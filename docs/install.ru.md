@@ -155,6 +155,12 @@ sudo docker compose -f compose.yml -f compose.ghcr.yml -f compose.caddy.yml up -
 sudo docker compose -f compose.yml -f compose.caddy.yml up -d --build
 ```
 
+В scale-режиме (несколько воркеров и отдельный планировщик) файлов больше:
+
+```bash
+sudo docker compose -f compose.yml -f compose.scale.yml -f compose.ghcr.yml -f compose.ghcr-scale.yml up -d
+```
+
 Чтобы не писать `-f` каждый раз, положите в `.env`:
 
 ```ini

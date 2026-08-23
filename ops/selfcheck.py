@@ -200,6 +200,42 @@ def check_i18n() -> None:
     print(f"строк через t(): {len(used)}, переведено: {len(used) - len(missing)}")
 
 
+def check_compose_overlays() -> None:
+    """Оверлей не должен ВВОДИТЬ сервис, которого нет в базовом compose.
+
+    Объявление сервиса в оверлее его создаёт, а не дополняет. compose.ghcr.yml
+    упоминал scheduler «на случай scale» — и в обычном режиме поднимался пустой
+    контейнер без переменных и томов, падавший на первой же попытке открыть базу.
+    Установка при этом выглядела успешной, а рядом висел Exited (1).
+    """
+    def services(path: str) -> set[str]:
+        out, inside = set(), False
+        for line in read(path).split("\n"):
+            if re.match(r"^services:\s*$", line):
+                inside = True
+                continue
+            if inside:
+                if re.match(r"^\S", line):          # вышли из блока services
+                    inside = False
+                elif (m := re.match(r"^  ([a-z0-9_-]+):\s*$", line)):
+                    out.add(m.group(1))
+        return out
+
+    base = services("compose.yml")
+    # Оверлей → сервисы, которые ему разрешено называть. compose.scale.yml
+    # заводит scheduler целиком, а ghcr-scale только подменяет ему образ и
+    # применяется исключительно вместе со scale — там сервис уже существует.
+    allowed = {"compose.scale.yml": {"scheduler"},
+               "compose.ghcr-scale.yml": {"scheduler"}}
+    for f in sorted(f for f in os.listdir(".") if re.match(r"^compose\..+\.yml$", f)):
+        new = services(f) - base - allowed.get(f, set())
+        for name in sorted(new):
+            fail("compose", f"{f} вводит сервис «{name}», которого нет в compose.yml — "
+                            "он поднимется пустым, без окружения и томов")
+    print(f"сервисов в compose.yml: {len(base)}, оверлеев проверено: "
+          f"{len([f for f in os.listdir('.') if re.match(r'^compose[.].+[.]yml$', f)])}")
+
+
 def check_version() -> None:
     """Номер версии объявлен в трёх файлах — они должны совпадать.
 
@@ -283,7 +319,7 @@ def main() -> int:
         return 2
     for fn in (check_helpers, check_alerts, check_rbac, check_secrets,
                check_migrations, check_i18n, check_i18n_literals,
-               check_password_len, check_version):
+               check_password_len, check_version, check_compose_overlays):
         try:
             fn()
         except Exception as exc:  # noqa: BLE001 — упавшая проверка тоже проблема

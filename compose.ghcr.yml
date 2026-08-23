@@ -18,7 +18,10 @@ services:
     build: !reset null
     image: ghcr.io/mihsergeev/kervax-frontend:${KERVAX_VERSION:-latest}
 
-  # присутствует только вместе с compose.scale.yml; лишним не будет
+# Про scheduler здесь НАМЕРЕННО ничего нет. Он живёт только в compose.scale.yml,
+# а объявление сервиса в оверлее его СОЗДАЁТ: в обычном режиме получался пустой
+# контейнер без переменных и томов, который падал на первой же попытке открыть
+# базу. Для scale-режима есть отдельный compose.ghcr-scale.yml.
+
   scheduler:
-    build: !reset null
-    image: ghcr.io/mihsergeev/kervax-backend:${KERVAX_VERSION:-latest}
+    image: test

@@ -153,6 +153,12 @@ the frontend), but you know exactly what you are running:
 sudo docker compose -f compose.yml -f compose.caddy.yml up -d --build
 ```
 
+In scale mode (several workers and a separate scheduler) there are more files:
+
+```bash
+sudo docker compose -f compose.yml -f compose.scale.yml -f compose.ghcr.yml -f compose.ghcr-scale.yml up -d
+```
+
 To stop repeating the `-f` flags, put this in `.env`:
 
 ```ini
