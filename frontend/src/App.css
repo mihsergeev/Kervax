@@ -1,0 +1,4709 @@
+.app {
+  max-width: 1240px;
+  margin: 0 auto;
+  padding: 1.5rem 1.5rem 3rem;
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin-bottom: 1.5rem;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  margin-right: 0.5rem;
+}
+
+/* бренд Kervax: рендерим обе (тёмную/светлую) версии, тема прячет лишнюю */
+.brand-img {
+  display: flex;
+  align-items: center;
+}
+.brand-img img {
+  display: block;
+}
+/* горизонтальный лого шапки: отступ знак↔надпись чуть больше, чем в макете,
+   чтобы KERVAX не липла к орлу */
+.brand-lockup-h .brand-gap {
+  width: 13px;
+  flex: none;
+}
+:root[data-theme='light'] .brand-when-dark {
+  display: none;
+}
+:root:not([data-theme='light']) .brand-when-light {
+  display: none;
+}
+
+.spacer {
+  flex: 1;
+}
+
+.topnav {
+  display: flex;
+  gap: 0.25rem;
+  margin-left: 0.5rem;
+}
+
+.navlink {
+  background: transparent;
+  color: var(--text-muted);
+  border: none;
+  box-shadow: none;
+  border-radius: 8px;
+  padding: 0.4rem 0.9rem;
+  font-weight: 500;
+}
+
+.navlink:hover {
+  background: var(--bg-card);
+  color: var(--text);
+}
+
+.navlink-active {
+  background: var(--bg-card);
+  color: var(--text);
+}
+
+/* Сайты/Серверы — самостоятельные сущности; Докер/Кубер/Сервисы/Бэкапы — срезы по тем
+   же серверам. Черта отделяет одно от другого, капсула собирает срезы в группу. Только
+   визуальная подсказка: все вкладки остаются кликабельными в один клик, без выпадашек. */
+.nav-sep {
+  width: 1px;
+  height: 20px;
+  align-self: center;
+  margin: 0 0.4rem;
+  background: var(--border);
+}
+
+.navgroup {
+  display: flex;
+  gap: 0.15rem;
+  padding: 3px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--border) 28%, transparent);
+}
+
+/* внутри капсулы вкладки чуть компактнее — иначе шапка вырастает по ширине */
+.navgroup .navlink {
+  padding: 0.3rem 0.75rem;
+}
+
+.tagline {
+  color: var(--text-muted);
+  font-size: 0.95rem;
+  margin: -0.5rem 0 1.5rem;
+}
+
+.card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 1.25rem 1.5rem;
+}
+
+.muted {
+  color: var(--text-muted);
+}
+
+.small {
+  font-size: 0.82rem;
+}
+
+.mono {
+  font-family: Consolas, 'Cascadia Mono', monospace;
+  font-size: 0.9em;
+}
+
+.dot {
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  margin-right: 0.4rem;
+  vertical-align: middle;
+}
+
+.dot.up {
+  background: var(--up);
+}
+.dot.degraded {
+  background: var(--degraded);
+}
+.dot.down {
+  background: var(--down);
+}
+
+/* ---------- кнопки и формы ---------- */
+
+button {
+  background: linear-gradient(180deg, #4b74ff, #3563e9);
+  color: #fff;
+  border: none;
+  border-radius: 8px;
+  padding: 0.5rem 1rem;
+  font-size: 0.9rem;
+  font-weight: 600;
+  cursor: pointer;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.35);
+  transition: background-color 0.15s ease, border-color 0.15s ease,
+    color 0.15s ease, box-shadow 0.15s ease, transform 0.06s ease;
+}
+
+button:hover {
+  background: linear-gradient(180deg, #5580ff, #2f59d8);
+}
+
+button:active {
+  transform: translateY(1px);
+}
+
+button:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+button.ghost {
+  background: transparent;
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+  font-weight: 500;
+  box-shadow: none;
+}
+
+button.ghost:hover {
+  color: var(--text);
+  border-color: var(--text-muted);
+  background: var(--hover);
+}
+
+button.danger-solid {
+  background: #c0392b;
+}
+
+button.danger-solid:hover {
+  background: #a93226;
+}
+
+.icon-btn {
+  padding: 0.4rem 0.6rem;
+  min-width: 2.2rem;
+  font-size: 0.95rem;
+  line-height: 1;
+}
+
+label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  font-size: 0.85rem;
+  color: var(--text-muted);
+}
+
+input {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.5rem 0.7rem;
+  color: var(--text);
+  font-size: 0.95rem;
+}
+
+input:focus {
+  outline: none;
+  border-color: #3563e9;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  margin: 0.5rem 0;
+}
+
+.field > span {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+}
+
+.form-error {
+  color: var(--down);
+  font-size: 0.9rem;
+}
+
+.form-ok {
+  color: var(--up);
+  font-size: 0.9rem;
+}
+
+/* ---------- вход ---------- */
+
+.login-wrap {
+  display: flex;
+  justify-content: center;
+  padding-top: 8vh;
+}
+
+.login-card {
+  width: 340px;
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+/* бренд-локап на карточке входа: знак с надписью снизу, адаптируется к теме */
+.login-brand {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  margin-bottom: 0.35rem;
+}
+
+.login-card h2 {
+  margin: 0;
+  font-size: 1.1rem;
+  align-self: center;
+  color: var(--text-muted);
+  font-weight: 500;
+}
+
+/* ---------- модалка ---------- */
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(3px);
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding-top: 8vh;
+  padding-bottom: 2rem;
+  overflow-y: auto;
+  z-index: 10;
+  animation: backdrop-in 0.16s ease;
+}
+
+.modal-backdrop > .card,
+.modal-backdrop > .modal {
+  animation: modal-in 0.18s cubic-bezier(0.2, 0.8, 0.3, 1);
+}
+
+@keyframes backdrop-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes modal-in {
+  from { opacity: 0; transform: translateY(8px) scale(0.985); }
+  to { opacity: 1; transform: none; }
+}
+
+.modal {
+  width: 440px;
+  max-width: calc(100vw - 2rem);
+  display: flex;
+  flex-direction: column;
+  gap: 0.9rem;
+}
+
+.modal h3 {
+  margin: 0;
+  font-size: 1.05rem;
+}
+
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.6rem;
+  margin-top: 0.3rem;
+}
+
+.clients-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.clients-head h3 {
+  margin: 0;
+}
+
+.qr-wrap {
+  display: flex;
+  justify-content: center;
+  background: #fff;
+  border-radius: 10px;
+  padding: 0.8rem;
+}
+
+/* ---------- выпадающее меню ---------- */
+
+.menu-wrap {
+  position: relative;
+  display: inline-flex;
+}
+
+.menu-catcher {
+  position: fixed;
+  inset: 0;
+  z-index: 39;
+}
+
+.menu-pop {
+  position: absolute;
+  top: calc(100% + 4px);
+  z-index: 40;
+  min-width: 220px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 0.3rem;
+  box-shadow: 0 12px 34px rgba(0, 0, 0, 0.5);
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  animation: modal-in 0.13s cubic-bezier(0.2, 0.8, 0.3, 1);
+  transform-origin: top right;
+}
+
+.menu-pop-right {
+  right: 0;
+}
+
+.menu-gear {
+  font-size: 1.05rem;
+  line-height: 1;
+  display: inline-block;
+}
+
+.menu-pop .menu-item {
+  background: transparent;
+  color: var(--text);
+  border: none;
+  border-radius: 6px;
+  text-align: left;
+  width: 100%;
+  padding: 0.5rem 0.7rem;
+  font-size: 0.85rem;
+  font-weight: 500;
+  white-space: nowrap;
+  box-shadow: none;
+}
+
+.menu-pop .menu-item:hover {
+  background: var(--hover);
+}
+
+.menu-divider {
+  height: 1px;
+  background: var(--border);
+  margin: 0.3rem 0.35rem;
+}
+/* бейдж «Только просмотр» в шапке меню наблюдателя */
+.menu-role-badge {
+  margin: 0.15rem 0.5rem 0.25rem;
+  padding: 0.15rem 0.5rem;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  border-radius: 6px;
+  text-align: center;
+}
+/* управление пользователями */
+.users-modal {
+  width: min(560px, calc(100vw - 2rem));
+}
+/* алерты: длинные токены/URL — модалка заметно шире базовой */
+.alerts-modal {
+  width: min(680px, calc(100vw - 2rem));
+}
+/* плитка «Выключены» — нейтрально-приглушённая цифра */
+.stat-num-muted {
+  color: var(--text-muted);
+}
+/* textarea кастомных HTTP-заголовков монитора (JSON) */
+.headers-input {
+  resize: vertical;
+  min-height: 3.2rem;
+  line-height: 1.4;
+  padding: 0.5rem 0.7rem;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
+  font-size: 0.85rem;
+}
+.headers-input:focus {
+  outline: none;
+  border-color: var(--border-strong);
+}
+
+/* быстрый снуз алертов (монитор/сервер) */
+.snooze-ctl {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+  margin: 0.5rem 0 0.2rem;
+  font-size: 0.85rem;
+}
+.snooze-ctl button {
+  padding: 0.2rem 0.6rem;
+  font-size: 0.82rem;
+}
+.snooze-on {
+  color: var(--degraded);
+  font-weight: 600;
+}
+/* единый контрол приглушения алертов сервера (весь сервер + типы) */
+.snooze-bar {
+  margin: 0.5rem 0 0.2rem;
+}
+.snooze-row {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+  font-size: 0.85rem;
+}
+.snooze-row button {
+  padding: 0.2rem 0.6rem;
+  font-size: 0.82rem;
+}
+.snooze-scope {
+  padding: 0.24rem 0.5rem;
+  font-size: 0.82rem;
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  min-width: 9rem;
+}
+.snooze-active-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  flex-basis: 100%;
+  margin-top: 0.2rem;
+}
+.snooze-active-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.15rem 0.5rem;
+  font-size: 0.8rem;
+  background: rgba(207, 155, 82, 0.12);
+  color: var(--degraded);
+  border-radius: 999px;
+}
+.snooze-active-chip .chip-x {
+  padding: 0 0.2rem;
+  background: none;
+  border: none;
+  color: inherit;
+  cursor: pointer;
+  font-size: 0.85rem;
+  line-height: 1;
+}
+.snooze-active-chip .chip-x:hover {
+  color: var(--text);
+}
+/* совет по правам агента (не хватает systemd-настроек) */
+.agent-advice {
+  margin: 0.5rem 0 0.2rem;
+  padding: 0.6rem 0.8rem;
+  border: 1px solid rgba(207, 155, 82, 0.4);
+  background: rgba(207, 155, 82, 0.08);
+  border-radius: 10px;
+  font-size: 0.85rem;
+}
+.agent-advice-head {
+  font-weight: 600;
+  color: var(--degraded);
+}
+.agent-advice-list {
+  margin: 0.3rem 0 0.4rem;
+  padding-left: 1.2rem;
+}
+/* подзаголовок группы внутри общего баннера «сделай руками» (права юнита / setup-скрипты) */
+.agent-advice-group {
+  margin-top: 0.45rem;
+  font-weight: 600;
+  opacity: 0.85;
+}
+.agent-advice-cmd {
+  display: flex;
+  align-items: stretch;
+  gap: 0.5rem;
+}
+.agent-advice-cmd pre {
+  flex: 1;
+  margin: 0;
+  padding: 0.5rem 0.6rem;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 0.78rem;
+  white-space: pre-wrap;
+  word-break: break-all;
+  overflow-x: auto;
+}
+.agent-advice-cmd button {
+  flex-shrink: 0;
+  align-self: flex-start;
+}
+.agent-advice > .muted {
+  margin-top: 0.4rem;
+}
+.docker-title {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+.docker-logo {
+  width: 1.5em;
+  height: 1.5em;
+  flex-shrink: 0;
+}
+.docker-group-head {
+  cursor: default;
+}
+.docker-hide-stopped {
+  margin-left: auto;
+  padding: 0.15rem 0.5rem;
+  font-size: 0.78rem;
+}
+.kube-tabs {
+  margin: 0.3rem 0 0.7rem;
+}
+.modal-search {
+  width: 100%;
+  margin: 0 0 0.6rem;
+}
+.modal-toolbar {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+  margin-bottom: 0.6rem;
+}
+.modal-toolbar .modal-search {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+}
+.modal-sort {
+  flex-shrink: 0;
+  padding: 0.4rem 0.5rem;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
+  font-size: 0.82rem;
+  cursor: pointer;
+}
+.home-attention {
+  margin: 0 0 1.1rem;
+  padding: 0.8rem 1rem;
+  border-radius: 12px;
+  border: 1px solid color-mix(in srgb, #f0a020 35%, var(--border));
+  background: color-mix(in srgb, #f0a020 8%, transparent);
+}
+.home-attention-head {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-weight: 700;
+  font-size: 1rem;
+  margin-bottom: 0.5rem;
+}
+.home-attention-ic {
+  font-size: 1.05rem;
+}
+.home-attention-n {
+  min-width: 1.4rem;
+  text-align: center;
+  padding: 0.02rem 0.4rem;
+  border-radius: 999px;
+  background: color-mix(in srgb, #f0a020 25%, transparent);
+  font-size: 0.85rem;
+}
+.home-attention-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+.home-attention-row {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: none;
+  box-shadow: none;
+  color: var(--text);
+  padding: 0.4rem 0.3rem;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 0.92rem;
+}
+.home-attention-row:hover {
+  background: color-mix(in srgb, #f0a020 12%, transparent);
+}
+.home-attention-ico {
+  flex-shrink: 0;
+}
+.home-attention-row .warn-name {
+  flex: 1;
+  min-width: 0;
+}
+.home-attention-more {
+  padding: 0.3rem;
+}
+/* Текст пункта «Требует действий» — СВОЙ класс, а не .warn-name: тот придуман для
+   компактных строк SSL/доменов (nowrap + ellipsis + max-width:45%) и резал предложение
+   на середине, из-за чего было непонятно, что делать. Здесь наоборот — переносим. */
+.home-attention-txt {
+  flex: 1;
+  min-width: 0;
+  font-weight: 600;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+/* карточка раздела: вся плитка кликабельна (div role=button), строки перехватывают клик */
+.home-card-clickable {
+  cursor: pointer;
+}
+.sec-icon {
+  width: 1.35em;
+  height: 1.35em;
+  flex-shrink: 0;
+}
+.home-card-title {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+.home-warn-btn {
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: none;
+  box-shadow: none;
+  color: var(--text);
+  cursor: pointer;
+  border-radius: 6px;
+}
+.home-warn-btn:hover {
+  background: color-mix(in srgb, var(--text) 7%, transparent);
+}
+.home-warn-btn {
+  align-items: flex-start;
+}
+.home-warn-btn .home-open {
+  margin-left: auto;
+  flex-shrink: 0;
+}
+/* в строках-кнопках весь текст проблемы в .warn-name — не усекаем, переносим */
+.home-warn-btn .warn-name {
+  flex: 1;
+  min-width: 0;
+  max-width: none;
+  white-space: normal;
+  overflow: visible;
+  text-overflow: clip;
+}
+.home-agent-upd {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  width: 100%;
+  text-align: left;
+  margin: 0 0 1rem;
+  padding: 0.7rem 1rem;
+  border-radius: 10px;
+  border: 1px solid color-mix(in srgb, #f0a020 45%, var(--border));
+  background: color-mix(in srgb, #f0a020 12%, transparent);
+  color: var(--text);
+  cursor: pointer;
+  font-size: 0.92rem;
+}
+.home-agent-upd:hover {
+  background: color-mix(in srgb, #f0a020 18%, transparent);
+}
+.home-agent-upd-ic {
+  font-size: 1.1rem;
+  color: #f0a020;
+  flex-shrink: 0;
+}
+.kv-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  margin: 0.6rem 0;
+}
+.kv-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 1rem;
+  padding: 0.3rem 0.2rem;
+  border-bottom: 1px solid var(--border);
+}
+.kv-k {
+  flex-shrink: 0;
+}
+.kv-v {
+  text-align: right;
+  word-break: break-word;
+}
+.backup-notes {
+  margin: 0.5rem 0;
+}
+.backup-clients-head {
+  margin-top: 0.6rem;
+}
+.backup-enable {
+  margin-top: 0.6rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+.backup-manage {
+  margin-top: 0.8rem;
+  padding-top: 0.8rem;
+  border-top: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+.backup-manage-head {
+  font-weight: 700;
+  font-size: 0.98rem;
+}
+.backup-manage-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+.backup-manage-label {
+  min-width: 9rem;
+  color: var(--text-muted);
+  font-size: 0.9rem;
+}
+.backup-time-inp {
+  max-width: 7rem;
+  min-width: 5rem;
+}
+.backup-paths {
+  width: 100%;
+  font-family: ui-monospace, monospace;
+  font-size: 0.82rem;
+  line-height: 1.5;
+  padding: 0.5rem;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
+  resize: vertical;
+  min-height: 15rem; /* по дефолту показываем ~15 строк с запасом — типичный exclude-список влезает целиком */
+}
+.backup-manage-actions {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  align-items: center;
+}
+/* «запустить сейчас» намеренно приглушён и отодвинут вправо: рутинный бэкап идёт
+   ночью по расписанию, ручной запуск — редкий случай, не должен бросаться в глаза.
+   Самодостаточный сброс (не наследуем .linklike — иначе синий + подчёркивание). */
+.backup-runnow-link {
+  margin-left: auto;
+  background: none;
+  border: none;
+  box-shadow: none;
+  padding: 0.1rem 0.2rem;
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 0.8rem;
+  text-decoration: none;
+  cursor: pointer;
+}
+.backup-runnow-link:hover { color: var(--text); background: none; filter: none; }
+.backup-runnow-link:disabled { opacity: 0.45; cursor: default; }
+/* редактор путей с подсветкой: прозрачный textarea поверх раскрашенного pre.
+   Оба наследуют .backup-paths (одинаковые шрифт/паддинг/бордер/размер) → выравнены. */
+.backup-paths-wrap {
+  position: relative;
+}
+.backup-paths-wrap .backup-paths {
+  box-sizing: border-box;
+  white-space: pre;           /* без переноса — точное совпадение строк pre и textarea */
+  overflow: auto;
+}
+.backup-paths-hl {
+  position: absolute;
+  inset: 0;
+  margin: 0;
+  overflow: hidden;           /* скролл ведём из textarea, синхронизируем в JS */
+  pointer-events: none;
+  z-index: 0;
+  background: var(--bg);
+}
+.backup-paths-edit {
+  position: relative;
+  z-index: 1;
+  background: transparent;    /* сквозь него виден раскрашенный pre */
+  color: transparent;         /* свой текст textarea прячем */
+  caret-color: var(--text);   /* каретка остаётся видимой */
+}
+/* при color:transparent плейсхолдер тоже пропадает — задаём цвет явно */
+.backup-paths-edit::placeholder { color: var(--text-muted); opacity: 1; }
+.excl-junk { color: var(--text-muted); }   /* стандартный мусор — серым */
+.excl-keep { color: var(--text); }         /* добавленное оператором — белым */
+/* блок синхронизации времени в шапке детали сервера */
+.clock-fix { margin: 0.4rem 0 0.7rem; }
+.clock-fix-fallback { margin-top: 0.5rem; }
+.clock-sync-row { display: flex; align-items: center; gap: 0.4rem; margin: 0.4rem 0; }
+.clock-manual { margin-top: 0.4rem; }
+.clock-manual summary { cursor: pointer; }
+.backup-paths-hint {
+  margin-top: 0.25rem;
+}
+.docker-group-head .mon-group-n {
+  margin-left: auto;
+}
+/* страница Docker: карточки хостов, в каждой — контейнеры */
+.docker-hosts {
+  display: flex;
+  flex-direction: column;
+  gap: 0.8rem;
+}
+.docker-host {
+  padding: 0.8rem 1rem;
+}
+.docker-host-head {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  margin-bottom: 0.6rem;
+}
+.docker-host-name {
+  font-weight: 700;
+  font-size: 1rem;
+}
+.docker-host-count {
+  margin-left: auto;
+}
+.docker-clist {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+.docker-host-row {
+  width: 100%;
+  text-align: left;
+  cursor: pointer;
+  color: var(--text);
+  font: inherit;
+}
+.docker-host-row:hover {
+  border-color: var(--border-strong);
+  background: var(--card-hover);
+}
+.docker-host-row .docker-host-count {
+  flex-shrink: 0;
+  font-weight: 700;
+  font-size: 0.95rem;
+}
+.docker-modal {
+  max-width: 820px;
+  width: 92vw;
+}
+.docker-clist-scroll {
+  max-height: 62vh;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+.docker-row {
+  min-width: 0;
+}
+.docker-c-main {
+  overflow: hidden;
+}
+/* имя + чипы (unhealthy/рестарты/статусы) переносятся, а не расталкивают строку */
+.docker-c-name {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.3rem;
+  min-width: 0;
+}
+.docker-actions {
+  display: flex;
+  gap: 0.25rem;
+  flex-shrink: 0;
+  margin-left: 0.4rem;
+}
+.docker-actions .icon-btn {
+  padding: 0.15rem 0.45rem;
+  font-size: 0.95rem;
+  line-height: 1;
+}
+.logs-modal {
+  max-width: 900px;
+  width: 92vw;
+}
+.logs-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin: 0.4rem 0;
+  flex-wrap: wrap;
+}
+.logs-pre {
+  margin: 0.5rem 0;
+  padding: 0.7rem;
+  background: #0c0e13;
+  color: #cdd3de;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 0.76rem;
+  line-height: 1.4;
+  max-height: 60vh;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+:root[data-theme='light'] .logs-pre {
+  background: #1b1e26;
+  color: #dde2ea;
+}
+.logs-empty {
+  margin: 0.5rem 0;
+  padding: 1.4rem 0.7rem;
+  text-align: center;
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+  font-size: 0.85rem;
+}
+/* раздел Docker: версии + контейнеры со статусом */
+.docker-head {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  margin-bottom: 0.5rem;
+}
+.docker-noaccess {
+  padding: 0.4rem 0;
+}
+.docker-row {
+  gap: 0.7rem;
+  border-left-width: 3px;
+  transition: background 0.12s ease, border-color 0.12s ease, transform 0.08s ease;
+}
+.docker-row.t-up {
+  border-left-color: var(--up);
+}
+.docker-row.t-degraded {
+  border-left-color: var(--degraded);
+}
+.docker-row.t-down {
+  border-left-color: var(--down);
+}
+.docker-row.t-muted {
+  border-left-color: var(--border);
+  opacity: 0.55;
+}
+/* «подвал» опнутых из бэкапа — отделён сверху и приглушён, чтобы не мозолил */
+.nobackup-optout {
+  margin-top: 1.1rem;
+  padding-top: 0.5rem;
+  border-top: 1px dashed var(--border);
+  opacity: 0.75;
+}
+/* аудит покрытия бэкапа в модалке ноды */
+.coverage-audit {
+  margin-top: 0.9rem;
+  padding-top: 0.6rem;
+  border-top: 1px solid var(--border);
+}
+.coverage-group {
+  margin: 0.4rem 0 0.6rem;
+}
+.coverage-item {
+  padding: 0.15rem 0 0.15rem 1.1rem;
+  font-size: 0.85rem;
+  word-break: break-all;
+}
+/* строка репозитория с раскрывающимся блоком зачистки — колонкой */
+.repo-row-col {
+  flex-direction: column;
+  align-items: stretch;
+}
+.repo-row-main {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  width: 100%;
+}
+.repo-row-main .docker-c-main {
+  flex: 1;
+  min-width: 0;
+}
+.repo-cleanup {
+  margin-top: 0.5rem;
+  padding-top: 0.5rem;
+  border-top: 1px dashed var(--border);
+}
+.repo-cleanup-toggle {
+  padding: 0.1rem 0.45rem;
+  font-size: 0.78rem;
+}
+.repo-cleanup .agent-advice-cmd {
+  margin: 0.35rem 0;
+}
+/* подвал страницы «Бэкапы»: осознанно снятые ноды — отбиваем сильнее и уводим вниз */
+.backup-optout-footer {
+  margin-top: 2rem;
+}
+.backup-optout-footer .optout-toggle {
+  margin-left: auto;
+  padding: 0.15rem 0.5rem;
+  font-size: 0.8rem;
+}
+/* галочка «бэкапить не требуется» в строке без бэкапа */
+.nobackup-check {
+  display: inline-flex;
+  /* ОБЯЗАТЕЛЬНО: глобальный `label` — это flex-COLUMN (подпись над полем, для форм).
+     Без явного row чекбокс встаёт НАД текстом, а align-items:center в колонке ещё и
+     центрирует его по горизонтали — получается галка, висящая посреди блока. */
+  flex-direction: row;
+  align-items: center;
+  gap: 0.4rem;
+  flex-shrink: 0;
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.nobackup-check input {
+  cursor: pointer;
+}
+.nobackup-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  flex-shrink: 0;
+}
+/* модалка «Настроить бэкап» */
+.backup-setup-form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+}
+.retention-row {
+  display: flex;
+  gap: 0.5rem;
+}
+.retention-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  flex: 1;
+  min-width: 0;
+  text-align: center;
+}
+.retention-field input {
+  width: 100%;
+  min-width: 0;
+  text-align: center;
+  height: 2.4rem;
+  padding: 0.3rem 0.4rem;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
+  font-size: 1rem;
+  line-height: 1.4;
+  /* убрать спиннеры — они съедают ширину и режут цифру */
+  appearance: textfield;
+  -moz-appearance: textfield;
+}
+.retention-field input::-webkit-outer-spin-button,
+.retention-field input::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+.backup-setup-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+  padding: 0.3rem 0;
+}
+.setup-step {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.35rem 0.6rem;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  border-left-width: 3px;
+}
+.setup-step.t-up {
+  border-left-color: var(--up);
+}
+.setup-step.t-down {
+  border-left-color: var(--down);
+}
+.setup-final {
+  font-weight: 650;
+  padding: 0.3rem 0;
+}
+/* «Данные для восстановления» в модалке бэкапа */
+.restore-info {
+  margin-top: 0.6rem;
+  padding-top: 0.6rem;
+  border-top: 1px dashed var(--border);
+}
+.restore-creds {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+.creds-row {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+}
+.creds-row > .muted {
+  flex: 0 0 9.5rem;
+}
+.creds-row code {
+  flex: 1;
+  min-width: 0;
+  overflow-x: auto;
+  white-space: nowrap;
+  padding: 0.25rem 0.45rem;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+.creds-row .creds-url {
+  font-size: 0.78rem;
+}
+.creds-row button {
+  flex: 0 0 auto;
+}
+.docker-row:hover {
+  background: var(--hover);
+  transform: translateX(1px);
+}
+/* мета репозитория: снапшоты · размер · свежесть · хранение — в одну строку с разделителями */
+.repo-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.2rem 0.9rem;
+}
+/* мета строки клиента бэкапа: расписание · последний · длительность · таймер */
+.backup-row-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.15rem 0.85rem;
+  margin-top: 0.15rem;
+}
+.backup-row-meta > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  white-space: nowrap;
+}
+.repo-mute-btn {
+  flex-shrink: 0;
+}
+.docker-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  background: var(--text-muted);
+}
+.docker-dot.t-up {
+  background: var(--up);
+}
+.docker-dot.t-degraded {
+  background: var(--degraded);
+}
+.docker-dot.t-down {
+  background: var(--down);
+}
+.docker-c-main {
+  flex: 1;
+  min-width: 0;
+}
+.docker-c-name {
+  font-weight: 600;
+}
+.docker-c-img {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.docker-c-status {
+  flex-shrink: 0;
+  text-align: center;
+  white-space: nowrap;
+  padding: 0.16rem 0.6rem;
+  border-radius: 999px;
+  font-size: 0.72rem;
+  font-weight: 600;
+  background: var(--hover);
+  color: var(--text-muted);
+}
+.docker-c-status.t-up {
+  color: #6bbfa8;
+  background: color-mix(in srgb, var(--up) 14%, transparent);
+}
+.docker-c-status.t-degraded {
+  color: #d3a35f;
+  background: color-mix(in srgb, var(--degraded) 15%, transparent);
+}
+.docker-c-status.t-down {
+  color: #db7d7d;
+  background: color-mix(in srgb, var(--down) 14%, transparent);
+}
+/* список OOM-событий под графиком: жертва слева, дата справа */
+.oom-log {
+  margin-top: 0.5rem;
+  border-top: 1px solid var(--border);
+  padding-top: 0.4rem;
+}
+.oom-log-cap {
+  margin-bottom: 0.25rem;
+}
+.oom-log-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  max-height: 9rem;
+  overflow-y: auto;
+}
+.oom-log-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.6rem;
+  font-size: 0.8rem;
+}
+.oom-log-victim {
+  color: #d06b6b;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.oom-log-when {
+  flex-shrink: 0;
+}
+
+/* поле пароля с кнопкой показать/скрыть (HTTP-аутентификация монитора) */
+.pass-row {
+  display: flex;
+  gap: 0.4rem;
+  align-items: stretch;
+}
+.pass-row input {
+  flex: 1;
+  min-width: 0;
+}
+
+.install-fw-note {
+  border-left: 2px solid color-mix(in srgb, #f0a020 60%, var(--border));
+  padding-left: 0.6rem;
+}
+/* статус подключения агента в окне «Сервер создан» */
+.install-status {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.55rem 0.8rem;
+  border-radius: 8px;
+  font-size: 0.9rem;
+}
+.install-wait {
+  color: var(--text-muted);
+  border: 1px dashed var(--border);
+}
+.install-wait .sdot {
+  animation: pulse-dot 1.2s ease-in-out infinite;
+}
+@keyframes pulse-dot {
+  50% { opacity: 0.3; }
+}
+.install-ok {
+  color: var(--up, #22c55e);
+  border: 1px solid color-mix(in srgb, var(--up, #22c55e) 45%, transparent);
+  background: color-mix(in srgb, var(--up, #22c55e) 10%, transparent);
+  font-weight: 600;
+}
+.users-modal .form-row .field {
+  min-width: 0; /* иначе инпуты не сжимаются и ряд вылезает за модалку */
+}
+.users-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  max-height: 40vh;
+  overflow-y: auto;
+}
+.user-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem;
+  padding: 0.5rem 0.7rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.user-main {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-width: 0;
+}
+.user-name {
+  font-weight: 600;
+}
+.user-actions {
+  display: flex;
+  gap: 0.35rem;
+  flex-shrink: 0;
+}
+.user-actions .small {
+  font-size: 0.8rem;
+  padding: 0.28rem 0.55rem;
+}
+.role-chip {
+  padding: 0.06rem 0.45rem;
+  border-radius: 999px;
+  font-size: 0.72rem;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.role-admin {
+  color: #7aa0ff;
+  background: rgba(53, 99, 233, 0.16);
+}
+.role-viewer {
+  color: var(--text-muted);
+  background: var(--border);
+}
+
+.menu-pop .menu-item-danger {
+  color: #ec8a80;
+}
+
+.menu-pop .menu-item-danger:hover {
+  background: rgba(231, 76, 60, 0.14);
+  color: #ff9b8f;
+}
+
+/* ---------- лоск ---------- */
+
+body {
+  background:
+    radial-gradient(1100px 420px at 50% -120px, rgba(53, 99, 233, 0.08), transparent 70%),
+    var(--bg);
+  background-attachment: fixed;
+}
+
+/* ---------- мониторы ---------- */
+
+.stat-tiles {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+  gap: 0.75rem;
+  margin-bottom: 1.25rem;
+}
+
+.stat-tile {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 0.9rem 1.1rem;
+  text-align: left;
+  color: var(--text);
+  box-shadow: none;
+  width: 100%;
+}
+.stat-tile-btn {
+  cursor: pointer;
+  transition: border-color 0.12s ease, background 0.12s ease;
+}
+.stat-tile-btn:hover {
+  border-color: var(--border-strong);
+  background: var(--card-hover);
+}
+.stat-tile-active {
+  border-color: #3563e9;
+  background: var(--card-hover);
+}
+
+.stat-num {
+  font-size: 1.9rem;
+  font-weight: 700;
+  line-height: 1;
+}
+.stat-num.t-up {
+  color: var(--up);
+}
+.stat-num.t-degraded {
+  color: var(--degraded);
+}
+.stat-num.t-down {
+  color: var(--down);
+}
+
+.stat-lbl {
+  color: var(--text-muted);
+  font-size: 0.82rem;
+  margin-top: 0.35rem;
+}
+
+.checks-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap; /* тесно → кнопки уезжают на след. строку, заголовок не рвётся */
+  gap: 0.6rem;
+  margin-bottom: 0.9rem;
+}
+.checks-head h2 {
+  margin: 0;
+  font-size: 1.15rem;
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  flex-wrap: nowrap; /* «Мониторы» и бейдж — всегда вместе, одной строкой */
+  flex-shrink: 0;
+}
+
+.check-form {
+  margin-bottom: 1rem;
+}
+.form-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: 0.7rem 0.9rem;
+}
+.field-wide {
+  grid-column: 1 / -1;
+}
+.check-form .field {
+  margin: 0;
+}
+
+select {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.45rem 0.6rem;
+  color: var(--text);
+  font-size: 0.9rem;
+}
+select:focus {
+  outline: none;
+  border-color: #3563e9;
+}
+
+.checkbox {
+  flex-direction: row;
+  align-items: center;
+  gap: 0.5rem;
+  color: var(--text);
+  font-size: 0.9rem;
+  margin: 0.85rem 0 0.2rem;
+  cursor: pointer;
+}
+.checkbox input {
+  width: auto;
+}
+
+.check-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+/* ---------- серверы ---------- */
+.srv-row {
+  gap: 0.9rem;
+}
+.srv-row.dragging {
+  opacity: 0.45;
+}
+/* «горит» — сервер с активным превышением */
+.srv-fire {
+  margin-right: 0.15rem;
+  font-size: 0.95em;
+  line-height: 1;
+}
+.srv-meters {
+  display: flex;
+  gap: 0.9rem;
+  flex-shrink: 0;
+}
+.srv-meter {
+  width: 92px;
+}
+.srv-meter-top {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.3rem;
+}
+.srv-meter-val {
+  font-weight: 700;
+  font-size: 0.85rem;
+}
+.srv-bar {
+  margin-top: 0.2rem;
+  height: 6px;
+  border-radius: 4px;
+  background: var(--border);
+  overflow: hidden;
+}
+.srv-bar-fill {
+  display: block;
+  height: 100%;
+  border-radius: 4px;
+  background: var(--up);
+  transition: width 0.3s ease;
+}
+.srv-bar-fill.t-degraded {
+  background: var(--degraded);
+}
+.srv-bar-fill.t-down {
+  background: var(--down);
+}
+.install-cmd {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.7rem 0.8rem;
+  font-family: Consolas, 'Cascadia Mono', monospace;
+  font-size: 0.82rem;
+  white-space: pre-wrap;
+  word-break: break-all;
+  color: var(--text);
+  margin: 0.3rem 0 0.6rem;
+}
+/* подсветка допвписываемого третьего аргумента (имя инстанса) в примере команды */
+.install-cmd-add {
+  color: var(--accent);
+  font-weight: 700;
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  border-radius: 4px;
+  padding: 0 0.15rem;
+}
+/* «раскрывашка» для сценария «уже стоит агент другой панели» — не мозолит глаза в обычном случае */
+.install-alt {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.5rem 0.7rem;
+  margin: 0.2rem 0 0.4rem;
+}
+.install-alt > summary {
+  cursor: pointer;
+  user-select: none;
+}
+.install-alt[open] > summary {
+  margin-bottom: 0.4rem;
+}
+.install-alt-hint {
+  margin: 0.2rem 0;
+}
+.install-alt-actions {
+  margin: 0 0 0.2rem;
+}
+
+@media (max-width: 720px) {
+  .srv-meters {
+    display: none;
+  }
+}
+
+/* ---------- баннер обновления агентов ---------- */
+.agent-update-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.8rem;
+  flex-wrap: wrap;
+  margin-bottom: 1rem;
+  padding: 0.7rem 0.95rem;
+  border: 1px solid var(--accent);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+/* сводка мьютов в подвале: отделяем от контента, чтобы читалась как справка */
+.mutes-banner-footer {
+  margin: 1.25rem 0 0;
+}
+/* сводка заглушённого: не алерт (заглушили осознанно), но и не фон — иначе мьют
+   теряется. Отсюда нейтральная рамка и приглушённый тон, а срок — акцентом. */
+.mutes-banner {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  flex-wrap: wrap;
+  margin-bottom: 0.9rem;
+  padding: 0.5rem 0.7rem;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-card);
+}
+.mutes-banner-head {
+  font-size: 0.85rem;
+  color: var(--text-muted);
+  margin-right: 0.15rem;
+}
+.mute-sum-chip {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.4rem;
+  padding: 0.2rem 0.55rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text);
+  font-size: 0.8rem;
+  cursor: pointer;
+}
+.mute-sum-chip:hover {
+  border-color: var(--accent);
+}
+.mute-sum-what {
+  color: var(--text-muted);
+  max-width: 22rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mute-sum-when {
+  color: var(--text-muted);
+}
+/* бессрочное выделяем: у временного снуза срок истечёт сам, у этого — нет */
+.mute-sum-perm,
+.type-chip.mute-chip-perm {
+  color: var(--degraded);
+}
+.type-chip.mute-chip {
+  color: var(--text-muted);
+  cursor: help;
+}
+/* позитивный индикатор: все агенты на подписанной версии */
+.agent-update-ok {
+  margin-bottom: 0.9rem;
+  font-size: 0.85rem;
+  color: var(--up);
+}
+.aub-text {
+  font-size: 0.9rem;
+  color: var(--text);
+}
+.aub-actions {
+  display: flex;
+  gap: 0.5rem;
+  flex-shrink: 0;
+}
+.agent-upd-btn {
+  margin-left: 0.4rem;
+  padding: 0.05rem 0.5rem;
+  font-size: 0.78rem;
+  border-radius: 6px;
+  vertical-align: middle;
+}
+.agent-upd-to {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+/* ---------- группы мониторов ---------- */
+.groupby {
+  margin-right: 0.2rem;
+}
+.mon-group {
+  margin-bottom: 0.9rem;
+}
+.mon-group-head {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.35rem 0.2rem;
+  margin: 0.2rem 0 0.4rem;
+  border-bottom: 1px solid var(--border);
+  /* reset для варианта-кнопки (страница серверов); на Checks это <div> */
+  background: transparent;
+  color: var(--text);
+  border-top: none;
+  border-left: none;
+  border-right: none;
+  box-shadow: none;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.mon-group-toggle {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  background: transparent;
+  color: var(--text);
+  border: none;
+  box-shadow: none;
+  padding: 0;
+  font: inherit;
+  cursor: pointer;
+  text-align: left;
+}
+.mon-group-grip {
+  font-size: 0.95rem;
+}
+.mon-group-caret {
+  color: var(--text-muted);
+  font-size: 0.8rem;
+  width: 0.9rem;
+  flex-shrink: 0;
+}
+.mon-group-name {
+  font-weight: 700;
+  font-size: 0.98rem;
+}
+.mon-group-n {
+  min-width: 1.4rem;
+  padding: 0.02rem 0.4rem;
+  border-radius: 999px;
+  background: var(--border);
+  color: var(--text-muted);
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-align: center;
+}
+.mon-group-sum {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin-left: auto;
+  flex-shrink: 0;
+}
+.mon-group-ok {
+  font-weight: 700;
+}
+/* группа-цель при перетаскивании целой группы */
+.group-drag-over {
+  outline: 1px dashed var(--accent);
+  outline-offset: 3px;
+  border-radius: 8px;
+}
+.group-chip {
+  background: rgba(53, 99, 233, 0.16);
+  color: #7aa0ff;
+}
+:root[data-theme='light'] .group-chip {
+  color: #2f59d8;
+}
+
+.check-row {
+  display: flex;
+  align-items: center;
+  gap: 0.8rem;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 0.7rem 0.95rem;
+}
+
+.sdot {
+  display: inline-block; /* иначе вне flex (напр. в h3) width/height игнорятся → полоска */
+  vertical-align: middle;
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.sdot-up {
+  background: var(--up);
+  box-shadow: 0 0 0 3px rgba(34, 197, 94, 0.15);
+}
+.sdot-degraded {
+  background: var(--degraded);
+  box-shadow: 0 0 0 3px rgba(245, 158, 11, 0.15);
+}
+.sdot-down {
+  background: var(--down);
+  box-shadow: 0 0 0 3px rgba(239, 68, 68, 0.15);
+}
+.sdot-unknown {
+  background: var(--text-muted);
+}
+
+.check-main {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+.check-name {
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.type-chip {
+  background: var(--hover);
+  color: var(--text-muted);
+  border-radius: 6px;
+  padding: 0.05rem 0.4rem;
+  font-size: 0.68rem;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  flex-shrink: 0;
+}
+.type-chip.off {
+  color: var(--down);
+}
+.type-chip.upd {
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+}
+/* иконка ОС (SVG-логотип дистрибутива) в строках/шапках */
+.os-ico {
+  vertical-align: -0.15em;
+  margin-right: 0.15rem;
+  flex-shrink: 0;
+}
+/* раздел «Сервисы»: иконки сервисов в строке ноды + карточки в модалке */
+.svc-row-icons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem 0.5rem;
+  margin-top: 0.2rem;
+}
+.svc-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.2rem;
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  background: var(--hover);
+  border-radius: 6px;
+  padding: 0.05rem 0.4rem;
+}
+.svc-cards {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin: 0.5rem 0;
+}
+.svc-card-hot {
+  border-left: 3px solid var(--down);
+}
+.svc-modal-note {
+  margin-top: 0.5rem;
+}
+.check-target {
+  color: var(--text-muted);
+  font-size: 0.84rem;
+  margin-top: 0.12rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: Consolas, 'Cascadia Mono', monospace;
+}
+.check-meta {
+  text-align: right;
+  min-width: 0;
+  flex-shrink: 0;
+}
+.check-metric {
+  font-weight: 600;
+  font-size: 0.9rem;
+}
+.check-msg {
+  max-width: 240px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.check-actions {
+  display: flex;
+  gap: 0.3rem;
+  flex-shrink: 0;
+}
+/* компактная строка монитора: grid с фиксированными колонками → ленты статуса
+   идеально выровнены по вертикали; вся строка кликабельна */
+.check-row-compact {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) minmax(320px, 2fr) 168px;
+  align-items: center;
+  gap: 0.9rem;
+  padding: 0.42rem 0.9rem;
+}
+.check-row-compact.clickable {
+  cursor: pointer;
+  transition: border-color 0.12s, background 0.12s;
+}
+.check-row-compact.clickable:hover {
+  border-color: var(--border-strong);
+  background: var(--hover);
+}
+.check-row-compact.clickable:focus-visible {
+  outline: 2px solid var(--accent, #5a8fc7);
+  outline-offset: 1px;
+}
+/* режим ручного порядка: добавляется колонка под «ручку» перетаскивания */
+.check-row-compact.reorderable {
+  grid-template-columns: 20px auto minmax(0, 1fr) minmax(320px, 2fr) 168px;
+}
+/* режим массового выбора: колонка под чекбокс */
+.check-row-compact.selecting {
+  grid-template-columns: 22px auto minmax(0, 1fr) minmax(320px, 2fr) 168px;
+}
+.row-check {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--accent, #3563e9);
+  cursor: pointer;
+}
+.select-count {
+  color: var(--text-muted);
+  font-size: 0.85rem;
+  white-space: nowrap;
+}
+.check-row-compact.drag-over {
+  border-color: var(--accent);
+  box-shadow: inset 0 2px 0 -1px var(--accent);
+}
+.check-row-compact.dragging {
+  opacity: 0.45;
+}
+.mon-grip {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: grab;
+  color: var(--text-muted);
+  font-size: 1rem;
+  line-height: 1;
+  user-select: none;
+  border-radius: 5px;
+}
+.mon-grip:hover {
+  color: var(--text);
+  background: var(--hover);
+}
+.mon-grip:active {
+  cursor: grabbing;
+}
+.check-row-compact .check-target {
+  margin-top: 0.05rem;
+  font-size: 0.8rem;
+}
+/* лента статуса по времени в строке (grid-колонка держит её длинной и ровной) */
+.check-beats {
+  min-width: 0;
+}
+.check-beats .statusbar {
+  height: 15px; /* тоньше — аккуратнее в списке */
+  gap: 1px;
+  border-radius: 4px;
+}
+/* узкие экраны: прячем ленту, строка сворачивается в 3 колонки */
+@media (max-width: 880px) {
+  .check-row-compact {
+    grid-template-columns: auto minmax(0, 1fr) auto;
+  }
+  .check-row-compact.reorderable {
+    grid-template-columns: 20px auto minmax(0, 1fr) auto;
+  }
+  .check-beats {
+    display: none;
+  }
+}
+.icon-btn-danger:hover {
+  color: var(--down);
+  border-color: var(--down);
+}
+/* точечное заглушение типов алертов (чипы в форме сервера/монитора) */
+.mute-group {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  margin: 0.2rem 0;
+}
+.mute-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+.mute-chip {
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 0.24rem 0.72rem;
+  font-size: 0.82rem;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: color 0.12s, border-color 0.12s, background 0.12s;
+}
+.mute-chip:hover {
+  border-color: var(--border-strong);
+  color: var(--text);
+}
+.mute-chip-on {
+  background: rgba(208, 107, 107, 0.14);
+  border-color: #d06b6b;
+  color: #d06b6b;
+}
+
+@media (max-width: 620px) {
+  .check-msg {
+    display: none;
+  }
+}
+
+.uptime-badge {
+  font-size: 0.68rem;
+  font-weight: 600;
+  padding: 0.05rem 0.4rem;
+  border-radius: 6px;
+  background: var(--hover);
+  flex-shrink: 0;
+}
+.uptime-badge.t-up {
+  color: var(--up);
+}
+.uptime-badge.t-degraded {
+  color: var(--degraded);
+}
+.uptime-badge.t-down {
+  color: var(--down);
+}
+
+.inc-badge {
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--down);
+  background: rgba(239, 68, 68, 0.14);
+  border-radius: 6px;
+  padding: 0.1rem 0.5rem;
+  white-space: nowrap; /* «N откр. инцидентов» — одним куском, не разрывать */
+}
+
+/* цветовые утилиты статусов */
+.t-up {
+  color: var(--up);
+}
+.t-degraded {
+  color: var(--degraded);
+}
+.t-down {
+  color: var(--down);
+}
+
+/* кликабельный логотип в шапке */
+.brand-link {
+  background: transparent;
+  border: none;
+  box-shadow: none;
+  cursor: pointer;
+  padding: 0.15rem 0.35rem;
+  border-radius: 8px;
+}
+.brand-link:hover {
+  background: var(--hover);
+}
+
+/* ---------- главная (сводка) ---------- */
+
+/* колоночная раскладка: 3 независимые колонки, внутри карточки стопкой. Высокие
+   карточки (Сайты/Бэкапы) не ломают выравнивание соседних колонок («не уезжает»).
+   Группировка: Сайты+Сервера | Docker+Kubernetes | Бэкапы. */
+.home-cols {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 1rem;
+  align-items: start;
+}
+/* учётка видит не все разделы → колонок меньше, растягиваем оставшиеся */
+.home-cols.cols-2 {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+.home-cols.cols-1 {
+  grid-template-columns: minmax(0, 1fr);
+  max-width: 640px;
+}
+.home-col {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  min-width: 0;
+}
+@media (max-width: 1100px) {
+  .home-cols {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .home-cols.cols-1 {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+@media (max-width: 680px) {
+  .home-cols {
+    grid-template-columns: 1fr;
+  }
+}
+.home-card {
+  display: flex;
+  flex-direction: column;
+  text-align: left;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 0 1.35rem 1.25rem;
+  color: var(--text);
+  box-shadow: none;
+  cursor: pointer;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+.home-card:hover {
+  background: var(--card-hover);
+  border-color: var(--border-strong);
+}
+/* шапка карточки — общий разделитель снизу, всегда на одном уровне */
+.home-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 3.4rem;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 1rem;
+}
+.home-card-head h3 {
+  margin: 0;
+  font-size: 1.1rem;
+}
+.home-open {
+  color: var(--text-muted);
+  font-size: 0.82rem;
+  font-weight: 600;
+  transition: color 0.15s ease;
+}
+.home-card:hover .home-open {
+  color: var(--accent, #4b74ff);
+}
+.home-headline {
+  font-size: 1.4rem;
+  font-weight: 700;
+  margin-bottom: 0.7rem;
+}
+.home-stat-row {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.4rem;
+}
+/* мини-статы как чипы */
+.home-mini {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.3rem 0.6rem;
+  font-size: 0.82rem;
+}
+.home-mini-num {
+  font-weight: 700;
+  font-size: 0.95rem;
+}
+.home-inc {
+  margin-top: 0.75rem;
+  color: var(--down);
+  font-weight: 600;
+  font-size: 0.85rem;
+}
+.home-warns {
+  margin-top: 0.9rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+.home-warn {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.85rem;
+}
+.warn-tone {
+  filter: saturate(1.1);
+}
+.warn-name {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 45%;
+}
+
+/* ---------- опции SSL/домен в форме ---------- */
+
+.expiry-opts {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin: 0.85rem 0 0.2rem;
+  padding-top: 0.7rem;
+  border-top: 1px solid var(--border);
+}
+.expiry-opt {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+.expiry-opt .checkbox {
+  margin: 0;
+}
+.inline-days {
+  flex-direction: row;
+  align-items: center;
+  gap: 0.45rem;
+  font-size: 0.8rem;
+  color: var(--text-muted);
+}
+.inline-days input {
+  width: 6.5rem;
+  padding: 0.3rem 0.5rem;
+}
+
+/* --- шапка списка + массовое применение --- */
+.checks-head-actions {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+/* строка поиска — отдельно от кнопок, на всю ширину */
+.checks-search-row {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+  margin-bottom: 0.9rem;
+}
+.checks-search-row .checks-search {
+  flex: 1;
+  min-width: 0;
+}
+.srv-search,
+.checks-search {
+  min-width: 240px;
+  padding: 0.5rem 0.75rem 0.5rem 2.15rem;
+  border-radius: 8px;
+  border: 1px solid var(--border-strong);
+  /* фон карточки (светлее строки кнопок) + иконка-лупа слева — чтобы поле поиска
+     выделялось среди кнопок-«призраков» */
+  background: var(--bg-card)
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' fill='none' stroke='%238b93a7' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='7' cy='7' r='5'/%3E%3Cline x1='11' y1='11' x2='15' y2='15'/%3E%3C/svg%3E")
+    no-repeat 0.65rem center;
+  background-size: 15px;
+  color: var(--text);
+  font: inherit;
+}
+.srv-search:focus,
+.checks-search:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
+}
+/* Нейтральное поле формы: вид как у .checks-search, но БЕЗ иконки-лупы и без левого
+   отступа под неё. Лупа означает «поиск/фильтр» — на поле времени или селекте она врёт. */
+.field-inp {
+  padding: 0.5rem 0.75rem;
+  border-radius: 8px;
+  border: 1px solid var(--border-strong);
+  background: var(--bg-card);
+  color: var(--text);
+  font: inherit;
+}
+.field-inp:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
+}
+.bulk-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  margin: 0.6rem 0;
+}
+.bulk-row {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  opacity: 0.55;
+}
+.bulk-row-on {
+  opacity: 1;
+}
+.bulk-check {
+  flex: 1;
+  margin: 0;
+}
+.bulk-row input {
+  width: 9rem;
+  flex-shrink: 0;
+}
+
+/* выбор локаций в форме монитора */
+.loc-pick {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  margin: 0.4rem 0 0.2rem;
+  padding: 0.6rem 0.8rem;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 9px;
+}
+.loc-pick-item {
+  margin: 0.1rem 0;
+}
+
+/* ---------- плитки SSL/домена в детали ---------- */
+
+.expiry-pills {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 0.6rem;
+}
+.expiry-pill {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 0.6rem 0.8rem;
+}
+.expiry-ico {
+  font-size: 1.2rem;
+}
+.expiry-lbl {
+  color: var(--text-muted);
+  font-size: 0.75rem;
+}
+.expiry-days {
+  font-weight: 700;
+  font-size: 1.05rem;
+}
+
+.check-main.clickable {
+  cursor: pointer;
+  border-radius: 8px;
+  margin: -0.2rem -0.4rem;
+  padding: 0.2rem 0.4rem;
+}
+.check-main.clickable:hover .check-name {
+  text-decoration: underline;
+  text-decoration-color: var(--border-strong);
+  text-underline-offset: 3px;
+}
+.check-main.clickable:focus-visible {
+  outline: 2px solid #3563e9;
+  outline-offset: 1px;
+}
+
+/* --- детали монитора (модалка) --- */
+
+.detail {
+  width: 880px;
+  max-width: calc(100vw - 2rem);
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+.detail-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.detail-head-actions {
+  display: flex;
+  gap: 0.3rem;
+  flex-shrink: 0;
+}
+.detail-title {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-width: 0;
+}
+.detail-title h3 {
+  margin: 0;
+  font-size: 1.1rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.detail-target {
+  color: var(--text-muted);
+  font-family: Consolas, 'Cascadia Mono', monospace;
+  font-size: 0.85rem;
+  margin-top: -0.4rem;
+  word-break: break-all;
+}
+/* мета-строка сервера: аккуратные чипы вместо ряда через точки */
+.srv-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  margin-top: -0.2rem;
+}
+.srv-meta-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.15rem 0.5rem;
+  font-size: 0.78rem;
+  color: var(--text);
+}
+.srv-meta-item .srv-meta-k {
+  color: var(--text-muted);
+}
+/* адрес сервера: внешний (глобус) + локальный (домик) с иконками вместо «внеш/лок»
+   («лок» читалось как «залочен»). Контекстно-нейтрально: в плашке-мете и в плитке. */
+.srv-addr {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5em;
+}
+.srv-addr-part {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.28em;
+}
+/* иконка приглушена, чтобы сам IP читался как основное. Размер — от текста контейнера. */
+.srv-addr-ic {
+  width: 0.95em;
+  height: 0.95em;
+  opacity: 0.6;
+  flex-shrink: 0;
+}
+
+.uptime-tiles {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 0.6rem;
+  margin-top: 0.2rem;
+}
+.uptime-tile {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 0.7rem 0.9rem;
+  text-align: center;
+}
+.uptime-val {
+  font-size: 1.5rem;
+  font-weight: 700;
+  line-height: 1;
+}
+.uptime-val.t-up {
+  color: var(--up);
+}
+.uptime-val.t-degraded {
+  color: var(--degraded);
+}
+.uptime-val.t-down {
+  color: var(--down);
+}
+.uptime-lbl {
+  color: var(--text-muted);
+  font-size: 0.75rem;
+  margin-top: 0.35rem;
+}
+
+.detail-toolbar {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 0.2rem;
+}
+.win-switch {
+  display: inline-flex;
+  gap: 0.15rem;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  padding: 0.15rem;
+}
+.win-btn {
+  background: transparent;
+  color: var(--text-muted);
+  border: none;
+  box-shadow: none;
+  border-radius: 7px;
+  padding: 0.28rem 0.75rem;
+  font-size: 0.82rem;
+  font-weight: 600;
+}
+.win-btn:hover {
+  background: var(--hover);
+  color: var(--text);
+}
+.win-btn-active,
+.win-btn-active:hover {
+  background: var(--bg-card);
+  color: var(--text);
+}
+
+.statusbar-wrap {
+  position: relative;
+}
+.statusbar {
+  display: flex;
+  gap: 1px; /* тонкие деления, а не «плитки» */
+  height: 22px;
+  border-radius: 5px;
+  overflow: hidden; /* скругляем только края всей ленты */
+  background: var(--border); /* виден в 1px-зазорах как тонкий разделитель */
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.22);
+}
+.statusbar-seg {
+  position: relative;
+  display: block;
+  min-width: 1px;
+  border-radius: 0; /* прямые сегменты — не «скруглённые квадратики» */
+  transition: filter 0.12s ease;
+}
+/* объёмная заливка: блик сверху → лёгкая тень снизу (материал, не плоский неон) */
+.statusbar-seg::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    180deg,
+    rgba(255, 255, 255, 0.18),
+    rgba(255, 255, 255, 0) 42%,
+    rgba(0, 0, 0, 0.16)
+  );
+  pointer-events: none;
+}
+.statusbar-seg-hi {
+  filter: brightness(1.15);
+  z-index: 1;
+}
+.statusbar-seg-hi::after {
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.3), rgba(255, 255, 255, 0.05));
+}
+.statusbar-tip {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  transform: translateX(-50%);
+  background: var(--bg-card);
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  padding: 0.3rem 0.55rem;
+  font-size: 0.78rem;
+  white-space: nowrap;
+  pointer-events: none;
+  z-index: 5;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.35);
+}
+.statusbar-tip[style*='right'] {
+  transform: translateX(50%);
+}
+.statusbar-empty {
+  height: 22px;
+}
+/* лента статуса над графиком в полноэкранном зуме — выровнена по ОБЛАСТИ ГРАФИКА
+   (у чарта viewBox 640, отступы PAD_L=52 слева под ось Y, PAD_R=12 справа) */
+.chart-full-status {
+  margin: 0 0 0.7rem;
+  padding-left: 8.125%; /* 52/640 — как левый отступ графика */
+  padding-right: 1.875%; /* 12/640 — как правый */
+}
+.chart-full-status .statusbar {
+  height: 16px;
+}
+
+.chart-block {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+.chart-cap {
+  color: var(--text-muted);
+  font-size: 0.78rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+/* пустое состояние детали сервера (агент не выходил на связь) */
+.srv-nodata {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  gap: 0.5rem;
+  padding: 2.5rem 1.5rem;
+}
+.srv-nodata .sdot {
+  width: 12px;
+  height: 12px;
+}
+.srv-nodata-title {
+  font-size: 1.05rem;
+  font-weight: 600;
+}
+.srv-nodata p {
+  max-width: 460px;
+}
+
+/* заглушка будущих разделов мониторинга (Docker / Kubernetes) */
+.section-stub {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  gap: 0.65rem;
+  padding: 4.5rem 1.5rem;
+  border: 1px dashed var(--border);
+  border-radius: 16px;
+  background: color-mix(in srgb, var(--bg-card) 55%, transparent);
+}
+.section-stub-icon {
+  font-size: 3.2rem;
+  line-height: 1;
+  filter: grayscale(0.15);
+  opacity: 0.9;
+}
+.section-stub-title {
+  font-size: 1.25rem;
+  font-weight: 650;
+}
+.section-stub-desc {
+  max-width: 440px;
+  margin: 0;
+}
+.section-stub-badge {
+  margin-top: 0.35rem;
+  padding: 0.22rem 0.7rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  color: var(--accent);
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  border-radius: 999px;
+}
+
+/* компактные строки реальных значений под графиком */
+.chart-stats {
+  margin-top: 0.2rem;
+}
+.chart-stats .loc-res {
+  padding: 0.35rem 0.7rem;
+}
+/* readout по сущностям (интерфейсы/диски): при десятках строк — скролл, а не рост карточки */
+.chart-stats-scroll {
+  max-height: 20rem;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+/* «тепловая» подсветка процессов по нагрузке: красный→жёлтый→зелёный→белый */
+.chart-stats .loc-res.proc-crit {
+  background: rgba(208, 107, 107, 0.12);
+}
+.chart-stats .loc-res.proc-warn {
+  background: rgba(207, 155, 82, 0.1);
+}
+.chart-stats .loc-res.proc-crit .loc-res-metric,
+.chart-stats .loc-res.proc-crit .proc-metric {
+  color: #d06b6b;
+}
+.chart-stats .loc-res.proc-warn .loc-res-metric,
+.chart-stats .loc-res.proc-warn .proc-metric {
+  color: #cf9b52;
+}
+.chart-stats .loc-res.proc-ok .loc-res-metric,
+.chart-stats .loc-res.proc-ok .proc-metric {
+  color: #57a894;
+}
+/* строка процесса — три яруса: [имя … метрика] / командная строка / мета.
+   Раньше было две колонки встык (команда слева, мета справа), и на узкой карточке
+   серый моно-cmdline упирался в серую моно-мету — читалось одной простынёй. */
+/* .proc-row.loc-res (2 класса) — иначе базовый .loc-res{align-items:center}, объявленный
+   НИЖЕ в файле, перебивает по source-order и центрирует всю колонку (метрика/команда/мета
+   уезжают в центр, margin-left:auto у метрики не срабатывает). */
+.proc-row.loc-res {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0.25rem;
+  min-width: 0;
+  text-align: left;
+}
+.chart-stats .loc-res.proc-row {
+  padding: 0.5rem 0.75rem; /* три строки — нужно чуть больше воздуха, чем стандартные 0.35 */
+}
+/* строки-процессы разносим чуть заметнее, чтобы карточки не сливались в стопку */
+.chart-stats.loc-results {
+  gap: 0.45rem;
+}
+.proc-head {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  min-width: 0;
+}
+.proc-comm {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+.proc-head .type-chip {
+  flex-shrink: 0;
+}
+/* метрика (CPU% / память) прижата вправо на одной строке с именем */
+.proc-metric {
+  margin-left: auto;
+  flex-shrink: 0;
+  font-weight: 700;
+  font-size: 0.9rem;
+}
+/* командная строка — во всю ширину, приглушённее имени */
+.proc-cmd {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  opacity: 0.6;
+}
+/* мета (PID · юзер · потоки · память) — отдельной строкой, мельче и тусклее команды */
+.proc-meta {
+  white-space: normal;
+  word-break: break-word;
+  opacity: 0.8;
+  font-size: 0.78rem;
+}
+.ent-more {
+  padding: 0.3rem 0.7rem;
+}
+
+/* секция графика в детали — отдельная карточка, чтобы не сливались */
+.chart-card {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 0.7rem 0.85rem;
+  margin-top: 0.7rem;
+}
+
+/* ---------- секции метрик + сетка графиков (масштаб на 20+ графиков) ---------- */
+/* деталь сервера шире обычной модалки; графики — одной колонкой во всю ширину,
+   слева — липкий рельс навигации по секциям */
+.detail.detail-server {
+  width: min(1360px, 94vw);
+}
+.detail-body {
+  display: flex;
+  align-items: flex-start;
+  gap: 1rem;
+}
+.detail-sections {
+  flex: 1 1 auto;
+  min-width: 0; /* иначе широкие графики распирают flex-колонку */
+}
+.detail-nav {
+  position: sticky;
+  top: 12px;
+  align-self: flex-start;
+  flex: 0 0 148px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: calc(100vh - 24px);
+  overflow-y: auto;
+  padding-top: 0.3rem;
+}
+.detail-nav-item {
+  text-align: left;
+  background: transparent;
+  border: none;
+  border-left: 2px solid transparent;
+  border-radius: 0;
+  padding: 7px 12px;
+  color: var(--text-muted);
+  font-size: 0.8rem;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition: color 0.12s, border-color 0.12s, background 0.12s;
+}
+.detail-nav-item:hover {
+  color: var(--text);
+}
+.detail-nav-item.active {
+  color: var(--text);
+  border-left-color: #5a8fc7;
+  background: rgba(90, 143, 199, 0.1);
+}
+@media (max-width: 760px) {
+  .detail-nav {
+    display: none;
+  }
+}
+.scroll-top-btn {
+  position: fixed;
+  /* ставим в правое поле вплотную к краю контента (серверная деталь =
+     min(1360px,94vw) по центру), НЕ наезжая на графики. 680px = половина 1360;
+     +46px ширина кнопки +6px зазор → сдвиг за край контента */
+  right: max(26px, calc(50vw - 732px));
+  bottom: 26px;
+  z-index: 20;
+  width: 46px;
+  height: 46px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1.35rem;
+  line-height: 1;
+  color: var(--text);
+  background: var(--bg-elev, #1c2029);
+  border: 1px solid var(--border-strong, rgba(255, 255, 255, 0.14));
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.4);
+  cursor: pointer;
+  transition: opacity 0.16s, transform 0.16s, border-color 0.16s;
+}
+.scroll-top-btn:hover {
+  border-color: #5a8fc7;
+  transform: translateY(-2px);
+}
+.scroll-top-hidden {
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(10px);
+}
+.metric-section {
+  margin: 1rem 0 0.2rem;
+}
+.metric-section-head {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.4rem 0.15rem;
+  margin-bottom: 0.6rem;
+  background: transparent;
+  border: none;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-muted);
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  cursor: pointer;
+  text-align: left;
+}
+.metric-section-head:hover {
+  color: var(--text);
+}
+.metric-section-caret {
+  font-size: 0.7rem;
+  width: 0.8rem;
+  flex-shrink: 0;
+}
+.metric-section-body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+.chart-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 0.75rem;
+  align-items: start;
+}
+.chart-grid .chart-card {
+  margin-top: 0;
+  min-width: 0; /* грид-элемент по умолчанию min-width:auto → длинные cmdline процессов раздвигали карточку за пределы страницы */
+}
+.chart-cap-btn {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  background: transparent;
+  border: none;
+  box-shadow: none;
+  padding: 0;
+  cursor: pointer;
+  color: var(--text-muted);
+  font: inherit;
+}
+.chart-cap-btn:hover {
+  color: var(--text);
+}
+.chart-cap-btn > span:first-child {
+  font-size: 0.78rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.chart-expand {
+  font-size: 1rem;
+  opacity: 0.6;
+}
+.chart-cap-btn:hover .chart-expand {
+  opacity: 1;
+}
+
+/* полноэкранный график */
+.chart-full-backdrop {
+  align-items: flex-start;
+}
+.chart-full {
+  width: min(2200px, 96vw);
+  max-width: none;
+  margin-top: 3vh;
+}
+.chart-full-metric {
+  color: var(--text-muted);
+  font-size: 0.85rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.chart-full-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+
+.edit-actions {
+  align-items: center;
+}
+/* «Удалить сервер» вынесено наверх и вправо, чтобы не нажать рядом с «Сохранить» */
+.edit-danger-top {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 0.35rem;
+}
+.edit-danger-top .danger-btn {
+  font-size: 0.82rem;
+  padding: 0.28rem 0.6rem;
+}
+.danger-btn {
+  color: #f87171;
+}
+.danger-btn:hover {
+  background: rgba(248, 113, 113, 0.12);
+  color: #ef4444;
+}
+.line-chart {
+  width: 100%;
+  height: 160px;
+  display: block;
+}
+.mchart-legend {
+  display: flex;
+  gap: 1rem;
+  flex-wrap: wrap;
+  margin-bottom: 0.15rem;
+}
+.mchart-leg {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.78rem;
+  color: var(--text-muted);
+}
+.mchart-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 2px;
+  display: inline-block;
+}
+.srv-net-val {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  font-size: 0.95rem;
+}
+
+/* стек-график с тултипом */
+.sac-wrap {
+  position: relative;
+}
+/* подписи осей поверх SVG (HTML → не растягиваются) */
+.sac-ylabel {
+  position: absolute;
+  left: 0;
+  transform: translateY(-50%);
+  text-align: right;
+  padding-right: 6px;
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  pointer-events: none;
+  white-space: nowrap;
+}
+/* Подписи времени по оси X. Центрируем по своей метке: у краёв график режет
+   их рамкой, поэтому крайние прижимаем внутрь (:first-child / :last-child). */
+.sac-xtick {
+  position: absolute;
+  bottom: 1px;
+  transform: translateX(-50%);
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  pointer-events: none;
+  white-space: nowrap;
+}
+/* вертикальные линии под подписями — те же, что у горизонтальной сетки */
+.sac-xgrid {
+  stroke: var(--border);
+  stroke-width: 1;
+  opacity: 0.45;
+}
+.sac-legval {
+  color: var(--text);
+  font-weight: 700;
+  margin-left: 0.1rem;
+}
+.sac-cursor {
+  stroke: var(--text-muted);
+  stroke-width: 1;
+  stroke-dasharray: 3 3;
+  opacity: 0.7;
+}
+.line-chart.sac-zoomable {
+  cursor: crosshair;
+}
+.sac-brush {
+  fill: rgba(53, 99, 233, 0.18);
+  stroke: #3563e9;
+  stroke-width: 1;
+  vector-effect: non-scaling-stroke;
+}
+.sac-tip {
+  position: absolute;
+  top: 4px;
+  transform: translateX(0.5rem);
+  min-width: 130px;
+  background: var(--bg-card);
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  padding: 0.4rem 0.55rem;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+  pointer-events: none;
+  z-index: 3;
+}
+.sac-tip[style*='right'] {
+  transform: translateX(-0.5rem);
+}
+.sac-tip-t {
+  color: var(--text-muted);
+  font-size: 0.72rem;
+  margin-bottom: 0.2rem;
+}
+.sac-tip-row {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.78rem;
+}
+.sac-tip-name {
+  color: var(--text-muted);
+  flex: 1;
+}
+.sac-tip-val {
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+.chart-grid {
+  stroke: var(--border);
+  stroke-width: 1;
+  vector-effect: non-scaling-stroke;
+}
+.chart-axis {
+  fill: var(--text-muted);
+  font-size: 10px;
+  font-family: 'Segoe UI', system-ui, sans-serif;
+}
+.chart-empty {
+  color: var(--text-muted);
+  font-size: 0.85rem;
+  padding: 1.5rem 0;
+  text-align: center;
+}
+
+.detail-inc {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+.inc-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  max-height: 210px;
+  overflow-y: auto;
+}
+.inc-item {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.45rem 0.7rem;
+}
+.inc-when {
+  flex-shrink: 0;
+  font-size: 0.85rem;
+  min-width: 130px;
+}
+.inc-msg {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: right;
+}
+
+/* --- журнал проверок --- */
+.detail-log {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+.log-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.log-switch {
+  padding: 0.12rem;
+}
+.log-switch .win-btn {
+  padding: 0.2rem 0.6rem;
+  font-size: 0.78rem;
+}
+.log-list {
+  display: flex;
+  flex-direction: column;
+  max-height: 240px;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.log-item {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.35rem 0.6rem;
+  border-bottom: 1px solid var(--border);
+}
+.log-item:last-child {
+  border-bottom: none;
+}
+.log-time {
+  flex: 0 0 auto;
+  min-width: 92px;
+}
+.log-metric {
+  flex: 0 0 auto;
+  min-width: 56px;
+  text-align: right;
+  font-weight: 600;
+  font-size: 0.82rem;
+}
+.log-msg {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* --- массовое добавление --- */
+.import-modal {
+  width: 560px;
+}
+textarea {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.5rem 0.7rem;
+  color: var(--text);
+  font-size: 0.9rem;
+  resize: vertical;
+  width: 100%;
+}
+textarea:focus {
+  outline: none;
+  border-color: #3563e9;
+}
+.import-textarea {
+  font-family: Consolas, 'Cascadia Mono', monospace;
+  line-height: 1.5;
+}
+
+/* --- локации (модалка) --- */
+.loc-form {
+  display: flex;
+  gap: 0.6rem;
+  align-items: flex-end;
+  flex-wrap: wrap;
+  margin: 0.6rem 0;
+}
+.loc-form .field {
+  flex: 1 1 40%;
+  margin: 0;
+}
+.loc-form-actions {
+  display: flex;
+  gap: 0.5rem;
+}
+.loc-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  margin-top: 0.5rem;
+}
+.loc-row {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  padding: 0.5rem 0.7rem;
+}
+.loc-toggle {
+  margin: 0;
+}
+.loc-toggle input {
+  width: auto;
+}
+.loc-main {
+  flex: 1;
+  min-width: 0;
+}
+.loc-name {
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+.loc-url {
+  color: var(--text-muted);
+  font-size: 0.8rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* --- локации в детали монитора --- */
+.detail-locs {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+.loc-results {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+.loc-res {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.45rem 0.7rem;
+}
+.loc-res-off {
+  opacity: 0.55;
+}
+/* строки-локации как кнопки-переключатели графика */
+.loc-res-btn {
+  width: 100%;
+  text-align: left;
+  cursor: pointer;
+  color: var(--text);
+  box-shadow: none;
+  font: inherit;
+  transition: border-color 0.12s ease, background 0.12s ease;
+}
+.loc-res-btn:hover {
+  background: var(--card-hover);
+  border-color: var(--border-strong);
+}
+.loc-res-active,
+.loc-res-active:hover {
+  border-color: #3563e9;
+  background: var(--card-hover);
+}
+.loc-res-name {
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  flex: 0 0 auto;
+  min-width: 130px;
+}
+.loc-res-metric {
+  font-weight: 600;
+  font-size: 0.85rem;
+  flex: 0 0 auto;
+}
+.loc-res-msg {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: right;
+}
+
+/* --- настройки алертов (модалка) --- */
+.settings-group {
+  margin: 0.9rem 0;
+  padding-top: 0.6rem;
+  border-top: 1px solid var(--border);
+}
+.settings-group h4 {
+  margin: 0 0 0.3rem;
+  font-size: 0.95rem;
+}
+/* правила серверных алертов — компактный аккордеон */
+.arule-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  margin-top: 0.5rem;
+}
+.arule {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+}
+.arule-off {
+  opacity: 0.6;
+}
+.arule-head {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.55rem 0.7rem;
+  cursor: pointer;
+}
+.arule-head:hover {
+  background: var(--hover);
+}
+.arule-check {
+  width: 17px;
+  height: 17px;
+  flex: 0 0 auto;
+  accent-color: #3563e9;
+  cursor: pointer;
+}
+.arule-name {
+  font-weight: 600;
+  font-size: 0.9rem;
+}
+.arule-sum {
+  flex: 1;
+  text-align: right;
+}
+.arule-caret {
+  color: var(--text-muted);
+  font-size: 0.8rem;
+  width: 0.9rem;
+  text-align: center;
+}
+.arule-body {
+  padding: 0.2rem 0.7rem 0.7rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+  border-top: 1px solid var(--border);
+}
+.rule-text {
+  width: 100%;
+  padding: 0.5rem 0.7rem;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+  font-size: 0.85rem;
+}
+.arule-scope {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  flex-wrap: wrap;
+}
+/* поиск-типахед выбора групп/серверов */
+.scope-picker {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+.scope-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+}
+.scope-chip-x {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  background: rgba(53, 99, 233, 0.15);
+  border: 1px solid #3563e9;
+  border-radius: 7px;
+  padding: 0.2rem 0.45rem;
+  font-size: 0.8rem;
+  color: var(--text);
+  cursor: pointer;
+}
+.scope-chip-x:hover .scope-x {
+  color: #f87171;
+}
+.scope-x {
+  color: var(--text-muted);
+  font-size: 0.7rem;
+}
+.scope-search {
+  font-size: 0.82rem;
+}
+.scope-drop {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  max-height: 220px;
+  overflow-y: auto;
+}
+.scope-drop-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: none;
+  box-shadow: none;
+  padding: 0.4rem 0.7rem;
+  color: var(--text);
+  font: inherit;
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+.scope-drop-item:hover {
+  background: var(--hover);
+}
+.scope-drop-empty,
+.scope-drop-more {
+  padding: 0.4rem 0.7rem;
+}
+
+/* галочка-переключатель с подписью и описанием */
+.check-toggle {
+  display: flex;
+  /* как и .nobackup-check: перебиваем глобальный label{flex-direction:column},
+     иначе чекбокс встаёт над подписью вместо «галка слева, текст справа» */
+  flex-direction: row;
+  align-items: flex-start;
+  gap: 0.6rem;
+  cursor: pointer;
+}
+.check-toggle input {
+  margin-top: 0.15rem;
+  width: 18px;
+  height: 18px;
+  flex: 0 0 auto;
+  accent-color: #3563e9;
+  cursor: pointer;
+}
+.check-toggle > span {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+.form-row {
+  display: flex;
+  gap: 1rem;
+}
+.form-row .field {
+  flex: 1;
+}
+
+/* раздел «Сервисы»: строка с числами очереди справа */
+.queue-nums {
+  display: flex;
+  gap: 0.4rem;
+  align-items: baseline;
+  flex-shrink: 0;
+}
+.row-clickable {
+  cursor: pointer;
+}
+
+/* «куда бэкапится» — своя колонка справа от метаданных, перед статусом */
+.backup-dest {
+  flex-shrink: 0;
+  margin-left: auto;
+  padding-right: 0.9rem;
+  white-space: nowrap;
+}
+
+/* ---------- карточка сервиса в блоке «Покрытие» ----------
+   Раньше движки шли сплошным текстом, а кнопка была inline-«призраком» посреди
+   переносов — её буквально не видно. Теперь: каждая СУБД — отдельная карточка,
+   кнопка прижата вправо в заголовке и выглядит как кнопка. */
+.svc-card {
+  margin: 0.45rem 0;
+  padding: 0.5rem 0.6rem;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--degraded);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--bg-card) 60%, transparent);
+}
+.svc-card-ok {
+  border-left-color: var(--up);
+}
+.svc-card-head {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+}
+.svc-ico {
+  font-size: 1.05rem;
+  line-height: 1;
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+}
+/* SVG-логотип движка (simple-icons): фирменный цвет (или currentColor у тема-опасных),
+   полная насыщенность; выровнен по базовой линии соседнего текста. */
+.engine-ico {
+  vertical-align: -0.15em;
+}
+.svc-name {
+  font-weight: 600;
+  font-size: 0.9rem;
+}
+.svc-ok-tag {
+  margin-left: 0.2rem;
+}
+/* кнопка действия: вправо, с рамкой и фоном — чтобы читалась как кнопка, а не как текст */
+.svc-act {
+  margin-left: auto;
+  flex-shrink: 0;
+  padding: 0.2rem 0.6rem;
+  font-size: 0.78rem;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  background: var(--bg-card);
+  color: var(--text);
+  cursor: pointer;
+  white-space: nowrap;
+}
+/* Действия карточки одной группой у правого края. Без неё margin-left:auto стоял
+   и на кнопке, и на колокольчике — свободное место делилось пополам, и кнопка
+   вставала тем левее, чем длиннее имя движка: в списке получалась лесенка. */
+.svc-head-act {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  flex-shrink: 0;
+}
+.svc-head-act .svc-act,
+.svc-head-act .coverage-mute {
+  margin-left: 0;
+}
+/* Главное действие карточки — акцентная заливка: «включить дампы» это то, зачем
+   сюда пришли, и оно не должно теряться рядом с приглушённым колокольчиком. */
+.svc-act-primary {
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--border-strong));
+  background: color-mix(in srgb, var(--accent) 12%, var(--bg-card));
+  font-weight: 600;
+}
+.svc-act-primary:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--accent) 22%, var(--bg-card));
+}
+.svc-act:hover:not(:disabled) {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 14%, var(--bg-card));
+}
+.svc-act:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+.svc-card-detail {
+  margin-top: 0.25rem;
+  line-height: 1.45;
+}
+
+/* список сайтов веб-сервиса: превью + раскрытие в скроллящуюся сетку чипов с фильтром */
+/* инвентарь СУБД в карточке сервиса: версия/итог сверху, базы построчно */
+.coverage-dump-hint {
+  margin: 0.25rem 0 0.5rem;
+  padding: 0.4rem 0.6rem;
+  border-left: 2px solid var(--border-strong);
+  border-radius: 0;
+}
+.coverage-dump-hint .mono {
+  margin-top: 0.3rem;
+  color: var(--text);
+  word-break: break-all;
+}
+.svc-db {
+  margin-top: 0.45rem;
+}
+.svc-db-head {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+  margin-bottom: 0.3rem;
+}
+.svc-db-ver {
+  color: var(--text-muted);
+}
+.svc-db-list {
+  max-height: none;
+}
+/* раскрытый список длинный (сотня баз) — скроллим внутри карточки, не растягивая модалку */
+.svc-db-list.open {
+  max-height: 18rem;
+  overflow-y: auto;
+}
+.svc-db-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.16rem 0;
+  font-size: 0.82rem;
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 45%, transparent);
+}
+.svc-db-row:last-child {
+  border-bottom: 0;
+}
+.svc-sites {
+  margin-top: 0.35rem;
+}
+.svc-sites-head {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+.svc-sites-count {
+  font-size: 0.78rem;
+  color: var(--text-muted);
+}
+.svc-sites-filter {
+  width: 100%;
+  margin: 0.4rem 0 0.2rem;
+  padding: 0.3rem 0.5rem;
+  font-size: 0.8rem;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+}
+.svc-sites-list {
+  margin-top: 0.3rem;
+}
+.svc-sites-list.open {
+  max-height: 14rem;
+  overflow-y: auto;
+  padding: 0.35rem 0.6rem;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+/* каждый домен — своей строкой (в строку через запятую сливалось); тонкий разделитель */
+.svc-site-row {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.8rem;
+  line-height: 1.5;
+  color: var(--text);
+  padding: 0.15rem 0;
+}
+.svc-site-name {
+  min-width: 0;
+  word-break: break-all;
+}
+/* признак/кнопка справа — одинаковой ширины, чтобы столбик доменов не «дышал» */
+.svc-site-on,
+.svc-site-no,
+.svc-site-add {
+  flex-shrink: 0;
+  margin-left: auto;
+  width: 1.4rem;
+  height: 1.4rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 6px;
+  font-size: 0.8rem;
+  line-height: 1;
+  border: 1px solid transparent;
+  background: none;
+  padding: 0;
+}
+.svc-site-on {
+  color: var(--up);
+  font-weight: 700;
+}
+button.svc-site-on {
+  cursor: pointer;
+}
+button.svc-site-on:hover {
+  background: color-mix(in srgb, var(--up) 16%, transparent);
+}
+.svc-site-no {
+  color: var(--muted);
+  cursor: help;
+}
+.svc-site-add {
+  border-color: var(--border-strong);
+  background: var(--bg-card);
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 0.95rem;
+}
+.svc-site-add:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--border-strong));
+  background: color-mix(in srgb, var(--accent) 16%, var(--bg-card));
+  color: var(--text);
+}
+.svc-site-add:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+/* ---- мастер «поставить сайты на мониторинг» ---- */
+/* плашка в «Сайтах»: агенты видят домены, которых нет ни в одном мониторе */
+.discover-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.6rem;
+  margin-bottom: 0.9rem;
+  padding: 0.6rem 0.9rem;
+  border: 1px solid color-mix(in srgb, var(--accent) 40%, var(--border));
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--accent) 8%, var(--bg-card));
+}
+.discover-ico {
+  font-size: 1.1rem;
+}
+/* проблема самой точки проверки, а не сайтов */
+.loc-warn {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.6rem;
+  margin-bottom: 0.9rem;
+  padding: 0.6rem 0.9rem;
+  border: 1px solid color-mix(in srgb, var(--degraded) 45%, var(--border));
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--degraded) 10%, var(--bg-card));
+}
+.loc-warn-ico {
+  font-size: 1.1rem;
+}
+.discover-bar .primary {
+  margin-left: auto;
+}
+.adopt-modal {
+  max-width: 860px;
+  width: 100%;
+}
+.adopt-sub {
+  margin-bottom: 0.6rem;
+}
+.adopt-tools {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.6rem;
+}
+.adopt-search {
+  flex: 1 1 14rem;
+  min-width: 0;
+  padding: 0.35rem 0.6rem;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: var(--bg-input, var(--bg-card));
+  color: var(--text);
+}
+.adopt-chk {
+  /* глобальный label — flex-column (подпись над полем); здесь подпись идёт в строку */
+  display: inline-flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.85rem;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.adopt-list {
+  max-height: 46vh;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 0.4rem 0.6rem;
+}
+.adopt-zone + .adopt-zone {
+  margin-top: 0.35rem;
+  border-top: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
+  padding-top: 0.35rem;
+}
+.adopt-zone-head {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  min-height: 1.6rem;
+}
+.adopt-zone-name {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  border: none;
+  background: none;
+  padding: 0;
+  color: var(--text);
+  font-weight: 600;
+  font-size: 0.86rem;
+  cursor: pointer;
+}
+.adopt-caret {
+  color: var(--muted);
+  font-size: 0.7rem;
+  width: 0.7rem;
+}
+.adopt-rows {
+  padding: 0.15rem 0 0.2rem 1.35rem;
+}
+.adopt-row {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  font-size: 0.8rem;
+  padding: 0.12rem 0;
+  /* одинаковая высота: иначе строка с чекбоксом выше строки с «✓» и список рябит */
+  min-height: 1.5rem;
+}
+.adopt-row.adopt-bad .adopt-dom,
+.adopt-row.adopt-monitored .adopt-dom {
+  color: var(--muted);
+}
+.adopt-dom {
+  min-width: 0;
+  word-break: break-all;
+}
+.adopt-where {
+  margin-left: auto;
+  padding-left: 0.5rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 40%;
+}
+.adopt-mark {
+  width: 1.1rem;
+  text-align: center;
+  flex-shrink: 0;
+  border: none;
+  background: none;
+  padding: 0;
+  color: var(--muted);
+}
+.adopt-mark.up {
+  color: var(--up);
+  font-weight: 700;
+}
+/* «мониторить не нужно»: неяркая кнопка справа, проявляется на наведении строки */
+.adopt-skip {
+  flex-shrink: 0;
+  width: 1.3rem;
+  height: 1.3rem;
+  border: none;
+  background: none;
+  padding: 0;
+  color: var(--muted);
+  opacity: 0.35;
+  cursor: pointer;
+  border-radius: 5px;
+}
+.adopt-row:hover .adopt-skip,
+.adopt-skip.back {
+  opacity: 1;
+}
+.adopt-skip:hover {
+  background: color-mix(in srgb, var(--down) 18%, transparent);
+  color: var(--text);
+}
+.adopt-skip.back:hover {
+  background: color-mix(in srgb, var(--up) 18%, transparent);
+}
+.adopt-row.adopt-skipped .adopt-dom {
+  color: var(--muted);
+  text-decoration: line-through;
+}
+/* ---- свой логотип (white-label) ---- */
+/* Чужая картинка приходит любой: от узкой полоски до квадрата, с фоном и без.
+   Высоту задаём жёстко, ширину ограничиваем — тогда шапка не «прыгает» от
+   того, какой файл залили; contain не даёт растянуть непропорционально. */
+.brand-custom {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-width: 0;
+}
+/* Высоту держит КОНТЕЙНЕР, картинка вписывается внутрь. Иначе плашка со своим
+   padding делала шапку выше, чем без неё, и высота хедера зависела от того,
+   какой файл залил админ (замерено: 57 / 67 / 72 px на трёх логотипах). */
+.brand-custom.brand-header {
+  height: 44px;
+}
+.brand-custom.brand-login {
+  height: 88px;
+}
+.brand-custom img {
+  display: block;
+  object-fit: contain;
+  max-width: 220px;
+  max-height: 100%;
+  width: auto;
+}
+.brand-custom.brand-login img {
+  max-width: 260px;
+}
+/* Подложка. Ради неё всё и затевалось: логотип со своим (обычно белым) фоном
+   на тёмной теме выглядит вырезанным куском, а тёмный логотип на прозрачном
+   фоне там же почти не виден. Светлая карточка со скруглением решает оба
+   случая и читается как часть интерфейса, а не как случайная картинка. */
+.brand-plate {
+  background: #fff;
+  padding: 0.3rem 0.6rem;
+  border-radius: 10px;
+  box-shadow: 0 1px 3px rgb(0 0 0 / 25%);
+}
+.brand-plate.brand-login {
+  padding: 0.5rem 0.9rem;
+  border-radius: 14px;
+}
+/* На светлой теме белая плашка сливалась бы с фоном — обозначаем её рамкой. */
+:root[data-theme='light'] .brand-plate {
+  box-shadow: none;
+  border: 1px solid var(--border);
+}
+.brand-title {
+  font-weight: 600;
+  font-size: 1.05rem;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* превью в настройках: сразу на обеих темах — иначе «на белом было нормально» */
+.brand-preview-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.6rem;
+  margin: 0.7rem 0 0.4rem;
+}
+.brand-preview {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 0.6rem;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.4rem;
+  min-height: 5rem;
+  justify-content: center;
+}
+.brand-preview-dark {
+  background: #0f1720;
+}
+.brand-preview-light {
+  background: #f4f6f8;
+}
+.brand-preview-lbl {
+  align-self: flex-start;
+}
+.brand-preview-dark .brand-preview-lbl {
+  color: #93a3b3;
+}
+.brand-preview-light .brand-preview-lbl {
+  color: #64748b;
+}
+.brand-file,
+.brand-row {
+  flex-direction: column;
+  gap: 0.3rem;
+  margin-top: 0.7rem;
+}
+.brand-row select,
+.brand-row input {
+  padding: 0.35rem 0.55rem;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: var(--bg-input, var(--bg-card));
+  color: var(--text);
+}
+.brand-note {
+  margin-top: 0.9rem;
+  padding-top: 0.7rem;
+  border-top: 1px solid var(--border);
+}
+
+/* ---- «О панели» ---- */
+.about-head {
+  display: flex;
+  align-items: center;
+  gap: 0.9rem;
+  margin: 0.9rem 0 0.8rem;
+}
+.about-name {
+  font-size: 1.35rem;
+  font-weight: 700;
+  line-height: 1.1;
+}
+.about-lead {
+  margin: 0 0 0.9rem;
+  color: var(--text);
+}
+/* Ссылок в панели почти нет — всё кнопками, поэтому глобального стиля для <a>
+   не было, и эти три светили браузерным синим с фиолетовым :visited. Оформляем
+   их как обычные кнопки интерфейса: снаружи ведут наружу, внутри — свои. */
+.about-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+.about-links a,
+.about-links a:visited {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.38rem 0.75rem;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: var(--bg-card);
+  color: var(--text);
+  font-size: 0.85rem;
+  text-decoration: none;
+  white-space: nowrap;
+}
+/* стрелка «наружу»: сразу понятно, что уйдёшь из панели */
+.about-links a::after {
+  content: '↗';
+  font-size: 0.78em;
+  opacity: 0.55;
+}
+.about-links a:hover {
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--border-strong));
+  background: color-mix(in srgb, var(--accent) 12%, var(--bg-card));
+}
+/* переключатель настройки логотипа — тоже кнопка, а не голубая ссылка */
+.about-brand-toggle {
+  padding: 0.38rem 0.75rem;
+  font-size: 0.85rem;
+}
+/* настройка логотипа живёт здесь же, но свёрнутой: её трогают один раз */
+.about-branding {
+  margin-top: 1rem;
+  padding-top: 0.9rem;
+  border-top: 1px solid var(--border);
+}
+
+/* ---- личные алерты в Telegram ---- */
+.tg-state {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 0.7rem 0;
+  font-size: 0.9rem;
+}
+.tg-row {
+  flex-direction: row;
+  align-items: center;
+  gap: 0.4rem;
+  margin-bottom: 0.6rem;
+  color: var(--text);
+  cursor: pointer;
+}
+.tg-steps {
+  margin: 0.6rem 0;
+}
+.tg-step {
+  font-size: 0.85rem;
+  margin-bottom: 0.35rem;
+}
+.tg-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-top: 0.8rem;
+}
+.tg-manual {
+  margin-top: 0.8rem;
+  padding-top: 0.8rem;
+  border-top: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+.tg-ok {
+  color: var(--up);
+  font-size: 0.85rem;
+}
+
+/* ссылка-переключатель внутри строки со счётчиками */
+.linklike {
+  border: none;
+  background: none;
+  padding: 0;
+  font: inherit;
+  color: var(--accent);
+  cursor: pointer;
+  text-decoration: underline dotted;
+}
+button.adopt-mark {
+  cursor: pointer;
+}
+.adopt-foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.7rem;
+  margin-top: 0.7rem;
+}
+.adopt-grp {
+  display: inline-flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+.adopt-grp input {
+  width: 11rem;
+  padding: 0.3rem 0.55rem;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: var(--bg-input, var(--bg-card));
+  color: var(--text);
+}
+.adopt-foot .primary {
+  margin-left: auto;
+}
+.adopt-done {
+  color: var(--up);
+  margin-top: 0.4rem;
+}
+.adopt-hint {
+  margin-top: 0.5rem;
+}
+.svc-sites-list.open .svc-site-row + .svc-site-row {
+  border-top: 1px solid color-mix(in srgb, var(--border) 55%, transparent);
+}
+.svc-site-more {
+  padding-top: 0.15rem;
+}
+
+/* «дамп включён» — зелёная строка состояния под карточкой сервиса */
+.svc-dump-on {
+  margin-top: 0.35rem;
+  padding-top: 0.3rem;
+  border-top: 1px dashed var(--border);
+  color: var(--up);
+  line-height: 1.4;
+}
+/* «выключить» — рядом со статусом включённого дампа, чуть приглушённая */
+.svc-act-off {
+  margin-left: 0.6rem;
+  padding: 0.05rem 0.45rem;
+  font-size: 0.72rem;
+}
+
+/* группы в «Требует действий»: серверное сверху, бэкапное ниже */
+.home-attention-grp + .home-attention-grp {
+  margin-top: 0.5rem;
+  padding-top: 0.4rem;
+  border-top: 1px dashed var(--border);
+}
+.home-attention-grp-head {
+  padding: 0.1rem 0.3rem 0.25rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-size: 0.72rem;
+}
+
+/* пояснение под галкой «дампы вне панели» — с отступом под чекбокс */
+.coverage-hint {
+  margin: 0.15rem 0 0 1.5rem;
+  line-height: 1.4;
+}
+
+/* блок «снял лок — проверить»: кнопка и подсказка в одну строку, как в других советах */
+.repo-unlock-after {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 8px;
+}
+
+/* точечное приглушение находки покрытия: кнопка неяркая, чтобы не спорить с действием
+   «включить дампы» — это вторичный жест, а не основной */
+.coverage-mute {
+  margin-left: auto;
+  opacity: 0.45;
+  flex: none;
+}
+.coverage-mute:hover { opacity: 1; }
+.coverage-item { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.coverage-muted { margin-top: 6px; opacity: 0.75; }
+
+/* массовая зачистка: условие отбора в строку, поле дней узкое */
+.bulk-cleanup { margin-top: 10px; }
+.bulk-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 8px; }
+.bulk-days { width: 90px; }
+
+/* постоянный мьют отличаем от временного снуза: он не истечёт сам */
+.snooze-perm { border-color: var(--warn, #b98900); }
+.srv-fire.clickable { cursor: pointer; }
+.srv-fire.clickable:hover { filter: brightness(1.3); }
+
+/* блок «обновить сразу на N нодах» под списком действий */
+.ansible-hint { margin: 8px 0 4px 26px; }
+
+/* форма настроек дампа: строки «подпись — поле», компактно */
+/* форма настроек дампа: чуть утопленный фон, чтобы отделяться от карточки, и строки
+   «подпись | контрол» сеткой. display:grid на .dump-cfg-row перебивает глобальный
+   label{flex-direction:column} (класс важнее типа) — иначе подписи вставали над полями. */
+.dump-config {
+  margin-top: 10px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--hover);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+/* сейф доступов: визуально отдельный блок — это не сводка, а хранилище ключей */
+.vault-box {
+  margin: 1.25rem 0 0;
+  padding: 0.8rem 1rem;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--bg-card);
+}
+.vault-hint {
+  margin-bottom: 0.6rem;
+  max-width: 60rem;
+}
+.vault-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  margin: 0.5rem 0;
+}
+.vault-item {
+  padding: 0.45rem 0;
+  border-top: 1px solid color-mix(in srgb, var(--border) 55%, transparent);
+}
+.vault-item-head {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+}
+.vault-cmds {
+  margin: 0.4rem 0;
+  padding: 0.6rem 0.75rem;
+  border-radius: 8px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  font-size: 0.8rem;
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 22rem;
+  overflow-y: auto;
+}
+/* каталог дампов: полный путь целиком, поэтому поле шире соседних числовых */
+.dump-cfg-dir {
+  min-width: 18rem;
+}
+.dump-cfg-title {
+  font-weight: 600;
+  font-size: 0.9rem;
+  margin-bottom: 2px;
+}
+.dump-cfg-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: center;
+  gap: 12px;
+}
+.dump-cfg-row > span { color: var(--muted); }
+.dump-cfg-row .field-inp { width: 100%; }
+.dump-cfg-row .dump-cfg-num { width: 84px; text-align: center; }
+/* пояснение под строкой — во всю ширину, приглушённо */
+.dump-cfg-hint { color: var(--muted); font-size: 0.82rem; line-height: 1.35; }
+.dump-cfg-hint.warn { color: var(--degraded); }
+.dump-config .dump-cfg-apply {
+  align-self: flex-end;
+  padding: 0.45rem 1.1rem;
+  font-weight: 600;
+}
+
+/* кнопка-ссылка: выглядит как ссылка, ведёт себя как кнопка (без перехода) */
+.linklike {
+  background: none;
+  border: none;
+  padding: 0;
+  color: var(--accent);
+  cursor: pointer;
+  font: inherit;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.linklike:hover { filter: brightness(1.2); }
+
+/* мягкое уведомление о выходе бэкапа за окно — приглушённое, не тревожное */
+.home-notice { margin: 12px 0; padding: 10px 14px; border: 1px solid var(--border); border-radius: 10px; background: var(--hover); }
+.home-notice-head { margin-bottom: 6px; }
+.home-notice-row { display: flex; align-items: center; gap: 8px; width: 100%; background: none; border: none; padding: 6px 4px; cursor: pointer; color: var(--text); text-align: left; border-radius: 6px; }
+.home-notice-row:hover { background: var(--hover); }
+.backup-window-note { color: var(--degraded); font-size: 0.85rem; margin: 4px 0; }
+.backup-anytime-row { margin-top: 6px; }
+
+/* быстрый мут на строке предупреждения главной: неяркая иконка справа */
+.quick-mute { margin-left: auto; cursor: pointer; opacity: 0.5; padding: 0 4px; }
+.quick-mute:hover { opacity: 1; }
+
+/* строка restic с кнопкой обновления */
+.restic-row { display: inline-flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+/* кнопка обновления restic — заметная (акцент), а не сливающаяся серая */
+.restic-update-btn {
+  background: var(--accent);
+  color: #fff;
+  border: none;
+  border-radius: 7px;
+  padding: 5px 12px;
+  font-weight: 600;
+  font-size: 0.85rem;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.restic-update-btn:hover:not(:disabled) { filter: brightness(1.1); }
+.restic-update-btn:disabled { opacity: 0.6; cursor: default; }
+
+/* Цена включения дампа (Neo4j: база гасится на время снятия). Не «ошибка», но и не
+   проходной текст — жёлтая рамка, как у остальных предупреждений покрытия. */
+.coverage-downtime {
+  margin-top: 6px;
+  padding: 6px 9px;
+  border-left: 3px solid var(--warn, #d29922);
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--warn, #d29922) 10%, transparent);
+  color: var(--text);
+}
+
+/* Флаг страны сервера — SVG-картинка (эмодзи-флаг Windows рисует как две буквы).
+   Высота привязана к строке, рамка отделяет светлые флаги от светлого фона. */
+.country-flag {
+  height: 0.95em;
+  width: auto;
+  flex-shrink: 0;
+  border-radius: 2px;
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--text) 18%, transparent);
+  vertical-align: -0.08em;
+  cursor: default;
+}
+/* запасной вариант, если такого файла нет: код страны текстом */
+.country-flag-txt {
+  height: auto;
+  box-shadow: none;
+  font-size: 0.72em;
+  font-weight: 600;
+  opacity: 0.75;
+  letter-spacing: 0.03em;
+}
+
+/* Проблемный контейнер в модалке Докера: заливка + жирная полоса слева. Красим строку
+   целиком, а не только текст статуса — крашащийся контейнер обычно running, поэтому в
+   общем зелёном списке он ничем не выделялся. */
+.docker-row-loop,
+.docker-row-down {
+  border-left-width: 3px;
+  border-left-style: solid;
+}
+.docker-row-loop {
+  border-left-color: var(--warn, #d29922);
+  background: color-mix(in srgb, var(--warn, #d29922) 10%, transparent);
+}
+.docker-row-down {
+  border-left-color: var(--down, #f85149);
+  background: color-mix(in srgb, var(--down, #f85149) 12%, transparent);
+}
+.docker-prob-ico {
+  margin-right: 4px;
+  cursor: help;
+}
+
+/* Заполнение тома с репозиториями — над чипами бэкап-сервера: кончившееся место
+   останавливает бэкапы всего парка, поэтому смотреть на это надо первым делом. */
+.bs-storage {
+  margin: 10px 0 2px;
+}
+.bs-storage-top {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 4px;
+  flex-wrap: wrap;
+}
+
+/* «без алерта» у инцидента: приглушённая метка — это не ошибка, а следствие порога */
+.inc-noalert {
+  opacity: 0.75;
+  cursor: help;
+  white-space: nowrap;
+}
+
+/* График, который раскрывается по клику: курсор-лупа. На графиках с выделением
+   диапазона протяжка остаётся выделением — кликом её не подменяем. */
+.sac-expandable {
+  cursor: zoom-in;
+}
+
+/* Настройка алерта по очередям: порог общий для ноды, у отдельной очереди — своя кнопка */
+.queue-alert-cfg {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin: 8px 0 2px;
+}
+.queue-thr-input {
+  width: 92px;
+  padding: 4px 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  background: var(--bg-card);
+  color: var(--text);
+}
+.queue-alert-btn {
+  margin-left: 8px;
+  min-width: 62px;
+  text-align: center;
+}
+.queue-alert-on {
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--border-strong));
+  background: color-mix(in srgb, var(--accent) 12%, var(--bg-card));
+}
+
+/* Порог отдельной очереди — редактируемое число прямо в строке. Пусто = как у ноды. */
+.queue-thr-cell {
+  width: 92px;
+  margin-left: 8px;
+  padding: 4px 6px;
+  text-align: right;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  background: var(--bg-card);
+  color: var(--text);
+}
+
+/* Массовое применение настроек: полей много, подписи длинные («Алерт «медленно»
+   после N подряд»). В общей ширине модалки 440px они ломались на три строки, а поле
+   ввода уезжало под них. Даём вдвое больше и запрещаем перенос внутри строки —
+   правило .bulk-row ниже по файлу (для зачистки бэкапов) включает wrap и иначе
+   перебивало бы это. */
+.bulk-modal {
+  width: 880px;
+}
+.bulk-modal .bulk-row {
+  flex-wrap: nowrap;
+  margin-bottom: 0;
+  gap: 0.75rem;
+}
+.bulk-modal .bulk-check {
+  flex: 1;
+  min-width: 0;
+}
+.bulk-modal .bulk-row input,
+.bulk-modal .bulk-row select {
+  width: 12rem;
+  flex-shrink: 0;
+}
+
+/* Две полосы прокрутки справа при открытой модалке: одна у страницы под ней, вторая
+   у самой модалки (.modal-backdrop скроллится). Пока модалка открыта, фон не
+   скроллим — остаётся ровно одна полоса, и колесо мыши не уводит страницу под
+   модалкой. :has() ловит ЛЮБУЮ модалку: все они рендерятся порталом в body, и
+   вешать хук на каждую точку открытия не нужно.
+   scrollbar-gutter резервирует место под полосу заранее — иначе в момент открытия
+   контент дёргается на её ширину. */
+html {
+  scrollbar-gutter: stable;
+}
+body:has(.modal-backdrop) {
+  overflow: hidden;
+}
+
+/* Выдача доступа учётке: разделы и группы галочками, редактор под строкой */
+.acl-pick {
+  margin: 0.5rem 0;
+}
+.acl-pick-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+.acl-pick-items {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+}
+.acl-item {
+  margin: 0;
+}
+.acl-editor {
+  width: 100%;
+  margin-top: 8px;
+  padding: 10px 12px;
+  border-left: 3px solid var(--accent);
+  border-radius: 6px;
+  background: var(--bg);
+}
+.role-chip.role-editor {
+  opacity: 0.9;
+}
+
+/* ---------- модалка учёток: опрятная выдача доступа ---------- */
+.users-modal {
+  width: min(700px, calc(100vw - 2rem));
+}
+/* строка учётки: имя с ролью сверху, область — отдельной строкой. Раньше область
+   стояла в один ряд с кнопками и переносилась посреди фразы. */
+.user-row {
+  align-items: flex-start;
+  flex-wrap: wrap;
+  padding: 0.6rem 0.75rem;
+}
+.user-main {
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.25rem;
+  flex: 1;
+}
+.user-title {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  flex-wrap: wrap;
+}
+.user-scope {
+  line-height: 1.35;
+}
+.role-editor {
+  color: #86d7a6;
+  background: rgba(46, 160, 92, 0.16);
+}
+
+/* выбор разделов и групп — чипами: плотнее и нагляднее системных галочек */
+.acl-pick-items {
+  gap: 6px;
+  padding: 8px;
+}
+.acl-chip {
+  padding: 0.24rem 0.7rem;
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  background: var(--bg-card);
+  color: var(--text-muted);
+  font-size: 0.82rem;
+  cursor: pointer;
+  transition: background 0.12s, border-color 0.12s, color 0.12s;
+}
+.acl-chip:hover {
+  border-color: var(--accent);
+  color: var(--text);
+}
+.acl-chip-on {
+  border-color: color-mix(in srgb, var(--accent) 65%, var(--border-strong));
+  background: color-mix(in srgb, var(--accent) 16%, var(--bg-card));
+  color: var(--text);
+  font-weight: 600;
+}
+.acl-pick-head {
+  font-weight: 600;
+}
+/* редактор доступа под строкой — карточкой на всю ширину */
+.acl-editor {
+  flex-basis: 100%;
+}
