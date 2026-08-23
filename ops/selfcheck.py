@@ -215,6 +215,11 @@ def check_compose_overlays() -> None:
                 inside = True
                 continue
             if inside:
+                # комментарий и пустая строка блок НЕ закрывают: в YAML они
+                # прозрачны, и дописанный после комментария сервис Compose
+                # прекрасно видит — а наивный парсер его пропускал
+                if not line.strip() or line.lstrip().startswith("#"):
+                    continue
                 if re.match(r"^\S", line):          # вышли из блока services
                     inside = False
                 elif (m := re.match(r"^  ([a-z0-9_-]+):\s*$", line)):
