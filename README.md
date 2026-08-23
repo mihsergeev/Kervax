@@ -1,16 +1,17 @@
 # Kervax
 
-Enterprise-grade monitoring that works out of the box — open source, self-hosted,
-no exporters to wire up and no dashboards to assemble.
+Enterprise-grade monitoring that works out of the box: sites, servers,
+containers, databases and backups in one panel. A single command brings it all
+up, the agent discovers what runs on each machine, dashboards open already filled
+in, and alerts land where people actually read them.
 
-One panel for the whole picture: the sites your users see and the servers behind
-them. Kervax checks sites from the outside — status, keyword, response time, TLS
-and domain expiry, from your panel and from other regions — and watches the
-machines from the inside through a small agent that connects **out** to the
-panel. Nothing reaches into your servers, and the panel stores only a hash of
-each agent token.
+Kervax looks at your infrastructure from both sides at once. From the outside, as
+a user does: status, keyword, response time, certificate and domain expiry — and
+from other regions too. From the inside, through a small agent that connects
+**out** to the panel: the node's ports stay closed, and the panel keeps nothing
+but a hash of each agent token.
 
-[Русская версия](README.ru.md) · [Install guide](docs/install.md) · [Why another monitoring panel](docs/why.md) · [Changelog](CHANGELOG.md)
+[Русская версия](README.ru.md) · [kervax.ru](https://kervax.ru) · [Install guide](docs/install.md) · [Why another monitoring panel](docs/why.md) · [Changelog](CHANGELOG.md)
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/mihsergeev/Kervax/main/ops/quickstart.sh | sudo sh
