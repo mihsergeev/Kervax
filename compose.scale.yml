@@ -1,0 +1,60 @@
+# Optional overlay for scaling ingest to many servers. Runs the API/ingest as
+# several uvicorn workers and moves the background scheduler into its OWN single
+# process (so it isn't started once per worker).
+#
+#   docker compose -f compose.yml -f compose.scale.yml up -d --build
+#
+# Tune worker count with KERVAX_WEB_WORKERS in .env (each worker holds its own DB
+# pool of up to ~15 connections, so keep workers × 15 well under Postgres
+# max_connections=100 → ~4-6 workers on the default DB).
+services:
+  backend:
+    # несколько воркеров + планировщик ВЫКЛЮЧЕН в веб-процессе (его крутит scheduler)
+    command:
+      - sh
+      - -c
+      - alembic upgrade head && exec uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers ${KERVAX_WEB_WORKERS:-3}
+    environment:
+      KERVAX_RUN_SCHEDULER: "0"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health')\""]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  # Одиночный процесс планировщика: сбор мониторов, серверные/локационные алерты,
+  # прунинг, авто-бэкап. РОВНО один экземпляр (не масштабировать).
+  scheduler:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+      args:
+        AGENT_PUBKEY: ${KERVAX_AGENT_PUBKEY:-}
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    command: ["python", "-m", "app.scheduler_run"]
+    environment:
+      KERVAX_RUN_SCHEDULER: "1"
+      KERVAX_DB_URL: postgresql+asyncpg://${KERVAX_DB_USER:-kervax}:${KERVAX_DB_PASSWORD}@db:5432/${KERVAX_DB_NAME:-kervax}
+      KERVAX_JWT_SECRET: ${KERVAX_JWT_SECRET}
+      KERVAX_ADMIN_USER: ${KERVAX_ADMIN_USER}
+      KERVAX_ADMIN_PASSWORD: ${KERVAX_ADMIN_PASSWORD}
+      KERVAX_ADMIN_PASSWORD_RESET: ${KERVAX_ADMIN_PASSWORD_RESET:-0}
+      KERVAX_DATA_DIR: /data
+      KERVAX_PANEL_IP: ${KERVAX_PANEL_IP:-}
+      KERVAX_PANEL_URL: ${KERVAX_PANEL_URL:-}
+      KERVAX_DEFAULT_SSH_USER: ${KERVAX_DEFAULT_SSH_USER:-kervax}
+      KERVAX_SCHEDULER_TICK: ${KERVAX_SCHEDULER_TICK:-30}
+      KERVAX_DISK_ALERT_PERCENT: ${KERVAX_DISK_ALERT_PERCENT:-90}
+      KERVAX_BACKUP_INTERVAL_HOURS: ${KERVAX_BACKUP_INTERVAL_HOURS:-24}
+      KERVAX_BACKUP_KEEP: ${KERVAX_BACKUP_KEEP:-14}
+    volumes:
+      - ./data:/data
+    depends_on:
+      db:
+        condition: service_healthy
+      backend:                 # веб прогоняет миграции и становится healthy — тогда стартуем
+        condition: service_healthy
+    networks:
+      - internal
