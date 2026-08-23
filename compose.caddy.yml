@@ -1,0 +1,39 @@
+# Optional override for deployments that use caddy-docker-proxy for edge TLS
+# + IP allow-list. Requires an external Docker network named "caddy" created by
+# a running caddy-docker-proxy instance.
+#
+#   docker compose -f compose.yml -f compose.caddy.yml up -d --build
+#
+# or set COMPOSE_FILE=compose.yml:compose.caddy.yml in your .env.
+#
+# Set KERVAX_DOMAIN and KERVAX_ALLOW_IPS in .env. To disable the IP allow-list,
+# remove the @denied / abort labels below.
+services:
+  frontend:
+    # caddy proxies via the internal network — no host port needed, so drop
+    # the base compose's published port (avoids a host port conflict).
+    ports: !reset []
+    networks:
+      - internal
+      - caddy
+    labels:
+      caddy: ${KERVAX_DOMAIN}
+      # Two mutually-exclusive handle blocks (works the same on caddy-docker-proxy
+      # 2.8 and 2.12, unlike suffixed not_N matchers):
+      #  1) /api/agent/* is open to ANY IP — agents push metrics from monitored
+      #     nodes whose addresses aren't in the admin allow-list; those endpoints
+      #     authenticate with per-server tokens anyway.
+      #  2) everything else is denied unless the client IP is in KERVAX_ALLOW_IPS.
+      #     Left empty → "not in all IPs" denies no one = open (fail-open).
+      caddy.handle_0: /api/agent/*
+      caddy.handle_0.reverse_proxy: "{{upstreams 8080}}"
+      caddy.handle_1.@denied.not.remote_ip: ${KERVAX_ALLOW_IPS:-0.0.0.0/0 ::/0}
+      caddy.handle_1.abort: "@denied"
+      caddy.handle_1.reverse_proxy: "{{upstreams 8080}}"
+
+networks:
+  caddy:
+    external: true
+    # Name of the existing network your caddy-docker-proxy watches.
+    # Override in .env if it isn't literally "caddy" (e.g. KERVAX_CADDY_NETWORK=web).
+    name: ${KERVAX_CADDY_NETWORK:-caddy}

@@ -1,0 +1,285 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Kervax — мониторинг сайтов и серверов, который работает из коробки</title>
+<meta name="description" content="Self-hosted панель мониторинга корпоративного уровня: сайты, серверы, контейнеры, базы и бэкапы в одном месте. Одна команда — и панель работает с готовыми дашбордами и алертами. Open source, AGPL-3.0.">
+<meta property="og:title" content="Kervax — мониторинг сайтов и серверов из коробки">
+<meta property="og:description" content="Сайты, серверы, Docker, Kubernetes, базы и бэкапы в одной панели. Одна команда на установку, одна на каждую ноду. Open source, self-hosted.">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://kervax.ru/">
+<meta property="og:image" content="https://kervax.ru/shots/ru/home.webp">
+<meta name="theme-color" content="#0F1117">
+<link rel="icon" type="image/svg+xml" href="/mark.svg">
+<link rel="stylesheet" href="/style.css?v=1">
+</head>
+<body>
+
+<div class="top">
+  <div class="wrap">
+    <a class="brand" href="/"><img src="/mark.svg" alt="">Kervax</a>
+    <nav>
+      <a class="hide-sm" href="#features">Возможности</a>
+      <a class="hide-sm" href="#box">Из коробки</a>
+      <a class="hide-sm" href="#ui">Интерфейс</a>
+      <a class="hide-sm" href="#security">Безопасность</a>
+      <a href="#install">Установка</a>
+      <span class="sep hide-sm"></span>
+      <a href="https://github.com/mihsergeev/Kervax">GitHub</a>
+      <a class="lang" href="/en/">EN</a>
+    </nav>
+  </div>
+</div>
+
+<div class="hero">
+  <div class="wrap hero-inner">
+    <img class="hero-logo" src="/logo.svg" alt="Kervax">
+    <p class="eyebrow">Open source · AGPL-3.0 · self-hosted</p>
+    <h1>Мониторинг корпоративного уровня — из коробки</h1>
+    <p class="lead">
+      Сайты, серверы, контейнеры, базы и бэкапы — в одной панели.
+      Одна команда поднимает всё: агент сам находит, что работает на машине,
+      дашборды открываются заполненными, а алерты приходят туда, где их читают.
+    </p>
+    <div class="cta">
+      <a class="btn" href="#install">Установить за минуту</a>
+      <a class="btn btn-ghost" href="https://github.com/mihsergeev/Kervax">Смотреть на GitHub</a>
+    </div>
+    <div class="chips">
+      <span class="chip">Docker Compose</span>
+      <span class="chip">хватает 2 ГБ памяти</span>
+      <span class="chip">агент для Linux</span>
+      <span class="chip">Telegram и webhook</span>
+      <span class="chip">RU / EN</span>
+    </div>
+  </div>
+
+  <div class="wrap hero-shot">
+    <a class="frame" href="/shots/ru/home@2x.webp" data-lb>
+      <div class="frame-bar"><i></i><i></i><i></i><span>kervax.example.com</span><em>увеличить</em></div>
+      <img src="/shots/ru/home.webp" alt="Главный экран панели Kervax" width="1440" height="1031" loading="eager"></a>
+  </div>
+</div>
+
+<section id="features">
+  <div class="wrap">
+    <p class="eyebrow-s">Возможности</p>
+    <h2>Вся инфраструктура на одном экране</h2>
+    <p class="sub">
+      То, что обычно живёт в трёх разных системах, здесь собрано в одну и связано
+      между собой: монитор, который ушёл в красное, и машина за ним — в двух кликах
+      друг от друга и на одной шкале времени.
+    </p>
+
+    <div class="cards">
+      <div class="card">
+        <h3>Сайты — глазами пользователя</h3>
+        <p>Статус, ключевое слово, время ответа, сроки сертификата и регистрации
+        домена. Проверка идёт ещё и из других регионов, поэтому панель сразу
+        скажет, если сайт открывается у вас, но лежит для половины мира.</p>
+      </div>
+      <div class="card">
+        <h3>Серверы — изнутри</h3>
+        <p>Один статический бинарь отдаёт CPU по ядрам, память, диски по разделам,
+        сеть, температуру, троттлинг, OOM и топы процессов. Соединение всегда
+        исходящее — порты ноды остаются закрытыми.</p>
+      </div>
+      <div class="card">
+        <h3>Всё, что крутится на машине</h3>
+        <p>Контейнеры Docker и поды Kubernetes, веб-серверы вместе с их доменами,
+        СУБД с размерами баз, очереди RabbitMQ. Панель находит это сама и
+        предлагает поставить найденные домены под мониторинг в два клика.</p>
+      </div>
+      <div class="card">
+        <h3>Бэкапы под присмотром</h3>
+        <p>Состояние restic по каждой ноде, репозитории на вашем сервере,
+        попадание в ночное окно — и сейф доступов для восстановления, который
+        шифруется прямо в браузере.</p>
+      </div>
+      <div class="card">
+        <h3>Алерты, которые читают</h3>
+        <p>Telegram и webhook, свой текст на каждый тип, пороги, которые должны
+        продержаться, снуз и точечное приглушение. Адресация идёт по ролям —
+        человеку приходит то, за что он отвечает.</p>
+      </div>
+      <div class="card">
+        <h3>Панель следит и за собой</h3>
+        <p>Устаревший агент, отвалившаяся точка проверки, разъехавшиеся часы,
+        бэкап позже своего окна — всё попадает в «Требует действий» вместе с
+        готовой командой, которая это чинит.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="box">
+  <div class="wrap">
+    <p class="eyebrow-s">Из коробки</p>
+    <h2>Работает сразу — там, где обычно начинается проект по настройке</h2>
+    <p class="sub">
+      Классический стек мониторинга собирают: экспортер на каждую задачу,
+      scrape-конфиг, правила, маршруты алертов и по дашборду на каждую вещь,
+      которую хочется видеть. Kervax приносит те же результаты уже соединёнными.
+    </p>
+
+    <table class="cmp">
+      <thead>
+        <tr><th>Задача</th><th>Kervax</th><th>Классический стек</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Метрики нового сервера</td>
+            <td class="yes"><b>одна команда на ноде</b>, данные через секунды</td>
+            <td class="old">node_exporter, цель в scrape-конфиге, перечитать конфиг, импортировать дашборд</td></tr>
+        <tr><td>Проверка сайта снаружи</td>
+            <td class="yes"><b>ввести адрес</b> — схема, сертификат и домен подхватятся сами</td>
+            <td class="old">blackbox_exporter, job с relabeling, правило, отдельная панель</td></tr>
+        <tr><td>Срок сертификата и домена</td>
+            <td class="yes"><b>считается сам</b>, напоминания за 14 / 7 / 1 день</td>
+            <td class="old">проба, PromQL-правило; для домена — свой экспортер</td></tr>
+        <tr><td>Аптайм за 30 дней</td>
+            <td class="yes"><b>цифра на карточке</b> монитора</td>
+            <td class="old">recording rule и запрос на PromQL</td></tr>
+        <tr><td>Инциденты</td>
+            <td class="yes"><b>открываются и закрываются сами</b>, с историей</td>
+            <td class="old">маршруты, группировка, подавления и silence в конфигах</td></tr>
+        <tr><td>Контейнеры, поды, СУБД, очереди</td>
+            <td class="yes"><b>агент находит сам</b></td>
+            <td class="old">cAdvisor, kube-state-metrics, postgres_exporter, rabbitmq_exporter…</td></tr>
+        <tr><td>Состояние бэкапов</td>
+            <td class="yes"><b>статус restic</b> по каждой ноде, прямо в панели</td>
+            <td class="old">решается отдельно</td></tr>
+        <tr><td>Кто что видит</td>
+            <td class="yes"><b>роли и группы</b>, проверяются в API</td>
+            <td class="old">организации в Grafana плюс отдельный доступ к хранилищу</td></tr>
+        <tr><td>Дашборды</td>
+            <td class="yes"><b>заполнены при первом входе</b></td>
+            <td class="old">собрать или импортировать</td></tr>
+      </tbody>
+    </table>
+
+    <p class="note">
+      Prometheus остаётся сильнейшим инструментом для прикладных метрик и
+      произвольных запросов на PromQL — и прекрасно живёт рядом. Kervax закрывает
+      инфраструктуру: хост, сайт, сертификат, контейнер, бэкап.
+    </p>
+  </div>
+</section>
+
+<section id="ui">
+  <div class="wrap">
+    <p class="eyebrow-s">Интерфейс</p>
+    <h2>Как это выглядит</h2>
+    <p class="sub">
+      Скриншоты сняты с работающей панели на демонстрационных данных — тот же
+      интерфейс, который вы получите после установки.
+    </p>
+
+    <div class="gallery">
+      <figure>
+        <a class="frame" href="/shots/ru/servers@2x.webp" data-lb>
+          <div class="frame-bar"><i></i><i></i><i></i><span>/servers</span><em>увеличить</em></div>
+          <img src="/shots/ru/servers.webp" alt="Парк серверов" width="1440" height="940" loading="lazy"></a>
+        <figcaption>Весь парк сразу: загрузка, диски, группы, состояние агента.</figcaption>
+      </figure>
+      <figure>
+        <a class="frame" href="/shots/ru/server-detail@2x.webp" data-lb>
+          <div class="frame-bar"><i></i><i></i><i></i><span>/servers/web-01</span><em>увеличить</em></div>
+          <img src="/shots/ru/server-detail.webp" alt="Метрики сервера" width="1440" height="830" loading="lazy"></a>
+        <figcaption>Детали ноды: CPU по ядрам, память, диски, сеть, температура.</figcaption>
+      </figure>
+      <figure>
+        <a class="frame" href="/shots/ru/sites@2x.webp" data-lb>
+          <div class="frame-bar"><i></i><i></i><i></i><span>/sites</span><em>увеличить</em></div>
+          <img src="/shots/ru/sites.webp" alt="Мониторы сайтов" width="1440" height="1180" loading="lazy"></a>
+        <figcaption>Сайты: аптайм, сертификаты, домены и частичная доступность.</figcaption>
+      </figure>
+      <figure>
+        <a class="frame" href="/shots/ru/backups@2x.webp" data-lb>
+          <div class="frame-bar"><i></i><i></i><i></i><span>/backups</span><em>увеличить</em></div>
+          <img src="/shots/ru/backups.webp" alt="Бэкапы" width="1440" height="1000" loading="lazy"></a>
+        <figcaption>Бэкапы: свежесть, репозитории, расписание, сейф доступов.</figcaption>
+      </figure>
+    </div>
+  </div>
+</section>
+
+<section id="install">
+  <div class="wrap">
+    <p class="eyebrow-s">Установка</p>
+    <h2>Одна команда — и панель готова</h2>
+    <p class="sub">
+      Выполните на чистом сервере с Linux. Команда поставит Docker, поднимет Caddy
+      с сертификатом Let's Encrypt, придумает секреты и напечатает адрес панели
+      вместе с паролем администратора.
+    </p>
+
+    <div class="cmd">
+      <button class="copy" data-copy>копировать</button>
+      <span class="p">$</span> curl -fsSL https://raw.githubusercontent.com/mihsergeev/Kervax/main/ops/quickstart.sh | sudo sh
+    </div>
+
+    <div class="steps">
+      <div class="step">
+        <b>Свой домен по желанию</b>
+        <p>Без домена панель поднимется на <code>&lt;IP-сервера&gt;.sslip.io</code> —
+        с настоящим сертификатом и сразу по https.</p>
+      </div>
+      <div class="step">
+        <b>Сервер под наблюдение</b>
+        <p>Кнопка «Добавить сервер» показывает готовую команду. Выполните её на
+        ноде — машина появится со всеми метриками через секунды.</p>
+      </div>
+      <div class="step">
+        <b>Сайт под наблюдение</b>
+        <p>Достаточно ввести адрес. Схема, сертификат, домен и история подхватятся
+        автоматически с первой же проверки.</p>
+      </div>
+    </div>
+
+    <p class="note">
+      Нужен свой домен, вайтлист по IP, работа за существующим nginx или установка
+      по шагам? Всё это в
+      <a href="https://github.com/mihsergeev/Kervax/blob/main/docs/install.ru.md">подробной инструкции</a>.
+    </p>
+  </div>
+</section>
+
+<section id="security">
+  <div class="wrap">
+    <p class="eyebrow-s">Безопасность</p>
+    <h2>Устроено так, чтобы доверять ему инфраструктуру</h2>
+
+    <ul class="sec-list">
+      <li><b>Агент ходит только наружу.</b> Он не слушает портов и не выполняет
+      команд оболочки, а панель хранит от его токена лишь SHA-256.</li>
+      <li><b>Роли проверяются в API.</b> Аккаунт, ограниченный группой, видит
+      только свои объекты — даже при прямом обращении по идентификатору.</li>
+      <li><b>Всё работает без root.</b> Бэкенд под отдельным пользователем,
+      фронтенд на непривилегированном образе, у контейнеров
+      <code>no-new-privileges</code>.</li>
+      <li><b>Вход под защитой.</b> JWT и второй фактор TOTP, лимит попыток, журнал
+      действий; пароль — от 12 символов, а слабый секрет панель просто не примет.</li>
+      <li><b>Обновление агентов держится на офлайн-ключе.</b> Подпись выпускается
+      вне сервера, поэтому даже захваченная панель не заставит агенты выполнить
+      чужой код.</li>
+    </ul>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    <span>Kervax · AGPL-3.0 · self-hosted</span>
+    <nav>
+      <a href="https://github.com/mihsergeev/Kervax">GitHub</a>
+      <a href="https://github.com/mihsergeev/Kervax/blob/main/docs/install.ru.md">Установка</a>
+      <a href="https://github.com/mihsergeev/Kervax/blob/main/docs/why.ru.md">Зачем это</a>
+      <a href="/en/">English</a>
+    </nav>
+  </div>
+</footer>
+
+<div class="lb" id="lb"><img src="" alt=""></div>
+<script src="/lb.js?v=1"></script>
+</body>
+</html>

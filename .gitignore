@@ -1,0 +1,53 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Node
+node_modules/
+dist/
+
+# Runtime data & secrets (DB, panel SSH key, backups) — MUST NOT be committed
+data/
+# ...кроме таблицы IP→страна: это КОД-ресурс, а не рантайм. Каталог приходится
+# разигнорить целиком — git не возвращает файл, если исключён его каталог.
+!backend/app/data/
+!backend/app/data/geoip.csv.gz
+*.db
+
+# Agent release signing: PRIVATE KEY is the root of trust — NEVER commit it.
+# The PUBLIC key stays out of the upstream repository too: every installation
+# generates its own with keygen.py, and an agent built with someone else's
+# public key would trust someone else's signed releases.
+agent-signing/*.key
+agent-signing/*.pub
+# ssh target of the fallback build host (infra-specific, not secret but local)
+agent-signing/build-host.txt
+
+# Agent release artifacts (signed manifest + transient binaries) are produced by
+# agent-signing/release.py and shipped via the deploy tarball, NOT git. Only
+# .gitkeep is tracked so the dir exists for a fresh clone / Docker build.
+agent-dist/*
+!agent-dist/.gitkeep
+
+# Local env; keep the template
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+
+# бренд-архивы (ассеты уже распакованы в frontend/src/assets)
+*brand-kit*.zip
+*design_concepts*.zip
+
+# SVG-флаги копируются из flag-icons при сборке (npm run prebuild) — в репо не держим
+frontend/public/flags/
+
+# документ-задание: живёт в scratchpad, в репозитории ему делать нечего
+ROTATION-METRICS-TASK.md

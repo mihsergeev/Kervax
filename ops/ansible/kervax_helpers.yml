@@ -1,0 +1,189 @@
+---
+# Переустановка setup-скриптов (helper'ов) Kervax на нодах.
+#
+# ЗАЧЕМ ПЛЕЙБУК, А НЕ КНОПКА В ПАНЕЛИ. Helper ставится от root. Если бы панель умела
+# запускать его сама, её взлом означал бы root на всём парке. Поэтому панель только
+# ПОКАЗЫВАЕТ, где helper устарел, а выкатывает человек — отсюда и ansible.
+# Скрипты берутся ЛОКАЛЬНО из репозитория, с панели ничего не скачивается: даже
+# скомпрометированная панель не может подсунуть свой код.
+#
+# Переустанавливаются ТОЛЬКО те helper'ы, что уже стоят на ноде (есть маркер версии),
+# и только если версия отличается. Повторный прогон не делает ничего.
+#
+# Запуск (из корня репо):
+#   ansible-playbook playbooks/kervax_helpers.yml -l 'web-01,db-01'
+#
+# Список хостов даёт панель: Главная → «Требует действий» → «обновить сразу на N нодах».
+#
+# Сухой прогон (покажет, что и где обновится, ничего не меняя):
+#   ansible-playbook playbooks/kervax_helpers.yml -l '…' --check --diff
+#
+# Скрипты лежат в другом месте? Укажите каталог явно:
+#   ansible-playbook playbooks/kervax_helpers.yml -l '…' -e kervax_src=/path/to/agent
+
+- name: Обновить setup-скрипты Kervax
+  hosts: all
+  # free: каждая нода идёт своим темпом. При обычной linear-стратегии ansible ждёт
+  # ВСЕ хосты на каждой задаче, и одна недоступная нода останавливает весь прогон.
+  strategy: free
+  become: true
+  gather_facts: false
+  # Потолок на задачу. free даёт живым нодам идти вперёд, но play всё равно ждёт
+  # отставших: одна нода, залипшая на SSH, держала прогон бесконечно. Установка
+  # helper'а укладывается в секунды, так что двух минут хватает с запасом.
+  timeout: 120
+
+  vars:
+    # kervax_helpers и kervax_always НЕ хардкодятся — они авто-обнаруживаются из репо
+    # (задачи «Обнаружить setup-скрипты…» ниже). Добавил новый скрипт agent/*.sh с
+    # `KERVAX_SETUP_VERSION=` — плейбук подхватит его сам, править список не нужно.
+    # Скрипт с `KERVAX_SETUP_ALWAYS` считается безопасным на ЛЮБОЙ ноде и ставится даже
+    # при первом заходе (напр. timesync-setup, agent-watchdog). Без флага — только
+    # обновляется там, где уже стоит (напр. kube-setup упал бы на ноде без кластера).
+    kervax_ver_dir: /var/lib/kervax/versions
+    # временная копия в /root, а не в /tmp: /tmp доступен на запись всем, и подменить
+    # скрипт между копированием и запуском там принципиально возможно
+    kervax_stage: /root/.kervax-setup
+    # Каталог со скриптами ищем сами: раскладка репо ansible либо репо панели.
+    # lookup выполняется на управляющей машине, к нодам не ходит.
+    # Порядок = приоритет (first_found берёт первый существующий):
+    #  1) репо ПАНЕЛИ рядом с репо ansible (на общем шаре) — ЕДИНЫЙ ИСТОЧНИК ПРАВДЫ.
+    #     Панель флагует устаревшие helper'ы по этим же версиям, поэтому берём их напрямую
+    #     и вторая копия не нужна (её расхождение как раз и приводило к «прокатал — а висит»).
+    #  2) локальная копия files/kervax — фолбэк, если панельного репо рядом нет.
+    # kervax_repo — путь к репозиторию панели, если он лежит не рядом с ansible:
+    #   ansible-playbook kervax_helpers.yml -e kervax_repo=/srv/kervax
+    # (удобнее один раз положить в group_vars, чем писать при каждом прогоне).
+    kervax_repo: ""
+    kervax_src_candidates:
+      - "{{ kervax_repo }}/agent/backup-setup.sh"
+      - "{{ playbook_dir }}/../files/kervax/backup-setup.sh"
+      - "{{ playbook_dir }}/../../agent/backup-setup.sh"
+      - "{{ playbook_dir }}/../../../agent/backup-setup.sh"
+    kervax_src: >-
+      {{ (lookup('first_found', kervax_src_candidates, errors='ignore')
+          | default('', true)) | dirname }}
+
+  tasks:
+    - name: Убедиться, что скрипты найдены
+      ansible.builtin.assert:
+        that: kervax_src | length > 0
+        fail_msg: >-
+          Не нашёл каталог со скриптами. Положите их в files/kervax/
+          или укажите -e kervax_src=/путь/к/agent
+
+    # УНИВЕРСАЛЬНОСТЬ: список хелперов не хардкодим — берём ВСЕ agent/*.sh с маркером
+    # `KERVAX_SETUP_VERSION=`. Так новый скрипт подхватывается сам, без правки плейбука.
+    # fileglob/file — lookup'ы на управляющей машине (к нодам не ходят). install.sh
+    # маркера не имеет и сюда не попадает.
+    - name: Обнаружить setup-скрипты в репозитории
+      ansible.builtin.set_fact:
+        kervax_helpers: >-
+          {{ (kervax_helpers | default([])) + [item | basename | splitext | first] }}
+      loop: "{{ query('fileglob', kervax_src ~ '/*.sh') | sort }}"
+      when: "'KERVAX_SETUP_VERSION=' in lookup('file', item)"
+      changed_when: false
+      check_mode: false
+
+    # Скрипты с `KERVAX_SETUP_ALWAYS` — безопасны на любой ноде (ставим и при первом заходе).
+    - name: Обнаружить безопасные-везде скрипты (KERVAX_SETUP_ALWAYS)
+      ansible.builtin.set_fact:
+        kervax_always: >-
+          {{ (kervax_always | default([])) + [item | basename | splitext | first] }}
+      loop: "{{ query('fileglob', kervax_src ~ '/*.sh') | sort }}"
+      when:
+        - "'KERVAX_SETUP_VERSION=' in lookup('file', item)"
+        - "'KERVAX_SETUP_ALWAYS' in lookup('file', item)"
+      changed_when: false
+      check_mode: false
+
+    - name: Убедиться, что хелперы обнаружены
+      ansible.builtin.assert:
+        that: (kervax_helpers | default([])) | length > 0
+        fail_msg: "В {{ kervax_src }} нет ни одного скрипта с KERVAX_SETUP_VERSION="
+
+    # Целевые версии читаем ИЗ САМИХ СКРИПТОВ (lookup — на управляющей машине).
+    # Держать их копией в плейбуке нельзя: разъедутся, и обновления встанут молча.
+    # Отдельной игрой это делать тоже нельзя: --limit применяется ко ВСЕМ играм,
+    # подготовительная игра на localhost при -l просто не запускается.
+    - name: Прочитать целевые версии из скриптов
+      ansible.builtin.set_fact:
+        kervax_want: >-
+          {{ kervax_want | default({}) | combine({
+               item: lookup('file', kervax_src ~ '/' ~ item ~ '.sh')
+                     | regex_search('KERVAX_SETUP_VERSION=([0-9.]+)', '\1') | first
+             }) }}
+      loop: "{{ kervax_helpers }}"
+      changed_when: false
+      check_mode: false
+
+    # Установленным считаем helper с маркером версии. Ставить, например, kube-setup
+    # на ноду без кластера нельзя — он упадёт, и прогон по парку станет красным.
+    # Читаем ВСЕ маркеры одной командой: три отдельных задачи — это три SSH-захода
+    # на каждую ноду, а на парке в сотни хостов разница заметная.
+    - name: Прочитать маркеры версий на ноде
+      ansible.builtin.shell: |
+        for h in {{ kervax_helpers | join(' ') }}; do
+          f="{{ kervax_ver_dir }}/$h.ver"
+          [ -f "$f" ] && echo "$h=$(cat "$f")"
+        done
+        exit 0
+      args:
+        executable: /bin/bash
+      register: kervax_have
+      changed_when: false
+      check_mode: false
+
+    - name: Отобрать устаревшие (установленные и с другой версией)
+      ansible.builtin.set_fact:
+        kervax_todo: "{{ kervax_todo | default([]) + [item.split('=')[0]] }}"
+      loop: "{{ kervax_have.stdout_lines }}"
+      when: item.split('=')[1] | trim != kervax_want[item.split('=')[0]]
+
+    # Безопасные-везде helper'ы (timesync) ставим и при ПЕРВОМ заходе — на ноде без маркера
+    # «Отобрать устаревшие» их не выбрало бы (оно ходит только по установленным).
+    - name: Добавить первую установку безопасных helper'ов
+      ansible.builtin.set_fact:
+        kervax_todo: "{{ (kervax_todo | default([])) + [item] }}"
+      loop: "{{ kervax_always | default([]) }}"
+      when: (item ~ '=') not in (kervax_have.stdout | default(''))
+
+    - name: Что будет обновлено
+      ansible.builtin.debug:
+        msg: "{{ item }} → {{ kervax_want[item] }}"
+      loop: "{{ kervax_todo | default([]) }}"
+
+    # Установка одним блоком: уборка временной копии в always, иначе при падении
+    # установки root-скрипт остался бы лежать на диске (проверено — так и было).
+    - name: Установить helper'ы
+      block:
+        # copy родительский каталог НЕ создаёт — нужен отдельной задачей. 0700 root:
+        # временная копия root-скрипта не должна быть доступна никому больше.
+        - name: Создать каталог для временной копии
+          ansible.builtin.file:
+            path: "{{ kervax_stage }}"
+            state: directory
+            owner: root
+            group: root
+            mode: "0700"
+          when: (kervax_todo | default([]) | length) > 0
+
+        - name: Скопировать скрипт на ноду
+          ansible.builtin.copy:
+            src: "{{ kervax_src }}/{{ item }}.sh"
+            dest: "{{ kervax_stage }}/{{ item }}.sh"
+            owner: root
+            group: root
+            mode: "0700"
+          loop: "{{ kervax_todo | default([]) }}"
+
+        - name: Выполнить установку
+          ansible.builtin.command: "bash {{ kervax_stage }}/{{ item }}.sh"
+          loop: "{{ kervax_todo | default([]) }}"
+          register: kervax_run
+          changed_when: kervax_run.rc == 0
+      always:
+        - name: Убрать временную копию
+          ansible.builtin.file:
+            path: "{{ kervax_stage }}"
+            state: absent
