@@ -138,6 +138,15 @@ the password and the second factor. Agent endpoints (`/api/agent/*`) are never
 part of that list: agents come from the addresses of monitored nodes and
 authenticate with their own tokens.
 
+Take the address the **server** sees you as, not the one an IP-lookup service
+reports: on a machine with more than one uplink they differ, and the panel will
+lock you out along with everyone else. The simplest source is the ssh session you
+already have:
+
+```bash
+ssh <server> 'echo $SSH_CLIENT' | awk '{print $1}'
+```
+
 ### 4. Start
 
 From prebuilt images — fast, nothing is compiled:
