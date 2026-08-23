@@ -1,14 +1,24 @@
 # Kervax
 
-Self-hosted monitoring for the whole picture: the sites your users see and the
-servers behind them, in one panel.
+Enterprise-grade monitoring that works out of the box — open source, self-hosted,
+no exporters to wire up and no dashboards to assemble.
 
-Kervax checks sites from the outside — status, keyword, response time, TLS and
-domain expiry, from your panel and from other regions — and watches the machines
-from the inside through a small agent that connects **out** to the panel. Nothing
-reaches into your servers, and the panel stores only a hash of each agent token.
+One panel for the whole picture: the sites your users see and the servers behind
+them. Kervax checks sites from the outside — status, keyword, response time, TLS
+and domain expiry, from your panel and from other regions — and watches the
+machines from the inside through a small agent that connects **out** to the
+panel. Nothing reaches into your servers, and the panel stores only a hash of
+each agent token.
 
-[Русская версия](README.ru.md) · [Why another monitoring panel](docs/why.md) · [Changelog](CHANGELOG.md)
+[Русская версия](README.ru.md) · [Install guide](docs/install.md) · [Why another monitoring panel](docs/why.md) · [Changelog](CHANGELOG.md)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/mihsergeev/Kervax/main/ops/quickstart.sh | sudo sh
+```
+
+That single command installs Docker if needed, brings up Caddy with a real
+Let's Encrypt certificate, and prints the panel's address and admin password. No
+domain of your own required — `<server-ip>.sslip.io` works out of the box.
 
 ![Home](docs/img/home.png)
 
@@ -100,39 +110,52 @@ get alerts about what they are responsible for.
 
 Threat model and deployment notes: [docs/security.en.md](docs/security.en.md).
 
+## Out of the box
+
+A Prometheus stack is assembled: an exporter per concern, a scrape config, rules,
+Alertmanager routes, and a Grafana dashboard per thing you want to see. That is
+power, and it is also a weekend. Kervax is the other trade-off — the same jobs,
+already wired:
+
+| To get this | With Kervax | The usual stack |
+| --- | --- | --- |
+| Metrics from a new server | one command on the node, data in seconds | install node_exporter, add a scrape target (or set up service discovery), reload Prometheus, import a dashboard |
+| A site checked from outside | type the address | blackbox_exporter, a job with relabeling, a rule, a panel |
+| TLS expiry | counted automatically, escalating reminders | a blackbox probe plus a PromQL rule |
+| Domain registration expiry | counted automatically | nothing off the shelf — write an exporter |
+| Uptime over 30 days | a number on the card | a recording rule and a PromQL query |
+| Incidents | opened and closed on their own, with history | Alertmanager: routes, grouping, inhibition, silences — in config files |
+| Containers, pods, databases, queues | discovered by the agent | cAdvisor, kube-state-metrics, postgres_exporter, rabbitmq_exporter… |
+| Backup status | restic state per node, in the panel | not covered |
+| Who sees what | roles and groups, enforced in the API | Grafana orgs plus separate access to Prometheus |
+| Storage | pruned on a schedule you set | retention tuning, and Thanos/Mimir when it grows |
+| Dashboards | there when you sign in | build or import them |
+
+Nothing here is a knock on Prometheus: for application metrics and ad-hoc PromQL
+it remains the better tool, and the two coexist perfectly well. Kervax covers
+infrastructure — the host, the site, the certificate, the backup — and covers it
+without a configuration project. **[What it deliberately does not do →
+docs/why.md](docs/why.md)**
+
 ## Requirements
 
-- Docker with Compose
-- a reverse proxy terminating TLS — your own, or the bundled
-  [caddy-docker-proxy](https://github.com/lucaslorentz/caddy-docker-proxy) overlay
-- no external services: metrics, incidents and history live in your Postgres
+- A Linux server with Docker and Compose. 2 GB of RAM is enough.
+- Ports 80 and 443 free, or your own reverse proxy in front.
+- No external services: metrics, incidents and history live in your Postgres.
 
 ## Quick start
 
-```sh
-git clone https://github.com/mihsergeev/Kervax.git && cd Kervax
-cp .env.example .env
+```bash
+curl -fsSL https://raw.githubusercontent.com/mihsergeev/Kervax/main/ops/quickstart.sh | sudo sh
 ```
 
-Fill in `.env` — at minimum `KERVAX_ADMIN_PASSWORD` (not "admin"),
-`KERVAX_JWT_SECRET` (`openssl rand -hex 32`) and `KERVAX_DB_PASSWORD`. Then:
+Docker (if missing), Caddy with a Let's Encrypt certificate, random secrets, the
+panel itself — and the address with the admin password printed at the end. A
+domain is optional: without one the panel is published on `<server-ip>.sslip.io`.
 
-```sh
-docker compose up -d --build
-```
-
-The panel comes up on `http://127.0.0.1:8080` (`KERVAX_BIND` moves it) and
-**refuses to start** on empty or default secrets. Put HTTPS in front of it, or
-use the bundled overlay after setting `KERVAX_DOMAIN` and `KERVAX_ALLOW_IPS`:
-
-```sh
-docker compose -f compose.yml -f compose.caddy.yml up -d --build
-```
-
-Sign in as `admin`, change the password, enable 2FA from the ⚙ menu. Then add a
-site ("Add monitor" — a URL or a bare domain is enough) and a server ("Add
-server" prints a one-line install command; run it as root on the node and the
-machine appears within seconds).
+Prefer to do it by hand, use your own domain, or put it behind an existing proxy?
+**[Full installation guide → docs/install.md](docs/install.md)** covers all of it,
+including the allow-list, upgrades and what to check when something is off.
 
 ## Configuration
 
