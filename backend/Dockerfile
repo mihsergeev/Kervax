@@ -1,7 +1,7 @@
 # --- сборка Go-агента из исходников (панель собирает агента сама) ---
 # AGENT_PUBKEY пуст по умолчанию → у агента нет ключа → самообновление ВЫКЛЮЧЕНО.
 # Чтобы включить secure-автообновление, задай KERVAX_AGENT_PUBKEY в .env (см. README).
-FROM golang:1.22-alpine AS agent
+FROM golang:1.27-alpine AS agent
 ARG AGENT_PUBKEY=
 WORKDIR /agent
 COPY agent/go.mod ./
