@@ -4,7 +4,10 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [1.1.1] - 2026-08-23
+
+Установка одной командой — и то, что нашлось, когда её прогнали на чистых
+машинах несколько раз подряд.
 
 ### Added
 - **`ops/quickstart.sh` — установка одной командой.** Ставит Docker, если его
