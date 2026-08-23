@@ -159,18 +159,22 @@ def report(node, t_min: float) -> dict:
                                 "sites": WEB_SITES[name]}]
     if role in ("web", "app", "ci"):
         rep["docker"] = {"present": True, "access": True, "version": "27.3.1", "compose": True,
+                         # Поля ровно те, что шлёт агент: name/image/state/status/
+                         # policy/restarts/binds. Раньше здесь были выдуманные cpu и
+                         # mem и ключ «restart» вместо «policy» — демо-панель
+                         # показывала не то, что покажет настоящая.
                          "containers": [
                              {"name": f"{name}-app-1", "image": "app:2.14.0", "state": "running",
-                              "status": "Up 6 days", "restart": "always", "cpu": 12.4,
-                              "mem": 640 * 1024 ** 2},
+                              "status": "Up 6 days", "policy": "always", "restarts": 0,
+                              "binds": ["/srv/app/data"]},
                              {"name": f"{name}-worker-1", "image": "app:2.14.0", "state": "running",
-                              "status": "Up 6 days", "restart": "always", "cpu": 4.1,
-                              "mem": 310 * 1024 ** 2},
+                              "status": "Up 6 days", "policy": "always", "restarts": 2,
+                              "binds": []},
                              # без СУБД в контейнерах: панель справедливо спросила бы
                              # про инвентарь и дампы, а в демо отвечать на это нечем
                              {"name": f"{name}-nginx-1", "image": "nginx:1.27-alpine",
-                              "state": "running", "status": "Up 21 days", "restart": "unless-stopped",
-                              "cpu": 0.8, "mem": 96 * 1024 ** 2}]}
+                              "state": "running", "status": "Up 21 days",
+                              "policy": "unless-stopped", "restarts": 0, "binds": []}]}
     if role == "kube":
         rep["kube"] = {"present": True, "access": True, "flavor": "k0s", "version": "v1.31.2",
                        "nodes": [{"name": "k8s-node-1", "ready": True, "roles": "control-plane",
