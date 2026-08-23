@@ -464,6 +464,14 @@ async def run_due_checks(
             row.last_latency_ms = outcome.latency_ms
             row.last_value = outcome.value
             row.last_checked_at = now
+            # Монитор ТИПА «сертификат» сам и есть проверка срока: дни приходят в
+            # value. Отдельный проход по срокам (probe_expiry) ходит только к
+            # http-мониторам, поэтому ssl_days у cert оставался пустым — а на нём
+            # держится всё остальное: чип срока в списке, блок «истекает» на
+            # главной, группировка по домену. Данные были, показать их было нечем.
+            if row.type == "cert" and outcome.value is not None:
+                row.ssl_days = int(outcome.value)
+                row.expiry_checked_at = now
             # разбивка по IP (режим «все адреса») — снимок для детали + точки в
             # тайм-серию по каждому адресу (для графика времени ответа по IP)
             if outcome.ip_results is not None:

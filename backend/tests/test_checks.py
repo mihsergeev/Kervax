@@ -590,3 +590,42 @@ async def test_run_http_custom_headers(monkeypatch):
     assert checks_exec._parse_headers("не json") == {}
     assert checks_exec._parse_headers('["a","b"]') == {}
     assert checks_exec._parse_headers('{"k": 7}') == {"k": "7"}
+
+
+async def test_cert_monitor_fills_ssl_days(tmp_path, monkeypatch):
+    """У монитора типа «сертификат» срок должен доезжать до ssl_days.
+
+    Дни приходят в value самой проверки, а отдельный проход по срокам ходит
+    только к http-мониторам — из-за этого чип срока в списке, блок «истекает»
+    на главной и группировка по домену для cert-мониторов молчали, хотя данные
+    были посчитаны.
+    """
+    from sqlalchemy import select
+
+    from app import checks as checks_exec
+    from app import collector
+    from app.checks import CheckOutcome
+    from app.config import Settings
+    from app.db import Base, create_engine_and_factory
+    from app.models import Check
+
+    engine, factory = create_engine_and_factory(
+        f"sqlite+aiosqlite:///{(tmp_path / 'cert.db').as_posix()}"
+    )
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    async with factory() as s:
+        s.add(Check(name="cert", type="cert", target="example.com"))
+        await s.commit()
+
+    async def fake_run(check):
+        return CheckOutcome("up", value=42.7, message="сертификат: 42 дн. до истечения")
+
+    monkeypatch.setattr(checks_exec, "run_check", fake_run)
+    await collector.run_due_checks(factory, Settings())
+
+    async with factory() as s:
+        row = await s.scalar(select(Check))
+        assert row.ssl_days == 42, f"ssl_days={row.ssl_days}, last_value={row.last_value}"
+        assert row.expiry_checked_at is not None
+    await engine.dispose()
