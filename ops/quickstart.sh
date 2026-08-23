@@ -108,10 +108,19 @@ fi
 if [ -d "$DIR/.git" ]; then
     say "Обновляю $DIR"
     git -C "$DIR" pull --ff-only >/dev/null || die "git pull не прошёл"
+elif [ -d "$DIR" ] && [ -n "$(ls -A "$DIR" 2>/dev/null)" ]; then
+    die "каталог $DIR не пуст и не является репозиторием Kervax.
+  Уберите его (rm -rf $DIR) или поставьте панель в другой: --dir /путь"
 else
     say "Клонирую в $DIR"
     command -v git >/dev/null 2>&1 || (apt-get update -qq && apt-get install -y -qq git) >/dev/null 2>&1
-    git clone -q "$REPO" "$DIR" || die "не удалось клонировать $REPO"
+    # Клонируем рядом и переносим готовое: прерванный на середине клон иначе
+    # оставляет непустой каталог без .git, после которого повторный запуск
+    # невозможен — ни склонировать (занято), ни обновить (не репозиторий).
+    rm -rf "$DIR.tmp"
+    git clone -q "$REPO" "$DIR.tmp" || { rm -rf "$DIR.tmp"; die "не удалось клонировать $REPO"; }
+    rm -rf "$DIR"
+    mv "$DIR.tmp" "$DIR"
 fi
 cd "$DIR"
 
