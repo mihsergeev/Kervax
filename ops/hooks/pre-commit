@@ -1,0 +1,26 @@
+#!/bin/sh
+# Быстрая проверка перед коммитом: ops/selfcheck.py (доли секунды).
+#
+# Зачем хук, если есть CI: воркфлоу в .github/ выполняется только на GitHub, а
+# этот репозиторий живёт локально и катится на прод через `git archive HEAD | ssh`.
+# То есть между «написал» и «на проде» никакой автоматики нет — кроме этой.
+#
+# Включить один раз:  git config core.hooksPath ops/hooks
+# Пропустить разово:  git commit --no-verify
+#
+# Тесты сюда НЕ ставим: 2 минуты на каждый коммит никто терпеть не будет.
+# Их место — перед выкаткой: cd backend && python -m pytest -q
+
+set -e
+
+if ! command -v python >/dev/null 2>&1; then
+    echo "pre-commit: python не найден, проверка пропущена" >&2
+    exit 0
+fi
+
+python ops/selfcheck.py || {
+    echo ""
+    echo "pre-commit: selfcheck нашёл расхождения (см. выше)."
+    echo "Починить — или закоммитить как есть: git commit --no-verify"
+    exit 1
+}
