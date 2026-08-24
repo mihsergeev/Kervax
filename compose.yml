@@ -1,0 +1,101 @@
+services:
+  db:
+    image: postgres:18-alpine
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    # parallel-query / большой work_mem используют /dev/shm — дефолтных 64 МБ мало
+    shm_size: 256mb
+    # Тюнинг под тайм-серии метрик (десятки млн строк, диапазонные чтения по индексу,
+    # постоянные вставки + прунинг). Значения — под ~4 ГБ ОЗУ (делится с бэкендом);
+    # на выделенной/большей машине подними shared_buffers≈25% ОЗУ и effective_cache_size≈50-75%.
+    command:
+      - postgres
+      - -c
+      - shared_buffers=${KERVAX_PG_SHARED_BUFFERS:-256MB}
+      - -c
+      - effective_cache_size=${KERVAX_PG_EFFECTIVE_CACHE:-1536MB}
+      - -c
+      - work_mem=16MB
+      - -c
+      - maintenance_work_mem=256MB
+      - -c
+      - random_page_cost=1.1            # локальный SSD/диск → индексные сканы дешевле
+      - -c
+      - wal_compression=on
+      - -c
+      - max_wal_size=2GB                # реже чекпоинты под потоком вставок
+      - -c
+      - autovacuum_naptime=20s
+      - -c
+      - autovacuum_vacuum_scale_factor=0.05   # вакуум при 5% мёртвых (не 20%) — churn-таблицы
+      - -c
+      - autovacuum_analyze_scale_factor=0.05
+      - -c
+      - autovacuum_vacuum_cost_limit=2000     # вакуум успевает за прунингом
+    environment:
+      # имя БД/роли параметризованы: новые установки — kervax; при апгрейде
+      # существующего кластера задайте прежние значения в .env, чтобы не мигрировать данные
+      POSTGRES_DB: ${KERVAX_DB_NAME:-kervax}
+      POSTGRES_USER: ${KERVAX_DB_USER:-kervax}
+      POSTGRES_PASSWORD: ${KERVAX_DB_PASSWORD}
+    volumes:
+      # PG18+ хранит данные в подкаталоге с мажор-версией (…/18/docker) —
+      # монтируем корень кластера, а не сам каталог данных.
+      - ./data/postgres:/var/lib/postgresql
+    networks:
+      - internal
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${KERVAX_DB_USER:-kervax} -d ${KERVAX_DB_NAME:-kervax}"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+      args:
+        # пусто → самообновление агента выключено; впиши пубключ для secure-автообновления
+        AGENT_PUBKEY: ${KERVAX_AGENT_PUBKEY:-}
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      KERVAX_DB_URL: postgresql+asyncpg://${KERVAX_DB_USER:-kervax}:${KERVAX_DB_PASSWORD}@db:5432/${KERVAX_DB_NAME:-kervax}
+      KERVAX_JWT_SECRET: ${KERVAX_JWT_SECRET}
+      KERVAX_ADMIN_USER: ${KERVAX_ADMIN_USER}
+      KERVAX_ADMIN_PASSWORD: ${KERVAX_ADMIN_PASSWORD}
+      # break-glass: 1 сбрасывает пароль/2FA админа при старте (потом убрать)
+      KERVAX_ADMIN_PASSWORD_RESET: ${KERVAX_ADMIN_PASSWORD_RESET:-0}
+      KERVAX_DATA_DIR: /data
+      KERVAX_PANEL_URL: ${KERVAX_PANEL_URL:-}
+      KERVAX_DEFAULT_SSH_USER: ${KERVAX_DEFAULT_SSH_USER:-kervax}
+      KERVAX_SCHEDULER_TICK: ${KERVAX_SCHEDULER_TICK:-30}
+      KERVAX_DISK_ALERT_PERCENT: ${KERVAX_DISK_ALERT_PERCENT:-90}
+      KERVAX_BACKUP_INTERVAL_HOURS: ${KERVAX_BACKUP_INTERVAL_HOURS:-24}
+      KERVAX_BACKUP_KEEP: ${KERVAX_BACKUP_KEEP:-14}
+    volumes:
+      - ./data:/data
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - internal
+
+  frontend:
+    build: ./frontend
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    depends_on:
+      - backend
+    # Панель отдаётся на хосте по KERVAX_BIND (по умолчанию 127.0.0.1:8080).
+    # Поставьте впереди реверс-прокси с HTTPS или используйте compose.caddy.yml.
+    ports:
+      - "${KERVAX_BIND:-127.0.0.1:8080}:8080"
+    networks:
+      - internal
+
+networks:
+  internal:

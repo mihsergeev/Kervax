@@ -1,0 +1,11 @@
+# Готовые образы для scale-режима: переключает на них ещё и планировщик.
+#
+#   docker compose -f compose.yml -f compose.scale.yml \
+#                  -f compose.ghcr.yml -f compose.ghcr-scale.yml up -d
+#
+# Отдельным файлом, а не строкой в compose.ghcr.yml: там объявление сервиса
+# создало бы пустой scheduler и в обычном режиме, где его быть не должно.
+services:
+  scheduler:
+    build: !reset null
+    image: ghcr.io/mihsergeev/kervax-backend:${KERVAX_VERSION:-latest}

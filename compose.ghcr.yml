@@ -1,0 +1,25 @@
+# Готовые образы вместо сборки из исходников.
+#
+#   docker compose -f compose.yml -f compose.ghcr.yml up -d
+#
+# Сборка из исходников (базовый compose.yml) требует ~2 ГБ свободной памяти и
+# нескольких минут: собираются Go-агент под две архитектуры и фронтенд. На
+# небольшой VPS проще взять образы, собранные из этого же тега в CI.
+#
+# KERVAX_VERSION=1.0.0 закрепляет версию; по умолчанию — latest.
+# Автообновление агента в этих образах ВЫКЛЮЧЕНО: публичный образ собирается без
+# ключа подписи, и это правильно — ключ у каждой установки свой (см. README).
+services:
+  backend:
+    build: !reset null
+    image: ghcr.io/mihsergeev/kervax-backend:${KERVAX_VERSION:-latest}
+
+  frontend:
+    build: !reset null
+    image: ghcr.io/mihsergeev/kervax-frontend:${KERVAX_VERSION:-latest}
+
+# Про scheduler здесь НАМЕРЕННО ничего нет. Он живёт только в compose.scale.yml,
+# а объявление сервиса в оверлее его СОЗДАЁТ: в обычном режиме получался пустой
+# контейнер без переменных и томов, который падал на первой же попытке открыть
+# базу. Для scale-режима есть отдельный compose.ghcr-scale.yml.
+
