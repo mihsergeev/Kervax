@@ -1,23 +1,26 @@
 #!/bin/sh
-# Установка Kervax-агента. Вызывается: install.sh <url_панели> <токен> [инстанс]
-# Ставит статический бинарь в /opt/kervax-agent/bin (владелец kervax — чтобы агент мог
-# БЕЗ root безопасно обновлять сам себя), конфиг в /etc, systemd-юнит.
-# Агент работает под непривилегированным юзером kervax (без шелла), только исходящие.
+# Kervax agent installer. Usage: install.sh <panel_url> <token> [instance]
+# Places a static binary in /opt/kervax-agent/bin (owned by kervax, so the agent can
+# safely replace itself WITHOUT root), a config in /etc and a systemd unit.
+# The agent runs as the unprivileged user kervax (no shell), outbound connections only.
 #
-# [инстанс] — для ВТОРОГО агента на том же сервере (метрики в другую панель):
-#   install.sh https://panel2.example.com <токен2> panel2
-# → конфиг /etc/kervax-agent-panel2.conf + юнит kervax-agent@panel2 (template).
-# Бинарь общий; инстансы полностью независимы (свой url/token/процесс).
+# [instance] — for a SECOND agent on the same server (metrics to another panel):
+#   install.sh https://panel2.example.com <token2> panel2
+# → config /etc/kervax-agent-panel2.conf + unit kervax-agent@panel2 (template).
+# The binary is shared; instances are fully independent (own url/token/process).
 #
-# Снять агента с ноды:
-#   install.sh --uninstall            всё: сервис, хелперы, бинарь, конфиги, юзер
-#   install.sh --uninstall panel2     только этот инстанс
+# Removing the agent from a node:
+#   install.sh --uninstall            everything: service, helpers, binary, configs, user
+#   install.sh --uninstall panel2     only that instance
+#
+# Russian version of this installer: agent/install-ru.sh
 set -eu
 
-# Разбор аргументов: позиционные <url> <токен> [инстанс] + флаги.
-# По умолчанию (авто-режим) install.sh включает ВСЁ применимое на ноде: bounded-доступ
-# к Docker (socket-proxy), read-only Kubernetes (узкий SA), статистику сервера бэкапов,
-# управление restic-бэкапом. Каждый шаг самодетектируется. Флаг --no-auto — только агент.
+# Argument parsing: positional <url> <token> [instance] plus flags.
+# By default (auto mode) install.sh enables EVERYTHING applicable on the node: bounded
+# Docker access (socket-proxy), read-only Kubernetes (a narrow SA), backup server
+# statistics, restic backup control. Each step self-detects. --no-auto installs the
+# agent only.
 URL=""; TOKEN=""; INSTANCE=""; WANT_DOCKER=0; NO_AUTO=0; UNINSTALL=0
 for a in "$@"; do
   case "$a" in
@@ -32,41 +35,41 @@ for a in "$@"; do
   esac
 done
 
-# ── Удаление ─────────────────────────────────────────────────────────────────
-# Обратной операции не было вовсе: сервер убирают из панели, а на ноде остаётся
-# работающий сервис, который вечно стучится с уже отозванным токеном, плюс юзер,
-# бинарь, юниты хелперов, sudoers и socket-proxy. Что именно вычищать — знал
-# только тот, кто читал этот файл.
-#   install.sh --uninstall            снять агента
-#   install.sh --uninstall <инстанс>  снять один инстанс (конфиг/юнит с суффиксом)
+# ── Removal ──────────────────────────────────────────────────────────────────
+# There used to be no reverse operation at all: the server is deleted in the panel
+# while the node keeps a running service knocking with a revoked token, plus the user,
+# the binary, helper units, sudoers and the socket-proxy. What exactly to clean up was
+# known only to whoever had read this file.
+#   install.sh --uninstall            remove the agent
+#   install.sh --uninstall <instance> remove a single instance (suffixed config/unit)
 if [ "$UNINSTALL" = 1 ]; then
-  [ "$(id -u)" = "0" ] || { echo "Нужен root (sudo)." >&2; exit 1; }
-  # у --uninstall первый позиционный аргумент — это инстанс, а не url
+  [ "$(id -u)" = "0" ] || { echo "Root required (sudo)." >&2; exit 1; }
+  # with --uninstall the first positional argument is the instance, not a url
   [ -z "$INSTANCE" ] && [ -n "$URL" ] && INSTANCE="$URL"
   if [ -n "$INSTANCE" ]; then
     UNITS="kervax-agent@$INSTANCE"
     CONFS="/etc/kervax-agent-$INSTANCE.conf"
-    echo "→ Снимаю инстанс $INSTANCE"
+    echo "→ Removing instance $INSTANCE"
   else
     UNITS="kervax-agent"
     CONFS="/etc/kervax-agent.conf"
-    # инстансы, заведённые через шаблон, снимаем заодно — иначе они останутся
-    # без основного юнита и продолжат стучаться в свои панели
+    # template-based instances go too — otherwise they are left without the main unit
+    # and keep knocking on their panels
     for u in $(systemctl list-units --all --plain --no-legend 'kervax-agent@*' 2>/dev/null | awk '{print $1}'); do
       UNITS="$UNITS ${u%.service}"
       n=${u#kervax-agent@}; n=${n%.service}
       CONFS="$CONFS /etc/kervax-agent-$n.conf"
     done
-    echo "→ Снимаю агента полностью"
+    echo "→ Removing the agent completely"
   fi
 
   for u in $UNITS; do
     systemctl disable --now "$u" >/dev/null 2>&1 || true
   done
-  # юниты и таймеры хелперов (запросы из панели, инвентарь, дампы, домены)
+  # helper units and timers (panel requests, inventory, dumps, domains)
   if [ -z "$INSTANCE" ]; then
-    # .path тоже: запросы из панели хелперы ловят path-юнитом, и без него в
-    # /etc/systemd/system оставались висеть kervax-*-req.path
+    # .path as well: helpers catch panel requests with a path unit, and without this
+    # kervax-*-req.path files were left behind in /etc/systemd/system
     for u in kervax-backup-req kervax-bsrv-req kervax-tsync-req \
              kervax-db-stats kervax-dumps kervax-web-sites; do
       for kind in timer path service; do
@@ -75,7 +78,7 @@ if [ "$UNINSTALL" = 1 ]; then
       done
     done
     rm -f /etc/systemd/system/kervax-agent.service /etc/systemd/system/kervax-agent@.service
-    # drop-in'ы юнита (спул, вотчдог) лежат каталогом рядом — иначе он остаётся
+    # unit drop-ins (spool, watchdog) live in a directory next to it — otherwise it stays
     rm -rf /etc/systemd/system/kervax-agent.service.d /etc/systemd/system/kervax-agent@.service.d
   fi
   systemctl daemon-reload >/dev/null 2>&1 || true
@@ -84,79 +87,79 @@ if [ "$UNINSTALL" = 1 ]; then
   if [ -z "$INSTANCE" ]; then
     command -v docker >/dev/null 2>&1 && docker rm -f kervax-docker-proxy >/dev/null 2>&1 || true
     rm -rf /opt/kervax-agent /opt/kervax/bin /lib65/kervax /etc/kervax
-    rmdir /opt/kervax /lib65 2>/dev/null || true   # только если пусты (каталог панели уцелеет)
+    rmdir /opt/kervax /lib65 2>/dev/null || true   # only if empty (the panel directory survives)
     rm -f /etc/sudoers.d/kervax-backup /etc/sudoers.d/kervax-backupserver
     id kervax >/dev/null 2>&1 && { userdel kervax >/dev/null 2>&1 || deluser kervax >/dev/null 2>&1 || true; }
-    echo "✓ Агент снят: сервис, юниты хелперов, бинарь, конфиги, sudoers, юзер kervax."
-    echo "  Учётная запись в Kubernetes (если включалась) остаётся в кластере:"
-    echo "    kubectl -n kervax delete serviceaccount kervax    # при необходимости"
-    echo "  Сервер из самой панели удалите отдельно — тогда её токен перестанет действовать."
+    echo "✓ Agent removed: service, helper units, binary, configs, sudoers, user kervax."
+    echo "  The Kubernetes account (if it was enabled) stays in the cluster:"
+    echo "    kubectl -n kervax delete serviceaccount kervax    # if you want it gone"
+    echo "  Delete the server in the panel separately — that revokes its token."
   else
-    echo "✓ Инстанс $INSTANCE снят (общий бинарь и остальные инстансы не тронуты)."
+    echo "✓ Instance $INSTANCE removed (the shared binary and other instances are untouched)."
   fi
   exit 0
 fi
 
 if [ -z "$URL" ] || [ -z "$TOKEN" ]; then
-  echo "Использование: install.sh <url_панели> <токен> [инстанс] [--no-auto]" >&2
-  echo "               install.sh --uninstall [инстанс]" >&2
+  echo "Usage: install.sh <panel_url> <token> [instance] [--no-auto]" >&2
+  echo "       install.sh --uninstall [instance]" >&2
   exit 1
 fi
 if [ -n "$INSTANCE" ] && ! printf '%s' "$INSTANCE" | grep -Eq '^[A-Za-z0-9_-]+$'; then
-  echo "Имя инстанса — только буквы/цифры/дефис/подчёркивание." >&2
+  echo "Instance name may contain only letters, digits, hyphen and underscore." >&2
   exit 1
 fi
 
 if [ "$(id -u)" != "0" ]; then
-  echo "Нужен root (sudo)." >&2
+  echo "Root required (sudo)." >&2
   exit 1
 fi
 
 case "$(uname -m)" in
   x86_64 | amd64) ARCH=amd64 ;;
   aarch64 | arm64) ARCH=arm64 ;;
-  *) echo "Архитектура $(uname -m) не поддерживается (нужен amd64/arm64)." >&2; exit 1 ;;
+  *) echo "Architecture $(uname -m) is not supported (amd64/arm64 required)." >&2; exit 1 ;;
 esac
 
-# непривилегированный системный юзер
+# unprivileged system user
 id kervax >/dev/null 2>&1 || useradd --system --no-create-home --shell /usr/sbin/nologin kervax 2>/dev/null || \
   adduser --system --no-create-home --shell /usr/sbin/nologin kervax 2>/dev/null || true
 
-echo "→ Скачиваю агент ($ARCH)..."
-# Каталог агента — /opt/kervax-agent, НЕ /opt/kervax. Панель по умолчанию
-# ставится именно в /opt/kervax (так делает quickstart.sh), и раньше агент
-# селился внутрь неё, а следом делал chown -R kervax по всему каталогу. На
-# машине, где мониторят саму панель — совершенно обычный случай, — это забирало
-# у панели её же ./data вместе с кластером postgres: работающая база мгновенно
-# теряла доступ к своим файлам («could not open file … Permission denied»),
-# соединения переставали открываться, панель отдавала 500. Поднималась она
-# только после ручного перезапуска контейнеров.
-# Заодно уходим из-под документированного удаления панели (`rm -rf /opt/kervax`),
-# которое сносило бинарь работающего агента.
+echo "→ Downloading the agent ($ARCH)..."
+# The agent directory is /opt/kervax-agent, NOT /opt/kervax. The panel installs into
+# /opt/kervax by default (that is what quickstart.sh does), and the agent used to
+# settle inside it and then run chown -R kervax across the whole directory. On a
+# machine where the panel itself is monitored - an entirely ordinary case - that took
+# over the panel's own ./data along with the postgres cluster: the running database
+# instantly lost access to its files ("could not open file ... Permission denied"),
+# connections stopped opening and the panel returned 500. It only recovered after a
+# manual container restart.
+# It also moves the agent out of the way of the documented panel removal
+# (`rm -rf /opt/kervax`), which used to wipe the binary of a running agent.
 BIN_DIR=/opt/kervax-agent/bin
 BIN=$BIN_DIR/kervax-agent
 LEGACY_BIN_DIR=/opt/kervax/bin
 mkdir -p "$BIN_DIR"
-# во временный файл + mv: атомарно и не спотыкается о «Text file busy»,
-# когда на сервере уже крутится другой инстанс агента с этим бинарём
-# --connect-timeout: если панель закрыта фаерволом — быстрое понятное падение,
-# а не многоминутное зависание (проверьте «IP сервера» в панели и её фаервол)
+# to a temp file plus mv: atomic, and it does not trip over "Text file busy" when
+# another agent instance on the server already runs this binary.
+# --connect-timeout: if the panel is behind a firewall this fails fast and clearly
+# instead of hanging for minutes (check "server IP" in the panel and its firewall)
 curl -fsSL --connect-timeout 15 "${URL%/}/api/agent/download/$ARCH" -o "$BIN.new" || {
-  echo "✗ Панель недоступна с этого сервера. Если она за фаерволом — укажите" >&2
-  echo "  «IP сервера» в её настройках и подождите ~2 мин (cron-синк), затем повторите." >&2
+  echo "✗ The panel is unreachable from this server. If it sits behind a firewall," >&2
+  echo "  add the server IP in its settings, wait about 2 minutes and retry." >&2
   exit 1
 }
 chmod 0755 "$BIN.new"
 mv -f "$BIN.new" "$BIN"
-# ТОЛЬКО свой каталог: агенту нужно право заменить самого себя при обновлении,
-# и ничего больше. Рекурсивный chown по родительскому каталогу — как раз то, чем
-# он однажды забрал у панели её базу.
+# ONLY its own directory: the agent needs the right to replace itself on update and
+# nothing more. A recursive chown over the parent directory is exactly how it once
+# took the panel's database away.
 chown -R kervax "$BIN_DIR"
-# уберём легаси-пути прошлых установок, если были
+# clean up legacy paths from earlier installs, if any
 rm -f /usr/local/bin/kervax-agent 2>/dev/null || true
 if [ -d "$LEGACY_BIN_DIR" ] && [ "$LEGACY_BIN_DIR" != "$BIN_DIR" ]; then
   rm -rf "$LEGACY_BIN_DIR"
-  # каталог панели не трогаем: rmdir сработает, только если он опустел
+  # the panel directory is left alone: rmdir succeeds only if it became empty
   rmdir /opt/kervax 2>/dev/null || true
 fi
 
@@ -176,7 +179,7 @@ EOF
 chown kervax "$CONF" 2>/dev/null || true
 chmod 0600 "$CONF"
 
-# одиночный юнит (по умолчанию)
+# single unit (default)
 cat > /etc/systemd/system/kervax-agent.service <<'EOF'
 [Unit]
 Description=Kervax monitoring agent
@@ -188,25 +191,26 @@ User=kervax
 ExecStart=BIN_PLACEHOLDER/kervax-agent /etc/kervax-agent.conf
 Restart=always
 RestartSec=10
-# systemd-watchdog: агент шлёт WATCHDOG=1 каждый цикл; если замолчал дольше WatchdogSec
-# (завис сбор/сеть) — systemd сам гасит и поднимает. Независимо от Go-вотчдога (тот
-# однажды не сработал). Type=notify требует READY=1 при старте (агент 1.77+ шлёт).
+# systemd watchdog: the agent sends WATCHDOG=1 every cycle; if it goes quiet for longer
+# than WatchdogSec (stuck collection or network), systemd restarts it. Independent of
+# the Go watchdog, which once failed to fire. Type=notify requires READY=1 at startup
+# (agent 1.77+ sends it).
 Type=notify
 NotifyAccess=main
 WatchdogSec=180
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
-# агент обновляет сам себя атомарной заменой бинаря — разрешаем запись ТОЛЬКО сюда
+# the agent updates itself by atomically replacing the binary - writes allowed ONLY here
 ReadWritePaths=BIN_PLACEHOLDER
-# читать /dev/kmsg для имени OOM-жертвы (иначе dmesg_restrict=1 не даёт непривил. юзеру)
+# read /dev/kmsg for the OOM victim name (dmesg_restrict=1 blocks unprivileged users)
 AmbientCapabilities=CAP_SYSLOG
 CapabilityBoundingSet=CAP_SYSLOG
 [Install]
 WantedBy=multi-user.target
 EOF
 
-# template-юнит для дополнительных инстансов (kervax-agent@<имя>)
+# template unit for additional instances (kervax-agent@<name>)
 cat > /etc/systemd/system/kervax-agent@.service <<'EOF'
 [Unit]
 Description=Kervax monitoring agent (%i)
@@ -225,31 +229,31 @@ NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
 ReadWritePaths=BIN_PLACEHOLDER
-# читать /dev/kmsg для имени OOM-жертвы (иначе dmesg_restrict=1 не даёт непривил. юзеру)
+# read /dev/kmsg for the OOM victim name (dmesg_restrict=1 blocks unprivileged users)
 AmbientCapabilities=CAP_SYSLOG
 CapabilityBoundingSet=CAP_SYSLOG
 [Install]
 WantedBy=multi-user.target
 EOF
 
-# Путь к бинарю в юнитах подставляем здесь: сами юниты пишутся heredoc'ом с
-# закавыченным EOF, чтобы systemd-спецификаторы (%i) не съел шелл.
+# The binary path is substituted here: the units are written with a quoted heredoc so
+# the shell does not eat systemd specifiers such as %i.
 sed -i "s|BIN_PLACEHOLDER|$BIN_DIR|g"     /etc/systemd/system/kervax-agent.service /etc/systemd/system/kervax-agent@.service
 
 systemctl daemon-reload
 systemctl enable "$UNIT" >/dev/null 2>&1 || true
-# restart (а не just --now): при переустановке поверх работающего агента надо
-# перезапустить процесс, иначе он продолжит крутить старый бинарь/юнит.
+# restart (not just --now): reinstalling over a running agent has to restart the
+# process, otherwise it keeps running the old binary and unit.
 systemctl restart "$UNIT"
-echo "✓ $UNIT установлен и запущен. Логи: journalctl -u $UNIT -f"
+echo "✓ $UNIT installed and started. Logs: journalctl -u $UNIT -f"
 
-# Доступ к Docker для агента БЕЗ выдачи ему root. Крошечный socket-proxy (wollomatic)
-# отдаёт агенту ТОЛЬКО пер-методный allowlist: GET version/list/logs + POST
-# restart/stop/start конкретного контейнера. Всё остальное (exec, create, images,
-# build, volumes, host-mount) — 403. Ни RCE, ни host-root. Слушает только 127.0.0.1.
+# Docker access for the agent WITHOUT granting it root. A tiny socket-proxy (wollomatic)
+# exposes ONLY a per-method allowlist: GET version/list/logs plus POST
+# restart/stop/start for a specific container. Everything else (exec, create, images,
+# build, volumes, host mounts) returns 403. No RCE, no host root. Binds to 127.0.0.1.
 setup_docker_proxy() {
-  command -v docker >/dev/null 2>&1 || { echo "· Docker не найден — пропускаю proxy." >&2; return; }
-  echo "→ Настраиваю bounded-доступ к Docker (socket-proxy)..."
+  command -v docker >/dev/null 2>&1 || { echo "· Docker not found - skipping the proxy." >&2; return; }
+  echo "→ Setting up bounded Docker access (socket-proxy)..."
   DGID=$(getent group docker 2>/dev/null | cut -d: -f3)
   docker rm -f kervax-docker-proxy >/dev/null 2>&1 || true
   if docker run -d --name kervax-docker-proxy --restart unless-stopped \
@@ -261,64 +265,65 @@ setup_docker_proxy() {
         -allowGET '^/(v[0-9.]+/)?(version|info|_ping|containers/json|containers/[a-zA-Z0-9_.-]+/(json|logs))' \
         -allowPOST '^/(v[0-9.]+/)?containers/[a-zA-Z0-9_.-]+/(restart|stop|start)$' >/dev/null; then
     grep -q '^docker_host=' "$CONF" || printf 'docker_host=tcp://127.0.0.1:2375\n' >> "$CONF"
-    echo "✓ Docker включён (proxy: view + restart/stop/start, без exec/create/root)."
+    echo "✓ Docker enabled (proxy: view plus restart/stop/start, no exec/create/root)."
   else
-    echo "✗ Не удалось поднять socket-proxy (docker-демон доступен?)." >&2
+    echo "✗ Could not start the socket-proxy (is the docker daemon reachable?)." >&2
   fi
 }
 
-# скачать и выполнить серверный setup-скрипт панели (kube-setup/backupserver-setup/
-# backup-setup). Они самодетектируются и молча пропускают неприменимое. Нужен bash.
+# download and run a setup helper from the panel (kube-setup/backupserver-setup/
+# backup-setup). They self-detect and silently skip what does not apply. Needs bash.
 run_remote_setup() {
-  if ! command -v bash >/dev/null 2>&1; then echo "· $1: нужен bash — пропускаю." >&2; return; fi
-  # общий маршрут: раздаётся ЛЮБОЙ хелпер каталога. Раньше тут был /api/agent/$1.sh —
-  # персональные URL есть только у kube/backup/backupserver, поэтому webserver-setup
-  # на свежей ноде молча получал 404 и не ставился.
+  if ! command -v bash >/dev/null 2>&1; then echo "· $1: bash is required - skipping." >&2; return; fi
+  # a shared route serving ANY helper from the directory. This used to be
+  # /api/agent/$1.sh - only kube/backup/backupserver have personal URLs, so on a fresh
+  # node webserver-setup silently got a 404 and was never installed.
   curl -fsSL --connect-timeout 15 "${URL%/}/api/agent/setup/$1.sh" | bash \
-    || echo "· $1: не удалось выполнить (пропускаю)." >&2
+    || echo "· $1: could not run it (skipping)." >&2
 }
 
-# Хелперы, безопасные на любой ноде (KERVAX_SETUP_ALWAYS): список СПРАШИВАЕМ У ПАНЕЛИ,
-# а не держим захардкоженным здесь. Иначе каждый новый хелпер надо дописывать в
-# установщик — о чём забывали, и свежая нода сразу просила «сходи выполни руками».
+# Helpers safe on any node (KERVAX_SETUP_ALWAYS): the list is REQUESTED FROM THE PANEL
+# rather than hardcoded here. Otherwise every new helper would have to be added to the
+# installer - which was forgotten, and a fresh node immediately asked for a manual
+# step.
 install_always_setups() {
   idx=$(curl -fsSL --connect-timeout 15 "${URL%/}/api/agent/setup/index" 2>/dev/null) || {
-    echo "· каталог хелперов недоступен — ставлю только детектируемые." >&2; return; }
-  # без jq: каждая запись каталога — свой объект, берём имена тех, где always=true
+    echo "· the helper index is unavailable - installing only detected ones." >&2; return; }
+  # without jq: each index entry is its own object, take names where always=true
   names=$(printf '%s' "$idx" | tr '{' '\n' | grep '"always": *true' | sed -n 's/.*"name": *"\([^"]*\)".*/\1/p')
   for n in $names; do
-    echo "→ Хелпер $n..."
+    echo "→ Helper $n..."
     run_remote_setup "$n"
   done
 }
 
-# ── авто-интеграции: включаем всё применимое, чтобы после добавления сервера
-#    ничего не доделывать вручную. Все привилегии УЗКИЕ (proxy/SA/sudoers). ──
+# -- auto integrations: enable everything applicable so nothing has to be finished by
+#    hand after adding a server. All privileges are NARROW (proxy/SA/sudoers). --
 if [ "$NO_AUTO" = 0 ]; then
   # Docker
   command -v docker >/dev/null 2>&1 && setup_docker_proxy
-  # всё, что безопасно везде (вотчдог, время, домены, инвентарь СУБД, …) — из каталога
+  # everything safe everywhere (watchdog, clock, domains, database inventory, ...)
   install_always_setups
-  # Kubernetes (k0s/k3s/microk8s/kubeadm) → узкий read-only+ SA (kube-setup.sh)
+  # Kubernetes (k0s/k3s/microk8s/kubeadm) -> a narrow read-only+ SA (kube-setup.sh)
   if command -v k0s >/dev/null 2>&1 || command -v k3s >/dev/null 2>&1 \
      || command -v microk8s >/dev/null 2>&1 || command -v kubelet >/dev/null 2>&1 \
      || [ -e /etc/rancher/k3s/k3s.yaml ] || [ -e /etc/kubernetes/admin.conf ] || [ -d /var/lib/k0s ]; then
-    echo "→ Kubernetes найден — включаю read-only доступ (узкий SA)..."
+    echo "→ Kubernetes detected - enabling read-only access (narrow SA)..."
     run_remote_setup kube-setup
   fi
-  # сервер бэкапов (rest-server) → read-only статистика репозиториев
+  # backup server (rest-server) -> read-only repository statistics
   if [ -d /app/rest-server/data ] \
      || { command -v docker >/dev/null 2>&1 && docker ps --format '{{.Image}}' 2>/dev/null | grep -q 'rest-server'; }; then
-    echo "→ Сервер бэкапов найден — включаю статистику репозиториев..."
+    echo "→ Backup server detected - enabling repository statistics..."
     run_remote_setup backupserver-setup
   fi
-  # клиент restic-бэкапа → управление из панели (узкий sudoers-helper)
+  # restic backup client -> control from the panel (a narrow sudoers helper)
   if [ -e /etc/systemd-rest.conf ] || [ -e /etc/systemd/system/systemd-rest.timer ] \
      || [ -x /usr/local/lib/.restic/restic ]; then
-    echo "→ restic-бэкап найден — включаю управление из панели..."
+    echo "→ restic backup detected - enabling control from the panel..."
     run_remote_setup backup-setup
   fi
-  # перезапуск, чтобы агент подхватил docker_host/kube.json/хелперы
+  # restart so the agent picks up docker_host/kube.json/helpers
   systemctl restart "$UNIT" 2>/dev/null || true
 elif [ "$WANT_DOCKER" = 1 ]; then
   setup_docker_proxy

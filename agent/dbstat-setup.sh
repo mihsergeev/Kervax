@@ -1,46 +1,48 @@
 #!/usr/bin/env bash
-# Kervax: инвентарь СУБД (базы, их размеры, логины, версия движка) — для раздела «Сервисы».
-# Неприв. агент (kervax) в контейнеры ходить не может (docker-exec запрещён его проксёй),
-# поэтому root-хелпер по таймеру опрашивает движки и пишет /var/lib/kervax/db-stats.json.
-# Агент ТОЛЬКО ЧИТАЕТ этот файл.
+# Kervax: database inventory (databases, their sizes, logins, engine version) for the
+# Services section. The unprivileged agent (kervax) cannot reach into containers (docker
+# exec is blocked by its own proxy), so a root helper queries the engines on a timer and
+# writes /var/lib/kervax/db-stats.json. The agent ONLY READS that file.
 #
-# ПАРОЛИ НЕ ХРАНИМ И НЕ ПЕРЕДАЁМ: в контейнер ходим `docker exec` под служебным юзером,
-# пароль (если нужен) берём из окружения САМОГО контейнера — ровно как уже делает
-# дамп-хелпер backup-setup. Наружу отдаём только имена баз/логинов, размеры и версию.
+# NO PASSWORDS ARE STORED OR PASSED AROUND: containers are entered with `docker exec` as a
+# service user, and the password (when needed) is taken from THE CONTAINER'S OWN
+# environment — exactly as the backup-setup dump helper already does. Only database and
+# login names, sizes and the version leave this script.
 set -euo pipefail
 
-KERVAX_SETUP_VERSION=0.3  # МАЖОР.МИНОР; сравнивается покомпонентно
-KERVAX_SETUP_ALWAYS=1     # безопасно на любой ноде: без СУБД собирает пустой файл
+KERVAX_SETUP_VERSION=0.3  # MAJOR.MINOR; compared component-wise
+KERVAX_SETUP_ALWAYS=1     # safe on any node: without a database it collects an empty file
 
 HELPER_DIR=/lib65/kervax
 HELPER="$HELPER_DIR/kervax-db-stats"
 STATE_DIR=/var/lib/kervax
 OUT="$STATE_DIR/db-stats.json"
 
-if [ "$(id -u)" != 0 ]; then echo "Нужен root." >&2; exit 1; fi
+if [ "$(id -u)" != 0 ]; then echo "Root required." >&2; exit 1; fi
 
-# Родителя /var/lib/kervax задаём 0755 ЯВНО (под umask 077 неприв. агент иначе не войдёт).
+# The parent /var/lib/kervax is set to 0755 EXPLICITLY (under umask 077 the unprivileged agent could not enter).
 install -d -m 0755 "$HELPER_DIR" "$STATE_DIR" "$STATE_DIR/versions"
 
 cat > "$HELPER" <<'HELPER_EOF'
 #!/usr/bin/env bash
-# Снимает инвентарь СУБД → /var/lib/kervax/db-stats.json. Только чтение, без паролей наружу.
+# Collects the database inventory -> /var/lib/kervax/db-stats.json. Read only, no passwords leave.
 set -u
 OUT=/var/lib/kervax/db-stats.json
 TMP="$OUT.tmp.$$"
-TO=10   # таймаут на один запрос: подвисшая база не должна вешать сбор
+TO=10   # per-query timeout: a hung database must not hang the whole collection
 
 have() { command -v "$1" >/dev/null 2>&1; }
 esc() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g' | tr -d '\000-\037'; }
 
-# «имя|размер» построчно → JSON-массив [{"name":…,"size":…}]. Ограничение сверху:
-# на ноде бывает под сотню инстансов (видели 104), полный список раздул бы отчёт.
+# "name|size" per line -> a JSON array [{"name":...,"size":...}]. There is an upper bound:
+# a node can hold close to a hundred instances (104 seen), and a full list would bloat the
+# report.
 MAXDB=20
 MAXUSR=50
-# ВАЖНО: размер печатаем СТРОКОЙ (%s), а не числом. У mawk (дефолт в Debian/Ubuntu)
-# printf "%d" 32-битный: всё больше 2 ГиБ схлопывалось ровно в 2147483648 — база на
-# 2.6 ГБ показывалась как «2048.0 МБ», и так у каждой крупной. Значение и так приходит
-# из БД целым, конвертировать его незачем.
+# IMPORTANT: the size is printed as a STRING (%s), not a number. In mawk (the default on
+# Debian/Ubuntu) printf "%d" is 32-bit: anything above 2 GiB collapsed to exactly
+# 2147483648, so a 2.6 GB database was shown as "2048.0 MB", and so was every large one.
+# The value already arrives from the database as an integer; there is nothing to convert.
 dbs_json() {
   awk -F'|' -v max="$MAXDB" 'BEGIN{printf "["; n=0}
     n>=max{next}
@@ -52,7 +54,7 @@ dbs_json() {
       printf "%s{\"name\":\"%s\",\"size\":%s}", (n++?",":""), name, size }
     END{printf "]"}'
 }
-# построчный список → JSON-массив строк
+# a line-by-line list -> a JSON array of strings
 list_json() {
   awk -v max="$MAXUSR" 'BEGIN{printf "["; n=0}
     n>=max{next}
@@ -65,13 +67,13 @@ list_json() {
 ENTRIES=""
 add_entry() { # engine container version dbs_json users_json
   local e="$1" c="$2" v="$3" d="$4" u="$5"
-  [ "$d" = "[]" ] && [ "$u" = "[]" ] && [ -z "$v" ] && return 0  # совсем пусто — не шумим
+  [ "$d" = "[]" ] && [ "$u" = "[]" ] && [ -z "$v" ] && return 0  # nothing at all - stay quiet
   ENTRIES="$ENTRIES${ENTRIES:+,}{\"engine\":\"$(esc "$e")\",\"container\":\"$(esc "$c")\",\"version\":\"$(esc "$v")\",\"dbs\":$d,\"users\":$u}"
 }
 
 # ── PostgreSQL ─────────────────────────────────────────────────────────────────
-# psql запускаем от служебного юзера postgres (peer-аутентификация по сокету) —
-# пароль не нужен; фолбэк на POSTGRES_USER контейнера, если образ нестандартный.
+# psql runs as the postgres service user (peer authentication over the socket), so no
+# password is needed; falls back to the container's POSTGRES_USER for non-standard images.
 pg_q() { # container query
   local c="$1" q="$2" u
   if [ -n "$c" ]; then
@@ -92,18 +94,19 @@ collect_pg() {
 }
 
 # ── MySQL / MariaDB ────────────────────────────────────────────────────────────
-# Пароль берём из окружения контейнера ВНУТРИ него (MYSQL_PWD), в аргументы не
-# попадает — иначе светился бы в `ps` на хосте.
+# The password is read from the container's environment INSIDE it (MYSQL_PWD) and never
+# passed as an argument — otherwise it would show up in `ps` on the host.
 my_q() { # container query
-  # Клиент выбираем ПО ФАКТУ наличия. В mariadb:11 команды `mysql` больше нет —
-  # только `mariadb`, и запрос молча падал в /dev/null: движок в отчёте есть,
-  # а баз, размеров и логинов нет ни одного. Снаружи это выглядит как «инвентарь
-  # почему-то пустой», без единой подсказки, что клиента просто не нашли.
+  # The client is chosen by what actually exists. mariadb:11 no longer ships a `mysql`
+  # command — only `mariadb` — and the query failed silently into /dev/null: the engine
+  # appeared in the report while not a single database, size or login did. From outside it
+  # looked like "the inventory is empty for some reason", with no hint that the client was
+  # simply not found.
   local c="$1" q="$2"
   if [ -n "$c" ]; then
-    # MYSQL_PWD передаём ПРЕФИКСОМ команды, а не отдельным присваиванием: без
-    # export переменная осталась бы в оболочке и до клиента не дошла — «using
-    # password: NO» при заданном пароле.
+    # MYSQL_PWD is passed as a command PREFIX rather than a separate assignment: without
+    # export the variable would stay in the shell and never reach the client — "using
+    # password: NO" despite a password being set.
     timeout $TO docker exec "$c" sh -c 'if command -v mysql >/dev/null 2>&1; then CLI=mysql; else CLI=mariadb; fi
       MYSQL_PWD="${MYSQL_ROOT_PASSWORD:-${MARIADB_ROOT_PASSWORD:-}}" exec "$CLI" -u root -N -B -e "'"$q"'"' 2>/dev/null
   elif have mysql; then
@@ -137,8 +140,8 @@ collect_ch() {
 }
 
 # ── Redis ──────────────────────────────────────────────────────────────────────
-# «Базы» у Redis — db0..dbN; вместо размера показываем число ключей (размер только
-# суммарный, по used_memory — на отдельные БД он не разбит).
+# Redis "databases" are db0..dbN; instead of a size we show the key count (only a total
+# size exists, via used_memory, and it is not broken down per database).
 rd_q() { local c="$1" a="$2"; [ -n "$c" ] \
   && timeout $TO docker exec "$c" redis-cli info "$a" 2>/dev/null \
   || timeout $TO redis-cli info "$a" 2>/dev/null; }
@@ -150,7 +153,7 @@ collect_redis() {
   add_entry redis "$c" "$v" "$d" "[]"
 }
 
-# ── обход: контейнеры по образу + хостовые процессы ────────────────────────────
+# -- sweep: containers by image plus host processes --------------------------------
 if have docker; then
   docker ps --format '{{.Names}}|{{.Image}}' 2>/dev/null | while IFS='|' read -r name img; do
     echo "$name|$img"
@@ -166,7 +169,7 @@ if have docker; then
   done < /tmp/kv-dbs.$$
   rm -f /tmp/kv-dbs.$$
 fi
-# хостовые (не в docker) — только если движок реально слушает локально
+# host engines (not in docker) - only if one is actually listening locally
 pgrep -x postgres        >/dev/null 2>&1 && have psql             && collect_pg ""
 pgrep -x mysqld          >/dev/null 2>&1 && { have mysql || have mariadb; } && collect_mysql ""
 pgrep -x mariadbd        >/dev/null 2>&1 && { have mysql || have mariadb; } && collect_mysql ""
@@ -181,14 +184,14 @@ chmod 0755 "$HELPER"
 
 cat > /etc/systemd/system/kervax-db-stats.service <<EOF
 [Unit]
-Description=Kervax: инвентарь СУБД (базы, размеры, логины)
+Description=Kervax: database inventory (databases, sizes, logins)
 [Service]
 Type=oneshot
 ExecStart=$HELPER
 EOF
 cat > /etc/systemd/system/kervax-db-stats.timer <<'EOF'
 [Unit]
-Description=Kervax: периодически обновлять инвентарь СУБД
+Description=Kervax: refresh the database inventory periodically
 [Timer]
 OnBootSec=3min
 OnUnitActiveSec=15min
@@ -199,8 +202,8 @@ EOF
 
 systemctl daemon-reload
 systemctl enable --now kervax-db-stats.timer >/dev/null 2>&1 || true
-"$HELPER" || true   # первый прогон сразу
+"$HELPER" || true   # run once immediately
 
 echo "$KERVAX_SETUP_VERSION" > "$STATE_DIR/versions/dbstat-setup.ver"
 chmod 0644 "$STATE_DIR/versions/dbstat-setup.ver"
-echo "✓ dbstat-setup: инвентарь СУБД → $OUT (обновление при старте и каждые 15 мин)."
+echo "✓ dbstat-setup: database inventory -> $OUT (refreshed at boot and every 15 minutes)."
