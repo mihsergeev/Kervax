@@ -1,15 +1,15 @@
 # Kervax
 
-Enterprise-grade monitoring that works out of the box: sites, servers,
-containers, databases and backups in one panel. A single command brings it all
-up, the agent discovers what runs on each machine, dashboards open already filled
-in, and alerts land where people actually read them.
+Enterprise-grade monitoring that is ready to use right after installation: sites,
+servers, containers, databases and backups in one panel. The install runs as a
+single command, the agent detects what runs on each machine, dashboards fill in
+from the first check, and alerts go to Telegram or a webhook.
 
-Kervax looks at your infrastructure from both sides at once. From the outside, as
-a user does: status, keyword, response time, certificate and domain expiry — and
-from other regions too. From the inside, through a small agent that connects
-**out** to the panel: the node's ports stay closed, and the panel keeps nothing
-but a hash of each agent token.
+Infrastructure is visible from both sides at once. From the outside, through
+external checks: response code, keyword, response time, certificate and domain
+expiry, including through proxies in other networks. From the inside, through an
+agent that uses **outbound** connections only: no port is opened on the node, and
+the panel stores a hash of the agent token rather than the token.
 
 [Русская версия](README.ru.md) · [kervax.ru](https://kervax.ru) · [Install guide](docs/install.md) · [Why another monitoring panel](docs/why.md) · [Changelog](CHANGELOG.md)
 
@@ -25,16 +25,16 @@ domain of your own required — `<server-ip>.sslip.io` works out of the box.
 
 <table>
 <tr>
-<td width="50%"><a href="docs/img/servers.png"><img src="docs/img/servers.png" alt="Servers"></a><br><sub>Servers — the fleet at a glance, with what is actually loaded</sub></td>
-<td width="50%"><a href="docs/img/server-detail.png"><img src="docs/img/server-detail.png" alt="Server detail"></a><br><sub>Server detail — CPU, memory, disks, network, processes</sub></td>
+<td width="50%"><a href="docs/img/servers.png"><img src="docs/img/servers.png" alt="Servers"></a><br><sub>Servers: the fleet with current load</sub></td>
+<td width="50%"><a href="docs/img/server-detail.png"><img src="docs/img/server-detail.png" alt="Server detail"></a><br><sub>Server card: CPU, memory, disks, network, processes</sub></td>
 </tr>
 <tr>
-<td width="50%"><a href="docs/img/sites.png"><img src="docs/img/sites.png" alt="Sites"></a><br><sub>Sites — uptime, certificates, domains, partial availability</sub></td>
-<td width="50%"><a href="docs/img/site-detail.png"><img src="docs/img/site-detail.png" alt="Monitor detail"></a><br><sub>Monitor detail — uptime, response time per location, incidents</sub></td>
+<td width="50%"><a href="docs/img/sites.png"><img src="docs/img/sites.png" alt="Sites"></a><br><sub>Sites: availability, certificates, domains, checks from several locations</sub></td>
+<td width="50%"><a href="docs/img/site-detail.png"><img src="docs/img/site-detail.png" alt="Monitor detail"></a><br><sub>Monitor card: availability, response time per location, incidents</sub></td>
 </tr>
 </table>
 
-<sub>The screenshots are taken from a running panel filled with demo data —
+<sub>The screenshots are taken from a running panel on demo data;
 the same frontend that ships in the image. Every host, domain and address in
 them is invented (RFC 2606 / RFC 5737). See <a href="docs/make-shots.py">docs/make-shots.py</a>.</sub>
 
