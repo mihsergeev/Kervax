@@ -328,7 +328,9 @@ def _setup_scripts() -> tuple[str, ...]:
     try:
         return tuple(sorted(
             f[:-3] for f in os.listdir(get_settings().agent_dist_dir)
-            if f.endswith(".sh") and f != "install.sh"
+            # установщик и его русская копия — не helper'ы: попади они в каталог,
+            # агент попытался бы выполнить их как setup-скрипт
+            if f.endswith(".sh") and f not in ("install.sh", "install-ru.sh")
         ))
     except OSError:
         return ()
@@ -1774,6 +1776,20 @@ async def install_script() -> PlainTextResponse:
     path = os.path.join(get_settings().agent_dist_dir, "install.sh")
     if not os.path.exists(path):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "install.sh не найден")
+    with open(path, encoding="utf-8") as f:
+        return PlainTextResponse(f.read(), media_type="text/x-shellscript")
+
+
+@agent_router.get("/install-ru.sh")
+async def install_script_ru() -> PlainTextResponse:
+    """Тот же установщик с сообщениями на русском.
+
+    Основной install.sh англоязычный — его видят все, кто ставит панель. Русская
+    копия нужна там, где команду выполняет человек, которому так понятнее, и
+    отличается она ровно языком вывода."""
+    path = os.path.join(get_settings().agent_dist_dir, "install-ru.sh")
+    if not os.path.exists(path):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "install-ru.sh не найден")
     with open(path, encoding="utf-8") as f:
         return PlainTextResponse(f.read(), media_type="text/x-shellscript")
 

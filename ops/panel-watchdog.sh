@@ -1,29 +1,29 @@
 #!/bin/bash
-# Хостовый сторож Kervax (dead-man's-switch, вне docker).
+# Kervax host watchdog (a dead man's switch, outside docker).
 #
-# Панель не может сама сообщить о собственной смерти по своему же каналу, поэтому
-# нужен наблюдатель ВНЕ её процесса. Этот скрипт — такой наблюдатель на хосте
-# панели: он читает «пульс», который планировщик пишет раз в минуту в
-# <data>/heartbeat (backend/app/heartbeat.py), и НЕЗАВИСИМО шлёт в Telegram/webhook,
-# если:
-#   • пульс протух (>MAX_AGE) — контейнер/планировщик/БД мертвы или зависли;
-#   • alerts_ok=0 — само-тест канала алертов панели не прошёл (протух токен / TG
-#     заблокирован).
-# Креды (токен/чат/зеркало) берёт из самого пульса, поэтому достучится даже когда
-# панель и БД уже не отвечают. Алертит только на переходе состояния (без спама).
+# A panel cannot report its own death through its own channel, so an observer OUTSIDE its
+# process is required. This script is that observer, running on the panel host: it reads the
+# heartbeat the scheduler writes every minute into <data>/heartbeat
+# (backend/app/heartbeat.py) and sends to Telegram/webhook INDEPENDENTLY when:
+#   * the heartbeat is stale (>MAX_AGE) - the container, scheduler or database is dead or hung;
+#   * alerts_ok=0 - the panel's own alert-channel self-test failed (expired token, Telegram
+#     blocked).
+# Credentials (token, chat, mirror) come from the heartbeat itself, so it gets through even
+# when the panel and the database no longer answer. It alerts only on a state change, without
+# repeating itself.
 #
-# УСТАНОВКА (на хосте панели, от root):
+# INSTALLATION (on the panel host, as root):
 #   install -D -m755 ops/panel-watchdog.sh /lib65/kervax/panel-watchdog.sh
-#   # поправьте HB ниже под свой путь data (по умолчанию /root/kervax/data/heartbeat)
+#   # adjust HB below to your data path (default /root/kervax/data/heartbeat)
 #   echo '*/5 * * * * root /lib65/kervax/panel-watchdog.sh' > /etc/cron.d/kervax-watchdog
 #   chmod 644 /etc/cron.d/kervax-watchdog
-# (скрипт — в /lib65, т.к. /usr исключён из бэкапа; cron-конфиг в /etc.)
+# (the script lives in /lib65 because /usr is excluded from backups; the cron config is in /etc.)
 
 set -u
-HB="${KERVAX_HEARTBEAT:-/root/kervax/data/heartbeat}"   # путь к файлу пульса на хосте
+HB="${KERVAX_HEARTBEAT:-/root/kervax/data/heartbeat}"   # path to the heartbeat file on the host
 STATE=/lib65/kervax/watchdog.state
-MAX_AGE="${KERVAX_HB_MAX_AGE:-600}"                       # сек: пульс старше — тревога
-STRIKES="${KERVAX_WD_STRIKES:-2}"                        # проверок ПОДРЯД с проблемой до тревоги
+MAX_AGE="${KERVAX_HB_MAX_AGE:-600}"                       # seconds: an older heartbeat raises an alarm
+STRIKES="${KERVAX_WD_STRIKES:-2}"                        # consecutive failing checks before alarming
 NOW=$(date +%s)
 
 val() { grep -m1 "^$1=" "$HB" 2>/dev/null | cut -d= -f2-; }
@@ -43,25 +43,25 @@ send() {
 
 problem=""
 if [ ! -f "$HB" ]; then
-  problem="файл пульса отсутствует — планировщик не пишет heartbeat (панель не запущена?)"
+  problem="the heartbeat file is missing - the scheduler is not writing it (is the panel running?)"
 else
   ts=$(val ts); ok=$(val alerts_ok); age=$(( NOW - ${ts:-0} ))
   if [ "${ts:-0}" -eq 0 ] || [ "$age" -gt "$MAX_AGE" ]; then
-    problem="панель молчит ${age}с (>${MAX_AGE}с) — контейнер/планировщик/БД мертвы или зависли"
+    problem="the panel has been silent for ${age}s (>${MAX_AGE}s) - container, scheduler or database is dead or hung"
   elif [ "$ok" = "0" ]; then
-    problem="панель жива, но канал алертов сломан (Telegram недоступен / токен невалиден)"
+    problem="the panel is alive but its alert channel is broken (Telegram unreachable or the token is invalid)"
   fi
 fi
 
-# какая именно панель (из пульса) — чтобы в алерте было видно, что упало
+# which panel exactly (from the heartbeat), so the alert says what went down
 panel=$(val panel)
 [ -z "$panel" ] && panel="$(hostname)"
 tag="🚑 Kervax watchdog [$panel]"
 
-# Дебаунс: тревогу шлём лишь после STRIKES проверок ПОДРЯД с проблемой — чтобы
-# кратковременные события (рестарт панели при деплое, разовый блип канала) не
-# будили сторожа. Состояние: строка1 = слали ли уже (ok|problem), строка2 = стрик.
-# alerted — outstanding-тревога; strikes — счётчик подряд-обнаружений до первой тревоги.
+# Debounce: an alarm is sent only after STRIKES consecutive failing checks, so short-lived
+# events (a panel restart during a deploy, a single channel blip) do not wake the watchdog.
+# State: line 1 = whether an alarm was already sent (ok|problem), line 2 = the streak.
+# alerted is the outstanding alarm; strikes counts consecutive detections before the first one.
 alerted=$(sed -n 1p "$STATE" 2>/dev/null); [ -z "$alerted" ] && alerted=ok
 strikes=$(sed -n 2p "$STATE" 2>/dev/null); case "$strikes" in ''|*[!0-9]*) strikes=0;; esac
 
@@ -74,7 +74,7 @@ if [ -n "$problem" ]; then
 else
   strikes=0
   if [ "$alerted" = "problem" ]; then
-    send "✅ Kervax watchdog [$panel]: панель снова в норме."
+    send "✅ Kervax watchdog [$panel]: the panel is back to normal."
     alerted=ok
   fi
 fi

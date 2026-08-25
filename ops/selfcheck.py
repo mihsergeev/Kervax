@@ -54,7 +54,10 @@ def check_helpers() -> None:
     """Каждый раздаваемый helper должен иметь человекочитаемую подпись."""
     srv = read("backend/app/api/servers.py")
     labels = set(re.findall(r'^\s*"([a-z-]+)":', block(srv, "_SETUP_LABEL = {"), re.M))
-    files = {f[:-3] for f in os.listdir("agent") if f.endswith(".sh") and f != "install.sh"}
+    # установщик и его русская копия helper'ами не являются — панель их не
+    # раздаёт через каталог и не следит за их версиями
+    installers = {"install.sh", "install-ru.sh"}
+    files = {f[:-3] for f in os.listdir("agent") if f.endswith(".sh") and f not in installers}
     for name in sorted(files - labels):
         fail("helper", f"«{name}» без подписи в _SETUP_LABEL — в UI покажется техимя")
     for name in sorted(labels - files):

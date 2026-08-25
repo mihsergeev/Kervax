@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
-# Kervax: включить ОДНОКЛИК-синхронизацию времени из панели.
+# Kervax: enable one-click clock synchronisation from the panel.
 #
-# Агент под непривилегированным `kervax` + NoNewPrivileges шагать часы не может (это root).
-# Поэтому: агент кладёт запрос в спул /var/lib/kervax/tsync-req, root path-unit исполняет
-# узким helper (синхронизация NTP + HTTP-фолбэк) и пишет ответ в /var/lib/kervax/tsync-res.
-# Агент остаётся изолированным. Действие одно (sync), панель-URL для фолбэка валидируется.
-# Запускать root'ом на ноде. Без этого helper'а панель показывает copy-paste команду.
+# Running as the unprivileged `kervax` with NoNewPrivileges, the agent cannot step the
+# clock — that requires root. So the agent drops a request into the spool
+# /var/lib/kervax/tsync-req, a root path unit runs a narrow helper (NTP sync with an HTTP
+# fallback) and writes the answer to /var/lib/kervax/tsync-res. The agent stays isolated.
+# There is exactly one action (sync), and the panel URL used for the fallback is
+# validated. Run as root on the node. Without this helper the panel only shows a
+# copy-paste command.
 set -euo pipefail
 
 HELPER_DIR=/lib65/kervax
@@ -15,19 +17,19 @@ REQ_DIR="$STATE_DIR/tsync-req"
 RES_DIR="$STATE_DIR/tsync-res"
 AGENT_USER=kervax
 
-KERVAX_SETUP_VERSION=0.2  # МАЖОР.МИНОР; сравнивается покомпонентно
-KERVAX_SETUP_ALWAYS=1     # безопасен на любой ноде → ansible ставит и при первом заходе
+KERVAX_SETUP_VERSION=0.2  # MAJOR.MINOR; compared component-wise
+KERVAX_SETUP_ALWAYS=1     # safe on any node, so it is installed on the first pass too
 if ! getent group "$AGENT_USER" >/dev/null 2>&1; then
-  echo "На этой ноде нет агента Kervax (нет группы '$AGENT_USER'). Сначала заведите ноду в панель." >&2
+  echo "No Kervax agent on this node (group '$AGENT_USER' is missing). Add the node in the panel first." >&2
   exit 2
 fi
 install -d -m 0755 "$HELPER_DIR" "$STATE_DIR" /var/lib/kervax/versions
 echo "$KERVAX_SETUP_VERSION" > /var/lib/kervax/versions/timesync-setup.ver
 chmod 0644 /var/lib/kervax/versions/timesync-setup.ver
-# спул: агент (kervax) кладёт запросы (-wx), читает/удаляет ответы (r-x + запись)
+# spool: the agent (kervax) drops requests (-wx) and reads/removes answers (r-x plus write)
 install -d -o root -g "$AGENT_USER" -m 0730 "$REQ_DIR"
 install -d -o root -g "$AGENT_USER" -m 0770 "$RES_DIR"
-# агент под ProtectSystem=strict — разрешаем ему писать спул в /var/lib/kervax
+# the agent runs under ProtectSystem=strict — allow it to write the spool in /var/lib/kervax
 if systemctl cat kervax-agent >/dev/null 2>&1; then
   install -d -m 0755 /etc/systemd/system/kervax-agent.service.d
   cat > /etc/systemd/system/kervax-agent.service.d/kervax-spool.conf <<'DROPIN'
@@ -40,13 +42,13 @@ fi
 
 cat > "$HELPER" <<'HELPER_EOF'
 #!/usr/bin/env bash
-# Kervax timesync helper (root): поднять/форсировать синхронизацию времени; при закрытом
-# исходящем NTP — грубый HTTP-фолбэк по времени панели. Действие одно: sync.
+# Kervax timesync helper (root): start or force clock synchronisation; when outbound NTP
+# is blocked, fall back roughly to the panel's clock over HTTP. One action only: sync.
 set -euo pipefail
 REQ_DIR=/var/lib/kervax/tsync-req
 RES_DIR=/var/lib/kervax/tsync-res
 
-# активный демон времени ('' = ни один не жив)
+# the active time daemon ('' = none is running)
 _active_timed() {
   local s
   for s in systemd-timesyncd chronyd chrony ntpd ntpsec openntpd; do
@@ -56,24 +58,24 @@ _active_timed() {
 
 cmd_sync() {
   local panel="$1" svc method note synced=no i httpdate now
-  # panel-URL для фолбэка принимаем только https:// (приходит из конфига агента)
+  # the fallback panel URL is accepted only as https:// (it comes from the agent config)
   case "$panel" in https://*) ;; *) panel="" ;; esac
-  # 1) есть демон? нет — поднимаем systemd-timesyncd (обычно предустановлен)
+  # 1) is a daemon present? if not, start systemd-timesyncd (usually preinstalled)
   svc="$(_active_timed || true)"
   if [ -z "$svc" ]; then
     timedatectl set-ntp true >/dev/null 2>&1 || true
     systemctl start systemd-timesyncd >/dev/null 2>&1 || true
     svc="$(_active_timed || true)"
   fi
-  # 2) форс-синк (шаг часов сразу, а не медленный slew)
+  # 2) force a sync (step the clock at once instead of a slow slew)
   case "$svc" in
     chrony*)          chronyc -a makestep >/dev/null 2>&1 || chronyc makestep >/dev/null 2>&1 || true; method="chrony makestep" ;;
     systemd-timesyncd*) timedatectl set-ntp true >/dev/null 2>&1 || true; systemctl restart systemd-timesyncd >/dev/null 2>&1 || true; method="timesyncd" ;;
     *)                method="" ;;
   esac
-  # 3) убеждаемся, что синхронизировалось — СПОСОБОМ ПОД ДЕМОН. timedatectl NTPSynchronized
-  #    на chrony-нодах часто показывает «no», хотя chrony уже синхронизирован → спрашиваем
-  #    сам chrony (waitsync: до 15 попыток с интервалом 1с, пока коррекция < 0.5с; rc 0 = ок).
+  # 3) confirm the sync USING THE DAEMON'S OWN CHECK. On chrony nodes timedatectl often
+  #    reports NTPSynchronized=no while chrony is already in sync, so ask chrony itself
+  #    (waitsync: up to 15 attempts, 1s apart, until the correction is below 0.5s; rc 0 = ok).
   case "$svc" in
     chrony*) chronyc waitsync 15 0.5 0 1 >/dev/null 2>&1 && synced=yes ;;
   esac
@@ -85,18 +87,18 @@ cmd_sync() {
   fi
   now="$(date '+%F %T %Z' 2>/dev/null || date)"
   if [ "$synced" = yes ]; then
-    echo "OK время синхронизировано (${method:-ntp}) — NTPSynchronized=yes, сейчас $now"
+    echo "OK clock synchronised (${method:-ntp}) - NTPSynchronized=yes, now $now"
     return 0
   fi
-  # 4) NTP не достался (исходящий UDP 123 закрыт?) → HTTP-фолбэк по времени панели
+  # 4) NTP unreachable (outbound UDP 123 blocked?) -> HTTP fallback to the panel's clock
   if [ -n "$panel" ]; then
     httpdate="$(curl -sI --max-time 10 "$panel/" 2>/dev/null | grep -i '^date:' | head -1 | cut -d' ' -f2- | tr -d '\r')"
     if [ -n "$httpdate" ] && date -s "$httpdate" >/dev/null 2>&1; then
-      echo "OK NTP недоступен — часы выставлены по времени панели (грубо, до секунды): $(date '+%F %T %Z'). Для точной синхронизации откройте исходящий UDP 123 (напр. ufw allow out 123/udp)"
+      echo "OK NTP unreachable - the clock was set from the panel (coarse, to the second): $(date '+%F %T %Z'). For accurate sync open outbound UDP 123 (e.g. ufw allow out 123/udp)"
       return 0
     fi
   fi
-  echo "не удалось синхронизировать: демон='${svc:-нет}', NTPSynchronized=no. Похоже, закрыт исходящий NTP (UDP 123) и HTTP-фолбэк не сработал — откройте порт или проверьте доступ к панели" >&2
+  echo "could not synchronise: daemon='${svc:-none}', NTPSynchronized=no. Outbound NTP (UDP 123) appears blocked and the HTTP fallback did not work - open the port or check access to the panel" >&2
   return 2
 }
 
@@ -126,7 +128,7 @@ esac
 HELPER_EOF
 chmod 0755 "$HELPER"; chown root:root "$HELPER"
 
-# path-unit: как только агент кладёт запрос — root исполняет его сразу
+# path unit: as soon as the agent drops a request, root executes it immediately
 cat > /etc/systemd/system/kervax-tsync-req.service <<UNIT_EOF
 [Unit]
 Description=Kervax timesync request processor
@@ -147,4 +149,4 @@ systemctl daemon-reload
 systemctl enable --now kervax-tsync-req.path >/dev/null 2>&1 || true
 "$HELPER" process-spool >/dev/null 2>&1 || true
 
-echo "timesync-setup: готово → $HELPER; одноклик-синхронизация через спул $REQ_DIR."
+echo "timesync-setup: done -> $HELPER; one-click sync through the spool $REQ_DIR."
