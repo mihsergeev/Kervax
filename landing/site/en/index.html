@@ -12,7 +12,7 @@
 <meta property="og:image" content="https://kervax.ru/shots/en/home.webp">
 <meta name="theme-color" content="#0F1117">
 <link rel="icon" type="image/svg+xml" href="/mark.svg">
-<link rel="stylesheet" href="/style.css?v=1">
+<link rel="stylesheet" href="/style.css?v=2">
 </head>
 <body>
 
@@ -38,10 +38,10 @@
     <p class="eyebrow">Open source · AGPL-3.0 · self-hosted</p>
     <h1>Enterprise-grade monitoring, out of the box</h1>
     <p class="lead">
-      Sites, servers, containers, databases and backups — in one panel.
-      A single command brings it all up: the agent discovers what runs on each
-      machine, dashboards open already filled in, and alerts land where people
-      actually read them.
+      Sites, servers, containers, databases and backups — in one panel. The
+      install runs as a single command: the agent detects what runs on each
+      machine, dashboards fill in from the first check, and alerts go to Telegram
+      or a webhook.
     </p>
     <div class="cta">
       <a class="btn" href="#install">Install in a minute</a>
@@ -66,49 +66,52 @@
 <section id="features">
   <div class="wrap">
     <p class="eyebrow-s">Features</p>
-    <h2>Your whole infrastructure on one screen</h2>
+    <h2>All infrastructure on one screen</h2>
     <p class="sub">
-      What usually lives in three separate systems is gathered here into one and
-      tied together: the monitor that went red and the machine behind it are two
-      clicks apart, on the same timeline.
+      External checks, host metrics and backup state usually live in separate
+      systems. Here they share one database and one timeline: a failing monitor
+      and the machine behind it are two clicks apart.
     </p>
 
     <div class="cards">
       <div class="card">
-        <h3>Sites, as your users see them</h3>
-        <p>Status, keyword, response time, certificate and domain expiry. Checks
-        also run from other regions, so the panel tells you right away when a site
-        opens for you but is down for half the world.</p>
+        <h3>Sites</h3>
+        <p>Response code, a keyword in the body, response time, TLS certificate and
+        domain expiry. Sites are additionally checked through proxies in other
+        networks: if a site answers you but not them, the panel reports that as a
+        separate state rather than a plain "up".</p>
       </div>
       <div class="card">
-        <h3>Servers, from the inside</h3>
-        <p>A single static binary reports CPU per core, memory, disks per mount,
-        network, temperature, throttling, OOM kills and process tops. The
-        connection is always outbound — the node's ports stay closed.</p>
+        <h3>Servers</h3>
+        <p>A static binary reports CPU per core, memory, disks per mount, network,
+        temperature, throttling, OOM kills and top processes by load. The
+        connection is outbound only: no port is opened on the node.</p>
       </div>
       <div class="card">
-        <h3>Everything running on the machine</h3>
-        <p>Docker containers and Kubernetes pods, web servers with the domains
-        they serve, databases with their sizes, RabbitMQ queues. The panel finds
-        all of it and offers to put the discovered domains under monitoring.</p>
+        <h3>What runs on the machine</h3>
+        <p>Docker containers, Kubernetes nodes and pods, web servers with the domains
+        they serve, databases with their sizes, RabbitMQ queues. The agent detects
+        all of it; discovered domains are offered for monitoring.</p>
       </div>
       <div class="card">
-        <h3>Backups under watch</h3>
-        <p>restic state for every node, repositories on your own server, whether
-        the run fit its night window — and a vault of restore credentials that is
-        encrypted right in your browser.</p>
+        <h3>Backups</h3>
+        <p>restic state per node: time of the last snapshot, its result, whether the
+        run fit the configured window. A backup server and its clients can be
+        provisioned from the panel. Restore credentials live in a vault encrypted
+        in the browser — the server only ever holds ciphertext.</p>
       </div>
       <div class="card">
-        <h3>Alerts people keep reading</h3>
-        <p>Telegram and webhook, your own text per alert type, thresholds that
-        have to hold, snooze and per-signal mute. Routing follows roles — everyone
-        gets what they are responsible for.</p>
+        <h3>Alerts</h3>
+        <p>Telegram and webhooks, with your own text per alert type. A threshold
+        fires only after it holds for a set time, so single spikes do not create
+        incidents. Snooze, per-type muting and routing by roles and groups are
+        supported.</p>
       </div>
       <div class="card">
-        <h3>The panel watches itself too</h3>
-        <p>An outdated agent, a probe location that stopped working, a drifting
-        clock, a backup that ran late — all of it lands in "Action needed" with
-        the command that fixes it.</p>
+        <h3>Self-checks</h3>
+        <p>An outdated agent or helper, an unreachable probe location, clock drift on
+        a node, a backup outside its window — all of it collects in "Action
+        needed", together with the command that resolves it.</p>
       </div>
     </div>
   </div>
@@ -117,11 +120,11 @@
 <section id="box">
   <div class="wrap">
     <p class="eyebrow-s">Out of the box</p>
-    <h2>Working where a configuration project usually begins</h2>
+    <h2>Ready to use without assembling a stack</h2>
     <p class="sub">
-      A classic monitoring stack is assembled: an exporter per concern, a scrape
-      config, rules, alert routes and a dashboard for each thing you want to see.
-      Kervax delivers the same results already wired together.
+      A conventional monitoring stack has to be assembled: an exporter per
+      concern, a scrape config, rules, alert routes and a dashboard per entity.
+      Kervax provides the same data already wired together.
     </p>
 
     <table class="cmp">
@@ -133,26 +136,26 @@
             <td class="yes"><b>one command on the node</b>, data in seconds</td>
             <td class="old">node_exporter, a scrape target, reload, import a dashboard</td></tr>
         <tr><td>Checking a site from outside</td>
-            <td class="yes"><b>type the address</b> — scheme, certificate and domain follow</td>
+            <td class="yes"><b>the monitor address</b> — scheme, certificate and domain are detected</td>
             <td class="old">blackbox_exporter, a job with relabeling, a rule, a panel</td></tr>
         <tr><td>Certificate and domain expiry</td>
             <td class="yes"><b>counted automatically</b>, reminders at 14 / 7 / 1 days</td>
             <td class="old">a probe and a PromQL rule; for domains, your own exporter</td></tr>
         <tr><td>Uptime over 30 days</td>
-            <td class="yes"><b>a number on the card</b></td>
+            <td class="yes"><b>shown on the monitor card</b></td>
             <td class="old">a recording rule and a PromQL query</td></tr>
         <tr><td>Incidents</td>
-            <td class="yes"><b>open and close themselves</b>, with history</td>
+            <td class="yes"><b>opened and closed automatically</b>, with history</td>
             <td class="old">routes, grouping, inhibition and silences in config files</td></tr>
         <tr><td>Containers, pods, databases, queues</td>
-            <td class="yes"><b>the agent finds them</b></td>
+            <td class="yes"><b>detected by the agent</b></td>
             <td class="old">cAdvisor, kube-state-metrics, postgres_exporter, rabbitmq_exporter…</td></tr>
         <tr><td>Backup state</td>
             <td class="yes"><b>restic status</b> per node, right in the panel</td>
             <td class="old">handled separately</td></tr>
         <tr><td>Who sees what</td>
             <td class="yes"><b>roles and groups</b>, enforced in the API</td>
-            <td class="old">Grafana orgs plus separate access to the store</td></tr>
+            <td class="old">Grafana orgs and separate access to the store</td></tr>
         <tr><td>Dashboards</td>
             <td class="yes"><b>filled in at first sign-in</b></td>
             <td class="old">build or import them</td></tr>
@@ -160,9 +163,9 @@
     </table>
 
     <p class="note">
-      Prometheus remains the strongest tool for application metrics and ad-hoc
-      PromQL — and lives happily alongside. Kervax covers the infrastructure: the
-      host, the site, the certificate, the container, the backup.
+      Prometheus remains the better choice for application metrics and ad-hoc
+      PromQL queries, and runs alongside without conflict. Kervax covers the
+      infrastructure layer: host, site, certificate, container, backup.
     </p>
   </div>
 </section>
@@ -172,8 +175,8 @@
     <p class="eyebrow-s">Interface</p>
     <h2>What it looks like</h2>
     <p class="sub">
-      Taken from a running panel filled with demo data — the same interface you
-      get after installing.
+      Taken from a running panel on demo data; the interface looks the same after
+      an install.
     </p>
 
     <div class="gallery">
@@ -181,25 +184,25 @@
         <a class="frame" href="/shots/en/servers@2x.webp" data-lb>
           <div class="frame-bar"><i></i><i></i><i></i><span>/servers</span><em>enlarge</em></div>
           <img src="/shots/en/servers.webp" alt="Server fleet" width="1440" height="940" loading="lazy"></a>
-        <figcaption>The whole fleet at once: load, disks, groups, agent state.</figcaption>
+        <figcaption>Server list: load, disks, groups, agent state.</figcaption>
       </figure>
       <figure>
         <a class="frame" href="/shots/en/server-detail@2x.webp" data-lb>
           <div class="frame-bar"><i></i><i></i><i></i><span>/servers/web-01</span><em>enlarge</em></div>
           <img src="/shots/en/server-detail.webp" alt="Server metrics" width="1440" height="830" loading="lazy"></a>
-        <figcaption>Node detail: CPU per core, memory, disks, network, temperature.</figcaption>
+        <figcaption>Server card: CPU per core, memory, disks, network, temperature.</figcaption>
       </figure>
       <figure>
         <a class="frame" href="/shots/en/sites@2x.webp" data-lb>
           <div class="frame-bar"><i></i><i></i><i></i><span>/sites</span><em>enlarge</em></div>
           <img src="/shots/en/sites.webp" alt="Site monitors" width="1440" height="1180" loading="lazy"></a>
-        <figcaption>Sites: uptime, certificates, domains and partial availability.</figcaption>
+        <figcaption>Site monitors: availability, certificates, domains, checks from several locations.</figcaption>
       </figure>
       <figure>
         <a class="frame" href="/shots/en/backups@2x.webp" data-lb>
           <div class="frame-bar"><i></i><i></i><i></i><span>/backups</span><em>enlarge</em></div>
           <img src="/shots/en/backups.webp" alt="Backups" width="1440" height="1000" loading="lazy"></a>
-        <figcaption>Backups: freshness, repositories, schedule, credential vault.</figcaption>
+        <figcaption>Backups: last snapshot time, repositories, schedule, credential vault.</figcaption>
       </figure>
     </div>
   </div>
@@ -208,11 +211,11 @@
 <section id="install">
   <div class="wrap">
     <p class="eyebrow-s">Install</p>
-    <h2>One command and the panel is ready</h2>
+    <h2>Install with one command</h2>
     <p class="sub">
-      Run it on a fresh Linux server. It installs Docker, brings up Caddy with a
-      Let's Encrypt certificate, generates the secrets and prints the panel's
-      address together with the admin password.
+      Runs on a clean Linux server. The command installs Docker, brings up Caddy
+      with a Let's Encrypt certificate, generates the secrets and prints the panel
+      address with the admin password.
     </p>
 
     <div class="cmd">
@@ -222,25 +225,25 @@
 
     <div class="steps">
       <div class="step">
-        <b>Your own domain, optionally</b>
+        <b>Your own domain is optional</b>
         <p>Without one the panel comes up on <code>&lt;server-ip&gt;.sslip.io</code> —
         with a real certificate, on https from the start.</p>
       </div>
       <div class="step">
-        <b>A server to watch</b>
-        <p>"Add server" shows a ready command. Run it on the node and the machine
-        appears with all its metrics within seconds.</p>
+        <b>Adding a server</b>
+        <p>"Add server" produces a ready command. After it runs on the node, metrics
+        appear in the panel within seconds.</p>
       </div>
       <div class="step">
-        <b>A site to watch</b>
-        <p>An address is enough. Scheme, certificate, domain and history are
-        picked up from the very first check.</p>
+        <b>Adding a site</b>
+        <p>An address is enough: scheme, certificate, domain and history are filled in
+        from the first check.</p>
       </div>
     </div>
 
     <p class="note">
-      Need your own domain, an IP allow-list, an existing nginx in front, or a
-      step-by-step walkthrough? It is all in the
+      Your own domain, an IP allow-list, an existing nginx in front and a
+      step-by-step walkthrough are covered in the
       <a href="https://github.com/mihsergeev/Kervax/blob/main/docs/install.md">installation guide</a>.
     </p>
   </div>
@@ -249,22 +252,24 @@
 <section id="security">
   <div class="wrap">
     <p class="eyebrow-s">Security</p>
-    <h2>Built to be trusted with your infrastructure</h2>
+    <h2>How access is handled</h2>
 
     <ul class="sec-list">
-      <li><b>The agent only connects outwards.</b> It listens on no port and runs
-      no shell commands, and the panel keeps nothing but a SHA-256 of its token.</li>
-      <li><b>Roles are enforced in the API.</b> An account limited to a group sees
-      only its own objects — even when an id is requested directly.</li>
-      <li><b>Everything runs without root.</b> The backend under its own user, the
-      frontend on an unprivileged image, containers with
+      <li><b>The agent uses outbound connections only.</b> It listens on no port and
+      runs no arbitrary shell commands; the panel stores a SHA-256 of its token
+      rather than the token itself.</li>
+      <li><b>Permissions are enforced in the API.</b> An account limited to a group
+      will not receive another group's object even when its id is requested
+      directly.</li>
+      <li><b>Components run without root.</b> The backend runs under its own user,
+      the frontend on an unprivileged image, and containers start with
       <code>no-new-privileges</code>.</li>
-      <li><b>Sign-in is guarded.</b> JWT plus TOTP second factor, attempt limits,
-      an audit log; passwords from 12 characters, and a weak secret is refused
-      outright.</li>
-      <li><b>Agent updates rest on an offline key.</b> Signatures are made away
-      from the server, so even a compromised panel cannot make agents run someone
-      else's code.</li>
+      <li><b>Sign-in is protected.</b> JWT with a TOTP second factor, login attempt
+      limits and an audit log. Passwords are at least 12 characters; with a weak or
+      default secret the panel refuses to start.</li>
+      <li><b>Agent updates are verified by signature.</b> The private key is kept
+      off the server, so even a panel with full access cannot push a foreign binary
+      to the nodes.</li>
     </ul>
   </div>
 </section>

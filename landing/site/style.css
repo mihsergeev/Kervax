@@ -53,7 +53,9 @@ nav .sep{width:1px; height:18px; background:var(--border); flex:0 0 auto}
   background:radial-gradient(circle, rgba(75,116,255,.13), transparent 62%);
 }
 .hero-inner{position:relative; text-align:center}
-.hero-logo{height:52px; margin-bottom:22px}
+.hero-logo{height:104px; margin-bottom:26px; max-width:100%}
+@media(max-width:900px){ .hero-logo{height:76px} }
+@media(max-width:560px){ .hero-logo{height:56px} }
 .eyebrow{color:var(--dim); font-size:13px; letter-spacing:.09em; text-transform:uppercase;
          margin:0 0 12px}
 .hero h1{font-size:46px; line-height:1.1; letter-spacing:-.03em; margin:0 auto 16px;
