@@ -596,6 +596,7 @@ class ServerUpdate(BaseModel):
     disk_crit_percent: int | None = Field(default=None, ge=0, le=100)
     temp_alert_c: int | None = Field(default=None, ge=0, le=120)
     conntrack_alert_percent: int | None = Field(default=None, ge=0, le=100)
+    db_conn_alert_percent: int | None = Field(default=None, ge=0, le=100)
     # порог глубины очереди RabbitMQ (0 = алерты по очередям на ноде выключены)
     queue_alert_depth: int | None = Field(default=None, ge=0, le=10_000_000)
     # переопределения по очередям: {"<источник>|<vhost>/<имя>": порог}, 0 = не алертить
@@ -695,6 +696,7 @@ class ServerOut(BaseModel):
     disk_crit_percent: int
     temp_alert_c: int
     conntrack_alert_percent: int
+    db_conn_alert_percent: int
     queue_alert_depth: int = 0
     # None, а не dict: в БД колонка nullable, и пустое значение приходит как NULL —
     # обязательный dict валил ServerOut пятисоткой на всём списке серверов

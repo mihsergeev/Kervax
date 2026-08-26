@@ -33,6 +33,7 @@ SERVER_ALERT_KINDS: dict[str, tuple[str, str]] = {
     "temp": ("Температура CPU", "CPU {value}°C ≥ {threshold}°C"),
     "throttle": ("Троттлинг CPU", "устойчивый тепловой троттлинг CPU ({streak} интервала подряд)"),
     "conntrack": ("Conntrack", "таблица conntrack заполнена на {value}% ≥ {threshold}%"),
+    "db_conn": ("Коннекты СУБД", "{engine}: занято {used} из {limit} подключений ({value}% ≥ {threshold}%)"),
     "disktemp": ("Температура диска", "диск {value}°C ≥ {threshold}°C"),
     "reboot": ("Перезагрузка", "перезагружен (аптайм сброшен)"),
     "oom": ("OOM-killer", "OOM-kill: ядро убило {value} процесс(ов){victim} из-за нехватки памяти"),
