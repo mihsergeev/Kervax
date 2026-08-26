@@ -1236,3 +1236,52 @@ async def test_metrics_written_no_more_often_than_interval(client, auth_headers,
     assert srv.metric_written_at is not None
 
     get_settings.cache_clear()
+
+
+async def test_server_db_connection_conditions():
+    """Занятость слотов подключений СУБД: порог, дебаунс и самый нагруженный инстанс.
+
+    Коннекты кончаются раньше, чем это станет заметно по CPU или памяти самой базы:
+    она жива и отвечает, а приложение уже получает «sorry, too many clients already».
+    """
+    from datetime import datetime, timedelta, timezone
+
+    from app import collector
+    from app.models import Server
+
+    now = datetime.now(timezone.utc)
+    s = Server(
+        name="n", token_hash="x", enabled=True, backup_not_required=True, last_seen=now,
+        offline_after_seconds=120, temp_alert_c=0, alert_sustain_seconds=900,
+        cpu_alert_percent=0, mem_alert_percent=0,
+        disk_warn_percent=0, disk_alert_percent=0, disk_crit_percent=0,
+        conntrack_alert_percent=0, disk_temp_alert_c=0, db_conn_alert_percent=85,
+        last_report={"db_stats": [
+            {"engine": "pg", "container": "spare-db", "conn_used": 10, "conn_max": 100},
+            {"engine": "pg", "container": "hot-db", "conn_used": 92, "conn_max": 100},
+        ]},
+    )
+    cond = collector._server_conditions(s, now)
+    # берём САМЫЙ нагруженный инстанс, а не первый попавшийся: алерт на сервер один
+    assert cond["db_conn"][1]["value"] == 92
+    assert cond["db_conn"][1]["engine"] == "hot-db"
+    assert cond["db_conn"][1]["used"] == 92 and cond["db_conn"][1]["limit"] == 100
+    # первый интервал: превышение есть, но не удержалось → уровень 0 (гасим всплески пулера)
+    assert cond["db_conn"][0] == 0
+
+    s.alert_state = {"db_conn_since": (now - timedelta(minutes=20)).isoformat()}
+    assert collector._server_conditions(s, now)["db_conn"][0] == 1
+
+    # ниже порога → условие есть, но уровень 0 (иначе прошлый алерт не закрылся бы)
+    s.last_report = {"db_stats": [{"engine": "pg", "conn_used": 12, "conn_max": 100}]}
+    cond = collector._server_conditions(s, now)
+    assert cond["db_conn"][0] == 0 and cond["db_conn"][1]["value"] == 12
+
+    # движок не отдал лимит (старый helper) → не выдумываем процент
+    s.last_report = {"db_stats": [{"engine": "pg", "conn_used": 5, "conn_max": 0}]}
+    assert "db_conn" not in collector._server_conditions(s, now)
+
+    # порог 0 = проверка выключена для всей ноды
+    s.db_conn_alert_percent = 0
+    s.last_report = {"db_stats": [{"engine": "pg", "conn_used": 99, "conn_max": 100}]}
+    assert "db_conn" not in collector._server_conditions(s, now)

@@ -1101,6 +1101,10 @@ const EN: Record<string, string> = {
   'Бэкап': 'Backup',
   'Бэкап содержит мониторы, серверы, локации и настройки — без метрик (тайм-серий) и без учётных записей: пользователей, их роли и доступы после восстановления придётся завести заново.':
     'A backup contains monitors, servers, locations and settings — without metrics (time-series) and without accounts: users, their roles and permissions have to be created again after a restore.',
+  'Алерт по коннектам СУБД, % (0 = выкл)': 'Database connection alert, % (0 = off)',
+  'коннекты: {u} из {m} ({p}%)': 'connections: {u} of {m} ({p}%)',
+  'Занято подключений на {c}': 'Connection slots in use on {c}',
+  'этом движке': 'this engine',
   'Скачать бэкап': 'Download backup',
   'Восстановить из файла': 'Restore from file',
   'Автобэкап на сервере': 'Auto-backup on the server',

@@ -168,6 +168,14 @@ function DbInventory({ db, t }: {
   const total = rows.reduce((a, r) => a + r.size, 0)
   const users = new Set(db.flatMap((d) => d.users ?? []))
   const vers = [...new Set(db.map((d) => d.version).filter(Boolean))]
+  // Слоты подключений: показываем самый нагруженный инстанс движка. Число само по себе
+  // ни о чём не говорит, пока не видно предела, поэтому всегда рядом с ним. Инстансы без
+  // лимита (старый helper) пропускаем: 0 из 0 выглядело бы как исправное «свободно».
+  const conn = db
+    .filter((d) => (d.conn_max ?? 0) > 0)
+    .map((d) => ({ used: d.conn_used ?? 0, max: d.conn_max ?? 0, cont: d.container ?? '' }))
+    .sort((a, b) => b.used / b.max - a.used / a.max)[0]
+  const connPct = conn ? Math.round((conn.used / conn.max) * 100) : 0
   const shown = open ? rows : rows.slice(0, 5)
   return (
     <div className="svc-db">
@@ -184,6 +192,14 @@ function DbInventory({ db, t }: {
         </span>
         {users.size > 0 && (
           <span title={[...users].join(', ')}>{t('логинов: {n}', { n: users.size })}</span>
+        )}
+        {conn && (
+          <span
+            className={connPct >= 85 ? 't-down' : connPct >= 70 ? 't-degraded' : undefined}
+            title={t('Занято подключений на {c}', { c: conn.cont || t('этом движке') })}
+          >
+            {t('коннекты: {u} из {m} ({p}%)', { u: conn.used, m: conn.max, p: connPct })}
+          </span>
         )}
         {rows.length > 5 && (
           <button className="svc-act" onClick={() => setOpen(!open)}>
