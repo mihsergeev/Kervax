@@ -348,6 +348,9 @@ class Server(Base):
     # Занятость слотов подключений СУБД, % (0=выкл). Отдельный порог: коннекты
     # кончаются задолго до того, как что-то видно по CPU/памяти самой базы.
     db_conn_alert_percent: Mapped[int] = mapped_column(Integer, default=85)
+    # За сколько дней до истечения предупреждать о сертификатах кластера и
+    # токенах Flux (0=выкл). Две недели — чтобы успеть спланировать ротацию.
+    kube_expiry_alert_days: Mapped[int] = mapped_column(Integer, default=14)
     # Глубина очереди RabbitMQ, с которой алертим. 0 = выключено для всей ноды.
     queue_alert_depth: Mapped[int] = mapped_column(Integer, default=0)
     # Переопределения по КОНКРЕТНЫМ очередям: {"<источник>|<vhost>/<имя>": порог},

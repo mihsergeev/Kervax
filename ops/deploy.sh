@@ -132,6 +132,26 @@ fi
 # would leave a list of files that are not on production, and the next cleanup would miss
 printf '%s\n' "$NEW_LIST" | ssh "$HOST" "sudo tee '$DIR/.kervax-deployed' >/dev/null"
 
+# -- The signed agent release -------------------------------------------------
+# agent-dist/ is not in the repository (the signature is made offline, off this machine's
+# git), so `git archive` cannot carry it - and a panel deployed without it keeps serving
+# the PREVIOUS release manifest: the new agent exists, is signed, and never reaches a
+# single node. Ship the manifest explicitly. Only manifest.json and manifest.sig: the
+# binaries the panel builds itself, and a stray binary here makes it refuse to serve
+# updates at all.
+if [ -f agent-dist/manifest.json ] && [ -f agent-dist/manifest.sig ]; then
+    LOCAL_AGENT=$(sed -n 's/.*"version":"\([^"]*\)".*/\1/p' agent-dist/manifest.json)
+    REMOTE_AGENT=$(ssh "$HOST" "sudo sed -n 's/.*\"version\":\"\([^\"]*\)\".*/\1/p' '$DIR/agent-dist/manifest.json' 2>/dev/null" || true)
+    if [ "$LOCAL_AGENT" != "$REMOTE_AGENT" ]; then
+        say "Shipping the signed agent release: ${REMOTE_AGENT:-none} -> $LOCAL_AGENT"
+        tar -cf - -C agent-dist manifest.json manifest.sig \
+            | ssh "$HOST" "sudo tar x -C '$DIR/agent-dist'" || die "the manifest did not arrive"
+        AGENT_SHIPPED="$LOCAL_AGENT"
+    else
+        echo "  signed agent release: $LOCAL_AGENT, already there"
+    fi
+fi
+
 # -- Build --------------------------------------------------------------------
 say "Building and starting: $SERVICES"
 ssh "$HOST" "cd '$DIR' && sudo docker compose $FILES up -d --build $SERVICES 2>&1 | tail -6" \
@@ -147,13 +167,15 @@ AFTER=$(ssh "$HOST" "cd '$DIR'
     CNT=\$(sudo docker exec -e PGPASSWORD=\"\$DBPW\" kervax-db-1 psql -U kervax -d kervax -tAc 'select (select count(*) from servers), (select count(*) from checks), (select count(*) from users)' 2>/dev/null | head -1)
     SCH=\$(sudo docker exec kervax-scheduler-1 sed -n 's/^\s*version: str = \"\([0-9.]*\)\".*/\1/p' /srv/app/config.py 2>/dev/null | head -1)
     ERR=\$(sudo docker logs kervax-backend-1 --since 3m 2>&1 | grep -ciE 'traceback|critical' || true)
-    printf '%s\n%s\n%s\n%s\n%s\n' \"\$VER\" \"\$MIG\" \"\$CNT\" \"\$SCH\" \"\$ERR\"")
+    AGT=\$(sudo docker exec kervax-backend-1 python -c 'import urllib.request;print(urllib.request.urlopen(\"http://localhost:8000/api/agent/manifest\").read().decode())' 2>/dev/null | sed -n 's/.*\"version\":\"\([^\"]*\)\".*/\1/p')
+    printf '%s\n%s\n%s\n%s\n%s\n%s\n' \"\$VER\" \"\$MIG\" \"\$CNT\" \"\$SCH\" \"\$ERR\" \"\$AGT\"")
 
 VER_AFTER=$(printf '%s' "$AFTER" | sed -n 1p)
 MIG_AFTER=$(printf '%s' "$AFTER" | sed -n 2p)
 CNT_AFTER=$(printf '%s' "$AFTER" | sed -n 3p)
 SCH_AFTER=$(printf '%s' "$AFTER" | sed -n 4p)
 ERR_AFTER=$(printf '%s' "$AFTER" | sed -n 5p)
+AGT_AFTER=$(printf '%s' "$AFTER" | sed -n 6p)
 
 BAD=0
 echo "  health:    $VER_AFTER"
@@ -171,6 +193,13 @@ echo "  data:      $CNT_BEFORE -> $CNT_AFTER"
 if [ "$SERVICES" != "${SERVICES#*scheduler}" ]; then
     echo "  scheduler: $SCH_AFTER"
     [ "$SCH_AFTER" = "$VERSION" ] || { echo "    ✗ scheduler is not on $VERSION - alerts run old code"; BAD=1; }
+fi
+# What the LIVE panel hands to agents, not what lies in the directory: the manifest is
+# baked into the image, so a file delivered but never built in reaches no one.
+if [ -n "${LOCAL_AGENT:-}" ]; then
+    echo "  agent release served: ${AGT_AFTER:-none}"
+    [ "$AGT_AFTER" = "$LOCAL_AGENT" ] \
+        || { echo "    ✗ the panel serves ${AGT_AFTER:-nothing}, not $LOCAL_AGENT - agents will not update"; BAD=1; }
 fi
 echo "  tracebacks in the backend log over 3 minutes: ${ERR_AFTER:-0}"
 [ "${ERR_AFTER:-0}" = "0" ] || BAD=1

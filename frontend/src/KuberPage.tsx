@@ -6,7 +6,9 @@ import {
   kubeCommandStatus,
   listServers,
   podFinished,
+  type FluxState,
   type KubeCommand,
+  type KubeExpiry,
   type KubeInfo,
   type KubePod,
   type KubeWorkload,
@@ -27,6 +29,32 @@ import { CountryFlag } from './CountryFlag'
 // кладёт токен в /etc/kervax/kube.json (root:kervax), перезапускает агент.
 const KUBE_ENABLE_CMD = `curl -fsSL ${window.location.origin}/api/agent/kube-setup.sh | sudo bash
 sudo systemctl restart kervax-agent`
+
+// Что именно истекает. Путь к файлу сам по себе инженеру ничего не говорит —
+// пока не сказано, чем этот файл держит кластер.
+const EXPIRY_KIND: Record<string, string> = {
+  'cluster-cert': 'сертификат control-plane',
+  kubeconfig: 'kubeconfig',
+  'kubelet-cert': 'сертификат kubelet',
+  'flux-token': 'токен Flux',
+  'secret-cert': 'TLS-сертификат',
+}
+
+// Ready=False по этим причинам — работа, а не поломка: Flux тянет артефакт или
+// докатывает релиз.
+const FLUX_TRANSIENT = new Set(['Progressing', 'Reconciling', 'ProgressingWithRetry', 'Unknown'])
+
+// К ближайшему, а не вниз — как считает бэкенд в алерте: остаток 4 дня 23 часа
+// это «5 дн.», иначе панель и Telegram называют один и тот же срок по-разному.
+function daysLeft(ts: number): number {
+  return Math.round((ts * 1000 - Date.now()) / 86400000)
+}
+
+// Цвет по остатку: красный — уже истекло, жёлтый — две недели (столько же по
+// умолчанию у алерта), дальше обычный.
+function expiryTone(d: number): string {
+  return d < 0 ? 't-down' : d <= 14 ? 't-degraded' : ''
+}
 
 function podTone(p: KubePod): string {
   // завершённые Job/CronJob-поды — история, не живой воркоад: Succeeded=ок,
@@ -369,7 +397,7 @@ function KubeHostModal({
 }) {
   const { t } = useI18n()
   const [logsPod, setLogsPod] = useState<KubePod | null>(null)
-  const [tab, setTab] = useState<'pods' | 'finished' | 'workloads' | 'nodes'>('pods')
+  const [tab, setTab] = useState<'pods' | 'finished' | 'workloads' | 'nodes' | 'expiry'>('pods')
   const [q, setQ] = useState('')
   const [sort, setSort] = useState<'state' | 'name' | 'restarts' | 'ns'>('state')
   const nodes = kube.nodes ?? []
@@ -385,10 +413,18 @@ function KubeHostModal({
     restarts: (a, b) => (b.restarts ?? 0) - (a.restarts ?? 0),
     ns: (a, b) => (a.ns || '').localeCompare(b.ns || '') || a.name.localeCompare(b.name),
   }
+  // Сроки и состояние Flux приезжают в отчёте агента (хелпер kubeexpiry-setup),
+  // а не через kube-api: у ServiceAccount панели доступа к секретам нет и не будет.
+  const expiry: KubeExpiry[] = (s.last_report?.kube_expiry ?? []).slice().sort((a, b) => a.expires - b.expires)
+  const flux: FluxState[] = s.last_report?.flux ?? []
+  const fluxBroken = flux.filter((f) => !f.ready && !FLUX_TRANSIENT.has(f.reason ?? ''))
+  const expirySoon = expiry.filter((e) => daysLeft(e.expires) <= 14).length
+  const hasExpiryTab = expiry.length > 0 || flux.length > 0
   const doneCount = pods.filter(podFinished).length
   // вкладка «Завершённые» есть только пока они есть; если последний завершённый пропал
   // (удалили/сборщик подчистил) — не залипаем на исчезнувшей вкладке
-  const curTab = tab === 'finished' && doneCount === 0 ? 'pods' : tab
+  const curTab =
+    (tab === 'finished' && doneCount === 0) || (tab === 'expiry' && !hasExpiryTab) ? 'pods' : tab
   // «Поды» = только живые; завершённые (история Job/CronJob) — своя вкладка, чтобы не
   // подмешивались к тому, что надо чинить
   const fpods = pods
@@ -399,7 +435,7 @@ function KubeHostModal({
   const fworkloads = workloads.filter((w) => !ql || `${w.name} ${w.ns} ${w.kind}`.toLowerCase().includes(ql))
   const nodesReady = nodes.filter((n) => n.ready).length
   const { running: podsRunning, active: podsActive } = podCounts(pods)
-  const tabs: { k: 'pods' | 'finished' | 'workloads' | 'nodes'; l: string; title?: string }[] = [
+  const tabs: { k: typeof tab; l: string; title?: string }[] = [
     { k: 'pods', l: t('Поды ({n})', { n: podsActive }) },
     ...(doneCount > 0
       ? [{
@@ -410,6 +446,20 @@ function KubeHostModal({
       : []),
     { k: 'workloads', l: t('Воркоады ({n})', { n: workloads.length }) },
     { k: 'nodes', l: t('Ноды ({n})', { n: nodes.length }) },
+    ...(hasExpiryTab
+      ? [{
+          k: 'expiry' as const,
+          l:
+            fluxBroken.length > 0
+              ? t('Сроки ⚠ ({n})', { n: fluxBroken.length })
+              : expirySoon > 0
+                ? t('Сроки ⏳ ({n})', { n: expirySoon })
+                : t('Сроки ({n})', { n: expiry.length }),
+          title: t(
+            'Сертификаты, kubeconfig-и и токены Flux с их сроками, плюс состояние доставки Flux. Собирает root-хелпер на самой ноде: панель токенов не видит.',
+          ),
+        }]
+      : []),
   ]
   return createPortal(
     <div className="modal-backdrop">
@@ -450,7 +500,7 @@ function KubeHostModal({
                 </button>
               ))}
             </div>
-            {curTab !== 'nodes' && (
+            {curTab !== 'nodes' && curTab !== 'expiry' && (
               <div className="modal-toolbar">
                 <input
                   className="checks-search modal-search"
@@ -502,6 +552,64 @@ function KubeHostModal({
                     />
                   ))
                 ))}
+              {curTab === 'expiry' && (
+                <>
+                  {fluxBroken.length > 0 && (
+                    <div className="kube-expiry-note t-down">
+                      {t('Доставка Flux встала: {n} ресурс(ов) не в Ready. Уже запущенное продолжает работать — по метрикам это не видно.', {
+                        n: fluxBroken.length,
+                      })}
+                    </div>
+                  )}
+                  {expiry.map((e) => {
+                    const d = daysLeft(e.expires)
+                    return (
+                      <div className={`loc-res docker-row ${expiryTone(d)}`} key={e.kind + '/' + e.where + '/' + (e.note ?? '')}>
+                        <div className="docker-c-main">
+                          <div className="docker-c-name mono">
+                            {e.where}
+                            <span className="type-chip">{t(EXPIRY_KIND[e.kind] ?? e.kind)}</span>
+                          </div>
+                          <div className="docker-c-img mono muted small">
+                            {new Date(e.expires * 1000).toLocaleDateString()}
+                            {e.note ? ` · ${e.note}` : ''}
+                          </div>
+                        </div>
+                        <div className={`docker-c-status mono small ${expiryTone(d)}`}>
+                          {d < 0 ? t('истёк') : d === 0 ? t('сегодня') : t('{n} дн.', { n: d })}
+                        </div>
+                      </div>
+                    )
+                  })}
+                  {flux.length > 0 && <div className="kube-expiry-sub muted small">{t('Ресурсы Flux')}</div>}
+                  {flux
+                    .slice()
+                    .sort((a, b) => Number(a.ready) - Number(b.ready) || a.where.localeCompare(b.where))
+                    .map((f) => (
+                      <div
+                        className={`loc-res docker-row ${f.ready ? 't-up' : FLUX_TRANSIENT.has(f.reason ?? '') ? '' : 't-down'}`}
+                        key={f.kind + '/' + f.where}
+                      >
+                        <div className="docker-c-main">
+                          <div className="docker-c-name mono">
+                            {f.where}
+                            <span className="type-chip">{f.kind}</span>
+                          </div>
+                          <div className="docker-c-img mono muted small">
+                            {f.reason || ''}
+                            {f.message ? ` · ${f.message}` : ''}
+                          </div>
+                        </div>
+                        <div className={`docker-c-status mono small ${f.ready ? 't-up' : 't-down'}`}>
+                          {f.ready ? 'Ready' : 'NotReady'}
+                        </div>
+                      </div>
+                    ))}
+                  {expiry.length === 0 && flux.length === 0 && (
+                    <div className="muted small">{t('Данных пока нет.')}</div>
+                  )}
+                </>
+              )}
               {curTab === 'nodes' &&
                 nodes.map((n) => (
                   <div className={`loc-res docker-row ${n.ready ? 't-up' : 't-down'}`} key={n.name}>
@@ -545,6 +653,12 @@ function HostRow({
   const pods = kube.pods ?? []
   const nodesReady = nodes.filter((n) => n.ready).length
   const { running, active } = podCounts(pods)
+  // Сроки видны прямо в списке: истёкший токен Flux не меняет ни одного счётчика
+  // подов, и без отдельной пометки хост в списке выглядит совершенно здоровым.
+  const fluxBroken = (s.last_report?.flux ?? []).filter(
+    (f) => !f.ready && !FLUX_TRANSIENT.has(f.reason ?? ''),
+  ).length
+  const soon = (s.last_report?.kube_expiry ?? []).filter((e) => daysLeft(e.expires) <= 14).length
   return (
     <button className="check-row srv-row docker-host-row" onClick={onOpen}>
       <span className={`sdot ${s.online ? 'sdot-up' : 'sdot-down'}`} />
@@ -555,6 +669,16 @@ function HostRow({
           {s.name}
           {showGroup && s.group_name && <span className="type-chip group-chip">{s.group_name}</span>}
           {!kube.access && <span className="type-chip off">{t('нет доступа')}</span>}
+          {fluxBroken > 0 && (
+            <span className="type-chip t-down" title={t('Ресурсы Flux не в Ready — доставка встала')}>
+              {t('Flux ⚠ {n}', { n: fluxBroken })}
+            </span>
+          )}
+          {soon > 0 && (
+            <span className="type-chip t-degraded" title={t('Сертификаты или токены истекают в ближайшие две недели')}>
+              {t('сроки ⏳ {n}', { n: soon })}
+            </span>
+          )}
         </div>
         <div className="check-target mono muted small">
           {kube.flavor || 'k8s'} {kube.version || '—'}

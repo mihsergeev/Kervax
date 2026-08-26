@@ -51,6 +51,10 @@ SERVER_ALERT_KINDS: dict[str, tuple[str, str]] = {
     "queue": ("RabbitMQ: очередь переполнена",
               "очередь {queue} ({source}): {value} сообщений ≥ {threshold}"),
     "clock": ("Время: сдвиг часов", "часы разошлись на {value} с временем панели — ломает TOTP/TLS/корреляцию логов, синхронизируйте время"),
+    "kube_expiry": ("Kubernetes: истекает срок", "{what} {where} — {value}, {date}{more}"),
+    "flux_down": ("Flux: доставка встала",
+                  "{what} {where} — {reason}: {message}{more}. Новое в кластер не приезжает, "
+                  "работающее пока живо — по метрикам это не видно"),
 }
 
 # Прежние («Kervax: сервер …») дефолты серверных правил. Если в БД сохранён один

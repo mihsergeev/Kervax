@@ -68,6 +68,15 @@ servers and the sites they serve, databases and their sizes, RabbitMQ queue
 depth. Domains found on a node's nginx or an Ingress can be put under monitoring
 in two clicks — the panel shows what it found and which of it is already watched.
 
+**What expires before it breaks.** Clusters die on dates: a Flux token runs out
+and nothing is delivered any more, while everything already running keeps running
+and every dashboard stays green. Kervax reads the expiry of control-plane and
+kubelet certificates, kubeconfigs, TLS secrets and the credentials Flux uses to
+reach Git — and warns two weeks ahead. It also watches the `Ready` state of Flux
+resources, for the case where a token is revoked rather than expired. The dates
+are computed by a root helper on the node itself: no key material and no token
+value ever reaches the panel.
+
 ![Services](docs/img/services.png)
 
 **Backups.** Status of restic backups per node, repositories on your rest-server,
