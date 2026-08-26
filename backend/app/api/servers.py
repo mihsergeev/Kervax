@@ -340,6 +340,7 @@ _SETUP_LABEL = {
     "backup-setup": "Бэкап (клиент)",
     "backupserver-setup": "Бэкап-сервер",
     "kube-setup": "Kubernetes",
+    "kubeexpiry-setup": "Сроки Kubernetes и Flux",
     "webserver-setup": "Веб-домены",
     "timesync-setup": "Синхронизация времени",
     "dbstat-setup": "Инвентарь СУБД",
@@ -358,6 +359,11 @@ def _setup_needed(name: str, rep: dict) -> bool:
         return bool(bsrv.get("present") and bsrv.get("repos"))
     if name == "kube-setup":
         return bool((rep.get("kube") or {}).get("access"))
+    # kubeexpiry-setup — везде, где кластер ЕСТЬ, а не только где панель в него пущена:
+    # хелпер читает PKI и ходит в кластер локальным admin-kubectl ноды, панельный
+    # ServiceAccount ему не нужен (и секретов ему не дают принципиально)
+    if name == "kubeexpiry-setup":
+        return bool((rep.get("kube") or {}).get("present"))
     # webserver-setup — только где реально есть веб-сервер (иначе доменов всё равно нет)
     if name == "webserver-setup":
         return bool(rep.get("web_services"))

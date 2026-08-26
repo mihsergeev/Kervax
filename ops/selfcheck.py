@@ -191,7 +191,17 @@ def check_i18n() -> None:
     d = "frontend/src"
     key_re = re.compile(r"^\s+'((?:[^'" + BS + BS + "]|" + BS + BS + r".)+)'\s*:", re.M)
     use_re = re.compile(r"\bt\(\s*'((?:[^'" + BS + BS + "]|" + BS + BS + r".)+)'")
-    keys = set(key_re.findall(read(f"{d}/i18n.tsx")))
+    all_keys = key_re.findall(read(f"{d}/i18n.tsx"))
+    keys = set(all_keys)
+    # Дубль ключа — ошибка СБОРКИ (TS1117), а не мелочь стиля: словарь растёт снизу,
+    # и строку легко добавить второй раз, не заметив её в разделе выше. Ловим здесь,
+    # иначе это всплывёт только на `npm run build` в момент деплоя.
+    if len(all_keys) != len(keys):
+        seen: set[str] = set()
+        for k in all_keys:
+            if k in seen:
+                fail("i18n", f"ключ повторяется в словаре — «{k[:60]}»")
+            seen.add(k)
     used: dict[str, str] = {}
     for f in sorted(os.listdir(d)):
         if f.endswith((".tsx", ".ts")) and f != "i18n.tsx":

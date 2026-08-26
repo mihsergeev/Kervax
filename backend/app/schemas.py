@@ -596,6 +596,7 @@ class ServerUpdate(BaseModel):
     disk_crit_percent: int | None = Field(default=None, ge=0, le=100)
     temp_alert_c: int | None = Field(default=None, ge=0, le=120)
     conntrack_alert_percent: int | None = Field(default=None, ge=0, le=100)
+    kube_expiry_alert_days: int | None = Field(default=None, ge=0, le=365)
     db_conn_alert_percent: int | None = Field(default=None, ge=0, le=100)
     # порог глубины очереди RabbitMQ (0 = алерты по очередям на ноде выключены)
     queue_alert_depth: int | None = Field(default=None, ge=0, le=10_000_000)
@@ -696,6 +697,7 @@ class ServerOut(BaseModel):
     disk_crit_percent: int
     temp_alert_c: int
     conntrack_alert_percent: int
+    kube_expiry_alert_days: int
     db_conn_alert_percent: int
     queue_alert_depth: int = 0
     # None, а не dict: в БД колонка nullable, и пустое значение приходит как NULL —
@@ -813,6 +815,11 @@ class AgentReportIn(BaseModel):
     # уровень → обязателен здесь, иначе pydantic выбросит и в last_report не доедет.
     web_services: list[dict] = []
     db_stats: list[dict] = []  # инвентарь СУБД: базы/размеры/логины (хелпер dbstat-setup)
+    # сроки PKI кластера, kubeconfig'ов, TLS-секретов и кредов Flux
+    # (хелпер kubeexpiry-setup): [{kind, where, expires, note}]
+    kube_expiry: list[dict] = []
+    # состояния Ready ресурсов Flux: [{kind, where, ready, reason, message}]
+    flux: list[dict] | None = None
     net_rx: float = 0.0  # байт/сек (агент считает по дельте)
     net_tx: float = 0.0
     disk_read: float = 0.0  # байт/сек

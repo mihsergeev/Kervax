@@ -1285,3 +1285,113 @@ async def test_server_db_connection_conditions():
     s.db_conn_alert_percent = 0
     s.last_report = {"db_stats": [{"engine": "pg", "conn_used": 99, "conn_max": 100}]}
     assert "db_conn" not in collector._server_conditions(s, now)
+
+
+def _kube_server(now, **kw):
+    """Сервер без единого включённого порога: мешать проверке нечему."""
+    from app.models import Server
+
+    base = dict(
+        name="k", token_hash="x", enabled=True, backup_not_required=True, last_seen=now,
+        offline_after_seconds=120, temp_alert_c=0, alert_sustain_seconds=900,
+        cpu_alert_percent=0, mem_alert_percent=0,
+        disk_warn_percent=0, disk_alert_percent=0, disk_crit_percent=0,
+        conntrack_alert_percent=0, disk_temp_alert_c=0, db_conn_alert_percent=0,
+        kube_expiry_alert_days=14,
+    )
+    base.update(kw)
+    return Server(**base)
+
+
+async def test_server_kube_expiry_conditions():
+    """Сроки кластера: порог в днях, самый ранний срок и счётчик остальных.
+
+    Это отказ, который не виден ни одной метрикой: истёкший токен Flux не роняет
+    подов и не грузит процессор — просто новое перестаёт приезжать.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    from app import collector
+
+    now = datetime.now(timezone.utc)
+    day = 86400
+    ts = int(now.timestamp())
+
+    s = _kube_server(now, last_report={"kube_expiry": [
+        {"kind": "cluster-cert", "where": "/var/lib/k0s/pki/server.crt", "expires": ts + 3600 * day},
+        {"kind": "flux-token", "where": "flux-system/flux-system", "expires": ts + 5 * day, "note": "GitRepository"},
+        {"kind": "secret-cert", "where": "default/api-tls", "expires": ts + 9 * day},
+    ]})
+    cond = collector._server_conditions(s, now)
+    # самый ранний срок, а не первый в списке: алерт на сервер один
+    # уточнение из хелпера дописано в скобках — по пути к секрету не видно, чей он
+    assert "flux-system/flux-system (GitRepository)" == cond["kube_expiry"][1]["where"]
+    assert "истекает через 5 дн." == cond["kube_expiry"][1]["value"]
+    assert "токен Flux" in cond["kube_expiry"][1]["what"]
+    # второй подпадающий под порог упомянут числом: длинного списка в алерте не будет
+    assert cond["kube_expiry"][1]["more"] == " + ещё 1 на этом сервере"
+    # дальний сертификат (10 лет) в счёт не идёт — иначе алерт был бы всегда
+    assert cond["kube_expiry"][0] == 0  # первый интервал: дебаунс общий
+
+    s.alert_state = {"kube_expiry_since": (now - timedelta(minutes=20)).isoformat()}
+    assert collector._server_conditions(s, now)["kube_expiry"][0] == 1
+
+    # уже истёкший: считаем дни назад, а не «через -2 дн.»
+    s.last_report = {"kube_expiry": [
+        {"kind": "flux-token", "where": "flux-system/flux-system", "expires": ts - 2 * day},
+    ]}
+    assert collector._server_conditions(s, now)["kube_expiry"][1]["value"] == "ИСТЁК 2 дн. назад"
+
+    # всё далеко → условие есть, уровень 0: прошлый алерт должен закрыться
+    s.last_report = {"kube_expiry": [
+        {"kind": "cluster-cert", "where": "/x.crt", "expires": ts + 300 * day},
+    ]}
+    cond = collector._server_conditions(s, now)
+    assert cond["kube_expiry"][0] == 0
+
+    # порог 0 = проверка выключена для ноды
+    s.kube_expiry_alert_days = 0
+    s.last_report = {"kube_expiry": [{"kind": "flux-token", "where": "a/b", "expires": ts + day}]}
+    assert "kube_expiry" not in collector._server_conditions(s, now)
+
+
+async def test_server_flux_down_conditions():
+    """Вставшая доставка Flux: отозванный токен предупредить о себе не успевает.
+
+    Срок можно проспать, а токен — ещё и отозвать руками; тогда алертить надо по
+    факту, а не по дате. Реконсиляция при этом поломкой не считается.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    from app import collector
+
+    now = datetime.now(timezone.utc)
+    s = _kube_server(now, last_report={"flux": [
+        {"kind": "Kustomization", "where": "flux-system/apps", "ready": True},
+        {"kind": "GitRepository", "where": "flux-system/flux-system", "ready": False,
+         "reason": "GitOperationFailed",
+         "message": "authentication required: HTTP Basic: Access denied"},
+    ]})
+    cond = collector._server_conditions(s, now)
+    assert cond["flux_down"][1]["where"] == "flux-system/flux-system"
+    assert cond["flux_down"][1]["reason"] == "GitOperationFailed"
+    assert "Access denied" in cond["flux_down"][1]["message"]
+    assert cond["flux_down"][0] == 0  # первый интервал — дебаунс
+
+    s.alert_state = {"flux_down_since": (now - timedelta(minutes=20)).isoformat()}
+    assert collector._server_conditions(s, now)["flux_down"][0] == 1
+
+    # реконсиляция — не поломка: иначе алерт срабатывал бы на каждой выкатке
+    s.last_report = {"flux": [
+        {"kind": "HelmRelease", "where": "apps/web", "ready": False, "reason": "Progressing"},
+    ]}
+    cond = collector._server_conditions(s, now)
+    assert cond["flux_down"][0] == 0
+
+    # Flux в кластере нет вовсе → условия нет (не «всё хорошо», а «нечего проверять»)
+    s.last_report = {"kube_expiry": []}
+    assert "flux_down" not in collector._server_conditions(s, now)
+
+    # Flux читался и всё зелено → условие есть с уровнем 0, чтобы алерт закрылся
+    s.last_report = {"flux": []}
+    assert collector._server_conditions(s, now)["flux_down"][0] == 0
