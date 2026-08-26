@@ -792,6 +792,8 @@ export type ServerReport = {
   services?: ServiceInfo[] // прикладные метрики сервисов (очереди RabbitMQ и т.п.)
   web_services?: WebService[] // веб-серверы/прокси (nginx/envoy/…) + сайты, что обслуживают
   db_stats?: DBStat[] // инвентарь СУБД: базы с размерами, логины, версия (хелпер dbstat-setup)
+  kube_expiry?: KubeExpiry[] // сроки PKI/kubeconfig/токенов Flux (хелпер kubeexpiry-setup)
+  flux?: FluxState[] | null // состояния Ready ресурсов Flux; null = данных нет
   caps?: Record<string, boolean> // возможности агента: kmsg, proc_full (полный ли /proc)
   clock?: ClockInfo // статус синхронизации времени (timedatectl)
   clock_skew_sec?: number // сдвиг часов ноды относительно панели, сек (± ; считает бэкенд)
@@ -949,6 +951,7 @@ export type Server = {
   temp_alert_c: number
   conntrack_alert_percent: number
   db_conn_alert_percent: number
+  kube_expiry_alert_days: number // за сколько дней предупреждать о сроках кластера и Flux
   disk_temp_alert_c: number
   alert_mutes: string[] | null
   backup_repo_mutes: string[] | null // заглушённые репо бэкап-сервера (по имени)
@@ -987,6 +990,25 @@ export type DBStat = {
   // 0 = движок их не отдал (старый helper) — тогда ничего не показываем.
   conn_used?: number
   conn_max?: number
+}
+
+// Датируемая сущность кластера: сертификат, kubeconfig или токен Flux. Собирает
+// root-хелпер kubeexpiry-setup на самой ноде; сюда приезжает только дата.
+export type KubeExpiry = {
+  kind: string // cluster-cert | kubeconfig | kubelet-cert | flux-token | secret-cert
+  where: string // путь к файлу либо namespace/name
+  expires: number // unix-время истечения
+  note?: string // имя сертификата или поле секрета
+}
+
+// Состояние ресурса Flux. Нужно к тому же классу отказов с другой стороны: срок
+// можно проспать, а токен — отозвать, и тогда доставка встаёт без предупреждения.
+export type FluxState = {
+  kind: string // GitRepository | Kustomization | HelmRelease | …
+  where: string // namespace/name
+  ready: boolean
+  reason?: string
+  message?: string
 }
 
 export type WebService = {
@@ -1079,6 +1101,7 @@ export type ServerForm = {
   temp_alert_c?: number
   conntrack_alert_percent?: number
   db_conn_alert_percent?: number
+  kube_expiry_alert_days?: number
   disk_temp_alert_c?: number
   alert_mutes?: string[]
   offline_after_seconds?: number

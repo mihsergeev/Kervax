@@ -182,6 +182,8 @@ _SRV_ICON = {
     "queue": "🐇", "backup_rotation": "🧹",
     "backup_missing": "💾", "backup_failed": "💾", "backup_stale": "💾", "backup_repo": "💾",
     "backup_dump": "💾", "backup_dump_space": "🈵", "backup_cron": "💾", "clock": "🕐",
+    # ⏳ — срок ещё не вышел, есть время спланировать; 🔥 — доставка уже встала
+    "kube_expiry": "⏳", "flux_down": "🔥☸️",
 }
 
 # Куда ведёт ссылка алерта (deep-link ?server=id&sec=…). Целимся в КОНКРЕТНУЮ метрику,
@@ -194,6 +196,7 @@ _SRV_SECTION = {
     "mem": "mem", "oom": "oom",
     "conntrack": "conntrack", "disk": "diskfill", "disktemp": "disktemp",
     "db_conn": "services",
+    "kube_expiry": "kube", "flux_down": "kube",
     "clock": "clock",
 }
 
@@ -879,6 +882,7 @@ _SRV_LABEL = {
     "backup_missing": "бэкап", "backup_failed": "бэкап", "backup_stale": "свежесть бэкапа",
     "backup_dump": "дамп СУБД", "backup_dump_space": "место под дампы",
     "backup_cron": "дамп-CronJob", "clock": "время",
+    "kube_expiry": "сроки Kubernetes", "flux_down": "доставка Flux",
 }
 
 # Единицы пороговых метрик. Нужны отбою: голое «снова в норме» не отвечает на
@@ -913,6 +917,19 @@ _THROTTLE_MIN_STREAK = 3  # интервалов подряд с реальны�
 # начала «жарки» ({тип}_since), сбрасываем как только метрика вернулась в норму или
 # сервер оффлайн (данные протухли). Одиночные спайки «моргнуло и прошло» не шлём.
 _SUSTAIN_DEFAULT = 900
+
+# Как назвать истекающую сущность в алерте. Путь к файлу инженеру мало что говорит,
+# пока не сказано, что именно этот файл держит.
+_KUBE_KIND = {
+    "cluster-cert": "сертификат control-plane",
+    "kubeconfig": "kubeconfig",
+    "kubelet-cert": "сертификат kubelet",
+    "flux-token": "токен Flux в секрете",
+    "secret-cert": "TLS-сертификат в секрете",
+}
+# Ready=False с этими причинами — не поломка, а работа: Flux тянет артефакт или
+# докатывает релиз. Алертить на них — гарантированно приучить игнорировать канал.
+_FLUX_TRANSIENT = frozenset({"Progressing", "Reconciling", "ProgressingWithRetry", "Unknown"})
 # Сколько молчания СВЕРХ offline_after нужно для алерта (в интерфейсе нода посереет
 # сразу, а в Telegram уйдёт только устойчивый обрыв). 3 минуты = 12 пропущенных
 # отчётов подряд: разовая перегрузка канала столько не держится.
@@ -1351,6 +1368,66 @@ def _server_conditions(s: Server, now: datetime) -> dict[str, tuple[int, dict]]:
                 "used": db.get("conn_used") or 0,
                 "limit": db.get("conn_max") or 0,
             })
+    # Сроки Kubernetes и Flux. Отдельный класс отказов: он не проявляется ни ростом
+    # метрик, ни падением подов. Истёкший токен Flux просто перестаёт привозить новое —
+    # запущенное продолжает работать, дашборды остаются зелёными, и пропажу замечают
+    # через дни, по недоехавшей выкатке. Сертификаты control-plane отказывают резче, но
+    # так же без предупреждения. Берём САМЫЙ ранний срок: алерт на сервер один, а
+    # датируемых сущностей на ноде десятки.
+    if s.kube_expiry_alert_days:
+        soon, near = None, 0
+        for it in rep.get("kube_expiry") or []:
+            exp = it.get("expires") or 0
+            if exp <= 0:
+                continue
+            days = (exp - now.timestamp()) / 86400
+            if days > s.kube_expiry_alert_days:
+                continue
+            near += 1
+            if soon is None or exp < soon[0]:
+                soon = (exp, days, it)
+        if soon is not None:
+            exp, days, it = soon
+            # К ближайшему, а не вниз: «через 4 дн.» при остатке 4 дня 23 часа —
+            # формально верно и практически обман, до срока почти пять дней.
+            left = round(days)
+            phrase = (f"истекает через {left} дн." if left >= 1
+                      else "истекает сегодня" if days >= 0
+                      else f"ИСТЁК {abs(left) or 1} дн. назад")
+            # Уточнение из хелпера показываем, только если его нет в самом пути:
+            # у сертификата note — это имя файла, и «server.crt (server)» — шум.
+            note, where = it.get("note") or "", it.get("where") or ""
+            if note and note not in where:
+                where = f"{where} ({note})"
+            sustain("kube_expiry", True, {
+                "value": phrase,
+                "what": _KUBE_KIND.get(it.get("kind") or "", "срок"),
+                "where": where,
+                "date": datetime.fromtimestamp(exp, tz=timezone.utc).strftime("%d.%m.%Y"),
+                "more": f" + ещё {near - 1} на этом сервере" if near > 1 else "",
+            })
+        else:
+            sustain("kube_expiry", False, {})
+
+    # Flux уже сломан. Второй половиной той же беды: срок можно проспать, а токен —
+    # ещё и отозвать руками, и тогда предупреждать не о чем, доставка встала сразу.
+    # Читаем Ready у ресурсов Flux; «в процессе» не считаем поломкой, а дебаунс
+    # (те же 15 минут по умолчанию) гасит обычную реконсиляцию.
+    broken = [f for f in (rep.get("flux") or [])
+              if not f.get("ready") and (f.get("reason") or "") not in _FLUX_TRANSIENT]
+    if rep.get("flux") is not None:
+        if broken:
+            f = sorted(broken, key=lambda x: (x.get("kind") or "", x.get("where") or ""))[0]
+            sustain("flux_down", True, {
+                "what": f.get("kind") or "ресурс Flux",
+                "where": f.get("where") or "",
+                "reason": f.get("reason") or "Ready=False",
+                "message": (f.get("message") or "")[:160] or "без пояснения",
+                "more": f" (и ещё {len(broken) - 1})" if len(broken) > 1 else "",
+            })
+        else:
+            sustain("flux_down", False, {})
+
     if s.disk_temp_alert_c:  # макс по устройствам с датчиком (на VM датчика обычно нет)
         temps = [d["temp"] for d in (rep.get("disk_devs") or []) if d.get("temp") is not None]
         if temps:

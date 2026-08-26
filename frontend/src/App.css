@@ -585,6 +585,21 @@ input:focus {
 .kube-tabs {
   margin: 0.3rem 0 0.7rem;
 }
+/* Сводка над списком сроков: почему список стоит читать прямо сейчас. */
+.kube-expiry-note {
+  padding: 0.5rem 0.65rem;
+  margin-bottom: 0.5rem;
+  border-radius: 8px;
+  border: 1px solid currentColor;
+  font-size: 0.85rem;
+}
+/* Разделитель между датами и состоянием Flux: это разные вопросы (когда сломается
+   и что уже сломано), и слипшимися они читаются как один список. */
+.kube-expiry-sub {
+  margin: 0.7rem 0 0.35rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
 .modal-search {
   width: 100%;
   margin: 0 0 0.6rem;

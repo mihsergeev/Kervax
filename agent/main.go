@@ -35,7 +35,7 @@ import (
 	"time"
 )
 
-const version = "2.0"
+const version = "2.1"
 
 // Публичный ключ для проверки подписи релизов агента (Ed25519, base64).
 // ПУСТО по умолчанию → самообновление ВЫКЛЮЧЕНО (агент никогда не заменяет себя).
@@ -127,6 +127,12 @@ type report struct {
 	Services      []serviceInfo `json:"services,omitempty"`     // прикладные метрики (очереди RabbitMQ и т.п.)
 	WebServices   []webService  `json:"web_services,omitempty"` // веб-серверы/прокси (nginx/envoy/…) + сайты
 	DBStats       []dbStat      `json:"db_stats,omitempty"`     // инвентарь СУБД: базы, размеры, логины (root-хелпер dbstat-setup)
+	// Сроки того, на чём кластер молча умирает: PKI control-plane, kubeconfig'и,
+	// сертификат kubelet, TLS-секреты и креды Flux. Считает root-хелпер
+	// kubeexpiry-setup, агент только читает готовые даты — ни ключей, ни токенов
+	// он не видит. Flux — состояния Ready: срок можно проспать, а токен отозвать.
+	KubeExpiry    []kubeExpiry  `json:"kube_expiry,omitempty"`
+	Flux          []fluxState   `json:"flux,omitempty"`
 	NetRx         float64       `json:"net_rx"`                 // байт/сек
 	NetTx         float64       `json:"net_tx"`
 	DiskRead      float64       `json:"disk_read"`       // байт/сек, чтение с дисков
@@ -1903,6 +1909,7 @@ func collect(prev sample) (report, sample) {
 	r.Services = collectServices(dk, r.Kube)
 	r.WebServices = collectWebServices(r.Kube)
 	r.DBStats = collectDBStats()
+	r.KubeExpiry, r.Flux = collectKubeExpiry()
 	return r, cur
 }
 
@@ -2200,6 +2207,46 @@ func collectWebServices(kube *kubeInfo) []webService {
 type dbEntry struct {
 	Name string `json:"name"`
 	Size int64  `json:"size"`
+}
+
+// Одна датируемая сущность кластера: что это, где лежит и когда истекает.
+type kubeExpiry struct {
+	Kind    string `json:"kind"`           // cluster-cert | kubeconfig | kubelet-cert | flux-token | secret-cert
+	Where   string `json:"where"`          // путь к файлу либо namespace/name
+	Expires int64  `json:"expires"`        // unix-время истечения
+	Note    string `json:"note,omitempty"` // имя сертификата или поле секрета
+}
+
+// Состояние ресурса Flux. Нужно ко второй половине той же беды: срок можно
+// проспать, а токен — ещё и отозвать, и тогда предупреждать уже не о чем.
+type fluxState struct {
+	Kind    string `json:"kind"`              // GitRepository | Kustomization | HelmRelease | …
+	Where   string `json:"where"`             // namespace/name
+	Ready   bool   `json:"ready"`             // условие Ready
+	Reason  string `json:"reason,omitempty"`  // GitOperationFailed / BuildFailed / …
+	Message string `json:"message,omitempty"` // пояснение из условия
+}
+
+// Хелпер kubeexpiry-setup кладёт готовый разбор; агент только читает файл —
+// ни ключей, ни токенов он не видит и в кластер не ходит.
+func collectKubeExpiry() ([]kubeExpiry, []fluxState) {
+	b, err := os.ReadFile("/var/lib/kervax/kube-expiry.json")
+	if err != nil {
+		return nil, nil
+	}
+	var doc struct {
+		Items []kubeExpiry `json:"items"`
+		Flux  []fluxState  `json:"flux"`
+	}
+	if json.Unmarshal(b, &doc) != nil {
+		return nil, nil
+	}
+	// Пустой (не nil) срез: панель отличает «Flux читался, всё зелено» от
+	// «данных о Flux нет» — во втором случае алертить не о чем.
+	if doc.Flux == nil {
+		doc.Flux = []fluxState{}
+	}
+	return doc.Items, doc.Flux
 }
 
 type dbStat struct {
