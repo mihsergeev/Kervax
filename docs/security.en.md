@@ -29,6 +29,29 @@ connect back to the server — there is no open port to reach.
   use for port 80, a reverse proxy publishes it.
 - Every container runs with `no-new-privileges:true`.
 
+## 2c. Root helpers: doing what the agent cannot
+
+Some data is out of reach for an unprivileged agent by design — cluster PKI
+expiry lives under root, and no sane RBAC hands out Flux secrets. Those jobs are
+done by separate scripts (`agent/*-setup.sh`) that you install by hand and on
+purpose; the agent neither runs them nor can run them.
+
+- They live in `/lib65/kervax`, run from a systemd timer, and write an already
+  parsed result to `/var/lib/kervax/*.json` (0644). The agent only reads it.
+- The panel cannot command them: its reply to an agent contains nothing but an
+  interval and a wish to update (see section 3).
+- What leaves the node is conclusions, not raw material: `kubeexpiry-setup`
+  sends a kind, a location, a date and a `Ready` state — no key material, no
+  token values, not even their length.
+
+About the network request. A token's expiry is not stored inside the token —
+only the forge knows it — so `kubeexpiry-setup` asks **the host named in the
+Flux source URL** (a self-hosted GitLab asks itself, not gitlab.com). The token
+is used for that single request, is never written anywhere, and never leaves the
+node. If you would rather not have that request: do not install the helper —
+without it the panel simply does not know the dates, everything else is
+unchanged.
+
 ## 3. What the panel can even tell the agent
 
 The panel's reply to the agent is a struct with exactly two fields:
