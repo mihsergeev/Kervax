@@ -1723,6 +1723,7 @@ type ServerEditForm = {
   disk_crit_percent: number
   temp_alert_c: number
   conntrack_alert_percent: number
+  db_conn_alert_percent: number
   disk_temp_alert_c: number
   alert_mutes: string[]
   offline_after_seconds: number
@@ -2077,6 +2078,16 @@ function ServerEditCard({
             onChange={(e) => set({ conntrack_alert_percent: num(e.target.value) })}
           />
         </label>
+        <label className="field">
+          <span>🔌 {t('Алерт по коннектам СУБД, % (0 = выкл)')}</span>
+          <input
+            type="number"
+            min={0}
+            max={100}
+            value={form.db_conn_alert_percent}
+            onChange={(e) => set({ db_conn_alert_percent: num(e.target.value) })}
+          />
+        </label>
         {!isVm && (
           <label className="field">
             <span>🌡 {t('Алерт по температуре диска, °C (0 = выкл)')}</span>
@@ -2358,6 +2369,7 @@ function ServerDetail({
       disk_crit_percent: s.disk_crit_percent,
       temp_alert_c: s.temp_alert_c,
       conntrack_alert_percent: s.conntrack_alert_percent,
+      db_conn_alert_percent: s.db_conn_alert_percent,
       disk_temp_alert_c: s.disk_temp_alert_c,
       alert_mutes: s.alert_mutes ?? [],
       offline_after_seconds: s.offline_after_seconds,
@@ -2383,6 +2395,7 @@ function ServerDetail({
         disk_crit_percent: form.disk_crit_percent,
         temp_alert_c: form.temp_alert_c,
         conntrack_alert_percent: form.conntrack_alert_percent,
+        db_conn_alert_percent: form.db_conn_alert_percent,
         disk_temp_alert_c: form.disk_temp_alert_c,
         alert_mutes: form.alert_mutes,
         offline_after_seconds: form.offline_after_seconds,

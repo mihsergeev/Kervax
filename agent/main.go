@@ -35,7 +35,7 @@ import (
 	"time"
 )
 
-const version = "1.99"
+const version = "2.0"
 
 // Публичный ключ для проверки подписи релизов агента (Ed25519, base64).
 // ПУСТО по умолчанию → самообновление ВЫКЛЮЧЕНО (агент никогда не заменяет себя).
@@ -2208,6 +2208,13 @@ type dbStat struct {
 	Version   string    `json:"version,omitempty"`
 	DBs       []dbEntry `json:"dbs,omitempty"`
 	Users     []string  `json:"users,omitempty"`
+
+	// Занятые и доступные слоты подключений. Исчерпание убивает приложение так же
+	// надёжно, как упавшая база, но выглядит совсем иначе: в логе приложения
+	// «sorry, too many clients already», а на дашборде базы всё зелено. Поля
+	// заполняет root-хелпер dbstat-setup; 0/0 = движок их не отдал.
+	ConnUsed int `json:"conn_used,omitempty"`
+	ConnMax  int `json:"conn_max,omitempty"`
 }
 
 func collectDBStats() []dbStat {

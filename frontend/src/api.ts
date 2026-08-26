@@ -948,6 +948,7 @@ export type Server = {
   disk_crit_percent: number
   temp_alert_c: number
   conntrack_alert_percent: number
+  db_conn_alert_percent: number
   disk_temp_alert_c: number
   alert_mutes: string[] | null
   backup_repo_mutes: string[] | null // заглушённые репо бэкап-сервера (по имени)
@@ -981,6 +982,11 @@ export type DBStat = {
   version?: string
   dbs?: { name: string; size: number }[] // у redis size = число ключей
   users?: string[] // логины (имена, без паролей — их панель не видит принципиально)
+  // Слоты подключений: занято и предел. У postgres предел — уже за вычетом
+  // зарезервированных суперпользователю, то есть тот, в который упрётся приложение.
+  // 0 = движок их не отдал (старый helper) — тогда ничего не показываем.
+  conn_used?: number
+  conn_max?: number
 }
 
 export type WebService = {
@@ -1072,6 +1078,7 @@ export type ServerForm = {
   disk_crit_percent?: number
   temp_alert_c?: number
   conntrack_alert_percent?: number
+  db_conn_alert_percent?: number
   disk_temp_alert_c?: number
   alert_mutes?: string[]
   offline_after_seconds?: number

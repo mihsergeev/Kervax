@@ -175,6 +175,7 @@ _SRV_ICON = {
     # иконка ещё и уточняется по серьёзности — см. _srv_icon_for.
     "offline": "🔥", "cpu": "⚠️", "mem": "⚠️", "disk": "⚠️", "temp": "🌡",
     "throttle": "🥵", "conntrack": "🔗", "disktemp": "🌡", "reboot": "🔄", "oom": "🧠",
+    "db_conn": "🔌",
     # огонёк перед китом: в ленте докерные строки шли теми же иконками, что и
     # обычные события, и «упал»/«крутится в цикле» не читались как авария
     "docker_down": "🔥🐳", "docker_loop": "🔥🐳",
@@ -192,6 +193,7 @@ _SRV_SECTION = {
     "cpu": "cpu", "throttle": "throttle", "temp": "temp",
     "mem": "mem", "oom": "oom",
     "conntrack": "conntrack", "disk": "diskfill", "disktemp": "disktemp",
+    "db_conn": "services",
     "clock": "clock",
 }
 
@@ -873,6 +875,7 @@ _SRV_LABEL = {
     "offline": "на связи", "cpu": "CPU", "mem": "RAM", "disk": "диск",
     "temp": "температура", "throttle": "троттлинг",
     "conntrack": "conntrack", "disktemp": "температура диска",
+    "db_conn": "коннекты СУБД",
     "backup_missing": "бэкап", "backup_failed": "бэкап", "backup_stale": "свежесть бэкапа",
     "backup_dump": "дамп СУБД", "backup_dump_space": "место под дампы",
     "backup_cron": "дамп-CronJob", "clock": "время",
@@ -881,7 +884,7 @@ _SRV_LABEL = {
 # Единицы пороговых метрик. Нужны отбою: голое «снова в норме» не отвечает на
 # первый вопрос инженера — сколько освободилось. Показываем «диск снова в норме:
 # 82% (было 90%)», где «было» — значение на момент срабатывания.
-_SRV_UNIT = {"cpu": "%", "mem": "%", "disk": "%", "conntrack": "%",
+_SRV_UNIT = {"cpu": "%", "mem": "%", "disk": "%", "conntrack": "%", "db_conn": "%",
              "temp": "°C", "disktemp": "°C"}
 
 
@@ -1322,6 +1325,32 @@ def _server_conditions(s: Server, now: datetime) -> dict[str, tuple[int, dict]]:
         fill = (rep.get("conntrack_count") or 0) / ctmax * 100
         sustain("conntrack", fill >= s.conntrack_alert_percent,
                 {"value": round(fill), "threshold": s.conntrack_alert_percent})
+
+    # Коннекты СУБД. Слоты кончаются задолго до того, как что-то заметно по CPU или
+    # памяти самой базы: она жива, отвечает, метрики зелёные — а приложение уже
+    # получает «sorry, too many clients already». Берём САМЫЙ нагруженный движок ноды:
+    # алерт на сервер один, а инстансов на нём бывает несколько, и молчать из-за того,
+    # что второй свободен, нельзя. Дебаунс общий (sustain): всплеск коннектов на один
+    # интервал — обычное дело у пулеров, инцидент — только удержание.
+    if s.db_conn_alert_percent:
+        worst = None
+        for db in rep.get("db_stats") or []:
+            limit = db.get("conn_max") or 0
+            if limit <= 0:  # движок не отдал лимит — считать процент не из чего
+                continue
+            pct = (db.get("conn_used") or 0) / limit * 100
+            if worst is None or pct > worst[0]:
+                worst = (pct, db)
+        if worst is not None:
+            pct, db = worst
+            name = db.get("container") or db.get("engine") or "СУБД"
+            sustain("db_conn", pct >= s.db_conn_alert_percent, {
+                "value": round(pct),
+                "threshold": s.db_conn_alert_percent,
+                "engine": name,
+                "used": db.get("conn_used") or 0,
+                "limit": db.get("conn_max") or 0,
+            })
     if s.disk_temp_alert_c:  # макс по устройствам с датчиком (на VM датчика обычно нет)
         temps = [d["temp"] for d in (rep.get("disk_devs") or []) if d.get("temp") is not None]
         if temps:

@@ -345,6 +345,9 @@ class Server(Base):
     disk_crit_percent: Mapped[int] = mapped_column(Integer, default=95)  # «критично»
     temp_alert_c: Mapped[int] = mapped_column(Integer, default=0)  # порог темп. CPU, °C (0=выкл)
     conntrack_alert_percent: Mapped[int] = mapped_column(Integer, default=90)  # заполнение conntrack, % (0=выкл)
+    # Занятость слотов подключений СУБД, % (0=выкл). Отдельный порог: коннекты
+    # кончаются задолго до того, как что-то видно по CPU/памяти самой базы.
+    db_conn_alert_percent: Mapped[int] = mapped_column(Integer, default=85)
     # Глубина очереди RabbitMQ, с которой алертим. 0 = выключено для всей ноды.
     queue_alert_depth: Mapped[int] = mapped_column(Integer, default=0)
     # Переопределения по КОНКРЕТНЫМ очередям: {"<источник>|<vhost>/<имя>": порог},

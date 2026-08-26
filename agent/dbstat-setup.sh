@@ -10,7 +10,7 @@
 # login names, sizes and the version leave this script.
 set -euo pipefail
 
-KERVAX_SETUP_VERSION=0.3  # MAJOR.MINOR; compared component-wise
+KERVAX_SETUP_VERSION=0.4  # MAJOR.MINOR; compared component-wise
 KERVAX_SETUP_ALWAYS=1     # safe on any node: without a database it collects an empty file
 
 HELPER_DIR=/lib65/kervax
@@ -65,10 +65,15 @@ list_json() {
 }
 
 ENTRIES=""
-add_entry() { # engine container version dbs_json users_json
-  local e="$1" c="$2" v="$3" d="$4" u="$5"
+add_entry() { # engine container version dbs_json users_json conn_used conn_max
+  local e="$1" c="$2" v="$3" d="$4" u="$5" cu="${6:-0}" cm="${7:-0}"
   [ "$d" = "[]" ] && [ "$u" = "[]" ] && [ -z "$v" ] && return 0  # nothing at all - stay quiet
-  ENTRIES="$ENTRIES${ENTRIES:+,}{\"engine\":\"$(esc "$e")\",\"container\":\"$(esc "$c")\",\"version\":\"$(esc "$v")\",\"dbs\":$d,\"users\":$u}"
+  # conn_used/conn_max: connection slots in use and the configured limit. Running out of
+  # them takes an application down as hard as a dead database, and the failure looks like
+  # "FATAL: sorry, too many clients already" in the app log rather than anything on the
+  # database dashboard. 0/0 means the engine did not report them - the panel then simply
+  # shows nothing instead of a fake 0%.
+  ENTRIES="$ENTRIES${ENTRIES:+,}{\"engine\":\"$(esc "$e")\",\"container\":\"$(esc "$c")\",\"version\":\"$(esc "$v")\",\"dbs\":$d,\"users\":$u,\"conn_used\":${cu:-0},\"conn_max\":${cm:-0}}"
 }
 
 # ── PostgreSQL ─────────────────────────────────────────────────────────────────
@@ -85,12 +90,21 @@ pg_q() { # container query
   fi
 }
 collect_pg() {
-  local c="$1" v d u
+  local c="$1" v d u cu cm
   v=$(pg_q "$c" "show server_version" | head -1 | awk '{print $1}')
   [ -z "$v" ] && return 0
   d=$(pg_q "$c" "select datname||'|'||pg_database_size(datname) from pg_database where not datistemplate order by pg_database_size(datname) desc" | dbs_json)
   u=$(pg_q "$c" "select rolname from pg_roles where rolcanlogin order by 1" | list_json)
-  add_entry pg "$c" "$v" "$d" "$u"
+  # Connection slots. Only client backends are counted: pg_stat_activity also lists the
+  # server's own processes (checkpointer, walwriter, io workers, autovacuum launcher), and
+  # they do not consume the client limit - counting them showed 26 of 20 on a live database.
+  # The limit reported is the full max_connections. Subtracting superuser_reserved_connections
+  # looked more precise but produced "18 of 17" on a live database - a superuser may occupy the
+  # reserve, and a figure above 100% reads as a broken metric. An ordinary application does hit
+  # the wall a few slots earlier, and the threshold covers exactly that gap.
+  cu=$(pg_q "$c" "select count(*) from pg_stat_activity where backend_type = 'client backend'" | head -1)
+  cm=$(pg_q "$c" "select current_setting('max_connections')::int" | head -1)
+  add_entry pg "$c" "$v" "$d" "$u" "$cu" "$cm"
 }
 
 # ── MySQL / MariaDB ────────────────────────────────────────────────────────────
@@ -116,13 +130,17 @@ my_q() { # container query
   fi
 }
 collect_mysql() {
-  local c="$1" v d u
+  local c="$1" v d u cu cm
   v=$(my_q "$c" "select version()" | head -1)
   [ -z "$v" ] && return 0
   d=$(my_q "$c" "select table_schema, ifnull(sum(data_length+index_length),0) from information_schema.tables where table_schema not in ('information_schema','performance_schema','sys') group by table_schema order by 2 desc" \
       | awk -F'\t' '{print $1"|"$2}' | dbs_json)
   u=$(my_q "$c" "select distinct user from mysql.user order by user" | list_json)
-  add_entry mysql "$c" "$v" "$d" "$u"
+  # the same ceiling on the MySQL/MariaDB side: threads currently connected vs max_connections
+  cu=$(my_q "$c" "select variable_value from performance_schema.global_status where variable_name='Threads_connected'" | head -1)
+  [ -z "$cu" ] && cu=$(my_q "$c" "show status like 'Threads_connected'" | awk '{print $2}' | head -1)
+  cm=$(my_q "$c" "select @@max_connections" | head -1)
+  add_entry mysql "$c" "$v" "$d" "$u" "$cu" "$cm"
 }
 
 # ── ClickHouse ─────────────────────────────────────────────────────────────────
