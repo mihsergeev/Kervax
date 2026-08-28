@@ -178,6 +178,17 @@ class Check(Base):
     # дедуп алертов частичной доступности: набор id «недоступных» локаций на момент
     # последнего алерта (None = не в состоянии частичной недоступности)
     loc_alerted: Mapped[list[int] | None] = mapped_column(JSON, nullable=True, default=None)
+    # С какого момента держится нынешняя частичная недоступность. Нужно, чтобы
+    # отличить её от ФАЗЫ ВОССТАНОВЛЕНИЯ: после полного падения точки поднимаются
+    # не одновременно, и «из СПб видно, из Алматы нет» — это сайт встаёт, а не
+    # проблема с доступностью из региона. Сбрасывается при полном падении.
+    loc_partial_since: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, default=None
+    )
+    # О каком наборе недоступных точек УВЕДОМИЛИ. Отдельно от loc_alerted: тот
+    # ведёт интерфейс и обновляется сразу, а этот — только после реально
+    # отправленного алерта, и по нему решается, нужен ли отбой.
+    loc_notified: Mapped[list[int] | None] = mapped_column(JSON, nullable=True, default=None)
     # последние вычисленные сроки (обновляются реже основной проверки)
     ssl_days: Mapped[int | None] = mapped_column(Integer, nullable=True)
     domain_days: Mapped[int | None] = mapped_column(Integer, nullable=True)
