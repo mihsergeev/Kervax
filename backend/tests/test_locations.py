@@ -131,7 +131,7 @@ async def test_probe_direct_uses_no_proxy(monkeypatch):
 
 
 async def test_location_partial_alert(tmp_path, monkeypatch):
-    from datetime import datetime, timezone
+    from datetime import datetime, timedelta, timezone
 
     db = (tmp_path / "la.db").as_posix()
     engine, factory = create_engine_and_factory(f"sqlite+aiosqlite:///{db}")
@@ -166,11 +166,18 @@ async def test_location_partial_alert(tmp_path, monkeypatch):
     await collector.evaluate_location_alerts(factory, settings, now)
     assert sent == []
 
-    # 3 подряд-сбоя (≥ порога) → устойчивое падение → частичная доступность
+    # 3 подряд-сбоя (≥ порога) → устойчивое падение. Но сразу не алертим: точки
+    # ходят каждая на своей каденции, и «видно отсюда, не видно оттуда» надо
+    # сперва подтвердить временем (см. _LOC_PARTIAL_SUSTAIN).
     async with factory() as s:
         pr = (await s.scalars(select(LocationResult))).one()
         pr.consecutive_fails = 3
         await s.commit()
+    await collector.evaluate_location_alerts(factory, settings, now)
+    assert sent == []
+
+    # состояние держится дольше выдержки → частичная доступность
+    now = now + timedelta(seconds=collector._LOC_PARTIAL_SUSTAIN + 30)
     await collector.evaluate_location_alerts(factory, settings, now)
     assert len(sent) == 1
     assert "🟢 Прямая — доступен" in sent[0] and "🔴 Прокси — недоступен" in sent[0]
@@ -346,4 +353,136 @@ async def test_partial_state_saved_without_alert_channel(tmp_path, monkeypatch):
         assert row.loc_alerted == [proxy_id], (
             f"панель не запомнила проблемную точку: loc_alerted={row.loc_alerted}"
         )
+    await engine.dispose()
+
+
+async def test_recovery_from_full_outage_is_silent(tmp_path, monkeypatch):
+    """Подъём после полного падения не должен слать «недоступен из N».
+
+    Поймано вживую: на сервере меняли диск, сайт лёг целиком, а при возврате
+    точки проверки поднялись не одновременно — сперва одна, через минуту вторая.
+    На каждый монитор прилетала лишняя пара «Алматы недоступен» + «снова доступен
+    из всех локаций», хотя чинить было нечего: сайт просто вставал.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    db = (tmp_path / "lr.db").as_posix()
+    engine, factory = create_engine_and_factory(f"sqlite+aiosqlite:///{db}")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    async with factory() as s:
+        s.add(Check(name="cake.ru", type="http", target="https://cake.ru",
+                    enabled=True, check_locations=True, last_status="down",
+                    consecutive_fails=5))
+        s.add(Location(name="Россия, Санкт-Петербург", url="", enabled=True))
+        s.add(Location(name="Казахстан, Алматы", url="http://kz:3128", enabled=True))
+        await s.commit()
+    async with factory() as s:
+        proxy = (await s.scalars(select(Location).where(Location.url != ""))).one()
+        cid = await s.scalar(select(Check.id))
+        s.add(LocationResult(check_id=cid, location_id=proxy.id, status="down",
+                             latency_ms=None, message="fail", consecutive_fails=5))
+        await s.commit()
+        proxy_id = proxy.id
+
+    sent: list[str] = []
+
+    async def fake_send(cfg, text, parse_mode=None):
+        sent.append(text)
+        return []
+
+    monkeypatch.setattr("app.alerts.send_alert", fake_send)
+    settings = Settings(alert_webhook="http://hook")
+    now = datetime.now(timezone.utc)
+
+    # сайт лежит целиком: частичной доступности нет, отсчёт не идёт
+    await collector.evaluate_location_alerts(factory, settings, now)
+    assert sent == []
+    async with factory() as s:
+        assert (await s.scalar(select(Check.loc_partial_since))) is None
+
+    # лежит уже десять минут — дольше любой выдержки
+    now = now + timedelta(minutes=10)
+    await collector.evaluate_location_alerts(factory, settings, now)
+    assert sent == []
+
+    # диск заменили, сайт встаёт: прямая проверка поднялась, прокси ещё нет
+    async with factory() as s:
+        row = (await s.scalars(select(Check))).one()
+        row.last_status, row.consecutive_fails = "up", 0
+        await s.commit()
+    await collector.evaluate_location_alerts(factory, settings, now)
+    assert sent == [], "фаза восстановления не должна выглядеть как частичная недоступность"
+    # интерфейсу правда видна сразу, а отсчёт начат с нуля — не с начала падения
+    async with factory() as s:
+        row = (await s.scalars(select(Check))).one()
+        assert row.loc_alerted == [proxy_id]
+        # sqlite отдаёт время без зоны — сравниваем по значению
+        assert row.loc_partial_since.replace(tzinfo=timezone.utc) == now
+
+    # через минуту поднялась и вторая точка
+    now = now + timedelta(minutes=1)
+    async with factory() as s:
+        r = (await s.scalars(select(LocationResult))).one()
+        r.status, r.consecutive_fails = "up", 0
+        await s.commit()
+    await collector.evaluate_location_alerts(factory, settings, now)
+    # ни «недоступен из N», ни отбоя по алерту, которого не было
+    assert sent == []
+    async with factory() as s:
+        row = (await s.scalars(select(Check))).one()
+        assert row.loc_alerted is None and row.loc_partial_since is None
+    await engine.dispose()
+
+
+async def test_partial_outage_that_lasts_still_alerts(tmp_path, monkeypatch):
+    """Выдержка гасит фазу восстановления, но не саму находку.
+
+    Если сайт действительно не виден из региона — алерт обязан прийти, просто
+    позже. Прошлый инцидент был именно такой: 20 минут не видно из одной точки.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    db = (tmp_path / "lp.db").as_posix()
+    engine, factory = create_engine_and_factory(f"sqlite+aiosqlite:///{db}")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    async with factory() as s:
+        s.add(Check(name="site", type="http", target="https://x", enabled=True,
+                    check_locations=True, last_status="up"))
+        s.add(Location(name="Прямая", url="", enabled=True))
+        s.add(Location(name="Алматы", url="http://kz:3128", enabled=True))
+        await s.commit()
+    async with factory() as s:
+        proxy = (await s.scalars(select(Location).where(Location.url != ""))).one()
+        cid = await s.scalar(select(Check.id))
+        s.add(LocationResult(check_id=cid, location_id=proxy.id, status="down",
+                             latency_ms=None, message="fail", consecutive_fails=3))
+        await s.commit()
+
+    sent: list[str] = []
+
+    async def fake_send(cfg, text, parse_mode=None):
+        sent.append(text)
+        return []
+
+    monkeypatch.setattr("app.alerts.send_alert", fake_send)
+    settings = Settings(alert_webhook="http://hook")
+    now = datetime.now(timezone.utc)
+
+    await collector.evaluate_location_alerts(factory, settings, now)
+    assert sent == []                      # ждём подтверждения временем
+
+    now = now + timedelta(minutes=20)
+    await collector.evaluate_location_alerts(factory, settings, now)
+    assert len(sent) == 1 and "Алматы — недоступен" in sent[0]
+
+    # и отбой по нему приходит, потому что алерт был
+    async with factory() as s:
+        r = (await s.scalars(select(LocationResult))).one()
+        r.status, r.consecutive_fails = "up", 0
+        await s.commit()
+    sent.clear()
+    await collector.evaluate_location_alerts(factory, settings, now + timedelta(minutes=1))
+    assert len(sent) == 1 and "снова доступен" in sent[0]
     await engine.dispose()
