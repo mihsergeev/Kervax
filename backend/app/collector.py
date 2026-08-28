@@ -810,10 +810,10 @@ async def evaluate_location_alerts(
     await _forget_stale_locations(session_factory, enabled)
 
     pending: list = []
-    # (check_id, значение) — новое состояние «откуда сайт не виден». Копится
+    # (check_id, откуда не виден, с какого момента) — новое состояние. Копится
     # отдельно от pending: его надо сохранить независимо от того, ушёл алерт или
     # нет (см. ниже).
-    state_updates: list[tuple[int, list[int] | None]] = []
+    state_updates: list[tuple[int, list[int] | None, datetime | None]] = []
     for c in checks:
         lines: list[str] = []  # строка на локацию: «🟢/🔴 Имя — доступен/недоступен»
         down_ids: list[int] = []
@@ -840,17 +840,35 @@ async def evaluate_location_alerts(
             # unknown (ещё не проверялось) — пропускаем
         down_ids.sort()
         prev = sorted(c.loc_alerted) if c.loc_alerted is not None else None
+        # О чём уже уведомили — отдельно от того, что показываем: алерт может быть
+        # придержан выдержкой или не доставлен, а интерфейс должен знать правду сразу.
+        notified = sorted(c.loc_notified) if c.loc_notified is not None else None
 
         if n_up and n_down:  # частичная доступность → список локаций с кружками
-            if down_ids != prev:
-                state_updates.append((c.id, down_ids))
+            # Отсчёт ведём от НАЧАЛА состояния, а не от смены набора: если сперва
+            # отвалилась одна точка, а через минуту вторая — сайт всё это время
+            # виден не отовсюду, и заново ждать выдержку незачем.
+            # _aware: sqlite отдаёт время без зоны, вычитать такое из now нельзя
+            since = _aware(c.loc_partial_since) if c.loc_partial_since else now
+            if down_ids != prev or c.loc_partial_since is None:
+                state_updates.append((c.id, down_ids, since))
+            if (now - since).total_seconds() >= _LOC_PARTIAL_SUSTAIN and down_ids != notified:
                 pending.append(
                     ("locpart", c.name, "", "\n".join(lines), None, c.id,
-                     ("loc_alerted", down_ids), "")
+                     ("loc_notified", down_ids), "")
                 )
-        elif prev is not None and not n_down:  # снова доступен отовсюду
-            state_updates.append((c.id, None))
-            pending.append(("locrec", c.name, "", "", None, c.id, ("loc_alerted", None), ""))
+        elif not n_down:  # снова доступен отовсюду
+            if prev is not None or c.loc_partial_since is not None:
+                state_updates.append((c.id, None, None))
+            # Отбой — только по алерту, который действительно был отправлен.
+            if notified is not None:
+                pending.append(("locrec", c.name, "", "", None, c.id, ("loc_notified", None), ""))
+        elif not n_up and c.loc_partial_since is not None:
+            # Не виден ниоткуда: полное падение ведёт основной инцидент, а здесь
+            # важно обнулить отсчёт. Точки поднимаются по одной, и без сброса
+            # выдержка была бы уже выдержана к моменту, когда встала первая из них —
+            # то есть ровно на восстановлении и прилетал бы лишний алерт.
+            state_updates.append((c.id, c.loc_alerted, None))
 
     # Состояние сохраняем ДО отправки и независимо от неё. loc_alerted — это не
     # только дедупликация алерта: на нём держатся счётчик «частично», чип с
@@ -861,10 +879,11 @@ async def evaluate_location_alerts(
     # интерфейс — разные вещи.
     if state_updates:
         async with session_factory() as session:
-            for check_id, value in state_updates:
+            for check_id, value, since in state_updates:
                 row = await session.get(Check, check_id)
                 if row is not None:
                     row.loc_alerted = value
+                    row.loc_partial_since = since
             await session.commit()
 
     if pending:
@@ -917,6 +936,12 @@ _THROTTLE_MIN_STREAK = 3  # интервалов подряд с реальны�
 # начала «жарки» ({тип}_since), сбрасываем как только метрика вернулась в норму или
 # сервер оффлайн (данные протухли). Одиночные спайки «моргнуло и прошло» не шлём.
 _SUSTAIN_DEFAULT = 900
+# Сколько должна продержаться частичная доступность, прежде чем о ней сообщать.
+# Точки проверки ходят каждая на своей каденции, поэтому сайт, поднявшийся после
+# падения, какое-то время виден из одних и не виден из других — это фаза
+# восстановления, а не проблема с регионом. Без выдержки каждое восстановление
+# давало лишнюю пару «недоступен из N» + «снова доступен отовсюду».
+_LOC_PARTIAL_SUSTAIN = 300
 
 # Как назвать истекающую сущность в алерте. Путь к файлу инженеру мало что говорит,
 # пока не сказано, что именно этот файл держит.
