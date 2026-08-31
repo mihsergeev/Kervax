@@ -7,6 +7,8 @@ package main
 
 import (
 	"crypto/rand"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -121,5 +123,22 @@ func TestPartFileIsPerVersionAndSize(t *testing.T) {
 	c := partPath("2.2", 200)
 	if a == b || b == c || a == c {
 		t.Fatalf("имена огрызков совпали: %s / %s / %s", a, b, c)
+	}
+}
+
+func TestPermanentVsTemporaryRejection(t *testing.T) {
+	// Из-за отсутствия этого различия две ноды простояли на старой версии пять дней:
+	// первая же сетевая неудача помечала версию отвергнутой НАВСЕГДА, и повторов не
+	// было вовсе. Подпись действительно сама себя не починит, а оборванный канал — да.
+	perm := permanent(errors.New("sha256 бинаря не совпал с подписанным"))
+	if !isPermanent(perm) {
+		t.Fatal("отказ по sha должен быть окончательным — иначе агент вечно тянет подделку")
+	}
+	if !isPermanent(fmt.Errorf("скачивание: %w", perm)) {
+		t.Fatal("обёрнутый окончательный отказ перестал быть окончательным")
+	}
+	tmp := fmt.Errorf("на 3473408/5714055 байт: %w", errors.New("HTTP 502 вместо 206"))
+	if isPermanent(tmp) {
+		t.Fatal("обрыв канала посчитан окончательным — нода больше не попробует обновиться")
 	}
 }
