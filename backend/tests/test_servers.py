@@ -1374,8 +1374,12 @@ async def test_server_flux_down_conditions():
     ]})
     cond = collector._server_conditions(s, now)
     assert cond["flux_down"][1]["where"] == "flux-system/flux-system"
-    assert cond["flux_down"][1]["reason"] == "GitOperationFailed"
+    # причина по-русски, а сырой код Flux — в скобках: по нему гуглят
+    assert "истёк или отозван токен" in cond["flux_down"][1]["reason"]
+    assert "GitOperationFailed" in cond["flux_down"][1]["reason"]
+    # преамбула Flux вырезана, суть осталась
     assert "Access denied" in cond["flux_down"][1]["message"]
+    assert "failed to checkout" not in cond["flux_down"][1]["message"]
     assert cond["flux_down"][0] == 0  # первый интервал — дебаунс
 
     s.alert_state = {"flux_down_since": (now - timedelta(minutes=20)).isoformat()}
@@ -1395,3 +1399,71 @@ async def test_server_flux_down_conditions():
     # Flux читался и всё зелено → условие есть с уровнем 0, чтобы алерт закрылся
     s.last_report = {"flux": []}
     assert collector._server_conditions(s, now)["flux_down"][0] == 0
+
+
+async def test_flux_alert_points_at_the_root_of_the_cascade():
+    """Одна упавшая сборка тянет за собой зависимые — алертить надо о причине.
+
+    Поймано на живом парке: в ленте висело «Kustomization op-dg-prod-backend —
+    DependencyNotReady: dependency op-dg-prod-migrations is not ready», то есть
+    следствие, выбранное по алфавиту. Инженеру приходилось самому идти искать,
+    что же именно упало.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    from app import collector
+
+    now = datetime.now(timezone.utc)
+    s = _kube_server(now, last_report={"flux": [
+        # по алфавиту первый — и это следствие
+        {"kind": "Kustomization", "where": "flux-system/op-dg-prod-backend",
+         "ready": False, "reason": "DependencyNotReady",
+         "message": "dependency 'flux-system/op-dg-prod-migrations' is not ready"},
+        {"kind": "Kustomization", "where": "flux-system/op-dg-prod-migrations",
+         "ready": False, "reason": "HealthCheckFailed",
+         "message": "health check failed after 33.9ms: failed early due to stalled "
+                    "resources: [Job/op-dg-prod/op-dg-migrations status: 'Failed']"},
+        {"kind": "Kustomization", "where": "flux-system/op-dg-prod-processing",
+         "ready": False, "reason": "DependencyNotReady",
+         "message": "dependency 'flux-system/op-dg-prod-migrations' is not ready"},
+    ]})
+    s.alert_state = {"flux_down_since": (now - timedelta(minutes=20)).isoformat()}
+    lvl, ctx = collector._server_conditions(s, now)["flux_down"]
+    assert lvl == 1
+    assert ctx["where"] == "flux-system/op-dg-prod-migrations", "показали следствие вместо причины"
+    # ждущие посчитаны отдельно: масштаб виден, но список не раздут
+    assert "2 ждут этого" in ctx["more"]
+    # объект, который не поднялся, назван по-человечески
+    assert ctx["message"] == "Job op-dg-migrations: Failed"
+    # подсказка подставлена с реальными namespace и именем
+    assert "kubectl -n flux-system describe kustomization op-dg-prod-migrations" in ctx["hint"]
+
+
+async def test_expiry_alert_explains_what_to_do():
+    """Дата без объяснения вызывает недоумение, а не действие.
+
+    «ИСТЁК 49 дн. назад» на живом кластере — первый вопрос инженера «а почему
+    тогда всё работает?». Ответ должен быть в самом сообщении.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    from app import collector
+
+    now = datetime.now(timezone.utc)
+    ts = int(now.timestamp())
+    s = _kube_server(now, last_report={"kube_expiry": [
+        {"kind": "secret-cert", "where": "tech1/backend-hosts-ssl",
+         "expires": ts - 49 * 86400, "note": "tls.crt"},
+    ]})
+    s.alert_state = {"kube_expiry_since": (now - timedelta(minutes=20)).isoformat()}
+    ctx = collector._server_conditions(s, now)["kube_expiry"][1]
+    assert "при рестарте пода" in ctx["advice"]
+    # «TLS-сертификат … (tls.crt)» — повтор самого себя, его быть не должно
+    assert "tls.crt" not in ctx["where"]
+
+    # ещё не истёк — совет другой: не «уберите», а «обновите до срока»
+    s.last_report = {"kube_expiry": [
+        {"kind": "flux-token", "where": "flux-system/flux-system", "expires": ts + 5 * 86400},
+    ]}
+    ctx = collector._server_conditions(s, now)["kube_expiry"][1]
+    assert "перестанет забирать изменения" in ctx["advice"]

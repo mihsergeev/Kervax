@@ -952,9 +952,86 @@ _KUBE_KIND = {
     "flux-token": "токен Flux в секрете",
     "secret-cert": "TLS-сертификат в секрете",
 }
+
+# Чем грозит и что делать — отдельно для «ещё не истёк» и «уже истёк». Без этого
+# алерт сообщает дату и молчит о главном; на «ИСТЁК 49 дн. назад» первый вопрос
+# инженера — «а почему тогда всё работает?», и ответ должен быть в самом сообщении.
+_KUBE_ADVICE = {
+    ("cluster-cert", False): "после этой даты компоненты control-plane перестанут принимать друг друга — перевыпустите заранее",
+    ("cluster-cert", True): "control-plane обычно уже не поднимется после рестарта — перевыпускайте немедленно",
+    ("kubeconfig", False): "после этой даты этим файлом в кластер не зайти — перевыпустите",
+    ("kubeconfig", True): "этим файлом в кластер уже не зайти — перевыпустите",
+    ("kubelet-cert", False): "он должен ротироваться сам; если дата близко — ротация не работает, и нода выпадет из кластера",
+    ("kubelet-cert", True): "ротация не сработала — нода отвалится от кластера, чините kubelet",
+    ("flux-token", False): "после этой даты Flux перестанет забирать изменения из Git — выпустите новый токен и обновите секрет",
+    ("flux-token", True): "Flux уже не может забирать изменения — выпустите новый токен и обновите секрет",
+    ("secret-cert", False): "обновите, иначе TLS у того, кто им пользуется, перестанет работать",
+    ("secret-cert", True): "кластер жив — значит секрет сейчас никто не перечитывает, но при рестарте пода сломается то, что им пользуется; обновите или удалите, если он больше не нужен",
+}
 # Ready=False с этими причинами — не поломка, а работа: Flux тянет артефакт или
 # докатывает релиз. Алертить на них — гарантированно приучить игнорировать канал.
 _FLUX_TRANSIENT = frozenset({"Progressing", "Reconciling", "ProgressingWithRetry", "Unknown"})
+
+# Причина отказа Flux по-русски и куда смотреть. Английский reason сам по себе инженеру
+# мало что даёт: «InstallFailed» не говорит, чинить чарт, кластер или права. Пары
+# (что случилось, где смотреть) собраны по тому, что реально прилетало с парка.
+_FLUX_REASON = {
+    "GitOperationFailed": ("не может сходить в Git — обычно истёк или отозван токен",
+                           "проверьте секрет с доступом у источника"),
+    "AuthenticationFailed": ("отказ в доступе к источнику",
+                             "проверьте секрет с доступом у источника"),
+    "InstallFailed": ("Helm не смог поставить релиз", "kubectl -n {ns} get pods"),
+    "UpgradeFailed": ("Helm не смог обновить релиз", "kubectl -n {ns} get pods"),
+    "TestFailed": ("тесты чарта не прошли", "kubectl -n {ns} get pods"),
+    "RemediationFailed": ("откат после неудачного выката тоже не удался",
+                          "kubectl -n {ns} get helmrelease {name}"),
+    "HealthCheckFailed": ("ресурсы не поднялись после выката",
+                          "kubectl -n {ns} describe kustomization {name}"),
+    "BuildFailed": ("не собираются манифесты", "проверьте kustomization в репозитории"),
+    "ArtifactFailed": ("не смог скачать артефакт источника",
+                       "kubectl -n {ns} get gitrepositories,ocirepositories"),
+    "ReconciliationFailed": ("не смог применить изменения в кластер",
+                             "kubectl -n {ns} describe kustomization {name}"),
+    "DependencyNotReady": ("ждёт другую сборку", ""),
+    "PostRenderingFailed": ("не отработал post-renderer", "проверьте патчи релиза"),
+}
+
+# Преамбулы, которые Flux ставит перед собственно причиной. Они уже сказаны в
+# заголовке алерта («Helm не смог обновить релиз») и в строке с именем ресурса,
+# поэтому в тексте это просто шум, съедающий место до сути.
+_FLUX_STRIP = (
+    re.compile(r"^Helm (?:install|upgrade|uninstall|rollback) failed for release \S+ "
+               r"with chart \S+:\s*"),
+    re.compile(r"^health check failed after [\d.]+[a-z]*s:\s*"),
+    re.compile(r"^failed early due to stalled resources:\s*"),
+    re.compile(r"^failed to checkout and determine revision:\s*"),
+    re.compile(r"^unable to clone [^:]*:\s*"),
+    re.compile(r"^reconciliation failed:\s*"),
+)
+
+# «[Job/op-dg-prod/op-dg-migrations status: 'Failed']» — так Flux называет объект,
+# который не поднялся. Человеку нужнее «Job op-dg-migrations: Failed».
+_FLUX_OBJ = re.compile(r"\[(\w+)/[^/\]]+/([^\s\]]+) status: '([^']+)'\]")
+
+
+def _flux_detail(msg: str, limit: int = 150) -> str:
+    """Сообщение Flux без преамбул, обрезанное ПО ГРАНИЦЕ СЛОВА.
+
+    Резать вслепую нельзя: в ленте висело «would exceed context de.» — обрывок,
+    похожий на опечатку и не объясняющий ничего."""
+    msg = " ".join((msg or "").split())
+    changed = True
+    while changed:  # преамбулы бывают вложены одна в другую
+        changed = False
+        for pat in _FLUX_STRIP:
+            new = pat.sub("", msg)
+            if new != msg:
+                msg, changed = new, True
+    msg = _FLUX_OBJ.sub(lambda m: f"{m.group(1)} {m.group(2)}: {m.group(3)}", msg)
+    if len(msg) <= limit:
+        return msg
+    cut = msg[:limit].rsplit(" ", 1)[0]
+    return (cut or msg[:limit]) + "…"
 # Сколько молчания СВЕРХ offline_after нужно для алерта (в интерфейсе нода посереет
 # сразу, а в Telegram уйдёт только устойчивый обрыв). 3 минуты = 12 пропущенных
 # отчётов подряд: разовая перегрузка канала столько не держится.
@@ -1422,12 +1499,16 @@ def _server_conditions(s: Server, now: datetime) -> dict[str, tuple[int, dict]]:
             # Уточнение из хелпера показываем, только если его нет в самом пути:
             # у сертификата note — это имя файла, и «server.crt (server)» — шум.
             note, where = it.get("note") or "", it.get("where") or ""
+            if note in ("tls.crt", "config"):
+                note = ""  # «TLS-сертификат … (tls.crt)» — повтор самого себя
             if note and note not in where:
                 where = f"{where} ({note})"
+            kind = it.get("kind") or ""
             sustain("kube_expiry", True, {
                 "value": phrase,
-                "what": _KUBE_KIND.get(it.get("kind") or "", "срок"),
+                "what": _KUBE_KIND.get(kind, "срок"),
                 "where": where,
+                "advice": _KUBE_ADVICE.get((kind, days < 0), ""),
                 "date": datetime.fromtimestamp(exp, tz=timezone.utc).strftime("%d.%m.%Y"),
                 "more": f" + ещё {near - 1} на этом сервере" if near > 1 else "",
             })
@@ -1442,13 +1523,31 @@ def _server_conditions(s: Server, now: datetime) -> dict[str, tuple[int, dict]]:
               if not f.get("ready") and (f.get("reason") or "") not in _FLUX_TRANSIENT]
     if rep.get("flux") is not None:
         if broken:
-            f = sorted(broken, key=lambda x: (x.get("kind") or "", x.get("where") or ""))[0]
+            # Корень, а не первый по алфавиту. Одна упавшая сборка тянет за собой все
+            # зависимые, и те отвечают «DependencyNotReady» — это следствие. В ленте
+            # висело именно оно, и инженеру приходилось самому искать, что же упало.
+            roots = [f for f in broken if (f.get("reason") or "") != "DependencyNotReady"]
+            waiting = len(broken) - len(roots)
+            pool = roots or broken
+            f = sorted(pool, key=lambda x: (x.get("kind") or "", x.get("where") or ""))[0]
+            reason = f.get("reason") or "Ready=False"
+            why, hint = _FLUX_REASON.get(reason, ("", ""))
+            where = f.get("where") or ""
+            ns, _, name = where.partition("/")
+            tail = []
+            if len(pool) > 1:
+                tail.append(f"ещё {len(pool) - 1} сломано")
+            if waiting:
+                tail.append(f"{waiting} ждут этого")
             sustain("flux_down", True, {
                 "what": f.get("kind") or "ресурс Flux",
-                "where": f.get("where") or "",
-                "reason": f.get("reason") or "Ready=False",
-                "message": (f.get("message") or "")[:160] or "без пояснения",
-                "more": f" (и ещё {len(broken) - 1})" if len(broken) > 1 else "",
+                "where": where,
+                # человеческая причина, а сырой reason — в скобках: по нему гуглят
+                "reason": f"{why} ({reason})" if why else reason,
+                "message": _flux_detail(f.get("message") or "") or "без пояснения",
+                "hint": ("\n↳ " + hint.format(ns=ns or "namespace", name=name or "имя"))
+                        if hint else "",
+                "more": f" [{', '.join(tail)}]" if tail else "",
             })
         else:
             sustain("flux_down", False, {})
