@@ -16,6 +16,15 @@ set -euo pipefail
 # v2: RBAC gained READ on batch/cronjobs+jobs — the panel sees database dumps already set up
 # v3: plus read on persistentvolumes/claims — the audit matches cluster volumes against backups
 KERVAX_SETUP_VERSION=0.14  # MAJOR.MINOR; compared component-wise (0.13 > 0.2!)
+# Which nodes need this helper at all - read by the installer and by the ansible
+# playbook, and evaluated as a shell condition ON THE NODE.
+KERVAX_SETUP_WHEN="command -v k0s >/dev/null 2>&1 || command -v k3s >/dev/null 2>&1 || command -v microk8s >/dev/null 2>&1 || command -v kubelet >/dev/null 2>&1 || [ -e /etc/kubernetes/admin.conf ] || [ -d /var/lib/k0s ]"
+# ...but never in bulk. This script creates a ServiceAccount and puts its token on the
+# node - it GRANTS the panel access to the cluster. That is a decision a human makes for
+# a specific cluster, not a conclusion from "there is a cluster here": the neighbouring
+# cluster may be off limits on purpose. So the installer runs it (adding a node IS the
+# explicit act), while a fleet-wide playbook run only updates it where it already is.
+KERVAX_SETUP_MANUAL=1
 NS=kube-system
 SA=kervax-agent
 OUT=/etc/kervax/kube.json

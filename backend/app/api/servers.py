@@ -1850,10 +1850,17 @@ async def setup_index() -> list[dict]:
             continue
         ver = re.search(r"^KERVAX_SETUP_VERSION=([0-9.]+)", body, re.MULTILINE)
         always = re.search(r"^KERVAX_SETUP_ALWAYS=1", body, re.MULTILINE)
+        # Условие применимости и признак «только явной установкой». Оба живут в самом
+        # скрипте: установщик и ansible-плейбук читают одно и то же, и ни один из них
+        # не носит у себя списка «что куда ставить» — такие списки расходятся молча.
+        when = re.search(r'^KERVAX_SETUP_WHEN="([^"]+)"', body, re.MULTILINE)
+        manual = re.search(r"^KERVAX_SETUP_MANUAL=1", body, re.MULTILINE)
         out.append({
             "name": name,
             "version": ver.group(1) if ver else "",
             "always": bool(always),
+            "when": when.group(1) if when else "",
+            "manual": bool(manual),
         })
     return out
 

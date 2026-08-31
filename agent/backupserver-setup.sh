@@ -50,6 +50,11 @@ fi
 #           repository created by the panel. The env is exported now, and the installer
 #           repairs already created envs (migration below).
 KERVAX_SETUP_VERSION=0.20  # MAJOR.MINOR; compared component-wise (0.13 > 0.2!)
+# Which nodes need this helper at all. Read by the ansible playbook on the
+# CONTROL machine and evaluated as a shell condition ON THE NODE, so a new
+# helper lands where it belongs without anyone editing the playbook.
+# Only on a backup server. Elsewhere there are no restic repositories to report on.
+KERVAX_SETUP_WHEN="[ -d /app/rest-server ] || [ -d /app/rest-server-tls ] || [ -d /srv/rest-server ] || (command -v docker >/dev/null 2>&1 && docker ps 2>/dev/null | grep -qi rest-server)"
 install -d -m 0755 "$HELPER_DIR" "$STATE_DIR" /var/lib/kervax/versions
 echo "$KERVAX_SETUP_VERSION" > /var/lib/kervax/versions/backupserver-setup.ver
 chmod 0644 /var/lib/kervax/versions/backupserver-setup.ver  # explicit: the agent (kervax) must read it
