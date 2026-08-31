@@ -35,7 +35,7 @@ import (
 	"time"
 )
 
-const version = "2.1"
+const version = "2.2"
 
 // Публичный ключ для проверки подписи релизов агента (Ed25519, base64).
 // ПУСТО по умолчанию → самообновление ВЫКЛЮЧЕНО (агент никогда не заменяет себя).
@@ -705,6 +705,15 @@ const (
 	dlAttemptsMax = 400 // страховка от бесконечного цикла
 )
 
+// Пауза после неудачи, удваивается до dlBackoffMax. Без неё восемь попыток сгорали
+// за миллисекунды: 502 от прокси во время перезапуска панели — это мгновенный ответ,
+// а не таймаут, так что «неудачи подряд» кончались раньше, чем панель успевала
+// подняться. Переменные, а не константы: тесту нужно их обнулить.
+var (
+	dlBackoff    = 2 * time.Second
+	dlBackoffMax = 30 * time.Second
+)
+
 // fetchRange — один кусок [from..to]. noRange=true, если панель не умеет Range —
 // тогда зовущий откатывается на обычное скачивание целиком.
 func fetchRange(client *http.Client, u string, from, to int) (b []byte, noRange bool, err error) {
@@ -733,15 +742,59 @@ func fetchRange(client *http.Client, u string, from, to int) (b []byte, noRange 
 	return b, false, nil
 }
 
+// partPath — где копится недокачанный бинарь. Имя включает версию и размер: после
+// нового релиза старый огрызок не должен выдать себя за начало нового файла.
+// Каталог тот же, что у бинаря агента, — единственный, куда systemd разрешает писать.
+func partPath(ver string, size int) string {
+	self, err := os.Executable()
+	if err != nil {
+		return ""
+	}
+	if resolved, e := filepath.EvalSymlinks(self); e == nil {
+		self = resolved
+	}
+	safe := strings.Map(func(r rune) rune {
+		if (r >= '0' && r <= '9') || r == '.' {
+			return r
+		}
+		return '-'
+	}, ver)
+	return filepath.Join(filepath.Dir(self), fmt.Sprintf(".update-%s-%d.part", safe, size))
+}
+
 // httpGetChunked — скачивание с докачкой. size берём из ПОДПИСАННОГО манифеста, так что
 // на него можно опираться при выделении памяти; sha256 всё равно проверяется зовущим.
-func httpGetChunked(u string, size int) ([]byte, error) {
+//
+// Прогресс ПЕРЕЖИВАЕТ неудачную попытку: скачанное дописывается в файл рядом с бинарём,
+// и следующий заход продолжает с того же места. Без этого на канале, который рвёт
+// длинную передачу, обновление не доезжало НИКОГДА: агент честно набирал ~3.5 МБ из
+// 5.7, упирался в предел неудач, терял всё и на следующем цикле начинал с нуля — так
+// две ноды за DPI простояли на старой версии пять дней, повторяя одну и ту же ошибку.
+func httpGetChunked(u string, size int, ver string) ([]byte, error) {
 	if size <= 0 || size > 128<<20 {
 		return nil, fmt.Errorf("нереальный размер артефакта: %d", size)
 	}
-	client := &http.Client{Timeout: 60 * time.Second, Transport: panelTransport(false)}
+	part := partPath(ver, size)
 	buf := make([]byte, 0, size)
+	if part != "" {
+		if old, err := os.ReadFile(part); err == nil && len(old) > 0 && len(old) < size {
+			buf = append(buf, old...) // продолжаем прошлую попытку
+		} else if err == nil && len(old) >= size {
+			os.Remove(part) // мусор: столько байт не бывает, качаем заново
+		}
+	}
+	// Дописываем по мере скачивания. Если файл открыть не вышло (нет прав, нет места) —
+	// работаем как раньше, в памяти: обновление важнее, чем возможность его возобновить.
+	var f *os.File
+	if part != "" {
+		if fh, err := os.OpenFile(part, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600); err == nil {
+			f = fh
+			defer f.Close()
+		}
+	}
+	client := &http.Client{Timeout: 60 * time.Second, Transport: panelTransport(false)}
 	chunk, fails, attempts := dlChunkMax, 0, 0
+	wait := dlBackoff
 	for len(buf) < size {
 		if attempts++; attempts > dlAttemptsMax {
 			return nil, fmt.Errorf("слишком много попыток, взято %d из %d байт", len(buf), size)
@@ -750,21 +803,33 @@ func httpGetChunked(u string, size int) ([]byte, error) {
 		if end > size-1 {
 			end = size - 1
 		}
-		part, noRange, err := fetchRange(client, u, len(buf), end)
+		part2, noRange, err := fetchRange(client, u, len(buf), end)
 		if noRange {
 			return httpGetLimited(u, int64(size)+1)
 		}
 		if err != nil {
 			if fails++; fails >= dlFailsMax {
-				return nil, fmt.Errorf("на %d/%d байт: %w", len(buf), size, err)
+				// Файл НЕ удаляем: набранное пригодится следующей попытке.
+				return nil, fmt.Errorf("на %d/%d байт: %w (продолжим с этого места)",
+					len(buf), size, err)
 			}
 			if chunk > dlChunkMin {
 				chunk /= 2 // канал не тянет длинную передачу — идём мельче
 			}
+			time.Sleep(wait)
+			if wait < dlBackoffMax {
+				wait *= 2
+			}
 			continue
 		}
-		buf = append(buf, part...)
-		fails = 0
+		buf = append(buf, part2...)
+		if f != nil {
+			if _, werr := f.Write(part2); werr != nil {
+				f.Close()
+				f = nil // дальше только в памяти
+			}
+		}
+		fails, wait = 0, dlBackoff
 		if chunk < dlChunkMax {
 			chunk *= 2
 		}
@@ -831,9 +896,13 @@ func selfUpdate(panelURL, want string) error {
 		return fmt.Errorf("в манифесте нет артефакта для %s", runtime.GOARCH)
 	}
 
-	bin, err := httpGetChunked(base+"/api/agent/download/"+runtime.GOARCH, art.Size)
+	bin, err := httpGetChunked(base+"/api/agent/download/"+runtime.GOARCH, art.Size, m.Version)
 	if err != nil {
 		return fmt.Errorf("скачивание бинаря: %w", err)
+	}
+	// Дальше огрызок не нужен ни при каком исходе: либо ставим, либо он битый.
+	if pp := partPath(m.Version, art.Size); pp != "" {
+		defer os.Remove(pp)
 	}
 	sum := sha256.Sum256(bin)
 	if hex.EncodeToString(sum[:]) != art.SHA256 {
