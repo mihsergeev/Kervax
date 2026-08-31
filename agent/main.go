@@ -36,7 +36,7 @@ import (
 	"time"
 )
 
-const version = "2.3"
+const version = "2.4"
 
 // Публичный ключ для проверки подписи релизов агента (Ed25519, base64).
 // ПУСТО по умолчанию → самообновление ВЫКЛЮЧЕНО (агент никогда не заменяет себя).
@@ -708,6 +708,12 @@ const (
 	// Пауза перед повтором после ВРЕМЕННОЙ неудачи обновления. Чаще незачем:
 	// каждая попытка добирает свой кусок, а канал за пять минут не исправится.
 	updateRetryPause = 5 * time.Minute
+	// Предел на ОДНУ попытку скачивания. Без него плохой канал держал попытку часами:
+	// куски то проходят, то нет, счётчик неудач подряд сбрасывается на каждом удачном,
+	// и цикл живёт до 400 попыток по минуте. Всё это время новых попыток не начиналось,
+	// а нода выглядела молчащей. Теперь попытка гарантированно завершается, набранное
+	// остаётся на диске, и следующая продолжает с того же места.
+	dlTotalMax = 10 * time.Minute
 )
 
 // Пауза после неудачи, удваивается до dlBackoffMax. Без неё восемь попыток сгорали
@@ -800,9 +806,14 @@ func httpGetChunked(u string, size int, ver string) ([]byte, error) {
 	client := &http.Client{Timeout: 60 * time.Second, Transport: panelTransport(false)}
 	chunk, fails, attempts := dlChunkMax, 0, 0
 	wait := dlBackoff
+	deadline := time.Now().Add(dlTotalMax)
 	for len(buf) < size {
 		if attempts++; attempts > dlAttemptsMax {
 			return nil, fmt.Errorf("слишком много попыток, взято %d из %d байт", len(buf), size)
+		}
+		if time.Now().After(deadline) {
+			return nil, fmt.Errorf("не уложились в %s, взято %d из %d байт (продолжим с этого места)",
+				dlTotalMax, len(buf), size)
 		}
 		end := len(buf) + chunk - 1
 		if end > size-1 {
