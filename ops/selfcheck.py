@@ -62,7 +62,41 @@ def check_helpers() -> None:
         fail("helper", f"«{name}» без подписи в _SETUP_LABEL — в UI покажется техимя")
     for name in sorted(labels - files):
         fail("helper", f"подпись для «{name}», а файла agent/{name}.sh нет")
-    print(f"helper-скриптов: {len(files)}, с подписями: {len(labels & files)}")
+    # Каждый helper обязан сказать, каким нодам он нужен. Без этого ansible-плейбук
+    # ставит его ТОЛЬКО туда, где он уже стоит, — то есть новый helper не приезжает
+    # никуда, пока его не поставят руками на каждую ноду. Ровно так и вышло с
+    # kubeexpiry-setup: прогон по парку отработал вхолостую, а панель продолжала
+    # требовать действий. Три допустимых ответа, четвёртого нет:
+    #   KERVAX_SETUP_ALWAYS — безопасен везде;
+    #   KERVAX_SETUP_WHEN=… — условие, проверяемое на ноде;
+    # Помечать ли скрипт ещё и KERVAX_SETUP_MANUAL (ставить только явной установкой
+    # ноды, массово — лишь обновлять) — отдельный вопрос; здесь важно, чтобы helper
+    # хотя бы сказал, кому он нужен.
+    silent = []
+    for name in sorted(files):
+        body = read(f"agent/{name}.sh")
+        if "KERVAX_SETUP_ALWAYS" in body or "KERVAX_SETUP_WHEN=" in body:
+            continue
+        silent.append(name)
+    # Фигурные скобки в условии ломают сразу двоих: ansible подставляет условие в
+    # Jinja-шаблон (там «{{…}}» — выражение), а установщик режет каталог панели по
+    # границам записей. Одинарные кавычки ломают третьего — YAML-строку в плейбуке.
+    # Всё это проявляется не отказом, а тихой пропажей helper'а из списка.
+    for name in sorted(files):
+        m = re.search(r'^KERVAX_SETUP_WHEN="([^"]*)"', read(f"agent/{name}.sh"), re.M)
+        if not m:
+            continue
+        bad = [c for c in ("{", "}", "'") if c in m.group(1)]
+        if bad:
+            fail("helper", f"в условии «{name}» есть {' и '.join(bad)} — уберите: "
+                           f"скобки ломают шаблон ansible и разбор каталога, "
+                           f"апостроф — YAML плейбука")
+    for name in silent:
+        fail("helper", f"«{name}» не говорит, каким нодам он нужен — добавьте "
+                       f"KERVAX_SETUP_ALWAYS или KERVAX_SETUP_WHEN=… "
+                       f"(иначе ни установщик, ни плейбук его никуда не поставят)")
+    print(f"helper-скриптов: {len(files)}, с подписями: {len(labels & files)}, "
+          f"с условием применимости: {len(files) - len(silent)}")
 
 
 # ---------------------------------------------------------------- 2. алерты

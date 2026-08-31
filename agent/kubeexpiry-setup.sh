@@ -25,6 +25,12 @@
 set -euo pipefail
 
 KERVAX_SETUP_VERSION=0.1  # MAJOR.MINOR; compared component-wise
+# Which nodes need this helper at all. Read by the ansible playbook on the
+# CONTROL machine and evaluated as a shell condition ON THE NODE, so a new
+# helper lands where it belongs without anyone editing the playbook.
+# Only where a cluster actually runs - and regardless of whether the panel has
+# access to it: this helper works through the node's own admin kubectl.
+KERVAX_SETUP_WHEN="command -v k0s >/dev/null 2>&1 || command -v k3s >/dev/null 2>&1 || command -v microk8s >/dev/null 2>&1 || command -v kubelet >/dev/null 2>&1 || [ -e /etc/kubernetes/admin.conf ] || [ -d /var/lib/k0s ] || [ -d /var/lib/rancher/k3s ]"
 # Deliberately NOT "always": on a node without Kubernetes there is nothing to collect, and
 # asking a forge for token expiry is a network call - it belongs only where Flux actually runs.
 
