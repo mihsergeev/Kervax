@@ -447,6 +447,8 @@ const EN: Record<string, string> = {
     'repository already existed — reconnected to it, history preserved',
   '{name}: helper «{helper}» устарел ({a} → {b}) — переустановите':
     '{name}: helper "{helper}" is outdated ({a} → {b}) — reinstall it',
+  '{name}: helper «{helper}» не установлен ({b}) — поставьте':
+    '{name}: helper "{helper}" is not installed ({b}) — install it',
   'Требуется ручное действие на сервере. Выполните от root:':
     'Manual action required on the server. Run as root:',
   'Агенту не хватает прав из systemd-юнита:':

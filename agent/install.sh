@@ -282,16 +282,33 @@ run_remote_setup() {
     || echo "· $1: could not run it (skipping)." >&2
 }
 
-# Helpers safe on any node (KERVAX_SETUP_ALWAYS): the list is REQUESTED FROM THE PANEL
-# rather than hardcoded here. Otherwise every new helper would have to be added to the
-# installer - which was forgotten, and a fresh node immediately asked for a manual
-# step.
-install_always_setups() {
+# Which helpers this node needs is decided BY THE HELPERS THEMSELVES, and the panel's
+# index just carries their answers: KERVAX_SETUP_ALWAYS (safe anywhere) and
+# KERVAX_SETUP_WHEN (a shell condition checked here, on the node). Nothing about any
+# specific helper is written in this installer - the previous version had a hardcoded
+# list, it was forgotten every time a helper was added, and a freshly installed node
+# immediately asked for a manual step.
+#
+# The condition is executed as root, and it arrives from the panel - which this script
+# already trusts completely: it downloads the helpers from there and pipes them into
+# bash. (The ansible playbook is a different matter: it reads the same conditions from
+# the repository, not over the network.)
+install_applicable_setups() {
   idx=$(curl -fsSL --connect-timeout 15 "${URL%/}/api/agent/setup/index" 2>/dev/null) || {
-    echo "· the helper index is unavailable - installing only detected ones." >&2; return; }
-  # without jq: each index entry is its own object, take names where always=true
-  names=$(printf '%s' "$idx" | tr '{' '\n' | grep '"always": *true' | sed -n 's/.*"name": *"\([^"]*\)".*/\1/p')
-  for n in $names; do
+    echo "· the helper index is unavailable - skipping the helpers." >&2; return; }
+  # split BETWEEN entries, not on every '{': a condition may contain braces of its
+  # own, and splitting on them tore an entry in half - the helper after it vanished
+  # from the list entirely.
+  # '%s\n', not '%s': without a trailing newline `read` never yields the last
+  # entry, so the last helper in the index was silently not installed.
+  printf '%s\n' "$idx" | sed 's/},{/}\n{/g' | while IFS= read -r row; do
+    n=$(printf '%s' "$row" | sed -n 's/.*"name": *"\([^"]*\)".*/\1/p')
+    [ -n "$n" ] || continue
+    if ! printf '%s' "$row" | grep -q '"always": *true'; then
+      cond=$(printf '%s' "$row" | sed -n 's/.*"when": *"\([^"]*\)".*/\1/p')
+      [ -n "$cond" ] || continue                    # no condition, not safe everywhere
+      ( eval "$cond" ) >/dev/null 2>&1 || continue  # this node is not it
+    fi
     echo "→ Helper $n..."
     run_remote_setup "$n"
   done
@@ -302,27 +319,12 @@ install_always_setups() {
 if [ "$NO_AUTO" = 0 ]; then
   # Docker
   command -v docker >/dev/null 2>&1 && setup_docker_proxy
-  # everything safe everywhere (watchdog, clock, domains, database inventory, ...)
-  install_always_setups
-  # Kubernetes (k0s/k3s/microk8s/kubeadm) -> a narrow read-only+ SA (kube-setup.sh)
-  if command -v k0s >/dev/null 2>&1 || command -v k3s >/dev/null 2>&1 \
-     || command -v microk8s >/dev/null 2>&1 || command -v kubelet >/dev/null 2>&1 \
-     || [ -e /etc/rancher/k3s/k3s.yaml ] || [ -e /etc/kubernetes/admin.conf ] || [ -d /var/lib/k0s ]; then
-    echo "→ Kubernetes detected - enabling read-only access (narrow SA)..."
-    run_remote_setup kube-setup
-  fi
-  # backup server (rest-server) -> read-only repository statistics
-  if [ -d /app/rest-server/data ] \
-     || { command -v docker >/dev/null 2>&1 && docker ps --format '{{.Image}}' 2>/dev/null | grep -q 'rest-server'; }; then
-    echo "→ Backup server detected - enabling repository statistics..."
-    run_remote_setup backupserver-setup
-  fi
-  # restic backup client -> control from the panel (a narrow sudoers helper)
-  if [ -e /etc/systemd-rest.conf ] || [ -e /etc/systemd/system/systemd-rest.timer ] \
-     || [ -x /usr/local/lib/.restic/restic ]; then
-    echo "→ restic backup detected - enabling control from the panel..."
-    run_remote_setup backup-setup
-  fi
+  # everything that applies: helpers safe anywhere (watchdog, clock, domains, database
+  # inventory) plus the ones whose own condition matches this node (Kubernetes access,
+  # backup-server statistics, ...). Adding a node IS the explicit act, so helpers marked
+  # "manual only" - the ones that grant the panel new access - are installed here too;
+  # a fleet-wide playbook run deliberately leaves those alone.
+  install_applicable_setups
   # restart so the agent picks up docker_host/kube.json/helpers
   systemctl restart "$UNIT" 2>/dev/null || true
 elif [ "$WANT_DOCKER" = 1 ]; then

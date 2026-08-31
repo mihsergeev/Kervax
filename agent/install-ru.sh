@@ -281,15 +281,31 @@ run_remote_setup() {
     || echo "· $1: не удалось выполнить (пропускаю)." >&2
 }
 
-# Хелперы, безопасные на любой ноде (KERVAX_SETUP_ALWAYS): список СПРАШИВАЕМ У ПАНЕЛИ,
-# а не держим захардкоженным здесь. Иначе каждый новый хелпер надо дописывать в
-# установщик — о чём забывали, и свежая нода сразу просила «сходи выполни руками».
-install_always_setups() {
+# Кому нужен хелпер, решают САМИ ХЕЛПЕРЫ, а каталог панели лишь передаёт их ответы:
+# KERVAX_SETUP_ALWAYS (безопасен везде) и KERVAX_SETUP_WHEN (shell-условие, которое
+# проверяется здесь, на ноде). Про конкретные хелперы в установщике не написано ничего:
+# прежняя версия держала список внутри себя, его забывали дополнить при появлении
+# нового хелпера, и свежепоставленная нода сразу просила «сходи выполни руками».
+#
+# Условие выполняется от root и приходит с панели — которой этот скрипт и так доверяет
+# полностью: он качает оттуда сами хелперы и отдаёт их в bash. (Ansible-плейбук — другое
+# дело: он читает те же условия из репозитория, а не по сети.)
+install_applicable_setups() {
   idx=$(curl -fsSL --connect-timeout 15 "${URL%/}/api/agent/setup/index" 2>/dev/null) || {
-    echo "· каталог хелперов недоступен — ставлю только детектируемые." >&2; return; }
-  # без jq: каждая запись каталога — свой объект, берём имена тех, где always=true
-  names=$(printf '%s' "$idx" | tr '{' '\n' | grep '"always": *true' | sed -n 's/.*"name": *"\([^"]*\)".*/\1/p')
-  for n in $names; do
+    echo "· каталог хелперов недоступен — пропускаю хелперы." >&2; return; }
+  # делим МЕЖДУ записями, а не по каждой '{': в условии бывают свои скобки, и
+  # разбиение по ним рвало запись пополам — следующий за ней хелпер пропадал из
+  # списка совсем.
+  # '%s\n', а не '%s': без завершающего перевода строки `read` не отдаёт последнюю
+  # запись, и последний helper каталога молча не ставился.
+  printf '%s\n' "$idx" | sed 's/},{/}\n{/g' | while IFS= read -r row; do
+    n=$(printf '%s' "$row" | sed -n 's/.*"name": *"\([^"]*\)".*/\1/p')
+    [ -n "$n" ] || continue
+    if ! printf '%s' "$row" | grep -q '"always": *true'; then
+      cond=$(printf '%s' "$row" | sed -n 's/.*"when": *"\([^"]*\)".*/\1/p')
+      [ -n "$cond" ] || continue                    # ни условия, ни «безопасен везде»
+      ( eval "$cond" ) >/dev/null 2>&1 || continue  # эта нода не подходит
+    fi
     echo "→ Хелпер $n..."
     run_remote_setup "$n"
   done
@@ -300,27 +316,12 @@ install_always_setups() {
 if [ "$NO_AUTO" = 0 ]; then
   # Docker
   command -v docker >/dev/null 2>&1 && setup_docker_proxy
-  # всё, что безопасно везде (вотчдог, время, домены, инвентарь СУБД, …) — из каталога
-  install_always_setups
-  # Kubernetes (k0s/k3s/microk8s/kubeadm) → узкий read-only+ SA (kube-setup.sh)
-  if command -v k0s >/dev/null 2>&1 || command -v k3s >/dev/null 2>&1 \
-     || command -v microk8s >/dev/null 2>&1 || command -v kubelet >/dev/null 2>&1 \
-     || [ -e /etc/rancher/k3s/k3s.yaml ] || [ -e /etc/kubernetes/admin.conf ] || [ -d /var/lib/k0s ]; then
-    echo "→ Kubernetes найден — включаю read-only доступ (узкий SA)..."
-    run_remote_setup kube-setup
-  fi
-  # сервер бэкапов (rest-server) → read-only статистика репозиториев
-  if [ -d /app/rest-server/data ] \
-     || { command -v docker >/dev/null 2>&1 && docker ps --format '{{.Image}}' 2>/dev/null | grep -q 'rest-server'; }; then
-    echo "→ Сервер бэкапов найден — включаю статистику репозиториев..."
-    run_remote_setup backupserver-setup
-  fi
-  # клиент restic-бэкапа → управление из панели (узкий sudoers-helper)
-  if [ -e /etc/systemd-rest.conf ] || [ -e /etc/systemd/system/systemd-rest.timer ] \
-     || [ -x /usr/local/lib/.restic/restic ]; then
-    echo "→ restic-бэкап найден — включаю управление из панели..."
-    run_remote_setup backup-setup
-  fi
+  # всё применимое: и безопасное везде (вотчдог, время, домены, инвентарь СУБД), и то,
+  # чьё собственное условие подошло этой ноде (доступ в Kubernetes, статистика
+  # бэкап-сервера, …). Добавление ноды — и есть явное действие, поэтому хелперы с
+  # пометкой «только вручную» (те, что выдают панели новый доступ) ставятся и здесь;
+  # массовый прогон плейбука их намеренно не трогает.
+  install_applicable_setups
   # перезапуск, чтобы агент подхватил docker_host/kube.json/хелперы
   systemctl restart "$UNIT" 2>/dev/null || true
 elif [ "$WANT_DOCKER" = 1 ]; then

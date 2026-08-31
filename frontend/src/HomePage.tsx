@@ -122,10 +122,18 @@ function actionItems(servers: Server[], avail: string, relProblem: string, t: T)
           { name: s.name, db: dbs.map((x) => x.subject).join(', ') }) })
     }
     for (const h of s.helper_advice || []) {
+      // «устарел (? → v0.1)» на ноде, где helper'а нет вовсе, вводит в заблуждение:
+      // это не обновление, а первая установка, и делается она тем же прогоном.
+      const fresh = !h.installed
       items.push({ key: `hlp-${h.name}-${s.id}`, icon: '🧩', section: 'servers', id: s.id, cc: s.country,
-        text: t('{name}: helper «{helper}» устарел ({a} → {b}) — переустановите',
-          { name: s.name, helper: h.name,
-            a: fmtSetupVersion(h.installed), b: fmtSetupVersion(h.current) }) })
+        text: fresh
+          ? t('{name}: helper «{helper}» не установлен ({b}) — поставьте', {
+              name: s.name, helper: h.name, b: fmtSetupVersion(h.current),
+            })
+          : t('{name}: helper «{helper}» устарел ({a} → {b}) — переустановите', {
+              name: s.name, helper: h.name,
+              a: fmtSetupVersion(h.installed), b: fmtSetupVersion(h.current),
+            }) })
     }
   }
   return items

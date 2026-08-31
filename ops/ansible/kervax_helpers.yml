@@ -7,8 +7,16 @@
 # Скрипты берутся ЛОКАЛЬНО из репозитория, с панели ничего не скачивается: даже
 # скомпрометированная панель не может подсунуть свой код.
 #
-# Переустанавливаются ТОЛЬКО те helper'ы, что уже стоят на ноде (есть маркер версии),
-# и только если версия отличается. Повторный прогон не делает ничего.
+# ЧТО СТАВИТСЯ. Плейбук не знает ни одного helper'а по имени — он читает их из репо
+# и спрашивает у самих скриптов, кому они нужны:
+#   * `KERVAX_SETUP_ALWAYS`  — безопасен на любой ноде, ставим всюду;
+#   * `KERVAX_SETUP_WHEN=…`  — shell-условие, которое ПРОВЕРЯЕТСЯ НА НОДЕ (напр. «есть
+#     кластер»): истинно — ставим, ложно — молча пропускаем;
+#   * `KERVAX_SETUP_MANUAL`  — ставится только явной установкой ноды (выдаёт панели
+#     новый доступ), массовым прогоном — лишь обновляется там, где уже стоит;
+#   * ни того, ни другого     — ставим только там, где helper уже стоит.
+# Обновляем, если версия в репо отличается от установленной. Повторный прогон не делает
+# ничего. Новый скрипт с условием разъезжается по нужным нодам сам, без правки плейбука.
 #
 # Запуск (из корня репо):
 #   ansible-playbook playbooks/kervax_helpers.yml -l 'web-01,db-01'
@@ -38,8 +46,11 @@
     # (задачи «Обнаружить setup-скрипты…» ниже). Добавил новый скрипт agent/*.sh с
     # `KERVAX_SETUP_VERSION=` — плейбук подхватит его сам, править список не нужно.
     # Скрипт с `KERVAX_SETUP_ALWAYS` считается безопасным на ЛЮБОЙ ноде и ставится даже
-    # при первом заходе (напр. timesync-setup, agent-watchdog). Без флага — только
-    # обновляется там, где уже стоит (напр. kube-setup упал бы на ноде без кластера).
+    # при первом заходе (напр. timesync-setup, agent-watchdog). Скрипт с
+    # `KERVAX_SETUP_WHEN=…` сам называет условие своей применимости, и оно проверяется
+    # НА НОДЕ (напр. kube-setup и kubeexpiry-setup — только там, где есть кластер).
+    # Без того и другого — helper лишь обновляется там, где уже стоит: раньше так вело
+    # себя всё без ALWAYS, и НОВЫЙ helper не приезжал никуда, пока его не поставят руками.
     kervax_ver_dir: /var/lib/kervax/versions
     # временная копия в /root, а не в /tmp: /tmp доступен на запись всем, и подменить
     # скрипт между копированием и запуском там принципиально возможно
@@ -97,6 +108,36 @@
       changed_when: false
       check_mode: false
 
+    # Скрипты с `KERVAX_SETUP_MANUAL` массово НЕ ставим, даже если условие подошло: это
+    # те, что выдают панели новый доступ (kube-setup создаёт ServiceAccount в кластере).
+    # Такое решение принимает человек для конкретного кластера — а установщик ставит их,
+    # потому что добавление ноды и есть явное действие. Обновлять уже стоящие можно.
+    - name: Обнаружить скрипты «только вручную» (KERVAX_SETUP_MANUAL)
+      ansible.builtin.set_fact:
+        kervax_manual: >-
+          {{ (kervax_manual | default([])) + [item | basename | splitext | first] }}
+      loop: "{{ query('fileglob', kervax_src ~ '/*.sh') | sort }}"
+      when:
+        - "'KERVAX_SETUP_VERSION=' in lookup('file', item)"
+        - "'KERVAX_SETUP_MANUAL' in lookup('file', item)"
+      changed_when: false
+      check_mode: false
+
+    # Условие применимости из самого скрипта. Пусто = условия нет.
+    # Кавычки в значении — двойные; одинарных внутри условия быть не должно.
+    - name: Прочитать условия применимости (KERVAX_SETUP_WHEN)
+      ansible.builtin.set_fact:
+        kervax_when: >-
+          {{ kervax_when | default({}) | combine({
+               (item | basename | splitext | first):
+                 ((lookup('file', item)
+                   | regex_findall('KERVAX_SETUP_WHEN="([^"]+)"')) + ['']) | first
+             }) }}
+      loop: "{{ query('fileglob', kervax_src ~ '/*.sh') | sort }}"
+      when: "'KERVAX_SETUP_VERSION=' in lookup('file', item)"
+      changed_when: false
+      check_mode: false
+
     - name: Убедиться, что хелперы обнаружены
       ansible.builtin.assert:
         that: (kervax_helpers | default([])) | length > 0
@@ -140,18 +181,51 @@
       loop: "{{ kervax_have.stdout_lines }}"
       when: item.split('=')[1] | trim != kervax_want[item.split('=')[0]]
 
-    # Безопасные-везде helper'ы (timesync) ставим и при ПЕРВОМ заходе — на ноде без маркера
-    # «Отобрать устаревшие» их не выбрало бы (оно ходит только по установленным).
-    - name: Добавить первую установку безопасных helper'ов
+    # Условия применимости проверяем ОДНОЙ командой на ноду: каждое — это пара-тройка
+    # `command -v`, но отдельная задача на helper означала бы отдельный SSH-заход.
+    # Условие пишет автор скрипта, выполняется оно от root — тем же root, что и сам
+    # скрипт следом, так что новой поверхности это не добавляет.
+    - name: Спросить ноду, какие helper'ы ей подходят
+      ansible.builtin.shell: |
+        {% for h in kervax_helpers %}{% if kervax_when[h] | default('') | length > 0 %}
+        if ( {{ kervax_when[h] }} ) >/dev/null 2>&1; then echo "{{ h }}"; fi
+        {% endif %}{% endfor %}
+        exit 0
+      args:
+        executable: /bin/bash
+      register: kervax_fits
+      changed_when: false
+      check_mode: false
+
+    # Безопасные-везде helper'ы (timesync) и подошедшие по условию ставим и при ПЕРВОМ
+    # заходе — на ноде без маркера «Отобрать устаревшие» их не выбрало бы (оно ходит
+    # только по установленным).
+    - name: Добавить первую установку подходящих helper'ов
       ansible.builtin.set_fact:
         kervax_todo: "{{ (kervax_todo | default([])) + [item] }}"
-      loop: "{{ kervax_always | default([]) }}"
+      loop: >-
+        {{ ((kervax_always | default([])) + (kervax_fits.stdout_lines | default([])))
+           | difference(kervax_manual | default([])) }}
       when: (item ~ '=') not in (kervax_have.stdout | default(''))
 
-    - name: Что будет обновлено
+    - name: Что будет установлено или обновлено
       ansible.builtin.debug:
-        msg: "{{ item }} → {{ kervax_want[item] }}"
+        msg: >-
+          {{ item }} →
+          {{ kervax_want[item] }}{{ ' (первая установка)'
+             if (item ~ '=') not in (kervax_have.stdout | default('')) else '' }}
       loop: "{{ kervax_todo | default([]) }}"
+
+    # Иначе прогон, который ничего не сделал, выглядит одинаково и когда всё уже стоит,
+    # и когда helper не подошёл ни одной ноде — а это разные ситуации.
+    - name: Ставить нечего
+      ansible.builtin.debug:
+        msg: >-
+          Всё на месте. Не подошли этой ноде:
+          {{ kervax_helpers | difference(kervax_always | default([]))
+             | difference(kervax_fits.stdout_lines | default([]))
+             | union(kervax_manual | default([])) | join(', ') | default('—', true) }}
+      when: (kervax_todo | default([]) | length) == 0
 
     # Установка одним блоком: уборка временной копии в always, иначе при падении
     # установки root-скрипт остался бы лежать на диске (проверено — так и было).
