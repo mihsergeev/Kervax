@@ -16,6 +16,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -35,7 +36,7 @@ import (
 	"time"
 )
 
-const version = "2.2"
+const version = "2.3"
 
 // Публичный ключ для проверки подписи релизов агента (Ed25519, base64).
 // ПУСТО по умолчанию → самообновление ВЫКЛЮЧЕНО (агент никогда не заменяет себя).
@@ -50,7 +51,8 @@ var updatePubKeyB64 = ""
 // панель собрана НЕ с тем пубключом, которым подписан релиз.
 var (
 	lastUpdateError atomic.Value // string
-	rejectedVersion atomic.Value // string
+	rejectedVersion atomic.Value // string — отвергнута ОКОНЧАТЕЛЬНО, больше не пробуем
+	updateRetryAt   atomic.Value // time.Time — не раньше этого момента после временной неудачи
 )
 
 // разделы меньше этого не мониторим (мелкая системщина: /boot и т.п.)
@@ -703,6 +705,9 @@ const (
 	dlChunkMin    = 64 << 10
 	dlFailsMax    = 8   // неудач ПОДРЯД, после которых сдаёмся
 	dlAttemptsMax = 400 // страховка от бесконечного цикла
+	// Пауза перед повтором после ВРЕМЕННОЙ неудачи обновления. Чаще незачем:
+	// каждая попытка добирает свой кусок, а канал за пять минут не исправится.
+	updateRetryPause = 5 * time.Minute
 )
 
 // Пауза после неудачи, удваивается до dlBackoffMax. Без неё восемь попыток сгорали
@@ -851,6 +856,24 @@ func httpGetLimited(u string, max int64) ([]byte, error) {
 	return io.ReadAll(io.LimitReader(resp.Body, max))
 }
 
+// Окончательный отказ — тот, который не починится сам: подпись не сошлась, sha не тот,
+// версия не та. Повторять его бессмысленно, и агент такую версию больше не трогает.
+// Всё остальное (не скачался манифест, оборвался бинарь, кончилось место) — временное:
+// раньше ЛЮБАЯ первая неудача помечала версию отвергнутой навсегда, и нода за плохим
+// каналом не пыталась обновиться больше ни разу — стояла на старой версии, пока
+// кто-нибудь не заметит.
+type permError struct{ err error }
+
+func (e permError) Error() string { return e.err.Error() }
+func (e permError) Unwrap() error { return e.err }
+
+func permanent(err error) error { return permError{err} }
+
+func isPermanent(err error) bool {
+	var p permError
+	return errors.As(err, &p)
+}
+
 // selfUpdate — БЕЗОПАСНОЕ самообновление. Ставит новый бинарь ТОЛЬКО если:
 //  1. подпись манифеста верна (вшитый пубключ);
 //  2. версия в манифесте == запрошенной панелью И строго новее текущей (анти-откат);
@@ -871,29 +894,29 @@ func selfUpdate(panelURL, want string) error {
 	}
 	sig, err := base64.StdEncoding.DecodeString(strings.TrimSpace(string(sigRaw)))
 	if err != nil {
-		return fmt.Errorf("подпись не base64: %w", err)
+		return permanent(fmt.Errorf("подпись не base64: %w", err))
 	}
 	pub, err := base64.StdEncoding.DecodeString(updatePubKeyB64)
 	if err != nil || len(pub) != ed25519.PublicKeySize {
-		return fmt.Errorf("некорректный вшитый пубключ")
+		return permanent(fmt.Errorf("некорректный вшитый пубключ"))
 	}
 	if !ed25519.Verify(ed25519.PublicKey(pub), manBytes, sig) {
-		return fmt.Errorf("ПОДПИСЬ МАНИФЕСТА НЕВЕРНА — отказ (возможна подмена)")
+		return permanent(fmt.Errorf("ПОДПИСЬ МАНИФЕСТА НЕВЕРНА — отказ (возможна подмена)"))
 	}
 
 	var m manifest
 	if err := json.Unmarshal(manBytes, &m); err != nil {
-		return fmt.Errorf("манифест не JSON: %w", err)
+		return permanent(fmt.Errorf("манифест не JSON: %w", err))
 	}
 	if m.Version != want {
-		return fmt.Errorf("панель просит %s, а подписан %s — отказ", want, m.Version)
+		return permanent(fmt.Errorf("панель просит %s, а подписан %s — отказ", want, m.Version))
 	}
 	if !versionNewer(m.Version, version) {
-		return fmt.Errorf("%s не новее текущей %s — отказ (анти-откат)", m.Version, version)
+		return permanent(fmt.Errorf("%s не новее текущей %s — отказ (анти-откат)", m.Version, version))
 	}
 	art, ok := m.Artifacts[runtime.GOARCH]
 	if !ok {
-		return fmt.Errorf("в манифесте нет артефакта для %s", runtime.GOARCH)
+		return permanent(fmt.Errorf("в манифесте нет артефакта для %s", runtime.GOARCH))
 	}
 
 	bin, err := httpGetChunked(base+"/api/agent/download/"+runtime.GOARCH, art.Size, m.Version)
@@ -906,10 +929,10 @@ func selfUpdate(panelURL, want string) error {
 	}
 	sum := sha256.Sum256(bin)
 	if hex.EncodeToString(sum[:]) != art.SHA256 {
-		return fmt.Errorf("sha256 бинаря не совпал с подписанным — отказ (подмена)")
+		return permanent(fmt.Errorf("sha256 бинаря не совпал с подписанным — отказ (подмена)"))
 	}
 	if len(bin) != art.Size {
-		return fmt.Errorf("размер бинаря не совпал с подписанным — отказ")
+		return permanent(fmt.Errorf("размер бинаря не совпал с подписанным — отказ"))
 	}
 
 	self, err := os.Executable()
@@ -4402,18 +4425,33 @@ func main() {
 				cfg.Update.Version != "" && cfg.Update.Version != version &&
 				updating.CompareAndSwap(false, true) {
 				want := cfg.Update.Version
-				if prev, _ := rejectedVersion.Load().(string); prev == want {
-					// эту версию мы уже отвергли — подпись сама себя не починит,
-					// а без этой проверки агент тянул и отвергал релиз каждый цикл
+				prev, _ := rejectedVersion.Load().(string)
+				retryAt, _ := updateRetryAt.Load().(time.Time)
+				switch {
+				case prev == want:
+					// эту версию мы отвергли ОКОНЧАТЕЛЬНО (подпись, sha, анти-откат) —
+					// она сама себя не починит, тянуть её каждый цикл незачем
 					updating.Store(false)
-				} else {
+				case !retryAt.IsZero() && time.Now().Before(retryAt):
+					// прошлая попытка сорвалась по временной причине: ждём паузу,
+					// чтобы не долбить панель на каждом отчёте
+					updating.Store(false)
+				default:
 					go func() {
 						defer updating.Store(false)
-						if uerr := selfUpdate(url, want); uerr != nil {
-							fmt.Fprintf(os.Stderr, "kervax-agent: обновление отклонено: %v\n", uerr)
-							lastUpdateError.Store(fmt.Sprintf("%s: %v", want, uerr))
-							rejectedVersion.Store(want)
+						uerr := selfUpdate(url, want)
+						if uerr == nil {
+							return // сюда не возвращаемся: процесс заменён через exec
 						}
+						fmt.Fprintf(os.Stderr, "kervax-agent: обновление отклонено: %v\n", uerr)
+						lastUpdateError.Store(fmt.Sprintf("%s: %v", want, uerr))
+						if isPermanent(uerr) {
+							rejectedVersion.Store(want)
+							return
+						}
+						// Временная беда — обрыв, 502, нет места. Повторим: недокачанное
+						// сохранено, и следующая попытка продолжит с того же места.
+						updateRetryAt.Store(time.Now().Add(updateRetryPause))
 					}()
 				}
 			}
