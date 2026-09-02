@@ -160,6 +160,10 @@ class Check(Base):
     # не проверять TLS-сертификат основной проверкой (самоподписанный / hostname
     # mismatch / истёкший, но сайт нужно мониторить). По умолчанию выкл.
     ignore_tls: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Сайт закрыт снаружи (белый список IP), и панель до него не дотянется: проверять
+    # будет агент НА САМОМ СЕРВЕРЕ. Здесь — id этого сервера; None = обычная внешняя
+    # проверка. Панель к такому монитору не ходит вовсе, иначе он вечно «недоступен».
+    probe_server_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     # доп. проверки для http-мониторов (по умолчанию включены) —
     # срок/валидность TLS-сертификата и срок регистрации домена (RDAP)
@@ -288,6 +292,28 @@ class Location(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
+
+
+class AgentProbe(Base):
+    """Последний результат локальной проверки сайта агентом (не тайм-серия).
+
+    Сырьё, а не вердикт: агент сообщает код ответа, задержку, ошибку и нашлись ли
+    ключевые слова, а оценивает это панель — теми же порогами и тем же кодом, что и
+    обычные мониторы. Иначе логика инцидентов разъехалась бы по двум местам.
+    """
+
+    __tablename__ = "agent_probes"
+
+    check_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    server_id: Mapped[int] = mapped_column(Integer, index=True)
+    ts: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    code: Mapped[int] = mapped_column(Integer, default=0)  # 0 = запрос не состоялся
+    latency_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    error: Mapped[str] = mapped_column(String(512), default="")
+    # Тело наружу не отдаём: агент сам смотрит ключевые слова и шлёт только «да/нет».
+    # Так панель не хранит и не логирует содержимое закрытых страниц.
+    kw_up_found: Mapped[bool] = mapped_column(Boolean, default=True)
+    kw_down_found: Mapped[bool] = mapped_column(Boolean, default=False)
 
 
 class LocationResult(Base):

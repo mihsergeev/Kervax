@@ -629,3 +629,54 @@ async def test_cert_monitor_fills_ssl_days(tmp_path, monkeypatch):
         assert row.ssl_days == 42, f"ssl_days={row.ssl_days}, last_value={row.last_value}"
         assert row.expiry_checked_at is not None
     await engine.dispose()
+
+
+async def test_agent_probe_outcome():
+    """Оценка локальной проверки: те же правила, что и у обычной.
+
+    Сайт за белым списком панель проверить не может — снаружи соединение рвут,
+    и монитор вечно «недоступен», хотя сайт жив. Результат снимает агент на самом
+    сервере; здесь проверяется, что вердикт по нему выносится тем же кодом.
+    """
+    from datetime import datetime, timedelta, timezone
+    from types import SimpleNamespace
+
+    from app import checks as checks_exec
+
+    now = datetime.now(timezone.utc)
+    check = SimpleNamespace(
+        expected_status="200-399", keyword_up="", keyword_down="",
+        interval_seconds=60, degraded_ms=2000,
+    )
+    probe = SimpleNamespace(ts=now, code=200, latency_ms=12, error="",
+                            kw_up_found=True, kw_down_found=False)
+
+    assert checks_exec.outcome_from_agent(check, probe, now, 2000).status == "up"
+
+    # ошибка с ноды переводится тем же словарём, что и своя
+    probe.error = "dial tcp 127.0.0.1:443: connect: connection refused"
+    out = checks_exec.outcome_from_agent(check, probe, now, 2000)
+    assert out.status == "down" and "отказ" in out.message.lower() or "соедин" in out.message.lower()
+
+    # молчащий агент — это отказ проверки, а не «сайт работает»
+    probe.error = ""
+    stale = SimpleNamespace(ts=now - timedelta(minutes=30), code=200, latency_ms=10,
+                            error="", kw_up_found=True, kw_down_found=False)
+    out = checks_exec.outcome_from_agent(check, stale, now, 2000)
+    assert out.status == "down" and "не присылает" in out.message
+
+    # результата ещё не было — тоже не «up»
+    assert checks_exec.outcome_from_agent(check, None, now, 2000).status == "down"
+
+    # ключевое слово ищет агент, панель верит флагу
+    check.keyword_up = "Добро пожаловать"
+    probe.kw_up_found = False
+    assert checks_exec.outcome_from_agent(check, probe, now, 2000).status == "down"
+    probe.kw_up_found = True
+    assert checks_exec.outcome_from_agent(check, probe, now, 2000).status == "up"
+
+    # 403 снаружи — норма для таких сайтов, но ИЗНУТРИ это всё-таки отказ:
+    # правило кодов общее, никаких поблажек локальной проверке
+    check.keyword_up = ""
+    probe.code = 403
+    assert checks_exec.outcome_from_agent(check, probe, now, 2000).status == "down"

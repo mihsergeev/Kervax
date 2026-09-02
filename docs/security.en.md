@@ -66,6 +66,33 @@ type config struct {
 No "run", "read a file", "open a port". At most it can change the interval or **ask**
 the agent to update.
 
+## 3b. The agent probing a site: why this is not a hole
+
+A site closed behind an IP allow-list cannot be checked by the panel — from
+outside the connection is simply dropped. The agent on that very server does it
+instead, and the panel tells it "probe this address". That sounds exactly like
+the command section 3 says does not exist, so it matters what limits it.
+
+**The agent only ever connects to localhost.** It substitutes the address
+itself; from the URL it takes the name (Host and SNI), the scheme, the port and
+the path. The panel cannot send it to any other host — not to a neighbouring
+server, not into the internal network. A compromised panel does not turn a fleet
+of agents into a scanner: the most it learns is how this one server answers,
+which it already hears from that server anyway.
+
+**What leaves the node is facts, not the page.** Status code, latency, error
+text and whether a keyword was found — the agent does the keyword search itself.
+The content of closed pages never reaches the panel, is not stored and is not
+logged.
+
+**The verdict is the panel's.** The agent does not decide whether a site "works":
+it reports facts, while thresholds, retries and incidents stay in the panel,
+under the same rules as any other monitor.
+
+The honest flip side: the probe task carries this monitor's custom headers and
+basic-auth password, if set. That is the same data the site on that node already
+uses, but it is worth knowing.
+
 ## 4. Updates rely on a signature, not on trusting the panel
 
 The agent installs a new binary **only if all three hold**:
