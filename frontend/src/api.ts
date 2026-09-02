@@ -1357,6 +1357,10 @@ export type LocalProbeSuggestion = {
   name: string
   host: string
   message: string
+  // local — проверять изнутри ноды, которая держит домен;
+  // code  — сайт отвечает «не пущу» (403): он жив, довольно считать код нормой
+  kind: 'local' | 'code'
+  code: number
   server_id: number
   server_name: string
 }

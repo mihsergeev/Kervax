@@ -5,6 +5,7 @@ from fastapi import APIRouter, BackgroundTasks, HTTPException, Query, Request, s
 from sqlalchemy import case, delete as sa_delete, func, select
 
 from app import audit
+from app.checks import status_matches
 from app import checks as checks_exec
 from app.collector import effective_locations
 from app.config import get_settings
@@ -491,6 +492,20 @@ async def discovered(user: CurrentUser, session: SessionDep) -> DiscoveredOut:
     )
 
 
+# Коды, которыми прокси говорит «ты не в списке»: сайт при этом ЖИВ. 401 не берём —
+# это «представься», нормальная работа сайта с авторизацией, и решать за владельца,
+# что 401 не проблема, панель не должна.
+_CLOSED_CODES = (403,)
+
+
+def _closed_code(check, message: str) -> int:
+    """Код «не пущу», если внешняя проверка упёрлась именно в него (0 = не тот случай)."""
+    for code in _CLOSED_CODES:
+        if f"HTTP {code}" in message and not status_matches(code, check.expected_status):
+            return code
+    return 0
+
+
 def _serving_servers(servers) -> dict[str, tuple[int, str]]:
     """Карта «домен → сервер, который его обслуживает» из отчётов агентов.
 
@@ -530,16 +545,27 @@ async def local_probe_suggestions(
     ):
         if not group_allowed(user, check.group_name, "sites"):
             continue
+        msg = (check.last_message or "")[:200]
         host = _host_of(check)
+        # Сайт ОТВЕЧАЕТ кодом «не пущу» — значит он жив, и проверять изнутри нечего:
+        # довольно считать этот код нормой. Так лечатся сайты за прокси, которое
+        # закрывает их само (Envoy Gateway, nginx с allow/deny), где локальной
+        # проверке и зацепиться не за что: на localhost там никто не слушает.
+        code = _closed_code(check, msg)
+        if code:
+            out.append(LocalProbeSuggestion(
+                check_id=check.id, name=check.name, host=host, message=msg,
+                kind="code", code=code,
+            ))
+            continue
         hit = serving.get(host)
         if not hit:
             continue
         out.append(LocalProbeSuggestion(
-            check_id=check.id, name=check.name, host=host,
-            message=(check.last_message or "")[:200],
-            server_id=hit[0], server_name=hit[1],
+            check_id=check.id, name=check.name, host=host, message=msg,
+            kind="local", server_id=hit[0], server_name=hit[1],
         ))
-    out.sort(key=lambda x: x.name)
+    out.sort(key=lambda x: (x.kind, x.name))
     return LocalProbeSuggestionsOut(items=out)
 
 
@@ -558,6 +584,15 @@ async def local_probe_apply(
         select(Check).where(Check.id.in_(body.check_ids), Check.type == "http")
     ):
         if not group_allowed(user, check.group_name, "sites"):
+            continue
+        msg = (check.last_message or "")[:200]
+        code = _closed_code(check, msg)
+        if code:
+            # Дописываем код к ожидаемым, а не заменяем: «200-399» остаётся в силе,
+            # и сайт, который однажды откроется, зелёным быть не перестанет.
+            spec = (check.expected_status or "200-399").strip()
+            check.expected_status = f"{spec},{code}" if spec else f"200-399,{code}"
+            updated += 1
             continue
         hit = serving.get(_host_of(check))
         if not hit:
