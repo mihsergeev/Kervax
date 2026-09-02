@@ -287,6 +287,50 @@ class ExpiryInfo:
     domain_message: str = ""
 
 
+async def probe_expiry_domain_only(check) -> ExpiryInfo:
+    """Только срок регистрации домена. Для сайтов, чей сертификат приносит агент:
+    домен живёт в реестре, а не на сайте, и запрос к RDAP проходит и без доступа."""
+    info = ExpiryInfo()
+    if not getattr(check, "check_domain", False):
+        return info
+    timeout = max(check.timeout_ms, 1000) / 1000.0
+    days, msg = await _domain_days_cached(
+        _registrable_domain((check.target or "").strip()), max(timeout, 10.0)
+    )
+    info.domain_days, info.domain_message = days, msg
+    return info
+
+
+def expiry_from_agent(check, probe, now) -> ExpiryInfo:
+    """Сроки для сайта, который проверяет агент: сертификат он уже видел сам.
+
+    Своя проверка тут невозможна — сайт закрыт снаружи, и раньше в карточке висело
+    «сайт недоступен (таймаут)», хотя сертификат живой. Срок домена по-прежнему
+    считает панель: это запрос в RDAP/whois, а не к самому сайту, и он проходит.
+    """
+    info = ExpiryInfo()
+    if not getattr(check, "check_ssl", False):
+        return info
+    url = (check.target or "").strip()
+    if url.startswith("http://"):
+        info.ssl_message = "не HTTPS"
+        return info
+    exp = getattr(probe, "cert_expires", 0) if probe is not None else 0
+    if not exp:
+        info.ssl_message = ("агент ещё не присылал сертификат" if probe is None
+                            else "сертификат не отдан")
+        return info
+    left = (datetime.fromtimestamp(exp, tz=timezone.utc) - now).total_seconds() / 86400
+    info.ssl_days = int(left)
+    issuer = (getattr(probe, "cert_issuer", "") or "").strip()
+    # Помечаем, что срок снят изнутри: «действителен ещё 60 дней» с локальной
+    # проверки не то же самое, что тот же ответ снаружи — посетитель может видеть
+    # другой сертификат, если перед сайтом стоит ещё один прокси.
+    info.ssl_message = (f"{issuer}, проверено с сервера" if issuer
+                        else "проверено с сервера")
+    return info
+
+
 async def probe_expiry(check) -> ExpiryInfo:
     """Медленные сигналы http-монитора: срок TLS-сертификата и срок регистрации домена.
     Считаются реже основной проверки; не влияют на up/degraded/down."""
