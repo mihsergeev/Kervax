@@ -48,7 +48,7 @@ const EMPTY: CheckForm = {
   keyword_down: '',
   http_headers: '',
   ignore_tls: false,
-  probe_server_id: null,
+  probe_local: false,
   check_ssl: true,
   check_domain: true,
   ssl_warn_days: [14, 7, 1],
@@ -966,15 +966,18 @@ function CheckRow({
           {/* Зелёный по локальной проверке — это не то же самое, что «сайт виден
               посетителям»: снаружи он закрыт белым списком. Метка обязательна,
               иначе статус читается как обычная внешняя доступность. */}
-          {c.probe_server_id != null && (
+          {c.probe_local && (
             <span
               className="type-chip"
-              title={t('Проверяется изнутри сервера {srv}: панель к сайту не ходит, снаружи он закрыт', {
-                srv: c.probe_server_name || '—',
-              })}
+              title={
+                c.probe_server_name
+                  ? t('Проверяется изнутри сервера {srv}: панель к сайту не ходит, снаружи он закрыт', {
+                      srv: c.probe_server_name,
+                    })
+                  : t('Проверять локально включено, но домен не найден ни на одном сервере — проверять некому')
+              }
             >
-              🏠 {t('локально')}
-              {c.probe_server_name ? ` · ${c.probe_server_name}` : ''}
+              {c.probe_server_name ? '🏠' : '🏠⚠️'}
             </span>
           )}
           {showGroup && c.group_name && (

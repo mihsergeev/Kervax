@@ -1,12 +1,5 @@
 import { useEffect, useState } from 'react'
-import {
-  listLocations,
-  listServers,
-  type CheckForm,
-  type CheckType,
-  type Location,
-  type Server,
-} from './api'
+import { listLocations, type CheckForm, type CheckType, type Location } from './api'
 import { useI18n } from './i18n'
 
 // типы сайтовых алертов, которые можно точечно заглушить для монитора (ключи = SITE_ALERT_KINDS)
@@ -69,12 +62,7 @@ export function CheckFormCard({
     if (form.type === 'http') listLocations().then(setAllLocs).catch(() => {})
   }, [form.type])
 
-  // Сайт за белым списком: панель снаружи получит обрыв или 403, поэтому проверять
-  // его может только агент на самом сервере.
-  const [srvs, setSrvs] = useState<Server[]>([])
-  useEffect(() => {
-    if (form.type === 'http') listServers().then(setSrvs).catch(() => {})
-  }, [form.type])
+
 
   const ids = form.location_ids // null = все, [] = ни одной, [id…] = подмножество
   const locChecked = (id: number) => ids == null || ids.includes(id)
@@ -322,25 +310,19 @@ export function CheckFormCard({
         </div>
       )}
       {form.type === 'http' && (
-        <label className="field field-wide">
-          <span>{t('Проверять с сервера (сайт закрыт снаружи)')}</span>
-          <select
-            value={form.probe_server_id ?? ''}
-            onChange={(e) =>
-              set({ probe_server_id: e.target.value === '' ? null : Number(e.target.value) })
-            }
-          >
-            <option value="">{t('снаружи, как обычно')}</option>
-            {srvs.map((s) => (
-              <option key={s.id} value={s.id}>
-                {s.name}
-              </option>
-            ))}
-          </select>
-          <span className="field-hint muted small">
-            {t('Агент на выбранном сервере постучится на localhost с этим именем хоста и пришлёт результат. Панель к сайту ходить не будет: снаружи он всё равно закрыт. Это проверка изнутри — она не докажет, что сайт виден посетителям. Белый список сайта должен пускать 127.0.0.1, иначе проверка получит обрыв.')}
-          </span>
+        <label className="checkbox">
+          <input
+            type="checkbox"
+            checked={form.probe_local ?? false}
+            onChange={(e) => set({ probe_local: e.target.checked })}
+          />
+          {t('Проверять локально, с самого сервера (сайт закрыт снаружи)')}
         </label>
+      )}
+      {form.type === 'http' && form.probe_local && (
+        <div className="field-hint muted small form-note">
+          {t('Панель к сайту ходить не будет: снаружи он всё равно закрыт. Проверит агент на том сервере, чей веб-сервер обслуживает этот домен — панель найдёт его сама. Он постучится на localhost с этим именем хоста. Это проверка изнутри: она не докажет, что сайт виден посетителям. Белый список сайта должен пускать 127.0.0.1, иначе проверка получит обрыв.')}
+        </div>
       )}
       {form.type === 'http' && (
         <label className="checkbox">

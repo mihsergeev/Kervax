@@ -374,6 +374,51 @@ def _apply_expiry(row: Check, info, now: datetime, pending: list) -> None:
             )
 
 
+def _host_of_target(target: str) -> str:
+    """Хост из адреса монитора: «https://gr.example.ru/health» → «gr.example.ru»."""
+    d = (target or "").strip().lower().rstrip(".")
+    if "://" in d:
+        d = d.split("://", 1)[1]
+    d = d.split("/")[0]
+    return d.split(":", 1)[0]
+
+
+async def rebind_local_probes(session_factory) -> int:
+    """Привязывает мониторы с галочкой «локально» к ноде, обслуживающей их домен.
+
+    Человек ставит галочку, а не выбирает сервер: панель и так знает, чьи веб-серверы
+    держат этот домен (агенты присылают их в web_services). Пересчитываем каждый цикл,
+    потому что сайт переезжает с ноды на ноду, а галочка остаётся — при жёсткой
+    привязке монитор молча ушёл бы проверяться туда, где сайта уже нет.
+
+    Ноду не находим — probe_server_id остаётся пустым, и монитор честно скажет, что
+    проверять его некому: это лучше, чем зелёный статус ни от кого."""
+    async with session_factory() as session:
+        checks = list(
+            await session.scalars(
+                select(Check).where(Check.enabled.is_(True), Check.probe_local.is_(True))
+            )
+        )
+        if not checks:
+            return 0
+        serving: dict[str, int] = {}
+        for srv in sorted(await session.scalars(select(Server)), key=lambda x: x.name):
+            for web in (srv.last_report or {}).get("web_services") or []:
+                for raw in web.get("sites") or []:
+                    host = _host_of_target(raw)
+                    if host and host not in serving:
+                        serving[host] = srv.id
+        changed = 0
+        for c in checks:
+            want = serving.get(_host_of_target(c.target))
+            if c.probe_server_id != want:
+                c.probe_server_id = want
+                changed += 1
+        if changed:
+            await session.commit()
+        return changed
+
+
 async def run_due_checks(
     session_factory: async_sessionmaker[AsyncSession], settings: Settings
 ) -> int:
@@ -391,8 +436,8 @@ async def run_due_checks(
     # Сайт за белым списком панель проверить не может — снаружи соединение просто
     # рвут. За неё это делает агент НА САМОМ СЕРВЕРЕ и присылает сырой результат;
     # здесь мы его только оцениваем — теми же порогами, что и всё остальное.
-    local = [c for c in due if c.probe_server_id]
-    remote = [c for c in due if not c.probe_server_id]
+    local = [c for c in due if c.probe_local]
+    remote = [c for c in due if not c.probe_local]
     outcomes_map: dict[int, object] = {}
     if remote:
         got = await _gather_capped([checks_exec.run_check(c) for c in remote], cap, jitter)
@@ -2140,6 +2185,9 @@ async def collector_loop(
                     log.info("проверок через локации: %d", m)
             except Exception:  # noqa: BLE001 — цикл не должен падать
                 log.exception("ошибка планировщика мониторов")
+            # привязка локальных мониторов к нодам: дёшево и должно идти ДО проверок,
+            # иначе свежепоставленная галочка ждёт лишний цикл
+            await stage("привязка локальных проверок", rebind_local_probes(session_factory))
             await stage("алерты локаций", evaluate_location_alerts(
                 session_factory, settings, datetime.now(timezone.utc)))
             await stage("серверные алерты", evaluate_servers(

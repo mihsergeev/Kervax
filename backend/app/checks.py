@@ -352,6 +352,16 @@ AGENT_PROBE_STALE_INTERVALS = 2
 def outcome_from_agent(check, probe, now, degraded_ms: int) -> CheckOutcome:
     """Вердикт по результату, присланному агентом с самого сервера."""
     if probe is None:
+        # Две разные беды с одинаковым симптомом «данных нет»: либо проверять
+        # НЕКОМУ (ни один сервер парка не держит этот домен), либо агент есть, но
+        # молчит. Первое чинится галочкой или установкой агента, второе — самой
+        # нодой, и путать их значит отправить человека искать не там.
+        if not getattr(check, "probe_server_id", None):
+            return CheckOutcome(
+                "down",
+                message="проверять локально некому: ни один сервер парка не "
+                        "обслуживает этот домен",
+            )
         return CheckOutcome("down", message="агент ещё не присылал результат проверки")
     ts = probe.ts if probe.ts.tzinfo else probe.ts.replace(tzinfo=timezone.utc)
     age = (now - ts).total_seconds()
