@@ -4722,3 +4722,29 @@ body:has(.modal-backdrop) {
 .acl-editor {
   flex-basis: 100%;
 }
+
+/* Предложение «проверять локально»: отдельный блок, потому что это не авария и не
+   задача на ноде, а находка — панель заметила, что сайт живёт на её же сервере. */
+.home-attention-probe .home-attention-ic {
+  filter: none;
+}
+.local-probe-hint {
+  margin-top: 0.5rem;
+}
+.local-probe-list {
+  list-style: none;
+  margin: 0.5rem 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+.local-probe-list li {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+}
+.form-note {
+  margin: -0.3rem 0 0.5rem;
+}

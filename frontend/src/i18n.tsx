@@ -1125,6 +1125,18 @@ const EN: Record<string, string> = {
   'локально': 'local',
   'Проверяется изнутри сервера {srv}: панель к сайту не ходит, снаружи он закрыт':
     'Probed from within {srv}: the panel does not visit this site, it is closed from outside',
+  'Проверять локально, с самого сервера (сайт закрыт снаружи)':
+    'Probe locally, from the server itself (the site is closed from outside)',
+  'Панель к сайту ходить не будет: снаружи он всё равно закрыт. Проверит агент на том сервере, чей веб-сервер обслуживает этот домен — панель найдёт его сама. Он постучится на localhost с этим именем хоста. Это проверка изнутри: она не докажет, что сайт виден посетителям. Белый список сайта должен пускать 127.0.0.1, иначе проверка получит обрыв.':
+    'The panel will not visit the site: it is closed from outside anyway. It is probed by the agent on the server whose web server serves this domain — the panel finds it itself. The agent knocks on localhost with this host name. This is a probe from within: it does not prove the site is reachable for visitors. The site allow-list must let 127.0.0.1 through, otherwise the probe gets a dropped connection.',
+  'Проверять локально включено, но домен не найден ни на одном сервере — проверять некому':
+    'Local probing is on, but the domain was not found on any server — nobody can check it',
+  'Похоже на белый список': 'Looks like an allow-list',
+  '🏠 проверять локально: подходит {n} сайт(ов)': '🏠 probe locally: {n} site(s) qualify',
+  'Эти сайты не отвечают панели снаружи, но их домены обслуживают ваши серверы — похоже на белый список. Агент проверит их изнутри; панель к ним ходить перестанет. Зелёный статус будет означать «сайт жив на сервере», а не «виден посетителям».':
+    'These sites do not answer the panel from outside, but their domains are served by your own servers — that looks like an allow-list. The agent will probe them from within and the panel will stop visiting them. A green status will then mean "the site is alive on the server", not "reachable for visitors".',
+  'включить': 'enable',
+  'включить для всех {n}': 'enable for all {n}',
   'Данных пока нет.': 'No data yet.',
   'Ресурсы Flux не в Ready — доставка встала': 'Flux resources are not Ready — delivery has stopped',
   'Сертификаты или токены истекают в ближайшие две недели':
