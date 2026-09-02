@@ -215,9 +215,19 @@ async def overview(_: CurrentUser, session: SessionDep) -> ChecksOverviewOut:
             CheckIncident.ended_at.is_(None)
         )
     )
+    # имена серверов-проверяльщиков: в списке сайт помечается «локально · <сервер>»,
+    # иначе зелёный статус выглядит как обычная внешняя доступность, а это не она
+    pids = {c.probe_server_id for c in checks if c.probe_server_id}
+    pnames = (
+        {r[0]: r[1] for r in (await session.execute(
+            select(Server.id, Server.name).where(Server.id.in_(pids))
+        )).all()}
+        if pids else {}
+    )
     outs = []
     for c in checks:
         co = CheckOut.model_validate(c)
+        co.probe_server_name = pnames.get(c.probe_server_id or 0)
         co.uptime_24h = uptime.get(c.id)
         co.beats = beats.get(c.id)
         co.loc_down = (

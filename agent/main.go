@@ -36,7 +36,7 @@ import (
 	"time"
 )
 
-const version = "2.4"
+const version = "2.5"
 
 // Публичный ключ для проверки подписи релизов агента (Ed25519, base64).
 // ПУСТО по умолчанию → самообновление ВЫКЛЮЧЕНО (агент никогда не заменяет себя).
@@ -135,6 +135,8 @@ type report struct {
 	// он не видит. Flux — состояния Ready: срок можно проспать, а токен отозвать.
 	KubeExpiry    []kubeExpiry  `json:"kube_expiry,omitempty"`
 	Flux          []fluxState   `json:"flux,omitempty"`
+	// результаты локальных проверок сайтов (панель до них не дотягивается сама)
+	SiteProbes    []siteProbeResult `json:"site_probes,omitempty"`
 	NetRx         float64       `json:"net_rx"`                 // байт/сек
 	NetTx         float64       `json:"net_tx"`
 	DiskRead      float64       `json:"disk_read"`       // байт/сек, чтение с дисков
@@ -603,6 +605,39 @@ type config struct {
 	// отчёт — и «обновить restic» из панели там не срабатывало никогда.
 	KubeCommands   []kubeCommand   `json:"kube_commands"`
 	BackupCommands []backupCommand `json:"backup_commands"`
+	// Сайты этого сервера, которые панель проверить не может (белый список IP
+	// снаружи рвёт соединение). Проверяем их сами — см. runSiteProbes.
+	SiteProbes []siteProbe `json:"site_probes"`
+}
+
+// Задание на локальную проверку сайта. URL здесь — НЕ адрес, куда идти: соединяемся
+// всегда с localhost, а из URL берём имя (Host и SNI), схему, порт и путь. Поэтому
+// панель, даже захваченная, не может послать агента ни на какой другой хост —
+// сканировать внутреннюю сеть через агентов не выйдет.
+type siteProbe struct {
+	ID             int    `json:"id"`
+	URL            string `json:"url"`
+	Method         string `json:"method"`
+	TimeoutMs      int    `json:"timeout_ms"`
+	Interval       int    `json:"interval"`
+	ExpectedStatus string `json:"expected_status"`
+	KeywordUp      string `json:"keyword_up"`
+	KeywordDown    string `json:"keyword_down"`
+	Headers        string `json:"headers"` // JSON-объект, как в панели
+	AuthUser       string `json:"auth_user"`
+	AuthPass       string `json:"auth_pass"`
+	IgnoreTLS      bool   `json:"ignore_tls"`
+}
+
+// Что уходит обратно: факты, а не тело. Ключевые слова агент ищет сам — содержимое
+// закрытой страницы не должно покидать сервер.
+type siteProbeResult struct {
+	ID          int    `json:"id"`
+	Code        int    `json:"code"`
+	LatencyMs   int    `json:"latency_ms"`
+	Error       string `json:"error,omitempty"`
+	KwUpFound   bool   `json:"kw_up_found"`
+	KwDownFound bool   `json:"kw_down_found"`
 }
 
 // docker-действие из очереди панели (исполняется через read-only proxy)
@@ -883,6 +918,146 @@ func permanent(err error) error { return permError{err} }
 func isPermanent(err error) bool {
 	var p permError
 	return errors.As(err, &p)
+}
+
+// Результаты последних локальных проверок: собираются по своему расписанию, а
+// уезжают со следующим отчётом.
+var (
+	siteKnown   atomic.Value // *map[int]bool — задания, присланные панелью в прошлый раз
+	siteMu      sync.Mutex
+	siteLast    = map[int]siteProbeResult{}
+	siteRunAt   = map[int]time.Time{}
+	siteProbing atomic.Bool
+)
+
+// localDialer — транспорт, который ВСЕГДА идёт на localhost, каким бы ни был хост в
+// URL. Порт и схема берутся из URL, имя — уходит в Host и SNI, так что сервер отдаёт
+// тот же виртуальный хост и тот же сертификат, что и настоящему посетителю.
+func localDialer(timeout time.Duration, insecure bool) *http.Transport {
+	d := &net.Dialer{Timeout: timeout}
+	return &http.Transport{
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			_, port, err := net.SplitHostPort(addr)
+			if err != nil {
+				return nil, err
+			}
+			conn, err := d.DialContext(ctx, network, net.JoinHostPort("127.0.0.1", port))
+			if err == nil {
+				return conn, nil
+			}
+			// IPv6-only локалхост встречается на нодах без IPv4-лупбека
+			return d.DialContext(ctx, network, net.JoinHostPort("::1", port))
+		},
+		TLSClientConfig:   &tls.Config{InsecureSkipVerify: insecure}, //nolint:gosec // по настройке монитора
+		DisableKeepAlives: true,
+		Proxy:             nil, // прокси окружения тут только помешают: цель — свой же хост
+	}
+}
+
+func probeSite(p siteProbe) siteProbeResult {
+	res := siteProbeResult{ID: p.ID, KwUpFound: true}
+	timeout := time.Duration(p.TimeoutMs) * time.Millisecond
+	if timeout <= 0 || timeout > 60*time.Second {
+		timeout = 10 * time.Second
+	}
+	method := strings.ToUpper(strings.TrimSpace(p.Method))
+	if method == "" {
+		method = "GET"
+	}
+	req, err := http.NewRequest(method, p.URL, nil)
+	if err != nil {
+		res.Error = err.Error()
+		return res
+	}
+	req.Header.Set("User-Agent", "kervax-agent/"+version+" (local probe)")
+	if p.Headers != "" {
+		var hdr map[string]string
+		if json.Unmarshal([]byte(p.Headers), &hdr) == nil {
+			for k, v := range hdr {
+				req.Header.Set(k, v)
+			}
+		}
+	}
+	if p.AuthUser != "" {
+		req.SetBasicAuth(p.AuthUser, p.AuthPass)
+	}
+	client := &http.Client{
+		Timeout:   timeout,
+		Transport: localDialer(timeout, p.IgnoreTLS),
+		// Редирект наружу пошёл бы уже мимо localhost и упёрся бы в тот самый белый
+		// список: считаем ответом сам редирект, как это делает панель.
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+	start := time.Now()
+	resp, err := client.Do(req)
+	res.LatencyMs = int(time.Since(start).Milliseconds())
+	if err != nil {
+		res.Error = err.Error()
+		return res
+	}
+	defer resp.Body.Close()
+	res.Code = resp.StatusCode
+	if p.KeywordUp != "" || p.KeywordDown != "" {
+		// читаем ограниченно: ключевые слова ищут в начале страницы, а тянуть
+		// многомегабайтный ответ на каждой проверке незачем
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512<<10))
+		text := string(body)
+		if p.KeywordUp != "" {
+			res.KwUpFound = strings.Contains(text, p.KeywordUp)
+		}
+		if p.KeywordDown != "" {
+			res.KwDownFound = strings.Contains(text, p.KeywordDown)
+		}
+	}
+	return res
+}
+
+// runSiteProbes — прогоняет созревшие задания в фоне. Каждое со своим интервалом:
+// панель может проверять сайт раз в минуту, а отчёт агента идёт своим тактом.
+func runSiteProbes(list []siteProbe) {
+	if len(list) == 0 || !siteProbing.CompareAndSwap(false, true) {
+		return
+	}
+	go func() {
+		defer siteProbing.Store(false)
+		now := time.Now()
+		for _, p := range list {
+			every := time.Duration(p.Interval) * time.Second
+			if every < 15*time.Second {
+				every = 15 * time.Second
+			}
+			siteMu.Lock()
+			last, seen := siteRunAt[p.ID]
+			siteMu.Unlock()
+			if seen && now.Sub(last) < every {
+				continue
+			}
+			r := probeSite(p)
+			siteMu.Lock()
+			siteRunAt[p.ID] = time.Now()
+			siteLast[p.ID] = r
+			siteMu.Unlock()
+		}
+	}()
+}
+
+// collectSiteProbes — то, что накопили с прошлого отчёта. Чистим задания, которых
+// панель больше не присылает: иначе снятый монитор жил бы в отчётах вечно.
+func collectSiteProbes(known map[int]bool) []siteProbeResult {
+	siteMu.Lock()
+	defer siteMu.Unlock()
+	out := make([]siteProbeResult, 0, len(siteLast))
+	for id, r := range siteLast {
+		if len(known) > 0 && !known[id] {
+			delete(siteLast, id)
+			delete(siteRunAt, id)
+			continue
+		}
+		out = append(out, r)
+	}
+	return out
 }
 
 // selfUpdate — БЕЗОПАСНОЕ самообновление. Ставит новый бинарь ТОЛЬКО если:
@@ -2013,6 +2188,9 @@ func collect(prev sample) (report, sample) {
 	r.WebServices = collectWebServices(r.Kube)
 	r.DBStats = collectDBStats()
 	r.KubeExpiry, r.Flux = collectKubeExpiry()
+	if kn, _ := siteKnown.Load().(*map[int]bool); kn != nil {
+		r.SiteProbes = collectSiteProbes(*kn)
+	}
 	return r, cur
 }
 
@@ -4466,6 +4644,14 @@ func main() {
 					}()
 				}
 			}
+			// Локальные проверки сайтов: панель до них не дотягивается, и без этого
+			// они висели бы «недоступен» навсегда. Идут в фоне, со своим тактом.
+			runSiteProbes(cfg.SiteProbes)
+			known := make(map[int]bool, len(cfg.SiteProbes))
+			for _, sp := range cfg.SiteProbes {
+				known[sp.ID] = true
+			}
+			siteKnown.Store(&known)
 			// команды из очереди — в отдельных горутинах (не блокируем цикл/вотчдог)
 			for _, c := range cfg.DockerCommands {
 				go runDockerCommand(url, token, c)

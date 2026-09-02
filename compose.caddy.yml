@@ -25,9 +25,17 @@ services:
       #     authenticate with per-server tokens anyway.
       #  2) everything else is denied unless the client IP is in KERVAX_ALLOW_IPS.
       #     Left empty → "not in all IPs" denies no one = open (fail-open).
+      #     The loopback and docker's own range are always allowed - that is the
+      #     host talking to itself, and it is what makes a local probe possible (an
+      #     agent checks a whitelisted site from inside its own server). It has to
+      #     include 172.16.0.0/12, not just 127.0.0.1: docker publishes the port
+      #     through its own proxy, so caddy sees the bridge gateway (172.x) and never
+      #     the loopback. Deliberately NOT caddy's `private_ranges`: that also covers
+      #     10/8 and 192.168/16, which on a corporate network means every neighbour
+      #     gets in. If your docker uses a different subnet, add it to KERVAX_ALLOW_IPS.
       caddy.handle_0: /api/agent/*
       caddy.handle_0.reverse_proxy: "{{upstreams 8080}}"
-      caddy.handle_1.@denied.not.remote_ip: ${KERVAX_ALLOW_IPS:-0.0.0.0/0 ::/0}
+      caddy.handle_1.@denied.not.remote_ip: 127.0.0.1/32 ::1/128 172.16.0.0/12 ${KERVAX_ALLOW_IPS:-0.0.0.0/0 ::/0}
       caddy.handle_1.abort: "@denied"
       caddy.handle_1.reverse_proxy: "{{upstreams 8080}}"
 

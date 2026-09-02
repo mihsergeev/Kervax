@@ -77,6 +77,14 @@ resources, for the case where a token is revoked rather than expired. The dates
 are computed by a root helper on the node itself: no key material and no token
 value ever reaches the panel.
 
+**Sites closed from outside.** An internal panel, a Grafana, an n8n behind an IP
+allow-list: the panel cannot reach them, and the monitor would sit at "down"
+forever. Such a site is probed by the agent from inside the server — it knocks on
+`localhost` with the right host name and reports back. It only ever connects to
+localhost, so the panel cannot send it anywhere else; what leaves the node is a
+status code and a latency, not the page. In the list such a monitor is marked
+"local".
+
 ![Services](docs/img/services.png)
 
 **Backups.** Status of restic backups per node, repositories on your rest-server,

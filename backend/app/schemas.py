@@ -136,6 +136,8 @@ class CheckCreate(BaseModel):
     auth_pass: str = Field(default="", max_length=256)
     http_headers: str = Field(default="", max_length=4096)
     ignore_tls: bool = False
+    # id сервера, чей агент проверяет сайт изнутри (сайт закрыт белым списком)
+    probe_server_id: int | None = None
     check_all_ips: bool = False
     check_ssl: bool = True
     check_domain: bool = True
@@ -170,6 +172,7 @@ class CheckUpdate(BaseModel):
     auth_pass: str | None = Field(default=None, max_length=256)
     http_headers: str | None = Field(default=None, max_length=4096)
     ignore_tls: bool | None = None
+    probe_server_id: int | None = None
     check_all_ips: bool | None = None
     check_ssl: bool | None = None
     check_domain: bool | None = None
@@ -362,6 +365,8 @@ class CheckOut(BaseModel):
     auth_pass: str = ""
     http_headers: str = ""
     ignore_tls: bool = False
+    probe_server_id: int | None = None
+    probe_server_name: str | None = None  # имя для чипа «локально · сервер»
     check_all_ips: bool = False
     check_ssl: bool
     check_domain: bool
@@ -818,6 +823,9 @@ class AgentReportIn(BaseModel):
     # сроки PKI кластера, kubeconfig'ов, TLS-секретов и кредов Flux
     # (хелпер kubeexpiry-setup): [{kind, where, expires, note}]
     kube_expiry: list[dict] = []
+    # результаты локальных проверок сайтов, снятые агентом изнутри сервера:
+    # [{id, code, latency_ms, error, kw_up_found, kw_down_found}]
+    site_probes: list[dict] = []
     # состояния Ready ресурсов Flux: [{kind, where, ready, reason, message}]
     flux: list[dict] | None = None
     net_rx: float = 0.0  # байт/сек (агент считает по дельте)
@@ -883,6 +891,10 @@ class AgentConfigOut(BaseModel):
     kube_commands: list[dict] = []
     # backup-команды: [{id,action,mode,paths,schedule}] (set_paths/set_schedule/run_now)
     backup_commands: list[dict] = []
+    # Сайты, которые агент проверяет САМ, изнутри сервера: панель до них не дотянется
+    # (белый список IP). [{id,url,method,timeout_ms,expected_status,keyword_up,
+    #  keyword_down,headers,auth_user,auth_pass,ignore_tls,interval}]
+    site_probes: list[dict] = []
 
 
 class DockerCommandIn(BaseModel):

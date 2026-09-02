@@ -196,6 +196,10 @@ export type Check = {
   auth_pass: string
   http_headers: string
   ignore_tls: boolean
+  // id сервера, чей агент проверяет этот сайт изнутри (сайт закрыт белым
+  // списком, и панель до него не дотянется). null = обычная внешняя проверка.
+  probe_server_id: number | null
+  probe_server_name?: string | null
   check_all_ips: boolean
   last_ip_results: IpResult[] | null
   check_ssl: boolean
@@ -259,6 +263,7 @@ export type CheckForm = {
   auth_pass?: string
   http_headers?: string
   ignore_tls?: boolean
+  probe_server_id?: number | null
   check_all_ips?: boolean
   check_ssl?: boolean
   check_domain?: boolean
@@ -440,6 +445,7 @@ export function checkToForm(c: Check): CheckForm {
     auth_pass: c.auth_pass ?? '',
     http_headers: c.http_headers ?? '',
     ignore_tls: c.ignore_tls ?? false,
+    probe_server_id: c.probe_server_id ?? null,
     check_all_ips: c.check_all_ips ?? false,
     check_ssl: c.check_ssl,
     check_domain: c.check_domain,
