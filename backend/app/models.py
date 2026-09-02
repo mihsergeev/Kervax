@@ -321,6 +321,11 @@ class AgentProbe(Base):
     # Так панель не хранит и не логирует содержимое закрытых страниц.
     kw_up_found: Mapped[bool] = mapped_column(Boolean, default=True)
     kw_down_found: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Срок сертификата, снятый агентом с того же соединения. 0 = сайт по HTTP либо
+    # сертификата не отдали. Панель до закрытого сайта не дотянется и свою проверку
+    # сделать не может, а у агента он и так в руках.
+    cert_expires: Mapped[int] = mapped_column(BigInteger, default=0)
+    cert_issuer: Mapped[str] = mapped_column(String(128), default="")
 
 
 class LocationResult(Base):
