@@ -818,3 +818,26 @@ async def test_suggestion_for_site_that_answers_403(client, auth_headers, monkey
     # предложение исчезает: код уже принят
     r = await client.get("/api/checks/local-probe-suggestions", headers=auth_headers)
     assert not [x for x in r.json()["items"] if x["check_id"] == cid]
+
+
+async def test_agent_probe_tls_hint_points_at_http():
+    """Изнутри «unknown authority» почти всегда значит «у сайта нет TLS».
+
+    Веб-сервер отдаёт локальному запросу свой внутренний сертификат, и голая
+    ошибка x509 отправляет искать проблему в сертификатах, а дело в схеме.
+    """
+    from datetime import datetime, timezone
+    from types import SimpleNamespace
+
+    from app import checks as checks_exec
+
+    now = datetime.now(timezone.utc)
+    check = SimpleNamespace(expected_status="200-399", keyword_up="", keyword_down="",
+                            interval_seconds=60, degraded_ms=2000, probe_server_id=1)
+    probe = SimpleNamespace(ts=now, code=0, latency_ms=3,
+                            error='Get "https://ai.example.ru": tls: failed to verify '
+                                  "certificate: x509: certificate signed by unknown authority",
+                            kw_up_found=True, kw_down_found=False)
+    out = checks_exec.outcome_from_agent(check, probe, now, 2000)
+    assert out.status == "down"
+    assert "http://" in out.message, "не подсказали, что дело в схеме"
