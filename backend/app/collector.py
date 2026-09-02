@@ -439,6 +439,7 @@ async def run_due_checks(
     local = [c for c in due if c.probe_local]
     remote = [c for c in due if not c.probe_local]
     outcomes_map: dict[int, object] = {}
+    probes: dict[int, AgentProbe] = {}
     if remote:
         got = await _gather_capped([checks_exec.run_check(c) for c in remote], cap, jitter)
         outcomes_map.update(dict(zip((c.id for c in remote), got)))
@@ -457,14 +458,30 @@ async def run_due_checks(
     outcomes = [outcomes_map.get(c.id) for c in due]
     # «медленные» сроки (TLS/домен) обновляем только у созревших для этого мониторов
     refresh = [c for c in due if _needs_expiry(c, now, settings)]
+    # У сайта за белым списком своя проверка сертификата невозможна: панель до него
+    # не дотягивается, и в карточке висело «сайт недоступен (таймаут)» при живом
+    # сертификате. Агент видел его на том же соединении, которым проверял сайт, —
+    # берём оттуда. Срок ДОМЕНА при этом считает панель как обычно: это запрос в
+    # RDAP, а не к самому сайту, и он проходит.
+    exp_local = [c for c in refresh if c.probe_local]
+    exp_remote = [c for c in refresh if not c.probe_local]
     exp_results = await _gather_capped(
-        [checks_exec.probe_expiry(c) for c in refresh], cap, jitter
+        [checks_exec.probe_expiry(c) for c in exp_remote], cap, jitter
     )
     exp_map: dict[int, checks_exec.ExpiryInfo] = {
         c.id: r
-        for c, r in zip(refresh, exp_results)
+        for c, r in zip(exp_remote, exp_results)
         if isinstance(r, checks_exec.ExpiryInfo)
     }
+    if exp_local:
+        dom_results = await _gather_capped(
+            [checks_exec.probe_expiry_domain_only(c) for c in exp_local], cap, jitter
+        )
+        for c, dom in zip(exp_local, dom_results):
+            info = checks_exec.expiry_from_agent(c, probes.get(c.id), now)
+            if isinstance(dom, checks_exec.ExpiryInfo):
+                info.domain_days, info.domain_message = dom.domain_days, dom.domain_message
+            exp_map[c.id] = info
 
     # (kind, name, status, message, incident_id, check_id, flag)
     #   kind: "bad" | "recovery" | "ssl" | "domain"

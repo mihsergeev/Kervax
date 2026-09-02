@@ -36,7 +36,7 @@ import (
 	"time"
 )
 
-const version = "2.5"
+const version = "2.6"
 
 // Публичный ключ для проверки подписи релизов агента (Ed25519, base64).
 // ПУСТО по умолчанию → самообновление ВЫКЛЮЧЕНО (агент никогда не заменяет себя).
@@ -638,6 +638,12 @@ type siteProbeResult struct {
 	Error       string `json:"error,omitempty"`
 	KwUpFound   bool   `json:"kw_up_found"`
 	KwDownFound bool   `json:"kw_down_found"`
+	// Срок сертификата, снятый с ТОГО ЖЕ соединения, которым проверяли сайт. Панель
+	// до закрытого сайта не дотягивается и свою проверку сделать не может — а тут
+	// сертификат и так лежит в руках, второй раз ходить незачем. 0 = сайт по HTTP
+	// либо сертификата не отдали.
+	CertExpires int64  `json:"cert_expires,omitempty"`
+	CertIssuer  string `json:"cert_issuer,omitempty"`
 }
 
 // docker-действие из очереди панели (исполняется через read-only proxy)
@@ -999,6 +1005,13 @@ func probeSite(p siteProbe) siteProbeResult {
 	}
 	defer resp.Body.Close()
 	res.Code = resp.StatusCode
+	// Сертификат берём из состояния уже установленного соединения: отдельного
+	// рукопожатия не делаем, и на сайт по HTTP это просто не сработает — там TLS нет.
+	if resp.TLS != nil && len(resp.TLS.PeerCertificates) > 0 {
+		leaf := resp.TLS.PeerCertificates[0]
+		res.CertExpires = leaf.NotAfter.Unix()
+		res.CertIssuer = leaf.Issuer.CommonName
+	}
 	if p.KeywordUp != "" || p.KeywordDown != "" {
 		// читаем ограниченно: ключевые слова ищут в начале страницы, а тянуть
 		// многомегабайтный ответ на каждой проверке незачем

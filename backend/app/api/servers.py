@@ -2099,6 +2099,11 @@ async def _store_site_probes(session, server_id: int, results: list, now) -> Non
         row.error = str(r.get("error") or "")[:512]
         row.kw_up_found = bool(r.get("kw_up_found", True))
         row.kw_down_found = bool(r.get("kw_down_found", False))
+        try:
+            row.cert_expires = int(r.get("cert_expires") or 0)
+        except (TypeError, ValueError):
+            row.cert_expires = 0
+        row.cert_issuer = str(r.get("cert_issuer") or "")[:128]
 
 
 async def _site_probe_tasks(session, server_id: int) -> list[dict]:

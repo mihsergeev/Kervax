@@ -841,3 +841,42 @@ async def test_agent_probe_tls_hint_points_at_http():
     out = checks_exec.outcome_from_agent(check, probe, now, 2000)
     assert out.status == "down"
     assert "http://" in out.message, "не подсказали, что дело в схеме"
+
+
+async def test_cert_expiry_from_agent():
+    """Срок сертификата для закрытого сайта берётся у агента.
+
+    Панель до такого сайта не дотягивается, и её собственная проверка упирается в
+    тот же обрыв: в карточке висело «сайт недоступен (таймаут)» при живом
+    сертификате. Агент видит его на том же соединении, которым проверяет сайт.
+    """
+    from datetime import datetime, timedelta, timezone
+    from types import SimpleNamespace
+
+    from app import checks as checks_exec
+
+    now = datetime.now(timezone.utc)
+    check = SimpleNamespace(check_ssl=True, check_domain=False,
+                            target="https://closed.example.ru", timeout_ms=10000)
+    probe = SimpleNamespace(cert_expires=int((now + timedelta(days=42)).timestamp()),
+                            cert_issuer="Let's Encrypt")
+
+    info = checks_exec.expiry_from_agent(check, probe, now)
+    assert info.ssl_days == 41 or info.ssl_days == 42, info.ssl_days
+    # в сообщении видно, что срок снят изнутри: снаружи посетитель может получить
+    # другой сертификат, если перед сайтом стоит ещё один прокси
+    assert "с сервера" in info.ssl_message
+
+    # сайт по HTTP — сертификата нет и быть не должно, это не ошибка
+    check.target = "http://plain.example.ru"
+    assert checks_exec.expiry_from_agent(check, probe, now).ssl_message == "не HTTPS"
+
+    # агент ещё не присылал — говорим об этом, а не молчим с пустым сроком
+    check.target = "https://closed.example.ru"
+    info = checks_exec.expiry_from_agent(check, None, now)
+    assert info.ssl_days is None and "не присылал" in info.ssl_message
+
+    # слежение за сертификатом выключено — ничего не выдумываем
+    check.check_ssl = False
+    empty = checks_exec.expiry_from_agent(check, probe, now)
+    assert empty.ssl_days is None and empty.ssl_message == ""
