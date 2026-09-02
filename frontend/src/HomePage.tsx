@@ -3,11 +3,14 @@ import {
   ApiError,
   checksOverview,
   getAgentRelease,
+  applyLocalProbe,
   listServers,
+  localProbeSuggestions,
   podFinished,
   updateServer,
   type Check,
   type ChecksOverview,
+  type LocalProbeSuggestion,
   type Server,
 } from './api'
 import type { Section } from './App'
@@ -38,6 +41,68 @@ const D_RESTART_POLICIES = ['always', 'unless-stopped', 'on-failure']
 // выкатывать их сама: helper ставится от root, и «кнопка в панели» означала бы, что
 // взлом панели = root на всём парке. Поэтому здесь только список хостов, а выкатывает
 // человек своим ansible — панель к нодам с root-правами не ходит.
+// Сайт лежит по внешней проверке, а его домен обслуживает известная панели нода —
+// почти всегда это белый список: снаружи рвут соединение, изнутри сайт цел. Панель
+// уже знает и то, и другое, так что незачем заставлять человека сопоставлять это
+// руками. Но и включать молча нельзя: проверка изнутри отвечает на другой вопрос,
+// чем внешняя, и подменять одну другой без ведома владельца — обман.
+function LocalProbeHint({
+  items,
+  onDone,
+}: {
+  items: LocalProbeSuggestion[]
+  onDone: () => void
+}) {
+  const { t } = useI18n()
+  const [open, setOpen] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const apply = async (ids: number[]) => {
+    setBusy(true)
+    try {
+      await applyLocalProbe(ids)
+      onDone()
+    } finally {
+      setBusy(false)
+    }
+  }
+  return (
+    <div className="ansible-hint">
+      <button className="ghost" onClick={() => setOpen(!open)}>
+        {open
+          ? t('скрыть')
+          : t('🏠 проверять локально: подходит {n} сайт(ов)', { n: items.length })}
+      </button>
+      {open && (
+        <div className="local-probe-hint">
+          <div className="muted small">
+            {t('Эти сайты не отвечают панели снаружи, но их домены обслуживают ваши серверы — похоже на белый список. Агент проверит их изнутри; панель к ним ходить перестанет. Зелёный статус будет означать «сайт жив на сервере», а не «виден посетителям».')}
+          </div>
+          <ul className="local-probe-list">
+            {items.map((x) => (
+              <li key={x.check_id}>
+                <span className="mono">{x.host}</span>{' '}
+                <span className="muted small">→ {x.server_name}</span>{' '}
+                <button className="ghost small" disabled={busy} onClick={() => apply([x.check_id])}>
+                  {t('включить')}
+                </button>
+              </li>
+            ))}
+          </ul>
+          {items.length > 1 && (
+            <button
+              className="ghost"
+              disabled={busy}
+              onClick={() => apply(items.map((x) => x.check_id))}
+            >
+              {t('включить для всех {n}', { n: items.length })}
+            </button>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
 function AnsibleHint({ hosts }: { hosts: string[] }) {
   const { t } = useI18n()
   const [open, setOpen] = useState(false)
@@ -261,6 +326,7 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
   const [servers, setServers] = useState<Server[] | null>(null)
   const [avail, setAvail] = useState('')
   const [relProblem, setRelProblem] = useState('')
+  const [probeHints, setProbeHints] = useState<LocalProbeSuggestion[]>([])
 
   useEffect(() => {
     getAgentRelease()
@@ -279,6 +345,11 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
       .catch((e) => {
         if (e instanceof ApiError && e.status === 401) onUnauthorized()
       })
+    // предложения «проверять локально»: тихо, без ошибок в интерфейсе — это подсказка,
+    // а не состояние системы, и её недоступность не должна ничего ломать
+    localProbeSuggestions()
+      .then((r) => setProbeHints(r.items))
+      .catch(() => setProbeHints([]))
   }, [onUnauthorized])
 
   // быстрый мут прямо с главной: приглушить типы алертов сервера навсегда (alert_mutes).
@@ -353,6 +424,16 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
   return (
     <div>
       <p className="tagline">{t('Мониторинг инфраструктуры')}</p>
+      {probeHints.length > 0 && (
+        <div className="home-attention home-attention-probe">
+          <div className="home-attention-head">
+            <span className="home-attention-ic">🏠</span>
+            {t('Похоже на белый список')}
+            <span className="home-attention-n">{probeHints.length}</span>
+          </div>
+          <LocalProbeHint items={probeHints} onDone={load} />
+        </div>
+      )}
       {actions.length > 0 && (
         <div className="home-attention">
           <div className="home-attention-head">

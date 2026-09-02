@@ -196,9 +196,9 @@ export type Check = {
   auth_pass: string
   http_headers: string
   ignore_tls: boolean
-  // id сервера, чей агент проверяет этот сайт изнутри (сайт закрыт белым
-  // списком, и панель до него не дотянется). null = обычная внешняя проверка.
-  probe_server_id: number | null
+  // проверять изнутри сервера: сайт закрыт белым списком, и панель до него не
+  // дотянется. Какой именно сервер — панель находит сама по домену.
+  probe_local: boolean
   probe_server_name?: string | null
   check_all_ips: boolean
   last_ip_results: IpResult[] | null
@@ -263,7 +263,7 @@ export type CheckForm = {
   auth_pass?: string
   http_headers?: string
   ignore_tls?: boolean
-  probe_server_id?: number | null
+  probe_local?: boolean
   check_all_ips?: boolean
   check_ssl?: boolean
   check_domain?: boolean
@@ -445,7 +445,7 @@ export function checkToForm(c: Check): CheckForm {
     auth_pass: c.auth_pass ?? '',
     http_headers: c.http_headers ?? '',
     ignore_tls: c.ignore_tls ?? false,
-    probe_server_id: c.probe_server_id ?? null,
+    probe_local: c.probe_local ?? false,
     check_all_ips: c.check_all_ips ?? false,
     check_ssl: c.check_ssl,
     check_domain: c.check_domain,
@@ -1347,6 +1347,28 @@ export type Location = {
   url: string
   enabled: boolean
   created_at: string
+}
+
+// Сайт лежит по внешней проверке, а его домен обслуживает известная панели нода.
+// Почти всегда это белый список: снаружи рвут соединение, а сайт цел.
+export type LocalProbeSuggestion = {
+  check_id: number
+  name: string
+  host: string
+  message: string
+  server_id: number
+  server_name: string
+}
+
+export function localProbeSuggestions(): Promise<{ items: LocalProbeSuggestion[] }> {
+  return api('/api/checks/local-probe-suggestions')
+}
+
+export function applyLocalProbe(ids: number[]): Promise<{ updated: number }> {
+  return api('/api/checks/local-probe-apply', {
+    method: 'POST',
+    body: JSON.stringify({ check_ids: ids }),
+  })
 }
 
 export function listLocations(): Promise<Location[]> {

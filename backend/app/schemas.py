@@ -136,8 +136,8 @@ class CheckCreate(BaseModel):
     auth_pass: str = Field(default="", max_length=256)
     http_headers: str = Field(default="", max_length=4096)
     ignore_tls: bool = False
-    # id сервера, чей агент проверяет сайт изнутри (сайт закрыт белым списком)
-    probe_server_id: int | None = None
+    # проверять изнутри сервера (сайт закрыт белым списком снаружи)
+    probe_local: bool = False
     check_all_ips: bool = False
     check_ssl: bool = True
     check_domain: bool = True
@@ -172,7 +172,7 @@ class CheckUpdate(BaseModel):
     auth_pass: str | None = Field(default=None, max_length=256)
     http_headers: str | None = Field(default=None, max_length=4096)
     ignore_tls: bool | None = None
-    probe_server_id: int | None = None
+    probe_local: bool | None = None
     check_all_ips: bool | None = None
     check_ssl: bool | None = None
     check_domain: bool | None = None
@@ -309,6 +309,25 @@ class DiscoveredDomain(BaseModel):
     servers: list[str]  # где встретился (имена нод) — подсказка «чей это домен»
 
 
+class LocalProbeSuggestion(BaseModel):
+    """«Этот сайт не отвечает снаружи, но его домен обслуживает вот этот сервер»."""
+
+    check_id: int
+    name: str
+    host: str
+    message: str  # чем именно закончилась внешняя проверка
+    server_id: int
+    server_name: str
+
+
+class LocalProbeSuggestionsOut(BaseModel):
+    items: list[LocalProbeSuggestion] = []
+
+
+class LocalProbeApplyIn(BaseModel):
+    check_ids: list[int]
+
+
 class DiscoveredOut(BaseModel):
     """Всё, что агенты нашли на веб-серверах парка, + что из этого уже мониторится."""
 
@@ -365,8 +384,8 @@ class CheckOut(BaseModel):
     auth_pass: str = ""
     http_headers: str = ""
     ignore_tls: bool = False
-    probe_server_id: int | None = None
-    probe_server_name: str | None = None  # имя для чипа «локально · сервер»
+    probe_local: bool = False
+    probe_server_name: str | None = None  # чей агент проверяет (для подсказки)
     check_all_ips: bool = False
     check_ssl: bool
     check_domain: bool

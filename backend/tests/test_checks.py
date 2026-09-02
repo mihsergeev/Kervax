@@ -666,7 +666,14 @@ async def test_agent_probe_outcome():
     assert out.status == "down" and "не присылает" in out.message
 
     # результата ещё не было — тоже не «up»
+    check.probe_server_id = 7
     assert checks_exec.outcome_from_agent(check, None, now, 2000).status == "down"
+
+    # проверять некому (домена нет ни на одной ноде) — это ДРУГАЯ беда, и лечится
+    # она не на ноде, а установкой агента или снятием галочки
+    check.probe_server_id = None
+    out = checks_exec.outcome_from_agent(check, None, now, 2000)
+    assert out.status == "down" and "некому" in out.message
 
     # ключевое слово ищет агент, панель верит флагу
     check.keyword_up = "Добро пожаловать"
@@ -680,3 +687,55 @@ async def test_agent_probe_outcome():
     check.keyword_up = ""
     probe.code = 403
     assert checks_exec.outcome_from_agent(check, probe, now, 2000).status == "down"
+
+
+async def test_local_probe_rebinding(tmp_path):
+    """Галочку ставит человек, ноду находит панель — и находит заново при переезде.
+
+    Выбор конкретной ноды был бы лишней работой: панель и так знает, чьи веб-серверы
+    держат домен. А жёсткая привязка молча устаревала бы, когда сайт переезжает.
+    """
+    from app import collector
+    from app.db import create_engine_and_factory
+    from app.models import Base, Check, Server
+    from sqlalchemy import select
+
+    db = (tmp_path / "lp.db").as_posix()
+    engine, factory = create_engine_and_factory(f"sqlite+aiosqlite:///{db}")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    async with factory() as s:
+        s.add(Check(name="панель", type="http", target="https://panel.example.ru",
+                    enabled=True, probe_local=True))
+        s.add(Server(name="node-a", token_hash="a", enabled=True,
+                     last_report={"web_services": [{"kind": "nginx", "sites": ["panel.example.ru"]}]}))
+        s.add(Server(name="node-b", token_hash="b", enabled=True, last_report={}))
+        await s.commit()
+
+    assert await collector.rebind_local_probes(factory) == 1
+    async with factory() as s:
+        chk = (await s.scalars(select(Check))).one()
+        node_a = (await s.scalars(select(Server).where(Server.name == "node-a"))).one()
+        assert chk.probe_server_id == node_a.id
+
+    # сайт переехал на другую ноду — привязка обязана переехать следом
+    async with factory() as s:
+        a = (await s.scalars(select(Server).where(Server.name == "node-a"))).one()
+        b = (await s.scalars(select(Server).where(Server.name == "node-b"))).one()
+        a.last_report = {}
+        b.last_report = {"web_services": [{"kind": "nginx", "sites": ["panel.example.ru"]}]}
+        await s.commit()
+        b_id = b.id
+    assert await collector.rebind_local_probes(factory) == 1
+    async with factory() as s:
+        assert (await s.scalars(select(Check))).one().probe_server_id == b_id
+
+    # домена нет нигде — привязки нет, и монитор честно скажет, что проверять некому
+    async with factory() as s:
+        b = (await s.scalars(select(Server).where(Server.name == "node-b"))).one()
+        b.last_report = {}
+        await s.commit()
+    assert await collector.rebind_local_probes(factory) == 1
+    async with factory() as s:
+        assert (await s.scalars(select(Check))).one().probe_server_id is None
+    await engine.dispose()

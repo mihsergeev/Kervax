@@ -22,6 +22,9 @@ from app.models import (
     User,
 )
 from app.schemas import (
+    LocalProbeSuggestionsOut,
+    LocalProbeSuggestion,
+    LocalProbeApplyIn,
     AdoptDomainsIn,
     AdoptResult,
     BulkResult,
@@ -486,6 +489,86 @@ async def discovered(user: CurrentUser, session: SessionDep) -> DiscoveredOut:
         groups=groups,
         ignored=ignored,
     )
+
+
+def _serving_servers(servers) -> dict[str, tuple[int, str]]:
+    """Карта «домен → сервер, который его обслуживает» из отчётов агентов.
+
+    Если домен нашёлся на нескольких нодах, берём первую по имени: предложение
+    всё равно подтверждает человек, а гадать за него незачем."""
+    found: dict[str, tuple[int, str]] = {}
+    for srv in sorted(servers, key=lambda x: x.name):
+        for web in (srv.last_report or {}).get("web_services") or []:
+            for raw in web.get("sites") or []:
+                domain = _norm_domain(raw)
+                if domain and domain not in found:
+                    found[domain] = (srv.id, srv.name)
+    return found
+
+
+@router.get("/local-probe-suggestions", response_model=LocalProbeSuggestionsOut)
+async def local_probe_suggestions(
+    user: CurrentUser, session: SessionDep
+) -> LocalProbeSuggestionsOut:
+    """Сайты, которые не отвечают панели, но живут на известной ей ноде.
+
+    Почти всегда это белый список: снаружи соединение рвут, а сайт цел. Панель уже
+    знает домены всех веб-серверов парка — значит может не ждать, пока человек
+    сопоставит одно с другим, а предложить проверять такой сайт изнутри сервера.
+    Само не назначаем: проверка изнутри отвечает на другой вопрос, чем внешняя, и
+    подменять одну другой без ведома владельца нельзя."""
+    servers = list(await session.scalars(scope_query(user, select(Server), Server)))
+    serving = _serving_servers(servers)
+    out: list[LocalProbeSuggestion] = []
+    for check in await session.scalars(
+        select(Check).where(
+            Check.enabled.is_(True),
+            Check.type == "http",
+            Check.probe_local.is_(False),
+            Check.last_status == "down",
+        )
+    ):
+        if not group_allowed(user, check.group_name, "sites"):
+            continue
+        host = _host_of(check)
+        hit = serving.get(host)
+        if not hit:
+            continue
+        out.append(LocalProbeSuggestion(
+            check_id=check.id, name=check.name, host=host,
+            message=(check.last_message or "")[:200],
+            server_id=hit[0], server_name=hit[1],
+        ))
+    out.sort(key=lambda x: x.name)
+    return LocalProbeSuggestionsOut(items=out)
+
+
+@router.post("/local-probe-apply", response_model=BulkResult)
+async def local_probe_apply(
+    body: LocalProbeApplyIn, user: CurrentUser, session: SessionDep
+) -> BulkResult:
+    """Назначает мониторам проверку с той ноды, что обслуживает их домен.
+
+    Сервер вычисляем ЗДЕСЬ, а не берём из запроса: иначе редактор мог бы назначить
+    проверку с чужой ноды и увидеть ответ сайта, к которому доступа не имеет."""
+    servers = list(await session.scalars(scope_query(user, select(Server), Server)))
+    serving = _serving_servers(servers)
+    updated = 0
+    for check in await session.scalars(
+        select(Check).where(Check.id.in_(body.check_ids), Check.type == "http")
+    ):
+        if not group_allowed(user, check.group_name, "sites"):
+            continue
+        hit = serving.get(_host_of(check))
+        if not hit:
+            continue
+        check.probe_local = True
+        check.probe_server_id = hit[0]
+        updated += 1
+    await session.commit()
+    if updated:
+        await audit.record(session, user.username, "local_probe_apply", str(body.check_ids))
+    return BulkResult(updated=updated)
 
 
 @router.post("/discovered/ignore", response_model=BulkResult)
