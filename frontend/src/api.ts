@@ -1365,6 +1365,20 @@ export type LocalProbeSuggestion = {
   server_name: string
 }
 
+// Объект, по которому не сработает ни один алерт. Читается только админом:
+// область действия правил — часть настроек алертов.
+export type MuteWarning = {
+  kind: 'server' | 'site'
+  id: number
+  name: string
+  group: string
+  reason: string
+}
+
+export function alertCoverage(): Promise<{ items: MuteWarning[] }> {
+  return api('/api/alerts/coverage')
+}
+
 export function localProbeSuggestions(): Promise<{ items: LocalProbeSuggestion[] }> {
   return api('/api/checks/local-probe-suggestions')
 }

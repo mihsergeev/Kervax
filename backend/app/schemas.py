@@ -312,6 +312,20 @@ class DiscoveredDomain(BaseModel):
     servers: list[str]  # где встретился (имена нод) — подсказка «чей это домен»
 
 
+class MuteWarning(BaseModel):
+    """Объект, по которому не сработает ни один алерт."""
+
+    kind: str          # server | site
+    id: int
+    name: str
+    group: str
+    reason: str        # почему молчит — человеку, а не в терминах scope_type
+
+
+class AlertCoverageOut(BaseModel):
+    items: list[MuteWarning] = []
+
+
 class LocalProbeSuggestion(BaseModel):
     """Что панель предлагает сделать с недоступным снаружи сайтом.
 

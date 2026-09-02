@@ -3,6 +3,7 @@ import {
   ApiError,
   checksOverview,
   getAgentRelease,
+  alertCoverage,
   applyLocalProbe,
   listServers,
   localProbeSuggestions,
@@ -11,6 +12,7 @@ import {
   type Check,
   type ChecksOverview,
   type LocalProbeSuggestion,
+  type MuteWarning,
   type Server,
 } from './api'
 import type { Section } from './App'
@@ -331,6 +333,7 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
   const [avail, setAvail] = useState('')
   const [relProblem, setRelProblem] = useState('')
   const [probeHints, setProbeHints] = useState<LocalProbeSuggestion[]>([])
+  const [mutes, setMutes] = useState<MuteWarning[]>([])
 
   useEffect(() => {
     getAgentRelease()
@@ -354,6 +357,11 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
     localProbeSuggestions()
       .then((r) => setProbeHints(r.items))
       .catch(() => setProbeHints([]))
+    // объекты, по которым не сработает ни один алерт. Доступно только админу
+    // (область действия — часть настроек алертов), остальным просто молчим
+    alertCoverage()
+      .then((r) => setMutes(r.items))
+      .catch(() => setMutes([]))
   }, [onUnauthorized])
 
   // быстрый мут прямо с главной: приглушить типы алертов сервера навсегда (alert_mutes).
@@ -428,6 +436,39 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
   return (
     <div>
       <p className="tagline">{t('Мониторинг инфраструктуры')}</p>
+      {mutes.length > 0 && (
+        <div className="home-attention home-attention-mute">
+          <div className="home-attention-head">
+            <span className="home-attention-ic">🔕</span>
+            {t('Алерты не придут')}
+            <span className="home-attention-n">{mutes.length}</span>
+          </div>
+          <div className="muted small home-attention-note">
+            {t('По этим объектам не сработает ни один алерт: они не попадают ни в одну область действия правил. Метрики собираются и графики рисуются — но когда что-то сломается, не придёт ничего.')}
+          </div>
+          <div className="home-attention-list">
+            {mutes.slice(0, ATTENTION_LIMIT).map((m) => (
+              <button
+                key={`${m.kind}-${m.id}`}
+                className="home-attention-row"
+                onClick={() => onOpen(m.kind === 'server' ? 'servers' : 'sites', m.id)}
+              >
+                <span className="dot degraded" />
+                <span className="home-attention-ico">{m.kind === 'server' ? '🖥' : '🌐'}</span>
+                <span className="home-attention-txt">
+                  {m.name} — {m.reason}
+                </span>
+                <span className="home-open">→</span>
+              </button>
+            ))}
+            {mutes.length > ATTENTION_LIMIT && (
+              <div className="muted small home-attention-more">
+                {t('…и ещё {n}', { n: mutes.length - ATTENTION_LIMIT })}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
       {probeHints.length > 0 && (
         <div className="home-attention home-attention-probe">
           <div className="home-attention-head">

@@ -1140,6 +1140,9 @@ const EN: Record<string, string> = {
   'включить': 'enable',
   'включить для всех {n}': 'enable for all {n}',
   'Проверять локально, с самого сервера': 'Probe locally, from the server itself',
+  'Алерты не придут': 'No alerts will arrive',
+  'По этим объектам не сработает ни один алерт: они не попадают ни в одну область действия правил. Метрики собираются и графики рисуются — но когда что-то сломается, не придёт ничего.':
+    'No alert will fire for these: they fall outside the scope of every rule. Metrics are still collected and charts still drawn — but when something breaks, nothing will arrive.',
   'Данных пока нет.': 'No data yet.',
   'Ресурсы Flux не в Ready — доставка встала': 'Flux resources are not Ready — delivery has stopped',
   'Сертификаты или токены истекают в ближайшие две недели':
