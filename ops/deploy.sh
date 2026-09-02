@@ -1,9 +1,15 @@
 #!/bin/sh
 # Deploy Kervax to production: ship the sources, rebuild, VERIFY the result.
 #
-#   ops/deploy.sh kervax-build            deploy HEAD to kervax.acdev.pro
-#   ops/deploy.sh fi-hz-ms2 v1.1.2        deploy a tag to kervax.msergeev.ru
-#   ops/deploy.sh kervax-build --dry-run  show what would happen and exit
+#   ops/deploy.sh <host>                  deploy HEAD to one panel
+#   ops/deploy.sh <host> v1.1.2           deploy a tag
+#   ops/deploy.sh <host> --dry-run        show what would happen and exit
+#   ops/deploy.sh --all                   deploy to every panel listed in ops/prods
+#
+# ops/prods is one ssh host per line (blank lines and # comments ignored). It is not
+# in the repository: which panels an installation has is nobody else's business. With
+# --all the panels are done one after another and the run STOPS on the first failure -
+# a half-deployed fleet is worse than one that was not touched.
 #
 # Production builds from source (it has its own agent signing key) and /app/kervax is NOT
 # a git repository: files arrive as an archive. Hence the two things this script exists
@@ -24,17 +30,44 @@
 #    old code.
 set -eu
 
-HOST=""; REF="HEAD"; DIR=/app/kervax; DRY=0
+HOST=""; REF="HEAD"; DIR=/app/kervax; DRY=0; ALL=0
 while [ $# -gt 0 ]; do
     case "$1" in
         --dry-run) DRY=1; shift ;;
+        --all) ALL=1; shift ;;
         --dir) DIR="$2"; shift 2 ;;
-        -h|--help) sed -n '2,10p' "$0"; exit 0 ;;
+        -h|--help) sed -n '2,14p' "$0"; exit 0 ;;
         -*) echo "unknown argument: $1" >&2; exit 2 ;;
         *) if [ -z "$HOST" ]; then HOST="$1"; else REF="$1"; fi; shift ;;
     esac
 done
-[ -n "$HOST" ] || { echo "Usage: ops/deploy.sh <ssh-host> [ref] [--dry-run]" >&2; exit 2; }
+
+# --all: прогоняем этот же скрипт по каждой панели из списка. Именно рекурсией, а не
+# циклом внутри: каждая панель проходит ПОЛНУЮ проверку после выкатки, и падение на
+# одной останавливает остальные — чтобы парк не остался в разных версиях молча.
+if [ "$ALL" = "1" ]; then
+    LIST="$(dirname "$0")/prods"
+    [ -f "$LIST" ] || { echo "нет списка панелей: $LIST (по ssh-хосту на строку)" >&2; exit 2; }
+    HOSTS=$(grep -vE '^[[:space:]]*(#|$)' "$LIST")
+    [ -n "$HOSTS" ] || { echo "список $LIST пуст" >&2; exit 2; }
+    n=$(printf '%s\n' "$HOSTS" | grep -c .)
+    printf '\n\033[1m→ Панелей к выкатке: %s\033[0m\n' "$n"
+    i=0
+    for h in $HOSTS; do
+        i=$((i + 1))
+        printf '\n\033[1m═══ [%s/%s] %s ═══\033[0m\n' "$i" "$n" "$h"
+        set -- "$h" "$REF"
+        [ "$DRY" = "1" ] && set -- "$@" --dry-run
+        sh "$0" "$@" || {
+            printf '\n\033[31m✗ остановились на %s — остальные панели не тронуты\033[0m\n' "$h" >&2
+            exit 1
+        }
+    done
+    printf '\n\033[32m✓ выкачено на все панели: %s\033[0m\n' "$n"
+    exit 0
+fi
+
+[ -n "$HOST" ] || { echo "Usage: ops/deploy.sh <ssh-host> [ref] [--dry-run] | --all" >&2; exit 2; }
 
 say()  { printf '\n\033[1m→ %s\033[0m\n' "$*"; }
 die()  { printf '\n\033[31m✗ %s\033[0m\n' "$*" >&2; exit 1; }
@@ -199,7 +232,11 @@ fi
 if [ -n "${LOCAL_AGENT:-}" ]; then
     echo "  agent release served: ${AGT_AFTER:-none}"
     [ "$AGT_AFTER" = "$LOCAL_AGENT" ] \
-        || { echo "    ✗ the panel serves ${AGT_AFTER:-nothing}, not $LOCAL_AGENT - agents will not update"; BAD=1; }
+        || { echo "    ✗ the panel serves ${AGT_AFTER:-nothing}, not $LOCAL_AGENT - agents will not update"
+             echo "      (a fresh panel usually misses KERVAX_AGENT_PUBKEY in its .env: the key is"
+             echo "       compiled into the agent, so without it the built binary does not match"
+             echo "       the signed one and the panel refuses to serve the release)"
+             BAD=1; }
 fi
 echo "  tracebacks in the backend log over 3 minutes: ${ERR_AFTER:-0}"
 [ "${ERR_AFTER:-0}" = "0" ] || BAD=1

@@ -288,6 +288,7 @@ export type CheckBulk = {
   check_all_ips?: boolean
   ssl_warn_days?: number[]
   domain_warn_days?: number[]
+  probe_local?: boolean
 }
 
 // ids не задан → применить ко ВСЕМ мониторам; ids=[…] → только к выбранным.
