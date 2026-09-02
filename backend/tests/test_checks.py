@@ -771,3 +771,50 @@ async def test_bulk_enable_local_probe(client, auth_headers):
     for cid in ids:
         got = await client.get(f"/api/checks/{cid}", headers=auth_headers)
         assert got.json()["probe_local"] is False
+
+
+async def test_suggestion_for_site_that_answers_403(client, auth_headers, monkeypatch):
+    """Сайт, отвечающий 403, лечится не локальной проверкой, а принятием кода.
+
+    Поймано на живом парке: сайты за Envoy Gateway отдают 403 снаружи, а изнутри
+    ноды на localhost не слушает никто — проверять там нечего. Раз сайт ОТВЕЧАЕТ,
+    он жив, и достаточно считать этот код нормой.
+    """
+    r = await client.post("/api/checks", headers=auth_headers,
+                          json={"name": "closed", "type": "http",
+                                "target": "https://closed.example.ru"})
+    cid = r.json()["id"]
+
+    # приводим монитор в то состояние, в каком его видит панель после проверки
+    from sqlalchemy import select
+    from app.models import Check
+
+    # У фикстуры своё приложение с временной БД (см. conftest), поэтому фабрику
+    # сессий берём у него, а не у импортированного модуля: иначе правка уедет
+    # в другую базу и монитор останется нетронутым.
+    factory = client._transport.app.state.session_factory  # noqa: SLF001
+    async with factory() as s:
+        row = (await s.scalars(select(Check).where(Check.id == cid))).one()
+        row.last_status = "down"
+        row.last_message = "доступ запрещён (HTTP 403)"
+        await s.commit()
+
+    r = await client.get("/api/checks/local-probe-suggestions", headers=auth_headers)
+    items = [x for x in r.json()["items"] if x["check_id"] == cid]
+    assert items, "панель не заметила сайт, отвечающий 403"
+    assert items[0]["kind"] == "code" and items[0]["code"] == 403
+
+    r = await client.post("/api/checks/local-probe-apply", headers=auth_headers,
+                          json={"check_ids": [cid]})
+    assert r.json()["updated"] == 1
+
+    got = (await client.get(f"/api/checks/{cid}", headers=auth_headers)).json()
+    assert "403" in got["expected_status"]
+    # 200-399 остаётся в силе: сайт, который однажды откроется, зелёным быть не перестанет
+    assert "200-399" in got["expected_status"]
+    # локальную проверку при этом НЕ включаем: изнутри там проверять нечего
+    assert got["probe_local"] is False
+
+    # предложение исчезает: код уже принят
+    r = await client.get("/api/checks/local-probe-suggestions", headers=auth_headers)
+    assert not [x for x in r.json()["items"] if x["check_id"] == cid]

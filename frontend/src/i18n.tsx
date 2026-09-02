@@ -1133,8 +1133,10 @@ const EN: Record<string, string> = {
     'Local probing is on, but the domain was not found on any server — nobody can check it',
   'Похоже на белый список': 'Looks like an allow-list',
   '🏠 проверять локально: подходит {n} сайт(ов)': '🏠 probe locally: {n} site(s) qualify',
-  'Эти сайты не отвечают панели снаружи, но их домены обслуживают ваши серверы — похоже на белый список. Агент проверит их изнутри; панель к ним ходить перестанет. Зелёный статус будет означать «сайт жив на сервере», а не «виден посетителям».':
-    'These sites do not answer the panel from outside, but their domains are served by your own servers — that looks like an allow-list. The agent will probe them from within and the panel will stop visiting them. A green status will then mean "the site is alive on the server", not "reachable for visitors".',
+  'Эти сайты панель снаружи проверить не может — похоже на белый список. Те, чей домен держит ваш сервер, она предлагает проверять изнутри него. А если сайт ОТВЕЧАЕТ «доступ запрещён» — он жив, и довольно считать этот код нормой: изнутри там проверять нечего, прокси закрывает сайт сам.':
+    'The panel cannot check these sites from outside — that looks like an allow-list. For those whose domain is served by one of your servers it offers a probe from within. And when a site ANSWERS with "forbidden" it is alive, so it is enough to treat that code as normal: there is nothing to probe from within, the proxy closes the site itself.',
+  'отвечает {code} — считать нормой': 'answers {code} — treat as normal',
+  'принять код': 'accept the code',
   'включить': 'enable',
   'включить для всех {n}': 'enable for all {n}',
   'Проверять локально, с самого сервера': 'Probe locally, from the server itself',
