@@ -75,15 +75,19 @@ function LocalProbeHint({
       {open && (
         <div className="local-probe-hint">
           <div className="muted small">
-            {t('Эти сайты не отвечают панели снаружи, но их домены обслуживают ваши серверы — похоже на белый список. Агент проверит их изнутри; панель к ним ходить перестанет. Зелёный статус будет означать «сайт жив на сервере», а не «виден посетителям».')}
+            {t('Эти сайты панель снаружи проверить не может — похоже на белый список. Те, чей домен держит ваш сервер, она предлагает проверять изнутри него. А если сайт ОТВЕЧАЕТ «доступ запрещён» — он жив, и довольно считать этот код нормой: изнутри там проверять нечего, прокси закрывает сайт сам.')}
           </div>
           <ul className="local-probe-list">
             {items.map((x) => (
               <li key={x.check_id}>
                 <span className="mono">{x.host}</span>{' '}
-                <span className="muted small">→ {x.server_name}</span>{' '}
+                <span className="muted small">
+                  {x.kind === 'code'
+                    ? t('отвечает {code} — считать нормой', { code: x.code })
+                    : `→ ${x.server_name}`}
+                </span>{' '}
                 <button className="ghost small" disabled={busy} onClick={() => apply([x.check_id])}>
-                  {t('включить')}
+                  {x.kind === 'code' ? t('принять код') : t('включить')}
                 </button>
               </li>
             ))}
