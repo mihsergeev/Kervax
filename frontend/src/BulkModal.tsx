@@ -21,6 +21,7 @@ const FIELDS: { key: keyof CheckBulk; label: string; kind: Kind; def: string }[]
   { key: 'domain_warn_days', label: 'Домен: напоминать за, дн.', kind: 'days', def: '7, 1' },
   // булевы переключатели (вкл/выкл разом)
   { key: 'check_locations', label: 'Проверять из локаций (прокси)', kind: 'bool', def: 'off' },
+  { key: 'probe_local', label: 'Проверять локально, с самого сервера', kind: 'bool', def: 'off' },
   { key: 'check_all_ips', label: 'Проверять все IP-адреса домена', kind: 'bool', def: 'off' },
   { key: 'check_ssl', label: 'Следить за SSL-сертификатом', kind: 'bool', def: 'on' },
   { key: 'check_domain', label: 'Следить за сроком домена', kind: 'bool', def: 'on' },

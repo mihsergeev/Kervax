@@ -656,7 +656,7 @@ async def test_agent_probe_outcome():
     # ошибка с ноды переводится тем же словарём, что и своя
     probe.error = "dial tcp 127.0.0.1:443: connect: connection refused"
     out = checks_exec.outcome_from_agent(check, probe, now, 2000)
-    assert out.status == "down" and "отказ" in out.message.lower() or "соедин" in out.message.lower()
+    assert out.status == "down" and "172.16.0.0/12" in out.message  # подсказываем, что добавить
 
     # молчащий агент — это отказ проверки, а не «сайт работает»
     probe.error = ""
@@ -739,3 +739,35 @@ async def test_local_probe_rebinding(tmp_path):
     async with factory() as s:
         assert (await s.scalars(select(Check))).one().probe_server_id is None
     await engine.dispose()
+
+
+async def test_bulk_enable_local_probe(client, auth_headers):
+    """Локальную проверку можно включить сразу пачке мониторов.
+
+    Сайтов за белым списком обычно не один, а десяток: автодискавери заводит их
+    вместе, и все вместе они оказываются красными. Включать по одному — работа,
+    которую никто не будет делать.
+    """
+    ids = []
+    for host in ("a.example.ru", "b.example.ru"):
+        r = await client.post("/api/checks", headers=auth_headers,
+                              json={"name": host, "type": "http", "target": f"https://{host}"})
+        assert r.status_code == 201, r.text
+        ids.append(r.json()["id"])
+
+    r = await client.patch("/api/checks/bulk", headers=auth_headers,
+                           json={"ids": ids, "probe_local": True})
+    assert r.status_code == 200, r.text
+    assert r.json()["updated"] == 2
+
+    for cid in ids:
+        got = await client.get(f"/api/checks/{cid}", headers=auth_headers)
+        assert got.json()["probe_local"] is True
+
+    # и выключить тоже пачкой — иначе из режима не выйти без ручного обхода
+    r = await client.patch("/api/checks/bulk", headers=auth_headers,
+                           json={"ids": ids, "probe_local": False})
+    assert r.status_code == 200
+    for cid in ids:
+        got = await client.get(f"/api/checks/{cid}", headers=auth_headers)
+        assert got.json()["probe_local"] is False

@@ -8,7 +8,7 @@
 # secrets or config contents.
 set -euo pipefail
 
-KERVAX_SETUP_VERSION=0.4  # MAJOR.MINOR; compared component-wise
+KERVAX_SETUP_VERSION=0.5  # MAJOR.MINOR; compared component-wise
 KERVAX_SETUP_ALWAYS=1     # safe on any node: the refresh is a no-op without a web server
 
 HELPER_DIR=/lib65/kervax
@@ -85,7 +85,14 @@ extract_domains() { tr ' ,' '\n' | sed -E 's~^https?://~~; s~:[0-9]+$~~; s~/.*$~
 collect_caddy() {
   if command -v docker >/dev/null 2>&1; then
     for cid in $(docker ps -q 2>/dev/null); do
-      docker inspect --format '{{index .Config.Labels "caddy"}}' "$cid" 2>/dev/null
+      # Адрес сайта живёт в метке `caddy` — ЛИБО в пронумерованных `caddy_0`,
+      # `caddy_1`… когда один контейнер обслуживает несколько сайтов. Раньше читалась
+      # только первая форма, и нода с метками caddy_0 выглядела как сервер вообще без
+      # доменов: веб-сервер найден, сайтов ноль. Ключи с точкой (caddy_0.reverse_proxy
+      # и прочие директивы) пропускаем — там не адреса.
+      docker inspect --format '{{json .Config.Labels}}' "$cid" 2>/dev/null \
+        | tr ',' '\n' \
+        | sed -n 's/.*"caddy\(_[0-9][0-9]*\)\{0,1\}"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\2/p'
     done | extract_domains
   fi
   [ -f /etc/caddy/Caddyfile ] && grep -vE '^[[:space:]]*#' /etc/caddy/Caddyfile \
