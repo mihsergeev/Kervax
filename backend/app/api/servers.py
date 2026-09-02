@@ -17,6 +17,8 @@ from app import audit, geoip
 from app.config import get_settings
 from app.deps import AdminUser, CurrentUser, SessionDep, group_allowed, scope_query
 from app.models import (
+    AgentProbe,
+    Check,
     BackupCommand,
     BackupSetupJob,
     DockerCommand,
@@ -2055,12 +2057,83 @@ async def agent_report(
     cmds = await _take_docker_commands(session, server.id)
     kcmds = await _take_kube_commands(session, server.id)
     bcmds = await _take_backup_commands(session, server.id)
+    await _store_site_probes(session, server.id, body.site_probes or [], now)
+    probes = await _site_probe_tasks(session, server.id)
     await session.commit()
 
     return AgentConfigOut(
         interval=get_settings().server_report_interval, checks=[], update=upd,
         docker_commands=cmds, kube_commands=kcmds, backup_commands=bcmds,
+        site_probes=probes,
     )
+
+
+async def _store_site_probes(session, server_id: int, results: list, now) -> None:
+    """Кладёт присланные агентом результаты локальных проверок.
+
+    Только для мониторов, которым ЭТОТ сервер назначен проверяющим: иначе агент
+    (или тот, кто добыл его токен) мог бы объявить любой чужой монитор упавшим."""
+    if not results:
+        return
+    ids = [int(r.get("id") or 0) for r in results if r.get("id")]
+    if not ids:
+        return
+    mine = set(
+        await session.scalars(
+            select(Check.id).where(Check.id.in_(ids), Check.probe_server_id == server_id)
+        )
+    )
+    for r in results:
+        cid = int(r.get("id") or 0)
+        if cid not in mine:
+            continue
+        row = await session.get(AgentProbe, cid)
+        if row is None:
+            row = AgentProbe(check_id=cid, server_id=server_id, ts=now)
+            session.add(row)
+        row.server_id = server_id
+        row.ts = now
+        row.code = int(r.get("code") or 0)
+        lat = r.get("latency_ms")
+        row.latency_ms = int(lat) if isinstance(lat, (int, float)) else None
+        row.error = str(r.get("error") or "")[:512]
+        row.kw_up_found = bool(r.get("kw_up_found", True))
+        row.kw_down_found = bool(r.get("kw_down_found", False))
+
+
+async def _site_probe_tasks(session, server_id: int) -> list[dict]:
+    """Задания агенту: что проверять изнутри сервера.
+
+    Агент ходит ТОЛЬКО на localhost (адрес он подменяет сам), поэтому URL здесь —
+    это не «куда пойти», а «чьим именем представиться»: Host и SNI. Панель не может
+    послать агента ни на какой другой хост, и заставить его сканировать сеть тоже
+    не может — даже будучи захваченной."""
+    rows = list(
+        await session.scalars(
+            select(Check).where(
+                Check.enabled.is_(True),
+                Check.probe_server_id == server_id,
+                Check.type == "http",
+            )
+        )
+    )
+    out: list[dict] = []
+    for c in rows:
+        out.append({
+            "id": c.id,
+            "url": c.target,
+            "method": c.method or "GET",
+            "timeout_ms": c.timeout_ms,
+            "interval": c.interval_seconds,
+            "expected_status": c.expected_status,
+            "keyword_up": c.keyword_up,
+            "keyword_down": c.keyword_down,
+            "headers": c.http_headers or "",
+            "auth_user": c.auth_user if c.auth_method == "basic" else "",
+            "auth_pass": c.auth_pass if c.auth_method == "basic" else "",
+            "ignore_tls": bool(c.ignore_tls),
+        })
+    return out
 
 
 @agent_router.get("/commands")

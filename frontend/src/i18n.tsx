@@ -1118,6 +1118,13 @@ const EN: Record<string, string> = {
   'сертификат control-plane': 'control-plane certificate',
   'сертификат kubelet': 'kubelet certificate',
   'токен Flux': 'Flux token',
+  'Проверять с сервера (сайт закрыт снаружи)': 'Probe from the server (the site is closed from outside)',
+  'снаружи, как обычно': 'from outside, as usual',
+  'Агент на выбранном сервере постучится на localhost с этим именем хоста и пришлёт результат. Панель к сайту ходить не будет: снаружи он всё равно закрыт. Это проверка изнутри — она не докажет, что сайт виден посетителям. Белый список сайта должен пускать 127.0.0.1, иначе проверка получит обрыв.':
+    'The agent on the chosen server will knock on localhost with this host name and report back. The panel will not visit the site: it is closed from outside anyway. This is a probe from within — it does not prove the site is reachable for visitors. The site allow-list must let 127.0.0.1 through, otherwise the probe gets a dropped connection.',
+  'локально': 'local',
+  'Проверяется изнутри сервера {srv}: панель к сайту не ходит, снаружи он закрыт':
+    'Probed from within {srv}: the panel does not visit this site, it is closed from outside',
   'Данных пока нет.': 'No data yet.',
   'Ресурсы Flux не в Ready — доставка встала': 'Flux resources are not Ready — delivery has stopped',
   'Сертификаты или токены истекают в ближайшие две недели':

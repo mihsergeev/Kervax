@@ -324,6 +324,62 @@ def _parse_headers(raw: str) -> dict[str, str]:
     return {str(k): str(v) for k, v in data.items()}
 
 
+def eval_parts(check, code: int, kw_up_ok: bool, kw_down_found: bool,
+               latency: int, degraded_ms: int) -> CheckOutcome:
+    """Вердикт по «разобранному» ответу: код, попадание ключевых слов, задержка.
+
+    Отдельно от _eval_http, потому что источник ответа бывает разный: панель держит
+    в руках сам ответ, а от агента приходят только факты (тело закрытой страницы
+    наружу не отдаём). Правила должны остаться ОДНИ, иначе один и тот же сайт
+    получал бы разный вердикт в зависимости от того, кто его проверил."""
+    if not status_matches(code, check.expected_status):
+        return CheckOutcome("down", latency, message=http_status_text(code))
+    if check.keyword_up and not kw_up_ok:
+        return CheckOutcome("down", latency, message=f"нет ключевого слова «{check.keyword_up}»")
+    if check.keyword_down and kw_down_found:
+        return CheckOutcome("down", latency, message=f"найдено запрещённое «{check.keyword_down}»")
+    if latency > degraded_ms:
+        return CheckOutcome("degraded", latency, message=f"медленно: {latency} мс")
+    return CheckOutcome("up", latency, message=f"HTTP {code} · {latency} мс")
+
+
+# Сколько интервалов монитора можно не получать результат от агента, прежде чем
+# считать это отказом. Два: один пропуск бывает от совпадения расписаний (агент
+# отчитывается своим тактом), а вот два подряд — это уже молчание.
+AGENT_PROBE_STALE_INTERVALS = 2
+
+
+def outcome_from_agent(check, probe, now, degraded_ms: int) -> CheckOutcome:
+    """Вердикт по результату, присланному агентом с самого сервера."""
+    if probe is None:
+        return CheckOutcome("down", message="агент ещё не присылал результат проверки")
+    ts = probe.ts if probe.ts.tzinfo else probe.ts.replace(tzinfo=timezone.utc)
+    age = (now - ts).total_seconds()
+    limit = max(check.interval_seconds, 30) * AGENT_PROBE_STALE_INTERVALS
+    if age > limit:
+        mins = int(age // 60)
+        return CheckOutcome(
+            "down",
+            message=f"агент не присылает результат {mins} мин — проверка с сервера не идёт",
+        )
+    if probe.error:
+        # Обрыв на локальной проверке почти всегда означает одно: белый список сайта
+        # не пускает 127.0.0.1. Снаружи такой сайт закрыт намеренно, а изнутри —
+        # по недосмотру, и без подсказки это выглядит как «сайт лежит».
+        low = probe.error.lower()
+        if "eof" in low or "reset by peer" in low or "connection refused" in low:
+            return CheckOutcome(
+                "down", probe.latency_ms,
+                message="сервер оборвал соединение изнутри — вероятно, localhost "
+                        f"не разрешён в белом списке сайта ({probe.error[:80]})",
+            )
+        # Остальное прогоняем через тот же словарь подсказок, что и свои ошибки:
+        # «connection refused» инженеру понятно, дежурному — нет, а читают одни люди.
+        return CheckOutcome("down", probe.latency_ms, message=humanize_error(probe.error))
+    return eval_parts(check, probe.code, probe.kw_up_found, probe.kw_down_found,
+                      probe.latency_ms or 0, degraded_ms)
+
+
 def _eval_http(check, r, body: str, latency: int, fell_back: bool, degraded_ms: int) -> CheckOutcome:
     """Оценивает ответ http-проверки → CheckOutcome (общая логика для одиночной
     проверки и для проверки каждого IP в режиме «все адреса»)."""

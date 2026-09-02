@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app import alerts, backup, checks as checks_exec, heartbeat, settings_store
 from app.config import Settings
 from app.models import (
+    AgentProbe,
     Check,
     CheckIncident,
     CheckIpSample,
@@ -387,9 +388,28 @@ async def run_due_checks(
 
     cap = settings.check_max_concurrency
     jitter = max(settings.check_jitter_ms, 0) / 1000.0
-    outcomes = await _gather_capped(
-        [checks_exec.run_check(c) for c in due], cap, jitter
-    )
+    # Сайт за белым списком панель проверить не может — снаружи соединение просто
+    # рвут. За неё это делает агент НА САМОМ СЕРВЕРЕ и присылает сырой результат;
+    # здесь мы его только оцениваем — теми же порогами, что и всё остальное.
+    local = [c for c in due if c.probe_server_id]
+    remote = [c for c in due if not c.probe_server_id]
+    outcomes_map: dict[int, object] = {}
+    if remote:
+        got = await _gather_capped([checks_exec.run_check(c) for c in remote], cap, jitter)
+        outcomes_map.update(dict(zip((c.id for c in remote), got)))
+    if local:
+        async with session_factory() as session:
+            probes = {
+                r.check_id: r
+                for r in await session.scalars(
+                    select(AgentProbe).where(AgentProbe.check_id.in_([c.id for c in local]))
+                )
+            }
+        for c in local:
+            outcomes_map[c.id] = checks_exec.outcome_from_agent(
+                c, probes.get(c.id), now, c.degraded_ms
+            )
+    outcomes = [outcomes_map.get(c.id) for c in due]
     # «медленные» сроки (TLS/домен) обновляем только у созревших для этого мониторов
     refresh = [c for c in due if _needs_expiry(c, now, settings)]
     exp_results = await _gather_capped(
