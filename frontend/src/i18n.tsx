@@ -1137,6 +1137,7 @@ const EN: Record<string, string> = {
     'These sites do not answer the panel from outside, but their domains are served by your own servers — that looks like an allow-list. The agent will probe them from within and the panel will stop visiting them. A green status will then mean "the site is alive on the server", not "reachable for visitors".',
   'включить': 'enable',
   'включить для всех {n}': 'enable for all {n}',
+  'Проверять локально, с самого сервера': 'Probe locally, from the server itself',
   'Данных пока нет.': 'No data yet.',
   'Ресурсы Flux не в Ready — доставка встала': 'Flux resources are not Ready — delivery has stopped',
   'Сертификаты или токены истекают в ближайшие две недели':

@@ -202,6 +202,9 @@ class CheckBulkUpdate(BaseModel):
     check_domain: bool | None = None
     check_locations: bool | None = None
     check_all_ips: bool | None = None
+    # Сайтов за белым списком обычно не один, а десяток сразу — включать по одному
+    # мучительно. Ноду для каждого панель найдёт сама (см. rebind_local_probes).
+    probe_local: bool | None = None
     ssl_warn_days: list[int] | None = None
     domain_warn_days: list[int] | None = None
     location_ids: list[int] | None = None
