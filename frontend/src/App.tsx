@@ -34,7 +34,25 @@ type Modal =
   | null
 export type Section = 'home' | 'sites' | 'servers' | 'docker' | 'kuber' | 'services' | 'backups'
 
+// Ширина полосы прокрутки этого браузера: у классической (Windows/Linux) около 15px,
+// у оверлейной (macOS, мобильные) — 0. Нужна, чтобы вернуть её ширину отступом на
+// время открытой модалки: фон в этот момент перестаёт скроллиться, полоса исчезает и
+// содержимое дёргается вбок. Постоянно резервировать место нельзя — тогда справа
+// всегда пустая полоса, а до самой полосы приходится тянуться мышью левее края окна.
+function useScrollbarWidth(): void {
+  useEffect(() => {
+    const apply = () => {
+      const w = window.innerWidth - document.documentElement.clientWidth
+      document.documentElement.style.setProperty('--scrollbar-w', `${Math.max(w, 0)}px`)
+    }
+    apply()
+    window.addEventListener('resize', apply)
+    return () => window.removeEventListener('resize', apply)
+  }, [])
+}
+
 export default function App() {
+  useScrollbarWidth()
   const { t, lang, setLang } = useI18n()
   const [authed, setAuthed] = useState<boolean | null>(null)
   const [role, setRole] = useState<Role>('admin')
