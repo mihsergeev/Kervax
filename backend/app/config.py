@@ -7,7 +7,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="KERVAX_", env_file=".env")
 
     app_name: str = "Kervax"
-    version: str = "1.4.1"
+    version: str = "1.4.2"
     debug: bool = False
     # Внешний URL панели — если задан, в алерты добавляется ссылка на монитор
     # (напр. https://kervax.example.com). Пусто = ссылку не добавляем.
