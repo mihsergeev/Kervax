@@ -1372,11 +1372,22 @@ export type MuteWarning = {
   id: number
   name: string
   group: string
-  reason: string
+  reason_code: 'group_out' | 'no_group' | 'no_rules'
+  fixable: boolean
 }
 
 export function alertCoverage(): Promise<{ items: MuteWarning[] }> {
   return api('/api/alerts/coverage')
+}
+
+// Дописать немые объекты в область уже включённых правил алертов.
+export function fixAlertCoverage(
+  items: { kind: string; id: number }[],
+): Promise<{ rules: number; items: MuteWarning[] }> {
+  return api('/api/alerts/coverage/apply', {
+    method: 'POST',
+    body: JSON.stringify({ items }),
+  })
 }
 
 export function localProbeSuggestions(): Promise<{ items: LocalProbeSuggestion[] }> {
