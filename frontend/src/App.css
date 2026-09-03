@@ -4771,9 +4771,21 @@ body:has(.modal-backdrop) {
 .home-attention-mute .home-attention-row {
   cursor: default;
   gap: 0.4rem;
+  /* На узком экране кнопки уезжают под текст. Без переноса они забирали место у
+     имени, и оно рвалось в столбик по слогам. */
+  flex-wrap: wrap;
 }
 .home-attention-mute .home-attention-row:hover {
   background: transparent;
+}
+.home-attention-mute .home-attention-txt {
+  flex: 1 1 14rem;
+}
+.home-attention-mute .home-attention-row > button {
+  flex-shrink: 0;
+}
+.home-attention-mute > button {
+  margin-top: 0.4rem;
 }
 .home-attention-todo {
   flex-shrink: 0;
