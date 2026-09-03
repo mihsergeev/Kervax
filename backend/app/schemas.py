@@ -313,16 +313,39 @@ class DiscoveredDomain(BaseModel):
 
 
 class MuteWarning(BaseModel):
-    """Объект, по которому не сработает ни один алерт."""
+    """Объект, по которому не сработает ни один алерт.
+
+    Причину отдаём КОДОМ, а не готовой фразой: текст живёт в словаре интерфейса и
+    переводится вместе со всем остальным, а панель двуязычная.
+    """
 
     kind: str          # server | site
     id: int
     name: str
     group: str
-    reason: str        # почему молчит — человеку, а не в терминах scope_type
+    reason_code: str   # group_out | no_group | no_rules
+    fixable: bool      # хватит ли кнопки — есть ли куда дописать объект
 
 
 class AlertCoverageOut(BaseModel):
+    items: list[MuteWarning] = []
+
+
+class CoverageRef(BaseModel):
+    """Ссылка на немой объект: тем же видом, каким его отдал /coverage."""
+
+    kind: str
+    id: int
+
+
+class CoverageFixIn(BaseModel):
+    items: list[CoverageRef] = []
+
+
+class CoverageFixOut(BaseModel):
+    """Что получилось: сколько правил тронуто и кто остался немым."""
+
+    rules: int = 0
     items: list[MuteWarning] = []
 
 

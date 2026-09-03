@@ -1143,6 +1143,17 @@ const EN: Record<string, string> = {
   'Алерты не придут': 'No alerts will arrive',
   'По этим объектам не сработает ни один алерт: они не попадают ни в одну область действия правил. Метрики собираются и графики рисуются — но когда что-то сломается, не придёт ничего.':
     'No alert will fire for these: they fall outside the scope of every rule. Metrics are still collected and charts still drawn — but when something breaks, nothing will arrive.',
+  'Кнопка дописывает объект в область всех включённых правил: уведомления по нему пойдут туда же, куда по остальным.':
+    'The button adds the object to the scope of every enabled rule: its notifications will go wherever the others go.',
+  'не включён ни один тип алертов': 'no alert type is enabled',
+  'объект без группы, а области алертов заданы по группам':
+    'the object has no group, while alert scopes are defined by group',
+  'группа «{g}» не входит ни в одну область алертов':
+    'group “{g}” is not in the scope of any alert',
+  'включить алерты': 'enable alerts',
+  'включить алерты для всех {n}': 'enable alerts for all {n}',
+  'включите типы алертов: ⚙ → Алерты': 'enable alert types: ⚙ → Alerts',
+  'задайте группу, которая уже в области': 'assign a group that is already in scope',
   'Данных пока нет.': 'No data yet.',
   'Ресурсы Flux не в Ready — доставка встала': 'Flux resources are not Ready — delivery has stopped',
   'Сертификаты или токены истекают в ближайшие две недели':
@@ -1216,6 +1227,7 @@ const EN: Record<string, string> = {
 
   // --- детали монитора / графики ---
   'Открыть детали': 'Open details',
+  'Открыть': 'Open',
   'Аптайм 24ч': 'Uptime 24h',
   'Аптайм 7д': 'Uptime 7d',
   'Аптайм 30д': 'Uptime 30d',

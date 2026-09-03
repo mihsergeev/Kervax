@@ -4766,3 +4766,15 @@ body:has(.modal-backdrop) {
    чтобы не путать с «Требует действий». */
 .home-attention-mute .home-attention-ic { filter: none; }
 .home-attention-note { margin: 0.3rem 0 0.5rem; }
+/* В «Алерты не придут» кликается не строка, а кнопки на ней: сама строка — div,
+   и рука-курсор с подсветкой обещали бы переход, которого нет. */
+.home-attention-mute .home-attention-row {
+  cursor: default;
+  gap: 0.4rem;
+}
+.home-attention-mute .home-attention-row:hover {
+  background: transparent;
+}
+.home-attention-todo {
+  flex-shrink: 0;
+}

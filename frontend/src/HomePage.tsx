@@ -4,6 +4,7 @@ import {
   checksOverview,
   getAgentRelease,
   alertCoverage,
+  fixAlertCoverage,
   applyLocalProbe,
   listServers,
   localProbeSuggestions,
@@ -105,6 +106,102 @@ function LocalProbeHint({
           )}
         </div>
       )}
+    </div>
+  )
+}
+
+// Почему объект молчит — словами. Бэкенд отдаёт код, а не готовую фразу: текст живёт
+// в словаре интерфейса и переводится вместе со всем остальным.
+function muteReason(m: MuteWarning, t: T): string {
+  if (m.reason_code === 'no_rules') return t('не включён ни один тип алертов')
+  if (m.reason_code === 'no_group')
+    return t('объект без группы, а области алертов заданы по группам')
+  return t('группа «{g}» не входит ни в одну область алертов', { g: m.group })
+}
+
+// Немые объекты. Раньше строка просто вела в карточку объекта — а лечится это в
+// другом месте (настройки → тип алерта → область действия) и в каждом типе отдельно.
+// Поэтому чинить предлагаем прямо здесь: кнопка дописывает объект в область всех
+// включённых правил.
+function MuteHint({
+  items,
+  onOpen,
+  onDone,
+}: {
+  items: MuteWarning[]
+  onOpen: (s: Section, id?: number) => void
+  onDone: () => void
+}) {
+  const { t } = useI18n()
+  const [busy, setBusy] = useState(false)
+  const [err, setErr] = useState('')
+  const fixable = items.filter((x) => x.fixable)
+  const fix = async (list: MuteWarning[]) => {
+    setBusy(true)
+    setErr('')
+    try {
+      await fixAlertCoverage(list.map((x) => ({ kind: x.kind, id: x.id })))
+      onDone()
+    } catch (e) {
+      setErr(String((e as Error).message || e))
+    } finally {
+      setBusy(false)
+    }
+  }
+  return (
+    <div className="home-attention home-attention-mute">
+      <div className="home-attention-head">
+        <span className="home-attention-ic">🔕</span>
+        {t('Алерты не придут')}
+        <span className="home-attention-n">{items.length}</span>
+      </div>
+      <div className="muted small home-attention-note">
+        {t('По этим объектам не сработает ни один алерт: они не попадают ни в одну область действия правил. Метрики собираются и графики рисуются — но когда что-то сломается, не придёт ничего.')}
+        {fixable.length > 0 &&
+          ' ' +
+            t('Кнопка дописывает объект в область всех включённых правил: уведомления по нему пойдут туда же, куда по остальным.')}
+      </div>
+      <div className="home-attention-list">
+        {items.slice(0, ATTENTION_LIMIT).map((m) => (
+          <div key={`${m.kind}-${m.id}`} className="home-attention-row">
+            <span className="dot degraded" />
+            <span className="home-attention-ico">{m.kind === 'server' ? '🖥' : '🌐'}</span>
+            <span className="home-attention-txt">
+              {m.name} — {muteReason(m, t)}
+            </span>
+            {m.fixable ? (
+              <button className="ghost small" disabled={busy} onClick={() => fix([m])}>
+                {t('включить алерты')}
+              </button>
+            ) : (
+              <span className="muted small home-attention-todo">
+                {m.reason_code === 'no_rules'
+                  ? t('включите типы алертов: ⚙ → Алерты')
+                  : t('задайте группу, которая уже в области')}
+              </span>
+            )}
+            <button
+              className="ghost small"
+              title={t('Открыть')}
+              disabled={busy}
+              onClick={() => onOpen(m.kind === 'server' ? 'servers' : 'sites', m.id)}
+            >
+              →
+            </button>
+          </div>
+        ))}
+        {items.length > ATTENTION_LIMIT && (
+          <div className="muted small home-attention-more">
+            {t('…и ещё {n}', { n: items.length - ATTENTION_LIMIT })}
+          </div>
+        )}
+      </div>
+      {fixable.length > 1 && (
+        <button className="ghost" disabled={busy} onClick={() => fix(fixable)}>
+          {t('включить алерты для всех {n}', { n: fixable.length })}
+        </button>
+      )}
+      {err && <div className="muted small">{err}</div>}
     </div>
   )
 }
@@ -436,39 +533,7 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
   return (
     <div>
       <p className="tagline">{t('Мониторинг инфраструктуры')}</p>
-      {mutes.length > 0 && (
-        <div className="home-attention home-attention-mute">
-          <div className="home-attention-head">
-            <span className="home-attention-ic">🔕</span>
-            {t('Алерты не придут')}
-            <span className="home-attention-n">{mutes.length}</span>
-          </div>
-          <div className="muted small home-attention-note">
-            {t('По этим объектам не сработает ни один алерт: они не попадают ни в одну область действия правил. Метрики собираются и графики рисуются — но когда что-то сломается, не придёт ничего.')}
-          </div>
-          <div className="home-attention-list">
-            {mutes.slice(0, ATTENTION_LIMIT).map((m) => (
-              <button
-                key={`${m.kind}-${m.id}`}
-                className="home-attention-row"
-                onClick={() => onOpen(m.kind === 'server' ? 'servers' : 'sites', m.id)}
-              >
-                <span className="dot degraded" />
-                <span className="home-attention-ico">{m.kind === 'server' ? '🖥' : '🌐'}</span>
-                <span className="home-attention-txt">
-                  {m.name} — {m.reason}
-                </span>
-                <span className="home-open">→</span>
-              </button>
-            ))}
-            {mutes.length > ATTENTION_LIMIT && (
-              <div className="muted small home-attention-more">
-                {t('…и ещё {n}', { n: mutes.length - ATTENTION_LIMIT })}
-              </div>
-            )}
-          </div>
-        </div>
-      )}
+      {mutes.length > 0 && <MuteHint items={mutes} onOpen={onOpen} onDone={load} />}
       {probeHints.length > 0 && (
         <div className="home-attention home-attention-probe">
           <div className="home-attention-head">
