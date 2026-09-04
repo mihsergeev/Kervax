@@ -21,10 +21,18 @@
 # WHAT LEAVES THE NODE: a kind, a location (file path or namespace/name), a date, and for Flux
 # resources their Ready state. No key material, no token values, not even their length.
 #
+# TWO PASSES, ONE FILE. Dates move over months, so collecting them hourly is plenty - and the
+# forge is asked about token expiry only that often. Ready state moves in seconds: a broken
+# delivery must be noticed quickly, and a delivery that has just been REPAIRED must stop being
+# reported as broken just as quickly. Hourly it looked like the panel was lying - the cluster
+# was already green while the alert stood for another forty minutes. So Ready state gets its own
+# lightweight pass (--flux-only) every 5 minutes: it reads nothing but the Flux objects
+# themselves, touches no secrets, calls no forge, and refreshes that one field.
+#
 # Result: /var/lib/kervax/kube-expiry.json, world-readable; the agent only reads it.
 set -euo pipefail
 
-KERVAX_SETUP_VERSION=0.1  # MAJOR.MINOR; compared component-wise
+KERVAX_SETUP_VERSION=0.2  # MAJOR.MINOR; compared component-wise
 # Which nodes need this helper at all. Read by the ansible playbook on the
 # CONTROL machine and evaluated as a shell condition ON THE NODE, so a new
 # helper lands where it belongs without anyone editing the playbook.
@@ -54,6 +62,17 @@ OUT=/var/lib/kervax/kube-expiry.json
 TMP="$OUT.tmp.$$"
 TO=15   # per-command timeout: a hung API server must not hang the collection
 
+# --flux-only: refresh just the Ready state of Flux objects, keep the dates already collected.
+FLUX_ONLY=0
+[ "${1:-}" = "--flux-only" ] && FLUX_ONLY=1
+
+# Both passes write the same file and the slow one runs for a while: without a lock the hourly
+# pass could land on top of a fresher Ready state with its own, older copy.
+if command -v flock >/dev/null 2>&1; then
+  exec 9>/var/lock/kervax-kube-expiry.lock
+  flock -w 60 9 || exit 0
+fi
+
 have() { command -v "$1" >/dev/null 2>&1; }
 esc() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g' | tr -d '\000-\037'; }
 
@@ -72,6 +91,7 @@ cert_ts() { # PEM on stdin -> unix timestamp of notAfter
 }
 
 # ── 1. cluster PKI: the files the control plane itself runs on ────────────────
+if [ "$FLUX_ONLY" = 0 ]; then
 for dir in /var/lib/k0s/pki /var/lib/k0s/pki/etcd /etc/kubernetes/pki /etc/kubernetes/pki/etcd \
            /var/lib/rancher/k3s/server/tls; do
   [ -d "$dir" ] || continue
@@ -102,6 +122,7 @@ for kp in /var/lib/kubelet/pki/kubelet-client-current.pem /var/lib/k0s/kubelet/p
   [ -f "$kp" ] || continue
   add kubelet-cert "$kp" "$(cert_ts < "$kp")" ""   # the kind already says what it is
 done
+fi   # /FLUX_ONLY = 0: dates read from files on disk
 
 # ── 3. inside the cluster: Flux credentials, Flux state, TLS secrets ─────────
 # The node's own admin kubectl: k0s/k3s ship one, kubeadm leaves admin.conf behind.
@@ -119,11 +140,17 @@ ROWS=/tmp/kv-kube-rows.$$
 if [ -n "$KC" ] && have python3; then
   # Sources carry the URL and the name of the secret with the credentials; the secrets hold the
   # token itself; the resources hold the Ready state. Three cheap reads, one pass.
-  SRC=$(timeout $TO $KC get gitrepositories,ocirepositories,helmrepositories,imagerepositories \
-        -A -o json 2>/dev/null || echo '{}')
+  # The quick pass takes only the last of the three: reading every secret in the cluster and
+  # asking the forge about token expiry has no business running every five minutes.
+  SRC='{}'
+  SEC='{}'
   RES=$(timeout $TO $KC get gitrepositories,ocirepositories,helmrepositories,kustomizations,helmreleases,imagerepositories,imageupdateautomations \
         -A -o json 2>/dev/null || echo '{}')
-  SEC=$(timeout $TO $KC get secrets -A -o json 2>/dev/null || echo '{}')
+  if [ "$FLUX_ONLY" = 0 ]; then
+    SRC=$(timeout $TO $KC get gitrepositories,ocirepositories,helmrepositories,imagerepositories \
+          -A -o json 2>/dev/null || echo '{}')
+    SEC=$(timeout $TO $KC get secrets -A -o json 2>/dev/null || echo '{}')
+  fi
 
   FLUX_STATE=$(printf '%s' "$RES" | timeout $TO python3 -c '
 import json, sys
@@ -149,6 +176,7 @@ print(json.dumps(out, ensure_ascii=False))
 ' 2>/dev/null || echo '[]')
   [ -n "$FLUX_STATE" ] || FLUX_STATE="[]"
 
+  if [ "$FLUX_ONLY" = 0 ]; then
   printf '%s\n---\n%s\n' "$SRC" "$SEC" | timeout $TO python3 -c '
 import base64, json, subprocess, sys
 from urllib.parse import urlsplit
@@ -277,6 +305,7 @@ for s in data.get("items", []):
         rows.append(("secret-cert", f"{ns}/{nm}", ts, "tls.crt"))
 print("\n".join(f"{k}\t{w}\t{t}\t{n}" for k, w, t, n in rows))
 ' >> "$ROWS" 2>/dev/null || true
+  fi   # /FLUX_ONLY = 0: secrets and the forge
 fi
 
 if [ -s "$ROWS" ]; then
@@ -286,7 +315,28 @@ if [ -s "$ROWS" ]; then
 fi
 rm -f "$ROWS"
 
-printf '{"ts":%s,"items":[%s],"flux":%s}\n' "$(date +%s)" "$ITEMS" "$FLUX_STATE" > "$TMP"
+if [ "$FLUX_ONLY" = 1 ]; then
+  # Keep the dates from the last full pass, replace only the Ready state. If the API server was
+  # unreachable there is no state to write: changing nothing beats erasing a real report of a
+  # broken delivery because of one failed read.
+  [ -n "$KC" ] || exit 0
+  FLUX_STATE="$FLUX_STATE" python3 - "$OUT" "$TMP" <<'MERGE_EOF' || exit 0
+import json, os, sys, time
+out, tmp = sys.argv[1], sys.argv[2]
+try:
+    doc = json.load(open(out))
+except Exception:
+    doc = {}
+doc.setdefault("ts", int(time.time()))
+doc.setdefault("items", [])
+doc["flux"] = json.loads(os.environ.get("FLUX_STATE") or "[]")
+doc["flux_ts"] = int(time.time())
+json.dump(doc, open(tmp, "w"), ensure_ascii=False)
+MERGE_EOF
+else
+  printf '{"ts":%s,"items":[%s],"flux":%s,"flux_ts":%s}\n' \
+    "$(date +%s)" "$ITEMS" "$FLUX_STATE" "$(date +%s)" > "$TMP"
+fi
 mv -f "$TMP" "$OUT"
 chmod 0644 "$OUT"
 HELPER_EOF
@@ -312,10 +362,32 @@ Persistent=true
 WantedBy=timers.target
 EOF
 
+cat > /etc/systemd/system/kervax-kube-flux.service <<EOF
+[Unit]
+Description=Kervax: refresh Flux Ready state (quick pass)
+[Service]
+Type=oneshot
+ExecStart=$HELPER --flux-only
+EOF
+cat > /etc/systemd/system/kervax-kube-flux.timer <<'EOF'
+[Unit]
+Description=Kervax: refresh Flux Ready state every few minutes
+[Timer]
+OnBootSec=6min
+# Ready state is the half that moves fast: a stopped delivery should be seen within minutes,
+# and a repaired one should stop being reported just as fast. This pass touches no secrets and
+# makes no outside calls, so it is cheap enough to run often.
+OnUnitActiveSec=5min
+Persistent=true
+[Install]
+WantedBy=timers.target
+EOF
+
 systemctl daemon-reload
 systemctl enable --now kervax-kube-expiry.timer >/dev/null 2>&1 || true
+systemctl enable --now kervax-kube-flux.timer >/dev/null 2>&1 || true
 "$HELPER" || true   # run once immediately so the data appears without waiting for the timer
 
 echo "$KERVAX_SETUP_VERSION" > "$STATE_DIR/versions/kubeexpiry-setup.ver"
 chmod 0644 "$STATE_DIR/versions/kubeexpiry-setup.ver"
-echo "✓ kubeexpiry-setup: expiry dates -> $OUT (refreshed at boot and hourly)."
+echo "✓ kubeexpiry-setup: $OUT (dates hourly, Flux state every 5 min)."
