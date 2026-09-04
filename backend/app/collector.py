@@ -17,6 +17,7 @@ from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app import alerts, backup, checks as checks_exec, heartbeat, settings_store
+from app.setup_scripts import current_setup_versions, gaps
 from app.config import Settings
 from app.models import (
     AgentProbe,
@@ -2169,6 +2170,75 @@ async def _maybe_auto_backup(
         log.info("автобэкап записан: %s", name)
 
 
+# Сводка о непокрытом — раз в сутки. Не чаще: это не поломка, а работа, которую
+# делают за один прогон плейбука; и не реже — иначе новая СУБД неделями стоит без
+# инвентаря, а появление кластера замечают, когда с него уже что-то падает.
+_UNCOVERED_PERIOD = 24 * 3600
+
+
+async def _daily_uncovered(session_factory, settings: Settings) -> None:
+    """Одно сообщение в сутки: где появилось новое, а покрытия под это нет.
+
+    Панель узнаёт об этом сама (агент пересобирает состав ноды каждый отчёт), но
+    до сих пор говорила об этом только пунктом в «Требует действий». Пока туда не
+    заглядывают, свежий Postgres стоит без инвентаря баз, а докер без доступа —
+    без контейнеров: мониторинг вроде есть, а половины его нет.
+
+    Шлём то, что чинится ОДНИМ действием (прогон плейбука или kube-setup), и в
+    конце даём готовую команду. Устаревшие версии helper'ов сюда не попадают:
+    там всё работает, просто не последней версии.
+    """
+    now = datetime.now(timezone.utc)
+    async with session_factory() as session:
+        cfg = await settings_store.get_alert_config(session, settings)
+        muted = await settings_store.get_muted(session)
+        rule = (await settings_store.get_server_alert_rules(session)).get("uncovered") or {}
+        if muted or not rule.get("enabled") or not alerts.alerts_enabled(cfg):
+            return
+        last = await settings_store.get_uncovered_sent(session)
+        if last and now.timestamp() - last < _UNCOVERED_PERIOD:
+            return
+        servers = list(await session.scalars(select(Server).where(Server.enabled.is_(True))))
+        threshold = int(cfg.get("flood_threshold", 6))
+
+    cur = current_setup_versions()
+    lines: list[str] = []
+    hosts: list[str] = []
+    for srv in sorted(servers, key=lambda x: x.name or ""):
+        # Оффлайновую ноду не зовём чинить: её отчёт устарел, и первым делом её
+        # надо поднять — об этом уже есть свой алерт.
+        if not seen_online(srv, now) or not _rule_scope_ok(rule, srv):
+            continue
+        if srv.snooze_until is not None and _aware(srv.snooze_until) > now:
+            continue
+        if "uncovered" in set(srv.alert_mutes or []):
+            continue
+        g = gaps(srv.last_report or {}, cur)
+        if not g:
+            continue
+        lines.append("• {}: {}".format(
+            html.escape(srv.name or "", quote=False),
+            "; ".join(html.escape(txt, quote=False) for _, txt in g),
+        ))
+        hosts.append(srv.name or "")
+
+    if not lines:
+        return
+    cmd = "ansible-playbook playbooks/kervax_helpers.yml -l '{}'".format(",".join(hosts))
+    default = settings_store.SERVER_ALERT_KINDS["uncovered"][1]
+    tpl = rule.get("text") or default
+    try:
+        body = tpl.format(list="\n".join(lines), cmd=html.escape(cmd, quote=False), n=len(hosts))
+    except (KeyError, IndexError, ValueError):
+        body = default.format(list="\n".join(lines), cmd=html.escape(cmd, quote=False), n=len(hosts))
+    text = alerts.Msg(f"🧩 {body}", "servers", "")
+    if await alerts.dispatch(cfg, True, [text], threshold, parse_mode="HTML",
+                             session_factory=session_factory):
+        async with session_factory() as session:
+            await settings_store.set_uncovered_sent(session, now.timestamp())
+            await session.commit()
+
+
 async def collector_loop(
     session_factory: async_sessionmaker[AsyncSession], settings: Settings
 ) -> None:
@@ -2218,6 +2288,7 @@ async def collector_loop(
             ).total_seconds() >= settings.prune_interval_seconds:
                 await stage("прунинг", _prune(session_factory, settings))
                 last_prune = now
+            await stage("сводка непокрытого", _daily_uncovered(session_factory, settings))
             await stage("автобэкап", _maybe_auto_backup(session_factory, settings))
             await asyncio.sleep(settings.scheduler_tick)
     finally:

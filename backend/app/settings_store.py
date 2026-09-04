@@ -10,6 +10,7 @@ from app.models import AppSetting
 
 ALERTS_KEY = "alerts"
 MUTED_KEY = "alerts_muted"
+UNCOVERED_KEY = "uncovered_digest_sent"
 VAULT_META_KEY = "backup_vault_meta"  # соль/итерации/verifier сейфа (СЕКРЕТОВ НЕТ)
 RETENTION_KEY = "retention"
 BACKUP_KEY = "backup"
@@ -60,7 +61,11 @@ SERVER_ALERT_KINDS: dict[str, tuple[str, str]] = {
     # смотреть». Раньше это был сырой вывод Flux одной простынёй, и прочитать его можно
     # было, только зная Flux наизусть.
     "flux_down": ("Flux: доставка встала",
-                  "доставка встала: {reason}\n↳ {what} {where}{more}\n↳ {message}{hint}"),
+                  "доставка встала: {reason}\n↳ {what} {where}{more}\n↳ {message}{hint}"),    # Сводка, а не событие: одно сообщение раз в сутки про ноды, где появилось
+    # новое (СУБД, кластер, веб-сервер, докер), а покрытия под это ещё нет. Тут
+    # нечего «восстанавливать» — пункт закрывается прогоном плейбука.
+    "uncovered": ("Появилось новое без покрытия",
+                  "новое без покрытия мониторингом:\n{list}\n↳ поставить: {cmd}"),
 }
 
 # Прежние («Kervax: сервер …») дефолты серверных правил. Если в БД сохранён один
@@ -178,6 +183,23 @@ async def get_muted(session: AsyncSession) -> bool:
 
 async def set_muted(session: AsyncSession, muted: bool) -> None:
     await _set_raw(session, MUTED_KEY, "1" if muted else "0")
+
+
+async def get_uncovered_sent(session: AsyncSession) -> float:
+    """Когда в последний раз уходила сводка о непокрытом (unix, 0 = никогда).
+
+    Метка в БД, а не в памяти планировщика: рестарт контейнера не должен
+    оборачиваться повторной сводкой, а два одинаковых сообщения подряд быстрее
+    всего учат не читать сводку вовсе."""
+    raw = await _get_raw(session, UNCOVERED_KEY)
+    try:
+        return float(raw or 0)
+    except ValueError:
+        return 0.0
+
+
+async def set_uncovered_sent(session: AsyncSession, ts: float) -> None:
+    await _set_raw(session, UNCOVERED_KEY, str(int(ts)))
 
 
 async def get_retention(session: AsyncSession, settings: Settings) -> dict:

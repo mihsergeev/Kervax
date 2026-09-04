@@ -14,6 +14,11 @@ from fastapi.responses import FileResponse, PlainTextResponse
 from sqlalchemy import delete as sa_delete, select
 
 from app import audit, geoip
+from app.setup_scripts import (
+    current_setup_versions as _current_setup_versions,
+    setup_needed as _setup_needed,
+    setup_scripts as _setup_scripts,
+)
 from app.config import get_settings
 from app.deps import AdminUser, CurrentUser, SessionDep, group_allowed, scope_query
 from app.models import (
@@ -320,24 +325,6 @@ async def create_server(
 # --- управляемое обновление агентов (admin, аудит; регистрируем ДО /{server_id}) ---
 
 
-def _setup_scripts() -> tuple[str, ...]:
-    """Какие helper'ы панель раздаёт — читаем каталог, а НЕ держим список в коде.
-
-    Захардкоженный кортеж означал, что новый helper, забытый в нём, панель молча
-    перестаёт отслеживать: раздаётся, ставится установщиком, а «устарел» по нему не
-    показывается никогда. Молчание тут хуже ложного срабатывания — источником правды
-    остаются сами файлы (как и у install.sh, который давно читает этот же каталог)."""
-    try:
-        return tuple(sorted(
-            f[:-3] for f in os.listdir(get_settings().agent_dist_dir)
-            # установщик и его русская копия — не helper'ы: попади они в каталог,
-            # агент попытался бы выполнить их как setup-скрипт
-            if f.endswith(".sh") and f not in ("install.sh", "install-ru.sh")
-        ))
-    except OSError:
-        return ()
-
-
 _SETUP_LABEL = {
     "backup-setup": "Бэкап (клиент)",
     "backupserver-setup": "Бэкап-сервер",
@@ -348,34 +335,6 @@ _SETUP_LABEL = {
     "dbstat-setup": "Инвентарь СУБД",
     "agent-watchdog": "Вотчдог агента",
 }
-
-
-def _setup_needed(name: str, rep: dict) -> bool:
-    """Нужен ли helper этой ноде.
-
-    Незнакомое имя (helper добавили, а условие сюда не дописали) считаем нужным
-    всюду: лучше лишний пункт в «Требует действий», который сразу видно и легко
-    уточнить, чем невыкаченный helper, о котором панель молчит месяцами."""
-    if name == "backupserver-setup":
-        bsrv = rep.get("backup_server") or {}
-        return bool(bsrv.get("present") and bsrv.get("repos"))
-    if name == "kube-setup":
-        return bool((rep.get("kube") or {}).get("access"))
-    # kubeexpiry-setup — везде, где кластер ЕСТЬ, а не только где панель в него пущена:
-    # хелпер читает PKI и ходит в кластер локальным admin-kubectl ноды, панельный
-    # ServiceAccount ему не нужен (и секретов ему не дают принципиально)
-    if name == "kubeexpiry-setup":
-        return bool((rep.get("kube") or {}).get("present"))
-    # webserver-setup — только где реально есть веб-сервер (иначе доменов всё равно нет)
-    if name == "webserver-setup":
-        return bool(rep.get("web_services"))
-    # dbstat-setup — только там, где СУБД реально есть (скан процессов агента);
-    # на ноде без баз инвентарь пустой, флагать нечего
-    if name == "dbstat-setup":
-        return bool(rep.get("db_engines") or rep.get("db_stats"))
-    # backup-setup — транспорт панели для дампов, нужен и без файлового бэкапа;
-    # timesync-setup и agent-watchdog ansible ставит всюду; остальное — см. докстроку
-    return True
 
 
 def _helper_advice(server: Server, cur: dict[str, str]) -> list[HelperAdvice]:
@@ -761,22 +720,6 @@ def _ver_key(v: object) -> tuple[int, ...]:
     # любой «мажор.минор», поэтому уводим их в отрицательный разряд. Без этого 20260721
     # оказалась бы новее 0.12, и нода со старым helper'ом молча осталась бы непомеченной.
     return (-1, t[0]) if len(t) == 1 else t
-
-
-def _current_setup_versions() -> dict[str, str]:
-    """Текущие версии setup-скриптов — читаем маркер KERVAX_SETUP_VERSION из раздаваемых
-    файлов. Единственный источник правды: бампнул версию в скрипте → панель это увидела."""
-    out: dict[str, str] = {}
-    d = get_settings().agent_dist_dir
-    for name in _setup_scripts():
-        try:
-            with open(os.path.join(d, f"{name}.sh"), encoding="utf-8") as f:
-                m = re.search(r"^KERVAX_SETUP_VERSION=([0-9.]+)", f.read(), re.MULTILINE)
-                if m:
-                    out[name] = m.group(1)
-        except OSError:
-            pass
-    return out
 
 
 @router.get("/agent-release", response_model=AgentReleaseOut)
