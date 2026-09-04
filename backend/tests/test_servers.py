@@ -1467,3 +1467,79 @@ async def test_expiry_alert_explains_what_to_do():
     ]}
     ctx = collector._server_conditions(s, now)["kube_expiry"][1]
     assert "перестанет забирать изменения" in ctx["advice"]
+
+async def test_daily_uncovered_digest(tmp_path, monkeypatch):
+    """На ноде появилось новое (СУБД, докер), покрытия под это нет — сводка раз в сутки.
+
+    Панель узнаёт о таком сама, но раньше говорила только пунктом в «Требует
+    действий»: пока туда не заглядывают, свежая база стоит без инвентаря.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    from app import collector
+    from app.config import Settings
+    from app.db import Base, create_engine_and_factory
+    from app.models import Server
+
+    db = (tmp_path / "unc.db").as_posix()
+    engine, factory = create_engine_and_factory(f"sqlite+aiosqlite:///{db}")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    now = datetime.now(timezone.utc)
+    rep = {
+        "agent_version": "2.6",
+        "db_engines": ["postgres"],
+        "docker": {"present": True, "access": False},
+        "setup_versions": {"timesync-setup": "0.2"},
+    }
+    async with factory() as s:
+        s.add(Server(name="новая-нода", token_hash="a", enabled=True,
+                     last_seen=now, offline_after_seconds=120, last_report=rep))
+        # оффлайновую чинить не зовут: сначала её надо поднять, и об этом свой алерт
+        s.add(Server(name="мёртвая-нода", token_hash="b", enabled=True,
+                     last_seen=now - timedelta(hours=5), offline_after_seconds=120,
+                     last_report=rep))
+        await s.commit()
+
+    sent: list[str] = []
+
+    async def fake_send(cfg, text, parse_mode=None):
+        sent.append(text)
+        return []
+
+    monkeypatch.setattr("app.alerts.send_alert", fake_send)
+    monkeypatch.setattr("app.collector.current_setup_versions",
+                        lambda: {"dbstat-setup": "0.3", "timesync-setup": "0.2"})
+    settings = Settings(alert_webhook="http://hook")
+
+    await collector._daily_uncovered(factory, settings)
+    assert len(sent) == 1, sent
+    msg = sent[0]
+    assert "новая-нода" in msg
+    assert "инвентарь СУБД" in msg, "не сказано, чего не хватает"
+    assert "Docker без доступа" in msg
+    assert "kervax_helpers.yml" in msg, "нет готовой команды — сводка не действие, а новость"
+    assert "мёртвая-нода" not in msg, "оффлайновую ноду звать чинить рано"
+    assert "timesync-setup" not in msg, "установленный helper попал в сводку"
+
+    # второй раз в те же сутки — молчим
+    sent.clear()
+    await collector._daily_uncovered(factory, settings)
+    assert sent == []
+
+    # дыру закрыли → сутки спустя сводки нет
+    async with factory() as s:
+        from sqlalchemy import select
+
+        for row in await s.scalars(select(Server)):
+            row.last_report = {**rep, "docker": {"present": True, "access": True},
+                               "setup_versions": {"timesync-setup": "0.2",
+                                                  "dbstat-setup": "0.3"}}
+        await s.commit()
+    from app import settings_store
+
+    async with factory() as s:
+        await settings_store.set_uncovered_sent(s, 0)
+        await s.commit()
+    await collector._daily_uncovered(factory, settings)
+    assert sent == []
