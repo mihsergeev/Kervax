@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "kervax-backend"
-version = "1.4.5"
+version = "1.4.6"
 description = "Kervax — self-hosted website & server monitoring panel (backend)"
 requires-python = ">=3.12"
 dependencies = [
