@@ -75,6 +75,11 @@ export function CheckDetail({ check, groups, onClose, onSaved, onRun, onDelete, 
   const [locs, setLocs] = useState<LocationResult[]>([])
   const [logRows, setLogRows] = useState<CheckSample[]>([])
   const [logFailed, setLogFailed] = useState(true) // по умолчанию только сбои
+  // Старое разворачивают руками. Открытая карточка показывает выбранное окно —
+  // иначе первым же экраном встречает сбой недельной давности, и кажется, что
+  // с сайтом что-то не так прямо сейчас.
+  const [oldInc, setOldInc] = useState(false)
+  const [oldLog, setOldLog] = useState(false)
   // локация, чью тайм-серию показываем на графике (null = основная/прямая)
   const [selectedLoc, setSelectedLoc] = useState<number | null>(null)
   const [selectedIp, setSelectedIp] = useState<string | null>(null) // график по IP
@@ -143,6 +148,25 @@ export function CheckDetail({ check, groups, onClose, onSaved, onRun, onDelete, 
     const id = window.setInterval(run, 12000)
     return () => window.clearInterval(id)
   }, [check.id, check.check_locations, editing, logFailed, fail])
+
+  useEffect(() => {
+    setOldInc(false)
+    setOldLog(false)
+  }, [hours, check.id])
+
+  // Граница «свежего»: то же окно, что у графика и полосы статусов. Один
+  // переключатель на всю карточку — переключил на 7д, увидел и историю сбоев.
+  const cutoff = Date.now() - hours * 3600_000
+  const winLabel = t(WINDOWS.find((w) => w.hours === hours)?.label ?? '24ч')
+  // Незакрытый инцидент — всегда свежий, даже если начался месяц назад: он идёт СЕЙЧАС.
+  const incFresh = incidents.filter(
+    (i) => !i.ended_at || new Date(i.ended_at).getTime() >= cutoff,
+  )
+  const incHidden = incidents.length - incFresh.length
+  const incShown = oldInc ? incidents : incFresh
+  const logFresh = logRows.filter((r) => new Date(r.ts).getTime() >= cutoff)
+  const logHidden = logRows.length - logFresh.length
+  const logShown = oldLog ? logRows : logFresh
 
   // выбранная локация: если она прямая — бэкенд отдаст основную серию
   const selLoc = locs.find((l) => l.location_id === selectedLoc)
@@ -422,9 +446,14 @@ export function CheckDetail({ check, groups, onClose, onSaved, onRun, onDelete, 
           <div className="chart-cap">{t('Инциденты')}</div>
           {incidents.length === 0 ? (
             <div className="muted small">{t('Инцидентов не было.')}</div>
+          ) : incShown.length === 0 ? (
+            <div className="muted small">
+              {t('За {w} инцидентов не было.', { w: winLabel })}{' '}
+              {t('последний — {t}', { t: fmtDateTime(incidents[0].started_at) })}
+            </div>
           ) : (
             <div className="inc-list">
-              {incidents.map((inc) => (
+              {incShown.map((inc) => (
                 <div key={inc.id} className="inc-item">
                   <span className={`sdot sdot-${inc.status}`} />
                   <div className="inc-when">
@@ -445,6 +474,13 @@ export function CheckDetail({ check, groups, onClose, onSaved, onRun, onDelete, 
                 </div>
               ))}
             </div>
+          )}
+          {incHidden > 0 && (
+            <button className="ghost small stale-more" onClick={() => setOldInc(!oldInc)}>
+              {oldInc
+                ? t('скрыть прежние')
+                : t('показать прежние ({n})', { n: incHidden })}
+            </button>
           )}
         </div>
 
@@ -470,9 +506,17 @@ export function CheckDetail({ check, groups, onClose, onSaved, onRun, onDelete, 
             <div className="muted small">
               {logFailed ? t('Сбоев не было.') : t('Пока пусто.')}
             </div>
+          ) : logShown.length === 0 ? (
+            <div className="muted small">
+              {logFailed
+                ? t('За {w} сбоев не было.', { w: winLabel })
+                : t('За {w} проверок нет.', { w: winLabel })}{' '}
+              {logFailed &&
+                t('последний — {t}', { t: fmtDateTime(logRows[0].ts) })}
+            </div>
           ) : (
             <div className="log-list">
-              {logRows.map((s, i) => (
+              {logShown.map((s, i) => (
                 <div key={i} className="log-item">
                   <span className={`sdot sdot-${s.status}`} />
                   <span className="log-time muted small">{fmtDateTime(s.ts)}</span>
@@ -485,6 +529,13 @@ export function CheckDetail({ check, groups, onClose, onSaved, onRun, onDelete, 
                 </div>
               ))}
             </div>
+          )}
+          {logHidden > 0 && (
+            <button className="ghost small stale-more" onClick={() => setOldLog(!oldLog)}>
+              {oldLog
+                ? t('скрыть прежние')
+                : t('показать прежние ({n})', { n: logHidden })}
+            </button>
           )}
         </div>
           </>
