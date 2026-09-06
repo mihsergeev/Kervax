@@ -4787,6 +4787,12 @@ body:has(.modal-backdrop) {
 .home-attention-mute > button {
   margin-top: 0.4rem;
 }
+/* «показать прежние» под списком инцидентов и журнала: спокойная строка, а не
+   акцент — это выход в архив, а не действие, которого от инженера ждут. */
+.stale-more {
+  margin-top: 0.4rem;
+}
+
 .home-attention-todo {
   flex-shrink: 0;
 }
