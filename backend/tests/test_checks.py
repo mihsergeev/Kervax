@@ -741,6 +741,54 @@ async def test_local_probe_rebinding(tmp_path):
     await engine.dispose()
 
 
+async def test_local_probe_warmup_is_not_an_outage(tmp_path):
+    """Только что привязанный локальный монитор не считается упавшим.
+
+    Задание агент забирает своим следующим отчётом, а результат присылает ещё
+    одним — до двух минут. Раньше монитор успевал за это время покраснеть, открыть
+    инцидент и обнулить суточный аптайм, а потом позеленеть сам: человек видел
+    аварию, которой не было.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    from app import collector
+    from app.config import Settings
+    from app.db import create_engine_and_factory
+    from app.models import Base, Check, CheckSample, Server
+    from sqlalchemy import select
+
+    db = (tmp_path / "warm.db").as_posix()
+    engine, factory = create_engine_and_factory(f"sqlite+aiosqlite:///{db}")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    async with factory() as s:
+        s.add(Check(name="панель", type="http", target="https://panel.example.ru",
+                    enabled=True, probe_local=True, interval_seconds=60))
+        s.add(Server(name="node-a", token_hash="a", enabled=True,
+                     last_report={"web_services": [{"kind": "nginx",
+                                                    "sites": ["panel.example.ru"]}]}))
+        await s.commit()
+
+    settings = Settings()
+    await collector.rebind_local_probes(factory)          # привязка + отметка времени
+    assert await collector.run_due_checks(factory, settings) == 0, "молчание принято за сбой"
+    async with factory() as s:
+        assert (await s.scalars(select(CheckSample))).all() == [], "записан ложный сбой"
+
+    # прогрев вышел, результата от агента так и нет → это уже настоящая проблема
+    async with factory() as s:
+        chk = (await s.scalars(select(Check))).one()
+        chk.probe_bound_at = datetime.now(timezone.utc) - timedelta(minutes=30)
+        chk.created_at = chk.probe_bound_at
+        await s.commit()
+    assert await collector.run_due_checks(factory, settings) == 1
+    async with factory() as s:
+        rows = (await s.scalars(select(CheckSample))).all()
+        assert len(rows) == 1 and rows[0].status == "down"
+        assert "агент" in rows[0].message
+    await engine.dispose()
+
+
 async def test_bulk_enable_local_probe(client, auth_headers):
     """Локальную проверку можно включить сразу пачке мониторов.
 

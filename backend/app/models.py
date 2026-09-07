@@ -171,6 +171,12 @@ class Check(Base):
     # планировщик пересчитывает: сайт переезжает с ноды на ноду, галочка остаётся.
     probe_local: Mapped[bool] = mapped_column(Boolean, default=False)
     probe_server_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Когда привязка была вычислена в последний раз. Нужна ровно для одного: не
+    # объявлять сайт упавшим в те две минуты, пока агент физически не мог прислать
+    # первый результат — задание он забирает своим следующим отчётом.
+    probe_bound_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
     # доп. проверки для http-мониторов (по умолчанию включены) —
     # срок/валидность TLS-сертификата и срок регистрации домена (RDAP)
