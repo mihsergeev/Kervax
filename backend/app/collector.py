@@ -410,14 +410,33 @@ async def rebind_local_probes(session_factory) -> int:
                     if host and host not in serving:
                         serving[host] = srv.id
         changed = 0
+        now = datetime.now(timezone.utc)
         for c in checks:
             want = serving.get(_host_of_target(c.target))
-            if c.probe_server_id != want:
+            # Отметку ставим и при первом взгляде на монитор, и при смене ноды: в
+            # обоих случаях результата от агента ещё нет, и это не падение сайта.
+            if c.probe_server_id != want or c.probe_bound_at is None:
                 c.probe_server_id = want
+                c.probe_bound_at = now
                 changed += 1
         if changed:
             await session.commit()
         return changed
+
+
+# Сколько интервалов монитора ждать первый результат от агента, прежде чем считать
+# его отсутствие падением. Задание агент забирает своим отчётом, результат присылает
+# следующим — то есть до двух его циклов; берём три интервала и не меньше трёх минут.
+_PROBE_WARMUP_INTERVALS = 3
+
+
+def _probe_warming_up(c: Check, now: datetime) -> bool:
+    """Локальный монитор только что привязан к ноде — данных ещё быть не может."""
+    since = c.probe_bound_at or c.created_at
+    if since is None:
+        return False
+    limit = max(c.interval_seconds * _PROBE_WARMUP_INTERVALS, 180)
+    return (now - _aware(since)).total_seconds() < limit
 
 
 async def run_due_checks(
@@ -452,6 +471,14 @@ async def run_due_checks(
                     select(AgentProbe).where(AgentProbe.check_id.in_([c.id for c in local]))
                 )
             }
+        # Молчание агента в первые минуты после привязки — это не «сайт лежит», а
+        # «результат ещё в пути». Раньше монитор успевал покраснеть, открыть инцидент
+        # и обнулить суточный аптайм, а через минуту зеленел сам: человек видел ровно
+        # ту картину, ради которой мониторинг и заводят, и она была ложной.
+        warming = {c.id for c in local if probes.get(c.id) is None and _probe_warming_up(c, now)}
+        if warming:
+            due = [c for c in due if c.id not in warming]
+            local = [c for c in local if c.id not in warming]
         for c in local:
             outcomes_map[c.id] = checks_exec.outcome_from_agent(
                 c, probes.get(c.id), now, c.degraded_ms
@@ -2263,6 +2290,10 @@ async def collector_loop(
 
     try:
         while True:
+            # Привязка локальных мониторов к нодам — ДО проверок, а не после: иначе
+            # свежая галочка «проверять локально» встречает первый же цикл без ноды,
+            # и монитор минуту горит «проверять некому» с открытым инцидентом.
+            await stage("привязка локальных проверок", rebind_local_probes(session_factory))
             try:
                 n = await run_due_checks(session_factory, settings)
                 if n:
@@ -2272,9 +2303,6 @@ async def collector_loop(
                     log.info("проверок через локации: %d", m)
             except Exception:  # noqa: BLE001 — цикл не должен падать
                 log.exception("ошибка планировщика мониторов")
-            # привязка локальных мониторов к нодам: дёшево и должно идти ДО проверок,
-            # иначе свежепоставленная галочка ждёт лишний цикл
-            await stage("привязка локальных проверок", rebind_local_probes(session_factory))
             await stage("алерты локаций", evaluate_location_alerts(
                 session_factory, settings, datetime.now(timezone.utc)))
             await stage("серверные алерты", evaluate_servers(
