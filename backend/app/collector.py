@@ -2201,6 +2201,42 @@ async def _maybe_auto_backup(
 # делают за один прогон плейбука; и не реже — иначе новая СУБД неделями стоит без
 # инвентаря, а появление кластера замечают, когда с него уже что-то падает.
 _UNCOVERED_PERIOD = 24 * 3600
+# Сколько дыра должна продержаться, чтобы попасть в сводку. Мгновенный срез врёт:
+# на перезапуске docker (обновление пакета, ребут демона) агент честно видит «докер
+# есть, доступа нет», и сводка звала чинить read-only proxy, который на самом деле
+# стоял и работал. Через минуту всё было на месте, а сообщение уже ушло — в панели
+# при этом ничего, потому что она показывает СЕЙЧАС.
+_UNCOVERED_SUSTAIN = 3600
+
+
+def _uncov_since(state: dict, keys: set[str], now: datetime) -> dict:
+    """Отметки «когда эту дыру увидели впервые»: старые сохраняем, ушедшие забываем."""
+    old = state.get("uncov") or {}
+    return {k: (old.get(k) or now.isoformat()) for k in keys}
+
+
+async def _track_uncovered(session_factory, now: datetime) -> None:
+    """Каждый тик: помнить, с какого момента у ноды не хватает покрытия.
+
+    Пишем в alert_state только когда набор дыр изменился — появилась новая или
+    закрылась старая. На спокойном парке это ноль записей в БД.
+    """
+    cur = current_setup_versions()
+    async with session_factory() as session:
+        changed = False
+        for srv in await session.scalars(select(Server).where(Server.enabled.is_(True))):
+            keys = {k for k, _ in gaps(srv.last_report or {}, cur)} if seen_online(srv, now) else set()
+            state = dict(srv.alert_state or {})
+            fresh = _uncov_since(state, keys, now)
+            if fresh != (state.get("uncov") or {}):
+                if fresh:
+                    state["uncov"] = fresh
+                else:
+                    state.pop("uncov", None)
+                srv.alert_state = state
+                changed = True
+        if changed:
+            await session.commit()
 
 
 async def _daily_uncovered(session_factory, settings: Settings) -> None:
@@ -2240,7 +2276,15 @@ async def _daily_uncovered(session_factory, settings: Settings) -> None:
             continue
         if "uncovered" in set(srv.alert_mutes or []):
             continue
-        g = gaps(srv.last_report or {}, cur)
+        # Только то, что держится: см. _UNCOVERED_SUSTAIN. Свежую дыру пропускаем —
+        # она попадёт в следующую сводку, если и правда никуда не денется.
+        since = (srv.alert_state or {}).get("uncov") or {}
+        g = [
+            (k, txt)
+            for k, txt in gaps(srv.last_report or {}, cur)
+            if k in since
+            and (now - (_parse_iso(since[k]) or now)).total_seconds() >= _UNCOVERED_SUSTAIN
+        ]
         if not g:
             continue
         lines.append("• {}: {}".format(
@@ -2316,6 +2360,8 @@ async def collector_loop(
             ).total_seconds() >= settings.prune_interval_seconds:
                 await stage("прунинг", _prune(session_factory, settings))
                 last_prune = now
+            await stage("учёт непокрытого", _track_uncovered(
+                session_factory, datetime.now(timezone.utc)))
             await stage("сводка непокрытого", _daily_uncovered(session_factory, settings))
             await stage("автобэкап", _maybe_auto_backup(session_factory, settings))
             await asyncio.sleep(settings.scheduler_tick)
