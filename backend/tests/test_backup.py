@@ -58,3 +58,41 @@ async def test_backup_config_roundtrip(client: httpx.AsyncClient, auth_headers):
     assert r.status_code == 200 and r.json() == {"interval_hours": 12, "keep": 30}
     r = await client.get("/api/backup/config", headers=auth_headers)
     assert r.json()["interval_hours"] == 12
+
+def test_rotation_overflow_needs_time_and_zero_removals():
+    """Мёртвую ротацию видно на вторые сутки: снапшотов больше политики, удалений нет.
+
+    Возраст старейшего снапшота при keep-monthly 6 терпит 231 день — за это время диск
+    активного бэкап-сервера кончится дважды. Но переполнение САМО ПО СЕБЕ законно:
+    forget группирует по host+tags, и репозиторий с двумя клиентами держит два
+    комплекта. Отличает мёртвую ротацию именно ноль удалений.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    from app import collector
+
+    now = datetime.now(timezone.utc)
+    bsrv = {"repos": [
+        # ротация встала: снапшотов втрое больше политики и ничего не уходит
+        {"name": "мертвый", "snapshots": 42, "keep_daily": 7, "keep_weekly": 4,
+         "keep_monthly": 6, "rotation_removed": 0},
+        # переполнен, но прогоны что-то удаляют — это просто несколько групп
+        {"name": "многогруппный", "snapshots": 34, "keep_daily": 7, "keep_weekly": 4,
+         "keep_monthly": 6, "rotation_removed": 5},
+        # политики нет — судить не о чем
+        {"name": "без-политики", "snapshots": 99, "rotation_removed": 0},
+    ]}
+
+    out, seen = collector.rotation_overflow(bsrv, {}, now)
+    assert out == [], "сработал в первый же тик — единичный лок дал бы ложную тревогу"
+    assert set(seen) == {"мертвый"}, seen
+
+    old = {"мертвый": (now - timedelta(days=4)).isoformat()}
+    out, seen = collector.rotation_overflow(bsrv, old, now)
+    assert len(out) == 1 and out[0].startswith("мертвый")
+    assert "42" in out[0] and "17" in out[0], "в тексте нет ни числа снапшотов, ни политики"
+
+    # ротация ожила — отметка уходит, алерта нет
+    bsrv["repos"][0]["rotation_removed"] = 11
+    out, seen = collector.rotation_overflow(bsrv, old, now)
+    assert out == [] and seen == {}
