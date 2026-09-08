@@ -110,6 +110,33 @@ type MetricChart = {
 }
 const DISK_PALETTE = ['#5a8fc7', '#4fa79a', '#cf9b52', '#8a7fb8', '#c77b95', '#57a894']
 
+// Ось графика идёт по ТОЧКАМ, а не по времени, поэтому у молчащей ноды она
+// заканчивалась последним отчётом: часы на подписях замирали, линия доходила до
+// правого края, и график выглядел как у живого сервера. Дорисовываем в хвост пустые
+// метки времени — линия обрывается там, где нода замолчала, а дальше видно провал.
+//
+// Не до бесконечности: нода может молчать неделю, и тогда все данные сожмутся в
+// точку у левого края. Хвост не длиннее самих данных — этого хватает, чтобы провал
+// бросался в глаза, а прочитать графики всё ещё было можно.
+function padToNow(mc: MetricChart, now: number): MetricChart {
+  const n = mc.ts.length
+  if (n < 2) return mc
+  const step = (mc.ts[n - 1] - mc.ts[0]) / (n - 1)
+  const gap = now - mc.ts[n - 1]
+  // Меньше двух шагов — обычная задержка сбора, дыры тут нет.
+  if (step <= 0 || gap < step * 2) return mc
+  const add = Math.min(Math.round(gap / step), n, 500)
+  const tail = Array.from({ length: add }, (_, i) => mc.ts[n - 1] + step * (i + 1))
+  return {
+    ...mc,
+    ts: [...mc.ts, ...tail],
+    series: mc.series.map((x) => ({
+      ...x,
+      values: [...x.values, ...Array<number | null>(add).fill(null)],
+    })),
+  }
+}
+
 // Строит конфиг графика метрики из массива снимков — общий для детали и полноэкрана.
 function buildMetric(
   key: MetricKey,
@@ -2206,7 +2233,7 @@ function ServerChartModal({
   }, [server.id, hours, zoom])
 
   const M = metrics ?? []
-  const mc = buildMetric(metricKey, M, t)
+  const mc = padToNow(buildMetric(metricKey, M, t), Date.now())
   const spanH = zoom ? (zoom.to - zoom.from) / 3600 : hours
   const fmtT =
     spanH <= 24
@@ -2443,7 +2470,7 @@ function ServerDetail({
 
   // Секция графика: кликабельная карточка → полноэкранный график этой метрики.
   const chartCard = (key: MetricKey, extra?: React.ReactNode) => {
-    const mc = buildMetric(key, M, t)
+    const mc = padToNow(buildMetric(key, M, t), Date.now())
     return (
       // якорь на КАРТОЧКУ: ссылка из алерта должна вести к самой метрике, а не к
       // началу раздела. У диска, например, раздел открывается графиками ввода-вывода,
@@ -2544,6 +2571,21 @@ function ServerDetail({
             helpers={s.helper_advice || []}
             t={t}
           />
+        )}
+        {/* Карточка молчащей ноды показывала свежие на вид проценты и «обновлено N
+            назад» мелким шрифтом среди прочей меты — выглядело как рабочий сервер.
+            Говорим прямо, и сразу под именем: цифры ниже historical, а не текущие. */}
+        {!editing && s.last_report && !s.online && (
+          <div className="srv-offline-note">
+            <span className="srv-offline-ic">🔴</span>
+            <span>
+              <b>{t('Сервер недоступен')}</b>{' '}
+              {s.last_seen
+                ? t('— агент молчит {ago}. Всё, что ниже, — последние данные, снятые тогда же.',
+                    { ago: fmtRel(s.last_seen) })
+                : t('— агент ещё ни разу не выходил на связь.')}
+            </span>
+          </div>
         )}
         {s.last_report ? (
           <div className="srv-meta">
