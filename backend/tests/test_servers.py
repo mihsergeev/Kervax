@@ -1512,6 +1512,22 @@ async def test_daily_uncovered_digest(tmp_path, monkeypatch):
                         lambda: {"dbstat-setup": "0.3", "timesync-setup": "0.2"})
     settings = Settings(alert_webhook="http://hook")
 
+    # мгновенный срез в сводку не идёт: докер на перезапуске выглядит так же, как
+    # докер без доступа, и звать чинить прокси из-за минутного рестарта — вранье
+    await collector._track_uncovered(factory, now)
+    await collector._daily_uncovered(factory, settings)
+    assert sent == [], "свежая дыра ушла в сводку без выдержки"
+
+    # дыра держится дольше порога — теперь это правда
+    async with factory() as s:
+        from sqlalchemy import select as _sel
+
+        for row in await s.scalars(_sel(Server)):
+            st = dict(row.alert_state or {})
+            st["uncov"] = {k: (now - timedelta(hours=3)).isoformat()
+                           for k in (st.get("uncov") or {})}
+            row.alert_state = st
+        await s.commit()
     await collector._daily_uncovered(factory, settings)
     assert len(sent) == 1, sent
     msg = sent[0]
