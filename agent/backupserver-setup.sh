@@ -49,7 +49,7 @@ fi
 #           cleanup silently did nothing ("repo not accessible", success=0) for EVERY
 #           repository created by the panel. The env is exported now, and the installer
 #           repairs already created envs (migration below).
-KERVAX_SETUP_VERSION=0.20  # MAJOR.MINOR; compared component-wise (0.13 > 0.2!)
+KERVAX_SETUP_VERSION=0.21  # MAJOR.MINOR; compared component-wise (0.13 > 0.2!)
 # Which nodes need this helper at all. Read by the ansible playbook on the
 # CONTROL machine and evaluated as a shell condition ON THE NODE, so a new
 # helper lands where it belongs without anyone editing the playbook.
@@ -299,10 +299,14 @@ repo_size() { du -sb "$RESTIC_REPOSITORY" 2>/dev/null | awk '{print $1}'; }
     snap_before="$(count_snaps)"; [ -n "$snap_before" ] || snap_before=-1
     bytes_before="$(repo_size)"; [ -n "$bytes_before" ] || bytes_before=-1
     "$BIN" unlock >/dev/null 2>&1 || true
-    # SAFETY: keep-last<1 means DO NOT prune (otherwise forget wipes every snapshot). Defense in depth.
-    kl_val=1; for _i in "${!KEEP[@]}"; do [ "${KEEP[$_i]}" = "--keep-last" ] && kl_val="${KEEP[$((_i+1))]}"; done
-    if ! [ "${kl_val:-0}" -ge 1 ] 2>/dev/null; then
-      echo "SAFETY: keep-last<1 -> forget/prune SKIPPED (protection against wiping everything)"
+    # SAFETY: prune only when the policy keeps something. An EMPTY policy (every keep-* is 0)
+    # would let forget wipe every snapshot. keep-last on its own saying 0 is normal: the
+    # hand-written scripts this template replaced never passed --keep-last and rotated fine on
+    # keep-daily/weekly/monthly. Reading that absence as "do not prune" once stopped the
+    # rotation of an entire backup server for eight days.
+    keep_sum=0; for _v in "${KEEP[@]}"; do case "$_v" in [0-9]*) keep_sum=$((keep_sum+_v));; esac; done
+    if ! [ "${keep_sum:-0}" -ge 1 ] 2>/dev/null; then
+      echo "SAFETY: every keep-* is 0 -> forget/prune SKIPPED (protection against wiping everything)"
       success=1
     else
       # --group-by host,tags: by default restic groups by host+paths and applies the policy to
@@ -372,8 +376,9 @@ cmd_regen_prune() {
     [ -n "$name" ] || continue
     kl=$(keep_of keep-last "$f"); kd=$(keep_of keep-daily "$f")
     kw=$(keep_of keep-weekly "$f"); km=$(keep_of keep-monthly "$f")
-    # keep-last=0 in the template means "no prune at all" (see the safety check in the script
-    # body): kept as is, so regeneration never changes the policy silently
+    # The retention is carried over as it stands, so regeneration never changes the policy
+    # silently. keep-last is often 0 here - the scripts of an older generation did not pass the
+    # flag at all - and that is fine: the script body prunes as long as ANY keep-* is set.
     cp -f "$f" "$f.bak-$(date +%Y%m%d-%H%M%S)" 2>/dev/null || true
     write_prune_script "$name" "$kl" "$kd" "$kw" "$km"
     n=$((n+1))
