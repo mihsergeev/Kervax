@@ -4789,6 +4789,24 @@ body:has(.modal-backdrop) {
 }
 /* «показать прежние» под списком инцидентов и журнала: спокойная строка, а не
    акцент — это выход в архив, а не действие, которого от инженера ждут. */
+/* «Сервер недоступен» — спокойная, но заметная полоса под именем ноды. Красной
+   заливки нет намеренно: авария уже случилась, кричать нечем, а читать придётся. */
+.srv-offline-note {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  margin: 0 0 0.6rem;
+  padding: 0.55rem 0.75rem;
+  border-radius: 10px;
+  border: 1px solid color-mix(in srgb, #d06b6b 40%, var(--border));
+  background: color-mix(in srgb, #d06b6b 10%, transparent);
+  line-height: 1.4;
+}
+.srv-offline-ic {
+  flex-shrink: 0;
+  font-size: 0.85rem;
+}
+
 .stale-more {
   margin-top: 0.4rem;
 }
