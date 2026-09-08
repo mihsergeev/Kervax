@@ -1380,6 +1380,52 @@ def rotation_max_age_days(repo: dict) -> int:
     return span + _ROT_GRACE_DAYS
 
 
+# Второй, БЫСТРЫЙ признак. Возраст старейшего снапшота честен, но нетороплив: при
+# keep-monthly 6 он терпит 231 день, а диск активного бэкап-сервера кончается за
+# недели. Прямой признак виден на вторые сутки — снапшотов больше, чем оставляет
+# политика, и при этом ни один прогон ничего не удаляет.
+#
+# Почему нужны ОБА условия. Переполнение само по себе законно: forget группирует по
+# host+tags и применяет политику к каждой группе, так что репозиторий с двумя
+# клиентами держит два комплекта. Но в такой группе ротация ЖИВАЯ — прогоны что-то
+# удаляют. Мёртвая ротация даёт ноль удалений подряд, сколько бы групп ни было, и
+# число групп панели знать не нужно.
+_ROT_DEAD_DAYS = 3
+
+
+def rotation_policy_max(repo: dict) -> int:
+    """Сколько снапшотов оставляет политика ОДНОЙ группы. 0 = политики нет."""
+    return sum(
+        int(repo.get(f"keep_{k}") or 0) for k in ("last", "daily", "weekly", "monthly")
+    )
+
+
+def rotation_overflow(bsrv: dict, seen: dict, now: datetime) -> tuple[list[str], dict]:
+    """Репозитории, где ротация не отрабатывает: переполнение + ноль удалений.
+
+    seen — карта «репозиторий → когда это заметили впервые» из состояния сервера.
+    Возвращает (список для алерта, новая карта). Пока не выдержан _ROT_DEAD_DAYS,
+    репозиторий копится в карте, но в алерт не идёт: единичный лок на репозитории
+    или прогон, которому нечего было удалять, — обычное дело.
+    """
+    fresh: dict = {}
+    out: list[str] = []
+    for r in bsrv.get("repos") or []:
+        name = r.get("name") or ""
+        snaps = int(r.get("snapshots") or 0)
+        limit = rotation_policy_max(r)
+        removed = int(r.get("rotation_removed") if r.get("rotation_removed") is not None else -1)
+        if not name or limit <= 0 or snaps <= limit or removed != 0:
+            continue  # нет политики, всё в пределах, или ротация что-то убирает
+        since = seen.get(name) or now.isoformat()
+        fresh[name] = since
+        started = _parse_iso(since)
+        held = (now - started).total_seconds() / 86400 if started else 0
+        if held >= _ROT_DEAD_DAYS:
+            out.append(f"{name} ({snaps} снапшотов при политике {limit}, удалений нет)")
+    return sorted(out), fresh
+
+
 def rotation_stale_repos(bsrv: dict, now: datetime) -> list[str]:
     """Репозитории, где старейший снапшот пережил собственную политику хранения.
 
@@ -2060,7 +2106,11 @@ async def evaluate_servers(
         bsrv_rot = (s.last_report or {}).get("backup_server") or {}
         if (online_now and bsrv_rot.get("present") and rot_r and rot_r["enabled"]
                 and "backup_rotation" not in mutes and _rule_scope_ok(rot_r, s)):
-            stale = [x for x in rotation_stale_repos(bsrv_rot, now)
+            over, seen_over = rotation_overflow(
+                bsrv_rot, dict(st.get("rotation_over") or {}), now)
+            if seen_over != (st.get("rotation_over") or {}):
+                apply(s.id, "rotation_over", seen_over)
+            stale = [x for x in rotation_stale_repos(bsrv_rot, now) + over
                      if x.split(" (")[0] not in set(s.backup_repo_mutes or [])]
             was_stale = bool(st.get("rotation_stale"))
             if stale and not was_stale:
