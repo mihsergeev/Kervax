@@ -1329,7 +1329,7 @@ async def test_server_kube_expiry_conditions():
     assert "истекает через 5 дн." == cond["kube_expiry"][1]["value"]
     assert "токен Flux" in cond["kube_expiry"][1]["what"]
     # второй подпадающий под порог упомянут числом: длинного списка в алерте не будет
-    assert cond["kube_expiry"][1]["more"] == " + ещё 1 на этом сервере"
+    assert cond["kube_expiry"][1]["more"] == " (и ещё 1 на этом сервере)"
     # дальний сертификат (10 лет) в счёт не идёт — иначе алерт был бы всегда
     assert cond["kube_expiry"][0] == 0  # первый интервал: дебаунс общий
 
@@ -1443,7 +1443,8 @@ async def test_expiry_alert_explains_what_to_do():
     """Дата без объяснения вызывает недоумение, а не действие.
 
     «ИСТЁК 49 дн. назад» на живом кластере — первый вопрос инженера «а почему
-    тогда всё работает?». Ответ должен быть в самом сообщении.
+    тогда всё работает?». Следующий шаг должен стоять в самом сообщении — одной
+    короткой строкой: объяснять там, почему кластер ещё жив, никто не просил.
     """
     from datetime import datetime, timedelta, timezone
 
@@ -1466,7 +1467,11 @@ async def test_expiry_alert_explains_what_to_do():
         {"kind": "flux-token", "where": "flux-system/flux-system", "expires": ts + 5 * 86400},
     ]}
     ctx = collector._server_conditions(s, now)["kube_expiry"][1]
-    assert "перестанет забирать изменения" in ctx["advice"]
+    assert "новый токен" in ctx["advice"]
+    # совет — одна короткая строка, а не абзац: его читают с телефона
+    for kind in ("secret-cert", "flux-token", "kubeconfig", "cluster-cert", "kubelet-cert"):
+        for expired in (True, False):
+            assert len(collector._KUBE_ADVICE[(kind, expired)]) <= 60
 
 async def test_daily_uncovered_digest(tmp_path, monkeypatch):
     """На ноде появилось новое (СУБД, докер), покрытия под это нет — сводка раз в сутки.
