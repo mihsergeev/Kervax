@@ -1714,7 +1714,11 @@ export function BackupsPage({
   const [openSrvId, setOpenSrvId] = useState<number | null>(openSrvHostId)
   const [setupSrv, setSetupSrv] = useState<Server | null>(null)
   const [deploySrv, setDeploySrv] = useState<Server | null>(null)
-  const [covSrv, setCovSrv] = useState<Server | null>(null)
+  // Только id, а не сам объект: модалка обязана видеть свежий сервер после каждой
+  // перезагрузки списка. С копией, снятой в момент открытия, галочка внутри не
+  // перерисовывалась — клик срабатывал, но выглядел как проигнорированный, и
+  // изменение обнаруживалось только при закрытии окна.
+  const [covId, setCovId] = useState<number | null>(null)
   // подвал «не требуется» свёрнут по умолчанию; выбор помним между заходами
   const [showOptOut, setShowOptOut] = useState(
     () => localStorage.getItem('kervax.backups.showOptOut') === '1',
@@ -1767,6 +1771,7 @@ export function BackupsPage({
     .filter((x): x is { s: Server; d: BackupServerInfo } => !!x.d?.present)
     .sort((a, b) => a.s.name.localeCompare(b.s.name))
   const openSrv = srvHosts.find(({ s }) => s.id === openSrvId)
+  const covSrv = (servers ?? []).find((x) => x.id === covId) ?? null
 
   const allHosts = (servers ?? [])
     .map((s) => ({ s, d: s.last_report?.backup }))
@@ -1830,7 +1835,7 @@ export function BackupsPage({
     const srv = (servers ?? []).find((x) => x.id === openId)
     if (!srv) return
     if (srv.last_report?.backup_server?.present) setOpenSrvId(openId)
-    else if ((srv.backup_audit?.length ?? 0) > 0) setCovSrv(srv)
+    else if ((srv.backup_audit?.length ?? 0) > 0) setCovId(srv.id)
     setOpenId(null)
   }, [openId, open, servers])
 
@@ -1977,7 +1982,7 @@ export function BackupsPage({
               {noBackupOptView.map((s) => (
                 <NoBackupRow key={s.id} server={s} canAct={!isViewer}
                   onSetup={() => setSetupSrv(s)} onDeploy={() => setDeploySrv(s)}
-                  onCoverage={(s.backup_audit?.length ?? 0) > 0 ? () => setCovSrv(s) : undefined}
+                  onCoverage={(s.backup_audit?.length ?? 0) > 0 ? () => setCovId(s.id) : undefined}
                   onChanged={load} />
               ))}
             </div>
@@ -2029,7 +2034,7 @@ export function BackupsPage({
       )}
       {covSrv && (
         <NodeCoverageModal server={covSrv} canManage={!isViewer}
-          onChanged={load} onClose={() => setCovSrv(null)} />
+          onChanged={load} onClose={() => setCovId(null)} />
       )}
       {deploySrv && (
         <DeployServerModal
