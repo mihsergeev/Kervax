@@ -928,3 +928,33 @@ async def test_cert_expiry_from_agent():
     check.check_ssl = False
     empty = checks_exec.expiry_from_agent(check, probe, now)
     assert empty.ssl_days is None and empty.ssl_message == ""
+
+def test_x509_reason_tells_expired_from_self_signed():
+    """Локальная проверка обязана назвать причину, а не одну на все случаи.
+
+    Раньше любая x509-ошибка изнутри означала «похоже, сайт живёт по HTTP — укажите
+    http://». Для самоподписанного это верно, а для ИСТЁКШЕГО — вредный совет:
+    переписывать адрес монитора там, где надо выпускать новый сертификат.
+    """
+    from app.checks import x509_reason
+
+    why, ts = x509_reason(
+        'Get "https://x": tls: failed to verify certificate: x509: certificate has '
+        "expired or is not yet valid: current time 2026-09-09T16:41:02+03:00 is after "
+        "2026-09-08T12:00:00Z"
+    )
+    assert "истёк" in why and "08.09.2026" in why
+    assert ts > 0, "дата окончания есть в тексте ошибки — её надо доставать"
+    assert "http://" not in why, "совет про схему тут не к месту"
+
+    # Go пишет одну фразу на оба случая, различает только хвост
+    why, _ = x509_reason("x509: certificate has expired or is not yet valid: "
+                         "current time T is before 2026-10-01T00:00:00Z")
+    assert "ещё не начал действовать" in why
+
+    why, _ = x509_reason("x509: certificate is valid for ingress.local, not site.example")
+    assert "на другое имя" in why
+
+    # самоподписанный изнутри — тот самый случай, ради которого совет и писался
+    why, _ = x509_reason("x509: certificate signed by unknown authority")
+    assert "http://" in why
