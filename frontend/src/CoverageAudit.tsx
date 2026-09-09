@@ -104,11 +104,22 @@ export function CoverageAudit({ server: s, canManage, onChanged }: {
       {muteBusy === x.key ? '…' : '🔕'}
     </button>
   ) : null)
+  const [dumpsWish, setDumpsWish] = useState<boolean | null>(null)
+  useEffect(() => { setDumpsWish(null) }, [s.db_dumps_ok])
+
+  // Пока обновлённый сервер едет с бэкенда (запрос + перезагрузка списка), показываем
+  // то, что человек только что выбрал. Иначе галочка полсекунды стоит в прежнем
+  // положении, и клик выглядит непринятым — жмут второй раз, отменяя первый.
+  const dumpsOk = dumpsWish ?? !!s.db_dumps_ok
   const toggleDumps = async () => {
+    const next = !dumpsOk
+    setDumpsWish(next)
     setBusy(true)
     try {
-      await updateServer(s.id, { db_dumps_ok: !s.db_dumps_ok })
+      await updateServer(s.id, { db_dumps_ok: next })
       onChanged()
+    } catch {
+      setDumpsWish(null)  // не сохранилось — возвращаем как было
     } finally {
       setBusy(false)
     }
@@ -364,7 +375,7 @@ export function CoverageAudit({ server: s, canManage, onChanged }: {
       {hasDb && canManage && (
         <>
           <label className="nobackup-check">
-            <input type="checkbox" checked={!!s.db_dumps_ok} disabled={busy} onChange={toggleDumps} />
+            <input type="checkbox" checked={dumpsOk} disabled={busy} onChange={toggleDumps} />
             {t('Все базы этой ноды бэкаплю сам — не напоминать')}
           </label>
           {/* Объясняем прямо здесь: галка НЕ настраивает дамп, а только гасит напоминание.
