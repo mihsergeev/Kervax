@@ -5,6 +5,7 @@
 """
 
 import asyncio
+import re
 import math
 import json
 import socket
@@ -301,6 +302,42 @@ async def probe_expiry_domain_only(check) -> ExpiryInfo:
     return info
 
 
+def x509_reason(err: str) -> tuple[str, int]:
+    """Причина TLS-ошибки словами + unix-время окончания, если оно есть в тексте.
+
+    Раньше любая x509-ошибка изнутри означала «сайт живёт по HTTP, укажите http://».
+    Для самоподписанного сертификата это верно, а для ИСТЁКШЕГО — вранье: панель
+    советовала переписать адрес монитора там, где надо выпускать новый сертификат.
+    """
+    low = (err or "").lower()
+    # Go: «current time 2026-09-09T16:41:02+03:00 is after 2026-09-08T12:00:00Z»
+    ts = 0
+    m = re.search(r"is after (\S+)", err or "")
+    if m:
+        try:
+            ts = int(datetime.fromisoformat(m.group(1).replace("Z", "+00:00")).timestamp())
+        except ValueError:
+            ts = 0
+    # Go выдаёт одну и ту же фразу «has expired or is not yet valid», а какой это из
+    # двух случаев, видно только по хвосту: «is after <дата>» — истёк, «is before» —
+    # ещё не начал действовать. Поэтому сначала проверяем хвост.
+    if "is before" in low:
+        return "сертификат ещё не начал действовать — проверьте часы и дату выпуска", 0
+    if "has expired" in low or "is after" in low:
+        when = (f" {datetime.fromtimestamp(ts, tz=timezone.utc).strftime('%d.%m.%Y')}"
+                if ts else "")
+        return f"сертификат истёк{when} — выпустите новый", ts
+    if "certificate is valid for" in low or "doesn't match" in low:
+        return "сертификат выписан на другое имя — проверьте, тот ли это сайт", 0
+    if "unknown authority" in low or "self-signed" in low or "self signed" in low:
+        # Локальная проверка идёт на сам веб-сервер, и если у сайта нет TLS, тот
+        # отдаёт свой внутренний сертификат — изнутри это читается как «подпись
+        # неизвестного центра». Почти всегда это значит, что сайт живёт по HTTP.
+        return ("сертификат не проверяется изнутри: похоже, сайт работает только по "
+                "HTTP — укажите http:// в адресе монитора"), 0
+    return "сертификат не прошёл проверку", 0
+
+
 def expiry_from_agent(check, probe, now) -> ExpiryInfo:
     """Сроки для сайта, который проверяет агент: сертификат он уже видел сам.
 
@@ -317,8 +354,20 @@ def expiry_from_agent(check, probe, now) -> ExpiryInfo:
         return info
     exp = getattr(probe, "cert_expires", 0) if probe is not None else 0
     if not exp:
-        info.ssl_message = ("агент ещё не присылал сертификат" if probe is None
-                            else "сертификат не отдан")
+        # Сертификата в ответе нет по разным причинам, и «не отдан» из них худшая:
+        # у истёкшего рукопожатие обрывается ДО того, как агент успевает его снять,
+        # и в карточке висело невнятное, хотя в ошибке прямо написано, что случилось.
+        err = (getattr(probe, "error", "") or "") if probe is not None else ""
+        if probe is None:
+            info.ssl_message = "агент ещё не присылал сертификат"
+        elif err:
+            why, ts = x509_reason(err)
+            info.ssl_message = why.split(" — ")[0]
+            if ts:
+                info.ssl_days = int((datetime.fromtimestamp(ts, tz=timezone.utc)
+                                     - now).total_seconds() / 86400)
+        else:
+            info.ssl_message = "сертификат не отдан"
         return info
     left = (datetime.fromtimestamp(exp, tz=timezone.utc) - now).total_seconds() / 86400
     info.ssl_days = int(left)
@@ -426,11 +475,9 @@ def outcome_from_agent(check, probe, now, degraded_ms: int) -> CheckOutcome:
         # изнутри читается как «подпись неизвестного центра». Почти всегда это
         # значит, что сайт живёт по HTTP, а в мониторе записан https.
         if "unknown authority" in low or "x509" in low:
+            why, _ = x509_reason(probe.error)
             return CheckOutcome(
-                "down", probe.latency_ms,
-                message="сертификат не проверяется изнутри: похоже, сайт работает "
-                        "только по HTTP — укажите http:// в адресе монитора "
-                        f"({probe.error[:60]})",
+                "down", probe.latency_ms, message=f"{why} ({probe.error[:60]})",
             )
         if "eof" in low or "reset by peer" in low or "connection refused" in low:
             # Сразу говорим, ЧТО добавить: через docker-proxy веб-сервер видит не
