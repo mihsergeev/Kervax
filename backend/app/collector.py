@@ -1075,8 +1075,11 @@ _KUBE_ADVICE = {
     ("kubelet-cert", True): "нода отвалится от кластера — чините kubelet",
     ("flux-token", False): "выпустите новый токен и обновите секрет",
     ("flux-token", True): "Flux уже не тянет изменения — новый токен в секрет",
-    ("secret-cert", False): "обновите, иначе TLS у его пользователя отвалится",
-    ("secret-cert", True): "сломается при рестарте пода — обновите или удалите",
+    ("secret-cert", False): "обновите до этой даты, иначе TLS отвалится",
+    # Прежний текст обещал поломку «при рестарте пода» — неправда для главного
+    # случая: секрет из ingress/gateway контроллер читает сам и отдаёт клиентам
+    # как есть, поэтому браузер ругается сразу, задолго до всякого рестарта.
+    ("secret-cert", True): "TLS уже не проходит проверку — обновите или удалите",
 }
 # Ready=False с этими причинами — не поломка, а работа: Flux тянет артефакт или
 # докатывает релиз. Алертить на них — гарантированно приучить игнорировать канал.
@@ -1665,6 +1668,9 @@ def _server_conditions(s: Server, now: datetime) -> dict[str, tuple[int, dict]]:
                 "what": _KUBE_KIND.get(kind, "срок"),
                 "where": where,
                 "advice": _KUBE_ADVICE.get((kind, days < 0), ""),
+                # не для текста, а для иконки: «истекает через 6 дн.» и «ИСТЁК» —
+                # разные новости, и в ленте они должны различаться с первого взгляда
+                "expired": days < 0,
                 "date": datetime.fromtimestamp(exp, tz=timezone.utc).strftime("%d.%m.%Y"),
                 "more": f" (и ещё {near - 1} на этом сервере)" if near > 1 else "",
             })
@@ -1866,6 +1872,8 @@ async def evaluate_servers(
         if rule["text"] == default or rule["text"] in settings_store.LEGACY_SERVER_DEFAULTS:
             # у диска три уровня — ведущая иконка должна их различать
             ico = _DISK_ICON.get(int(ctx.get("level") or 0), "") if key == "disk" else ""
+            if key == "kube_expiry" and ctx.get("expired"):
+                ico = "⛔"  # срок не «скоро», а уже вышел — это поломка, а не напоминание
             return _server_alert_text(
                 key, s.name, _fmt_rule(default, s, ctx), url, icon=ico,
                 group=s.group_name or "",

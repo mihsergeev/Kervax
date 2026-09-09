@@ -1458,7 +1458,12 @@ async def test_expiry_alert_explains_what_to_do():
     ]})
     s.alert_state = {"kube_expiry_since": (now - timedelta(minutes=20)).isoformat()}
     ctx = collector._server_conditions(s, now)["kube_expiry"][1]
-    assert "при рестарте пода" in ctx["advice"]
+    # НЕ «сломается при рестарте пода»: секрет из ingress/gateway контроллер читает
+    # сам и отдаёт клиентам, так что браузер ругается сразу — обещать поломку в
+    # будущем значит врать про уже случившуюся
+    assert "уже не проходит" in ctx["advice"]
+    assert "рестарт" not in ctx["advice"]
+    assert ctx["expired"] is True
     # «TLS-сертификат … (tls.crt)» — повтор самого себя, его быть не должно
     assert "tls.crt" not in ctx["where"]
 
