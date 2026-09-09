@@ -4791,6 +4791,22 @@ body:has(.modal-backdrop) {
    акцент — это выход в архив, а не действие, которого от инженера ждут. */
 /* «Сервер недоступен» — спокойная, но заметная полоса под именем ноды. Красной
    заливки нет намеренно: авария уже случилась, кричать нечем, а читать придётся. */
+/* «Откуда проверять» — один выбор из трёх, а не россыпь галочек по форме. */
+.probe-where {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  margin: 0.2rem 0 0.6rem;
+}
+.probe-switch {
+  align-self: flex-start;
+}
+/* Раскрытие тонкой настройки: ссылка, а не кнопка-акцент — это не действие формы. */
+.adv-toggle {
+  align-self: flex-start;
+  margin: 0.1rem 0 0.5rem;
+}
+
 .srv-offline-note {
   display: flex;
   align-items: baseline;

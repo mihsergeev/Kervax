@@ -24,6 +24,32 @@ type Props = {
   groups?: string[]
 }
 
+type ProbeMode = 'panel' | 'local' | 'locations'
+
+// Отличается ли тонкая настройка от умолчаний. Нужна ровно для одного решения:
+// раскрывать ли блок сразу. Список короткий намеренно — сюда входит то, что человек
+// действительно правит руками, а не всё подряд.
+function advTouched(f: CheckForm): boolean {
+  const dflt: [unknown, unknown][] = [
+    [f.interval_seconds ?? 60, 60],
+    [f.degraded_ms ?? 2000, 2000],
+    [f.retries ?? 2, 2],
+    [f.alert_after_failures ?? 2, 2],
+    [f.degraded_after_failures ?? 10, 10],
+    [f.expected_status || '200-399', '200-399'],
+    [f.keyword_up || '', ''],
+    [f.keyword_down || '', ''],
+    [f.auth_method || '', ''],
+    [f.http_headers || '', ''],
+    [f.ignore_tls ?? false, false],
+    [f.check_all_ips ?? false, false],
+    [f.check_ssl ?? true, true],
+    [f.check_domain ?? true, true],
+    [(f.alert_mutes ?? []).length, 0],
+  ]
+  return dflt.some(([a, b]) => a !== b)
+}
+
 export function CheckFormCard({
   form,
   set,
@@ -63,6 +89,23 @@ export function CheckFormCard({
   }, [form.type])
 
 
+
+  // Откуда проверяем — ОДИН параметр, а не две независимые галочки. Раньше «локально
+  // с сервера» и «из локаций» стояли в разных местах списка, хотя выбор между ними
+  // взаимоисключающий по смыслу: сайт, закрытый снаружи белым списком, из локаций не
+  // увидит никто, а включённые вместе они спорили друг с другом.
+  const probeMode: ProbeMode = form.probe_local
+    ? 'local'
+    : form.check_locations
+      ? 'locations'
+      : 'panel'
+  const setProbeMode = (m: ProbeMode) =>
+    set({ probe_local: m === 'local', check_locations: m === 'locations' })
+
+  // Всё, что имеет разумное умолчание, спрятано: чтобы завести монитор, хватает имени
+  // и адреса. Но если у монитора что-то УЖЕ отличается от умолчаний, прятать это
+  // нельзя — человек открыл карточку именно из-за них, поэтому раскрываем сами.
+  const [adv, setAdv] = useState(() => advTouched(form))
 
   const ids = form.location_ids // null = все, [] = ни одной, [id…] = подмножество
   const locChecked = (id: number) => ids == null || ids.includes(id)
@@ -131,6 +174,70 @@ export function CheckFormCard({
             />
           </label>
         )}
+      </div>
+
+      {form.type === 'http' && (
+        <div className="probe-where">
+          <span className="muted small">{t('Откуда проверять')}</span>
+          <div className="win-switch probe-switch">
+            {([
+              ['panel', t('С панели')],
+              ['local', t('Изнутри сервера')],
+              ['locations', t('Из локаций')],
+            ] as [ProbeMode, string][]).map(([m, label]) => (
+              <button
+                key={m}
+                type="button"
+                className={`win-btn${probeMode === m ? ' win-btn-active' : ''}`}
+                onClick={() => setProbeMode(m)}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+          <div className="field-hint muted small">
+            {probeMode === 'panel' &&
+              t('Обычная проверка снаружи, с самой панели.')}
+            {probeMode === 'local' &&
+              t('Для сайта, закрытого белым списком: панель к нему не пойдёт, проверит агент на том сервере, чей веб-сервер держит этот домен — панель найдёт его сама. Он постучится на localhost с этим именем. Проверка изнутри не доказывает, что сайт виден посетителям, а белый список должен пускать 127.0.0.1 и подсеть докера.')}
+            {probeMode === 'locations' &&
+              t('Через прокси-локации: видно, доступен ли сайт из разных сетей и стран.')}
+          </div>
+        </div>
+      )}
+      {form.type === 'http' && probeMode === 'locations' && (
+        <div className="loc-pick">
+          {allLocs.length === 0 ? (
+            <div className="muted small">{t('Локаций пока нет — добавьте в ⚙ → Локации.')}</div>
+          ) : (
+            <>
+              <div className="muted small">{t('Из каких локаций проверять:')}</div>
+              {allLocs.map((l) => (
+                <label className="checkbox loc-pick-item" key={l.id}>
+                  <input
+                    type="checkbox"
+                    checked={locChecked(l.id)}
+                    onChange={() => toggleLoc(l.id)}
+                  />
+                  {l.name}
+                  {!l.url && <span className="type-chip">{t('напрямую')}</span>}
+                  {!l.enabled && <span className="type-chip off">{t('выкл')}</span>}
+                </label>
+              ))}
+            </>
+          )}
+        </div>
+      )}
+
+      {/* Всё остальное имеет рабочее умолчание, и на форме добавления оно только мешало:
+          чтобы завести монитор, достаточно имени и адреса. Раскрывается одним кликом, а у
+          монитора, где что-то уже отличается от умолчаний, открыто сразу. */}
+      <button type="button" className="ghost adv-toggle" onClick={() => setAdv(!adv)}>
+        {adv ? t('скрыть тонкую настройку') : t('тонкая настройка: интервалы, коды, заголовки, сроки')}
+      </button>
+      {adv && (
+        <>
+      <div className="form-grid">
         <label className="field">
           <span>{t('Интервал, сек')}</span>
           <input
@@ -313,21 +420,6 @@ export function CheckFormCard({
         <label className="checkbox">
           <input
             type="checkbox"
-            checked={form.probe_local ?? false}
-            onChange={(e) => set({ probe_local: e.target.checked })}
-          />
-          {t('Проверять локально, с самого сервера (сайт закрыт снаружи)')}
-        </label>
-      )}
-      {form.type === 'http' && form.probe_local && (
-        <div className="field-hint muted small form-note">
-          {t('Панель к сайту ходить не будет: снаружи он всё равно закрыт. Проверит агент на том сервере, чей веб-сервер обслуживает этот домен — панель найдёт его сама. Он постучится на localhost с этим именем хоста. Это проверка изнутри: она не докажет, что сайт виден посетителям. Белый список сайта должен пускать 127.0.0.1, иначе проверка получит обрыв.')}
-        </div>
-      )}
-      {form.type === 'http' && (
-        <label className="checkbox">
-          <input
-            type="checkbox"
             checked={form.ignore_tls ?? false}
             onChange={(e) => set({ ignore_tls: e.target.checked })}
           />
@@ -343,39 +435,6 @@ export function CheckFormCard({
           />
           {t('Проверять все IP-адреса домена (ловит мёртвый бэкенд за балансировщиком)')}
         </label>
-      )}
-      {form.type === 'http' && (
-        <label className="checkbox">
-          <input
-            type="checkbox"
-            checked={form.check_locations ?? false}
-            onChange={(e) => set({ check_locations: e.target.checked })}
-          />
-          {t('Проверять из локаций (прокси)')}
-        </label>
-      )}
-      {form.type === 'http' && (form.check_locations ?? false) && (
-        <div className="loc-pick">
-          {allLocs.length === 0 ? (
-            <div className="muted small">{t('Локаций пока нет — добавьте в ⚙ → Локации.')}</div>
-          ) : (
-            <>
-              <div className="muted small">{t('Из каких локаций проверять:')}</div>
-              {allLocs.map((l) => (
-                <label className="checkbox loc-pick-item" key={l.id}>
-                  <input
-                    type="checkbox"
-                    checked={locChecked(l.id)}
-                    onChange={() => toggleLoc(l.id)}
-                  />
-                  {l.name}
-                  {!l.url && <span className="type-chip">{t('напрямую')}</span>}
-                  {!l.enabled && <span className="type-chip off">{t('выкл')}</span>}
-                </label>
-              ))}
-            </>
-          )}
-        </div>
       )}
       <div className="mute-group">
         <span className="muted small">{t('Не слать алерты этого монитора:')}</span>
@@ -401,6 +460,8 @@ export function CheckFormCard({
           })}
         </div>
       </div>
+        </>
+      )}
       <label className="checkbox">
         <input
           type="checkbox"
