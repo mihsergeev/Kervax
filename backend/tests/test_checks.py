@@ -958,3 +958,30 @@ def test_x509_reason_tells_expired_from_self_signed():
     # самоподписанный изнутри — тот самый случай, ради которого совет и писался
     why, _ = x509_reason("x509: certificate signed by unknown authority")
     assert "http://" in why
+
+async def test_probe_source_is_one_choice(client, auth_headers):
+    """Изнутри сервера ИЛИ из локаций — но не одновременно.
+
+    Это один вопрос «откуда смотреть на сайт». Вместе они бессмысленны: сайт,
+    закрытый снаружи белым списком, из локаций не увидит никто, и монитор получал
+    вечную «частичную доступность» вдобавок к нормальной локальной проверке.
+    """
+    r = await client.post("/api/checks", headers=auth_headers, json={
+        "name": "закрытый", "type": "http", "target": "https://inner.example.ru",
+        "probe_local": True, "check_locations": True,
+    })
+    assert r.status_code == 201
+    assert r.json()["probe_local"] is True
+    assert r.json()["check_locations"] is False, "включились оба источника разом"
+
+    cid = r.json()["id"]
+    # и при правке тоже: включаем локации — локальная проверка обязана уступить
+    r = await client.patch(f"/api/checks/{cid}", headers=auth_headers,
+                           json={"probe_local": False, "check_locations": True})
+    assert r.status_code == 200
+    assert r.json()["check_locations"] is True and r.json()["probe_local"] is False
+
+    # обратно: локальная поверх локаций гасит локации
+    r = await client.patch(f"/api/checks/{cid}", headers=auth_headers,
+                           json={"probe_local": True})
+    assert r.json()["probe_local"] is True and r.json()["check_locations"] is False

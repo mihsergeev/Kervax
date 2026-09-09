@@ -711,6 +711,7 @@ async def create_check(
             status.HTTP_403_FORBIDDEN, "Группа недоступна для этой учётной записи"
         )
     check = Check(**body.model_dump())
+    _one_probe_source(check)
     # новый монитор — в конец списка (иначе прыгнул бы наверх при ручном порядке)
     max_order = await session.scalar(select(func.max(Check.sort_order)))
     check.sort_order = (max_order or 0) + 1
@@ -721,6 +722,18 @@ async def create_check(
     # первую проверку — в фон, чтобы создание не висело на медленном/недоступном сайте
     background.add_task(_first_check, request.app.state.session_factory, check.id)
     return check
+
+
+def _one_probe_source(check: Check) -> None:
+    """Проверять можно ИЛИ изнутри сервера, ИЛИ из локаций, но не одновременно.
+
+    Это один вопрос — откуда смотреть на сайт, — и раньше он задавался двумя
+    независимыми галочками в разных концах формы. Включённые вместе они бессмысленны:
+    сайт, закрытый снаружи белым списком (ради чего и нужна проверка изнутри), из
+    локаций не увидит никто, и монитор получал вечную «частичную доступность».
+    """
+    if check.probe_local:
+        check.check_locations = False
 
 
 @router.get("/{check_id}", response_model=CheckOut)
@@ -737,6 +750,7 @@ async def update_check(
     check = await _get_or_404(check_id, session, user)
     for field, value in body.model_dump(exclude_unset=True).items():
         setattr(check, field, value)
+    _one_probe_source(check)
     await session.commit()
     await session.refresh(check)
     await audit.record(session, user.username, "check_update", check.name)

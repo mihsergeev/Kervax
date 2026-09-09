@@ -159,6 +159,18 @@ const EN: Record<string, string> = {
 
   // --- локации (прокси) ---
   'Локации': 'Locations',
+  'Откуда проверять': 'Where to probe from',
+  'С панели': 'From the panel',
+  'Изнутри сервера': 'From the server itself',
+  'Из локаций': 'From locations',
+  'Обычная проверка снаружи, с самой панели.': 'A normal check from outside, made by the panel.',
+  'Для сайта, закрытого белым списком: панель к нему не пойдёт, проверит агент на том сервере, чей веб-сервер держит этот домен — панель найдёт его сама. Он постучится на localhost с этим именем. Проверка изнутри не доказывает, что сайт виден посетителям, а белый список должен пускать 127.0.0.1 и подсеть докера.':
+    'For a site closed behind an allow-list: the panel will not go there. The agent on the server whose web server holds this domain does it instead — the panel finds that server itself — knocking on localhost with this host name. A check from inside does not prove the site is reachable for visitors, and the allow-list must admit 127.0.0.1 and the docker subnet.',
+  'Через прокси-локации: видно, доступен ли сайт из разных сетей и стран.':
+    'Through proxy locations: shows whether the site is reachable from different networks and countries.',
+  'тонкая настройка: интервалы, коды, заголовки, сроки':
+    'fine tuning: intervals, codes, headers, expiry',
+  'скрыть тонкую настройку': 'hide fine tuning',
   'Проверять из локаций (прокси)': 'Check from locations (proxies)',
   'Прокси, через которые панель проверяет сайты (HTTP/HTTPS/SOCKS5) — чтобы видеть доступность из разных сетей/регионов.':
     'Proxies the panel checks sites through (HTTP/HTTPS/SOCKS5) — to see availability from different networks/regions.',
