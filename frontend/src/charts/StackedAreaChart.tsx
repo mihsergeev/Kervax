@@ -29,6 +29,41 @@ const PAD_R = 12
 const PAD_T = 8
 const PAD_B = 20
 
+/** Прямая ломаная — для нижней кромки площади: её никто не читает как линию. */
+function lineTo(pts: [number, number][]): string {
+  return pts.map((p) => `L${p[0].toFixed(1)} ${p[1].toFixed(1)}`).join(' ')
+}
+
+/** Сглаженная кривая по точкам (Catmull-Rom → кубические Безье).
+ *
+ * Ломаная из сотен замеров выглядит дребезжащей, и глаз цепляется за каждый зубец
+ * вместо формы. Контрольные точки берём по соседям и ЗАЖИМАЕМ по вертикали между
+ * концами сегмента: без этого кривая вылетает за пределы данных и рисует всплеск,
+ * которого в метрике не было — на графике мониторинга это прямое враньё.
+ */
+function smooth(pts: [number, number][]): string {
+  if (pts.length === 0) return ''
+  if (pts.length < 3) {
+    return `M${pts[0][0].toFixed(1)} ${pts[0][1].toFixed(1)}` + lineTo(pts.slice(1))
+  }
+  const clamp = (v: number, a: number, b: number) =>
+    Math.max(Math.min(a, b), Math.min(Math.max(a, b), v))
+  let d = `M${pts[0][0].toFixed(1)} ${pts[0][1].toFixed(1)}`
+  for (let i = 0; i < pts.length - 1; i++) {
+    const p0 = pts[i === 0 ? 0 : i - 1]
+    const p1 = pts[i]
+    const p2 = pts[i + 1]
+    const p3 = pts[i + 2] ?? p2
+    const c1y = clamp(p1[1] + (p2[1] - p0[1]) / 6, p1[1], p2[1])
+    const c2y = clamp(p2[1] - (p3[1] - p1[1]) / 6, p1[1], p2[1])
+    const c1x = p1[0] + (p2[0] - p1[0]) / 3
+    const c2x = p2[0] - (p2[0] - p1[0]) / 3
+    d += `C${c1x.toFixed(1)} ${c1y.toFixed(1)},${c2x.toFixed(1)} ${c2y.toFixed(1)},` +
+      `${p2[0].toFixed(1)} ${p2[1].toFixed(1)}`
+  }
+  return d
+}
+
 export function StackedAreaChart({
   ts,
   series,
@@ -75,24 +110,39 @@ export function StackedAreaChart({
   const scaleH = mode === 'mirror' ? plotH / 2 : plotH
   const sy = (v: number) => zeroY - (v / top) * scaleH
 
-  // построение площадей
-  const areas: { s: Series; d: string; sign: number }[] = []
+  // построение площадей: по КУСКАМ между пропусками, со сглаживанием
+  const areas: { s: Series; d: string; line: string; sign: number; last: [number, number] | null }[] = []
   const cum = new Array(n).fill(0) // для стека
   series.forEach((s, si) => {
     const sign = mode === 'mirror' && si === 1 ? -1 : 1
-    const upper: string[] = []
-    const lower: string[] = []
+    // null в ряду — это «данных нет», а не ноль. Раньше пропуск подставлялся нулём,
+    // и молчание ноды рисовалось отвесным падением в пол: график показывал аварию
+    // там, где просто нечего показать. Теперь линия рвётся, как и должна.
+    const chunks: { top: [number, number][]; bot: [number, number][] }[] = []
+    let cur: { top: [number, number][]; bot: [number, number][] } | null = null
     for (let i = 0; i < n; i++) {
+      const raw = s.values[i]
       const base = mode === 'stack' ? cum[i] : 0
-      const val = s.values[i] ?? 0
-      const y0 = sy(base * sign)
-      const y1 = sy((base + val) * sign)
-      upper.push(`${i ? 'L' : 'M'}${sx(i).toFixed(1)} ${y1.toFixed(1)}`)
-      lower.push(`L${sx(i).toFixed(1)} ${y0.toFixed(1)}`)
-      if (mode === 'stack') cum[i] += s.values[i] ?? 0
+      if (mode === 'stack') cum[i] += raw ?? 0
+      if (raw == null) {
+        cur = null
+        continue
+      }
+      if (!cur) {
+        cur = { top: [], bot: [] }
+        chunks.push(cur)
+      }
+      cur.top.push([sx(i), sy((base + raw) * sign)])
+      cur.bot.push([sx(i), sy(base * sign)])
     }
-    lower.reverse()
-    areas.push({ s, d: `${upper.join(' ')} ${lower.join(' ')} Z`, sign })
+    const d = chunks
+      .map((c) => `${smooth(c.top)} ${lineTo(c.bot.slice().reverse())} Z`)
+      .join(' ')
+    const line = chunks.map((c) => smooth(c.top)).join(' ')
+    const tail = chunks.length ? chunks[chunks.length - 1].top : []
+    // Точка на последнем замере: у живого ряда она совпадает с правым краем, у
+    // замолчавшего — стоит там, где данные кончились, и сама показывает, где это было.
+    areas.push({ s, d, line, sign, last: tail.length ? tail[tail.length - 1] : null })
   })
 
   const gridN = mode === 'mirror' ? 2 : 3
@@ -217,17 +267,31 @@ export function StackedAreaChart({
           {grid.map((g, i) => (
             <line key={i} x1={PAD_L} y1={g.y} x2={W - PAD_R} y2={g.y} className="chart-grid" />
           ))}
-          {areas.map(({ s, d }) => (
-            <path
-              key={s.name}
-              d={d}
-              fill={`url(#${gid(s.color)})`}
-              stroke={s.color}
-              strokeWidth={1.4}
-              strokeLinejoin="round"
-              strokeLinecap="round"
-              vectorEffect="non-scaling-stroke"
-            />
+          {areas.map(({ s, d, line, last }) => (
+            <g key={s.name}>
+              <path d={d} fill={`url(#${gid(s.color)})`} stroke="none" />
+              <path
+                d={line}
+                fill="none"
+                stroke={s.color}
+                strokeWidth={1.6}
+                strokeLinejoin="round"
+                strokeLinecap="round"
+                vectorEffect="non-scaling-stroke"
+              />
+              {/* «где мы сейчас»: у одиночного ряда точка помогает поймать последнее
+                  значение, у стека из четырёх слоёв она превратилась бы в сыпь */}
+              {last && series.length <= 2 && (
+                <circle
+                  cx={last[0]}
+                  cy={last[1]}
+                  r={3}
+                  fill={s.color}
+                  className="sac-last"
+                  vectorEffect="non-scaling-stroke"
+                />
+              )}
+            </g>
           ))}
           {xt.map((tk) => (
             <line

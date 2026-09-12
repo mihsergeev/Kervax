@@ -24,6 +24,7 @@ import {
   type ServerMetric,
 } from './api'
 import { StackedAreaChart, type Series } from './charts/StackedAreaChart'
+import { CoresHeatmap } from './charts/CoresHeatmap'
 import { fmtSetupVersion, srvIssues } from './serverUtils'
 import { OsIcon } from './osIcon'
 import { CountryFlag } from './CountryFlag'
@@ -2289,6 +2290,13 @@ function ServerChartModal({
 
         {metrics == null ? (
           <div className="chart-empty">{t('загрузка…')}</div>
+        ) : metricKey === 'cores' && mc.ts.length ? (
+          <CoresHeatmap
+            ts={mc.ts}
+            cores={M.map((m) => m.cpu_cores_pct ?? [])}
+            height={bigH}
+            fmtTime={fmtT}
+          />
         ) : mc.ts.length ? (
           <StackedAreaChart
             ts={mc.ts}
@@ -2482,6 +2490,16 @@ function ServerDetail({
         </button>
         {metrics == null ? (
           <div className="chart-empty">{t('загрузка…')}</div>
+        ) : key === 'cores' && mc.ts.length ? (
+          /* Шестнадцать наложенных кривых читались как клубок; карта отвечает на
+             единственный вопрос к этому графику — размазана нагрузка или упёрлась
+             в одно ядро. */
+          <CoresHeatmap
+            ts={mc.ts}
+            cores={M.map((m) => m.cpu_cores_pct ?? [])}
+            height={180}
+            fmtTime={fmtT}
+          />
         ) : mc.ts.length ? (
           <StackedAreaChart
             ts={mc.ts}
