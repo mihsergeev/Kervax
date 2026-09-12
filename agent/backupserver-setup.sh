@@ -49,7 +49,7 @@ fi
 #           cleanup silently did nothing ("repo not accessible", success=0) for EVERY
 #           repository created by the panel. The env is exported now, and the installer
 #           repairs already created envs (migration below).
-KERVAX_SETUP_VERSION=0.21  # MAJOR.MINOR; compared component-wise (0.13 > 0.2!)
+KERVAX_SETUP_VERSION=0.22  # MAJOR.MINOR; compared component-wise (0.13 > 0.2!)
 # Which nodes need this helper at all. Read by the ansible playbook on the
 # CONTROL machine and evaluated as a shell condition ON THE NODE, so a new
 # helper lands where it belongs without anyone editing the playbook.
@@ -299,6 +299,24 @@ repo_size() { du -sb "$RESTIC_REPOSITORY" 2>/dev/null | awk '{print $1}'; }
     snap_before="$(count_snaps)"; [ -n "$snap_before" ] || snap_before=-1
     bytes_before="$(repo_size)"; [ -n "$bytes_before" ] || bytes_before=-1
     "$BIN" unlock >/dev/null 2>&1 || true
+    # Клиентский бэкап и серверная очистка приходят к одному репозиторию, и restic
+    # разводит их локом. Расписания рано или поздно встречаются (бэкап в 03:33,
+    # очистка в 03:35), и prune просто падал: "repository is already locked" ->
+    # success=0 -> алерт "prune упал" на ровном месте, хотя чистить было НЕЧЕГО
+    # ровно две минуты. Это очередь, а не ошибка: ждём, пока освободится.
+    #
+    # --retry-lock умеет ждать внутри самой команды, но появился в restic 0.16;
+    # на серверах встречается и 0.14, поэтому там ждём сами, глядя на список локов.
+    RETRY_LOCK=""
+    if "$BIN" forget --help 2>/dev/null | grep -q -- "--retry-lock"; then
+      RETRY_LOCK="--retry-lock 20m"
+    else
+      waited=0
+      while [ "$waited" -lt 1200 ] && [ "$("$BIN" list locks 2>/dev/null | grep -c .)" -gt 0 ]; do
+        sleep 60; waited=$((waited+60))
+      done
+      [ "$waited" -gt 0 ] && echo "ждали освобождения репозитория: $((waited/60)) мин"
+    fi
     # SAFETY: prune only when the policy keeps something. An EMPTY policy (every keep-* is 0)
     # would let forget wipe every snapshot. keep-last on its own saying 0 is normal: the
     # hand-written scripts this template replaced never passed --keep-last and rotated fine on
@@ -313,8 +331,8 @@ repo_size() { du -sb "$RESTIC_REPOSITORY" 2>/dev/null | awk '{print $1}'; }
       # each group separately. If a client backs up a file with a date in its name
       # (shared-20260812-030002.zip.enc), every snapshot forms a group of one, becomes the
       # "last snapshot" in it and is never removed.
-      forget_rc=0; "$BIN" forget --group-by host,tags "${KEEP[@]}" 2>&1 || forget_rc=$?
-      prune_rc=0;  "$BIN" prune 2>&1 || prune_rc=$?
+      forget_rc=0; "$BIN" forget --group-by host,tags ${RETRY_LOCK} "${KEEP[@]}" 2>&1 || forget_rc=$?
+      prune_rc=0;  "$BIN" prune ${RETRY_LOCK} 2>&1 || prune_rc=$?
       [ "$forget_rc" -eq 0 ] && [ "${prune_rc:-0}" -eq 0 ] && success=1
     fi
   fi
