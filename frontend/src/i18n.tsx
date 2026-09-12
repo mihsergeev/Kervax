@@ -159,6 +159,8 @@ const EN: Record<string, string> = {
 
   // --- локации (прокси) ---
   'Локации': 'Locations',
+  'ядро': 'core',
+  'ядро под курсором покажет свою загрузку': 'hover a core to read its load',
   'Откуда проверять': 'Where to probe from',
   'С панели': 'From the panel',
   'Изнутри сервера': 'From the server itself',
