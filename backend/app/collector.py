@@ -384,6 +384,16 @@ def _host_of_target(target: str) -> str:
     return d.split(":", 1)[0]
 
 
+# Сколько домен может отсутствовать в списке ноды, прежде чем монитор от неё отвяжут.
+# Список собирается раз в 15 минут, и один неполный сбор — деплой, пересоздание
+# контейнера, упавший helper — не повод считать, что сайт с ноды ушёл: два полных цикла.
+# Переезд на ДРУГУЮ ноду при этом срабатывает сразу — там домен виден, ждать нечего.
+_UNBIND_GRACE = 30 * 60
+# check_id → когда домен последний раз был виден на привязанной ноде. В памяти
+# планировщика: после его рестарта в худшем случае повторится ровно старое поведение.
+_bound_seen: dict[int, datetime] = {}
+
+
 async def rebind_local_probes(session_factory) -> int:
     """Привязывает мониторы с галочкой «локально» к ноде, обслуживающей их домен.
 
@@ -411,14 +421,28 @@ async def rebind_local_probes(session_factory) -> int:
                         serving[host] = srv.id
         changed = 0
         now = datetime.now(timezone.utc)
+        online = {
+            srv.id for srv in await session.scalars(select(Server)) if seen_online(srv, now)
+        }
         for c in checks:
             want = serving.get(_host_of_target(c.target))
+            if want is not None and want == c.probe_server_id:
+                _bound_seen[c.id] = now
+            # Домен пропал из списка, а нода, которая его держала, на связи: скорее всего
+            # это неполный сбор на деплое, а не переезд сайта. Держим привязку, пока не
+            # выйдет _UNBIND_GRACE, — агент продолжает проверять, ложного алерта нет.
+            if want is None and c.probe_server_id is not None and c.probe_server_id in online:
+                seen = _bound_seen.setdefault(c.id, now)
+                if (now - seen).total_seconds() < _UNBIND_GRACE:
+                    continue
             # Отметку ставим и при первом взгляде на монитор, и при смене ноды: в
             # обоих случаях результата от агента ещё нет, и это не падение сайта.
             if c.probe_server_id != want or c.probe_bound_at is None:
                 c.probe_server_id = want
                 c.probe_bound_at = now
                 changed += 1
+                if want is not None:
+                    _bound_seen[c.id] = now
         if changed:
             await session.commit()
         return changed
