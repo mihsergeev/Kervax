@@ -741,6 +741,73 @@ async def test_local_probe_rebinding(tmp_path):
     await engine.dispose()
 
 
+async def test_local_probe_binding_survives_a_partial_domain_scan(tmp_path):
+    """Деплой не отвязывает локальный монитор от ноды.
+
+    Список доменов ноды собирается раз в 15 минут. Попал сбор в секунды, когда новый
+    контейнер создан, но не запущен, — домен выпадал из списка, монитор терял ноду, и
+    на живой сайт приходил алерт «агент не присылает результат». Отвязывать надо
+    только когда домен пропал надолго; переезд на другую ноду — сразу.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    from app import collector
+    from app.db import create_engine_and_factory
+    from app.models import Base, Check, Server
+    from sqlalchemy import select
+
+    collector._bound_seen.clear()
+    db = (tmp_path / "sticky.db").as_posix()
+    engine, factory = create_engine_and_factory(f"sqlite+aiosqlite:///{db}")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    now = datetime.now(timezone.utc)
+    site = {"web_services": [{"kind": "caddy", "sites": ["app.example.ru"]}]}
+    async with factory() as s:
+        s.add(Check(name="app", type="http", target="https://app.example.ru",
+                    enabled=True, probe_local=True))
+        s.add(Server(name="node-a", token_hash="a", enabled=True, last_seen=now,
+                     offline_after_seconds=120, last_report=site))
+        s.add(Server(name="node-b", token_hash="b", enabled=True, last_seen=now,
+                     offline_after_seconds=120, last_report={}))
+        await s.commit()
+
+    await collector.rebind_local_probes(factory)
+    async with factory() as s:
+        a = (await s.scalars(select(Server).where(Server.name == "node-a"))).one()
+        b = (await s.scalars(select(Server).where(Server.name == "node-b"))).one()
+        chk = (await s.scalars(select(Check))).one()
+        assert chk.probe_server_id == a.id
+        # деплой: сбор на node-a не увидел домен, сама нода на связи
+        a.last_report = {"web_services": [{"kind": "caddy", "sites": []}]}
+        await s.commit()
+        a_id, b_id, cid = a.id, b.id, chk.id
+
+    assert await collector.rebind_local_probes(factory) == 0, "монитор отвязан от ноды на деплое"
+    async with factory() as s:
+        assert (await s.scalars(select(Check))).one().probe_server_id == a_id
+
+    # домена нет дольше льготного окна — тогда это уже не деплой, отвязываем
+    collector._bound_seen[cid] = now - timedelta(minutes=31)
+    assert await collector.rebind_local_probes(factory) == 1
+    async with factory() as s:
+        assert (await s.scalars(select(Check))).one().probe_server_id is None
+
+    # переезд на другую ноду — сразу, ждать тут нечего: домен там виден
+    async with factory() as s:
+        chk = (await s.scalars(select(Check))).one()
+        chk.probe_server_id = a_id
+        b = await s.get(Server, b_id)
+        b.last_report = site
+        await s.commit()
+    collector._bound_seen[cid] = now
+    await collector.rebind_local_probes(factory)
+    async with factory() as s:
+        assert (await s.scalars(select(Check))).one().probe_server_id == b_id
+    collector._bound_seen.clear()
+    await engine.dispose()
+
+
 async def test_local_probe_warmup_is_not_an_outage(tmp_path):
     """Только что привязанный локальный монитор не считается упавшим.
 

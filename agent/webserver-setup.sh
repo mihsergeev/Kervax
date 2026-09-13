@@ -8,7 +8,7 @@
 # secrets or config contents.
 set -euo pipefail
 
-KERVAX_SETUP_VERSION=0.5  # MAJOR.MINOR; compared component-wise
+KERVAX_SETUP_VERSION=0.6  # MAJOR.MINOR; compared component-wise
 KERVAX_SETUP_ALWAYS=1     # safe on any node: the refresh is a no-op without a web server
 
 HELPER_DIR=/lib65/kervax
@@ -82,9 +82,19 @@ collect_apache() {
 # value is a list of site addresses). Plus a host Caddyfile (site addresses before `{`).
 # The scheme and port are stripped.
 extract_domains() { tr ' ,' '\n' | sed -E 's~^https?://~~; s~:[0-9]+$~~; s~/.*$~~' | grep -E '^\*?[A-Za-z0-9._-]+\.[A-Za-z]{2,}$'; }
+# Контейнеры, чьи метки считаем: работающие, только что созданные и перезапускающиеся.
+# Только работающих мало. Compose при деплое сначала создаёт новый контейнер и лишь
+# потом запускает его; сбор, попавший в эти секунды, видел старый уже остановленным, а
+# новый ещё не запущенным — и все домены с его меток выпадали из списка до следующего
+# сбора через 15 минут. Мониторы этих сайтов теряли ноду, и приходил алерт «агент не
+# присылает результат» на живые сайты. Повтор --filter status — это ИЛИ.
+label_containers() {
+  docker ps -q --filter status=running --filter status=created --filter status=restarting 2>/dev/null
+}
+
 collect_caddy() {
   if command -v docker >/dev/null 2>&1; then
-    for cid in $(docker ps -q 2>/dev/null); do
+    for cid in $(label_containers); do
       # Адрес сайта живёт в метке `caddy` — ЛИБО в пронумерованных `caddy_0`,
       # `caddy_1`… когда один контейнер обслуживает несколько сайтов. Раньше читалась
       # только первая форма, и нода с метками caddy_0 выглядела как сервер вообще без
@@ -104,7 +114,7 @@ collect_caddy() {
 # (the docker provider; same idea as caddy-docker-proxy). HostSNI covers TCP routers.
 collect_traefik() {
   command -v docker >/dev/null 2>&1 || return 0
-  for cid in $(docker ps -q 2>/dev/null); do
+  for cid in $(label_containers); do
     docker inspect --format '{{json .Config.Labels}}' "$cid" 2>/dev/null
   done | grep -oE 'Host(SNI)?\(`[^)]*\)' | grep -oE '`[^`]+`' | tr -d '`' | extract_domains
 }
