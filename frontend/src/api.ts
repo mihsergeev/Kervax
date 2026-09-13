@@ -333,7 +333,10 @@ export type Branding = {
   logo: boolean
   title: string
   plate: 'auto' | 'always' | 'never'
-  plate_auto: boolean
+  plate_auto: boolean // автоанализ: на ТЁМНОЙ теме нужна плашка
+  plate_light: boolean | null // на светлой; null — залит до разделения по темам
+  dark_logo: boolean // есть отдельный вариант для тёмной темы
+  dark_plate: boolean // у варианта для тёмной темы свой фон
   version: number
 }
 export function getBranding(): Promise<Branding> {
@@ -341,14 +344,19 @@ export function getBranding(): Promise<Branding> {
 }
 // ?v= меняется при замене логотипа: файл кэшируется на неделю, и без версии
 // браузер показывал бы старый ещё долго после замены
-export function brandingLogoUrl(version: number): string {
-  return `/api/branding/logo?v=${version}`
+export function brandingLogoUrl(version: number, dark = false): string {
+  return `/api/branding/${dark ? 'logo-dark' : 'logo'}?v=${version}`
 }
+// data/dark пусты — файлы не меняются, сохраняются только настройки
 export function putBranding(body: {
-  data: string
+  data?: string
   plate: string
   plate_auto: boolean
+  plate_light: boolean | null
   title: string
+  dark?: string
+  dark_plate?: boolean
+  dark_remove?: boolean
 }): Promise<Branding> {
   return api('/api/branding', { method: 'PUT', body: JSON.stringify(body) })
 }

@@ -51,8 +51,57 @@ def _dir() -> str:
     return os.path.join(get_settings().data_dir, "branding")
 
 
-def _path(ext: str) -> str:
-    return os.path.join(_dir(), f"logo.{ext}")
+def _path(ext: str, dark: bool = False) -> str:
+    return os.path.join(_dir(), f"logo-dark.{ext}" if dark else f"logo.{ext}")
+
+
+_EXTS = ("png", "jpg", "gif", "webp", "svg")
+
+
+def _decode(raw: str) -> bytes:
+    """base64 или data-URL → байты с проверкой размера. Бросает 400/413."""
+    raw = raw.strip()
+    if raw.startswith("data:"):
+        raw = raw.split(",", 1)[-1]  # «data:image/png;base64,AAA…» → «AAA…»
+    try:
+        data = base64.b64decode(raw, validate=True)
+    except (binascii.Error, ValueError):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Файл повреждён") from None
+    if len(data) > _MAX_BYTES:
+        raise HTTPException(
+            status.HTTP_413_CONTENT_TOO_LARGE,
+            f"Файл больше {_MAX_BYTES // 1024} КБ — уменьшите логотип",
+        )
+    if not data:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Пустой файл")
+    return data
+
+
+def _store(data: bytes, dark: bool, ext: str) -> None:
+    """Кладёт уже проверенный файл, убирая прежний с другим расширением."""
+    os.makedirs(_dir(), exist_ok=True)
+    for stale in _EXTS:
+        if stale != ext:
+            try:
+                os.remove(_path(stale, dark))
+            except OSError:
+                pass
+    with open(_path(ext, dark), "wb") as f:
+        f.write(data)
+
+
+def _out(m: dict) -> BrandingOut:
+    light = m.get("plate_light")
+    return BrandingOut(
+        logo=bool(m.get("ext")),
+        title=m.get("title", ""),
+        plate=m.get("plate", "auto"),
+        plate_auto=bool(m.get("plate_auto")),
+        plate_light=light if isinstance(light, bool) else None,
+        dark_logo=bool(m.get("dark_ext")),
+        dark_plate=bool(m.get("dark_plate")),
+        version=m.get("v", 0),
+    )
 
 
 def _sniff(data: bytes) -> tuple[str, str]:
@@ -100,24 +149,29 @@ def _write_meta(meta: dict) -> None:
 @router.get("", response_model=BrandingOut)
 async def get_branding() -> BrandingOut:
     """Публично: экран входа рисуется до авторизации."""
-    m = _read_meta()
-    return BrandingOut(
-        logo=bool(m.get("ext")),
-        title=m.get("title", ""),
-        plate=m.get("plate", "auto"),
-        plate_auto=bool(m.get("plate_auto")),
-        version=m.get("v", 0),
-    )
+    return _out(_read_meta())
 
 
 @router.get("/logo")
 async def get_logo() -> Response:
+    return _serve(dark=False)
+
+
+@router.get("/logo-dark")
+async def get_logo_dark() -> Response:
+    """Вариант для тёмной темы — тёмный логотип на тёмном фоне не виден, и вместо
+    светлой плашки под ним лучше показать его светлую версию."""
+    return _serve(dark=True)
+
+
+def _serve(dark: bool) -> Response:
     m = _read_meta()
-    ext, media = m.get("ext"), m.get("media")
+    ext = m.get("dark_ext") if dark else m.get("ext")
+    media = m.get("dark_media") if dark else m.get("media")
     if not ext:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Логотип не задан")
     try:
-        with open(_path(ext), "rb") as f:
+        with open(_path(ext, dark), "rb") as f:
             data = f.read()
     except OSError:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Логотип не задан") from None
@@ -138,61 +192,67 @@ async def get_logo() -> Response:
 async def put_logo(
     body: BrandingIn, user: AdminUser, session: SessionDep
 ) -> BrandingOut:
-    """Заливает логотип (base64 или data-URL). plate: auto|always|never."""
-    raw = body.data.strip()
-    if raw.startswith("data:"):
-        raw = raw.split(",", 1)[-1]  # «data:image/png;base64,AAA…» → «AAA…»
-    try:
-        data = base64.b64decode(raw, validate=True)
-    except (binascii.Error, ValueError):
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Файл повреждён") from None
-    if len(data) > _MAX_BYTES:
-        raise HTTPException(
-            status.HTTP_413_CONTENT_TOO_LARGE,
-            f"Файл больше {_MAX_BYTES // 1024} КБ — уменьшите логотип",
-        )
-    if not data:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Пустой файл")
-    media, ext = _sniff(data)
-    plate = body.plate if body.plate in ("auto", "always", "never") else "auto"
-    title = body.title
-
-    os.makedirs(_dir(), exist_ok=True)
+    """Логотип и его настройки. Файл (base64 или data-URL) необязателен, если логотип
+    уже есть: раньше поменять подложку можно было, только заново выбрав тот же файл.
+    plate: auto|always|never."""
     old = _read_meta()
-    for stale in {"png", "jpg", "gif", "webp", "svg"}:
-        if stale != ext:
+    data = _decode(body.data) if body.data.strip() else None
+    if data is None and not old.get("ext"):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Выберите файл логотипа")
+    dark = _decode(body.dark) if body.dark.strip() else None
+    # оба файла проверяем ДО записи: иначе годный основной лёг бы на диск, а
+    # отвергнутый вариант для тёмной темы оставил бы мету от прежнего файла
+    kind = _sniff(data) if data is not None else None
+    dark_kind = _sniff(dark) if dark is not None else None
+
+    meta = dict(old)
+    changed: list[str] = []
+    if data is not None and kind is not None:
+        meta["media"], meta["ext"] = kind
+        _store(data, False, meta["ext"])
+        meta["sha"] = hashlib.sha256(data).hexdigest()[:16]
+        changed.append(f"{meta['ext']}, {len(data)} байт")
+    if dark is not None and dark_kind is not None:
+        meta["dark_media"], meta["dark_ext"] = dark_kind
+        _store(dark, True, meta["dark_ext"])
+        changed.append(f"тёмная тема: {meta['dark_ext']}, {len(dark)} байт")
+    elif body.dark_remove and old.get("dark_ext"):
+        for ext in _EXTS:
             try:
-                os.remove(_path(stale))
+                os.remove(_path(ext, dark=True))
             except OSError:
                 pass
-    with open(_path(ext), "wb") as f:
-        f.write(data)
+        meta.pop("dark_ext", None)
+        meta.pop("dark_media", None)
+        changed.append("вариант для тёмной темы убран")
 
-    meta = {
-        "ext": ext,
-        "media": media,
-        "plate": plate,
-        "plate_auto": bool(body.plate_auto),
-        "title": title.strip()[:64],
-        # версия — чтобы браузер забрал новый файл, не сбрасывая кэш вручную
-        "v": int(old.get("v", 0)) + 1,
-        "sha": hashlib.sha256(data).hexdigest()[:16],
-    }
+    meta["plate"] = body.plate if body.plate in ("auto", "always", "never") else "auto"
+    meta["plate_auto"] = bool(body.plate_auto)
+    if body.plate_light is not None:
+        meta["plate_light"] = bool(body.plate_light)
+    elif data is not None:
+        meta.pop("plate_light", None)  # новый файл без анализа — пусть браузер решит сам
+    meta["dark_plate"] = bool(body.dark_plate) if meta.get("dark_ext") else False
+    meta["title"] = body.title.strip()[:64]
+    # версия — чтобы браузер забрал новые файлы, не сбрасывая кэш вручную
+    meta["v"] = int(old.get("v", 0)) + 1
     _write_meta(meta)
-    await audit.record(session, user.username, "branding_set", f"{ext}, {len(data)} байт")
-    return BrandingOut(logo=True, title=meta["title"], plate=plate,
-                       plate_auto=bool(body.plate_auto), version=meta["v"])
+    await audit.record(
+        session, user.username, "branding_set", "; ".join(changed) or "настройки"
+    )
+    return _out(meta)
 
 
 @router.delete("", response_model=BrandingOut)
 async def delete_logo(user: AdminUser, session: SessionDep) -> BrandingOut:
     m = _read_meta()
-    if m.get("ext"):
-        try:
-            os.remove(_path(m["ext"]))
-        except OSError:
-            pass
-    _write_meta({"v": int(m.get("v", 0)) + 1, "title": m.get("title", "")})
+    for dark in (False, True):
+        for ext in _EXTS:
+            try:
+                os.remove(_path(ext, dark))
+            except OSError:
+                pass
+    meta = {"v": int(m.get("v", 0)) + 1, "title": m.get("title", "")}
+    _write_meta(meta)
     await audit.record(session, user.username, "branding_clear", "")
-    return BrandingOut(logo=False, title=m.get("title", ""), plate="auto",
-                       plate_auto=False, version=int(m.get("v", 0)) + 1)
+    return _out(meta)

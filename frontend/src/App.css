@@ -4220,6 +4220,12 @@ button.svc-site-on:hover {
 .brand-preview-lbl {
   align-self: flex-start;
 }
+.brand-dark-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-top: 0.45rem;
+}
 .brand-preview-dark .brand-preview-lbl {
   color: #93a3b3;
 }
