@@ -75,8 +75,9 @@ export function StackedAreaChart({
   const scaleH = mode === 'mirror' ? plotH / 2 : plotH
   const sy = (v: number) => zeroY - (v / top) * scaleH
 
-  // построение площадей
-  const areas: { s: Series; d: string; sign: number }[] = []
+  // построение площадей; путь линии — отдельно: заливка идёт без обводки, а линия
+  // рисуется поверх всех заливок, иначе у стека верхний слой перекрывает нижние
+  const areas: { s: Series; d: string; line: string; sign: number }[] = []
   const cum = new Array(n).fill(0) // для стека
   series.forEach((s, si) => {
     const sign = mode === 'mirror' && si === 1 ? -1 : 1
@@ -92,10 +93,12 @@ export function StackedAreaChart({
       if (mode === 'stack') cum[i] += s.values[i] ?? 0
     }
     lower.reverse()
-    areas.push({ s, d: `${upper.join(' ')} ${lower.join(' ')} Z`, sign })
+    areas.push({ s, d: `${upper.join(' ')} ${lower.join(' ')} Z`, line: upper.join(' '), sign })
   })
 
-  const gridN = mode === 'mirror' ? 2 : 3
+  // Сетка частая, как в Grafana: по ней читают значение, не наводя курсор. На шкале
+  // процентов — деление на каждые 10%, на остальных пять делений.
+  const gridN = mode === 'mirror' ? 2 : yMaxFix === 100 ? 10 : 5
   const grid =
     mode === 'mirror'
       ? [-top, 0, top].map((v) => ({ v, y: sy(v) }))
@@ -114,10 +117,12 @@ export function StackedAreaChart({
   const fmt = fmtY ?? ((v: number) => Math.round(v).toString())
   const fmtVal = fmtV ?? fmt
 
-  // Datadog-стиль: overlay (много независимых линий) — почти без заливки, чтобы не
-  // мутнело при наложении; стек/зеркало (part-to-whole) — умеренная мягкая заливка.
-  const fillTop = mode === 'overlay' ? 0.14 : 0.3
-  const fillBot = mode === 'overlay' ? 0.02 : 0.05
+  // Заливка как в Grafana. Плотно — у стека: там площади делят полотно, и цвет несёт
+  // смысл, а бледная заливка читается выцветшей. У независимых линий (ядра, частота,
+  // сеть) плотная заливка ложится слоями и превращает график в тёмную кашу, поэтому
+  // там она лёгкая; зеркальный приём/отдача — посередине.
+  const [fillTop, fillBot] =
+    mode === 'stack' ? [0.78, 0.6] : mode === 'mirror' ? [0.5, 0.14] : [0.38, 0.06]
   // id градиента уникален по (режим+цвет) — иначе один цвет в overlay и стеке
   // на одной странице делит defs и заливка «перетекает» между графиками
   const gid = (c: string) => `sac-${mode}-${c.replace('#', '')}`
@@ -210,6 +215,9 @@ export function StackedAreaChart({
             {series.map((s) => (
               <linearGradient key={s.name} id={gid(s.color)} x1="0" y1="0" x2="0" y2="1">
                 <stop offset="0%" stopColor={s.color} stopOpacity={fillTop} />
+                {/* средняя остановка: заливка ярче у кромки и уходит в глубину,
+                    а не гаснет ровной плёнкой */}
+                <stop offset="55%" stopColor={s.color} stopOpacity={fillTop * 0.34} />
                 <stop offset="100%" stopColor={s.color} stopOpacity={fillBot} />
               </linearGradient>
             ))}
@@ -218,12 +226,15 @@ export function StackedAreaChart({
             <line key={i} x1={PAD_L} y1={g.y} x2={W - PAD_R} y2={g.y} className="chart-grid" />
           ))}
           {areas.map(({ s, d }) => (
+            <path key={`a-${s.name}`} d={d} fill={`url(#${gid(s.color)})`} stroke="none" />
+          ))}
+          {areas.map(({ s, line }) => (
             <path
-              key={s.name}
-              d={d}
-              fill={`url(#${gid(s.color)})`}
+              key={`l-${s.name}`}
+              d={line}
+              fill="none"
               stroke={s.color}
-              strokeWidth={1.4}
+              strokeWidth={1.6}
               strokeLinejoin="round"
               strokeLinecap="round"
               vectorEffect="non-scaling-stroke"
