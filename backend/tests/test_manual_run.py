@@ -205,6 +205,34 @@ async def test_local_manual_run_asks_the_agent(client, auth_headers, monkeypatch
     async with _factory(client)() as s:
         probe = await s.get(AgentProbe, cid)
         assert probe.code == 200 and probe.manual_until is not None
+        answered_at = probe.ts
+        probe.ts = answered_at - timedelta(minutes=3)  # как будто ответ был давно
+        await s.commit()
+    # агент продолжает слать старый плановый сбой: данные не трогаем, но отметку
+    # времени двигаем — иначе застывшая ts через пару минут читалась бы как молчание
+    await client.post("/api/agent/report", headers=ah, json=dict(REPORT, site_probes=[
+        {"id": cid, "code": 0, "latency_ms": 0, "error": 'Get "https://closed.example": EOF'},
+    ]))
+    async with _factory(client)() as s:
+        probe = await s.get(AgentProbe, cid)
+        assert probe.code == 200 and not probe.error
+        assert probe.ts.replace(tzinfo=None) > (answered_at - timedelta(minutes=1)).replace(tzinfo=None)
+
+
+async def test_local_manual_run_only_for_http(client, auth_headers, monkeypatch):
+    """Изнутри агент умеет только HTTP: TCP-монитор с галочкой «локально» честно
+    получает «так нельзя», а не непонятную ошибку разбора адреса."""
+    cid, sid, ah = await _local_setup(client, auth_headers, monkeypatch)
+    async with _factory(client)() as s:
+        row = await s.get(Check, cid)
+        row.type = "tcp_port"
+        row.target = "closed.example"
+        row.port = 5432
+        await s.commit()
+    body = (await client.post(f"/api/checks/{cid}/run", headers=auth_headers)).json()
+    assert body["run_pending"] is None and "HTTP" in body["run_error"]
+    async with _factory(client)() as s:
+        assert (await s.scalars(select(ProbeRequest))).all() == []
 
 
 async def test_local_manual_run_fast_agent(client, auth_headers, monkeypatch):
