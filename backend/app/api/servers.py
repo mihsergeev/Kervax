@@ -2067,6 +2067,9 @@ async def _store_site_probes(session, server_id: int, results: list, now) -> lis
         elif row.manual_until is not None and now < _aware_dt(row.manual_until):
             # Свежая ручная проверка главнее: плановый ответ агент повторяет из
             # памяти, пока не проверит сайт заново, и он может быть старше нажатия.
+            # Отметку времени при этом двигаем: агент на связи и про сайт отчитался,
+            # а застывшая ts через пару минут читалась бы как «агент молчит».
+            row.ts = now
             continue
         row.server_id = server_id
         row.ts = now
