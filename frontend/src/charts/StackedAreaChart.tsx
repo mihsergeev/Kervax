@@ -81,19 +81,37 @@ export function StackedAreaChart({
   const cum = new Array(n).fill(0) // для стека
   series.forEach((s, si) => {
     const sign = mode === 'mirror' && si === 1 ? -1 : 1
-    const upper: string[] = []
-    const lower: string[] = []
-    for (let i = 0; i < n; i++) {
-      const base = mode === 'stack' ? cum[i] : 0
-      const val = s.values[i] ?? 0
-      const y0 = sy(base * sign)
-      const y1 = sy((base + val) * sign)
-      upper.push(`${i ? 'L' : 'M'}${sx(i).toFixed(1)} ${y1.toFixed(1)}`)
-      lower.push(`L${sx(i).toFixed(1)} ${y0.toFixed(1)}`)
-      if (mode === 'stack') cum[i] += s.values[i] ?? 0
+    // Пропуск в ряду (null) — «данных нет», и рисуется он разрывом. Раньше пропуск
+    // подставлялся нулём: у ноды, которая молчала, или у выделенного мышью участка,
+    // дотянутого до края окна, все линии отвесно падали в пол и шли по нулю —
+    // график показывал простой процессора там, где просто не было замеров.
+    const areaParts: string[] = []
+    const lineParts: string[] = []
+    let upper: string[] = []
+    let lower: string[] = []
+    const flush = () => {
+      if (upper.length) {
+        areaParts.push(`${upper.join(' ')} ${lower.reverse().join(' ')} Z`)
+        lineParts.push(upper.join(' '))
+      }
+      upper = []
+      lower = []
     }
-    lower.reverse()
-    areas.push({ s, d: `${upper.join(' ')} ${lower.join(' ')} Z`, line: upper.join(' '), sign })
+    for (let i = 0; i < n; i++) {
+      const raw = s.values[i]
+      if (raw == null) {
+        flush()
+        continue
+      }
+      const base = mode === 'stack' ? cum[i] : 0
+      const y0 = sy(base * sign)
+      const y1 = sy((base + raw) * sign)
+      upper.push(`${upper.length ? 'L' : 'M'}${sx(i).toFixed(1)} ${y1.toFixed(1)}`)
+      lower.push(`L${sx(i).toFixed(1)} ${y0.toFixed(1)}`)
+      if (mode === 'stack') cum[i] += raw
+    }
+    flush()
+    areas.push({ s, d: areaParts.join(' '), line: lineParts.join(' '), sign })
   })
 
   // Сетка частая, как в Grafana: по ней читают значение, не наводя курсор. На шкале
@@ -190,7 +208,7 @@ export function StackedAreaChart({
             <span className="mchart-dot" style={{ background: s.color }} />
             {s.name}
             {hi != null && (
-              <b className="sac-legval">{fmtVal(Math.abs(s.values[hi] ?? 0))}</b>
+              <b className="sac-legval">{s.values[hi] == null ? '—' : fmtVal(Math.abs(s.values[hi] as number))}</b>
             )}
           </span>
         ))}
@@ -296,7 +314,7 @@ export function StackedAreaChart({
               <div key={s.name} className="sac-tip-row">
                 <span className="mchart-dot" style={{ background: s.color }} />
                 <span className="sac-tip-name">{s.name}</span>
-                <span className="sac-tip-val">{fmtVal(Math.abs(s.values[hi] ?? 0))}</span>
+                <span className="sac-tip-val">{s.values[hi] == null ? '—' : fmtVal(Math.abs(s.values[hi] as number))}</span>
               </div>
             ))}
           </div>

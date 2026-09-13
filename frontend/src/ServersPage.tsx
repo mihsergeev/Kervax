@@ -118,7 +118,11 @@ const DISK_PALETTE = ['#5a8fc7', '#4fa79a', '#cf9b52', '#8a7fb8', '#c77b95', '#5
 // Не до бесконечности: нода может молчать неделю, и тогда все данные сожмутся в
 // точку у левого края. Хвост не длиннее самих данных — этого хватает, чтобы провал
 // бросался в глаза, а прочитать графики всё ещё было можно.
-function padToNow(mc: MetricChart, now: number): MetricChart {
+// `end` — конец показываемого окна. Для живого окна это «сейчас», а у выделенного
+// мышью участка в прошлом — его правая граница: дотягивать такой участок до текущего
+// момента значит пририсовать к нему полчаса пустоты, которой он не просил.
+function padToNow(mc: MetricChart, end: number): MetricChart {
+  const now = end
   const n = mc.ts.length
   if (n < 2) return mc
   const step = (mc.ts[n - 1] - mc.ts[0]) / (n - 1)
@@ -171,6 +175,9 @@ function buildMetric(
           name: t('простой'),
           color: GRAFANA_CPU.idle,
           values: M.map((m) => {
+            // замер без состава процессора — пропуск и у простоя: иначе на месте дыры
+            // встала бы полоса «100% свободно», которой никто не измерял
+            if (m.cpu_system == null && m.cpu_user == null) return null
             const busy = (m.cpu_system ?? 0) + (m.cpu_user ?? 0) +
               (m.cpu_iowait ?? 0) + (m.cpu_irq ?? 0)
             return Math.max(0, 100 - busy)
@@ -2251,7 +2258,7 @@ function ServerChartModal({
   }, [server.id, hours, zoom])
 
   const M = metrics ?? []
-  const mc = padToNow(buildMetric(metricKey, M, t), Date.now())
+  const mc = padToNow(buildMetric(metricKey, M, t), zoom ? zoom.to * 1000 : Date.now())
   const spanH = zoom ? (zoom.to - zoom.from) / 3600 : hours
   const fmtT =
     spanH <= 24
