@@ -130,6 +130,7 @@ export default function App() {
     () => (localStorage.getItem('kervax_theme') as 'dark' | 'light') || 'dark',
   )
 
+
   const loadMe = useCallback(() => {
     me()
       .then((u) => {

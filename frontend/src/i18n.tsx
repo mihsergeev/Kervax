@@ -159,6 +159,7 @@ const EN: Record<string, string> = {
 
   // --- локации (прокси) ---
   'Локации': 'Locations',
+  'простой': 'idle',
   'Откуда проверять': 'Where to probe from',
   'С панели': 'From the panel',
   'Изнутри сервера': 'From the server itself',
