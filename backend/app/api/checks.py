@@ -879,6 +879,13 @@ async def run_check_now(
 
 async def _run_via_agent(check, user, session, request, background) -> CheckRunOut:
     now = datetime.now(timezone.utc)
+    if check.type != "http":
+        # агент изнутри умеет только HTTP-запрос к своему веб-серверу
+        return _run_out(
+            check, user, run_source="agent",
+            run_error="проверка изнутри сервера бывает только у HTTP-мониторов — "
+                      "переключите этот монитор на проверку из панели",
+        )
     srv = await session.get(Server, check.probe_server_id) if check.probe_server_id else None
     if srv is None:
         # Ни одна нода не держит этот домен — это и есть честный ответ проверки.
