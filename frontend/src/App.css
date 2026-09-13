@@ -2855,11 +2855,15 @@ select:focus {
 }
 
 /* секция графика в детали — отдельная карточка, чтобы не сливались */
+/* Карточка графика в духе Grafana: плоское полотно без теней и градиентов, малый
+   радиус, компактные поля. Фон — тот же, что у окна, как у раскрытого на весь экран
+   графика: заливки полупрозрачные, и на подложке темнее окна те же цвета выходили
+   тусклыми. Границу держит рамка. */
 .chart-card {
-  background: var(--bg);
+  background: var(--bg-card);
   border: 1px solid var(--border);
-  border-radius: 12px;
-  padding: 0.7rem 0.85rem;
+  border-radius: 4px;
+  padding: 0.6rem 0.7rem 0.5rem;
   margin-top: 0.7rem;
 }
 
@@ -3074,9 +3078,11 @@ select:focus {
 }
 .mchart-legend {
   display: flex;
-  gap: 1rem;
+  gap: 0.9rem;
   flex-wrap: wrap;
   margin-bottom: 0.15rem;
+  font-size: 0.72rem;
+  color: color-mix(in srgb, var(--text) 78%, var(--text-muted));
 }
 .mchart-leg {
   display: inline-flex;
@@ -3109,8 +3115,8 @@ select:focus {
   transform: translateY(-50%);
   text-align: right;
   padding-right: 6px;
-  font-size: 0.72rem;
-  color: var(--text-muted);
+  font-size: 0.66rem;
+  color: color-mix(in srgb, var(--text) 78%, var(--text-muted));
   pointer-events: none;
   white-space: nowrap;
 }
@@ -3120,16 +3126,16 @@ select:focus {
   position: absolute;
   bottom: 1px;
   transform: translateX(-50%);
-  font-size: 0.72rem;
-  color: var(--text-muted);
+  font-size: 0.66rem;
+  color: color-mix(in srgb, var(--text) 78%, var(--text-muted));
   pointer-events: none;
   white-space: nowrap;
 }
 /* вертикальные линии под подписями — те же, что у горизонтальной сетки */
 .sac-xgrid {
-  stroke: var(--border);
+  stroke: var(--border-strong);
   stroke-width: 1;
-  opacity: 0.45;
+  opacity: 0.32;
 }
 .sac-legval {
   color: var(--text);
@@ -3186,9 +3192,13 @@ select:focus {
   font-weight: 700;
   font-variant-numeric: tabular-nums;
 }
-.chart-grid {
-  stroke: var(--border);
+/* Горизонтальная сетка графика. Селектор именно `line.chart-grid`: тем же классом
+   назван контейнер карточек на странице сервера, и правило без `line.` ложилось на
+   весь контейнер — полупрозрачность приглушала разом все графики с подписями. */
+line.chart-grid {
+  stroke: var(--border-strong);
   stroke-width: 1;
+  opacity: 0.42;
   vector-effect: non-scaling-stroke;
 }
 .chart-axis {

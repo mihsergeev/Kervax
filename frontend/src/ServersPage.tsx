@@ -138,6 +138,16 @@ function padToNow(mc: MetricChart, now: number): MetricChart {
 }
 
 // Строит конфиг графика метрики из массива снимков — общий для детали и полноэкрана.
+// Палитра Grafana для состава CPU: их же роли в их же цветах, включая простой. Кто
+// привык к Node Exporter Full, читает этот график, не глядя в легенду.
+const GRAFANA_CPU = {
+  system: '#eab839',
+  user: '#5794f2',
+  iowait: '#e24d42',
+  irq: '#ef843c',
+  idle: '#3274d9',
+}
+
 function buildMetric(
   key: MetricKey,
   M: ServerMetric[],
@@ -147,17 +157,25 @@ function buildMetric(
   const pctY = (v: number) => `${Math.round(v)}%`
   const pctV = (v: number) => `${v.toFixed(1)}%`
   if (key === 'cpu')
+    // Стек до ста процентов вместе с простоем — та самая картинка, по которой
+    // сразу видно, СКОЛЬКО процессора свободно, а не только чем занят занятый.
     return {
-      // overlay, а не стек: каждая метрика рисуется ОТ НУЛЯ — её линия на реальной
-      // высоте (iowait 18% = линия на 18%). В стеке полоса стоит на сумме предыдущих
-      // и читается ложно «высокой». Итог по CPU и так есть в плитке сверху.
-      key, title: `CPU · ${t('состав нагрузки')}`, ts, mode: 'overlay', yMax: 100,
+      key, title: `CPU · ${t('состав нагрузки')}`, ts, mode: 'stack', yMax: 100,
       fmtY: pctY, fmtV: pctV,
       series: [
-        { name: t('система'), color: '#8a7fb8', values: M.map((m) => m.cpu_system) },
-        { name: t('юзер'), color: '#5a8fc7', values: M.map((m) => m.cpu_user) },
-        { name: 'iowait', color: '#cf9b52', values: M.map((m) => m.cpu_iowait) },
-        { name: 'irq', color: '#c77b95', values: M.map((m) => m.cpu_irq) },
+        { name: t('система'), color: GRAFANA_CPU.system, values: M.map((m) => m.cpu_system) },
+        { name: t('юзер'), color: GRAFANA_CPU.user, values: M.map((m) => m.cpu_user) },
+        { name: 'iowait', color: GRAFANA_CPU.iowait, values: M.map((m) => m.cpu_iowait) },
+        { name: 'irq', color: GRAFANA_CPU.irq, values: M.map((m) => m.cpu_irq) },
+        {
+          name: t('простой'),
+          color: GRAFANA_CPU.idle,
+          values: M.map((m) => {
+            const busy = (m.cpu_system ?? 0) + (m.cpu_user ?? 0) +
+              (m.cpu_iowait ?? 0) + (m.cpu_irq ?? 0)
+            return Math.max(0, 100 - busy)
+          }),
+        },
       ],
     }
   if (key === 'cores') {
