@@ -63,9 +63,11 @@ type MetricKey =
 
 // приглушённая палитра (Datadog-стиль) для overlay-графиков (ядра/интерфейсы/диски).
 // Десатурированные тона: не мутнеют при наложении, различимы на 8+ линиях.
+// Классическая палитра Grafana: оттенки Node Exporter Full в их порядке — соседние
+// линии не сливаются, а цвета узнаются с первого взгляда.
 const CORE_COLORS = [
-  '#5a8fc7', '#57a894', '#cf9b52', '#c77b95', '#8a7fb8', '#5fb0ad',
-  '#d0796b', '#8faa5f', '#b58fb8', '#c98f5a', '#7f9bd0', '#6faf94',
+  '#73bf69', '#fade2a', '#5794f2', '#ff9830', '#f2495c', '#b877d9',
+  '#8ab8ff', '#96d98d', '#ffb357', '#ff7383', '#ca95e5', '#6ed0e0',
 ]
 // максимум линий/строк на overlay-графиках по сущностям (интерфейсы/диски) —
 // при 20 интерфейсах график и readout не «распидарасит»: показываем топ-N по пику,
@@ -108,7 +110,7 @@ type MetricChart = {
   fmtY: (v: number) => string
   fmtV: (v: number) => string
 }
-const DISK_PALETTE = ['#5a8fc7', '#4fa79a', '#cf9b52', '#8a7fb8', '#c77b95', '#57a894']
+const DISK_PALETTE = ['#5794f2', '#73bf69', '#ff9830', '#b877d9', '#fade2a', '#6ed0e0']
 
 // Ось графика идёт по ТОЧКАМ, а не по времени, поэтому у молчащей ноды она
 // заканчивалась последним отчётом: часы на подписях замирали, линия доходила до
@@ -199,38 +201,41 @@ function buildMetric(
   if (key === 'freq')
     return {
       key, title: `CPU · ${t('частота')}`, ts, mode: 'overlay', fmtY: fmtMHz, fmtV: fmtMHz,
-      series: [{ name: t('частота'), color: '#5a8fc7', values: M.map((m) => m.cpu_freq) }],
+      series: [{ name: t('частота'), color: '#5794f2', values: M.map((m) => m.cpu_freq) }],
     }
   if (key === 'temp')
     return {
       key, title: `CPU · ${t('температура')}`, ts, mode: 'overlay', fmtY: fmtTempC, fmtV: fmtTempC,
-      series: [{ name: t('температура'), color: '#cf9b52', values: M.map((m) => m.cpu_temp) }],
+      series: [{ name: t('температура'), color: '#ff9830', values: M.map((m) => m.cpu_temp) }],
     }
   if (key === 'throttle')
     return {
       key, title: `CPU · ${t('троттлинг')}`, ts, mode: 'overlay',
       fmtY: (v) => String(Math.round(v)), fmtV: (v) => String(Math.round(v)),
-      series: [{ name: t('троттлинг'), color: '#d06b6b', values: M.map((m) => m.cpu_throttle) }],
+      series: [{ name: t('троттлинг'), color: '#f2495c', values: M.map((m) => m.cpu_throttle) }],
     }
   if (key === 'oom')
     return {
       key, title: `${t('Память')} · ${t('OOM-киллы')}`, ts, mode: 'overlay',
       fmtY: (v) => String(Math.round(v)), fmtV: (v) => String(Math.round(v)),
-      series: [{ name: t('OOM-киллы'), color: '#d06b6b', values: M.map((m) => m.oom_kill) }],
+      series: [{ name: t('OOM-киллы'), color: '#f2495c', values: M.map((m) => m.oom_kill) }],
     }
   if (key === 'mem')
     return {
-      key, title: t('Память'), ts, yMax: 100, fmtY: pctY, fmtV: pctV,
+      key, title: t('Память'), ts, mode: 'stack', yMax: 100, fmtY: pctY, fmtV: pctV,
       series: [
         {
-          name: t('занято'), color: '#5a8fc7',
+          name: t('занято'), color: '#ff9830',
           values: M.map((m) =>
             m.mem_free != null && m.mem_cache != null
               ? Math.max(0, 100 - m.mem_free - m.mem_cache)
               : m.mem_percent,
           ),
         },
-        { name: t('кэш/буфер'), color: '#4fa79a', values: M.map((m) => m.mem_cache) },
+        { name: t('кэш/буфер'), color: '#fade2a', values: M.map((m) => m.mem_cache) },
+        // Свободное — синим до самого верха, как простой у процессора: ресурс, которого
+        // осталось много, и выглядит свободным, а не пустым местом над графиком.
+        { name: t('свободно'), color: GRAFANA_CPU.idle, values: M.map((m) => m.mem_free) },
       ],
     }
   if (key === 'swap')
@@ -238,8 +243,8 @@ function buildMetric(
       key, title: `Swap · ${t('↓ загрузка / ↑ выгрузка')}`, ts, mode: 'mirror',
       fmtY: fmtRate, fmtV: fmtRate,
       series: [
-        { name: t('↓ загрузка'), color: '#57a894', values: M.map((m) => m.swap_in) },
-        { name: t('↑ выгрузка'), color: '#cf9b52', values: M.map((m) => m.swap_out) },
+        { name: t('↓ загрузка'), color: '#73bf69', values: M.map((m) => m.swap_in) },
+        { name: t('↑ выгрузка'), color: '#ff9830', values: M.map((m) => m.swap_out) },
       ],
     }
   if (key === 'memwb')
@@ -247,8 +252,8 @@ function buildMetric(
       key, title: `${t('Память')} · ${t('буфер записи')}`, ts, mode: 'overlay',
       fmtY: fmtBytes, fmtV: fmtBytes,
       series: [
-        { name: t('ожидают записи'), color: '#cf9b52', values: M.map((m) => m.mem_dirty) },
-        { name: t('запись на диск'), color: '#c77b95', values: M.map((m) => m.mem_writeback) },
+        { name: t('ожидают записи'), color: '#ff9830', values: M.map((m) => m.mem_dirty) },
+        { name: t('запись на диск'), color: '#b877d9', values: M.map((m) => m.mem_writeback) },
       ],
     }
   if (key === 'net')
@@ -256,8 +261,8 @@ function buildMetric(
       key, title: `${t('Сеть')} · ${t('↓ приём / ↑ отдача')}`, ts, mode: 'mirror',
       fmtY: fmtRate, fmtV: fmtRate,
       series: [
-        { name: t('↓ приём'), color: '#57a894', values: M.map((m) => m.net_rx) },
-        { name: t('↑ отдача'), color: '#5a8fc7', values: M.map((m) => m.net_tx) },
+        { name: t('↓ приём'), color: '#73bf69', values: M.map((m) => m.net_rx) },
+        { name: t('↑ отдача'), color: '#5794f2', values: M.map((m) => m.net_tx) },
       ],
     }
   if (key === 'netifrx' || key === 'netiftx') {
@@ -325,16 +330,16 @@ function buildMetric(
     return {
       key, ts, mode: 'overlay', fmtY: fmtNum, fmtV: fmtNum,
       title: `conntrack · ${t('соединения')}`,
-      series: [{ name: 'conntrack', color: '#5a8fc7', values: M.map((m) => m.conntrack_count) }],
+      series: [{ name: 'conntrack', color: '#5794f2', values: M.map((m) => m.conntrack_count) }],
     }
   if (key === 'sockets')
     return {
       key, ts, mode: 'overlay', fmtY: fmtNum, fmtV: fmtNum,
       title: t('Сокеты'),
       series: [
-        { name: 'TCP', color: '#5a8fc7', values: M.map((m) => m.sock_tcp) },
-        { name: 'time-wait', color: '#cf9b52', values: M.map((m) => m.sock_tcp_tw) },
-        { name: 'UDP', color: '#57a894', values: M.map((m) => m.sock_udp) },
+        { name: 'TCP', color: '#5794f2', values: M.map((m) => m.sock_tcp) },
+        { name: 'time-wait', color: '#ff9830', values: M.map((m) => m.sock_tcp_tw) },
+        { name: 'UDP', color: '#73bf69', values: M.map((m) => m.sock_udp) },
       ],
     }
   if (key === 'diskio')
@@ -342,8 +347,8 @@ function buildMetric(
       key, title: `${t('Диск I/O')} · ${t('↓ чтение / ↑ запись')}`, ts, mode: 'mirror',
       fmtY: fmtRate, fmtV: fmtRate,
       series: [
-        { name: t('↓ чтение'), color: '#57a894', values: M.map((m) => m.disk_read) },
-        { name: t('↑ запись'), color: '#cf9b52', values: M.map((m) => m.disk_write) },
+        { name: t('↓ чтение'), color: '#73bf69', values: M.map((m) => m.disk_read) },
+        { name: t('↑ запись'), color: '#ff9830', values: M.map((m) => m.disk_write) },
       ],
     }
   if (key === 'diskiops')
@@ -351,8 +356,8 @@ function buildMetric(
       key, title: `${t('Диск IOPS')} · ${t('↓ чтение / ↑ запись')}`, ts, mode: 'mirror',
       fmtY: fmtIops, fmtV: fmtIops,
       series: [
-        { name: t('↓ чтение'), color: '#57a894', values: M.map((m) => m.disk_read_iops) },
-        { name: t('↑ запись'), color: '#cf9b52', values: M.map((m) => m.disk_write_iops) },
+        { name: t('↓ чтение'), color: '#73bf69', values: M.map((m) => m.disk_read_iops) },
+        { name: t('↑ запись'), color: '#ff9830', values: M.map((m) => m.disk_write_iops) },
       ],
     }
   // disk: своя ось времени по точкам с дисками; крупные маунты — первыми (позади)
