@@ -133,6 +133,21 @@ else
              rm -f /tmp/.kv_old.$$ /tmp/.kv_new.$$)
 fi
 
+# The manifest only knows what earlier deploys shipped. Files in the source directories
+# that no revision has - left from deploys before the manifest existed, or copied by
+# hand - are invisible to it, yet the image build takes those directories whole. A live
+# case: frontend/src/BrandingModal.tsx, removed from the repository in August, broke the
+# 1.4.28 build on one panel once the signature of a function it called had changed.
+# These directories belong to the repository entirely, so what it lacks goes too.
+ORPHANS=$(ssh "$HOST" "cd '$DIR' && find frontend/src backend/app backend/alembic -type f \
+            -not -path '*/__pycache__/*' -not -name '*.pyc' 2>/dev/null" | LC_ALL=C sort > /tmp/.kv_srv.$$
+          printf '%s\n' "$NEW_LIST" | LC_ALL=C sort > /tmp/.kv_rev.$$
+          LC_ALL=C comm -23 /tmp/.kv_srv.$$ /tmp/.kv_rev.$$
+          rm -f /tmp/.kv_srv.$$ /tmp/.kv_rev.$$)
+if [ -n "$ORPHANS" ]; then
+    STALE=$(printf '%s\n%s\n' "$STALE" "$ORPHANS" | grep -v '^$' | LC_ALL=C sort -u)
+fi
+
 if [ -n "$STALE" ]; then
     say "Files removed from the repository (they will be deleted on production)"
     printf '%s\n' "$STALE" | sed 's/^/  − /'
