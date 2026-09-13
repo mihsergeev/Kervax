@@ -117,6 +117,13 @@ export function StackedAreaChart({
   // Сетка частая, как в Grafana: по ней читают значение, не наводя курсор. На шкале
   // процентов — деление на каждые 10%, на остальных пять делений.
   const gridN = mode === 'mirror' ? 2 : yMaxFix === 100 ? 10 : 5
+  // У независимых рядов с плотной заливкой порядок рисования решает всё: нарисуй
+  // крупный ряд последним — и он закроет мелкие целиком. Крупные — позади, по
+  // среднему значению; легенда и подсказка при этом остаются в исходном порядке.
+  const avg = (vals: (number | null)[]) =>
+    vals.reduce<number>((a, v) => a + Math.abs(v ?? 0), 0) / Math.max(1, vals.length)
+  const drawOrder =
+    mode === 'overlay' ? [...areas].sort((a, b) => avg(b.s.values) - avg(a.s.values)) : areas
   const grid =
     mode === 'mirror'
       ? [-top, 0, top].map((v) => ({ v, y: sy(v) }))
@@ -135,12 +142,12 @@ export function StackedAreaChart({
   const fmt = fmtY ?? ((v: number) => Math.round(v).toString())
   const fmtVal = fmtV ?? fmt
 
-  // Заливка как в Grafana. Плотно — у стека: там площади делят полотно, и цвет несёт
-  // смысл, а бледная заливка читается выцветшей. У независимых линий (ядра, частота,
-  // сеть) плотная заливка ложится слоями и превращает график в тёмную кашу, поэтому
-  // там она лёгкая; зеркальный приём/отдача — посередине.
-  const [fillTop, fillBot] =
-    mode === 'stack' ? [0.78, 0.6] : mode === 'mirror' ? [0.5, 0.14] : [0.38, 0.06]
+  // Заливка плотная у всех графиков, как у состава процессора: цвет несёт смысл, и
+  // бледная заливка читается выцветшей. Исключение одно — много независимых рядов
+  // (ядра, интерфейсы): там плотные площади закрыли бы друг друга целиком, поэтому
+  // заливка легче, а крупные ряды рисуются позади мелких (см. drawOrder).
+  const crowded = mode === 'overlay' && series.length > 3
+  const [fillTop, fillBot] = crowded ? [0.55, 0.22] : [0.78, 0.6]
   // id градиента уникален по (режим+цвет) — иначе один цвет в overlay и стеке
   // на одной странице делит defs и заливка «перетекает» между графиками
   const gid = (c: string) => `sac-${mode}-${c.replace('#', '')}`
@@ -243,7 +250,7 @@ export function StackedAreaChart({
           {grid.map((g, i) => (
             <line key={i} x1={PAD_L} y1={g.y} x2={W - PAD_R} y2={g.y} className="chart-grid" />
           ))}
-          {areas.map(({ s, d }) => (
+          {drawOrder.map(({ s, d }) => (
             <path key={`a-${s.name}`} d={d} fill={`url(#${gid(s.color)})`} stroke="none" />
           ))}
           {areas.map(({ s, line }) => (
