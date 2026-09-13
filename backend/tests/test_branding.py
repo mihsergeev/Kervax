@@ -97,3 +97,67 @@ async def test_branding_write_requires_admin(client: httpx.AsyncClient, auth_hea
     assert (await client.get("/api/branding", headers=editor)).status_code == 200
     assert (await _put(client, editor, PNG_1PX)).status_code == 403
     assert (await client.delete("/api/branding", headers=editor)).status_code == 403
+
+
+async def test_branding_plate_per_theme_and_dark_variant(client: httpx.AsyncClient, auth_headers):
+    """Тёмный логотип на прозрачном фоне: плашка нужна только на тёмной теме.
+
+    Живой случай — логотип corpsoft24 (почти чёрный текст): панель подкладывала белую
+    плашку и на светлой теме, где он и так виден. На тёмной вместо плашки можно
+    показать светлый вариант — отдельным файлом.
+    """
+    r = await _put(client, auth_headers, SVG_OK, plate_auto=True, plate_light=False)
+    assert r.status_code == 200, r.text
+    b = r.json()
+    assert b["plate_auto"] is True and b["plate_light"] is False and b["dark_logo"] is False
+    assert (await client.get("/api/branding/logo-dark")).status_code == 404
+
+    # вариант для тёмной темы — без повторной заливки основного файла
+    r = await client.put("/api/branding", headers=auth_headers, json={
+        "plate": "auto", "plate_auto": True, "plate_light": False, "title": "",
+        "dark": b64(PNG_1PX), "dark_plate": False,
+    })
+    assert r.status_code == 200, r.text
+    b = r.json()
+    assert b["logo"] is True and b["dark_logo"] is True and b["version"] == 2
+    dark = await client.get("/api/branding/logo-dark")
+    assert dark.status_code == 200 and dark.content == PNG_1PX
+    assert "default-src 'none'" in dark.headers["content-security-policy"]
+    # основной файл остался прежним
+    assert (await client.get("/api/branding/logo")).content == SVG_OK
+
+    # только настройки: подложку можно поменять, не выбирая файл заново
+    r = await client.put("/api/branding", headers=auth_headers, json={
+        "plate": "never", "plate_auto": True, "plate_light": False, "title": "Ромашка",
+        "dark_plate": False,
+    })
+    assert r.status_code == 200 and r.json()["plate"] == "never"
+    assert r.json()["dark_logo"] is True and r.json()["title"] == "Ромашка"
+
+    # активный SVG не проходит и как вариант для тёмной темы
+    r = await client.put("/api/branding", headers=auth_headers, json={
+        "plate": "auto", "title": "", "dark": b64(SVG_SCRIPT),
+    })
+    assert r.status_code == 400
+
+    # убрать вариант для тёмной темы
+    r = await client.put("/api/branding", headers=auth_headers, json={
+        "plate": "auto", "plate_auto": True, "title": "", "dark_remove": True,
+    })
+    assert r.json()["dark_logo"] is False
+    assert (await client.get("/api/branding/logo-dark")).status_code == 404
+
+    # сброс убирает оба файла
+    await client.put("/api/branding", headers=auth_headers, json={
+        "plate": "auto", "title": "", "dark": b64(PNG_1PX),
+    })
+    r = await client.delete("/api/branding", headers=auth_headers)
+    assert r.json()["logo"] is False and r.json()["dark_logo"] is False
+    assert (await client.get("/api/branding/logo-dark")).status_code == 404
+
+
+async def test_branding_settings_need_a_logo(client: httpx.AsyncClient, auth_headers):
+    # без файла сохранять нечего: настройки без логотипа ничего не значат
+    r = await client.put("/api/branding", headers=auth_headers,
+                         json={"plate": "auto", "title": ""})
+    assert r.status_code == 400

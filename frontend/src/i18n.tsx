@@ -1370,6 +1370,20 @@ const EN: Record<string, string> = {
   'Заменяет логотип в шапке и на экране входа. PNG, SVG, WebP или JPEG до {n} КБ.':
     'Replaces the logo in the header and on the login screen. PNG, SVG, WebP or JPEG up to {n} KB.',
   'Файл логотипа': 'Logo file',
+  'Вариант для тёмной темы (необязательно)': 'Dark theme variant (optional)',
+  'Сделать светлый вариант из SVG': 'Make a light variant from the SVG',
+  'Убрать вариант для тёмной темы': 'Remove the dark theme variant',
+  'SVG не удалось перекрасить — загрузите светлый вариант файлом.':
+    'Could not recolor the SVG — upload a light variant as a file.',
+  'На тёмной теме — отдельный вариант логотипа.':
+    'The dark theme uses a separate logo variant.',
+  'У логотипа свой фон — на тёмной теме он показан на плашке.':
+    'The logo has its own background, so the dark theme shows it on a plate.',
+  'Логотип тёмный: на тёмной теме без плашки его не видно. Загрузите светлый вариант — и плашка не понадобится.':
+    'The logo is dark and invisible on the dark theme without a plate. Upload a light variant and the plate is not needed.',
+  'У логотипа свой фон — на светлой теме он тоже на плашке.':
+    'The logo has its own background, so the light theme shows it on a plate too.',
+  'На светлой теме логотип показан как есть.': 'The light theme shows the logo as is.',
   'Файл больше {n} КБ — уменьшите логотип': 'The file is over {n} KB — make the logo smaller',
   'Не удалось прочитать файл': 'Could not read the file',
   'тёмная тема': 'dark theme',

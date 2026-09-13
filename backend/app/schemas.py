@@ -283,18 +283,31 @@ class BrandingOut(BaseModel):
     logo: bool          # загружен ли свой логотип
     title: str          # подпись рядом с логотипом (название компании)
     plate: str          # auto | always | never — подложка под логотип
-    # что решил автоанализ картинки при загрузке (края непрозрачны или логотип
-    # тёмный → на тёмной теме нужна светлая подложка). Считает браузер: только он
-    # видит пиксели, а тащить на бэкенд декодер картинок ради этого не стоит.
+    # Что решил автоанализ картинки при загрузке. Считает браузер: только он видит
+    # пиксели, а тащить на бэкенд декодер картинок ради этого не стоит.
+    # plate_auto — плашка нужна на ТЁМНОЙ теме (у картинки свой фон или она тёмная).
     plate_auto: bool = False
+    # На СВЕТЛОЙ теме плашка нужна только картинке со своим фоном: тёмный логотип на
+    # прозрачном фоне там и так виден. None — логотип залит до разделения по темам,
+    # анализа нет, и браузер делает его сам при показе.
+    plate_light: bool | None = None
+    # отдельный вариант для тёмной темы (обычно светлая версия логотипа)
+    dark_logo: bool = False
+    dark_plate: bool = False  # у варианта для тёмной темы свой фон — нужна плашка
     version: int        # растёт при замене; используется как ?v= для кэша
 
 
 class BrandingIn(BaseModel):
-    data: str = Field(min_length=1, max_length=1_400_000)  # base64/data-URL
+    # base64/data-URL; пусто — файл не меняем, сохраняем только настройки
+    data: str = Field(default="", max_length=1_400_000)
     plate: str = Field(default="auto", pattern="^(auto|always|never)$")
     plate_auto: bool = False  # вердикт автоанализа на стороне браузера
+    plate_light: bool | None = None
     title: str = Field(default="", max_length=64)
+    # вариант для тёмной темы: пусто — не менять; dark_remove — убрать
+    dark: str = Field(default="", max_length=1_400_000)
+    dark_plate: bool = False
+    dark_remove: bool = False
 
 
 class KnownHostsOut(BaseModel):
