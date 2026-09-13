@@ -466,6 +466,25 @@ class CheckOut(BaseModel):
     alert_mutes: list[str] | None = None  # заглушённые типы алертов монитора
 
 
+class CheckRunOut(CheckOut):
+    """Монитор после «Проверить сейчас» + итог именно этой проверки.
+
+    Итог отдельно от last_*: карточка должна показать ответ на нажатие, а last_status
+    к моменту чтения мог уже переписать планировщик. У сайта, который проверяет агент,
+    ответ приходит не сразу — тогда run_pending несёт номер запроса, и карточка
+    спрашивает его, пока не получит вердикт или run_error."""
+
+    run_pending: int | None = None  # номер запроса к агенту: ответ ещё в пути
+    run_fast: bool = False  # агент отвечает быстрым путём (секунды, а не отчёт)
+    run_status: str = ""  # up | degraded | down — когда готово
+    run_message: str = ""
+    run_latency_ms: int | None = None
+    run_at: datetime | None = None
+    run_source: str = "panel"  # panel — из панели, agent — с сервера изнутри
+    run_server: str = ""  # чей агент проверял
+    run_error: str = ""  # проверить не удалось (агент молчит, нода не на связи)
+
+
 class CheckSampleOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -480,6 +499,10 @@ class CheckHistoryOut(BaseModel):
     check_id: int
     interval_seconds: int
     points: list[CheckSampleOut]
+    # Ширина бина, сек. По ней карточка раскладывает ленту статуса и график на всё
+    # выбранное окно: у свежего монитора два бина растягивались на всю ширину, и
+    # один сбой из двадцати проверок выглядел как «полдня лежал».
+    step_seconds: int = 0
 
 
 class UptimeOut(BaseModel):
@@ -987,6 +1010,12 @@ class DockerCommandOut(BaseModel):
     status: str  # pending/running/done/error
     ok: bool | None
     result: str
+
+
+class AgentSiteProbesIn(BaseModel):
+    """Агент → панель: ответы на ручную проверку сайта (быстрый путь агента 2.7+)."""
+
+    site_probes: list[dict] = Field(default_factory=list, max_length=50)
 
 
 class DockerResultIn(BaseModel):

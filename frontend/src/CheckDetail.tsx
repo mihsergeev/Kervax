@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   ApiError,
   checkHistory,
@@ -7,11 +7,15 @@ import {
   checkToForm,
   checkUptime,
   listIncidents,
+  runCheck,
+  runCheckResult,
   snoozeCheck,
   updateCheck,
   type Check,
   type CheckForm,
+  type CheckRun,
   type CheckSample,
+  type CheckStatus,
   type Incident,
   type LocationResult,
   type Uptime,
@@ -19,7 +23,7 @@ import {
 import { CheckFormCard } from './CheckFormCard'
 import { SnoozeControl } from './SnoozeControl'
 import { StackedAreaChart } from './charts/StackedAreaChart'
-import { StatusBar } from './charts/StatusBar'
+import { StatusBar, type BarStatus } from './charts/StatusBar'
 import { useI18n } from './i18n'
 import { expiryText } from './checkUtils'
 import { useAuth } from './auth'
@@ -29,7 +33,7 @@ type Props = {
   groups?: string[]
   onClose: () => void
   onSaved?: () => void
-  onRun?: () => void
+  onRun?: () => void // ручная проверка закончилась — обновить список
   onDelete?: () => void
   onUnauthorized: () => void
 }
@@ -52,6 +56,43 @@ function fmtDateTime(ts: string): string {
 function tone(u: number | null): string {
   if (u == null) return ''
   return u >= 99 ? 't-up' : u >= 95 ? 't-degraded' : 't-down'
+}
+
+// Состояние ручной проверки: идёт → готово (вердикт) или «проверить не удалось».
+type RunState =
+  | {
+      phase: 'running'
+      source: 'panel' | 'agent'
+      server: string
+      fast: boolean
+      pending: number | null // номер запроса к агенту, когда ответ ещё в пути
+      since: number
+    }
+  | { phase: 'done'; result: CheckRun }
+  | { phase: 'failed'; message: string }
+
+// Бины окна целиком: пропуски — «нет данных», а не соседние бины, растянутые на всю
+// ширину. У свежего монитора было два бина на всю ленту, и один сбой из двадцати
+// проверок выглядел как «полсуток лежал» — рядом с лентой в списке, где тот же сбой
+// занимал одну клетку из двадцати четырёх.
+function fillWindow(
+  points: CheckSample[],
+  fromMs: number,
+  toMs: number,
+  stepSec: number,
+): { ts: number; p: CheckSample | null }[] {
+  const plain = points.map((p) => ({ ts: new Date(p.ts).getTime(), p }))
+  if (!stepSec || points.length === 0) return plain
+  const stepMs = stepSec * 1000
+  const first = Math.floor(fromMs / stepMs) * stepMs
+  const last = Math.floor(toMs / stepMs) * stepMs
+  const n = (last - first) / stepMs + 1
+  if (n <= 0 || n > 2000) return plain
+  const byBin = new Map<number, CheckSample>()
+  for (const x of plain) byBin.set(Math.floor(x.ts / stepMs) * stepMs, x.p)
+  const out: { ts: number; p: CheckSample | null }[] = []
+  for (let b = first; b <= last; b += stepMs) out.push({ ts: b, p: byBin.get(b) ?? null })
+  return out
 }
 
 /** Метка «алерта не было» с объяснением, чего именно не хватило. */
@@ -85,6 +126,11 @@ export function CheckDetail({ check, groups, onClose, onSaved, onRun, onDelete, 
   const [selectedIp, setSelectedIp] = useState<string | null>(null) // график по IP
   const [zoomOpen, setZoomOpen] = useState(false)
   const [err, setErr] = useState<string | null>(null)
+  const [step, setStep] = useState(0) // ширина бина истории, сек
+  // ручная проверка и её вердикт; refresh — перечитать карточку сразу после неё,
+  // не дожидаясь очередного автообновления
+  const [run, setRun] = useState<RunState | null>(null)
+  const [refresh, setRefresh] = useState(0)
 
   // редактирование прямо в модалке
   const [editing, setEditing] = useState(false)
@@ -127,6 +173,74 @@ export function CheckDetail({ check, groups, onClose, onSaved, onRun, onDelete, 
     [onUnauthorized, t],
   )
 
+  // «Проверить сейчас»: человек жмёт кнопку, когда что-то поменял или сомневается, и
+  // ответ должен быть виден сразу и однозначно — работает сайт или нет и почему.
+  // Раньше результат молча записывался в журнал: кнопку жали двадцать раз подряд.
+  const running = run?.phase === 'running'
+  const finishRun = (r: CheckRun) => {
+    setRun(r.run_error ? { phase: 'failed', message: r.run_error } : { phase: 'done', result: r })
+    setRefresh((x) => x + 1)
+    onRun?.()
+  }
+  // опрос ответа агента живёт в эффекте, а колбэки меняются на каждой отрисовке
+  const runCb = useRef({ finishRun, onUnauthorized })
+  runCb.current = { finishRun, onUnauthorized }
+
+  const startRun = async () => {
+    if (running) return
+    const local = check.probe_local
+    setRun({
+      phase: 'running', source: local ? 'agent' : 'panel',
+      server: check.probe_server_name ?? '', fast: false, pending: null, since: Date.now(),
+    })
+    try {
+      const r = await runCheck(check.id)
+      if (r.run_pending != null) {
+        setRun({
+          phase: 'running', source: 'agent', server: r.run_server, fast: r.run_fast,
+          pending: r.run_pending, since: Date.now(),
+        })
+      } else {
+        finishRun(r)
+      }
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 401) return onUnauthorized()
+      setRun({ phase: 'failed', message: e instanceof Error ? e.message : t('Ошибка') })
+    }
+  }
+
+  const pendingId = run?.phase === 'running' ? run.pending : null
+  useEffect(() => {
+    if (pendingId == null) return
+    let stop = false
+    const started = Date.now()
+    let timer = 0
+    const poll = async () => {
+      if (stop) return
+      try {
+        const r = await runCheckResult(check.id, pendingId)
+        if (stop) return
+        if (r.run_pending == null) return runCb.current.finishRun(r)
+      } catch (e) {
+        if (e instanceof ApiError && e.status === 401) return runCb.current.onUnauthorized()
+        // сеть моргнула — спрашиваем дальше, срок ожидания считает панель
+      }
+      if (Date.now() - started > 150_000) {
+        setRun({ phase: 'failed', message: t('Ответ проверки так и не пришёл.') })
+        return
+      }
+      timer = window.setTimeout(poll, 1000)
+    }
+    timer = window.setTimeout(poll, 700)
+    return () => {
+      stop = true
+      window.clearTimeout(timer)
+    }
+  }, [pendingId, check.id, t])
+
+  useEffect(() => setRun(null), [check.id])
+  const closeRun = useCallback(() => setRun(null), [])
+
   // статусы/аптайм/инциденты/локации — с автообновлением (пока не редактируем)
   useEffect(() => {
     if (editing) return
@@ -147,7 +261,7 @@ export function CheckDetail({ check, groups, onClose, onSaved, onRun, onDelete, 
     run()
     const id = window.setInterval(run, 12000)
     return () => window.clearInterval(id)
-  }, [check.id, check.check_locations, editing, logFailed, fail])
+  }, [check.id, check.check_locations, editing, logFailed, fail, refresh])
 
   useEffect(() => {
     setOldInc(false)
@@ -183,13 +297,16 @@ export function CheckDetail({ check, groups, onClose, onSaved, onRun, onDelete, 
         undefined,
         selectedIp ?? undefined,
       )
-        .then((h) => setPoints(h.points))
+        .then((h) => {
+          setPoints(h.points)
+          setStep(h.step_seconds ?? 0)
+        })
         .catch(fail)
     run()
     if (editing) return
     const id = window.setInterval(run, 12000)
     return () => window.clearInterval(id)
-  }, [check.id, hours, selectedLoc, selDirect, selectedIp, editing, fail])
+  }, [check.id, hours, selectedLoc, selDirect, selectedIp, editing, fail, refresh])
 
   const isCert = check.type === 'cert'
   const chartTs = (points ?? []).map((p) => new Date(p.ts).getTime())
@@ -217,10 +334,16 @@ export function CheckDetail({ check, groups, onClose, onSaved, onRun, onDelete, 
       : (ms: number) =>
           new Date(ms).toLocaleDateString([], { day: '2-digit', month: '2-digit' })
 
-  const segments = (points ?? []).map((p) => ({
-    status: p.status,
-    title: `${fmtDateTime(p.ts)} · ${p.status}`,
-  }))
+  const nowMs = Date.now()
+  const segments: { status: BarStatus; title: string }[] =
+    points == null
+      ? []
+      : fillWindow(points, nowMs - hours * 3600_000, nowMs, step).map(({ ts, p }) => ({
+          status: p ? p.status : 'nodata',
+          title: `${fmtDateTime(new Date(ts).toISOString())} · ${
+            p ? statusWord(p.status, t) : t('нет данных')
+          }`,
+        }))
 
   return (
     <>
@@ -236,8 +359,13 @@ export function CheckDetail({ check, groups, onClose, onSaved, onRun, onDelete, 
           </div>
           <div className="detail-head-actions">
             {!editing && !isViewer && onRun && (
-              <button className="ghost icon-btn" onClick={onRun} title={t('Проверить сейчас')}>
-                ▶
+              <button
+                className="ghost icon-btn"
+                onClick={startRun}
+                disabled={running}
+                title={t('Проверить сейчас')}
+              >
+                {running ? <span className="run-spin" /> : '▶'}
               </button>
             )}
             {!editing && !isViewer && (
@@ -542,6 +670,7 @@ export function CheckDetail({ check, groups, onClose, onSaved, onRun, onDelete, 
         )}
       </div>
     </div>
+    {run && <RunVerdict run={run} onClose={closeRun} />}
     {zoomOpen && (
       <CheckChartModal
         check={check}
@@ -657,7 +786,7 @@ function CheckChartModal({
               <StatusBar
                 segments={(points ?? []).map((p) => ({
                   status: p.status,
-                  title: `${fmtDateTime(p.ts)} · ${p.status}`,
+                  title: `${fmtDateTime(p.ts)} · ${statusWord(p.status, t)}`,
                 }))}
               />
             </div>
@@ -678,6 +807,95 @@ function CheckChartModal({
           <div className="chart-empty">{t('Нет данных за период')}</div>
         )}
       </div>
+    </div>
+  )
+}
+
+function statusWord(
+  st: CheckStatus,
+  t: (k: string, p?: Record<string, string | number>) => string,
+): string {
+  return st === 'up'
+    ? t('работает')
+    : st === 'degraded'
+      ? t('деградация')
+      : st === 'down'
+        ? t('недоступен')
+        : t('нет данных')
+}
+
+/** Всплывающий ответ на «Проверить сейчас»: крупно — работает или нет, ниже — почему
+ *  и откуда проверяли. Успех сам уходит через несколько секунд; сбой и «не удалось
+ *  проверить» висят, пока их не закроют: их надо прочитать. */
+function RunVerdict({ run, onClose }: { run: RunState; onClose: () => void }) {
+  const { t } = useI18n()
+  const [, setTick] = useState(0)
+  useEffect(() => {
+    if (run.phase !== 'running') return
+    const id = window.setInterval(() => setTick((x) => x + 1), 1000)
+    return () => window.clearInterval(id)
+  }, [run.phase])
+  const autoHide = run.phase === 'done' && run.result.run_status === 'up'
+  useEffect(() => {
+    if (!autoHide) return
+    const id = window.setTimeout(onClose, 8000)
+    return () => window.clearTimeout(id)
+  }, [autoHide, onClose, run])
+
+  let tone: string
+  let icon: React.ReactNode
+  let title: string
+  let text = ''
+  let meta = ''
+  if (run.phase === 'running') {
+    tone = 'running'
+    icon = <span className="run-spin run-spin-lg" />
+    title = t('Проверяем…')
+    const secs = Math.max(0, Math.round((Date.now() - run.since) / 1000))
+    if (run.source === 'agent') {
+      text = run.server
+        ? t('Сайт проверяет агент изнутри сервера {srv}', { srv: run.server })
+        : t('Сайт проверяет агент изнутри сервера')
+      if (run.pending != null && !run.fast) meta = t('обычно это до 15 секунд')
+    } else {
+      text = t('Запрос к сайту идёт прямо сейчас')
+    }
+    if (secs >= 2) meta = meta ? `${meta} · ${secs} ${t('с')}` : `${secs} ${t('с')}`
+  } else if (run.phase === 'failed') {
+    tone = 'failed'
+    icon = '!'
+    title = t('Проверить не удалось')
+    text = run.message
+  } else {
+    const r = run.result
+    const st = r.run_status || r.last_status
+    tone = st
+    icon = st === 'up' ? '✓' : st === 'degraded' ? '!' : '✕'
+    title =
+      st === 'up' ? t('Работает') : st === 'degraded' ? t('Работает с замечаниями') : t('Не работает')
+    text = r.run_message
+    const where =
+      r.run_source === 'agent'
+        ? t('проверено изнутри сервера {srv}', { srv: r.run_server })
+        : t('проверено из панели')
+    const when = r.run_at
+      ? new Date(r.run_at).toLocaleTimeString([], {
+          hour: '2-digit', minute: '2-digit', second: '2-digit',
+        })
+      : ''
+    meta = when ? `${where} · ${when}` : where
+  }
+  return (
+    <div className={`run-verdict run-verdict-${tone}`} role="status" aria-live="polite">
+      <span className="run-verdict-ic">{icon}</span>
+      <div className="run-verdict-body">
+        <div className="run-verdict-title">{title}</div>
+        {text && <div className="run-verdict-text">{text}</div>}
+        {meta && <div className="run-verdict-meta">{meta}</div>}
+      </div>
+      <button className="ghost icon-btn run-verdict-x" onClick={onClose} title={t('Закрыть')}>
+        ✕
+      </button>
     </div>
   )
 }

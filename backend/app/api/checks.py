@@ -4,13 +4,20 @@ from urllib.parse import urlparse
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Query, Request, status
 from sqlalchemy import case, delete as sa_delete, func, select
 
-from app import audit
+from app import audit, manual_probe
 from app.checks import status_matches
 from app import checks as checks_exec
-from app.collector import effective_locations
+from app.collector import (
+    _aware,
+    effective_locations,
+    record_outcome,
+    seen_online,
+    send_alerts_soon,
+)
 from app.config import get_settings
 from app.deps import CurrentUser, SessionDep, group_allowed, scope_query
 from app.models import (
+    AgentProbe,
     Check,
     CheckIncident,
     CheckIpSample,
@@ -19,6 +26,7 @@ from app.models import (
     IgnoredDomain,
     LocationResult,
     LocationSample,
+    ProbeRequest,
     Server,
     User,
 )
@@ -38,6 +46,7 @@ from app.schemas import (
     CheckIncidentOut,
     CheckOut,
     CheckReorder,
+    CheckRunOut,
     CheckSampleOut,
     CheckUpdate,
     ChecksOverviewOut,
@@ -81,34 +90,28 @@ async def _get_or_404(
     return check
 
 
-async def _execute_and_store(session: SessionDep, check: Check) -> None:
-    """Исполняет монитор сейчас, пишет снимок и обновляет последний статус."""
+async def _execute_and_store(session: SessionDep, check: Check):
+    """Исполняет монитор из панели сейчас и записывает результат той же дорожкой,
+    что и планировщик: снимок, статус, инцидент. Возвращает (исход, момент, алерты)."""
     outcome = await checks_exec.run_check(check)
     now = datetime.now(timezone.utc)
-    session.add(
-        CheckSample(
-            check_id=check.id,
-            status=outcome.status,
-            latency_ms=outcome.latency_ms,
-            value=outcome.value,
-            message=outcome.message[:512],
-            ts=now,
-        )
-    )
-    check.last_status = outcome.status
-    check.last_message = outcome.message[:512]
-    check.last_latency_ms = outcome.latency_ms
-    check.last_value = outcome.value
-    check.last_checked_at = now
-    if outcome.ip_results is not None:
-        check.last_ip_results = outcome.ip_results
-        for ipr in outcome.ip_results:
-            session.add(CheckIpSample(
-                check_id=check.id, ip=ipr["ip"], status=ipr["status"],
-                latency_ms=ipr.get("latency_ms"), ts=now,
-            ))
+    pending: list = []
+    await record_outcome(session, check, outcome, now, pending, manual=True)
     await session.commit()
     await session.refresh(check)
+    return outcome, now, pending
+
+
+def _run_out(check: Check, user, **extra) -> CheckRunOut:
+    """Ответ на ручную проверку. Секреты прячем на модели ответа, а не на объекте
+    сессии: иначе «очистка» уехала бы в базу на ближайшем flush."""
+    out = CheckRunOut.model_validate(check)
+    if user.role not in ("admin", "editor"):
+        out.auth_pass = ""
+        out.http_headers = ""
+    for key, value in extra.items():
+        setattr(out, key, value)
+    return out
 
 
 @router.get("", response_model=list[CheckOut])
@@ -214,11 +217,13 @@ async def overview(_: CurrentUser, session: SessionDep) -> ChecksOverviewOut:
                 loc_stat[lid][0] += 1
     uptime = await _uptime_24h(session)
     beats = await _recent_beats(session)
+    enabled_ids = [c.id for c in checks if c.enabled]
     open_inc = await session.scalar(
         select(func.count()).select_from(CheckIncident).where(
-            CheckIncident.ended_at.is_(None)
+            CheckIncident.ended_at.is_(None),
+            CheckIncident.check_id.in_(enabled_ids),
         )
-    )
+    ) if enabled_ids else 0
     # имена серверов-проверяльщиков: в списке сайт помечается «локально · <сервер>»,
     # иначе зелёный статус выглядит как обычная внешняя доступность, а это не она
     pids = {c.probe_server_id for c in checks if c.probe_server_id}
@@ -308,6 +313,10 @@ async def bulk_update(
     for check in checks:
         for name, value in fields.items():
             setattr(check, name, value)
+        if "probe_local" in fields or "check_locations" in fields:
+            _one_probe_source(check)
+    if "enabled" in fields:
+        await _close_if_disabled(session, checks)
     await session.commit()
     scope = f"ids={len(ids)}" if ids is not None else "all"
     await audit.record(
@@ -328,7 +337,8 @@ async def bulk_delete_checks(
         return BulkResult(updated=0)
     ids = [c.id for c in rows]
     names = ", ".join(c.name for c in rows[:20])
-    for model in (CheckSample, CheckIncident, LocationResult, LocationSample, CheckIpSample):
+    for model in (CheckSample, CheckIncident, LocationResult, LocationSample, CheckIpSample,
+                  AgentProbe, ProbeRequest):
         await session.execute(sa_delete(model).where(model.check_id.in_(ids)))
     await session.execute(sa_delete(Check).where(Check.id.in_(ids)))
     await session.commit()
@@ -389,11 +399,15 @@ async def import_checks(
 
 
 async def _first_check(session_factory, check_id: int) -> None:
-    """Первая проверка в фоне (может быть медленной/висеть на недоступном сайте)."""
+    """Первая проверка в фоне (может быть медленной/висеть на недоступном сайте).
+
+    Локальный сайт не трогаем: из панели его не видно, и первая же «проверка»
+    записала бы ложный статус. Первый результат пришлёт агент — пока он в пути,
+    планировщик не судит (прогрев привязки)."""
     try:
         async with session_factory() as session:
             check = await session.get(Check, check_id)
-            if check is not None:
+            if check is not None and not check.probe_local:
                 await _execute_and_store(session, check)
     except Exception:  # noqa: BLE001 — не критично
         pass
@@ -734,6 +748,27 @@ def _one_probe_source(check: Check) -> None:
     """
     if check.probe_local:
         check.check_locations = False
+    else:
+        # Галочку сняли — привязка к ноде больше ничего не значит. Раньше она
+        # оставалась, и агент продолжал проверять сайт, который уже проверяет панель.
+        check.probe_server_id = None
+        check.probe_bound_at = None
+
+
+async def _close_if_disabled(session, checks: list[Check]) -> None:
+    """Выключенный монитор не проверяется, и открытый инцидент закрыть было бы
+    некому: он висел вечно — «идёт сейчас» в карточке и «N откр. инцидентов» на
+    главной у монитора, который никто не проверяет."""
+    ids = [c.id for c in checks if not c.enabled]
+    if not ids:
+        return
+    now = datetime.now(timezone.utc)
+    for inc in await session.scalars(
+        select(CheckIncident).where(
+            CheckIncident.check_id.in_(ids), CheckIncident.ended_at.is_(None)
+        )
+    ):
+        inc.ended_at = now
 
 
 @router.get("/{check_id}", response_model=CheckOut)
@@ -751,6 +786,7 @@ async def update_check(
     for field, value in body.model_dump(exclude_unset=True).items():
         setattr(check, field, value)
     _one_probe_source(check)
+    await _close_if_disabled(session, [check])
     await session.commit()
     await session.refresh(check)
     await audit.record(session, user.username, "check_update", check.name)
@@ -795,21 +831,33 @@ async def delete_check(
     await session.execute(
         sa_delete(CheckIpSample).where(CheckIpSample.check_id == check_id)
     )
+    await session.execute(sa_delete(AgentProbe).where(AgentProbe.check_id == check_id))
+    await session.execute(sa_delete(ProbeRequest).where(ProbeRequest.check_id == check_id))
     await session.delete(check)
     await session.commit()
     await audit.record(session, user.username, "check_delete", name)
 
 
-@router.post("/{check_id}/run", response_model=CheckOut)
+@router.post("/{check_id}/run", response_model=CheckRunOut)
 async def run_check_now(
-    check_id: int, user: CurrentUser, session: SessionDep
-) -> Check:
+    check_id: int,
+    user: CurrentUser,
+    session: SessionDep,
+    request: Request,
+    background: BackgroundTasks,
+) -> CheckRunOut:
+    """«Проверить сейчас» — проверка тем же путём, каким монитор проверяется всегда.
+
+    Сайт, который проверяет агент на ноде, проверяем через агента: из панели его либо
+    не видно, либо видно не то (панель в белом списке, а изнутри сайт сломан)."""
     check = await _get_or_404(check_id, session, user)
+    if check.probe_local:
+        return await _run_via_agent(check, user, session, request, background)
     # «Проверить сейчас» должно проверять СЕЙЧАС — в том числе срок домена и
     # сертификата, которые обычно берутся из кэша (регистратуры не любят частых
     # запросов). Иначе после оплаты домена панель ещё часами пишет «истёк».
     checks_exec.forget_domain(check.target)
-    await _execute_and_store(session, check)
+    outcome, now, pending = await _execute_and_store(session, check)
     info = await checks_exec.probe_expiry(check)
     if info.domain_days is not None:
         check.domain_days = info.domain_days
@@ -821,14 +869,104 @@ async def run_check_now(
         check.expiry_checked_at = datetime.now(timezone.utc)
         await session.commit()
         await session.refresh(check)
-    return check
+    background.add_task(send_alerts_soon, request.app.state.session_factory, pending, now)
+    return _run_out(
+        check, user,
+        run_status=outcome.status, run_message=outcome.message[:512],
+        run_latency_ms=outcome.latency_ms, run_at=now, run_source="panel",
+    )
+
+
+async def _run_via_agent(check, user, session, request, background) -> CheckRunOut:
+    now = datetime.now(timezone.utc)
+    srv = await session.get(Server, check.probe_server_id) if check.probe_server_id else None
+    if srv is None:
+        # Ни одна нода не держит этот домен — это и есть честный ответ проверки.
+        outcome = checks_exec.outcome_from_agent(check, None, now, check.degraded_ms)
+        pending: list = []
+        await record_outcome(session, check, outcome, now, pending, manual=True)
+        await session.commit()
+        await session.refresh(check)
+        return _run_out(
+            check, user, run_status=outcome.status, run_message=outcome.message[:512],
+            run_at=now, run_source="agent",
+        )
+    base = {"probe_server_name": srv.name, "run_source": "agent", "run_server": srv.name}
+    if not seen_online(srv, now):
+        return _run_out(
+            check, user, **base,
+            run_error=f"сервер {srv.name} не на связи — проверить сайт изнутри сейчас "
+                      "некому. Статус монитора не менялся.",
+        )
+    req = await session.scalar(
+        select(ProbeRequest)
+        .where(
+            ProbeRequest.check_id == check.id,
+            ProbeRequest.server_id == srv.id,
+            ProbeRequest.ts.is_(None),
+            ProbeRequest.created_at
+            >= now - timedelta(seconds=manual_probe.deadline_seconds(check)),
+        )
+        .order_by(ProbeRequest.id.desc())
+        .limit(1)
+    )
+    if req is None:  # повторное нажатие, пока ждём ответ, нового задания не плодит
+        req = ProbeRequest(check_id=check.id, server_id=srv.id, created_at=now)
+        session.add(req)
+    srv.probe_pending_at = now
+    await session.commit()
+    await session.refresh(check)
+    return _run_out(
+        check, user, **base, run_pending=req.id, run_fast=manual_probe.fast_agent(srv),
+    )
+
+
+@router.get("/{check_id}/run/{request_id}", response_model=CheckRunOut)
+async def run_check_result(
+    check_id: int, request_id: int, user: CurrentUser, session: SessionDep
+) -> CheckRunOut:
+    """Итог ручной проверки через агента: ждём, готово или «проверить не удалось»."""
+    check = await _get_or_404(check_id, session, user)
+    req = await session.get(ProbeRequest, request_id)
+    if req is None or req.check_id != check.id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Проверка не найдена")
+    srv = await session.get(Server, req.server_id)
+    name = srv.name if srv else ""
+    base = {"probe_server_name": name or None, "run_source": "agent", "run_server": name}
+    if req.ts is not None:
+        if not req.status:
+            return _run_out(
+                check, user, **base,
+                run_error="пока шла проверка, монитор перестали проверять с этого "
+                          "сервера — ответ не засчитан",
+            )
+        return _run_out(
+            check, user, **base,
+            run_status=req.status, run_message=req.message,
+            run_latency_ms=None if req.error else req.latency_ms, run_at=req.ts,
+        )
+    now = datetime.now(timezone.utc)
+    waited = (now - _aware(req.created_at)).total_seconds()
+    if waited > manual_probe.deadline_seconds(check):
+        return _run_out(
+            check, user, **base,
+            run_error=f"агент на сервере {name} не прислал ответ за {int(waited)} с — "
+                      "проверка не выполнена. Статус монитора не менялся.",
+        )
+    return _run_out(
+        check, user, **base, run_pending=req.id, run_fast=manual_probe.fast_agent(srv),
+    )
+
+
+def _bin_step(hours: float, interval: int) -> int:
+    """Ширина бина: не уже интервала проверок и не больше ~300 точек на окно."""
+    return max(interval, int(hours * 3600 // 300), 1)
 
 
 def _bin_samples(samples, hours: float, interval: int) -> list[CheckSampleOut]:
     """Бинирует снимки по времени, чтобы payload графика оставался небольшим.
     В бакете: средняя latency/value и худший статус (для полосы статусов)."""
-    window = hours * 3600
-    step = max(interval, int(window // 300), 1)  # не больше ~300 точек
+    step = _bin_step(hours, interval)
     buckets: dict[int, list] = {}
     for s in samples:
         b = int(s.ts.timestamp() // step) * step
@@ -895,6 +1033,7 @@ async def check_history(
             check_id=check_id,
             interval_seconds=check.interval_seconds,
             points=_bin_samples(ip_samples, span_hours, check.interval_seconds),
+            step_seconds=_bin_step(span_hours, check.interval_seconds),
         )
 
     # прокси-локация → её тайм-серия; прямая/без параметра → основная проверка
@@ -917,6 +1056,7 @@ async def check_history(
             check_id=check_id,
             interval_seconds=interval,
             points=_bin_samples(samples, span_hours, interval),
+            step_seconds=_bin_step(span_hours, interval),
         )
 
     samples = list(
@@ -934,6 +1074,7 @@ async def check_history(
         check_id=check_id,
         interval_seconds=check.interval_seconds,
         points=_bin_samples(samples, span_hours, check.interval_seconds),
+        step_seconds=_bin_step(span_hours, check.interval_seconds),
     )
 
 

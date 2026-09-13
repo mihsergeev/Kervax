@@ -332,6 +332,47 @@ class AgentProbe(Base):
     # сделать не может, а у агента он и так в руках.
     cert_expires: Mapped[int] = mapped_column(BigInteger, default=0)
     cert_issuer: Mapped[str] = mapped_column(String(128), default="")
+    # До этого момента результат ручной проверки главнее планового. Агент шлёт свой
+    # последний плановый результат с каждым отчётом, пока не проверит сайт заново, —
+    # а это до интервала монитора. Без паузы человек чинил белый список, жал «Проверить
+    # сейчас», видел «работает», и через минуту планировщик брал старый ответ агента,
+    # снова открывал инцидент — ровно та путаница, из-за которой кнопку и переделали.
+    manual_until: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+
+class ProbeRequest(Base):
+    """Ручная проверка локального сайта: «проверь сейчас» для агента на ноде.
+
+    Панель сама до такого сайта не дотягивается, а агент проверяет его своим тактом.
+    Кнопка должна отвечать про СЕЙЧАС, поэтому задание уходит агенту отдельным номером
+    (в протоколе — отрицательным: -id), и ответ на него гарантированно снят после
+    нажатия, а не повторён из прошлого отчёта. Поля результата названы как у
+    AgentProbe — оценка идёт тем же outcome_from_agent."""
+
+    __tablename__ = "probe_requests"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    check_id: Mapped[int] = mapped_column(Integer, index=True)
+    server_id: Mapped[int] = mapped_column(Integer, index=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    # агент 2.7+ забрал задание быстрым опросом (раз в секунду)
+    taken_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # когда пришёл результат; None — ещё в пути
+    ts: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    code: Mapped[int] = mapped_column(Integer, default=0)
+    latency_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    error: Mapped[str] = mapped_column(String(512), default="")
+    kw_up_found: Mapped[bool] = mapped_column(Boolean, default=True)
+    kw_down_found: Mapped[bool] = mapped_column(Boolean, default=False)
+    cert_expires: Mapped[int] = mapped_column(BigInteger, default=0)
+    cert_issuer: Mapped[str] = mapped_column(String(128), default="")
+    # вердикт панели — ровно то, что записано в журнал и показано человеку
+    status: Mapped[str] = mapped_column(String(16), default="")
+    message: Mapped[str] = mapped_column(String(512), default="")
 
 
 class LocationResult(Base):
@@ -389,6 +430,13 @@ class Server(Base):
         DateTime(timezone=True), nullable=True
     )
     last_seen: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    # Когда для этой ноды последний раз просили ручную проверку сайта. Дешёвый
+    # признак для горячих путей: агенты опрашивают панель раз в секунду, и лезть на
+    # каждом опросе в probe_requests ради редкой кнопки незачем — строка сервера и
+    # так уже загружена.
+    probe_pending_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
 
