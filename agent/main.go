@@ -36,7 +36,7 @@ import (
 	"time"
 )
 
-const version = "2.6"
+const version = "2.7"
 
 // Публичный ключ для проверки подписи релизов агента (Ed25519, base64).
 // ПУСТО по умолчанию → самообновление ВЫКЛЮЧЕНО (агент никогда не заменяет себя).
@@ -952,7 +952,13 @@ func localDialer(timeout time.Duration, insecure bool) *http.Transport {
 				return conn, nil
 			}
 			// IPv6-only локалхост встречается на нодах без IPv4-лупбека
-			return d.DialContext(ctx, network, net.JoinHostPort("::1", port))
+			if conn6, err6 := d.DialContext(ctx, network, net.JoinHostPort("::1", port)); err6 == nil {
+				return conn6, nil
+			}
+			// Не удалось ни так, ни так — отдаём ошибку IPv4: лупбек v4 есть почти везде,
+			// и она говорит о главном. Раньше в панель уходила ошибка запасного ::1, и
+			// «порт закрыт на 127.0.0.1» читалось как странная беда с IPv6.
+			return nil, err
 		},
 		TLSClientConfig:   &tls.Config{InsecureSkipVerify: insecure}, //nolint:gosec // по настройке монитора
 		DisableKeepAlives: true,
@@ -2914,6 +2920,9 @@ func commandLoop(panelURL, token string) {
 			DockerCommands []dockerCommand `json:"docker_commands"`
 			KubeCommands   []kubeCommand   `json:"kube_commands"`
 			BackupCommands []backupCommand `json:"backup_commands"`
+			// «Проверить сейчас» у сайта, который проверяем изнутри: человек ждёт ответ
+			// на кнопке, поэтому задание берём здесь, а не следующим отчётом (до 15 с).
+			SiteProbes []siteProbe `json:"site_probes"`
 		}
 		if resp.StatusCode == 200 {
 			_ = json.NewDecoder(resp.Body).Decode(&out)
@@ -2928,7 +2937,32 @@ func commandLoop(panelURL, token string) {
 		for _, c := range out.BackupCommands {
 			go runBackupCommand(panelURL, token, c)
 		}
+		for _, p := range out.SiteProbes {
+			go runManualSiteProbe(panelURL, token, p)
+		}
 	}
+}
+
+// runManualSiteProbe — ручная проверка сайта по кнопке в панели: сразу, мимо
+// расписания, и ответ уходит отдельным запросом, не дожидаясь отчёта. Номер задания
+// у неё свой (отрицательный), так что плановый результат этого сайта не трогаем.
+func runManualSiteProbe(panelURL, token string, p siteProbe) {
+	r := probeSite(p)
+	body, _ := json.Marshal(map[string]any{"site_probes": []siteProbeResult{r}})
+	req, err := http.NewRequest("POST", strings.TrimRight(panelURL, "/")+"/api/agent/site-probe-result", bytes.NewReader(body))
+	if err != nil {
+		return
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := (&http.Client{Timeout: 15 * time.Second}).Do(req)
+	if err != nil {
+		// не страшно: панель переотдаст задание отчётом, если ответ так и не дошёл
+		fmt.Fprintf(os.Stderr, "kervax-agent: ответ на ручную проверку не отправлен: %v\n", err)
+		return
+	}
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
 }
 
 func postDockerResult(panelURL, token string, id int, ok bool, output string) {

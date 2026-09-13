@@ -477,8 +477,27 @@ export function deleteCheck(id: number): Promise<void> {
   return api<void>(`/api/checks/${id}`, { method: 'DELETE' })
 }
 
-export function runCheck(id: number): Promise<Check> {
-  return api<Check>(`/api/checks/${id}/run`, { method: 'POST' })
+// Итог «Проверить сейчас»: монитор + ответ именно на это нажатие. Сайт, который
+// проверяет агент на ноде, отвечает не сразу — тогда run_pending несёт номер запроса,
+// и карточка спрашивает runCheckResult, пока не придёт вердикт или run_error.
+export type CheckRun = Check & {
+  run_pending: number | null
+  run_fast: boolean // агент отвечает быстрым путём — секунды, а не интервал отчёта
+  run_status: '' | CheckStatus
+  run_message: string
+  run_latency_ms: number | null
+  run_at: string | null
+  run_source: 'panel' | 'agent'
+  run_server: string
+  run_error: string // проверить не удалось: агент молчит, нода не на связи
+}
+
+export function runCheck(id: number): Promise<CheckRun> {
+  return api<CheckRun>(`/api/checks/${id}/run`, { method: 'POST' })
+}
+
+export function runCheckResult(id: number, requestId: number): Promise<CheckRun> {
+  return api<CheckRun>(`/api/checks/${id}/run/${requestId}`)
 }
 
 // Быстрый снуз алертов монитора на N часов (0 = снять).
@@ -503,7 +522,12 @@ export function checkHistory(
   locationId?: number,
   range?: { from: number; to: number }, // unix-сек — произвольный диапазон (зум)
   ip?: string, // график по конкретному IP (режим «все адреса»)
-): Promise<{ check_id: number; interval_seconds: number; points: CheckSample[] }> {
+): Promise<{
+  check_id: number
+  interval_seconds: number
+  points: CheckSample[]
+  step_seconds?: number // ширина бина — чтобы разложить ленту статуса на всё окно
+}> {
   const q = locationId != null ? `&location_id=${locationId}` : ''
   const r = range ? `&from_ts=${range.from}&to_ts=${range.to}` : ''
   const ipq = ip ? `&ip=${encodeURIComponent(ip)}` : ''

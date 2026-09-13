@@ -653,10 +653,22 @@ async def test_agent_probe_outcome():
 
     assert checks_exec.outcome_from_agent(check, probe, now, 2000).status == "up"
 
-    # ошибка с ноды переводится тем же словарём, что и своя
-    probe.error = "dial tcp 127.0.0.1:443: connect: connection refused"
+    # обрыв уже принятого соединения — белый список: подсказываем, что добавить
+    probe.error = 'Get "https://x": EOF'
+    probe.latency_ms = 0
     out = checks_exec.outcome_from_agent(check, probe, now, 2000)
-    assert out.status == "down" and "172.16.0.0/12" in out.message  # подсказываем, что добавить
+    assert out.status == "down" and "172.16.0.0/12" in out.message
+    # у несостоявшегося запроса задержки нет — не «0 мс»
+    assert out.latency_ms is None
+
+    # «отказано в соединении» — это НЕ белый список: на localhost порт никто не
+    # слушает (живой случай — ingress Kubernetes на внешнем адресе), и советовать
+    # править белый список значит отправить человека чинить то, что не сломано
+    probe.error = "dial tcp [::1]:443: connect: connection refused"
+    out = checks_exec.outcome_from_agent(check, probe, now, 2000)
+    assert out.status == "down" and "172.16.0.0/12" not in out.message
+    assert "443" in out.message and "localhost" in out.message
+    probe.latency_ms = 12
 
     # молчащий агент — это отказ проверки, а не «сайт работает»
     probe.error = ""

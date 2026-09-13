@@ -477,7 +477,10 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
   }, [load])
 
   const warns = ov ? expiryWarnings(ov.checks) : []
-  const allUp = ov && ov.down === 0 && ov.degraded === 0 && ov.open_incidents === 0
+  // Заголовок — про СЕЙЧАС: сколько мониторов лежит или деградирует. Открытые
+  // инциденты сюда не подмешиваем: иначе при нуле проблем выходило красное
+  // «Проблемы: 0». Счётчик инцидентов виден строкой ниже.
+  const allUp = ov && ov.down === 0 && ov.degraded === 0
   const downChecks = (ov?.checks ?? [])
     // только включённые: выключенный «down» — не проблема (и счётчики его не считают)
     .filter((c) => c.enabled && (c.last_status === 'down' || c.last_status === 'degraded'))

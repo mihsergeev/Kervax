@@ -442,6 +442,18 @@ def eval_parts(check, code: int, kw_up_ok: bool, kw_down_found: bool,
 AGENT_PROBE_STALE_INTERVALS = 2
 
 
+def _target_port(check) -> int:
+    """Порт, на который идёт http-монитор: явный из адреса либо по схеме."""
+    target = (getattr(check, "target", "") or "").strip()
+    if "://" not in target:
+        target = "https://" + target
+    try:
+        parsed = urlparse(target)
+        return parsed.port or (80 if parsed.scheme == "http" else 443)
+    except ValueError:
+        return 443
+
+
 def outcome_from_agent(check, probe, now, degraded_ms: int) -> CheckOutcome:
     """Вердикт по результату, присланному агентом с самого сервера."""
     if probe is None:
@@ -466,33 +478,46 @@ def outcome_from_agent(check, probe, now, degraded_ms: int) -> CheckOutcome:
             message=f"агент не присылает результат {mins} мин — проверка с сервера не идёт",
         )
     if probe.error:
-        # Обрыв на локальной проверке почти всегда означает одно: белый список сайта
-        # не пускает 127.0.0.1. Снаружи такой сайт закрыт намеренно, а изнутри —
-        # по недосмотру, и без подсказки это выглядит как «сайт лежит».
         low = probe.error.lower()
+        # У несостоявшегося запроса задержки нет. Агент присылает 0, и в журнале
+        # стояло «0 мс сервер оборвал соединение», а в графике времени ответа этот
+        # ноль тянул среднее вниз — сбой выглядел как самый быстрый ответ за день.
+        lat = probe.latency_ms or None
         # Локальная проверка идёт на сам веб-сервер, и если у сайта нет TLS, тот
         # отдаёт свой внутренний сертификат — снаружи это выглядело бы иначе, а
         # изнутри читается как «подпись неизвестного центра». Почти всегда это
         # значит, что сайт живёт по HTTP, а в мониторе записан https.
         if "unknown authority" in low or "x509" in low:
             why, _ = x509_reason(probe.error)
+            return CheckOutcome("down", lat, message=f"{why} ({probe.error[:60]})")
+        if "connection refused" in low:
+            # «Отказано в соединении» — это НЕ белый список: тот рвёт уже принятое
+            # соединение, а здесь на localhost этот порт вообще никто не слушает.
+            # Живой случай: Kubernetes-нода, где ingress принимает трафик только на
+            # внешнем адресе (hostPort, LoadBalancer). Раньше сюда шла подсказка
+            # «добавьте 127.0.0.1 в белый список» — человек правил то, что не сломано.
             return CheckOutcome(
-                "down", probe.latency_ms, message=f"{why} ({probe.error[:60]})",
+                "down", None,
+                message=f"изнутри сервера порт {_target_port(check)} закрыт: веб-сервер "
+                        "не слушает localhost (так бывает у Kubernetes) — локальная "
+                        "проверка здесь не сработает, проверяйте из панели "
+                        f"({probe.error[:60]})",
             )
-        if "eof" in low or "reset by peer" in low or "connection refused" in low:
-            # Сразу говорим, ЧТО добавить: через docker-proxy веб-сервер видит не
-            # loopback, а адрес моста, поэтому одного 127.0.0.1 в списке не хватает —
-            # на этом спотыкаются каждый раз.
+        if "eof" in low or "reset by peer" in low:
+            # Обрыв уже принятого соединения на локальной проверке почти всегда
+            # означает белый список сайта, не пускающий локальный запрос. Сразу
+            # говорим, ЧТО добавить: через docker-proxy веб-сервер видит не loopback,
+            # а адрес моста, поэтому одного 127.0.0.1 в списке не хватает.
             return CheckOutcome(
-                "down", probe.latency_ms,
+                "down", lat,
                 message="сервер оборвал соединение изнутри: белый список сайта не "
-                        "пускает локальный запрос. Добавьте в него "
+                        "пускает локальный запрос — добавьте в него "
                         "127.0.0.1/32 ::1/128 172.16.0.0/12 "
                         f"({probe.error[:60]})",
             )
         # Остальное прогоняем через тот же словарь подсказок, что и свои ошибки:
         # «connection refused» инженеру понятно, дежурному — нет, а читают одни люди.
-        return CheckOutcome("down", probe.latency_ms, message=humanize_error(probe.error))
+        return CheckOutcome("down", lat, message=humanize_error(probe.error))
     return eval_parts(check, probe.code, probe.kw_up_found, probe.kw_down_found,
                       probe.latency_ms or 0, degraded_ms)
 

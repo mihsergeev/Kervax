@@ -18,7 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app import alerts, backup, checks as checks_exec, heartbeat, settings_store
 from app.setup_scripts import current_setup_versions, gaps
-from app.config import Settings
+from app.config import Settings, get_settings
 from app.models import (
     AgentProbe,
     Check,
@@ -32,6 +32,7 @@ from app.models import (
     LocationResult,
     LocationSample,
     OomEvent,
+    ProbeRequest,
     Server,
     ServerMetric,
 )
@@ -463,6 +464,113 @@ def _probe_warming_up(c: Check, now: datetime) -> bool:
     return (now - _aware(since)).total_seconds() < limit
 
 
+async def record_outcome(
+    session: AsyncSession,
+    row: Check,
+    outcome: "checks_exec.CheckOutcome",
+    now: datetime,
+    pending: list,
+    *,
+    manual: bool = False,
+) -> None:
+    """Записывает результат проверки: снимок, статус монитора, инцидент, алерты.
+
+    Одна дорожка и для планировщика, и для кнопки «Проверить сейчас». Раньше ручная
+    проверка писала снимок и статус, а инциденты не трогала вовсе: монитор зеленел,
+    а в карточке рядом висело «идёт сейчас», на главной — красное «Проблемы: 0» и
+    «1 откр. инцидентов». Человек не мог понять, работает сайт или нет.
+
+    manual=True отличается в одном: неудача не двигает счётчик «N неудачных подряд»
+    и сама алерт не шлёт. Порог задуман как «сбой держится ~N интервалов», а три
+    нажатия за пять секунд — это не три минуты простоя, и дежурный чат не должен
+    узнавать о сайте от того, кто на него сейчас и так смотрит. Успех же закрывает
+    инцидент по-настоящему — с отбоем, если о падении уже написали."""
+    msg = outcome.message[:512]
+    session.add(
+        CheckSample(
+            check_id=row.id,
+            status=outcome.status,
+            latency_ms=outcome.latency_ms,
+            value=outcome.value,
+            message=msg,
+            ts=now,
+        )
+    )
+    new_status = outcome.status
+    if new_status == "up":
+        row.consecutive_fails = 0
+    elif not manual:
+        row.consecutive_fails = (row.consecutive_fails or 0) + 1
+
+    open_inc = await session.scalar(
+        select(CheckIncident).where(
+            CheckIncident.check_id == row.id,
+            CheckIncident.ended_at.is_(None),
+        )
+    )
+    if new_status != "up":
+        if open_inc is None:
+            open_inc = CheckIncident(
+                check_id=row.id, status=new_status,
+                started_at=now, last_message=msg, notified=False,
+            )
+            session.add(open_inc)
+            await session.flush()  # получить id
+        else:
+            open_inc.status = new_status
+            open_inc.last_message = msg
+        # деградация («медленно») шумнее — свой, обычно больший порог
+        threshold = max(
+            row.degraded_after_failures if new_status == "degraded"
+            else row.alert_after_failures,
+            1,
+        )
+        if not manual and not open_inc.notified and row.consecutive_fails >= threshold:
+            pending.append(
+                ("bad", row.name, new_status, msg, open_inc.id, row.id, None, "")
+            )
+    elif open_inc is not None:
+        open_inc.ended_at = now
+        if open_inc.notified:
+            # несём up-сообщение («HTTP 200 · N мс» / «порт открыт …») —
+            # чтобы в восстановлении был виден код/латентность, а не пусто
+            pending.append(("recovery", row.name, "up", msg, None, row.id, None, ""))
+
+    row.last_status = new_status
+    row.last_message = msg
+    row.last_latency_ms = outcome.latency_ms
+    row.last_value = outcome.value
+    row.last_checked_at = now
+    # Монитор ТИПА «сертификат» сам и есть проверка срока: дни приходят в
+    # value. Отдельный проход по срокам (probe_expiry) ходит только к
+    # http-мониторам, поэтому ssl_days у cert оставался пустым — а на нём
+    # держится всё остальное: чип срока в списке, блок «истекает» на
+    # главной, группировка по домену. Данные были, показать их было нечем.
+    if row.type == "cert" and outcome.value is not None:
+        row.ssl_days = int(outcome.value)
+        row.expiry_checked_at = now
+    # разбивка по IP (режим «все адреса») — снимок для детали + точки в
+    # тайм-серию по каждому адресу (для графика времени ответа по IP)
+    if outcome.ip_results is not None:
+        row.last_ip_results = outcome.ip_results
+        for ipr in outcome.ip_results:
+            session.add(CheckIpSample(
+                check_id=row.id, ip=ipr["ip"], status=ipr["status"],
+                latency_ms=ipr.get("latency_ms"), ts=now,
+            ))
+
+
+async def send_alerts_soon(session_factory, pending: list, now: datetime) -> None:
+    """Отправка алертов из веб-запроса (ручная проверка, отчёт агента): ошибка канала
+    не должна превращаться в ошибку кнопки — результат проверки уже записан."""
+    if not pending:
+        return
+    try:
+        await _send_alerts(session_factory, get_settings(), pending, now)
+    except Exception:  # noqa: BLE001
+        log.exception("ошибка отправки алертов ручной проверки")
+
+
 async def run_due_checks(
     session_factory: async_sessionmaker[AsyncSession], settings: Settings
 ) -> int:
@@ -546,81 +654,10 @@ async def run_due_checks(
                 if isinstance(res, checks_exec.CheckOutcome)
                 else checks_exec.CheckOutcome("down", message=str(res)[:500])
             )
-            msg = outcome.message[:512]
-            session.add(
-                CheckSample(
-                    check_id=check.id,
-                    status=outcome.status,
-                    latency_ms=outcome.latency_ms,
-                    value=outcome.value,
-                    message=msg,
-                    ts=now,
-                )
-            )
             row = await session.get(Check, check.id)
             if row is None:
                 continue
-
-            new_status = outcome.status
-            row.consecutive_fails = 0 if new_status == "up" else row.consecutive_fails + 1
-
-            open_inc = await session.scalar(
-                select(CheckIncident).where(
-                    CheckIncident.check_id == row.id,
-                    CheckIncident.ended_at.is_(None),
-                )
-            )
-            if new_status != "up":
-                if open_inc is None:
-                    open_inc = CheckIncident(
-                        check_id=row.id, status=new_status,
-                        started_at=now, last_message=msg, notified=False,
-                    )
-                    session.add(open_inc)
-                    await session.flush()  # получить id
-                else:
-                    open_inc.status = new_status
-                    open_inc.last_message = msg
-                # деградация («медленно») шумнее — свой, обычно больший порог
-                threshold = max(
-                    row.degraded_after_failures if new_status == "degraded"
-                    else row.alert_after_failures,
-                    1,
-                )
-                if not open_inc.notified and row.consecutive_fails >= threshold:
-                    pending.append(
-                        ("bad", row.name, new_status, msg, open_inc.id, row.id, None, "")
-                    )
-            elif open_inc is not None:
-                open_inc.ended_at = now
-                if open_inc.notified:
-                    # несём up-сообщение («HTTP 200 · N мс» / «порт открыт …») —
-                    # чтобы в восстановлении был виден код/латентность, а не пусто
-                    pending.append(("recovery", row.name, "up", msg, None, row.id, None, ""))
-
-            row.last_status = new_status
-            row.last_message = msg
-            row.last_latency_ms = outcome.latency_ms
-            row.last_value = outcome.value
-            row.last_checked_at = now
-            # Монитор ТИПА «сертификат» сам и есть проверка срока: дни приходят в
-            # value. Отдельный проход по срокам (probe_expiry) ходит только к
-            # http-мониторам, поэтому ssl_days у cert оставался пустым — а на нём
-            # держится всё остальное: чип срока в списке, блок «истекает» на
-            # главной, группировка по домену. Данные были, показать их было нечем.
-            if row.type == "cert" and outcome.value is not None:
-                row.ssl_days = int(outcome.value)
-                row.expiry_checked_at = now
-            # разбивка по IP (режим «все адреса») — снимок для детали + точки в
-            # тайм-серию по каждому адресу (для графика времени ответа по IP)
-            if outcome.ip_results is not None:
-                row.last_ip_results = outcome.ip_results
-                for ipr in outcome.ip_results:
-                    session.add(CheckIpSample(
-                        check_id=row.id, ip=ipr["ip"], status=ipr["status"],
-                        latency_ms=ipr.get("latency_ms"), ts=now,
-                    ))
-
+            await record_outcome(session, row, outcome, now, pending)
             if check.id in exp_map:
                 _apply_expiry(row, exp_map[check.id], now, pending)
         await session.commit()
@@ -2249,6 +2286,10 @@ async def _prune(
         )
         await session.execute(
             delete(BackupCommand).where(BackupCommand.created_at < now - timedelta(days=7))
+        )
+        # ручные проверки нужны ровно на время ожидания ответа — итог уже в журнале
+        await session.execute(
+            delete(ProbeRequest).where(ProbeRequest.created_at < now - timedelta(days=1))
         )
         # закрытые инциденты старше ретеншена тоже чистим
         await session.execute(
