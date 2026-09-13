@@ -3,17 +3,22 @@
 import { useState } from 'react'
 import type { CheckStatus } from '../api'
 
-const COLOR: Record<CheckStatus, string> = {
+// nodata — бин окна, в котором проверок не было (монитор ещё не существовал или был
+// выключен). Без него лента растягивала имеющиеся бины на всю ширину.
+export type BarStatus = CheckStatus | 'nodata'
+
+const COLOR: Record<BarStatus, string> = {
   up: 'var(--up)',
   degraded: 'var(--degraded)',
   down: 'var(--down)',
   unknown: 'var(--text-muted)',
+  nodata: 'transparent',
 }
 
 export function StatusBar({
   segments,
 }: {
-  segments: { status: CheckStatus; title?: string }[]
+  segments: { status: BarStatus; title?: string }[]
 }) {
   const [hi, setHi] = useState<number | null>(null)
   if (segments.length === 0)

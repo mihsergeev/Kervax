@@ -2678,6 +2678,110 @@ select:focus {
 .statusbar-empty {
   height: 22px;
 }
+/* бин без проверок: фон ленты просвечивает ровной полосой, без блика сегмента */
+.statusbar-seg-nodata::after {
+  display: none;
+}
+
+/* --- ответ на «Проверить сейчас» ---
+   Всплывает поверх карточки: крупно — работает или нет, ниже — почему и откуда. */
+.run-verdict {
+  --run-tone: var(--accent);
+  position: fixed;
+  top: 1.1rem;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 40;
+  width: min(580px, calc(100vw - 2rem));
+  display: flex;
+  align-items: flex-start;
+  gap: 0.8rem;
+  padding: 0.85rem 0.7rem 0.85rem 0.95rem;
+  background: var(--bg-card);
+  border: 1px solid var(--border-strong);
+  border-left: 4px solid var(--run-tone);
+  border-radius: 10px;
+  box-shadow: 0 16px 44px rgba(0, 0, 0, 0.45);
+  animation: run-verdict-in 0.22s cubic-bezier(0.2, 0.8, 0.3, 1);
+}
+.run-verdict-up {
+  --run-tone: var(--up);
+}
+.run-verdict-degraded,
+.run-verdict-failed {
+  --run-tone: var(--degraded);
+}
+.run-verdict-down {
+  --run-tone: var(--down);
+}
+.run-verdict-ic {
+  flex-shrink: 0;
+  width: 2.1rem;
+  height: 2.1rem;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1.15rem;
+  font-weight: 700;
+  color: #fff;
+  background: var(--run-tone);
+}
+.run-verdict-running .run-verdict-ic {
+  background: transparent;
+}
+.run-verdict-body {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  padding-top: 0.05rem;
+}
+.run-verdict-title {
+  font-size: 1.05rem;
+  font-weight: 650;
+  color: var(--run-tone);
+}
+.run-verdict-running .run-verdict-title {
+  color: var(--text);
+}
+.run-verdict-text {
+  font-size: 0.9rem;
+  line-height: 1.4;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+.run-verdict-meta {
+  font-size: 0.78rem;
+  color: var(--text-muted);
+}
+.run-verdict-x {
+  flex-shrink: 0;
+  margin-top: -0.15rem;
+}
+@keyframes run-verdict-in {
+  from { opacity: 0; transform: translate(-50%, -8px); }
+  to { opacity: 1; transform: translate(-50%, 0); }
+}
+.run-spin {
+  display: inline-block;
+  width: 0.85em;
+  height: 0.85em;
+  border: 2px solid var(--border-strong);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: run-spin 0.8s linear infinite;
+  vertical-align: middle;
+}
+.run-spin-lg {
+  width: 1.5rem;
+  height: 1.5rem;
+  border-width: 3px;
+}
+@keyframes run-spin {
+  to { transform: rotate(360deg); }
+}
 /* лента статуса над графиком в полноэкранном зуме — выровнена по ОБЛАСТИ ГРАФИКА
    (у чарта viewBox 640, отступы PAD_L=52 слева под ось Y, PAD_R=12 справа) */
 .chart-full-status {

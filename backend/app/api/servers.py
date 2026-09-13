@@ -9,11 +9,12 @@ import secrets
 import string
 from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, Header, HTTPException, Query, Request, status
+from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, Query, Request, status
 from fastapi.responses import FileResponse, PlainTextResponse
 from sqlalchemy import delete as sa_delete, select
 
-from app import audit, geoip
+from app import audit, geoip, manual_probe
+from app.collector import send_alerts_soon
 from app.setup_scripts import (
     current_setup_versions as _current_setup_versions,
     setup_needed as _setup_needed,
@@ -37,6 +38,7 @@ from app.schemas import (
     AgentConfigOut,
     AgentReleaseOut,
     AgentReportIn,
+    AgentSiteProbesIn,
     AgentUpdateCancel,
     AgentUpdateReq,
     AlertSnoozeIn,
@@ -1874,6 +1876,8 @@ def _client_ip(xff: str, xreal: str) -> str:
 async def agent_report(
     body: AgentReportIn,
     session: SessionDep,
+    request: Request,
+    background: BackgroundTasks,
     authorization: str = Header(default=""),
     x_forwarded_for: str = Header(default=""),
     x_real_ip: str = Header(default=""),
@@ -2000,40 +2004,70 @@ async def agent_report(
     cmds = await _take_docker_commands(session, server.id)
     kcmds = await _take_kube_commands(session, server.id)
     bcmds = await _take_backup_commands(session, server.id)
-    await _store_site_probes(session, server.id, body.site_probes or [], now)
-    probes = await _site_probe_tasks(session, server.id)
+    pending = await _store_site_probes(session, server.id, body.site_probes or [], now)
+    # Ручные проверки — первыми: агент проходит задания по порядку, и «Проверить
+    # сейчас» не должно ждать, пока он переберёт медленные плановые сайты.
+    manual = await manual_probe.tasks_for_report(session, server, now)
+    probes = manual + await _site_probe_tasks(session, server.id)
     await session.commit()
+    background.add_task(send_alerts_soon, request.app.state.session_factory, pending, now)
 
     return AgentConfigOut(
-        interval=get_settings().server_report_interval, checks=[], update=upd,
+        # пока ждём ответ на ручную проверку, агент отчитывается чаще — иначе его
+        # ответ уехал бы только через обычные 15 секунд
+        interval=(
+            manual_probe.PENDING_REPORT_INTERVAL if manual
+            else get_settings().server_report_interval
+        ),
+        checks=[], update=upd,
         docker_commands=cmds, kube_commands=kcmds, backup_commands=bcmds,
         site_probes=probes,
     )
 
 
-async def _store_site_probes(session, server_id: int, results: list, now) -> None:
+async def _store_site_probes(session, server_id: int, results: list, now) -> list:
     """Кладёт присланные агентом результаты локальных проверок.
 
     Только для мониторов, которым ЭТОТ сервер назначен проверяющим: иначе агент
-    (или тот, кто добыл его токен) мог бы объявить любой чужой монитор упавшим."""
+    (или тот, кто добыл его токен) мог бы объявить любой чужой монитор упавшим.
+    Отрицательные номера — ответы на ручную проверку (см. manual_probe); вернёт
+    очередь алертов, которые они вызвали."""
     if not results:
-        return
-    ids = [int(r.get("id") or 0) for r in results if r.get("id")]
+        return []
+
+    def _id(r) -> int:
+        try:
+            return int(r.get("id") or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    pending = await manual_probe.ingest(
+        session, server_id, [r for r in results if _id(r) < 0], now
+    )
+    ids = [i for r in results if (i := _id(r)) > 0]
     if not ids:
-        return
+        return pending
     mine = set(
         await session.scalars(
-            select(Check.id).where(Check.id.in_(ids), Check.probe_server_id == server_id)
+            select(Check.id).where(
+                Check.id.in_(ids),
+                Check.probe_server_id == server_id,
+                Check.probe_local.is_(True),
+            )
         )
     )
     for r in results:
-        cid = int(r.get("id") or 0)
+        cid = _id(r)
         if cid not in mine:
             continue
         row = await session.get(AgentProbe, cid)
         if row is None:
             row = AgentProbe(check_id=cid, server_id=server_id, ts=now)
             session.add(row)
+        elif row.manual_until is not None and now < _aware_dt(row.manual_until):
+            # Свежая ручная проверка главнее: плановый ответ агент повторяет из
+            # памяти, пока не проверит сайт заново, и он может быть старше нажатия.
+            continue
         row.server_id = server_id
         row.ts = now
         row.code = int(r.get("code") or 0)
@@ -2047,41 +2081,29 @@ async def _store_site_probes(session, server_id: int, results: list, now) -> Non
         except (TypeError, ValueError):
             row.cert_expires = 0
         row.cert_issuer = str(r.get("cert_issuer") or "")[:128]
+    return pending
+
+
+def _aware_dt(dt: datetime) -> datetime:
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
 
 
 async def _site_probe_tasks(session, server_id: int) -> list[dict]:
-    """Задания агенту: что проверять изнутри сервера.
+    """Плановые задания агенту: что проверять изнутри сервера (см. site_probe_task).
 
-    Агент ходит ТОЛЬКО на localhost (адрес он подменяет сам), поэтому URL здесь —
-    это не «куда пойти», а «чьим именем представиться»: Host и SNI. Панель не может
-    послать агента ни на какой другой хост, и заставить его сканировать сеть тоже
-    не может — даже будучи захваченной."""
+    Только мониторы с галочкой «локально»: снятая галочка оставляла привязку, и агент
+    ещё долго проверял сайт, который панель давно проверяет сама."""
     rows = list(
         await session.scalars(
             select(Check).where(
                 Check.enabled.is_(True),
+                Check.probe_local.is_(True),
                 Check.probe_server_id == server_id,
                 Check.type == "http",
             )
         )
     )
-    out: list[dict] = []
-    for c in rows:
-        out.append({
-            "id": c.id,
-            "url": c.target,
-            "method": c.method or "GET",
-            "timeout_ms": c.timeout_ms,
-            "interval": c.interval_seconds,
-            "expected_status": c.expected_status,
-            "keyword_up": c.keyword_up,
-            "keyword_down": c.keyword_down,
-            "headers": c.http_headers or "",
-            "auth_user": c.auth_user if c.auth_method == "basic" else "",
-            "auth_pass": c.auth_pass if c.auth_method == "basic" else "",
-            "ignore_tls": bool(c.ignore_tls),
-        })
-    return out
+    return [manual_probe.site_probe_task(c, c.id) for c in rows]
 
 
 @agent_router.get("/commands")
@@ -2099,8 +2121,35 @@ async def agent_commands(
     cmds = await _take_docker_commands(session, server.id)
     kcmds = await _take_kube_commands(session, server.id)
     bcmds = await _take_backup_commands(session, server.id)
+    # ручная проверка сайта — агенту 2.7+, он ответит через /agent/site-probe-result
+    sprobes = await manual_probe.take_fast_tasks(session, server, datetime.now(timezone.utc))
     await session.commit()
-    return {"docker_commands": cmds, "kube_commands": kcmds, "backup_commands": bcmds}
+    return {
+        "docker_commands": cmds, "kube_commands": kcmds, "backup_commands": bcmds,
+        "site_probes": sprobes,
+    }
+
+
+@agent_router.post("/site-probe-result")
+async def agent_site_probe_result(
+    body: AgentSiteProbesIn,
+    session: SessionDep,
+    request: Request,
+    background: BackgroundTasks,
+    authorization: str = Header(default=""),
+) -> dict:
+    """Агент 2.7+ присылает ответ на ручную проверку сразу, не дожидаясь отчёта."""
+    token = authorization.removeprefix("Bearer ").strip()
+    server = await session.scalar(
+        select(Server).where(Server.token_hash == hash_agent_token(token))
+    )
+    if server is None or not server.enabled:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Неверный токен агента")
+    now = datetime.now(timezone.utc)
+    pending = await _store_site_probes(session, server.id, body.site_probes, now)
+    await session.commit()
+    background.add_task(send_alerts_soon, request.app.state.session_factory, pending, now)
+    return {"ok": True}
 
 
 @agent_router.post("/docker-result")

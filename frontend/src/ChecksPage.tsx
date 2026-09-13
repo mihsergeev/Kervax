@@ -7,7 +7,6 @@ import {
   deleteCheck,
   discoveredDomains,
   reorderChecks,
-  runCheck,
   updateCheck,
   type Check,
   type CheckForm,
@@ -210,15 +209,6 @@ export function ChecksPage({ onUnauthorized, openCheckId, onConsumed }: Props) {
     } catch (e) {
       if (e instanceof ApiError && e.status === 401) onUnauthorized()
       return false
-    }
-  }
-
-  const run = async (c: Check) => {
-    try {
-      await runCheck(c.id)
-      load()
-    } catch (e) {
-      if (e instanceof ApiError && e.status === 401) return onUnauthorized()
     }
   }
 
@@ -815,7 +805,7 @@ export function ChecksPage({ onUnauthorized, openCheckId, onConsumed }: Props) {
           groups={groupNames}
           onClose={() => setDetailId(null)}
           onSaved={load}
-          onRun={() => run(detail)}
+          onRun={load}
           onDelete={async () => {
             if (await remove(detail)) setDetailId(null)
           }}
