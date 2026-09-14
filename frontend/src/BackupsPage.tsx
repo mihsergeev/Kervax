@@ -26,6 +26,7 @@ import { updateServer } from './api'
 import { backupWindowNote } from './serverUtils'
 import { OsIcon, osShort } from './osIcon'
 import { CoverageAudit } from './CoverageAudit'
+import { helperText } from './helperText'
 import { bulkCleanupScript, safeRepoName } from './bulkCleanupScript'
 import { useAuth } from './auth'
 import { useI18n, currentLang, tr } from './i18n'
@@ -213,7 +214,7 @@ function ManageSection({ server: s, backup: b, onChanged }: { server: Server; ba
     setMsg(null)
     try {
       const res = await runAndWait(s.id, body)
-      setMsg({ ok: res.status === 'done', text: res.result || (res.status === 'done' ? t('готово') : t('ошибка')) })
+      setMsg({ ok: res.status === 'done', text: helperText(res.result, t) || (res.status === 'done' ? t('готово') : t('ошибка')) })
       onChanged()
     } catch {
       setMsg({ ok: false, text: t('ошибка') })
@@ -256,11 +257,11 @@ function ManageSection({ server: s, backup: b, onChanged }: { server: Server; ba
       if (winDirty) await updateServer(s.id, { backup_deadline_hour: deadline, backup_anytime: anytime })
       if (schedDirty) {
         const r = await runAndWait(s.id, { action: 'set_schedule', schedule })
-        if (r.status !== 'done') throw new Error(r.result || t('ошибка'))
+        if (r.status !== 'done') throw new Error(helperText(r.result, t) || t('ошибка'))
       }
       if (pathsDirty) {
         const r = await runAndWait(s.id, { action: 'set_paths', mode, paths: curList })
-        if (r.status !== 'done') throw new Error(r.result || t('ошибка'))
+        if (r.status !== 'done') throw new Error(helperText(r.result, t) || t('ошибка'))
       }
       setMsg({ ok: true, text: t('Сохранено') })
       onChanged()
@@ -547,7 +548,7 @@ function BackupModal({
     try {
       const res = await runAndWait(s.id, { action: 'restic_update' })
       const ok = res.status !== 'error'
-      setRmsg(ok ? (res.result || t('готово')) : (res.result || t('не удалось')))
+      setRmsg(ok ? (helperText(res.result, t) || t('готово')) : (helperText(res.result, t) || t('не удалось')))
       if (ok) setRdone(true)   // прячем кнопку до подтверждения отчётом
       onChanged()
     } catch (e) {
@@ -1189,7 +1190,7 @@ function RestServerUpdate({ server: s, info, onChanged }: {
     try {
       const res = await runAndWait(s.id, { action: 'update_image' })
       const ok = res.status !== 'error'
-      setMsg(ok ? (res.result || t('готово')) : (res.result || t('не удалось')))
+      setMsg(ok ? (helperText(res.result, t) || t('готово')) : (helperText(res.result, t) || t('не удалось')))
       if (ok) setDone(true)
       onChanged()
     } catch (e) {

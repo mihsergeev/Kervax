@@ -1367,6 +1367,84 @@ const EN: Record<string, string> = {
   'Заменяет логотип в шапке и на экране входа. PNG, SVG, WebP или JPEG до {n} КБ.':
     'Replaces the logo in the header and on the login screen. PNG, SVG, WebP or JPEG up to {n} KB.',
   'Файл логотипа': 'Logo file',
+  'Команда отправлена на сервер': 'Command sent to the server',
+  'Подтверждение в отчёте сервера': 'Confirmation in the server report',
+  '{n} с': '{n} s',
+  'Сервер проверяет доступ к базе (pg_dumpall --schema-only)':
+    'The server checks access to the database (pg_dumpall --schema-only)',
+  'Сервер проверяет доступ к базе (mysqldump --no-data)':
+    'The server checks access to the database (mysqldump --no-data)',
+  'Сервер проверяет доступ к ClickHouse': 'The server checks access to ClickHouse',
+  'Сервер проверяет доступ к Redis': 'The server checks access to Redis',
+  'Сервер проверяет доступ к RabbitMQ': 'The server checks access to RabbitMQ',
+  'Сервер настраивает снимок кластера': 'The server sets up the cluster snapshot',
+  'Сервер снимает пробную копию grafana.db':
+    'The server takes a trial copy of grafana.db',
+  'Сервер проверяет neo4j-admin в образе базы':
+    'The server checks neo4j-admin in the database image',
+  'Сервер настраивает дамп': 'The server sets up the dump',
+  'Сервер выключает дамп и удаляет локальные файлы':
+    'The server disables the dump and removes local files',
+  'Команда ещё выполняется на сервере — статус обновится в течение минуты.':
+    'The command is still running on the server — the status will update within a minute.',
+  'перед каждым бэкапом': 'before every backup',
+  'ежедневно по своему таймеру — файлового бэкапа на ноде нет, копия только локальная':
+    'daily on its own timer — the node has no file backup, the copy is local only',
+  'Дампы {engine} включены → {dir}: {when}, храним {keep} последних, порог свободного места {minfree}%.':
+    '{engine} dumps enabled → {dir}: {when}, keeping the last {keep}, free space threshold {minfree}%.',
+  'Каталог {dir} добавлен в список бэкапа.': '{dir} was added to the backup list.',
+  'ВНИМАНИЕ: {dir} в исключениях — дампы не попадут в бэкап!':
+    'WARNING: {dir} is excluded — the dumps will not reach the backup!',
+  'Первый дамп снимется с ближайшим бэкапом по расписанию.':
+    'The first dump will be taken with the next scheduled backup.',
+  'Первый дамп снимется при ближайшем запуске таймера.':
+    'The first dump will be taken on the next timer run.',
+  'Пробный дамп не прошёл — дампы НЕ включены: {err}':
+    'The trial dump failed — dumps were NOT enabled: {err}',
+  'Дампы {engine} выключены, локальные файлы удалены (история осталась в restic).':
+    '{engine} dumps disabled, local files removed (the history stays in restic).',
+  'Дампы {engine} и так не были включены.': '{engine} dumps were not enabled anyway.',
+  'Неизвестный движок дампа: {engine}': 'Unknown dump engine: {engine}',
+  'Каталог дампов должен быть абсолютным путём: {dir}':
+    'The dump directory must be an absolute path: {dir}',
+  'Недопустимый каталог дампов: {dir}': 'Invalid dump directory: {dir}',
+  'Корень / для дампов использовать нельзя.': 'The root / cannot be used for dumps.',
+  'Бэкап запущен.': 'Backup started.',
+  'Готово.': 'Done.',
+  'restic уже {v} — обновлять не нужно.': 'restic is already {v} — no update needed.',
+  'restic обновлён до {v} (было {old}).': 'restic updated to {v} (was {old}).',
+  'Не удалось скачать restic {v}': 'Could not download restic {v}',
+  'Контрольная сумма restic не совпала — обновление отменено.':
+    'The restic checksum did not match — the update was cancelled.',
+  'Скачанный restic не запускается — обновление отменено.':
+    'The downloaded restic does not run — the update was cancelled.',
+  'На ноде не найден restic.': 'No restic found on the node.',
+  'Таймер бэкапа не найден.': 'Backup timer not found.',
+  'Скрипт бэкапа не найден.': 'Backup script not found.',
+  'Неверное время.': 'Invalid time.',
+  'Неверный режим.': 'Invalid mode.',
+  'Недопустимый путь: {path}': 'Invalid path: {path}',
+  'Не указаны пути.': 'No paths given.',
+  'Бэкап настроен ({mode}, {time}).': 'Backup configured ({mode}, {time}).',
+  'Бэкап переведён под управление панели ({mode}, {time}).':
+    'Backup moved under panel management ({mode}, {time}).',
+  'Бэкап уже под управлением панели — переносить нечего.':
+    'The backup is already managed by the panel — nothing to migrate.',
+  'Бэкап настроен не панелью — доступов для восстановления у панели нет.':
+    'The backup was not set up by the panel — it has no restore credentials.',
+  'Helper на ноде не знает эту команду — переустановите его.':
+    'The helper on the node does not know this command — reinstall it.',
+  'rest-server обновлён до {v} (было {old}), отвечает {code}.':
+    'rest-server updated to {v} (was {old}), answering {code}.',
+  'rest-server развёрнут: порт {port}, append-only и private-repos, HTTP {code}, ufw {ufw}.':
+    'rest-server deployed: port {port}, append-only and private-repos, HTTP {code}, ufw {ufw}.',
+  'rest-server уже развёрнут и работает (порт {port}, HTTP {code}, ufw {ufw}).':
+    'rest-server is already deployed and running (port {port}, HTTP {code}, ufw {ufw}).',
+  'Обновление образа не удалось: {err}': 'The image update failed: {err}',
+  'HTTPS rest-server запущен на порту {port}.':
+    'HTTPS rest-server started on port {port}.',
+  'Репозиторий {name} создан.': 'Repository {name} created.',
+  'Скрипты ротации пересобраны: {n}.': 'Rotation scripts regenerated: {n}.',
   'Сведения с ноды давно не обновлялись: helper бэкапа там не запускается. Переустановите его.':
     'The node has not updated this for a long time: the backup helper does not run there. Reinstall it.',
   'ежедневно {time}': 'daily {time}',

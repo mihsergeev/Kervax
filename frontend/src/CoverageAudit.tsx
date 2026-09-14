@@ -1,5 +1,7 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { backupCommand, backupCommandStatus, updateServer, type BackupCommand, type Server, backupAuditMute } from './api'
+import { CommandProgress, nextPhase, type CmdProgressState } from './CommandProgress'
+import { helperText } from './helperText'
 import { useI18n } from './i18n'
 import { EngineIcon } from './engineIcon'
 import { kubeDumpManifest } from './kubeDumpManifest'
@@ -26,18 +28,34 @@ const fmtWhen = (ts: number, t: (s: string, p?: Record<string, string | number>)
 async function runAndWait(
   serverId: number,
   body: Parameters<typeof backupCommand>[1],
+  onStatus?: (status: string) => void,
 ): Promise<BackupCommand> {
   const c = await backupCommand(serverId, body)
   let last = c
-  // probe при включении быстрый, но дадим запас (медленный docker exec на нагруженной
-  // ноде). Если всё же не дождались — это НЕ ошибка: команда доедет через спул, статус
-  // подтянется следующим опросом. Возвращаем как есть, вызывающий покажет «применяется».
-  for (let i = 0; i < 100 && last.status !== 'done' && last.status !== 'error'; i++) {
+  onStatus?.(last.status)
+  // Пробный дамп на крупной базе идёт десятки секунд. Ждём до таймаута самой панели (90 с,
+  // после него команда помечается «агент не ответил»), а не обрываем раньше: иначе
+  // медленная, но успешная команда выглядела бы незавершённой.
+  for (let i = 0; i < 240 && last.status !== 'done' && last.status !== 'error'; i++) {
     await new Promise((r) => setTimeout(r, 400))
     last = await backupCommandStatus(serverId, c.id)
+    onStatus?.(last.status)
   }
   return last
 }
+
+// что делает helper на этапе «выполняет» — у каждого движка своя проверка
+const PROBE_TEXT: Record<string, string> = {
+  pg: 'Сервер проверяет доступ к базе (pg_dumpall --schema-only)',
+  mysql: 'Сервер проверяет доступ к базе (mysqldump --no-data)',
+  ch: 'Сервер проверяет доступ к ClickHouse',
+  redis: 'Сервер проверяет доступ к Redis',
+  rabbitmq: 'Сервер проверяет доступ к RabbitMQ',
+  k8s: 'Сервер настраивает снимок кластера',
+  grafana: 'Сервер снимает пробную копию grafana.db',
+  neo4j: 'Сервер проверяет neo4j-admin в образе базы',
+}
+const PROBE_SEC: Record<string, number> = { k8s: 4, redis: 6, ch: 6, rabbitmq: 8, neo4j: 12 }
 
 // Манифест CronJob для СУБД в kubernetes. Панель кластер НЕ трогает и прав exec не просит —
 // только печатает YAML, применяет человек. Дамп кладётся в hostPath /backup/<движок>, откуда
@@ -52,6 +70,12 @@ export function CoverageAudit({ server: s, canManage, onChanged }: {
   const { t } = useI18n()
   const [busy, setBusy] = useState(false)
   const [dumpBusy, setDumpBusy] = useState<string | null>(null)
+  // Ход команды дампа — в карточке той базы, которую включают или выключают. Ключ
+  // «движок|контейнер»: на ноде бывает несколько postgres, и полоса должна стоять у своей.
+  const [op, setOp] = useState<{
+    key: string; engine: string; container: string; action: 'dump_setup' | 'dump_remove'
+    progress: CmdProgressState; msg: { ok: boolean; text: string } | null
+  } | null>(null)
   const [cfgFor, setCfgFor] = useState<string | null>(null)
   const [muteBusy, setMuteBusy] = useState<string | null>(null)
   const [showMuted, setShowMuted] = useState(false)
@@ -74,7 +98,6 @@ export function CoverageAudit({ server: s, canManage, onChanged }: {
     setHasSchedule(!!document.getElementById('backup-manage-schedule'))
   }, [])
   const items = s.backup_audit ?? []
-  if (items.length === 0) return null
   const live = items.filter((x) => !x.muted)
   const mutedItems = items.filter((x) => !!x.muted)
   const gaps = live.filter((x) => x.gap)
@@ -133,25 +156,31 @@ export function CoverageAudit({ server: s, canManage, onChanged }: {
     if (action === 'dump_remove' &&
       !window.confirm(t('Выключить дампы {eng}? Локальные файлы дампов будут удалены; история останется в restic.', { eng: engine })))
       return
-    setDumpBusy(engine); setDumpMsg(null)
+    const key = `${engine}|${container}`
+    const start = Date.now()
+    setDumpBusy(engine); setDumpMsg(null); setCfgFor(null)
+    setOp({ key, engine, container, action, msg: null, progress: { phase: 'sent', since: start, phaseSince: start } })
+    const phase = (ph: CmdProgressState['phase'], msg: { ok: boolean; text: string } | null = null) =>
+      setOp((o) => (o && o.key === key ? { ...o, msg, progress: nextPhase(o.progress, ph) } : o))
     try {
       const body = action === 'dump_setup'
         ? { action, engine, container, ...opts } as const
         : { action, engine, container } as const
-      const res = await runAndWait(s.id, body)
-      // error = команда реально упала (helper вернул ошибку). Иначе (done или ещё
-      // running после таймаута опроса) — успех/в процессе, а не «ошибка».
+      const res = await runAndWait(s.id, body, (st) => { if (st === 'running') phase('running') })
       if (res.status === 'error') {
-        setDumpMsg({ ok: false, text: res.result || t('не удалось') })
+        phase('error', { ok: false, text: helperText(res.result, t) || t('не удалось') })
       } else if (res.status === 'done') {
-        setDumpMsg({ ok: true, text: res.result || t('готово') })
+        // Команда отработала, но карточка перерисуется, только когда новое состояние
+        // приедет отчётом сервера (до ~15 с). До того кнопка «включить» висела бы как ни
+        // в чём не бывало, поэтому держим этап «подтверждение» — см. эффект ниже.
+        phase('confirm', { ok: true, text: helperText(res.result, t) || t('готово') })
+        onChanged()
       } else {
-        setDumpMsg({ ok: true, text: t('Применяется — статус обновится в течение минуты.') })
+        phase('confirm', { ok: true, text: t('Команда ещё выполняется на сервере — статус обновится в течение минуты.') })
+        onChanged()
       }
-      setCfgFor(null)
-      onChanged()
     } catch (e) {
-      setDumpMsg({ ok: false, text: e instanceof Error ? e.message : t('ошибка') })
+      phase('error', { ok: false, text: e instanceof Error ? e.message : t('ошибка') })
     } finally {
       setDumpBusy(null)
     }
@@ -165,6 +194,57 @@ export function CoverageAudit({ server: s, canManage, onChanged }: {
     return all.find((y) => y.engine === engine && (y.container || '') === (inst || ''))
       // helper < v8 контейнер не присылал — засчитываем такой дамп первому экземпляру
       ?? all.find((y) => y.engine === engine && !y.container)
+  }
+  // Этап «подтверждение»: ждём, пока отчёт сервера покажет включённый (или исчезнувший)
+  // дамп, и понемногу перечитываем сервер. Больше минуты не ждём — отчёт догонит сам.
+  const confirmed = op?.progress.phase === 'confirm' && (() => {
+    const has = !!findDump(op.engine, op.container)
+    return op.action === 'dump_setup' ? has : !has
+  })()
+  useEffect(() => {
+    if (confirmed) setOp((o) => (o ? { ...o, progress: nextPhase(o.progress, 'done') } : o))
+  }, [confirmed])
+  // Опрос — своим таймером, а не «следующей отрисовкой»: если отчёт вернёт то же самое,
+  // перерисовки не будет, и ожидание зависло бы навсегда.
+  const onChangedRef = useRef(onChanged)
+  onChangedRef.current = onChanged
+  const confirmSince = op?.progress.phase === 'confirm' ? op.progress.phaseSince : 0
+  useEffect(() => {
+    if (!confirmSince) return
+    const id = window.setInterval(() => {
+      if (Date.now() - confirmSince > 60_000) {
+        setOp((o) => (o && o.progress.phase === 'confirm' ? { ...o, progress: nextPhase(o.progress, 'done') } : o))
+        return
+      }
+      onChangedRef.current()
+    }, 3000)
+    return () => window.clearInterval(id)
+  }, [confirmSince])
+  // пока команда идёт (включая подтверждение), остальные действия с дампами недоступны
+  const opActive = !!op && op.progress.phase !== 'done' && op.progress.phase !== 'error'
+  const busyAny = dumpBusy !== null || opActive
+  // полоса и итог — в карточке своей базы
+  const opFor = (engine?: string, inst?: string) =>
+    op && op.key === `${engine ?? ''}|${inst ?? ''}` ? op : null
+  const opBlock = (engine?: string, inst?: string) => {
+    const o = opFor(engine, inst)
+    if (!o) return null
+    const running = o.action === 'dump_setup'
+      ? t(PROBE_TEXT[o.engine] ?? 'Сервер настраивает дамп')
+      : t('Сервер выключает дамп и удаляет локальные файлы')
+    return (
+      <div className="coverage-op">
+        {o.progress.phase !== 'done' && o.progress.phase !== 'error' && (
+          <CommandProgress state={o.progress} runningText={running} expectSec={PROBE_SEC[o.engine] ?? 20} />
+        )}
+        {o.msg && (o.progress.phase === 'done' || o.progress.phase === 'error') && (
+          <div className={`small coverage-op-msg ${o.msg.ok ? 't-up' : 'form-error'}`}>
+            {o.msg.ok ? '✓ ' : '✗ '}{o.msg.text}
+            <button className="ghost icon-btn coverage-op-x" title={t('Закрыть')} onClick={() => setOp(null)}>✕</button>
+          </div>
+        )}
+      </div>
+    )
   }
   const dumpLine = (engine?: string, inst?: string) => {
     const d = findDump(engine, inst)
@@ -209,13 +289,13 @@ export function CoverageAudit({ server: s, canManage, onChanged }: {
         )}
         {canManage && (
           <>
-            <button className="svc-act" disabled={dumpBusy !== null}
+            <button className="svc-act" disabled={busyAny}
               onClick={() => setCfgFor(cfgFor === (inst || engine || '') ? null : (inst || engine || ''))}>
               {t('настроить')}
             </button>
-            <button className="svc-act svc-act-off" disabled={dumpBusy !== null}
+            <button className="svc-act svc-act-off" disabled={busyAny}
               onClick={() => dumpAction('dump_remove', d.engine, d.container || '')}>
-              {dumpBusy === d.engine ? '…' : t('выключить')}
+              {t('выключить')}
             </button>
           </>
         )}
@@ -223,13 +303,15 @@ export function CoverageAudit({ server: s, canManage, onChanged }: {
           <DumpConfig
             init={{ dir, keep: d.keep, minfree: d.min_free_pct ?? 10 }}
             suffix={`/${d.engine}${d.container ? '/' + d.container : ''}`}
-            busy={dumpBusy !== null}
+            busy={busyAny}
             onApply={(o) => dumpAction('dump_setup', d.engine, d.container || '', o)}
           />
         )}
       </div>
     )
   }
+  // ранний выход — после всех хуков: иначе при опустевшем списке менялся бы их порядок
+  if (items.length === 0) return null
   return (
     <div className="coverage-audit">
       <div className="backup-manage-head">{t('Покрытие')}</div>
@@ -289,10 +371,11 @@ export function CoverageAudit({ server: s, canManage, onChanged }: {
                     ними, и кнопка вставала тем левее, чем длиннее имя движка —
                     в списке они шли лесенкой. */}
                 <span className="svc-head-act">
-                  {canDumpHere && x.dump_engine && x.can_dump && !findDump(x.dump_engine, x.instance) && (
-                    <button className="svc-act svc-act-primary" disabled={dumpBusy !== null}
+                  {canDumpHere && x.dump_engine && x.can_dump && !findDump(x.dump_engine, x.instance) &&
+                    !(opActive && opFor(x.dump_engine, x.container || '')) && (
+                    <button className="svc-act svc-act-primary" disabled={busyAny}
                       onClick={() => setCfgFor(cfgFor === (x.instance || x.dump_engine!) ? null : (x.instance || x.dump_engine!))}>
-                      {dumpBusy === x.dump_engine ? '…' : t('включить дампы')}
+                      {t('включить дампы')}
                     </button>
                   )}
                   {canManage && x.dump_engine && !x.can_dump && (x.pods?.length ?? 0) > 0 && (
@@ -322,10 +405,11 @@ export function CoverageAudit({ server: s, canManage, onChanged }: {
                 <DumpConfig
                   init={{ dir: '/backup', keep: 2, minfree: 10 }}
                   suffix={`/${x.dump_engine}${x.container ? '/' + x.container : ''}`}
-                  busy={dumpBusy !== null}
+                  busy={busyAny}
                   onApply={(o) => dumpAction('dump_setup', x.dump_engine!, x.container || '', o)}
                 />
               )}
+              {opBlock(x.dump_engine, x.container || '')}
               {/* манифест показываем В карточке: раньше он уезжал под весь список, и после
                   нажатия «показать манифест» экран выглядел так, будто ничего не произошло */}
               {manifest?.eng === x.subject && (
@@ -344,12 +428,11 @@ export function CoverageAudit({ server: s, canManage, onChanged }: {
               )}
             </div>
           ))}
-          {/* Пробный дамп занимает секунды (а на крупной базе — дольше), и всё это время
-              экран не менялся: человек успевал решить, что кнопка не сработала, и жал ещё раз. */}
-          {dumpBusy && (
-            <div className="muted small">
-              {t('Настраиваю и снимаю пробный дамп — подождите, на большой базе это может занять до минуты…')}
-            </div>
+          {/* итог, если карточка, у которой шла команда, пропала из списков (например,
+              контейнер удалили, пока ждали отчёт) — иначе ответ сервера просто исчез бы */}
+          {op?.msg && (op.progress.phase === 'done' || op.progress.phase === 'error') &&
+            !live.some((x) => `${x.dump_engine ?? ''}|${x.container || ''}` === op.key) && (
+            <div className={`small ${op.msg.ok ? 't-up' : 'form-error'}`}>{op.msg.text}</div>
           )}
           {dumpMsg && !dumpBusy && (
             <div className={`small ${dumpMsg.ok ? 't-up' : 'form-error'}`}>{dumpMsg.text}</div>
@@ -368,6 +451,7 @@ export function CoverageAudit({ server: s, canManage, onChanged }: {
               </div>
               <div className="svc-card-detail muted small">{x.detail}</div>
               {dumpLine(x.dump_engine, x.instance)}
+              {opBlock(x.dump_engine, x.container || '')}
             </div>
           ))}
         </div>
