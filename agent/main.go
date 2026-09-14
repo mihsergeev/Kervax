@@ -36,7 +36,7 @@ import (
 	"time"
 )
 
-const version = "2.7"
+const version = "2.8"
 
 // Публичный ключ для проверки подписи релизов агента (Ed25519, base64).
 // ПУСТО по умолчанию → самообновление ВЫКЛЮЧЕНО (агент никогда не заменяет себя).
@@ -209,6 +209,10 @@ type report struct {
 	// (точных) часов — работает даже если у ноды закрыт исходящий и до NTP не достучаться.
 	Clock     *clockInfo `json:"clock,omitempty"`
 	ClockUnix int64      `json:"clock_unix,omitempty"`
+	// Готовые JSON-блоки root-хелперов из /var/lib/kervax/report.d/<имя>.json. Агент их не
+	// разбирает, а пересылает как есть: хелпер, которому нужно что-то сообщить панели
+	// (например, найденные на ноде свои бэкапы), больше не требует нового агента.
+	Extras map[string]json.RawMessage `json:"extras,omitempty"`
 }
 
 // статус синхронизации времени (unprivileged: timedatectl + is-active демона). Сам оффсет
@@ -2200,6 +2204,7 @@ func collect(prev sample) (report, sample) {
 		BackupServer:  collectBackupServer(dk),
 		SetupVersions: collectSetupVersions(),
 		Clock:         collectClock(),
+		Extras:        collectExtras(),
 	}
 	// kube собираем в переменную: он же нужен для скрейпа сервисов (podIP есть только там)
 	r.Kube = collectKube()
@@ -2245,6 +2250,37 @@ func collectClock() *clockInfo {
 		}
 	}
 	return ci
+}
+
+const reportExtrasDir = "/var/lib/kervax/report.d"
+
+var extraNameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,39}$`)
+
+// collectExtras — блоки хелперов для панели. Только валидный JSON и с потолком размера:
+// отчёт уходит и на ноды за DPI, где соединение рвётся по объёму отданного (см. panelTransport).
+func collectExtras() map[string]json.RawMessage {
+	ents, err := os.ReadDir(reportExtrasDir)
+	if err != nil {
+		return nil
+	}
+	out := map[string]json.RawMessage{}
+	total := 0
+	for _, e := range ents {
+		name, ok := strings.CutSuffix(e.Name(), ".json")
+		if !ok || !e.Type().IsRegular() || !extraNameRe.MatchString(name) {
+			continue
+		}
+		b, err := os.ReadFile(filepath.Join(reportExtrasDir, e.Name()))
+		if err != nil || len(b) == 0 || len(b) > 256<<10 || total+len(b) > 512<<10 || !json.Valid(b) {
+			continue
+		}
+		total += len(b)
+		out[name] = json.RawMessage(b)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // collectSetupVersions — версии установленных setup-скриптов из /var/lib/kervax/versions/*.ver.

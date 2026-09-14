@@ -1005,6 +1005,39 @@ export type Server = {
   agent_fix_command: string | null // команда-фикс для ноды (drop-in) или null
   helper_advice: HelperAdvice[] // устаревшие setup-скрипты (helper'ы) на ноде → переустановить
   backup_audit?: BackupAudit[] // аудит покрытия бэкапа: что рискует не восстановиться
+  custom_backups?: CustomBackup[] // свои бэкапы ноды (настроены без панели) со статусом
+  custom_backup_ignored?: string[] | null
+}
+
+// Свой бэкап ноды: cron-задание, systemd-таймер или скрипт с метриками, настроенный без
+// панели. Находит helper на ноде, статус считает панель; сама нода при этом не меняется.
+export type CustomBackupStatus =
+  | 'ok' | 'failed' | 'stale' | 'disabled' | 'running' | 'unknown' | 'ignored'
+export type CustomBackup = {
+  id: string
+  kind: 'cron' | 'systemd' | 'metrics'
+  name: string
+  desc: string
+  schedule: string
+  engines: string[]
+  files: boolean // файловый бэкап ноды (restic/borg/rsync…), а не дамп одной базы
+  containers: string[]
+  status: CustomBackupStatus
+  problem: string
+  ok_ts: number // последний успех; у задания без статуса — самый свежий файл бэкапа
+  run_ts: number
+  next_ts: number
+  size_bytes: number
+  duration_sec: number
+  dir: string
+  log: string
+  script: string
+  unit: string
+  result: string
+  metrics: string
+  dbs: { name: string; ok: number; ts: number; size_bytes: number }[]
+  stale_after: number
+  ignored: boolean
 }
 export type QueueStat = {
   name: string
@@ -1328,6 +1361,14 @@ export function backupAuditMute(id: number, key: string, muted: boolean): Promis
   return api<Server>(`/api/servers/${id}/backup/audit-mute`, {
     method: 'POST',
     body: JSON.stringify({ key, muted }),
+  })
+}
+
+// не отслеживать найденный на ноде бэкап («это не бэкап», «старый скрипт») — или вернуть
+export function setCustomBackupIgnored(id: number, job: string, ignored: boolean): Promise<Server> {
+  return api<Server>(`/api/servers/${id}/backup/custom-ignore`, {
+    method: 'POST',
+    body: JSON.stringify({ id: job, ignored }),
   })
 }
 
