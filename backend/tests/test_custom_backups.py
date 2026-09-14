@@ -81,6 +81,20 @@ def test_statuses():
     assert custom_backups.evaluate(_jobs()[0], NOW, {"systemd:n8n-sqlite-backup.timer"}).status == "ignored"
 
 
+def test_frozen_scan_raises_nothing():
+    """helper перестал запускаться: застывший снимок не должен через двое суток превратиться
+    в «нет свежего бэкапа» по заданиям, которые исправно работают."""
+    s = _server()
+    s.last_report["extras"]["custom-backups"]["ts"] = T - 5 * 3600
+    views = custom_backups.views(s, NOW)
+    assert {v.status for v in views} == {"unknown"} and all(v.scan_stale for v in views)
+    assert collector._server_conditions(s, NOW)["backup_custom"][0] == 0
+    # покрытие при этом держится: задания никуда не делись
+    from app.api.servers import _backup_coverage
+    audit = {(a.subject, a.instance): a for a in _backup_coverage(s)}
+    assert audit[("PostgreSQL", "postgresql")].kind == "db_ok"
+
+
 def test_intervals():
     assert custom_backups.cron_interval("0 4 * * *") == 86400
     assert custom_backups.cron_interval("*/15 * * * *") == 900
@@ -163,7 +177,9 @@ async def test_report_extras_and_ignore_api(client: httpx.AsyncClient, auth_head
         "hostname": "node", "os": "Ubuntu 24.04", "agent_version": "2.8",
         "cpu_percent": 1.0, "mem_used": 1, "mem_total": 2,
         "load": [0.1, 0.1, 0.1], "disks": [{"mount": "/", "used": 1, "total": 2}],
-        "extras": {"custom-backups": {"v": 1, "ts": T, "jobs": _jobs()}},
+        # снимок свежий по НАСТОЯЩИМ часам: API судит по текущему времени, а не по NOW
+        "extras": {"custom-backups": {"v": 1, "ts": int(datetime.now(timezone.utc).timestamp()),
+                                      "jobs": _jobs()}},
     }
     r = await client.post("/api/agent/report", json=report,
                           headers={"Authorization": f"Bearer {token}"})

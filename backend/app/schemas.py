@@ -791,6 +791,7 @@ class CustomBackupOut(BaseModel):
     dbs: list[CustomBackupDb] = []
     stale_after: int = 0  # через сколько секунд молчание считается проблемой
     ignored: bool = False
+    scan_stale: bool = False  # helper давно не обновлял сведения — статус неизвестен
 
 
 class CustomBackupIgnoreIn(BaseModel):

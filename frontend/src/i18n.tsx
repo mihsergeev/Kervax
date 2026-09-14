@@ -1367,6 +1367,8 @@ const EN: Record<string, string> = {
   'Заменяет логотип в шапке и на экране входа. PNG, SVG, WebP или JPEG до {n} КБ.':
     'Replaces the logo in the header and on the login screen. PNG, SVG, WebP or JPEG up to {n} KB.',
   'Файл логотипа': 'Logo file',
+  'Сведения с ноды давно не обновлялись: helper бэкапа там не запускается. Переустановите его.':
+    'The node has not updated this for a long time: the backup helper does not run there. Reinstall it.',
   'ежедневно {time}': 'daily {time}',
   'ежедневно': 'daily',
   'ежечасно': 'hourly',
