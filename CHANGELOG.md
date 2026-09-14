@@ -4,6 +4,14 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.4.30] - 2026-09-14
+
+### Fixed
+- **Превью логотипа в «О панели» больше не выезжает за край окна.** Колонка превью не
+  могла стать уже самой картинки, и широкий логотип выталкивал превью светлой темы
+  вправо за пределы окна, а с плашкой ещё дальше. Теперь логотип в превью
+  пропорционально ужимается по ширине колонки.
+
 ## [1.4.29] - 2026-09-14
 
 ### Changed

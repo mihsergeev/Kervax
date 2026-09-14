@@ -4196,7 +4196,9 @@ button.svc-site-on:hover {
 /* превью в настройках: сразу на обеих темах — иначе «на белом было нормально» */
 .brand-preview-row {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  /* minmax(0, …): у простого 1fr колонка не уже самой картинки, и широкий логотип
+     выталкивал превью светлой темы за край окна */
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 0.6rem;
   margin: 0.7rem 0 0.4rem;
 }
@@ -4208,6 +4210,7 @@ button.svc-site-on:hover {
   flex-direction: column;
   align-items: center;
   gap: 0.4rem;
+  min-width: 0;
   min-height: 5rem;
   justify-content: center;
 }
@@ -4219,6 +4222,13 @@ button.svc-site-on:hover {
 }
 .brand-preview-lbl {
   align-self: flex-start;
+}
+/* логотип в превью ужимается по ширине колонки, пропорции держит object-fit */
+.brand-preview .brand-custom {
+  max-width: 100%;
+}
+.brand-preview .brand-custom img {
+  max-width: 100%;
 }
 .brand-dark-actions {
   display: flex;
