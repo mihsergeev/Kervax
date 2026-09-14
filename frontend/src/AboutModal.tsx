@@ -8,7 +8,8 @@ import {
   putBranding,
   type Branding,
 } from './api'
-import { analyzeLogo, lightenSvg, needsPlate, needsPlateLight, svgDataUrl } from './BrandLogo'
+import { useLogoViews } from './BrandLogo'
+import type { LogoSource } from './logoAdapt'
 import { BrandMark } from './Logo'
 import { useAuth } from './auth'
 import { useI18n } from './i18n'
@@ -72,20 +73,18 @@ export function AboutModal({ onClose, onBrandingChanged }: {
 
 // Настройка логотипа. Превью сразу на обеих темах: типовая ошибка — залить
 // логотип, который хорош на белом и исчезает на тёмном, а заметить это вечером,
-// когда панель откроет коллега с другой темой.
-type Analysis = { transparentEdges: boolean; dark: boolean }
-
+// когда панель откроет коллега с другой темой. Превью считается тем же logoView,
+// что и шапка: что видно здесь, то и будет в панели.
 function BrandingSection({ onChanged }: { onChanged: () => void }) {
   const { t } = useI18n()
   const [st, setSt] = useState<Branding | null>(null)
   const [open, setOpen] = useState(false)
-  // основной логотип: новый файл (data-URL), его разбор и текст, если это SVG
+  // новый основной файл (data-URL) и его текст, если это SVG
   const [data, setData] = useState('')
-  const [main, setMain] = useState<Analysis | null>(null)
-  const [mainSvg, setMainSvg] = useState<string | null>(null)
+  const [dataSvg, setDataSvg] = useState<string | null>(null)
   // вариант для тёмной темы
   const [dark, setDark] = useState('')
-  const [darkA, setDarkA] = useState<Analysis | null>(null)
+  const [darkSvg, setDarkSvg] = useState<string | null>(null)
   const [darkRemove, setDarkRemove] = useState(false)
   const [plate, setPlate] = useState<'auto' | 'always' | 'never'>('auto')
   const [title, setTitle] = useState('')
@@ -102,26 +101,6 @@ function BrandingSection({ onChanged }: { onChanged: () => void }) {
       })
       .catch(() => setSt(null))
   }, [])
-
-  // Сохранённый логотип разбираем заново при открытии: превью и подсказки должны
-  // знать, нужна ли плашка на каждой из тем, а у старых заливок светлая тема не
-  // размечена. Текст SVG нужен для кнопки «светлый вариант».
-  const storedVersion = st?.logo ? st.version : 0
-  useEffect(() => {
-    if (!open || !storedVersion || data) return
-    let alive = true
-    const url = brandingLogoUrl(storedVersion)
-    analyzeLogo(url).then((a) => alive && setMain(a)).catch(() => undefined)
-    fetch(url)
-      .then(async (r) =>
-        r.ok && (r.headers.get('content-type') ?? '').startsWith('image/svg') ? r.text() : null,
-      )
-      .then((txt) => alive && setMainSvg(txt))
-      .catch(() => undefined)
-    return () => {
-      alive = false
-    }
-  }, [open, storedVersion, data])
 
   const readFile = async (file: File | undefined) => {
     setErr('')
@@ -141,48 +120,42 @@ function BrandingSection({ onChanged }: { onChanged: () => void }) {
       setErr(t('Не удалось прочитать файл'))
       return null
     }
+    // текст SVG — для перекраски по цветам; у растровой картинки его нет
     const svg =
       file.type === 'image/svg+xml' || /\.svg$/i.test(file.name)
         ? await file.text().catch(() => null)
         : null
-    return { url, svg, analysis: await analyzeLogo(url) }
+    return { url, svg }
   }
 
   const pickMain = async (file: File | undefined) => {
     const got = await readFile(file)
     if (!got) return
     setData(got.url)
-    setMain(got.analysis)
-    setMainSvg(got.svg)
+    setDataSvg(got.svg)
   }
 
   const pickDark = async (file: File | undefined) => {
     const got = await readFile(file)
     if (!got) return
     setDark(got.url)
-    setDarkA(got.analysis)
+    setDarkSvg(got.svg)
     setDarkRemove(false)
   }
 
-  const makeLight = async () => {
-    setErr('')
-    const out = mainSvg ? lightenSvg(mainSvg) : null
-    if (!out) {
-      setErr(t('SVG не удалось перекрасить — загрузите светлый вариант файлом.'))
-      return
-    }
-    const url = svgDataUrl(out)
-    setDark(url)
-    setDarkA(await analyzeLogo(url))
-    setDarkRemove(false)
-  }
-
-  // что решил разбор; пока разбора нет — то, что сохранено
-  const autoDark = main ? needsPlate(main) : !!st?.plate_auto
-  const autoLight = main ? needsPlateLight(main) : !!st?.plate_light
-  const hasDark = !!dark || (!!st?.dark_logo && !darkRemove)
-  const autoDarkVariant = darkA ? needsPlateLight(darkA) : !!st?.dark_plate
-  const on = (auto: boolean) => plate === 'always' || (plate === 'auto' && auto)
+  const storedDark = !!st?.dark_logo && !darkRemove
+  const hasDark = !!dark || storedDark
+  const mainSrc: LogoSource | null = data
+    ? { url: data, svg: dataSvg }
+    : st?.logo
+      ? { url: brandingLogoUrl(st.version) }
+      : null
+  const darkSrc: LogoSource | null = dark
+    ? { url: dark, svg: darkSvg }
+    : storedDark && st
+      ? { url: brandingLogoUrl(st.version, true) }
+      : null
+  const views = useLogoViews(mainSrc, darkSrc, plate)
 
   const save = async () => {
     setBusy(true)
@@ -192,17 +165,19 @@ function BrandingSection({ onChanged }: { onChanged: () => void }) {
       const b = await putBranding({
         data: data || undefined,
         plate,
-        plate_auto: autoDark,
-        plate_light: main ? autoLight : (st?.plate_light ?? null),
+        // флаги хранятся для совместимости; как показывать, решает перекраска при показе
+        plate_auto: views.dark?.plate ?? !!st?.plate_auto,
+        plate_light: views.light ? views.light.plate : (st?.plate_light ?? null),
         title: title.trim(),
         dark: dark || undefined,
-        dark_plate: autoDarkVariant,
+        dark_plate: hasDark ? (views.dark?.plate ?? false) : false,
         dark_remove: darkRemove && !dark,
       })
       setSt(b)
       setData('')
+      setDataSvg(null)
       setDark('')
-      setDarkA(null)
+      setDarkSvg(null)
       setDarkRemove(false)
       setNote(t('Логотип сохранён'))
       onChanged()
@@ -220,10 +195,9 @@ function BrandingSection({ onChanged }: { onChanged: () => void }) {
       const b = await deleteBranding()
       setSt(b)
       setData('')
-      setMain(null)
-      setMainSvg(null)
+      setDataSvg(null)
       setDark('')
-      setDarkA(null)
+      setDarkSvg(null)
       setDarkRemove(false)
       setNote(t('Вернули стандартный логотип'))
       onChanged()
@@ -234,36 +208,32 @@ function BrandingSection({ onChanged }: { onChanged: () => void }) {
     }
   }
 
-  const src = data || (st?.logo ? brandingLogoUrl(st.version) : '')
-  const darkSrc =
-    dark || (st?.dark_logo && !darkRemove && st ? brandingLogoUrl(st.version, true) : src)
   const previews = [
     {
       theme: 'dark' as const,
-      src: darkSrc,
-      plate: on(hasDark ? autoDarkVariant : autoDark),
+      view: views.dark,
+      fallback: (darkSrc ?? mainSrc)?.url ?? '',
       label: t('тёмная тема'),
     },
-    { theme: 'light' as const, src, plate: on(autoLight), label: t('светлая тема') },
+    { theme: 'light' as const, view: views.light, fallback: mainSrc?.url ?? '', label: t('светлая тема') },
   ]
-  // светлый вариант из SVG предлагаем, когда без него на тёмной теме нужна плашка
-  const canLighten = !!mainSvg && !hasDark && !!main && main.transparentEdges && main.dark
 
   const hints: string[] = []
-  if (src && plate === 'auto') {
-    if (hasDark) hints.push(t('На тёмной теме — отдельный вариант логотипа.'))
-    else if (main && !main.transparentEdges)
-      hints.push(t('У логотипа свой фон — на тёмной теме он показан на плашке.'))
-    else if (autoDark)
+  if (views.dark && views.light) {
+    const d = views.dark
+    if (hasDark)
       hints.push(
-        t('Логотип тёмный: на тёмной теме без плашки его не видно. Загрузите светлый вариант — и плашка не понадобится.'),
+        d.adapted
+          ? t('На тёмной теме — отдельный вариант логотипа, его цвета подстроены под тему.')
+          : t('На тёмной теме — отдельный вариант логотипа.'),
       )
-    else hints.push(t('Фон прозрачный, логотип светлый — плашка не нужна.'))
-    hints.push(
-      autoLight
-        ? t('У логотипа свой фон — на светлой теме он тоже на плашке.')
-        : t('На светлой теме логотип показан как есть.'),
-    )
+    else if (d.adapted) hints.push(t('На тёмной теме цвета логотипа подстроены под тему.'))
+    else if (d.plate) hints.push(t('На тёмной теме логотип на плашке: у картинки свой фон или её нельзя перекрасить.'))
+    else hints.push(t('На тёмной теме логотип показан как есть.'))
+    const l = views.light
+    if (l.adapted) hints.push(t('На светлой теме цвета логотипа подстроены под тему.'))
+    else if (l.plate) hints.push(t('На светлой теме логотип на плашке: у картинки свой фон.'))
+    else hints.push(t('На светлой теме логотип показан как есть.'))
   }
 
   return (
@@ -287,14 +257,18 @@ function BrandingSection({ onChanged }: { onChanged: () => void }) {
             />
           </label>
 
-          {src && (
+          {mainSrc && (
             <>
               <div className="brand-preview-row">
                 {previews.map((pv) => (
                   <div key={pv.theme} className={`brand-preview brand-preview-${pv.theme}`}>
                     <div className="brand-preview-lbl muted small">{pv.label}</div>
-                    <span className={`brand-custom${pv.plate ? ' brand-plate' : ''}`}>
-                      <img src={pv.src} alt="" style={{ height: 38 }} />
+                    <span className={`brand-custom${pv.view?.plate ? ' brand-plate' : ''}`}>
+                      <img
+                        src={pv.view?.src ?? pv.fallback}
+                        alt=""
+                        style={{ height: 38, visibility: pv.view ? undefined : 'hidden' }}
+                      />
                     </span>
                   </div>
                 ))}
@@ -312,37 +286,33 @@ function BrandingSection({ onChanged }: { onChanged: () => void }) {
                   accept="image/png,image/svg+xml,image/webp,image/jpeg,image/gif"
                   onChange={(e) => pickDark(e.target.files?.[0])}
                 />
+                <span className="muted small">
+                  {t('Нужен, только если для тёмного фона у логотипа есть своя версия: цвета основного панель подстраивает под тему сама.')}
+                </span>
               </label>
-              {(canLighten || hasDark) && (
+              {hasDark && (
                 <div className="brand-dark-actions">
-                  {canLighten && (
-                    <button className="ghost small" onClick={makeLight}>
-                      {t('Сделать светлый вариант из SVG')}
-                    </button>
-                  )}
-                  {hasDark && (
-                    <button
-                      className="ghost small"
-                      onClick={() => {
-                        setDark('')
-                        setDarkA(null)
-                        setDarkRemove(true)
-                      }}
-                    >
-                      {t('Убрать вариант для тёмной темы')}
-                    </button>
-                  )}
+                  <button
+                    className="ghost small"
+                    onClick={() => {
+                      setDark('')
+                      setDarkSvg(null)
+                      setDarkRemove(true)
+                    }}
+                  >
+                    {t('Убрать вариант для тёмной темы')}
+                  </button>
                 </div>
               )}
             </>
           )}
 
           <label className="brand-row">
-            {t('Подложка')}
+            {t('Оформление')}
             <select value={plate} onChange={(e) => setPlate(e.target.value as typeof plate)}>
-              <option value="auto">{t('авто (по картинке)')}</option>
-              <option value="always">{t('всегда')}</option>
-              <option value="never">{t('никогда')}</option>
+              <option value="auto">{t('авто: подстроить цвета под тему')}</option>
+              <option value="always">{t('всегда на плашке')}</option>
+              <option value="never">{t('как есть')}</option>
             </select>
           </label>
 
@@ -361,7 +331,7 @@ function BrandingSection({ onChanged }: { onChanged: () => void }) {
 
           <div className="tg-actions">
             {/* файл заново выбирать не нужно: у залитого логотипа можно поменять
-                подложку, подпись и вариант для тёмной темы */}
+                оформление, подпись и вариант для тёмной темы */}
             <button className="primary" disabled={busy || !(data || st?.logo)} onClick={save}>
               {busy ? t('сохраняем…') : t('Сохранить логотип')}
             </button>

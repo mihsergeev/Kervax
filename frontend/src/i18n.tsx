@@ -1361,35 +1361,37 @@ const EN: Record<string, string> = {
     'Watches sites, servers, Docker, Kubernetes and backups — and messages you on Telegram when something breaks.',
   'Поставить свой логотип': 'Use your own logo',
   'свернуть настройку логотипа': 'hide logo settings',
-  'У логотипа свой фон или он тёмный — под него подложена светлая плашка.':
-    'The logo has its own background or is dark — a light plate is placed behind it.',
-  'Фон прозрачный, логотип светлый — плашка не нужна.':
-    'Transparent background and a light logo — no plate needed.',
   'Исходный код на GitHub': 'Source code on GitHub',
   'Сообщить о проблеме': 'Report an issue',
   'Заменяет логотип в шапке и на экране входа. PNG, SVG, WebP или JPEG до {n} КБ.':
     'Replaces the logo in the header and on the login screen. PNG, SVG, WebP or JPEG up to {n} KB.',
   'Файл логотипа': 'Logo file',
+  'На тёмной теме — отдельный вариант логотипа, его цвета подстроены под тему.':
+    'The dark theme uses a separate logo variant, with its colours adjusted to the theme.',
+  'На тёмной теме цвета логотипа подстроены под тему.':
+    'On the dark theme the logo colours are adjusted to the theme.',
+  'На тёмной теме логотип на плашке: у картинки свой фон или её нельзя перекрасить.':
+    'On the dark theme the logo sits on a plate: the image has its own background or cannot be recoloured.',
+  'На тёмной теме логотип показан как есть.': 'The dark theme shows the logo as is.',
+  'На светлой теме цвета логотипа подстроены под тему.':
+    'On the light theme the logo colours are adjusted to the theme.',
+  'На светлой теме логотип на плашке: у картинки свой фон.':
+    'On the light theme the logo sits on a plate: the image has its own background.',
+  'Нужен, только если для тёмного фона у логотипа есть своя версия: цвета основного панель подстраивает под тему сама.':
+    'Only needed if the logo has its own version for dark backgrounds: the panel adjusts the colours of the main one to the theme by itself.',
+  'Оформление': 'Appearance',
+  'авто: подстроить цвета под тему': 'auto: adjust colours to the theme',
+  'всегда на плашке': 'always on a plate',
+  'как есть': 'as is',
   'Вариант для тёмной темы (необязательно)': 'Dark theme variant (optional)',
-  'Сделать светлый вариант из SVG': 'Make a light variant from the SVG',
   'Убрать вариант для тёмной темы': 'Remove the dark theme variant',
-  'SVG не удалось перекрасить — загрузите светлый вариант файлом.':
-    'Could not recolor the SVG — upload a light variant as a file.',
   'На тёмной теме — отдельный вариант логотипа.':
     'The dark theme uses a separate logo variant.',
-  'У логотипа свой фон — на тёмной теме он показан на плашке.':
-    'The logo has its own background, so the dark theme shows it on a plate.',
-  'Логотип тёмный: на тёмной теме без плашки его не видно. Загрузите светлый вариант — и плашка не понадобится.':
-    'The logo is dark and invisible on the dark theme without a plate. Upload a light variant and the plate is not needed.',
-  'У логотипа свой фон — на светлой теме он тоже на плашке.':
-    'The logo has its own background, so the light theme shows it on a plate too.',
   'На светлой теме логотип показан как есть.': 'The light theme shows the logo as is.',
   'Файл больше {n} КБ — уменьшите логотип': 'The file is over {n} KB — make the logo smaller',
   'Не удалось прочитать файл': 'Could not read the file',
   'тёмная тема': 'dark theme',
   'светлая тема': 'light theme',
-  'Подложка': 'Plate',
-  'авто (по картинке)': 'auto (from the image)',
   'всегда': 'always',
   'никогда': 'never',
   'Подпись рядом с логотипом': 'Caption next to the logo',
