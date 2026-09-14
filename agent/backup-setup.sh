@@ -44,7 +44,9 @@ AGENT_USER=kervax
 # 0.24: the node's own backups (cron, systemd timers, node_exporter metrics) are found and their
 #       state is written to /var/lib/kervax/report.d/custom-backups.json - the panel watches
 #       them without changing anything
-KERVAX_SETUP_VERSION=0.24  # MAJOR.MINOR; compared component-wise (0.13 > 0.2!)
+# 0.25: repository upkeep (prune/forget/rotation) is not counted as a backup; DST_DIR-style
+#       output directories are recognised
+KERVAX_SETUP_VERSION=0.25  # MAJOR.MINOR; compared component-wise (0.13 > 0.2!)
 KERVAX_SETUP_ALWAYS=1  # safe on any node: installs only its own helper and spool and does not
                        # touch the backup configuration until the panel sends a command
 install -d -m 0755 "$HELPER_DIR" "$STATE_DIR" /var/lib/kervax/versions
@@ -983,7 +985,12 @@ CB_PROM_DIRS=(/var/lib/node_exporter/textfile_collector /var/lib/prometheus/node
 # a job LOOKS like a backup by its name or command line...
 CB_NAME_RE='backup|dump|bkp|snapshot|restic|borg|rsync|rclone|duplicity|kopia|pgbackrest|barman|wal-g|xtrabackup|mariabackup|mongodump'
 # ...or by what its script actually runs, whatever the script is called
-CB_TOOL_RE='pg_dump|pg_basebackup|pgbackrest|barman|wal-g|mysqldump|mariadb-dump|mariabackup|xtrabackup|mongodump|neo4j-admin|clickhouse-backup|etcdctl.*snapshot|redis-cli.*(--rdb|bgsave)|restic.*backup|borg.*create|borgmatic|duplicity|kopia.*snapshot|rclone.*(copy|sync)'
+# "restic ... backup" only as the SUBCOMMAND: a prune script mentions .../backup in its repository path
+CB_FILE_TOOL_RE='restic[[:space:]]+([^|;&]*[[:space:]])?backup([[:space:]]|$)|borg[[:space:]]+([^|;&]*[[:space:]])?create([[:space:]]|$)|borgmatic|rsync[[:space:]]|rclone[[:space:]]+([^|;&]*[[:space:]])?(copy|sync)([[:space:]]|$)|duplicity[[:space:]]|kopia[[:space:]]+([^|;&]*[[:space:]])?snapshot'
+CB_TOOL_RE='pg_dump|pg_basebackup|pgbackrest|barman|wal-g|mysqldump|mariadb-dump|mariabackup|xtrabackup|mongodump|neo4j-admin|clickhouse-backup|etcdctl.*snapshot|redis-cli.*(--rdb|bgsave)|'"$CB_FILE_TOOL_RE"
+# Repository upkeep (prune, forget, rotation, checks) is not a backup: nothing is saved, and on a
+# backup server the panel already watches rotation itself. Skipped unless the same job also backs up.
+CB_MAINT_RE='prune|forget|cleanup|clean-up|rotate|rotation|purge|verify|check'
 # look-alikes that are not backups, and the panel's own jobs (it already watches those)
 # dpkg-db-backup is the distribution's own copy of the package database, not a data backup
 CB_SKIP_RE='tcpdump|coredump|dumpe2fs|xfsdump|dumpcap|kervax|systemd-rest|restic-backup\.(timer|service)|^restic\.(timer|service)$|dpkg-db-backup'
@@ -1020,6 +1027,12 @@ cb_engines() {
 # File-level backup tools: such a job backs up the node itself, not just a database.
 cb_is_files() { [[ "${1,,}" =~ restic|borg|rsync|rclone|duplicity|kopia|bacula|bareos|urbackup ]]; }
 
+# upkeep only: the name says prune/rotate/check and nothing in it actually backs up
+cb_maintenance_only() {  # $1 names and command, $2 script body
+  [[ "${1,,}" =~ $CB_MAINT_RE ]] || return 1
+  ! grep -qiE "$CB_TOOL_RE" <<<"$1"$'\n'"$2"
+}
+
 # JSON array of running containers a job refers to. Explicit references first (docker exec
 # NAME, CONTAINER=NAME, ="NAME"); a bare word only for names long enough not to be an
 # ordinary word in a script ("db", "app" are everywhere).
@@ -1038,7 +1051,7 @@ cb_containers() {
 
 # Directories a script puts its backups into: BACKUP_DIR=/x, OUT="${VAR:-/x}" and the like.
 cb_dirs() {
-  grep -oE '(BACKUP|BKP|DUMP|DEST|OUT|OUTPUT|ARCHIVE|TARGET|STORE)[A-Z0-9_]*[[:space:]]*=[[:space:]]*["'"'"']?(\$\{[A-Za-z0-9_]+:-)?/[A-Za-z0-9._/@+-]+' <<<"$1" \
+  grep -oE '(BACKUP|BKP|DUMP|DEST|DST|OUT|OUTPUT|ARCHIVE|TARGET|STORE|SAVE)[A-Z0-9_]*[[:space:]]*=[[:space:]]*["'"'"']?(\$\{[A-Za-z0-9_]+:-)?/[A-Za-z0-9._/@+-]+' <<<"$1" \
     | grep -oE '/[A-Za-z0-9._/@+-]+$' | sed 's#/*$##' | while IFS= read -r d; do
       case "$d" in ''|/|/tmp|/tmp/*|/var/log|/var/log/*|/etc|/etc/*|/usr|/usr/*|/proc*|/dev*|/run|/run/*) continue ;; esac
       [ -d "$d" ] && printf '%s\n' "$d"
@@ -1220,7 +1233,7 @@ cmd_custom_scan() {
       strong="$strong ${mj_names[$m]} ${mj_lab[$m]}"
     fi
     engines="$(cb_engines "$strong" "$body")"
-    if [ "$engines" = "[]" ] && { cb_is_files "$strong" || grep -qiE 'restic.*backup|borg.*create|borgmatic|rsync |rclone.*(copy|sync)|duplicity|kopia.*snapshot' <<<"$body"; }; then
+    if [ "$engines" = "[]" ] && { cb_is_files "$strong" || grep -qiE "$CB_FILE_TOOL_RE" <<<"$body"; }; then
       files=true
     fi
     jobs+=("{\"id\":\"$(json_escape "$id")\",\"kind\":\"$kind\",\"name\":\"$(json_escape "$(cb_clean "$name")")\",\"desc\":\"$(json_escape "$(cb_clean "$desc")")\",\"schedule\":\"$(json_escape "$(cb_clean "$sched")")\",\"engines\":$engines,\"files\":$files,\"containers\":$(cb_containers "$strong"$'\n'"$body"),$status}")
@@ -1248,6 +1261,7 @@ cmd_custom_scan() {
     script="$(cb_script_of "$(printf '%s' "$execs" | sed -n 's/.*argv\[\]=\([^;]*\);.*/\1/p')")"
     body="$(cb_body "$script")"
     if ! [[ "${t,,} ${svc,,}" =~ $CB_NAME_RE ]] && ! grep -qiE "$CB_TOOL_RE" <<<"$body"; then continue; fi
+    cb_maintenance_only "$t $svc $desc" "$body" && continue
     cal="$(systemctl show "$t" --timestamp=unix -p TimersCalendar --value 2>/dev/null)"
     next="$(printf '%s' "$cal" | sed -n 's/.*next_elapse=@\([0-9]*\).*/\1/p' | head -1)"
     cal="$(printf '%s' "$cal" | sed -n 's/.*OnCalendar=\([^;]*\);.*/\1/p' | sed 's/[[:space:]]*$//' | head -1)"
@@ -1269,6 +1283,7 @@ cmd_custom_scan() {
     script="$(cb_script_of "$cmd")"
     body="$(cb_body "$script")"
     if ! [[ "${cmd,,}" =~ $CB_NAME_RE ]] && ! grep -qiE "$CB_TOOL_RE" <<<"$cmd"$'\n'"$body"; then continue; fi
+    cb_maintenance_only "$cmd" "$body" && continue
     if [ -n "$script" ]; then
       name="$(basename "$script")"
     else

@@ -449,7 +449,9 @@ function OwnBackupRow({ job: j, canManage, busy, onToggle }: {
         {j.problem && <div className="t-down small">{j.problem}</div>}
         {j.status === 'unknown' && (
           <div className="muted small">
-            {t('Не видно, когда задание отработало: метрик у него нет, а файлов бэкапа панель не нашла.')}
+            {j.scan_stale
+              ? t('Сведения с ноды давно не обновлялись: helper бэкапа там не запускается. Переустановите его.')
+              : t('Не видно, когда задание отработало: метрик у него нет, а файлов бэкапа панель не нашла.')}
           </div>
         )}
         {src.length > 0 && <div className="muted small mono own-backup-src">{src.join(' · ')}</div>}

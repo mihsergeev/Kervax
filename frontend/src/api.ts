@@ -1038,6 +1038,7 @@ export type CustomBackup = {
   dbs: { name: string; ok: number; ts: number; size_bytes: number }[]
   stale_after: number
   ignored: boolean
+  scan_stale: boolean // helper давно не обновлял сведения — статус неизвестен
 }
 export type QueueStat = {
   name: string
