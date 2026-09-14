@@ -41,7 +41,10 @@ AGENT_USER=kervax
 # v14: dumps WITHOUT a file backup - their own kervax-dumps.timer (a local copy on the node that
 #      can be restored from); the helper is installed EVERYWHERE (ALWAYS): it is the panel's
 #      transport for dump control, and without restic it simply did not exist before
-KERVAX_SETUP_VERSION=0.23  # MAJOR.MINOR; compared component-wise (0.13 > 0.2!)
+# 0.24: the node's own backups (cron, systemd timers, node_exporter metrics) are found and their
+#       state is written to /var/lib/kervax/report.d/custom-backups.json - the panel watches
+#       them without changing anything
+KERVAX_SETUP_VERSION=0.24  # MAJOR.MINOR; compared component-wise (0.13 > 0.2!)
 KERVAX_SETUP_ALWAYS=1  # safe on any node: installs only its own helper and spool and does not
                        # touch the backup configuration until the panel sends a command
 install -d -m 0755 "$HELPER_DIR" "$STATE_DIR" /var/lib/kervax/versions
@@ -966,9 +969,358 @@ cmd_process_spool() {
   refresh_config  # refresh the config file for the panel after the changes
 }
 
+# ------- the node's OWN backups, set up without the panel -------
+# A node usually arrives with its backups already in place: a cron job with pg_dump, a systemd
+# timer, a script writing node_exporter metrics. Redoing them the panel's way is pointless, so
+# the panel only WATCHES them. Nothing on the node is changed, and no command line or script
+# body leaves it (they hold passwords and tokens): only names, schedules, times, sizes, paths
+# and the names of the containers a job refers to.
+CUSTOM_DIR=/var/lib/kervax/report.d
+CUSTOM_JSON="$CUSTOM_DIR/custom-backups.json"
+CUSTOM_EVERY=300  # seconds between scans: cron and timers rarely change
+CUSTOM_MAX_JOBS=40
+CB_PROM_DIRS=(/var/lib/node_exporter/textfile_collector /var/lib/prometheus/node-exporter)
+# a job LOOKS like a backup by its name or command line...
+CB_NAME_RE='backup|dump|bkp|snapshot|restic|borg|rsync|rclone|duplicity|kopia|pgbackrest|barman|wal-g|xtrabackup|mariabackup|mongodump'
+# ...or by what its script actually runs, whatever the script is called
+CB_TOOL_RE='pg_dump|pg_basebackup|pgbackrest|barman|wal-g|mysqldump|mariadb-dump|mariabackup|xtrabackup|mongodump|neo4j-admin|clickhouse-backup|etcdctl.*snapshot|redis-cli.*(--rdb|bgsave)|restic.*backup|borg.*create|borgmatic|duplicity|kopia.*snapshot|rclone.*(copy|sync)'
+# look-alikes that are not backups, and the panel's own jobs (it already watches those)
+# dpkg-db-backup is the distribution's own copy of the package database, not a data backup
+CB_SKIP_RE='tcpdump|coredump|dumpe2fs|xfsdump|dumpcap|kervax|systemd-rest|restic-backup\.(timer|service)|^restic\.(timer|service)$|dpkg-db-backup'
+
+cb_clean() { printf '%s' "$1" | tr -d '\000-\037' | cut -c1-200; }
+cb_boot_ts() { awk '/^btime/{print $2; exit}' /proc/stat; }
+
+# JSON array of engines. $1 - names, command lines, unit descriptions, metric names and labels:
+# any mention counts. $2 - a script body: only a real invocation of a dump tool counts, because
+# a file-backup script easily MENTIONS mysql in its excludes without dumping anything.
+cb_engines() {
+  local s="${1,,}" b="${2,,}" out="" p rest re eng bre
+  local -a rules=(
+    'pg_dump|pg_basebackup|pgbackrest|barman|wal-g|postgres|psql|pg_backup|pgbackup|pgdump=PostgreSQL=pg_dump|pg_basebackup|pgbackrest|wal-g '
+    'mysqldump|mariadb-dump|mariabackup|xtrabackup|mysql|mariadb=MySQL/MariaDB=mysqldump|mariadb-dump|mariabackup|xtrabackup'
+    'mongodump|mongo=MongoDB=mongodump'
+    'neo4j=Neo4j=neo4j-admin'
+    'clickhouse=ClickHouse=clickhouse-backup'
+    'redis=Redis=redis-cli.*(bgsave|--rdb)'
+    'etcd=etcd=etcdctl.*snapshot'
+    'elasticsearch|opensearch=Elasticsearch=_snapshot/'
+    'influx=InfluxDB=influxd? backup'
+    'sqlite=SQLite=sqlite3.*\.backup'
+  )
+  for p in "${rules[@]}"; do
+    re="${p%%=*}"; rest="${p#*=}"; eng="${rest%%=*}"; bre="${rest#*=}"
+    if [[ "$s" =~ $re ]] || { [ -n "$b" ] && [[ "$b" =~ $bre ]]; }; then
+      out="${out:+$out,}\"$eng\""
+    fi
+  done
+  printf '[%s]' "$out"
+}
+
+# File-level backup tools: such a job backs up the node itself, not just a database.
+cb_is_files() { [[ "${1,,}" =~ restic|borg|rsync|rclone|duplicity|kopia|bacula|bareos|urbackup ]]; }
+
+# JSON array of running containers a job refers to. Explicit references first (docker exec
+# NAME, CONTAINER=NAME, ="NAME"); a bare word only for names long enough not to be an
+# ordinary word in a script ("db", "app" are everywhere).
+cb_containers() {
+  local text="$1" out="" n q
+  for n in "${CB_CONTAINERS[@]}"; do
+    [ -n "$n" ] || continue
+    q="$(printf '%s' "$n" | sed 's/[][\.*^$/]/\\&/g')"
+    if grep -qE "(docker|podman)[^;|&]*(exec|cp)[^;|&]*[[:space:]]$q([[:space:]:]|$)|CONTAINER[A-Z_]*=[\"']?(\\\$\{[A-Za-z0-9_]+:-)?$q([\"'}[:space:]]|$)|=\"$q\"" <<<"$text" \
+       || { [ "${#n}" -ge 5 ] && grep -qE "(^|[^A-Za-z0-9_.-])$q([^A-Za-z0-9_.-]|$)" <<<"$text"; }; then
+      out="${out:+$out,}\"$(json_escape "$n")\""
+    fi
+  done
+  printf '[%s]' "$out"
+}
+
+# Directories a script puts its backups into: BACKUP_DIR=/x, OUT="${VAR:-/x}" and the like.
+cb_dirs() {
+  grep -oE '(BACKUP|BKP|DUMP|DEST|OUT|OUTPUT|ARCHIVE|TARGET|STORE)[A-Z0-9_]*[[:space:]]*=[[:space:]]*["'"'"']?(\$\{[A-Za-z0-9_]+:-)?/[A-Za-z0-9._/@+-]+' <<<"$1" \
+    | grep -oE '/[A-Za-z0-9._/@+-]+$' | sed 's#/*$##' | while IFS= read -r d; do
+      case "$d" in ''|/|/tmp|/tmp/*|/var/log|/var/log/*|/etc|/etc/*|/usr|/usr/*|/proc*|/dev*|/run|/run/*) continue ;; esac
+      [ -d "$d" ] && printf '%s\n' "$d"
+    done | awk '!seen[$0]++' | head -3
+}
+
+# "mtime size" of the newest file in a directory (the last thing the backup wrote)
+cb_newest() {
+  timeout 20 find "$1" -xdev -maxdepth 3 -type f ! -name '*.partial*' ! -name '*.tmp' -printf '%T@ %s\n' 2>/dev/null \
+    | sort -rn | head -1 | awk '{printf "%d %d", $1, $2}'
+}
+
+# the first absolute path in a command that is a regular file - the job's script
+cb_script_of() {
+  local -a toks; local tok
+  read -ra toks <<<"$1"
+  for tok in "${toks[@]}"; do
+    tok="${tok#[\'\"]}"; tok="${tok%[\'\";]}"
+    case "$tok" in
+      */sh|*/bash|*/env|*/flock|*/nice|*/ionice|*/timeout|*/chronic|*/run-one) continue ;;
+      /*) [ -f "$tok" ] && { printf '%s' "$tok"; return; } ;;
+    esac
+  done
+}
+
+# a script body for classification only: text files, the first 64 KB
+cb_body() { [ -n "$1" ] && [ -f "$1" ] && grep -Iq . "$1" 2>/dev/null && head -c 65536 "$1" 2>/dev/null | tr -d '\000'; }
+
+# Metrics a backup script leaves for node_exporter. One file = one job; per-database series
+# become its "dbs". Status: *_ok/*_success must be 1, *_failed/*_errors must be 0; the stalest
+# *_last_success*/*timestamp* is the job's last success.
+cb_prom_parse() {
+  awk '
+    function lab(s, key) {
+      if (match(s, key "=\"[^\"]*\"")) return substr(s, RSTART + length(key) + 2, RLENGTH - length(key) - 3)
+      return ""
+    }
+    /^[ \t]*#/ { next }
+    match($0, /^[a-zA-Z_:][a-zA-Z0-9_:]*/) {
+      name = substr($0, 1, RLENGTH); rest = substr($0, RLENGTH + 1); labels = ""
+      if (substr(rest, 1, 1) == "{") { e = index(rest, "}"); if (!e) next; labels = substr(rest, 2, e - 2); rest = substr(rest, e + 1) }
+      gsub(/^[ \t]+/, "", rest); split(rest, parts, /[ \t]+/); val = parts[1]
+      if (val == "") next
+      ln = tolower(name)
+      if (ln ~ /^restic_(last_backup|server)_/) next
+      if (ln !~ /backup|dump|snapshot|borg|walg|wal_g|pgbackrest|barman/) next
+      found = 1; names[name] = 1
+      db = lab(labels, "db"); if (db == "") db = lab(labels, "database")
+      lv = labels; gsub(/[a-zA-Z_][a-zA-Z0-9_]*="/, " ", lv); gsub(/"/, " ", lv); labtext = labtext " " lv
+      v = val + 0
+      if (ln ~ /last_success|last_backup|last_run|timestamp/) {
+        if (v > 1000000000) { if (mints == 0 || v < mints) mints = v; if (db != "") { dbs[db] = 1; dbts[db] = v } }
+      } else if (ln ~ /(_ok|_success|_succeeded)$/) {
+        checks++; if (v != 1) bad++; if (db != "") { dbs[db] = 1; dbok[db] = v }
+      } else if (ln ~ /(_failed|_failure|_failures|_errors?)$/) {
+        checks++; if (v > 0) bad++
+      } else if (ln ~ /_bytes$/) {
+        if (db != "") { dbs[db] = 1; dbsz[db] = v; sumsz += v } else if (v > maxsz) maxsz = v
+      } else if (ln ~ /duration_seconds$/) {
+        if (v > maxdur) maxdur = v
+      }
+    }
+    END {
+      if (!found) exit
+      n = ""; for (k in names) n = n " " k; print "NAMES" n
+      printf "TS %d\n", mints
+      printf "OK %d %d\n", checks, bad
+      printf "SIZE %d\n", (sumsz > 0 ? sumsz : maxsz)
+      printf "DUR %d\n", maxdur
+      print "LAB" labtext
+      for (d in dbs) printf "DB\t%s\t%s\t%d\t%d\n", d, (d in dbok ? dbok[d] : -1), dbts[d], dbsz[d]
+    }
+  ' "$1" 2>/dev/null
+}
+
+# "source<TAB>user<TAB>schedule<TAB>command" for every cron entry on the node
+cb_cron_lines() {
+  local f line u p
+  for f in /var/spool/cron/crontabs/* /var/spool/cron/*; do
+    [ -f "$f" ] || continue
+    u="$(basename "$f")"
+    while IFS= read -r line || [ -n "$line" ]; do cb_cron_line "$f" "$u" "$line"; done < "$f"
+  done
+  for f in /etc/crontab /etc/cron.d/*; do
+    [ -f "$f" ] || continue
+    case "$(basename "$f")" in kervax*|*.dpkg-*|*~|*.swp) continue ;; esac
+    while IFS= read -r line || [ -n "$line" ]; do cb_cron_line "$f" "" "$line"; done < "$f"
+  done
+  for p in hourly daily weekly monthly; do
+    for f in /etc/cron.$p/*; do
+      [ -f "$f" ] && [ -x "$f" ] || continue
+      printf '%s\t%s\t%s\t%s\n' "/etc/cron.$p" root "@$p" "$f"
+    done
+  done
+}
+
+# one crontab line -> the TSV above. $2 empty = a system crontab (a user field before the command)
+cb_cron_line() {
+  local src="$1" user="$2" line="$3" sched cmd
+  line="${line#"${line%%[![:space:]]*}"}"
+  case "$line" in ''|'#'*|@reboot*) return ;; esac
+  line="${line//$'\t'/ }"
+  if [[ "$line" =~ ^(@(yearly|annually|monthly|weekly|daily|midnight|hourly))[[:space:]]+(.*)$ ]]; then
+    sched="${BASH_REMATCH[1]}"; cmd="${BASH_REMATCH[3]}"
+  elif [[ "$line" =~ ^([0-9*/,-]+[[:space:]]+[0-9*/,-]+[[:space:]]+[0-9*/,A-Za-z-]+[[:space:]]+[0-9*/,A-Za-z-]+[[:space:]]+[0-9*/,A-Za-z-]+)[[:space:]]+(.*)$ ]]; then
+    sched="${BASH_REMATCH[1]}"; cmd="${BASH_REMATCH[2]}"
+  else
+    return  # VAR=value and anything else that is not a schedule
+  fi
+  if [ -z "$user" ]; then user="${cmd%%[[:space:]]*}"; cmd="${cmd#*[[:space:]]}"; fi
+  printf '%s\t%s\t%s\t%s\n' "$src" "$user" "$(printf '%s' "$sched" | tr -s ' ')" "$cmd"
+}
+
+cmd_custom_scan() {
+  set +euo pipefail  # a missing file or an empty grep is a normal outcome of a scan, not an error
+  local now; now=$(date +%s)
+  CB_CONTAINERS=()
+  if command -v docker >/dev/null 2>&1; then
+    mapfile -t CB_CONTAINERS < <(timeout 10 docker ps --format '{{.Names}}' 2>/dev/null)
+  fi
+  local -a jobs=()
+  local -A mj_json=() mj_names=() mj_lab=() mj_used=()
+
+  # 1. metrics files
+  local dir f base parsed line names ts checks bad size dur lab dbs okv dname dok dts dsz
+  for dir in "${CB_PROM_DIRS[@]}"; do
+    for f in "$dir"/*.prom; do
+      [ -f "$f" ] || continue
+      parsed="$(cb_prom_parse "$f")"
+      [ -n "$parsed" ] || continue
+      base="$(basename "$f" .prom)"
+      names=""; ts=0; checks=0; bad=0; size=0; dur=0; lab=""; dbs=""
+      while IFS= read -r line; do
+        case "$line" in
+          NAMES*) names="${line#NAMES}" ;;
+          "TS "*) ts="${line#TS }" ;;
+          "OK "*) read -r _ checks bad <<<"$line" ;;
+          "SIZE "*) size="${line#SIZE }" ;;
+          "DUR "*) dur="${line#DUR }" ;;
+          LAB*) lab="${line#LAB}" ;;
+          DB$'\t'*)
+            IFS=$'\t' read -r _ dname dok dts dsz <<<"$line"
+            dbs="${dbs:+$dbs,}{\"name\":\"$(json_escape "$(cb_clean "$dname")")\",\"ok\":${dok:--1},\"ts\":${dts:-0},\"size_bytes\":${dsz:-0}}"
+            ;;
+        esac
+      done <<<"$parsed"
+      okv=-1; [ "${checks:-0}" -gt 0 ] && { [ "${bad:-0}" -eq 0 ] && okv=1 || okv=0; }
+      mj_names[$base]="$names"
+      mj_lab[$base]="$lab"
+      mj_json[$base]="\"metrics\":\"$(json_escape "$f")\",\"ok\":$okv,\"ok_ts\":${ts:-0},\"size_bytes\":${size:-0},\"duration_sec\":${dur:-0},\"dbs\":[$dbs]"
+    done
+  done
+
+  # a cron job or a timer that WRITES one of these metrics files takes its status from them
+  cb_linked_metrics() {
+    local text="$1" id nm pfx
+    for id in "${!mj_names[@]}"; do
+      [ -n "${mj_used[$id]:-}" ] && continue
+      for nm in ${mj_names[$id]}; do
+        if grep -qF -- "$nm" <<<"$text"; then printf '%s' "$id"; return; fi
+      done
+      # metric names are often put together from a prefix: pg_backup_ + ok
+      pfx="${id%_*}"
+      if [ "$pfx" != "$id" ] && [ "${#pfx}" -ge 4 ] && grep -qE "(^|[^A-Za-z0-9])${pfx}_" <<<"$text"; then
+        printf '%s' "$id"; return
+      fi
+    done
+  }
+
+  # $1 id, $2 kind, $3 name, $4 description, $5 schedule, $6 names and commands, $7 script body,
+  # $8 the job's own status fields
+  cb_emit() {
+    local id="$1" kind="$2" name="$3" desc="$4" sched="$5" strong="$6" body="$7" status="$8" m engines files=false
+    m="$(cb_linked_metrics "$strong"$'\n'"$body")"
+    if [ -n "$m" ]; then
+      mj_used[$m]=1
+      # the metrics fields go last: they override the guesses from files and log times
+      status="$status,${mj_json[$m]}"
+      strong="$strong ${mj_names[$m]} ${mj_lab[$m]}"
+    fi
+    engines="$(cb_engines "$strong" "$body")"
+    if [ "$engines" = "[]" ] && { cb_is_files "$strong" || grep -qiE 'restic.*backup|borg.*create|borgmatic|rsync |rclone.*(copy|sync)|duplicity|kopia.*snapshot' <<<"$body"; }; then
+      files=true
+    fi
+    jobs+=("{\"id\":\"$(json_escape "$id")\",\"kind\":\"$kind\",\"name\":\"$(json_escape "$(cb_clean "$name")")\",\"desc\":\"$(json_escape "$(cb_clean "$desc")")\",\"schedule\":\"$(json_escape "$(cb_clean "$sched")")\",\"engines\":$engines,\"files\":$files,\"containers\":$(cb_containers "$strong"$'\n'"$body"),$status}")
+  }
+
+  # 2. systemd timers
+  local t svc props k v result estatus exit_ts active execs script body desc cal next last_mono last_ts err ok ok_ts
+  while IFS= read -r t; do
+    [ -n "$t" ] || continue
+    [[ "${t,,}" =~ $CB_SKIP_RE ]] && continue
+    svc="$(systemctl show "$t" -p Unit --value 2>/dev/null)"; [ -n "$svc" ] || continue
+    props="$(systemctl show "$svc" --timestamp=unix -p Result -p ExecMainStatus -p ExecMainExitTimestamp -p ActiveState -p ExecStart -p Description 2>/dev/null)"
+    err=$?
+    # systemd older than 247 has no --timestamp=unix: monotonic time plus boot time instead
+    [ "$err" -eq 0 ] || props="$(systemctl show "$svc" -p Result -p ExecMainStatus -p ExecMainExitTimestampMonotonic -p ActiveState -p ExecStart -p Description 2>/dev/null)"
+    result=""; estatus=""; exit_ts=0; active=""; execs=""; desc=""
+    while IFS='=' read -r k v; do
+      case "$k" in
+        Result) result="$v" ;; ExecMainStatus) estatus="$v" ;; ActiveState) active="$v" ;;
+        ExecStart) execs="$v" ;; Description) desc="$v" ;;
+        ExecMainExitTimestamp) [[ "$v" =~ ^@([0-9]+)$ ]] && exit_ts="${BASH_REMATCH[1]}" ;;
+        ExecMainExitTimestampMonotonic) [[ "$v" =~ ^[0-9]+$ ]] && [ "$v" -gt 0 ] && exit_ts=$(( $(cb_boot_ts) + v / 1000000 )) ;;
+      esac
+    done <<<"$props"
+    script="$(cb_script_of "$(printf '%s' "$execs" | sed -n 's/.*argv\[\]=\([^;]*\);.*/\1/p')")"
+    body="$(cb_body "$script")"
+    if ! [[ "${t,,} ${svc,,}" =~ $CB_NAME_RE ]] && ! grep -qiE "$CB_TOOL_RE" <<<"$body"; then continue; fi
+    cal="$(systemctl show "$t" --timestamp=unix -p TimersCalendar --value 2>/dev/null)"
+    next="$(printf '%s' "$cal" | sed -n 's/.*next_elapse=@\([0-9]*\).*/\1/p' | head -1)"
+    cal="$(printf '%s' "$cal" | sed -n 's/.*OnCalendar=\([^;]*\);.*/\1/p' | sed 's/[[:space:]]*$//' | head -1)"
+    last_mono="$(systemctl show "$t" -p LastTriggerUSecMonotonic --value 2>/dev/null)"
+    last_ts=0; [[ "$last_mono" =~ ^[0-9]+$ ]] && [ "$last_mono" -gt 0 ] && last_ts=$(( $(cb_boot_ts) + last_mono / 1000000 ))
+    ok=-1; ok_ts=0
+    if [ "$exit_ts" -gt 0 ]; then
+      if [ "$result" = success ] && [ "${estatus:-0}" = 0 ]; then ok=1; ok_ts=$exit_ts; else ok=0; fi
+    fi
+    cb_emit "systemd:$t" systemd "${t%.timer}" "$desc" "$cal" "$t $svc $script $desc" "$body" \
+      "\"unit\":\"$(json_escape "$svc")\",\"script\":\"$(json_escape "$script")\",\"ok\":$ok,\"ok_ts\":$ok_ts,\"run_ts\":$exit_ts,\"result\":\"$(json_escape "$result")\",\"running\":$([ "$active" = activating ] && echo true || echo false),\"next_ts\":${next:-0},\"prev_ts\":$last_ts,\"enabled\":$(systemctl is-enabled "$t" >/dev/null 2>&1 && echo true || echo false)"
+  done < <(systemctl list-unit-files --type=timer --no-legend 2>/dev/null | awk '{print $1}')
+
+  # 3. cron: user crontabs, system crontabs, cron.{hourly,daily,weekly,monthly}
+  local src user sched cmd name logf log_ts id d newest
+  while IFS=$'\t' read -r src user sched cmd; do
+    [ -n "$cmd" ] || continue
+    [[ "${cmd,,}" =~ $CB_SKIP_RE ]] && continue
+    script="$(cb_script_of "$cmd")"
+    body="$(cb_body "$script")"
+    if ! [[ "${cmd,,}" =~ $CB_NAME_RE ]] && ! grep -qiE "$CB_TOOL_RE" <<<"$cmd"$'\n'"$body"; then continue; fi
+    if [ -n "$script" ]; then
+      name="$(basename "$script")"
+    else
+      name="$(printf '%s' "$cmd" | sed -E 's/^([A-Za-z_][A-Za-z0-9_]*=[^ ]* +)*//' | awk '{print $1}')"; name="$(basename "$name")"
+    fi
+    # the command is hashed, never sent: it may carry a password
+    id="cron:$(printf '%s|%s' "$user" "$cmd" | sha1sum | cut -c1-12)"
+    logf="$(printf '%s' "$cmd" | grep -oE '(>>?|tee( -a)?)[[:space:]]*/[A-Za-z0-9._/@+-]+' | grep -oE '/[A-Za-z0-9._/@+-]+' | grep -v '^/dev/' | tail -1)"
+    log_ts=0; [ -n "$logf" ] && [ -f "$logf" ] && log_ts=$(stat -c %Y "$logf" 2>/dev/null || echo 0)
+    d="$(cb_dirs "$cmd"$'\n'"$body" | head -1)"
+    dts=0; dsz=0
+    if [ -n "$d" ]; then newest="$(cb_newest "$d")"; [ -n "$newest" ] && { dts="${newest%% *}"; dsz="${newest##* }"; }; fi
+    cb_emit "$id" cron "$name" "" "$sched" "$name $cmd" "$body" \
+      "\"user\":\"$(json_escape "$user")\",\"source\":\"$(json_escape "$src")\",\"script\":\"$(json_escape "$script")\",\"ok\":-1,\"ok_ts\":${dts:-0},\"size_bytes\":${dsz:-0},\"dir\":\"$(json_escape "$d")\",\"log\":\"$(json_escape "$logf")\",\"run_ts\":${log_ts:-0}"
+  done < <(cb_cron_lines)
+
+  # metrics nobody above claimed: a standalone job (written by something we did not recognise)
+  local mid
+  for mid in "${!mj_json[@]}"; do
+    [ -n "${mj_used[$mid]:-}" ] && continue
+    jobs+=("{\"id\":\"metrics:$(json_escape "$mid")\",\"kind\":\"metrics\",\"name\":\"$(json_escape "$mid")\",\"desc\":\"\",\"schedule\":\"\",\"engines\":$(cb_engines "$mid ${mj_names[$mid]}" ""),\"files\":false,\"containers\":$(cb_containers "${mj_lab[$mid]}"),${mj_json[$mid]}}")
+  done
+
+  local out="" n=0 j
+  for j in "${jobs[@]}"; do
+    n=$((n + 1)); [ "$n" -le "$CUSTOM_MAX_JOBS" ] || break
+    out="${out:+$out,}$j"
+  done
+  printf '{"v":1,"ts":%s,"jobs":[%s]}\n' "$now" "$out"
+}
+
+# the scan runs from the minute cron, but not more often than CUSTOM_EVERY and never twice at once
+custom_scan_maybe() {
+  local age="$CUSTOM_EVERY"
+  [ -f "$CUSTOM_JSON" ] && age=$(( $(date +%s) - $(stat -c %Y "$CUSTOM_JSON" 2>/dev/null || echo 0) ))
+  [ "$age" -ge "$CUSTOM_EVERY" ] || return 0
+  install -d -m 0755 "$CUSTOM_DIR"
+  (
+    flock -n 9 || exit 0
+    if nice -n 10 timeout 150 "$0" custom-scan > "$CUSTOM_JSON.tmp" 2>/dev/null && [ -s "$CUSTOM_JSON.tmp" ]; then
+      mv -f "$CUSTOM_JSON.tmp" "$CUSTOM_JSON"; chmod 0644 "$CUSTOM_JSON"
+    else
+      rm -f "$CUSTOM_JSON.tmp"
+    fi
+  ) 9>/run/kervax-custom-scan.lock
+}
+
 case "${1:-}" in
   get-config)    cmd_get_config ;;
-  refresh)       refresh_config ;;
+  # the scan is throttled inside (every CUSTOM_EVERY seconds): the config refresh stays per-minute
+  refresh)       refresh_config || true; custom_scan_maybe ;;
+  custom-scan)   cmd_custom_scan ;;
   set-paths)     shift; cmd_set_paths "$@" ;;
   set-schedule)  shift; cmd_set_schedule "$@" ;;
   run-now)       cmd_run_now ;;
@@ -980,7 +1332,7 @@ case "${1:-}" in
   dump-remove)   shift; cmd_dump_remove "$@" ;;
   dump-status)   cmd_dump_status ;;
   process-spool) cmd_process_spool ;;
-  *) echo "usage: $0 {get-config|set-paths <mode> <path...>|set-schedule <HH:MM>|run-now|provision <url> <repopass> <mode> <HH:MM> <delay> <ver> <cacert_b64|-> <path...>|dump-setup <engine> [container]|dump-remove <engine>|dump-status|process-spool}" >&2; exit 2 ;;
+  *) echo "usage: $0 {get-config|custom-scan|set-paths <mode> <path...>|set-schedule <HH:MM>|run-now|provision <url> <repopass> <mode> <HH:MM> <delay> <ver> <cacert_b64|-> <path...>|dump-setup <engine> [container]|dump-remove <engine>|dump-status|process-spool}" >&2; exit 2 ;;
 esac
 HELPER_EOF
 chmod 0755 "$HELPER"; chown root:root "$HELPER"

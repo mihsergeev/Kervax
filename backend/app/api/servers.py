@@ -13,7 +13,7 @@ from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, Query, Re
 from fastapi.responses import FileResponse, PlainTextResponse
 from sqlalchemy import delete as sa_delete, select
 
-from app import audit, geoip, manual_probe
+from app import audit, custom_backups, geoip, manual_probe
 from app.collector import send_alerts_soon
 from app.setup_scripts import (
     current_setup_versions as _current_setup_versions,
@@ -45,6 +45,7 @@ from app.schemas import (
     BackupCommandIn,
     BackupCommandOut,
     BackupAuditMuteIn,
+    CustomBackupIgnoreIn,
     BackupRepoMuteIn,
     BackupCredsOut,
     BackupAudit,
@@ -151,6 +152,7 @@ def _out(
         server, cur_versions if cur_versions is not None else _current_setup_versions()
     )
     o.backup_audit = _backup_coverage(server)
+    o.custom_backups = custom_backups.views(server, now)
     # Страна по IP — офлайн-таблицей (см. geoip). Берём адрес, которым нода реально
     # выходит в сеть: external_ip панель видит сама, agent_ip задан руками и может
     # оказаться внутренним. local_ip не смотрим — он приватный и страны не имеет.
@@ -568,17 +570,29 @@ def _backup_coverage(server: Server) -> list[BackupAudit]:
         # экземпляры: каждый контейнер — отдельная находка. Поды и нативная установка
         # контейнерного имени не имеют, поэтому идут одной записью с пустым instance.
         insts: list[str] = list(names) if names else [""]
+        now_c = datetime.now(timezone.utc)
         for inst in insts:
+            where_txt = (
+                f"контейнер: {inst}" if inst
+                else ("под kubernetes: " + ", ".join(pods[:4]) if pods else "процесс на хосте")
+            )
+            # Свой бэкап ноды (cron, таймер, скрипт с метриками), который бэкапит именно этот
+            # экземпляр. Раньше панель его не видела и звала «настройте дамп» там, где дамп
+            # годами снимает ансибл-роль.
+            own = custom_backups.db_cover(server, now_c, eng, inst, len(insts))
+            if own is not None:
+                out.append(BackupAudit(
+                    kind="db_ok", subject=eng, gap=False, instance=inst,
+                    detail=f"{where_txt} — свой бэкап: {custom_backups.label(own)}",
+                    container=inst, pods=pods[:4],
+                ))
+                continue
             dump = panel_dumps.get((code, inst)) if code else None
             # старый helper (< v8) не различал контейнеры и слал дамп без имени —
             # засчитываем его первому экземпляру, иначе после обновления панели
             # уже работающий дамп показался бы выключенным
             if dump is None and code and inst and inst == insts[0]:
                 dump = panel_dumps.get((code, ""))
-            where_txt = (
-                f"контейнер: {inst}" if inst
-                else ("под kubernetes: " + ", ".join(pods[:4]) if pods else "процесс на хосте")
-            )
             if dump and (dump.get("files") or 0) > 0:
                 out.append(BackupAudit(
                     kind="db_ok", subject=eng, gap=False, instance=inst,
@@ -1224,6 +1238,29 @@ async def backup_command_status(
     out = _backup_cmd_out(c, datetime.now(timezone.utc))
     await session.commit()
     return out
+
+
+@router.post("/{server_id}/backup/custom-ignore", response_model=ServerOut)
+async def custom_backup_ignore(
+    server_id: int, body: CustomBackupIgnoreIn, user: CurrentUser, session: SessionDep
+) -> ServerOut:
+    """Не отслеживать найденный на ноде бэкап («это не бэкап», «старый скрипт») — или
+    вернуть. Задание остаётся видимым в списке, но не алертит и не закрывает покрытие."""
+    s = await _get_or_404(server_id, session, user)
+    ids = set(s.custom_backup_ignored or [])
+    if body.ignored:
+        ids.add(body.id)
+    else:
+        ids.discard(body.id)
+    s.custom_backup_ignored = sorted(ids)
+    await session.commit()
+    await session.refresh(s)
+    await audit.record(
+        session, user.username,
+        "custom_backup_ignore" if body.ignored else "custom_backup_watch",
+        body.id[:120], f"srv={server_id}",
+    )
+    return _out(s, datetime.now(timezone.utc))
 
 
 @router.post("/{server_id}/backup/audit-mute", response_model=ServerOut)

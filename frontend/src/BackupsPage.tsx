@@ -12,11 +12,13 @@ import {
   deployBackupServer,
   enableBackupTls,
   listServers,
+  setCustomBackupIgnored,
   type BackupCommand,
   type BackupCreds,
   type BackupInfo,
   type BackupServerInfo,
   type BackupSetupJob,
+  type CustomBackup,
   type RepoStat,
   type Server,
 } from './api'
@@ -357,6 +359,157 @@ function verLt(v: string, target: string): boolean {
   }
   return false
 }
+// ---------- свои бэкапы ноды: настроены без панели, находит helper ----------
+const OWN_PROBLEM = ['failed', 'stale', 'disabled']
+function ownBackupProblems(s: Server): CustomBackup[] {
+  return (s.custom_backups ?? []).filter((j) => OWN_PROBLEM.includes(j.status))
+}
+// свой файловый бэкап ноды (restic/borg/rsync без панели) — нода не «без бэкапа»
+function hasOwnFileBackup(s: Server): boolean {
+  return (s.custom_backups ?? []).some((j) => j.files && !j.ignored)
+}
+
+// «0 4 * * *» и «*-*-* 04:00:00» — это «ежедневно 04:00»; остальное показываем как есть
+function fmtSchedule(sched: string, t: (k: string, p?: Record<string, string | number>) => string): string {
+  const v = (sched || '').trim()
+  const two = (n: string) => n.padStart(2, '0')
+  let m = v.match(/^(\d{1,2})\s+(\d{1,2})\s+\*\s+\*\s+\*$/)
+  if (m) return t('ежедневно {time}', { time: `${two(m[2])}:${two(m[1])}` })
+  m = v.match(/^(?:\*-\*-\*\s+)?(\d{1,2}):(\d{2})(?::00)?$/)
+  if (m) return t('ежедневно {time}', { time: `${two(m[1])}:${m[2]}` })
+  if (v === '@daily' || v === 'daily') return t('ежедневно')
+  if (v === '@hourly' || v === 'hourly') return t('ежечасно')
+  if (v === '@weekly' || v === 'weekly') return t('еженедельно')
+  return v || '—'
+}
+
+function OwnBackupsChip({ server: s }: { server: Server }) {
+  const { t } = useI18n()
+  const jobs = (s.custom_backups ?? []).filter((j) => !j.ignored)
+  if (jobs.length === 0) return null
+  const bad = ownBackupProblems(s).length
+  return (
+    <span className={`type-chip${bad ? ' t-down' : ''}`} title={jobs.map((j) => j.name).join(', ')}>
+      {bad
+        ? t('свои бэкапы: {n}, с проблемой: {b}', { n: jobs.length, b: bad })
+        : t('свои бэкапы: {n}', { n: jobs.length })}
+    </span>
+  )
+}
+
+function OwnBackupRow({ job: j, canManage, busy, onToggle }: {
+  job: CustomBackup; canManage: boolean; busy: boolean; onToggle: () => void
+}) {
+  const { t } = useI18n()
+  const label: Record<CustomBackup['status'], string> = {
+    ok: t('работает'), failed: t('ошибка'), stale: t('не свежий'), disabled: t('таймер выключен'),
+    running: t('идёт сейчас'), unknown: t('не видно'), ignored: t('не отслеживается'),
+  }
+  const tone: Record<CustomBackup['status'], string> = {
+    ok: 't-up', running: 't-up', failed: 't-down', stale: 't-degraded', disabled: 't-degraded',
+    unknown: 'muted', ignored: 'muted',
+  }
+  const dot: Record<CustomBackup['status'], string> = {
+    ok: 'sdot-up', running: 'sdot-up', failed: 'sdot-down', stale: 'sdot-degraded',
+    disabled: 'sdot-degraded', unknown: 'sdot-unknown', ignored: 'sdot-unknown',
+  }
+  const where = j.kind === 'cron'
+    ? `cron · ${fmtSchedule(j.schedule, t)}`
+    : j.kind === 'systemd' ? `${t('таймер')} · ${fmtSchedule(j.schedule, t)}` : t('метрики')
+  // у задания без собственного статуса «последнее» — это самый свежий файл бэкапа
+  const lastLbl = j.kind === 'cron' && !j.metrics ? t('свежий файл бэкапа') : t('последний успех')
+  const bits: string[] = []
+  if (j.ok_ts) bits.push(`${lastLbl}: ${fmtAgo(j.ok_ts)}`)
+  else if (j.run_ts) bits.push(`${t('последний запуск')}: ${fmtAgo(j.run_ts)}`)
+  if (j.size_bytes) bits.push(fmtBytes(j.size_bytes))
+  if (j.duration_sec) bits.push(`⏱ ${fmtDur(j.duration_sec)}`)
+  const src = [
+    j.dir ? `📁 ${j.dir}` : '',
+    j.log ? `${t('лог')}: ${j.log}` : '',
+    j.metrics ? `${t('метрики')}: ${j.metrics.split('/').pop()}` : '',
+    j.unit,
+  ].filter(Boolean)
+  return (
+    <div className={`own-backup${j.ignored ? ' own-backup-ignored' : ''}`}>
+      <span className={`sdot ${dot[j.status]}`} />
+      <div className="own-backup-main">
+        <div className="own-backup-name">
+          <span className="mono">{j.name}</span>
+          {j.engines.map((e) => <span key={e} className="type-chip">{e}</span>)}
+          {j.containers.map((c) => <span key={c} className="type-chip mono">🐳 {c}</span>)}
+          <span className="type-chip mono">{where}</span>
+        </div>
+        {j.desc && <div className="muted small">{j.desc}</div>}
+        {bits.length > 0 && <div className="small">{bits.join(' · ')}</div>}
+        {j.dbs.length > 0 && (
+          <div className="muted small">
+            {t('базы')}: {j.dbs.map((d) => `${d.name}${d.ok === 1 ? ' ✓' : d.ok === 0 ? ' ✗' : ''}`).join(', ')}
+          </div>
+        )}
+        {j.problem && <div className="t-down small">{j.problem}</div>}
+        {j.status === 'unknown' && (
+          <div className="muted small">
+            {t('Не видно, когда задание отработало: метрик у него нет, а файлов бэкапа панель не нашла.')}
+          </div>
+        )}
+        {src.length > 0 && <div className="muted small mono own-backup-src">{src.join(' · ')}</div>}
+      </div>
+      <div className="own-backup-side">
+        <span className={`small ${tone[j.status]}`}>{label[j.status]}</span>
+        {canManage && (
+          <button className="ghost small" disabled={busy} onClick={onToggle}>
+            {j.ignored ? t('отслеживать') : t('не отслеживать')}
+          </button>
+        )}
+      </div>
+    </div>
+  )
+}
+
+function OwnBackups({ server: s, canManage, onChanged }: {
+  server: Server; canManage: boolean; onChanged: () => void
+}) {
+  const { t } = useI18n()
+  const [busy, setBusy] = useState<string | null>(null)
+  const [err, setErr] = useState('')
+  const [showIgnored, setShowIgnored] = useState(false)
+  const jobs = s.custom_backups ?? []
+  if (jobs.length === 0) return null
+  const active = jobs.filter((j) => !j.ignored)
+  const ignored = jobs.filter((j) => j.ignored)
+  const toggle = async (j: CustomBackup) => {
+    setBusy(j.id)
+    setErr('')
+    try {
+      await setCustomBackupIgnored(s.id, j.id, !j.ignored)
+      onChanged()
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : t('Ошибка'))
+    } finally {
+      setBusy(null)
+    }
+  }
+  const row = (j: CustomBackup) => (
+    <OwnBackupRow key={j.id} job={j} canManage={canManage} busy={busy === j.id} onToggle={() => toggle(j)} />
+  )
+  return (
+    <div className="own-backups">
+      <div className="chart-cap">{t('Свои бэкапы на ноде')}</div>
+      <div className="muted small own-backups-lead">
+        {t('Настроены без панели. Панель нашла их сама и следит за их работой, ничего на ноде не меняя.')}
+      </div>
+      {active.length > 0 && <div className="own-backups-list">{active.map(row)}</div>}
+      {err && <p className="form-error small">{err}</p>}
+      {ignored.length > 0 && (
+        <button className="ghost small stale-more" onClick={() => setShowIgnored(!showIgnored)}>
+          {showIgnored ? t('скрыть неотслеживаемые') : t('не отслеживаются ({n})', { n: ignored.length })}
+        </button>
+      )}
+      {showIgnored && <div className="own-backups-list">{ignored.map(row)}</div>}
+    </div>
+  )
+}
+
 function BackupModal({
   server: s,
   backup: b,
@@ -481,6 +634,7 @@ function BackupModal({
             ))}
           </div>
         )}
+        <OwnBackups server={s} canManage={canManage} onChanged={onChanged} />
         <CoverageAudit server={s} canManage={canManage} onChanged={onChanged} />
         {canManage && b.manageable && (b.helper_version || 0) < CURRENT_BACKUP_HELPER && (
           <div className="form-error small" style={{ marginTop: '0.5rem' }}>
@@ -640,6 +794,7 @@ function HostRow({
           {showGroup && s.group_name && <span className="type-chip group-chip">{s.group_name}</span>}
           {b.restic_version && <span className="type-chip mono">{shortRestic(b.restic_version)}</span>}
           {!b.configured && <span className="type-chip off">{t('не настроен')}</span>}
+          <OwnBackupsChip server={s} />
           {auditMutes.length > 0 && <MuteChip items={auditMutes} t={t} />}
         </div>
         <div className="backup-row-meta mono muted small">
@@ -1349,8 +1504,11 @@ function NodeCoverageModal({ server: s, canManage, onChanged, onClose }: {
         <div className="muted small">
           {s.backup_not_required
             ? t('Бэкап на этой ноде помечен как не требующийся, но данные на ней есть:')
-            : t('Файловый бэкап на ноде не настроен. Что на ней обнаружено:')}
+            : hasOwnFileBackup(s)
+              ? t('Панельного бэкапа на ноде нет, но есть свой — за ним панель следит:')
+              : t('Файловый бэкап на ноде не настроен. Что на ней обнаружено:')}
         </div>
+        <OwnBackups server={s} canManage={canManage} onChanged={onChanged} />
         <CoverageAudit server={s} canManage={canManage} onChanged={onChanged} />
       </div>
     </div>,
@@ -1382,6 +1540,7 @@ function NoBackupRow({ server: s, canAct, onSetup, onDeploy, onCoverage, onChang
           {s.name}
           {s.group_name && <span className="type-chip group-chip">{s.group_name}</span>}
           {optedOut && <span className="type-chip">{t('не требуется')}</span>}
+          <OwnBackupsChip server={s} />
         </div>
         <div className="check-target mono muted small">{serverAddr(s)}</div>
       </div>
@@ -1786,19 +1945,22 @@ export function BackupsPage({
     .filter((x) => x.items.length > 0)
   // сервера БЕЗ живого бэкапа (по умолчанию бэкап нужен → алерт). Бэкап-серверы и
   // живые клиенты сюда не попадают; мёртвый/осиротевший бэкап — попадает (можно настроить заново).
-  const noBackupAll = (servers ?? []).filter(
+  const noPanelBackup = (servers ?? []).filter(
     (s) =>
       s.online &&
       !s.last_report?.backup_server?.present &&
       !backupAlive(s.last_report?.backup),
   )
+  // свой файловый бэкап (restic/borg/rsync без панели): нода не «без бэкапа», за ним следим
+  const ownOnly = noPanelBackup.filter(hasOwnFileBackup).sort((a, b) => a.name.localeCompare(b.name))
+  const noBackupAll = noPanelBackup.filter((s) => !hasOwnFileBackup(s))
   // требуют бэкапа (галка не стоит) — наверх, красным; «не требуется» — в отдельный подвал внизу
   const noBackupReq = noBackupAll.filter((s) => !s.backup_not_required).sort((a, b) => a.name.localeCompare(b.name))
   const noBackupOpt = noBackupAll.filter((s) => s.backup_not_required).sort((a, b) => a.name.localeCompare(b.name))
-  const problems = allHosts.filter(({ d }) => {
+  const problems = allHosts.filter(({ s, d }) => {
     const st = backupStatus(d)
-    return st === 'failed' || st === 'stale'
-  }).length
+    return st === 'failed' || st === 'stale' || ownBackupProblems(s).length > 0
+  }).length + ownOnly.filter((s) => ownBackupProblems(s).length > 0).length
   const q = query.trim().toLowerCase()
   // Поиск обязан действовать на ВСЮ страницу. Раньше он сужал только клиентов, а
   // бэкап-серверы и «не требуется» оставались как есть — при активном фильтре это
@@ -1809,6 +1971,7 @@ export function BackupsPage({
     .filter(({ s }) => match(s))
     .sort((a, b) => a.s.name.localeCompare(b.s.name))
   const srvHostsView = srvHosts.filter(({ s }) => match(s))
+  const ownOnlyView = ownOnly.filter(match)
   const noBackupReqView = noBackupReq.filter(match)
   const noBackupOptView = noBackupOpt.filter(match)
 
@@ -1922,12 +2085,39 @@ export function BackupsPage({
           </div>
         </div>
       )}
-      {srvHostsView.length + noBackupReqView.length + noBackupOptView.length > 0 && hosts.length > 0 && (
+      {ownOnlyView.length > 0 && (
+        <div className="mon-group">
+          <div className="mon-group-head docker-group-head">
+            <span className="mon-group-name">🧰 {t('Свой бэкап (настроен без панели)')}</span>
+            <span className="mon-group-n">{ownOnlyView.length}</span>
+          </div>
+          <div className="check-list">
+            {ownOnlyView.map((s) => {
+              const bad = ownBackupProblems(s).length > 0
+              return (
+                <button key={s.id} className={`loc-res docker-row own-only-row${bad ? ' t-down' : ''}`}
+                  onClick={() => setCovId(s.id)}>
+                  <div className="docker-c-main">
+                    <div className="docker-c-name">
+                      <CountryFlag code={s.country} />
+                      {s.name}
+                      {s.group_name && <span className="type-chip group-chip">{s.group_name}</span>}
+                      <OwnBackupsChip server={s} />
+                    </div>
+                    <div className="check-target mono muted small">{serverAddr(s)}</div>
+                  </div>
+                </button>
+              )
+            })}
+          </div>
+        </div>
+      )}
+      {srvHostsView.length + noBackupReqView.length + noBackupOptView.length + ownOnlyView.length > 0 && hosts.length > 0 && (
         <div className="mon-group-head docker-group-head backup-clients-head">
           <span className="mon-group-name">{t('Клиенты (что бэкапится)')}</span>
         </div>
       )}
-      {servers && allHosts.length === 0 && srvHosts.length === 0 && noBackupAll.length === 0 && (
+      {servers && allHosts.length === 0 && srvHosts.length === 0 && noBackupAll.length === 0 && ownOnly.length === 0 && (
         <div className="card muted">
           {t('Ноды с restic-бэкапом не найдены. Агент определяет бэкап сам (метрики + systemd); если бэкап есть, но раздел пуст — обновите агент.')}
         </div>

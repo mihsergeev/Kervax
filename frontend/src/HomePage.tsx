@@ -346,8 +346,17 @@ function backupProblems(servers: Server[], t: T): ProbItem[] {
       else if (b.last_backup_ts && Date.now() / 1000 - b.last_backup_ts > 2 * 86400) out.push({ key: `b-stale-${s.id}`, id: s.id, cc: s.country, down: false, text: t('{name}: бэкап не свежий', { name: s.name }) })
     }
     const bs = s.last_report?.backup_server
+    // свои бэкапы ноды (настроены без панели): упал прогон, давно не отрабатывал, выключен
+    const own = (s.custom_backups ?? []).filter((j) => ['failed', 'stale', 'disabled'].includes(j.status))
+    if (own.length > 0) {
+      out.push({ key: `b-own-${s.id}`, id: s.id, cc: s.country, down: own.some((j) => j.status === 'failed'),
+        text: t('{name}: свой бэкап не отрабатывает — {jobs}', {
+          name: s.name, jobs: own.map((j) => `${j.name} (${j.problem})`).join(', '),
+        }) })
+    }
+    const ownFiles = (s.custom_backups ?? []).some((j) => j.files && !j.ignored)
     // сервер без настроенного бэкапа (и не помеченный «не требуется», и не сам бэкап-сервер)
-    if (!bs?.present && !(b?.configured || b?.metric_present) && !s.backup_not_required) {
+    if (!bs?.present && !(b?.configured || b?.metric_present) && !s.backup_not_required && !ownFiles) {
       out.push({ key: `b-none-${s.id}`, id: s.id, cc: s.country, down: false, text: t('{name}: бэкап не настроен', { name: s.name }) })
     }
     if (bs?.present) {

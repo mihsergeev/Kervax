@@ -57,6 +57,7 @@ const RULE_KIND_LABELS: Record<string, string> = {
   backup_dump: 'Бэкап: дамп СУБД',
   backup_dump_space: 'Бэкап: место под дампы',
   backup_cron: 'Бэкап: дамп-CronJob',
+  backup_custom: 'Бэкап: свои бэкапы',
   clock: 'Время сервера',
 }
 
