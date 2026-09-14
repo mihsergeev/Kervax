@@ -19,10 +19,20 @@ _MAX_INTERVAL = 31 * 86400
 _DAY = 86400
 
 
-def jobs_of(server) -> list[dict]:
+# Сведения helper'а устарели: он обновляет их раз в 5 минут, и три часа тишины значат, что
+# он больше не запускается. Судить по застывшему снимку нельзя — через двое суток он дал бы
+# «нет свежего бэкапа» по заданиям, которые на самом деле исправно работают.
+_SCAN_STALE = 3 * 3600
+
+
+def _block(server) -> dict:
     rep = getattr(server, "last_report", None) or {}
     block = ((rep.get("extras") or {}).get(EXTRA_KEY)) or {}
-    jobs = block.get("jobs") if isinstance(block, dict) else None
+    return block if isinstance(block, dict) else {}
+
+
+def jobs_of(server) -> list[dict]:
+    jobs = _block(server).get("jobs")
     return [j for j in (jobs or []) if isinstance(j, dict) and j.get("id")]
 
 
@@ -117,7 +127,7 @@ def _ago(seconds: float) -> str:
     return f"{seconds / _DAY:.1f} дн".replace(".0 ", " ")
 
 
-def evaluate(job: dict, now: datetime, ignored: set[str]) -> CustomBackupOut:
+def evaluate(job: dict, now: datetime, ignored: set[str], fresh: bool = True) -> CustomBackupOut:
     nowts = now.timestamp()
     ok = int(job.get("ok") if job.get("ok") is not None else -1)
     ok_ts = int(job.get("ok_ts") or 0)
@@ -125,6 +135,8 @@ def evaluate(job: dict, now: datetime, ignored: set[str]) -> CustomBackupOut:
     status, problem = "unknown", ""
     if job.get("id") in ignored:
         status = "ignored"
+    elif not fresh:
+        pass  # снимок застыл: ни «работает», ни «упал» по нему утверждать нельзя
     elif job.get("running"):
         status = "running"
     elif job.get("kind") == "systemd" and job.get("enabled") is False:
@@ -177,12 +189,15 @@ def evaluate(job: dict, now: datetime, ignored: set[str]) -> CustomBackupOut:
         dbs=dbs,
         stale_after=after,
         ignored=status == "ignored",
+        scan_stale=not fresh,
     )
 
 
 def views(server, now: datetime) -> list[CustomBackupOut]:
     ignored = set(getattr(server, "custom_backup_ignored", None) or [])
-    return [evaluate(j, now, ignored) for j in jobs_of(server)]
+    scanned = int(_block(server).get("ts") or 0)
+    fresh = now.timestamp() - scanned <= _SCAN_STALE
+    return [evaluate(j, now, ignored, fresh) for j in jobs_of(server)]
 
 
 _PROBLEM = ("failed", "stale", "disabled")
