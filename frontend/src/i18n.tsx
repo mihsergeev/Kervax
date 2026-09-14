@@ -744,6 +744,7 @@ const EN: Record<string, string> = {
   'Бэкап: дамп СУБД': 'Backup: DB dump',
   'Бэкап: место под дампы': 'Backup: dump disk space',
   'Бэкап: дамп-CronJob': 'Backup: dump CronJob',
+  'Бэкап: свои бэкапы': 'Backup: own backups',
   'Время сервера': 'Server clock',
   'открыть график': 'open chart',
   'Диск — только предупреждения': 'Disk — warnings only',
@@ -1366,6 +1367,36 @@ const EN: Record<string, string> = {
   'Заменяет логотип в шапке и на экране входа. PNG, SVG, WebP или JPEG до {n} КБ.':
     'Replaces the logo in the header and on the login screen. PNG, SVG, WebP or JPEG up to {n} KB.',
   'Файл логотипа': 'Logo file',
+  'ежедневно {time}': 'daily {time}',
+  'ежедневно': 'daily',
+  'ежечасно': 'hourly',
+  'еженедельно': 'weekly',
+  'свои бэкапы: {n}': 'own backups: {n}',
+  'свои бэкапы: {n}, с проблемой: {b}': 'own backups: {n}, failing: {b}',
+  'таймер выключен': 'timer disabled',
+  'не видно': 'not visible',
+  'не отслеживается': 'not watched',
+  'таймер': 'timer',
+  'метрики': 'metrics',
+  'свежий файл бэкапа': 'newest backup file',
+  'последний успех': 'last success',
+  'последний запуск': 'last run',
+  'лог': 'log',
+  'базы': 'databases',
+  'Не видно, когда задание отработало: метрик у него нет, а файлов бэкапа панель не нашла.':
+    'It is not visible when the job last ran: it has no metrics, and the panel found no backup files.',
+  'отслеживать': 'watch',
+  'не отслеживать': 'do not watch',
+  'Свои бэкапы на ноде': 'Own backups on the node',
+  'Настроены без панели. Панель нашла их сама и следит за их работой, ничего на ноде не меняя.':
+    'Set up without the panel. The panel found them by itself and watches them without changing anything on the node.',
+  'скрыть неотслеживаемые': 'hide unwatched',
+  'не отслеживаются ({n})': 'not watched ({n})',
+  'Панельного бэкапа на ноде нет, но есть свой — за ним панель следит:':
+    'The node has no panel backup, but it has its own, and the panel watches it:',
+  'Свой бэкап (настроен без панели)': 'Own backup (set up without the panel)',
+  '{name}: свой бэкап не отрабатывает — {jobs}':
+    '{name}: own backup is failing — {jobs}',
   'На тёмной теме — отдельный вариант логотипа, его цвета подстроены под тему.':
     'The dark theme uses a separate logo variant, with its colours adjusted to the theme.',
   'На тёмной теме цвета логотипа подстроены под тему.':

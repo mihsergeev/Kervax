@@ -750,6 +750,56 @@ class BackupAudit(BaseModel):
     instance: str = ""
 
 
+class CustomBackupDb(BaseModel):
+    """База внутри своего бэкапа — из его метрик (успех и время по каждой)."""
+
+    name: str
+    ok: int = -1  # 1 успех, 0 ошибка, -1 не сообщается
+    ts: int = 0
+    size_bytes: int = 0
+
+
+class CustomBackupOut(BaseModel):
+    """Свой бэкап ноды (настроен без панели) и его состояние.
+
+    Находит helper на ноде; панель только следит. Статус: ok — отработал вовремя,
+    failed — последний прогон упал, stale — давно не было успешного, disabled — таймер
+    выключен, running — идёт сейчас, unknown — по заданию не видно, когда оно отработало,
+    ignored — отмечено «не отслеживать»."""
+
+    id: str
+    kind: str  # cron | systemd | metrics
+    name: str
+    desc: str = ""
+    schedule: str = ""
+    engines: list[str] = []  # какие СУБД бэкапит (по именам, командам, метрикам)
+    files: bool = False  # файловый бэкап ноды (restic/borg/rsync…), а не дамп базы
+    containers: list[str] = []  # на какие контейнеры ссылается
+    status: str
+    problem: str = ""  # что не так — для failed/stale/disabled
+    ok_ts: int = 0  # последний успех (или самый свежий файл бэкапа, если статуса нет)
+    run_ts: int = 0  # последний прогон вообще
+    next_ts: int = 0
+    size_bytes: int = 0
+    duration_sec: int = 0
+    dir: str = ""
+    log: str = ""
+    script: str = ""
+    unit: str = ""
+    result: str = ""  # systemd Result последнего прогона
+    metrics: str = ""  # файл метрик, из которого взят статус
+    dbs: list[CustomBackupDb] = []
+    stale_after: int = 0  # через сколько секунд молчание считается проблемой
+    ignored: bool = False
+
+
+class CustomBackupIgnoreIn(BaseModel):
+    """Не отслеживать / снова отслеживать найденный на ноде бэкап."""
+
+    id: str = Field(min_length=1, max_length=120)
+    ignored: bool
+
+
 class BackupAuditMuteIn(BaseModel):
     """Приглушить/вернуть одну находку аудита покрытия (ключ вида "db:RabbitMQ")."""
 
@@ -831,6 +881,9 @@ class ServerOut(BaseModel):
     helper_advice: list[HelperAdvice] = []
     # аудит покрытия бэкапа: что рискует не восстановиться (показ, БЕЗ алертов)
     backup_audit: list[BackupAudit] = []
+    # свои бэкапы ноды, найденные helper'ом (cron, таймеры, метрики) — со статусом
+    custom_backups: list[CustomBackupOut] = []
+    custom_backup_ignored: list[str] | None = None
 
 
 class BackupRepoMuteIn(BaseModel):
@@ -981,6 +1034,8 @@ class AgentReportIn(BaseModel):
     setup_versions: dict | None = None  # версии setup-скриптов на ноде: {backup-setup:1, kube-setup:1,…}
     clock: dict | None = None  # статус синхронизации времени: {synced,ntp,service}
     clock_unix: int = 0  # локальные часы ноды на момент отправки (для расчёта сдвига панелью)
+    # блоки root-хелперов как есть: {"custom-backups": {...}} (агент 2.8+, report.d)
+    extras: dict | None = None
 
 
 class AgentConfigOut(BaseModel):

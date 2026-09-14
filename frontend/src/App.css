@@ -4230,6 +4230,62 @@ button.svc-site-on:hover {
 .brand-preview .brand-custom img {
   max-width: 100%;
 }
+/* --- свои бэкапы ноды (настроены без панели) --- */
+.own-backups {
+  margin-top: 0.9rem;
+}
+.own-backups-lead {
+  margin: 0.15rem 0 0.5rem;
+}
+.own-backups-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+}
+.own-backup {
+  display: flex;
+  gap: 0.6rem;
+  align-items: flex-start;
+  padding: 0.55rem 0.7rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+}
+.own-backup > .sdot {
+  margin-top: 0.3rem;
+}
+.own-backup-main {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+.own-backup-name {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.35rem;
+  font-weight: 600;
+}
+.own-backup-src {
+  overflow-wrap: anywhere;
+}
+.own-backup-side {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 0.3rem;
+  flex-shrink: 0;
+}
+.own-backup-ignored {
+  opacity: 0.6;
+}
+.own-only-row {
+  width: 100%;
+  text-align: left;
+  cursor: pointer;
+}
 .brand-dark-actions {
   display: flex;
   flex-wrap: wrap;

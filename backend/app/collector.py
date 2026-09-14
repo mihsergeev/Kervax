@@ -16,7 +16,7 @@ from urllib.parse import urlparse
 from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app import alerts, backup, checks as checks_exec, heartbeat, settings_store
+from app import alerts, backup, checks as checks_exec, custom_backups, heartbeat, settings_store
 from app.setup_scripts import current_setup_versions, gaps
 from app.config import Settings, get_settings
 from app.models import (
@@ -184,7 +184,8 @@ _SRV_ICON = {
     "docker_down": "🔥🐳", "docker_loop": "🔥🐳",
     "queue": "🐇", "backup_rotation": "🧹",
     "backup_missing": "💾", "backup_failed": "💾", "backup_stale": "💾", "backup_repo": "💾",
-    "backup_dump": "💾", "backup_dump_space": "🈵", "backup_cron": "💾", "clock": "🕐",
+    "backup_dump": "💾", "backup_dump_space": "🈵", "backup_cron": "💾", "backup_custom": "💾",
+    "clock": "🕐",
     # ⏳ — срок ещё не вышел, есть время спланировать; 🔥 — доставка уже встала
     "kube_expiry": "⏳", "flux_down": "🔥☸️",
 }
@@ -1071,7 +1072,7 @@ _SRV_LABEL = {
     "db_conn": "коннекты СУБД",
     "backup_missing": "бэкап", "backup_failed": "бэкап", "backup_stale": "свежесть бэкапа",
     "backup_dump": "дамп СУБД", "backup_dump_space": "место под дампы",
-    "backup_cron": "дамп-CronJob", "clock": "время",
+    "backup_cron": "дамп-CronJob", "backup_custom": "свой бэкап", "clock": "время",
     "kube_expiry": "сроки Kubernetes", "flux_down": "доставка Flux",
 }
 
@@ -1813,7 +1814,9 @@ def _server_conditions(s: Server, now: datetime) -> dict[str, tuple[int, dict]]:
         # — алерт «бэкап не настроен» уже не закрывался никогда).
         out["backup_missing"] = (0, {})
     elif online:
-        ok = bool(bk.get("configured")) or bool(getattr(s, "backup_not_required", False))
+        # свой файловый бэкап ноды (restic/borg/rsync, настроенный без панели) — тоже бэкап
+        ok = (bool(bk.get("configured")) or bool(getattr(s, "backup_not_required", False))
+              or custom_backups.has_file_backup(s, now))
         if ok:
             out["backup_missing"] = (0, {})
         else:
@@ -1868,6 +1871,11 @@ def _server_conditions(s: Server, now: datetime) -> dict[str, tuple[int, dict]]:
     if online and (rep.get("kube") or {}).get("access"):
         cron = _cron_dump_problems(rep, now)
         out["backup_cron"] = (1 if cron else 0, {"jobs": "; ".join(cron[:6]), "n": len(cron)})
+    # Свои бэкапы ноды (настроены без панели; находит helper): упал прогон, давно не было
+    # успешного, выключен таймер. Состояния устойчивые, как и у restic, — без дебаунса.
+    if online:
+        own = custom_backups.problems(s, now)
+        out["backup_custom"] = (1 if own else 0, {"jobs": "; ".join(own[:6]), "n": len(own)})
     return out
 
 
