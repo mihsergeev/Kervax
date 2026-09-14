@@ -3751,6 +3751,72 @@ textarea:focus {
 .svc-card-ok {
   border-left-color: var(--up);
 }
+/* ход команды на ноде (включение дампа и т.п.) — прямо в карточке */
+.coverage-op {
+  margin-top: 0.5rem;
+}
+.cmd-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+.cmd-progress-bar {
+  height: 6px;
+  border-radius: 999px;
+  background: var(--border);
+  overflow: hidden;
+}
+.cmd-progress-bar > span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--accent);
+  transition: width 0.25s linear;
+}
+.cmd-progress-done .cmd-progress-bar > span {
+  background: var(--up);
+}
+.cmd-progress-error .cmd-progress-bar > span {
+  background: var(--down);
+}
+.cmd-progress-steps {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.3rem 0.9rem;
+  font-size: 0.8rem;
+}
+.cmd-step {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  color: var(--text-muted);
+}
+.cmd-step-cur {
+  color: var(--text);
+}
+.cmd-step-done {
+  color: var(--up);
+}
+.cmd-step-ic {
+  display: inline-flex;
+  width: 0.9rem;
+  justify-content: center;
+}
+.cmd-progress-time {
+  margin-left: auto;
+  font-variant-numeric: tabular-nums;
+}
+.coverage-op-msg {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.4rem;
+  line-height: 1.4;
+}
+.coverage-op-x {
+  margin-left: auto;
+  flex-shrink: 0;
+}
 .svc-card-head {
   display: flex;
   align-items: center;
