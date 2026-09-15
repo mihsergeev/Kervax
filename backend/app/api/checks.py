@@ -4,7 +4,7 @@ from urllib.parse import urlparse
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Query, Request, status
 from sqlalchemy import case, delete as sa_delete, func, select
 
-from app import audit, manual_probe
+from app import audit, domain_probe, manual_probe
 from app.checks import status_matches
 from app import checks as checks_exec
 from app.collector import (
@@ -52,6 +52,8 @@ from app.schemas import (
     ChecksOverviewOut,
     DiscoveredDomain,
     DiscoveredOut,
+    DomainProbeIn,
+    DomainProbesOut,
     IgnoreDomainsIn,
     KnownHostsOut,
     LocationHealth,
@@ -506,6 +508,53 @@ async def discovered(user: CurrentUser, session: SessionDep) -> DiscoveredOut:
     )
 
 
+@router.post("/discovered/probe", response_model=DomainProbesOut)
+async def probe_discovered(
+    body: DomainProbeIn,
+    user: CurrentUser,
+    session: SessionDep,
+    request: Request,
+    background: BackgroundTasks,
+) -> DomainProbesOut:
+    """Разово проверить найденные домены снаружи и изнутри их сервера (см. domain_probe).
+
+    Проверяем только то, что мастер и так предлагает: домен найден на сервере этой
+    учётки, годится в монитор и ещё не мониторится. Иначе кнопка превратилась бы в
+    способ гонять панель и агентов по произвольным адресам."""
+    servers = list(await session.scalars(scope_query(user, select(Server), Server)))
+    serving = _serving_servers(servers)
+    hosts, _ = await _hosts_map(user, session)
+    names: list[str] = []
+    for raw in body.domains:
+        domain = _norm_domain(raw)
+        if domain in names or domain not in serving or domain in hosts:
+            continue
+        if not _adopt_problem(domain):
+            names.append(domain)
+    now = datetime.now(timezone.utc)
+    started = await domain_probe.start(
+        session, names, serving, {s.id: s for s in servers}, user.username, body.force, now
+    )
+    await session.commit()
+    if started:
+        background.add_task(
+            domain_probe.run_external, request.app.state.session_factory, started, now
+        )
+    labels = {s.id: s.name for s in servers}
+    return DomainProbesOut(items=await domain_probe.rows_out(session, names, labels, now))
+
+
+@router.get("/discovered/probes", response_model=DomainProbesOut)
+async def discovered_probes(user: CurrentUser, session: SessionDep) -> DomainProbesOut:
+    """Свежие итоги разовых проверок найденных доменов — мастер опрашивает, пока идут."""
+    servers = list(await session.scalars(scope_query(user, select(Server), Server)))
+    labels = {s.id: s.name for s in servers}
+    now = datetime.now(timezone.utc)
+    return DomainProbesOut(
+        items=await domain_probe.rows_out(session, list(_serving_servers(servers)), labels, now)
+    )
+
+
 # Коды, которыми прокси говорит «ты не в списке»: сайт при этом ЖИВ. 401 не берём —
 # это «представься», нормальная работа сайта с авторизацией, и решать за владельца,
 # что 401 не проблема, панель не должна.
@@ -680,6 +729,14 @@ async def adopt_domains(
     skipped: list[str] = []
     fresh: list[Check] = []
     seen: set[str] = set()
+    # «Проверять изнутри» — ноду вычисляем здесь, а не берём из запроса (как и в
+    # local_probe_apply): иначе редактор назначил бы проверку с чужой ноды.
+    local = {_norm_domain(d) for d in body.local}
+    serving = (
+        _serving_servers(list(await session.scalars(scope_query(user, select(Server), Server))))
+        if local else {}
+    )
+    now = datetime.now(timezone.utc)
     for raw in body.domains:
         domain = _norm_domain(raw)
         problem = _adopt_problem(domain)
@@ -691,15 +748,23 @@ async def adopt_domains(
             continue
         seen.add(domain)
         max_order += 1
-        fresh.append(
-            Check(
-                name=domain,
-                type="http",
-                target=f"https://{domain}",
-                group_name=group,
-                sort_order=max_order,
-            )
+        check = Check(
+            name=domain,
+            type="http",
+            target=domain_probe.target(domain),
+            group_name=group,
+            sort_order=max_order,
         )
+        hit = serving.get(domain) if domain in local else None
+        if hit:
+            # домен, который панель не видит снаружи (так показала проверка в мастере),
+            # проверяет агент его ноды; сразу помечаем привязку — первый ответ агента
+            # ещё в пути, и это не падение сайта
+            check.probe_local = True
+            check.probe_server_id = hit[0]
+            check.probe_bound_at = now
+            _one_probe_source(check)
+        fresh.append(check)
     if fresh:
         session.add_all(fresh)
         await session.commit()
@@ -707,7 +772,10 @@ async def adopt_domains(
             session, user.username, "checks_adopt", ", ".join(c.name for c in fresh[:20])
         )
     hosts, _ = await _hosts_map(user, session)
-    return AdoptResult(created=len(fresh), skipped=skipped, hosts=hosts)
+    return AdoptResult(
+        created=len(fresh), skipped=skipped, hosts=hosts,
+        local=sum(1 for c in fresh if c.probe_local),
+    )
 
 
 @router.post("", response_model=CheckOut, status_code=status.HTTP_201_CREATED)

@@ -16,13 +16,14 @@
 """
 
 from datetime import datetime, timedelta
+from types import SimpleNamespace
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import checks as checks_exec
 from app.collector import _aware, record_outcome
-from app.models import AgentProbe, Check, ProbeRequest, Server
+from app.models import AgentProbe, Check, DomainProbe, ProbeRequest, Server
 
 # С этой версии агент забирает ручную проверку опросом команд и отвечает сразу.
 FAST_AGENT = (2, 7)
@@ -31,6 +32,20 @@ FAST_AGENT = (2, 7)
 PENDING_REPORT_INTERVAL = 2
 # Сколько живёт пометка «у ноды есть ручные проверки» (servers.probe_pending_at).
 _PENDING_FLAG_TTL = 180
+
+
+def domain_check(url: str) -> SimpleNamespace:
+    """Монитор, которого ещё нет: проверка домена из мастера «найденные домены».
+
+    Настройки — как у монитора, который мастер заведёт (значения по умолчанию), иначе
+    мастер обещал бы «работает» про сайт, который сам монитор сочтёт упавшим. Повторов
+    нет: это разовый взгляд перед добавлением, а не вердикт для алерта."""
+    return SimpleNamespace(
+        id=0, type="http", target=url, method="GET", timeout_ms=10000,
+        interval_seconds=60, degraded_ms=2000, retries=0, expected_status="200-399",
+        keyword_up="", keyword_down="", http_headers="", auth_method="", auth_user="",
+        auth_pass="", ignore_tls=False, check_all_ips=False, probe_server_id=None,
+    )
 
 
 def _ver(v: object) -> tuple[int, ...]:
@@ -65,7 +80,7 @@ def authority_seconds(check: Check) -> int:
     return int(max(check.interval_seconds or 60, 15) + 30 + _timeout_s(check))
 
 
-def site_probe_task(check: Check, task_id: int) -> dict:
+def site_probe_task(check, task_id: int) -> dict:
     """Задание агенту: что проверить изнутри сервера.
 
     Агент ходит ТОЛЬКО на localhost (адрес он подменяет сам), поэтому URL здесь — это
@@ -88,17 +103,17 @@ def site_probe_task(check: Check, task_id: int) -> dict:
     }
 
 
-async def _open(
-    session: AsyncSession, server: Server, now: datetime
-) -> list[tuple[ProbeRequest, Check]]:
-    """Ручные проверки ноды, ещё ждущие ответа и не просроченные."""
+async def _open(session: AsyncSession, server: Server, now: datetime) -> list[tuple]:
+    """Ручные проверки ноды, ещё ждущие ответа и не просроченные: (запрос, монитор).
+
+    У проверки домена из мастера монитора нет — вместо него настройки по умолчанию."""
     at = server.probe_pending_at
     if at is None or (now - _aware(at)).total_seconds() > _PENDING_FLAG_TTL:
         return []
     rows = (
         await session.execute(
             select(ProbeRequest, Check)
-            .join(Check, Check.id == ProbeRequest.check_id)
+            .outerjoin(Check, Check.id == ProbeRequest.check_id)
             .where(
                 ProbeRequest.server_id == server.id,
                 ProbeRequest.ts.is_(None),
@@ -107,11 +122,15 @@ async def _open(
             .order_by(ProbeRequest.id)
         )
     ).all()
-    return [
-        (req, chk)
-        for req, chk in rows
-        if (now - _aware(req.created_at)).total_seconds() <= deadline_seconds(chk)
-    ]
+    out = []
+    for req, chk in rows:
+        if req.check_id == 0 and req.url:
+            chk = domain_check(req.url)
+        if chk is None:
+            continue  # монитор удалили, пока запрос ждал агента
+        if (now - _aware(req.created_at)).total_seconds() <= deadline_seconds(chk):
+            out.append((req, chk))
+    return out
 
 
 async def take_fast_tasks(session: AsyncSession, server: Server, now: datetime) -> list[dict]:
@@ -160,11 +179,6 @@ async def ingest(
         if req is None or req.server_id != server_id or req.ts is not None:
             continue  # чужая, повтор уже учтённого ответа или давно вычищенная
         req.ts = now
-        check = await session.get(Check, req.check_id)
-        if check is None or not check.probe_local or check.probe_server_id != server_id:
-            # пока ждали, монитор удалили, перевели на проверку из панели или сайт
-            # переехал — ответ этой ноды про него больше ничего не значит
-            continue
         req.code = int(r.get("code") or 0)
         lat = r.get("latency_ms")
         req.latency_ms = int(lat) if isinstance(lat, (int, float)) else None
@@ -176,6 +190,15 @@ async def ingest(
         except (TypeError, ValueError):
             req.cert_expires = 0
         req.cert_issuer = str(r.get("cert_issuer") or "")[:128]
+
+        if req.check_id == 0:
+            await _ingest_domain(session, req, now)
+            continue
+        check = await session.get(Check, req.check_id)
+        if check is None or not check.probe_local or check.probe_server_id != server_id:
+            # пока ждали, монитор удалили, перевели на проверку из панели или сайт
+            # переехал — ответ этой ноды про него больше ничего не значит
+            continue
 
         outcome = checks_exec.outcome_from_agent(check, req, now, check.degraded_ms)
         req.status = outcome.status
@@ -203,3 +226,21 @@ async def ingest(
         probe.cert_issuer = req.cert_issuer
         probe.manual_until = now + timedelta(seconds=authority_seconds(check))
     return pending
+
+
+async def _ingest_domain(session: AsyncSession, req: ProbeRequest, now: datetime) -> None:
+    """Ответ агента про домен из мастера: вердикт — в его строку domain_probes.
+
+    Ни монитора, ни инцидентов тут нет. Строку ищем по номеру запроса: если домен
+    успели перепроверить, у строки уже другой запрос, и опоздавший ответ её не тронет."""
+    chk = domain_check(req.url)
+    outcome = checks_exec.outcome_from_agent(chk, req, now, chk.degraded_ms)
+    req.status = outcome.status
+    req.message = outcome.message[:512]
+    row = await session.scalar(select(DomainProbe).where(DomainProbe.local_request_id == req.id))
+    if row is None:
+        return
+    row.local_ts = now
+    row.local_status = outcome.status
+    row.local_latency_ms = outcome.latency_ms
+    row.local_message = outcome.message[:512]

@@ -27,6 +27,7 @@ from app.models import (
     CheckSample,
     BackupCommand,
     DockerCommand,
+    DomainProbe,
     KubeCommand,
     Location,
     LocationResult,
@@ -2298,6 +2299,10 @@ async def _prune(
         # ручные проверки нужны ровно на время ожидания ответа — итог уже в журнале
         await session.execute(
             delete(ProbeRequest).where(ProbeRequest.created_at < now - timedelta(days=1))
+        )
+        # разовые проверки доменов из мастера живут часы; неделя — с большим запасом
+        await session.execute(
+            delete(DomainProbe).where(DomainProbe.started_at < now - timedelta(days=7))
         )
         # закрытые инциденты старше ретеншена тоже чистим
         await session.execute(

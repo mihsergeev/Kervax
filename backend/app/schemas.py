@@ -413,6 +413,9 @@ class AdoptDomainsIn(BaseModel):
 
     domains: list[str] = Field(min_length=1, max_length=500)
     group_name: str = Field(default="", max_length=64)
+    # Какие из них проверять изнутри сервера, где домен найден (сайт закрыт снаружи).
+    # Ноду здесь не передают: её панель вычисляет сама, как и для «проверять локально».
+    local: list[str] = Field(default_factory=list, max_length=500)
 
 
 class AdoptResult(BaseModel):
@@ -420,6 +423,44 @@ class AdoptResult(BaseModel):
     # «домен — причина», по-человечески: wildcard и мусор из server_name не мониторятся
     skipped: list[str]
     hosts: dict[str, int]  # обновлённая карта, чтобы UI перерисовал галочки без перезагрузки
+    local: int = 0  # из созданных — с проверкой изнутри сервера
+
+
+class DomainProbeIn(BaseModel):
+    """Разово проверить найденные домены снаружи и изнутри их сервера.
+
+    force=false — домены со свежим итогом не перепроверяются (открытие мастера);
+    force=true — перепроверить (кнопка)."""
+
+    domains: list[str] = Field(min_length=1, max_length=300)
+    force: bool = False
+
+
+class DomainProbeOut(BaseModel):
+    """Итог разовой проверки домена: снаружи (панелью) и изнутри сервера (агентом).
+
+    Статусы: pending — ещё проверяется; up / degraded / down — как у монитора;
+    none (только изнутри) — проверить было некому. *_kind — что не так одним словом
+    (http, dns, tls, refused, timeout, reset, connect, other; изнутри ещё offline и
+    no_answer): текст к нему живёт в словаре интерфейса, полная причина — в *_message."""
+
+    domain: str
+    started_at: datetime
+    ext_status: str
+    ext_latency_ms: int | None = None
+    ext_message: str = ""
+    ext_kind: str = ""
+    ext_code: int = 0
+    local_status: str
+    local_latency_ms: int | None = None
+    local_message: str = ""
+    local_kind: str = ""
+    local_code: int = 0
+    local_server: str = ""
+
+
+class DomainProbesOut(BaseModel):
+    items: list[DomainProbeOut]
 
 
 class CheckOut(BaseModel):
