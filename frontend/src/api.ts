@@ -317,15 +317,48 @@ export function knownHosts(): Promise<KnownHosts> {
 }
 
 // Завести мониторы по доменам веб-сервиса. Возвращает обновлённую карту хостов,
-// чтобы галочки перерисовались без перезагрузки страницы.
+// чтобы галочки перерисовались без перезагрузки страницы. local — какие из доменов
+// проверять изнутри сервера, где они найдены (ноду панель вычисляет сама).
 export function adoptDomains(
   domains: string[],
   group_name = '',
-): Promise<{ created: number; skipped: string[]; hosts: Record<string, number> }> {
+  local: string[] = [],
+): Promise<{ created: number; skipped: string[]; hosts: Record<string, number>; local: number }> {
   return api('/api/checks/adopt', {
     method: 'POST',
-    body: JSON.stringify({ domains, group_name }),
+    body: JSON.stringify({ domains, group_name, local }),
   })
+}
+
+// Разовая проверка найденного домена перед постановкой на мониторинг: снаружи (панелью)
+// и изнутри сервера, где он найден (агентом). Это не мониторинг — итог живёт 12 часов.
+// pending — ещё проверяется; none (изнутри) — проверить было некому. *_kind — что не так
+// одним словом: http, dns, tls, refused, timeout, reset, connect, other, offline, no_answer.
+export type ProbeStatus = 'pending' | 'up' | 'degraded' | 'down' | 'none'
+export type DomainProbe = {
+  domain: string
+  started_at: string
+  ext_status: ProbeStatus
+  ext_latency_ms: number | null
+  ext_message: string
+  ext_kind: string
+  ext_code: number
+  local_status: ProbeStatus
+  local_latency_ms: number | null
+  local_message: string
+  local_kind: string
+  local_code: number
+  local_server: string
+}
+// force=false — домены со свежим итогом не перепроверяются (открытие мастера)
+export function probeDomains(domains: string[], force = false): Promise<{ items: DomainProbe[] }> {
+  return api('/api/checks/discovered/probe', {
+    method: 'POST',
+    body: JSON.stringify({ domains, force }),
+  })
+}
+export function domainProbes(): Promise<{ items: DomainProbe[] }> {
+  return api('/api/checks/discovered/probes')
 }
 
 // --- брендирование (свой логотип) ---
