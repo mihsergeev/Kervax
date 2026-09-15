@@ -4066,7 +4066,8 @@ button.svc-site-on:hover {
   margin-left: auto;
 }
 .adopt-modal {
-  max-width: 860px;
+  /* шире прежних 860px: у нового домена в строке ещё пара «снаружи / изнутри» */
+  max-width: 980px;
   width: 100%;
 }
 .adopt-sub {
@@ -4080,7 +4081,9 @@ button.svc-site-on:hover {
   margin-bottom: 0.6rem;
 }
 .adopt-search {
-  flex: 1 1 14rem;
+  /* основа поуже: при 14rem кнопки «выбрать доступные» и «не нужны» переносили ряд
+     на вторую строку, и список прыгал вниз прямо под курсором при первой же галочке */
+  flex: 1 1 10rem;
   min-width: 0;
   padding: 0.35rem 0.6rem;
   border: 1px solid var(--border-strong);
@@ -4201,6 +4204,112 @@ button.svc-site-on:hover {
 .adopt-row.adopt-skipped .adopt-dom {
   color: var(--muted);
   text-decoration: line-through;
+}
+/* Разовая проверка найденного домена. Пара «снаружи / изнутри» — и итог проверки, и
+   выбор: выделенный вариант получит монитор. Ширина у значков одна, чтобы в длинном
+   списке они стояли столбцами, а не лесенкой. */
+.adopt-probe-sum {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.3rem 0.9rem;
+  margin: -0.1rem 0 0.55rem;
+  min-height: 1.4rem;
+}
+.adopt-probe-bar {
+  flex: 1 1 8rem;
+  max-width: 14rem;
+  height: 4px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--border) 80%, transparent);
+  overflow: hidden;
+}
+.adopt-probe-bar > span {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+  transition: width 0.3s ease;
+}
+.adopt-probes {
+  display: inline-flex;
+  gap: 0.3rem;
+  margin-left: auto;
+  flex-shrink: 0;
+}
+.adopt-probes + .adopt-where {
+  margin-left: 0;
+}
+.adopt-probe {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  width: 11.5rem;
+  padding: 0.05rem 0.55rem;
+  /* рамка только у выбранного варианта: в строке сразу видно, как пойдёт монитор */
+  border: 1px solid transparent;
+  border-radius: 999px;
+  background: none;
+  color: var(--muted);
+  font-size: 0.74rem;
+  line-height: 1.35;
+  white-space: nowrap;
+  cursor: pointer;
+}
+/* фон на наведении задаём явно: иначе побеждает общий button:hover с синей заливкой */
+.adopt-probe:hover {
+  border-color: var(--border-strong);
+  background: color-mix(in srgb, var(--text) 6%, transparent);
+  color: var(--text);
+}
+.adopt-probe.on,
+.adopt-probe.on:hover {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  color: var(--text);
+}
+.adopt-probe-ic {
+  width: 0.8rem;
+  flex-shrink: 0;
+  text-align: center;
+  font-weight: 700;
+}
+.adopt-probe-ic .run-spin,
+.adopt-probe-wait .run-spin {
+  width: 0.7em;
+  height: 0.7em;
+  border-width: 1.5px;
+}
+.adopt-probe.probe-up .adopt-probe-ic {
+  color: var(--up);
+}
+.adopt-probe.probe-degraded .adopt-probe-ic {
+  color: var(--degraded);
+}
+.adopt-probe.probe-down .adopt-probe-ic,
+.adopt-probe.probe-down .adopt-probe-txt {
+  color: var(--down);
+}
+.adopt-probe-txt {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+@media (max-width: 720px) {
+  /* на узком экране пара уходит второй строкой под домен */
+  .adopt-row {
+    flex-wrap: wrap;
+  }
+  .adopt-probes {
+    order: 5;
+    flex: 1 1 100%;
+    min-width: 0;
+    margin-left: 1.55rem;
+  }
+  .adopt-probe {
+    flex: 1 1 0;
+    width: auto;
+    min-width: 0;
+  }
 }
 /* ---- свой логотип (white-label) ---- */
 /* Чужая картинка приходит любой: от узкой полоски до квадрата, с фоном и без.
@@ -4700,7 +4809,8 @@ button.adopt-mark {
   text-decoration: underline;
   text-underline-offset: 2px;
 }
-.linklike:hover { filter: brightness(1.2); }
+/* background: общий button:hover заливал ссылку синим, и текст того же цвета пропадал */
+.linklike:hover { background: none; filter: brightness(1.2); }
 
 /* мягкое уведомление о выходе бэкапа за окно — приглушённое, не тревожное */
 .home-notice { margin: 12px 0; padding: 10px 14px; border: 1px solid var(--border); border-radius: 10px; background: var(--hover); }

@@ -1,6 +1,14 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { ApiError, adoptDomains, ignoreDomains } from './api'
+import {
+  ApiError,
+  adoptDomains,
+  domainProbes,
+  ignoreDomains,
+  probeDomains,
+  type DomainProbe,
+  type ProbeStatus,
+} from './api'
 import { useI18n } from './i18n'
 
 // Мастер «Поставить на мониторинг»: список доменов, найденных агентами на веб-серверах
@@ -20,6 +28,85 @@ export function adoptable(d: string): boolean {
 
 // за раз столько же, сколько принимает POST /api/checks/adopt
 const ADOPT_MAX = 500
+// и сколько принимает POST /api/checks/discovered/probe
+const PROBE_MAX = 300
+
+type T = (s: string, p?: Record<string, string | number>) => string
+type Mode = 'ext' | 'local'
+
+const works = (s?: ProbeStatus) => s === 'up' || s === 'degraded'
+const waiting = (p: DomainProbe) => p.ext_status === 'pending' || p.local_status === 'pending'
+
+// Что не так — одним словом: строк в мастере бывает сотня, и полную причину («сервер не
+// ответил на попытку соединения (ConnectTimeout)») читать в каждой некому. Она в подсказке.
+function kindText(kind: string, code: number, t: T): string {
+  switch (kind) {
+    case 'http': return `HTTP ${code}`
+    case 'dns': return t('нет в DNS')
+    case 'tls': return t('ошибка TLS')
+    case 'refused': return t('порт закрыт')
+    case 'timeout': return t('нет ответа')
+    case 'reset': return t('обрыв связи')
+    case 'connect': return t('нет связи')
+    case 'offline': return t('нода офлайн')
+    case 'no_answer': return t('агент молчит')
+    default: return t('ошибка')
+  }
+}
+
+function agoText(iso: string, t: T): string {
+  const sec = Math.max(0, (Date.now() - Date.parse(iso)) / 1000)
+  if (sec < 60) return t('только что')
+  if (sec < 3600) return t('{n} мин назад', { n: Math.round(sec / 60) })
+  return t('{n} ч назад', { n: Math.round(sec / 3600) })
+}
+
+// Вариант проверки монитора — снаружи или изнутри сервера — вместе с итогом разовой
+// проверки. Выделенный вариант и будет у монитора: по умолчанию снаружи, а если снаружи
+// сайт не открылся, но открылся изнутри (белый список) — изнутри.
+function ProbeChoice({ p, mode, onMode }: { p: DomainProbe; mode: Mode; onMode: (m: Mode) => void }) {
+  const { t } = useI18n()
+  const side = (key: Mode) => {
+    const ext = key === 'ext'
+    const status = ext ? p.ext_status : p.local_status
+    const lat = ext ? p.ext_latency_ms : p.local_latency_ms
+    const msg = ext ? p.ext_message : p.local_message
+    const icon =
+      status === 'pending' ? <span className="run-spin" />
+        : status === 'up' ? '✓'
+          : status === 'degraded' ? '⚠'
+            : status === 'down' ? '✗' : '—'
+    const text =
+      status === 'pending' ? t('проверяем…')
+        : works(status) ? (lat != null ? `${lat} ${t('мс')}` : t('работает'))
+          : kindText(ext ? p.ext_kind : p.local_kind, ext ? p.ext_code : p.local_code, t)
+    const about = ext
+      ? t('Снаружи: монитор проверяет панель — как посетитель сайта.')
+      : t('Изнутри сервера {srv}: монитор проверяет агент на нём — для сайтов, закрытых снаружи белым списком.', {
+          srv: p.local_server || '—',
+        })
+    return (
+      <button
+        type="button"
+        role="radio"
+        aria-checked={mode === key}
+        className={`adopt-probe probe-${status}${mode === key ? ' on' : ''}`}
+        title={msg ? `${about}\n${msg}` : about}
+        onClick={() => onMode(key)}
+      >
+        <span className="adopt-probe-lbl">{ext ? t('снаружи') : t('изнутри')}</span>
+        <span className="adopt-probe-ic">{icon}</span>
+        <span className="adopt-probe-txt">{text}</span>
+      </button>
+    )
+  }
+  return (
+    <span className="adopt-probes" role="radiogroup" aria-label={t('Откуда проверять')}>
+      {side('ext')}
+      {side('local')}
+    </span>
+  )
+}
 
 // Домены второго уровня, за которыми регистрируют третий: для них «зона» — три метки,
 // иначе shop.msk.ru и blog.msk.ru слиплись бы в одну кучу «msk.ru». Полный PSL сюда
@@ -76,6 +163,13 @@ export function AdoptSitesModal({
   // локальная копия «ненужных»: правим её сразу, не дожидаясь перезагрузки списка
   const [skip, setSkip] = useState<Set<string>>(() => new Set(ignored || []))
   const [showSkipped, setShowSkipped] = useState(false)
+  // Разовая проверка предложенных доменов: итоги, домены с запросом в пути и выбор
+  // варианта, если человек его поменял (иначе вариант следует из итогов, см. modeOf).
+  const [probes, setProbes] = useState<Record<string, DomainProbe>>({})
+  const [inflight, setInflight] = useState<Set<string>>(new Set())
+  const [probeErr, setProbeErr] = useState('')
+  const [modes, setModes] = useState<Record<string, Mode>>({})
+  const requested = useRef<Set<string>>(new Set())
 
   // строки со статусом: считаем один раз на смену входных данных/карты мониторов
   const rows: Row[] = useMemo(() => {
@@ -130,8 +224,93 @@ export function AdoptSitesModal({
       .sort((a, b) => b.fresh.length - a.fresh.length || a.zone.localeCompare(b.zone))
   }, [visible])
 
+  // ——— разовая проверка доступности ———
+  const newDomains = rows.filter((r) => r.status === 'new').map((r) => r.domain)
+  const newKey = newDomains.join(' ')
+
+  // Свежее не затираем старым: опрос, ушедший до «перепроверить», мог вернуться позже
+  // и вернуть прошлый итог — ожидание бы оборвалось, а новый итог так и не показался.
+  const merge = (items: DomainProbe[]) =>
+    setProbes((prev) => {
+      const next = { ...prev }
+      for (const it of items) {
+        const cur = next[it.domain]
+        if (!cur || Date.parse(it.started_at) >= Date.parse(cur.started_at)) next[it.domain] = it
+      }
+      return next
+    })
+
+  const startProbe = async (domains: string[], force: boolean) => {
+    if (domains.length === 0) return
+    setProbeErr('')
+    setInflight((prev) => new Set([...prev, ...domains]))
+    try {
+      for (let i = 0; i < domains.length; i += PROBE_MAX) {
+        const res = await probeDomains(domains.slice(i, i + PROBE_MAX), force)
+        merge(res.items)
+      }
+    } catch (e) {
+      setProbeErr(e instanceof ApiError ? e.message : String(e))
+    } finally {
+      setInflight((prev) => {
+        const next = new Set(prev)
+        for (const d of domains) next.delete(d)
+        return next
+      })
+    }
+  }
+
+  // Открыли мастер (или вернули домен в предложения) — проверяем то, что ещё не
+  // спрашивали. Свежий итог панель отдаст как есть, по сайтам заново не пойдёт.
+  useEffect(() => {
+    const need = newKey ? newKey.split(' ').filter((d) => !requested.current.has(d)) : []
+    for (const d of need) requested.current.add(d)
+    void startProbe(need, false)
+    // startProbe пересоздаётся на каждый рендер, а запускать проверку надо только
+    // на смену набора доменов
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [newKey])
+
+  const pendingAny = newDomains.some((d) => probes[d] && waiting(probes[d]))
+  useEffect(() => {
+    if (!pendingAny) return
+    const id = window.setInterval(() => {
+      domainProbes()
+        .then((r) => merge(r.items))
+        .catch(() => {})
+    }, 2000)
+    return () => window.clearInterval(id)
+  }, [pendingAny])
+
+  const modeOf = (domain: string): Mode => {
+    const chosen = modes[domain]
+    if (chosen) return chosen
+    const p = probes[domain]
+    // снаружи — пока не доказано, что снаружи не работает, а изнутри работает
+    if (!p || works(p.ext_status) || p.ext_status === 'pending') return 'ext'
+    return works(p.local_status) ? 'local' : 'ext'
+  }
+  const chosenWorks = (domain: string) => {
+    const p = probes[domain]
+    return !!p && works(modeOf(domain) === 'local' ? p.local_status : p.ext_status)
+  }
+
+  const probeRows = newDomains.filter((d) => probes[d] || inflight.has(d))
+  const probeDone = newDomains.filter((d) => probes[d] && !waiting(probes[d]) && !inflight.has(d))
+  const probeRunning = probeRows.length - probeDone.length
+  const extOk = probeDone.filter((d) => works(probes[d].ext_status)).length
+  const localOnly = probeDone.filter(
+    (d) => !works(probes[d].ext_status) && works(probes[d].local_status),
+  ).length
+  const dead = probeDone.length - extOk - localOnly
+  const checkedAt = probeDone
+    .map((d) => probes[d].started_at)
+    .sort((a, b) => Date.parse(a) - Date.parse(b))[0]
+
   const freshVisible = visible.filter((r) => r.status === 'new')
+  const availVisible = freshVisible.filter((r) => chosenWorks(r.domain))
   const picked = freshVisible.filter((r) => sel.has(r.domain))
+  const pickedLocal = picked.filter((r) => modeOf(r.domain) === 'local').length
   const total = rows.length
   const newTotal = rows.filter((r) => r.status === 'new').length
   const skipTotal = rows.filter((r) => r.status === 'skipped').length
@@ -194,13 +373,18 @@ export function AdoptSitesModal({
     setDone('')
     try {
       const chunk = picked.slice(0, ADOPT_MAX).map((r) => r.domain)
-      const res = await adoptDomains(chunk, group.trim())
+      const local = chunk.filter((d) => modeOf(d) === 'local')
+      const res = await adoptDomains(chunk, group.trim(), local)
       setSel((prev) => {
         const next = new Set(prev)
         for (const d of chunk) next.delete(d)
         return next
       })
-      setDone(t('создано мониторов: {n}', { n: res.created }))
+      setDone(
+        res.local > 0
+          ? t('создано мониторов: {n}, из них изнутри сервера: {m}', { n: res.created, m: res.local })
+          : t('создано мониторов: {n}', { n: res.created }),
+      )
       onDone(res.hosts, res.created)
     } catch (e) {
       setErr(e instanceof ApiError ? e.message : String(e))
@@ -257,6 +441,11 @@ export function AdoptSitesModal({
           >
             {t('выбрать все ({n})', { n: freshVisible.length })}
           </button>
+          {probeRunning === 0 && availVisible.length > 0 && availVisible.length < freshVisible.length && (
+            <button className="ghost" onClick={() => setMany(availVisible, true)}>
+              {t('выбрать доступные ({n})', { n: availVisible.length })}
+            </button>
+          )}
           <button className="ghost" disabled={sel.size === 0} onClick={() => setSel(new Set())}>
             {t('снять выбор')}
           </button>
@@ -269,6 +458,45 @@ export function AdoptSitesModal({
             </button>
           )}
         </div>
+
+        {(probeRows.length > 0 || probeErr) && (
+          <div className="adopt-probe-sum small">
+            {probeErr ? (
+              <span className="t-down">
+                {t('Проверить доступность не удалось: {err}', { err: probeErr })}
+              </span>
+            ) : probeRunning > 0 ? (
+              <>
+                <span className="run-spin" />
+                <span>
+                  {t('Проверяем доступность снаружи и изнутри серверов: готово {n} из {m}', {
+                    n: probeDone.length,
+                    m: probeRows.length,
+                  })}
+                </span>
+                <span className="adopt-probe-bar">
+                  <span style={{ width: `${Math.round((probeDone.length / probeRows.length) * 100)}%` }} />
+                </span>
+              </>
+            ) : (
+              <>
+                <span className={extOk > 0 ? 't-up' : 'muted'}>
+                  {t('открываются снаружи: {n}', { n: extOk })}
+                </span>
+                {localOnly > 0 && <span>{t('только изнутри сервера: {n}', { n: localOnly })}</span>}
+                {dead > 0 && <span className="t-down">{t('не открываются: {n}', { n: dead })}</span>}
+                {checkedAt && <span className="muted">{t('проверено {ago}', { ago: agoText(checkedAt, t) })}</span>}
+                <button
+                  className="linklike"
+                  onClick={() => startProbe(newDomains, true)}
+                  title={t('Проверить эти домены ещё раз — снаружи и изнутри серверов')}
+                >
+                  {t('перепроверить')}
+                </button>
+              </>
+            )}
+          </div>
+        )}
 
         <div className="adopt-list">
           {zones.length === 0 ? (
@@ -335,6 +563,17 @@ export function AdoptSitesModal({
                             </span>
                           )}
                           <span className="adopt-dom mono">{r.domain}</span>
+                          {r.status === 'new' && probes[r.domain] ? (
+                            <ProbeChoice
+                              p={probes[r.domain]}
+                              mode={modeOf(r.domain)}
+                              onMode={(m) => setModes((prev) => ({ ...prev, [r.domain]: m }))}
+                            />
+                          ) : r.status === 'new' && inflight.has(r.domain) ? (
+                            <span className="adopt-probes adopt-probe-wait">
+                              <span className="run-spin" />
+                            </span>
+                          ) : null}
                           {r.servers.length > 0 && (
                             <span className="adopt-where muted small">{r.servers.join(', ')}</span>
                           )}
@@ -387,14 +626,16 @@ export function AdoptSitesModal({
           <span className="muted small">
             {picked.length > ADOPT_MAX
               ? t('выбрано {n}, за раз добавим {m}', { n: picked.length, m: ADOPT_MAX })
-              : t('будет создано мониторов: {n}', { n: picked.length })}
+              : pickedLocal > 0
+                ? t('будет создано мониторов: {n}, из них изнутри сервера: {m}', { n: picked.length, m: pickedLocal })
+                : t('будет создано мониторов: {n}', { n: picked.length })}
           </span>
           <button className="primary" disabled={busy || picked.length === 0} onClick={submit}>
             {busy ? t('добавляем…') : t('Поставить на мониторинг')}
           </button>
         </div>
         <div className="muted small adopt-hint">
-          {t('Создаётся HTTPS-монитор на каждый домен. Первая проверка — на ближайшем тике планировщика.')}
+          {t('Создаётся HTTPS-монитор на каждый домен — с тем вариантом проверки, что выделен в строке: снаружи его проверяет панель, изнутри — агент на сервере сайта. Доступность здесь проверена один раз, итог хранится 12 часов.')}
         </div>
       </div>
     </div>,

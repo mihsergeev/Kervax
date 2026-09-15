@@ -354,8 +354,11 @@ class ProbeRequest(Base):
     __tablename__ = "probe_requests"
 
     id: Mapped[int] = mapped_column(primary_key=True)
+    # 0 — проверка домена, которого ещё нет в мониторинге (мастер «найденные домены»,
+    # см. DomainProbe); адрес тогда в url, а не в мониторе
     check_id: Mapped[int] = mapped_column(Integer, index=True)
     server_id: Mapped[int] = mapped_column(Integer, index=True)
+    url: Mapped[str] = mapped_column(String(512), default="")
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
@@ -373,6 +376,38 @@ class ProbeRequest(Base):
     # вердикт панели — ровно то, что записано в журнал и показано человеку
     status: Mapped[str] = mapped_column(String(16), default="")
     message: Mapped[str] = mapped_column(String(512), default="")
+
+
+class DomainProbe(Base):
+    """Разовая проверка найденного на серверах домена — до того, как его заведут монитором.
+
+    Мастер «Домены, найденные на серверах» предлагал поставить сайт на мониторинг
+    вслепую: откроется ли он панели или его закрывает белый список, человек узнавал уже
+    от красного монитора. Теперь домен проверяется дважды — снаружи (панелью, как будет
+    проверять обычный монитор) и изнутри сервера, где он найден (агентом), — и мастер
+    предлагает тот вариант, который работает.
+
+    Это не мониторинг: проверка идёт при открытии мастера, и её итог живёт несколько
+    часов, чтобы повторное открытие не гоняло по сайтам новые запросы."""
+
+    __tablename__ = "domain_probes"
+
+    domain: Mapped[str] = mapped_column(String(255), primary_key=True)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    by_user: Mapped[str] = mapped_column(String(64), default="")
+    # снаружи: ext_ts пуст — проверка ещё идёт
+    ext_ts: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    ext_status: Mapped[str] = mapped_column(String(16), default="")
+    ext_latency_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    ext_message: Mapped[str] = mapped_column(String(512), default="")
+    # изнутри: какой ноде поручили и под каким запросом (probe_requests.id) ждём ответ.
+    # local_status: up|degraded|down — ответ агента, none — проверить было некому
+    local_server_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    local_request_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    local_ts: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    local_status: Mapped[str] = mapped_column(String(16), default="")
+    local_latency_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    local_message: Mapped[str] = mapped_column(String(512), default="")
 
 
 class LocationResult(Base):

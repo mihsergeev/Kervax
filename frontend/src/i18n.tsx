@@ -1332,6 +1332,38 @@ const EN: Record<string, string> = {
   'Все найденные домены уже стоят на мониторинге.':
     'Every discovered domain is already monitored.',
   'будет создано мониторов: {n}': 'monitors to create: {n}',
+  'будет создано мониторов: {n}, из них изнутри сервера: {m}':
+    'monitors to create: {n}, checked from inside the server: {m}',
+  'создано мониторов: {n}, из них изнутри сервера: {m}':
+    'monitors created: {n}, checked from inside the server: {m}',
+  'выбрать доступные ({n})': 'select reachable ({n})',
+  'нет в DNS': 'not in DNS',
+  'ошибка TLS': 'TLS error',
+  'порт закрыт': 'port closed',
+  'нет ответа': 'no response',
+  'обрыв связи': 'conn. reset',
+  'нет связи': 'can\'t connect',
+  'нода офлайн': 'node offline',
+  'агент молчит': 'agent silent',
+  'только что': 'just now',
+  'снаружи': 'outside',
+  'изнутри': 'inside',
+  'Снаружи: монитор проверяет панель — как посетитель сайта.':
+    'Outside: the panel checks the site, the way a visitor opens it.',
+  'Изнутри сервера {srv}: монитор проверяет агент на нём — для сайтов, закрытых снаружи белым списком.':
+    'Inside server {srv}: its agent checks the site — for sites closed to the outside by an allowlist.',
+  'Проверить доступность не удалось: {err}': 'Could not check reachability: {err}',
+  'Проверяем доступность снаружи и изнутри серверов: готово {n} из {m}':
+    'Checking reachability from outside and inside the servers: {n} of {m} done',
+  'открываются снаружи: {n}': 'open from outside: {n}',
+  'только изнутри сервера: {n}': 'only from inside the server: {n}',
+  'не открываются: {n}': 'do not open: {n}',
+  'проверено {ago}': 'checked {ago}',
+  'Проверить эти домены ещё раз — снаружи и изнутри серверов':
+    'Check these domains again — from outside and inside the servers',
+  'перепроверить': 'check again',
+  'Создаётся HTTPS-монитор на каждый домен — с тем вариантом проверки, что выделен в строке: снаружи его проверяет панель, изнутри — агент на сервере сайта. Доступность здесь проверена один раз, итог хранится 12 часов.':
+    'One HTTPS monitor per domain, checked the way highlighted in its row: from outside by the panel, from inside by the agent on the site\'s server. Reachability here is checked once and the result is kept for 12 hours.',
   'выбрано {n}, за раз добавим {m}': '{n} selected, {m} added per run',
   'создано мониторов: {n}': 'monitors created: {n}',
   'ненужных: {n}': 'not needed: {n}',
@@ -1537,8 +1569,6 @@ const EN: Record<string, string> = {
   'Свой бот нужен, только если хотите отдельного бота или свой прокси к Telegram. Для группы добавьте бота в неё и укажите её ID.':
     'You only need your own bot for a separate bot or your own Telegram proxy. For a group, add the bot to it and enter the group ID.',
   'без группы': 'no group',
-  'Создаётся HTTPS-монитор на каждый домен. Первая проверка — на ближайшем тике планировщика.':
-    'One HTTPS monitor per domain. The first probe runs on the scheduler\'s next tick.',
   'Уже в мониторинге — открыть монитор': 'Already monitored — open the monitor',
   'Уже в мониторинге': 'Already monitored',
   'Маска или regexp — монитору нужен конкретный адрес':
