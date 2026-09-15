@@ -50,7 +50,11 @@ AGENT_USER=kervax
 #       script's variables and the config it sources are resolved (DEST="${X:-$APP/backups}"); the
 #       outcome comes from the status file the script writes or from the snapshot restic saved
 #       into its cache - still without changing anything on the node
-KERVAX_SETUP_VERSION=0.26  # MAJOR.MINOR; compared component-wise (0.13 > 0.2!)
+# 0.27: databases in Kubernetes pods are dumped like those in docker containers, with one button:
+#       kubectl exec through the node's own admin access, the pod found anew on every run from its
+#       StatefulSet/Deployment/DaemonSet. Replaces the CronJob manifest the panel used to print.
+#       report.d/kube-dumps.json tells the panel whether the node can do this
+KERVAX_SETUP_VERSION=0.27  # MAJOR.MINOR; compared component-wise (0.13 > 0.2!)
 KERVAX_SETUP_ALWAYS=1  # safe on any node: installs only its own helper and spool and does not
                        # touch the backup configuration until the panel sends a command
 install -d -m 0755 "$HELPER_DIR" "$STATE_DIR" /var/lib/kervax/versions
@@ -214,8 +218,124 @@ grafana_dumper() {
   return 1
 }
 
+# ------- databases in Kubernetes pods -------
+# A database in a pod is dumped the same way as one in a docker container; only the way in is
+# `kubectl exec` with the node's own admin access (k0s/k3s/microk8s on a controller, kubeadm's
+# admin.conf). The target is the WORKLOAD, never a pod: "k8s.<namespace>.<sts|deploy|ds>.<name>".
+# The pod is looked up anew on every run through the workload's selector: pods come back under
+# new names (a Deployment's hash changes with every rollout), and a dump pinned to a pod name
+# would stop working after the first restart.
+
+# how root on this node reaches the cluster ("" - it does not: a worker, or no Kubernetes here)
+kube_ctl() {
+  local cfg
+  if command -v k0s >/dev/null 2>&1 && [ -e /var/lib/k0s/pki/admin.conf ]; then echo "k0s kubectl"; return 0; fi
+  if command -v k3s >/dev/null 2>&1 && [ -e /etc/rancher/k3s/k3s.yaml ]; then echo "k3s kubectl"; return 0; fi
+  if command -v microk8s >/dev/null 2>&1; then echo "microk8s kubectl"; return 0; fi
+  for cfg in /etc/kubernetes/admin.conf /root/.kube/config; do
+    if command -v kubectl >/dev/null 2>&1 && [ -e "$cfg" ]; then echo "kubectl --kubeconfig $cfg"; return 0; fi
+  done
+  return 1
+}
+
+kube_target_ok() {
+  [[ "$1" =~ ^k8s\.[a-z0-9]([-a-z0-9]*[a-z0-9])?\.(sts|deploy|ds)\.[a-z0-9]([-a-z0-9.]*[a-z0-9])?$ ]]
+}
+
+# the running pod of a workload: "$1" namespace, "$2" sts|deploy|ds, "$3" name. A StatefulSet's
+# first replica (-0) is preferred: in primary/replica setups it is usually the primary.
+kube_pod() {
+  local ns="$1" kind="$2" name="$3" kc sel pods p
+  kc="$(kube_ctl)" || { echo "no access to the Kubernetes cluster from this node" >&2; return 1; }
+  case "$kind" in sts) kind=statefulset ;; deploy) kind=deployment ;; ds) kind=daemonset ;; esac
+  sel="$($kc get "$kind" -n "$ns" "$name" -o jsonpath='{.spec.selector.matchLabels}' 2>/dev/null \
+    | sed -E 's/[{}" ]//g; s/:/=/g')"
+  [ -n "$sel" ] || { echo "no $kind $name in namespace $ns" >&2; return 1; }
+  pods="$($kc get pods -n "$ns" -l "$sel" --field-selector=status.phase=Running \
+    -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null)"
+  [ -n "$pods" ] || { echo "no running pod of $kind $name in namespace $ns" >&2; return 1; }
+  for p in $pods; do [ "$p" = "$name-0" ] && { echo "$p"; return 0; }; done
+  printf '%s\n' "$pods" | head -1
+}
+
+# the database container of the pod: the first one whose image looks like the engine (a pod
+# often carries an exporter or a backup sidecar next to the database)
+kube_container() {
+  local ns="$1" pod="$2" engine="$3" kc re line
+  kc="$(kube_ctl)" || return 1
+  case "$engine" in
+    pg) re='postgres|postgis|timescale|pgvector|spilo|cloudnative-pg' ;;
+    mysql) re='mysql|mariadb|percona' ;;
+    ch) re='clickhouse' ;;
+    redis) re='redis|valkey|keydb|dragonfly' ;;
+    rabbitmq) re='rabbitmq' ;;
+    *) re='.' ;;
+  esac
+  local all
+  all="$($kc get pod -n "$ns" "$pod" -o jsonpath='{range .spec.containers[*]}{.name}{"|"}{.image}{"\n"}{end}' 2>/dev/null)"
+  line="$(printf '%s\n' "$all" | grep -iE "\|.*($re)" | grep -viE '\|.*(exporter|operator|backup|postgrest|pgbouncer)' | head -1)"
+  [ -n "$line" ] || line="$(printf '%s\n' "$all" | head -1)"
+  [ -n "$line" ] || return 1
+  printf '%s' "${line%%|*}"
+}
+
+# the command runner inside the workload's database container: sets KEX for the caller
+kube_enter() {  # $1 target k8s.<ns>.<kind>.<name>, $2 engine
+  local rest ns kind name pod cont kc
+  rest="${1#k8s.}"; ns="${rest%%.*}"; rest="${rest#*.}"; kind="${rest%%.*}"; name="${rest#*.}"
+  kc="$(kube_ctl)" || { echo "no access to the Kubernetes cluster from this node" >&2; return 1; }
+  pod="$(kube_pod "$ns" "$kind" "$name")" || return 1
+  cont="$(kube_container "$ns" "$pod" "$2")" || { echo "no containers in pod $ns/$pod" >&2; return 1; }
+  # without -i: nothing is fed to the database, and an idle stdin under systemd is only a risk
+  KEX_CMD="$kc exec -n $ns $pod -c $cont --"
+}
+KEX() { $KEX_CMD "$@"; }
+
+# Whether this node can dump databases from pods - the panel offers the button only then. Written
+# for the panel next to the node's other extras, at most every 5 minutes.
+KUBE_EXTRA=/var/lib/kervax/report.d/kube-dumps.json
+kube_access_maybe() {
+  local kc can=false
+  if [ -f "$KUBE_EXTRA" ] && [ $(( $(date +%s) - $(stat -c %Y "$KUBE_EXTRA" 2>/dev/null || echo 0) )) -lt 300 ]; then
+    return 0
+  fi
+  kc="$(kube_ctl)" || { rm -f "$KUBE_EXTRA"; return 0; }
+  [ "$(timeout 15 $kc auth can-i create pods --subresource=exec -A 2>/dev/null)" = yes ] && can=true
+  install -d -m 0755 "$(dirname "$KUBE_EXTRA")"
+  printf '{"v":1,"ts":%s,"ctl":"%s","exec":%s}\n' "$(date +%s)" "$(json_escape "${kc%% *}")" "$can" > "$KUBE_EXTRA.tmp" \
+    && mv -f "$KUBE_EXTRA.tmp" "$KUBE_EXTRA" && chmod 0644 "$KUBE_EXTRA"
+}
+
+# ClickHouse refusing the password-less default user answers with a long text that ends in
+# "deleting this file will reset the password" - exactly the advice not to pass on. Say what is
+# actually wrong instead. $1 - the runner (KEX, or docker_ch for a container, or nothing).
+docker_ch() { docker exec "$DOCKER_CH" "$@"; }
+ch_probe() {
+  local out
+  if out="$(${1:+$1} clickhouse-client --query "SELECT 1" 2>&1)"; then return 0; fi
+  if grep -qiE 'authentication failed|password is incorrect|required_password' <<<"$out"; then
+    echo "clickhouse did not let the default user in: it needs a password, and the database environment does not have one" >&2
+  else
+    printf '%s' "$out" | tr '\n' ' ' | tail -c 300 >&2
+  fi
+  return 1
+}
+
 dump_probe() {
   local engine="$1" container="${2:-}"
+  if kube_target_ok "$container"; then
+    kube_enter "$container" "$engine" || return 1
+    case "$engine" in
+      pg) KEX sh -c 'PGPASSWORD="${POSTGRES_PASSWORD:-${PGPASSWORD:-}}"; export PGPASSWORD; pg_dumpall -U "${POSTGRES_USER:-postgres}" --schema-only' >/dev/null ;;
+      mysql) KEX sh -c 'MYSQL_PWD="${MYSQL_ROOT_PASSWORD:-${MARIADB_ROOT_PASSWORD:-}}"; export MYSQL_PWD; if command -v mariadb-dump >/dev/null 2>&1; then mariadb-dump -u root --no-data --all-databases; else mysqldump -u root --no-data --all-databases; fi' >/dev/null ;;
+      ch) ch_probe KEX ;;
+      redis) [ "$(KEX sh -c 'p="${REDISCLI_AUTH:-${REDIS_PASSWORD:-}}"; [ -n "$p" ] && export REDISCLI_AUTH="$p"; redis-cli ping' 2>&1)" = PONG ] \
+               || { echo "redis did not answer PONG (a password it does not have in its environment?)" >&2; return 1; } ;;
+      rabbitmq) KEX rabbitmqctl -q list_vhosts >/dev/null ;;
+      *) echo "dumps from pods are not supported for $engine" >&2; return 1 ;;
+    esac
+    return
+  fi
   case "$engine" in
     pg)
       if [ -n "$container" ]; then
@@ -229,8 +349,8 @@ dump_probe() {
         docker exec "$container" sh -c 'MYSQL_PWD="${MYSQL_ROOT_PASSWORD:-${MARIADB_ROOT_PASSWORD:-}}" mysqldump -u root --no-data --all-databases' >/dev/null 2>&1
       else mysqldump --no-data --all-databases >/dev/null 2>&1; fi ;;
     ch)
-      if [ -n "$container" ]; then docker exec "$container" clickhouse-client --query "SELECT 1" >/dev/null 2>&1
-      else clickhouse-client --query "SELECT 1" >/dev/null 2>&1; fi ;;
+      if [ -n "$container" ]; then DOCKER_CH="$container"; ch_probe docker_ch
+      else ch_probe; fi ;;
     redis)
       if [ -n "$container" ]; then docker exec "$container" redis-cli ping >/dev/null 2>&1
       else redis-cli ping >/dev/null 2>&1; fi ;;
@@ -258,6 +378,18 @@ cmd_dump_setup() {
     *) echo "unknown engine: $engine (supported: pg, mysql, ch, redis, rabbitmq, k8s, grafana, neo4j)" >&2; return 2 ;;
   esac
   case "$container" in ''|*[!A-Za-z0-9._-]*) container="" ;; esac
+  # a database in a pod: the "container" is the workload, entered with kubectl exec (see kube_enter)
+  local kt="" dcont="$container"
+  case "$container" in
+    k8s.*)
+      kube_target_ok "$container" || { echo "invalid Kubernetes workload: $container" >&2; return 2; }
+      case "$engine" in
+        pg|mysql|ch|redis|rabbitmq) ;;
+        *) echo "dumps from pods are not supported for $engine" >&2; return 2 ;;
+      esac
+      kube_ctl >/dev/null || { echo "no access to the Kubernetes cluster from this node" >&2; return 2; }
+      kt="$container"; dcont="" ;;
+  esac
   # Settings come from the env (the agent places them through the spool; from the CLI the
   # defaults apply). They are validated HERE rather than trusted from the panel: dir ends up in
   # rm/mkdir as root, and keep drives the rotation.
@@ -290,7 +422,7 @@ cmd_dump_setup() {
   local f="$DUMPS_D/$slot.sh"
   {
     printf '#!/usr/bin/env bash\n# generated by kervax - dump of %s before the file backup\nset -uo pipefail\n' "$engine"
-    printf 'OUT=%q\nKEEP=%s\nCONT=%q\nMINFREE=%s\nSKIPF=%q\n' "$out" "$keep" "$container" "$minfree" "$skipf"
+    printf 'OUT=%q\nKEEP=%s\nCONT=%q\nKT=%q\nMINFREE=%s\nSKIPF=%q\n' "$out" "$keep" "$dcont" "$kt" "$minfree" "$skipf"
     printf 'TS=$(date +%%Y%%m%%d-%%H%%M%%S)\n'
     printf 'FINAL="$OUT"\nMULTI=""\n'
     # OVERFLOW PROTECTION: the dump does not start if less than MINFREE% would be left on the
@@ -309,6 +441,11 @@ cmd_dump_setup() {
     printf '    echo "kervax-dump: %s SKIPPED - free space on the filesystem is $(( AVAIL*100/TOTAL ))%%, threshold ${MINFREE}%% (needs about $(( NEED/1024 )) MB)" >&2\n' "$slot"
     printf '    exit 0\n  fi\nfi\n'
     printf 'rm -f "$SKIPF"\n'   # there was enough space - clear the previous skip marker
+    # a pod is found anew on every run (its name changes with every restart and rollout)
+    if [ -n "$kt" ]; then
+      declare -f kube_ctl kube_pod kube_container kube_enter KEX
+      printf 'kube_enter "$KT" %q || { echo "kervax-dump: %s - the pod was not found" >&2; exit 1; }\n' "$engine" "$slot"
+    fi
     # ATOMICITY: we write into a temporary subdirectory and move the finished result. A dump
     # interrupted halfway (a reboot, an OOM kill, a killed session) would otherwise leave a
     # truncated .gz next to the real ones - the panel would count it as a dump file and restic
@@ -323,8 +460,13 @@ cmd_dump_setup() {
            # no GRANTs. A run goes into a timestamped subdirectory ($OUT/<TS>) and rotation is
            # per run (MULTI=1). The role is read from the container's POSTGRES_USER (see v7);
            # -u postgres, or the default user where that does not exist (bitnami).
+           # In a pod the role and the password come from the environment of the database container
+           # itself (POSTGRES_USER/POSTGRES_PASSWORD), expanded inside it.
            pg_body='MULTI=1
-if [ -n "$CONT" ]; then
+if [ -n "$KT" ]; then
+  PGU=$(KEX sh -c "printf %s \"\${POSTGRES_USER:-postgres}\"" 2>/dev/null); [ -n "$PGU" ] || PGU=postgres
+  DEX() { KEX sh -c "PGPASSWORD=\"\${POSTGRES_PASSWORD:-\${PGPASSWORD:-}}\"; export PGPASSWORD; exec \"\$@\"" sh "$@"; }
+elif [ -n "$CONT" ]; then
   PGU=$(docker inspect -f "{{range .Config.Env}}{{println .}}{{end}}" "$CONT" 2>/dev/null | sed -n "s/^POSTGRES_USER=//p" | head -1)
   [ -n "$PGU" ] || PGU=postgres
   DEX() { docker exec -u postgres "$CONT" "$@" 2>/dev/null || docker exec "$CONT" "$@"; }
@@ -343,19 +485,28 @@ done
            # The root password is expanded INSIDE the container (sh -c) rather than passed in
            # the docker exec arguments - otherwise it would show up in ps on the host. MYSQL_PWD
            # rather than -p: a password in argv is visible even inside the container.
-           printf 'if [ -n "$CONT" ]; then docker exec "$CONT" sh -c %s | gzip -c > "$F"\n' \
-                  "'MYSQL_PWD=\"\${MYSQL_ROOT_PASSWORD:-\${MARIADB_ROOT_PASSWORD:-}}\" mysqldump -u root --all-databases --single-transaction --quick'"
+           # mariadb:11 no longer ships the mysqldump symlink - mariadb-dump first
+           my_sh="'MYSQL_PWD=\"\${MYSQL_ROOT_PASSWORD:-\${MARIADB_ROOT_PASSWORD:-}}\"; export MYSQL_PWD; if command -v mariadb-dump >/dev/null 2>&1; then exec mariadb-dump -u root --all-databases --single-transaction --quick; else exec mysqldump -u root --all-databases --single-transaction --quick; fi'"
+           printf 'if [ -n "$KT" ]; then KEX sh -c %s | gzip -c > "$F"\n' "$my_sh"
+           printf 'elif [ -n "$CONT" ]; then docker exec "$CONT" sh -c %s | gzip -c > "$F"\n' "$my_sh"
            printf 'else mysqldump --all-databases --single-transaction --quick | gzip -c > "$F"; fi\n' ;;
       redis) printf 'F="$OUT/redis-$TS.rdb"\n'
            # --rdb performs a full sync into a file; from a container we extract it with
            # docker cp because redis-cli writes a FILE (streaming to stdout is not supported
            # everywhere)
-           printf 'if [ -n "$CONT" ]; then docker exec "$CONT" redis-cli --rdb /tmp/kervax.rdb >/dev/null 2>&1 && docker cp "$CONT":/tmp/kervax.rdb "$F" >/dev/null && docker exec "$CONT" rm -f /tmp/kervax.rdb\n'
+           # in a pod: kubectl cp needs tar in the image, so the file is read back with cat. It is
+           # written into the first writable data directory - the root filesystem of a pod is
+           # often read-only.
+           printf 'if [ -n "$KT" ]; then KEX sh -c %s > "$F"\n' \
+                  "'p=\"\${REDISCLI_AUTH:-\${REDIS_PASSWORD:-}}\"; [ -n \"\$p\" ] && export REDISCLI_AUTH=\"\$p\"; for d in /data /bitnami/redis/data /var/lib/redis /tmp; do if [ -d \"\$d\" ] && [ -w \"\$d\" ]; then f=\"\$d/.kervax-dump.rdb\"; redis-cli --rdb \"\$f\" >/dev/null 2>&1 && cat \"\$f\"; rc=\$?; rm -f \"\$f\"; exit \$rc; fi; done; exit 1'"
+           printf 'elif [ -n "$CONT" ]; then docker exec "$CONT" redis-cli --rdb /tmp/kervax.rdb >/dev/null 2>&1 && docker cp "$CONT":/tmp/kervax.rdb "$F" >/dev/null && docker exec "$CONT" rm -f /tmp/kervax.rdb\n'
            printf 'else redis-cli --rdb "$F" >/dev/null 2>&1; fi\n'
            printf 'gzip -f "$F" 2>/dev/null; F="$F.gz"\n' ;;
       rabbitmq) printf 'F="$OUT/rabbitmq-defs-$TS.json"\n'
            # export_definitions covers users, vhosts, queues and policies (MESSAGES are not included)
-           printf 'if [ -n "$CONT" ]; then docker exec "$CONT" rabbitmqctl export_definitions /tmp/kervax.json >/dev/null 2>&1 && docker cp "$CONT":/tmp/kervax.json "$F" >/dev/null && docker exec "$CONT" rm -f /tmp/kervax.json\n'
+           # in a pod straight to stdout ("-"): its root filesystem is often read-only (erofs on /tmp)
+           printf 'if [ -n "$KT" ]; then KEX rabbitmqctl -q export_definitions - > "$F" 2>/dev/null\n'
+           printf 'elif [ -n "$CONT" ]; then docker exec "$CONT" rabbitmqctl export_definitions /tmp/kervax.json >/dev/null 2>&1 && docker cp "$CONT":/tmp/kervax.json "$F" >/dev/null && docker exec "$CONT" rm -f /tmp/kervax.json\n'
            printf 'else rabbitmqctl export_definitions "$F" >/dev/null 2>&1; fi\n'
            printf 'gzip -f "$F" 2>/dev/null; F="$F.gz"\n' ;;
       k8s) printf 'F="$OUT/cluster-$TS"\n'
@@ -411,7 +562,8 @@ done
            printf 'else false; fi\n' ;;
       ch)  printf 'F="$OUT/clickhouse-$TS.sql.gz"\n'
            # without clickhouse-backup: schema and data are exported with the standard client
-           printf 'if [ -n "$CONT" ]; then docker exec "$CONT" clickhouse-client --query "SHOW DATABASES" > "$OUT/databases-$TS.txt" 2>/dev/null; docker exec "$CONT" clickhouse-client --query "SELECT create_table_query FROM system.tables WHERE database NOT IN (%s)" | gzip -c > "$F"\n' "'system','INFORMATION_SCHEMA','information_schema'"
+           printf 'if [ -n "$KT" ]; then KEX clickhouse-client --query "SHOW DATABASES" > "$OUT/databases-$TS.txt" 2>/dev/null; KEX clickhouse-client --query "SELECT create_table_query FROM system.tables WHERE database NOT IN (%s)" | gzip -c > "$F"\n' "'system','INFORMATION_SCHEMA','information_schema'"
+           printf 'elif [ -n "$CONT" ]; then docker exec "$CONT" clickhouse-client --query "SHOW DATABASES" > "$OUT/databases-$TS.txt" 2>/dev/null; docker exec "$CONT" clickhouse-client --query "SELECT create_table_query FROM system.tables WHERE database NOT IN (%s)" | gzip -c > "$F"\n' "'system','INFORMATION_SCHEMA','information_schema'"
            printf 'else clickhouse-client --query "SELECT create_table_query FROM system.tables WHERE database NOT IN (%s)" | gzip -c > "$F"; fi\n' "'system','INFORMATION_SCHEMA','information_schema'" ;;
     esac
     printf 'rc=$?\n'
@@ -1646,7 +1798,7 @@ custom_scan_maybe() {
 case "${1:-}" in
   get-config)    cmd_get_config ;;
   # the scan is throttled inside (every CUSTOM_EVERY seconds): the config refresh stays per-minute
-  refresh)       refresh_config || true; custom_scan_maybe ;;
+  refresh)       refresh_config || true; custom_scan_maybe; kube_access_maybe || true ;;
   custom-scan)   cmd_custom_scan ;;
   set-paths)     shift; cmd_set_paths "$@" ;;
   set-schedule)  shift; cmd_set_schedule "$@" ;;

@@ -12,12 +12,19 @@ const ENGINES: Record<string, string> = {
   rabbitmq: 'RabbitMQ', k8s: 'Kubernetes (etcd)', grafana: 'Grafana', neo4j: 'Neo4j',
 }
 
-// «pg» → PostgreSQL, «pg@traccar-postgres» → PostgreSQL (traccar-postgres)
+// «pg» → PostgreSQL, «pg@traccar-postgres» → PostgreSQL (traccar-postgres),
+// «ch@k8s.default.sts.clickhouse» → ClickHouse (default/clickhouse)
 function engineName(slot: string): string {
   const [code, cont] = slot.split('@')
   const name = ENGINES[code] ?? code
+  if (cont && cont.startsWith('k8s.')) {
+    const [, ns, , ...wl] = cont.split('.')
+    return `${name} (${ns}/${wl.join('.')})`
+  }
   return cont ? `${name} (${cont})` : name
 }
+
+const KIND: Record<string, string> = { statefulset: 'StatefulSet', deployment: 'Deployment', daemonset: 'DaemonSet' }
 
 export function helperText(raw: string | null | undefined, t: T): string {
   const s = (raw ?? '').trim()
@@ -48,7 +55,20 @@ export function helperText(raw: string | null | undefined, t: T): string {
     return parts.join(' ')
   }
   m = s.match(/^the dump probe failed, dumps were NOT enabled: ?(.*)$/)
-  if (m) return t('Пробный дамп не прошёл — дампы НЕ включены: {err}', { err: m[1] || '—' })
+  if (m) return t('Пробный дамп не прошёл — дампы НЕ включены: {err}', { err: helperText(m[1], t) || '—' })
+  // базы в подах kubernetes
+  if (/^no access to the Kubernetes cluster from this node/.test(s))
+    return t('У helper на этой ноде нет доступа к кластеру Kubernetes: дамп из пода включается на управляющей ноде.')
+  m = s.match(/^no (statefulset|deployment|daemonset) (\S+) in namespace (\S+)$/)
+  if (m) return t('В пространстве {ns} нет {kind} {name}.', { ns: m[3], kind: KIND[m[1]], name: m[2] })
+  m = s.match(/^no running pod of (statefulset|deployment|daemonset) (\S+) in namespace (\S+)$/)
+  if (m) return t('У {kind} {name} в пространстве {ns} нет запущенного пода.', { ns: m[3], kind: KIND[m[1]], name: m[2] })
+  if (/^clickhouse did not let the default user in/.test(s))
+    return t('ClickHouse не пустил пользователя default: база требует пароль, а в её окружении пароля нет.')
+  if (/^redis did not answer PONG/.test(s))
+    return t('Redis не ответил на ping: похоже, нужен пароль, которого нет в окружении базы.')
+  m = s.match(/^dumps from pods are not supported for (\S+)$/)
+  if (m) return t('Дамп из пода для {engine} не поддерживается.', { engine: engineName(m[1]) })
   m = s.match(/^OK (\S+) dumps disabled, local files removed/)
   if (m) return t('Дампы {engine} выключены, локальные файлы удалены (история осталась в restic).', { engine: engineName(m[1]) })
   m = s.match(/^(\S+) dumps were not enabled anyway$/)
