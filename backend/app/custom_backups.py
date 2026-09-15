@@ -131,6 +131,7 @@ def evaluate(job: dict, now: datetime, ignored: set[str], fresh: bool = True) ->
     nowts = now.timestamp()
     ok = int(job.get("ok") if job.get("ok") is not None else -1)
     ok_ts = int(job.get("ok_ts") or 0)
+    run_ts = int(job.get("run_ts") or 0)
     after = stale_after(job)
     status, problem = "unknown", ""
     if job.get("id") in ignored:
@@ -142,10 +143,19 @@ def evaluate(job: dict, now: datetime, ignored: set[str], fresh: bool = True) ->
     elif job.get("kind") == "systemd" and job.get("enabled") is False:
         status, problem = "disabled", "таймер выключен — бэкап не запускается"
     elif ok == 0:
-        res = (job.get("result") or "").strip()
-        why = {"timeout": "не уложился в таймаут", "exit-code": "завершился с ошибкой",
-               "signal": "убит сигналом", "core-dump": "упал"}.get(res, "завершился с ошибкой")
-        status, problem = "failed", f"последний прогон {why}"
+        fail = job.get("fail") or ""
+        if fail == "state":
+            status, problem = "failed", "скрипт отметил последний запуск как неудачный"
+        elif fail == "state_old":
+            # скрипт пишет итог после каждого прогона, а после последнего не записал ничего
+            status, problem = "failed", "последний запуск не записал итог — скрипт, похоже, прервался"
+        elif fail == "restic":
+            status, problem = "failed", "последний запуск не сохранил снимок restic"
+        else:
+            res = (job.get("result") or "").strip()
+            why = {"timeout": "не уложился в таймаут", "exit-code": "завершился с ошибкой",
+                   "signal": "убит сигналом", "core-dump": "упал"}.get(res, "завершился с ошибкой")
+            status, problem = "failed", f"последний прогон {why}"
         bad = [d.get("name") for d in (job.get("dbs") or []) if d.get("ok") == 0]
         if bad:
             problem += ": " + ", ".join(str(b) for b in bad[:5])
@@ -157,6 +167,15 @@ def evaluate(job: dict, now: datetime, ignored: set[str], fresh: bool = True) ->
             status = "ok"
     elif ok == 1:
         status = "ok"
+    elif job.get("kind") == "cron" and job.get("run_src") == "journal" and run_ts > 0:
+        # Итога не видно, но запуски видны по журналу cron. Тишина в журнале — это уже
+        # не «не понять», а поломка: cron не запускает задание (снят, сломан, нода лежала).
+        # Время записи лога так не читаем: скрипт может писать в лог только при ошибке.
+        age = nowts - run_ts
+        if age > after:
+            status, problem = "stale", f"cron не запускал задание {_ago(age)}"
+        else:
+            status = "ran"
     dbs = [
         CustomBackupDb(
             name=str(d.get("name") or "")[:120], ok=int(d.get("ok") if d.get("ok") is not None else -1),
@@ -176,7 +195,7 @@ def evaluate(job: dict, now: datetime, ignored: set[str], fresh: bool = True) ->
         status=status,
         problem=problem,
         ok_ts=ok_ts,
-        run_ts=int(job.get("run_ts") or 0),
+        run_ts=run_ts,
         next_ts=int(job.get("next_ts") or 0),
         size_bytes=int(job.get("size_bytes") or 0),
         duration_sec=int(job.get("duration_sec") or 0),
@@ -186,6 +205,10 @@ def evaluate(job: dict, now: datetime, ignored: set[str], fresh: bool = True) ->
         unit=str(job.get("unit") or "")[:200],
         result=str(job.get("result") or "")[:40],
         metrics=str(job.get("metrics") or "")[:300],
+        run_src=str(job.get("run_src") or "")[:16],
+        state=str(job.get("state") or "")[:300],
+        evidence=str(job.get("evidence") or "")[:16],
+        fail=str(job.get("fail") or "")[:16],
         dbs=dbs,
         stale_after=after,
         ignored=status == "ignored",

@@ -404,28 +404,37 @@ function OwnBackupRow({ job: j, canManage, busy, onToggle }: {
   const { t } = useI18n()
   const label: Record<CustomBackup['status'], string> = {
     ok: t('работает'), failed: t('ошибка'), stale: t('не свежий'), disabled: t('таймер выключен'),
-    running: t('идёт сейчас'), unknown: t('не видно'), ignored: t('не отслеживается'),
+    running: t('идёт сейчас'), ran: t('запускается'), unknown: t('не видно'), ignored: t('не отслеживается'),
   }
   const tone: Record<CustomBackup['status'], string> = {
     ok: 't-up', running: 't-up', failed: 't-down', stale: 't-degraded', disabled: 't-degraded',
-    unknown: 'muted', ignored: 'muted',
+    ran: '', unknown: 'muted', ignored: 'muted',
   }
   const dot: Record<CustomBackup['status'], string> = {
     ok: 'sdot-up', running: 'sdot-up', failed: 'sdot-down', stale: 'sdot-degraded',
-    disabled: 'sdot-degraded', unknown: 'sdot-unknown', ignored: 'sdot-unknown',
+    disabled: 'sdot-degraded', ran: 'sdot-unknown', unknown: 'sdot-unknown', ignored: 'sdot-unknown',
   }
   const where = j.kind === 'cron'
     ? `cron · ${fmtSchedule(j.schedule, t)}`
     : j.kind === 'systemd' ? `${t('таймер')} · ${fmtSchedule(j.schedule, t)}` : t('метрики')
-  // у задания без собственного статуса «последнее» — это самый свежий файл бэкапа
-  const lastLbl = j.kind === 'cron' && !j.metrics ? t('свежий файл бэкапа') : t('последний успех')
+  // «последнее» зависит от того, чем подтверждён итог: у задания без собственного статуса
+  // это самый свежий файл бэкапа, у restic — снимок, который он сохранил
+  const lastLbl =
+    j.metrics || j.kind !== 'cron' || j.evidence === 'state' ? t('последний успех')
+      : j.evidence === 'restic' ? t('последний снимок restic')
+        : t('свежий файл бэкапа')
   const bits: string[] = []
   if (j.ok_ts) bits.push(`${lastLbl}: ${fmtAgo(j.ok_ts)}`)
-  else if (j.run_ts) bits.push(`${t('последний запуск')}: ${fmtAgo(j.run_ts)}`)
+  // запуск — отдельно, если он не тот же, что успех: иначе видно, что задание запускалось
+  // уже после последнего успеха
+  if (j.run_ts && (!j.ok_ts || Math.abs(j.run_ts - j.ok_ts) > 600))
+    bits.push(`${t('последний запуск')}: ${fmtAgo(j.run_ts)}`)
   if (j.size_bytes) bits.push(fmtBytes(j.size_bytes))
   if (j.duration_sec) bits.push(`⏱ ${fmtDur(j.duration_sec)}`)
   const src = [
     j.dir ? `📁 ${j.dir}` : '',
+    j.state ? `${t('отметка')}: ${j.state}` : '',
+    j.evidence === 'restic' ? t('по кэшу restic') : '',
     j.log ? `${t('лог')}: ${j.log}` : '',
     j.metrics ? `${t('метрики')}: ${j.metrics.split('/').pop()}` : '',
     j.unit,
@@ -453,6 +462,11 @@ function OwnBackupRow({ job: j, canManage, busy, onToggle }: {
             {j.scan_stale
               ? t('Сведения с ноды давно не обновлялись: helper бэкапа там не запускается. Переустановите его.')
               : t('Не видно, когда задание отработало: метрик у него нет, а файлов бэкапа панель не нашла.')}
+          </div>
+        )}
+        {j.status === 'ran' && (
+          <div className="muted small">
+            {t('Запуски видны по журналу cron, а итог — нет: скрипт не пишет ни метрик, ни отметки о результате, а файлов бэкапа панель не нашла.')}
           </div>
         )}
         {src.length > 0 && <div className="muted small mono own-backup-src">{src.join(' · ')}</div>}

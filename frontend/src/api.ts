@@ -1044,8 +1044,9 @@ export type Server = {
 
 // Свой бэкап ноды: cron-задание, systemd-таймер или скрипт с метриками, настроенный без
 // панели. Находит helper на ноде, статус считает панель; сама нода при этом не меняется.
+// ran — cron задание запускает (видно по журналу), но итога не видно
 export type CustomBackupStatus =
-  | 'ok' | 'failed' | 'stale' | 'disabled' | 'running' | 'unknown' | 'ignored'
+  | 'ok' | 'failed' | 'stale' | 'disabled' | 'running' | 'ran' | 'unknown' | 'ignored'
 export type CustomBackup = {
   id: string
   kind: 'cron' | 'systemd' | 'metrics'
@@ -1068,6 +1069,10 @@ export type CustomBackup = {
   unit: string
   result: string
   metrics: string
+  run_src: string // journal — старт из журнала cron, log — запись лога, state — отметка скрипта
+  state: string // файл-отметка, куда скрипт пишет итог
+  evidence: string // чем подтверждён итог: state | restic | files
+  fail: string // state | state_old | restic
   dbs: { name: string; ok: number; ts: number; size_bytes: number }[]
   stale_after: number
   ignored: boolean

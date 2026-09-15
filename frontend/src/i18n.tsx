@@ -1497,6 +1497,12 @@ const EN: Record<string, string> = {
   'базы': 'databases',
   'Не видно, когда задание отработало: метрик у него нет, а файлов бэкапа панель не нашла.':
     'It is not visible when the job last ran: it has no metrics, and the panel found no backup files.',
+  'Запуски видны по журналу cron, а итог — нет: скрипт не пишет ни метрик, ни отметки о результате, а файлов бэкапа панель не нашла.':
+    'Runs are visible in the cron log, the outcome is not: the script writes neither metrics nor a status file, and the panel found no backup files.',
+  'запускается': 'runs',
+  'последний снимок restic': 'last restic snapshot',
+  'отметка': 'status file',
+  'по кэшу restic': 'from the restic cache',
   'отслеживать': 'watch',
   'не отслеживать': 'do not watch',
   'Свои бэкапы на ноде': 'Own backups on the node',
