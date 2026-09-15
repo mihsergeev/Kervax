@@ -1511,10 +1511,29 @@ function ServerRow({
   const onFire = s.online && issues.length > 0
   const muteItems = collectMutes(s, t, ['alert'])
   return (
+    // Вся карточка — вход в сервер, как строки «Докера», «Сервисов» и «Сайтов». Раньше
+    // открывали только имя с адресом: наведение на карточку ничего не подсвечивало, а
+    // клик по нагрузке справа не делал ничего. Кнопкой (<button>) карточку не сделать:
+    // внутри свои интерактивные элементы — чекбокс, ручка переноса, 🔥.
     <div
-      className={`check-row srv-row${selecting ? ' selecting' : ''}${
+      className={`check-row srv-row clickable${selecting ? ' selecting' : ''}${
         dragging ? ' dragging' : ''
       }`}
+      role="button"
+      tabIndex={0}
+      onClick={() => {
+        // выделяли текст (скопировать IP) — это не клик по карточке
+        if (window.getSelection()?.toString()) return
+        onOpen()
+      }}
+      onKeyDown={(e) => {
+        // Enter/пробел на чекбоксе или 🔥 — их собственные, карточку не открываем
+        if (e.target !== e.currentTarget) return
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault()
+          onOpen()
+        }
+      }}
     >
       {selecting && (
         <input
@@ -1539,13 +1558,7 @@ function ServerRow({
         </span>
       )}
       <span className={`sdot ${s.online ? 'sdot-up' : 'sdot-down'}`} />
-      <div
-        className="check-main clickable"
-        role="button"
-        tabIndex={0}
-        onClick={onOpen}
-        onKeyDown={(e) => (e.key === 'Enter' || e.key === ' ') && onOpen()}
-      >
+      <div className="check-main">
         <div className="check-name">
           {onFire && (
             <span
