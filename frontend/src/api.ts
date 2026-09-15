@@ -780,9 +780,9 @@ export type KubePod = {
   reason?: string
   owner?: string // kind контроллера (Job/ReplicaSet/StatefulSet/DaemonSet/Node); есть с агента 1.39
   image?: string // образ СУБД-контейнера (только у СУБД-подов)
-  cred?: KubeCred // откуда под берёт креды БД — для автоподстановки секрета в манифест дампа (агент ≥1.74)
+  cred?: KubeCred // откуда под берёт креды БД (без значений; агент ≥1.74)
 }
-// Ссылки на креды СУБД-пода (без значений паролей): панель воспроизведёт их в CronJob-дампе.
+// Ссылки на креды СУБД-пода (без значений паролей).
 export type KubeCred = {
   env_from?: string[] // secretRef из envFrom (весь секрет оптом)
   env?: KubeEnvRef[] // кред-переменные: имя + источник (secretKeyRef или plain-значение user/database)
@@ -1147,12 +1147,12 @@ export type BackupAudit = {
   detail: string
   gap: boolean // true = данных нет в бэкапе; false = есть, но восстановимость под вопросом
   dump_engine?: string // pg/mysql/ch — код движка; пусто = дампить не умеем
-  can_dump?: boolean // true = панель снимет дамп сама; false = только предложит манифест
+  can_dump?: boolean // true = панель снимет дамп сама (docker, локально, из пода); false = причина в detail
   downtime?: string // непусто = включение дампа стоит простоя (Neo4j Community)
-  container?: string // имя контейнера с базой ("" = нативная установка)
-  pods?: string[] // ns/name подов с этой СУБД (для генерации манифеста CronJob)
+  container?: string // имя контейнера или k8s.<ns>.<sts|deploy|ds>.<имя> ("" = нативная установка)
+  pods?: string[] // ns/name подов этого экземпляра — где живёт база
   key?: string // "db:RabbitMQ:cont" — устойчивый ключ находки (для точечного приглушения)
-  instance?: string // имя контейнера с этой базой ("" = под/нативная установка)
+  instance?: string // экземпляр: контейнер или контроллер пода k8s.… ("" = нативная установка)
   muted?: boolean // приглушена вручную: не считается проблемой и не идёт на главную
 }
 export type HelperAdvice = {

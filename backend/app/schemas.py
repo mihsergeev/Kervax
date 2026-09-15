@@ -772,22 +772,23 @@ class BackupAudit(BaseModel):
     detail: str  # человекочитаемое пояснение
     gap: bool  # True = данных нет в бэкапе; False = есть, но восстановимость под вопросом
     # для kind=db: код движка (pg/mysql/ch) — пусто, если движок дампить не умеем.
-    # can_dump=True → панель снимет дамп сама (docker/локально); False → только предложит
-    # манифест CronJob (под kubernetes: нужен exec, которого у агента намеренно нет).
+    # can_dump=True → панель снимет дамп сама (docker, локально, из пода через helper);
+    # False → нельзя на этой ноде, причина — в detail.
     dump_engine: str = ""
     can_dump: bool = False
     # непусто → включение дампа стоит простоя (Neo4j Community умеет дамп только с
     # остановленной базы). Показываем в UI до включения, а не постфактум в графиках.
     downtime: str = ""
     container: str = ""
-    pods: list[str] = []  # ns/name подов с этой СУБД (для генерации манифеста)
+    pods: list[str] = []  # ns/name подов этого экземпляра — показать, где живёт база
     # ключ для точечного приглушения ("db:RabbitMQ") и признак «приглушена». Приглушённая
     # находка НЕ исчезает, а уезжает в свёрнутый список: иначе через месяц не вспомнить,
     # что спрятал её сам, и легко решить, что панель перестала проверять.
     key: str = ""
     muted: bool = False
-    # конкретный экземпляр движка (имя контейнера). Пусто = под/нативная установка.
-    # Входит в ключ: две postgres на ноде глушатся и дампятся независимо.
+    # конкретный экземпляр движка: имя контейнера или k8s.<ns>.<sts|deploy|ds>.<имя>.
+    # Пусто = нативная установка. Входит в ключ: две postgres на ноде глушатся и дампятся
+    # независимо.
     instance: str = ""
 
 
@@ -1201,7 +1202,8 @@ class BackupCommandIn(BaseModel):
     # agent/backup-setup.sh: забытый движок молча отваливался бы 422-й на кнопке
     # «включить дампы» (так уже вышло с grafana).
     engine: str = Field(default="", pattern="^$|^(pg|mysql|ch|redis|rabbitmq|k8s|grafana|neo4j)$")
-    container: str = Field(default="", max_length=64, pattern=r"^$|^[A-Za-z0-9._-]+$")
+    # имя контейнера или цель в kubernetes: k8s.<namespace>.<sts|deploy|ds>.<имя>
+    container: str = Field(default="", max_length=160, pattern=r"^$|^[A-Za-z0-9._-]+$")
     # настройки дампа: каталог, сколько последних хранить, минимум свободного места (%).
     # Пусто/0 у dump_dir → helper берёт дефолт /backup. dump_keep 1..30, dump_minfree 0..50.
     dump_dir: str = Field(default="", max_length=200)

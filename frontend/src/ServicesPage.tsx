@@ -286,7 +286,8 @@ function buildByServer(
       const pods = a.pods ?? []
       items.push({
         kind: a.subject,
-        where: a.container
+        // у базы в поде container — это её контроллер (k8s.<ns>.<вид>.<имя>), а не контейнер
+        where: a.container && !a.container.startsWith('k8s.')
           ? t('контейнер: {c}', { c: a.container })
           : pods.length
             ? t('под kubernetes: {p}', { p: pods.join(', ') })

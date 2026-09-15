@@ -423,9 +423,6 @@ const EN: Record<string, string> = {
   'Отметка «разобрался сам»: убирает пункт с главной. На ноду не влияет — список выше остаётся, панель ничего не настраивает и не выключает.':
     'An "I handled it" mark: removes the item from the home page. It does not touch the node — the list above stays and the panel configures nothing.',
   'включить дампы': 'enable dumps',
-  'показать манифест': 'show manifest',
-  'Панель кластер не трогает и прав exec не просит — примените этот CronJob сами. Дамп ляжет в /backup на ноде, откуда его заберёт restic:':
-    'The panel never touches the cluster and asks for no exec rights — apply this CronJob yourself. The dump lands in /backup on the node, where restic picks it up:',
   '{name}: {db} — нужен отдельный дамп': '{name}: {db} — needs its own dump',
   'Не попадает в бэкап ({n}):': 'Not included in the backup ({n}):',
   'Дампы БД': 'DB dumps',
@@ -809,25 +806,6 @@ const EN: Record<string, string> = {
   'Читается на сервере без паролей: наличие config (валидность), число снапшотов, свежесть, лок.':
     'Read on the server without passwords: presence of config (validity), snapshot count, freshness, lock.',
   // --- CronJob-манифест дампа СУБД в кластере (копипаст в kubectl) ---
-  'Дамп {engine} ({ns}/{host}) → {dir} на ноде {node}.':
-    'Dump of {engine} ({ns}/{host}) → {dir} on node {node}.',
-  'Оттуда его заберёт обычный restic-бэкап этой ноды (путь /backup уже в бэкапе).':
-    'From there the node\'s regular restic backup picks it up (/backup is already included).',
-  'Секрет с доступом к базе подставлен АВТОМАТИЧЕСКИ из спеки пода (те же ссылки, что у самой СУБД — панель значений не читает). Сверьте и примените.':
-    'The database secret was filled in AUTOMATICALLY from the pod spec (the same references the database itself uses — the panel never reads the values). Check it and apply.',
-  'ВАЖНО: подставьте имя Secret\'а с доступом к базе — панель секреты не читает и не хранит.':
-    'IMPORTANT: fill in the name of the Secret holding database credentials — the panel neither reads nor stores secrets.',
-  'Это ОДИН из нескольких манифестов: баз этого типа найдено больше одной, у каждой свой CronJob и свой каталог — иначе они затирали бы дампы друг друга.':
-    'This is ONE of several manifests: more than one database of this type was found, and each gets its own CronJob and directory — otherwise they would overwrite each other\'s dumps.',
-  'Обращаемся к Service «{host}» (имя выведено из имени пода — СВЕРЬТЕ его с kubectl get svc), а не к конкретному поду: у реплик дамп надо снимать один раз. Если у вас primary/replica — укажите здесь Service именно primary.':
-    'This targets the Service “{host}” (the name is derived from the pod name — VERIFY it against kubectl get svc), not a specific pod: replicas should be dumped once. With a primary/replica setup, point this at the primary\'s Service.',
-  'секрет не требуется (открытый доступ)': 'no secret needed (open access)',
-  'secret-с-доступом-к-базе': 'secret-with-database-credentials',
-  'ПОДСТАВЬТЕ': 'FILL IN',
-  'нода с агентом': 'node running the agent',
-  'нода-с-агентом': 'node-running-the-agent',
-  'за час до бэкапа ноды': 'an hour before the node backup',
-  'дамп должен лечь на ноду, где идёт restic': 'the dump must land on the node running restic',
 
   // --- Бэкапы: скрипт массовой зачистки репозиториев (копипаст в терминал) ---
   'Kervax: зачистка репозиториев на {server}.': 'Kervax: repository cleanup on {server}.',
@@ -1503,6 +1481,20 @@ const EN: Record<string, string> = {
   'последний снимок restic': 'last restic snapshot',
   'отметка': 'status file',
   'по кэшу restic': 'from the restic cache',
+  'Сервер находит под и проверяет доступ к базе':
+    'The server finds the pod and checks access to the database',
+  'У helper на этой ноде нет доступа к кластеру Kubernetes: дамп из пода включается на управляющей ноде.':
+    'The helper on this node has no access to the Kubernetes cluster: dumps from pods are enabled on a control-plane node.',
+  'В пространстве {ns} нет {kind} {name}.':
+    'There is no {kind} {name} in namespace {ns}.',
+  'У {kind} {name} в пространстве {ns} нет запущенного пода.':
+    '{kind} {name} in namespace {ns} has no running pod.',
+  'ClickHouse не пустил пользователя default: база требует пароль, а в её окружении пароля нет.':
+    'ClickHouse refused the default user: the database requires a password, and its environment has none.',
+  'Redis не ответил на ping: похоже, нужен пароль, которого нет в окружении базы.':
+    'Redis did not answer ping: it seems to need a password that is not in its environment.',
+  'Дамп из пода для {engine} не поддерживается.':
+    'Dumps from a pod are not supported for {engine}.',
   'отслеживать': 'watch',
   'не отслеживать': 'do not watch',
   'Свои бэкапы на ноде': 'Own backups on the node',
