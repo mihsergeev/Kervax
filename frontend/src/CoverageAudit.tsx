@@ -4,7 +4,6 @@ import { CommandProgress, nextPhase, type CmdProgressState } from './CommandProg
 import { helperText } from './helperText'
 import { useI18n } from './i18n'
 import { EngineIcon } from './engineIcon'
-import { kubeDumpManifest } from './kubeDumpManifest'
 import { byteUnits } from './units'
 
 const fmtSize = (n: number) => {
@@ -57,9 +56,15 @@ const PROBE_TEXT: Record<string, string> = {
 }
 const PROBE_SEC: Record<string, number> = { k8s: 4, redis: 6, ch: 6, rabbitmq: 8, neo4j: 12 }
 
-// Манифест CronJob для СУБД в kubernetes. Панель кластер НЕ трогает и прав exec не просит —
-// только печатает YAML, применяет человек. Дамп кладётся в hostPath /backup/<движок>, откуда
-// его забирает обычный restic-бэкап ноды (та же схема, что у локальных дампов).
+// База в поде kubernetes: экземпляр — не контейнер, а контроллер пода
+// «k8s.<namespace>.<sts|deploy|ds>.<имя>». Дамп снимает helper на ноде через kubectl exec,
+// сам под он находит заново при каждом запуске. Человеку показываем «namespace/имя».
+const isKube = (inst?: string) => !!inst && inst.startsWith('k8s.')
+function instLabel(inst: string): string {
+  if (!isKube(inst)) return inst
+  const [, ns, , ...name] = inst.split('.')
+  return `☸ ${ns}/${name.join('.')}`
+}
 
 // Аудит покрытия: панель сверяет, что на ноде есть, с тем, что реально попадает в бэкап.
 // Две категории: ДЫРА (данных в бэкапе нет) и РИСК (данные есть, но восстановимость под
@@ -81,16 +86,12 @@ export function CoverageAudit({ server: s, canManage, onChanged }: {
   const [showMuted, setShowMuted] = useState(false)
   const [showDbRisks, setShowDbRisks] = useState(false)
   const [dumpMsg, setDumpMsg] = useState<{ ok: boolean; text: string } | null>(null)
-  const [manifest, setManifest] = useState<{ eng: string; yaml: string } | null>(null)
-  const [yamlCopied, setYamlCopied] = useState(false)
   // Дамп нужен и БЕЗ файлового бэкапа: локальная копия на самой ноде, из которой можно
   // восстановиться (helper 0.19 поднимает под это свой таймер). Единственное реальное
   // требование — установленный helper: через его спул панель и отдаёт команду.
   const bk = s.last_report?.backup
   const canDumpHere = canManage && !!bk?.manageable
   const dumpsAreLocalOnly = !bk?.configured  // копии вне ноды не будет — честно предупреждаем
-  // манифест пинится на ноду с агентом: дамп должен лечь туда, где работает restic
-  const kubeNodeName = s.hostname || s.name
   // ссылку «поменять время бэкапа» показываем, только если раздел «Управление» есть на
   // странице (модалка бэкапа), — в детали сервера его нет, кнопка была бы мёртвой
   const [hasSchedule, setHasSchedule] = useState(false)
@@ -230,12 +231,15 @@ export function CoverageAudit({ server: s, canManage, onChanged }: {
     const o = opFor(engine, inst)
     if (!o) return null
     const running = o.action === 'dump_setup'
-      ? t(PROBE_TEXT[o.engine] ?? 'Сервер настраивает дамп')
+      ? isKube(o.container)
+        ? t('Сервер находит под и проверяет доступ к базе')
+        : t(PROBE_TEXT[o.engine] ?? 'Сервер настраивает дамп')
       : t('Сервер выключает дамп и удаляет локальные файлы')
     return (
       <div className="coverage-op">
         {o.progress.phase !== 'done' && o.progress.phase !== 'error' && (
-          <CommandProgress state={o.progress} runningText={running} expectSec={PROBE_SEC[o.engine] ?? 20} />
+          <CommandProgress state={o.progress} runningText={running}
+            expectSec={isKube(o.container) ? 12 : PROBE_SEC[o.engine] ?? 20} />
         )}
         {o.msg && (o.progress.phase === 'done' || o.progress.phase === 'error') && (
           <div className={`small coverage-op-msg ${o.msg.ok ? 't-up' : 'form-error'}`}>
@@ -365,7 +369,7 @@ export function CoverageAudit({ server: s, canManage, onChanged }: {
               <div className="svc-card-head">
                 <span className="svc-ico"><EngineIcon name={x.subject} /></span>
                 <span className="svc-name">{x.subject}</span>
-                {x.instance && <span className="type-chip mono">{x.instance}</span>}
+                {x.instance && <span className="type-chip mono">{instLabel(x.instance)}</span>}
                 {/* действия — единой группой справа. Раньше margin-left:auto висел
                     и на кнопке, и на колокольчике: свободное место делилось между
                     ними, и кнопка вставала тем левее, чем длиннее имя движка —
@@ -376,15 +380,6 @@ export function CoverageAudit({ server: s, canManage, onChanged }: {
                     <button className="svc-act svc-act-primary" disabled={busyAny}
                       onClick={() => setCfgFor(cfgFor === (x.instance || x.dump_engine!) ? null : (x.instance || x.dump_engine!))}>
                       {t('включить дампы')}
-                    </button>
-                  )}
-                  {canManage && x.dump_engine && !x.can_dump && (x.pods?.length ?? 0) > 0 && (
-                    <button className="svc-act"
-                      onClick={() => setManifest(manifest?.eng === x.subject ? null : {
-                        eng: x.subject,
-                        yaml: kubeDumpManifest(x.dump_engine!, x.pods!, kubeNodeName, s.last_report?.kube?.pods),
-                      })}>
-                      {manifest?.eng === x.subject ? t('скрыть') : t('показать манифест')}
                     </button>
                   )}
                   {muteBtn(x)}
@@ -410,22 +405,6 @@ export function CoverageAudit({ server: s, canManage, onChanged }: {
                 />
               )}
               {opBlock(x.dump_engine, x.container || '')}
-              {/* манифест показываем В карточке: раньше он уезжал под весь список, и после
-                  нажатия «показать манифест» экран выглядел так, будто ничего не произошло */}
-              {manifest?.eng === x.subject && (
-                <div className="repo-cleanup">
-                  <div className="muted small">
-                    {t('Панель кластер не трогает и прав exec не просит — примените этот CronJob сами. Дамп ляжет в /backup на ноде, откуда его заберёт restic:')}
-                  </div>
-                  <div className="agent-advice-cmd">
-                    <pre>{manifest.yaml}</pre>
-                    <button className="ghost" onClick={() => {
-                      navigator.clipboard?.writeText(manifest.yaml)
-                      setYamlCopied(true); window.setTimeout(() => setYamlCopied(false), 1500)
-                    }}>{yamlCopied ? t('Скопировано') : t('Копировать')}</button>
-                  </div>
-                </div>
-              )}
             </div>
           ))}
           {/* итог, если карточка, у которой шла команда, пропала из списков (например,
@@ -446,7 +425,7 @@ export function CoverageAudit({ server: s, canManage, onChanged }: {
               <div className="svc-card-head">
                 <span className="svc-ico"><EngineIcon name={x.subject} /></span>
                 <span className="svc-name">{x.subject}</span>
-                {x.instance && <span className="type-chip mono">{x.instance}</span>}
+                {x.instance && <span className="type-chip mono">{instLabel(x.instance)}</span>}
                 <span className="t-up small svc-ok-tag">✓</span>
               </div>
               <div className="svc-card-detail muted small">{x.detail}</div>

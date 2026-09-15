@@ -412,7 +412,9 @@ _DB_IMAGES = {
 # НЕ базы, хотя образ содержит имя движка: prometheus-экспортеры (postgres-exporter,
 # redis-exporter…) читают метрики, но данных не хранят; postgrest — REST-обёртка.
 # Считать их СУБД = ложная находка «нужен дамп» (ловили 4 postgres-exporter'а как базы).
-_NOT_DB_MARKERS = ("exporter", "postgrest")
+# Операторы (altinity/clickhouse-operator, postgres-operator…) базами управляют, но данных
+# не держат: на kz-se-op-dtp под clickhouse-operator числился второй ClickHouse.
+_NOT_DB_MARKERS = ("exporter", "postgrest", "operator")
 
 
 def _db_engine_of(image: str, name: str = "") -> str | None:
@@ -473,6 +475,50 @@ _DB_HOWTO = {
 }
 
 
+# Дамп базы из пода снимает helper на ноде: kubectl exec с админским доступом самой ноды.
+# Цель — не под, а его StatefulSet/Deployment/DaemonSet: под helper каждый раз находит заново,
+# потому что поды пересоздаются под новыми именами (у Deployment хеш меняется при каждом
+# выкате). Раньше панель печатала CronJob с именами, выведенными из имени пода, — его
+# приходилось править руками, и после передеплоя он переставал попадать в базу.
+_KUBE_DUMP_ENGINES = {"pg", "mysql", "ch", "redis", "rabbitmq"}
+_KUBE_DUMP_HELPER = "0.27"
+_KUBE_KIND = {"sts": "StatefulSet", "deploy": "Deployment", "ds": "DaemonSet"}
+
+
+def _kube_workload(pod: dict) -> str:
+    """Контроллер пода как цель дампа: «k8s.<ns>.<sts|deploy|ds>.<имя>» ("" — под без
+    контроллера, найти его заново после пересоздания не по чему).
+
+    Имя контроллера выводим из имени пода — так их именует сам Kubernetes: StatefulSet
+    даёт <имя>-<номер>, Deployment через ReplicaSet — <имя>-<хеш>-<суффикс>, DaemonSet —
+    <имя>-<суффикс>. Helper на ноде по этому имени берёт селектор и ищет живой под."""
+    ns, name, owner = pod.get("ns") or "", pod.get("name") or "", pod.get("owner") or ""
+    rules = {
+        "StatefulSet": ("sts", r"^(.+)-\d+$"),
+        "ReplicaSet": ("deploy", r"^(.+)-[a-z0-9]{6,10}-[a-z0-9]{5}$"),
+        "DaemonSet": ("ds", r"^(.+)-[a-z0-9]{5}$"),
+    }
+    if owner not in rules or not ns:
+        return ""
+    kind, rx = rules[owner]
+    m = re.match(rx, name)
+    return f"k8s.{ns}.{kind}.{m.group(1)}" if m else ""
+
+
+def _kube_dump_block(rep: dict, code: str) -> str:
+    """Почему дамп из пода на этой ноде не включить ("" — можно)."""
+    if code not in _KUBE_DUMP_ENGINES:
+        return "дамп этого движка из пода панель не снимает"
+    have = str((rep.get("setup_versions") or {}).get("backup-setup") or "")
+    if not have or _ver_key(have) < _ver_key(_KUBE_DUMP_HELPER):
+        return (f"дамп из пода снимает helper backup-setup {_KUBE_DUMP_HELPER} и новее — "
+                "обновите его на ноде")
+    if not ((rep.get("extras") or {}).get("kube-dumps") or {}).get("exec"):
+        return ("у helper на этой ноде нет доступа к кластеру: дамп из пода включается на "
+                "управляющей ноде (k0s, k3s, microk8s или kubeadm с admin.conf)")
+    return ""
+
+
 def _path_covered(path: str, mode: str, inc: list[str], exc: list[str]) -> bool:
     """Покрыт ли путь бэкапом. include — должен лежать под одним из перечисленных;
     exclude — покрыт, пока не попал под исключение. Сравниваем по границе сегмента,
@@ -508,12 +554,21 @@ def _backup_coverage(server: Server) -> list[BackupAudit]:
     # kubernetes: агент шлёт образ только у СУБД-подов. Нужен отдельно от скана процессов —
     # под может крутиться на воркере, где агента нет, и в /proc control-plane его не видно.
     kube_pods: dict[str, list[str]] = {}
+    # движок → цель дампа (k8s.<ns>.<вид>.<имя>) → её поды. Поды без контроллера — отдельно
+    kube_wl: dict[str, dict[str, list[str]]] = {}
+    kube_bare: dict[str, list[str]] = {}
     for p in ((rep.get("kube") or {}).get("pods") or []):
         if not p.get("image") or p.get("phase") != "Running":
             continue
         eng = _db_engine_of(p.get("image") or "", p.get("name") or "")
         if eng:
-            kube_pods.setdefault(eng, []).append(f"{p.get('ns', '?')}/{p.get('name', '?')}")
+            ref = f"{p.get('ns', '?')}/{p.get('name', '?')}"
+            kube_pods.setdefault(eng, []).append(ref)
+            wl = _kube_workload(p)
+            if wl:
+                kube_wl.setdefault(eng, {}).setdefault(wl, []).append(ref)
+            else:
+                kube_bare.setdefault(eng, []).append(ref)
             where.setdefault(eng, [])
     for eng in (rep.get("db_engines") or []):
         where.setdefault(eng, [])  # найдена по процессу; контейнер может и не быть
@@ -567,15 +622,28 @@ def _backup_coverage(server: Server) -> list[BackupAudit]:
                 pods=pods[:4],
             ))
             continue
-        # экземпляры: каждый контейнер — отдельная находка. Поды и нативная установка
-        # контейнерного имени не имеют, поэтому идут одной записью с пустым instance.
-        insts: list[str] = list(names) if names else [""]
+        # экземпляры: каждый контейнер и каждый контроллер kubernetes — отдельная находка.
+        # Нативная установка и поды без контроллера имени не имеют — одна запись с пустым
+        # instance. Процесс базы из пода виден и в /proc хоста, поэтому «нативную» запись
+        # заводим, только если ни контейнеров, ни контроллеров не нашлось.
+        wls = kube_wl.get(eng, {})
+        bare = sorted(set(kube_bare.get(eng, [])))
+        insts: list[str] = list(names) + sorted(wls)
+        if not insts or bare:
+            insts.append("")
         now_c = datetime.now(timezone.utc)
         for inst in insts:
-            where_txt = (
-                f"контейнер: {inst}" if inst
-                else ("под kubernetes: " + ", ".join(pods[:4]) if pods else "процесс на хосте")
-            )
+            kube = inst.startswith("k8s.")
+            inst_pods = sorted(set(wls.get(inst, []))) if kube else ([] if inst else bare)
+            if kube:
+                _, ns, kind, wname = inst.split(".", 3)
+                where_txt = (f"{_KUBE_KIND.get(kind, kind)} {ns}/{wname} в kubernetes"
+                             f" (под {', '.join(x.split('/', 1)[1] for x in inst_pods[:3])})")
+            else:
+                where_txt = (
+                    f"контейнер: {inst}" if inst
+                    else ("под kubernetes: " + ", ".join(bare[:4]) if bare else "процесс на хосте")
+                )
             # Свой бэкап ноды (cron, таймер, скрипт с метриками), который бэкапит именно этот
             # экземпляр. Раньше панель его не видела и звала «настройте дамп» там, где дамп
             # годами снимает ансибл-роль.
@@ -584,7 +652,7 @@ def _backup_coverage(server: Server) -> list[BackupAudit]:
                 out.append(BackupAudit(
                     kind="db_ok", subject=eng, gap=False, instance=inst,
                     detail=f"{where_txt} — свой бэкап: {custom_backups.label(own)}",
-                    container=inst, pods=pods[:4],
+                    container=inst, pods=inst_pods[:4],
                 ))
                 continue
             dump = panel_dumps.get((code, inst)) if code else None
@@ -597,7 +665,7 @@ def _backup_coverage(server: Server) -> list[BackupAudit]:
                 out.append(BackupAudit(
                     kind="db_ok", subject=eng, gap=False, instance=inst,
                     detail=f"{where_txt} — дамп снимает панель перед каждым бэкапом",
-                    dump_engine=code, can_dump=True, container=inst,
+                    dump_engine=code, can_dump=True, container=inst, pods=inst_pods[:4],
                 ))
                 continue
             if dump:
@@ -610,28 +678,34 @@ def _backup_coverage(server: Server) -> list[BackupAudit]:
                         kind="db", subject=eng, gap=False, instance=inst,
                         detail=f"{where_txt} — дамп включён, но после бэкапа файлов в /backup"
                                " нет, проверьте, снимается ли он",
-                        dump_engine=code, can_dump=True, container=inst,
+                        dump_engine=code, can_dump=True, container=inst, pods=inst_pods[:4],
                     ))
                 else:
                     # ждём первого бэкапа по расписанию — это норма, не проблема
                     out.append(BackupAudit(
                         kind="db_ok", subject=eng, gap=False, instance=inst,
                         detail=f"{where_txt} — дамп включён, первый снимется в ближайший бэкап",
-                        dump_engine=code, can_dump=True, container=inst,
+                        dump_engine=code, can_dump=True, container=inst, pods=inst_pods[:4],
                     ))
                 continue
-            # кнопку дампа даём только там, где helper реально может его снять: docker exec
-            # или локально. Для пода нужен `kubectl exec`, а у агента в RBAC нет pods/exec —
-            # молча расширять права до выполнения команд в любом поде нельзя.
-            can_dump = bool(inst) or not pods
+            # Кнопку дампа даём только там, где helper реально может его снять: docker exec,
+            # локально или kubectl exec с админским доступом самой ноды. Агенту pods/exec
+            # по-прежнему не выдаём — exec делает root-helper по белому списку движков.
+            if kube:
+                block = _kube_dump_block(rep, code) if code else ""
+                can_dump = bool(code) and not block
+            else:
+                block = ("не удалось определить StatefulSet или Deployment пода — дамп из него панель "
+                         "не снимает") if bare and not inst else ""
+                can_dump = not block
             out.append(BackupAudit(
                 kind="db", subject=eng, gap=False, instance=inst,
                 detail=f"{where_txt} — файловый снапшот живой базы может не восстановиться"
                        + (f", бэкапьте отдельно: {howto}" if howto else "")
-                       + ("" if can_dump else " — дамп из пода снимает CronJob, панель покажет манифест"),
+                       + (f" — {block}" if block else ""),
                 dump_engine=code, can_dump=can_dump,
-                downtime=_DUMP_DOWNTIME.get(code, "") if can_dump else "",
-                container=inst, pods=pods[:4],
+                downtime=_DUMP_DOWNTIME.get(code, "") if can_dump and not kube else "",
+                container=inst, pods=inst_pods[:4],
             ))
     # покрытие путей знаем только для нод с helper'ом (у остальных нет конфига)
     if not bk.get("manageable"):
