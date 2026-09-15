@@ -943,10 +943,7 @@ input:focus {
   color: var(--text);
   font: inherit;
 }
-.docker-host-row:hover {
-  border-color: var(--border-strong);
-  background: var(--card-hover);
-}
+/* наведение — общее с карточкой на «Серверах», см. .srv-row.clickable */
 .docker-host-row .docker-host-count {
   flex-shrink: 0;
   font-weight: 700;
@@ -2454,18 +2451,19 @@ select:focus {
   font-size: 1.05rem;
 }
 
-.check-main.clickable {
+/* Карточка сервера — целиком вход в него. Подсветка общая с карточками серверов в
+   «Докере», «Кубере», «Сервисах» и «Бэкапах» (.docker-host-row). Прежняя (--card-hover)
+   отличалась от фона на пару единиц яркости, и наведения было не видно. */
+.srv-row.clickable {
   cursor: pointer;
-  border-radius: 8px;
-  margin: -0.2rem -0.4rem;
-  padding: 0.2rem 0.4rem;
+  transition: border-color 0.12s ease, background 0.12s ease;
 }
-.check-main.clickable:hover .check-name {
-  text-decoration: underline;
-  text-decoration-color: var(--border-strong);
-  text-underline-offset: 3px;
+.srv-row.clickable:hover,
+.docker-host-row:hover {
+  border-color: color-mix(in srgb, var(--accent) 50%, var(--border-strong));
+  background: color-mix(in srgb, var(--accent) 7%, var(--bg-card));
 }
-.check-main.clickable:focus-visible {
+.srv-row.clickable:focus-visible {
   outline: 2px solid #3563e9;
   outline-offset: 1px;
 }
