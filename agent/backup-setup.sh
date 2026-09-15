@@ -46,7 +46,11 @@ AGENT_USER=kervax
 #       them without changing anything
 # 0.25: repository upkeep (prune/forget/rotation) is not counted as a backup; DST_DIR-style
 #       output directories are recognised
-KERVAX_SETUP_VERSION=0.25  # MAJOR.MINOR; compared component-wise (0.13 > 0.2!)
+# 0.26: an own cron job no longer reads "cannot see": its starts come from the cron journal; the
+#       script's variables and the config it sources are resolved (DEST="${X:-$APP/backups}"); the
+#       outcome comes from the status file the script writes or from the snapshot restic saved
+#       into its cache - still without changing anything on the node
+KERVAX_SETUP_VERSION=0.26  # MAJOR.MINOR; compared component-wise (0.13 > 0.2!)
 KERVAX_SETUP_ALWAYS=1  # safe on any node: installs only its own helper and spool and does not
                        # touch the backup configuration until the panel sends a command
 install -d -m 0755 "$HELPER_DIR" "$STATE_DIR" /var/lib/kervax/versions
@@ -1165,6 +1169,213 @@ cb_cron_line() {
   printf '%s\t%s\t%s\t%s\n' "$src" "$user" "$(printf '%s' "$sched" | tr -s ' ')" "$cmd"
 }
 
+# ---- when a cron job ran and how it ended, without touching the job ----
+# A cron job leaves no status of its own, but it leaves traces. Cron logs every start
+# ("CRON[1234]: (root) CMD (/lib65/x/backup.sh)"); a script often records its result in a status
+# file or writes its output into a directory built from its own variables; restic saves each new
+# snapshot into its local cache. Read, never run or change anything.
+#
+# The journal is read incrementally: the first scan looks CB_RUNS_DAYS back, later ones only since
+# the previous scan. CB_RUNS keeps the last start of each job and the restic cache directory a job
+# was seen saving into - job ids only, no command lines.
+CB_RUNS="${KERVAX_CB_RUNS:-/var/lib/kervax/custom-runs.tsv}"
+# A week and a day: daily and weekly jobs are seen at once. Reading further back is expensive on a
+# busy node (35 days of a per-minute cron took 34 s on fi-hz-ms2); a monthly job shows its start
+# after its next run, and the start is kept from then on.
+CB_RUNS_DAYS=8
+
+# the command as cron logs it: whitespace collapsed, the part after an unescaped % is the job's
+# stdin (not logged), \% becomes %
+cb_cron_logged() {
+  printf '%s' "$1" | tr '\t' ' ' | sed -E 's/(^|[^\\])%.*$/\1/; s/\\%/%/g; s/  +/ /g; s/^ //; s/ $//'
+}
+
+# "id<TAB>ts" - the newest logged start of every job in the file $1
+# ("id<TAB>user<TAB>command as logged", or "id<TAB><TAB>cron.daily<TAB>parts" for run-parts jobs);
+# $2 - read the journal since this unix time. Exit status 1: the journal could not be read.
+cb_journal_starts() {
+  local jobsf="$1" since="$2" anac=0
+  command -v journalctl >/dev/null 2>&1 || return 1
+  [ -x /usr/sbin/anacron ] && anac=1
+  # piped, not kept in a variable: the first scan reads weeks of a busy cron log
+  timeout 60 journalctl -t CRON -t CROND -t anacron --since "@$since" -o short-unix --no-pager -q 2>/dev/null \
+    | grep -E ' CMD \(|Job .cron\.[a-z]+. started' | awk -v jobs="$jobsf" -v anac="$anac" '
+    BEGIN { while ((getline l < jobs) > 0) { n++; split(l, f, "\t"); id[n] = f[1]; us[n] = f[2]; tx[n] = f[3]; kd[n] = f[4] } }
+    {
+      if (!match($0, /^[0-9]+/)) next
+      ts = substr($0, 1, RLENGTH) + 0
+      if (match($0, /Job .cron\.[a-z]+. started/)) {      # anacron: Job `cron.daily'"'"' started
+        part = substr($0, RSTART + 5, RLENGTH - 14); user = ""; cmd = ""
+      } else {
+        p = index($0, "]: ("); if (!p) next
+        rest = substr($0, p + 4); q = index(rest, ") CMD ("); if (!q) next
+        user = substr(rest, 1, q - 1); cmd = substr(rest, q + 7); part = ""
+        sub(/\)[ \t]*$/, "", cmd); gsub(/[ \t]+/, " ", cmd); sub(/^ /, "", cmd); sub(/ $/, "", cmd)
+      }
+      for (i = 1; i <= n; i++) {
+        if (kd[i] == "parts") {
+          # with anacron installed cron only calls anacron, and the start is anacron'"'"'s
+          if (anac) { if (part != tx[i]) continue } else if (cmd == "" || !index(cmd, "/etc/" tx[i])) continue
+        } else if (cmd != tx[i] || (us[i] != "" && user != us[i])) continue
+        if (ts > last[id[i]]) last[id[i]] = ts
+      }
+    }
+    END { for (k in last) printf "%s\t%d\n", k, last[k] }'
+  [ "${PIPESTATUS[0]}" -eq 0 ]
+}
+
+# Absolute paths a script builds from its variables, resolved WITHOUT running anything:
+#   APP="${APP_DIR:-/app/x}"; DEST="${BACKUP_DIR:-$APP/backups}"   ->   DEST<TAB>/app/x/backups
+# A config file the script sources (". /lib65/x/backup.conf", '. "$CONF"') is read at that point,
+# so its settings win over the defaults, as in the shell. Command substitutions stay unresolved.
+# Only absolute paths come out: repository URLs, passwords and the like never leave awk.
+# $1 - the script, $2 - the home directory of the job's user.
+cb_path_vars() {
+  local script="$1" home="$2" allowed="" p
+  [ -f "$script" ] || return 0
+  # pass 1 finds the files the script sources; only small text files outside /proc, /sys, /dev
+  # are read in pass 2
+  while IFS= read -r p; do
+    case "$p" in /proc/*|/sys/*|/dev/*|'') continue ;; esac
+    [ -f "$p" ] && [ "$(stat -c %s "$p" 2>/dev/null || echo 999999)" -le 262144 ] && grep -Iq . "$p" 2>/dev/null \
+      && allowed="$allowed$p"$'\n'
+  done < <(cb_vars_awk "$script" "$home" scan "")
+  cb_vars_awk "$script" "$home" vars "$allowed"
+}
+
+cb_vars_awk() {  # $1 script, $2 home, $3 scan|vars, $4 sourceable files (one per line)
+  head -c 262144 "$1" 2>/dev/null | tr -d '\000' | awk -v home="$2" -v mode="$3" -v allowed="$4" '
+    BEGIN { V["HOME"] = home; na = split(allowed, al, "\n"); for (i = 1; i <= na; i++) if (al[i] != "") OK[al[i]] = 1 }
+    # value of an assignment, without quotes and whatever follows it on the line
+    function unq(v,   c) {
+      sub(/^[ \t]+/, "", v); c = substr(v, 1, 1)
+      if (c == "\"") { v = substr(v, 2); if (!sub(/"[ \t]*([;&|#].*)?$/, "", v)) return "\001"; return v }
+      if (c == "\047") { v = substr(v, 2); if (!sub(/\047[ \t]*([;&|#].*)?$/, "", v)) return "\001"; gsub(/\$/, "\002", v); return v }
+      sub(/[ \t;&|].*$/, "", v); return v
+    }
+    function expand(v,   g, name, op, def, m, pre, post, known) {
+      if (v == "\001") return v
+      for (g = 0; g < 30; g++) {
+        if (index(v, "$(") || index(v, "`")) return "\001"
+        if (match(v, /\$[A-Za-z_][A-Za-z0-9_]*/)) {
+          name = substr(v, RSTART + 1, RLENGTH - 1)
+          if (!(name in V)) return "\001"
+          v = substr(v, 1, RSTART - 1) V[name] substr(v, RSTART + RLENGTH); continue
+        }
+        if (match(v, /\$\{[A-Za-z_][A-Za-z0-9_]*(:?[-=+][^{}$]*)?\}/)) {
+          m = substr(v, RSTART + 2, RLENGTH - 3); pre = substr(v, 1, RSTART - 1); post = substr(v, RSTART + RLENGTH)
+          match(m, /^[A-Za-z_][A-Za-z0-9_]*/); name = substr(m, 1, RLENGTH); op = substr(m, RLENGTH + 1)
+          known = (name in V) && V[name] != ""
+          if (op == "") { if (!(name in V)) return "\001"; v = pre V[name] post; continue }
+          def = op; sub(/^:?[-=+]/, "", def)
+          if (op ~ /^:?\+/) v = pre (known ? def : "") post
+          else v = pre (known ? V[name] : def) post
+          continue
+        }
+        break
+      }
+      return index(v, "$") ? "\001" : v
+    }
+    function assign(name, raw,   val) {
+      val = expand(unq(raw))
+      if (val != "\001") V[name] = val   # an unresolvable value (a fallback branch) keeps the known one
+    }
+    function line(s, depth,   name, raw, p, path, l, m) {
+      if (match(s, /^[ \t]*(export[ \t]+|readonly[ \t]+|declare[ \t]+(-[a-zA-Z]+[ \t]+)?)?[A-Za-z_][A-Za-z0-9_]*=/)) {
+        raw = substr(s, RLENGTH + 1); name = substr(s, 1, RLENGTH - 1)
+        sub(/^[ \t]*(export[ \t]+|readonly[ \t]+|declare[ \t]+(-[a-zA-Z]+[ \t]+)?)?/, "", name)
+        assign(name, raw); return
+      }
+      # : "${BACKUP_DIR:=/backup}"
+      if (match(s, /^[ \t]*:[ \t]+"?\$\{[A-Za-z_][A-Za-z0-9_]*:?=[^}]*\}/)) {
+        m = substr(s, RSTART, RLENGTH); sub(/^[ \t]*:[ \t]+"?\$\{/, "", m); sub(/\}$/, "", m)
+        name = m; sub(/:?=.*$/, "", name); raw = m; sub(/^[A-Za-z_][A-Za-z0-9_]*:?=/, "", raw)
+        if (!(name in V) || V[name] == "") assign(name, raw)
+        return
+      }
+      # . /path/file   source "$CONF"
+      if (depth == 0 && match(s, /(^|[;&|{( \t])(\.|source)[ \t]+("[^"]+"|\047[^\047]+\047|[^ \t;&|)]+)/)) {
+        p = substr(s, RSTART, RLENGTH); sub(/^[;&|{( \t]*(\.|source)[ \t]+/, "", p)
+        path = expand(unq(p))
+        if (path == "\001" || substr(path, 1, 1) != "/") return
+        if (mode == "scan") { print path; return }
+        if (!(path in OK)) return
+        while ((getline l < path) > 0) line(l, 1)
+        close(path)
+      }
+    }
+    { line($0, 0) }
+    END {
+      if (mode != "vars") exit
+      for (k in V) if (k != "HOME" && substr(V[k], 1, 1) == "/" && !index(V[k], "\002")) printf "%s\t%s\n", k, V[k]
+    }'
+}
+
+# the first existing output directory among the resolved variables (BACKUP_DIR, DEST, OUT...)
+cb_var_dir() {
+  awk -F'\t' 'toupper($1) ~ /(BACKUP|BKP|DUMP|DEST|DST|OUTPUT|OUT_DIR|OUTDIR|ARCHIVE|TARGET|STORE|SAVE)/ { print $2 }' <<<"$1" \
+    | while IFS= read -r d; do
+        d="${d%/}"
+        case "$d" in ''|/|/tmp|/tmp/*|/var/log|/var/log/*|/etc|/etc/*|/usr|/usr/*|/proc*|/dev*|/run|/run/*) continue ;; esac
+        [ -d "$d" ] && { printf '%s\n' "$d"; break; }
+      done
+}
+
+# a status file the script writes about its result: STATE=/app/x/data/backup.json
+cb_var_state() {
+  awk -F'\t' 'toupper($1) ~ /(^|_)(STATE|STATUS|RESULT|MARK|MARKER|REPORT)(_|$)/ && $2 ~ /\.json$/ { print $2 }' <<<"$1" \
+    | while IFS= read -r f; do
+        [ -f "$f" ] && [ "$(stat -c %s "$f" 2>/dev/null || echo 999999)" -le 65536 ] && { printf '%s' "$f"; break; }
+      done
+}
+
+# "ok at size" from a small JSON status file: ok 1/0/-1 (unknown), at - unix time (0 unknown)
+CB_ST_OK_RE='"(ok|success|succeeded)"[[:space:]]*:[[:space:]]*(true|false|1|0)([^0-9a-z]|$)'
+CB_ST_STATUS_RE='"(status|result|state)"[[:space:]]*:[[:space:]]*"(ok|success|succeeded|done|completed|failed|failure|fail|error)"'
+CB_ST_AT_RE='"(at|finished_at|finished|ended_at|end|completed_at|time|timestamp|ts|last_run|date)"[[:space:]]*:[[:space:]]*("([^"]+)"|([0-9]{9,13}))'
+CB_ST_SIZE_RE='"(size|bytes|size_bytes)"[[:space:]]*:[[:space:]]*([0-9]+)'
+cb_state_parse() {
+  local raw ok=-1 at=0 size=0 v
+  raw="$(head -c 65536 "$1" 2>/dev/null | tr -d '\000' | tr '\n\r' '  ')"
+  raw="${raw,,}"
+  if [[ "$raw" =~ $CB_ST_OK_RE ]]; then
+    case "${BASH_REMATCH[2]}" in true|1) ok=1 ;; *) ok=0 ;; esac
+  elif [[ "$raw" =~ $CB_ST_STATUS_RE ]]; then
+    case "${BASH_REMATCH[2]}" in ok|success|succeeded|done|completed) ok=1 ;; *) ok=0 ;; esac
+  fi
+  if [[ "$raw" =~ $CB_ST_AT_RE ]]; then
+    if [ -n "${BASH_REMATCH[4]}" ]; then
+      v="${BASH_REMATCH[4]}"; [ "${#v}" -ge 13 ] && v=$((v / 1000)); at="$v"
+    else
+      at="$(date -d "${BASH_REMATCH[3]}" +%s 2>/dev/null || echo 0)"
+    fi
+  fi
+  [[ "$raw" =~ $CB_ST_SIZE_RE ]] && size="${BASH_REMATCH[2]}"
+  printf '%s %s %s' "$ok" "${at:-0}" "$size"
+}
+
+# "mtime<TAB>repo dir<TAB>repo dirs seen" - the newest restic snapshot saved into restic's cache in
+# [$2, $2 + 12h]. A finished `restic backup` writes its snapshot into the cache as well, so a new
+# file there is the run's result. $3 - look only into this repository's cache.
+cb_restic_saved() {
+  local base="$1" st="$2" only="$3"
+  [ -d "$base" ] || return 0
+  timeout 20 find "$base" -mindepth 3 -maxdepth 4 -path "$base/${only:-*}/snapshots/*" -type f -newermt "@$st" \
+      -printf '%T@\t%P\n' 2>/dev/null \
+    | awk -F'\t' -v lim=$((st + 43200)) '
+        { t = int($1); if (t > lim) next; split($2, p, "/"); if (!(p[1] in seen)) { seen[p[1]] = 1; nd++ }
+          if (t > best) { best = t; dir = p[1] } }
+        END { if (best) printf "%d\t%s\t%d", best, dir, nd }'
+}
+
+# is the script running now: under a shell (sh /x/backup.sh, bash -e /x/backup.sh) or by itself
+cb_running() {
+  local p
+  [ -n "$1" ] || return 1
+  p="$(printf '%s' "$1" | sed 's/[][\.*^$+?(){}|]/\\&/g')"
+  pgrep -f -- "(^|/)(ba|da|z|k)?sh( [^ ]+)* $p( |$)|^$p( |$)" >/dev/null 2>&1
+}
+
 cmd_custom_scan() {
   set +euo pipefail  # a missing file or an empty grep is a normal outcome of a scan, not an error
   local now; now=$(date +%s)
@@ -1276,7 +1487,11 @@ cmd_custom_scan() {
   done < <(systemctl list-unit-files --type=timer --no-legend 2>/dev/null | awk '{print $1}')
 
   # 3. cron: user crontabs, system crontabs, cron.{hourly,daily,weekly,monthly}
+  # First the jobs that look like backups, then one pass over the cron journal for all of them.
   local src user sched cmd name logf log_ts id d newest
+  local -a cron_rows=()
+  local -A cron_seen=() CB_LAST=() CB_RDIR=()
+  local jobsf; jobsf="$(mktemp)"
   while IFS=$'\t' read -r src user sched cmd; do
     [ -n "$cmd" ] || continue
     [[ "${cmd,,}" =~ $CB_SKIP_RE ]] && continue
@@ -1284,21 +1499,118 @@ cmd_custom_scan() {
     body="$(cb_body "$script")"
     if ! [[ "${cmd,,}" =~ $CB_NAME_RE ]] && ! grep -qiE "$CB_TOOL_RE" <<<"$cmd"$'\n'"$body"; then continue; fi
     cb_maintenance_only "$cmd" "$body" && continue
+    # the command is hashed, never sent: it may carry a password
+    id="cron:$(printf '%s|%s' "$user" "$cmd" | sha1sum | cut -c1-12)"
+    [ -n "${cron_seen[$id]:-}" ] && continue
+    cron_seen[$id]=1
+    case "$src" in
+      /etc/cron.hourly|/etc/cron.daily|/etc/cron.weekly|/etc/cron.monthly)
+        printf '%s\t\t%s\tparts\n' "$id" "${src#/etc/}" >> "$jobsf" ;;
+      *) printf '%s\t%s\t%s\tcmd\n' "$id" "$user" "$(cb_cron_logged "$cmd")" >> "$jobsf" ;;
+    esac
+    cron_rows+=("$src"$'\t'"$user"$'\t'"$sched"$'\t'"$id"$'\t'"$cmd")
+  done < <(cb_cron_lines)
+
+  # starts from the journal, merged with the ones seen by earlier scans
+  local k v r runs_since=$((now - CB_RUNS_DAYS * 86400)) starts journal_ok=0
+  if [ -f "$CB_RUNS" ]; then
+    while IFS=$'\t' read -r k v r; do
+      case "$k" in
+        '#since') [[ "$v" =~ ^[0-9]+$ ]] && [ "$v" -gt "$runs_since" ] && runs_since=$((v - 900)) ;;
+        cron:*) [[ "$v" =~ ^[0-9]+$ ]] && CB_LAST[$k]="$v"; CB_RDIR[$k]="$r" ;;
+      esac
+    done < "$CB_RUNS"
+  fi
+  if [ "${#cron_rows[@]}" -gt 0 ] && starts="$(cb_journal_starts "$jobsf" "$runs_since")"; then
+    journal_ok=1
+    while IFS=$'\t' read -r k v; do
+      [ -n "$k" ] && [ "${v:-0}" -gt "${CB_LAST[$k]:-0}" ] && CB_LAST[$k]="$v"
+    done <<<"$starts"
+  fi
+  rm -f "$jobsf"
+
+  local row home pvars st run_ts run_src ok ok_ts size evidence fail dur statef running rcache learned hit rts rdir rnd sok sat ssz
+  for row in "${cron_rows[@]}"; do
+    IFS=$'\t' read -r src user sched id cmd <<<"$row"
+    script="$(cb_script_of "$cmd")"
+    body="$(cb_body "$script")"
     if [ -n "$script" ]; then
       name="$(basename "$script")"
     else
       name="$(printf '%s' "$cmd" | sed -E 's/^([A-Za-z_][A-Za-z0-9_]*=[^ ]* +)*//' | awk '{print $1}')"; name="$(basename "$name")"
     fi
-    # the command is hashed, never sent: it may carry a password
-    id="cron:$(printf '%s|%s' "$user" "$cmd" | sha1sum | cut -c1-12)"
+    home="$(getent passwd "$user" 2>/dev/null | cut -d: -f6)"; [ -n "$home" ] || home=/root
+    pvars=""; [ -n "$script" ] && pvars="$(cb_path_vars "$script" "$home")"
+    running=false; [ -n "$script" ] && cb_running "$script" && running=true
+
+    # when it ran: the logged start; without it - when its log file was last written
+    st="${CB_LAST[$id]:-0}"; run_ts=0; run_src=""
+    [ "$st" -gt 0 ] && { run_ts="$st"; run_src=journal; }
     logf="$(printf '%s' "$cmd" | grep -oE '(>>?|tee( -a)?)[[:space:]]*/[A-Za-z0-9._/@+-]+' | grep -oE '/[A-Za-z0-9._/@+-]+' | grep -v '^/dev/' | tail -1)"
     log_ts=0; [ -n "$logf" ] && [ -f "$logf" ] && log_ts=$(stat -c %Y "$logf" 2>/dev/null || echo 0)
-    d="$(cb_dirs "$cmd"$'\n'"$body" | head -1)"
-    dts=0; dsz=0
-    if [ -n "$d" ]; then newest="$(cb_newest "$d")"; [ -n "$newest" ] && { dts="${newest%% *}"; dsz="${newest##* }"; }; fi
+    [ "$run_ts" -eq 0 ] && [ "$log_ts" -gt 0 ] && { run_ts="$log_ts"; run_src=log; }
+
+    # what it left: the newest file in its output directory...
+    ok=-1; ok_ts=0; size=0; evidence=""; fail=""; dur=0
+    d="$(cb_var_dir "$pvars")"; [ -n "$d" ] || d="$(cb_dirs "$cmd"$'\n'"$body" | head -1)"
+    if [ -n "$d" ]; then
+      newest="$(cb_newest "$d")"
+      [ -n "$newest" ] && { ok_ts="${newest%% *}"; size="${newest##* }"; evidence=files; }
+    fi
+    # ...the status file it writes about itself (takes precedence over a file's mtime)...
+    statef="$(cb_var_state "$pvars")"
+    if [ -n "$statef" ]; then
+      read -r sok sat ssz <<<"$(cb_state_parse "$statef")"
+      if [ "$sok" != "-1" ]; then
+        evidence=state
+        [ "${ssz:-0}" -gt 0 ] && size="$ssz"
+        if [ "$sok" = 0 ]; then
+          ok=0; fail=state
+        elif [ "$st" -gt 0 ] && [ "${sat:-0}" -gt 0 ] && [ "$sat" -lt $((st - 120)) ] && [ "$running" = false ] \
+             && [ $((now - st)) -ge 1800 ]; then
+          # the job ran after the last mark and finished without writing a new one: it died on the way
+          ok=0; fail=state_old
+        else
+          ok=1; [ "${sat:-0}" -gt 0 ] && ok_ts="$sat"
+        fi
+        [ "$run_ts" -eq 0 ] && [ "${sat:-0}" -gt 0 ] && { run_ts="$sat"; run_src=state; }
+      fi
+    fi
+    # ...and the snapshot restic saved into its cache after the start
+    rcache=""
+    if grep -qiE 'restic[[:space:]]+([^|;&]*[[:space:]])?backup([[:space:]]|$)' <<<"$cmd"$'\n'"$body" \
+       && ! grep -qF -- '--no-cache' <<<"$cmd"$'\n'"$body"; then
+      rcache="$(awk -F'\t' '$1 == "RESTIC_CACHE_DIR" { c = $2 } $1 == "XDG_CACHE_HOME" { x = $2 "/restic" } END { print (c != "" ? c : x) }' <<<"$pvars")"
+      [ -n "$rcache" ] || rcache="$home/.cache/restic"
+    fi
+    if [ -n "$rcache" ] && [ "$st" -gt 0 ] && [ "$running" = false ] && [ "$ok" != 0 ]; then
+      learned="${CB_RDIR[$id]:-}"
+      hit="$(cb_restic_saved "$rcache" "$((st - 5))" "$learned")"
+      if [ -n "$hit" ]; then
+        IFS=$'\t' read -r rts rdir rnd <<<"$hit"
+        # until the job's repository is known, a snapshot counts only if a single repository got one
+        if [ -n "$learned" ] || [ "$rnd" = 1 ]; then
+          ok=1; ok_ts="$rts"; evidence=restic; dur=$((rts - st)); CB_RDIR[$id]="$rdir"
+        fi
+      elif [ -n "$learned" ] && [ -n "$script" ] && [ -d "$rcache/$learned/snapshots" ] && [ $((now - st)) -ge 1800 ]; then
+        # it ran, has finished, and its repository got no new snapshot
+        ok=0; fail=restic; evidence=restic
+      fi
+    fi
+
     cb_emit "$id" cron "$name" "" "$sched" "$name $cmd" "$body" \
-      "\"user\":\"$(json_escape "$user")\",\"source\":\"$(json_escape "$src")\",\"script\":\"$(json_escape "$script")\",\"ok\":-1,\"ok_ts\":${dts:-0},\"size_bytes\":${dsz:-0},\"dir\":\"$(json_escape "$d")\",\"log\":\"$(json_escape "$logf")\",\"run_ts\":${log_ts:-0}"
-  done < <(cb_cron_lines)
+      "\"user\":\"$(json_escape "$user")\",\"source\":\"$(json_escape "$src")\",\"script\":\"$(json_escape "$script")\",\"ok\":$ok,\"ok_ts\":${ok_ts:-0},\"size_bytes\":${size:-0},\"dir\":\"$(json_escape "$d")\",\"log\":\"$(json_escape "$logf")\",\"run_ts\":${run_ts:-0},\"run_src\":\"$run_src\",\"state\":\"$(json_escape "$statef")\",\"evidence\":\"$evidence\",\"fail\":\"$fail\",\"duration_sec\":${dur:-0},\"running\":$running"
+  done
+
+  # the starts and learned repositories survive to the next scan; the journal position moves on
+  # only when the journal was actually read
+  if [ "${#cron_rows[@]}" -gt 0 ]; then
+    local since_out=$(( journal_ok == 1 ? now : (runs_since > now - CB_RUNS_DAYS * 86400 ? runs_since + 900 : 0) ))
+    {
+      [ "$since_out" -gt 0 ] && printf '#since\t%s\n' "$since_out"
+      for k in "${!cron_seen[@]}"; do printf '%s\t%s\t%s\n' "$k" "${CB_LAST[$k]:-0}" "${CB_RDIR[$k]:-}"; done
+    } > "$CB_RUNS.tmp" 2>/dev/null && mv -f "$CB_RUNS.tmp" "$CB_RUNS" 2>/dev/null
+  fi
 
   # metrics nobody above claimed: a standalone job (written by something we did not recognise)
   local mid

@@ -154,6 +154,54 @@ def test_alert_conditions():
     assert collector._server_conditions(s, NOW)["backup_custom"][0] == 0
 
 
+def test_cron_job_seen_without_touching_it():
+    """Своё cron-задание без метрик и без файлов в известном каталоге раньше было «не видно».
+    Теперь запуски берутся из журнала cron, итог — из отметки, которую пишет сам скрипт, или
+    из снимка, сохранённого restic в свой кэш. Живой случай: kz-se-msadmin, сентябрь 2026 —
+    sekvyr/backup.sh пишет data/backup.json, noderoost/backup-offsite.sh делает restic backup."""
+    base = {"kind": "cron", "schedule": "17 3 * * *", "engines": [], "containers": [], "ok": -1}
+
+    def ev(**kw):
+        return custom_backups.evaluate(base | {"id": "cron:x", "name": "backup.sh"} | kw, NOW, set())
+
+    # видны только запуски: «запускается», а не «не видно», и это не проблема
+    ran = ev(run_ts=T - 9 * 3600, run_src="journal")
+    assert ran.status == "ran" and not ran.problem
+    # cron двое суток не запускал ежедневное задание — поломка, а не «не понять»
+    silent = ev(run_ts=T - 50 * 3600, run_src="journal")
+    assert silent.status == "stale" and "не запускал" in silent.problem
+    # время записи лога так не читаем: скрипт может писать в лог только при ошибке
+    assert ev(run_ts=T - 50 * 3600, run_src="log").status == "unknown"
+
+    # отметка скрипта
+    good = ev(ok=1, ok_ts=T - 9 * 3600, run_ts=T - 9 * 3600, run_src="journal",
+              evidence="state", state="/app/sekvyr/data/backup.json", size_bytes=19318159)
+    assert good.status == "ok" and good.state.endswith("backup.json") and good.evidence == "state"
+    assert "неудачн" in ev(ok=0, fail="state").problem
+    died = ev(ok=0, fail="state_old", run_ts=T - 9 * 3600, run_src="journal")
+    assert died.status == "failed" and "прервался" in died.problem
+    # старая отметка об успехе: успех давний — как и раньше, «нет свежего бэкапа»
+    assert ev(ok=1, ok_ts=T - 60 * 3600, evidence="state").status == "stale"
+
+    # restic: снимок в кэше после запуска — успех, после запуска снимка нет — провал
+    offsite = ev(name="backup-offsite.sh", files=True, ok=1, ok_ts=T - 8 * 3600,
+                 run_ts=T - 8 * 3600 - 4, run_src="journal", evidence="restic", duration_sec=4)
+    assert offsite.status == "ok" and offsite.duration_sec == 4
+    lost = ev(ok=0, fail="restic", evidence="restic", run_ts=T - 8 * 3600, run_src="journal")
+    assert lost.status == "failed" and "restic" in lost.problem
+
+    # алерт: провал и тишина cron — да, «запускается» — нет
+    def jobs(**kw):
+        return [base | {"id": "cron:y", "name": "backup.sh"} | kw]
+
+    def lvl(js):
+        return collector._server_conditions(_server(js), NOW)["backup_custom"][0]
+
+    assert lvl(jobs(run_ts=T - 9 * 3600, run_src="journal")) == 0
+    assert lvl(jobs(run_ts=T - 50 * 3600, run_src="journal")) == 1
+    assert lvl(jobs(ok=0, fail="restic")) == 1
+
+
 def test_own_file_backup_counts_as_configured():
     """restic/borg, настроенный без панели, — это бэкап: «не настроен» было бы враньём.
     Дамп одной базы бэкапом всей ноды не считается."""
