@@ -256,8 +256,11 @@ export function CoverageAudit({ server: s, canManage, onChanged }: {
     const dir = d.dir || '/backup'
     return (
       <div className="svc-dump-on small">
-        ✓ {t('дамп включён — снимается перед каждым бэкапом в {dir}, хранится {k} последних',
-          { dir, k: d.keep })}
+        ✓ {dumpsAreLocalOnly
+          ? t('дамп включён — снимается раз в сутки по своему таймеру в {dir}, хранится {k} последних',
+            { dir, k: d.keep })
+          : t('дамп включён — снимается перед каждым бэкапом в {dir}, хранится {k} последних',
+            { dir, k: d.keep })}
         <span className="muted">
           {(d.min_free_pct ?? 0) > 0
             ? ` · ${t('не запускать при <{p}% свободного', { p: d.min_free_pct! })}`
@@ -271,9 +274,12 @@ export function CoverageAudit({ server: s, canManage, onChanged }: {
             {t('PostgreSQL: каждая база — отдельный файл + globals (роли/права).')}
           </div>
         )}
+        {/* без файлового бэкапа helper запускает дамп своим таймером (03:00 + до 15 мин) */}
         <div className="dump-cfg-hint">
-          {t('По расписанию сначала снимается дамп, затем restic бэкапит файлы (включая свежий дамп) — одним запуском, последовательно. Долгий дамп задержит начало restic, но не сорвёт его.')}
-          {hasSchedule && (
+          {dumpsAreLocalOnly
+            ? t('Файлового бэкапа на ноде нет: дамп снимается ночью, около 03:00 по времени ноды, и хранится только на ней. Восстановиться с самой ноды можно, копии за её пределами нет.')
+            : t('По расписанию сначала снимается дамп, затем restic бэкапит файлы (включая свежий дамп) — одним запуском, последовательно. Долгий дамп задержит начало restic, но не сорвёт его.')}
+          {!dumpsAreLocalOnly && hasSchedule && (
             <>
               {' '}
               <button className="linklike" onClick={() => {
