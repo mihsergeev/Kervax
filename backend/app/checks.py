@@ -13,7 +13,8 @@ import ssl
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from urllib.parse import urlparse
+from types import SimpleNamespace
+from urllib.parse import urlparse, urlunparse
 
 import httpx
 
@@ -38,6 +39,8 @@ class CheckOutcome:
     message: str = ""
     # разбивка по IP (режим «проверять все адреса»): [{ip,status,latency_ms,message}]
     ip_results: list | None = None
+    # разбивка по дополнительным путям монитора: [{path,status,latency_ms,message}]
+    path_results: list | None = None
 
 
 def status_matches(code: int, spec: str) -> bool:
@@ -417,6 +420,98 @@ def _parse_headers(raw: str) -> dict[str, str]:
     return {str(k): str(v) for k, v in data.items()}
 
 
+# ---- additional paths of one monitor ----
+# A site often has more than one thing worth checking: the main page is the site itself,
+# /health is its API. Two monitors on one domain doubled the certificate and domain checks
+# together with their alerts, so the paths live inside the monitor. Every path is checked
+# the same way as the main address (from the panel, from inside the server, through the
+# locations) with the same expected code, headers and auth. Keywords belong to the main page.
+
+MAX_EXTRA_PATHS = 10
+
+
+def extra_paths_of(check) -> list[str]:
+    """Paths the monitor checks besides its main address (only http monitors have them)."""
+    if (getattr(check, "type", "http") or "http") != "http":
+        return []
+    return [x for x in (getattr(check, "extra_paths", None) or []) if isinstance(x, str) and x.startswith("/")]
+
+
+def path_url(base: str, path: str) -> str:
+    """A path on the same site: scheme, host and port come from the monitor address."""
+    raw = (base or "").strip()
+    u = urlparse(raw if "://" in raw else "https://" + raw)
+    only, _, query = path.partition("?")
+    return urlunparse((u.scheme, u.netloc, only, "", query, ""))
+
+
+_VIEW_FIELDS = (
+    "id", "type", "method", "timeout_ms", "interval_seconds", "degraded_ms", "retries",
+    "expected_status", "http_headers", "auth_method", "auth_user", "auth_pass", "ignore_tls",
+    "probe_local", "probe_server_id",
+)
+
+
+def path_view(check, path: str) -> SimpleNamespace:
+    """The monitor as seen by one of its paths: same settings, the path address, no keywords."""
+    fields = {f: getattr(check, f, None) for f in _VIEW_FIELDS}
+    return SimpleNamespace(
+        **fields, target=path_url(check.target, path), keyword_up="", keyword_down="",
+        check_all_ips=False, extra_paths=[],
+    )
+
+
+def combine_paths(main: CheckOutcome, items: list) -> CheckOutcome:
+    """The monitor verdict from its main address and paths: [(path, outcome or None)].
+
+    None means the path was not checked because the main address is down. A path with the
+    status pending has no result yet (right after it was added) and does not count. The
+    latency stays the main one: the response time chart is about the site itself."""
+    results = []
+    for path, out in items:
+        if out is None:
+            results.append({"path": path, "status": "skipped", "latency_ms": None,
+                            "message": "не проверялся: основной адрес недоступен"})
+        else:
+            results.append({"path": path, "status": out.status, "latency_ms": out.latency_ms,
+                            "message": (out.message or "")[:256]})
+    status, message = main.status, main.message
+    if main.status != "down":
+        bad = [r for r in results if r["status"] == "down"]
+        slow = [r for r in results if r["status"] == "degraded"]
+        if bad:
+            status = "down"
+            message = f"{bad[0]['path']}: {bad[0]['message']}"
+            if len(bad) > 1:
+                message += f" (и ещё путей: {len(bad) - 1})"
+        elif slow and main.status == "up":
+            status = "degraded"
+            message = f"{slow[0]['path']}: {slow[0]['message']}"
+    return CheckOutcome(status, main.latency_ms, main.value, message,
+                        ip_results=main.ip_results, path_results=results)
+
+
+def outcome_with_agent_paths(check, main: CheckOutcome, rows: dict, now,
+                             degraded_ms: int, warming: bool) -> CheckOutcome:
+    """Local monitor: paths come from the agent as separate results (rows: path -> result).
+
+    A path without a result right after it was added is waiting, not down: the agent gets
+    the task with its next report and answers with the one after."""
+    paths = extra_paths_of(check)
+    if not paths:
+        return main
+    if main.status == "down":
+        return combine_paths(main, [(x, None) for x in paths])
+    items = []
+    for x in paths:
+        row = rows.get(x)
+        if row is None and warming:
+            items.append((x, CheckOutcome("pending", message="ждём первый результат агента")))
+            continue
+        items.append((x, outcome_from_agent(path_view(check, x), row, now, degraded_ms)))
+    return combine_paths(main, items)
+
+
 def eval_parts(check, code: int, kw_up_ok: bool, kw_down_found: bool,
                latency: int, degraded_ms: int) -> CheckOutcome:
     """Вердикт по «разобранному» ответу: код, попадание ключевых слов, задержка.
@@ -675,12 +770,13 @@ async def _run_http(
     if getattr(check, "check_all_ips", False) and proxy is None:
         multi = await _run_http_all_ips(check, url, method, auth, timeout, degraded_ms, attempt)
         if multi is not None:
-            return multi
+            return await _check_paths(check, multi, url, attempt, degraded_ms)
         # ≤1 адрес → падаем в обычную одиночную проверку ниже
 
     # HTTPS не поднялся, а схему подставили сами и пришлось откатиться на http —
     # это не «всё ок»: сайт задумывался как https, но по факту доступен только http.
     fell_back = False
+    base = url
     t0 = time.perf_counter()
     try:
         r, body = await attempt(url)
@@ -691,14 +787,43 @@ async def _run_http(
             try:
                 r, body = await attempt("http://" + raw)
                 fell_back = True
+                base = "http://" + raw
             except httpx.HTTPError as exc2:
-                return CheckOutcome(
+                return await _check_paths(check, CheckOutcome(
                     "down", message=_short(str(exc2) or type(exc2).__name__)
-                )
+                ), base, attempt, degraded_ms)
         else:
-            return CheckOutcome("down", message=humanize_error(str(exc) or type(exc).__name__))
+            return await _check_paths(check, CheckOutcome(
+                "down", message=humanize_error(str(exc) or type(exc).__name__)
+            ), base, attempt, degraded_ms)
     latency = int((time.perf_counter() - t0) * 1000)
-    return _eval_http(check, r, body, latency, fell_back, degraded_ms)
+    return await _check_paths(
+        check, _eval_http(check, r, body, latency, fell_back, degraded_ms), base, attempt, degraded_ms
+    )
+
+
+async def _check_paths(check, main: CheckOutcome, base: str, attempt, degraded_ms: int) -> CheckOutcome:
+    """Additional paths after the main address, over the same client settings and scheme.
+
+    With the main address down the paths are not requested: the site is down either way,
+    and every path would only add its own timeout to the check."""
+    paths = extra_paths_of(check)
+    if not paths:
+        return main
+    if main.status == "down":
+        return combine_paths(main, [(x, None) for x in paths])
+
+    async def one(path: str) -> CheckOutcome:
+        t0 = time.perf_counter()
+        try:
+            r, _ = await attempt(path_url(base, path))
+        except httpx.HTTPError as exc:
+            return CheckOutcome("down", message=humanize_error(str(exc) or type(exc).__name__))
+        lat = int((time.perf_counter() - t0) * 1000)
+        return eval_parts(check, r.status_code, True, False, lat, degraded_ms)
+
+    got = await asyncio.gather(*(one(x) for x in paths))
+    return combine_paths(main, list(zip(paths, got)))
 
 
 async def _run_tcp_port(check) -> CheckOutcome:

@@ -154,6 +154,15 @@ class Check(Base):
     # проверять КАЖДЫЙ IP домена (A-записи), а не только тот, что выбрал резолвер —
     # ловит мёртвый бэкенд за балансировщиком. По умолчанию выкл. (только http).
     check_all_ips: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Additional paths of the same site, checked together with the main address and the same
+    # way (checks.extra_paths_of): the main page is the site, /health is its API. A second
+    # monitor on the same domain doubled the certificate and domain checks with their alerts.
+    extra_paths: Mapped[list] = mapped_column(JSON, default=list)
+    # When the paths were last changed: a new path has no agent result yet, and for a local
+    # monitor that is waiting, not a failure (see collector._paths_warming_up)
+    paths_changed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     # кастомные HTTP-заголовки (JSON-текст, напр. {"x-application-token":"…"}) —
     # для сайтов, требующих токен/заголовок (иначе 401). Пусто = без доп. заголовков.
     http_headers: Mapped[str] = mapped_column(String(4096), default="")
@@ -224,6 +233,8 @@ class Check(Base):
     last_message: Mapped[str] = mapped_column(String(512), default="")
     # разбивка последней проверки по IP (режим check_all_ips): [{ip,status,latency_ms,message}]
     last_ip_results: Mapped[list | None] = mapped_column(JSON, nullable=True, default=None)
+    # the last check split by additional paths: [{path,status,latency_ms,message}]
+    last_path_results: Mapped[list | None] = mapped_column(JSON, nullable=True, default=None)
     last_latency_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     last_value: Mapped[float | None] = mapped_column(Float, nullable=True)  # дни сертификата и т.п.
     last_checked_at: Mapped[datetime | None] = mapped_column(
@@ -340,6 +351,32 @@ class AgentProbe(Base):
     # а это до интервала монитора. Без паузы человек чинил белый список, жал «Проверить
     # сейчас», видел «работает», и через минуту планировщик брал старый ответ агента,
     # снова открывал инцидент — ровно та путаница, из-за которой кнопку и переделали.
+    manual_until: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+
+class AgentPathProbe(Base):
+    """The last agent result for an additional path of a local monitor.
+
+    Same raw facts as AgentProbe, one row per path. The agent gets a path as a separate task
+    with its own number (manual_probe.path_task_ids) and does not know it belongs to a
+    monitor, so no agent update was needed for paths."""
+
+    __tablename__ = "agent_path_probes"
+
+    check_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    path: Mapped[str] = mapped_column(String(256), primary_key=True)
+    server_id: Mapped[int] = mapped_column(Integer, index=True)
+    ts: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    code: Mapped[int] = mapped_column(Integer, default=0)
+    latency_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    error: Mapped[str] = mapped_column(String(512), default="")
+    via: Mapped[str] = mapped_column(String(128), default="")
+    # keywords belong to the main page, a path always passes them (read by outcome_from_agent)
+    kw_up_found = True
+    kw_down_found = False
+    # as in AgentProbe: a fresh manual result wins over the one the agent repeats from memory
     manual_until: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )

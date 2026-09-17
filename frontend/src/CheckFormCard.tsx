@@ -102,6 +102,38 @@ export function CheckFormCard({
   const setProbeMode = (m: ProbeMode) =>
     set({ probe_local: m === 'local', check_locations: m === 'locations' })
 
+  // Дополнительные пути правим как текст: разбирай его на каждом нажатии, и перенос строки
+  // в конце нельзя было бы даже набрать. В форму уходит уже разобранный список.
+  const [pathsText, setPathsText] = useState(() => (form.extra_paths ?? []).join('\n'))
+  const mainHost = (() => {
+    const raw = form.target.trim()
+    try {
+      return new URL(/^[a-z][a-z0-9+.-]*:\/\//i.test(raw) ? raw : `https://${raw}`).host
+    } catch {
+      return ''
+    }
+  })()
+  const parsePaths = (text: string) =>
+    text
+      .split('\n')
+      .map((line) => {
+        const v = line.trim()
+        // полный адрес того же сайта проще вставить из браузера, чем вырезать из него домен
+        if (/^https?:\/\//i.test(v)) {
+          try {
+            const u = new URL(v)
+            if (u.host === mainHost) return (u.pathname || '/') + u.search
+          } catch {
+            // останется как есть, ниже подсветится
+          }
+        }
+        return v
+      })
+      .filter(Boolean)
+  const badPaths = (form.extra_paths ?? []).filter(
+    (p) => !p.startsWith('/') || p.startsWith('//') || /\s/.test(p),
+  )
+
   // Всё, что имеет разумное умолчание, спрятано: чтобы завести монитор, хватает имени
   // и адреса. Но если у монитора что-то УЖЕ отличается от умолчаний, прятать это
   // нельзя — человек открыл карточку именно из-за них, поэтому раскрываем сами.
@@ -149,6 +181,31 @@ export function CheckFormCard({
             </span>
           )}
         </label>
+        {form.type === 'http' && (
+          <label className="field field-wide">
+            <span>{t('Дополнительные пути')}</span>
+            <textarea
+              className="paths-input mono"
+              rows={Math.min(Math.max(pathsText.split('\n').length, 2), 6)}
+              value={pathsText}
+              placeholder="/health"
+              spellCheck={false}
+              onChange={(e) => {
+                setPathsText(e.target.value)
+                set({ extra_paths: parsePaths(e.target.value) })
+              }}
+            />
+            {badPaths.length > 0 ? (
+              <span className="field-hint form-error small">
+                {t('Путь должен начинаться с /: {list}', { list: badPaths.join(', ') })}
+              </span>
+            ) : (
+              <span className="field-hint muted small">
+                {t('По одному на строку, например /health для API. Проверяются вместе с основным адресом и тем же способом, и монитор падает, если не отвечает любой из них.')}
+              </span>
+            )}
+          </label>
+        )}
         <label className="field field-wide">
           <span>{t('Группа')}</span>
           <input

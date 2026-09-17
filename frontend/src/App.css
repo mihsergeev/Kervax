@@ -1953,6 +1953,15 @@ select:focus {
   white-space: nowrap;
   font-family: Consolas, 'Cascadia Mono', monospace;
 }
+/* дополнительные пути монитора рядом с адресом: видно, что проверяется не только главная */
+.check-target-paths {
+  color: var(--text-muted);
+  opacity: 0.8;
+}
+.paths-input {
+  font-family: Consolas, 'Cascadia Mono', monospace;
+  line-height: 1.5;
+}
 .check-meta {
   text-align: right;
   min-width: 0;

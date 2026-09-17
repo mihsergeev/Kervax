@@ -14,6 +14,28 @@ def _clean_warn_days(v: list[int] | None) -> list[int] | None:
     out = sorted({int(x) for x in v if 1 <= int(x) <= 3650}, reverse=True)
     return out[:6]
 
+
+def _clean_paths(v: list[str] | None) -> list[str] | None:
+    """Additional paths of a monitor: /health, /api/status?full=1. Empty lines are dropped,
+    repeats are merged, the order is kept."""
+    if v is None:
+        return None
+    out: list[str] = []
+    for raw in v:
+        path = (raw or "").strip()
+        if not path:
+            continue
+        if not path.startswith("/") or path.startswith("//"):
+            raise ValueError(f"путь должен начинаться с /: {path[:60]}")
+        if any(c.isspace() for c in path) or len(path) > 256:
+            raise ValueError(f"недопустимый путь: {path[:60]}")
+        if path not in out:
+            out.append(path)
+    if len(out) > 10:
+        raise ValueError("дополнительных путей не больше 10")
+    return out
+
+
 CheckType = Literal["http", "tcp_port", "cert"]
 
 
@@ -147,7 +169,11 @@ class CheckCreate(BaseModel):
     location_ids: list[int] | None = None
     alert_mutes: list[str] | None = None  # типы алертов, заглушённые для этого монитора
 
+    # additional paths of the same site, checked with the main address (see checks.extra_paths_of)
+    extra_paths: list[str] = []
+
     _clean = field_validator("ssl_warn_days", "domain_warn_days")(_clean_warn_days)
+    _paths = field_validator("extra_paths")(_clean_paths)
 
 
 class CheckUpdate(BaseModel):
@@ -182,7 +208,10 @@ class CheckUpdate(BaseModel):
     location_ids: list[int] | None = None
     alert_mutes: list[str] | None = None
 
+    extra_paths: list[str] | None = None
+
     _clean = field_validator("ssl_warn_days", "domain_warn_days")(_clean_warn_days)
+    _paths = field_validator("extra_paths")(_clean_paths)
 
 
 class CheckBulkUpdate(BaseModel):
@@ -521,6 +550,8 @@ class CheckOut(BaseModel):
     last_status: str
     last_message: str
     last_ip_results: list | None = None
+    extra_paths: list[str] = []
+    last_path_results: list | None = None
     last_latency_ms: int | None
     last_value: float | None
     last_checked_at: datetime | None
