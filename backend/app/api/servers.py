@@ -665,10 +665,16 @@ def _backup_coverage(server: Server) -> list[BackupAudit]:
             # уже работающий дамп показался бы выключенным
             if dump is None and code and inst and inst == insts[0]:
                 dump = panel_dumps.get((code, ""))
+            # Перед бэкапом дамп идёт, только если бэкап на ноде есть: helper цепляет дамп к
+            # его сервису. Без бэкапа helper ставит свой суточный таймер, и копия остаётся на
+            # самой ноде (kz-se-op-dtp). configured — агент нашёл таймер бэкапа.
+            own_timer = not bk.get("configured")
             if dump and (dump.get("files") or 0) > 0:
                 out.append(BackupAudit(
                     kind="db_ok", subject=eng, gap=False, instance=inst,
-                    detail=f"{where_txt} — дамп снимает панель перед каждым бэкапом",
+                    detail=(f"{where_txt} — дамп снимается раз в сутки по своему таймеру, "
+                            "копия только на этой ноде" if own_timer
+                            else f"{where_txt} — дамп снимает панель перед каждым бэкапом"),
                     dump_engine=code, can_dump=True, container=inst, pods=inst_pods[:4],
                 ))
                 continue
@@ -688,7 +694,9 @@ def _backup_coverage(server: Server) -> list[BackupAudit]:
                     # ждём первого бэкапа по расписанию — это норма, не проблема
                     out.append(BackupAudit(
                         kind="db_ok", subject=eng, gap=False, instance=inst,
-                        detail=f"{where_txt} — дамп включён, первый снимется в ближайший бэкап",
+                        detail=(f"{where_txt} — дамп включён, первый снимется ночью по своему таймеру"
+                                if own_timer
+                                else f"{where_txt} — дамп включён, первый снимется в ближайший бэкап"),
                         dump_engine=code, can_dump=True, container=inst, pods=inst_pods[:4],
                     ))
                 continue

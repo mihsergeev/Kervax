@@ -100,6 +100,16 @@ def test_enabled_pod_dump_closes_the_finding():
     s = _server(backup={"present": True, "manageable": True, "configured": False, "dumps": [dump]})
     rabbit = _audit(s)[("RabbitMQ", "k8s.default.sts.rabbitmq")]
     assert rabbit.kind == "db_ok" and rabbit.can_dump
+    # на kz-se-op-dtp файлового бэкапа нет: дамп идёт своим таймером, а не «перед бэкапом»
+    assert "по своему таймеру" in rabbit.detail and "перед каждым бэкапом" not in rabbit.detail
+
+    s = _server(backup={"present": True, "manageable": True, "configured": True, "dumps": [dump]})
+    rabbit = _audit(s)[("RabbitMQ", "k8s.default.sts.rabbitmq")]
+    assert "перед каждым бэкапом" in rabbit.detail
+
+    fresh = dict(dump, files=0, last_ts=0, enabled_ts=1789480000)
+    s = _server(backup={"present": True, "manageable": True, "configured": False, "dumps": [fresh]})
+    assert "ночью по своему таймеру" in _audit(s)[("RabbitMQ", "k8s.default.sts.rabbitmq")].detail
 
 
 def test_the_command_accepts_a_workload():
