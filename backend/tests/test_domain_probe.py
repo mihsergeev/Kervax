@@ -207,6 +207,38 @@ async def test_adopt_inside_the_server(client, auth_headers, monkeypatch):
     assert [t["id"] for t in tasks] == [closed.id]
 
 
+async def test_adopt_reports_each_domain(client, auth_headers, monkeypatch):
+    """После «Поставить на мониторинг» мастер показывает итог по каждому домену: что
+    заведено и как проверяется, что нет и почему. Живой случай (17.09.2026, cs24): окно
+    оставалось с «создано мониторов: 5» и пустым списком — что добавилось, не понять."""
+    await _setup(client, auth_headers, monkeypatch)
+    r = await client.post("/api/checks/adopt", headers=auth_headers, json={
+        "domains": ["closed.example", "open.example", "watched.example", "*.mask.example",
+                    "nowhere.example", "open.example"],
+        "local": ["closed.example", "nowhere.example"],
+        "group_name": "CS24",
+    })
+    assert r.status_code == 201, r.text
+    body = r.json()
+    assert body["group_name"] == "CS24"
+    async with _factory(client)() as s:
+        ids = {c.target: c.id for c in await s.scalars(select(Check))}
+    # порядок — как в запросе, повтор домена второй строки не даёт
+    assert body["items"] == [
+        {"domain": "closed.example", "check_id": ids["https://closed.example"], "local": True,
+         "server": "fi-hz-aff", "reason": "", "problem": ""},
+        {"domain": "open.example", "check_id": ids["https://open.example"], "local": False,
+         "server": "", "reason": "", "problem": ""},
+        {"domain": "watched.example", "check_id": ids["https://watched.example"],
+         "local": False, "server": "", "reason": "monitored", "problem": ""},
+        {"domain": "*.mask.example", "check_id": 0, "local": False, "server": "",
+         "reason": "invalid", "problem": "маска — нет конкретного хоста"},
+        # изнутри просили, но домен не найден ни на одной ноде — проверяет панель
+        {"domain": "nowhere.example", "check_id": ids["https://nowhere.example"],
+         "local": False, "server": "", "reason": "", "problem": ""},
+    ]
+
+
 async def test_viewer_cannot_probe(client, auth_headers, monkeypatch):
     await _setup(client, auth_headers, monkeypatch)
     r = await client.post("/api/users", headers=auth_headers, json={

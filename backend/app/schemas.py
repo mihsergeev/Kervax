@@ -418,12 +418,27 @@ class AdoptDomainsIn(BaseModel):
     local: list[str] = Field(default_factory=list, max_length=500)
 
 
+class AdoptItemOut(BaseModel):
+    """Что стало с одним доменом из запроса — мастер показывает это списком."""
+
+    domain: str
+    check_id: int = 0  # монитор по домену; 0 — не заведён или вне видимости учётки
+    local: bool = False  # проверяет агент ноды — изнутри сервера
+    server: str = ""  # какая нода проверяет изнутри
+    # почему монитор не заведён: monitored — домен уже на мониторинге, invalid — имя не
+    # годится (подробность в problem); пусто — заведён
+    reason: str = ""
+    problem: str = ""
+
+
 class AdoptResult(BaseModel):
     created: int
     # «домен — причина», по-человечески: wildcard и мусор из server_name не мониторятся
     skipped: list[str]
     hosts: dict[str, int]  # обновлённая карта, чтобы UI перерисовал галочки без перезагрузки
     local: int = 0  # из созданных — с проверкой изнутри сервера
+    group_name: str = ""  # куда легли мониторы: учётке с нарезкой — первая разрешённая группа
+    items: list[AdoptItemOut] = []
 
 
 class DomainProbeIn(BaseModel):

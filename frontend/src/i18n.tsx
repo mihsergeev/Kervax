@@ -1312,8 +1312,6 @@ const EN: Record<string, string> = {
   'будет создано мониторов: {n}': 'monitors to create: {n}',
   'будет создано мониторов: {n}, из них изнутри сервера: {m}':
     'monitors to create: {n}, checked from inside the server: {m}',
-  'создано мониторов: {n}, из них изнутри сервера: {m}':
-    'monitors created: {n}, checked from inside the server: {m}',
   'выбрать доступные ({n})': 'select reachable ({n})',
   'нет в DNS': 'not in DNS',
   'ошибка TLS': 'TLS error',
@@ -1343,7 +1341,23 @@ const EN: Record<string, string> = {
   'Создаётся HTTPS-монитор на каждый домен — с тем вариантом проверки, что выделен в строке: снаружи его проверяет панель, изнутри — агент на сервере сайта. Доступность здесь проверена один раз, итог хранится 12 часов.':
     'One HTTPS monitor per domain, checked the way highlighted in its row: from outside by the panel, from inside by the agent on the site\'s server. Reachability here is checked once and the result is kept for 12 hours.',
   'выбрано {n}, за раз добавим {m}': '{n} selected, {m} added per run',
-  'создано мониторов: {n}': 'monitors created: {n}',
+  'Поставлено на мониторинг: {n}': 'Added to monitoring: {n}',
+  'Ничего не добавлено': 'Nothing was added',
+  'группа «{g}»': 'group "{g}"',
+  'открыть монитор': 'open monitor',
+  'не добавлены: {n}': 'not added: {n}',
+  'уже на мониторинге': 'already monitored',
+  'снаружи — изнутри некому': 'outside — nobody to check inside',
+  'Домен не нашёлся ни на одной ноде — проверять изнутри некому, поэтому монитор проверяет панель снаружи.':
+    'The domain was not found on any node — nobody can check it from inside, so the panel checks it from outside.',
+  'вне мониторинга осталось доменов: {n}': 'domains still not monitored: {n}',
+  'новых доменов вне мониторинга не осталось': 'no new unmonitored domains left',
+  'добавить ещё': 'add more',
+  'маска — нет конкретного хоста': 'wildcard — no specific host',
+  'regexp в server_name': 'regexp in server_name',
+  'не доменное имя': 'not a domain name',
+  'недопустимые символы': 'invalid characters',
+  'пустое имя': 'empty name',
   'ненужных: {n}': 'not needed: {n}',
   'скрыть ненужные ({n})': 'hide not needed ({n})',
   'не нужны ({n})': 'not needed ({n})',
