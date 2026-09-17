@@ -23,6 +23,7 @@ from app.setup_scripts import (
 from app.config import get_settings
 from app.deps import AdminUser, CurrentUser, SessionDep, group_allowed, scope_query
 from app.models import (
+    AgentPathProbe,
     AgentProbe,
     Check,
     BackupCommand,
@@ -2180,7 +2181,10 @@ async def _store_site_probes(session, server_id: int, results: list, now) -> lis
     pending = await manual_probe.ingest(
         session, server_id, [r for r in results if _id(r) < 0], now
     )
-    ids = [i for r in results if (i := _id(r)) > 0]
+    await _store_path_probes(
+        session, server_id, [r for r in results if _id(r) >= manual_probe.PATH_TASK_BASE], now
+    )
+    ids = [i for r in results if 0 < (i := _id(r)) < manual_probe.PATH_TASK_BASE]
     if not ids:
         return pending
     mine = set(
@@ -2224,6 +2228,51 @@ async def _store_site_probes(session, server_id: int, results: list, now) -> lis
     return pending
 
 
+async def _store_path_probes(session, server_id: int, results: list, now) -> None:
+    """Planned agent results for the additional paths of local monitors.
+
+    The task number carries the monitor and a hash of the path (manual_probe.path_task_ids).
+    A number that no longer matches a path of the monitor is an answer about a renamed or
+    removed path, and it is dropped. As with the main address, only the node that checks the
+    monitor may report on it."""
+    if not results:
+        return
+    by_check: dict[int, list] = {}
+    for r in results:
+        try:
+            tid = int(r.get("id") or 0)
+        except (TypeError, ValueError):
+            continue
+        by_check.setdefault(manual_probe.path_task_check_id(tid), []).append((tid, r))
+    checks = await session.scalars(
+        select(Check).where(
+            Check.id.in_(list(by_check)),
+            Check.probe_server_id == server_id,
+            Check.probe_local.is_(True),
+        )
+    )
+    for check in checks:
+        paths = {tid: path for path, tid in manual_probe.path_task_ids(check).items()}
+        for tid, r in by_check.get(check.id, []):
+            path = paths.get(tid)
+            if path is None:
+                continue
+            row = await session.get(AgentPathProbe, (check.id, path))
+            if row is None:
+                row = AgentPathProbe(check_id=check.id, path=path, server_id=server_id, ts=now)
+                session.add(row)
+            elif row.manual_until is not None and now < _aware_dt(row.manual_until):
+                row.ts = now  # a fresh manual answer wins, see the same case in _store_site_probes
+                continue
+            row.server_id = server_id
+            row.ts = now
+            row.code = int(r.get("code") or 0)
+            lat = r.get("latency_ms")
+            row.latency_ms = int(lat) if isinstance(lat, (int, float)) else None
+            row.error = str(r.get("error") or "")[:512]
+            row.via = str(r.get("via") or "")[:128]
+
+
 def _aware_dt(dt: datetime) -> datetime:
     return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
 
@@ -2243,7 +2292,7 @@ async def _site_probe_tasks(session, server_id: int) -> list[dict]:
             )
         )
     )
-    return [manual_probe.site_probe_task(c, c.id) for c in rows]
+    return [task for c in rows for task in manual_probe.planned_tasks(c)]
 
 
 @agent_router.get("/commands")

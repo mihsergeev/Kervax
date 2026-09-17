@@ -1370,6 +1370,13 @@ const EN: Record<string, string> = {
     'Not worth monitoring — drop from suggestions',
   'Вернуть в предложения': 'Bring back to suggestions',
   'группа': 'group',
+  'Дополнительные пути': 'Additional paths',
+  'Дополнительные пути: {list}': 'Additional paths: {list}',
+  'Путь должен начинаться с /: {list}': 'A path must start with /: {list}',
+  'По одному на строку, например /health для API. Проверяются вместе с основным адресом и тем же способом, и монитор падает, если не отвечает любой из них.':
+    'One per line, for example /health for the API. They are checked together with the main address and the same way, and the monitor goes down if any of them does not respond.',
+  'Пути ещё не проверялись: результат появится после ближайшей проверки.':
+    'The paths have not been checked yet, the result will appear after the next check.',
   'добавляем…': 'adding…',
   'Место на диске': 'Disk space',
   'свободно {f} из {tt}': '{f} free of {tt}',

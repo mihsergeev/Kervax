@@ -20,6 +20,7 @@ from app import alerts, backup, checks as checks_exec, custom_backups, heartbeat
 from app.setup_scripts import current_setup_versions, gaps
 from app.config import Settings, get_settings
 from app.models import (
+    AgentPathProbe,
     AgentProbe,
     Check,
     CheckIncident,
@@ -466,6 +467,15 @@ def _probe_warming_up(c: Check, now: datetime) -> bool:
     return (now - _aware(since)).total_seconds() < limit
 
 
+def _paths_warming_up(c: Check, now: datetime) -> bool:
+    """The same for the additional paths: they were just added or the monitor just bound."""
+    stamps = [_aware(x) for x in (c.paths_changed_at, c.probe_bound_at, c.created_at) if x is not None]
+    if not stamps:
+        return False
+    limit = max(c.interval_seconds * _PROBE_WARMUP_INTERVALS, 180)
+    return (now - max(stamps)).total_seconds() < limit
+
+
 async def record_outcome(
     session: AsyncSession,
     row: Check,
@@ -553,6 +563,8 @@ async def record_outcome(
         row.expiry_checked_at = now
     # разбивка по IP (режим «все адреса») — снимок для детали + точки в
     # тайм-серию по каждому адресу (для графика времени ответа по IP)
+    # split by additional paths: the card shows which path failed (None: the monitor has no paths)
+    row.last_path_results = outcome.path_results
     if outcome.ip_results is not None:
         row.last_ip_results = outcome.ip_results
         for ipr in outcome.ip_results:
@@ -613,9 +625,20 @@ async def run_due_checks(
         if warming:
             due = [c for c in due if c.id not in warming]
             local = [c for c in local if c.id not in warming]
+        # additional paths come from the agent as separate results, one row per path
+        path_rows: dict[int, dict[str, AgentPathProbe]] = {}
+        with_paths = [c.id for c in local if checks_exec.extra_paths_of(c)]
+        if with_paths:
+            async with session_factory() as session:
+                for r in await session.scalars(
+                    select(AgentPathProbe).where(AgentPathProbe.check_id.in_(with_paths))
+                ):
+                    path_rows.setdefault(r.check_id, {})[r.path] = r
         for c in local:
-            outcomes_map[c.id] = checks_exec.outcome_from_agent(
-                c, probes.get(c.id), now, c.degraded_ms
+            main = checks_exec.outcome_from_agent(c, probes.get(c.id), now, c.degraded_ms)
+            rows = {p: r for p, r in path_rows.get(c.id, {}).items() if r.server_id == c.probe_server_id}
+            outcomes_map[c.id] = checks_exec.outcome_with_agent_paths(
+                c, main, rows, now, c.degraded_ms, _paths_warming_up(c, now)
             )
     outcomes = [outcomes_map.get(c.id) for c in due]
     # «медленные» сроки (TLS/домен) обновляем только у созревших для этого мониторов

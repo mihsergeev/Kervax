@@ -17,6 +17,7 @@ from app.collector import (
 from app.config import get_settings
 from app.deps import CurrentUser, SessionDep, group_allowed, scope_query
 from app.models import (
+    AgentPathProbe,
     AgentProbe,
     Check,
     CheckIncident,
@@ -867,8 +868,20 @@ async def update_check(
     check_id: int, body: CheckUpdate, user: CurrentUser, session: SessionDep
 ) -> Check:
     check = await _get_or_404(check_id, session, user)
+    old_paths = list(check.extra_paths or [])
     for field, value in body.model_dump(exclude_unset=True).items():
         setattr(check, field, value)
+    new_paths = list(check.extra_paths or [])
+    if new_paths != old_paths:
+        # a new path of a local monitor has no agent result yet: waiting, not down
+        check.paths_changed_at = datetime.now(timezone.utc)
+        gone = [x for x in old_paths if x not in new_paths]
+        if gone:
+            await session.execute(sa_delete(AgentPathProbe).where(
+                AgentPathProbe.check_id == check.id, AgentPathProbe.path.in_(gone)
+            ))
+        if not new_paths:
+            check.last_path_results = None
     _one_probe_source(check)
     await _close_if_disabled(session, [check])
     await session.commit()
@@ -916,6 +929,7 @@ async def delete_check(
         sa_delete(CheckIpSample).where(CheckIpSample.check_id == check_id)
     )
     await session.execute(sa_delete(AgentProbe).where(AgentProbe.check_id == check_id))
+    await session.execute(sa_delete(AgentPathProbe).where(AgentPathProbe.check_id == check_id))
     await session.execute(sa_delete(ProbeRequest).where(ProbeRequest.check_id == check_id))
     await session.delete(check)
     await session.commit()
@@ -994,6 +1008,7 @@ async def _run_via_agent(check, user, session, request, background) -> CheckRunO
         .where(
             ProbeRequest.check_id == check.id,
             ProbeRequest.server_id == srv.id,
+            ProbeRequest.url == "",
             ProbeRequest.ts.is_(None),
             ProbeRequest.created_at
             >= now - timedelta(seconds=manual_probe.deadline_seconds(check)),
@@ -1004,6 +1019,9 @@ async def _run_via_agent(check, user, session, request, background) -> CheckRunO
     if req is None:  # повторное нажатие, пока ждём ответ, нового задания не плодит
         req = ProbeRequest(check_id=check.id, server_id=srv.id, created_at=now)
         session.add(req)
+        # the paths go in the same press: the verdict waits for all of them (manual_probe._finish_batch)
+        for path in checks_exec.extra_paths_of(check):
+            session.add(ProbeRequest(check_id=check.id, server_id=srv.id, url=path, created_at=now))
     srv.probe_pending_at = now
     await session.commit()
     await session.refresh(check)
@@ -1024,6 +1042,18 @@ async def run_check_result(
     srv = await session.get(Server, req.server_id)
     name = srv.name if srv else ""
     base = {"probe_server_name": name or None, "run_source": "agent", "run_server": name}
+    if req.ts is not None and not req.status and await manual_probe.batch_waiting(session, req):
+        # the main address answered, the paths of the monitor are still being checked
+        waited = (datetime.now(timezone.utc) - _aware(req.created_at)).total_seconds()
+        if waited > manual_probe.deadline_seconds(check):
+            return _run_out(
+                check, user, **base,
+                run_error=f"агент на сервере {name} не прислал ответ по дополнительным путям "
+                          f"за {int(waited)} с — проверка не выполнена. Статус монитора не менялся.",
+            )
+        return _run_out(
+            check, user, **base, run_pending=req.id, run_fast=manual_probe.fast_agent(srv),
+        )
     if req.ts is not None:
         if not req.status:
             return _run_out(

@@ -172,6 +172,15 @@ export type IpResult = {
   message: string
 }
 
+// разбивка проверки по дополнительным путям монитора: pending - результата еще нет (путь
+// только добавили), skipped - не проверялся, потому что недоступен основной адрес
+export type PathResult = {
+  path: string
+  status: CheckStatus | 'pending' | 'skipped'
+  latency_ms: number | null
+  message: string
+}
+
 export type Check = {
   id: number
   name: string
@@ -202,6 +211,9 @@ export type Check = {
   probe_server_name?: string | null
   check_all_ips: boolean
   last_ip_results: IpResult[] | null
+  // пути того же сайта, которые проверяются вместе с основным адресом (напр. /health у API)
+  extra_paths: string[]
+  last_path_results: PathResult[] | null
   check_ssl: boolean
   check_domain: boolean
   ssl_warn_days: number[]
@@ -272,6 +284,7 @@ export type CheckForm = {
   check_locations?: boolean
   location_ids?: number[] | null
   alert_mutes?: string[]
+  extra_paths?: string[]
 }
 
 // Поля для массового применения ко всем мониторам (только переданные меняются).
@@ -518,6 +531,7 @@ export function checkToForm(c: Check): CheckForm {
     check_locations: c.check_locations,
     location_ids: c.location_ids,
     alert_mutes: c.alert_mutes ?? [],
+    extra_paths: c.extra_paths ?? [],
   }
 }
 
