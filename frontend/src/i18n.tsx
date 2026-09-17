@@ -546,6 +546,10 @@ const EN: Record<string, string> = {
   'запущен': 'running',
   'невалиден': 'invalid',
   'залочен': 'locked',
+  'дамп включён — снимается раз в сутки по своему таймеру в {dir}, хранится {k} последних':
+    'dump on — taken once a day on its own timer into {dir}, keeps {k} latest',
+  'Файлового бэкапа на ноде нет: дамп снимается ночью, около 03:00 по времени ноды, и хранится только на ней. Восстановиться с самой ноды можно, копии за её пределами нет.':
+    'The node has no file backup: the dump is taken at night, around 03:00 node time, and kept only on the node. It can be restored from the node itself, but there is no copy anywhere else.',
   'дамп включён — снимается перед каждым бэкапом в {dir}, хранится {k} последних':
     'dump on — taken before every backup into {dir}, keeps {k} latest',
   'PostgreSQL: каждая база — отдельный файл + globals (роли/права).':
