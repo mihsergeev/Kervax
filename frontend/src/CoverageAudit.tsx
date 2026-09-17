@@ -250,13 +250,15 @@ export function CoverageAudit({ server: s, canManage, onChanged }: {
       </div>
     )
   }
-  const dumpLine = (engine?: string, inst?: string) => {
+  // warn — строка стоит в карточке риска (дамп включён, но не снимается): зелёная галочка
+  // спорила бы с предупреждением над ней
+  const dumpLine = (engine?: string, inst?: string, warn = false) => {
     const d = findDump(engine, inst)
     if (!d) return null
     const dir = d.dir || '/backup'
     return (
-      <div className="svc-dump-on small">
-        ✓ {dumpsAreLocalOnly
+      <div className={`svc-dump-on small${warn ? ' warn' : ''}`}>
+        {warn ? '⚠' : '✓'} {dumpsAreLocalOnly
           ? t('дамп включён — снимается раз в сутки по своему таймеру в {dir}, хранится {k} последних',
             { dir, k: d.keep })
           : t('дамп включён — снимается перед каждым бэкапом в {dir}, хранится {k} последних',
@@ -365,7 +367,8 @@ export function CoverageAudit({ server: s, canManage, onChanged }: {
             </div>
           )}
           {/* дамп без файлового бэкапа полезен, но копия остаётся на той же ноде */}
-          {canDumpHere && dumpsAreLocalOnly && risks.some((x) => x.dump_engine && x.can_dump) && (
+          {canDumpHere && dumpsAreLocalOnly &&
+            risks.some((x) => x.dump_engine && x.can_dump && !findDump(x.dump_engine, x.instance)) && (
             <div className="muted small coverage-dump-hint">
               {t('Файлового бэкапа на ноде нет: дампы лягут локально (ежедневно, свой таймер) — восстановиться с самой ноды можно, копии за её пределами не будет.')}
             </div>
@@ -392,7 +395,7 @@ export function CoverageAudit({ server: s, canManage, onChanged }: {
                 </span>
               </div>
               <div className="svc-card-detail muted small">{x.detail}</div>
-              {dumpLine(x.dump_engine, x.instance)}
+              {dumpLine(x.dump_engine, x.instance, true)}
               {/* форма настроек ДО первого включения: у ещё-не-включённого дампа dumpLine
                   ничего не рисует, поэтому форму показываем здесь */}
               {canDumpHere && x.dump_engine && x.can_dump && !findDump(x.dump_engine, x.instance) &&
