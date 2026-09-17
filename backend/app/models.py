@@ -332,6 +332,9 @@ class AgentProbe(Base):
     # сделать не может, а у агента он и так в руках.
     cert_expires: Mapped[int] = mapped_column(BigInteger, default=0)
     cert_issuer: Mapped[str] = mapped_column(String(128), default="")
+    # Каким путём агент проверил сайт: "" — через localhost, "cluster:<ns>/<сервис>:<порт>" —
+    # сервис кластера в обход шлюза (сайт в Kubernetes за белым списком, агент 2.9+).
+    via: Mapped[str] = mapped_column(String(128), default="")
     # До этого момента результат ручной проверки главнее планового. Агент шлёт свой
     # последний плановый результат с каждым отчётом, пока не проверит сайт заново, —
     # а это до интервала монитора. Без паузы человек чинил белый список, жал «Проверить
@@ -373,6 +376,7 @@ class ProbeRequest(Base):
     kw_down_found: Mapped[bool] = mapped_column(Boolean, default=False)
     cert_expires: Mapped[int] = mapped_column(BigInteger, default=0)
     cert_issuer: Mapped[str] = mapped_column(String(128), default="")
+    via: Mapped[str] = mapped_column(String(128), default="")  # как в AgentProbe.via
     # вердикт панели — ровно то, что записано в журнал и показано человеку
     status: Mapped[str] = mapped_column(String(16), default="")
     message: Mapped[str] = mapped_column(String(512), default="")

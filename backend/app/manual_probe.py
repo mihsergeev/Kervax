@@ -190,6 +190,7 @@ async def ingest(
         except (TypeError, ValueError):
             req.cert_expires = 0
         req.cert_issuer = str(r.get("cert_issuer") or "")[:128]
+        req.via = str(r.get("via") or "")[:128]
 
         if req.check_id == 0:
             await _ingest_domain(session, req, now)
@@ -224,6 +225,7 @@ async def ingest(
         probe.kw_down_found = req.kw_down_found
         probe.cert_expires = req.cert_expires
         probe.cert_issuer = req.cert_issuer
+        probe.via = req.via
         probe.manual_until = now + timedelta(seconds=authority_seconds(check))
     return pending
 
