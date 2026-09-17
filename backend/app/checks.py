@@ -477,6 +477,9 @@ def outcome_from_agent(check, probe, now, degraded_ms: int) -> CheckOutcome:
             "down",
             message=f"агент не присылает результат {mins} мин — проверка с сервера не идёт",
         )
+    via = getattr(probe, "via", "") or ""
+    if via.startswith("cluster:"):
+        return _outcome_via_cluster(check, probe, degraded_ms, via[len("cluster:"):])
     if probe.error:
         low = probe.error.lower()
         # У несостоявшегося запроса задержки нет. Агент присылает 0, и в журнале
@@ -520,6 +523,28 @@ def outcome_from_agent(check, probe, now, degraded_ms: int) -> CheckOutcome:
         return CheckOutcome("down", lat, message=humanize_error(probe.error))
     return eval_parts(check, probe.code, probe.kw_up_found, probe.kw_down_found,
                       probe.latency_ms or 0, degraded_ms)
+
+
+def _outcome_via_cluster(check, probe, degraded_ms: int, svc: str) -> CheckOutcome:
+    """Сайт проверен через сервис кластера в обход шлюза (агент 2.9+).
+
+    Так агент поступает, когда сайт в Kubernetes: на localhost шлюз не слушает, а его белый
+    список не пускает саму ноду. Приложение спрашивают напрямую, поэтому в сообщении это
+    сказано явно — зелёный статус здесь значит «приложение отвечает», а не «сайт открылся
+    через шлюз». Сам шлюз всё же проверен: сертификат снят TLS-рукопожатием с него."""
+    where = f"сервис {svc} в обход шлюза"
+    if probe.error:
+        err = probe.error
+        if err.startswith("gateway "):
+            # приложение отвечает, а шлюз не принимает соединения — посетители сайт не видят
+            addr = err[len("gateway "):].split(": ", 1)[0]
+            return CheckOutcome("down", None, message=f"шлюз {addr} не отвечает: {humanize_error(err)}")
+        return CheckOutcome("down", probe.latency_ms or None,
+                            message=f"{humanize_error(err)} — {where}")
+    out = eval_parts(check, probe.code, probe.kw_up_found, probe.kw_down_found,
+                     probe.latency_ms or 0, degraded_ms)
+    out.message = f"{out.message} · {where}"
+    return out
 
 
 def _eval_http(check, r, body: str, latency: int, fell_back: bool, degraded_ms: int) -> CheckOutcome:

@@ -2195,6 +2195,7 @@ async def _store_site_probes(session, server_id: int, results: list, now) -> lis
         except (TypeError, ValueError):
             row.cert_expires = 0
         row.cert_issuer = str(r.get("cert_issuer") or "")[:128]
+        row.via = str(r.get("via") or "")[:128]
     return pending
 
 

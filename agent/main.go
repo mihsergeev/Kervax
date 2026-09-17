@@ -36,7 +36,7 @@ import (
 	"time"
 )
 
-const version = "2.8"
+const version = "2.9"
 
 // Публичный ключ для проверки подписи релизов агента (Ed25519, base64).
 // ПУСТО по умолчанию → самообновление ВЫКЛЮЧЕНО (агент никогда не заменяет себя).
@@ -648,6 +648,9 @@ type siteProbeResult struct {
 	// либо сертификата не отдали.
 	CertExpires int64  `json:"cert_expires,omitempty"`
 	CertIssuer  string `json:"cert_issuer,omitempty"`
+	// каким путём проверен сайт: "" — через localhost, "cluster:<ns>/<сервис>:<порт>" — сервис
+	// кластера в обход шлюза (см. probeSiteCluster)
+	Via string `json:"via,omitempty"`
 }
 
 // docker-действие из очереди панели (исполняется через read-only proxy)
@@ -970,20 +973,38 @@ func localDialer(timeout time.Duration, insecure bool) *http.Transport {
 	}
 }
 
+// probeSite — проверка сайта изнутри сервера. Сначала как всегда, через localhost. Если там
+// отказ, обрыв или 403 (сайт в Kubernetes: шлюз на localhost не слушает, а его белый список
+// не пускает саму ноду), а домен маршрутизирует кластер — проверяем сервис этого маршрута
+// напрямую, в обход шлюза.
 func probeSite(p siteProbe) siteProbeResult {
-	res := siteProbeResult{ID: p.ID, KwUpFound: true}
+	res := probeSiteLocal(p)
+	if res.Error == "" && res.Code != 403 {
+		return res
+	}
+	if cr, ok := probeSiteCluster(p); ok {
+		return cr
+	}
+	return res
+}
+
+func probeTimeout(p siteProbe) time.Duration {
 	timeout := time.Duration(p.TimeoutMs) * time.Millisecond
 	if timeout <= 0 || timeout > 60*time.Second {
 		timeout = 10 * time.Second
 	}
+	return timeout
+}
+
+// probeRequest — запрос проверки: метод, заголовки и basic auth монитора
+func probeRequest(p siteProbe, target string) (*http.Request, error) {
 	method := strings.ToUpper(strings.TrimSpace(p.Method))
 	if method == "" {
 		method = "GET"
 	}
-	req, err := http.NewRequest(method, p.URL, nil)
+	req, err := http.NewRequest(method, target, nil)
 	if err != nil {
-		res.Error = err.Error()
-		return res
+		return nil, err
 	}
 	req.Header.Set("User-Agent", "kervax-agent/"+version+" (local probe)")
 	if p.Headers != "" {
@@ -996,6 +1017,34 @@ func probeSite(p siteProbe) siteProbeResult {
 	}
 	if p.AuthUser != "" {
 		req.SetBasicAuth(p.AuthUser, p.AuthPass)
+	}
+	return req, nil
+}
+
+// probeKeywords — ключевые слова ищем сами: тело закрытой страницы с сервера не уходит
+func probeKeywords(p siteProbe, resp *http.Response, res *siteProbeResult) {
+	if p.KeywordUp == "" && p.KeywordDown == "" {
+		return
+	}
+	// читаем ограниченно: ключевые слова ищут в начале страницы, а тянуть
+	// многомегабайтный ответ на каждой проверке незачем
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 512<<10))
+	text := string(body)
+	if p.KeywordUp != "" {
+		res.KwUpFound = strings.Contains(text, p.KeywordUp)
+	}
+	if p.KeywordDown != "" {
+		res.KwDownFound = strings.Contains(text, p.KeywordDown)
+	}
+}
+
+func probeSiteLocal(p siteProbe) siteProbeResult {
+	res := siteProbeResult{ID: p.ID, KwUpFound: true}
+	timeout := probeTimeout(p)
+	req, err := probeRequest(p, p.URL)
+	if err != nil {
+		res.Error = err.Error()
+		return res
 	}
 	client := &http.Client{
 		Timeout:   timeout,
@@ -1022,19 +1071,350 @@ func probeSite(p siteProbe) siteProbeResult {
 		res.CertExpires = leaf.NotAfter.Unix()
 		res.CertIssuer = leaf.Issuer.CommonName
 	}
-	if p.KeywordUp != "" || p.KeywordDown != "" {
-		// читаем ограниченно: ключевые слова ищут в начале страницы, а тянуть
-		// многомегабайтный ответ на каждой проверке незачем
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512<<10))
-		text := string(body)
-		if p.KeywordUp != "" {
-			res.KwUpFound = strings.Contains(text, p.KeywordUp)
+	probeKeywords(p, resp, &res)
+	return res
+}
+
+// ---- проверка сайта изнутри кластера, в обход шлюза ----
+// Сайт в Kubernetes публикует шлюз (Envoy Gateway, ingress-nginx), а на localhost его нет:
+// шлюз слушает адрес ноды или LoadBalancer. Белый список шлюза при этом не пускает ни панель,
+// ни саму ноду, и проверка изнутри упиралась в «порт закрыт» или 403 — чинилось это только
+// добавлением адресов в вайтлист. Здесь агент по маршрутам кластера (HTTPRoute, Ingress)
+// находит сервис, который обслуживает этот домен и путь, и спрашивает его напрямую: так
+// видно, живо ли само приложение. Сертификат берём у шлюза TLS-рукопожатием — оно проходит
+// и при белом списке, тот отказывает уже на уровне HTTP.
+//
+// Куда идти, агент решает САМ по объектам кластера: панель присылает только URL и направить
+// агента на произвольный адрес не может — только в сервисы, на которые кластер отправляет
+// этот домен.
+type kubeRouteRule struct {
+	path  string // "" — любой путь
+	exact bool
+	ns    string
+	svc   string
+	ip    string // ClusterIP сервиса
+	port  int
+}
+
+type kubeRouteTable struct {
+	rules map[string][]kubeRouteRule // хост (или *.суффикс) → правила
+	tls   map[string]string          // хост → адрес шлюза для сертификата ("ip:443")
+}
+
+var (
+	kubeRoutes   atomic.Value // *kubeRouteTable
+	kubeRoutesMu sync.Mutex
+	kubeRoutesAt time.Time
+)
+
+// wildcard: *.example.com из маршрута подходит к a.example.com
+func hostLookup[T any](m map[string]T, host string) (T, bool) {
+	host = strings.ToLower(host)
+	if v, ok := m[host]; ok {
+		return v, true
+	}
+	if i := strings.Index(host, "."); i > 0 {
+		v, ok := m["*"+host[i:]]
+		return v, ok
+	}
+	var zero T
+	return zero, false
+}
+
+// match — правило для пути: точное совпадение, иначе самый длинный префикс (по границе
+// сегмента, как в Gateway API: /api подходит к /api и /api/x, но не к /apix)
+func (rt *kubeRouteTable) match(host, path string) (kubeRouteRule, bool) {
+	rules, _ := hostLookup(rt.rules, host)
+	best, found := -1, kubeRouteRule{}
+	for _, r := range rules {
+		if r.exact {
+			if path == r.path {
+				return r, true
+			}
+			continue
 		}
-		if p.KeywordDown != "" {
-			res.KwDownFound = strings.Contains(text, p.KeywordDown)
+		pre := strings.TrimRight(r.path, "/")
+		if pre == "" || path == pre || strings.HasPrefix(path, pre+"/") {
+			if len(pre) > best {
+				best, found = len(pre), r
+			}
 		}
 	}
-	return res
+	return found, best >= 0
+}
+
+// kubeRefreshRoutes — таблица «домен → путь → сервис» из маршрутов кластера. Раз в минуту:
+// маршруты меняются выкатом, а не каждые 15 секунд, и гонять список сервисов в каждом цикле
+// незачем.
+func kubeRefreshRoutes(cl *http.Client, kc *kubeConf) {
+	kubeRoutesMu.Lock()
+	if time.Since(kubeRoutesAt) < time.Minute {
+		kubeRoutesMu.Unlock()
+		return
+	}
+	kubeRoutesAt = time.Now()
+	kubeRoutesMu.Unlock()
+
+	var svcs struct {
+		Items []struct {
+			Metadata struct {
+				Name      string            `json:"name"`
+				Namespace string            `json:"namespace"`
+				Labels    map[string]string `json:"labels"`
+			} `json:"metadata"`
+			Spec struct {
+				ClusterIP string `json:"clusterIP"`
+				Ports     []struct {
+					Name string `json:"name"`
+					Port int    `json:"port"`
+				} `json:"ports"`
+			} `json:"spec"`
+			Status struct {
+				LoadBalancer struct {
+					Ingress []struct {
+						IP string `json:"ip"`
+					} `json:"ingress"`
+				} `json:"loadBalancer"`
+			} `json:"status"`
+		} `json:"items"`
+	}
+	if kubeGet(cl, kc, "/api/v1/services", &svcs) != nil {
+		return
+	}
+	type svcInfo struct {
+		ip    string
+		named map[string]int
+	}
+	svcBy := map[string]svcInfo{}
+	gateways := map[string]string{} // "ns/шлюз" → "ip:443"
+	for _, s := range svcs.Items {
+		info := svcInfo{ip: s.Spec.ClusterIP, named: map[string]int{}}
+		has443 := false
+		for _, p := range s.Spec.Ports {
+			info.named[p.Name] = p.Port
+			has443 = has443 || p.Port == 443
+		}
+		svcBy[s.Metadata.Namespace+"/"+s.Metadata.Name] = info
+		// data plane Envoy Gateway: сервис помечен шлюзом, которому принадлежит
+		if gw := s.Metadata.Labels["gateway.envoyproxy.io/owning-gateway-name"]; gw != "" && has443 {
+			addr := s.Spec.ClusterIP
+			if ing := s.Status.LoadBalancer.Ingress; len(ing) > 0 && ing[0].IP != "" {
+				addr = ing[0].IP
+			}
+			if addr != "" && addr != "None" {
+				gateways[s.Metadata.Labels["gateway.envoyproxy.io/owning-gateway-namespace"]+"/"+gw] = net.JoinHostPort(addr, "443")
+			}
+		}
+	}
+	rt := &kubeRouteTable{rules: map[string][]kubeRouteRule{}, tls: map[string]string{}}
+	add := func(host, ns, svc string, port int, portName, path string, exact bool) {
+		info, ok := svcBy[ns+"/"+svc]
+		if !ok || info.ip == "" || info.ip == "None" {
+			return // сервиса нет или он headless — ClusterIP, куда стучаться, нет
+		}
+		if port == 0 && portName != "" {
+			port = info.named[portName]
+		}
+		if host == "" || port == 0 {
+			return
+		}
+		if !exact && strings.TrimRight(path, "/") == "" {
+			path = ""
+		}
+		h := strings.ToLower(host)
+		rt.rules[h] = append(rt.rules[h], kubeRouteRule{path: path, exact: exact, ns: ns, svc: svc, ip: info.ip, port: port})
+	}
+
+	// Gateway API
+	var hr struct {
+		Items []struct {
+			Metadata struct {
+				Namespace string `json:"namespace"`
+			} `json:"metadata"`
+			Spec struct {
+				Hostnames  []string `json:"hostnames"`
+				ParentRefs []struct {
+					Name      string `json:"name"`
+					Namespace string `json:"namespace"`
+				} `json:"parentRefs"`
+				Rules []struct {
+					Matches []struct {
+						Path *struct {
+							Type  string `json:"type"`
+							Value string `json:"value"`
+						} `json:"path"`
+					} `json:"matches"`
+					BackendRefs []struct {
+						Name      string `json:"name"`
+						Namespace string `json:"namespace"`
+						Kind      string `json:"kind"`
+						Port      int    `json:"port"`
+					} `json:"backendRefs"`
+				} `json:"rules"`
+			} `json:"spec"`
+		} `json:"items"`
+	}
+	if kubeGet(cl, kc, "/apis/gateway.networking.k8s.io/v1/httproutes", &hr) != nil {
+		_ = kubeGet(cl, kc, "/apis/gateway.networking.k8s.io/v1beta1/httproutes", &hr)
+	}
+	for _, r := range hr.Items {
+		ns := r.Metadata.Namespace
+		for _, rule := range r.Spec.Rules {
+			// правило без бэкенда — редирект http→https и прочие фильтры: проверять нечего
+			if len(rule.BackendRefs) == 0 {
+				continue
+			}
+			b := rule.BackendRefs[0]
+			if b.Kind != "" && b.Kind != "Service" {
+				continue
+			}
+			bns := ns
+			if b.Namespace != "" {
+				bns = b.Namespace
+			}
+			for _, h := range r.Spec.Hostnames {
+				if len(rule.Matches) == 0 {
+					add(h, bns, b.Name, b.Port, "", "", false)
+				}
+				for _, m := range rule.Matches {
+					switch {
+					case m.Path == nil:
+						add(h, bns, b.Name, b.Port, "", "", false)
+					case m.Path.Type == "" || m.Path.Type == "PathPrefix":
+						add(h, bns, b.Name, b.Port, "", m.Path.Value, false)
+					case m.Path.Type == "Exact":
+						add(h, bns, b.Name, b.Port, "", m.Path.Value, true)
+					}
+				}
+			}
+		}
+		for _, h := range r.Spec.Hostnames {
+			for _, p := range r.Spec.ParentRefs {
+				pns := ns
+				if p.Namespace != "" {
+					pns = p.Namespace
+				}
+				if a := gateways[pns+"/"+p.Name]; a != "" {
+					rt.tls[strings.ToLower(h)] = a
+				}
+			}
+		}
+	}
+
+	// Ingress
+	var ing struct {
+		Items []struct {
+			Metadata struct {
+				Namespace string `json:"namespace"`
+			} `json:"metadata"`
+			Spec struct {
+				Rules []struct {
+					Host string `json:"host"`
+					HTTP *struct {
+						Paths []struct {
+							Path     string `json:"path"`
+							PathType string `json:"pathType"`
+							Backend  struct {
+								Service *struct {
+									Name string `json:"name"`
+									Port struct {
+										Number int    `json:"number"`
+										Name   string `json:"name"`
+									} `json:"port"`
+								} `json:"service"`
+							} `json:"backend"`
+						} `json:"paths"`
+					} `json:"http"`
+				} `json:"rules"`
+			} `json:"spec"`
+		} `json:"items"`
+	}
+	if kubeGet(cl, kc, "/apis/networking.k8s.io/v1/ingresses", &ing) == nil {
+		for _, it := range ing.Items {
+			for _, rule := range it.Spec.Rules {
+				if rule.HTTP == nil {
+					continue
+				}
+				for _, p := range rule.HTTP.Paths {
+					if p.Backend.Service == nil {
+						continue
+					}
+					add(rule.Host, it.Metadata.Namespace, p.Backend.Service.Name, p.Backend.Service.Port.Number,
+						p.Backend.Service.Port.Name, p.Path, p.PathType == "Exact")
+				}
+			}
+		}
+	}
+	kubeRoutes.Store(rt)
+}
+
+// probeSiteCluster — проверка через сервис кластера. ok=false: домен кластер не
+// маршрутизирует, проверять так нечего.
+func probeSiteCluster(p siteProbe) (siteProbeResult, bool) {
+	rt, _ := kubeRoutes.Load().(*kubeRouteTable)
+	if rt == nil {
+		return siteProbeResult{}, false
+	}
+	u, err := url.Parse(p.URL)
+	if err != nil || u.Hostname() == "" {
+		return siteProbeResult{}, false
+	}
+	path := u.EscapedPath()
+	if path == "" {
+		path = "/"
+	}
+	rule, ok := rt.match(u.Hostname(), path)
+	if !ok {
+		return siteProbeResult{}, false
+	}
+	res := siteProbeResult{
+		ID: p.ID, KwUpFound: true,
+		Via: fmt.Sprintf("cluster:%s/%s:%d", rule.ns, rule.svc, rule.port),
+	}
+	timeout := probeTimeout(p)
+	req, err := probeRequest(p, "http://"+net.JoinHostPort(rule.ip, strconv.Itoa(rule.port))+u.RequestURI())
+	if err != nil {
+		res.Error = err.Error()
+		return res, true
+	}
+	req.Host = u.Host // приложение видит тот же Host, что пришёл бы через шлюз
+	client := &http.Client{
+		Timeout: timeout,
+		Transport: &http.Transport{
+			DialContext:       (&net.Dialer{Timeout: timeout}).DialContext,
+			DisableKeepAlives: true,
+			Proxy:             nil,
+		},
+		// как и через localhost: ответом считаем сам редирект
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}
+	start := time.Now()
+	resp, err := client.Do(req)
+	res.LatencyMs = int(time.Since(start).Milliseconds())
+	if err != nil {
+		res.Error = err.Error()
+		return res, true
+	}
+	defer resp.Body.Close()
+	res.Code = resp.StatusCode
+	probeKeywords(p, resp, &res)
+	// Сертификат — у шлюза: приложение за ним отвечает по HTTP. Шлюз не отвечает вовсе — сайт
+	// недоступен и посетителям, даже если приложение живо.
+	if addr, ok := hostLookup(rt.tls, u.Hostname()); ok && u.Scheme == "https" {
+		conn, err := tls.DialWithDialer(&net.Dialer{Timeout: timeout}, "tcp", addr,
+			&tls.Config{ServerName: u.Hostname(), InsecureSkipVerify: true}) //nolint:gosec // нужны только срок и издатель
+		if err != nil {
+			res.Code = 0
+			res.Error = "gateway " + addr + ": " + err.Error()
+			return res, true
+		}
+		if cs := conn.ConnectionState(); len(cs.PeerCertificates) > 0 {
+			res.CertExpires = cs.PeerCertificates[0].NotAfter.Unix()
+			res.CertIssuer = cs.PeerCertificates[0].Issuer.CommonName
+		}
+		conn.Close()
+	}
+	return res, true
 }
 
 // runSiteProbes — прогоняет созревшие задания в фоне. Каждое со своим интервалом:
@@ -3219,6 +3599,8 @@ func collectKube() *kubeInfo {
 	ki.Volumes = kubeVolumes(cl, kc)
 	// домены маршрутов кластера: стандартный Ingress + Gateway API HTTPRoute
 	ki.ingressHosts = mergeSites(kubeIngressHosts(cl, kc), kubeGatewayHosts(cl, kc))
+	// куда эти домены ведут — для проверки сайтов в обход шлюза (probeSiteCluster)
+	kubeRefreshRoutes(cl, kc)
 	return ki
 }
 
