@@ -15,6 +15,7 @@
 его отчитываться чаще.
 """
 
+import zlib
 from datetime import datetime, timedelta
 from types import SimpleNamespace
 
@@ -23,7 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import checks as checks_exec
 from app.collector import _aware, record_outcome
-from app.models import AgentProbe, Check, DomainProbe, ProbeRequest, Server
+from app.models import AgentPathProbe, AgentProbe, Check, DomainProbe, ProbeRequest, Server
 
 # С этой версии агент забирает ручную проверку опросом команд и отвечает сразу.
 FAST_AGENT = (2, 7)
@@ -48,6 +49,40 @@ def domain_check(url: str) -> SimpleNamespace:
     )
 
 
+# Additional paths of a local monitor go to the agent as separate planned tasks. The agent
+# keeps its state by task number and knows nothing about monitors, so every path needs a
+# number of its own that maps back to the monitor and the path: a base far above monitor ids,
+# the monitor id and a hash of the path. A renamed path gets a new number, and the agent
+# forgets the old task as it forgets any task the panel stopped sending.
+PATH_TASK_BASE = 1 << 40
+_PATH_SLOTS = 1 << 20
+
+
+def path_task_ids(check) -> dict[str, int]:
+    """Task numbers of the monitor paths: {path: number}."""
+    out: dict[str, int] = {}
+    used: set[int] = set()
+    for path in checks_exec.extra_paths_of(check):
+        slot = zlib.crc32(path.encode()) % _PATH_SLOTS
+        while slot in used:  # two paths of one monitor with the same hash: the next free slot
+            slot = (slot + 1) % _PATH_SLOTS
+        used.add(slot)
+        out[path] = PATH_TASK_BASE + check.id * _PATH_SLOTS + slot
+    return out
+
+
+def path_task_check_id(task_id: int) -> int:
+    return (task_id - PATH_TASK_BASE) // _PATH_SLOTS
+
+
+def planned_tasks(check) -> list[dict]:
+    """Planned agent tasks of a local monitor: the main address and every path."""
+    out = [site_probe_task(check, check.id)]
+    for path, tid in path_task_ids(check).items():
+        out.append(site_probe_task(checks_exec.path_view(check, path), tid))
+    return out
+
+
 def _ver(v: object) -> tuple[int, ...]:
     try:
         return tuple(int(x) for x in str(v or "").strip().split("."))
@@ -67,8 +102,9 @@ def deadline_seconds(check: Check) -> int:
     """Сколько ждать ответа агента, прежде чем сказать «проверить не удалось».
 
     Старый агент заберёт задание следующим отчётом (до 15 с), проверка займёт до
-    таймаута монитора, ответ уедет ещё одним отчётом — и запас на сеть."""
-    return int(30 + _timeout_s(check))
+    таймаута монитора, ответ уедет ещё одним отчётом — и запас на сеть. Paths of the
+    monitor are checked one after another, each within the same timeout."""
+    return int(30 + _timeout_s(check) * (1 + len(checks_exec.extra_paths_of(check))))
 
 
 def authority_seconds(check: Check) -> int:
@@ -126,6 +162,9 @@ async def _open(session: AsyncSession, server: Server, now: datetime) -> list[tu
     for req, chk in rows:
         if req.check_id == 0 and req.url:
             chk = domain_check(req.url)
+        elif req.url and chk is not None:
+            # a path of the monitor: the request keeps the path, the rest comes from the monitor
+            chk = checks_exec.path_view(chk, req.url)
         if chk is None:
             continue  # монитор удалили, пока запрос ждал агента
         if (now - _aware(req.created_at)).total_seconds() <= deadline_seconds(chk):
@@ -200,34 +239,89 @@ async def ingest(
             # пока ждали, монитор удалили, перевели на проверку из панели или сайт
             # переехал — ответ этой ноды про него больше ничего не значит
             continue
-
-        outcome = checks_exec.outcome_from_agent(check, req, now, check.degraded_ms)
-        req.status = outcome.status
-        req.message = outcome.message[:512]
-        await record_outcome(session, check, outcome, now, pending, manual=True)
-        # срок сертификата — с того же соединения: человек мог жать кнопку ровно
-        # после перевыпуска, и старый срок в карточке был бы враньём
-        info = checks_exec.expiry_from_agent(check, req, now)
-        if info.ssl_days is not None:
-            check.ssl_days = info.ssl_days
-            check.ssl_message = info.ssl_message[:256]
-
-        probe = await session.get(AgentProbe, check.id)
-        if probe is None:
-            probe = AgentProbe(check_id=check.id, server_id=server_id, ts=now)
-            session.add(probe)
-        probe.server_id = server_id
-        probe.ts = now
-        probe.code = req.code
-        probe.latency_ms = req.latency_ms
-        probe.error = req.error
-        probe.kw_up_found = req.kw_up_found
-        probe.kw_down_found = req.kw_down_found
-        probe.cert_expires = req.cert_expires
-        probe.cert_issuer = req.cert_issuer
-        probe.via = req.via
-        probe.manual_until = now + timedelta(seconds=authority_seconds(check))
+        if req.url:
+            await _store_manual_path(session, check, req, server_id, now)
+        else:
+            await _store_manual_main(session, check, req, server_id, now)
+        await _finish_batch(session, check, req, server_id, now, pending)
     return pending
+
+
+async def _batch(session: AsyncSession, req: ProbeRequest) -> list[ProbeRequest]:
+    """One press of the button: the main address and the monitor paths, asked together."""
+    return list(await session.scalars(select(ProbeRequest).where(
+        ProbeRequest.check_id == req.check_id,
+        ProbeRequest.server_id == req.server_id,
+        ProbeRequest.created_at == req.created_at,
+    )))
+
+
+async def batch_waiting(session: AsyncSession, req: ProbeRequest) -> bool:
+    """Some answers of the press are still on the way (a path answers after the main address)."""
+    return any(r.ts is None for r in await _batch(session, req))
+
+
+async def _finish_batch(session: AsyncSession, check: Check, req: ProbeRequest,
+                        server_id: int, now: datetime, pending: list) -> None:
+    """The verdict of a press once the main address and every path answered.
+
+    Recording the main answer alone would show "works" and a minute later the scheduler
+    would turn the monitor red because of a path: the same confusion the button was rebuilt
+    to avoid."""
+    batch = await _batch(session, req)
+    main = next((r for r in batch if not r.url), None)
+    if main is None or main.status or any(r.ts is None for r in batch):
+        return
+    outcome = checks_exec.outcome_from_agent(check, main, now, check.degraded_ms)
+    rows = {r.url: r for r in batch if r.url}
+    # a path added after the press was not asked: it waits for the planned check
+    outcome = checks_exec.outcome_with_agent_paths(check, outcome, rows, now, check.degraded_ms, True)
+    main.status = outcome.status
+    main.message = outcome.message[:512]
+    await record_outcome(session, check, outcome, now, pending, manual=True)
+
+
+async def _store_manual_path(session: AsyncSession, check: Check, req: ProbeRequest,
+                             server_id: int, now: datetime) -> None:
+    """A fresh manual answer for a path wins over the one the agent repeats from memory."""
+    row = await session.get(AgentPathProbe, (check.id, req.url))
+    if row is None:
+        row = AgentPathProbe(check_id=check.id, path=req.url, server_id=server_id, ts=now)
+        session.add(row)
+    row.server_id = server_id
+    row.ts = now
+    row.code = req.code
+    row.latency_ms = req.latency_ms
+    row.error = req.error
+    row.via = req.via
+    row.manual_until = now + timedelta(seconds=authority_seconds(check))
+
+
+async def _store_manual_main(session: AsyncSession, check: Check, req: ProbeRequest,
+                             server_id: int, now: datetime) -> None:
+    """The raw manual answer for the main address and the certificate from the same connection."""
+    # срок сертификата — с того же соединения: человек мог жать кнопку ровно
+    # после перевыпуска, и старый срок в карточке был бы враньём
+    info = checks_exec.expiry_from_agent(check, req, now)
+    if info.ssl_days is not None:
+        check.ssl_days = info.ssl_days
+        check.ssl_message = info.ssl_message[:256]
+
+    probe = await session.get(AgentProbe, check.id)
+    if probe is None:
+        probe = AgentProbe(check_id=check.id, server_id=server_id, ts=now)
+        session.add(probe)
+    probe.server_id = server_id
+    probe.ts = now
+    probe.code = req.code
+    probe.latency_ms = req.latency_ms
+    probe.error = req.error
+    probe.kw_up_found = req.kw_up_found
+    probe.kw_down_found = req.kw_down_found
+    probe.cert_expires = req.cert_expires
+    probe.cert_issuer = req.cert_issuer
+    probe.via = req.via
+    probe.manual_until = now + timedelta(seconds=authority_seconds(check))
 
 
 async def _ingest_domain(session: AsyncSession, req: ProbeRequest, now: datetime) -> None:

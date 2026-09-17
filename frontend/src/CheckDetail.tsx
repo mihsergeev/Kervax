@@ -498,6 +498,31 @@ export function CheckDetail({ check, groups, onClose, onSaved, onRun, onDelete, 
           </div>
         )}
 
+        {(check.extra_paths ?? []).length > 0 && (
+          <div className="detail-locs">
+            <div className="chart-cap">{t('Дополнительные пути')}</div>
+            <div className="loc-results">
+              {(check.last_path_results ?? []).map((r) => (
+                <div key={r.path} className="loc-res">
+                  <span className={`sdot sdot-${r.status === 'pending' || r.status === 'skipped' ? 'unknown' : r.status}`} />
+                  <div className="loc-res-name mono">{r.path}</div>
+                  <div className="loc-res-metric">
+                    {r.latency_ms != null ? `${r.latency_ms} ${t('мс')}` : '—'}
+                  </div>
+                  <div className="loc-res-msg muted small" title={r.message}>
+                    {r.message || '—'}
+                  </div>
+                </div>
+              ))}
+              {(check.last_path_results ?? []).length === 0 && (
+                <div className="muted small">
+                  {t('Пути ещё не проверялись: результат появится после ближайшей проверки.')}
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
         {check.check_all_ips && (
           <div className="detail-locs">
             <div className="chart-cap">{t('IP-адреса домена')}</div>

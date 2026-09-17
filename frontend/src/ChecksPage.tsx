@@ -53,6 +53,7 @@ const EMPTY: CheckForm = {
   ssl_warn_days: [14, 7, 1],
   domain_warn_days: [7, 1],
   enabled: true,
+  extra_paths: [],
 }
 
 function StatusDot({ status }: { status: CheckStatus }) {
@@ -1006,7 +1007,17 @@ function CheckRow({
           )}
           {!c.enabled && <span className="type-chip off">{t('выкл')}</span>}
         </div>
-        <div className="check-target">{c.target}{c.port ? `:${c.port}` : ''}</div>
+        <div className="check-target">
+          {c.target}{c.port ? `:${c.port}` : ''}
+          {(c.extra_paths ?? []).length > 0 && (
+            <span
+              className="check-target-paths"
+              title={t('Дополнительные пути: {list}', { list: c.extra_paths.join(', ') })}
+            >
+              {' + '}{c.extra_paths.join(' ')}
+            </span>
+          )}
+        </div>
       </div>
       {/* контейнер ленты всегда в DOM — держит grid-колонку ровной даже без истории */}
       <div className="check-beats">
