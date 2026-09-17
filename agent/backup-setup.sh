@@ -54,7 +54,10 @@ AGENT_USER=kervax
 #       kubectl exec through the node's own admin access, the pod found anew on every run from its
 #       StatefulSet/Deployment/DaemonSet. Replaces the CronJob manifest the panel used to print.
 #       report.d/kube-dumps.json tells the panel whether the node can do this
-KERVAX_SETUP_VERSION=0.27  # MAJOR.MINOR; compared component-wise (0.13 > 0.2!)
+# 0.28: the ClickHouse dump (the schema) is read from the server's metadata files instead of
+#       logging in as default - no password is needed, whatever the users are (in a pod, in docker
+#       and on the host alike)
+KERVAX_SETUP_VERSION=0.28  # MAJOR.MINOR; compared component-wise (0.13 > 0.2!)
 KERVAX_SETUP_ALWAYS=1  # safe on any node: installs only its own helper and spool and does not
                        # touch the backup configuration until the panel sends a command
 install -d -m 0755 "$HELPER_DIR" "$STATE_DIR" /var/lib/kervax/versions
@@ -306,19 +309,146 @@ kube_access_maybe() {
     && mv -f "$KUBE_EXTRA.tmp" "$KUBE_EXTRA" && chmod 0644 "$KUBE_EXTRA"
 }
 
-# ClickHouse refusing the password-less default user answers with a long text that ends in
-# "deleting this file will reset the password" - exactly the advice not to pass on. Say what is
-# actually wrong instead. $1 - the runner (KEX, or docker_ch for a container, or nothing).
-docker_ch() { docker exec "$DOCKER_CH" "$@"; }
-ch_probe() {
-  local out
-  if out="$(${1:+$1} clickhouse-client --query "SELECT 1" 2>&1)"; then return 0; fi
-  if grep -qiE 'authentication failed|password is incorrect|required_password' <<<"$out"; then
-    echo "clickhouse did not let the default user in: it needs a password, and the database environment does not have one" >&2
-  else
-    printf '%s' "$out" | tr '\n' ' ' | tail -c 300 >&2
-  fi
-  return 1
+# ClickHouse: the dump is the schema - every database and table as a CREATE statement (the data
+# is not dumped). The server keeps exactly that on disk: an .sql file per database and per table
+# under <path>/metadata, written as ATTACH statements (for an Atomic database metadata/<db> is a
+# symlink into store/). Reading the files needs no login, so the dump works whatever the users
+# and passwords are. Up to 0.27 the dump logged in as default, and it failed wherever default has
+# a password the database's environment does not carry (kz-se-op-dtp, 15.09.2026).
+# Unlike SHOW CREATE, the files are not masked: credentials written into a table engine (MySQL,
+# S3, a dictionary source) reach the dump as they are. The dump is root-only 0600, like the files.
+# $@ - the runner: KEX (a pod), docker exec <container>, or nothing (ClickHouse on the host). The
+# runner needs only sh and cat: names are decoded and statements rewritten here, on the node.
+ch_schema() {
+  # inside the runner every database and table file goes out behind a header line "<RS>D db" or
+  # "<RS>T db table", with the names escaped the way ClickHouse writes them into file names
+  "$@" sh -c '
+    p=""
+    for c in /etc/clickhouse-server/config.xml /etc/clickhouse-server/config.yaml /opt/bitnami/clickhouse/etc/config.xml; do
+      [ -f "$c" ] || continue
+      v=$(clickhouse extract-from-config --config-file "$c" --key path 2>/dev/null) && [ -n "$v" ] && { p=$v; break; }
+    done
+    [ -n "$p" ] || p=/var/lib/clickhouse
+    cd "$p/metadata" 2>/dev/null || { echo "no ClickHouse metadata directory at ${p%/}/metadata" >&2; exit 3; }
+    printf "\036S\n"
+    for e in *; do
+      case "$e" in
+        *.sql) [ -f "$e" ] || continue; db=${e%.sql} ;;
+        *) [ -d "$e" ] && [ ! -f "$e.sql" ] || continue; db=$e ;;
+      esac
+      case "$db" in system|INFORMATION_SCHEMA|information_schema) continue ;; esac
+      printf "\n\036D %s\n" "$db"
+      [ -f "$db.sql" ] && cat "$db.sql"
+      [ -d "$db" ] || continue
+      for t in "$db"/*.sql; do
+        [ -f "$t" ] || continue
+        t=${t#"$db"/}
+        printf "\n\036T %s %s\n" "$db" "${t%.sql}"
+        cat "$db/$t"
+      done
+    done' | LC_ALL=C awk '
+    # ClickHouse keeps [A-Za-z0-9_] in file names and writes every other byte as %XX
+    function unesc(s,   o, i, c, h) {
+      o = ""
+      for (i = 1; i <= length(s); i++) {
+        c = substr(s, i, 1)
+        if (c == "%" && i + 2 <= length(s)) {
+          h = (index(X, toupper(substr(s, i + 1, 1))) - 1) * 16 + index(X, toupper(substr(s, i + 2, 1))) - 1
+          if (h > 0) { o = o sprintf("%c", h); i += 2; continue }
+        }
+        o = o c
+      }
+      return o
+    }
+    function q(s,   o, i, c) {
+      o = ""
+      for (i = 1; i <= length(s); i++) {
+        c = substr(s, i, 1)
+        if (c == "\\" || c == "`") o = o "\\"
+        o = o c
+      }
+      return "`" o "`"
+    }
+    # how long the name after "ATTACH <kind> " is: "_", a bare name or a quoted one
+    function namelen(s,   c, i) {
+      c = substr(s, 1, 1)
+      if (c == "`" || c == "\"") {
+        for (i = 2; i <= length(s); i++) {
+          if (substr(s, i, 1) == "\\") { i++; continue }
+          if (substr(s, i, 1) == c) return i
+        }
+        return length(s)
+      }
+      for (i = 1; i <= length(s); i++) {
+        c = substr(s, i, 1)
+        if (c == " " || c == "\t" || c == "(") return i - 1
+      }
+      return length(s)
+    }
+    # Output lines go into an array per group and are printed at the end: databases first, then
+    # tables, dictionaries and views (a view needs its tables to exist). Gluing everything into
+    # one string would copy it again on every line - quadratic on a schema of thousands of tables.
+    function add(ph, line) { O[ph, ++N[ph]] = line }
+    # one file: "ATTACH <kind> <name>" on its first line becomes "CREATE <kind> db.table". A
+    # dictionary is kept as "CREATE DICTIONARY _" already (checked on 26.7), so both verbs count.
+    function flush(   i, j, k, l, pre, rest, ph, title) {
+      if (typ == "") return
+      while (nl > 0 && L[nl] ~ /^[ \t\r]*$/) nl--
+      for (i = 1; i <= nl && L[i] ~ /^[ \t\r]*$/; i++) ;
+      title = "-- " dn ((typ == "T") ? "." tn : "")
+      if (i > nl) {
+        # a database directory without its .sql (an old default): the engine is the default one
+        if (typ == "D") { add(0, title); add(0, "CREATE DATABASE IF NOT EXISTS " q(dn) ";"); add(0, "") }
+        typ = ""; nl = 0; return
+      }
+      l = L[i]; ph = -1
+      for (k = 1; k <= NK; k++) {
+        pre = "ATTACH " K[k] " "
+        if (substr(l, 1, length(pre)) != pre) {
+          pre = "CREATE " K[k] " "
+          if (substr(l, 1, length(pre)) != pre) continue
+        }
+        rest = substr(l, length(pre) + 1)
+        rest = substr(rest, namelen(rest) + 1)
+        if (K[k] == "DATABASE") { l = "CREATE DATABASE IF NOT EXISTS " q(dn) rest; ph = 0 }
+        else { l = "CREATE " K[k] " " q(dn) "." q(tn) rest; ph = (K[k] == "TABLE") ? 1 : ((K[k] == "DICTIONARY") ? 2 : 3) }
+        break
+      }
+      if (ph < 0) {
+        add(3, "-- not an ATTACH or CREATE statement, kept as a comment: " substr(title, 4))
+        for (j = i; j <= nl; j++) add(3, "-- " L[j])
+      } else {
+        add(ph, title)
+        if (i == nl) add(ph, l ";")
+        else {
+          add(ph, l)
+          for (j = i + 1; j < nl; j++) add(ph, L[j])
+          add(ph, L[nl] ";")
+        }
+      }
+      add((ph < 0) ? 3 : ph, "")
+      typ = ""; nl = 0
+    }
+    BEGIN { H = sprintf("%c", 30); X = "0123456789ABCDEF"; NK = split("MATERIALIZED VIEW|LIVE VIEW|WINDOW VIEW|DICTIONARY|DATABASE|TABLE|VIEW", K, "|") }
+    substr($0, 1, 1) == H {
+      flush()
+      split(substr($0, 2), f, " ")
+      # S: the metadata directory was found. Without it the runner has already said what failed
+      if (f[1] == "S") { started = 1; next }
+      typ = f[1]; dn = unesc(f[2]); tn = (typ == "T") ? unesc(f[3]) : ""; seen++
+      # the inner table of a materialized view is created again by the view itself
+      if (typ == "T" && substr(tn, 1, 6) == ".inner") typ = ""
+      next
+    }
+    typ != "" { L[++nl] = $0 }
+    END {
+      flush()
+      if (!started) exit 3
+      if (!seen) { print "no databases found in the ClickHouse metadata" > "/dev/stderr"; exit 4 }
+      print "-- ClickHouse schema, read by kervax from the server metadata files"
+      print ""
+      for (k = 0; k <= 3; k++) for (j = 1; j <= N[k]; j++) print O[k, j]
+    }'
 }
 
 dump_probe() {
@@ -328,7 +458,7 @@ dump_probe() {
     case "$engine" in
       pg) KEX sh -c 'PGPASSWORD="${POSTGRES_PASSWORD:-${PGPASSWORD:-}}"; export PGPASSWORD; pg_dumpall -U "${POSTGRES_USER:-postgres}" --schema-only' >/dev/null ;;
       mysql) KEX sh -c 'MYSQL_PWD="${MYSQL_ROOT_PASSWORD:-${MARIADB_ROOT_PASSWORD:-}}"; export MYSQL_PWD; if command -v mariadb-dump >/dev/null 2>&1; then mariadb-dump -u root --no-data --all-databases; else mysqldump -u root --no-data --all-databases; fi' >/dev/null ;;
-      ch) ch_probe KEX ;;
+      ch) ch_schema KEX >/dev/null ;;
       redis) [ "$(KEX sh -c 'p="${REDISCLI_AUTH:-${REDIS_PASSWORD:-}}"; [ -n "$p" ] && export REDISCLI_AUTH="$p"; redis-cli ping' 2>&1)" = PONG ] \
                || { echo "redis did not answer PONG (a password it does not have in its environment?)" >&2; return 1; } ;;
       rabbitmq) KEX rabbitmqctl -q list_vhosts >/dev/null ;;
@@ -349,8 +479,8 @@ dump_probe() {
         docker exec "$container" sh -c 'MYSQL_PWD="${MYSQL_ROOT_PASSWORD:-${MARIADB_ROOT_PASSWORD:-}}" mysqldump -u root --no-data --all-databases' >/dev/null 2>&1
       else mysqldump --no-data --all-databases >/dev/null 2>&1; fi ;;
     ch)
-      if [ -n "$container" ]; then DOCKER_CH="$container"; ch_probe docker_ch
-      else ch_probe; fi ;;
+      if [ -n "$container" ]; then ch_schema docker exec "$container" >/dev/null
+      else ch_schema >/dev/null; fi ;;
     redis)
       if [ -n "$container" ]; then docker exec "$container" redis-cli ping >/dev/null 2>&1
       else redis-cli ping >/dev/null 2>&1; fi ;;
@@ -561,10 +691,10 @@ done
            # dump would look successful - the if branch would simply not run and return 0
            printf 'else false; fi\n' ;;
       ch)  printf 'F="$OUT/clickhouse-$TS.sql.gz"\n'
-           # without clickhouse-backup: schema and data are exported with the standard client
-           printf 'if [ -n "$KT" ]; then KEX clickhouse-client --query "SHOW DATABASES" > "$OUT/databases-$TS.txt" 2>/dev/null; KEX clickhouse-client --query "SELECT create_table_query FROM system.tables WHERE database NOT IN (%s)" | gzip -c > "$F"\n' "'system','INFORMATION_SCHEMA','information_schema'"
-           printf 'elif [ -n "$CONT" ]; then docker exec "$CONT" clickhouse-client --query "SHOW DATABASES" > "$OUT/databases-$TS.txt" 2>/dev/null; docker exec "$CONT" clickhouse-client --query "SELECT create_table_query FROM system.tables WHERE database NOT IN (%s)" | gzip -c > "$F"\n' "'system','INFORMATION_SCHEMA','information_schema'"
-           printf 'else clickhouse-client --query "SELECT create_table_query FROM system.tables WHERE database NOT IN (%s)" | gzip -c > "$F"; fi\n' "'system','INFORMATION_SCHEMA','information_schema'" ;;
+           # the schema, read from the server's metadata files: no login and no password (see
+           # ch_schema). The data is not dumped.
+           declare -f ch_schema
+           printf 'if [ -n "$KT" ]; then ch_schema KEX\nelif [ -n "$CONT" ]; then ch_schema docker exec "$CONT"\nelse ch_schema\nfi | gzip -c > "$F"\n' ;;
     esac
     printf 'rc=$?\n'
     # Two finishing modes. MULTI (pg): a run is the subdirectory $FINAL/<TS> holding a set of

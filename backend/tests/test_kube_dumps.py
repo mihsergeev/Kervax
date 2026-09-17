@@ -29,7 +29,7 @@ def _server(pods=None, **rep_kw):
         "agent_version": "2.8",
         "backup": {"present": True, "manageable": True, "configured": False},
         "kube": {"pods": PODS if pods is None else pods},
-        "setup_versions": {"backup-setup": "0.27"},
+        "setup_versions": {"backup-setup": "0.28"},
         "extras": {"kube-dumps": {"v": 1, "ctl": "k0s", "exec": True}},
     }
     rep.update(rep_kw)
@@ -73,7 +73,15 @@ def test_pod_databases_get_the_dump_button():
 def test_why_the_button_is_not_offered():
     old = _audit(_server(setup_versions={"backup-setup": "0.26"}))
     ch = old[("ClickHouse", "k8s.default.sts.chi-clickhouse-main-0-0")]
-    assert not ch.can_dump and "0.27" in ch.detail
+    assert not ch.can_dump and "0.28" in ch.detail
+    assert "0.27" in old[("RabbitMQ", "k8s.default.sts.rabbitmq")].detail
+
+    # ClickHouse helper 0.27 дампил, входя в базу, и спотыкался о пароль (kz-se-op-dtp);
+    # 0.28 читает схему из файлов metadata — кнопка только с ним. Остальным хватает 0.27.
+    mid = _audit(_server(setup_versions={"backup-setup": "0.27"}))
+    ch = mid[("ClickHouse", "k8s.default.sts.chi-clickhouse-main-0-0")]
+    assert not ch.can_dump and "0.28" in ch.detail
+    assert mid[("RabbitMQ", "k8s.default.sts.rabbitmq")].can_dump
 
     worker = _audit(_server(extras={"kube-dumps": {"v": 1, "ctl": "", "exec": False}}))
     ch = worker[("ClickHouse", "k8s.default.sts.chi-clickhouse-main-0-0")]

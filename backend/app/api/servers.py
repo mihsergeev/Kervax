@@ -482,6 +482,9 @@ _DB_HOWTO = {
 # приходилось править руками, и после передеплоя он переставал попадать в базу.
 _KUBE_DUMP_ENGINES = {"pg", "mysql", "ch", "redis", "rabbitmq"}
 _KUBE_DUMP_HELPER = "0.27"
+# ClickHouse helper 0.27 дампил, входя пользователем default, и на kz-se-op-dtp упёрся в
+# пароль, которого нет в окружении пода. С 0.28 схему читает из файлов metadata — без входа.
+_KUBE_DUMP_HELPER_FOR = {"ch": "0.28"}
 _KUBE_KIND = {"sts": "StatefulSet", "deploy": "Deployment", "ds": "DaemonSet"}
 
 
@@ -509,9 +512,10 @@ def _kube_dump_block(rep: dict, code: str) -> str:
     """Почему дамп из пода на этой ноде не включить ("" — можно)."""
     if code not in _KUBE_DUMP_ENGINES:
         return "дамп этого движка из пода панель не снимает"
+    need = _KUBE_DUMP_HELPER_FOR.get(code, _KUBE_DUMP_HELPER)
     have = str((rep.get("setup_versions") or {}).get("backup-setup") or "")
-    if not have or _ver_key(have) < _ver_key(_KUBE_DUMP_HELPER):
-        return (f"дамп из пода снимает helper backup-setup {_KUBE_DUMP_HELPER} и новее — "
+    if not have or _ver_key(have) < _ver_key(need):
+        return (f"дамп из пода снимает helper backup-setup {need} и новее — "
                 "обновите его на ноде")
     if not ((rep.get("extras") or {}).get("kube-dumps") or {}).get("exec"):
         return ("у helper на этой ноде нет доступа к кластеру: дамп из пода включается на "
