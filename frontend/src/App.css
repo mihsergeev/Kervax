@@ -4010,13 +4010,13 @@ button.svc-site-on:hover {
   background: color-mix(in srgb, var(--up) 16%, transparent);
 }
 .svc-site-no {
-  color: var(--muted);
+  color: var(--text-muted);
   cursor: help;
 }
 .svc-site-add {
   border-color: var(--border-strong);
   background: var(--bg-card);
-  color: var(--muted);
+  color: var(--text-muted);
   cursor: pointer;
   font-size: 0.95rem;
 }
@@ -4130,7 +4130,7 @@ button.svc-site-on:hover {
   cursor: pointer;
 }
 .adopt-caret {
-  color: var(--muted);
+  color: var(--text-muted);
   font-size: 0.7rem;
   width: 0.7rem;
 }
@@ -4148,7 +4148,7 @@ button.svc-site-on:hover {
 }
 .adopt-row.adopt-bad .adopt-dom,
 .adopt-row.adopt-monitored .adopt-dom {
-  color: var(--muted);
+  color: var(--text-muted);
 }
 .adopt-dom {
   min-width: 0;
@@ -4169,7 +4169,7 @@ button.svc-site-on:hover {
   border: none;
   background: none;
   padding: 0;
-  color: var(--muted);
+  color: var(--text-muted);
 }
 .adopt-mark.up {
   color: var(--up);
@@ -4183,7 +4183,7 @@ button.svc-site-on:hover {
   border: none;
   background: none;
   padding: 0;
-  color: var(--muted);
+  color: var(--text-muted);
   opacity: 0.35;
   cursor: pointer;
   border-radius: 5px;
@@ -4200,7 +4200,7 @@ button.svc-site-on:hover {
   background: color-mix(in srgb, var(--up) 18%, transparent);
 }
 .adopt-row.adopt-skipped .adopt-dom {
-  color: var(--muted);
+  color: var(--text-muted);
   text-decoration: line-through;
 }
 /* Разовая проверка найденного домена. Пара «снаружи / изнутри» — и итог проверки, и
@@ -4247,11 +4247,18 @@ button.svc-site-on:hover {
   border: 1px solid transparent;
   border-radius: 999px;
   background: none;
-  color: var(--muted);
+  color: var(--text-muted);
   font-size: 0.74rem;
   line-height: 1.35;
   white-space: nowrap;
   cursor: pointer;
+}
+/* мелкие кнопки мастера — без общей тени кнопок: в светлой теме под ними были серые плашки */
+.adopt-zone-name,
+.adopt-mark,
+.adopt-skip,
+.adopt-probe {
+  box-shadow: none;
 }
 /* фон на наведении задаём явно: иначе побеждает общий button:hover с синей заливкой */
 .adopt-probe:hover {
@@ -4603,6 +4610,8 @@ button.svc-site-on:hover {
   color: var(--accent);
   cursor: pointer;
   text-decoration: underline dotted;
+  /* общая тень кнопок в светлой теме рисовала под ссылкой серую плашку */
+  box-shadow: none;
 }
 button.adopt-mark {
   cursor: pointer;
@@ -4620,7 +4629,7 @@ button.adopt-mark {
   align-items: center;
   gap: 0.4rem;
   font-size: 0.85rem;
-  color: var(--muted);
+  color: var(--text-muted);
 }
 .adopt-grp input {
   width: 11rem;
@@ -4630,12 +4639,78 @@ button.adopt-mark {
   background: var(--bg-input, var(--bg-card));
   color: var(--text);
 }
-.adopt-foot .primary {
+.adopt-foot > .primary {
   margin-left: auto;
 }
-.adopt-done {
+/* Итог «Поставить на мониторинг» — вместо списка: что заведено и как проверяется, что нет */
+.adopt-report-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.3rem 0.6rem;
+  margin: 0.15rem 0 0.7rem;
+}
+.adopt-report-ic {
+  display: inline-grid;
+  place-items: center;
+  width: 1.7rem;
+  height: 1.7rem;
+  flex-shrink: 0;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--up) 18%, transparent);
   color: var(--up);
-  margin-top: 0.4rem;
+  font-weight: 700;
+}
+.adopt-report-head.none .adopt-report-ic {
+  background: color-mix(in srgb, var(--text-muted) 18%, transparent);
+  color: var(--text-muted);
+}
+.adopt-report-title {
+  font-weight: 600;
+  font-size: 0.95rem;
+}
+.adopt-report-sep {
+  margin: 0.4rem 0 0.15rem;
+  padding-top: 0.4rem;
+  border-top: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
+}
+.adopt-how {
+  margin-left: auto;
+  padding-left: 0.5rem;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.adopt-how.t-degraded {
+  color: var(--degraded);
+}
+.adopt-open {
+  flex-shrink: 0;
+  font-size: 0.76rem;
+}
+.adopt-foot-btns {
+  display: inline-flex;
+  gap: 0.5rem;
+  margin-left: auto;
+}
+@media (max-width: 720px) {
+  /* домен — своей строкой, под ним «как проверяется» и ссылка на монитор */
+  .adopt-report .adopt-row + .adopt-row {
+    margin-top: 0.3rem;
+  }
+  .adopt-report .adopt-dom {
+    flex: 1 1 calc(100% - 1.6rem);
+  }
+  .adopt-report .adopt-how {
+    flex: 1 1 auto;
+    margin-left: 1.55rem;
+    padding-left: 0;
+    white-space: normal;
+  }
+  .adopt-report .adopt-open {
+    margin-left: auto;
+  }
 }
 .adopt-hint {
   margin-top: 0.5rem;
@@ -4784,11 +4859,11 @@ button.adopt-mark {
   align-items: center;
   gap: 12px;
 }
-.dump-cfg-row > span { color: var(--muted); }
+.dump-cfg-row > span { color: var(--text-muted); }
 .dump-cfg-row .field-inp { width: 100%; }
 .dump-cfg-row .dump-cfg-num { width: 84px; text-align: center; }
 /* пояснение под строкой — во всю ширину, приглушённо */
-.dump-cfg-hint { color: var(--muted); font-size: 0.82rem; line-height: 1.35; }
+.dump-cfg-hint { color: var(--text-muted); font-size: 0.82rem; line-height: 1.35; }
 .dump-cfg-hint.warn { color: var(--degraded); }
 .dump-config .dump-cfg-apply {
   align-self: flex-end;
