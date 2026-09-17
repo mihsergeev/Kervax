@@ -1503,8 +1503,11 @@ const EN: Record<string, string> = {
     'There is no {kind} {name} in namespace {ns}.',
   'У {kind} {name} в пространстве {ns} нет запущенного пода.':
     '{kind} {name} in namespace {ns} has no running pod.',
-  'ClickHouse не пустил пользователя default: база требует пароль, а в её окружении пароля нет.':
-    'ClickHouse refused the default user: the database requires a password, and its environment has none.',
+  'ClickHouse не пустил пользователя default: база требует пароль. Helper backup-setup 0.28 снимает схему из файлов, без входа в базу — обновите его на ноде.':
+    'ClickHouse refused the default user: the database requires a password. The backup-setup helper 0.28 takes the schema from files without logging in — update it on the node.',
+  'Не найден каталог со схемой ClickHouse: {dir}.': 'ClickHouse schema directory not found: {dir}.',
+  'В каталоге со схемой ClickHouse не нашлось ни одной базы.':
+    'No databases were found in the ClickHouse schema directory.',
   'Redis не ответил на ping: похоже, нужен пароль, которого нет в окружении базы.':
     'Redis did not answer ping: it seems to need a password that is not in its environment.',
   'Дамп из пода для {engine} не поддерживается.':

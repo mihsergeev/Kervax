@@ -4,6 +4,29 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.4.40] - 2026-09-17
+
+### Changed
+- **Дамп ClickHouse больше не требует пароля.** Дамп ClickHouse в Kervax — это схема:
+  базы, таблицы, словари и представления в виде CREATE, данные таблиц не выгружаются. Раньше
+  helper снимал схему, входя в базу пользователем default. Если у default есть пароль, а в
+  окружении базы его нет, дамп не включался — так было с ClickHouse под clickhouse-operator.
+  Helper backup-setup 0.28 читает схему из файлов, в которых её хранит сам ClickHouse
+  (каталог `metadata`), и переводит в CREATE. В базу он не входит: пароль не нужен ни в
+  панели, ни на ноде, и смена пароля дамп не сломает. Так работает ClickHouse в поде, в
+  docker и на хосте; каталог данных берётся из конфига сервера.
+
+  Дамп восстанавливается на чистом сервере через `clickhouse-client < файл`. Проверено на
+  ClickHouse 24.8 и 26.7: таблицы, словари и представления совпали вместе с UUID. Базу на
+  устаревшем движке Ordinary восстанавливают с `--allow_deprecated_database_ordinary=1`.
+
+  В отличие от SHOW CREATE, файлы не скрывают пароли, прописанные в движках таблиц (MySQL,
+  S3, источник словаря): в дамп они попадут как есть. Дамп доступен только root, как и сами
+  файлы.
+
+  Для ClickHouse в поде кнопка дампа появляется с helper backup-setup 0.28. Ноды со старым
+  helper'ом видны в «Требует действий».
+
 ## [1.4.39] - 2026-09-17
 
 ### Changed
