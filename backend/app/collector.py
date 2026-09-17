@@ -1253,6 +1253,37 @@ _BACKUP_LOCK_STUCK_SECONDS = 30 * 60
 # запас в целый цикл; поломка дампа — процесс медленный, ловить её за минуты незачем.
 _BACKUP_DUMP_LAG_SECONDS = 2 * 86400
 
+# Нода без файлового бэкапа: helper снимает дамп своим таймером раз в сутки (03:00 плюс до
+# 15 минут разброса), и сверить дамп можно только с часами. Двое суток — чтобы одиночный
+# пропуск (ночная перезагрузка, под в рестарте) не будил: следующей ночью дамп снимется
+# сам. Час сверху — на разброс таймера, иначе при одном пропуске возраст на пару минут
+# переходил бы порог прямо перед следующим удачным запуском, и алерт мигал бы.
+_DUMP_LOCAL_LAG_SECONDS = 2 * 86400 + 3600
+
+# Почему дамп считается сломанным — хвост текста алерта backup_dump ({reason}).
+_DUMP_REASON_BACKUP = "бэкап идёт, а дамп не обновился — файловый снапшот живой базы может не восстановиться"
+_DUMP_REASON_LOCAL = "свежего дампа нет больше двух суток, а файлового бэкапа на ноде нет"
+
+
+def _dump_label(d: dict) -> str:
+    eng = d.get("engine") or "?"
+    cont = d.get("container") or ""
+    return f"{eng}@{cont}" if cont else eng
+
+
+def dump_local_stale(d: dict, now_ts: float) -> bool:
+    """Сломан ли дамп на ноде без файлового бэкапа (kz-se-op-dtp, 17.09.2026): свежего
+    файла нет дольше _DUMP_LOCAL_LAG_SECONDS ни с последнего дампа, ни с включения.
+    Включение (enabled_ts — mtime скрипта дампа, он переписывается и при перенастройке)
+    даёт отсрочку: первый дамп снимется только ближайшей ночью. Пропуск из-за места —
+    отдельный алерт, здесь он не считается. Раньше такие дампы не проверялись вовсе:
+    проверка шла только от времени бэкапа, а бэкапа на ноде нет."""
+    if d.get("skipped"):
+        return False
+    last = (d.get("last_ts") or 0) if (d.get("files") or 0) > 0 else 0
+    ref = max(last, d.get("enabled_ts") or 0)
+    return ref > 0 and now_ts - ref > _DUMP_LOCAL_LAG_SECONDS
+
 
 def _dump_problems(bk: dict) -> list[str]:
     """Движки, чей дамп настроен, но не снимается. Два признака поломки: файлов нет
@@ -1265,9 +1296,7 @@ def _dump_problems(bk: dict) -> list[str]:
     for d in bk.get("dumps") or []:
         if d.get("skipped"):
             continue  # пропущен намеренно (мало места) — это отдельный сигнал, не «падает»
-        eng = d.get("engine") or "?"
-        cont = d.get("container") or ""
-        label = f"{eng}@{cont}" if cont else eng
+        label = _dump_label(d)
         files = d.get("files") or 0
         dts = d.get("last_ts") or 0
         enabled = d.get("enabled_ts") or 0
@@ -1293,9 +1322,7 @@ def _dump_skipped(bk: dict) -> tuple[list[str], int]:
     for d in bk.get("dumps") or []:
         if not d.get("skipped"):
             continue
-        eng = d.get("engine") or "?"
-        cont = d.get("container") or ""
-        labels.append(f"{eng}@{cont}" if cont else eng)
+        labels.append(_dump_label(d))
         fp = d.get("skip_free_pct")
         if isinstance(fp, int) and 0 <= fp < min_free:
             min_free = fp
@@ -1862,10 +1889,21 @@ def _server_conditions(s: Server, now: datetime) -> dict[str, tuple[int, dict]]:
             # через sustain: сломанный дамп — состояние на дни, оно удержание переживёт,
             # а одиночный тик на стыке циклов (см. _BACKUP_DUMP_LAG_SECONDS) — нет
             sustain("backup_dump", bool(broken),
-                    {"engines": ", ".join(broken), "n": len(broken)})
+                    {"engines": ", ".join(broken), "n": len(broken), "reason": _DUMP_REASON_BACKUP})
             skipped, free = _dump_skipped(bk)
             out["backup_dump_space"] = (1 if skipped else 0,
                                         {"engines": ", ".join(skipped), "free": free})
+    elif online and (bk.get("dumps") or state.get("backup_dump") or state.get("backup_dump_space")):
+        # Файлового бэкапа нет, а дампы есть: helper снимает их своим таймером, и сверять
+        # их не с чем, кроме часов (см. dump_local_stale). Висящий алерт при выключенных
+        # дампах тоже сюда: условие должно прийти с нулём, иначе он не закроется.
+        now_ts = now.timestamp()
+        broken = sorted(_dump_label(d) for d in bk.get("dumps") or [] if dump_local_stale(d, now_ts))
+        sustain("backup_dump", bool(broken),
+                {"engines": ", ".join(broken), "n": len(broken), "reason": _DUMP_REASON_LOCAL})
+        skipped, free = _dump_skipped(bk)
+        out["backup_dump_space"] = (1 if skipped else 0,
+                                    {"engines": ", ".join(skipped), "free": free})
     # Дамп-CronJob'ы в кластере: мониторим прогоны НЕЗАВИСИМО от restic-бэкапа (kube-нода
     # часто без него). Панель раньше только детектила «дамп настроен» — теперь алертит,
     # если CronJob приостановлен или его последний прогон не завершился успехом.

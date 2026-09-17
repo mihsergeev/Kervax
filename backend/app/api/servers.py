@@ -14,7 +14,7 @@ from fastapi.responses import FileResponse, PlainTextResponse
 from sqlalchemy import delete as sa_delete, select
 
 from app import audit, custom_backups, geoip, manual_probe
-from app.collector import send_alerts_soon
+from app.collector import dump_local_stale, send_alerts_soon
 from app.setup_scripts import (
     current_setup_versions as _current_setup_versions,
     setup_needed as _setup_needed,
@@ -669,6 +669,19 @@ def _backup_coverage(server: Server) -> list[BackupAudit]:
             # его сервису. Без бэкапа helper ставит свой суточный таймер, и копия остаётся на
             # самой ноде (kz-se-op-dtp). configured — агент нашёл таймер бэкапа.
             own_timer = not bk.get("configured")
+            # На такой ноде сломанный дамп виден только по часам — тот же признак, что у
+            # алерта backup_dump. Отсчёт от последнего отчёта ноды: у замолчавшей ноды файлы
+            # не «стареют», про неё есть свой алерт.
+            seen_ts = (server.last_seen.replace(tzinfo=server.last_seen.tzinfo or timezone.utc).timestamp()
+                       if server.last_seen else datetime.now(timezone.utc).timestamp())
+            if dump and own_timer and dump_local_stale(dump, seen_ts):
+                out.append(BackupAudit(
+                    kind="db", subject=eng, gap=False, instance=inst,
+                    detail=f"{where_txt} — дамп включён, но свежего файла нет больше двух суток,"
+                           " проверьте, снимается ли он",
+                    dump_engine=code, can_dump=True, container=inst, pods=inst_pods[:4],
+                ))
+                continue
             if dump and (dump.get("files") or 0) > 0:
                 out.append(BackupAudit(
                     kind="db_ok", subject=eng, gap=False, instance=inst,

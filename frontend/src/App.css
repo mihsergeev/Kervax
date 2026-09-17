@@ -4730,6 +4730,10 @@ button.adopt-mark {
   color: var(--up);
   line-height: 1.4;
 }
+/* дамп включён, но не снимается — строка в карточке риска */
+.svc-dump-on.warn {
+  color: var(--degraded);
+}
 /* «выключить» — рядом со статусом включённого дампа, чуть приглушённая */
 .svc-act-off {
   margin-left: 0.6rem;
