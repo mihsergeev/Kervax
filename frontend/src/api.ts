@@ -316,6 +316,28 @@ export function knownHosts(): Promise<KnownHosts> {
   return api('/api/checks/known-hosts')
 }
 
+// Итог по одному домену из «Поставить на мониторинг». check_id — монитор (0 — не заведён
+// или вне видимости учётки); local/server — проверяет агент этой ноды; reason — почему
+// монитор не заведён: monitored — домен уже на мониторинге, invalid — имя не годится
+// (подробность в problem); пусто — заведён.
+export type AdoptedDomain = {
+  domain: string
+  check_id: number
+  local: boolean
+  server: string
+  reason: '' | 'monitored' | 'invalid'
+  problem: string
+}
+
+export type AdoptResult = {
+  created: number
+  skipped: string[]
+  hosts: Record<string, number>
+  local: number
+  group_name: string // куда легли мониторы (учётке с нарезкой — первая разрешённая группа)
+  items: AdoptedDomain[]
+}
+
 // Завести мониторы по доменам веб-сервиса. Возвращает обновлённую карту хостов,
 // чтобы галочки перерисовались без перезагрузки страницы. local — какие из доменов
 // проверять изнутри сервера, где они найдены (ноду панель вычисляет сама).
@@ -323,7 +345,7 @@ export function adoptDomains(
   domains: string[],
   group_name = '',
   local: string[] = [],
-): Promise<{ created: number; skipped: string[]; hosts: Record<string, number>; local: number }> {
+): Promise<AdoptResult> {
   return api('/api/checks/adopt', {
     method: 'POST',
     body: JSON.stringify({ domains, group_name, local }),

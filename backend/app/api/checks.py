@@ -35,6 +35,7 @@ from app.schemas import (
     LocalProbeSuggestion,
     LocalProbeApplyIn,
     AdoptDomainsIn,
+    AdoptItemOut,
     AdoptResult,
     BulkResult,
     CheckBulkUpdate,
@@ -737,14 +738,23 @@ async def adopt_domains(
         if local else {}
     )
     now = datetime.now(timezone.utc)
+    # итог по каждому домену: без него мастер после добавления не может показать,
+    # что заведено, как оно будет проверяться и что нет — только общие числа
+    items: list[AdoptItemOut] = []
     for raw in body.domains:
         domain = _norm_domain(raw)
         problem = _adopt_problem(domain)
         if problem:
             skipped.append(f"{raw} — {problem}")
+            items.append(AdoptItemOut(domain=raw, reason="invalid", problem=problem))
             continue
         if domain in hosts or domain in seen:
             skipped.append(f"{domain} — уже в мониторинге")
+            # повтор в самом запросе — строка по домену уже есть
+            if domain not in seen:
+                items.append(
+                    AdoptItemOut(domain=domain, check_id=hosts[domain], reason="monitored")
+                )
             continue
         seen.add(domain)
         max_order += 1
@@ -765,16 +775,22 @@ async def adopt_domains(
             check.probe_bound_at = now
             _one_probe_source(check)
         fresh.append(check)
+        items.append(AdoptItemOut(domain=domain, local=bool(hit), server=hit[1] if hit else ""))
     if fresh:
         session.add_all(fresh)
         await session.commit()
         await audit.record(
             session, user.username, "checks_adopt", ", ".join(c.name for c in fresh[:20])
         )
+    made = {c.name: c.id for c in fresh}
+    for it in items:
+        if not it.reason:
+            it.check_id = made[it.domain]
     hosts, _ = await _hosts_map(user, session)
     return AdoptResult(
         created=len(fresh), skipped=skipped, hosts=hosts,
         local=sum(1 for c in fresh if c.probe_local),
+        group_name=group, items=items,
     )
 
 

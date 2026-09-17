@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom'
 import {
   ApiError,
   adoptDomains,
+  type AdoptedDomain,
   domainProbes,
   ignoreDomains,
   probeDomains,
@@ -108,6 +109,115 @@ function ProbeChoice({ p, mode, onMode }: { p: DomainProbe; mode: Mode; onMode: 
   )
 }
 
+// Итог «Поставить на мониторинг»: что заведено и как будет проверяться, что нет и почему.
+// Раньше добавленные строки просто пропадали из списка, оставалась строчка «создано
+// мониторов: 5» над пустым списком — что добавилось, а что нет, было не понять.
+type Report = { group: string; items: AdoptedDomain[]; wantedLocal: string[] }
+
+function AdoptReport({
+  report,
+  left,
+  onMore,
+  onClose,
+  onOpenCheck,
+}: {
+  report: Report
+  left: number // сколько новых доменов осталось вне мониторинга
+  onMore: () => void
+  onClose: () => void
+  onOpenCheck?: (id: number) => void
+}) {
+  const { t } = useI18n()
+  const added = report.items.filter((i) => !i.reason)
+  const missed = report.items.filter((i) => i.reason)
+  const open = (i: AdoptedDomain) =>
+    i.check_id > 0 && onOpenCheck ? (
+      <button className="linklike adopt-open" onClick={() => onOpenCheck(i.check_id)}>
+        {t('открыть монитор')}
+      </button>
+    ) : null
+  const how = (i: AdoptedDomain) =>
+    i.local ? (
+      <span
+        className="adopt-how"
+        title={t('Изнутри сервера {srv}: монитор проверяет агент на нём — для сайтов, закрытых снаружи белым списком.', { srv: i.server })}
+      >
+        {t('изнутри')} · {i.server}
+      </span>
+    ) : report.wantedLocal.includes(i.domain) ? (
+      // просили изнутри, а домен уже не найден ни на одной ноде
+      <span
+        className="adopt-how t-degraded"
+        title={t('Домен не нашёлся ни на одной ноде — проверять изнутри некому, поэтому монитор проверяет панель снаружи.')}
+      >
+        {t('снаружи — изнутри некому')}
+      </span>
+    ) : (
+      <span className="adopt-how" title={t('Снаружи: монитор проверяет панель — как посетитель сайта.')}>
+        {t('снаружи')}
+      </span>
+    )
+  return (
+    <>
+      <div className={`adopt-report-head${added.length === 0 ? ' none' : ''}`}>
+        <span className="adopt-report-ic">{added.length > 0 ? '✓' : '—'}</span>
+        <span className="adopt-report-title">
+          {added.length > 0
+            ? t('Поставлено на мониторинг: {n}', { n: added.length })
+            : t('Ничего не добавлено')}
+        </span>
+        {added.length > 0 && (
+          <span className="muted small">
+            {report.group ? t('группа «{g}»', { g: report.group }) : t('без группы')}
+          </span>
+        )}
+      </div>
+      <div className="adopt-list adopt-report">
+        {added.map((i) => (
+          <div key={i.domain} className="adopt-row">
+            <span className="adopt-mark up">✓</span>
+            <span className="adopt-dom mono">{i.domain}</span>
+            {how(i)}
+            {open(i)}
+          </div>
+        ))}
+        {missed.length > 0 && (
+          <div className="adopt-report-sep muted small">
+            {t('не добавлены: {n}', { n: missed.length })}
+          </div>
+        )}
+        {missed.map((i) => (
+          <div key={i.domain} className="adopt-row adopt-monitored">
+            <span className="adopt-mark">—</span>
+            <span className="adopt-dom mono">{i.domain}</span>
+            <span className="adopt-how">
+              {i.reason === 'monitored' ? t('уже на мониторинге') : t(i.problem)}
+            </span>
+            {open(i)}
+          </div>
+        ))}
+      </div>
+      <div className="adopt-foot">
+        <span className="muted small">
+          {left > 0
+            ? t('вне мониторинга осталось доменов: {n}', { n: left })
+            : t('новых доменов вне мониторинга не осталось')}
+        </span>
+        <span className="adopt-foot-btns">
+          {left > 0 && (
+            <button className="ghost" onClick={onMore}>
+              {t('добавить ещё')}
+            </button>
+          )}
+          <button className="primary" onClick={onClose}>
+            {t('Готово')}
+          </button>
+        </span>
+      </div>
+    </>
+  )
+}
+
 // Домены второго уровня, за которыми регистрируют третий: для них «зона» — три метки,
 // иначе shop.msk.ru и blog.msk.ru слиплись бы в одну кучу «msk.ru». Полный PSL сюда
 // тащить не за чем — список нужен только для ГРУППИРОВКИ в списке, ошибка не критична.
@@ -158,7 +268,8 @@ export function AdoptSitesModal({
   const [sel, setSel] = useState<Set<string>>(new Set())
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState('')
-  const [done, setDone] = useState('')
+  // итог последнего добавления: пока он есть, мастер показывает его вместо списка
+  const [report, setReport] = useState<Report | null>(null)
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set())
   // локальная копия «ненужных»: правим её сразу, не дожидаясь перезагрузки списка
   const [skip, setSkip] = useState<Set<string>>(() => new Set(ignored || []))
@@ -370,7 +481,6 @@ export function AdoptSitesModal({
   const submit = async () => {
     setBusy(true)
     setErr('')
-    setDone('')
     try {
       const chunk = picked.slice(0, ADOPT_MAX).map((r) => r.domain)
       const local = chunk.filter((d) => modeOf(d) === 'local')
@@ -380,11 +490,7 @@ export function AdoptSitesModal({
         for (const d of chunk) next.delete(d)
         return next
       })
-      setDone(
-        res.local > 0
-          ? t('создано мониторов: {n}, из них изнутри сервера: {m}', { n: res.created, m: res.local })
-          : t('создано мониторов: {n}', { n: res.created }),
-      )
+      setReport({ group: res.group_name, items: res.items, wantedLocal: local })
       onDone(res.hosts, res.created)
     } catch (e) {
       setErr(e instanceof ApiError ? e.message : String(e))
@@ -401,242 +507,258 @@ export function AdoptSitesModal({
           <button className="ghost" onClick={onClose}>{t('Закрыть')}</button>
         </div>
 
-        <div className="adopt-sub muted small">
-          {t('найдено доменов: {n}', { n: total })}
-          {' · '}
-          {newTotal > 0
-            ? t('вне мониторинга: {n}', { n: newTotal })
-            : t('все уже под мониторингом')}
-          {skipTotal > 0 && (
-            <>
-              {' · '}
-              <button className="linklike" onClick={() => setShowSkipped(!showSkipped)}>
-                {showSkipped
-                  ? t('скрыть ненужные ({n})', { n: skipTotal })
-                  : t('ненужных: {n}', { n: skipTotal })}
-              </button>
-            </>
-          )}
-        </div>
-
-        <div className="adopt-tools">
-          <input
-            className="adopt-search mono"
-            placeholder={t('фильтр по домену или ноде…')}
-            value={q}
-            onChange={(e) => setQ(e.target.value)}
+        {report ? (
+          <AdoptReport
+            report={report}
+            left={newTotal}
+            onMore={() => setReport(null)}
+            onClose={onClose}
+            onOpenCheck={onOpenCheck}
           />
-          <label className="adopt-chk">
-            <input
-              type="checkbox"
-              checked={onlyNew}
-              onChange={(e) => setOnlyNew(e.target.checked)}
-            />
-            {t('только новые')}
-          </label>
-          <button
-            className="ghost"
-            disabled={freshVisible.length === 0}
-            onClick={() => setMany(freshVisible, true)}
-          >
-            {t('выбрать все ({n})', { n: freshVisible.length })}
-          </button>
-          {probeRunning === 0 && availVisible.length > 0 && availVisible.length < freshVisible.length && (
-            <button className="ghost" onClick={() => setMany(availVisible, true)}>
-              {t('выбрать доступные ({n})', { n: availVisible.length })}
-            </button>
-          )}
-          <button className="ghost" disabled={sel.size === 0} onClick={() => setSel(new Set())}>
-            {t('снять выбор')}
-          </button>
-          {picked.length > 0 && (
-            <button
-              className="ghost"
-              onClick={() => mark(picked.map((r) => r.domain), true)}
-            >
-              {t('не нужны ({n})', { n: picked.length })}
-            </button>
-          )}
-        </div>
+        ) : (
+          <>
+            <div className="adopt-sub muted small">
+              {t('найдено доменов: {n}', { n: total })}
+              {' · '}
+              {newTotal > 0
+                ? t('вне мониторинга: {n}', { n: newTotal })
+                : t('все уже под мониторингом')}
+              {skipTotal > 0 && (
+                <>
+                  {' · '}
+                  <button className="linklike" onClick={() => setShowSkipped(!showSkipped)}>
+                    {showSkipped
+                      ? t('скрыть ненужные ({n})', { n: skipTotal })
+                      : t('ненужных: {n}', { n: skipTotal })}
+                  </button>
+                </>
+              )}
+            </div>
 
-        {(probeRows.length > 0 || probeErr) && (
-          <div className="adopt-probe-sum small">
-            {probeErr ? (
-              <span className="t-down">
-                {t('Проверить доступность не удалось: {err}', { err: probeErr })}
-              </span>
-            ) : probeRunning > 0 ? (
-              <>
-                <span className="run-spin" />
-                <span>
-                  {t('Проверяем доступность снаружи и изнутри серверов: готово {n} из {m}', {
-                    n: probeDone.length,
-                    m: probeRows.length,
-                  })}
-                </span>
-                <span className="adopt-probe-bar">
-                  <span style={{ width: `${Math.round((probeDone.length / probeRows.length) * 100)}%` }} />
-                </span>
-              </>
-            ) : (
-              <>
-                <span className={extOk > 0 ? 't-up' : 'muted'}>
-                  {t('открываются снаружи: {n}', { n: extOk })}
-                </span>
-                {localOnly > 0 && <span>{t('только изнутри сервера: {n}', { n: localOnly })}</span>}
-                {dead > 0 && <span className="t-down">{t('не открываются: {n}', { n: dead })}</span>}
-                {checkedAt && <span className="muted">{t('проверено {ago}', { ago: agoText(checkedAt, t) })}</span>}
-                <button
-                  className="linklike"
-                  onClick={() => startProbe(newDomains, true)}
-                  title={t('Проверить эти домены ещё раз — снаружи и изнутри серверов')}
-                >
-                  {t('перепроверить')}
+            <div className="adopt-tools">
+              <input
+                className="adopt-search mono"
+                placeholder={t('фильтр по домену или ноде…')}
+                value={q}
+                onChange={(e) => setQ(e.target.value)}
+              />
+              <label className="adopt-chk">
+                <input
+                  type="checkbox"
+                  checked={onlyNew}
+                  onChange={(e) => setOnlyNew(e.target.checked)}
+                />
+                {t('только новые')}
+              </label>
+              <button
+                className="ghost"
+                disabled={freshVisible.length === 0}
+                onClick={() => setMany(freshVisible, true)}
+              >
+                {t('выбрать все ({n})', { n: freshVisible.length })}
+              </button>
+              {probeRunning === 0 && availVisible.length > 0 && availVisible.length < freshVisible.length && (
+                <button className="ghost" onClick={() => setMany(availVisible, true)}>
+                  {t('выбрать доступные ({n})', { n: availVisible.length })}
                 </button>
+              )}
+              <button className="ghost" disabled={sel.size === 0} onClick={() => setSel(new Set())}>
+                {t('снять выбор')}
+              </button>
+              {picked.length > 0 && (
+                <button
+                  className="ghost"
+                  onClick={() => mark(picked.map((r) => r.domain), true)}
+                >
+                  {t('не нужны ({n})', { n: picked.length })}
+                </button>
+              )}
+            </div>
+
+            {(probeRows.length > 0 || probeErr) && (
+              <div className="adopt-probe-sum small">
+                {probeErr ? (
+                  <span className="t-down">
+                    {t('Проверить доступность не удалось: {err}', { err: probeErr })}
+                  </span>
+                ) : probeRunning > 0 ? (
+                  <>
+                    <span className="run-spin" />
+                    <span>
+                      {t('Проверяем доступность снаружи и изнутри серверов: готово {n} из {m}', {
+                        n: probeDone.length,
+                        m: probeRows.length,
+                      })}
+                    </span>
+                    <span className="adopt-probe-bar">
+                      <span style={{ width: `${Math.round((probeDone.length / probeRows.length) * 100)}%` }} />
+                    </span>
+                  </>
+                ) : (
+                  <>
+                    <span className={extOk > 0 ? 't-up' : 'muted'}>
+                      {t('открываются снаружи: {n}', { n: extOk })}
+                    </span>
+                    {localOnly > 0 && <span>{t('только изнутри сервера: {n}', { n: localOnly })}</span>}
+                    {dead > 0 && <span className="t-down">{t('не открываются: {n}', { n: dead })}</span>}
+                    {checkedAt && <span className="muted">{t('проверено {ago}', { ago: agoText(checkedAt, t) })}</span>}
+                    <button
+                      className="linklike"
+                      onClick={() => startProbe(newDomains, true)}
+                      title={t('Проверить эти домены ещё раз — снаружи и изнутри серверов')}
+                    >
+                      {t('перепроверить')}
+                    </button>
+                  </>
+                )}
+              </div>
+            )}
+
+            <div className="adopt-list">
+              {zones.length === 0 ? (
+                <div className="muted small">
+                  {onlyNew && newTotal === 0
+                    ? t('Все найденные домены уже стоят на мониторинге.')
+                    : t('ничего не найдено')}
+                </div>
+              ) : (
+                zones.map(({ zone, list, fresh }) => {
+                  const shut = collapsed.has(zone)
+                  const on = fresh.length > 0 && fresh.every((r) => sel.has(r.domain))
+                  return (
+                    <div key={zone} className="adopt-zone">
+                      <div className="adopt-zone-head">
+                        <input
+                          type="checkbox"
+                          checked={on}
+                          disabled={fresh.length === 0}
+                          // частичный выбор внутри зоны — «квадратик», а не галка
+                          ref={(el) => {
+                            if (el) el.indeterminate = !on && fresh.some((r) => sel.has(r.domain))
+                          }}
+                          onChange={(e) => setMany(fresh, e.target.checked)}
+                        />
+                        <button className="adopt-zone-name" onClick={() => toggleZone(zone)}>
+                          <span className="adopt-caret">{shut ? '▸' : '▾'}</span>
+                          <span className="mono">{zone}</span>
+                        </button>
+                        <span className="muted small">
+                          {fresh.length > 0
+                            ? t('новых: {n} из {m}', { n: fresh.length, m: list.length })
+                            : t('всё покрыто ({m})', { m: list.length })}
+                        </span>
+                      </div>
+                      {!shut && (
+                        <div className="adopt-rows">
+                          {list.map((r) => (
+                            <div key={r.domain} className={`adopt-row adopt-${r.status}`}>
+                              {r.status === 'new' ? (
+                                <input
+                                  type="checkbox"
+                                  checked={sel.has(r.domain)}
+                                  onChange={() => toggle(r.domain)}
+                                />
+                              ) : r.status === 'monitored' ? (
+                                r.checkId > 0 && onOpenCheck ? (
+                                  <button
+                                    className="adopt-mark up"
+                                    title={t('Уже в мониторинге — открыть монитор')}
+                                    onClick={() => onOpenCheck(r.checkId)}
+                                  >
+                                    ✓
+                                  </button>
+                                ) : (
+                                  <span className="adopt-mark up" title={t('Уже в мониторинге')}>✓</span>
+                                )
+                              ) : (
+                                <span
+                                  className="adopt-mark"
+                                  title={t('Маска или regexp — монитору нужен конкретный адрес')}
+                                >
+                                  —
+                                </span>
+                              )}
+                              <span className="adopt-dom mono">{r.domain}</span>
+                              {r.status === 'new' && probes[r.domain] ? (
+                                <ProbeChoice
+                                  p={probes[r.domain]}
+                                  mode={modeOf(r.domain)}
+                                  onMode={(m) => setModes((prev) => ({ ...prev, [r.domain]: m }))}
+                                />
+                              ) : r.status === 'new' && inflight.has(r.domain) ? (
+                                <span className="adopt-probes adopt-probe-wait">
+                                  <span className="run-spin" />
+                                </span>
+                              ) : null}
+                              {r.servers.length > 0 && (
+                                <span className="adopt-where muted small">{r.servers.join(', ')}</span>
+                              )}
+                              {r.status === 'new' && (
+                                <button
+                                  className="adopt-skip"
+                                  title={t('Мониторить не нужно — убрать из предложений')}
+                                  onClick={() => mark([r.domain], true)}
+                                >
+                                  ✕
+                                </button>
+                              )}
+                              {r.status === 'skipped' && (
+                                <button
+                                  className="adopt-skip back"
+                                  title={t('Вернуть в предложения')}
+                                  onClick={() => mark([r.domain], false)}
+                                >
+                                  ↺
+                                </button>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  )
+                })
+              )}
+            </div>
+
+            {err && <div className="form-error small">{err}</div>}
+
+            {/* добавлять нечего — поле группы, «будет создано: 0» и серая кнопка только сбивают */}
+            {newTotal > 0 && (
+              <>
+                <div className="adopt-foot">
+                  <label className="adopt-grp">
+                    {t('группа')}
+                    <input
+                      list="kervax-site-groups"
+                      placeholder={t('без группы')}
+                      value={group}
+                      onChange={(e) => setGroup(e.target.value)}
+                    />
+                    <datalist id="kervax-site-groups">
+                      {groups.map((g) => (
+                        <option key={g} value={g} />
+                      ))}
+                    </datalist>
+                  </label>
+                  <span className="muted small">
+                    {picked.length > ADOPT_MAX
+                      ? t('выбрано {n}, за раз добавим {m}', { n: picked.length, m: ADOPT_MAX })
+                      : pickedLocal > 0
+                        ? t('будет создано мониторов: {n}, из них изнутри сервера: {m}', { n: picked.length, m: pickedLocal })
+                        : t('будет создано мониторов: {n}', { n: picked.length })}
+                  </span>
+                  <button className="primary" disabled={busy || picked.length === 0} onClick={submit}>
+                    {busy ? t('добавляем…') : t('Поставить на мониторинг')}
+                  </button>
+                </div>
+                <div className="muted small adopt-hint">
+                  {t('Создаётся HTTPS-монитор на каждый домен — с тем вариантом проверки, что выделен в строке: снаружи его проверяет панель, изнутри — агент на сервере сайта. Доступность здесь проверена один раз, итог хранится 12 часов.')}
+                </div>
               </>
             )}
-          </div>
+          </>
         )}
-
-        <div className="adopt-list">
-          {zones.length === 0 ? (
-            <div className="muted small">
-              {onlyNew && newTotal === 0
-                ? t('Все найденные домены уже стоят на мониторинге.')
-                : t('ничего не найдено')}
-            </div>
-          ) : (
-            zones.map(({ zone, list, fresh }) => {
-              const shut = collapsed.has(zone)
-              const on = fresh.length > 0 && fresh.every((r) => sel.has(r.domain))
-              return (
-                <div key={zone} className="adopt-zone">
-                  <div className="adopt-zone-head">
-                    <input
-                      type="checkbox"
-                      checked={on}
-                      disabled={fresh.length === 0}
-                      // частичный выбор внутри зоны — «квадратик», а не галка
-                      ref={(el) => {
-                        if (el) el.indeterminate = !on && fresh.some((r) => sel.has(r.domain))
-                      }}
-                      onChange={(e) => setMany(fresh, e.target.checked)}
-                    />
-                    <button className="adopt-zone-name" onClick={() => toggleZone(zone)}>
-                      <span className="adopt-caret">{shut ? '▸' : '▾'}</span>
-                      <span className="mono">{zone}</span>
-                    </button>
-                    <span className="muted small">
-                      {fresh.length > 0
-                        ? t('новых: {n} из {m}', { n: fresh.length, m: list.length })
-                        : t('всё покрыто ({m})', { m: list.length })}
-                    </span>
-                  </div>
-                  {!shut && (
-                    <div className="adopt-rows">
-                      {list.map((r) => (
-                        <div key={r.domain} className={`adopt-row adopt-${r.status}`}>
-                          {r.status === 'new' ? (
-                            <input
-                              type="checkbox"
-                              checked={sel.has(r.domain)}
-                              onChange={() => toggle(r.domain)}
-                            />
-                          ) : r.status === 'monitored' ? (
-                            r.checkId > 0 && onOpenCheck ? (
-                              <button
-                                className="adopt-mark up"
-                                title={t('Уже в мониторинге — открыть монитор')}
-                                onClick={() => onOpenCheck(r.checkId)}
-                              >
-                                ✓
-                              </button>
-                            ) : (
-                              <span className="adopt-mark up" title={t('Уже в мониторинге')}>✓</span>
-                            )
-                          ) : (
-                            <span
-                              className="adopt-mark"
-                              title={t('Маска или regexp — монитору нужен конкретный адрес')}
-                            >
-                              —
-                            </span>
-                          )}
-                          <span className="adopt-dom mono">{r.domain}</span>
-                          {r.status === 'new' && probes[r.domain] ? (
-                            <ProbeChoice
-                              p={probes[r.domain]}
-                              mode={modeOf(r.domain)}
-                              onMode={(m) => setModes((prev) => ({ ...prev, [r.domain]: m }))}
-                            />
-                          ) : r.status === 'new' && inflight.has(r.domain) ? (
-                            <span className="adopt-probes adopt-probe-wait">
-                              <span className="run-spin" />
-                            </span>
-                          ) : null}
-                          {r.servers.length > 0 && (
-                            <span className="adopt-where muted small">{r.servers.join(', ')}</span>
-                          )}
-                          {r.status === 'new' && (
-                            <button
-                              className="adopt-skip"
-                              title={t('Мониторить не нужно — убрать из предложений')}
-                              onClick={() => mark([r.domain], true)}
-                            >
-                              ✕
-                            </button>
-                          )}
-                          {r.status === 'skipped' && (
-                            <button
-                              className="adopt-skip back"
-                              title={t('Вернуть в предложения')}
-                              onClick={() => mark([r.domain], false)}
-                            >
-                              ↺
-                            </button>
-                          )}
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              )
-            })
-          )}
-        </div>
-
-        {err && <div className="form-error small">{err}</div>}
-        {done && <div className="adopt-done small">{done}</div>}
-
-        <div className="adopt-foot">
-          <label className="adopt-grp">
-            {t('группа')}
-            <input
-              list="kervax-site-groups"
-              placeholder={t('без группы')}
-              value={group}
-              onChange={(e) => setGroup(e.target.value)}
-            />
-            <datalist id="kervax-site-groups">
-              {groups.map((g) => (
-                <option key={g} value={g} />
-              ))}
-            </datalist>
-          </label>
-          <span className="muted small">
-            {picked.length > ADOPT_MAX
-              ? t('выбрано {n}, за раз добавим {m}', { n: picked.length, m: ADOPT_MAX })
-              : pickedLocal > 0
-                ? t('будет создано мониторов: {n}, из них изнутри сервера: {m}', { n: picked.length, m: pickedLocal })
-                : t('будет создано мониторов: {n}', { n: picked.length })}
-          </span>
-          <button className="primary" disabled={busy || picked.length === 0} onClick={submit}>
-            {busy ? t('добавляем…') : t('Поставить на мониторинг')}
-          </button>
-        </div>
-        <div className="muted small adopt-hint">
-          {t('Создаётся HTTPS-монитор на каждый домен — с тем вариантом проверки, что выделен в строке: снаружи его проверяет панель, изнутри — агент на сервере сайта. Доступность здесь проверена один раз, итог хранится 12 часов.')}
-        </div>
       </div>
     </div>,
     document.body,
