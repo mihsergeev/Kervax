@@ -57,7 +57,10 @@ AGENT_USER=kervax
 # 0.28: the ClickHouse dump (the schema) is read from the server's metadata files instead of
 #       logging in as default - no password is needed, whatever the users are (in a pod, in docker
 #       and on the host alike)
-KERVAX_SETUP_VERSION=0.28  # MAJOR.MINOR; compared component-wise (0.13 > 0.2!)
+# 0.29: enabled dumps always have something to run them: the refresh checks every minute that
+#       they hang on the backup service where there is one and on their own timer where there is
+#       not, and rebuilds the trigger when the node changed under them
+KERVAX_SETUP_VERSION=0.29  # MAJOR.MINOR; compared component-wise (0.13 > 0.2!)
 KERVAX_SETUP_ALWAYS=1  # safe on any node: installs only its own helper and spool and does not
                        # touch the backup configuration until the panel sends a command
 install -d -m 0755 "$HELPER_DIR" "$STATE_DIR" /var/lib/kervax/versions
@@ -166,6 +169,9 @@ EOF
     systemctl disable --now kervax-dumps.timer >/dev/null 2>&1 || true
     rm -f /etc/systemd/system/kervax-dumps.timer /etc/systemd/system/kervax-dumps.service
   else
+    # a drop-in left from a backup service that no longer exists: if the service came back, the
+    # dumps would run twice - from it and from our timer
+    rm -f "/etc/systemd/system/$PROV_SERVICE.d/kervax-dumps.conf"
     cat > /etc/systemd/system/kervax-dumps.service <<EOF
 [Unit]
 Description=Kervax: local database dumps (this node has no file backup)
@@ -188,6 +194,27 @@ EOF
     systemctl enable --now kervax-dumps.timer >/dev/null 2>&1 || true
   fi
   systemctl daemon-reload 2>/dev/null || true
+}
+
+# What runs the dumps is chosen once, when a dump is enabled: the file backup service if the node
+# has one, our own timer otherwise. When the backup service disappears later, the dumps stay
+# attached to a unit that no longer exists and nothing runs them. On fi-hz-ms2 the dump of the
+# panel's own database stood still from 22.07 to 17.09.2026, and nobody knew. A backup set up
+# after the dumps is the mirror case. So the trigger is checked on every refresh and rebuilt when
+# it no longer matches the node.
+dumps_trigger_maybe() {
+  ls "$DUMPS_D"/*.sh >/dev/null 2>&1 || return 0
+  local want=timer ok=false
+  systemctl cat "$PROV_SERVICE" >/dev/null 2>&1 && want=backup
+  if [ "$want" = backup ]; then
+    [ -f "/etc/systemd/system/$PROV_SERVICE.d/kervax-dumps.conf" ] \
+      && ! systemctl is-enabled kervax-dumps.timer >/dev/null 2>&1 && ok=true
+  else
+    systemctl is-enabled kervax-dumps.timer >/dev/null 2>&1 && ok=true
+  fi
+  "$ok" && return 0
+  write_run_dumps
+  logger -t kervax-backup "enabled dumps had nothing to run them - attached to the $([ "$want" = backup ] && echo "backup service $PROV_SERVICE" || echo "own kervax-dumps.timer")" 2>/dev/null || true
 }
 
 # A quick availability probe before enabling, instead of a full trial dump. On a large database
@@ -1928,7 +1955,7 @@ custom_scan_maybe() {
 case "${1:-}" in
   get-config)    cmd_get_config ;;
   # the scan is throttled inside (every CUSTOM_EVERY seconds): the config refresh stays per-minute
-  refresh)       refresh_config || true; custom_scan_maybe; kube_access_maybe || true ;;
+  refresh)       refresh_config || true; custom_scan_maybe; kube_access_maybe || true; dumps_trigger_maybe || true ;;
   custom-scan)   cmd_custom_scan ;;
   set-paths)     shift; cmd_set_paths "$@" ;;
   set-schedule)  shift; cmd_set_schedule "$@" ;;
