@@ -1125,12 +1125,14 @@ const EN: Record<string, string> = {
     'Warn about Kubernetes expiry this many days ahead (0 = off)',
   'Сроки ({n})': 'Expiry ({n})',
   'Сроки ⏳ ({n})': 'Expiry ⏳ ({n})',
-  'Сроки ⚠ ({n})': 'Expiry ⚠ ({n})',
-  'Сертификаты, kubeconfig-и и токены Flux с их сроками, плюс состояние доставки Flux. Собирает root-хелпер на самой ноде: панель токенов не видит.':
-    'Certificates, kubeconfigs and Flux tokens with their expiry dates, plus the state of Flux delivery. Collected by a root helper on the node itself: the panel never sees the tokens.',
+  'Сертификаты, kubeconfig-и и токены Flux с их сроками. Собирает root-хелпер на самой ноде: панель токенов не видит.':
+    'Certificates, kubeconfigs and Flux tokens with their expiry dates. Collected by a root helper on the node itself: the panel never sees the tokens.',
+  'Flux ({n})': 'Flux ({n})',
+  'Flux ⚠ ({n})': 'Flux ⚠ ({n})',
+  'Ресурсы Flux и их готовность. Не в Ready — доставка встала: запущенное продолжает работать, а новые изменения из git не доезжают.':
+    'Flux resources and whether they are Ready. Not Ready means delivery has stopped: what is running keeps running, but new changes from git do not arrive.',
   'Доставка Flux встала: {n} ресурс(ов) не в Ready. Уже запущенное продолжает работать — по метрикам это не видно.':
     'Flux delivery has stopped: {n} resource(s) not Ready. Everything already running keeps running — metrics will not show this.',
-  'Ресурсы Flux': 'Flux resources',
   'сертификат control-plane': 'control-plane certificate',
   'сертификат kubelet': 'kubelet certificate',
   'токен Flux': 'Flux token',
@@ -1170,7 +1172,6 @@ const EN: Record<string, string> = {
   'включить алерты для всех {n}': 'enable alerts for all {n}',
   'включите типы алертов: ⚙ → Алерты': 'enable alert types: ⚙ → Alerts',
   'задайте группу, которая уже в области': 'assign a group that is already in scope',
-  'Данных пока нет.': 'No data yet.',
   'Ресурсы Flux не в Ready — доставка встала': 'Flux resources are not Ready — delivery has stopped',
   'Сертификаты или токены истекают в ближайшие две недели':
     'Certificates or tokens expire within the next two weeks',

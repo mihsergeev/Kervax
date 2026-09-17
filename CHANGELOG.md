@@ -4,6 +4,16 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.4.44] - 2026-09-17
+
+### Changed
+- **Flux — отдельная вкладка в карточке кластера.** Ресурсы Flux были нижней частью вкладки
+  «Сроки», под десятками сертификатов, и вкладка называлась «Сроки ⚠», когда вставала
+  доставка. Теперь у Flux своя вкладка «Flux (N)», при сломанной доставке — «Flux ⚠ (N)» с
+  числом ресурсов не в Ready. Внутри — предупреждение о вставшей доставке, сначала
+  несработавшие ресурсы и фильтр по имени. Во «Сроках» остались только сроки сертификатов,
+  kubeconfig и токенов.
+
 ## [1.4.43] - 2026-09-17
 
 ### Fixed

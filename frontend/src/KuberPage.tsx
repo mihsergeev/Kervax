@@ -397,7 +397,7 @@ function KubeHostModal({
 }) {
   const { t } = useI18n()
   const [logsPod, setLogsPod] = useState<KubePod | null>(null)
-  const [tab, setTab] = useState<'pods' | 'finished' | 'workloads' | 'nodes' | 'expiry'>('pods')
+  const [tab, setTab] = useState<'pods' | 'finished' | 'workloads' | 'nodes' | 'expiry' | 'flux'>('pods')
   const [q, setQ] = useState('')
   const [sort, setSort] = useState<'state' | 'name' | 'restarts' | 'ns'>('state')
   const nodes = kube.nodes ?? []
@@ -419,12 +419,15 @@ function KubeHostModal({
   const flux: FluxState[] = s.last_report?.flux ?? []
   const fluxBroken = flux.filter((f) => !f.ready && !FLUX_TRANSIENT.has(f.reason ?? ''))
   const expirySoon = expiry.filter((e) => daysLeft(e.expires) <= 14).length
-  const hasExpiryTab = expiry.length > 0 || flux.length > 0
   const doneCount = pods.filter(podFinished).length
   // вкладка «Завершённые» есть только пока они есть; если последний завершённый пропал
-  // (удалили/сборщик подчистил) — не залипаем на исчезнувшей вкладке
+  // (удалили/сборщик подчистил) — не залипаем на исчезнувшей вкладке. Так же со сроками и Flux.
   const curTab =
-    (tab === 'finished' && doneCount === 0) || (tab === 'expiry' && !hasExpiryTab) ? 'pods' : tab
+    (tab === 'finished' && doneCount === 0) ||
+    (tab === 'expiry' && expiry.length === 0) ||
+    (tab === 'flux' && flux.length === 0)
+      ? 'pods'
+      : tab
   // «Поды» = только живые; завершённые (история Job/CronJob) — своя вкладка, чтобы не
   // подмешивались к тому, что надо чинить
   const fpods = pods
@@ -433,6 +436,11 @@ function KubeHostModal({
     .slice()
     .sort(pcmp[sort])
   const fworkloads = workloads.filter((w) => !ql || `${w.name} ${w.ns} ${w.kind}`.toLowerCase().includes(ql))
+  // сломанные сверху: вкладку открывают, чтобы найти, что не доехало
+  const fflux = flux
+    .filter((f) => !ql || `${f.where} ${f.kind} ${f.reason ?? ''}`.toLowerCase().includes(ql))
+    .slice()
+    .sort((a, b) => Number(a.ready) - Number(b.ready) || a.where.localeCompare(b.where))
   const nodesReady = nodes.filter((n) => n.ready).length
   const { running: podsRunning, active: podsActive } = podCounts(pods)
   const tabs: { k: typeof tab; l: string; title?: string }[] = [
@@ -446,17 +454,23 @@ function KubeHostModal({
       : []),
     { k: 'workloads', l: t('Воркоады ({n})', { n: workloads.length }) },
     { k: 'nodes', l: t('Ноды ({n})', { n: nodes.length }) },
-    ...(hasExpiryTab
+    ...(expiry.length > 0
       ? [{
           k: 'expiry' as const,
-          l:
-            fluxBroken.length > 0
-              ? t('Сроки ⚠ ({n})', { n: fluxBroken.length })
-              : expirySoon > 0
-                ? t('Сроки ⏳ ({n})', { n: expirySoon })
-                : t('Сроки ({n})', { n: expiry.length }),
+          l: expirySoon > 0 ? t('Сроки ⏳ ({n})', { n: expirySoon }) : t('Сроки ({n})', { n: expiry.length }),
           title: t(
-            'Сертификаты, kubeconfig-и и токены Flux с их сроками, плюс состояние доставки Flux. Собирает root-хелпер на самой ноде: панель токенов не видит.',
+            'Сертификаты, kubeconfig-и и токены Flux с их сроками. Собирает root-хелпер на самой ноде: панель токенов не видит.',
+          ),
+        }]
+      : []),
+    // Flux — своя вкладка: сроки отвечают «когда сломается», Flux — «что уже не доезжает»,
+    // и в одном списке второе терялось под десятками сертификатов
+    ...(flux.length > 0
+      ? [{
+          k: 'flux' as const,
+          l: fluxBroken.length > 0 ? t('Flux ⚠ ({n})', { n: fluxBroken.length }) : t('Flux ({n})', { n: flux.length }),
+          title: t(
+            'Ресурсы Flux и их готовность. Не в Ready — доставка встала: запущенное продолжает работать, а новые изменения из git не доезжают.',
           ),
         }]
       : []),
@@ -552,7 +566,28 @@ function KubeHostModal({
                     />
                   ))
                 ))}
-              {curTab === 'expiry' && (
+              {curTab === 'expiry' &&
+                expiry.map((e) => {
+                  const d = daysLeft(e.expires)
+                  return (
+                    <div className={`loc-res docker-row ${expiryTone(d)}`} key={e.kind + '/' + e.where + '/' + (e.note ?? '')}>
+                      <div className="docker-c-main">
+                        <div className="docker-c-name mono">
+                          {e.where}
+                          <span className="type-chip">{t(EXPIRY_KIND[e.kind] ?? e.kind)}</span>
+                        </div>
+                        <div className="docker-c-img mono muted small">
+                          {new Date(e.expires * 1000).toLocaleDateString()}
+                          {e.note ? ` · ${e.note}` : ''}
+                        </div>
+                      </div>
+                      <div className={`docker-c-status mono small ${expiryTone(d)}`}>
+                        {d < 0 ? t('истёк') : d === 0 ? t('сегодня') : t('{n} дн.', { n: d })}
+                      </div>
+                    </div>
+                  )
+                })}
+              {curTab === 'flux' && (
                 <>
                   {fluxBroken.length > 0 && (
                     <div className="kube-expiry-note t-down">
@@ -561,53 +596,27 @@ function KubeHostModal({
                       })}
                     </div>
                   )}
-                  {expiry.map((e) => {
-                    const d = daysLeft(e.expires)
-                    return (
-                      <div className={`loc-res docker-row ${expiryTone(d)}`} key={e.kind + '/' + e.where + '/' + (e.note ?? '')}>
-                        <div className="docker-c-main">
-                          <div className="docker-c-name mono">
-                            {e.where}
-                            <span className="type-chip">{t(EXPIRY_KIND[e.kind] ?? e.kind)}</span>
-                          </div>
-                          <div className="docker-c-img mono muted small">
-                            {new Date(e.expires * 1000).toLocaleDateString()}
-                            {e.note ? ` · ${e.note}` : ''}
-                          </div>
+                  {fflux.length === 0 && <div className="muted small">{t('Ничего не найдено.')}</div>}
+                  {fflux.map((f) => (
+                    <div
+                      className={`loc-res docker-row ${f.ready ? 't-up' : FLUX_TRANSIENT.has(f.reason ?? '') ? '' : 't-down'}`}
+                      key={f.kind + '/' + f.where}
+                    >
+                      <div className="docker-c-main">
+                        <div className="docker-c-name mono">
+                          {f.where}
+                          <span className="type-chip">{f.kind}</span>
                         </div>
-                        <div className={`docker-c-status mono small ${expiryTone(d)}`}>
-                          {d < 0 ? t('истёк') : d === 0 ? t('сегодня') : t('{n} дн.', { n: d })}
+                        <div className="docker-c-img mono muted small">
+                          {f.reason || ''}
+                          {f.message ? ` · ${f.message}` : ''}
                         </div>
                       </div>
-                    )
-                  })}
-                  {flux.length > 0 && <div className="kube-expiry-sub muted small">{t('Ресурсы Flux')}</div>}
-                  {flux
-                    .slice()
-                    .sort((a, b) => Number(a.ready) - Number(b.ready) || a.where.localeCompare(b.where))
-                    .map((f) => (
-                      <div
-                        className={`loc-res docker-row ${f.ready ? 't-up' : FLUX_TRANSIENT.has(f.reason ?? '') ? '' : 't-down'}`}
-                        key={f.kind + '/' + f.where}
-                      >
-                        <div className="docker-c-main">
-                          <div className="docker-c-name mono">
-                            {f.where}
-                            <span className="type-chip">{f.kind}</span>
-                          </div>
-                          <div className="docker-c-img mono muted small">
-                            {f.reason || ''}
-                            {f.message ? ` · ${f.message}` : ''}
-                          </div>
-                        </div>
-                        <div className={`docker-c-status mono small ${f.ready ? 't-up' : 't-down'}`}>
-                          {f.ready ? 'Ready' : 'NotReady'}
-                        </div>
+                      <div className={`docker-c-status mono small ${f.ready ? 't-up' : 't-down'}`}>
+                        {f.ready ? 'Ready' : 'NotReady'}
                       </div>
-                    ))}
-                  {expiry.length === 0 && flux.length === 0 && (
-                    <div className="muted small">{t('Данных пока нет.')}</div>
-                  )}
+                    </div>
+                  ))}
                 </>
               )}
               {curTab === 'nodes' &&
