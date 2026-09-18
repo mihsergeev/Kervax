@@ -641,6 +641,9 @@ class ServerMetric(Base):
     sock_tcp: Mapped[float | None] = mapped_column(Float, nullable=True)
     sock_tcp_tw: Mapped[float | None] = mapped_column(Float, nullable=True)
     sock_udp: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # запросов в минуту по access-логам веб-сервера (их считает helper webserver-setup):
+    # наплыв редиректов по 300 байт канал почти не шевелит, а запросы показывает сразу
+    web_rpm: Mapped[float | None] = mapped_column(Float, nullable=True)
 
 
 class LocationSample(Base):

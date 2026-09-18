@@ -168,3 +168,71 @@ async def test_metric_walking_around_threshold_goes_quiet(tmp_path, monkeypatch)
     assert len(lift) == 1 and "CPU снова в норме" in lift[0]
     assert any("CPU 95%" in x for x in await tick(60 * 7 + 30, 95))
     await engine.dispose()
+
+
+def test_web_rate_block_is_taken_only_while_fresh():
+    now = datetime.now(timezone.utc)
+    fresh = {"web-rate": {"ts": now.timestamp() - 30, "rpm": 6042, "logs": []}}
+    assert collector.web_rate_total(fresh, now) == 6042
+    # хелпер встал: вчерашний поток не должен выглядеть как сегодняшний
+    old = {"web-rate": {"ts": now.timestamp() - 3600, "rpm": 6042}}
+    assert collector.web_rate_total(old, now) is None
+    assert collector.web_rate_total(None, now) is None
+    assert collector.web_rate_total({"web-rate": {"rpm": 10}}, now) is None
+
+
+async def test_requests_are_preferred_over_bytes(tmp_path, monkeypatch):
+    engine, factory = await _panel(tmp_path, "rpm.db")
+    now = datetime.now(timezone.utc)
+    rep = _report(92, 300_000, 900)
+    rep["extras"] = {"web-rate": {"ts": now.timestamp() - 20, "rpm": 6000, "logs": [
+        {"log": "/var/log/nginx/winbet.access.log", "rpm": 5800, "sites": ["play-winbet.top"]}]}}
+    async with factory() as s:
+        s.add(Server(
+            name="fi-hz-aff", token_hash="x", enabled=True, backup_not_required=True,
+            last_seen=now, last_report=rep, cpu_alert_percent=90, mem_alert_percent=0,
+            disk_alert_percent=0, alert_sustain_seconds=0,
+        ))
+        await s.commit()
+        for d in range(1, 8):
+            for m in (-20, 0, 20):
+                s.add(ServerMetric(
+                    server_id=1, ts=now - timedelta(days=d) + timedelta(minutes=m),
+                    cpu_percent=30, net_rx=180_000, net_tx=20_000, sock_tcp=300, web_rpm=150,
+                ))
+        await s.commit()
+
+    sent: list[str] = []
+
+    async def fake_send(cfg, text, parse_mode=None):
+        sent.append(text)
+        return []
+
+    monkeypatch.setattr("app.alerts.send_alert", fake_send)
+    await collector.evaluate_servers(factory, Settings(alert_webhook="http://hook"), now)
+    # редиректы по 300 байт канал почти не шевелят, поэтому о байтах молчим, а запросы
+    # выросли в 40 раз - о них и говорим
+    assert len(sent) == 1 and "запросов к веб-серверу x40 к обычному для этого часа" in sent[0]
+    assert "трафик" not in sent[0]
+    await engine.dispose()
+
+
+async def test_report_stores_requests_per_minute(client, auth_headers):
+    """Блок хелпера приезжает в extras как есть, панель кладёт сумму в тайм-серию:
+    иначе не с чем сравнивать наплыв и нечего рисовать на графике."""
+    import time
+
+    r = await client.post("/api/servers", json={"name": "web1"}, headers=auth_headers)
+    token = r.json()["token"]
+    sid = r.json()["server"]["id"]
+    report = {
+        "hostname": "h1", "os": "Ubuntu 24.04", "agent_version": "2.9",
+        "cpu_percent": 12.5, "mem_used": 50, "mem_total": 100,
+        "extras": {"web-rate": {"ts": int(time.time()), "rpm": 6042, "logs": [
+            {"log": "/var/log/nginx/winbet.access.log", "rpm": 6000, "sites": ["play-winbet.top"]}]}},
+    }
+    r = await client.post("/api/agent/report", json=report,
+                          headers={"Authorization": f"Bearer {token}"})
+    assert r.status_code == 200
+    r = await client.get(f"/api/servers/{sid}/metrics", headers=auth_headers)
+    assert r.json()[0]["web_rpm"] == 6042

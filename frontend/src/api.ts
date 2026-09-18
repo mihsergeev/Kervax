@@ -903,8 +903,10 @@ export type ServerReport = {
   kube_expiry?: KubeExpiry[] // сроки PKI/kubeconfig/токенов Flux (хелпер kubeexpiry-setup)
   flux?: FluxState[] | null // состояния Ready ресурсов Flux; null = данных нет
   caps?: Record<string, boolean> // возможности агента: kmsg, proc_full (полный ли /proc)
+  extras?: { 'web-rate'?: WebRate } & Record<string, unknown> // блоки хелперов как есть
   clock?: ClockInfo // статус синхронизации времени (timedatectl)
   clock_skew_sec?: number // сдвиг часов ноды относительно панели, сек (± ; считает бэкенд)
+  clock_unix?: number // локальные часы ноды на момент отправки отчёта
 }
 export type ClockInfo = {
   synced: boolean // NTPSynchronized=yes
@@ -1158,6 +1160,14 @@ export type FluxState = {
   message?: string
 }
 
+// Запросы в минуту по access-логам: считает helper webserver-setup, агент отдаёт
+// блок как есть в extras. Наплыв редиректов канал почти не шевелит, а тут виден сразу.
+export type WebRate = {
+  ts: number
+  rpm: number
+  logs?: { log: string; rpm: number; sites?: string[] }[]
+}
+
 export type WebService = {
   kind: string // nginx / ingress-nginx / Envoy / Traefik / HAProxy / Caddy / Apache
   source?: string // где найден (напр. «kubernetes»)
@@ -1235,6 +1245,7 @@ export type ServerMetric = {
   sock_tcp_tw: number | null
   sock_udp: number | null
   disks: { mount: string; pct: number }[] | null
+  web_rpm: number | null // запросов в минуту по access-логам веб-сервера
 }
 export type ServerForm = {
   name: string

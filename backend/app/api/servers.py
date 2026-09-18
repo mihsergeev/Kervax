@@ -14,7 +14,7 @@ from fastapi.responses import FileResponse, PlainTextResponse
 from sqlalchemy import delete as sa_delete, func, select
 
 from app import audit, custom_backups, geoip, manual_probe
-from app.collector import dump_local_stale, send_alerts_soon
+from app.collector import dump_local_stale, send_alerts_soon, web_rate_total
 from app.setup_scripts import (
     current_setup_versions as _current_setup_versions,
     setup_needed as _setup_needed,
@@ -1105,6 +1105,7 @@ def _bin_metrics(rows: list[ServerMetric], hours: float) -> list[ServerMetricOut
                 sock_tcp=avg([x.sock_tcp for x in grp]),
                 sock_tcp_tw=avg([x.sock_tcp_tw for x in grp]),
                 sock_udp=avg([x.sock_udp for x in grp]),
+                web_rpm=avg([x.web_rpm for x in grp]),
                 disks=disks,
             )
         )
@@ -2115,6 +2116,7 @@ async def agent_report(
                 sock_tcp=round(body.sock_tcp),
                 sock_tcp_tw=round(body.sock_tcp_tw),
                 sock_udp=round(body.sock_udp),
+                web_rpm=web_rate_total(body.extras, now, body.clock_unix),
                 ts=now,
             )
         )

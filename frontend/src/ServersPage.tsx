@@ -24,7 +24,7 @@ import {
   type ServerMetric,
 } from './api'
 import { StackedAreaChart, type Series } from './charts/StackedAreaChart'
-import { fmtSetupVersion, srvIssues } from './serverUtils'
+import { fmtSetupVersion, srvIssues, webRate } from './serverUtils'
 import { OsIcon } from './osIcon'
 import { CountryFlag } from './CountryFlag'
 import { currentLang, useI18n } from './i18n'
@@ -60,6 +60,7 @@ type MetricKey =
   | 'disktemp'
   | 'disk'
   | 'conntrack'
+  | 'web'
   | 'sockets'
 
 // приглушённая палитра (Datadog-стиль) для overlay-графиков (ядра/интерфейсы/диски).
@@ -327,6 +328,12 @@ function buildMetric(
       })),
     }
   }
+  if (key === 'web')
+    return {
+      key, ts, mode: 'overlay', fmtY: fmtNum, fmtV: fmtNum,
+      title: `${t('Веб-сервер')} · ${t('запросов в минуту')}`,
+      series: [{ name: t('запросов/мин'), color: '#5794f2', values: M.map((m) => m.web_rpm) }],
+    }
   if (key === 'conntrack')
     return {
       key, ts, mode: 'overlay', fmtY: fmtNum, fmtV: fmtNum,
@@ -2888,6 +2895,23 @@ function ServerDetail({
                   palette={CORE_COLORS}
                 />,
               )}
+            {webRate(r) && chartCard(
+              'web',
+              <div className="loc-results chart-stats">
+                <StatRow color="#5a8fc7" name={t('запросов/мин')} value={fmtNum(webRate(r)!.rpm)} />
+                {(webRate(r)!.logs ?? [])
+                  .slice()
+                  .sort((a, b) => b.rpm - a.rpm)
+                  .slice(0, 4)
+                  .map((l) => (
+                    <StatRow
+                      key={l.log}
+                      name={l.sites?.length ? l.sites.join(', ') : l.log.split('/').pop() || l.log}
+                      value={fmtNum(l.rpm)}
+                    />
+                  ))}
+              </div>,
+            )}
             {(r.net_ifaces?.length ?? 0) > 0 && chartCard('netiftx')}
             {(r.net_ifaces?.length ?? 0) > 0 &&
               chartCard(
