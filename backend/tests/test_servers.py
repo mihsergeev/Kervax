@@ -1569,3 +1569,31 @@ async def test_daily_uncovered_digest(tmp_path, monkeypatch):
         await s.commit()
     await collector._daily_uncovered(factory, settings)
     assert sent == []
+
+
+async def test_duplicate_server_name_is_refused(client, auth_headers):
+    """Панель различает ноды по имени, поэтому второй такой же записи быть не должно.
+
+    Живой случай (18.09.2026): кнопка "Добавить сервер" молча завела второй ru-se-mxstat
+    рядом с рабочим, и в списке оказались две одинаковые строки, вторая пустая."""
+    r = await client.post("/api/servers", json={"name": "ru-se-mxstat"}, headers=auth_headers)
+    assert r.status_code == 201, r.text
+    sid = r.json()["server"]["id"]
+
+    for dup in ("ru-se-mxstat", "  ru-se-mxstat ", "RU-SE-MXSTAT"):
+        r = await client.post("/api/servers", json={"name": dup}, headers=auth_headers)
+        assert r.status_code == 409, dup
+        assert "ru-se-mxstat" in r.json()["detail"]
+
+    # другое имя заводится, пробелы по краям срезаются
+    r = await client.post("/api/servers", json={"name": " ru-se-mxstat-2 "}, headers=auth_headers)
+    assert r.status_code == 201 and r.json()["server"]["name"] == "ru-se-mxstat-2"
+    other = r.json()["server"]["id"]
+
+    # переименовать в занятое имя нельзя, свое имя оставить можно
+    r = await client.patch(f"/api/servers/{other}", json={"name": "ru-se-mxstat"}, headers=auth_headers)
+    assert r.status_code == 409
+    r = await client.patch(f"/api/servers/{sid}", json={"name": "ru-se-mxstat"}, headers=auth_headers)
+    assert r.status_code == 200
+    r = await client.patch(f"/api/servers/{other}", json={"name": " ru-se-mxstat-3 "}, headers=auth_headers)
+    assert r.status_code == 200 and r.json()["name"] == "ru-se-mxstat-3"

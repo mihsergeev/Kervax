@@ -240,6 +240,14 @@ input:focus {
   font-size: 0.8rem;
   color: var(--text-muted);
 }
+/* подсказка под полем: ошибка красная, предупреждение желтое. Без этого их съедал
+   серый цвет подписи поля - он специфичнее, чем .form-error сам по себе */
+.field > span.form-error {
+  color: var(--down);
+}
+.field > span.t-degraded {
+  color: var(--degraded);
+}
 
 .form-error {
   color: var(--down);

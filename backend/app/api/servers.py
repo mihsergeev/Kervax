@@ -11,7 +11,7 @@ from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, Query, Request, status
 from fastapi.responses import FileResponse, PlainTextResponse
-from sqlalchemy import delete as sa_delete, select
+from sqlalchemy import delete as sa_delete, func, select
 
 from app import audit, custom_backups, geoip, manual_probe
 from app.collector import dump_local_stale, send_alerts_soon
@@ -313,8 +313,10 @@ async def list_servers(user: CurrentUser, session: SessionDep) -> list[ServerOut
 async def create_server(
     body: ServerCreate, user: CurrentUser, session: SessionDep
 ) -> ServerEnrollOut:
+    name = body.name.strip()
+    await _name_free(session, name)
     token = generate_agent_token()
-    server = Server(**body.model_dump(), token_hash=hash_agent_token(token))
+    server = Server(**(body.model_dump() | {"name": name}), token_hash=hash_agent_token(token))
     session.add(server)
     await session.commit()
     await session.refresh(server)
@@ -324,6 +326,24 @@ async def create_server(
         server=_out(server, datetime.now(timezone.utc)),
         token=token,
         install_cmd=_install_cmd(token),
+    )
+
+
+async def _name_free(session, name: str, exclude_id: int | None = None) -> None:
+    """Проверяет, что имя еще не занято: панель различает ноды по имени.
+
+    Две записи с одним именем в списке не различить, их метрики и алерты идут вперемешку,
+    а вторая обычно пустая: ту же ноду завели второй раз. Так в парке появился второй
+    ru-se-mxstat (18.09.2026) - панель молча создала его рядом с рабочим."""
+    dup = await session.scalar(
+        select(Server).where(func.lower(func.trim(Server.name)) == name.strip().lower())
+    )
+    if dup is None or dup.id == exclude_id:
+        return
+    raise HTTPException(
+        status.HTTP_409_CONFLICT,
+        f"Сервер {dup.name} уже есть в панели. Другой ноде дайте другое имя, "
+        "а ту же ноду второй раз заводить не нужно.",
     )
 
 
@@ -957,7 +977,11 @@ async def update_server(
     server_id: int, body: ServerUpdate, user: CurrentUser, session: SessionDep
 ) -> ServerOut:
     server = await _get_or_404(server_id, session, user)
-    for field, value in body.model_dump(exclude_unset=True).items():
+    fields = body.model_dump(exclude_unset=True)
+    if fields.get("name") is not None:
+        fields["name"] = fields["name"].strip()
+        await _name_free(session, fields["name"], exclude_id=server.id)
+    for field, value in fields.items():
         setattr(server, field, value)
     await session.commit()
     await session.refresh(server)
