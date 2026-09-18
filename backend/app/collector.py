@@ -1577,6 +1577,7 @@ _BASE_MIN_SAMPLES = 20      # меньше замеров - истории ма�
 # базой бывают байты в секунду, и тогда любой бэкап дал бы «трафик x900».
 _SURGE_MIN_NET = 1_000_000  # байт/сек
 _SURGE_MIN_CONN = 200
+_SURGE_MIN_RPM = 600        # запросов в минуту: 10 в секунду это уже поток
 
 
 def _fmt_size(b: float) -> str:
@@ -1617,7 +1618,8 @@ async def hour_baseline(session: AsyncSession, server_id: int, now: datetime) ->
         for day in (now - timedelta(days=d) for d in range(1, _BASE_DAYS + 1))
     ]
     rows = list(await session.execute(
-        select(ServerMetric.net_rx, ServerMetric.net_tx, ServerMetric.sock_tcp).where(
+        select(ServerMetric.net_rx, ServerMetric.net_tx, ServerMetric.sock_tcp,
+               ServerMetric.web_rpm).where(
             ServerMetric.server_id == server_id, or_(*windows)
         )
     ))
@@ -1627,7 +1629,30 @@ async def hour_baseline(session: AsyncSession, server_id: int, now: datetime) ->
     conn = [float(r[2]) for r in rows if r[2] is not None]
     if len(conn) >= _BASE_MIN_SAMPLES:
         out["conn"] = statistics.median(conn)
+    rpm = [float(r[3]) for r in rows if r[3] is not None]
+    if len(rpm) >= _BASE_MIN_SAMPLES:
+        out["rpm"] = statistics.median(rpm)
     return out
+
+
+def web_rate_total(extras: dict | None, now: datetime, clock_unix: float = 0,
+                   max_age: int = 600) -> float | None:
+    """Запросов в минуту по всем access-логам ноды. Блок кладёт helper webserver-setup
+    (report.d/web-rate.json), агент отдаёт его как есть. Протухший блок игнорируем:
+    хелпер мог встать, а вчерашний поток выглядел бы как сегодняшний.
+
+    Возраст меряем по часам САМОЙ ноды (clock_unix из отчёта): её часы бывают сдвинуты
+    относительно панели - на это есть отдельный алерт, - и живые данные из-за сдвига
+    терялись бы. Часов ноды нет (старый агент) - сверяемся со своими."""
+    block = ((extras or {}).get("web-rate")) or {}
+    if not isinstance(block, dict):
+        return None
+    ts = float(block.get("ts") or 0)
+    ref = float(clock_unix or 0) or now.timestamp()
+    if ts <= 0 or ref - ts > max_age:
+        return None
+    rpm = block.get("rpm")
+    return float(rpm) if isinstance(rpm, (int, float)) else None
 
 
 def _times(cur: float, base: float, floor: float) -> str:
@@ -1638,7 +1663,7 @@ def _times(cur: float, base: float, floor: float) -> str:
     return f"x{min(cur / base, 999):.0f}"
 
 
-def cause_text(rep: dict, kind: str, base: dict[str, float]) -> str:
+def cause_text(rep: dict, kind: str, base: dict[str, float], now: datetime | None = None) -> str:
     """Хвост к тексту алерта: кто ест ресурс и не наплыв ли это. Пусто, если
     сказать нечего - тогда алерт выглядит как раньше."""
     parts = []
@@ -1646,13 +1671,20 @@ def cause_text(rep: dict, kind: str, base: dict[str, float]) -> str:
     if eaters:
         parts.append(f"сверху {eaters}")
     surge = []
-    net = _times(float(rep.get("net_rx") or 0) + float(rep.get("net_tx") or 0),
-                 base.get("net") or 0, _SURGE_MIN_NET)
-    if net:
-        surge.append(f"трафик {net}")
-    conn = _times(float(rep.get("sock_tcp") or 0), base.get("conn") or 0, _SURGE_MIN_CONN)
-    if conn:
-        surge.append(f"соединений {conn}")
+    # Запросы точнее байтов: 2.3 млн редиректов по 300 байт канал почти не шевелят.
+    # Их считает helper webserver-setup; нет его - остаются трафик и соединения.
+    cur_rpm = web_rate_total(rep.get("extras"), now, rep.get("clock_unix") or 0) if now else None
+    rpm = _times(cur_rpm or 0, base.get("rpm") or 0, _SURGE_MIN_RPM) if cur_rpm else ""
+    if rpm:
+        surge.append(f"запросов к веб-серверу {rpm}")
+    else:
+        net = _times(float(rep.get("net_rx") or 0) + float(rep.get("net_tx") or 0),
+                     base.get("net") or 0, _SURGE_MIN_NET)
+        if net:
+            surge.append(f"трафик {net}")
+        conn = _times(float(rep.get("sock_tcp") or 0), base.get("conn") or 0, _SURGE_MIN_CONN)
+        if conn:
+            surge.append(f"соединений {conn}")
     if surge:
         parts.append(" и ".join(surge) + " к обычному для этого часа")
     return " - " + "; ".join(parts) if parts else ""
@@ -2145,7 +2177,7 @@ async def evaluate_servers(
             except Exception:
                 log.warning("норма трафика для %s не посчиталась", s.name, exc_info=True)
                 base_cache[s.id] = {}
-        return cause_text(s.last_report or {}, key, base_cache[s.id])
+        return cause_text(s.last_report or {}, key, base_cache[s.id], now)
 
     def srv_fire(s: Server, key: str, rule: dict, ctx: dict) -> alerts.Msg:
         """Текст срабатывания: дефолт → богатый формат (иконка + имя-ссылкой + суть),

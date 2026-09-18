@@ -8,11 +8,12 @@
 # secrets or config contents.
 set -euo pipefail
 
-KERVAX_SETUP_VERSION=0.6  # MAJOR.MINOR; compared component-wise
+KERVAX_SETUP_VERSION=0.7  # MAJOR.MINOR; compared component-wise
 KERVAX_SETUP_ALWAYS=1     # safe on any node: the refresh is a no-op without a web server
 
 HELPER_DIR=/lib65/kervax
 HELPER="$HELPER_DIR/kervax-web-sites"
+RATE="$HELPER_DIR/kervax-web-rate"
 STATE_DIR=/var/lib/kervax
 OUT="$STATE_DIR/web-sites.json"
 
@@ -21,7 +22,7 @@ if [ "$(id -u)" != 0 ]; then echo "Root required." >&2; exit 1; fi
 # The parent /var/lib/kervax is set to 0755 EXPLICITLY (otherwise, under an active umask
 # 077, the unprivileged agent cannot enter it and never reads the file — the very bug from
 # kube-setup).
-install -d -m 0755 "$HELPER_DIR" "$STATE_DIR" "$STATE_DIR/versions"
+install -d -m 0755 "$HELPER_DIR" "$STATE_DIR" "$STATE_DIR/versions" "$STATE_DIR/report.d"
 
 # -- refresh script (root, on a timer). Single quotes keep the body literal, no expansion. --
 cat > "$HELPER" <<'HELPER_EOF'
@@ -119,6 +120,84 @@ collect_traefik() {
   done | grep -oE 'Host(SNI)?\(`[^)]*\)' | grep -oE '`[^`]+`' | tr -d '`' | extract_domains
 }
 
+# ── access-логи: какой лог какие домены обслуживает ───────────────────────────
+# Нужно для счёта запросов в минуту (его делает kervax-web-rate раз в минуту). Здесь
+# только карта «файл лога -> домены», её кладём в web-logs.tsv рядом: файл служебный,
+# агент читает не его, а готовый web-rate.json.
+#
+# Разбор дампа nginx -T: у каждого server-блока запоминаем его access_log (или
+# унаследованный с уровня http) и server_name. Вложенные location со своим логом не
+# трогаем - считаем виртуальный хост целиком.
+extract_logs() {
+  awk '
+    # лог печатаем и без доменов: общий access.log ловит всё, что не разложено по
+    # виртуальным хостам, и его поток тоже надо видеть
+    function flush() { if (slog!="") print slog "\t" names }
+    /^[[:space:]]*server[[:space:]]*\{/ && !insrv { insrv=1; depth=1; names=""; slog=hlog; next }
+    !insrv && $1=="access_log" { p=$2; sub(/;$/,"",p); if (p!="off") hlog=p; next }
+    insrv {
+      o=gsub(/\{/,"{"); c=gsub(/\}/,"}"); depth += o-c
+      if ($1=="server_name") {
+        for (i=2;i<=NF;i++) { g=$i; sub(/;$/,"",g); gsub(/^["\047]+|["\047]+$/,"",g);
+          if (g=="" || g=="_" || g=="localhost") continue;
+          if (g ~ /^[~^]/) {                          # regexp сводим к *.domain.tld, как в доменах
+            r=g; sub(/^~/,"",r); sub(/^\^/,"",r); sub(/\$$/,"",r);
+            gsub(/\([^)]*\\\.\)\?/,"",r);
+            gsub(/\(\?<[A-Za-z0-9_]+>[^)]*\)/,"*",r);
+            gsub(/\([^)]*\)\??/,"*",r);
+            gsub(/\\\./,".",r);
+            gsub(/\.\+|\.\*/,"*",r);
+            g=r }
+          if (g !~ /[A-Za-z]/) continue;
+          if (g !~ /^[A-Za-z0-9.*_-]+$/) continue;
+          names = names (names==""?"":" ") g }
+      } else if ($1=="access_log" && depth==1) { p=$2; sub(/;$/,"",p); slog=(p=="off"?"":p) }
+      if (depth<=0) { flush(); insrv=0 }
+    }
+  '
+}
+
+# Один лог - одна строка: иначе десяток виртуальных хостов с общим логом дал бы десяток
+# строк, и счётчик сложил бы один и тот же поток столько же раз.
+merge_logs() {
+  awk -F'\t' '
+    { if (!($1 in seen_log)) { seen_log[$1]=1; a[$1]="" }
+      n=split($2, w, " ")
+      for (i=1;i<=n;i++) if (w[i]!="" && !(($1 SUBSEP w[i]) in seen)) {
+        seen[$1 SUBSEP w[i]]=1; a[$1]=a[$1] (a[$1]==""?"":" ") w[i] } }
+    END { for (k in a) print k "\t" a[k] }'
+}
+
+# Путь лога внутри контейнера -> путь на хосте по его bind-mount'ам. Лог, оставшийся
+# внутри контейнера или уехавший в stdout, пропускаем: считать нечего.
+host_path() {
+  awk -F'|' -v p="$1" '
+    { d=$1; s=$2; if (d=="" || s=="") next;
+      if (p==d) { print s; exit }
+      if (substr(p,1,length(d)+1)==d"/") { print s substr(p,length(d)+1); exit } }'
+}
+
+collect_logs() {
+  command -v nginx >/dev/null 2>&1 && nginx -T 2>/dev/null | extract_logs
+  command -v docker >/dev/null 2>&1 || return 0
+  docker ps --format '{{.Names}} {{.Image}}' 2>/dev/null | awk '/nginx/{print $1}' | sort -u \
+    | while read -r c; do
+        [ -n "$c" ] || continue
+        mounts=$(docker inspect --format '{{range .Mounts}}{{.Destination}}|{{.Source}}
+{{end}}' "$c" 2>/dev/null)
+        [ -n "$mounts" ] || continue
+        docker exec "$c" nginx -T 2>/dev/null | extract_logs | while IFS="$(printf '\t')" read -r lg names; do
+          hp=$(printf '%s\n' "$mounts" | host_path "$lg")
+          [ -n "$hp" ] && printf '%s\t%s\n' "$hp" "$names"
+        done
+      done
+}
+
+LOGTMP="/var/lib/kervax/web-logs.tsv.tmp.$$"
+collect_logs | merge_logs | sort > "$LOGTMP" 2>/dev/null || : > "$LOGTMP"
+mv -f "$LOGTMP" /var/lib/kervax/web-logs.tsv
+chmod 0644 /var/lib/kervax/web-logs.tsv
+
 NGINX=$(collect_nginx | sort -u)
 APACHE=$(collect_apache | sort -u)
 CADDY=$(collect_caddy | sort -u)
@@ -141,6 +220,96 @@ chmod 0644 "$OUT"
 HELPER_EOF
 chmod 0755 "$HELPER"
 
+# -- счёт запросов в минуту (root, раз в минуту) --
+cat > "$RATE" <<'RATE_EOF'
+#!/usr/bin/env bash
+# Сколько строк добавилось в каждый access-лог с прошлого запуска -> запросов в минуту.
+# Карту «лог -> домены» пишет сборщик доменов (web-logs.tsv), сами логи читаем только на
+# длину: в web-rate.json уходят числа и имена доменов, ни одной строки лога.
+set -u
+# Кладём в report.d: агент отдаёт этот каталог панели как есть, своей версии ему для
+# новых блоков не нужно.
+OUT=/var/lib/kervax/report.d/web-rate.json
+MAP=/var/lib/kervax/web-logs.tsv
+STATE=/var/lib/kervax/web-rate.state
+TMP="$OUT.tmp.$$"
+NEW="$STATE.tmp.$$"
+CAP=$((64 * 1024 * 1024))     # больше за раз не вычитываем
+SAMPLE=$((8 * 1024 * 1024))   # на таком куске оцениваем среднюю длину строки
+TAB=$(printf '\t')
+
+now=$(date +%s)
+: > "$NEW"
+ITEMS=""
+TOTAL=0
+
+esc() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g' | tr -d '\000-\037'; }
+sites_json() { tr ' ' '\n' | awk 'BEGIN{printf "["} {gsub(/[\\"]/,""); if($0=="")next; printf "%s\"%s\"", (n++?",":""), $0} END{printf "]"}'; }
+
+if [ -s "$MAP" ]; then
+  while IFS="$TAB" read -r lg names; do
+    [ -n "$lg" ] && [ -f "$lg" ] || continue
+    ino=$(stat -c %i "$lg" 2>/dev/null) || continue
+    size=$(stat -c %s "$lg" 2>/dev/null) || continue
+    prev=$(awk -F"$TAB" -v p="$lg" '$1==p{print $2, $3, $4; exit}' "$STATE" 2>/dev/null)
+    printf '%s\t%s\t%s\t%s\n' "$lg" "$ino" "$size" "$now" >> "$NEW"
+    # shellcheck disable=SC2086
+    set -- $prev
+    pino="${1:-}"; psize="${2:-0}"; pts="${3:-0}"
+    # Первый запуск, ротация (сменился inode) или лог обрезали - точки отсчёта нет,
+    # в этот раз про него молчим, посчитаем со следующего запуска.
+    [ -n "$pino" ] && [ "$pino" = "$ino" ] && [ "$size" -ge "$psize" ] || continue
+    el=$((now - pts))
+    [ "$el" -ge 20 ] || continue
+    delta=$((size - psize))
+    lines=0
+    if [ "$delta" -gt 0 ]; then
+      if [ "$delta" -le "$CAP" ]; then
+        lines=$(tail -c "+$((psize + 1))" "$lg" 2>/dev/null | wc -l)
+      else
+        s=$(tail -c "+$((psize + 1))" "$lg" 2>/dev/null | head -c "$SAMPLE" | wc -l)
+        lines=$((s * (delta / SAMPLE + 1)))
+      fi
+    fi
+    rpm=$((lines * 60 / el))
+    TOTAL=$((TOTAL + rpm))
+    ITEMS="$ITEMS${ITEMS:+,}{\"log\":\"$(esc "$lg")\",\"rpm\":$rpm,\"sites\":$(printf '%s' "$names" | sites_json)}"
+  done < "$MAP"
+fi
+
+mv -f "$NEW" "$STATE"
+chmod 0600 "$STATE"
+# Ни одного посчитанного лога - блок не пишем вовсе (и убираем старый). Пустой блок
+# означал бы "запросов ноль", хотя правда в другом: логи уехали в stdout контейнера
+# либо nginx тут вообще не пишет их в файлы.
+if [ -z "$ITEMS" ]; then
+  rm -f "$OUT"
+  exit 0
+fi
+printf '{"ts":%s,"rpm":%s,"logs":[%s]}\n' "$now" "$TOTAL" "$ITEMS" > "$TMP"
+mv -f "$TMP" "$OUT"
+chmod 0644 "$OUT"
+RATE_EOF
+chmod 0755 "$RATE"
+
+cat > /etc/systemd/system/kervax-web-rate.service <<EOF
+[Unit]
+Description=Kervax: count web server requests per minute
+[Service]
+Type=oneshot
+ExecStart=$RATE
+EOF
+cat > /etc/systemd/system/kervax-web-rate.timer <<'EOF'
+[Unit]
+Description=Kervax: count web server requests every minute
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=1min
+AccuracySec=5s
+[Install]
+WantedBy=timers.target
+EOF
+
 # -- systemd: a oneshot unit plus a timer (at boot and every 15 minutes) --
 cat > /etc/systemd/system/kervax-web-sites.service <<EOF
 [Unit]
@@ -162,8 +331,11 @@ EOF
 
 systemctl daemon-reload
 systemctl enable --now kervax-web-sites.timer >/dev/null 2>&1 || true
+systemctl enable --now kervax-web-rate.timer >/dev/null 2>&1 || true
 "$HELPER" || true   # run once immediately so the data appears without waiting for the timer
+"$RATE" || true     # первый запуск только запоминает позиции в логах, счёт со второго
 
 echo "$KERVAX_SETUP_VERSION" > "$STATE_DIR/versions/webserver-setup.ver"
 chmod 0644 "$STATE_DIR/versions/webserver-setup.ver"
-echo "✓ webserver-setup: web server domains -> $OUT (refreshed at boot and every 15 minutes)."
+echo "✓ webserver-setup: web server domains -> $OUT (refreshed at boot and every 15 minutes),"
+echo "  requests per minute -> /var/lib/kervax/report.d/web-rate.json (every minute)."

@@ -1,5 +1,17 @@
-import type { Server } from './api'
+import type { Server, ServerReport, WebRate } from './api'
 import { tr } from './i18n'
+
+// Запросы в минуту по access-логам ноды: блок кладёт root-хелпер webserver-setup, агент
+// отдаёт его как есть. Протухший блок (хелпер встал, логи не крутятся) не показываем:
+// вчерашний поток выглядел бы как сегодняшний.
+export function webRate(r?: ServerReport | null): WebRate | null {
+  const w = r?.extras?.['web-rate']
+  if (!w || !w.ts || typeof w.rpm !== 'number') return null
+  // возраст меряем часами самой ноды (clock_unix): её часы бывают сдвинуты, и живые
+  // данные из-за этого пропадали бы
+  const nowTs = r?.clock_unix || Date.now() / 1000
+  return nowTs - w.ts > 900 ? null : w
+}
 
 // --- метрики сервера из последнего снимка (для сортировки/группировки/сводки) ---
 
