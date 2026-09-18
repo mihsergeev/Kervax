@@ -11,6 +11,7 @@ import {
   type Server,
 } from './api'
 import { useAuth } from './auth'
+import { useUrlCard } from './deeplink'
 import { useI18n } from './i18n'
 import { OsIcon } from './osIcon'
 import { CountryFlag } from './CountryFlag'
@@ -465,6 +466,7 @@ export function DockerPage({
       onConsumed?.()
     }
   }, [openHostId, onConsumed])
+  useUrlCard('docker', openId)
   const [query, setQuery] = useState('')
   const [groupBy, setGroupBy] = useState<'none' | 'group'>(
     () => (localStorage.getItem('kervax_docker_groupby') as 'none' | 'group') || 'group',
