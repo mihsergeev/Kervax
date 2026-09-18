@@ -1036,6 +1036,7 @@ class ServerMetricOut(BaseModel):
     sock_tcp_tw: float | None = None
     sock_udp: float | None = None
     disks: list[dict] | None = None  # [{"mount": "/", "pct": 53.0}, …]
+    web_rpm: float | None = None  # запросов в минуту по access-логам веб-сервера
 
 
 class OomEventOut(BaseModel):

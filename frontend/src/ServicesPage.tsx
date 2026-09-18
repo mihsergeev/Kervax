@@ -12,6 +12,7 @@ import {
 import { useI18n } from './i18n'
 import { useAuth } from './auth'
 import { useUrlCard } from './deeplink'
+import { webRate } from './serverUtils'
 import { AdoptSitesModal, adoptable } from './AdoptSitesModal'
 import { EngineIcon } from './engineIcon'
 import { OsIcon } from './osIcon'
@@ -114,6 +115,11 @@ type SvcItem = {
 type SrvServices = { server: Server; items: SvcItem[] }
 
 const QUEUE_HOT = 100 // очередь глубже — подсвечиваем: обычно отставший консьюмер
+
+// «6 042» вместо «6042»: тысячи в потоке запросов читаются взглядом, а не пересчётом
+function rpmText(v: number): string {
+  return Math.round(v).toLocaleString('ru-RU').replace(/\u00a0/g, ' ')
+}
 
 // Ключ очереди ДОЛЖЕН совпадать с backend/app/collector.py::queue_key — по нему
 // хранятся пороги отдельных очередей. Источник в ключе обязателен: на ноде бывает
@@ -536,6 +542,20 @@ function ServerServicesModal({ srv, onClose, onChanged, autoQueues, sites }: {
                 )}
                 {it.web && !it.sites?.length && (
                   <div className="svc-card-detail muted small">{noSitesHint(it.kind, s, t)}</div>
+                )}
+                {/* поток запросов: его считает helper по access-логам, поэтому он есть
+                    только у хостового и контейнерного nginx */}
+                {it.kind === 'nginx' && webRate(s.last_report) && (
+                  <div className="svc-card-detail muted small">
+                    {t('запросов в минуту: {n}', { n: rpmText(webRate(s.last_report)!.rpm) })}
+                    {(webRate(s.last_report)!.logs ?? []).length > 1 &&
+                      ` · ${webRate(s.last_report)!
+                        .logs!.slice()
+                        .sort((a, b) => b.rpm - a.rpm)
+                        .slice(0, 3)
+                        .map((l) => `${l.sites?.[0] || l.log.split('/').pop()} ${rpmText(l.rpm)}`)
+                        .join(', ')}`}
+                  </div>
                 )}
               </div>
             )

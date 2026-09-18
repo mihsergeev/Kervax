@@ -988,6 +988,10 @@ const EN: Record<string, string> = {
   'Этот адрес уже у сервера {name}. Если это та же нода, второй раз её заводить не нужно.':
     'This address already belongs to {name}. If it is the same node, there is no need to add it again.',
   'на связи': 'online',
+  'запросов в минуту: {n}': 'requests per minute: {n}',
+  'Веб-сервер': 'Web server',
+  'запросов в минуту': 'requests per minute',
+  'запросов/мин': 'requests/min',
   'Добавить сервер': 'Add server',
   'Создать': 'Create',
   'напр. Прод / БД': 'e.g. Prod / DB',
