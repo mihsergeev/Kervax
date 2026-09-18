@@ -29,6 +29,7 @@ import { CoverageAudit } from './CoverageAudit'
 import { helperText } from './helperText'
 import { bulkCleanupScript, safeRepoName } from './bulkCleanupScript'
 import { useAuth } from './auth'
+import { useUrlCard } from './deeplink'
 import { useI18n, currentLang, tr } from './i18n'
 import { MuteChip, MutesBanner, collectMutes } from './mutes'
 import { VaultPanel } from './VaultPanel'
@@ -1914,6 +1915,8 @@ export function BackupsPage({
       onSrvConsumed?.()
     }
   }, [openSrvHostId, onSrvConsumed])
+  useUrlCard('backup', openId)
+  useUrlCard('backupsrv', openSrvId)
   const [query, setQuery] = useState('')
   const [searchRo, setSearchRo] = useState(true) // см. поле поиска ниже
   const [groupBy, setGroupBy] = useState<'none' | 'group'>(

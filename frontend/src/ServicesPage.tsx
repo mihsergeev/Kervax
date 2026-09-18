@@ -11,6 +11,7 @@ import {
 } from './api'
 import { useI18n } from './i18n'
 import { useAuth } from './auth'
+import { useUrlCard } from './deeplink'
 import { AdoptSitesModal, adoptable } from './AdoptSitesModal'
 import { EngineIcon } from './engineIcon'
 import { OsIcon } from './osIcon'
@@ -654,6 +655,7 @@ export function ServicesPage({ onUnauthorized, openServerId, openQueues, onConsu
     setOpenId(openServerId)
     onConsumed?.()
   }, [openServerId, servers, onConsumed])
+  useUrlCard('services', openId)
 
   useEffect(() => {
     load()

@@ -28,6 +28,7 @@ import { fmtSetupVersion, srvIssues } from './serverUtils'
 import { OsIcon } from './osIcon'
 import { CountryFlag } from './CountryFlag'
 import { currentLang, useI18n } from './i18n'
+import { useUrlCard } from './deeplink'
 import { fmtBytes, rateUnits, timeUnits } from './units'
 import {
   MuteChip,
@@ -1026,15 +1027,15 @@ export function ServersPage({ onUnauthorized, openServerId, openServerSec, onCon
   // и сравнивать с ним на отрисовке уже нельзя — раздел терялся, деталь открывалась
   // в самом верху вместо нужной метрики
   const [urlSec, setUrlSec] = useState<string | null>(null)
-  // диплинк из алерта/главной (?server=id) → открыть деталь, убрать параметр, «съесть» id
+  // диплинк из алерта/главной (?server=id) → открыть деталь и «съесть» id
   useEffect(() => {
     if (openServerId) {
       setDetailId(openServerId)
       setUrlSec(openServerSec ?? null)
-      window.history.replaceState({}, '', window.location.pathname)
       onConsumed?.()
     }
   }, [openServerId, openServerSec, onConsumed])
+  useUrlCard('server', detailId)
 
   // доступная (подписанная) версия агента для управляемого обновления
   const [avail, setAvail] = useState('')

@@ -15,6 +15,7 @@ import {
   type Server,
 } from './api'
 import { useAuth } from './auth'
+import { useUrlCard } from './deeplink'
 import { useI18n } from './i18n'
 import { OsIcon } from './osIcon'
 import { CountryFlag } from './CountryFlag'
@@ -729,6 +730,7 @@ export function KuberPage({
       onConsumed?.()
     }
   }, [openHostId, onConsumed])
+  useUrlCard('kube', openId)
   const [query, setQuery] = useState('')
   const [groupBy, setGroupBy] = useState<'none' | 'group'>(
     () => (localStorage.getItem('kervax_kube_groupby') as 'none' | 'group') || 'group',
