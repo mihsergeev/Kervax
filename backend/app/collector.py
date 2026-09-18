@@ -9,11 +9,12 @@ import html
 import logging
 import random
 import re
+import statistics
 from datetime import datetime, timedelta, timezone
 from typing import NamedTuple
 from urllib.parse import urlparse
 
-from sqlalchemy import delete, select, update
+from sqlalchemy import and_, delete, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app import alerts, backup, checks as checks_exec, custom_backups, heartbeat, settings_store
@@ -1560,6 +1561,112 @@ def rotation_stale_repos(bsrv: dict, now: datetime) -> list[str]:
     return sorted(out)
 
 
+# --- «почему» в тексте алерта -------------------------------------------------
+# «CPU 92%» не отвечает на единственный нужный вопрос: из-за чего. 18.09.2026 на
+# fi-hz-aff рекламная сеть залила 2.3 млн переходов в сутки вместо обычных шести
+# тысяч. Пришёл алерт по CPU, разбор занял вечер, хотя всё нужное панель уже
+# знала: топ процессов лежит в том же отчёте, трафик и соединения - в минутной
+# истории. Теперь это дописывается в сам алерт ({cause} в шаблоне).
+_CAUSE_MIN_CPU = 5.0        # % одного ядра: процессы мельче не упоминаем
+_CAUSE_TOP_N = 3
+_CAUSE_RATIO = 3.0          # во столько раз выше нормы = стоит сказать
+_BASE_DAYS = 7              # по скольким суткам считаем норму того же времени
+_BASE_HALF = timedelta(minutes=30)  # окно вокруг того же времени в каждом из тех суток
+_BASE_MIN_SAMPLES = 20      # меньше замеров - истории мало, молчим
+# Пороги «это настоящий поток, а не проснувшаяся из нуля нода»: ночью на простое
+# базой бывают байты в секунду, и тогда любой бэкап дал бы «трафик x900».
+_SURGE_MIN_NET = 1_000_000  # байт/сек
+_SURGE_MIN_CONN = 200
+
+
+def _fmt_size(b: float) -> str:
+    return f"{b / 1024 ** 3:.1f} ГБ" if b >= 1024 ** 3 else f"{b / 1024 ** 2:.0f} МБ"
+
+
+def top_eaters(rep: dict, kind: str) -> str:
+    """Кто ест ресурс - из снимка top_cpu/top_mem последнего отчёта. Процессы с
+    одним именем складываем: у php-fpm полсотни воркеров, по отдельности каждый
+    мелкий, и в топе от них толку нет."""
+    rows = rep.get("top_cpu" if kind == "cpu" else "top_mem") or []
+    by: dict[str, float] = {}
+    for p in rows:
+        if not isinstance(p, dict):
+            continue
+        name = str(p.get("comm") or "?").strip() or "?"
+        if kind == "cpu":
+            by[name] = by.get(name, 0.0) + float(p.get("cpu") or 0)
+        else:
+            priv = max(float(p.get("rss") or 0) - float(p.get("shared") or 0), 0.0)
+            by[name] = by.get(name, 0.0) + priv
+    top = sorted(by.items(), key=lambda kv: kv[1], reverse=True)[:_CAUSE_TOP_N]
+    if kind == "cpu":
+        return ", ".join(f"{n} {v:.0f}%" for n, v in top if v >= _CAUSE_MIN_CPU)
+    return ", ".join(f"{n} {_fmt_size(v)}" for n, v in top if v > 0)
+
+
+async def hour_baseline(session: AsyncSession, server_id: int, now: datetime) -> dict[str, float]:
+    """Норма для ЭТОГО времени суток: медиана трафика и TCP-соединений в том же часе
+    предыдущих _BASE_DAYS суток (плюс-минус полчаса от текущего времени).
+
+    Час суток важен - у трафика своя суточная кривая, и сравнение со средним за
+    неделю объявляло бы наплывом каждый вечерний пик. Берём именно медиану: наплыв,
+    который идёт вторые сутки, попадает в окно вчерашнего дня, но медиану семи дней
+    не сдвигает. Сегодняшние замеры не берём вовсе - в них уже сам наплыв."""
+    windows = [
+        and_(ServerMetric.ts >= day - _BASE_HALF, ServerMetric.ts <= day + _BASE_HALF)
+        for day in (now - timedelta(days=d) for d in range(1, _BASE_DAYS + 1))
+    ]
+    rows = list(await session.execute(
+        select(ServerMetric.net_rx, ServerMetric.net_tx, ServerMetric.sock_tcp).where(
+            ServerMetric.server_id == server_id, or_(*windows)
+        )
+    ))
+    if len(rows) < _BASE_MIN_SAMPLES:
+        return {}
+    out = {"net": statistics.median([float(r[0] or 0) + float(r[1] or 0) for r in rows])}
+    conn = [float(r[2]) for r in rows if r[2] is not None]
+    if len(conn) >= _BASE_MIN_SAMPLES:
+        out["conn"] = statistics.median(conn)
+    return out
+
+
+def _times(cur: float, base: float, floor: float) -> str:
+    """«x40», если сейчас во столько раз выше нормы. Пусто, если нормы нет, поток
+    сам по себе мелкий или превышение в пределах _CAUSE_RATIO."""
+    if base <= 0 or cur < floor or cur / base < _CAUSE_RATIO:
+        return ""
+    return f"x{min(cur / base, 999):.0f}"
+
+
+def cause_text(rep: dict, kind: str, base: dict[str, float]) -> str:
+    """Хвост к тексту алерта: кто ест ресурс и не наплыв ли это. Пусто, если
+    сказать нечего - тогда алерт выглядит как раньше."""
+    parts = []
+    eaters = top_eaters(rep, kind)
+    if eaters:
+        parts.append(f"сверху {eaters}")
+    surge = []
+    net = _times(float(rep.get("net_rx") or 0) + float(rep.get("net_tx") or 0),
+                 base.get("net") or 0, _SURGE_MIN_NET)
+    if net:
+        surge.append(f"трафик {net}")
+    conn = _times(float(rep.get("sock_tcp") or 0), base.get("conn") or 0, _SURGE_MIN_CONN)
+    if conn:
+        surge.append(f"соединений {conn}")
+    if surge:
+        parts.append(" и ".join(surge) + " к обычному для этого часа")
+    return " - " + "; ".join(parts) if parts else ""
+
+
+# Метрики, которые умеют ходить вокруг порога. Наплыв трафика держится сутками, CPU
+# то выше порога, то ниже, и на каждый заход прилетала пара «сработало - отбой».
+# После _FLAP_METRIC_LIMIT заходов за окно шлём одно сообщение и замолкаем.
+# Эскалации (диск warn -> crit) не считаем: там растёт проблема, а не мигает метрика.
+_FLAP_METRIC_KINDS = frozenset({"cpu", "mem", "disk", "temp", "conntrack", "db_conn", "disktemp"})
+_FLAP_METRIC_WINDOW = 6 * 3600
+_FLAP_METRIC_LIMIT = 3
+
+
 def _flapping(s: Server, st: dict, now: datetime, apply, note: list, url: str = "") -> bool:
     """True, если про это переключение писать НЕ нужно. Побочно ведёт счётчик и,
     один раз на серию, кладёт в note сообщение о нестабильности.
@@ -1587,6 +1694,34 @@ def _flapping(s: Server, st: dict, now: datetime, apply, note: list, url: str = 
             )
         )
     return True
+
+
+
+def _flap_metric(s: Server, st: dict, now: datetime, apply, note: list, url: str,
+                 key: str, title: str) -> bool:
+    """True, если про это срабатывание писать НЕ нужно: метрика ходит вокруг порога.
+    Устроено как гаситель мигания у обрывов связи, но окно длиннее: с выдержкой в
+    15 минут один и тот же порог чаще раза в пару часов не пересечь."""
+    pre = f"flap_{key}"
+    first = _parse_iso(st.get(f"{pre}_since") or "") or now
+    cnt = int(st.get(f"{pre}_count", 0))
+    if (now - first).total_seconds() > _FLAP_METRIC_WINDOW:  # окно истекло - считаем заново
+        first, cnt = now, 0
+    cnt += 1
+    apply(s.id, f"{pre}_since", first.isoformat())
+    apply(s.id, f"{pre}_count", cnt)
+    if cnt < _FLAP_METRIC_LIMIT:
+        return False
+    if not st.get(f"{pre}_muted"):
+        apply(s.id, f"{pre}_muted", 1)
+        note.append(_server_alert_text(
+            key, s.name,
+            f"{title} ходит вокруг порога: {cnt} срабатывания за "
+            f"{_FLAP_METRIC_WINDOW // 3600} ч - дальше молчу, пока не устаканится",
+            url, group=s.group_name or "",
+        ))
+    return True
+
 
 def queue_key(source: str, q: dict) -> str:
     """Ключ очереди: источник обязателен — на ноде бывает несколько инстансов
@@ -1672,12 +1807,14 @@ def _server_conditions(s: Server, now: datetime) -> dict[str, tuple[int, dict]]:
     rep = s.last_report or {}
     cpu = rep.get("cpu_percent")
     if s.cpu_alert_percent and cpu is not None:
+        # cause заполняется в момент отправки (нужна история метрик), но в ctx он
+        # обязан быть всегда: без него шаблон с {cause} не отрендерится
         sustain("cpu", cpu >= s.cpu_alert_percent,
-                {"value": round(cpu), "threshold": s.cpu_alert_percent})
+                {"value": round(cpu), "threshold": s.cpu_alert_percent, "cause": ""})
     if s.mem_alert_percent and rep.get("mem_total"):
         memp = rep.get("mem_used", 0) / rep["mem_total"] * 100
         sustain("mem", memp >= s.mem_alert_percent,
-                {"value": round(memp), "threshold": s.mem_alert_percent})
+                {"value": round(memp), "threshold": s.mem_alert_percent, "cause": ""})
     if rep.get("disks"):
         worst = max(
             (d["used"] / d["total"] * 100 for d in rep["disks"] if d.get("total")),
@@ -1995,6 +2132,21 @@ async def evaluate_servers(
         sec = _SRV_SECTION.get(key)
         return f"{base}/?server={s.id}" + (f"&sec={sec}" if sec else "")
 
+    base_cache: dict[int, dict[str, float]] = {}
+
+    async def cause_for(s: Server, key: str) -> str:
+        """«Почему» для порогового алерта: кто ест ресурс и не наплыв ли трафика.
+        Норму считаем один раз на сервер за тик. Не прочиталась - алерт уходит без
+        хвоста: причина это украшение, терять из-за неё сам алерт нельзя."""
+        if s.id not in base_cache:
+            try:
+                async with session_factory() as ses:
+                    base_cache[s.id] = await hour_baseline(ses, s.id, now)
+            except Exception:
+                log.warning("норма трафика для %s не посчиталась", s.name, exc_info=True)
+                base_cache[s.id] = {}
+        return cause_text(s.last_report or {}, key, base_cache[s.id])
+
     def srv_fire(s: Server, key: str, rule: dict, ctx: dict) -> alerts.Msg:
         """Текст срабатывания: дефолт → богатый формат (иконка + имя-ссылкой + суть),
         кастомный шаблон пользователя → рендерим как есть + строка со ссылкой."""
@@ -2057,6 +2209,23 @@ async def evaluate_servers(
                         srv_url(s, "offline"), recovery=True, group=s.group_name or "",
                     )
                 )
+        # То же для пороговых метрик: за окно ни одного нового захода - снова
+        # разрешаем алерты. Отбой шлём, только если метрика реально вернулась в
+        # норму, иначе «снова в норме» было бы неправдой.
+        for fk in _FLAP_METRIC_KINDS:
+            if not st.get(f"flap_{fk}_muted"):
+                continue
+            fs = _parse_iso(st.get(f"flap_{fk}_since") or "")
+            if fs is not None and (now - fs).total_seconds() <= _FLAP_METRIC_WINDOW:
+                continue
+            apply(s.id, f"flap_{fk}_muted", 0)
+            apply(s.id, f"flap_{fk}_count", 0)
+            if int(st.get(fk, 0)) == 0:
+                recoveries.append(_server_alert_text(
+                    fk, s.name,
+                    f"{settings_store.SERVER_ALERT_KINDS[fk][0]} снова в норме",
+                    srv_url(s, fk), recovery=True, group=s.group_name or "",
+                ))
         conds = _server_conditions(s, now)
         # состояние дебаунса ведём КАЖДЫЙ тик, даже без смены уровня алерта — иначе
         # оно не накопится (при level==prev цикл ниже делает continue без записи).
@@ -2087,6 +2256,17 @@ async def evaluate_servers(
                 fire_apply.append((s.id, key, level))
                 continue
             if level > prev:  # срабатывание/эскалация (напр. warn→crit)
+                # Метрика ходит вокруг порога - одно сообщение на серию. Считаем
+                # только заходы с нуля: эскалация (диск warn→crit) это растущая
+                # проблема, про неё молчать нельзя.
+                if prev == 0 and key in _FLAP_METRIC_KINDS and _flap_metric(
+                    s, st, now, apply, fires, srv_url(s, key), key,
+                    settings_store.SERVER_ALERT_KINDS[key][0],
+                ):
+                    fire_apply.append((s.id, key, level))
+                    continue
+                if key in ("cpu", "mem"):
+                    ctx["cause"] = await cause_for(s, key)
                 fires.append(srv_fire(s, key, rule, ctx))
                 fire_apply.append((s.id, key, level))
                 if key in _SRV_UNIT and ctx.get("value") is not None:
@@ -2099,6 +2279,9 @@ async def evaluate_servers(
                     # чтобы флаг не появился, когда отправка пачки не удалась
                     fire_apply.append((s.id, "offline_said", 1))
             elif level == 0:  # полное восстановление
+                if key in _FLAP_METRIC_KINDS and st.get(f"flap_{key}_muted"):
+                    apply(s.id, key, 0)  # серия заглушена: про мигание уже сказано
+                    continue
                 detail = (
                     "снова доступен"
                     if key == "offline"
