@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { ApiError, getToken, me, setToken, type Role } from './api'
 import { AuthProvider } from './auth'
 import { useI18n, type Lang } from './i18n'
+import { useUrlSection } from './deeplink'
 import { BrandLogo, useBranding } from './BrandLogo'
 import { AboutModal } from './AboutModal'
 import { AlertsModal } from './AlertsModal'
@@ -33,6 +34,7 @@ type Modal =
   | 'users'
   | null
 export type Section = 'home' | 'sites' | 'servers' | 'docker' | 'kuber' | 'services' | 'backups'
+const SECTIONS: Section[] = ['home', 'sites', 'servers', 'docker', 'kuber', 'services', 'backups']
 
 // Ширина полосы прокрутки этого браузера: у классической (Windows/Linux) около 15px,
 // у оверлейной (macOS, мобильные) — 0. Нужна, чтобы вернуть её ширину отступом на
@@ -67,6 +69,7 @@ export default function App() {
     const p = new URLSearchParams(window.location.search).get(k)
     return p ? Number(p) : null
   }
+  const urlSection = new URLSearchParams(window.location.search).get('section')
   const [openCheckId, setOpenCheckId] = useState<number | null>(() => urlNum('check'))
   const [openServerId, setOpenServerId] = useState<number | null>(() => urlNum('server'))
   const [openDockerId, setOpenDockerId] = useState<number | null>(() => urlNum('docker'))
@@ -116,13 +119,24 @@ export default function App() {
               ? 'backups'
               : openServicesId
                 ? 'services'
-                : 'home',
+                : SECTIONS.includes(urlSection as Section)
+                  ? (urlSection as Section)
+                  : 'home',
   )
+  // адрес показывает раздел и открытую карточку, чтобы ссылку можно было отдать другому
+  useUrlSection(section)
   // раздел виден, если список не задан (значит все) или он в списке
   const canSee = useCallback(
     (sec: Section) => sections.length === 0 || sections.includes(sec),
     [sections],
   )
+  // раздел из адреса может быть закрыт для этой учётки (ссылкой поделились с тем, кому
+  // видна только часть панели) - тогда показываем главную
+  useEffect(() => {
+    if (section !== 'home' && sections.length > 0 && !sections.includes(section)) {
+      setSection('home')
+    }
+  }, [sections, section])
   const [branding, reloadBranding] = useBranding()
   const [menuOpen, setMenuOpen] = useState(false)
   const [modal, setModal] = useState<Modal>(null)

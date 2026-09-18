@@ -17,6 +17,7 @@ import {
 import { BulkModal } from './BulkModal'
 import { CheckDetail } from './CheckDetail'
 import { expiryText } from './checkUtils'
+import { useUrlCard } from './deeplink'
 import { AdoptSitesModal, adoptable } from './AdoptSitesModal'
 import { CheckFormCard } from './CheckFormCard'
 import { StatusBar } from './charts/StatusBar'
@@ -163,14 +164,14 @@ export function ChecksPage({ onUnauthorized, openCheckId, onConsumed }: Props) {
     return () => window.clearInterval(id)
   }, [load])
 
-  // диплинк из алерта/главной (?check=id) → открыть деталь, убрать параметр, «съесть» id
+  // диплинк из алерта/главной (?check=id) → открыть деталь и «съесть» id
   useEffect(() => {
     if (openCheckId) {
       setDetailId(openCheckId)
-      window.history.replaceState({}, '', window.location.pathname)
       onConsumed?.()
     }
   }, [openCheckId, onConsumed])
+  useUrlCard('check', detailId)
 
   // что реально можно предложить добавить: без масок/regexp, без уже покрытых и без
   // помеченных «мониторить не нужно» — иначе плашка висела бы вечно
