@@ -1440,6 +1440,7 @@ export function ServersPage({ onUnauthorized, openServerId, openServerSec, onCon
 
       {addOpen && (
         <EnrollModal
+          servers={servers ?? []}
           groups={serverGroups}
           onClose={() => setAddOpen(false)}
           onEnrolled={(e) => {
@@ -1601,11 +1602,13 @@ function ServerRow({
 }
 
 function EnrollModal({
+  servers,
   groups,
   onClose,
   onEnrolled,
   onUnauthorized,
 }: {
+  servers: Server[]
   groups: string[]
   onClose: () => void
   onEnrolled: (e: ServerEnroll) => void
@@ -1617,6 +1620,13 @@ function EnrollModal({
   const [agentIp, setAgentIp] = useState('')
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState<string | null>(null)
+  // Дубль видно до нажатия: имя занято - создавать нельзя (панель различает ноды по имени),
+  // адрес совпал - только предупреждение, за одним внешним адресом законно живет несколько нод
+  const nameDup = servers.find((s) => s.name.trim().toLowerCase() === name.trim().toLowerCase())
+  const ip = agentIp.trim()
+  const ipDup = ip
+    ? servers.find((s) => [s.agent_ip, s.external_ip, s.local_ip].some((x) => (x || '').trim() === ip))
+    : undefined
 
   async function submit() {
     setBusy(true)
@@ -1648,6 +1658,13 @@ function EnrollModal({
         <label className="field">
           <span>{t('Название')}</span>
           <input value={name} onChange={(e) => setName(e.target.value)} autoFocus />
+          {nameDup && (
+            <span className="field-hint form-error small">
+              {t('Сервер с таким именем уже есть ({state}). Панель различает ноды по имени.', {
+                state: nameDup.online ? t('на связи') : t('оффлайн'),
+              })}
+            </span>
+          )}
         </label>
         <label className="field">
           <span>{t('Группа')}</span>
@@ -1670,6 +1687,13 @@ function EnrollModal({
             onChange={(e) => setAgentIp(e.target.value)}
             placeholder="203.0.113.10"
           />
+          {ipDup && !nameDup && (
+            <span className="field-hint t-degraded small">
+              {t('Этот адрес уже у сервера {name}. Если это та же нода, второй раз её заводить не нужно.', {
+                name: ipDup.name,
+              })}
+            </span>
+          )}
           <span className="field-hint muted small">
             {t('Если панель закрыта фаерволом: адрес попадёт в data/agent_allow_ips, а хостовый скрипт ops/agent-firewall-sync.sh разрешит его в ufw/firewalld. Для Caddy-вайтлиста ничего не нужно — /api/agent/* уже открыт.')}
           </span>
@@ -1679,7 +1703,7 @@ function EnrollModal({
           <button className="ghost" onClick={onClose}>
             {t('Отмена')}
           </button>
-          <button onClick={submit} disabled={!name.trim() || busy}>
+          <button onClick={submit} disabled={!name.trim() || !!nameDup || busy}>
             {busy ? t('…') : t('Создать')}
           </button>
         </div>

@@ -7,9 +7,15 @@
 helper находит заново при каждом запуске.
 """
 
+import time
+
 from app.api.servers import _backup_coverage, _kube_workload
 from app.models import Server
 from app.schemas import BackupCommandIn
+
+# время берём от текущего, иначе тест протухает: дамп старше двух суток панель
+# считает сломанным (1.4.42)
+NOW = time.time()
 
 PODS = [
     {"ns": "default", "name": "chi-clickhouse-main-0-0-0", "phase": "Running",
@@ -96,7 +102,7 @@ def test_why_the_button_is_not_offered():
 
 def test_enabled_pod_dump_closes_the_finding():
     dump = {"engine": "rabbitmq", "container": "k8s.default.sts.rabbitmq", "files": 2,
-            "last_ts": 1789480127, "keep": 2, "dir": "/backup/rabbitmq/k8s.default.sts.rabbitmq"}
+            "last_ts": NOW - 3600, "keep": 2, "dir": "/backup/rabbitmq/k8s.default.sts.rabbitmq"}
     s = _server(backup={"present": True, "manageable": True, "configured": False, "dumps": [dump]})
     rabbit = _audit(s)[("RabbitMQ", "k8s.default.sts.rabbitmq")]
     assert rabbit.kind == "db_ok" and rabbit.can_dump
@@ -107,7 +113,7 @@ def test_enabled_pod_dump_closes_the_finding():
     rabbit = _audit(s)[("RabbitMQ", "k8s.default.sts.rabbitmq")]
     assert "перед каждым бэкапом" in rabbit.detail
 
-    fresh = dict(dump, files=0, last_ts=0, enabled_ts=1789480000)
+    fresh = dict(dump, files=0, last_ts=0, enabled_ts=NOW - 600)
     s = _server(backup={"present": True, "manageable": True, "configured": False, "dumps": [fresh]})
     assert "ночью по своему таймеру" in _audit(s)[("RabbitMQ", "k8s.default.sts.rabbitmq")].detail
 
