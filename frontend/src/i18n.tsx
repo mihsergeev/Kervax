@@ -983,6 +983,11 @@ const EN: Record<string, string> = {
   'Диск': 'Disk',
   'разд.': 'part.',
   'Диски': 'Disks',
+  'Сервер с таким именем уже есть ({state}). Панель различает ноды по имени.':
+    'A server with this name already exists ({state}). The panel tells nodes apart by name.',
+  'Этот адрес уже у сервера {name}. Если это та же нода, второй раз её заводить не нужно.':
+    'This address already belongs to {name}. If it is the same node, there is no need to add it again.',
+  'на связи': 'online',
   'Добавить сервер': 'Add server',
   'Создать': 'Create',
   'напр. Прод / БД': 'e.g. Prod / DB',
