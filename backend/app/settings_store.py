@@ -25,8 +25,10 @@ SITE_RULES_KEY = "site_alert_rules"
 # Плейсхолдеры: {server} {group} {value} {threshold} {severity} {streak} {victim}.
 SERVER_ALERT_KINDS: dict[str, tuple[str, str]] = {
     "offline": ("Недоступен", "недоступен, агент не шлёт метрики"),
-    "cpu": ("CPU", "CPU {value}% ≥ {threshold}%"),
-    "mem": ("RAM", "RAM {value}% ≥ {threshold}%"),
+    # {cause} - кто ест ресурс и не наплыв ли это (пусто, если сказать нечего):
+    # без него алерт «CPU 92%» требовал отдельного разбора на сервере
+    "cpu": ("CPU", "CPU {value}% ≥ {threshold}%{cause}"),
+    "mem": ("RAM", "RAM {value}% ≥ {threshold}%{cause}"),
     # без слова-серьёзности: уровень и так виден по ведущей иконке (⚠️/🔴/🚨),
     # а «(предупреждение)» только удлиняло строку. {severity} остаётся доступным
     # тем, кто пишет свой шаблон
@@ -75,6 +77,9 @@ SERVER_ALERT_KINDS: dict[str, tuple[str, str]] = {
 # имя сервера — ссылкой), а не гоняем старый текст. Иначе установки, где форму
 # серверных алертов однажды сохранили, застряли бы на старом «Kervax:»-тексте.
 LEGACY_SERVER_DEFAULTS: frozenset[str] = frozenset({
+    # дефолты CPU и RAM до 1.4.48 - без {cause}
+    "CPU {value}% ≥ {threshold}%",
+    "RAM {value}% ≥ {threshold}%",
     # дефолт дампа до 1.4.42 знал только ноды с бэкапом («хотя бэкап идёт»); без бэкапа
     # дамп теперь тоже проверяется, и причина приходит в {reason}
     "дамп не обновляется, хотя бэкап идёт: {engines} (файловый снапшот живой базы может не восстановиться)",
