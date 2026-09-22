@@ -8,7 +8,7 @@
 # secrets or config contents.
 set -euo pipefail
 
-KERVAX_SETUP_VERSION=0.7  # MAJOR.MINOR; compared component-wise
+KERVAX_SETUP_VERSION=0.8  # MAJOR.MINOR; compared component-wise
 KERVAX_SETUP_ALWAYS=1     # safe on any node: the refresh is a no-op without a web server
 
 HELPER_DIR=/lib65/kervax
@@ -168,8 +168,7 @@ merge_logs() {
     END { for (k in a) print k "\t" a[k] }'
 }
 
-# Путь лога внутри контейнера -> путь на хосте по его bind-mount'ам. Лог, оставшийся
-# внутри контейнера или уехавший в stdout, пропускаем: считать нечего.
+# Путь лога внутри контейнера -> путь на хосте по его bind-mount'ам.
 host_path() {
   awk -F'|' -v p="$1" '
     { d=$1; s=$2; if (d=="" || s=="") next;
@@ -177,19 +176,43 @@ host_path() {
       if (substr(p,1,length(d)+1)==d"/") { print s substr(p,length(d)+1); exit } }'
 }
 
+# Логи одного nginx-контейнера в хостовых путях. Два случая:
+#  * лог смонтирован с хоста - берём его по bind-mount'ам;
+#  * лог уходит в stdout (в образе nginx access.log это симлинк на /dev/stdout) - тогда
+#    строки лежат в json-файле докера, и путь к нему знает сам докер (.LogPath). Драйвер
+#    обязан быть json-file: у local формат бинарный, строки в нём не посчитать.
+# В json-файл попадает и stderr, то есть редкие строки ошибок nginx тоже считаются.
+container_logs() {
+  c="$1"
+  mounts=$(docker inspect --format '{{range .Mounts}}{{.Destination}}|{{.Source}}
+{{end}}' "$c" 2>/dev/null)
+  logpath=$(docker inspect --format '{{.LogPath}}' "$c" 2>/dev/null)
+  driver=$(docker inspect --format '{{.HostConfig.LogConfig.Type}}' "$c" 2>/dev/null)
+  docker exec "$c" nginx -T 2>/dev/null | extract_logs | while IFS="$(printf '\t')" read -r lg names; do
+    real=$(docker exec "$c" sh -c 'readlink -f "$1" 2>/dev/null' _ "$lg" 2>/dev/null)
+    [ -n "$real" ] || real="$lg"
+    case "$real" in
+      /dev/*|/proc/*)
+        case "$driver" in
+          json-file|"")
+            [ -n "$logpath" ] && [ -f "$logpath" ] && printf '%s\t%s\n' "$logpath" "$names"
+            ;;
+        esac
+        ;;
+      *)
+        hp=$(printf '%s\n' "$mounts" | host_path "$real")
+        [ -n "$hp" ] && printf '%s\t%s\n' "$hp" "$names"
+        ;;
+    esac
+  done
+}
+
 collect_logs() {
   command -v nginx >/dev/null 2>&1 && nginx -T 2>/dev/null | extract_logs
   command -v docker >/dev/null 2>&1 || return 0
   docker ps --format '{{.Names}} {{.Image}}' 2>/dev/null | awk '/nginx/{print $1}' | sort -u \
     | while read -r c; do
-        [ -n "$c" ] || continue
-        mounts=$(docker inspect --format '{{range .Mounts}}{{.Destination}}|{{.Source}}
-{{end}}' "$c" 2>/dev/null)
-        [ -n "$mounts" ] || continue
-        docker exec "$c" nginx -T 2>/dev/null | extract_logs | while IFS="$(printf '\t')" read -r lg names; do
-          hp=$(printf '%s\n' "$mounts" | host_path "$lg")
-          [ -n "$hp" ] && printf '%s\t%s\n' "$hp" "$names"
-        done
+        [ -n "$c" ] && container_logs "$c"
       done
 }
 
