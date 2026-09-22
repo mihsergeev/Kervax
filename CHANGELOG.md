@@ -4,6 +4,13 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.4.50] - 2026-09-22
+
+### Changed
+- На графике "CPU, состав нагрузки" простой стал серо-синим вместо синего. Рядом с "юзером"
+  получалось синее на синем: по стеку не читалось, где кончается занятая часть и начинается
+  свободная, особенно на суточном окне. Остальные цвета прежние.
+
 ## [1.4.49] - 2026-09-18
 
 ### Added
