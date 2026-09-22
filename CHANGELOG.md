@@ -4,6 +4,17 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.4.51] - 2026-09-22
+
+### Fixed
+- Запросы в минуту считаются и у nginx в контейнерах. В 0.7 счет шел только там, где nginx
+  пишет логи в файл на хосте, а это две ноды из двадцати: в образе nginx access.log это
+  симлинк на stdout, и строки уходят в json-лог докера. Теперь helper 0.8 берет путь к нему
+  у самого докера и считает его, домены к логу подставляет из конфига того же контейнера.
+  Драйвер должен быть json-file, у local формат бинарный. В json-лог попадает и stderr,
+  так что редкие строки ошибок nginx тоже попадут в счет. Логи, смонтированные с хоста,
+  считаются как раньше.
+
 ## [1.4.50] - 2026-09-22
 
 ### Changed
