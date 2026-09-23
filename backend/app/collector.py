@@ -190,7 +190,7 @@ _SRV_ICON = {
     "backup_dump": "💾", "backup_dump_space": "🈵", "backup_cron": "💾", "backup_custom": "💾",
     "clock": "🕐",
     # ⏳ — срок ещё не вышел, есть время спланировать; 🔥 — доставка уже встала
-    "kube_expiry": "⏳", "flux_down": "🔥☸️",
+    "kube_expiry": "⏳", "flux_down": "🔥☸️", "kube_pod": "☸️🔥",
 }
 
 # Куда ведёт ссылка алерта (deep-link ?server=id&sec=…). Целимся в КОНКРЕТНУЮ метрику,
@@ -203,7 +203,7 @@ _SRV_SECTION = {
     "mem": "mem", "oom": "oom",
     "conntrack": "conntrack", "disk": "diskfill", "disktemp": "disktemp",
     "db_conn": "services",
-    "kube_expiry": "kube", "flux_down": "kube",
+    "kube_expiry": "kube", "flux_down": "kube", "kube_pod": "kube",
     "clock": "clock",
 }
 
@@ -220,6 +220,7 @@ _ALERT_SECTION = {
     "docker_down": "docker",
     "queue": "services",
     "backup_repo": "backups",
+    "kube_pod": "kuber",
 }
 
 
@@ -1099,6 +1100,7 @@ _SRV_LABEL = {
     "backup_dump": "дамп СУБД", "backup_dump_space": "место под дампы",
     "backup_cron": "дамп-CronJob", "backup_custom": "свой бэкап", "clock": "время",
     "kube_expiry": "сроки Kubernetes", "flux_down": "доставка Flux",
+    "kube_pod": "поды kubernetes",
 }
 
 # Единицы пороговых метрик. Нужны отбою: голое «снова в норме» не отвечает на
@@ -1106,6 +1108,43 @@ _SRV_LABEL = {
 # 82% (было 90%)», где «было» — значение на момент срабатывания.
 _SRV_UNIT = {"cpu": "%", "mem": "%", "disk": "%", "conntrack": "%", "db_conn": "%",
              "temp": "°C", "disktemp": "°C"}
+
+
+# Поды, которые контроллер ОБЯЗАН держать живыми. Поды Job/CronJob сюда не берём: они
+# на то и одноразовые, а их ImagePullBackOff - обычный мусор отработавших кронов (на
+# de-hz-mxstat-dev таких 19 штук). Поды без контроллера - ручные, их никто не поднимет.
+_POD_OWNERS = frozenset({"Deployment", "StatefulSet", "ReplicaSet", "DaemonSet"})
+_POD_FINISHED = frozenset({"Succeeded", "Failed"})
+
+
+def kube_bad_pods(rep: dict) -> list[dict]:
+    """Поды, которые должны работать и не работают: не поднялись, падают в цикле или
+    работают, но не готовы. Выдержка (alert_sustain_seconds) отсекает обычный выкат:
+    новый под несколько минут не готов, и это не авария."""
+    out = []
+    for p in ((rep.get("kube") or {}).get("pods") or []):
+        if p.get("owner") not in _POD_OWNERS or p.get("phase") in _POD_FINISHED:
+            continue
+        # ready is False, а не falsy: агент, который поля не шлёт, иначе дал бы алерт
+        # про каждый работающий под
+        if p.get("phase") == "Running" and p.get("ready") is not False:
+            continue
+        out.append(p)
+    return out
+
+
+def bad_pods_text(pods: list[dict], limit: int = 4) -> str:
+    """«default/postgres-0 (CrashLoopBackOff, 83 рестарта), и ещё 2». Причина обязательна:
+    CreateContainerConfigError и ImagePullBackOff чинятся совершенно по-разному."""
+    items = []
+    for p in pods[:limit]:
+        why = p.get("reason") or p.get("phase") or "?"
+        restarts = int(p.get("restarts") or 0)
+        tail = f", {restarts} рестарта" if restarts >= 5 else ""
+        items.append(f"{p.get('ns', '?')}/{p.get('name', '?')} ({why}{tail})")
+    if len(pods) > limit:
+        items.append(f"и ещё {len(pods) - limit}")
+    return ", ".join(items)
 
 
 def _recovery_detail(key: str, st: dict, ctx: dict) -> str:
@@ -1995,6 +2034,15 @@ def _server_conditions(s: Server, now: datetime) -> dict[str, tuple[int, dict]]:
             })
         else:
             sustain("flux_down", False, {})
+
+    # Поды, которые контроллер обязан держать живыми. Повод - uz-air-op-dg 23.09.2026:
+    # ClickHouse (нет секрета) и PostgreSQL (нет сертификата) лежали по семь часов, и
+    # панель об этом не сказала ни разу: в «Кубере» их видно, только если открыть.
+    # Шума не будет: по парку в 26 нод таких подов было ровно четыре, все на этой ноде.
+    if online and (rep.get("kube") or {}).get("access"):
+        bad_pods = kube_bad_pods(rep)
+        sustain("kube_pod", bool(bad_pods),
+                {"pods": bad_pods_text(bad_pods), "n": len(bad_pods)})
 
     if s.disk_temp_alert_c:  # макс по устройствам с датчиком (на VM датчика обычно нет)
         temps = [d["temp"] for d in (rep.get("disk_devs") or []) if d.get("temp") is not None]

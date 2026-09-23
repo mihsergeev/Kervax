@@ -236,3 +236,57 @@ async def test_report_stores_requests_per_minute(client, auth_headers):
     assert r.status_code == 200
     r = await client.get(f"/api/servers/{sid}/metrics", headers=auth_headers)
     assert r.json()[0]["web_rpm"] == 6042
+
+
+async def test_dead_pod_of_a_controller_alerts_and_jobs_do_not(tmp_path, monkeypatch):
+    """uz-air-op-dg, 23.09.2026: ClickHouse и PostgreSQL лежали по семь часов (не нашлись
+    секрет и сертификат), и панель не сказала об этом ни разу. Поды Job'ов при этом
+    алертить нельзя: на одной ноде их набралось 19 штук с ImagePullBackOff."""
+    engine, factory = await _panel(tmp_path, "pods.db")
+    now = datetime.now(timezone.utc)
+    pods = [
+        {"ns": "default", "name": "postgres-0", "phase": "Running", "ready": False,
+         "owner": "StatefulSet", "reason": "CrashLoopBackOff", "restarts": 83},
+        {"ns": "tech1", "name": "cron-aggregate-29661745-758l6", "phase": "Pending",
+         "ready": False, "owner": "Job", "reason": "ImagePullBackOff"},
+        {"ns": "default", "name": "envoy-gateway-fc4", "phase": "Running", "ready": True,
+         "owner": "ReplicaSet"},
+    ]
+    async with factory() as s:
+        s.add(Server(
+            name="uz-air-op-dg", token_hash="x", enabled=True, backup_not_required=True,
+            last_seen=now, cpu_alert_percent=0, mem_alert_percent=0, disk_alert_percent=0,
+            alert_sustain_seconds=0,
+            last_report={"cpu_percent": 5, "kube": {"present": True, "access": True, "pods": pods}},
+        ))
+        await s.commit()
+
+    sent: list[str] = []
+
+    async def fake_send(cfg, text, parse_mode=None):
+        sent.append(text)
+        return []
+
+    monkeypatch.setattr("app.alerts.send_alert", fake_send)
+    settings = Settings(alert_webhook="http://hook")
+    await collector.evaluate_servers(factory, settings, now)
+    assert len(sent) == 1, sent
+    assert "default/postgres-0 (CrashLoopBackOff, 83 рестарта)" in sent[0]
+    assert "cron-aggregate" not in sent[0]  # Job - не наша забота
+
+    # повторно молчим
+    sent.clear()
+    await collector.evaluate_servers(factory, settings, now + timedelta(minutes=5))
+    assert sent == []
+
+    # под поднялся - отбой
+    async with factory() as s:
+        srv = await s.scalar(select(Server))
+        ok = [dict(p) for p in pods]
+        ok[0].update(ready=True, reason="")
+        srv.last_report = {"cpu_percent": 5, "kube": {"present": True, "access": True, "pods": ok}}
+        srv.last_seen = now + timedelta(minutes=10)
+        await s.commit()
+    await collector.evaluate_servers(factory, settings, now + timedelta(minutes=10))
+    assert len(sent) == 1 and "снова в норме" in sent[0]
+    await engine.dispose()
