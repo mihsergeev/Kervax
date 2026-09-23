@@ -114,6 +114,25 @@ AGENT_UNIT_REQS: dict[str, dict[str, str]] = {
 }
 
 
+# Маркер временной неудачи в тексте агента: скачанное сохранено, попытка продолжится.
+_UPD_RESUME = "продолжим с этого места"
+
+
+def agent_update_note(rep: dict) -> str:
+    """«докачивается 59% (3.4 из 5.8 МБ)» - чтобы было видно, что процесс идёт, а не
+    встал. Пусто, если докачки нет. Текст готов к показу как есть: фронт только
+    подставляет имя ноды, иначе строку пришлось бы собирать в двух местах."""
+    err = str(rep.get("update_error") or "").strip()
+    if _UPD_RESUME not in err:
+        return ""
+    m = re.search(r"взято (\d+) из (\d+)", err)
+    if not m:
+        return "докачивается"
+    got, total = int(m.group(1)), int(m.group(2))
+    pct = round(got / total * 100) if total else 0
+    return f"докачивается {pct}% ({got / 1e6:.1f} из {total / 1e6:.1f} МБ)"
+
+
 def _agent_advice(server: Server) -> tuple[list[str], str | None]:
     """По самодиагностике агента (last_report.caps) собираем: чего не хватает в юните
     (человекочитаемо) и ОДНУ команду-фикс (drop-in). Если агент старый и caps не шлёт
@@ -128,7 +147,13 @@ def _agent_advice(server: Server) -> tuple[list[str], str | None]:
     # частая причина — панель собрана не с тем пубключом, которым подписан релиз;
     # на парке в десятки нод искать это по логам каждой ноды невозможно.
     upd_err = str(rep.get("update_error") or "").strip()
-    extra = [f"обновление агента отклонено — {upd_err}"] if upd_err else []
+    # Медленная докачка - НЕ отказ: набранное лежит на ноде, следующая попытка идёт
+    # дальше с того же места. Такой текст в «Требует действий» звал чинить то, что
+    # чинится само: на РФ-нодах за DPI 5.8 МБ набираются за несколько попыток по
+    # 10 минут, и панель показывала три пункта «обновление отклонено» подряд.
+    extra = [] if (not upd_err or _UPD_RESUME in upd_err) else [
+        f"обновление агента отклонено — {upd_err}"
+    ]
 
     if not missing:
         return extra, None
@@ -149,6 +174,7 @@ def _out(
     o = ServerOut.model_validate(server)
     o.online = _is_online(server, now)
     o.agent_advice, o.agent_fix_command = _agent_advice(server)
+    o.agent_update_note = agent_update_note(server.last_report or {}) or None
     o.helper_advice = _helper_advice(
         server, cur_versions if cur_versions is not None else _current_setup_versions()
     )

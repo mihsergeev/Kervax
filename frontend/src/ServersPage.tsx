@@ -1249,6 +1249,16 @@ export function ServersPage({ onUnauthorized, openServerId, openServerSec, onCon
               v: avail,
               n: behind.length,
             })}
+            {/* медленный канал (РФ-ноды за DPI): показываем прогресс, иначе выглядит как
+                «обновление не идёт», хотя докачка продолжается сама */}
+            {behind.some((s) => s.agent_update_note) && (
+              <span className="muted small aub-progress">
+                {behind
+                  .filter((s) => s.agent_update_note)
+                  .map((s) => `${s.name}: ${s.agent_update_note}`)
+                  .join(' · ')}
+              </span>
+            )}
           </span>
           <div className="aub-actions">
             <button

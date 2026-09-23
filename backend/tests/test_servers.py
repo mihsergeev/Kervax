@@ -1597,3 +1597,27 @@ async def test_duplicate_server_name_is_refused(client, auth_headers):
     assert r.status_code == 200
     r = await client.patch(f"/api/servers/{other}", json={"name": " ru-se-mxstat-3 "}, headers=auth_headers)
     assert r.status_code == 200 and r.json()["name"] == "ru-se-mxstat-3"
+
+
+def test_slow_agent_download_is_progress_not_a_rejection():
+    """Медленная докачка обновления - не отказ: набранное лежит на ноде, следующая
+    попытка идёт дальше. Живой случай 23.09.2026: три РФ-ноды за DPI набирали 5.8 МБ
+    несколькими попытками по 10 минут, и панель показывала три пункта «обновление
+    агента отклонено» в «Требует действий» - звала чинить то, что чинится само."""
+    from app.api.servers import _agent_advice, agent_update_note
+    from app.models import Server
+
+    slow = ("2.10: скачивание бинаря: не уложились в 10m0s, "
+            "взято 3407872 из 5779591 байт (продолжим с этого места)")
+    srv = Server(name="ru-be-mobprod", token_hash="x", enabled=True,
+                 last_report={"update_error": slow})
+    assert agent_update_note(srv.last_report) == "докачивается 59% (3.4 из 5.8 МБ)"
+    advice, _ = _agent_advice(srv)
+    assert advice == []  # в «Требует действий» такое не попадает
+
+    # настоящий отказ (чужая подпись, нет места) по-прежнему требует человека
+    bad = Server(name="node", token_hash="x", enabled=True,
+                 last_report={"update_error": "подпись манифеста не сошлась"})
+    assert agent_update_note(bad.last_report) == ""
+    advice, _ = _agent_advice(bad)
+    assert advice == ["обновление агента отклонено — подпись манифеста не сошлась"]
