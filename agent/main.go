@@ -36,7 +36,7 @@ import (
 	"time"
 )
 
-const version = "2.9"
+const version = "2.10"
 
 // Публичный ключ для проверки подписи релизов агента (Ed25519, base64).
 // ПУСТО по умолчанию → самообновление ВЫКЛЮЧЕНО (агент никогда не заменяет себя).
@@ -2823,6 +2823,22 @@ var dbCmdlineSignatures = []struct{ needle, engine string }{
 // Запасной матч по префиксу: ядро режет comm до 15 символов, и точное имя зависит от
 // сборки (clickhouse-server/clickhouse-serv/clickhouse). Проверять на всех вариантах
 // нечем, поэтому ловим по началу имени.
+// Не база, хотя имя начинается с имени движка: оператор, экспортёр, прокси, утилита
+// бэкапа. Ядро режет comm до 15 символов, поэтому ловим и обрубки: clickhouse-oper
+// (altinity/clickhouse-operator), postgres-operat, mysqld-exporter. Живой случай -
+// uz-air-op-dg: оператор на ноде числился ClickHouse'ом, панель предлагала ему дамп,
+// а пробный дамп падал на «нет /var/lib/clickhouse/metadata».
+var notDBCommMarkers = []string{"-oper", "_oper", "export", "postgrest", "-backup", "-proxy"}
+
+func notDBComm(comm string) bool {
+	for _, m := range notDBCommMarkers {
+		if strings.Contains(comm, m) {
+			return true
+		}
+	}
+	return false
+}
+
 var dbProcPrefixes = []struct{ prefix, engine string }{
 	{"clickhouse", "ClickHouse"},
 	{"mariadb", "MySQL/MariaDB"},
@@ -3042,6 +3058,9 @@ func collectDBEngines() []string {
 			continue // процесс умер между ReadDir и чтением — норма
 		}
 		comm := strings.TrimSpace(string(b))
+		if notDBComm(comm) {
+			continue
+		}
 		if eng, ok := dbProcSignatures[comm]; ok {
 			seen[eng] = true
 			continue

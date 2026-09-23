@@ -582,12 +582,20 @@ def _backup_coverage(server: Server) -> list[BackupAudit]:
     # движок → цель дампа (k8s.<ns>.<вид>.<имя>) → её поды. Поды без контроллера — отдельно
     kube_wl: dict[str, dict[str, list[str]]] = {}
     kube_bare: dict[str, list[str]] = {}
+    # Под, который ДОЛЖЕН работать, но не поднялся, раньше просто выпадал из аудита, и
+    # карточка писала «процесс на хосте»: на ноде остаётся процесс оператора базы.
+    # Живой случай - uz-air-op-dg, 23.09.2026: ClickHouse 6 часов в
+    # CreateContainerConfigError (нет секрета), а панель предлагала включить ему дамп.
+    down_pods: dict[str, str] = {}
     for p in ((rep.get("kube") or {}).get("pods") or []):
-        if not p.get("image") or p.get("phase") != "Running":
+        # Succeeded/Failed - это отработавшие поды Job'ов, живой базой они не были
+        if not p.get("image") or p.get("phase") not in ("Running", "Pending"):
             continue
         eng = _db_engine_of(p.get("image") or "", p.get("name") or "")
         if eng:
             ref = f"{p.get('ns', '?')}/{p.get('name', '?')}"
+            if p.get("phase") != "Running":
+                down_pods[ref] = str(p.get("reason") or "не запущен")
             kube_pods.setdefault(eng, []).append(ref)
             wl = _kube_workload(p)
             if wl:
@@ -672,6 +680,17 @@ def _backup_coverage(server: Server) -> list[BackupAudit]:
             # Свой бэкап ноды (cron, таймер, скрипт с метриками), который бэкапит именно этот
             # экземпляр. Раньше панель его не видела и звала «настройте дамп» там, где дамп
             # годами снимает ансибл-роль.
+            # Все поды этого экземпляра лежат - дамп снимать не с чего, и звать
+            # «включите дамп» бессмысленно: сначала надо поднять базу.
+            down = [down_pods[x] for x in inst_pods if x in down_pods]
+            if inst_pods and len(down) == len(inst_pods):
+                out.append(BackupAudit(
+                    kind="db", subject=eng, gap=False, instance=inst,
+                    detail=f"{where_txt} — под не запущен ({down[0]}), "
+                           "дамп снять не с чего: сначала поднимите базу",
+                    container=inst, pods=inst_pods[:4],
+                ))
+                continue
             own = custom_backups.db_cover(server, now_c, eng, inst, len(insts))
             if own is not None:
                 out.append(BackupAudit(

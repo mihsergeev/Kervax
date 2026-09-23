@@ -122,3 +122,24 @@ def test_the_command_accepts_a_workload():
     cmd = BackupCommandIn(action="dump_setup", engine="ch",
                           container="k8s.default.sts.chi-clickhouse-main-0-0")
     assert cmd.container == "k8s.default.sts.chi-clickhouse-main-0-0"
+
+
+def test_pod_that_cannot_start_is_not_a_host_process():
+    """Живой случай 23.09.2026 (uz-air-op-dg): ClickHouse шесть часов не поднимался
+    (нет секрета), панель выкидывала такой под из аудита и писала «процесс на хосте» -
+    по процессу оператора, который на ноде остаётся. Предлагала включить дамп, а
+    пробный дамп падал на «нет /var/lib/clickhouse/metadata»."""
+    broken = [dict(p) for p in PODS]
+    for p in broken:
+        if p["name"].startswith("chi-clickhouse"):
+            p.update(phase="Pending", ready=False, reason="CreateContainerConfigError")
+    ch = _audit(_server(pods=broken))[("ClickHouse", "k8s.default.sts.chi-clickhouse-main-0-0")]
+    assert ch.kind == "db" and not ch.can_dump
+    assert "под не запущен (CreateContainerConfigError)" in ch.detail
+    assert "процесс на хосте" not in ch.detail
+    assert ch.pods == ["default/chi-clickhouse-main-0-0-0"]
+
+    # отработавший под Job'а живой базой не считаем: поднимать там нечего, и находки нет
+    done = [{"ns": "default", "name": "pg-dump-29833860-x", "phase": "Succeeded",
+             "owner": "Job", "image": "postgres:18"}]
+    assert [k for k in _audit(_server(pods=done)) if k[0] == "PostgreSQL"] == []
