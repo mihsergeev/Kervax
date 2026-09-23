@@ -1072,6 +1072,7 @@ export type Server = {
   backup_anytime?: boolean // бэкап в любое время — не уведомлять о выходе за окно
   offline_after_seconds: number
   alert_sustain_seconds: number // сколько держать превышение до алерта, сек
+  agent_update_note?: string | null // «обновление докачивается: 59% (3.4 из 5.8 МБ)»
   agent_advice: string[] // чего агенту не хватает в systemd-юните (человекочитаемо)
   agent_fix_command: string | null // команда-фикс для ноды (drop-in) или null
   helper_advice: HelperAdvice[] // устаревшие setup-скрипты (helper'ы) на ноде → переустановить

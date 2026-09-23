@@ -1682,6 +1682,12 @@ select:focus {
   border-radius: 10px;
   background: color-mix(in srgb, var(--accent) 10%, transparent);
 }
+/* прогресс докачки агента: отдельной строкой под текстом баннера, иначе он встаёт
+   в ту же строку и баннер расползается на медленных нодах */
+.aub-progress {
+  display: block;
+  margin-top: 0.2rem;
+}
 /* сводка мьютов в подвале: отделяем от контента, чтобы читалась как справка */
 .mutes-banner-footer {
   margin: 1.25rem 0 0;

@@ -975,6 +975,8 @@ class ServerOut(BaseModel):
     # самодиагностика: чего агенту не хватает в systemd-юните + команда-фикс (или пусто)
     agent_advice: list[str] = []
     agent_fix_command: str | None = None
+    # идёт докачка обновления агента (медленный канал) - не отказ, чинить нечего
+    agent_update_note: str | None = None
     # устаревшие setup-скрипты (helper'ы) на ноде → переустановить на детали сервера
     helper_advice: list[HelperAdvice] = []
     # аудит покрытия бэкапа: что рискует не восстановиться (показ, БЕЗ алертов)
