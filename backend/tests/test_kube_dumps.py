@@ -143,3 +143,24 @@ def test_pod_that_cannot_start_is_not_a_host_process():
     done = [{"ns": "default", "name": "pg-dump-29833860-x", "phase": "Succeeded",
              "owner": "Job", "image": "postgres:18"}]
     assert [k for k in _audit(_server(pods=done)) if k[0] == "PostgreSQL"] == []
+
+
+def test_dump_cronjob_does_not_hide_a_dead_database():
+    """postgres-0 семь часов в CrashLoopBackOff (не нашёлся TLS-сертификат), а карточка
+    была зелёной: ветка «дамп уже настроен: CronJob» срабатывала раньше проверки подов."""
+    pods = [{"ns": "default", "name": "postgres-0", "phase": "Running", "ready": False,
+             "owner": "StatefulSet", "image": "postgres:18", "reason": "CrashLoopBackOff",
+             "restarts": 83}]
+    cj = [{"ns": "default", "name": "kervax-dump-pg-postgres", "image": "postgres:18",
+           "schedule": "0 2 * * *"}]
+    s = _server(pods=pods)
+    s.last_report["kube"]["cronjobs"] = cj
+    pg = _audit(s)[("PostgreSQL", "")]
+    assert pg.kind == "db" and "под не запущен (CrashLoopBackOff)" in pg.detail
+    assert "дамп настроен: CronJob default/kervax-dump-pg-postgres" in pg.detail
+
+    # поднялся - снова обычное «дамп уже настроен», без находки
+    pods[0].update(ready=True, reason="")
+    s = _server(pods=pods)
+    s.last_report["kube"]["cronjobs"] = cj
+    assert _audit(s)[("PostgreSQL", "")].kind == "db_ok"
