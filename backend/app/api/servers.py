@@ -620,7 +620,9 @@ def _backup_coverage(server: Server) -> list[BackupAudit]:
         eng = _db_engine_of(p.get("image") or "", p.get("name") or "")
         if eng:
             ref = f"{p.get('ns', '?')}/{p.get('name', '?')}"
-            if p.get("phase") != "Running":
+            # ready is False, а не falsy: старый агент поля не шлёт вовсе, и на нём
+            # «не готов» означало бы «все поды лежат» - карточка врала бы наоборот
+            if p.get("phase") != "Running" or p.get("ready") is False:
                 down_pods[ref] = str(p.get("reason") or "не запущен")
             kube_pods.setdefault(eng, []).append(ref)
             wl = _kube_workload(p)
@@ -670,6 +672,17 @@ def _backup_coverage(server: Server) -> list[BackupAudit]:
         code = _DUMP_ENGINE.get(eng, "")
         howto = _DB_HOWTO.get(eng)
         if eng in existing:
+            # Дамп настроен, но все поды базы лежат: «дамп уже настроен» читалось бы как
+            # «всё в порядке». Живой случай - postgres-0 семь часов в CrashLoopBackOff
+            # (нет TLS-сертификата), а карточка оставалась зелёной.
+            all_down = [down_pods[x] for x in pods if x in down_pods]
+            if pods and len(all_down) == len(pods):
+                out.append(BackupAudit(
+                    kind="db", subject=eng, gap=False, pods=pods[:4],
+                    detail=f"под не запущен ({all_down[0]}) — база не работает, "
+                           f"дамп настроен: CronJob {existing[eng]}",
+                ))
+                continue
             # дамп уже есть (CronJob в кластере) — сообщаем как факт, без кнопки.
             # container/pods отдаём и здесь: по ним «Сервисы» показывают, ГДЕ живёт
             # СУБД. Раньше эта ветка их не заполняла, и странице оставался только
