@@ -995,6 +995,27 @@ const EN: Record<string, string> = {
   'без кода ответа': 'no status code',
   'Веб': 'Web',
   'остальные': 'other',
+  'Выпустить новый токен? Старый сразу перестанет работать.':
+    'Issue a new token? The old one stops working right away.',
+  'Отключить доступ ansible? Плагин инвентаря перестанет получать ноды этой панели.':
+    'Turn off ansible access? The inventory plugin will stop getting the nodes of this panel.',
+  'Плагин инвентаря в репо ansible (inventory_plugins/kervax_panels.py) спрашивает у каждой панели её ноды и собирает группы: kervax - все ноды с агентом, kervax_outdated - где плейбук что-то обновит. Тогда helper-скрипты на всех панелях обновляет одна команда:':
+    'The inventory plugin in the ansible repo (inventory_plugins/kervax_panels.py) asks every panel for its nodes and builds groups: kervax - all nodes with the agent, kervax_outdated - where the playbook will update something. Then one command updates the helpers on all panels:',
+  'Токен открывает только список нод - имена и адреса, без секретов и без управления.':
+    'The token opens only the node list - names and addresses, no secrets and no control.',
+  'Доступ включен': 'Access is on',
+  'Доступ выключен': 'Access is off',
+  'Токен выпущен: {a}. Ansible спрашивал последний раз: {b}.':
+    'Token issued: {a}. Ansible last asked: {b}.',
+  'Токен показывается один раз. Добавьте эти строки в inventories/kervax_panels.yml, в список panels:':
+    'The token is shown only once. Add these lines to inventories/kervax_panels.yml, under panels:',
+  'Отключить': 'Turn off',
+  'Выпустить новый токен': 'Issue a new token',
+  'Выпустить токен': 'Issue a token',
+  'Одна команда на все панели: группу kervax_outdated плагин инвентаря собирает, спрашивая сами панели.':
+    'One command for all panels: the inventory plugin builds the kervax_outdated group by asking the panels themselves.',
+  'Чтобы на всех панелях была одна команда без списка хостов, включите доступ для ansible: меню настроек -> Ansible.':
+    'To get one command for all panels without a host list, turn on ansible access: settings menu -> Ansible.',
   'За сутки ответов 5xx не было.': 'No 5xx responses in the last 24 hours.',
   'Ответы 5xx за сутки по логам веб-сервера': '5xx responses in the last 24 hours, by web server log',
   '{n} ошибок за {m} мин, пик {p}/мин': '{n} errors over {m} min, peak {p}/min',

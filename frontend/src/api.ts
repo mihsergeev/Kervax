@@ -728,6 +728,24 @@ export function putRetention(body: Retention): Promise<Retention> {
   })
 }
 
+// --- доступ ansible к списку нод ---
+// Плагин инвентаря в репо ansible спрашивает ноды у всех панелей сам: одна команда
+// обновляет helper'ы везде, без копирования списка хостов из каждой панели.
+
+export type AnsibleAccess = { enabled: boolean; created_at: string | null; used_at: string | null }
+
+export function getAnsibleAccess(): Promise<AnsibleAccess> {
+  return api<AnsibleAccess>('/api/settings/ansible')
+}
+
+export function issueAnsibleToken(): Promise<{ token: string; created_at: string }> {
+  return api('/api/settings/ansible', { method: 'POST' })
+}
+
+export function revokeAnsibleToken(): Promise<void> {
+  return api('/api/settings/ansible', { method: 'DELETE' })
+}
+
 // --- бэкап (конфиг без метрик) ---
 
 export type BackupConfig = { interval_hours: number; keep: number }
@@ -1077,6 +1095,9 @@ export type Server = {
   agent_advice: string[] // чего агенту не хватает в systemd-юните (человекочитаемо)
   agent_fix_command: string | null // команда-фикс для ноды (drop-in) или null
   helper_advice: HelperAdvice[] // устаревшие setup-скрипты (helper'ы) на ноде → переустановить
+  // прогон kervax_helpers.yml ноде что-то поменяет (устарел helper или нет watchdog);
+  // тот же признак панель отдает ansible, поэтому считается на бэкенде
+  helper_rollout?: boolean
   backup_audit?: BackupAudit[] // аудит покрытия бэкапа: что рискует не восстановиться
   custom_backups?: CustomBackup[] // свои бэкапы ноды (настроены без панели) со статусом
   custom_backup_ignored?: string[] | null

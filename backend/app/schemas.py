@@ -705,6 +705,41 @@ class ServerAlertRulesIn(BaseModel):
     rules: dict[str, ServerAlertRule]
 
 
+class AnsibleAccessOut(BaseModel):
+    """Доступ ansible к списку нод: включен ли, когда выпущен токен и когда им пользовались."""
+
+    enabled: bool
+    created_at: str | None = None
+    used_at: str | None = None
+
+
+class AnsibleTokenOut(BaseModel):
+    """Новый токен ansible - показывается один раз, в базе остается только хеш."""
+
+    token: str
+    created_at: str
+
+
+class AnsibleServerOut(BaseModel):
+    """Нода для инвентаря ansible. Имени в инвентаре панель не знает, поэтому отдает все,
+    по чему его можно найти: имя в панели, hostname ноды и её адреса."""
+
+    name: str
+    hostname: str = ""
+    ips: list[str] = []
+    online: bool
+    enabled: bool
+    # Прогон kervax_helpers.yml этой ноде что-то поменяет, и она на связи: устарел helper
+    # или не включен watchdog. Ровно те ноды, что панель зовет обновить на главной.
+    rollout: bool
+    outdated: list[str] = []  # какие helper'ы устарели
+
+
+class AnsibleServersOut(BaseModel):
+    version: str
+    servers: list[AnsibleServerOut]
+
+
 class RetentionConfig(BaseModel):
     """Сроки хранения тайм-серий, дней."""
 
@@ -981,6 +1016,10 @@ class ServerOut(BaseModel):
     agent_update_note: str | None = None
     # устаревшие setup-скрипты (helper'ы) на ноде → переустановить на детали сервера
     helper_advice: list[HelperAdvice] = []
+    # Прогон kervax_helpers.yml ноде что-то поменяет: устарел helper или не включен
+    # watchdog. Считается здесь, а не на фронте: тот же признак отдает ansible
+    # (/api/ansible/servers), и расходиться им нельзя.
+    helper_rollout: bool = False
     # аудит покрытия бэкапа: что рискует не восстановиться (показ, БЕЗ алертов)
     backup_audit: list[BackupAudit] = []
     # свои бэкапы ноды, найденные helper'ом (cron, таймеры, метрики) — со статусом

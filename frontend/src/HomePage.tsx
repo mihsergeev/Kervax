@@ -6,6 +6,7 @@ import {
   alertCoverage,
   fixAlertCoverage,
   applyLocalProbe,
+  getAnsibleAccess,
   listServers,
   localProbeSuggestions,
   podFinished,
@@ -208,9 +209,19 @@ function MuteHint({
 
 function AnsibleHint({ hosts }: { hosts: string[] }) {
   const { t } = useI18n()
+  const { isAdmin } = useAuth()
   const [open, setOpen] = useState(false)
   const [copied, setCopied] = useState(false)
-  const cmd = `ansible-playbook playbooks/kervax_helpers.yml -l '${hosts.join(',')}'`
+  // Доступ ansible включен - плагин инвентаря сам спрашивает у панелей, где что
+  // обновить, и команда одна на все панели. Иначе - список хостов этой панели.
+  const [viaPanels, setViaPanels] = useState(false)
+  useEffect(() => {
+    if (!isAdmin) return
+    getAnsibleAccess().then((a) => setViaPanels(a.enabled)).catch(() => setViaPanels(false))
+  }, [isAdmin])
+  const cmd = viaPanels
+    ? 'ansible-playbook playbooks/kervax_helpers.yml -l kervax_outdated'
+    : `ansible-playbook playbooks/kervax_helpers.yml -l '${hosts.join(',')}'`
   return (
     <div className="ansible-hint">
       <button className="ghost" onClick={() => setOpen(!open)}>
@@ -227,6 +238,11 @@ function AnsibleHint({ hosts }: { hosts: string[] }) {
           </div>
           <div className="muted small">
             {t('Запускать из своего репозитория ansible. Сначала можно вхолостую: добавьте --check --diff. Панель ничего не выполняет — только называет хосты.')}
+          </div>
+          <div className="muted small">
+            {viaPanels
+              ? t('Одна команда на все панели: группу kervax_outdated плагин инвентаря собирает, спрашивая сами панели.')
+              : isAdmin && t('Чтобы на всех панелях была одна команда без списка хостов, включите доступ для ansible: меню настроек -> Ansible.')}
           </div>
         </>
       )}
@@ -539,7 +555,7 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
   const homeCols = [colSites, colDocker, colBackups].filter(Boolean).length
   const rolloutHosts = [...new Set(
     srvList
-      .filter((s) => s.online && ((s.helper_advice?.length ?? 0) > 0 || s.last_report?.caps?.watchdog === false))
+      .filter((s) => s.online && s.helper_rollout)
       .map((s) => s.hostname || s.name),
   )].sort()
   return (

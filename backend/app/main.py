@@ -7,6 +7,7 @@ from fastapi import FastAPI
 
 from app.api import (
     alerts,
+    ansible as ansible_api,
     audit,
     auth,
     backup as backup_api,
@@ -97,6 +98,7 @@ def create_app() -> FastAPI:
     app.include_router(servers.router, prefix="/api")
     app.include_router(servers.agent_router, prefix="/api")
     app.include_router(settings_api.router, prefix="/api")
+    app.include_router(ansible_api.router, prefix="/api")
     app.include_router(backup_api.router, prefix="/api")
     app.include_router(vault_api.router, prefix="/api")
     # брендирование: GET публичный (экран входа рисуется до авторизации),

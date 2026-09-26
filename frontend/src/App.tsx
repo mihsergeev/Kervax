@@ -10,6 +10,7 @@ import { ChecksPage } from './ChecksPage'
 import { HomePage } from './HomePage'
 import { LocationsModal } from './LocationsModal'
 import { RetentionModal } from './RetentionModal'
+import { AnsibleModal } from './AnsibleModal'
 import { BackupModal } from './BackupModal'
 import { LoginPage } from './LoginPage'
 import { ServersPage } from './ServersPage'
@@ -30,6 +31,7 @@ type Modal =
   | 'alerts'
   | 'locations'
   | 'retention'
+  | 'ansible'
   | 'backup'
   | 'users'
   | null
@@ -325,6 +327,15 @@ export default function App() {
                       <button
                         className="menu-item"
                         onClick={() => {
+                          setModal('ansible')
+                          setMenuOpen(false)
+                        }}
+                      >
+                        Ansible
+                      </button>
+                      <button
+                        className="menu-item"
+                        onClick={() => {
                           setModal('backup')
                           setMenuOpen(false)
                         }}
@@ -449,6 +460,9 @@ export default function App() {
       )}
       {modal === 'retention' && (
         <RetentionModal onClose={() => setModal(null)} onUnauthorized={logout} />
+      )}
+      {modal === 'ansible' && (
+        <AnsibleModal onClose={() => setModal(null)} onUnauthorized={logout} />
       )}
       {modal === 'backup' && (
         <BackupModal onClose={() => setModal(null)} onUnauthorized={logout} />
