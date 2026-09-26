@@ -8,7 +8,7 @@
 # secrets or config contents.
 set -euo pipefail
 
-KERVAX_SETUP_VERSION=0.10  # MAJOR.MINOR; compared component-wise
+KERVAX_SETUP_VERSION=0.11  # MAJOR.MINOR; compared component-wise
 KERVAX_SETUP_ALWAYS=1     # safe on any node: the refresh is a no-op without a web server
 
 HELPER_DIR=/lib65/kervax
@@ -192,20 +192,26 @@ container_logs() {
 {{end}}' "$c" 2>/dev/null)
   logpath=$(docker inspect --format '{{.LogPath}}' "$c" 2>/dev/null)
   driver=$(docker inspect --format '{{.HostConfig.LogConfig.Type}}' "$c" 2>/dev/null)
+  # имя контейнера - для показа: в пути json-лога только хеш, и без доменов лог в панели
+  # был бы безымянным
+  cname=$(docker inspect --format '{{.Name}}' "$c" 2>/dev/null); cname=${cname#/}
   docker exec "$c" nginx -T 2>/dev/null | extract_logs | while IFS="$(printf '\t')" read -r lg names; do
-    real=$(docker exec "$c" sh -c 'readlink -f "$1" 2>/dev/null' _ "$lg" 2>/dev/null)
+    # Обычный файл - берём его путь, иначе это поток: в образе nginx access.log ведёт в
+    # /dev/stdout, а оттуда в pipe, и readlink -f отвечает то /dev/..., то /proc/...,
+    # то «/pipe:[816111754]» (busybox во фронте панели). Спрашиваем тип, а не путь.
+    real=$(docker exec "$c" sh -c 'if [ -f "$1" ] && [ ! -c "$1" ]; then readlink -f "$1"; else echo STREAM; fi' _ "$lg" 2>/dev/null)
     [ -n "$real" ] || real="$lg"
     case "$real" in
-      /dev/*|/proc/*)
+      STREAM|/dev/*|/proc/*|*pipe:*|*socket:*)
         case "$driver" in
           json-file|"")
-            [ -n "$logpath" ] && [ -f "$logpath" ] && printf '%s\t%s\n' "$logpath" "$names"
+            [ -n "$logpath" ] && [ -f "$logpath" ] && printf '%s\t%s\t%s\n' "$logpath" "$names" "$cname"
             ;;
         esac
         ;;
       *)
         hp=$(printf '%s\n' "$mounts" | host_path "$real")
-        [ -n "$hp" ] && printf '%s\t%s\n' "$hp" "$names"
+        [ -n "$hp" ] && printf '%s\t%s\t%s\n' "$hp" "$names" "$cname"
         ;;
     esac
   done
@@ -233,10 +239,44 @@ collect_pod_logs() {
   done
 }
 
+# nginx ищем по процессам, а не по имени образа: nginx часто живёт внутри образа
+# приложения (фронт самой панели - kervax-frontend), и по имени его не найти. У каждого
+# master-процесса cgroup называет контейнер: docker-<id>.scope у докера и .../pod<uid>/<id>
+# у kubernetes. Пустой id - nginx на самом хосте.
+nginx_container_ids() {
+  for p in /proc/[0-9]*; do
+    [ "$(cat "$p/comm" 2>/dev/null)" = nginx ] || continue
+    tr '\0' ' ' < "$p/cmdline" 2>/dev/null | grep -q 'master process' || continue
+    grep -o '[0-9a-f]\{64\}' "$p/cgroup" 2>/dev/null | tail -n 1
+  done | sort -u
+}
+
+# Лог пода по id его контейнера: kubelet держит симлинк
+# /var/log/containers/<под>_<ns>_<контейнер>-<id>.log -> /var/log/pods/.../0.log
+pod_log_by_id() {
+  for l in /var/log/containers/*-"$1".log; do
+    [ -e "$l" ] || continue
+    f=$(readlink -f "$l" 2>/dev/null) || continue
+    [ -f "$f" ] || continue
+    base=${l##*/}; pod=${base%%_*}; rest=${base#*_}; ns=${rest%%_*}
+    printf '%s\t\t%s/%s\n' "$f" "$ns" "$pod"
+  done
+}
+
 collect_logs() {
   command -v nginx >/dev/null 2>&1 && nginx -T 2>/dev/null | extract_logs
   collect_pod_logs
-  command -v docker >/dev/null 2>&1 || return 0
+  have_docker=0
+  command -v docker >/dev/null 2>&1 && have_docker=1
+  for id in $(nginx_container_ids); do
+    if [ "$have_docker" = 1 ] && docker inspect "$id" >/dev/null 2>&1; then
+      container_logs "$id"
+    else
+      pod_log_by_id "$id"
+    fi
+  done
+  # по имени - как раньше: nginx, который ещё не поднялся или недоступен через /proc
+  [ "$have_docker" = 1 ] || return 0
   docker ps --format '{{.Names}} {{.Image}}' 2>/dev/null | awk '/nginx/{print $1}' | sort -u \
     | while read -r c; do
         [ -n "$c" ] && container_logs "$c"
@@ -297,22 +337,25 @@ T5=0
 esc() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g' | tr -d '\000-\037'; }
 sites_json() { tr ' ' '\n' | awk 'BEGIN{printf "["} {gsub(/[\\"]/,""); if($0=="")next; printf "%s\"%s\"", (n++?",":""), $0} END{printf "]"}'; }
 
-# Строки -> «всего 5xx 4xx». Код ответа ищем тремя способами, потому что формат лога
-# у всех свой: после кавычки с запросом (combined, в том числе внутри docker-json, где
-# кавычка экранирована), полем через табуляцию (так пишет ingress-nginx) и как
-# "status":503 в json-логах. Не нашли - строка считается только в «всего».
+# Строки -> «всего 5xx 4xx нераспознано». Код ответа ищем четырьмя способами, потому что
+# формат лога у всех свой: после кавычки с запросом (combined, в том числе внутри
+# docker-json, где кавычка экранирована), перед ней (так пишет loki-gateway: `204 "POST
+# ...`), полем через табуляцию (ingress-nginx) и как "status":503 в json-логах. Не нашли -
+# строка идёт в «нераспознано»: без этого «ошибок ноль» и «код не нашёлся» выглядели бы
+# одинаково.
 count_codes() {
   awk '
     { n++
       s=""
       if (match($0, /\\?"[ \t]+[1-5][0-9][0-9]([ \t]|$)/)) { s=substr($0,RSTART,RLENGTH); gsub(/[^0-9]/,"",s) }
+      else if (match($0, /[ \t][1-5][0-9][0-9][ \t]+\\?"[A-Z]+ /)) { s=substr($0,RSTART+1,3) }
       else if (match($0, /"status"[ \t]*:[ \t]*"?[1-5][0-9][0-9]/)) { s=substr($0,RSTART+RLENGTH-3,3) }
       else if (match($0, /\t[1-5][0-9][0-9]\t/)) { s=substr($0,RSTART+1,3) }
-      if (s=="") next
+      if (s=="") { u++; next }
       c=s+0
       if (c>=500) e5++
       else if (c>=400) e4++ }
-    END { printf "%d %d %d\n", n+0, e5+0, e4+0 }'
+    END { printf "%d %d %d %d\n", n+0, e5+0, e4+0, u+0 }'
 }
 
 if [ -s "$MAP" ]; then
@@ -340,7 +383,7 @@ if [ -s "$MAP" ]; then
     el=$((now - pts))
     [ "$el" -ge 20 ] || continue
     delta=$((size - psize))
-    counts="0 0 0"
+    counts="0 0 0 0"
     if [ "$delta" -gt 0 ]; then
       if [ "$delta" -le "$CAP" ]; then
         counts=$(tail -c "+$((psize + 1))" "$lg" 2>/dev/null | count_codes)
@@ -348,16 +391,19 @@ if [ -s "$MAP" ]; then
         # слишком много за раз: считаем кусок и масштабируем - и строки, и ошибки
         k=$((delta / SAMPLE + 1))
         counts=$(tail -c "+$((psize + 1))" "$lg" 2>/dev/null | head -c "$SAMPLE" \
-                 | count_codes | awk -v k="$k" '{printf "%d %d %d\n", $1*k, $2*k, $3*k}')
+                 | count_codes | awk -v k="$k" '{printf "%d %d %d %d\n", $1*k, $2*k, $3*k, $4*k}')
       fi
     fi
-    lines=${counts%% *}; tail2=${counts#* }; e5=${tail2%% *}; e4=${tail2##* }
+    # shellcheck disable=SC2086
+    set -- $counts
+    lines=${1:-0}; e5=${2:-0}; e4=${3:-0}; un=${4:-0}
     rpm=$((lines * 60 / el))
     r5=$((e5 * 60 / el))
     r4=$((e4 * 60 / el))
+    ru=$((un * 60 / el))
     TOTAL=$((TOTAL + rpm))
     T5=$((T5 + r5))
-    ITEMS="$ITEMS${ITEMS:+,}{\"log\":\"$(esc "$lg")\",\"name\":\"$(esc "$name")\",\"rpm\":$rpm,\"e5\":$r5,\"e4\":$r4,\"sites\":$(printf '%s' "$names" | sites_json)}"
+    ITEMS="$ITEMS${ITEMS:+,}{\"log\":\"$(esc "$lg")\",\"name\":\"$(esc "$name")\",\"rpm\":$rpm,\"e5\":$r5,\"e4\":$r4,\"un\":$ru,\"sites\":$(printf '%s' "$names" | sites_json)}"
   done < "$MAP"
 fi
 
