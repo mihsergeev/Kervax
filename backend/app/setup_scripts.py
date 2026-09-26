@@ -64,9 +64,11 @@ def setup_needed(name: str, rep: dict) -> bool:
     # ServiceAccount ему не нужен (и секретов ему не дают принципиально)
     if name == "kubeexpiry-setup":
         return bool((rep.get("kube") or {}).get("present"))
-    # webserver-setup — только где реально есть веб-сервер (иначе доменов всё равно нет)
+    # webserver-setup - где есть веб-сервер (иначе доменов все равно нет) или где helper уже
+    # считает запросы: на host-a агент веб-сервер не распознал, а блок запросов от
+    # helper 0.7 шел, и устаревший helper там никто не флагал
     if name == "webserver-setup":
-        return bool(rep.get("web_services"))
+        return bool(rep.get("web_services")) or bool((rep.get("extras") or {}).get("web-rate"))
     # dbstat-setup — только там, где СУБД реально есть (скан процессов агента);
     # на ноде без баз инвентарь пустой, флагать нечего
     if name == "dbstat-setup":

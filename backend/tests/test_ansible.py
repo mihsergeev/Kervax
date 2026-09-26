@@ -86,3 +86,14 @@ async def test_only_admin_manages_the_token(client, auth_headers):
     assert (await client.post("/api/settings/ansible", headers=viewer)).status_code == 403
     # и JWT обычной учетки ansible-ручку не открывает: там только свой токен
     assert (await client.get("/api/ansible/servers", headers=auth_headers)).status_code == 401
+
+
+def test_webserver_helper_is_needed_where_it_already_counts_requests():
+    """host-a: агент веб-сервер не распознал (web_services пуст), а helper 0.7 слал
+    блок запросов - устаревший helper там не флагался ни разу."""
+    from app.setup_scripts import setup_needed
+
+    assert setup_needed("webserver-setup", {"web_services": [{"kind": "nginx"}]})
+    assert setup_needed("webserver-setup", {"extras": {"web-rate": {"ts": 1, "rpm": 0, "logs": []}}})
+    # без веб-сервера и без блока - не нужен: доменов там все равно нет
+    assert not setup_needed("webserver-setup", {"extras": {"custom-backups": {}}})
