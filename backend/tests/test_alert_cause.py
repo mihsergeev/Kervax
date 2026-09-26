@@ -295,3 +295,53 @@ async def test_dead_pod_of_a_controller_alerts_and_jobs_do_not(tmp_path, monkeyp
     await collector.evaluate_servers(factory, settings, now + timedelta(minutes=10))
     assert len(sent) == 1 and "снова в норме" in sent[0]
     await engine.dispose()
+
+
+def test_web_error_rule_needs_a_real_count_and_a_real_share():
+    # балансер из разбора: 0.2% ошибок при большом потоке - повод
+    assert collector.web_error_level(total=500_000, errs=1_000, points=15, threshold=0.05)
+    # одна случайная 503 на маленькой ноде - 0.09%, но будить из-за неё нельзя
+    assert not collector.web_error_level(total=1_115, errs=1, points=15, threshold=0.05)
+    # ошибок много, но на таком потоке это шум: 0.001%
+    assert not collector.web_error_level(total=3_000_000, errs=30, points=15, threshold=0.05)
+    # окно не набралось (только что раскатили хелпер) - молчим
+    assert not collector.web_error_level(total=50_000, errs=500, points=3, threshold=0.05)
+    # правило выключено
+    assert not collector.web_error_level(total=50_000, errs=500, points=15, threshold=0)
+
+
+async def test_5xx_alert_names_where_the_errors_are(tmp_path, monkeypatch):
+    """Кейс 23.09: ingress-nginx на балансере отдавал 503 на 0.1-0.28% запросов, и
+    заметили это по жалобе. Теперь панель говорит сама и показывает, в каком логе."""
+    engine, factory = await _panel(tmp_path, "e5.db")
+    now = datetime.now(timezone.utc)
+    rep = {"cpu_percent": 20, "extras": {"web-rate": {"ts": now.timestamp(), "rpm": 40000, "e5": 80, "logs": [
+        {"log": "/var/log/pods/ingress-nginx_ingress-nginx-controller-569b_uid/controller/0.log",
+         "name": "ingress-nginx/ingress-nginx-controller-569b", "rpm": 39000, "e5": 80},
+        {"log": "/var/log/nginx/access.log", "sites": ["my.advcake.com"], "rpm": 1000, "e5": 0},
+    ]}}}
+    async with factory() as s:
+        s.add(Server(
+            name="ru-vk-abalancer-wn9", token_hash="x", enabled=True, backup_not_required=True,
+            last_seen=now, last_report=rep, cpu_alert_percent=0, mem_alert_percent=0,
+            disk_alert_percent=0, alert_sustain_seconds=900, web_5xx_alert_percent=0.05,
+        ))
+        await s.commit()
+        # 15 минут потока: 40 тысяч запросов в минуту, из них 80 - 503 (0.2%)
+        for m in range(15):
+            s.add(ServerMetric(server_id=1, ts=now - timedelta(minutes=m), cpu_percent=20,
+                               web_rpm=40000, web_5xx=80))
+        await s.commit()
+
+    sent: list[str] = []
+
+    async def fake_send(cfg, text, parse_mode=None):
+        sent.append(text)
+        return []
+
+    monkeypatch.setattr("app.alerts.send_alert", fake_send)
+    await collector.evaluate_servers(factory, Settings(alert_webhook="http://hook"), now)
+    assert len(sent) == 1, sent
+    assert "ошибки 5xx: 0.20% за 15 минут (1200 из 600000)" in sent[0]
+    assert "сверху ingress-nginx/ingress-nginx-controller-569b 80/мин" in sent[0]
+    await engine.dispose()

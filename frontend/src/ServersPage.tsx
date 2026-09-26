@@ -1845,6 +1845,7 @@ type ServerEditForm = {
   temp_alert_c: number
   conntrack_alert_percent: number
   db_conn_alert_percent: number
+  web_5xx_alert_percent: number
   kube_expiry_alert_days: number
   disk_temp_alert_c: number
   alert_mutes: string[]
@@ -2211,6 +2212,17 @@ function ServerEditCard({
           />
         </label>
         <label className="field">
+          <span>🌐 {t('Алерт по ошибкам 5xx, % за 15 минут (0 = выкл)')}</span>
+          <input
+            type="number"
+            min={0}
+            max={100}
+            step={0.01}
+            value={form.web_5xx_alert_percent}
+            onChange={(e) => set({ web_5xx_alert_percent: num(e.target.value) })}
+          />
+        </label>
+        <label className="field">
           <span>⏳ {t('Предупреждать о сроках Kubernetes за, дн. (0 = выкл)')}</span>
           <input
             type="number"
@@ -2502,6 +2514,7 @@ function ServerDetail({
       temp_alert_c: s.temp_alert_c,
       conntrack_alert_percent: s.conntrack_alert_percent,
       db_conn_alert_percent: s.db_conn_alert_percent,
+      web_5xx_alert_percent: s.web_5xx_alert_percent ?? 0.05,
       kube_expiry_alert_days: s.kube_expiry_alert_days,
       disk_temp_alert_c: s.disk_temp_alert_c,
       alert_mutes: s.alert_mutes ?? [],
@@ -2529,6 +2542,7 @@ function ServerDetail({
         temp_alert_c: form.temp_alert_c,
         conntrack_alert_percent: form.conntrack_alert_percent,
         db_conn_alert_percent: form.db_conn_alert_percent,
+        web_5xx_alert_percent: form.web_5xx_alert_percent,
         kube_expiry_alert_days: form.kube_expiry_alert_days,
         disk_temp_alert_c: form.disk_temp_alert_c,
         alert_mutes: form.alert_mutes,

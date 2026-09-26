@@ -14,7 +14,7 @@ from datetime import datetime, timedelta, timezone
 from typing import NamedTuple
 from urllib.parse import urlparse
 
-from sqlalchemy import and_, delete, or_, select, update
+from sqlalchemy import and_, delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app import alerts, backup, checks as checks_exec, custom_backups, heartbeat, settings_store
@@ -190,7 +190,7 @@ _SRV_ICON = {
     "backup_dump": "💾", "backup_dump_space": "🈵", "backup_cron": "💾", "backup_custom": "💾",
     "clock": "🕐",
     # ⏳ — срок ещё не вышел, есть время спланировать; 🔥 — доставка уже встала
-    "kube_expiry": "⏳", "flux_down": "🔥☸️", "kube_pod": "☸️🔥",
+    "kube_expiry": "⏳", "flux_down": "🔥☸️", "kube_pod": "☸️🔥", "web_5xx": "🌐🔥",
 }
 
 # Куда ведёт ссылка алерта (deep-link ?server=id&sec=…). Целимся в КОНКРЕТНУЮ метрику,
@@ -203,7 +203,7 @@ _SRV_SECTION = {
     "mem": "mem", "oom": "oom",
     "conntrack": "conntrack", "disk": "diskfill", "disktemp": "disktemp",
     "db_conn": "services",
-    "kube_expiry": "kube", "flux_down": "kube", "kube_pod": "kube",
+    "kube_expiry": "kube", "flux_down": "kube", "kube_pod": "kube", "web_5xx": "net",
     "clock": "clock",
 }
 
@@ -1101,6 +1101,7 @@ _SRV_LABEL = {
     "backup_cron": "дамп-CronJob", "backup_custom": "свой бэкап", "clock": "время",
     "kube_expiry": "сроки Kubernetes", "flux_down": "доставка Flux",
     "kube_pod": "поды kubernetes",
+    "web_5xx": "ошибки 5xx",
 }
 
 # Единицы пороговых метрик. Нужны отбою: голое «снова в норме» не отвечает на
@@ -1746,9 +1747,51 @@ def cause_text(rep: dict, kind: str, base: dict[str, float], now: datetime | Non
 # то выше порога, то ниже, и на каждый заход прилетала пара «сработало - отбой».
 # После _FLAP_METRIC_LIMIT заходов за окно шлём одно сообщение и замолкаем.
 # Эскалации (диск warn -> crit) не считаем: там растёт проблема, а не мигает метрика.
-_FLAP_METRIC_KINDS = frozenset({"cpu", "mem", "disk", "temp", "conntrack", "db_conn", "disktemp"})
+_FLAP_METRIC_KINDS = frozenset({"cpu", "mem", "disk", "temp", "conntrack", "db_conn", "disktemp",
+                                "web_5xx"})
 _FLAP_METRIC_WINDOW = 6 * 3600
 _FLAP_METRIC_LIMIT = 3
+
+
+
+# Ошибки 5xx по логам веб-сервера. Синтетический монитор такую долю не видит: 0.1-0.3%
+# это один запрос из трёхсот. Окно 15 минут - и выдержка, и знаменатель сразу. Нижний
+# порог по числу ошибок страхует мелкие ноды: на ноде с тысячей запросов в час одна
+# случайная 503 - это уже 0.1%, и будить из-за неё нельзя.
+_WEB_ERR_WINDOW = timedelta(minutes=15)
+_WEB_ERR_MIN = 20           # ошибок за окно, меньше - не повод
+_WEB_ERR_MIN_POINTS = 10    # минут с данными в окне, меньше - окно не набралось
+
+
+async def web_error_window(session: AsyncSession, now: datetime) -> dict[int, tuple[float, float, int]]:
+    """{server_id: (запросов, ошибок 5xx, минут с данными)} за последние 15 минут.
+    Один сгруппированный запрос на тик, а не по запросу на ноду."""
+    rows = await session.execute(
+        select(ServerMetric.server_id, func.sum(ServerMetric.web_rpm),
+               func.sum(ServerMetric.web_5xx), func.count())
+        .where(ServerMetric.ts >= now - _WEB_ERR_WINDOW, ServerMetric.web_5xx.is_not(None))
+        .group_by(ServerMetric.server_id)
+    )
+    return {sid: (float(t or 0), float(e or 0), int(n or 0)) for sid, t, e, n in rows}
+
+
+def web_error_level(total: float, errs: float, points: int, threshold: float) -> bool:
+    """Пошли ли ошибки: окно набралось, ошибок больше случайных и их доля выше порога."""
+    if not threshold or points < _WEB_ERR_MIN_POINTS or total <= 0:
+        return False
+    return errs >= _WEB_ERR_MIN and errs / total * 100 >= threshold
+
+
+def web_error_top(rep: dict, limit: int = 3) -> str:
+    """Где именно: логи с ошибками из последнего отчёта. По ним сразу видно, домен это,
+    контейнер или под ingress."""
+    logs = ((rep.get("extras") or {}).get("web-rate") or {}).get("logs") or []
+    bad = sorted((x for x in logs if (x.get("e5") or 0) > 0), key=lambda x: -(x.get("e5") or 0))
+    names = []
+    for x in bad[:limit]:
+        label = x.get("name") or ", ".join((x.get("sites") or [])[:2]) or str(x.get("log") or "?").split("/")[-1]
+        names.append(f"{label} {int(x.get('e5') or 0)}/мин")
+    return f" - сверху {', '.join(names)}" if names else ""
 
 
 def _flapping(s: Server, st: dict, now: datetime, apply, note: list, url: str = "") -> bool:
@@ -1847,7 +1890,8 @@ def _fallback_rule(key: str) -> dict:
     }
 
 
-def _server_conditions(s: Server, now: datetime) -> dict[str, tuple[int, dict]]:
+def _server_conditions(s: Server, now: datetime,
+                       web_err: tuple[float, float, int] | None = None) -> dict[str, tuple[int, dict]]:
     """Пороги сервера: ключ → (уровень, контекст для шаблона текста). Уровень 0 =
     норма; для диска 1=предупреждение(≥warn), 2=проблема(≥alert), 3=критично(≥crit)."""
     out: dict[str, tuple[int, dict]] = {}
@@ -2048,6 +2092,19 @@ def _server_conditions(s: Server, now: datetime) -> dict[str, tuple[int, dict]]:
         else:
             sustain("flux_down", False, {})
 
+    # Пошли ошибки 5xx. Выдержка тут - само окно в 15 минут, поэтому уровень ставим сразу,
+    # без sustain: иначе к окну добавились бы ещё 15 минут ожидания.
+    thr5 = float(getattr(s, "web_5xx_alert_percent", 0) or 0)
+    if online and thr5 and web_err is not None:
+        total, errs, points = web_err
+        bad5 = web_error_level(total, errs, points, thr5)
+        out["web_5xx"] = (1 if bad5 else 0, {
+            "value": f"{errs / total * 100:.2f}" if total else "0",
+            "errs": int(errs), "total": int(total),
+            "top": web_error_top(rep) if bad5 else "",
+            "threshold": thr5,
+        })
+
     # Поды, которые контроллер обязан держать живыми. Повод - uz-air-op-dg 23.09.2026:
     # ClickHouse (нет секрета) и PostgreSQL (нет сертификата) лежали по семь часов, и
     # панель об этом не сказала ни разу: в «Кубере» их видно, только если открыть.
@@ -2202,6 +2259,7 @@ async def evaluate_servers(
         cfg = await settings_store.get_alert_config(session, settings)
         muted = await settings_store.get_muted(session)
         rules = await settings_store.get_server_alert_rules(session)
+        web_err = await web_error_window(session, now)
     can_send = alerts.alerts_enabled(cfg) and not muted
     base = settings.panel_url.rstrip("/")
     threshold = int(cfg.get("flood_threshold", 6))
@@ -2319,7 +2377,7 @@ async def evaluate_servers(
                     f"{settings_store.SERVER_ALERT_KINDS[fk][0]} снова в норме",
                     srv_url(s, fk), recovery=True, group=s.group_name or "",
                 ))
-        conds = _server_conditions(s, now)
+        conds = _server_conditions(s, now, web_err.get(s.id))
         # состояние дебаунса ведём КАЖДЫЙ тик, даже без смены уровня алерта — иначе
         # оно не накопится (при level==prev цикл ниже делает continue без записи).
         # «<тип>_since» — момент начала «жарки» (по времени); throttle — «_streak».

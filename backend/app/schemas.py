@@ -796,6 +796,7 @@ class ServerUpdate(BaseModel):
     conntrack_alert_percent: int | None = Field(default=None, ge=0, le=100)
     kube_expiry_alert_days: int | None = Field(default=None, ge=0, le=365)
     db_conn_alert_percent: int | None = Field(default=None, ge=0, le=100)
+    web_5xx_alert_percent: float | None = Field(default=None, ge=0, le=100)
     # порог глубины очереди RabbitMQ (0 = алерты по очередям на ноде выключены)
     queue_alert_depth: int | None = Field(default=None, ge=0, le=10_000_000)
     # переопределения по очередям: {"<источник>|<vhost>/<имя>": порог}, 0 = не алертить
@@ -958,6 +959,7 @@ class ServerOut(BaseModel):
     conntrack_alert_percent: int
     kube_expiry_alert_days: int
     db_conn_alert_percent: int
+    web_5xx_alert_percent: float = 0.05
     queue_alert_depth: int = 0
     # None, а не dict: в БД колонка nullable, и пустое значение приходит как NULL —
     # обязательный dict валил ServerOut пятисоткой на всём списке серверов
