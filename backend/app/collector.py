@@ -38,6 +38,7 @@ from app.models import (
     ProbeRequest,
     Server,
     ServerMetric,
+    WebErrorSample,
 )
 
 log = logging.getLogger("kervax.collector")
@@ -203,7 +204,7 @@ _SRV_SECTION = {
     "mem": "mem", "oom": "oom",
     "conntrack": "conntrack", "disk": "diskfill", "disktemp": "disktemp",
     "db_conn": "services",
-    "kube_expiry": "kube", "flux_down": "kube", "kube_pod": "kube", "web_5xx": "net",
+    "kube_expiry": "kube", "flux_down": "kube", "kube_pod": "kube", "web_5xx": "web",
     "clock": "clock",
 }
 
@@ -1152,6 +1153,8 @@ def _recovery_detail(key: str, st: dict, ctx: dict) -> str:
     """Текст отбоя порогового алерта. Прежнее значение берём из alert_state
     («<тип>_val», кладётся вместе с самим срабатыванием); если его нет — алерт
     объявлен ещё старой версией, тогда показываем хотя бы текущее."""
+    if key == "web_5xx":
+        return "ошибок 5xx нет уже час, доля ниже порога"
     label = _SRV_LABEL[key]
     unit, val = _SRV_UNIT.get(key), ctx.get("value")
     if not unit or val is None:
@@ -1722,7 +1725,8 @@ def cause_text(rep: dict, kind: str, base: dict[str, float], now: datetime | Non
     parts = []
     eaters = top_eaters(rep, kind)
     if eaters:
-        parts.append(f"сверху {eaters}")
+        # «сверху» читалось непонятно: это те, кто больше всего ест ресурс
+        parts.append(f"больше всего {'CPU' if kind == 'cpu' else 'памяти'} у {eaters}")
     surge = []
     # Запросы точнее байтов: 2.3 млн редиректов по 300 байт канал почти не шевелят.
     # Их считает helper webserver-setup; нет его - остаются трафик и соединения.
@@ -1782,16 +1786,64 @@ def web_error_level(total: float, errs: float, points: int, threshold: float) ->
     return errs >= _WEB_ERR_MIN and errs / total * 100 >= threshold
 
 
-def web_error_top(rep: dict, limit: int = 3) -> str:
-    """Где именно: логи с ошибками из последнего отчёта. По ним сразу видно, домен это,
-    контейнер или под ingress."""
-    logs = ((rep.get("extras") or {}).get("web-rate") or {}).get("logs") or []
-    bad = sorted((x for x in logs if (x.get("e5") or 0) > 0), key=lambda x: -(x.get("e5") or 0))
-    names = []
-    for x in bad[:limit]:
-        label = x.get("name") or ", ".join((x.get("sites") or [])[:2]) or str(x.get("log") or "?").split("/")[-1]
-        names.append(f"{label} {int(x.get('e5') or 0)}/мин")
-    return f" - сверху {', '.join(names)}" if names else ""
+def web_log_label(entry: dict) -> str:
+    """Как назвать лог человеку: под kubernetes, иначе домены (с «и ещё N»), иначе имя
+    контейнера или файла. Путь json-лога докера - это хеш, он ни о чём не говорит."""
+    if entry.get("name") and "/" in str(entry.get("name")):
+        return str(entry["name"])  # ns/под
+    sites = [str(x) for x in (entry.get("sites") or []) if x]
+    if sites:
+        more = f" и ещё {len(sites) - 2}" if len(sites) > 2 else ""
+        return ", ".join(sites[:2]) + more
+    return str(entry.get("name") or str(entry.get("log") or "?").split("/")[-1])
+
+
+# Ошибки кончились - но это ещё не отбой. У ru-be-mobprod 5xx шли пачками: 15 минут
+# есть, 15 нет, и за 45 минут пришло две пары «ошибки - снова в норме». Отбой только
+# после часа подряд ниже порога: пачки внутри часа - это одна история, а не четыре.
+_WEB_ERR_CLEAR = timedelta(hours=1)
+
+
+async def web_error_where(session: AsyncSession, server_id: int, now: datetime) -> dict:
+    """Где ошибки за окно алерта: логи по убыванию, коды, частые пути. Берём из минут с
+    ошибками, а не из последнего отчёта: ошибки могли кончиться минуту назад, а за
+    окно их было сорок, и алерт без «где» (так было в первом сообщении) бесполезен."""
+    rows = list(await session.scalars(
+        select(WebErrorSample).where(WebErrorSample.server_id == server_id,
+                                     WebErrorSample.ts >= now - _WEB_ERR_WINDOW)
+    ))
+    by_log: dict[str, list] = {}
+    codes: dict[str, int] = {}
+    paths: dict[str, int] = {}
+    for r in rows:
+        acc = by_log.setdefault(r.log, [r.label, 0])
+        acc[1] += int(r.e5 or 0)
+        for c, n in (r.codes or {}).items():
+            codes[str(c)] = codes.get(str(c), 0) + int(n or 0)
+        for it in (r.paths or []):
+            if isinstance(it, dict) and it.get("p"):
+                paths[str(it["p"])] = paths.get(str(it["p"]), 0) + int(it.get("n") or 0)
+    logs = sorted(by_log.values(), key=lambda x: -x[1])
+    return {"logs": logs, "codes": codes, "paths": paths}
+
+
+def web_where_text(where: dict) -> str:
+    """«Больше всего: anketa.dentro.ru и ещё 2 - 41. Коды: 502 - 30, 504 - 11. Чаще всего
+    падает: /api/v1/anketa - 38.» Каждый кусок - только если данные есть: коды и пути
+    шлёт helper с 0.12."""
+    out = []
+    logs = [x for x in where.get("logs") or [] if x[1] > 0]
+    if logs:
+        top = ", ".join(f"{label} - {n}" for label, n in logs[:2])
+        more = f" и ещё {len(logs) - 2} лог(а)" if len(logs) > 2 else ""
+        out.append(f"больше всего: {top}{more}")
+    codes = sorted((where.get("codes") or {}).items(), key=lambda kv: -kv[1])
+    if codes:
+        out.append("коды: " + ", ".join(f"{c} - {n}" for c, n in codes[:4]))
+    paths = sorted((where.get("paths") or {}).items(), key=lambda kv: -kv[1])
+    if paths:
+        out.append("чаще всего падает: " + ", ".join(f"{p} - {n}" for p, n in paths[:2]))
+    return ". " + ". ".join(s[0].upper() + s[1:] for s in out) if out else ""
 
 
 def _flapping(s: Server, st: dict, now: datetime, apply, note: list, url: str = "") -> bool:
@@ -2098,11 +2150,19 @@ def _server_conditions(s: Server, now: datetime,
     if online and thr5 and web_err is not None:
         total, errs, points = web_err
         bad5 = web_error_level(total, errs, points, thr5)
-        out["web_5xx"] = (1 if bad5 else 0, {
+        # Отбой - только после часа подряд без превышения (_WEB_ERR_CLEAR): пачки ошибок
+        # внутри часа остаются одной историей. «since» здесь - с какого момента чисто.
+        lvl5, since5 = (1, None) if bad5 else (0, None)
+        if not bad5 and int(state.get("web_5xx", 0)) > 0:
+            since5 = state.get("web_5xx_since") or now.isoformat()
+            clean_from = _parse_iso(since5)
+            if clean_from is None or now - clean_from < _WEB_ERR_CLEAR:
+                lvl5 = 1
+        out["web_5xx"] = (lvl5, {
             "value": f"{errs / total * 100:.2f}" if total else "0",
             "errs": int(errs), "total": int(total),
-            "top": web_error_top(rep) if bad5 else "",
-            "threshold": thr5,
+            "where": "",  # заполняется при отправке: нужна история минут с ошибками
+            "threshold": thr5, "since": since5,
         })
 
     # Поды, которые контроллер обязан держать живыми. Повод - uz-air-op-dg 23.09.2026:
@@ -2418,6 +2478,12 @@ async def evaluate_servers(
                     continue
                 if key in ("cpu", "mem"):
                     ctx["cause"] = await cause_for(s, key)
+                if key == "web_5xx":
+                    try:
+                        async with session_factory() as ses:
+                            ctx["where"] = web_where_text(await web_error_where(ses, s.id, now))
+                    except Exception:
+                        log.warning("не собрал, где ошибки 5xx на %s", s.name, exc_info=True)
                 fires.append(srv_fire(s, key, rule, ctx))
                 fire_apply.append((s.id, key, level))
                 if key in _SRV_UNIT and ctx.get("value") is not None:
@@ -2680,6 +2746,7 @@ async def _prune(
         await session.execute(delete(LocationSample).where(LocationSample.ts < cutoff))
         await session.execute(delete(CheckIpSample).where(CheckIpSample.ts < cutoff))
         await session.execute(delete(ServerMetric).where(ServerMetric.ts < srv_cutoff))
+        await session.execute(delete(WebErrorSample).where(WebErrorSample.ts < srv_cutoff))
         await session.execute(delete(OomEvent).where(OomEvent.ts < srv_cutoff))
         # docker/kube-команды (с логами) держим коротко — неделя, не тайм-серия
         await session.execute(

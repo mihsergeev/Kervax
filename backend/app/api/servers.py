@@ -14,7 +14,9 @@ from fastapi.responses import FileResponse, PlainTextResponse
 from sqlalchemy import delete as sa_delete, func, select
 
 from app import audit, custom_backups, geoip, manual_probe
-from app.collector import dump_local_stale, send_alerts_soon, web_5xx_total, web_rate_total
+from app.collector import (
+    dump_local_stale, send_alerts_soon, web_5xx_total, web_log_label, web_rate_total,
+)
 from app.setup_scripts import (
     current_setup_versions as _current_setup_versions,
     setup_needed as _setup_needed,
@@ -34,6 +36,7 @@ from app.models import (
     Server,
     ServerMetric,
     User,
+    WebErrorSample,
 )
 from app.schemas import (
     AgentConfigOut,
@@ -62,6 +65,7 @@ from app.schemas import (
     KubeCommandOut,
     KubeResultIn,
     OomEventOut,
+    WebErrorOut,
     ServerCreate,
     ServerEnrollOut,
     ServerMetricOut,
@@ -1202,6 +1206,71 @@ async def server_metrics(
     return _bin_metrics(rows, span_hours)
 
 
+async def _store_web_errors(session, server: Server, body, now: datetime) -> None:
+    """Минуты с ошибками 5xx - в историю, по логу на строку. Блок хелпер обновляет раз в
+    минуту, а агент шлёт его с каждым отчётом: повтор отсекаем по ts блока на ноде."""
+    if web_rate_total(body.extras, now, body.clock_unix) is None:
+        return  # блока нет или он протух
+    block = (body.extras or {}).get("web-rate") or {}
+    src = int(block.get("ts") or 0)
+    bad = [x for x in (block.get("logs") or []) if isinstance(x, dict) and (x.get("e5") or 0) > 0]
+    if not bad or not src:
+        return
+    dup = await session.scalar(
+        select(WebErrorSample.id).where(
+            WebErrorSample.server_id == server.id, WebErrorSample.src_ts == src
+        ).limit(1)
+    )
+    if dup is not None:
+        return
+    for x in bad[:20]:
+        codes = x.get("c5") if isinstance(x.get("c5"), dict) else None
+        paths = [p for p in (x.get("p5") or []) if isinstance(p, dict)][:8] or None
+        session.add(WebErrorSample(
+            server_id=server.id, ts=now, src_ts=src,
+            log=str(x.get("log") or "")[:512], label=web_log_label(x)[:255],
+            e5=int(x.get("e5") or 0), rpm=int(x.get("rpm") or 0),
+            codes=codes, paths=paths,
+        ))
+
+
+@router.get("/{server_id}/web-errors", response_model=list[WebErrorOut])
+async def server_web_errors(
+    server_id: int,
+    user: CurrentUser,
+    session: SessionDep,
+    hours: int = Query(default=24, ge=1, le=720),
+) -> list[WebErrorOut]:
+    """Ошибки 5xx по логам за окно: где, сколько, какие коды и пути. Сюда ведёт алерт."""
+    await _get_or_404(server_id, session, user)
+    since = datetime.now(timezone.utc) - timedelta(hours=hours)
+    rows = list(await session.scalars(
+        select(WebErrorSample)
+        .where(WebErrorSample.server_id == server_id, WebErrorSample.ts >= since)
+        .order_by(WebErrorSample.ts)
+    ))
+    acc: dict[str, dict] = {}
+    for r in rows:
+        a = acc.setdefault(r.log, {"log": r.log, "label": r.label, "errors": 0, "minutes": 0,
+                                   "peak": 0, "first_ts": r.ts, "last_ts": r.ts,
+                                   "codes": {}, "paths": {}})
+        a["errors"] += int(r.e5 or 0)
+        a["minutes"] += 1
+        a["peak"] = max(a["peak"], int(r.e5 or 0))
+        a["last_ts"] = r.ts
+        a["label"] = r.label or a["label"]
+        for c, n in (r.codes or {}).items():
+            a["codes"][str(c)] = a["codes"].get(str(c), 0) + int(n or 0)
+        for it in (r.paths or []):
+            if isinstance(it, dict) and it.get("p"):
+                a["paths"][str(it["p"])] = a["paths"].get(str(it["p"]), 0) + int(it.get("n") or 0)
+    out = []
+    for a in sorted(acc.values(), key=lambda x: -x["errors"]):
+        top = sorted(a["paths"].items(), key=lambda kv: -kv[1])[:8]
+        out.append(WebErrorOut(**{**a, "paths": [{"p": p, "n": n} for p, n in top]}))
+    return out
+
+
 @router.get("/{server_id}/oom-events", response_model=list[OomEventOut])
 async def server_oom_events(
     server_id: int,
@@ -2205,6 +2274,7 @@ async def agent_report(
             server.oom_victim = victim
         # журнал OOM-событий: одна запись на отчёт с киллом (когда + кого)
         session.add(OomEvent(server_id=server.id, ts=now, victim=victim, count=oom_delta))
+    await _store_web_errors(session, server, body, now)
     report_dict = body.model_dump()
     # сдвиг часов: локальное время ноды (на момент отправки) минус время панели на приёме.
     # Работает даже если у ноды нет доступа к NTP — агент до панели по HTTPS достучался.

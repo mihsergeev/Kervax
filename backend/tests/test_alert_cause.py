@@ -52,7 +52,7 @@ def test_surge_needs_a_real_stream():
     assert "трафик" not in collector.cause_text(_report(92, 700_000, 300), "cpu", {"net": 1000.0})
     # нормы нет (истории мало) - хвост только про процессы
     assert collector.cause_text(_report(92, 8_000_000, 300), "cpu", {}) == (
-        " - сверху php-fpm 73%, queue-worker 28%, nginx 9%"
+        " - больше всего CPU у php-fpm 73%, queue-worker 28%, nginx 9%"
     )
 
 
@@ -93,7 +93,7 @@ async def test_cpu_alert_says_who_eats_and_that_it_is_a_surge(tmp_path, monkeypa
     await collector.evaluate_servers(factory, Settings(alert_webhook="http://hook"), now)
     assert len(sent) == 1, sent
     assert "CPU 92% ≥ 90%" in sent[0]
-    assert "сверху php-fpm 73%, queue-worker 28%" in sent[0]
+    assert "больше всего CPU у php-fpm 73%, queue-worker 28%" in sent[0]
     assert "трафик x50 и соединений x13 к обычному для этого часа" in sent[0]
     await engine.dispose()
 
@@ -310,27 +310,32 @@ def test_web_error_rule_needs_a_real_count_and_a_real_share():
     assert not collector.web_error_level(total=50_000, errs=500, points=15, threshold=0)
 
 
-async def test_5xx_alert_names_where_the_errors_are(tmp_path, monkeypatch):
-    """Кейс 23.09: ingress-nginx на балансере отдавал 503 на 0.1-0.28% запросов, и
-    заметили это по жалобе. Теперь панель говорит сама и показывает, в каком логе."""
+async def test_5xx_alert_says_where_codes_and_paths(tmp_path, monkeypatch):
+    """Кейс 23.09: ingress-nginx отдавал 503 на 0.1-0.28% запросов. Первый вариант алерта
+    писал «сверху ...», и по нему было непонятно, что это; а если ошибки кончились за
+    минуту до отправки, «где» не было вовсе. Теперь «где» собирается из минут с ошибками
+    за окно: лог, коды, частые пути."""
+    from app.models import WebErrorSample
+
     engine, factory = await _panel(tmp_path, "e5.db")
     now = datetime.now(timezone.utc)
-    rep = {"cpu_percent": 20, "extras": {"web-rate": {"ts": now.timestamp(), "rpm": 40000, "e5": 80, "logs": [
-        {"log": "/var/log/pods/ingress-nginx_ingress-nginx-controller-569b_uid/controller/0.log",
-         "name": "ingress-nginx/ingress-nginx-controller-569b", "rpm": 39000, "e5": 80},
-        {"log": "/var/log/nginx/access.log", "sites": ["my.advcake.com"], "rpm": 1000, "e5": 0},
-    ]}}}
     async with factory() as s:
         s.add(Server(
             name="ru-vk-abalancer-wn9", token_hash="x", enabled=True, backup_not_required=True,
-            last_seen=now, last_report=rep, cpu_alert_percent=0, mem_alert_percent=0,
-            disk_alert_percent=0, alert_sustain_seconds=900, web_5xx_alert_percent=0.05,
+            last_seen=now, last_report={"cpu_percent": 20}, cpu_alert_percent=0,
+            mem_alert_percent=0, disk_alert_percent=0, alert_sustain_seconds=900,
+            web_5xx_alert_percent=0.05,
         ))
         await s.commit()
-        # 15 минут потока: 40 тысяч запросов в минуту, из них 80 - 503 (0.2%)
         for m in range(15):
-            s.add(ServerMetric(server_id=1, ts=now - timedelta(minutes=m), cpu_percent=20,
-                               web_rpm=40000, web_5xx=80))
+            ts = now - timedelta(minutes=m)
+            s.add(ServerMetric(server_id=1, ts=ts, cpu_percent=20, web_rpm=40000, web_5xx=80))
+            s.add(WebErrorSample(
+                server_id=1, ts=ts, src_ts=1000 + m, e5=80, rpm=39000,
+                log="/var/log/pods/ingress-nginx_ingress-nginx-controller-569b_uid/controller/0.log",
+                label="ingress-nginx/ingress-nginx-controller-569b",
+                codes={"503": 80}, paths=[{"p": "/api/v{n}/stat", "n": 60}, {"p": "/", "n": 20}],
+            ))
         await s.commit()
 
     sent: list[str] = []
@@ -340,8 +345,90 @@ async def test_5xx_alert_names_where_the_errors_are(tmp_path, monkeypatch):
         return []
 
     monkeypatch.setattr("app.alerts.send_alert", fake_send)
-    await collector.evaluate_servers(factory, Settings(alert_webhook="http://hook"), now)
+    await collector.evaluate_servers(
+        factory, Settings(alert_webhook="http://hook", panel_url="https://kervax.test"), now)
     assert len(sent) == 1, sent
-    assert "ошибки 5xx: 0.20% за 15 минут (1200 из 600000)" in sent[0]
-    assert "сверху ingress-nginx/ingress-nginx-controller-569b 80/мин" in sent[0]
+    msg = sent[0]
+    assert "0.20% запросов за 15 минут закончились ошибкой 5xx (1200 из 600000)" in msg
+    assert "Больше всего: ingress-nginx/ingress-nginx-controller-569b - 1200" in msg
+    assert "Коды: 503 - 1200" in msg
+    assert "Чаще всего падает: /api/v{n}/stat - 900" in msg
+    assert "сверху" not in msg
+    # ссылка ведёт на раздел «Веб» карточки, где эти ошибки видны подробно
+    assert "sec=web" in msg
     await engine.dispose()
+
+
+async def test_5xx_bursts_within_an_hour_are_one_story(tmp_path, monkeypatch):
+    """ru-be-mobprod: ошибки шли пачками, 15 минут есть, 15 нет, и за 45 минут пришли две
+    пары «ошибки - снова в норме». Отбой теперь только после часа подряд без превышения."""
+    engine, factory = await _panel(tmp_path, "burst.db")
+    t0 = datetime.now(timezone.utc) - timedelta(hours=3)
+    async with factory() as s:
+        s.add(Server(name="ru-be-mobprod", token_hash="x", enabled=True, backup_not_required=True,
+                     last_seen=t0, last_report={"cpu_percent": 5}, cpu_alert_percent=0,
+                     mem_alert_percent=0, disk_alert_percent=0, web_5xx_alert_percent=0.05))
+        await s.commit()
+
+    sent: list[str] = []
+
+    async def fake_send(cfg, text, parse_mode=None):
+        sent.append(text)
+        return []
+
+    monkeypatch.setattr("app.alerts.send_alert", fake_send)
+    settings = Settings(alert_webhook="http://hook")
+
+    async def tick(minute: int, errors: int) -> list[str]:
+        """Минута `minute` от t0; за последние 15 минут на ноде errors ошибок из 450."""
+        sent.clear()
+        now = t0 + timedelta(minutes=minute)
+        async with factory() as s:
+            srv = await s.scalar(select(Server))
+            srv.last_seen = now
+            await s.execute(__import__("sqlalchemy").delete(ServerMetric))
+            for m in range(15):
+                s.add(ServerMetric(server_id=1, ts=now - timedelta(minutes=m), cpu_percent=5,
+                                   web_rpm=30, web_5xx=errors / 15))
+            await s.commit()
+        await collector.evaluate_servers(factory, settings, now)
+        return list(sent)
+
+    assert len(await tick(0, 41)) == 1          # пачка - алерт
+    assert await tick(15, 0) == []              # затихло, но отбоя нет
+    assert await tick(30, 44) == []             # новая пачка - та же история, без повтора
+    assert await tick(45, 0) == []
+    assert await tick(90, 0) == []              # чисто 45 минут - ещё рано
+    rec = await tick(110, 0)                    # чисто больше часа - отбой
+    assert len(rec) == 1 and "ошибок 5xx нет уже час" in rec[0]
+    await engine.dispose()
+
+
+async def test_error_minutes_are_stored_once_and_shown_per_log(client, auth_headers):
+    """Блок с ошибками агент шлёт с каждым отчётом, а хелпер обновляет его раз в минуту:
+    в историю минута должна попасть один раз. Страница карточки собирает её по логам."""
+    import time
+
+    r = await client.post("/api/servers", json={"name": "web2"}, headers=auth_headers)
+    token, sid = r.json()["token"], r.json()["server"]["id"]
+    block = {"ts": int(time.time()), "rpm": 500, "e5": 44, "logs": [
+        {"log": "/var/log/nginx/access.log", "rpm": 450, "e5": 44,
+         "sites": ["anketa.dentro.ru", "mobile-wsdart-prod.dentro.ru", "mobile.dentro.ru"],
+         "c5": {"502": 30, "504": 14}, "p5": [{"p": "/api/v{n}/anketa", "n": 38}]},
+        {"log": "/var/log/nginx/other.log", "rpm": 50, "e5": 0, "sites": ["ok.dentro.ru"]},
+    ]}
+    report = {"hostname": "h", "os": "U", "agent_version": "2.10", "cpu_percent": 5,
+              "mem_used": 1, "mem_total": 2, "extras": {"web-rate": block}}
+    for _ in range(3):  # один и тот же блок в трёх отчётах подряд
+        r = await client.post("/api/agent/report", json=report,
+                              headers={"Authorization": f"Bearer {token}"})
+        assert r.status_code == 200
+    r = await client.get(f"/api/servers/{sid}/web-errors?hours=1", headers=auth_headers)
+    assert r.status_code == 200
+    rows = r.json()
+    assert len(rows) == 1  # лог без ошибок в историю не попадает
+    row = rows[0]
+    assert row["label"] == "anketa.dentro.ru, mobile-wsdart-prod.dentro.ru и ещё 1"
+    assert row["errors"] == 44 and row["minutes"] == 1  # не 132: повторы отсечены
+    assert row["codes"] == {"502": 30, "504": 14}
+    assert row["paths"] == [{"p": "/api/v{n}/anketa", "n": 38}]

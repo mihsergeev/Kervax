@@ -55,7 +55,7 @@ SERVER_ALERT_KINDS: dict[str, tuple[str, str]] = {
     "queue": ("RabbitMQ: очередь переполнена",
               "очередь {queue} ({source}): {value} сообщений ≥ {threshold}"),
     "web_5xx": ("Веб: пошли ошибки 5xx",
-                "ошибки 5xx: {value}% за 15 минут ({errs} из {total}){top}"),
+                "{value}% запросов за 15 минут закончились ошибкой 5xx ({errs} из {total}){where}"),
     "kube_pod": ("Kubernetes: под не поднимается",
                  "не поднимаются поды: {pods}"),
     "clock": ("Время: сдвиг часов", "часы разошлись на {value} с временем панели — ломает TOTP/TLS/корреляцию логов, синхронизируйте время"),
@@ -81,6 +81,8 @@ SERVER_ALERT_KINDS: dict[str, tuple[str, str]] = {
 # имя сервера — ссылкой), а не гоняем старый текст. Иначе установки, где форму
 # серверных алертов однажды сохранили, застряли бы на старом «Kervax:»-тексте.
 LEGACY_SERVER_DEFAULTS: frozenset[str] = frozenset({
+    # первый текст алерта 5xx (1.4.58): со «сверху», которое читалось непонятно
+    "ошибки 5xx: {value}% за 15 минут ({errs} из {total}){top}",
     # дефолты CPU и RAM до 1.4.48 - без {cause}
     "CPU {value}% ≥ {threshold}%",
     "RAM {value}% ≥ {threshold}%",

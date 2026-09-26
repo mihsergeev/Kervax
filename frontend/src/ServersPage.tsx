@@ -12,6 +12,7 @@ import {
   listServers,
   serverMetrics,
   serverOomEvents,
+  serverWebErrors,
   snoozeServer,
   snoozeServerAlert,
   updateServer,
@@ -19,6 +20,7 @@ import {
   type HelperAdvice,
   type OomEvent,
   type ProcStat,
+  type WebErrorRow,
   type Server,
   type ServerEnroll,
   type ServerMetric,
@@ -618,12 +620,14 @@ const SEC_OF_CARD: Record<string, string> = {
   cpu: 'cpu', throttle: 'cpu', temp: 'cpu',
   mem: 'mem', oom: 'mem',
   conntrack: 'conn', diskfill: 'disk', disktemp: 'disk', disk: 'disk',
+  web: 'web', web5xx: 'web',
 }
 
 const DETAIL_SECTIONS = [
   { id: 'cpu', label: 'CPU' },
   { id: 'mem', label: 'Память' },
   { id: 'net', label: 'Сеть' },
+  { id: 'web', label: 'Веб' },
   { id: 'conn', label: 'Соединения' },
   { id: 'disk', label: 'Диск' },
   { id: 'proc', label: 'Процессы' },
@@ -862,6 +866,70 @@ function OomEventList({
           </div>
         ))}
       </div>
+    </div>
+  )
+}
+
+// Ошибки 5xx по логам за сутки: куда ведёт ссылка из алерта. Где (домены, под или
+// контейнер), сколько и в пике, какими кодами и на каких путях. Коды и пути присылает
+// helper с 0.12; у старого - только числа.
+function WebErrorList({
+  serverId,
+  t,
+}: {
+  serverId: number
+  t: (s: string, vars?: Record<string, string | number>) => string
+}) {
+  const [rows, setRows] = useState<WebErrorRow[] | null>(null)
+  useEffect(() => {
+    let alive = true
+    const load = () =>
+      serverWebErrors(serverId, 24)
+        .then((r) => alive && setRows(r))
+        .catch(() => alive && setRows([]))
+    load()
+    const id = window.setInterval(load, 60000)
+    return () => {
+      alive = false
+      window.clearInterval(id)
+    }
+  }, [serverId])
+  if (rows == null) return null
+  const fmt = (ts: string) =>
+    new Date(ts).toLocaleString([], { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })
+  if (rows.length === 0)
+    return <div className="web-err-empty muted small">{t('За сутки ответов 5xx не было.')}</div>
+  return (
+    <div className="web-err">
+      <div className="web-err-cap muted small">{t('Ответы 5xx за сутки по логам веб-сервера')}</div>
+      {rows.map((r) => {
+        const codes = Object.entries(r.codes || {}).sort((a, b) => b[1] - a[1])
+        return (
+          <div key={r.log} className="web-err-row">
+            <div className="web-err-head">
+              <span className="web-err-where mono">{r.label || r.log.split('/').pop()}</span>
+              <span className="web-err-count">
+                {t('{n} ошибок за {m} мин, пик {p}/мин', { n: r.errors, m: r.minutes, p: r.peak })}
+              </span>
+            </div>
+            {codes.length > 0 && (
+              <div className="web-err-line small">
+                <span className="muted">{t('коды')}: </span>
+                <span className="mono">{codes.map(([c, n]) => `${c} - ${n}`).join(', ')}</span>
+              </div>
+            )}
+            {r.paths.length > 0 && (
+              <div className="web-err-line small">
+                <span className="muted">{t('где падает')}: </span>
+                <span className="mono">{r.paths.slice(0, 5).map((x) => `${x.p} (${x.n})`).join(', ')}</span>
+              </div>
+            )}
+            <div className="web-err-line muted small">
+              {t('с {a} по {b}', { a: fmt(r.first_ts), b: fmt(r.last_ts) })}
+            </div>
+          </div>
+        )
+      })}
     </div>
   )
 }
@@ -2836,7 +2904,10 @@ function ServerDetail({
         </div>
 
         <div className="detail-body">
-          <DetailNav t={t} />
+          <DetailNav
+            t={t}
+            sections={webRate(r) ? DETAIL_SECTIONS : DETAIL_SECTIONS.filter((x) => x.id !== 'web')}
+          />
           <div className="detail-sections">
         <MetricSection id="cpu" title="CPU">
           <div className="chart-grid">
@@ -2928,45 +2999,6 @@ function ServerDetail({
                   palette={CORE_COLORS}
                 />,
               )}
-            {webRate(r) && chartCard(
-              'web',
-              <div className="loc-results chart-stats">
-                <StatRow color="#5a8fc7" name={t('запросов/мин')} value={fmtNum(webRate(r)!.rpm)} />
-                {(webRate(r)!.logs ?? [])
-                  .slice()
-                  .sort((a, b) => b.rpm - a.rpm)
-                  .slice(0, 4)
-                  .map((l) => (
-                    <StatRow
-                      key={l.log}
-                      name={l.sites?.length ? l.sites.join(', ') : l.name || l.log.split('/').pop() || l.log}
-                      value={fmtNum(l.rpm)}
-                    />
-                  ))}
-              </div>,
-            )}
-            {/* ошибки рядом с запросами: «было ноль, стало 0.2%» видно только так -
-                синтетический монитор такую долю не поймает */}
-            {webRate(r) && chartCard(
-              'web5xx',
-              <div className="loc-results chart-stats">
-                <StatRow color="#c25a52" name={t('5xx/мин')} value={fmtNum(webRate(r)!.e5 ?? 0)} />
-                {(webRate(r)!.logs ?? [])
-                  .filter((l) => (l.e5 ?? 0) > 0)
-                  .sort((a, b) => (b.e5 ?? 0) - (a.e5 ?? 0))
-                  .slice(0, 4)
-                  .map((l) => (
-                    <StatRow
-                      key={l.log}
-                      name={l.name || l.sites?.join(', ') || l.log.split('/').pop() || l.log}
-                      value={fmtNum(l.e5 ?? 0)}
-                    />
-                  ))}
-                {webUnparsed(r) > 0 && (
-                  <StatRow name={t('без кода ответа')} value={fmtNum(webUnparsed(r))} />
-                )}
-              </div>,
-            )}
             {(r.net_ifaces?.length ?? 0) > 0 && chartCard('netiftx')}
             {(r.net_ifaces?.length ?? 0) > 0 &&
               chartCard(
@@ -2981,6 +3013,55 @@ function ServerDetail({
               )}
           </div>
         </MetricSection>
+
+        {/* Свой раздел для веба: сюда ведёт ссылка из алерта по 5xx. Сначала список -
+            где ошибки, какие коды и пути, - потом графики во времени. */}
+        {webRate(r) && (
+          <MetricSection id="web" title={t('Веб')}>
+            <WebErrorList serverId={s.id} t={t} />
+            <div className="chart-grid">
+              {webRate(r) && chartCard(
+                'web',
+                <div className="loc-results chart-stats">
+                  <StatRow color="#5a8fc7" name={t('запросов/мин')} value={fmtNum(webRate(r)!.rpm)} />
+                  {(webRate(r)!.logs ?? [])
+                    .slice()
+                    .sort((a, b) => b.rpm - a.rpm)
+                    .slice(0, 4)
+                    .map((l) => (
+                      <StatRow
+                        key={l.log}
+                        name={l.sites?.length ? l.sites.join(', ') : l.name || l.log.split('/').pop() || l.log}
+                        value={fmtNum(l.rpm)}
+                      />
+                    ))}
+                </div>,
+              )}
+              {/* ошибки рядом с запросами: «было ноль, стало 0.2%» видно только так -
+                  синтетический монитор такую долю не поймает */}
+              {webRate(r) && chartCard(
+                'web5xx',
+                <div className="loc-results chart-stats">
+                  <StatRow color="#c25a52" name={t('5xx/мин')} value={fmtNum(webRate(r)!.e5 ?? 0)} />
+                  {(webRate(r)!.logs ?? [])
+                    .filter((l) => (l.e5 ?? 0) > 0)
+                    .sort((a, b) => (b.e5 ?? 0) - (a.e5 ?? 0))
+                    .slice(0, 4)
+                    .map((l) => (
+                      <StatRow
+                        key={l.log}
+                        name={l.name || l.sites?.join(', ') || l.log.split('/').pop() || l.log}
+                        value={fmtNum(l.e5 ?? 0)}
+                      />
+                    ))}
+                  {webUnparsed(r) > 0 && (
+                    <StatRow name={t('без кода ответа')} value={fmtNum(webUnparsed(r))} />
+                  )}
+                </div>,
+              )}
+            </div>
+          </MetricSection>
+        )}
 
         <MetricSection id="conn" title={t('Соединения')}>
           <div className="chart-grid">
