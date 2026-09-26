@@ -1061,6 +1061,7 @@ export type Server = {
   temp_alert_c: number
   conntrack_alert_percent: number
   db_conn_alert_percent: number
+  web_5xx_alert_percent: number // доля 5xx за 15 минут, % (0 = выкл)
   kube_expiry_alert_days: number // за сколько дней предупреждать о сроках кластера и Flux
   disk_temp_alert_c: number
   alert_mutes: string[] | null
@@ -1270,6 +1271,7 @@ export type ServerForm = {
   temp_alert_c?: number
   conntrack_alert_percent?: number
   db_conn_alert_percent?: number
+  web_5xx_alert_percent?: number
   kube_expiry_alert_days?: number
   disk_temp_alert_c?: number
   alert_mutes?: string[]
