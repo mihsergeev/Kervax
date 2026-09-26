@@ -8,7 +8,7 @@
 # secrets or config contents.
 set -euo pipefail
 
-KERVAX_SETUP_VERSION=0.11  # MAJOR.MINOR; compared component-wise
+KERVAX_SETUP_VERSION=0.12  # MAJOR.MINOR; compared component-wise
 KERVAX_SETUP_ALWAYS=1     # safe on any node: the refresh is a no-op without a web server
 
 HELPER_DIR=/lib65/kervax
@@ -353,9 +353,40 @@ count_codes() {
       else if (match($0, /\t[1-5][0-9][0-9]\t/)) { s=substr($0,RSTART+1,3) }
       if (s=="") { u++; next }
       c=s+0
-      if (c>=500) e5++
+      if (c>=500) {
+        e5++; c5[s]++
+        # Путь запроса с ошибкой: «МЕТОД /путь» ищем где угодно в строке - так он
+        # находится во всех форматах. Query отрезаем (там бывают токены), номера и
+        # длинные hex-идентификаторы сворачиваем, чтобы /user/123 и /user/456 были одним
+        # путём и чтобы идентификаторы не уезжали в панель.
+        if (match($0, /[A-Z][A-Z][A-Z]+ \/[^ "\\?]*/)) {
+          q=substr($0,RSTART,RLENGTH); sub(/^[A-Z]+ /,"",q)
+          m=split(q, seg, "/"); q=""
+          for (i=2;i<=m;i++) {
+            g=seg[i]
+            if (length(g)>=16 && g ~ /^[0-9a-fA-F-]+$/) g="{id}"
+            else gsub(/[0-9][0-9]+/,"{n}",g)
+            q=q "/" g }
+          if (q=="") q="/"
+          gsub(/[^A-Za-z0-9\/_.~%:+,;=@!$&()*{}-]/,"",q)
+          p5[substr(q,1,80)]++ }
+      }
       else if (c>=400) e4++ }
-    END { printf "%d %d %d %d\n", n+0, e5+0, e4+0, u+0 }'
+    END {
+      printf "%d %d %d %d\n", n+0, e5+0, e4+0, u+0
+      # коды 5xx: {"502":30,"504":11}
+      printf "{"; k=0
+      for (x in c5) { printf "%s\"%s\":%d", (k++?",":""), x, c5[x] }
+      printf "}\n"
+      # пять самых частых путей с ошибками - сортировки в mawk нет, выбираем максимум
+      printf "["; k=0
+      for (t=0;t<5;t++) {
+        best=""; bn=0
+        for (x in p5) if (p5[x]>bn) { best=x; bn=p5[x] }
+        if (best=="") break
+        printf "%s{\"p\":\"%s\",\"n\":%d}", (k++?",":""), best, bn
+        delete p5[best] }
+      printf "]\n" }'
 }
 
 if [ -s "$MAP" ]; then
@@ -383,17 +414,21 @@ if [ -s "$MAP" ]; then
     el=$((now - pts))
     [ "$el" -ge 20 ] || continue
     delta=$((size - psize))
-    counts="0 0 0 0"
+    out="0 0 0 0"
     if [ "$delta" -gt 0 ]; then
       if [ "$delta" -le "$CAP" ]; then
-        counts=$(tail -c "+$((psize + 1))" "$lg" 2>/dev/null | count_codes)
+        out=$(tail -c "+$((psize + 1))" "$lg" 2>/dev/null | count_codes)
       else
-        # слишком много за раз: считаем кусок и масштабируем - и строки, и ошибки
+        # Слишком много за раз: считаем кусок и масштабируем числа. Коды и пути не
+        # масштабируем - они про то, КАКИЕ ошибки, а не сколько.
         k=$((delta / SAMPLE + 1))
-        counts=$(tail -c "+$((psize + 1))" "$lg" 2>/dev/null | head -c "$SAMPLE" \
-                 | count_codes | awk -v k="$k" '{printf "%d %d %d %d\n", $1*k, $2*k, $3*k, $4*k}')
+        out=$(tail -c "+$((psize + 1))" "$lg" 2>/dev/null | head -c "$SAMPLE" \
+              | count_codes | awk -v k="$k" 'NR==1{printf "%d %d %d %d\n", $1*k, $2*k, $3*k, $4*k; next} {print}')
       fi
     fi
+    counts=$(printf '%s\n' "$out" | sed -n 1p)
+    c5=$(printf '%s\n' "$out" | sed -n 2p); [ -n "$c5" ] || c5="{}"
+    p5=$(printf '%s\n' "$out" | sed -n 3p); [ -n "$p5" ] || p5="[]"
     # shellcheck disable=SC2086
     set -- $counts
     lines=${1:-0}; e5=${2:-0}; e4=${3:-0}; un=${4:-0}
@@ -403,7 +438,7 @@ if [ -s "$MAP" ]; then
     ru=$((un * 60 / el))
     TOTAL=$((TOTAL + rpm))
     T5=$((T5 + r5))
-    ITEMS="$ITEMS${ITEMS:+,}{\"log\":\"$(esc "$lg")\",\"name\":\"$(esc "$name")\",\"rpm\":$rpm,\"e5\":$r5,\"e4\":$r4,\"un\":$ru,\"sites\":$(printf '%s' "$names" | sites_json)}"
+    ITEMS="$ITEMS${ITEMS:+,}{\"log\":\"$(esc "$lg")\",\"name\":\"$(esc "$name")\",\"rpm\":$rpm,\"e5\":$r5,\"e4\":$r4,\"un\":$ru,\"c5\":$c5,\"p5\":$p5,\"sites\":$(printf '%s' "$names" | sites_json)}"
   done < "$MAP"
 fi
 

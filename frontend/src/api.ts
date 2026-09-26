@@ -1501,6 +1501,22 @@ export function agentUpdateCancel(serverIds?: number[]): Promise<Server[]> {
     body: JSON.stringify({ server_ids: serverIds ?? null }),
   })
 }
+// Ошибки 5xx одного лога за окно: где, сколько, какие коды и пути. Сюда ведёт алерт.
+export type WebErrorRow = {
+  log: string
+  label: string // домены, под kubernetes или контейнер
+  errors: number
+  minutes: number
+  peak: number // максимум ошибок в минуту
+  first_ts: string
+  last_ts: string
+  codes: Record<string, number> // {"502": 30} - с хелпером 0.12
+  paths: { p: string; n: number }[] // частые пути с ошибками - с хелпером 0.12
+}
+export function serverWebErrors(id: number, hours = 24): Promise<WebErrorRow[]> {
+  return api<WebErrorRow[]>(`/api/servers/${id}/web-errors?hours=${hours}`)
+}
+
 export function serverMetrics(
   id: number,
   hours = 6,

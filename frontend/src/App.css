@@ -1342,6 +1342,48 @@ input:focus {
   flex-shrink: 0;
 }
 
+/* ошибки 5xx по логам: куда ведёт алерт. Лог - строкой, под ним коды, пути и время */
+.web-err {
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+  margin: 0.2rem 0 0.9rem;
+}
+.web-err-cap {
+  margin-bottom: 0.1rem;
+}
+.web-err-row {
+  padding: 0.55rem 0.7rem;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--down);
+  border-radius: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+.web-err-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 0.8rem;
+  flex-wrap: wrap;
+}
+.web-err-where {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+.web-err-count {
+  color: var(--down);
+  font-size: 0.85rem;
+  white-space: nowrap;
+}
+.web-err-line {
+  overflow-wrap: anywhere;
+}
+.web-err-empty {
+  margin: 0.2rem 0 0.9rem;
+}
+
 /* поле пароля с кнопкой показать/скрыть (HTTP-аутентификация монитора) */
 .pass-row {
   display: flex;

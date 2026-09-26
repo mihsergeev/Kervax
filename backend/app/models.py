@@ -653,6 +653,31 @@ class ServerMetric(Base):
     web_5xx: Mapped[float | None] = mapped_column(Float, nullable=True)
 
 
+class WebErrorSample(Base):
+    """Минута, в которую у лога веб-сервера были ответы 5xx: сколько, какие коды, по каким
+    путям. Пишем ТОЛЬКО минуты с ошибками: они редки, а все минуты всех логов парка -
+    миллионы строк в месяц. По этой таблице алерт говорит, где именно ошибки, а карточка
+    сервера показывает их историю."""
+
+    __tablename__ = "web_error_samples"
+    __table_args__ = (Index("ix_web_error_samples_lookup", "server_id", "ts"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    server_id: Mapped[int] = mapped_column(Integer)
+    ts: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), index=True
+    )
+    # ts блока на ноде: агент шлёт один и тот же блок с каждым отчётом, раз в 15 секунд,
+    # а хелпер обновляет его раз в минуту - по нему отсекаем повторы
+    src_ts: Mapped[int] = mapped_column(Integer, default=0)
+    log: Mapped[str] = mapped_column(String(512), default="")
+    label: Mapped[str] = mapped_column(String(255), default="")  # домены, под или контейнер
+    e5: Mapped[int] = mapped_column(Integer, default=0)   # ответов 5xx в минуту
+    rpm: Mapped[int] = mapped_column(Integer, default=0)  # запросов в минуту в этом логе
+    codes: Mapped[dict | None] = mapped_column(JSON, nullable=True)  # {"502": 30, "504": 11}
+    paths: Mapped[list | None] = mapped_column(JSON, nullable=True)  # [{"p": "/api/x", "n": 38}]
+
+
 class LocationSample(Base):
     """Тайм-серия проверок монитора через прокси-локацию (для графика по локации)."""
 
