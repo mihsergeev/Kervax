@@ -61,6 +61,7 @@ type MetricKey =
   | 'disk'
   | 'conntrack'
   | 'web'
+  | 'web5xx'
   | 'sockets'
 
 // приглушённая палитра (Datadog-стиль) для overlay-графиков (ядра/интерфейсы/диски).
@@ -335,6 +336,12 @@ function buildMetric(
       key, ts, mode: 'overlay', fmtY: fmtNum, fmtV: fmtNum,
       title: `${t('Веб-сервер')} · ${t('запросов в минуту')}`,
       series: [{ name: t('запросов/мин'), color: '#5794f2', values: M.map((m) => m.web_rpm) }],
+    }
+  if (key === 'web5xx')
+    return {
+      key, ts, mode: 'overlay', fmtY: fmtNum, fmtV: fmtNum,
+      title: `${t('Веб-сервер')} · ${t('ошибок 5xx в минуту')}`,
+      series: [{ name: t('5xx/мин'), color: '#e24d42', values: M.map((m) => m.web_5xx) }],
     }
   if (key === 'conntrack')
     return {
@@ -2918,8 +2925,27 @@ function ServerDetail({
                   .map((l) => (
                     <StatRow
                       key={l.log}
-                      name={l.sites?.length ? l.sites.join(', ') : l.log.split('/').pop() || l.log}
+                      name={l.sites?.length ? l.sites.join(', ') : l.name || l.log.split('/').pop() || l.log}
                       value={fmtNum(l.rpm)}
+                    />
+                  ))}
+              </div>,
+            )}
+            {/* ошибки рядом с запросами: «было ноль, стало 0.2%» видно только так -
+                синтетический монитор такую долю не поймает */}
+            {webRate(r) && chartCard(
+              'web5xx',
+              <div className="loc-results chart-stats">
+                <StatRow color="#c25a52" name={t('5xx/мин')} value={fmtNum(webRate(r)!.e5 ?? 0)} />
+                {(webRate(r)!.logs ?? [])
+                  .filter((l) => (l.e5 ?? 0) > 0)
+                  .sort((a, b) => (b.e5 ?? 0) - (a.e5 ?? 0))
+                  .slice(0, 4)
+                  .map((l) => (
+                    <StatRow
+                      key={l.log}
+                      name={l.name || l.sites?.join(', ') || l.log.split('/').pop() || l.log}
+                      value={fmtNum(l.e5 ?? 0)}
                     />
                   ))}
               </div>,

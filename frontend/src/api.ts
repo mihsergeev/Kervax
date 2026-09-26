@@ -1166,7 +1166,15 @@ export type FluxState = {
 export type WebRate = {
   ts: number
   rpm: number
-  logs?: { log: string; rpm: number; sites?: string[] }[]
+  e5?: number // ответов 5xx в минуту по всем логам
+  logs?: {
+    log: string
+    name?: string // ns/под для логов kubernetes: «0.log» в панели ни о чём не говорит
+    rpm: number
+    e5?: number
+    e4?: number
+    sites?: string[]
+  }[]
 }
 
 export type WebService = {
@@ -1247,6 +1255,7 @@ export type ServerMetric = {
   sock_udp: number | null
   disks: { mount: string; pct: number }[] | null
   web_rpm: number | null // запросов в минуту по access-логам веб-сервера
+  web_5xx: number | null // из них ответов 5xx в минуту
 }
 export type ServerForm = {
   name: string

@@ -228,14 +228,19 @@ async def test_report_stores_requests_per_minute(client, auth_headers):
     report = {
         "hostname": "h1", "os": "Ubuntu 24.04", "agent_version": "2.9",
         "cpu_percent": 12.5, "mem_used": 50, "mem_total": 100,
-        "extras": {"web-rate": {"ts": int(time.time()), "rpm": 6042, "logs": [
-            {"log": "/var/log/nginx/winbet.access.log", "rpm": 6000, "sites": ["play-winbet.top"]}]}},
+        "extras": {"web-rate": {"ts": int(time.time()), "rpm": 6042, "e5": 12, "logs": [
+            {"log": "/var/log/nginx/winbet.access.log", "rpm": 6000, "e5": 12,
+             "sites": ["play-winbet.top"]},
+            {"log": "/var/log/pods/ingress-nginx_ingress-nginx-controller-abc_uid/controller/0.log",
+             "name": "ingress-nginx/ingress-nginx-controller-abc", "rpm": 42, "e5": 0}]}},
     }
     r = await client.post("/api/agent/report", json=report,
                           headers={"Authorization": f"Bearer {token}"})
     assert r.status_code == 200
     r = await client.get(f"/api/servers/{sid}/metrics", headers=auth_headers)
-    assert r.json()[0]["web_rpm"] == 6042
+    # ошибки едут той же строкой: 0.1-0.3% 5xx синтетический монитор не увидит, а
+    # счётчик по логам - да (ради этого и считаем коды ответа)
+    assert r.json()[0]["web_rpm"] == 6042 and r.json()[0]["web_5xx"] == 12
 
 
 async def test_dead_pod_of_a_controller_alerts_and_jobs_do_not(tmp_path, monkeypatch):
