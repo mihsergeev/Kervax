@@ -992,6 +992,7 @@ const EN: Record<string, string> = {
   'ошибок 5xx в минуту': '5xx errors per minute',
   '5xx/мин': '5xx/min',
   '5xx: {n} ({p}%)': '5xx: {n} ({p}%)',
+  'без кода ответа': 'no status code',
   'Веб-сервер': 'Web server',
   'запросов в минуту': 'requests per minute',
   'запросов/мин': 'requests/min',

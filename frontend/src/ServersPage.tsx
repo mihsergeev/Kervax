@@ -24,7 +24,7 @@ import {
   type ServerMetric,
 } from './api'
 import { StackedAreaChart, type Series } from './charts/StackedAreaChart'
-import { fmtSetupVersion, srvIssues, webRate } from './serverUtils'
+import { fmtSetupVersion, srvIssues, webRate, webUnparsed } from './serverUtils'
 import { OsIcon } from './osIcon'
 import { CountryFlag } from './CountryFlag'
 import { currentLang, useI18n } from './i18n'
@@ -2948,6 +2948,9 @@ function ServerDetail({
                       value={fmtNum(l.e5 ?? 0)}
                     />
                   ))}
+                {webUnparsed(r) > 0 && (
+                  <StatRow name={t('без кода ответа')} value={fmtNum(webUnparsed(r))} />
+                )}
               </div>,
             )}
             {(r.net_ifaces?.length ?? 0) > 0 && chartCard('netiftx')}

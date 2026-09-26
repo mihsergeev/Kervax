@@ -1173,6 +1173,7 @@ export type WebRate = {
     rpm: number
     e5?: number
     e4?: number
+    un?: number // строк без распознанного кода ответа: отличает «ошибок ноль» от «не нашли код»
     sites?: string[]
   }[]
 }
