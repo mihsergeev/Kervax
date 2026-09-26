@@ -4,6 +4,27 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.4.64] - 2026-09-26
+
+### Added
+- Запросы и 5xx у Caddy (helper 0.15). Раньше раздел "Веб" появлялся только там, где
+  есть nginx: счет шел по его access-логам. У Caddy access-лог по умолчанию выключен и
+  включается только у каждого сайта отдельно - на app-e (caddy-docker-proxy перед
+  сотней контейнеров) логов не было ни одного, и раздела не было. Теперь helper берет
+  счетчики самого Caddy с его admin-эндпоинта (localhost:2019/metrics): запросы по кодам
+  ответа с его запуска, в минуту - разница с прошлым разом. Считаются только конечные
+  обработчики (reverse_proxy, file_server, static_response), обертки вроде subroute
+  видят тот же запрос еще раз. Ошибки обработчика (прокси не достучался до приложения или
+  клиент ушел, не дождавшись ответа) кода в метриках не имеют и идут в "без кода", а не в
+  5xx. Домены - из живого конфига Caddy.
+
+  Caddy берется, только если nginx на ноде не нашелся: обычно Caddy стоит перед nginx (так
+  у самой панели), и один запрос считался бы дважды. В новых версиях Caddy HTTP-метрики
+  включаются отдельно (servers { metrics }), без них раздела не будет.
+
+### Fixed
+- Кириллические домены (.рф в punycode) больше не выпадают из доменов Caddy и Traefik.
+
 ## [1.4.63] - 2026-09-26
 
 ### Fixed
