@@ -183,6 +183,7 @@ def _out(
     o.helper_advice = _helper_advice(
         server, cur_versions if cur_versions is not None else _current_setup_versions()
     )
+    o.helper_rollout = helper_rollout(server, o.helper_advice)
     o.backup_audit = _backup_coverage(server)
     o.custom_backups = custom_backups.views(server, now)
     # Страна по IP — офлайн-таблицей (см. geoip). Берём адрес, которым нода реально
@@ -391,6 +392,13 @@ _SETUP_LABEL = {
     "dbstat-setup": "Инвентарь СУБД",
     "agent-watchdog": "Вотчдог агента",
 }
+
+
+def helper_rollout(server: Server, advice: list[HelperAdvice]) -> bool:
+    """Поменяет ли прогон kervax_helpers.yml что-то на ноде: устарел helper или агент
+    говорит, что watchdog не включен (его ставит helper agent-watchdog)."""
+    caps = (server.last_report or {}).get("caps") or {}
+    return bool(advice) or caps.get("watchdog") is False
 
 
 def _helper_advice(server: Server, cur: dict[str, str]) -> list[HelperAdvice]:

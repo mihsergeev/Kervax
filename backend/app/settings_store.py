@@ -132,6 +132,25 @@ LEGACY_SITE_DEFAULTS: frozenset[str] = frozenset({
 })
 
 
+# Доступ ansible к списку нод (GET /api/ansible/servers). Храним только хеш токена: сам
+# токен показываем один раз при выпуске, как токен агента. used_at - когда ansible
+# последний раз спрашивал, чтобы в настройках было видно, что связка работает.
+_ANSIBLE_KEY = "ansible_access"
+
+
+async def get_ansible_access(session: AsyncSession) -> dict:
+    raw = await _get_raw(session, _ANSIBLE_KEY)
+    try:
+        data = json.loads(raw) if raw else {}
+    except ValueError:
+        data = {}
+    return data if isinstance(data, dict) else {}
+
+
+async def set_ansible_access(session: AsyncSession, data: dict | None) -> None:
+    await _set_raw(session, _ANSIBLE_KEY, json.dumps(data) if data else "")
+
+
 async def get_raw(session: AsyncSession, key: str) -> str | None:
     return await _get_raw(session, key)
 
