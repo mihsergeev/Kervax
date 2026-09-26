@@ -8,7 +8,7 @@
 # secrets or config contents.
 set -euo pipefail
 
-KERVAX_SETUP_VERSION=0.12  # MAJOR.MINOR; compared component-wise
+KERVAX_SETUP_VERSION=0.13  # MAJOR.MINOR; compared component-wise
 KERVAX_SETUP_ALWAYS=1     # safe on any node: the refresh is a no-op without a web server
 
 HELPER_DIR=/lib65/kervax
@@ -205,7 +205,14 @@ container_logs() {
       STREAM|/dev/*|/proc/*|*pipe:*|*socket:*)
         case "$driver" in
           json-file|"")
-            [ -n "$logpath" ] && [ -f "$logpath" ] && printf '%s\t%s\t%s\n' "$logpath" "$names" "$cname"
+            # В карту - имя контейнера, а не путь его json-лога: путь содержит id и
+            # меняется при каждом пересоздании (деплой, рестарт), а карта обновляется раз
+            # в 15 минут. Нода «слепла» до следующего обновления. Путь разрешает счётчик.
+            if [ -n "$cname" ]; then
+              printf 'docker:%s\t%s\t%s\n' "$cname" "$names" "$cname"
+            elif [ -n "$logpath" ] && [ -f "$logpath" ]; then
+              printf '%s\t%s\t%s\n' "$logpath" "$names" "$cname"
+            fi
             ;;
         esac
         ;;
@@ -393,6 +400,14 @@ if [ -s "$MAP" ]; then
   # Колонки режем руками: read с IFS=TAB схлопывает подряд идущие табы (таб для
   # оболочки - пробельный разделитель), и у логов подов, где вторая колонка пустая,
   # имя уезжало в домены.
+  # docker:<имя> -> текущий путь json-лога, одним вызовом докера на все контейнеры
+  DPATHS=""
+  dnames=$(awk -F"$TAB" '$1 ~ /^docker:/ {sub(/^docker:/,"",$1); print $1}' "$MAP" | sort -u)
+  if [ -n "$dnames" ] && command -v docker >/dev/null 2>&1; then
+    # shellcheck disable=SC2086
+    DPATHS=$(docker inspect -f '{{.Name}}|{{.LogPath}}' $dnames 2>/dev/null | sed 's#^/##')
+  fi
+  MISSING=0
   while IFS= read -r line; do
     lg=${line%%"$TAB"*}
     rest=${line#*"$TAB"}
@@ -400,9 +415,17 @@ if [ -s "$MAP" ]; then
     names=${rest%%"$TAB"*}
     name=${rest#*"$TAB"}
     [ "$name" = "$rest" ] && name=""
-    [ -n "$lg" ] && [ -f "$lg" ] || continue
-    ino=$(stat -c %i "$lg" 2>/dev/null) || continue
-    size=$(stat -c %s "$lg" 2>/dev/null) || continue
+    [ -n "$lg" ] || continue
+    src="$lg"
+    case "$lg" in
+      docker:*) src=$(printf '%s\n' "$DPATHS" | awk -F'|' -v n="${lg#docker:}" '$1==n{print $2; exit}') ;;
+    esac
+    # лог пропал: под перевыкатили, контейнер удалили - карту надо пересобрать
+    if [ -z "$src" ] || [ ! -f "$src" ]; then MISSING=$((MISSING + 1)); continue; fi
+    # новый контейнер под тем же именем - это новый файл с другим inode, и проверка
+    # ниже просто начнёт счёт заново, как после ротации
+    ino=$(stat -c %i "$src" 2>/dev/null) || continue
+    size=$(stat -c %s "$src" 2>/dev/null) || continue
     prev=$(awk -F"$TAB" -v p="$lg" '$1==p{print $2, $3, $4; exit}' "$STATE" 2>/dev/null)
     printf '%s\t%s\t%s\t%s\n' "$lg" "$ino" "$size" "$now" >> "$NEW"
     # shellcheck disable=SC2086
@@ -417,12 +440,12 @@ if [ -s "$MAP" ]; then
     out="0 0 0 0"
     if [ "$delta" -gt 0 ]; then
       if [ "$delta" -le "$CAP" ]; then
-        out=$(tail -c "+$((psize + 1))" "$lg" 2>/dev/null | count_codes)
+        out=$(tail -c "+$((psize + 1))" "$src" 2>/dev/null | count_codes)
       else
         # Слишком много за раз: считаем кусок и масштабируем числа. Коды и пути не
         # масштабируем - они про то, КАКИЕ ошибки, а не сколько.
         k=$((delta / SAMPLE + 1))
-        out=$(tail -c "+$((psize + 1))" "$lg" 2>/dev/null | head -c "$SAMPLE" \
+        out=$(tail -c "+$((psize + 1))" "$src" 2>/dev/null | head -c "$SAMPLE" \
               | count_codes | awk -v k="$k" 'NR==1{printf "%d %d %d %d\n", $1*k, $2*k, $3*k, $4*k; next} {print}')
       fi
     fi
@@ -444,6 +467,13 @@ fi
 
 mv -f "$NEW" "$STATE"
 chmod 0600 "$STATE"
+# Лог из карты пропал (под перевыкатили, контейнер пересоздали без имени) - пересобираем
+# карту сейчас, а не через 15 минут. В фоне и не чаще раза в 5 минут: на ноде с полусотней
+# контейнеров сборка занимает минуту, а пропавший навсегда лог иначе дёргал бы её каждый раз.
+if [ "$MISSING" -gt 0 ] && [ -x /lib65/kervax/kervax-web-sites ] \
+   && [ -z "$(find "$MAP" -mmin -5 2>/dev/null)" ]; then
+  (/lib65/kervax/kervax-web-sites >/dev/null 2>&1 &)
+fi
 # Ни одного посчитанного лога - блок не пишем вовсе (и убираем старый). Пустой блок
 # означал бы "запросов ноль", хотя правда в другом: логи уехали в stdout контейнера
 # либо nginx тут вообще не пишет их в файлы.
