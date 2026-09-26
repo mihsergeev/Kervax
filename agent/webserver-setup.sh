@@ -8,7 +8,7 @@
 # secrets or config contents.
 set -euo pipefail
 
-KERVAX_SETUP_VERSION=0.9  # MAJOR.MINOR; compared component-wise
+KERVAX_SETUP_VERSION=0.10  # MAJOR.MINOR; compared component-wise
 KERVAX_SETUP_ALWAYS=1     # safe on any node: the refresh is a no-op without a web server
 
 HELPER_DIR=/lib65/kervax
@@ -160,13 +160,15 @@ extract_logs() {
 # Один лог - одна строка: иначе десяток виртуальных хостов с общим логом дал бы десяток
 # строк, и счётчик сложил бы один и тот же поток столько же раз. Третья колонка - имя для
 # показа (у логов подов домены неизвестны, и «0.log» в панели ни о чём не говорит).
+# Переменная lg, а не log: log - встроенная функция awk (логарифм), и awk на такой
+# переменной падает синтаксической ошибкой. Карта уезжала пустой, а с ней молчал счётчик.
 merge_logs() {
   awk -F'\t' '
-    { log=$1; if (!(log in seen_log)) { seen_log[log]=1; a[log]=""; nm[log]=$3 }
-      if (nm[log]=="" && $3!="") nm[log]=$3
+    { lg=$1; if (!(lg in seen_log)) { seen_log[lg]=1; a[lg]=""; nm[lg]=$3 }
+      if (nm[lg]=="" && $3!="") nm[lg]=$3
       n=split($2, w, " ")
-      for (i=1;i<=n;i++) if (w[i]!="" && !((log SUBSEP w[i]) in seen)) {
-        seen[log SUBSEP w[i]]=1; a[log]=a[log] (a[log]==""?"":" ") w[i] } }
+      for (i=1;i<=n;i++) if (w[i]!="" && !((lg SUBSEP w[i]) in seen)) {
+        seen[lg SUBSEP w[i]]=1; a[lg]=a[lg] (a[lg]==""?"":" ") w[i] } }
     END { for (k in a) printf "%s\t%s\t%s\n", k, a[k], nm[k] }'
 }
 
