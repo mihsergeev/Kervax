@@ -8,7 +8,7 @@
 # secrets or config contents.
 set -euo pipefail
 
-KERVAX_SETUP_VERSION=0.14  # MAJOR.MINOR; compared component-wise
+KERVAX_SETUP_VERSION=0.15  # MAJOR.MINOR; compared component-wise
 KERVAX_SETUP_ALWAYS=1     # safe on any node: the refresh is a no-op without a web server
 
 HELPER_DIR=/lib65/kervax
@@ -82,7 +82,8 @@ collect_apache() {
 # Caddy: with caddy-docker-proxy the domains live in the containers' `caddy` label (its
 # value is a list of site addresses). Plus a host Caddyfile (site addresses before `{`).
 # The scheme and port are stripped.
-extract_domains() { tr ' ,' '\n' | sed -E 's~^https?://~~; s~:[0-9]+$~~; s~/.*$~~' | grep -E '^\*?[A-Za-z0-9._-]+\.[A-Za-z]{2,}$'; }
+# Зона - буквы или punycode (xn--p1ai): иначе кириллические домены .рф выпадали из списка.
+extract_domains() { tr ' ,' '\n' | sed -E 's~^https?://~~; s~:[0-9]+$~~; s~/.*$~~' | grep -E '^\*?[A-Za-z0-9._-]+\.([A-Za-z]{2,}|xn--[A-Za-z0-9-]+)$'; }
 # Контейнеры, чьи метки считаем: работающие, только что созданные и перезапускающиеся.
 # Только работающих мало. Compose при деплое сначала создаёт новый контейнер и лишь
 # потом запускает его; сбор, попавший в эти секунды, видел старый уже остановленным, а
@@ -266,8 +267,43 @@ collect_logs() {
   done
 }
 
+# Caddy считаем не по логам, а по его метрикам: access-лог у Caddy по умолчанию выключен
+# и включается только у каждого сайта отдельно (ru-se-parking: caddy-docker-proxy перед
+# сотней контейнеров, логов нет ни одного). Счетчики запросов по кодам ответа он отдает
+# на admin-эндпоинте (localhost:2019/metrics), туда ходим из его сетевого пространства.
+# В карту идет ключ caddy:<контейнер> (caddy:host - Caddy на самой ноде), домены - из
+# его живого конфига, а не из меток: так видны и сайты из Caddyfile.
+caddy_get() {  # PID путь: запрос к admin-эндпоинту Caddy из сетевого пространства процесса
+  nsenter -t "$1" -n curl -s -m 5 "http://localhost:2019$2" 2>/dev/null \
+    || nsenter -t "$1" -n wget -qO- -T 5 "http://localhost:2019$2" 2>/dev/null
+}
+caddy_sources() {
+  for p in /proc/[0-9]*; do
+    [ "$(cat "$p/comm" 2>/dev/null)" = caddy ] || continue
+    pid=${p#/proc/}
+    cid=$(grep -o '[0-9a-f]\{64\}' "$p/cgroup" 2>/dev/null | tail -n 1)
+    if [ -z "$cid" ]; then
+      key=host; name=caddy
+    elif command -v docker >/dev/null 2>&1 && name=$(docker inspect -f '{{.Name}}' "$cid" 2>/dev/null); then
+      name=${name#/}; key=$name
+    else
+      continue  # Caddy в поде kubernetes пока не считаем
+    fi
+    # HTTP-метрики есть не всегда: в новых версиях Caddy их включают отдельно
+    # (servers { metrics }). Без них про этот Caddy молчим, а не рисуем ноль.
+    caddy_get "$pid" /metrics | grep -q '^caddy_http_requests_total{' || continue
+    hosts=$(caddy_get "$pid" /config/apps/http/servers | grep -o '"host":\[[^]]*\]' \
+      | sed 's/^"host":\[//; s/\]$//' | tr ',' '\n' | tr -d '"' | extract_domains | sort -u | tr '\n' ' ')
+    [ -n "$hosts" ] || hosts=$(collect_caddy | sort -u | tr '\n' ' ')
+    printf 'caddy:%s\t%s\t%s\n' "$key" "${hosts% }" "$name"
+  done | awk -F'\t' '!seen[$1]++'
+}
+
 LOGTMP="/var/lib/kervax/web-logs.tsv.tmp.$$"
 collect_logs | merge_logs | sort > "$LOGTMP" 2>/dev/null || : > "$LOGTMP"
+# Caddy - только если nginx на ноде не нашелся. Обычно Caddy стоит перед nginx (так у
+# самой панели: caddy-docker-proxy -> фронт на nginx), и один запрос считался бы дважды.
+[ -s "$LOGTMP" ] || caddy_sources >> "$LOGTMP" 2>/dev/null || true
 mv -f "$LOGTMP" /var/lib/kervax/web-logs.tsv
 chmod 0644 /var/lib/kervax/web-logs.tsv
 
@@ -298,7 +334,8 @@ cat > "$RATE" <<'RATE_EOF'
 #!/usr/bin/env bash
 # Сколько строк добавилось в каждый access-лог с прошлого запуска -> запросов в минуту.
 # Карту «лог -> домены» пишет сборщик доменов (web-logs.tsv), сами логи читаем только на
-# длину: в web-rate.json уходят числа и имена доменов, ни одной строки лога.
+# длину: в web-rate.json уходят числа и имена доменов, ни одной строки лога. У Caddy
+# логов нет - там разница его собственных счетчиков запросов с прошлого запуска.
 set -u
 # Кладём в report.d: агент отдаёт этот каталог панели как есть, своей версии ему для
 # новых блоков не нужно.
@@ -387,6 +424,59 @@ count_codes() {
       printf "]\n" }'
 }
 
+caddy_get() {  # PID путь: запрос к admin-эндпоинту Caddy из сетевого пространства процесса
+  nsenter -t "$1" -n curl -s -m 5 "http://localhost:2019$2" 2>/dev/null \
+    || nsenter -t "$1" -n wget -qO- -T 5 "http://localhost:2019$2" 2>/dev/null
+}
+# Ключ из карты -> PID, в чье сетевое пространство идти за метриками
+caddy_pid() {
+  if [ "$1" = host ]; then
+    for p in /proc/[0-9]*; do
+      [ "$(cat "$p/comm" 2>/dev/null)" = caddy ] || continue
+      grep -q '[0-9a-f]\{64\}' "$p/cgroup" 2>/dev/null && continue
+      echo "${p#/proc/}"
+      return
+    done
+  else
+    docker inspect -f '{{.State.Pid}}' "$1" 2>/dev/null | grep -v '^0$'
+  fi
+}
+# Метрики Caddy -> накопленные счетчики "tot=... e5=... e4=... err=... c502=...". Считаем
+# только конечные обработчики (reverse_proxy, file_server, static_response): subroute и
+# прочие обертки видят тот же запрос еще раз, и счет удвоился бы. Ошибки обработчика
+# (прокси не достучался до приложения ИЛИ клиент ушел, не дождавшись ответа) кода в
+# метриках не имеют, а 499 от ушедшего клиента не отличить от 502 - идут в "без кода",
+# а не в 5xx. printf %.0f, а не %d: у mawk %d режет числа больше 2^31, а счетчики с
+# запуска Caddy бывают и больше.
+caddy_counters() {
+  awk '
+    function term(l) { return l ~ /handler="(reverse_proxy|file_server|static_response)"/ }
+    /^caddy_http_requests_total\{/ && term($0) { tot += $NF; seen = 1 }
+    /^caddy_http_request_errors_total\{/ && term($0) { err += $NF }
+    /^caddy_http_request_duration_seconds_count\{/ && term($0) && match($0, /code="[0-9]+"/) {
+      c = substr($0, RSTART + 6, RLENGTH - 7)
+      if (c ~ /^5/) { e5 += $NF; c5[c] += $NF } else if (c ~ /^4/) e4 += $NF }
+    END {
+      if (!seen) exit
+      printf "tot=%.0f e5=%.0f e4=%.0f err=%.0f", tot, e5, e4, err
+      for (c in c5) printf " c%s=%.0f", c, c5[c]
+      printf "\n" }'
+}
+# Текущие и прошлые счетчики -> "в минуту" (первая строка: всего 5xx 4xx без_кода) и коды
+# 5xx за минуту в JSON (вторая). Код 1 - считать не из чего: первый замер или счетчики
+# сбросились (Caddy перезапустили).
+caddy_delta() {
+  awk -v cur="$1" -v prev="$2" -v el="$3" 'BEGIN {
+    n = split(prev, a, " "); for (i = 1; i <= n; i++) { split(a[i], kv, "="); p[kv[1]] = kv[2] }
+    if (!("tot" in p)) exit 1
+    n = split(cur, a, " ")
+    for (i = 1; i <= n; i++) { split(a[i], kv, "="); d[kv[1]] = kv[2] - p[kv[1]]; if (d[kv[1]] < 0) exit 1 }
+    printf "%d %d %d %d\n", d["tot"] * 60 / el, d["e5"] * 60 / el, d["e4"] * 60 / el, d["err"] * 60 / el
+    printf "{"; k = 0
+    for (x in d) if (x ~ /^c5/ && d[x] > 0) printf "%s\"%s\":%d", (k++ ? "," : ""), substr(x, 2), d[x] * 60 / el + 0.5
+    printf "}\n" }'
+}
+
 if [ -s "$MAP" ]; then
   # Колонки режем руками: read с IFS=TAB схлопывает подряд идущие табы (таб для
   # оболочки - пробельный разделитель), и у логов подов, где вторая колонка пустая,
@@ -407,6 +497,28 @@ if [ -s "$MAP" ]; then
     name=${rest#*"$TAB"}
     [ "$name" = "$rest" ] && name=""
     [ -n "$lg" ] || continue
+    case "$lg" in
+      caddy:*)
+        cpid=$(caddy_pid "${lg#caddy:}")
+        if [ -z "$cpid" ]; then MISSING=$((MISSING + 1)); continue; fi
+        cur=$(caddy_get "$cpid" /metrics | caddy_counters)
+        [ -n "$cur" ] || continue
+        prevline=$(awk -F"$TAB" -v p="$lg" '$1==p{print $2 "|" $3; exit}' "$STATE" 2>/dev/null)
+        printf '%s\t%s\t%s\n' "$lg" "$cur" "$now" >> "$NEW"
+        [ -n "$prevline" ] || continue
+        el=$((now - ${prevline##*|}))
+        [ "$el" -ge 20 ] || continue
+        out=$(caddy_delta "$cur" "${prevline%|*}" "$el") || continue
+        # shellcheck disable=SC2046
+        set -- $(printf '%s\n' "$out" | sed -n 1p)
+        rpm=${1:-0}; r5=${2:-0}; r4=${3:-0}; ru=${4:-0}
+        c5=$(printf '%s\n' "$out" | sed -n 2p); [ -n "$c5" ] || c5="{}"
+        TOTAL=$((TOTAL + rpm))
+        T5=$((T5 + r5))
+        ITEMS="$ITEMS${ITEMS:+,}{\"log\":\"$(esc "$lg")\",\"name\":\"$(esc "$name")\",\"rpm\":$rpm,\"e5\":$r5,\"e4\":$r4,\"un\":$ru,\"c5\":$c5,\"p5\":[],\"sites\":$(printf '%s' "$names" | sites_json)}"
+        continue
+        ;;
+    esac
     src="$lg"
     case "$lg" in
       docker:*) src=$(printf '%s\n' "$DPATHS" | awk -F'|' -v n="${lg#docker:}" '$1==n{print $2; exit}') ;;
@@ -524,4 +636,5 @@ systemctl enable --now kervax-web-rate.timer >/dev/null 2>&1 || true
 echo "$KERVAX_SETUP_VERSION" > "$STATE_DIR/versions/webserver-setup.ver"
 chmod 0644 "$STATE_DIR/versions/webserver-setup.ver"
 echo "✓ webserver-setup: web server domains -> $OUT (refreshed at boot and every 15 minutes),"
-echo "  requests per minute -> /var/lib/kervax/report.d/web-rate.json (every minute)."
+echo "  requests per minute -> /var/lib/kervax/report.d/web-rate.json (every minute; nginx by"
+echo "  its access logs, Caddy by its own metrics when there is no nginx on the node)."
