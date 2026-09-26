@@ -8,7 +8,7 @@
 # secrets or config contents.
 set -euo pipefail
 
-KERVAX_SETUP_VERSION=0.13  # MAJOR.MINOR; compared component-wise
+KERVAX_SETUP_VERSION=0.14  # MAJOR.MINOR; compared component-wise
 KERVAX_SETUP_ALWAYS=1     # safe on any node: the refresh is a no-op without a web server
 
 HELPER_DIR=/lib65/kervax
@@ -224,28 +224,6 @@ container_logs() {
   done
 }
 
-# Логи подов kubernetes: containerd кладёт их в
-# /var/log/pods/<ns>_<под>_<uid>/<контейнер>/0.log, докера на такой ноде нет вовсе.
-# Берём поды, у которых nginx в имени пода или контейнера: у ingress-nginx контейнер
-# называется controller, у обычных - nginx. Домены отсюда не узнать (они в Ingress, а
-# хелпер в кластер не ходит), поэтому третьей колонкой пишем ns/под - его и покажет панель.
-collect_pod_logs() {
-  [ -d /var/log/pods ] || return 0
-  for f in /var/log/pods/*/*/0.log; do
-    [ -f "$f" ] || continue
-    rest=${f#/var/log/pods/}
-    poddir=${rest%%/*}
-    cont=${rest#*/}; cont=${cont%%/*}
-    case "$poddir/$cont" in
-      *nginx*) ;;
-      *) continue ;;
-    esac
-    ns=${poddir%%_*}
-    pod=${poddir#*_}; pod=${pod%_*}
-    printf '%s\t\t%s/%s\n' "$f" "$ns" "$pod"
-  done
-}
-
 # nginx ищем по процессам, а не по имени образа: nginx часто живёт внутри образа
 # приложения (фронт самой панели - kervax-frontend), и по имени его не найти. У каждого
 # master-процесса cgroup называет контейнер: docker-<id>.scope у докера и .../pod<uid>/<id>
@@ -270,9 +248,13 @@ pod_log_by_id() {
   done
 }
 
+# Логи ищем ТОЛЬКО по живым процессам nginx. Поиск по имени (образ или контейнер с nginx
+# в названии) оставлял ложные находки: на de-hz-mxstat-dev контейнер «nginx» в поде
+# фронта крутит node, и его вывод («> mxstat-frontend start») считался запросами без
+# кода. Ещё он брал 0.log пода, хотя после рестарта контейнер пишет уже в 1.log.
+# Процесс и симлинк kubelet дают ровно текущий лог настоящего nginx.
 collect_logs() {
   command -v nginx >/dev/null 2>&1 && nginx -T 2>/dev/null | extract_logs
-  collect_pod_logs
   have_docker=0
   command -v docker >/dev/null 2>&1 && have_docker=1
   for id in $(nginx_container_ids); do
@@ -282,12 +264,6 @@ collect_logs() {
       pod_log_by_id "$id"
     fi
   done
-  # по имени - как раньше: nginx, который ещё не поднялся или недоступен через /proc
-  [ "$have_docker" = 1 ] || return 0
-  docker ps --format '{{.Names}} {{.Image}}' 2>/dev/null | awk '/nginx/{print $1}' | sort -u \
-    | while read -r c; do
-        [ -n "$c" ] && container_logs "$c"
-      done
 }
 
 LOGTMP="/var/lib/kervax/web-logs.tsv.tmp.$$"
@@ -352,13 +328,28 @@ sites_json() { tr ' ' '\n' | awk 'BEGIN{printf "["} {gsub(/[\\"]/,""); if($0==""
 # одинаково.
 count_codes() {
   awk '
-    { n++
-      s=""
+    # Строки error-лога nginx («2026/09/26 09:25:31 [error] 29#29: ... request: "GET
+    # /.env"») идут в тот же поток контейнера, но это не запросы: у них нет кода, и
+    # они раздували и «всего», и «без кода». Пропускаем их совсем.
+    /[0-9][0-9][0-9][0-9]\/[0-9][0-9]\/[0-9][0-9] [0-9][0-9]:[0-9][0-9]:[0-9][0-9] \[(emerg|alert|crit|error|warn|notice|info|debug)\]/ { next }
+    { s=""
       if (match($0, /\\?"[ \t]+[1-5][0-9][0-9]([ \t]|$)/)) { s=substr($0,RSTART,RLENGTH); gsub(/[^0-9]/,"",s) }
       else if (match($0, /[ \t][1-5][0-9][0-9][ \t]+\\?"[A-Z]+ /)) { s=substr($0,RSTART+1,3) }
       else if (match($0, /"status"[ \t]*:[ \t]*"?[1-5][0-9][0-9]/)) { s=substr($0,RSTART+RLENGTH-3,3) }
       else if (match($0, /\t[1-5][0-9][0-9]\t/)) { s=substr($0,RSTART+1,3) }
-      if (s=="") { u++; next }
+      # тот же формат с табуляцией, но через json-лог докера: там таб закодирован как
+      # \u0009 (ru-se-feed), а иной кодировщик пишет \t
+      else if (match($0, /\\u0009[1-5][0-9][0-9]\\u0009/)) { s=substr($0,RSTART+6,3) }
+      else if (match($0, /\\t[1-5][0-9][0-9]\\t/)) { s=substr($0,RSTART+2,3) }
+      # Кода нет. Если в строке есть сам запрос («GET /x HTTP/1.1») - это запрос в
+      # незнакомом формате, его считаем и помечаем «без кода». Иначе это вовсе не access-
+      # строка: служебный вывод контроллера (klog у ingress-nginx: «I0926 15:01:57
+      # admission.go:149] ...»), вывод приложения, пустая строка - такое не считаем, иначе
+      # на de-hz-mxstat-dev 73 строки контроллера в минуту выглядели как 73 запроса.
+      if (s=="") {
+        if ($0 ~ /[A-Z][A-Z][A-Z]+ \/[^ ]* HTTP\/[0-9]/) { n++; u++ }
+        next }
+      n++
       c=s+0
       if (c>=500) {
         e5++; c5[s]++
