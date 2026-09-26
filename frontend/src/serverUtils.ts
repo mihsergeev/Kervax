@@ -13,6 +13,12 @@ export function webRate(r?: ServerReport | null): WebRate | null {
   return nowTs - w.ts > 900 ? null : w
 }
 
+// Строк в минуту, где код ответа не распознан. Без этого «5xx: 0» значило бы и «ошибок
+// нет», и «формат лога незнакомый» - а это противоположные вещи.
+export function webUnparsed(r?: ServerReport | null): number {
+  return (webRate(r)?.logs ?? []).reduce((a, l) => a + (l.un ?? 0), 0)
+}
+
 // --- метрики сервера из последнего снимка (для сортировки/группировки/сводки) ---
 
 export function srvCpuPct(s: Server): number | null {
