@@ -13,6 +13,21 @@ export function webRate(r?: ServerReport | null): WebRate | null {
   return nowTs - w.ts > 900 ? null : w
 }
 
+// Подпись лога - как у панели (web_log_label): под kubernetes, "контейнер (домены +N)",
+// домены, имя или файл. Несколько доменов в одной строке - это один nginx: все свои
+// сайты он пишет в общий access-лог, и разделить их можно, только если в формате лога
+// есть $host. По этой подписи строки под графиком находят цвет своей полосы.
+export function webLogLabel(l: { log: string; name?: string; sites?: string[] }): string {
+  const name = l.name ?? ''
+  if (name.includes('/')) return name
+  const sites = (l.sites ?? []).filter(Boolean)
+  if (sites.length) {
+    const doms = sites.slice(0, 2).join(', ') + (sites.length > 2 ? ` +${sites.length - 2}` : '')
+    return (name ? `${name} (${doms})` : doms).slice(0, 120)
+  }
+  return (name || l.log.split('/').pop() || l.log).slice(0, 120)
+}
+
 // Строк в минуту, где код ответа не распознан. Без этого «5xx: 0» значило бы и «ошибок
 // нет», и «формат лога незнакомый» - а это противоположные вещи.
 export function webUnparsed(r?: ServerReport | null): number {

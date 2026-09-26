@@ -26,7 +26,7 @@ import {
   type ServerMetric,
 } from './api'
 import { StackedAreaChart, type Series } from './charts/StackedAreaChart'
-import { fmtSetupVersion, srvIssues, webRate, webUnparsed } from './serverUtils'
+import { fmtSetupVersion, srvIssues, webLogLabel, webRate, webUnparsed } from './serverUtils'
 import { OsIcon } from './osIcon'
 import { CountryFlag } from './CountryFlag'
 import { currentLang, useI18n } from './i18n'
@@ -112,6 +112,7 @@ type MetricChart = {
   series: Series[]
   mode?: 'stack' | 'mirror' | 'overlay'
   yMax?: number
+  yNice?: boolean | 'bytes' // круглые деления оси (1-2-5); 'bytes' - в КБ/МБ
   fmtY: (v: number) => string
   fmtV: (v: number) => string
 }
@@ -151,6 +152,26 @@ function padToNow(mc: MetricChart, end: number): MetricChart {
 // Строит конфиг графика метрики из массива снимков — общий для детали и полноэкрана.
 // Палитра Grafana для состава CPU: их же роли в их же цветах, включая простой. Кто
 // привык к Node Exporter Full, читает этот график, не глядя в легенду.
+// Стек запросов по логам: цвет по месту в пятерке, крупнейший - снизу. Хеш по имени
+// тут не годится: на пять рядов из двенадцати цветов почти всегда выпадают два одинаковых.
+const WEB_COLORS = ['#5794f2', '#73bf69', '#fade2a', '#ff9830', '#b877d9']
+const WEB_REST = '#6b7a90' // "остальные": нейтральный, не спорит с цветными полосами
+// у частых кодов 5xx цвет постоянный: 502 на любом сервере одного цвета
+const CODE_COLORS: Record<string, string> = {
+  '500': '#e24d42', '502': '#ff9830', '503': '#fade2a', '504': '#b877d9',
+}
+const CODE_PALETTE = ['#f2495c', '#6ed0e0', '#ca95e5', '#8ab8ff', '#ffb357', '#96d98d']
+// какие логи идут в стеке отдельными полосами: пять самых нагруженных за окно
+function webStackNames(M: ServerMetric[]): string[] {
+  const sum = new Map<string, number>()
+  for (const m of M) for (const x of m.web_top ?? []) sum.set(x.k, (sum.get(x.k) ?? 0) + x.r)
+  return [...sum.entries()]
+    .filter((e) => e[1] > 0)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, WEB_COLORS.length)
+    .map((e) => e[0])
+}
+
 const GRAFANA_CPU = {
   system: '#eab839',
   user: '#5794f2',
@@ -207,23 +228,24 @@ function buildMetric(
   }
   if (key === 'freq')
     return {
-      key, title: `CPU · ${t('частота')}`, ts, mode: 'overlay', fmtY: fmtMHz, fmtV: fmtMHz,
+      key, title: `CPU · ${t('частота')}`, ts, mode: 'overlay', yNice: true, fmtY: fmtMHz, fmtV: fmtMHz,
       series: [{ name: t('частота'), color: '#5794f2', values: M.map((m) => m.cpu_freq) }],
     }
   if (key === 'temp')
     return {
-      key, title: `CPU · ${t('температура')}`, ts, mode: 'overlay', fmtY: fmtTempC, fmtV: fmtTempC,
+      key, title: `CPU · ${t('температура')}`, ts, mode: 'overlay', yNice: true,
+      fmtY: fmtTempC, fmtV: fmtTempC,
       series: [{ name: t('температура'), color: '#ff9830', values: M.map((m) => m.cpu_temp) }],
     }
   if (key === 'throttle')
     return {
-      key, title: `CPU · ${t('троттлинг')}`, ts, mode: 'overlay',
+      key, title: `CPU · ${t('троттлинг')}`, ts, mode: 'overlay', yNice: true,
       fmtY: (v) => String(Math.round(v)), fmtV: (v) => String(Math.round(v)),
       series: [{ name: t('троттлинг'), color: '#f2495c', values: M.map((m) => m.cpu_throttle) }],
     }
   if (key === 'oom')
     return {
-      key, title: `${t('Память')} · ${t('OOM-киллы')}`, ts, mode: 'overlay',
+      key, title: `${t('Память')} · ${t('OOM-киллы')}`, ts, mode: 'overlay', yNice: true,
       fmtY: (v) => String(Math.round(v)), fmtV: (v) => String(Math.round(v)),
       series: [{ name: t('OOM-киллы'), color: '#f2495c', values: M.map((m) => m.oom_kill) }],
     }
@@ -256,7 +278,7 @@ function buildMetric(
     }
   if (key === 'memwb')
     return {
-      key, title: `${t('Память')} · ${t('буфер записи')}`, ts, mode: 'overlay',
+      key, title: `${t('Память')} · ${t('буфер записи')}`, ts, mode: 'overlay', yNice: 'bytes',
       fmtY: fmtBytes, fmtV: fmtBytes,
       series: [
         { name: t('ожидают записи'), color: '#ff9830', values: M.map((m) => m.mem_dirty) },
@@ -277,7 +299,7 @@ function buildMetric(
     // общий топ-N набор по пику rx+tx → приём и отдача показывают одни интерфейсы
     const names = topEntities(M, (m) => m.net_ifaces, (x) => x.if, (x) => Math.max(x.rx, x.tx))
     return {
-      key, ts, mode: 'overlay', fmtY: fmtRate, fmtV: fmtRate,
+      key, ts, mode: 'overlay', yNice: 'bytes', fmtY: fmtRate, fmtV: fmtRate,
       title: `${t('Сеть')} · ${tx ? t('отдача по интерфейсам') : t('приём по интерфейсам')}`,
       series: names.map((n) => ({
         name: n, color: entColor(n, CORE_COLORS),
@@ -292,7 +314,7 @@ function buildMetric(
     // одна линия на интерфейс = ошибки+дропы/сек (обычно 0 — плоско = здорово)
     const names = topEntities(M, (m) => m.net_ifaces, (x) => x.if, (x) => x.errs + x.drops)
     return {
-      key, ts, mode: 'overlay', fmtY: fmtErr, fmtV: fmtErr,
+      key, ts, mode: 'overlay', yNice: true, fmtY: fmtErr, fmtV: fmtErr,
       title: `${t('Сеть')} · ${t('ошибки/дропы по интерфейсам')}`,
       series: names.map((n) => ({
         name: n, color: entColor(n, CORE_COLORS),
@@ -307,7 +329,7 @@ function buildMetric(
     const lat = key === 'disklat'
     const names = topEntities(M, (m) => m.disk_devs, (x) => x.dev, (x) => x.util)
     return {
-      key, ts, mode: 'overlay', yMax: lat ? undefined : 100,
+      key, ts, mode: 'overlay', yMax: lat ? undefined : 100, yNice: lat,
       title: `${t('Диск')} · ${lat ? t('задержка (await)') : t('загрузка (%util)')}`,
       fmtY: lat ? fmtMs : pctY, fmtV: lat ? fmtMs : pctV,
       series: names.map((n) => ({
@@ -325,7 +347,7 @@ function buildMetric(
       ...new Set(M.flatMap((m) => (m.disk_devs ?? []).filter((x) => x.temp != null).map((x) => x.dev))),
     ].sort()
     return {
-      key, ts, mode: 'overlay', fmtY: fmtTempC, fmtV: fmtTempC,
+      key, ts, mode: 'overlay', yNice: true, fmtY: fmtTempC, fmtV: fmtTempC,
       title: `${t('Диск')} · ${t('температура')}`,
       series: names.map((n) => ({
         name: n, color: entColor(n, DISK_PALETTE),
@@ -333,27 +355,83 @@ function buildMetric(
       })),
     }
   }
-  if (key === 'web')
+  if (key === 'web') {
+    const title = `${t('Веб-сервер')} · ${t('запросов в минуту')}`
+    // Стек по логам, как состав CPU: видно не только сколько запросов, но и на какой сайт
+    // или под пришел рост. Пять самых нагруженных за окно, остальное - одной полосой.
+    const names = webStackNames(M)
+    if (!names.length)
+      return {
+        key, ts, mode: 'overlay', yNice: true, fmtY: fmtCount, fmtV: fmtCount, title,
+        series: [{ name: t('запросов/мин'), color: '#5794f2', values: M.map((m) => m.web_rpm) }],
+      }
+    // минута без разбивки (история до 1.4.62) - пропуск у логов, все уходит в "остальные"
+    const val = (m: ServerMetric, n: string) =>
+      m.web_top ? (m.web_top.find((x) => x.k === n)?.r ?? 0) : null
+    const rest = M.map((m) =>
+      m.web_rpm == null ? null : Math.max(0, m.web_rpm - names.reduce((a, n) => a + (val(m, n) ?? 0), 0)),
+    )
     return {
-      key, ts, mode: 'overlay', fmtY: fmtNum, fmtV: fmtNum,
-      title: `${t('Веб-сервер')} · ${t('запросов в минуту')}`,
-      series: [{ name: t('запросов/мин'), color: '#5794f2', values: M.map((m) => m.web_rpm) }],
+      key, ts, mode: 'stack', yNice: true, fmtY: fmtCount, fmtV: fmtCount, title,
+      series: [
+        ...names.map((n, i) => ({ name: n, color: WEB_COLORS[i], values: M.map((m) => val(m, n)) })),
+        ...(rest.some((v) => (v ?? 0) >= 1) || M.some((m) => m.web_rpm != null && !m.web_top)
+          ? [{ name: t('остальные'), color: WEB_REST, values: rest }]
+          : []),
+      ],
     }
-  if (key === 'web5xx')
+  }
+  if (key === 'web5xx') {
+    const title = `${t('Веб-сервер')} · ${t('ошибок 5xx в минуту')}`
+    // Стек по кодам: 502 и 504 - разные истории (апстрим упал / его не дождались), и на
+    // одной красной линии их не различить. Код "5xx" шлет хелпер до 0.12, у него кодов
+    // нет - такие ошибки идут в "остальные".
+    const sum = new Map<string, number>()
+    for (const m of M)
+      for (const x of m.web_codes ?? []) if (x.c !== '5xx') sum.set(x.c, (sum.get(x.c) ?? 0) + x.n)
+    const codes = [...sum.entries()]
+      .filter((e) => e[1] > 0)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 6)
+      .map((e) => e[0])
+      .sort()
+    if (!codes.length)
+      return {
+        key, ts, mode: 'overlay', yNice: true, fmtY: fmtCount, fmtV: fmtCount, title,
+        series: [{ name: t('5xx/мин'), color: '#e24d42', values: M.map((m) => m.web_5xx) }],
+      }
+    const val = (m: ServerMetric, c: string) =>
+      m.web_codes ? (m.web_codes.find((x) => x.c === c)?.n ?? 0) : null
+    const rest = M.map((m) => {
+      if (m.web_5xx == null) return null
+      const x = Math.max(0, m.web_5xx - codes.reduce((a, c) => a + (val(m, c) ?? 0), 0))
+      // нулевой остаток у минут с разбивкой не рисуем: серая линия легла бы поверх кодов
+      return m.web_codes && x < 0.05 ? null : x
+    })
     return {
-      key, ts, mode: 'overlay', fmtY: fmtNum, fmtV: fmtNum,
-      title: `${t('Веб-сервер')} · ${t('ошибок 5xx в минуту')}`,
-      series: [{ name: t('5xx/мин'), color: '#e24d42', values: M.map((m) => m.web_5xx) }],
+      key, ts, mode: 'stack', yNice: true, fmtY: fmtCount, fmtV: fmtCount, title,
+      series: [
+        ...codes.map((c, i) => ({
+          name: c,
+          color: CODE_COLORS[c] ?? CODE_PALETTE[i % CODE_PALETTE.length],
+          values: M.map((m) => val(m, c)),
+        })),
+        // минуты без разбивки (история до 1.4.62) тоже рисуем "остальными", иначе там дыра
+        ...(rest.some((v) => (v ?? 0) >= 0.5) || M.some((m) => m.web_5xx != null && !m.web_codes)
+          ? [{ name: t('остальные'), color: WEB_REST, values: rest }]
+          : []),
+      ],
     }
+  }
   if (key === 'conntrack')
     return {
-      key, ts, mode: 'overlay', fmtY: fmtNum, fmtV: fmtNum,
+      key, ts, mode: 'overlay', yNice: true, fmtY: fmtNum, fmtV: fmtNum,
       title: `conntrack · ${t('соединения')}`,
       series: [{ name: 'conntrack', color: '#5794f2', values: M.map((m) => m.conntrack_count) }],
     }
   if (key === 'sockets')
     return {
-      key, ts, mode: 'overlay', fmtY: fmtNum, fmtV: fmtNum,
+      key, ts, mode: 'overlay', yNice: true, fmtY: fmtNum, fmtV: fmtNum,
       title: t('Сокеты'),
       series: [
         { name: 'TCP', color: '#5794f2', values: M.map((m) => m.sock_tcp) },
@@ -557,7 +635,7 @@ function fmtTempC(v?: number | null): string {
   return v == null ? '—' : `${Math.round(v)}°C`
 }
 function fmtMs(v?: number | null): string {
-  if (v == null) return '—'
+  if (v == null) return '-'
   const u = currentLang() === 'en' ? 'ms' : 'мс'
   return `${v >= 10 ? Math.round(v) : v.toFixed(2)} ${u}`
 }
@@ -566,9 +644,17 @@ function fmtErr(v?: number | null): string {
   if (!v) return '0'
   return v >= 10 ? String(Math.round(v)) : v.toFixed(2)
 }
+// Запросы и ошибки в минуту. За 7-30 дней точки усреднены и дробь осмысленна ("0.3
+// ошибки в минуту"); округление до целого рисовало на оси "0 0 0 1 1 1".
+function fmtCount(v?: number | null): string {
+  if (v == null) return '—'
+  if (v >= 10000) return `${(v / 1000).toFixed(1)}k`
+  if (v >= 10 || Number.isInteger(v)) return String(Math.round(v))
+  return String(Math.round(v * 10) / 10)
+}
 // компактное целое (сокеты/conntrack): 12 345 → «12.3k»
 function fmtNum(v?: number | null): string {
-  if (v == null) return '—'
+  if (v == null) return '-'
   return v >= 10000 ? `${(v / 1000).toFixed(1)}k` : String(Math.round(v))
 }
 
@@ -623,39 +709,82 @@ const SEC_OF_CARD: Record<string, string> = {
   web: 'web', web5xx: 'web',
 }
 
+// Веб - последним: раздел есть не на каждой ноде, и в середине он сдвигал привычные.
 const DETAIL_SECTIONS = [
   { id: 'cpu', label: 'CPU' },
   { id: 'mem', label: 'Память' },
   { id: 'net', label: 'Сеть' },
-  { id: 'web', label: 'Веб' },
   { id: 'conn', label: 'Соединения' },
   { id: 'disk', label: 'Диск' },
   { id: 'proc', label: 'Процессы' },
+  { id: 'web', label: 'Веб' },
 ]
+// отдельной константой: новый массив на каждый рендер пересоздавал бы слежение за скроллом
+const DETAIL_SECTIONS_NO_WEB = DETAIL_SECTIONS.filter((x) => x.id !== 'web')
+// раздел, к которому ведет ссылка ?sec=: сам раздел или тот, где лежит карточка
+function secOfLink(sec?: string | null): string | null {
+  if (!sec) return null
+  return DETAIL_SECTIONS.some((x) => x.id === sec) ? sec : (SEC_OF_CARD[sec] ?? null)
+}
 function DetailNav({
   t,
   sections = DETAIL_SECTIONS,
+  initial,
 }: {
   t: (s: string) => string
   sections?: { id: string; label: string }[]
+  initial?: string | null
 }) {
-  const [active, setActive] = useState('cpu')
+  const [active, setActive] = useState(initial || 'cpu')
+  // После клика по пункту или перехода по ссылке подсветка стоит на выбранном разделе,
+  // пока человек сам не крутанет страницу. Иначе её сбивала сама прокрутка: по ссылке
+  // на "Веб" горела "Сеть" (карточка веба вставала по центру, а верхнюю треть экрана,
+  // по которой считалась подсветка, занимал конец сети), а короткий последний раздел
+  // не доезжает до этой трети вообще.
+  const holdRef = useRef(!!initial)
   useEffect(() => {
-    const els = sections.map((s) => document.getElementById(`msec-${s.id}`)).filter(
-      (e): e is HTMLElement => e != null,
-    )
-    if (!els.length) return
-    const io = new IntersectionObserver(
-      (ents) => {
-        const vis = ents
-          .filter((e) => e.isIntersecting)
-          .sort((a, b) => a.boundingClientRect.top - b.boundingClientRect.top)
-        if (vis[0]) setActive(vis[0].target.id.replace('msec-', ''))
-      },
-      { rootMargin: '-8% 0px -70% 0px' },
-    )
-    els.forEach((el) => io.observe(el))
-    return () => io.disconnect()
+    if (!initial) return
+    setActive(initial)
+    holdRef.current = true
+  }, [initial])
+  useEffect(() => {
+    const release = () => {
+      holdRef.current = false
+    }
+    const opt = { capture: true, passive: true }
+    const evs = ['wheel', 'touchmove', 'keydown', 'mousedown'] as const
+    evs.forEach((e) => window.addEventListener(e, release, opt))
+    return () => evs.forEach((e) => window.removeEventListener(e, release, opt))
+  }, [])
+  useEffect(() => {
+    let raf = 0
+    const spy = (e: Event) => {
+      if (raf || holdRef.current) return
+      const box = e.target instanceof HTMLElement ? e.target : document.scrollingElement
+      raf = requestAnimationFrame(() => {
+        raf = 0
+        const els = sections
+          .map((s) => document.getElementById(`msec-${s.id}`))
+          .filter((x): x is HTMLElement => x != null)
+        if (!box || !els.length || !box.contains(els[0])) return
+        // активный - последний раздел, чей верх уже прошел линию на трети экрана
+        const line = window.innerHeight * 0.3
+        let cur = els[0]
+        for (const el of els) if (el.getBoundingClientRect().top <= line) cur = el
+        // докрутили до конца - последний видимый раздел, иначе короткий последний не
+        // загорится никогда
+        if (box.scrollTop + box.clientHeight >= box.scrollHeight - 4) {
+          const seen = els.filter((el) => el.getBoundingClientRect().top < window.innerHeight)
+          cur = seen[seen.length - 1] ?? cur
+        }
+        setActive(cur.id.replace('msec-', ''))
+      })
+    }
+    document.addEventListener('scroll', spy, { capture: true, passive: true })
+    return () => {
+      document.removeEventListener('scroll', spy, { capture: true })
+      cancelAnimationFrame(raf)
+    }
   }, [sections])
   const go = (id: string) => {
     const el = document.getElementById(`msec-${id}`)
@@ -663,6 +792,8 @@ function DetailNav({
     if (!el.querySelector('.metric-section-body')) {
       ;(el.querySelector('.metric-section-head') as HTMLElement | null)?.click()
     }
+    setActive(id)
+    holdRef.current = true
     el.scrollIntoView({ behavior: 'smooth', block: 'start' })
   }
   return (
@@ -2469,6 +2600,7 @@ function ServerChartModal({
             series={mc.series}
             mode={mc.mode}
             yMax={mc.yMax}
+            yNice={mc.yNice}
             fmtY={mc.fmtY}
             fmtV={mc.fmtV}
             fmtTime={fmtT}
@@ -2537,18 +2669,29 @@ function ServerDetail({
   useEffect(() => {
     if (!initialSection || scrolledRef.current || !s.last_report) return
     scrolledRef.current = true
+    const secId = secOfLink(initialSection)
+    let inner = 0
     const id = window.setTimeout(() => {
-      // Порядок: точная карточка → раздел с тем же именем → раздел, которому карточка
-      // принадлежит. Третий шаг нужен потому, что карточки условны: датчика температуры
-      // диска может не быть, и тогда mcard-disktemp в DOM отсутствует — без запасного
-      // пути ссылка не сработала бы вообще.
-      const el =
-        document.getElementById(`mcard-${initialSection}`) ??
-        document.getElementById(`msec-${initialSection}`) ??
-        document.getElementById(`msec-${SEC_OF_CARD[initialSection] ?? ''}`)
-      el?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+      // свернутый раздел раскрываем: ссылка ведет к графикам, а не к заголовку
+      const sec = document.getElementById(`msec-${secId ?? ''}`)
+      const head = sec && !sec.querySelector('.metric-section-body')
+        ? sec.querySelector<HTMLElement>('.metric-section-head')
+        : null
+      head?.click()
+      inner = window.setTimeout(() => {
+        // Ссылка на раздел - к его началу, на карточку - карточку в центр экрана. По
+        // "sec=web" раньше открывалась карточка графика (id у них общий), и список ошибок
+        // над ней уезжал за верх экрана, а по такой ссылке он самое нужное. Карточки
+        // может не быть (датчика температуры диска нет) - тогда к её разделу.
+        const card = secId === initialSection ? null : document.getElementById(`mcard-${initialSection}`)
+        if (card) card.scrollIntoView({ behavior: 'smooth', block: 'center' })
+        else document.getElementById(`msec-${secId ?? ''}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+      }, head ? 60 : 0)
     }, 200) // ждём вёрстку модалки
-    return () => window.clearTimeout(id)
+    return () => {
+      window.clearTimeout(id)
+      window.clearTimeout(inner)
+    }
   }, [initialSection, s.last_report])
 
   async function del() {
@@ -2644,6 +2787,21 @@ function ServerDetail({
   const memAvailB = Math.max(0, memTotalB - memUsedB)
   const loadStr = (r.load ?? []).slice(0, 3).map((x) => x.toFixed(2)).join(' / ')
 
+  // Веб: цвета строк под графиками - те же, что у полос стека (по подписи ряда).
+  const wr = webRate(r)
+  const webColors = new Map<string, string>()
+  if (wr)
+    for (const k of ['web', 'web5xx'] as const)
+      for (const x of buildMetric(k, M, t).series) webColors.set(`${k}|${x.name}`, x.color)
+  const webColor = (k: MetricKey, name: string) => webColors.get(`${k}|${name}`)
+  // коды 5xx последней минуты по всем логам
+  const codesNow = Object.entries(
+    (wr?.logs ?? []).reduce<Record<string, number>>((acc, l) => {
+      for (const [c, n] of Object.entries(l.c5 ?? {})) acc[c] = (acc[c] ?? 0) + n
+      return acc
+    }, {}),
+  ).sort((a, b) => b[1] - a[1])
+
   // Секция графика: кликабельная карточка → полноэкранный график этой метрики.
   const chartCard = (key: MetricKey, extra?: React.ReactNode) => {
     const mc = padToNow(buildMetric(key, M, t), Date.now())
@@ -2664,6 +2822,7 @@ function ServerDetail({
             series={mc.series}
             mode={mc.mode}
             yMax={mc.yMax}
+            yNice={mc.yNice}
             fmtY={mc.fmtY}
             fmtV={mc.fmtV}
             fmtTime={fmtT}
@@ -2906,7 +3065,8 @@ function ServerDetail({
         <div className="detail-body">
           <DetailNav
             t={t}
-            sections={webRate(r) ? DETAIL_SECTIONS : DETAIL_SECTIONS.filter((x) => x.id !== 'web')}
+            sections={wr ? DETAIL_SECTIONS : DETAIL_SECTIONS_NO_WEB}
+            initial={secOfLink(initialSection)}
           />
           <div className="detail-sections">
         <MetricSection id="cpu" title="CPU">
@@ -3013,55 +3173,6 @@ function ServerDetail({
               )}
           </div>
         </MetricSection>
-
-        {/* Свой раздел для веба: сюда ведёт ссылка из алерта по 5xx. Сначала список -
-            где ошибки, какие коды и пути, - потом графики во времени. */}
-        {webRate(r) && (
-          <MetricSection id="web" title={t('Веб')}>
-            <WebErrorList serverId={s.id} t={t} />
-            <div className="chart-grid">
-              {webRate(r) && chartCard(
-                'web',
-                <div className="loc-results chart-stats">
-                  <StatRow color="#5a8fc7" name={t('запросов/мин')} value={fmtNum(webRate(r)!.rpm)} />
-                  {(webRate(r)!.logs ?? [])
-                    .slice()
-                    .sort((a, b) => b.rpm - a.rpm)
-                    .slice(0, 4)
-                    .map((l) => (
-                      <StatRow
-                        key={l.log}
-                        name={l.sites?.length ? l.sites.join(', ') : l.name || l.log.split('/').pop() || l.log}
-                        value={fmtNum(l.rpm)}
-                      />
-                    ))}
-                </div>,
-              )}
-              {/* ошибки рядом с запросами: «было ноль, стало 0.2%» видно только так -
-                  синтетический монитор такую долю не поймает */}
-              {webRate(r) && chartCard(
-                'web5xx',
-                <div className="loc-results chart-stats">
-                  <StatRow color="#c25a52" name={t('5xx/мин')} value={fmtNum(webRate(r)!.e5 ?? 0)} />
-                  {(webRate(r)!.logs ?? [])
-                    .filter((l) => (l.e5 ?? 0) > 0)
-                    .sort((a, b) => (b.e5 ?? 0) - (a.e5 ?? 0))
-                    .slice(0, 4)
-                    .map((l) => (
-                      <StatRow
-                        key={l.log}
-                        name={l.name || l.sites?.join(', ') || l.log.split('/').pop() || l.log}
-                        value={fmtNum(l.e5 ?? 0)}
-                      />
-                    ))}
-                  {webUnparsed(r) > 0 && (
-                    <StatRow name={t('без кода ответа')} value={fmtNum(webUnparsed(r))} />
-                  )}
-                </div>,
-              )}
-            </div>
-          </MetricSection>
-        )}
 
         <MetricSection id="conn" title={t('Соединения')}>
           <div className="chart-grid">
@@ -3178,6 +3289,56 @@ function ServerDetail({
             <ProcCard title={t('Топ по памяти')} procs={r.top_mem} kind="mem" total={r.mem_total ?? 0} t={t} />
           </div>
         </MetricSection>
+
+        {/* Веб - последним: раздел есть не на каждой ноде. Сюда ведет ссылка из алерта
+            по 5xx: сначала список - где ошибки, какие коды и пути, - потом графики. */}
+        {wr && (
+          <MetricSection id="web" title={t('Веб')}>
+            <WebErrorList serverId={s.id} t={t} />
+            <div className="chart-grid">
+              {chartCard(
+                'web',
+                <div className="loc-results chart-stats">
+                  <StatRow
+                    color={webColor('web', t('запросов/мин'))}
+                    name={t('запросов/мин')}
+                    value={fmtCount(wr.rpm)}
+                  />
+                  {(wr.logs ?? [])
+                    .filter((l) => l.rpm > 0)
+                    .sort((a, b) => b.rpm - a.rpm)
+                    .slice(0, 5)
+                    .map((l) => (
+                      <StatRow
+                        key={l.log}
+                        color={webColor('web', webLogLabel(l))}
+                        name={webLogLabel(l)}
+                        value={fmtCount(l.rpm)}
+                      />
+                    ))}
+                </div>,
+              )}
+              {/* ошибки рядом с запросами: рост с нуля до 0.2% видно только так -
+                  синтетический монитор такую долю не поймает */}
+              {chartCard(
+                'web5xx',
+                <div className="loc-results chart-stats">
+                  <StatRow
+                    color={webColor('web5xx', t('5xx/мин'))}
+                    name={t('5xx/мин')}
+                    value={fmtCount(wr.e5 ?? 0)}
+                  />
+                  {codesNow.map(([c, n]) => (
+                    <StatRow key={c} color={webColor('web5xx', c)} name={c} value={fmtCount(n)} />
+                  ))}
+                  {webUnparsed(r) > 0 && (
+                    <StatRow name={t('без кода ответа')} value={fmtCount(webUnparsed(r))} />
+                  )}
+                </div>,
+              )}
+            </div>
+          </MetricSection>
+        )}
           </div>
         </div>
 

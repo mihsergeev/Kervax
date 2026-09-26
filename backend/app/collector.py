@@ -1787,15 +1787,60 @@ def web_error_level(total: float, errs: float, points: int, threshold: float) ->
 
 
 def web_log_label(entry: dict) -> str:
-    """Как назвать лог человеку: под kubernetes, иначе домены (с «и ещё N»), иначе имя
-    контейнера или файла. Путь json-лога докера - это хеш, он ни о чём не говорит."""
-    if entry.get("name") and "/" in str(entry.get("name")):
-        return str(entry["name"])  # ns/под
+    """Как назвать лог человеку: под kubernetes, контейнер с доменами в скобках, домены,
+    имя контейнера или файла. Путь json-лога докера - это хеш, он ни о чем не говорит.
+
+    Несколько доменов в одной подписи - это один лог: nginx пишет запросы всех своих
+    server_name в общий access-лог, и разделить их по сайтам можно, только если в формате
+    лога есть $host. Имя контейнера впереди объясняет, откуда такая группа. "+N", а не
+    "и еще N": подпись попадает и в легенду графика английского интерфейса."""
+    name = str(entry.get("name") or "")
+    if "/" in name:
+        return name  # ns/под
     sites = [str(x) for x in (entry.get("sites") or []) if x]
     if sites:
-        more = f" и ещё {len(sites) - 2}" if len(sites) > 2 else ""
-        return ", ".join(sites[:2]) + more
-    return str(entry.get("name") or str(entry.get("log") or "?").split("/")[-1])
+        doms = ", ".join(sites[:2]) + (f" +{len(sites) - 2}" if len(sites) > 2 else "")
+        return f"{name} ({doms})" if name else doms
+    return name or str(entry.get("log") or "?").split("/")[-1]
+
+
+def web_label_key(label: str) -> str:
+    """По чему сводить записи одного лога. Ключ лога у контейнера менялся (путь json-лога
+    до хелпера 0.13, docker:имя после), подпись тоже ("домены и еще N" раньше, "контейнер
+    (домены +N)" теперь), и один nginx показывался двумя строками. Общее у них - домены."""
+    s = label.strip()
+    m = re.fullmatch(r"[^()]* \((.+)\)", s)
+    if m:
+        s = m.group(1)
+    return re.sub(r" и ещё (\d+)$", r" +\1", s)
+
+
+def web_breakdown(extras: dict | None, now: datetime, clock_unix: float = 0,
+                  top: int = 5) -> tuple[list | None, list | None]:
+    """Для графиков стеком: самые нагруженные логи минуты и ошибки 5xx по кодам (сумма
+    по всем логам). (None, None), если блока нет или он протух."""
+    if web_rate_total(extras, now, clock_unix) is None:
+        return None, None
+    logs = [x for x in ((extras or {}).get("web-rate") or {}).get("logs") or [] if isinstance(x, dict)]
+    busiest = sorted((x for x in logs if (x.get("rpm") or 0) > 0), key=lambda x: -(x.get("rpm") or 0))
+    tops = [{"k": web_log_label(x)[:120], "r": int(x.get("rpm") or 0), "e": int(x.get("e5") or 0)}
+            for x in busiest[:top]]
+    codes: dict[str, float] = {}
+    for x in logs:
+        e5 = int(x.get("e5") or 0)
+        if e5 <= 0:
+            continue
+        c5 = x.get("c5") if isinstance(x.get("c5"), dict) else {}
+        got = sum(int(n or 0) for n in c5.values())
+        if got <= 0:  # хелпер до 0.12 кодов не присылает
+            codes["5xx"] = codes.get("5xx", 0) + e5
+            continue
+        # На большом потоке helper считает выборку и домножает число ошибок, а коды - нет
+        # (они про то, какие ошибки). Растягиваем коды до числа ошибок, иначе полосы по
+        # кодам не доставали бы до общей линии.
+        for c, n in c5.items():
+            codes[str(c)] = codes.get(str(c), 0) + int(n or 0) * e5 / got
+    return tops, [{"c": c, "n": round(n, 1)} for c, n in sorted(codes.items())]
 
 
 # Ошибки кончились - но это ещё не отбой. У ru-be-mobprod 5xx шли пачками: 15 минут
@@ -1815,8 +1860,9 @@ async def web_error_where(session: AsyncSession, server_id: int, now: datetime) 
     by_log: dict[str, list] = {}
     codes: dict[str, int] = {}
     paths: dict[str, int] = {}
-    for r in rows:
-        acc = by_log.setdefault(r.log, [r.label, 0])
+    for r in sorted(rows, key=lambda x: x.ts):
+        acc = by_log.setdefault(web_label_key(r.label or r.log), [r.label, 0])
+        acc[0] = r.label or acc[0]  # подпись - самая свежая
         acc[1] += int(r.e5 or 0)
         for c, n in (r.codes or {}).items():
             codes[str(c)] = codes.get(str(c), 0) + int(n or 0)
@@ -1828,7 +1874,7 @@ async def web_error_where(session: AsyncSession, server_id: int, now: datetime) 
 
 
 def web_where_text(where: dict) -> str:
-    """«Больше всего: anketa.dentro.ru и ещё 2 - 41. Коды: 502 - 30, 504 - 11. Чаще всего
+    """"Больше всего: nginx (anketa.dentro.ru, mobile.dentro.ru +2) - 41. Коды: 502 - 30, 504 - 11. Чаще всего
     падает: /api/v1/anketa - 38.» Каждый кусок - только если данные есть: коды и пути
     шлёт helper с 0.12."""
     out = []

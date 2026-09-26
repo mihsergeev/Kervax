@@ -1042,6 +1042,8 @@ class ServerMetricOut(BaseModel):
     disks: list[dict] | None = None  # [{"mount": "/", "pct": 53.0}, …]
     web_rpm: float | None = None  # запросов в минуту по access-логам веб-сервера
     web_5xx: float | None = None  # из них ответов 5xx в минуту
+    web_top: list[dict] | None = None  # [{"k","r","e"}] самые нагруженные логи
+    web_codes: list[dict] | None = None  # [{"c","n"}] ответы 5xx по кодам
 
 
 class WebErrorPath(BaseModel):

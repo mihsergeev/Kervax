@@ -428,7 +428,91 @@ async def test_error_minutes_are_stored_once_and_shown_per_log(client, auth_head
     rows = r.json()
     assert len(rows) == 1  # лог без ошибок в историю не попадает
     row = rows[0]
-    assert row["label"] == "anketa.dentro.ru, mobile-wsdart-prod.dentro.ru и ещё 1"
+    assert row["label"] == "anketa.dentro.ru, mobile-wsdart-prod.dentro.ru +1"
     assert row["errors"] == 44 and row["minutes"] == 1  # не 132: повторы отсечены
     assert row["codes"] == {"502": 30, "504": 14}
     assert row["paths"] == [{"p": "/api/v{n}/anketa", "n": 38}]
+
+
+def test_log_label_names_container_and_merges_old_records():
+    """Домены одной строкой - это один nginx: все свои сайты он пишет в общий лог. Имя
+    контейнера впереди это объясняет. Старые записи ("домены и еще N", ключ - путь
+    json-лога) сводятся с новыми по доменам, а не показываются второй строкой."""
+    new = collector.web_log_label({"log": "docker:kervax-frontend-1", "name": "kervax-frontend-1",
+                                   "sites": ["kervax.acdev.pro"]})
+    assert new == "kervax-frontend-1 (kervax.acdev.pro)"
+    many = collector.web_log_label({"name": "edge", "sites": ["a.ru", "b.ru", "c.ru", "d.ru"]})
+    assert many == "edge (a.ru, b.ru +2)"
+    assert collector.web_log_label({"name": "prod/api-7d9f", "sites": ["x.ru"]}) == "prod/api-7d9f"
+    assert collector.web_log_label({"log": "/var/log/nginx/access.log"}) == "access.log"
+    assert collector.web_label_key(new) == collector.web_label_key("kervax.acdev.pro")
+    assert collector.web_label_key(many) == collector.web_label_key("a.ru, b.ru и ещё 2")
+    assert collector.web_label_key("prod/api-7d9f") == "prod/api-7d9f"
+
+
+def test_breakdown_keeps_busiest_logs_and_stretches_codes():
+    """Для стека на графике: пятерка самых нагруженных логов и 5xx по кодам. На большом
+    потоке helper домножает число ошибок, а коды нет - коды растягиваем до числа ошибок."""
+    now = datetime.now(timezone.utc)
+    logs = [{"log": f"/l{i}", "name": f"c{i}", "rpm": 10 * i, "e5": 0} for i in range(1, 7)]
+    logs.append({"log": "docker:big", "name": "big", "sites": ["big.ru"], "rpm": 900, "e5": 40,
+                 "c5": {"502": 3, "504": 1}})
+    logs.append({"log": "/old", "name": "old", "rpm": 5, "e5": 2})  # хелпер до 0.12, без кодов
+    logs.append({"log": "/idle", "name": "idle", "rpm": 0, "e5": 0})
+    block = {"ts": int(now.timestamp()), "rpm": 1115, "e5": 42, "logs": logs}
+    tops, codes = collector.web_breakdown({"web-rate": block}, now)
+    assert [x["k"] for x in tops] == ["big (big.ru)", "c6", "c5", "c4", "c3"]
+    assert tops[0] == {"k": "big (big.ru)", "r": 900, "e": 40}
+    assert codes == [{"c": "502", "n": 30.0}, {"c": "504", "n": 10.0}, {"c": "5xx", "n": 2.0}]
+    # протухший блок - разбивки нет, как нет и самих чисел
+    stale = {**block, "ts": int(now.timestamp()) - 3600}
+    assert collector.web_breakdown({"web-rate": stale}, now) == (None, None)
+
+
+def test_breakdown_buckets_count_missing_log_as_zero():
+    """В бакете длинного окна лог мог выпасть из пятерки в какую-то минуту. Считаем его там
+    нулем: иначе полосы стека в сумме вылезали выше общего числа запросов."""
+    from app.api.servers import _bin_metrics
+
+    # начало бакета суточного окна (шаг 288 с), чтобы обе минуты легли в один бакет
+    t0 = datetime.fromtimestamp(1790424000 // 288 * 288, timezone.utc)
+    rows = [
+        ServerMetric(server_id=1, ts=t0, web_rpm=14, web_5xx=3,
+                     web_top=[{"k": "a", "r": 10, "e": 3}, {"k": "b", "r": 4, "e": 0}],
+                     web_codes=[{"c": "502", "n": 3}]),
+        ServerMetric(server_id=1, ts=t0 + timedelta(minutes=1), web_rpm=6, web_5xx=0,
+                     web_top=[{"k": "a", "r": 6, "e": 0}], web_codes=[]),
+    ]
+    out = _bin_metrics(rows, 24)
+    assert len(out) == 1
+    m = out[0]
+    assert m.web_rpm == 10
+    assert m.web_top == [{"k": "a", "r": 8.0, "e": 1.5}, {"k": "b", "r": 2.0, "e": 0.0}]
+    assert m.web_codes == [{"c": "502", "n": 1.5}]
+    assert sum(x["r"] for x in m.web_top) == m.web_rpm
+
+
+async def test_errors_page_merges_one_container_across_helper_versions(client, auth_headers):
+    """Живой случай ru-se-amonitoring: 502 фронта панели за время деплоя показывались двумя
+    строками - до хелпера 0.13 лог назывался путем json-файла, после - docker:имя."""
+    from app.models import WebErrorSample
+
+    r = await client.post("/api/servers", json={"name": "web3"}, headers=auth_headers)
+    sid = r.json()["server"]["id"]
+    now = datetime.now(timezone.utc)
+    factory = client._transport.app.state.session_factory  # noqa: SLF001
+    async with factory() as s:
+        s.add(WebErrorSample(server_id=sid, ts=now - timedelta(hours=3), src_ts=1,
+                             log="/var/lib/docker/containers/ab12/ab12-json.log",
+                             label="kervax.acdev.pro", e5=4, rpm=40, codes={"502": 4}))
+        s.add(WebErrorSample(server_id=sid, ts=now - timedelta(minutes=5), src_ts=2,
+                             log="docker:kervax-frontend-1",
+                             label="kervax-frontend-1 (kervax.acdev.pro)", e5=6, rpm=40,
+                             codes={"502": 6}))
+        await s.commit()
+    r = await client.get(f"/api/servers/{sid}/web-errors?hours=24", headers=auth_headers)
+    rows = r.json()
+    assert len(rows) == 1
+    assert rows[0]["label"] == "kervax-frontend-1 (kervax.acdev.pro)"  # подпись - свежая
+    assert rows[0]["errors"] == 10 and rows[0]["minutes"] == 2
+    assert rows[0]["codes"] == {"502": 10}
