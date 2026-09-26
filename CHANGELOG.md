@@ -4,6 +4,17 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.4.66] - 2026-09-27
+
+### Fixed
+- Счетчик запросов больше не падает на ноде, где не нашлось ни одного лога (helper
+  0.16). Счетчик пропавших логов заводился только при непустой карте, а проверялся
+  всегда: если nginx на ноде нет (ушел из пода, Caddy без метрик), set -u ронял скрипт
+  раньше, чем тот убирал старый блок. В панель уезжал блок многочасовой давности, а юнит
+  падал раз в минуту. На ru-cs24-landings блок висел с перехода на 0.14.
+- webserver-setup флагуется и там, где агент веб-сервер не распознал, но helper уже
+  считает запросы: на ru-se-mshost стоял helper 0.7, и панель про него молчала.
+
 ## [1.4.65] - 2026-09-26
 
 ### Added

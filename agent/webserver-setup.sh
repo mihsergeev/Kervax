@@ -8,7 +8,7 @@
 # secrets or config contents.
 set -euo pipefail
 
-KERVAX_SETUP_VERSION=0.15  # MAJOR.MINOR; compared component-wise
+KERVAX_SETUP_VERSION=0.16  # MAJOR.MINOR; compared component-wise
 KERVAX_SETUP_ALWAYS=1     # safe on any node: the refresh is a no-op without a web server
 
 HELPER_DIR=/lib65/kervax
@@ -353,6 +353,11 @@ now=$(date +%s)
 ITEMS=""
 TOTAL=0
 T5=0
+# Счетчик пропавших логов - здесь, а не внутри разбора карты. Раньше он заводился только
+# когда карта не пустая, а проверялся всегда: на ноде, где логов не нашлось (nginx из пода
+# ушел, Caddy без метрик), set -u ронял скрипт раньше, чем тот убирал старый блок. Блок
+# многочасовой давности так и уезжал в панель (ru-cs24-landings), а юнит падал раз в минуту.
+MISSING=0
 
 esc() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g' | tr -d '\000-\037'; }
 sites_json() { tr ' ' '\n' | awk 'BEGIN{printf "["} {gsub(/[\\"]/,""); if($0=="")next; printf "%s\"%s\"", (n++?",":""), $0} END{printf "]"}'; }
@@ -488,7 +493,6 @@ if [ -s "$MAP" ]; then
     # shellcheck disable=SC2086
     DPATHS=$(docker inspect -f '{{.Name}}|{{.LogPath}}' $dnames 2>/dev/null | sed 's#^/##')
   fi
-  MISSING=0
   while IFS= read -r line; do
     lg=${line%%"$TAB"*}
     rest=${line#*"$TAB"}
