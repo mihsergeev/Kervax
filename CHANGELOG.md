@@ -4,6 +4,17 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.4.56] - 2026-09-26
+
+### Fixed
+- Helper 0.10: счет по логам в 0.9 не работал бы нигде. В коде сведения карты логов
+  переменная называлась log, а это встроенная функция awk - логарифм. Awk падал
+  синтаксической ошибкой, карта логов получалась пустой, и счетчик молчал бы на всех
+  нодах. На ноды 0.9 разъехаться не успел, так что никого не задело.
+
+  Проверено вживую на ноде с k0s: карта собирается из /var/log/pods, два лога подов nginx
+  посчитались (loki-gateway 132 запроса в минуту, фронт 12), имена подов на месте.
+
 ## [1.4.55] - 2026-09-26
 
 ### Added
