@@ -548,6 +548,12 @@ function ServerServicesModal({ srv, onClose, onChanged, autoQueues, sites }: {
                 {it.kind === 'nginx' && webRate(s.last_report) && (
                   <div className="svc-card-detail muted small">
                     {t('запросов в минуту: {n}', { n: rpmText(webRate(s.last_report)!.rpm) })}
+                    {(webRate(s.last_report)!.e5 ?? 0) > 0 &&
+                      ` · ${t('5xx: {n} ({p}%)', {
+                        n: rpmText(webRate(s.last_report)!.e5 ?? 0),
+                        p: (((webRate(s.last_report)!.e5 ?? 0) /
+                          Math.max(webRate(s.last_report)!.rpm, 1)) * 100).toFixed(2),
+                      })}`}
                     {(webRate(s.last_report)!.logs ?? []).length > 1 &&
                       ` · ${webRate(s.last_report)!
                         .logs!.slice()

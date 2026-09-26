@@ -1674,8 +1674,8 @@ async def hour_baseline(session: AsyncSession, server_id: int, now: datetime) ->
     return out
 
 
-def web_rate_total(extras: dict | None, now: datetime, clock_unix: float = 0,
-                   max_age: int = 600) -> float | None:
+def web_rate_field(extras: dict | None, now: datetime, clock_unix: float = 0,
+                   field: str = "rpm", max_age: int = 600) -> float | None:
     """Запросов в минуту по всем access-логам ноды. Блок кладёт helper webserver-setup
     (report.d/web-rate.json), агент отдаёт его как есть. Протухший блок игнорируем:
     хелпер мог встать, а вчерашний поток выглядел бы как сегодняшний.
@@ -1690,8 +1690,21 @@ def web_rate_total(extras: dict | None, now: datetime, clock_unix: float = 0,
     ref = float(clock_unix or 0) or now.timestamp()
     if ts <= 0 or ref - ts > max_age:
         return None
-    rpm = block.get("rpm")
-    return float(rpm) if isinstance(rpm, (int, float)) else None
+    v = block.get(field)
+    return float(v) if isinstance(v, (int, float)) else None
+
+
+def web_rate_total(extras: dict | None, now: datetime, clock_unix: float = 0,
+                   max_age: int = 600) -> float | None:
+    """Запросов в минуту по всем логам ноды."""
+    return web_rate_field(extras, now, clock_unix, "rpm", max_age)
+
+
+def web_5xx_total(extras: dict | None, now: datetime, clock_unix: float = 0,
+                  max_age: int = 600) -> float | None:
+    """Ответов 5xx в минуту по всем логам ноды. Считает тот же helper: код ответа он
+    берёт из той же строки лога, которую и так прочитал для счёта запросов."""
+    return web_rate_field(extras, now, clock_unix, "e5", max_age)
 
 
 def _times(cur: float, base: float, floor: float) -> str:
