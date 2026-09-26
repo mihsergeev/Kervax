@@ -1175,6 +1175,7 @@ export type WebRate = {
     e5?: number
     e4?: number
     un?: number // строк без распознанного кода ответа: отличает «ошибок ноль» от «не нашли код»
+    c5?: Record<string, number> // ответы 5xx по кодам за минуту (хелпер 0.12+)
     sites?: string[]
   }[]
 }
@@ -1258,6 +1259,9 @@ export type ServerMetric = {
   disks: { mount: string; pct: number }[] | null
   web_rpm: number | null // запросов в минуту по access-логам веб-сервера
   web_5xx: number | null // из них ответов 5xx в минуту
+  // разбивка для стека: самые нагруженные логи минуты и ответы 5xx по кодам (с 1.4.62)
+  web_top?: { k: string; r: number; e: number }[] | null
+  web_codes?: { c: string; n: number }[] | null
 }
 export type ServerForm = {
   name: string

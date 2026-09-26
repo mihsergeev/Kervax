@@ -994,6 +994,7 @@ const EN: Record<string, string> = {
   '5xx: {n} ({p}%)': '5xx: {n} ({p}%)',
   'без кода ответа': 'no status code',
   'Веб': 'Web',
+  'остальные': 'other',
   'За сутки ответов 5xx не было.': 'No 5xx responses in the last 24 hours.',
   'Ответы 5xx за сутки по логам веб-сервера': '5xx responses in the last 24 hours, by web server log',
   '{n} ошибок за {m} мин, пик {p}/мин': '{n} errors over {m} min, peak {p}/min',

@@ -3069,8 +3069,10 @@ select:focus {
   cursor: pointer;
   transition: color 0.12s, border-color 0.12s, background 0.12s;
 }
+/* фон своим цветом: без него пункт под курсором заливался градиентом обычной кнопки */
 .detail-nav-item:hover {
   color: var(--text);
+  background: var(--hover);
 }
 .detail-nav-item.active {
   color: var(--text);
