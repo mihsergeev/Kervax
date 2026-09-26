@@ -16,6 +16,9 @@ type Props = {
   fmtY?: (v: number) => string
   fmtV?: (v: number) => string // формат значения в тултипе
   fmtTime?: (ms: number) => string // подпись времени по оси/в тултипе
+  // Круглые деления оси: "0, 200, 400", а не "0, 197, 394". 'bytes' - шаг круглый в
+  // своей единице (200 КБ, 1 МБ), а не в байтах.
+  yNice?: boolean | 'bytes'
   height?: number
   onZoom?: (fromMs: number, toMs: number) => void // выделение мышью → зум по времени
   // клик по полотну (нажал-отпустил на месте) → раскрыть график. Отдельно от onZoom:
@@ -29,6 +32,26 @@ const PAD_R = 12
 const PAD_T = 8
 const PAD_B = 20
 
+// Шаг оси 1-2-5 и верх, кратный шагу: четыре-восемь делений, пик не упирается в край.
+// Пустой график (все по нулю) - шкала 0..1, а не "0 0 0 1 1 1", как было у 5xx; у байтов
+// 0..1000 Б вместо "0 Б 0 Б 1 Б 1 Б".
+function niceAxis(peak: number, bytes = false): { top: number; step: number; n: number } {
+  const target = peak > 0 ? peak * 1.05 : bytes ? 1000 : 1
+  const raw = target / 8
+  // У байтов шаг считаем в КБ/МБ/ГБ, иначе "круглые" 500000 байт подписались бы "488 КБ".
+  // Единица старшая, только когда ось доходит хотя бы до двух таких: шаг 0.5 МБ - это
+  // "512 КБ, 1.0 МБ, 1.5 МБ", а 0.2 МБ дали бы "205 КБ, 410 КБ". Ниже двух мегабайт шаг в
+  // килобайтах: "200 КБ ... 1000 КБ, 1.2 МБ".
+  const unit = bytes ? 1024 ** Math.max(0, Math.floor(Math.log(target / 2) / Math.log(1024))) : 1
+  const u = raw / unit
+  const p = Math.pow(10, Math.floor(Math.log10(u)))
+  const m = u / p
+  let step = (m <= 1 ? 1 : m <= 2 ? 2 : m <= 5 ? 5 : 10) * p * unit
+  if (bytes) step = Math.max(1, step) // дробных байтов не бывает
+  const n = Math.max(1, Math.ceil(target / step - 1e-9))
+  return { top: n * step, step, n }
+}
+
 export function StackedAreaChart({
   ts,
   series,
@@ -37,6 +60,7 @@ export function StackedAreaChart({
   fmtY,
   fmtV,
   fmtTime: fmtTimeProp,
+  yNice = false,
   height = 150,
   onZoom,
   onExpand,
@@ -57,20 +81,22 @@ export function StackedAreaChart({
     n === 1 ? PAD_L + plotW / 2 : PAD_L + (i / (n - 1)) * plotW
 
   // верхняя граница
+  const peak =
+    mode === 'stack'
+      ? Math.max(0, ...ts.map((_, i) => series.reduce((a, s) => a + (s.values[i] ?? 0), 0)))
+      : Math.max(0, ...series.flatMap((s) => s.values.map((v) => Math.abs(v ?? 0))))
+  // Сетка частая, как в Grafana: по ней читают значение, не наводя курсор. На шкале
+  // процентов - деление на каждые 10%, на остальных пять делений или круглый шаг.
+  let gridN = mode === 'mirror' ? 2 : yMaxFix === 100 ? 10 : 5
   let top: number
-  if (mode === 'mirror' || mode === 'overlay') {
-    const mx = Math.max(
-      1,
-      ...series.flatMap((s) => s.values.map((v) => Math.abs(v ?? 0))),
-    )
-    top = yMaxFix ?? mx * (mode === 'overlay' ? 1.12 : 1.15)
-  } else {
-    const stackMax = Math.max(
-      1,
-      ...ts.map((_, i) => series.reduce((a, s) => a + (s.values[i] ?? 0), 0)),
-    )
-    top = yMaxFix ?? stackMax * 1.12
-  }
+  let step = 0
+  if (yMaxFix != null) top = yMaxFix
+  else if (yNice && mode !== 'mirror') {
+    const ax = niceAxis(peak, yNice === 'bytes')
+    top = ax.top
+    step = ax.step
+    gridN = ax.n
+  } else top = Math.max(1, peak) * (mode === 'mirror' ? 1.15 : 1.12)
   const zeroY = mode === 'mirror' ? PAD_T + plotH / 2 : PAD_T + plotH
   const scaleH = mode === 'mirror' ? plotH / 2 : plotH
   const sy = (v: number) => zeroY - (v / top) * scaleH
@@ -114,9 +140,6 @@ export function StackedAreaChart({
     areas.push({ s, d: areaParts.join(' '), line: lineParts.join(' '), sign })
   })
 
-  // Сетка частая, как в Grafana: по ней читают значение, не наводя курсор. На шкале
-  // процентов — деление на каждые 10%, на остальных пять делений.
-  const gridN = mode === 'mirror' ? 2 : yMaxFix === 100 ? 10 : 5
   // У независимых рядов с плотной заливкой порядок рисования решает всё: нарисуй
   // крупный ряд последним — и он закроет мелкие целиком. Крупные — позади, по
   // среднему значению; легенда и подсказка при этом остаются в исходном порядке.
@@ -141,6 +164,16 @@ export function StackedAreaChart({
   }))
   const fmt = fmtY ?? ((v: number) => Math.round(v).toString())
   const fmtVal = fmtV ?? fmt
+  // Шаг мельче единицы, а формат округляет до целых - подписи слиплись бы в "0 0 1 1".
+  // Тогда подписываем столькими знаками, сколько нужно шагу.
+  let fmtTick = fmt
+  if (step > 0) {
+    const labels = grid.map((g) => fmt(Math.abs(g.v)))
+    if (new Set(labels).size < labels.length) {
+      const dec = Math.max(0, Math.ceil(-Math.log10(step) - 1e-9))
+      fmtTick = (v: number) => v.toFixed(dec)
+    }
+  }
 
   // Заливка плотная у всех графиков, как у состава процессора: цвет несёт смысл, и
   // бледная заливка читается выцветшей. Исключение одно — много независимых рядов
@@ -303,7 +336,7 @@ export function StackedAreaChart({
             className="sac-ylabel"
             style={{ top: `${(g.y / H) * 100}%`, width: `${(PAD_L / W) * 100}%` }}
           >
-            {fmt(Math.abs(g.v))}
+            {fmtTick(Math.abs(g.v))}
           </span>
         ))}
         {xt.map((tk) => (

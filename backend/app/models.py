@@ -651,6 +651,11 @@ class ServerMetric(Base):
     # из тех же строк лога: ответов 5xx в минуту. Доля 5xx - главный признак того,
     # что «ошибок не было, а потом пошли», и синтетический монитор её не видит
     web_5xx: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # Разбивка для графиков стеком, как у CPU: пять самых нагруженных логов минуты
+    # [{"k": подпись, "r": запросов, "e": 5xx}] и ошибки по кодам [{"c": "502", "n": 3}].
+    # Без неё график запросов - одна линия, и по ней не видно, какой сайт вырос.
+    web_top: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    web_codes: Mapped[list | None] = mapped_column(JSON, nullable=True)
 
 
 class WebErrorSample(Base):

@@ -15,7 +15,8 @@ from sqlalchemy import delete as sa_delete, func, select
 
 from app import audit, custom_backups, geoip, manual_probe
 from app.collector import (
-    dump_local_stale, send_alerts_soon, web_5xx_total, web_log_label, web_rate_total,
+    dump_local_stale, send_alerts_soon, web_5xx_total, web_breakdown, web_label_key,
+    web_log_label, web_rate_total,
 )
 from app.setup_scripts import (
     current_setup_versions as _current_setup_versions,
@@ -1126,6 +1127,28 @@ def _bin_metrics(rows: list[ServerMetric], hours: float) -> list[ServerMetricOut
             out.append(row)
         return out or None
 
+    def avg_parts(
+        rows: list[ServerMetric], attr: str, key: str, vals: tuple[str, ...]
+    ) -> list[dict] | None:
+        # Как avg_named, но для разбивки "пятерка за минуту": лог, выпавший из пятерки в
+        # какую-то минуту бакета, в ней считается нулем, и делим на все минуты с разбивкой.
+        # Усреднение только по минутам, где лог был, завышало его: полосы стека вылезали
+        # выше общего числа запросов.
+        have = [getattr(r, attr) for r in rows if getattr(r, attr) is not None]
+        if not have:
+            return None
+        acc: dict[str, dict[str, float]] = {}
+        for items in have:
+            for it in items:
+                name = it.get(key)
+                if not name:
+                    continue
+                slot = acc.setdefault(name, {v: 0.0 for v in vals})
+                for v in vals:
+                    slot[v] += float(it.get(v) or 0)
+        return [{key: name, **{v: round(x / len(have), 1) for v, x in slot.items()}}
+                for name, slot in sorted(acc.items())]
+
     for b in sorted(buckets):
         grp = buckets[b]
         disks = next((x.disks for x in reversed(grp) if x.disks), None)
@@ -1169,6 +1192,8 @@ def _bin_metrics(rows: list[ServerMetric], hours: float) -> list[ServerMetricOut
                 sock_udp=avg([x.sock_udp for x in grp]),
                 web_rpm=avg([x.web_rpm for x in grp]),
                 web_5xx=avg([x.web_5xx for x in grp]),
+                web_top=avg_parts(grp, "web_top", "k", ("r", "e")),
+                web_codes=avg_parts(grp, "web_codes", "c", ("n",)),
                 disks=disks,
             )
         )
@@ -1250,13 +1275,19 @@ async def server_web_errors(
         .order_by(WebErrorSample.ts)
     ))
     acc: dict[str, dict] = {}
+    seen: dict[str, set] = {}
     for r in rows:
-        a = acc.setdefault(r.log, {"log": r.log, "label": r.label, "errors": 0, "minutes": 0,
-                                   "peak": 0, "first_ts": r.ts, "last_ts": r.ts,
-                                   "codes": {}, "paths": {}})
+        # Сводим по доменам, а не по ключу лога: см. web_label_key - иначе один и тот же
+        # контейнер после обновления хелпера показывался двумя строками.
+        k = web_label_key(r.label or r.log)
+        a = acc.setdefault(k, {"log": r.log, "label": r.label, "errors": 0, "minutes": 0,
+                               "peak": 0, "first_ts": r.ts, "last_ts": r.ts,
+                               "codes": {}, "paths": {}})
         a["errors"] += int(r.e5 or 0)
-        a["minutes"] += 1
+        seen.setdefault(k, set()).add(r.ts)
+        a["minutes"] = len(seen[k])
         a["peak"] = max(a["peak"], int(r.e5 or 0))
+        a["log"] = r.log
         a["last_ts"] = r.ts
         a["label"] = r.label or a["label"]
         for c, n in (r.codes or {}).items():
@@ -2206,6 +2237,7 @@ async def agent_report(
     )
     if write_metric:
         server.metric_written_at = now
+        web_top, web_codes = web_breakdown(body.extras, now, body.clock_unix)
         session.add(
             ServerMetric(
                 server_id=server.id,
@@ -2246,6 +2278,8 @@ async def agent_report(
                 sock_udp=round(body.sock_udp),
                 web_rpm=web_rate_total(body.extras, now, body.clock_unix),
                 web_5xx=web_5xx_total(body.extras, now, body.clock_unix),
+                web_top=web_top,
+                web_codes=web_codes,
                 ts=now,
             )
         )
