@@ -1765,23 +1765,42 @@ _FLAP_METRIC_LIMIT = 3
 _WEB_ERR_WINDOW = timedelta(minutes=15)
 _WEB_ERR_MIN = 20           # ошибок за окно, меньше - не повод
 _WEB_ERR_MIN_POINTS = 10    # минут с данными в окне, меньше - окно не набралось
+# Минут с ошибками в окне. Живой случай 26.09.2026: деплой панели на минуту роняет бэкенд,
+# фронт отвечает 502 на запросы агентов - 100-130 ошибок за одну минуту, и алерт уходил на
+# каждый деплой, а через час отбой. Рестарт дает минуту-две ошибок и проходит сам, а
+# поломка, на которую надо реагировать, идет дольше.
+_WEB_ERR_MIN_MINUTES = 3
 
 
-async def web_error_window(session: AsyncSession, now: datetime) -> dict[int, tuple[float, float, int]]:
-    """{server_id: (запросов, ошибок 5xx, минут с данными)} за последние 15 минут.
-    Один сгруппированный запрос на тик, а не по запросу на ноду."""
+async def web_error_window(session: AsyncSession,
+                           now: datetime) -> dict[int, tuple[float, float, int, int]]:
+    """{server_id: (запросов, ошибок 5xx, минут с данными, минут с ошибками)} за последние
+    15 минут. Два сгруппированных запроса на тик, а не по запросу на ноду."""
+    since = now - _WEB_ERR_WINDOW
     rows = await session.execute(
         select(ServerMetric.server_id, func.sum(ServerMetric.web_rpm),
                func.sum(ServerMetric.web_5xx), func.count())
-        .where(ServerMetric.ts >= now - _WEB_ERR_WINDOW, ServerMetric.web_5xx.is_not(None))
+        .where(ServerMetric.ts >= since, ServerMetric.web_5xx.is_not(None))
         .group_by(ServerMetric.server_id)
     )
-    return {sid: (float(t or 0), float(e or 0), int(n or 0)) for sid, t, e, n in rows}
+    # Минуты с ошибками - по минутам helper'а (src_ts), а не по точкам истории: одна и та
+    # же минута helper'а может попасть в две точки подряд.
+    mins = dict((await session.execute(
+        select(WebErrorSample.server_id, func.count(func.distinct(WebErrorSample.src_ts)))
+        .where(WebErrorSample.ts >= since, WebErrorSample.e5 > 0)
+        .group_by(WebErrorSample.server_id)
+    )).all())
+    return {sid: (float(t or 0), float(e or 0), int(n or 0), int(mins.get(sid) or 0))
+            for sid, t, e, n in rows}
 
 
-def web_error_level(total: float, errs: float, points: int, threshold: float) -> bool:
-    """Пошли ли ошибки: окно набралось, ошибок больше случайных и их доля выше порога."""
+def web_error_level(total: float, errs: float, points: int, threshold: float,
+                    minutes: int | None = None) -> bool:
+    """Пошли ли ошибки: окно набралось, ошибок больше случайных, их доля выше порога и шли
+    они не одну-две минуты (minutes - минут с ошибками; None - не проверять)."""
     if not threshold or points < _WEB_ERR_MIN_POINTS or total <= 0:
+        return False
+    if minutes is not None and minutes < _WEB_ERR_MIN_MINUTES:
         return False
     return errs >= _WEB_ERR_MIN and errs / total * 100 >= threshold
 
@@ -1989,7 +2008,7 @@ def _fallback_rule(key: str) -> dict:
 
 
 def _server_conditions(s: Server, now: datetime,
-                       web_err: tuple[float, float, int] | None = None) -> dict[str, tuple[int, dict]]:
+                       web_err: tuple[float, float, int, int] | None = None) -> dict[str, tuple[int, dict]]:
     """Пороги сервера: ключ → (уровень, контекст для шаблона текста). Уровень 0 =
     норма; для диска 1=предупреждение(≥warn), 2=проблема(≥alert), 3=критично(≥crit)."""
     out: dict[str, tuple[int, dict]] = {}
@@ -2194,8 +2213,8 @@ def _server_conditions(s: Server, now: datetime,
     # без sustain: иначе к окну добавились бы ещё 15 минут ожидания.
     thr5 = float(getattr(s, "web_5xx_alert_percent", 0) or 0)
     if online and thr5 and web_err is not None:
-        total, errs, points = web_err
-        bad5 = web_error_level(total, errs, points, thr5)
+        total, errs, points, err_minutes = web_err
+        bad5 = web_error_level(total, errs, points, thr5, err_minutes)
         # Отбой - только после часа подряд без превышения (_WEB_ERR_CLEAR): пачки ошибок
         # внутри часа остаются одной историей. «since» здесь - с какого момента чисто.
         lvl5, since5 = (1, None) if bad5 else (0, None)

@@ -308,6 +308,10 @@ def test_web_error_rule_needs_a_real_count_and_a_real_share():
     assert not collector.web_error_level(total=50_000, errs=500, points=3, threshold=0.05)
     # правило выключено
     assert not collector.web_error_level(total=50_000, errs=500, points=15, threshold=0)
+    # 120 ошибок за одну минуту - рестарт при деплое, он проходит сам
+    assert not collector.web_error_level(total=12_000, errs=120, points=15, threshold=0.05, minutes=1)
+    assert not collector.web_error_level(total=12_000, errs=120, points=15, threshold=0.05, minutes=2)
+    assert collector.web_error_level(total=12_000, errs=120, points=15, threshold=0.05, minutes=3)
 
 
 async def test_5xx_alert_says_where_codes_and_paths(tmp_path, monkeypatch):
@@ -379,6 +383,8 @@ async def test_5xx_bursts_within_an_hour_are_one_story(tmp_path, monkeypatch):
     monkeypatch.setattr("app.alerts.send_alert", fake_send)
     settings = Settings(alert_webhook="http://hook")
 
+    from app.models import WebErrorSample
+
     async def tick(minute: int, errors: int) -> list[str]:
         """Минута `minute` от t0; за последние 15 минут на ноде errors ошибок из 450."""
         sent.clear()
@@ -387,9 +393,15 @@ async def test_5xx_bursts_within_an_hour_are_one_story(tmp_path, monkeypatch):
             srv = await s.scalar(select(Server))
             srv.last_seen = now
             await s.execute(__import__("sqlalchemy").delete(ServerMetric))
+            await s.execute(__import__("sqlalchemy").delete(WebErrorSample))
             for m in range(15):
-                s.add(ServerMetric(server_id=1, ts=now - timedelta(minutes=m), cpu_percent=5,
+                ts = now - timedelta(minutes=m)
+                s.add(ServerMetric(server_id=1, ts=ts, cpu_percent=5,
                                    web_rpm=30, web_5xx=errors / 15))
+                if errors:  # ошибки размазаны по всем минутам окна, как у пачек mobprod
+                    s.add(WebErrorSample(server_id=1, ts=ts, src_ts=int(ts.timestamp()),
+                                         e5=max(1, errors // 15), rpm=30,
+                                         log="/var/log/nginx/access.log", label="anketa.dentro.ru"))
             await s.commit()
         await collector.evaluate_servers(factory, settings, now)
         return list(sent)
@@ -516,3 +528,52 @@ async def test_errors_page_merges_one_container_across_helper_versions(client, a
     assert rows[0]["label"] == "kervax-frontend-1 (kervax.acdev.pro)"  # подпись - свежая
     assert rows[0]["errors"] == 10 and rows[0]["minutes"] == 2
     assert rows[0]["codes"] == {"502": 10}
+
+
+async def test_restart_burst_of_502_is_not_an_alert(tmp_path, monkeypatch):
+    """Живой случай 26.09.2026: деплой панели на минуту роняет бэкенд, фронт отвечает 502 на
+    запросы агентов - 100-130 ошибок за одну минуту. Алерт уходил на каждый деплой, а через
+    час отбой. Рестарт проходит сам, будить из-за него нельзя; если же ошибки идут минута
+    за минутой - это поломка."""
+    from app.models import WebErrorSample
+
+    engine, factory = await _panel(tmp_path, "restart.db")
+    now = datetime.now(timezone.utc)
+    async with factory() as s:
+        s.add(Server(name="ru-se-amonitoring", token_hash="x", enabled=True, backup_not_required=True,
+                     last_seen=now, last_report={"cpu_percent": 5}, cpu_alert_percent=0,
+                     mem_alert_percent=0, disk_alert_percent=0, web_5xx_alert_percent=0.05))
+        await s.commit()
+        for m in range(15):
+            ts = now - timedelta(minutes=m)
+            burst = m in (4, 5)  # рестарт на стыке двух минут
+            s.add(ServerMetric(server_id=1, ts=ts, cpu_percent=5, web_rpm=800,
+                               web_5xx=65 if burst else 0))
+            if burst:
+                # та же минута helper'а могла попасть в две точки истории - считаем её одной
+                for dup in (0, 1):
+                    s.add(WebErrorSample(server_id=1, ts=ts + timedelta(seconds=dup * 20),
+                                         src_ts=int(ts.timestamp()), e5=65, rpm=800,
+                                         log="docker:kervax-frontend-1", label="kervax-frontend-1",
+                                         codes={"502": 65}))
+        await s.commit()
+
+    sent: list[str] = []
+
+    async def fake_send(cfg, text, parse_mode=None):
+        sent.append(text)
+        return []
+
+    monkeypatch.setattr("app.alerts.send_alert", fake_send)
+    settings = Settings(alert_webhook="http://hook")
+    await collector.evaluate_servers(factory, settings, now)
+    assert sent == []  # 130 ошибок, 1.08% - но за две минуты
+    # а три минуты подряд - уже не рестарт
+    async with factory() as s:
+        ts = now - timedelta(minutes=6)
+        s.add(WebErrorSample(server_id=1, ts=ts, src_ts=int(ts.timestamp()), e5=10, rpm=800,
+                             log="docker:kervax-frontend-1", label="kervax-frontend-1"))
+        await s.commit()
+    await collector.evaluate_servers(factory, settings, now + timedelta(seconds=30))
+    assert len(sent) == 1 and "ошибкой 5xx" in sent[0]
+    await engine.dispose()
