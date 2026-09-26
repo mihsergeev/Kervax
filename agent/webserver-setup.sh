@@ -8,7 +8,7 @@
 # secrets or config contents.
 set -euo pipefail
 
-KERVAX_SETUP_VERSION=0.8  # MAJOR.MINOR; compared component-wise
+KERVAX_SETUP_VERSION=0.9  # MAJOR.MINOR; compared component-wise
 KERVAX_SETUP_ALWAYS=1     # safe on any node: the refresh is a no-op without a web server
 
 HELPER_DIR=/lib65/kervax
@@ -158,14 +158,16 @@ extract_logs() {
 }
 
 # Один лог - одна строка: иначе десяток виртуальных хостов с общим логом дал бы десяток
-# строк, и счётчик сложил бы один и тот же поток столько же раз.
+# строк, и счётчик сложил бы один и тот же поток столько же раз. Третья колонка - имя для
+# показа (у логов подов домены неизвестны, и «0.log» в панели ни о чём не говорит).
 merge_logs() {
   awk -F'\t' '
-    { if (!($1 in seen_log)) { seen_log[$1]=1; a[$1]="" }
+    { log=$1; if (!(log in seen_log)) { seen_log[log]=1; a[log]=""; nm[log]=$3 }
+      if (nm[log]=="" && $3!="") nm[log]=$3
       n=split($2, w, " ")
-      for (i=1;i<=n;i++) if (w[i]!="" && !(($1 SUBSEP w[i]) in seen)) {
-        seen[$1 SUBSEP w[i]]=1; a[$1]=a[$1] (a[$1]==""?"":" ") w[i] } }
-    END { for (k in a) print k "\t" a[k] }'
+      for (i=1;i<=n;i++) if (w[i]!="" && !((log SUBSEP w[i]) in seen)) {
+        seen[log SUBSEP w[i]]=1; a[log]=a[log] (a[log]==""?"":" ") w[i] } }
+    END { for (k in a) printf "%s\t%s\t%s\n", k, a[k], nm[k] }'
 }
 
 # Путь лога внутри контейнера -> путь на хосте по его bind-mount'ам.
@@ -207,8 +209,31 @@ container_logs() {
   done
 }
 
+# Логи подов kubernetes: containerd кладёт их в
+# /var/log/pods/<ns>_<под>_<uid>/<контейнер>/0.log, докера на такой ноде нет вовсе.
+# Берём поды, у которых nginx в имени пода или контейнера: у ingress-nginx контейнер
+# называется controller, у обычных - nginx. Домены отсюда не узнать (они в Ingress, а
+# хелпер в кластер не ходит), поэтому третьей колонкой пишем ns/под - его и покажет панель.
+collect_pod_logs() {
+  [ -d /var/log/pods ] || return 0
+  for f in /var/log/pods/*/*/0.log; do
+    [ -f "$f" ] || continue
+    rest=${f#/var/log/pods/}
+    poddir=${rest%%/*}
+    cont=${rest#*/}; cont=${cont%%/*}
+    case "$poddir/$cont" in
+      *nginx*) ;;
+      *) continue ;;
+    esac
+    ns=${poddir%%_*}
+    pod=${poddir#*_}; pod=${pod%_*}
+    printf '%s\t\t%s/%s\n' "$f" "$ns" "$pod"
+  done
+}
+
 collect_logs() {
   command -v nginx >/dev/null 2>&1 && nginx -T 2>/dev/null | extract_logs
+  collect_pod_logs
   command -v docker >/dev/null 2>&1 || return 0
   docker ps --format '{{.Names}} {{.Image}}' 2>/dev/null | awk '/nginx/{print $1}' | sort -u \
     | while read -r c; do
@@ -265,12 +290,40 @@ now=$(date +%s)
 : > "$NEW"
 ITEMS=""
 TOTAL=0
+T5=0
 
 esc() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g' | tr -d '\000-\037'; }
 sites_json() { tr ' ' '\n' | awk 'BEGIN{printf "["} {gsub(/[\\"]/,""); if($0=="")next; printf "%s\"%s\"", (n++?",":""), $0} END{printf "]"}'; }
 
+# Строки -> «всего 5xx 4xx». Код ответа ищем тремя способами, потому что формат лога
+# у всех свой: после кавычки с запросом (combined, в том числе внутри docker-json, где
+# кавычка экранирована), полем через табуляцию (так пишет ingress-nginx) и как
+# "status":503 в json-логах. Не нашли - строка считается только в «всего».
+count_codes() {
+  awk '
+    { n++
+      s=""
+      if (match($0, /\\?"[ \t]+[1-5][0-9][0-9]([ \t]|$)/)) { s=substr($0,RSTART,RLENGTH); gsub(/[^0-9]/,"",s) }
+      else if (match($0, /"status"[ \t]*:[ \t]*"?[1-5][0-9][0-9]/)) { s=substr($0,RSTART+RLENGTH-3,3) }
+      else if (match($0, /\t[1-5][0-9][0-9]\t/)) { s=substr($0,RSTART+1,3) }
+      if (s=="") next
+      c=s+0
+      if (c>=500) e5++
+      else if (c>=400) e4++ }
+    END { printf "%d %d %d\n", n+0, e5+0, e4+0 }'
+}
+
 if [ -s "$MAP" ]; then
-  while IFS="$TAB" read -r lg names; do
+  # Колонки режем руками: read с IFS=TAB схлопывает подряд идущие табы (таб для
+  # оболочки - пробельный разделитель), и у логов подов, где вторая колонка пустая,
+  # имя уезжало в домены.
+  while IFS= read -r line; do
+    lg=${line%%"$TAB"*}
+    rest=${line#*"$TAB"}
+    [ "$rest" = "$line" ] && rest=""
+    names=${rest%%"$TAB"*}
+    name=${rest#*"$TAB"}
+    [ "$name" = "$rest" ] && name=""
     [ -n "$lg" ] && [ -f "$lg" ] || continue
     ino=$(stat -c %i "$lg" 2>/dev/null) || continue
     size=$(stat -c %s "$lg" 2>/dev/null) || continue
@@ -285,18 +338,24 @@ if [ -s "$MAP" ]; then
     el=$((now - pts))
     [ "$el" -ge 20 ] || continue
     delta=$((size - psize))
-    lines=0
+    counts="0 0 0"
     if [ "$delta" -gt 0 ]; then
       if [ "$delta" -le "$CAP" ]; then
-        lines=$(tail -c "+$((psize + 1))" "$lg" 2>/dev/null | wc -l)
+        counts=$(tail -c "+$((psize + 1))" "$lg" 2>/dev/null | count_codes)
       else
-        s=$(tail -c "+$((psize + 1))" "$lg" 2>/dev/null | head -c "$SAMPLE" | wc -l)
-        lines=$((s * (delta / SAMPLE + 1)))
+        # слишком много за раз: считаем кусок и масштабируем - и строки, и ошибки
+        k=$((delta / SAMPLE + 1))
+        counts=$(tail -c "+$((psize + 1))" "$lg" 2>/dev/null | head -c "$SAMPLE" \
+                 | count_codes | awk -v k="$k" '{printf "%d %d %d\n", $1*k, $2*k, $3*k}')
       fi
     fi
+    lines=${counts%% *}; tail2=${counts#* }; e5=${tail2%% *}; e4=${tail2##* }
     rpm=$((lines * 60 / el))
+    r5=$((e5 * 60 / el))
+    r4=$((e4 * 60 / el))
     TOTAL=$((TOTAL + rpm))
-    ITEMS="$ITEMS${ITEMS:+,}{\"log\":\"$(esc "$lg")\",\"rpm\":$rpm,\"sites\":$(printf '%s' "$names" | sites_json)}"
+    T5=$((T5 + r5))
+    ITEMS="$ITEMS${ITEMS:+,}{\"log\":\"$(esc "$lg")\",\"name\":\"$(esc "$name")\",\"rpm\":$rpm,\"e5\":$r5,\"e4\":$r4,\"sites\":$(printf '%s' "$names" | sites_json)}"
   done < "$MAP"
 fi
 
@@ -309,7 +368,7 @@ if [ -z "$ITEMS" ]; then
   rm -f "$OUT"
   exit 0
 fi
-printf '{"ts":%s,"rpm":%s,"logs":[%s]}\n' "$now" "$TOTAL" "$ITEMS" > "$TMP"
+printf '{"ts":%s,"rpm":%s,"e5":%s,"logs":[%s]}\n' "$now" "$TOTAL" "$T5" "$ITEMS" > "$TMP"
 mv -f "$TMP" "$OUT"
 chmod 0644 "$OUT"
 RATE_EOF

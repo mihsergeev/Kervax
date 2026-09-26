@@ -644,6 +644,9 @@ class ServerMetric(Base):
     # запросов в минуту по access-логам веб-сервера (их считает helper webserver-setup):
     # наплыв редиректов по 300 байт канал почти не шевелит, а запросы показывает сразу
     web_rpm: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # из тех же строк лога: ответов 5xx в минуту. Доля 5xx - главный признак того,
+    # что «ошибок не было, а потом пошли», и синтетический монитор её не видит
+    web_5xx: Mapped[float | None] = mapped_column(Float, nullable=True)
 
 
 class LocationSample(Base):
