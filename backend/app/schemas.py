@@ -1044,6 +1044,25 @@ class ServerMetricOut(BaseModel):
     web_5xx: float | None = None  # из них ответов 5xx в минуту
 
 
+class WebErrorPath(BaseModel):
+    p: str
+    n: int
+
+
+class WebErrorOut(BaseModel):
+    """Ошибки 5xx одного лога за окно: страница, на которую ведёт алерт."""
+
+    log: str
+    label: str
+    errors: int          # всего ответов 5xx за окно
+    minutes: int         # сколько минут были ошибки
+    peak: int            # максимум ошибок в минуту
+    first_ts: datetime
+    last_ts: datetime
+    codes: dict[str, int] = {}
+    paths: list[WebErrorPath] = []
+
+
 class OomEventOut(BaseModel):
     """Строка журнала OOM-киллов: когда, кого убило, сколько за интервал."""
 
