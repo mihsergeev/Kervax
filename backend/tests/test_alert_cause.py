@@ -652,3 +652,19 @@ async def test_one_log_can_be_snoozed_via_api(client, auth_headers):
     r = await client.post(f"/api/servers/{sid}/snooze-alert", json={"kind": "Bad Kind", "hours": 1},
                           headers=auth_headers)
     assert r.status_code == 422
+
+
+def test_chart_bands_merge_pods_of_one_deployment_and_same_apps():
+    """Имя пода меняется при каждом выкате, контейнер Coolify - при каждом деплое: полоса
+    графика по ним менялась бы вместе с именем. Одинаковые подписи складываются."""
+    now = datetime.now(timezone.utc)
+    logs = [
+        {"log": "/var/log/pods/a/0.log", "name": "default/ingress-nginx-controller-5c67cd68dd-djg5j", "rpm": 300},
+        {"log": "/var/log/pods/b/0.log", "name": "default/ingress-nginx-controller-5c67cd68dd-xwm58", "rpm": 200},
+        {"log": "docker:x47reo0hm6t0s5gwq1fziepm-082822316403", "name": "anketa", "rpm": 7},
+        {"log": "docker:x47reo0hm6t0s5gwq1fziepm-093000000000", "name": "anketa", "rpm": 3},
+    ]
+    block = {"ts": int(now.timestamp()), "rpm": 510, "e5": 0, "logs": logs}
+    tops, _ = collector.web_breakdown({"web-rate": block}, now)
+    assert tops == [{"k": "default/ingress-nginx-controller", "r": 500, "e": 0},
+                    {"k": "anketa", "r": 10, "e": 0}]
