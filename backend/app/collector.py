@@ -1869,9 +1869,19 @@ def web_breakdown(extras: dict | None, now: datetime, clock_unix: float = 0,
     if web_rate_total(extras, now, clock_unix) is None:
         return None, None
     logs = [x for x in ((extras or {}).get("web-rate") or {}).get("logs") or [] if isinstance(x, dict)]
-    busiest = sorted((x for x in logs if (x.get("rpm") or 0) > 0), key=lambda x: -(x.get("rpm") or 0))
-    tops = [{"k": web_log_label(x)[:120], "r": int(x.get("rpm") or 0), "e": int(x.get("e5") or 0)}
-            for x in busiest[:top]]
+    # Полоса графика - по подписи, и одинаковые подписи складываются. Поды одного
+    # деплоймента - одна полоса (имя пода меняется с каждым выкатом, и полоса менялась бы
+    # вместе с ним), два контейнера одного приложения Coolify - тоже.
+    agg: dict[str, list[int]] = {}
+    for x in logs:
+        name = web_log_label(x)
+        if "/" in name and "(" not in name:
+            name = web_label_key(name)
+        slot = agg.setdefault(name[:120], [0, 0])
+        slot[0] += int(x.get("rpm") or 0)
+        slot[1] += int(x.get("e5") or 0)
+    busiest = sorted(((k, r, e) for k, (r, e) in agg.items() if r > 0), key=lambda t: -t[1])
+    tops = [{"k": k, "r": r, "e": e} for k, r, e in busiest[:top]]
     codes: dict[str, float] = {}
     for x in logs:
         e5 = int(x.get("e5") or 0)
