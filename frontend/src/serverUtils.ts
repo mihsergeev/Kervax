@@ -28,6 +28,15 @@ export function webLogLabel(l: { log: string; name?: string; sites?: string[] })
   return (name || l.log.split('/').pop() || l.log).slice(0, 120)
 }
 
+// Под какой полосой графика идет лог: поды одного деплоймента - одна полоса (как
+// web_breakdown на бэкенде). Хвосты пода kubernetes - из алфавита без гласных.
+const K8S_RAND = '[bcdfghjklmnpqrstvwxz2456789]'
+const POD_RE = new RegExp(`^([a-z0-9.-]+/.+?)(?:-${K8S_RAND}{6,10})?-${K8S_RAND}{5}$`)
+export function webSeriesName(label: string): string {
+  if (!label.includes('/') || label.includes('(')) return label
+  return label.match(POD_RE)?.[1] ?? label
+}
+
 // Строк в минуту, где код ответа не распознан. Без этого «5xx: 0» значило бы и «ошибок
 // нет», и «формат лога незнакомый» - а это противоположные вещи.
 export function webUnparsed(r?: ServerReport | null): number {

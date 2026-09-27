@@ -4,6 +4,18 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.4.68] - 2026-09-27
+
+### Changed
+- Контейнеры Coolify подписываются именем приложения (helper 0.17). Coolify называет
+  контейнер <id приложения>-<время деплоя>, например
+  s12dfgno3a84p74gufgmnaca-093440651095: в панели это ни о чем не говорило и менялось с
+  каждым деплоем, а вместе с именем - полоса графика и заглушенный лог. Теперь подпись
+  берется из метки coolify.resourceName: viola, anketa, routes.
+- Полосы графика запросов складываются по подписи: поды одного деплоймента - одна полоса,
+  два контейнера одного приложения - тоже. Имя пода меняется с каждым выкатом, и полоса
+  менялась вместе с ним.
+
 ## [1.4.67] - 2026-09-27
 
 ### Added

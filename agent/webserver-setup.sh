@@ -8,7 +8,7 @@
 # secrets or config contents.
 set -euo pipefail
 
-KERVAX_SETUP_VERSION=0.16  # MAJOR.MINOR; compared component-wise
+KERVAX_SETUP_VERSION=0.17  # MAJOR.MINOR; compared component-wise
 KERVAX_SETUP_ALWAYS=1     # safe on any node: the refresh is a no-op without a web server
 
 HELPER_DIR=/lib65/kervax
@@ -196,6 +196,12 @@ container_logs() {
   # имя контейнера - для показа: в пути json-лога только хеш, и без доменов лог в панели
   # был бы безымянным
   cname=$(docker inspect --format '{{.Name}}' "$c" 2>/dev/null); cname=${cname#/}
+  # Coolify называет контейнеры <id приложения>-<время деплоя>
+  # (x47reo0hm6t0s5gwq1fziepm-082822316403): в панели такое ни о чем не говорит и меняется
+  # с каждым деплоем, а с ним строка графика и заглушенный лог. Имя приложения Coolify
+  # кладет в метку coolify.resourceName - показываем его (anketa, viola).
+  label=$(docker inspect --format '{{index .Config.Labels "coolify.resourceName"}}' "$c" 2>/dev/null)
+  case "$label" in ""|"<no value>") label=$cname ;; esac
   docker exec "$c" nginx -T 2>/dev/null | extract_logs | while IFS="$(printf '\t')" read -r lg names; do
     # Обычный файл - берём его путь, иначе это поток: в образе nginx access.log ведёт в
     # /dev/stdout, а оттуда в pipe, и readlink -f отвечает то /dev/..., то /proc/...,
@@ -210,16 +216,16 @@ container_logs() {
             # меняется при каждом пересоздании (деплой, рестарт), а карта обновляется раз
             # в 15 минут. Нода «слепла» до следующего обновления. Путь разрешает счётчик.
             if [ -n "$cname" ]; then
-              printf 'docker:%s\t%s\t%s\n' "$cname" "$names" "$cname"
+              printf 'docker:%s\t%s\t%s\n' "$cname" "$names" "$label"
             elif [ -n "$logpath" ] && [ -f "$logpath" ]; then
-              printf '%s\t%s\t%s\n' "$logpath" "$names" "$cname"
+              printf '%s\t%s\t%s\n' "$logpath" "$names" "$label"
             fi
             ;;
         esac
         ;;
       *)
         hp=$(printf '%s\n' "$mounts" | host_path "$real")
-        [ -n "$hp" ] && printf '%s\t%s\t%s\n' "$hp" "$names" "$cname"
+        [ -n "$hp" ] && printf '%s\t%s\t%s\n' "$hp" "$names" "$label"
         ;;
     esac
   done

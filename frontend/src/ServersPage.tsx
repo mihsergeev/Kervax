@@ -26,7 +26,7 @@ import {
   type ServerMetric,
 } from './api'
 import { StackedAreaChart, type Series } from './charts/StackedAreaChart'
-import { fmtSetupVersion, srvIssues, webLogLabel, webRate, webUnparsed } from './serverUtils'
+import { fmtSetupVersion, srvIssues, webLogLabel, webRate, webSeriesName, webUnparsed } from './serverUtils'
 import { OsIcon } from './osIcon'
 import { CountryFlag } from './CountryFlag'
 import { currentLang, useI18n } from './i18n'
@@ -3383,7 +3383,7 @@ function ServerDetail({
                     .map((l) => (
                       <StatRow
                         key={l.log}
-                        color={webColor('web', webLogLabel(l))}
+                        color={webColor('web', webSeriesName(webLogLabel(l)))}
                         name={webLogLabel(l)}
                         value={fmtCount(l.rpm)}
                       />
