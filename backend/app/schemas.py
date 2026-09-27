@@ -260,8 +260,10 @@ class SnoozeIn(BaseModel):
 class AlertSnoozeIn(BaseModel):
     """Точечный снуз ОДНОГО типа алерта сервера на N часов (0 = снять)."""
 
-    # «disk» или «disk@2» — тип, опционально с макс. заглушаемым уровнем (см. _muted)
-    kind: str = Field(min_length=1, max_length=32, pattern=r"^[a-z_]+(@[1-3])?$")
+    # "disk" или "disk@2" - тип, опционально с макс. заглушаемым уровнем (см. _muted);
+    # web_5xx:<ключ лога> - 5xx одного лога (домена), остальные логи ноды алертят
+    kind: str = Field(min_length=1, max_length=240,
+                      pattern=r"^(?:[a-z_]+(?:@[1-3])?|web_5xx:[^\x00-\x1f]{1,220})$")
     hours: float = Field(ge=0, le=24 * 30)
 
 
@@ -1093,6 +1095,7 @@ class WebErrorPath(BaseModel):
 class WebErrorOut(BaseModel):
     """Ошибки 5xx одного лога за окно: страница, на которую ведёт алерт."""
 
+    key: str = ""  # ключ лога для глушения: web_5xx:<key>
     log: str
     label: str
     errors: int          # всего ответов 5xx за окно

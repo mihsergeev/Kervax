@@ -577,3 +577,78 @@ async def test_restart_burst_of_502_is_not_an_alert(tmp_path, monkeypatch):
     await collector.evaluate_servers(factory, settings, now + timedelta(seconds=30))
     assert len(sent) == 1 and "ошибкой 5xx" in sent[0]
     await engine.dispose()
+
+
+async def test_muted_log_drops_out_of_the_5xx_alert(tmp_path, monkeypatch):
+    """fi-hz-aff: боты получают 500 на robots.txt от одного из доменов ноды. Заглушили этот
+    лог - он выпадает из расчета, а ошибки второго лога той же ноды алертят как раньше, и
+    в "где" заглушенного нет."""
+    from app.models import WebErrorSample
+
+    engine, factory = await _panel(tmp_path, "wmute.db")
+    now = datetime.now(timezone.utc)
+    noisy = "lithub-nginx (litnet.com, hub.litnet.com +3)"
+    async with factory() as s:
+        s.add(Server(name="fi-hz-aff", token_hash="x", enabled=True, backup_not_required=True,
+                     last_seen=now, last_report={"cpu_percent": 5}, cpu_alert_percent=0,
+                     mem_alert_percent=0, disk_alert_percent=0, web_5xx_alert_percent=0.05,
+                     alert_mutes=["web_5xx:litnet.com, hub.litnet.com +3"]))
+        await s.commit()
+        for m in range(15):
+            ts = now - timedelta(minutes=m)
+            s.add(ServerMetric(server_id=1, ts=ts, cpu_percent=5, web_rpm=2000, web_5xx=10))
+            s.add(WebErrorSample(server_id=1, ts=ts, src_ts=int(ts.timestamp()), e5=10, rpm=80,
+                                 log="docker:lithub-nginx", label=noisy, codes={"500": 10},
+                                 paths=[{"p": "/robots.txt", "n": 10}]))
+        await s.commit()
+
+    sent: list[str] = []
+
+    async def fake_send(cfg, text, parse_mode=None):
+        sent.append(text)
+        return []
+
+    monkeypatch.setattr("app.alerts.send_alert", fake_send)
+    settings = Settings(alert_webhook="http://hook")
+    await collector.evaluate_servers(factory, settings, now)
+    assert sent == []  # 150 ошибок, 0.5% - но все от заглушенного лога
+
+    async with factory() as s:
+        for m in range(15):
+            ts = now - timedelta(minutes=m)
+            s.add(WebErrorSample(server_id=1, ts=ts, src_ts=int(ts.timestamp()), e5=5, rpm=500,
+                                 log="docker:winbet-nginx", label="winbet-nginx (admin.winpartners.io)",
+                                 codes={"502": 5}))
+        for row in await s.scalars(select(ServerMetric)):
+            row.web_5xx = 15
+        await s.commit()
+    await collector.evaluate_servers(factory, settings, now + timedelta(seconds=30))
+    assert len(sent) == 1, sent
+    assert "winbet-nginx" in sent[0] and "litnet" not in sent[0]
+    assert "(75 из 30000)" in sent[0]  # ошибки заглушенного лога вычтены
+    await engine.dispose()
+
+
+def test_pod_log_key_is_its_controller():
+    """Имя пода меняется при каждом выкате: без этого строки одного деплоймента множились,
+    а заглушенный лог снова алертил после первого рестарта."""
+    k = collector.web_label_key
+    assert k("default/ingress-nginx-controller-5c67cd68dd-djg5j") == "default/ingress-nginx-controller"
+    assert k("default/ingress-nginx-controller-5c67cd68dd-xwm58") == "default/ingress-nginx-controller"
+    assert k("kube-system/kube-proxy-x7k2p") == "kube-system/kube-proxy"  # DaemonSet
+    assert k("default/postgres-0") == "default/postgres-0"                # StatefulSet
+    assert k("ns/web-12345") == "ns/web-12345"                            # живое имя
+
+
+async def test_one_log_can_be_snoozed_via_api(client, auth_headers):
+    r = await client.post("/api/servers", json={"name": "w"}, headers=auth_headers)
+    sid = r.json()["server"]["id"]
+    kind = "web_5xx:litnet.com, hub.litnet.com +3"
+    r = await client.post(f"/api/servers/{sid}/snooze-alert", json={"kind": kind, "hours": 24},
+                          headers=auth_headers)
+    assert r.status_code == 200, r.text
+    assert kind in r.json()["alert_snoozes"]
+    # прочий мусор в ключе по-прежнему не проходит
+    r = await client.post(f"/api/servers/{sid}/snooze-alert", json={"kind": "Bad Kind", "hours": 1},
+                          headers=auth_headers)
+    assert r.status_code == 422
