@@ -995,6 +995,13 @@ const EN: Record<string, string> = {
   'без кода ответа': 'no status code',
   'Веб': 'Web',
   'остальные': 'other',
+  'Веб: ошибки 5xx': 'Web: 5xx errors',
+  'Kubernetes: поды': 'Kubernetes: pods',
+  '5xx по логу': '5xx for log',
+  'не алертить по этому логу': 'mute alerts for this log',
+  'не алертить по этому логу:': 'mute alerts for this log:',
+  'не алертит, постоянно': 'muted, permanently',
+  'не алертит {t}': 'muted {t}',
   'Выпустить новый токен? Старый сразу перестанет работать.':
     'Issue a new token? The old one stops working right away.',
   'Отключить доступ ansible? Плагин инвентаря перестанет получать ноды этой панели.':

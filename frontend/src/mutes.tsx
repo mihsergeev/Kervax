@@ -28,7 +28,16 @@ export const SRV_ALERT_KINDS: { k: string; label: string }[] = [
   { k: 'disktemp', label: 'Температура диска' },
   { k: 'reboot', label: 'Перезагрузка' },
   { k: 'oom', label: 'OOM-killer' },
+  { k: 'web_5xx', label: 'Веб: ошибки 5xx' },
+  { k: 'kube_pod', label: 'Kubernetes: поды' },
 ]
+
+// Заглушенные 5xx одного лога (домена): ключ web_5xx:<ключ лога>. Подпись - с самим
+// логом, иначе в списке заглушенного был бы голый технический ключ.
+export const WEB_MUTE = 'web_5xx:'
+export function muteKindLabel(k: string, t: TFn): string | null {
+  return k.startsWith(WEB_MUTE) ? `${t('5xx по логу')}: ${k.slice(WEB_MUTE.length)}` : null
+}
 
 // Варианты для ВРЕМЕННОГО приглушения. Отличаются от списка выше уровнями диска:
 // «@N» = молчать про уровни до N включительно (см. _muted в коллекторе). Постоянно
@@ -69,7 +78,7 @@ export function collectMutes(
   now = Date.now(),
 ): MuteItem[] {
   const label = (k: string) =>
-    t(SNOOZE_KINDS.find((x) => x.k === k)?.label ?? RULE_KIND_LABELS[k] ?? k)
+    muteKindLabel(k, t) ?? t(SNOOZE_KINDS.find((x) => x.k === k)?.label ?? RULE_KIND_LABELS[k] ?? k)
   const out: MuteItem[] = []
   if (groups.includes('alert')) {
     if (s.snooze_until && new Date(s.snooze_until).getTime() > now)

@@ -36,6 +36,8 @@ import {
   MuteChip,
   MutesBanner,
   SNOOZE_KINDS,
+  WEB_MUTE,
+  muteKindLabel,
   SRV_ALERT_KINDS,
   collectMutes,
 } from './mutes'
@@ -1005,13 +1007,42 @@ function OomEventList({
 // контейнер), сколько и в пике, какими кодами и на каких путях. Коды и пути присылает
 // helper с 0.12; у старого - только числа.
 function WebErrorList({
-  serverId,
+  server: s,
   t,
+  onChanged,
+  onUnauthorized,
 }: {
-  serverId: number
+  server: Server
   t: (s: string, vars?: Record<string, string | number>) => string
+  onChanged: () => void
+  onUnauthorized: () => void
 }) {
+  const serverId = s.id
+  const { isViewer } = useAuth()
   const [rows, setRows] = useState<WebErrorRow[] | null>(null)
+  const [picking, setPicking] = useState<string | null>(null) // лог, для которого выбирают срок
+  const [busy, setBusy] = useState(false)
+  // Заглушить 5xx одного лога. Сюда ведет ссылка из алерта, поэтому глушить - прямо
+  // тут: боты с их 500 на robots.txt одного домена не должны держать в тишине весь
+  // сервер, остальные логи продолжают алертить.
+  const mute = async (kind: string, hours: number) => {
+    setBusy(true)
+    try {
+      if (hours < 0) {
+        await updateServer(s.id, { alert_mutes: [...new Set([...(s.alert_mutes ?? []), kind])] })
+      } else if (hours === 0) {
+        if ((s.alert_mutes ?? []).includes(kind))
+          await updateServer(s.id, { alert_mutes: (s.alert_mutes ?? []).filter((x) => x !== kind) })
+        if (s.alert_snoozes?.[kind]) await snoozeServerAlert(s.id, kind, 0)
+      } else await snoozeServerAlert(s.id, kind, hours)
+      setPicking(null)
+      onChanged()
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 401) onUnauthorized()
+    } finally {
+      setBusy(false)
+    }
+  }
   useEffect(() => {
     let alive = true
     const load = () =>
@@ -1035,14 +1066,55 @@ function WebErrorList({
       <div className="web-err-cap muted small">{t('Ответы 5xx за сутки по логам веб-сервера')}</div>
       {rows.map((r) => {
         const codes = Object.entries(r.codes || {}).sort((a, b) => b[1] - a[1])
+        const kind = WEB_MUTE + (r.key || r.label || r.log)
+        const perm = (s.alert_mutes ?? []).includes(kind)
+        const until = s.alert_snoozes?.[kind]
+        const snoozed = !!until && new Date(until).getTime() > Date.now()
         return (
-          <div key={r.log} className="web-err-row">
+          <div key={r.key || r.log} className={`web-err-row${perm || snoozed ? ' web-err-muted' : ''}`}>
             <div className="web-err-head">
               <span className="web-err-where mono">{r.label || r.log.split('/').pop()}</span>
               <span className="web-err-count">
                 {t('{n} ошибок за {m} мин, пик {p}/мин', { n: r.errors, m: r.minutes, p: r.peak })}
               </span>
             </div>
+            {(perm || snoozed) ? (
+              <div className="web-err-line small">
+                <span className="snooze-active-chip snooze-perm">
+                  🔇 {perm ? t('не алертит, постоянно') : t('не алертит {t}', { t: t('до {t}', { t: fmt(until!) }) })}
+                  {!isViewer && (
+                    <button className="chip-x" disabled={busy} title={t('Снять')} onClick={() => mute(kind, 0)}>
+                      ✕
+                    </button>
+                  )}
+                </span>
+              </div>
+            ) : !isViewer && (
+              <div className="web-err-line small web-err-mute">
+                {picking === kind ? (
+                  <>
+                    <span className="muted">🔕 {t('не алертить по этому логу:')}</span>
+                    {[
+                      { h: 1, l: t('1 час') },
+                      { h: 24, l: t('1 день') },
+                      { h: 24 * 7, l: t('1 неделя') },
+                      { h: -1, l: t('постоянно') },
+                    ].map(({ h, l }) => (
+                      <button key={h} className="ghost small" disabled={busy} onClick={() => mute(kind, h)}>
+                        {l}
+                      </button>
+                    ))}
+                    <button className="ghost small" disabled={busy} onClick={() => setPicking(null)}>
+                      {t('Отмена')}
+                    </button>
+                  </>
+                ) : (
+                  <button className="ghost small" onClick={() => setPicking(kind)}>
+                    🔕 {t('не алертить по этому логу')}
+                  </button>
+                )}
+              </div>
+            )}
             {codes.length > 0 && (
               <div className="web-err-line small">
                 <span className="muted">{t('коды')}: </span>
@@ -2075,7 +2147,7 @@ function SnoozeBar({
   const { t } = useI18n()
   const [scope, setScope] = useState('all') // 'all' = весь сервер, иначе тип
   const now = Date.now()
-  const labelOf = (k: string) => SNOOZE_KINDS.find((x) => x.k === k)?.label ?? k
+  const labelOf = (k: string) => muteKindLabel(k, t) ?? SNOOZE_KINDS.find((x) => x.k === k)?.label ?? k
   const fmt = (u: string) =>
     new Date(u).toLocaleString([], {
       day: '2-digit',
@@ -3294,7 +3366,7 @@ function ServerDetail({
             по 5xx: сначала список - где ошибки, какие коды и пути, - потом графики. */}
         {wr && (
           <MetricSection id="web" title={t('Веб')}>
-            <WebErrorList serverId={s.id} t={t} />
+            <WebErrorList server={s} t={t} onChanged={onChanged} onUnauthorized={onUnauthorized} />
             <div className="chart-grid">
               {chartCard(
                 'web',

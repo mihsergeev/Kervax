@@ -1528,6 +1528,7 @@ export function agentUpdateCancel(serverIds?: number[]): Promise<Server[]> {
 }
 // Ошибки 5xx одного лога за окно: где, сколько, какие коды и пути. Сюда ведёт алерт.
 export type WebErrorRow = {
+  key: string // ключ лога: заглушить 5xx именно его - web_5xx:<key>
   log: string
   label: string // домены, под kubernetes или контейнер
   errors: number

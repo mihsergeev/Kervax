@@ -1773,9 +1773,10 @@ _WEB_ERR_MIN_MINUTES = 3
 
 
 async def web_error_window(session: AsyncSession,
-                           now: datetime) -> dict[int, tuple[float, float, int, int]]:
-    """{server_id: (запросов, ошибок 5xx, минут с данными, минут с ошибками)} за последние
-    15 минут. Два сгруппированных запроса на тик, а не по запросу на ноду."""
+                           now: datetime) -> dict[int, tuple[float, float, int, dict]]:
+    """{server_id: (запросов, ошибок 5xx, минут с данными, {ключ лога: {минута: ошибок}})}
+    за последние 15 минут. Два запроса на тик, а не по запросу на ноду. Разбивка по логам -
+    чтобы вычесть заглушенные и посчитать минуты с ошибками без них."""
     since = now - _WEB_ERR_WINDOW
     rows = await session.execute(
         select(ServerMetric.server_id, func.sum(ServerMetric.web_rpm),
@@ -1785,12 +1786,14 @@ async def web_error_window(session: AsyncSession,
     )
     # Минуты с ошибками - по минутам helper'а (src_ts), а не по точкам истории: одна и та
     # же минута helper'а может попасть в две точки подряд.
-    mins = dict((await session.execute(
-        select(WebErrorSample.server_id, func.count(func.distinct(WebErrorSample.src_ts)))
+    per: dict[int, dict[str, dict[int, int]]] = {}
+    for sid, label, log, src, e5 in await session.execute(
+        select(WebErrorSample.server_id, WebErrorSample.label, WebErrorSample.log,
+               WebErrorSample.src_ts, WebErrorSample.e5)
         .where(WebErrorSample.ts >= since, WebErrorSample.e5 > 0)
-        .group_by(WebErrorSample.server_id)
-    )).all())
-    return {sid: (float(t or 0), float(e or 0), int(n or 0), int(mins.get(sid) or 0))
+    ):
+        per.setdefault(sid, {}).setdefault(web_label_key(label or log), {})[int(src)] = int(e5 or 0)
+    return {sid: (float(t or 0), float(e or 0), int(n or 0), per.get(sid, {}))
             for sid, t, e, n in rows}
 
 
@@ -1831,7 +1834,32 @@ def web_label_key(label: str) -> str:
     m = re.fullmatch(r"[^()]* \((.+)\)", s)
     if m:
         s = m.group(1)
-    return re.sub(r" и ещё (\d+)$", r" +\1", s)
+    s = re.sub(r" и ещё (\d+)$", r" +\1", s)
+    # Под kubernetes - по его контроллеру: имя пода меняется при каждом выкате
+    # (ns/app-5c67cd68dd-djg5j), и без этого строки одного деплоймента множились, а
+    # заглушенный лог снова начинал алертить после первого же рестарта. Хвосты пода
+    # kubernetes берет из алфавита без гласных, поэтому живые слова не срезаются.
+    m = re.fullmatch(rf"([a-z0-9.-]+/.+?)(?:-{_K8S_RAND}{{6,10}})?-{_K8S_RAND}{{5}}", s)
+    return m.group(1) if m else s
+
+
+_K8S_RAND = "[bcdfghjklmnpqrstvwxz2456789]"
+
+# Заглушить 5xx одного лога (домена): ключ web_5xx:<ключ лога> в alert_snoozes (на время)
+# или alert_mutes (насовсем). Заглушенный лог выпадает из расчета: ошибки прочих логов
+# ноды алертят как раньше. Так боты, которым приложение отдает 500 на robots.txt, не
+# держат в тишине весь сервер.
+_WEB_MUTE_PREFIX = "web_5xx:"
+
+
+def web_muted_keys(s: Server, now: datetime) -> set[str]:
+    """Ключи логов, по которым 5xx сейчас не алертят."""
+    keys = {m[len(_WEB_MUTE_PREFIX):] for m in (s.alert_mutes or []) if m.startswith(_WEB_MUTE_PREFIX)}
+    for k, until in (s.alert_snoozes or {}).items():
+        u = _parse_iso(until)
+        if k.startswith(_WEB_MUTE_PREFIX) and u is not None and u > now:
+            keys.add(k[len(_WEB_MUTE_PREFIX):])
+    return keys
 
 
 def web_breakdown(extras: dict | None, now: datetime, clock_unix: float = 0,
@@ -1868,7 +1896,8 @@ def web_breakdown(extras: dict | None, now: datetime, clock_unix: float = 0,
 _WEB_ERR_CLEAR = timedelta(hours=1)
 
 
-async def web_error_where(session: AsyncSession, server_id: int, now: datetime) -> dict:
+async def web_error_where(session: AsyncSession, server_id: int, now: datetime,
+                          muted: set[str] | frozenset = frozenset()) -> dict:
     """Где ошибки за окно алерта: логи по убыванию, коды, частые пути. Берём из минут с
     ошибками, а не из последнего отчёта: ошибки могли кончиться минуту назад, а за
     окно их было сорок, и алерт без «где» (так было в первом сообщении) бесполезен."""
@@ -1880,6 +1909,8 @@ async def web_error_where(session: AsyncSession, server_id: int, now: datetime) 
     codes: dict[str, int] = {}
     paths: dict[str, int] = {}
     for r in sorted(rows, key=lambda x: x.ts):
+        if web_label_key(r.label or r.log) in muted:
+            continue  # заглушенный лог: про него не пишем, даже если он и шумит
         acc = by_log.setdefault(web_label_key(r.label or r.log), [r.label, 0])
         acc[0] = r.label or acc[0]  # подпись - самая свежая
         acc[1] += int(r.e5 or 0)
@@ -2008,7 +2039,7 @@ def _fallback_rule(key: str) -> dict:
 
 
 def _server_conditions(s: Server, now: datetime,
-                       web_err: tuple[float, float, int, int] | None = None) -> dict[str, tuple[int, dict]]:
+                       web_err: tuple[float, float, int, dict] | None = None) -> dict[str, tuple[int, dict]]:
     """Пороги сервера: ключ → (уровень, контекст для шаблона текста). Уровень 0 =
     норма; для диска 1=предупреждение(≥warn), 2=проблема(≥alert), 3=критично(≥crit)."""
     out: dict[str, tuple[int, dict]] = {}
@@ -2213,7 +2244,11 @@ def _server_conditions(s: Server, now: datetime,
     # без sustain: иначе к окну добавились бы ещё 15 минут ожидания.
     thr5 = float(getattr(s, "web_5xx_alert_percent", 0) or 0)
     if online and thr5 and web_err is not None:
-        total, errs, points, err_minutes = web_err
+        total, errs, points, per_log = web_err
+        muted = web_muted_keys(s, now)
+        if muted:
+            errs = max(0.0, errs - sum(sum(m.values()) for k, m in per_log.items() if k in muted))
+        err_minutes = len({src for k, m in per_log.items() if k not in muted for src in m})
         bad5 = web_error_level(total, errs, points, thr5, err_minutes)
         # Отбой - только после часа подряд без превышения (_WEB_ERR_CLEAR): пачки ошибок
         # внутри часа остаются одной историей. «since» здесь - с какого момента чисто.
@@ -2546,7 +2581,8 @@ async def evaluate_servers(
                 if key == "web_5xx":
                     try:
                         async with session_factory() as ses:
-                            ctx["where"] = web_where_text(await web_error_where(ses, s.id, now))
+                            ctx["where"] = web_where_text(await web_error_where(
+                                ses, s.id, now, web_muted_keys(s, now)))
                     except Exception:
                         log.warning("не собрал, где ошибки 5xx на %s", s.name, exc_info=True)
                 fires.append(srv_fire(s, key, rule, ctx))
