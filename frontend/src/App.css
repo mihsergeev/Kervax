@@ -1380,6 +1380,17 @@ input:focus {
 .web-err-line {
   overflow-wrap: anywhere;
 }
+/* заглушенный лог: ошибки видны, но строка приглушена - алерта по нему не будет */
+.web-err-row.web-err-muted {
+  border-left-color: var(--border);
+  opacity: 0.75;
+}
+.web-err-mute {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.35rem;
+}
 .web-err-empty {
   margin: 0.2rem 0 0.9rem;
 }

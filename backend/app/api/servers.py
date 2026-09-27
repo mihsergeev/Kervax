@@ -1304,9 +1304,9 @@ async def server_web_errors(
             if isinstance(it, dict) and it.get("p"):
                 a["paths"][str(it["p"])] = a["paths"].get(str(it["p"]), 0) + int(it.get("n") or 0)
     out = []
-    for a in sorted(acc.values(), key=lambda x: -x["errors"]):
+    for k, a in sorted(acc.items(), key=lambda kv: -kv[1]["errors"]):
         top = sorted(a["paths"].items(), key=lambda kv: -kv[1])[:8]
-        out.append(WebErrorOut(**{**a, "paths": [{"p": p, "n": n} for p, n in top]}))
+        out.append(WebErrorOut(**{**a, "key": k, "paths": [{"p": p, "n": n} for p, n in top]}))
     return out
 
 
