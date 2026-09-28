@@ -2889,8 +2889,12 @@ function ServerDetail({
 
   // Веб: цвета строк под графиками - те же, что у полос стека (по подписи ряда).
   const wr = webRate(r)
+  // Раздел держится и на истории за период, а не только на последнем отчете: блок
+  // helper'а бывает пропущен (установка helper'а, ротация всех логов разом), и раздел
+  // вместе со ссылкой из алерта пропадал бы на эту минуту
+  const hasWeb = !!wr || M.some((m) => m.web_rpm != null)
   const webColors = new Map<string, string>()
-  if (wr)
+  if (hasWeb)
     for (const k of ['web', 'web5xx'] as const)
       for (const x of buildMetric(k, M, t).series) webColors.set(`${k}|${x.name}`, x.color)
   const webColor = (k: MetricKey, name: string) => webColors.get(`${k}|${name}`)
@@ -3165,7 +3169,7 @@ function ServerDetail({
         <div className="detail-body">
           <DetailNav
             t={t}
-            sections={wr ? DETAIL_SECTIONS : DETAIL_SECTIONS_NO_WEB}
+            sections={hasWeb ? DETAIL_SECTIONS : DETAIL_SECTIONS_NO_WEB}
             initial={secOfLink(initialSection)}
           />
           <div className="detail-sections">
@@ -3392,7 +3396,7 @@ function ServerDetail({
 
         {/* Веб - последним: раздел есть не на каждой ноде. Сюда ведет ссылка из алерта
             по 5xx: сначала список - где ошибки, какие коды и пути, - потом графики. */}
-        {wr && (
+        {hasWeb && (
           <MetricSection id="web" title={t('Веб')}>
             <WebErrorList server={s} t={t} onChanged={onChanged} onUnauthorized={onUnauthorized} />
             <div className="chart-grid">
@@ -3402,9 +3406,9 @@ function ServerDetail({
                   <StatRow
                     color={webColor('web', t('запросов/мин'))}
                     name={t('запросов/мин')}
-                    value={fmtCount(wr.rpm)}
+                    value={fmtCount(wr?.rpm)}
                   />
-                  {(wr.logs ?? [])
+                  {(wr?.logs ?? [])
                     .filter((l) => l.rpm > 0)
                     .sort((a, b) => b.rpm - a.rpm)
                     .slice(0, 5)
@@ -3426,7 +3430,7 @@ function ServerDetail({
                   <StatRow
                     color={webColor('web5xx', t('5xx/мин'))}
                     name={t('5xx/мин')}
-                    value={fmtCount(wr.e5 ?? 0)}
+                    value={fmtCount(wr ? wr.e5 ?? 0 : null)}
                   />
                   {codesNow.map(([c, n]) => (
                     <StatRow key={c} color={webColor('web5xx', c)} name={c} value={fmtCount(n)} />
