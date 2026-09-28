@@ -76,6 +76,10 @@ export default function App() {
   const [openServerId, setOpenServerId] = useState<number | null>(() => urlNum('server'))
   const [openDockerId, setOpenDockerId] = useState<number | null>(() => urlNum('docker'))
   const [openKubeId, setOpenKubeId] = useState<number | null>(() => urlNum('kube'))
+  // ?kube=<id>&ktab=expiry - из алерта про сроки: кластер сразу на вкладке "Сроки"
+  const [openKubeTab, setOpenKubeTab] = useState<string | null>(
+    () => new URLSearchParams(window.location.search).get('ktab'),
+  )
   const [openBackupId, setOpenBackupId] = useState<number | null>(() => urlNum('backup'))
   const [openBackupSrvId, setOpenBackupSrvId] = useState<number | null>(() => urlNum('backupsrv'))
   // ?services=<id>[&queues=1] — из алерта по очереди RabbitMQ: открыть ноду и сразу очереди
@@ -411,7 +415,15 @@ export default function App() {
         ) : section === 'docker' ? (
           <DockerPage onUnauthorized={logout} openHostId={openDockerId} onConsumed={() => setOpenDockerId(null)} />
         ) : section === 'kuber' ? (
-          <KuberPage onUnauthorized={logout} openHostId={openKubeId} onConsumed={() => setOpenKubeId(null)} />
+          <KuberPage
+            onUnauthorized={logout}
+            openHostId={openKubeId}
+            openTab={openKubeTab}
+            onConsumed={() => {
+              setOpenKubeId(null)
+              setOpenKubeTab(null)
+            }}
+          />
         ) : section === 'services' ? (
           <ServicesPage
             onUnauthorized={logout}

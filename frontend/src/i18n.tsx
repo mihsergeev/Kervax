@@ -1171,8 +1171,8 @@ const EN: Record<string, string> = {
     'A backup contains monitors, servers, locations and settings — without metrics (time-series) and without accounts: users, their roles and permissions have to be created again after a restore.',
   'Алерт по коннектам СУБД, % (0 = выкл)': 'Database connection alert, % (0 = off)',
   // --- сроки Kubernetes и Flux ---
-  'Предупреждать о сроках Kubernetes за, дн. (0 = выкл)':
-    'Warn about Kubernetes expiry this many days ahead (0 = off)',
+  'Предупреждать о сроках Kubernetes за, дн. (через запятую, пусто = выкл)':
+    'Warn about Kubernetes expiry, days before (comma separated, empty = off)',
   'Сроки ({n})': 'Expiry ({n})',
   'Сроки ⏳ ({n})': 'Expiry ⏳ ({n})',
   'Сертификаты, kubeconfig-и и токены Flux с их сроками. Собирает root-хелпер на самой ноде: панель токенов не видит.':

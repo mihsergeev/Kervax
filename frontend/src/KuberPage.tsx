@@ -51,10 +51,14 @@ function daysLeft(ts: number): number {
   return Math.round((ts * 1000 - Date.now()) / 86400000)
 }
 
-// Цвет по остатку: красный — уже истекло, жёлтый — две недели (столько же по
-// умолчанию у алерта), дальше обычный.
-function expiryTone(d: number): string {
-  return d < 0 ? 't-down' : d <= 14 ? 't-degraded' : ''
+// Цвет по остатку: красный - уже истекло, желтый - в пределах первого порога алерта
+// сервера (по умолчанию неделя), дальше обычный.
+function expiryTone(d: number, horizon: number): string {
+  return d < 0 ? 't-down' : d <= horizon ? 't-degraded' : ''
+}
+// "Скоро" - то же, что и у алерта: первый (самый дальний) порог сервера
+function expiryHorizon(s: Server): number {
+  return Math.max(0, ...(s.kube_expiry_warn_days ?? [7]))
 }
 
 function podTone(p: KubePod): string {
@@ -383,22 +387,29 @@ function PodRow({
 }
 
 // Модалка хоста-кластера: ноды + воркоады + поды. Логи пода — вложенная модалка.
+type KubeTab = 'pods' | 'finished' | 'workloads' | 'nodes' | 'expiry' | 'flux'
+const KUBE_TABS: KubeTab[] = ['pods', 'finished', 'workloads', 'nodes', 'expiry', 'flux']
+
 function KubeHostModal({
   server: s,
   kube,
   canAct,
+  initialTab,
   onClose,
   onChanged,
 }: {
   server: Server
   kube: KubeInfo
   canAct: boolean
+  initialTab?: string | null // из ссылки алерта: ?kube=id&ktab=expiry
   onClose: () => void
   onChanged: () => void
 }) {
   const { t } = useI18n()
   const [logsPod, setLogsPod] = useState<KubePod | null>(null)
-  const [tab, setTab] = useState<'pods' | 'finished' | 'workloads' | 'nodes' | 'expiry' | 'flux'>('pods')
+  const [tab, setTab] = useState<KubeTab>(
+    () => (KUBE_TABS as string[]).includes(initialTab ?? '') ? (initialTab as KubeTab) : 'pods',
+  )
   const [q, setQ] = useState('')
   const [sort, setSort] = useState<'state' | 'name' | 'restarts' | 'ns'>('state')
   const nodes = kube.nodes ?? []
@@ -419,7 +430,8 @@ function KubeHostModal({
   const expiry: KubeExpiry[] = (s.last_report?.kube_expiry ?? []).slice().sort((a, b) => a.expires - b.expires)
   const flux: FluxState[] = s.last_report?.flux ?? []
   const fluxBroken = flux.filter((f) => !f.ready && !FLUX_TRANSIENT.has(f.reason ?? ''))
-  const expirySoon = expiry.filter((e) => daysLeft(e.expires) <= 14).length
+  const horizon = expiryHorizon(s)
+  const expirySoon = expiry.filter((e) => daysLeft(e.expires) <= horizon).length
   const doneCount = pods.filter(podFinished).length
   // вкладка «Завершённые» есть только пока они есть; если последний завершённый пропал
   // (удалили/сборщик подчистил) — не залипаем на исчезнувшей вкладке. Так же со сроками и Flux.
@@ -571,7 +583,7 @@ function KubeHostModal({
                 expiry.map((e) => {
                   const d = daysLeft(e.expires)
                   return (
-                    <div className={`loc-res docker-row ${expiryTone(d)}`} key={e.kind + '/' + e.where + '/' + (e.note ?? '')}>
+                    <div className={`loc-res docker-row ${expiryTone(d, horizon)}`} key={e.kind + '/' + e.where + '/' + (e.note ?? '')}>
                       <div className="docker-c-main">
                         <div className="docker-c-name mono">
                           {e.where}
@@ -582,7 +594,7 @@ function KubeHostModal({
                           {e.note ? ` · ${e.note}` : ''}
                         </div>
                       </div>
-                      <div className={`docker-c-status mono small ${expiryTone(d)}`}>
+                      <div className={`docker-c-status mono small ${expiryTone(d, horizon)}`}>
                         {d < 0 ? t('истёк') : d === 0 ? t('сегодня') : t('{n} дн.', { n: d })}
                       </div>
                     </div>
@@ -668,7 +680,7 @@ function HostRow({
   const fluxBroken = (s.last_report?.flux ?? []).filter(
     (f) => !f.ready && !FLUX_TRANSIENT.has(f.reason ?? ''),
   ).length
-  const soon = (s.last_report?.kube_expiry ?? []).filter((e) => daysLeft(e.expires) <= 14).length
+  const soon = (s.last_report?.kube_expiry ?? []).filter((e) => daysLeft(e.expires) <= expiryHorizon(s)).length
   return (
     <button className="check-row srv-row docker-host-row" onClick={onOpen}>
       <span className={`sdot ${s.online ? 'sdot-up' : 'sdot-down'}`} />
@@ -713,10 +725,12 @@ type KHost = { s: Server; d: KubeInfo }
 export function KuberPage({
   onUnauthorized,
   openHostId = null,
+  openTab = null,
   onConsumed,
 }: {
   onUnauthorized: () => void
   openHostId?: number | null
+  openTab?: string | null // вкладка кластера из ссылки алерта (?ktab=expiry)
   onConsumed?: () => void
 }) {
   const { t } = useI18n()
@@ -724,12 +738,18 @@ export function KuberPage({
   const [servers, setServers] = useState<Server[] | null>(null)
   const [err, setErr] = useState<string | null>(null)
   const [openId, setOpenId] = useState<number | null>(openHostId)
+  // Вкладка из ссылки алерта. Номер кластера из ссылки App забывает сразу, а список
+  // кластеров приезжает позже - поэтому вкладку держим здесь до первого открытия.
+  const [linkTab, setLinkTab] = useState<{ id: number | null; tab: string | null }>(
+    { id: openHostId, tab: openTab },
+  )
   useEffect(() => {
     if (openHostId != null) {
       setOpenId(openHostId)
+      setLinkTab({ id: openHostId, tab: openTab })
       onConsumed?.()
     }
-  }, [openHostId, onConsumed])
+  }, [openHostId, openTab, onConsumed])
   useUrlCard('kube', openId)
   const [query, setQuery] = useState('')
   const [groupBy, setGroupBy] = useState<'none' | 'group'>(
@@ -874,7 +894,11 @@ export function KuberPage({
           server={open.s}
           kube={open.d}
           canAct={!isViewer && open.d.access}
-          onClose={() => setOpenId(null)}
+          initialTab={linkTab.id === open.s.id ? linkTab.tab : null}
+          onClose={() => {
+            setOpenId(null)
+            setLinkTab({ id: null, tab: null })
+          }}
           onChanged={load}
         />
       )}

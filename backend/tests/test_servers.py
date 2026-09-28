@@ -1297,7 +1297,7 @@ def _kube_server(now, **kw):
         cpu_alert_percent=0, mem_alert_percent=0,
         disk_warn_percent=0, disk_alert_percent=0, disk_crit_percent=0,
         conntrack_alert_percent=0, disk_temp_alert_c=0, db_conn_alert_percent=0,
-        kube_expiry_alert_days=14,
+        kube_expiry_warn_days=[14, 7, 1],
     )
     base.update(kw)
     return Server(**base)
@@ -1334,7 +1334,8 @@ async def test_server_kube_expiry_conditions():
     assert cond["kube_expiry"][0] == 0  # первый интервал: дебаунс общий
 
     s.alert_state = {"kube_expiry_since": (now - timedelta(minutes=20)).isoformat()}
-    assert collector._server_conditions(s, now)["kube_expiry"][0] == 1
+    # уровень - сколько порогов пройдено: 5 дней при порогах 14/7/1 - уже два
+    assert collector._server_conditions(s, now)["kube_expiry"][0] == 2
 
     # уже истёкший: считаем дни назад, а не «через -2 дн.»
     s.last_report = {"kube_expiry": [
@@ -1349,8 +1350,8 @@ async def test_server_kube_expiry_conditions():
     cond = collector._server_conditions(s, now)
     assert cond["kube_expiry"][0] == 0
 
-    # порог 0 = проверка выключена для ноды
-    s.kube_expiry_alert_days = 0
+    # пустой список порогов = проверка выключена для ноды
+    s.kube_expiry_warn_days = []
     s.last_report = {"kube_expiry": [{"kind": "flux-token", "where": "a/b", "expires": ts + day}]}
     assert "kube_expiry" not in collector._server_conditions(s, now)
 
@@ -1621,3 +1622,65 @@ def test_slow_agent_download_is_progress_not_a_rejection():
     assert agent_update_note(bad.last_report) == ""
     advice, _ = _agent_advice(bad)
     assert advice == ["обновление агента отклонено — подпись манифеста не сошлась"]
+
+
+async def test_expiry_alerts_at_seven_days_one_day_and_on_expiry():
+    """По порогам [7, 1] (по умолчанию): сообщение за неделю, еще одно за день и когда
+    срок вышел. Раньше было одно, за две недели, и к сроку о нем успевали забыть."""
+    from datetime import datetime, timedelta, timezone
+
+    from app import collector
+
+    now = datetime.now(timezone.utc)
+    ts = int(now.timestamp())
+    s = _kube_server(now, kube_expiry_warn_days=[7, 1])
+    s.alert_state = {"kube_expiry_since": (now - timedelta(minutes=20)).isoformat()}
+
+    def level(days: float) -> int:
+        s.last_report = {"kube_expiry": [
+            {"kind": "secret-cert", "where": "default/app-tls", "expires": ts + int(days * 86400)}]}
+        return collector._server_conditions(s, now)["kube_expiry"][0]
+
+    assert level(14) == 0   # две недели - еще рано
+    assert level(6) == 1    # за неделю
+    assert level(0.5) == 2  # за день
+    assert level(-1) == 3   # уже истек
+
+
+async def test_expiry_alert_text_and_link(tmp_path, monkeypatch):
+    """До срока у TLS-сертификата совета нет: "обновите до этой даты" повторяло саму дату.
+    Ссылка ведет в раздел "Кубер" на вкладку со сроками, а не в карточку сервера."""
+    from datetime import datetime, timedelta, timezone
+
+    from app import collector
+    from app.config import Settings
+    from tests.test_alert_cause import _panel
+
+    engine, factory = await _panel(tmp_path, "kexp.db")
+    now = datetime.now(timezone.utc)
+    ts = int(now.timestamp())
+    async with factory() as db:
+        srv = _kube_server(now, name="corp-foundry", kube_expiry_warn_days=[7, 1], last_report={
+            "cpu_percent": 5, "kube_expiry": [
+                {"kind": "secret-cert", "where": "default/foundry-frontend-demo-staging-tls",
+                 "expires": ts + 6 * 86400, "note": "tls.crt"}]})
+        srv.alert_state = {"kube_expiry_since": (now - timedelta(minutes=20)).isoformat()}
+        db.add(srv)
+        await db.commit()
+
+    sent: list[str] = []
+
+    async def fake_send(cfg, text, parse_mode=None):
+        sent.append(text)
+        return []
+
+    monkeypatch.setattr("app.alerts.send_alert", fake_send)
+    await collector.evaluate_servers(
+        factory, Settings(alert_webhook="http://hook", panel_url="https://kervax.test"), now)
+    assert len(sent) == 1, sent
+    msg = sent[0]
+    assert "default/foundry-frontend-demo-staging-tls" in msg
+    assert "истекает через 6 дн." in msg
+    assert "обновите до этой даты" not in msg and " · " not in msg
+    assert "?kube=1&amp;ktab=expiry" in msg or "?kube=1&ktab=expiry" in msg
+    await engine.dispose()

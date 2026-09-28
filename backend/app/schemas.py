@@ -831,7 +831,8 @@ class ServerUpdate(BaseModel):
     disk_crit_percent: int | None = Field(default=None, ge=0, le=100)
     temp_alert_c: int | None = Field(default=None, ge=0, le=120)
     conntrack_alert_percent: int | None = Field(default=None, ge=0, le=100)
-    kube_expiry_alert_days: int | None = Field(default=None, ge=0, le=365)
+    # пороги сроков Kubernetes в днях: [7, 1]; пустой список - выключено
+    kube_expiry_warn_days: list[int] | None = None
     db_conn_alert_percent: int | None = Field(default=None, ge=0, le=100)
     web_5xx_alert_percent: float | None = Field(default=None, ge=0, le=100)
     # порог глубины очереди RabbitMQ (0 = алерты по очередям на ноде выключены)
@@ -846,6 +847,8 @@ class ServerUpdate(BaseModel):
     backup_anytime: bool | None = None  # бэкап в любое время (не уведомлять о дневном)
     offline_after_seconds: int | None = Field(default=None, ge=30, le=86400)
     alert_sustain_seconds: int | None = Field(default=None, ge=0, le=86400)
+
+    _kube_days = field_validator("kube_expiry_warn_days")(_clean_warn_days)
 
 
 class BackupAudit(BaseModel):
@@ -994,7 +997,7 @@ class ServerOut(BaseModel):
     disk_crit_percent: int
     temp_alert_c: int
     conntrack_alert_percent: int
-    kube_expiry_alert_days: int
+    kube_expiry_warn_days: list[int] | None = None
     db_conn_alert_percent: int
     web_5xx_alert_percent: float = 0.05
     queue_alert_depth: int = 0
