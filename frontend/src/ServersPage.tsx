@@ -2117,7 +2117,7 @@ type ServerEditForm = {
   conntrack_alert_percent: number
   db_conn_alert_percent: number
   web_5xx_alert_percent: number
-  kube_expiry_alert_days: number
+  kube_expiry_warn_days: string // "7, 1": по сообщению на каждый порог, пусто - выключено
   disk_temp_alert_c: number
   alert_mutes: string[]
   offline_after_seconds: number
@@ -2494,13 +2494,12 @@ function ServerEditCard({
           />
         </label>
         <label className="field">
-          <span>⏳ {t('Предупреждать о сроках Kubernetes за, дн. (0 = выкл)')}</span>
+          <span>⏳ {t('Предупреждать о сроках Kubernetes за, дн. (через запятую, пусто = выкл)')}</span>
           <input
-            type="number"
-            min={0}
-            max={365}
-            value={form.kube_expiry_alert_days}
-            onChange={(e) => set({ kube_expiry_alert_days: num(e.target.value) })}
+            type="text"
+            placeholder="7, 1"
+            value={form.kube_expiry_warn_days}
+            onChange={(e) => set({ kube_expiry_warn_days: e.target.value })}
           />
         </label>
         {!isVm && (
@@ -2798,7 +2797,7 @@ function ServerDetail({
       conntrack_alert_percent: s.conntrack_alert_percent,
       db_conn_alert_percent: s.db_conn_alert_percent,
       web_5xx_alert_percent: s.web_5xx_alert_percent ?? 0.05,
-      kube_expiry_alert_days: s.kube_expiry_alert_days,
+      kube_expiry_warn_days: (s.kube_expiry_warn_days ?? []).join(', '),
       disk_temp_alert_c: s.disk_temp_alert_c,
       alert_mutes: s.alert_mutes ?? [],
       offline_after_seconds: s.offline_after_seconds,
@@ -2826,7 +2825,7 @@ function ServerDetail({
         conntrack_alert_percent: form.conntrack_alert_percent,
         db_conn_alert_percent: form.db_conn_alert_percent,
         web_5xx_alert_percent: form.web_5xx_alert_percent,
-        kube_expiry_alert_days: form.kube_expiry_alert_days,
+        kube_expiry_warn_days: form.kube_expiry_warn_days.split(/[^0-9]+/).filter(Boolean).map(Number),
         disk_temp_alert_c: form.disk_temp_alert_c,
         alert_mutes: form.alert_mutes,
         offline_after_seconds: form.offline_after_seconds,

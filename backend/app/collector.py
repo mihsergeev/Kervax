@@ -216,6 +216,9 @@ _DISK_ICON = {1: "⚠️", 2: "🔴", 3: "🚨"}
 
 # Раздел панели, к которому относится алерт — по нему персональная рассылка
 # понимает, кого он касается (у учётки может не быть, скажем, «Бэкапов»).
+# Вкладка карточки кластера в разделе "Кубер", куда ведет ссылка алерта.
+_KUBE_TAB = {"kube_expiry": "expiry", "flux_down": "flux", "kube_pod": "pods"}
+
 _ALERT_SECTION = {
     "docker_loop": "docker",
     "docker_down": "docker",
@@ -1205,7 +1208,9 @@ _KUBE_ADVICE = {
     ("kubelet-cert", True): "нода отвалится от кластера — чините kubelet",
     ("flux-token", False): "выпустите новый токен и обновите секрет",
     ("flux-token", True): "Flux уже не тянет изменения — новый токен в секрет",
-    ("secret-cert", False): "обновите до этой даты, иначе TLS отвалится",
+    # До срока совета нет: "обновите до этой даты" повторяло саму дату и только
+    # удлиняло сообщение.
+    ("secret-cert", False): "",
     # Прежний текст обещал поломку «при рестарте пода» — неправда для главного
     # случая: секрет из ingress/gateway контроллер читает сам и отдаёт клиентам
     # как есть, поэтому браузер ругается сразу, задолго до всякого рестарта.
@@ -2171,14 +2176,15 @@ def _server_conditions(s: Server, now: datetime,
     # через дни, по недоехавшей выкатке. Сертификаты control-plane отказывают резче, но
     # так же без предупреждения. Берём САМЫЙ ранний срок: алерт на сервер один, а
     # датируемых сущностей на ноде десятки.
-    if s.kube_expiry_alert_days:
+    warn_days = sorted({int(d) for d in (s.kube_expiry_warn_days or []) if int(d) > 0}, reverse=True)
+    if warn_days:
         soon, near = None, 0
         for it in rep.get("kube_expiry") or []:
             exp = it.get("expires") or 0
             if exp <= 0:
                 continue
             days = (exp - now.timestamp()) / 86400
-            if days > s.kube_expiry_alert_days:
+            if days > warn_days[0]:
                 continue
             near += 1
             if soon is None or exp < soon[0]:
@@ -2199,17 +2205,25 @@ def _server_conditions(s: Server, now: datetime,
             if note and note not in where:
                 where = f"{where} ({note})"
             kind = it.get("kind") or ""
+            advice = _KUBE_ADVICE.get((kind, days < 0), "")
             sustain("kube_expiry", True, {
                 "value": phrase,
                 "what": _KUBE_KIND.get(kind, "срок"),
                 "where": where,
-                "advice": _KUBE_ADVICE.get((kind, days < 0), ""),
+                "advice": f" · {advice}" if advice else "",
                 # не для текста, а для иконки: «истекает через 6 дн.» и «ИСТЁК» —
                 # разные новости, и в ленте они должны различаться с первого взгляда
                 "expired": days < 0,
                 "date": datetime.fromtimestamp(exp, tz=timezone.utc).strftime("%d.%m.%Y"),
                 "more": f" (и ещё {near - 1} на этом сервере)" if near > 1 else "",
             })
+            # Уровень - сколько порогов пройдено, и истекший сверх них: за 7 дней, за
+            # 1 день и в день истечения - по сообщению. Раньше было одно, за две недели,
+            # и к сроку о нем успевали забыть.
+            lvl, ctx = out["kube_expiry"]
+            if lvl:
+                ctx["level"] = sum(1 for d in warn_days if days <= d) + (1 if days < 0 else 0)
+                out["kube_expiry"] = (ctx["level"], ctx)
         else:
             sustain("kube_expiry", False, {})
 
@@ -2446,6 +2460,10 @@ async def evaluate_servers(
             # ведём СРАЗУ в очереди этой ноды: из алерта человек идёт смотреть,
             # что там накопилось, а не в общий список сервисов
             return f"{base}/?services={s.id}&queues=1"
+        if key in _KUBE_TAB:
+            # Раздел "Кубер" с открытым кластером и сразу на нужной вкладке: сроки, Flux,
+            # поды. В карточке сервера кластера нет, и ссылка вела мимо.
+            return f"{base}/?kube={s.id}&ktab={_KUBE_TAB[key]}"
         if key in ("backup_repo", "backup_rotation"):
             return f"{base}/?backupsrv={s.id}"
         if key.startswith("backup"):
