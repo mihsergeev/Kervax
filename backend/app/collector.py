@@ -1822,9 +1822,13 @@ def web_log_label(entry: dict) -> str:
     лога есть $host. Имя контейнера впереди объясняет, откуда такая группа. "+N", а не
     "и еще N": подпись попадает и в легенду графика английского интерфейса."""
     name = str(entry.get("name") or "")
-    if "/" in name:
-        return name  # ns/под
     sites = [str(x) for x in (entry.get("sites") or []) if x]
+    if "/" in name:
+        # под kubernetes - по контроллеру (имя пода меняется с каждым выкатом), с
+        # доменами из его nginx, если helper их нашел (у ingress-nginx - хосты Ingress)
+        name = _pod_controller(name)
+        if not sites:
+            return name
     if sites:
         doms = ", ".join(sites[:2]) + (f" +{len(sites) - 2}" if len(sites) > 2 else "")
         return f"{name} ({doms})" if name else doms
@@ -1836,19 +1840,27 @@ def web_label_key(label: str) -> str:
     до хелпера 0.13, docker:имя после), подпись тоже ("домены и еще N" раньше, "контейнер
     (домены +N)" теперь), и один nginx показывался двумя строками. Общее у них - домены."""
     s = label.strip()
-    m = re.fullmatch(r"[^()]* \((.+)\)", s)
-    if m:
-        s = m.group(1)
-    s = re.sub(r" и ещё (\d+)$", r" +\1", s)
+    m = re.fullmatch(r"([^()]*) \((.+)\)", s)
+    head = m.group(1) if m else s
     # Под kubernetes - по его контроллеру: имя пода меняется при каждом выкате
     # (ns/app-5c67cd68dd-djg5j), и без этого строки одного деплоймента множились, а
-    # заглушенный лог снова начинал алертить после первого же рестарта. Хвосты пода
-    # kubernetes берет из алфавита без гласных, поэтому живые слова не срезаются.
-    m = re.fullmatch(rf"([a-z0-9.-]+/.+?)(?:-{_K8S_RAND}{{6,10}})?-{_K8S_RAND}{{5}}", s)
-    return m.group(1) if m else s
+    # заглушенный лог снова начинал алертить после первого же рестарта. Домены пода
+    # (хосты Ingress у ingress-nginx) в ключ не идут: их список меняется чаще.
+    if "/" in head:
+        return _pod_controller(head)
+    if m:
+        s = m.group(2)
+    return re.sub(r" и ещё (\d+)$", r" +\1", s)
 
 
 _K8S_RAND = "[bcdfghjklmnpqrstvwxz2456789]"
+
+
+def _pod_controller(name: str) -> str:
+    """ns/app-5c67cd68dd-djg5j -> ns/app. Хвосты пода kubernetes берет из алфавита без
+    гласных, поэтому живые слова (ns/web-12345, ns/postgres-0) не срезаются."""
+    m = re.fullmatch(rf"([a-z0-9.-]+/.+?)(?:-{_K8S_RAND}{{6,10}})?-{_K8S_RAND}{{5}}", name.strip())
+    return m.group(1) if m else name.strip()
 
 # Заглушить 5xx одного лога (домена): ключ web_5xx:<ключ лога> в alert_snoozes (на время)
 # или alert_mutes (насовсем). Заглушенный лог выпадает из расчета: ошибки прочих логов

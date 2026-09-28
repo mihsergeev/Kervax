@@ -8,7 +8,7 @@
 # secrets or config contents.
 set -euo pipefail
 
-KERVAX_SETUP_VERSION=0.17  # MAJOR.MINOR; compared component-wise
+KERVAX_SETUP_VERSION=0.18  # MAJOR.MINOR; compared component-wise
 KERVAX_SETUP_ALWAYS=1     # safe on any node: the refresh is a no-op without a web server
 
 HELPER_DIR=/lib65/kervax
@@ -38,8 +38,11 @@ TMP="$OUT.tmp.$$"
 #   server_name "~^(?<sub>.+)\.trafflow\.tech$";
 # so the "first character is ~" test missed it, backslashes leaked into the JSON and the
 # agent discarded the WHOLE file (that is how all 50+ domains of a node were lost).
+# Строго директива server_name: по префиксу ловились и server_name_in_redirect off, и
+# server_names_hash_* - у ingress-nginx они стоят в каждом конфиге, и в домены попадало
+# "off".
 extract_nginx() {
-  awk '/^[[:space:]]*server_name/ {
+  awk '$1 == "server_name" {
     for (i=2;i<=NF;i++){ g=$i; sub(/;$/,"",g);
       gsub(/^["\047]+|["\047]+$/,"",g);           # strip quotes (\047 = apostrophe)
       if (g=="" || g=="_" || g=="localhost") continue;
@@ -239,19 +242,29 @@ nginx_container_ids() {
   for p in /proc/[0-9]*; do
     [ "$(cat "$p/comm" 2>/dev/null)" = nginx ] || continue
     tr '\0' ' ' < "$p/cmdline" 2>/dev/null | grep -q 'master process' || continue
-    grep -o '[0-9a-f]\{64\}' "$p/cgroup" 2>/dev/null | tail -n 1
-  done | sort -u
+    cid=$(grep -o '[0-9a-f]\{64\}' "$p/cgroup" 2>/dev/null | tail -n 1)
+    [ -n "$cid" ] && echo "$cid ${p#/proc/}"
+  done | sort -u -k1,1
 }
 
 # Лог пода по id его контейнера: kubelet держит симлинк
 # /var/log/containers/<под>_<ns>_<контейнер>-<id>.log -> /var/log/pods/.../0.log
+# Домены - из конфига nginx внутри контейнера: читаем его через /proc/<pid>/root, в
+# контейнер ничего не запускаем. У ingress-nginx там все хосты его Ingress, и без них
+# строка в панели называлась только именем пода.
 pod_log_by_id() {
+  names=""
+  if [ -n "${2:-}" ] && [ -d "/proc/$2/root/etc/nginx" ]; then
+    names=$(cat "/proc/$2/root/etc/nginx/nginx.conf" "/proc/$2/root/etc/nginx/conf.d/"*.conf \
+              "/proc/$2/root/etc/nginx/sites-enabled/"* 2>/dev/null | extract_nginx | sort -u | tr '\n' ' ')
+    names=${names% }
+  fi
   for l in /var/log/containers/*-"$1".log; do
     [ -e "$l" ] || continue
     f=$(readlink -f "$l" 2>/dev/null) || continue
     [ -f "$f" ] || continue
     base=${l##*/}; pod=${base%%_*}; rest=${base#*_}; ns=${rest%%_*}
-    printf '%s\t\t%s/%s\n' "$f" "$ns" "$pod"
+    printf '%s\t%s\t%s/%s\n' "$f" "$names" "$ns" "$pod"
   done
 }
 
@@ -264,11 +277,11 @@ collect_logs() {
   command -v nginx >/dev/null 2>&1 && nginx -T 2>/dev/null | extract_logs
   have_docker=0
   command -v docker >/dev/null 2>&1 && have_docker=1
-  for id in $(nginx_container_ids); do
+  nginx_container_ids | while read -r id pid; do
     if [ "$have_docker" = 1 ] && docker inspect "$id" >/dev/null 2>&1; then
       container_logs "$id"
     else
-      pod_log_by_id "$id"
+      pod_log_by_id "$id" "$pid"
     fi
   done
 }
