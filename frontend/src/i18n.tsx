@@ -995,6 +995,8 @@ const EN: Record<string, string> = {
   'без кода ответа': 'no status code',
   'Веб': 'Web',
   'остальные': 'other',
+  'строки ошибок ({n})': 'error lines ({n})',
+  'скачать .txt': 'download .txt',
   'Веб: ошибки 5xx': 'Web: 5xx errors',
   'Kubernetes: поды': 'Kubernetes: pods',
   '5xx по логу': '5xx for log',

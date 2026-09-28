@@ -1539,6 +1539,12 @@ export type WebErrorRow = {
   last_ts: string
   codes: Record<string, number> // {"502": 30} - с хелпером 0.12
   paths: { p: string; n: number }[] // частые пути с ошибками - с хелпером 0.12
+  lines: string[] // последние строки с 5xx (хелпер 0.19), секреты замаскированы на ноде
+  lines_n: number // сколько строк сохранено за окно
+}
+// Все строки с 5xx одного лога за окно - для .txt
+export function serverWebErrorLines(id: number, key: string, hours = 24): Promise<string[]> {
+  return api<string[]>(`/api/servers/${id}/web-errors/lines?key=${encodeURIComponent(key)}&hours=${hours}`)
 }
 export function serverWebErrors(id: number, hours = 24): Promise<WebErrorRow[]> {
   return api<WebErrorRow[]>(`/api/servers/${id}/web-errors?hours=${hours}`)

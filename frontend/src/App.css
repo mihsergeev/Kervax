@@ -1391,6 +1391,19 @@ input:focus {
   align-items: center;
   gap: 0.35rem;
 }
+/* сами строки с 5xx: моноширинно, с переносом - строка лога бывает длиннее экрана */
+.web-err-lines {
+  margin: 0.2rem 0 0;
+  padding: 0.45rem 0.6rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 0.75rem;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 14rem;
+  overflow: auto;
+}
 .web-err-empty {
   margin: 0.2rem 0 0.9rem;
 }

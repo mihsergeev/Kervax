@@ -2888,6 +2888,14 @@ async def _prune(
         await session.execute(delete(CheckIpSample).where(CheckIpSample.ts < cutoff))
         await session.execute(delete(ServerMetric).where(ServerMetric.ts < srv_cutoff))
         await session.execute(delete(WebErrorSample).where(WebErrorSample.ts < srv_cutoff))
+        # Сами строки с 5xx - неделю: в них адреса клиентов и запросы целиком. Обнуляем
+        # полосой в два дня, чтобы не переписывать каждый раз весь месяц истории.
+        await session.execute(
+            update(WebErrorSample)
+            .where(WebErrorSample.ts < now - timedelta(days=7),
+                   WebErrorSample.ts > now - timedelta(days=9))
+            .values(lines=None)
+        )
         await session.execute(delete(OomEvent).where(OomEvent.ts < srv_cutoff))
         # docker/kube-команды (с логами) держим коротко — неделя, не тайм-серия
         await session.execute(

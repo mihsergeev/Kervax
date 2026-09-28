@@ -684,6 +684,10 @@ class WebErrorSample(Base):
     rpm: Mapped[int] = mapped_column(Integer, default=0)  # запросов в минуту в этом логе
     codes: Mapped[dict | None] = mapped_column(JSON, nullable=True)  # {"502": 30, "504": 11}
     paths: Mapped[list | None] = mapped_column(JSON, nullable=True)  # [{"p": "/api/x", "n": 38}]
+    # Сами строки с 5xx, до пяти за минуту (helper 0.19): чтобы посмотреть ошибку, не
+    # заходя на сервер. Значения секретов в query (token=, key=...) helper маскирует еще
+    # на ноде. Храним неделю, дальше строка обнуляется - остаются числа.
+    lines: Mapped[list | None] = mapped_column(JSON, nullable=True)
 
 
 class LocationSample(Base):
