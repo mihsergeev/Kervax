@@ -4,6 +4,21 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.4.70] - 2026-09-28
+
+### Changed
+- У логов подов kubernetes появились домены (helper 0.18). Раньше строка в разделе "Веб"
+  называлась только именем пода, хотя хосты Ingress лежат в nginx.conf контроллера.
+  Helper читает конфиг nginx внутри контейнера через /proc/<pid>/root (в контейнер ничего
+  не запускает): у ingress-nginx это все хосты его Ingress. Подпись - контроллер и домены:
+  "default/ingress-nginx-controller (corpassist-dev.corp.example, engassist-dev.corp.example
+  +2)", реплики контроллера - одна полоса графика.
+
+### Fixed
+- В домены веб-сервера больше не попадает "off": директива server_name искалась по
+  префиксу, и server_name_in_redirect off (у ingress-nginx она в каждом конфиге) давала
+  лишний "домен".
+
 ## [1.4.69] - 2026-09-28
 
 ### Changed

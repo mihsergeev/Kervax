@@ -455,7 +455,7 @@ def test_log_label_names_container_and_merges_old_records():
     assert new == "kervax-frontend-1 (kervax.example.org)"
     many = collector.web_log_label({"name": "edge", "sites": ["a.ru", "b.ru", "c.ru", "d.ru"]})
     assert many == "edge (a.ru, b.ru +2)"
-    assert collector.web_log_label({"name": "prod/api-7d9f", "sites": ["x.ru"]}) == "prod/api-7d9f"
+    assert collector.web_log_label({"name": "prod/api-7d9f", "sites": ["x.ru"]}) == "prod/api-7d9f (x.ru)"
     assert collector.web_log_label({"log": "/var/log/nginx/access.log"}) == "access.log"
     assert collector.web_label_key(new) == collector.web_label_key("kervax.example.org")
     assert collector.web_label_key(many) == collector.web_label_key("a.ru, b.ru и ещё 2")
@@ -668,3 +668,18 @@ def test_chart_bands_merge_pods_of_one_deployment_and_same_apps():
     tops, _ = collector.web_breakdown({"web-rate": block}, now)
     assert tops == [{"k": "default/ingress-nginx-controller", "r": 500, "e": 0},
                     {"k": "anketa", "r": 10, "e": 0}]
+
+
+def test_ingress_pod_label_has_its_hosts_and_a_stable_key():
+    """corp-ai-dev: у логов ingress-nginx в панели было только имя пода, хотя
+    хосты Ingress лежат в его nginx.conf. Helper 0.18 их читает; в подписи - контроллер и
+    домены, ключ (для сведения строк и глушения) - только контроллер."""
+    hosts = ["corpassist-dev.corp.example", "engassist-dev.corp.example",
+             "engassist-dev-mon.corp.example", "engassist-dev-portainer.corp.example"]
+    label = collector.web_log_label(
+        {"name": "default/ingress-nginx-controller-6c657c6487-5r2sn", "sites": hosts})
+    assert label == "default/ingress-nginx-controller (corpassist-dev.corp.example, engassist-dev.corp.example +2)"
+    assert collector.web_label_key(label) == "default/ingress-nginx-controller"
+    # старые записи (имя пода без доменов) сводятся в ту же строку
+    assert collector.web_label_key("default/ingress-nginx-controller-6c657c6487-865hj") == \
+        "default/ingress-nginx-controller"

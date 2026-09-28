@@ -18,9 +18,13 @@ export function webRate(r?: ServerReport | null): WebRate | null {
 // сайты он пишет в общий access-лог, и разделить их можно, только если в формате лога
 // есть $host. По этой подписи строки под графиком находят цвет своей полосы.
 export function webLogLabel(l: { log: string; name?: string; sites?: string[] }): string {
-  const name = l.name ?? ''
-  if (name.includes('/')) return name
+  let name = l.name ?? ''
   const sites = (l.sites ?? []).filter(Boolean)
+  if (name.includes('/')) {
+    // под kubernetes - по контроллеру, с доменами его nginx (у ingress-nginx - хосты Ingress)
+    name = name.match(POD_RE)?.[1] ?? name
+    if (!sites.length) return name
+  }
   if (sites.length) {
     const doms = sites.slice(0, 2).join(', ') + (sites.length > 2 ? ` +${sites.length - 2}` : '')
     return (name ? `${name} (${doms})` : doms).slice(0, 120)
