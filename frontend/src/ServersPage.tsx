@@ -13,6 +13,7 @@ import {
   serverMetrics,
   serverOomEvents,
   serverWebErrors,
+  serverWebErrorLines,
   snoozeServer,
   snoozeServerAlert,
   updateServer,
@@ -1021,6 +1022,23 @@ function WebErrorList({
   const { isViewer } = useAuth()
   const [rows, setRows] = useState<WebErrorRow[] | null>(null)
   const [picking, setPicking] = useState<string | null>(null) // лог, для которого выбирают срок
+  const [openLines, setOpenLines] = useState<string | null>(null) // у какого лога раскрыты строки
+  // Все строки с 5xx лога за сутки одним файлом: смотреть ошибку, не заходя на сервер
+  const downloadLines = async (r: WebErrorRow) => {
+    try {
+      const all = await serverWebErrorLines(s.id, r.key || r.label || r.log, 24)
+      const blob = new Blob([all.join('\n') + '\n'], { type: 'text/plain;charset=utf-8' })
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      const stamp = new Date().toISOString().slice(0, 16).replace(/[:T]/g, '-')
+      a.href = url
+      a.download = `${s.name}_5xx_${stamp}.txt`
+      a.click()
+      URL.revokeObjectURL(url)
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 401) onUnauthorized()
+    }
+  }
   const [busy, setBusy] = useState(false)
   // Заглушить 5xx одного лога. Сюда ведет ссылка из алерта, поэтому глушить - прямо
   // тут: боты с их 500 на robots.txt одного домена не должны держать в тишине весь
@@ -1127,6 +1145,17 @@ function WebErrorList({
                 <span className="mono">{r.paths.slice(0, 5).map((x) => `${x.p} (${x.n})`).join(', ')}</span>
               </div>
             )}
+            {(r.lines?.length ?? 0) > 0 && (
+              <div className="web-err-line small web-err-mute">
+                <button className="ghost small" onClick={() => setOpenLines(openLines === kind ? null : kind)}>
+                  📄 {t('строки ошибок ({n})', { n: r.lines_n })}
+                </button>
+                <button className="ghost small" onClick={() => downloadLines(r)}>
+                  {t('скачать .txt')}
+                </button>
+              </div>
+            )}
+            {openLines === kind && <pre className="web-err-lines mono">{r.lines.join('\n')}</pre>}
             <div className="web-err-line muted small">
               {t('с {a} по {b}', { a: fmt(r.first_ts), b: fmt(r.last_ts) })}
             </div>

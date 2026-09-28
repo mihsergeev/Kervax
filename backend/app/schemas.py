@@ -1108,6 +1108,8 @@ class WebErrorOut(BaseModel):
     last_ts: datetime
     codes: dict[str, int] = {}
     paths: list[WebErrorPath] = []
+    lines: list[str] = []  # последние строки с 5xx (helper 0.19), старые сверху
+    lines_n: int = 0       # сколько строк сохранено за окно - все отдает /web-errors/lines
 
 
 class OomEventOut(BaseModel):

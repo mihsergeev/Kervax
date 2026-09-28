@@ -683,3 +683,31 @@ def test_ingress_pod_label_has_its_hosts_and_a_stable_key():
     # старые записи (имя пода без доменов) сводятся в ту же строку
     assert collector.web_label_key("default/ingress-nginx-controller-6c657c6487-865hj") == \
         "default/ingress-nginx-controller"
+
+
+async def test_error_lines_are_kept_and_downloadable(client, auth_headers):
+    """Строки с 5xx (helper 0.19) видны в списке ошибок и отдаются целиком для .txt -
+    чтобы посмотреть ошибку, не заходя на сервер."""
+    import time
+
+    r = await client.post("/api/servers", json={"name": "mob"}, headers=auth_headers)
+    token, sid = r.json()["token"], r.json()["server"]["id"]
+    line = ('203.0.113.54 - - [28/Sep/2026:16:37:21 +0300] "GET /route/approved?token=***&chat_id=1 '
+            'HTTP/1.1" 500 63 "-" "python-httpx/0.28.1" "-"')
+    for i in range(2):  # две минуты с ошибками
+        block = {"ts": int(time.time()) - 60 + i, "rpm": 100, "e5": 3, "logs": [
+            {"log": "/var/log/nginx/access.log", "rpm": 100, "e5": 3,
+             "sites": ["anketa.shop.example"], "c5": {"500": 3},
+             "l5": [line.replace("chat_id=1", f"chat_id={i}{j}") for j in range(3)]}]}
+        report = {"hostname": "h", "os": "U", "agent_version": "2.10", "cpu_percent": 5,
+                  "mem_used": 1, "mem_total": 2, "extras": {"web-rate": block}}
+        r = await client.post("/api/agent/report", json=report,
+                              headers={"Authorization": f"Bearer {token}"})
+        assert r.status_code == 200
+    rows = (await client.get(f"/api/servers/{sid}/web-errors?hours=1", headers=auth_headers)).json()
+    assert rows[0]["lines_n"] == 6 and len(rows[0]["lines"]) == 5
+    assert rows[0]["lines"][-1].endswith('"-"') and "token=***" in rows[0]["lines"][-1]
+    r = await client.get(f"/api/servers/{sid}/web-errors/lines",
+                         params={"key": rows[0]["key"], "hours": 1}, headers=auth_headers)
+    assert r.status_code == 200 and len(r.json()) == 6
+    assert "chat_id=00" in r.json()[0] and "chat_id=12" in r.json()[-1]  # старые сверху
