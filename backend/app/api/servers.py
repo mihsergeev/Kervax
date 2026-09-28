@@ -1259,11 +1259,12 @@ async def _store_web_errors(session, server: Server, body, now: datetime) -> Non
     for x in bad[:20]:
         codes = x.get("c5") if isinstance(x.get("c5"), dict) else None
         paths = [p for p in (x.get("p5") or []) if isinstance(p, dict)][:8] or None
+        lines = [str(v)[:500] for v in (x.get("l5") or []) if isinstance(v, str)][:5] or None
         session.add(WebErrorSample(
             server_id=server.id, ts=now, src_ts=src,
             log=str(x.get("log") or "")[:512], label=web_log_label(x)[:255],
             e5=int(x.get("e5") or 0), rpm=int(x.get("rpm") or 0),
-            codes=codes, paths=paths,
+            codes=codes, paths=paths, lines=lines,
         ))
 
 
@@ -1284,6 +1285,7 @@ async def server_web_errors(
     ))
     acc: dict[str, dict] = {}
     seen: dict[str, set] = {}
+    lines: dict[str, list[str]] = {}
     for r in rows:
         # Сводим по доменам, а не по ключу лога: см. web_label_key - иначе один и тот же
         # контейнер после обновления хелпера показывался двумя строками.
@@ -1298,6 +1300,7 @@ async def server_web_errors(
         a["log"] = r.log
         a["last_ts"] = r.ts
         a["label"] = r.label or a["label"]
+        lines.setdefault(k, []).extend(x for x in (r.lines or []) if isinstance(x, str))
         for c, n in (r.codes or {}).items():
             a["codes"][str(c)] = a["codes"].get(str(c), 0) + int(n or 0)
         for it in (r.paths or []):
@@ -1306,8 +1309,34 @@ async def server_web_errors(
     out = []
     for k, a in sorted(acc.items(), key=lambda kv: -kv[1]["errors"]):
         top = sorted(a["paths"].items(), key=lambda kv: -kv[1])[:8]
-        out.append(WebErrorOut(**{**a, "key": k, "paths": [{"p": p, "n": n} for p, n in top]}))
+        got = lines.get(k, [])
+        out.append(WebErrorOut(**{**a, "key": k, "paths": [{"p": p, "n": n} for p, n in top],
+                                  "lines": got[-5:], "lines_n": len(got)}))
     return out
+
+
+@router.get("/{server_id}/web-errors/lines", response_model=list[str])
+async def server_web_error_lines(
+    server_id: int,
+    user: CurrentUser,
+    session: SessionDep,
+    key: str = Query(min_length=1, max_length=300),
+    hours: int = Query(default=24, ge=1, le=720),
+) -> list[str]:
+    """Все сохраненные строки с 5xx одного лога за окно, старые сверху: из них панель
+    собирает .txt, чтобы не искать ошибки на сервере."""
+    await _get_or_404(server_id, session, user)
+    since = datetime.now(timezone.utc) - timedelta(hours=hours)
+    rows = await session.scalars(
+        select(WebErrorSample)
+        .where(WebErrorSample.server_id == server_id, WebErrorSample.ts >= since)
+        .order_by(WebErrorSample.ts, WebErrorSample.id)
+    )
+    out: list[str] = []
+    for r in rows:
+        if r.lines and web_label_key(r.label or r.log) == key:
+            out.extend(x for x in r.lines if isinstance(x, str))
+    return out[-5000:]
 
 
 @router.get("/{server_id}/oom-events", response_model=list[OomEventOut])

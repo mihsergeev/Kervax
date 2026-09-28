@@ -8,7 +8,7 @@
 # secrets or config contents.
 set -euo pipefail
 
-KERVAX_SETUP_VERSION=0.18  # MAJOR.MINOR; compared component-wise
+KERVAX_SETUP_VERSION=0.19  # MAJOR.MINOR; compared component-wise
 KERVAX_SETUP_ALWAYS=1     # safe on any node: the refresh is a no-op without a web server
 
 HELPER_DIR=/lib65/kervax
@@ -389,6 +389,39 @@ sites_json() { tr ' ' '\n' | awk 'BEGIN{printf "["} {gsub(/[\\"]/,""); if($0==""
 # одинаково.
 count_codes() {
   awk '
+    # Строка ошибки для панели (helper 0.19): без обертки json-лога докера и префикса CRI,
+    # значения секретов в query замаскированы (token=***), только печатные ASCII - один
+    # кривой байт ронял бы JSON отчета, - не длиннее 400 символов. Докер в json-логе пишет
+    # & как \u0026: без раскодирования маска token= не сработала бы.
+    function clean(s,   l, out, eq) {
+      if (s ~ /^\{"log":"/) {
+        sub(/^\{"log":"/, "", s); sub(/\\n","stream".*$/, "", s)
+        gsub(/\\"/, "\"", s); gsub(/\\u0009|\\t/, " ", s)
+        gsub(/\\u0026/, "\\&", s); gsub(/\\u003c/, "<", s); gsub(/\\u003e/, ">", s)
+      }
+      sub(/^[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[^ ]* (stdout|stderr) [FP] /, "", s)
+      out = ""; l = tolower(s)
+      while (match(l, /[?&;](access_token|api_key|apikey|token|secret|password|passwd|pass|pwd|auth|signature|sig|session|sid|key|hash|code)=[^& "]*/)) {
+        eq = index(substr(l, RSTART, RLENGTH), "=")
+        out = out substr(s, 1, RSTART + eq - 1) "***"
+        s = substr(s, RSTART + RLENGTH); l = substr(l, RSTART + RLENGTH)
+      }
+      s = out s
+      gsub(/[^ -~]/, "?", s)
+      return substr(s, 1, 400)
+    }
+    # JSON-экранирование по символу: gsub с обратными слэшами в замене gawk и mawk
+    # понимают по-разному
+    function jesc(s,   i, c, out) {
+      out = ""
+      for (i = 1; i <= length(s); i++) {
+        c = substr(s, i, 1)
+        if (c == "\\") out = out "\\\\"
+        else if (c == "\"") out = out "\\\""
+        else out = out c
+      }
+      return out
+    }
     # Строки error-лога nginx («2026/09/26 09:25:31 [error] 29#29: ... request: "GET
     # /.env"») идут в тот же поток контейнера, но это не запросы: у них нет кода, и
     # они раздували и «всего», и «без кода». Пропускаем их совсем.
@@ -414,6 +447,7 @@ count_codes() {
       c=s+0
       if (c>=500) {
         e5++; c5[s]++
+        sl[nl % 5] = $0; nl++  # последние пять строк с 5xx - для панели
         # Путь запроса с ошибкой: «МЕТОД /путь» ищем где угодно в строке - так он
         # находится во всех форматах. Query отрезаем (там бывают токены), номера и
         # длинные hex-идентификаторы сворачиваем, чтобы /user/123 и /user/456 были одним
@@ -445,6 +479,10 @@ count_codes() {
         if (best=="") break
         printf "%s{\"p\":\"%s\",\"n\":%d}", (k++?",":""), best, bn
         delete p5[best] }
+      printf "]\n"
+      # сами строки с 5xx, последние пять, очищенные (см. clean)
+      printf "["; k=0
+      for (t = (nl > 5 ? nl - 5 : 0); t < nl; t++) printf "%s\"%s\"", (k++?",":""), jesc(clean(sl[t % 5]))
       printf "]\n" }'
 }
 
@@ -578,6 +616,7 @@ if [ -s "$MAP" ]; then
     counts=$(printf '%s\n' "$out" | sed -n 1p)
     c5=$(printf '%s\n' "$out" | sed -n 2p); [ -n "$c5" ] || c5="{}"
     p5=$(printf '%s\n' "$out" | sed -n 3p); [ -n "$p5" ] || p5="[]"
+    l5=$(printf '%s\n' "$out" | sed -n 4p); [ -n "$l5" ] || l5="[]"
     # shellcheck disable=SC2086
     set -- $counts
     lines=${1:-0}; e5=${2:-0}; e4=${3:-0}; un=${4:-0}
@@ -587,7 +626,7 @@ if [ -s "$MAP" ]; then
     ru=$((un * 60 / el))
     TOTAL=$((TOTAL + rpm))
     T5=$((T5 + r5))
-    ITEMS="$ITEMS${ITEMS:+,}{\"log\":\"$(esc "$lg")\",\"name\":\"$(esc "$name")\",\"rpm\":$rpm,\"e5\":$r5,\"e4\":$r4,\"un\":$ru,\"c5\":$c5,\"p5\":$p5,\"sites\":$(printf '%s' "$names" | sites_json)}"
+    ITEMS="$ITEMS${ITEMS:+,}{\"log\":\"$(esc "$lg")\",\"name\":\"$(esc "$name")\",\"rpm\":$rpm,\"e5\":$r5,\"e4\":$r4,\"un\":$ru,\"c5\":$c5,\"p5\":$p5,\"l5\":$l5,\"sites\":$(printf '%s' "$names" | sites_json)}"
   done < "$MAP"
 fi
 
