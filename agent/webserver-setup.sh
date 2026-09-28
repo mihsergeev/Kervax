@@ -8,7 +8,7 @@
 # secrets or config contents.
 set -euo pipefail
 
-KERVAX_SETUP_VERSION=0.19  # MAJOR.MINOR; compared component-wise
+KERVAX_SETUP_VERSION=0.20  # MAJOR.MINOR; compared component-wise
 KERVAX_SETUP_ALWAYS=1     # safe on any node: the refresh is a no-op without a web server
 
 HELPER_DIR=/lib65/kervax
@@ -352,9 +352,10 @@ chmod 0755 "$HELPER"
 cat > "$RATE" <<'RATE_EOF'
 #!/usr/bin/env bash
 # Сколько строк добавилось в каждый access-лог с прошлого запуска -> запросов в минуту.
-# Карту «лог -> домены» пишет сборщик доменов (web-logs.tsv), сами логи читаем только на
-# длину: в web-rate.json уходят числа и имена доменов, ни одной строки лога. У Caddy
-# логов нет - там разница его собственных счетчиков запросов с прошлого запуска.
+# Карту лог -> домены пишет сборщик доменов (web-logs.tsv). Из новых строк берем код ответа
+# и путь, в web-rate.json уходят числа, домены, коды, пути без query и до пяти последних
+# строк с 5xx (значения секретов в query замаскированы здесь же, на ноде). У Caddy логов
+# нет - там разница его собственных счетчиков запросов с прошлого запуска.
 set -u
 # Кладём в report.d: агент отдаёт этот каталог панели как есть, своей версии ему для
 # новых блоков не нужно.
@@ -377,6 +378,10 @@ T5=0
 # ушел, Caddy без метрик), set -u ронял скрипт раньше, чем тот убирал старый блок. Блок
 # многочасовой давности так и уезжал в панель (corp-landings), а юнит падал раз в минуту.
 MISSING=0
+# Сколько логов пропущено из-за того, что прошлый запуск был только что (меньше 20 секунд
+# назад): установка helper'а считает руками, и тут же срабатывает таймер. Такой запуск не
+# должен убирать свежий блок прошлого - раньше раздел "Веб" в панели пропадал на минуту.
+SOON=0
 
 esc() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g' | tr -d '\000-\037'; }
 sites_json() { tr ' ' '\n' | awk 'BEGIN{printf "["} {gsub(/[\\"]/,""); if($0=="")next; printf "%s\"%s\"", (n++?",":""), $0} END{printf "]"}'; }
@@ -565,10 +570,18 @@ if [ -s "$MAP" ]; then
         cur=$(caddy_get "$cpid" /metrics | caddy_counters)
         [ -n "$cur" ] || continue
         prevline=$(awk -F"$TAB" -v p="$lg" '$1==p{print $2 "|" $3; exit}' "$STATE" 2>/dev/null)
-        printf '%s\t%s\t%s\n' "$lg" "$cur" "$now" >> "$NEW"
-        [ -n "$prevline" ] || continue
+        if [ -z "$prevline" ]; then
+          printf '%s\t%s\t%s\n' "$lg" "$cur" "$now" >> "$NEW"
+          continue
+        fi
         el=$((now - ${prevline##*|}))
-        [ "$el" -ge 20 ] || continue
+        # запуск следом за прошлым: точку отсчета не двигаем (как у файловых логов ниже)
+        if [ "$el" -lt 20 ]; then
+          printf '%s\t%s\t%s\n' "$lg" "${prevline%|*}" "${prevline##*|}" >> "$NEW"
+          SOON=$((SOON + 1))
+          continue
+        fi
+        printf '%s\t%s\t%s\n' "$lg" "$cur" "$now" >> "$NEW"
         out=$(caddy_delta "$cur" "${prevline%|*}" "$el") || continue
         # shellcheck disable=SC2046
         set -- $(printf '%s\n' "$out" | sed -n 1p)
@@ -591,15 +604,24 @@ if [ -s "$MAP" ]; then
     ino=$(stat -c %i "$src" 2>/dev/null) || continue
     size=$(stat -c %s "$src" 2>/dev/null) || continue
     prev=$(awk -F"$TAB" -v p="$lg" '$1==p{print $2, $3, $4; exit}' "$STATE" 2>/dev/null)
-    printf '%s\t%s\t%s\t%s\n' "$lg" "$ino" "$size" "$now" >> "$NEW"
     # shellcheck disable=SC2086
     set -- $prev
     pino="${1:-}"; psize="${2:-0}"; pts="${3:-0}"
     # Первый запуск, ротация (сменился inode) или лог обрезали - точки отсчёта нет,
     # в этот раз про него молчим, посчитаем со следующего запуска.
-    [ -n "$pino" ] && [ "$pino" = "$ino" ] && [ "$size" -ge "$psize" ] || continue
+    if ! { [ -n "$pino" ] && [ "$pino" = "$ino" ] && [ "$size" -ge "$psize" ]; }; then
+      printf '%s\t%s\t%s\t%s\n' "$lg" "$ino" "$size" "$now" >> "$NEW"
+      continue
+    fi
     el=$((now - pts))
-    [ "$el" -ge 20 ] || continue
+    # Запуск следом за прошлым - считать не за что. Точку отсчета оставляем прежней, иначе
+    # строки этих секунд выпали бы из счета.
+    if [ "$el" -lt 20 ]; then
+      printf '%s\t%s\t%s\t%s\n' "$lg" "$pino" "$psize" "$pts" >> "$NEW"
+      SOON=$((SOON + 1))
+      continue
+    fi
+    printf '%s\t%s\t%s\t%s\n' "$lg" "$ino" "$size" "$now" >> "$NEW"
     delta=$((size - psize))
     out="0 0 0 0"
     if [ "$delta" -gt 0 ]; then
@@ -641,9 +663,10 @@ if [ "$MISSING" -gt 0 ] && [ -x /lib65/kervax/kervax-web-sites ] \
 fi
 # Ни одного посчитанного лога - блок не пишем вовсе (и убираем старый). Пустой блок
 # означал бы "запросов ноль", хотя правда в другом: логи уехали в stdout контейнера
-# либо nginx тут вообще не пишет их в файлы.
+# либо nginx тут вообще не пишет их в файлы. Исключение - прошлый запуск был только что:
+# его блок свежий, оставляем.
 if [ -z "$ITEMS" ]; then
-  rm -f "$OUT"
+  [ "$SOON" -gt 0 ] || rm -f "$OUT"
   exit 0
 fi
 printf '{"ts":%s,"rpm":%s,"e5":%s,"logs":[%s]}\n' "$now" "$TOTAL" "$T5" "$ITEMS" > "$TMP"
