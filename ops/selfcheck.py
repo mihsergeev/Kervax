@@ -319,6 +319,37 @@ def check_agent_release_matches() -> None:
         print(f"агент и подписанный релиз совпадают: {signed}")
 
 
+def check_agent_go_image() -> None:
+    """Агента собирает один и тот же Go: стадия agent в backend/Dockerfile, GO_IMAGE в
+    agent-signing/release.py и CI.
+
+    Панель раздает бинарь своей сборки, а подписан бинарь сборки release.py: sha256
+    совпадают, только пока Go один и тот же. Сменил образ в одном месте (например, влил
+    PR dependabot) - панель перестает раздавать релиз, самообновление встает у всего
+    парка. Плавающий тег вроде 1.27-alpine тоже нельзя: следующий патч Go сменит байты.
+    """
+    dock = re.search(r"^FROM (golang:\S+) AS agent", read("backend/Dockerfile"), re.M)
+    rel_path = "agent-signing/release.py"
+    rel = re.search(r'^GO_IMAGE = "([^"]+)"', read(rel_path), re.M) if os.path.exists(rel_path) else None
+    ci = re.search(r'go-version: "([^"]+)"', read(".github/workflows/ci.yml"))
+    if not dock or not rel:
+        fail("agent", "не нашел образ Go в backend/Dockerfile или в agent-signing/release.py")
+        return
+    img = dock.group(1)
+    m = re.fullmatch(r"golang:(\d+\.\d+\.\d+)-alpine", img)
+    if img != rel.group(1):
+        fail("agent", f"Go для агента: в Dockerfile {img}, в release.py {rel.group(1)} - "
+                      "бинарь панели не совпадет с подписанным")
+    elif not m:
+        fail("agent", f"образ Go {img} без точного патча: следующий выпуск Go сменит байты "
+                      "бинаря, и он разойдется с подписанным")
+    elif not ci or ci.group(1) != m.group(1):
+        fail("agent", f"CI проверяет агента на Go {ci.group(1) if ci else '?'}, а собираем "
+                      f"на {m.group(1)}")
+    else:
+        print(f"Go для агента один: Dockerfile, release.py и CI на {m.group(1)}")
+
+
 def check_compose_file_pinned() -> None:
     """Установка обязана оставить после себя COMPOSE_FILE в .env.
 
@@ -438,7 +469,8 @@ def main() -> int:
     for fn in (check_helpers, check_alerts, check_rbac, check_secrets,
                check_migrations, check_i18n, check_i18n_literals,
                check_password_len, check_version, check_compose_overlays,
-               check_compose_file_pinned, check_agent_release_matches):
+               check_compose_file_pinned, check_agent_release_matches,
+               check_agent_go_image):
         try:
             fn()
         except Exception as exc:  # noqa: BLE001 — упавшая проверка тоже проблема

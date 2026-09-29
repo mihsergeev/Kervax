@@ -32,7 +32,9 @@ from _signing import (  # noqa: E402
     AGENT, DIST, HERE, load_signing_key, pub_b64, read_agent_version, read_pubkey,
 )
 
-GO_IMAGE = "golang:1.22-alpine"
+# тот же образ, что в backend/Dockerfile (стадия agent), с точным патчем - иначе бинарь
+# панели разойдется с подписанным по sha256; сверяет ops/selfcheck.py
+GO_IMAGE = "golang:1.27.1-alpine"
 ARCHES = ("amd64", "arm64")
 BUILD_HOST_FILE = os.path.join(HERE, "build-host.txt")
 

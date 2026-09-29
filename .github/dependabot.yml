@@ -28,6 +28,10 @@ updates:
     directory: /backend
     schedule:
       interval: weekly
+    # Go для агента меняется только вместе с agent-signing/release.py и новым подписанным
+    # релизом агента: PR на один Dockerfile разводит бинарь панели и подписанный по sha256
+    ignore:
+      - dependency-name: golang
   - package-ecosystem: docker
     directory: /frontend
     schedule:

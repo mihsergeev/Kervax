@@ -4,6 +4,19 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.4.74] - 2026-09-29
+
+### Changed
+- Агент 2.11: собран на Go 1.27.1 вместо Go 1.22, который давно не получает исправлений
+  безопасности. Код агента не менялся. go.mod остается на go 1.21, поэтому умолчания Go
+  (TLS, DNS, таймеры) прежние, а директива //go:debug tlsmlkem=0 явно держит TLS ClientHello
+  без post-quantum ключа. Проверено на ноде в РФ за DPI: рукопожатие как у 2.10 (один ключ
+  X25519, один пакет), отчеты до панели доходят.
+- Образ Go закреплен с точным патчем (golang:1.27.1-alpine) сразу в backend/Dockerfile,
+  agent-signing/release.py и CI. Панель раздает бинарь своей сборки, а подписан бинарь
+  сборки release.py, и sha256 совпадают только при одинаковом Go. Теперь это проверяет
+  ops/selfcheck.py, а dependabot больше не предлагает Go отдельным PR (Kervax#8 закрывается).
+
 ## [1.4.73] - 2026-09-29
 
 ### Changed
