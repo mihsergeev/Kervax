@@ -4,6 +4,20 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.4.73] - 2026-09-29
+
+### Changed
+- Зависимости фронтенда (PR dependabot): react и react-dom 19.3, vite 8.3,
+  @vitejs/plugin-react 6.1, oxlint 1.85, playwright-core 1.63, типы react и node. Сборка
+  и линт проходят, собранная панель проверена в браузере.
+- GitHub Actions (PR dependabot): setup-python, setup-node и setup-go 7, docker/login-action 4,
+  docker/build-push-action 7. Меняется среда выполнения (Node 24), входные параметры те же.
+
+### Fixed
+- CI бэкенда падал с 1.4.65: test_ansible.py берет хелпер из tests.test_users, а в CI пакет
+  ставится обычной установкой, и пакет tests не виден. Локально это скрывала editable-
+  установка. В настройках pytest теперь pythonpath = ["."].
+
 ## [1.4.72] - 2026-09-28
 
 ### Fixed
