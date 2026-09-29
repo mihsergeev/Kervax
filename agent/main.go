@@ -42,7 +42,7 @@ import (
 	"time"
 )
 
-const version = "2.11"
+const version = "2.12"
 
 // Публичный ключ для проверки подписи релизов агента (Ed25519, base64).
 // ПУСТО по умолчанию → самообновление ВЫКЛЮЧЕНО (агент никогда не заменяет себя).
@@ -827,6 +827,31 @@ func partPath(ver string, size int) string {
 	return filepath.Join(filepath.Dir(self), fmt.Sprintf(".update-%s-%d.part", safe, size))
 }
 
+// cleanStaleParts убирает огрызки обновлений версий не новее текущей. До 2.12 каждый
+// успешный самоапдейт оставлял полный .part рядом с бинарем (defer не срабатывал из-за
+// exec) - по 6-7 МБ на релиз, на старых нодах набралось по 50 МБ. Огрызок более новой
+// версии не трогаем: это недокачанное обновление, следующий заход его продолжит.
+func cleanStaleParts() {
+	self, err := os.Executable()
+	if err != nil {
+		return
+	}
+	if resolved, e := filepath.EvalSymlinks(self); e == nil {
+		self = resolved
+	}
+	files, _ := filepath.Glob(filepath.Join(filepath.Dir(self), ".update-*.part"))
+	for _, p := range files {
+		name := strings.TrimSuffix(strings.TrimPrefix(filepath.Base(p), ".update-"), ".part")
+		i := strings.LastIndex(name, "-")
+		if i <= 0 {
+			continue
+		}
+		if !versionNewer(name[:i], version) {
+			os.Remove(p)
+		}
+	}
+}
+
 // httpGetChunked — скачивание с докачкой. size берём из ПОДПИСАННОГО манифеста, так что
 // на него можно опираться при выделении памяти; sha256 всё равно проверяется зовущим.
 //
@@ -1548,6 +1573,11 @@ func selfUpdate(panelURL, want string) error {
 	if err := os.Rename(tmp, self); err != nil { // атомарно, лечит ETXTBSY (свап inode)
 		os.Remove(tmp)
 		return fmt.Errorf("замена бинаря: %w", err)
+	}
+	// Огрызок убираем здесь, а не defer'ом: exec заменяет процесс раньше, чем defer
+	// сработает, и докачанный файл оставался рядом с бинарем навсегда, по одному на релиз.
+	if pp := partPath(m.Version, art.Size); pp != "" {
+		os.Remove(pp)
 	}
 	fmt.Printf("kervax-agent: обновлён %s → %s, перезапуск\n", version, m.Version)
 	return syscall.Exec(self, os.Args, os.Environ()) // тот же PID, systemd доволен
@@ -5021,6 +5051,7 @@ func main() {
 	hostCPUModel = cpuModel()
 	hostIsVM, hostVirt = detectVirt()
 	fmt.Printf("kervax-agent %s → %s\n", version, url)
+	cleanStaleParts()
 
 	interval := 15 * time.Second
 	prev := snap()
