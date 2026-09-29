@@ -1,7 +1,11 @@
 # --- сборка Go-агента из исходников (панель собирает агента сама) ---
 # AGENT_PUBKEY пуст по умолчанию → у агента нет ключа → самообновление ВЫКЛЮЧЕНО.
 # Чтобы включить secure-автообновление, задай KERVAX_AGENT_PUBKEY в .env (см. README).
-FROM golang:1.22-alpine AS agent
+# Образ Go - ровно тот же, что GO_IMAGE в agent-signing/release.py, с точным патчем:
+# панель раздает бинарь этой сборки, а подписан бинарь сборки release.py, и sha256
+# совпадают, только пока их собирает один Go. Менять оба места вместе и выпускать новый
+# релиз агента (ops/selfcheck.py это проверяет).
+FROM golang:1.27.1-alpine AS agent
 ARG AGENT_PUBKEY=
 WORKDIR /agent
 COPY agent/go.mod ./
