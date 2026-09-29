@@ -115,6 +115,28 @@ func TestDownloadResumesAcrossAttempts(t *testing.T) {
 	t.Logf("первая попытка набрала %d из %d байт, вторая продолжила с этого места", got, len(data))
 }
 
+func TestStalePartsAreCleaned(t *testing.T) {
+	// Огрызки прошлых релизов и текущего убираются при старте, огрызок более новой
+	// версии (недокачанное обновление) остается.
+	cleanupParts(t)
+	defer cleanupParts(t)
+	old, cur, next := partPath("2.3", 100), partPath(version, 200), partPath("99.0", 300)
+	for _, p := range []string{old, cur, next} {
+		if err := os.WriteFile(p, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cleanStaleParts()
+	for _, p := range []string{old, cur} {
+		if _, err := os.Stat(p); err == nil {
+			t.Fatalf("%s не убран", filepath.Base(p))
+		}
+	}
+	if _, err := os.Stat(next); err != nil {
+		t.Fatalf("огрызок новой версии убран, а это недокачанное обновление: %v", err)
+	}
+}
+
 func TestPartFileIsPerVersionAndSize(t *testing.T) {
 	// Огрызок от прошлого релиза не должен выдать себя за начало нового: иначе
 	// склеенный файл не пройдёт sha256 и обновление будет отвергаться молча и вечно.
