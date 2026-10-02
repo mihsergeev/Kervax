@@ -1632,6 +1632,67 @@ def _fmt_size(b: float) -> str:
     return f"{b / 1024 ** 3:.1f} ГБ" if b >= 1024 ** 3 else f"{b / 1024 ** 2:.0f} МБ"
 
 
+# Разбор места helper'а diskusage-setup: блок есть, пока раздел заполняется (от 75%),
+# helper обновляет его раз в 10 минут. Старше двух часов - helper встал, не показываем.
+_DISK_USAGE_MAX_AGE = 2 * 3600
+# "Без риска освобождается" упоминаем в алерте, только если это заметная величина
+_DISK_SAFE_MIN = 256 * 1024 ** 2
+
+
+def disk_usage_block(rep: dict) -> dict | None:
+    """Блок "на что ушло место" из отчета (report.d/disk-usage.json, агент отдает как есть).
+    Возраст меряем часами самой ноды, как у блока веба: при сдвинутых часах живые данные
+    иначе пропадали бы."""
+    block = ((rep.get("extras") or {}).get("disk-usage")) or {}
+    if not isinstance(block, dict) or not isinstance(block.get("fs"), list) or not block["fs"]:
+        return None
+    ts = float(block.get("ts") or 0)
+    ref = float(rep.get("clock_unix") or 0) or datetime.now(timezone.utc).timestamp()
+    if ts <= 0 or ref - ts > _DISK_USAGE_MAX_AGE:
+        return None
+    return block
+
+
+def disk_top_dirs(fs: dict, n: int = 2) -> list[tuple[str, float]]:
+    """Самые большие каталоги раздела без матрешки: /var не называем, если почти все в нем -
+    это /var/lib/docker. Каталог пропускаем, когда его потомок из списка держит больше 60%
+    его объема, - тогда назван будет потомок."""
+    top = [(str(t.get("path") or ""), float(t.get("bytes") or 0))
+           for t in fs.get("top") or [] if isinstance(t, dict)]
+    keep = []
+    for p, b in top:
+        if not p or b <= 0:
+            continue
+        pre = p.rstrip("/") + "/"
+        if any(q.startswith(pre) and qb >= 0.6 * b for q, qb in top):
+            continue
+        keep.append((p, b))
+    keep.sort(key=lambda x: -x[1])
+    return keep[:n]
+
+
+def disk_cause(rep: dict) -> str:
+    """Хвост к дисковому алерту: на что ушло место и сколько освобождается без риска на
+    самом заполненном разделе. Пусто без блока helper'а - тогда алерт как раньше."""
+    block = disk_usage_block(rep)
+    if not block:
+        return ""
+    fss = [f for f in block["fs"] if isinstance(f, dict)]
+    if not fss:
+        return ""
+    worst = max(fss, key=lambda f: float(f.get("pct") or 0))
+    parts = []
+    dirs = disk_top_dirs(worst)
+    if dirs:
+        parts.append("больше всего места: " + ", ".join(f"{p} {_fmt_size(b)}" for p, b in dirs))
+    safe = sum(float(i.get("free") or 0) for i in block.get("items") or []
+               if isinstance(i, dict) and i.get("level") == "safe"
+               and i.get("mount") == worst.get("mount"))
+    if safe >= _DISK_SAFE_MIN:
+        parts.append(f"без риска освобождается ~{_fmt_size(safe)}")
+    return " - " + "; ".join(parts) if parts else ""
+
+
 def top_eaters(rep: dict, kind: str) -> str:
     """Кто ест ресурс - из снимка top_cpu/top_mem последнего отчёта. Процессы с
     одним именем складываем: у php-fpm полсотни воркеров, по отдельности каждый
@@ -2133,7 +2194,7 @@ def _server_conditions(s: Server, now: datetime,
         else:
             lvl, sev, thr = 0, "", 0
         out["disk"] = (lvl, {"value": round(worst), "threshold": thr,
-                             "severity": sev, "level": lvl})
+                             "severity": sev, "level": lvl, "cause": ""})
     temp = rep.get("cpu_temp")
     if s.temp_alert_c and temp is not None:
         sustain("temp", temp >= s.temp_alert_c,
@@ -2618,6 +2679,9 @@ async def evaluate_servers(
                     continue
                 if key in ("cpu", "mem"):
                     ctx["cause"] = await cause_for(s, key)
+                if key == "disk":
+                    # на что ушло место - из разбора helper'а diskusage-setup, без запросов
+                    ctx["cause"] = disk_cause(s.last_report or {})
                 if key == "web_5xx":
                     try:
                         async with session_factory() as ses:

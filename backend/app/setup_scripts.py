@@ -74,7 +74,8 @@ def setup_needed(name: str, rep: dict) -> bool:
     if name == "dbstat-setup":
         return bool(rep.get("db_engines") or rep.get("db_stats"))
     # backup-setup — транспорт панели для дампов, нужен и без файлового бэкапа;
-    # timesync-setup и agent-watchdog ansible ставит всюду; остальное — см. докстроку
+    # timesync-setup, agent-watchdog и diskusage-setup ansible ставит всюду (разбор места
+    # нужен любой ноде: диск забивается где угодно); остальное - см. докстроку
     return True
 
 

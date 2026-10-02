@@ -1,4 +1,4 @@
-import type { Server, ServerReport, WebRate } from './api'
+import type { DiskUsage, Server, ServerReport, WebRate } from './api'
 import { tr } from './i18n'
 
 // Запросы в минуту по access-логам ноды: блок кладёт root-хелпер webserver-setup, агент
@@ -11,6 +11,16 @@ export function webRate(r?: ServerReport | null): WebRate | null {
   // данные из-за этого пропадали бы
   const nowTs = r?.clock_unix || Date.now() / 1000
   return nowTs - w.ts > 900 ? null : w
+}
+
+// Разбор места от helper'а diskusage-setup. Блок обновляется раз в 10 минут, пока раздел
+// заполняется; старше двух часов - helper встал, старый разбор за свежий не выдаем.
+// Возраст - по часам самой ноды, как у блока веба.
+export function diskUsage(r?: ServerReport | null): DiskUsage | null {
+  const d = r?.extras?.['disk-usage']
+  if (!d || !d.ts || !Array.isArray(d.fs) || !d.fs.length) return null
+  const nowTs = r?.clock_unix || Date.now() / 1000
+  return nowTs - d.ts > 7200 ? null : d
 }
 
 // Подпись лога - как у панели (web_log_label): под kubernetes, "контейнер (домены +N)",

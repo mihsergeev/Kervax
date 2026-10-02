@@ -921,11 +921,38 @@ export type ServerReport = {
   kube_expiry?: KubeExpiry[] // сроки PKI/kubeconfig/токенов Flux (хелпер kubeexpiry-setup)
   flux?: FluxState[] | null // состояния Ready ресурсов Flux; null = данных нет
   caps?: Record<string, boolean> // возможности агента: kmsg, proc_full (полный ли /proc)
-  extras?: { 'web-rate'?: WebRate } & Record<string, unknown> // блоки хелперов как есть
+  extras?: { 'web-rate'?: WebRate; 'disk-usage'?: DiskUsage } & Record<string, unknown> // блоки хелперов как есть
   clock?: ClockInfo // статус синхронизации времени (timedatectl)
   clock_skew_sec?: number // сдвиг часов ноды относительно панели, сек (± ; считает бэкенд)
   clock_unix?: number // локальные часы ноды на момент отправки отчёта
 }
+// Разбор места (helper diskusage-setup): есть, пока раздел заполняется (от 75%). Helper
+// ничего не удаляет, у находок - команда для человека.
+export type DiskUsageDir = { path: string; bytes: number }
+export type DiskUsageFs = {
+  mount: string
+  size: number
+  used: number
+  avail: number
+  pct: number
+  inodes: number
+  top_state: 'ok' | 'partial' | 'skipped'
+  top_ts: number
+  top: DiskUsageDir[] // самые большие каталоги до глубины 3, от 1% раздела
+}
+export type DiskUsageItem = {
+  id: string
+  bytes: number
+  free: number // сколько освободит команда (у журнала - сверх оставляемых 200 МБ)
+  mount: string
+  path: string
+  level: 'safe' | 'careful' | 'manual'
+  fix: string // команда без sudo; пусто - автоматом не решается
+  count?: number
+  name?: string // имя контейнера у его лога
+  procs?: { pid: number; comm: string; bytes: number }[] // кто держит удаленные файлы
+}
+export type DiskUsage = { v: number; ts: number; fs: DiskUsageFs[]; items: DiskUsageItem[] }
 export type ClockInfo = {
   synced: boolean // NTPSynchronized=yes
   ntp: boolean // синхронизация включена
