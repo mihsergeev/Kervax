@@ -3,13 +3,15 @@
 # measures the usual suspects - systemd journal, rotated and oversized logs, package caches, docker, container logs,
 # old temp files, restic cache, core dumps, space held by deleted files that are still
 # open - plus the biggest directories, and writes /var/lib/kervax/report.d/disk-usage.json.
-# The agent hands report.d to the panel as is, so no agent release is needed.
+# The agent hands report.d to the panel as is.
 #
-# READ ONLY: nothing is deleted here. Every finding carries the command that frees the
-# space; the panel shows it for a human to run.
+# The measurement deletes nothing: every finding carries the command that frees the space.
+# Since 0.3 the panel can also start some of them itself ("Free up" with a preview first):
+# a root fixer with a fixed catalogue of actions, reached through a spool like the other
+# helpers, and only for the actions /etc/kervax/fix.conf on this node allows.
 set -euo pipefail
 
-KERVAX_SETUP_VERSION=0.2  # MAJOR.MINOR; compared component-wise
+KERVAX_SETUP_VERSION=0.3  # MAJOR.MINOR; compared component-wise
 KERVAX_SETUP_ALWAYS=1     # safe on any node: while disks have room it only reads df
 
 HELPER_DIR=/lib65/kervax
@@ -299,7 +301,19 @@ done <<EOF_HOT2
 $HOT
 EOF_HOT2
 
-printf '{"v":1,"ts":%s,"fs":[%s],"items":[%s]}\n' "$now" "$FSJ" "$ITEMS" > "$TMP"
+# Which "Free up" actions the panel may start here: only with the fixer installed, and only
+# what /etc/kervax/fix.conf allows.
+FIXJ=""
+if [ -x /lib65/kervax/kervax-disk-fix ]; then
+  allow=$(grep -E '^allow=' /etc/kervax/fix.conf 2>/dev/null | tail -1 | cut -d= -f2- | tr ',' ' ')
+  for a in $allow; do
+    case "$a" in *[!a-z-]*) continue ;; esac
+    FIXJ="$FIXJ${FIXJ:+,}\"$a\""
+  done
+  FIXJ=",\"fix\":{\"v\":1,\"allow\":[$FIXJ]}"
+fi
+
+printf '{"v":1,"ts":%s,"fs":[%s],"items":[%s]%s}\n' "$now" "$FSJ" "$ITEMS" "$FIXJ" > "$TMP"
 mv -f "$TMP" "$OUT"
 chmod 0644 "$OUT"
 HELPER_EOF
@@ -332,6 +346,255 @@ systemctl enable --now kervax-disk-usage.timer >/dev/null 2>&1 || true
 # installer (or an ansible run over the fleet) must not wait for it.
 systemctl start --no-block kervax-disk-usage.service >/dev/null 2>&1 || true
 
+# -- "Free up" actions started from the panel --
+# The agent (unprivileged kervax) drops a request into /var/lib/kervax/du-req, a root path
+# unit runs the fixer, the answer goes to /var/lib/kervax/du-res: the spool scheme of
+# timesync-setup. The fixer knows a fixed catalogue of actions and runs only the ones listed
+# in /etc/kervax/fix.conf. That file belongs to the node: the panel cannot add anything.
+AGENT_USER=kervax
+REQ_DIR="$STATE_DIR/du-req"
+RES_DIR="$STATE_DIR/du-res"
+FIXER="$HELPER_DIR/kervax-disk-fix"
+if getent group "$AGENT_USER" >/dev/null 2>&1; then
+  install -d -o root -g "$AGENT_USER" -m 0730 "$REQ_DIR"
+  install -d -o root -g "$AGENT_USER" -m 0770 "$RES_DIR"
+  # the agent runs under ProtectSystem=strict: let it write the spool in /var/lib/kervax
+  if systemctl cat kervax-agent >/dev/null 2>&1 \
+     && [ ! -f /etc/systemd/system/kervax-agent.service.d/kervax-spool.conf ]; then
+    install -d -m 0755 /etc/systemd/system/kervax-agent.service.d
+    printf '[Service]\nReadWritePaths=/var/lib/kervax\n' \
+      > /etc/systemd/system/kervax-agent.service.d/kervax-spool.conf
+    systemctl daemon-reload 2>/dev/null || true
+    systemctl try-restart kervax-agent 2>/dev/null || true
+  fi
+  install -d -m 0755 /etc/kervax
+  if [ ! -f /etc/kervax/fix.conf ]; then
+    cat > /etc/kervax/fix.conf <<'CONF_EOF'
+# Kervax: actions the panel may run on this node from "Where the disk space went".
+# The fixer refuses anything not listed here, and the panel cannot change this file.
+# Remove an action to switch its button off; "allow=" with nothing disables them all.
+allow=journal rotated-logs apt-cache dnf-cache coredumps crash-reports docker-dangling docker-build-cache container-log
+CONF_EOF
+    chmod 0644 /etc/kervax/fix.conf
+  fi
+
+  cat > "$FIXER" <<'FIXER_EOF'
+#!/usr/bin/env bash
+# Kervax "Free up" actions (root), started from the panel through the spool. A fixed
+# catalogue; an action runs only when /etc/kervax/fix.conf on this node allows it.
+#   preview - what would be removed and how much space that frees; nothing is touched;
+#   run     - remove it and report how much was actually freed.
+# The answer is one line of JSON in the spool format of the other Kervax helpers.
+set -u
+export LC_ALL=C
+REQ_DIR=/var/lib/kervax/du-req
+RES_DIR=/var/lib/kervax/du-res
+CONF=/etc/kervax/fix.conf
+CACHE=/var/lib/kervax/disk-usage
+
+have() { command -v "$1" >/dev/null 2>&1; }
+esc() { printf '%s' "$1" | tr -d '\000-\037' | sed 's/\\/\\\\/g; s/"/\\"/g'; }
+size_of() { du -sxB1 -- "$@" 2>/dev/null | awk '{s += $1} END {printf "%.0f", s}'; }
+allowed() {
+  grep -E '^allow=' "$CONF" 2>/dev/null | tail -1 | cut -d= -f2- | tr ', ' '\n\n' | grep -qxF -- "$1"
+}
+# docker prints sizes in powers of 1000: "1.2GB", "512kB", "0B"
+dbytes() {
+  awk '{ n = $1 + 0; u = $1; sub(/^[0-9.]+/, "", u)
+         if (u == "kB" || u == "KB") n *= 1e3; else if (u == "MB") n *= 1e6
+         else if (u == "GB") n *= 1e9; else if (u == "TB") n *= 1e12
+         s += n } END {printf "%.0f", s}'
+}
+# rotated logs older than a week: the same selection as in the measurement
+rotated() {
+  find /var/log -xdev -path /var/log/journal -prune -o -type f \( -name '*.gz' -o -name '*.xz' \
+    -o -name '*.bz2' -o -name '*.zst' -o -name '*.old' -o -regex '.*\.[0-9][0-9]*' \) -mtime +7 "$@"
+}
+
+# Every action prints "<bytes> <count>" on the first line and sample lines after it.
+act_journal() {
+  local b a
+  b=$(size_of /var/log/journal)
+  if [ "$1" = run ]; then
+    journalctl --vacuum-size=200M >/dev/null 2>&1 || { echo "journalctl --vacuum-size failed" >&2; return 1; }
+    a=$(size_of /var/log/journal)
+    echo "$((b - a)) 0"
+  else
+    a=$((b - 200 * 1024 * 1024)); [ "$a" -gt 0 ] || a=0
+    echo "$a 0"
+  fi
+}
+act_rotated() {
+  local list
+  list=$(rotated -printf '%s\t%p\n' 2>/dev/null | sort -rn)
+  printf '%s\n' "$list" | awk -F'\t' 'NF {s += $1; n++} END {printf "%.0f %d\n", s, n}'
+  printf '%s\n' "$list" | head -10 | cut -f2-
+  if [ "$1" = run ]; then rotated -delete 2>/dev/null; fi
+  return 0
+}
+act_pkgcache() {  # mode action
+  local d=/var/cache/apt/archives tool="apt-get clean" b a n
+  if [ "$2" = dnf-cache ]; then
+    if have dnf; then d=/var/cache/dnf; tool="dnf clean all"; else d=/var/cache/yum; tool="yum clean all"; fi
+  fi
+  b=$(size_of "$d")
+  n=$(find "$d" -xdev -type f \( -name '*.deb' -o -name '*.rpm' \) 2>/dev/null | wc -l)
+  if [ "$1" = run ]; then
+    $tool >/dev/null 2>&1 || { echo "$tool failed" >&2; return 1; }
+    a=$(size_of "$d")
+    echo "$((b - a)) $n"
+  else
+    echo "$b $n"
+  fi
+}
+act_files_in() {  # mode dir: regular files right inside a directory (core dumps, crash reports)
+  local list
+  list=$(find "$2" -xdev -maxdepth 1 -type f -printf '%s\t%p\n' 2>/dev/null | sort -rn)
+  printf '%s\n' "$list" | awk -F'\t' 'NF {s += $1; n++} END {printf "%.0f %d\n", s, n}'
+  printf '%s\n' "$list" | head -10 | cut -f2-
+  if [ "$1" = run ]; then find "$2" -xdev -maxdepth 1 -type f -delete 2>/dev/null; fi
+  return 0
+}
+act_dangling() {
+  local list b out
+  list=$(timeout 60 docker images -f dangling=true --format '{{.ID}} {{.Size}} {{.CreatedSince}}' 2>/dev/null)
+  b=$(printf '%s\n' "$list" | awk 'NF {print $2}' | dbytes)
+  if [ "$1" = run ]; then
+    out=$(timeout 900 docker image prune -f 2>&1) || { printf '%s\n' "$out" | tail -3 >&2; return 1; }
+    b=$(printf '%s\n' "$out" | awk -F': ' 'tolower($0) ~ /reclaimed space/ {print $2}' | dbytes)
+  fi
+  echo "$b $(printf '%s\n' "$list" | grep -c .)"
+  printf '%s\n' "$list" | head -10
+}
+act_buildcache() {
+  local b out
+  if [ "$1" = run ]; then
+    out=$(timeout 900 docker builder prune -af 2>&1) || { printf '%s\n' "$out" | tail -3 >&2; return 1; }
+    b=$(printf '%s\n' "$out" | awk 'tolower($1) ~ /^total/ {print $NF}' | dbytes)
+  else
+    b=$(timeout 120 docker system df --format '{{.Type}}|{{.Reclaimable}}' 2>/dev/null \
+        | awk -F'|' '$1 == "Build Cache" {print $2}' | dbytes)
+  fi
+  echo "$b 0"
+}
+act_container_log() {  # mode container
+  local root lp s
+  root=$(timeout 20 docker info -f '{{.DockerRootDir}}' 2>/dev/null)
+  [ -n "$root" ] || root=/var/lib/docker
+  lp=$(timeout 20 docker inspect --format '{{.LogPath}}' "$2" 2>/dev/null)
+  # only a json-file log under the docker root: the path comes from docker, not from the panel
+  case "$lp" in
+    "$root"/containers/*/*-json.log) ;;
+    *) echo "container $2 has no json-file log" >&2; return 1 ;;
+  esac
+  [ -f "$lp" ] || { echo "the log file of $2 is missing" >&2; return 1; }
+  s=$(stat -c %s -- "$lp")
+  if [ "$1" = run ]; then truncate -s 0 -- "$lp" || { echo "truncate failed" >&2; return 1; }; fi
+  echo "$s 1"
+  echo "$lp"
+}
+
+run_action() {  # action mode container
+  case "$1" in
+    journal) act_journal "$2" ;;
+    rotated-logs) act_rotated "$2" ;;
+    apt-cache|dnf-cache) act_pkgcache "$2" "$1" ;;
+    coredumps) act_files_in "$2" /var/lib/systemd/coredump ;;
+    crash-reports) act_files_in "$2" /var/crash ;;
+    docker-dangling) act_dangling "$2" ;;
+    docker-build-cache) act_buildcache "$2" ;;
+    container-log) act_container_log "$2" "$3" ;;
+    *) echo "unknown action" >&2; return 1 ;;
+  esac
+}
+
+process_spool() {
+  local req id line k v act mode cont tmpd first b n sample ok out refresh=""
+  for req in "$REQ_DIR"/*.req; do
+    [ -f "$req" ] || continue
+    id=$(basename "$req" .req)
+    act=""; mode=""; cont=""
+    while IFS= read -r line; do
+      k=${line%%=*}; v=${line#*=}
+      case "$k" in action) act=$v ;; mode) mode=$v ;; container) cont=$v ;; esac
+    done < "$req"
+    rm -f "$req"
+    ok=false
+    case "$mode" in preview|run) ;; *) act="" ;; esac
+    if [ "$act" = container-log ]; then
+      case "$cont" in [A-Za-z0-9]*) ;; *) act="" ;; esac
+      case "$cont" in *[!A-Za-z0-9._-]*) act="" ;; esac
+    fi
+    if [ -z "$act" ]; then
+      out="bad request"
+    elif ! allowed "$act"; then
+      out="the action $act is not allowed on this node (/etc/kervax/fix.conf)"
+    else
+      tmpd=$(mktemp -d)
+      if run_action "$act" "$mode" "$cont" > "$tmpd/out" 2> "$tmpd/err"; then
+        first=$(head -1 "$tmpd/out"); b=${first%% *}; n=${first#* }
+        case "$b" in ''|*[!0-9-]*) b=0 ;; esac
+        case "$n" in ''|*[!0-9]*) n=0 ;; esac
+        [ "$b" -ge 0 ] 2>/dev/null || b=0
+        sample=""
+        while IFS= read -r line; do
+          [ -n "$line" ] && sample="$sample${sample:+,}\"$(esc "$line")\""
+        done <<EOF_S
+$(tail -n +2 "$tmpd/out" | head -10)
+EOF_S
+        out="{\"action\":\"$act\",\"mode\":\"$mode\",\"bytes\":$b,\"count\":$n,\"sample\":[$sample]}"
+        ok=true
+        if [ "$mode" = run ]; then refresh=1; fi
+      else
+        out=$(tr '\n' ' ' < "$tmpd/err" | cut -c1-300)
+        [ -n "$out" ] || out="the action failed"
+      fi
+      rm -rf "$tmpd"
+    fi
+    printf 'ok=%s\noutput=%s\n' "$ok" "$out" > "$RES_DIR/$id.res.tmp"
+    mv -f "$RES_DIR/$id.res.tmp" "$RES_DIR/$id.res"
+    chmod 0644 "$RES_DIR/$id.res"
+  done
+  # after a run the panel should see the new numbers at once, not in ten minutes
+  if [ -n "$refresh" ]; then
+    rm -f "$CACHE/docker-df"
+    systemctl start --no-block kervax-disk-usage.service >/dev/null 2>&1 || true
+  fi
+}
+
+case "${1:-}" in
+  process-spool) process_spool ;;
+  preview|run) run_action "${2:-}" "$1" "${3:-}" ;;
+  *) echo "usage: $0 process-spool | preview|run <action> [container]" >&2; exit 2 ;;
+esac
+FIXER_EOF
+  chmod 0755 "$FIXER"
+  chown root:root "$FIXER"
+
+  cat > /etc/systemd/system/kervax-du-req.service <<UNIT_EOF
+[Unit]
+Description=Kervax: "Free up" requests from the panel
+[Service]
+Type=oneshot
+ExecStart=$FIXER process-spool
+TimeoutStartSec=20min
+UNIT_EOF
+  cat > /etc/systemd/system/kervax-du-req.path <<UNIT_EOF
+[Unit]
+Description=Kervax: watch the "Free up" request spool
+[Path]
+DirectoryNotEmpty=$REQ_DIR
+Unit=kervax-du-req.service
+[Install]
+WantedBy=multi-user.target
+UNIT_EOF
+  systemctl daemon-reload
+  systemctl enable --now kervax-du-req.path >/dev/null 2>&1 || true
+else
+  echo "· no Kervax agent group on this node: the \"Free up\" actions are not installed." >&2
+fi
+
 echo "$KERVAX_SETUP_VERSION" > "$STATE_DIR/versions/diskusage-setup.ver"
 chmod 0644 "$STATE_DIR/versions/diskusage-setup.ver"
-echo "✓ diskusage-setup: where the disk space went -> $OUT (every 10 minutes, only while a disk fills up)."
+echo "✓ diskusage-setup: where the disk space went -> $OUT (every 10 minutes, only while a disk fills up);"
+echo "  \"Free up\" actions through $REQ_DIR, allowed by /etc/kervax/fix.conf."

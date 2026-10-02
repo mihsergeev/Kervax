@@ -303,6 +303,25 @@ const EN: Record<string, string> = {
   'Копировать': 'Copy',
   'Скопировано': 'Copied',
   'На что ушло место': 'Where the disk space went',
+  'Освободить': 'Free up',
+  'Обнулить': 'Truncate',
+  'Выполнить': 'Run',
+  'закрыть': 'close',
+  'Нода считает, что удалится...': 'The node is working out what would be removed...',
+  'Освободится ~{n}': 'About {n} will be freed',
+  'Освобождать нечего.': 'Nothing to free.',
+  'файлов: {n}': 'files: {n}',
+  'Выполняю...': 'Running...',
+  'Выполняю, docker может чистить несколько минут...': 'Running, docker may take a few minutes...',
+  'Освобождено {n}': 'Freed {n}',
+  'цифры обновятся со следующим отчетом': 'the numbers update with the next report',
+  'нода не ответила вовремя': 'the node did not answer in time',
+  'На этой ноде действие выключено: его нет в /etc/kervax/fix.conf.':
+    'The action is switched off on this node: it is not in /etc/kervax/fix.conf.',
+  'Кнопки "Освободить" появятся после обновления helper diskusage-setup до 0.3 (ansible kervax_helpers.yml).':
+    'The "Free up" buttons appear once the diskusage-setup helper is updated to 0.3 (ansible kervax_helpers.yml).',
+  'Кнопки "Освободить" появятся после обновления агента до {v}.':
+    'The "Free up" buttons appear once the agent is updated to {v}.',
   'замер {n} мин назад': 'measured {n} min ago',
   'занято {u} из {s}, свободно {a}': '{u} of {s} used, {a} free',
   'Что можно освободить': 'What can be freed',
@@ -433,7 +452,6 @@ const EN: Record<string, string> = {
     'Turn off {eng} dumps? Local dump files will be deleted; history stays in restic.',
   'дамп включён — снимается перед каждым бэкапом в /backup/{eng}, хранится {k} последних':
     'dump enabled — taken before every backup into /backup/{eng}, {k} latest kept',
-  'файлов: {n}': 'files: {n}',
   'ещё не снимался': 'not taken yet',
   '{n} мин назад': '{n} min ago',
   '{n} ч назад': '{n} h ago',

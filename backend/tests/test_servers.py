@@ -1684,3 +1684,56 @@ async def test_expiry_alert_text_and_link(tmp_path, monkeypatch):
     assert "обновите до этой даты" not in msg and " · " not in msg
     assert "?kube=1&amp;ktab=expiry" in msg or "?kube=1&ktab=expiry" in msg
     await engine.dispose()
+
+
+async def test_disk_fix_command(client, auth_headers):
+    """Кнопка "Освободить": команда disk_fix уходит агенту с действием и контейнером, ответ
+    helper'а (JSON) возвращается как есть. Кривые запросы отвергаются, редактору нельзя -
+    это root-действие на ноде."""
+    r = await client.post("/api/servers", json={"name": "dfx"}, headers=auth_headers)
+    token, sid = r.json()["token"], r.json()["server"]["id"]
+    ah = {"Authorization": f"Bearer {token}"}
+    url = f"/api/servers/{sid}/backup/command"
+
+    async def post(body, headers=auth_headers):
+        return await client.post(url, json=body, headers=headers)
+
+    assert (await post({"action": "disk_fix", "mode": "run", "fix": "rm-rf"})).status_code == 422
+    assert (await post({"action": "disk_fix", "mode": "run", "fix": "container-log"})).status_code == 400
+    assert (await post({"action": "disk_fix", "mode": "exclude", "fix": "journal"})).status_code == 400
+    assert (await post({"action": "set_schedule", "mode": "run", "schedule": "02:30"})).status_code == 400
+    assert (await post({"action": "disk_fix", "mode": "run", "fix": "container-log",
+                        "container": "../../etc/passwd"})).status_code == 422
+
+    r = await post({"action": "disk_fix", "mode": "preview", "fix": "container-log",
+                    "container": "coolify-sentinel"})
+    assert r.status_code == 200
+    cid = r.json()["id"]
+    rep = {"agent_version": "2.13", "mem_used": 1, "mem_total": 2,
+           "disks": [{"mount": "/", "used": 1, "total": 2}]}
+    resp = (await client.post("/api/agent/report", json=rep, headers=ah)).json()
+    assert resp["backup_commands"] == [
+        {"id": cid, "action": "disk_fix", "mode": "preview", "paths": [], "schedule": "",
+         "name": "container-log", "container": "coolify-sentinel"}
+    ]
+    out = ('{"action":"container-log","mode":"preview","bytes":1314650,"count":1,'
+           '"sample":["/var/lib/docker/containers/ed5c/ed5c-json.log"]}')
+    r = await client.post("/api/agent/backup-result", json={"id": cid, "ok": True, "output": out},
+                          headers=ah)
+    assert r.status_code == 200
+    st = (await client.get(f"{url}/{cid}", headers=auth_headers)).json()
+    assert st["status"] == "done" and st["result"] == out
+
+    # журнал без контейнера: контейнер в команду не попадает
+    r = await post({"action": "disk_fix", "mode": "run", "fix": "journal", "container": "x"})
+    resp = (await client.post("/api/agent/report", json=rep, headers=ah)).json()
+    assert resp["backup_commands"][0]["name"] == "journal" and resp["backup_commands"][0]["container"] == ""
+
+    r = await client.post("/api/users", json={"username": "ed", "password": "editorpass-001",
+                                              "role": "editor"}, headers=auth_headers)
+    assert r.status_code == 201
+    tok = (await client.post("/api/auth/login",
+                             json={"username": "ed", "password": "editorpass-001"})).json()["access_token"]
+    r = await post({"action": "disk_fix", "mode": "preview", "fix": "journal"},
+                   {"Authorization": f"Bearer {tok}"})
+    assert r.status_code == 403

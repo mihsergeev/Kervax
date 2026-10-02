@@ -1509,10 +1509,15 @@ async def _take_backup_commands(session, server_id: int) -> list[dict]:
     return cmds
 
 
+# Сколько ждать ответа агента, прежде чем считать команду пропавшей. disk_fix дольше:
+# docker builder prune по кэшу в десятки ГБ идет минутами, агент ждет helper до 15 минут.
+_CMD_TIMEOUT = {"disk_fix": 16 * 60}
+
+
 def _backup_cmd_out(c: BackupCommand, now: datetime) -> BackupCommandOut:
     if c.status == "running" and (now - c.created_at.replace(
         tzinfo=c.created_at.tzinfo or timezone.utc
-    )).total_seconds() > 90:
+    )).total_seconds() > _CMD_TIMEOUT.get(c.action, 90):
         c.status, c.ok, c.result = "error", False, "агент не ответил (таймаут)"
     return BackupCommandOut.model_validate(c)
 
@@ -1527,7 +1532,20 @@ async def backup_command(
     # engine/container нужны только dump_setup — кладём в payload (агент мержит его
     # в команду верхним уровнем), чтобы не плодить колонки под разовые поля
     payload = None
-    if body.action in ("dump_setup", "dump_remove"):
+    if body.action == "disk_fix":
+        # Root-действие на ноде (удаляет файлы): только админ и только из каталога. Путь
+        # к логу контейнера панель не передает - helper берет его у docker по имени.
+        if user.role != "admin":
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "Требуются права администратора")
+        if not body.fix or body.mode not in ("preview", "run"):
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "не указано действие или режим")
+        if body.fix == "container-log" and not body.container:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "не указан контейнер")
+        payload = {"name": body.fix,
+                   "container": body.container if body.fix == "container-log" else ""}
+    elif body.mode in ("preview", "run"):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "режим preview/run - только у disk_fix")
+    elif body.action in ("dump_setup", "dump_remove"):
         if not body.engine:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "не указан движок дампа")
         payload = {"engine": body.engine, "container": body.container}
@@ -1543,10 +1561,10 @@ async def backup_command(
     session.add(c)
     await session.commit()
     await session.refresh(c)
-    await audit.record(
-        session, user.username, f"backup_{body.action}",
-        (body.schedule or f"{body.mode}:{len(body.paths)}")[:120], f"srv={server_id}"
-    )
+    target = (body.schedule or f"{body.mode}:{len(body.paths)}")[:120]
+    if body.action == "disk_fix":
+        target = f"{body.fix}:{body.mode}" + (f":{body.container}" if payload["container"] else "")
+    await audit.record(session, user.username, f"backup_{body.action}", target, f"srv={server_id}")
     return BackupCommandOut.model_validate(c)
 
 

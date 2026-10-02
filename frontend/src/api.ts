@@ -952,7 +952,13 @@ export type DiskUsageItem = {
   name?: string // имя контейнера у его лога
   procs?: { pid: number; comm: string; bytes: number }[] // кто держит удаленные файлы
 }
-export type DiskUsage = { v: number; ts: number; fs: DiskUsageFs[]; items: DiskUsageItem[] }
+export type DiskUsage = {
+  v: number
+  ts: number
+  fs: DiskUsageFs[]
+  items: DiskUsageItem[]
+  fix?: { v: number; allow: string[] } // helper 0.3+: какие действия "Освободить" нода разрешает
+}
 export type ClockInfo = {
   synced: boolean // NTPSynchronized=yes
   ntp: boolean // синхронизация включена
@@ -1430,6 +1436,8 @@ export function backupCommand(
     | { action: 'restic_update' }
     | { action: 'update_image' }
     | { action: 'timesync' }
+    // "Освободить" из разбора места; контейнер - только у лога контейнера
+    | { action: 'disk_fix'; mode: 'preview' | 'run'; fix: string; container?: string }
     | { action: 'dump_remove'; engine: string; container: string }
     | {
         action: 'dump_setup'
