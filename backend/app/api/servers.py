@@ -389,6 +389,7 @@ _SETUP_LABEL = {
     "kubeexpiry-setup": "Сроки Kubernetes и Flux",
     "webserver-setup": "Веб-домены",
     "timesync-setup": "Синхронизация времени",
+    "diskusage-setup": "Разбор места на диске",
     "dbstat-setup": "Инвентарь СУБД",
     "agent-watchdog": "Вотчдог агента",
 }

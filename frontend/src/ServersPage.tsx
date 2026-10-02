@@ -18,6 +18,9 @@ import {
   snoozeServerAlert,
   updateServer,
   type ClockInfo,
+  type DiskUsageDir,
+  type DiskUsageFs,
+  type DiskUsageItem,
   type HelperAdvice,
   type OomEvent,
   type ProcStat,
@@ -25,9 +28,10 @@ import {
   type Server,
   type ServerEnroll,
   type ServerMetric,
+  type ServerReport,
 } from './api'
 import { StackedAreaChart, type Series } from './charts/StackedAreaChart'
-import { fmtSetupVersion, srvIssues, webLogLabel, webRate, webSeriesName, webUnparsed } from './serverUtils'
+import { diskUsage, fmtSetupVersion, srvIssues, webLogLabel, webRate, webSeriesName, webUnparsed } from './serverUtils'
 import { OsIcon } from './osIcon'
 import { CountryFlag } from './CountryFlag'
 import { currentLang, useI18n } from './i18n'
@@ -1180,6 +1184,190 @@ const PROC_STATE: Record<string, string> = {
   T: 'остановлен',
   t: 'под трассировкой',
   X: 'мёртв',
+}
+
+type TFn = (s: string, vars?: Record<string, string | number>) => string
+
+const duLevel = (l: string, t: TFn) =>
+  l === 'safe' ? t('безопасно') : l === 'careful' ? t('осторожно') : t('вручную')
+
+function duLabel(it: DiskUsageItem, t: TFn): string {
+  switch (it.id) {
+    case 'journal': return t('Журнал systemd')
+    case 'rotated-logs': return t('Старые ротированные логи: {n} файлов старше 7 дней', { n: it.count ?? 0 })
+    case 'big-log': return t('Большой лог {p}', { p: it.path })
+    case 'apt-cache': return t('Кэш пакетов apt')
+    case 'dnf-cache': return t('Кэш пакетов dnf/yum')
+    case 'tmp-old': return t('Файлы в /tmp старше 10 дней')
+    case 'vartmp-old': return t('Файлы в /var/tmp старше 30 дней')
+    case 'coredumps': return t('Дампы памяти упавших программ')
+    case 'crash-reports': return t('Отчеты о падениях в /var/crash')
+    case 'restic-cache': return t('Кэш restic {p}', { p: it.path })
+    case 'docker-dangling': return t('Docker: образы без тега')
+    case 'docker-build-cache': return t('Docker: кэш сборки')
+    case 'docker-images': return t('Docker: образы, которые не использует ни один контейнер')
+    case 'docker-containers': return t('Docker: остановленные контейнеры')
+    case 'docker-volumes': return t('Docker: тома, не подключенные ни к одному контейнеру')
+    case 'container-log': return t('Лог контейнера {name}', { name: it.name ?? '?' })
+    case 'deleted-open': return t('Удаленные файлы, которые еще держат процессы')
+    case 'old-kernels': return t('Старые ядра в /boot: {n} шт.', { n: it.count ?? 0 })
+    default: return it.id
+  }
+}
+
+function duHint(it: DiskUsageItem, t: TFn): string {
+  switch (it.id) {
+    case 'journal': return t('Останутся последние 200 МБ записей.')
+    case 'big-log': return t('Содержимое лога пропадет. Чтобы не рос снова, проверьте для него logrotate.')
+    case 'tmp-old':
+    case 'vartmp-old': return t('Обычно это мусор, но некоторые программы держат там рабочие файлы.')
+    case 'restic-cache': return t('Пересоздастся при следующем бэкапе, тот пойдет медленнее. Не удаляйте во время бэкапа.')
+    case 'docker-build-cache': return t('Следующая сборка образов пойдет без кэша.')
+    case 'docker-images': return t('Скачаются или соберутся заново, когда понадобятся; образы, собранные только локально, придется собирать снова.')
+    case 'docker-containers': return t('Контейнеры удалятся вместе с данными внутри них.')
+    case 'docker-volumes': return t('В томах могут быть данные: посмотрите список и удаляйте вручную.')
+    case 'container-log': return t('Содержимое лога пропадет. Чтобы не рос снова, задайте log-opts max-size в /etc/docker/daemon.json.')
+    case 'deleted-open':
+      return t('Место освободится после перезапуска: {p}.', {
+        p: (it.procs ?? []).map((p) => `${p.comm} (pid ${p.pid})`).join(', ') || '?',
+      })
+    case 'old-kernels': return t('apt удалит ядра, которые больше не нужны; текущее останется.')
+    default: return ''
+  }
+}
+
+// Самые большие каталоги раздела деревом: родитель - ближайший каталог списка, который
+// является началом пути; дети по убыванию размера, полоска - доля от занятого.
+function DuTree({ fs, t }: { fs: DiskUsageFs; t: TFn }) {
+  const [all, setAll] = useState(false)
+  if (fs.top_state === 'skipped')
+    return (
+      <div className="muted small">
+        {t('Раздел слишком большой для полного обхода ({n} млн файлов), смотрите находки ниже.', {
+          n: (fs.inodes / 1e6).toFixed(1),
+        })}
+      </div>
+    )
+  const top = [...fs.top].sort((a, b) => b.bytes - a.bytes)
+  const parentOf = (p: string) => {
+    let best = ''
+    for (const q of top)
+      if (q.path !== p && p.startsWith(q.path.replace(/\/$/, '') + '/') && q.path.length > best.length) best = q.path
+    return best
+  }
+  const kids = new Map<string, DiskUsageDir[]>()
+  for (const d of top) {
+    const pp = parentOf(d.path)
+    kids.set(pp, [...(kids.get(pp) ?? []), d])
+  }
+  const rows: { d: DiskUsageDir; depth: number; parent: string }[] = []
+  const walk = (p: string, depth: number) => {
+    for (const d of kids.get(p) ?? []) {
+      rows.push({ d, depth, parent: p })
+      walk(d.path, depth + 1)
+    }
+  }
+  walk('', 0)
+  const shown = all ? rows : rows.slice(0, 12)
+  const base = fs.used || 1
+  return (
+    <div className="du-tree">
+      {shown.map(({ d, depth, parent }) => (
+        <div key={d.path} className="du-row" style={{ paddingLeft: `${depth * 14}px` }} title={d.path}>
+          <span className="mono du-path">{parent ? d.path.slice(parent.length).replace(/^\//, '') : d.path}</span>
+          <span className="du-bar">
+            <span style={{ width: `${Math.min(100, (d.bytes / base) * 100)}%` }} />
+          </span>
+          <span className="mono du-size">{fmtBytes(d.bytes)}</span>
+        </div>
+      ))}
+      {rows.length > 12 && (
+        <button className="ghost small du-more" onClick={() => setAll(!all)}>
+          {all ? t('свернуть') : `${t('показать все')} (${rows.length})`}
+        </button>
+      )}
+      {fs.top_state === 'partial' && (
+        <div className="muted small">{t('Обход не успел целиком, показано то, что посчитано.')}</div>
+      )}
+      {!rows.length && fs.top_state === 'ok' && <div className="muted small">{t('Крупных каталогов нет.')}</div>}
+    </div>
+  )
+}
+
+// "На что ушло место" (helper diskusage-setup): дерево самых больших каталогов раздела и
+// находки с готовыми командами. Панель ничего не удаляет, команду запускает человек.
+function DiskUsageBlock({ r }: { r: ServerReport }) {
+  const { t } = useI18n()
+  const [copied, setCopied] = useState<string | null>(null)
+  const du = diskUsage(r)
+  if (!du) return null
+  const age = Math.max(0, Math.round(((r.clock_unix || Date.now() / 1000) - du.ts) / 60))
+  const copy = (txt: string, id: string) => {
+    navigator.clipboard?.writeText(txt)
+    setCopied(id)
+    window.setTimeout(() => setCopied(null), 1500)
+  }
+  return (
+    <div className="du-block">
+      <div className="chart-cap">
+        {t('На что ушло место')}
+        <span className="muted small du-age"> · {t('замер {n} мин назад', { n: age })}</span>
+      </div>
+      {du.fs.map((fs) => {
+        const items = du.items
+          .filter((i) => i.mount === fs.mount)
+          .sort((a, b) => (b.free || b.bytes) - (a.free || a.bytes))
+        const safe = items.filter((i) => i.level === 'safe').reduce((s, i) => s + i.free, 0)
+        return (
+          <div key={fs.mount} className="du-fs">
+            <div className="du-fs-head">
+              <span className="mono">{fs.mount}</span>
+              <span className="du-fs-pct">{fs.pct}%</span>
+              <span className="muted small">
+                {t('занято {u} из {s}, свободно {a}', {
+                  u: fmtBytes(fs.used),
+                  s: fmtBytes(fs.size),
+                  a: fmtBytes(fs.avail),
+                })}
+              </span>
+            </div>
+            <DuTree fs={fs} t={t} />
+            {items.length > 0 && (
+              <div className="du-items">
+                <div className="du-sub">
+                  {t('Что можно освободить')}
+                  {safe > 0 && <span className="muted small"> · {t('без риска ~{n}', { n: fmtBytes(safe) })}</span>}
+                </div>
+                {items.map((it, k) => {
+                  const key = `${fs.mount}|${k}`
+                  const cmd = it.fix ? `sudo ${it.fix}` : ''
+                  const hint = duHint(it, t)
+                  return (
+                    <div key={key} className="du-item">
+                      <div className="du-item-head">
+                        <span className={`du-lvl du-lvl-${it.level}`}>{duLevel(it.level, t)}</span>
+                        <span className="du-item-name">{duLabel(it, t)}</span>
+                        <span className="du-item-size mono">{fmtBytes(it.free || it.bytes)}</span>
+                      </div>
+                      {hint && <div className="muted small du-item-hint">{hint}</div>}
+                      {cmd && (
+                        <div className="agent-advice-cmd">
+                          <pre>{cmd}</pre>
+                          <button className="ghost" onClick={() => copy(cmd, key)}>
+                            {copied === key ? t('Скопировано') : t('Копировать')}
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  )
+                })}
+              </div>
+            )}
+          </div>
+        )
+      })}
+    </div>
+  )
 }
 
 function ProcCard({ title, procs, kind, total, t }: {
@@ -3384,6 +3572,7 @@ function ServerDetail({
             ) : (
               <div className="muted small">—</div>
             )}
+            <DiskUsageBlock r={r} />
           </div>
         </MetricSection>
 

@@ -711,3 +711,86 @@ async def test_error_lines_are_kept_and_downloadable(client, auth_headers):
                          params={"key": rows[0]["key"], "hours": 1}, headers=auth_headers)
     assert r.status_code == 200 and len(r.json()) == 6
     assert "chat_id=00" in r.json()[0] and "chat_id=12" in r.json()[-1]  # старые сверху
+
+
+def _du_report(clock: float, ts: float) -> dict:
+    gb = 1024 ** 3
+    return {"clock_unix": clock, "extras": {"disk-usage": {"v": 1, "ts": ts, "fs": [
+        {"mount": "/", "size": 100 * gb, "used": 88 * gb, "avail": 12 * gb, "pct": 88,
+         "top_state": "ok", "top_ts": ts, "inodes": 1000, "top": [
+             {"path": "/var", "bytes": 60 * gb}, {"path": "/var/lib", "bytes": 58 * gb},
+             {"path": "/var/lib/docker", "bytes": 50 * gb},
+             {"path": "/home", "bytes": 20 * gb}, {"path": "/home/www", "bytes": 19 * gb},
+             {"path": "/var/lib/mysql", "bytes": 7 * gb}]},
+        {"mount": "/data", "size": 100 * gb, "used": 80 * gb, "avail": 20 * gb, "pct": 80,
+         "top_state": "skipped", "top_ts": ts, "inodes": 9000000, "top": []}],
+        "items": [
+            {"id": "journal", "bytes": 4 * gb, "free": int(3.8 * gb), "mount": "/", "level": "safe"},
+            {"id": "docker-build-cache", "bytes": 2 * gb, "free": 2 * gb, "mount": "/", "level": "safe"},
+            {"id": "docker-images", "bytes": 9 * gb, "free": 9 * gb, "mount": "/", "level": "careful"},
+            {"id": "journal", "bytes": 5 * gb, "free": 5 * gb, "mount": "/data", "level": "safe"}]}}}
+
+
+def test_disk_cause_names_dirs_and_safe_space():
+    """Дисковый алерт говорит, на что ушло место (без матрешки /var > /var/lib) и сколько
+    освобождается без риска на самом заполненном разделе (осторожное не считаем)."""
+    from app.collector import disk_cause, disk_top_dirs
+
+    rep = _du_report(1_000_000, 1_000_000 - 600)
+    assert disk_top_dirs(rep["extras"]["disk-usage"]["fs"][0]) == [
+        ("/var/lib/docker", 50 * 1024 ** 3), ("/home/www", 19 * 1024 ** 3)]
+    assert disk_cause(rep) == (" - больше всего места: /var/lib/docker 50.0 ГБ, /home/www 19.0 ГБ;"
+                               " без риска освобождается ~5.8 ГБ")
+
+
+def test_disk_cause_ignores_stale_or_missing_block():
+    """Протухший блок (helper встал больше двух часов назад) и его отсутствие - алерт без хвоста."""
+    from app.collector import disk_cause
+
+    assert disk_cause(_du_report(1_000_000, 1_000_000 - 3 * 3600)) == ""
+    assert disk_cause({"extras": {}}) == ""
+    assert disk_cause({}) == ""
+
+
+def test_disk_template_with_cause_and_legacy_default():
+    """Новый дефолт диска подставляет {cause}; старый дефолт без него считается дефолтом,
+    чтобы у сохранивших форму алертов текст обновился сам."""
+    from app import settings_store
+
+    assert settings_store.SERVER_ALERT_KINDS["disk"][1] == "диск {value}% ≥ {threshold}%{cause}"
+    assert "диск {value}% ≥ {threshold}%" in settings_store.LEGACY_SERVER_DEFAULTS
+
+
+async def test_disk_alert_says_where_the_space_went(tmp_path, monkeypatch):
+    """Сквозной: дисковый алерт уходит с хвостом из разбора helper'а diskusage-setup."""
+    from datetime import datetime, timezone
+
+    from app import collector
+    from app.config import Settings
+    from app.db import Base, create_engine_and_factory
+    from app.models import Server
+
+    engine, factory = create_engine_and_factory(f"sqlite+aiosqlite:///{(tmp_path / 'du.db').as_posix()}")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    now = datetime.now(timezone.utc)
+    rep = _du_report(now.timestamp(), now.timestamp() - 300)
+    rep.update({"uptime_seconds": 100, "disks": [{"mount": "/", "used": 88, "total": 100}]})
+    async with factory() as s:
+        s.add(Server(name="node", token_hash="x", enabled=True, backup_not_required=True,
+                     last_seen=now, cpu_alert_percent=0, mem_alert_percent=0,
+                     disk_warn_percent=85, disk_alert_percent=90, disk_crit_percent=95,
+                     last_report=rep))
+        await s.commit()
+    sent: list[str] = []
+
+    async def fake_send(cfg, text, parse_mode=None):
+        sent.append(text)
+        return []
+
+    monkeypatch.setattr("app.alerts.send_alert", fake_send)
+    await collector.evaluate_servers(factory, Settings(alert_webhook="http://hook"), now)
+    assert len(sent) == 1 and "88%" in sent[0]
+    assert "больше всего места: /var/lib/docker 50.0 ГБ" in sent[0]
+    assert "без риска освобождается ~5.8 ГБ" in sent[0]
+    await engine.dispose()
