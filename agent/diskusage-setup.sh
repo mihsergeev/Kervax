@@ -9,7 +9,7 @@
 # space; the panel shows it for a human to run.
 set -euo pipefail
 
-KERVAX_SETUP_VERSION=0.1  # MAJOR.MINOR; compared component-wise
+KERVAX_SETUP_VERSION=0.2  # MAJOR.MINOR; compared component-wise
 KERVAX_SETUP_ALWAYS=1     # safe on any node: while disks have room it only reads df
 
 HELPER_DIR=/lib65/kervax
@@ -153,7 +153,10 @@ for d in /root/.cache/restic /var/cache/restic /home/*/.cache/restic; do
   [ -d "$d" ] || continue
   case "$d" in *\'*) continue ;; esac
   f="$CACHE/restic-$(printf '%s' "$d" | md5sum | cut -c1-12)"
-  fresh "$f" || size_of "$d" > "$f"
+  # the hourly measurement is redone early when the cache was removed and built again
+  if ! fresh "$f" || [ -n "$(find "$d" -maxdepth 0 -newer "$f" 2>/dev/null)" ]; then
+    size_of "$d" > "$f"
+  fi
   r=$(cat "$f" 2>/dev/null)
   add_item restic-cache "${r:-0}" "${r:-0}" "$d" careful "rm -rf '$d'"
 done
@@ -194,20 +197,19 @@ if have docker && timeout 20 docker info >/dev/null 2>&1; then
     esac
   done < "$f"
 
-  # container logs without max-size: the json-file driver never rotates them by itself
+  # Container logs without max-size: the json-file driver never rotates them by itself.
+  # Measured on every run, not cached: one docker inspect is cheap, and a log that was just
+  # truncated must not hang in the panel at its old size for an hour.
   f="$CACHE/docker-logs"
-  if ! fresh "$f"; then
-    ids=$(timeout 30 docker ps -aq 2>/dev/null | tr '\n' ' ')
-    if [ -n "$ids" ]; then
-      # shellcheck disable=SC2086
-      timeout 60 docker inspect --format '{{.Name}}|{{.LogPath}}' $ids 2>/dev/null \
-      | while IFS='|' read -r name lp; do
-          [ -n "$lp" ] && [ -f "$lp" ] && printf '%s\t%s\t%s\n' "$(stat -c %s -- "$lp")" "${name#/}" "$lp"
-        done | sort -rn | head -5 > "$f.tmp"
-    else
-      : > "$f.tmp"
-    fi
-    mv -f "$f.tmp" "$f"
+  ids=$(timeout 30 docker ps -aq 2>/dev/null | tr '\n' ' ')
+  if [ -n "$ids" ]; then
+    # shellcheck disable=SC2086
+    timeout 60 docker inspect --format '{{.Name}}|{{.LogPath}}' $ids 2>/dev/null \
+    | while IFS='|' read -r name lp; do
+        [ -n "$lp" ] && [ -f "$lp" ] && printf '%s\t%s\t%s\n' "$(stat -c %s -- "$lp")" "${name#/}" "$lp"
+      done | sort -rn | head -5 > "$f"
+  else
+    : > "$f"
   fi
   while IFS="$TAB" read -r b name lp; do
     [ -n "$lp" ] || continue
