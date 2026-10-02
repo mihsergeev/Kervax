@@ -61,7 +61,10 @@ five.
 CPU (with per-core and breakdown), memory and swap, disks per mount, network per
 interface, disk I/O, sockets and conntrack, temperature, throttling, OOM kills,
 reboots and the process tops. It runs as an unprivileged `kervax` user under
-systemd with `NoNewPrivileges`, and it never listens on a port.
+systemd with `NoNewPrivileges`, and it never listens on a port. When a disk fills
+up, the server card shows where the space went: the biggest directories, the
+journal, docker build cache and images, oversized logs, each with the command that
+frees it.
 
 **What runs on those servers.** Docker containers and Kubernetes pods, web
 servers and the sites they serve, databases and their sizes, RabbitMQ queue
