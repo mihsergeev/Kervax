@@ -4,6 +4,15 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.4.77] - 2026-10-02
+
+### Fixed
+- "На что ушло место" (helper diskusage-setup 0.2): обнуленный лог контейнера висел в
+  панели со старым размером до часа, потому что список логов кэшировался вместе с
+  тяжелыми замерами. Теперь размеры логов контейнеров меряются на каждом прогоне (один
+  docker inspect), а кэш restic пересчитывается раньше часа, если каталог удалили и он
+  собрался заново. Найдено после обнуления логов на нодах dentro.
+
 ## [1.4.76] - 2026-10-02
 
 ### Added
