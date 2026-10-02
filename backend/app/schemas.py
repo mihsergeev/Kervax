@@ -1313,8 +1313,9 @@ class BackupCommandIn(BaseModel):
     """Панель → очередь: управление restic-бэкапом ноды (через узкий helper).
     Только белый список: set_paths (include/exclude), set_schedule, run_now."""
 
-    action: str = Field(pattern="^(set_paths|set_schedule|run_now|dump_setup|dump_remove|restic_update|update_image|timesync)$")
-    mode: str = Field(default="exclude", pattern="^(include|exclude)$")
+    action: str = Field(pattern="^(set_paths|set_schedule|run_now|dump_setup|dump_remove|restic_update|update_image|timesync|disk_fix)$")
+    # include/exclude - для путей бэкапа; preview/run - для disk_fix
+    mode: str = Field(default="exclude", pattern="^(include|exclude|preview|run)$")
     paths: list[str] = Field(default_factory=list, max_length=200)
     schedule: str = Field(default="", pattern=r"^$|^([01][0-9]|2[0-3]):[0-5][0-9]$")
     # dump_setup: локальные дампы СУБД перед файловым бэкапом
@@ -1329,6 +1330,10 @@ class BackupCommandIn(BaseModel):
     dump_dir: str = Field(default="", max_length=200)
     dump_keep: int = Field(default=0, ge=0, le=30)
     dump_minfree: int = Field(default=10, ge=0, le=50)
+    # disk_fix: кнопка "Освободить" из разбора места. Тот же каталог знают агент и helper
+    # diskusage-setup; разрешено ли действие на ноде, решает helper по /etc/kervax/fix.conf.
+    fix: str = Field(default="", pattern="^$|^(journal|rotated-logs|apt-cache|dnf-cache|coredumps"
+                     "|crash-reports|docker-dangling|docker-build-cache|container-log)$")
 
     @field_validator("paths")
     @classmethod
