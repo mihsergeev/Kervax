@@ -28,7 +28,6 @@ import {
   type Server,
   type ServerEnroll,
   type ServerMetric,
-  type ServerReport,
 } from './api'
 import { StackedAreaChart, type Series } from './charts/StackedAreaChart'
 import { diskUsage, fmtSetupVersion, srvIssues, webLogLabel, webRate, webSeriesName, webUnparsed } from './serverUtils'
@@ -1294,11 +1293,42 @@ function DuTree({ fs, t }: { fs: DiskUsageFs; t: TFn }) {
   )
 }
 
+// Действия "Освободить": тот же каталог знают агент и helper diskusage-setup; какие из них
+// разрешены на ноде, helper сообщает сам (du.fix.allow из /etc/kervax/fix.conf).
+const DU_FIXABLE = new Set([
+  'journal', 'rotated-logs', 'apt-cache', 'dnf-cache', 'coredumps', 'crash-reports',
+  'docker-dangling', 'docker-build-cache', 'container-log',
+])
+const DU_FIX_AGENT = '2.13' // с этой версии агент передает команду в спул helper'а
+
+// a >= b по числам через точку: "2.13" новее "2.9"
+function verAtLeast(a: string | undefined | null, b: string): boolean {
+  if (!a) return false
+  const pa = a.split('.').map((x) => parseInt(x, 10) || 0)
+  const pb = b.split('.').map((x) => parseInt(x, 10) || 0)
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    if ((pa[i] ?? 0) !== (pb[i] ?? 0)) return (pa[i] ?? 0) > (pb[i] ?? 0)
+  }
+  return true
+}
+
+type DuFixResult = { action: string; mode: string; bytes: number; count: number; sample: string[] }
+type DuFixState =
+  | { phase: 'preview' }
+  | { phase: 'confirm'; data: DuFixResult }
+  | { phase: 'run'; data: DuFixResult }
+  | { phase: 'done'; data: DuFixResult }
+  | { phase: 'error'; msg: string }
+
 // "На что ушло место" (helper diskusage-setup): дерево самых больших каталогов раздела и
-// находки с готовыми командами. Панель ничего не удаляет, команду запускает человек.
-function DiskUsageBlock({ r }: { r: ServerReport }) {
+// находки с готовыми командами. Безопасные находки и лог контейнера освобождаются кнопкой:
+// сначала нода сама считает, что удалится (preview), человек подтверждает, потом run.
+function DiskUsageBlock({ server: s, onChanged }: { server: Server; onChanged: () => void }) {
   const { t } = useI18n()
+  const { isAdmin } = useAuth()
   const [copied, setCopied] = useState<string | null>(null)
+  const [fix, setFix] = useState<Record<string, DuFixState>>({})
+  const r = s.last_report ?? {}
   const du = diskUsage(r)
   if (!du) return null
   const age = Math.max(0, Math.round(((r.clock_unix || Date.now() / 1000) - du.ts) / 60))
@@ -1307,17 +1337,84 @@ function DiskUsageBlock({ r }: { r: ServerReport }) {
     setCopied(id)
     window.setTimeout(() => setCopied(null), 1500)
   }
+  const allow = new Set(du.fix?.allow ?? [])
+  const agentOk = verAtLeast(s.agent_version, DU_FIX_AGENT)
+  const canFix = (it: DiskUsageItem) =>
+    isAdmin && agentOk && DU_FIXABLE.has(it.id) && allow.has(it.id) && (it.id !== 'container-log' || !!it.name)
+  // почему кнопок нет, хотя находки для них есть
+  const fixNote = !(isAdmin && du.items.some((i) => DU_FIXABLE.has(i.id)))
+    ? ''
+    : !du.fix
+      ? t('Кнопки "Освободить" появятся после обновления helper diskusage-setup до 0.3 (ansible kervax_helpers.yml).')
+      : !agentOk
+        ? t('Кнопки "Освободить" появятся после обновления агента до {v}.', { v: DU_FIX_AGENT })
+        : ''
+  const set = (key: string, st: DuFixState | null) =>
+    setFix((cur) => {
+      const next = { ...cur }
+      if (st) next[key] = st
+      else delete next[key]
+      return next
+    })
+  const command = async (it: DiskUsageItem, mode: 'preview' | 'run', maxMs: number) => {
+    const c = await backupCommand(s.id, {
+      action: 'disk_fix',
+      mode,
+      fix: it.id,
+      container: it.id === 'container-log' ? it.name : undefined,
+    })
+    let last = c
+    const t0 = Date.now()
+    while (last.status !== 'done' && last.status !== 'error' && Date.now() - t0 < maxMs) {
+      await new Promise((res) => setTimeout(res, 1000))
+      last = await backupCommandStatus(s.id, c.id)
+    }
+    if (last.status === 'done' && last.ok) {
+      try {
+        return JSON.parse(last.result) as DuFixResult
+      } catch {
+        throw new Error(last.result || t('не удалось'))
+      }
+    }
+    throw new Error(last.result || (last.status === 'error' ? t('не удалось') : t('нода не ответила вовремя')))
+  }
+  // самый частый отказ helper'а переводим: остальное он пишет коротко и по-английски
+  const fixError = (e: unknown) => {
+    const m = e instanceof Error ? e.message : String(e)
+    return m.includes('is not allowed on this node')
+      ? t('На этой ноде действие выключено: его нет в /etc/kervax/fix.conf.')
+      : m
+  }
+  const preview = async (key: string, it: DiskUsageItem) => {
+    set(key, { phase: 'preview' })
+    try {
+      set(key, { phase: 'confirm', data: await command(it, 'preview', 150_000) })
+    } catch (e) {
+      set(key, { phase: 'error', msg: fixError(e) })
+    }
+  }
+  const run = async (key: string, it: DiskUsageItem, data: DuFixResult) => {
+    set(key, { phase: 'run', data })
+    try {
+      set(key, { phase: 'done', data: await command(it, 'run', 16 * 60_000) })
+      // helper сразу пересчитывает место, новые цифры приедут со следующим отчетом агента
+      window.setTimeout(onChanged, 20_000)
+    } catch (e) {
+      set(key, { phase: 'error', msg: fixError(e) })
+    }
+  }
   return (
     <div className="du-block">
       <div className="chart-cap">
         {t('На что ушло место')}
         <span className="muted small du-age"> · {t('замер {n} мин назад', { n: age })}</span>
       </div>
+      {fixNote && <div className="muted small du-note">{fixNote}</div>}
       {du.fs.map((fs) => {
         const items = du.items
           .filter((i) => i.mount === fs.mount)
           .sort((a, b) => (b.free || b.bytes) - (a.free || a.bytes))
-        const safe = items.filter((i) => i.level === 'safe').reduce((s, i) => s + i.free, 0)
+        const safe = items.filter((i) => i.level === 'safe').reduce((sum, i) => sum + i.free, 0)
         return (
           <div key={fs.mount} className="du-fs">
             <div className="du-fs-head">
@@ -1338,19 +1435,71 @@ function DiskUsageBlock({ r }: { r: ServerReport }) {
                   {t('Что можно освободить')}
                   {safe > 0 && <span className="muted small"> · {t('без риска ~{n}', { n: fmtBytes(safe) })}</span>}
                 </div>
-                {items.map((it, k) => {
-                  const key = `${fs.mount}|${k}`
+                {items.map((it) => {
+                  const key = `${fs.mount}|${it.id}|${it.path}`
                   const cmd = it.fix ? `sudo ${it.fix}` : ''
                   const hint = duHint(it, t)
+                  const st = fix[key]
                   return (
                     <div key={key} className="du-item">
                       <div className="du-item-head">
                         <span className={`du-lvl du-lvl-${it.level}`}>{duLevel(it.level, t)}</span>
                         <span className="du-item-name">{duLabel(it, t)}</span>
                         <span className="du-item-size mono">{fmtBytes(it.free || it.bytes)}</span>
+                        {canFix(it) && !st && (
+                          <button className="du-fix-btn" onClick={() => preview(key, it)}>
+                            {it.id === 'container-log' ? t('Обнулить') : t('Освободить')}
+                          </button>
+                        )}
                       </div>
                       {hint && <div className="muted small du-item-hint">{hint}</div>}
-                      {cmd && (
+                      {st?.phase === 'preview' && (
+                        <div className="du-fix-line muted small">{t('Нода считает, что удалится...')}</div>
+                      )}
+                      {st?.phase === 'confirm' && (
+                        <div className="du-fix">
+                          <div>
+                            {st.data.bytes > 0
+                              ? t('Освободится ~{n}', { n: fmtBytes(st.data.bytes) })
+                              : t('Освобождать нечего.')}
+                            {st.data.count > 0 && (
+                              <span className="muted"> · {t('файлов: {n}', { n: st.data.count })}</span>
+                            )}
+                          </div>
+                          {st.data.sample.length > 0 && (
+                            <pre className="du-fix-sample mono">
+                              {st.data.sample.join('\n') + (st.data.count > st.data.sample.length ? '\n...' : '')}
+                            </pre>
+                          )}
+                          <div className="du-fix-actions">
+                            {st.data.bytes > 0 && (
+                              <button onClick={() => run(key, it, st.data)}>{t('Выполнить')}</button>
+                            )}
+                            <button className="ghost" onClick={() => set(key, null)}>{t('Отмена')}</button>
+                          </div>
+                        </div>
+                      )}
+                      {st?.phase === 'run' && (
+                        <div className="du-fix-line muted small">
+                          {it.id.startsWith('docker-')
+                            ? t('Выполняю, docker может чистить несколько минут...')
+                            : t('Выполняю...')}
+                        </div>
+                      )}
+                      {st?.phase === 'done' && (
+                        <div className="du-fix-line small">
+                          <span className="t-up">{t('Освобождено {n}', { n: fmtBytes(st.data.bytes) })}</span>
+                          <span className="muted">{t('цифры обновятся со следующим отчетом')}</span>
+                          <button className="ghost small" onClick={() => set(key, null)}>{t('закрыть')}</button>
+                        </div>
+                      )}
+                      {st?.phase === 'error' && (
+                        <div className="du-fix-line small">
+                          <span className="form-error">{st.msg}</span>
+                          <button className="ghost small" onClick={() => set(key, null)}>{t('закрыть')}</button>
+                        </div>
+                      )}
+                      {cmd && (!st || st.phase === 'error') && (
                         <div className="agent-advice-cmd">
                           <pre>{cmd}</pre>
                           <button className="ghost" onClick={() => copy(cmd, key)}>
@@ -3572,7 +3721,7 @@ function ServerDetail({
             ) : (
               <div className="muted small">—</div>
             )}
-            <DiskUsageBlock r={r} />
+            <DiskUsageBlock server={s} onChanged={onChanged} />
           </div>
         </MetricSection>
 

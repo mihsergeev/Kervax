@@ -42,7 +42,7 @@ import (
 	"time"
 )
 
-const version = "2.12"
+const version = "2.13"
 
 // Публичный ключ для проверки подписи релизов агента (Ed25519, base64).
 // ПУСТО по умолчанию → самообновление ВЫКЛЮЧЕНО (агент никогда не заменяет себя).
@@ -4532,6 +4532,8 @@ const bsrvReqDir = "/var/lib/kervax/bsrv-req" // спул бэкап-СЕРВЕ�
 const bsrvResDir = "/var/lib/kervax/bsrv-res"
 const tsyncReqDir = "/var/lib/kervax/tsync-req" // спул синхронизации времени (timesync-setup)
 const tsyncResDir = "/var/lib/kervax/tsync-res"
+const duReqDir = "/var/lib/kervax/du-req" // спул кнопок "Освободить" (diskusage-setup 0.3+)
+const duResDir = "/var/lib/kervax/du-res"
 
 // collectBackupServer — nil, если нода не сервер бэкапов. Детект по docker-контейнеру
 // rest-server (без прав); per-repo статистику (снапшоты/свежесть/лок) добавляет helper
@@ -4748,6 +4750,21 @@ func runBackupCommand(panelURL, token string, cmd backupCommand) {
 		res, out := spoolTimesyncRequest(cmd.ID, []string{"action=sync", "panel_url=" + panelURL})
 		postBackupResult(panelURL, token, cmd.ID, res, out)
 		return
+	case "disk_fix":
+		// "Освободить" из разбора места: спул du-req, исполняет root-helper diskusage-setup.
+		lines, ok := diskFixLines(cmd)
+		if !ok {
+			postBackupResult(panelURL, token, cmd.ID, false, "неизвестное действие или параметры")
+			return
+		}
+		// docker builder prune по кэшу в десятки ГБ идет минутами: run ждем дольше
+		wait := 2 * time.Minute
+		if cmd.Mode == "run" {
+			wait = 15 * time.Minute
+		}
+		res, out := spoolInFor(duReqDir, duResDir, cmd.ID, lines, "diskusage-setup", wait)
+		postBackupResult(panelURL, token, cmd.ID, res, out)
+		return
 	default:
 		postBackupResult(panelURL, token, cmd.ID, false, "неизвестное действие")
 		return
@@ -4849,9 +4866,39 @@ func spoolTimesyncRequest(cmdID int, lines []string) (bool, string) {
 	return spoolIn(tsyncReqDir, tsyncResDir, cmdID, lines, "timesync-setup")
 }
 
+// diskFixActions - что панель может запустить из разбора места. Тот же список знает
+// helper; разрешено ли действие на этой ноде, решает он по /etc/kervax/fix.conf.
+var diskFixActions = map[string]bool{
+	"journal": true, "rotated-logs": true, "apt-cache": true, "dnf-cache": true,
+	"coredumps": true, "crash-reports": true, "docker-dangling": true,
+	"docker-build-cache": true, "container-log": true,
+}
+
+// diskFixLines - строки запроса в спул du-req. Только известное действие и режим; у лога
+// контейнера - имя по белому списку символов, путь к логу helper берет у docker сам.
+func diskFixLines(cmd backupCommand) ([]string, bool) {
+	if !diskFixActions[cmd.Name] || (cmd.Mode != "preview" && cmd.Mode != "run") {
+		return nil, false
+	}
+	lines := []string{"action=" + cmd.Name, "mode=" + cmd.Mode}
+	if cmd.Name == "container-log" {
+		c := cmd.Container
+		if !backupNameOK(c) || !(c[0] >= 'a' && c[0] <= 'z' || c[0] >= 'A' && c[0] <= 'Z' || c[0] >= '0' && c[0] <= '9') {
+			return nil, false
+		}
+		lines = append(lines, "container="+c)
+	}
+	return lines, true
+}
+
 // spoolIn — атомарно кладёт запрос в <reqDir> и ждёт ответ в <resDir>. Файл 0600:
 // запросы могут нести секреты (repopass/hpass), процессор их сразу удаляет.
 func spoolIn(reqDir, resDir string, cmdID int, lines []string, helper string) (bool, string) {
+	return spoolInFor(reqDir, resDir, cmdID, lines, helper, 90*time.Second)
+}
+
+// spoolInFor - то же с заданным ожиданием ответа (долгие действия helper'а).
+func spoolInFor(reqDir, resDir string, cmdID int, lines []string, helper string, wait time.Duration) (bool, string) {
 	reqID := fmt.Sprintf("%d-%d", cmdID, time.Now().UnixNano())
 	tmp := filepath.Join(reqDir, reqID+".tmp")
 	req := filepath.Join(reqDir, reqID+".req")
@@ -4864,7 +4911,7 @@ func spoolIn(reqDir, resDir string, cmdID int, lines []string, helper string) (b
 		os.Remove(tmp)
 		return false, "не удалось поставить запрос в спул"
 	}
-	deadline := time.Now().Add(90 * time.Second)
+	deadline := time.Now().Add(wait)
 	for time.Now().Before(deadline) {
 		if b, err := os.ReadFile(res); err == nil {
 			os.Remove(res) // res-каталог 0770 → агент может удалить прочитанный ответ
