@@ -96,7 +96,21 @@ export function srvDiskPct(s: Server): number | null {
 // что в диплинках алертов (_SRV_SECTION в коллекторе), чтобы поведение совпадало.
 // mute — ключ для быстрого приглушения ИМЕННО этого сигнала (disk@1 = только предупр.
 // диска, крит останется). Панель шлёт его в alert_mutes.
-export type SrvIssue = { tone: 't-down' | 't-degraded'; text: string; sec?: string; mute?: string; kind?: string }
+// since - с какого момента проблема видна (ISO): для "Что сломано" - "2 дн"
+export type SrvIssue = {
+  tone: 't-down' | 't-degraded'; text: string; sec?: string; mute?: string; kind?: string; since?: string | null
+}
+
+// Сколько длится проблема, коротко: "40 мин", "5 ч", "3 дн". Меньше минуты - пусто: только что
+// появившееся длительностью не подписываем.
+export function sinceShort(iso: string | null | undefined, t: (k: string, p?: Record<string, string | number>) => string): string {
+  if (!iso) return ''
+  const sec = (Date.now() - Date.parse(iso)) / 1000
+  if (!Number.isFinite(sec) || sec < 60) return ''
+  if (sec < 3600) return t('{n} мин', { n: Math.floor(sec / 60) })
+  if (sec < 48 * 3600) return t('{n} ч', { n: Math.floor(sec / 3600) })
+  return t('{n} дн', { n: Math.floor(sec / 86400) })
+}
 
 // Проблемы сервера: оффлайн / CPU / RAM / диск (warn=degraded, ≥alert/crit=down).
 // Заглушён ли сигнал (повторяет бэкендовый _muted): базовый ключ `disk` глушит все
@@ -122,7 +136,8 @@ export function srvIssues(
 ): SrvIssue[] {
   const mutes = new Set(s.alert_mutes ?? [])
   const keep = (arr: SrvIssue[]) => arr.filter((i) => !srvIssueMuted(i, mutes))
-  if (!s.online) return keep([{ tone: 't-down', text: t('оффлайн'), mute: 'offline', kind: 'offline' }])
+  if (!s.online)
+    return keep([{ tone: 't-down', text: t('оффлайн'), mute: 'offline', kind: 'offline', since: s.last_seen }])
   const out: SrvIssue[] = []
   const cpu = srvCpuPct(s)
   if (cpu != null && s.cpu_alert_percent && cpu >= s.cpu_alert_percent)
@@ -162,7 +177,9 @@ export function srvIssues(
   // новые проверки (поломки дисков, прогноз заполнения, inode, упавшие юниты) приходят с
   // бэкенда готовыми: уровни те же, что у алертов, считать их здесь второй раз незачем
   for (const p of s.problems ?? [])
-    out.push({ tone: p.level >= 2 ? 't-down' : 't-degraded', text: p.text, sec: p.sec, mute: p.mute, kind: p.kind })
+    out.push({ tone: p.level >= 2 ? 't-down' : 't-degraded', text: p.text, sec: p.sec, mute: p.mute, kind: p.kind, since: p.since })
+  // с какого момента: панель запоминает начало проблемы каждого вида (alert_since)
+  for (const i of out) if (i.since === undefined && i.kind) i.since = s.alert_since?.[i.kind] ?? null
   return keep(out)
 }
 

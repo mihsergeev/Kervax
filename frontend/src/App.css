@@ -1007,6 +1007,21 @@ input:focus {
     flex-basis: 100%;
   }
 }
+/* группы процессов по CPU: имя с владельцем - гибкая колонка, "крутятся вхолостую" - своей строкой */
+.cg-row { flex-wrap: wrap; }
+.cg-row .cg-name {
+  display: block;
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cg-row .cg-spin { flex-basis: 100%; }
+.cg-row .loc-res-metric, .cg-row .loc-res-msg { flex: 0 0 auto; }
+@media (max-width: 600px) {
+  .cg-row .cg-name { flex-basis: 100%; white-space: normal; overflow-wrap: anywhere; }
+}
 .du-fix-btn { flex-shrink: 0; padding: 0.15rem 0.65rem; font-size: 0.78rem; }
 .du-fix {
   margin: 0.35rem 0 0.25rem;
