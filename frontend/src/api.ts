@@ -922,7 +922,7 @@ export type ServerReport = {
   kube_expiry?: KubeExpiry[] // сроки PKI/kubeconfig/токенов Flux (хелпер kubeexpiry-setup)
   flux?: FluxState[] | null // состояния Ready ресурсов Flux; null = данных нет
   caps?: Record<string, boolean> // возможности агента: kmsg, proc_full (полный ли /proc)
-  extras?: { 'web-rate'?: WebRate; 'disk-usage'?: DiskUsage } & Record<string, unknown> // блоки хелперов как есть
+  extras?: { 'web-rate'?: WebRate; 'disk-usage'?: DiskUsage; 'disk-health'?: DiskHealth } & Record<string, unknown> // блоки хелперов как есть
   clock?: ClockInfo // статус синхронизации времени (timedatectl)
   clock_skew_sec?: number // сдвиг часов ноды относительно панели, сек (± ; считает бэкенд)
   clock_unix?: number // локальные часы ноды на момент отправки отчёта
@@ -961,6 +961,55 @@ export type DiskUsage = {
   fs: DiskUsageFs[]
   items: DiskUsageItem[]
   fix?: { v: number; allow: string[] } // helper 0.3+: какие действия "Освободить" нода разрешает
+}
+// Здоровье дисков (helper diskhealth-setup, раз в 2 минуты): программный RAID, SMART,
+// пропавшие диски и ошибки ввода-вывода в журнале ядра. Диски и SMART - только на железе.
+export type DiskHealthRaid = {
+  dev: string
+  state: string // active / inactive
+  level: string // raid1 / raid5 / ...
+  total: number // дисков по схеме массива (0 у raid0/linear)
+  active: number
+  map: string // [UU] / [U_]
+  members: string // рабочие разделы через пробел
+  failed: string // сбойные (F)
+  spare: string // запасные (S)
+  sync: string // recovery=45.2% / resync=... / check=...
+}
+export type DiskHealthDisk = {
+  dev: string
+  model: string
+  serial: string
+  type: string // nvme / sata / sas
+  size: number | null
+  rota: number | null // 1 - вращающийся
+  ok: boolean // false - диск не отвечает или ядро его отключило
+  err: string // dead / no_answer / no_namespace_* / state_* / nosmart
+  health: string // PASSED / OK / FAILED!
+  failing: boolean
+  temp: number | null
+  wear: number | null // износ, %
+  spare: number | null // NVMe: запас, %
+  spare_thr: number | null
+  media: number | null // NVMe: ошибки носителя
+  crit: string // NVMe Critical Warning, 0x00 - норма
+  poh: number | null // наработка, часов
+  realloc: number | null
+  pending: number | null
+  uncorr: number | null
+  crc: number | null
+  grow: Partial<Record<'realloc' | 'pending' | 'uncorr' | 'media' | 'crc', number>> // прирост за сутки
+}
+export type DiskHealth = {
+  v: number
+  ts: number
+  virt: string // none - железо
+  container: boolean
+  smart: boolean // smartctl есть
+  raid: DiskHealthRaid[]
+  disks: DiskHealthDisk[]
+  missing: { serial: string; model: string; dev: string; last: number }[]
+  io: { count: number; last: string[] }
 }
 export type ClockInfo = {
   synced: boolean // NTPSynchronized=yes

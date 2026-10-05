@@ -390,6 +390,7 @@ _SETUP_LABEL = {
     "webserver-setup": "Веб-домены",
     "timesync-setup": "Синхронизация времени",
     "diskusage-setup": "Разбор места на диске",
+    "diskhealth-setup": "Здоровье дисков",
     "dbstat-setup": "Инвентарь СУБД",
     "agent-watchdog": "Вотчдог агента",
 }

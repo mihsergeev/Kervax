@@ -20,6 +20,7 @@ import {
   snoozeServerAlert,
   updateServer,
   type ClockInfo,
+  type DiskHealthDisk,
   type DiskUsageDir,
   type DiskUsageFs,
   type DiskUsageItem,
@@ -30,9 +31,10 @@ import {
   type Server,
   type ServerEnroll,
   type ServerMetric,
+  type ServerReport,
 } from './api'
 import { StackedAreaChart, type Series } from './charts/StackedAreaChart'
-import { diskUsage, fmtSetupVersion, srvIssues, webLogLabel, webRate, webSeriesName, webUnparsed } from './serverUtils'
+import { diskHealth, diskUsage, fmtSetupVersion, srvIssues, webLogLabel, webRate, webSeriesName, webUnparsed } from './serverUtils'
 import { OsIcon } from './osIcon'
 import { CountryFlag } from './CountryFlag'
 import { currentLang, useI18n } from './i18n'
@@ -1305,6 +1307,174 @@ function DuTree({ fs, t }: { fs: DiskUsageFs; t: TFn }) {
         <div className="muted small">{t('Обход не успел целиком, показано то, что посчитано.')}</div>
       )}
       {!rows.length && fs.top_state === 'ok' && <div className="muted small">{t('Крупных каталогов нет.')}</div>}
+    </div>
+  )
+}
+
+// Здоровье дисков (helper diskhealth-setup): программный RAID, SMART, пропавшие диски и
+// ошибки ввода-вывода в журнале ядра. Оценка та же, что у алерта "Диск: поломка" в
+// коллекторе: красное - данные под угрозой сейчас, желтое - диск пора менять.
+type DhTone = 'up' | 'degraded' | 'down'
+const DH_GROW: [keyof DiskHealthDisk['grow'], string][] = [
+  ['realloc', 'переназначенные сектора'],
+  ['pending', 'нечитаемые сектора'],
+  ['uncorr', 'неисправимые ошибки'],
+  ['media', 'ошибки носителя'],
+  ['crc', 'ошибки передачи (CRC)'],
+]
+
+function dhFailing(d: DiskHealthDisk): boolean {
+  return d.failing || /FAIL/i.test(d.health)
+}
+
+function dhTone(d: DiskHealthDisk): DhTone {
+  const crit = parseInt(d.crit || '0', 16) || 0
+  const worn = (d.wear ?? 0) >= 100
+  if (!d.ok || (dhFailing(d) && !worn) || crit & ~0x02) return 'down'
+  if (dhFailing(d) || crit & 0x02 || DH_GROW.some(([k]) => (d.grow?.[k] ?? 0) > 0) || (d.wear ?? 0) >= 90)
+    return 'degraded'
+  return 'up'
+}
+
+function dhPoh(h: number, t: TFn): string {
+  if (h < 48) return t('{n} ч', { n: h })
+  if (h < 24 * 365) return t('{n} дн', { n: Math.round(h / 24) })
+  return t('{n} г.', { n: (h / 24 / 365).toFixed(1) })
+}
+
+function dhDiskState(d: DiskHealthDisk, t: TFn): string {
+  if (!d.ok) {
+    if (d.err === 'dead') return t('не определяется')
+    if (d.err.startsWith('no_namespace')) return t('контроллер есть, диска нет')
+    if (d.err.startsWith('state_')) return t('отключен ядром')
+    return t('не отвечает')
+  }
+  if (dhFailing(d)) return 'SMART: FAILED'
+  if (d.err === 'nosmart') return t('SMART недоступен')
+  return d.health || '—'
+}
+
+function dhSync(sync: string, t: TFn): string {
+  const m = sync.match(/^(recovery|resync|reshape|check)=([\d.]+)%$/)
+  if (!m) return ''
+  const n = Math.round(parseFloat(m[2]))
+  return m[1] === 'check'
+    ? t('плановая проверка {n}%', { n })
+    : m[1] === 'reshape'
+      ? t('перестройка {n}%', { n })
+      : t('восстановление {n}%', { n })
+}
+
+function DiskHealthBlock({ r }: { r: ServerReport }) {
+  const { t } = useI18n()
+  const dh = diskHealth(r)
+  if (!dh) return null
+  const bare = dh.virt === 'none' && !dh.container
+  const raid = dh.raid ?? []
+  const disks = dh.disks ?? []
+  const missing = dh.missing ?? []
+  const io = dh.io ?? { count: 0, last: [] }
+  // на VM без массивов и без ошибок сказать нечего
+  if (!bare && !raid.length && !io.count) return null
+  return (
+    <div className="detail-inc" id="mcard-diskhealth">
+      <div className="chart-cap">{t('Здоровье дисков')}</div>
+      {bare && !dh.smart && (
+        <div className="muted small dh-note">
+          {t('smartmontools не установлен, SMART не читается: его ставит helper diskhealth-setup.')}
+        </div>
+      )}
+      <div className="loc-results">
+        {raid.map((a) => {
+          const degraded = a.state === 'inactive' || (a.total > 0 && a.active < a.total)
+          const tone: DhTone = degraded ? 'down' : a.failed ? 'degraded' : 'up'
+          const sync = dhSync(a.sync, t)
+          const msg = [
+            a.level,
+            a.state === 'inactive'
+              ? t('не собран')
+              : a.total > 0
+                ? degraded
+                  ? t('работает {a} из {n} дисков', { a: a.active, n: a.total })
+                  : t('в порядке')
+                : '',
+            a.members,
+            a.failed ? t('сбойный {d}', { d: a.failed }) : '',
+            a.spare ? t('запасной {d}', { d: a.spare }) : '',
+            sync,
+          ].filter(Boolean)
+          return (
+            <div key={a.dev} className="loc-res dh-row">
+              <span className={`sdot sdot-${tone}`} />
+              <div className="loc-res-name mono">{a.dev}</div>
+              <div className="loc-res-metric mono">{a.map || a.state}</div>
+              <div className="loc-res-msg muted small">{msg.join(' · ')}</div>
+            </div>
+          )
+        })}
+        {disks.map((d) => {
+          const tone = dhTone(d)
+          const meta = [
+            d.model,
+            d.serial,
+            d.size ? fmtBytes(d.size) : '',
+            d.wear != null ? t('износ {n}%', { n: d.wear }) : '',
+            d.temp != null ? fmtTempC(d.temp) : '',
+            d.poh != null ? t('наработка {v}', { v: dhPoh(d.poh, t) }) : '',
+          ].filter(Boolean)
+          const counters = [
+            d.realloc ? t('переназначено {n}', { n: d.realloc }) : '',
+            d.pending ? t('нечитаемых {n}', { n: d.pending }) : '',
+            d.uncorr ? t('неисправимых {n}', { n: d.uncorr }) : '',
+            d.media ? t('ошибок носителя {n}', { n: d.media }) : '',
+            d.crc ? t('ошибок CRC {n}', { n: d.crc }) : '',
+          ].filter(Boolean)
+          const grow = DH_GROW.filter(([k]) => (d.grow?.[k] ?? 0) > 0).map(
+            ([k, label]) => `${t(label)} +${d.grow[k]}`,
+          )
+          return (
+            <div key={d.dev + d.serial} className="loc-res dh-row dh-disk">
+              <span className={`sdot sdot-${tone}`} />
+              <div className="loc-res-name mono">{d.dev}</div>
+              <div className={`loc-res-metric ${tone === 'down' ? 't-down' : tone === 'degraded' ? 't-degraded' : ''}`}>
+                {dhDiskState(d, t)}
+              </div>
+              <div className="loc-res-msg muted small">
+                {meta.join(' · ')}
+                {counters.length > 0 && <div>{counters.join(' · ')}</div>}
+                {grow.length > 0 && (
+                  <div className="t-degraded">{t('за сутки: {v}', { v: grow.join(', ') })}</div>
+                )}
+              </div>
+            </div>
+          )
+        })}
+        {missing.map((m) => {
+          const ago = Math.max(0, dh.ts - m.last)
+          return (
+            <div key={'gone-' + m.serial} className="loc-res dh-row">
+              <span className="sdot sdot-down" />
+              <div className="loc-res-name mono">{m.dev}</div>
+              <div className="loc-res-metric t-down">{t('пропал')}</div>
+              <div className="loc-res-msg muted small">
+                {[m.model, m.serial].filter(Boolean).join(' · ')} ·{' '}
+                {ago >= 3600
+                  ? t('последний раз виден {n} ч назад', { n: Math.floor(ago / 3600) })
+                  : t('последний раз виден {n} мин назад', { n: Math.max(1, Math.floor(ago / 60)) })}
+              </div>
+            </div>
+          )
+        })}
+        {bare && !disks.length && !raid.length && <div className="muted small">—</div>}
+      </div>
+      {io.count > 0 && (
+        <div className="dh-io">
+          <div className={`small ${io.count >= 10 ? 't-down' : 'muted'}`}>
+            {t('Ошибки ввода-вывода в журнале ядра за 10 минут: {n}', { n: io.count })}
+          </div>
+          {io.last.length > 0 && <pre className="dh-io-lines mono">{io.last.join('\n')}</pre>}
+        </div>
+      )}
     </div>
   )
 }
@@ -3829,6 +3999,7 @@ function ServerDetail({
               )}
             {chartCard('disk')}
           </div>
+          <DiskHealthBlock r={r} />
           <div className="detail-inc" id="mcard-diskfill">
             <div className="chart-cap">{t('Диски')}</div>
             {r.disks?.length ? (
