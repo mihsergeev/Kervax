@@ -1783,13 +1783,14 @@ def _int(v) -> int:
         return 0
 
 
-def disk_health_problems(block: dict) -> list[tuple[int, str, str]]:
+def disk_health_problems(block: dict, short: bool = False) -> list[tuple[int, str, str]]:
     """Поломки дисков: (уровень, ключ, текст), серьезные первыми. Ключ стабилен между
     отчетами: по нему алерт понимает, что сломалось НОВОЕ (второй диск при уже
     развалившемся RAID), а не то, о чем уже сказано. Склеенные в одну строку массивы
     дают по записи на массив без текста и одну запись с текстом без ключа: досинхронизи-
     ровавшийся первым md42 не должен выглядеть новой поломкой md43. Ошибки журнала ядра
-    сюда не входят, у них своя выдержка (см. _server_conditions)."""
+    сюда не входят, у них своя выдержка (см. _server_conditions). short - диск только по
+    имени, без модели и серийника: для сводки на главной."""
     out: list[tuple[int, str, str]] = []
     # RAID с одинаковой бедой склеиваем: оба массива на двух дисках теряют разделы одного
     # и того же умершего диска, и "md42: 1 из 2; md43: 1 из 2" - это одна новость
@@ -1821,7 +1822,7 @@ def disk_health_problems(block: dict) -> list[tuple[int, str, str]]:
     for d in block.get("disks") or []:
         if not isinstance(d, dict):
             continue
-        name = _disk_title(d)
+        name = str(d.get("dev") or "?") if short else _disk_title(d)
         ser = str(d.get("serial") or d.get("dev") or "?")
         err = str(d.get("err") or "")
         if d.get("ok") is False:
@@ -1871,8 +1872,61 @@ def disk_health_problems(block: dict) -> list[tuple[int, str, str]]:
         ser = str(m.get("serial") or "?")
         ago = max(0, ts - _int(m.get("last")))
         when = f"{ago // 3600} ч назад" if ago >= 3600 else f"{max(1, ago // 60)} мин назад"
-        out.append((3, f"missing:{ser}", f"пропал диск {_disk_title(m)}, последний раз виден {when}"))
+        title = str(m.get("dev") or "?") if short else _disk_title(m)
+        out.append((3, f"missing:{ser}", f"пропал диск {title}, последний раз виден {when}"))
     out.sort(key=lambda p: -p[0])
+    return out
+
+
+def server_problems(s: Server, now: datetime) -> list[dict]:
+    """Что сломано на сервере по новым проверкам - поломки дисков, прогноз заполнения, inode,
+    упавшие юниты - коротко, для сводки "Что сломано" на главной и значков в списке серверов.
+    Уровни те же, что у алертов: 2-3 - проблема, 1 - предупреждение. Прогноз здесь виден за
+    10 дней (алерт - за трое суток): сводка для того, чтобы успеть. У молчащей ноды пусто, про
+    нее говорит "оффлайн"."""
+    if not seen_online(s, now):
+        return []
+    rep = s.last_report or {}
+    out: list[dict] = []
+
+    def add(kind: str, level: int, text: str, sec: str, mute: str) -> None:
+        out.append({"kind": kind, "level": level, "text": text, "sec": sec, "mute": mute})
+
+    hb = disk_health_block(rep)
+    if hb is not None:
+        for lvl, _key, txt in disk_health_problems(hb, short=True):
+            if txt:
+                add("disk_health", lvl, txt, "diskhealth", "disk_health")
+        n = _int((hb.get("io") or {}).get("count"))
+        if n >= _DISK_IO_MIN:
+            add("disk_health", 2, f"ошибки ввода-вывода: {n} за 10 минут", "diskhealth", "disk_health")
+    ub = units_block(rep)
+    if ub is not None:
+        ref = float(rep.get("clock_unix") or 0) or now.timestamp()
+        muted = units_muted(s, now)
+        for u in ub.get("units") or []:
+            if not isinstance(u, dict) or not u.get("unit") or u["unit"] in muted:
+                continue
+            if ref - float(u.get("since") or 0) < _UNIT_MIN_AGE:
+                continue
+            add("units", unit_level(u), f"{u['unit']}: {unit_why(u)}", "units", f"unit:{u['unit']}")
+    for i in dfc.fresh_items(s.disk_forecast, now) or []:
+        eta = float(i["eta_h"])
+        if eta > 10 * 24:
+            continue
+        what = (f"inode на {i['mount']} кончатся" if i.get("kind") == "inode"
+                else f"{i['mount']} заполнится")
+        add("disk_forecast", 2 if eta <= _FORECAST_CRIT_H else 1,
+            f"{what} {dfc.eta_text(eta)}", "diskfill", "disk_forecast")
+    ino = [d for d in rep.get("disks") or [] if isinstance(d, dict) and d.get("inodes")]
+    if ino:
+        wi = max(ino, key=lambda d: (d.get("inodes_used") or 0) / d["inodes"])
+        ipct = round((wi.get("inodes_used") or 0) / wi["inodes"] * 100)
+        crit, prob, warn = s.disk_crit_percent, s.disk_alert_percent, s.disk_warn_percent
+        lvl = 3 if crit and ipct >= crit else 2 if prob and ipct >= prob else 1 if warn and ipct >= warn else 0
+        if lvl:
+            add("inode", lvl, f"inode {wi.get('mount') or '?'} {ipct}%", "diskfill", f"inode@{lvl}" if lvl < 3 else "inode")
+    out.sort(key=lambda p: -p["level"])
     return out
 
 
