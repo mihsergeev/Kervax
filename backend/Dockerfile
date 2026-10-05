@@ -15,7 +15,10 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath \
       -o /out/kervax-agent-amd64 . \
  && CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath \
       -ldflags="-s -w -buildid= -X main.updatePubKeyB64=${AGENT_PUBKEY}" \
-      -o /out/kervax-agent-arm64 .
+      -o /out/kervax-agent-arm64 . \
+ && for a in amd64 arm64; do gzip -9 -c /out/kervax-agent-$a > /out/kervax-agent-$a.gz; done
+# Сжатые копии - для самообновления агентов 2.18+: в 2.4 раза меньше, на канале за DPI это
+# минуты вместо получаса. Подпись им не нужна: агент сверяет с манифестом распакованное.
 
 # --- бэкенд ---
 FROM python:3.14-slim
@@ -42,7 +45,8 @@ COPY backend/alembic.ini ./
 COPY backend/alembic ./alembic
 
 # бинари агента, которые панель раздаёт (/api/agent/download|install.sh)
-COPY --from=agent /out/kervax-agent-amd64 /out/kervax-agent-arm64 /srv/agent/
+COPY --from=agent /out/kervax-agent-amd64 /out/kervax-agent-arm64 \
+     /out/kervax-agent-amd64.gz /out/kervax-agent-arm64.gz /srv/agent/
 # ОПЦИОНАЛЬНО: подписанный релиз-манифест (manifest.json/.sig) для secure-автообновления.
 # agent-dist/ всегда существует (.gitkeep); manifest появляется после agent-signing/release.py.
 # Нет манифеста → эндпоинт отдаёт 404, фича просто выключена.

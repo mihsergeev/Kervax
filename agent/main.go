@@ -42,7 +42,7 @@ import (
 	"time"
 )
 
-const version = "2.17"
+const version = "2.18"
 
 // Публичный ключ для проверки подписи релизов агента (Ed25519, base64).
 // ПУСТО по умолчанию → самообновление ВЫКЛЮЧЕНО (агент никогда не заменяет себя).
@@ -942,6 +942,76 @@ func httpGetChunked(u string, size int, ver string) ([]byte, error) {
 	return buf, nil
 }
 
+// errNoCompressed - панель сжатого бинаря не отдает (старая или архив не прошел ее проверку):
+// это не поломка, просто качаем несжатый.
+var errNoCompressed = errors.New("сжатого бинаря нет")
+
+// fetchCompressed - бинарь, скачанный сжатым (gzip) с той же докачкой по кускам, распакованный
+// и сверенный с подписанным манифестом. Размер архива панель сообщает на HEAD; он не подписан,
+// но и не нужен для доверия: распакованное читается не больше подписанного размера (бомба
+// не раздует память) и обязано совпасть по sha256. Огрызок архива копится рядом с бинарем
+// под своим размером, так что с огрызком несжатого не путается.
+func fetchCompressed(u, ver string, art artifact) ([]byte, error) {
+	size, err := headSize(u)
+	if err != nil || size <= 0 || size >= art.Size {
+		return nil, errNoCompressed
+	}
+	gz, err := httpGetChunked(u, size, ver)
+	if err != nil {
+		return nil, err
+	}
+	pp := partPath(ver, size)
+	bin, err := gunzipLimited(gz, art.Size)
+	if err == nil {
+		sum := sha256.Sum256(bin)
+		if hex.EncodeToString(sum[:]) != art.SHA256 {
+			err = fmt.Errorf("sha256 распакованного не совпал с подписанным")
+		}
+	}
+	if pp != "" {
+		os.Remove(pp) // готов или битый - в любом случае больше не нужен
+	}
+	if err != nil {
+		return nil, err
+	}
+	return bin, nil
+}
+
+// headSize - размер файла по HEAD (Content-Length); не 200 - ошибка.
+func headSize(u string) (int, error) {
+	client := &http.Client{Timeout: 30 * time.Second, Transport: panelTransport(false)}
+	req, err := http.NewRequest("HEAD", u, nil)
+	if err != nil {
+		return 0, err
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return 0, err
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return 0, fmt.Errorf("HTTP %d", resp.StatusCode)
+	}
+	return int(resp.ContentLength), nil
+}
+
+// gunzipLimited - распаковка не больше size байт; распакованное обязано быть ровно size.
+func gunzipLimited(gz []byte, size int) ([]byte, error) {
+	zr, err := gzip.NewReader(bytes.NewReader(gz))
+	if err != nil {
+		return nil, err
+	}
+	defer zr.Close()
+	out, err := io.ReadAll(io.LimitReader(zr, int64(size)+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(out) != size {
+		return nil, fmt.Errorf("распаковано %d байт вместо %d", len(out), size)
+	}
+	return out, nil
+}
+
 // httpGetLimited — GET с таймаутом и лимитом тела (враждебная панель не заольёт память).
 func httpGetLimited(u string, max int64) ([]byte, error) {
 	client := &http.Client{Timeout: 60 * time.Second}
@@ -1549,9 +1619,18 @@ func selfUpdate(panelURL, want string) error {
 		return permanent(fmt.Errorf("в манифесте нет артефакта для %s", runtime.GOARCH))
 	}
 
-	bin, err := httpGetChunked(base+"/api/agent/download/"+runtime.GOARCH, art.Size, m.Version)
-	if err != nil {
-		return fmt.Errorf("скачивание бинаря: %w", err)
+	// Сначала сжатый: в 2.4 раза меньше, на канале за DPI (~0.2 МБ/мин) это 15 минут вместо
+	// 40. Его подлинность та же: распакованный бинарь сверяется с подписанным sha256 ниже.
+	// Не вышло (панель старше 1.4.86, архив не сошелся) - качаем несжатый, как раньше.
+	bin, gzErr := fetchCompressed(base+"/api/agent/download-gz/"+runtime.GOARCH, m.Version, art)
+	if gzErr != nil {
+		if !errors.Is(gzErr, errNoCompressed) {
+			fmt.Printf("kervax-agent: сжатый бинарь не подошел (%v), качаю несжатый\n", gzErr)
+		}
+		bin, err = httpGetChunked(base+"/api/agent/download/"+runtime.GOARCH, art.Size, m.Version)
+		if err != nil {
+			return fmt.Errorf("скачивание бинаря: %w", err)
+		}
 	}
 	// Дальше огрызок не нужен ни при каком исходе: либо ставим, либо он битый.
 	if pp := partPath(m.Version, art.Size); pp != "" {
