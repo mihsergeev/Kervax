@@ -79,7 +79,11 @@ The panel does not deal with certificates — a reverse proxy sits in front of i
 `caddy-docker-proxy` reads container labels and obtains certificates itself.
 
 ```bash
-sudo docker network create caddy
+# --ipv6 matters: in an IPv4-only network docker forwards IPv6 connections through
+# its userland proxy and caddy sees the bridge gateway instead of the client, so an
+# IP allow-list lets every IPv6 client in. If your docker cannot do --ipv6, publish
+# caddy's ports as "0.0.0.0:80:80" and "0.0.0.0:443:443" instead.
+sudo docker network create --ipv6 caddy
 sudo mkdir -p /srv/caddy && cd /srv/caddy
 ```
 

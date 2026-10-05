@@ -81,7 +81,11 @@ curl -fsSL https://get.docker.com | sudo sh
 сертификаты.
 
 ```bash
-sudo docker network create caddy
+# --ipv6 важен: в сети без IPv6 docker проносит IPv6-соединения через свой прокси,
+# и caddy видит адрес шлюза моста вместо клиента - белый список по IP пускает всех,
+# кто пришёл по IPv6. Если ваш docker не умеет --ipv6, публикуйте порты caddy как
+# "0.0.0.0:80:80" и "0.0.0.0:443:443".
+sudo docker network create --ipv6 caddy
 sudo mkdir -p /srv/caddy && cd /srv/caddy
 ```
 

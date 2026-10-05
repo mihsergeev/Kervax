@@ -25,17 +25,20 @@ services:
       #     authenticate with per-server tokens anyway.
       #  2) everything else is denied unless the client IP is in KERVAX_ALLOW_IPS.
       #     Left empty → "not in all IPs" denies no one = open (fail-open).
-      #     The loopback and docker's own range are always allowed - that is the
-      #     host talking to itself, and it is what makes a local probe possible (an
-      #     agent checks a whitelisted site from inside its own server). It has to
-      #     include 172.16.0.0/12, not just 127.0.0.1: docker publishes the port
-      #     through its own proxy, so caddy sees the bridge gateway (172.x) and never
-      #     the loopback. Deliberately NOT caddy's `private_ranges`: that also covers
-      #     10/8 and 192.168/16, which on a corporate network means every neighbour
-      #     gets in. If your docker uses a different subnet, add it to KERVAX_ALLOW_IPS.
+      #     The loopback is always allowed, and so is KERVAX_PROXY_GATEWAY - the
+      #     gateway of the docker network caddy runs in. Docker publishes the port
+      #     through its own proxy, so a local probe (an agent checking a whitelisted
+      #     site from inside its own server) reaches caddy from that gateway and
+      #     never from the loopback. Only that single address belongs here, never
+      #     the whole 172.16.0.0/12: in an IPv4-only caddy network every IPv6 client
+      #     arrives from the same gateway, so a range here opens the panel to anyone
+      #     over IPv6, and it lets in every neighbouring container as well. Never
+      #     caddy's `private_ranges` either - it covers 10/8 and 192.168/16, which
+      #     on a corporate network means every neighbour gets in. quickstart writes
+      #     the address; docs/install.md says how to set it by hand.
       caddy.handle_0: /api/agent/*
       caddy.handle_0.reverse_proxy: "{{upstreams 8080}}"
-      caddy.handle_1.@denied.not.remote_ip: 127.0.0.1/32 ::1/128 172.16.0.0/12 ${KERVAX_ALLOW_IPS:-0.0.0.0/0 ::/0}
+      caddy.handle_1.@denied.not.remote_ip: 127.0.0.1/32 ::1/128 ${KERVAX_PROXY_GATEWAY:-} ${KERVAX_ALLOW_IPS:-0.0.0.0/0 ::/0}
       caddy.handle_1.abort: "@denied"
       caddy.handle_1.reverse_proxy: "{{upstreams 8080}}"
 
