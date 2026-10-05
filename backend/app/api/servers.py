@@ -2285,6 +2285,8 @@ async def agent_report(
     )
     disks_pct = [
         {"mount": d["mount"], "pct": round(d["used"] / d["total"] * 100, 1)}
+        # inode с агента 2.15: по их истории прогноз видит, когда они кончатся
+        | ({"ipct": round((d.get("inodes_used") or 0) / d["inodes"] * 100, 1)} if d.get("inodes") else {})
         for d in body.disks
         if d.get("total") and d.get("mount")
     ]

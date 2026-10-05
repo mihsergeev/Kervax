@@ -998,6 +998,7 @@ class ServerOut(BaseModel):
     disk_warn_percent: int
     disk_crit_percent: int
     disk_autofix: bool = False  # авто-очистка безопасного при пороге предупреждения
+    disk_forecast: dict | None = None  # когда заполнятся диски и inode (планировщик)
     temp_alert_c: int
     conntrack_alert_percent: int
     kube_expiry_warn_days: list[int] | None = None

@@ -527,6 +527,9 @@ class Server(Base):
     # state - когда какое действие запускалось, чтобы не повторять его чаще раза в 6 часов.
     disk_autofix: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
     disk_autofix_state: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    # Прогноз заполнения дисков и inode (считает планировщик раз в полчаса по истории):
+    # {"ts": epoch, "items": [{"mount", "kind": space|inode, "pct", "rate", "eta_h"}]}
+    disk_forecast: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     temp_alert_c: Mapped[int] = mapped_column(Integer, default=0)  # порог темп. CPU, °C (0=выкл)
     conntrack_alert_percent: Mapped[int] = mapped_column(Integer, default=90)  # заполнение conntrack, % (0=выкл)
     # Занятость слотов подключений СУБД, % (0=выкл). Отдельный порог: коннекты

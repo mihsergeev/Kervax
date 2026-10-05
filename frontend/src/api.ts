@@ -780,7 +780,18 @@ export function restoreBackup(
 
 // --- серверы (агент-push) ---
 
-export type ServerDisk = { mount: string; used: number; total: number }
+export type ServerDisk = {
+  mount: string
+  used: number
+  total: number
+  avail?: number // доступно не-root процессам (агент 2.15+): без резерва ext4
+  inodes?: number // всего inode (агент 2.15+; у btrfs нет)
+  inodes_used?: number
+}
+// Прогноз заполнения (планировщик раз в полчаса по истории): только разделы с устойчивым
+// ростом, до которых осталось не больше месяца
+export type DiskForecastItem = { mount: string; kind: 'space' | 'inode'; pct: number; rate: number; eta_h: number }
+export type DiskForecast = { ts: number; items: DiskForecastItem[] }
 export type ProcStat = {
   pid: number
   comm: string
@@ -937,9 +948,16 @@ export type DiskUsageFs = {
   avail: number
   pct: number
   inodes: number
-  top_state: 'ok' | 'partial' | 'skipped'
+  top_state: 'ok' | 'partial' | 'skipped' | 'none' // none - раздел в разборе только из-за inode
   top_ts: number
   top: DiskUsageDir[] // самые большие каталоги до глубины 3, от 1% раздела
+  // inode (helper 0.5+): раздел попадает в разбор и когда кончаются они
+  ipct?: number
+  iused?: number
+  itotal?: number
+  itop_state?: '' | 'ok' | 'partial' | 'failed'
+  itop_ts?: number
+  itop?: { path: string; files: number }[] // где больше всего файлов, глубина 3
 }
 export type DiskUsageItem = {
   id: string
@@ -1162,6 +1180,7 @@ export type Server = {
   disk_warn_percent: number
   disk_crit_percent: number
   disk_autofix?: boolean // авто-очистка безопасного при пороге предупреждения (включает админ)
+  disk_forecast?: DiskForecast | null
   temp_alert_c: number
   conntrack_alert_percent: number
   db_conn_alert_percent: number
@@ -1364,7 +1383,7 @@ export type ServerMetric = {
   sock_tcp: number | null
   sock_tcp_tw: number | null
   sock_udp: number | null
-  disks: { mount: string; pct: number }[] | null
+  disks: { mount: string; pct: number; ipct?: number }[] | null
   web_rpm: number | null // запросов в минуту по access-логам веб-сервера
   web_5xx: number | null // из них ответов 5xx в минуту
   // разбивка для стека: самые нагруженные логи минуты и ответы 5xx по кодам (с 1.4.62)
