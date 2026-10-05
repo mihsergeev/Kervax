@@ -847,6 +847,9 @@ export type KubePod = {
   owner?: string // kind контроллера (Job/ReplicaSet/StatefulSet/DaemonSet/Node); есть с агента 1.39
   image?: string // образ СУБД-контейнера (только у СУБД-подов)
   cred?: KubeCred // откуда под берёт креды БД (без значений; агент ≥1.74)
+  // только у подов этой ноды (агент 2.16+): память как в kubectl top и что перезапускать
+  mem?: number
+  ctrl?: string // deployment/имя, statefulset/имя, daemonset/имя
 }
 // Ссылки на креды СУБД-пода (без значений паролей).
 export type KubeCred = {

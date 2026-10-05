@@ -1992,6 +1992,16 @@ def cause_text(rep: dict, kind: str, base: dict[str, float], now: datetime | Non
         )[:2]
         if conts:
             parts.append("контейнеры: " + ", ".join(f"{n} {_fmt_size(m)}" for n, m in conts))
+        # и поды Kubernetes этой ноды (агент 2.16+): у k8s-нод docker пустой, а память
+        # держат поды, и перезапускают их деплоймент
+        pods = sorted(
+            ((f"{p.get('ns') or '?'}/{p.get('name') or '?'}", float(p.get("mem") or 0))
+             for p in ((rep.get("kube") or {}).get("pods") or [])
+             if isinstance(p, dict) and p.get("mem")),
+            key=lambda x: -x[1],
+        )[:2]
+        if pods:
+            parts.append("поды: " + ", ".join(f"{n} {_fmt_size(m)}" for n, m in pods))
     surge = []
     # Запросы точнее байтов: 2.3 млн редиректов по 300 байт канал почти не шевелят.
     # Их считает helper webserver-setup; нет его - остаются трафик и соединения.

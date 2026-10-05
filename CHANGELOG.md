@@ -4,6 +4,16 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.4.82] - 2026-10-05
+
+### Added
+- "Поды по памяти" в разделе "Память" (агент 2.16): память подов Kubernetes этой ноды
+  агент берет из их cgroup, как kubectl top (на k8s-d совпало до мегабайта), без
+  metrics-server и без новых прав. У подов деплоймента, statefulset и daemonset кнопка
+  "Перезапустить" делает rollout restart: Kubernetes пересоздает поды по очереди. Поды баз
+  кнопкой не перезапускаются, как и контейнеры. Алерт по памяти теперь называет и поды.
+  Видно на нодах, где у агента есть доступ к кластеру (kube-setup).
+
 ## [1.4.81] - 2026-10-05
 
 ### Added

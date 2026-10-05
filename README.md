@@ -74,6 +74,8 @@ inodes, which run out separately from space.
 servers and the sites they serve, databases and their sizes, RabbitMQ queue
 depth. Domains found on a node's nginx or an Ingress can be put under monitoring
 in two clicks — the panel shows what it found and which of it is already watched.
+When memory runs low, the server card lists the containers and pods that hold it,
+with a button to restart them.
 
 **What expires before it breaks.** Clusters die on dates: a Flux token runs out
 and nothing is delivered any more, while everything already running keeps running

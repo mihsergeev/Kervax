@@ -11,6 +11,8 @@ import {
   dockerCommand,
   dockerCommandStatus,
   getAgentRelease,
+  kubeCommand,
+  kubeCommandStatus,
   listServers,
   serverMetrics,
   serverOomEvents,
@@ -1836,6 +1838,76 @@ function MemContainers({ server: s, onChanged }: { server: Server; onChanged: ()
                   <button className="ghost small" disabled={!!cs?.busy} onClick={() => restart(c.name)}>
                     {cs?.busy ? t('перезапускаю...') : t('Перезапустить')}
                   </button>
+                ))}
+            </div>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
+// Поды Kubernetes этой ноды по памяти (агент 2.16+ берет ее из cgroup пода, как kubectl
+// top): кто съел память и кнопка перезапуска его контроллера (rollout restart - Kubernetes
+// пересоздает поды по очереди). Поды баз кнопкой не перезапускаются, как и контейнеры.
+function MemPods({ server: s, onChanged }: { server: Server; onChanged: () => void }) {
+  const { t } = useI18n()
+  const { isViewer } = useAuth()
+  const [st, setSt] = useState<Record<string, { busy?: boolean; ok?: boolean; msg?: string }>>({})
+  const list = (s.last_report?.kube?.pods ?? [])
+    .filter((p) => (p.mem ?? 0) > 0)
+    .sort((a, b) => (b.mem ?? 0) - (a.mem ?? 0))
+    .slice(0, 6)
+  if (!list.length) return null
+  const total = s.last_report?.mem_total || 0
+  const restart = async (key: string, ns: string, ctrl: string) => {
+    const [kind, name] = ctrl.split('/') as ['deployment' | 'statefulset' | 'daemonset', string]
+    if (!window.confirm(t('Перезапустить {c} в {ns}? Kubernetes пересоздаст его поды по очереди.', { c: ctrl, ns })))
+      return
+    setSt((cur) => ({ ...cur, [key]: { busy: true } }))
+    try {
+      const c = await kubeCommand(s.id, ns, kind, name, 'rollout_restart')
+      let last = c
+      const t0 = Date.now()
+      while (last.status !== 'done' && last.status !== 'error' && Date.now() - t0 < 120_000) {
+        await new Promise((res) => setTimeout(res, 1000))
+        last = await kubeCommandStatus(s.id, c.id)
+      }
+      const ok = last.status === 'done' && !!last.ok
+      setSt((cur) => ({ ...cur, [key]: { ok, msg: ok ? t('перезапуск начат') : last.result || t('не удалось') } }))
+      if (ok) window.setTimeout(onChanged, 30_000)
+    } catch (e) {
+      setSt((cur) => ({ ...cur, [key]: { ok: false, msg: e instanceof Error ? e.message : String(e) } }))
+    }
+  }
+  return (
+    <div className="detail-inc mem-cont">
+      <div className="chart-cap">{t('Поды по памяти')}</div>
+      <div className="loc-results">
+        {list.map((p) => {
+          const key = `${p.ns}/${p.name}`
+          const db = !!p.image || DB_IMAGE.test(p.name)
+          const ps = st[key]
+          return (
+            <div key={key} className="loc-res mc-row mp-row" title={p.ctrl ? `${key} (${p.ctrl})` : key}>
+              <div className="loc-res-name mono mp-name">
+                <span className="muted">{p.ns}/</span>
+                {p.name}
+              </div>
+              <div className="loc-res-metric">{fmtBytes(p.mem ?? 0)}</div>
+              <div className="loc-res-msg muted small">
+                {total ? `${Math.round(((p.mem ?? 0) / total) * 100)}%` : ''}
+              </div>
+              {ps?.msg && <span className={`small ${ps.ok ? 't-up' : 'form-error'}`}>{ps.msg}</span>}
+              {!isViewer &&
+                (db ? (
+                  <span className="muted small">{t('база: перезапуск только вручную')}</span>
+                ) : p.ctrl ? (
+                  <button className="ghost small" disabled={!!ps?.busy} onClick={() => restart(key, p.ns, p.ctrl!)}>
+                    {ps?.busy ? t('перезапускаю...') : t('Перезапустить')}
+                  </button>
+                ) : (
+                  <span className="muted small">{t('без контроллера')}</span>
                 ))}
             </div>
           )
@@ -3922,6 +3994,7 @@ function ServerDetail({
               : null}
           </div>
           <MemContainers server={s} onChanged={onChanged} />
+          <MemPods server={s} onChanged={onChanged} />
         </MetricSection>
 
         <MetricSection id="net" title={t('Сеть')}>
