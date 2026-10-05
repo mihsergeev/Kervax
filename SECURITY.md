@@ -39,6 +39,15 @@ The full threat model is in [docs/security.en.md](docs/security.en.md)
 own and binds to `127.0.0.1` by default. The bundled caddy overlay takes
 `KERVAX_ALLOW_IPS`; agents need only the ingest endpoint, not the whole panel.
 
+**Give the caddy network IPv6, or bind its ports to IPv4.** An IP allow-list in
+front of docker is only as good as the address docker hands over. In an IPv4-only
+network docker forwards IPv6 connections through its userland proxy, so the proxy
+sees the bridge gateway and every IPv6 client looks alike - allow a docker range
+there and the panel is open to all of them. Create the network as
+`docker network create --ipv6 caddy`, or publish caddy on `0.0.0.0` only. The
+overlay allows one address of its own, `KERVAX_PROXY_GATEWAY`, which is what makes
+a local probe possible.
+
 **The panel refuses weak secrets.** `KERVAX_JWT_SECRET`, `KERVAX_DB_PASSWORD` and
 `KERVAX_ADMIN_PASSWORD` must be set to real values or it will not start. Change
 the admin password after the first sign-in and turn on 2FA.

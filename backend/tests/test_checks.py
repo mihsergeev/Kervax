@@ -657,7 +657,10 @@ async def test_agent_probe_outcome():
     probe.error = 'Get "https://x": EOF'
     probe.latency_ms = 0
     out = checks_exec.outcome_from_agent(check, probe, now, 2000)
-    assert out.status == "down" and "172.16.0.0/12" in out.message
+    assert out.status == "down" and "шлюза docker-сети" in out.message
+    # подсеть целиком советовать нельзя: в сети без IPv6 с того же адреса
+    # приходят все клиенты по IPv6
+    assert "172.16.0.0/12" not in out.message
     # у несостоявшегося запроса задержки нет — не «0 мс»
     assert out.latency_ms is None
 
@@ -666,7 +669,7 @@ async def test_agent_probe_outcome():
     # править белый список значит отправить человека чинить то, что не сломано
     probe.error = "dial tcp [::1]:443: connect: connection refused"
     out = checks_exec.outcome_from_agent(check, probe, now, 2000)
-    assert out.status == "down" and "172.16.0.0/12" not in out.message
+    assert out.status == "down" and "шлюза docker-сети" not in out.message
     assert "443" in out.message and "localhost" in out.message
     probe.latency_ms = 12
 

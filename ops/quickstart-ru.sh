@@ -93,18 +93,39 @@ else
 fi
 
 # ── 4. Caddy ─────────────────────────────────────────────────────────────────
-docker network inspect caddy >/dev/null 2>&1 || docker network create caddy >/dev/null
+# --ipv6 здесь не для красоты. В сети без IPv6 docker проносит IPv6-соединения
+# через свой userland-прокси, и caddy видит не клиента, а адрес шлюза моста: белый
+# список по IP перестаёт различать кого-либо и пускает всех, кто пришёл по IPv6.
+# С IPv6 в сети порт пробрасывается через ip6tables и адрес доходит настоящим.
+# Старый docker, который так не умеет, откатывается на IPv4 - тогда порты ниже
+# публикуются только на IPv4, и по IPv6 до caddy никто не доходит.
+if ! docker network inspect caddy >/dev/null 2>&1; then
+    docker network create --ipv6 caddy >/dev/null 2>&1 || docker network create caddy >/dev/null
+fi
+NET_IPV6=$(docker network inspect caddy -f '{{.EnableIPv6}}' 2>/dev/null)
+if [ "$NET_IPV6" = "true" ]; then
+    CADDY_PORTS='["80:80", "443:443"]'
+else
+    CADDY_PORTS='["0.0.0.0:80:80", "0.0.0.0:443:443"]'
+fi
 if docker ps --format '{{.Image}}' | grep -q caddy-docker-proxy; then
     say "caddy-docker-proxy уже запущен"
+    if [ "$NET_IPV6" != "true" ] && ip -6 addr show scope global 2>/dev/null | grep -q inet6; then
+        say "ВНИМАНИЕ: сеть caddy без IPv6, а у хоста есть публичный IPv6"
+        echo "  Клиент по IPv6 приходит к caddy с адреса шлюза моста, и белый список"
+        echo "  по IP его не остановит. Либо публикуйте порты caddy только на 0.0.0.0,"
+        echo "  либо пересоздайте сеть с IPv6: остановить все стеки в ней, затем"
+        echo "  docker network rm caddy && docker network create --ipv6 caddy."
+    fi
 else
     say "Поднимаю caddy-docker-proxy (TLS и сертификаты)"
     mkdir -p /srv/caddy
-    cat > /srv/caddy/compose.yml <<'YML'
+    cat > /srv/caddy/compose.yml <<YML
 services:
   caddy:
     image: lucaslorentz/caddy-docker-proxy:2.10-alpine
     restart: unless-stopped
-    ports: ["80:80", "443:443"]
+    ports: $CADDY_PORTS
     environment:
       CADDY_INGRESS_NETWORKS: caddy
     volumes:
@@ -173,6 +194,21 @@ if grep -q '^COMPOSE_FILE=' .env; then
     sed -i "s|^COMPOSE_FILE=.*|COMPOSE_FILE=$COMPOSE_LIST|" .env
 else
     printf 'COMPOSE_FILE=%s\n' "$COMPOSE_LIST" >> .env
+fi
+
+# KERVAX_PROXY_GATEWAY прописываем тоже ВСЕГДА. Этот один адрес пускается в
+# caddy-оверлее, чтобы работала локальная проверка: агент проверяет сайт за белым
+# списком изнутри своего же сервера, docker публикует порт через свой прокси, и
+# caddy видит шлюз своей сети, а не loopback. Один адрес, а не подсеть
+# 172.16.0.0/12: подсеть пустила бы и соседние контейнеры, а в сети без IPv6 - всех,
+# кто пришёл по IPv6.
+PROXY_GW=$(docker network inspect caddy \
+    -f '{{range .IPAM.Config}}{{if .Gateway}}{{.Gateway}} {{end}}{{end}}' 2>/dev/null \
+    | sed 's/ *$//')
+if grep -q '^KERVAX_PROXY_GATEWAY=' .env; then
+    sed -i "s|^KERVAX_PROXY_GATEWAY=.*|KERVAX_PROXY_GATEWAY=$PROXY_GW|" .env
+else
+    printf 'KERVAX_PROXY_GATEWAY=%s\n' "$PROXY_GW" >> .env
 fi
 
 # ── 7. Запуск ────────────────────────────────────────────────────────────────
