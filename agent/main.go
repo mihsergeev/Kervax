@@ -42,7 +42,7 @@ import (
 	"time"
 )
 
-const version = "2.18"
+const version = "2.19"
 
 // Публичный ключ для проверки подписи релизов агента (Ed25519, base64).
 // ПУСТО по умолчанию → самообновление ВЫКЛЮЧЕНО (агент никогда не заменяет себя).
@@ -356,11 +356,20 @@ type kubeCronJob struct {
 }
 
 type kubeNode struct {
-	Name    string `json:"name"`
-	Ready   bool   `json:"ready"`
-	Roles   string `json:"roles,omitempty"`   // control-plane/worker
-	Version string `json:"version,omitempty"` // версия kubelet
-	IP      string `json:"ip,omitempty"`
+	Name    string   `json:"name"`
+	Ready   bool     `json:"ready"`
+	Roles   string   `json:"roles,omitempty"`   // control-plane/worker
+	Version string   `json:"version,omitempty"` // версия kubelet
+	IP      string   `json:"ip,omitempty"`
+	Use     *kubeUse `json:"use,omitempty"` // сколько занято сейчас (metrics-server)
+	Cap     *kubeUse `json:"cap,omitempty"` // сколько есть всего (status.capacity)
+}
+
+// kubeUse - CPU в милликорах и память в байтах: использование пода или ноды по
+// metrics-server (как kubectl top) или объем ноды.
+type kubeUse struct {
+	CPUm uint64 `json:"cpu_m"`
+	Mem  uint64 `json:"mem"`
 }
 
 type kubeWorkload struct {
@@ -386,6 +395,9 @@ type kubePod struct {
 	// контроллер для кнопки "перезапустить" в разделе "Память" (deployment/имя и т.п.)
 	Mem  uint64 `json:"mem,omitempty"`
 	Ctrl string `json:"ctrl,omitempty"`
+	// По всему кластеру, если есть metrics-server: память и CPU пода, где бы он ни работал.
+	// Нужно там, где на ноде с агентом своих подов нет (контроллер k0s без воркера).
+	Use *kubeUse `json:"use,omitempty"`
 	ip   string // podIP: нужен агенту для скрейпа метрик, в отчёт НЕ уходит (строчная = не сериализуется)
 	uid  string // metadata.uid: по нему под находится в cgroup ноды
 	ctrl string // контроллер; в отчет - только у подов этой ноды (Ctrl)
@@ -3769,6 +3781,7 @@ func collectKube() *kubeInfo {
 					KubeletVersion string
 				}
 				Addresses []struct{ Type, Address string }
+				Capacity  map[string]string
 			}
 		}
 	}
@@ -3795,6 +3808,7 @@ func collectKube() *kubeInfo {
 					kn.IP = a.Address
 				}
 			}
+			kn.Cap = quantityUse(n.Status.Capacity["cpu"], n.Status.Capacity["memory"])
 			ki.Nodes = append(ki.Nodes, kn)
 		}
 	}
@@ -3808,6 +3822,19 @@ func collectKube() *kubeInfo {
 	ki.Workloads = append(ki.Workloads, kubeReplicaWorkloads(cl, kc, "statefulsets", "StatefulSet")...)
 	ki.Workloads = append(ki.Workloads, kubeDaemonsets(cl, kc)...)
 	ki.Pods = kubePods(cl, kc)
+	// использование подов и нод по metrics-server, если он есть (нет - тихо без него)
+	if podUse, nodeUse := kubeMetrics(cl, kc); podUse != nil || nodeUse != nil {
+		for i := range ki.Pods {
+			if u, ok := podUse[ki.Pods[i].NS+"/"+ki.Pods[i].Name]; ok {
+				ki.Pods[i].Use = u
+			}
+		}
+		for i := range ki.Nodes {
+			if u, ok := nodeUse[ki.Nodes[i].Name]; ok {
+				ki.Nodes[i].Use = u
+			}
+		}
+	}
 	ki.CronJobs = kubeCronJobs(cl, kc)
 	ki.Volumes = kubeVolumes(cl, kc)
 	// домены маршрутов кластера: стандартный Ingress + Gateway API HTTPRoute
@@ -4191,6 +4218,86 @@ func kubePods(cl *http.Client, kc *kubeConf) []kubePod {
 		out = kubeCapPods(out, kubePodCap)
 	}
 	return out
+}
+
+// kubeMetrics - использование подов (ns/имя) и нод по metrics.k8s.io, как kubectl top. Права на
+// это у ServiceAccount агента есть с kube-setup 0.1; нет metrics-server - оба nil, без ошибки.
+func kubeMetrics(cl *http.Client, kc *kubeConf) (map[string]*kubeUse, map[string]*kubeUse) {
+	var pods struct {
+		Items []struct {
+			Metadata   struct{ Name, Namespace string }
+			Containers []struct {
+				Usage map[string]string
+			}
+		}
+	}
+	var podUse map[string]*kubeUse
+	if kubeGet(cl, kc, "/apis/metrics.k8s.io/v1beta1/pods", &pods) == nil {
+		podUse = make(map[string]*kubeUse, len(pods.Items))
+		for _, it := range pods.Items {
+			u := &kubeUse{}
+			for _, c := range it.Containers {
+				if cu := quantityUse(c.Usage["cpu"], c.Usage["memory"]); cu != nil {
+					u.CPUm += cu.CPUm
+					u.Mem += cu.Mem
+				}
+			}
+			podUse[it.Metadata.Namespace+"/"+it.Metadata.Name] = u
+		}
+	}
+	var nodes struct {
+		Items []struct {
+			Metadata struct{ Name string }
+			Usage    map[string]string
+		}
+	}
+	var nodeUse map[string]*kubeUse
+	if kubeGet(cl, kc, "/apis/metrics.k8s.io/v1beta1/nodes", &nodes) == nil {
+		nodeUse = make(map[string]*kubeUse, len(nodes.Items))
+		for _, it := range nodes.Items {
+			if u := quantityUse(it.Usage["cpu"], it.Usage["memory"]); u != nil {
+				nodeUse[it.Metadata.Name] = u
+			}
+		}
+	}
+	return podUse, nodeUse
+}
+
+// quantityUse - CPU и память из величин Kubernetes; nil, если не разобралось ни то, ни другое.
+func quantityUse(cpu, mem string) *kubeUse {
+	c, okc := parseQuantity(cpu)
+	m, okm := parseQuantity(mem)
+	if !okc && !okm {
+		return nil
+	}
+	return &kubeUse{CPUm: uint64(c*1000 + 0.5), Mem: uint64(m + 0.5)}
+}
+
+// parseQuantity - величина Kubernetes в обычное число: "250m" -> 0.25, "67258n" -> 0.000067258,
+// "43296Ki" -> 44335104, "1k" -> 1000, "1.5Gi", "1e3". Пустое или мусор - false.
+func parseQuantity(q string) (float64, bool) {
+	q = strings.TrimSpace(q)
+	if q == "" {
+		return 0, false
+	}
+	mult := map[string]float64{
+		"n": 1e-9, "u": 1e-6, "m": 1e-3, "k": 1e3, "M": 1e6, "G": 1e9, "T": 1e12, "P": 1e15, "E": 1e18,
+		"Ki": 1 << 10, "Mi": 1 << 20, "Gi": 1 << 30, "Ti": 1 << 40, "Pi": 1 << 50, "Ei": 1 << 60,
+	}
+	for _, suf := range []string{"Ki", "Mi", "Gi", "Ti", "Pi", "Ei", "n", "u", "m", "k", "M", "G", "T", "P", "E"} {
+		if strings.HasSuffix(q, suf) {
+			v, err := strconv.ParseFloat(strings.TrimSuffix(q, suf), 64)
+			if err != nil || v < 0 {
+				return 0, false
+			}
+			return v * mult[suf], true
+		}
+	}
+	v, err := strconv.ParseFloat(q, 64) // в том числе "1e3"
+	if err != nil || v < 0 {
+		return 0, false
+	}
+	return v, true
 }
 
 // podCtrl - что перезапускать у пода: "deployment/имя", "statefulset/имя", "daemonset/имя".

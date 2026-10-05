@@ -362,6 +362,12 @@ const EN: Record<string, string> = {
   'Кнопки перезапуска появятся после обновления агента до 2.17.': 'The restart buttons appear once the agent is updated to 2.17.',
   'не алертить по этому юниту:': 'do not alert on this unit:',
   'не алертить': 'do not alert',
+  // поды и ноды кластера по metrics-server
+  'по metrics-server, как kubectl top': 'from metrics-server, like kubectl top',
+  'сорт: память': 'sort: memory',
+  'сорт: CPU': 'sort: CPU',
+  'память {u} из {c}': 'memory {u} of {c}',
+  'CPU {u} из {c}': 'CPU {u} of {c}',
   // поды Kubernetes по памяти
   'Поды по памяти': 'Pods by memory',
   'Перезапустить {c} в {ns}? Kubernetes пересоздаст его поды по очереди.':
