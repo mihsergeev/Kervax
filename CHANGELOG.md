@@ -4,6 +4,16 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.4.85] - 2026-10-05
+
+### Changed
+- Дампы баз сжимаются с gzip --rsyncable (helper backup-setup 0.30). Обычный gzip после
+  первого изменения сдвигает все последующие байты, и restic каждую ночь кладет дамп в
+  репозиторий целиком: на feed-a это 78 ГБ pg_dumpall за ночь. С --rsyncable неизменные
+  таблицы сжимаются в те же байты, и restic их не дублирует. Скрипты дампов, созданные
+  прежними версиями helper'а, правятся на месте при обновлении, один раз и без смены формата;
+  где gzip не умеет --rsyncable, остается обычный.
+
 ## [1.4.84] - 2026-10-05
 
 ### Changed
