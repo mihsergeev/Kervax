@@ -522,6 +522,11 @@ class Server(Base):
     disk_alert_percent: Mapped[int] = mapped_column(Integer, default=90)  # «проблема»
     disk_warn_percent: Mapped[int] = mapped_column(Integer, default=85)  # «предупреждение»
     disk_crit_percent: Mapped[int] = mapped_column(Integer, default=95)  # «критично»
+    # Авто-очистка диска (галочка, по умолчанию выключена): планировщик сам запускает
+    # безопасные действия "Освободить", когда диск дошел до порога предупреждения.
+    # state - когда какое действие запускалось, чтобы не повторять его чаще раза в 6 часов.
+    disk_autofix: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
+    disk_autofix_state: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     temp_alert_c: Mapped[int] = mapped_column(Integer, default=0)  # порог темп. CPU, °C (0=выкл)
     conntrack_alert_percent: Mapped[int] = mapped_column(Integer, default=90)  # заполнение conntrack, % (0=выкл)
     # Занятость слотов подключений СУБД, % (0=выкл). Отдельный порог: коннекты
@@ -796,6 +801,9 @@ class BackupCommand(Base):
         DateTime(timezone=True), server_default=func.now(), index=True
     )
     done_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # "auto" - команду поставил планировщик (авто-очистка диска): результат уходит
+    # уведомлением в каналы алертов
+    origin: Mapped[str] = mapped_column(String(16), default="", server_default="")
 
 
 class BackupSetupJob(Base):

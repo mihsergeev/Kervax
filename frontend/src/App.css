@@ -937,6 +937,10 @@ input:focus {
 .du-lvl-careful { color: var(--degraded); }
 .du-lvl-manual { color: var(--text-muted); }
 .du-note { margin: 0.2rem 0 0.4rem; }
+.mem-cont { margin-top: 0.8rem; }
+.mc-row .loc-res-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.mc-row .loc-res-metric { min-width: 4.5rem; text-align: right; }
+.mc-row .loc-res-msg { min-width: 2.5rem; }
 .du-fix-btn { flex-shrink: 0; padding: 0.15rem 0.65rem; font-size: 0.78rem; }
 .du-fix {
   margin: 0.35rem 0 0.25rem;

@@ -42,7 +42,7 @@ import (
 	"time"
 )
 
-const version = "2.13"
+const version = "2.14"
 
 // Публичный ключ для проверки подписи релизов агента (Ed25519, base64).
 // ПУСТО по умолчанию → самообновление ВЫКЛЮЧЕНО (агент никогда не заменяет себя).
@@ -566,6 +566,7 @@ type dockerContainer struct {
 	Policy   string   `json:"policy,omitempty"` // restart-policy: no/always/unless-stopped/on-failure
 	Health   string   `json:"health,omitempty"` // healthy/unhealthy/starting (если есть healthcheck)
 	Binds    []string `json:"binds,omitempty"`  // хост-пути bind-mount'ов (аудит покрытия бэкапа)
+	Mem      uint64   `json:"mem,omitempty"`    // память работающего контейнера, байты (как docker stats)
 	ip       string   // IP контейнера для скрейпа метрик; в отчёт НЕ уходит (строчная)
 }
 
@@ -3219,6 +3220,10 @@ func collectDocker() *dockerInfo {
 				name = strings.TrimPrefix(c.Names[0], "/")
 			}
 			dc := dockerContainer{Name: name, Image: c.Image, State: c.State, Status: c.Status}
+			if c.State == "running" {
+				// кто съел память - для алерта и кнопки "перезапустить" в разделе "Память"
+				dc.Mem = containerMem("/sys/fs/cgroup", c.Id)
+			}
 			// inspect по id: RestartCount (crash-loop), restart-policy (намеренная ли
 			// остановка — бэкенд не алертит down у policy=no) и health. Ошибка inspect
 			// не критична — секция всё равно уедет с базовой инфой из списка.
@@ -3227,6 +3232,60 @@ func collectDocker() *dockerInfo {
 		}
 	}
 	return di
+}
+
+// containerMem - память контейнера по его cgroup, как в docker stats: использование без
+// неактивного файлового кэша (его ядро отдаст само, как только памяти станет мало). Пути:
+// cgroup v2 с systemd-драйвером docker, cgroup v2 с cgroupfs, cgroup v1. Файлы cgroup
+// читаются без прав, docker stats для этого не нужен (он медленный). 0 - не нашли.
+func containerMem(root, id string) uint64 {
+	if id == "" || strings.ContainsAny(id, "/.") {
+		return 0
+	}
+	for _, dir := range []string{
+		root + "/system.slice/docker-" + id + ".scope",
+		root + "/docker/" + id,
+	} {
+		if cur, ok := readUintFile(dir + "/memory.current"); ok {
+			return minusCache(cur, cgroupStat(dir+"/memory.stat", "inactive_file"))
+		}
+	}
+	dir := root + "/memory/docker/" + id
+	if use, ok := readUintFile(dir + "/memory.usage_in_bytes"); ok {
+		return minusCache(use, cgroupStat(dir+"/memory.stat", "total_inactive_file"))
+	}
+	return 0
+}
+
+func minusCache(use, cache uint64) uint64 {
+	if cache < use {
+		return use - cache
+	}
+	return use
+}
+
+func readUintFile(path string) (uint64, bool) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return 0, false
+	}
+	v, err := strconv.ParseUint(strings.TrimSpace(string(b)), 10, 64)
+	return v, err == nil
+}
+
+// cgroupStat - значение ключа из memory.stat ("ключ значение" построчно), 0 если нет.
+func cgroupStat(path, key string) uint64 {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return 0
+	}
+	for _, ln := range strings.Split(string(b), "\n") {
+		if f := strings.Fields(ln); len(f) == 2 && f[0] == key {
+			v, _ := strconv.ParseUint(f[1], 10, 64)
+			return v
+		}
+	}
+	return 0
 }
 
 // dockerInspect дополняет контейнер полями из /containers/{id}/json (RestartCount,

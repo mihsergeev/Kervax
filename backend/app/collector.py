@@ -6,6 +6,7 @@
 
 import asyncio
 import html
+import json
 import logging
 import random
 import re
@@ -17,7 +18,7 @@ from urllib.parse import urlparse
 from sqlalchemy import and_, delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app import alerts, backup, checks as checks_exec, custom_backups, heartbeat, settings_store
+from app import alerts, audit, backup, checks as checks_exec, custom_backups, heartbeat, settings_store
 from app.setup_scripts import current_setup_versions, gaps
 from app.config import Settings, get_settings
 from app.models import (
@@ -1793,6 +1794,16 @@ def cause_text(rep: dict, kind: str, base: dict[str, float], now: datetime | Non
     if eaters:
         # «сверху» читалось непонятно: это те, кто больше всего ест ресурс
         parts.append(f"больше всего {'CPU' if kind == 'cpu' else 'памяти'} у {eaters}")
+    if kind == "mem":
+        # процессы контейнера в топе не подписаны, а перезапускают контейнер (агент 2.14+)
+        conts = sorted(
+            ((str(c.get("name") or "?"), float(c.get("mem") or 0))
+             for c in ((rep.get("docker") or {}).get("containers") or [])
+             if isinstance(c, dict) and c.get("mem")),
+            key=lambda x: -x[1],
+        )[:2]
+        if conts:
+            parts.append("контейнеры: " + ", ".join(f"{n} {_fmt_size(m)}" for n, m in conts))
     surge = []
     # Запросы точнее байтов: 2.3 млн редиректов по 300 байт канал почти не шевелят.
     # Их считает helper webserver-setup; нет его - остаются трафик и соединения.
@@ -2917,6 +2928,8 @@ async def evaluate_servers(
 # Команда живёт секунды: агент забирает её за 1-15с, helper отвечает в пределах 90с
 # (столько же ждёт спул на ноде). Всё, что висит дольше, до ноды не доехало.
 _CMD_STUCK_SECONDS = 10 * 60
+# disk_fix run ждет helper до 15 минут (docker builder prune по большому кэшу)
+_FIX_STUCK_SECONDS = 20 * 60
 
 
 async def _expire_commands(session_factory: async_sessionmaker[AsyncSession]) -> None:
@@ -2926,17 +2939,132 @@ async def _expire_commands(session_factory: async_sessionmaker[AsyncSession]) ->
     суток, и в панели это выглядело как «кнопка ничего не делает» — без единого
     следа причины. Теперь пользователь видит явный отказ и может повторить.
     """
-    cutoff = datetime.now(timezone.utc) - timedelta(seconds=_CMD_STUCK_SECONDS)
+    now = datetime.now(timezone.utc)
+    cutoff = now - timedelta(seconds=_CMD_STUCK_SECONDS)
+    fix_cutoff = now - timedelta(seconds=_FIX_STUCK_SECONDS)
     async with session_factory() as session:
         res = await session.execute(
             update(BackupCommand)
             .where(BackupCommand.status.in_(("pending", "running")),
-                   BackupCommand.created_at < cutoff)
+                   or_(and_(BackupCommand.action != "disk_fix", BackupCommand.created_at < cutoff),
+                       and_(BackupCommand.action == "disk_fix", BackupCommand.created_at < fix_cutoff)))
             .values(status="error", ok=False, result="агент не ответил — команда не доехала")
         )
         if res.rowcount:
             log.info("закрыто зависших backup-команд: %d", res.rowcount)
         await session.commit()
+
+
+# --- авто-очистка диска (галочка сервера, по умолчанию выключена) ---
+# Только безопасная часть каталога "Освободить": то, что пересоздается само или является
+# мусором. Лог контейнера (содержимое пропадает) в авторежим не входит. Разрешено ли
+# действие на ноде, по-прежнему решает /etc/kervax/fix.conf (fix.allow в разборе места).
+_AUTOFIX_ACTIONS = ("journal", "rotated-logs", "apt-cache", "dnf-cache", "coredumps",
+                    "crash-reports", "docker-dangling", "docker-build-cache")
+_AUTOFIX_LABEL = {
+    "journal": "журнал systemd", "rotated-logs": "старые ротированные логи",
+    "apt-cache": "кэш пакетов apt", "dnf-cache": "кэш пакетов dnf/yum",
+    "coredumps": "дампы памяти упавших программ", "crash-reports": "отчеты о падениях",
+    "docker-dangling": "образы docker без тега", "docker-build-cache": "кэш сборки docker",
+}
+_AUTOFIX_MIN = 64 * 1024 ** 2   # меньше - не стоит запуска
+_AUTOFIX_COOLDOWN = 6 * 3600    # одно и то же действие на ноде - не чаще
+_AUTOFIX_AGENT = (2, 13)        # агент, который передает disk_fix в спул helper'а
+
+
+def _ver_tuple(v) -> tuple[int, ...]:
+    try:
+        return tuple(int(x) for x in str(v or "0").split("."))
+    except ValueError:
+        return (0,)
+
+
+async def autofix_disks(session_factory: async_sessionmaker[AsyncSession], now: datetime) -> int:
+    """Авто-очистка: у серверов с галочкой, когда раздел дошел до порога предупреждения,
+    ставит в очередь одно безопасное действие "Освободить" - самое крупное. Следующее -
+    когда это отработает (одна команда на сервер за раз) и только если раздел все еще выше
+    порога. Одно и то же действие повторяется не чаще раза в 6 часов, чтобы не долбить
+    ноду, где место съедает что-то другое. Возвращает, сколько команд поставлено."""
+    queued = 0
+    async with session_factory() as session:
+        servers = list(await session.scalars(
+            select(Server).where(Server.enabled.is_(True), Server.disk_autofix.is_(True))))
+        for s in servers:
+            rep = s.last_report or {}
+            if _ver_tuple(rep.get("agent_version")) < _AUTOFIX_AGENT:
+                continue
+            block = disk_usage_block(rep)
+            allow = set(((block or {}).get("fix") or {}).get("allow") or [])
+            if not block or not allow:
+                continue
+            thr = s.disk_warn_percent or s.disk_alert_percent or s.disk_crit_percent or 85
+            hot = {f.get("mount") for f in block["fs"]
+                   if isinstance(f, dict) and float(f.get("pct") or 0) >= thr}
+            if not hot:
+                continue
+            busy = await session.scalar(
+                select(BackupCommand.id).where(
+                    BackupCommand.server_id == s.id, BackupCommand.action == "disk_fix",
+                    BackupCommand.status.in_(("pending", "running"))).limit(1))
+            if busy:
+                continue
+            st = dict(s.disk_autofix_state or {})
+            cands = [
+                i for i in block.get("items") or []
+                if isinstance(i, dict) and i.get("level") == "safe"
+                and i.get("id") in _AUTOFIX_ACTIONS and i.get("id") in allow
+                and i.get("mount") in hot and float(i.get("free") or 0) >= _AUTOFIX_MIN
+                and now.timestamp() - float(st.get(i["id"]) or 0) >= _AUTOFIX_COOLDOWN
+            ]
+            if not cands:
+                continue
+            it = max(cands, key=lambda i: float(i.get("free") or 0))
+            session.add(BackupCommand(server_id=s.id, action="disk_fix", mode="run",
+                                      payload={"name": it["id"], "container": ""}, origin="auto"))
+            st[it["id"]] = now.timestamp()
+            s.disk_autofix_state = st
+            # audit.record коммитит сессию - команда и отметка уходят вместе с записью журнала
+            await audit.record(session, "авто", "backup_disk_fix", f"{it['id']}:run:auto",
+                               f"srv={s.id}")
+            queued += 1
+        await session.commit()
+    return queued
+
+
+async def send_autofix_note(session_factory: async_sessionmaker[AsyncSession],
+                            server_id: int, cmd_id: int) -> None:
+    """Результат авто-очистки - в каналы алертов: что панель удалила сама и сколько
+    освободилось (или почему не вышло). Без этого удаление от root прошло бы тихо."""
+    settings = get_settings()
+    async with session_factory() as session:
+        s = await session.get(Server, server_id)
+        c = await session.get(BackupCommand, cmd_id)
+        if s is None or c is None:
+            return
+        cfg = await settings_store.get_alert_config(session, settings)
+        if await settings_store.get_muted(session) or not alerts.alerts_enabled(cfg):
+            return
+        name, group, rep = s.name, s.group_name or "", s.last_report or {}
+        action = str((c.payload or {}).get("name") or "")
+        ok, result = bool(c.ok), c.result or ""
+    label = _AUTOFIX_LABEL.get(action, action or "?")
+    if ok:
+        try:
+            freed = float(json.loads(result).get("bytes") or 0)
+        except (ValueError, AttributeError):
+            freed = 0.0
+        block = disk_usage_block(rep) or {}
+        worst = max((f for f in block.get("fs") or [] if isinstance(f, dict)),
+                    key=lambda f: float(f.get("pct") or 0), default=None)
+        where = f" (диск {worst.get('mount')} был {worst.get('pct')}%)" if worst else ""
+        detail, icon = f"автоочистка диска: {label}, освобождено {_fmt_size(freed)}{where}", "🧹"
+    else:
+        detail, icon = f"автоочистка диска не удалась ({label}): {result[:200]}", "⚠️"
+    base = settings.panel_url.rstrip("/")
+    url = f"{base}/?server={server_id}&sec=diskfill" if base else ""
+    msg = _server_alert_text("disk", name, detail, url, icon=icon, group=group)
+    await alerts.dispatch(cfg, True, [msg], int(cfg.get("flood_threshold", 6)),
+                          parse_mode="HTML", session_factory=session_factory)
 
 
 async def _prune(
@@ -3162,6 +3290,8 @@ async def collector_loop(
                 session_factory, settings, datetime.now(timezone.utc)))
             await stage("серверные алерты", evaluate_servers(
                 session_factory, settings, datetime.now(timezone.utc)))
+            await stage("авто-очистка дисков", autofix_disks(
+                session_factory, datetime.now(timezone.utc)))
             await stage("зависшие команды", _expire_commands(session_factory))
             # Прунинг двигает границу ретеншена медленно — незачем каждый тик гонять
             # DELETE по 3 большим таблицам. Раз в prune_interval_seconds (по умолч. час).

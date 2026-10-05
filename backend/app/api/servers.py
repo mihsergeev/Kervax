@@ -15,8 +15,8 @@ from sqlalchemy import delete as sa_delete, func, select
 
 from app import audit, custom_backups, geoip, manual_probe
 from app.collector import (
-    dump_local_stale, send_alerts_soon, web_5xx_total, web_breakdown, web_label_key,
-    web_log_label, web_rate_total,
+    dump_local_stale, send_alerts_soon, send_autofix_note, web_5xx_total, web_breakdown,
+    web_label_key, web_log_label, web_rate_total,
 )
 from app.setup_scripts import (
     current_setup_versions as _current_setup_versions,
@@ -1050,6 +1050,13 @@ async def update_server(
 ) -> ServerOut:
     server = await _get_or_404(server_id, session, user)
     fields = body.model_dump(exclude_unset=True)
+    autofix = fields.pop("disk_autofix", None)
+    autofix_changed = autofix is not None and autofix != server.disk_autofix
+    # панель начнет сама запускать удаление на ноде: решение админа, не редактора
+    if autofix_changed and user.role != "admin":
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Авто-очистку диска включает только админ")
+    if autofix_changed:
+        fields["disk_autofix"] = autofix
     if fields.get("name") is not None:
         fields["name"] = fields["name"].strip()
         await _name_free(session, fields["name"], exclude_id=server.id)
@@ -1059,6 +1066,9 @@ async def update_server(
     await session.refresh(server)
     await _write_agent_allowlist(session)
     await audit.record(session, user.username, "server_update", server.name)
+    if autofix_changed:
+        await audit.record(session, user.username,
+                           "disk_autofix_on" if autofix else "disk_autofix_off", server.name)
     return _out(server, datetime.now(timezone.utc))
 
 
@@ -2639,6 +2649,8 @@ async def agent_kube_result(
 async def agent_backup_result(
     body: BackupResultIn,
     session: SessionDep,
+    request: Request,
+    background: BackgroundTasks,
     authorization: str = Header(default=""),
 ) -> dict:
     """Агент постит результат backup-команды (по своему токену)."""
@@ -2655,6 +2667,10 @@ async def agent_backup_result(
     c.result = (body.output or "")[-100_000:]
     c.status = "done" if body.ok else "error"
     c.done_at = datetime.now(timezone.utc)
-    c.payload = None  # секреты (repopass/hpass) в БД не задерживаем — стираем сразу
+    if c.action != "disk_fix":  # у disk_fix секретов нет, а название действия нужно уведомлению
+        c.payload = None  # секреты (repopass/hpass) в БД не задерживаем - стираем сразу
     await session.commit()
+    if c.action == "disk_fix" and c.origin == "auto":
+        # что сделала авто-очистка - в каналы алертов, иначе удаление от root прошло бы тихо
+        background.add_task(send_autofix_note, request.app.state.session_factory, server.id, c.id)
     return {"ok": True}

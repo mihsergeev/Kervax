@@ -801,6 +801,7 @@ export type DockerContainer = {
   restarts?: number // RestartCount демона
   policy?: string // restart-policy: no/always/unless-stopped/on-failure
   health?: string // healthy/unhealthy/starting
+  mem?: number // память работающего контейнера, байты (агент 2.14+, как docker stats)
 }
 export type DockerInfo = {
   present: boolean
@@ -951,6 +952,8 @@ export type DiskUsageItem = {
   count?: number
   name?: string // имя контейнера у его лога
   procs?: { pid: number; comm: string; bytes: number }[] // кто держит удаленные файлы
+  kind?: string // у каталогов во временных: restic / dump / archive / other
+  fresh?: boolean // в каталоге есть и свежие файлы - им пользуются
 }
 export type DiskUsage = {
   v: number
@@ -1109,6 +1112,7 @@ export type Server = {
   disk_alert_percent: number
   disk_warn_percent: number
   disk_crit_percent: number
+  disk_autofix?: boolean // авто-очистка безопасного при пороге предупреждения (включает админ)
   temp_alert_c: number
   conntrack_alert_percent: number
   db_conn_alert_percent: number
@@ -1354,6 +1358,7 @@ export function updateServer(
     db_dumps_ok?: boolean
     queue_alert_depth?: number // порог глубины очереди RabbitMQ (0 = выкл)
     queue_alert_over?: Record<string, number> // порог по конкретной очереди
+    disk_autofix?: boolean // авто-очистка диска (меняет только админ)
   },
 ): Promise<Server> {
   return api<Server>(`/api/servers/${id}`, { method: 'PATCH', body: JSON.stringify(body) })
