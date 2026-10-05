@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -162,5 +163,101 @@ func TestPermanentVsTemporaryRejection(t *testing.T) {
 	tmp := fmt.Errorf("на 3473408/5714055 байт: %w", errors.New("HTTP 502 вместо 206"))
 	if isPermanent(tmp) {
 		t.Fatal("обрыв канала посчитан окончательным — нода больше не попробует обновиться")
+	}
+}
+
+// rangeOf - запрошенный диапазон [from..to] (без Range - весь файл).
+func rangeOf(r *http.Request, n int) (int, int) {
+	from, to := 0, n-1
+	if rng := r.Header.Get("Range"); strings.HasPrefix(rng, "bytes=") {
+		parts := strings.SplitN(strings.TrimPrefix(rng, "bytes="), "-", 2)
+		from, _ = strconv.Atoi(parts[0])
+		if len(parts) == 2 && parts[1] != "" {
+			to, _ = strconv.Atoi(parts[1])
+		}
+	}
+	if to > n-1 {
+		to = n - 1
+	}
+	return from, to
+}
+
+func TestDownloadThroughFreezingChannel(t *testing.T) {
+	// Канал, как у web-a-prod за DPI: соединение отдает ~11 КБ тела и замерзает
+	// навсегда. Раньше агент ждал минуту на каждом таком куске, выбрасывал пришедшее и
+	// не опускался ниже 64 КБ - OTA шла час на везении. Теперь: замерзшее рвется по
+	// тишине, пришедшее остается, кусок за три неудачи падает до 8 КБ и там и остается.
+	cleanupParts(t)
+	defer cleanupParts(t)
+	oldB, oldM, oldI := dlBackoff, dlBackoffMax, dlIdle
+	dlBackoff, dlBackoffMax, dlIdle = time.Millisecond, 2*time.Millisecond, 100*time.Millisecond
+	defer func() { dlBackoff, dlBackoffMax, dlIdle = oldB, oldM, oldI }()
+
+	data := make([]byte, 200<<10)
+	if _, err := rand.Read(data); err != nil {
+		t.Fatal(err)
+	}
+	var mu sync.Mutex
+	total, frozen := 0, 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		from, to := rangeOf(r, len(data))
+		chunk := data[from : to+1]
+		w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", from, to, len(data)))
+		w.Header().Set("Content-Length", strconv.Itoa(len(chunk)))
+		w.WriteHeader(http.StatusPartialContent)
+		mu.Lock()
+		total++
+		big := len(chunk) > 12<<10
+		if big {
+			frozen++
+		}
+		mu.Unlock()
+		if big {
+			w.Write(chunk[:11<<10])
+			w.(http.Flusher).Flush()
+			<-r.Context().Done() // замерзло: больше ни байта, пока клиент не уйдет
+			return
+		}
+		w.Write(chunk)
+	}))
+	defer srv.Close()
+
+	start := time.Now()
+	bin, err := httpGetChunked(srv.URL, len(data), "9.97")
+	if err != nil {
+		t.Fatalf("не доехало: %v", err)
+	}
+	if len(bin) != len(data) {
+		t.Fatalf("скачано %d, ожидали %d", len(bin), len(data))
+	}
+	for i := range bin {
+		if bin[i] != data[i] {
+			t.Fatalf("байт %d не совпал - склейка с оборванными кусками испортила файл", i)
+		}
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	// 1 МБ -> 128 КБ -> 16 КБ замерзают, дальше только 8 КБ: три замерзших и ~22 целых
+	if frozen > 3 {
+		t.Fatalf("замерзших запросов %d - кусок не опускается до размера, который проходит", frozen)
+	}
+	if total > 30 {
+		t.Fatalf("запросов %d на 200 КБ - пришедшее из оборванных кусков выбрасывается?", total)
+	}
+	t.Logf("запросов %d, из них замерзли %d, за %s", total, frozen, time.Since(start).Round(time.Millisecond))
+}
+
+func TestFetchRangeChecksContentRange(t *testing.T) {
+	// Кусок не с того места склеился бы в битый файл (sha не сойдется, обновление
+	// отвергнется навсегда) - такой ответ не берем ни целиком, ни частью.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Range", "bytes 0-99/1000")
+		w.WriteHeader(http.StatusPartialContent)
+		w.Write(make([]byte, 100))
+	}))
+	defer srv.Close()
+	b, _, err := fetchRange(&http.Client{Timeout: 5 * time.Second}, srv.URL, 500, 599)
+	if err == nil || len(b) != 0 {
+		t.Fatalf("кусок не с того байта принят: err=%v len=%d", err, len(b))
 	}
 }
