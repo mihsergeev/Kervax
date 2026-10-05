@@ -4,6 +4,17 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.4.84] - 2026-10-05
+
+### Changed
+- Подсказки у упавших юнитов systemd для всего, что нашлось на парке после раскатки: mdadm
+  без почтового адреса (теперь mask: mdmonitor запускает правило udev, disable его не
+  останавливает), unbound-resolvconf без systemd-resolved, systemd-networkd-wait-online,
+  сокет, который не смог занять порт (ssh.socket рядом с sshd), restic с кодом 3 (часть
+  файлов не прочитана), freshclam без доступа к базам, openipmi без IPMI, раскладка
+  console-setup. Где есть готовое решение - команда с кнопкой "Копировать". Для массовой
+  уборки mdmonitor и unbound-resolvconf есть плейбук units_cleanup.yml в репозитории ansible.
+
 ## [1.4.83] - 2026-10-05
 
 ### Added
