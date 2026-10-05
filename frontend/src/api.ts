@@ -790,7 +790,19 @@ export type ServerDisk = {
 }
 // Прогноз заполнения (планировщик раз в полчаса по истории): только разделы с устойчивым
 // ростом, до которых осталось не больше месяца
-export type ServerProblem = { kind: string; level: number; text: string; sec: string; mute: string }
+// since - с какого момента это видно (ISO): для "Что сломано" - "2 дн"
+export type ServerProblem = { kind: string; level: number; text: string; sec: string; mute: string; since?: string | null }
+// Кто ест CPU группами (агент 2.21): процессы с одним именем у одного владельца. cpu - % одного
+// ядра (как top), spin - сколько из них давно крутят по ядру вхолостую, spin_age - возраст старшего
+export type CpuGroup = {
+  comm: string
+  kind?: 'container' | 'pod' | 'unit' | ''
+  owner?: string // контейнер, ns/имя пода ("pod <uid8>", если имени агент не знает) или юнит
+  n: number
+  cpu: number
+  spin?: number
+  spin_age?: number
+}
 export type DiskForecastItem = { mount: string; kind: 'space' | 'inode'; pct: number; rate: number; eta_h: number }
 export type DiskForecast = { ts: number; items: DiskForecastItem[] }
 export type ProcStat = {
@@ -814,6 +826,7 @@ export type DockerContainer = {
   policy?: string // restart-policy: no/always/unless-stopped/on-failure
   health?: string // healthy/unhealthy/starting
   mem?: number // память работающего контейнера, байты (агент 2.14+, как docker stats)
+  cpu?: number // CPU работающего контейнера, % одного ядра (агент 2.21+)
 }
 export type DockerInfo = {
   present: boolean
@@ -854,8 +867,10 @@ export type KubePod = {
   cred?: KubeCred // откуда под берёт креды БД (без значений; агент ≥1.74)
   // только у подов этой ноды (агент 2.16+): память как в kubectl top и что перезапускать
   mem?: number
+  cpu?: number // % одного ядра по cgroup пода (агент 2.21+, только поды этой ноды)
   ctrl?: string // deployment/имя, statefulset/имя, daemonset/имя
   use?: KubeUse // по всему кластеру из metrics-server (агент 2.19+), где бы под ни работал
+  u?: string // начало uid: по нему находятся имена подов воркера без доступа к kube-api
 }
 // Ссылки на креды СУБД-пода (без значений паролей).
 export type KubeCred = {
@@ -925,6 +940,7 @@ export type ServerReport = {
   disk_devs?: { dev: string; util: number; await: number; temp: number | null }[]
   top_cpu?: ProcStat[]
   top_mem?: ProcStat[]
+  cpu_groups?: CpuGroup[] // кто ест CPU группами с владельцем (агент 2.21+)
   conntrack_count?: number
   conntrack_max?: number
   sock_used?: number
@@ -1237,6 +1253,9 @@ export type Server = {
   custom_backup_ignored?: string[] | null
   kube_node_ignored?: string[] | null // ноды кластера, где агент не нужен (по имени)
   kube_unmonitored?: KubeNodeRef[] // ноды кластера без агента панели (считает бэкенд)
+  alert_since?: Record<string, string> // с какого момента видна проблема каждого вида (ISO)
+  docker_since?: Record<string, string> // с какого момента лежит каждый упавший контейнер
+  pod_names?: Record<string, string> // начало uid пода -> ns/имя (для "pod <uid8>" в cpu_groups)
 }
 
 // Свой бэкап ноды: cron-задание, systemd-таймер или скрипт с метриками, настроенный без

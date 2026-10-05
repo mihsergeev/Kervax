@@ -16,8 +16,9 @@ from sqlalchemy import delete as sa_delete, func, select
 
 from app import audit, custom_backups, geoip, kube_coverage, manual_probe
 from app.collector import (
-    dump_local_stale, send_alerts_soon, send_autofix_note, server_problems, web_5xx_total,
-    web_breakdown, web_label_key, web_log_label, web_rate_total,
+    alert_since, docker_since, dump_local_stale, needed_pod_names, pod_uid_names, send_alerts_soon,
+    send_autofix_note, server_problems, web_5xx_total, web_breakdown, web_label_key, web_log_label,
+    web_rate_total,
 )
 from app.setup_scripts import (
     current_setup_versions as _current_setup_versions,
@@ -177,7 +178,8 @@ def _agent_advice(server: Server) -> tuple[list[str], str | None]:
 
 
 def _out(
-    server: Server, now: datetime, cur_versions: dict[str, int] | None = None
+    server: Server, now: datetime, cur_versions: dict[str, int] | None = None,
+    pod_names: dict[str, str] | None = None,
 ) -> ServerOut:
     o = ServerOut.model_validate(server)
     o.online = _is_online(server, now)
@@ -194,7 +196,10 @@ def _out(
     # оказаться внутренним. local_ip не смотрим — он приватный и страны не имеет.
     o.country = geoip.country_of(server.external_ip) or geoip.country_of(server.agent_ip)
     o.docker_alerts = _docker_alerts(server)
-    o.problems = server_problems(server, now)
+    o.problems = server_problems(server, now, pod_names)
+    o.alert_since = alert_since(server)
+    o.docker_since = docker_since(server)
+    o.pod_names = needed_pod_names(server, pod_names)
     return o
 
 
@@ -346,9 +351,10 @@ async def list_servers(user: CurrentUser, session: SessionDep) -> list[ServerOut
     # чужой группы, все равно под присмотром. Без нарезки по группам это тот же список.
     every = servers if not (user.server_groups or []) else await session.scalars(select(Server))
     index = kube_coverage.build_index(every)
+    names = pod_uid_names(every)
     outs = []
     for s in servers:
-        o = _out(s, now, cur)
+        o = _out(s, now, cur, names)
         o.kube_unmonitored = _unmonitored(s, index)
         outs.append(o)
     return outs

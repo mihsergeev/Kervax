@@ -1056,6 +1056,12 @@ class ServerOut(BaseModel):
     problems: list[dict] = []
     custom_backup_ignored: list[str] | None = None
     kube_node_ignored: list[str] | None = None  # ноды кластера, где агент не нужен (по имени)
+    # с какого момента видна проблема каждого вида (ISO) - для "Что сломано": "2 дня"
+    alert_since: dict[str, str] = Field(default_factory=dict)
+    # с какого момента лежит каждый упавший контейнер: {имя: ISO}
+    docker_since: dict[str, str] = Field(default_factory=dict)
+    # начало uid пода -> ns/имя: агент воркера без доступа к kube-api знает поды по uid
+    pod_names: dict[str, str] = Field(default_factory=dict)
     # ноды кластера без агента панели; считает kube_coverage по ВСЕМ серверам панели
     kube_unmonitored: list[KubeNodeRef] = []
 

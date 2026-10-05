@@ -18,7 +18,7 @@ import {
   type Server,
 } from './api'
 import type { Section } from './App'
-import { backupWindowNote, fmtSetupVersion, srvIssues } from './serverUtils'
+import { backupWindowNote, fmtSetupVersion, sinceShort, srvIssues } from './serverUtils'
 import { useI18n } from './i18n'
 import { expiryText, registrableDomain } from './checkUtils'
 import { useAuth } from './auth'
@@ -33,7 +33,7 @@ const BROKEN_LIMIT = 12
 // иконка проблемы по ее виду - чтобы список читался, не вчитываясь
 const ISSUE_ICON: Record<string, string> = {
   offline: '🔥', cpu: '🧮', mem: '🧠', disk: '🗄', temp: '🌡', throttle: '🥵', conntrack: '🔗',
-  disktemp: '🌡', disk_health: '💽', disk_forecast: '📈', inode: '🗂', units: '⚙️',
+  disktemp: '🌡', disk_health: '💽', disk_forecast: '📈', inode: '🗂', units: '⚙️', cpu_spin: '🌀',
   docker: '🐳', kuber: '☸️', backups: '💾',
 }
 
@@ -42,7 +42,16 @@ type T = (k: string, p?: Record<string, string | number>) => string
 // представлен строкой, объекта под рукой нет, поэтому код кладём в сам пункт
 type ActItem = { key: string; icon: string; section: Section; id?: number; text: string; srv?: boolean; sec?: string; cc?: string; name?: string }
 // name - имя сервера: по нему "Что сломано" пишет "сервер - что" (text начинается с "имя: ")
-type ProbItem = { key: string; id?: number; down: boolean; text: string; srv?: boolean; cc?: string; name?: string }
+type ProbItem = {
+  key: string; id?: number; down: boolean; text: string; srv?: boolean; cc?: string; name?: string
+  since?: string | null // с какого момента (ISO), для "Что сломано"
+}
+
+// самое раннее из известных начал: у нескольких упавших контейнеров хоста - старшее
+function earliest(list: (string | null | undefined)[]): string | null {
+  const ok = list.filter((x): x is string => !!x).sort()
+  return ok[0] ?? null
+}
 
 const K_BAD_POD = ['CrashLoopBackOff', 'ImagePullBackOff', 'ErrImagePull', 'Error', 'OOMKilled', 'CreateContainerError']
 const D_RESTART_POLICIES = ['always', 'unless-stopped', 'on-failure']
@@ -349,7 +358,7 @@ function dockerProblems(servers: Server[], t: T): ProbItem[] {
     if (!d?.access || !d.containers) continue
     const down = d.containers.filter((c) => (c.state === 'exited' || c.state === 'dead') && D_RESTART_POLICIES.includes((c.policy || '').toLowerCase()))
     const loop = d.containers.filter((c) => (c.restarts || 0) >= 3 && c.state === 'running')
-    if (down.length > 0) out.push({ key: `d-down-${s.id}`, id: s.id, name: s.name, cc: s.country, down: true, text: t('{name}: контейнеров упало — {n}', { name: s.name, n: down.length }) })
+    if (down.length > 0) out.push({ key: `d-down-${s.id}`, id: s.id, name: s.name, cc: s.country, down: true, since: earliest(down.map((c) => s.docker_since?.[c.name])), text: t('{name}: контейнеров упало — {n}', { name: s.name, n: down.length }) })
     if (loop.length > 0) out.push({ key: `d-loop-${s.id}`, id: s.id, name: s.name, cc: s.country, down: true, text: t('{name}: перезапусков — {n}', { name: s.name, n: loop.length }) })
   }
   return out
@@ -364,7 +373,7 @@ function kubeProblems(servers: Server[], t: T): ProbItem[] {
     const nr = (k.nodes || []).filter((n) => !n.ready).length
     const bad = (k.pods || []).filter((p) => !podFinished(p) && (p.phase === 'Failed' || (p.reason ? K_BAD_POD.includes(p.reason) : false))).length
     if (nr > 0) out.push({ key: `k-node-${s.id}`, id: s.id, name: s.name, cc: s.country, down: true, text: t('{name}: нод NotReady — {n}', { name: s.name, n: nr }) })
-    if (bad > 0) out.push({ key: `k-pod-${s.id}`, id: s.id, name: s.name, cc: s.country, down: true, text: t('{name}: проблемных подов — {n}', { name: s.name, n: bad }) })
+    if (bad > 0) out.push({ key: `k-pod-${s.id}`, id: s.id, name: s.name, cc: s.country, down: true, since: s.alert_since?.kube_pod, text: t('{name}: проблемных подов — {n}', { name: s.name, n: bad }) })
   }
   return out
 }
@@ -376,14 +385,14 @@ function backupProblems(servers: Server[], t: T): ProbItem[] {
     if (!s.online) continue
     const b = s.last_report?.backup
     if (b?.present && b.metric_present) {
-      if (b.success === 0) out.push({ key: `b-fail-${s.id}`, id: s.id, name: s.name, cc: s.country, down: true, text: t('{name}: бэкап завершился с ошибкой', { name: s.name }) })
-      else if (b.last_backup_ts && Date.now() / 1000 - b.last_backup_ts > 2 * 86400) out.push({ key: `b-stale-${s.id}`, id: s.id, name: s.name, cc: s.country, down: false, text: t('{name}: бэкап не свежий', { name: s.name }) })
+      if (b.success === 0) out.push({ key: `b-fail-${s.id}`, id: s.id, name: s.name, cc: s.country, down: true, since: s.alert_since?.backup_failed, text: t('{name}: бэкап завершился с ошибкой', { name: s.name }) })
+      else if (b.last_backup_ts && Date.now() / 1000 - b.last_backup_ts > 2 * 86400) out.push({ key: `b-stale-${s.id}`, id: s.id, name: s.name, cc: s.country, down: false, since: s.alert_since?.backup_stale, text: t('{name}: бэкап не свежий', { name: s.name }) })
     }
     const bs = s.last_report?.backup_server
     // свои бэкапы ноды (настроены без панели): упал прогон, давно не отрабатывал, выключен
     const own = (s.custom_backups ?? []).filter((j) => ['failed', 'stale', 'disabled'].includes(j.status))
     if (own.length > 0) {
-      out.push({ key: `b-own-${s.id}`, id: s.id, name: s.name, cc: s.country, down: own.some((j) => j.status === 'failed'),
+      out.push({ key: `b-own-${s.id}`, id: s.id, name: s.name, cc: s.country, down: own.some((j) => j.status === 'failed'), since: s.alert_since?.backup_custom,
         text: t('{name}: свой бэкап не отрабатывает — {jobs}', {
           name: s.name, jobs: own.map((j) => `${j.name} (${j.problem})`).join(', '),
         }) })
@@ -391,7 +400,7 @@ function backupProblems(servers: Server[], t: T): ProbItem[] {
     const ownFiles = (s.custom_backups ?? []).some((j) => j.files && !j.ignored)
     // сервер без настроенного бэкапа (и не помеченный «не требуется», и не сам бэкап-сервер)
     if (!bs?.present && !(b?.configured || b?.metric_present) && !s.backup_not_required && !ownFiles) {
-      out.push({ key: `b-none-${s.id}`, id: s.id, name: s.name, cc: s.country, down: false, text: t('{name}: бэкап не настроен', { name: s.name }) })
+      out.push({ key: `b-none-${s.id}`, id: s.id, name: s.name, cc: s.country, down: false, since: s.alert_since?.backup_missing, text: t('{name}: бэкап не настроен', { name: s.name }) })
     }
     if (bs?.present) {
       if (!bs.running) out.push({ key: `bs-stop-${s.id}`, id: s.id, name: s.name, cc: s.country, down: true, srv: true, text: t('{name}: rest-server остановлен', { name: s.name }) })
@@ -403,7 +412,7 @@ function backupProblems(servers: Server[], t: T): ProbItem[] {
         if (!r.valid || stuck) return true
         return r.last_activity ? Date.now() / 1000 - r.last_activity > 3 * 86400 : false
       }).length
-      if (badRepos > 0) out.push({ key: `bs-repo-${s.id}`, id: s.id, name: s.name, cc: s.country, down: true, srv: true, text: t('{name}: репозиториев с проблемой — {n}', { name: s.name, n: badRepos }) })
+      if (badRepos > 0) out.push({ key: `bs-repo-${s.id}`, id: s.id, name: s.name, cc: s.country, down: true, srv: true, since: s.alert_since?.backup_repo, text: t('{name}: репозиториев с проблемой — {n}', { name: s.name, n: badRepos }) })
     }
   }
   return out
@@ -571,14 +580,14 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
   // стояли рядом. Списки в карточках разделов ниже убраны: там остались счетчики.
   type Broken = {
     key: string; id: number; name: string; cc?: string; tone: 't-down' | 't-degraded'; text: string
-    kind: string; section: Section; srv?: boolean; sec?: string; mute?: string
+    kind: string; section: Section; srv?: boolean; sec?: string; mute?: string; since?: string | null
   }
   const fromProbs = (items: ProbItem[], section: Section): Broken[] =>
     canSee(section)
       ? items.map((p) => ({
           key: p.key, id: p.id ?? 0, name: p.name ?? '', cc: p.cc, tone: p.down ? 't-down' : 't-degraded',
           text: p.name && p.text.startsWith(p.name + ': ') ? p.text.slice(p.name.length + 2) : p.text,
-          kind: section, section, srv: p.srv,
+          kind: section, section, srv: p.srv, since: p.since,
         }))
       : []
   const broken: Broken[] = [
@@ -587,6 +596,7 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
           srvIssues(s, t).map((i, n) => ({
             key: `${s.id}-${n}`, id: s.id, name: s.name, cc: s.country, tone: i.tone, text: i.text,
             kind: i.kind ?? 'server', section: 'servers' as Section, srv: true, sec: i.sec, mute: i.mute,
+            since: i.since,
           })),
         )
       : []),
@@ -630,6 +640,7 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
                 <span className="home-attention-ico">{ISSUE_ICON[it.kind] ?? '⚠️'}</span>
                 <span className="home-attention-txt">
                   <CountryFlag code={it.cc} /> <b>{it.name}</b> - {it.text}
+                  {sinceShort(it.since, t) && <span className="muted"> · {sinceShort(it.since, t)}</span>}
                 </span>
                 {it.mute && (
                   <span className="quick-mute" title={t('Приглушить')}

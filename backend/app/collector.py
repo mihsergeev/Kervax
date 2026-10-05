@@ -192,6 +192,7 @@ _SRV_ICON = {
     "backup_missing": "💾", "backup_failed": "💾", "backup_stale": "💾", "backup_repo": "💾",
     "backup_dump": "💾", "backup_dump_space": "🈵", "backup_cron": "💾", "backup_custom": "💾",
     "clock": "🕐", "disk_health": "💽", "inode": "⚠️", "disk_forecast": "📈", "units": "⚙️",
+    "cpu_spin": "🌀",
     # ⏳ — срок ещё не вышел, есть время спланировать; 🔥 — доставка уже встала
     "kube_expiry": "⏳", "flux_down": "🔥☸️", "kube_pod": "☸️🔥", "web_5xx": "🌐🔥",
 }
@@ -208,6 +209,7 @@ _SRV_SECTION = {
     "db_conn": "services",
     "kube_expiry": "kube", "flux_down": "kube", "kube_pod": "kube", "web_5xx": "web",
     "clock": "clock", "disk_health": "diskhealth", "inode": "diskfill", "disk_forecast": "diskfill", "units": "units",
+    "cpu_spin": "cpueat",
 }
 
 
@@ -1112,6 +1114,7 @@ _SRV_LABEL = {
     "inode": "inode",
     "disk_forecast": "прогноз заполнения",
     "units": "юниты systemd",
+    "cpu_spin": "процессы в пустом цикле",
 }
 
 # Единицы пороговых метрик. Нужны отбою: голое «снова в норме» не отвечает на
@@ -1170,6 +1173,8 @@ def _recovery_detail(key: str, st: dict, ctx: dict) -> str:
         return "диски больше не грозят заполниться в ближайшие дни: рост замедлился или место освободили"
     if key == "units":
         return "упавших юнитов больше нет"
+    if key == "cpu_spin":
+        return "процессов, крутивших CPU вхолостую, больше нет"
     label = _SRV_LABEL[key]
     unit, val = _SRV_UNIT.get(key), ctx.get("value")
     if not unit or val is None:
@@ -1878,7 +1883,7 @@ def disk_health_problems(block: dict, short: bool = False) -> list[tuple[int, st
     return out
 
 
-def server_problems(s: Server, now: datetime) -> list[dict]:
+def server_problems(s: Server, now: datetime, pod_names: dict[str, str] | None = None) -> list[dict]:
     """Что сломано на сервере по новым проверкам - поломки дисков, прогноз заполнения, inode,
     упавшие юниты - коротко, для сводки "Что сломано" на главной и значков в списке серверов.
     Уровни те же, что у алертов: 2-3 - проблема, 1 - предупреждение. Прогноз здесь виден за
@@ -1888,9 +1893,13 @@ def server_problems(s: Server, now: datetime) -> list[dict]:
         return []
     rep = s.last_report or {}
     out: list[dict] = []
+    state = s.alert_state or {}
 
-    def add(kind: str, level: int, text: str, sec: str, mute: str) -> None:
-        out.append({"kind": kind, "level": level, "text": text, "sec": sec, "mute": mute})
+    def add(kind: str, level: int, text: str, sec: str, mute: str, since: str | None = None) -> None:
+        # since - с какого момента это видно (для "Что сломано": "2 дня"); по умолчанию -
+        # когда панель впервые увидела проблему этого вида (alert_state "<вид>_from")
+        out.append({"kind": kind, "level": level, "text": text, "sec": sec, "mute": mute,
+                    "since": since or state.get(f"{kind}_from")})
 
     hb = disk_health_block(rep)
     if hb is not None:
@@ -1909,7 +1918,13 @@ def server_problems(s: Server, now: datetime) -> list[dict]:
                 continue
             if ref - float(u.get("since") or 0) < _UNIT_MIN_AGE:
                 continue
-            add("units", unit_level(u), f"{u['unit']}: {unit_why(u)}", "units", f"unit:{u['unit']}")
+            u_since = datetime.fromtimestamp(float(u["since"]), timezone.utc).isoformat() if u.get("since") else None
+            add("units", unit_level(u), f"{u['unit']}: {unit_why(u)}", "units", f"unit:{u['unit']}", u_since)
+    for g in spin_groups(rep):
+        # крутится почти всю жизнь (так он и попал в группу), поэтому начало - возраст процесса
+        age = int(g.get("spin_age") or 0)
+        add("cpu_spin", 1, spin_text([g], pod_names, with_age=False), "cpueat", "cpu_spin",
+            (now - timedelta(seconds=age)).isoformat() if age > 0 else None)
     for i in dfc.fresh_items(s.disk_forecast, now) or []:
         eta = float(i["eta_h"])
         if eta > 10 * 24:
@@ -2042,6 +2057,126 @@ def top_eaters(rep: dict, kind: str) -> str:
     return ", ".join(f"{n} {_fmt_size(v)}" for n, v in top if v > 0)
 
 
+def _plural(n: int, one: str, few: str, many: str) -> str:
+    if n % 10 == 1 and n % 100 != 11:
+        return one
+    return few if 2 <= n % 10 <= 4 and not 12 <= n % 100 <= 14 else many
+
+
+def _cores(pct: float) -> str:
+    """% одного ядра словами: 4510 -> "45 ядер", 250 -> "2.5 ядра"."""
+    v = pct / 100
+    if v >= 10:
+        n = round(v)
+        return f"{n} {_plural(n, 'ядро', 'ядра', 'ядер')}"
+    return f"{v:.1f} ядра"
+
+
+# Группа одинаковых процессов одного владельца, которые давно крутят по ядру каждый (агент
+# 2.21, cpu_groups[].spin). Одиночный занятой демон (containerd на 1.3 ядра за 84 дня на
+# k8s-a-prc) сюда не попадает: нужно хотя бы три одинаковых процесса.
+_SPIN_MIN = 3
+
+
+def pod_uid_names(servers) -> dict[str, str]:
+    """Начало uid пода -> ns/имя по отчетам всех нод с доступом к kube-api (агент 2.21+).
+    Агент воркера без доступа к kube-api знает свои поды только по uid из cgroup."""
+    out: dict[str, str] = {}
+    for s in servers:
+        for p in (((s.last_report or {}).get("kube") or {}).get("pods") or []):
+            if isinstance(p, dict) and p.get("u"):
+                out[str(p["u"])] = f"{p.get('ns') or '?'}/{p.get('name') or '?'}"
+    return out
+
+
+def group_owner(g: dict, pod_names: dict[str, str] | None = None) -> str:
+    """Владелец группы процессов словами: "под ns/имя", "контейнер x", "юнит x.service"."""
+    owner, kind = str(g.get("owner") or ""), g.get("kind")
+    if kind == "pod":
+        if owner.startswith("pod "):
+            owner = (pod_names or {}).get(owner[4:], owner[4:])
+        return f"под {owner}"
+    if kind == "container":
+        return f"контейнер {owner}"
+    if kind == "unit":
+        return f"юнит {owner}"
+    return ""
+
+
+def spin_groups(rep: dict) -> list[dict]:
+    return [g for g in (rep.get("cpu_groups") or [])
+            if isinstance(g, dict) and int(g.get("spin") or 0) >= _SPIN_MIN]
+
+
+def spin_text(groups: list[dict], pod_names: dict[str, str] | None = None, with_age: bool = True) -> str:
+    """"47 процессов chrome (под ns/имя) крутят по ядру вхолостую: 45 ядер, старшему 186 дн".
+    В "Что сломано" возраст не пишем: там длительность и так стоит в конце строки."""
+    parts = []
+    for g in groups:
+        n, age = int(g.get("spin") or 0), int(g.get("spin_age") or 0)
+        own = group_owner(g, pod_names)
+        age_t = f"{age // 86400} дн" if age >= 86400 else f"{age // 3600} ч"
+        parts.append(f"{n} {_plural(n, 'процесс', 'процесса', 'процессов')} {g.get('comm') or '?'}"
+                     + (f" ({own})" if own else "")
+                     + f" крутят по ядру вхолостую: {_cores(float(g.get('cpu') or 0))}"
+                     + (f", старшему {age_t}" if with_age else ""))
+    return "; ".join(parts)
+
+
+def groups_text(groups: list[dict], pod_names: dict[str, str] | None = None) -> str:
+    """"chrome x47 (под ns/имя) 45 ядер, containerd (юнит k0sworker.service) 1.3 ядра"."""
+    items = []
+    for g in groups[:_CAUSE_TOP_N]:
+        cpu = float(g.get("cpu") or 0)
+        if cpu < _CAUSE_MIN_CPU:
+            continue
+        n, own = int(g.get("n") or 1), group_owner(g, pod_names)
+        items.append(f"{g.get('comm') or '?'}{f' x{n}' if n > 1 else ''}{f' ({own})' if own else ''} {_cores(cpu)}")
+    return ", ".join(items)
+
+
+# Что из alert_state отдать как "с какого момента проблема": "<вид>_from" ставит цикл алертов
+# для любого вида, а у пороговых метрик точнее "<вид>_since" - начало превышения, а не алерта.
+_SINCE_KEYS = ("cpu", "mem", "temp", "conntrack", "disktemp", "db_conn", "web_5xx", "clock",
+               "backup_missing")
+
+
+def alert_since(s: Server) -> dict[str, str]:
+    """Только активные проблемы ("<вид>_from" снимается при отбое). "<вид>_since" бывает
+    устаревшим - backup_missing_since живет и после того, как бэкап настроили, - поэтому
+    берем его, только пока проблема активна и только если он раньше начала алерта."""
+    st = s.alert_state or {}
+    out: dict[str, str] = {}
+    for key, v in st.items():
+        if not (key.endswith("_from") and isinstance(v, str) and v):
+            continue
+        k = key[:-5]
+        early = st.get(f"{k}_since") if k in _SINCE_KEYS else None
+        out[k] = early if isinstance(early, str) and early and early < v else v
+    return out
+
+
+def docker_since(s: Server) -> dict[str, str]:
+    """С какого момента лежит каждый упавший контейнер (alert_state["docker"][имя]["down_since"])."""
+    out = {}
+    for name, cs in ((s.alert_state or {}).get("docker") or {}).items():
+        if isinstance(cs, dict) and isinstance(cs.get("down_since"), str):
+            out[name] = cs["down_since"]
+    return out
+
+
+def needed_pod_names(s: Server, names: dict[str, str] | None) -> dict[str, str]:
+    """Имена только тех подов, которые этот сервер знает по uid ("pod 56279ecf" в cpu_groups)."""
+    if not names:
+        return {}
+    out = {}
+    for g in ((s.last_report or {}).get("cpu_groups") or []):
+        own = str(g.get("owner") or "") if isinstance(g, dict) else ""
+        if g.get("kind") == "pod" and own.startswith("pod ") and own[4:] in names:
+            out[own[4:]] = names[own[4:]]
+    return out
+
+
 async def hour_baseline(session: AsyncSession, server_id: int, now: datetime) -> dict[str, float]:
     """Норма для ЭТОГО времени суток: медиана трафика и TCP-соединений в том же часе
     предыдущих _BASE_DAYS суток (плюс-минус полчаса от текущего времени).
@@ -2113,11 +2248,15 @@ def _times(cur: float, base: float, floor: float) -> str:
     return f"x{min(cur / base, 999):.0f}"
 
 
-def cause_text(rep: dict, kind: str, base: dict[str, float], now: datetime | None = None) -> str:
+def cause_text(rep: dict, kind: str, base: dict[str, float], now: datetime | None = None,
+               pod_names: dict[str, str] | None = None) -> str:
     """Хвост к тексту алерта: кто ест ресурс и не наплыв ли это. Пусто, если
     сказать нечего - тогда алерт выглядит как раньше."""
     parts = []
-    eaters = top_eaters(rep, kind)
+    # CPU у агентов 2.21+ - группами с владельцем: в топе всего 8 процессов, и 47 зависших
+    # chrome выглядели бы как "chrome 800%", а не 45 ядер одного пода
+    groups = [g for g in (rep.get("cpu_groups") or []) if isinstance(g, dict)] if kind == "cpu" else []
+    eaters = groups_text(groups, pod_names) if groups else top_eaters(rep, kind)
     if eaters:
         # «сверху» читалось непонятно: это те, кто больше всего ест ресурс
         parts.append(f"больше всего {'CPU' if kind == 'cpu' else 'памяти'} у {eaters}")
@@ -2475,7 +2614,8 @@ def _fallback_rule(key: str) -> dict:
 
 
 def _server_conditions(s: Server, now: datetime,
-                       web_err: tuple[float, float, int, dict] | None = None) -> dict[str, tuple[int, dict]]:
+                       web_err: tuple[float, float, int, dict] | None = None,
+                       pod_names: dict[str, str] | None = None) -> dict[str, tuple[int, dict]]:
     """Пороги сервера: ключ → (уровень, контекст для шаблона текста). Уровень 0 =
     норма; для диска 1=предупреждение(≥warn), 2=проблема(≥alert), 3=критично(≥crit)."""
     out: dict[str, tuple[int, dict]] = {}
@@ -2819,6 +2959,13 @@ def _server_conditions(s: Server, now: datetime,
             "sig": sorted(u["unit"] for u in bad),
         })
 
+    # Одинаковые процессы, которые давно крутят по ядру каждый (агент 2.21). На k8s-a-prc 47
+    # зависших chrome жгли 45 ядер из 96, а CPU-алерт молчал: до порога не доходило. Агент
+    # старше 2.21 групп не шлет - ключа нет, как у юнитов без helper'а.
+    if online and "cpu_groups" in rep:
+        spin = spin_groups(rep)
+        out["cpu_spin"] = (1 if spin else 0, {"detail": spin_text(spin, pod_names) if spin else ""})
+
     # Сдвиг часов: локальное время ноды (clock_unix) vs время панели на приёме. По модулю;
     # порог warn 5с / проблема 30с / крит 5мин. Дебаунс (как sustain): разовый спайк —
     # медленный отчёт/GC — не шлёт алерт, ждём удержания ≥ sustain_s (пишем clock_since).
@@ -2986,6 +3133,8 @@ async def evaluate_servers(
         return f"{base}/?server={s.id}" + (f"&sec={sec}" if sec else "")
 
     base_cache: dict[int, dict[str, float]] = {}
+    # имена подов по uid - один раз за тик: воркер без доступа к kube-api пишет поды по uid
+    pod_names = pod_uid_names(servers)
 
     async def cause_for(s: Server, key: str) -> str:
         """«Почему» для порогового алерта: кто ест ресурс и не наплыв ли трафика.
@@ -2998,7 +3147,7 @@ async def evaluate_servers(
             except Exception:
                 log.warning("норма трафика для %s не посчиталась", s.name, exc_info=True)
                 base_cache[s.id] = {}
-        return cause_text(s.last_report or {}, key, base_cache[s.id], now)
+        return cause_text(s.last_report or {}, key, base_cache[s.id], now, pod_names)
 
     def srv_fire(s: Server, key: str, rule: dict, ctx: dict) -> alerts.Msg:
         """Текст срабатывания: дефолт → богатый формат (иконка + имя-ссылкой + суть),
@@ -3085,7 +3234,7 @@ async def evaluate_servers(
                     f"{settings_store.SERVER_ALERT_KINDS[fk][0]} снова в норме",
                     srv_url(s, fk), recovery=True, group=s.group_name or "",
                 ))
-        conds = _server_conditions(s, now, web_err.get(s.id))
+        conds = _server_conditions(s, now, web_err.get(s.id), pod_names)
         # состояние дебаунса ведём КАЖДЫЙ тик, даже без смены уровня алерта — иначе
         # оно не накопится (при level==prev цикл ниже делает continue без записи).
         # «<тип>_since» — момент начала «жарки» (по времени); throttle — «_streak».
@@ -3094,6 +3243,13 @@ async def evaluate_servers(
                 apply(s.id, f"{k}_since", cx["since"])
             if "streak" in cx and int(st.get(f"{k}_streak", 0)) != cx["streak"]:
                 apply(s.id, f"{k}_streak", cx["streak"])
+            # с какого момента проблема видна - для "Что сломано" ("sda изношен - 2 дня");
+            # ведем для любого вида и до проверки мьютов: заглушенное тоже остается проблемой
+            frm = st.get(f"{k}_from")
+            if _lvl > 0 and not frm:
+                apply(s.id, f"{k}_from", now.isoformat())
+            elif _lvl <= 0 and frm:
+                apply(s.id, f"{k}_from", None)
         for key, (level, ctx) in conds.items():
             rule = rules.get(key) or _fallback_rule(key)
             if not rule["enabled"] or not _rule_scope_ok(rule, s):

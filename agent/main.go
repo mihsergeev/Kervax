@@ -42,7 +42,7 @@ import (
 	"time"
 )
 
-const version = "2.20"
+const version = "2.21"
 
 // Публичный ключ для проверки подписи релизов агента (Ed25519, base64).
 // ПУСТО по умолчанию → самообновление ВЫКЛЮЧЕНО (агент никогда не заменяет себя).
@@ -180,6 +180,9 @@ type report struct {
 	// топ-процессы (снапшот): по CPU и по памяти
 	TopCPU []procStat `json:"top_cpu"`
 	TopMem []procStat `json:"top_mem"`
+	// кто ест CPU группами: одинаковые процессы одного владельца (контейнер, под, юнит)
+	// складываются, и видно, сколько из них давно крутят ядро вхолостую
+	CPUGroups []cpuGroup `json:"cpu_groups,omitempty"`
 	// таблица conntrack + сокеты (мгновенные значения)
 	ConntrackCount float64 `json:"conntrack_count"`
 	ConntrackMax   float64 `json:"conntrack_max"`
@@ -393,11 +396,15 @@ type kubePod struct {
 	Cred     *kubeCred `json:"cred,omitempty"`   // откуда СУБД-под берёт креды (ССЫЛКИ, не значения) — для автоподстановки в манифест дампа
 	// Только у подов ЭТОЙ ноды (их cgroup видна агенту): память как в kubectl top и
 	// контроллер для кнопки "перезапустить" в разделе "Память" (deployment/имя и т.п.)
-	Mem  uint64 `json:"mem,omitempty"`
-	Ctrl string `json:"ctrl,omitempty"`
+	Mem  uint64  `json:"mem,omitempty"`
+	CPU  float64 `json:"cpu,omitempty"` // % одного ядра по cgroup пода, как top
+	Ctrl string  `json:"ctrl,omitempty"`
 	// По всему кластеру, если есть metrics-server: память и CPU пода, где бы он ни работал.
 	// Нужно там, где на ноде с агентом своих подов нет (контроллер k0s без воркера).
 	Use *kubeUse `json:"use,omitempty"`
+	// начало metadata.uid (8 символов): агент воркера без доступа к kube-api знает свои поды
+	// только по uid из cgroup ("pod 56279ecf"), и по этому полю панель находит их имена
+	U    string `json:"u,omitempty"`
 	ip   string // podIP: нужен агенту для скрейпа метрик, в отчёт НЕ уходит (строчная = не сериализуется)
 	uid  string // metadata.uid: по нему под находится в cgroup ноды
 	ctrl string // контроллер; в отчет - только у подов этой ноды (Ctrl)
@@ -588,7 +595,9 @@ type dockerContainer struct {
 	Health   string   `json:"health,omitempty"` // healthy/unhealthy/starting (если есть healthcheck)
 	Binds    []string `json:"binds,omitempty"`  // хост-пути bind-mount'ов (аудит покрытия бэкапа)
 	Mem      uint64   `json:"mem,omitempty"`    // память работающего контейнера, байты (как docker stats)
+	CPU      float64  `json:"cpu,omitempty"`    // CPU работающего контейнера, % одного ядра (как top)
 	ip       string   // IP контейнера для скрейпа метрик; в отчёт НЕ уходит (строчная)
+	id       string   // id контейнера: по нему процесс находит свой контейнер (cpu_groups)
 }
 
 // пропускная способность одного сетевого интерфейса, байт/сек + ошибки/дропы, пакетов/сек
@@ -2322,6 +2331,7 @@ type procSample struct {
 	comm    string
 	threads int
 	state   string
+	start   uint64 // starttime: тиков от загрузки (возраст процесса, отличить переиспользованный pid)
 }
 
 // снимок всех процессов из /proc/<pid>/stat: тики CPU (utime+stime), RSS, имя.
@@ -2358,7 +2368,8 @@ func readProcs() map[int]procSample {
 		stime, _ := strconv.ParseUint(tail[12], 10, 64)    // поле 15
 		threads, _ := strconv.Atoi(tail[17])               // поле 20 (num_threads)
 		rssPages, _ := strconv.ParseUint(tail[21], 10, 64) // поле 24 (страницы)
-		m[pid] = procSample{ticks: utime + stime, rss: rssPages * ps, comm: comm, threads: threads, state: state}
+		start, _ := strconv.ParseUint(tail[19], 10, 64)    // поле 22 (starttime)
+		m[pid] = procSample{ticks: utime + stime, rss: rssPages * ps, comm: comm, threads: threads, state: state, start: start}
 	}
 	return m
 }
@@ -2413,6 +2424,286 @@ func topProcs(prev, cur sample) (topCPU, topMem []procStat) {
 }
 
 const procCmdlineMax = 140
+
+// cpuGroup - кто ест CPU: процессы с одним именем у одного владельца. По отдельности 49 зависших
+// chrome теряются в топе, а вместе это 45 ядер одного пода.
+type cpuGroup struct {
+	Comm    string  `json:"comm"`
+	Kind    string  `json:"kind,omitempty"`     // container | pod | unit; пусто - без владельца
+	Owner   string  `json:"owner,omitempty"`    // имя контейнера, ns/имя пода или systemd-юнит
+	N       int     `json:"n"`                  // процессов группы, евших CPU за интервал
+	CPU     float64 `json:"cpu"`                // % одного ядра, сумма по группе
+	Spin    int     `json:"spin,omitempty"`     // из них давно крутят по ядру (см. spinNowPct)
+	SpinAge int64   `json:"spin_age,omitempty"` // возраст старшего такого, секунды
+}
+
+// Процесс "крутится": сейчас занимает ядро почти целиком, почти всю жизнь занимал так же и
+// живет дольше spinMinAge. История не нужна: возраст и все потраченное время есть в /proc.
+// Так выглядят зависшие браузеры и воркеры в пустом цикле (на k8s-a-prc 49 chrome по ядру
+// 2-52 дня). Процесс, который недавно проснулся после долгого простоя, сюда не попадет, пока
+// его среднее не подтянется, - зато обычная пиковая нагрузка не попадет никогда.
+const (
+	spinNowPct = 90.0
+	spinAvgPct = 80.0
+	spinMinAge = 6 * 3600.0
+)
+
+// подменяются в тестах: cgroup процесса и время с загрузки
+var (
+	procCgroup = func(pid int) string {
+		b, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/cgroup")
+		if err != nil {
+			return ""
+		}
+		return string(b)
+	}
+	procUptime = func() float64 {
+		b, err := os.ReadFile("/proc/uptime")
+		if err != nil {
+			return 0
+		}
+		f := strings.Fields(string(b))
+		if len(f) == 0 {
+			return 0
+		}
+		v, _ := strconv.ParseFloat(f[0], 64)
+		return v
+	}
+)
+
+// procOwner - чей процесс по его /proc/<pid>/cgroup: под (uid), контейнер docker (id) или
+// systemd-юнит. Под важнее контейнера: перезапускают деплоймент, а не контейнер в нем.
+func procOwner(cg string) (kind, id string) {
+	for _, ln := range strings.Split(cg, "\n") {
+		f := strings.SplitN(ln, ":", 3)
+		if len(f) != 3 || f[2] == "/" || f[2] == "" {
+			continue
+		}
+		segs := strings.Split(strings.Trim(f[2], "/"), "/")
+		for i := len(segs) - 1; i >= 0; i-- {
+			if uid := podUID(segs[i]); uid != "" {
+				return "pod", uid
+			}
+		}
+		for i := len(segs) - 1; i >= 0; i-- {
+			sg := segs[i]
+			if strings.HasPrefix(sg, "docker-") && strings.HasSuffix(sg, ".scope") {
+				return "container", strings.TrimSuffix(strings.TrimPrefix(sg, "docker-"), ".scope")
+			}
+			if i > 0 && segs[i-1] == "docker" && len(sg) == 64 {
+				return "container", sg
+			}
+		}
+		for i := len(segs) - 1; i >= 0; i-- {
+			if strings.HasSuffix(segs[i], ".service") {
+				return "unit", segs[i]
+			}
+		}
+	}
+	return "", ""
+}
+
+// cpuGroups - процессы, евшие CPU за интервал, сложенные по (имя, владелец). cgroup читаем только
+// у них: простаивающих большинство, и /proc/<pid>/cgroup на каждый процесс каждые 15 с незачем.
+func cpuGroups(prev, cur sample, conts, pods map[string]string) []cpuGroup {
+	el := cur.at.Sub(prev.at).Seconds()
+	if len(cur.procs) == 0 || el <= 0 {
+		return nil
+	}
+	up := procUptime()
+	by := map[string]*cpuGroup{}
+	for pid, c := range cur.procs {
+		p, ok := prev.procs[pid]
+		if !ok || c.start != p.start || c.ticks <= p.ticks {
+			continue // новый процесс, чужой pid или не ел CPU
+		}
+		cpu := float64(c.ticks-p.ticks) / clkTck / el * 100
+		if cpu < 1 {
+			continue
+		}
+		kind, id := procOwner(procCgroup(pid))
+		owner := id
+		switch kind {
+		case "container":
+			if n := conts[id]; n != "" {
+				owner = n
+			} else if len(id) > 12 {
+				owner = id[:12]
+			}
+		case "pod":
+			if n := pods[id]; n != "" {
+				owner = n
+			} else {
+				owner = "pod " + id[:8]
+			}
+		}
+		key := c.comm + "\x00" + kind + "\x00" + owner
+		g := by[key]
+		if g == nil {
+			g = &cpuGroup{Comm: c.comm, Kind: kind, Owner: owner}
+			by[key] = g
+		}
+		g.N++
+		g.CPU += cpu
+		if age := up - float64(c.start)/clkTck; up > 0 && age >= spinMinAge && cpu >= spinNowPct &&
+			float64(c.ticks)/clkTck/age*100 >= spinAvgPct {
+			g.Spin++
+			g.SpinAge = max(g.SpinAge, int64(age))
+		}
+	}
+	list := make([]cpuGroup, 0, len(by))
+	for _, g := range by {
+		g.CPU = round1(g.CPU)
+		list = append(list, *g)
+	}
+	sort.Slice(list, func(i, j int) bool {
+		if list[i].CPU != list[j].CPU {
+			return list[i].CPU > list[j].CPU
+		}
+		return list[i].Comm < list[j].Comm
+	})
+	var out []cpuGroup
+	for i, g := range list {
+		if (i < topProcN && g.CPU >= 5) || g.Spin >= 2 {
+			out = append(out, g)
+		}
+	}
+	return out
+}
+
+// containerNames / podNames - id контейнера и uid пода в человеческие имена для cpu_groups.
+func containerNames(di *dockerInfo) map[string]string {
+	m := map[string]string{}
+	if di != nil {
+		for _, c := range di.Containers {
+			if c.id != "" {
+				m[c.id] = c.Name
+			}
+		}
+	}
+	return m
+}
+
+func podNames(ki *kubeInfo) map[string]string {
+	m := map[string]string{}
+	if ki != nil {
+		for _, p := range ki.Pods {
+			if p.uid != "" {
+				m[p.uid] = p.NS + "/" + p.Name
+			}
+		}
+	}
+	return m
+}
+
+// cgCPU - прошлый замер процессорного времени cgroup (контейнера, пода): по разнице с ним
+// считается загрузка, как у top по тикам процесса.
+var cgCPU = struct {
+	sync.Mutex
+	m map[string]cgCPUSample
+}{m: map[string]cgCPUSample{}}
+
+type cgCPUSample struct {
+	usec uint64
+	at   time.Time
+}
+
+// cpuRate - % одного ядра у cgroup с прошлого замера. Первый замер - 0: сравнивать не с чем.
+// Замеры, не обновлявшиеся 10 минут (контейнер удален), выкидываются.
+func cpuRate(key string, usec uint64, now time.Time) float64 {
+	cgCPU.Lock()
+	defer cgCPU.Unlock()
+	prev, ok := cgCPU.m[key]
+	cgCPU.m[key] = cgCPUSample{usec, now}
+	for k, v := range cgCPU.m {
+		if now.Sub(v.at) > 10*time.Minute {
+			delete(cgCPU.m, k)
+		}
+	}
+	el := now.Sub(prev.at).Seconds()
+	if !ok || usec < prev.usec || el <= 0 {
+		return 0
+	}
+	return round1(float64(usec-prev.usec) / 1e6 / el * 100)
+}
+
+// cgroupUsec - потраченное cgroup процессорное время, микросекунды: usage_usec из cpu.stat
+// (cgroup v2) или cpuacct.usage в наносекундах (v1).
+func cgroupUsec(dir string) (uint64, bool) {
+	if b, err := os.ReadFile(dir + "/cpu.stat"); err == nil {
+		for _, ln := range strings.Split(string(b), "\n") {
+			if f := strings.Fields(ln); len(f) == 2 && f[0] == "usage_usec" {
+				v, err := strconv.ParseUint(f[1], 10, 64)
+				return v, err == nil
+			}
+		}
+	}
+	if ns, ok := readUintFile(dir + "/cpuacct.usage"); ok {
+		return ns / 1000, true
+	}
+	return 0, false
+}
+
+// containerCPU - процессорное время контейнера по его cgroup; пути те же, что у containerMem.
+func containerCPU(root, id string) (uint64, bool) {
+	if id == "" || strings.ContainsAny(id, "/.") {
+		return 0, false
+	}
+	for _, dir := range []string{
+		root + "/system.slice/docker-" + id + ".scope",
+		root + "/docker/" + id,
+		root + "/cpuacct/docker/" + id,
+		root + "/cpu,cpuacct/docker/" + id,
+	} {
+		if v, ok := cgroupUsec(dir); ok {
+			return v, true
+		}
+	}
+	return 0, false
+}
+
+// podCPU - процессорное время подов этой ноды: uid -> микросекунды. Раскладки те же, что у
+// podMem, у cgroup v1 - в контроллере cpuacct.
+func podCPU(root string) map[string]uint64 {
+	out := map[string]uint64{}
+	for _, base := range []string{root, root + "/cpuacct", root + "/cpu,cpuacct"} {
+		top, err := os.ReadDir(base)
+		if err != nil {
+			continue
+		}
+		for _, e := range top {
+			if e.IsDir() && strings.HasPrefix(e.Name(), "kubepods") {
+				podCPUWalk(base+"/"+e.Name(), 0, out)
+			}
+		}
+		if len(out) > 0 {
+			break
+		}
+	}
+	return out
+}
+
+func podCPUWalk(dir string, depth int, out map[string]uint64) {
+	ents, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	for _, e := range ents {
+		if !e.IsDir() {
+			continue
+		}
+		sub := dir + "/" + e.Name()
+		if uid := podUID(e.Name()); uid != "" {
+			if v, ok := cgroupUsec(sub); ok {
+				out[uid] = v
+			}
+			continue
+		}
+		if depth < 2 {
+			podCPUWalk(sub, depth+1, out)
+		}
+	}
+}
 
 // uidCache — ленивый кэш uid→имя из /etc/passwd (одно чтение файла).
 var (
@@ -2809,6 +3100,8 @@ func collect(prev sample) (report, sample) {
 	}
 	// kube собираем в переменную: он же нужен для скрейпа сервисов (podIP есть только там)
 	r.Kube = collectKube()
+	// группы процессов - после docker и kube: им нужны имена контейнеров и подов
+	r.CPUGroups = cpuGroups(prev, cur, containerNames(dk), podNames(r.Kube))
 	r.Services = collectServices(dk, r.Kube)
 	r.WebServices = collectWebServices(r.Kube)
 	r.DBStats = collectDBStats()
@@ -3403,10 +3696,14 @@ func collectDocker() *dockerInfo {
 			if len(c.Names) > 0 {
 				name = strings.TrimPrefix(c.Names[0], "/")
 			}
-			dc := dockerContainer{Name: name, Image: c.Image, State: c.State, Status: c.Status}
+			dc := dockerContainer{Name: name, Image: c.Image, State: c.State, Status: c.Status, id: c.Id}
 			if c.State == "running" {
-				// кто съел память - для алерта и кнопки "перезапустить" в разделе "Память"
+				// кто съел память и CPU - для алертов и кнопки "перезапустить" в разделах
+				// "Память" и "CPU"
 				dc.Mem = containerMem("/sys/fs/cgroup", c.Id)
+				if u, ok := containerCPU("/sys/fs/cgroup", c.Id); ok {
+					dc.CPU = cpuRate("c:"+c.Id, u, time.Now())
+				}
 			}
 			// inspect по id: RestartCount (crash-loop), restart-policy (намеренная ли
 			// остановка — бэкенд не алертит down у policy=no) и health. Ошибка inspect
@@ -4221,12 +4518,17 @@ func kubePods(cl *http.Client, kc *kubeConf) []kubePod {
 		return nil
 	}
 	mem := podMem("/sys/fs/cgroup")
+	cpu := podCPU("/sys/fs/cgroup")
+	now := time.Now()
 	out := make([]kubePod, 0, len(d.Items))
 	for _, p := range d.Items {
 		kp := kubePod{
 			NS: p.Metadata.Namespace, Name: p.Metadata.Name,
 			Phase: p.Status.Phase, Node: p.Spec.NodeName, Reason: p.Status.Reason,
 			uid: p.Metadata.UID,
+		}
+		if len(kp.uid) >= 8 {
+			kp.U = kp.uid[:8]
 		}
 		if len(p.Metadata.OwnerReferences) > 0 {
 			o := p.Metadata.OwnerReferences[0]
@@ -4235,6 +4537,9 @@ func kubePods(cl *http.Client, kc *kubeConf) []kubePod {
 		}
 		if m := mem[kp.uid]; m > 0 && p.Status.Phase == "Running" {
 			kp.Mem, kp.Ctrl = m, kp.ctrl
+		}
+		if u, ok := cpu[kp.uid]; ok && p.Status.Phase == "Running" {
+			kp.CPU, kp.Ctrl = cpuRate("p:"+kp.uid, u, now), kp.ctrl
 		}
 		// образ шлём ТОЛЬКО у подов, похожих на СУБД: в больших кластерах (сотни подов)
 		// гонять образ каждого пода в каждом отчёте — лишние килобайты на ровном месте.
@@ -4462,7 +4767,7 @@ func kubeCapPods(pods []kubePod, cap int) []kubePod {
 	var good []kubePod
 	for _, p := range pods {
 		// поды этой ноды (с памятью) тоже не теряем: по ним раздел "Память" и алерт
-		if !p.Ready || p.Restarts > 0 || p.Mem > 0 || (p.Phase != "Running" && p.Phase != "Succeeded") {
+		if !p.Ready || p.Restarts > 0 || p.Mem > 0 || p.CPU > 0 || (p.Phase != "Running" && p.Phase != "Succeeded") {
 			res = append(res, p)
 		} else {
 			good = append(good, p)

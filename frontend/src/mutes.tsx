@@ -30,6 +30,7 @@ export const SRV_ALERT_KINDS: { k: string; label: string }[] = [
   { k: 'inode', label: 'Диск: inode' },
   { k: 'disk_forecast', label: 'Диск: скоро заполнится' },
   { k: 'units', label: 'Systemd: упавшие юниты' },
+  { k: 'cpu_spin', label: 'CPU: процессы в пустом цикле' },
   { k: 'reboot', label: 'Перезагрузка' },
   { k: 'oom', label: 'OOM-killer' },
   { k: 'web_5xx', label: 'Веб: ошибки 5xx' },

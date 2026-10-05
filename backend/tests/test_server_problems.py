@@ -66,4 +66,5 @@ async def test_problems_in_servers_list(client, auth_headers):
     assert (await client.post("/api/agent/report", json=report,
                               headers={"Authorization": f"Bearer {token}"})).status_code == 200
     srv = (await client.get("/api/servers", headers=auth_headers)).json()[0]
-    assert srv["problems"] == [{"kind": "inode", "level": 3, "text": "inode / 97%", "sec": "diskfill", "mute": "inode"}]
+    assert srv["problems"] == [{"kind": "inode", "level": 3, "text": "inode / 97%", "sec": "diskfill", "mute": "inode",
+                               "since": None}]

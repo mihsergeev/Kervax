@@ -362,6 +362,17 @@ const EN: Record<string, string> = {
   'Кнопки перезапуска появятся после обновления агента до 2.17.': 'The restart buttons appear once the agent is updated to 2.17.',
   'не алертить по этому юниту:': 'do not alert on this unit:',
   'не алертить': 'do not alert',
+  // кто ест CPU (агент 2.21)
+  'Контейнеры по CPU': 'Containers by CPU',
+  'Поды по CPU': 'Pods by CPU',
+  'Процессы по CPU': 'Processes by CPU',
+  '{n} ядро': '{n} core',
+  '{n} ядра': '{n} cores',
+  '{n} ядер': '{n} cores',
+  'под': 'pod',
+  'контейнер': 'container',
+  '{n} крутят по ядру вхолостую, старшему {age}': '{n} spin a core idle, the oldest for {age}',
+  'CPU: процессы в пустом цикле': 'CPU: processes in an idle loop',
   // ноды кластера без агента панели
   '{name}: нод кластера без агента - {n} ({nodes})': '{name}: cluster nodes without an agent - {n} ({nodes})',
   'Нод без агента: {n}. На них панель не видит диски, SMART, упавшие юниты и процессы - только то, что отдает Kubernetes.':

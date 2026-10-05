@@ -32,6 +32,7 @@ import {
   type OomEvent,
   type ProcStat,
   type WebErrorRow,
+  type CpuGroup,
   type Server,
   type ServerEnroll,
   type ServerMetric,
@@ -1790,16 +1791,20 @@ const DB_IMAGE = /(postgres|mysql|mariadb|mongo|redis|valkey|keydb|clickhouse|el
 
 // Кто съел память: контейнеры по памяти (агент 2.14+) с перезапуском прямо отсюда - сюда
 // ведет ссылка из алерта по памяти. Перезапуск - та же команда, что в разделе Docker.
-function MemContainers({ server: s, onChanged }: { server: Server; onChanged: () => void }) {
+// by - чем меряем: память (раздел "Память") или CPU (раздел "CPU", агент 2.21+). Перезапуск
+// один и тот же: тот, кто съел ресурс, обычно и чинится перезапуском.
+function MemContainers({ server: s, onChanged, by = 'mem' }: { server: Server; onChanged: () => void; by?: 'mem' | 'cpu' }) {
   const { t } = useI18n()
   const { isViewer } = useAuth()
   const [st, setSt] = useState<Record<string, { busy?: boolean; ok?: boolean; msg?: string }>>({})
+  const val = (c: { mem?: number; cpu?: number }) => (by === 'cpu' ? c.cpu ?? 0 : c.mem ?? 0)
   const list = (s.last_report?.docker?.containers ?? [])
-    .filter((c) => c.state === 'running' && (c.mem ?? 0) > 0)
-    .sort((a, b) => (b.mem ?? 0) - (a.mem ?? 0))
+    .filter((c) => c.state === 'running' && val(c) >= (by === 'cpu' ? CPU_SHOW_MIN : 1))
+    .sort((a, b) => val(b) - val(a))
     .slice(0, 6)
   if (!list.length) return null
-  const total = s.last_report?.mem_total || 0
+  // процент - от всей машины: памяти или всех ядер
+  const total = by === 'cpu' ? (s.last_report?.cpu_cores || 0) * 100 : s.last_report?.mem_total || 0
   const restart = async (name: string) => {
     if (!window.confirm(t('Перезапустить контейнер {n}? Несколько секунд он будет недоступен.', { n: name }))) return
     setSt((cur) => ({ ...cur, [name]: { busy: true } }))
@@ -1820,7 +1825,7 @@ function MemContainers({ server: s, onChanged }: { server: Server; onChanged: ()
   }
   return (
     <div className="detail-inc mem-cont">
-      <div className="chart-cap">{t('Контейнеры по памяти')}</div>
+      <div className="chart-cap">{by === 'cpu' ? t('Контейнеры по CPU') : t('Контейнеры по памяти')}</div>
       <div className="loc-results">
         {list.map((c) => {
           const db = DB_IMAGE.test(c.image) || DB_IMAGE.test(c.name)
@@ -1828,9 +1833,9 @@ function MemContainers({ server: s, onChanged }: { server: Server; onChanged: ()
           return (
             <div key={c.name} className="loc-res mc-row">
               <div className="loc-res-name mono">{c.name}</div>
-              <div className="loc-res-metric">{fmtBytes(c.mem ?? 0)}</div>
+              <div className="loc-res-metric">{by === 'cpu' ? fmtCpu(c.cpu ?? 0, t) : fmtBytes(c.mem ?? 0)}</div>
               <div className="loc-res-msg muted small">
-                {total ? `${Math.round(((c.mem ?? 0) / total) * 100)}%` : ''}
+                {total ? `${Math.round((val(c) / total) * 100)}%` : ''}
               </div>
               {cs?.msg && <span className={`small ${cs.ok ? 't-up' : 'form-error'}`}>{cs.msg}</span>}
               {!isViewer &&
@@ -2127,16 +2132,17 @@ function FailedUnits({ server: s, onChanged }: { server: Server; onChanged: () =
 // Поды Kubernetes этой ноды по памяти (агент 2.16+ берет ее из cgroup пода, как kubectl
 // top): кто съел память и кнопка перезапуска его контроллера (rollout restart - Kubernetes
 // пересоздает поды по очереди). Поды баз кнопкой не перезапускаются, как и контейнеры.
-function MemPods({ server: s, onChanged }: { server: Server; onChanged: () => void }) {
+function MemPods({ server: s, onChanged, by = 'mem' }: { server: Server; onChanged: () => void; by?: 'mem' | 'cpu' }) {
   const { t } = useI18n()
   const { isViewer } = useAuth()
   const [st, setSt] = useState<Record<string, { busy?: boolean; ok?: boolean; msg?: string }>>({})
+  const val = (p: { mem?: number; cpu?: number }) => (by === 'cpu' ? p.cpu ?? 0 : p.mem ?? 0)
   const list = (s.last_report?.kube?.pods ?? [])
-    .filter((p) => (p.mem ?? 0) > 0)
-    .sort((a, b) => (b.mem ?? 0) - (a.mem ?? 0))
+    .filter((p) => val(p) >= (by === 'cpu' ? CPU_SHOW_MIN : 1))
+    .sort((a, b) => val(b) - val(a))
     .slice(0, 6)
   if (!list.length) return null
-  const total = s.last_report?.mem_total || 0
+  const total = by === 'cpu' ? (s.last_report?.cpu_cores || 0) * 100 : s.last_report?.mem_total || 0
   const restart = async (key: string, ns: string, ctrl: string) => {
     const [kind, name] = ctrl.split('/') as ['deployment' | 'statefulset' | 'daemonset', string]
     if (!window.confirm(t('Перезапустить {c} в {ns}? Kubernetes пересоздаст его поды по очереди.', { c: ctrl, ns })))
@@ -2159,7 +2165,7 @@ function MemPods({ server: s, onChanged }: { server: Server; onChanged: () => vo
   }
   return (
     <div className="detail-inc mem-cont">
-      <div className="chart-cap">{t('Поды по памяти')}</div>
+      <div className="chart-cap">{by === 'cpu' ? t('Поды по CPU') : t('Поды по памяти')}</div>
       <div className="loc-results">
         {list.map((p) => {
           const key = `${p.ns}/${p.name}`
@@ -2171,9 +2177,9 @@ function MemPods({ server: s, onChanged }: { server: Server; onChanged: () => vo
                 <span className="muted">{p.ns}/</span>
                 {p.name}
               </div>
-              <div className="loc-res-metric">{fmtBytes(p.mem ?? 0)}</div>
+              <div className="loc-res-metric">{by === 'cpu' ? fmtCpu(p.cpu ?? 0, t) : fmtBytes(p.mem ?? 0)}</div>
               <div className="loc-res-msg muted small">
-                {total ? `${Math.round(((p.mem ?? 0) / total) * 100)}%` : ''}
+                {total ? `${Math.round((val(p) / total) * 100)}%` : ''}
               </div>
               {ps?.msg && <span className={`small ${ps.ok ? 't-up' : 'form-error'}`}>{ps.msg}</span>}
               {!isViewer &&
@@ -2189,6 +2195,67 @@ function MemPods({ server: s, onChanged }: { server: Server; onChanged: () => vo
             </div>
           )
         })}
+      </div>
+    </div>
+  )
+}
+
+// контейнеры и поды мельче 5% одного ядра в "кто ест CPU" не показываем - это фон
+const CPU_SHOW_MIN = 5
+
+// CPU из "% одного ядра" (как top) в ядра: 4510 -> "45 ядер", 250 -> "2.5 ядра"
+function fmtCpu(pct: number, t: TFn): string {
+  const v = pct / 100
+  if (v < 10) return t('{n} ядра', { n: v.toFixed(1) })
+  const n = Math.round(v)
+  const m10 = n % 10
+  const m100 = n % 100
+  return t(m10 === 1 && m100 !== 11 ? '{n} ядро' : m10 >= 2 && m10 <= 4 && (m100 < 12 || m100 > 14) ? '{n} ядра' : '{n} ядер', { n })
+}
+
+const CPU_OWNER_KIND: Record<string, string> = { pod: 'под', container: 'контейнер', unit: 'юнит' }
+
+// Кто ест CPU группами (агент 2.21): процессы с одним именем у одного владельца складываются, и
+// видно, сколько из них давно крутят ядро вхолостую. Так видны 47 зависших chrome одного пода:
+// в топе процессов их было бы восемь строк по ядру без владельца.
+function CpuGroups({ server: s }: { server: Server }) {
+  const { t } = useI18n()
+  const groups = s.last_report?.cpu_groups ?? []
+  if (!groups.length) return null
+  const total = (s.last_report?.cpu_cores || 0) * 100
+  // агент воркера без доступа к kube-api пишет под как "pod <uid8>", имя знает панель
+  const owner = (g: CpuGroup) => {
+    const o = g.owner || ''
+    return g.kind === 'pod' && o.startsWith('pod ') ? s.pod_names?.[o.slice(4)] ?? o.slice(4) : o
+  }
+  const age = (sec: number) =>
+    sec >= 86400 ? t('{n} дн', { n: Math.floor(sec / 86400) }) : t('{n} ч', { n: Math.floor(sec / 3600) })
+  return (
+    <div className="detail-inc mem-cont">
+      <div className="chart-cap">{t('Процессы по CPU')}</div>
+      <div className="loc-results">
+        {groups.map((g, i) => (
+          <div key={`${g.comm}-${g.owner}-${i}`} className={`loc-res mc-row cg-row${(g.spin ?? 0) >= 3 ? ' t-degraded' : ''}`}>
+            <div className="loc-res-name mono cg-name">
+              {g.comm}
+              {g.n > 1 ? ` x${g.n}` : ''}
+              {g.owner && (
+                <span className="muted">
+                  {' · '}
+                  {CPU_OWNER_KIND[g.kind || ''] ? `${t(CPU_OWNER_KIND[g.kind || ''])} ` : ''}
+                  {owner(g)}
+                </span>
+              )}
+            </div>
+            <div className="loc-res-metric">{fmtCpu(g.cpu, t)}</div>
+            <div className="loc-res-msg muted small">{total ? `${Math.round((g.cpu / total) * 100)}%` : ''}</div>
+            {(g.spin ?? 0) >= 2 && (
+              <span className="small t-degraded cg-spin">
+                {t('{n} крутят по ядру вхолостую, старшему {age}', { n: g.spin ?? 0, age: age(g.spin_age ?? 0) })}
+              </span>
+            )}
+          </div>
+        ))}
       </div>
     </div>
   )
@@ -4236,6 +4303,12 @@ function ServerDetail({
                 )
               : null}
             {r.cpu_throttle != null ? chartCard('throttle') : null}
+          </div>
+          {/* кто ест CPU: сюда ведет алерт о процессах в пустом цикле (sec=cpueat) */}
+          <div id="mcard-cpueat">
+            <MemContainers server={s} onChanged={onChanged} by="cpu" />
+            <MemPods server={s} onChanged={onChanged} by="cpu" />
+            <CpuGroups server={s} />
           </div>
         </MetricSection>
 
