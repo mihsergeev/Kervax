@@ -319,6 +319,33 @@ const EN: Record<string, string> = {
     'Old files: {n}, but there are fresh ones too: the directory is in use. Delete by hand if you are sure.',
   'Старых файлов: {n}. Если каталог не нужен, удаляйте целиком.': 'Old files: {n}. If the directory is not needed, delete it as a whole.',
   'Контейнеры по памяти': 'Containers by memory',
+  // упавшие юниты systemd
+  'Упавшие юниты systemd': 'Failed systemd units',
+  'Systemd: упавшие юниты': 'Systemd: failed units',
+  'юнит': 'unit',
+  'код {n}': 'exit code {n}',
+  'ошибка запуска': 'failed to start',
+  'убит сигналом {s}': 'killed by signal {s}',
+  'не уложился во время': 'timed out',
+  'упал с дампом памяти': 'crashed with a core dump',
+  'слишком часто перезапускался': 'restarted too often',
+  'убит из-за нехватки памяти': 'killed by the OOM killer',
+  'перестал отвечать watchdog': 'stopped answering the watchdog',
+  'упал': 'failed',
+  'mdadm некуда слать письма. За RAID следит Kervax ("Диск: поломка"), мониторинг mdadm можно выключить: sudo systemctl disable --now mdmonitor.service mdmonitor-oneshot.timer && sudo systemctl reset-failed':
+    'mdadm has no mail address to send to. Kervax watches the RAID ("Disk: failure"), so the mdadm monitor can be turned off: sudo systemctl disable --now mdmonitor.service mdmonitor-oneshot.timer && sudo systemctl reset-failed',
+  'Сертификат выпущен вручную (manual plugin): сам он не продлится. Продлите вручную или удалите ненужный: certbot delete --cert-name <имя>':
+    'The certificate was issued by hand (manual plugin) and will not renew by itself. Renew it by hand or delete it if unused: certbot delete --cert-name <name>',
+  'отметка сброшена': 'failed mark cleared',
+  '{n} дн назад': '{n} d ago',
+  'отработал без ошибок': 'finished without errors',
+  'снова упал': 'failed again',
+  'Перезапустить {u}?': 'Restart {u}?',
+  'Сбросить у {u} отметку "упал"? Сам юнит не запустится, алерт по нему закроется.':
+    'Clear the failed mark of {u}? The unit is not started, its alert closes.',
+  'Кнопки перезапуска появятся после обновления агента до 2.17.': 'The restart buttons appear once the agent is updated to 2.17.',
+  'не алертить по этому юниту:': 'do not alert on this unit:',
+  'не алертить': 'do not alert',
   // поды Kubernetes по памяти
   'Поды по памяти': 'Pods by memory',
   'Перезапустить {c} в {ns}? Kubernetes пересоздаст его поды по очереди.':

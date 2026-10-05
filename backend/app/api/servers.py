@@ -391,6 +391,7 @@ _SETUP_LABEL = {
     "timesync-setup": "Синхронизация времени",
     "diskusage-setup": "Разбор места на диске",
     "diskhealth-setup": "Здоровье дисков",
+    "units-setup": "Упавшие юниты systemd",
     "dbstat-setup": "Инвентарь СУБД",
     "agent-watchdog": "Вотчдог агента",
 }
@@ -1522,7 +1523,7 @@ async def _take_backup_commands(session, server_id: int) -> list[dict]:
 
 # Сколько ждать ответа агента, прежде чем считать команду пропавшей. disk_fix дольше:
 # docker builder prune по кэшу в десятки ГБ идет минутами, агент ждет helper до 15 минут.
-_CMD_TIMEOUT = {"disk_fix": 16 * 60}
+_CMD_TIMEOUT = {"disk_fix": 16 * 60, "unit_fix": 7 * 60}
 
 
 def _backup_cmd_out(c: BackupCommand, now: datetime) -> BackupCommandOut:
@@ -1554,8 +1555,14 @@ async def backup_command(
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "не указан контейнер")
         payload = {"name": body.fix,
                    "container": body.container if body.fix == "container-log" else ""}
-    elif body.mode in ("preview", "run"):
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "режим preview/run - только у disk_fix")
+    elif body.action == "unit_fix":
+        # Перезапустить упавший юнит или сбросить его отметку. Рабочий сервис так не тронуть:
+        # helper на ноде делает это, только пока юнит упал.
+        if body.mode not in ("restart", "reset") or not body.unit:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "не указан юнит или действие")
+        payload = {"name": body.unit}
+    elif body.mode in ("preview", "run", "restart", "reset"):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "этот режим - только у disk_fix и unit_fix")
     elif body.action in ("dump_setup", "dump_remove"):
         if not body.engine:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "не указан движок дампа")
@@ -1575,6 +1582,8 @@ async def backup_command(
     target = (body.schedule or f"{body.mode}:{len(body.paths)}")[:120]
     if body.action == "disk_fix":
         target = f"{body.fix}:{body.mode}" + (f":{body.container}" if payload["container"] else "")
+    if body.action == "unit_fix":
+        target = f"{body.unit}:{body.mode}"[:120]
     await audit.record(session, user.username, f"backup_{body.action}", target, f"srv={server_id}")
     return BackupCommandOut.model_validate(c)
 

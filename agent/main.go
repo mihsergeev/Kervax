@@ -42,7 +42,7 @@ import (
 	"time"
 )
 
-const version = "2.16"
+const version = "2.17"
 
 // Публичный ключ для проверки подписи релизов агента (Ed25519, base64).
 // ПУСТО по умолчанию → самообновление ВЫКЛЮЧЕНО (агент никогда не заменяет себя).
@@ -4704,6 +4704,10 @@ const bsrvResDir = "/var/lib/kervax/bsrv-res"
 const tsyncReqDir = "/var/lib/kervax/tsync-req" // спул синхронизации времени (timesync-setup)
 const tsyncResDir = "/var/lib/kervax/tsync-res"
 const duReqDir = "/var/lib/kervax/du-req" // спул кнопок "Освободить" (diskusage-setup 0.3+)
+
+// спул кнопок "Перезапустить"/"Сбросить" у упавших юнитов systemd (units-setup)
+const unitsReqDir = "/var/lib/kervax/units-req"
+const unitsResDir = "/var/lib/kervax/units-res"
 const duResDir = "/var/lib/kervax/du-res"
 
 // collectBackupServer — nil, если нода не сервер бэкапов. Детект по docker-контейнеру
@@ -4936,6 +4940,18 @@ func runBackupCommand(panelURL, token string, cmd backupCommand) {
 		res, out := spoolInFor(duReqDir, duResDir, cmd.ID, lines, "diskusage-setup", wait)
 		postBackupResult(panelURL, token, cmd.ID, res, out)
 		return
+	case "unit_fix":
+		// упавший юнит systemd: перезапустить или сбросить отметку. Root-helper units-setup
+		// трогает юнит, только если тот упал прямо сейчас; restart oneshot-юнита (certbot и
+		// т.п.) идет до конца задания, поэтому ждем дольше обычного.
+		lines, ok := unitFixLines(cmd)
+		if !ok {
+			postBackupResult(panelURL, token, cmd.ID, false, "неизвестное действие или юнит")
+			return
+		}
+		res, out := spoolInFor(unitsReqDir, unitsResDir, cmd.ID, lines, "units-setup", 6*time.Minute)
+		postBackupResult(panelURL, token, cmd.ID, res, out)
+		return
 	default:
 		postBackupResult(panelURL, token, cmd.ID, false, "неизвестное действие")
 		return
@@ -5060,6 +5076,34 @@ func diskFixLines(cmd backupCommand) ([]string, bool) {
 		lines = append(lines, "container="+c)
 	}
 	return lines, true
+}
+
+// unitFixLines - запрос helper'у units-setup: op=restart|reset и имя юнита. Имя проверяется
+// здесь и еще раз в helper'е: буквы, цифры, @._:- и \ (так systemd экранирует имена
+// mount-юнитов), тип - из тех, что умеют падать.
+func unitFixLines(cmd backupCommand) ([]string, bool) {
+	if cmd.Mode != "restart" && cmd.Mode != "reset" {
+		return nil, false
+	}
+	u := cmd.Name
+	if u == "" || len(u) > 200 || u[0] == '-' {
+		return nil, false
+	}
+	for _, c := range u {
+		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || strings.ContainsRune("@._:-\\", c)) {
+			return nil, false
+		}
+	}
+	dot := strings.LastIndex(u, ".")
+	if dot <= 0 {
+		return nil, false
+	}
+	switch u[dot+1:] {
+	case "service", "socket", "timer", "mount", "automount", "swap", "path":
+	default:
+		return nil, false
+	}
+	return []string{"op=" + cmd.Mode, "unit=" + u}, true
 }
 
 // spoolIn — атомарно кладёт запрос в <reqDir> и ждёт ответ в <resDir>. Файл 0600:

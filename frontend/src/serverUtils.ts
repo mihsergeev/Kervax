@@ -1,4 +1,4 @@
-import type { DiskHealth, DiskUsage, Server, ServerReport, WebRate } from './api'
+import type { DiskHealth, DiskUsage, Server, ServerReport, UnitsBlock, WebRate } from './api'
 import { tr } from './i18n'
 
 // Запросы в минуту по access-логам ноды: блок кладёт root-хелпер webserver-setup, агент
@@ -30,6 +30,15 @@ export function diskHealth(r?: ServerReport | null): DiskHealth | null {
   if (!d || d.v !== 1 || !d.ts) return null
   const nowTs = r?.clock_unix || Date.now() / 1000
   return nowTs - d.ts > 1800 ? null : d
+}
+
+// Упавшие юниты от helper'а units-setup: блок обновляется раз в минуту, старше 10 минут -
+// helper встал, старый список за свежий не выдаем.
+export function unitsBlock(r?: ServerReport | null): UnitsBlock | null {
+  const u = r?.extras?.units
+  if (!u || u.v !== 1 || !u.ts || !Array.isArray(u.units)) return null
+  const nowTs = r?.clock_unix || Date.now() / 1000
+  return nowTs - u.ts > 600 ? null : u
 }
 
 // Подпись лога - как у панели (web_log_label): под kubernetes, "контейнер (домены +N)",

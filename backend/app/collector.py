@@ -191,7 +191,7 @@ _SRV_ICON = {
     "queue": "🐇", "backup_rotation": "🧹",
     "backup_missing": "💾", "backup_failed": "💾", "backup_stale": "💾", "backup_repo": "💾",
     "backup_dump": "💾", "backup_dump_space": "🈵", "backup_cron": "💾", "backup_custom": "💾",
-    "clock": "🕐", "disk_health": "💽", "inode": "⚠️", "disk_forecast": "📈",
+    "clock": "🕐", "disk_health": "💽", "inode": "⚠️", "disk_forecast": "📈", "units": "⚙️",
     # ⏳ — срок ещё не вышел, есть время спланировать; 🔥 — доставка уже встала
     "kube_expiry": "⏳", "flux_down": "🔥☸️", "kube_pod": "☸️🔥", "web_5xx": "🌐🔥",
 }
@@ -207,7 +207,7 @@ _SRV_SECTION = {
     "conntrack": "conntrack", "disk": "diskfill", "disktemp": "disktemp",
     "db_conn": "services",
     "kube_expiry": "kube", "flux_down": "kube", "kube_pod": "kube", "web_5xx": "web",
-    "clock": "clock", "disk_health": "diskhealth", "inode": "diskfill", "disk_forecast": "diskfill",
+    "clock": "clock", "disk_health": "diskhealth", "inode": "diskfill", "disk_forecast": "diskfill", "units": "units",
 }
 
 
@@ -1111,6 +1111,7 @@ _SRV_LABEL = {
     "disk_health": "диски",
     "inode": "inode",
     "disk_forecast": "прогноз заполнения",
+    "units": "юниты systemd",
 }
 
 # Единицы пороговых метрик. Нужны отбою: голое «снова в норме» не отвечает на
@@ -1167,6 +1168,8 @@ def _recovery_detail(key: str, st: dict, ctx: dict) -> str:
         return "диски снова в порядке: RAID собран, неисправных и пропавших дисков нет"
     if key == "disk_forecast":
         return "диски больше не грозят заполниться в ближайшие дни: рост замедлился или место освободили"
+    if key == "units":
+        return "упавших юнитов больше нет"
     label = _SRV_LABEL[key]
     unit, val = _SRV_UNIT.get(key), ctx.get("value")
     if not unit or val is None:
@@ -1880,6 +1883,88 @@ def disk_health_text(probs: list[tuple[int, str, str]], limit: int = 5) -> str:
     if len(lines) > limit:
         lines = lines[:limit] + [f"и еще {len(lines) - limit}"]
     return "\n↳ ".join(lines)
+
+
+# Упавшие юниты systemd (helper units-setup, раз в минуту). Старше 10 минут - helper
+# встал, судить не по чему.
+_UNITS_MAX_AGE = 10 * 60
+# Юнит, упавший только что, могут как раз чинить руками: ждем пару минут
+_UNIT_MIN_AGE = 120
+_UNIT_MUTE_PREFIX = "unit:"
+# Почему упал: Result из systemd словами
+_UNIT_RESULT = {
+    "timeout": "не уложился во время", "core-dump": "упал с дампом памяти",
+    "start-limit-hit": "слишком часто перезапускался", "resources": "не хватило ресурсов",
+    "oom-kill": "убит из-за нехватки памяти", "watchdog": "перестал отвечать watchdog",
+    "exit-code": "", "signal": "", "protocol": "нарушил протокол запуска",
+}
+_SIGNALS = {6: "ABRT", 9: "KILL", 11: "SEGV", 15: "TERM"}
+
+
+def units_block(rep: dict) -> dict | None:
+    """Блок упавших юнитов из отчета (report.d/units.json, агент отдает как есть)."""
+    block = ((rep.get("extras") or {}).get("units")) or {}
+    if not isinstance(block, dict) or block.get("v") != 1:
+        return None
+    ts = float(block.get("ts") or 0)
+    ref = float(rep.get("clock_unix") or 0) or datetime.now(timezone.utc).timestamp()
+    if ts <= 0 or ref - ts > _UNITS_MAX_AGE:
+        return None
+    return block
+
+
+def units_muted(s: Server, now: datetime) -> set[str]:
+    """Юниты, по которым сейчас не алертят: "не следить" насовсем или на время."""
+    keys = {m[len(_UNIT_MUTE_PREFIX):] for m in (s.alert_mutes or []) if m.startswith(_UNIT_MUTE_PREFIX)}
+    for k, until in (s.alert_snoozes or {}).items():
+        u = _parse_iso(until)
+        if k.startswith(_UNIT_MUTE_PREFIX) and u is not None and u > now:
+            keys.add(k[len(_UNIT_MUTE_PREFIX):])
+    return keys
+
+
+def unit_level(u: dict) -> int:
+    """Упавший демон (nginx, postgres) или пропавший маунт - сервис лежит, это проблема.
+    Упавшее задание по расписанию (oneshot: certbot, бэкап) - работа не сделана,
+    предупреждение."""
+    name = str(u.get("unit") or "")
+    if name.endswith(".service"):
+        return 1 if u.get("type") == "oneshot" else 2
+    return 2 if name.endswith((".mount", ".automount", ".swap", ".socket")) else 1
+
+
+def unit_why(u: dict) -> str:
+    """Причина словами: код 1, убит сигналом KILL, не уложился во время."""
+    res = str(u.get("result") or "")
+    st = u.get("status")
+    if res == "exit-code":
+        return f"код {st}" if st not in (None, 0) else "ошибка запуска"
+    if res == "signal":
+        return f"убит сигналом {_SIGNALS.get(st, st)}" if st else "убит сигналом"
+    return _UNIT_RESULT.get(res) or res or "упал"
+
+
+def units_text(units: list[dict], ref: float, limit: int = 4) -> str:
+    """Один юнит: "упал certbot.service: код 1, 3 ч назад" и строка лога ниже. Несколько -
+    списком, строка лога - у самого серьезного."""
+    def ago(u: dict) -> str:
+        since = float(u.get("since") or 0)
+        if since <= 0:
+            return ""
+        d = max(0.0, ref - since)
+        return (f", {int(d // 86400)} дн назад" if d >= 86400 else f", {int(d // 3600)} ч назад"
+                if d >= 3600 else f", {max(1, int(d // 60))} мин назад")
+    units = sorted(units, key=lambda u: -unit_level(u))
+    if len(units) == 1:
+        txt = f"упал {units[0]['unit']}: {unit_why(units[0])}{ago(units[0])}"
+    else:
+        shown = ", ".join(f"{u['unit']} ({unit_why(u)})" for u in units[:limit])
+        more = f" и еще {len(units) - limit}" if len(units) > limit else ""
+        txt = f"упали юниты: {shown}{more}"
+    line = next((str(x) for x in reversed(units[0].get("log") or []) if x), "")
+    if line:
+        txt += f"\n↳ {units[0]['unit'] + ': ' if len(units) > 1 else ''}{line[:200]}"
+    return txt
 
 
 def top_eaters(rep: dict, kind: str) -> str:
@@ -2662,6 +2747,24 @@ def _server_conditions(s: Server, now: datetime,
             "level": f_lvl,
         })
 
+    # Упавшие юниты systemd (helper units-setup). certbot, упавший на продлении, молчит до
+    # истечения сертификата, бэкап по таймеру - до дня, когда понадобится восстановление.
+    # Юниты, которые человек велел не замечать, в счет не идут. Нет свежего блока - ключа
+    # нет: молчание helper'а не повод объявлять, что все починилось.
+    ub = units_block(rep) if online else None
+    if ub is not None:
+        ref = float(rep.get("clock_unix") or 0) or now.timestamp()
+        muted_u = units_muted(s, now)
+        bad = [u for u in ub.get("units") or []
+               if isinstance(u, dict) and u.get("unit") and u["unit"] not in muted_u
+               and ref - float(u.get("since") or 0) >= _UNIT_MIN_AGE]
+        u_lvl = max((unit_level(u) for u in bad), default=0)
+        out["units"] = (u_lvl, {
+            "detail": units_text(bad, ref) if bad else "", "level": u_lvl,
+            # какие юниты лежат: новый упавший при том же уровне - повод для сообщения
+            "sig": sorted(u["unit"] for u in bad),
+        })
+
     # Сдвиг часов: локальное время ноды (clock_unix) vs время панели на приёме. По модулю;
     # порог warn 5с / проблема 30с / крит 5мин. Дебаунс (как sustain): разовый спайк —
     # медленный отчёт/GC — не шлёт алерт, ждём удержания ≥ sustain_s (пишем clock_since).
@@ -2855,6 +2958,8 @@ async def evaluate_servers(
                 ico = _DISK_ICON.get(int(ctx.get("level") or 0), "") + "💽"
             if key == "disk_forecast":
                 ico = _DISK_ICON.get(int(ctx.get("level") or 0), "") + "📈"
+            if key == "units":
+                ico = _DISK_ICON.get(int(ctx.get("level") or 0), "") + "⚙️"
             if key == "kube_expiry" and ctx.get("expired"):
                 ico = "⛔"  # срок не «скоро», а уже вышел — это поломка, а не напоминание
             return _server_alert_text(
@@ -2942,24 +3047,26 @@ async def evaluate_servers(
             if _muted(key, level, mutes):
                 continue  # тип (или его нижние уровни) заглушён для этого сервера
             prev = int(st.get(key, 0))
-            if key == "disk_health":
+            if key in ("disk_health", "units"):
                 # Тот же уровень, но сломалось НОВОЕ (второй диск при уже развалившемся
-                # RAID): молчать нельзя, хотя уровень не вырос. Что сломано - ключи в sig.
-                old_sig = set(st.get("disk_health_sig") or [])
+                # RAID, второй упавший юнит): молчать нельзя, хотя уровень не вырос. Что
+                # сломано - ключи в sig.
+                sk = f"{key}_sig"
+                old_sig = set(st.get(sk) or [])
                 new_sig = set(ctx.get("sig") or [])
                 if level == prev:
                     if level and new_sig - old_sig:
                         fires.append(srv_fire(s, key, rule, ctx))
-                        fire_apply.append((s.id, "disk_health_sig", sorted(new_sig)))
+                        fire_apply.append((s.id, sk, sorted(new_sig)))
                     elif new_sig != old_sig:
-                        apply(s.id, "disk_health_sig", sorted(new_sig))
+                        apply(s.id, sk, sorted(new_sig))
                     continue
                 if level > prev:
-                    fire_apply.append((s.id, "disk_health_sig", sorted(new_sig)))
+                    fire_apply.append((s.id, sk, sorted(new_sig)))
                 elif level:
-                    apply(s.id, "disk_health_sig", sorted(new_sig))
+                    apply(s.id, sk, sorted(new_sig))
                 else:
-                    rec_apply.append((s.id, "disk_health_sig", []))
+                    rec_apply.append((s.id, sk, []))
             if level == prev:
                 continue
             # Гаситель «мигания» — только для НОВЫХ обрывов. Восстановление после уже

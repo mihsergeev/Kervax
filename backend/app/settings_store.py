@@ -47,6 +47,8 @@ SERVER_ALERT_KINDS: dict[str, tuple[str, str]] = {
     "inode": ("Диск: inode", "inode на {mount}: занято {value}% ≥ {threshold}%{cause}"),
     # Прогноз планировщика по истории заполнения: место или inode кончатся через дни
     "disk_forecast": ("Диск: скоро заполнится", "{detail}"),
+    # Упавшие юниты systemd (helper units-setup): что упало, почему и последняя строка лога
+    "units": ("Systemd: упал юнит", "{detail}"),
     "reboot": ("Перезагрузка", "перезагружен (аптайм сброшен)"),
     "oom": ("OOM-killer", "OOM-kill: ядро убило {value} процесс(ов){victim} из-за нехватки памяти"),
     "docker_down": ("Docker: контейнер упал", "контейнер {container} не работает ({state}, restart-policy: {policy})"),

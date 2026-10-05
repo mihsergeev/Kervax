@@ -23,6 +23,7 @@ import {
   updateServer,
   type ClockInfo,
   type DiskForecastItem,
+  type FailedUnit,
   type DiskHealthDisk,
   type DiskUsageDir,
   type DiskUsageFs,
@@ -37,7 +38,7 @@ import {
   type ServerReport,
 } from './api'
 import { StackedAreaChart, type Series } from './charts/StackedAreaChart'
-import { diskHealth, diskUsage, fmtSetupVersion, srvIssues, webLogLabel, webRate, webSeriesName, webUnparsed } from './serverUtils'
+import { diskHealth, diskUsage, fmtSetupVersion, unitsBlock, srvIssues, webLogLabel, webRate, webSeriesName, webUnparsed } from './serverUtils'
 import { OsIcon } from './osIcon'
 import { CountryFlag } from './CountryFlag'
 import { currentLang, useI18n } from './i18n'
@@ -47,6 +48,7 @@ import {
   MuteChip,
   MutesBanner,
   SNOOZE_KINDS,
+  UNIT_MUTE,
   WEB_MUTE,
   muteKindLabel,
   SRV_ALERT_KINDS,
@@ -1843,6 +1845,217 @@ function MemContainers({ server: s, onChanged }: { server: Server; onChanged: ()
           )
         })}
       </div>
+    </div>
+  )
+}
+
+// Упавшие юниты systemd (helper units-setup): что упало, почему и последние строки лога.
+// Кнопки (агент 2.17): перезапустить или сбросить отметку - helper на ноде делает это, только
+// пока юнит упал, рабочий сервис так не тронуть. Ненужный юнит можно не отслеживать: как лог
+// с 5xx, остальные юниты ноды продолжают алертить.
+const UNITS_AGENT = '2.17'
+type UnitFixResult = { op: string; unit: string; state: string; result: string; rc: number; log: string[] }
+
+function unitLevel(u: FailedUnit): number {
+  if (u.unit.endsWith('.service')) return u.type === 'oneshot' ? 1 : 2
+  return /\.(mount|automount|swap|socket)$/.test(u.unit) ? 2 : 1
+}
+
+function unitWhy(u: FailedUnit, t: TFn): string {
+  const sig: Record<number, string> = { 6: 'ABRT', 9: 'KILL', 11: 'SEGV', 15: 'TERM' }
+  switch (u.result) {
+    case 'exit-code':
+      return u.status ? t('код {n}', { n: u.status }) : t('ошибка запуска')
+    case 'signal':
+      return t('убит сигналом {s}', { s: u.status ? (sig[u.status] ?? String(u.status)) : '' }).trim()
+    case 'timeout':
+      return t('не уложился во время')
+    case 'core-dump':
+      return t('упал с дампом памяти')
+    case 'start-limit-hit':
+      return t('слишком часто перезапускался')
+    case 'oom-kill':
+      return t('убит из-за нехватки памяти')
+    case 'watchdog':
+      return t('перестал отвечать watchdog')
+    default:
+      return u.result || t('упал')
+  }
+}
+
+// Известные причины, у которых есть понятный выход
+function unitHint(u: FailedUnit, t: TFn): string {
+  const log = u.log.join('\n')
+  if (u.unit.startsWith('mdmonitor') && log.includes('No mail address'))
+    return t('mdadm некуда слать письма. За RAID следит Kervax ("Диск: поломка"), мониторинг mdadm можно выключить: sudo systemctl disable --now mdmonitor.service mdmonitor-oneshot.timer && sudo systemctl reset-failed')
+  if (u.unit === 'certbot.service' && log.includes('manual'))
+    return t('Сертификат выпущен вручную (manual plugin): сам он не продлится. Продлите вручную или удалите ненужный: certbot delete --cert-name <имя>')
+  return ''
+}
+
+function unitStateText(d: UnitFixResult, t: TFn): string {
+  if (d.op === 'reset') return t('отметка сброшена')
+  if (d.state === 'active') return t('работает')
+  if (d.state === 'activating') return t('запускается')
+  if (d.state === 'inactive') return t('отработал без ошибок')
+  return t('снова упал')
+}
+
+function FailedUnits({ server: s, onChanged }: { server: Server; onChanged: () => void }) {
+  const { t } = useI18n()
+  const { isViewer } = useAuth()
+  const [st, setSt] = useState<Record<string, { busy?: boolean; ok?: boolean; msg?: string; log?: string[] }>>({})
+  const [picking, setPicking] = useState<string | null>(null)
+  const [busy, setBusy] = useState(false)
+  const r = s.last_report
+  const ub = unitsBlock(r)
+  if (!ub || !ub.units.length) return null
+  const agentOk = verAtLeast(r?.agent_version, UNITS_AGENT)
+  const canFix = ub.fix && agentOk && !isViewer
+  const ref = r?.clock_unix || ub.ts
+  const ago = (u: FailedUnit) => {
+    if (!u.since) return ''
+    const d = Math.max(0, ref - u.since)
+    return d >= 86400
+      ? t('{n} дн назад', { n: Math.floor(d / 86400) })
+      : d >= 3600
+        ? t('{n} ч назад', { n: Math.floor(d / 3600) })
+        : t('{n} мин назад', { n: Math.max(1, Math.floor(d / 60)) })
+  }
+  const run = async (unit: string, mode: 'restart' | 'reset') => {
+    const q =
+      mode === 'restart'
+        ? t('Перезапустить {u}?', { u: unit })
+        : t('Сбросить у {u} отметку "упал"? Сам юнит не запустится, алерт по нему закроется.', { u: unit })
+    if (!window.confirm(q)) return
+    setSt((cur) => ({ ...cur, [unit]: { busy: true } }))
+    try {
+      const c = await backupCommand(s.id, { action: 'unit_fix', mode, unit })
+      let last = c
+      const t0 = Date.now()
+      while (last.status !== 'done' && last.status !== 'error' && Date.now() - t0 < 7 * 60_000) {
+        await new Promise((res) => setTimeout(res, 1500))
+        last = await backupCommandStatus(s.id, c.id)
+      }
+      let data: UnitFixResult | null = null
+      try {
+        data = JSON.parse(last.result || '')
+      } catch {
+        data = null
+      }
+      const ok = last.status === 'done' && !!last.ok
+      setSt((cur) => ({
+        ...cur,
+        [unit]: { ok, msg: data ? unitStateText(data, t) : last.result || t('не удалось'), log: data?.log },
+      }))
+      if (ok) window.setTimeout(onChanged, 5000)
+    } catch (e) {
+      setSt((cur) => ({ ...cur, [unit]: { ok: false, msg: e instanceof Error ? e.message : String(e) } }))
+    }
+  }
+  const mute = async (kind: string, hours: number) => {
+    setBusy(true)
+    try {
+      if (hours < 0) {
+        await updateServer(s.id, { alert_mutes: [...new Set([...(s.alert_mutes ?? []), kind])] })
+      } else if (hours === 0) {
+        if ((s.alert_mutes ?? []).includes(kind))
+          await updateServer(s.id, { alert_mutes: (s.alert_mutes ?? []).filter((x) => x !== kind) })
+        if (s.alert_snoozes?.[kind]) await snoozeServerAlert(s.id, kind, 0)
+      } else await snoozeServerAlert(s.id, kind, hours)
+      setPicking(null)
+      onChanged()
+    } catch {
+      /* кнопка остается, можно повторить */
+    } finally {
+      setBusy(false)
+    }
+  }
+  const fmt = (ts: string) =>
+    new Date(ts).toLocaleString([], { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })
+  const muted = (u: FailedUnit) => ((s.alert_mutes ?? []).includes(UNIT_MUTE + u.unit) ? 1 : 0)
+  return (
+    <div className="detail-inc" id="mcard-units">
+      <div className="chart-cap">{t('Упавшие юниты systemd')}</div>
+      {!agentOk && !isViewer && ub.fix && (
+        <div className="muted small du-note">{t('Кнопки перезапуска появятся после обновления агента до 2.17.')}</div>
+      )}
+      {[...ub.units]
+        // заглушенные - в конец: они уже разобраны, внимание нужно остальным
+        .sort((a, b) => muted(a) - muted(b) || unitLevel(b) - unitLevel(a))
+        .map((u) => {
+          const kind = UNIT_MUTE + u.unit
+          const perm = (s.alert_mutes ?? []).includes(kind)
+          const until = s.alert_snoozes?.[kind]
+          const snoozed = !!until && new Date(until).getTime() > Date.now()
+          const us = st[u.unit]
+          const hint = unitHint(u, t)
+          return (
+            <div key={u.unit} className={`unit-row${perm || snoozed ? ' unit-muted' : ''}`}>
+              <div className="unit-head">
+                <span className={`sdot sdot-${unitLevel(u) === 2 ? 'down' : 'degraded'}`} />
+                <span className="mono unit-name">{u.unit}</span>
+                <span className={unitLevel(u) === 2 ? 't-down' : 't-degraded'}>{unitWhy(u, t)}</span>
+                <span className="muted small">{ago(u)}</span>
+              </div>
+              {u.desc && u.desc !== u.unit && <div className="muted small unit-desc">{u.desc}</div>}
+              {u.log.length > 0 && <pre className="unit-log mono">{u.log.join('\n')}</pre>}
+              {hint && <div className="small unit-hint">{hint}</div>}
+              {us?.busy && <div className="muted small">{t('Выполняю...')}</div>}
+              {us?.msg && (
+                <div className="small">
+                  <span className={us.ok ? 't-up' : 'form-error'}>{us.msg}</span>
+                  {(us.log?.length ?? 0) > 0 && !us.ok && <pre className="unit-log mono">{us.log!.join('\n')}</pre>}
+                </div>
+              )}
+              <div className="unit-actions small">
+                {canFix && !us?.busy && (
+                  <>
+                    <button className="ghost small" onClick={() => run(u.unit, 'restart')}>
+                      {t('Перезапустить')}
+                    </button>
+                    <button className="ghost small" onClick={() => run(u.unit, 'reset')}>
+                      {t('Сбросить')}
+                    </button>
+                  </>
+                )}
+                {perm || snoozed ? (
+                  <span className="snooze-active-chip snooze-perm">
+                    🔇 {perm ? t('не алертит, постоянно') : t('не алертит {t}', { t: t('до {t}', { t: fmt(until!) }) })}
+                    {!isViewer && (
+                      <button className="chip-x" disabled={busy} title={t('Снять')} onClick={() => mute(kind, 0)}>
+                        ✕
+                      </button>
+                    )}
+                  </span>
+                ) : (
+                  !isViewer &&
+                  (picking === kind ? (
+                    <>
+                      <span className="muted">🔕 {t('не алертить по этому юниту:')}</span>
+                      {[
+                        { h: 24, l: t('1 день') },
+                        { h: 24 * 7, l: t('1 неделя') },
+                        { h: -1, l: t('постоянно') },
+                      ].map(({ h, l }) => (
+                        <button key={h} className="ghost small" disabled={busy} onClick={() => mute(kind, h)}>
+                          {l}
+                        </button>
+                      ))}
+                      <button className="ghost small" disabled={busy} onClick={() => setPicking(null)}>
+                        {t('Отмена')}
+                      </button>
+                    </>
+                  ) : (
+                    <button className="ghost small" onClick={() => setPicking(kind)}>
+                      🔕 {t('не алертить')}
+                    </button>
+                  ))
+                )}
+              </div>
+            </div>
+          )
+        })}
     </div>
   )
 }
@@ -4164,6 +4377,7 @@ function ServerDetail({
         </MetricSection>
 
         <MetricSection id="proc" title={t('Процессы')}>
+          <FailedUnits server={s} onChanged={onChanged} />
           <div className="chart-grid">
             <ProcCard title={t('Топ по CPU')} procs={r.top_cpu} kind="cpu" total={r.mem_total ?? 0} t={t} />
             <ProcCard title={t('Топ по памяти')} procs={r.top_mem} kind="mem" total={r.mem_total ?? 0} t={t} />
