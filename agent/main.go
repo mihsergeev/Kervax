@@ -42,7 +42,7 @@ import (
 	"time"
 )
 
-const version = "2.19"
+const version = "2.20"
 
 // Публичный ключ для проверки подписи релизов агента (Ed25519, base64).
 // ПУСТО по умолчанию → самообновление ВЫКЛЮЧЕНО (агент никогда не заменяет себя).
@@ -771,19 +771,31 @@ func versionNewer(a, b string) bool {
 // Замерено на ноде за DPI: обрыв — лотерея на КАЖДОЕ соединение (три куска по
 // мегабайту из шести пришли целиком, остальные умерли на ~12 КБ), причём окна везения
 // чередуются. Поэтому бюджет считаем по неудачам ПОДРЯД и обнуляем на каждом принятом
-// куске: иначе общий счётчик выгорал раньше, чем файл собирался. На успехе возвращаем
-// размер куска обратно вверх — не тащить весь файл по 64 КБ, когда канал ожил.
+// куске: иначе общий счётчик выгорал раньше, чем файл собирался.
+// Замерено еще раз 05.10.2026 на web-a-prod: соединение замерзает на ~16 КБ вместе с
+// TLS-рукопожатием (тела приходит 11 КБ), куски по 8 КБ проходят всегда (10 из 10, по
+// 0.1 с), по 12 КБ - 7 из 10, по 32 КБ - 1 из 10. Минимальный кусок был 64 КБ, и OTA
+// держалась на везении: 0.02-0.5 МБ/мин, 55 минут на сжатый бинарь. Теперь при неудаче
+// кусок режется сразу в 8 раз до 8 КБ, выше половины того, что не прошло, до конца
+// попытки не растет, замерзшее соединение рвется после dlIdle тишины, а пришедшее из
+// оборванного куска не выбрасывается. На таком канале это ~40 с на 3 МБ.
 // одно самообновление за раз: отчёты идут каждые 15-30с, а докачка длится минутами
 var updating atomic.Bool
 
+// dlProgress - текущая попытка обновления что-то докачала: тогда следующая начинается почти
+// сразу (updateRetryQuick), а не через updateRetryPause.
+var dlProgress atomic.Bool
+
 const (
 	dlChunkMax    = 1 << 20
-	dlChunkMin    = 64 << 10
-	dlFailsMax    = 8   // неудач ПОДРЯД, после которых сдаёмся
-	dlAttemptsMax = 400 // страховка от бесконечного цикла
-	// Пауза перед повтором после ВРЕМЕННОЙ неудачи обновления. Чаще незачем:
-	// каждая попытка добирает свой кусок, а канал за пять минут не исправится.
+	dlChunkMin    = 8 << 10 // за DPI проходит всегда (см. выше); 64 КБ проходили через раз
+	dlFailsMax    = 8       // неудач ПОДРЯД без единого байта, после которых сдаёмся
+	dlAttemptsMax = 4000    // страховка от бесконечного цикла: 7.5 МБ по 8 КБ - это ~920 кусков
+	// Пауза перед повтором после ВРЕМЕННОЙ неудачи обновления, если попытка не набрала
+	// ничего: канал за пять минут не исправится, долбить панель незачем.
 	updateRetryPause = 5 * time.Minute
+	// Попытка докачала часть и не уложилась по времени: продолжаем со следующим отчетом.
+	updateRetryQuick = 20 * time.Second
 	// Предел на ОДНУ попытку скачивания. Без него плохой канал держал попытку часами:
 	// куски то проходят, то нет, счётчик неудач подряд сбрасывается на каждом удачном,
 	// и цикл живёт до 400 попыток по минуте. Всё это время новых попыток не начиналось,
@@ -799,12 +811,21 @@ const (
 var (
 	dlBackoff    = 2 * time.Second
 	dlBackoffMax = 30 * time.Second
+	// Столько тишины в ответе - и соединение считаем замерзшим. Замерзшее не оживает, а ждать
+	// его до таймаута клиента (минута) значило терять минуту на каждом куске.
+	dlIdle = 5 * time.Second
 )
 
 // fetchRange — один кусок [from..to]. noRange=true, если панель не умеет Range —
-// тогда зовущий откатывается на обычное скачивание целиком.
+// тогда зовущий откатывается на обычное скачивание целиком. При обрыве отдает то, что
+// успело прийти, вместе с ошибкой: кусок начинается с того байта, что просили (это
+// подтверждает Content-Range), и выбрасывать пришедшее - значит качать его по кругу.
 func fetchRange(client *http.Client, u string, from, to int) (b []byte, noRange bool, err error) {
-	req, err := http.NewRequest("GET", u, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	idle := time.AfterFunc(dlIdle, cancel) // тишина дольше dlIdle - рвем; перезаводится на данных
+	defer idle.Stop()
+	req, err := http.NewRequestWithContext(ctx, "GET", u, nil)
 	if err != nil {
 		return nil, false, err
 	}
@@ -818,15 +839,33 @@ func fetchRange(client *http.Client, u string, from, to int) (b []byte, noRange 
 		// 200 = отдали файл целиком, Range не поддержан; прочее — честная ошибка
 		return nil, resp.StatusCode == http.StatusOK, fmt.Errorf("HTTP %d вместо 206", resp.StatusCode)
 	}
+	if cr := resp.Header.Get("Content-Range"); !strings.HasPrefix(cr, fmt.Sprintf("bytes %d-", from)) {
+		return nil, false, fmt.Errorf("Content-Range %q не с байта %d", cr, from)
+	}
 	want := to - from + 1
-	b, err = io.ReadAll(io.LimitReader(resp.Body, int64(want)))
+	idle.Reset(dlIdle)
+	b, err = io.ReadAll(&idleReader{r: io.LimitReader(resp.Body, int64(want)), idle: idle})
 	if err != nil {
-		return nil, false, err
+		return b, false, err
 	}
 	if len(b) != want {
-		return nil, false, fmt.Errorf("кусок короче: %d из %d", len(b), want)
+		return b, false, fmt.Errorf("кусок короче: %d из %d", len(b), want)
 	}
 	return b, false, nil
+}
+
+// idleReader перезаводит таймер тишины на каждом пришедшем куске данных.
+type idleReader struct {
+	r    io.Reader
+	idle *time.Timer
+}
+
+func (ir *idleReader) Read(p []byte) (int, error) {
+	n, err := ir.r.Read(p)
+	if n > 0 {
+		ir.idle.Reset(dlIdle)
+	}
+	return n, err
 }
 
 // partPath — где копится недокачанный бинарь. Имя включает версию и размер: после
@@ -905,7 +944,9 @@ func httpGetChunked(u string, size int, ver string) ([]byte, error) {
 		}
 	}
 	client := &http.Client{Timeout: 60 * time.Second, Transport: panelTransport(false)}
-	chunk, fails, attempts := dlChunkMax, 0, 0
+	// ceiling - выше этого кусок до конца попытки не растет: половина того, что не прошло.
+	// Без потолка кусок после каждой удачи рос обратно, и каждый второй снова замерзал.
+	chunk, ceiling, fails, attempts := dlChunkMax, dlChunkMax, 0, 0
 	wait := dlBackoff
 	deadline := time.Now().Add(dlTotalMax)
 	for len(buf) < size {
@@ -920,35 +961,48 @@ func httpGetChunked(u string, size int, ver string) ([]byte, error) {
 		if end > size-1 {
 			end = size - 1
 		}
+		t0 := time.Now()
 		part2, noRange, err := fetchRange(client, u, len(buf), end)
 		if noRange {
 			return httpGetLimited(u, int64(size)+1)
 		}
+		if len(part2) > 0 { // в том числе из оборванного куска: он с правильного места
+			buf = append(buf, part2...)
+			dlProgress.Store(true)
+			if f != nil {
+				if _, werr := f.Write(part2); werr != nil {
+					f.Close()
+					f = nil // дальше только в памяти
+				}
+			}
+		}
 		if err != nil {
+			// Канал не тянет столько за одно соединение: режем кусок сразу в 8 раз (с мегабайта
+			// до 8 КБ за три неудачи, а не за семь) и выше половины несостоявшегося не растем.
+			ceiling = max(dlChunkMin, chunk/2)
+			chunk = max(dlChunkMin, chunk/8)
+			if len(part2) > 0 {
+				fails, wait = 0, dlBackoff // канал живой, просто кусок великоват
+				continue
+			}
 			if fails++; fails >= dlFailsMax {
 				// Файл НЕ удаляем: набранное пригодится следующей попытке.
 				return nil, fmt.Errorf("на %d/%d байт: %w (продолжим с этого места)",
 					len(buf), size, err)
 			}
-			if chunk > dlChunkMin {
-				chunk /= 2 // канал не тянет длинную передачу — идём мельче
+			// Пауза - для панели, которая отвечает мгновенной ошибкой (502 во время ее
+			// перезапуска). Запрос, который сам провисел дольше паузы, уже подождал за нее.
+			if time.Since(t0) < wait {
+				time.Sleep(wait)
 			}
-			time.Sleep(wait)
 			if wait < dlBackoffMax {
 				wait *= 2
 			}
 			continue
 		}
-		buf = append(buf, part2...)
-		if f != nil {
-			if _, werr := f.Write(part2); werr != nil {
-				f.Close()
-				f = nil // дальше только в памяти
-			}
-		}
 		fails, wait = 0, dlBackoff
-		if chunk < dlChunkMax {
-			chunk *= 2
+		if chunk < ceiling {
+			chunk = min(chunk*2, ceiling)
 		}
 	}
 	return buf, nil
@@ -957,6 +1011,10 @@ func httpGetChunked(u string, size int, ver string) ([]byte, error) {
 // errNoCompressed - панель сжатого бинаря не отдает (старая или архив не прошел ее проверку):
 // это не поломка, просто качаем несжатый.
 var errNoCompressed = errors.New("сжатого бинаря нет")
+
+// errGzBroken - сжатый скачан, но не распаковался или распаковался не в тот бинарь: его
+// докачивать бесполезно, берем несжатый. Обрыв и нехватка времени - НЕ это.
+var errGzBroken = errors.New("сжатый архив не подошел")
 
 // fetchCompressed - бинарь, скачанный сжатым (gzip) с той же докачкой по кускам, распакованный
 // и сверенный с подписанным манифестом. Размер архива панель сообщает на HEAD; он не подписан,
@@ -984,7 +1042,30 @@ func fetchCompressed(u, ver string, art artifact) ([]byte, error) {
 		os.Remove(pp) // готов или битый - в любом случае больше не нужен
 	}
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w: %v", errGzBroken, err)
+	}
+	return bin, nil
+}
+
+// downloadBinary - бинарь новой версии: сначала сжатый, в 2.4 раза меньше. Несжатый - только
+// если сжатого нет (панель старше 1.4.86) или архив не подошел. Обрыв и нехватка времени -
+// не повод переключаться: огрызок сжатого лежит рядом, и следующая попытка докачает его. Агенты
+// 2.18-2.19 переключались на любой ошибке, и на медленном канале попытки по очереди тянули оба
+// файла: web-a-prod потратил на несжатый 3 МБ, которых хватило бы на весь сжатый.
+func downloadBinary(base, ver string, art artifact) ([]byte, error) {
+	bin, gzErr := fetchCompressed(base+"/api/agent/download-gz/"+runtime.GOARCH, ver, art)
+	if gzErr == nil {
+		return bin, nil
+	}
+	if !errors.Is(gzErr, errNoCompressed) && !errors.Is(gzErr, errGzBroken) {
+		return nil, fmt.Errorf("скачивание сжатого бинаря: %w", gzErr)
+	}
+	if errors.Is(gzErr, errGzBroken) {
+		fmt.Printf("kervax-agent: %v, качаю несжатый\n", gzErr)
+	}
+	bin, err := httpGetChunked(base+"/api/agent/download/"+runtime.GOARCH, art.Size, ver)
+	if err != nil {
+		return nil, fmt.Errorf("скачивание бинаря: %w", err)
 	}
 	return bin, nil
 }
@@ -1631,18 +1712,10 @@ func selfUpdate(panelURL, want string) error {
 		return permanent(fmt.Errorf("в манифесте нет артефакта для %s", runtime.GOARCH))
 	}
 
-	// Сначала сжатый: в 2.4 раза меньше, на канале за DPI (~0.2 МБ/мин) это 15 минут вместо
-	// 40. Его подлинность та же: распакованный бинарь сверяется с подписанным sha256 ниже.
-	// Не вышло (панель старше 1.4.86, архив не сошелся) - качаем несжатый, как раньше.
-	bin, gzErr := fetchCompressed(base+"/api/agent/download-gz/"+runtime.GOARCH, m.Version, art)
-	if gzErr != nil {
-		if !errors.Is(gzErr, errNoCompressed) {
-			fmt.Printf("kervax-agent: сжатый бинарь не подошел (%v), качаю несжатый\n", gzErr)
-		}
-		bin, err = httpGetChunked(base+"/api/agent/download/"+runtime.GOARCH, art.Size, m.Version)
-		if err != nil {
-			return fmt.Errorf("скачивание бинаря: %w", err)
-		}
+	// Подлинность сжатого та же: распакованный бинарь сверяется с подписанным sha256 ниже.
+	bin, err := downloadBinary(base, m.Version, art)
+	if err != nil {
+		return err
 	}
 	// Дальше огрызок не нужен ни при каком исходе: либо ставим, либо он битый.
 	if pp := partPath(m.Version, art.Size); pp != "" {
@@ -5597,6 +5670,7 @@ func main() {
 				default:
 					go func() {
 						defer updating.Store(false)
+						dlProgress.Store(false)
 						uerr := selfUpdate(url, want)
 						if uerr == nil {
 							return // сюда не возвращаемся: процесс заменён через exec
@@ -5608,8 +5682,13 @@ func main() {
 							return
 						}
 						// Временная беда — обрыв, 502, нет места. Повторим: недокачанное
-						// сохранено, и следующая попытка продолжит с того же места.
-						updateRetryAt.Store(time.Now().Add(updateRetryPause))
+						// сохранено, и следующая попытка продолжит с того же места. Если эта
+						// что-то докачала, следующая начинается почти сразу.
+						pause := updateRetryPause
+						if dlProgress.Load() {
+							pause = updateRetryQuick
+						}
+						updateRetryAt.Store(time.Now().Add(pause))
 					}()
 				}
 			}
