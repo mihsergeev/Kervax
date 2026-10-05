@@ -936,7 +936,10 @@ export type ServerReport = {
   kube_expiry?: KubeExpiry[] // сроки PKI/kubeconfig/токенов Flux (хелпер kubeexpiry-setup)
   flux?: FluxState[] | null // состояния Ready ресурсов Flux; null = данных нет
   caps?: Record<string, boolean> // возможности агента: kmsg, proc_full (полный ли /proc)
-  extras?: { 'web-rate'?: WebRate; 'disk-usage'?: DiskUsage; 'disk-health'?: DiskHealth } & Record<string, unknown> // блоки хелперов как есть
+  extras?: { 'web-rate'?: WebRate; 'disk-usage'?: DiskUsage; 'disk-health'?: DiskHealth; units?: UnitsBlock } & Record<
+    string,
+    unknown
+  > // блоки хелперов как есть
   clock?: ClockInfo // статус синхронизации времени (timedatectl)
   clock_skew_sec?: number // сдвиг часов ноды относительно панели, сек (± ; считает бэкенд)
   clock_unix?: number // локальные часы ноды на момент отправки отчёта
@@ -1032,6 +1035,19 @@ export type DiskHealth = {
   missing: { serial: string; model: string; dev: string; last: number }[]
   io: { count: number; last: string[] }
 }
+// Упавшие юниты systemd (helper units-setup, раз в минуту): почему упал и последние
+// строки лога. fix - на ноде есть спул для кнопок "Перезапустить"/"Сбросить".
+export type FailedUnit = {
+  unit: string
+  desc: string
+  type: string // simple / oneshot / forking / notify; у не-сервисов пусто
+  result: string // exit-code / signal / timeout / core-dump / start-limit-hit / oom-kill ...
+  status: number | null // код выхода или номер сигнала
+  since: number // когда упал (unix, часы ноды), 0 - неизвестно
+  restarts: number | null
+  log: string[]
+}
+export type UnitsBlock = { v: number; ts: number; units: FailedUnit[]; fix: boolean }
 export type ClockInfo = {
   synced: boolean // NTPSynchronized=yes
   ntp: boolean // синхронизация включена
@@ -1514,6 +1530,8 @@ export function backupCommand(
     | { action: 'timesync' }
     // "Освободить" из разбора места; контейнер - только у лога контейнера
     | { action: 'disk_fix'; mode: 'preview' | 'run'; fix: string; container?: string }
+    // упавший юнит systemd: перезапустить или сбросить отметку (helper units-setup)
+    | { action: 'unit_fix'; mode: 'restart' | 'reset'; unit: string }
     | { action: 'dump_remove'; engine: string; container: string }
     | {
         action: 'dump_setup'

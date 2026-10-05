@@ -921,6 +921,25 @@ input:focus {
 .du-more { align-self: flex-start; margin-top: 0.2rem; }
 .du-sub { font-weight: 600; font-size: 0.86rem; margin: 0.55rem 0 0.3rem; }
 .du-item { padding: 0.4rem 0; border-top: 1px dashed var(--border); }
+/* упавшие юниты systemd */
+.unit-row { padding: 0.45rem 0; border-top: 1px dashed var(--border); }
+.unit-row:first-of-type { border-top: 0; }
+.unit-muted { opacity: 0.6; }
+.unit-head { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
+.unit-name { font-weight: 600; overflow-wrap: anywhere; }
+.unit-desc { margin-top: 0.1rem; }
+.unit-log {
+  margin: 0.3rem 0 0;
+  padding: 0.45rem 0.6rem;
+  font-size: 0.76rem;
+  white-space: pre-wrap;
+  word-break: break-all;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.unit-hint { margin-top: 0.3rem; }
+.unit-actions { display: flex; align-items: center; gap: 0.4rem; flex-wrap: wrap; margin-top: 0.35rem; }
 .du-item-head { display: flex; align-items: center; gap: 0.5rem; }
 .du-item-name { flex: 1; min-width: 0; overflow-wrap: anywhere; }
 .du-item-size { flex-shrink: 0; }

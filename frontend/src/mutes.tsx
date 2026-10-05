@@ -29,6 +29,7 @@ export const SRV_ALERT_KINDS: { k: string; label: string }[] = [
   { k: 'disk_health', label: 'Диск: поломка' },
   { k: 'inode', label: 'Диск: inode' },
   { k: 'disk_forecast', label: 'Диск: скоро заполнится' },
+  { k: 'units', label: 'Systemd: упавшие юниты' },
   { k: 'reboot', label: 'Перезагрузка' },
   { k: 'oom', label: 'OOM-killer' },
   { k: 'web_5xx', label: 'Веб: ошибки 5xx' },
@@ -38,7 +39,10 @@ export const SRV_ALERT_KINDS: { k: string; label: string }[] = [
 // Заглушенные 5xx одного лога (домена): ключ web_5xx:<ключ лога>. Подпись - с самим
 // логом, иначе в списке заглушенного был бы голый технический ключ.
 export const WEB_MUTE = 'web_5xx:'
+// Один упавший юнит systemd: unit:<имя>, остальные юниты ноды алертят
+export const UNIT_MUTE = 'unit:'
 export function muteKindLabel(k: string, t: TFn): string | null {
+  if (k.startsWith(UNIT_MUTE)) return `${t('юнит')}: ${k.slice(UNIT_MUTE.length)}`
   return k.startsWith(WEB_MUTE) ? `${t('5xx по логу')}: ${k.slice(WEB_MUTE.length)}` : null
 }
 

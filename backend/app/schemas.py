@@ -261,9 +261,10 @@ class AlertSnoozeIn(BaseModel):
     """Точечный снуз ОДНОГО типа алерта сервера на N часов (0 = снять)."""
 
     # "disk" или "disk@2" - тип, опционально с макс. заглушаемым уровнем (см. _muted);
-    # web_5xx:<ключ лога> - 5xx одного лога (домена), остальные логи ноды алертят
+    # web_5xx:<ключ лога> - 5xx одного лога (домена), остальные логи ноды алертят;
+    # unit:<юнит> - один упавший юнит systemd, остальные алертят
     kind: str = Field(min_length=1, max_length=240,
-                      pattern=r"^(?:[a-z_]+(?:@[1-3])?|web_5xx:[^\x00-\x1f]{1,220})$")
+                      pattern=r"^(?:[a-z_]+(?:@[1-3])?|web_5xx:[^\x00-\x1f]{1,220}|unit:[A-Za-z0-9@._:\\-]{1,200})$")
     hours: float = Field(ge=0, le=24 * 30)
 
 
@@ -1313,13 +1314,16 @@ class KubeResultIn(BaseModel):
 _BACKUP_PATH = r"^/[A-Za-z0-9._/+-]+$"  # '+' — для /lost+found (стандартный exclude ext-ФС)
 
 
+_UNIT_NAME = r"^$|^[A-Za-z0-9@._:\\][A-Za-z0-9@._:\\-]*\.(service|socket|timer|mount|automount|swap|path)$"
+
+
 class BackupCommandIn(BaseModel):
     """Панель → очередь: управление restic-бэкапом ноды (через узкий helper).
     Только белый список: set_paths (include/exclude), set_schedule, run_now."""
 
-    action: str = Field(pattern="^(set_paths|set_schedule|run_now|dump_setup|dump_remove|restic_update|update_image|timesync|disk_fix)$")
-    # include/exclude - для путей бэкапа; preview/run - для disk_fix
-    mode: str = Field(default="exclude", pattern="^(include|exclude|preview|run)$")
+    action: str = Field(pattern="^(set_paths|set_schedule|run_now|dump_setup|dump_remove|restic_update|update_image|timesync|disk_fix|unit_fix)$")
+    # include/exclude - для путей бэкапа; preview/run - для disk_fix; restart/reset - для unit_fix
+    mode: str = Field(default="exclude", pattern="^(include|exclude|preview|run|restart|reset)$")
     paths: list[str] = Field(default_factory=list, max_length=200)
     schedule: str = Field(default="", pattern=r"^$|^([01][0-9]|2[0-3]):[0-5][0-9]$")
     # dump_setup: локальные дампы СУБД перед файловым бэкапом
@@ -1338,6 +1342,9 @@ class BackupCommandIn(BaseModel):
     # diskusage-setup; разрешено ли действие на ноде, решает helper по /etc/kervax/fix.conf.
     fix: str = Field(default="", pattern="^$|^(journal|rotated-logs|apt-cache|dnf-cache|coredumps"
                      "|crash-reports|docker-dangling|docker-build-cache|container-log)$")
+    # unit_fix: упавший юнит systemd (helper units-setup трогает его, только пока тот упал).
+    # Обратный слэш - так systemd экранирует имена mount-юнитов (mnt-my\x20disk.mount).
+    unit: str = Field(default="", max_length=200, pattern=_UNIT_NAME)
 
     @field_validator("paths")
     @classmethod
