@@ -8,6 +8,8 @@ import {
   backupCommandStatus,
   createServer,
   deleteServer,
+  dockerCommand,
+  dockerCommandStatus,
   getAgentRelease,
   listServers,
   serverMetrics,
@@ -1197,6 +1199,15 @@ function duLabel(it: DiskUsageItem, t: TFn): string {
     case 'big-log': return t('Большой лог {p}', { p: it.path })
     case 'apt-cache': return t('Кэш пакетов apt')
     case 'dnf-cache': return t('Кэш пакетов dnf/yum')
+    case 'tmp-dir':
+    case 'vartmp-dir':
+      return it.kind === 'restic'
+        ? t('{p}: похоже на копию репозитория restic', { p: it.path })
+        : it.kind === 'dump'
+          ? t('{p}: дампы баз', { p: it.path })
+          : it.kind === 'archive'
+            ? t('{p}: архивы', { p: it.path })
+            : t('{p}: старые файлы', { p: it.path })
     case 'tmp-old': return t('Файлы в /tmp старше 10 дней')
     case 'vartmp-old': return t('Файлы в /var/tmp старше 30 дней')
     case 'coredumps': return t('Дампы памяти упавших программ')
@@ -1218,6 +1229,11 @@ function duHint(it: DiskUsageItem, t: TFn): string {
   switch (it.id) {
     case 'journal': return t('Останутся последние 200 МБ записей.')
     case 'big-log': return t('Содержимое лога пропадет. Чтобы не рос снова, проверьте для него logrotate.')
+    case 'tmp-dir':
+    case 'vartmp-dir':
+      return it.fresh
+        ? t('Старых файлов: {n}, но есть и свежие: каталогом пользуются. Удаляйте вручную, если уверены.', { n: it.count ?? 0 })
+        : t('Старых файлов: {n}. Если каталог не нужен, удаляйте целиком.', { n: it.count ?? 0 })
     case 'tmp-old':
     case 'vartmp-old': return t('Обычно это мусор, но некоторые программы держат там рабочие файлы.')
     case 'restic-cache': return t('Пересоздастся при следующем бэкапе, тот пойдет медленнее. Не удаляйте во время бэкапа.')
@@ -1330,8 +1346,27 @@ function DiskUsageBlock({ server: s, onChanged }: { server: Server; onChanged: (
   const [fix, setFix] = useState<Record<string, DuFixState>>({})
   const r = s.last_report ?? {}
   const du = diskUsage(r)
-  if (!du) return null
+  const done = Object.values(fix).flatMap((x) => (x.phase === 'done' ? [x.data.bytes] : []))
+  if (!du) {
+    // Освободили - раздел ушел ниже 75%, helper убрал разбор. Без итога блок просто
+    // исчезал вместе с "Освобождено", и казалось, что все сломалось.
+    if (!done.length) return null
+    return (
+      <div className="du-block">
+        <div className="chart-cap">{t('На что ушло место')}</div>
+        <div className="du-fix-line small">
+          <span className="t-up">{t('Освобождено {n}', { n: fmtBytes(done.reduce((a, b) => a + b, 0)) })}</span>
+          <span className="muted">
+            {t('Раздел больше не заполнен ({d}), разбор места скрыт: он появляется от 75%.', {
+              d: (r.disks ?? []).map((d) => `${d.mount} ${pct(d.used, d.total)}%`).join(', '),
+            })}
+          </span>
+        </div>
+      </div>
+    )
+  }
   const age = Math.max(0, Math.round(((r.clock_unix || Date.now() / 1000) - du.ts) / 60))
+  const autoThr = s.disk_warn_percent || s.disk_alert_percent || s.disk_crit_percent || 85
   const copy = (txt: string, id: string) => {
     navigator.clipboard?.writeText(txt)
     setCopied(id)
@@ -1410,6 +1445,15 @@ function DiskUsageBlock({ server: s, onChanged }: { server: Server; onChanged: (
         <span className="muted small du-age"> · {t('замер {n} мин назад', { n: age })}</span>
       </div>
       {fixNote && <div className="muted small du-note">{fixNote}</div>}
+      {s.disk_autofix ? (
+        <div className="muted small du-note">
+          🧹 {t('Автоочистка включена: от {p}% панель сама освобождает безопасное.', { p: autoThr })}
+        </div>
+      ) : (
+        isAdmin && (
+          <div className="muted small du-note">{t('Автоочистка выключена, включается в настройках сервера.')}</div>
+        )
+      )}
       {du.fs.map((fs) => {
         const items = du.items
           .filter((i) => i.mount === fs.mount)
@@ -1515,6 +1559,70 @@ function DiskUsageBlock({ server: s, onChanged }: { server: Server; onChanged: (
           </div>
         )
       })}
+    </div>
+  )
+}
+
+// Базы перезапускать кнопкой не даем: потеря соединений и долгий старт - решение человека
+const DB_IMAGE = /(postgres|mysql|mariadb|mongo|redis|valkey|keydb|clickhouse|elasticsearch|opensearch|rabbitmq|kafka|zookeeper|etcd|neo4j|influx|timescale|cassandra|memcached|minio|percona)/i
+
+// Кто съел память: контейнеры по памяти (агент 2.14+) с перезапуском прямо отсюда - сюда
+// ведет ссылка из алерта по памяти. Перезапуск - та же команда, что в разделе Docker.
+function MemContainers({ server: s, onChanged }: { server: Server; onChanged: () => void }) {
+  const { t } = useI18n()
+  const { isViewer } = useAuth()
+  const [st, setSt] = useState<Record<string, { busy?: boolean; ok?: boolean; msg?: string }>>({})
+  const list = (s.last_report?.docker?.containers ?? [])
+    .filter((c) => c.state === 'running' && (c.mem ?? 0) > 0)
+    .sort((a, b) => (b.mem ?? 0) - (a.mem ?? 0))
+    .slice(0, 6)
+  if (!list.length) return null
+  const total = s.last_report?.mem_total || 0
+  const restart = async (name: string) => {
+    if (!window.confirm(t('Перезапустить контейнер {n}? Несколько секунд он будет недоступен.', { n: name }))) return
+    setSt((cur) => ({ ...cur, [name]: { busy: true } }))
+    try {
+      const c = await dockerCommand(s.id, name, 'restart')
+      let last = c
+      const t0 = Date.now()
+      while (last.status !== 'done' && last.status !== 'error' && Date.now() - t0 < 120_000) {
+        await new Promise((res) => setTimeout(res, 1000))
+        last = await dockerCommandStatus(s.id, c.id)
+      }
+      const ok = last.status === 'done' && !!last.ok
+      setSt((cur) => ({ ...cur, [name]: { ok, msg: ok ? t('перезапущен') : last.result || t('не удалось') } }))
+      if (ok) window.setTimeout(onChanged, 15_000)
+    } catch (e) {
+      setSt((cur) => ({ ...cur, [name]: { ok: false, msg: e instanceof Error ? e.message : String(e) } }))
+    }
+  }
+  return (
+    <div className="detail-inc mem-cont">
+      <div className="chart-cap">{t('Контейнеры по памяти')}</div>
+      <div className="loc-results">
+        {list.map((c) => {
+          const db = DB_IMAGE.test(c.image) || DB_IMAGE.test(c.name)
+          const cs = st[c.name]
+          return (
+            <div key={c.name} className="loc-res mc-row">
+              <div className="loc-res-name mono">{c.name}</div>
+              <div className="loc-res-metric">{fmtBytes(c.mem ?? 0)}</div>
+              <div className="loc-res-msg muted small">
+                {total ? `${Math.round(((c.mem ?? 0) / total) * 100)}%` : ''}
+              </div>
+              {cs?.msg && <span className={`small ${cs.ok ? 't-up' : 'form-error'}`}>{cs.msg}</span>}
+              {!isViewer &&
+                (db ? (
+                  <span className="muted small">{t('база: перезапуск только вручную')}</span>
+                ) : (
+                  <button className="ghost small" disabled={!!cs?.busy} onClick={() => restart(c.name)}>
+                    {cs?.busy ? t('перезапускаю...') : t('Перезапустить')}
+                  </button>
+                ))}
+            </div>
+          )
+        })}
+      </div>
     </div>
   )
 }
@@ -2479,6 +2587,7 @@ type ServerEditForm = {
   disk_alert_percent: number
   disk_warn_percent: number
   disk_crit_percent: number
+  disk_autofix: boolean
   temp_alert_c: number
   conntrack_alert_percent: number
   db_conn_alert_percent: number
@@ -2716,6 +2825,7 @@ function ServerEditCard({
   onDelete: () => void
 }) {
   const { t } = useI18n()
+  const { isAdmin } = useAuth()
   const num = (v: string) => (v === '' ? 0 : Number(v))
   // на VM нет датчиков температуры → скрываем температурные алерты (CPU/диск)
   const kinds = SRV_ALERT_KINDS.filter(
@@ -2815,6 +2925,19 @@ function ServerEditCard({
           />
         </label>
       </div>
+      {/* Панель начнет сама запускать удаление на ноде - решение админа (сервер проверяет) */}
+      <label className="checkbox">
+        <input
+          type="checkbox"
+          checked={form.disk_autofix}
+          disabled={!isAdmin}
+          onChange={(e) => set({ disk_autofix: e.target.checked })}
+        />
+        <span>🧹 {t('Автоочистка диска')}</span>
+      </label>
+      <p className="muted small">
+        {t('Когда раздел дошел до порога предупреждения, панель сама освобождает безопасное: журнал, старые логи, кэши пакетов, мусор docker. Каждое действие не чаще раза в 6 часов, о каждом запуске пишет в канал алертов. Включает только админ, нужны агент 2.13 и helper diskusage-setup 0.3.')}
+      </p>
       {!isVm && (
         <label className="field">
           <span>🌡 {t('Алерт по температуре CPU, °C (0 = выкл)')}</span>
@@ -3159,6 +3282,7 @@ function ServerDetail({
       disk_alert_percent: s.disk_alert_percent,
       disk_warn_percent: s.disk_warn_percent,
       disk_crit_percent: s.disk_crit_percent,
+      disk_autofix: !!s.disk_autofix,
       temp_alert_c: s.temp_alert_c,
       conntrack_alert_percent: s.conntrack_alert_percent,
       db_conn_alert_percent: s.db_conn_alert_percent,
@@ -3187,6 +3311,7 @@ function ServerDetail({
         disk_alert_percent: form.disk_alert_percent,
         disk_warn_percent: form.disk_warn_percent,
         disk_crit_percent: form.disk_crit_percent,
+        disk_autofix: form.disk_autofix,
         temp_alert_c: form.temp_alert_c,
         conntrack_alert_percent: form.conntrack_alert_percent,
         db_conn_alert_percent: form.db_conn_alert_percent,
@@ -3578,6 +3703,7 @@ function ServerDetail({
               ? chartCard('oom', <OomEventList serverId={s.id} t={t} />)
               : null}
           </div>
+          <MemContainers server={s} onChanged={onChanged} />
         </MetricSection>
 
         <MetricSection id="net" title={t('Сеть')}>

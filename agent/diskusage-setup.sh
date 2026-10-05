@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Kervax: where the disk space went. When a filesystem fills up (75% used), a root helper
-# measures the usual suspects - systemd journal, rotated and oversized logs, package caches, docker, container logs,
-# old temp files, restic cache, core dumps, space held by deleted files that are still
-# open - plus the biggest directories, and writes /var/lib/kervax/report.d/disk-usage.json.
-# The agent hands report.d to the panel as is.
+# measures the usual suspects - systemd journal, rotated and oversized logs, package caches,
+# docker, container logs, old files in the temp directories, restic cache, core dumps, space
+# held by deleted files that are still open - plus the biggest directories, and writes
+# /var/lib/kervax/report.d/disk-usage.json. The agent hands report.d to the panel as is.
 #
 # The measurement deletes nothing: every finding carries the command that frees the space.
 # Since 0.3 the panel can also start some of them itself ("Free up" with a preview first):
@@ -11,7 +11,7 @@
 # helpers, and only for the actions /etc/kervax/fix.conf on this node allows.
 set -euo pipefail
 
-KERVAX_SETUP_VERSION=0.3  # MAJOR.MINOR; compared component-wise
+KERVAX_SETUP_VERSION=0.4  # MAJOR.MINOR; compared component-wise
 KERVAX_SETUP_ALWAYS=1     # safe on any node: while disks have room it only reads df
 
 HELPER_DIR=/lib65/kervax
@@ -138,11 +138,46 @@ elif have yum; then
   add_item dnf-cache "$a" "$a" /var/cache/yum safe "yum clean all"
 fi
 
-# -- old temp files: the ages systemd-tmpfiles uses by default (10 and 30 days) --
-t=$(find /tmp -xdev -type f -mtime +10 -ctime +10 -printf '%s\n' 2>/dev/null | sum_bytes)
-add_item tmp-old "$t" "$t" /tmp careful "find /tmp -xdev -type f -mtime +10 -ctime +10 -delete"
-t=$(find /var/tmp -xdev -type f -mtime +30 -ctime +30 -printf '%s\n' 2>/dev/null | sum_bytes)
-add_item vartmp-old "$t" "$t" /var/tmp careful "find /var/tmp -xdev -type f -mtime +30 -ctime +30 -delete"
+# -- old files in /tmp and /var/tmp, by what lies right under them --
+# Ages as systemd-tmpfiles uses by default (10 and 30 days). Grouped by the top-level entry:
+# "/tmp/dev-1 9.4 GB" says more than thousands of old files, and a blanket "delete files
+# older than N days" leaves half a directory behind (a copy of a restic repository was found
+# exactly like that). Each entry says what it looks like; deleting is for a human, and only
+# the whole entry, offered only when it holds no fresh files.
+tmp_scan() {  # dir age_days item_id
+  local dir=$1 cut=$((now - $2 * 86400)) id=$3 b cnt fr dumps archs top p kind fix
+  [ -d "$dir" ] || return 0
+  find "$dir" -xdev -mindepth 1 -type f -printf '%s\t%T@\t%C@\t%P\n' 2>/dev/null \
+  | awk -F'\t' -v cut="$cut" '
+      { split($4, p, "/"); top = p[1]
+        if ($2 < cut && $3 < cut) { old[top] += $1; n[top]++ } else fresh[top] = 1
+        f = tolower($4)
+        if (f ~ /\.(sql|sql\.gz|sql\.zst|dump|bak)$/) dump[top]++
+        else if (f ~ /\.(tar|tar\.gz|tgz|tar\.zst|zip|7z|gz|xz|bz2)$/) arch[top]++ }
+      END { for (t in old) printf "%.0f\t%d\t%d\t%d\t%d\t%s\n", old[t], n[t], (t in fresh), dump[t] + 0, arch[t] + 0, t }' \
+  | sort -rn | head -5 > "$CACHE/tmp-scan"
+  while IFS="$TAB" read -r b cnt fr dumps archs top; do
+    [ -n "$top" ] || continue
+    p="$dir/$top"
+    kind=other
+    if [ -d "$p" ] && [ -f "$p/config" ] && [ -d "$p/data" ] && [ -d "$p/index" ] && [ -d "$p/snapshots" ]; then
+      kind=restic
+    elif [ "$dumps" -gt 0 ]; then
+      kind=dump
+    elif [ "$archs" -gt 0 ]; then
+      kind=archive
+    fi
+    fix=""
+    if [ "$fr" = 0 ]; then
+      case "$p" in *\'*) ;; *) fix="rm -rf '$p'" ;; esac
+    fi
+    add_item "$id" "$b" "$b" "$p" manual "$fix" \
+      ",\"count\":$cnt,\"kind\":\"$kind\",\"fresh\":$([ "$fr" = 1 ] && echo true || echo false)"
+  done < "$CACHE/tmp-scan"
+  rm -f "$CACHE/tmp-scan"
+}
+tmp_scan /tmp 10 tmp-dir
+tmp_scan /var/tmp 30 vartmp-dir
 
 # -- core dumps --
 c=$(size_of /var/lib/systemd/coredump)

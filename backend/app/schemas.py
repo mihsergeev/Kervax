@@ -829,6 +829,8 @@ class ServerUpdate(BaseModel):
     disk_alert_percent: int | None = Field(default=None, ge=0, le=100)
     disk_warn_percent: int | None = Field(default=None, ge=0, le=100)
     disk_crit_percent: int | None = Field(default=None, ge=0, le=100)
+    # авто-очистка диска: включает только админ (проверка в update_server)
+    disk_autofix: bool | None = None
     temp_alert_c: int | None = Field(default=None, ge=0, le=120)
     conntrack_alert_percent: int | None = Field(default=None, ge=0, le=100)
     # пороги сроков Kubernetes в днях: [7, 1]; пустой список - выключено
@@ -995,6 +997,7 @@ class ServerOut(BaseModel):
     disk_alert_percent: int
     disk_warn_percent: int
     disk_crit_percent: int
+    disk_autofix: bool = False  # авто-очистка безопасного при пороге предупреждения
     temp_alert_c: int
     conntrack_alert_percent: int
     kube_expiry_warn_days: list[int] | None = None
