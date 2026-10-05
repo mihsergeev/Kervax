@@ -1876,6 +1876,8 @@ function unitWhy(u: FailedUnit, t: TFn): string {
       return t('слишком часто перезапускался')
     case 'oom-kill':
       return t('убит из-за нехватки памяти')
+    case 'resources':
+      return t('не хватило ресурсов')
     case 'watchdog':
       return t('перестал отвечать watchdog')
     default:
@@ -1883,14 +1885,57 @@ function unitWhy(u: FailedUnit, t: TFn): string {
   }
 }
 
-// Известные причины, у которых есть понятный выход
-function unitHint(u: FailedUnit, t: TFn): string {
+// Известные причины, у которых есть понятный выход: что случилось и, где можно, команда.
+// Набор - с парка 05.10.2026: mdmonitor на семи нодах, unbound-resolvconf на четырех и т.д.
+type UnitHint = { text: string; cmd?: string }
+function unitHint(u: FailedUnit, all: FailedUnit[], t: TFn): UnitHint | null {
   const log = u.log.join('\n')
-  if (u.unit.startsWith('mdmonitor') && log.includes('No mail address'))
-    return t('mdadm некуда слать письма. За RAID следит Kervax ("Диск: поломка"), мониторинг mdadm можно выключить: sudo systemctl disable --now mdmonitor.service mdmonitor-oneshot.timer && sudo systemctl reset-failed')
-  if (u.unit === 'certbot.service' && log.includes('manual'))
-    return t('Сертификат выпущен вручную (manual plugin): сам он не продлится. Продлите вручную или удалите ненужный: certbot delete --cert-name <имя>')
-  return ''
+  const n = u.unit
+  // у давно упавшего mdmonitor.service лог уже ротирован, причину видно у mdmonitor-oneshot
+  const mdNoMail = all.some((x) => x.unit.startsWith('mdmonitor') && x.log.join('\n').includes('No mail address'))
+  if (n.startsWith('mdmonitor') && (log.includes('No mail address') || (!log && mdNoMail)))
+    return {
+      text: t('mdadm некуда слать письма, RAID он на самом деле не мониторит. За RAID следит Kervax ("Диск: поломка"), мониторинг mdadm можно выключить (по всему парку - плейбук units_cleanup.yml):'),
+      cmd: 'sudo systemctl disable --now mdmonitor-oneshot.timer && sudo systemctl mask --now mdmonitor.service && sudo systemctl reset-failed mdmonitor.service mdmonitor-oneshot.service',
+    }
+  if (n === 'unbound-resolvconf.service')
+    return {
+      text: t('unbound пытается прописаться в systemd-resolved, которого на ноде нет. Ничего полезного юнит не делает, его можно выключить (по всему парку - плейбук units_cleanup.yml):'),
+      cmd: 'sudo systemctl mask --now unbound-resolvconf.service && sudo systemctl reset-failed unbound-resolvconf.service',
+    }
+  if (n.startsWith('systemd-networkd-wait-online'))
+    return {
+      text: t('При загрузке не дождались сети: обычно из-за интерфейса, который не нужен или не управляется networkd. Сервер при этом работает, достаточно сбросить отметку. Если повторяется на каждой загрузке - ограничьте ожидание нужным интерфейсом (--interface=) или выключите юнит.'),
+    }
+  if (n.endsWith('.socket') && u.result === 'resources')
+    return {
+      text: t('Сокет не смог занять свой порт: обычно его уже держит сам сервис (sshd со своим портом). Сервис при этом работает, лишний сокет можно выключить:'),
+      cmd: `sudo systemctl disable --now ${n} && sudo systemctl reset-failed ${n}`,
+    }
+  if (log.includes('at least one source file could not be read'))
+    return {
+      text: t('restic закончил бэкап, но часть файлов прочитать не смог (код 3): снапшот есть, но неполный. Какие файлы - в журнале юнита:'),
+      cmd: `sudo journalctl -u ${n} --since "2 days ago" --no-pager | grep -i -E "error|denied|no such"`,
+    }
+  if (n.startsWith('clamav-freshclam'))
+    return {
+      text: t('freshclam не может скачать базы антивируса, и они устаревают. Частая причина - зеркало ClamAV закрыто для адресов из России: нужно свое зеркало (PrivateMirror в freshclam.conf) или прокси.'),
+    }
+  if (n === 'openipmi.service')
+    return {
+      text: t('openipmi не нашел IPMI на этой машине. Если BMC нет или он не нужен, юнит можно выключить:'),
+      cmd: 'sudo systemctl disable --now openipmi.service && sudo systemctl reset-failed openipmi.service',
+    }
+  if (n === 'console-setup.service')
+    return {
+      text: t('Неправильная раскладка консоли, на сервере ни на что не влияет. Поправить - sudo dpkg-reconfigure keyboard-configuration, или просто сбросить отметку.'),
+    }
+  if (n === 'certbot.service' && log.includes('manual'))
+    return {
+      text: t('Сертификат выпущен вручную (manual plugin), сам он не продлится. Продлите вручную или удалите ненужный:'),
+      cmd: 'sudo certbot certificates && sudo certbot delete --cert-name <cert-name>',
+    }
+  return null
 }
 
 function unitStateText(d: UnitFixResult, t: TFn): string {
@@ -1907,6 +1952,7 @@ function FailedUnits({ server: s, onChanged }: { server: Server; onChanged: () =
   const [st, setSt] = useState<Record<string, { busy?: boolean; ok?: boolean; msg?: string; log?: string[] }>>({})
   const [picking, setPicking] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
+  const [copied, setCopied] = useState<string | null>(null)
   const r = s.last_report
   const ub = unitsBlock(r)
   if (!ub || !ub.units.length) return null
@@ -1974,6 +2020,12 @@ function FailedUnits({ server: s, onChanged }: { server: Server; onChanged: () =
   const fmt = (ts: string) =>
     new Date(ts).toLocaleString([], { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })
   const muted = (u: FailedUnit) => ((s.alert_mutes ?? []).includes(UNIT_MUTE + u.unit) ? 1 : 0)
+  const copy = (text: string, key: string) => {
+    void navigator.clipboard?.writeText(text).then(() => {
+      setCopied(key)
+      window.setTimeout(() => setCopied((c) => (c === key ? null : c)), 1500)
+    })
+  }
   return (
     <div className="detail-inc" id="mcard-units">
       <div className="chart-cap">{t('Упавшие юниты systemd')}</div>
@@ -1989,7 +2041,7 @@ function FailedUnits({ server: s, onChanged }: { server: Server; onChanged: () =
           const until = s.alert_snoozes?.[kind]
           const snoozed = !!until && new Date(until).getTime() > Date.now()
           const us = st[u.unit]
-          const hint = unitHint(u, t)
+          const hint = unitHint(u, ub.units, t)
           return (
             <div key={u.unit} className={`unit-row${perm || snoozed ? ' unit-muted' : ''}`}>
               <div className="unit-head">
@@ -2000,7 +2052,19 @@ function FailedUnits({ server: s, onChanged }: { server: Server; onChanged: () =
               </div>
               {u.desc && u.desc !== u.unit && <div className="muted small unit-desc">{u.desc}</div>}
               {u.log.length > 0 && <pre className="unit-log mono">{u.log.join('\n')}</pre>}
-              {hint && <div className="small unit-hint">{hint}</div>}
+              {hint && (
+                <div className="small unit-hint">
+                  {hint.text}
+                  {hint.cmd && (
+                    <div className="agent-advice-cmd">
+                      <pre>{hint.cmd}</pre>
+                      <button className="ghost" onClick={() => copy(hint.cmd!, u.unit)}>
+                        {copied === u.unit ? t('Скопировано') : t('Копировать')}
+                      </button>
+                    </div>
+                  )}
+                </div>
+              )}
               {us?.busy && <div className="muted small">{t('Выполняю...')}</div>}
               {us?.msg && (
                 <div className="small">

@@ -329,13 +329,28 @@ const EN: Record<string, string> = {
   'не уложился во время': 'timed out',
   'упал с дампом памяти': 'crashed with a core dump',
   'слишком часто перезапускался': 'restarted too often',
+  'не хватило ресурсов': 'ran out of resources',
   'убит из-за нехватки памяти': 'killed by the OOM killer',
   'перестал отвечать watchdog': 'stopped answering the watchdog',
   'упал': 'failed',
-  'mdadm некуда слать письма. За RAID следит Kervax ("Диск: поломка"), мониторинг mdadm можно выключить: sudo systemctl disable --now mdmonitor.service mdmonitor-oneshot.timer && sudo systemctl reset-failed':
-    'mdadm has no mail address to send to. Kervax watches the RAID ("Disk: failure"), so the mdadm monitor can be turned off: sudo systemctl disable --now mdmonitor.service mdmonitor-oneshot.timer && sudo systemctl reset-failed',
-  'Сертификат выпущен вручную (manual plugin): сам он не продлится. Продлите вручную или удалите ненужный: certbot delete --cert-name <имя>':
-    'The certificate was issued by hand (manual plugin) and will not renew by itself. Renew it by hand or delete it if unused: certbot delete --cert-name <name>',
+  'mdadm некуда слать письма, RAID он на самом деле не мониторит. За RAID следит Kervax ("Диск: поломка"), мониторинг mdadm можно выключить (по всему парку - плейбук units_cleanup.yml):':
+    'mdadm has no mail address to send to, so it does not really watch the RAID. Kervax does ("Disk: failure"), so the mdadm monitor can be turned off (fleet-wide: the units_cleanup.yml playbook):',
+  'unbound пытается прописаться в systemd-resolved, которого на ноде нет. Ничего полезного юнит не делает, его можно выключить (по всему парку - плейбук units_cleanup.yml):':
+    'unbound tries to register itself in systemd-resolved, which is not on this node. The unit does nothing useful and can be turned off (fleet-wide: the units_cleanup.yml playbook):',
+  'При загрузке не дождались сети: обычно из-за интерфейса, который не нужен или не управляется networkd. Сервер при этом работает, достаточно сбросить отметку. Если повторяется на каждой загрузке - ограничьте ожидание нужным интерфейсом (--interface=) или выключите юнит.':
+    'The network was not ready in time at boot, usually because of an interface that is not needed or not managed by networkd. The server works; resetting the mark is enough. If it repeats on every boot, limit the wait to the right interface (--interface=) or turn the unit off.',
+  'Сокет не смог занять свой порт: обычно его уже держит сам сервис (sshd со своим портом). Сервис при этом работает, лишний сокет можно выключить:':
+    'The socket could not take its port, usually because the service itself holds it (sshd with its own port). The service works; the extra socket can be turned off:',
+  'restic закончил бэкап, но часть файлов прочитать не смог (код 3): снапшот есть, но неполный. Какие файлы - в журнале юнита:':
+    'restic finished the backup but could not read some files (exit code 3): the snapshot exists but is incomplete. Which files - in the unit log:',
+  'freshclam не может скачать базы антивируса, и они устаревают. Частая причина - зеркало ClamAV закрыто для адресов из России: нужно свое зеркало (PrivateMirror в freshclam.conf) или прокси.':
+    'freshclam cannot download the antivirus databases, so they get stale. A common cause: the ClamAV mirror is closed to Russian addresses; use your own mirror (PrivateMirror in freshclam.conf) or a proxy.',
+  'openipmi не нашел IPMI на этой машине. Если BMC нет или он не нужен, юнит можно выключить:':
+    'openipmi found no IPMI on this machine. If there is no BMC or it is not needed, the unit can be turned off:',
+  'Неправильная раскладка консоли, на сервере ни на что не влияет. Поправить - sudo dpkg-reconfigure keyboard-configuration, или просто сбросить отметку.':
+    'A wrong console keyboard layout; on a server it affects nothing. Fix it with sudo dpkg-reconfigure keyboard-configuration, or just reset the mark.',
+  'Сертификат выпущен вручную (manual plugin), сам он не продлится. Продлите вручную или удалите ненужный:':
+    'The certificate was issued by hand (manual plugin) and will not renew by itself. Renew it by hand or delete it if unused:',
   'отметка сброшена': 'failed mark cleared',
   '{n} дн назад': '{n} d ago',
   'отработал без ошибок': 'finished without errors',
