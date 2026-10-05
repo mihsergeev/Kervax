@@ -1235,6 +1235,8 @@ export type Server = {
   backup_audit?: BackupAudit[] // аудит покрытия бэкапа: что рискует не восстановиться
   custom_backups?: CustomBackup[] // свои бэкапы ноды (настроены без панели) со статусом
   custom_backup_ignored?: string[] | null
+  kube_node_ignored?: string[] | null // ноды кластера, где агент не нужен (по имени)
+  kube_unmonitored?: KubeNodeRef[] // ноды кластера без агента панели (считает бэкенд)
 }
 
 // Свой бэкап ноды: cron-задание, systemd-таймер или скрипт с метриками, настроенный без
@@ -1620,6 +1622,17 @@ export function rotateServerToken(id: number): Promise<ServerEnroll> {
 }
 // заглушить/включить конкретный репо бэкап-сервера (разовые/неактуальные)
 // приглушить ОДНУ находку покрытия: «эту базу бэкапить не нужно», остальные остаются
+// нода кластера без агента панели: public - адрес можно подставить в "IP сервера"
+export type KubeNodeRef = { name: string; ip: string; public: boolean }
+
+// "агент не нужен" для ноды кластера (чужая, временная) - или вернуть ее в подсказку
+export function kubeNodeIgnore(id: number, node: string, ignored: boolean): Promise<Server> {
+  return api<Server>(`/api/servers/${id}/kube/node-ignore`, {
+    method: 'POST',
+    body: JSON.stringify({ node, ignored }),
+  })
+}
+
 export function backupAuditMute(id: number, key: string, muted: boolean): Promise<Server> {
   return api<Server>(`/api/servers/${id}/backup/audit-mute`, {
     method: 'POST',

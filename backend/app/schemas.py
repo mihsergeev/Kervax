@@ -942,6 +942,15 @@ class CustomBackupIgnoreIn(BaseModel):
     ignored: bool
 
 
+class KubeNodeIgnoreIn(BaseModel):
+    """Нода кластера, на которой агент не нужен, - или вернуть ее в подсказку."""
+
+    node: str = Field(
+        min_length=1, max_length=253, pattern=r"^[A-Za-z0-9]([A-Za-z0-9._-]*[A-Za-z0-9])?$"
+    )
+    ignored: bool
+
+
 class BackupAuditMuteIn(BaseModel):
     """Приглушить/вернуть одну находку аудита покрытия (ключ вида "db:RabbitMQ")."""
 
@@ -967,6 +976,14 @@ class HelperAdvice(BaseModel):
     # как дробь это неверно (см. _ver_key в servers.py)
     installed: str | None = None  # None = helper до версионирования
     current: str
+
+
+class KubeNodeRef(BaseModel):
+    """Нода кластера без агента панели: имя, адрес из Kubernetes и публичный ли он."""
+
+    name: str
+    ip: str = ""
+    public: bool = False  # можно подставить в "IP сервера" при добавлении
 
 
 class ServerOut(BaseModel):
@@ -1038,6 +1055,9 @@ class ServerOut(BaseModel):
     # sec - куда вести в карточке, mute - ключ приглушения. Считает collector.server_problems.
     problems: list[dict] = []
     custom_backup_ignored: list[str] | None = None
+    kube_node_ignored: list[str] | None = None  # ноды кластера, где агент не нужен (по имени)
+    # ноды кластера без агента панели; считает kube_coverage по ВСЕМ серверам панели
+    kube_unmonitored: list[KubeNodeRef] = []
 
 
 class BackupRepoMuteIn(BaseModel):

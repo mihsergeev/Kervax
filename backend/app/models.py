@@ -584,6 +584,9 @@ class Server(Base):
     # приглушённые находки аудита покрытия — ключи вида "db:RabbitMQ", "kube_vol:/mnt/x".
     # Точечная альтернатива db_dumps_ok: «эту базу бэкапить не нужно», не глуша остальные.
     backup_audit_mutes: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    # ноды кластера этого сервера (по имени), на которых агент не нужен: чужие, временные.
+    # Остальные ноды без агента панель выносит в "Требует действий" (см. kube_coverage).
+    kube_node_ignored: Mapped[list | None] = mapped_column(JSON, nullable=True)
     # свои бэкапы ноды, которые отслеживать не нужно (id найденных helper'ом заданий):
     # эвристика поиска ошибается, и «это не бэкап» должно сниматься одним кликом
     custom_backup_ignored: Mapped[list | None] = mapped_column(JSON, nullable=True)

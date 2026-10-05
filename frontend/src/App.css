@@ -603,6 +603,27 @@ input:focus {
 .kube-tabs {
   margin: 0.3rem 0 0.7rem;
 }
+
+/* ноды кластера без агента: подсказка над списком нод и кнопки под нодой */
+.kube-noagent-hint {
+  padding: 8px 10px;
+  margin-bottom: 6px;
+  border-left: 3px solid var(--degraded);
+  border-radius: 4px;
+}
+/* адрес и загрузка ноды на телефоне переносятся, а не режутся многоточием */
+.docker-c-img.kube-node-line {
+  white-space: normal;
+  overflow: visible;
+  overflow-wrap: anywhere;
+}
+.kube-node-acts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+  margin-top: 6px;
+}
 /* Сводка над списком сроков: почему список стоит читать прямо сейчас. */
 .kube-expiry-note {
   padding: 0.5rem 0.65rem;

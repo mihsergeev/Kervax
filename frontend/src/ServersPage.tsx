@@ -2940,23 +2940,27 @@ function ServerRow({
   )
 }
 
-function EnrollModal({
+// initial - готовые значения полей: так ноду кластера без агента добавляют из "Кубера"
+// одной кнопкой, с ее именем, группой контроллера и адресом.
+export function EnrollModal({
   servers,
   groups,
+  initial,
   onClose,
   onEnrolled,
   onUnauthorized,
 }: {
   servers: Server[]
   groups: string[]
+  initial?: { name?: string; group?: string; ip?: string }
   onClose: () => void
   onEnrolled: (e: ServerEnroll) => void
   onUnauthorized: () => void
 }) {
   const { t } = useI18n()
-  const [name, setName] = useState('')
-  const [group, setGroup] = useState('')
-  const [agentIp, setAgentIp] = useState('')
+  const [name, setName] = useState(initial?.name ?? '')
+  const [group, setGroup] = useState(initial?.group ?? '')
+  const [agentIp, setAgentIp] = useState(initial?.ip ?? '')
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState<string | null>(null)
   // Дубль видно до нажатия: имя занято - создавать нельзя (панель различает ноды по имени),
@@ -3051,7 +3055,7 @@ function EnrollModal({
   )
 }
 
-function InstallModal({ enroll, onClose }: { enroll: ServerEnroll; onClose: () => void }) {
+export function InstallModal({ enroll, onClose }: { enroll: ServerEnroll; onClose: () => void }) {
   const { t } = useI18n()
   const [copied, setCopied] = useState(false)
   // живая проверка: поллим сервер, пока агент не пришлёт первый отчёт

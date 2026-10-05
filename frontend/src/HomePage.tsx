@@ -294,6 +294,15 @@ function actionItems(servers: Server[], avail: string, relProblem: string, t: T)
       items.push({ key: `k-acc-${s.id}`, icon: '☸', section: 'kuber', id: s.id, name: s.name, cc: s.country,
         text: t('{name}: Kubernetes без доступа — запустите kube-setup', { name: s.name }) })
     }
+    // Ноды кластера без агента: на них не видно ни дисков, ни SMART, ни упавших юнитов, ни
+    // процессов (на k8s-a-prc так неделями жгли 45 ядер зависшие chrome). Ведем во
+    // вкладку нод: там кнопка добавить ноду в панель или отметить, что агент не нужен.
+    const unmon = rep?.kube?.access ? (s.kube_unmonitored ?? []) : []
+    if (unmon.length > 0) {
+      const names = unmon.slice(0, 4).map((n) => n.name).join(', ') + (unmon.length > 4 ? ', ...' : '')
+      items.push({ key: `k-noagent-${s.id}`, icon: '☸', section: 'kuber', id: s.id, name: s.name, cc: s.country, sec: 'nodes',
+        text: t('{name}: нод кластера без агента - {n} ({nodes})', { name: s.name, n: unmon.length, nodes: names }) })
+    }
     // бэкап-сервер найден (по docker), но статистики репо нет → нужен backupserver-setup
     const bs = rep?.backup_server
     if (bs?.present && (!bs.repos || bs.repos.length === 0)) {
