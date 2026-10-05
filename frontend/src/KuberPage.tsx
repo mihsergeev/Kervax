@@ -4,15 +4,18 @@ import {
   ApiError,
   kubeCommand,
   kubeCommandStatus,
+  kubeNodeIgnore,
   listServers,
   podFinished,
   type FluxState,
   type KubeCommand,
   type KubeExpiry,
   type KubeInfo,
+  type KubeNodeRef,
   type KubePod,
   type KubeWorkload,
   type Server,
+  type ServerEnroll,
 } from './api'
 import { useAuth } from './auth'
 import { useUrlCard } from './deeplink'
@@ -20,6 +23,7 @@ import { useI18n } from './i18n'
 import { OsIcon } from './osIcon'
 import { CountryFlag } from './CountryFlag'
 import { fmtBytes } from './units'
+import { EnrollModal, InstallModal } from './ServersPage'
 
 // Вкладка «Кубер»: КОМПАКТНЫЙ список хостов с кластером; клик по хосту → модалка
 // с нодами, воркоадами и подами (статусы, рестарты, логи, управление). Агент читает
@@ -409,6 +413,7 @@ function KubeHostModal({
   initialTab,
   onClose,
   onChanged,
+  onAddNode,
 }: {
   server: Server
   kube: KubeInfo
@@ -416,6 +421,7 @@ function KubeHostModal({
   initialTab?: string | null // из ссылки алерта: ?kube=id&ktab=expiry
   onClose: () => void
   onChanged: () => void
+  onAddNode: (n: KubeNodeRef) => void // завести ноду кластера в панели (форма добавления сервера)
 }) {
   const { t } = useI18n()
   const [logsPod, setLogsPod] = useState<KubePod | null>(null)
@@ -441,6 +447,19 @@ function KubeHostModal({
     cpu: (a, b) => (b.use?.cpu_m ?? 0) - (a.use?.cpu_m ?? 0),
   }
   const hasUse = pods.some((p) => p.use)
+  // ноды без агента панели (считает бэкенд по всем серверам) и те, где агент не нужен
+  const unmon = new Map((s.kube_unmonitored ?? []).map((n) => [n.name, n]))
+  const ignoredNodes = new Set(s.kube_node_ignored ?? [])
+  const [nodeBusy, setNodeBusy] = useState<string | null>(null)
+  const [nodeErr, setNodeErr] = useState<{ node: string; msg: string } | null>(null)
+  const setNodeIgnored = (node: string, ignored: boolean) => {
+    setNodeBusy(node)
+    setNodeErr(null)
+    kubeNodeIgnore(s.id, node, ignored)
+      .then(() => onChanged())
+      .catch((e) => setNodeErr({ node, msg: e instanceof Error ? e.message : t('Ошибка') }))
+      .finally(() => setNodeBusy(null))
+  }
   // Сроки и состояние Flux приезжают в отчёте агента (хелпер kubeexpiry-setup),
   // а не через kube-api: у ServiceAccount панели доступа к секретам нет и не будет.
   const expiry: KubeExpiry[] = (s.last_report?.kube_expiry ?? []).slice().sort((a, b) => a.expires - b.expires)
@@ -650,6 +669,11 @@ function KubeHostModal({
                   ))}
                 </>
               )}
+              {curTab === 'nodes' && unmon.size > 0 && (
+                <div className="kube-noagent-hint muted small">
+                  {t('Нод без агента: {n}. На них панель не видит диски, SMART, упавшие юниты и процессы - только то, что отдает Kubernetes.', { n: unmon.size })}
+                </div>
+              )}
               {curTab === 'nodes' &&
                 nodes.map((n) => (
                   <div className={`loc-res docker-row ${n.ready ? 't-up' : 't-down'}`} key={n.name}>
@@ -657,16 +681,43 @@ function KubeHostModal({
                       <div className="docker-c-name mono">
                         {n.name}
                         {n.roles && <span className="type-chip">{n.roles}</span>}
+                        {unmon.has(n.name) && <span className="type-chip t-degraded">{t('без агента')}</span>}
+                        {ignoredNodes.has(n.name) && (
+                          <span className="type-chip muted" title={t('отмечено, что агент здесь не нужен')}>
+                            {t('агент не нужен')}
+                          </span>
+                        )}
                       </div>
-                      <div className="docker-c-img mono muted small">
+                      <div className="docker-c-img kube-node-line mono muted small">
                         {n.version || ''}{n.ip ? ` · ${n.ip}` : ''}
                       </div>
                       {n.use && (
-                        <div className="docker-c-img mono muted small">
+                        <div className="docker-c-img kube-node-line mono muted small">
                           {t('память {u} из {c}', { u: fmtBytes(n.use.mem), c: n.cap ? fmtBytes(n.cap.mem) : '?' })}
                           {n.cap?.mem ? ` (${Math.round((n.use.mem / n.cap.mem) * 100)}%)` : ''}
                           {' · '}
                           {t('CPU {u} из {c}', { u: fmtCores(n.use.cpu_m), c: n.cap ? fmtCores(n.cap.cpu_m) : '?' })}
+                        </div>
+                      )}
+                      {canAct && (unmon.has(n.name) || ignoredNodes.has(n.name)) && (
+                        <div className="kube-node-acts">
+                          {unmon.has(n.name) ? (
+                            <>
+                              <button className="small" onClick={() => onAddNode(unmon.get(n.name)!)}>
+                                {t('Добавить в панель')}
+                              </button>
+                              <button className="ghost small" disabled={nodeBusy === n.name}
+                                onClick={() => setNodeIgnored(n.name, true)}>
+                                {t('Агент не нужен')}
+                              </button>
+                            </>
+                          ) : (
+                            <button className="ghost small" disabled={nodeBusy === n.name}
+                              onClick={() => setNodeIgnored(n.name, false)}>
+                              {t('Вернуть подсказку')}
+                            </button>
+                          )}
+                          {nodeErr && nodeErr.node === n.name && <span className="form-error small">{nodeErr.msg}</span>}
                         </div>
                       )}
                     </div>
@@ -778,6 +829,9 @@ export function KuberPage({
   }, [openHostId, openTab, onConsumed])
   useUrlCard('kube', openId)
   const [query, setQuery] = useState('')
+  // нода кластера без агента, которую заводят в панели, и команда установки после этого
+  const [addNode, setAddNode] = useState<{ name: string; group: string; ip: string } | null>(null)
+  const [enroll, setEnroll] = useState<ServerEnroll | null>(null)
   const [groupBy, setGroupBy] = useState<'none' | 'group'>(
     () => (localStorage.getItem('kervax_kube_groupby') as 'none' | 'group') || 'group',
   )
@@ -926,8 +980,27 @@ export function KuberPage({
             setLinkTab({ id: null, tab: null })
           }}
           onChanged={load}
+          onAddNode={(n) => setAddNode({ name: n.name, group: open.s.group_name || '', ip: n.public ? n.ip : '' })}
         />
       )}
+      {/* поверх модалки кластера: порталом и позже нее, иначе форма оказалась бы под ней */}
+      {addNode &&
+        createPortal(
+          <EnrollModal
+            servers={servers ?? []}
+            groups={[...new Set((servers ?? []).map((x) => x.group_name).filter(Boolean) as string[])]}
+            initial={addNode}
+            onClose={() => setAddNode(null)}
+            onEnrolled={(e) => {
+              setEnroll(e)
+              setAddNode(null)
+              load()
+            }}
+            onUnauthorized={onUnauthorized}
+          />,
+          document.body,
+        )}
+      {enroll && createPortal(<InstallModal enroll={enroll} onClose={() => setEnroll(null)} />, document.body)}
     </div>
   )
 }

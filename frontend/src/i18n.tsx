@@ -362,6 +362,16 @@ const EN: Record<string, string> = {
   'Кнопки перезапуска появятся после обновления агента до 2.17.': 'The restart buttons appear once the agent is updated to 2.17.',
   'не алертить по этому юниту:': 'do not alert on this unit:',
   'не алертить': 'do not alert',
+  // ноды кластера без агента панели
+  '{name}: нод кластера без агента - {n} ({nodes})': '{name}: cluster nodes without an agent - {n} ({nodes})',
+  'Нод без агента: {n}. На них панель не видит диски, SMART, упавшие юниты и процессы - только то, что отдает Kubernetes.':
+    'Nodes without an agent: {n}. On them the panel sees no disks, SMART, failed units or processes - only what Kubernetes reports.',
+  'без агента': 'no agent',
+  'агент не нужен': 'agent not needed',
+  'отмечено, что агент здесь не нужен': 'marked as not needing an agent',
+  'Добавить в панель': 'Add to the panel',
+  'Агент не нужен': 'Agent not needed',
+  'Вернуть подсказку': 'Show the hint again',
   // поды и ноды кластера по metrics-server
   'по metrics-server, как kubectl top': 'from metrics-server, like kubectl top',
   'сорт: память': 'sort: memory',

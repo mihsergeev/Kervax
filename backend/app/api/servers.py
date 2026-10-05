@@ -14,7 +14,7 @@ from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, Query, Re
 from fastapi.responses import FileResponse, PlainTextResponse
 from sqlalchemy import delete as sa_delete, func, select
 
-from app import audit, custom_backups, geoip, manual_probe
+from app import audit, custom_backups, geoip, kube_coverage, manual_probe
 from app.collector import (
     dump_local_stale, send_alerts_soon, send_autofix_note, server_problems, web_5xx_total,
     web_breakdown, web_label_key, web_log_label, web_rate_total,
@@ -64,6 +64,8 @@ from app.schemas import (
     DockerResultIn,
     HelperAdvice,
     KubeCommandIn,
+    KubeNodeIgnoreIn,
+    KubeNodeRef,
     KubeCommandOut,
     KubeResultIn,
     OomEventOut,
@@ -340,7 +342,16 @@ async def list_servers(user: CurrentUser, session: SessionDep) -> list[ServerOut
         scope_query(user, select(Server), Server).order_by(Server.id)
     ))
     cur = _current_setup_versions()  # читаем раздаваемые скрипты один раз на весь список
-    return [_out(s, now, cur) for s in servers]
+    # Ноды кластеров сверяем со ВСЕМИ серверами панели: нода, которую смотрит сервер из
+    # чужой группы, все равно под присмотром. Без нарезки по группам это тот же список.
+    every = servers if not (user.server_groups or []) else await session.scalars(select(Server))
+    index = kube_coverage.build_index(every)
+    outs = []
+    for s in servers:
+        o = _out(s, now, cur)
+        o.kube_unmonitored = _unmonitored(s, index)
+        outs.append(o)
+    return outs
 
 
 @router.post("", response_model=ServerEnrollOut, status_code=status.HTTP_201_CREATED)
@@ -1464,6 +1475,38 @@ def _kube_cmd_out(c: KubeCommand, now: datetime) -> KubeCommandOut:
     )).total_seconds() > 90:
         c.status, c.ok, c.result = "error", False, "агент не ответил (таймаут)"
     return KubeCommandOut.model_validate(c)
+
+
+@router.post("/{server_id}/kube/node-ignore", response_model=ServerOut)
+async def kube_node_ignore(
+    server_id: int, body: KubeNodeIgnoreIn, user: CurrentUser, session: SessionDep
+) -> ServerOut:
+    """Нода кластера, на которой агент не нужен (чужая, временная), - или вернуть ее в
+    подсказку "без агента". Нода остается в списке нод, просто не просит агента."""
+    s = await _get_or_404(server_id, session, user)
+    names = set(s.kube_node_ignored or [])
+    if body.ignored:
+        if len(names) >= 1000:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "Слишком много скрытых нод")
+        names.add(body.node)
+    else:
+        names.discard(body.node)
+    s.kube_node_ignored = sorted(names)
+    await session.commit()
+    await session.refresh(s)
+    await audit.record(
+        session, user.username,
+        "kube_node_ignore" if body.ignored else "kube_node_watch",
+        body.node, f"srv={server_id}",
+    )
+    o = _out(s, datetime.now(timezone.utc))
+    o.kube_unmonitored = _unmonitored(s, kube_coverage.build_index(await session.scalars(select(Server))))
+    return o
+
+
+def _unmonitored(server: Server, index: tuple[set[str], set[str]]) -> list[KubeNodeRef]:
+    """Ноды кластера сервера без агента панели - в виде схемы ответа."""
+    return [KubeNodeRef(**n) for n in kube_coverage.unmonitored(server, index)]
 
 
 @router.post("/{server_id}/kube/command", response_model=KubeCommandOut)

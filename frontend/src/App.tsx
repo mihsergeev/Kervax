@@ -97,7 +97,10 @@ export default function App() {
       if (sec === 'sites') setOpenCheckId(id)
       else if (sec === 'servers') setOpenServerId(id)
       else if (sec === 'docker') setOpenDockerId(id)
-      else if (sec === 'kuber') setOpenKubeId(id)
+      else if (sec === 'kuber') {
+        setOpenKubeId(id)
+        if (detailSec) setOpenKubeTab(detailSec) // вкладка кластера: "ноды без агента" -> nodes
+      }
       else if (sec === 'services') setOpenServicesId(id)
       else if (sec === 'backups') {
         if (srv) setOpenBackupSrvId(id)
