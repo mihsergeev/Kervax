@@ -64,7 +64,9 @@ reboots and the process tops. It runs as an unprivileged `kervax` user under
 systemd with `NoNewPrivileges`, and it never listens on a port. When a disk fills
 up, the server card shows where the space went: the biggest directories, the
 journal, docker build cache and images, oversized logs, each with the command that
-frees it.
+frees it. When a disk breaks, the panel says so too: a degraded software RAID, a disk
+that stopped answering or vanished, SMART reporting a failing disk or error counters
+growing within a day, bursts of I/O errors in the kernel log.
 
 **What runs on those servers.** Docker containers and Kubernetes pods, web
 servers and the sites they serve, databases and their sizes, RabbitMQ queue

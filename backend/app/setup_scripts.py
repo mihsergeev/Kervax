@@ -74,8 +74,9 @@ def setup_needed(name: str, rep: dict) -> bool:
     if name == "dbstat-setup":
         return bool(rep.get("db_engines") or rep.get("db_stats"))
     # backup-setup — транспорт панели для дампов, нужен и без файлового бэкапа;
-    # timesync-setup, agent-watchdog и diskusage-setup ansible ставит всюду (разбор места
-    # нужен любой ноде: диск забивается где угодно); остальное - см. докстроку
+    # timesync-setup, agent-watchdog, diskusage-setup и diskhealth-setup ansible ставит
+    # всюду (диск забивается и ломается где угодно, а на VM здоровье дисков смотрит хотя бы
+    # RAID и ошибки ядра); остальное - см. докстроку
     return True
 
 
@@ -94,6 +95,8 @@ _HELPER_LABEL = {
     "timesync-setup": "синхронизация времени",
     "dbstat-setup": "инвентарь СУБД",
     "agent-watchdog": "вотчдог агента",
+    "diskusage-setup": "разбор места на диске",
+    "diskhealth-setup": "здоровье дисков",
 }
 
 

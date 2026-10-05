@@ -39,6 +39,9 @@ SERVER_ALERT_KINDS: dict[str, tuple[str, str]] = {
     "conntrack": ("Conntrack", "таблица conntrack заполнена на {value}% ≥ {threshold}%"),
     "db_conn": ("Коннекты СУБД", "{engine}: занято {used} из {limit} подключений ({value}% ≥ {threshold}%)"),
     "disktemp": ("Температура диска", "диск {value}°C ≥ {threshold}°C"),
+    # Поломка физического диска (helper diskhealth-setup): RAID развалился, диск не отвечает
+    # или пропал, SMART говорит о неисправности, за сутки выросли счетчики ошибок
+    "disk_health": ("Диск: поломка", "{detail}"),
     "reboot": ("Перезагрузка", "перезагружен (аптайм сброшен)"),
     "oom": ("OOM-killer", "OOM-kill: ядро убило {value} процесс(ов){victim} из-за нехватки памяти"),
     "docker_down": ("Docker: контейнер упал", "контейнер {container} не работает ({state}, restart-policy: {policy})"),

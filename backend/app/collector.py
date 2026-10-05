@@ -190,7 +190,7 @@ _SRV_ICON = {
     "queue": "🐇", "backup_rotation": "🧹",
     "backup_missing": "💾", "backup_failed": "💾", "backup_stale": "💾", "backup_repo": "💾",
     "backup_dump": "💾", "backup_dump_space": "🈵", "backup_cron": "💾", "backup_custom": "💾",
-    "clock": "🕐",
+    "clock": "🕐", "disk_health": "💽",
     # ⏳ — срок ещё не вышел, есть время спланировать; 🔥 — доставка уже встала
     "kube_expiry": "⏳", "flux_down": "🔥☸️", "kube_pod": "☸️🔥", "web_5xx": "🌐🔥",
 }
@@ -206,7 +206,7 @@ _SRV_SECTION = {
     "conntrack": "conntrack", "disk": "diskfill", "disktemp": "disktemp",
     "db_conn": "services",
     "kube_expiry": "kube", "flux_down": "kube", "kube_pod": "kube", "web_5xx": "web",
-    "clock": "clock",
+    "clock": "clock", "disk_health": "diskhealth",
 }
 
 
@@ -1107,6 +1107,7 @@ _SRV_LABEL = {
     "kube_expiry": "сроки Kubernetes", "flux_down": "доставка Flux",
     "kube_pod": "поды kubernetes",
     "web_5xx": "ошибки 5xx",
+    "disk_health": "диски",
 }
 
 # Единицы пороговых метрик. Нужны отбою: голое «снова в норме» не отвечает на
@@ -1159,6 +1160,8 @@ def _recovery_detail(key: str, st: dict, ctx: dict) -> str:
     объявлен ещё старой версией, тогда показываем хотя бы текущее."""
     if key == "web_5xx":
         return "ошибок 5xx нет уже час, доля ниже порога"
+    if key == "disk_health":
+        return "диски снова в порядке: RAID собран, неисправных и пропавших дисков нет"
     label = _SRV_LABEL[key]
     unit, val = _SRV_UNIT.get(key), ctx.get("value")
     if not unit or val is None:
@@ -1692,6 +1695,158 @@ def disk_cause(rep: dict) -> str:
     if safe >= _DISK_SAFE_MIN:
         parts.append(f"без риска освобождается ~{_fmt_size(safe)}")
     return " - " + "; ".join(parts) if parts else ""
+
+
+# Здоровье физических дисков (helper diskhealth-setup): блок обновляется раз в 2 минуты.
+# Старше получаса - helper встал, и судить о дисках не по чему: живой развалившийся RAID
+# не должен "выздоравливать" оттого, что отчеты перестали приходить.
+_DISK_HEALTH_MAX_AGE = 30 * 60
+# Ошибок ввода-вывода в журнале ядра за 10 минут (окно helper'а), меньше - не повод:
+# одиночные строки бывают при загрузке и у исправного железа
+_DISK_IO_MIN = 10
+# Пачки ошибок в пределах часа - одна история, а не алерт и отбой на каждую пачку
+_DISK_IO_HOLD = timedelta(hours=1)
+_DISK_WEAR_WARN = 90
+# Счетчики, рост которых за сутки значит, что диск умирает сейчас (статичное число,
+# оставшееся с давних времен, - не новость)
+_DISK_GROW_LABEL = {
+    "realloc": "переназначенные сектора",
+    "pending": "нечитаемые сектора",
+    "uncorr": "неисправимые ошибки",
+    "media": "ошибки носителя",
+}
+
+
+def disk_health_block(rep: dict) -> dict | None:
+    """Блок здоровья дисков из отчета (report.d/disk-health.json, агент отдает как есть).
+    Возраст - по часам самой ноды, как у остальных блоков helper'ов."""
+    block = ((rep.get("extras") or {}).get("disk-health")) or {}
+    if not isinstance(block, dict) or block.get("v") != 1:
+        return None
+    ts = float(block.get("ts") or 0)
+    ref = float(rep.get("clock_unix") or 0) or datetime.now(timezone.utc).timestamp()
+    if ts <= 0 or ref - ts > _DISK_HEALTH_MAX_AGE:
+        return None
+    return block
+
+
+def _disk_title(d: dict) -> str:
+    """Имя диска с моделью и серийником: nvme1n1 (Samsung SSD 990 PRO 2TB, S7DNNU0Y719359D).
+    В ЦОД диск меняют по серийнику, а имя устройства после перезагрузки может уехать на
+    соседний."""
+    extra = ", ".join(x for x in (str(d.get("model") or "").strip(),
+                                  str(d.get("serial") or "").strip()) if x)
+    dev = str(d.get("dev") or "?")
+    return f"{dev} ({extra})" if extra else dev
+
+
+def _int(v) -> int:
+    try:
+        return int(v or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def disk_health_problems(block: dict) -> list[tuple[int, str, str]]:
+    """Поломки дисков: (уровень, ключ, текст), серьезные первыми. Ключ стабилен между
+    отчетами: по нему алерт понимает, что сломалось НОВОЕ (второй диск при уже
+    развалившемся RAID), а не то, о чем уже сказано. Склеенные в одну строку массивы
+    дают по записи на массив без текста и одну запись с текстом без ключа: досинхронизи-
+    ровавшийся первым md42 не должен выглядеть новой поломкой md43. Ошибки журнала ядра
+    сюда не входят, у них своя выдержка (см. _server_conditions)."""
+    out: list[tuple[int, str, str]] = []
+    # RAID с одинаковой бедой склеиваем: оба массива на двух дисках теряют разделы одного
+    # и того же умершего диска, и "md42: 1 из 2; md43: 1 из 2" - это одна новость
+    degraded: dict[str, list[str]] = {}
+    for r in block.get("raid") or []:
+        if not isinstance(r, dict):
+            continue
+        dev = str(r.get("dev") or "md?")
+        tot, act = _int(r.get("total")), _int(r.get("active"))
+        failed = str(r.get("failed") or "").strip()
+        if r.get("state") == "inactive":
+            out.append((3, f"raid:{dev}", f"RAID {dev} не собран (inactive)"))
+        elif tot and act < tot:
+            tail = (f" ({r['level']})" if r.get("level") else "") + f": работает {act} из {tot} дисков"
+            if failed:
+                tail += f", сбойный {failed}"
+            m = re.match(r"(recovery|resync|reshape)=([\d.]+)%", str(r.get("sync") or ""))
+            if m:
+                tail += f", идет восстановление {m.group(2)}%"
+            degraded.setdefault(tail, []).append(dev)
+        elif failed:
+            out.append((2, f"raidf:{dev}",
+                        f"RAID {dev}: выпал {failed}, работу взял запасной диск"))
+    for tail, devs in degraded.items():
+        for dev in devs:
+            out.append((3, f"raid:{dev}", ""))
+        out.append((3, "", f"RAID {', '.join(devs)}{tail}"))
+
+    for d in block.get("disks") or []:
+        if not isinstance(d, dict):
+            continue
+        name = _disk_title(d)
+        ser = str(d.get("serial") or d.get("dev") or "?")
+        err = str(d.get("err") or "")
+        if d.get("ok") is False:
+            if err == "dead":
+                why = "не определяется (размер 0)"
+            elif err.startswith("no_namespace"):
+                why = "не определяется: контроллер есть, диска нет"
+            elif err.startswith("state_"):
+                why = f"отключен ядром ({err[6:]})"
+            else:
+                why = "не отвечает"
+            out.append((3, f"dead:{ser}", f"диск {name} {why}"))
+            continue
+        health = str(d.get("health") or "").upper()
+        wear = d.get("wear") if isinstance(d.get("wear"), (int, float)) else None
+        failing = "FAIL" in health or d.get("failing") is True
+        if failing:
+            # SSD, выработавший ресурс, SMART тоже считает неисправным, но такой диск обычно
+            # еще работает: менять надо, будить ночью - нет
+            worn = wear is not None and wear >= 100
+            out.append((2 if worn else 3, f"smart:{ser}",
+                        f"диск {name}: SMART считает диск неисправным"
+                        + (f", ресурс выработан (износ {wear}%)" if worn else "")))
+        crit = str(d.get("crit") or "")
+        try:
+            cw = int(crit, 16) if crit else 0
+        except ValueError:
+            cw = 0
+        if cw & ~0x02:  # запас, надежность, только чтение, резервная память
+            out.append((3, f"crit:{ser}", f"диск {name}: NVMe сообщает о деградации ({crit})"))
+        elif cw & 0x02:
+            out.append((2, f"hot:{ser}", f"диск {name}: NVMe сообщает о перегреве"))
+        grow = d.get("grow") if isinstance(d.get("grow"), dict) else {}
+        bad = [f"{lbl} +{_int(grow.get(k))}" for k, lbl in _DISK_GROW_LABEL.items() if _int(grow.get(k)) > 0]
+        if bad:
+            out.append((2, f"grow:{ser}", f"диск {name}: за сутки выросли ошибки - " + ", ".join(bad)))
+        if _int(grow.get("crc")) > 0:
+            out.append((1, f"crc:{ser}", f"диск {name}: за сутки +{_int(grow.get('crc'))} ошибок "
+                                         "передачи (CRC), проверьте кабель или разъем"))
+        if wear is not None and wear >= _DISK_WEAR_WARN and not failing:
+            out.append((1, f"wear:{ser}", f"диск {name}: износ {wear}%, пора планировать замену"))
+
+    ts = _int(block.get("ts"))
+    for m in block.get("missing") or []:
+        if not isinstance(m, dict):
+            continue
+        ser = str(m.get("serial") or "?")
+        ago = max(0, ts - _int(m.get("last")))
+        when = f"{ago // 3600} ч назад" if ago >= 3600 else f"{max(1, ago // 60)} мин назад"
+        out.append((3, f"missing:{ser}", f"пропал диск {_disk_title(m)}, последний раз виден {when}"))
+    out.sort(key=lambda p: -p[0])
+    return out
+
+
+def disk_health_text(probs: list[tuple[int, str, str]], limit: int = 5) -> str:
+    """Первая беда - в строке алерта, остальные - строками ниже: "RAID md42, md43 (raid1):
+    работает 1 из 2 дисков\n↳ диск nvme1n1 (...) не определяется"."""
+    lines = [txt for _lvl, _key, txt in probs if txt]
+    if len(lines) > limit:
+        lines = lines[:limit] + [f"и еще {len(lines) - limit}"]
+    return "\n↳ ".join(lines)
 
 
 def top_eaters(rep: dict, kind: str) -> str:
@@ -2389,6 +2544,42 @@ def _server_conditions(s: Server, now: datetime,
             sustain("disktemp", hottest >= s.disk_temp_alert_c,
                     {"value": round(hottest), "threshold": s.disk_temp_alert_c})
 
+    # Поломка физического диска (helper diskhealth-setup). Повод - k8s-d 05.10.2026:
+    # NVMe умер, оба RAID1 работали на одном диске, а панель молчала. Нет свежего блока -
+    # ключ не отдаем вовсе: молчание helper'а не повод объявлять, что RAID починился, а у
+    # недоступной ноды свой алерт. Выдержки нет: развалившийся массив сам не соберется.
+    hb = disk_health_block(rep) if online else None
+    if hb is not None:
+        probs = disk_health_problems(hb)
+        # Ошибки ввода-вывода: окно helper'а 10 минут, сверху держим час с последней пачки
+        # (since), чтобы пачки внутри часа были одной историей. Момент пачки обновляем раз
+        # в 5 минут: иначе alert_state переписывался бы каждый тик, пока сыплются ошибки.
+        io = hb.get("io") if isinstance(hb.get("io"), dict) else {}
+        io_n = _int(io.get("count"))
+        prev_io = state.get("disk_health_since")
+        last_io = _parse_iso(prev_io or "")
+        io_since = None
+        if io_n >= _DISK_IO_MIN:
+            fresh = last_io is not None and now - last_io < timedelta(minutes=5)
+            io_since = prev_io if fresh else now.isoformat()
+        elif last_io is not None and now - last_io < _DISK_IO_HOLD:
+            io_since = prev_io
+        if io_since:
+            txt = (f"ошибки ввода-вывода в журнале ядра: {io_n} за 10 минут" if io_n >= _DISK_IO_MIN
+                   else "ошибки ввода-вывода в журнале ядра, последние меньше часа назад")
+            line = next((str(x) for x in reversed(io.get("last") or []) if x), "")
+            if line:
+                txt += f" ({line[:160]})"
+            probs.append((2, "", txt))
+            probs.sort(key=lambda p: -p[0])
+        lvl = max((p[0] for p in probs), default=0)
+        out["disk_health"] = (lvl, {
+            "detail": disk_health_text(probs), "level": lvl,
+            # что именно сломано: новая поломка при том же уровне - повод для сообщения
+            "sig": sorted({k for _l, k, _t in probs if k}),
+            "since": io_since,
+        })
+
     # Сдвиг часов: локальное время ноды (clock_unix) vs время панели на приёме. По модулю;
     # порог warn 5с / проблема 30с / крит 5мин. Дебаунс (как sustain): разовый спайк —
     # медленный отчёт/GC — не шлёт алерт, ждём удержания ≥ sustain_s (пишем clock_since).
@@ -2578,6 +2769,8 @@ async def evaluate_servers(
         if rule["text"] == default or rule["text"] in settings_store.LEGACY_SERVER_DEFAULTS:
             # у диска три уровня — ведущая иконка должна их различать
             ico = _DISK_ICON.get(int(ctx.get("level") or 0), "") if key == "disk" else ""
+            if key == "disk_health":
+                ico = _DISK_ICON.get(int(ctx.get("level") or 0), "") + "💽"
             if key == "kube_expiry" and ctx.get("expired"):
                 ico = "⛔"  # срок не «скоро», а уже вышел — это поломка, а не напоминание
             return _server_alert_text(
@@ -2665,6 +2858,24 @@ async def evaluate_servers(
             if _muted(key, level, mutes):
                 continue  # тип (или его нижние уровни) заглушён для этого сервера
             prev = int(st.get(key, 0))
+            if key == "disk_health":
+                # Тот же уровень, но сломалось НОВОЕ (второй диск при уже развалившемся
+                # RAID): молчать нельзя, хотя уровень не вырос. Что сломано - ключи в sig.
+                old_sig = set(st.get("disk_health_sig") or [])
+                new_sig = set(ctx.get("sig") or [])
+                if level == prev:
+                    if level and new_sig - old_sig:
+                        fires.append(srv_fire(s, key, rule, ctx))
+                        fire_apply.append((s.id, "disk_health_sig", sorted(new_sig)))
+                    elif new_sig != old_sig:
+                        apply(s.id, "disk_health_sig", sorted(new_sig))
+                    continue
+                if level > prev:
+                    fire_apply.append((s.id, "disk_health_sig", sorted(new_sig)))
+                elif level:
+                    apply(s.id, "disk_health_sig", sorted(new_sig))
+                else:
+                    rec_apply.append((s.id, "disk_health_sig", []))
             if level == prev:
                 continue
             # Гаситель «мигания» — только для НОВЫХ обрывов. Восстановление после уже
