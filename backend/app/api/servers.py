@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import gzip
 import hashlib
 import json
 import logging
@@ -2234,6 +2235,53 @@ async def download_agent(arch: str) -> FileResponse:
     return FileResponse(
         path, media_type="application/octet-stream", filename="kervax-agent"
     )
+
+
+_gz_cache: dict[str, tuple[tuple, bool]] = {}
+
+
+def agent_gz_ok(arch: str) -> bool:
+    """Сжатый бинарь распаковывается ровно в тот, что подписан в манифесте. Иначе его не
+    отдаем: агент получит 404 и возьмет несжатый, а не будет раз за разом качать архив,
+    который не пройдет проверку. Результат кэшируется до смены файлов."""
+    dist = get_settings().agent_dist_dir
+    names = ["manifest.json", f"kervax-agent-{arch}.gz"]
+    fp = _release_fingerprint(dist, names)
+    hit = _gz_cache.get(arch)
+    if hit is not None and hit[0] == fp:
+        return hit[1]
+    ok = False
+    try:
+        with open(os.path.join(dist, "manifest.json"), encoding="utf-8") as f:
+            art = (json.load(f).get("artifacts") or {}).get(arch) or {}
+        size = int(art.get("size") or 0)
+        digest = hashlib.sha256()
+        got = 0
+        with gzip.open(os.path.join(dist, f"kervax-agent-{arch}.gz"), "rb") as fz:
+            while chunk := fz.read(1 << 20):
+                got += len(chunk)
+                if got > size:
+                    break
+                digest.update(chunk)
+        ok = size > 0 and got == size and digest.hexdigest() == art.get("sha256")
+    except (OSError, ValueError, EOFError, gzip.BadGzipFile):
+        ok = False
+    _gz_cache[arch] = (fp, ok)
+    return ok
+
+
+@agent_router.api_route("/download-gz/{arch}", methods=["GET", "HEAD"])
+async def download_agent_gz(arch: str) -> FileResponse:
+    """Тот же бинарь, сжатый gzip (в 2.4 раза меньше). Агент 2.18+ берет его первым и сам
+    распаковывает; подлинность проверяет по подписанному манифесту, как у несжатого. На
+    канале за DPI (ru-be, ~0.2 МБ/мин) это 15 минут вместо 40. HEAD нужен агенту, чтобы
+    узнать размер архива для докачки по кускам."""
+    if arch not in ("amd64", "arm64"):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "нет такой архитектуры")
+    path = os.path.join(get_settings().agent_dist_dir, f"kervax-agent-{arch}.gz")
+    if not os.path.exists(path) or not agent_gz_ok(arch):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "сжатого бинаря нет")
+    return FileResponse(path, media_type="application/octet-stream")
 
 
 @agent_router.get("/manifest")
