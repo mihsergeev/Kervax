@@ -19,6 +19,7 @@ from sqlalchemy import and_, delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app import alerts, audit, backup, checks as checks_exec, custom_backups, heartbeat, settings_store
+from app import disk_forecast as dfc
 from app.setup_scripts import current_setup_versions, gaps
 from app.config import Settings, get_settings
 from app.models import (
@@ -190,7 +191,7 @@ _SRV_ICON = {
     "queue": "🐇", "backup_rotation": "🧹",
     "backup_missing": "💾", "backup_failed": "💾", "backup_stale": "💾", "backup_repo": "💾",
     "backup_dump": "💾", "backup_dump_space": "🈵", "backup_cron": "💾", "backup_custom": "💾",
-    "clock": "🕐", "disk_health": "💽",
+    "clock": "🕐", "disk_health": "💽", "inode": "⚠️", "disk_forecast": "📈",
     # ⏳ — срок ещё не вышел, есть время спланировать; 🔥 — доставка уже встала
     "kube_expiry": "⏳", "flux_down": "🔥☸️", "kube_pod": "☸️🔥", "web_5xx": "🌐🔥",
 }
@@ -206,7 +207,7 @@ _SRV_SECTION = {
     "conntrack": "conntrack", "disk": "diskfill", "disktemp": "disktemp",
     "db_conn": "services",
     "kube_expiry": "kube", "flux_down": "kube", "kube_pod": "kube", "web_5xx": "web",
-    "clock": "clock", "disk_health": "diskhealth",
+    "clock": "clock", "disk_health": "diskhealth", "inode": "diskfill", "disk_forecast": "diskfill",
 }
 
 
@@ -1108,12 +1109,14 @@ _SRV_LABEL = {
     "kube_pod": "поды kubernetes",
     "web_5xx": "ошибки 5xx",
     "disk_health": "диски",
+    "inode": "inode",
+    "disk_forecast": "прогноз заполнения",
 }
 
 # Единицы пороговых метрик. Нужны отбою: голое «снова в норме» не отвечает на
 # первый вопрос инженера — сколько освободилось. Показываем «диск снова в норме:
 # 82% (было 90%)», где «было» — значение на момент срабатывания.
-_SRV_UNIT = {"cpu": "%", "mem": "%", "disk": "%", "conntrack": "%", "db_conn": "%",
+_SRV_UNIT = {"cpu": "%", "mem": "%", "disk": "%", "inode": "%", "conntrack": "%", "db_conn": "%",
              "temp": "°C", "disktemp": "°C"}
 
 
@@ -1162,6 +1165,8 @@ def _recovery_detail(key: str, st: dict, ctx: dict) -> str:
         return "ошибок 5xx нет уже час, доля ниже порога"
     if key == "disk_health":
         return "диски снова в порядке: RAID собран, неисправных и пропавших дисков нет"
+    if key == "disk_forecast":
+        return "диски больше не грозят заполниться в ближайшие дни: рост замедлился или место освободили"
     label = _SRV_LABEL[key]
     unit, val = _SRV_UNIT.get(key), ctx.get("value")
     if not unit or val is None:
@@ -1675,25 +1680,50 @@ def disk_top_dirs(fs: dict, n: int = 2) -> list[tuple[str, float]]:
     return keep[:n]
 
 
-def disk_cause(rep: dict) -> str:
-    """Хвост к дисковому алерту: на что ушло место и сколько освобождается без риска на
-    самом заполненном разделе. Пусто без блока helper'а - тогда алерт как раньше."""
-    block = disk_usage_block(rep)
-    if not block:
-        return ""
-    fss = [f for f in block["fs"] if isinstance(f, dict)]
-    if not fss:
-        return ""
-    worst = max(fss, key=lambda f: float(f.get("pct") or 0))
+def disk_cause(rep: dict, forecast: dict | None = None, mount: str | None = None,
+               now: datetime | None = None) -> str:
+    """Хвост к дисковому алерту: когда при нынешнем росте раздел заполнится (прогноз
+    планировщика), на что ушло место и сколько освобождается без риска на самом
+    заполненном разделе. Пусто без прогноза и блока helper'а - тогда алерт как раньше."""
     parts = []
-    dirs = disk_top_dirs(worst)
-    if dirs:
-        parts.append("больше всего места: " + ", ".join(f"{p} {_fmt_size(b)}" for p, b in dirs))
-    safe = sum(float(i.get("free") or 0) for i in block.get("items") or []
-               if isinstance(i, dict) and i.get("level") == "safe"
-               and i.get("mount") == worst.get("mount"))
-    if safe >= _DISK_SAFE_MIN:
-        parts.append(f"без риска освобождается ~{_fmt_size(safe)}")
+    eta = dfc.mount_eta(forecast, mount, "space", now or datetime.now(timezone.utc)) if mount else None
+    if eta is not None:
+        parts.append(f"заполнится примерно {dfc.eta_text(eta)}")
+    block = disk_usage_block(rep)
+    fss = [f for f in (block or {}).get("fs") or [] if isinstance(f, dict)]
+    if fss:
+        worst = max(fss, key=lambda f: float(f.get("pct") or 0))
+        dirs = disk_top_dirs(worst)
+        if dirs:
+            parts.append("больше всего места: " + ", ".join(f"{p} {_fmt_size(b)}" for p, b in dirs))
+        safe = sum(float(i.get("free") or 0) for i in block.get("items") or []
+                   if isinstance(i, dict) and i.get("level") == "safe"
+                   and i.get("mount") == worst.get("mount"))
+        if safe >= _DISK_SAFE_MIN:
+            parts.append(f"без риска освобождается ~{_fmt_size(safe)}")
+    return " - " + "; ".join(parts) if parts else ""
+
+
+def _fmt_files(n: float) -> str:
+    return f"{n / 1e6:.1f} млн" if n >= 1e6 else f"{n / 1e3:.0f} тыс." if n >= 1e3 else str(int(n))
+
+
+def inode_cause(rep: dict, forecast: dict | None, mount: str | None, now: datetime) -> str:
+    """Хвост к алерту по inode: где скопились файлы (дерево helper'а diskusage-setup 0.5)
+    и когда inode кончатся при нынешнем росте."""
+    parts = []
+    eta = dfc.mount_eta(forecast, mount, "inode", now) if mount else None
+    if eta is not None:
+        parts.append(f"кончатся примерно {dfc.eta_text(eta)}")
+    block = disk_usage_block(rep) or {}
+    for fs in block.get("fs") or []:
+        if not isinstance(fs, dict) or fs.get("mount") != mount:
+            continue
+        top = [{"path": t.get("path"), "bytes": t.get("files")} for t in fs.get("itop") or []
+               if isinstance(t, dict)]
+        dirs = disk_top_dirs({"top": top})
+        if dirs:
+            parts.append("больше всего файлов: " + ", ".join(f"{p} {_fmt_files(n)}" for p, n in dirs))
     return " - " + "; ".join(parts) if parts else ""
 
 
@@ -1707,6 +1737,9 @@ _DISK_IO_MIN = 10
 # Пачки ошибок в пределах часа - одна история, а не алерт и отбой на каждую пачку
 _DISK_IO_HOLD = timedelta(hours=1)
 _DISK_WEAR_WARN = 90
+# Прогноз заполнения: за сколько часов до конца места или inode предупреждать и бить тревогу
+_FORECAST_WARN_H = 72
+_FORECAST_CRIT_H = 24
 # Счетчики, рост которых за сутки значит, что диск умирает сейчас (статичное число,
 # оставшееся с давних времен, - не новость)
 _DISK_GROW_LABEL = {
@@ -2346,9 +2379,9 @@ def _server_conditions(s: Server, now: datetime,
         sustain("mem", memp >= s.mem_alert_percent,
                 {"value": round(memp), "threshold": s.mem_alert_percent, "cause": ""})
     if rep.get("disks"):
-        worst = max(
-            (d["used"] / d["total"] * 100 for d in rep["disks"] if d.get("total")),
-            default=0.0,
+        worst, worst_mount = max(
+            ((d["used"] / d["total"] * 100, d.get("mount")) for d in rep["disks"] if d.get("total")),
+            default=(0.0, None), key=lambda x: x[0],
         )
         crit, prob, warn = s.disk_crit_percent, s.disk_alert_percent, s.disk_warn_percent
         if crit and worst >= crit:
@@ -2360,7 +2393,24 @@ def _server_conditions(s: Server, now: datetime,
         else:
             lvl, sev, thr = 0, "", 0
         out["disk"] = (lvl, {"value": round(worst), "threshold": thr,
-                             "severity": sev, "level": lvl, "cause": ""})
+                             "severity": sev, "level": lvl, "cause": "", "mount": worst_mount})
+        # Inode кончаются отдельно от места: миллионы мелких файлов (сессии PHP, кэш) забивают
+        # ФС, когда df показывает свободные гигабайты, и ничего нового не создать. Пороги те
+        # же, что у места. Считают агенты 2.15+, у btrfs inode нет вовсе.
+        ino = [d for d in rep["disks"] if d.get("inodes")]
+        if ino:
+            wi = max(ino, key=lambda d: (d.get("inodes_used") or 0) / d["inodes"])
+            ipct = (wi.get("inodes_used") or 0) / wi["inodes"] * 100
+            if crit and ipct >= crit:
+                ilvl, ithr = 3, crit
+            elif prob and ipct >= prob:
+                ilvl, ithr = 2, prob
+            elif warn and ipct >= warn:
+                ilvl, ithr = 1, warn
+            else:
+                ilvl, ithr = 0, 0
+            out["inode"] = (ilvl, {"value": round(ipct), "threshold": ithr, "level": ilvl,
+                                   "mount": wi.get("mount") or "?", "cause": ""})
     temp = rep.get("cpu_temp")
     if s.temp_alert_c and temp is not None:
         sustain("temp", temp >= s.temp_alert_c,
@@ -2580,6 +2630,28 @@ def _server_conditions(s: Server, now: datetime,
             "since": io_since,
         })
 
+    # Прогноз заполнения (планировщик, раз в полчаса по истории): место или inode кончатся
+    # через трое суток - предупреждение, через сутки - проблема. Обычные пороги говорят,
+    # насколько полно сейчас, прогноз - сколько осталось. Гистерезис по часам: прогноз
+    # дышит вместе с ростом, и без запаса алерт мигал бы на границе. Протухший прогноз
+    # ключа не дает: молчание - не повод объявлять, что рост прекратился.
+    fitems = dfc.fresh_items(s.disk_forecast, now) if online else None
+    if fitems is not None:
+        prev_fc = int(state.get("disk_forecast", 0))
+        eta = float(fitems[0]["eta_h"]) if fitems else None
+        if eta is not None and (eta <= _FORECAST_CRIT_H
+                                or (prev_fc >= 2 and eta <= _FORECAST_CRIT_H * 1.25)):
+            f_lvl = 2
+        elif eta is not None and (eta <= _FORECAST_WARN_H
+                                  or (prev_fc and eta <= _FORECAST_WARN_H * 4 / 3)):
+            f_lvl = 1
+        else:
+            f_lvl = 0
+        out["disk_forecast"] = (f_lvl, {
+            "detail": dfc.forecast_text(fitems, _FORECAST_WARN_H) if f_lvl else "",
+            "level": f_lvl,
+        })
+
     # Сдвиг часов: локальное время ноды (clock_unix) vs время панели на приёме. По модулю;
     # порог warn 5с / проблема 30с / крит 5мин. Дебаунс (как sustain): разовый спайк —
     # медленный отчёт/GC — не шлёт алерт, ждём удержания ≥ sustain_s (пишем clock_since).
@@ -2768,9 +2840,11 @@ async def evaluate_servers(
         default = settings_store.SERVER_ALERT_KINDS[key][1]
         if rule["text"] == default or rule["text"] in settings_store.LEGACY_SERVER_DEFAULTS:
             # у диска три уровня — ведущая иконка должна их различать
-            ico = _DISK_ICON.get(int(ctx.get("level") or 0), "") if key == "disk" else ""
+            ico = _DISK_ICON.get(int(ctx.get("level") or 0), "") if key in ("disk", "inode") else ""
             if key == "disk_health":
                 ico = _DISK_ICON.get(int(ctx.get("level") or 0), "") + "💽"
+            if key == "disk_forecast":
+                ico = _DISK_ICON.get(int(ctx.get("level") or 0), "") + "📈"
             if key == "kube_expiry" and ctx.get("expired"):
                 ico = "⛔"  # срок не «скоро», а уже вышел — это поломка, а не напоминание
             return _server_alert_text(
@@ -2903,7 +2977,9 @@ async def evaluate_servers(
                     ctx["cause"] = await cause_for(s, key)
                 if key == "disk":
                     # на что ушло место - из разбора helper'а diskusage-setup, без запросов
-                    ctx["cause"] = disk_cause(s.last_report or {})
+                    ctx["cause"] = disk_cause(s.last_report or {}, s.disk_forecast, ctx.get("mount"), now)
+                if key == "inode":
+                    ctx["cause"] = inode_cause(s.last_report or {}, s.disk_forecast, ctx.get("mount"), now)
                 if key == "web_5xx":
                     try:
                         async with session_factory() as ses:
@@ -3499,6 +3575,9 @@ async def collector_loop(
                 log.exception("ошибка планировщика мониторов")
             await stage("алерты локаций", evaluate_location_alerts(
                 session_factory, settings, datetime.now(timezone.utc)))
+            # прогноз - до алертов: они читают его из servers.disk_forecast
+            await stage("прогноз дисков", dfc.update_disk_forecasts(
+                session_factory, datetime.now(timezone.utc)))
             await stage("серверные алерты", evaluate_servers(
                 session_factory, settings, datetime.now(timezone.utc)))
             await stage("авто-очистка дисков", autofix_disks(

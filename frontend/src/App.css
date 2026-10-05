@@ -2033,20 +2033,20 @@ select:focus {
 .dh-disk .loc-res-msg div {
   margin-top: 2px;
 }
-/* модель, серийник и счетчики важнее ровной строки: переносим, а не режем многоточием
-   (по серийнику диск меняют в ЦОД); на телефоне подробности уходят под имя */
-.dh-row .loc-res-msg {
+/* модель, серийник, счетчики и прогноз важнее ровной строки: переносим, а не режем
+   многоточием (по серийнику диск меняют в ЦОД); на телефоне подробности уходят под имя */
+.loc-res-wrap .loc-res-msg {
   white-space: normal;
   overflow: visible;
 }
-.dh-row .loc-res-name {
+.loc-res-wrap .loc-res-name {
   min-width: 90px;
 }
 @media (max-width: 600px) {
-  .dh-row {
+  .loc-res-wrap {
     flex-wrap: wrap;
   }
-  .dh-row .loc-res-msg {
+  .loc-res-wrap .loc-res-msg {
     flex-basis: 100%;
     text-align: left;
     padding-left: 1.2rem;

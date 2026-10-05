@@ -20,6 +20,7 @@ import {
   snoozeServerAlert,
   updateServer,
   type ClockInfo,
+  type DiskForecastItem,
   type DiskHealthDisk,
   type DiskUsageDir,
   type DiskUsageFs,
@@ -515,6 +516,21 @@ function fmtRel(iso: string | null): string {
 function toneOf(p: number | null): string {
   if (p == null) return ''
   return p >= 90 ? 't-down' : p >= 75 ? 't-degraded' : 't-up'
+}
+
+// Прогноз заполнения из планировщика - только свежий: у замолчавшей ноды он устарел. Возраст
+// меряем временем отчета, а не часами браузера (те бывают сдвинуты).
+function diskForecast(s: Server, r: ServerReport): DiskForecastItem[] {
+  const fc = s.disk_forecast
+  if (!fc?.ts || !r.clock_unix || r.clock_unix - fc.ts > 7200) return []
+  return fc.items ?? []
+}
+
+// Как в алерте: до двух суток - часами, дальше днями
+function etaText(h: number, t: TFn): string {
+  if (h < 1) return t('меньше чем через час')
+  if (h < 48) return t('примерно через {n} ч', { n: Math.round(h) })
+  return t('примерно через {n} дн', { n: Math.round(h / 24) })
 }
 
 // компактный статус времени в шапке детали: цвет по модулю сдвига (норма<5с / предупр<30с /
@@ -1255,9 +1271,20 @@ function duHint(it: DiskUsageItem, t: TFn): string {
 
 // Самые большие каталоги раздела деревом: родитель - ближайший каталог списка, который
 // является началом пути; дети по убыванию размера, полоска - доля от занятого.
-function DuTree({ fs, t }: { fs: DiskUsageFs; t: TFn }) {
+// Число файлов коротко: 4.1 млн, 700 тыс.
+function fmtFiles(n: number, t: TFn): string {
+  if (n >= 1e6) return t('{n} млн', { n: (n / 1e6).toFixed(1) })
+  if (n >= 1e3) return t('{n} тыс.', { n: Math.round(n / 1e3) })
+  return String(n)
+}
+
+function DuTree({ fs, t, files = false }: { fs: DiskUsageFs; t: TFn; files?: boolean }) {
   const [all, setAll] = useState(false)
-  if (fs.top_state === 'skipped')
+  const state = files ? fs.itop_state : fs.top_state
+  if (!files && fs.top_state === 'none') return null
+  if (files && state === 'failed')
+    return <div className="muted small">{t('Посчитать файлы не вышло: du на ноде не знает --inodes.')}</div>
+  if (!files && fs.top_state === 'skipped')
     return (
       <div className="muted small">
         {t('Раздел слишком большой для полного обхода ({n} млн файлов), смотрите находки ниже.', {
@@ -1265,7 +1292,9 @@ function DuTree({ fs, t }: { fs: DiskUsageFs; t: TFn }) {
         })}
       </div>
     )
-  const top = [...fs.top].sort((a, b) => b.bytes - a.bytes)
+  const top: DiskUsageDir[] = (files ? (fs.itop ?? []).map((x) => ({ path: x.path, bytes: x.files })) : [...fs.top]).sort(
+    (a, b) => b.bytes - a.bytes,
+  )
   const parentOf = (p: string) => {
     let best = ''
     for (const q of top)
@@ -1286,7 +1315,7 @@ function DuTree({ fs, t }: { fs: DiskUsageFs; t: TFn }) {
   }
   walk('', 0)
   const shown = all ? rows : rows.slice(0, 12)
-  const base = fs.used || 1
+  const base = (files ? fs.iused : fs.used) || 1
   return (
     <div className="du-tree">
       {shown.map(({ d, depth, parent }) => (
@@ -1295,7 +1324,7 @@ function DuTree({ fs, t }: { fs: DiskUsageFs; t: TFn }) {
           <span className="du-bar">
             <span style={{ width: `${Math.min(100, (d.bytes / base) * 100)}%` }} />
           </span>
-          <span className="mono du-size">{fmtBytes(d.bytes)}</span>
+          <span className="mono du-size">{files ? fmtFiles(d.bytes, t) : fmtBytes(d.bytes)}</span>
         </div>
       ))}
       {rows.length > 12 && (
@@ -1303,10 +1332,12 @@ function DuTree({ fs, t }: { fs: DiskUsageFs; t: TFn }) {
           {all ? t('свернуть') : `${t('показать все')} (${rows.length})`}
         </button>
       )}
-      {fs.top_state === 'partial' && (
+      {state === 'partial' && (
         <div className="muted small">{t('Обход не успел целиком, показано то, что посчитано.')}</div>
       )}
-      {!rows.length && fs.top_state === 'ok' && <div className="muted small">{t('Крупных каталогов нет.')}</div>}
+      {!rows.length && state === 'ok' && (
+        <div className="muted small">{files ? t('Каталогов с массой файлов нет.') : t('Крупных каталогов нет.')}</div>
+      )}
     </div>
   )
 }
@@ -1404,7 +1435,7 @@ function DiskHealthBlock({ r }: { r: ServerReport }) {
             sync,
           ].filter(Boolean)
           return (
-            <div key={a.dev} className="loc-res dh-row">
+            <div key={a.dev} className="loc-res loc-res-wrap">
               <span className={`sdot sdot-${tone}`} />
               <div className="loc-res-name mono">{a.dev}</div>
               <div className="loc-res-metric mono">{a.map || a.state}</div>
@@ -1433,7 +1464,7 @@ function DiskHealthBlock({ r }: { r: ServerReport }) {
             ([k, label]) => `${t(label)} +${d.grow[k]}`,
           )
           return (
-            <div key={d.dev + d.serial} className="loc-res dh-row dh-disk">
+            <div key={d.dev + d.serial} className="loc-res loc-res-wrap dh-disk">
               <span className={`sdot sdot-${tone}`} />
               <div className="loc-res-name mono">{d.dev}</div>
               <div className={`loc-res-metric ${tone === 'down' ? 't-down' : tone === 'degraded' ? 't-degraded' : ''}`}>
@@ -1452,7 +1483,7 @@ function DiskHealthBlock({ r }: { r: ServerReport }) {
         {missing.map((m) => {
           const ago = Math.max(0, dh.ts - m.last)
           return (
-            <div key={'gone-' + m.serial} className="loc-res dh-row">
+            <div key={'gone-' + m.serial} className="loc-res loc-res-wrap">
               <span className="sdot sdot-down" />
               <div className="loc-res-name mono">{m.dev}</div>
               <div className="loc-res-metric t-down">{t('пропал')}</div>
@@ -1643,6 +1674,23 @@ function DiskUsageBlock({ server: s, onChanged }: { server: Server; onChanged: (
               </span>
             </div>
             <DuTree fs={fs} t={t} />
+            {(fs.ipct ?? 0) >= 75 && (
+              <div className="du-items">
+                <div className="du-sub">
+                  {t('Где больше всего файлов')}
+                  <span className="muted small">
+                    {' '}
+                    ·{' '}
+                    {t('inode заняты на {p}%: {u} из {n}', {
+                      p: fs.ipct ?? 0,
+                      u: fmtFiles(fs.iused ?? 0, t),
+                      n: fmtFiles(fs.itotal ?? 0, t),
+                    })}
+                  </span>
+                </div>
+                <DuTree fs={fs} t={t} files />
+              </div>
+            )}
             {items.length > 0 && (
               <div className="du-items">
                 <div className="du-sub">
@@ -4004,16 +4052,36 @@ function ServerDetail({
             <div className="chart-cap">{t('Диски')}</div>
             {r.disks?.length ? (
               <div className="loc-results">
-                {r.disks.map((d) => (
-                  <div key={d.mount} className="loc-res">
-                    <span className={`sdot sdot-${toneOf(pct(d.used, d.total)) === 't-down' ? 'down' : toneOf(pct(d.used, d.total)) === 't-degraded' ? 'degraded' : 'up'}`} />
-                    <div className="loc-res-name mono">{d.mount}</div>
-                    <div className="loc-res-metric">{pct(d.used, d.total)}%</div>
-                    <div className="loc-res-msg muted small">
-                      {fmtBytes(d.used)} / {fmtBytes(d.total)}
+                {r.disks.map((d) => {
+                  const p = pct(d.used, d.total)
+                  // inode с агента 2.15; точка красится по худшему из места и inode
+                  const ip = d.inodes ? Math.round(((d.inodes_used ?? 0) / d.inodes) * 100) : null
+                  const tone = toneOf(Math.max(p ?? 0, ip ?? 0))
+                  const fc = diskForecast(s, r).filter((i) => i.mount === d.mount)
+                  return (
+                    <div key={d.mount} className="loc-res loc-res-wrap">
+                      <span className={`sdot sdot-${tone === 't-down' ? 'down' : tone === 't-degraded' ? 'degraded' : 'up'}`} />
+                      <div className="loc-res-name mono">{d.mount}</div>
+                      <div className="loc-res-metric">{p}%</div>
+                      <div className="loc-res-msg muted small">
+                        {fmtBytes(d.used)} / {fmtBytes(d.total)}
+                        {ip != null && (
+                          <>
+                            {' · '}
+                            <span className={ip >= 75 ? toneOf(ip) : ''}>inode {ip}%</span>
+                          </>
+                        )}
+                        {fc.map((i) => (
+                          <div key={i.kind} className={i.eta_h <= 72 ? 't-down' : i.eta_h <= 7 * 24 ? 't-degraded' : ''}>
+                            {(i.kind === 'inode' ? t('inode кончатся {when}', { when: etaText(i.eta_h, t) }) : t('заполнится {when}', { when: etaText(i.eta_h, t) })) +
+                              ' ' +
+                              t('(растет на ~{r}% в сутки)', { r: i.rate < 10 ? +i.rate.toFixed(1) : Math.round(i.rate) })}
+                          </div>
+                        ))}
+                      </div>
                     </div>
-                  </div>
-                ))}
+                  )
+                })}
               </div>
             ) : (
               <div className="muted small">—</div>

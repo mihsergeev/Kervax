@@ -9,9 +9,11 @@
 # Since 0.3 the panel can also start some of them itself ("Free up" with a preview first):
 # a root fixer with a fixed catalogue of actions, reached through a spool like the other
 # helpers, and only for the actions /etc/kervax/fix.conf on this node allows.
+# Since 0.5 a filesystem that runs out of inodes (75% used) is broken down too: the
+# directories with the most files, since df shows free gigabytes while nothing can be created.
 set -euo pipefail
 
-KERVAX_SETUP_VERSION=0.4  # MAJOR.MINOR; compared component-wise
+KERVAX_SETUP_VERSION=0.5  # MAJOR.MINOR; compared component-wise
 KERVAX_SETUP_ALWAYS=1     # safe on any node: while disks have room it only reads df
 
 HELPER_DIR=/lib65/kervax
@@ -68,14 +70,28 @@ fs_list() {
     END { for (d in seen) printf "%s\t%.0f\t%.0f\t%.0f\n", seen[d], size[d], used[d], avail[d] }'
 }
 
-HOT=""
+HOT=""     # filling up with data: findings and the biggest directories
+ALL=""     # filling up with data or running out of inodes: what the block lists
 while IFS="$TAB" read -r mnt size used avail; do
   [ -n "$mnt" ] || continue
   tot=$((used + avail))
   [ "$tot" -gt 0 ] || continue
   pct=$(( (used * 100 + tot - 1) / tot ))   # rounded up, as df does
+  # inodes: total and used; btrfs and the like report 0 total - nothing to run out of
+  iv=$(df -P -i -- "$mnt" 2>/dev/null | awk 'NR == 2 && $2 ~ /^[0-9]+$/ && $3 ~ /^[0-9]+$/ {print $2 " " $3}')
+  itot=${iv%% *}; iused=${iv##* }; ipct=0
+  if [ -n "$iv" ] && [ "${itot:-0}" -gt 0 ]; then
+    ipct=$(( (iused * 100 + itot - 1) / itot ))
+  else
+    itot=0; iused=0
+  fi
+  line=$(printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s' "$mnt" "$size" "$used" "$avail" "$pct" "$ipct" "$iused" "$itot")
   if [ "$pct" -ge "$HOT_PCT" ]; then
-    HOT="$HOT$(printf '%s\t%s\t%s\t%s\t%s' "$mnt" "$size" "$used" "$avail" "$pct")
+    HOT="$HOT$line
+"
+  fi
+  if [ "$pct" -ge "$HOT_PCT" ] || [ "$ipct" -ge "$HOT_PCT" ]; then
+    ALL="$ALL$line
 "
   fi
 done <<EOF_FS
@@ -83,7 +99,7 @@ $(fs_list)
 EOF_FS
 
 # Nothing is filling up - no block at all, the panel shows nothing.
-if [ -z "$HOT" ]; then
+if [ -z "$ALL" ]; then
   rm -f "$OUT"
   exit 0
 fi
@@ -302,10 +318,13 @@ fi
 
 # -- the biggest directories of every filesystem that is filling up --
 FSJ=""
-while IFS="$TAB" read -r mnt size used avail pct; do
+while IFS="$TAB" read -r mnt size used avail pct ipct iused itot; do
   [ -n "$mnt" ] || continue
-  f="$CACHE/top-$(printf '%s' "$mnt" | md5sum | cut -c1-12)"
-  if ! fresh "$f"; then
+  key=$(printf '%s' "$mnt" | md5sum | cut -c1-12)
+  f="$CACHE/top-$key"
+  if [ "$pct" -lt "$HOT_PCT" ]; then
+    printf 'none\t%s\t%s\n' "$now" "$iused" > "$f"   # only the inodes run out here
+  elif ! fresh "$f" || [ "$(head -1 "$f" | cut -f1)" = none ]; then
     ino=$(df -P -i -- "$mnt" 2>/dev/null | awk 'NR == 2 {print $3}')
     if [ "${ino:-0}" -gt "$MAX_INODES" ] 2>/dev/null; then
       printf 'skipped\t%s\t%s\n' "$now" "$ino" > "$f"
@@ -331,9 +350,35 @@ while IFS="$TAB" read -r mnt size used avail pct; do
   done <<EOF_TOP
 $(tail -n +2 "$f")
 EOF_TOP
-  FSJ="$FSJ${FSJ:+,}{\"mount\":\"$(esc "$mnt")\",\"size\":$size,\"used\":$used,\"avail\":$avail,\"pct\":$pct,\"inodes\":${ino:-0},\"top_state\":\"$st\",\"top_ts\":${tts:-0},\"top\":[$top]}"
+  # Where the files piled up: directories by the number of inodes, the same depth 3. A
+  # filesystem that runs out of inodes is walked whatever its size - that is the point.
+  itop=""; ist=""; its=0
+  if [ "$ipct" -ge "$HOT_PCT" ]; then
+    g="$CACHE/itop-$key"
+    if ! fresh "$g"; then
+      imin=$((itot / 100)); [ "$imin" -ge 10000 ] || imin=10000
+      timeout "$DU_TIMEOUT" du -x --inodes -d 3 -- "$mnt" > "$g.raw" 2>/dev/null
+      rc=$?
+      ist=ok; [ "$rc" -eq 124 ] && ist=partial
+      [ "$rc" -ne 0 ] && [ "$rc" -ne 124 ] && [ ! -s "$g.raw" ] && ist=failed
+      { printf '%s\t%s\n' "$ist" "$now"
+        awk -F'\t' -v min="$imin" -v root="$mnt" '$1 >= min && $2 != root' "$g.raw" \
+          | sort -t "$(printf '\t')" -k1,1nr | head -40
+      } > "$g.tmp"
+      mv -f "$g.tmp" "$g"
+      rm -f "$g.raw"
+    fi
+    ist=$(head -1 "$g" | cut -f1); its=$(head -1 "$g" | cut -f2)
+    while IFS="$TAB" read -r n p; do
+      [ -n "$p" ] || continue
+      itop="$itop${itop:+,}{\"path\":\"$(esc "$p")\",\"files\":$n}"
+    done <<EOF_ITOP
+$(tail -n +2 "$g")
+EOF_ITOP
+  fi
+  FSJ="$FSJ${FSJ:+,}{\"mount\":\"$(esc "$mnt")\",\"size\":$size,\"used\":$used,\"avail\":$avail,\"pct\":$pct,\"inodes\":${ino:-0},\"top_state\":\"$st\",\"top_ts\":${tts:-0},\"top\":[$top],\"ipct\":$ipct,\"iused\":$iused,\"itotal\":$itot,\"itop_state\":\"$ist\",\"itop_ts\":${its:-0},\"itop\":[$itop]}"
 done <<EOF_HOT2
-$HOT
+$ALL
 EOF_HOT2
 
 # Which "Free up" actions the panel may start here: only with the fixer installed, and only

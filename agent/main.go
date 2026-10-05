@@ -42,7 +42,7 @@ import (
 	"time"
 )
 
-const version = "2.14"
+const version = "2.15"
 
 // Публичный ключ для проверки подписи релизов агента (Ed25519, base64).
 // ПУСТО по умолчанию → самообновление ВЫКЛЮЧЕНО (агент никогда не заменяет себя).
@@ -110,9 +110,12 @@ func localIP() string {
 }
 
 type disk struct {
-	Mount string `json:"mount"`
-	Used  uint64 `json:"used"`
-	Total uint64 `json:"total"`
+	Mount      string `json:"mount"`
+	Used       uint64 `json:"used"`
+	Total      uint64 `json:"total"`
+	Avail      uint64 `json:"avail"`                 // доступно не-root процессам: без резерва ext4
+	Inodes     uint64 `json:"inodes,omitempty"`      // всего inode; 0 - у ФС их нет (btrfs)
+	InodesUsed uint64 `json:"inodes_used,omitempty"` // занято inode
 }
 
 type report struct {
@@ -2353,16 +2356,27 @@ func disks() []disk {
 		if syscall.Statfs(mount, &st) != nil || st.Blocks == 0 {
 			continue
 		}
-		bs := uint64(st.Bsize)
-		total := st.Blocks * bs
-		if total < minDiskBytes {
+		d := diskOf(mount, &st)
+		if d.Total < minDiskBytes {
 			continue // мелкая системщина (/boot и т.п.) — пропускаем
 		}
 		seenDev[meta.Dev] = true
-		used := (st.Blocks - st.Bfree) * bs
-		out = append(out, disk{Mount: mount, Used: used, Total: total})
+		out = append(out, d)
 	}
 	return out
+}
+
+// diskOf - место и inode ФС по statfs. Avail - сколько осталось у обычных процессов: ext4
+// держит резерв для root (обычно 5%), и сервисы встают на "95%", а не на 100%. По нему
+// панель считает, когда диск заполнится. Inode кончаются отдельно от места: миллионы мелких
+// файлов (сессии PHP, кэш) забивают ФС, когда df показывает свободные гигабайты.
+func diskOf(mount string, st *syscall.Statfs_t) disk {
+	bs := uint64(st.Bsize)
+	d := disk{Mount: mount, Total: st.Blocks * bs, Used: (st.Blocks - st.Bfree) * bs, Avail: st.Bavail * bs}
+	if st.Files > 0 && st.Ffree <= st.Files {
+		d.Inodes, d.InodesUsed = st.Files, st.Files-st.Ffree
+	}
+	return d
 }
 
 // статичные атрибуты хоста — считаем один раз на старте

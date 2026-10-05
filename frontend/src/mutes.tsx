@@ -27,6 +27,8 @@ export const SRV_ALERT_KINDS: { k: string; label: string }[] = [
   { k: 'conntrack', label: 'Conntrack' },
   { k: 'disktemp', label: 'Температура диска' },
   { k: 'disk_health', label: 'Диск: поломка' },
+  { k: 'inode', label: 'Диск: inode' },
+  { k: 'disk_forecast', label: 'Диск: скоро заполнится' },
   { k: 'reboot', label: 'Перезагрузка' },
   { k: 'oom', label: 'OOM-killer' },
   { k: 'web_5xx', label: 'Веб: ошибки 5xx' },
