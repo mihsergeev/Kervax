@@ -790,6 +790,7 @@ export type ServerDisk = {
 }
 // Прогноз заполнения (планировщик раз в полчаса по истории): только разделы с устойчивым
 // ростом, до которых осталось не больше месяца
+export type ServerProblem = { kind: string; level: number; text: string; sec: string; mute: string }
 export type DiskForecastItem = { mount: string; kind: 'space' | 'inode'; pct: number; rate: number; eta_h: number }
 export type DiskForecast = { ts: number; items: DiskForecastItem[] }
 export type ProcStat = {
@@ -1200,6 +1201,9 @@ export type Server = {
   disk_crit_percent: number
   disk_autofix?: boolean // авто-очистка безопасного при пороге предупреждения (включает админ)
   disk_forecast?: DiskForecast | null
+  // что сломано по новым проверкам (диски, прогноз, inode, упавшие юниты) - считает бэкенд
+  // с теми же уровнями, что у алертов; level 2-3 - проблема, 1 - предупреждение
+  problems?: ServerProblem[]
   temp_alert_c: number
   conntrack_alert_percent: number
   db_conn_alert_percent: number

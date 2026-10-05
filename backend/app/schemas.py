@@ -1034,6 +1034,9 @@ class ServerOut(BaseModel):
     backup_audit: list[BackupAudit] = []
     # свои бэкапы ноды, найденные helper'ом (cron, таймеры, метрики) — со статусом
     custom_backups: list[CustomBackupOut] = []
+    # Что сломано по новым проверкам (диски, прогноз, inode, юниты): kind, level 1-3, text,
+    # sec - куда вести в карточке, mute - ключ приглушения. Считает collector.server_problems.
+    problems: list[dict] = []
     custom_backup_ignored: list[str] | None = None
 
 

@@ -16,8 +16,8 @@ from sqlalchemy import delete as sa_delete, func, select
 
 from app import audit, custom_backups, geoip, manual_probe
 from app.collector import (
-    dump_local_stale, send_alerts_soon, send_autofix_note, web_5xx_total, web_breakdown,
-    web_label_key, web_log_label, web_rate_total,
+    dump_local_stale, send_alerts_soon, send_autofix_note, server_problems, web_5xx_total,
+    web_breakdown, web_label_key, web_log_label, web_rate_total,
 )
 from app.setup_scripts import (
     current_setup_versions as _current_setup_versions,
@@ -192,6 +192,7 @@ def _out(
     # оказаться внутренним. local_ip не смотрим — он приватный и страны не имеет.
     o.country = geoip.country_of(server.external_ip) or geoip.country_of(server.agent_ip)
     o.docker_alerts = _docker_alerts(server)
+    o.problems = server_problems(server, now)
     return o
 
 

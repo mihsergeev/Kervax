@@ -319,6 +319,7 @@ const EN: Record<string, string> = {
     'Old files: {n}, but there are fresh ones too: the directory is in use. Delete by hand if you are sure.',
   'Старых файлов: {n}. Если каталог не нужен, удаляйте целиком.': 'Old files: {n}. If the directory is not needed, delete it as a whole.',
   'Контейнеры по памяти': 'Containers by memory',
+  'Что сломано': 'What is broken',
   // упавшие юниты systemd
   'Упавшие юниты systemd': 'Failed systemd units',
   'Systemd: упавшие юниты': 'Systemd: failed units',

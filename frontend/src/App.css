@@ -695,6 +695,14 @@ input:focus {
 .home-attention-more {
   padding: 0.3rem;
 }
+/* "Что сломано": красная рамка, когда есть настоящие проблемы, а не только предупреждения;
+   имя сервера жирным, сама беда - обычным, чтобы строка читалась как "где - что" */
+.home-attention-broken.has-down {
+  border-color: color-mix(in srgb, #e5534b 40%, var(--border));
+  background: color-mix(in srgb, #e5534b 7%, transparent);
+}
+.home-attention-broken .home-attention-txt { font-weight: 400; }
+.home-attention-broken .home-attention-txt b { font-weight: 600; }
 /* Текст пункта «Требует действий» — СВОЙ класс, а не .warn-name: тот придуман для
    компактных строк SSL/доменов (nowrap + ellipsis + max-width:45%) и резал предложение
    на середине, из-за чего было непонятно, что делать. Здесь наоборот — переносим. */

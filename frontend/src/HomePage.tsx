@@ -28,6 +28,13 @@ import { CountryFlag } from './CountryFlag'
 // сколько проблемных строк показывать в карточках главной
 const HOME_LIST_LIMIT = 25
 const ATTENTION_LIMIT = 15
+// "Что сломано": столько строк сразу, остальное - по кнопке
+const BROKEN_LIMIT = 12
+// иконка проблемы по ее виду - чтобы список читался, не вчитываясь
+const ISSUE_ICON: Record<string, string> = {
+  offline: '🔥', cpu: '🧮', mem: '🧠', disk: '💾', temp: '🌡', throttle: '🥵', conntrack: '🔗',
+  disktemp: '🌡', disk_health: '💽', disk_forecast: '📈', inode: '🗂', units: '⚙️',
+}
 
 type T = (k: string, p?: Record<string, string | number>) => string
 // cc — ISO-код страны ноды (бэкенд определяет по IP): в этих списках сервер
@@ -456,6 +463,7 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
   const [relProblem, setRelProblem] = useState('')
   const [probeHints, setProbeHints] = useState<LocalProbeSuggestion[]>([])
   const [mutes, setMutes] = useState<MuteWarning[]>([])
+  const [brokenAll, setBrokenAll] = useState(false)
 
   useEffect(() => {
     getAgentRelease()
@@ -532,6 +540,13 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
     .filter((x): x is NonNullable<typeof x> => x != null)
   const srvDown = srvProblems.filter((p) => p.down)
   const srvWarn = srvProblems.filter((p) => !p.down)
+  // "Что сломано": каждая проблема отдельной строкой, с переходом в нужный раздел карточки
+  // сервера. Проблемы - сверху, предупреждения ниже; внутри - по имени сервера.
+  const broken = (servers ?? [])
+    .flatMap((s) =>
+      srvIssues(s, t).map((i, n) => ({ key: `${s.id}-${n}`, id: s.id, name: s.name, cc: s.country, ...i })),
+    )
+    .sort((a, b) => (a.tone === b.tone ? a.name.localeCompare(b.name) : a.tone === 't-down' ? -1 : 1))
 
   const srvList = servers ?? []
   const actions = actionItems(srvList, avail, relProblem, t).filter((x) => canSee(x.section))
@@ -562,6 +577,42 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
     <div>
       <p className="tagline">{t('Мониторинг инфраструктуры')}</p>
       {mutes.length > 0 && <MuteHint items={mutes} onOpen={onOpen} onDone={load} />}
+      {canSee('servers') && broken.length > 0 && (
+        <div className={`home-attention home-attention-broken${broken.some((x) => x.tone === 't-down') ? ' has-down' : ''}`}>
+          <div className="home-attention-head">
+            <span className="home-attention-ic">🛠</span>
+            {t('Что сломано')}
+            <span className="home-attention-n">{broken.length}</span>
+          </div>
+          <div className="home-attention-list">
+            {(brokenAll ? broken : broken.slice(0, BROKEN_LIMIT)).map((it) => (
+              <button
+                key={it.key}
+                className="home-attention-row"
+                onClick={() => onOpen('servers', it.id, true, it.sec)}
+              >
+                <span className={`dot ${it.tone === 't-down' ? 'down' : 'degraded'}`} />
+                <span className="home-attention-ico">{ISSUE_ICON[it.kind ?? ''] ?? '⚠️'}</span>
+                <span className="home-attention-txt">
+                  <CountryFlag code={it.cc} /> <b>{it.name}</b> - {it.text}
+                </span>
+                {it.mute && (
+                  <span className="quick-mute" title={t('Приглушить')}
+                    onClick={(e) => { e.stopPropagation(); quickMute(it.id, [it.mute!]) }}>
+                    🔕
+                  </span>
+                )}
+                <span className="home-open">→</span>
+              </button>
+            ))}
+            {broken.length > BROKEN_LIMIT && (
+              <button className="ghost small home-attention-more" onClick={() => setBrokenAll(!brokenAll)}>
+                {brokenAll ? t('свернуть') : t('…и ещё {n}', { n: broken.length - BROKEN_LIMIT })}
+              </button>
+            )}
+          </div>
+        </div>
+      )}
       {probeHints.length > 0 && (
         <div className="home-attention home-attention-probe">
           <div className="home-attention-head">
@@ -760,30 +811,8 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
                 <Mini dot="up" label={t('Онлайн')} value={srvOnline} />
                 <Mini dot="down" label={t('Оффлайн')} value={srvOffline} />
               </div>
-              {srvProblems.length > 0 && (
-                <div className="home-warns">
-                  {/* проблемы сверху, предупреждения ниже — критичное первым */}
-                  {[...srvDown, ...srvWarn].slice(0, HOME_LIST_LIMIT).map((p) => (
-                    <div key={p.id} className="home-warn">
-                      <span className={`dot ${p.down ? 'down' : 'degraded'}`} />
-                      <CountryFlag code={p.cc} />
-                      <span className="warn-name">{p.name}</span>
-                      <span className="muted small">{p.text}</span>
-                      {p.mutes.length > 0 && (
-                        <span className="quick-mute" title={t('Приглушить')}
-                          onClick={(e) => { e.stopPropagation(); quickMute(p.id, p.mutes) }}>
-                          🔕
-                        </span>
-                      )}
-                    </div>
-                  ))}
-                  {srvProblems.length > HOME_LIST_LIMIT && (
-                    <div className="muted small">
-                      {t('…ещё {n}', { n: srvProblems.length - HOME_LIST_LIMIT })}
-                    </div>
-                  )}
-                </div>
-              )}
+              {/* сами проблемы - в блоке сверху, по строке на каждую и с переходом в
+                  нужный раздел карточки; здесь только счетчики, без повтора */}
             </>
           )}
         </button>
