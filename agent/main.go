@@ -42,7 +42,7 @@ import (
 	"time"
 )
 
-const version = "2.15"
+const version = "2.16"
 
 // Публичный ключ для проверки подписи релизов агента (Ed25519, base64).
 // ПУСТО по умолчанию → самообновление ВЫКЛЮЧЕНО (агент никогда не заменяет себя).
@@ -382,7 +382,13 @@ type kubePod struct {
 	Owner    string    `json:"owner,omitempty"`  // kind контроллера (Job/ReplicaSet/StatefulSet/DaemonSet/Node) — отличить историю Job'ов от живых воркоадов
 	Image    string    `json:"image,omitempty"`  // заполняется ТОЛЬКО у СУБД-подов (аудит бэкапа)
 	Cred     *kubeCred `json:"cred,omitempty"`   // откуда СУБД-под берёт креды (ССЫЛКИ, не значения) — для автоподстановки в манифест дампа
-	ip       string    // podIP: нужен агенту для скрейпа метрик, в отчёт НЕ уходит (строчная = не сериализуется)
+	// Только у подов ЭТОЙ ноды (их cgroup видна агенту): память как в kubectl top и
+	// контроллер для кнопки "перезапустить" в разделе "Память" (deployment/имя и т.п.)
+	Mem  uint64 `json:"mem,omitempty"`
+	Ctrl string `json:"ctrl,omitempty"`
+	ip   string // podIP: нужен агенту для скрейпа метрик, в отчёт НЕ уходит (строчная = не сериализуется)
+	uid  string // metadata.uid: по нему под находится в cgroup ноды
+	ctrl string // контроллер; в отчет - только у подов этой ноды (Ctrl)
 }
 
 // kubeCred — как СУБД-под получает логин/пароль. Панель воспроизведёт это в CronJob-дампе
@@ -3995,8 +4001,9 @@ func kubePods(cl *http.Client, kc *kubeConf) []kubePod {
 	var d struct {
 		Items []struct {
 			Metadata struct {
-				Name, Namespace string
-				OwnerReferences []struct{ Kind string }
+				Name, Namespace, UID string
+				Labels               map[string]string
+				OwnerReferences      []struct{ Kind, Name string }
 			}
 			Spec struct {
 				NodeName   string
@@ -4034,14 +4041,21 @@ func kubePods(cl *http.Client, kc *kubeConf) []kubePod {
 	if kubeGet(cl, kc, "/api/v1/pods", &d) != nil {
 		return nil
 	}
+	mem := podMem("/sys/fs/cgroup")
 	out := make([]kubePod, 0, len(d.Items))
 	for _, p := range d.Items {
 		kp := kubePod{
 			NS: p.Metadata.Namespace, Name: p.Metadata.Name,
 			Phase: p.Status.Phase, Node: p.Spec.NodeName, Reason: p.Status.Reason,
+			uid: p.Metadata.UID,
 		}
 		if len(p.Metadata.OwnerReferences) > 0 {
-			kp.Owner = p.Metadata.OwnerReferences[0].Kind
+			o := p.Metadata.OwnerReferences[0]
+			kp.Owner = o.Kind
+			kp.ctrl = podCtrl(o.Kind, o.Name, p.Metadata.Labels["pod-template-hash"])
+		}
+		if m := mem[kp.uid]; m > 0 && p.Status.Phase == "Running" {
+			kp.Mem, kp.Ctrl = m, kp.ctrl
 		}
 		// образ шлём ТОЛЬКО у подов, похожих на СУБД: в больших кластерах (сотни подов)
 		// гонять образ каждого пода в каждом отчёте — лишние килобайты на ровном месте.
@@ -4100,12 +4114,96 @@ func kubePods(cl *http.Client, kc *kubeConf) []kubePod {
 	return out
 }
 
+// podCtrl - что перезапускать у пода: "deployment/имя", "statefulset/имя", "daemonset/имя".
+// Деплоймент владеет подом через ReplicaSet, имя которого - имя деплоймента плюс хэш шаблона
+// (тот же, что в метке pod-template-hash). Голый ReplicaSet, Job и прочее - пусто: rollout
+// restart там не к чему применить.
+func podCtrl(kind, name, hash string) string {
+	switch kind {
+	case "ReplicaSet":
+		if hash != "" && strings.HasSuffix(name, "-"+hash) {
+			return "deployment/" + strings.TrimSuffix(name, "-"+hash)
+		}
+	case "StatefulSet", "DaemonSet":
+		return strings.ToLower(kind) + "/" + name
+	}
+	return ""
+}
+
+// podMem - память подов этой ноды по их cgroup: uid -> байты, как в kubectl top
+// (использование без неактивного файлового кэша). Раскладки: cgroup v2 с драйвером cgroupfs
+// (kubepods/burstable/pod<uid>, так у k0s), с systemd (kubepods.slice/kubepods-burstable.slice/
+// kubepods-burstable-pod<uid с _>.slice), cgroup v1 (memory/kubepods/...). Файлы cgroup
+// читаются без прав, metrics-server не нужен.
+func podMem(root string) map[string]uint64 {
+	out := map[string]uint64{}
+	for _, base := range []string{root, root + "/memory"} {
+		top, err := os.ReadDir(base)
+		if err != nil {
+			continue
+		}
+		for _, e := range top {
+			if e.IsDir() && strings.HasPrefix(e.Name(), "kubepods") {
+				podMemWalk(base+"/"+e.Name(), 0, out)
+			}
+		}
+		if len(out) > 0 {
+			break
+		}
+	}
+	return out
+}
+
+func podMemWalk(dir string, depth int, out map[string]uint64) {
+	ents, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	for _, e := range ents {
+		if !e.IsDir() {
+			continue
+		}
+		sub := dir + "/" + e.Name()
+		if uid := podUID(e.Name()); uid != "" {
+			if cur, ok := readUintFile(sub + "/memory.current"); ok {
+				out[uid] = minusCache(cur, cgroupStat(sub+"/memory.stat", "inactive_file"))
+			} else if use, ok := readUintFile(sub + "/memory.usage_in_bytes"); ok {
+				out[uid] = minusCache(use, cgroupStat(sub+"/memory.stat", "total_inactive_file"))
+			}
+			continue // внутри пода - контейнеры, их память уже в поде
+		}
+		if depth < 2 {
+			podMemWalk(sub, depth+1, out)
+		}
+	}
+}
+
+// podUID - uid пода из имени его cgroup: "pod<uid>" или "kubepods-burstable-pod<uid с _>.slice".
+func podUID(name string) string {
+	name = strings.TrimSuffix(name, ".slice")
+	i := strings.LastIndex(name, "pod")
+	if i < 0 || (i > 0 && name[i-1] != '-') {
+		return ""
+	}
+	uid := strings.ReplaceAll(name[i+3:], "_", "-")
+	if len(uid) != 36 || strings.Count(uid, "-") != 4 {
+		return ""
+	}
+	for _, c := range uid {
+		if !(c == '-' || (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
+			return ""
+		}
+	}
+	return uid
+}
+
 // kubeCapPods — приоритет проблемным подам, добор здоровыми до cap (не теряем аварии).
 func kubeCapPods(pods []kubePod, cap int) []kubePod {
 	res := make([]kubePod, 0, cap)
 	var good []kubePod
 	for _, p := range pods {
-		if !p.Ready || p.Restarts > 0 || (p.Phase != "Running" && p.Phase != "Succeeded") {
+		// поды этой ноды (с памятью) тоже не теряем: по ним раздел "Память" и алерт
+		if !p.Ready || p.Restarts > 0 || p.Mem > 0 || (p.Phase != "Running" && p.Phase != "Succeeded") {
 			res = append(res, p)
 		} else {
 			good = append(good, p)

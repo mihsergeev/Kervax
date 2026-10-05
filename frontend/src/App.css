@@ -941,6 +941,24 @@ input:focus {
 .mc-row .loc-res-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .mc-row .loc-res-metric { min-width: 4.5rem; text-align: right; }
 .mc-row .loc-res-msg { min-width: 2.5rem; }
+/* у подов длинные имена (деплоймент + хэши): имя - гибкая колонка с многоточием, целиком в подсказке */
+.mp-row .mp-name {
+  display: block;
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mp-row .loc-res-msg { flex: 0 0 auto; }
+@media (max-width: 600px) {
+  .mp-row {
+    flex-wrap: wrap;
+  }
+  .mp-row .mp-name {
+    flex-basis: 100%;
+  }
+}
 .du-fix-btn { flex-shrink: 0; padding: 0.15rem 0.65rem; font-size: 0.78rem; }
 .du-fix {
   margin: 0.35rem 0 0.25rem;

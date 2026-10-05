@@ -319,6 +319,12 @@ const EN: Record<string, string> = {
     'Old files: {n}, but there are fresh ones too: the directory is in use. Delete by hand if you are sure.',
   'Старых файлов: {n}. Если каталог не нужен, удаляйте целиком.': 'Old files: {n}. If the directory is not needed, delete it as a whole.',
   'Контейнеры по памяти': 'Containers by memory',
+  // поды Kubernetes по памяти
+  'Поды по памяти': 'Pods by memory',
+  'Перезапустить {c} в {ns}? Kubernetes пересоздаст его поды по очереди.':
+    'Restart {c} in {ns}? Kubernetes will recreate its pods one by one.',
+  'перезапуск начат': 'restart started',
+  'без контроллера': 'no controller',
   // inode и прогноз заполнения
   'Диск: inode': 'Disk: inodes',
   'Диск: скоро заполнится': 'Disk: filling up soon',
