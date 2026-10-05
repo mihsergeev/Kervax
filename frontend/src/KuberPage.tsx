@@ -19,6 +19,7 @@ import { useUrlCard } from './deeplink'
 import { useI18n } from './i18n'
 import { OsIcon } from './osIcon'
 import { CountryFlag } from './CountryFlag'
+import { fmtBytes } from './units'
 
 // Вкладка «Кубер»: КОМПАКТНЫЙ список хостов с кластером; клик по хосту → модалка
 // с нодами, воркоадами и подами (статусы, рестарты, логи, управление). Агент читает
@@ -310,6 +311,11 @@ function WorkloadRow({
   )
 }
 
+// CPU в ядрах: 0.25, 2.5 - как удобнее читать, чем милликоры
+function fmtCores(m: number): string {
+  return m >= 10000 ? String(Math.round(m / 1000)) : m >= 100 ? (m / 1000).toFixed(1) : (m / 1000).toFixed(2)
+}
+
 function PodRow({
   serverId,
   p,
@@ -369,6 +375,12 @@ function PodRow({
             </span>
           )}
         </div>
+        {p.use && (
+          <div className="docker-c-img mono muted small" title={t('по metrics-server, как kubectl top')}>
+            {fmtBytes(p.use.mem)} · CPU {fmtCores(p.use.cpu_m)}
+            {p.node ? ` · ${p.node}` : ''}
+          </div>
+        )}
         {err && <div className="form-error small">{err}</div>}
       </div>
       <div className={`docker-c-status mono small ${podTone(p)}`}>{p.phase}</div>
@@ -411,7 +423,7 @@ function KubeHostModal({
     () => (KUBE_TABS as string[]).includes(initialTab ?? '') ? (initialTab as KubeTab) : 'pods',
   )
   const [q, setQ] = useState('')
-  const [sort, setSort] = useState<'state' | 'name' | 'restarts' | 'ns'>('state')
+  const [sort, setSort] = useState<'state' | 'name' | 'restarts' | 'ns' | 'mem' | 'cpu'>('state')
   const nodes = kube.nodes ?? []
   const workloads = kube.workloads ?? []
   const pods = kube.pods ?? []
@@ -424,7 +436,11 @@ function KubeHostModal({
     name: (a, b) => a.name.localeCompare(b.name),
     restarts: (a, b) => (b.restarts ?? 0) - (a.restarts ?? 0),
     ns: (a, b) => (a.ns || '').localeCompare(b.ns || '') || a.name.localeCompare(b.name),
+    // кто съел память или CPU кластера (metrics-server): самые тяжелые сверху
+    mem: (a, b) => (b.use?.mem ?? 0) - (a.use?.mem ?? 0),
+    cpu: (a, b) => (b.use?.cpu_m ?? 0) - (a.use?.cpu_m ?? 0),
   }
+  const hasUse = pods.some((p) => p.use)
   // Сроки и состояние Flux приезжают в отчёте агента (хелпер kubeexpiry-setup),
   // а не через kube-api: у ServiceAccount панели доступа к секретам нет и не будет.
   const expiry: KubeExpiry[] = (s.last_report?.kube_expiry ?? []).slice().sort((a, b) => a.expires - b.expires)
@@ -541,6 +557,8 @@ function KubeHostModal({
                     <option value="name">{t('сорт: имя')}</option>
                     <option value="restarts">{t('сорт: рестарты')}</option>
                     <option value="ns">{t('сорт: namespace')}</option>
+                    {hasUse && <option value="mem">{t('сорт: память')}</option>}
+                    {hasUse && <option value="cpu">{t('сорт: CPU')}</option>}
                   </select>
                 )}
               </div>
@@ -643,6 +661,14 @@ function KubeHostModal({
                       <div className="docker-c-img mono muted small">
                         {n.version || ''}{n.ip ? ` · ${n.ip}` : ''}
                       </div>
+                      {n.use && (
+                        <div className="docker-c-img mono muted small">
+                          {t('память {u} из {c}', { u: fmtBytes(n.use.mem), c: n.cap ? fmtBytes(n.cap.mem) : '?' })}
+                          {n.cap?.mem ? ` (${Math.round((n.use.mem / n.cap.mem) * 100)}%)` : ''}
+                          {' · '}
+                          {t('CPU {u} из {c}', { u: fmtCores(n.use.cpu_m), c: n.cap ? fmtCores(n.cap.cpu_m) : '?' })}
+                        </div>
+                      )}
                     </div>
                     <div className={`docker-c-status mono small ${n.ready ? 't-up' : 't-down'}`}>
                       {n.ready ? 'Ready' : 'NotReady'}

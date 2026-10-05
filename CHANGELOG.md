@@ -4,6 +4,17 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.4.89] - 2026-10-05
+
+### Added
+- Память и CPU подов по всему кластеру (агент 2.19): если в кластере есть metrics-server,
+  агент берет у него использование каждого пода и каждой ноды (как kubectl top), а у нод
+  еще и их объем. В разделе "Кубер" у пода видны память, CPU и нода, на которой он
+  работает, есть сортировка по памяти и по CPU; у ноды - "память N из M, CPU N из M". Нужно
+  там, где на ноде с агентом своих подов нет (контроллер k0s без воркера, как node-35):
+  раньше память подов была видна только по cgroup своей ноды. Новых прав не нужно, без
+  metrics-server все как раньше.
+
 ## [1.4.88] - 2026-10-05
 
 ### Changed

@@ -823,12 +823,16 @@ export type DockerInfo = {
   compose?: string
   containers?: DockerContainer[]
 }
+// CPU в милликорах и память в байтах: использование (metrics-server, как kubectl top) или объем
+export type KubeUse = { cpu_m: number; mem: number }
 export type KubeNode = {
   name: string
   ready: boolean
   roles?: string
   version?: string
   ip?: string
+  use?: KubeUse // занято сейчас (агент 2.19+, если в кластере есть metrics-server)
+  cap?: KubeUse // объем ноды
 }
 export type KubeWorkload = {
   ns: string
@@ -851,6 +855,7 @@ export type KubePod = {
   // только у подов этой ноды (агент 2.16+): память как в kubectl top и что перезапускать
   mem?: number
   ctrl?: string // deployment/имя, statefulset/имя, daemonset/имя
+  use?: KubeUse // по всему кластеру из metrics-server (агент 2.19+), где бы под ни работал
 }
 // Ссылки на креды СУБД-пода (без значений паролей).
 export type KubeCred = {
