@@ -32,15 +32,17 @@ const ATTENTION_LIMIT = 15
 const BROKEN_LIMIT = 12
 // иконка проблемы по ее виду - чтобы список читался, не вчитываясь
 const ISSUE_ICON: Record<string, string> = {
-  offline: '🔥', cpu: '🧮', mem: '🧠', disk: '💾', temp: '🌡', throttle: '🥵', conntrack: '🔗',
+  offline: '🔥', cpu: '🧮', mem: '🧠', disk: '🗄', temp: '🌡', throttle: '🥵', conntrack: '🔗',
   disktemp: '🌡', disk_health: '💽', disk_forecast: '📈', inode: '🗂', units: '⚙️',
+  docker: '🐳', kuber: '☸️', backups: '💾',
 }
 
 type T = (k: string, p?: Record<string, string | number>) => string
 // cc — ISO-код страны ноды (бэкенд определяет по IP): в этих списках сервер
 // представлен строкой, объекта под рукой нет, поэтому код кладём в сам пункт
-type ActItem = { key: string; icon: string; section: Section; id?: number; text: string; srv?: boolean; sec?: string; cc?: string }
-type ProbItem = { key: string; id?: number; down: boolean; text: string; srv?: boolean; cc?: string }
+type ActItem = { key: string; icon: string; section: Section; id?: number; text: string; srv?: boolean; sec?: string; cc?: string; name?: string }
+// name - имя сервера: по нему "Что сломано" пишет "сервер - что" (text начинается с "имя: ")
+type ProbItem = { key: string; id?: number; down: boolean; text: string; srv?: boolean; cc?: string; name?: string }
 
 const K_BAD_POD = ['CrashLoopBackOff', 'ImagePullBackOff', 'ErrImagePull', 'Error', 'OOMKilled', 'CreateContainerError']
 const D_RESTART_POLICIES = ['always', 'unless-stopped', 'on-failure']
@@ -285,17 +287,17 @@ function actionItems(servers: Server[], avail: string, relProblem: string, t: T)
     if (!s.online) continue
     const rep = s.last_report
     if (rep?.docker?.present && !rep.docker.access) {
-      items.push({ key: `d-acc-${s.id}`, icon: '🐳', section: 'docker', id: s.id, cc: s.country,
+      items.push({ key: `d-acc-${s.id}`, icon: '🐳', section: 'docker', id: s.id, name: s.name, cc: s.country,
         text: t('{name}: Docker без доступа — включите read-only proxy', { name: s.name }) })
     }
     if (rep?.kube?.present && !rep.kube.access) {
-      items.push({ key: `k-acc-${s.id}`, icon: '☸', section: 'kuber', id: s.id, cc: s.country,
+      items.push({ key: `k-acc-${s.id}`, icon: '☸', section: 'kuber', id: s.id, name: s.name, cc: s.country,
         text: t('{name}: Kubernetes без доступа — запустите kube-setup', { name: s.name }) })
     }
     // бэкап-сервер найден (по docker), но статистики репо нет → нужен backupserver-setup
     const bs = rep?.backup_server
     if (bs?.present && (!bs.repos || bs.repos.length === 0)) {
-      items.push({ key: `bs-setup-${s.id}`, icon: '🗄', section: 'backups', id: s.id, cc: s.country, srv: true,
+      items.push({ key: `bs-setup-${s.id}`, icon: '🗄', section: 'backups', id: s.id, name: s.name, cc: s.country, srv: true,
         text: t('{name}: бэкап-сервер — включите статистику (backupserver-setup)', { name: s.name }) })
     }
     // setup-скрипты (helper'ы) устарели → переустановить. Версии сверяет бэкенд (helper_advice);
@@ -308,7 +310,7 @@ function actionItems(servers: Server[], avail: string, relProblem: string, t: T)
     if (dbs.length > 0 && !s.db_dumps_ok) {
       // всё про бэкап живёт в разделе «Бэкапы»; там модалка открывается для ЛЮБОЙ ноды —
       // клиента, бэкап-сервера или вообще без бэкапа (иначе пункт вёл бы в пустоту)
-      items.push({ key: `dbdump-${s.id}`, icon: '🛢', section: 'backups', id: s.id, cc: s.country,
+      items.push({ key: `dbdump-${s.id}`, icon: '🛢', section: 'backups', id: s.id, name: s.name, cc: s.country,
         text: t('{name}: {db} — нужен отдельный дамп',
           { name: s.name, db: dbs.map((x) => x.subject).join(', ') }) })
     }
@@ -316,7 +318,7 @@ function actionItems(servers: Server[], avail: string, relProblem: string, t: T)
       // «устарел (? → v0.1)» на ноде, где helper'а нет вовсе, вводит в заблуждение:
       // это не обновление, а первая установка, и делается она тем же прогоном.
       const fresh = !h.installed
-      items.push({ key: `hlp-${h.name}-${s.id}`, icon: '🧩', section: 'servers', id: s.id, cc: s.country,
+      items.push({ key: `hlp-${h.name}-${s.id}`, icon: '🧩', section: 'servers', id: s.id, name: s.name, cc: s.country,
         text: fresh
           ? t('{name}: helper «{helper}» не установлен ({b}) — поставьте', {
               name: s.name, helper: h.name, b: fmtSetupVersion(h.current),
@@ -338,8 +340,8 @@ function dockerProblems(servers: Server[], t: T): ProbItem[] {
     if (!d?.access || !d.containers) continue
     const down = d.containers.filter((c) => (c.state === 'exited' || c.state === 'dead') && D_RESTART_POLICIES.includes((c.policy || '').toLowerCase()))
     const loop = d.containers.filter((c) => (c.restarts || 0) >= 3 && c.state === 'running')
-    if (down.length > 0) out.push({ key: `d-down-${s.id}`, id: s.id, cc: s.country, down: true, text: t('{name}: контейнеров упало — {n}', { name: s.name, n: down.length }) })
-    if (loop.length > 0) out.push({ key: `d-loop-${s.id}`, id: s.id, cc: s.country, down: true, text: t('{name}: перезапусков — {n}', { name: s.name, n: loop.length }) })
+    if (down.length > 0) out.push({ key: `d-down-${s.id}`, id: s.id, name: s.name, cc: s.country, down: true, text: t('{name}: контейнеров упало — {n}', { name: s.name, n: down.length }) })
+    if (loop.length > 0) out.push({ key: `d-loop-${s.id}`, id: s.id, name: s.name, cc: s.country, down: true, text: t('{name}: перезапусков — {n}', { name: s.name, n: loop.length }) })
   }
   return out
 }
@@ -352,8 +354,8 @@ function kubeProblems(servers: Server[], t: T): ProbItem[] {
     if (!k?.access) continue
     const nr = (k.nodes || []).filter((n) => !n.ready).length
     const bad = (k.pods || []).filter((p) => !podFinished(p) && (p.phase === 'Failed' || (p.reason ? K_BAD_POD.includes(p.reason) : false))).length
-    if (nr > 0) out.push({ key: `k-node-${s.id}`, id: s.id, cc: s.country, down: true, text: t('{name}: нод NotReady — {n}', { name: s.name, n: nr }) })
-    if (bad > 0) out.push({ key: `k-pod-${s.id}`, id: s.id, cc: s.country, down: true, text: t('{name}: проблемных подов — {n}', { name: s.name, n: bad }) })
+    if (nr > 0) out.push({ key: `k-node-${s.id}`, id: s.id, name: s.name, cc: s.country, down: true, text: t('{name}: нод NotReady — {n}', { name: s.name, n: nr }) })
+    if (bad > 0) out.push({ key: `k-pod-${s.id}`, id: s.id, name: s.name, cc: s.country, down: true, text: t('{name}: проблемных подов — {n}', { name: s.name, n: bad }) })
   }
   return out
 }
@@ -365,14 +367,14 @@ function backupProblems(servers: Server[], t: T): ProbItem[] {
     if (!s.online) continue
     const b = s.last_report?.backup
     if (b?.present && b.metric_present) {
-      if (b.success === 0) out.push({ key: `b-fail-${s.id}`, id: s.id, cc: s.country, down: true, text: t('{name}: бэкап завершился с ошибкой', { name: s.name }) })
-      else if (b.last_backup_ts && Date.now() / 1000 - b.last_backup_ts > 2 * 86400) out.push({ key: `b-stale-${s.id}`, id: s.id, cc: s.country, down: false, text: t('{name}: бэкап не свежий', { name: s.name }) })
+      if (b.success === 0) out.push({ key: `b-fail-${s.id}`, id: s.id, name: s.name, cc: s.country, down: true, text: t('{name}: бэкап завершился с ошибкой', { name: s.name }) })
+      else if (b.last_backup_ts && Date.now() / 1000 - b.last_backup_ts > 2 * 86400) out.push({ key: `b-stale-${s.id}`, id: s.id, name: s.name, cc: s.country, down: false, text: t('{name}: бэкап не свежий', { name: s.name }) })
     }
     const bs = s.last_report?.backup_server
     // свои бэкапы ноды (настроены без панели): упал прогон, давно не отрабатывал, выключен
     const own = (s.custom_backups ?? []).filter((j) => ['failed', 'stale', 'disabled'].includes(j.status))
     if (own.length > 0) {
-      out.push({ key: `b-own-${s.id}`, id: s.id, cc: s.country, down: own.some((j) => j.status === 'failed'),
+      out.push({ key: `b-own-${s.id}`, id: s.id, name: s.name, cc: s.country, down: own.some((j) => j.status === 'failed'),
         text: t('{name}: свой бэкап не отрабатывает — {jobs}', {
           name: s.name, jobs: own.map((j) => `${j.name} (${j.problem})`).join(', '),
         }) })
@@ -380,10 +382,10 @@ function backupProblems(servers: Server[], t: T): ProbItem[] {
     const ownFiles = (s.custom_backups ?? []).some((j) => j.files && !j.ignored)
     // сервер без настроенного бэкапа (и не помеченный «не требуется», и не сам бэкап-сервер)
     if (!bs?.present && !(b?.configured || b?.metric_present) && !s.backup_not_required && !ownFiles) {
-      out.push({ key: `b-none-${s.id}`, id: s.id, cc: s.country, down: false, text: t('{name}: бэкап не настроен', { name: s.name }) })
+      out.push({ key: `b-none-${s.id}`, id: s.id, name: s.name, cc: s.country, down: false, text: t('{name}: бэкап не настроен', { name: s.name }) })
     }
     if (bs?.present) {
-      if (!bs.running) out.push({ key: `bs-stop-${s.id}`, id: s.id, cc: s.country, down: true, srv: true, text: t('{name}: rest-server остановлен', { name: s.name }) })
+      if (!bs.running) out.push({ key: `bs-stop-${s.id}`, id: s.id, name: s.name, cc: s.country, down: true, srv: true, text: t('{name}: rest-server остановлен', { name: s.name }) })
       const rmuted = new Set(s.backup_repo_mutes ?? [])
       const badRepos = (bs.repos || []).filter((r) => {
         if (rmuted.has(r.name)) return false
@@ -392,7 +394,7 @@ function backupProblems(servers: Server[], t: T): ProbItem[] {
         if (!r.valid || stuck) return true
         return r.last_activity ? Date.now() / 1000 - r.last_activity > 3 * 86400 : false
       }).length
-      if (badRepos > 0) out.push({ key: `bs-repo-${s.id}`, id: s.id, cc: s.country, down: true, srv: true, text: t('{name}: репозиториев с проблемой — {n}', { name: s.name, n: badRepos }) })
+      if (badRepos > 0) out.push({ key: `bs-repo-${s.id}`, id: s.id, name: s.name, cc: s.country, down: true, srv: true, text: t('{name}: репозиториев с проблемой — {n}', { name: s.name, n: badRepos }) })
     }
   }
   return out
@@ -540,13 +542,6 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
     .filter((x): x is NonNullable<typeof x> => x != null)
   const srvDown = srvProblems.filter((p) => p.down)
   const srvWarn = srvProblems.filter((p) => !p.down)
-  // "Что сломано": каждая проблема отдельной строкой, с переходом в нужный раздел карточки
-  // сервера. Проблемы - сверху, предупреждения ниже; внутри - по имени сервера.
-  const broken = (servers ?? [])
-    .flatMap((s) =>
-      srvIssues(s, t).map((i, n) => ({ key: `${s.id}-${n}`, id: s.id, name: s.name, cc: s.country, ...i })),
-    )
-    .sort((a, b) => (a.tone === b.tone ? a.name.localeCompare(b.name) : a.tone === 't-down' ? -1 : 1))
 
   const srvList = servers ?? []
   const actions = actionItems(srvList, avail, relProblem, t).filter((x) => canSee(x.section))
@@ -559,6 +554,37 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
   const backupClients = srvList.filter((s) => s.last_report?.backup?.present)
   const backupServers = srvList.filter((s) => s.last_report?.backup_server?.present)
   const backupProbs = backupProblems(srvList, t)
+
+  // "Что сломано": все проблемы одним списком, по строке на каждую - серверы (включая
+  // поломки дисков, прогноз, inode, упавшие юниты), Docker, Kubernetes и бэкапы. Клик ведет
+  // туда, где это чинится: в раздел карточки сервера или в карточку Docker/Кубера/бэкапа.
+  // Проблемы сверху, предупреждения ниже; внутри - по имени сервера, чтобы беды одной ноды
+  // стояли рядом. Списки в карточках разделов ниже убраны: там остались счетчики.
+  type Broken = {
+    key: string; id: number; name: string; cc?: string; tone: 't-down' | 't-degraded'; text: string
+    kind: string; section: Section; srv?: boolean; sec?: string; mute?: string
+  }
+  const fromProbs = (items: ProbItem[], section: Section): Broken[] =>
+    canSee(section)
+      ? items.map((p) => ({
+          key: p.key, id: p.id ?? 0, name: p.name ?? '', cc: p.cc, tone: p.down ? 't-down' : 't-degraded',
+          text: p.name && p.text.startsWith(p.name + ': ') ? p.text.slice(p.name.length + 2) : p.text,
+          kind: section, section, srv: p.srv,
+        }))
+      : []
+  const broken: Broken[] = [
+    ...(canSee('servers')
+      ? srvList.flatMap((s) =>
+          srvIssues(s, t).map((i, n) => ({
+            key: `${s.id}-${n}`, id: s.id, name: s.name, cc: s.country, tone: i.tone, text: i.text,
+            kind: i.kind ?? 'server', section: 'servers' as Section, srv: true, sec: i.sec, mute: i.mute,
+          })),
+        )
+      : []),
+    ...fromProbs(dockerProbs, 'docker'),
+    ...fromProbs(kubeProbs, 'kuber'),
+    ...fromProbs(backupProbs, 'backups'),
+  ].sort((a, b) => (a.tone === b.tone ? a.name.localeCompare(b.name) : a.tone === 't-down' ? -1 : 1))
 
   // Хосты для ansible-кнопки «обновить сразу на N нодах»: те, что плейбук реально чинит —
   // устаревший helper (переустановка) ИЛИ не включён watchdog (helper agent-watchdog, ALWAYS).
@@ -577,7 +603,7 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
     <div>
       <p className="tagline">{t('Мониторинг инфраструктуры')}</p>
       {mutes.length > 0 && <MuteHint items={mutes} onOpen={onOpen} onDone={load} />}
-      {canSee('servers') && broken.length > 0 && (
+      {broken.length > 0 && (
         <div className={`home-attention home-attention-broken${broken.some((x) => x.tone === 't-down') ? ' has-down' : ''}`}>
           <div className="home-attention-head">
             <span className="home-attention-ic">🛠</span>
@@ -589,10 +615,10 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
               <button
                 key={it.key}
                 className="home-attention-row"
-                onClick={() => onOpen('servers', it.id, true, it.sec)}
+                onClick={() => onOpen(it.section, it.id, it.srv, it.sec)}
               >
                 <span className={`dot ${it.tone === 't-down' ? 'down' : 'degraded'}`} />
-                <span className="home-attention-ico">{ISSUE_ICON[it.kind ?? ''] ?? '⚠️'}</span>
+                <span className="home-attention-ico">{ISSUE_ICON[it.kind] ?? '⚠️'}</span>
                 <span className="home-attention-txt">
                   <CountryFlag code={it.cc} /> <b>{it.name}</b> - {it.text}
                 </span>
@@ -833,7 +859,7 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
               <Mini dot="up" label={t('Контейнеров')} value={dockerRunning} />
             </div>
           }
-          problems={dockerProbs} onNavigate={onNavigate} onOpen={onOpen} t={t}
+          problems={dockerProbs} onNavigate={onNavigate} t={t}
         />
         )}
 
@@ -848,7 +874,7 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
               <Mini dot="up" label={t('Подов')} value={kubePods} />
             </div>
           }
-          problems={kubeProbs} onNavigate={onNavigate} onOpen={onOpen} t={t}
+          problems={kubeProbs} onNavigate={onNavigate} t={t}
         />
         )}
         </div>
@@ -866,7 +892,7 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
               <Mini dot="up" label={t('Серверов')} value={backupServers.length} />
             </div>
           }
-          problems={backupProbs} onNavigate={onNavigate} onOpen={onOpen} t={t}
+          problems={backupProbs} onNavigate={onNavigate} t={t}
         />
         </div>
         )}
@@ -893,11 +919,11 @@ function Mini({
   )
 }
 
-// Карточка раздела (Docker/Kubernetes/Бэкапы): ВСЯ плитка кликабельна (→ в раздел),
-// строки проблем перехватывают клик и ведут СРАЗУ в конкретный хост (deep-link).
+// Карточка раздела (Docker/Kubernetes/Бэкапы): ВСЯ плитка кликабельна (в раздел), сами
+// проблемы с переходом в конкретный хост - в блоке "Что сломано" сверху, здесь счетчик.
 // Не рендерится, если в разделе нет объектов.
 function SectionCard({
-  title, icon, section, total, okText, stats, problems, onNavigate, onOpen, t,
+  title, icon, section, total, okText, stats, problems, onNavigate, t,
 }: {
   title: string
   icon: ReactNode
@@ -907,7 +933,6 @@ function SectionCard({
   stats?: ReactNode
   problems: ProbItem[]
   onNavigate: (s: Section) => void
-  onOpen: (s: Section, id?: number, srv?: boolean) => void
   t: T
 }) {
   if (total === 0) return null
@@ -925,28 +950,7 @@ function SectionCard({
         )}
       </div>
       {stats}
-      {problems.length > 0 && (
-        <div className="home-warns">
-          {problems.slice(0, HOME_LIST_LIMIT).map((p) => (
-            <button
-              key={p.key}
-              className="home-warn home-warn-btn"
-              onClick={(e) => {
-                e.stopPropagation()
-                onOpen(section, p.id, p.srv)
-              }}
-            >
-              <span className={`dot ${p.down ? 'down' : 'degraded'}`} />
-              <CountryFlag code={p.cc} />
-              <span className="warn-name">{p.text}</span>
-              <span className="home-open">→</span>
-            </button>
-          ))}
-          {problems.length > HOME_LIST_LIMIT && (
-            <div className="muted small">{t('…ещё {n}', { n: problems.length - HOME_LIST_LIMIT })}</div>
-          )}
-        </div>
-      )}
+      {/* сами проблемы - в блоке сверху вместе со всеми остальными, здесь только счетчик */}
     </div>
   )
 }

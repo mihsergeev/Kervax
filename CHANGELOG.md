@@ -4,6 +4,16 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.4.88] - 2026-10-05
+
+### Changed
+- "Что сломано" на главной теперь один список всего: к проблемам серверов добавились Docker
+  (упавшие и перезапускающиеся контейнеры), Kubernetes (ноды NotReady, проблемные поды) и
+  бэкапы (ошибка, несвежий, не настроен, свой бэкап не отрабатывает, rest-server и
+  репозитории бэкап-сервера). Клик ведет туда, где это чинится: в карточку хоста Docker, в
+  кластер, в бэкап. Беды одной ноды стоят рядом. В карточках Docker, Kubernetes и Бэкапы на
+  главной остались счетчики, списки переехали наверх.
+
 ## [1.4.87] - 2026-10-05
 
 ### Added
