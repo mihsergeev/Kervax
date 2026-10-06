@@ -236,6 +236,7 @@ export type Check = {
   uptime_24h: number | null
   beats: CheckStatus[] | null // последние N снимков — для мини-ленты статуса в списке
   loc_down?: string[] // локации, из которых сайт сейчас не отвечает
+  flaky_since?: string | null // с какого момента отвечает через раз (сбои вперемешку с успешными)
   alert_mutes: string[] | null // заглушённые типы алертов этого монитора
 }
 
@@ -247,6 +248,7 @@ export type ChecksOverview = {
   unknown: number
   disabled: number
   partial: number // доступен с основной проверки, но не из части локаций
+  flaky?: number // отвечает через раз
   loc_summary?: { id: number; name: string; down: number; total: number }[]
   open_incidents: number
   checks: Check[]
@@ -1225,6 +1227,8 @@ export type Server = {
   docker_alerts?: Record<string, string>
   // внешние прокси (caddy-docker-proxy, traefik) с docker-сокетом: взлом прокси - root на хосте
   docker_exposed?: { name: string; image: string; kind: string }[]
+  // внешние прокси со сборкой образа старше года (built - unix-секунды)
+  proxy_outdated?: { name: string; image: string; kind: string; version: string; built: number; age_days: number }[]
   agent_ip: string
   last_report: ServerReport | null
   last_seen: string | null

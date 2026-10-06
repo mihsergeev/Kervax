@@ -42,7 +42,7 @@ import (
 	"time"
 )
 
-const version = "2.22"
+const version = "2.23"
 
 // Публичный ключ для проверки подписи релизов агента (Ed25519, base64).
 // ПУСТО по умолчанию → самообновление ВЫКЛЮЧЕНО (агент никогда не заменяет себя).
@@ -602,8 +602,13 @@ type dockerContainer struct {
 	Exit     *int   `json:"exit,omitempty"`      // State.ExitCode; у работающего нет
 	MaxRetry int    `json:"max_retry,omitempty"` // on-failure:N - сколько раз докер его перезапустит
 	OOM      bool   `json:"oom,omitempty"`       // остановленный убит OOM-киллером
-	ip       string // IP контейнера для скрейпа метрик; в отчёт НЕ уходит (строчная)
-	id       string // id контейнера: по нему процесс находит свой контейнер (cpu_groups)
+	// Только у внешних прокси (edgeProxyImage): версия из метки образа и дата его сборки. По
+	// тегу возраст не понять: traefik:latest на одной ноде оказался сборкой 2021 года.
+	ImgVer     string `json:"img_ver,omitempty"`     // org.opencontainers.image.version
+	ImgCreated int64  `json:"img_created,omitempty"` // сборка образа, unix-секунды
+	imageID    string // id образа: по нему дата сборки из /images/json
+	ip         string // IP контейнера для скрейпа метрик; в отчёт НЕ уходит (строчная)
+	id         string // id контейнера: по нему процесс находит свой контейнер (cpu_groups)
 }
 
 // пропускная способность одного сетевого интерфейса, байт/сек + ошибки/дропы, пакетов/сек
@@ -3690,11 +3695,12 @@ func collectDocker() *dockerInfo {
 	}
 
 	var raw []struct {
-		Id     string
-		Names  []string
-		Image  string
-		State  string
-		Status string
+		Id      string
+		Names   []string
+		Image   string
+		ImageID string
+		State   string
+		Status  string
 	}
 	if err := dockerGet(cl, "/containers/json?all=1", &raw); err == nil {
 		for _, c := range raw {
@@ -3702,7 +3708,7 @@ func collectDocker() *dockerInfo {
 			if len(c.Names) > 0 {
 				name = strings.TrimPrefix(c.Names[0], "/")
 			}
-			dc := dockerContainer{Name: name, Image: c.Image, State: c.State, Status: c.Status, id: c.Id}
+			dc := dockerContainer{Name: name, Image: c.Image, State: c.State, Status: c.Status, id: c.Id, imageID: c.ImageID}
 			if c.State == "running" {
 				// кто съел память и CPU - для алертов и кнопки "перезапустить" в разделах
 				// "Память" и "CPU"
@@ -3717,8 +3723,73 @@ func collectDocker() *dockerInfo {
 			dockerInspect(cl, c.Id, &dc)
 			di.Containers = append(di.Containers, dc)
 		}
+		imageBuildDates(cl, di.Containers, time.Now())
 	}
 	return di
+}
+
+// edgeProxyImage - образ внешнего прокси (как image_kind в панели): caddy, caddy-docker-proxy,
+// traefik, nginx-proxy. Только для них агент шлет версию и дату сборки образа: такой прокси
+// смотрит в интернет, и старая сборка - это непочиненные дыры.
+func edgeProxyImage(image string) bool {
+	name := strings.ToLower(image)
+	if i := strings.Index(name, "@"); i >= 0 {
+		name = name[:i]
+	}
+	if i := strings.LastIndex(name, "/"); i >= 0 {
+		name = name[i+1:]
+	}
+	if i := strings.Index(name, ":"); i >= 0 {
+		name = name[:i]
+	}
+	switch name {
+	case "caddy", "caddy-docker-proxy", "traefik", "nginx-proxy", "docker-gen":
+		return true
+	}
+	return false
+}
+
+// Даты сборки образов меняются, только когда образ обновили, а список образов на сборочных
+// нодах большой: спрашиваем его раз в полчаса. Ошибку (старый прокси агента отвечает на
+// /images/json 403) тоже помним полчаса, чтобы не сыпать отказами в его лог каждый отчет.
+const imageListTTL = 30 * time.Minute
+
+var imageList struct {
+	at      time.Time
+	created map[string]int64
+}
+
+// imageBuildDates проставляет внешним прокси дату сборки их образа (ImgCreated). Остальным
+// контейнерам она не нужна, и без прокси на ноде список образов не запрашивается вовсе.
+func imageBuildDates(cl *http.Client, cs []dockerContainer, now time.Time) {
+	need := false
+	for i := range cs {
+		if edgeProxyImage(cs[i].Image) && cs[i].imageID != "" {
+			need = true
+			break
+		}
+	}
+	if !need {
+		return
+	}
+	if imageList.at.IsZero() || now.Sub(imageList.at) >= imageListTTL {
+		var raw []struct {
+			Id      string
+			Created int64
+		}
+		imageList.at, imageList.created = now, nil
+		if err := dockerGet(cl, "/images/json", &raw); err == nil {
+			imageList.created = make(map[string]int64, len(raw))
+			for _, im := range raw {
+				imageList.created[im.Id] = im.Created
+			}
+		}
+	}
+	for i := range cs {
+		if edgeProxyImage(cs[i].Image) {
+			cs[i].ImgCreated = imageList.created[cs[i].imageID]
+		}
+	}
 }
 
 // containerMem - память контейнера по его cgroup, как в docker stats: использование без
@@ -3803,9 +3874,16 @@ func dockerInspect(cl *http.Client, id string, dc *dockerContainer) {
 		NetworkSettings struct {
 			Networks map[string]struct{ IPAddress string }
 		}
+		// метки контейнера включают метки образа: в них версия, которую пишут в образ при сборке
+		Config struct {
+			Labels map[string]string
+		}
 	}
 	if err := dockerGet(cl, "/containers/"+url.PathEscape(id)+"/json", &ins); err != nil {
 		return
+	}
+	if edgeProxyImage(dc.Image) {
+		dc.ImgVer = strings.TrimSpace(ins.Config.Labels["org.opencontainers.image.version"])
 	}
 	dc.Restarts = ins.RestartCount
 	dc.Policy = ins.HostConfig.RestartPolicy.Name

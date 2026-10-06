@@ -189,6 +189,14 @@ export function fmtSetupVersion(v?: string | null): string {
   return v ? `v${v}` : '?'
 }
 
+// Версия и месяц сборки образа внешнего прокси: "v2.5.5, 12.2021". Версия есть не у всех
+// образов (у caddy-docker-proxy метки нет), месяц сборки - всегда.
+export function proxyBuilt(p: { version?: string; built: number }): string {
+  const d = new Date(p.built * 1000)
+  const when = `${String(d.getMonth() + 1).padStart(2, '0')}.${d.getFullYear()}`
+  return p.version ? `${p.version}, ${when}` : when
+}
+
 // Вышел ли бэкап за «ночное окно». Мягкое уведомление (не алерт): бэкап либо ещё идёт
 // после дедлайна, либо завершился позже него. backup_anytime отключает проверку — для
 // нод, где дневной бэкап это норма. Возвращает текст уведомления или null.

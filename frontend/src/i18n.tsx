@@ -1338,6 +1338,7 @@ const EN: Record<string, string> = {
   'Правила действуют на все. Пороги и исключения — в настройках конкретного сервера/монитора.':
     'Rules apply to all. Thresholds and exceptions live in the specific server/monitor settings.',
   'Недоступен / деградация': 'Down / degraded',
+  'Отвечает через раз': 'Intermittent failures',
   'Частичная доступность (локации)': 'Partial availability (locations)',
   'Недоступен': 'Down',
   'Троттлинг CPU': 'CPU throttling',
@@ -1568,6 +1569,9 @@ const EN: Record<string, string> = {
   'домен': 'domain',
   'мониторов: {n}': '{n} monitors',
   'Частично': 'Partial',
+  'Через раз': 'Intermittent',
+  'через раз': 'intermittent',
+  'Сбои идут вперемешку с успешными проверками, с {time}': 'Failures mixed with successful checks since {time}',
   'Недоступен из части локаций': 'Not reachable from some locations',
   'Не отвечает из этих точек проверки: {list}': 'Not answering from: {list}',
   'Точка проверки «{name}»: не отвечают {down} из {total} мониторов — похоже на проблему самой точки, а не сайтов.':
@@ -1673,6 +1677,20 @@ const EN: Record<string, string> = {
     'an internet-facing proxy holds the docker socket: breaking into the proxy gives root on the host',
   '{name}: docker-сокет у {list} - взлом прокси даст root на хосте':
     '{name}: {list} holds the docker socket - breaking into the proxy gives root on the host',
+  '{name}: устарел образ внешнего прокси {list} - обновите':
+    '{name}: the internet-facing proxy image {list} is outdated - update it',
+  'образ внешнего прокси собран больше года назад': 'the internet-facing proxy image was built more than a year ago',
+  '{list}: образ собран больше года назад. Прокси смотрит в интернет, а за год в нем закрывают не одну дыру.':
+    '{list}: the image was built more than a year ago. The proxy faces the internet, and a year brings more than one security fix.',
+  'caddy-docker-proxy: закрепленная версия, как в роли caddy-proxy - lucaslorentz/caddy-docker-proxy:2.13.1. С caddy 2.5 бэкенд получает заголовки Via и X-Forwarded-Host, а X-Forwarded-For от клиента отбрасывается: остается только реальный IP.':
+    'caddy-docker-proxy: a pinned version, as in the caddy-proxy role - lucaslorentz/caddy-docker-proxy:2.13.1. Since caddy 2.5 the backend gets the Via and X-Forwarded-Host headers, and an X-Forwarded-For sent by the client is dropped: only the real IP stays.',
+  'caddy: последний caddy:2.': 'caddy: the latest caddy:2.',
+  'traefik: последний патч своей ветки, для v2 это traefik:v2.11 (не latest: это уже v3, метки пришлось бы переписать). В 2.11 на чтение запроса вместе с телом по умолчанию 60 с: если на сайтах есть загрузки дольше минуты, верните --entryPoints.<имя>.transport.respondingTimeouts.readTimeout=0.':
+    'traefik: the latest patch of its branch, for v2 that is traefik:v2.11 (not latest: that is v3, the labels would need rewriting). In 2.11 reading a request with its body is limited to 60 s by default: if the sites take uploads longer than a minute, set --entryPoints.<name>.transport.respondingTimeouts.readTimeout=0 back.',
+  'nginx-proxy: последний тег nginxproxy/nginx-proxy (и docker-gen, если он запущен отдельно).':
+    'nginx-proxy: the latest nginxproxy/nginx-proxy tag (and docker-gen if it runs separately).',
+  'Обновлять лучше через стенд рядом: новый образ на других портах, сравнить ответы всех доменов, потом переключить, а старый тег держать для отката. Ноды с этой проблемой плагин инвентаря ansible собирает в группу kervax_proxy_old, caddy по роли обновляет caddy_harden.yml.':
+    'Better update through a stand next to it: the new image on other ports, compare the answers of all domains, then switch, keeping the old tag for a rollback. The ansible inventory plugin puts the nodes with this problem into the kervax_proxy_old group; caddy from the role is updated by caddy_harden.yml.',
   'лог больше не пишется': 'log no longer written',
   'этого лога в отчете больше нет: сайты разнесли по своим логам или контейнер удалили, ошибки ниже - история':
     'this log is no longer in the report: the sites got their own logs or the container was removed, the errors below are history',

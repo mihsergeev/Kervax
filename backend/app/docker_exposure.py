@@ -46,6 +46,50 @@ def exposed(rep: dict) -> list[dict]:
     return out
 
 
+# Сборка образа внешнего прокси старше этого - пора обновлять: он смотрит в интернет, а за год в
+# caddy и traefik закрывают не одну дыру. traefik:latest на одной ноде оказался сборкой 2021 года
+# (v2.5.5), еще до исправления HTTP/2 rapid reset, а caddy-docker-proxy:ci-alpine - caddy 2.4.5.
+OUTDATED_DAYS = 365
+_DAY = 86400
+
+
+def proxy_kind(image: str) -> str | None:
+    """Внешний прокси для проверки возраста образа: те же, что image_kind, плюс обычный caddy."""
+    kind = image_kind(image)
+    if kind:
+        return kind
+    base = (image or "").lower().split("@", 1)[0].rsplit("/", 1)[-1].split(":", 1)[0]
+    return "caddy" if base == "caddy" else None
+
+
+def outdated(rep: dict, now: float) -> list[dict]:
+    """Работающие внешние прокси со старым образом:
+    [{"name", "image", "kind", "version", "built", "age_days"}], built - сборка образа, unix-секунды.
+
+    Дату сборки присылает агент 2.23 (img_created). Нет ее - не флагаем: по тегу возраст не понять
+    (latest бывает и вчерашним, и пятилетним), а на ноде может стоять агент постарше или прокси
+    агента, который не пускает к списку образов."""
+    out: list[dict] = []
+    for c in ((rep or {}).get("docker") or {}).get("containers") or []:
+        if not isinstance(c, dict) or c.get("state") != "running":
+            continue
+        kind = proxy_kind(str(c.get("image") or ""))
+        try:
+            built = int(c.get("img_created") or 0)
+        except (TypeError, ValueError):
+            built = 0
+        if not kind or built <= 0:
+            continue
+        age = int((now - built) // _DAY)
+        if age < OUTDATED_DAYS:
+            continue
+        out.append({
+            "name": str(c.get("name") or ""), "image": str(c.get("image") or ""), "kind": kind,
+            "version": str(c.get("img_ver") or "")[:64], "built": built, "age_days": age,
+        })
+    return out
+
+
 def text(items: list[dict]) -> str:
     """Строка алерта: "caddy-proxy-caddy-1 (caddy) держит docker-сокет: взлом прокси - root на хосте"."""
     if not items:

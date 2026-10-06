@@ -18,7 +18,7 @@ import {
   type Server,
 } from './api'
 import type { Section } from './App'
-import { backupWindowNote, fmtSetupVersion, sinceShort, srvIssues } from './serverUtils'
+import { backupWindowNote, fmtSetupVersion, proxyBuilt, sinceShort, srvIssues } from './serverUtils'
 import { useI18n } from './i18n'
 import { expiryText, registrableDomain } from './checkUtils'
 import { useAuth } from './auth'
@@ -302,6 +302,16 @@ function actionItems(servers: Server[], avail: string, relProblem: string, t: T)
       items.push({ key: `k-acc-${s.id}`, icon: '☸', section: 'kuber', id: s.id, name: s.name, cc: s.country,
         text: t('{name}: Kubernetes без доступа — запустите kube-setup', { name: s.name }) })
     }
+    // Внешний прокси на старом образе: смотрит в интернет, а за год в caddy и traefik закрывают
+    // не одну дыру. Ведем в Docker ноды: там написано, на что и как обновить.
+    const old = s.proxy_outdated ?? []
+    if (old.length > 0) {
+      items.push({ key: `d-old-${s.id}`, icon: '🧓', section: 'docker', id: s.id, name: s.name, cc: s.country,
+        text: t('{name}: устарел образ внешнего прокси {list} - обновите', {
+          name: s.name,
+          list: old.map((p) => `${p.name} (${proxyBuilt(p)})`).join(', '),
+        }) })
+    }
     // Ноды кластера без агента: на них не видно ни дисков, ни SMART, ни упавших юнитов, ни
     // процессов (на k8s-a-prc так неделями жгли 45 ядер зависшие chrome). Ведем во
     // вкладку нод: там кнопка добавить ноду в панель или отметить, что агент не нужен.
@@ -562,11 +572,16 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
   // Заголовок — про СЕЙЧАС: сколько мониторов лежит или деградирует. Открытые
   // инциденты сюда не подмешиваем: иначе при нуле проблем выходило красное
   // «Проблемы: 0». Счётчик инцидентов виден строкой ниже.
-  const allUp = ov && ov.down === 0 && ov.degraded === 0
   const downChecks = (ov?.checks ?? [])
-    // только включённые: выключенный «down» — не проблема (и счётчики его не считают)
-    .filter((c) => c.enabled && (c.last_status === 'down' || c.last_status === 'degraded'))
+    // только включённые: выключенный «down» — не проблема (и счётчики его не считают).
+    // Отвечающий через раз тоже здесь: по последней проверке он обычно "работает".
+    .filter(
+      (c) =>
+        c.enabled &&
+        (c.last_status === 'down' || c.last_status === 'degraded' || !!c.flaky_since),
+    )
     .sort((a, b) => (a.last_status === 'down' ? 0 : 1) - (b.last_status === 'down' ? 0 : 1))
+  const allUp = ov && downChecks.length === 0
   const srvTotal = servers?.length ?? 0
   const srvOnline = servers?.filter((s) => s.online).length ?? 0
   const srvOffline = srvTotal - srvOnline
@@ -793,7 +808,7 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
                   <span className="t-up">{t('Все {n} в норме', { n: ov.total })}</span>
                 ) : (
                   <span className="t-down">
-                    {t('Проблемы: {n}', { n: ov.down + ov.degraded })}
+                    {t('Проблемы: {n}', { n: downChecks.length })}
                   </span>
                 )}
               </div>
@@ -814,8 +829,12 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
                       <span className={`dot ${c.last_status === 'down' ? 'down' : 'degraded'}`} />
                       <span className="warn-name">{c.name}</span>
                       <span className="muted small">
-                        {c.last_status === 'down' ? t('Недоступно') : t('Деградация')}
-                        {c.last_message ? ` · ${c.last_message}` : ''}
+                        {c.last_status === 'down'
+                          ? t('Недоступно')
+                          : c.last_status === 'degraded'
+                            ? t('Деградация')
+                            : t('Отвечает через раз')}
+                        {c.last_status !== 'up' && c.last_message ? ` · ${c.last_message}` : ''}
                       </span>
                     </div>
                   ))}

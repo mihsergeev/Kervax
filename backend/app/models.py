@@ -215,6 +215,13 @@ class Check(Base):
     # ведёт интерфейс и обновляется сразу, а этот — только после реально
     # отправленного алерта, и по нему решается, нужен ли отбой.
     loc_notified: Mapped[list[int] | None] = mapped_column(JSON, nullable=True, default=None)
+    # Сайт отвечает через раз (flaky.py): с какого момента. Так же, как loc_alerted и
+    # loc_notified: flaky_since ведет интерфейс и меняется сразу, а flaky_notified - только
+    # после реально отправленного алерта, и по нему решается, нужен ли отбой.
+    flaky_since: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, default=None
+    )
+    flaky_notified: Mapped[bool] = mapped_column(Boolean, default=False)
     # последние вычисленные сроки (обновляются реже основной проверки)
     ssl_days: Mapped[int | None] = mapped_column(Integer, nullable=True)
     domain_days: Mapped[int | None] = mapped_column(Integer, nullable=True)

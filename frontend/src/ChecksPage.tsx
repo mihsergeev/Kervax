@@ -90,14 +90,14 @@ export function ChecksPage({ onUnauthorized, openCheckId, onConsumed }: Props) {
   // область bulk-настройки: null = ко всем; массив id = к выбранным
   const [bulkIds, setBulkIds] = useState<number[] | null>(null)
   const [importOpen, setImportOpen] = useState(false)
-  const [statusFilter, setStatusFilter] = useState<CheckStatus | 'all' | 'disabled' | 'partial'>(
+  const [statusFilter, setStatusFilter] = useState<CheckStatus | 'all' | 'disabled' | 'partial' | 'flaky'>(
     'all',
   )
   const [query, setQuery] = useState('')
   // режим массового выбора (чекбоксы + удаление выбранных)
   const [selectMode, setSelectMode] = useState(false)
   const [selected, setSelected] = useState<Set<number>>(new Set())
-  const toggleFilter = (s: CheckStatus | 'disabled' | 'partial') =>
+  const toggleFilter = (s: CheckStatus | 'disabled' | 'partial' | 'flaky') =>
     setStatusFilter((cur) => (cur === s ? 'all' : s))
   const [groupBy, setGroupBy] = useState<'group' | 'type' | 'none'>(
     () => (localStorage.getItem('kervax_groupby') as 'group' | 'type' | 'none') || 'group',
@@ -237,6 +237,8 @@ export function ChecksPage({ onUnauthorized, openCheckId, onConsumed }: Props) {
         ? checks.filter(
             (c) => c.enabled && c.last_status !== 'down' && (c.loc_down?.length ?? 0) > 0,
           )
+        : statusFilter === 'flaky'
+          ? checks.filter((c) => c.enabled && c.last_status !== 'down' && !!c.flaky_since)
         : statusFilter === 'disabled'
           ? checks.filter((c) => !c.enabled)
         : checks.filter((c) => c.enabled && c.last_status === statusFilter)
@@ -491,6 +493,17 @@ export function ChecksPage({ onUnauthorized, openCheckId, onConsumed }: Props) {
               tone="degraded"
               active={statusFilter === 'partial'}
               onClick={() => toggleFilter('partial')}
+            />
+          )}
+          {/* Сбои вперемешку с успешными проверками: по последней проверке сайт обычно
+              "работает", и без отдельной плитки его не видно среди проблем */}
+          {(ov.flaky ?? 0) > 0 && (
+            <Tile
+              label={t('Через раз')}
+              value={ov.flaky ?? 0}
+              tone="degraded"
+              active={statusFilter === 'flaky'}
+              onClick={() => toggleFilter('flaky')}
             />
           )}
           {ov.disabled > 0 && (
@@ -1004,6 +1017,16 @@ function CheckRow({
               })}
             >
               🌍 {(c.loc_down ?? []).join(', ')}
+            </span>
+          )}
+          {c.enabled && c.last_status !== 'down' && c.flaky_since && (
+            <span
+              className="uptime-badge t-degraded"
+              title={t('Сбои идут вперемешку с успешными проверками, с {time}', {
+                time: new Date(c.flaky_since).toLocaleString(),
+              })}
+            >
+              🟠 {t('через раз')}
             </span>
           )}
           {!c.enabled && <span className="type-chip off">{t('выкл')}</span>}

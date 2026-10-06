@@ -15,6 +15,7 @@ import { useUrlCard } from './deeplink'
 import { useI18n } from './i18n'
 import { OsIcon } from './osIcon'
 import { CountryFlag } from './CountryFlag'
+import { proxyBuilt } from './serverUtils'
 
 // Вкладка «Docker»: КОМПАКТНЫЙ список хостов с докером; клик по хосту → модалка
 // с его контейнерами (версии, статусы, кнопки, логи). Так масштабируется на 100+
@@ -39,7 +40,7 @@ sudo docker run -d --name kervax-docker-proxy --restart unless-stopped \\
   --user 65534:$DGID -v /var/run/docker.sock:/var/run/docker.sock:ro \\
   wollomatic/socket-proxy:1 \\
   -loglevel warn -listenip 127.0.0.1 -allowfrom 127.0.0.1/32 -shutdowngracetime 1 \\
-  -allowGET '^/(v[0-9.]+/)?(version|info|_ping|containers/json|containers/[a-zA-Z0-9_.-]+/(json|logs))' \\
+  -allowGET '^/(v[0-9.]+/)?(version|info|_ping|containers/json|images/json|containers/[a-zA-Z0-9_.-]+/(json|logs))' \\
   -allowPOST '^/(v[0-9.]+/)?containers/[a-zA-Z0-9_.-]+/(restart|stop|start)$'
 grep -q '^docker_host=' /etc/kervax-agent.conf || echo docker_host=tcp://127.0.0.1:2375 | sudo tee -a /etc/kervax-agent.conf
 sudo systemctl restart kervax-agent`
@@ -141,6 +142,39 @@ function SockWarning({ items }: { items: { name: string; image: string; kind: st
       ))}
       <div className="muted small">
         {t('Проверка после замены: в логе docker-api нет строк blocked request, сайты отвечают как раньше. Ноды с этой проблемой плагин инвентаря ansible собирает в группу kervax_docker_sock.')}
+      </div>
+    </div>
+  )
+}
+
+// Внешний прокси на образе старше года: на что обновлять. Подсказки - из обновлений 06.10.2026
+// (traefik 2.5.5 -> 2.11.57, caddy 2.4.5 -> caddy-docker-proxy 2.13.1): что меняется по умолчанию
+// и чего не поймает сравнение ответов сайтов.
+type ProxyOld = NonNullable<Server['proxy_outdated']>[number]
+
+const PROXY_HINT: Record<string, string> = {
+  cdp: 'caddy-docker-proxy: закрепленная версия, как в роли caddy-proxy - lucaslorentz/caddy-docker-proxy:2.13.1. С caddy 2.5 бэкенд получает заголовки Via и X-Forwarded-Host, а X-Forwarded-For от клиента отбрасывается: остается только реальный IP.',
+  caddy: 'caddy: последний caddy:2.',
+  traefik: 'traefik: последний патч своей ветки, для v2 это traefik:v2.11 (не latest: это уже v3, метки пришлось бы переписать). В 2.11 на чтение запроса вместе с телом по умолчанию 60 с: если на сайтах есть загрузки дольше минуты, верните --entryPoints.<имя>.transport.respondingTimeouts.readTimeout=0.',
+  'nginx-proxy': 'nginx-proxy: последний тег nginxproxy/nginx-proxy (и docker-gen, если он запущен отдельно).',
+}
+
+const proxyHintKey = (p: ProxyOld) => (p.image.includes('caddy-docker-proxy') ? 'cdp' : p.kind)
+
+function ProxyOldWarning({ items }: { items: ProxyOld[] }) {
+  const { t } = useI18n()
+  const keys = [...new Set(items.map(proxyHintKey))].filter((k) => PROXY_HINT[k])
+  return (
+    <div className="docker-noaccess docker-sock-warn">
+      <div className="form-error small">
+        {t('{list}: образ собран больше года назад. Прокси смотрит в интернет, а за год в нем закрывают не одну дыру.',
+          { list: items.map((p) => `${p.name} (${proxyBuilt(p)})`).join(', ') })}
+      </div>
+      {keys.map((k) => (
+        <div key={k} className="muted small">{t(PROXY_HINT[k])}</div>
+      ))}
+      <div className="muted small">
+        {t('Обновлять лучше через стенд рядом: новый образ на других портах, сравнить ответы всех доменов, потом переключить, а старый тег держать для отката. Ноды с этой проблемой плагин инвентаря ansible собирает в группу kervax_proxy_old, caddy по роли обновляет caddy_harden.yml.')}
       </div>
     </div>
   )
@@ -487,6 +521,7 @@ function DockerHostModal({
         )}
         {denied && docker.access && <EnableBlock readonly />}
         {(s.docker_exposed?.length ?? 0) > 0 && <SockWarning items={s.docker_exposed ?? []} />}
+        {(s.proxy_outdated?.length ?? 0) > 0 && <ProxyOldWarning items={s.proxy_outdated ?? []} />}
         {!docker.access ? (
           <EnableBlock />
         ) : cs.length === 0 ? (
@@ -553,6 +588,11 @@ function HostRow({
           {(s.docker_exposed?.length ?? 0) > 0 && (
             <span className="type-chip off" title={t('внешний прокси держит docker-сокет: взлом прокси даст root на хосте')}>
               🔓 docker.sock
+            </span>
+          )}
+          {(s.proxy_outdated?.length ?? 0) > 0 && (
+            <span className="type-chip off" title={t('образ внешнего прокси собран больше года назад')}>
+              🧓 {(s.proxy_outdated ?? []).map((p) => proxyBuilt(p)).join(', ')}
             </span>
           )}
         </div>
