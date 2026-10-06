@@ -192,6 +192,19 @@ button.ghost:hover {
   background: var(--hover);
 }
 
+/* Кнопка действия в строке списка (перезапустить, сбросить): у ghost-кнопки рамка цвета фона
+   строки, и на темной теме кнопка сливалась со строкой. Здесь рамка с оттенком акцента,
+   обычный цвет текста и легкая подложка - видно, что это кнопка. */
+button.ghost.row-act {
+  color: var(--text);
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+button.ghost.row-act:hover:not(:disabled) {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 20%, transparent);
+}
+
 button.danger-solid {
   background: #c0392b;
 }
@@ -989,6 +1002,19 @@ input:focus {
 .mc-row .loc-res-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .mc-row .loc-res-metric { min-width: 4.5rem; text-align: right; }
 .mc-row .loc-res-msg { min-width: 2.5rem; }
+/* колонка действия одной ширины во всех строках: цифры стоят ровно, где бы ни была кнопка */
+.mc-row .mc-act-col {
+  flex: 0 0 14rem;
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 0.5rem;
+  text-align: right;
+}
+@media (max-width: 600px) {
+  .mc-row { flex-wrap: wrap; }
+  .mc-row .mc-act-col { flex: 1 1 100%; justify-content: flex-start; text-align: left; }
+}
 /* у подов длинные имена (деплоймент + хэши): имя - гибкая колонка с многоточием, целиком в подсказке */
 .mp-row .mp-name {
   display: block;

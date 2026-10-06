@@ -1844,15 +1844,21 @@ function MemContainers({ server: s, onChanged, by = 'mem' }: { server: Server; o
               <div className="loc-res-msg muted small">
                 {total ? `${Math.round((val(c) / total) * 100)}%` : ''}
               </div>
-              {cs?.msg && <span className={`small ${cs.ok ? 't-up' : 'form-error'}`}>{cs.msg}</span>}
-              {!isViewer &&
-                (db ? (
-                  <span className="muted small">{t('база: перезапуск только вручную')}</span>
-                ) : (
-                  <button className="ghost small" disabled={!!cs?.busy} onClick={() => restart(c.name)}>
-                    {cs?.busy ? t('перезапускаю...') : t('Перезапустить')}
-                  </button>
-                ))}
+              {/* действие - в колонке одной ширины: иначе строка с кнопкой и строка с пометкой
+                  про базу сдвигали цифры в разные стороны */}
+              {(!isViewer || cs?.msg) && (
+                <div className="mc-act-col">
+                  {cs?.msg && <span className={`small ${cs.ok ? 't-up' : 'form-error'}`}>{cs.msg}</span>}
+                  {!isViewer &&
+                    (db ? (
+                      <span className="muted small">{t('база: перезапуск только вручную')}</span>
+                    ) : (
+                      <button className="ghost small row-act" disabled={!!cs?.busy} onClick={() => restart(c.name)}>
+                        {cs?.busy ? t('перезапускаю...') : t('Перезапустить')}
+                      </button>
+                    ))}
+                </div>
+              )}
             </div>
           )
         })}
@@ -2087,10 +2093,10 @@ function FailedUnits({ server: s, onChanged }: { server: Server; onChanged: () =
               <div className="unit-actions small">
                 {canFix && !us?.busy && (
                   <>
-                    <button className="ghost small" onClick={() => run(u.unit, 'restart')}>
+                    <button className="ghost small row-act" onClick={() => run(u.unit, 'restart')}>
                       {t('Перезапустить')}
                     </button>
-                    <button className="ghost small" onClick={() => run(u.unit, 'reset')}>
+                    <button className="ghost small row-act" onClick={() => run(u.unit, 'reset')}>
                       {t('Сбросить')}
                     </button>
                   </>
@@ -2188,17 +2194,21 @@ function MemPods({ server: s, onChanged, by = 'mem' }: { server: Server; onChang
               <div className="loc-res-msg muted small">
                 {total ? `${Math.round((val(p) / total) * 100)}%` : ''}
               </div>
-              {ps?.msg && <span className={`small ${ps.ok ? 't-up' : 'form-error'}`}>{ps.msg}</span>}
-              {!isViewer &&
-                (db ? (
-                  <span className="muted small">{t('база: перезапуск только вручную')}</span>
-                ) : p.ctrl ? (
-                  <button className="ghost small" disabled={!!ps?.busy} onClick={() => restart(key, p.ns, p.ctrl!)}>
-                    {ps?.busy ? t('перезапускаю...') : t('Перезапустить')}
-                  </button>
-                ) : (
-                  <span className="muted small">{t('без контроллера')}</span>
-                ))}
+              {(!isViewer || ps?.msg) && (
+                <div className="mc-act-col">
+                  {ps?.msg && <span className={`small ${ps.ok ? 't-up' : 'form-error'}`}>{ps.msg}</span>}
+                  {!isViewer &&
+                    (db ? (
+                      <span className="muted small">{t('база: перезапуск только вручную')}</span>
+                    ) : p.ctrl ? (
+                      <button className="ghost small row-act" disabled={!!ps?.busy} onClick={() => restart(key, p.ns, p.ctrl!)}>
+                        {ps?.busy ? t('перезапускаю...') : t('Перезапустить')}
+                      </button>
+                    ) : (
+                      <span className="muted small">{t('без контроллера')}</span>
+                    ))}
+                </div>
+              )}
             </div>
           )
         })}
