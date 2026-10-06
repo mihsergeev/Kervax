@@ -1161,6 +1161,13 @@ function WebErrorList({
                 )}
               </div>
             )}
+            {/* общий лог нескольких сайтов, разложенный по доменам ($host в формате) */}
+            {(r.hosts?.length ?? 0) > 0 && (
+              <div className="web-err-line small">
+                <span className="muted">{t('по доменам')}: </span>
+                <span className="mono">{(r.hosts ?? []).slice(0, 5).map((x) => `${x.h} (${x.n})`).join(', ')}</span>
+              </div>
+            )}
             {codes.length > 0 && (
               <div className="web-err-line small">
                 <span className="muted">{t('коды')}: </span>

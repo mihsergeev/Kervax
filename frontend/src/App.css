@@ -1007,6 +1007,12 @@ input:focus {
     flex-basis: 100%;
   }
 }
+/* прирост бэкапа по прогонам: столбики, свежий справа; подробности - в подсказке столбика */
+.growth-wrap { display: flex; flex-direction: column; gap: 4px; margin: 4px 0 10px; max-width: 100%; overflow-x: auto; }
+.growth-bars { display: block; }
+.growth-bars rect { fill: var(--accent); opacity: 0.7; }
+.growth-bars rect:last-child, .growth-bars rect:hover { opacity: 1; }
+.growth-sum { margin: 2px 0 8px; }
 /* группы процессов по CPU: имя с владельцем - гибкая колонка, "крутятся вхолостую" - своей строкой */
 .cg-row { flex-wrap: wrap; }
 .cg-row .cg-name {

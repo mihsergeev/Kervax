@@ -18,7 +18,7 @@ from urllib.parse import urlparse
 from sqlalchemy import and_, delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app import alerts, audit, backup, checks as checks_exec, custom_backups, heartbeat, settings_store
+from app import alerts, audit, backup, backup_growth, checks as checks_exec, custom_backups, heartbeat, settings_store
 from app import disk_forecast as dfc
 from app.setup_scripts import current_setup_versions, gaps
 from app.config import Settings, get_settings
@@ -192,7 +192,7 @@ _SRV_ICON = {
     "backup_missing": "💾", "backup_failed": "💾", "backup_stale": "💾", "backup_repo": "💾",
     "backup_dump": "💾", "backup_dump_space": "🈵", "backup_cron": "💾", "backup_custom": "💾",
     "clock": "🕐", "disk_health": "💽", "inode": "⚠️", "disk_forecast": "📈", "units": "⚙️",
-    "cpu_spin": "🌀",
+    "cpu_spin": "🌀", "backup_growth": "💾📈",
     # ⏳ — срок ещё не вышел, есть время спланировать; 🔥 — доставка уже встала
     "kube_expiry": "⏳", "flux_down": "🔥☸️", "kube_pod": "☸️🔥", "web_5xx": "🌐🔥",
 }
@@ -1115,6 +1115,7 @@ _SRV_LABEL = {
     "disk_forecast": "прогноз заполнения",
     "units": "юниты systemd",
     "cpu_spin": "процессы в пустом цикле",
+    "backup_growth": "прирост бэкапа",
 }
 
 # Единицы пороговых метрик. Нужны отбою: голое «снова в норме» не отвечает на
@@ -1175,6 +1176,8 @@ def _recovery_detail(key: str, st: dict, ctx: dict) -> str:
         return "упавших юнитов больше нет"
     if key == "cpu_spin":
         return "процессов, крутивших CPU вхолостую, больше нет"
+    if key == "backup_growth":
+        return "прирост бэкапа снова обычный"
     label = _SRV_LABEL[key]
     unit, val = _SRV_UNIT.get(key), ctx.get("value")
     if not unit or val is None:
@@ -2442,9 +2445,22 @@ def web_breakdown(extras: dict | None, now: datetime, clock_unix: float = 0,
         name = web_log_label(x)
         if "/" in name and "(" not in name:
             name = web_label_key(name)
+        rpm, e5 = int(x.get("rpm") or 0), int(x.get("e5") or 0)
+        # Общий лог нескольких сайтов, у которого helper (0.21) разложил поток по доменам
+        # (в формате есть $host): полоса на каждый сайт. Что не разложилось - под подписью лога.
+        for h in (x.get("hosts") or []):
+            if not isinstance(h, dict) or not h.get("h") or h.get("h") == "-":
+                continue
+            hr, he = int(h.get("rpm") or 0), int(h.get("e5") or 0)
+            slot = agg.setdefault(str(h["h"])[:120], [0, 0])
+            slot[0] += hr
+            slot[1] += he
+            rpm, e5 = rpm - hr, e5 - he
+        if rpm <= 0 and e5 <= 0 and x.get("hosts"):
+            continue
         slot = agg.setdefault(name[:120], [0, 0])
-        slot[0] += int(x.get("rpm") or 0)
-        slot[1] += int(x.get("e5") or 0)
+        slot[0] += max(rpm, 0)
+        slot[1] += max(e5, 0)
     busiest = sorted(((k, r, e) for k, (r, e) in agg.items() if r > 0), key=lambda t: -t[1])
     tops = [{"k": k, "r": r, "e": e} for k, r, e in busiest[:top]]
     codes: dict[str, float] = {}
@@ -2483,6 +2499,7 @@ async def web_error_where(session: AsyncSession, server_id: int, now: datetime,
     by_log: dict[str, list] = {}
     codes: dict[str, int] = {}
     paths: dict[str, int] = {}
+    hosts: dict[str, int] = {}
     for r in sorted(rows, key=lambda x: x.ts):
         if web_label_key(r.label or r.log) in muted:
             continue  # заглушенный лог: про него не пишем, даже если он и шумит
@@ -2494,8 +2511,11 @@ async def web_error_where(session: AsyncSession, server_id: int, now: datetime,
         for it in (r.paths or []):
             if isinstance(it, dict) and it.get("p"):
                 paths[str(it["p"])] = paths.get(str(it["p"]), 0) + int(it.get("n") or 0)
+        for it in (r.hosts or []):
+            if isinstance(it, dict) and it.get("h") and it.get("h") != "-":
+                hosts[str(it["h"])] = hosts.get(str(it["h"]), 0) + int(it.get("n") or 0)
     logs = sorted(by_log.values(), key=lambda x: -x[1])
-    return {"logs": logs, "codes": codes, "paths": paths}
+    return {"logs": logs, "codes": codes, "paths": paths, "hosts": hosts}
 
 
 def web_where_text(where: dict) -> str:
@@ -2508,6 +2528,10 @@ def web_where_text(where: dict) -> str:
         top = ", ".join(f"{label} - {n}" for label, n in logs[:2])
         more = f" и ещё {len(logs) - 2} лог(а)" if len(logs) > 2 else ""
         out.append(f"больше всего: {top}{more}")
+    # общий лог нескольких сайтов, разложенный по доменам (helper 0.21): какой сайт падает
+    hosts = sorted((where.get("hosts") or {}).items(), key=lambda kv: -kv[1])
+    if hosts:
+        out.append("по доменам: " + ", ".join(f"{h} - {n}" for h, n in hosts[:3]))
     codes = sorted((where.get("codes") or {}).items(), key=lambda kv: -kv[1])
     if codes:
         out.append("коды: " + ", ".join(f"{c} - {n}" for c, n in codes[:4]))
@@ -2965,6 +2989,12 @@ def _server_conditions(s: Server, now: datetime,
     if online and "cpu_groups" in rep:
         spin = spin_groups(rep)
         out["cpu_spin"] = (1 if spin else 0, {"detail": spin_text(spin, pod_names) if spin else ""})
+
+    # Прогон бэкапа добавил в разы больше обычного (helper backup-setup 0.32). Без блока helper'а
+    # ключа нет: молчание не значит, что прирост стал обычным.
+    if online and backup_growth.EXTRA_KEY in (rep.get("extras") or {}):
+        g = backup_growth.jump(s, now)
+        out["backup_growth"] = (1 if g else 0, {"detail": g["text"] if g else ""})
 
     # Сдвиг часов: локальное время ноды (clock_unix) vs время панели на приёме. По модулю;
     # порог warn 5с / проблема 30с / крит 5мин. Дебаунс (как sustain): разовый спайк —

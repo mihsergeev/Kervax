@@ -16,6 +16,7 @@ import {
   type BackupCommand,
   type BackupCreds,
   type BackupInfo,
+  type BackupRun,
   type BackupServerInfo,
   type BackupSetupJob,
   type CustomBackup,
@@ -137,6 +138,47 @@ function backupRepoStat(
     if (r) return r
   }
   return undefined
+}
+
+// Прогоны бэкапа клиента (helper backup-setup 0.32) и обычный прирост за прогон после сжатия -
+// медиана последних 14, как у алерта о скачке
+function backupRuns(s: Server): BackupRun[] {
+  const b = s.last_report?.extras?.['backup-runs']
+  return b && b.v === 1 && Array.isArray(b.runs) ? b.runs.slice().sort((x, y) => x.ts - y.ts) : []
+}
+function usualGrowth(runs: BackupRun[]): number {
+  const v = runs.slice(-14).map((r) => r.st).sort((a, b) => a - b)
+  if (!v.length) return 0
+  const m = Math.floor(v.length / 2)
+  return v.length % 2 ? v[m] : (v[m - 1] + v[m]) / 2
+}
+
+// Сколько каждый прогон добавил в репозиторий (после сжатия) - столбиками, свежий справа;
+// подробности прогона - в подсказке столбика
+function GrowthBars({ runs }: { runs: BackupRun[] }) {
+  const { t } = useI18n()
+  const max = Math.max(...runs.map((r) => r.st), 1)
+  const w = 6
+  const gap = 2
+  const h = 44
+  return (
+    <svg className="growth-bars" width={runs.length * (w + gap)} height={h} role="img"
+      aria-label={t('Прирост бэкапа по прогонам')}>
+      {runs.map((r, i) => {
+        const bh = Math.max(1, Math.round((r.st / max) * (h - 2)))
+        return (
+          <rect key={r.ts} x={i * (w + gap)} y={h - bh} width={w} height={bh} rx={1}>
+            <title>
+              {`${new Date(r.ts * 1000).toLocaleString()}\n` +
+                t('добавлено {a} (после сжатия {s}), прочитано {p} за {d}', {
+                  a: fmtBytes(r.add), s: fmtBytes(r.st), p: fmtBytes(r.proc), d: fmtDur(r.dur),
+                })}
+            </title>
+          </rect>
+        )
+      })}
+    </svg>
+  )
 }
 
 function fmtAgo(ts?: number): string {
@@ -632,6 +674,27 @@ function BackupModal({
           })()}
           {repo && (repo.size_bytes || 0) > 0 && row(t('В репозитории'),
             `${fmtBytes(repo.size_bytes)} · ${t('снапшотов: {n}', { n: repo.snapshots })}`)}
+          {(() => {
+            // сколько restic добавляет за прогон: это и раздувает бэкап-сервер
+            const runs = backupRuns(s)
+            if (!runs.length) return null
+            const last = runs[runs.length - 1]
+            return (
+              <>
+                {row(t('Последний прогон'), t('добавил {s} (до сжатия {a}) · прочитано {p} за {d}', {
+                  s: fmtBytes(last.st), a: fmtBytes(last.add), p: fmtBytes(last.proc), d: fmtDur(last.dur),
+                }))}
+                {runs.length > 1 && row(t('Обычно за прогон'), fmtBytes(usualGrowth(runs.slice(0, -1))))}
+                <div className="growth-wrap">
+                  <GrowthBars runs={runs.slice(-40)} />
+                  <div className="muted small">
+                    {t('сколько каждый прогон добавил в репозиторий, последние {n}, свежий справа', { n: Math.min(runs.length, 40) })}
+                  </div>
+                  {s.backup_growth && <div className="small t-degraded">⚠ {s.backup_growth.text}</div>}
+                </div>
+              </>
+            )
+          })()}
           {row('restic', (
             <span className="restic-row">
               {b.restic_found ? (shortRestic(b.restic_version) || t('найден')) : t('не найден')}
@@ -1106,8 +1169,9 @@ function RepoUnlock({ r, onChanged }: { r: RepoStat; onChanged: () => void }) {
   )
 }
 
-function RepoRow({ server: s, r, muted, canAct, onChanged }: {
+function RepoRow({ server: s, r, muted, canAct, onChanged, growth }: {
   server: Server; r: RepoStat; muted: Set<string>; canAct: boolean; onChanged: () => void
+  growth?: number // обычный прирост клиента за прогон (после сжатия)
 }) {
   const { t } = useI18n()
   const [busy, setBusy] = useState(false)
@@ -1145,6 +1209,11 @@ function RepoRow({ server: s, r, muted, canAct, onChanged }: {
           {st === 'locked' && <span className="type-chip off">{t('залочен')}</span>}
           {st === 'running' && <span className="type-chip">{t('идёт бэкап')}</span>}
           {st === 'stale' && <span className="type-chip off">{t('устарел')}</span>}
+          {(growth ?? 0) > 0 && (
+            <span className="type-chip" title={t('обычный прирост за прогон после сжатия')}>
+              +{fmtBytes(growth ?? 0)}
+            </span>
+          )}
         </div>
         <div className="docker-c-img mono muted small repo-meta">
           <span>{t('снапшотов: {n}', { n: r.snapshots })}</span>
@@ -1296,12 +1365,21 @@ function StorageBar({ info, t }: { info: BackupServerInfo; t: (k: string, p?: Re
   )
 }
 
-function BackupServerModal({ server: s, info, canAct, onChanged, onClose }: {
-  server: Server; info: BackupServerInfo; canAct: boolean; onChanged: () => void; onClose: () => void
+function BackupServerModal({ server: s, info, servers, canAct, onChanged, onClose }: {
+  server: Server; info: BackupServerInfo; servers: Server[]; canAct: boolean; onChanged: () => void; onClose: () => void
 }) {
   const { t } = useI18n()
   const [q, setQ] = useState('')
-  const [sort, setSort] = useState<'problems' | 'name' | 'size' | 'age' | 'snapshots'>('problems')
+  const [sort, setSort] = useState<'problems' | 'name' | 'size' | 'age' | 'snapshots' | 'growth'>('problems')
+  // Кто раздувает сервер: обычный прирост за прогон у клиента, чей репозиторий здесь. Репозиторий
+  // назван по клиенту (так его заводит helper), поэтому сопоставляем по имени.
+  const growthOf = new Map<string, number>()
+  for (const c of servers) {
+    const runs = backupRuns(c)
+    if (!runs.length) continue
+    const g = usualGrowth(runs)
+    for (const n of [c.hostname, c.name]) if (n) growthOf.set(n, g)
+  }
   const muted = new Set(s.backup_repo_mutes ?? [])
   const all = info.repos ?? []
   const bad = all.filter((r) => repoBad(r, muted)).length
@@ -1313,7 +1391,13 @@ function BackupServerModal({ server: s, info, canAct, onChanged, onClose }: {
     size: (a, b) => (b.size_bytes ?? 0) - (a.size_bytes ?? 0) || a.name.localeCompare(b.name),
     age: (a, b) => (a.last_activity || Infinity) - (b.last_activity || Infinity) || a.name.localeCompare(b.name),
     snapshots: (a, b) => b.snapshots - a.snapshots || a.name.localeCompare(b.name),
+    growth: (a, b) => (growthOf.get(b.name) ?? -1) - (growthOf.get(a.name) ?? -1) || a.name.localeCompare(b.name),
   }
+  const growers = all
+    .map((r) => ({ name: r.name, g: growthOf.get(r.name) ?? 0 }))
+    .filter((x) => x.g > 0)
+    .sort((a, b) => b.g - a.g)
+  const growTotal = growers.reduce((a, x) => a + x.g, 0)
   const repos = all
     .filter((r) => !ql || r.name.toLowerCase().includes(ql))
     .slice()
@@ -1354,6 +1438,14 @@ function BackupServerModal({ server: s, info, canAct, onChanged, onClose }: {
           {canAct && <RestServerUpdate server={s} info={info} onChanged={onChanged} />}
           {canAct && !info.tls_front && <EnableTls server={s} onChanged={onChanged} />}
         </div>
+        {growers.length > 0 && (
+          <div className="muted small growth-sum">
+            {t('За прогон клиенты добавляют около {s}: {top}', {
+              s: fmtBytes(growTotal),
+              top: growers.slice(0, 4).map((x) => `${x.name} ${fmtBytes(x.g)}`).join(', '),
+            })}
+          </div>
+        )}
         {all.length === 0 ? (
           <EnableServerStats />
         ) : (
@@ -1368,6 +1460,7 @@ function BackupServerModal({ server: s, info, canAct, onChanged, onClose }: {
                   <option value="size">{t('сорт: размер')}</option>
                   <option value="age">{t('сорт: старые')}</option>
                   <option value="snapshots">{t('сорт: снапшоты')}</option>
+                  {growers.length > 0 && <option value="growth">{t('сорт: прирост')}</option>}
                 </select>
               </div>
             )}
@@ -1376,7 +1469,8 @@ function BackupServerModal({ server: s, info, canAct, onChanged, onClose }: {
                 <div className="muted small">{t('Ничего не найдено.')}</div>
               ) : (
                 repos.map((r) => (
-                  <RepoRow key={r.name} server={s} r={r} muted={muted} canAct={canAct} onChanged={onChanged} />
+                  <RepoRow key={r.name} server={s} r={r} muted={muted} canAct={canAct} onChanged={onChanged}
+                    growth={growthOf.get(r.name)} />
                 ))
               )}
             </div>
@@ -2229,6 +2323,7 @@ export function BackupsPage({
         <BackupServerModal
           server={openSrv.s}
           info={openSrv.d}
+          servers={servers ?? []}
           canAct={!isViewer}
           onChanged={load}
           onClose={() => setOpenSrvId(null)}

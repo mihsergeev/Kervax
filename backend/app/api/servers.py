@@ -14,7 +14,7 @@ from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, Query, Re
 from fastapi.responses import FileResponse, PlainTextResponse
 from sqlalchemy import delete as sa_delete, func, select
 
-from app import audit, custom_backups, geoip, kube_coverage, manual_probe
+from app import audit, backup_growth, custom_backups, geoip, kube_coverage, manual_probe
 from app.collector import (
     alert_since, docker_since, dump_local_stale, needed_pod_names, pod_uid_names, send_alerts_soon,
     send_autofix_note, server_problems, web_5xx_total, web_breakdown, web_label_key, web_log_label,
@@ -199,6 +199,7 @@ def _out(
     o.problems = server_problems(server, now, pod_names)
     o.alert_since = alert_since(server)
     o.docker_since = docker_since(server)
+    o.backup_growth = backup_growth.jump(server, now)
     o.pod_names = needed_pod_names(server, pod_names)
     return o
 
@@ -1292,11 +1293,13 @@ async def _store_web_errors(session, server: Server, body, now: datetime) -> Non
         codes = x.get("c5") if isinstance(x.get("c5"), dict) else None
         paths = [p for p in (x.get("p5") or []) if isinstance(p, dict)][:8] or None
         lines = [str(v)[:500] for v in (x.get("l5") or []) if isinstance(v, str)][:5] or None
+        hosts = [{"h": str(h.get("h"))[:120], "n": int(h.get("e5") or 0)}
+                 for h in (x.get("hosts") or []) if isinstance(h, dict) and h.get("h") and (h.get("e5") or 0) > 0][:10] or None
         session.add(WebErrorSample(
             server_id=server.id, ts=now, src_ts=src,
             log=str(x.get("log") or "")[:512], label=web_log_label(x)[:255],
             e5=int(x.get("e5") or 0), rpm=int(x.get("rpm") or 0),
-            codes=codes, paths=paths, lines=lines,
+            codes=codes, paths=paths, lines=lines, hosts=hosts,
         ))
 
 
@@ -1324,7 +1327,7 @@ async def server_web_errors(
         k = web_label_key(r.label or r.log)
         a = acc.setdefault(k, {"log": r.log, "label": r.label, "errors": 0, "minutes": 0,
                                "peak": 0, "first_ts": r.ts, "last_ts": r.ts,
-                               "codes": {}, "paths": {}})
+                               "codes": {}, "paths": {}, "hosts": {}})
         a["errors"] += int(r.e5 or 0)
         seen.setdefault(k, set()).add(r.ts)
         a["minutes"] = len(seen[k])
@@ -1338,11 +1341,16 @@ async def server_web_errors(
         for it in (r.paths or []):
             if isinstance(it, dict) and it.get("p"):
                 a["paths"][str(it["p"])] = a["paths"].get(str(it["p"]), 0) + int(it.get("n") or 0)
+        for it in (r.hosts or []):
+            if isinstance(it, dict) and it.get("h"):
+                a["hosts"][str(it["h"])] = a["hosts"].get(str(it["h"]), 0) + int(it.get("n") or 0)
     out = []
     for k, a in sorted(acc.items(), key=lambda kv: -kv[1]["errors"]):
         top = sorted(a["paths"].items(), key=lambda kv: -kv[1])[:8]
+        hosts = sorted(a["hosts"].items(), key=lambda kv: -kv[1])[:10]
         got = lines.get(k, [])
         out.append(WebErrorOut(**{**a, "key": k, "paths": [{"p": p, "n": n} for p, n in top],
+                                  "hosts": [{"h": h, "n": n} for h, n in hosts],
                                   "lines": got[-5:], "lines_n": len(got)}))
     return out
 
