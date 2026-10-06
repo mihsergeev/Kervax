@@ -1856,8 +1856,10 @@ _DISK_IO_MIN = 10
 # Пачки ошибок в пределах часа - одна история, а не алерт и отбой на каждую пачку
 _DISK_IO_HOLD = timedelta(hours=1)
 _DISK_WEAR_WARN = 90
-# Прогноз заполнения: за сколько часов до конца места или inode предупреждать и бить тревогу
-_FORECAST_WARN_H = 72
+# Прогноз заполнения: за сколько часов до конца места или inode предупреждать и бить тревогу.
+# Тот же срок, с которого пункт есть в "Что сломано": раньше там он висел с 10 дней, а алерт
+# приходил за трое суток, и было непонятно, почему "сломано", а тишина.
+_FORECAST_WARN_H = 5 * 24
 _FORECAST_CRIT_H = 24
 # Счетчики, рост которых за сутки значит, что диск умирает сейчас (статичное число,
 # оставшееся с давних времен, - не новость)
@@ -1997,9 +1999,9 @@ def disk_health_problems(block: dict, short: bool = False) -> list[tuple[int, st
 def server_problems(s: Server, now: datetime, pod_names: dict[str, str] | None = None) -> list[dict]:
     """Что сломано на сервере по новым проверкам - поломки дисков, прогноз заполнения, inode,
     упавшие юниты - коротко, для сводки "Что сломано" на главной и значков в списке серверов.
-    Уровни те же, что у алертов: 2-3 - проблема, 1 - предупреждение. Прогноз здесь виден за
-    10 дней (алерт - за трое суток): сводка для того, чтобы успеть. У молчащей ноды пусто, про
-    нее говорит "оффлайн"."""
+    Уровни те же, что у алертов: 2-3 - проблема, 1 - предупреждение. Прогноз здесь виден с того
+    же срока, что и алерт (_FORECAST_WARN_H, пять суток). У молчащей ноды пусто, про нее говорит
+    "оффлайн"."""
     if not seen_online(s, now):
         return []
     rep = s.last_report or {}
@@ -2038,7 +2040,7 @@ def server_problems(s: Server, now: datetime, pod_names: dict[str, str] | None =
             (now - timedelta(seconds=age)).isoformat() if age > 0 else None)
     for i in dfc.fresh_items(s.disk_forecast, now) or []:
         eta = float(i["eta_h"])
-        if eta > 10 * 24:
+        if eta > _FORECAST_WARN_H:
             continue
         what = (f"inode на {i['mount']} кончатся" if i.get("kind") == "inode"
                 else f"{i['mount']} заполнится")
@@ -3052,7 +3054,7 @@ def _server_conditions(s: Server, now: datetime,
         })
 
     # Прогноз заполнения (планировщик, раз в полчаса по истории): место или inode кончатся
-    # через трое суток - предупреждение, через сутки - проблема. Обычные пороги говорят,
+    # через пять суток - предупреждение, через сутки - проблема. Обычные пороги говорят,
     # насколько полно сейчас, прогноз - сколько осталось. Гистерезис по часам: прогноз
     # дышит вместе с ростом, и без запаса алерт мигал бы на границе. Протухший прогноз
     # ключа не дает: молчание - не повод объявлять, что рост прекратился.
@@ -3800,6 +3802,61 @@ async def autofix_disks(session_factory: async_sessionmaker[AsyncSession], now: 
     return queued
 
 
+# --- разбор раздела по прогнозу ---
+# Helper разбирает место сам только от 75%. Прогноз же обещает заполнение через считанные дни
+# и у раздела пониже: из "Что сломано" человек попадал на диск, где нечего освободить и не
+# видно, что растет. Такой раздел панель просит helper разобрать (helper держит разбор сутки),
+# и к клику по пункту разбор уже приехал с отчетом.
+_ANALYZE_AGENT = (2, 24)     # агент передает disk_fix analyze с разделом
+_ANALYZE_HELPER = (0, 6)     # diskusage-setup с разбором по запросу
+_ANALYZE_EVERY = 12 * 3600   # просим заново раньше, чем helper отпустит раздел
+
+
+def disk_analyze_ok(rep: dict) -> bool:
+    """Умеет ли нода разобрать раздел по запросу панели (кнопка "Разобрать" и прогноз)."""
+    hv = ((rep or {}).get("setup_versions") or {}).get("diskusage-setup")
+    return (_ver_tuple((rep or {}).get("agent_version")) >= _ANALYZE_AGENT
+            and _ver_tuple(hv) >= _ANALYZE_HELPER)
+
+
+async def request_disk_analysis(session_factory: async_sessionmaker[AsyncSession], now: datetime) -> int:
+    """Ставит в очередь разбор раздела, который по прогнозу заполнится в пределах предупреждения,
+    а разбора у него нет. По одной команде disk_fix на сервер за раз, раздел - не чаще раза в
+    _ANALYZE_EVERY. Возвращает, сколько команд поставлено."""
+    queued = 0
+    async with session_factory() as session:
+        for s in list(await session.scalars(select(Server).where(Server.enabled.is_(True)))):
+            rep = s.last_report or {}
+            if not disk_analyze_ok(rep) or not seen_online(s, now):
+                continue
+            done = {f.get("mount") for f in ((disk_usage_block(rep) or {}).get("fs") or [])
+                    if isinstance(f, dict)}
+            st = dict(s.disk_autofix_state or {})
+            want = [i["mount"] for i in dfc.fresh_items(s.disk_forecast, now) or []
+                    if i.get("mount") and i["mount"] not in done
+                    and float(i["eta_h"]) <= _FORECAST_WARN_H
+                    and now.timestamp() - float(st.get(f"analyze:{i['mount']}") or 0) >= _ANALYZE_EVERY]
+            if not want:
+                continue
+            busy = await session.scalar(
+                select(BackupCommand.id).where(
+                    BackupCommand.server_id == s.id, BackupCommand.action == "disk_fix",
+                    BackupCommand.status.in_(("pending", "running"))).limit(1))
+            if busy:
+                continue
+            m = want[0]
+            session.add(BackupCommand(server_id=s.id, action="disk_fix", mode="run",
+                                      payload={"name": "analyze", "container": "", "mount": m},
+                                      origin="auto"))
+            st[f"analyze:{m}"] = now.timestamp()
+            s.disk_autofix_state = st
+            await audit.record(session, "авто", "backup_disk_fix", f"analyze:run:{m}"[:120],
+                               f"srv={s.id}")
+            queued += 1
+        await session.commit()
+    return queued
+
+
 async def send_autofix_note(session_factory: async_sessionmaker[AsyncSession],
                             server_id: int, cmd_id: int) -> None:
     """Результат авто-очистки - в каналы алертов: что панель удалила сама и сколько
@@ -3816,6 +3873,8 @@ async def send_autofix_note(session_factory: async_sessionmaker[AsyncSession],
         name, group, rep = s.name, s.group_name or "", s.last_report or {}
         action = str((c.payload or {}).get("name") or "")
         ok, result = bool(c.ok), c.result or ""
+    if action == "analyze":
+        return  # разбор раздела по прогнозу ничего не удаляет
     label = _AUTOFIX_LABEL.get(action, action or "?")
     if ok:
         try:
@@ -4063,6 +4122,8 @@ async def collector_loop(
             await stage("серверные алерты", evaluate_servers(
                 session_factory, settings, datetime.now(timezone.utc)))
             await stage("авто-очистка дисков", autofix_disks(
+                session_factory, datetime.now(timezone.utc)))
+            await stage("разбор дисков по прогнозу", request_disk_analysis(
                 session_factory, datetime.now(timezone.utc)))
             await stage("зависшие команды", _expire_commands(session_factory))
             # Прунинг двигает границу ретеншена медленно — незачем каждый тик гонять

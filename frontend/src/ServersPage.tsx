@@ -1556,6 +1556,58 @@ type DuFixState =
   | { phase: 'done'; data: DuFixResult }
   | { phase: 'error'; msg: string }
 
+// "Разобрать" раздел, на который helper сам не смотрит (ниже 75%): прогноз обещает заполнение
+// или просто интересно, что там лежит. helper держит разбор сутки, результат приезжает со
+// следующим отчетом в блок "На что ушло место". Раздел с прогнозом панель разбирает и сама.
+type AnalyzeState = 'idle' | 'busy' | 'sent' | string
+function DiskAnalyze({ server: s, mount, forecast, onChanged }: {
+  server: Server; mount: string; forecast: boolean; onChanged: () => void
+}) {
+  const { t } = useI18n()
+  const { isViewer } = useAuth()
+  const [st, setSt] = useState<AnalyzeState>('idle')
+  if (isViewer) return null
+  if (!s.disk_analyze) {
+    return forecast ? (
+      <div className="muted small">
+        {t('Разбор места сам включается от 75%. Кнопка "Разобрать" появится с агентом 2.24 и helper diskusage-setup 0.6.')}
+      </div>
+    ) : null
+  }
+  const go = async () => {
+    setSt('busy')
+    try {
+      const c = await backupCommand(s.id, { action: 'disk_fix', mode: 'run', fix: 'analyze', mount })
+      let last = c
+      for (let i = 0; i < 90 && last.status !== 'done' && last.status !== 'error'; i++) {
+        await new Promise((res) => setTimeout(res, 1000))
+        last = await backupCommandStatus(s.id, c.id)
+      }
+      if (last.status === 'done' && last.ok) {
+        setSt('sent')
+        // du по большому разделу идет минуты, а отчет агент шлет раз в несколько десятков секунд
+        window.setTimeout(onChanged, 45_000)
+        window.setTimeout(onChanged, 150_000)
+      } else {
+        setSt(last.result || (last.status === 'error' ? t('не удалось') : t('нода не ответила вовремя')))
+      }
+    } catch (e) {
+      setSt(e instanceof Error ? e.message : t('не удалось'))
+    }
+  }
+  if (st === 'sent') {
+    return <div className="muted small">{t('Разбор запущен, появится ниже через минуту-две.')}</div>
+  }
+  return (
+    <div className="du-analyze small">
+      <button className="du-fix-btn" disabled={st === 'busy'} onClick={go}>
+        {st === 'busy' ? t('Запрашиваю...') : t('Разобрать')}
+      </button>
+      {st !== 'idle' && st !== 'busy' && <span className="t-down"> {st}</span>}
+    </div>
+  )
+}
+
 // "На что ушло место" (helper diskusage-setup): дерево самых больших каталогов раздела и
 // находки с готовыми командами. Безопасные находки и лог контейнера освобождаются кнопкой:
 // сначала нода сама считает, что удалится (preview), человек подтверждает, потом run.
@@ -4509,6 +4561,7 @@ function ServerDetail({
                   const ip = d.inodes ? Math.round(((d.inodes_used ?? 0) / d.inodes) * 100) : null
                   const tone = toneOf(Math.max(p ?? 0, ip ?? 0))
                   const fc = diskForecast(s, r).filter((i) => i.mount === d.mount)
+                  const analyzed = (diskUsage(r)?.fs ?? []).some((f) => f.mount === d.mount)
                   return (
                     <div key={d.mount} className="loc-res loc-res-wrap">
                       <span className={`sdot sdot-${tone === 't-down' ? 'down' : tone === 't-degraded' ? 'degraded' : 'up'}`} />
@@ -4523,12 +4576,15 @@ function ServerDetail({
                           </>
                         )}
                         {fc.map((i) => (
-                          <div key={i.kind} className={i.eta_h <= 72 ? 't-down' : i.eta_h <= 7 * 24 ? 't-degraded' : ''}>
+                          <div key={i.kind} className={i.eta_h <= 24 ? 't-down' : i.eta_h <= 5 * 24 ? 't-degraded' : ''}>
                             {(i.kind === 'inode' ? t('inode кончатся {when}', { when: etaText(i.eta_h, t) }) : t('заполнится {when}', { when: etaText(i.eta_h, t) })) +
                               ' ' +
                               t('(растет на ~{r}% в сутки)', { r: i.rate < 10 ? +i.rate.toFixed(1) : Math.round(i.rate) })}
                           </div>
                         ))}
+                        {!analyzed && (
+                          <DiskAnalyze server={s} mount={d.mount} forecast={fc.length > 0} onChanged={onChanged} />
+                        )}
                       </div>
                     </div>
                   )
