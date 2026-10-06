@@ -21,11 +21,16 @@ import { CountryFlag } from './CountryFlag'
 // серверов. Действия/логи — on-demand через bounded proxy (агент забирает команду
 // быстрым опросом, исполняет, постит результат). Логи не хранятся — разовый tail.
 
-function dockerTone(state: string): string {
-  if (state === 'running') return 't-up'
-  if (state === 'exited' || state === 'dead') return 't-down'
+// Остановленный контейнер красный, только если это авария: по нему ушел алерт, докер не смог
+// его запустить (err) или он dead. Остановленный руками - серый: docker stop не снимает
+// restart-policy, и раньше такой выглядел упавшим.
+function dockerTone(c: DockerContainer, problem?: string): string {
+  if (c.state === 'running') return 't-up'
+  if (problem || c.err || c.state === 'dead') return 't-down'
+  if (c.state === 'exited' || c.state === 'created') return 't-muted'
   return 't-degraded'
 }
+const RESTART_POLICIES = new Set(['always', 'unless-stopped', 'on-failure'])
 
 const DOCKER_ENABLE_CMD = `DGID=$(getent group docker | cut -d: -f3)
 sudo docker rm -f kervax-docker-proxy 2>/dev/null
@@ -114,11 +119,16 @@ function ContainerRow({
     }
   }
   const running = c.state === 'running'
+  const tone = dockerTone(c, problem)
+  // агент 2.22+ сказал, что ошибки запуска нет: значит, остановили руками
+  const byHand = tone === 't-muted' && c.exit !== undefined && RESTART_POLICIES.has(c.policy ?? '')
   // problem приходит из alert_state бэкенда: подсвечиваем ровно те контейнеры, про
   // которые панель уже написала в телеграм. Крашащийся контейнер обычно в состоянии
   // running (он же перезапускается), поэтому по одному c.state он выглядел зелёным.
   return (
-    <div className={`loc-res docker-row ${dockerTone(c.state)}${problem ? ` docker-row-${problem}` : ''}`}>
+    <div
+      className={`loc-res docker-row ${tone === 't-muted' ? 'docker-row-stopped' : tone}${problem ? ` docker-row-${problem}` : ''}`}
+    >
       <div className="docker-c-main">
         <div className="docker-c-name mono">
           {problem && (
@@ -144,9 +154,19 @@ function ContainerRow({
         <div className="docker-c-img mono muted small" title={c.image}>
           {c.image}
         </div>
+        {c.err && !running && (
+          <div className="form-error small docker-c-err" title={c.err}>
+            {t('докер не смог запустить')}: {c.err}
+          </div>
+        )}
         {err && <div className="form-error small">{err}</div>}
       </div>
-      <div className={`docker-c-status mono small ${dockerTone(c.state)}`}>{c.status}</div>
+      <div
+        className={`docker-c-status mono small ${tone}`}
+        title={byHand ? t('остановлен вручную: docker такой контейнер сам не поднимает, это не авария и тревоги нет') : undefined}
+      >
+        {c.status}
+      </div>
       <div className="docker-actions">
         <button className="ghost icon-btn" onClick={onLogs} title={t('Логи')}>
           📄

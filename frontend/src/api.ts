@@ -827,6 +827,11 @@ export type DockerContainer = {
   health?: string // healthy/unhealthy/starting
   mem?: number // память работающего контейнера, байты (агент 2.14+, как docker stats)
   cpu?: number // CPU работающего контейнера, % одного ядра (агент 2.21+)
+  // у остановленного (агент 2.22+): почему он лежит
+  err?: string // State.Error: докер пытался его запустить и не смог
+  exit?: number // код выхода
+  max_retry?: number // on-failure:N
+  oom?: boolean // убит OOM-киллером
 }
 export type DockerInfo = {
   present: boolean

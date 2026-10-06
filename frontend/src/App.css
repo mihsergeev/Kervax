@@ -1230,6 +1230,19 @@ input:focus {
   border-left-color: var(--border);
   opacity: 0.55;
 }
+/* контейнер, остановленный штатно (руками или отработавший): серая полоса и имя, но без
+   прозрачности - кнопка "запустить" в строке должна оставаться заметной */
+.docker-row.docker-row-stopped {
+  border-left-color: var(--border);
+}
+.docker-row-stopped .docker-c-name {
+  color: var(--text-muted);
+}
+.docker-c-err {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 /* «подвал» опнутых из бэкапа — отделён сверху и приглушён, чтобы не мозолил */
 .nobackup-optout {
   margin-top: 1.1rem;

@@ -46,3 +46,18 @@ async def test_errors_page_shows_domains(client, auth_headers):
     assert len(rows) == 1
     # домены без ошибок и неразобранное в сводку ошибок не идут
     assert rows[0]["hosts"] == [{"h": "mobile.shop.example", "n": 11}, {"h": "anketa.shop.example", "n": 1}]
+
+
+async def test_unparsed_domain_is_not_a_domain(client, auth_headers):
+    """Строки, из которых домен не достался ("-"), даже с ошибками не показываются доменом."""
+    r = await client.post("/api/servers", json={"name": "skid"}, headers=auth_headers)
+    token, sid = r.json()["token"], r.json()["server"]["id"]
+    log = {"log": "docker:deals-nginx", "rpm": 10, "e5": 4, "c5": {"502": 4},
+           "sites": ["api.deals.example", "admin.deals.example"],
+           "hosts": [{"h": "-", "rpm": 5, "e5": 3}, {"h": "api.deals.example", "rpm": 5, "e5": 1}]}
+    report = {"hostname": "skid", "os": "U", "agent_version": "2.22", "cpu_percent": 5, "mem_used": 1,
+              "mem_total": 2, "extras": {"web-rate": {"ts": int(time.time()), "rpm": 10, "e5": 4, "logs": [log]}}}
+    r = await client.post("/api/agent/report", json=report, headers={"Authorization": f"Bearer {token}"})
+    assert r.status_code == 200
+    rows = (await client.get(f"/api/servers/{sid}/web-errors?hours=1", headers=auth_headers)).json()
+    assert rows[0]["hosts"] == [{"h": "api.deals.example", "n": 1}]

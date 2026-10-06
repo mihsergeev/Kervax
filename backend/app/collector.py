@@ -1313,6 +1313,57 @@ _DOCKER_LOOP_WINDOW = 900  # сек: окно подсчёта рестарто�
 _DOCKER_LOOP_MIN = 3  # приростов RestartCount за окно → crash-loop
 _DOCKER_RESTART_POLICIES = frozenset({"always", "unless-stopped", "on-failure"})
 _DOCKER_DOWN_STATES = frozenset({"exited", "dead"})
+# С какими кодами контейнер обычно выходит по docker stop: 0 - сам корректно завершился по
+# SIGTERM, 143 - убит SIGTERM, 137 - добит SIGKILL после таймаута остановки
+_DOCKER_STOP_CODES = frozenset({0, 137, 143})
+_EXITED_RE = re.compile(r"^Exited \((-?\d+)\)")
+
+
+def docker_exit_code(c: dict) -> int | None:
+    """Код выхода остановленного контейнера: поле агента (2.22) или строка статуса docker
+    ("Exited (0) 17 minutes ago")."""
+    if isinstance(c.get("exit"), int):
+        return c["exit"]
+    m = _EXITED_RE.match(str(c.get("status") or ""))
+    return int(m.group(1)) if m else None
+
+
+def docker_down_why(c: dict) -> str | None:
+    """Почему лежащий контейнер - авария (текст для алерта), или None, если это не авария.
+
+    docker stop не снимает restart-policy, поэтому "не работает при policy=always" само по себе
+    не авария: упавший контейнер с такой политикой докер поднимает сам за секунды. Долго лежать
+    он может, если его остановили руками (разработчик погасил воркеры на время работы, а панель
+    подняла тревогу) или если докер не смог его запустить - причину докер
+    пишет в State.Error, агент 2.22 отдает ее в err. У on-failure:N - еще когда кончились
+    перезапуски. Контейнеры без restart-policy (one-shot, policy=no) не трогаем вовсе."""
+    state = (c.get("state") or "").lower()
+    policy = (c.get("policy") or "").lower()
+    if policy not in _DOCKER_RESTART_POLICIES:
+        return None
+    err = str(c.get("err") or "").strip()
+    # created с ошибкой: compose up не смог его запустить (порт занят, нет каталога для mount)
+    if state not in _DOCKER_DOWN_STATES and not (state == "created" and err):
+        return None
+    if state == "dead":
+        return "состояние dead: докер не смог его остановить или убрать"
+    if err:
+        return f"докер не смог его запустить: {err}"
+    code = docker_exit_code(c)
+    if policy == "on-failure" and code == 0:
+        return None  # отработал и вышел сам: on-failure перезапускает только после ошибки
+    if "exit" in c:
+        # Агент 2.22+ видит State.Error, и ее нет. При always/unless-stopped это остановка
+        # руками; при on-failure тоже, пока перезапуски не кончились: иначе докер поднимал бы его.
+        mx, rc = int(c.get("max_retry") or 0), int(c.get("restarts") or 0)
+        if policy == "on-failure" and mx and rc >= mx:
+            oom = ", убит OOM" if c.get("oom") else ""
+            return f"перезапуски кончились ({rc} из {mx}), код выхода {code}{oom}"
+        return None
+    # агент старше 2.22: ошибку запуска не видно, судим по коду выхода
+    if code in _DOCKER_STOP_CODES:
+        return None
+    return f"остановился с кодом {code}" if code is not None else "не работает"
 
 # Бэкап считается «не свежим», если последний успешный прогон старше этого порога.
 # Бэкапы обычно ежедневные → 2 дня = ≥2 пропуска подряд, это уже требует внимания.
@@ -3438,8 +3489,10 @@ async def evaluate_servers(
                             "docker_loop", s.name, f"контейнер {name}: перезапуски прекратились",
                             srv_url(s, "docker_loop"), recovery=True))
                     cs["alerted_loop"] = False
-                # «упал»: не running при наличии restart-policy, держится ≥ sustain
-                is_down = state in _DOCKER_DOWN_STATES and policy in _DOCKER_RESTART_POLICIES
+                # «упал»: не работает и это авария (docker_down_why: не остановлен руками),
+                # держится ≥ sustain
+                why = docker_down_why(c)
+                is_down = why is not None
                 was_down = bool(cs.get("alerted_down"))
                 down_ok = r_down and r_down["enabled"] and "docker_down" not in mutes and _rule_scope_ok(r_down, s)
                 if is_down:
@@ -3449,15 +3502,18 @@ async def evaluate_servers(
                     held = (now - started).total_seconds() if started else 0.0
                     if held >= sustain_s and not was_down and down_ok:
                         fires.append(srv_fire(s, "docker_down", r_down,
-                                              {"container": name, "state": state, "policy": policy or "no"}))
+                                              {"container": name, "state": state, "policy": policy or "no",
+                                               "why": why}))
                         cs["alerted_down"] = True
                 else:
                     cs["down_since"] = None
                     if was_down:  # снова поднялся; отметку снимаем и у заглушенного
                         if down_ok:
+                            # не поднялся, но это уже не авария: остановили руками, сняли policy
+                            back = (f"контейнер {name} снова работает" if state == "running"
+                                    else f"контейнер {name} остановлен штатно, тревога снята")
                             recoveries.append(_server_alert_text(
-                                "docker_down", s.name, f"контейнер {name} снова работает",
-                                srv_url(s, "docker_down"), recovery=True))
+                                "docker_down", s.name, back, srv_url(s, "docker_down"), recovery=True))
                         cs["alerted_down"] = False
                 dstate[name] = cs
             # контейнеры, пропавшие из списка (удалены/пересозданы) — чистим состояние
