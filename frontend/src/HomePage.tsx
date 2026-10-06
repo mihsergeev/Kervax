@@ -412,6 +412,11 @@ function backupProblems(servers: Server[], t: T): ProbItem[] {
           name: s.name, jobs: own.map((j) => `${j.name} (${j.problem})`).join(', '),
         }) })
     }
+    // прогон добавил в разы больше обычного (helper backup-setup 0.32, считает бэкенд)
+    const g = s.backup_growth
+    if (g && !(s.alert_mutes ?? []).includes('backup_growth'))
+      out.push({ key: `b-growth-${s.id}`, id: s.id, name: s.name, cc: s.country, down: false,
+        since: new Date(g.ts * 1000).toISOString(), text: `${s.name}: ${g.text}` })
     const ownFiles = (s.custom_backups ?? []).some((j) => j.files && !j.ignored)
     // сервер без настроенного бэкапа (и не помеченный «не требуется», и не сам бэкап-сервер)
     if (!bs?.present && !(b?.configured || b?.metric_present) && !s.backup_not_required && !ownFiles) {

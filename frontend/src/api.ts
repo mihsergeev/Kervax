@@ -958,7 +958,10 @@ export type ServerReport = {
   kube_expiry?: KubeExpiry[] // сроки PKI/kubeconfig/токенов Flux (хелпер kubeexpiry-setup)
   flux?: FluxState[] | null // состояния Ready ресурсов Flux; null = данных нет
   caps?: Record<string, boolean> // возможности агента: kmsg, proc_full (полный ли /proc)
-  extras?: { 'web-rate'?: WebRate; 'disk-usage'?: DiskUsage; 'disk-health'?: DiskHealth; units?: UnitsBlock } & Record<
+  extras?: {
+    'web-rate'?: WebRate; 'disk-usage'?: DiskUsage; 'disk-health'?: DiskHealth; units?: UnitsBlock
+    'backup-runs'?: BackupRuns
+  } & Record<
     string,
     unknown
   > // блоки хелперов как есть
@@ -966,6 +969,12 @@ export type ServerReport = {
   clock_skew_sec?: number // сдвиг часов ноды относительно панели, сек (± ; считает бэкенд)
   clock_unix?: number // локальные часы ноды на момент отправки отчёта
 }
+// Итоги прогонов бэкапа (helper backup-setup 0.32): сколько restic добавил в репозиторий.
+// add - новые данные до сжатия, st - сколько легло в репозиторий, proc - сколько прочитано
+export type BackupRun = {
+  ts: number; add: number; st: number; proc: number; files: number; fnew: number; fchg: number; dur: number
+}
+export type BackupRuns = { v: number; ts: number; unit?: string; runs: BackupRun[] }
 // Разбор места (helper diskusage-setup): есть, пока раздел заполняется (от 75%). Helper
 // ничего не удаляет, у находок - команда для человека.
 export type DiskUsageDir = { path: string; bytes: number }
@@ -1255,6 +1264,8 @@ export type Server = {
   kube_unmonitored?: KubeNodeRef[] // ноды кластера без агента панели (считает бэкенд)
   alert_since?: Record<string, string> // с какого момента видна проблема каждого вида (ISO)
   docker_since?: Record<string, string> // с какого момента лежит каждый упавший контейнер
+  // последний прогон бэкапа добавил в разы больше обычного (считает бэкенд)
+  backup_growth?: { level: number; text: string; st: number; usual: number; ts: number } | null
   pod_names?: Record<string, string> // начало uid пода -> ns/имя (для "pod <uid8>" в cpu_groups)
 }
 
@@ -1709,6 +1720,7 @@ export type WebErrorRow = {
   last_ts: string
   codes: Record<string, number> // {"502": 30} - с хелпером 0.12
   paths: { p: string; n: number }[] // частые пути с ошибками - с хелпером 0.12
+  hosts?: { h: string; n: number }[] // по доменам, если лог общий и в формате есть $host (helper 0.21)
   lines: string[] // последние строки с 5xx (хелпер 0.19), секреты замаскированы на ноде
   lines_n: number // сколько строк сохранено за окно
 }

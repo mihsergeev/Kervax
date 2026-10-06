@@ -8,7 +8,10 @@
 # secrets or config contents.
 set -euo pipefail
 
-KERVAX_SETUP_VERSION=0.20  # MAJOR.MINOR; compared component-wise
+# 0.21: a log shared by several sites is split by domain when its log_format has $host (or
+#       $http_host, $server_name): the map gets the format as a 4th column, the counter takes the
+#       domain out of every line by that format and reports requests and 5xx per domain
+KERVAX_SETUP_VERSION=0.21  # MAJOR.MINOR; compared component-wise
 KERVAX_SETUP_ALWAYS=1     # safe on any node: the refresh is a no-op without a web server
 
 HELPER_DIR=/lib65/kervax
@@ -134,11 +137,35 @@ collect_traefik() {
 # трогаем - считаем виртуальный хост целиком.
 extract_logs() {
   awk '
+    # Четвертая колонка - формат лога, если в нем есть домен ($host, $http_host,
+    # $server_name): по нему счетчик разложит общий лог по сайтам. Формат с табуляцией не
+    # берем - он сломал бы колонки карты. Третья колонка (имя для показа) тут пустая.
+    function hostfmt(f) {
+      if (index(f, "\t")) return ""
+      return (f ~ /\$(host|http_host|server_name)([^A-Za-z0-9_]|$)/ || f ~ /\$\{(host|http_host|server_name)\}/) ? f : ""
+    }
     # лог печатаем и без доменов: общий access.log ловит всё, что не разложено по
     # виртуальным хостам, и его поток тоже надо видеть
-    function flush() { if (slog!="") print slog "\t" names }
-    /^[[:space:]]*server[[:space:]]*\{/ && !insrv { insrv=1; depth=1; names=""; slog=hlog; next }
-    !insrv && $1=="access_log" { p=$2; sub(/;$/,"",p); if (p!="off") hlog=p; next }
+    function flush() { if (slog!="") print slog "\t" names "\t\t" hostfmt(fmtdef[sfmt]) }
+    # формат у access_log: третье слово, если это не параметр (buffer=, if=...); по умолчанию combined
+    function fmtname(   f) { f=$3; sub(/;$/,"",f); if (f=="" || f ~ /=/) f="combined"; return f }
+    # log_format идет на несколько строк до ";" вне кавычек: собираем содержимое кавычек
+    function lf_feed(x,   i, c) {
+      for (i = 1; i <= length(x); i++) {
+        c = substr(x, i, 1)
+        if (lf_q != "") { if (c == lf_q) lf_q = ""; else lf_fmt = lf_fmt c }
+        else if (c == "\"" || c == "\047") lf_q = c
+        else if (c == ";") { fmtdef[lf_name] = lf_fmt; lf_on = 0; return }
+      }
+    }
+    BEGIN { fmtdef["combined"] = "$remote_addr - $remote_user [$time_local] \"$request\" $status $body_bytes_sent \"$http_referer\" \"$http_user_agent\"" }
+    lf_on { lf_feed($0); next }
+    !insrv && $1=="log_format" {
+      lf_name=$2; lf_fmt=""; lf_q=""; lf_on=1; x=$0
+      sub(/^[[:space:]]*log_format[[:space:]]+[^[:space:]]+/, "", x); lf_feed(x); next
+    }
+    /^[[:space:]]*server[[:space:]]*\{/ && !insrv { insrv=1; depth=1; names=""; slog=hlog; sfmt=hfmt; next }
+    !insrv && $1=="access_log" { p=$2; sub(/;$/,"",p); if (p!="off") { hlog=p; hfmt=fmtname() } next }
     insrv {
       o=gsub(/\{/,"{"); c=gsub(/\}/,"}"); depth += o-c
       if ($1=="server_name") {
@@ -155,7 +182,7 @@ extract_logs() {
           if (g !~ /[A-Za-z]/) continue;
           if (g !~ /^[A-Za-z0-9.*_-]+$/) continue;
           names = names (names==""?"":" ") g }
-      } else if ($1=="access_log" && depth==1) { p=$2; sub(/;$/,"",p); slog=(p=="off"?"":p) }
+      } else if ($1=="access_log" && depth==1) { p=$2; sub(/;$/,"",p); slog=(p=="off"?"":p); sfmt=fmtname() }
       if (depth<=0) { flush(); insrv=0 }
     }
   '
@@ -168,12 +195,13 @@ extract_logs() {
 # переменной падает синтаксической ошибкой. Карта уезжала пустой, а с ней молчал счётчик.
 merge_logs() {
   awk -F'\t' '
-    { lg=$1; if (!(lg in seen_log)) { seen_log[lg]=1; a[lg]=""; nm[lg]=$3 }
+    { lg=$1; if (!(lg in seen_log)) { seen_log[lg]=1; a[lg]=""; nm[lg]=$3; fm[lg]=$4 }
       if (nm[lg]=="" && $3!="") nm[lg]=$3
+      if (fm[lg]=="" && $4!="") fm[lg]=$4
       n=split($2, w, " ")
       for (i=1;i<=n;i++) if (w[i]!="" && !((lg SUBSEP w[i]) in seen)) {
         seen[lg SUBSEP w[i]]=1; a[lg]=a[lg] (a[lg]==""?"":" ") w[i] } }
-    END { for (k in a) printf "%s\t%s\t%s\n", k, a[k], nm[k] }'
+    END { for (k in a) printf "%s\t%s\t%s\t%s\n", k, a[k], nm[k], fm[k] }'
 }
 
 # Путь лога внутри контейнера -> путь на хосте по его bind-mount'ам.
@@ -205,7 +233,12 @@ container_logs() {
   # кладет в метку coolify.resourceName - показываем его (anketa, viola).
   label=$(docker inspect --format '{{index .Config.Labels "coolify.resourceName"}}' "$c" 2>/dev/null)
   case "$label" in ""|"<no value>") label=$cname ;; esac
-  docker exec "$c" nginx -T 2>/dev/null | extract_logs | while IFS="$(printf '\t')" read -r lg names; do
+  T=$(printf '\t')
+  docker exec "$c" nginx -T 2>/dev/null | extract_logs | while IFS= read -r line; do
+    # колонки разбираем руками: read с IFS=таб склеивает пустые поля, и формат вставал бы
+    # на место пустых доменов
+    lg=${line%%"$T"*}; rest=${line#*"$T"}; names=${rest%%"$T"*}; hf=${rest##*"$T"}
+    [ "$hf" = "$rest" ] && hf=""
     # Обычный файл - берём его путь, иначе это поток: в образе nginx access.log ведёт в
     # /dev/stdout, а оттуда в pipe, и readlink -f отвечает то /dev/..., то /proc/...,
     # то «/pipe:[816111754]» (busybox во фронте панели). Спрашиваем тип, а не путь.
@@ -219,16 +252,16 @@ container_logs() {
             # меняется при каждом пересоздании (деплой, рестарт), а карта обновляется раз
             # в 15 минут. Нода «слепла» до следующего обновления. Путь разрешает счётчик.
             if [ -n "$cname" ]; then
-              printf 'docker:%s\t%s\t%s\n' "$cname" "$names" "$label"
+              printf 'docker:%s\t%s\t%s\t%s\n' "$cname" "$names" "$label" "$hf"
             elif [ -n "$logpath" ] && [ -f "$logpath" ]; then
-              printf '%s\t%s\t%s\n' "$logpath" "$names" "$label"
+              printf '%s\t%s\t%s\t%s\n' "$logpath" "$names" "$label" "$hf"
             fi
             ;;
         esac
         ;;
       *)
         hp=$(printf '%s\n' "$mounts" | host_path "$real")
-        [ -n "$hp" ] && printf '%s\t%s\t%s\n' "$hp" "$names" "$label"
+        [ -n "$hp" ] && printf '%s\t%s\t%s\t%s\n' "$hp" "$names" "$label" "$hf"
         ;;
     esac
   done
@@ -392,8 +425,48 @@ sites_json() { tr ' ' '\n' | awk 'BEGIN{printf "["} {gsub(/[\\"]/,""); if($0==""
 # ...`), полем через табуляцию (ingress-nginx) и как "status":503 в json-логах. Не нашли -
 # строка идёт в «нераспознано»: без этого «ошибок ноль» и «код не нашёлся» выглядели бы
 # одинаково.
+# $1 - формат лога с доменом (пусто - не делим), $2 - секунд с прошлого счета, $3 - во сколько
+# раз домножать (большой прирост считается выборкой). Пятая строка вывода - домены:
+# [{"h":"site","rpm":N,"e5":N}] в минуту, по убыванию ошибок, потом запросов.
 count_codes() {
-  awk '
+  awk -v fmt="${1:-}" -v el="${2:-60}" -v kk="${3:-1}" '
+    # План формата: L[0] V[1] L[1] V[2] ... V[N] L[N] - кусок текста, переменная, кусок.
+    # Домен в строке - текст между L[i-1] и L[i] для его переменной. Только index/substr:
+    # у mawk нет захвата групп в match.
+    function plan(f,   i, j, nm) {
+      N = 0; L[0] = ""
+      while (f != "") {
+        i = index(f, "$")
+        if (i == 0) { L[N] = L[N] f; break }
+        L[N] = L[N] substr(f, 1, i - 1); f = substr(f, i + 1)
+        if (substr(f, 1, 1) == "{") { j = index(f, "}"); nm = substr(f, 2, j - 2); f = substr(f, j + 1) }
+        else if (match(f, /^[A-Za-z0-9_]+/)) { nm = substr(f, 1, RLENGTH); f = substr(f, RLENGTH + 1) }
+        else { L[N] = L[N] "$"; continue }
+        N++; V[N] = nm; L[N] = ""
+      }
+    }
+    function hostof(x,   i, p, k, v) {
+      if (substr(x, 1, length(L[0])) != L[0]) return ""
+      p = length(L[0]) + 1
+      for (i = 1; i <= HI; i++) {
+        if (L[i] == "") { v = substr(x, p); break }  # переменная последняя: до конца строки
+        k = index(substr(x, p), L[i])
+        if (k == 0) return ""
+        v = substr(x, p, k - 1); p += k - 1 + length(L[i])
+      }
+      v = tolower(v); sub(/:[0-9]+$/, "", v); sub(/\.$/, "", v)
+      if (v == "" || v == "-" || v !~ /^[a-z0-9.*_-]+$/) return ""
+      return v
+    }
+    BEGIN {
+      HI = 0
+      if (fmt != "") {
+        plan(fmt)
+        for (i = 1; i <= N && !HI; i++) if (V[i] == "host" || V[i] == "http_host" || V[i] == "server_name") HI = i
+        # домен посреди двух переменных без текста между ними не отделить
+        if (HI && L[HI] == "" && HI < N) HI = 0
+      }
+    }
     # Строка ошибки для панели (helper 0.19): без обертки json-лога докера и префикса CRI,
     # значения секретов в query замаскированы (token=***), только печатные ASCII - один
     # кривой байт ронял бы JSON отчета, - не длиннее 400 символов. Докер в json-логе пишет
@@ -450,6 +523,14 @@ count_codes() {
         next }
       n++
       c=s+0
+      if (HI) {
+        x = $0
+        if (x ~ /^\{"log":"/) { sub(/^\{"log":"/, "", x); sub(/\\n","stream".*$/, "", x); gsub(/\\"/, "\"", x) }
+        sub(/^[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[^ ]* (stdout|stderr) [FP] /, "", x)
+        h = hostof(x)
+        if (h == "") h = "-"
+        hn[h]++; if (c >= 500) he5[h]++
+      }
       if (c>=500) {
         e5++; c5[s]++
         sl[nl % 5] = $0; nl++  # последние пять строк с 5xx - для панели
@@ -488,6 +569,16 @@ count_codes() {
       # сами строки с 5xx, последние пять, очищенные (см. clean)
       printf "["; k=0
       for (t = (nl > 5 ? nl - 5 : 0); t < nl; t++) printf "%s\"%s\"", (k++?",":""), jesc(clean(sl[t % 5]))
+      printf "]\n"
+      # домены: десять самых важных - сначала по ошибкам, потом по запросам
+      printf "["; k=0
+      if (el < 1) el = 60
+      for (t=0;t<10;t++) {
+        best=""; be=-1; bq=-1
+        for (x in hn) if (he5[x]+0 > be || (he5[x]+0 == be && hn[x] > bq)) { best=x; be=he5[x]+0; bq=hn[x] }
+        if (best=="") break
+        printf "%s{\"h\":\"%s\",\"rpm\":%.0f,\"e5\":%.0f}", (k++?",":""), best, hn[best]*60*kk/el, be*60*kk/el
+        delete hn[best] }
       printf "]\n" }'
 }
 
@@ -562,6 +653,9 @@ if [ -s "$MAP" ]; then
     names=${rest%%"$TAB"*}
     name=${rest#*"$TAB"}
     [ "$name" = "$rest" ] && name=""
+    # четвертая колонка (0.21) - формат лога с доменом
+    fmt=""
+    case "$name" in *"$TAB"*) fmt=${name#*"$TAB"}; name=${name%%"$TAB"*} ;; esac
     [ -n "$lg" ] || continue
     case "$lg" in
       caddy:*)
@@ -626,19 +720,20 @@ if [ -s "$MAP" ]; then
     out="0 0 0 0"
     if [ "$delta" -gt 0 ]; then
       if [ "$delta" -le "$CAP" ]; then
-        out=$(tail -c "+$((psize + 1))" "$src" 2>/dev/null | count_codes)
+        out=$(tail -c "+$((psize + 1))" "$src" 2>/dev/null | count_codes "$fmt" "$el" 1)
       else
         # Слишком много за раз: считаем кусок и масштабируем числа. Коды и пути не
         # масштабируем - они про то, КАКИЕ ошибки, а не сколько.
         k=$((delta / SAMPLE + 1))
         out=$(tail -c "+$((psize + 1))" "$src" 2>/dev/null | head -c "$SAMPLE" \
-              | count_codes | awk -v k="$k" 'NR==1{printf "%d %d %d %d\n", $1*k, $2*k, $3*k, $4*k; next} {print}')
+              | count_codes "$fmt" "$el" "$k" | awk -v k="$k" 'NR==1{printf "%d %d %d %d\n", $1*k, $2*k, $3*k, $4*k; next} {print}')
       fi
     fi
     counts=$(printf '%s\n' "$out" | sed -n 1p)
     c5=$(printf '%s\n' "$out" | sed -n 2p); [ -n "$c5" ] || c5="{}"
     p5=$(printf '%s\n' "$out" | sed -n 3p); [ -n "$p5" ] || p5="[]"
     l5=$(printf '%s\n' "$out" | sed -n 4p); [ -n "$l5" ] || l5="[]"
+    hosts=$(printf '%s\n' "$out" | sed -n 5p); [ -n "$hosts" ] || hosts="[]"
     # shellcheck disable=SC2086
     set -- $counts
     lines=${1:-0}; e5=${2:-0}; e4=${3:-0}; un=${4:-0}
@@ -648,7 +743,9 @@ if [ -s "$MAP" ]; then
     ru=$((un * 60 / el))
     TOTAL=$((TOTAL + rpm))
     T5=$((T5 + r5))
-    ITEMS="$ITEMS${ITEMS:+,}{\"log\":\"$(esc "$lg")\",\"name\":\"$(esc "$name")\",\"rpm\":$rpm,\"e5\":$r5,\"e4\":$r4,\"un\":$ru,\"c5\":$c5,\"p5\":$p5,\"l5\":$l5,\"sites\":$(printf '%s' "$names" | sites_json)}"
+    # домены - только у логов, которые делятся (формат с $host): иначе блок рос бы зря
+    hj=""; [ -n "$fmt" ] && hj=",\"hosts\":$hosts"
+    ITEMS="$ITEMS${ITEMS:+,}{\"log\":\"$(esc "$lg")\",\"name\":\"$(esc "$name")\",\"rpm\":$rpm,\"e5\":$r5,\"e4\":$r4,\"un\":$ru,\"c5\":$c5,\"p5\":$p5,\"l5\":$l5$hj,\"sites\":$(printf '%s' "$names" | sites_json)}"
   done < "$MAP"
 fi
 

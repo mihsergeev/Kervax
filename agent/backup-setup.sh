@@ -70,7 +70,14 @@ AGENT_USER=kervax
 #       and the panel alerted on a failed unit every night on feed-a, stats-a and
 #       k8s-b. Any other read error (permissions, a failing disk) still fails the unit.
 #       Existing backup scripts, the helper's and the ansible role's, are patched in place once
-KERVAX_SETUP_VERSION=0.31  # MAJOR.MINOR; compared component-wise (0.13 > 0.2!)
+# 0.32: how much every backup run added to the repository: restic prints its summary at the end
+#       ("Added to the repository: 221.756 GiB (96.562 GiB stored)", "processed ... in 46:12"), the
+#       refresh picks it up from the journal of each finished run and keeps the last 40 runs in
+#       report.d/backup-runs.json. The first refresh fills the history from what the journal has.
+#       The panel draws the nightly growth, shows who inflates a backup server and warns when a
+#       node suddenly adds much more than usual (feed-a and stats-a added 200-300 GB a
+#       night, and nobody saw it until the backup server filled up)
+KERVAX_SETUP_VERSION=0.32  # MAJOR.MINOR; compared component-wise (0.13 > 0.2!)
 KERVAX_SETUP_ALWAYS=1  # safe on any node: installs only its own helper and spool and does not
                        # touch the backup configuration until the panel sends a command
 install -d -m 0755 "$HELPER_DIR" "$STATE_DIR" /var/lib/kervax/versions
@@ -2020,6 +2027,86 @@ cmd_custom_scan() {
   printf '{"v":1,"ts":%s,"jobs":[%s]}\n' "$now" "$out"
 }
 
+# ------- the nightly growth of the backup: restic's summary of every run, from the journal -------
+RUNS_JSON="$CUSTOM_DIR/backup-runs.json"
+RUNS_MAX=40     # runs kept: more than a month of nightly backups
+RUNS_DAYS=45    # how far back the journal is read for the history
+
+# restic summary lines of the backup unit's journal (-o short-unix) -> {"v":1,...,"runs":[...]}.
+# A run is recorded at its "processed N files, X in M:SS" line, with the "Files:" and "Added to the
+# repository" lines that come before it. mawk-safe: no gawk extensions, big numbers through %.0f.
+backup_runs_parse() {
+  awk -v now="$(date +%s)" -v unit="$1" -v max="$RUNS_MAX" '
+    function bytes(v, u,   m) {
+      m = 1
+      if (u == "KiB") m = 1024
+      else if (u == "MiB") m = 1048576
+      else if (u == "GiB") m = 1073741824
+      else if (u == "TiB") m = 1099511627776
+      return v * m
+    }
+    function secs(x,   a, n) {
+      n = split(x, a, ":")
+      if (n == 3) return a[1] * 3600 + a[2] * 60 + a[3]
+      if (n == 2) return a[1] * 60 + a[2]
+      return x + 0
+    }
+    {
+      ts = $1; sub(/\..*/, "", ts)
+      msg = $0; sub(/^[^ ]+ [^ ]+ [^ ]+ /, "", msg)
+    }
+    msg ~ /^Files: / { split(msg, f, /[ ,]+/); fnew = f[2]; fchg = f[4]; next }
+    msg ~ /^Added to the repository: / {
+      split(msg, f, / +/); st = f[7]; sub(/^\(/, "", st)
+      add = bytes(f[5], f[6]); st = bytes(st, f[8]); have = 1; next
+    }
+    msg ~ /^processed [0-9]+ files, / {
+      split(msg, f, / +/)
+      if (have) {
+        n++
+        R[n] = sprintf("{\"ts\":%s,\"add\":%.0f,\"st\":%.0f,\"proc\":%.0f,\"files\":%.0f,\"fnew\":%.0f,\"fchg\":%.0f,\"dur\":%.0f}", \
+          ts, add, st, bytes(f[4], f[5]), f[2], fnew, fchg, secs(f[7]))
+      }
+      have = 0; fnew = 0; fchg = 0; next
+    }
+    END {
+      printf "{\"v\":1,\"ts\":%s,\"unit\":\"%s\",\"runs\":[", now, unit
+      for (i = (n > max ? n - max + 1 : 1); i <= n; i++) printf "%s%s", (k++ ? "," : ""), R[i]
+      print "]}"
+    }'
+}
+
+cmd_backup_runs() {
+  local timer svc
+  timer="$(find_timer)" || true
+  [ -n "$timer" ] || { echo "timer not found" >&2; return 2; }
+  svc="${timer%.timer}.service"
+  journalctl -u "$svc" --since "-${RUNS_DAYS} days" -o short-unix -q --no-pager 2>/dev/null \
+    | grep -a -E ': (Files: |Added to the repository: |processed [0-9]+ files, )' \
+    | backup_runs_parse "$svc"
+}
+
+# Rebuilt once per finished run of the backup service (its InvocationID changes), not every minute:
+# the journal of 45 days is read only then. A run in progress is left alone until it ends.
+backup_runs_maybe() {
+  local timer svc inv
+  timer="$(find_timer)" || true
+  [ -n "$timer" ] || return 0
+  svc="${timer%.timer}.service"
+  [ "$(systemctl show -p ActiveState --value "$svc" 2>/dev/null)" = activating ] && return 0
+  inv="$(systemctl show -p InvocationID --value "$svc" 2>/dev/null)"
+  if [ -f "$RUNS_JSON" ] && [ "$inv" = "$(cat "$RUNS_JSON.inv" 2>/dev/null)" ]; then return 0; fi
+  install -d -m 0755 "$CUSTOM_DIR"
+  (
+    flock -n 9 || exit 0
+    if nice -n 10 timeout 150 "$0" backup-runs > "$RUNS_JSON.tmp" 2>/dev/null && [ -s "$RUNS_JSON.tmp" ]; then
+      mv -f "$RUNS_JSON.tmp" "$RUNS_JSON"; chmod 0644 "$RUNS_JSON"; printf '%s' "$inv" > "$RUNS_JSON.inv"
+    else
+      rm -f "$RUNS_JSON.tmp"
+    fi
+  ) 9>/run/kervax-backup-runs.lock
+}
+
 # the scan runs from the minute cron, but not more often than CUSTOM_EVERY and never twice at once
 custom_scan_maybe() {
   local age="$CUSTOM_EVERY"
@@ -2040,8 +2127,9 @@ case "${1:-}" in
   get-config)    cmd_get_config ;;
   # the scan is throttled inside (every CUSTOM_EVERY seconds): the config refresh stays per-minute
   refresh)       refresh_config || true; custom_scan_maybe; kube_access_maybe || true; dumps_trigger_maybe || true
-                 dumps_rsyncable_maybe || true; vanished_ok_maybe || true ;;
+                 dumps_rsyncable_maybe || true; vanished_ok_maybe || true; backup_runs_maybe || true ;;
   custom-scan)   cmd_custom_scan ;;
+  backup-runs)   cmd_backup_runs ;;
   set-paths)     shift; cmd_set_paths "$@" ;;
   set-schedule)  shift; cmd_set_schedule "$@" ;;
   run-now)       cmd_run_now ;;
@@ -2053,7 +2141,7 @@ case "${1:-}" in
   dump-remove)   shift; cmd_dump_remove "$@" ;;
   dump-status)   cmd_dump_status ;;
   process-spool) cmd_process_spool ;;
-  *) echo "usage: $0 {get-config|custom-scan|set-paths <mode> <path...>|set-schedule <HH:MM>|run-now|provision <url> <repopass> <mode> <HH:MM> <delay> <ver> <cacert_b64|-> <path...>|dump-setup <engine> [container]|dump-remove <engine>|dump-status|process-spool}" >&2; exit 2 ;;
+  *) echo "usage: $0 {get-config|custom-scan|backup-runs|set-paths <mode> <path...>|set-schedule <HH:MM>|run-now|provision <url> <repopass> <mode> <HH:MM> <delay> <ver> <cacert_b64|-> <path...>|dump-setup <engine> [container]|dump-remove <engine>|dump-status|process-spool}" >&2; exit 2 ;;
 esac
 HELPER_EOF
 chmod 0755 "$HELPER"; chown root:root "$HELPER"

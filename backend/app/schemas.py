@@ -1060,6 +1060,8 @@ class ServerOut(BaseModel):
     alert_since: dict[str, str] = Field(default_factory=dict)
     # с какого момента лежит каждый упавший контейнер: {имя: ISO}
     docker_since: dict[str, str] = Field(default_factory=dict)
+    # последний прогон бэкапа добавил в разы больше обычного: {level, text, st, usual, ts}
+    backup_growth: dict | None = None
     # начало uid пода -> ns/имя: агент воркера без доступа к kube-api знает поды по uid
     pod_names: dict[str, str] = Field(default_factory=dict)
     # ноды кластера без агента панели; считает kube_coverage по ВСЕМ серверам панели
@@ -1142,6 +1144,8 @@ class WebErrorOut(BaseModel):
     last_ts: datetime
     codes: dict[str, int] = {}
     paths: list[WebErrorPath] = []
+    # по доменам, если лог общий и в его формате есть $host (helper 0.21): [{"h": "site", "n": 41}]
+    hosts: list[dict] = []
     lines: list[str] = []  # последние строки с 5xx (helper 0.19), старые сверху
     lines_n: int = 0       # сколько строк сохранено за окно - все отдает /web-errors/lines
 
