@@ -120,22 +120,47 @@ if docker ps --format '{{.Image}}' | grep -q caddy-docker-proxy; then
 else
     say "Поднимаю caddy-docker-proxy (TLS и сертификаты)"
     mkdir -p /srv/caddy
-    cat > /srv/caddy/compose.yml <<YML
+    # caddy смотрит в интернет, поэтому docker-сокет ему не даем (дыра в caddy была бы root
+    # на хосте): список контейнеров, сети и события он читает через прокси только на
+    # чтение, и подключаться к нему может только caddy
+    DGID=$(stat -c %g /var/run/docker.sock)
+    cat > /srv/caddy/compose.yml <<'YML'
 services:
   caddy:
     image: lucaslorentz/caddy-docker-proxy:2.10-alpine
     restart: unless-stopped
-    ports: $CADDY_PORTS
+    ports: __PORTS__
     environment:
       CADDY_INGRESS_NETWORKS: caddy
+      DOCKER_HOST: tcp://docker-api:2375
+    volumes:
+      - ./data:/data
+    networks: [caddy, docker-api]
+    depends_on: [docker-api]
+  docker-api:
+    image: wollomatic/socket-proxy:1
+    restart: unless-stopped
+    user: "65534:__DGID__"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
-      - ./data:/data
-    networks: [caddy]
+    networks: [docker-api]
+    command:
+      - -loglevel=warn
+      - -listenip=0.0.0.0
+      - -allowfrom=caddy
+      - -shutdowngracetime=5
+      - -allowHEAD=^/_ping$$
+      - -allowGET=^/(v[0-9.]+/)?(_ping|version|info|events|containers/json|networks(/[a-zA-Z0-9_.-]+)?)$$
 networks:
   caddy:
     external: true
+  docker-api:
+    internal: true
 YML
+    sed -i "s|__PORTS__|$CADDY_PORTS|; s|__DGID__|$DGID|" /srv/caddy/compose.yml
     (cd /srv/caddy && docker compose up -d >/dev/null) || die "caddy не поднялся"
 fi
 

@@ -4,6 +4,18 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.4.100] - 2026-10-06
+
+### Security
+- Установщик (ops/quickstart.sh) больше не дает caddy docker-сокет. caddy смотрит в интернет, и
+  с сокетом дыра в caddy была бы root на хосте. Теперь caddy-docker-proxy читает список
+  контейнеров, сети и события через wollomatic/socket-proxy во внутренней сети: только чтение,
+  подключаться может только контейнер caddy, без capabilities, корень только для чтения.
+  Существующей установки перезапуск установщика не касается (caddy уже работает). Чтобы
+  перевести ее: `cd /srv/caddy && docker compose down`, затем снова запустить установщик - он
+  поднимет caddy по-новому (и заодно обновит панель, .env не трогает), сертификаты в
+  /srv/caddy/data остаются.
+
 ## [1.4.99] - 2026-10-06
 
 ### Security
