@@ -63,12 +63,14 @@ async function runAndWait(
 
 // Внешний прокси с docker-сокетом: что добавить в его compose, чтобы он читал докер через
 // прокси сокета только на чтение. traefik и nginx-proxy смотрят еще и свойства контейнеров
-// (inspect), caddy-docker-proxy - нет.
+// (inspect), caddy-docker-proxy - нет. Версия прокси закреплена (образ подписан), шаблоны
+// путей прокси сам обрамляет ^ и $, сторож перезапускает его, если сокет отвалился.
 const SOCK_PROXY_SVC = (client: string, inspect: boolean) => `  docker-api:
-    image: wollomatic/socket-proxy:1
+    image: wollomatic/socket-proxy:1.13.1
     restart: unless-stopped
     user: "65534:GID"   # GID: stat -c %g /var/run/docker.sock
     read_only: true
+    mem_limit: 64M
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
     volumes:
@@ -77,8 +79,10 @@ const SOCK_PROXY_SVC = (client: string, inspect: boolean) => `  docker-api:
     command:
       - -listenip=0.0.0.0
       - -allowfrom=${client}   # the service name of ${client}
-      - -allowHEAD=^/_ping$$
-      - -allowGET=^/(v[0-9.]+/)?(_ping|version|info|events|containers/json${inspect ? '|containers/[a-zA-Z0-9_.-]+/json' : ''}|networks(/[a-zA-Z0-9_.-]+)?)$$
+      - -watchdoginterval=600
+      - -stoponwatchdog
+      - -allowHEAD=/_ping
+      - -allowGET=/(v[0-9]+\\.[0-9]+/)?(_ping|version|info|events|containers/json${inspect ? '|containers/[a-zA-Z0-9][a-zA-Z0-9_.-]*/json' : ''}|networks(/[a-zA-Z0-9][a-zA-Z0-9_.-]*)?)
 networks:
   docker-api:
     internal: true`
@@ -88,8 +92,11 @@ const SOCK_FIX: Record<string, string> = {
   caddy:
     environment:
       - DOCKER_HOST=tcp://docker-api:2375
+      # required: without it caddy inspects its own container to find
+      # the networks, and the proxy does not allow inspect
+      - CADDY_INGRESS_NETWORKS=caddy   # your ingress network
     networks: [caddy, docker-api]   # plus the networks it has now
-    # and drop /var/run/docker.sock from its volumes
+    # and drop /var/run/docker.sock from its volumes; not for swarm mode
 ${SOCK_PROXY_SVC('caddy', false)}`,
   traefik: `services:
   traefik:

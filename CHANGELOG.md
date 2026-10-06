@@ -4,6 +4,19 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.4.102] - 2026-10-06
+
+### Security
+- Прокси сокета у caddy (установщик и подсказка в разделе Docker) закреплен на подписанной
+  версии wollomatic/socket-proxy 1.13.1 вместо плавающего :1, получил сторож сокета (после
+  обновления docker соединение с сокетом может отвалиться - прокси завершится и перезапустится,
+  иначе caddy перестал бы видеть новые контейнеры) и лимит памяти 64 МБ. Шаблоны путей строже:
+  версия API только вида v1.47, имя сети начинается с буквы или цифры. Раньше /networks/.. и
+  /v../containers/json проходили фильтр (docker отвечал 301 и 400, без данных), теперь 403.
+  Явные ^ и $ убраны - прокси ставит их сам, и в compose больше нет экранирования $$.
+- В подсказке для caddy добавлен обязательный CADDY_INGRESS_NETWORKS: без него caddy ищет
+  свои сети, разглядывая собственный контейнер (inspect), а прокси этого не пропускает.
+
 ## [1.4.101] - 2026-10-06
 
 ### Security
