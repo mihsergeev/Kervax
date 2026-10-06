@@ -18,7 +18,7 @@ from urllib.parse import urlparse
 from sqlalchemy import and_, delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app import alerts, audit, backup, backup_growth, checks as checks_exec, custom_backups, heartbeat, settings_store
+from app import alerts, audit, backup, backup_growth, checks as checks_exec, custom_backups, docker_exposure, heartbeat, settings_store
 from app import disk_forecast as dfc
 from app.setup_scripts import current_setup_versions, gaps
 from app.config import Settings, get_settings
@@ -192,7 +192,7 @@ _SRV_ICON = {
     "backup_missing": "💾", "backup_failed": "💾", "backup_stale": "💾", "backup_repo": "💾",
     "backup_dump": "💾", "backup_dump_space": "🈵", "backup_cron": "💾", "backup_custom": "💾",
     "clock": "🕐", "disk_health": "💽", "inode": "⚠️", "disk_forecast": "📈", "units": "⚙️",
-    "cpu_spin": "🌀", "backup_growth": "💾📈",
+    "cpu_spin": "🌀", "backup_growth": "💾📈", "docker_sock": "🔓🐳",
     # ⏳ — срок ещё не вышел, есть время спланировать; 🔥 — доставка уже встала
     "kube_expiry": "⏳", "flux_down": "🔥☸️", "kube_pod": "☸️🔥", "web_5xx": "🌐🔥",
 }
@@ -226,6 +226,7 @@ _KUBE_TAB = {"kube_expiry": "expiry", "flux_down": "flux", "kube_pod": "pods"}
 _ALERT_SECTION = {
     "docker_loop": "docker",
     "docker_down": "docker",
+    "docker_sock": "docker",
     "queue": "services",
     "backup_repo": "backups",
     "kube_pod": "kuber",
@@ -1116,6 +1117,7 @@ _SRV_LABEL = {
     "units": "юниты systemd",
     "cpu_spin": "процессы в пустом цикле",
     "backup_growth": "прирост бэкапа",
+    "docker_sock": "docker-сокет у внешнего прокси",
 }
 
 # Единицы пороговых метрик. Нужны отбою: голое «снова в норме» не отвечает на
@@ -1178,6 +1180,8 @@ def _recovery_detail(key: str, st: dict, ctx: dict) -> str:
         return "процессов, крутивших CPU вхолостую, больше нет"
     if key == "backup_growth":
         return "прирост бэкапа снова обычный"
+    if key == "docker_sock":
+        return "внешний прокси больше не держит docker-сокет"
     label = _SRV_LABEL[key]
     unit, val = _SRV_UNIT.get(key), ctx.get("value")
     if not unit or val is None:
@@ -3046,6 +3050,14 @@ def _server_conditions(s: Server, now: datetime,
     if online and backup_growth.EXTRA_KEY in (rep.get("extras") or {}):
         g = backup_growth.jump(s, now)
         out["backup_growth"] = (1 if g else 0, {"detail": g["text"] if g else ""})
+
+    # Внешний прокси (caddy-docker-proxy, traefik) с docker-сокетом: взлом прокси - root на
+    # хосте. Только при доступе к докеру: без списка контейнеров молчание ничего не значит.
+    # sig - какие контейнеры: новый такой же прокси на ноде - повод для нового сообщения.
+    if online and (rep.get("docker") or {}).get("access"):
+        ex = docker_exposure.exposed(rep)
+        out["docker_sock"] = (1 if ex else 0, {"detail": docker_exposure.text(ex),
+                                               "sig": sorted(e["name"] for e in ex)})
 
     # Сдвиг часов: локальное время ноды (clock_unix) vs время панели на приёме. По модулю;
     # порог warn 5с / проблема 30с / крит 5мин. Дебаунс (как sustain): разовый спайк —

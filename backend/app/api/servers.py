@@ -14,7 +14,7 @@ from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, Query, Re
 from fastapi.responses import FileResponse, PlainTextResponse
 from sqlalchemy import delete as sa_delete, func, select
 
-from app import audit, backup_growth, custom_backups, geoip, kube_coverage, manual_probe
+from app import audit, backup_growth, custom_backups, docker_exposure, geoip, kube_coverage, manual_probe
 from app.collector import (
     alert_since, docker_since, dump_local_stale, needed_pod_names, pod_uid_names, send_alerts_soon,
     send_autofix_note, server_problems, web_5xx_total, web_breakdown, web_label_key, web_log_label,
@@ -196,6 +196,7 @@ def _out(
     # оказаться внутренним. local_ip не смотрим — он приватный и страны не имеет.
     o.country = geoip.country_of(server.external_ip) or geoip.country_of(server.agent_ip)
     o.docker_alerts = _docker_alerts(server)
+    o.docker_exposed = docker_exposure.exposed(server.last_report or {})
     o.problems = server_problems(server, now, pod_names)
     o.alert_since = alert_since(server)
     o.docker_since = docker_since(server)
@@ -1314,8 +1315,13 @@ async def server_web_errors(
     hours: int = Query(default=24, ge=1, le=720),
 ) -> list[WebErrorOut]:
     """Ошибки 5xx по логам за окно: где, сколько, какие коды и пути. Сюда ведёт алерт."""
-    await _get_or_404(server_id, session, user)
+    server = await _get_or_404(server_id, session, user)
     since = datetime.now(timezone.utc) - timedelta(hours=hours)
+    # какие логи нода пишет сейчас: остальные за окно - история (сайты разнесли по логам)
+    web = ((server.last_report or {}).get("extras") or {}).get("web-rate")
+    # ключ как у сохраненных строк: подпись обрезана до 255, без подписи - путь лога (до 512)
+    live = ({web_label_key(web_log_label(x)[:255] or str(x.get("log") or "")[:512])
+             for x in (web.get("logs") or []) if isinstance(x, dict)} if isinstance(web, dict) else None)
     rows = list(await session.scalars(
         select(WebErrorSample)
         .where(WebErrorSample.server_id == server_id, WebErrorSample.ts >= since)
@@ -1354,7 +1360,8 @@ async def server_web_errors(
         got = lines.get(k, [])
         out.append(WebErrorOut(**{**a, "key": k, "paths": [{"p": p, "n": n} for p, n in top],
                                   "hosts": [{"h": h, "n": n} for h, n in hosts],
-                                  "lines": got[-5:], "lines_n": len(got)}))
+                                  "lines": got[-5:], "lines_n": len(got),
+                                  "gone": live is not None and k not in live}))
     return out
 
 

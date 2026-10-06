@@ -15,7 +15,7 @@ import hmac
 from fastapi import APIRouter, HTTPException, Request
 from sqlalchemy import select
 
-from app import settings_store
+from app import docker_exposure, settings_store
 from app.api.servers import _helper_advice, _is_online, helper_rollout
 from app.config import get_settings
 from app.deps import SessionDep
@@ -51,6 +51,7 @@ async def ansible_servers(request: Request, session: SessionDep) -> AnsibleServe
             online=online, enabled=bool(s.enabled),
             rollout=online and helper_rollout(s, advice),
             outdated=[a.name for a in advice],
+            issues=["docker_sock"] if online and docker_exposure.exposed(rep) else [],
         ))
     acc["used_at"] = now.isoformat()
     await settings_store.set_ansible_access(session, acc)

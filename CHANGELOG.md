@@ -4,6 +4,24 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.4.101] - 2026-10-06
+
+### Security
+- Панель находит внешний прокси с docker-сокетом: caddy-docker-proxy, traefik или nginx-proxy,
+  которому смонтирован /var/run/docker.sock целиком. Такой прокси смотрит в интернет, а сокет -
+  это root на хосте: одна дыра в прокси, и чужой получает весь сервер. Новый алерт "Docker:
+  внешний прокси с docker-сокетом" (раз при появлении, отбой после исправления), пункт в "Что
+  сломано", метка у хоста и у контейнера в разделе Docker. В карточке хоста написано, что
+  добавить в compose (прокси сокета только на чтение во внутренней сети), отдельно для caddy,
+  traefik и nginx-proxy. Ноды с такой проблемой ansible получает группой kervax_docker_sock
+  (поле issues в /api/ansible/servers). Наши прокси сокета и сборщики метрик (cadvisor,
+  promtail) держат сокет по делу и в интернет не смотрят - их панель не трогает.
+
+### Changed
+- В карточке "Ответы 5xx" лог, которого больше нет в отчете (сайты разнесли по своим логам,
+  контейнер удалили), помечен "лог больше не пишется": его ошибки за сутки видны, но это
+  история, а не то, что падает сейчас.
+
 ## [1.4.100] - 2026-10-06
 
 ### Security

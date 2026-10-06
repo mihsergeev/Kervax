@@ -1119,7 +1119,14 @@ function WebErrorList({
         return (
           <div key={r.key || r.log} className={`web-err-row${perm || snoozed ? ' web-err-muted' : ''}`}>
             <div className="web-err-head">
-              <span className="web-err-where mono">{r.label || r.log.split('/').pop()}</span>
+              <span className="web-err-where mono">
+                {r.label || r.log.split('/').pop()}
+                {r.gone && (
+                  <span className="type-chip off" title={t('этого лога в отчете больше нет: сайты разнесли по своим логам или контейнер удалили, ошибки ниже - история')}>
+                    {t('лог больше не пишется')}
+                  </span>
+                )}
+              </span>
               <span className="web-err-count">
                 {t('{n} ошибок за {m} мин, пик {p}/мин', { n: r.errors, m: r.minutes, p: r.peak })}
               </span>
