@@ -3400,10 +3400,13 @@ async def evaluate_servers(
                            "window": round(_DOCKER_LOOP_WINDOW / 60), "policy": policy or "no", "state": state}
                     fires.append(srv_fire(s, "docker_loop", r_loop, ctx))
                     cs["alerted_loop"] = True
-                elif was_loop and not loops and loop_ok:  # рестарты прекратились
-                    recoveries.append(_server_alert_text(
-                        "docker_loop", s.name, f"контейнер {name}: перезапуски прекратились",
-                        srv_url(s, "docker_loop"), recovery=True))
+                elif was_loop and not loops:  # рестарты прекратились
+                    # Отметку снимаем всегда, отбой шлем только по живому правилу: иначе контейнер,
+                    # заглушенный посреди алерта, навсегда оставался "в цикле" на главной.
+                    if loop_ok:
+                        recoveries.append(_server_alert_text(
+                            "docker_loop", s.name, f"контейнер {name}: перезапуски прекратились",
+                            srv_url(s, "docker_loop"), recovery=True))
                     cs["alerted_loop"] = False
                 # «упал»: не running при наличии restart-policy, держится ≥ sustain
                 is_down = state in _DOCKER_DOWN_STATES and policy in _DOCKER_RESTART_POLICIES
@@ -3420,10 +3423,11 @@ async def evaluate_servers(
                         cs["alerted_down"] = True
                 else:
                     cs["down_since"] = None
-                    if was_down and down_ok:  # снова поднялся
-                        recoveries.append(_server_alert_text(
-                            "docker_down", s.name, f"контейнер {name} снова работает",
-                            srv_url(s, "docker_down"), recovery=True))
+                    if was_down:  # снова поднялся; отметку снимаем и у заглушенного
+                        if down_ok:
+                            recoveries.append(_server_alert_text(
+                                "docker_down", s.name, f"контейнер {name} снова работает",
+                                srv_url(s, "docker_down"), recovery=True))
                         cs["alerted_down"] = False
                 dstate[name] = cs
             # контейнеры, пропавшие из списка (удалены/пересозданы) — чистим состояние
