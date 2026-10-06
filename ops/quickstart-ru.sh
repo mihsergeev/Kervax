@@ -138,10 +138,11 @@ services:
     networks: [caddy, docker-api]
     depends_on: [docker-api]
   docker-api:
-    image: wollomatic/socket-proxy:1
+    image: wollomatic/socket-proxy:1.13.1
     restart: unless-stopped
     user: "65534:__DGID__"
     read_only: true
+    mem_limit: 64M
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
     volumes:
@@ -152,8 +153,10 @@ services:
       - -listenip=0.0.0.0
       - -allowfrom=caddy
       - -shutdowngracetime=5
-      - -allowHEAD=^/_ping$$
-      - -allowGET=^/(v[0-9.]+/)?(_ping|version|info|events|containers/json|networks(/[a-zA-Z0-9_.-]+)?)$$
+      - -watchdoginterval=600
+      - -stoponwatchdog
+      - -allowHEAD=/_ping
+      - -allowGET=/(v[0-9]+\.[0-9]+/)?(_ping|version|info|events|containers/json|networks(/[a-zA-Z0-9][a-zA-Z0-9_.-]*)?)
 networks:
   caddy:
     external: true
