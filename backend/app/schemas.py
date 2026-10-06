@@ -566,6 +566,8 @@ class CheckOut(BaseModel):
     # локации, из которых сайт сейчас не отвечает (пусто = отовсюду доступен).
     # Основная проверка при этом обычно зелёная — см. partial в обзоре.
     loc_down: list[str] = []
+    # с какого момента сайт отвечает через раз (сбои вперемешку с успешными, flaky.py)
+    flaky_since: datetime | None = None
     alert_mutes: list[str] | None = None  # заглушённые типы алертов монитора
 
 
@@ -632,6 +634,8 @@ class ChecksOverviewOut(BaseModel):
     # не входит: по основному статусу это «работает», и раньше такой сайт нигде
     # в счётчиках не всплывал — «Недоступно: 1», хотя проблем две.
     partial: int = 0
+    # Отвечает через раз: по последней проверке обычно "работает", поэтому тоже отдельно
+    flaky: int = 0
     # Сводка по точкам проверки: сколько мониторов из каждой не отвечает.
     # Если из одной локации «падает» сразу многое — почти наверняка сломана она
     # сама, а не все эти сайты разом.
@@ -737,7 +741,8 @@ class AnsibleServerOut(BaseModel):
     rollout: bool
     outdated: list[str] = []  # какие helper'ы устарели
     # что на ноде надо поправить плейбуком, кроме helper'ов: "docker_sock" - внешний прокси с
-    # docker-сокетом. Плагин инвентаря делает из каждого группу kervax_<имя>
+    # docker-сокетом, "proxy_old" - образ внешнего прокси старше года. Плагин инвентаря
+    # делает из каждого группу kervax_<имя>
     issues: list[str] = []
 
 
@@ -1010,6 +1015,9 @@ class ServerOut(BaseModel):
     docker_alerts: dict[str, str] = Field(default_factory=dict)
     # внешние прокси (caddy-docker-proxy, traefik) с docker-сокетом: [{"name", "image", "kind"}]
     docker_exposed: list[dict] = Field(default_factory=list)
+    # внешние прокси со сборкой образа старше года (docker_exposure.outdated):
+    # [{"name", "image", "kind", "version", "built", "age_days"}]
+    proxy_outdated: list[dict] = Field(default_factory=list)
     last_report: dict | None
     last_seen: datetime | None
     snooze_until: datetime | None = None

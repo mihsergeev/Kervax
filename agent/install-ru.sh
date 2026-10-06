@@ -252,9 +252,9 @@ systemctl restart "$UNIT"
 echo "✓ $UNIT установлен и запущен. Логи: journalctl -u $UNIT -f"
 
 # Доступ к Docker для агента БЕЗ выдачи ему root. Крошечный socket-proxy (wollomatic)
-# отдаёт агенту ТОЛЬКО пер-методный allowlist: GET version/list/logs + POST
-# restart/stop/start конкретного контейнера. Всё остальное (exec, create, images,
-# build, volumes, host-mount) - 403. Ни RCE, ни host-root. Работает в сети хоста и слушает
+# отдает агенту ТОЛЬКО пер-методный allowlist: GET version/list/logs и список образов (даты
+# сборки образов внешних прокси) + POST restart/stop/start конкретного контейнера. Все
+# остальное (exec, create, pull, build, volumes, host-mount) - 403. Ни RCE, ни host-root. Работает в сети хоста и слушает
 # только 127.0.0.1: другие контейнеры до него не достают (из bridge-сети любой контейнер
 # мог через него читать переменные окружения и логи всех остальных). Без capabilities,
 # корень только для чтения. Та же команда - в dockerproxy-setup.sh и в разделе Docker панели.
@@ -269,7 +269,7 @@ setup_docker_proxy() {
       -v /var/run/docker.sock:/var/run/docker.sock:ro \
       wollomatic/socket-proxy:1 \
         -loglevel warn -listenip 127.0.0.1 -allowfrom 127.0.0.1/32 -shutdowngracetime 1 \
-        -allowGET '^/(v[0-9.]+/)?(version|info|_ping|containers/json|containers/[a-zA-Z0-9_.-]+/(json|logs))' \
+        -allowGET '^/(v[0-9.]+/)?(version|info|_ping|containers/json|images/json|containers/[a-zA-Z0-9_.-]+/(json|logs))' \
         -allowPOST '^/(v[0-9.]+/)?containers/[a-zA-Z0-9_.-]+/(restart|stop|start)$' >/dev/null; then
     grep -q '^docker_host=' "$CONF" || printf 'docker_host=tcp://127.0.0.1:2375\n' >> "$CONF"
     echo "✓ Docker включён (proxy: view + restart/stop/start, без exec/create/root)."

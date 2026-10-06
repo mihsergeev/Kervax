@@ -2,8 +2,10 @@
 # Kervax: harden the agent's bounded Docker access (the kervax-docker-proxy container).
 #
 # WHY. The agent never gets the docker socket itself: a tiny socket-proxy (wollomatic) lets
-# through only a per-method allowlist - GET version/list/inspect/logs and POST restart/stop/
-# start of a container; exec, create, images, build and volumes get 403. The proxy used to be
+# through only a per-method allowlist - GET version/list/inspect/logs and the image list, POST
+# restart/stop/start of a container; exec, create, image inspect/pull, build and volumes get 403.
+# The image list (names, labels, build dates, no env) tells the panel how old the image of an
+# internet-facing proxy is: a traefik:latest tag turned out to be a 2021 build. The proxy used to be
 # published as -p 127.0.0.1:2375 from the default bridge network, so any other container on
 # that network could reach it by its address, read the env (secrets) and logs of every
 # container and stop them. Now it runs in the host network and listens on 127.0.0.1 only:
@@ -16,13 +18,13 @@
 # is put back. Run as root.
 set -euo pipefail
 
-KERVAX_SETUP_VERSION=0.1  # MAJOR.MINOR; compared component-wise
+KERVAX_SETUP_VERSION=0.2  # MAJOR.MINOR; compared component-wise
 KERVAX_SETUP_WHEN="docker inspect kervax-docker-proxy || docker inspect kervax-docker-proxy-old"
 
 NAME=kervax-docker-proxy
 OLD=$NAME-old
 IMAGE=wollomatic/socket-proxy:1
-ALLOW_GET='^/(v[0-9.]+/)?(version|info|_ping|containers/json|containers/[a-zA-Z0-9_.-]+/(json|logs))'
+ALLOW_GET='^/(v[0-9.]+/)?(version|info|_ping|containers/json|images/json|containers/[a-zA-Z0-9_.-]+/(json|logs))'
 ALLOW_POST='^/(v[0-9.]+/)?containers/[a-zA-Z0-9_.-]+/(restart|stop|start)$'
 VERDIR=/var/lib/kervax/versions
 MARK=$VERDIR/dockerproxy-setup.ver
@@ -53,13 +55,15 @@ probe() {
   return 1
 }
 
+# the allowlist is part of the check: a proxy from 0.1 is hardened, but answers 403 to the image list
 hardened() {
   [ "$(docker inspect -f '{{.Config.Image}} {{.HostConfig.NetworkMode}} {{.HostConfig.ReadonlyRootfs}}' "$NAME" 2>/dev/null)" = "$IMAGE host true" ] \
-    && docker inspect -f '{{json .Args}}' "$NAME" | grep -q '"-listenip","127.0.0.1"'
+    && docker inspect -f '{{json .Args}}' "$NAME" | grep -q '"-listenip","127.0.0.1"' \
+    && docker inspect -f '{{json .Args}}' "$NAME" | grep -qF -- "\"$ALLOW_GET\""
 }
 
 if hardened; then
-  echo "· $NAME is already hardened."
+  echo "· $NAME is already hardened, the allowlist is current."
 else
   # the group that may use the socket, taken from the socket itself: a node without a group
   # named docker still works, the same as the proxy that is running there now

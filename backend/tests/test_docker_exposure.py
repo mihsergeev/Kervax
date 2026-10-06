@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select
 
-from app.docker_exposure import exposed, image_kind, text
+from app.docker_exposure import exposed, image_kind, outdated, text
 
 SOCK = ["/var/run/docker.sock"]
 
@@ -107,6 +107,49 @@ async def test_ansible_group_and_server_field(client, auth_headers):
     rows = {x["name"]: x for x in (await client.get(
         "/api/ansible/servers", headers={"Authorization": f"Bearer {atok}"})).json()["servers"]}
     assert rows["edge"]["issues"] == ["docker_sock"]
+
+
+def test_outdated_proxies_by_image_build_date():
+    """Внешний прокси на образе старше года. Дату сборки шлет агент 2.23: по тегу возраст не понять
+    (traefik:latest на одной ноде был сборкой 2021 года)."""
+    now = datetime(2026, 10, 6, tzinfo=timezone.utc).timestamp()
+    old = int(datetime(2021, 12, 1, tzinfo=timezone.utc).timestamp())
+    fresh = int(datetime(2026, 9, 17, tzinfo=timezone.utc).timestamp())
+    rep = _rep(
+        {"name": "traefik", "image": "traefik:latest", "state": "running", "img_ver": "v2.5.5", "img_created": old},
+        {"name": "cdp", "image": "lucaslorentz/caddy-docker-proxy:2.13.1", "state": "running", "img_created": fresh},
+        {"name": "plain", "image": "caddy:2.4.0", "state": "running", "img_created": old},
+        # обычные контейнеры и остановленный прокси не трогаем
+        {"name": "app", "image": "myapp:1", "state": "running", "img_created": old},
+        {"name": "stopped", "image": "traefik:v1.7", "state": "exited", "img_created": old},
+        # агент до 2.23 или прокси агента без списка образов: даты нет - не флагаем
+        {"name": "nodate", "image": "traefik:latest", "state": "running"},
+    )
+    got = outdated(rep, now)
+    assert [g["name"] for g in got] == ["traefik", "plain"]
+    assert got[0]["kind"] == "traefik" and got[0]["version"] == "v2.5.5" and got[0]["built"] == old
+    assert got[0]["age_days"] >= 365 and got[1]["kind"] == "caddy" and got[1]["version"] == ""
+    assert outdated({}, now) == []
+
+
+async def test_old_proxy_goes_to_server_field_and_ansible(client, auth_headers):
+    r = await client.post("/api/servers", json={"name": "aff"}, headers=auth_headers)
+    token = r.json()["token"]
+    built = int(time.time()) - 4 * 365 * 86400
+    rep = {"hostname": "aff", "os": "Ubuntu", "agent_version": "2.23", "cpu_percent": 5,
+           "mem_used": 1, "mem_total": 2, **_rep(
+               {"name": "traefik", "image": "traefik:v2.5.5", "state": "running",
+                "img_ver": "v2.5.5", "img_created": built})}
+    r = await client.post("/api/agent/report", json=rep, headers={"Authorization": f"Bearer {token}"})
+    assert r.status_code == 200, r.text
+    srv = [x for x in (await client.get("/api/servers", headers=auth_headers)).json() if x["name"] == "aff"][0]
+    assert [(p["name"], p["version"], p["built"]) for p in srv["proxy_outdated"]] == [("traefik", "v2.5.5", built)]
+    assert srv["docker_exposed"] == []
+    r = await client.post("/api/settings/ansible", headers=auth_headers)
+    atok = r.json()["token"]
+    rows = {x["name"]: x for x in (await client.get(
+        "/api/ansible/servers", headers={"Authorization": f"Bearer {atok}"})).json()["servers"]}
+    assert rows["aff"]["issues"] == ["proxy_old"]
 
 
 async def test_web_errors_mark_a_log_that_is_gone(client, auth_headers):

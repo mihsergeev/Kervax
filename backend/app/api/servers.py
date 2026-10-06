@@ -197,6 +197,7 @@ def _out(
     o.country = geoip.country_of(server.external_ip) or geoip.country_of(server.agent_ip)
     o.docker_alerts = _docker_alerts(server)
     o.docker_exposed = docker_exposure.exposed(server.last_report or {})
+    o.proxy_outdated = docker_exposure.outdated(server.last_report or {}, now.timestamp())
     o.problems = server_problems(server, now, pod_names)
     o.alert_since = alert_since(server)
     o.docker_since = docker_since(server)

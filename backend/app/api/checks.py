@@ -191,11 +191,14 @@ async def overview(_: CurrentUser, session: SessionDep) -> ChecksOverviewOut:
     counts = {"up": 0, "degraded": 0, "down": 0, "unknown": 0}
     disabled = 0
     partial = 0
+    flaky = 0
     for c in checks:
         if not c.enabled:
             disabled += 1
             continue
         counts[c.last_status if c.last_status in counts else "unknown"] += 1
+        if c.flaky_since is not None and c.last_status != "down":
+            flaky += 1
         # loc_alerted непустой = набор локаций, из которых сайт не отвечает
         # (заполняет collector после дебаунса). Считаем отдельно: основная
         # проверка при этом обычно зелёная.
@@ -257,6 +260,7 @@ async def overview(_: CurrentUser, session: SessionDep) -> ChecksOverviewOut:
         unknown=counts["unknown"],
         disabled=disabled,
         partial=partial,
+        flaky=flaky,
         loc_summary=[
             LocationHealth(id=lid, name=locs[lid], down=d, total=t)
             for lid, (d, t) in loc_stat.items()

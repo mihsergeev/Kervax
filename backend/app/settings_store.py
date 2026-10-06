@@ -138,6 +138,8 @@ LEGACY_SERVER_DEFAULTS: frozenset[str] = frozenset({
 SITE_ALERT_KINDS: dict[str, tuple[str, str]] = {
     "down": ("Недоступен / деградация", "🔴 {name} — {message}"),
     "recovery": ("Восстановление", "✅ {name} — {message}"),
+    # сбои вперемешку с успешными проверками: N подряд не набирается (см. flaky.py)
+    "flaky": ("Отвечает через раз", "🟠 {name} — {message}"),
     "ssl": ("SSL-сертификат", "🔐 {name} — {message}"),
     "domain": ("Домен", "🌐 {name} — {message}"),
     "locpart": ("Частичная доступность (локации)", "🌍 {name}\n{message}"),

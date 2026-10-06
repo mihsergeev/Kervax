@@ -5,6 +5,7 @@ import { useI18n } from './i18n'
 // типы сайтовых алертов, которые можно точечно заглушить для монитора (ключи = SITE_ALERT_KINDS)
 const MON_ALERT_KINDS: { k: string; label: string }[] = [
   { k: 'down', label: 'Недоступен / деградация' },
+  { k: 'flaky', label: 'Отвечает через раз' },
   { k: 'ssl', label: 'SSL-сертификат' },
   { k: 'domain', label: 'Домен' },
   { k: 'locpart', label: 'Частичная доступность (локации)' },

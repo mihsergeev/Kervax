@@ -18,7 +18,7 @@ from urllib.parse import urlparse
 from sqlalchemy import and_, delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app import alerts, audit, backup, backup_growth, checks as checks_exec, custom_backups, docker_exposure, heartbeat, settings_store
+from app import alerts, audit, backup, backup_growth, checks as checks_exec, custom_backups, docker_exposure, flaky, heartbeat, settings_store
 from app import disk_forecast as dfc
 from app.setup_scripts import current_setup_versions, gaps
 from app.config import Settings, get_settings
@@ -164,7 +164,10 @@ def _display_host(target: str, ctype: str, port: int) -> str:
     return t
 
 
-_ALERT_ICON = {"recovery": "✅", "locrec": "✅", "ssl": "🔐", "domain": "🌐", "locpart": "🌍"}
+_ALERT_ICON = {
+    "recovery": "✅", "locrec": "✅", "ssl": "🔐", "domain": "🌐", "locpart": "🌍",
+    "flaky": "🟠", "flakyrec": "✅",
+}
 
 
 def _expiry_icon(kind: str, days: int) -> str:
@@ -558,6 +561,8 @@ async def record_outcome(
             # несём up-сообщение («HTTP 200 · N мс» / «порт открыт …») —
             # чтобы в восстановлении был виден код/латентность, а не пусто
             pending.append(("recovery", row.name, "up", msg, None, row.id, None, ""))
+    if not manual:
+        await _flaky_step(session, row, new_status, msg, now, pending)
 
     row.last_status = new_status
     row.last_message = msg
@@ -583,6 +588,53 @@ async def record_outcome(
                 check_id=row.id, ip=ipr["ip"], status=ipr["status"],
                 latency_ms=ipr.get("latency_ms"), ts=now,
             ))
+
+
+async def _flaky_step(
+    session: AsyncSession, row: Check, new_status: str, msg: str, now: datetime, pending: list
+) -> None:
+    """Сайт отвечает через раз (flaky.py): сбои вперемешку с успешными проверками, которых
+    алерт "N неудач подряд" не видит. Ручная проверка сюда не попадает, как и в счетчик подряд.
+
+    Состояние (flaky_since) меняем сразу, а алерт и отбой ставим в очередь, пока они не уйдут:
+    flaky_notified выставит _send_alerts только после доставки."""
+    thr = max(row.alert_after_failures, 1)
+    prev = (
+        await session.execute(
+            select(CheckSample.status, CheckSample.message)
+            # нынешний снимок уже в сессии и может попасть в выборку при автофлаше
+            .where(CheckSample.check_id == row.id, CheckSample.ts < now)
+            .order_by(CheckSample.ts.desc())
+            .limit(flaky.WINDOW + thr)
+        )
+    ).all()
+    hist = [(st, m) for st, m in reversed(prev)] + [(new_status, msg)]
+    statuses = [st for st, _ in hist]
+    was = row.flaky_since is not None
+    now_flaky = flaky.is_flaky(statuses, thr, was)
+    if now_flaky and not was:
+        row.flaky_since = now
+    elif was and not now_flaky:
+        row.flaky_since = None
+    if now_flaky and not row.flaky_notified:
+        fails, _ = flaky.short_failures(statuses, thr)
+        last_err = next((m for st, m in reversed(hist) if st == "down" and m), "")
+        text = (
+            f"отвечает через раз: {fails} из {min(len(statuses), flaky.WINDOW)} "
+            f"последних проверок не прошли"
+        )
+        if last_err:
+            text += f", последняя ошибка: {last_err}"
+        pending.append(
+            Pending("flaky", row.name, new_status, text, None, row.id, ("flaky_notified", True), "")
+        )
+    elif not now_flaky and row.flaky_notified:
+        pending.append(
+            Pending(
+                "flakyrec", row.name, "up", "снова отвечает стабильно", None, row.id,
+                ("flaky_notified", False), "",
+            )
+        )
 
 
 async def send_alerts_soon(session_factory, pending: list, now: datetime) -> None:
@@ -710,6 +762,7 @@ async def run_due_checks(
 _SITE_RULE_KIND = {
     "bad": "down", "recovery": "recovery", "ssl": "ssl",
     "domain": "domain", "locpart": "locpart", "locrec": "locpart",
+    "flaky": "flaky", "flakyrec": "flaky",
 }
 
 

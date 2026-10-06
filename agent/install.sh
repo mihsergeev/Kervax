@@ -253,9 +253,9 @@ systemctl restart "$UNIT"
 echo "✓ $UNIT installed and started. Logs: journalctl -u $UNIT -f"
 
 # Docker access for the agent WITHOUT granting it root. A tiny socket-proxy (wollomatic)
-# exposes ONLY a per-method allowlist: GET version/list/logs plus POST
-# restart/stop/start for a specific container. Everything else (exec, create, images,
-# build, volumes, host mounts) returns 403. No RCE, no host root. It runs in the host
+# exposes ONLY a per-method allowlist: GET version/list/logs and the image list (build dates
+# of internet-facing proxy images) plus POST restart/stop/start for a specific container.
+# Everything else (exec, create, pull, build, volumes, host mounts) returns 403. No RCE, no host root. It runs in the host
 # network and listens on 127.0.0.1 only: other containers cannot reach it (from the bridge
 # network any container could read the env and logs of every other one through it). No
 # capabilities, read-only root. The same command lives in dockerproxy-setup.sh and in the
@@ -271,7 +271,7 @@ setup_docker_proxy() {
       -v /var/run/docker.sock:/var/run/docker.sock:ro \
       wollomatic/socket-proxy:1 \
         -loglevel warn -listenip 127.0.0.1 -allowfrom 127.0.0.1/32 -shutdowngracetime 1 \
-        -allowGET '^/(v[0-9.]+/)?(version|info|_ping|containers/json|containers/[a-zA-Z0-9_.-]+/(json|logs))' \
+        -allowGET '^/(v[0-9.]+/)?(version|info|_ping|containers/json|images/json|containers/[a-zA-Z0-9_.-]+/(json|logs))' \
         -allowPOST '^/(v[0-9.]+/)?containers/[a-zA-Z0-9_.-]+/(restart|stop|start)$' >/dev/null; then
     grep -q '^docker_host=' "$CONF" || printf 'docker_host=tcp://127.0.0.1:2375\n' >> "$CONF"
     echo "✓ Docker enabled (proxy: view plus restart/stop/start, no exec/create/root)."

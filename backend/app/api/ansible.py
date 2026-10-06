@@ -27,6 +27,16 @@ from app.setup_scripts import current_setup_versions
 router = APIRouter(prefix="/ansible", tags=["ansible"])
 
 
+def _issues(rep: dict, now: datetime) -> list[str]:
+    """Что на ноде чинится плейбуком, кроме helper'ов: группы kervax_docker_sock, kervax_proxy_old."""
+    out = []
+    if docker_exposure.exposed(rep):
+        out.append("docker_sock")
+    if docker_exposure.outdated(rep, now.timestamp()):
+        out.append("proxy_old")
+    return out
+
+
 @router.get("/servers", response_model=AnsibleServersOut)
 async def ansible_servers(request: Request, session: SessionDep) -> AnsibleServersOut:
     auth = request.headers.get("authorization", "")
@@ -51,7 +61,7 @@ async def ansible_servers(request: Request, session: SessionDep) -> AnsibleServe
             online=online, enabled=bool(s.enabled),
             rollout=online and helper_rollout(s, advice),
             outdated=[a.name for a in advice],
-            issues=["docker_sock"] if online and docker_exposure.exposed(rep) else [],
+            issues=_issues(rep, now) if online else [],
         ))
     acc["used_at"] = now.isoformat()
     await settings_store.set_ansible_access(session, acc)
