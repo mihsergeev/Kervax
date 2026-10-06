@@ -54,7 +54,6 @@ function earliest(list: (string | null | undefined)[]): string | null {
 }
 
 const K_BAD_POD = ['CrashLoopBackOff', 'ImagePullBackOff', 'ErrImagePull', 'Error', 'OOMKilled', 'CreateContainerError']
-const D_RESTART_POLICIES = ['always', 'unless-stopped', 'on-failure']
 
 // ВЕРХНИЙ блок: только то, что требует РУЧНОГО действия на ноде — обновить агент или
 // выполнить setup-скрипт (docker proxy / kube-setup / backupserver-setup). Клик ведёт
@@ -356,10 +355,26 @@ function dockerProblems(servers: Server[], t: T): ProbItem[] {
   for (const s of servers) {
     const d = s.online ? s.last_report?.docker : undefined
     if (!d?.access || !d.containers) continue
-    const down = d.containers.filter((c) => (c.state === 'exited' || c.state === 'dead') && D_RESTART_POLICIES.includes((c.policy || '').toLowerCase()))
-    const loop = d.containers.filter((c) => (c.restarts || 0) >= 3 && c.state === 'running')
-    if (down.length > 0) out.push({ key: `d-down-${s.id}`, id: s.id, name: s.name, cc: s.country, down: true, since: earliest(down.map((c) => s.docker_since?.[c.name])), text: t('{name}: контейнеров упало — {n}', { name: s.name, n: down.length }) })
-    if (loop.length > 0) out.push({ key: `d-loop-${s.id}`, id: s.id, name: s.name, cc: s.country, down: true, text: t('{name}: перезапусков — {n}', { name: s.name, n: loop.length }) })
+    // Что сломано - решает бэкенд, как и в разделе "Докер" (docker_alerts - по чему ушел алерт):
+    // упавший - должен работать и не поднялся за выдержку, крутящийся - счетчик перезапусков
+    // растет прямо сейчас. Сам счетчик копится за всю жизнь контейнера: семь перезапусков могли
+    // быть месяц назад или руками, а главная по нему поднимала ложную тревогу.
+    const al = s.docker_alerts ?? {}
+    const down = d.containers.filter((c) => al[c.name] === 'down').map((c) => c.name)
+    const loop = d.containers.filter((c) => al[c.name] === 'loop').map((c) => c.name)
+    if (down.length > 0)
+      out.push({
+        key: `d-down-${s.id}`, id: s.id, name: s.name, cc: s.country, down: true,
+        since: earliest(down.map((n) => s.docker_since?.[n])),
+        text: t(down.length === 1 ? '{name}: не работает контейнер {list}' : '{name}: не работают контейнеры {list}',
+          { name: s.name, list: down.join(', ') }),
+      })
+    if (loop.length > 0)
+      out.push({
+        key: `d-loop-${s.id}`, id: s.id, name: s.name, cc: s.country, down: true,
+        text: t(loop.length === 1 ? '{name}: перезапускается в цикле {list}' : '{name}: перезапускаются в цикле {list}',
+          { name: s.name, list: loop.join(', ') }),
+      })
   }
   return out
 }
