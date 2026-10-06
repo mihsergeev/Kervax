@@ -1660,6 +1660,9 @@ const EN: Record<string, string> = {
   'свободно {f} из {tt}': '{f} free of {tt}',
   'Обновить': 'Refresh',
   'докер не смог запустить': 'docker could not start it',
+  'Прокси docker-сокета на этой ноде пускает только чтение, поэтому перезапуск, стоп и старт дают 403. Замените его этой командой: просмотр плюс перезапуск, стоп и старт, без exec, создания контейнеров и образов, слушает только 127.0.0.1 хоста.':
+    'The docker socket proxy on this node allows reading only, so restart, stop and start get 403. Replace it with this command: viewing plus restart, stop and start, no exec, no creating containers or images, listening on 127.0.0.1 of the host only.',
+  'Доступ к Docker (прокси)': 'Docker access (proxy)',
   'остановлен вручную: docker такой контейнер сам не поднимает, это не авария и тревоги нет':
     'stopped by hand: docker does not bring such a container back by itself, this is not an outage and no alert is sent',
   'контейнер упал и не поднялся — по нему отправлен алерт':

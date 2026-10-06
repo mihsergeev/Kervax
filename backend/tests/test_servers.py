@@ -334,6 +334,15 @@ async def test_docker_command_flow(client, auth_headers):
     st = (await client.get(f"/api/servers/{sid}/docker/command/{cid}", headers=auth_headers)).json()
     assert st["status"] == "done" and st["ok"] is True and st["result"] == "OK"
 
+    # 403 отвечает прокси docker-сокета, а не докер: панель говорит, в чем дело
+    r = await client.post(f"/api/servers/{sid}/docker/command",
+                          json={"container": "web", "action": "restart"}, headers=auth_headers)
+    cid = r.json()["id"]
+    r = await client.post("/api/agent/docker-result",
+                          json={"id": cid, "ok": False, "output": "docker вернул 403"}, headers=ah)
+    st = (await client.get(f"/api/servers/{sid}/docker/command/{cid}", headers=auth_headers)).json()
+    assert st["status"] == "error" and "только чтение (403)" in st["result"]
+
 
 async def test_agent_managed_update(client, auth_headers, monkeypatch):
     # enroll + первый репорт (агент на 1.5)

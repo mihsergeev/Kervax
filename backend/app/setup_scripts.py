@@ -73,6 +73,11 @@ def setup_needed(name: str, rep: dict) -> bool:
     # на ноде без баз инвентарь пустой, флагать нечего
     if name == "dbstat-setup":
         return bool(rep.get("db_engines") or rep.get("db_stats"))
+    # dockerproxy-setup - там, где агенту уже дан доступ к Docker через наш прокси: helper его
+    # укрепляет. Включать доступ там, где его не давали, - решение человека, не helper'а
+    if name == "dockerproxy-setup":
+        cs = (rep.get("docker") or {}).get("containers") or []
+        return any(str(c.get("name") or "").startswith("kervax-docker-proxy") for c in cs)
     # backup-setup — транспорт панели для дампов, нужен и без файлового бэкапа;
     # timesync-setup, agent-watchdog, diskusage-setup, diskhealth-setup и units-setup
     # ansible ставит всюду (диск забивается и ломается где угодно, а на VM здоровье дисков смотрит хотя бы
@@ -98,6 +103,7 @@ _HELPER_LABEL = {
     "diskusage-setup": "разбор места на диске",
     "diskhealth-setup": "здоровье дисков",
     "units-setup": "упавшие юниты systemd",
+    "dockerproxy-setup": "защита доступа к Docker",
 }
 
 
