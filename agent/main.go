@@ -42,7 +42,7 @@ import (
 	"time"
 )
 
-const version = "2.21"
+const version = "2.22"
 
 // Публичный ключ для проверки подписи релизов агента (Ed25519, base64).
 // ПУСТО по умолчанию → самообновление ВЫКЛЮЧЕНО (агент никогда не заменяет себя).
@@ -596,8 +596,14 @@ type dockerContainer struct {
 	Binds    []string `json:"binds,omitempty"`  // хост-пути bind-mount'ов (аудит покрытия бэкапа)
 	Mem      uint64   `json:"mem,omitempty"`    // память работающего контейнера, байты (как docker stats)
 	CPU      float64  `json:"cpu,omitempty"`    // CPU работающего контейнера, % одного ядра (как top)
-	ip       string   // IP контейнера для скрейпа метрик; в отчёт НЕ уходит (строчная)
-	id       string   // id контейнера: по нему процесс находит свой контейнер (cpu_groups)
+	// У остановленного: почему он лежит. docker stop не снимает restart-policy, и без этих полей
+	// остановленный руками контейнер выглядел для панели так же, как упавший.
+	Err      string `json:"err,omitempty"`       // State.Error: докер пытался его запустить и не смог
+	Exit     *int   `json:"exit,omitempty"`      // State.ExitCode; у работающего нет
+	MaxRetry int    `json:"max_retry,omitempty"` // on-failure:N - сколько раз докер его перезапустит
+	OOM      bool   `json:"oom,omitempty"`       // остановленный убит OOM-киллером
+	ip       string // IP контейнера для скрейпа метрик; в отчёт НЕ уходит (строчная)
+	id       string // id контейнера: по нему процесс находит свой контейнер (cpu_groups)
 }
 
 // пропускная способность одного сетевого интерфейса, байт/сек + ошибки/дропы, пакетов/сек
@@ -3779,10 +3785,16 @@ func dockerInspect(cl *http.Client, id string, dc *dockerContainer) {
 	var ins struct {
 		RestartCount int
 		State        struct {
-			Health *struct{ Status string }
+			Health    *struct{ Status string }
+			Error     string
+			ExitCode  int
+			OOMKilled bool
 		}
 		HostConfig struct {
-			RestartPolicy struct{ Name string }
+			RestartPolicy struct {
+				Name              string
+				MaximumRetryCount int
+			}
 		}
 		Mounts []struct {
 			Type   string
@@ -3797,8 +3809,23 @@ func dockerInspect(cl *http.Client, id string, dc *dockerContainer) {
 	}
 	dc.Restarts = ins.RestartCount
 	dc.Policy = ins.HostConfig.RestartPolicy.Name
+	dc.MaxRetry = ins.HostConfig.RestartPolicy.MaximumRetryCount
 	if ins.State.Health != nil {
 		dc.Health = ins.State.Health.Status
+	}
+	// Остановленный: упавший контейнер с restart-policy докер поднимает сам, поэтому лежать долго
+	// он может, только если его остановили руками или докер не смог его запустить. Второе видно
+	// по State.Error - по нему панель и отличает аварию от остановки руками.
+	if dc.State != "running" {
+		code := ins.State.ExitCode
+		dc.Exit = &code
+		if e := strings.TrimSpace(ins.State.Error); e != "" {
+			if len(e) > 300 {
+				e = e[:300]
+			}
+			dc.Err = e
+		}
+		dc.OOM = ins.State.OOMKilled
 	}
 	// bind-mount'ы = хост-пути, которые кто-то ОСОЗНАННО прокинул в контейнер, т.е. почти
 	// наверняка данные. Панель сверит их с покрытием бэкапа. Named volumes не шлём: они

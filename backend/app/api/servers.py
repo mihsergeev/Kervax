@@ -1293,8 +1293,10 @@ async def _store_web_errors(session, server: Server, body, now: datetime) -> Non
         codes = x.get("c5") if isinstance(x.get("c5"), dict) else None
         paths = [p for p in (x.get("p5") or []) if isinstance(p, dict)][:8] or None
         lines = [str(v)[:500] for v in (x.get("l5") or []) if isinstance(v, str)][:5] or None
+        # "-" - строки, из которых домен не достался: в сводке "по доменам" это не домен
         hosts = [{"h": str(h.get("h"))[:120], "n": int(h.get("e5") or 0)}
-                 for h in (x.get("hosts") or []) if isinstance(h, dict) and h.get("h") and (h.get("e5") or 0) > 0][:10] or None
+                 for h in (x.get("hosts") or [])
+                 if isinstance(h, dict) and h.get("h") and h.get("h") != "-" and (h.get("e5") or 0) > 0][:10] or None
         session.add(WebErrorSample(
             server_id=server.id, ts=now, src_ts=src,
             log=str(x.get("log") or "")[:512], label=web_log_label(x)[:255],
@@ -1342,7 +1344,7 @@ async def server_web_errors(
             if isinstance(it, dict) and it.get("p"):
                 a["paths"][str(it["p"])] = a["paths"].get(str(it["p"]), 0) + int(it.get("n") or 0)
         for it in (r.hosts or []):
-            if isinstance(it, dict) and it.get("h"):
+            if isinstance(it, dict) and it.get("h") and it.get("h") != "-":
                 a["hosts"][str(it["h"])] = a["hosts"].get(str(it["h"]), 0) + int(it.get("n") or 0)
     out = []
     for k, a in sorted(acc.items(), key=lambda kv: -kv[1]["errors"]):

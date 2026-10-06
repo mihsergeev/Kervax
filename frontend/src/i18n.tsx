@@ -1659,6 +1659,9 @@ const EN: Record<string, string> = {
   'Место на диске': 'Disk space',
   'свободно {f} из {tt}': '{f} free of {tt}',
   'Обновить': 'Refresh',
+  'докер не смог запустить': 'docker could not start it',
+  'остановлен вручную: docker такой контейнер сам не поднимает, это не авария и тревоги нет':
+    'stopped by hand: docker does not bring such a container back by itself, this is not an outage and no alert is sent',
   'контейнер упал и не поднялся — по нему отправлен алерт':
     'container is down and did not come back — an alert was sent',
   'контейнер постоянно перезапускается — по нему отправлен алерт':

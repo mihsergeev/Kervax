@@ -11,7 +11,9 @@ set -euo pipefail
 # 0.21: a log shared by several sites is split by domain when its log_format has $host (or
 #       $http_host, $server_name): the map gets the format as a 4th column, the counter takes the
 #       domain out of every line by that format and reports requests and 5xx per domain
-KERVAX_SETUP_VERSION=0.21  # MAJOR.MINOR; compared component-wise
+# 0.22: the domain is found in docker json logs of tab-separated formats (docker writes the tab
+#       as \u0009), and a log_format in double quotes with \" inside keeps its $host
+KERVAX_SETUP_VERSION=0.22  # MAJOR.MINOR; compared component-wise
 KERVAX_SETUP_ALWAYS=1     # safe on any node: the refresh is a no-op without a web server
 
 HELPER_DIR=/lib65/kervax
@@ -149,11 +151,18 @@ extract_logs() {
     function flush() { if (slog!="") print slog "\t" names "\t\t" hostfmt(fmtdef[sfmt]) }
     # формат у access_log: третье слово, если это не параметр (buffer=, if=...); по умолчанию combined
     function fmtname(   f) { f=$3; sub(/;$/,"",f); if (f=="" || f ~ /=/) f="combined"; return f }
-    # log_format идет на несколько строк до ";" вне кавычек: собираем содержимое кавычек
+    # log_format идет на несколько строк до ";" вне кавычек: собираем содержимое кавычек.
+    # \" и \t внутри кавычек оставляем как есть: кавычка после \ строку не закрывает, а
+    # счетчик получает формат через awk -v, и тот раскрывает такие последовательности так же,
+    # как nginx (\t - табуляция, \" - кавычка)
     function lf_feed(x,   i, c) {
       for (i = 1; i <= length(x); i++) {
         c = substr(x, i, 1)
-        if (lf_q != "") { if (c == lf_q) lf_q = ""; else lf_fmt = lf_fmt c }
+        if (lf_q != "") {
+          if (c == "\\" && i < length(x)) { lf_fmt = lf_fmt c substr(x, i + 1, 1); i++ }
+          else if (c == lf_q) lf_q = ""
+          else lf_fmt = lf_fmt c
+        }
         else if (c == "\"" || c == "\047") lf_q = c
         else if (c == ";") { fmtdef[lf_name] = lf_fmt; lf_on = 0; return }
       }
@@ -525,7 +534,13 @@ count_codes() {
       c=s+0
       if (HI) {
         x = $0
-        if (x ~ /^\{"log":"/) { sub(/^\{"log":"/, "", x); sub(/\\n","stream".*$/, "", x); gsub(/\\"/, "\"", x) }
+        # json-лог докера: снимаем обертку и раскрываем то, что докер закодировал. Табуляцию
+        # он пишет как \u0009 (а иной кодировщик как \t), а в формате она настоящая: формат с
+        # \t между полями (web-c) иначе не совпадал ни с одной строкой
+        if (x ~ /^\{"log":"/) {
+          sub(/^\{"log":"/, "", x); sub(/\\n","stream".*$/, "", x)
+          gsub(/\\u0009|\\t/, "\t", x); gsub(/\\"/, "\"", x)
+        }
         sub(/^[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[^ ]* (stdout|stderr) [FP] /, "", x)
         h = hostof(x)
         if (h == "") h = "-"
