@@ -1663,6 +1663,20 @@ const EN: Record<string, string> = {
   'Прокси docker-сокета на этой ноде пускает только чтение, поэтому перезапуск, стоп и старт дают 403. Замените его этой командой: просмотр плюс перезапуск, стоп и старт, без exec, создания контейнеров и образов, слушает только 127.0.0.1 хоста.':
     'The docker socket proxy on this node allows reading only, so restart, stop and start get 403. Replace it with this command: viewing plus restart, stop and start, no exec, no creating containers or images, listening on 127.0.0.1 of the host only.',
   'Доступ к Docker (прокси)': 'Docker access (proxy)',
+  '{list}: docker-сокет смонтирован целиком. Прокси смотрит в интернет, а сокет - это root на хосте: одна дыра в прокси, и чужой получает весь сервер. Пусть прокси читает докер через прокси сокета только на чтение (список контейнеров, сети, события), а сам сокет из его volumes уберите. Что добавить в compose:':
+    '{list}: the whole docker socket is mounted. The proxy faces the internet, and the socket is root on the host: one hole in the proxy and a stranger owns the server. Let the proxy read docker through a read-only socket proxy (container list, networks, events) and drop the socket from its volumes. What to add to the compose:',
+  'Проверка после замены: в логе docker-api нет строк blocked request, сайты отвечают как раньше. Ноды с этой проблемой плагин инвентаря ansible собирает в группу kervax_docker_sock.':
+    'Check after the change: no blocked request lines in the docker-api log, the sites answer as before. The ansible inventory plugin puts the nodes with this problem into the kervax_docker_sock group.',
+  'прокси смотрит в интернет и держит docker-сокет: взлом прокси даст root на хосте':
+    'the proxy faces the internet and holds the docker socket: breaking into the proxy gives root on the host',
+  'внешний прокси держит docker-сокет: взлом прокси даст root на хосте':
+    'an internet-facing proxy holds the docker socket: breaking into the proxy gives root on the host',
+  '{name}: docker-сокет у {list} - взлом прокси даст root на хосте':
+    '{name}: {list} holds the docker socket - breaking into the proxy gives root on the host',
+  'лог больше не пишется': 'log no longer written',
+  'этого лога в отчете больше нет: сайты разнесли по своим логам или контейнер удалили, ошибки ниже - история':
+    'this log is no longer in the report: the sites got their own logs or the container was removed, the errors below are history',
+  'Docker: внешний прокси с docker-сокетом': 'Docker: internet-facing proxy with the docker socket',
   'остановлен вручную: docker такой контейнер сам не поднимает, это не авария и тревоги нет':
     'stopped by hand: docker does not bring such a container back by itself, this is not an outage and no alert is sent',
   'контейнер упал и не поднялся — по нему отправлен алерт':

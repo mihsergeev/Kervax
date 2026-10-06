@@ -736,6 +736,9 @@ class AnsibleServerOut(BaseModel):
     # или не включен watchdog. Ровно те ноды, что панель зовет обновить на главной.
     rollout: bool
     outdated: list[str] = []  # какие helper'ы устарели
+    # что на ноде надо поправить плейбуком, кроме helper'ов: "docker_sock" - внешний прокси с
+    # docker-сокетом. Плагин инвентаря делает из каждого группу kervax_<имя>
+    issues: list[str] = []
 
 
 class AnsibleServersOut(BaseModel):
@@ -1005,6 +1008,8 @@ class ServerOut(BaseModel):
     # контейнеры, по которым алерт уже ушёл: {имя: "down"|"loop"} — панель подсвечивает
     # ровно их, а не всё подряд с ненулевым RestartCount
     docker_alerts: dict[str, str] = Field(default_factory=dict)
+    # внешние прокси (caddy-docker-proxy, traefik) с docker-сокетом: [{"name", "image", "kind"}]
+    docker_exposed: list[dict] = Field(default_factory=list)
     last_report: dict | None
     last_seen: datetime | None
     snooze_until: datetime | None = None
@@ -1148,6 +1153,9 @@ class WebErrorOut(BaseModel):
     hosts: list[dict] = []
     lines: list[str] = []  # последние строки с 5xx (helper 0.19), старые сверху
     lines_n: int = 0       # сколько строк сохранено за окно - все отдает /web-errors/lines
+    # лога больше нет в отчете: сайты разнесли по своим логам, контейнер удалили. Ошибки за
+    # окно остаются видны, но это история, а не то, что падает сейчас
+    gone: bool = False
 
 
 class OomEventOut(BaseModel):

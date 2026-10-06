@@ -61,6 +61,84 @@ async function runAndWait(
   return last
 }
 
+// Внешний прокси с docker-сокетом: что добавить в его compose, чтобы он читал докер через
+// прокси сокета только на чтение. traefik и nginx-proxy смотрят еще и свойства контейнеров
+// (inspect), caddy-docker-proxy - нет.
+const SOCK_PROXY_SVC = (client: string, inspect: boolean) => `  docker-api:
+    image: wollomatic/socket-proxy:1
+    restart: unless-stopped
+    user: "65534:GID"   # GID: stat -c %g /var/run/docker.sock
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks: [docker-api]
+    command:
+      - -listenip=0.0.0.0
+      - -allowfrom=${client}   # the service name of ${client}
+      - -allowHEAD=^/_ping$$
+      - -allowGET=^/(v[0-9.]+/)?(_ping|version|info|events|containers/json${inspect ? '|containers/[a-zA-Z0-9_.-]+/json' : ''}|networks(/[a-zA-Z0-9_.-]+)?)$$
+networks:
+  docker-api:
+    internal: true`
+
+const SOCK_FIX: Record<string, string> = {
+  caddy: `services:
+  caddy:
+    environment:
+      - DOCKER_HOST=tcp://docker-api:2375
+    networks: [caddy, docker-api]   # plus the networks it has now
+    # and drop /var/run/docker.sock from its volumes
+${SOCK_PROXY_SVC('caddy', false)}`,
+  traefik: `services:
+  traefik:
+    command:
+      - --providers.docker.endpoint=tcp://docker-api:2375
+      # keep the other flags; drop /var/run/docker.sock from its volumes
+    networks: [docker-api]   # plus the networks it has now
+${SOCK_PROXY_SVC('traefik', true)}`,
+  'nginx-proxy': `services:
+  nginx-proxy:
+    environment:
+      - DOCKER_HOST=tcp://docker-api:2375
+    networks: [docker-api]   # plus the networks it has now
+    # and drop /var/run/docker.sock from its volumes
+${SOCK_PROXY_SVC('nginx-proxy', true)}`,
+}
+
+function SockWarning({ items }: { items: { name: string; image: string; kind: string }[] }) {
+  const { t } = useI18n()
+  const [copied, setCopied] = useState('')
+  const kinds = [...new Set(items.map((i) => i.kind))].filter((k) => SOCK_FIX[k])
+  return (
+    <div className="docker-noaccess docker-sock-warn">
+      <div className="form-error small">
+        {t('{list}: docker-сокет смонтирован целиком. Прокси смотрит в интернет, а сокет - это root на хосте: одна дыра в прокси, и чужой получает весь сервер. Пусть прокси читает докер через прокси сокета только на чтение (список контейнеров, сети, события), а сам сокет из его volumes уберите. Что добавить в compose:',
+          { list: items.map((i) => `${i.name} (${i.kind})`).join(', ') })}
+      </div>
+      {kinds.map((k) => (
+        <div key={k} className="agent-advice-cmd">
+          <pre>{SOCK_FIX[k]}</pre>
+          <button
+            className="ghost"
+            onClick={() => {
+              navigator.clipboard?.writeText(SOCK_FIX[k])
+              setCopied(k)
+              window.setTimeout(() => setCopied(''), 1500)
+            }}
+          >
+            {copied === k ? t('Скопировано') : t('Копировать')}
+          </button>
+        </div>
+      ))}
+      <div className="muted small">
+        {t('Проверка после замены: в логе docker-api нет строк blocked request, сайты отвечают как раньше. Ноды с этой проблемой плагин инвентаря ansible собирает в группу kervax_docker_sock.')}
+      </div>
+    </div>
+  )
+}
+
 // readonly: доступ есть, но действие получило 403 - на ноде прокси только для чтения
 function EnableBlock({ readonly = false }: { readonly?: boolean }) {
   const { t } = useI18n()
@@ -97,6 +175,7 @@ function ContainerRow({
   onLogs,
   onChanged,
   onDenied,
+  sock = false,
 }: {
   serverId: number
   c: DockerContainer
@@ -105,6 +184,7 @@ function ContainerRow({
   onLogs: () => void
   onChanged: () => void
   onDenied?: () => void // прокси ответил 403: на ноде доступ только на чтение
+  sock?: boolean // внешний прокси с docker-сокетом
 }) {
   const { t } = useI18n()
   const [busy, setBusy] = useState<string | null>(null)
@@ -150,6 +230,11 @@ function ContainerRow({
           {c.name}
           {c.health === 'unhealthy' && (
             <span className="type-chip off" title={t('healthcheck: unhealthy')}>unhealthy</span>
+          )}
+          {sock && (
+            <span className="type-chip off" title={t('прокси смотрит в интернет и держит docker-сокет: взлом прокси даст root на хосте')}>
+              🔓 docker.sock
+            </span>
           )}
           {!!c.restarts && c.restarts > 0 && (
             <span
@@ -394,6 +479,7 @@ function DockerHostModal({
           </div>
         )}
         {denied && docker.access && <EnableBlock readonly />}
+        {(s.docker_exposed?.length ?? 0) > 0 && <SockWarning items={s.docker_exposed ?? []} />}
         {!docker.access ? (
           <EnableBlock />
         ) : cs.length === 0 ? (
@@ -409,6 +495,7 @@ function DockerHostModal({
                 c={c}
                 problem={probs[c.name]}
                 onDenied={() => setDenied(true)}
+                sock={(s.docker_exposed ?? []).some((e) => e.name === c.name)}
                 canAct={canAct}
                 onLogs={() => setLogs(c.name)}
                 onChanged={onChanged}
@@ -456,6 +543,11 @@ function HostRow({
           {s.name}
           {showGroup && s.group_name && <span className="type-chip group-chip">{s.group_name}</span>}
           {!docker.access && <span className="type-chip off">{t('нет доступа')}</span>}
+          {(s.docker_exposed?.length ?? 0) > 0 && (
+            <span className="type-chip off" title={t('внешний прокси держит docker-сокет: взлом прокси даст root на хосте')}>
+              🔓 docker.sock
+            </span>
+          )}
         </div>
         <div className="check-target mono muted small">
           Docker {docker.version || '—'}

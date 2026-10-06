@@ -34,7 +34,7 @@ const BROKEN_LIMIT = 12
 const ISSUE_ICON: Record<string, string> = {
   offline: '🔥', cpu: '🧮', mem: '🧠', disk: '🗄', temp: '🌡', throttle: '🥵', conntrack: '🔗',
   disktemp: '🌡', disk_health: '💽', disk_forecast: '📈', inode: '🗂', units: '⚙️', cpu_spin: '🌀',
-  docker: '🐳', kuber: '☸️', backups: '💾',
+  docker: '🐳', kuber: '☸️', backups: '💾', docker_sock: '🔓',
 }
 
 type T = (k: string, p?: Record<string, string | number>) => string
@@ -374,6 +374,15 @@ function dockerProblems(servers: Server[], t: T): ProbItem[] {
         key: `d-loop-${s.id}`, id: s.id, name: s.name, cc: s.country, down: true,
         text: t(loop.length === 1 ? '{name}: перезапускается в цикле {list}' : '{name}: перезапускаются в цикле {list}',
           { name: s.name, list: loop.join(', ') }),
+      })
+    // внешний прокси с docker-сокетом: не авария, а дыра - предупреждением, клик ведет в Docker,
+    // где написано, как поправить
+    const ex = s.docker_exposed ?? []
+    if (ex.length > 0 && !(s.alert_mutes ?? []).includes('docker_sock'))
+      out.push({
+        key: `d-sock-${s.id}`, id: s.id, name: s.name, cc: s.country, down: false,
+        text: t('{name}: docker-сокет у {list} - взлом прокси даст root на хосте',
+          { name: s.name, list: ex.map((e) => e.name).join(', ') }),
       })
   }
   return out

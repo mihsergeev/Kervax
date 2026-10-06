@@ -1223,6 +1223,8 @@ export type Server = {
   // фронте нельзя — crash-loop определяется по приросту RestartCount в окне,
   // а история есть только на бэкенде
   docker_alerts?: Record<string, string>
+  // внешние прокси (caddy-docker-proxy, traefik) с docker-сокетом: взлом прокси - root на хосте
+  docker_exposed?: { name: string; image: string; kind: string }[]
   agent_ip: string
   last_report: ServerReport | null
   last_seen: string | null
@@ -1728,6 +1730,7 @@ export type WebErrorRow = {
   hosts?: { h: string; n: number }[] // по доменам, если лог общий и в формате есть $host (helper 0.21)
   lines: string[] // последние строки с 5xx (хелпер 0.19), секреты замаскированы на ноде
   lines_n: number // сколько строк сохранено за окно
+  gone?: boolean // лога больше нет в отчете: ошибки за окно - история (сайты разнесли по логам)
 }
 // Все строки с 5xx одного лога за окно - для .txt
 export function serverWebErrorLines(id: number, key: string, hours = 24): Promise<string[]> {

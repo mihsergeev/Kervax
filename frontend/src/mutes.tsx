@@ -32,6 +32,7 @@ export const SRV_ALERT_KINDS: { k: string; label: string }[] = [
   { k: 'units', label: 'Systemd: упавшие юниты' },
   { k: 'cpu_spin', label: 'CPU: процессы в пустом цикле' },
   { k: 'backup_growth', label: 'Бэкап: резкий прирост' },
+  { k: 'docker_sock', label: 'Docker: внешний прокси с docker-сокетом' },
   { k: 'reboot', label: 'Перезагрузка' },
   { k: 'oom', label: 'OOM-killer' },
   { k: 'web_5xx', label: 'Веб: ошибки 5xx' },
