@@ -414,6 +414,7 @@ _SETUP_LABEL = {
     "units-setup": "Упавшие юниты systemd",
     "dbstat-setup": "Инвентарь СУБД",
     "agent-watchdog": "Вотчдог агента",
+    "dockerproxy-setup": "Доступ к Docker (прокси)",
 }
 
 
@@ -1428,7 +1429,12 @@ def _docker_cmd_out(c: DockerCommand, now: datetime) -> DockerCommandOut:
         tzinfo=c.created_at.tzinfo or timezone.utc
     )).total_seconds() > 90:
         c.status, c.ok, c.result = "error", False, "агент не ответил (таймаут)"
-    return DockerCommandOut.model_validate(c)
+    out = DockerCommandOut.model_validate(c)
+    # 403 на действие отвечает не докер, а прокси docker-сокета: на ноде прокси только для
+    # чтения (tecnativa с POST=0). Говорим, в чем дело, вместо голого кода; в БД - как было.
+    if out.status == "error" and (out.result or "").strip() == "docker вернул 403":
+        out.result = "прокси Docker на ноде пропускает только чтение (403)"
+    return out
 
 
 @router.post("/{server_id}/docker/command", response_model=DockerCommandOut)

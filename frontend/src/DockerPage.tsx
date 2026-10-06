@@ -35,9 +35,10 @@ const RESTART_POLICIES = new Set(['always', 'unless-stopped', 'on-failure'])
 const DOCKER_ENABLE_CMD = `DGID=$(getent group docker | cut -d: -f3)
 sudo docker rm -f kervax-docker-proxy 2>/dev/null
 sudo docker run -d --name kervax-docker-proxy --restart unless-stopped \\
+  --network host --read-only --cap-drop ALL --security-opt no-new-privileges \\
   --user 65534:$DGID -v /var/run/docker.sock:/var/run/docker.sock:ro \\
-  -p 127.0.0.1:2375:2375 wollomatic/socket-proxy:1 \\
-  -loglevel warn -listenip 0.0.0.0 -allowfrom 0.0.0.0/0 -shutdowngracetime 1 \\
+  wollomatic/socket-proxy:1 \\
+  -loglevel warn -listenip 127.0.0.1 -allowfrom 127.0.0.1/32 -shutdowngracetime 1 \\
   -allowGET '^/(v[0-9.]+/)?(version|info|_ping|containers/json|containers/[a-zA-Z0-9_.-]+/(json|logs))' \\
   -allowPOST '^/(v[0-9.]+/)?containers/[a-zA-Z0-9_.-]+/(restart|stop|start)$'
 grep -q '^docker_host=' /etc/kervax-agent.conf || echo docker_host=tcp://127.0.0.1:2375 | sudo tee -a /etc/kervax-agent.conf
@@ -60,13 +61,16 @@ async function runAndWait(
   return last
 }
 
-function EnableBlock() {
+// readonly: доступ есть, но действие получило 403 - на ноде прокси только для чтения
+function EnableBlock({ readonly = false }: { readonly?: boolean }) {
   const { t } = useI18n()
   const [copied, setCopied] = useState(false)
   return (
     <div className="docker-noaccess">
-      <div className="muted small">
-        {t('Docker установлен (версии видны). Список контейнеров скрыт — включите read-only доступ (docker-socket-proxy: только просмотр + restart, без exec/root). Новым нодам — флаг --docker при установке.')}
+      <div className={readonly ? 'form-error small' : 'muted small'}>
+        {readonly
+          ? t('Прокси docker-сокета на этой ноде пускает только чтение, поэтому перезапуск, стоп и старт дают 403. Замените его этой командой: просмотр плюс перезапуск, стоп и старт, без exec, создания контейнеров и образов, слушает только 127.0.0.1 хоста.')
+          : t('Docker установлен (версии видны). Список контейнеров скрыт — включите read-only доступ (docker-socket-proxy: только просмотр + restart, без exec/root). Новым нодам — флаг --docker при установке.')}
       </div>
       <div className="agent-advice-cmd">
         <pre>{DOCKER_ENABLE_CMD}</pre>
@@ -92,6 +96,7 @@ function ContainerRow({
   canAct,
   onLogs,
   onChanged,
+  onDenied,
 }: {
   serverId: number
   c: DockerContainer
@@ -99,6 +104,7 @@ function ContainerRow({
   canAct: boolean
   onLogs: () => void
   onChanged: () => void
+  onDenied?: () => void // прокси ответил 403: на ноде доступ только на чтение
 }) {
   const { t } = useI18n()
   const [busy, setBusy] = useState<string | null>(null)
@@ -110,7 +116,10 @@ function ContainerRow({
     setErr(null)
     try {
       const res = await runAndWait(serverId, c.name, action)
-      if (res.status !== 'done') setErr(res.result || t('не удалось'))
+      if (res.status !== 'done') {
+        setErr(res.result || t('не удалось'))
+        if ((res.result || '').includes('(403)')) onDenied?.()
+      }
       onChanged()
     } catch {
       setErr(t('ошибка'))
@@ -320,6 +329,7 @@ function DockerHostModal({
   const { t } = useI18n()
   const [logs, setLogs] = useState<string | null>(null)
   const [hideStopped, setHideStopped] = useState(false)
+  const [denied, setDenied] = useState(false)
   const [q, setQ] = useState('')
   const [sort, setSort] = useState<'state' | 'name' | 'restarts'>('state')
   const cs = docker.containers ?? []
@@ -383,6 +393,7 @@ function DockerHostModal({
             </select>
           </div>
         )}
+        {denied && docker.access && <EnableBlock readonly />}
         {!docker.access ? (
           <EnableBlock />
         ) : cs.length === 0 ? (
@@ -397,6 +408,7 @@ function DockerHostModal({
                 serverId={s.id}
                 c={c}
                 problem={probs[c.name]}
+                onDenied={() => setDenied(true)}
                 canAct={canAct}
                 onLogs={() => setLogs(c.name)}
                 onChanged={onChanged}

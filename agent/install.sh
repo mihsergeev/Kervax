@@ -255,18 +255,22 @@ echo "✓ $UNIT installed and started. Logs: journalctl -u $UNIT -f"
 # Docker access for the agent WITHOUT granting it root. A tiny socket-proxy (wollomatic)
 # exposes ONLY a per-method allowlist: GET version/list/logs plus POST
 # restart/stop/start for a specific container. Everything else (exec, create, images,
-# build, volumes, host mounts) returns 403. No RCE, no host root. Binds to 127.0.0.1.
+# build, volumes, host mounts) returns 403. No RCE, no host root. It runs in the host
+# network and listens on 127.0.0.1 only: other containers cannot reach it (from the bridge
+# network any container could read the env and logs of every other one through it). No
+# capabilities, read-only root. The same command lives in dockerproxy-setup.sh and in the
+# Docker section of the panel.
 setup_docker_proxy() {
   command -v docker >/dev/null 2>&1 || { echo "· Docker not found - skipping the proxy." >&2; return; }
   echo "→ Setting up bounded Docker access (socket-proxy)..."
   DGID=$(getent group docker 2>/dev/null | cut -d: -f3)
   docker rm -f kervax-docker-proxy >/dev/null 2>&1 || true
   if docker run -d --name kervax-docker-proxy --restart unless-stopped \
+      --network host --read-only --cap-drop ALL --security-opt no-new-privileges \
       --user "65534:${DGID:-999}" \
       -v /var/run/docker.sock:/var/run/docker.sock:ro \
-      -p 127.0.0.1:2375:2375 \
       wollomatic/socket-proxy:1 \
-        -loglevel warn -listenip 0.0.0.0 -allowfrom 0.0.0.0/0 -shutdowngracetime 1 \
+        -loglevel warn -listenip 127.0.0.1 -allowfrom 127.0.0.1/32 -shutdowngracetime 1 \
         -allowGET '^/(v[0-9.]+/)?(version|info|_ping|containers/json|containers/[a-zA-Z0-9_.-]+/(json|logs))' \
         -allowPOST '^/(v[0-9.]+/)?containers/[a-zA-Z0-9_.-]+/(restart|stop|start)$' >/dev/null; then
     grep -q '^docker_host=' "$CONF" || printf 'docker_host=tcp://127.0.0.1:2375\n' >> "$CONF"

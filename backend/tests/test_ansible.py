@@ -97,3 +97,16 @@ def test_webserver_helper_is_needed_where_it_already_counts_requests():
     assert setup_needed("webserver-setup", {"extras": {"web-rate": {"ts": 1, "rpm": 0, "logs": []}}})
     # без веб-сервера и без блока - не нужен: доменов там все равно нет
     assert not setup_needed("webserver-setup", {"extras": {"custom-backups": {}}})
+
+
+def test_docker_proxy_helper_only_where_access_was_given():
+    """dockerproxy-setup укрепляет уже выданный доступ к Docker; там, где прокси нет, доступ
+    не давали - и helper туда не зовется."""
+    from app.setup_scripts import setup_needed
+
+    with_proxy = {"docker": {"present": True, "access": True, "containers": [
+        {"name": "web-1"}, {"name": "kervax-docker-proxy", "image": "wollomatic/socket-proxy:1"}]}}
+    assert setup_needed("dockerproxy-setup", with_proxy)
+    assert not setup_needed("dockerproxy-setup", {"docker": {"present": True, "access": False}})
+    assert not setup_needed("dockerproxy-setup", {"docker": {"present": True, "access": True,
+                                                             "containers": [{"name": "web-1"}]}})
