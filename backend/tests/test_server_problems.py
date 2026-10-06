@@ -33,8 +33,10 @@ def test_problems_from_all_new_checks():
         },
     }
     fc = {"ts": ts, "items": [
-        {"mount": "/hdd", "kind": "space", "pct": 78.0, "rate": 3.0, "eta_h": 176.0},
-        {"mount": "/data", "kind": "space", "pct": 50.0, "rate": 1.0, "eta_h": 400.0}]}  # дальше 10 дней
+        {"mount": "/hdd", "kind": "space", "pct": 85.0, "rate": 3.0, "eta_h": 110.0},
+        # дальше пяти суток, с которых приходит и алерт: в "Что сломано" не попадает
+        {"mount": "/srv", "kind": "space", "pct": 78.0, "rate": 3.0, "eta_h": 176.0},
+        {"mount": "/data", "kind": "space", "pct": 50.0, "rate": 1.0, "eta_h": 400.0}]}
     s = _server(rep, now, disk_forecast=fc, alert_mutes=["unit:muted.service"])
     probs = server_problems(s, now)
     texts = {(p["kind"], p["level"], p["text"]) for p in probs}
@@ -42,9 +44,10 @@ def test_problems_from_all_new_checks():
     assert ("disk_health", 3, "диск nvme1n1 не определяется (размер 0)") in texts  # без модели
     assert ("disk_health", 2, "ошибки ввода-вывода: 40 за 10 минут") in texts
     assert ("units", 1, "certbot.service: код 1") in texts
-    assert ("disk_forecast", 1, "/hdd заполнится через 7 дн") in texts
+    assert ("disk_forecast", 1, "/hdd заполнится через 5 дн") in texts
     assert ("inode", 2, "inode / 92%") in texts
-    assert not any("fresh.service" in t or "muted.service" in t or "/data" in t for _k, _l, t in texts)
+    assert not any("fresh.service" in t or "muted.service" in t or "/data" in t or "/srv" in t
+                   for _k, _l, t in texts)
     assert probs[0]["level"] == 3  # серьезные первыми
     by_kind = {p["kind"]: p for p in probs}
     assert by_kind["units"]["mute"] == "unit:certbot.service" and by_kind["units"]["sec"] == "units"

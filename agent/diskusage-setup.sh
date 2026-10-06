@@ -11,9 +11,12 @@
 # helpers, and only for the actions /etc/kervax/fix.conf on this node allows.
 # Since 0.5 a filesystem that runs out of inodes (75% used) is broken down too: the
 # directories with the most files, since df shows free gigabytes while nothing can be created.
+# Since 0.6 the panel can ask to analyze a filesystem below 75% ("Analyze", or a forecast says
+# it fills up in days): the fixer puts it on a watch list for a day, and the measurement treats
+# it as filling up. Read only, so fix.conf does not gate it.
 set -euo pipefail
 
-KERVAX_SETUP_VERSION=0.5  # MAJOR.MINOR; compared component-wise
+KERVAX_SETUP_VERSION=0.6  # MAJOR.MINOR; compared component-wise
 KERVAX_SETUP_ALWAYS=1     # safe on any node: while disks have room it only reads df
 
 HELPER_DIR=/lib65/kervax
@@ -44,6 +47,16 @@ MAX_INODES=3000000                     # a full walk of a backup server takes ho
 now=$(date +%s)
 TAB=$(printf '\t')
 install -d -m 0700 "$CACHE"
+
+# Filesystems the panel asked to analyze below HOT_PCT (mount<TAB>until, written by the fixer):
+# treated as filling up until the request expires. Expired lines are dropped here.
+WATCH="$CACHE/watch"
+WATCHED=""
+if [ -s "$WATCH" ]; then
+  WATCHED=$(awk -F'\t' -v now="$now" '$2 > now {print $1}' "$WATCH")
+  awk -F'\t' -v now="$now" '$2 > now' "$WATCH" > "$WATCH.tmp" && mv -f "$WATCH.tmp" "$WATCH"
+fi
+is_watched() { [ -n "$WATCHED" ] && printf '%s\n' "$WATCHED" | grep -qxF -- "$1"; }
 
 have() { command -v "$1" >/dev/null 2>&1; }
 # JSON string body: control characters dropped, backslash and quote escaped. A single raw
@@ -86,11 +99,12 @@ while IFS="$TAB" read -r mnt size used avail; do
     itot=0; iused=0
   fi
   line=$(printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s' "$mnt" "$size" "$used" "$avail" "$pct" "$ipct" "$iused" "$itot")
-  if [ "$pct" -ge "$HOT_PCT" ]; then
+  w=0; is_watched "$mnt" && w=1
+  if [ "$pct" -ge "$HOT_PCT" ] || [ "$w" = 1 ]; then
     HOT="$HOT$line
 "
   fi
-  if [ "$pct" -ge "$HOT_PCT" ] || [ "$ipct" -ge "$HOT_PCT" ]; then
+  if [ "$pct" -ge "$HOT_PCT" ] || [ "$ipct" -ge "$HOT_PCT" ] || [ "$w" = 1 ]; then
     ALL="$ALL$line
 "
   fi
@@ -322,7 +336,7 @@ while IFS="$TAB" read -r mnt size used avail pct ipct iused itot; do
   [ -n "$mnt" ] || continue
   key=$(printf '%s' "$mnt" | md5sum | cut -c1-12)
   f="$CACHE/top-$key"
-  if [ "$pct" -lt "$HOT_PCT" ]; then
+  if ! is_hot "$mnt"; then
     printf 'none\t%s\t%s\n' "$now" "$iused" > "$f"   # only the inodes run out here
   elif ! fresh "$f" || [ "$(head -1 "$f" | cut -f1)" = none ]; then
     ino=$(df -P -i -- "$mnt" 2>/dev/null | awk 'NR == 2 {print $3}')
@@ -573,8 +587,21 @@ act_container_log() {  # mode container
   echo "$s 1"
   echo "$lp"
 }
+# Analyze a filesystem below 75% for a day: put it on the watch list of the measurement. Only a
+# local filesystem df knows about; deletes nothing, so fix.conf does not gate it.
+act_analyze() {  # mount
+  local m=$1 until
+  df -P -l 2>/dev/null | awk 'NR > 1 {print $NF}' | grep -qxF -- "$m" \
+    || { echo "no local filesystem is mounted at $m" >&2; return 1; }
+  install -d -m 0700 "$CACHE"
+  until=$(( $(date +%s) + 86400 ))
+  { awk -F'\t' -v m="$m" '$1 != m' "$CACHE/watch" 2>/dev/null; printf '%s\t%s\n' "$m" "$until"; } > "$CACHE/watch.tmp"
+  mv -f "$CACHE/watch.tmp" "$CACHE/watch"
+  echo "0 0"
+  echo "$m"
+}
 
-run_action() {  # action mode container
+run_action() {  # action mode container mount
   case "$1" in
     journal) act_journal "$2" ;;
     rotated-logs) act_rotated "$2" ;;
@@ -584,19 +611,20 @@ run_action() {  # action mode container
     docker-dangling) act_dangling "$2" ;;
     docker-build-cache) act_buildcache "$2" ;;
     container-log) act_container_log "$2" "$3" ;;
+    analyze) act_analyze "$4" ;;
     *) echo "unknown action" >&2; return 1 ;;
   esac
 }
 
 process_spool() {
-  local req id line k v act mode cont tmpd first b n sample ok out refresh=""
+  local req id line k v act mode cont mnt tmpd first b n sample ok out refresh=""
   for req in "$REQ_DIR"/*.req; do
     [ -f "$req" ] || continue
     id=$(basename "$req" .req)
-    act=""; mode=""; cont=""
+    act=""; mode=""; cont=""; mnt=""
     while IFS= read -r line; do
       k=${line%%=*}; v=${line#*=}
-      case "$k" in action) act=$v ;; mode) mode=$v ;; container) cont=$v ;; esac
+      case "$k" in action) act=$v ;; mode) mode=$v ;; container) cont=$v ;; mount) mnt=$v ;; esac
     done < "$req"
     rm -f "$req"
     ok=false
@@ -605,13 +633,18 @@ process_spool() {
       case "$cont" in [A-Za-z0-9]*) ;; *) act="" ;; esac
       case "$cont" in *[!A-Za-z0-9._-]*) act="" ;; esac
     fi
+    if [ "$act" = analyze ]; then
+      [ "$mode" = run ] || act=""
+      case "$mnt" in /*) ;; *) act="" ;; esac
+      case "$mnt" in *[!A-Za-z0-9/._-]*|*..*) act="" ;; esac
+    fi
     if [ -z "$act" ]; then
       out="bad request"
-    elif ! allowed "$act"; then
+    elif [ "$act" != analyze ] && ! allowed "$act"; then
       out="the action $act is not allowed on this node (/etc/kervax/fix.conf)"
     else
       tmpd=$(mktemp -d)
-      if run_action "$act" "$mode" "$cont" > "$tmpd/out" 2> "$tmpd/err"; then
+      if run_action "$act" "$mode" "$cont" "$mnt" > "$tmpd/out" 2> "$tmpd/err"; then
         first=$(head -1 "$tmpd/out"); b=${first%% *}; n=${first#* }
         case "$b" in ''|*[!0-9-]*) b=0 ;; esac
         case "$n" in ''|*[!0-9]*) n=0 ;; esac
@@ -644,8 +677,8 @@ EOF_S
 
 case "${1:-}" in
   process-spool) process_spool ;;
-  preview|run) run_action "${2:-}" "$1" "${3:-}" ;;
-  *) echo "usage: $0 process-spool | preview|run <action> [container]" >&2; exit 2 ;;
+  preview|run) run_action "${2:-}" "$1" "${3:-}" "${3:-}" ;;
+  *) echo "usage: $0 process-spool | preview|run <action> [container|mount]" >&2; exit 2 ;;
 esac
 FIXER_EOF
   chmod 0755 "$FIXER"
@@ -676,5 +709,5 @@ fi
 
 echo "$KERVAX_SETUP_VERSION" > "$STATE_DIR/versions/diskusage-setup.ver"
 chmod 0644 "$STATE_DIR/versions/diskusage-setup.ver"
-echo "✓ diskusage-setup: where the disk space went -> $OUT (every 10 minutes, only while a disk fills up);"
-echo "  \"Free up\" actions through $REQ_DIR, allowed by /etc/kervax/fix.conf."
+echo "✓ diskusage-setup: where the disk space went -> $OUT (every 10 minutes, while a disk fills up or the panel asked);"
+echo "  \"Free up\" actions through $REQ_DIR, allowed by /etc/kervax/fix.conf; \"Analyze\" needs no allow."

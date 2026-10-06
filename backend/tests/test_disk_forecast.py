@@ -32,6 +32,24 @@ def test_one_time_jump_is_not_growth():
     assert dfc.growth_rate(pts, NOW) is None
 
 
+def test_jump_next_to_noise_is_not_growth():
+    """admin-a 05.10: сборка образов разом +7.1% к /app, накануне +0.1% шума. Оба дня
+    "росли", но это скачок: прогноз обещал заполнение через неделю при ровном графике."""
+    def fn(ago):
+        if ago >= 2:
+            return 62.6
+        return 62.7 if ago >= 1.2 else 69.8
+    assert dfc.growth_rate(series(fn), NOW) is None
+
+
+def test_growth_must_be_comparable_and_above_noise():
+    # ускорение в пределах STEP_RATIO - все еще тренд
+    pts = series(lambda ago: 70 + (1 * (3 - ago) if ago >= 1 else 2 + 3 * (1 - ago)))
+    assert dfc.growth_rate(pts, NOW) is not None
+    # ровный рост ниже порога шума - не прогноз (до заполнения все равно месяцы)
+    assert dfc.growth_rate(series(lambda ago: 40 + 0.2 * (3 - ago)), NOW) is None
+
+
 def test_gap_in_history_gives_nothing():
     pts = [p for p in series(lambda ago: 50 + 2 * (3 - ago)) if not (1.1 < (NOW - p[0]) / 86400 < 1.9)]
     assert dfc.growth_rate(pts, NOW) is None
@@ -155,6 +173,106 @@ async def test_forecast_alert_levels_and_recovery(tmp_path, monkeypatch):
     await tick(None)  # рост прекратился
     assert len(sent) == 3 and sent[2].startswith("✅") and "больше не грозят заполниться" in sent[2]
     await engine.dispose()
+
+
+async def test_forecast_alert_comes_five_days_ahead(tmp_path, monkeypatch):
+    """Предупреждение за пять суток - с того же срока, что пункт в "Что сломано"."""
+    from app import collector
+    from app.config import Settings
+    from app.models import Server
+
+    rep = {"clock_unix": 0, "uptime_seconds": 100000, "disks": [{"mount": "/hdd", "used": 80, "total": 100}]}
+    engine, factory, now = await _setup(tmp_path, "fc5", last_report=rep)
+    sent = _capture(monkeypatch)
+    cfg = Settings(alert_webhook="http://hook")
+
+    async def tick(eta_h):
+        nonlocal now
+        now = now + timedelta(minutes=2)
+        async with factory() as s:
+            srv = (await s.execute(select(Server))).scalars().one()
+            srv.last_seen = now
+            srv.disk_forecast = {"ts": int(now.timestamp()), "items": [
+                {"mount": "/hdd", "kind": "space", "pct": 80.0, "rate": 3.0, "eta_h": eta_h}]}
+            await s.commit()
+        await collector.evaluate_servers(factory, cfg, now)
+
+    await tick(130)  # больше пяти суток - рано
+    assert sent == []
+    await tick(115)
+    assert len(sent) == 1 and sent[0].startswith("⚠️📈 ") and "через 5 дн" in sent[0]
+    await tick(150)  # запас гистерезиса
+    assert len(sent) == 1
+    await engine.dispose()
+
+
+async def test_analyze_request_for_forecast_mount(tmp_path):
+    """Раздел ниже 75% с прогнозом: helper сам его не разбирает - панель просит разбор. Не чаще
+    раза в 12 ч, только у нод с агентом 2.24 и diskusage-setup 0.6, не тот, что уже разобран."""
+    from app import collector
+    from app.models import BackupCommand, Server
+
+    rep = {"agent_version": "2.24", "setup_versions": {"diskusage-setup": "0.6"},
+           "disks": [{"mount": "/app", "used": 70, "total": 100}, {"mount": "/hdd", "used": 90, "total": 100}],
+           "extras": {"disk-usage": {"v": 1, "ts": 1, "items": [], "fs": [{"mount": "/hdd", "pct": 90}]}}}
+    engine, factory, now = await _setup(tmp_path, "an", last_report=rep)
+    fc = {"ts": int(now.timestamp()), "items": [
+        {"mount": "/app", "kind": "space", "pct": 70.0, "rate": 6.0, "eta_h": 100.0},
+        {"mount": "/hdd", "kind": "space", "pct": 90.0, "rate": 3.0, "eta_h": 60.0}]}
+    async with factory() as s:
+        srv = (await s.execute(select(Server))).scalars().one()
+        srv.disk_forecast = fc
+        await s.commit()
+    assert await collector.request_disk_analysis(factory, now) == 1
+    async with factory() as s:
+        cmds = list(await s.scalars(select(BackupCommand)))
+        assert [(c.action, c.mode, c.payload["name"], c.payload["mount"], c.origin) for c in cmds] == [
+            ("disk_fix", "run", "analyze", "/app", "auto")]
+        cmds[0].status = "done"
+        await s.commit()
+    # повтор - только через 12 часов
+    assert await collector.request_disk_analysis(factory, now + timedelta(hours=1)) == 0
+    async with factory() as s:
+        srv = (await s.execute(select(Server))).scalars().one()
+        srv.disk_forecast = {**fc, "ts": int((now + timedelta(hours=13)).timestamp())}
+        srv.last_seen = now + timedelta(hours=13)
+        await s.commit()
+    assert await collector.request_disk_analysis(factory, now + timedelta(hours=13)) == 1
+    # старый агент - не просим
+    async with factory() as s:
+        srv = (await s.execute(select(Server))).scalars().one()
+        srv.last_report = {**rep, "agent_version": "2.23"}
+        await s.commit()
+    assert not collector.disk_analyze_ok({**rep, "agent_version": "2.23"})
+    assert not collector.disk_analyze_ok({**rep, "setup_versions": {"diskusage-setup": "0.5"}})
+    await engine.dispose()
+
+
+async def test_analyze_api(client, auth_headers):
+    from tests.test_users import _mk_viewer
+
+    r = await client.post("/api/servers", json={"name": "an"}, headers=auth_headers)
+    token, sid = r.json()["token"], r.json()["server"]["id"]
+    rep = {"hostname": "an", "os": "U", "agent_version": "2.24", "cpu_percent": 5, "mem_used": 1, "mem_total": 2,
+           "setup_versions": {"diskusage-setup": "0.6"},
+           "disks": [{"mount": "/app", "used": 70, "total": 100}]}
+    r = await client.post("/api/agent/report", json=rep, headers={"Authorization": f"Bearer {token}"})
+    assert r.status_code == 200
+    srv = [x for x in (await client.get("/api/servers", headers=auth_headers)).json() if x["id"] == sid][0]
+    assert srv["disk_analyze"] is True
+    url = f"/api/servers/{sid}/backup/command"
+    body = {"action": "disk_fix", "mode": "run", "fix": "analyze", "mount": "/app"}
+    r = await client.post(url, json=body, headers=auth_headers)
+    assert r.status_code == 200, r.text
+    # раздела нет у ноды, preview, путь с обходом - отказ
+    for bad in ({**body, "mount": "/etc"}, {**body, "mode": "preview"}, {**body, "mount": "/app/../etc"}):
+        assert (await client.post(url, json=bad, headers=auth_headers)).status_code in (400, 422)
+    viewer = await _mk_viewer(client, auth_headers)
+    assert (await client.post(url, json=body, headers=viewer)).status_code == 403
+    # агент получает раздел в команде
+    r = await client.get("/api/agent/commands", headers={"Authorization": f"Bearer {token}"})
+    cmd = [c for c in r.json()["backup_commands"] if c["action"] == "disk_fix"][0]
+    assert cmd["name"] == "analyze" and cmd["mount"] == "/app" and cmd["mode"] == "run"
 
 
 async def test_inode_alert_with_cause_and_disk_eta(tmp_path, monkeypatch):

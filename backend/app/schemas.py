@@ -1018,6 +1018,8 @@ class ServerOut(BaseModel):
     # внешние прокси со сборкой образа старше года (docker_exposure.outdated):
     # [{"name", "image", "kind", "version", "built", "age_days"}]
     proxy_outdated: list[dict] = Field(default_factory=list)
+    # нода умеет разобрать раздел по запросу (агент 2.24 + diskusage-setup 0.6): кнопка "Разобрать"
+    disk_analyze: bool = False
     last_report: dict | None
     last_seen: datetime | None
     snooze_until: datetime | None = None
@@ -1390,7 +1392,9 @@ class BackupCommandIn(BaseModel):
     # disk_fix: кнопка "Освободить" из разбора места. Тот же каталог знают агент и helper
     # diskusage-setup; разрешено ли действие на ноде, решает helper по /etc/kervax/fix.conf.
     fix: str = Field(default="", pattern="^$|^(journal|rotated-logs|apt-cache|dnf-cache|coredumps"
-                     "|crash-reports|docker-dangling|docker-build-cache|container-log)$")
+                     "|crash-reports|docker-dangling|docker-build-cache|container-log|analyze)$")
+    # disk_fix analyze: разобрать раздел, который helper сам не разбирает (ниже 75%)
+    mount: str = Field(default="", max_length=256, pattern=r"^$|^/[A-Za-z0-9/._-]*$")
     # unit_fix: упавший юнит systemd (helper units-setup трогает его, только пока тот упал).
     # Обратный слэш - так systemd экранирует имена mount-юнитов (mnt-my\x20disk.mount).
     unit: str = Field(default="", max_length=200, pattern=_UNIT_NAME)

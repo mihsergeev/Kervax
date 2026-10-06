@@ -1229,6 +1229,8 @@ export type Server = {
   docker_exposed?: { name: string; image: string; kind: string }[]
   // внешние прокси со сборкой образа старше года (built - unix-секунды)
   proxy_outdated?: { name: string; image: string; kind: string; version: string; built: number; age_days: number }[]
+  // нода умеет разобрать раздел по запросу (агент 2.24 + diskusage-setup 0.6)
+  disk_analyze?: boolean
   agent_ip: string
   last_report: ServerReport | null
   last_seen: string | null
@@ -1582,6 +1584,8 @@ export function backupCommand(
     | { action: 'timesync' }
     // "Освободить" из разбора места; контейнер - только у лога контейнера
     | { action: 'disk_fix'; mode: 'preview' | 'run'; fix: string; container?: string }
+    // "Разобрать" раздел ниже 75% (helper diskusage-setup 0.6)
+    | { action: 'disk_fix'; mode: 'run'; fix: 'analyze'; mount: string }
     // упавший юнит systemd: перезапустить или сбросить отметку (helper units-setup)
     | { action: 'unit_fix'; mode: 'restart' | 'reset'; unit: string }
     | { action: 'dump_remove'; engine: string; container: string }

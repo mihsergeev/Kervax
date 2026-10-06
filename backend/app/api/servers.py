@@ -16,9 +16,9 @@ from sqlalchemy import delete as sa_delete, func, select
 
 from app import audit, backup_growth, custom_backups, docker_exposure, geoip, kube_coverage, manual_probe
 from app.collector import (
-    alert_since, docker_since, dump_local_stale, needed_pod_names, pod_uid_names, send_alerts_soon,
-    send_autofix_note, server_problems, web_5xx_total, web_breakdown, web_label_key, web_log_label,
-    web_rate_total,
+    alert_since, disk_analyze_ok, docker_since, dump_local_stale, needed_pod_names, pod_uid_names,
+    send_alerts_soon, send_autofix_note, server_problems, web_5xx_total, web_breakdown,
+    web_label_key, web_log_label, web_rate_total,
 )
 from app.setup_scripts import (
     current_setup_versions as _current_setup_versions,
@@ -198,6 +198,7 @@ def _out(
     o.docker_alerts = _docker_alerts(server)
     o.docker_exposed = docker_exposure.exposed(server.last_report or {})
     o.proxy_outdated = docker_exposure.outdated(server.last_report or {}, now.timestamp())
+    o.disk_analyze = disk_analyze_ok(server.last_report or {})
     o.problems = server_problems(server, now, pod_names)
     o.alert_since = alert_since(server)
     o.docker_since = docker_since(server)
@@ -1615,11 +1616,20 @@ async def backup_command(
 ) -> BackupCommandOut:
     """Поставить backup-действие в очередь (агент заберёт ~1-15с). Исполняется через
     узкий helper: только set_paths / set_schedule / run_now."""
-    await _get_or_404(server_id, session, user)
+    srv = await _get_or_404(server_id, session, user)
     # engine/container нужны только dump_setup — кладём в payload (агент мержит его
     # в команду верхним уровнем), чтобы не плодить колонки под разовые поля
     payload = None
-    if body.action == "disk_fix":
+    if body.action == "disk_fix" and body.fix == "analyze":
+        # Разобрать раздел, на который helper сам не смотрит (ниже 75%): только чтение (du,
+        # docker system df), поэтому не одному админу. Раздел - из тех, что нода сообщает сама.
+        if user.role == "viewer":
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "Недостаточно прав")
+        mounts = {d.get("mount") for d in (srv.last_report or {}).get("disks") or [] if isinstance(d, dict)}
+        if body.mode != "run" or not body.mount or body.mount not in mounts:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "такого раздела на ноде нет")
+        payload = {"name": "analyze", "container": "", "mount": body.mount}
+    elif body.action == "disk_fix":
         # Root-действие на ноде (удаляет файлы): только админ и только из каталога. Путь
         # к логу контейнера панель не передает - helper берет его у docker по имени.
         if user.role != "admin":
@@ -1656,7 +1666,8 @@ async def backup_command(
     await session.refresh(c)
     target = (body.schedule or f"{body.mode}:{len(body.paths)}")[:120]
     if body.action == "disk_fix":
-        target = f"{body.fix}:{body.mode}" + (f":{body.container}" if payload["container"] else "")
+        target = (f"{body.fix}:{body.mode}" + (f":{body.container}" if payload["container"] else "")
+                  + (f":{body.mount}" if body.fix == "analyze" else ""))[:120]
     if body.action == "unit_fix":
         target = f"{body.unit}:{body.mode}"[:120]
     await audit.record(session, user.username, f"backup_{body.action}", target, f"srv={server_id}")
@@ -2804,7 +2815,8 @@ async def agent_backup_result(
     if c.action != "disk_fix":  # у disk_fix секретов нет, а название действия нужно уведомлению
         c.payload = None  # секреты (repopass/hpass) в БД не задерживаем - стираем сразу
     await session.commit()
-    if c.action == "disk_fix" and c.origin == "auto":
+    if c.action == "disk_fix" and c.origin == "auto" and (c.payload or {}).get("name") != "analyze":
         # что сделала авто-очистка - в каналы алертов, иначе удаление от root прошло бы тихо
+        # (разбор раздела по прогнозу ничего не удаляет - о нем писать нечего)
         background.add_task(send_autofix_note, request.app.state.session_factory, server.id, c.id)
     return {"ok": True}

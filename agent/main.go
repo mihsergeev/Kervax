@@ -42,7 +42,7 @@ import (
 	"time"
 )
 
-const version = "2.23"
+const version = "2.24"
 
 // Публичный ключ для проверки подписи релизов агента (Ed25519, base64).
 // ПУСТО по умолчанию → самообновление ВЫКЛЮЧЕНО (агент никогда не заменяет себя).
@@ -743,6 +743,7 @@ type backupCommand struct {
 	SanIP       string `json:"san_ip,omitempty"`
 	SanDNS      string `json:"san_dns,omitempty"`
 	Port        int    `json:"port,omitempty"`         // deploy_server: порт rest-server
+	Mount       string `json:"mount,omitempty"`        // disk_fix analyze: раздел, который разобрать
 	Engine      string `json:"engine,omitempty"`       // dump_setup: pg/mysql/ch
 	Container   string `json:"container,omitempty"`    // dump_setup: имя контейнера ("" = нативно)
 	DumpDir     string `json:"dump_dir,omitempty"`     // dump_setup: каталог дампов
@@ -5728,6 +5729,22 @@ var diskFixActions = map[string]bool{
 	"journal": true, "rotated-logs": true, "apt-cache": true, "dnf-cache": true,
 	"coredumps": true, "crash-reports": true, "docker-dangling": true,
 	"docker-build-cache": true, "container-log": true,
+	// не удаляет, а разбирает раздел ниже 75%, на который helper сам не смотрит
+	"analyze": true,
+}
+
+// diskMountOK - раздел для разбора: абсолютный путь из букв, цифр и /._- без "..". helper
+// еще раз сверит его со списком своих разделов (df), чужой путь там не пройдет.
+func diskMountOK(m string) bool {
+	if m == "" || m[0] != '/' || len(m) > 256 || strings.Contains(m, "..") || strings.Contains(m, "//") {
+		return false
+	}
+	for _, c := range m {
+		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || strings.ContainsRune("/._-", c)) {
+			return false
+		}
+	}
+	return true
 }
 
 // diskFixLines - строки запроса в спул du-req. Только известное действие и режим; у лога
@@ -5735,6 +5752,12 @@ var diskFixActions = map[string]bool{
 func diskFixLines(cmd backupCommand) ([]string, bool) {
 	if !diskFixActions[cmd.Name] || (cmd.Mode != "preview" && cmd.Mode != "run") {
 		return nil, false
+	}
+	if cmd.Name == "analyze" {
+		if cmd.Mode != "run" || !diskMountOK(cmd.Mount) {
+			return nil, false
+		}
+		return []string{"action=analyze", "mode=run", "mount=" + cmd.Mount}, true
 	}
 	lines := []string{"action=" + cmd.Name, "mode=" + cmd.Mode}
 	if cmd.Name == "container-log" {

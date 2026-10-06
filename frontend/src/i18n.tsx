@@ -311,6 +311,11 @@ const EN: Record<string, string> = {
   'Автоочистка выключена, включается в настройках сервера.': 'Automatic cleanup is off; turn it on in the server settings.',
   'Раздел больше не заполнен ({d}), разбор места скрыт: он появляется от 75%.':
     'The filesystem is no longer filling up ({d}), so the breakdown is hidden: it appears from 75%.',
+  'Разбор места сам включается от 75%. Кнопка "Разобрать" появится с агентом 2.24 и helper diskusage-setup 0.6.':
+    'The disk breakdown starts by itself from 75%. The "Analyze" button comes with agent 2.24 and helper diskusage-setup 0.6.',
+  'Разбор запущен, появится ниже через минуту-две.': 'The breakdown has started, it shows up below in a minute or two.',
+  'Запрашиваю...': 'Requesting...',
+  'Разобрать': 'Analyze',
   '{p}: похоже на копию репозитория restic': '{p}: looks like a copy of a restic repository',
   '{p}: дампы баз': '{p}: database dumps',
   '{p}: архивы': '{p}: archives',

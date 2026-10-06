@@ -1055,6 +1055,7 @@ input:focus {
   .cg-row .cg-name { flex-basis: 100%; white-space: normal; overflow-wrap: anywhere; }
 }
 .du-fix-btn { flex-shrink: 0; padding: 0.15rem 0.65rem; font-size: 0.78rem; }
+.du-analyze { margin-top: 0.3rem; }
 .du-fix {
   margin: 0.35rem 0 0.25rem;
   padding: 0.5rem 0.65rem;
