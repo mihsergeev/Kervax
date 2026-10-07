@@ -4,6 +4,18 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.4.109] - 2026-10-07
+
+### Fixed
+- Алерт "Веб: пошли ошибки 5xx" больше не срабатывает на ответы сканерам. На stand-a сканер
+  под видом Googlebot и GPTBot пробовал прочитать /@fs/.env, /@fs/root/.env и соседей через
+  dev-сервер Vite, приложение отвечало 500 вместо 404, и 22 таких ответа при 30 тыс. запросов
+  (0.07%) дали алерт, хотя сайт работал. Теперь минута, где все пути с 5xx - пробы сканера,
+  в алерт не входит: служебные файлы с точкой в начале (/.env, /.git/config,
+  /.aws/credentials, кроме /.well-known/), /@fs/, выход за корень сайта, /vendor/phpunit/,
+  /etc/passwd. Если среди пяти самых частых путей с ошибками есть хоть один настоящий, минута
+  считается целиком, как раньше. Порог 0.05% не менялся.
+
 ## [1.4.108] - 2026-10-07
 
 ### Fixed
