@@ -1020,6 +1020,9 @@ class ServerOut(BaseModel):
     proxy_outdated: list[dict] = Field(default_factory=list)
     # нода умеет разобрать раздел по запросу (агент 2.24 + diskusage-setup 0.6): кнопка "Разобрать"
     disk_analyze: bool = False
+    # только что поставлена (первые 20 минут после первого отчета): установщик еще ставит helper'ы
+    # и прокси Docker, "Требует действий" их не требует
+    fresh: bool = False
     last_report: dict | None
     last_seen: datetime | None
     snooze_until: datetime | None = None

@@ -4,6 +4,16 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.4.106] - 2026-10-07
+
+### Fixed
+- Только что добавленный сервер первые минуты показывал в "Требует действий" пачку "helper ... не
+  установлен - поставьте" и "Docker без доступа", а через пару минут они пропадали сами.
+  Установщик запускает агента раньше, чем ставит helper'ы и прокси Docker, и первые отчеты
+  приходили без них. Теперь первые 20 минут после первого отчета агента панель не требует
+  отсутствующие helper'ы и доступ к Docker и Kubernetes. Устаревший helper видно сразу (установщик
+  берет свежие у панели), а установщик, упавший на полпути, проявится после паузы.
+
 ## [1.4.105] - 2026-10-07
 
 ### Fixed

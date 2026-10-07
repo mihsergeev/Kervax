@@ -110,3 +110,37 @@ def test_docker_proxy_helper_only_where_access_was_given():
     assert not setup_needed("dockerproxy-setup", {"docker": {"present": True, "access": False}})
     assert not setup_needed("dockerproxy-setup", {"docker": {"present": True, "access": True,
                                                              "containers": [{"name": "web-1"}]}})
+
+
+def test_fresh_node_is_not_asked_for_helpers():
+    """Установщик ставит helper'ы уже после старта агента: первые минуты их отсутствие не повод
+    звать "поставьте" (плашки мигали и пропадали сами)."""
+    from datetime import datetime, timedelta, timezone
+
+    from app.api.servers import _fresh_node, _helper_advice
+    from app.models import Server
+
+    now = datetime.now(timezone.utc)
+    rep = {"agent_version": "2.24", "setup_versions": {}}
+    s = Server(name="new", token_hash="x", enabled=True, last_report=rep,
+               first_report_at=now - timedelta(minutes=3))
+    cur = {"timesync-setup": "0.2"}
+    assert _fresh_node(s, now) and _helper_advice(s, cur) == []
+    # устаревший helper установщик не приносит (берет свежие у панели) - его видно сразу
+    s.last_report = {**rep, "setup_versions": {"timesync-setup": "0.1"}}
+    assert [a.name for a in _helper_advice(s, cur)] == ["timesync-setup"]
+    s.last_report = rep
+    s.first_report_at = now - timedelta(minutes=30)  # установщик давно закончил
+    assert not _fresh_node(s, now) and [a.name for a in _helper_advice(s, cur)] == ["timesync-setup"]
+    s.first_report_at = None  # нода, заведенная до этого поля
+    assert not _fresh_node(s, now)
+
+
+async def test_first_report_marks_the_node_fresh(client, auth_headers):
+    r = await client.post("/api/servers", json={"name": "fresh-one"}, headers=auth_headers)
+    token = r.json()["token"]
+    srv = [x for x in (await client.get("/api/servers", headers=auth_headers)).json() if x["name"] == "fresh-one"][0]
+    assert srv["fresh"] is False  # отчетов еще нет
+    await _report(client, token, hostname="fresh-one", setup_versions={})
+    srv = [x for x in (await client.get("/api/servers", headers=auth_headers)).json() if x["name"] == "fresh-one"][0]
+    assert srv["fresh"] is True and srv["helper_advice"] == []

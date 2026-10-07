@@ -294,11 +294,13 @@ function actionItems(servers: Server[], avail: string, relProblem: string, t: T)
   for (const s of servers) {
     if (!s.online) continue
     const rep = s.last_report
-    if (rep?.docker?.present && !rep.docker.access) {
+    // Только что поставленная нода: установщик еще поднимает прокси Docker и ставит helper'ы
+    // (их бэкенд в эти минуты и не требует). Без паузы плашки мигали и пропадали сами.
+    if (rep?.docker?.present && !rep.docker.access && !s.fresh) {
       items.push({ key: `d-acc-${s.id}`, icon: '🐳', section: 'docker', id: s.id, name: s.name, cc: s.country,
         text: t('{name}: Docker без доступа — включите read-only proxy', { name: s.name }) })
     }
-    if (rep?.kube?.present && !rep.kube.access) {
+    if (rep?.kube?.present && !rep.kube.access && !s.fresh) {
       items.push({ key: `k-acc-${s.id}`, icon: '☸', section: 'kuber', id: s.id, name: s.name, cc: s.country,
         text: t('{name}: Kubernetes без доступа — запустите kube-setup', { name: s.name }) })
     }
