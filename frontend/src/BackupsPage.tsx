@@ -1037,9 +1037,15 @@ function RotationInfo({ r, x, legacy, t }: {
   if (!x && !oldest && !ts) return noCleaner
   const limit = rotationLimitDays(r)
   const ageDays = oldest ? Math.floor((Date.now() / 1000 - oldest) / 86400) : 0
-  const stale = !!(oldest && limit && ageDays > limit)
   const removed = r.rotation_removed ?? -1
   const now = Date.now() / 1000
+  // Снапшотов не больше, чем политика может оставить: их она и оставила. keep-daily считает
+  // дни с бэкапами, а не календарные, и у редко бэкапящегося клиента старый снапшот законен.
+  // Так же считает rotation_stale_repos на бэкенде.
+  const policyMax = (r.keep_last ?? 0) + (r.keep_daily ?? 0) + (r.keep_weekly ?? 0) + (r.keep_monthly ?? 0)
+  const stale = !!(oldest && limit && ageDays > limit && r.snapshots > policyMax)
+  // чистка что-то удаляет: тогда переживший политику снапшот почти наверняка другой группы
+  const alive = removed > 0 || !!(x?.removed_ts && now - x.removed_ts < 3 * 86400)
   // без метрик чистки helper сам видит, когда из репозитория пропадали снапшоты
   const idleDays = x && !x.removed_ts && x.seen_since ? Math.floor((now - x.seen_since) / 86400) : 0
   const lastRun = legacy?.log_ts ? t('последний прогон {ago}', { ago: fmtAgo(legacy.log_ts) }) : ''
@@ -1079,9 +1085,11 @@ function RotationInfo({ r, x, legacy, t }: {
       {oldest > 0 && (
         <span
           className={stale ? 't-down' : ''}
-          title={limit
-            ? t('политика допускает снапшоты возрастом до {n} дн.', { n: limit })
-            : t('политика хранения не задана — судить не о чем')}
+          title={!limit
+            ? t('политика хранения не задана, судить не о чем')
+            : stale && alive
+              ? t('Чистка идет, а старые снапшоты остаются: похоже, это другая группа, менялись хост или пути бэкапа. Последние снапшоты каждой группы restic хранит, пока их не удалить вручную.')
+              : t('политика допускает снапшоты возрастом до {n} дн.', { n: limit })}
         >
           {t('старейший')}: {ageDays} {t('дн.')}
           {stale && ` > ${limit}`}
