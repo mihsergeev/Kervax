@@ -1243,6 +1243,8 @@ export type BackupServerRepoExtra = {
   cleaner: '' | 'script' | 'legacy' // свой prune-скрипт, старый общий скрипт, никто
   removed_ts: number // когда из репозитория последний раз пропадали снапшоты (0 - не видели)
   seen_since: number // с какого момента helper за ним следит
+  check_ts?: number // недельная проверка целостности нашего prune-скрипта (helper 0.25)
+  check_ok?: number // 1 прошла, 0 нашла ошибки, -1 еще не было
 }
 export type BackupServerExtra = {
   v: number

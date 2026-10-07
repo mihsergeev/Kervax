@@ -56,6 +56,7 @@ import {
   collectMutes,
 } from './mutes'
 import { useAuth } from './auth'
+import { AlertHistoryModal } from './AlertHistoryModal'
 
 type MetricKey =
   | 'cpu'
@@ -3910,6 +3911,7 @@ function ServerDetail({
   const { isViewer } = useAuth()
   const [updBusy, setUpdBusy] = useState(false)
   const [snoozing, setSnoozing] = useState(false)
+  const [histOpen, setHistOpen] = useState(false)
   const doUpdate = async (fn: () => Promise<Server[]>) => {
     setUpdBusy(true)
     try {
@@ -4130,6 +4132,9 @@ function ServerDetail({
             {s.group_name && <span className="type-chip group-chip">{s.group_name}</span>}
           </div>
           <div className="detail-head-actions">
+            <button className="ghost icon-btn" onClick={() => setHistOpen(true)} title={t('История алертов')}>
+              🔔
+            </button>
             {!editing && !isViewer && (
               <button className="ghost icon-btn" onClick={startEdit} title={t('Изменить')}>
                 ✎
@@ -4664,6 +4669,9 @@ function ServerDetail({
     </div>
     {zoomKey && (
       <ServerChartModal server={s} metricKey={zoomKey} onClose={() => setZoomKey(null)} />
+    )}
+    {histOpen && (
+      <AlertHistoryModal initialTarget={s.name} onClose={() => setHistOpen(false)} onUnauthorized={onUnauthorized} />
     )}
     </>
   )

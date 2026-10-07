@@ -5,6 +5,7 @@ import { useI18n } from './i18n'
 type Props = {
   onClose: () => void
   onUnauthorized: () => void
+  initialTarget?: string // открыть сразу с фильтром по серверу или монитору (из карточки сервера)
 }
 
 const PERIODS = [1, 7, 30, 90, 180]
@@ -12,11 +13,11 @@ const PERIODS = [1, 7, 30, 90, 180]
 // История отправленных алертов. Нужна на два вопроса: приходил ли алерт про эту беду (и
 // когда), и что шумит больше всего - сводка считает срабатывания за весь период под
 // фильтром, клик по строке сводки сужает список до этого вида или объекта.
-export function AlertHistoryModal({ onClose, onUnauthorized }: Props) {
+export function AlertHistoryModal({ onClose, onUnauthorized, initialTarget }: Props) {
   const { t } = useI18n()
   const [days, setDays] = useState(7)
   const [only, setOnly] = useState<'all' | 'fires' | 'recoveries'>('all')
-  const [target, setTarget] = useState('')
+  const [target, setTarget] = useState(initialTarget ?? '')
   const [kind, setKind] = useState<{ kind: string; label: string } | null>(null)
   const [q, setQ] = useState('')
   const [qDebounced, setQDebounced] = useState('')
