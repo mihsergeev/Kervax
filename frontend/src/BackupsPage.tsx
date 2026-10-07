@@ -996,6 +996,33 @@ function EnableServerStats() {
   )
 }
 
+// restic самого сервера бэкапов старше целевой версии. Его обновляет установка helper'а, так
+// что обычно это значит, что скачать с github не вышло. Root-команды панель не запускает,
+// поэтому показываем команду для сервера.
+function ServerResticOld({ ver, target }: { ver: string; target: string }) {
+  const { t } = useI18n()
+  const [copied, setCopied] = useState(false)
+  const cmd = 'sudo /lib65/kervax/kervax-backupserver-helper restic-update'
+  return (
+    <div className="small growth-sum t-degraded">
+      {t('На сервере restic {v}, а helper ставит {target} (ту же версию, что у клиентов). Обычно его обновляет установка helper\'а, если скачать не вышло, запустите на сервере:', { v: ver, target })}
+      <div className="agent-advice-cmd">
+        <pre>{cmd}</pre>
+        <button
+          className="ghost"
+          onClick={() => {
+            navigator.clipboard?.writeText(cmd)
+            setCopied(true)
+            window.setTimeout(() => setCopied(false), 1500)
+          }}
+        >
+          {copied ? t('Скопировано') : t('Копировать')}
+        </button>
+      </div>
+    </div>
+  )
+}
+
 // Раскладка бэкап-сервера — та же, что создаёт backupserver-setup.sh / deploy-server.
 const BSRV_ROOT = '/app/rest-server'
 
@@ -1527,6 +1554,12 @@ function BackupServerModal({ server: s, info, servers, canAct, onChanged, onClos
         <StorageBar info={info} t={t} />
         <div className="docker-host-head">
           <span className="type-chip">🗄 rest-server {info.version || '—'}</span>
+          {ext?.restic && (
+            <span className={`type-chip ${s.bsrv_restic_old ? 't-degraded' : ''}`}
+              title={t('restic, которым сервер сам чистит и проверяет репозитории (prune, forget, check)')}>
+              restic {ext.restic}
+            </span>
+          )}
           {s.os && <span className="type-chip">{osShort(s.os)}</span>}
           <span className={`type-chip ${info.running ? 't-up' : 't-down'}`}>
             {info.running ? t('запущен') : t('остановлен')}
@@ -1554,6 +1587,7 @@ function BackupServerModal({ server: s, info, servers, canAct, onChanged, onClos
           {canAct && <RestServerUpdate server={s} info={info} onChanged={onChanged} />}
           {canAct && !info.tls_front && <EnableTls server={s} onChanged={onChanged} />}
         </div>
+        {s.bsrv_restic_old && <ServerResticOld ver={s.bsrv_restic_old} target={ext?.restic_target || ''} />}
         {legacy && legacyN > 0 && (
           <div className={`small growth-sum ${legacy.where ? 'muted' : 't-down'}`}>
             {legacy.where

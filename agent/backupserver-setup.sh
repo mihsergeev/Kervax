@@ -57,7 +57,9 @@ fi
 #       scripts run a weekly restic check (the monolith checked daily), stats report it
 # 0.26: the cleanup runs 12 hours away from the client's backup (prune locks the repository
 #       exclusively, a backup starting meanwhile failed)
-KERVAX_SETUP_VERSION=0.26  # MAJOR.MINOR; compared component-wise (0.13 > 0.2!)
+# 0.27: restic-update brings the server's own restic to 0.19.1 (the installer runs it), stats
+#       report the version the server runs
+KERVAX_SETUP_VERSION=0.27  # MAJOR.MINOR; compared component-wise (0.13 > 0.2!)
 # Which nodes need this helper at all. Read by the ansible playbook on the
 # CONTROL machine and evaluated as a shell condition ON THE NODE, so a new
 # helper lands where it belongs without anyone editing the playbook.
@@ -130,6 +132,31 @@ REST_IMAGE="restic/rest-server:0.14.0"
 KERVAX_RESTIC=/lib65/kervax/restic
 RESTIC_BIN="$(command -v restic || true)"
 [ -n "$RESTIC_BIN" ] || RESTIC_BIN="$KERVAX_RESTIC"
+# The restic the server runs itself is brought to this version (restic-update, the installer
+# runs it too). The one from the distribution is old: Debian 12 ships 0.14, and before 0.16
+# restic cannot wait for a lock by itself. The sha256 of the .bz2 from github is BAKED in here,
+# the same version and sums as in backup-setup.sh.
+RESTIC_TARGET_VER="0.19.1"
+RESTIC_SHA_amd64="f415415624dcc452f2a02b8c33641791a8c6d6d3b65bbb3543fcf9a25151585c"
+RESTIC_SHA_arm64="a5f64aaab53d51e311fa3829124c5b703f2d14cf187d8640b6be3b2b49376465"
+restic_ver() { "$1" version 2>/dev/null | grep -oE '^restic [0-9]+\.[0-9]+\.[0-9]+' | awk '{ print $2 }' || true; }
+ver_lt() { [ "$1" != "$2" ] && [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | head -n1)" = "$1" ]; }
+# every restic the server runs: the one new prune scripts get plus whatever the existing scripts
+# were generated with (their BIN= line), each path once
+server_restic_bins() {
+  { [ -x "$RESTIC_BIN" ] && echo "$RESTIC_BIN"; sed -n 's/^BIN=//p' "$PRUNE_DIR"/restic-prune-*.sh 2>/dev/null; } \
+    | grep -E '^/[A-Za-z0-9._/+-]+$' | awk '!seen[$0]++' || true
+}
+# the oldest of them: that is the version the panel compares with the target
+server_restic_min() {
+  local b v min=""
+  while IFS= read -r b; do
+    [ -x "$b" ] || continue
+    v="$(restic_ver "$b")"; [ -n "$v" ] || continue
+    if [ -z "$min" ] || ver_lt "$v" "$min"; then min="$v"; fi
+  done < <(server_restic_bins)
+  printf '%s' "$min"
+}
 
 # where the certificate actually is: the new layout, otherwise the old one (a node may not
 # have gone through the migration - stats/get-cert/ufw must see HTTPS either way)
@@ -315,7 +342,8 @@ cmd_stats() {
     legacy_json="{\"script\":\"$LEGACY_PRUNE\",\"repos\":${lcount:-0},\"where\":\"$(json_escape "$L_WHERE")\",\"schedule\":\"$(json_escape "$L_SCHED")\",\"log\":\"$(json_escape "$L_LOG")\",\"log_ts\":${log_ts:-0},\"missing\":[$missing]}"
   fi
   install -d -m 0755 "${REPORT_EXTRA%/*}" 2>/dev/null || true
-  if printf '{"v":1,"ts":%s,"legacy":%s,"repos":{%s}}\n' "$now_ts" "$legacy_json" "$extra_json" > "$REPORT_EXTRA.tmp" 2>/dev/null; then
+  if printf '{"v":1,"ts":%s,"restic":"%s","restic_target":"%s","legacy":%s,"repos":{%s}}\n' \
+      "$now_ts" "$(server_restic_min)" "$RESTIC_TARGET_VER" "$legacy_json" "$extra_json" > "$REPORT_EXTRA.tmp" 2>/dev/null; then
     chmod 0644 "$REPORT_EXTRA.tmp" 2>/dev/null && mv -f "$REPORT_EXTRA.tmp" "$REPORT_EXTRA" 2>/dev/null || true
   fi
   # Space on the volume WITH THE REPOSITORIES rather than on /: they often sit on a separate
@@ -1029,6 +1057,56 @@ cmd_get_client_creds() {
 }
 
 # ------- spool: execute provisioning requests (secrets are 0600 and removed at once) -------
+# cmd_restic_update brings every restic the server runs (server_restic_bins) up to
+# RESTIC_TARGET_VER: only the ones that are older, a newer one is never touched. Downloaded from
+# github, checked against the baked sha256, then swapped in atomically. A binary that came from a
+# package gets the package put on hold, otherwise apt would bring the old one back on the next
+# upgrade.
+cmd_restic_update() {
+  local arch want b cur old=() f tmp got newbin out="" pkg held=""
+  case "$(uname -m)" in
+    x86_64) arch=amd64; want="$RESTIC_SHA_amd64" ;;
+    aarch64|arm64) arch=arm64; want="$RESTIC_SHA_arm64" ;;
+    *) echo "unknown architecture: $(uname -m)" >&2; return 2 ;;
+  esac
+  while IFS= read -r b; do
+    [ -x "$b" ] || continue
+    cur="$(restic_ver "$b")"
+    if [ -z "$cur" ]; then echo "$b does not report a restic version, left alone" >&2; continue; fi
+    if ver_lt "$cur" "$RESTIC_TARGET_VER"; then old+=("$b"); echo "$b: restic $cur"; fi
+  done < <(server_restic_bins)
+  if [ "${#old[@]}" -eq 0 ]; then echo "restic is $RESTIC_TARGET_VER or newer, nothing to update"; return 0; fi
+  command -v bunzip2 >/dev/null 2>&1 || { apt-get update -qq >/dev/null 2>&1 || true; apt-get install -y -qq bzip2 >/dev/null 2>&1 || true; }
+  f="restic_${RESTIC_TARGET_VER}_linux_${arch}.bz2"
+  tmp="$(mktemp -d /tmp/kv-restic.XXXXXX)"
+  if ! curl -fsSL --connect-timeout 20 --max-time 600 "https://github.com/restic/restic/releases/download/v$RESTIC_TARGET_VER/$f" -o "$tmp/$f"; then
+    rm -rf "$tmp"; echo "could not download restic $RESTIC_TARGET_VER from github" >&2; return 2
+  fi
+  got="$(sha256sum "$tmp/$f" | awk '{ print $1 }')"
+  if [ "$got" != "$want" ]; then
+    rm -rf "$tmp"; echo "the sha256 did not match (expected $want, got $got), nothing was replaced" >&2; return 2
+  fi
+  bunzip2 -f "$tmp/$f" || { rm -rf "$tmp"; echo "bunzip2 failed" >&2; return 2; }
+  newbin="$tmp/${f%.bz2}"
+  chmod 0755 "$newbin"
+  [ "$(restic_ver "$newbin")" = "$RESTIC_TARGET_VER" ] || { rm -rf "$tmp"; echo "the downloaded restic does not run" >&2; return 2; }
+  for b in "${old[@]}"; do
+    # a copy next to it plus mv: same filesystem, so the swap is atomic and a running prune keeps the old file
+    if cp -f "$newbin" "$b.kv-new" && chmod 0755 "$b.kv-new" && mv -f "$b.kv-new" "$b"; then
+      out="$out $b"
+      pkg="$(dpkg -S "$b" 2>/dev/null | head -n1 | cut -d: -f1 || true)"
+      if [ -n "$pkg" ] && apt-mark hold "$pkg" >/dev/null 2>&1; then
+        held=" (package $pkg is on hold now, apt will not bring the old version back)"
+      fi
+    else
+      rm -f "$b.kv-new"; echo "could not replace $b" >&2
+    fi
+  done
+  rm -rf "$tmp"
+  [ -n "$out" ] || return 2
+  echo "restic updated to $RESTIC_TARGET_VER:$out$held"
+}
+
 cmd_process_spool() {
   local req id action name hpass repopass client_ip kl kd kw km san_ip san_dns port out ok k v line
   for req in "$REQ_DIR"/*.req; do
@@ -1069,12 +1147,13 @@ case "${1:-}" in
   refresh)          refresh_stats ;;
   deploy-server)    shift; cmd_deploy_server "$@" ;;
   update-image)     cmd_update_image ;;
+  restic-update)    cmd_restic_update ;;
   provision-client) shift; cmd_provision_client "$@" ;;
   deploy-tls-front) shift; cmd_deploy_tls_front "$@" ;;
   get-cert)         cmd_get_cert ;;
   get-client-creds) shift; cmd_get_client_creds "$@" ;;
   process-spool)    cmd_process_spool ;;
-  *) echo "usage: $0 {stats|regen-prune|adopt-legacy [--apply] [name...]|deploy-server [port]|update-image|provision-client <name> <hpass> <repopass> <ip> [kl kd kw km]|deploy-tls-front <ip> [dns]|get-cert|get-client-creds <name>|process-spool}" >&2; exit 2 ;;
+  *) echo "usage: $0 {stats|regen-prune|adopt-legacy [--apply] [name...]|deploy-server [port]|update-image|restic-update|provision-client <name> <hpass> <repopass> <ip> [kl kd kw km]|deploy-tls-front <ip> [dns]|get-cert|get-client-creds <name>|process-spool}" >&2; exit 2 ;;
 esac
 HELPER_EOF
 chmod 0755 "$HELPER"; chown root:root "$HELPER"
@@ -1095,6 +1174,14 @@ for _f in /app/rest-server/system/envs/*.env; do
     rm -f "$_f.kvtmp"
   fi
 done
+
+# The server's own restic (prune, forget, check) up to the version baked into the helper. A
+# failed download changes nothing: the old restic keeps working and the panel shows it is old.
+if _out="$("$HELPER" restic-update 2>&1)"; then
+  printf '%s\n' "$_out" | sed 's/^/backupserver-setup: /'
+else
+  printf '%s\n' "$_out" | sed 's/^/backupserver-setup: restic not updated: /' >&2
+fi
 
 # one immediate run (so the file appears) plus a cron entry every minute (stats are cheap)
 "$HELPER" stats > "$STATS.tmp" 2>/dev/null && mv -f "$STATS.tmp" "$STATS" || true

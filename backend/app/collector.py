@@ -1776,6 +1776,23 @@ def bsrv_extra(rep: dict) -> dict:
     return block
 
 
+def _ver_tuple(v: str) -> tuple[int, ...]:
+    return tuple(int(x) for x in re.findall(r"\d+", v or "")[:3])
+
+
+def bsrv_restic_old(rep: dict) -> str:
+    """Версия restic сервера бэкапов, если она старше целевой, иначе "".
+
+    Обе версии из блока helper'а (backupserver-setup 0.27+): он знает, до какой версии
+    обновляет restic, и панели не нужно держать свою копию этого числа. restic-update
+    берет самую старую из тех, что сервер запускает, ее же helper и сообщает."""
+    b = bsrv_extra(rep)
+    cur, want = str(b.get("restic") or ""), str(b.get("restic_target") or "")
+    if not _ver_tuple(cur) or not _ver_tuple(want):
+        return ""
+    return cur if _ver_tuple(cur) < _ver_tuple(want) else ""
+
+
 def _muted(key: str, level: int, mutes: set) -> bool:
     """Заглушён ли алерт. Кроме простого «весь тип» (`disk`) поддерживаем УРОВЕНЬ:
     `disk@1` = молчать про предупреждения, но алертить проблему и критику. Нужно там,

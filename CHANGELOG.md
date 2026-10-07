@@ -4,6 +4,26 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.4.115] - 2026-10-08
+
+### Fixed
+- Бэкап, который стартует во время серверной чистки репозитория, ждет её до 2 часов, а не падает
+  (helper backup-setup 0.33). prune держит эксклюзивный лок, и restic без `--retry-lock` сразу
+  выходит с ошибкой "repository is already locked". Флаг ставится сразу после слова `backup` и
+  только если restic на ноде его знает (с 0.16), старый restic запускается как раньше. Скрипты
+  бэкапа, сделанные раньше helper'ом или ansible-ролью, правятся один раз при обновлении helper'а,
+  рядом остается копия `.kervax-pre-retry.bak`. В шаблоне ansible-роли restic-backup то же самое.
+
+### Added
+- Обновление restic самого сервера бэкапов (helper backupserver-setup 0.27):
+  `kervax-backupserver-helper restic-update`, его же запускает установка helper'а. Обновляются
+  только те restic, что старше 0.19.1: тот, что получат новые prune-скрипты, и те, с которыми
+  созданы существующие. Бинарь качается с github и сверяется с sha256, зашитым в helper, как у
+  клиентов. Сейчас на backup-b и backup-c restic 0.14.0, на backup-a 0.16.5.
+  restic из пакета ставится на hold, чтобы apt не вернул старую версию. Версия restic видна в
+  окне сервера бэкапов, старая выносится в "Требует действий" с командой обновления, для ansible
+  это группа `kervax_restic_old`.
+
 ## [1.4.114] - 2026-10-07
 
 ### Fixed

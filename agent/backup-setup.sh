@@ -77,7 +77,9 @@ AGENT_USER=kervax
 #       The panel draws the nightly growth, shows who inflates a backup server and warns when a
 #       node suddenly adds much more than usual (feed-a and stats-a added 200-300 GB a
 #       night, and nobody saw it until the backup server filled up)
-KERVAX_SETUP_VERSION=0.32  # MAJOR.MINOR; compared component-wise (0.13 > 0.2!)
+# 0.33: a backup that starts while the server prunes the repository waits for the lock
+#       (--retry-lock 2h on restic 0.16+) instead of failing; existing scripts are patched once
+KERVAX_SETUP_VERSION=0.33  # MAJOR.MINOR; compared component-wise (0.13 > 0.2!)
 KERVAX_SETUP_ALWAYS=1  # safe on any node: installs only its own helper and spool and does not
                        # touch the backup configuration until the panel sends a command
 install -d -m 0755 "$HELPER_DIR" "$STATE_DIR" /var/lib/kervax/versions
@@ -588,6 +590,46 @@ vanished_ok_maybe() {
   rm -f "$f.blk"
   if bash -n "$f.tmp" 2>/dev/null && grep -qF "$VANISHED_MARK" "$f.tmp"; then
     cp -a "$f" "$f.kervax-pre-vanished.bak"
+    chmod --reference="$f" "$f.tmp"; chown --reference="$f" "$f.tmp"; mv -f "$f.tmp" "$f"
+  else
+    rm -f "$f.tmp"
+  fi
+}
+
+# A backup that starts while the backup server prunes the repository fails: prune holds an
+# exclusive lock, and restic does not wait for it unless told to. Backup scripts made earlier,
+# by the helper or by the ansible role, get the wait once: a block right before the single
+# `eval "$BACKUP_CMD"` line, and that line puts " --retry-lock 2h" right after the "backup" word
+# (not at the end: a hand-edited command may end with "--" or a redirection). The flag goes in only
+# when the restic there knows it (0.16+). Same safety as above: one such line or nothing, bash -n
+# before replacing, the original kept as .kervax-pre-retry.bak.
+RETRY_MARK='# kervax-retry-lock: 1'
+RETRY_EVAL='eval "${BACKUP_CMD/ backup / backup$KV_RETRY_LOCK }"'
+retry_lock_block() {
+  printf '%s\n' "$RETRY_MARK" \
+    '# The server cleanup (prune) locks the repository exclusively: wait for it instead of failing' \
+    '# (restic 0.16+; an older restic does not know the flag and runs as before).' \
+    'KV_RETRY_LOCK=""' \
+    'case "$(${BACKUP_CMD%% *} --help 2>/dev/null)" in *--retry-lock*) KV_RETRY_LOCK=" --retry-lock 2h" ;; esac'
+}
+retry_lock_maybe() {
+  local f; f="$(find_script)" || return 0
+  [ -n "$f" ] && [ -f "$f" ] || return 0
+  grep -qF "$RETRY_MARK" "$f" && return 0
+  [ "$(grep -cF 'eval "$BACKUP_CMD"' "$f")" = 1 ] || return 0
+  retry_lock_block > "$f.blk"
+  awk -v bf="$f.blk" -v new="$RETRY_EVAL" '
+    BEGIN { old = "eval \"$BACKUP_CMD\"" }
+    (i = index($0, old)) && !done {
+      while ((getline l < bf) > 0) print l
+      close(bf)
+      $0 = substr($0, 1, i - 1) new substr($0, i + length(old))
+      done = 1
+    }
+    { print }' "$f" > "$f.tmp"
+  rm -f "$f.blk"
+  if bash -n "$f.tmp" 2>/dev/null && grep -qF "$RETRY_MARK" "$f.tmp" && grep -qF "$RETRY_EVAL" "$f.tmp"; then
+    cp -a "$f" "$f.kervax-pre-retry.bak"
     chmod --reference="$f" "$f.tmp"; chown --reference="$f" "$f.tmp"; mv -f "$f.tmp" "$f"
   else
     rm -f "$f.tmp"
@@ -1174,7 +1216,12 @@ if [ "$INCLUDE_MODE" = include ]; then
 else
   BACKUP_CMD="$RESTIC backup / --exclude-caches${EXCLUDES_STR:+ $EXCLUDES_STR}"
 fi
-ts_start=$(date +%s); set +e; eval "$BACKUP_CMD"; RC=$?; set -e; dur=$(( $(date +%s) - ts_start ))
+# kervax-retry-lock: 1
+# The server cleanup (prune) locks the repository exclusively: wait for it instead of failing
+# (restic 0.16+; an older restic does not know the flag and runs as before).
+KV_RETRY_LOCK=""
+case "$(${BACKUP_CMD%% *} --help 2>/dev/null)" in *--retry-lock*) KV_RETRY_LOCK=" --retry-lock 2h" ;; esac
+ts_start=$(date +%s); set +e; eval "${BACKUP_CMD/ backup / backup$KV_RETRY_LOCK }"; RC=$?; set -e; dur=$(( $(date +%s) - ts_start ))
 if [ $RC -eq 0 ] || [ $RC -eq 3 ]; then write_metrics 1 0 "$dur"; else write_metrics 0 0 "$dur"; fi
 RUNNER_BODY
     vanished_ok_block
@@ -2127,7 +2174,7 @@ case "${1:-}" in
   get-config)    cmd_get_config ;;
   # the scan is throttled inside (every CUSTOM_EVERY seconds): the config refresh stays per-minute
   refresh)       refresh_config || true; custom_scan_maybe; kube_access_maybe || true; dumps_trigger_maybe || true
-                 dumps_rsyncable_maybe || true; vanished_ok_maybe || true; backup_runs_maybe || true ;;
+                 dumps_rsyncable_maybe || true; vanished_ok_maybe || true; retry_lock_maybe || true; backup_runs_maybe || true ;;
   custom-scan)   cmd_custom_scan ;;
   backup-runs)   cmd_backup_runs ;;
   set-paths)     shift; cmd_set_paths "$@" ;;

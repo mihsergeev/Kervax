@@ -16,7 +16,7 @@ from sqlalchemy import delete as sa_delete, func, select
 
 from app import audit, backup_growth, custom_backups, docker_exposure, geoip, kube_coverage, manual_probe
 from app.collector import (
-    alert_since, backup_rotation_items, backup_unmonitored, disk_analyze_ok, docker_since, dump_local_stale, needed_pod_names,
+    alert_since, backup_rotation_items, backup_unmonitored, bsrv_restic_old, disk_analyze_ok, docker_since, dump_local_stale, needed_pod_names,
     panel_server_names, pod_uid_names,
     send_alerts_soon, send_autofix_note, server_problems, web_5xx_total, web_breakdown,
     web_label_key, web_log_label, web_rate_total,
@@ -206,6 +206,7 @@ def _out(
     o.docker_since = docker_since(server)
     o.backup_growth = backup_growth.jump(server, now)
     o.bsrv_rotation = backup_rotation_items(server, now)
+    o.bsrv_restic_old = bsrv_restic_old(server.last_report or {})
     o.pod_names = needed_pod_names(server, pod_names)
     return o
 

@@ -323,6 +323,12 @@ function actionItems(servers: Server[], avail: string, relProblem: string, t: T)
       items.push({ key: `k-noagent-${s.id}`, icon: '☸', section: 'kuber', id: s.id, name: s.name, cc: s.country, sec: 'nodes',
         text: t('{name}: нод кластера без агента - {n} ({nodes})', { name: s.name, n: unmon.length, nodes: names }) })
     }
+    // restic самого сервера бэкапов (prune, forget, check) старше той версии, до которой его
+    // обновляет helper: обычно обновление не скачалось. Ведем в модалку сервера, там команда.
+    if (s.bsrv_restic_old) {
+      items.push({ key: `bs-restic-${s.id}`, icon: '🧓', section: 'backups', id: s.id, name: s.name, cc: s.country, srv: true,
+        text: t('{name}: на сервере бэкапов старый restic {v} - обновите', { name: s.name, v: s.bsrv_restic_old }) })
+    }
     // бэкап-сервер найден (по docker), но статистики репо нет → нужен backupserver-setup
     const bs = rep?.backup_server
     if (bs?.present && (!bs.repos || bs.repos.length === 0)) {

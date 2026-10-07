@@ -17,6 +17,7 @@ from sqlalchemy import select
 
 from app import docker_exposure, settings_store
 from app.api.servers import _helper_advice, _is_online, helper_rollout
+from app.collector import bsrv_restic_old
 from app.config import get_settings
 from app.deps import SessionDep
 from app.models import Server
@@ -28,12 +29,15 @@ router = APIRouter(prefix="/ansible", tags=["ansible"])
 
 
 def _issues(rep: dict, now: datetime) -> list[str]:
-    """Что на ноде чинится плейбуком, кроме helper'ов: группы kervax_docker_sock, kervax_proxy_old."""
+    """Что на ноде чинится плейбуком или командой, кроме helper'ов: группы kervax_docker_sock,
+    kervax_proxy_old, kervax_restic_old."""
     out = []
     if docker_exposure.exposed(rep):
         out.append("docker_sock")
     if docker_exposure.outdated(rep, now.timestamp()):
         out.append("proxy_old")
+    if bsrv_restic_old(rep):
+        out.append("restic_old")
     return out
 
 

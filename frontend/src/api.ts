@@ -1249,6 +1249,8 @@ export type BackupServerRepoExtra = {
 export type BackupServerExtra = {
   v: number
   ts: number
+  restic?: string // самый старый restic из тех, что сервер запускает сам (helper 0.27)
+  restic_target?: string // до какой версии его обновляет helper
   legacy: BackupServerLegacy | null
   repos: Record<string, BackupServerRepoExtra>
 }
@@ -1340,6 +1342,7 @@ export type Server = {
   kube_unmonitored?: KubeNodeRef[] // ноды кластера без агента панели (считает бэкенд)
   bsrv_unmonitored?: string[] // репозитории бэкап-сервера, чьих клиентов нет в панели (считает бэкенд)
   bsrv_rotation?: string[] // что сейчас сказал бы алерт "ротация встала" (считает бэкенд)
+  bsrv_restic_old?: string // restic сервера бэкапов старше целевой версии (считает бэкенд)
   alert_since?: Record<string, string> // с какого момента видна проблема каждого вида (ISO)
   docker_since?: Record<string, string> // с какого момента лежит каждый упавший контейнер
   // последний прогон бэкапа добавил в разы больше обычного (считает бэкенд)
