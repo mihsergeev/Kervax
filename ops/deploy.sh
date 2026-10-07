@@ -63,6 +63,23 @@ if [ "$ALL" = "1" ]; then
             exit 1
         }
     done
+    if [ "$DRY" != "1" ]; then
+        # Сверка после всех: каждая панель еще раз отвечает версией с живого health. 07.10.2026
+        # панель из середины списка молча осталась на старой версии, а цикл отчитался "выкачено
+        # на все": дочерний прогон вернул успех, ничего не выкатив, и по выводу причину уже не
+        # восстановить. Повторный прогон на нее прошел чисто.
+        WANT=$(git show "$REF:backend/app/config.py" | sed -n 's/^\s*version: str = "\([0-9.]*\)".*/\1/p' | head -1)
+        bad=""
+        for h in $HOSTS; do
+            got=$(ssh "$h" "sudo docker exec kervax-backend-1 python -c 'import urllib.request;print(urllib.request.urlopen(\"http://localhost:8000/api/health\").read().decode())'" 2>/dev/null \
+                  | sed -n 's/.*"version": *"\([0-9.]*\)".*/\1/p')
+            [ "$got" = "$WANT" ] || bad="$bad $h=${got:-?}"
+        done
+        if [ -n "$bad" ]; then
+            printf '\n\033[31m✗ после выкатки не на %s:%s\033[0m\n' "$WANT" "$bad" >&2
+            exit 1
+        fi
+    fi
     printf '\n\033[32m✓ выкачено на все панели: %s\033[0m\n' "$n"
     exit 0
 fi
