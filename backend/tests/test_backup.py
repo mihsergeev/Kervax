@@ -175,3 +175,28 @@ def test_backup_server_extra_must_be_fresh():
     assert collector.bsrv_extra(rep) == {}
     rep["extras"]["backup-server"] = dict(block, v=2)
     assert collector.bsrv_extra(rep) == {}
+
+
+def test_rotation_age_trusts_the_policy_when_it_can_keep_everything():
+    """keep-daily считает дни с бэкапами, а не календарные. app-d бэкапится раз в
+    месяц-другой: 7 снапшотов за 15 месяцев, все семь законно держит --keep-daily 7, хотя
+    старейшему 458 дней. А у vpn-c 28 снапшотов: текущая группа обрезается по
+    политике, а старая (сменился хост или пути) застыла в 2024 году и не уйдет никогда."""
+    from datetime import datetime, timezone
+
+    from app import collector
+
+    now = datetime.now(timezone.utc)
+    ts = now.timestamp()
+    pol = {"keep_daily": 7, "keep_weekly": 4, "keep_monthly": 6}
+    sparse = dict(pol, name="app-d", snapshots=7, oldest_snapshot=ts - 458 * 86400)
+    orphan = dict(pol, name="vpn-c", snapshots=28, oldest_snapshot=ts - 859 * 86400,
+                  rotation_removed=-1)
+    bsrv = {"repos": [sparse, orphan]}
+    out = collector.rotation_stale_repos(bsrv, now)
+    assert out == ["vpn-c (859 дн. > 231)"], out
+    # чистка при этом идет: подсказываем, что это старая группа, а не вставшая ротация
+    extra = {"repos": {"vpn-c": {"cleaner": "legacy", "removed_ts": ts - 3600,
+                                         "seen_since": ts - 86400}}}
+    out = collector.rotation_stale_repos(bsrv, now, extra)
+    assert len(out) == 1 and "старую группу" in out[0], out

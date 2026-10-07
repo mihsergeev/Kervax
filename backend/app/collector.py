@@ -1796,22 +1796,44 @@ def rotation_overflow(
     return sorted(out), fresh
 
 
-def rotation_stale_repos(bsrv: dict, now: datetime) -> list[str]:
+def rotation_stale_repos(bsrv: dict, now: datetime, extra: dict | None = None) -> list[str]:
     """Репозитории, где старейший снапшот пережил собственную политику хранения.
 
     Главный признак мёртвой ротации, инвариантный к причине: неважно, сломалась ли
     группировка forget, упал prune или снят cron — старьё просто перестаёт исчезать.
-    Именно этого сигнала не хватало, когда 17 дней всё было зелёным."""
+    Именно этого сигнала не хватало, когда 17 дней все было зеленым.
+
+    extra - блок helper'а backup-server: по нему видно, что чистка при этом идет."""
     out: list[str] = []
+    observed = (extra or {}).get("repos") or {}
     for r in bsrv.get("repos") or []:
         oldest = int(r.get("oldest_snapshot") or 0)
         limit = rotation_max_age_days(r)
         if oldest <= 0 or limit <= 0:
             continue  # нет метрики (старый helper) или нет политики — молчим
+        # Снапшотов не больше, чем политика вообще может оставить, - значит, их она и
+        # оставила: keep-daily считает дни, в которые были бэкапы, а не календарные. У
+        # клиента, который бэкапится раз в месяц, 7 снапшотов законно держатся больше
+        # года (app-d: 458 дней, и все семь на своем месте).
+        if int(r.get("snapshots") or 0) <= rotation_policy_max(r):
+            continue
         age = (now.timestamp() - oldest) / 86400
         if age > limit:
-            out.append(f"{r.get('name') or '?'} ({int(age)} дн. > {limit})")
+            # чистка при этом идет - тогда старье почти наверняка другая группа: forget
+            # группирует по хосту и путям, и последние снапшоты старой группы держит вечно
+            hint = ", похоже на старую группу: менялись хост или пути" if rotation_alive(
+                r, observed.get(r.get("name") or ""), now) else ""
+            out.append(f"{r.get('name') or '?'} ({int(age)} дн. > {limit}{hint})")
     return sorted(out)
+
+
+def rotation_alive(r: dict, observed: dict | None, now: datetime) -> bool:
+    """Удаляет ли что-то чистка: по метрике своего prune-скрипта (снято за последний прогон)
+    или по удалениям, которые видел helper за последние _ROT_DEAD_DAYS суток."""
+    if int(r.get("rotation_removed") or 0) > 0:
+        return True
+    ts = int((observed or {}).get("removed_ts") or 0) if isinstance(observed, dict) else 0
+    return ts > 0 and now.timestamp() - ts < _ROT_DEAD_DAYS * 86400
 
 
 # --- «почему» в тексте алерта -------------------------------------------------
@@ -3709,11 +3731,12 @@ async def evaluate_servers(
         bsrv_rot = (s.last_report or {}).get("backup_server") or {}
         if (online_now and bsrv_rot.get("present") and rot_r and rot_r["enabled"]
                 and "backup_rotation" not in mutes and _rule_scope_ok(rot_r, s)):
+            rot_ext = bsrv_extra(s.last_report or {})
             over, seen_over = rotation_overflow(
-                bsrv_rot, dict(st.get("rotation_over") or {}), now, bsrv_extra(s.last_report or {}))
+                bsrv_rot, dict(st.get("rotation_over") or {}), now, rot_ext)
             if seen_over != (st.get("rotation_over") or {}):
                 apply(s.id, "rotation_over", seen_over)
-            stale = [x for x in rotation_stale_repos(bsrv_rot, now) + over
+            stale = [x for x in rotation_stale_repos(bsrv_rot, now, rot_ext) + over
                      if x.split(" (")[0] not in set(s.backup_repo_mutes or [])]
             was_stale = bool(st.get("rotation_stale"))
             if stale and not was_stale:

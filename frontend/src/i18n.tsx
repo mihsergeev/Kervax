@@ -129,6 +129,8 @@ const EN: Record<string, string> = {
   'снято {n}': '{n} removed',
   'старейший': 'oldest',
   'политика допускает снапшоты возрастом до {n} дн.': 'policy allows snapshots up to {n} days old',
+  'Чистка идет, а старые снапшоты остаются: похоже, это другая группа, менялись хост или пути бэкапа. Последние снапшоты каждой группы restic хранит, пока их не удалить вручную.':
+    'Cleanup runs, yet old snapshots stay: they probably belong to another group, the host or backup paths changed. restic keeps the latest snapshots of every group until they are removed by hand.',
   '— агент молчит {ago}. Всё, что ниже, — последние данные, снятые тогда же.':
     '— the agent has been silent for {ago}. Everything below is the last data, taken back then.',
   '— агент ещё ни разу не выходил на связь.': '— the agent has never reported in.',
@@ -160,7 +162,7 @@ const EN: Record<string, string> = {
     'The old script {script} lists {n} repositories, but it is not scheduled in cron or systemd, so nobody cleans them',
   'У репозитория нет своего prune-скрипта: политика показана из старого общего конфига, но сервер по ней ничего не удаляет. Старое убирает только сам клиент, если у него это настроено.':
     'This repository has no prune script of its own: the retention shown comes from an old shared config the server never runs. Anything old is removed only by the client itself, if it is set up to.',
-  'политика хранения не задана — судить не о чем': 'no retention policy — nothing to judge by',
+  'политика хранения не задана, судить не о чем': 'no retention policy, nothing to judge by',
   'последний прогон завершился ошибкой': 'the last run finished with an error',
   'Название': 'Name',
   'Тип': 'Type',
