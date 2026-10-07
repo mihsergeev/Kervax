@@ -300,3 +300,23 @@ def test_home_page_rotation_matches_the_alert():
         alert_state={}, backup_repo_mutes=["zaglushen"],
     )
     assert collector.backup_rotation_items(s, now) == ["vpn-c (859 дн. > 231)"]
+
+
+def test_failed_integrity_checks():
+    """Недельная проверка нашего prune-скрипта: алертим, только если последняя проверка свежая и
+    не прошла. Еще не было (-1) и прошедшие давно (скрипт, похоже, не запускается) не в счет."""
+    from datetime import datetime, timezone
+
+    from app import collector
+
+    now = datetime.now(timezone.utc)
+    ts = now.timestamp()
+    bs = {"repos": [{"name": n} for n in ("broken", "ok", "new", "old", "muted")]}
+    extra = {"repos": {
+        "broken": {"check_ts": ts - 3600, "check_ok": 0},
+        "ok": {"check_ts": ts - 3600, "check_ok": 1},
+        "new": {"check_ts": ts - 3600, "check_ok": -1},
+        "old": {"check_ts": ts - 30 * 86400, "check_ok": 0},
+        "muted": {"check_ts": ts - 3600, "check_ok": 0},
+    }}
+    assert collector.failed_checks(bs, extra, {"muted"}, now) == ["broken"]

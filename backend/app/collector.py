@@ -193,7 +193,7 @@ _SRV_ICON = {
     # обычные события, и «упал»/«крутится в цикле» не читались как авария
     "docker_down": "🔥🐳", "docker_loop": "🔥🐳",
     "queue": "🐇", "backup_rotation": "🧹", "backup_lock": "🔒",
-    "backup_unmonitored": "💾",
+    "backup_unmonitored": "💾", "backup_check": "🩺",
     "backup_missing": "💾", "backup_failed": "💾", "backup_stale": "💾", "backup_repo": "💾",
     "backup_dump": "💾", "backup_dump_space": "🈵", "backup_cron": "💾", "backup_custom": "💾",
     "clock": "🕐", "disk_health": "💽", "inode": "⚠️", "disk_forecast": "📈", "units": "⚙️",
@@ -239,6 +239,7 @@ _ALERT_SECTION = {
     "backup_rotation": "backups",
     "backup_lock": "backups",
     "backup_unmonitored": "backups",
+    "backup_check": "backups",
     "kube_pod": "kuber",
 }
 
@@ -1698,6 +1699,28 @@ def long_locked_repos(bs: dict, muted: set, now: datetime) -> list[tuple[str, in
         age = lock_age(r, now.timestamp())
         if name and name not in muted and age > _BACKUP_LOCK_ALERT_SECONDS:
             out.append((name, int(age // 86400)))
+    return sorted(out)
+
+
+# Недельная проверка целостности (restic check в нашем prune-скрипте, helper 0.25): старый общий
+# скрипт проверял каждый день и слал ошибку в Telegram, переезд на свой скрипт не должен ее
+# терять. Результат старше двух недель не считаем: скрипт с проверкой, похоже, больше не
+# запускается, и про это скажет ротация.
+_BACKUP_CHECK_FRESH = 14 * 86400
+
+
+def failed_checks(bs: dict, extra: dict, muted: set, now: datetime) -> list[str]:
+    """Репозитории, у которых последняя недельная проверка не прошла. Без заглушенных."""
+    out = []
+    for r in bs.get("repos") or []:
+        name = r.get("name") or ""
+        o = ((extra or {}).get("repos") or {}).get(name)
+        if not name or name in muted or not isinstance(o, dict):
+            continue
+        ts = int(o.get("check_ts") or 0)
+        if int(o.get("check_ok") if o.get("check_ok") is not None else -1) == 0 \
+                and ts > 0 and now.timestamp() - ts < _BACKUP_CHECK_FRESH:
+            out.append(name)
     return sorted(out)
 
 
@@ -3505,7 +3528,7 @@ async def evaluate_servers(
             # Раздел "Кубер" с открытым кластером и сразу на нужной вкладке: сроки, Flux,
             # поды. В карточке сервера кластера нет, и ссылка вела мимо.
             return f"{base}/?kube={s.id}&ktab={_KUBE_TAB[key]}"
-        if key in ("backup_repo", "backup_rotation", "backup_lock", "backup_unmonitored"):
+        if key in ("backup_repo", "backup_rotation", "backup_lock", "backup_unmonitored", "backup_check"):
             return f"{base}/?backupsrv={s.id}"
         if key.startswith("backup"):
             return f"{base}/?backup={s.id}"
@@ -3911,6 +3934,27 @@ async def evaluate_servers(
                     "backup_lock", s.name, "висячих локов в репозиториях больше нет",
                     srv_url(s, "backup_lock"), recovery=True))
                 rec_apply.append((s.id, "backup_locks", {}))
+
+        # Не прошла недельная проверка целостности репозитория. Как и с локом: при новом
+        # сломанном и раз в сутки, пока не починят; отбой, когда все проверки снова прошли.
+        cr = rules.get("backup_check")
+        if online_now and bsrv.get("present") and "backup_check" not in mutes:
+            bad = failed_checks(bsrv, bsrv_extra(s.last_report or {}), set(s.backup_repo_mutes or []), now)
+            prev = st.get("backup_checks") if isinstance(st.get("backup_checks"), dict) else {}
+            prev_names = list(prev.get("repos") or [])
+            prev_ts = float(prev.get("ts") or 0)
+            due = bool(set(bad) - set(prev_names)) or now.timestamp() - prev_ts >= _BACKUP_REPO_REALERT
+            if bad and cr and cr["enabled"] and _rule_scope_ok(cr, s) and due:
+                shown = ", ".join(bad[:6]) + (f" и еще {len(bad) - 6}" if len(bad) > 6 else "")
+                fires.append(srv_fire(s, "backup_check", cr, {"repos": shown}))
+                fire_apply.append((s.id, "backup_checks", {"repos": bad, "ts": now.timestamp()}))
+            elif bad and prev_names and bad != prev_names:
+                apply(s.id, "backup_checks", {"repos": bad, "ts": prev_ts})
+            elif not bad and prev_names:
+                recoveries.append(_server_alert_text(
+                    "backup_check", s.name, "проверка целостности репозиториев снова проходит",
+                    srv_url(s, "backup_check"), recovery=True))
+                rec_apply.append((s.id, "backup_checks", {}))
 
         # Новый клиент бэкап-сервера без агента в панели. Алерт только про новых: тех, кто
         # уже писал сюда, когда проверка появилась, запоминаем молча (их видно в окне

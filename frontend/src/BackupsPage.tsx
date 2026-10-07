@@ -1076,6 +1076,12 @@ function RotationInfo({ r, x, legacy, t }: {
           {t('удалений нет {n} дн.', { n: idleDays })}
         </span>
       )}
+      {x && x.check_ts && (x.check_ok ?? -1) >= 0 ? (
+        <span className={x.check_ok === 0 ? 't-down' : ''}
+          title={x.check_ok === 0 ? t('restic check нашел ошибки, вывод в логе prune-скрипта на бэкап-сервере') : t('недельная проверка целостности (restic check)')}>
+          {x.check_ok === 0 ? t('проверка не прошла') : t('проверка')}: {fmtAgo(x.check_ts)}
+        </span>
+      ) : null}
       {ts > 0 && (
         <span title={r.rotation_ok === 0 ? t('последний прогон завершился ошибкой') : ''}>
           {t('чистка')}: {fmtAgo(ts)}

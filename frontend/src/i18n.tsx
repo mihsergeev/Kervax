@@ -1016,6 +1016,10 @@ const EN: Record<string, string> = {
   'Клиенты этих репозиториев не подключены к панели. Если их бэкап сломается, панель узнает только через 3 дня, когда репозиторий устареет. Агент на ноде дал бы алерт в тот же день.':
     'The clients of these repositories are not in the panel. If their backup breaks, the panel learns only after 3 days, when the repository goes stale. An agent on the node would alert the same day.',
   'нет в панели': 'not in the panel',
+  'проверка': 'check',
+  'проверка не прошла': 'check failed',
+  'restic check нашел ошибки, вывод в логе prune-скрипта на бэкап-сервере': 'restic check found errors, the output is in the prune script log on the backup server',
+  'недельная проверка целостности (restic check)': 'weekly integrity check (restic check)',
   '{name}: залочен больше суток, чистка не идет - {list}': '{name}: locked for over a day, cleanup is not running - {list}',
   '{name}: старые снапшоты не вычищаются - {list}': '{name}: old snapshots are not removed - {list}',
   'В нем еще блоки на удаленные репозитории ({n}): {list}. Скрипт каждый день проверяет их и шлет ошибку по каждому, в этом шуме тонут настоящие. Эти блоки стоит убрать из скрипта.':

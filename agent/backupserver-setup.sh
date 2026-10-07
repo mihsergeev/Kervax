@@ -53,7 +53,9 @@ fi
 #       and when snapshots were last removed from it, in report.d/backup-server.json; lock_ts
 #       is the OLDEST stale lock when there is one; oldest_snapshot from the snapshot files
 # 0.24: the monolith's blocks for repositories that no longer exist (it errors on them daily)
-KERVAX_SETUP_VERSION=0.24  # MAJOR.MINOR; compared component-wise (0.13 > 0.2!)
+# 0.25: adopt-legacy moves repositories off the monolith onto their own prune scripts; prune
+#       scripts run a weekly restic check (the monolith checked daily), stats report it
+KERVAX_SETUP_VERSION=0.25  # MAJOR.MINOR; compared component-wise (0.13 > 0.2!)
 # Which nodes need this helper at all. Read by the ansible playbook on the
 # CONTROL machine and evaluated as a shell condition ON THE NODE, so a new
 # helper lands where it belongs without anyone editing the playbook.
@@ -215,7 +217,7 @@ cmd_stats() {
   # fall back to the compose tag if the container is missing or did not answer
   [ -n "$ver" ] || { [ -f "$COMPOSE" ] && ver="$(grep -oE 'rest-server:[A-Za-z0-9._-]+' "$COMPOSE" | head -1 | cut -d: -f2)"; }
   local repos_json="" extra_json="" repo name snaps last locked lock_ts valid size prune kl kd kw km
-  local oldest cleaner ids sf removed_ts seen_since now_ts legacy_list="" lcount=0
+  local oldest cleaner ids sf removed_ts seen_since chk_ts chk_ok now_ts legacy_list="" lcount=0
   now_ts="$(date +%s)"
   install -d -m 0700 "$SNAP_STATE" 2>/dev/null || true
   # repositories the monolith has a block for (the same exact line keep_of_legacy looks for)
@@ -280,8 +282,16 @@ cmd_stats() {
     fi
     removed_ts="$(cat "$sf.removed" 2>/dev/null || true)"; [[ "$removed_ts" =~ ^[0-9]+$ ]] || removed_ts=0
     seen_since="$(cat "$sf.since" 2>/dev/null || true)"; [[ "$seen_since" =~ ^[0-9]+$ ]] || seen_since=0
+    # the weekly integrity check of our prune script (its metrics file; the agent does not read these)
+    chk_ts=0; chk_ok=-1
+    if [ -f "$NE_METRICS_DIR/restic_server_$name.prom" ]; then
+      chk_ts="$(awk '$1 ~ /^restic_server_check_timestamp/ { v = $2 } END { print v + 0 }' "$NE_METRICS_DIR/restic_server_$name.prom" 2>/dev/null || true)"
+      chk_ok="$(awk '$1 ~ /^restic_server_check_success/ { v = $2 } END { print (v == "" ? -1 : v) }' "$NE_METRICS_DIR/restic_server_$name.prom" 2>/dev/null || true)"
+    fi
+    [[ "$chk_ts" =~ ^[0-9]+$ ]] || chk_ts=0
+    [[ "$chk_ok" =~ ^-?[01]$ ]] || chk_ok=-1
     repos_json="${repos_json:+$repos_json,}{\"name\":\"$(json_escape "$name")\",\"valid\":$valid,\"snapshots\":$snaps,\"last_activity\":$last,\"oldest_snapshot\":$oldest,\"locked\":$locked,\"lock_ts\":$lock_ts,\"size_bytes\":$size,\"keep_last\":${kl:-0},\"keep_daily\":${kd:-0},\"keep_weekly\":${kw:-0},\"keep_monthly\":${km:-0}}"
-    extra_json="${extra_json:+$extra_json,}\"$(json_escape "$name")\":{\"cleaner\":\"$cleaner\",\"removed_ts\":$removed_ts,\"seen_since\":$seen_since}"
+    extra_json="${extra_json:+$extra_json,}\"$(json_escape "$name")\":{\"cleaner\":\"$cleaner\",\"removed_ts\":$removed_ts,\"seen_since\":$seen_since,\"check_ts\":$chk_ts,\"check_ok\":$chk_ok}"
   done
   # watch state of repositories that are gone
   for sf in "$SNAP_STATE"/*.ids; do
@@ -376,6 +386,10 @@ mkdir -p "$(dirname "$LOG")" "$(dirname "$METRICS_FILE")" "$(dirname "$METRICS_F
 ts_start=$(date +%s); success=0
 snap_before=-1; snap_after=-1; removed=-1
 bytes_before=-1; bytes_after=-1; oldest_ts=0
+# "<time> <1|0|-1>" of the last weekly integrity check, see below
+CHECK_STATE="/var/tmp/restic-check-${CLIENT}.state"
+check_ts=0; check_ok=-1
+[ -s "$CHECK_STATE" ] && read -r check_ts check_ok < "$CHECK_STATE"
 
 # Snapshots are counted WITHOUT jq: backup servers do not have it, and the metric sat at -1
 # for years. In the --json output there is exactly one "short_id" per snapshot.
@@ -434,6 +448,25 @@ repo_size() { du -sb "$RESTIC_REPOSITORY" 2>/dev/null | awk '{print $1}'; }
       prune_rc=0;  "$BIN" prune ${RETRY_LOCK} 2>&1 || prune_rc=$?
       [ "$forget_rc" -eq 0 ] && [ "${prune_rc:-0}" -eq 0 ] && success=1
     fi
+    # Integrity check once a week: structure and index, not the data itself (--read-data would
+    # read the whole repository). The legacy shared script ran it every day, and moving a
+    # repository onto this script must not lose it. The first check of each repository is
+    # spread over the week by its name, so a helper update does not check everything in one
+    # night. A repository busy with a backup is checked on the next run, not reported broken.
+    if [ ! -s "$CHECK_STATE" ]; then
+      echo "$(( $(date +%s) - ( $(printf '%s' "$CLIENT" | cksum | cut -d' ' -f1) % 7 ) * 86400 )) -1" > "$CHECK_STATE"
+    fi
+    read -r check_ts check_ok < "$CHECK_STATE" || true
+    if [ $(( $(date +%s) - ${check_ts:-0} )) -ge $(( 7 * 86400 )) ]; then
+      chk_rc=0; chk_out="$("$BIN" check ${RETRY_LOCK} 2>&1)" || chk_rc=$?
+      printf '%s\n' "$chk_out"
+      if [ "$chk_rc" -eq 0 ]; then
+        echo "$(date +%s) 1" > "$CHECK_STATE"
+      elif ! printf '%s' "$chk_out" | grep -qi "already locked"; then
+        echo "$(date +%s) 0" > "$CHECK_STATE"
+      fi
+      read -r check_ts check_ok < "$CHECK_STATE" || true
+    fi
   fi
   # Measured AFTER the prune: the size used to be taken before the cleanup, so a 1.5 GB
   # repository reported 4.6 GiB - the metric showed what was already gone.
@@ -460,6 +493,9 @@ ts_end=$(date +%s)
   echo "restic_server_repo_snapshots_before{client=\"${CLIENT}\"} ${snap_before}"
   echo "restic_server_forget_removed{client=\"${CLIENT}\"} ${removed}"
   echo "restic_server_oldest_snapshot_timestamp{client=\"${CLIENT}\"} ${oldest_ts}"
+  # the weekly integrity check: when and whether it passed (-1 = not checked yet)
+  echo "restic_server_check_timestamp{client=\"${CLIENT}\"} ${check_ts:-0}"
+  echo "restic_server_check_success{client=\"${CLIENT}\"} ${check_ok:--1}"
 } > "${METRICS_FILE}.partial" && {
   chmod 0644 "${METRICS_FILE}.partial"
   # node-exporter reads the file as a whole: we publish by rename so it never catches it
@@ -501,6 +537,181 @@ cmd_regen_prune() {
     n=$((n+1))
   done
   echo "prune scripts regenerated: $n"
+}
+
+# ------- moving repositories off the legacy shared script (/etc/systemd-rest.conf) -------
+# The monolith checks, forgets and prunes every repository in one cron job, without restic
+# unlock (a stale lock stopped the cleanup of app-a for 23 days), without metrics and
+# with the default host+paths grouping (a group that no longer backs up is kept forever).
+# adopt-legacy gives such a repository its own prune script, the same one the panel creates,
+# with the same retention and the same password. The password is read here from the
+# repository's block and is never printed. The block itself is commented out in the monolith
+# (a copy of the file is kept next to it), and so are the blocks of repositories that are gone.
+# Without --apply it is a dry run: what forget removes today and with the new grouping.
+
+# "start end" line numbers of the repository's block: from its header ("####...name") to its
+# "restic prune" (or to the line before the next header). Nothing if there is no block.
+legacy_block_lines() {
+  awk -v repo="RESTIC_REPOSITORY=$DATA/$1" '
+    function header() { return substr($0, 1, 20) == "####################" && $0 ~ /[^#]/ }
+    found && !done && header() { print start, NR - 1; done = 1 }
+    header() { hdr = NR }
+    $0 == repo && !found { found = 1; start = hdr ? hdr : NR }
+    found && !done && NR > start && $0 ~ /^[[:space:]]*restic[[:space:]]+prune/ { print start, NR; done = 1 }
+    END { if (found && !done) print start, NR }
+  ' "$LEGACY_PRUNE"
+}
+
+# Puts the block's RESTIC_PASSWORD and RESTIC_REPOSITORY into the environment of the current
+# (sub)shell, evaluated exactly as the monolith evaluates them. Fails if they are not there.
+legacy_env() {  # name start end
+  local pw_line repo_line
+  pw_line="$(sed -n "${2},${3}p" "$LEGACY_PRUNE" | grep -m1 -E '^[[:space:]]*(export[[:space:]]+)?RESTIC_PASSWORD=' || true)"
+  repo_line="$(sed -n "${2},${3}p" "$LEGACY_PRUNE" | grep -m1 -E '^[[:space:]]*(export[[:space:]]+)?RESTIC_REPOSITORY=' || true)"
+  [ -n "$pw_line" ] && [ -n "$repo_line" ] || return 1
+  eval "$pw_line"; eval "$repo_line"
+  export RESTIC_PASSWORD RESTIC_REPOSITORY
+  [ -n "$RESTIC_PASSWORD" ] && [ "$RESTIC_REPOSITORY" = "$DATA/$1" ]
+}
+
+# What forget removes today (the monolith groups by host+paths) and after the move (host+tags).
+legacy_dry() {  # name start end kl kd kw km
+  local name="$1" keep=() today after
+  [ "$4" -gt 0 ] && keep+=(--keep-last "$4")
+  [ "$5" -gt 0 ] && keep+=(--keep-daily "$5")
+  [ "$6" -gt 0 ] && keep+=(--keep-weekly "$6")
+  [ "$7" -gt 0 ] && keep+=(--keep-monthly "$7")
+  today="$(mktemp)"; after="$(mktemp)"
+  (
+    legacy_env "$name" "$2" "$3" || exit 3
+    "$RESTIC_BIN" --no-lock --no-cache forget --dry-run --json "${keep[@]}" > "$today" 2>/dev/null
+    "$RESTIC_BIN" --no-lock --no-cache forget --dry-run --json --group-by host,tags "${keep[@]}" > "$after" 2>/dev/null
+  )
+  local rc=$?
+  if [ "$rc" -eq 3 ]; then
+    echo "$name: no password or repository in its block - left as is"
+  else
+    NAME="$name" POLICY="$4/$5/$6/$7" python3 - "$today" "$after" <<'PY'
+import json, os, sys
+def load(path):
+    raw = open(path, encoding="utf-8", errors="replace").read()
+    i = raw.find("[")
+    try:
+        return json.loads(raw[i:]) if i >= 0 else None
+    except ValueError:
+        return None
+def removed(groups):
+    out = []
+    for g in groups or []:
+        for s in g.get("remove") or []:
+            out.append((s.get("time", "")[:10], s.get("hostname", ""), ",".join(s.get("paths") or [])))
+    return sorted(out)
+def kept(groups):
+    return sum(len(g.get("keep") or []) for g in groups or [])
+today, after = load(sys.argv[1]), load(sys.argv[2])
+name = os.environ["NAME"]
+if today is None or after is None:
+    print(f"{name}: restic did not answer (wrong password or broken repository?) - left as is")
+    sys.exit(0)
+t, a = removed(today), removed(after)
+print(f"{name}: policy {os.environ['POLICY']}, snapshots {kept(today) + len(t)}")
+print(f"  today, groups by host+paths: forget removes {len(t)}")
+line = f"  after the move, groups by host+tags: forget removes {len(a)}"
+if a:
+    hosts = sorted({h for _, h, _ in a})
+    paths = sorted({p for _, _, p in a})
+    line += f": {a[0][0]} .. {a[-1][0]}, host {', '.join(hosts)}, paths {'; '.join(paths)[:120]}"
+print(line)
+PY
+  fi
+  rm -f "$today" "$after"
+  [ "$rc" -ne 3 ]
+}
+
+# The repository's own env (password from its block) and prune script with the same retention.
+legacy_apply() {  # name start end kl kd kw km
+  local pw
+  pw="$( legacy_env "$1" "$2" "$3" && printf '%s' "$RESTIC_PASSWORD" )" || return 1
+  install -d -m 0755 "$PRUNE_DIR" "$ENV_DIR"
+  umask 077
+  {
+    printf '# generated by kervax for %s (moved off %s)\nset -a\n' "$1" "$LEGACY_PRUNE"
+    printf 'RESTIC_REPOSITORY=%q\n' "$DATA/$1"
+    printf 'RESTIC_PASSWORD=%q\n' "$pw"
+    printf 'set +a\n'
+  } > "$ENV_DIR/$1.env"
+  umask 022
+  chown root:root "$ENV_DIR/$1.env"; chmod 0600 "$ENV_DIR/$1.env"
+  write_prune_script "$1" "$4" "$5" "$6" "$7"
+}
+
+# Comments out line ranges of the monolith ("start:end:tag ..."). A copy of the file is kept,
+# and the result must still parse, otherwise the monolith is left untouched.
+legacy_comment_out() {
+  local bak tmp="$LEGACY_PRUNE.kervax-tmp"
+  bak="$LEGACY_PRUNE.kervax-bak-$(date +%Y%m%d-%H%M%S)"
+  cp -p "$LEGACY_PRUNE" "$bak" || return 1
+  if ! awk -v spec="$1" '
+      BEGIN { n = split(spec, parts, " "); for (i = 1; i <= n; i++) { split(parts[i], f, ":"); s[i] = f[1] + 0; e[i] = f[2] + 0; t[i] = f[3] } }
+      { tag = ""; for (i = 1; i <= n; i++) if (NR >= s[i] && NR <= e[i]) tag = t[i]
+        if (tag != "" && $0 !~ /^# kervax-/) print "# kervax-" tag " " $0; else print }
+    ' "$LEGACY_PRUNE" > "$tmp"; then
+    rm -f "$tmp"; return 1
+  fi
+  if ! sh -n "$tmp"; then
+    echo "the edited $LEGACY_PRUNE does not parse - left as it was"; rm -f "$tmp"; return 1
+  fi
+  chmod --reference="$LEGACY_PRUNE" "$tmp"; chown --reference="$LEGACY_PRUNE" "$tmp"
+  mv -f "$tmp" "$LEGACY_PRUNE"
+  echo "$LEGACY_PRUNE: blocks commented out, the previous version is $bak"
+}
+
+cmd_adopt_legacy() {  # [--apply] [name...]   no names = every repository of the monolith
+  local apply=0 names=() a n r start end kl kd kw km ranges="" moved=0 dropped=0
+  for a in "$@"; do
+    case "$a" in
+      --apply) apply=1 ;;
+      *) valid_name "$a" && names+=("$a") || { echo "bad name: $a"; return 2; } ;;
+    esac
+  done
+  [ -f "$LEGACY_PRUNE" ] || { echo "no $LEGACY_PRUNE here"; return 0; }
+  if [ ${#names[@]} -eq 0 ]; then
+    mapfile -t names < <(awk -v p="RESTIC_REPOSITORY=$DATA/" 'index($0, p) == 1 { print substr($0, length(p) + 1) }' "$LEGACY_PRUNE")
+  fi
+  [ ${#names[@]} -gt 0 ] || { echo "$LEGACY_PRUNE has no repository blocks left"; return 0; }
+  [ "$apply" = 1 ] || echo "dry run, nothing is changed (add --apply to move)"
+  for n in "${names[@]}"; do
+    r="$(legacy_block_lines "$n")"
+    [ -n "$r" ] || { echo "$n: no block in $LEGACY_PRUNE"; continue; }
+    start="${r% *}"; end="${r#* }"
+    if [ ! -d "$DATA/$n" ]; then
+      echo "$n: the repository is gone, its block only sends a daily error - the block will be commented out"
+      ranges="$ranges $start:$end:gone"; dropped=$((dropped + 1)); continue
+    fi
+    if [ -f "$PRUNE_DIR/restic-prune-$n.sh" ]; then
+      echo "$n: already has its own prune script, the block cleans it a second time - the block will be commented out"
+      ranges="$ranges $start:$end:dup"; dropped=$((dropped + 1)); continue
+    fi
+    kl=$(keep_of_legacy keep-last "$n"); kd=$(keep_of_legacy keep-daily "$n")
+    kw=$(keep_of_legacy keep-weekly "$n"); km=$(keep_of_legacy keep-monthly "$n")
+    if [ $(( kl + kd + kw + km )) -eq 0 ]; then
+      echo "$n: its block has no keep-* policy - left as is"; continue
+    fi
+    legacy_dry "$n" "$start" "$end" "$kl" "$kd" "$kw" "$km" || continue
+    if [ "$apply" = 1 ]; then
+      if legacy_apply "$n" "$start" "$end" "$kl" "$kd" "$kw" "$km"; then
+        ranges="$ranges $start:$end:moved"; moved=$((moved + 1))
+        echo "  moved: $PRUNE_DIR/restic-prune-$n.sh, $(cut -d' ' -f1-2 "/etc/cron.d/kervax-prune-$n" | awk '{ printf "%02d:%02d", $2, $1 }') every night"
+      else
+        echo "  $n: could not move - left as is"
+      fi
+    fi
+  done
+  if [ "$apply" = 1 ] && [ -n "$ranges" ]; then
+    legacy_comment_out "$ranges" || return 1
+    refresh_stats || true
+    echo "moved: $moved, blocks removed for gone or doubly cleaned repositories: $dropped"
+  fi
 }
 
 # ------- deploying a rest-server from scratch (clean node -> backup server) -------
@@ -835,6 +1046,7 @@ STATE_DIR=/var/lib/kervax
 case "${1:-}" in
   stats)            cmd_stats ;;
   regen-prune)      cmd_regen_prune ;;
+  adopt-legacy)     shift; cmd_adopt_legacy "$@" ;;
   refresh)          refresh_stats ;;
   deploy-server)    shift; cmd_deploy_server "$@" ;;
   update-image)     cmd_update_image ;;
@@ -843,7 +1055,7 @@ case "${1:-}" in
   get-cert)         cmd_get_cert ;;
   get-client-creds) shift; cmd_get_client_creds "$@" ;;
   process-spool)    cmd_process_spool ;;
-  *) echo "usage: $0 {stats|regen-prune|deploy-server [port]|update-image|provision-client <name> <hpass> <repopass> <ip> [kl kd kw km]|deploy-tls-front <ip> [dns]|get-cert|get-client-creds <name>|process-spool}" >&2; exit 2 ;;
+  *) echo "usage: $0 {stats|regen-prune|adopt-legacy [--apply] [name...]|deploy-server [port]|update-image|provision-client <name> <hpass> <repopass> <ip> [kl kd kw km]|deploy-tls-front <ip> [dns]|get-cert|get-client-creds <name>|process-spool}" >&2; exit 2 ;;
 esac
 HELPER_EOF
 chmod 0755 "$HELPER"; chown root:root "$HELPER"
