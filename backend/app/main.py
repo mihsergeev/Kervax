@@ -6,6 +6,7 @@ from typing import AsyncIterator
 from fastapi import FastAPI
 
 from app.api import (
+    alert_history,
     alerts,
     ansible as ansible_api,
     audit,
@@ -94,6 +95,8 @@ def create_app() -> FastAPI:
     app.include_router(audit.router, prefix="/api")
     app.include_router(checks.router, prefix="/api")
     app.include_router(alerts.router, prefix="/api")
+    # история алертов - для всех учеток, но под их права (как персональная рассылка)
+    app.include_router(alert_history.router, prefix="/api")
     app.include_router(locations.router, prefix="/api")
     app.include_router(servers.router, prefix="/api")
     app.include_router(servers.agent_router, prefix="/api")

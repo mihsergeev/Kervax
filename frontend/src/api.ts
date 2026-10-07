@@ -734,6 +734,42 @@ export function putRetention(body: Retention): Promise<Retention> {
 // Плагин инвентаря в репо ansible спрашивает ноды у всех панелей сам: одна команда
 // обновляет helper'ы везде, без копирования списка хостов из каждой панели.
 
+// История отправленных алертов (под права учетки, как персональная рассылка)
+export type AlertEventDto = {
+  id: number
+  ts: string
+  kind: string
+  label: string // подпись вида, как в правилах алертов
+  target: string // сервер или монитор; пусто у сводок по всему парку
+  section: string
+  recovery: boolean
+  text: string // текст без разметки, как в Telegram
+}
+export type AlertHistory = {
+  events: AlertEventDto[]
+  more: boolean // есть еще раньше: before_id = id последнего
+  summary: {
+    total: number
+    fires: number
+    recoveries: number
+    kinds: { kind: string; label: string; n: number }[] // чаще всего срабатывали, за весь период
+    targets: { target: string; n: number }[]
+  }
+}
+export type AlertHistoryQuery = {
+  days?: number
+  target?: string
+  kind?: string
+  q?: string
+  only?: 'all' | 'fires' | 'recoveries'
+  before_id?: number
+}
+export function alertHistory(p: AlertHistoryQuery): Promise<AlertHistory> {
+  const qs = new URLSearchParams()
+  for (const [k, v] of Object.entries(p)) if (v !== undefined && v !== '' && v !== 0) qs.set(k, String(v))
+  return api<AlertHistory>(`/api/alert-history?${qs}`)
+}
+
 export type AnsibleAccess = { enabled: boolean; created_at: string | null; used_at: string | null }
 
 export function getAnsibleAccess(): Promise<AnsibleAccess> {

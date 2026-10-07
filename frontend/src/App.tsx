@@ -6,6 +6,7 @@ import { useUrlSection } from './deeplink'
 import { BrandLogo, useBranding } from './BrandLogo'
 import { AboutModal } from './AboutModal'
 import { AlertsModal } from './AlertsModal'
+import { AlertHistoryModal } from './AlertHistoryModal'
 import { ChecksPage } from './ChecksPage'
 import { HomePage } from './HomePage'
 import { LocationsModal } from './LocationsModal'
@@ -34,6 +35,7 @@ type Modal =
   | 'ansible'
   | 'backup'
   | 'users'
+  | 'history'
   | null
 export type Section = 'home' | 'sites' | 'servers' | 'docker' | 'kuber' | 'services' | 'backups'
 const SECTIONS: Section[] = ['home', 'sites', 'servers', 'docker', 'kuber', 'services', 'backups']
@@ -364,6 +366,15 @@ export default function App() {
                   <button
                     className="menu-item"
                     onClick={() => {
+                      setModal('history')
+                      setMenuOpen(false)
+                    }}
+                  >
+                    {t('История алертов')}
+                  </button>
+                  <button
+                    className="menu-item"
+                    onClick={() => {
                       setModal('password')
                       setMenuOpen(false)
                     }}
@@ -466,6 +477,9 @@ export default function App() {
       )}
       {modal === '2fa' && (
         <TwoFAModal onClose={() => setModal(null)} onUnauthorized={logout} />
+      )}
+      {modal === 'history' && (
+        <AlertHistoryModal onClose={() => setModal(null)} onUnauthorized={logout} />
       )}
       {modal === 'alerts' && (
         <AlertsModal onClose={() => setModal(null)} onUnauthorized={logout} />

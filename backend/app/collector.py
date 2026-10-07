@@ -37,6 +37,7 @@ from app.models import (
     LocationResult,
     LocationSample,
     OomEvent,
+    AlertEvent,
     ProbeRequest,
     Server,
     ServerMetric,
@@ -257,7 +258,7 @@ def _server_alert_text(
     return alerts.Msg(
         f"{icon} {linked}" + (f" — {d}" if d else ""),
         _ALERT_SECTION.get(kind, "servers"),
-        group,
+        group, kind=kind, target=name, recovery=recovery,
     )
 
 
@@ -768,6 +769,9 @@ _SITE_RULE_KIND = {
     "domain": "domain", "locpart": "locpart", "locrec": "locpart",
     "flaky": "flaky", "flakyrec": "flaky",
 }
+# История алертов: отбой - под видом самой беды, чтобы фильтр показывал ее целиком
+_SITE_HISTORY_KIND = {"bad": "down", "recovery": "down"}
+_SITE_RECOVERY = frozenset({"recovery", "locrec", "flakyrec"})
 
 
 def _site_scope_ok(rule: dict, check_id: int | None, group: str) -> bool:
@@ -882,7 +886,10 @@ async def _send_alerts(
         if zone:
             dom_at[zone] = len(texts)
             dom_n[zone] = 1
-        texts.append(alerts.Msg(text, "sites", grp or ""))
+        # в истории отбой лежит под тем же видом, что и сама беда: фильтр по виду
+        # показывает историю целиком
+        texts.append(alerts.Msg(text, "sites", grp or "", kind=_SITE_HISTORY_KIND.get(kind, rk or kind),
+                                target=name, recovery=kind in _SITE_RECOVERY))
         commits.append((kind, inc_id, check_id, flag))
 
     # дописываем счётчик только там, где мониторов реально больше одного
@@ -891,7 +898,8 @@ async def _send_alerts(
         if n > 1:
             old = texts[idx]
             texts[idx] = alerts.Msg(
-                f"{old} · мониторов: {n}", old.section, old.group
+                f"{old} · мониторов: {n}", old.section, old.group,
+                kind=old.kind, target=old.target, recovery=old.recovery,
             )
 
     # parse_mode=HTML: имя монитора идёт ссылкой <a href>. Весь контент экранирован.
@@ -3497,7 +3505,7 @@ async def evaluate_servers(
         return alerts.Msg(
             txt + (f"\n🔗 {html.escape(url)}" if url else ""),
             _ALERT_SECTION.get(key, "servers"),
-            s.group_name or "",
+            s.group_name or "", kind=key, target=s.name,
         )
 
     # Сначала СОБИРАЕМ все переходы за тик (не шлём внутри цикла), чтобы при
@@ -4102,6 +4110,11 @@ async def send_autofix_note(session_factory: async_sessionmaker[AsyncSession],
                           parse_mode="HTML", session_factory=session_factory)
 
 
+# История алертов: сотня строк в день на весь парк, а вопрос "как часто это было" задают и про
+# квартал назад. Полгода, отдельно от хранения метрик.
+_ALERT_HISTORY_KEEP = timedelta(days=180)
+
+
 async def _prune(
     session_factory: async_sessionmaker[AsyncSession], settings: Settings
 ) -> None:
@@ -4124,6 +4137,8 @@ async def _prune(
             .values(lines=None)
         )
         await session.execute(delete(OomEvent).where(OomEvent.ts < srv_cutoff))
+        # история алертов маленькая, а нужна надолго: "как часто это было за квартал"
+        await session.execute(delete(AlertEvent).where(AlertEvent.ts < now - _ALERT_HISTORY_KEEP))
         # docker/kube-команды (с логами) держим коротко — неделя, не тайм-серия
         await session.execute(
             delete(DockerCommand).where(DockerCommand.created_at < now - timedelta(days=7))
@@ -4276,7 +4291,7 @@ async def _daily_uncovered(session_factory, settings: Settings) -> None:
         body = tpl.format(list="\n".join(lines), cmd=html.escape(cmd, quote=False), n=len(hosts))
     except (KeyError, IndexError, ValueError):
         body = default.format(list="\n".join(lines), cmd=html.escape(cmd, quote=False), n=len(hosts))
-    text = alerts.Msg(f"🧩 {body}", "servers", "")
+    text = alerts.Msg(f"🧩 {body}", "servers", "", kind="uncovered")
     if await alerts.dispatch(cfg, True, [text], threshold, parse_mode="HTML",
                              session_factory=session_factory):
         async with session_factory() as session:
