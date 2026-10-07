@@ -55,7 +55,9 @@ fi
 # 0.24: the monolith's blocks for repositories that no longer exist (it errors on them daily)
 # 0.25: adopt-legacy moves repositories off the monolith onto their own prune scripts; prune
 #       scripts run a weekly restic check (the monolith checked daily), stats report it
-KERVAX_SETUP_VERSION=0.25  # MAJOR.MINOR; compared component-wise (0.13 > 0.2!)
+# 0.26: the cleanup runs 12 hours away from the client's backup (prune locks the repository
+#       exclusively, a backup starting meanwhile failed)
+KERVAX_SETUP_VERSION=0.26  # MAJOR.MINOR; compared component-wise (0.13 > 0.2!)
 # Which nodes need this helper at all. Read by the ansible playbook on the
 # CONTROL machine and evaluated as a shell condition ON THE NODE, so a new
 # helper lands where it belongs without anyone editing the playbook.
@@ -363,6 +365,23 @@ ENVEOF
   write_prune_script "$name" "$kl" "$kd" "$kw" "$km"
 }
 
+# The hour of the repository's cleanup: 12 hours away from when its client backs up. prune holds
+# an exclusive lock, and a client backup that starts meanwhile fails ("repository is already
+# locked exclusively"): neither our client script nor the ansible one waits for the lock. The
+# typical backup hour is the most frequent hour of the snapshot files (a snapshot is written when
+# the backup ends). The legacy shared script ran at 16:30, away from the night backups, and never
+# met them; moving its repositories into the night window put some prunes right on top of a
+# backup. A repository without snapshots yet keeps the old night window (02:00-07:59).
+prune_hour() {
+  local h
+  h="$(find "$DATA/$1/snapshots" -maxdepth 1 -type f -printf '%TH\n' 2>/dev/null | sort | uniq -c | sort -rn | awk 'NR == 1 { print $2 + 0 }' || true)"
+  if [[ "$h" =~ ^[0-9]+$ ]]; then
+    echo $(( (h + 12) % 24 ))
+  else
+    echo $(( ( $(printf '%s' "$1" | cksum | cut -d' ' -f1) % 6 ) + 2 ))
+  fi
+}
+
 # Generates ONLY the script and its cron entry, never the env: that holds the repository
 # password, and on regeneration there is nowhere to take it from (nor any need).
 write_prune_script() {
@@ -507,8 +526,8 @@ ts_end=$(date +%s)
 PRUNE_BODY
   } > "$ps"
   chmod 0755 "$ps"; chown root:root "$ps"
-  # cron: prune once a day (hour = 04:00 by default plus an offset derived from the name)
-  local h=$(( ( $(printf '%s' "$name" | cksum | cut -d' ' -f1) % 6 ) + 2 ))
+  # cron: prune once a day, as far as possible from the client's backup (see prune_hour)
+  local h; h="$(prune_hour "$name")"
   cat > "/etc/cron.d/kervax-prune-$name" <<CRONEOF
 $(( RANDOM % 60 )) $h * * * root $ps >/dev/null 2>&1
 CRONEOF
