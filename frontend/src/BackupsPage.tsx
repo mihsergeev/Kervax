@@ -17,7 +17,10 @@ import {
   type BackupCreds,
   type BackupInfo,
   type BackupRun,
+  type BackupServerExtra,
   type BackupServerInfo,
+  type BackupServerLegacy,
+  type BackupServerRepoExtra,
   type BackupSetupJob,
   type CustomBackup,
   type RepoStat,
@@ -906,24 +909,53 @@ const STALE_REPO_SECONDS = 3 * 86400
 // Лок держится всё время бэкапа и освежается раз в 5 мин — сам по себе он значит
 // «бэкап идёт», а не «сломалось». Проблема — лок, который перестали освежать.
 const LOCK_STUCK_SECONDS = 30 * 60
+// Висячий лок моложе суток снимают сами чистка и клиент (restic unlock перед работой).
+// Дольше суток он уже точно остановил ежедневную чистку: с этого порога шлется алерт
+// backup_lock, и тут с него же репозиторий считается проблемным.
+const LOCK_LONG_SECONDS = 86400
+// сколько секунд висит висячий лок (0 - лока нет или он живой); helper 0.23 отдает
+// самый старый висячий лок, так что это время, с которого репозиторий заблокирован
+function lockAge(r: RepoStat): number {
+  if (!r.locked || !r.lock_ts) return 0
+  const age = Date.now() / 1000 - r.lock_ts
+  return age > LOCK_STUCK_SECONDS ? age : 0
+}
 function lockStuck(r: RepoStat): boolean {
   if (!r.locked) return false
   if (!r.lock_ts) return true // helper < v5 времени лока не отдаёт — считаем висячим
-  return Date.now() / 1000 - r.lock_ts > LOCK_STUCK_SECONDS
+  return lockAge(r) > 0
 }
-type RepoState = 'muted' | 'invalid' | 'locked' | 'running' | 'stale' | 'ok'
+function lockLong(r: RepoStat): boolean {
+  return !!r.locked && (!r.lock_ts || lockAge(r) > LOCK_LONG_SECONDS)
+}
+// stuck - висячий лок моложе суток: видно, но проблемой не считается (уйдет сам)
+type RepoState = 'muted' | 'invalid' | 'locked' | 'stuck' | 'running' | 'stale' | 'ok'
 function repoState(r: RepoStat, muted: Set<string>): RepoState {
   if (muted.has(r.name)) return 'muted'
   if (!r.valid) return 'invalid'
-  if (lockStuck(r)) return 'locked'
-  if (r.locked) return 'running'
+  if (lockLong(r)) return 'locked'
+  if (r.locked && !lockStuck(r)) return 'running'
   if (r.last_activity && Date.now() / 1000 - r.last_activity > STALE_REPO_SECONDS) return 'stale'
+  if (lockStuck(r)) return 'stuck'
   return 'ok'
 }
 // проблемный = не ок и не заглушён (для счётчиков/акцентов)
 function repoBad(r: RepoStat, muted: Set<string>): boolean {
   const st = repoState(r, muted)
-  return st !== 'ok' && st !== 'muted' && st !== 'running'
+  return st !== 'ok' && st !== 'muted' && st !== 'running' && st !== 'stuck'
+}
+// Блок helper'а backupserver-setup 0.23: кто чистит репозитории и когда из них что-то
+// удалялось. Старше 15 минут - helper встал, по такому блоку не судим.
+function bsrvExtra(s: Server): BackupServerExtra | null {
+  const b = s.last_report?.extras?.['backup-server']
+  if (!b || b.v !== 1 || !b.ts) return null
+  const ref = s.last_report?.clock_unix || Date.now() / 1000
+  return ref - b.ts > 15 * 60 ? null : b
+}
+// "30 16 * * *" -> "16:30"; остальное расписание показываем как есть
+function cronTime(sched: string): string {
+  const m = sched.match(/^(\d{1,2}) (\d{1,2}) \* \* \*$/)
+  return m ? `${m[2].padStart(2, '0')}:${m[1].padStart(2, '0')}` : sched
 }
 function fmtBytes(n?: number): string {
   if (!n) return '—'
@@ -977,8 +1009,10 @@ const BSRV_ROOT = '/app/rest-server'
 /** Состояние ротации репозитория: когда чистилось, сколько сняло, каков старейший
  * снапшот. Возраст старейшего — главный признак: он переживает свою политику ровно
  * тогда, когда чистка встала, какой бы ни была причина. */
-function RotationInfo({ r, t }: {
+function RotationInfo({ r, x, legacy, t }: {
   r: RepoStat
+  x?: BackupServerRepoExtra // кто чистит и когда удаляли (helper 0.23), нет - helper старый
+  legacy?: BackupServerLegacy | null
   t: (s: string, v?: Record<string, string | number>) => string
 }) {
   const oldest = r.oldest_snapshot ?? 0
@@ -988,22 +1022,54 @@ function RotationInfo({ r, t }: {
   // так, будто старое вычищается по ней. На деле политику панель показывает из
   // старого общего конфига, который никто не исполняет, и чистит репозиторий разве
   // что сам клиент со своей стороны.
-  if (!oldest && !ts) {
-    return (
-      <span
-        className="muted"
-        title={t('У репозитория нет своего prune-скрипта: политика показана из старого общего конфига, но сервер по ней ничего не удаляет. Старое убирает только сам клиент, если у него это настроено.')}
-      >
-        {t('сервер не чистит')}
-      </span>
-    )
-  }
+  // С helper'ом 0.23 это уже не догадка: он сам говорит, кто чистит репозиторий. Под
+  // "сервер не чистит" раньше попадали и те, кого чистил старый общий скрипт из cron.
+  const noCleaner = (
+    <span
+      className="muted"
+      title={x
+        ? t('Ни своего prune-скрипта, ни блока в старом общем скрипте у репозитория нет: сервер его не чистит. Старое убирает только сам клиент, если у него это настроено.')
+        : t('У репозитория нет своего prune-скрипта: политика показана из старого общего конфига, но сервер по ней ничего не удаляет. Старое убирает только сам клиент, если у него это настроено.')}
+    >
+      {t('сервер не чистит')}
+    </span>
+  )
+  if (!x && !oldest && !ts) return noCleaner
   const limit = rotationLimitDays(r)
   const ageDays = oldest ? Math.floor((Date.now() / 1000 - oldest) / 86400) : 0
   const stale = !!(oldest && limit && ageDays > limit)
   const removed = r.rotation_removed ?? -1
+  const now = Date.now() / 1000
+  // без метрик чистки helper сам видит, когда из репозитория пропадали снапшоты
+  const idleDays = x && !x.removed_ts && x.seen_since ? Math.floor((now - x.seen_since) / 86400) : 0
+  const lastRun = legacy?.log_ts ? t('последний прогон {ago}', { ago: fmtAgo(legacy.log_ts) }) : ''
   return (
     <>
+      {ts <= 0 && x?.cleaner === 'legacy' && legacy && (legacy.where ? (
+        <span title={[`${legacy.script}: ${legacy.where}, ${legacy.schedule}`, lastRun].filter(Boolean).join('\n')}>
+          {t('чистит старый скрипт')}: {cronTime(legacy.schedule)}
+        </span>
+      ) : (
+        <span className="t-down" title={t('Репозиторий описан в {script}, но этот скрипт не запланирован ни в cron, ни в systemd: старые снапшоты никто не удаляет.', { script: legacy.script })}>
+          {t('старый скрипт чистки не запускается')}
+        </span>
+      ))}
+      {ts <= 0 && x?.cleaner === 'script' && (
+        <span className="muted" title={t('Свой prune-скрипт есть, но метрик он не пишет: когда он отработал, панель не знает.')}>
+          {t('свой prune-скрипт без метрик')}
+        </span>
+      )}
+      {ts <= 0 && x && !x.cleaner && noCleaner}
+      {ts <= 0 && x && x.removed_ts > 0 && (
+        <span title={t('когда из репозитория последний раз удалялись снапшоты (кто бы их ни удалял)')}>
+          {t('удаляли')}: {fmtAgo(x.removed_ts)}
+        </span>
+      )}
+      {ts <= 0 && idleDays >= 1 && (
+        <span className="muted" title={t('панель следит за удалениями с {d}', { d: new Date((x?.seen_since ?? 0) * 1000).toLocaleDateString() })}>
+          {t('удалений нет {n} дн.', { n: idleDays })}
+        </span>
+      )}
       {ts > 0 && (
         <span title={r.rotation_ok === 0 ? t('последний прогон завершился ошибкой') : ''}>
           {t('чистка')}: {fmtAgo(ts)}
@@ -1115,9 +1181,13 @@ function RepoUnlock({ r, onChanged }: { r: RepoStat; onChanged: () => void }) {
     // Репозитории из старых деплоев созданы с другим паролем, и env к ним не подходит —
     // штатный unlock невозможен в принципе. Лок restic — это обычный файл в репо: удалить
     // его руками равносильно unlock и пароля не требует. Данные при этом не трогаются.
-    `  echo "${tr('пароль из env не подходит (репо от другого деплоя) — снимаю лок файлом')}"`,
-    `  ls -l "$REPO"/locks/ 2>/dev/null`,
-    `  rm -f "$REPO"/locks/* && echo "${tr('лок-файлы удалены')}"`,
+    // Удаляем только локи старше 30 минут, как и restic unlock: живой лок освежается раз
+    // в 5 минут, и идущий бэкап или чистка не пострадают. Раньше удалялись все лок-файлы,
+    // и перед командой приходилось проверять, что по репозиторию ничего не идет.
+    // У репозиториев старого общего скрипта env нет вовсе, поэтому ветка частая.
+    `  echo "${tr('подходящего пароля в env нет - снимаю висячие локи файлами')}"`,
+    `  find "$REPO"/locks -maxdepth 1 -type f -mmin +30 -print -delete`,
+    `  echo "${tr('готово, живые локи (моложе 30 минут) не тронуты')}"`,
     `fi`,
     `'`,
   ].join('\n')
@@ -1137,8 +1207,8 @@ function RepoUnlock({ r, onChanged }: { r: RepoStat; onChanged: () => void }) {
       </button>
       {open && (
         <>
-          <div className="form-error small">
-            ⚠️ {t('Сначала убедитесь, что по этому репозиторию НЕ идёт бэкап или prune прямо сейчас — снимать живой лок нельзя. Обычно лок остаётся после аварийно прерванной операции.')}
+          <div className="muted small">
+            {t('Команда снимает только висячие локи, которые не обновлялись больше 30 минут. Живой лок идущего бэкапа или чистки она не тронет. Обычно висячий лок остается после аварийно прерванной операции.')}
           </div>
           <div className="agent-advice-cmd">
             <pre>{cmd}</pre>
@@ -1198,6 +1268,9 @@ function RepoRow({ server: s, r, muted, canAct, onChanged, growth }: {
   // такое разбирают руками, а не копипастой rm -rf.
   const junk = st === 'invalid' && r.snapshots === 0
   const brokenWithData = st === 'invalid' && r.snapshots > 0
+  const ext = bsrvExtra(s)
+  const lockDays = Math.floor(lockAge(r) / 86400)
+  const lockHours = Math.max(1, Math.floor(lockAge(r) / 3600))
   return (
     <div className={`loc-res docker-row repo-row repo-row-col ${tone}`}>
       <div className="repo-row-main">
@@ -1206,7 +1279,16 @@ function RepoRow({ server: s, r, muted, canAct, onChanged, growth }: {
           {r.name}
           {isMuted && <span className="type-chip">{t('приглушён')}</span>}
           {st === 'invalid' && <span className="type-chip off">{t('невалиден')}</span>}
-          {st === 'locked' && <span className="type-chip off">{t('залочен')}</span>}
+          {st === 'locked' && (
+            <span className="type-chip off" title={t('Висячий лок держится больше суток: чистка и restic check по репозиторию не идут, пока его не снять.')}>
+              {lockDays > 0 ? t('залочен {n} дн.', { n: lockDays }) : t('залочен')}
+            </span>
+          )}
+          {st === 'stuck' && (
+            <span className="type-chip" title={t('Лок не обновлялся больше 30 минут: процесс, который его взял, умер. Чистка и клиенты обычно снимают такие локи сами, если лок продержится сутки, придет алерт.')}>
+              {t('висячий лок {n} ч', { n: lockHours })}
+            </span>
+          )}
           {st === 'running' && <span className="type-chip">{t('идёт бэкап')}</span>}
           {st === 'stale' && <span className="type-chip off">{t('устарел')}</span>}
           {(growth ?? 0) > 0 && (
@@ -1224,13 +1306,13 @@ function RepoRow({ server: s, r, muted, canAct, onChanged, growth }: {
               {t('хранит')}: {keep.map((v) => v ?? 0).join('/')}
             </span>
           )}
-          <RotationInfo r={r} t={t} />
+          <RotationInfo r={r} x={ext?.repos?.[r.name]} legacy={ext?.legacy} t={t} />
         </div>
       </div>
       {/* Приглушать нечего, пока репозиторий здоров: кнопка на каждой зелёной строке —
           это десятки бесполезных элементов, среди которых теряются нужные. Показываем
           только там, где есть что глушить, и у уже приглушённых (чтобы вернуть). */}
-      {canAct && st !== 'ok' && st !== 'running' && (
+      {canAct && st !== 'ok' && st !== 'running' && st !== 'stuck' && (
         <button className="ghost icon-btn repo-mute-btn" disabled={busy} onClick={toggleMute}
           title={isMuted ? t('Снять приглушение') : t('Приглушить (разовый/неактуальный)')}>
           {busy ? '…' : isMuted ? '🔔' : '🔕'}
@@ -1241,7 +1323,7 @@ function RepoRow({ server: s, r, muted, canAct, onChanged, growth }: {
           что реально выводят из эксплуатации. У живого репозитория с ежедневным бэкапом
           такая кнопка была бы приглашением к беде. */}
       {canAct && (junk || st === 'stale') && <RepoCleanup r={r} />}
-      {canAct && st === 'locked' && <RepoUnlock r={r} onChanged={onChanged} />}
+      {canAct && (st === 'locked' || st === 'stuck') && <RepoUnlock r={r} onChanged={onChanged} />}
       {canAct && brokenWithData && (
         <div className="muted small repo-cleanup">
           ⚠️ {t('Нет config, но снапшоты есть ({n} шт., {sz}) — данные могут быть восстановимы. Вслепую не удаляйте, разберитесь на сервере.', { n: r.snapshots, sz: fmtBytes(r.size_bytes) })}
@@ -1398,6 +1480,10 @@ function BackupServerModal({ server: s, info, servers, canAct, onChanged, onClos
     .filter((x) => x.g > 0)
     .sort((a, b) => b.g - a.g)
   const growTotal = growers.reduce((a, x) => a + x.g, 0)
+  // старый общий скрипт чистки: сколько живых репозиториев на нем и запущен ли он вообще
+  const ext = bsrvExtra(s)
+  const legacy = ext?.legacy
+  const legacyN = Object.values(ext?.repos ?? {}).filter((x) => x.cleaner === 'legacy').length
   const repos = all
     .filter((r) => !ql || r.name.toLowerCase().includes(ql))
     .slice()
@@ -1438,6 +1524,17 @@ function BackupServerModal({ server: s, info, servers, canAct, onChanged, onClos
           {canAct && <RestServerUpdate server={s} info={info} onChanged={onChanged} />}
           {canAct && !info.tls_front && <EnableTls server={s} onChanged={onChanged} />}
         </div>
+        {legacy && legacyN > 0 && (
+          <div className={`small growth-sum ${legacy.where ? 'muted' : 't-down'}`}>
+            {legacy.where
+              ? t('Старый скрипт {script} чистит репозиториев: {n}, расписание {when} ({where})', {
+                script: legacy.script, n: legacyN, when: cronTime(legacy.schedule), where: legacy.where,
+              }) + (legacy.log_ts ? `, ${t('последний прогон {ago}', { ago: fmtAgo(legacy.log_ts) })}` : '')
+              : t('Старый скрипт {script} описывает репозиториев: {n}, но не запланирован ни в cron, ни в systemd, их никто не чистит', {
+                script: legacy.script, n: legacyN,
+              })}
+          </div>
+        )}
         {growers.length > 0 && (
           <div className="muted small growth-sum">
             {t('За прогон клиенты добавляют около {s}: {top}', {

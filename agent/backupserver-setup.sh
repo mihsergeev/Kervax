@@ -49,7 +49,10 @@ fi
 #           cleanup silently did nothing ("repo not accessible", success=0) for EVERY
 #           repository created by the panel. The env is exported now, and the installer
 #           repairs already created envs (migration below).
-KERVAX_SETUP_VERSION=0.22  # MAJOR.MINOR; compared component-wise (0.13 > 0.2!)
+# 0.23: who cleans each repository (its own prune script, the legacy monolith from cron, nobody)
+#       and when snapshots were last removed from it, in report.d/backup-server.json; lock_ts
+#       is the OLDEST stale lock when there is one; oldest_snapshot from the snapshot files
+KERVAX_SETUP_VERSION=0.23  # MAJOR.MINOR; compared component-wise (0.13 > 0.2!)
 # Which nodes need this helper at all. Read by the ansible playbook on the
 # CONTROL machine and evaluated as a shell condition ON THE NODE, so a new
 # helper lands where it belongs without anyone editing the playbook.
@@ -158,6 +161,43 @@ keep_of_legacy() {
       | grep -oE -- "--$flag[= ]+[0-9]+" | grep -oE '[0-9]+' | head -1 || true)
   echo "${v:-0}"
 }
+# Whether the monolith actually RUNS, and when. The policy in the file said nothing about it: on
+# backup-a the monolith cleaned a dozen repositories from the root crontab, the panel
+# labelled them "the server does not clean", and when a stale lock stopped the cleanup of one of
+# them for 23 days nothing pointed at the right place.
+# Sets L_WHERE (where it is scheduled), L_SCHED (the schedule) and L_LOG (where its output goes:
+# the file's mtime is the end of the last run).
+LEGACY_RE='/etc/systemd-rest\.conf'
+legacy_schedule() {
+  L_WHERE=""; L_SCHED=""; L_LOG=""
+  local f line
+  for f in /var/spool/cron/crontabs/root /var/spool/cron/root /etc/crontab /etc/cron.d/*; do
+    [ -f "$f" ] || continue
+    # the exact path: a substring would also catch systemd-rest.conf.bak
+    line="$(grep -vE '^[[:space:]]*#' "$f" 2>/dev/null | grep -E "(^|[[:space:]])${LEGACY_RE}([[:space:];|&<>]|\$)" | head -1 || true)"
+    [ -n "$line" ] || continue
+    case "$f" in /var/spool/*) L_WHERE="crontab root" ;; *) L_WHERE="$f" ;; esac
+    L_SCHED="$(printf '%s\n' "$line" | awk '{ if ($1 ~ /^@/) print $1; else print $1" "$2" "$3" "$4" "$5 }')"
+    L_LOG="$(printf '%s\n' "$line" | grep -oE '(tee([[:space:]]+-a)?|>>?)[[:space:]]*/[^[:space:];|&<>]+' | tail -1 | grep -oE '/[^[:space:];|&<>]+$' || true)"
+    case "$L_LOG" in /dev/*) L_LOG="" ;; esac
+    return 0
+  done
+  # or a systemd service, with the schedule in the timer next to it
+  for f in /etc/systemd/system/*.service; do
+    [ -f "$f" ] || continue
+    grep -qE "^ExecStart=.*${LEGACY_RE}" "$f" 2>/dev/null || continue
+    L_WHERE="${f##*/}"
+    L_SCHED="$(grep -m1 -E '^OnCalendar=' "${f%.service}.timer" 2>/dev/null | cut -d= -f2- || true)"
+    return 0
+  done
+  return 0
+}
+# The agent forwards report.d blocks to the panel as they are, so new fields need no agent release
+REPORT_EXTRA=/var/lib/kervax/report.d/backup-server.json
+# Snapshot ids seen on the previous run, per repository. An id that is gone means somebody
+# removed a snapshot: the server prune, the monolith or the client itself. Prune metrics exist
+# only for our own scripts, so for everything else this is the only sign that rotation is alive.
+SNAP_STATE=/var/lib/kervax/bsrv-snaps
 # client name validation (it is also the repository and htpasswd user name): hostname-safe characters only
 valid_name() { case "$1" in ''|*[!A-Za-z0-9._-]*) return 1 ;; *) return 0 ;; esac; }
 valid_ip()   { [[ "$1" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] || [[ "$1" =~ ^[0-9A-Fa-f:]+$ ]]; }
@@ -173,7 +213,15 @@ cmd_stats() {
   [ -n "$cid" ] && ver="$(docker exec "$cid" rest-server --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
   # fall back to the compose tag if the container is missing or did not answer
   [ -n "$ver" ] || { [ -f "$COMPOSE" ] && ver="$(grep -oE 'rest-server:[A-Za-z0-9._-]+' "$COMPOSE" | head -1 | cut -d: -f2)"; }
-  local repos_json="" repo name snaps last locked lock_ts valid size prune kl kd kw km
+  local repos_json="" extra_json="" repo name snaps last locked lock_ts valid size prune kl kd kw km
+  local oldest cleaner ids sf removed_ts seen_since now_ts legacy_list="" lcount=0
+  now_ts="$(date +%s)"
+  install -d -m 0700 "$SNAP_STATE" 2>/dev/null || true
+  # repositories the monolith has a block for (the same exact line keep_of_legacy looks for)
+  if [ -f "$LEGACY_PRUNE" ]; then
+    legacy_list="$(awk -v p="RESTIC_REPOSITORY=$DATA/" 'index($0, p) == 1 { print substr($0, length(p) + 1) }' "$LEGACY_PRUNE" 2>/dev/null || true)"
+    [ -n "$legacy_list" ] && lcount="$(grep -c . <<<"$legacy_list" || true)"
+  fi
   for repo in "$DATA"/*/; do
     [ -d "$repo" ] || continue
     name="$(basename "$repo")"
@@ -181,32 +229,75 @@ cmd_stats() {
     [ "$valid" = true ] || [ -d "${repo}data" ] || [ -d "${repo}snapshots" ] || continue
     snaps=0
     [ -d "${repo}snapshots" ] && snaps=$(find "${repo}snapshots" -maxdepth 1 -type f 2>/dev/null | wc -l)
-    last=0
+    last=0; oldest=0
     if [ -d "${repo}snapshots" ]; then
       last=$(find "${repo}snapshots" -maxdepth 1 -type f -printf '%T@\n' 2>/dev/null | sort -rn | head -1 | cut -d. -f1)
+      # the oldest snapshot file: without prune metrics this is the only way to see that old
+      # snapshots stopped going away (the panel compares it with the retention policy)
+      oldest=$(find "${repo}snapshots" -maxdepth 1 -type f -printf '%T@\n' 2>/dev/null | sort -n | head -1 | cut -d. -f1 || true)
+      [ -n "$oldest" ] || oldest=0
     fi
     [ -z "$last" ] || [ "$last" = 0 ] && last="$(stat -c %Y "$repo" 2>/dev/null || echo 0)"
-    # a lock by itself is not a problem: restic holds one for the whole backup and refreshes it
-    # every 5 minutes. We report the mtime of the newest lock, and by it the panel tells a
-    # running backup from a lock left behind by a crashed process.
+    # A lock by itself is not a problem: restic holds one for the whole backup and refreshes it
+    # every 5 minutes. A lock that has not been refreshed for 30+ minutes is stale, and it
+    # blocks prune, forget and check whatever else is running. When there is one, lock_ts is
+    # the OLDEST stale lock, so its age says how long the repository has been blocked: with the
+    # newest lock a running backup hid a stale one, and a crash every night looked like a fresh
+    # lock every morning. Without stale locks it is the newest lock, as before.
     locked=false; lock_ts=0
     if [ -d "${repo}locks" ]; then
-      lock_ts=$(find "${repo}locks" -maxdepth 1 -type f -printf '%T@\n' 2>/dev/null | sort -rn | head -1 | cut -d. -f1)
+      lock_ts=$(find "${repo}locks" -maxdepth 1 -type f -mmin +30 -printf '%T@\n' 2>/dev/null | sort -n | head -1 | cut -d. -f1 || true)
+      [ -n "$lock_ts" ] || lock_ts=$(find "${repo}locks" -maxdepth 1 -type f -printf '%T@\n' 2>/dev/null | sort -rn | head -1 | cut -d. -f1 || true)
       [ -z "$lock_ts" ] && lock_ts=0
       [ "$lock_ts" != 0 ] && locked=true
     fi
     size="$(du -sb "$repo" 2>/dev/null | cut -f1 || true)"; [ -z "$size" ] && size=0
     prune="$PRUNE_DIR/restic-prune-$name.sh"
+    cleaner=""
     if [ -f "$prune" ]; then
+      cleaner=script
       kl=$(keep_of keep-last "$prune"); kd=$(keep_of keep-daily "$prune")
       kw=$(keep_of keep-weekly "$prune"); km=$(keep_of keep-monthly "$prune")
     else
       # no dedicated script - the repository may be cleaned by the legacy monolith (see keep_of_legacy)
+      [ -n "$legacy_list" ] && grep -qxF -- "$name" <<<"$legacy_list" && cleaner=legacy
       kl=$(keep_of_legacy keep-last "$name"); kd=$(keep_of_legacy keep-daily "$name")
       kw=$(keep_of_legacy keep-weekly "$name"); km=$(keep_of_legacy keep-monthly "$name")
     fi
-    repos_json="${repos_json:+$repos_json,}{\"name\":\"$(json_escape "$name")\",\"valid\":$valid,\"snapshots\":$snaps,\"last_activity\":$last,\"locked\":$locked,\"lock_ts\":$lock_ts,\"size_bytes\":$size,\"keep_last\":${kl:-0},\"keep_daily\":${kd:-0},\"keep_weekly\":${kw:-0},\"keep_monthly\":${km:-0}}"
+    # removals: ids that were here on the previous run and are gone now
+    ids="$(find "${repo}snapshots" -maxdepth 1 -type f -printf '%f\n' 2>/dev/null | LC_ALL=C sort || true)"
+    sf="$SNAP_STATE/$name"
+    if [ -f "$sf.ids" ]; then
+      if [ -n "$(LC_ALL=C comm -13 <(printf '%s\n' "$ids") "$sf.ids" 2>/dev/null | head -1 || true)" ]; then
+        echo "$now_ts" > "$sf.removed" 2>/dev/null || true
+      fi
+    else
+      echo "$now_ts" > "$sf.since" 2>/dev/null || true  # watching starts now
+    fi
+    if [ "$ids" != "$(cat "$sf.ids" 2>/dev/null || true)" ]; then
+      printf '%s\n' "$ids" > "$sf.ids.tmp" 2>/dev/null && mv -f "$sf.ids.tmp" "$sf.ids" 2>/dev/null || true
+    fi
+    removed_ts="$(cat "$sf.removed" 2>/dev/null || true)"; [[ "$removed_ts" =~ ^[0-9]+$ ]] || removed_ts=0
+    seen_since="$(cat "$sf.since" 2>/dev/null || true)"; [[ "$seen_since" =~ ^[0-9]+$ ]] || seen_since=0
+    repos_json="${repos_json:+$repos_json,}{\"name\":\"$(json_escape "$name")\",\"valid\":$valid,\"snapshots\":$snaps,\"last_activity\":$last,\"oldest_snapshot\":$oldest,\"locked\":$locked,\"lock_ts\":$lock_ts,\"size_bytes\":$size,\"keep_last\":${kl:-0},\"keep_daily\":${kd:-0},\"keep_weekly\":${kw:-0},\"keep_monthly\":${km:-0}}"
+    extra_json="${extra_json:+$extra_json,}\"$(json_escape "$name")\":{\"cleaner\":\"$cleaner\",\"removed_ts\":$removed_ts,\"seen_since\":$seen_since}"
   done
+  # watch state of repositories that are gone
+  for sf in "$SNAP_STATE"/*.ids; do
+    [ -f "$sf" ] || continue
+    name="${sf##*/}"; name="${name%.ids}"
+    [ -d "$DATA/$name" ] || rm -f "$SNAP_STATE/$name.ids" "$SNAP_STATE/$name.since" "$SNAP_STATE/$name.removed" 2>/dev/null || true
+  done
+  local legacy_json=null log_ts=0
+  if [ -n "$legacy_list" ]; then
+    legacy_schedule
+    [ -n "$L_LOG" ] && [ -f "$L_LOG" ] && log_ts="$(stat -c %Y "$L_LOG" 2>/dev/null || echo 0)"
+    legacy_json="{\"script\":\"$LEGACY_PRUNE\",\"repos\":${lcount:-0},\"where\":\"$(json_escape "$L_WHERE")\",\"schedule\":\"$(json_escape "$L_SCHED")\",\"log\":\"$(json_escape "$L_LOG")\",\"log_ts\":${log_ts:-0}}"
+  fi
+  install -d -m 0755 "${REPORT_EXTRA%/*}" 2>/dev/null || true
+  if printf '{"v":1,"ts":%s,"legacy":%s,"repos":{%s}}\n' "$now_ts" "$legacy_json" "$extra_json" > "$REPORT_EXTRA.tmp" 2>/dev/null; then
+    chmod 0644 "$REPORT_EXTRA.tmp" 2>/dev/null && mv -f "$REPORT_EXTRA.tmp" "$REPORT_EXTRA" 2>/dev/null || true
+  fi
   # Space on the volume WITH THE REPOSITORIES rather than on /: they often sit on a separate
   # disk, and the node's overall disk metric says nothing about backup storage filling up.
   # df -P: POSIX output, one line per filesystem (without -P long device names wrap).

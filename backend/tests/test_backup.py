@@ -96,3 +96,82 @@ def test_rotation_overflow_needs_time_and_zero_removals():
     bsrv["repos"][0]["rotation_removed"] = 11
     out, seen = collector.rotation_overflow(bsrv, old, now)
     assert out == [] and seen == {}
+
+
+def test_lock_alert_waits_a_day_and_counts_from_the_oldest_stale_lock():
+    """Висячий лок моложе суток снимут сами чистка и клиент (restic unlock перед работой).
+    Старше суток - ежедневная чистка на нем уже споткнулась: на backup-a старый общий
+    скрипт unlock не делал, и ротация app-a стояла 23 дня."""
+    from datetime import datetime, timezone
+
+    from app import collector
+
+    now = datetime.now(timezone.utc)
+    ts = now.timestamp()
+    bsrv = {"repos": [
+        {"name": "idet-bekap", "valid": True, "locked": True, "lock_ts": ts - 120},
+        {"name": "vchera-upal", "valid": True, "locked": True, "lock_ts": ts - 5 * 3600},
+        {"name": "stoit", "valid": True, "locked": True, "lock_ts": ts - 3 * 86400 - 60},
+        {"name": "zaglushen", "valid": True, "locked": True, "lock_ts": ts - 9 * 86400},
+        {"name": "bez-vremeni", "valid": True, "locked": True, "lock_ts": 0},
+    ]}
+    assert collector.long_locked_repos(bsrv, {"zaglushen"}, now) == [("stoit", 3)]
+    # лок без времени (очень старый helper) остается в общем алерте: его возраст не узнать
+    assert collector._backup_problem_repos(bsrv, set(), now) == ["bez-vremeni"]
+    assert collector._backup_repo_reason(bsrv["repos"][4], now) == "залочен"
+
+
+def test_repo_alert_says_why():
+    from datetime import datetime, timezone
+
+    from app import collector
+
+    now = datetime.now(timezone.utc)
+    assert collector._backup_repo_reason({"valid": False}, now) == "нет config"
+    old = {"valid": True, "last_activity": now.timestamp() - 5 * 86400 - 60}
+    assert collector._backup_repo_reason(old, now) == "нет новых бэкапов 5 дн"
+    assert collector._backup_repo_reason({"valid": True, "last_activity": now.timestamp()}, now) == ""
+
+
+def test_rotation_overflow_sees_removals_without_prune_metrics():
+    """Репозиторий чистит старый общий скрипт: метрик удалений нет, раньше он не проверялся
+    вовсе. Удаления видит helper по пропавшим файлам снапшотов."""
+    from datetime import datetime, timezone
+
+    from app import collector
+
+    now = datetime.now(timezone.utc)
+    ts = now.timestamp()
+    repo = {"name": "legacy", "snapshots": 30, "keep_daily": 7, "keep_weekly": 4,
+            "keep_monthly": 6, "rotation_removed": -1, "last_activity": ts - 3600}
+    bsrv = {"repos": [repo]}
+
+    def extra(removed_ts, seen_since):
+        return {"repos": {"legacy": {"cleaner": "legacy", "removed_ts": removed_ts,
+                                     "seen_since": seen_since}}}
+
+    # helper старый - судить не по чему
+    assert collector.rotation_overflow(bsrv, {}, now)[0] == []
+    # удаляли вчера: ротация живая, просто несколько групп
+    assert collector.rotation_overflow(bsrv, {}, now, extra(ts - 86400, ts - 30 * 86400))[0] == []
+    # смотрим неделю, удалений не было ни одного
+    out, _ = collector.rotation_overflow(bsrv, {}, now, extra(0, ts - 7 * 86400))
+    assert len(out) == 1 and "удалений нет 7 дн" in out[0] and "17" in out[0], out
+    # бэкапы перестали приходить: удалять нечего, это уже алерт backup_repo
+    repo["last_activity"] = ts - 4 * 86400
+    assert collector.rotation_overflow(bsrv, {}, now, extra(0, ts - 7 * 86400))[0] == []
+
+
+def test_backup_server_extra_must_be_fresh():
+    from datetime import datetime, timezone
+
+    from app import collector
+
+    ts = datetime.now(timezone.utc).timestamp()
+    block = {"v": 1, "ts": ts - 60, "repos": {"a": {"cleaner": "legacy"}}}
+    rep = {"clock_unix": ts, "extras": {"backup-server": block}}
+    assert collector.bsrv_extra(rep) == block
+    rep["extras"]["backup-server"] = dict(block, ts=ts - 3600)
+    assert collector.bsrv_extra(rep) == {}
+    rep["extras"]["backup-server"] = dict(block, v=2)
+    assert collector.bsrv_extra(rep) == {}

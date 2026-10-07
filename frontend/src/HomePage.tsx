@@ -448,8 +448,10 @@ function backupProblems(servers: Server[], t: T): ProbItem[] {
       const rmuted = new Set(s.backup_repo_mutes ?? [])
       const badRepos = (bs.repos || []).filter((r) => {
         if (rmuted.has(r.name)) return false
-        // лок идущего бэкапа — не проблема (см. lockStuck в BackupsPage)
-        const stuck = r.locked && (!r.lock_ts || Date.now() / 1000 - r.lock_ts > 30 * 60)
+        // лок идущего бэкапа - не проблема (см. lockStuck в BackupsPage). Висячий лок
+        // моложе суток тоже: его снимут сами чистка и клиент, проблемой он становится
+        // с того же порога, что и алерт backup_lock
+        const stuck = r.locked && (!r.lock_ts || Date.now() / 1000 - r.lock_ts > 86400)
         if (!r.valid || stuck) return true
         return r.last_activity ? Date.now() / 1000 - r.last_activity > 3 * 86400 : false
       }).length
