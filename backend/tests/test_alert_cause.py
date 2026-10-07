@@ -629,6 +629,76 @@ async def test_muted_log_drops_out_of_the_5xx_alert(tmp_path, monkeypatch):
     await engine.dispose()
 
 
+def test_scanner_probe_paths_are_recognized():
+    """Пути, которые живой посетитель не запрашивает: служебные файлы с точкой, /@fs/ dev-сервера
+    Vite, выход за корень. /.well-known/ и /robots.txt - настоящие пути."""
+    po = collector.probe_only
+    assert po([{"p": "/@fs/.env", "n": 4}, {"p": "/@fs/src/.env", "n": 2},
+               {"p": "/@fs/var/task/.env", "n": 1}, {"p": "/@fs/app/.env.production", "n": 1}])
+    assert po([{"p": "/.git/config", "n": 3}, {"p": "/.aws/credentials", "n": 1}])
+    assert po([{"p": "/static/../../etc/passwd", "n": 1}])
+    assert po([{"p": "/vendor/phpunit/phpunit/src/Util/PHP/eval-stdin.php", "n": 2}])
+    assert not po([{"p": "/@fs/.env", "n": 4}, {"p": "/api/orders", "n": 1}])
+    assert not po([{"p": "/robots.txt", "n": 4}])
+    assert not po([{"p": "/.well-known/acme-challenge/x", "n": 1}])
+    assert not po([])
+    assert not po(None)
+
+
+async def test_scanner_probes_do_not_raise_the_5xx_alert(tmp_path, monkeypatch):
+    """07.10.2026 stand-a: сканер под видом Googlebot и GPTBot пробовал /@fs/.env и соседей,
+    приложение отвечало 500, и при 30 тыс. запросов 22 таких ответа дали алерт. Минуты, где
+    ошибки только на пробах, в алерт не входят, настоящие ошибки рядом алертят как раньше."""
+    from app.models import WebErrorSample
+
+    engine, factory = await _panel(tmp_path, "wprobe.db")
+    now = datetime.now(timezone.utc)
+    dreamsite = "dreamsite-nginx (dreamsite.one, www.dreamsite.one +8)"
+    probes = [{"p": "/@fs/.env", "n": 4}, {"p": "/@fs/src/.env", "n": 2},
+              {"p": "/@fs/var/task/.env", "n": 1}, {"p": "/@fs/root/.env", "n": 1}]
+    async with factory() as s:
+        s.add(Server(name="stand-a", token_hash="x", enabled=True, backup_not_required=True,
+                     last_seen=now, last_report={"cpu_percent": 5}, cpu_alert_percent=0,
+                     mem_alert_percent=0, disk_alert_percent=0, web_5xx_alert_percent=0.05))
+        await s.commit()
+        for m in range(15):
+            ts = now - timedelta(minutes=m)
+            burst = m % 3 == 0  # пачка от сканера раз в три минуты
+            s.add(ServerMetric(server_id=1, ts=ts, cpu_percent=5, web_rpm=2000,
+                               web_5xx=20 if burst else 0))
+            if burst:
+                s.add(WebErrorSample(server_id=1, ts=ts, src_ts=int(ts.timestamp()), e5=20, rpm=80,
+                                     log="docker:dreamsite-nginx", label=dreamsite, codes={"500": 20},
+                                     paths=probes))
+        await s.commit()
+
+    sent: list[str] = []
+
+    async def fake_send(cfg, text, parse_mode=None):
+        sent.append(text)
+        return []
+
+    monkeypatch.setattr("app.alerts.send_alert", fake_send)
+    settings = Settings(alert_webhook="http://hook")
+    await collector.evaluate_servers(factory, settings, now)
+    assert sent == []  # 100 ошибок, 0.33%, пять минут - но все на пробах сканера
+
+    async with factory() as s:
+        for m in range(15):
+            ts = now - timedelta(minutes=m)
+            s.add(WebErrorSample(server_id=1, ts=ts, src_ts=int(ts.timestamp()), e5=5, rpm=500,
+                                 log="docker:betsite-nginx", label="betsite-nginx (admin.partners.example)",
+                                 codes={"502": 5}, paths=[{"p": "/api/bets", "n": 5}]))
+        for row in await s.scalars(select(ServerMetric)):
+            row.web_5xx = (row.web_5xx or 0) + 5
+        await s.commit()
+    await collector.evaluate_servers(factory, settings, now + timedelta(seconds=30))
+    assert len(sent) == 1, sent
+    assert "betsite-nginx" in sent[0] and "dreamsite" not in sent[0]
+    assert "(75 из 30000)" in sent[0]  # ответы сканеру вычтены
+    await engine.dispose()
+
+
 def test_pod_log_key_is_its_controller():
     """Имя пода меняется при каждом выкате: без этого строки одного деплоймента множились,
     а заглушенный лог снова алертил после первого рестарта."""

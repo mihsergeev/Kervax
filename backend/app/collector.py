@@ -2536,12 +2536,36 @@ _WEB_ERR_MIN_POINTS = 10    # минут с данными в окне, мень
 # поломка, на которую надо реагировать, идет дольше.
 _WEB_ERR_MIN_MINUTES = 3
 
+# Пробы сканеров: пути, которые живой посетитель не запрашивает никогда. Служебные файлы с
+# точкой в начале (/.env, /.git/config, /.aws/credentials), чтение файлов через dev-сервер
+# Vite (/@fs/...), выход за корень сайта, известные эксплойты. Приложение иногда отвечает на
+# них 500 вместо 404, и пачки от сканеров давали алерт: 07.10.2026 на stand-a dreamsite-nginx
+# отдал 22 ответа 500 на /@fs/.env и соседей при 30 тыс. запросов (0.07%), каждая пачка с
+# одного адреса под видом Googlebot и GPTBot. Сайт при этом работал.
+_PROBE_PATH = re.compile(
+    r"(?:^|/)\.(?!well-known(?:/|$))[^/]"  # точка в начале части пути, кроме /.well-known/
+    r"|/@fs/"
+    r"|\.\./|%2e%2e|\.\.%2f"
+    r"|/vendor/phpunit/"
+    r"|/etc/passwd",
+    re.I,
+)
+
+
+def probe_only(paths: list | None) -> bool:
+    """Все пути с ошибками минуты - пробы сканера. Helper присылает пять самых частых путей:
+    если среди них есть хоть один настоящий, минута считается целиком, как раньше."""
+    items = [x for x in (paths or []) if isinstance(x, dict) and x.get("p")]
+    return bool(items) and all(_PROBE_PATH.search(str(x["p"])) for x in items)
+
 
 async def web_error_window(session: AsyncSession,
-                           now: datetime) -> dict[int, tuple[float, float, int, dict]]:
-    """{server_id: (запросов, ошибок 5xx, минут с данными, {ключ лога: {минута: ошибок}})}
-    за последние 15 минут. Два запроса на тик, а не по запросу на ноду. Разбивка по логам -
-    чтобы вычесть заглушенные и посчитать минуты с ошибками без них."""
+                           now: datetime) -> dict[int, tuple[float, float, int, dict, float]]:
+    """{server_id: (запросов, ошибок 5xx, минут с данными, {ключ лога: {минута: ошибок}},
+    ошибок на пробах сканеров)} за последние 15 минут. Два запроса на тик, а не по запросу
+    на ноду. Разбивка по логам - чтобы вычесть заглушенные и посчитать минуты с ошибками
+    без них. Минуты, где ошибки только на пробах (probe_only), в разбивку не попадают, их
+    ошибки идут отдельной суммой: ее вычитают из общего числа так же, как заглушенные."""
     since = now - _WEB_ERR_WINDOW
     rows = await session.execute(
         select(ServerMetric.server_id, func.sum(ServerMetric.web_rpm),
@@ -2552,13 +2576,19 @@ async def web_error_window(session: AsyncSession,
     # Минуты с ошибками - по минутам helper'а (src_ts), а не по точкам истории: одна и та
     # же минута helper'а может попасть в две точки подряд.
     per: dict[int, dict[str, dict[int, int]]] = {}
-    for sid, label, log, src, e5 in await session.execute(
+    probes: dict[int, dict[tuple[str, int], int]] = {}
+    for sid, label, log, src, e5, paths in await session.execute(
         select(WebErrorSample.server_id, WebErrorSample.label, WebErrorSample.log,
-               WebErrorSample.src_ts, WebErrorSample.e5)
+               WebErrorSample.src_ts, WebErrorSample.e5, WebErrorSample.paths)
         .where(WebErrorSample.ts >= since, WebErrorSample.e5 > 0)
     ):
-        per.setdefault(sid, {}).setdefault(web_label_key(label or log), {})[int(src)] = int(e5 or 0)
-    return {sid: (float(t or 0), float(e or 0), int(n or 0), per.get(sid, {}))
+        key = web_label_key(label or log)
+        if probe_only(paths):
+            probes.setdefault(sid, {})[(key, int(src))] = int(e5 or 0)
+            continue
+        per.setdefault(sid, {}).setdefault(key, {})[int(src)] = int(e5 or 0)
+    return {sid: (float(t or 0), float(e or 0), int(n or 0), per.get(sid, {}),
+                  float(sum((probes.get(sid) or {}).values())))
             for sid, t, e, n in rows}
 
 
@@ -2712,6 +2742,8 @@ async def web_error_where(session: AsyncSession, server_id: int, now: datetime,
     for r in sorted(rows, key=lambda x: x.ts):
         if web_label_key(r.label or r.log) in muted:
             continue  # заглушенный лог: про него не пишем, даже если он и шумит
+        if probe_only(r.paths):
+            continue  # минута, где 500 только сканерам: в алерт она не входит
         acc = by_log.setdefault(web_label_key(r.label or r.log), [r.label, 0])
         acc[0] = r.label or acc[0]  # подпись - самая свежая
         acc[1] += int(r.e5 or 0)
@@ -2847,7 +2879,7 @@ def _fallback_rule(key: str) -> dict:
 
 
 def _server_conditions(s: Server, now: datetime,
-                       web_err: tuple[float, float, int, dict] | None = None,
+                       web_err: tuple[float, float, int, dict, float] | None = None,
                        pod_names: dict[str, str] | None = None) -> dict[str, tuple[int, dict]]:
     """Пороги сервера: ключ → (уровень, контекст для шаблона текста). Уровень 0 =
     норма; для диска 1=предупреждение(≥warn), 2=проблема(≥alert), 3=критично(≥crit)."""
@@ -3079,10 +3111,12 @@ def _server_conditions(s: Server, now: datetime,
     # без sustain: иначе к окну добавились бы ещё 15 минут ожидания.
     thr5 = float(getattr(s, "web_5xx_alert_percent", 0) or 0)
     if online and thr5 and web_err is not None:
-        total, errs, points, per_log = web_err
+        total, errs, points, per_log, probe_errs = web_err
         muted = web_muted_keys(s, now)
         if muted:
             errs = max(0.0, errs - sum(sum(m.values()) for k, m in per_log.items() if k in muted))
+        # ответы сканерам на /.env, /@fs/ и подобное: сайт от них не сломан
+        errs = max(0.0, errs - probe_errs)
         err_minutes = len({src for k, m in per_log.items() if k not in muted for src in m})
         bad5 = web_error_level(total, errs, points, thr5, err_minutes)
         # Отбой - только после часа подряд без превышения (_WEB_ERR_CLEAR): пачки ошибок
