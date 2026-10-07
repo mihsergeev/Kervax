@@ -59,7 +59,10 @@ fi
 #       exclusively, a backup starting meanwhile failed)
 # 0.27: restic-update brings the server's own restic to 0.19.1 (the installer runs it), stats
 #       report the version the server runs
-KERVAX_SETUP_VERSION=0.27  # MAJOR.MINOR; compared component-wise (0.13 > 0.2!)
+# 0.28: stats report the newest snapshot times (the panel learns how often each client backs
+#       up) and the snapshot groups the prune script finds; the weekly check reads a slice
+#       of the data too; forget-group removes an old group by hand
+KERVAX_SETUP_VERSION=0.28  # MAJOR.MINOR; compared component-wise (0.13 > 0.2!)
 # Which nodes need this helper at all. Read by the ansible playbook on the
 # CONTROL machine and evaluated as a shell condition ON THE NODE, so a new
 # helper lands where it belongs without anyone editing the playbook.
@@ -230,6 +233,9 @@ REPORT_EXTRA=/var/lib/kervax/report.d/backup-server.json
 # removed a snapshot: the server prune, the monolith or the client itself. Prune metrics exist
 # only for our own scripts, so for everything else this is the only sign that rotation is alive.
 SNAP_STATE=/var/lib/kervax/bsrv-snaps
+# Snapshot groups of a repository (host and tags), written by its prune script once a night:
+# stats have no repository password and must not run restic every minute anyway.
+GROUPS_DIR=/var/lib/kervax/bsrv-groups
 # client name validation (it is also the repository and htpasswd user name): hostname-safe characters only
 valid_name() { case "$1" in ''|*[!A-Za-z0-9._-]*) return 1 ;; *) return 0 ;; esac; }
 valid_ip()   { [[ "$1" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] || [[ "$1" =~ ^[0-9A-Fa-f:]+$ ]]; }
@@ -246,7 +252,7 @@ cmd_stats() {
   # fall back to the compose tag if the container is missing or did not answer
   [ -n "$ver" ] || { [ -f "$COMPOSE" ] && ver="$(grep -oE 'rest-server:[A-Za-z0-9._-]+' "$COMPOSE" | head -1 | cut -d: -f2)"; }
   local repos_json="" extra_json="" repo name snaps last locked lock_ts valid size prune kl kd kw km
-  local oldest cleaner ids sf removed_ts seen_since chk_ts chk_ok now_ts legacy_list="" lcount=0
+  local oldest cleaner ids sf removed_ts seen_since chk_ts chk_ok chk_part chk_parts recent grp now_ts legacy_list="" lcount=0
   now_ts="$(date +%s)"
   install -d -m 0700 "$SNAP_STATE" 2>/dev/null || true
   # repositories the monolith has a block for (the same exact line keep_of_legacy looks for)
@@ -319,14 +325,38 @@ cmd_stats() {
     fi
     [[ "$chk_ts" =~ ^[0-9]+$ ]] || chk_ts=0
     [[ "$chk_ok" =~ ^-?[01]$ ]] || chk_ok=-1
+    chk_part=0; chk_parts=0
+    if [ -f "$NE_METRICS_DIR/restic_server_$name.prom" ]; then
+      chk_part="$(awk '$1 ~ /^restic_server_check_read_part\{/ { v = $2 } END { print v + 0 }' "$NE_METRICS_DIR/restic_server_$name.prom" 2>/dev/null || true)"
+      chk_parts="$(awk '$1 ~ /^restic_server_check_read_parts\{/ { v = $2 } END { print v + 0 }' "$NE_METRICS_DIR/restic_server_$name.prom" 2>/dev/null || true)"
+    fi
+    [[ "$chk_part" =~ ^[0-9]+$ ]] || chk_part=0
+    [[ "$chk_parts" =~ ^[0-9]+$ ]] || chk_parts=0
+    # The newest snapshot times: the panel learns from them how often the client backs up and
+    # notices a backup that did not come within hours instead of the fixed 3 days. Older ones
+    # are thinned by the retention policy and say nothing about the rhythm.
+    recent="$(find "${repo}snapshots" -maxdepth 1 -type f -printf '%T@\n' 2>/dev/null | cut -d. -f1 | sort -rn | head -8 | paste -sd, - || true)"
+    [[ "$recent" =~ ^[0-9,]*$ ]] || recent=""
+    # groups from the prune script, when there is more than one (see GROUPS_PY); a damaged
+    # file must not break the whole block, so only something that looks like one JSON object
+    grp=null
+    if [ -f "$GROUPS_DIR/$name.json" ] && [ "$(stat -c %s "$GROUPS_DIR/$name.json" 2>/dev/null || echo 99999)" -le 16384 ]; then
+      grp="$(tr -d '\n' < "$GROUPS_DIR/$name.json" 2>/dev/null || true)"
+      case "$grp" in '{"ts": '*'}') ;; *) grp=null ;; esac
+    fi
     repos_json="${repos_json:+$repos_json,}{\"name\":\"$(json_escape "$name")\",\"valid\":$valid,\"snapshots\":$snaps,\"last_activity\":$last,\"oldest_snapshot\":$oldest,\"locked\":$locked,\"lock_ts\":$lock_ts,\"size_bytes\":$size,\"keep_last\":${kl:-0},\"keep_daily\":${kd:-0},\"keep_weekly\":${kw:-0},\"keep_monthly\":${km:-0}}"
-    extra_json="${extra_json:+$extra_json,}\"$(json_escape "$name")\":{\"cleaner\":\"$cleaner\",\"removed_ts\":$removed_ts,\"seen_since\":$seen_since,\"check_ts\":$chk_ts,\"check_ok\":$chk_ok}"
+    extra_json="${extra_json:+$extra_json,}\"$(json_escape "$name")\":{\"cleaner\":\"$cleaner\",\"removed_ts\":$removed_ts,\"seen_since\":$seen_since,\"check_ts\":$chk_ts,\"check_ok\":$chk_ok,\"check_part\":$chk_part,\"check_parts\":$chk_parts,\"recent\":[$recent],\"groups\":$grp}"
   done
   # watch state of repositories that are gone
   for sf in "$SNAP_STATE"/*.ids; do
     [ -f "$sf" ] || continue
     name="${sf##*/}"; name="${name%.ids}"
     [ -d "$DATA/$name" ] || rm -f "$SNAP_STATE/$name.ids" "$SNAP_STATE/$name.since" "$SNAP_STATE/$name.removed" 2>/dev/null || true
+  done
+  for sf in "$GROUPS_DIR"/*.json; do
+    [ -f "$sf" ] || continue
+    name="${sf##*/}"; name="${name%.json}"
+    [ -d "$DATA/$name" ] || rm -f "$sf" 2>/dev/null || true
   done
   local legacy_json=null log_ts=0 missing="" ln
   if [ -n "$legacy_list" ]; then
@@ -426,6 +456,7 @@ write_prune_script() {
     printf 'LOG=%q\n' "$LOG_DIR/restic-prune-$name.log"
     printf 'METRICS_FILE=%q\n' "$NE_METRICS_DIR/restic_server_$name.prom"
     printf 'METRICS_FILE_ALT=%q\n' "$METRICS_DIR/restic_server_$name.prom"
+    printf 'GROUPS_FILE=%q\n' "$GROUPS_DIR/$name.json"
     printf 'KEEP=(--keep-last %q --keep-daily %q --keep-weekly %q --keep-monthly %q)\n' "$kl" "$kd" "$kw" "$km"
     cat <<'PRUNE_BODY'
 set -a; . "$ENV_FILE"; set +a  # restic is a child process: without export it will not see the repository
@@ -433,9 +464,45 @@ mkdir -p "$(dirname "$LOG")" "$(dirname "$METRICS_FILE")" "$(dirname "$METRICS_F
 ts_start=$(date +%s); success=0
 snap_before=-1; snap_after=-1; removed=-1
 bytes_before=-1; bytes_after=-1; oldest_ts=0
-# "<time> <1|0|-1>" of the last weekly integrity check, see below
+# "<time> <1|0|-1> <part> <parts>" of the last weekly integrity check, see below
 CHECK_STATE="/var/tmp/restic-check-${CLIENT}.state"
-check_ts=0; check_ok=-1
+check_ts=0; check_ok=-1; check_part=0; check_parts=0
+CHECK_SLICE=$(( 50 * 1024 * 1024 * 1024 ))  # at most this much data is read per weekly check
+# restic snapshots --json on stdin -> the groups file (argv[1]): host, tags, a few paths,
+# count, first and last snapshot. More than one group only, otherwise the file is removed.
+GROUPS_PY='
+import json, os, re, sys, time
+from datetime import datetime
+out = sys.argv[1]
+def unix(t):
+    t = re.sub(r"\.\d+", "", t or "").replace("Z", "+00:00")
+    try:
+        return int(datetime.fromisoformat(t).timestamp())
+    except ValueError:
+        return 0
+groups = {}
+for s in json.load(sys.stdin) or []:
+    host = s.get("hostname") or ""
+    tags = sorted(s.get("tags") or [])
+    g = groups.setdefault(host + "\t" + ",".join(tags),
+                          {"host": host, "tags": tags, "paths": [], "n": 0, "first": 0, "last": 0})
+    g["n"] += 1
+    for p in s.get("paths") or []:
+        if p not in g["paths"] and len(g["paths"]) < 3:
+            g["paths"].append(p[:120])
+    ts = unix(s.get("time"))
+    if ts:
+        g["first"] = min(g["first"] or ts, ts)
+        g["last"] = max(g["last"], ts)
+if len(groups) < 2:
+    if os.path.exists(out):
+        os.remove(out)
+    sys.exit(0)
+with open(out + ".tmp", "w") as f:
+    json.dump({"ts": int(time.time()), "groups": sorted(groups.values(), key=lambda g: -g["last"])[:20]}, f)
+os.chmod(out + ".tmp", 0o644)
+os.replace(out + ".tmp", out)
+'
 [ -s "$CHECK_STATE" ] && read -r check_ts check_ok < "$CHECK_STATE"
 
 # Snapshots are counted WITHOUT jq: backup servers do not have it, and the metric sat at -1
@@ -495,24 +562,42 @@ repo_size() { du -sb "$RESTIC_REPOSITORY" 2>/dev/null | awk '{print $1}'; }
       prune_rc=0;  "$BIN" prune ${RETRY_LOCK} 2>&1 || prune_rc=$?
       [ "$forget_rc" -eq 0 ] && [ "${prune_rc:-0}" -eq 0 ] && success=1
     fi
-    # Integrity check once a week: structure and index, not the data itself (--read-data would
-    # read the whole repository). The legacy shared script ran it every day, and moving a
+    # Integrity check once a week. The legacy shared script ran it every day, and moving a
     # repository onto this script must not lose it. The first check of each repository is
     # spread over the week by its name, so a helper update does not check everything in one
     # night. A repository busy with a backup is checked on the next run, not reported broken.
+    # Structure and index alone do not see a damaged pack file: that shows up only on a
+    # restore. So each check also reads a slice of the data, part N of T, the next part every
+    # week: in T weeks every pack has been read once. T keeps a slice at about 50 GiB at most,
+    # because restic check holds an exclusive lock and a backup starting meanwhile waits for it
+    # (clients wait up to 2 hours since backup-setup 0.33). Repositories up to 400 GiB are read
+    # whole in 8 weeks.
     if [ ! -s "$CHECK_STATE" ]; then
       echo "$(( $(date +%s) - ( $(printf '%s' "$CLIENT" | cksum | cut -d' ' -f1) % 7 ) * 86400 )) -1" > "$CHECK_STATE"
     fi
-    read -r check_ts check_ok < "$CHECK_STATE" || true
+    read -r check_ts check_ok check_part check_parts < "$CHECK_STATE" || true
     if [ $(( $(date +%s) - ${check_ts:-0} )) -ge $(( 7 * 86400 )) ]; then
-      chk_rc=0; chk_out="$("$BIN" check ${RETRY_LOCK} 2>&1)" || chk_rc=$?
+      parts=8
+      if [ "${bytes_before:--1}" -gt 0 ] 2>/dev/null; then
+        parts=$(( (bytes_before + CHECK_SLICE - 1) / CHECK_SLICE )); [ "$parts" -ge 8 ] || parts=8
+      fi
+      part=$(( ${check_part:-0} % parts + 1 ))
+      chk_rc=0; chk_out="$("$BIN" check ${RETRY_LOCK} --read-data-subset="$part/$parts" 2>&1)" || chk_rc=$?
       printf '%s\n' "$chk_out"
       if [ "$chk_rc" -eq 0 ]; then
-        echo "$(date +%s) 1" > "$CHECK_STATE"
+        echo "$(date +%s) 1 $part $parts" > "$CHECK_STATE"
       elif ! printf '%s' "$chk_out" | grep -qi "already locked"; then
-        echo "$(date +%s) 0" > "$CHECK_STATE"
+        echo "$(date +%s) 0 $part $parts" > "$CHECK_STATE"
       fi
-      read -r check_ts check_ok < "$CHECK_STATE" || true
+      read -r check_ts check_ok check_part check_parts < "$CHECK_STATE" || true
+    fi
+    # Snapshot groups the way forget sees them (host and tags), for the panel. An old group,
+    # left by a renamed host, a server that is gone or a one-off backup, is kept by the policy
+    # forever: the panel shows it with the choice to archive it or remove it (forget-group).
+    # Written only when the repository has more than one group.
+    if command -v python3 >/dev/null 2>&1; then
+      mkdir -p "$(dirname "$GROUPS_FILE")"
+      "$BIN" snapshots --json 2>/dev/null | python3 -c "$GROUPS_PY" "$GROUPS_FILE" 2>/dev/null || true
     fi
   fi
   # Measured AFTER the prune: the size used to be taken before the cleanup, so a 1.5 GB
@@ -543,6 +628,9 @@ ts_end=$(date +%s)
   # the weekly integrity check: when and whether it passed (-1 = not checked yet)
   echo "restic_server_check_timestamp{client=\"${CLIENT}\"} ${check_ts:-0}"
   echo "restic_server_check_success{client=\"${CLIENT}\"} ${check_ok:--1}"
+  # which slice of the data that check read: part N of T (0 - the check did not read data)
+  echo "restic_server_check_read_part{client=\"${CLIENT}\"} ${check_part:-0}"
+  echo "restic_server_check_read_parts{client=\"${CLIENT}\"} ${check_parts:-0}"
 } > "${METRICS_FILE}.partial" && {
   chmod 0644 "${METRICS_FILE}.partial"
   # node-exporter reads the file as a whole: we publish by rename so it never catches it
@@ -1107,6 +1195,56 @@ cmd_restic_update() {
   echo "restic updated to $RESTIC_TARGET_VER:$out$held"
 }
 
+# cmd_forget_group removes every snapshot of one old group: a host that no longer backs up into
+# the repository (renamed, gone, a one-off backup). The policy keeps the last snapshots of such
+# a group forever, so it goes only by hand. Only an old group: when the host has a snapshot
+# from the last 7 days the group is alive and nothing is removed. Without --apply it only says
+# what would go. The space comes back with the next nightly prune of the repository.
+cmd_forget_group() {
+  local repo="${1:-}" host="${2:-}" apply="${3:-}" env bin
+  valid_name "$repo" || { echo "bad repository name" >&2; return 2; }
+  valid_name "$host" || { echo "bad host name" >&2; return 2; }
+  env="$ENV_DIR/$repo.env"
+  [ -f "$env" ] || { echo "no $env: the repository has no prune script of its own, nothing to take the password from" >&2; return 2; }
+  command -v python3 >/dev/null 2>&1 || { echo "python3 is needed" >&2; return 2; }
+  bin="$(sed -n 's/^BIN=//p' "$PRUNE_DIR/restic-prune-$repo.sh" 2>/dev/null | head -n1)"
+  [ -x "$bin" ] || bin="$RESTIC_BIN"
+  (
+    set -a; . "$env"; set +a
+    snaps="$("$bin" snapshots --host "$host" --json 2>&1)" || { echo "restic snapshots failed: $snaps" >&2; exit 2; }
+    info="$(printf '%s' "$snaps" | python3 -c '
+import json, re, sys
+from datetime import datetime
+def unix(t):
+    t = re.sub(r"\.\d+", "", t or "").replace("Z", "+00:00")
+    try:
+        return int(datetime.fromisoformat(t).timestamp())
+    except ValueError:
+        return 0
+rows = sorted((unix(s.get("time")), s.get("id") or "") for s in json.load(sys.stdin) or [])
+print(len(rows), rows[0][0] if rows else 0, rows[-1][0] if rows else 0)
+for t, i in rows:
+    print(i)
+')" || { echo "could not read the snapshot list" >&2; exit 2; }
+    read -r n first last <<<"$(head -n1 <<<"$info")"
+    if [ "${n:-0}" -eq 0 ]; then echo "no snapshots of host $host in $repo"; exit 0; fi
+    if [ $(( $(date +%s) - last )) -lt $(( 7 * 86400 )) ]; then
+      echo "host $host backed up into $repo $(( ($(date +%s) - last) / 3600 )) h ago: the group is alive, nothing removed" >&2
+      exit 2
+    fi
+    echo "group $host in $repo: $n snapshots, $(date -d "@$first" +%F) .. $(date -d "@$last" +%F)"
+    if [ "$apply" != "--apply" ]; then
+      echo "dry run, nothing removed. To remove: $0 forget-group $repo $host --apply"
+      exit 0
+    fi
+    rl=""; "$bin" forget --help 2>/dev/null | grep -q -- "--retry-lock" && rl="--retry-lock 20m"
+    # shellcheck disable=SC2046
+    "$bin" forget $rl $(tail -n +2 <<<"$info" | grep -E '^[0-9a-f]{64}$') || { echo "restic forget failed" >&2; exit 2; }
+    rm -f "$GROUPS_DIR/$repo.json"  # the next prune writes it anew
+    echo "removed $n snapshots of $host from $repo; the space comes back with the next nightly prune"
+  )
+}
+
 cmd_process_spool() {
   local req id action name hpass repopass client_ip kl kd kw km san_ip san_dns port out ok k v line
   for req in "$REQ_DIR"/*.req; do
@@ -1148,12 +1286,13 @@ case "${1:-}" in
   deploy-server)    shift; cmd_deploy_server "$@" ;;
   update-image)     cmd_update_image ;;
   restic-update)    cmd_restic_update ;;
+  forget-group)     shift; cmd_forget_group "$@" ;;
   provision-client) shift; cmd_provision_client "$@" ;;
   deploy-tls-front) shift; cmd_deploy_tls_front "$@" ;;
   get-cert)         cmd_get_cert ;;
   get-client-creds) shift; cmd_get_client_creds "$@" ;;
   process-spool)    cmd_process_spool ;;
-  *) echo "usage: $0 {stats|regen-prune|adopt-legacy [--apply] [name...]|deploy-server [port]|update-image|restic-update|provision-client <name> <hpass> <repopass> <ip> [kl kd kw km]|deploy-tls-front <ip> [dns]|get-cert|get-client-creds <name>|process-spool}" >&2; exit 2 ;;
+  *) echo "usage: $0 {stats|regen-prune|adopt-legacy [--apply] [name...]|deploy-server [port]|update-image|restic-update|forget-group <repo> <host> [--apply]|provision-client <name> <hpass> <repopass> <ip> [kl kd kw km]|deploy-tls-front <ip> [dns]|get-cert|get-client-creds <name>|process-spool}" >&2; exit 2 ;;
 esac
 HELPER_EOF
 chmod 0755 "$HELPER"; chown root:root "$HELPER"

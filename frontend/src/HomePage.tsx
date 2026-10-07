@@ -468,11 +468,12 @@ function backupProblems(servers: Server[], t: T): ProbItem[] {
             list: locked.map((r) => `${r.name} (${Math.floor((now - (r.lock_ts ?? now)) / 86400)} ${t('дн.')})`).join(', '),
           }),
         })
-      const badRepos = live.filter((r) => {
-        if (!r.valid || (r.locked && !r.lock_ts)) return true // лок без времени: очень старый helper
-        return r.last_activity ? now - r.last_activity > 3 * 86400 : false
-      }).length
-      if (badRepos > 0) out.push({ key: `bs-repo-${s.id}`, id: s.id, name: s.name, cc: s.country, down: true, srv: true, since: s.alert_since?.backup_repo, text: t('{name}: репозиториев с проблемой — {n}', { name: s.name, n: badRepos }) })
+      // те же репозитории, что в алерте backup_repo: бэкенд считает их с ритмом бэкапов (клиент
+      // без агента опаздывает через сутки с небольшим), без приглушенных и архива
+      const badNames = Object.keys(s.bsrv_repo_reasons ?? {}).sort()
+      if (badNames.length > 0) out.push({ key: `bs-repo-${s.id}`, id: s.id, name: s.name, cc: s.country, down: true, srv: true, since: s.alert_since?.backup_repo,
+        text: t('{name}: репозиториев с проблемой - {n} ({list})', { name: s.name, n: badNames.length,
+          list: badNames.slice(0, 3).join(', ') + (badNames.length > 3 ? ', ...' : '') }) })
       // ротация встала: считает бэкенд теми же правилами, что и алерт backup_rotation
       const rot = s.bsrv_rotation ?? []
       if (rot.length > 0 && !smuted.has('backup_rotation'))

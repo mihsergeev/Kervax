@@ -1047,6 +1047,8 @@ class ServerOut(BaseModel):
     disk_temp_alert_c: int
     alert_mutes: list[str] | None = None
     backup_repo_mutes: list[str] | None = None  # заглушённые репо бэкап-сервера (по имени)
+    # архив бэкап-сервера: репозиторий или "репозиторий|хост" -> {note, ts, by}
+    backup_repo_archive: dict | None = None
     backup_audit_mutes: list[str] | None = None  # приглушённые находки покрытия (по ключу)
     backup_not_required: bool = False  # у сервера бэкап не требуется (алерт снят)
     db_dumps_ok: bool = False  # дампы СУБД настроены отдельно (пункт снят с главной)
@@ -1090,6 +1092,11 @@ class ServerOut(BaseModel):
     bsrv_rotation: list[str] = []
     # restic самого сервера бэкапов старше той версии, до которой его обновляет helper
     bsrv_restic_old: str = ""
+    # репозитории, которые сейчас попали бы в алерт backup_repo: имя -> причина (по ВСЕМ серверам:
+    # с ритмом бэкапов и с тем, есть ли клиент в панели)
+    bsrv_repo_reasons: dict[str, str] = Field(default_factory=dict)
+    # обычный интервал бэкапов репозитория, секунды (по последним снапшотам, helper 0.28)
+    bsrv_cadence: dict[str, int] = Field(default_factory=dict)
 
 
 class BackupRepoMuteIn(BaseModel):
@@ -1097,6 +1104,15 @@ class BackupRepoMuteIn(BaseModel):
 
     repo: str = Field(min_length=1, max_length=253)
     muted: bool
+
+
+class BackupRepoArchiveIn(BaseModel):
+    """Убрать в архив или вернуть репозиторий бэкап-сервера, а с host - одну его старую группу."""
+
+    repo: str = Field(min_length=1, max_length=253, pattern=r"^[A-Za-z0-9._-]+$")
+    host: str = Field(default="", max_length=253, pattern=r"^[A-Za-z0-9._-]*$")
+    note: str = Field(default="", max_length=200)
+    archived: bool
 
 
 class ServerEnrollOut(BaseModel):

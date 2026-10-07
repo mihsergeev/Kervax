@@ -1645,31 +1645,154 @@ def _cron_dump_problems(rep: dict, now: datetime) -> list[str]:
     return sorted(out)
 
 
-def _backup_problem_repos(bs: dict, muted: set, now: datetime) -> list[str]:
+def _backup_problem_repos(
+    bs: dict, muted: set, now: datetime, extra: dict | None = None,
+    names: set[str] | None = None, archive: dict | None = None,
+) -> list[str]:
     """Имена НЕ заглушенных репо бэкап-сервера, требующих внимания: битые (нет config)
     или устаревшие (давно не принимали бэкап). Отсортировано.
     Висячий лок сюда больше не входит: у него свой алерт backup_lock и свой порог (сутки).
-    Остался только лок от helper'а без времени лока: сколько он висит, не узнать."""
+    Остался только лок от helper'а без времени лока: сколько он висит, не узнать.
+    Репозитории в архиве не в счет: новых бэкапов в них и не ждут."""
     out = []
     for r in bs.get("repos") or []:
         name = r.get("name") or ""
-        if not name or name in muted:
+        if not name or name in muted or archived_repo(archive, name):
             continue
-        if _backup_repo_reason(r, now):
+        if repo_reason(r, now, extra, names):
             out.append(name)
     return sorted(out)
 
 
-def _backup_repo_reason(r: dict, now: datetime) -> str:
-    """Что с репозиторием, словами для алерта backup_repo. Пусто - все в порядке."""
+def _backup_repo_reason(r: dict, now: datetime, cadence: int = 0, monitored: bool = True) -> str:
+    """Что с репозиторием, словами для алерта backup_repo. Пусто - все в порядке.
+
+    cadence - обычный интервал между бэкапами (backup_cadence), 0 - не известен. Тогда порог
+    прежний, 3 дня. С известным ритмом бэкап считается опоздавшим через интервал и еще
+    четверть его (не меньше 2 часов): ежедневный - через 30 часов. У клиента с агентом в
+    панели (monitored) сломанный бэкап раньше заметит сам агент, там ритм только раздвигает
+    порог для редких бэкапов: недельный не устаревает через 3 дня."""
     if not r.get("valid"):
         return "нет config"
     last = r.get("last_activity") or 0
-    if last > 0 and (now.timestamp() - last) > _BACKUP_REPO_STALE_SECONDS:
-        return f"нет новых бэкапов {int((now.timestamp() - last) // 86400)} дн"
+    age = now.timestamp() - last if last > 0 else 0
+    if cadence > 0:
+        late_after = cadence + max(cadence // 4, 2 * 3600)
+        limit = max(_BACKUP_REPO_STALE_SECONDS, late_after) if monitored else late_after
+    else:
+        limit = _BACKUP_REPO_STALE_SECONDS
+    if last > 0 and age > limit:
+        if cadence > 0:
+            return f"бэкап опоздал: обычно {_every(cadence)}, последний {_ago(age)} назад"
+        return f"нет новых бэкапов {int(age // 86400)} дн"
     if r.get("locked") and not (r.get("lock_ts") or 0):
         return "залочен"
     return ""
+
+
+def repo_reason(r: dict, now: datetime, extra: dict | None = None, names: set[str] | None = None) -> str:
+    """_backup_repo_reason с ритмом из блока helper'а (0.28+) и с тем, есть ли клиент в панели.
+    names - имена нод панели (panel_server_names); None - не знаем, считаем клиента своим."""
+    name = r.get("name") or ""
+    o = ((extra or {}).get("repos") or {}).get(name)
+    cadence = backup_cadence(o.get("recent") if isinstance(o, dict) else None)
+    monitored = names is None or name.lower() in names
+    return _backup_repo_reason(r, now, cadence, monitored)
+
+
+# Снапшоты одного прогона (файлы и дампы отдельными снапшотами, повтор после сбоя) ближе
+# друг к другу, чем на полчаса: это один бэкап.
+_RUN_GAP = 30 * 60
+
+
+def backup_cadence(recent: list | None) -> int:
+    """Обычный интервал между бэкапами репозитория по временам последних снапшотов, секунды;
+    0 - ритм не ясен (мало снапшотов или интервалы не сходятся).
+
+    Только голова списка: старше политика хранения уже проредила снапшоты (на серверах после
+    7 суточных идут 72, 168, 480 часов). Прореживание склеивает соседние интервалы, поэтому
+    ритм - самые свежие интервалы, пока они сходятся с самым новым, и таких нужно хотя бы
+    два. Иначе ритм не ясен: при keep-daily 2 за одним суточным идут недельные, и два
+    недельных подряд выдали бы ритм "раз в неделю", а бэкап с ним заметили бы позже, чем по
+    прежним 3 дням. Ручной бэкап посреди дня тоже делает ритм неясным, пока не уйдет вглубь."""
+    ts = sorted({int(t) for t in (recent or []) if isinstance(t, (int, float)) and t > 0}, reverse=True)
+    runs: list[int] = []
+    for t in ts:
+        if not runs or runs[-1] - t > _RUN_GAP:
+            runs.append(t)
+    iv = [runs[i] - runs[i + 1] for i in range(min(len(runs) - 1, 6))]
+    head: list[int] = []
+    for x in iv:
+        if head and not 0.8 * iv[0] <= x <= 1.25 * iv[0]:
+            break
+        head.append(x)
+    if len(head) < 2:
+        return 0
+    return sorted(head)[(len(head) - 1) // 2]
+
+
+def _every(sec: int) -> str:
+    """Интервал бэкапов словами: раз в сутки, раз в 6 ч, раз в неделю."""
+    h = sec / 3600
+    if abs(h - 24) <= 2:
+        return "раз в сутки"
+    if abs(h - 168) <= 12:
+        return "раз в неделю"
+    if abs(h - 1) <= 0.25:
+        return "раз в час"
+    if h < 48:
+        return f"раз в {round(h)} ч"
+    return f"раз в {round(h / 24)} дн"
+
+
+def _ago(sec: float) -> str:
+    return f"{int(sec // 3600)} ч" if sec < 2 * 86400 else f"{int(sec // 86400)} дн"
+
+
+# Архив репозиториев и старых групп снапшотов (Server.backup_repo_archive): сервера больше нет,
+# бэкапить больше не нужно, разовый бэкап, проект заморожен. Данные остаются как есть: чистка
+# по политике у репозитория без новых снапшотов ничего не удаляет (keep-daily считает дни с
+# бэкапами, а не календарные), а удалить группу можно только руками. Архив не устаревает, не
+# попадает в ротацию и в "клиенты без агента", но проверка целостности и висячий лок
+# остаются: архив должен читаться. Ключ - имя репозитория или "репозиторий|хост" для группы.
+def archived_repo(archive: dict | None, name: str) -> bool:
+    return bool(archive) and name in archive
+
+
+def archived_hosts(archive: dict | None, repo: str) -> set[str]:
+    """Хосты групп репозитория, убранных в архив."""
+    pre = repo + "|"
+    return {k[len(pre):] for k in (archive or {}) if k.startswith(pre)}
+
+
+# Группы снапшотов пишет prune-скрипт раз в сутки. Старше трех суток он, похоже, не
+# запускается, и по таким группам уже не судим.
+_GROUPS_MAX_AGE = 3 * 86400
+
+
+def repo_groups(extra: dict | None, name: str, now_ts: float) -> list[dict]:
+    """Группы снапшотов репозитория (хост и теги) от helper'а 0.28, свежие; иначе пусто."""
+    o = ((extra or {}).get("repos") or {}).get(name)
+    g = o.get("groups") if isinstance(o, dict) else None
+    if not isinstance(g, dict) or now_ts - float(g.get("ts") or 0) > _GROUPS_MAX_AGE:
+        return []
+    return [x for x in g.get("groups") or [] if isinstance(x, dict)]
+
+
+def _live_view(r: dict, extra: dict | None, archive: dict | None, now_ts: float) -> tuple[int, int]:
+    """(снапшотов, старейший) репозитория без групп, убранных в архив. Без архивных групп или
+    без сведений о группах - как есть."""
+    snaps = int(r.get("snapshots") or 0)
+    oldest = int(r.get("oldest_snapshot") or 0)
+    name = r.get("name") or ""
+    hosts = archived_hosts(archive, name)
+    groups = repo_groups(extra, name, now_ts) if hosts else []
+    if not groups:
+        return snaps, oldest
+    live = [g for g in groups if (g.get("host") or "") not in hosts]
+    gone = sum(int(g.get("n") or 0) for g in groups if (g.get("host") or "") in hosts)
+    firsts = [int(g.get("first") or 0) for g in live if int(g.get("first") or 0) > 0]
+    return max(snaps - gone, 0), (min(firsts) if firsts else oldest)
 
 
 # Висячий лок держит prune, forget и check. Чистка Kervax, клиенты Kervax и ansible снимают
@@ -1741,7 +1864,9 @@ def panel_server_names(servers) -> set[str]:
     return out
 
 
-def backup_unmonitored(bs: dict, muted: set, names: set[str], now: datetime) -> list[str]:
+def backup_unmonitored(
+    bs: dict, muted: set, names: set[str], now: datetime, archive: dict | None = None,
+) -> list[str]:
     """Репозитории со свежими бэкапами, чьих клиентов нет в панели. Если такой бэкап сломается,
     панель узнает только через 3 дня, когда репозиторий устареет, а агент на самой ноде сказал
     бы в тот же день. Так прошли 23 дня у app-a. Заглушенные и устаревшие (клиента,
@@ -1750,7 +1875,7 @@ def backup_unmonitored(bs: dict, muted: set, names: set[str], now: datetime) -> 
     for r in bs.get("repos") or []:
         name = r.get("name") or ""
         last = r.get("last_activity") or 0
-        if not name or name in muted or not last or now.timestamp() - last > _BACKUP_REPO_STALE_SECONDS:
+        if not name or name in muted or archived_repo(archive, name) or not last                 or now.timestamp() - last > _BACKUP_REPO_STALE_SECONDS:
             continue
         if name.lower() not in names:
             out.append(name)
@@ -1858,7 +1983,7 @@ def rotation_policy_max(repo: dict) -> int:
 
 
 def rotation_overflow(
-    bsrv: dict, seen: dict, now: datetime, extra: dict | None = None,
+    bsrv: dict, seen: dict, now: datetime, extra: dict | None = None, archive: dict | None = None,
 ) -> tuple[list[str], dict]:
     """Репозитории, где ротация не отрабатывает: переполнение + ноль удалений.
 
@@ -1871,13 +1996,18 @@ def rotation_overflow(
     prune-скрипты, а репозиторий, который чистит старый общий скрипт или никто, сюда
     раньше не попадал вовсе. Для него удаления видит helper по пропавшим файлам
     снапшотов, и отсчет идет от последнего удаления (или от начала наблюдения).
+
+    archive - архив репозиториев и групп (Server.backup_repo_archive): репозиторий в архиве не
+    проверяем, снапшоты групп в архиве не считаем.
     """
     fresh: dict = {}
     out: list[str] = []
     observed = (extra or {}).get("repos") or {}
     for r in bsrv.get("repos") or []:
         name = r.get("name") or ""
-        snaps = int(r.get("snapshots") or 0)
+        if archived_repo(archive, name):
+            continue
+        snaps, _oldest = _live_view(r, extra, archive, now.timestamp())
         limit = rotation_policy_max(r)
         removed = int(r.get("rotation_removed") if r.get("rotation_removed") is not None else -1)
         if not name or limit <= 0 or snaps <= limit:
@@ -1909,18 +2039,24 @@ def rotation_overflow(
     return sorted(out), fresh
 
 
-def rotation_stale_repos(bsrv: dict, now: datetime, extra: dict | None = None) -> list[str]:
+def rotation_stale_repos(
+    bsrv: dict, now: datetime, extra: dict | None = None, archive: dict | None = None,
+) -> list[str]:
     """Репозитории, где старейший снапшот пережил собственную политику хранения.
 
     Главный признак мёртвой ротации, инвариантный к причине: неважно, сломалась ли
     группировка forget, упал prune или снят cron — старьё просто перестаёт исчезать.
     Именно этого сигнала не хватало, когда 17 дней все было зеленым.
 
-    extra - блок helper'а backup-server: по нему видно, что чистка при этом идет."""
+    extra - блок helper'а backup-server: по нему видно, что чистка при этом идет.
+    archive - архив: репозиторий в архиве не проверяем, группы в архиве не считаем (старая
+    группа, которую решили хранить, больше не выглядит встающей ротацией)."""
     out: list[str] = []
     observed = (extra or {}).get("repos") or {}
     for r in bsrv.get("repos") or []:
-        oldest = int(r.get("oldest_snapshot") or 0)
+        if archived_repo(archive, r.get("name") or ""):
+            continue
+        snaps, oldest = _live_view(r, extra, archive, now.timestamp())
         limit = rotation_max_age_days(r)
         if oldest <= 0 or limit <= 0:
             continue  # нет метрики (старый helper) или нет политики — молчим
@@ -1928,16 +2064,42 @@ def rotation_stale_repos(bsrv: dict, now: datetime, extra: dict | None = None) -
         # оставила: keep-daily считает дни, в которые были бэкапы, а не календарные. У
         # клиента, который бэкапится раз в месяц, 7 снапшотов законно держатся больше
         # года (app-d: 458 дней, и все семь на своем месте).
-        if int(r.get("snapshots") or 0) <= rotation_policy_max(r):
+        if snaps <= rotation_policy_max(r):
             continue
         age = (now.timestamp() - oldest) / 86400
         if age > limit:
             # чистка при этом идет - тогда старье почти наверняка другая группа: forget
-            # группирует по хосту и путям, и последние снапшоты старой группы держит вечно
-            hint = ", похоже на старую группу: менялись хост или пути" if rotation_alive(
-                r, observed.get(r.get("name") or ""), now) else ""
-            out.append(f"{r.get('name') or '?'} ({int(age)} дн. > {limit}{hint})")
+            # группирует по хосту и тегам, и последние снапшоты старой группы держит вечно.
+            # helper 0.28 знает группы, тогда называем её прямо.
+            name = r.get("name") or ""
+            old = old_groups(extra, archive, name, now.timestamp())
+            if old:
+                g = old[0]
+                hint = f", старая группа {g.get('host') or '?'}: {int(g.get('n') or 0)} снапшотов"
+            elif rotation_alive(r, observed.get(name), now):
+                hint = ", похоже на старую группу: менялись хост или пути"
+            else:
+                hint = ""
+            out.append(f"{name or '?'} ({int(age)} дн. > {limit}{hint})")
     return sorted(out)
+
+
+# Группа старая, если в нее не бэкапились неделю: столько же ждет и forget-group, прежде чем
+# согласиться её удалить.
+_OLD_GROUP_SECONDS = 7 * 86400
+
+
+def old_groups(extra: dict | None, archive: dict | None, name: str, now_ts: float) -> list[dict]:
+    """Старые группы репозитория, не убранные в архив, свежие сначала. Группа, в которую
+    бэкапились последней, старой не бывает, даже если бэкапы встали: это сам клиент."""
+    groups = repo_groups(extra, name, now_ts)
+    if len(groups) < 2:
+        return []
+    hosts = archived_hosts(archive, name)
+    newest = max(int(g.get("last") or 0) for g in groups)
+    return [g for g in groups
+            if int(g.get("last") or 0) < newest and now_ts - int(g.get("last") or 0) > _OLD_GROUP_SECONDS
+            and (g.get("host") or "") not in hosts]
 
 
 def backup_rotation_items(s: Server, now: datetime) -> list[str]:
@@ -1948,9 +2110,10 @@ def backup_rotation_items(s: Server, now: datetime) -> list[str]:
     if not bs.get("present"):
         return []
     ext = bsrv_extra(rep)
-    over, _seen = rotation_overflow(bs, dict((s.alert_state or {}).get("rotation_over") or {}), now, ext)
+    arch = getattr(s, "backup_repo_archive", None) or {}
+    over, _seen = rotation_overflow(bs, dict((s.alert_state or {}).get("rotation_over") or {}), now, ext, arch)
     muted = set(s.backup_repo_mutes or [])
-    return [x for x in rotation_stale_repos(bs, now, ext) + over if x.split(" (")[0] not in muted]
+    return [x for x in rotation_stale_repos(bs, now, ext, arch) + over if x.split(" (")[0] not in muted]
 
 
 def rotation_alive(r: dict, observed: dict | None, now: datetime) -> bool:
@@ -3907,11 +4070,12 @@ async def evaluate_servers(
         if (online_now and bsrv_rot.get("present") and rot_r and rot_r["enabled"]
                 and "backup_rotation" not in mutes and _rule_scope_ok(rot_r, s)):
             rot_ext = bsrv_extra(s.last_report or {})
+            rot_arch = s.backup_repo_archive or {}
             over, seen_over = rotation_overflow(
-                bsrv_rot, dict(st.get("rotation_over") or {}), now, rot_ext)
+                bsrv_rot, dict(st.get("rotation_over") or {}), now, rot_ext, rot_arch)
             if seen_over != (st.get("rotation_over") or {}):
                 apply(s.id, "rotation_over", seen_over)
-            stale = [x for x in rotation_stale_repos(bsrv_rot, now, rot_ext) + over
+            stale = [x for x in rotation_stale_repos(bsrv_rot, now, rot_ext, rot_arch) + over
                      if x.split(" (")[0] not in set(s.backup_repo_mutes or [])]
             was_stale = bool(st.get("rotation_stale"))
             if stale and not was_stale:
@@ -3978,7 +4142,8 @@ async def evaluate_servers(
         # бэкап-сервера пометкой "нет в панели"), иначе первое сообщение было бы на 60 строк.
         ur = rules.get("backup_unmonitored")
         if online_now and bsrv.get("present") and "backup_unmonitored" not in mutes:
-            cur_un = backup_unmonitored(bsrv, set(s.backup_repo_mutes or []), panel_names, now)
+            cur_un = backup_unmonitored(bsrv, set(s.backup_repo_mutes or []), panel_names, now,
+                                        s.backup_repo_archive or {})
             known = st.get("bsrv_clients")
             if not isinstance(known, list):
                 apply(s.id, "bsrv_clients", cur_un)
@@ -3995,7 +4160,9 @@ async def evaluate_servers(
         # заглушенных. Алертим при появлении НОВЫХ проблемных, recovery - когда все чисты.
         rr = rules.get("backup_repo")
         if online_now and bsrv.get("present") and "backup_repo" not in mutes:
-            probs = _backup_problem_repos(bsrv, set(s.backup_repo_mutes or []), now)
+            repo_ext = bsrv_extra(s.last_report or {})
+            probs = _backup_problem_repos(bsrv, set(s.backup_repo_mutes or []), now, repo_ext,
+                                          panel_names, s.backup_repo_archive or {})
             prev = st.get("backup_repos")
             if isinstance(prev, list):  # старый формат (голый список) → мигрируем
                 prev = {"repos": prev, "ts": 0}
@@ -4004,13 +4171,16 @@ async def evaluate_servers(
             prev_ts = float(prev.get("ts") or 0)
             repo_ok = rr and rr["enabled"] and _rule_scope_ok(rr, s)
             # НЕ срочный: шлём при ПОЯВЛЕНИИ проблемы, потом напоминаем не чаще раза в сутки —
-            # а НЕ на каждое изменение набора (набор флапает по свежести/локам → был спам).
-            due = not prev_active or (now.timestamp() - prev_ts >= _BACKUP_REPO_REALERT)
+            # а НЕ на каждое изменение набора (набор флапал по локам -> был спам). Новый
+            # проблемный репозиторий шлем сразу: опоздавший бэкап клиента без агента иначе
+            # ждал бы суточного напоминания про чужую проблему. Локи тут давно не участвуют.
+            new_names = set(probs) - set(prev.get("repos") or [])
+            due = not prev_active or bool(new_names) or (now.timestamp() - prev_ts >= _BACKUP_REPO_REALERT)
             if probs and repo_ok and due:
                 n = len(probs)
                 # с причиной у каждого: по голому списку имен было не понять, что делать
                 byname = {r.get("name"): r for r in bsrv.get("repos") or []}
-                items = [f"{p} ({_backup_repo_reason(byname.get(p) or {}, now)})" for p in probs]
+                items = [f"{p} ({repo_reason(byname.get(p) or {}, now, repo_ext, panel_names)})" for p in probs]
                 lst = ", ".join(items[:8]) + (f" и еще {n - 8}" if n > 8 else "")
                 shown = f"{n} шт.: {lst}"
                 fires.append(srv_fire(s, "backup_repo", rr, {"repos": shown}))
