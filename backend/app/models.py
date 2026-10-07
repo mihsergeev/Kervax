@@ -884,3 +884,25 @@ class BackupVaultItem(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
+
+
+class AlertEvent(Base):
+    """Отправленный алерт: срабатывание или отбой, как его получил человек. Без истории не
+    ответить ни на "приходил ли алерт про этот лок все те 23 дня", ни на "что шумит больше
+    всего". Пишем только доставленное: что не ушло, повторится на следующем тике и запишется
+    тогда. section и grp - те же, по которым режется персональная рассылка, по ним история
+    режется под права учетки."""
+
+    __tablename__ = "alert_events"
+    __table_args__ = (Index("ix_alert_events_target", "target", "ts"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    ts: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), index=True
+    )
+    kind: Mapped[str] = mapped_column(String(40), default="")     # вид алерта: disk, down, backup_lock
+    target: Mapped[str] = mapped_column(String(255), default="")  # сервер или монитор
+    section: Mapped[str] = mapped_column(String(20), default="")  # раздел панели
+    grp: Mapped[str] = mapped_column(String(255), default="")     # группа объекта
+    recovery: Mapped[bool] = mapped_column(Boolean, default=False)
+    text: Mapped[str] = mapped_column(Text, default="")           # текст без HTML-разметки

@@ -5587,3 +5587,49 @@ body:has(.modal-backdrop) {
 .home-attention-todo {
   flex-shrink: 0;
 }
+
+/* История алертов */
+.ah-filters { display: flex; gap: 6px; flex-wrap: wrap; margin: 0 0 8px; }
+.ah-chip { cursor: pointer; }
+.ah-summary {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 6px 18px;
+  margin: 8px 0 10px;
+}
+.ah-summary-title { font-size: 0.78rem; color: var(--text-muted); margin-bottom: 4px; }
+.ah-bar {
+  position: relative;
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  padding: 2px 6px;
+  margin: 0 0 2px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text);
+  font-size: 0.8rem;
+  text-align: left;
+  cursor: pointer;
+  overflow: hidden;
+}
+.ah-bar:hover { background: color-mix(in srgb, var(--border) 40%, transparent); }
+.ah-bar-fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  pointer-events: none;
+}
+.ah-bar-label { position: relative; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ah-bar-n { position: relative; font-variant-numeric: tabular-nums; }
+.ah-row {
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+  min-width: 0;
+}
+.ah-row.ah-rec { opacity: 0.75; }
+.ah-meta { display: flex; gap: 10px; flex-wrap: wrap; align-items: baseline; }
+.ah-link { padding: 0; border: 0; font-size: inherit; color: var(--accent); }
+.ah-text { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 0.86rem; margin-top: 2px; }

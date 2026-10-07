@@ -4,7 +4,9 @@
 транспорт (send_alert) и security-события (брутфорс, смена пароля и т.п.).
 """
 
+import html
 import logging
+import re
 
 import httpx
 from sqlalchemy import select
@@ -12,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import settings_store
 from app.config import Settings
-from app.models import User
+from app.models import AlertEvent, User
 
 log = logging.getLogger("kervax.alerts")
 
@@ -27,11 +29,19 @@ class Msg(str):
 
     section: str
     group: str
+    # для истории алертов: вид, про какой сервер или монитор, отбой ли это
+    kind: str
+    target: str
+    recovery: bool
 
-    def __new__(cls, text: str, section: str = "", group: str = "") -> "Msg":
+    def __new__(cls, text: str, section: str = "", group: str = "", kind: str = "",
+                target: str = "", recovery: bool = False) -> "Msg":
         obj = super().__new__(cls, text)
         obj.section = section
         obj.group = group
+        obj.kind = kind
+        obj.target = target
+        obj.recovery = recovery
         return obj
 
 
@@ -181,13 +191,50 @@ async def dispatch(
     # получатели подчиняются тем же правилам, отдельного «ночью можно» у них нет
     if session_factory is not None:
         await send_personal(session_factory, cfg, messages, threshold, parse_mode)
+    channels = _channel_count(cfg)
     if threshold and len(messages) >= threshold:
-        return not await send_alert(cfg, _digest(messages), parse_mode)
-    ok = True
-    for m in messages:
-        if await send_alert(cfg, m, parse_mode):
-            ok = False  # хотя бы один канал не принял — повторим на следующем цикле
+        errors = await send_alert(cfg, _digest(messages), parse_mode)
+        delivered = list(messages) if len(errors) < channels else []
+        ok = not errors
+    else:
+        ok, delivered = True, []
+        for m in messages:
+            errors = await send_alert(cfg, m, parse_mode)
+            if errors:
+                ok = False  # хотя бы один канал не принял - повторим на следующем цикле
+            if len(errors) < channels:
+                delivered.append(m)
+    if session_factory is not None and delivered:
+        await record_history(session_factory, delivered)
     return ok
+
+
+def _channel_count(cfg: dict) -> int:
+    """Сколько общих каналов настроено: алерт считается полученным, если принял хоть один."""
+    return int(bool(cfg.get("telegram_token") and cfg.get("telegram_chat"))) + int(bool(cfg.get("webhook")))
+
+
+_TAG = re.compile(r"<[^>]+>")
+
+
+async def record_history(session_factory, messages: list[str]) -> None:
+    """Записать доставленные алерты в историю (AlertEvent). Текст без HTML-разметки, как его
+    видит человек. Сбой записи не должен ни ронять отправку, ни вызывать повтор: алерт уже
+    ушел, и вторая копия в чате хуже пропуска в истории."""
+    try:
+        async with session_factory() as session:
+            for m in messages:
+                session.add(AlertEvent(
+                    kind=str(getattr(m, "kind", "") or "")[:40],
+                    target=str(getattr(m, "target", "") or "")[:255],
+                    section=str(getattr(m, "section", "") or "")[:20],
+                    grp=str(getattr(m, "group", "") or "")[:255],
+                    recovery=bool(getattr(m, "recovery", False)),
+                    text=html.unescape(_TAG.sub("", str(m)))[:4000],
+                ))
+            await session.commit()
+    except Exception:  # noqa: BLE001
+        log.warning("история алертов не записана", exc_info=True)
 
 
 async def security_alert(session: AsyncSession, settings: Settings, text: str) -> None:
