@@ -967,7 +967,7 @@ export type ServerReport = {
   caps?: Record<string, boolean> // возможности агента: kmsg, proc_full (полный ли /proc)
   extras?: {
     'web-rate'?: WebRate; 'disk-usage'?: DiskUsage; 'disk-health'?: DiskHealth; units?: UnitsBlock
-    'backup-runs'?: BackupRuns
+    'backup-runs'?: BackupRuns; 'backup-server'?: BackupServerExtra
   } & Record<
     string,
     unknown
@@ -1185,11 +1185,33 @@ export type RepoStat = {
   snapshots: number
   last_activity?: number // epoch
   locked?: boolean
-  lock_ts?: number // epoch mtime свежего лока: живой бэкап освежает его раз в 5 мин
+  // epoch mtime лока: самого старого висячего, если такой есть (helper 0.23), иначе свежего,
+  // который живой бэкап освежает раз в 5 мин
+  lock_ts?: number
   keep_last?: number
   keep_daily?: number
   keep_weekly?: number
   keep_monthly?: number
+}
+// Кто чистит репозитории бэкап-сервера (helper backupserver-setup 0.23, report.d/backup-server.json)
+export type BackupServerLegacy = {
+  script: string // старый общий скрипт чистки (/etc/systemd-rest.conf)
+  repos: number // сколько репозиториев в нем описано
+  where: string // где запланирован: "crontab root", файл cron.d, юнит systemd; пусто - нигде
+  schedule: string // расписание cron или OnCalendar
+  log: string // куда пишет вывод
+  log_ts: number // mtime лога: конец последнего прогона
+}
+export type BackupServerRepoExtra = {
+  cleaner: '' | 'script' | 'legacy' // свой prune-скрипт, старый общий скрипт, никто
+  removed_ts: number // когда из репозитория последний раз пропадали снапшоты (0 - не видели)
+  seen_since: number // с какого момента helper за ним следит
+}
+export type BackupServerExtra = {
+  v: number
+  ts: number
+  legacy: BackupServerLegacy | null
+  repos: Record<string, BackupServerRepoExtra>
 }
 export type BackupServerInfo = {
   present: boolean

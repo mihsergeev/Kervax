@@ -133,6 +133,31 @@ const EN: Record<string, string> = {
     '— the agent has been silent for {ago}. Everything below is the last data, taken back then.',
   '— агент ещё ни разу не выходил на связь.': '— the agent has never reported in.',
   'сервер не чистит': 'the server does not clean this up',
+  'Ни своего prune-скрипта, ни блока в старом общем скрипте у репозитория нет: сервер его не чистит. Старое убирает только сам клиент, если у него это настроено.':
+    'The repository has neither its own prune script nor a block in the old shared script: the server does not clean it. Anything old is removed only by the client itself, if it is set up to.',
+  'чистит старый скрипт': 'cleaned by the old script',
+  'последний прогон {ago}': 'last run {ago}',
+  'старый скрипт чистки не запускается': 'the old cleanup script never runs',
+  'Репозиторий описан в {script}, но этот скрипт не запланирован ни в cron, ни в systemd: старые снапшоты никто не удаляет.':
+    'The repository is listed in {script}, but that script is not scheduled in cron or systemd: nobody removes old snapshots.',
+  'свой prune-скрипт без метрик': 'own prune script, no metrics',
+  'Свой prune-скрипт есть, но метрик он не пишет: когда он отработал, панель не знает.':
+    'There is a prune script of its own, but it writes no metrics: the panel does not know when it last ran.',
+  'удаляли': 'removed',
+  'когда из репозитория последний раз удалялись снапшоты (кто бы их ни удалял)':
+    'when snapshots were last removed from the repository, by whoever removed them',
+  'удалений нет {n} дн.': 'no removals for {n} d',
+  'панель следит за удалениями с {d}': 'the panel has been watching removals since {d}',
+  'залочен {n} дн.': 'locked for {n} d',
+  'Висячий лок держится больше суток: чистка и restic check по репозиторию не идут, пока его не снять.':
+    'A stale lock has been held for over a day: cleanup and restic check cannot run on this repository until it is removed.',
+  'висячий лок {n} ч': 'stale lock {n} h',
+  'Лок не обновлялся больше 30 минут: процесс, который его взял, умер. Чистка и клиенты обычно снимают такие локи сами, если лок продержится сутки, придет алерт.':
+    'The lock has not been refreshed for over 30 minutes: the process that took it is gone. Cleanup and clients usually remove such locks themselves, if it lasts a day an alert follows.',
+  'Старый скрипт {script} чистит репозиториев: {n}, расписание {when} ({where})':
+    'The old script {script} cleans {n} repositories, schedule {when} ({where})',
+  'Старый скрипт {script} описывает репозиториев: {n}, но не запланирован ни в cron, ни в systemd, их никто не чистит':
+    'The old script {script} lists {n} repositories, but it is not scheduled in cron or systemd, so nobody cleans them',
   'У репозитория нет своего prune-скрипта: политика показана из старого общего конфига, но сервер по ней ничего не удаляет. Старое убирает только сам клиент, если у него это настроено.':
     'This repository has no prune script of its own: the retention shown comes from an old shared config the server never runs. Anything old is removed only by the client itself, if it is set up to.',
   'политика хранения не задана — судить не о чем': 'no retention policy — nothing to judge by',
@@ -604,8 +629,8 @@ const EN: Record<string, string> = {
   '(по systemd)': '(from systemd)',
   '🧹 как удалить': '🧹 how to delete',
   '🔓 как снять лок': '🔓 how to unlock',
-  'Сначала убедитесь, что по этому репозиторию НЕ идёт бэкап или prune прямо сейчас — снимать живой лок нельзя. Обычно лок остаётся после аварийно прерванной операции.':
-    'First make sure no backup or prune is running against this repository right now — never remove a live lock. A lock usually lingers after an operation was aborted.',
+  'Команда снимает только висячие локи, которые не обновлялись больше 30 минут. Живой лок идущего бэкапа или чистки она не тронет. Обычно висячий лок остается после аварийно прерванной операции.':
+    'The command removes only stale locks, the ones not refreshed for over 30 minutes. It leaves the live lock of a running backup or cleanup alone. A stale lock usually lingers after an operation was aborted.',
   'Выполнять на бэкап-сервере от root. Пароль читается из prune-env внутри команды и в списке процессов не виден.':
     'Run on the backup server as root. The password is read from prune-env inside the command and never appears in the process list.',
   'Покрытие': 'Coverage',
@@ -972,6 +997,8 @@ const EN: Record<string, string> = {
   'Бэкап: ошибка': 'Backup: failed',
   'Бэкап: не свежий': 'Backup: stale',
   'Бэкап-сервер: репозитории': 'Backup server: repositories',
+  'Бэкап-сервер: репозиторий залочен': 'Backup server: repository locked',
+  'Бэкап-сервер: ротация встала': 'Backup server: rotation stalled',
   'Бэкап: дамп СУБД': 'Backup: DB dump',
   'Бэкап: место под дампы': 'Backup: dump disk space',
   'Бэкап: дамп-CronJob': 'Backup: dump CronJob',
@@ -1061,8 +1088,8 @@ const EN: Record<string, string> = {
   'отменено': 'cancelled',
   'снап.': 'snap.',
   'лок снят штатно': 'lock released normally',
-  'пароль из env не подходит (репо от другого деплоя) — снимаю лок файлом':
-    'the password from env does not fit (repo from another deployment) — removing the lock file',
+  'подходящего пароля в env нет - снимаю висячие локи файлами': 'no matching password in env - removing stale lock files',
+  'готово, живые локи (моложе 30 минут) не тронуты': 'done, live locks (younger than 30 minutes) left alone',
   'лок-файлы удалены': 'lock files removed',
 
   // --- Бэкапы ---

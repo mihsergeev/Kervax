@@ -191,7 +191,7 @@ _SRV_ICON = {
     # огонёк перед китом: в ленте докерные строки шли теми же иконками, что и
     # обычные события, и «упал»/«крутится в цикле» не читались как авария
     "docker_down": "🔥🐳", "docker_loop": "🔥🐳",
-    "queue": "🐇", "backup_rotation": "🧹",
+    "queue": "🐇", "backup_rotation": "🧹", "backup_lock": "🔒",
     "backup_missing": "💾", "backup_failed": "💾", "backup_stale": "💾", "backup_repo": "💾",
     "backup_dump": "💾", "backup_dump_space": "🈵", "backup_cron": "💾", "backup_custom": "💾",
     "clock": "🕐", "disk_health": "💽", "inode": "⚠️", "disk_forecast": "📈", "units": "⚙️",
@@ -232,6 +232,8 @@ _ALERT_SECTION = {
     "docker_sock": "docker",
     "queue": "services",
     "backup_repo": "backups",
+    "backup_rotation": "backups",
+    "backup_lock": "backups",
     "kube_pod": "kuber",
 }
 
@@ -1529,18 +1531,6 @@ def _dump_skipped(bk: dict) -> tuple[list[str], int]:
     return sorted(labels), (min_free if labels else 0)
 
 
-def _lock_stuck(r: dict, now_ts: float) -> bool:
-    """Лок висячий (а не от идущего прямо сейчас бэкапа)?"""
-    if not r.get("locked"):
-        return False
-    ts = r.get("lock_ts") or 0
-    # старый helper (< v5) времени лока не отдаёт — трактуем как раньше, иначе
-    # на неапгрейженных нодах висячие локи перестали бы замечаться вовсе
-    if ts <= 0:
-        return True
-    return (now_ts - ts) > _BACKUP_LOCK_STUCK_SECONDS
-
-
 # ключи образов СУБД — синхронны _DB_IMAGES в api/servers.py: опознаём тот же набор
 # дамп-CronJob'ов, что аудит показывает как «дамп настроен» (иначе мониторили бы не то).
 _DUMP_CRON_DB_KEYS = (
@@ -1615,18 +1605,79 @@ def _cron_dump_problems(rep: dict, now: datetime) -> list[str]:
 
 
 def _backup_problem_repos(bs: dict, muted: set, now: datetime) -> list[str]:
-    """Имена НЕ заглушённых репо бэкап-сервера, требующих внимания: битые (нет config),
-    с висячим локом или устаревшие (давно не принимали бэкап). Отсортировано."""
+    """Имена НЕ заглушенных репо бэкап-сервера, требующих внимания: битые (нет config)
+    или устаревшие (давно не принимали бэкап). Отсортировано.
+    Висячий лок сюда больше не входит: у него свой алерт backup_lock и свой порог (сутки).
+    Остался только лок от helper'а без времени лока: сколько он висит, не узнать."""
     out = []
     for r in bs.get("repos") or []:
         name = r.get("name") or ""
         if not name or name in muted:
             continue
-        last = r.get("last_activity") or 0
-        stale = last > 0 and (now.timestamp() - last) > _BACKUP_REPO_STALE_SECONDS
-        if (not r.get("valid")) or _lock_stuck(r, now.timestamp()) or stale:
+        if _backup_repo_reason(r, now):
             out.append(name)
     return sorted(out)
+
+
+def _backup_repo_reason(r: dict, now: datetime) -> str:
+    """Что с репозиторием, словами для алерта backup_repo. Пусто - все в порядке."""
+    if not r.get("valid"):
+        return "нет config"
+    last = r.get("last_activity") or 0
+    if last > 0 and (now.timestamp() - last) > _BACKUP_REPO_STALE_SECONDS:
+        return f"нет новых бэкапов {int((now.timestamp() - last) // 86400)} дн"
+    if r.get("locked") and not (r.get("lock_ts") or 0):
+        return "залочен"
+    return ""
+
+
+# Висячий лок держит prune, forget и check. Чистка Kervax, клиенты Kervax и ansible снимают
+# висячие локи сами (restic unlock перед работой), поэтому лок моложе суток почти всегда
+# уходит без человека. Старше суток - значит, ежедневная чистка на нем уже споткнулась и
+# дальше будет так же. Старый общий скрипт /etc/systemd-rest.conf unlock не делает, и на
+# backup-a чистка app-a так простояла 23 дня.
+_BACKUP_LOCK_ALERT_SECONDS = 86400
+
+
+def lock_age(r: dict, now_ts: float) -> float:
+    """Сколько секунд репозиторий держит висячий лок, 0 - лока нет, он живой или время
+    неизвестно. helper 0.23 отдает в lock_ts самый старый висячий лок, так что это время,
+    с которого репозиторий заблокирован, даже если рядом идет бэкап."""
+    ts = r.get("lock_ts") or 0
+    if not r.get("locked") or ts <= 0:
+        return 0.0
+    age = now_ts - ts
+    return age if age > _BACKUP_LOCK_STUCK_SECONDS else 0.0
+
+
+def long_locked_repos(bs: dict, muted: set, now: datetime) -> list[tuple[str, int]]:
+    """Не заглушенные репозитории с висячим локом дольше суток: (имя, полных суток)."""
+    out = []
+    for r in bs.get("repos") or []:
+        name = r.get("name") or ""
+        age = lock_age(r, now.timestamp())
+        if name and name not in muted and age > _BACKUP_LOCK_ALERT_SECONDS:
+            out.append((name, int(age // 86400)))
+    return sorted(out)
+
+
+# Блок helper'а backupserver-setup 0.23 (report.d/backup-server.json): кто чистит каждый
+# репозиторий (свой prune-скрипт, старый общий скрипт, никто) и когда из него последний раз
+# пропадали снапшоты. Пишется раз в минуту, старше 15 минут - helper встал, судить не по чему.
+BSRV_EXTRA_KEY = "backup-server"
+_BSRV_EXTRA_MAX_AGE = 15 * 60
+
+
+def bsrv_extra(rep: dict) -> dict:
+    """Свежий блок backup-server из отчета или пустой словарь."""
+    block = ((rep.get("extras") or {}).get(BSRV_EXTRA_KEY)) or {}
+    if not isinstance(block, dict) or block.get("v") != 1:
+        return {}
+    ts = float(block.get("ts") or 0)
+    ref = float(rep.get("clock_unix") or 0) or datetime.now(timezone.utc).timestamp()
+    if ts <= 0 or ref - ts > _BSRV_EXTRA_MAX_AGE:
+        return {}
+    return block
 
 
 def _muted(key: str, level: int, mutes: set) -> bool:
@@ -1693,23 +1744,49 @@ def rotation_policy_max(repo: dict) -> int:
     )
 
 
-def rotation_overflow(bsrv: dict, seen: dict, now: datetime) -> tuple[list[str], dict]:
+def rotation_overflow(
+    bsrv: dict, seen: dict, now: datetime, extra: dict | None = None,
+) -> tuple[list[str], dict]:
     """Репозитории, где ротация не отрабатывает: переполнение + ноль удалений.
 
     seen — карта «репозиторий → когда это заметили впервые» из состояния сервера.
     Возвращает (список для алерта, новая карта). Пока не выдержан _ROT_DEAD_DAYS,
     репозиторий копится в карте, но в алерт не идёт: единичный лок на репозитории
     или прогон, которому нечего было удалять, — обычное дело.
+
+    extra - блок helper'а backup-server (bsrv_extra). Метрики удалений пишут только наши
+    prune-скрипты, а репозиторий, который чистит старый общий скрипт или никто, сюда
+    раньше не попадал вовсе. Для него удаления видит helper по пропавшим файлам
+    снапшотов, и отсчет идет от последнего удаления (или от начала наблюдения).
     """
     fresh: dict = {}
     out: list[str] = []
+    observed = (extra or {}).get("repos") or {}
     for r in bsrv.get("repos") or []:
         name = r.get("name") or ""
         snaps = int(r.get("snapshots") or 0)
         limit = rotation_policy_max(r)
         removed = int(r.get("rotation_removed") if r.get("rotation_removed") is not None else -1)
-        if not name or limit <= 0 or snaps <= limit or removed != 0:
-            continue  # нет политики, всё в пределах, или ротация что-то убирает
+        if not name or limit <= 0 or snaps <= limit:
+            continue  # нет политики или все в пределах
+        last = r.get("last_activity") or 0
+        if last > 0 and now.timestamp() - last > _BACKUP_REPO_STALE_SECONDS:
+            # новых снапшотов нет, значит и удалять нечего: это не ротация встала, а бэкап
+            # перестал приходить, про это алерт backup_repo
+            continue
+        if removed < 0:
+            o = observed.get(name)
+            mark = 0
+            if isinstance(o, dict):
+                mark = max(int(o.get("removed_ts") or 0), int(o.get("seen_since") or 0))
+            if mark <= 0:
+                continue  # ни метрик, ни наблюдений helper'а (он старше 0.23)
+            idle = (now.timestamp() - mark) / 86400
+            if idle >= _ROT_DEAD_DAYS:
+                out.append(f"{name} ({snaps} снапшотов при политике {limit}, удалений нет {int(idle)} дн)")
+            continue
+        if removed != 0:
+            continue  # ротация что-то убирает
         since = seen.get(name) or now.isoformat()
         fresh[name] = since
         started = _parse_iso(since)
@@ -3273,7 +3350,7 @@ async def evaluate_servers(
             # Раздел "Кубер" с открытым кластером и сразу на нужной вкладке: сроки, Flux,
             # поды. В карточке сервера кластера нет, и ссылка вела мимо.
             return f"{base}/?kube={s.id}&ktab={_KUBE_TAB[key]}"
-        if key in ("backup_repo", "backup_rotation"):
+        if key in ("backup_repo", "backup_rotation", "backup_lock"):
             return f"{base}/?backupsrv={s.id}"
         if key.startswith("backup"):
             return f"{base}/?backup={s.id}"
@@ -3633,7 +3710,7 @@ async def evaluate_servers(
         if (online_now and bsrv_rot.get("present") and rot_r and rot_r["enabled"]
                 and "backup_rotation" not in mutes and _rule_scope_ok(rot_r, s)):
             over, seen_over = rotation_overflow(
-                bsrv_rot, dict(st.get("rotation_over") or {}), now)
+                bsrv_rot, dict(st.get("rotation_over") or {}), now, bsrv_extra(s.last_report or {}))
             if seen_over != (st.get("rotation_over") or {}):
                 apply(s.id, "rotation_over", seen_over)
             stale = [x for x in rotation_stale_repos(bsrv_rot, now) + over
@@ -3649,9 +3726,36 @@ async def evaluate_servers(
                     srv_url(s, "backup_rotation"), recovery=True))
                 rec_apply.append((s.id, "rotation_stale", 0))
 
-        # Бэкап-сервер: репозитории, требующие внимания (устарели/битые/залочены), кроме
-        # заглушённых. Алертим при появлении НОВЫХ проблемных, recovery — когда все чисты.
+        # Висячий лок дольше суток: чистка и проверка репозитория не идут. Раньше он был
+        # одной из причин backup_repo и терялся в общем списке, без возраста и без того,
+        # что из него следует. Шлем при появлении нового залоченного и раз в сутки, пока
+        # лок не снят.
         bsrv = (s.last_report or {}).get("backup_server") or {}
+        lr = rules.get("backup_lock")
+        if online_now and bsrv.get("present") and "backup_lock" not in mutes:
+            locks = long_locked_repos(bsrv, set(s.backup_repo_mutes or []), now)
+            names = [n for n, _d in locks]
+            prev = st.get("backup_locks") if isinstance(st.get("backup_locks"), dict) else {}
+            prev_names = list(prev.get("repos") or [])
+            prev_ts = float(prev.get("ts") or 0)
+            lock_ok = lr and lr["enabled"] and _rule_scope_ok(lr, s)
+            due = bool(set(names) - set(prev_names)) or now.timestamp() - prev_ts >= _BACKUP_REPO_REALERT
+            if locks and lock_ok and due:
+                items = [f"{n} ({d} дн)" for n, d in locks]
+                shown = ", ".join(items[:6]) + (f" и еще {len(items) - 6}" if len(items) > 6 else "")
+                fires.append(srv_fire(s, "backup_lock", lr, {"repos": shown}))
+                fire_apply.append((s.id, "backup_locks", {"repos": names, "ts": now.timestamp()}))
+            elif locks and prev_names and names != prev_names:
+                # набор сузился: запоминаем молча, иначе вернувшийся лок не считался бы новым
+                apply(s.id, "backup_locks", {"repos": names, "ts": prev_ts})
+            elif not locks and prev_names:
+                recoveries.append(_server_alert_text(
+                    "backup_lock", s.name, "висячих локов в репозиториях больше нет",
+                    srv_url(s, "backup_lock"), recovery=True))
+                rec_apply.append((s.id, "backup_locks", {}))
+
+        # Бэкап-сервер: репозитории, требующие внимания (устарели/битые), кроме
+        # заглушенных. Алертим при появлении НОВЫХ проблемных, recovery - когда все чисты.
         rr = rules.get("backup_repo")
         if online_now and bsrv.get("present") and "backup_repo" not in mutes:
             probs = _backup_problem_repos(bsrv, set(s.backup_repo_mutes or []), now)
@@ -3667,7 +3771,10 @@ async def evaluate_servers(
             due = not prev_active or (now.timestamp() - prev_ts >= _BACKUP_REPO_REALERT)
             if probs and repo_ok and due:
                 n = len(probs)
-                lst = ", ".join(probs[:8]) + (f" и ещё {n - 8}" if n > 8 else "")
+                # с причиной у каждого: по голому списку имен было не понять, что делать
+                byname = {r.get("name"): r for r in bsrv.get("repos") or []}
+                items = [f"{p} ({_backup_repo_reason(byname.get(p) or {}, now)})" for p in probs]
+                lst = ", ".join(items[:8]) + (f" и еще {n - 8}" if n > 8 else "")
                 shown = f"{n} шт.: {lst}"
                 fires.append(srv_fire(s, "backup_repo", rr, {"repos": shown}))
                 fire_apply.append((s.id, "backup_repos", {"repos": probs, "ts": now.timestamp()}))
