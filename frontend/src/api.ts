@@ -1237,6 +1237,7 @@ export type BackupServerLegacy = {
   schedule: string // расписание cron или OnCalendar
   log: string // куда пишет вывод
   log_ts: number // mtime лога: конец последнего прогона
+  missing?: string[] // блоки на удаленные репозитории: скрипт каждый день шлет по ним ошибки (helper 0.24)
 }
 export type BackupServerRepoExtra = {
   cleaner: '' | 'script' | 'legacy' // свой prune-скрипт, старый общий скрипт, никто
@@ -1335,6 +1336,8 @@ export type Server = {
   custom_backup_ignored?: string[] | null
   kube_node_ignored?: string[] | null // ноды кластера, где агент не нужен (по имени)
   kube_unmonitored?: KubeNodeRef[] // ноды кластера без агента панели (считает бэкенд)
+  bsrv_unmonitored?: string[] // репозитории бэкап-сервера, чьих клиентов нет в панели (считает бэкенд)
+  bsrv_rotation?: string[] // что сейчас сказал бы алерт "ротация встала" (считает бэкенд)
   alert_since?: Record<string, string> // с какого момента видна проблема каждого вида (ISO)
   docker_since?: Record<string, string> // с какого момента лежит каждый упавший контейнер
   // последний прогон бэкапа добавил в разы больше обычного (считает бэкенд)

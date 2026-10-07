@@ -52,7 +52,8 @@ fi
 # 0.23: who cleans each repository (its own prune script, the legacy monolith from cron, nobody)
 #       and when snapshots were last removed from it, in report.d/backup-server.json; lock_ts
 #       is the OLDEST stale lock when there is one; oldest_snapshot from the snapshot files
-KERVAX_SETUP_VERSION=0.23  # MAJOR.MINOR; compared component-wise (0.13 > 0.2!)
+# 0.24: the monolith's blocks for repositories that no longer exist (it errors on them daily)
+KERVAX_SETUP_VERSION=0.24  # MAJOR.MINOR; compared component-wise (0.13 > 0.2!)
 # Which nodes need this helper at all. Read by the ansible playbook on the
 # CONTROL machine and evaluated as a shell condition ON THE NODE, so a new
 # helper lands where it belongs without anyone editing the playbook.
@@ -288,11 +289,18 @@ cmd_stats() {
     name="${sf##*/}"; name="${name%.ids}"
     [ -d "$DATA/$name" ] || rm -f "$SNAP_STATE/$name.ids" "$SNAP_STATE/$name.since" "$SNAP_STATE/$name.removed" 2>/dev/null || true
   done
-  local legacy_json=null log_ts=0
+  local legacy_json=null log_ts=0 missing="" ln
   if [ -n "$legacy_list" ]; then
     legacy_schedule
     [ -n "$L_LOG" ] && [ -f "$L_LOG" ] && log_ts="$(stat -c %Y "$L_LOG" 2>/dev/null || echo 0)"
-    legacy_json="{\"script\":\"$LEGACY_PRUNE\",\"repos\":${lcount:-0},\"where\":\"$(json_escape "$L_WHERE")\",\"schedule\":\"$(json_escape "$L_SCHED")\",\"log\":\"$(json_escape "$L_LOG")\",\"log_ts\":${log_ts:-0}}"
+    # Blocks for repositories that are gone. The monolith still checks them every run and sends
+    # an error to Telegram for each one, every day: on backup-a 8 of its 15 blocks, and the
+    # real error of app-a drowned in that noise.
+    while IFS= read -r ln; do
+      [ -n "$ln" ] || continue
+      [ -d "$DATA/$ln" ] || missing="${missing:+$missing,}\"$(json_escape "$ln")\""
+    done <<<"$legacy_list"
+    legacy_json="{\"script\":\"$LEGACY_PRUNE\",\"repos\":${lcount:-0},\"where\":\"$(json_escape "$L_WHERE")\",\"schedule\":\"$(json_escape "$L_SCHED")\",\"log\":\"$(json_escape "$L_LOG")\",\"log_ts\":${log_ts:-0},\"missing\":[$missing]}"
   fi
   install -d -m 0755 "${REPORT_EXTRA%/*}" 2>/dev/null || true
   if printf '{"v":1,"ts":%s,"legacy":%s,"repos":{%s}}\n' "$now_ts" "$legacy_json" "$extra_json" > "$REPORT_EXTRA.tmp" 2>/dev/null; then

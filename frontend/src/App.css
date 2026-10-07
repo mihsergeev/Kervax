@@ -5633,3 +5633,11 @@ body:has(.modal-backdrop) {
 .ah-meta { display: flex; gap: 10px; flex-wrap: wrap; align-items: baseline; }
 .ah-link { padding: 0; border: 0; font-size: inherit; color: var(--accent); }
 .ah-text { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 0.86rem; margin-top: 2px; }
+
+/* чип-переключатель фильтра (окно бэкап-сервера: без агента в панели) */
+button.type-chip { cursor: pointer; border: 1px solid transparent; font-family: inherit; line-height: inherit; }
+.type-chip.on {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}

@@ -16,7 +16,8 @@ from sqlalchemy import delete as sa_delete, func, select
 
 from app import audit, backup_growth, custom_backups, docker_exposure, geoip, kube_coverage, manual_probe
 from app.collector import (
-    alert_since, disk_analyze_ok, docker_since, dump_local_stale, needed_pod_names, pod_uid_names,
+    alert_since, backup_rotation_items, backup_unmonitored, disk_analyze_ok, docker_since, dump_local_stale, needed_pod_names,
+    panel_server_names, pod_uid_names,
     send_alerts_soon, send_autofix_note, server_problems, web_5xx_total, web_breakdown,
     web_label_key, web_log_label, web_rate_total,
 )
@@ -204,6 +205,7 @@ def _out(
     o.alert_since = alert_since(server)
     o.docker_since = docker_since(server)
     o.backup_growth = backup_growth.jump(server, now)
+    o.bsrv_rotation = backup_rotation_items(server, now)
     o.pod_names = needed_pod_names(server, pod_names)
     return o
 
@@ -354,13 +356,18 @@ async def list_servers(user: CurrentUser, session: SessionDep) -> list[ServerOut
     cur = _current_setup_versions()  # читаем раздаваемые скрипты один раз на весь список
     # Ноды кластеров сверяем со ВСЕМИ серверами панели: нода, которую смотрит сервер из
     # чужой группы, все равно под присмотром. Без нарезки по группам это тот же список.
-    every = servers if not (user.server_groups or []) else await session.scalars(select(Server))
+    # список, а не результат запроса: его обходят три раза, а результат запроса отдается один раз
+    every = servers if not (user.server_groups or []) else list(await session.scalars(select(Server)))
     index = kube_coverage.build_index(every)
     names = pod_uid_names(every)
+    panel = panel_server_names(every)
     outs = []
     for s in servers:
         o = _out(s, now, cur, names)
         o.kube_unmonitored = _unmonitored(s, index)
+        bs = (s.last_report or {}).get("backup_server") or {}
+        if bs.get("present"):
+            o.bsrv_unmonitored = backup_unmonitored(bs, set(s.backup_repo_mutes or []), panel, now)
         outs.append(o)
     return outs
 

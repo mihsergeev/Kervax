@@ -193,6 +193,7 @@ _SRV_ICON = {
     # обычные события, и «упал»/«крутится в цикле» не читались как авария
     "docker_down": "🔥🐳", "docker_loop": "🔥🐳",
     "queue": "🐇", "backup_rotation": "🧹", "backup_lock": "🔒",
+    "backup_unmonitored": "💾",
     "backup_missing": "💾", "backup_failed": "💾", "backup_stale": "💾", "backup_repo": "💾",
     "backup_dump": "💾", "backup_dump_space": "🈵", "backup_cron": "💾", "backup_custom": "💾",
     "clock": "🕐", "disk_health": "💽", "inode": "⚠️", "disk_forecast": "📈", "units": "⚙️",
@@ -237,6 +238,7 @@ _ALERT_SECTION = {
     "backup_repo": "backups",
     "backup_rotation": "backups",
     "backup_lock": "backups",
+    "backup_unmonitored": "backups",
     "kube_pod": "kuber",
 }
 
@@ -1699,6 +1701,39 @@ def long_locked_repos(bs: dict, muted: set, now: datetime) -> list[tuple[str, in
     return sorted(out)
 
 
+def panel_server_names(servers) -> set[str]:
+    """Имена включенных нод панели для сверки с репозиториями бэкап-серверов: имя сервера,
+    hostname и его короткая часть до точки. Репозиторий назван по клиенту (так его заводят и
+    ansible-роль, и панель), поэтому совпадение по имени надежное."""
+    out: set[str] = set()
+    for s in servers:
+        if not getattr(s, "enabled", True):
+            continue
+        # и имя машины из отчета агента: им ansible-роль называет репозиторий клиента
+        for n in (s.name, s.hostname, (s.last_report or {}).get("hostname")):
+            n = (n or "").strip().lower()
+            if n:
+                out.add(n)
+                out.add(n.split(".")[0])
+    return out
+
+
+def backup_unmonitored(bs: dict, muted: set, names: set[str], now: datetime) -> list[str]:
+    """Репозитории со свежими бэкапами, чьих клиентов нет в панели. Если такой бэкап сломается,
+    панель узнает только через 3 дня, когда репозиторий устареет, а агент на самой ноде сказал
+    бы в тот же день. Так прошли 23 дня у app-a. Заглушенные и устаревшие (клиента,
+    похоже, уже нет) не считаем."""
+    out = []
+    for r in bs.get("repos") or []:
+        name = r.get("name") or ""
+        last = r.get("last_activity") or 0
+        if not name or name in muted or not last or now.timestamp() - last > _BACKUP_REPO_STALE_SECONDS:
+            continue
+        if name.lower() not in names:
+            out.append(name)
+    return sorted(out)
+
+
 # Блок helper'а backupserver-setup 0.23 (report.d/backup-server.json): кто чистит каждый
 # репозиторий (свой prune-скрипт, старый общий скрипт, никто) и когда из него последний раз
 # пропадали снапшоты. Пишется раз в минуту, старше 15 минут - helper встал, судить не по чему.
@@ -1863,6 +1898,19 @@ def rotation_stale_repos(bsrv: dict, now: datetime, extra: dict | None = None) -
                 r, observed.get(r.get("name") or ""), now) else ""
             out.append(f"{r.get('name') or '?'} ({int(age)} дн. > {limit}{hint})")
     return sorted(out)
+
+
+def backup_rotation_items(s: Server, now: datetime) -> list[str]:
+    """Что сейчас сказал бы алерт backup_rotation: старье пережило политику или ротация ничего
+    не удаляет. Для "Что сломано" на главной; заглушенные репозитории не в счет, как в алерте."""
+    rep = s.last_report or {}
+    bs = rep.get("backup_server") or {}
+    if not bs.get("present"):
+        return []
+    ext = bsrv_extra(rep)
+    over, _seen = rotation_overflow(bs, dict((s.alert_state or {}).get("rotation_over") or {}), now, ext)
+    muted = set(s.backup_repo_mutes or [])
+    return [x for x in rotation_stale_repos(bs, now, ext) + over if x.split(" (")[0] not in muted]
 
 
 def rotation_alive(r: dict, observed: dict | None, now: datetime) -> bool:
@@ -3457,7 +3505,7 @@ async def evaluate_servers(
             # Раздел "Кубер" с открытым кластером и сразу на нужной вкладке: сроки, Flux,
             # поды. В карточке сервера кластера нет, и ссылка вела мимо.
             return f"{base}/?kube={s.id}&ktab={_KUBE_TAB[key]}"
-        if key in ("backup_repo", "backup_rotation", "backup_lock"):
+        if key in ("backup_repo", "backup_rotation", "backup_lock", "backup_unmonitored"):
             return f"{base}/?backupsrv={s.id}"
         if key.startswith("backup"):
             return f"{base}/?backup={s.id}"
@@ -3467,6 +3515,8 @@ async def evaluate_servers(
     base_cache: dict[int, dict[str, float]] = {}
     # имена подов по uid - один раз за тик: воркер без доступа к kube-api пишет поды по uid
     pod_names = pod_uid_names(servers)
+    # имена нод панели - для сверки с клиентами бэкап-серверов (один раз за тик)
+    panel_names = panel_server_names(servers)
 
     async def cause_for(s: Server, key: str) -> str:
         """«Почему» для порогового алерта: кто ест ресурс и не наплыв ли трафика.
@@ -3861,6 +3911,24 @@ async def evaluate_servers(
                     "backup_lock", s.name, "висячих локов в репозиториях больше нет",
                     srv_url(s, "backup_lock"), recovery=True))
                 rec_apply.append((s.id, "backup_locks", {}))
+
+        # Новый клиент бэкап-сервера без агента в панели. Алерт только про новых: тех, кто
+        # уже писал сюда, когда проверка появилась, запоминаем молча (их видно в окне
+        # бэкап-сервера пометкой "нет в панели"), иначе первое сообщение было бы на 60 строк.
+        ur = rules.get("backup_unmonitored")
+        if online_now and bsrv.get("present") and "backup_unmonitored" not in mutes:
+            cur_un = backup_unmonitored(bsrv, set(s.backup_repo_mutes or []), panel_names, now)
+            known = st.get("bsrv_clients")
+            if not isinstance(known, list):
+                apply(s.id, "bsrv_clients", cur_un)
+            else:
+                new = [n for n in cur_un if n not in set(known)]
+                if new and ur and ur["enabled"] and _rule_scope_ok(ur, s):
+                    shown = ", ".join(new[:6]) + (f" и еще {len(new) - 6}" if len(new) > 6 else "")
+                    fires.append(srv_fire(s, "backup_unmonitored", ur, {"repos": shown}))
+                    fire_apply.append((s.id, "bsrv_clients", cur_un))
+                elif cur_un != sorted(known):
+                    apply(s.id, "bsrv_clients", cur_un)
 
         # Бэкап-сервер: репозитории, требующие внимания (устарели/битые), кроме
         # заглушенных. Алертим при появлении НОВЫХ проблемных, recovery - когда все чисты.

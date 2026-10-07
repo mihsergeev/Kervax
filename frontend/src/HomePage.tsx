@@ -446,16 +446,34 @@ function backupProblems(servers: Server[], t: T): ProbItem[] {
     if (bs?.present) {
       if (!bs.running) out.push({ key: `bs-stop-${s.id}`, id: s.id, name: s.name, cc: s.country, down: true, srv: true, text: t('{name}: rest-server остановлен', { name: s.name }) })
       const rmuted = new Set(s.backup_repo_mutes ?? [])
-      const badRepos = (bs.repos || []).filter((r) => {
-        if (rmuted.has(r.name)) return false
-        // лок идущего бэкапа - не проблема (см. lockStuck в BackupsPage). Висячий лок
-        // моложе суток тоже: его снимут сами чистка и клиент, проблемой он становится
-        // с того же порога, что и алерт backup_lock
-        const stuck = r.locked && (!r.lock_ts || Date.now() / 1000 - r.lock_ts > 86400)
-        if (!r.valid || stuck) return true
-        return r.last_activity ? Date.now() / 1000 - r.last_activity > 3 * 86400 : false
+      const smuted = new Set(s.alert_mutes ?? [])
+      const now = Date.now() / 1000
+      const live = (bs.repos || []).filter((r) => !rmuted.has(r.name))
+      // Висячий лок дольше суток - своей строкой, как и свой алерт backup_lock: в общем
+      // счетчике было не видно ни что это лок, ни что из-за него не идет чистка. Лок идущего
+      // бэкапа и висячий моложе суток проблемой не считаются (их снимут чистка и клиент).
+      const locked = live.filter((r) => r.locked && r.lock_ts && now - r.lock_ts > 86400)
+      if (locked.length > 0 && !smuted.has('backup_lock'))
+        out.push({
+          key: `bs-lock-${s.id}`, id: s.id, name: s.name, cc: s.country, down: true, srv: true,
+          since: new Date(Math.min(...locked.map((r) => r.lock_ts ?? now)) * 1000).toISOString(),
+          text: t('{name}: залочен больше суток, чистка не идет - {list}', {
+            name: s.name,
+            list: locked.map((r) => `${r.name} (${Math.floor((now - (r.lock_ts ?? now)) / 86400)} ${t('дн.')})`).join(', '),
+          }),
+        })
+      const badRepos = live.filter((r) => {
+        if (!r.valid || (r.locked && !r.lock_ts)) return true // лок без времени: очень старый helper
+        return r.last_activity ? now - r.last_activity > 3 * 86400 : false
       }).length
       if (badRepos > 0) out.push({ key: `bs-repo-${s.id}`, id: s.id, name: s.name, cc: s.country, down: true, srv: true, since: s.alert_since?.backup_repo, text: t('{name}: репозиториев с проблемой — {n}', { name: s.name, n: badRepos }) })
+      // ротация встала: считает бэкенд теми же правилами, что и алерт backup_rotation
+      const rot = s.bsrv_rotation ?? []
+      if (rot.length > 0 && !smuted.has('backup_rotation'))
+        out.push({
+          key: `bs-rot-${s.id}`, id: s.id, name: s.name, cc: s.country, down: false, srv: true,
+          text: t('{name}: старые снапшоты не вычищаются - {list}', { name: s.name, list: rot.join(', ') }),
+        })
     }
   }
   return out

@@ -1012,6 +1012,16 @@ const EN: Record<string, string> = {
   'Чаще всего: серверы и мониторы': 'Most frequent: servers and monitors',
   'За этот период алертов не было.': 'No alerts in this period.',
   'Показать раньше': 'Show earlier',
+  'без агента в панели: {n}': 'no agent in the panel: {n}',
+  'Клиенты этих репозиториев не подключены к панели. Если их бэкап сломается, панель узнает только через 3 дня, когда репозиторий устареет. Агент на ноде дал бы алерт в тот же день.':
+    'The clients of these repositories are not in the panel. If their backup breaks, the panel learns only after 3 days, when the repository goes stale. An agent on the node would alert the same day.',
+  'нет в панели': 'not in the panel',
+  '{name}: залочен больше суток, чистка не идет - {list}': '{name}: locked for over a day, cleanup is not running - {list}',
+  '{name}: старые снапшоты не вычищаются - {list}': '{name}: old snapshots are not removed - {list}',
+  'В нем еще блоки на удаленные репозитории ({n}): {list}. Скрипт каждый день проверяет их и шлет ошибку по каждому, в этом шуме тонут настоящие. Эти блоки стоит убрать из скрипта.':
+    'It also has blocks for repositories that are gone ({n}): {list}. The script checks them every day and sends an error for each, and real errors drown in that noise. These blocks should be removed from the script.',
+  'Клиента этого репозитория нет в панели: если его бэкап сломается, панель узнает только через 3 дня, когда репозиторий устареет.':
+    'The client of this repository is not in the panel: if its backup breaks, the panel learns only after 3 days, when the repository goes stale.',
   'Бэкап-сервер: ротация встала': 'Backup server: rotation stalled',
   'Бэкап: дамп СУБД': 'Backup: DB dump',
   'Бэкап: место под дампы': 'Backup: dump disk space',
