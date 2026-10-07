@@ -200,3 +200,103 @@ def test_rotation_age_trusts_the_policy_when_it_can_keep_everything():
                                          "seen_since": ts - 86400}}}
     out = collector.rotation_stale_repos(bsrv, now, extra)
     assert len(out) == 1 and "старую группу" in out[0], out
+
+
+def test_backup_clients_without_an_agent_are_found_by_name():
+    """Репозиторий назван по клиенту, и клиента ищем среди нод панели: по имени, hostname и
+    имени машины из отчета агента. Устаревшие (клиента, похоже, уже нет) и заглушенные не в счет."""
+    from datetime import datetime, timezone
+    from types import SimpleNamespace
+
+    from app import collector
+
+    now = datetime.now(timezone.utc)
+    ts = now.timestamp()
+    nodes = [
+        SimpleNamespace(name="stats-a", hostname="", enabled=True, last_report={}),
+        SimpleNamespace(name="db", hostname="", enabled=True, last_report={"hostname": "db-dev1.example"}),
+        SimpleNamespace(name="node-old", hostname="", enabled=False, last_report={}),
+    ]
+    names = collector.panel_server_names(nodes)
+    bs = {"repos": [
+        {"name": "stats-a", "last_activity": ts - 3600},
+        {"name": "db-dev1", "last_activity": ts - 3600},     # по имени машины из отчета
+        {"name": "app-a", "last_activity": ts - 3600},    # агента нет
+        {"name": "node-old", "last_activity": ts - 3600},        # сервер в панели выключен
+        {"name": "zaglushen", "last_activity": ts - 3600},
+        {"name": "davno-net", "last_activity": ts - 9 * 86400},  # клиента уже нет
+    ]}
+    assert collector.backup_unmonitored(bs, {"zaglushen"}, names, now) == ["app-a", "node-old"]
+
+
+async def test_new_backup_client_without_an_agent_alerts_once(tmp_path, monkeypatch):
+    """Клиенты, которые уже писали на сервер, когда проверка появилась, запоминаются молча:
+    иначе первое сообщение было бы на 60 строк. Алерт приходит про нового и один раз."""
+    from datetime import datetime, timedelta, timezone
+
+    from app import collector
+    from app.config import Settings
+    from app.db import Base, create_engine_and_factory
+    from app.models import Server
+
+    engine, factory = create_engine_and_factory(f"sqlite+aiosqlite:///{(tmp_path / 'u.db').as_posix()}")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    now = datetime.now(timezone.utc)
+    ts = now.timestamp()
+
+    def report(*names):
+        return {"cpu_percent": 5, "backup_server": {"present": True, "running": True, "repos": [
+            {"name": n, "valid": True, "snapshots": 5, "last_activity": ts - 600} for n in names]}}
+
+    async with factory() as s:
+        s.add(Server(name="backup-01", token_hash="x", enabled=True, backup_not_required=True,
+                     last_seen=now, last_report=report("stats-a", "app-a"),
+                     cpu_alert_percent=0, mem_alert_percent=0, disk_alert_percent=0))
+        s.add(Server(name="stats-a", token_hash="y", enabled=True, backup_not_required=True,
+                     last_seen=now, last_report={"cpu_percent": 5},
+                     cpu_alert_percent=0, mem_alert_percent=0, disk_alert_percent=0))
+        await s.commit()
+
+    sent: list[str] = []
+
+    async def fake_send(cfg, text, parse_mode=None):
+        sent.append(text)
+        return []
+
+    monkeypatch.setattr("app.alerts.send_alert", fake_send)
+    settings = Settings(alert_webhook="http://hook")
+    await collector.evaluate_servers(factory, settings, now)
+    assert not [x for x in sent if "без агента" in x]  # app-a был и раньше
+
+    async with factory() as s:
+        bsrv = (await s.scalars(collector.select(Server).where(Server.name == "backup-01"))).first()
+        bsrv.last_report = report("stats-a", "app-a", "node-new")
+        await s.commit()
+    await collector.evaluate_servers(factory, settings, now + timedelta(seconds=30))
+    hits = [x for x in sent if "без агента" in x]
+    assert len(hits) == 1 and "node-new" in hits[0] and "app-a" not in hits[0], sent
+    await collector.evaluate_servers(factory, settings, now + timedelta(seconds=60))
+    assert len([x for x in sent if "без агента" in x]) == 1  # не повторяется
+    await engine.dispose()
+
+
+def test_home_page_rotation_matches_the_alert():
+    """"Что сломано" на главной берет ротацию теми же правилами, что и алерт: старая группа
+    vpn-c там видна, заглушенный репозиторий - нет."""
+    from datetime import datetime, timezone
+    from types import SimpleNamespace
+
+    from app import collector
+
+    now = datetime.now(timezone.utc)
+    ts = now.timestamp()
+    pol = {"keep_daily": 7, "keep_weekly": 4, "keep_monthly": 6}
+    s = SimpleNamespace(
+        last_report={"backup_server": {"present": True, "repos": [
+            dict(pol, name="vpn-c", snapshots=28, oldest_snapshot=ts - 859 * 86400),
+            dict(pol, name="zaglushen", snapshots=28, oldest_snapshot=ts - 900 * 86400),
+        ]}},
+        alert_state={}, backup_repo_mutes=["zaglushen"],
+    )
+    assert collector.backup_rotation_items(s, now) == ["vpn-c (859 дн. > 231)"]

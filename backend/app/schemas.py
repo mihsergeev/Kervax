@@ -1084,6 +1084,10 @@ class ServerOut(BaseModel):
     pod_names: dict[str, str] = Field(default_factory=dict)
     # ноды кластера без агента панели; считает kube_coverage по ВСЕМ серверам панели
     kube_unmonitored: list[KubeNodeRef] = []
+    # репозитории бэкап-сервера со свежими бэкапами, чьих клиентов нет в панели (по ВСЕМ серверам)
+    bsrv_unmonitored: list[str] = []
+    # что сейчас сказал бы алерт "ротация встала" (для "Что сломано" на главной)
+    bsrv_rotation: list[str] = []
 
 
 class BackupRepoMuteIn(BaseModel):

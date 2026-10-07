@@ -1247,9 +1247,10 @@ function RepoUnlock({ r, onChanged }: { r: RepoStat; onChanged: () => void }) {
   )
 }
 
-function RepoRow({ server: s, r, muted, canAct, onChanged, growth }: {
+function RepoRow({ server: s, r, muted, canAct, onChanged, growth, unmonitored }: {
   server: Server; r: RepoStat; muted: Set<string>; canAct: boolean; onChanged: () => void
   growth?: number // обычный прирост клиента за прогон (после сжатия)
+  unmonitored?: boolean // клиента нет в панели
 }) {
   const { t } = useI18n()
   const [busy, setBusy] = useState(false)
@@ -1298,6 +1299,11 @@ function RepoRow({ server: s, r, muted, canAct, onChanged, growth }: {
             </span>
           )}
           {st === 'running' && <span className="type-chip">{t('идёт бэкап')}</span>}
+          {unmonitored && (
+            <span className="type-chip" title={t('Клиента этого репозитория нет в панели: если его бэкап сломается, панель узнает только через 3 дня, когда репозиторий устареет.')}>
+              {t('нет в панели')}
+            </span>
+          )}
           {st === 'stale' && <span className="type-chip off">{t('устарел')}</span>}
           {(growth ?? 0) > 0 && (
             <span className="type-chip" title={t('обычный прирост за прогон после сжатия')}>
@@ -1461,6 +1467,9 @@ function BackupServerModal({ server: s, info, servers, canAct, onChanged, onClos
   const { t } = useI18n()
   const [q, setQ] = useState('')
   const [sort, setSort] = useState<'problems' | 'name' | 'size' | 'age' | 'snapshots' | 'growth'>('problems')
+  // клиенты без агента в панели: их бэкап сломается молча, панель узнает через 3 дня
+  const unmon = new Set(s.bsrv_unmonitored ?? [])
+  const [onlyUnmon, setOnlyUnmon] = useState(false)
   // Кто раздувает сервер: обычный прирост за прогон у клиента, чей репозиторий здесь. Репозиторий
   // назван по клиенту (так его заводит helper), поэтому сопоставляем по имени.
   const growthOf = new Map<string, number>()
@@ -1494,6 +1503,7 @@ function BackupServerModal({ server: s, info, servers, canAct, onChanged, onClos
   const legacyN = Object.values(ext?.repos ?? {}).filter((x) => x.cleaner === 'legacy').length
   const repos = all
     .filter((r) => !ql || r.name.toLowerCase().includes(ql))
+    .filter((r) => !onlyUnmon || unmon.has(r.name))
     .slice()
     .sort(rcmp[sort])
   return createPortal(
@@ -1529,6 +1539,12 @@ function BackupServerModal({ server: s, info, servers, canAct, onChanged, onClos
               ? t('репозиториев: {n} · проблемных: {b}', { n: all.length, b: bad })
               : t('репозиториев: {n} · все ок', { n: all.length })}
           </span>
+          {unmon.size > 0 && (
+            <button className={`type-chip ${onlyUnmon ? 'on' : ''}`} onClick={() => setOnlyUnmon(!onlyUnmon)}
+              title={t('Клиенты этих репозиториев не подключены к панели. Если их бэкап сломается, панель узнает только через 3 дня, когда репозиторий устареет. Агент на ноде дал бы алерт в тот же день.')}>
+              {t('без агента в панели: {n}', { n: unmon.size })}
+            </button>
+          )}
           {canAct && <RestServerUpdate server={s} info={info} onChanged={onChanged} />}
           {canAct && !info.tls_front && <EnableTls server={s} onChanged={onChanged} />}
         </div>
@@ -1541,6 +1557,13 @@ function BackupServerModal({ server: s, info, servers, canAct, onChanged, onClos
               : t('Старый скрипт {script} описывает репозиториев: {n}, но не запланирован ни в cron, ни в systemd, их никто не чистит', {
                 script: legacy.script, n: legacyN,
               })}
+            {(legacy.missing?.length ?? 0) > 0 && (
+              <div className="t-degraded">
+                {t('В нем еще блоки на удаленные репозитории ({n}): {list}. Скрипт каждый день проверяет их и шлет ошибку по каждому, в этом шуме тонут настоящие. Эти блоки стоит убрать из скрипта.', {
+                  n: legacy.missing?.length ?? 0, list: (legacy.missing ?? []).join(', '),
+                })}
+              </div>
+            )}
           </div>
         )}
         {growers.length > 0 && (
@@ -1575,7 +1598,7 @@ function BackupServerModal({ server: s, info, servers, canAct, onChanged, onClos
               ) : (
                 repos.map((r) => (
                   <RepoRow key={r.name} server={s} r={r} muted={muted} canAct={canAct} onChanged={onChanged}
-                    growth={growthOf.get(r.name)} />
+                    growth={growthOf.get(r.name)} unmonitored={unmon.has(r.name)} />
                 ))
               )}
             </div>
