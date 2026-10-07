@@ -1088,6 +1088,8 @@ class ServerOut(BaseModel):
     bsrv_unmonitored: list[str] = []
     # что сейчас сказал бы алерт "ротация встала" (для "Что сломано" на главной)
     bsrv_rotation: list[str] = []
+    # restic самого сервера бэкапов старше той версии, до которой его обновляет helper
+    bsrv_restic_old: str = ""
 
 
 class BackupRepoMuteIn(BaseModel):

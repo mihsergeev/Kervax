@@ -320,3 +320,46 @@ def test_failed_integrity_checks():
         "muted": {"check_ts": ts - 3600, "check_ok": 0},
     }}
     assert collector.failed_checks(bs, extra, {"muted"}, now) == ["broken"]
+
+
+def test_backup_server_old_restic():
+    """restic самого сервера бэкапов сравниваем с целью из того же блока helper'а, по числам."""
+    from datetime import datetime, timezone
+
+    from app import collector
+
+    ts = datetime.now(timezone.utc).timestamp()
+
+    def rep(cur, want="0.19.1", age=60):
+        return {"clock_unix": ts, "extras": {"backup-server": {
+            "v": 1, "ts": ts - age, "restic": cur, "restic_target": want, "repos": {}}}}
+
+    assert collector.bsrv_restic_old(rep("0.14.0")) == "0.14.0"
+    assert collector.bsrv_restic_old(rep("0.9.6")) == "0.9.6"  # не строками: "0.9" > "0.1"
+    assert collector.bsrv_restic_old(rep("0.19.1")) == ""
+    assert collector.bsrv_restic_old(rep("0.20.0")) == ""
+    assert collector.bsrv_restic_old(rep("")) == ""  # helper не нашел restic
+    assert collector.bsrv_restic_old(rep("0.14.0", want="")) == ""
+    assert collector.bsrv_restic_old(rep("0.14.0", age=3600)) == ""  # helper встал
+    assert collector.bsrv_restic_old({}) == ""
+
+
+async def test_old_restic_on_backup_server_goes_to_server_field_and_ansible(client, auth_headers):
+    import time
+
+    r = await client.post("/api/servers", json={"name": "bsrv"}, headers=auth_headers)
+    token = r.json()["token"]
+    now = int(time.time())
+    rep = {"hostname": "bsrv", "os": "Debian", "agent_version": "2.23", "cpu_percent": 5,
+           "mem_used": 1, "mem_total": 2, "clock_unix": now,
+           "extras": {"backup-server": {"v": 1, "ts": now - 30, "restic": "0.14.0",
+                                        "restic_target": "0.19.1", "legacy": None, "repos": {}}}}
+    r = await client.post("/api/agent/report", json=rep, headers={"Authorization": f"Bearer {token}"})
+    assert r.status_code == 200, r.text
+    srv = [x for x in (await client.get("/api/servers", headers=auth_headers)).json() if x["name"] == "bsrv"][0]
+    assert srv["bsrv_restic_old"] == "0.14.0"
+    r = await client.post("/api/settings/ansible", headers=auth_headers)
+    atok = r.json()["token"]
+    rows = {x["name"]: x for x in (await client.get(
+        "/api/ansible/servers", headers={"Authorization": f"Bearer {atok}"})).json()["servers"]}
+    assert rows["bsrv"]["issues"] == ["restic_old"]

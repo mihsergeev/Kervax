@@ -1739,6 +1739,12 @@ const EN: Record<string, string> = {
     '{name}: {list} holds the docker socket - breaking into the proxy gives root on the host',
   '{name}: устарел образ внешнего прокси {list} - обновите':
     '{name}: the internet-facing proxy image {list} is outdated - update it',
+  '{name}: на сервере бэкапов старый restic {v} - обновите':
+    '{name}: the backup server runs an old restic {v} - update it',
+  'restic, которым сервер сам чистит и проверяет репозитории (prune, forget, check)':
+    'the restic the server itself cleans and checks the repositories with (prune, forget, check)',
+  'На сервере restic {v}, а helper ставит {target} (ту же версию, что у клиентов). Обычно его обновляет установка helper\'а, если скачать не вышло, запустите на сервере:':
+    'The server runs restic {v}, the helper installs {target} (the same version the clients run). Installing the helper normally updates it; if the download failed, run on the server:',
   'образ внешнего прокси собран больше года назад': 'the internet-facing proxy image was built more than a year ago',
   '{list}: образ собран больше года назад. Прокси смотрит в интернет, а за год в нем закрывают не одну дыру.':
     '{list}: the image was built more than a year ago. The proxy faces the internet, and a year brings more than one security fix.',
