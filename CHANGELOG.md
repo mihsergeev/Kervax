@@ -4,6 +4,16 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.4.105] - 2026-10-07
+
+### Fixed
+- Свежая нода с Docker показывала в "Требует действий" "helper dockerproxy-setup не установлен",
+  хотя установщик его поставил. Установщик запускает helper'ы под umask 077, а dockerproxy-setup
+  писал отметку версии без явных прав: файл выходил 0600, и агент (пользователь kervax) его не
+  читал. Теперь права 0644, как у остальных helper'ов, а самопроверка панели ловит helper, который
+  пишет отметку версии без chmod. На уже затронутой ноде помогает прогон kervax_helpers.yml или
+  `chmod 0644 /var/lib/kervax/versions/dockerproxy-setup.ver`.
+
 ## [1.4.104] - 2026-10-07
 
 ### Fixed
