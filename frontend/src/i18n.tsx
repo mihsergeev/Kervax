@@ -615,7 +615,7 @@ const EN: Record<string, string> = {
   '{name}: бэкап завершился с ошибкой': '{name}: backup failed',
   '{name}: бэкап не свежий': '{name}: backup is stale',
   '{name}: rest-server остановлен': '{name}: rest-server is stopped',
-  '{name}: репозиториев с проблемой — {n}': '{name}: repositories with problems — {n}',
+  '{name}: репозиториев с проблемой - {n} ({list})': '{name}: repositories with problems - {n} ({list})',
   // --- Бэкап-серверы ---
   'Бэкап-серверы': 'Backup servers',
   'бэкап-сервер': 'backup server',
@@ -1013,9 +1013,49 @@ const EN: Record<string, string> = {
   'За этот период алертов не было.': 'No alerts in this period.',
   'Показать раньше': 'Show earlier',
   'без агента в панели: {n}': 'no agent in the panel: {n}',
-  'Клиенты этих репозиториев не подключены к панели. Если их бэкап сломается, панель узнает только через 3 дня, когда репозиторий устареет. Агент на ноде дал бы алерт в тот же день.':
-    'The clients of these repositories are not in the panel. If their backup breaks, the panel learns only after 3 days, when the repository goes stale. An agent on the node would alert the same day.',
+  'Клиенты этих репозиториев не подключены к панели. Сломанный бэкап панель видит только по ритму: опоздавший бэкап через интервал и еще четверть его, ежедневный через 30 часов. Агент на ноде сказал бы сразу, как бэкап упал.':
+    'The clients of these repositories are not in the panel. The panel sees a broken backup only by the rhythm: a late backup after its interval plus a quarter of it, a daily one after 30 hours. An agent on the node would tell right when the backup failed.',
   'нет в панели': 'not in the panel',
+  'раз в сутки': 'daily',
+  'раз в неделю': 'weekly',
+  'раз в час': 'hourly',
+  'раз в {n} ч': 'every {n} h',
+  'раз в {n} дн.': 'every {n} days',
+  'Бэкап опоздал: обычно {every}, последний {ago}.': 'The backup is late: usually {every}, the last one {ago}.',
+  'Нет новых бэкапов {n} дн.': 'No new backups for {n} days.',
+  'опоздал': 'late',
+  'по времени последних снапшотов': 'from the times of the latest snapshots',
+  'следующий к {time}': 'next by {time}',
+  'В архив: хранить как есть, без алертов (сервера больше нет, разовый бэкап, проект заморожен)':
+    'To the archive: keep as is, without alerts (the server is gone, a one-off backup, a frozen project)',
+  'сервера больше нет': 'the server is gone',
+  'больше не бэкапится': 'no longer backed up',
+  'разовый бэкап': 'one-off backup',
+  'проект заморожен': 'project frozen',
+  'Группа {host} останется в репозитории как есть и больше не будет считаться встающей ротацией.':
+    'The {host} group stays in the repository as is and no longer counts as a stalled rotation.',
+  'Репозиторий останется как есть: чистка по политике у него ничего не удаляет, раз новых снапшотов нет. Он уйдет в раздел "Архив" и перестанет быть проблемой, а проверка целостности продолжится.':
+    'The repository stays as is: the policy cleanup removes nothing from it while no new snapshots come. It moves to the "Archive" section and stops being a problem, and the integrity check goes on.',
+  'Зачем в архив (необязательно)': 'Why archive it (optional)',
+  'В архив': 'Archive',
+  'в архив': 'archive',
+  'группа {host} в архиве': 'group {host} archived',
+  'старая группа {host}': 'old group {host}',
+  'Хранить группу как есть и не считать её встающей ротацией': 'Keep the group as is and do not count it as a stalled rotation',
+  'как удалить': 'how to remove',
+  'вернуть': 'restore',
+  'На бэкап-сервере. Без --apply команда только покажет, что удалится, с --apply удалит снапшоты группы, место вернет ночная чистка. Группу, в которую бэкапились последнюю неделю, команда удалять откажется.':
+    'On the backup server. Without --apply the command only shows what would go, with --apply it removes the snapshots of the group, and the nightly cleanup frees the space. A group that got a backup within the last week is refused.',
+  'архив': 'archive',
+  'убрал {who}': 'archived by {who}',
+  'в архиве с {d}': 'archived since {d}',
+  'Вернуть из архива: снова следить за свежестью': 'Restore from the archive: watch freshness again',
+  'Архив: {n} ({sz})': 'Archive: {n} ({sz})',
+  'хранятся как есть, без алертов; проверка целостности идет': 'kept as is, without alerts; the integrity check goes on',
+  'в архиве: {n}': 'archived: {n}',
+  'данные {p}/{n}': 'data {p}/{n}',
+  'Недельная проверка целостности: структура и индекс, плюс каждую неделю следующая часть данных. За {n} недель прочитывается весь репозиторий.':
+    'Weekly integrity check: structure and index, plus the next part of the data every week. The whole repository is read in {n} weeks.',
   'проверка': 'check',
   'проверка не прошла': 'check failed',
   'restic check нашел ошибки, вывод в логе prune-скрипта на бэкап-сервере': 'restic check found errors, the output is in the prune script log on the backup server',
@@ -1024,8 +1064,8 @@ const EN: Record<string, string> = {
   '{name}: старые снапшоты не вычищаются - {list}': '{name}: old snapshots are not removed - {list}',
   'В нем еще блоки на удаленные репозитории ({n}): {list}. Скрипт каждый день проверяет их и шлет ошибку по каждому, в этом шуме тонут настоящие. Эти блоки стоит убрать из скрипта.':
     'It also has blocks for repositories that are gone ({n}): {list}. The script checks them every day and sends an error for each, and real errors drown in that noise. These blocks should be removed from the script.',
-  'Клиента этого репозитория нет в панели: если его бэкап сломается, панель узнает только через 3 дня, когда репозиторий устареет.':
-    'The client of this repository is not in the panel: if its backup breaks, the panel learns only after 3 days, when the repository goes stale.',
+  'Клиента этого репозитория нет в панели. Панель следит за ним по ритму бэкапов: опоздавший бэкап видно через интервал и еще четверть его, ежедневный через 30 часов. Агент на самой ноде сказал бы сразу, как бэкап упал.':
+    'The client of this repository is not in the panel. The panel watches it by the backup rhythm: a late backup shows after its interval plus a quarter of it, a daily one after 30 hours. An agent on the node itself would tell right when the backup failed.',
   'Бэкап-сервер: ротация встала': 'Backup server: rotation stalled',
   'Бэкап: дамп СУБД': 'Backup: DB dump',
   'Бэкап: место под дампы': 'Backup: dump disk space',
@@ -1083,8 +1123,8 @@ const EN: Record<string, string> = {
   'Приглушить (разовый/неактуальный)': 'Mute (one-off / not needed)',
   'репозиториев: {n} · все ок': 'repositories: {n} · all OK',
   'Фильтр: имя репозитория…': 'Filter: repository name…',
-  'Читается на сервере без паролей: config (валидность), снапшоты, размер, свежесть, лок, политика хранения. Устаревшие (давно нет бэкапа) — красным и алертят; приглушите разовые/неактуальные (🔕).':
-    'Read on the server without passwords: config (validity), snapshots, size, freshness, lock, retention. Stale (no backup for a long time) — red + alerts; mute one-off / unneeded ones (🔕).',
+  'Читается на сервере без паролей: config (валидность), снапшоты, размер, свежесть, лок, политика хранения. Опоздавшие и устаревшие - красным и алертят. То, что хранится как есть (сервера больше нет, разовый бэкап, проект заморожен), уберите в архив (🗄), временное приглушите (🔕).':
+    'Read on the server without passwords: config (validity), snapshots, size, freshness, lock, retention. Late and stale ones are red and alert. Move what is kept as is (the server is gone, a one-off backup, a frozen project) to the archive (🗄), mute what is temporary (🔕).',
   'снапшотов: {n}': 'snapshots: {n}',
   'репозиториев: {n}': 'repositories: {n}',
   'проблемных: {b}': 'problem: {b}',

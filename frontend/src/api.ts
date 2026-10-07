@@ -1245,7 +1245,21 @@ export type BackupServerRepoExtra = {
   seen_since: number // с какого момента helper за ним следит
   check_ts?: number // недельная проверка целостности нашего prune-скрипта (helper 0.25)
   check_ok?: number // 1 прошла, 0 нашла ошибки, -1 еще не было
+  check_part?: number // какую часть данных прочитала проверка: часть check_part из check_parts (0 - не читала)
+  check_parts?: number
+  recent?: number[] // времена последних снапшотов (helper 0.28), по ним бэкенд считает ритм
+  groups?: { ts: number; groups: BackupGroup[] } | null // группы снапшотов, если их больше одной
 }
+// группа снапшотов так, как её видит forget: хост и теги (prune-скрипт, раз в сутки)
+export type BackupGroup = {
+  host: string
+  tags: string[]
+  paths: string[]
+  n: number
+  first: number
+  last: number
+}
+export type BackupArchiveEntry = { note: string; ts: string; by: string }
 export type BackupServerExtra = {
   v: number
   ts: number
@@ -1321,6 +1335,8 @@ export type Server = {
   disk_temp_alert_c: number
   alert_mutes: string[] | null
   backup_repo_mutes: string[] | null // заглушённые репо бэкап-сервера (по имени)
+  // архив бэкап-сервера: репозиторий или "репозиторий|хост" (старая группа) -> кто, когда, зачем
+  backup_repo_archive?: Record<string, BackupArchiveEntry> | null
   backup_audit_mutes?: string[] | null // приглушённые находки покрытия (по ключу)
   backup_not_required: boolean // на сервере бэкап не требуется (алерт снят)
   db_dumps_ok: boolean // дампы СУБД настроены отдельно (пункт снят с главной)
@@ -1343,6 +1359,8 @@ export type Server = {
   bsrv_unmonitored?: string[] // репозитории бэкап-сервера, чьих клиентов нет в панели (считает бэкенд)
   bsrv_rotation?: string[] // что сейчас сказал бы алерт "ротация встала" (считает бэкенд)
   bsrv_restic_old?: string // restic сервера бэкапов старше целевой версии (считает бэкенд)
+  bsrv_repo_reasons?: Record<string, string> // репозиторий -> почему он сейчас в алерте backup_repo
+  bsrv_cadence?: Record<string, number> // обычный интервал бэкапов репозитория, секунды
   alert_since?: Record<string, string> // с какого момента видна проблема каждого вида (ISO)
   docker_since?: Record<string, string> // с какого момента лежит каждый упавший контейнер
   // последний прогон бэкапа добавил в разы больше обычного (считает бэкенд)
@@ -1758,6 +1776,14 @@ export function setCustomBackupIgnored(id: number, job: string, ignored: boolean
   return api<Server>(`/api/servers/${id}/backup/custom-ignore`, {
     method: 'POST',
     body: JSON.stringify({ id: job, ignored }),
+  })
+}
+
+// архив: репозиторий (host пустой) или одна старая группа его снапшотов
+export function backupRepoArchive(id: number, repo: string, host: string, note: string, archived: boolean): Promise<Server> {
+  return api<Server>(`/api/servers/${id}/backup/repo-archive`, {
+    method: 'POST',
+    body: JSON.stringify({ repo, host, note, archived }),
   })
 }
 

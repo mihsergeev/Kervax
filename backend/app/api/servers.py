@@ -16,7 +16,8 @@ from sqlalchemy import delete as sa_delete, func, select
 
 from app import audit, backup_growth, custom_backups, docker_exposure, geoip, kube_coverage, manual_probe
 from app.collector import (
-    alert_since, backup_rotation_items, backup_unmonitored, bsrv_restic_old, disk_analyze_ok, docker_since, dump_local_stale, needed_pod_names,
+    _backup_problem_repos, alert_since, backup_cadence, backup_rotation_items, backup_unmonitored,
+    bsrv_extra, bsrv_restic_old, disk_analyze_ok, repo_reason, docker_since, dump_local_stale, needed_pod_names,
     panel_server_names, pod_uid_names,
     send_alerts_soon, send_autofix_note, server_problems, web_5xx_total, web_breakdown,
     web_label_key, web_log_label, web_rate_total,
@@ -54,6 +55,7 @@ from app.schemas import (
     BackupCommandOut,
     BackupAuditMuteIn,
     CustomBackupIgnoreIn,
+    BackupRepoArchiveIn,
     BackupRepoMuteIn,
     BackupCredsOut,
     BackupAudit,
@@ -207,6 +209,7 @@ def _out(
     o.backup_growth = backup_growth.jump(server, now)
     o.bsrv_rotation = backup_rotation_items(server, now)
     o.bsrv_restic_old = bsrv_restic_old(server.last_report or {})
+    o.bsrv_cadence = _cadences(server.last_report or {})
     o.pod_names = needed_pod_names(server, pod_names)
     return o
 
@@ -368,7 +371,13 @@ async def list_servers(user: CurrentUser, session: SessionDep) -> list[ServerOut
         o.kube_unmonitored = _unmonitored(s, index)
         bs = (s.last_report or {}).get("backup_server") or {}
         if bs.get("present"):
-            o.bsrv_unmonitored = backup_unmonitored(bs, set(s.backup_repo_mutes or []), panel, now)
+            arch = s.backup_repo_archive or {}
+            o.bsrv_unmonitored = backup_unmonitored(bs, set(s.backup_repo_mutes or []), panel, now, arch)
+            ext = bsrv_extra(s.last_report or {})
+            byname = {r.get("name"): r for r in bs.get("repos") or []}
+            o.bsrv_repo_reasons = {
+                n: repo_reason(byname[n], now, ext, panel)
+                for n in _backup_problem_repos(bs, set(s.backup_repo_mutes or []), now, ext, panel, arch)}
         outs.append(o)
     return outs
 
@@ -1758,6 +1767,42 @@ async def backup_audit_mute(
         session, user.username,
         "backup_audit_mute" if body.muted else "backup_audit_unmute",
         body.key[:120], f"srv={server_id}",
+    )
+    return _out(s, datetime.now(timezone.utc))
+
+
+def _cadences(rep: dict) -> dict[str, int]:
+    """Обычный интервал бэкапов по репозиториям бэкап-сервера, где он ясен."""
+    out = {}
+    for name, o in ((bsrv_extra(rep).get("repos") or {}).items()):
+        c = backup_cadence(o.get("recent")) if isinstance(o, dict) else 0
+        if c:
+            out[name] = c
+    return out
+
+
+@router.post("/{server_id}/backup/repo-archive", response_model=ServerOut)
+async def backup_repo_archive(
+    server_id: int, body: BackupRepoArchiveIn, user: CurrentUser, session: SessionDep
+) -> ServerOut:
+    """Убрать в архив или вернуть репозиторий бэкап-сервера (с host - одну старую группу его
+    снапшотов). Архив хранится как есть: не устаревает, не проблема, проверка целостности идет.
+    На сервере ничего не меняется: чистка по политике у такого репозитория и так ничего не
+    удаляет, а группу удаляют только руками (forget-group)."""
+    s = await _get_or_404(server_id, session, user)
+    key = f"{body.repo}|{body.host}" if body.host else body.repo
+    arch = dict(s.backup_repo_archive or {})
+    if body.archived:
+        arch[key] = {"note": body.note.strip(), "ts": datetime.now(timezone.utc).isoformat(),
+                     "by": user.username}
+    else:
+        arch.pop(key, None)
+    s.backup_repo_archive = arch
+    await session.commit()
+    await session.refresh(s)
+    await audit.record(
+        session, user.username, "backup_repo_archive" if body.archived else "backup_repo_unarchive",
+        key[:120], f"srv={server_id}"
     )
     return _out(s, datetime.now(timezone.utc))
 

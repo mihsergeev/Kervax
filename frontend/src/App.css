@@ -1451,6 +1451,53 @@ input:focus {
 .repo-mute-btn {
   flex-shrink: 0;
 }
+/* архив бэкап-сервера: форма "в архив", старые группы снапшотов, раздел архива */
+.repo-archive-form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+}
+.repo-archive-notes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+.repo-archive-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+}
+.repo-archive-row .field-inp {
+  flex: 1;
+  min-width: 12rem;
+}
+.repo-groups {
+  margin-top: 0.4rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+.repo-group-line {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem 0.6rem;
+  align-items: center;
+}
+.small-btn {
+  padding: 0.15rem 0.55rem;
+  font-size: 0.85em;
+}
+.repo-archive-section {
+  margin-top: 0.75rem;
+}
+.repo-archive-section > summary {
+  cursor: pointer;
+  padding: 0.35rem 0;
+}
+.repo-archived {
+  border-left-color: var(--border-strong);
+}
 .docker-dot {
   width: 8px;
   height: 8px;

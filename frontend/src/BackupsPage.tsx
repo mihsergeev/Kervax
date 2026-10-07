@@ -5,6 +5,7 @@ import {
   backupCommand,
   backupCommandStatus,
   backupCredentials,
+  backupRepoArchive,
   backupRepoMute,
   backupSetup,
   backupSetupStatus,
@@ -13,8 +14,10 @@ import {
   enableBackupTls,
   listServers,
   setCustomBackupIgnored,
+  type BackupArchiveEntry,
   type BackupCommand,
   type BackupCreds,
+  type BackupGroup,
   type BackupInfo,
   type BackupRun,
   type BackupServerExtra,
@@ -905,7 +908,6 @@ function HostRow({
   )
 }
 
-const STALE_REPO_SECONDS = 3 * 86400
 // Лок держится всё время бэкапа и освежается раз в 5 мин — сам по себе он значит
 // «бэкап идёт», а не «сломалось». Проблема — лок, который перестали освежать.
 const LOCK_STUCK_SECONDS = 30 * 60
@@ -929,20 +931,45 @@ function lockLong(r: RepoStat): boolean {
   return !!r.locked && (!r.lock_ts || lockAge(r) > LOCK_LONG_SECONDS)
 }
 // stuck - висячий лок моложе суток: видно, но проблемой не считается (уйдет сам)
-type RepoState = 'muted' | 'invalid' | 'locked' | 'stuck' | 'running' | 'stale' | 'ok'
-function repoState(r: RepoStat, muted: Set<string>): RepoState {
-  if (muted.has(r.name)) return 'muted'
+type RepoState = 'archived' | 'muted' | 'invalid' | 'locked' | 'stuck' | 'running' | 'stale' | 'ok'
+// Что панель знает о репозиториях сервера сверх них самих: приглушенные, архив и причины, по
+// которым репозиторий сейчас в алерте backup_repo. Причины считает бэкенд: с ритмом бэкапов
+// (клиент без агента опаздывает через сутки с небольшим, недельный бэкап не устаревает за 3
+// дня), так что список, счетчики и алерт расходиться не могут.
+type RepoCtx = { muted: Set<string>; archived: Set<string>; reasons: Record<string, string> }
+function repoCtx(s: Server): RepoCtx {
+  return {
+    muted: new Set(s.backup_repo_mutes ?? []),
+    archived: new Set(Object.keys(s.backup_repo_archive ?? {}).filter((k) => !k.includes('|'))),
+    reasons: s.bsrv_repo_reasons ?? {},
+  }
+}
+// интервал бэкапов словами: раз в сутки, раз в 6 ч, раз в неделю
+function everyLabel(sec: number, t: (s: string, v?: Record<string, string | number>) => string): string {
+  const h = sec / 3600
+  if (Math.abs(h - 24) <= 2) return t('раз в сутки')
+  if (Math.abs(h - 168) <= 12) return t('раз в неделю')
+  if (Math.abs(h - 1) <= 0.25) return t('раз в час')
+  if (h < 48) return t('раз в {n} ч', { n: Math.round(h) })
+  return t('раз в {n} дн.', { n: Math.round(h / 24) })
+}
+function fmtDay(ts: number): string {
+  return ts ? new Date(ts * 1000).toLocaleDateString() : '-'
+}
+function repoState(r: RepoStat, c: RepoCtx): RepoState {
+  if (c.archived.has(r.name)) return 'archived'
+  if (c.muted.has(r.name)) return 'muted'
   if (!r.valid) return 'invalid'
   if (lockLong(r)) return 'locked'
   if (r.locked && !lockStuck(r)) return 'running'
-  if (r.last_activity && Date.now() / 1000 - r.last_activity > STALE_REPO_SECONDS) return 'stale'
+  if (c.reasons[r.name]) return 'stale'
   if (lockStuck(r)) return 'stuck'
   return 'ok'
 }
-// проблемный = не ок и не заглушён (для счётчиков/акцентов)
-function repoBad(r: RepoStat, muted: Set<string>): boolean {
-  const st = repoState(r, muted)
-  return st !== 'ok' && st !== 'muted' && st !== 'running' && st !== 'stuck'
+// проблемный = не ок, не заглушен и не в архиве (для счетчиков и акцентов)
+function repoBad(r: RepoStat, c: RepoCtx): boolean {
+  const st = repoState(r, c)
+  return st !== 'ok' && st !== 'muted' && st !== 'archived' && st !== 'running' && st !== 'stuck'
 }
 // Блок helper'а backupserver-setup 0.23: кто чистит репозитории и когда из них что-то
 // удалялось. Старше 15 минут - helper встал, по такому блоку не судим.
@@ -1105,8 +1132,13 @@ function RotationInfo({ r, x, legacy, t }: {
       )}
       {x && x.check_ts && (x.check_ok ?? -1) >= 0 ? (
         <span className={x.check_ok === 0 ? 't-down' : ''}
-          title={x.check_ok === 0 ? t('restic check нашел ошибки, вывод в логе prune-скрипта на бэкап-сервере') : t('недельная проверка целостности (restic check)')}>
+          title={x.check_ok === 0
+            ? t('restic check нашел ошибки, вывод в логе prune-скрипта на бэкап-сервере')
+            : (x.check_parts ?? 0) > 0
+              ? t('Недельная проверка целостности: структура и индекс, плюс каждую неделю следующая часть данных. За {n} недель прочитывается весь репозиторий.', { n: x.check_parts ?? 0 })
+              : t('недельная проверка целостности (restic check)')}>
           {x.check_ok === 0 ? t('проверка не прошла') : t('проверка')}: {fmtAgo(x.check_ts)}
+          {(x.check_parts ?? 0) > 0 && ` (${t('данные {p}/{n}', { p: x.check_part ?? 0, n: x.check_parts ?? 0 })})`}
         </span>
       ) : null}
       {ts > 0 && (
@@ -1280,20 +1312,26 @@ function RepoUnlock({ r, onChanged }: { r: RepoStat; onChanged: () => void }) {
   )
 }
 
-function RepoRow({ server: s, r, muted, canAct, onChanged, growth, unmonitored }: {
-  server: Server; r: RepoStat; muted: Set<string>; canAct: boolean; onChanged: () => void
+function RepoRow({ server: s, r, ctx, canAct, onChanged, growth, unmonitored }: {
+  server: Server; r: RepoStat; ctx: RepoCtx; canAct: boolean; onChanged: () => void
   growth?: number // обычный прирост клиента за прогон (после сжатия)
   unmonitored?: boolean // клиента нет в панели
 }) {
   const { t } = useI18n()
   const [busy, setBusy] = useState(false)
-  const st = repoState(r, muted)
+  const [archiving, setArchiving] = useState(false)
+  const st = repoState(r, ctx)
   const isMuted = st === 'muted'
   // именно repoBad, а не своя копия условия: иначе строка и счётчики проблем расходятся
   // (так «идёт бэкап» — нормальное состояние — какое-то время красилось красным)
-  const tone = isMuted ? 't-muted' : repoBad(r, muted) ? 't-down' : 't-up'
-  const ageSec = r.last_activity ? Date.now() / 1000 - r.last_activity : 0
-  const freshTone = !r.last_activity ? 'muted' : ageSec > STALE_REPO_SECONDS ? 't-down' : ageSec > 2 * 86400 ? 't-degraded' : 't-up'
+  const tone = isMuted ? 't-muted' : repoBad(r, ctx) ? 't-down' : 't-up'
+  const now = Date.now() / 1000
+  const ageSec = r.last_activity ? now - r.last_activity : 0
+  // Обычный интервал бэкапов (бэкенд считает его по последним снапшотам, helper 0.28): с ним
+  // видно, когда ждать следующий бэкап. Без него как раньше: дольше 2 дней - желтым.
+  const cad = s.bsrv_cadence?.[r.name] ?? 0
+  const freshTone = !r.last_activity ? 'muted' : st === 'stale' ? 't-down'
+    : (cad ? ageSec > cad + 1800 : ageSec > 2 * 86400) ? 't-degraded' : 't-up'
   const keep = [r.keep_last, r.keep_daily, r.keep_weekly, r.keep_monthly]
   const hasKeep = keep.some((v) => (v ?? 0) > 0)
   const toggleMute = async () => {
@@ -1313,6 +1351,12 @@ function RepoRow({ server: s, r, muted, canAct, onChanged, growth, unmonitored }
   const ext = bsrvExtra(s)
   const lockDays = Math.floor(lockAge(r) / 86400)
   const lockHours = Math.max(1, Math.floor(lockAge(r) / 3600))
+  const staleTitle = cad
+    ? t('Бэкап опоздал: обычно {every}, последний {ago}.', { every: everyLabel(cad, t), ago: fmtAgo(r.last_activity) })
+    : t('Нет новых бэкапов {n} дн.', { n: Math.floor(ageSec / 86400) })
+  const nextAt = cad > 0 && cad < 2 * 86400 && r.last_activity && st !== 'stale'
+    ? new Date((r.last_activity + cad) * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+    : ''
   return (
     <div className={`loc-res docker-row repo-row repo-row-col ${tone}`}>
       <div className="repo-row-main">
@@ -1333,11 +1377,11 @@ function RepoRow({ server: s, r, muted, canAct, onChanged, growth, unmonitored }
           )}
           {st === 'running' && <span className="type-chip">{t('идёт бэкап')}</span>}
           {unmonitored && (
-            <span className="type-chip" title={t('Клиента этого репозитория нет в панели: если его бэкап сломается, панель узнает только через 3 дня, когда репозиторий устареет.')}>
+            <span className="type-chip" title={t('Клиента этого репозитория нет в панели. Панель следит за ним по ритму бэкапов: опоздавший бэкап видно через интервал и еще четверть его, ежедневный через 30 часов. Агент на самой ноде сказал бы сразу, как бэкап упал.')}>
               {t('нет в панели')}
             </span>
           )}
-          {st === 'stale' && <span className="type-chip off">{t('устарел')}</span>}
+          {st === 'stale' && <span className="type-chip off" title={staleTitle}>{cad ? t('опоздал') : t('устарел')}</span>}
           {(growth ?? 0) > 0 && (
             <span className="type-chip" title={t('обычный прирост за прогон после сжатия')}>
               +{fmtBytes(growth ?? 0)}
@@ -1348,6 +1392,11 @@ function RepoRow({ server: s, r, muted, canAct, onChanged, growth, unmonitored }
           <span>{t('снапшотов: {n}', { n: r.snapshots })}</span>
           <span>{fmtBytes(r.size_bytes)}</span>
           <span className={freshTone === 'muted' ? '' : freshTone}>{t('обновлён')}: {fmtAgo(r.last_activity)}</span>
+          {cad > 0 && (
+            <span title={t('по времени последних снапшотов')}>
+              {everyLabel(cad, t)}{nextAt && `, ${t('следующий к {time}', { time: nextAt })}`}
+            </span>
+          )}
           {hasKeep && (
             <span title={t('политика хранения: последних / дневных / недельных / месячных')}>
               {t('хранит')}: {keep.map((v) => v ?? 0).join('/')}
@@ -1356,6 +1405,14 @@ function RepoRow({ server: s, r, muted, canAct, onChanged, growth, unmonitored }
           <RotationInfo r={r} x={ext?.repos?.[r.name]} legacy={ext?.legacy} t={t} />
         </div>
       </div>
+      {/* В архив - то, что хранится как есть: сервера больше нет, бэкапить больше не нужно,
+          разовый бэкап, проект заморожен. Предлагаем там, где бэкапы и так не приходят. */}
+      {canAct && (st === 'stale' || isMuted) && (
+        <button className="ghost icon-btn repo-mute-btn" disabled={busy} onClick={() => setArchiving(!archiving)}
+          title={t('В архив: хранить как есть, без алертов (сервера больше нет, разовый бэкап, проект заморожен)')}>
+          🗄
+        </button>
+      )}
       {/* Приглушать нечего, пока репозиторий здоров: кнопка на каждой зелёной строке —
           это десятки бесполезных элементов, среди которых теряются нужные. Показываем
           только там, где есть что глушить, и у уже приглушённых (чтобы вернуть). */}
@@ -1366,6 +1423,11 @@ function RepoRow({ server: s, r, muted, canAct, onChanged, growth, unmonitored }
         </button>
       )}
       </div>
+      {archiving && (
+        <ArchiveForm server={s} repo={r.name} host="" onCancel={() => setArchiving(false)}
+          onDone={() => { setArchiving(false); onChanged() }} />
+      )}
+      <RepoGroups server={s} repo={r.name} ext={ext} canAct={canAct} onChanged={onChanged} />
       {/* «как удалить» даём только у проблемных: пустой мусор и заброшенные репо — это те,
           что реально выводят из эксплуатации. У живого репозитория с ежедневным бэкапом
           такая кнопка была бы приглашением к беде. */}
@@ -1376,6 +1438,190 @@ function RepoRow({ server: s, r, muted, canAct, onChanged, growth, unmonitored }
           ⚠️ {t('Нет config, но снапшоты есть ({n} шт., {sz}) — данные могут быть восстановимы. Вслепую не удаляйте, разберитесь на сервере.', { n: r.snapshots, sz: fmtBytes(r.size_bytes) })}
         </div>
       )}
+    </div>
+  )
+}
+
+// Почему убираем в архив: одним нажатием, свое можно дописать.
+const ARCHIVE_NOTES = ['сервера больше нет', 'больше не бэкапится', 'разовый бэкап', 'проект заморожен']
+
+// Убрать в архив репозиторий (host пустой) или одну старую группу его снапшотов. На сервере
+// ничего не меняется: чистка по политике у репозитория без новых снапшотов и так ничего не
+// удаляет, а группу удаляют только руками. Архив просто перестает быть проблемой.
+function ArchiveForm({ server: s, repo, host, onCancel, onDone }: {
+  server: Server; repo: string; host: string; onCancel: () => void; onDone: () => void
+}) {
+  const { t } = useI18n()
+  const [note, setNote] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [err, setErr] = useState('')
+  const save = async () => {
+    setBusy(true)
+    setErr('')
+    try {
+      await backupRepoArchive(s.id, repo, host, note.trim(), true)
+      onDone()
+    } catch (e) {
+      setErr(e instanceof ApiError ? e.message : String(e))
+      setBusy(false)
+    }
+  }
+  return (
+    <div className="repo-cleanup repo-archive-form">
+      <div className="muted small">
+        {host
+          ? t('Группа {host} останется в репозитории как есть и больше не будет считаться встающей ротацией.', { host })
+          : t('Репозиторий останется как есть: чистка по политике у него ничего не удаляет, раз новых снапшотов нет. Он уйдет в раздел "Архив" и перестанет быть проблемой, а проверка целостности продолжится.')}
+      </div>
+      <div className="repo-archive-notes">
+        {ARCHIVE_NOTES.map((n) => (
+          <button key={n} type="button" className={`type-chip ${note === t(n) ? 'on' : ''}`} onClick={() => setNote(t(n))}>
+            {t(n)}
+          </button>
+        ))}
+      </div>
+      <div className="repo-archive-row">
+        <input className="field-inp" maxLength={200} placeholder={t('Зачем в архив (необязательно)')}
+          value={note} onChange={(e) => setNote(e.target.value)} />
+        <button disabled={busy} onClick={save}>{busy ? '...' : t('В архив')}</button>
+        <button className="ghost" disabled={busy} onClick={onCancel}>{t('Отмена')}</button>
+      </div>
+      {err && <div className="form-error small">{err}</div>}
+    </div>
+  )
+}
+
+// Группы снапшотов репозитория (хост и теги, как их видит forget) от helper'а 0.28. Старая
+// группа - хост, который больше не бэкапится сюда: переименовали, сервера нет, разовый бэкап.
+// Политика держит её последние снапшоты вечно. Её можно убрать в архив (хранить как есть) или
+// удалить командой на сервере: удаление только руками и только старой группы.
+function RepoGroups({ server: s, repo, ext, canAct, onChanged }: {
+  server: Server; repo: string; ext: BackupServerExtra | null; canAct: boolean; onChanged: () => void
+}) {
+  const { t } = useI18n()
+  const [archiving, setArchiving] = useState('')
+  const [showCmd, setShowCmd] = useState('')
+  const [copied, setCopied] = useState('')
+  const [busy, setBusy] = useState(false)
+  const now = Date.now() / 1000
+  const g = ext?.repos?.[repo]?.groups
+  const groups: BackupGroup[] = g && now - g.ts < 3 * 86400 ? g.groups ?? [] : []
+  if (groups.length < 2) return null
+  const arch = s.backup_repo_archive ?? {}
+  const newest = Math.max(...groups.map((x) => x.last))
+  const old = groups.filter((x) => x.last < newest && now - x.last > 7 * 86400)
+  if (old.length === 0) return null
+  const unarchive = async (host: string) => {
+    setBusy(true)
+    try {
+      await backupRepoArchive(s.id, repo, host, '', false)
+      onChanged()
+    } finally {
+      setBusy(false)
+    }
+  }
+  const copy = (key: string, v: string) => {
+    navigator.clipboard?.writeText(v)
+    setCopied(key)
+    window.setTimeout(() => setCopied(''), 1500)
+  }
+  return (
+    <div className="repo-groups small">
+      {old.map((x) => {
+        const entry: BackupArchiveEntry | undefined = arch[`${repo}|${x.host}`]
+        const cmd = `sudo /lib65/kervax/kervax-backupserver-helper forget-group ${repo} ${x.host}`
+        return (
+          <div key={x.host + x.tags.join(',')} className="repo-group">
+            <div className="repo-group-line">
+              <span className={entry ? 'muted' : 't-degraded'}>
+                {entry ? t('группа {host} в архиве', { host: x.host }) : t('старая группа {host}', { host: x.host })}
+                {`: ${t('снапшотов: {n}', { n: x.n })}, ${fmtDay(x.first)} - ${fmtDay(x.last)}`}
+                {entry?.note ? ` (${entry.note})` : ''}
+              </span>
+              {canAct && !entry && (
+                <>
+                  <button className="ghost small-btn" onClick={() => setArchiving(archiving === x.host ? '' : x.host)}
+                    title={t('Хранить группу как есть и не считать её встающей ротацией')}>
+                    🗄 {t('в архив')}
+                  </button>
+                  <button className="ghost small-btn" onClick={() => setShowCmd(showCmd === x.host ? '' : x.host)}>
+                    {t('как удалить')}
+                  </button>
+                </>
+              )}
+              {canAct && entry && (
+                <button className="ghost small-btn" disabled={busy} onClick={() => unarchive(x.host)}>{t('вернуть')}</button>
+              )}
+            </div>
+            {!entry && x.paths.length > 0 && <div className="muted mono">{x.paths.join(' ')}</div>}
+            {archiving === x.host && (
+              <ArchiveForm server={s} repo={repo} host={x.host} onCancel={() => setArchiving('')}
+                onDone={() => { setArchiving(''); onChanged() }} />
+            )}
+            {showCmd === x.host && (
+              <div className="repo-cleanup">
+                <div className="muted">
+                  {t('На бэкап-сервере. Без --apply команда только покажет, что удалится, с --apply удалит снапшоты группы, место вернет ночная чистка. Группу, в которую бэкапились последнюю неделю, команда удалять откажется.')}
+                </div>
+                <div className="agent-advice-cmd">
+                  <pre>{cmd}</pre>
+                  <button className="ghost" onClick={() => copy(x.host, cmd)}>{copied === x.host ? t('Скопировано') : t('Копировать')}</button>
+                </div>
+              </div>
+            )}
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
+// Строка репозитория в архиве: спокойная, без красного. Видно, зачем он там, с какого дня,
+// когда был последний бэкап и цел ли он (проверка целостности идет и для архива).
+function ArchivedRow({ server: s, r, entry, canAct, onChanged }: {
+  server: Server; r: RepoStat; entry: BackupArchiveEntry; canAct: boolean; onChanged: () => void
+}) {
+  const { t } = useI18n()
+  const [busy, setBusy] = useState(false)
+  const ext = bsrvExtra(s)
+  const x = ext?.repos?.[r.name]
+  const restore = async () => {
+    setBusy(true)
+    try {
+      await backupRepoArchive(s.id, r.name, '', '', false)
+      onChanged()
+    } finally {
+      setBusy(false)
+    }
+  }
+  const since = entry.ts ? new Date(entry.ts).toLocaleDateString() : ''
+  return (
+    <div className="loc-res docker-row repo-row repo-row-col repo-archived">
+      <div className="repo-row-main">
+        <div className="docker-c-main">
+          <div className="docker-c-name mono">
+            {r.name}
+            <span className="type-chip">🗄 {t('архив')}</span>
+            {entry.note && <span className="muted small">{entry.note}</span>}
+          </div>
+          <div className="docker-c-img mono muted small repo-meta">
+            <span>{t('снапшотов: {n}', { n: r.snapshots })}</span>
+            <span>{fmtBytes(r.size_bytes)}</span>
+            <span>{t('последний бэкап')}: {fmtDay(r.last_activity ?? 0)}</span>
+            {since && <span title={entry.by ? t('убрал {who}', { who: entry.by }) : ''}>{t('в архиве с {d}', { d: since })}</span>}
+            {x && x.check_ts && (x.check_ok ?? -1) >= 0 ? (
+              <span className={x.check_ok === 0 ? 't-down' : ''}>
+                {x.check_ok === 0 ? t('проверка не прошла') : t('проверка')}: {fmtAgo(x.check_ts)}
+              </span>
+            ) : null}
+          </div>
+        </div>
+        {canAct && (
+          <button className="ghost small-btn" disabled={busy} onClick={restore} title={t('Вернуть из архива: снова следить за свежестью')}>
+            {busy ? '...' : t('вернуть')}
+          </button>
+        )}
+      </div>
     </div>
   )
 }
@@ -1500,7 +1746,7 @@ function BackupServerModal({ server: s, info, servers, canAct, onChanged, onClos
   const { t } = useI18n()
   const [q, setQ] = useState('')
   const [sort, setSort] = useState<'problems' | 'name' | 'size' | 'age' | 'snapshots' | 'growth'>('problems')
-  // клиенты без агента в панели: их бэкап сломается молча, панель узнает через 3 дня
+  // клиенты без агента в панели: сломанный бэкап панель видит только по ритму бэкапов
   const unmon = new Set(s.bsrv_unmonitored ?? [])
   const [onlyUnmon, setOnlyUnmon] = useState(false)
   // Кто раздувает сервер: обычный прирост за прогон у клиента, чей репозиторий здесь. Репозиторий
@@ -1512,11 +1758,16 @@ function BackupServerModal({ server: s, info, servers, canAct, onChanged, onClos
     const g = usualGrowth(runs)
     for (const n of [c.hostname, c.name]) if (n) growthOf.set(n, g)
   }
-  const muted = new Set(s.backup_repo_mutes ?? [])
-  const all = info.repos ?? []
-  const bad = all.filter((r) => repoBad(r, muted)).length
+  const ctx = repoCtx(s)
+  const muted = ctx.muted
+  const every = info.repos ?? []
+  // архив отдельным разделом внизу: в общем списке он выглядел бы заброшкой среди живых
+  const all = every.filter((r) => !ctx.archived.has(r.name))
+  const archivedRepos = every.filter((r) => ctx.archived.has(r.name)).sort((a, b) => a.name.localeCompare(b.name))
+  const archivedBytes = archivedRepos.reduce((a, r) => a + (r.size_bytes || 0), 0)
+  const bad = all.filter((r) => repoBad(r, ctx)).length
   const ql = q.trim().toLowerCase()
-  const rank = (r: RepoStat) => (repoBad(r, muted) ? 0 : muted.has(r.name) ? 2 : 1)
+  const rank = (r: RepoStat) => (repoBad(r, ctx) ? 0 : muted.has(r.name) ? 2 : 1)
   const rcmp: Record<string, (a: RepoStat, b: RepoStat) => number> = {
     problems: (a, b) => rank(a) - rank(b) || a.name.localeCompare(b.name),
     name: (a, b) => a.name.localeCompare(b.name),
@@ -1577,10 +1828,11 @@ function BackupServerModal({ server: s, info, servers, canAct, onChanged, onClos
             {bad > 0
               ? t('репозиториев: {n} · проблемных: {b}', { n: all.length, b: bad })
               : t('репозиториев: {n} · все ок', { n: all.length })}
+            {archivedRepos.length > 0 && ` · ${t('в архиве: {n}', { n: archivedRepos.length })}`}
           </span>
           {unmon.size > 0 && (
             <button className={`type-chip ${onlyUnmon ? 'on' : ''}`} onClick={() => setOnlyUnmon(!onlyUnmon)}
-              title={t('Клиенты этих репозиториев не подключены к панели. Если их бэкап сломается, панель узнает только через 3 дня, когда репозиторий устареет. Агент на ноде дал бы алерт в тот же день.')}>
+              title={t('Клиенты этих репозиториев не подключены к панели. Сломанный бэкап панель видит только по ритму: опоздавший бэкап через интервал и еще четверть его, ежедневный через 30 часов. Агент на ноде сказал бы сразу, как бэкап упал.')}>
               {t('без агента в панели: {n}', { n: unmon.size })}
             </button>
           )}
@@ -1637,17 +1889,31 @@ function BackupServerModal({ server: s, info, servers, canAct, onChanged, onClos
                 <div className="muted small">{t('Ничего не найдено.')}</div>
               ) : (
                 repos.map((r) => (
-                  <RepoRow key={r.name} server={s} r={r} muted={muted} canAct={canAct} onChanged={onChanged}
+                  <RepoRow key={r.name} server={s} r={r} ctx={ctx} canAct={canAct} onChanged={onChanged}
                     growth={growthOf.get(r.name)} unmonitored={unmon.has(r.name)} />
                 ))
               )}
             </div>
           </>
         )}
+        {archivedRepos.length > 0 && (
+          <details className="repo-archive-section">
+            <summary>
+              🗄 {t('Архив: {n} ({sz})', { n: archivedRepos.length, sz: fmtBytes(archivedBytes) })}
+              <span className="muted small"> {t('хранятся как есть, без алертов; проверка целостности идет')}</span>
+            </summary>
+            <div className="loc-results docker-clist">
+              {archivedRepos.map((r) => (
+                <ArchivedRow key={r.name} server={s} r={r} entry={(s.backup_repo_archive ?? {})[r.name]}
+                  canAct={canAct} onChanged={onChanged} />
+              ))}
+            </div>
+          </details>
+        )}
         {canAct && all.length > 0 && <BulkCleanup server={s} all={all} muted={muted} />}
         <CoverageAudit server={s} canManage={canAct} onChanged={onChanged} />
         <div className="muted small">
-          {t('Читается на сервере без паролей: config (валидность), снапшоты, размер, свежесть, лок, политика хранения. Устаревшие (давно нет бэкапа) — красным и алертят; приглушите разовые/неактуальные (🔕).')}
+          {t('Читается на сервере без паролей: config (валидность), снапшоты, размер, свежесть, лок, политика хранения. Опоздавшие и устаревшие - красным и алертят. То, что хранится как есть (сервера больше нет, разовый бэкап, проект заморожен), уберите в архив (🗄), временное приглушите (🔕).')}
         </div>
       </div>
     </div>,
@@ -1731,9 +1997,10 @@ function BulkCleanup({ server, all, muted }: {
 
 function BackupServerRow({ server: s, info, onOpen }: { server: Server; info: BackupServerInfo; onOpen: () => void }) {
   const { t } = useI18n()
-  const repos = info.repos ?? []
-  const muted = new Set(s.backup_repo_mutes ?? [])
-  const bad = repos.filter((r) => repoBad(r, muted)).length
+  const ctx = repoCtx(s)
+  const repos = (info.repos ?? []).filter((r) => !ctx.archived.has(r.name))
+  const archivedN = (info.repos ?? []).length - repos.length
+  const bad = repos.filter((r) => repoBad(r, ctx)).length
   // и покрытие тоже: бэкап-сервер в списке клиентов не рендерится, так что его
   // заглушённые пункты покрытия иначе оказались бы только в сводке
   const repoMutes = collectMutes(s, t, ['repo', 'audit'])
@@ -1755,6 +2022,7 @@ function BackupServerRow({ server: s, info, onOpen }: { server: Server; info: Ba
         <div className="check-target mono muted small">
           {t('репозиториев: {n}', { n: repos.length })}
           {bad > 0 ? ` · ${t('проблемных: {b}', { b: bad })}` : ''}
+          {archivedN > 0 ? ` · ${t('в архиве: {n}', { n: archivedN })}` : ''}
         </div>
       </div>
       <div className="docker-host-count mono">

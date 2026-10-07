@@ -363,3 +363,185 @@ async def test_old_restic_on_backup_server_goes_to_server_field_and_ansible(clie
     rows = {x["name"]: x for x in (await client.get(
         "/api/ansible/servers", headers={"Authorization": f"Bearer {atok}"})).json()["servers"]}
     assert rows["bsrv"]["issues"] == ["restic_old"]
+
+
+def test_backup_cadence_from_the_head_of_the_snapshot_list():
+    """Ритм - по самым свежим интервалам, пока они сходятся с самым новым: глубже снапшоты
+    проредила политика хранения, и интервалы там длиннее настоящих."""
+    from app import collector
+
+    h = 3600
+    t0 = 1_800_000_000
+    daily = [t0 - i * 24 * h for i in range(8)]
+    # как на серверах: после 7 суточных идут 72 и 168 часов
+    assert collector.backup_cadence(daily + [daily[-1] - 72 * h, daily[-1] - 240 * h]) == 24 * h
+    assert collector.backup_cadence([t0 - i * h for i in range(6)]) == h
+    # снапшоты одного прогона (файлы и дампы отдельно) - один бэкап
+    assert collector.backup_cadence([t0, t0 - 60, t0 - 24 * h, t0 - 24 * h - 90, t0 - 48 * h]) == 24 * h
+    # keep-daily 2: один суточный интервал, дальше недельные - ритм не ясен, а не "раз в неделю"
+    assert collector.backup_cadence([t0, t0 - 24 * h, t0 - 192 * h, t0 - 360 * h]) == 0
+    # ручной бэкап посреди дня: пока он в голове, ритм не ясен (лучше 3 дня, чем ложный алерт)
+    assert collector.backup_cadence([t0, t0 - 2 * h, t0 - 24 * h, t0 - 48 * h]) == 0
+    # app-d: редкие и неровные бэкапы
+    assert collector.backup_cadence([t0, t0 - 153 * h, t0 - 6549 * h, t0 - 8066 * h]) == 0
+    assert collector.backup_cadence([t0]) == 0 and collector.backup_cadence(None) == 0
+
+
+def test_late_backup_of_a_client_without_an_agent():
+    """С известным ритмом клиент без агента опаздывает через интервал и четверть его; у клиента
+    с агентом порог не короче прежних 3 дней, а у недельного бэкапа он шире."""
+    from datetime import datetime, timezone
+
+    from app import collector
+
+    now = datetime(2026, 10, 8, 12, tzinfo=timezone.utc)
+    ts = now.timestamp()
+    h = 3600
+
+    def repo(age_h):
+        return {"name": "web-01", "valid": True, "last_activity": ts - age_h * h}
+
+    daily, weekly = 24 * h, 168 * h
+    assert collector._backup_repo_reason(repo(29), now, daily, monitored=False) == ""
+    assert collector._backup_repo_reason(repo(31), now, daily, monitored=False) == \
+        "бэкап опоздал: обычно раз в сутки, последний 31 ч назад"
+    assert collector._backup_repo_reason(repo(31), now, daily, monitored=True) == ""
+    assert collector._backup_repo_reason(repo(80), now, daily, monitored=True).startswith("бэкап опоздал")
+    # недельный: 4 дня - не устарел (раньше был алерт через 3 дня), 9 дней - опоздал
+    assert collector._backup_repo_reason(repo(96), now, weekly, monitored=True) == ""
+    assert collector._backup_repo_reason(repo(216), now, weekly, monitored=False) == \
+        "бэкап опоздал: обычно раз в неделю, последний 9 дн назад"
+    # ритм не ясен - как раньше
+    assert collector._backup_repo_reason(repo(96), now, 0, monitored=False) == "нет новых бэкапов 4 дн"
+    # ритм из блока helper'а и клиент по именам нод панели
+    extra = {"repos": {"web-01": {"recent": [ts - 31 * h - i * daily for i in range(5)]}}}
+    assert collector.repo_reason(repo(31), now, extra, {"backup-01"}).startswith("бэкап опоздал")
+    assert collector.repo_reason(repo(31), now, extra, {"web-01"}) == ""
+
+
+def test_archive_is_not_a_problem_and_old_groups_are_named():
+    """Архив не устаревает, не ротация и не "клиент без агента"; старая группа называется по
+    хосту, а убранная в архив больше не делает ротацию встающей."""
+    from datetime import datetime, timezone
+
+    from app import collector
+
+    now = datetime(2026, 10, 8, 12, tzinfo=timezone.utc)
+    ts = now.timestamp()
+    d = 86400
+    pol = {"keep_daily": 7, "keep_weekly": 4, "keep_monthly": 6}
+    gone = {"name": "vpn-b", "valid": True, "snapshots": 14, "last_activity": ts - 700 * d,
+            "oldest_snapshot": ts - 900 * d, **pol}
+    renamed = {"name": "vpn-a", "valid": True, "snapshots": 29, "last_activity": ts - 3600,
+               "oldest_snapshot": ts - 860 * d, "rotation_removed": 1, **pol}
+    bs = {"repos": [gone, renamed]}
+    extra = {"repos": {"vpn-a": {"groups": {"ts": ts - 3600, "groups": [
+        {"host": "server", "n": 17, "first": ts - 200 * d, "last": ts - 3600},
+        {"host": "vpn-a", "n": 12, "first": ts - 860 * d, "last": ts - 856 * d},
+    ]}}}}
+    assert collector._backup_problem_repos(bs, set(), now) == ["vpn-b"]
+    assert collector._backup_problem_repos(bs, set(), now, archive={"vpn-b": {}}) == []
+    assert collector.backup_unmonitored({"repos": [renamed]}, set(), set(), now) == ["vpn-a"]
+    assert collector.backup_unmonitored({"repos": [renamed]}, set(), set(), now, {"vpn-a": {}}) == []
+    stale = collector.rotation_stale_repos(bs, now, extra)
+    assert stale == ["vpn-a (860 дн. > 231, старая группа vpn-a: 12 снапшотов)"], stale
+    assert collector.rotation_stale_repos(bs, now, extra, {"vpn-a|vpn-a": {}}) == []
+    assert collector.rotation_stale_repos(bs, now, extra, {"vpn-a": {}}) == []
+    assert [g["host"] for g in collector.old_groups(extra, None, "vpn-a", ts)] == ["vpn-a"]
+    # группы старше трех суток (prune-скрипт не запускается) - не судим по ним
+    stale_groups = {"repos": {"vpn-a": {"groups": dict(extra["repos"]["vpn-a"]["groups"], ts=ts - 5 * d)}}}
+    assert collector.old_groups(stale_groups, None, "vpn-a", ts) == []
+
+
+async def test_archive_endpoint_and_late_reasons_in_the_server_list(client, auth_headers):
+    import time
+
+    r = await client.post("/api/servers", json={"name": "backup-02"}, headers=auth_headers)
+    token, sid = r.json()["token"], r.json()["server"]["id"]
+    now = int(time.time())
+    h = 3600
+    rep = {"hostname": "backup-02", "os": "Debian", "agent_version": "2.23", "cpu_percent": 5,
+           "mem_used": 1, "mem_total": 2, "clock_unix": now,
+           "backup_server": {"present": True, "running": True, "repos": [
+               {"name": "gone-client", "valid": True, "snapshots": 9, "size_bytes": 1,
+                "last_activity": now - 31 * h},
+               {"name": "vpn-b", "valid": True, "snapshots": 14, "size_bytes": 1,
+                "last_activity": now - 700 * 86400}]},
+           "extras": {"backup-server": {"v": 1, "ts": now - 30, "legacy": None, "repos": {
+               "gone-client": {"recent": [now - 31 * h - i * 24 * h for i in range(5)]}}}}}
+    r = await client.post("/api/agent/report", json=rep, headers={"Authorization": f"Bearer {token}"})
+    assert r.status_code == 200, r.text
+
+    def mine(rows):
+        return [x for x in rows if x["id"] == sid][0]
+
+    srv = mine((await client.get("/api/servers", headers=auth_headers)).json())
+    assert srv["bsrv_cadence"] == {"gone-client": 24 * h}
+    assert srv["bsrv_repo_reasons"] == {
+        "gone-client": "бэкап опоздал: обычно раз в сутки, последний 31 ч назад",
+        "vpn-b": "нет новых бэкапов 700 дн"}
+    r = await client.post(f"/api/servers/{sid}/backup/repo-archive", headers=auth_headers,
+                          json={"repo": "vpn-b", "note": "сервера больше нет", "archived": True})
+    assert r.status_code == 200, r.text
+    assert r.json()["backup_repo_archive"]["vpn-b"]["note"] == "сервера больше нет"
+    srv = mine((await client.get("/api/servers", headers=auth_headers)).json())
+    assert list(srv["bsrv_repo_reasons"]) == ["gone-client"]
+    r = await client.post(f"/api/servers/{sid}/backup/repo-archive", headers=auth_headers,
+                          json={"repo": "vpn-b", "host": "old host", "archived": True})
+    assert r.status_code == 422  # хост только из безопасных символов
+    r = await client.post(f"/api/servers/{sid}/backup/repo-archive", headers=auth_headers,
+                          json={"repo": "vpn-b", "archived": False})
+    assert r.json()["backup_repo_archive"] == {}
+
+
+async def test_new_late_repo_alerts_at_once_next_to_an_old_problem(tmp_path, monkeypatch):
+    """Опоздавший бэкап клиента без агента приходит сразу, а не с суточным напоминанием про
+    репозиторий, который уже был проблемным."""
+    from datetime import datetime, timedelta, timezone
+
+    from app import collector
+    from app.config import Settings
+    from app.db import Base, create_engine_and_factory
+    from app.models import Server
+
+    engine, factory = create_engine_and_factory(f"sqlite+aiosqlite:///{(tmp_path / 'l.db').as_posix()}")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    now = datetime.now(timezone.utc)
+    ts = now.timestamp()
+    h = 3600
+
+    def report(late_age_h):
+        last = ts - late_age_h * h
+        return {"cpu_percent": 5, "clock_unix": ts,
+                "backup_server": {"present": True, "running": True, "repos": [
+                    {"name": "vpn-b", "valid": True, "snapshots": 14, "last_activity": ts - 700 * 86400},
+                    {"name": "web-07", "valid": True, "snapshots": 9, "last_activity": last}]},
+                "extras": {"backup-server": {"v": 1, "ts": ts - 30, "repos": {
+                    "web-07": {"recent": [last - i * 24 * h for i in range(5)]}}}}}
+
+    async with factory() as s:
+        s.add(Server(name="backup-03", token_hash="x", enabled=True, backup_not_required=True,
+                     last_seen=now, last_report=report(5),
+                     cpu_alert_percent=0, mem_alert_percent=0, disk_alert_percent=0))
+        await s.commit()
+    sent: list[str] = []
+
+    async def fake_send(cfg, text, parse_mode=None):
+        sent.append(text)
+        return []
+
+    monkeypatch.setattr("app.alerts.send_alert", fake_send)
+    settings = Settings(alert_webhook="http://hook")
+    await collector.evaluate_servers(factory, settings, now)
+    first = [x for x in sent if "vpn-b" in x]
+    assert len(first) == 1 and "web-07" not in first[0], sent
+    async with factory() as s:
+        bsrv = (await s.scalars(collector.select(Server).where(Server.name == "backup-03"))).first()
+        bsrv.last_report = report(31)
+        bsrv.last_seen = now + timedelta(seconds=30)
+        await s.commit()
+    await collector.evaluate_servers(factory, settings, now + timedelta(seconds=30))
+    late = [x for x in sent if "web-07" in x]
+    assert len(late) == 1 and "бэкап опоздал" in late[0], sent
+    await engine.dispose()
