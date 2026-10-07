@@ -198,6 +198,8 @@ _SRV_ICON = {
     "cpu_spin": "🌀", "backup_growth": "💾📈", "docker_sock": "🔓🐳",
     # ⏳ — срок ещё не вышел, есть время спланировать; 🔥 — доставка уже встала
     "kube_expiry": "⏳", "flux_down": "🔥☸️", "kube_pod": "☸️🔥", "web_5xx": "🌐🔥",
+    # репозиторий чартов недоступен, а развернутое работает: предупреждение, а не авария
+    "flux_stale": "⚠️☸️",
 }
 
 # Куда ведёт ссылка алерта (deep-link ?server=id&sec=…). Целимся в КОНКРЕТНУЮ метрику,
@@ -210,7 +212,7 @@ _SRV_SECTION = {
     "mem": "mem", "oom": "oom",
     "conntrack": "conntrack", "disk": "diskfill", "disktemp": "disktemp",
     "db_conn": "services",
-    "kube_expiry": "kube", "flux_down": "kube", "kube_pod": "kube", "web_5xx": "web",
+    "kube_expiry": "kube", "flux_down": "kube", "flux_stale": "kube", "kube_pod": "kube", "web_5xx": "web",
     "clock": "clock", "disk_health": "diskhealth", "inode": "diskfill", "disk_forecast": "diskfill", "units": "units",
     "cpu_spin": "cpueat",
 }
@@ -224,7 +226,7 @@ _DISK_ICON = {1: "⚠️", 2: "🔴", 3: "🚨"}
 # Раздел панели, к которому относится алерт — по нему персональная рассылка
 # понимает, кого он касается (у учётки может не быть, скажем, «Бэкапов»).
 # Вкладка карточки кластера в разделе "Кубер", куда ведет ссылка алерта.
-_KUBE_TAB = {"kube_expiry": "expiry", "flux_down": "flux", "kube_pod": "pods"}
+_KUBE_TAB = {"kube_expiry": "expiry", "flux_down": "flux", "flux_stale": "flux", "kube_pod": "pods"}
 
 _ALERT_SECTION = {
     "docker_loop": "docker",
@@ -1163,7 +1165,7 @@ _SRV_LABEL = {
     "backup_missing": "бэкап", "backup_failed": "бэкап", "backup_stale": "свежесть бэкапа",
     "backup_dump": "дамп СУБД", "backup_dump_space": "место под дампы",
     "backup_cron": "дамп-CronJob", "backup_custom": "свой бэкап", "clock": "время",
-    "kube_expiry": "сроки Kubernetes", "flux_down": "доставка Flux",
+    "kube_expiry": "сроки Kubernetes", "flux_down": "доставка Flux", "flux_stale": "репозиторий чартов",
     "kube_pod": "поды kubernetes",
     "web_5xx": "ошибки 5xx",
     "disk_health": "диски",
@@ -1237,6 +1239,8 @@ def _recovery_detail(key: str, st: dict, ctx: dict) -> str:
         return "прирост бэкапа снова обычный"
     if key == "docker_sock":
         return "внешний прокси больше не держит docker-сокет"
+    if key == "flux_stale":
+        return "репозиторий чартов снова отвечает"
     label = _SRV_LABEL[key]
     unit, val = _SRV_UNIT.get(key), ctx.get("value")
     if not unit or val is None:
@@ -1339,6 +1343,32 @@ _FLUX_STRIP = (
 # «[Job/k8s-b-prod/k8s-b-migrations status: 'Failed']» — так Flux называет объект,
 # который не поднялся. Человеку нужнее «Job k8s-b-migrations: Failed».
 _FLUX_OBJ = re.compile(r"\[(\w+)/[^/\]]+/([^\s\]]+) status: '([^']+)'\]")
+
+
+# Подсказка по тексту ошибки. reason у источников бывает общий ("Failed"), и по нему не понять,
+# что чинить: 07.10.2026 HelmRepository cert-manager на двух РФ-нодах упал с "dial tcp
+# 8.6.112.0:443: i/o timeout", и алерт пришел без единого слова о причине. Побеждает первое
+# совпадение, поэтому узкие образцы стоят выше общих.
+_FLUX_MSG_HINTS = (
+    # Cloudflare отдает российским резолверам эти адреса, а из РФ они недоступны
+    (re.compile(r"dial tcp (?:8\.6\.112|8\.47\.69)\.\d+:\d+"),
+     "это адреса Cloudflare, из РФ они недоступны: переведите источник на OCI вне Cloudflare "
+     "(чарты cert-manager - oci://quay.io/jetstack/charts)"),
+    (re.compile(r"no such host"), "имя источника не резолвится на ноде, проверьте DNS"),
+    (re.compile(r"\b(?:401|403)\b|unauthorized|authentication required|access denied", re.I),
+     "источник отказал в доступе, проверьте токен в секрете источника"),
+    (re.compile(r"x509|certificate", re.I), "не прошла проверка TLS-сертификата источника"),
+    (re.compile(r"i/o timeout|connection timed out|connection refused|context deadline exceeded", re.I),
+     "источник не отвечает с ноды: проверьте, открыт ли он из этой сети"),
+)
+
+
+def _flux_msg_hint(msg: str) -> str:
+    """Что делать, судя по тексту ошибки Flux. Пусто, если текст ни на что не похож."""
+    for rx, hint in _FLUX_MSG_HINTS:
+        if rx.search(msg or ""):
+            return hint
+    return ""
 
 
 def _flux_detail(msg: str, limit: int = 150) -> str:
@@ -3089,23 +3119,36 @@ def _server_conditions(s: Server, now: datetime,
             why, hint = _FLUX_REASON.get(reason, ("", ""))
             where = f.get("where") or ""
             ns, _, name = where.partition("/")
+            # текст ошибки точнее reason: "проверьте секрет" при недоступном адресе увел бы не туда
+            hint = _flux_msg_hint(f.get("message") or "") or hint
+            if hint:
+                hint = hint.format(ns=ns or "namespace", name=name or "имя")
             tail = []
             if len(pool) > 1:
                 tail.append(f"ещё {len(pool) - 1} сломано")
             if waiting:
                 tail.append(f"{waiting} ждут этого")
-            sustain("flux_down", True, {
+            ctx = {
                 "what": f.get("kind") or "ресурс Flux",
                 "where": where,
                 # человеческая причина, а сырой reason — в скобках: по нему гуглят
                 "reason": f"{why} ({reason})" if why else reason,
                 "message": _flux_detail(f.get("message") or "") or "без пояснения",
-                "hint": ("\n↳ " + hint.format(ns=ns or "namespace", name=name or "имя"))
-                        if hint else "",
                 "more": f" [{', '.join(tail)}]" if tail else "",
-            })
+            }
+            # Упали только репозитории чартов, а все сборки и релизы в Ready: развернутое
+            # работает на закешированном чарте, не придут лишь новые версии чартов. Это
+            # предупреждение, а не "доставка встала": изменения из Git по-прежнему
+            # применяются. Упавший GitRepository, наоборот, останавливает все выкаты.
+            if all((x.get("kind") or "") == "HelmRepository" for x in broken):
+                sustain("flux_stale", True, dict(ctx, hint=f"\n{hint}" if hint else ""))
+                sustain("flux_down", False, {})
+            else:
+                sustain("flux_down", True, dict(ctx, hint=f"\n↳ {hint}" if hint else ""))
+                sustain("flux_stale", False, {})
         else:
             sustain("flux_down", False, {})
+            sustain("flux_stale", False, {})
 
     # Пошли ошибки 5xx. Выдержка тут - само окно в 15 минут, поэтому уровень ставим сразу,
     # без sustain: иначе к окну добавились бы ещё 15 минут ожидания.
