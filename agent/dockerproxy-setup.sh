@@ -100,3 +100,4 @@ else
 fi
 install -d -m 0755 "$VERDIR"
 echo "$KERVAX_SETUP_VERSION" > "$MARK"
+chmod 0644 "$MARK"  # explicit: the agent (kervax) must read it; the installer runs helpers under umask 077

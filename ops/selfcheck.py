@@ -95,6 +95,17 @@ def check_helpers() -> None:
         fail("helper", f"«{name}» не говорит, каким нодам он нужен — добавьте "
                        f"KERVAX_SETUP_ALWAYS или KERVAX_SETUP_WHEN=… "
                        f"(иначе ни установщик, ни плейбук его никуда не поставят)")
+    # Отметку версии пишет root, а читает агент (пользователь kervax). Из установщика helper
+    # идет под umask 077, и без явного chmod 0644 отметка выходит 0600: агент ее не видит, и
+    # панель зовет поставить helper, который стоит (dockerproxy-setup на новой ноде, 07.10.2026).
+    # Под ansible (umask 022) этого не видно.
+    for name in sorted(files):
+        body = read(f"agent/{name}.sh")
+        for m in re.finditer(r'echo "\$KERVAX_SETUP_VERSION" > ("?[^"\s]+"?)', body):
+            if f"chmod 0644 {m.group(1)}" not in body:
+                fail("helper", f"«{name}» пишет отметку версии {m.group(1)} без chmod 0644 - "
+                               f"из установщика (umask 077) она выйдет 0600, агент ее не прочтет, "
+                               f"и панель скажет, что helper не установлен")
     print(f"helper-скриптов: {len(files)}, с подписями: {len(labels & files)}, "
           f"с условием применимости: {len(files) - len(silent)}")
 
