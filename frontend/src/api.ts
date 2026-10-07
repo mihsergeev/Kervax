@@ -1231,6 +1231,8 @@ export type Server = {
   proxy_outdated?: { name: string; image: string; kind: string; version: string; built: number; age_days: number }[]
   // нода умеет разобрать раздел по запросу (агент 2.24 + diskusage-setup 0.6)
   disk_analyze?: boolean
+  // только что поставлена: установщик еще ставит helper'ы и прокси Docker
+  fresh?: boolean
   agent_ip: string
   last_report: ServerReport | null
   last_seen: string | null

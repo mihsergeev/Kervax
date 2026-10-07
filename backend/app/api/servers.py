@@ -199,6 +199,7 @@ def _out(
     o.docker_exposed = docker_exposure.exposed(server.last_report or {})
     o.proxy_outdated = docker_exposure.outdated(server.last_report or {}, now.timestamp())
     o.disk_analyze = disk_analyze_ok(server.last_report or {})
+    o.fresh = _fresh_node(server, now)
     o.problems = server_problems(server, now, pod_names)
     o.alert_since = alert_since(server)
     o.docker_since = docker_since(server)
@@ -428,11 +429,30 @@ def helper_rollout(server: Server, advice: list[HelperAdvice]) -> bool:
     return bool(advice) or caps.get("watchdog") is False
 
 
+# Первые минуты после первого отчета установщик еще ставит helper'ы и прокси Docker: агент он
+# запускает раньше них. Их отсутствие тогда не повод звать "поставьте" - плашки пропадали сами
+# через пару минут и сбивали с толку. Установщик, упавший на полпути, проявится после паузы.
+FRESH_NODE = timedelta(minutes=20)
+
+
+def _fresh_node(server: Server, now: datetime | None = None) -> bool:
+    """Нода только что поставлена: с первого отчета агента не прошло FRESH_NODE."""
+    t = server.first_report_at
+    if t is None:
+        return False
+    now = now or datetime.now(timezone.utc)
+    return now - (t if t.tzinfo else t.replace(tzinfo=timezone.utc)) < FRESH_NODE
+
+
 def _helper_advice(server: Server, cur: dict[str, str]) -> list[HelperAdvice]:
     """Устаревшие setup-скрипты (helper'ы) на ноде: агент шлёт установленные версии
     (setup_versions), сверяем с текущими раздаваемыми. Флагуем только helper'ы, которые
     нода ТОЧНО имеет (manageable / бэкап-сервер с репо / kube-доступ). Гейт: агент <1.46
-    не шлёт setup_versions → молчим (не путаем старый агент со старым helper'ом)."""
+    не шлёт setup_versions → молчим (не путаем старый агент со старым helper'ом).
+
+    У только что поставленной ноды отсутствующий helper не флагуем: установщик его еще ставит
+    (_fresh_node). Устаревший флагуем: установщик берет helper'ы у панели, со старым не приходит."""
+    fresh = _fresh_node(server)
     rep = server.last_report or {}
     try:
         if float(rep.get("agent_version") or 0) < 1.46:
@@ -448,6 +468,8 @@ def _helper_advice(server: Server, cur: dict[str, str]) -> list[HelperAdvice]:
         inst = sv.get(name)  # None = helper до версионирования
         # агенты < 1.63 слали версии числами — приводим к строке, чтобы не спорить о типах
         inst = None if inst is None else str(inst)
+        if inst is None and fresh:
+            continue
         if inst is None or _ver_key(inst) < _ver_key(c):
             out.append(
                 HelperAdvice(
@@ -2528,6 +2550,8 @@ async def agent_report(
         report_dict["clock_skew_sec"] = int(now.timestamp()) - body.clock_unix
     server.last_report = report_dict
     server.last_seen = now
+    if server.first_report_at is None:
+        server.first_report_at = now
 
     # Сигнал обновления: только если админ выставил target и агент ещё не на ней.
     # Агент сам проверит подпись/хеш/анти-откат — панель лишь просит.

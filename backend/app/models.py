@@ -515,6 +515,12 @@ class Server(Base):
     last_seen: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    # Первый отчет агента. Установщик ставит helper'ы и прокси Docker уже после старта агента,
+    # и первые минуты панель видела их отсутствие: "не установлен, поставьте", "Docker без
+    # доступа", через пару минут плашки пропадали сами (см. FRESH_NODE в api/servers.py).
+    first_report_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     # Когда для этой ноды последний раз просили ручную проверку сайта. Дешёвый
     # признак для горячих путей: агенты опрашивают панель раз в секунду, и лезть на
     # каждом опросе в probe_requests ради редкой кнопки незачем — строка сервера и
