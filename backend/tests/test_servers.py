@@ -1411,6 +1411,42 @@ async def test_server_flux_down_conditions():
     assert collector._server_conditions(s, now)["flux_down"][0] == 0
 
 
+async def test_flux_chart_repo_down_is_a_warning_with_a_hint():
+    """07.10.2026: HelmRepository cert-manager на двух РФ-нодах упал с "dial tcp 8.6.112.0:443:
+    i/o timeout", а cert-manager работал на закешированном чарте. Пришло "доставка встала" с огнем
+    и без слова о причине. Теперь это предупреждение с подсказкой, а упавший GitRepository
+    по-прежнему авария: он останавливает все выкаты."""
+    from datetime import datetime, timedelta, timezone
+
+    from app import collector
+
+    now = datetime.now(timezone.utc)
+    s = _kube_server(now, last_report={"flux": [
+        {"kind": "HelmRelease", "where": "default/cert-manager", "ready": True},
+        {"kind": "HelmRepository", "where": "default/cert-manager", "ready": False, "reason": "Failed",
+         "message": 'failed to fetch Helm repository index: failed to cache index to temporary file: '
+                    'Get "https://charts.jetstack.io/index.yaml": dial tcp 8.6.112.0:443: i/o timeout'},
+    ]})
+    s.alert_state = {"flux_stale_since": (now - timedelta(minutes=20)).isoformat()}
+    cond = collector._server_conditions(s, now)
+    assert cond["flux_down"][0] == 0
+    assert cond["flux_stale"][0] == 1
+    assert "Cloudflare" in cond["flux_stale"][1]["hint"] and "oci://" in cond["flux_stale"][1]["hint"]
+    assert cond["flux_stale"][1]["where"] == "default/cert-manager"
+
+    # упал GitRepository: это уже авария, и подсказка тоже по тексту ошибки, а не по reason
+    s.last_report = {"flux": [
+        {"kind": "GitRepository", "where": "flux-system/flux-system", "ready": False,
+         "reason": "GitOperationFailed",
+         "message": "failed to checkout and determine revision: unable to clone 'https://git.example/x': "
+                    "dial tcp: lookup git.example on 10.96.0.10:53: no such host"},
+    ]}
+    s.alert_state = {"flux_down_since": (now - timedelta(minutes=20)).isoformat()}
+    cond = collector._server_conditions(s, now)
+    assert cond["flux_down"][0] == 1 and cond["flux_stale"][0] == 0
+    assert "DNS" in cond["flux_down"][1]["hint"]
+
+
 async def test_flux_alert_points_at_the_root_of_the_cascade():
     """Одна упавшая сборка тянет за собой зависимые — алертить надо о причине.
 
