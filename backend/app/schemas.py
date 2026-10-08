@@ -1289,6 +1289,8 @@ class AgentReportIn(BaseModel):
     setup_versions: dict | None = None  # версии setup-скриптов на ноде: {backup-setup:1, kube-setup:1,…}
     clock: dict | None = None  # статус синхронизации времени: {synced,ntp,service}
     clock_unix: int = 0  # локальные часы ноды на момент отправки (для расчёта сдвига панелью)
+    # DNS ноды (агент 2.25): {mode, servers:[{addr,ms,err}], miss_ms, miss_err, miss_ts, ts}
+    dns: dict | None = None
     # блоки root-хелперов как есть: {"custom-backups": {...}} (агент 2.8+, report.d)
     extras: dict | None = None
 

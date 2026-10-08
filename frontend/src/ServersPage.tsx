@@ -22,6 +22,7 @@ import {
   snoozeServerAlert,
   updateServer,
   type ClockInfo,
+  type DnsInfo,
   type DiskForecastItem,
   type FailedUnit,
   type DiskHealthDisk,
@@ -537,6 +538,32 @@ function etaText(h: number, t: TFn): string {
   if (h < 1) return t('меньше чем через час')
   if (h < 48) return t('примерно через {n} ч', { n: Math.round(h) })
   return t('примерно через {n} дн', { n: Math.round(h / 24) })
+}
+
+// DNS ноды в шапке детали: время ответа каждого резолвера; медленнее 1,5 с или без ответа -
+// красным (тот же порог, что у алерта на бэкенде). В подсказке - как нода ходит в DNS и сколько
+// занял последний резолв имени не из кэша.
+const DNS_SLOW_MS = 1500
+function DnsStatus({ dns }: { dns: DnsInfo }) {
+  const { t } = useI18n()
+  const ms = (x: { ms: number; err?: string }) => (x.ms >= 0 ? `${x.ms} ${t('мс')}` : x.err && x.err !== 'timeout' ? x.err : t('нет ответа'))
+  const bad = (x: { ms: number }) => x.ms < 0 || x.ms > DNS_SLOW_MS
+  const mode = dns.mode === 'resolved' ? t('через systemd-resolved') : dns.mode === 'local' ? t('свой резолвер на ноде') : t('резолверы из resolv.conf')
+  const miss = dns.miss_ts
+    ? `${t('имя не из кэша')}: ${dns.miss_ms >= 0 ? `${dns.miss_ms} ${t('мс')}` : t('не резолвится')} (${fmtRel(new Date(dns.miss_ts * 1000).toISOString())})`
+    : ''
+  const title = [mode, miss].filter(Boolean).join('\n')
+  if (!dns.servers?.length) return <span className="muted" title={title}>{miss || '-'}</span>
+  return (
+    <span title={title}>
+      {dns.servers.map((x, i) => (
+        <span key={x.addr}>
+          {i > 0 && ', '}
+          {x.addr} <span className={bad(x) ? 't-down' : 't-up'}>{ms(x)}</span>
+        </span>
+      ))}
+    </span>
+  )
 }
 
 // компактный статус времени в шапке детали: цвет по модулю сдвига (норма<5с / предупр<30с /
@@ -4257,6 +4284,11 @@ function ServerDetail({
                 <ClockStatus clock={r.clock} skew={r.clock_skew_sec} />
               </span>
             )}
+            {r.dns && (
+              <span className="srv-meta-item">
+                <span className="srv-meta-k">DNS</span> <DnsStatus dns={r.dns} />
+              </span>
+            )}
             <span className="srv-meta-item">
               <span className="srv-meta-k">{t('обновлено')}</span> {fmtRel(s.last_seen)}
             </span>
@@ -4295,6 +4327,16 @@ function ServerDetail({
         {r.clock && Math.abs(r.clock_skew_sec ?? 0) >= 5 && (
           <ClockFix server={s} clock={r.clock} skew={r.clock_skew_sec} canManage={!isViewer} />
         )}
+        {/* DNS тормозит дольше 10 минут (порог и выдержка те же, что у алерта): что именно и
+            что с этим делать прямо сейчас */}
+        {(s.problems ?? []).filter((p) => p.kind === 'dns').map((p) => (
+          <div key="dns" className="dns-problem small">
+            <span className="t-down">{p.text}</span>
+            <div className="muted">
+              {t('Пока резолверы провайдера тормозят, можно добавить на ноде публичные (1.1.1.1, 8.8.8.8) рядом с ними: systemd-resolved спросит все и возьмет первый ответ.')}
+            </div>
+          </div>
+        ))}
         <div className="uptime-tiles">
           <div className="uptime-tile">
             <div className={`uptime-val ${toneOf(r.cpu_percent != null ? Math.round(r.cpu_percent) : null)}`}>

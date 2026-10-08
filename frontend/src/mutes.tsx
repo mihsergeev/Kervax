@@ -78,6 +78,7 @@ const RULE_KIND_LABELS: Record<string, string> = {
   backup_prune: 'Бэкап-сервер: чистка не работает',
   backup_check: 'Бэкап-сервер: проверка репозитория не прошла',
   backup_unmonitored: 'Бэкап-сервер: клиент без агента',
+  dns: 'DNS на ноде',
   backup_dump: 'Бэкап: дамп СУБД',
   backup_dump_space: 'Бэкап: место под дампы',
   backup_cron: 'Бэкап: дамп-CronJob',
