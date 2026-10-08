@@ -17,7 +17,7 @@ from sqlalchemy import delete as sa_delete, func, select
 from app import audit, backup_growth, custom_backups, docker_exposure, geoip, kube_coverage, manual_probe
 from app.collector import (
     _backup_problem_repos, alert_since, backup_cadence, backup_rotation_items, backup_unmonitored,
-    bsrv_extra, bsrv_restic_old, disk_analyze_ok, repo_reason, docker_since, dump_local_stale, needed_pod_names,
+    bsrv_extra, bsrv_restic_old, disk_analyze_ok, prune_problems, repo_reason, docker_since, dump_local_stale, needed_pod_names,
     panel_server_names, pod_uid_names,
     send_alerts_soon, send_autofix_note, server_problems, web_5xx_total, web_breakdown,
     web_label_key, web_log_label, web_rate_total,
@@ -210,6 +210,11 @@ def _out(
     o.bsrv_rotation = backup_rotation_items(server, now)
     o.bsrv_restic_old = bsrv_restic_old(server.last_report or {})
     o.bsrv_cadence = _cadences(server.last_report or {})
+    bs = (server.last_report or {}).get("backup_server") or {}
+    if bs.get("present"):
+        o.bsrv_prune = {n: why for n, (_k, why) in prune_problems(
+            bs, bsrv_extra(server.last_report or {}), now, set(server.backup_repo_mutes or []),
+            server.backup_repo_archive or {}).items()}
     o.pod_names = needed_pod_names(server, pod_names)
     return o
 

@@ -1067,6 +1067,12 @@ const EN: Record<string, string> = {
   'Клиента этого репозитория нет в панели. Панель следит за ним по ритму бэкапов: опоздавший бэкап видно через интервал и еще четверть его, ежедневный через 30 часов. Агент на самой ноде сказал бы сразу, как бэкап упал.':
     'The client of this repository is not in the panel. The panel watches it by the backup rhythm: a late backup shows after its interval plus a quarter of it, a daily one after 30 hours. An agent on the node itself would tell right when the backup failed.',
   'Бэкап-сервер: ротация встала': 'Backup server: rotation stalled',
+  'Бэкап-сервер: чистка не работает': 'Backup server: cleanup is not working',
+  'Бэкап-сервер: проверка репозитория не прошла': 'Backup server: repository check failed',
+  'Бэкап-сервер: клиент без агента': 'Backup server: client without an agent',
+  'чистка не работает': 'cleanup is not working',
+  '{name}: чистка не работает - {list}': '{name}: cleanup is not working - {list}',
+  'чистка и проверка не открывают репозиторий': 'cleanup and check cannot open the repository',
   'Бэкап: дамп СУБД': 'Backup: DB dump',
   'Бэкап: место под дампы': 'Backup: dump disk space',
   'Бэкап: дамп-CronJob': 'Backup: dump CronJob',

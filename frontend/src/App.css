@@ -1488,6 +1488,10 @@ input:focus {
   padding: 0.15rem 0.55rem;
   font-size: 0.85em;
 }
+.repo-prune-why {
+  margin-top: 0.3rem;
+  align-self: flex-start;
+}
 .repo-archive-section {
   margin-top: 0.75rem;
 }

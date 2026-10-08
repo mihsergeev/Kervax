@@ -65,7 +65,9 @@ fi
 # 0.29: root crontab lines that run our prune scripts a second time (left by the ansible role)
 #       or start a prune script that is gone are commented out; the prune minute comes from the
 #       repository name, so updates no longer move it
-KERVAX_SETUP_VERSION=0.29  # MAJOR.MINOR; compared component-wise (0.13 > 0.2!)
+# 0.30: the cleanup log keeps the reason restic gives when it cannot open the repository, stats
+#       report the error of the last failed cleanup run
+KERVAX_SETUP_VERSION=0.30  # MAJOR.MINOR; compared component-wise (0.13 > 0.2!)
 # Which nodes need this helper at all. Read by the ansible playbook on the
 # CONTROL machine and evaluated as a shell condition ON THE NODE, so a new
 # helper lands where it belongs without anyone editing the playbook.
@@ -239,6 +241,21 @@ SNAP_STATE=/var/lib/kervax/bsrv-snaps
 # Snapshot groups of a repository (host and tags), written by its prune script once a night:
 # stats have no repository password and must not run restic every minute anyway.
 GROUPS_DIR=/var/lib/kervax/bsrv-groups
+# The error of the last cleanup run of a repository, when it failed or skipped the cleanup: what
+# the panel shows next to "cleanup is not working". The run's own ERROR or SAFETY line first
+# (repo not accessible, with the restic reason since 0.30), otherwise the last restic Fatal or
+# lock line of that run. Only the log tail is read; nothing for a run that went fine.
+prune_last_error() {
+  tail -n 400 "$1" 2>/dev/null | awk '
+    /=== .* start forget\/prune ===/ { err = ""; fat = ""; ok = ""; next }
+    (/^ERROR:/ || /^SAFETY:/) && err == "" { err = $0 }
+    /^(Fatal|error):/ || /^unable to / { fat = $0 }
+    /: done \(success=/ { ok = ($0 ~ /success=1/) ? "1" : "0" }
+    END {
+      if (err ~ /^SAFETY:/) print err
+      else if (ok == "0") print (err != "" ? err : fat)
+    }' | tr -cd '[:print:]' | cut -c1-200 || true
+}
 # client name validation (it is also the repository and htpasswd user name): hostname-safe characters only
 valid_name() { case "$1" in ''|*[!A-Za-z0-9._-]*) return 1 ;; *) return 0 ;; esac; }
 valid_ip()   { [[ "$1" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] || [[ "$1" =~ ^[0-9A-Fa-f:]+$ ]]; }
@@ -255,7 +272,7 @@ cmd_stats() {
   # fall back to the compose tag if the container is missing or did not answer
   [ -n "$ver" ] || { [ -f "$COMPOSE" ] && ver="$(grep -oE 'rest-server:[A-Za-z0-9._-]+' "$COMPOSE" | head -1 | cut -d: -f2)"; }
   local repos_json="" extra_json="" repo name snaps last locked lock_ts valid size prune kl kd kw km
-  local oldest cleaner ids sf removed_ts seen_since chk_ts chk_ok chk_part chk_parts recent grp now_ts legacy_list="" lcount=0
+  local oldest cleaner ids sf removed_ts seen_since chk_ts chk_ok chk_part chk_parts recent grp perr pmt now_ts legacy_list="" lcount=0
   now_ts="$(date +%s)"
   install -d -m 0700 "$SNAP_STATE" 2>/dev/null || true
   # repositories the monolith has a block for (the same exact line keep_of_legacy looks for)
@@ -340,6 +357,12 @@ cmd_stats() {
     # are thinned by the retention policy and say nothing about the rhythm.
     recent="$(find "${repo}snapshots" -maxdepth 1 -type f -printf '%T@\n' 2>/dev/null | cut -d. -f1 | sort -rn | head -8 | paste -sd, - || true)"
     [[ "$recent" =~ ^[0-9,]*$ ]] || recent=""
+    perr=""
+    [ -f "$LOG_DIR/restic-prune-$name.log" ] && perr="$(prune_last_error "$LOG_DIR/restic-prune-$name.log")"
+    # when the prune script was (re)generated: a script that never ran within days of that is
+    # stuck, while a repository just moved onto its own script simply waits for the night
+    pmt=0; [ -f "$prune" ] && pmt="$(stat -c %Y "$prune" 2>/dev/null || echo 0)"
+    [[ "$pmt" =~ ^[0-9]+$ ]] || pmt=0
     # groups from the prune script, when there is more than one (see GROUPS_PY); a damaged
     # file must not break the whole block, so only something that looks like one JSON object
     grp=null
@@ -348,7 +371,7 @@ cmd_stats() {
       case "$grp" in '{"ts": '*'}') ;; *) grp=null ;; esac
     fi
     repos_json="${repos_json:+$repos_json,}{\"name\":\"$(json_escape "$name")\",\"valid\":$valid,\"snapshots\":$snaps,\"last_activity\":$last,\"oldest_snapshot\":$oldest,\"locked\":$locked,\"lock_ts\":$lock_ts,\"size_bytes\":$size,\"keep_last\":${kl:-0},\"keep_daily\":${kd:-0},\"keep_weekly\":${kw:-0},\"keep_monthly\":${km:-0}}"
-    extra_json="${extra_json:+$extra_json,}\"$(json_escape "$name")\":{\"cleaner\":\"$cleaner\",\"removed_ts\":$removed_ts,\"seen_since\":$seen_since,\"check_ts\":$chk_ts,\"check_ok\":$chk_ok,\"check_part\":$chk_part,\"check_parts\":$chk_parts,\"recent\":[$recent],\"groups\":$grp}"
+    extra_json="${extra_json:+$extra_json,}\"$(json_escape "$name")\":{\"cleaner\":\"$cleaner\",\"removed_ts\":$removed_ts,\"seen_since\":$seen_since,\"check_ts\":$chk_ts,\"check_ok\":$chk_ok,\"check_part\":$chk_part,\"check_parts\":$chk_parts,\"recent\":[$recent],\"groups\":$grp,\"prune_err\":\"$(json_escape "$perr")\",\"prune_mtime\":$pmt}"
   done
   # watch state of repositories that are gone
   for sf in "$SNAP_STATE"/*.ids; do
@@ -523,8 +546,10 @@ oldest_snap_ts() {
 repo_size() { du -sb "$RESTIC_REPOSITORY" 2>/dev/null | awk '{print $1}'; }
 {
   echo "=== $(date -Is) ${CLIENT}: start forget/prune ==="
-  if ! "$BIN" cat config >/dev/null 2>&1; then
-    echo "ERROR: repo not accessible at $RESTIC_REPOSITORY"
+  # the reason restic gives goes into the log too (wrong password, no config, no access): the
+  # panel shows it next to "cleanup is not working" instead of a bare "not accessible"
+  if ! cfg_err="$("$BIN" cat config 2>&1 >/dev/null)"; then
+    echo "ERROR: repo not accessible at $RESTIC_REPOSITORY: $(printf '%s\n' "$cfg_err" | grep -v '^[[:space:]]*$' | tail -n1)"
   else
     snap_before="$(count_snaps)"; [ -n "$snap_before" ] || snap_before=-1
     bytes_before="$(repo_size)"; [ -n "$bytes_before" ] || bytes_before=-1
