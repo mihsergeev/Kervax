@@ -97,8 +97,10 @@ export function srvDiskPct(s: Server): number | null {
 // mute — ключ для быстрого приглушения ИМЕННО этого сигнала (disk@1 = только предупр.
 // диска, крит останется). Панель шлёт его в alert_mutes.
 // since - с какого момента проблема видна (ISO): для "Что сломано" - "2 дн"
+// section и srv - куда вести с главной, если проблема не про карточку сервера (см. ServerProblem)
 export type SrvIssue = {
   tone: 't-down' | 't-degraded'; text: string; sec?: string; mute?: string; kind?: string; since?: string | null
+  section?: 'kuber' | 'services' | 'backups'; srv?: boolean
 }
 
 // Сколько длится проблема, коротко: "40 мин", "5 ч", "3 дн". Меньше минуты - пусто: только что
@@ -174,10 +176,12 @@ export function srvIssues(
     if (temps.length && Math.max(...temps) >= s.disk_temp_alert_c)
       out.push({ tone: 't-down', text: `${t('Диск')} ${Math.round(Math.max(...temps))}°C`, sec: 'disktemp', kind: 'disktemp' })
   }
-  // новые проверки (поломки дисков, прогноз заполнения, inode, упавшие юниты) приходят с
-  // бэкенда готовыми: уровни те же, что у алертов, считать их здесь второй раз незачем
+  // остальное, о чем шлют алерты (поломки дисков, прогноз, inode, юниты, часы, DNS, коннекты СУБД,
+  // 5xx, очереди, сроки и Flux, дампы и проверки бэкапов), приходит с бэкенда готовым: уровни те
+  // же, что у алертов, считать их здесь второй раз незачем
   for (const p of s.problems ?? [])
-    out.push({ tone: p.level >= 2 ? 't-down' : 't-degraded', text: p.text, sec: p.sec, mute: p.mute, kind: p.kind, since: p.since })
+    out.push({ tone: p.level >= 2 ? 't-down' : 't-degraded', text: p.text, sec: p.sec, mute: p.mute, kind: p.kind,
+      since: p.since, section: p.section, srv: p.srv })
   // с какого момента: панель запоминает начало проблемы каждого вида (alert_since)
   for (const i of out) if (i.since === undefined && i.kind) i.since = s.alert_since?.[i.kind] ?? null
   return keep(out)

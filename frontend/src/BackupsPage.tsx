@@ -937,13 +937,21 @@ type RepoState = 'archived' | 'muted' | 'invalid' | 'locked' | 'stuck' | 'runnin
 // (клиент без агента опаздывает через сутки с небольшим, недельный бэкап не устаревает за 3
 // дня), так что список, счетчики и алерт расходиться не могут.
 // prune - репозитории, у которых не работает чистка (не открывает, падает, не запускается).
-type RepoCtx = { muted: Set<string>; archived: Set<string>; reasons: Record<string, string>; prune: Record<string, string> }
+// checks - не прошла последняя недельная проверка, моложе двух недель (как у алерта backup_check).
+type RepoCtx = {
+  muted: Set<string>; archived: Set<string>; reasons: Record<string, string>; prune: Record<string, string>
+  checks: Set<string>
+}
 function repoCtx(s: Server): RepoCtx {
+  const now = Date.now() / 1000
   return {
     muted: new Set(s.backup_repo_mutes ?? []),
     archived: new Set(Object.keys(s.backup_repo_archive ?? {}).filter((k) => !k.includes('|'))),
     reasons: s.bsrv_repo_reasons ?? {},
     prune: s.bsrv_prune ?? {},
+    checks: new Set(Object.entries(bsrvExtra(s)?.repos ?? {})
+      .filter(([, x]) => x.check_ok === 0 && !!x.check_ts && now - x.check_ts < 14 * 86400)
+      .map(([n]) => n)),
   }
 }
 // интервал бэкапов словами: раз в сутки, раз в 6 ч, раз в неделю
@@ -972,8 +980,9 @@ function repoState(r: RepoStat, c: RepoCtx): RepoState {
 function repoBad(r: RepoStat, c: RepoCtx): boolean {
   const st = repoState(r, c)
   if (st === 'muted' || st === 'archived') return false
-  // неработающая чистка - проблема при любом другом состоянии: нет ни ротации, ни проверки
-  return (st !== 'ok' && st !== 'running' && st !== 'stuck') || !!c.prune[r.name]
+  // неработающая чистка - проблема при любом другом состоянии: нет ни ротации, ни проверки.
+  // Не прошедшая проверка - тоже: в окне сервера было "все ок" при красной "проверка не прошла"
+  return (st !== 'ok' && st !== 'running' && st !== 'stuck') || !!c.prune[r.name] || c.checks.has(r.name)
 }
 // Блок helper'а backupserver-setup 0.23: кто чистит репозитории и когда из них что-то
 // удалялось. Старше 15 минут - helper встал, по такому блоку не судим.

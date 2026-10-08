@@ -3077,11 +3077,11 @@ function ServerRow({
               role="button"
               tabIndex={0}
               title={issues.map((i) => i.text).join(', ') + ' — ' + t('открыть график')}
-              onClick={(e) => { e.stopPropagation(); onOpenSec(issues.find((i) => i.sec)?.sec ?? null) }}
+              onClick={(e) => { e.stopPropagation(); onOpenSec(issues.find((i) => i.sec && !i.section)?.sec ?? null) }}
               onKeyDown={(e) => {
                 if (e.key === 'Enter' || e.key === ' ') {
                   e.stopPropagation(); e.preventDefault()
-                  onOpenSec(issues.find((i) => i.sec)?.sec ?? null)
+                  onOpenSec(issues.find((i) => i.sec && !i.section)?.sec ?? null)
                 }
               }}
             >
@@ -4327,13 +4327,20 @@ function ServerDetail({
         {r.clock && Math.abs(r.clock_skew_sec ?? 0) >= 5 && (
           <ClockFix server={s} clock={r.clock} skew={r.clock_skew_sec} canManage={!isViewer} />
         )}
-        {/* DNS тормозит дольше 10 минут (порог и выдержка те же, что у алерта): что именно и
-            что с этим делать прямо сейчас */}
+        {/* DNS тормозит или не резолвит (сразу, проблемой - после выдержки алерта) либо дольше
+            10 минут лежит один из резолверов: что именно и что с этим делать прямо сейчас. Совет -
+            по тому, как нода ходит в DNS */}
         {(s.problems ?? []).filter((p) => p.kind === 'dns').map((p) => (
           <div key="dns" className="dns-problem small">
-            <span className="t-down">{p.text}</span>
+            <span className={p.level >= 2 ? 't-down' : 't-degraded'}>{p.text}</span>
             <div className="muted">
-              {t('Пока резолверы провайдера тормозят, можно добавить на ноде публичные (1.1.1.1, 8.8.8.8) рядом с ними: systemd-resolved спросит все и возьмет первый ответ.')}
+              {p.sub === 'resolver'
+                ? t('Остальные резолверы отвечают, и имена резолвятся, но запасного нет: уберите неработающий из настроек сети ноды (netplan, /etc/resolv.conf) или замените рабочим.')
+                : r.dns?.mode === 'local'
+                  ? t('Ноду обслуживает свой резолвер (unbound, dnsmasq): проверьте его и серверы, куда он пересылает запросы.')
+                  : r.dns?.mode === 'direct'
+                    ? t('Пока резолверы провайдера тормозят, можно поставить первыми в /etc/resolv.conf публичные (nameserver 1.1.1.1 и 8.8.8.8): запросы идут к резолверам по порядку.')
+                    : t('Пока резолверы провайдера тормозят, можно добавить на ноде публичные: DNS=1.1.1.1 8.8.8.8 в /etc/systemd/resolved.conf.d/. systemd-resolved спросит их вместе с резолверами сети и возьмет первый ответ.')}
             </div>
           </div>
         ))}

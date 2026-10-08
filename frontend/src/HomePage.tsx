@@ -35,6 +35,8 @@ const ISSUE_ICON: Record<string, string> = {
   offline: '🔥', cpu: '🧮', mem: '🧠', disk: '🗄', temp: '🌡', throttle: '🥵', conntrack: '🔗',
   disktemp: '🌡', disk_health: '💽', disk_forecast: '📈', inode: '🗂', units: '⚙️', cpu_spin: '🌀',
   docker: '🐳', kuber: '☸️', backups: '💾', docker_sock: '🔓',
+  clock: '🕐', dns: '🌐', db_conn: '🔌', web_5xx: '🌐', queue: '🐇', kube_expiry: '⏳', flux_down: '☸️',
+  flux_stale: '☸️', backup_dump: '🛢', backup_dump_space: '🛢', backup_cron: '🛢', backup_check: '🩺',
 }
 
 type T = (k: string, p?: Record<string, string | number>) => string
@@ -627,9 +629,11 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
   // проблемные серверы (оффлайн + перегрузка ресурсов) — что именно не так
   // проблема = есть t-down (оффлайн / ≥порога alert/crit); предупреждение = только
   // t-degraded (warn, напр. диск 85%). Раньше всё валилось в «Проблемы» скопом.
+  // Проблемы других разделов (сроки и Flux, дампы, очереди) сюда не идут: их считают карточки
+  // своих разделов (sectionProbs), иначе одна беда попадала бы в два счетчика.
   const srvProblems = (servers ?? [])
     .map((s) => {
-      const iss = srvIssues(s, t)
+      const iss = srvIssues(s, t).filter((i) => !i.section)
       if (!iss.length) return null
       const down = iss.some((i) => i.tone === 't-down')
       // ключи мута для приглушения (у предупреждений — свои, напр. disk@1)
@@ -655,6 +659,12 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
   const backupClients = srvList.filter((s) => s.last_report?.backup?.present)
   const backupServers = srvList.filter((s) => s.last_report?.backup_server?.present)
   const backupProbs = backupProblems(srvList, t)
+  // проблемы с бэкенда, которые относятся к разделу (сроки и Flux - к "Куберу", дампы и проверки
+  // репозиториев - к "Бэкапам"): только для счетчика карточки, в "Что сломано" они идут общим списком
+  const sectionProbs = (sec: Section): ProbItem[] =>
+    srvList.flatMap((s) => srvIssues(s, t).filter((i) => i.section === sec).map((i, n) => ({
+      key: `${sec}-${s.id}-${n}`, id: s.id, name: s.name, down: i.tone === 't-down', text: i.text, srv: i.srv,
+    })))
 
   // "Что сломано": все проблемы одним списком, по строке на каждую - серверы (включая
   // поломки дисков, прогноз, inode, упавшие юниты), Docker, Kubernetes и бэкапы. Клик ведет
@@ -674,15 +684,17 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
         }))
       : []
   const broken: Broken[] = [
-    ...(canSee('servers')
-      ? srvList.flatMap((s) =>
-          srvIssues(s, t).map((i, n) => ({
-            key: `${s.id}-${n}`, id: s.id, name: s.name, cc: s.country, tone: i.tone, text: i.text,
-            kind: i.kind ?? 'server', section: 'servers' as Section, srv: true, sec: i.sec, mute: i.mute,
-            since: i.since,
-          })),
-        )
-      : []),
+    // проблемы сервера ведут в его карточку, а то, что чинится в другом разделе (сроки и Flux,
+    // очереди, дампы), - туда, и видно тем, кому этот раздел открыт
+    ...srvList.flatMap((s) =>
+      srvIssues(s, t)
+        .map((i, n) => ({
+          key: `${s.id}-${n}`, id: s.id, name: s.name, cc: s.country, tone: i.tone, text: i.text,
+          kind: i.kind ?? 'server', section: (i.section ?? 'servers') as Section, srv: i.srv ?? true,
+          sec: i.sec, mute: i.mute, since: i.since,
+        }))
+        .filter((i) => canSee(i.section)),
+    ),
     ...fromProbs(dockerProbs, 'docker'),
     ...fromProbs(kubeProbs, 'kuber'),
     ...fromProbs(backupProbs, 'backups'),
@@ -981,7 +993,7 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
               <Mini dot="up" label={t('Подов')} value={kubePods} />
             </div>
           }
-          problems={kubeProbs} onNavigate={onNavigate} t={t}
+          problems={[...kubeProbs, ...sectionProbs('kuber')]} onNavigate={onNavigate} t={t}
         />
         )}
         </div>
@@ -999,7 +1011,7 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
               <Mini dot="up" label={t('Серверов')} value={backupServers.length} />
             </div>
           }
-          problems={backupProbs} onNavigate={onNavigate} t={t}
+          problems={[...backupProbs, ...sectionProbs('backups')]} onNavigate={onNavigate} t={t}
         />
         </div>
         )}

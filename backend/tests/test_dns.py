@@ -89,7 +89,7 @@ async def test_dns_alert_fires_after_hold_with_the_provider_hint(tmp_path, monke
     await engine.dispose()
 
 
-def test_dns_in_what_is_broken_after_the_hold():
+def test_dns_in_what_is_broken_right_away_and_a_problem_after_the_hold():
     now = datetime(2026, 10, 8, 20, tzinfo=timezone.utc)
     ts = now.timestamp()
     slow = [{"addr": "185.12.64.1", "ms": 4800}]
@@ -97,7 +97,35 @@ def test_dns_in_what_is_broken_after_the_hold():
                         alert_state={"dns_since": (now - timedelta(minutes=3)).isoformat()},
                         disk_forecast=None, alert_mutes=[], alert_snoozes={},
                         disk_crit_percent=0, disk_alert_percent=0, disk_warn_percent=0)
-    assert [p for p in collector.server_problems(s, now) if p["kind"] == "dns"] == []
+    # до выдержки алерта - предупреждением, которое глушится отдельно от самого алерта
+    got = [p for p in collector.server_problems(s, now) if p["kind"] == "dns"]
+    assert [(p["level"], p["mute"]) for p in got] == [(1, "dns@1")]
+    assert got[0]["text"] == "DNS: резолверы: 185.12.64.1 4800 мс"
     s.alert_state = {"dns_since": (now - timedelta(minutes=12)).isoformat()}
     got = [p for p in collector.server_problems(s, now) if p["kind"] == "dns"]
-    assert got and got[0]["level"] == 2 and got[0]["text"] == "DNS: резолверы: 185.12.64.1 4800 мс"
+    assert [(p["level"], p["mute"]) for p in got] == [(2, "dns")]
+    assert got[0]["text"] == "DNS: резолверы: 185.12.64.1 4800 мс"
+
+
+def test_dead_resolver_next_to_a_working_one_after_the_hold():
+    now = datetime(2026, 10, 8, 20, tzinfo=timezone.utc)
+    ts = now.timestamp()
+    half = [{"addr": "77.88.8.1", "ms": 18}, {"addr": "198.51.100.76", "ms": -1, "err": "timeout"}]
+    from app.models import Server
+    s = Server(id=1, name="web-b-dev", last_seen=now, last_report=_rep(ts, half), alert_state={},
+               offline_after_seconds=120, enabled=True)
+    # цикл алертов запоминает, с какого момента подряд молчит резолвер
+    ctx = collector._server_conditions(s, now)["dns"][1]
+    assert ctx["res"] == {"198.51.100.76": now.isoformat()}
+    s.alert_state = {"dns_res": {"198.51.100.76": (now - timedelta(minutes=5)).isoformat()}}
+    assert collector._server_conditions(s, now)["dns"][1]["res"] == s.alert_state["dns_res"]
+    # имена резолвятся, поэтому до выдержки молчим: разовый таймаут бывает у любого
+    assert [p for p in collector.server_problems(s, now) if p["kind"] == "dns"] == []
+    s.alert_state = {"dns_res": {"198.51.100.76": (now - timedelta(minutes=11)).isoformat()}}
+    got = [p for p in collector.server_problems(s, now) if p["kind"] == "dns"]
+    assert [(p["level"], p["mute"], p.get("sub")) for p in got] == [(1, "dns@1", "resolver")]
+    assert got[0]["text"] == "DNS: резолвер 198.51.100.76 не отвечает"
+    # ожил - и пропал из списка сразу
+    s.last_report = _rep(ts, [{"addr": "77.88.8.1", "ms": 18}, {"addr": "198.51.100.76", "ms": 9}])
+    assert collector._server_conditions(s, now)["dns"][1]["res"] == {}
+    assert [p for p in collector.server_problems(s, now) if p["kind"] == "dns"] == []
