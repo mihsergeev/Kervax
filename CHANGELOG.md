@@ -4,6 +4,15 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.4.124] - 2026-10-09
+
+### Fixed
+- Подсказка "похоже на сбой у провайдера" в алерте DNS срабатывает и тогда, когда резолверы
+  отвечают из кэша мгновенно, а не резолвятся только новые имена. Так было вечером 08.10 у
+  Hetzner: тормозило у четырех нод, а алерты по backup-b и app-b-dev ушли без
+  подсказки. Свой резолвер ноды (127.0.0.1) и DNS меша (100.100.100.100) у каждой ноды свои, по
+  ним ноды больше не сравниваются.
+
 ## [1.4.123] - 2026-10-09
 
 ### Added

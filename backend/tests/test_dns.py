@@ -56,6 +56,24 @@ def test_dns_condition_waits_ten_minutes_and_names_the_provider():
     assert collector.dns_others_hint(1, {1: {"185.12.64.1"}, 2: {"185.12.64.1"}}) == ""  # одна соседняя - еще не повод
 
 
+def test_provider_hint_when_only_new_names_fail():
+    """08.10.2026 вечером: резолверы Hetzner отвечали из кэша мгновенно, а новые имена не
+    резолвились у четырех нод. Подозрение - на все резолверы ноды, иначе подсказки нет."""
+    ts = datetime(2026, 10, 8, 21, 40, tzinfo=timezone.utc).timestamp()
+    fast = [{"addr": "185.12.64.1", "ms": 12}, {"addr": "185.12.64.2", "ms": 6}]
+    assert collector.dns_suspects(_rep(ts, fast, miss_ms=-1, miss_err="timeout")) == {"185.12.64.1", "185.12.64.2"}
+    slow = [{"addr": "185.12.64.1", "ms": 4800}, {"addr": "185.12.64.2", "ms": 6}]
+    assert collector.dns_suspects(_rep(ts, slow, miss_ms=5000)) == {"185.12.64.1"}
+    # свой резолвер ноды и DNS меша у каждой ноды свои: по ним "у других нод то же" не скажешь
+    local = [{"addr": "127.0.0.1", "ms": 0}]
+    assert collector.dns_suspects(_rep(ts, local, miss_ms=-1, miss_err="timeout")) == set()
+    mesh = [{"addr": "100.100.100.100", "ms": 0}, {"addr": "10.0.0.53", "ms": 1}]
+    assert collector.dns_suspects(_rep(ts, mesh, miss_ms=-1, miss_err="timeout")) == {"10.0.0.53"}
+    by = {i: collector.dns_suspects(_rep(ts, fast, miss_ms=-1, miss_err="timeout")) for i in range(1, 5)}
+    assert collector.dns_others_hint(1, by) == \
+        ". Так же у 3 других нод с теми же резолверами, похоже на сбой у провайдера"
+
+
 async def test_dns_alert_fires_after_hold_with_the_provider_hint(tmp_path, monkeypatch):
     from app.config import Settings
     from app.db import Base, create_engine_and_factory
