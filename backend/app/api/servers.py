@@ -17,10 +17,10 @@ from sqlalchemy import delete as sa_delete, func, select
 from app import audit, backup_growth, custom_backups, docker_exposure, geoip, kube_coverage, manual_probe
 from app.collector import (
     _backup_problem_repos, alert_since, backup_cadence, backup_rotation_items, backup_unmonitored,
-    bsrv_extra, bsrv_restic_old, disk_analyze_ok, prune_problems, repo_reason, docker_since, dump_local_stale, needed_pod_names,
-    panel_server_names, pod_uid_names,
+    bsrv_extra, bsrv_restic_old, clock_skew_window, disk_analyze_ok, prune_problems, repo_reason, docker_since,
+    dump_local_stale, needed_pod_names, panel_server_names, pod_uid_names,
     send_alerts_soon, send_autofix_note, server_problems, web_5xx_total, web_breakdown,
-    web_label_key, web_log_label, web_rate_total,
+    web_error_window, web_label_key, web_log_label, web_rate_total,
 )
 from app.setup_scripts import (
     current_setup_versions as _current_setup_versions,
@@ -183,6 +183,7 @@ def _agent_advice(server: Server) -> tuple[list[str], str | None]:
 def _out(
     server: Server, now: datetime, cur_versions: dict[str, int] | None = None,
     pod_names: dict[str, str] | None = None,
+    web_err: tuple[float, float, int, dict, float] | None = None,
 ) -> ServerOut:
     o = ServerOut.model_validate(server)
     o.online = _is_online(server, now)
@@ -203,7 +204,7 @@ def _out(
     o.proxy_outdated = docker_exposure.outdated(server.last_report or {}, now.timestamp())
     o.disk_analyze = disk_analyze_ok(server.last_report or {})
     o.fresh = _fresh_node(server, now)
-    o.problems = server_problems(server, now, pod_names)
+    o.problems = server_problems(server, now, pod_names, web_err)
     o.alert_since = alert_since(server)
     o.docker_since = docker_since(server)
     o.backup_growth = backup_growth.jump(server, now)
@@ -370,9 +371,11 @@ async def list_servers(user: CurrentUser, session: SessionDep) -> list[ServerOut
     index = kube_coverage.build_index(every)
     names = pod_uid_names(every)
     panel = panel_server_names(every)
+    # ошибки 5xx за 15 минут по всем нодам - двумя запросами на весь список, для "Что сломано"
+    web_err = await web_error_window(session, now)
     outs = []
     for s in servers:
-        o = _out(s, now, cur, names)
+        o = _out(s, now, cur, names, web_err.get(s.id))
         o.kube_unmonitored = _unmonitored(s, index)
         bs = (s.last_report or {}).get("backup_server") or {}
         if bs.get("present"):
@@ -2603,9 +2606,13 @@ async def agent_report(
     report_dict = body.model_dump()
     # сдвиг часов: локальное время ноды (на момент отправки) минус время панели на приёме.
     # Работает даже если у ноды нет доступа к NTP — агент до панели по HTTPS достучался.
-    # Ошибка ≈ сетевая задержка (доли секунды); порог алерта её с запасом перекрывает.
+    # В разницу входит дорога отчета, при медленном DNS это секунды, поэтому берем минимум
+    # за 5 минут (clock_skew_window), окно живет в отчете.
     if body.clock_unix:
-        report_dict["clock_skew_sec"] = int(now.timestamp()) - body.clock_unix
+        cw = clock_skew_window((server.last_report or {}).get("clock_win"),
+                               int(now.timestamp()) - body.clock_unix, now.timestamp())
+        report_dict["clock_win"] = cw
+        report_dict["clock_skew_sec"] = cw["win"][0][1]
     server.last_report = report_dict
     server.last_seen = now
     if server.first_report_at is None:

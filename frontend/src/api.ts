@@ -829,7 +829,13 @@ export type ServerDisk = {
 // Прогноз заполнения (планировщик раз в полчаса по истории): только разделы с устойчивым
 // ростом, до которых осталось не больше месяца
 // since - с какого момента это видно (ISO): для "Что сломано" - "2 дн"
-export type ServerProblem = { kind: string; level: number; text: string; sec: string; mute: string; since?: string | null }
+// section и srv - куда вести, если не в карточку сервера: раздел "Кубер" (sec - вкладка кластера),
+// "Сервисы" или "Бэкапы" (srv - окно бэкап-сервера, иначе клиента). sub "resolver" у DNS - лежит
+// один из резолверов, остальные отвечают
+export type ServerProblem = {
+  kind: string; level: number; text: string; sec: string; mute: string; since?: string | null
+  section?: 'kuber' | 'services' | 'backups'; srv?: boolean; sub?: string
+}
 // Кто ест CPU группами (агент 2.21): процессы с одним именем у одного владельца. cpu - % одного
 // ядра (как top), spin - сколько из них давно крутят по ядру вхолостую, spin_age - возраст старшего
 export type CpuGroup = {

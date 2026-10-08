@@ -2533,23 +2533,78 @@ def dns_others_hint(sid: int, slow_by: dict[int, set[str]]) -> str:
     return f". Так же у {n} других нод с теми же резолверами, похоже на сбой у провайдера" if n >= 2 else ""
 
 
-def server_problems(s: Server, now: datetime, pod_names: dict[str, str] | None = None) -> list[dict]:
-    """Что сломано на сервере по новым проверкам - поломки дисков, прогноз заполнения, inode,
-    упавшие юниты - коротко, для сводки "Что сломано" на главной и значков в списке серверов.
-    Уровни те же, что у алертов: 2-3 - проблема, 1 - предупреждение. Прогноз здесь виден с того
-    же срока, что и алерт (_FORECAST_WARN_H, пять суток). У молчащей ноды пусто, про нее говорит
-    "оффлайн"."""
+def dns_dead_resolvers(rep: dict, tracked: dict | None, now: datetime) -> list[tuple[dict, str]]:
+    """Резолверы, которые тормозят или молчат дольше _DNS_HOLD подряд: [(замер, с какого
+    момента)]. tracked - alert_state dns_res, его ведет цикл алертов."""
+    d = dns_block(rep)
+    if d is None or not isinstance(tracked, dict):
+        return []
+    out = []
+    for x in dns_slow_servers(d):
+        since = tracked.get(x["addr"])
+        t0 = _parse_iso(since) if isinstance(since, str) else None
+        if t0 is not None and (now - t0).total_seconds() >= _DNS_HOLD:
+            out.append((x, since))
+    return out
+
+
+def _dns_res_text(x: dict) -> str:
+    ans = _dns_answer(x)
+    if ans == "нет ответа":
+        return "не отвечает"
+    return f"отвечает {ans}" if ans.endswith(" мс") else f"отвечает ошибкой {ans}"
+
+
+# Сдвиг часов панель меряет по отчету: свое время на приеме минус время ноды на отправке. В
+# разницу входит и дорога отчета, а агент шлет каждый отчет новым соединением и перед ним
+# резолвит имя панели: когда резолверы Hetzner тормозили (08.10.2026, по 4-6 с), у нод с
+# точными часами набегал такой же "сдвиг", и карточка советовала синхронизировать время.
+# Дорога только прибавляет, поэтому сдвиг - минимум за 5 минут: хоть один отчет за это время
+# доходит быстро. Отчет идет не дольше 15 с (таймаут агента), и два отчета подряд выше минимума
+# больше чем на 20 с - это часы перевели назад: окно начинаем заново.
+_CLOCK_WIN = 300
+_CLOCK_JUMP = 20
+
+
+def clock_skew_window(prev: dict | None, raw: int, ts: float) -> dict:
+    """Окно сдвига часов после нового отчета: {"win": [[время, сдвиг], ...] по возрастанию
+    сдвига, первый - минимум за _CLOCK_WIN; "last": сырой сдвиг прошлого отчета}."""
+    p = prev if isinstance(prev, dict) else {}
+    win = [w for w in p.get("win") or []
+           if isinstance(w, list) and len(w) == 2 and ts - w[0] < _CLOCK_WIN]
+    last = p.get("last")
+    if win and raw - win[0][1] > _CLOCK_JUMP and isinstance(last, int) and last - win[0][1] > _CLOCK_JUMP:
+        win = []
+    while win and win[-1][1] >= raw:
+        win.pop()
+    win.append([int(ts), raw])
+    return {"win": win, "last": raw}
+
+
+def server_problems(s: Server, now: datetime, pod_names: dict[str, str] | None = None,
+                    web_err: tuple[float, float, int, dict, float] | None = None) -> list[dict]:
+    """Что сломано на сервере коротко, для сводки "Что сломано" на главной и значков в списке
+    серверов: все, о чем шлют алерты, кроме того, что главная считает сама (CPU, RAM, диск,
+    температуры, conntrack, Docker, поды, бэкапы клиентов и репозитории). Уровни те же, что у
+    алертов: 2-3 - проблема, 1 - предупреждение. Выдержки алерта здесь нет там, где она гасит
+    только повторы сообщений: главная показывает, что сейчас. Прогноз виден с того же срока, что
+    и алерт (_FORECAST_WARN_H, пять суток). У молчащей ноды пусто, про нее говорит "оффлайн".
+
+    section и srv - куда вести, если не в карточку сервера: "kuber" (sec - вкладка кластера),
+    "services", "backups" (srv - окно бэкап-сервера, иначе клиента). web_err - окно ошибок 5xx
+    этой ноды (web_error_window); без него про 5xx молчим."""
     if not seen_online(s, now):
         return []
     rep = s.last_report or {}
     out: list[dict] = []
     state = s.alert_state or {}
 
-    def add(kind: str, level: int, text: str, sec: str, mute: str, since: str | None = None) -> None:
+    def add(kind: str, level: int, text: str, sec: str, mute: str, since: str | None = None,
+            **route) -> None:
         # since - с какого момента это видно (для "Что сломано": "2 дня"); по умолчанию -
         # когда панель впервые увидела проблему этого вида (alert_state "<вид>_from")
         out.append({"kind": kind, "level": level, "text": text, "sec": sec, "mute": mute,
-                    "since": since or state.get(f"{kind}_from")})
+                    "since": since or state.get(f"{kind}_from"), **route})
 
     hb = disk_health_block(rep)
     if hb is not None:
@@ -2591,11 +2646,94 @@ def server_problems(s: Server, now: datetime, pod_names: dict[str, str] | None =
         lvl = 3 if crit and ipct >= crit else 2 if prob and ipct >= prob else 1 if warn and ipct >= warn else 0
         if lvl:
             add("inode", lvl, f"inode {wi.get('mount') or '?'} {ipct}%", "diskfill", f"inode@{lvl}" if lvl < 3 else "inode")
-    # DNS: тот же порог и та же выдержка, что у алерта (начало ведет цикл алертов, dns_since)
+    # Часы: пороги алерта (5 с, 30 с, 5 минут) без его выдержки. Сдвиг уже очищен от дороги
+    # отчета (clock_skew_window), а сами часы за минуту не уходят и не возвращаются.
+    skew = rep.get("clock_skew_sec")
+    if isinstance(skew, (int, float)):
+        a = abs(int(skew))
+        lvl = 3 if a >= 300 else 2 if a >= 30 else 1 if a >= 5 else 0
+        if lvl:
+            disp = f"{a} с" if a < 120 else f"{a // 60} мин"
+            add("clock", lvl, f"часы разошлись с панелью на {disp}", "clock",
+                "clock" if lvl >= 3 else f"clock@{lvl}", state.get("clock_since"))
+    # DNS: поломка видна сразу предупреждением, проблемой - после выдержки алерта (начало ведет
+    # цикл алертов, dns_since). Резолвер, который лежит дольше выдержки, пока соседние отвечают, -
+    # предупреждение: имена резолвятся, но запасного нет.
     why = dns_problem(rep)
-    d_since = _parse_iso(state.get("dns_since") or "")
-    if why and d_since and (now - d_since).total_seconds() >= _DNS_HOLD:
-        add("dns", 2, f"DNS: {why}", "", "dns", state.get("dns_since"))
+    if why:
+        d_since = _parse_iso(state.get("dns_since") or "")
+        held = d_since is not None and (now - d_since).total_seconds() >= _DNS_HOLD
+        add("dns", 2 if held else 1, f"DNS: {why}", "", "dns" if held else "dns@1", state.get("dns_since"))
+    else:
+        dead = dns_dead_resolvers(rep, state.get("dns_res"), now)
+        if len(dead) == 1:
+            add("dns", 1, f"DNS: резолвер {dead[0][0]['addr']} {_dns_res_text(dead[0][0])}", "", "dns@1",
+                dead[0][1], sub="resolver")
+        elif dead:
+            add("dns", 1, "DNS: резолверы " + ", ".join(f"{x['addr']} {_dns_answer(x)}" for x, _ in dead),
+                "", "dns@1", min(since for _, since in dead), sub="resolver")
+    # Коннекты СУБД: порог алерта без его выдержки, как CPU и RAM на главной
+    conn_thr = getattr(s, "db_conn_alert_percent", 0) or 0
+    worst = db_conn_worst(rep) if conn_thr else None
+    if worst is not None and worst[0] >= conn_thr:
+        pct, db = worst
+        add("db_conn", 2, f"{db.get('container') or db.get('engine') or 'СУБД'}: занято "
+            f"{db.get('conn_used') or 0} из {db.get('conn_max') or 0} подключений ({round(pct)}%)",
+            "", "db_conn", state.get("db_conn_since"), section="services")
+    # Ошибки 5xx: окно алерта (15 минут), без часа после него, который держит алерт одной историей
+    w5 = web_5xx_now(s, web_err, now)
+    if w5 is not None and w5[0] and w5[2]:
+        add("web_5xx", 2, f"ошибки 5xx: {w5[1] / w5[2] * 100:.1f}% запросов за 15 минут", "web", "web_5xx")
+    # Очереди RabbitMQ выше своего порога, как у алерта queue
+    hot = []
+    for svc in rep.get("services") or []:
+        if not isinstance(svc, dict) or svc.get("kind") != "rabbitmq":
+            continue
+        for q in svc.get("queues") or []:
+            thr = queue_threshold(s, queue_key(svc.get("source") or "", q))
+            if thr > 0 and queue_depth(q) >= thr:
+                hot.append(f"{q.get('name') or '?'} ({queue_depth(q)})")
+    if hot:
+        add("queue", 2, "переполнены очереди RabbitMQ: " + ", ".join(hot[:3])
+            + (f" и еще {len(hot) - 3}" if len(hot) > 3 else ""), "", "queue", section="services")
+    # Сроки кластера: ближайший в пределах дальнего порога. За последний порог и истекший - проблема
+    wd = kube_warn_days(s) if getattr(s, "kube_expiry_warn_days", None) else []
+    soon = kube_expiry_soon(rep, wd, now) if wd else None
+    if soon is not None:
+        c = kube_expiry_ctx(*soon)
+        add("kube_expiry", 3 if soon[1] < 0 else 2 if soon[1] <= wd[-1] else 1,
+            f"{c['what']} {c['where']}: {c['value']}{c['more']}", "expiry", "kube_expiry", section="kuber")
+    # Flux: после выдержки алерта (<вид>_from) - пока идет выкат, зависимые сборки минутами
+    # отвечают DependencyNotReady, и строка мигала бы на каждый деплой
+    fx = flux_state(rep) if rep.get("flux") is not None else None
+    if fx is not None and state.get(f"{fx[0]}_from"):
+        kind, c = fx
+        what = "доставка встала" if kind == "flux_down" else "недоступен репозиторий чартов"
+        add(kind, 2 if kind == "flux_down" else 1, f"Flux: {what}, {c['what']} {c['where']} - {c['reason']}{c['more']}",
+            "flux", kind, state.get(f"{kind}_since"), section="kuber")
+    # Дампы СУБД: сломанный - после выдержки алерта (на стыке прогонов бывает тик без свежего
+    # дампа), пропущенный из-за места - сразу
+    broken, _why, skipped, free = dump_issues(rep, now)
+    if broken and state.get("backup_dump_from"):
+        add("backup_dump", 2, "дамп СУБД не обновляется: " + ", ".join(broken), "", "backup_dump",
+            state.get("backup_dump_since"), section="backups", srv=False)
+    if skipped:
+        add("backup_dump_space", 2, f"дамп пропущен, мало места (свободно {free}%): " + ", ".join(skipped),
+            "", "backup_dump_space", section="backups", srv=False)
+    if (rep.get("kube") or {}).get("access"):
+        cron = _cron_dump_problems(rep, now)
+        if cron:
+            add("backup_cron", 2, "дамп-CronJob не отрабатывает: " + "; ".join(cron[:3])
+                + (f" и еще {len(cron) - 3}" if len(cron) > 3 else ""), "", "backup_cron",
+                section="backups", srv=False)
+    # Бэкап-сервер: не прошла проверка целостности репозитория
+    bsrv = rep.get("backup_server") or {}
+    if bsrv.get("present"):
+        bad = failed_checks(bsrv, bsrv_extra(rep), set(getattr(s, "backup_repo_mutes", None) or []), now)
+        if bad:
+            add("backup_check", 2, "не прошла проверка целостности: " + ", ".join(bad[:3])
+                + (f" и еще {len(bad) - 3}" if len(bad) > 3 else ""), "", "backup_check",
+                section="backups", srv=True)
     out.sort(key=lambda p: -p["level"])
     return out
 
@@ -3321,6 +3459,152 @@ def _fallback_rule(key: str) -> dict:
     }
 
 
+def db_conn_worst(rep: dict) -> tuple[float, dict] | None:
+    """Самый нагруженный по коннектам движок ноды: (процент занятых, блок СУБД) или None."""
+    worst = None
+    for db in rep.get("db_stats") or []:
+        limit = db.get("conn_max") or 0
+        if limit <= 0:  # движок не отдал лимит — считать процент не из чего
+            continue
+        pct = (db.get("conn_used") or 0) / limit * 100
+        if worst is None or pct > worst[0]:
+            worst = (pct, db)
+    return worst
+
+
+def kube_warn_days(s: Server) -> list[int]:
+    """Пороги сроков кластера в днях, от дальнего к ближнему; пусто - сроки не сторожим."""
+    return sorted({int(d) for d in (s.kube_expiry_warn_days or []) if int(d) > 0}, reverse=True)
+
+
+def kube_expiry_soon(rep: dict, warn_days: list[int],
+                     now: datetime) -> tuple[float, float, dict, int] | None:
+    """Самый ранний срок кластера в пределах дальнего порога: (истекает, дней осталось,
+    запись helper'а, сколько всего сроков в пределах порога) или None."""
+    soon, near = None, 0
+    for it in rep.get("kube_expiry") or []:
+        exp = it.get("expires") or 0
+        if exp <= 0:
+            continue
+        days = (exp - now.timestamp()) / 86400
+        if days > warn_days[0]:
+            continue
+        near += 1
+        if soon is None or exp < soon[0]:
+            soon = (exp, days, it)
+    return (*soon, near) if soon is not None else None
+
+
+def kube_expiry_ctx(exp: float, days: float, it: dict, near: int) -> dict:
+    """Контекст текста про истекающий срок: что, где, когда и что делать."""
+    # К ближайшему, а не вниз: «через 4 дн.» при остатке 4 дня 23 часа —
+    # формально верно и практически обман, до срока почти пять дней.
+    left = round(days)
+    phrase = (f"истекает через {left} дн." if left >= 1
+              else "истекает сегодня" if days >= 0
+              else f"ИСТЁК {abs(left) or 1} дн. назад")
+    # Уточнение из хелпера показываем, только если его нет в самом пути:
+    # у сертификата note — это имя файла, и «server.crt (server)» — шум.
+    note, where = it.get("note") or "", it.get("where") or ""
+    if note in ("tls.crt", "config"):
+        note = ""  # «TLS-сертификат … (tls.crt)» — повтор самого себя
+    if note and note not in where:
+        where = f"{where} ({note})"
+    kind = it.get("kind") or ""
+    advice = _KUBE_ADVICE.get((kind, days < 0), "")
+    return {
+        "value": phrase,
+        "what": _KUBE_KIND.get(kind, "срок"),
+        "where": where,
+        "advice": f" · {advice}" if advice else "",
+        # не для текста, а для иконки: «истекает через 6 дн.» и «ИСТЁК» —
+        # разные новости, и в ленте они должны различаться с первого взгляда
+        "expired": days < 0,
+        "date": datetime.fromtimestamp(exp, tz=timezone.utc).strftime("%d.%m.%Y"),
+        "more": f" (и ещё {near - 1} на этом сервере)" if near > 1 else "",
+    }
+
+
+def flux_state(rep: dict) -> tuple[str, dict] | None:
+    """Сломанный Flux: ("flux_down" или "flux_stale", контекст текста) или None."""
+    broken = [f for f in (rep.get("flux") or [])
+              if not f.get("ready") and (f.get("reason") or "") not in _FLUX_TRANSIENT]
+    if not broken:
+        return None
+    # Корень, а не первый по алфавиту. Одна упавшая сборка тянет за собой все
+    # зависимые, и те отвечают «DependencyNotReady» — это следствие. В ленте
+    # висело именно оно, и инженеру приходилось самому искать, что же упало.
+    roots = [f for f in broken if (f.get("reason") or "") != "DependencyNotReady"]
+    waiting = len(broken) - len(roots)
+    pool = roots or broken
+    f = sorted(pool, key=lambda x: (x.get("kind") or "", x.get("where") or ""))[0]
+    reason = f.get("reason") or "Ready=False"
+    why, hint = _FLUX_REASON.get(reason, ("", ""))
+    where = f.get("where") or ""
+    ns, _, name = where.partition("/")
+    # текст ошибки точнее reason: "проверьте секрет" при недоступном адресе увел бы не туда
+    hint = _flux_msg_hint(f.get("message") or "") or hint
+    if hint:
+        hint = hint.format(ns=ns or "namespace", name=name or "имя")
+    tail = []
+    if len(pool) > 1:
+        tail.append(f"ещё {len(pool) - 1} сломано")
+    if waiting:
+        tail.append(f"{waiting} ждут этого")
+    ctx = {
+        "what": f.get("kind") or "ресурс Flux",
+        "where": where,
+        # человеческая причина, а сырой reason — в скобках: по нему гуглят
+        "reason": f"{why} ({reason})" if why else reason,
+        "message": _flux_detail(f.get("message") or "") or "без пояснения",
+        "more": f" [{', '.join(tail)}]" if tail else "",
+    }
+    # Упали только репозитории чартов, а все сборки и релизы в Ready: развернутое
+    # работает на закешированном чарте, не придут лишь новые версии чартов. Это
+    # предупреждение, а не "доставка встала": изменения из Git по-прежнему
+    # применяются. Упавший GitRepository, наоборот, останавливает все выкаты.
+    if all((x.get("kind") or "") == "HelmRepository" for x in broken):
+        return "flux_stale", dict(ctx, hint=f"\n{hint}" if hint else "")
+    return "flux_down", dict(ctx, hint=f"\n↳ {hint}" if hint else "")
+
+
+def web_5xx_now(s: Server, web_err: tuple[float, float, int, dict, float] | None,
+                now: datetime) -> tuple[bool, float, float, float] | None:
+    """Пошли ли ошибки 5xx за окно в 15 минут: (да или нет, ошибок, запросов, порог %).
+    Без заглушенных логов и ответов сканерам. None - порога нет или не по чему судить."""
+    thr5 = float(getattr(s, "web_5xx_alert_percent", 0) or 0)
+    if not thr5 or web_err is None:
+        return None
+    total, errs, points, per_log, probe_errs = web_err
+    muted = web_muted_keys(s, now)
+    if muted:
+        errs = max(0.0, errs - sum(sum(m.values()) for k, m in per_log.items() if k in muted))
+    # ответы сканерам на /.env, /@fs/ и подобное: сайт от них не сломан
+    errs = max(0.0, errs - probe_errs)
+    err_minutes = len({src for k, m in per_log.items() if k not in muted for src in m})
+    return web_error_level(total, errs, points, thr5, err_minutes), errs, total, thr5
+
+
+def dump_issues(rep: dict, now: datetime) -> tuple[list[str], str, list[str], int]:
+    """Дампы СУБД так, как их видят алерты backup_dump и backup_dump_space: (сломанные, почему,
+    пропущенные из-за места, % свободного). Упал сам бэкап - дампы не судим, это backup_failed."""
+    bk = rep.get("backup") or {}
+    from_systemd = bk.get("ts_source") == "systemd"
+    if bk.get("metric_present") or from_systemd:
+        failed = ((bk.get("service_result") or "").strip() not in ("", "success") if from_systemd
+                  else bk.get("success") == 0)
+        if failed:
+            return [], "", [], 0
+        skipped, free = _dump_skipped(bk)
+        return _dump_problems(bk), _DUMP_REASON_BACKUP, skipped, free
+    if bk.get("dumps"):
+        now_ts = now.timestamp()
+        broken = sorted(_dump_label(d) for d in bk["dumps"] if dump_local_stale(d, now_ts))
+        skipped, free = _dump_skipped(bk)
+        return broken, _DUMP_REASON_LOCAL, skipped, free
+    return [], "", [], 0
+
+
 def _server_conditions(s: Server, now: datetime,
                        web_err: tuple[float, float, int, dict, float] | None = None,
                        pod_names: dict[str, str] | None = None) -> dict[str, tuple[int, dict]]:
@@ -3438,14 +3722,7 @@ def _server_conditions(s: Server, now: datetime,
     # что второй свободен, нельзя. Дебаунс общий (sustain): всплеск коннектов на один
     # интервал — обычное дело у пулеров, инцидент — только удержание.
     if s.db_conn_alert_percent:
-        worst = None
-        for db in rep.get("db_stats") or []:
-            limit = db.get("conn_max") or 0
-            if limit <= 0:  # движок не отдал лимит — считать процент не из чего
-                continue
-            pct = (db.get("conn_used") or 0) / limit * 100
-            if worst is None or pct > worst[0]:
-                worst = (pct, db)
+        worst = db_conn_worst(rep)
         if worst is not None:
             pct, db = worst
             name = db.get("container") or db.get("engine") or "СУБД"
@@ -3462,47 +3739,12 @@ def _server_conditions(s: Server, now: datetime,
     # через дни, по недоехавшей выкатке. Сертификаты control-plane отказывают резче, но
     # так же без предупреждения. Берём САМЫЙ ранний срок: алерт на сервер один, а
     # датируемых сущностей на ноде десятки.
-    warn_days = sorted({int(d) for d in (s.kube_expiry_warn_days or []) if int(d) > 0}, reverse=True)
+    warn_days = kube_warn_days(s)
     if warn_days:
-        soon, near = None, 0
-        for it in rep.get("kube_expiry") or []:
-            exp = it.get("expires") or 0
-            if exp <= 0:
-                continue
-            days = (exp - now.timestamp()) / 86400
-            if days > warn_days[0]:
-                continue
-            near += 1
-            if soon is None or exp < soon[0]:
-                soon = (exp, days, it)
+        soon = kube_expiry_soon(rep, warn_days, now)
         if soon is not None:
-            exp, days, it = soon
-            # К ближайшему, а не вниз: «через 4 дн.» при остатке 4 дня 23 часа —
-            # формально верно и практически обман, до срока почти пять дней.
-            left = round(days)
-            phrase = (f"истекает через {left} дн." if left >= 1
-                      else "истекает сегодня" if days >= 0
-                      else f"ИСТЁК {abs(left) or 1} дн. назад")
-            # Уточнение из хелпера показываем, только если его нет в самом пути:
-            # у сертификата note — это имя файла, и «server.crt (server)» — шум.
-            note, where = it.get("note") or "", it.get("where") or ""
-            if note in ("tls.crt", "config"):
-                note = ""  # «TLS-сертификат … (tls.crt)» — повтор самого себя
-            if note and note not in where:
-                where = f"{where} ({note})"
-            kind = it.get("kind") or ""
-            advice = _KUBE_ADVICE.get((kind, days < 0), "")
-            sustain("kube_expiry", True, {
-                "value": phrase,
-                "what": _KUBE_KIND.get(kind, "срок"),
-                "where": where,
-                "advice": f" · {advice}" if advice else "",
-                # не для текста, а для иконки: «истекает через 6 дн.» и «ИСТЁК» —
-                # разные новости, и в ленте они должны различаться с первого взгляда
-                "expired": days < 0,
-                "date": datetime.fromtimestamp(exp, tz=timezone.utc).strftime("%d.%m.%Y"),
-                "more": f" (и ещё {near - 1} на этом сервере)" if near > 1 else "",
-            })
+            days = soon[1]
+            sustain("kube_expiry", True, kube_expiry_ctx(*soon))
             # Уровень - сколько порогов пройдено, и истекший сверх них: за 7 дней, за
             # 1 день и в день истечения - по сообщению. Раньше было одно, за две недели,
             # и к сроку о нем успевали забыть.
@@ -3517,64 +3759,23 @@ def _server_conditions(s: Server, now: datetime,
     # ещё и отозвать руками, и тогда предупреждать не о чем, доставка встала сразу.
     # Читаем Ready у ресурсов Flux; «в процессе» не считаем поломкой, а дебаунс
     # (те же 15 минут по умолчанию) гасит обычную реконсиляцию.
-    broken = [f for f in (rep.get("flux") or [])
-              if not f.get("ready") and (f.get("reason") or "") not in _FLUX_TRANSIENT]
     if rep.get("flux") is not None:
-        if broken:
-            # Корень, а не первый по алфавиту. Одна упавшая сборка тянет за собой все
-            # зависимые, и те отвечают «DependencyNotReady» — это следствие. В ленте
-            # висело именно оно, и инженеру приходилось самому искать, что же упало.
-            roots = [f for f in broken if (f.get("reason") or "") != "DependencyNotReady"]
-            waiting = len(broken) - len(roots)
-            pool = roots or broken
-            f = sorted(pool, key=lambda x: (x.get("kind") or "", x.get("where") or ""))[0]
-            reason = f.get("reason") or "Ready=False"
-            why, hint = _FLUX_REASON.get(reason, ("", ""))
-            where = f.get("where") or ""
-            ns, _, name = where.partition("/")
-            # текст ошибки точнее reason: "проверьте секрет" при недоступном адресе увел бы не туда
-            hint = _flux_msg_hint(f.get("message") or "") or hint
-            if hint:
-                hint = hint.format(ns=ns or "namespace", name=name or "имя")
-            tail = []
-            if len(pool) > 1:
-                tail.append(f"ещё {len(pool) - 1} сломано")
-            if waiting:
-                tail.append(f"{waiting} ждут этого")
-            ctx = {
-                "what": f.get("kind") or "ресурс Flux",
-                "where": where,
-                # человеческая причина, а сырой reason — в скобках: по нему гуглят
-                "reason": f"{why} ({reason})" if why else reason,
-                "message": _flux_detail(f.get("message") or "") or "без пояснения",
-                "more": f" [{', '.join(tail)}]" if tail else "",
-            }
-            # Упали только репозитории чартов, а все сборки и релизы в Ready: развернутое
-            # работает на закешированном чарте, не придут лишь новые версии чартов. Это
-            # предупреждение, а не "доставка встала": изменения из Git по-прежнему
-            # применяются. Упавший GitRepository, наоборот, останавливает все выкаты.
-            if all((x.get("kind") or "") == "HelmRepository" for x in broken):
-                sustain("flux_stale", True, dict(ctx, hint=f"\n{hint}" if hint else ""))
-                sustain("flux_down", False, {})
-            else:
-                sustain("flux_down", True, dict(ctx, hint=f"\n↳ {hint}" if hint else ""))
-                sustain("flux_stale", False, {})
+        fx = flux_state(rep)
+        if fx is not None and fx[0] == "flux_stale":
+            sustain("flux_stale", True, fx[1])
+            sustain("flux_down", False, {})
+        elif fx is not None:
+            sustain("flux_down", True, fx[1])
+            sustain("flux_stale", False, {})
         else:
             sustain("flux_down", False, {})
             sustain("flux_stale", False, {})
 
     # Пошли ошибки 5xx. Выдержка тут - само окно в 15 минут, поэтому уровень ставим сразу,
     # без sustain: иначе к окну добавились бы ещё 15 минут ожидания.
-    thr5 = float(getattr(s, "web_5xx_alert_percent", 0) or 0)
-    if online and thr5 and web_err is not None:
-        total, errs, points, per_log, probe_errs = web_err
-        muted = web_muted_keys(s, now)
-        if muted:
-            errs = max(0.0, errs - sum(sum(m.values()) for k, m in per_log.items() if k in muted))
-        # ответы сканерам на /.env, /@fs/ и подобное: сайт от них не сломан
-        errs = max(0.0, errs - probe_errs)
-        err_minutes = len({src for k, m in per_log.items() if k not in muted for src in m})
-        bad5 = web_error_level(total, errs, points, thr5, err_minutes)
+    w5 = web_5xx_now(s, web_err, now) if online else None
+    if w5 is not None:
+        bad5, errs, total, thr5 = w5
         # Отбой - только после часа подряд без превышения (_WEB_ERR_CLEAR): пачки ошибок
         # внутри часа остаются одной историей. «since» здесь - с какого момента чисто.
         lvl5, since5 = (1, None) if bad5 else (0, None)
@@ -3731,7 +3932,12 @@ def _server_conditions(s: Server, now: datetime,
             d_lvl = 2 if d_held >= _DNS_HOLD else 0
         else:
             d_since, d_lvl = None, 0
-        out["dns"] = (d_lvl, {"details": why, "since": d_since})
+        # С какого момента подряд тормозит или молчит каждый резолвер (alert_state dns_res): в
+        # "Что сломано" попадает тот, что лежит дольше выдержки, пока соседние отвечают
+        prev_res = state.get("dns_res") if isinstance(state.get("dns_res"), dict) else {}
+        res = {x["addr"]: prev_res.get(x["addr"]) or now.isoformat()
+               for x in dns_slow_servers(dns_block(rep) or {})}
+        out["dns"] = (d_lvl, {"details": why, "since": d_since, "res": res})
 
     # Бэкап (restic): алертим только по РЕАЛЬНОЙ метрике и только пока сервер онлайн
     # (у оффлайна свои алерты; данные протухли). Это устойчивые состояния (не спайки),
@@ -3790,23 +3996,20 @@ def _server_conditions(s: Server, now: datetime,
         # дамп мог и не запуститься — это уже backup_failed, дублировать не нужно.
         failed_lvl, _ = out.get("backup_failed", (0, {}))
         if failed_lvl == 0:
-            broken = _dump_problems(bk)
+            broken, reason, skipped, free = dump_issues(rep, now)
             # через sustain: сломанный дамп — состояние на дни, оно удержание переживёт,
             # а одиночный тик на стыке циклов (см. _BACKUP_DUMP_LAG_SECONDS) — нет
             sustain("backup_dump", bool(broken),
-                    {"engines": ", ".join(broken), "n": len(broken), "reason": _DUMP_REASON_BACKUP})
-            skipped, free = _dump_skipped(bk)
+                    {"engines": ", ".join(broken), "n": len(broken), "reason": reason})
             out["backup_dump_space"] = (1 if skipped else 0,
                                         {"engines": ", ".join(skipped), "free": free})
     elif online and (bk.get("dumps") or state.get("backup_dump") or state.get("backup_dump_space")):
         # Файлового бэкапа нет, а дампы есть: helper снимает их своим таймером, и сверять
         # их не с чем, кроме часов (см. dump_local_stale). Висящий алерт при выключенных
         # дампах тоже сюда: условие должно прийти с нулём, иначе он не закроется.
-        now_ts = now.timestamp()
-        broken = sorted(_dump_label(d) for d in bk.get("dumps") or [] if dump_local_stale(d, now_ts))
+        broken, _reason, skipped, free = dump_issues(rep, now)
         sustain("backup_dump", bool(broken),
                 {"engines": ", ".join(broken), "n": len(broken), "reason": _DUMP_REASON_LOCAL})
-        skipped, free = _dump_skipped(bk)
         out["backup_dump_space"] = (1 if skipped else 0,
                                     {"engines": ", ".join(skipped), "free": free})
     # Дамп-CronJob'ы в кластере: мониторим прогоны НЕЗАВИСИМО от restic-бэкапа (kube-нода
@@ -4003,6 +4206,9 @@ async def evaluate_servers(
                 apply(s.id, f"{k}_since", cx["since"])
             if "streak" in cx and int(st.get(f"{k}_streak", 0)) != cx["streak"]:
                 apply(s.id, f"{k}_streak", cx["streak"])
+            # с какого момента подряд тормозит каждый резолвер DNS (для "Что сломано")
+            if "res" in cx and (st.get(f"{k}_res") or {}) != cx["res"]:
+                apply(s.id, f"{k}_res", cx["res"] or None)
             # с какого момента проблема видна - для "Что сломано" ("sda изношен - 2 дня");
             # ведем для любого вида и до проверки мьютов: заглушенное тоже остается проблемой
             frm = st.get(f"{k}_from")

@@ -1076,8 +1076,22 @@ const EN: Record<string, string> = {
   'резолверы из resolv.conf': 'resolvers from resolv.conf',
   'имя не из кэша': 'a name not in cache',
   'не резолвится': 'does not resolve',
-  'Пока резолверы провайдера тормозят, можно добавить на ноде публичные (1.1.1.1, 8.8.8.8) рядом с ними: systemd-resolved спросит все и возьмет первый ответ.':
-    'While the provider resolvers are slow, public ones (1.1.1.1, 8.8.8.8) can be added on the node next to them: systemd-resolved asks all of them and takes the first answer.',
+  'Пока резолверы провайдера тормозят, можно добавить на ноде публичные: DNS=1.1.1.1 8.8.8.8 в /etc/systemd/resolved.conf.d/. systemd-resolved спросит их вместе с резолверами сети и возьмет первый ответ.':
+    'While the provider resolvers are slow, public ones can be added on the node: DNS=1.1.1.1 8.8.8.8 in /etc/systemd/resolved.conf.d/. systemd-resolved asks them together with the network resolvers and takes the first answer.',
+  'Пока резолверы провайдера тормозят, можно поставить первыми в /etc/resolv.conf публичные (nameserver 1.1.1.1 и 8.8.8.8): запросы идут к резолверам по порядку.':
+    'While the provider resolvers are slow, public ones (nameserver 1.1.1.1 and 8.8.8.8) can be put first in /etc/resolv.conf: queries go to the resolvers in order.',
+  'Ноду обслуживает свой резолвер (unbound, dnsmasq): проверьте его и серверы, куда он пересылает запросы.':
+    'The node is served by a resolver of its own (unbound, dnsmasq): check it and the servers it forwards queries to.',
+  'Остальные резолверы отвечают, и имена резолвятся, но запасного нет: уберите неработающий из настроек сети ноды (netplan, /etc/resolv.conf) или замените рабочим.':
+    'The other resolvers answer and names resolve, but there is no spare: remove the dead one from the node network settings (netplan, /etc/resolv.conf) or replace it with a working one.',
+  'DNS - только предупреждения': 'DNS - warnings only',
+  'Время сервера - только предупреждения': 'Server time - warnings only',
+  'Время сервера - предупр. и проблемы': 'Server time - warnings and problems',
+  'Коннекты СУБД': 'DB connections',
+  'RabbitMQ: очереди': 'RabbitMQ: queues',
+  'Kubernetes: сроки': 'Kubernetes: expiry dates',
+  'Flux: доставка встала': 'Flux: delivery stopped',
+  'Flux: репозиторий чартов недоступен': 'Flux: chart repository unavailable',
   'чистка не работает': 'cleanup is not working',
   '{name}: чистка не работает - {list}': '{name}: cleanup is not working - {list}',
   'чистка и проверка не открывают репозиторий': 'cleanup and check cannot open the repository',
