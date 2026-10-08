@@ -62,7 +62,10 @@ fi
 # 0.28: stats report the newest snapshot times (the panel learns how often each client backs
 #       up) and the snapshot groups the prune script finds; the weekly check reads a slice
 #       of the data too; forget-group removes an old group by hand
-KERVAX_SETUP_VERSION=0.28  # MAJOR.MINOR; compared component-wise (0.13 > 0.2!)
+# 0.29: root crontab lines that run our prune scripts a second time (left by the ansible role)
+#       or start a prune script that is gone are commented out; the prune minute comes from the
+#       repository name, so updates no longer move it
+KERVAX_SETUP_VERSION=0.29  # MAJOR.MINOR; compared component-wise (0.13 > 0.2!)
 # Which nodes need this helper at all. Read by the ansible playbook on the
 # CONTROL machine and evaluated as a shell condition ON THE NODE, so a new
 # helper lands where it belongs without anyone editing the playbook.
@@ -642,10 +645,12 @@ ts_end=$(date +%s)
 PRUNE_BODY
   } > "$ps"
   chmod 0755 "$ps"; chown root:root "$ps"
-  # cron: prune once a day, as far as possible from the client's backup (see prune_hour)
-  local h; h="$(prune_hour "$name")"
+  # cron: prune once a day, as far as possible from the client's backup (see prune_hour). The
+  # minute comes from the name, not at random: a random one moved on every helper update, and
+  # an update in the same hour could put it on a minute already gone, skipping that day.
+  local h m; h="$(prune_hour "$name")"; m=$(( $(printf '%s' "$name" | cksum | cut -d' ' -f1) % 60 ))
   cat > "/etc/cron.d/kervax-prune-$name" <<CRONEOF
-$(( RANDOM % 60 )) $h * * * root $ps >/dev/null 2>&1
+$m $h * * * root $ps >/dev/null 2>&1
 CRONEOF
   chmod 0644 "/etc/cron.d/kervax-prune-$name"
 }
@@ -1195,6 +1200,52 @@ cmd_restic_update() {
   echo "restic updated to $RESTIC_TARGET_VER:$out$held"
 }
 
+# Root crontab lines that run one of our prune scripts are left over from the ansible role that
+# used to provision clients: it scheduled each cleanup at the backup hour + 21. The helper owns
+# the schedule now (/etc/cron.d/kervax-prune-<name>, 12 hours away from the backup), so such a
+# line runs the same script a second time a day, at a time that ignores the client's backup.
+# These lines are commented out, and so are lines starting a prune script that no longer exists
+# (the client is gone, cron kept starting a missing file every night). Only a line whose whole
+# command is the script, with nothing but output redirection after it; everything else in the
+# crontab stays as it is. The previous crontab is kept in $CRONTAB_BAK_DIR.
+CRONTAB_BAK_DIR=/root
+cmd_dedup_cron() {
+  local cur new line cmd s n rest changed=0 bak
+  cur="$(crontab -l -u root 2>/dev/null)" || { echo "root crontab: none"; return 0; }
+  [ -n "$cur" ] || { echo "root crontab: empty"; return 0; }
+  new=""
+  while IFS= read -r line || [ -n "$line" ]; do
+    s=""
+    case "$line" in
+      '#'*|''|'@'*) ;;
+      *)
+        cmd="$(printf '%s\n' "$line" | awk '{ $1 = $2 = $3 = $4 = $5 = ""; sub(/^ +/, ""); print }')"
+        s="$(printf '%s\n' "$cmd" | grep -oE "^$PRUNE_DIR/restic-prune-[A-Za-z0-9._-]+\.sh" || true)"
+        if [ -n "$s" ]; then
+          rest="$(printf '%s' "${cmd#"$s"}" | sed -E 's#[[:space:]]*(2>&1|&>[^[:space:]]+|[12]?>>?[[:space:]]*[^[:space:]]+)##g')"
+          [ -z "${rest//[[:space:]]/}" ] || s=""
+        fi
+        ;;
+    esac
+    if [ -n "$s" ]; then
+      n="${s##*/restic-prune-}"; n="${n%.sh}"
+      if [ ! -f "$s" ]; then
+        line="# kervax-gone (no such script): $line"; changed=$((changed + 1))
+      elif grep -qF "$s" "/etc/cron.d/kervax-prune-$n" 2>/dev/null; then
+        line="# kervax-moved to /etc/cron.d/kervax-prune-$n: $line"; changed=$((changed + 1))
+      fi
+    fi
+    new="$new$line"$'\n'
+  done <<<"$cur"
+  if [ "$changed" -eq 0 ]; then echo "root crontab: no duplicate prune lines"; return 0; fi
+  bak="$CRONTAB_BAK_DIR/crontab.kervax-bak-$(date +%Y%m%d-%H%M%S)"
+  printf '%s\n' "$cur" > "$bak" && chmod 0600 "$bak" || { echo "could not save $bak, crontab left as is" >&2; return 2; }
+  if ! printf '%s' "$new" | crontab -u root -; then
+    echo "could not install the new crontab, the old one stays (copy in $bak)" >&2; return 2
+  fi
+  echo "root crontab: $changed prune line(s) commented out, the previous crontab is in $bak"
+}
+
 # cmd_forget_group removes every snapshot of one old group: a host that no longer backs up into
 # the repository (renamed, gone, a one-off backup). The policy keeps the last snapshots of such
 # a group forever, so it goes only by hand. Only an old group: when the host has a snapshot
@@ -1287,12 +1338,13 @@ case "${1:-}" in
   update-image)     cmd_update_image ;;
   restic-update)    cmd_restic_update ;;
   forget-group)     shift; cmd_forget_group "$@" ;;
+  dedup-cron)       cmd_dedup_cron ;;
   provision-client) shift; cmd_provision_client "$@" ;;
   deploy-tls-front) shift; cmd_deploy_tls_front "$@" ;;
   get-cert)         cmd_get_cert ;;
   get-client-creds) shift; cmd_get_client_creds "$@" ;;
   process-spool)    cmd_process_spool ;;
-  *) echo "usage: $0 {stats|regen-prune|adopt-legacy [--apply] [name...]|deploy-server [port]|update-image|restic-update|forget-group <repo> <host> [--apply]|provision-client <name> <hpass> <repopass> <ip> [kl kd kw km]|deploy-tls-front <ip> [dns]|get-cert|get-client-creds <name>|process-spool}" >&2; exit 2 ;;
+  *) echo "usage: $0 {stats|regen-prune|adopt-legacy [--apply] [name...]|deploy-server [port]|update-image|restic-update|forget-group <repo> <host> [--apply]|dedup-cron|provision-client <name> <hpass> <repopass> <ip> [kl kd kw km]|deploy-tls-front <ip> [dns]|get-cert|get-client-creds <name>|process-spool}" >&2; exit 2 ;;
 esac
 HELPER_EOF
 chmod 0755 "$HELPER"; chown root:root "$HELPER"
@@ -1355,6 +1407,8 @@ systemctl enable --now kervax-bsrv-req.path >/dev/null 2>&1 || true
 # refreshed right away, otherwise fixes (rotation metrics, --group-by) would reach new clients
 # only.
 "$HELPER" regen-prune 2>/dev/null || true
+# ...and the cleanups the ansible role scheduled in root's crontab are not run a second time
+"$HELPER" dedup-cron 2>&1 | sed 's/^/backupserver-setup: /' || true
 
 echo "backupserver-setup: done -> $HELPER; statistics in $STATS (cron every minute), provisioning through the spool $REQ_DIR."
 echo "backupserver-setup: current statistics:"
