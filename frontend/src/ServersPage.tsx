@@ -550,7 +550,7 @@ function DnsStatus({ dns }: { dns: DnsInfo }) {
   const bad = (x: { ms: number }) => x.ms < 0 || x.ms > DNS_SLOW_MS
   const mode = dns.mode === 'resolved' ? t('через systemd-resolved') : dns.mode === 'local' ? t('свой резолвер на ноде') : t('резолверы из resolv.conf')
   const miss = dns.miss_ts
-    ? `${t('имя не из кэша')}: ${dns.miss_ms >= 0 ? `${dns.miss_ms} ${t('мс')}` : t('не резолвится')} (${fmtRel(new Date(dns.miss_ts * 1000).toISOString())})`
+    ? `${t('имя не из кэша')}: ${dns.miss_ms >= 0 ? `${dns.miss_ms} ${t('мс')}` : dns.miss_err && dns.miss_err !== 'timeout' ? dns.miss_err : t('не резолвится')} (${fmtRel(new Date(dns.miss_ts * 1000).toISOString())})`
     : ''
   const title = [mode, miss].filter(Boolean).join('\n')
   if (!dns.servers?.length) return <span className="muted" title={title}>{miss || '-'}</span>

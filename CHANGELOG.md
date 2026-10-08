@@ -4,6 +4,16 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.4.122] - 2026-10-09
+
+### Fixed
+- Быстрый ответ ошибкой на несуществующее имя больше не считается поломкой DNS. На
+  corp-ai-dev systemd-resolved спрашивает и корпоративный резолвер, и DNS меша
+  100.100.100.100: первый честно отвечает NXDOMAIN, второй ошибкой, и resolved отдает SERVFAIL,
+  хотя настоящие имена резолвятся за 10-14 мс. Замер имени не из кэша как раз спрашивает
+  несуществующее имя, и пришел ложный алерт. Поломка - ответа нет совсем или он дольше 3 с. В
+  подсказке у DNS в карточке сервера теперь видна сама ошибка (servfail).
+
 ## [1.4.121] - 2026-10-09
 
 ### Fixed
