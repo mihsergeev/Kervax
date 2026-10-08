@@ -2504,7 +2504,13 @@ def dns_problem(rep: dict) -> str:
     slow = dns_slow_servers(d)
     miss_ts = float(d.get("miss_ts") or 0)
     miss = int(d.get("miss_ms") if d.get("miss_ms") is not None else 0)
-    miss_bad = miss_ts > 0 and ref - miss_ts <= _DNS_MISS_FRESH and (miss < 0 or miss > _DNS_MISS_SLOW_MS)
+    # Быстрый ответ ошибкой (SERVFAIL, REFUSED) на несуществующее имя - не поломка: так отвечает
+    # DNS меша 100.100.100.100, и systemd-resolved отдает SERVFAIL, хотя корпоративный резолвер
+    # рядом сказал NXDOMAIN, а настоящие имена резолвятся (corp-ai-dev). Поломка -
+    # ответа нет совсем или он дольше 3 с.
+    miss_err = str(d.get("miss_err") or "")
+    miss_bad = miss_ts > 0 and ref - miss_ts <= _DNS_MISS_FRESH and (
+        miss > _DNS_MISS_SLOW_MS or (miss < 0 and miss_err in ("", "timeout")))
     all_bad = bool(servers) and len(slow) == len(servers)
     if not miss_bad and not all_bad:
         return ""

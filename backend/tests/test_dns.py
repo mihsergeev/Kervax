@@ -19,6 +19,8 @@ def test_dns_problem_is_what_programs_would_feel():
     assert collector.dns_problem(_rep(ts, ok, miss_ms=4800)) == "имя не из кэша резолвится 4800 мс"
     # 0,5-1,5 с до авторитетных серверов домена панели - обычный день для нод в Hetzner
     assert collector.dns_problem(_rep(ts, ok, miss_ms=1532)) == ""
+    # быстрый SERVFAIL на несуществующее имя (DNS меша рядом с корпоративным) - не поломка
+    assert collector.dns_problem(_rep(ts, ok, miss_ms=-1, miss_err="servfail")) == ""
     assert collector.dns_problem(_rep(ts, ok, miss_ms=-1, miss_err="timeout")) == \
         "имя не из кэша не резолвится (нет ответа)"
     # все резолверы разом - проблема, даже если последний замер не из кэша был в норме
