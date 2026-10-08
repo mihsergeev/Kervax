@@ -196,7 +196,7 @@ _SRV_ICON = {
     "backup_unmonitored": "💾", "backup_check": "🩺", "backup_prune": "🧹",
     "backup_missing": "💾", "backup_failed": "💾", "backup_stale": "💾", "backup_repo": "💾",
     "backup_dump": "💾", "backup_dump_space": "🈵", "backup_cron": "💾", "backup_custom": "💾",
-    "clock": "🕐", "disk_health": "💽", "inode": "⚠️", "disk_forecast": "📈", "units": "⚙️",
+    "clock": "🕐", "dns": "🌐", "disk_health": "💽", "inode": "⚠️", "disk_forecast": "📈", "units": "⚙️",
     "cpu_spin": "🌀", "backup_growth": "💾📈", "docker_sock": "🔓🐳",
     # ⏳ — срок ещё не вышел, есть время спланировать; 🔥 — доставка уже встала
     "kube_expiry": "⏳", "flux_down": "🔥☸️", "kube_pod": "☸️🔥", "web_5xx": "🌐🔥",
@@ -1176,7 +1176,7 @@ _SRV_LABEL = {
     "db_conn": "коннекты СУБД",
     "backup_missing": "бэкап", "backup_failed": "бэкап", "backup_stale": "свежесть бэкапа",
     "backup_dump": "дамп СУБД", "backup_dump_space": "место под дампы",
-    "backup_cron": "дамп-CronJob", "backup_custom": "свой бэкап", "clock": "время",
+    "backup_cron": "дамп-CronJob", "backup_custom": "свой бэкап", "clock": "время", "dns": "DNS",
     "kube_expiry": "сроки Kubernetes", "flux_down": "доставка Flux", "flux_stale": "репозиторий чартов",
     "kube_pod": "поды kubernetes",
     "web_5xx": "ошибки 5xx",
@@ -2447,6 +2447,82 @@ def disk_health_problems(block: dict, short: bool = False) -> list[tuple[int, st
     return out
 
 
+# DNS ноды (агент 2.25): через какие резолверы нода ходит и как быстро они отвечают, фоновый
+# замер. Повод - сбой рекурсивных DNS Hetzner 08.10.2026: имена резолвились по 5 секунд, k8s не
+# мог скачать образы. Медленно - дольше 1,5 с: для программы это уже подвисание, а glibc ждет
+# резолвер до 5 секунд. Проблема - когда медленно или совсем не резолвится имя не из кэша (то,
+# что почувствуют программы) или когда тормозят все резолверы ноды разом. Один медленный из
+# нескольких - видно в карточке, но не алерт: systemd-resolved уйдет на соседний.
+_DNS_SLOW_MS = 1500
+_DNS_FRESH = 5 * 60       # снимок старше - агент его не обновляет, не судим
+_DNS_MISS_FRESH = 12 * 60  # резолв не из кэша мерится раз в 5 минут
+_DNS_HOLD = 10 * 60       # держится 10 минут - алерт: разовый медленный ответ бывает у любого
+
+
+def dns_block(rep: dict) -> dict | None:
+    """Свежий снимок DNS ноды из отчета или None."""
+    d = rep.get("dns")
+    if not isinstance(d, dict):
+        return None
+    ref = float(rep.get("clock_unix") or 0) or datetime.now(timezone.utc).timestamp()
+    if ref - float(d.get("ts") or 0) > _DNS_FRESH:
+        return None
+    return d
+
+
+def _dns_answer(x: dict) -> str:
+    ms = int(x.get("ms") if x.get("ms") is not None else -1)
+    if ms >= 0:
+        return f"{ms} мс"
+    err = str(x.get("err") or "")
+    return "нет ответа" if err in ("", "timeout") else err
+
+
+def dns_slow_servers(d: dict) -> list[dict]:
+    """Резолверы, которые отвечают дольше порога или не отвечают."""
+    out = []
+    for x in d.get("servers") or []:
+        if not isinstance(x, dict) or not x.get("addr"):
+            continue
+        ms = int(x.get("ms") if x.get("ms") is not None else -1)
+        if ms < 0 or ms > _DNS_SLOW_MS:
+            out.append(x)
+    return out
+
+
+def dns_problem(rep: dict) -> str:
+    """Что не так с DNS ноды, словами; пусто - все в порядке или судить не по чему."""
+    d = dns_block(rep)
+    if d is None:
+        return ""
+    ref = float(rep.get("clock_unix") or 0) or datetime.now(timezone.utc).timestamp()
+    servers = [x for x in d.get("servers") or [] if isinstance(x, dict) and x.get("addr")]
+    slow = dns_slow_servers(d)
+    miss_ts = float(d.get("miss_ts") or 0)
+    miss = int(d.get("miss_ms") if d.get("miss_ms") is not None else 0)
+    miss_bad = miss_ts > 0 and ref - miss_ts <= _DNS_MISS_FRESH and (miss < 0 or miss > _DNS_SLOW_MS)
+    all_bad = bool(servers) and len(slow) == len(servers)
+    if not miss_bad and not all_bad:
+        return ""
+    parts = []
+    if miss_bad:
+        parts.append("имя не из кэша " + (
+            f"не резолвится ({_dns_answer({'ms': -1, 'err': d.get('miss_err')})})" if miss < 0
+            else f"резолвится {miss} мс"))
+    if slow:
+        parts.append("резолверы: " + ", ".join(f"{x['addr']} {_dns_answer(x)}" for x in slow))
+    return "; ".join(parts)
+
+
+def dns_others_hint(sid: int, slow_by: dict[int, set[str]]) -> str:
+    """У скольких еще нод сейчас тормозят те же резолверы: тогда это сбой у провайдера."""
+    mine = slow_by.get(sid) or set()
+    if not mine:
+        return ""
+    n = sum(1 for other, addrs in slow_by.items() if other != sid and addrs & mine)
+    return f". Так же у {n} других нод с теми же резолверами, похоже на сбой у провайдера" if n >= 2 else ""
+
+
 def server_problems(s: Server, now: datetime, pod_names: dict[str, str] | None = None) -> list[dict]:
     """Что сломано на сервере по новым проверкам - поломки дисков, прогноз заполнения, inode,
     упавшие юниты - коротко, для сводки "Что сломано" на главной и значков в списке серверов.
@@ -2505,6 +2581,11 @@ def server_problems(s: Server, now: datetime, pod_names: dict[str, str] | None =
         lvl = 3 if crit and ipct >= crit else 2 if prob and ipct >= prob else 1 if warn and ipct >= warn else 0
         if lvl:
             add("inode", lvl, f"inode {wi.get('mount') or '?'} {ipct}%", "diskfill", f"inode@{lvl}" if lvl < 3 else "inode")
+    # DNS: тот же порог и та же выдержка, что у алерта (начало ведет цикл алертов, dns_since)
+    why = dns_problem(rep)
+    d_since = _parse_iso(state.get("dns_since") or "")
+    if why and d_since and (now - d_since).total_seconds() >= _DNS_HOLD:
+        add("dns", 2, f"DNS: {why}", "", "dns", state.get("dns_since"))
     out.sort(key=lambda p: -p["level"])
     return out
 
@@ -2702,7 +2783,7 @@ def groups_text(groups: list[dict], pod_names: dict[str, str] | None = None) -> 
 # Что из alert_state отдать как "с какого момента проблема": "<вид>_from" ставит цикл алертов
 # для любого вида, а у пороговых метрик точнее "<вид>_since" - начало превышения, а не алерта.
 _SINCE_KEYS = ("cpu", "mem", "temp", "conntrack", "disktemp", "db_conn", "web_5xx", "clock",
-               "backup_missing")
+               "backup_missing", "dns")
 
 
 def alert_since(s: Server) -> dict[str, str]:
@@ -3629,6 +3710,19 @@ def _server_conditions(s: Server, now: datetime,
         disp = f"{a} с" if a < 120 else f"{a // 60} мин"
         out["clock"] = (c_lvl, {"value": disp, "since": c_since})
 
+    # DNS ноды (агент 2.25): медленно или не резолвит дольше _DNS_HOLD - проблема. Без снимка
+    # (агент старше или замер встал) ключа нет: молчание не значит, что DNS в порядке.
+    if online and dns_block(rep) is not None:
+        why = dns_problem(rep)
+        if why:
+            d_since = state.get("dns_since") or now.isoformat()
+            d_started = _parse_iso(d_since)
+            d_held = (now - d_started).total_seconds() if d_started else 0.0
+            d_lvl = 2 if d_held >= _DNS_HOLD else 0
+        else:
+            d_since, d_lvl = None, 0
+        out["dns"] = (d_lvl, {"details": why, "since": d_since})
+
     # Бэкап (restic): алертим только по РЕАЛЬНОЙ метрике и только пока сервер онлайн
     # (у оффлайна свои алерты; данные протухли). Это устойчивые состояния (не спайки),
     # поэтому уровень выставляем напрямую, без дебаунса.
@@ -3784,6 +3878,13 @@ async def evaluate_servers(
     pod_names = pod_uid_names(servers)
     # имена нод панели - для сверки с клиентами бэкап-серверов (один раз за тик)
     panel_names = panel_server_names(servers)
+    # какие резолверы тормозят у каждой ноды прямо сейчас: в алерте DNS сказать, что то же у
+    # других нод с теми же резолверами (сбой у провайдера, а не на ноде)
+    dns_slow_by: dict[int, set[str]] = {}
+    for _s in servers:
+        _rep = _s.last_report or {}
+        if seen_online(_s, now) and dns_problem(_rep):
+            dns_slow_by[_s.id] = {x["addr"] for x in dns_slow_servers(dns_block(_rep) or {})}
 
     async def cause_for(s: Server, key: str) -> str:
         """«Почему» для порогового алерта: кто ест ресурс и не наплыв ли трафика.
@@ -3951,6 +4052,8 @@ async def evaluate_servers(
                     continue
                 if key in ("cpu", "mem"):
                     ctx["cause"] = await cause_for(s, key)
+                if key == "dns":
+                    ctx["details"] = (ctx.get("details") or "") + dns_others_hint(s.id, dns_slow_by)
                 if key == "disk":
                     # на что ушло место - из разбора helper'а diskusage-setup, без запросов
                     ctx["cause"] = disk_cause(s.last_report or {}, s.disk_forecast, ctx.get("mount"), now)

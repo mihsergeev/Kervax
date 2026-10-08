@@ -27,6 +27,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"os"
 	"os/exec"
@@ -42,7 +43,7 @@ import (
 	"time"
 )
 
-const version = "2.24"
+const version = "2.25"
 
 // Публичный ключ для проверки подписи релизов агента (Ed25519, base64).
 // ПУСТО по умолчанию → самообновление ВЫКЛЮЧЕНО (агент никогда не заменяет себя).
@@ -221,6 +222,8 @@ type report struct {
 	// (точных) часов — работает даже если у ноды закрыт исходящий и до NTP не достучаться.
 	Clock     *clockInfo `json:"clock,omitempty"`
 	ClockUnix int64      `json:"clock_unix,omitempty"`
+	// DNS ноды: резолверы и время их ответа (фоновый замер, последний снимок; nil - еще не мерили)
+	DNS *dnsInfo `json:"dns,omitempty"`
 	// Готовые JSON-блоки root-хелперов из /var/lib/kervax/report.d/<имя>.json. Агент их не
 	// разбирает, а пересылает как есть: хелпер, которому нужно что-то сообщить панели
 	// (например, найденные на ноде свои бэкапы), больше не требует нового агента.
@@ -3108,6 +3111,7 @@ func collect(prev sample) (report, sample) {
 		BackupServer:  collectBackupServer(dk),
 		SetupVersions: collectSetupVersions(),
 		Clock:         collectClock(),
+		DNS:           dnsLatest.Load(),
 		Extras:        collectExtras(),
 	}
 	// kube собираем в переменную: он же нужен для скрейпа сервисов (podIP есть только там)
@@ -3122,6 +3126,168 @@ func collect(prev sample) (report, sample) {
 		r.SiteProbes = collectSiteProbes(*kn)
 	}
 	return r, cur
+}
+
+// --- DNS ноды -----------------------------------------------------------------
+// Через какие резолверы нода ходит и как быстро они отвечают. Повод - сбой рекурсивных DNS
+// Hetzner 08.10.2026: имена резолвились по 5 секунд, k8s не мог скачать образы, а панель об
+// этом не знала. Меряем фоном, отчет берет последний снимок: каждый резолвер напрямую раз в
+// минуту, системный резолв имени, которого нет в кэше (то, что почувствуют программы), раз в
+// 5 минут. Только IPv4: IPv6 в парке не используется, запрос к недоступному v6-резолверу
+// выглядел бы поломкой.
+
+type dnsServer struct {
+	Addr string `json:"addr"`          // адрес резолвера
+	Ms   int    `json:"ms"`            // время ответа, мс; -1 - ответа нет
+	Err  string `json:"err,omitempty"` // timeout, refused, servfail...
+}
+
+type dnsInfo struct {
+	// direct - резолверы прямо в resolv.conf; resolved - за заглушкой systemd-resolved (тогда
+	// здесь её настоящие резолверы); local - свой unbound или dnsmasq на 127.0.0.1
+	Mode    string      `json:"mode"`
+	Servers []dnsServer `json:"servers"`
+	// системный резолв случайного имени под доменом панели: в кэше его нет, путь полный
+	MissMs  int    `json:"miss_ms"`
+	MissErr string `json:"miss_err,omitempty"`
+	MissTs  int64  `json:"miss_ts,omitempty"`
+	Ts      int64  `json:"ts"`
+}
+
+var dnsLatest atomic.Pointer[dnsInfo]
+
+const (
+	dnsEvery       = time.Minute
+	dnsMissEvery   = 5 * time.Minute
+	dnsAskTimeout  = 2 * time.Second
+	dnsMissTimeout = 6 * time.Second // glibc ждет резолвер 5 секунд: видно и такие ответы
+)
+
+// resolvConfServers - адреса nameserver из файла в формате resolv.conf
+func resolvConfServers(path string) []string {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, line := range strings.Split(string(b), "\n") {
+		f := strings.Fields(line)
+		if len(f) >= 2 && f[0] == "nameserver" {
+			out = append(out, f[1])
+		}
+	}
+	return out
+}
+
+// dnsServersFrom - режим и IPv4-резолверы, которые на деле отвечают ноде (не больше 4)
+func dnsServersFrom(resolvConf, resolvedConf string) (string, []string) {
+	ns := resolvConfServers(resolvConf)
+	mode := "direct"
+	for _, s := range ns {
+		if s == "127.0.0.53" {
+			mode = "resolved"
+			ns = resolvConfServers(resolvedConf)
+			break
+		}
+	}
+	var v4 []string
+	loop := 0
+	for _, s := range ns {
+		ip, err := netip.ParseAddr(s)
+		if err != nil || !ip.Is4() {
+			continue
+		}
+		if ip.IsLoopback() {
+			loop++
+		}
+		v4 = append(v4, s)
+	}
+	if mode == "direct" && len(v4) > 0 && loop == len(v4) {
+		mode = "local"
+	}
+	if len(v4) > 4 {
+		v4 = v4[:4]
+	}
+	return mode, v4
+}
+
+// dnsMeasure - время ответа на A-запрос; "такого имени нет" тоже ответ
+func dnsMeasure(r *net.Resolver, name string, timeout time.Duration) (int, string) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	t0 := time.Now()
+	_, err := r.LookupNetIP(ctx, "ip4", name)
+	ms := int(time.Since(t0) / time.Millisecond)
+	if err == nil {
+		return ms, ""
+	}
+	var de *net.DNSError
+	if errors.As(err, &de) && de.IsNotFound {
+		return ms, ""
+	}
+	if ctx.Err() != nil || (de != nil && de.IsTimeout) {
+		return -1, "timeout"
+	}
+	msg := err.Error()
+	switch {
+	case strings.Contains(msg, "refused"):
+		msg = "refused"
+	case strings.Contains(msg, "server misbehaving"):
+		msg = "servfail"
+	}
+	if len(msg) > 60 {
+		msg = msg[:60]
+	}
+	return -1, msg
+}
+
+// dnsAsk - спросить один резолвер напрямую, мимо кэшей ноды. server - IP или IP:порт.
+func dnsAsk(server, name string, timeout time.Duration) (int, string) {
+	addr := server
+	if _, _, err := net.SplitHostPort(server); err != nil {
+		addr = net.JoinHostPort(server, "53")
+	}
+	r := &net.Resolver{PreferGo: true, Dial: func(ctx context.Context, network, _ string) (net.Conn, error) {
+		var d net.Dialer
+		return d.DialContext(ctx, network, addr)
+	}}
+	return dnsMeasure(r, name, timeout)
+}
+
+// dnsLoop - фоновый замер DNS ноды; имя для запросов - хост панели (агенту оно нужно и так)
+func dnsLoop(panelURL string) {
+	host := "example.com"
+	if u, err := url.Parse(panelURL); err == nil {
+		if h := u.Hostname(); h != "" && net.ParseIP(h) == nil {
+			host = h
+		}
+	}
+	missMs, missErr, missTs := 0, "", int64(0)
+	var lastMiss time.Time
+	for {
+		mode, servers := dnsServersFrom("/etc/resolv.conf", "/run/systemd/resolve/resolv.conf")
+		info := &dnsInfo{Mode: mode, Ts: time.Now().Unix(), Servers: make([]dnsServer, len(servers))}
+		var wg sync.WaitGroup
+		for i, s := range servers {
+			wg.Add(1)
+			go func(i int, s string) {
+				defer wg.Done()
+				ms, e := dnsAsk(s, host+".", dnsAskTimeout)
+				info.Servers[i] = dnsServer{Addr: s, Ms: ms, Err: e}
+			}(i, s)
+		}
+		wg.Wait()
+		if time.Since(lastMiss) >= dnsMissEvery {
+			lastMiss = time.Now()
+			// уникальное имя: такого нет ни в одном кэше, резолвер идет до авторитетных серверов
+			name := fmt.Sprintf("kvx-%x.%s.", lastMiss.UnixNano(), host)
+			missMs, missErr = dnsMeasure(net.DefaultResolver, name, dnsMissTimeout)
+			missTs = lastMiss.Unix()
+		}
+		info.MissMs, info.MissErr, info.MissTs = missMs, missErr, missTs
+		dnsLatest.Store(info)
+		time.Sleep(dnsEvery)
+	}
 }
 
 // collectClock — статус синхронизации времени через timedatectl (read-only, unprivileged).
@@ -6018,6 +6184,8 @@ func main() {
 	// свежий процесс. 90с < offline_after (120с) → ложного «оффлайна» не будет.
 	// быстрый опрос docker-команд — отдельно от метрик, чтобы restart/logs шли ~3с
 	go commandLoop(url, token)
+	// DNS ноды меряем фоном со своим тактом: отчет уходит раз в 15 секунд, столько не нужно
+	go dnsLoop(url)
 
 	const maxCycle = 90 * time.Second
 	kick := make(chan struct{}, 1)

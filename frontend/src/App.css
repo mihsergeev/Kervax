@@ -941,6 +941,7 @@ input:focus {
 .excl-keep { color: var(--text); }         /* добавленное оператором — белым */
 /* блок синхронизации времени в шапке детали сервера */
 .clock-fix { margin: 0.4rem 0 0.7rem; }
+.dns-problem { margin: 0.4rem 0 0.7rem; display: flex; flex-direction: column; gap: 0.2rem; }
 
 /* "На что ушло место": дерево каталогов с полосками и находки с командами */
 .du-block { margin-top: 0.9rem; }

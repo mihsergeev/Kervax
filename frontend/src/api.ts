@@ -1011,6 +1011,7 @@ export type ServerReport = {
   clock?: ClockInfo // статус синхронизации времени (timedatectl)
   clock_skew_sec?: number // сдвиг часов ноды относительно панели, сек (± ; считает бэкенд)
   clock_unix?: number // локальные часы ноды на момент отправки отчёта
+  dns?: DnsInfo | null // DNS ноды: резолверы и время их ответа (агент 2.25)
 }
 // Итоги прогонов бэкапа (helper backup-setup 0.32): сколько restic добавил в репозиторий.
 // add - новые данные до сжатия, st - сколько легло в репозиторий, proc - сколько прочитано
@@ -1122,6 +1123,15 @@ export type FailedUnit = {
   log: string[]
 }
 export type UnitsBlock = { v: number; ts: number; units: FailedUnit[]; fix: boolean }
+// DNS ноды (агент 2.25): каждый резолвер напрямую раз в минуту, резолв имени не из кэша раз в 5 минут
+export type DnsInfo = {
+  mode: 'direct' | 'resolved' | 'local' | string // resolved - за заглушкой systemd-resolved, local - свой unbound/dnsmasq
+  servers: { addr: string; ms: number; err?: string }[] // ms -1 - ответа нет
+  miss_ms: number // системный резолв имени не из кэша, -1 - не вышло
+  miss_err?: string
+  miss_ts?: number
+  ts: number
+}
 export type ClockInfo = {
   synced: boolean // NTPSynchronized=yes
   ntp: boolean // синхронизация включена
