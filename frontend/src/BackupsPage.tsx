@@ -936,12 +936,14 @@ type RepoState = 'archived' | 'muted' | 'invalid' | 'locked' | 'stuck' | 'runnin
 // которым репозиторий сейчас в алерте backup_repo. Причины считает бэкенд: с ритмом бэкапов
 // (клиент без агента опаздывает через сутки с небольшим, недельный бэкап не устаревает за 3
 // дня), так что список, счетчики и алерт расходиться не могут.
-type RepoCtx = { muted: Set<string>; archived: Set<string>; reasons: Record<string, string> }
+// prune - репозитории, у которых не работает чистка (не открывает, падает, не запускается).
+type RepoCtx = { muted: Set<string>; archived: Set<string>; reasons: Record<string, string>; prune: Record<string, string> }
 function repoCtx(s: Server): RepoCtx {
   return {
     muted: new Set(s.backup_repo_mutes ?? []),
     archived: new Set(Object.keys(s.backup_repo_archive ?? {}).filter((k) => !k.includes('|'))),
     reasons: s.bsrv_repo_reasons ?? {},
+    prune: s.bsrv_prune ?? {},
   }
 }
 // интервал бэкапов словами: раз в сутки, раз в 6 ч, раз в неделю
@@ -969,7 +971,9 @@ function repoState(r: RepoStat, c: RepoCtx): RepoState {
 // проблемный = не ок, не заглушен и не в архиве (для счетчиков и акцентов)
 function repoBad(r: RepoStat, c: RepoCtx): boolean {
   const st = repoState(r, c)
-  return st !== 'ok' && st !== 'muted' && st !== 'archived' && st !== 'running' && st !== 'stuck'
+  if (st === 'muted' || st === 'archived') return false
+  // неработающая чистка - проблема при любом другом состоянии: нет ни ротации, ни проверки
+  return (st !== 'ok' && st !== 'running' && st !== 'stuck') || !!c.prune[r.name]
 }
 // Блок helper'а backupserver-setup 0.23: кто чистит репозитории и когда из них что-то
 // удалялось. Старше 15 минут - helper встал, по такому блоку не судим.
@@ -1063,10 +1067,11 @@ const BSRV_ROOT = '/app/rest-server'
 /** Состояние ротации репозитория: когда чистилось, сколько сняло, каков старейший
  * снапшот. Возраст старейшего — главный признак: он переживает свою политику ровно
  * тогда, когда чистка встала, какой бы ни была причина. */
-function RotationInfo({ r, x, legacy, t }: {
+function RotationInfo({ r, x, legacy, prune, t }: {
   r: RepoStat
   x?: BackupServerRepoExtra // кто чистит и когда удаляли (helper 0.23), нет - helper старый
   legacy?: BackupServerLegacy | null
+  prune?: string // почему не работает чистка (бэкенд), пусто - работает
   t: (s: string, v?: Record<string, string | number>) => string
 }) {
   const oldest = r.oldest_snapshot ?? 0
@@ -1142,7 +1147,7 @@ function RotationInfo({ r, x, legacy, t }: {
         </span>
       ) : null}
       {ts > 0 && (
-        <span title={r.rotation_ok === 0 ? t('последний прогон завершился ошибкой') : ''}>
+        <span className={prune ? 't-down' : ''} title={prune || (r.rotation_ok === 0 ? t('последний прогон завершился ошибкой') : '')}>
           {t('чистка')}: {fmtAgo(ts)}
           {removed >= 0 && ` (${t('снято {n}', { n: removed })})`}
         </span>
@@ -1382,6 +1387,9 @@ function RepoRow({ server: s, r, ctx, canAct, onChanged, growth, unmonitored }: 
             </span>
           )}
           {st === 'stale' && <span className="type-chip off" title={staleTitle}>{cad ? t('опоздал') : t('устарел')}</span>}
+          {ctx.prune[r.name] && !isMuted && (
+            <span className="type-chip off" title={ctx.prune[r.name]}>{t('чистка не работает')}</span>
+          )}
           {(growth ?? 0) > 0 && (
             <span className="type-chip" title={t('обычный прирост за прогон после сжатия')}>
               +{fmtBytes(growth ?? 0)}
@@ -1402,7 +1410,7 @@ function RepoRow({ server: s, r, ctx, canAct, onChanged, growth, unmonitored }: 
               {t('хранит')}: {keep.map((v) => v ?? 0).join('/')}
             </span>
           )}
-          <RotationInfo r={r} x={ext?.repos?.[r.name]} legacy={ext?.legacy} t={t} />
+          <RotationInfo r={r} x={ext?.repos?.[r.name]} legacy={ext?.legacy} prune={ctx.prune[r.name]} t={t} />
         </div>
       </div>
       {/* В архив - то, что хранится как есть: сервера больше нет, бэкапить больше не нужно,
@@ -1423,6 +1431,7 @@ function RepoRow({ server: s, r, ctx, canAct, onChanged, growth, unmonitored }: 
         </button>
       )}
       </div>
+      {ctx.prune[r.name] && !isMuted && <div className="small t-down repo-prune-why">{ctx.prune[r.name]}</div>}
       {archiving && (
         <ArchiveForm server={s} repo={r.name} host="" onCancel={() => setArchiving(false)}
           onDone={() => { setArchiving(false); onChanged() }} />
@@ -1614,6 +1623,11 @@ function ArchivedRow({ server: s, r, entry, canAct, onChanged }: {
                 {x.check_ok === 0 ? t('проверка не прошла') : t('проверка')}: {fmtAgo(x.check_ts)}
               </span>
             ) : null}
+            {r.rotation_ok === 0 && (r.rotation_removed ?? -1) < 0 && (
+              <span className="t-degraded" title={x?.prune_err || ''}>
+                {t('чистка и проверка не открывают репозиторий')}
+              </span>
+            )}
           </div>
         </div>
         {canAct && (

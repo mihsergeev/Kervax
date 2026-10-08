@@ -1097,6 +1097,8 @@ class ServerOut(BaseModel):
     bsrv_repo_reasons: dict[str, str] = Field(default_factory=dict)
     # обычный интервал бэкапов репозитория, секунды (по последним снапшотам, helper 0.28)
     bsrv_cadence: dict[str, int] = Field(default_factory=dict)
+    # репозитории, у которых не работает чистка: имя -> причина (не открывает, падает, не идет)
+    bsrv_prune: dict[str, str] = Field(default_factory=dict)
 
 
 class BackupRepoMuteIn(BaseModel):

@@ -1249,6 +1249,7 @@ export type BackupServerRepoExtra = {
   check_parts?: number
   recent?: number[] // времена последних снапшотов (helper 0.28), по ним бэкенд считает ритм
   groups?: { ts: number; groups: BackupGroup[] } | null // группы снапшотов, если их больше одной
+  prune_err?: string // ошибка последнего неудачного прогона чистки (helper 0.30)
 }
 // группа снапшотов так, как её видит forget: хост и теги (prune-скрипт, раз в сутки)
 export type BackupGroup = {
@@ -1361,6 +1362,7 @@ export type Server = {
   bsrv_restic_old?: string // restic сервера бэкапов старше целевой версии (считает бэкенд)
   bsrv_repo_reasons?: Record<string, string> // репозиторий -> почему он сейчас в алерте backup_repo
   bsrv_cadence?: Record<string, number> // обычный интервал бэкапов репозитория, секунды
+  bsrv_prune?: Record<string, string> // репозиторий -> почему не работает его чистка
   alert_since?: Record<string, string> // с какого момента видна проблема каждого вида (ISO)
   docker_since?: Record<string, string> // с какого момента лежит каждый упавший контейнер
   // последний прогон бэкапа добавил в разы больше обычного (считает бэкенд)

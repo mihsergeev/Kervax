@@ -545,3 +545,124 @@ async def test_new_late_repo_alerts_at_once_next_to_an_old_problem(tmp_path, mon
     late = [x for x in sent if "web-07" in x]
     assert len(late) == 1 and "бэкап опоздал" in late[0], sent
     await engine.dispose()
+
+
+def test_prune_problems_say_why_the_cleanup_does_not_work():
+    """Чистка не открывает репозиторий (rotation_removed -1), падает, пропущена пустой политикой
+    или не запускается: у каждого своя причина. Заглушенные и архив не в счет."""
+    from datetime import datetime, timezone
+
+    from app import collector
+
+    now = datetime(2026, 10, 8, 12, tzinfo=timezone.utc)
+    ts = now.timestamp()
+    h = 3600
+
+    def repo(name, ok, removed, age_h):
+        return {"name": name, "rotation_ok": ok, "rotation_removed": removed, "rotation_ts": ts - age_h * h}
+
+    bs = {"repos": [
+        repo("ms", 0, -1, 6), repo("ms-old", 0, -1, 6), repo("locked", 0, 0, 6), repo("fine", 1, 1, 6),
+        repo("stopped", 1, 1, 100), repo("safe", 1, 0, 6), repo("new", -1, -1, 0), repo("never", -1, -1, 0),
+        repo("muted", 0, -1, 6), repo("archived", 0, -1, 6)]}
+    for r in bs["repos"]:
+        if r["name"] in ("new", "never"):
+            r["rotation_ts"] = 0
+    extra = {"repos": {
+        "ms": {"cleaner": "script", "prune_err": "ERROR: repo not accessible at /app/rest-server/data/ms: Fatal: wrong password or no key found"},
+        "ms-old": {"cleaner": "script", "prune_err": "ERROR: repo not accessible at /app/rest-server/data/ms-old"},
+        "locked": {"cleaner": "script", "prune_err": "unable to create lock in backend: repository is already locked exclusively by PID 7"},
+        "fine": {"cleaner": "script", "prune_err": ""},
+        "stopped": {"cleaner": "script"},
+        "safe": {"cleaner": "script", "prune_err": "SAFETY: every keep-* is 0 -> forget/prune SKIPPED (protection against wiping everything)"},
+        # только что перенесен на свой скрипт (наблюдают давно, скрипт свежий) - ждет ночи
+        "new": {"cleaner": "script", "seen_since": ts - 30 * 86400, "prune_mtime": ts - 2 * h},
+        "never": {"cleaner": "script", "seen_since": ts - 30 * 86400, "prune_mtime": ts - 5 * 86400},
+    }}
+    got = collector.prune_problems(bs, extra, now, {"muted"}, {"archived": {}})
+    assert got == {
+        "ms": ("access", "чистка не открывает репозиторий: Fatal: wrong password or no key found"),
+        "ms-old": ("access", "чистка не открывает репозиторий: не подходит пароль в env или env нет"),
+        "locked": ("failed", "чистка падает: unable to create lock in backend: repository is already locked exclusively by PID 7"),
+        "stopped": ("idle", "чистка не запускается 4 дн"),
+        "safe": ("skipped", "чистка пропущена: политика хранения пустая, все keep-* = 0"),
+        "never": ("idle", "чистка ни разу не запускалась"),
+    }, got
+
+
+async def test_prune_alert_waits_for_a_second_failure_but_not_for_a_broken_env(tmp_path, monkeypatch):
+    """Не открывает репозиторий - алерт сразу. Просто упала - только если не прошла и через сутки
+    с лишним: разовый сбой лока проходит сам."""
+    from datetime import datetime, timedelta, timezone
+
+    from app import collector
+    from app.config import Settings
+    from app.db import Base, create_engine_and_factory
+    from app.models import Server
+
+    engine, factory = create_engine_and_factory(f"sqlite+aiosqlite:///{(tmp_path / 'p.db').as_posix()}")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    now = datetime.now(timezone.utc)
+
+    def report(at):
+        t = at.timestamp()
+        return {"cpu_percent": 5, "clock_unix": t,
+                "backup_server": {"present": True, "running": True, "repos": [
+                    {"name": "env-broken", "valid": True, "snapshots": 5, "last_activity": t - 3600,
+                     "rotation_ok": 0, "rotation_removed": -1, "rotation_ts": t - 600},
+                    {"name": "lock-once", "valid": True, "snapshots": 5, "last_activity": t - 3600,
+                     "rotation_ok": 0, "rotation_removed": 0, "rotation_ts": t - 600}]},
+                "extras": {"backup-server": {"v": 1, "ts": t - 30, "repos": {
+                    "env-broken": {"cleaner": "script", "prune_err": "ERROR: repo not accessible at /x: Fatal: wrong password or no key found"},
+                    "lock-once": {"cleaner": "script", "prune_err": "unable to create lock in backend: repository is already locked"}}}}}
+
+    async with factory() as s:
+        s.add(Server(name="backup-04", token_hash="x", enabled=True, backup_not_required=True,
+                     last_seen=now, last_report=report(now),
+                     cpu_alert_percent=0, mem_alert_percent=0, disk_alert_percent=0))
+        await s.commit()
+    sent: list[str] = []
+
+    async def fake_send(cfg, text, parse_mode=None):
+        sent.append(text)
+        return []
+
+    monkeypatch.setattr("app.alerts.send_alert", fake_send)
+    settings = Settings(alert_webhook="http://hook")
+    await collector.evaluate_servers(factory, settings, now)
+    hits = [x for x in sent if "чистка" in x]
+    assert len(hits) == 1 and "env-broken" in hits[0] and "wrong password" in hits[0] and "lock-once" not in hits[0], sent
+    later = now + timedelta(hours=27)
+    async with factory() as s:
+        srv = (await s.scalars(collector.select(Server).where(Server.name == "backup-04"))).first()
+        srv.last_report = report(later)
+        srv.last_seen = later
+        await s.commit()
+    await collector.evaluate_servers(factory, settings, later)
+    hits = [x for x in sent if "чистка" in x]
+    assert len(hits) == 2 and "lock-once" in hits[1], sent
+    await engine.dispose()
+
+
+async def test_prune_problems_in_the_server_list(client, auth_headers):
+    import time
+
+    r = await client.post("/api/servers", json={"name": "backup-05"}, headers=auth_headers)
+    token, sid = r.json()["token"], r.json()["server"]["id"]
+    now = int(time.time())
+    rep = {"hostname": "backup-05", "os": "Debian", "agent_version": "2.23", "cpu_percent": 5,
+           "mem_used": 1, "mem_total": 2, "clock_unix": now,
+           "backup_server": {"present": True, "running": True, "repos": [
+               {"name": "backup-e", "valid": True, "snapshots": 5, "size_bytes": 1,
+                "last_activity": now - 146 * 86400, "rotation_ok": 0, "rotation_removed": -1,
+                "rotation_ts": now - 3600}]},
+           "extras": {"backup-server": {"v": 1, "ts": now - 30, "legacy": None, "repos": {
+               "backup-e": {"cleaner": "script", "prune_err": "ERROR: repo not accessible at /x: Fatal: wrong password or no key found"}}}}}
+    r = await client.post("/api/agent/report", json=rep, headers={"Authorization": f"Bearer {token}"})
+    assert r.status_code == 200, r.text
+    srv = [x for x in (await client.get("/api/servers", headers=auth_headers)).json() if x["id"] == sid][0]
+    assert srv["bsrv_prune"] == {"backup-e": "чистка не открывает репозиторий: Fatal: wrong password or no key found"}
+    r = await client.post(f"/api/servers/{sid}/backup/repo-archive", headers=auth_headers,
+                          json={"repo": "backup-e", "archived": True})
+    assert r.json()["bsrv_prune"] == {}

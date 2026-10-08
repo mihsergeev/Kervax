@@ -474,6 +474,16 @@ function backupProblems(servers: Server[], t: T): ProbItem[] {
       if (badNames.length > 0) out.push({ key: `bs-repo-${s.id}`, id: s.id, name: s.name, cc: s.country, down: true, srv: true, since: s.alert_since?.backup_repo,
         text: t('{name}: репозиториев с проблемой - {n} ({list})', { name: s.name, n: badNames.length,
           list: badNames.slice(0, 3).join(', ') + (badNames.length > 3 ? ', ...' : '') }) })
+      // чистка не работает (не открывает репозиторий, падает, не запускается): те же
+      // репозитории, что в алерте backup_prune, считает бэкенд
+      const pruneNames = Object.keys(s.bsrv_prune ?? {}).sort()
+      if (pruneNames.length > 0 && !smuted.has('backup_prune'))
+        out.push({
+          key: `bs-prune-${s.id}`, id: s.id, name: s.name, cc: s.country, down: true, srv: true,
+          text: t('{name}: чистка не работает - {list}', {
+            name: s.name, list: pruneNames.slice(0, 3).join(', ') + (pruneNames.length > 3 ? ', ...' : ''),
+          }),
+        })
       // ротация встала: считает бэкенд теми же правилами, что и алерт backup_rotation
       const rot = s.bsrv_rotation ?? []
       if (rot.length > 0 && !smuted.has('backup_rotation'))

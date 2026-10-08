@@ -193,7 +193,7 @@ _SRV_ICON = {
     # обычные события, и «упал»/«крутится в цикле» не читались как авария
     "docker_down": "🔥🐳", "docker_loop": "🔥🐳",
     "queue": "🐇", "backup_rotation": "🧹", "backup_lock": "🔒",
-    "backup_unmonitored": "💾", "backup_check": "🩺",
+    "backup_unmonitored": "💾", "backup_check": "🩺", "backup_prune": "🧹",
     "backup_missing": "💾", "backup_failed": "💾", "backup_stale": "💾", "backup_repo": "💾",
     "backup_dump": "💾", "backup_dump_space": "🈵", "backup_cron": "💾", "backup_custom": "💾",
     "clock": "🕐", "disk_health": "💽", "inode": "⚠️", "disk_forecast": "📈", "units": "⚙️",
@@ -240,6 +240,7 @@ _ALERT_SECTION = {
     "backup_lock": "backups",
     "backup_unmonitored": "backups",
     "backup_check": "backups",
+    "backup_prune": "backups",
     "kube_pod": "kuber",
 }
 
@@ -2084,6 +2085,68 @@ def rotation_stale_repos(
     return sorted(out)
 
 
+# Чистка репозитория (prune-скрипт helper'а) не работает: нет ни ротации, ни недельной проверки
+# целостности, а алерт ротации скажет об этом только через несколько дней и не о причине. Агент
+# отдает итог последнего прогона: rotation_ok 0 - команды упали, а rotation_removed -1 при этом
+# значит, что скрипт не открыл репозиторий (обычно не тот пароль в env). helper 0.30 отдает и
+# строку ошибки (prune_err). Итогу старше трех суток не верим: тогда чистка не запускается.
+_PRUNE_FRESH = 3 * 86400
+
+
+def _prune_reason(err: str) -> str:
+    """Суть ошибки restic из строки лога: с "Fatal:", иначе строка как есть. Строка старого
+    helper'а без причины ("repo not accessible at <путь>") ничего не добавляет."""
+    err = (err or "").strip()
+    if "Fatal:" in err:
+        return err[err.index("Fatal:"):][:160]
+    if err.startswith("ERROR: repo not accessible"):
+        return ""
+    return err[:160]
+
+
+def prune_problems(
+    bs: dict, extra: dict | None, now: datetime, muted: set | None = None, archive: dict | None = None,
+) -> dict[str, tuple[str, str]]:
+    """Репозитории, у которых не работает чистка: имя -> (вид, причина словами). Виды: access -
+    не открывает репозиторий, failed - команды упали, skipped - пропущена (пустая политика),
+    idle - не запускается. Без заглушенных и архива."""
+    out: dict[str, tuple[str, str]] = {}
+    nowts = now.timestamp()
+    obs = (extra or {}).get("repos") or {}
+    for r in bs.get("repos") or []:
+        name = r.get("name") or ""
+        if not name or name in (muted or set()) or archived_repo(archive, name):
+            continue
+        o = obs.get(name) if isinstance(obs.get(name), dict) else {}
+        ts = int(r.get("rotation_ts") or 0)
+        ok = int(r.get("rotation_ok") if r.get("rotation_ok") is not None else -1)
+        removed = int(r.get("rotation_removed") if r.get("rotation_removed") is not None else -1)
+        err = str(o.get("prune_err") or "")
+        fresh = ts > 0 and nowts - ts < _PRUNE_FRESH
+        if fresh and err.startswith("SAFETY:"):
+            out[name] = ("skipped", "чистка пропущена: политика хранения пустая, все keep-* = 0")
+        elif fresh and ok == 0 and removed < 0:
+            out[name] = ("access", "чистка не открывает репозиторий: "
+                         + (_prune_reason(err) or "не подходит пароль в env или env нет"))
+        elif fresh and ok == 0:
+            why = _prune_reason(err)
+            out[name] = ("failed", f"чистка падает: {why}" if why else "чистка падает, подробности в логе prune-скрипта")
+        elif o.get("cleaner") == "script" and ts > 0 and not fresh:
+            out[name] = ("idle", f"чистка не запускается {int((nowts - ts) // 86400)} дн")
+        elif o.get("cleaner") == "script" and ts <= 0 and int(o.get("prune_mtime") or 0) > 0 \
+                and nowts - int(o.get("prune_mtime") or 0) >= _PRUNE_FRESH:
+            # от того, когда скрипт сгенерирован (helper 0.30), а не от начала наблюдения: только
+            # что перенесенный со старого скрипта репозиторий просто ждет ночи
+            out[name] = ("idle", "чистка ни разу не запускалась")
+    return out
+
+
+# Упавшую чистку (failed) алертим, только если упал и следующий прогон: единичный сбой, например
+# лок, который не дождался 20 минут, проходит сам. Не открывает репозиторий или не запускается -
+# сразу: это само не пройдет.
+_PRUNE_FAIL_HOLD = 26 * 3600
+
+
 # Группа старая, если в нее не бэкапились неделю: столько же ждет и forget-group, прежде чем
 # согласиться её удалить.
 _OLD_GROUP_SECONDS = 7 * 86400
@@ -3708,7 +3771,8 @@ async def evaluate_servers(
             # Раздел "Кубер" с открытым кластером и сразу на нужной вкладке: сроки, Flux,
             # поды. В карточке сервера кластера нет, и ссылка вела мимо.
             return f"{base}/?kube={s.id}&ktab={_KUBE_TAB[key]}"
-        if key in ("backup_repo", "backup_rotation", "backup_lock", "backup_unmonitored", "backup_check"):
+        if key in ("backup_repo", "backup_rotation", "backup_lock", "backup_unmonitored", "backup_check",
+                   "backup_prune"):
             return f"{base}/?backupsrv={s.id}"
         if key.startswith("backup"):
             return f"{base}/?backup={s.id}"
@@ -4136,6 +4200,37 @@ async def evaluate_servers(
                     "backup_check", s.name, "проверка целостности репозиториев снова проходит",
                     srv_url(s, "backup_check"), recovery=True))
                 rec_apply.append((s.id, "backup_checks", {}))
+
+        # Чистка репозитория не работает: не открывает репозиторий, падает, пропущена или не
+        # запускается. Как с локом: при новом и раз в сутки, пока не починят. Упавшую - только если
+        # упал и следующий прогон (_PRUNE_FAIL_HOLD): разовый сбой проходит сам.
+        pr = rules.get("backup_prune")
+        if online_now and bsrv.get("present") and "backup_prune" not in mutes:
+            cur = prune_problems(bsrv, bsrv_extra(s.last_report or {}), now,
+                                 set(s.backup_repo_mutes or []), s.backup_repo_archive or {})
+            held = st.get("prune_fail") if isinstance(st.get("prune_fail"), dict) else {}
+            fails = {n: float(held.get(n) or now.timestamp()) for n, (k, _r) in cur.items() if k == "failed"}
+            if fails != held:
+                apply(s.id, "prune_fail", fails)
+            shown_now = {n: r for n, (k, r) in cur.items()
+                         if k != "failed" or now.timestamp() - fails[n] >= _PRUNE_FAIL_HOLD}
+            names = sorted(shown_now)
+            prev = st.get("backup_prunes") if isinstance(st.get("backup_prunes"), dict) else {}
+            prev_names = list(prev.get("repos") or [])
+            prev_ts = float(prev.get("ts") or 0)
+            due = bool(set(names) - set(prev_names)) or now.timestamp() - prev_ts >= _BACKUP_REPO_REALERT
+            if names and pr and pr["enabled"] and _rule_scope_ok(pr, s) and due:
+                items = [f"{n} ({shown_now[n]})" for n in names]
+                shown = ", ".join(items[:6]) + (f" и еще {len(items) - 6}" if len(items) > 6 else "")
+                fires.append(srv_fire(s, "backup_prune", pr, {"repos": shown}))
+                fire_apply.append((s.id, "backup_prunes", {"repos": names, "ts": now.timestamp()}))
+            elif names and prev_names and names != prev_names:
+                apply(s.id, "backup_prunes", {"repos": names, "ts": prev_ts})
+            elif not names and prev_names:
+                recoveries.append(_server_alert_text(
+                    "backup_prune", s.name, "чистка репозиториев снова работает",
+                    srv_url(s, "backup_prune"), recovery=True))
+                rec_apply.append((s.id, "backup_prunes", {}))
 
         # Новый клиент бэкап-сервера без агента в панели. Алерт только про новых: тех, кто
         # уже писал сюда, когда проверка появилась, запоминаем молча (их видно в окне
