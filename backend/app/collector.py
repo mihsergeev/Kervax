@@ -2524,6 +2524,18 @@ def dns_problem(rep: dict) -> str:
     return "; ".join(parts)
 
 
+def dns_suspects(rep: dict) -> set[str]:
+    """Резолверы, на которые падает подозрение при поломке DNS ноды: медленные, а если на прямые
+    запросы все отвечают быстро (из кэша), а не резолвится имя не из кэша, - все резолверы ноды.
+    Так было вечером 08.10.2026 у Hetzner: кэш отвечал мгновенно, новые имена не резолвились у
+    четырех нод, а подсказка про сбой у провайдера не сработала ни разу. Свои резолверы ноды
+    (127.0.0.1, DNS меша 100.100.100.100) у каждой ноды свои, по ним ноды не сравниваем."""
+    d = dns_block(rep) or {}
+    slow = {x["addr"] for x in dns_slow_servers(d)}
+    every = {x["addr"] for x in d.get("servers") or [] if isinstance(x, dict) and x.get("addr")}
+    return {a for a in (slow or every) if not a.startswith("127.") and a != "100.100.100.100"}
+
+
 def dns_others_hint(sid: int, slow_by: dict[int, set[str]]) -> str:
     """У скольких еще нод сейчас тормозят те же резолверы: тогда это сбой у провайдера."""
     mine = slow_by.get(sid) or set()
@@ -4091,13 +4103,13 @@ async def evaluate_servers(
     pod_names = pod_uid_names(servers)
     # имена нод панели - для сверки с клиентами бэкап-серверов (один раз за тик)
     panel_names = panel_server_names(servers)
-    # какие резолверы тормозят у каждой ноды прямо сейчас: в алерте DNS сказать, что то же у
-    # других нод с теми же резолверами (сбой у провайдера, а не на ноде)
+    # на какие резолверы падает подозрение у каждой ноды с поломкой DNS прямо сейчас: в алерте
+    # сказать, что то же у других нод с теми же резолверами (сбой у провайдера, а не на ноде)
     dns_slow_by: dict[int, set[str]] = {}
     for _s in servers:
         _rep = _s.last_report or {}
         if seen_online(_s, now) and dns_problem(_rep):
-            dns_slow_by[_s.id] = {x["addr"] for x in dns_slow_servers(dns_block(_rep) or {})}
+            dns_slow_by[_s.id] = dns_suspects(_rep)
 
     async def cause_for(s: Server, key: str) -> str:
         """«Почему» для порогового алерта: кто ест ресурс и не наплыв ли трафика.
