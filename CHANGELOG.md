@@ -4,6 +4,16 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.4.121] - 2026-10-09
+
+### Fixed
+- Резолв имени не из кэша считается медленным с 3 секунд, а не с 1,5. Такое имя резолвер ищет у
+  авторитетных серверов домена панели, и с нод в Hetzner новые имена example.com и example.org
+  резолвятся 0,5-1,5 с и в обычный день: у backup-a первые же замеры дали 1532 мс, и
+  через 10 минут пришел бы ложный алерт. Поломка - 3 с и больше, при сбое Hetzner было 5 с.
+  Порог для прямых запросов к резолверам прежний, 1,5 с: их ответы из кэша должны быть
+  мгновенными.
+
 ## [1.4.120] - 2026-10-08
 
 ### Added

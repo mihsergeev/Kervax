@@ -2454,6 +2454,10 @@ def disk_health_problems(block: dict, short: bool = False) -> list[tuple[int, st
 # что почувствуют программы) или когда тормозят все резолверы ноды разом. Один медленный из
 # нескольких - видно в карточке, но не алерт: systemd-resolved уйдет на соседний.
 _DNS_SLOW_MS = 1500
+# Имя не из кэша резолвер ищет у авторитетных серверов домена панели, и путь до них бывает
+# длинным: с нод в Hetzner новые имена example.com и example.org (их DNS в России) резолвятся
+# 0,5-1,5 с и в обычный день. Поломка - 3 с и больше: при сбое Hetzner было 5 с.
+_DNS_MISS_SLOW_MS = 3000
 _DNS_FRESH = 5 * 60       # снимок старше - агент его не обновляет, не судим
 _DNS_MISS_FRESH = 12 * 60  # резолв не из кэша мерится раз в 5 минут
 _DNS_HOLD = 10 * 60       # держится 10 минут - алерт: разовый медленный ответ бывает у любого
@@ -2500,7 +2504,7 @@ def dns_problem(rep: dict) -> str:
     slow = dns_slow_servers(d)
     miss_ts = float(d.get("miss_ts") or 0)
     miss = int(d.get("miss_ms") if d.get("miss_ms") is not None else 0)
-    miss_bad = miss_ts > 0 and ref - miss_ts <= _DNS_MISS_FRESH and (miss < 0 or miss > _DNS_SLOW_MS)
+    miss_bad = miss_ts > 0 and ref - miss_ts <= _DNS_MISS_FRESH and (miss < 0 or miss > _DNS_MISS_SLOW_MS)
     all_bad = bool(servers) and len(slow) == len(servers)
     if not miss_bad and not all_bad:
         return ""
