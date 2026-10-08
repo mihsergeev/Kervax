@@ -67,7 +67,9 @@ fi
 #       repository name, so updates no longer move it
 # 0.30: the cleanup log keeps the reason restic gives when it cannot open the repository, stats
 #       report the error of the last failed cleanup run
-KERVAX_SETUP_VERSION=0.30  # MAJOR.MINOR; compared component-wise (0.13 > 0.2!)
+# 0.31: a cleanup that meets a running backup says BUSY and counts as done instead of failing
+#       (a backup of a big repository runs for a day or two)
+KERVAX_SETUP_VERSION=0.31  # MAJOR.MINOR; compared component-wise (0.13 > 0.2!)
 # Which nodes need this helper at all. Read by the ansible playbook on the
 # CONTROL machine and evaluated as a shell condition ON THE NODE, so a new
 # helper lands where it belongs without anyone editing the playbook.
@@ -488,7 +490,7 @@ write_prune_script() {
 set -a; . "$ENV_FILE"; set +a  # restic is a child process: without export it will not see the repository
 mkdir -p "$(dirname "$LOG")" "$(dirname "$METRICS_FILE")" "$(dirname "$METRICS_FILE_ALT")"
 ts_start=$(date +%s); success=0
-snap_before=-1; snap_after=-1; removed=-1
+snap_before=-1; snap_after=-1; removed=-1; busy=0
 bytes_before=-1; bytes_after=-1; oldest_ts=0
 # "<time> <1|0|-1> <part> <parts>" of the last weekly integrity check, see below
 CHECK_STATE="/var/tmp/restic-check-${CLIENT}.state"
@@ -586,9 +588,28 @@ repo_size() { du -sb "$RESTIC_REPOSITORY" 2>/dev/null | awk '{print $1}'; }
       # each group separately. If a client backs up a file with a date in its name
       # (shared-20260812-030002.zip.enc), every snapshot forms a group of one, becomes the
       # "last snapshot" in it and is never removed.
-      forget_rc=0; "$BIN" forget --group-by host,tags ${RETRY_LOCK} "${KEEP[@]}" 2>&1 || forget_rc=$?
-      prune_rc=0;  "$BIN" prune ${RETRY_LOCK} 2>&1 || prune_rc=$?
-      [ "$forget_rc" -eq 0 ] && [ "${prune_rc:-0}" -eq 0 ] && success=1
+      #
+      # A running backup holds its lock for as long as it runs, and on a big repository that is
+      # hours: app-d (5.4 TiB) backs up from Saturday evening to Monday, so a daily
+      # cleanup is bound to meet it. That is not a failure. The run says BUSY, counts as done,
+      # and the next run cleans up; the weekly check waits for a run that got the repository.
+      forget_rc=0; forget_out="$("$BIN" forget --group-by host,tags ${RETRY_LOCK} "${KEEP[@]}" 2>&1)" || forget_rc=$?
+      printf '%s\n' "$forget_out"
+      if [ "$forget_rc" -ne 0 ] && printf '%s' "$forget_out" | grep -qi "already locked"; then
+        busy=1
+      else
+        prune_rc=0; prune_out="$("$BIN" prune ${RETRY_LOCK} 2>&1)" || prune_rc=$?
+        printf '%s\n' "$prune_out"
+        if [ "$forget_rc" -eq 0 ] && [ "$prune_rc" -eq 0 ]; then
+          success=1
+        elif [ "$forget_rc" -eq 0 ] && printf '%s' "$prune_out" | grep -qi "already locked"; then
+          busy=1
+        fi
+      fi
+      if [ "$busy" -eq 1 ]; then
+        echo "BUSY: a running backup holds the repository, the cleanup is left for the next run"
+        success=1
+      fi
     fi
     # Integrity check once a week. The legacy shared script ran it every day, and moving a
     # repository onto this script must not lose it. The first check of each repository is
@@ -604,7 +625,7 @@ repo_size() { du -sb "$RESTIC_REPOSITORY" 2>/dev/null | awk '{print $1}'; }
       echo "$(( $(date +%s) - ( $(printf '%s' "$CLIENT" | cksum | cut -d' ' -f1) % 7 ) * 86400 )) -1" > "$CHECK_STATE"
     fi
     read -r check_ts check_ok check_part check_parts < "$CHECK_STATE" || true
-    if [ $(( $(date +%s) - ${check_ts:-0} )) -ge $(( 7 * 86400 )) ]; then
+    if [ "$busy" -eq 0 ] && [ $(( $(date +%s) - ${check_ts:-0} )) -ge $(( 7 * 86400 )) ]; then
       parts=8
       if [ "${bytes_before:--1}" -gt 0 ] 2>/dev/null; then
         parts=$(( (bytes_before + CHECK_SLICE - 1) / CHECK_SLICE )); [ "$parts" -ge 8 ] || parts=8
@@ -659,6 +680,8 @@ ts_end=$(date +%s)
   # which slice of the data that check read: part N of T (0 - the check did not read data)
   echo "restic_server_check_read_part{client=\"${CLIENT}\"} ${check_part:-0}"
   echo "restic_server_check_read_parts{client=\"${CLIENT}\"} ${check_parts:-0}"
+  # 1 - the last run met a running backup and left the cleanup for the next run
+  echo "restic_server_prune_busy{client=\"${CLIENT}\"} ${busy}"
 } > "${METRICS_FILE}.partial" && {
   chmod 0644 "${METRICS_FILE}.partial"
   # node-exporter reads the file as a whole: we publish by rename so it never catches it
