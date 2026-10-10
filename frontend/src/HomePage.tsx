@@ -37,6 +37,7 @@ const ISSUE_ICON: Record<string, string> = {
   docker: '🐳', kuber: '☸️', backups: '💾', docker_sock: '🔓',
   clock: '🕐', dns: '🌐', db_conn: '🔌', web_5xx: '🌐', queue: '🐇', kube_expiry: '⏳', flux_down: '☸️',
   flux_stale: '☸️', backup_dump: '🛢', backup_dump_space: '🛢', backup_cron: '🛢', backup_check: '🩺',
+  unit_loop: '🔁',
 }
 
 type T = (k: string, p?: Record<string, string | number>) => string

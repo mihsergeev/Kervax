@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Kervax: failed systemd units. A root helper lists the units in the "failed" state every
-# minute - why they failed and the last lines of their log - and writes
+# minute - why they failed and the last lines of their log - and the restart counters of the
+# services systemd restarts by itself (0.2: a crash loop never shows as failed), and writes
 # /var/lib/kervax/report.d/units.json. The agent hands report.d to the panel as is.
 #
 # The panel can restart a failed unit or clear its failed mark through a spool, the same
@@ -8,7 +9,7 @@
 # a working service.
 set -euo pipefail
 
-KERVAX_SETUP_VERSION=0.1  # MAJOR.MINOR; compared component-wise
+KERVAX_SETUP_VERSION=0.2  # MAJOR.MINOR; compared component-wise
 KERVAX_SETUP_ALWAYS=1     # safe on any node: it only reads systemctl and the journal
 
 HELPER_DIR=/lib65/kervax
@@ -35,6 +36,7 @@ OUT=/var/lib/kervax/report.d/units.json
 REQ_DIR=/var/lib/kervax/units-req
 RES_DIR=/var/lib/kervax/units-res
 MAX_UNITS=30
+MAX_RESTARTING=50
 
 # JSON string body: control characters dropped, backslash and quote escaped. One raw control
 # character makes the agent drop the whole file.
@@ -93,10 +95,36 @@ scan() {
   done <<EOF_U
 $(systemctl list-units --state=failed --all --no-legend --plain --no-pager 2>/dev/null | awk '{print $1}')
 EOF_U
+  # Services systemd restarts by itself (Restart=): one that crashes every few seconds and
+  # comes back never shows as failed, only its restart counter grows. The panel counts the
+  # growth between reports. Log lines only for a unit started in the last 15 minutes.
+  local restarting="" m=0 svcs id nr act sub res st started
+  svcs=$(systemctl list-units --type=service --all --no-legend --plain --no-pager 2>/dev/null | awk '{print $1}')
+  if [ -n "$svcs" ]; then
+    while IFS=$'\t' read -r id nr act sub res st mono; do
+      unit_ok "$id" || continue
+      [ "$m" -lt "$MAX_RESTARTING" ] || break
+      m=$((m + 1))
+      started=0
+      case "$mono" in ''|0|*[!0-9]*) ;; *) started=$(( now - (up - mono) / 1000000 )) ;; esac
+      : > "$tmp"
+      [ "$started" -gt 0 ] && [ $(( now - started )) -lt 900 ] && unit_log "$id" "$tmp"
+      restarting="$restarting${restarting:+,}{\"unit\":\"$(esc "$id")\",\"n\":$(num "$nr"),\"active\":\"$(esc "$act")\",\"sub\":\"$(esc "$sub")\",\"result\":\"$(esc "$res")\",\"status\":$(num "$st"),\"started\":$started,\"log\":[$(json_lines "$tmp")]}"
+    done <<EOF_R
+$(systemctl show --no-pager -p Id -p NRestarts -p ActiveState -p SubState -p Result -p ExecMainStatus \
+    -p ActiveEnterTimestampMonotonic -- $svcs 2>/dev/null | awk -F= '
+  function emit() { if (id != "" && nr + 0 > 0) print id "\t" nr "\t" act "\t" sb "\t" res "\t" st "\t" mono }
+  NF == 0 { emit(); id = nr = act = sb = res = st = mono = ""; next }
+  $1 == "Id" { id = $2 } $1 == "NRestarts" { nr = $2 } $1 == "ActiveState" { act = $2 }
+  $1 == "SubState" { sb = $2 } $1 == "Result" { res = $2 } $1 == "ExecMainStatus" { st = $2 }
+  $1 == "ActiveEnterTimestampMonotonic" { mono = $2 }
+  END { emit() }')
+EOF_R
+  fi
   rm -f "$tmp"
   local fix=false
   [ -d "$REQ_DIR" ] && fix=true
-  printf '{"v":1,"ts":%s,"units":[%s],"fix":%s}\n' "$now" "$units" "$fix" > "$OUT.tmp.$$"
+  printf '{"v":1,"ts":%s,"units":[%s],"restarting":[%s],"fix":%s}\n' "$now" "$units" "$restarting" "$fix" > "$OUT.tmp.$$"
   mv -f "$OUT.tmp.$$" "$OUT"
   chmod 0644 "$OUT"
 }

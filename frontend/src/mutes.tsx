@@ -30,6 +30,7 @@ export const SRV_ALERT_KINDS: { k: string; label: string }[] = [
   { k: 'inode', label: 'Диск: inode' },
   { k: 'disk_forecast', label: 'Диск: скоро заполнится' },
   { k: 'units', label: 'Systemd: упавшие юниты' },
+  { k: 'unit_loop', label: 'Systemd: юниты в цикле перезапусков' },
   { k: 'cpu_spin', label: 'CPU: процессы в пустом цикле' },
   { k: 'backup_growth', label: 'Бэкап: резкий прирост' },
   { k: 'docker_sock', label: 'Docker: внешний прокси с docker-сокетом' },

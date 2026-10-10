@@ -116,3 +116,90 @@ async def test_unit_fix_command(client, auth_headers):
     r = await client.post(f"/api/servers/{sid}/snooze-alert", json={"kind": "unit:certbot.service", "hours": 24},
                           headers=auth_headers)
     assert r.status_code == 200 and "unit:certbot.service" in (r.json()["alert_snoozes"] or {})
+
+
+WORKER = {"unit": "worker.service", "active": "activating", "sub": "auto-restart", "result": "exit-code",
+          "status": 3, "started": 0, "log": ["boom: config not found"]}
+
+
+def test_unit_loop_counts_only_growth():
+    from app.collector import unit_loop_hits, unit_loop_step
+
+    now = datetime(2026, 10, 11, 12, tzinfo=timezone.utc)
+    cs = unit_loop_step(None, 40, now)  # первый отчет: неизвестно, когда набежало
+    assert cs["hits"] == [] and cs["n"] == 40
+    cs = unit_loop_step(cs, 42, now + timedelta(minutes=1))
+    assert [h[1] for h in cs["hits"]] == [2]
+    cs = unit_loop_step(cs, 0, now + timedelta(minutes=2))  # ручной restart обнулил счетчик
+    assert [h[1] for h in cs["hits"]] == [2] and cs["n"] == 0
+    # старше окна (15 минут) - не в счет
+    assert unit_loop_hits(cs, now + timedelta(minutes=17)) == []
+
+
+async def test_unit_loop_alert_lifecycle(tmp_path, monkeypatch):
+    """Сервис падает и поднимается сам: три прироста счетчика за 15 минут - алерт и строка на
+    главной; 15 минут без перезапусков - отбой. Заглушенный по имени юнит не алертит."""
+    from app import collector
+    from app.config import Settings
+    from app.db import Base, create_engine_and_factory
+    from app.models import Server
+
+    engine, factory = create_engine_and_factory(f"sqlite+aiosqlite:///{(tmp_path / 'l.db').as_posix()}")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    now = datetime.now(timezone.utc)
+
+    def report(n):
+        ts = int(now.timestamp())
+        return {"clock_unix": ts, "uptime_seconds": 100000,
+                "extras": {"units": {"v": 1, "ts": ts - 30, "units": [], "fix": True,
+                                     "restarting": [dict(WORKER, n=n)]}}}
+
+    async with factory() as s:
+        s.add(Server(name="node", token_hash="x", enabled=True, backup_not_required=True,
+                     last_seen=now, cpu_alert_percent=0, mem_alert_percent=0, last_report=report(1)))
+        await s.commit()
+    sent: list[str] = []
+
+    async def fake_send(cfg, text, parse_mode=None):
+        sent.append(text)
+        return []
+
+    monkeypatch.setattr("app.alerts.send_alert", fake_send)
+    cfg = Settings(alert_webhook="http://hook")
+
+    async def tick(n, minutes=2, mutes=None):
+        nonlocal now
+        now = now + timedelta(minutes=minutes)
+        async with factory() as s:
+            srv = (await s.execute(select(Server))).scalars().one()
+            srv.last_seen = now
+            srv.last_report = report(n)
+            if mutes is not None:
+                srv.alert_mutes = mutes
+            await s.commit()
+        await collector.evaluate_servers(factory, cfg, now)
+        async with factory() as s:
+            srv = (await s.execute(select(Server))).scalars().one()
+            return [p for p in collector.server_problems(srv, now) if p["kind"] == "unit_loop"]
+
+    assert await tick(1) == []
+    await tick(3)
+    await tick(5)
+    assert sent == []
+    rows = await tick(8)
+    assert len(sent) == 1 and sent[0].startswith("🔁⚙️ "), sent
+    assert "worker.service перезапускается в цикле: 7 перезапусков за 15 мин, последний раз: код 3" in sent[0]
+    assert [(p["level"], p["unit"], p["mute"], p["log"]) for p in rows] == [
+        (2, "worker.service", "unit:worker.service", ["boom: config not found"])]
+    assert rows[0]["text"] == "worker.service перезапускается в цикле: 7 перезапусков за 15 минут, последний раз: код 3"
+    await tick(8, minutes=8)
+    assert len(sent) == 1  # еще в окне: приросты были 8 минут назад
+    rows = await tick(8, minutes=9)
+    assert len(sent) == 2 and sent[1].startswith("✅") and "worker.service: перезапуски прекратились" in sent[1]
+    assert rows == []
+    # заглушенный по имени юнит: цикл снова идет, а алерта нет
+    for n in (10, 12, 14):
+        await tick(n, mutes=["unit:worker.service"])
+    assert len(sent) == 2
+    await engine.dispose()

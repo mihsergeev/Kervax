@@ -1085,6 +1085,13 @@ const EN: Record<string, string> = {
   'Остальные резолверы отвечают, и имена резолвятся, но запасного нет: уберите неработающий из настроек сети ноды (netplan, /etc/resolv.conf) или замените рабочим.':
     'The other resolvers answer and names resolve, but there is no spare: remove the dead one from the node network settings (netplan, /etc/resolv.conf) or replace it with a working one.',
   'DNS - только предупреждения': 'DNS - warnings only',
+  'Юниты в цикле перезапусков': 'Units in a restart loop',
+  'Systemd: юниты в цикле перезапусков': 'Systemd: units in a restart loop',
+  'Не алертить по {u}? Юнит перестанет алертить и как упавший, и как перезапускающийся.':
+    'Stop alerting on {u}? The unit will alert neither as failed nor as restarting.',
+  'systemd поднимает сервис сам, поэтому среди упавших его нет. Причину обычно видно в логе: journalctl -u {u} -n 50':
+    'systemd brings the service back by itself, so it is not among the failed ones. The cause is usually in the log: journalctl -u {u} -n 50',
+  'не алертить по этому юниту': 'do not alert on this unit',
   'Время сервера - только предупреждения': 'Server time - warnings only',
   'Время сервера - предупр. и проблемы': 'Server time - warnings and problems',
   'Коннекты СУБД': 'DB connections',
