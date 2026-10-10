@@ -197,6 +197,7 @@ _SRV_ICON = {
     "backup_missing": "💾", "backup_failed": "💾", "backup_stale": "💾", "backup_repo": "💾",
     "backup_dump": "💾", "backup_dump_space": "🈵", "backup_cron": "💾", "backup_custom": "💾",
     "clock": "🕐", "dns": "🌐", "disk_health": "💽", "inode": "⚠️", "disk_forecast": "📈", "units": "⚙️",
+    "unit_loop": "🔁⚙️",
     "cpu_spin": "🌀", "backup_growth": "💾📈", "docker_sock": "🔓🐳",
     # ⏳ — срок ещё не вышел, есть время спланировать; 🔥 — доставка уже встала
     "kube_expiry": "⏳", "flux_down": "🔥☸️", "kube_pod": "☸️🔥", "web_5xx": "🌐🔥",
@@ -216,6 +217,7 @@ _SRV_SECTION = {
     "db_conn": "services",
     "kube_expiry": "kube", "flux_down": "kube", "flux_stale": "kube", "kube_pod": "kube", "web_5xx": "web",
     "clock": "clock", "disk_health": "diskhealth", "inode": "diskfill", "disk_forecast": "diskfill", "units": "units",
+    "unit_loop": "unitloop",
     "cpu_spin": "cpueat",
 }
 
@@ -2637,6 +2639,18 @@ def server_problems(s: Server, now: datetime, pod_names: dict[str, str] | None =
                 continue
             u_since = datetime.fromtimestamp(float(u["since"]), timezone.utc).isoformat() if u.get("since") else None
             add("units", unit_level(u), f"{u['unit']}: {unit_why(u)}", "units", f"unit:{u['unit']}", u_since)
+    # Юниты в цикле перезапусков: приросты счетчика ведет цикл алертов (alert_state unit_loops)
+    rs = units_restarting(rep)
+    loops = state.get("unit_loops") if isinstance(state.get("unit_loops"), dict) else {}
+    for u in rs or []:
+        name = str(u["unit"])
+        hits = unit_loop_hits(loops.get(name), now)
+        if len(hits) < _UNIT_LOOP_MIN or name in units_muted(s, now):
+            continue
+        count, why = unit_loop_text(u, hits)
+        add("unit_loop", 2, f"{name} перезапускается в цикле: {count} за {_UNIT_LOOP_WINDOW // 60} минут{why}",
+            "unitloop", f"unit:{name}", str(hits[0][0]), unit=name,
+            log=[str(x)[:200] for x in (u.get("log") or [])[-5:]])
     for g in spin_groups(rep):
         # крутится почти всю жизнь (так он и попал в группу), поэтому начало - возраст процесса
         age = int(g.get("spin_age") or 0)
@@ -2785,6 +2799,54 @@ def units_block(rep: dict) -> dict | None:
     if ts <= 0 or ref - ts > _UNITS_MAX_AGE:
         return None
     return block
+
+
+# Сервис, который systemd перезапускает сам (Restart=), падает и поднимается и никогда не
+# бывает failed: растет только счетчик перезапусков (helper units-setup 0.2, "restarting").
+# Цикл - три прироста счетчика за 15 минут, как у контейнеров Docker; отбой - 15 минут без
+# новых перезапусков.
+_UNIT_LOOP_WINDOW = 900
+_UNIT_LOOP_MIN = 3
+
+
+def units_restarting(rep: dict) -> list[dict] | None:
+    """Сервисы со счетчиком перезапусков из свежего блока helper'а. None - helper старше 0.2
+    или блок протух: судить не по чему."""
+    ub = units_block(rep)
+    if ub is None or not isinstance(ub.get("restarting"), list):
+        return None
+    return [u for u in ub["restarting"] if isinstance(u, dict) and u.get("unit")]
+
+
+def unit_loop_hits(cs: dict | None, now: datetime) -> list[list]:
+    """Приросты счетчика перезапусков за окно: [[время, сколько перезапусков], ...]."""
+    out = []
+    for h in (cs or {}).get("hits") or []:
+        if isinstance(h, list) and len(h) == 2:
+            t = _parse_iso(str(h[0]))
+            if t is not None and (now - t).total_seconds() <= _UNIT_LOOP_WINDOW:
+                out.append(h)
+    return out
+
+
+def unit_loop_step(prev: dict | None, n: int, now: datetime) -> dict:
+    """Состояние цикла юнита после нового отчета: {"n": счетчик, "hits": приросты за окно,
+    "alerted": ушел ли алерт}. Считаем только рост: ручной restart обнуляет счетчик, а первый
+    отчет о юните прироста не дает (неизвестно, когда набежало)."""
+    p = prev if isinstance(prev, dict) else {}
+    hits = unit_loop_hits(p, now)
+    last = p.get("n")
+    if isinstance(last, int) and n > last:
+        hits.append([now.isoformat(), n - last])
+    return {"n": n, "hits": hits, "alerted": bool(p.get("alerted"))}
+
+
+def unit_loop_text(u: dict, hits: list[list]) -> tuple[str, str]:
+    """("5 перезапусков", ", последний раз: код 3") для текста алерта и строки на главной."""
+    total = sum(int(h[1]) for h in hits)
+    why = unit_why(u) if u.get("result") not in (None, "", "success") else ""
+    return (f"{total} {_plural(total, 'перезапуск', 'перезапуска', 'перезапусков')}",
+            f", последний раз: {why}" if why else "")
 
 
 def units_muted(s: Server, now: datetime) -> set[str]:
@@ -4420,6 +4482,45 @@ async def evaluate_servers(
                 dstate.pop(gone, None)
             if dstate != (st.get("docker") or {}):
                 apply(s.id, "docker", dstate)
+
+        # Юниты systemd в цикле перезапусков (helper units-setup 0.2). Состояние - на каждый юнит
+        # в alert_state["unit_loops"]: приросты счетчика за окно и отметка, что алерт ушел. Блок
+        # протух или helper старый - состояние не трогаем: молчание не значит, что цикл кончился.
+        rs = units_restarting(s.last_report or {}) if online_now else None
+        if rs is not None:
+            ul_rule = rules.get("unit_loop")
+            ul_ok = bool(ul_rule and ul_rule["enabled"] and "unit_loop" not in mutes and _rule_scope_ok(ul_rule, s))
+            muted_u = units_muted(s, now)
+            ustate = dict(st.get("unit_loops") or {})
+            seen_u: set[str] = set()
+            for u in rs:
+                name = str(u["unit"])
+                seen_u.add(name)
+                cs = unit_loop_step(ustate.get(name), _int(u.get("n")), now)
+                hits = cs["hits"]
+                quiet = name in muted_u or not ul_ok
+                if len(hits) >= _UNIT_LOOP_MIN and not cs["alerted"] and not quiet:
+                    count, why = unit_loop_text(u, hits)
+                    fires.append(srv_fire(s, "unit_loop", ul_rule, {
+                        "unit": name, "count": count, "window": _UNIT_LOOP_WINDOW // 60, "why": why}))
+                    cs["alerted"] = True
+                elif cs["alerted"] and not hits:
+                    # отметку снимаем всегда, отбой шлем только по живому правилу
+                    if not quiet:
+                        recoveries.append(_server_alert_text(
+                            "unit_loop", s.name, f"{name}: перезапуски прекратились",
+                            srv_url(s, "unit_loop"), recovery=True))
+                    cs["alerted"] = False
+                ustate[name] = cs
+            # юнит пропал из списка: счетчик обнулили ручным restart, юнит убрали, перезагрузка
+            for gone in [n for n in ustate if n not in seen_u]:
+                cs = ustate.pop(gone)
+                if cs.get("alerted") and ul_ok and gone not in muted_u:
+                    recoveries.append(_server_alert_text(
+                        "unit_loop", s.name, f"{gone}: перезапуски прекратились",
+                        srv_url(s, "unit_loop"), recovery=True))
+            if ustate != (st.get("unit_loops") or {}):
+                apply(s.id, "unit_loops", ustate)
 
         # Очереди RabbitMQ: алертим те, что переросли свой порог. Состояние — на
         # КАЖДУЮ очередь: очередей десятки, и одна разбухшая не должна глушить

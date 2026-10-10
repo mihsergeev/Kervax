@@ -835,6 +835,7 @@ export type ServerDisk = {
 export type ServerProblem = {
   kind: string; level: number; text: string; sec: string; mute: string; since?: string | null
   section?: 'kuber' | 'services' | 'backups'; srv?: boolean; sub?: string
+  unit?: string; log?: string[] // юнит в цикле перезапусков и последние строки его лога
 }
 // Кто ест CPU группами (агент 2.21): процессы с одним именем у одного владельца. cpu - % одного
 // ядра (как top), spin - сколько из них давно крутят по ядру вхолостую, spin_age - возраст старшего

@@ -40,7 +40,7 @@ import {
   type ServerReport,
 } from './api'
 import { StackedAreaChart, type Series } from './charts/StackedAreaChart'
-import { diskHealth, diskUsage, fmtSetupVersion, unitsBlock, srvIssues, webLogLabel, webRate, webSeriesName, webUnparsed } from './serverUtils'
+import { diskHealth, diskUsage, fmtSetupVersion, sinceShort, unitsBlock, srvIssues, webLogLabel, webRate, webSeriesName, webUnparsed } from './serverUtils'
 import { OsIcon } from './osIcon'
 import { CountryFlag } from './CountryFlag'
 import { currentLang, useI18n } from './i18n'
@@ -762,9 +762,10 @@ function MetricSection({
 // Какому разделу принадлежит карточка метрики: запасной путь для ссылок из алертов,
 // когда самой карточки на этой ноде нет (условный рендер).
 const SEC_OF_CARD: Record<string, string> = {
-  cpu: 'cpu', throttle: 'cpu', temp: 'cpu',
+  cpu: 'cpu', throttle: 'cpu', temp: 'cpu', cpueat: 'cpu',
   mem: 'mem', oom: 'mem',
-  conntrack: 'conn', diskfill: 'disk', disktemp: 'disk', disk: 'disk',
+  conntrack: 'conn', diskfill: 'disk', disktemp: 'disk', disk: 'disk', diskhealth: 'disk',
+  units: 'proc', unitloop: 'proc',
   web: 'web', web5xx: 'web',
 }
 
@@ -2049,6 +2050,53 @@ function unitStateText(d: UnitFixResult, t: TFn): string {
   if (d.state === 'activating') return t('запускается')
   if (d.state === 'inactive') return t('отработал без ошибок')
   return t('снова упал')
+}
+
+// Сервисы, которые systemd перезапускает по кругу (helper units-setup 0.2): failed они не становятся,
+// поэтому среди упавших их нет. Приросты счетчика за окно считает бэкенд, строки приходят в problems.
+function LoopingUnits({ server: s, onChanged }: { server: Server; onChanged: () => void }) {
+  const { t } = useI18n()
+  const { isViewer } = useAuth()
+  const [busy, setBusy] = useState(false)
+  const rows = (s.problems ?? []).filter((p) => p.kind === 'unit_loop' && p.unit)
+  if (!rows.length) return null
+  const mute = async (unit: string) => {
+    if (!window.confirm(t('Не алертить по {u}? Юнит перестанет алертить и как упавший, и как перезапускающийся.', { u: unit }))) return
+    setBusy(true)
+    try {
+      await updateServer(s.id, { alert_mutes: [...new Set([...(s.alert_mutes ?? []), UNIT_MUTE + unit])] })
+      onChanged()
+    } catch {
+      /* кнопка остается, можно повторить */
+    } finally {
+      setBusy(false)
+    }
+  }
+  return (
+    <div className="detail-inc" id="mcard-unitloop">
+      <div className="chart-cap">{t('Юниты в цикле перезапусков')}</div>
+      {rows.map((p) => (
+        <div key={p.unit} className="unit-row">
+          <div className="unit-head">
+            <span className="sdot sdot-down" />
+            <span className="t-down">{p.text}</span>
+            {sinceShort(p.since, t) && <span className="muted small">{sinceShort(p.since, t)}</span>}
+          </div>
+          {(p.log?.length ?? 0) > 0 && <pre className="unit-log mono">{p.log!.join('\n')}</pre>}
+          <div className="muted small unit-hint">
+            {t('systemd поднимает сервис сам, поэтому среди упавших его нет. Причину обычно видно в логе: journalctl -u {u} -n 50', { u: p.unit! })}
+          </div>
+          {!isViewer && (
+            <div className="unit-actions small">
+              <button className="ghost small row-act" disabled={busy} onClick={() => mute(p.unit!)}>
+                🔕 {t('не алертить по этому юниту')}
+              </button>
+            </div>
+          )}
+        </div>
+      ))}
+    </div>
+  )
 }
 
 function FailedUnits({ server: s, onChanged }: { server: Server; onChanged: () => void }) {
@@ -3971,9 +4019,16 @@ function ServerDetail({
   const scrolledRef = useRef(false)
   useEffect(() => {
     if (!initialSection || scrolledRef.current || !s.last_report) return
-    scrolledRef.current = true
     const secId = secOfLink(initialSection)
     let inner = 0
+    let again = 0
+    // Графики догружаются после прокрутки и сдвигают карточку вниз, за край экрана. Если
+    // человек сам не крутил страницу, через полторы секунды прокручиваем к ней еще раз.
+    let touched = false
+    const touch = () => { touched = true }
+    window.addEventListener('wheel', touch, { once: true, passive: true })
+    window.addEventListener('touchstart', touch, { once: true, passive: true })
+    window.addEventListener('keydown', touch, { once: true })
     const id = window.setTimeout(() => {
       // свернутый раздел раскрываем: ссылка ведет к графикам, а не к заголовку
       const sec = document.getElementById(`msec-${secId ?? ''}`)
@@ -3986,14 +4041,25 @@ function ServerDetail({
         // "sec=web" раньше открывалась карточка графика (id у них общий), и список ошибок
         // над ней уезжал за верх экрана, а по такой ссылке он самое нужное. Карточки
         // может не быть (датчика температуры диска нет) - тогда к её разделу.
-        const card = secId === initialSection ? null : document.getElementById(`mcard-${initialSection}`)
-        if (card) card.scrollIntoView({ behavior: 'smooth', block: 'center' })
-        else document.getElementById(`msec-${secId ?? ''}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+        const go = (behavior: ScrollBehavior) => {
+          const card = secId === initialSection ? null : document.getElementById(`mcard-${initialSection}`)
+          if (card) card.scrollIntoView({ behavior, block: 'center' })
+          else document.getElementById(`msec-${secId ?? ''}`)?.scrollIntoView({ behavior, block: 'start' })
+        }
+        // отметка - только когда прокрутили: эффект перезапускается (StrictMode в разработке,
+        // обновление отчета), и отмененный таймер иначе оставлял карточку наверху
+        scrolledRef.current = true
+        go('smooth')
+        again = window.setTimeout(() => { if (!touched) go('auto') }, 1500)
       }, head ? 60 : 0)
     }, 200) // ждём вёрстку модалки
     return () => {
       window.clearTimeout(id)
       window.clearTimeout(inner)
+      window.clearTimeout(again)
+      window.removeEventListener('wheel', touch)
+      window.removeEventListener('touchstart', touch)
+      window.removeEventListener('keydown', touch)
     }
   }, [initialSection, s.last_report])
 
@@ -4652,6 +4718,7 @@ function ServerDetail({
         </MetricSection>
 
         <MetricSection id="proc" title={t('Процессы')}>
+          <LoopingUnits server={s} onChanged={onChanged} />
           <FailedUnits server={s} onChanged={onChanged} />
           <div className="chart-grid">
             <ProcCard title={t('Топ по CPU')} procs={r.top_cpu} kind="cpu" total={r.mem_total ?? 0} t={t} />
