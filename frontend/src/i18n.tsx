@@ -1092,6 +1092,17 @@ const EN: Record<string, string> = {
   'systemd поднимает сервис сам, поэтому среди упавших его нет. Причину обычно видно в логе: journalctl -u {u} -n 50':
     'systemd brings the service back by itself, so it is not among the failed ones. The cause is usually in the log: journalctl -u {u} -n 50',
   'не алертить по этому юниту': 'do not alert on this unit',
+  'CronJob ⚠ ({n})': 'CronJob ⚠ ({n})',
+  'CronJob ({n})': 'CronJob ({n})',
+  'Задания по расписанию: последний запуск и последний успешный. Упавший или переставший отрабатывать CronJob дает алерт.':
+    'Scheduled jobs: the last run and the last successful one. A CronJob that failed or stopped running raises an alert.',
+  'запуск {a} назад': 'ran {a} ago',
+  'успешный {a} назад': 'succeeded {a} ago',
+  'еще не запускался': 'has not run yet',
+  'идет': 'running',
+  'приостановлен': 'suspended',
+  'ок': 'ok',
+  'Kubernetes: CronJob': 'Kubernetes: CronJob',
   'Время сервера - только предупреждения': 'Server time - warnings only',
   'Время сервера - предупр. и проблемы': 'Server time - warnings and problems',
   'Коннекты СУБД': 'DB connections',

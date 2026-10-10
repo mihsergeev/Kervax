@@ -941,6 +941,12 @@ export function podFinished(p: KubePod): boolean {
   if (p.owner === 'Job' && (p.phase === 'Failed' || p.phase === 'Succeeded')) return true
   return false
 }
+// CronJob кластера: расписание и прогоны (агент отдает все, панель судит по ним дампы и обычные кроны)
+export type KubeCronJob = {
+  ns: string; name: string; schedule?: string; suspend?: boolean; image?: string
+  last_schedule?: number; last_success?: number; active?: number
+}
+
 export type KubeInfo = {
   present: boolean
   access: boolean
@@ -950,6 +956,7 @@ export type KubeInfo = {
   nodes?: KubeNode[]
   workloads?: KubeWorkload[]
   pods?: KubePod[]
+  cronjobs?: KubeCronJob[]
 }
 
 export type ServerReport = {
@@ -1344,6 +1351,7 @@ export type Server = {
   // что сломано по новым проверкам (диски, прогноз, inode, упавшие юниты) - считает бэкенд
   // с теми же уровнями, что у алертов; level 2-3 - проблема, 1 - предупреждение
   problems?: ServerProblem[]
+  kube_cron_issues?: Record<string, string> // CronJob с проблемой: {ns/имя: причина}, считает бэкенд
   temp_alert_c: number
   conntrack_alert_percent: number
   db_conn_alert_percent: number
