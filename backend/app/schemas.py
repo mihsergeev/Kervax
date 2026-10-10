@@ -1086,6 +1086,8 @@ class ServerOut(BaseModel):
     pod_names: dict[str, str] = Field(default_factory=dict)
     # ноды кластера без агента панели; считает kube_coverage по ВСЕМ серверам панели
     kube_unmonitored: list[KubeNodeRef] = []
+    # CronJob кластера с проблемой (упал, давно нет успеха, у дампа - приостановлен): {ns/имя: причина}
+    kube_cron_issues: dict[str, str] = Field(default_factory=dict)
     # репозитории бэкап-сервера со свежими бэкапами, чьих клиентов нет в панели (по ВСЕМ серверам)
     bsrv_unmonitored: list[str] = []
     # что сейчас сказал бы алерт "ротация встала" (для "Что сломано" на главной)

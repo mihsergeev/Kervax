@@ -195,3 +195,35 @@ def test_offline_node_shows_nothing_but_offline():
     now = datetime(2026, 10, 9, tzinfo=timezone.utc)
     s = _srv(now - timedelta(hours=1), {"clock_unix": now.timestamp(), "clock_skew_sec": 400})
     assert collector.server_problems(s, now) == []
+
+
+def test_kube_cronjobs_other_than_dumps():
+    """Обычный CronJob кластера упал или перестал отрабатывать - предупреждение и строка на
+    главной. Приостановленный обычный крон - чье-то решение (у дампа это проблема)."""
+    now = datetime(2026, 10, 11, 12, tzinfo=timezone.utc)
+    ts = now.timestamp()
+    crons = [
+        {"ns": "hub", "name": "geoip-update", "image": "alpine:3", "schedule": "0 4 * * *",
+         "last_schedule": ts - 8 * 3600, "last_success": ts - 32 * 3600},       # последний упал
+        {"ns": "tech", "name": "cron-minute", "image": "php:8", "schedule": "* * * * *", "suspend": True},
+        {"ns": "tech", "name": "report", "image": "php:8", "schedule": "0 3 * * *",
+         "last_schedule": ts - 9 * 86400, "last_success": ts - 9 * 86400},      # перестал стартовать
+        {"ns": "tech", "name": "busy", "image": "php:8", "schedule": "0 * * * *", "active": 1,
+         "last_schedule": ts - 600, "last_success": ts - 5 * 86400},           # идет прямо сейчас
+        {"ns": "db", "name": "pg-backup", "image": "postgres:16", "schedule": "30 2 * * *", "suspend": True},
+    ]
+    rep = {"clock_unix": ts, "kube": {"access": True, "cronjobs": crons}}
+    assert collector.cron_job_issues(rep, now, dumps=False) == {
+        "hub/geoip-update": "последний прогон не удался",
+        "tech/report": "нет успешного прогона 9.0 дн",
+    }
+    assert collector.cron_job_issues(rep, now, dumps=True) == {"db/pg-backup": "приостановлен"}
+    s = _srv(now, rep)
+    got = _probs(s, now, "kube_cron")
+    assert [(p["level"], p["section"], p["sec"], p["mute"]) for p in got] == [(1, "kuber", "cron", "kube_cron")]
+    assert got[0]["text"] == ("CronJob не отрабатывают: hub/geoip-update (последний прогон не удался); "
+                              "tech/report (нет успешного прогона 9.0 дн)")
+    lvl, ctx = collector._server_conditions(s, now)["kube_cron"]
+    assert lvl == 1 and ctx["n"] == 2
+    rep["kube"]["cronjobs"] = crons[1:2]
+    assert _probs(s, now, "kube_cron") == [] and collector._server_conditions(s, now)["kube_cron"][0] == 0

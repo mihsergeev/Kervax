@@ -23,6 +23,7 @@ import { useI18n } from './i18n'
 import { OsIcon } from './osIcon'
 import { CountryFlag } from './CountryFlag'
 import { fmtBytes } from './units'
+import { sinceShort } from './serverUtils'
 import { EnrollModal, InstallModal } from './ServersPage'
 
 // Вкладка «Кубер»: КОМПАКТНЫЙ список хостов с кластером; клик по хосту → модалка
@@ -403,8 +404,8 @@ function PodRow({
 }
 
 // Модалка хоста-кластера: ноды + воркоады + поды. Логи пода — вложенная модалка.
-type KubeTab = 'pods' | 'finished' | 'workloads' | 'nodes' | 'expiry' | 'flux'
-const KUBE_TABS: KubeTab[] = ['pods', 'finished', 'workloads', 'nodes', 'expiry', 'flux']
+type KubeTab = 'pods' | 'finished' | 'workloads' | 'cron' | 'nodes' | 'expiry' | 'flux'
+const KUBE_TABS: KubeTab[] = ['pods', 'finished', 'workloads', 'cron', 'nodes', 'expiry', 'flux']
 
 function KubeHostModal({
   server: s,
@@ -433,6 +434,12 @@ function KubeHostModal({
   const nodes = kube.nodes ?? []
   const workloads = kube.workloads ?? []
   const pods = kube.pods ?? []
+  // CronJob: с проблемой сверху (причину считает бэкенд теми же правилами, что и алерты)
+  const cronIssues = s.kube_cron_issues ?? {}
+  const cronjobs = (kube.cronjobs ?? []).slice().sort((a, b) =>
+    Number(!cronIssues[`${a.ns}/${a.name}`]) - Number(!cronIssues[`${b.ns}/${b.name}`])
+    || `${a.ns}/${a.name}`.localeCompare(`${b.ns}/${b.name}`))
+  const cronBad = cronjobs.filter((c) => cronIssues[`${c.ns}/${c.name}`]).length
   const ql = q.trim().toLowerCase()
   const podRank = (p: KubePod) => ({ 't-down': 0, 't-degraded': 1, 't-up': 2 })[podTone(p)] ?? 3
   // при равенстве сохраняем исходный порядок (стабильная сортировка), кроме ns —
@@ -473,7 +480,8 @@ function KubeHostModal({
   const curTab =
     (tab === 'finished' && doneCount === 0) ||
     (tab === 'expiry' && expiry.length === 0) ||
-    (tab === 'flux' && flux.length === 0)
+    (tab === 'flux' && flux.length === 0) ||
+    (tab === 'cron' && cronjobs.length === 0)
       ? 'pods'
       : tab
   // «Поды» = только живые; завершённые (история Job/CronJob) — своя вкладка, чтобы не
@@ -501,6 +509,13 @@ function KubeHostModal({
         }]
       : []),
     { k: 'workloads', l: t('Воркоады ({n})', { n: workloads.length }) },
+    ...(cronjobs.length > 0
+      ? [{
+          k: 'cron' as const,
+          l: cronBad > 0 ? t('CronJob ⚠ ({n})', { n: cronBad }) : t('CronJob ({n})', { n: cronjobs.length }),
+          title: t('Задания по расписанию: последний запуск и последний успешный. Упавший или переставший отрабатывать CronJob дает алерт.'),
+        }]
+      : []),
     { k: 'nodes', l: t('Ноды ({n})', { n: nodes.length }) },
     ...(expiry.length > 0
       ? [{
@@ -616,6 +631,35 @@ function KubeHostModal({
                     />
                   ))
                 ))}
+              {curTab === 'cron' &&
+                cronjobs
+                  .filter((c) => !ql || `${c.ns}/${c.name} ${c.image ?? ''}`.toLowerCase().includes(ql))
+                  .map((c) => {
+                    const key = `${c.ns}/${c.name}`
+                    const issue = cronIssues[key]
+                    const ago = (ts?: number) => (ts ? sinceShort(new Date(ts * 1000).toISOString(), t) || t('только что') : '')
+                    const tone = issue ? (c.suspend ? 't-degraded' : 't-down') : c.suspend ? '' : 't-up'
+                    return (
+                      <div className={`loc-res docker-row ${tone}`} key={key}>
+                        <div className="docker-c-main">
+                          <div className="docker-c-name mono">
+                            {key}
+                            {c.schedule && <span className="type-chip">{c.schedule}</span>}
+                          </div>
+                          <div className="docker-c-img mono muted small">
+                            {c.last_schedule
+                              ? t('запуск {a} назад', { a: ago(c.last_schedule) })
+                              : t('еще не запускался')}
+                            {c.last_success ? ` · ${t('успешный {a} назад', { a: ago(c.last_success) })}` : ''}
+                            {c.image ? ` · ${c.image}` : ''}
+                          </div>
+                        </div>
+                        <div className={`docker-c-status mono small ${tone}`}>
+                          {issue || (c.suspend ? t('приостановлен') : c.active ? t('идет') : t('ок'))}
+                        </div>
+                      </div>
+                    )
+                  })}
               {curTab === 'expiry' &&
                 expiry.map((e) => {
                   const d = daysLeft(e.expires)
