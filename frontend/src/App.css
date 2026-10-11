@@ -983,6 +983,26 @@ input:focus {
 }
 .unit-hint { margin-top: 0.3rem; }
 .unit-actions { display: flex; align-items: center; gap: 0.4rem; flex-wrap: wrap; margin-top: 0.35rem; }
+/* что открыто в интернет */
+.exposure { margin-top: 0.8rem; }
+.exp-table { width: 100%; border-collapse: collapse; }
+.exp-table td { padding: 0.3rem 0.5rem 0.3rem 0; border-top: 1px dashed var(--border); vertical-align: top; overflow-wrap: anywhere; }
+.exp-table tr:first-child td { border-top: 0; }
+.exp-table td:first-child { width: 4.5rem; white-space: nowrap; }
+.exp-table td:last-child { text-align: right; white-space: nowrap; }
+.exp-bad td:first-child { color: var(--down); font-weight: 600; }
+.exp-new {
+  margin-left: 0.4rem;
+  padding: 0 0.35rem;
+  border-radius: 4px;
+  font-size: 0.72rem;
+  background: var(--accent);
+  color: #fff;
+}
+.exp-more { align-self: flex-start; }
+@media (max-width: 640px) {
+  .exp-table td:last-child { white-space: normal; }
+}
 .du-item-head { display: flex; align-items: center; gap: 0.5rem; }
 .du-item-name { flex: 1; min-width: 0; overflow-wrap: anywhere; }
 .du-item-size { flex-shrink: 0; }

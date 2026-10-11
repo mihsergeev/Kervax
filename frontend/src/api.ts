@@ -959,6 +959,26 @@ export type KubeInfo = {
   cronjobs?: KubeCronJob[]
 }
 
+// Один порт на одном адресе по внешней проверке. state: open - отвечает, closed - отказ
+// (никто не слушает или REJECT), filtered - тишина (файрвол), unknown - проверить не вышло
+export type ExposedPort = {
+  ip: string
+  port: number
+  state: 'open' | 'closed' | 'filtered' | 'unknown'
+  what: string // контейнер, сервис кластера или владелец сокета
+  name: string // что это обычно за сервис
+  risk: boolean // базе, очереди, Docker API и т.п. не место в интернете
+}
+export type Exposure = {
+  ts: string
+  via: string // через какую локацию смотрели ("панель" - напрямую)
+  ips: string[]
+  ports: ExposedPort[]
+  new?: ExposedPort[] // открылись с прошлых проверок
+  new_ts?: string
+  muted?: string[] // порты, отмеченные как открытые намеренно
+}
+
 export type ServerReport = {
   hostname?: string
   os?: string
@@ -1025,6 +1045,8 @@ export type ServerReport = {
   clock?: ClockInfo // статус синхронизации времени (timedatectl)
   clock_skew_sec?: number // сдвиг часов ноды относительно панели, сек (± ; считает бэкенд)
   clock_unix?: number // локальные часы ноды на момент отправки отчёта
+  // слушающие сокеты кроме localhost (агент 2.26): по ним панель проверяет, что открыто снаружи
+  listen?: { p: string; ip: string; port: number; u?: string }[]
   dns?: DnsInfo | null // DNS ноды: резолверы и время их ответа (агент 2.25)
 }
 // Итоги прогонов бэкапа (helper backup-setup 0.32): сколько restic добавил в репозиторий.
@@ -1329,6 +1351,8 @@ export type Server = {
   docker_alerts?: Record<string, string>
   // внешние прокси (caddy-docker-proxy, traefik) с docker-сокетом: взлом прокси - root на хосте
   docker_exposed?: { name: string; image: string; kind: string }[]
+  // что открыто в интернет: внешняя проверка портов раз в 6 часов
+  exposure?: Exposure | null
   // внешние прокси со сборкой образа старше года (built - unix-секунды)
   proxy_outdated?: { name: string; image: string; kind: string; version: string; built: number; age_days: number }[]
   // нода умеет разобрать раздел по запросу (агент 2.24 + diskusage-setup 0.6)
@@ -1619,6 +1643,10 @@ export function updateServer(
 }
 export function deleteServer(id: number): Promise<void> {
   return api<void>(`/api/servers/${id}`, { method: 'DELETE' })
+}
+// Проверить снаружи, что открыто в интернет, не дожидаясь планового прогона
+export function scanExposure(id: number): Promise<Server> {
+  return api<Server>(`/api/servers/${id}/exposure/scan`, { method: 'POST' })
 }
 // Быстрый снуз алертов сервера на N часов (0 = снять).
 export function snoozeServer(id: number, hours: number): Promise<Server> {

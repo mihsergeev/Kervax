@@ -19,6 +19,7 @@ from sqlalchemy import and_, delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app import alerts, audit, backup, backup_growth, checks as checks_exec, custom_backups, docker_exposure, flaky, heartbeat, settings_store
+from app import open_ports
 from app import disk_forecast as dfc
 from app.setup_scripts import current_setup_versions, gaps
 from app.config import Settings, get_settings
@@ -203,6 +204,7 @@ _SRV_ICON = {
     "kube_expiry": "⏳", "flux_down": "🔥☸️", "kube_pod": "☸️🔥", "web_5xx": "🌐🔥",
     # репозиторий чартов недоступен, а развернутое работает: предупреждение, а не авария
     "flux_stale": "⚠️☸️", "kube_cron": "⏰☸️",
+    "exposed": "🔓", "port_new": "🚪",
 }
 
 # Куда ведёт ссылка алерта (deep-link ?server=id&sec=…). Целимся в КОНКРЕТНУЮ метрику,
@@ -219,6 +221,7 @@ _SRV_SECTION = {
     "clock": "clock", "disk_health": "diskhealth", "inode": "diskfill", "disk_forecast": "diskfill", "units": "units",
     "unit_loop": "unitloop",
     "cpu_spin": "cpueat",
+    "exposed": "exposure", "port_new": "exposure",
 }
 
 
@@ -1192,6 +1195,7 @@ _SRV_LABEL = {
     "cpu_spin": "процессы в пустом цикле",
     "backup_growth": "прирост бэкапа",
     "docker_sock": "docker-сокет у внешнего прокси",
+    "exposed": "открытые в интернет сервисы",
 }
 
 # Единицы пороговых метрик. Нужны отбою: голое «снова в норме» не отвечает на
@@ -1260,6 +1264,8 @@ def _recovery_detail(key: str, st: dict, ctx: dict) -> str:
         return "репозиторий чартов снова отвечает"
     if key == "kube_cron":
         return "CronJob кластера снова отрабатывают"
+    if key == "exposed":
+        return "опасных сервисов, открытых в интернет, больше нет"
     label = _SRV_LABEL[key]
     unit, val = _SRV_UNIT.get(key), ctx.get("value")
     if not unit or val is None:
@@ -2778,6 +2784,14 @@ def server_problems(s: Server, now: datetime, pod_names: dict[str, str] | None =
             add("backup_check", 2, "не прошла проверка целостности: " + ", ".join(bad[:3])
                 + (f" и еще {len(bad) - 3}" if len(bad) > 3 else ""), "", "backup_check",
                 section="backups", srv=True)
+    # Что открыто в интернет: внешняя проверка портов (open_ports, раз в 6 часов)
+    ex = open_ports.exposed(s, now)
+    if ex:
+        add("exposed", 2, "открыто в интернет: " + open_ports.exposed_text(ex, 3), "exposure", "exposed")
+    fresh = open_ports.new_ports(s, now)
+    if fresh:
+        add("port_new", 1, "в интернет открылся новый порт: " + open_ports.new_text(fresh), "exposure", "port_new",
+            open_ports.new_since(s))
     out.sort(key=lambda p: -p["level"])
     return out
 
@@ -4120,6 +4134,12 @@ def _server_conditions(s: Server, now: datetime,
     if online:
         own = custom_backups.problems(s, now)
         out["backup_custom"] = (1 if own else 0, {"jobs": "; ".join(own[:6]), "n": len(own)})
+    # Опасный сервис открыт в интернет (внешняя проверка портов): состояние, пока не закроют
+    # файрволом или не отметят порт намеренным. Свежесть проверки - в open_ports.exposed
+    if online:
+        ex = open_ports.exposed(s, now)
+        out["exposed"] = (2 if ex else 0, {"detail": "открыто в интернет: " + open_ports.exposed_text(ex),
+                                           "n": len(ex)})
     return out
 
 
@@ -4414,6 +4434,18 @@ async def evaluate_servers(
             if st.get("reboot_at") != stamp:
                 fires.append(srv_fire(s, "reboot", rb, {}))
                 fire_apply.append((s.id, "reboot_at", stamp))
+        # Новый порт открылся в интернет - событие на каждую проверку, нашедшую новые (new_ts).
+        # Заглушенный или выключенный алерт отметку тоже двигает: иначе после снятия мьюта
+        # пришла бы старая новость
+        pstamp = open_ports.new_since(s)
+        if pstamp and st.get("port_new_at") != pstamp:
+            pn, fresh = rules.get("port_new"), open_ports.new_ports(s, now)
+            if fresh and "port_new" not in mutes and pn and pn["enabled"] and _rule_scope_ok(pn, s):
+                fires.append(srv_fire(s, "port_new", pn, {
+                    "detail": "в интернет открылся новый порт: " + open_ports.new_text(fresh)}))
+                fire_apply.append((s.id, "port_new_at", pstamp))
+            else:
+                apply(s.id, "port_new_at", pstamp)
         # OOM-kill — алерт по КУМУЛЯТИВНОМУ счётчику (oom_total копится в ingest'е).
         # High-water mark oom_seen в alert_state: любой рост → алерт (не теряем килл,
         # даже если поллинг не совпал с отчётом). Событие, не состояние → без recovery.
@@ -5197,6 +5229,9 @@ async def collector_loop(
             await stage("разбор дисков по прогнозу", request_disk_analysis(
                 session_factory, datetime.now(timezone.utc)))
             await stage("зависшие команды", _expire_commands(session_factory))
+            # внешняя проверка портов идет фоном: закрытый файрволом порт отвечает только таймаутом
+            await stage("что открыто в интернет", open_ports.start_scan(
+                session_factory, datetime.now(timezone.utc)))
             # Прунинг двигает границу ретеншена медленно — незачем каждый тик гонять
             # DELETE по 3 большим таблицам. Раз в prune_interval_seconds (по умолч. час).
             now = datetime.now(timezone.utc)

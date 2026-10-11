@@ -20,9 +20,11 @@ import {
   serverWebErrorLines,
   snoozeServer,
   snoozeServerAlert,
+  scanExposure,
   updateServer,
   type ClockInfo,
   type DnsInfo,
+  type ExposedPort,
   type DiskForecastItem,
   type FailedUnit,
   type DiskHealthDisk,
@@ -52,6 +54,7 @@ import {
   SNOOZE_KINDS,
   UNIT_MUTE,
   WEB_MUTE,
+  EXPOSED_MUTE,
   muteKindLabel,
   SRV_ALERT_KINDS,
   collectMutes,
@@ -764,7 +767,7 @@ function MetricSection({
 const SEC_OF_CARD: Record<string, string> = {
   cpu: 'cpu', throttle: 'cpu', temp: 'cpu', cpueat: 'cpu',
   mem: 'mem', oom: 'mem',
-  conntrack: 'conn', diskfill: 'disk', disktemp: 'disk', disk: 'disk', diskhealth: 'disk',
+  conntrack: 'conn', exposure: 'conn', diskfill: 'disk', disktemp: 'disk', disk: 'disk', diskhealth: 'disk',
   units: 'proc', unitloop: 'proc',
   web: 'web', web5xx: 'web',
 }
@@ -2095,6 +2098,150 @@ function LoopingUnits({ server: s, onChanged }: { server: Server; onChanged: () 
           )}
         </div>
       ))}
+    </div>
+  )
+}
+
+// Что открыто в интернет. Панель раз в 6 часов стучится снаружи (через первую локацию-прокси,
+// без нее - сама) ко всем портам, которые слушает нода: что из этого видно из интернета, а что
+// закрыто файрволом. Опасное - база, очередь, Docker API, kubelet, экспортер метрик.
+const PORT_STATE: Record<ExposedPort['state'], string> = {
+  open: 'открыт',
+  closed: 'закрыт',
+  filtered: 'за файрволом',
+  unknown: 'не проверить',
+}
+type PortGroup = { port: number; name: string; what: string; risk: boolean; open: string[]; other: ExposedPort['state'] }
+
+function OpenPorts({ server: s, onChanged }: { server: Server; onChanged: () => void }) {
+  const { t } = useI18n()
+  const { isViewer } = useAuth()
+  const [busy, setBusy] = useState(false)
+  const [scanning, setScanning] = useState(false)
+  const [err, setErr] = useState('')
+  const [all, setAll] = useState(false)
+  const ex = s.exposure
+  if (!ex && !(s.last_report?.listen?.length ?? 0)) return null
+  const muted = new Set(ex?.muted ?? [])
+  const by = new Map<number, PortGroup>()
+  for (const x of ex?.ports ?? []) {
+    const g = by.get(x.port) ?? { port: x.port, name: x.name, what: x.what, risk: x.risk, open: [], other: x.state }
+    if (x.state === 'open') g.open.push(x.ip)
+    else if (g.other !== 'filtered' && g.other !== 'closed') g.other = x.state
+    by.set(x.port, g)
+  }
+  const rank = (g: PortGroup) => (g.open.length ? (g.risk && !muted.has(String(g.port)) ? 0 : 1) : 2)
+  const groups = [...by.values()].sort((a, b) => rank(a) - rank(b) || a.port - b.port)
+  const opened = groups.filter((g) => g.open.length)
+  const shown = all ? groups : opened
+  const fresh = new Set((ex?.new ?? []).map((x) => x.port))
+  const scan = async () => {
+    setScanning(true)
+    setErr('')
+    try {
+      await scanExposure(s.id)
+      onChanged()
+    } catch (e) {
+      setErr(e instanceof ApiError ? e.message : t('не вышло'))
+    } finally {
+      setScanning(false)
+    }
+  }
+  const setMuted = async (port: number, on: boolean) => {
+    if (on && !window.confirm(t('Порт {p} открыт намеренно? Панель перестанет алертить по нему.', { p: port }))) return
+    setBusy(true)
+    try {
+      const key = EXPOSED_MUTE + port
+      const cur = (s.alert_mutes ?? []).filter((k) => k !== key)
+      await updateServer(s.id, { alert_mutes: on ? [...cur, key] : cur })
+      onChanged()
+    } catch {
+      /* кнопка остается, можно повторить */
+    } finally {
+      setBusy(false)
+    }
+  }
+  return (
+    <div className="detail-inc exposure" id="mcard-exposure">
+      <div className="chart-cap">{t('Что открыто в интернет')}</div>
+      <div className="muted small">
+        {ex
+          ? t(sinceShort(ex.ts, t) ? 'проверено снаружи {ago} назад, откуда: {via}, адреса: {ips}' : 'проверено снаружи только что, откуда: {via}, адреса: {ips}', {
+              ago: sinceShort(ex.ts, t),
+              via: t(ex.via),
+              ips: ex.ips.join(', ') || '-',
+            })
+          : t('Внешней проверки еще не было: панель проверяет раз в 6 часов.')}
+        {!isViewer && (
+          <button className="ghost small row-act" disabled={scanning} onClick={scan}>
+            {scanning ? t('проверяю...') : t('проверить сейчас')}
+          </button>
+        )}
+        {err && <span className="t-down"> {err}</span>}
+      </div>
+      {ex && !ex.ips.length && (
+        <div className="muted small">{t('Публичного адреса у ноды не нашлось: проверять нечего.')}</div>
+      )}
+      {ex && ex.ips.length > 0 && !opened.length && (
+        <div className="muted small">
+          {groups.length > 0 && groups.every((g) => g.other === 'unknown')
+            ? t('Проверить не вышло: {via} не отвечает или не пропускает соединения на эти порты.', { via: t(ex.via) })
+            : t('Снаружи не открыто ни одного порта из тех, что слушает нода.')}
+        </div>
+      )}
+      {shown.length > 0 && (
+        <table className="exp-table small">
+          <tbody>
+            {shown.map((g) => {
+              const m = muted.has(String(g.port))
+              const bad = g.open.length > 0 && g.risk && !m
+              return (
+                <tr key={g.port} className={bad ? 'exp-bad' : ''}>
+                  <td className="mono">{g.port}</td>
+                  <td>
+                    {g.name && <b>{g.name} </b>}
+                    <span className="muted">{g.what}</span>
+                    {fresh.has(g.port) && <span className="exp-new">{t('новый')}</span>}
+                  </td>
+                  <td className={bad ? 't-down' : g.open.length ? '' : 'muted'}>
+                    {g.open.length ? `${t('открыт')}: ${g.open.join(', ')}` : t(PORT_STATE[g.other])}
+                  </td>
+                  <td>
+                    {m ? (
+                      <span className="muted">
+                        {t('намеренно')}{' '}
+                        {!isViewer && (
+                          <button className="ghost small row-act" disabled={busy} onClick={() => setMuted(g.port, false)}>
+                            {t('вернуть алерт')}
+                          </button>
+                        )}
+                      </span>
+                    ) : (
+                      g.open.length > 0 &&
+                      (g.risk || fresh.has(g.port)) &&
+                      !isViewer && (
+                        <button className="ghost small row-act" disabled={busy} onClick={() => setMuted(g.port, true)}>
+                          🔕 {t('открыт намеренно')}
+                        </button>
+                      )
+                    )}
+                  </td>
+                </tr>
+              )
+            })}
+          </tbody>
+        </table>
+      )}
+      {groups.length > opened.length && (
+        <button className="ghost small row-act exp-more" onClick={() => setAll(!all)}>
+          {all ? t('только открытые') : t('закрытых и за файрволом: {n}, показать', { n: groups.length - opened.length })}
+        </button>
+      )}
+      {opened.some((g) => g.risk && !muted.has(String(g.port))) && (
+        <div className="muted small unit-hint">
+          {t('Закройте порт файрволом или привяжите сервис к 127.0.0.1 либо к внутреннему адресу. Порт Docker, опубликованный через -p, обходит ufw: публикуйте его как 127.0.0.1:порт:порт.')}
+        </div>
+      )}
     </div>
   )
 }
@@ -4609,6 +4756,7 @@ function ServerDetail({
               </div>,
             )}
           </div>
+          <OpenPorts server={s} onChanged={onChanged} />
         </MetricSection>
 
         <MetricSection id="disk" title={t('Диск')}>

@@ -34,6 +34,8 @@ export const SRV_ALERT_KINDS: { k: string; label: string }[] = [
   { k: 'cpu_spin', label: 'CPU: процессы в пустом цикле' },
   { k: 'backup_growth', label: 'Бэкап: резкий прирост' },
   { k: 'docker_sock', label: 'Docker: внешний прокси с docker-сокетом' },
+  { k: 'exposed', label: 'Сеть: опасный сервис открыт в интернет' },
+  { k: 'port_new', label: 'Сеть: открылся новый порт' },
   { k: 'reboot', label: 'Перезагрузка' },
   { k: 'oom', label: 'OOM-killer' },
   { k: 'web_5xx', label: 'Веб: ошибки 5xx' },
@@ -45,8 +47,11 @@ export const SRV_ALERT_KINDS: { k: string; label: string }[] = [
 export const WEB_MUTE = 'web_5xx:'
 // Один упавший юнит systemd: unit:<имя>, остальные юниты ноды алертят
 export const UNIT_MUTE = 'unit:'
+// Порт, открытый в интернет намеренно: exposed:<порт>
+export const EXPOSED_MUTE = 'exposed:'
 export function muteKindLabel(k: string, t: TFn): string | null {
   if (k.startsWith(UNIT_MUTE)) return `${t('юнит')}: ${k.slice(UNIT_MUTE.length)}`
+  if (k.startsWith(EXPOSED_MUTE)) return `${t('открытый порт')}: ${k.slice(EXPOSED_MUTE.length)}`
   return k.startsWith(WEB_MUTE) ? `${t('5xx по логу')}: ${k.slice(WEB_MUTE.length)}` : null
 }
 
