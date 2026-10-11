@@ -1052,6 +1052,9 @@ export type ServerReport = {
   psi?: Record<string, number>
   dstate?: { n: number; top?: { c: string; n: number }[] }
   fds?: { used: number; max: number }
+  // TCP за секунду (агент 2.26): отправлено сегментов, из них повторно, переполнения очереди
+  // accept и выброшенные из нее, новые соединения, выброшенные conntrack, входящие с ошибкой
+  tcp?: { out: number; retrans: number; in_errs: number; listen_ovf: number; listen_drop: number; ct_drop: number }
   dns?: DnsInfo | null // DNS ноды: резолверы и время их ответа (агент 2.25)
 }
 // Итоги прогонов бэкапа (helper backup-setup 0.32): сколько restic добавил в репозиторий.

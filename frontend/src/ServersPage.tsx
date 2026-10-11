@@ -767,7 +767,7 @@ function MetricSection({
 const SEC_OF_CARD: Record<string, string> = {
   cpu: 'cpu', throttle: 'cpu', temp: 'cpu', cpueat: 'cpu',
   mem: 'mem', oom: 'mem',
-  conntrack: 'conn', exposure: 'conn', diskfill: 'disk', disktemp: 'disk', disk: 'disk', diskhealth: 'disk',
+  conntrack: 'conn', exposure: 'conn', nethealth: 'net', neterr: 'net', diskfill: 'disk', disktemp: 'disk', disk: 'disk', diskhealth: 'disk',
   units: 'proc', unitloop: 'proc', pressure: 'proc',
   web: 'web', web5xx: 'web',
 }
@@ -2183,6 +2183,46 @@ const PORT_STATE: Record<ExposedPort['state'], string> = {
   unknown: 'не проверить',
 }
 type PortGroup = { port: number; name: string; what: string; risk: boolean; open: string[]; other: ExposedPort['state'] }
+
+// Здоровье сети ноды (агент 2.26): потери TCP, очередь accept, conntrack. Пороги - как у алерта
+// "Сеть: потери и ошибки" (collector.net_problems).
+function NetHealth({ server: s }: { server: Server }) {
+  const { t } = useI18n()
+  const tcp = s.last_report?.tcp
+  if (!tcp) return null
+  const prob = (s.problems ?? []).find((p) => p.kind === 'net_health')
+  const pct = tcp.out > 0 ? (tcp.retrans / tcp.out) * 100 : 0
+  const lossy = tcp.out >= 100 && pct >= 10
+  const rate = (v: number) => (v >= 10 ? v.toFixed(0) : v.toFixed(v > 0 && v < 0.1 ? 2 : 1))
+  return (
+    <div className="detail-inc nethealth" id="mcard-nethealth">
+      <div className="chart-cap">{t('Здоровье сети')}</div>
+      {prob && <div className="t-down small">{prob.text}</div>}
+      <table className="exp-table psi-table small">
+        <tbody>
+          <tr>
+            <td>{t('TCP повторно')}</td>
+            <td className={lossy ? 't-down' : ''}>
+              {pct.toFixed(pct < 1 ? 2 : 1)}% <span className="muted">({rate(tcp.retrans)} {t('из')} {rate(tcp.out)} {t('сегм/с')})</span>
+            </td>
+          </tr>
+          <tr>
+            <td>{t('Очередь accept переполнена')}</td>
+            <td className={tcp.listen_ovf >= 1 ? 't-down' : ''}>{rate(tcp.listen_ovf)} {t('в сек')}</td>
+          </tr>
+          <tr>
+            <td>{t('conntrack выбросил')}</td>
+            <td className={tcp.ct_drop >= 1 ? 't-down' : ''}>{rate(tcp.ct_drop)} {t('в сек')}</td>
+          </tr>
+          <tr>
+            <td>{t('Входящие с ошибкой')}</td>
+            <td>{rate(tcp.in_errs)} {t('в сек')}</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  )
+}
 
 function OpenPorts({ server: s, onChanged }: { server: Server; onChanged: () => void }) {
   const { t } = useI18n()
@@ -4798,6 +4838,7 @@ function ServerDetail({
                 />,
               )}
           </div>
+          <NetHealth server={s} />
         </MetricSection>
 
         <MetricSection id="conn" title={t('Соединения')}>
