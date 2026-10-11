@@ -896,6 +896,7 @@ export type KubeNode = {
   ip?: string
   use?: KubeUse // занято сейчас (агент 2.19+, если в кластере есть metrics-server)
   cap?: KubeUse // объем ноды
+  pressure?: string[] // MemoryPressure/DiskPressure/PIDPressure/NetworkUnavailable (агент 2.26)
 }
 export type KubeWorkload = {
   ns: string
@@ -921,7 +922,13 @@ export type KubePod = {
   ctrl?: string // deployment/имя, statefulset/имя, daemonset/имя
   use?: KubeUse // по всему кластеру из metrics-server (агент 2.19+), где бы под ни работал
   u?: string // начало uid: по нему находятся имена подов воркера без доступа к kube-api
+  // агент 2.26, только у подов контроллеров: нет лимита памяти, нет ни одной пробы, почему
+  // под не встает в расписание
+  nolim?: boolean
+  noprobe?: boolean
+  msg?: string
 }
+export type KubeFailedJob = { ns: string; name: string; ts?: number; reason?: string }
 // Ссылки на креды СУБД-пода (без значений паролей).
 export type KubeCred = {
   env_from?: string[] // secretRef из envFrom (весь секрет оптом)
@@ -957,6 +964,7 @@ export type KubeInfo = {
   workloads?: KubeWorkload[]
   pods?: KubePod[]
   cronjobs?: KubeCronJob[]
+  failed_jobs?: KubeFailedJob[] // упавшие за неделю разовые Job (агент 2.26)
 }
 
 // Один порт на одном адресе по внешней проверке. state: open - отвечает, closed - отказ

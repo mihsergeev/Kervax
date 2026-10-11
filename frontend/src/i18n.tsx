@@ -1148,6 +1148,17 @@ const EN: Record<string, string> = {
   'Входящие с ошибкой': 'Incoming with errors',
   'в сек': 'per sec',
   'Сеть: потери и ошибки': 'Network: loss and errors',
+  // kubernetes: ноды, Job, гигиена подов
+  'без лимита памяти': 'no memory limit',
+  'без проб': 'no probes',
+  'У контейнера нет лимита памяти: один такой под может съесть всю ноду.': 'A container has no memory limit: one such pod can eat the whole node.',
+  'Нет ни liveness, ни readiness пробы: зависший под так и будет считаться работающим.': 'No liveness or readiness probe: a hung pod will keep counting as running.',
+  'Упавшие за неделю Job, запущенные не по расписанию (миграции, разовые задачи): {n}': 'Jobs failed this week that were not started by a schedule (migrations, one-off tasks): {n}',
+  'упал {a} назад': 'failed {a} ago',
+  'Без лимита памяти: {a}, без проб: {b}. Не авария, но под без лимита может съесть ноду, а без проб зависший под никто не перезапустит.':
+    'No memory limit: {a}, no probes: {b}. Not an outage, but a pod without a limit can eat the node, and nobody restarts a hung pod without probes.',
+  'Kubernetes: ноды': 'Kubernetes: nodes',
+  'Kubernetes: упавшие Job': 'Kubernetes: failed Jobs',
   'Kubernetes: CronJob': 'Kubernetes: CronJob',
   'Время сервера - только предупреждения': 'Server time - warnings only',
   'Время сервера - предупр. и проблемы': 'Server time - warnings and problems',

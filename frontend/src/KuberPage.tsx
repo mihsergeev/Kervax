@@ -379,7 +379,18 @@ function PodRow({
               ⟳ {p.restarts}
             </span>
           )}
+          {p.nolim && (
+            <span className="type-chip t-degraded" title={t('У контейнера нет лимита памяти: один такой под может съесть всю ноду.')}>
+              {t('без лимита памяти')}
+            </span>
+          )}
+          {p.noprobe && (
+            <span className="type-chip t-degraded" title={t('Нет ни liveness, ни readiness пробы: зависший под так и будет считаться работающим.')}>
+              {t('без проб')}
+            </span>
+          )}
         </div>
+        {p.msg && <div className="docker-c-img mono muted small">{p.msg}</div>}
         {p.use && (
           <div className="docker-c-img mono muted small" title={t('по metrics-server, как kubectl top')}>
             {fmtBytes(p.use.mem)} · CPU {fmtCores(p.use.cpu_m)}
@@ -440,6 +451,11 @@ function KubeHostModal({
     Number(!cronIssues[`${a.ns}/${a.name}`]) - Number(!cronIssues[`${b.ns}/${b.name}`])
     || `${a.ns}/${a.name}`.localeCompare(`${b.ns}/${b.name}`))
   const cronBad = cronjobs.filter((c) => cronIssues[`${c.ns}/${c.name}`]).length
+  const failedJobs = (s.last_report?.kube?.failed_jobs ?? []).slice().sort((a, b) => (b.ts ?? 0) - (a.ts ?? 0))
+  const hygiene = {
+    nolim: pods.filter((p) => p.nolim).length,
+    noprobe: pods.filter((p) => p.noprobe).length,
+  }
   const ql = q.trim().toLowerCase()
   const podRank = (p: KubePod) => ({ 't-down': 0, 't-degraded': 1, 't-up': 2 })[podTone(p)] ?? 3
   // при равенстве сохраняем исходный порядок (стабильная сортировка), кроме ns —
@@ -481,7 +497,7 @@ function KubeHostModal({
     (tab === 'finished' && doneCount === 0) ||
     (tab === 'expiry' && expiry.length === 0) ||
     (tab === 'flux' && flux.length === 0) ||
-    (tab === 'cron' && cronjobs.length === 0)
+    (tab === 'cron' && cronjobs.length === 0 && failedJobs.length === 0)
       ? 'pods'
       : tab
   // «Поды» = только живые; завершённые (история Job/CronJob) — своя вкладка, чтобы не
@@ -509,10 +525,12 @@ function KubeHostModal({
         }]
       : []),
     { k: 'workloads', l: t('Воркоады ({n})', { n: workloads.length }) },
-    ...(cronjobs.length > 0
+    ...(cronjobs.length > 0 || failedJobs.length > 0
       ? [{
           k: 'cron' as const,
-          l: cronBad > 0 ? t('CronJob ⚠ ({n})', { n: cronBad }) : t('CronJob ({n})', { n: cronjobs.length }),
+          l: cronBad + failedJobs.length > 0
+            ? t('CronJob ⚠ ({n})', { n: cronBad + failedJobs.length })
+            : t('CronJob ({n})', { n: cronjobs.length }),
           title: t('Задания по расписанию: последний запуск и последний успешный. Упавший или переставший отрабатывать CronJob дает алерт.'),
         }]
       : []),
@@ -598,6 +616,14 @@ function KubeHostModal({
               </div>
             )}
             <div className="loc-results docker-clist docker-clist-scroll">
+              {curTab === 'pods' && (hygiene.nolim > 0 || hygiene.noprobe > 0) && (
+                <div className="kube-noagent-hint muted small">
+                  {t('Без лимита памяти: {a}, без проб: {b}. Не авария, но под без лимита может съесть ноду, а без проб зависший под никто не перезапустит.', {
+                    a: hygiene.nolim,
+                    b: hygiene.noprobe,
+                  })}
+                </div>
+              )}
               {(curTab === 'pods' || curTab === 'finished') &&
                 (pods.length === 0 ? (
                   <div className="muted small">{t('Подов нет')}</div>
@@ -631,6 +657,27 @@ function KubeHostModal({
                     />
                   ))
                 ))}
+              {curTab === 'cron' && failedJobs.length > 0 && (
+                <>
+                  <div className="kube-expiry-note t-down">
+                    {t('Упавшие за неделю Job, запущенные не по расписанию (миграции, разовые задачи): {n}', { n: failedJobs.length })}
+                  </div>
+                  {failedJobs.map((j) => (
+                    <div className="loc-res docker-row t-down" key={`job/${j.ns}/${j.name}/${j.ts ?? 0}`}>
+                      <div className="docker-c-main">
+                        <div className="docker-c-name mono">
+                          {j.ns}/{j.name}
+                          <span className="type-chip">Job</span>
+                        </div>
+                        <div className="docker-c-img mono muted small">
+                          {j.ts ? t('упал {a} назад', { a: sinceShort(new Date(j.ts * 1000).toISOString(), t) || t('только что') }) : ''}
+                        </div>
+                      </div>
+                      <div className="docker-c-status mono small t-down">{j.reason || 'Failed'}</div>
+                    </div>
+                  ))}
+                </>
+              )}
               {curTab === 'cron' &&
                 cronjobs
                   .filter((c) => !ql || `${c.ns}/${c.name} ${c.image ?? ''}`.toLowerCase().includes(ql))
@@ -720,12 +767,15 @@ function KubeHostModal({
               )}
               {curTab === 'nodes' &&
                 nodes.map((n) => (
-                  <div className={`loc-res docker-row ${n.ready ? 't-up' : 't-down'}`} key={n.name}>
+                  <div className={`loc-res docker-row ${n.ready && !(n.pressure ?? []).length ? 't-up' : 't-down'}`} key={n.name}>
                     <div className="docker-c-main">
                       <div className="docker-c-name mono">
                         {n.name}
                         {n.roles && <span className="type-chip">{n.roles}</span>}
                         {unmon.has(n.name) && <span className="type-chip t-degraded">{t('без агента')}</span>}
+                        {(n.pressure ?? []).map((c) => (
+                          <span className="type-chip off" key={c}>{c}</span>
+                        ))}
                         {ignoredNodes.has(n.name) && (
                           <span className="type-chip muted" title={t('отмечено, что агент здесь не нужен')}>
                             {t('агент не нужен')}

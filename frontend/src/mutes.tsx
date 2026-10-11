@@ -100,6 +100,8 @@ const RULE_KIND_LABELS: Record<string, string> = {
   queue: 'RabbitMQ: очереди',
   kube_expiry: 'Kubernetes: сроки',
   kube_cron: 'Kubernetes: CronJob',
+  kube_node: 'Kubernetes: ноды',
+  kube_job: 'Kubernetes: упавшие Job',
   flux_down: 'Flux: доставка встала',
   flux_stale: 'Flux: репозиторий чартов недоступен',
 }

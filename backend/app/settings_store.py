@@ -72,6 +72,10 @@ SERVER_ALERT_KINDS: dict[str, tuple[str, str]] = {
     # Сеть ноды: TCP теряет пакеты, сервис не успевает принимать соединения, conntrack
     # выбрасывает новые, ошибки и дропы на интерфейсах
     "net_health": ("Сеть: потери и ошибки", "{detail}"),
+    # Нода кластера NotReady или под давлением (MemoryPressure, DiskPressure, PIDPressure)
+    "kube_node": ("Kubernetes: нода не готова или под давлением", "{detail}"),
+    # Разовый Job (миграция, задача не по расписанию) упал: BackoffLimitExceeded и т.п.
+    "kube_job": ("Kubernetes: упал Job", "{detail}"),
     "reboot": ("Перезагрузка", "перезагружен (аптайм сброшен)"),
     "oom": ("OOM-killer", "OOM-kill: ядро убило {value} процесс(ов){victim} из-за нехватки памяти"),
     "docker_down": ("Docker: контейнер упал", "контейнер {container} не работает: {why}"),

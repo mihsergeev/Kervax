@@ -205,6 +205,7 @@ _SRV_ICON = {
     # репозиторий чартов недоступен, а развернутое работает: предупреждение, а не авария
     "flux_stale": "⚠️☸️", "kube_cron": "⏰☸️",
     "exposed": "🔓", "port_new": "🚪", "pressure": "🫁", "net_health": "📶",
+    "kube_node": "🖥☸️", "kube_job": "💥☸️",
 }
 
 # Куда ведёт ссылка алерта (deep-link ?server=id&sec=…). Целимся в КОНКРЕТНУЮ метрику,
@@ -234,7 +235,7 @@ _DISK_ICON = {1: "⚠️", 2: "🔴", 3: "🚨"}
 # понимает, кого он касается (у учётки может не быть, скажем, «Бэкапов»).
 # Вкладка карточки кластера в разделе "Кубер", куда ведет ссылка алерта.
 _KUBE_TAB = {"kube_expiry": "expiry", "flux_down": "flux", "flux_stale": "flux", "kube_pod": "pods",
-             "kube_cron": "cron"}
+             "kube_cron": "cron", "kube_node": "nodes", "kube_job": "cron"}
 
 _ALERT_SECTION = {
     "docker_loop": "docker",
@@ -249,6 +250,8 @@ _ALERT_SECTION = {
     "backup_prune": "backups",
     "kube_pod": "kuber",
     "kube_cron": "kuber",
+    "kube_node": "kuber",
+    "kube_job": "kuber",
 }
 
 
@@ -1198,6 +1201,7 @@ _SRV_LABEL = {
     "exposed": "открытые в интернет сервисы",
     "pressure": "давление на ресурсы",
     "net_health": "сеть ноды",
+    "kube_node": "ноды kubernetes",
 }
 
 # Единицы пороговых метрик. Нужны отбою: голое «снова в норме» не отвечает на
@@ -1236,6 +1240,9 @@ def bad_pods_text(pods: list[dict], limit: int = 4) -> str:
     items = []
     for p in pods[:limit]:
         why = p.get("reason") or p.get("phase") or "?"
+        if p.get("msg"):
+            # почему не встает в расписание (агент 2.26): "0/3 nodes are available: ..."
+            why += ": " + str(p["msg"])[:140]
         restarts = int(p.get("restarts") or 0)
         tail = f", {restarts} рестарта" if restarts >= 5 else ""
         items.append(f"{p.get('ns', '?')}/{p.get('name', '?')} ({why}{tail})")
@@ -1272,6 +1279,8 @@ def _recovery_detail(key: str, st: dict, ctx: dict) -> str:
         return "сервер снова дышит: процессы не ждут память и диск, зависших нет"
     if key == "net_health":
         return "сеть ноды снова в порядке: потерь, переполнений и ошибок нет"
+    if key == "kube_node":
+        return "ноды кластера снова Ready, давления нет"
     label = _SRV_LABEL[key]
     unit, val = _SRV_UNIT.get(key), ctx.get("value")
     if not unit or val is None:
@@ -2674,6 +2683,58 @@ def pressure_problems(rep: dict) -> list[tuple[int, str, str]]:
     return out
 
 
+# Ноды кластера (агент 2.26 отдает условия): kubelet под давлением уже выселяет поды или не
+# пускает новые, NotReady - на ноде не работает ничего нового
+_KUBE_NODE_COND = {
+    "MemoryPressure": "не хватает памяти (MemoryPressure)",
+    "DiskPressure": "мало места на диске (DiskPressure)",
+    "PIDPressure": "кончаются PID (PIDPressure)",
+    "NetworkUnavailable": "сеть не настроена (NetworkUnavailable)",
+}
+
+
+def kube_node_problems(rep: dict) -> list[str]:
+    """'нода w1 не готова (NotReady)', 'нода w2: мало места на диске (DiskPressure)'."""
+    kube = rep.get("kube") or {}
+    if not kube.get("access"):
+        return []
+    out = []
+    for n in kube.get("nodes") or []:
+        if not isinstance(n, dict):
+            continue
+        name = n.get("name") or "?"
+        if n.get("ready") is False:
+            out.append(f"нода {name} не готова (NotReady)")
+        conds = [_KUBE_NODE_COND.get(str(c), str(c)) for c in n.get("pressure") or []]
+        if conds:
+            out.append(f"нода {name}: " + ", ".join(conds))
+    return out
+
+
+def kube_failed_jobs(rep: dict, now: datetime | None = None, hours: int | None = None) -> list[dict]:
+    """Упавшие разовые Job кластера (агент 2.26, за неделю); hours - только свежее."""
+    kube = rep.get("kube") or {}
+    if not kube.get("access"):
+        return []
+    out = []
+    for j in kube.get("failed_jobs") or []:
+        if not isinstance(j, dict):
+            continue
+        ts = _int(j.get("ts"))
+        if hours is not None and now is not None and (not ts or now.timestamp() - ts > hours * 3600):
+            continue
+        out.append(j)
+    return out
+
+
+def failed_jobs_text(jobs: list[dict], limit: int = 3) -> str:
+    items = [f"{j.get('ns', '?')}/{j.get('name', '?')}" + (f" ({j['reason']})" if j.get("reason") else "")
+             for j in jobs[:limit]]
+    if len(jobs) > limit:
+        items.append(f"и еще {len(jobs) - limit}")
+    return ", ".join(items)
+
+
 # Сеть ноды. TCP - агент 2.26, ошибки и дропы интерфейсов агент шлет давно. Все в секунду,
 # с той же выдержкой, что у CPU и RAM.
 _RETRANS_PCT = 10.0       # % сегментов, ушедших повторно: потери на пути
@@ -2905,6 +2966,14 @@ def server_problems(s: Server, now: datetime, pod_names: dict[str, str] | None =
             add("kube_cron", 1, ("CronJob не отрабатывает: " if len(kc) == 1 else "CronJob не отрабатывают: ")
                 + "; ".join(kc[:3]) + (f" и еще {len(kc) - 3}" if len(kc) > 3 else ""), "cron", "kube_cron",
                 section="kuber")
+        kn = kube_node_problems(rep)
+        if kn and _held_long(s, state, "kube_node", now):
+            add("kube_node", 2, "; ".join(kn[:3]) + (f" и еще {len(kn) - 3}" if len(kn) > 3 else ""),
+                "nodes", "kube_node", state.get("kube_node_since"), section="kuber")
+        fj = kube_failed_jobs(rep, now, 24)
+        if fj:
+            add("kube_job", 1, ("упал Job: " if len(fj) == 1 else "упали Job: ") + failed_jobs_text(fj),
+                "cron", "kube_job", section="kuber")
     # Бэкап-сервер: не прошла проверка целостности репозитория
     bsrv = rep.get("backup_server") or {}
     if bsrv.get("present"):
@@ -3175,7 +3244,7 @@ def groups_text(groups: list[dict], pod_names: dict[str, str] | None = None) -> 
 # Что из alert_state отдать как "с какого момента проблема": "<вид>_from" ставит цикл алертов
 # для любого вида, а у пороговых метрик точнее "<вид>_since" - начало превышения, а не алерта.
 _SINCE_KEYS = ("cpu", "mem", "temp", "conntrack", "disktemp", "db_conn", "web_5xx", "clock",
-               "backup_missing", "dns", "pressure", "net_health")
+               "backup_missing", "dns", "pressure", "net_health", "kube_node")
 
 
 def alert_since(s: Server) -> dict[str, str]:
@@ -4299,6 +4368,11 @@ def _server_conditions(s: Server, now: datetime,
     if online and (rep.get("tcp") or rep.get("net_ifaces")):
         nets = net_problems(rep)
         sustain_lvl("net_health", nets[0][0] if nets else 0, {"detail": "; ".join(t for _l, _r, t in nets[:4])})
+    # Ноды кластера: NotReady или под давлением дольше выдержки (перезагрузка ноды - минуты)
+    if online and (rep.get("kube") or {}).get("access"):
+        kn = kube_node_problems(rep)
+        sustain_lvl("kube_node", 2 if kn else 0,
+                    {"detail": "; ".join(kn[:4]) + (f" и еще {len(kn) - 4}" if len(kn) > 4 else "")})
     return out
 
 
@@ -4611,6 +4685,27 @@ async def evaluate_servers(
                 fire_apply.append((s.id, "port_new_at", pstamp))
             else:
                 apply(s.id, "port_new_at", pstamp)
+        # Упавшие разовые Job кластера - событие на каждый новый провал. Первое знакомство
+        # задает точку отсчета: упавшее за прошлую неделю не шлем пачкой после обновления
+        # (агент без failed_jobs в отчете: пустой список он не шлет, старше 2.26 не шлет вовсе)
+        k_rep = s.last_report or {}
+        if (k_rep.get("kube") or {}).get("access") and _ver_tuple(k_rep.get("agent_version")) >= (2, 26):
+            jobs = kube_failed_jobs(k_rep)
+            keys = sorted(f"{j.get('ns')}/{j.get('name')}@{_int(j.get('ts'))}" for j in jobs)
+            seen = st.get("kube_jobs_seen")
+            if seen is None:
+                apply(s.id, "kube_jobs_seen", keys)
+            elif set(keys) - set(seen):
+                fresh = [j for j in jobs if f"{j.get('ns')}/{j.get('name')}@{_int(j.get('ts'))}" not in set(seen)]
+                kj = rules.get("kube_job")
+                if "kube_job" not in mutes and kj and kj["enabled"] and _rule_scope_ok(kj, s):
+                    fires.append(srv_fire(s, "kube_job", kj, {
+                        "detail": ("упал Job: " if len(fresh) == 1 else "упали Job: ") + failed_jobs_text(fresh, 5)}))
+                    fire_apply.append((s.id, "kube_jobs_seen", keys))
+                else:
+                    apply(s.id, "kube_jobs_seen", keys)
+            elif sorted(seen) != keys:
+                apply(s.id, "kube_jobs_seen", keys)  # старые ушли из списка
         # OOM-kill — алерт по КУМУЛЯТИВНОМУ счётчику (oom_total копится в ingest'е).
         # High-water mark oom_seen в alert_state: любой рост → алерт (не теряем килл,
         # даже если поллинг не совпал с отчётом). Событие, не состояние → без recovery.
