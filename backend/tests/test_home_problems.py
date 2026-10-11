@@ -227,3 +227,22 @@ def test_kube_cronjobs_other_than_dumps():
     assert lvl == 1 and ctx["n"] == 2
     rep["kube"]["cronjobs"] = crons[1:2]
     assert _probs(s, now, "kube_cron") == [] and collector._server_conditions(s, now)["kube_cron"][0] == 0
+
+
+async def test_report_keeps_agent_226_fields(client, auth_headers):
+    """Поля агента 2.26 доходят до last_report: схема без них молча их отбросила бы."""
+    import time
+
+    r = await client.post("/api/servers", json={"name": "a226"}, headers=auth_headers)
+    token, sid = r.json()["token"], r.json()["server"]["id"]
+    rep = {"agent_version": "2.26", "mem_used": 1, "mem_total": 2, "clock_unix": int(time.time()),
+           "listen": [{"p": "tcp", "ip": "0.0.0.0", "port": 5432, "u": "postgres"}], "ips": ["203.0.113.5"],
+           "psi": {"mem_full_60": 1.5}, "dstate": {"n": 2, "top": [{"c": "nfsd", "n": 2}]},
+           "fds": {"used": 10, "max": 100}, "tcp": {"out": 100, "retrans": 2},
+           "os_upd": {"reboot": True, "updates": 5, "security": 2, "ts": int(time.time())}}
+    r = await client.post("/api/agent/report", json=rep, headers={"Authorization": f"Bearer {token}"})
+    assert r.status_code == 200
+    srv = next(x for x in (await client.get("/api/servers", headers=auth_headers)).json() if x["id"] == sid)
+    lr = srv["last_report"]
+    for k in ("listen", "ips", "psi", "dstate", "fds", "tcp", "os_upd"):
+        assert lr[k] == rep[k], k

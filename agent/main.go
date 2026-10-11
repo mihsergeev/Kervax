@@ -43,7 +43,7 @@ import (
 	"time"
 )
 
-const version = "2.25"
+const version = "2.26"
 
 // Публичный ключ для проверки подписи релизов агента (Ed25519, base64).
 // ПУСТО по умолчанию → самообновление ВЫКЛЮЧЕНО (агент никогда не заменяет себя).
@@ -224,6 +224,16 @@ type report struct {
 	ClockUnix int64      `json:"clock_unix,omitempty"`
 	// DNS ноды: резолверы и время их ответа (фоновый замер, последний снимок; nil - еще не мерили)
 	DNS *dnsInfo `json:"dns,omitempty"`
+	// Агент 2.26: что слушает нода и по каким публичным адресам её видно (панель проверяет
+	// порты снаружи), давление на ресурсы, процессы, зависшие на диске, файловые дескрипторы,
+	// TCP и обновления ОС. Пусто или nil - источника нет (старое ядро) или еще не мерили.
+	Listen []listenSock       `json:"listen,omitempty"`
+	IPs    []string           `json:"ips,omitempty"`
+	PSI    map[string]float64 `json:"psi,omitempty"`
+	DState *dstateInfo        `json:"dstate,omitempty"`
+	Fds    *fdInfo            `json:"fds,omitempty"`
+	TCP    *tcpRates          `json:"tcp,omitempty"`
+	OSUpd  *osUpdates         `json:"os_upd,omitempty"`
 	// Готовые JSON-блоки root-хелперов из /var/lib/kervax/report.d/<имя>.json. Агент их не
 	// разбирает, а пересылает как есть: хелпер, которому нужно что-то сообщить панели
 	// (например, найденные на ноде свои бэкапы), больше не требует нового агента.
@@ -321,17 +331,39 @@ type backupInfo struct {
 // снимок Kubernetes на ноде (read-only). Агент ходит в kube-API по токену
 // выделенного ServiceAccount с УЗКИМ RBAC (см. kube-setup.sh) — не cluster-admin.
 type kubeInfo struct {
-	Present      bool           `json:"present"`
-	Access       bool           `json:"access"`            // прочитан kube.json и опрошен kube-api
-	Flavor       string         `json:"flavor,omitempty"`  // k0s/k3s/microk8s/kubeadm/kubernetes
-	Version      string         `json:"version,omitempty"` // серверная k8s-версия (gitVersion)
-	Nodes        []kubeNode     `json:"nodes,omitempty"`
-	Namespaces   int            `json:"namespaces,omitempty"`
-	Workloads    []kubeWorkload `json:"workloads,omitempty"`
-	Pods         []kubePod      `json:"pods,omitempty"`
-	CronJobs     []kubeCronJob  `json:"cronjobs,omitempty"` // панель по ним видит уже настроенные дампы
-	Volumes      []kubeVolume   `json:"volumes,omitempty"`  // тома: панель сверяет их с покрытием бэкапа
-	ingressHosts []string       `json:"-"`                  // хосты из Ingress → вешаем на web_services, в отчёт не дублируем
+	Present    bool           `json:"present"`
+	Access     bool           `json:"access"`            // прочитан kube.json и опрошен kube-api
+	Flavor     string         `json:"flavor,omitempty"`  // k0s/k3s/microk8s/kubeadm/kubernetes
+	Version    string         `json:"version,omitempty"` // серверная k8s-версия (gitVersion)
+	Nodes      []kubeNode     `json:"nodes,omitempty"`
+	Namespaces int            `json:"namespaces,omitempty"`
+	Workloads  []kubeWorkload `json:"workloads,omitempty"`
+	Pods       []kubePod      `json:"pods,omitempty"`
+	CronJobs   []kubeCronJob  `json:"cronjobs,omitempty"` // панель по ним видит уже настроенные дампы
+	Volumes    []kubeVolume   `json:"volumes,omitempty"`  // тома: панель сверяет их с покрытием бэкапа
+	// упавшие за неделю Job, запущенные не по расписанию CronJob (миграции, разовые задачи)
+	FailedJobs []kubeJob `json:"failed_jobs,omitempty"`
+	// сервисы NodePort и LoadBalancer: порты, открытые на каждой ноде кластера
+	NodePorts    []kubeNodePort `json:"nodeports,omitempty"`
+	ingressHosts []string       `json:"-"` // хосты из Ingress → вешаем на web_services, в отчёт не дублируем
+}
+
+// kubeJob - упавший Job: когда и почему (BackoffLimitExceeded, DeadlineExceeded)
+type kubeJob struct {
+	NS     string `json:"ns"`
+	Name   string `json:"name"`
+	Ts     int64  `json:"ts,omitempty"`
+	Reason string `json:"reason,omitempty"`
+}
+
+// kubeNodePort - порт сервиса, открытый на всех нодах кластера (или балансировщиком)
+type kubeNodePort struct {
+	NS       string `json:"ns"`
+	Name     string `json:"name"`
+	Type     string `json:"type"` // NodePort/LoadBalancer
+	Port     int    `json:"port"`
+	NodePort int    `json:"node_port"`
+	Proto    string `json:"proto,omitempty"`
 }
 
 // kubeVolume — постоянный том кластера. Панели важно ОДНО: лежат ли данные каталогом на
@@ -369,6 +401,9 @@ type kubeNode struct {
 	IP      string   `json:"ip,omitempty"`
 	Use     *kubeUse `json:"use,omitempty"` // сколько занято сейчас (metrics-server)
 	Cap     *kubeUse `json:"cap,omitempty"` // сколько есть всего (status.capacity)
+	// MemoryPressure/DiskPressure/PIDPressure/NetworkUnavailable в статусе True: kubelet уже
+	// выселяет поды или не пускает новые
+	Pressure []string `json:"pressure,omitempty"`
 }
 
 // kubeUse - CPU в милликорах и память в байтах: использование пода или ноды по
@@ -402,6 +437,12 @@ type kubePod struct {
 	Mem  uint64  `json:"mem,omitempty"`
 	CPU  float64 `json:"cpu,omitempty"` // % одного ядра по cgroup пода, как top
 	Ctrl string  `json:"ctrl,omitempty"`
+	// Только у подов контроллеров (Deployment, StatefulSet, DaemonSet): нет лимита памяти у
+	// какого-то контейнера (один под может съесть ноду) и нет ни liveness, ни readiness проб
+	// (зависший под так и висит "работающим"). Msg - почему под не встает в расписание.
+	NoLim   bool   `json:"nolim,omitempty"`
+	NoProbe bool   `json:"noprobe,omitempty"`
+	Msg     string `json:"msg,omitempty"`
 	// По всему кластеру, если есть metrics-server: память и CPU пода, где бы он ни работал.
 	// Нужно там, где на ноде с агентом своих подов нет (контроллер k0s без воркера).
 	Use *kubeUse `json:"use,omitempty"`
@@ -609,9 +650,11 @@ type dockerContainer struct {
 	// тегу возраст не понять: traefik:latest на одной ноде оказался сборкой 2021 года.
 	ImgVer     string `json:"img_ver,omitempty"`     // org.opencontainers.image.version
 	ImgCreated int64  `json:"img_created,omitempty"` // сборка образа, unix-секунды
-	imageID    string // id образа: по нему дата сборки из /images/json
-	ip         string // IP контейнера для скрейпа метрик; в отчёт НЕ уходит (строчная)
-	id         string // id контейнера: по нему процесс находит свой контейнер (cpu_groups)
+	// опубликованные порты (docker -p): какой контейнер стоит за портом, открытым на хосте
+	Ports   []dockerPort `json:"ports,omitempty"`
+	imageID string       // id образа: по нему дата сборки из /images/json
+	ip      string       // IP контейнера для скрейпа метрик; в отчёт НЕ уходит (строчная)
+	id      string       // id контейнера: по нему процесс находит свой контейнер (cpu_groups)
 }
 
 // пропускная способность одного сетевого интерфейса, байт/сек + ошибки/дропы, пакетов/сек
@@ -2947,6 +2990,7 @@ type sample struct {
 	thrOK                bool               // есть ли счётчик троттлинга (на VM нет)
 	oom                  uint64             // накопительный счётчик OOM-киллов (/proc/vmstat oom_kill)
 	oomOK                bool               // есть ли счётчик (ядро ≥4.13)
+	tcp                  tcpCtr             // TCP, очередь accept и conntrack (накопительные)
 	at                   time.Time
 }
 
@@ -2961,7 +3005,7 @@ func snap() sample {
 		rdB: rdB, wrB: wrB, rdIO: rdIO, wrIO: wrIO,
 		swpin: swpin, swpout: swpout,
 		nifs: readNetIfaces(), ddevs: readDiskDevs(), procs: readProcs(),
-		thr: thr, thrOK: thrOK, oom: oom, oomOK: oomOK, at: time.Now(),
+		thr: thr, thrOK: thrOK, oom: oom, oomOK: oomOK, tcp: readTCP(), at: time.Now(),
 	}
 }
 
@@ -3125,6 +3169,19 @@ func collect(prev sample) (report, sample) {
 	if kn, _ := siteKnown.Load().(*map[int]bool); kn != nil {
 		r.SiteProbes = collectSiteProbes(*kn)
 	}
+	// 2.26: давление, зависшие на диске процессы, дескрипторы и TCP - на каждый отчет (дешево);
+	// порты, адреса и обновления ОС - из фоновых замеров
+	r.PSI = readPSI()
+	r.DState = dstate(cur.procs)
+	r.Fds = readFds()
+	r.TCP = tcpRate(cur.tcp, prev.tcp, cur.at.Sub(prev.at).Seconds())
+	if l := listenLatest.Load(); l != nil {
+		r.Listen = *l
+	}
+	if ips := ipsLatest.Load(); ips != nil {
+		r.IPs = *ips
+	}
+	r.OSUpd = osUpdLatest.Load()
 	return r, cur
 }
 
@@ -3868,6 +3925,12 @@ func collectDocker() *dockerInfo {
 		ImageID string
 		State   string
 		Status  string
+		Ports   []struct {
+			IP          string
+			PrivatePort int
+			PublicPort  int
+			Type        string
+		}
 	}
 	if err := dockerGet(cl, "/containers/json?all=1", &raw); err == nil {
 		for _, c := range raw {
@@ -3876,6 +3939,7 @@ func collectDocker() *dockerInfo {
 				name = strings.TrimPrefix(c.Names[0], "/")
 			}
 			dc := dockerContainer{Name: name, Image: c.Image, State: c.State, Status: c.Status, id: c.Id, imageID: c.ImageID}
+			dc.Ports = dockerPorts(c.Ports)
 			if c.State == "running" {
 				// кто съел память и CPU - для алертов и кнопки "перезапустить" в разделах
 				// "Память" и "CPU"
@@ -4434,6 +4498,12 @@ func collectKube() *kubeInfo {
 				if c.Type == "Ready" {
 					kn.Ready = c.Status == "True"
 				}
+				switch c.Type {
+				case "MemoryPressure", "DiskPressure", "PIDPressure", "NetworkUnavailable":
+					if c.Status == "True" {
+						kn.Pressure = append(kn.Pressure, c.Type)
+					}
+				}
 			}
 			var roles []string
 			for k := range n.Metadata.Labels {
@@ -4478,6 +4548,8 @@ func collectKube() *kubeInfo {
 		}
 	}
 	ki.CronJobs = kubeCronJobs(cl, kc)
+	ki.FailedJobs = kubeFailedJobs(cl, kc, time.Now())
+	ki.NodePorts = kubeNodePorts(cl, kc)
 	ki.Volumes = kubeVolumes(cl, kc)
 	// домены маршрутов кластера: стандартный Ingress + Gateway API HTTPRoute
 	ki.ingressHosts = mergeSites(kubeIngressHosts(cl, kc), kubeGatewayHosts(cl, kc))
@@ -4756,8 +4828,13 @@ func kubePods(cl *http.Client, kc *kubeConf) []kubePod {
 			Spec struct {
 				NodeName   string
 				Containers []struct {
-					Image string
-					Env   []struct {
+					Image     string
+					Resources struct {
+						Limits map[string]string `json:"limits"`
+					} `json:"resources"`
+					LivenessProbe  *json.RawMessage `json:"livenessProbe"`
+					ReadinessProbe *json.RawMessage `json:"readinessProbe"`
+					Env            []struct {
 						Name      string `json:"name"`
 						Value     string `json:"value"`
 						ValueFrom *struct {
@@ -4778,6 +4855,7 @@ func kubePods(cl *http.Client, kc *kubeConf) []kubePod {
 				Phase             string
 				Reason            string
 				PodIP             string
+				Conditions        []struct{ Type, Status, Reason, Message string }
 				ContainerStatuses []struct {
 					Ready        bool
 					RestartCount int
@@ -4809,6 +4887,27 @@ func kubePods(cl *http.Client, kc *kubeConf) []kubePod {
 		}
 		if m := mem[kp.uid]; m > 0 && p.Status.Phase == "Running" {
 			kp.Mem, kp.Ctrl = m, kp.ctrl
+		}
+		// лимиты и пробы - только у подов контроллеров: у Job и ручных подов другие правила
+		switch kp.Owner {
+		case "ReplicaSet", "StatefulSet", "DaemonSet":
+			probe := false
+			for _, c := range p.Spec.Containers {
+				if c.Resources.Limits["memory"] == "" {
+					kp.NoLim = true
+				}
+				if c.LivenessProbe != nil || c.ReadinessProbe != nil {
+					probe = true
+				}
+			}
+			kp.NoProbe = len(p.Spec.Containers) > 0 && !probe
+		}
+		// не встает в расписание: планировщик пишет почему ("0/3 nodes are available: ...")
+		for _, c := range p.Status.Conditions {
+			if c.Type == "PodScheduled" && c.Status == "False" && c.Reason == "Unschedulable" {
+				kp.Reason = c.Reason
+				kp.Msg = truncRunes(c.Message, 200)
+			}
 		}
 		if u, ok := cpu[kp.uid]; ok && p.Status.Phase == "Running" {
 			kp.CPU, kp.Ctrl = cpuRate("p:"+kp.uid, u, now), kp.ctrl
@@ -6186,6 +6285,9 @@ func main() {
 	go commandLoop(url, token)
 	// DNS ноды меряем фоном со своим тактом: отчет уходит раз в 15 секунд, столько не нужно
 	go dnsLoop(url)
+	// обновления ОС раз в час, слушающие порты и адреса раз в 5 минут
+	go osUpdLoop()
+	go hostScanLoop()
 
 	const maxCycle = 90 * time.Second
 	kick := make(chan struct{}, 1)
@@ -6314,4 +6416,666 @@ func main() {
 		}
 		time.Sleep(interval)
 	}
+}
+
+// ---- Агент 2.26: что открыто, давление на ресурсы, сеть, обновления ОС ----
+
+// listenSock - слушающий сокет ноды. Панель сверяет его снаружи: что реально открыто в интернет.
+type listenSock struct {
+	Proto string `json:"p"`  // tcp, tcp6, udp, udp6
+	IP    string `json:"ip"` // адрес привязки: 0.0.0.0, :: или конкретный
+	Port  int    `json:"port"`
+	User  string `json:"u,omitempty"` // владелец сокета: имя из /etc/passwd или uid
+}
+
+// dockerPort - опубликованный порт контейнера (docker -p): какой контейнер стоит за портом хоста
+type dockerPort struct {
+	IP    string `json:"ip,omitempty"`
+	Pub   int    `json:"pub"`
+	Priv  int    `json:"priv"`
+	Proto string `json:"proto,omitempty"`
+}
+
+// dstateInfo - процессы в состоянии D: ждут диск или сеть и не прерываются (подвисший NFS,
+// умирающий диск, перегруженное хранилище). Несколько минут подряд - сервер встал на I/O.
+type dstateInfo struct {
+	N   int          `json:"n"`
+	Top []dstateProc `json:"top,omitempty"`
+}
+
+type dstateProc struct {
+	Comm string `json:"c"`
+	N    int    `json:"n"`
+}
+
+// fdInfo - открытые файлы системы против предела ядра (fs.file-max)
+type fdInfo struct {
+	Used uint64 `json:"used"`
+	Max  uint64 `json:"max"`
+}
+
+// tcpRates - за секунду: отправлено сегментов и сколько из них ушло повторно (потери на пути),
+// переполнения очереди accept (сервис не успевает принимать соединения), дропы conntrack
+// (таблица забита - новые соединения теряются), входящие сегменты с ошибкой.
+type tcpRates struct {
+	Out        float64 `json:"out"`
+	Retrans    float64 `json:"retrans"`
+	InErrs     float64 `json:"in_errs"`
+	ListenOvf  float64 `json:"listen_ovf"`
+	ListenDrop float64 `json:"listen_drop"`
+	CtDrop     float64 `json:"ct_drop"`
+}
+
+// tcpCtr - накопительные счетчики для tcpRates
+type tcpCtr struct {
+	ok, okExt, okCt                bool
+	out, retrans, inErrs           uint64
+	listenOvf, listenDrop, ctDrops uint64
+}
+
+// osUpdates - обновления ОС: нужна ли перезагрузка и с каких пор, ожидающие обновления (и
+// сколько из них безопасности), когда последний раз обновлялись списки пакетов и работали
+// автообновления. Считается фоном раз в час (apt -s занимает секунды).
+type osUpdates struct {
+	Reboot     bool     `json:"reboot,omitempty"`
+	RebootTs   int64    `json:"reboot_ts,omitempty"`
+	RebootPkgs []string `json:"reboot_pkgs,omitempty"`
+	Kernel     string   `json:"kernel,omitempty"`
+	KernelNew  string   `json:"kernel_new,omitempty"` // в /boot есть ядро новее работающего
+	Updates    int      `json:"updates"`              // -1: неизвестно (не apt)
+	Security   int      `json:"security"`
+	UpdTs      int64    `json:"upd_ts,omitempty"`   // когда посчитаны
+	AptTs      int64    `json:"apt_ts,omitempty"`   // последнее успешное apt update
+	Unatt      string   `json:"unatt,omitempty"`    // on, off или none (unattended-upgrades нет)
+	UnattTs    int64    `json:"unatt_ts,omitempty"` // последний прогон автообновлений
+	Ts         int64    `json:"ts"`
+}
+
+const maxListen = 150
+
+// procNetAddr разбирает адрес из /proc/net/tcp: "0100007F:0035" или 32 hex-символа IPv6. Ядро
+// пишет каждое 32-битное слово в порядке хоста: на x86 и arm64 это little-endian.
+func procNetAddr(s string) (net.IP, int, bool) {
+	host, portHex, ok := strings.Cut(s, ":")
+	if !ok {
+		return nil, 0, false
+	}
+	port, err := strconv.ParseUint(portHex, 16, 16)
+	if err != nil {
+		return nil, 0, false
+	}
+	b, err := hex.DecodeString(host)
+	if err != nil || (len(b) != 4 && len(b) != 16) {
+		return nil, 0, false
+	}
+	ip := make(net.IP, len(b))
+	for i := 0; i+3 < len(b); i += 4 {
+		ip[i], ip[i+1], ip[i+2], ip[i+3] = b[i+3], b[i+2], b[i+1], b[i]
+	}
+	return ip, int(port), true
+}
+
+// passwdNames - uid -> имя пользователя из /etc/passwd
+func passwdNames() map[string]string {
+	m := map[string]string{}
+	b, err := os.ReadFile("/etc/passwd")
+	if err != nil {
+		return m
+	}
+	for _, line := range strings.Split(string(b), "\n") {
+		f := strings.Split(line, ":")
+		if len(f) > 2 && f[0] != "" {
+			m[f[2]] = f[0]
+		}
+	}
+	return m
+}
+
+// parseListen - слушающие сокеты из текста /proc/net/<proto>: TCP в LISTEN (0A), UDP
+// несвязанные (07) с нулевым удаленным портом. Только loopback пропускаем: наружу он не виден.
+func parseListen(proto, text string, users map[string]string, seen map[string]bool, out []listenSock) []listenSock {
+	lines := strings.Split(text, "\n")
+	for _, line := range lines[min(1, len(lines)):] {
+		fl := strings.Fields(line)
+		if len(fl) < 8 {
+			continue
+		}
+		if strings.HasPrefix(proto, "tcp") && fl[3] != "0A" {
+			continue
+		}
+		if strings.HasPrefix(proto, "udp") && (fl[3] != "07" || !strings.HasSuffix(fl[2], ":0000")) {
+			continue
+		}
+		ip, port, ok := procNetAddr(fl[1])
+		if !ok || port == 0 || ip.IsLoopback() {
+			continue
+		}
+		key := proto + "|" + ip.String() + "|" + strconv.Itoa(port)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		u := users[fl[7]]
+		if u == "" {
+			u = fl[7]
+		}
+		out = append(out, listenSock{Proto: proto, IP: ip.String(), Port: port, User: u})
+		if len(out) >= maxListen {
+			break
+		}
+	}
+	return out
+}
+
+func collectListen() []listenSock {
+	users := passwdNames()
+	seen := map[string]bool{}
+	var out []listenSock
+	for _, proto := range []string{"tcp", "tcp6", "udp", "udp6"} {
+		b, err := os.ReadFile("/proc/net/" + proto)
+		if err != nil || len(out) >= maxListen {
+			continue
+		}
+		out = parseListen(proto, string(b), users, seen, out)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Port != out[j].Port {
+			return out[i].Port < out[j].Port
+		}
+		return out[i].Proto+out[i].IP < out[j].Proto+out[j].IP
+	})
+	return out
+}
+
+// dockerPorts - только опубликованные на хосте порты контейнера, без повторов
+func dockerPorts(ps []struct {
+	IP          string
+	PrivatePort int
+	PublicPort  int
+	Type        string
+}) []dockerPort {
+	var out []dockerPort
+	seen := map[string]bool{}
+	for _, p := range ps {
+		if p.PublicPort <= 0 {
+			continue
+		}
+		key := p.IP + "|" + strconv.Itoa(p.PublicPort) + "|" + p.Type
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, dockerPort{IP: p.IP, Pub: p.PublicPort, Priv: p.PrivatePort, Proto: p.Type})
+	}
+	return out
+}
+
+var cgnat = net.IPNet{IP: net.IPv4(100, 64, 0, 0), Mask: net.CIDRMask(10, 32)}
+
+// publicIPs - публичные адреса интерфейсов: по ним панель проверяет порты снаружи, IPv6 отдельно
+// (у него свой файрвол, и дыры там бывают свои). Частные, CGNAT (меш) и link-local не нужны.
+func publicIPs() []string {
+	ifs, err := net.Interfaces()
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, ifc := range ifs {
+		if ifc.Flags&net.FlagUp == 0 || ifc.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+		addrs, err := ifc.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, a := range addrs {
+			ipn, ok := a.(*net.IPNet)
+			if !ok {
+				continue
+			}
+			ip := ipn.IP
+			if !ip.IsGlobalUnicast() || ip.IsPrivate() || cgnat.Contains(ip) {
+				continue
+			}
+			out = append(out, ip.String())
+			if len(out) >= 8 {
+				return out
+			}
+		}
+	}
+	return out
+}
+
+// readPSI - давление из /proc/pressure: доля времени, когда задачи ждали CPU, память или диск.
+// Ключи вида mem_full_60: some - хоть кто-то ждал, full - ждали все, 10 и 60 - окно в секундах.
+func readPSI() map[string]float64 {
+	out := map[string]float64{}
+	for _, r := range [][2]string{{"cpu", "cpu"}, {"memory", "mem"}, {"io", "io"}} {
+		b, err := os.ReadFile("/proc/pressure/" + r[0])
+		if err != nil {
+			continue
+		}
+		for _, line := range strings.Split(string(b), "\n") {
+			fl := strings.Fields(line)
+			if len(fl) < 3 || (fl[0] != "some" && fl[0] != "full") {
+				continue
+			}
+			for _, kv := range fl[1:] {
+				k, v, ok := strings.Cut(kv, "=")
+				if !ok || (k != "avg10" && k != "avg60") {
+					continue
+				}
+				if x, err := strconv.ParseFloat(v, 64); err == nil {
+					out[r[1]+"_"+fl[0]+"_"+strings.TrimPrefix(k, "avg")] = x
+				}
+			}
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// dstate - процессы в D из того же снимка /proc, что и топ процессов
+func dstate(procs map[int]procSample) *dstateInfo {
+	by := map[string]int{}
+	n := 0
+	for _, p := range procs {
+		if p.state == "D" {
+			n++
+			by[p.comm]++
+		}
+	}
+	d := &dstateInfo{N: n}
+	for c, k := range by {
+		d.Top = append(d.Top, dstateProc{Comm: c, N: k})
+	}
+	sort.Slice(d.Top, func(i, j int) bool {
+		if d.Top[i].N != d.Top[j].N {
+			return d.Top[i].N > d.Top[j].N
+		}
+		return d.Top[i].Comm < d.Top[j].Comm
+	})
+	if len(d.Top) > 5 {
+		d.Top = d.Top[:5]
+	}
+	return d
+}
+
+// readFds - /proc/sys/fs/file-nr: "выделено свободно предел"
+func readFds() *fdInfo {
+	b, err := os.ReadFile("/proc/sys/fs/file-nr")
+	if err != nil {
+		return nil
+	}
+	f := strings.Fields(string(b))
+	if len(f) < 3 {
+		return nil
+	}
+	alloc, _ := strconv.ParseUint(f[0], 10, 64)
+	free, _ := strconv.ParseUint(f[1], 10, 64)
+	lim, _ := strconv.ParseUint(f[2], 10, 64)
+	if lim == 0 || lim >= 1<<62 {
+		return nil // предела по сути нет
+	}
+	used := alloc
+	if free < alloc {
+		used = alloc - free
+	}
+	return &fdInfo{Used: used, Max: lim}
+}
+
+// pairCounters - таблица "Заголовок: имена\nЗаголовок: значения" (/proc/net/snmp, netstat)
+func pairCounters(text, prefix string) map[string]uint64 {
+	m := map[string]uint64{}
+	var names []string
+	for _, line := range strings.Split(text, "\n") {
+		if !strings.HasPrefix(line, prefix+":") {
+			continue
+		}
+		f := strings.Fields(line)[1:]
+		if names == nil {
+			names = f
+			continue
+		}
+		for i, v := range f {
+			if i < len(names) {
+				if x, err := strconv.ParseUint(v, 10, 64); err == nil {
+					m[names[i]] = x
+				}
+			}
+		}
+		names = nil
+	}
+	return m
+}
+
+// conntrackDrops - сумма insert_failed, drop и early_drop по всем CPU (/proc/net/stat/nf_conntrack,
+// числа в hex, первая строка - имена колонок)
+func conntrackDrops(text string) (uint64, bool) {
+	lines := strings.Split(strings.TrimSpace(text), "\n")
+	if len(lines) < 2 {
+		return 0, false
+	}
+	names := strings.Fields(lines[0])
+	var sum uint64
+	for _, line := range lines[1:] {
+		for i, v := range strings.Fields(line) {
+			if i >= len(names) {
+				break
+			}
+			switch names[i] {
+			case "insert_failed", "drop", "early_drop":
+				if x, err := strconv.ParseUint(v, 16, 64); err == nil {
+					sum += x
+				}
+			}
+		}
+	}
+	return sum, true
+}
+
+func readTCP() tcpCtr {
+	var c tcpCtr
+	if b, err := os.ReadFile("/proc/net/snmp"); err == nil {
+		m := pairCounters(string(b), "Tcp")
+		c.out, c.retrans, c.inErrs = m["OutSegs"], m["RetransSegs"], m["InErrs"]
+		c.ok = len(m) > 0
+	}
+	if b, err := os.ReadFile("/proc/net/netstat"); err == nil {
+		m := pairCounters(string(b), "TcpExt")
+		c.listenOvf, c.listenDrop = m["ListenOverflows"], m["ListenDrops"]
+		c.okExt = len(m) > 0
+	}
+	if b, err := os.ReadFile("/proc/net/stat/nf_conntrack"); err == nil {
+		c.ctDrops, c.okCt = conntrackDrops(string(b))
+	}
+	return c
+}
+
+func tcpRate(cur, prev tcpCtr, el float64) *tcpRates {
+	if !cur.ok || !prev.ok || el <= 0 {
+		return nil
+	}
+	rate := func(a, b uint64) float64 {
+		if a < b {
+			return 0
+		}
+		return round1(float64(a-b) / el)
+	}
+	r := &tcpRates{Out: rate(cur.out, prev.out), Retrans: rate(cur.retrans, prev.retrans),
+		InErrs: rate(cur.inErrs, prev.inErrs)}
+	if cur.okExt && prev.okExt {
+		r.ListenOvf, r.ListenDrop = rate(cur.listenOvf, prev.listenOvf), rate(cur.listenDrop, prev.listenDrop)
+	}
+	if cur.okCt && prev.okCt {
+		r.CtDrop = rate(cur.ctDrops, prev.ctDrops)
+	}
+	return r
+}
+
+// verCmp сравнивает версии ядер по числам: 6.8.0-45-generic < 6.8.0-47-generic
+func verCmp(a, b string) int {
+	num := func(s string) []int {
+		var out []int
+		cur, in := 0, false
+		for _, r := range s {
+			if r >= '0' && r <= '9' {
+				cur, in = cur*10+int(r-'0'), true
+			} else if in {
+				out, cur, in = append(out, cur), 0, false
+			}
+		}
+		if in {
+			out = append(out, cur)
+		}
+		return out
+	}
+	x, y := num(a), num(b)
+	for i := 0; i < len(x) && i < len(y); i++ {
+		if x[i] != y[i] {
+			if x[i] < y[i] {
+				return -1
+			}
+			return 1
+		}
+	}
+	return len(x) - len(y)
+}
+
+// parseUpdatesAvailable - текст update-notifier Ubuntu: первое число - сколько обновлений, число
+// из строки про безопасность - сколько из них security. Язык системы бывает любым, поэтому
+// "security" ищем и по-русски.
+func parseUpdatesAvailable(text string) (int, int, bool) {
+	upd, sec, found := 0, 0, false
+	num := regexp.MustCompile(`\d+`)
+	for _, line := range strings.Split(text, "\n") {
+		n := num.FindString(line)
+		if n == "" {
+			continue
+		}
+		v, _ := strconv.Atoi(n)
+		low := strings.ToLower(line)
+		if strings.Contains(low, "secur") || strings.Contains(low, "безопасн") {
+			sec = v
+		} else if !found {
+			upd, found = v, true
+		}
+	}
+	return upd, sec, found
+}
+
+// aptSimulate - apt-get -s dist-upgrade: строки "Inst" - что обновится, с "-security" - обновления
+// безопасности. Без root: симуляция не берет блокировок.
+func aptSimulate() (int, int, bool) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "apt-get", "-s", "-q", "-o", "Debug::NoLocking=true", "dist-upgrade")
+	cmd.Env = append(os.Environ(), "LC_ALL=C")
+	b, err := cmd.Output()
+	if err != nil {
+		return 0, 0, false
+	}
+	upd, sec := 0, 0
+	for _, line := range strings.Split(string(b), "\n") {
+		if !strings.HasPrefix(line, "Inst ") {
+			continue
+		}
+		upd++
+		if strings.Contains(line, "-security") || strings.Contains(line, "Debian-Security") {
+			sec++
+		}
+	}
+	return upd, sec, true
+}
+
+func mtime(path string) int64 {
+	if st, err := os.Stat(path); err == nil {
+		return st.ModTime().Unix()
+	}
+	return 0
+}
+
+func collectOSUpdates(now time.Time) *osUpdates {
+	u := &osUpdates{Updates: -1, Ts: now.Unix()}
+	for _, p := range []string{"/run/reboot-required", "/var/run/reboot-required"} {
+		if t := mtime(p); t > 0 {
+			u.Reboot, u.RebootTs = true, t
+			if b, err := os.ReadFile(p + ".pkgs"); err == nil {
+				seen := map[string]bool{}
+				for _, l := range strings.Fields(string(b)) {
+					if !seen[l] && len(u.RebootPkgs) < 10 {
+						seen[l] = true
+						u.RebootPkgs = append(u.RebootPkgs, l)
+					}
+				}
+			}
+			break
+		}
+	}
+	if b, err := os.ReadFile("/proc/sys/kernel/osrelease"); err == nil {
+		u.Kernel = strings.TrimSpace(string(b))
+		if ents, err := os.ReadDir("/boot"); err == nil {
+			newest := ""
+			for _, e := range ents {
+				if v, ok := strings.CutPrefix(e.Name(), "vmlinuz-"); ok && v != "" {
+					if newest == "" || verCmp(v, newest) > 0 {
+						newest = v
+					}
+				}
+			}
+			if newest != "" && verCmp(newest, u.Kernel) > 0 {
+				u.KernelNew = newest
+			}
+		}
+	}
+	if _, err := os.Stat("/usr/bin/apt-get"); err != nil {
+		return u // не apt: обновления не считаем
+	}
+	const notifier = "/var/lib/update-notifier/updates-available"
+	if t := mtime(notifier); t > 0 && now.Unix()-t < 3*86400 {
+		if b, err := os.ReadFile(notifier); err == nil {
+			if upd, sec, ok := parseUpdatesAvailable(string(b)); ok {
+				u.Updates, u.Security, u.UpdTs = upd, sec, t
+			}
+		}
+	}
+	if u.Updates < 0 {
+		if upd, sec, ok := aptSimulate(); ok {
+			u.Updates, u.Security, u.UpdTs = upd, sec, now.Unix()
+		}
+	}
+	u.AptTs = mtime("/var/lib/apt/periodic/update-success-stamp")
+	if u.AptTs == 0 {
+		u.AptTs = mtime("/var/lib/apt/lists")
+	}
+	u.UnattTs = mtime("/var/lib/apt/periodic/unattended-upgrades-stamp")
+	if _, err := os.Stat("/usr/bin/unattended-upgrade"); err != nil {
+		u.Unatt = "none"
+	} else {
+		u.Unatt = "off"
+		if b, err := os.ReadFile("/etc/apt/apt.conf.d/20auto-upgrades"); err == nil &&
+			regexp.MustCompile(`(?m)^\s*APT::Periodic::Unattended-Upgrade\s+"[1-9]`).Match(b) {
+			u.Unatt = "on"
+		}
+	}
+	return u
+}
+
+var (
+	osUpdLatest  atomic.Pointer[osUpdates]
+	listenLatest atomic.Pointer[[]listenSock]
+	ipsLatest    atomic.Pointer[[]string]
+)
+
+// hostScanLoop - слушающие порты и публичные адреса раз в 5 минут: /proc/net/tcp на нагруженном
+// сервере - десятки тысяч строк, читать его на каждый отчет дорого, а меняется он редко
+func hostScanLoop() {
+	time.Sleep(20 * time.Second)
+	for {
+		l, ips := collectListen(), publicIPs()
+		listenLatest.Store(&l)
+		ipsLatest.Store(&ips)
+		time.Sleep(5 * time.Minute)
+	}
+}
+
+// osUpdLoop - обновления ОС раз в час: apt -s занимает секунды, а меняется это редко
+func osUpdLoop() {
+	time.Sleep(30 * time.Second) // не толкаемся с первыми отчетами после старта
+	for {
+		osUpdLatest.Store(collectOSUpdates(time.Now()))
+		time.Sleep(time.Hour)
+	}
+}
+
+// truncRunes обрезает строку до n символов (не байт)
+func truncRunes(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n]) + "..."
+}
+
+// kubeFailedJobs - упавшие за неделю Job, созданные не CronJob'ом (их прогоны панель судит по
+// самим CronJob): миграции, разовые задачи. Требует batch/jobs (kube-setup 0.2+).
+func kubeFailedJobs(cl *http.Client, kc *kubeConf, now time.Time) []kubeJob {
+	var d struct {
+		Items []struct {
+			Metadata struct {
+				Name, Namespace   string
+				CreationTimestamp string
+				OwnerReferences   []struct{ Kind string }
+			}
+			Status struct {
+				Succeeded  int
+				Conditions []struct{ Type, Status, Reason, LastTransitionTime string }
+			}
+		}
+	}
+	if kubeGet(cl, kc, "/apis/batch/v1/jobs", &d) != nil {
+		return nil
+	}
+	var out []kubeJob
+	for _, j := range d.Items {
+		if len(j.Metadata.OwnerReferences) > 0 && j.Metadata.OwnerReferences[0].Kind == "CronJob" {
+			continue
+		}
+		if j.Status.Succeeded > 0 {
+			continue
+		}
+		for _, c := range j.Status.Conditions {
+			if c.Type != "Failed" || c.Status != "True" {
+				continue
+			}
+			t, err := time.Parse(time.RFC3339, c.LastTransitionTime)
+			if err != nil || now.Sub(t) > 7*24*time.Hour {
+				continue
+			}
+			out = append(out, kubeJob{NS: j.Metadata.Namespace, Name: j.Metadata.Name, Ts: t.Unix(), Reason: c.Reason})
+		}
+		if len(out) >= 30 {
+			break
+		}
+	}
+	return out
+}
+
+// kubeNodePorts - порты сервисов NodePort и LoadBalancer: они открыты на каждой ноде кластера
+func kubeNodePorts(cl *http.Client, kc *kubeConf) []kubeNodePort {
+	var d struct {
+		Items []struct {
+			Metadata struct{ Name, Namespace string }
+			Spec     struct {
+				Type  string
+				Ports []struct {
+					Port     int
+					NodePort int
+					Protocol string
+				}
+			}
+		}
+	}
+	if kubeGet(cl, kc, "/api/v1/services", &d) != nil {
+		return nil
+	}
+	var out []kubeNodePort
+	for _, s := range d.Items {
+		if s.Spec.Type != "NodePort" && s.Spec.Type != "LoadBalancer" {
+			continue
+		}
+		for _, p := range s.Spec.Ports {
+			if p.NodePort <= 0 {
+				continue
+			}
+			out = append(out, kubeNodePort{NS: s.Metadata.Namespace, Name: s.Metadata.Name, Type: s.Spec.Type,
+				Port: p.Port, NodePort: p.NodePort, Proto: p.Protocol})
+		}
+		if len(out) >= 100 {
+			break
+		}
+	}
+	return out
 }
