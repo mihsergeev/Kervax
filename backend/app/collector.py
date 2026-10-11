@@ -204,7 +204,7 @@ _SRV_ICON = {
     "kube_expiry": "⏳", "flux_down": "🔥☸️", "kube_pod": "☸️🔥", "web_5xx": "🌐🔥",
     # репозиторий чартов недоступен, а развернутое работает: предупреждение, а не авария
     "flux_stale": "⚠️☸️", "kube_cron": "⏰☸️",
-    "exposed": "🔓", "port_new": "🚪",
+    "exposed": "🔓", "port_new": "🚪", "pressure": "🫁",
 }
 
 # Куда ведёт ссылка алерта (deep-link ?server=id&sec=…). Целимся в КОНКРЕТНУЮ метрику,
@@ -221,7 +221,7 @@ _SRV_SECTION = {
     "clock": "clock", "disk_health": "diskhealth", "inode": "diskfill", "disk_forecast": "diskfill", "units": "units",
     "unit_loop": "unitloop",
     "cpu_spin": "cpueat",
-    "exposed": "exposure", "port_new": "exposure",
+    "exposed": "exposure", "port_new": "exposure", "pressure": "pressure",
 }
 
 
@@ -1196,6 +1196,7 @@ _SRV_LABEL = {
     "backup_growth": "прирост бэкапа",
     "docker_sock": "docker-сокет у внешнего прокси",
     "exposed": "открытые в интернет сервисы",
+    "pressure": "давление на ресурсы",
 }
 
 # Единицы пороговых метрик. Нужны отбою: голое «снова в норме» не отвечает на
@@ -1266,6 +1267,8 @@ def _recovery_detail(key: str, st: dict, ctx: dict) -> str:
         return "CronJob кластера снова отрабатывают"
     if key == "exposed":
         return "опасных сервисов, открытых в интернет, больше нет"
+    if key == "pressure":
+        return "сервер снова дышит: процессы не ждут память и диск, зависших нет"
     label = _SRV_LABEL[key]
     unit, val = _SRV_UNIT.get(key), ctx.get("value")
     if not unit or val is None:
@@ -2614,6 +2617,70 @@ def clock_skew_window(prev: dict | None, raw: int, ts: float) -> dict:
     return {"win": win, "last": raw}
 
 
+# Сервер задыхается (агент 2.26). PSI из /proc/pressure - доля времени, когда процессы ждали
+# ресурс: some - хоть один, full - все разом (сервер ничего не делал). Берем среднее за минуту,
+# сверху выдержка алерта (alert_sustain_seconds): ночной бэкап на пару минут - не повод.
+# Пороги - для того, что видно глазами: memory full 10% - уже свопится и тормозит.
+_PSI_MEM_FULL = 10.0
+_PSI_MEM_SOME = 40.0
+_PSI_IO_FULL = 50.0
+_PSI_IO_SOME = 80.0
+# Процессов в D-state (ждут диск или сеть и не прерываются) столько подряд: подвисший NFS,
+# умирающий диск. Один-два бывают и на здоровом сервере
+_DSTATE_MIN = 5
+_FDS_WARN, _FDS_PROB = 80.0, 90.0
+
+
+def pressure_problems(rep: dict) -> list[tuple[int, str, str]]:
+    """(уровень, ресурс, текст) по свежему отчету: память и диск по PSI, зависшие процессы,
+    файловые дескрипторы. Пусто - все в норме или агент старше 2.26."""
+    out: list[tuple[int, str, str]] = []
+    psi = rep.get("psi") if isinstance(rep.get("psi"), dict) else {}
+
+    def val(k: str) -> float:
+        try:
+            return float(psi.get(k) or 0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    mf, ms = val("mem_full_60"), val("mem_some_60")
+    if mf >= _PSI_MEM_FULL:
+        out.append((2, "mem", f"не хватает памяти: все процессы разом стоят {mf:.0f}% времени"))
+    elif ms >= _PSI_MEM_SOME:
+        out.append((1, "mem", f"не хватает памяти: процессы ждут память {ms:.0f}% времени"))
+    io_f, io_s = val("io_full_60"), val("io_some_60")
+    if io_f >= _PSI_IO_FULL:
+        out.append((2, "io", f"диск не успевает: все процессы разом ждут диск {io_f:.0f}% времени"))
+    elif io_s >= _PSI_IO_SOME:
+        out.append((1, "io", f"диск не успевает: процессы ждут диск {io_s:.0f}% времени"))
+    ds = rep.get("dstate") if isinstance(rep.get("dstate"), dict) else {}
+    n = _int(ds.get("n"))
+    if n >= _DSTATE_MIN:
+        top = ", ".join(f"{t.get('c') or '?'} ({_int(t.get('n'))})" for t in (ds.get("top") or [])[:3]
+                        if isinstance(t, dict))
+        out.append((2, "dstate", f"зависли в ожидании диска или сети {n} процессов (D-state)"
+                    + (f": {top}" if top else "")))
+    fd = rep.get("fds") if isinstance(rep.get("fds"), dict) else {}
+    used, lim = _int(fd.get("used")), _int(fd.get("max"))
+    if lim > 0:
+        pct = used / lim * 100
+        if pct >= _FDS_WARN:
+            out.append((2 if pct >= _FDS_PROB else 1, "fds",
+                        f"файловые дескрипторы заняты на {pct:.0f}% ({used} из {lim})"))
+    out.sort(key=lambda x: -x[0])
+    return out
+
+
+def io_cause(rep: dict) -> str:
+    """Хвост к давлению на диск: какой диск занят и с какой задержкой."""
+    devs = [d for d in rep.get("disk_devs") or [] if isinstance(d, dict) and d.get("util") is not None]
+    if not devs:
+        return ""
+    d = max(devs, key=lambda x: float(x.get("util") or 0))
+    aw = float(d.get("await") or 0)
+    return f" - {d.get('dev') or '?'} занят на {float(d['util']):.0f}%" + (f", задержка {aw:.0f} мс" if aw else "")
+
+
 def server_problems(s: Server, now: datetime, pod_names: dict[str, str] | None = None,
                     web_err: tuple[float, float, int, dict, float] | None = None) -> list[dict]:
     """Что сломано на сервере коротко, для сводки "Что сломано" на главной и значков в списке
@@ -2784,6 +2851,14 @@ def server_problems(s: Server, now: datetime, pod_names: dict[str, str] | None =
             add("backup_check", 2, "не прошла проверка целостности: " + ", ".join(bad[:3])
                 + (f" и еще {len(bad) - 3}" if len(bad) > 3 else ""), "", "backup_check",
                 section="backups", srv=True)
+    # Сервер задыхается: как и у алерта, только то, что держится дольше выдержки
+    pr = pressure_problems(rep)
+    p_since = _parse_iso(state.get("pressure_since") or "")
+    p_ss = getattr(s, "alert_sustain_seconds", None)
+    p_hold = _SUSTAIN_DEFAULT if p_ss is None else max(int(p_ss), 0)
+    if pr and p_since is not None and (now - p_since).total_seconds() >= p_hold:
+        add("pressure", pr[0][0], "; ".join(t for _l, _r, t in pr[:3]), "pressure", "pressure",
+            state.get("pressure_since"))
     # Что открыто в интернет: внешняя проверка портов (open_ports, раз в 6 часов)
     ex = open_ports.exposed(s, now)
     if ex:
@@ -3037,7 +3112,7 @@ def groups_text(groups: list[dict], pod_names: dict[str, str] | None = None) -> 
 # Что из alert_state отдать как "с какого момента проблема": "<вид>_from" ставит цикл алертов
 # для любого вида, а у пороговых метрик точнее "<вид>_since" - начало превышения, а не алерта.
 _SINCE_KEYS = ("cpu", "mem", "temp", "conntrack", "disktemp", "db_conn", "web_5xx", "clock",
-               "backup_missing", "dns")
+               "backup_missing", "dns", "pressure")
 
 
 def alert_since(s: Server) -> dict[str, str]:
@@ -4140,6 +4215,18 @@ def _server_conditions(s: Server, now: datetime,
         ex = open_ports.exposed(s, now)
         out["exposed"] = (2 if ex else 0, {"detail": "открыто в интернет: " + open_ports.exposed_text(ex),
                                            "n": len(ex)})
+    # Сервер задыхается (агент 2.26): уровень - худшая из причин, выдержка - как у CPU и RAM
+    if online and any(rep.get(k) for k in ("psi", "dstate", "fds")):
+        pr = pressure_problems(rep)
+        if pr:
+            p_since = state.get("pressure_since") or now.isoformat()
+            started = _parse_iso(p_since)
+            held = (now - started).total_seconds() if started else 0.0
+            p_lvl = pr[0][0] if held >= sustain_s else 0
+        else:
+            p_since, p_lvl = None, 0
+        out["pressure"] = (p_lvl, {"detail": "; ".join(t for _l, _r, t in pr[:3]),
+                                   "res": pr[0][1] if pr else "", "cause": "", "since": p_since})
     return out
 
 
@@ -4385,6 +4472,12 @@ async def evaluate_servers(
                     continue
                 if key in ("cpu", "mem"):
                     ctx["cause"] = await cause_for(s, key)
+                if key == "pressure":
+                    # кто ест память или какой диск занят: главное, что спросит инженер
+                    if ctx.get("res") == "mem":
+                        ctx["cause"] = await cause_for(s, "mem")
+                    elif ctx.get("res") == "io":
+                        ctx["cause"] = io_cause(s.last_report or {})
                 if key == "dns":
                     ctx["details"] = (ctx.get("details") or "") + dns_others_hint(s.id, dns_slow_by)
                 if key == "disk":

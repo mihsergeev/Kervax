@@ -1047,6 +1047,11 @@ export type ServerReport = {
   clock_unix?: number // локальные часы ноды на момент отправки отчёта
   // слушающие сокеты кроме localhost (агент 2.26): по ним панель проверяет, что открыто снаружи
   listen?: { p: string; ip: string; port: number; u?: string }[]
+  // давление на ресурсы (агент 2.26): PSI в % времени - mem_some_60, io_full_10 и т.п.;
+  // процессы в D-state; открытые файлы против fs.file-max
+  psi?: Record<string, number>
+  dstate?: { n: number; top?: { c: string; n: number }[] }
+  fds?: { used: number; max: number }
   dns?: DnsInfo | null // DNS ноды: резолверы и время их ответа (агент 2.25)
 }
 // Итоги прогонов бэкапа (helper backup-setup 0.32): сколько restic добавил в репозиторий.

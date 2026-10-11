@@ -768,7 +768,7 @@ const SEC_OF_CARD: Record<string, string> = {
   cpu: 'cpu', throttle: 'cpu', temp: 'cpu', cpueat: 'cpu',
   mem: 'mem', oom: 'mem',
   conntrack: 'conn', exposure: 'conn', diskfill: 'disk', disktemp: 'disk', disk: 'disk', diskhealth: 'disk',
-  units: 'proc', unitloop: 'proc',
+  units: 'proc', unitloop: 'proc', pressure: 'proc',
   web: 'web', web5xx: 'web',
 }
 
@@ -2057,6 +2057,77 @@ function unitStateText(d: UnitFixResult, t: TFn): string {
 
 // Сервисы, которые systemd перезапускает по кругу (helper units-setup 0.2): failed они не становятся,
 // поэтому среди упавших их нет. Приросты счетчика за окно считает бэкенд, строки приходят в problems.
+// Давление на ресурсы (агент 2.26). PSI - доля времени, когда процессы ждали ресурс: some - хоть
+// один, full - все разом. Пороги те же, что у алерта "Сервер задыхается" (collector).
+const PSI_ROWS: { k: string; label: string; some: number; full: number }[] = [
+  { k: 'cpu', label: 'CPU', some: 0, full: 0 },
+  { k: 'mem', label: 'Память', some: 40, full: 10 },
+  { k: 'io', label: 'Диск', some: 80, full: 50 },
+]
+
+function PressureCard({ server: s }: { server: Server }) {
+  const { t } = useI18n()
+  const r = s.last_report
+  const psi = r?.psi
+  if (!psi && !r?.dstate && !r?.fds) return null
+  const prob = (s.problems ?? []).find((p) => p.kind === 'pressure')
+  const cell = (k: string, lim: number) => {
+    const a = psi?.[`${k}_10`]
+    const b = psi?.[`${k}_60`]
+    if (a == null && b == null) return <td className="muted">-</td>
+    const hot = lim > 0 && (b ?? 0) >= lim
+    return (
+      <td className={hot ? 't-down' : ''}>
+        {(a ?? 0).toFixed(1)}% / {(b ?? 0).toFixed(1)}%
+      </td>
+    )
+  }
+  const fdPct = r?.fds && r.fds.max > 0 ? (r.fds.used / r.fds.max) * 100 : null
+  const ds = r?.dstate
+  return (
+    <div className="detail-inc pressure" id="mcard-pressure">
+      <div className="chart-cap">{t('Давление на ресурсы')}</div>
+      {prob && <div className="t-down small">{prob.text}</div>}
+      {psi && (
+        <table className="exp-table psi-table small">
+          <thead>
+            <tr>
+              <td />
+              <td className="muted">{t('ждут (some)')}</td>
+              <td className="muted">{t('все стоят (full)')}</td>
+            </tr>
+          </thead>
+          <tbody>
+            {PSI_ROWS.map((x) => (
+              <tr key={x.k}>
+                <td>{t(x.label)}</td>
+                {cell(`${x.k}_some`, x.some)}
+                {cell(`${x.k}_full`, x.full)}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+      {psi && <div className="muted small">{t('доля времени, когда процессы ждали ресурс: за 10 секунд / за минуту')}</div>}
+      {ds && (
+        <div className={`small ${ds.n >= 5 ? 't-down' : ''}`}>
+          {t('В D-state (ждут диск или сеть): {n}', { n: ds.n })}
+          {(ds.top?.length ?? 0) > 0 && <span className="muted"> - {ds.top!.map((x) => `${x.c} (${x.n})`).join(', ')}</span>}
+        </div>
+      )}
+      {r?.fds && fdPct != null && (
+        <div className={`small ${fdPct >= 80 ? 't-down' : ''}`}>
+          {t('Файловые дескрипторы: {u} из {m} ({p}%)', {
+            u: fmtNum(r.fds.used),
+            m: fmtNum(r.fds.max),
+            p: fdPct.toFixed(fdPct < 1 ? 2 : 0),
+          })}
+        </div>
+      )}
+    </div>
+  )
+}
+
 function LoopingUnits({ server: s, onChanged }: { server: Server; onChanged: () => void }) {
   const { t } = useI18n()
   const { isViewer } = useAuth()
@@ -4866,6 +4937,7 @@ function ServerDetail({
         </MetricSection>
 
         <MetricSection id="proc" title={t('Процессы')}>
+          <PressureCard server={s} />
           <LoopingUnits server={s} onChanged={onChanged} />
           <FailedUnits server={s} onChanged={onChanged} />
           <div className="chart-grid">

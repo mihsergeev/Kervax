@@ -1000,6 +1000,9 @@ input:focus {
   color: #fff;
 }
 .exp-more { align-self: flex-start; }
+.pressure { margin-bottom: 0.8rem; }
+.psi-table td:last-child { text-align: left; }
+.psi-table thead td { border-top: 0; }
 @media (max-width: 640px) {
   .exp-table td:last-child { white-space: normal; }
 }
