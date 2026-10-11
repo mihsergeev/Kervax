@@ -204,7 +204,7 @@ _SRV_ICON = {
     "kube_expiry": "⏳", "flux_down": "🔥☸️", "kube_pod": "☸️🔥", "web_5xx": "🌐🔥",
     # репозиторий чартов недоступен, а развернутое работает: предупреждение, а не авария
     "flux_stale": "⚠️☸️", "kube_cron": "⏰☸️",
-    "exposed": "🔓", "port_new": "🚪", "pressure": "🫁",
+    "exposed": "🔓", "port_new": "🚪", "pressure": "🫁", "net_health": "📶",
 }
 
 # Куда ведёт ссылка алерта (deep-link ?server=id&sec=…). Целимся в КОНКРЕТНУЮ метрику,
@@ -221,7 +221,7 @@ _SRV_SECTION = {
     "clock": "clock", "disk_health": "diskhealth", "inode": "diskfill", "disk_forecast": "diskfill", "units": "units",
     "unit_loop": "unitloop",
     "cpu_spin": "cpueat",
-    "exposed": "exposure", "port_new": "exposure", "pressure": "pressure",
+    "exposed": "exposure", "port_new": "exposure", "pressure": "pressure", "net_health": "nethealth",
 }
 
 
@@ -1197,6 +1197,7 @@ _SRV_LABEL = {
     "docker_sock": "docker-сокет у внешнего прокси",
     "exposed": "открытые в интернет сервисы",
     "pressure": "давление на ресурсы",
+    "net_health": "сеть ноды",
 }
 
 # Единицы пороговых метрик. Нужны отбою: голое «снова в норме» не отвечает на
@@ -1269,6 +1270,8 @@ def _recovery_detail(key: str, st: dict, ctx: dict) -> str:
         return "опасных сервисов, открытых в интернет, больше нет"
     if key == "pressure":
         return "сервер снова дышит: процессы не ждут память и диск, зависших нет"
+    if key == "net_health":
+        return "сеть ноды снова в порядке: потерь, переполнений и ошибок нет"
     label = _SRV_LABEL[key]
     unit, val = _SRV_UNIT.get(key), ctx.get("value")
     if not unit or val is None:
@@ -2671,6 +2674,65 @@ def pressure_problems(rep: dict) -> list[tuple[int, str, str]]:
     return out
 
 
+# Сеть ноды. TCP - агент 2.26, ошибки и дропы интерфейсов агент шлет давно. Все в секунду,
+# с той же выдержкой, что у CPU и RAM.
+_RETRANS_PCT = 10.0       # % сегментов, ушедших повторно: потери на пути
+_RETRANS_MIN_OUT = 100.0  # сегментов/с: на тихой ноде доля прыгает от пары потерь
+_LISTEN_OVF_MIN = 1.0     # переполнений очереди accept: сервис не успевает принимать
+_CT_DROP_MIN = 1.0        # новых соединений, выброшенных conntrack
+_IF_ERRS_MIN = 1.0
+# Единицы дропов в секунду бывают и у здоровой ноды (чужие протоколы, LLDP), поэтому порог
+# высокий; виртуальные мосты и туннели Docker и Kubernetes не считаем
+_IF_DROPS_MIN = 100.0
+_IF_VIRTUAL = ("docker", "br-", "cali", "flannel", "cni", "kube-", "vxlan", "tunl", "lxc", "virbr", "weave")
+
+
+def _num(v) -> float:
+    try:
+        return float(v or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def net_problems(rep: dict) -> list[tuple[int, str, str]]:
+    """(уровень, что, текст) по свежему отчету: потери TCP, переполнения очереди accept,
+    дропы conntrack, ошибки и дропы интерфейсов."""
+    out: list[tuple[int, str, str]] = []
+    tcp = rep.get("tcp") if isinstance(rep.get("tcp"), dict) else {}
+    ct = _num(tcp.get("ct_drop"))
+    if ct >= _CT_DROP_MIN:
+        out.append((2, "conntrack", f"conntrack выбрасывает новые соединения: {ct:.0f} в секунду"))
+    sent, again = _num(tcp.get("out")), _num(tcp.get("retrans"))
+    if sent >= _RETRANS_MIN_OUT and again / sent * 100 >= _RETRANS_PCT:
+        out.append((1, "retrans", f"TCP теряет пакеты: {again / sent * 100:.0f}% сегментов уходят повторно"))
+    ovf = _num(tcp.get("listen_ovf"))
+    if ovf >= _LISTEN_OVF_MIN:
+        n = round(ovf)
+        out.append((1, "listen", f"сервис не успевает принимать соединения: очередь accept "
+                                 f"переполняется {n} {_plural(n, 'раз', 'раза', 'раз')} в секунду"))
+    for i in rep.get("net_ifaces") or []:
+        if not isinstance(i, dict):
+            continue
+        name = str(i.get("if") or "?")
+        errs, drops = _num(i.get("errs")), _num(i.get("drops"))
+        if errs >= _IF_ERRS_MIN:
+            n = round(errs)
+            out.append((1, "iface", f"{name}: {n} {_plural(n, 'ошибка', 'ошибки', 'ошибок')} в секунду"))
+        if drops >= _IF_DROPS_MIN and not name.startswith(_IF_VIRTUAL):
+            n = round(drops)
+            out.append((1, "iface", f"{name}: {n} {_plural(n, 'дроп', 'дропа', 'дропов')} в секунду"))
+    out.sort(key=lambda x: -x[0])
+    return out
+
+
+def _held_long(s: Server, state: dict, key: str, now: datetime) -> bool:
+    """Держится ли "<вид>_since" дольше выдержки алерта: главная показывает то же, что алертит."""
+    since = _parse_iso(state.get(f"{key}_since") or "")
+    ss = getattr(s, "alert_sustain_seconds", None)
+    hold = _SUSTAIN_DEFAULT if ss is None else max(int(ss), 0)
+    return since is not None and (now - since).total_seconds() >= hold
+
+
 def io_cause(rep: dict) -> str:
     """Хвост к давлению на диск: какой диск занят и с какой задержкой."""
     devs = [d for d in rep.get("disk_devs") or [] if isinstance(d, dict) and d.get("util") is not None]
@@ -2853,12 +2915,13 @@ def server_problems(s: Server, now: datetime, pod_names: dict[str, str] | None =
                 section="backups", srv=True)
     # Сервер задыхается: как и у алерта, только то, что держится дольше выдержки
     pr = pressure_problems(rep)
-    p_since = _parse_iso(state.get("pressure_since") or "")
-    p_ss = getattr(s, "alert_sustain_seconds", None)
-    p_hold = _SUSTAIN_DEFAULT if p_ss is None else max(int(p_ss), 0)
-    if pr and p_since is not None and (now - p_since).total_seconds() >= p_hold:
+    if pr and _held_long(s, state, "pressure", now):
         add("pressure", pr[0][0], "; ".join(t for _l, _r, t in pr[:3]), "pressure", "pressure",
             state.get("pressure_since"))
+    nets = net_problems(rep)
+    if nets and _held_long(s, state, "net_health", now):
+        add("net_health", nets[0][0], "; ".join(t for _l, _r, t in nets[:3]),
+            "neterr" if nets[0][1] == "iface" else "nethealth", "net_health", state.get("net_health_since"))
     # Что открыто в интернет: внешняя проверка портов (open_ports, раз в 6 часов)
     ex = open_ports.exposed(s, now)
     if ex:
@@ -3112,7 +3175,7 @@ def groups_text(groups: list[dict], pod_names: dict[str, str] | None = None) -> 
 # Что из alert_state отдать как "с какого момента проблема": "<вид>_from" ставит цикл алертов
 # для любого вида, а у пороговых метрик точнее "<вид>_since" - начало превышения, а не алерта.
 _SINCE_KEYS = ("cpu", "mem", "temp", "conntrack", "disktemp", "db_conn", "web_5xx", "clock",
-               "backup_missing", "dns", "pressure")
+               "backup_missing", "dns", "pressure", "net_health")
 
 
 def alert_since(s: Server) -> dict[str, str]:
@@ -3829,6 +3892,18 @@ def _server_conditions(s: Server, now: datetime,
         ctx["since"] = since
         out[key] = (lvl, ctx)
 
+    def sustain_lvl(key: str, lvl: int, ctx: dict) -> None:
+        """Как sustain, но с уровнем: худшая причина сейчас, если беда держится дольше выдержки."""
+        if lvl and online:
+            since = state.get(f"{key}_since") or now.isoformat()
+            started = _parse_iso(since)
+            held = (now - started).total_seconds() if started else 0.0
+            lvl = lvl if held >= sustain_s else 0
+        else:
+            since, lvl = None, 0
+        ctx["since"] = since
+        out[key] = (lvl, ctx)
+
     rep = s.last_report or {}
     cpu = rep.get("cpu_percent")
     if s.cpu_alert_percent and cpu is not None:
@@ -4218,15 +4293,12 @@ def _server_conditions(s: Server, now: datetime,
     # Сервер задыхается (агент 2.26): уровень - худшая из причин, выдержка - как у CPU и RAM
     if online and any(rep.get(k) for k in ("psi", "dstate", "fds")):
         pr = pressure_problems(rep)
-        if pr:
-            p_since = state.get("pressure_since") or now.isoformat()
-            started = _parse_iso(p_since)
-            held = (now - started).total_seconds() if started else 0.0
-            p_lvl = pr[0][0] if held >= sustain_s else 0
-        else:
-            p_since, p_lvl = None, 0
-        out["pressure"] = (p_lvl, {"detail": "; ".join(t for _l, _r, t in pr[:3]),
-                                   "res": pr[0][1] if pr else "", "cause": "", "since": p_since})
+        sustain_lvl("pressure", pr[0][0] if pr else 0, {"detail": "; ".join(t for _l, _r, t in pr[:3]),
+                                                        "res": pr[0][1] if pr else "", "cause": ""})
+    # Сеть ноды: потери TCP, очередь accept, conntrack, ошибки и дропы интерфейсов
+    if online and (rep.get("tcp") or rep.get("net_ifaces")):
+        nets = net_problems(rep)
+        sustain_lvl("net_health", nets[0][0] if nets else 0, {"detail": "; ".join(t for _l, _r, t in nets[:4])})
     return out
 
 

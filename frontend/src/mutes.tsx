@@ -37,6 +37,7 @@ export const SRV_ALERT_KINDS: { k: string; label: string }[] = [
   { k: 'exposed', label: 'Сеть: опасный сервис открыт в интернет' },
   { k: 'port_new', label: 'Сеть: открылся новый порт' },
   { k: 'pressure', label: 'Сервер задыхается' },
+  { k: 'net_health', label: 'Сеть: потери и ошибки' },
   { k: 'reboot', label: 'Перезагрузка' },
   { k: 'oom', label: 'OOM-killer' },
   { k: 'web_5xx', label: 'Веб: ошибки 5xx' },
