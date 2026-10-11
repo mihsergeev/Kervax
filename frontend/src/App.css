@@ -1002,6 +1002,12 @@ input:focus {
 .exp-more { align-self: flex-start; }
 .pressure { margin-bottom: 0.8rem; }
 .nethealth { margin-top: 0.8rem; }
+.osupd {
+  margin: 0.6rem 0;
+  padding: 0.6rem 0.8rem;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
 .psi-table td:last-child { text-align: left; }
 .psi-table thead td { border-top: 0; }
 @media (max-width: 640px) {

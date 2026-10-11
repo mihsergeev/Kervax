@@ -14,7 +14,7 @@ from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, Query, Re
 from fastapi.responses import FileResponse, PlainTextResponse
 from sqlalchemy import delete as sa_delete, func, select
 
-from app import audit, backup_growth, custom_backups, docker_exposure, geoip, kube_coverage, manual_probe, open_ports
+from app import audit, backup_growth, custom_backups, docker_exposure, geoip, kube_coverage, manual_probe, open_ports, os_support
 from app.collector import (
     _backup_problem_repos, alert_since, backup_cadence, backup_rotation_items, backup_unmonitored,
     bsrv_extra, bsrv_restic_old, clock_skew_window, cron_job_issues, disk_analyze_ok, prune_problems, repo_reason, docker_since,
@@ -202,6 +202,7 @@ def _out(
     o.docker_alerts = _docker_alerts(server)
     o.docker_exposed = docker_exposure.exposed(server.last_report or {})
     o.exposure = open_ports.view(server)
+    o.os_advice = os_support.advice(server.last_report or {}, now)
     o.proxy_outdated = docker_exposure.outdated(server.last_report or {}, now.timestamp())
     o.disk_analyze = disk_analyze_ok(server.last_report or {})
     o.fresh = _fresh_node(server, now)

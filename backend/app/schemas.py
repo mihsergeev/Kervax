@@ -1051,6 +1051,8 @@ class ServerOut(BaseModel):
     backup_repo_archive: dict | None = None
     # что открыто в интернет: последняя внешняя проверка портов (app/exposure.py)
     exposure: dict | None = None
+    # что сделать с ОС ноды (os_support.advice): конец поддержки, перезагрузка, обновления
+    os_advice: list[dict] | None = None
     backup_audit_mutes: list[str] | None = None  # приглушённые находки покрытия (по ключу)
     backup_not_required: bool = False  # у сервера бэкап не требуется (алерт снят)
     db_dumps_ok: bool = False  # дампы СУБД настроены отдельно (пункт снят с главной)

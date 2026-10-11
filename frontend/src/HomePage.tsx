@@ -352,6 +352,14 @@ function actionItems(servers: Server[], avail: string, relProblem: string, t: T)
         text: t('{name}: {db} — нужен отдельный дамп',
           { name: s.name, db: dbs.map((x) => x.subject).join(', ') }) })
     }
+    // ОС: конец поддержки, перезагрузка, обновления безопасности. Одной строкой на ноду, чтобы
+    // десяток нод с отложенной перезагрузкой не превратил список в обои
+    const osAdv = s.os_advice ?? []
+    if (osAdv.length > 0) {
+      items.push({ key: `os-${s.id}`, icon: osAdv.some((x) => x.level >= 2) ? '⛔' : '🧰', section: 'servers', id: s.id,
+        name: s.name, cc: s.country, sec: 'osupd',
+        text: `${s.name}: ${osAdv.map((x) => x.text).join('; ')}` })
+    }
     for (const h of s.helper_advice || []) {
       // «устарел (? → v0.1)» на ноде, где helper'а нет вовсе, вводит в заблуждение:
       // это не обновление, а первая установка, и делается она тем же прогоном.
