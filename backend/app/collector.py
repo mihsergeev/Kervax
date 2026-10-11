@@ -19,6 +19,7 @@ from sqlalchemy import and_, delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app import alerts, audit, backup, backup_growth, checks as checks_exec, custom_backups, docker_exposure, flaky, heartbeat, settings_store
+from app import backup_verify
 from app import changes as srv_changes
 from app import open_ports
 from app import disk_forecast as dfc
@@ -207,6 +208,7 @@ _SRV_ICON = {
     "flux_stale": "⚠️☸️", "kube_cron": "⏰☸️",
     "exposed": "🔓", "port_new": "🚪", "pressure": "🫁", "net_health": "📶",
     "kube_node": "🖥☸️", "kube_job": "💥☸️", "access_change": "🔑",
+    "backup_restore": "🛟💾",
 }
 
 # Куда ведёт ссылка алерта (deep-link ?server=id&sec=…). Целимся в КОНКРЕТНУЮ метрику,
@@ -254,6 +256,7 @@ _ALERT_SECTION = {
     "kube_cron": "kuber",
     "kube_node": "kuber",
     "kube_job": "kuber",
+    "backup_restore": "backups",
 }
 
 
@@ -1204,6 +1207,7 @@ _SRV_LABEL = {
     "pressure": "давление на ресурсы",
     "net_health": "сеть ноды",
     "kube_node": "ноды kubernetes",
+    "backup_restore": "проверка восстановления",
 }
 
 # Единицы пороговых метрик. Нужны отбою: голое «снова в норме» не отвечает на
@@ -1283,6 +1287,8 @@ def _recovery_detail(key: str, st: dict, ctx: dict) -> str:
         return "сеть ноды снова в порядке: потерь, переполнений и ошибок нет"
     if key == "kube_node":
         return "ноды кластера снова Ready, давления нет"
+    if key == "backup_restore":
+        return "проверка восстановления снова проходит: файлы и дампы из снапшота читаются"
     label = _SRV_LABEL[key]
     unit, val = _SRV_UNIT.get(key), ctx.get("value")
     if not unit or val is None:
@@ -2993,6 +2999,11 @@ def server_problems(s: Server, now: datetime, pod_names: dict[str, str] | None =
     if nets and _held_long(s, state, "net_health", now):
         add("net_health", nets[0][0], "; ".join(t for _l, _r, t in nets[:3]),
             "neterr" if nets[0][1] == "iface" else "nethealth", "net_health", state.get("net_health_since"))
+    # Проверка восстановления бэкапа (helper backup-setup 0.34): ведет в "Бэкапы" клиента
+    bv = backup_verify.problems(rep, now)
+    if bv:
+        add("backup_restore", bv[0][0], "; ".join(t for _l, t in bv[:2]), "", "backup_restore",
+            section="backups", srv=False)
     # Изменился доступ: держится сутки, пока не отметили "это мы"
     acc = srv_changes.unacked_alerts(s, now)
     if acc:
@@ -4375,6 +4386,10 @@ def _server_conditions(s: Server, now: datetime,
     if online and (rep.get("tcp") or rep.get("net_ifaces")):
         nets = net_problems(rep)
         sustain_lvl("net_health", nets[0][0] if nets else 0, {"detail": "; ".join(t for _l, _r, t in nets[:4])})
+    # Проверка восстановления: итог недельной проверки держится до следующей, выдержка не нужна
+    if online and backup_verify.block(rep) is not None:
+        bv = backup_verify.problems(rep, now)
+        out["backup_restore"] = (bv[0][0] if bv else 0, {"detail": "; ".join(t for _l, t in bv[:3])})
     # Ноды кластера: NotReady или под давлением дольше выдержки (перезагрузка ноды - минуты)
     if online and (rep.get("kube") or {}).get("access"):
         kn = kube_node_problems(rep)

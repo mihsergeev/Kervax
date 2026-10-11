@@ -1055,6 +1055,8 @@ class ServerOut(BaseModel):
     os_advice: list[dict] | None = None
     # изменения на сервере (changes.view): лента и отметка "это мы"
     changes: dict | None = None
+    # итог недельной проверки восстановления бэкапа (backup_verify.view)
+    backup_verify: dict | None = None
     backup_audit_mutes: list[str] | None = None  # приглушённые находки покрытия (по ключу)
     backup_not_required: bool = False  # у сервера бэкап не требуется (алерт снят)
     db_dumps_ok: bool = False  # дампы СУБД настроены отдельно (пункт снят с главной)

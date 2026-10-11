@@ -701,6 +701,19 @@ function BackupModal({
               </>
             )
           })()}
+          {s.backup_verify && row(t('Восстановление'), (
+            <span className={s.backup_verify.level >= 2 ? 't-down' : s.backup_verify.level === 1 ? 't-degraded' : ''}>
+              {s.backup_verify.problems.length > 0
+                ? s.backup_verify.problems.join('; ')
+                : t('проверено {d}: файлов совпало {n}{dumps}', {
+                    d: s.backup_verify.ts ? new Date(s.backup_verify.ts).toLocaleDateString() : '?',
+                    n: s.backup_verify.files_ok,
+                    dumps: s.backup_verify.dumps_ok.length
+                      ? t(', дампы читаются: {e}', { e: s.backup_verify.dumps_ok.join(', ') })
+                      : '',
+                  })}
+            </span>
+          ))}
           {row('restic', (
             <span className="restic-row">
               {b.restic_found ? (shortRestic(b.restic_version) || t('найден')) : t('не найден')}

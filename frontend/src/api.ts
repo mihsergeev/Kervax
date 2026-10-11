@@ -1399,6 +1399,8 @@ export type Server = {
   os_advice?: { kind: string; level: number; text: string }[]
   // изменения на сервере (helper changes-setup): лента между снимками, отметка "это мы"
   changes?: ServerChanges | null
+  // недельная проверка восстановления бэкапа (helper backup-setup 0.34)
+  backup_verify?: { ts: string | null; files_ok: number; dumps_ok: string[]; level: number; problems: string[] } | null
   // внешние прокси со сборкой образа старше года (built - unix-секунды)
   proxy_outdated?: { name: string; image: string; kind: string; version: string; built: number; age_days: number }[]
   // нода умеет разобрать раздел по запросу (агент 2.24 + diskusage-setup 0.6)
