@@ -14,7 +14,7 @@ from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, Query, Re
 from fastapi.responses import FileResponse, PlainTextResponse
 from sqlalchemy import delete as sa_delete, func, select
 
-from app import audit, backup_growth, custom_backups, docker_exposure, geoip, kube_coverage, manual_probe
+from app import audit, backup_growth, custom_backups, docker_exposure, geoip, kube_coverage, manual_probe, open_ports
 from app.collector import (
     _backup_problem_repos, alert_since, backup_cadence, backup_rotation_items, backup_unmonitored,
     bsrv_extra, bsrv_restic_old, clock_skew_window, cron_job_issues, disk_analyze_ok, prune_problems, repo_reason, docker_since,
@@ -201,6 +201,7 @@ def _out(
     o.country = geoip.country_of(server.external_ip) or geoip.country_of(server.agent_ip)
     o.docker_alerts = _docker_alerts(server)
     o.docker_exposed = docker_exposure.exposed(server.last_report or {})
+    o.exposure = open_ports.view(server)
     o.proxy_outdated = docker_exposure.outdated(server.last_report or {}, now.timestamp())
     o.disk_analyze = disk_analyze_ok(server.last_report or {})
     o.fresh = _fresh_node(server, now)
@@ -1092,6 +1093,26 @@ async def snooze_server(
     await session.refresh(server)
     await audit.record(session, user.username, "server_snooze", server.name, f"{body.hours}ч")
     return _out(server, datetime.now(timezone.utc))
+
+
+@router.post("/{server_id}/exposure/scan", response_model=ServerOut)
+async def exposure_scan(server_id: int, user: CurrentUser, session: SessionDep) -> ServerOut:
+    """Проверить снаружи, что открыто в интернет, не дожидаясь планового прогона (раз в 6 часов):
+    например, сразу после правки файрвола."""
+    s = await _get_or_404(server_id, session, user)
+    if not (s.last_report or {}).get("listen"):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST,
+                            "Агент на ноде старше 2.26 и не сообщает, какие порты слушает")
+    now = datetime.now(timezone.utc)
+    last = open_ports.scanned_at(s)
+    if last is not None and now - last < timedelta(minutes=1):
+        raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "Проверка только что была, подождите минуту")
+    proxy, via = await open_ports.pick_proxy(session)
+    s.exposure = await open_ports.scan_server(s, proxy, via, now)
+    await session.commit()
+    await session.refresh(s)
+    await audit.record(session, user.username, "exposure_scan", s.name, via)
+    return _out(s, datetime.now(timezone.utc))
 
 
 @router.post("/{server_id}/snooze-alert", response_model=ServerOut)
