@@ -1178,6 +1178,11 @@ const EN: Record<string, string> = {
   'Изменений пока не было.': 'No changes yet.',
   'все изменения: {n}': 'all changes: {n}',
   'Сервер: изменился доступ': 'Server: access changed',
+  // проверка восстановления бэкапа
+  'Восстановление': 'Restore',
+  'проверено {d}: файлов совпало {n}{dumps}': 'checked {d}: {n} files matched{dumps}',
+  ', дампы читаются: {e}': ', dumps readable: {e}',
+  'Бэкап: проверка восстановления': 'Backup: restore check',
   'Kubernetes: CronJob': 'Kubernetes: CronJob',
   'Время сервера - только предупреждения': 'Server time - warnings only',
   'Время сервера - предупр. и проблемы': 'Server time - warnings and problems',

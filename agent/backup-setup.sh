@@ -79,7 +79,12 @@ AGENT_USER=kervax
 #       night, and nobody saw it until the backup server filled up)
 # 0.33: a backup that starts while the server prunes the repository waits for the lock
 #       (--retry-lock 2h on restic 0.16+) instead of failing; existing scripts are patched once
-KERVAX_SETUP_VERSION=0.33  # MAJOR.MINOR; compared component-wise (0.13 > 0.2!)
+# 0.34: a restore check once a week after a successful backup: a few unchanged files are restored
+#       from the latest snapshot and compared with the disk by sha256, and the newest dump of every
+#       engine is read from the snapshot (its first megabytes decompress into a real dump).
+#       Result in report.d/backup-verify.json. A backup that runs every night but cannot be
+#       restored is the worst kind of backup, and nothing else shows it
+KERVAX_SETUP_VERSION=0.34  # MAJOR.MINOR; compared component-wise (0.13 > 0.2!)
 KERVAX_SETUP_ALWAYS=1  # safe on any node: installs only its own helper and spool and does not
                        # touch the backup configuration until the panel sends a command
 install -d -m 0755 "$HELPER_DIR" "$STATE_DIR" /var/lib/kervax/versions
@@ -2170,13 +2175,137 @@ custom_scan_maybe() {
   ) 9>/run/kervax-custom-scan.lock
 }
 
+# ------- the restore check: restore a few files and the dumps from the latest snapshot -------
+VERIFY_JSON="$CUSTOM_DIR/backup-verify.json"
+VERIFY_EVERY=$((7 * 86400))  # once a week is enough to catch a repository that went bad
+VERIFY_FILES=8               # files compared per check
+VERIFY_MAX_SIZE=5M           # small files only: the check must not pull gigabytes
+
+# restic as the backup user, with its cache (root would build a cache of its own, and on a big
+# repository that alone is hundreds of megabytes). The env file is root-only, as for the backup
+# service (systemd reads it as root): root reads it and hands the variables over the environment.
+verify_restic() {
+  local restic="$RESTIC_BIN"; [ -f "$PROV_CACERT" ] && restic="$RESTIC_BIN --cacert $PROV_CACERT"
+  (
+    set -a; . "$PROV_ENV"; set +a
+    export HOME="$PROV_HOME"
+    # shellcheck disable=SC2086 - $restic is the binary plus an optional --cacert, split on purpose
+    exec runuser -p -u "$PROV_USER" -- $restic "$@"
+  )
+}
+
+verify_json_str() { printf '%s' "$1" | tr -d '\000-\037' | cut -c1-200 | sed 's/\\/\\\\/g; s/"/\\"/g'; }
+
+cmd_verify() {
+  local now t0 err="" errf tmpf snapj snapid stime sts lock="" mode incs excs dirs=() d f live got rc
+  local ok=0 skipped=0 bad="" checked=0 dumps="" e dir newest head kind
+  now=$(date +%s); t0=$now
+  if [ ! -f "$PROV_ENV" ] || [ ! -f "$PROV_SCRIPT" ] || ! id "$PROV_USER" >/dev/null 2>&1; then
+    printf '{"v":1,"ts":%s,"skip":"no backup managed by the panel"}\n' "$now"; return 0
+  fi
+  errf=$(mktemp); tmpf=$(mktemp)
+  case "$(verify_restic --help 2>/dev/null)" in *--retry-lock*) lock="--retry-lock 30m" ;; esac
+  # shellcheck disable=SC2086
+  snapj=$(verify_restic snapshots --json --latest 1 --host "$(hostname)" $lock 2>"$errf") || err="snapshots: $(tail -c 300 "$errf")"
+  # (|| true: under pipefail a grep without a match would stop the whole helper)
+  snapid=$(printf '%s' "$snapj" | grep -o '"id":"[0-9a-f]\{64\}"' | head -1 | cut -d'"' -f4 || true)
+  stime=$(printf '%s' "$snapj" | grep -o '"time":"[^"]*"' | head -1 | cut -d'"' -f4 || true)
+  sts=$(date -d "$stime" +%s 2>/dev/null || echo 0)
+  [ -z "$err" ] && [ -z "$snapid" ] && err="no snapshots of this host in the repository"
+  if [ -z "$err" ]; then
+    mode=$(sed -n 's/^INCLUDE_MODE="\(.*\)"$/\1/p' "$PROV_SCRIPT" | head -1)
+    incs=$(sed -n 's/^INCLUDES_STR="\(.*\)"$/\1/p' "$PROV_SCRIPT" | head -1)
+    excs=$(sed -n 's/^EXCLUDES_STR="\(.*\)"$/\1/p' "$PROV_SCRIPT" | head -1)
+    if [ "$mode" = include ]; then
+      for d in $incs; do d=${d//\"/}; [ -e "$d" ] && dirs+=("$d"); done
+    else
+      for d in /etc /root /home /opt /srv /app /var/www /usr/local/etc; do [ -d "$d" ] && dirs+=("$d"); done
+    fi
+    # unchanged since the snapshot (5 minutes before it started) and not under an exclude
+    while IFS= read -r f; do
+      [ "$checked" -lt "$VERIFY_FILES" ] || break
+      case " $excs " in *" --exclude=$f "*) continue ;; esac
+      for d in $excs; do d=${d#--exclude=}; case "$f" in "$d"/*) continue 2 ;; esac; done
+      live=$(sha256sum < "$f" 2>/dev/null | cut -c1-64) || continue
+      [ -n "$live" ] || continue
+      # shellcheck disable=SC2086
+      rc=0; verify_restic dump $lock "$snapid" "$f" > "$tmpf" 2>"$errf" || rc=$?
+      got=$(sha256sum < "$tmpf" | cut -c1-64)
+      if [ "$rc" -ne 0 ]; then
+        # not in the snapshot: an exclude pattern or a cache directory - not a fault
+        if grep -qiE 'not found|no such|cannot find|path .* not' "$errf"; then skipped=$((skipped + 1)); continue; fi
+        err="dump: $(tail -c 300 "$errf")"; break
+      fi
+      checked=$((checked + 1))
+      if [ "$got" = "$live" ]; then ok=$((ok + 1))
+      else bad="${bad:+$bad,}\"$(verify_json_str "$f")\""; fi
+    done < <(find "${dirs[@]}" -xdev -type f -size +0 -size "-$VERIFY_MAX_SIZE" ! -newermt "@$((sts - 300))" \
+               2>/dev/null | grep -v -E '/(\.cache|cache|tmp|\.git)/' | head -n 20000 | shuf -n 300 2>/dev/null)
+  fi
+  # the newest dump of every engine, read back from the snapshot: the first megabytes must
+  # decompress into a dump of that engine
+  if [ -z "$err" ]; then
+    for f in "$DUMPS_D"/*.sh; do
+      [ -f "$f" ] || continue
+      e=$(basename "$f" .sh); dir="$DUMP_DIR_BASE/$e"
+      newest=$(find "$dir" -maxdepth 1 -type f -name '*.gz' ! -newermt "@$sts" -printf '%T@ %p\n' 2>/dev/null \
+               | sort -rn | head -1 | cut -d' ' -f2- || true)
+      [ -n "$newest" ] || continue
+      # shellcheck disable=SC2086
+      head=$(verify_restic dump $lock "$snapid" "$newest" 2>/dev/null | head -c 8388608 | gzip -dc 2>/dev/null | head -c 4096 | tr -d '\000' || true)
+      kind=bad
+      case "$head" in
+        *"PostgreSQL database"*|*"MySQL dump"*|*"MariaDB dump"*|*"CREATE TABLE"*|*"CREATE DATABASE"*|*"SET "*) kind=ok ;;
+        "") kind=bad ;;
+        *) kind=data ;;  # redis, rabbitmq, k8s: no text signature, but it decompresses
+      esac
+      dumps="${dumps:+$dumps,}{\"engine\":\"$(verify_json_str "$e")\",\"file\":\"$(verify_json_str "$newest")\",\"ok\":$([ "$kind" = bad ] && echo false || echo true)}"
+    done
+  fi
+  rm -f "$errf" "$tmpf"
+  printf '{"v":1,"ts":%s,"secs":%s,"snap":"%s","snap_ts":%s,"files":{"ok":%s,"skipped":%s,"bad":[%s]},"dumps":[%s],"err":"%s"}\n' \
+    "$now" "$(( $(date +%s) - t0 ))" "${snapid:0:8}" "$sts" "$ok" "$skipped" "$bad" "$dumps" "$(verify_json_str "$err")"
+}
+
+# Once a week after a successful backup, in the background: the per-minute refresh must not wait
+verify_maybe() {
+  local age=$VERIFY_EVERY timer svc res last
+  [ -f "$PROV_ENV" ] && [ -f "$PROV_SCRIPT" ] || return 0
+  command -v runuser >/dev/null 2>&1 || return 0
+  [ -f "$VERIFY_JSON" ] && age=$(( $(date +%s) - $(stat -c %Y "$VERIFY_JSON" 2>/dev/null || echo 0) ))
+  [ "$age" -ge "$VERIFY_EVERY" ] || return 0
+  # a check that keeps dying (timeout, no runuser) is retried every 6 hours, not every minute
+  [ -f "$VERIFY_JSON.try" ] && [ $(( $(date +%s) - $(stat -c %Y "$VERIFY_JSON.try" 2>/dev/null || echo 0) )) -lt 21600 ] && return 0
+  timer="$(find_timer)" || true
+  [ -n "$timer" ] || return 0
+  svc="${timer%.timer}.service"
+  [ "$(systemctl show -p ActiveState --value "$svc" 2>/dev/null)" = activating ] && return 0
+  res=$(systemctl show -p Result --value "$svc" 2>/dev/null)
+  last=$(systemctl show -p ExecMainExitTimestampMonotonic --value "$svc" 2>/dev/null)
+  [ "$res" = success ] && [ "${last:-0}" != 0 ] || return 0
+  install -d -m 0755 "$CUSTOM_DIR"
+  (
+    flock -n 9 || exit 0
+    touch "$VERIFY_JSON.try"
+    if nice -n 10 timeout 1800 "$0" verify > "$VERIFY_JSON.tmp" 2>/dev/null && [ -s "$VERIFY_JSON.tmp" ]; then
+      mv -f "$VERIFY_JSON.tmp" "$VERIFY_JSON"; chmod 0644 "$VERIFY_JSON"
+      # could not reach the repository (a lock, the network): try again in 6 hours, not in a week
+      grep -q '"err":"[^"]' "$VERIFY_JSON" && touch -d "@$(( $(date +%s) - VERIFY_EVERY + 21600 ))" "$VERIFY_JSON"
+    else
+      rm -f "$VERIFY_JSON.tmp"
+    fi
+  ) 9>/run/kervax-backup-verify.lock > /dev/null 2>&1 &
+}
+
 case "${1:-}" in
   get-config)    cmd_get_config ;;
   # the scan is throttled inside (every CUSTOM_EVERY seconds): the config refresh stays per-minute
   refresh)       refresh_config || true; custom_scan_maybe; kube_access_maybe || true; dumps_trigger_maybe || true
-                 dumps_rsyncable_maybe || true; vanished_ok_maybe || true; retry_lock_maybe || true; backup_runs_maybe || true ;;
+                 dumps_rsyncable_maybe || true; vanished_ok_maybe || true; retry_lock_maybe || true; backup_runs_maybe || true
+                 verify_maybe || true ;;
   custom-scan)   cmd_custom_scan ;;
   backup-runs)   cmd_backup_runs ;;
+  verify)        cmd_verify ;;
   set-paths)     shift; cmd_set_paths "$@" ;;
   set-schedule)  shift; cmd_set_schedule "$@" ;;
   run-now)       cmd_run_now ;;

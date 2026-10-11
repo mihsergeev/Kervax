@@ -103,6 +103,7 @@ const RULE_KIND_LABELS: Record<string, string> = {
   kube_cron: 'Kubernetes: CronJob',
   kube_node: 'Kubernetes: ноды',
   kube_job: 'Kubernetes: упавшие Job',
+  backup_restore: 'Бэкап: проверка восстановления',
   flux_down: 'Flux: доставка встала',
   flux_stale: 'Flux: репозиторий чартов недоступен',
 }
