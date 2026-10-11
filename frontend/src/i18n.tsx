@@ -1169,6 +1169,15 @@ const EN: Record<string, string> = {
   'автообновления: {s}': 'auto-updates: {s}',
   'apt update: {d}': 'apt update: {d}',
   'нужна перезагрузка с {d}': 'reboot required since {d}',
+  // изменения на сервере
+  'Изменения на сервере': 'Server changes',
+  'SSH-ключей: {k}, пользователей с shell: {u}. Снимок раз в 10 минут, без содержимого ключей и кронов.':
+    'SSH keys: {k}, users with a shell: {u}. A snapshot every 10 minutes, without key or crontab contents.',
+  'Изменился доступ: проверьте, что это свои.': 'Access changed: check that it was your people.',
+  'это мы, все в порядке': 'that was us, all good',
+  'Изменений пока не было.': 'No changes yet.',
+  'все изменения: {n}': 'all changes: {n}',
+  'Сервер: изменился доступ': 'Server: access changed',
   'Kubernetes: CronJob': 'Kubernetes: CronJob',
   'Время сервера - только предупреждения': 'Server time - warnings only',
   'Время сервера - предупр. и проблемы': 'Server time - warnings and problems',

@@ -1002,6 +1002,9 @@ input:focus {
 .exp-more { align-self: flex-start; }
 .pressure { margin-bottom: 0.8rem; }
 .nethealth { margin-top: 0.8rem; }
+.changes { margin: 0.8rem 0; }
+.changes .exp-table td:first-child { width: 10.5rem; }
+.changes .exp-table td:last-child { text-align: left; white-space: normal; }
 .osupd {
   margin: 0.6rem 0;
   padding: 0.6rem 0.8rem;

@@ -593,8 +593,10 @@ class Server(Base):
     # или старая группа снапшотов, которые хранятся как есть (сервера больше нет, разовый
     # бэкап, проект заморожен). Не устаревают и не проблема, но проверка целостности идет.
     backup_repo_archive: Mapped[dict | None] = mapped_column(JSON, nullable=True)
-    # последняя внешняя проверка портов: что открыто в интернет (app/exposure.py)
+    # последняя внешняя проверка портов: что открыто в интернет (app/open_ports.py)
     exposure: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    # изменения на сервере (app/changes.py): последний снимок helper'а и лента изменений
+    changes: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     # по умолчанию у каждого сервера ДОЛЖЕН быть бэкап; если не настроен — алерт.
     # Флаг «бэкап не требуется» (галочка в панели) снимает этот алерт для сервера.
     backup_not_required: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")

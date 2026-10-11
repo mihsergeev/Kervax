@@ -14,6 +14,7 @@ from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, Query, Re
 from fastapi.responses import FileResponse, PlainTextResponse
 from sqlalchemy import delete as sa_delete, func, select
 
+from app import changes as srv_changes
 from app import audit, backup_growth, custom_backups, docker_exposure, geoip, kube_coverage, manual_probe, open_ports, os_support
 from app.collector import (
     _backup_problem_repos, alert_since, backup_cadence, backup_rotation_items, backup_unmonitored,
@@ -203,6 +204,7 @@ def _out(
     o.docker_exposed = docker_exposure.exposed(server.last_report or {})
     o.exposure = open_ports.view(server)
     o.os_advice = os_support.advice(server.last_report or {}, now)
+    o.changes = srv_changes.view(server)
     o.proxy_outdated = docker_exposure.outdated(server.last_report or {}, now.timestamp())
     o.disk_analyze = disk_analyze_ok(server.last_report or {})
     o.fresh = _fresh_node(server, now)
@@ -449,6 +451,7 @@ _SETUP_LABEL = {
     "dbstat-setup": "Инвентарь СУБД",
     "agent-watchdog": "Вотчдог агента",
     "dockerproxy-setup": "Доступ к Docker (прокси)",
+    "changes-setup": "Изменения на сервере",
 }
 
 
@@ -1113,6 +1116,23 @@ async def exposure_scan(server_id: int, user: CurrentUser, session: SessionDep) 
     await session.commit()
     await session.refresh(s)
     await audit.record(session, user.username, "exposure_scan", s.name, via)
+    return _out(s, datetime.now(timezone.utc))
+
+
+@router.post("/{server_id}/changes/ack", response_model=ServerOut)
+async def changes_ack(server_id: int, user: CurrentUser, session: SessionDep) -> ServerOut:
+    """Изменения доступа на сервере сделали свои: строка "изменился доступ" уходит с главной.
+    Лента остается как есть, новое изменение снова покажется и придет алертом."""
+    s = await _get_or_404(server_id, session, user)
+    if user.role == "viewer":
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Нужны права оператора")
+    cur = dict(s.changes or {}) if isinstance(s.changes, dict) else {}
+    cur["ack_ts"] = datetime.now(timezone.utc).isoformat()
+    cur["ack_by"] = user.username
+    s.changes = cur
+    await session.commit()
+    await session.refresh(s)
+    await audit.record(session, user.username, "changes_ack", s.name, "")
     return _out(s, datetime.now(timezone.utc))
 
 
