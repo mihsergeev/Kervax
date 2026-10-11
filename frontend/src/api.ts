@@ -1063,6 +1063,21 @@ export type ServerReport = {
   // TCP за секунду (агент 2.26): отправлено сегментов, из них повторно, переполнения очереди
   // accept и выброшенные из нее, новые соединения, выброшенные conntrack, входящие с ошибкой
   tcp?: { out: number; retrans: number; in_errs: number; listen_ovf: number; listen_drop: number; ct_drop: number }
+  // обновления ОС (агент 2.26, раз в час): updates/security -1 - не apt
+  os_upd?: {
+    reboot?: boolean
+    reboot_ts?: number
+    reboot_pkgs?: string[]
+    kernel?: string
+    kernel_new?: string
+    updates: number
+    security: number
+    upd_ts?: number
+    apt_ts?: number
+    unatt?: 'on' | 'off' | 'none'
+    unatt_ts?: number
+    ts: number
+  }
   dns?: DnsInfo | null // DNS ноды: резолверы и время их ответа (агент 2.25)
 }
 // Итоги прогонов бэкапа (helper backup-setup 0.32): сколько restic добавил в репозиторий.
@@ -1369,6 +1384,8 @@ export type Server = {
   docker_exposed?: { name: string; image: string; kind: string }[]
   // что открыто в интернет: внешняя проверка портов раз в 6 часов
   exposure?: Exposure | null
+  // что сделать с ОС: конец поддержки, перезагрузка, обновления безопасности (level 2 - уже дыра)
+  os_advice?: { kind: string; level: number; text: string }[]
   // внешние прокси со сборкой образа старше года (built - unix-секунды)
   proxy_outdated?: { name: string; image: string; kind: string; version: string; built: number; age_days: number }[]
   // нода умеет разобрать раздел по запросу (агент 2.24 + diskusage-setup 0.6)

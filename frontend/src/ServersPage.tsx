@@ -2065,6 +2065,39 @@ const PSI_ROWS: { k: string; label: string; some: number; full: number }[] = [
   { k: 'io', label: 'Диск', some: 80, full: 50 },
 ]
 
+// Обновления ОС (агент 2.26): что стоит, что ждет установки, когда перезагружаться. Сверху -
+// что сделать (os_advice считает бэкенд: конец поддержки, перезагрузка, безопасность, apt).
+function OsUpdates({ server: s }: { server: Server }) {
+  const { t } = useI18n()
+  const u = s.last_report?.os_upd
+  const adv = s.os_advice ?? []
+  if (!u && !adv.length) return null
+  const day = (ts?: number) => (ts ? new Date(ts * 1000).toLocaleDateString() : '')
+  const unatt = u?.unatt === 'on' ? t('включены') : u?.unatt === 'off' ? t('выключены') : u?.unatt === 'none' ? t('не установлены') : ''
+  return (
+    <div className="detail-inc osupd" id="mcard-osupd">
+      <div className="chart-cap">{t('Обновления ОС')}</div>
+      {adv.map((a) => (
+        <div key={a.kind} className={`small ${a.level >= 2 ? 't-down' : 't-degraded'}`}>{a.text}</div>
+      ))}
+      {u && (
+        <div className="muted small">
+          {[
+            s.last_report?.os,
+            u.kernel && t('ядро {k}', { k: u.kernel }),
+            u.updates >= 0 && t('обновлений {n}, из них безопасности {m}', { n: u.updates, m: u.security }),
+            unatt && t('автообновления: {s}', { s: unatt }) + (u.unatt_ts ? ` (${day(u.unatt_ts)})` : ''),
+            u.apt_ts ? t('apt update: {d}', { d: day(u.apt_ts) }) : '',
+            u.reboot ? t('нужна перезагрузка с {d}', { d: day(u.reboot_ts) }) : '',
+          ]
+            .filter(Boolean)
+            .join(' · ')}
+        </div>
+      )}
+    </div>
+  )
+}
+
 function PressureCard({ server: s }: { server: Server }) {
   const { t } = useI18n()
   const r = s.last_report
@@ -4543,6 +4576,7 @@ function ServerDetail({
             t={t}
           />
         )}
+        {!editing && s.online && <OsUpdates server={s} />}
         {/* Карточка молчащей ноды показывала свежие на вид проценты и «обновлено N
             назад» мелким шрифтом среди прочей меты — выглядело как рабочий сервер.
             Говорим прямо, и сразу под именем: цифры ниже historical, а не текущие. */}
