@@ -1293,6 +1293,16 @@ class AgentReportIn(BaseModel):
     clock_unix: int = 0  # локальные часы ноды на момент отправки (для расчёта сдвига панелью)
     # DNS ноды (агент 2.25): {mode, servers:[{addr,ms,err}], miss_ms, miss_err, miss_ts, ts}
     dns: dict | None = None
+    # агент 2.26: слушающие сокеты [{p, ip, port, u}], публичные адреса интерфейсов, давление
+    # (/proc/pressure), процессы в D-state, дескрипторы, TCP (ретрансмиты, очередь accept,
+    # дропы conntrack) и обновления ОС (перезагрузка, обновления, автообновления)
+    listen: list[dict] = []
+    ips: list[str] = []
+    psi: dict | None = None
+    dstate: dict | None = None
+    fds: dict | None = None
+    tcp: dict | None = None
+    os_upd: dict | None = None
     # блоки root-хелперов как есть: {"custom-backups": {...}} (агент 2.8+, report.d)
     extras: dict | None = None
 
