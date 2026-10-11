@@ -987,6 +987,17 @@ export type Exposure = {
   muted?: string[] // порты, отмеченные как открытые намеренно
 }
 
+// Одно изменение на сервере: kind key/user/sudo/cron/unit, act add/del/mod; alert - изменение
+// доступа, о нем приходит алерт
+export type ServerChange = { ts: string; kind: string; act: string; text: string; alert: boolean }
+export type ServerChanges = {
+  log: ServerChange[]
+  ack_ts?: string | null
+  snap_ts?: number
+  keys: number
+  users: number
+}
+
 export type ServerReport = {
   hostname?: string
   os?: string
@@ -1386,6 +1397,8 @@ export type Server = {
   exposure?: Exposure | null
   // что сделать с ОС: конец поддержки, перезагрузка, обновления безопасности (level 2 - уже дыра)
   os_advice?: { kind: string; level: number; text: string }[]
+  // изменения на сервере (helper changes-setup): лента между снимками, отметка "это мы"
+  changes?: ServerChanges | null
   // внешние прокси со сборкой образа старше года (built - unix-секунды)
   proxy_outdated?: { name: string; image: string; kind: string; version: string; built: number; age_days: number }[]
   // нода умеет разобрать раздел по запросу (агент 2.24 + diskusage-setup 0.6)
@@ -1676,6 +1689,10 @@ export function updateServer(
 }
 export function deleteServer(id: number): Promise<void> {
   return api<void>(`/api/servers/${id}`, { method: 'DELETE' })
+}
+// Изменения доступа сделали свои: строка уходит с главной
+export function ackChanges(id: number): Promise<Server> {
+  return api<Server>(`/api/servers/${id}/changes/ack`, { method: 'POST' })
 }
 // Проверить снаружи, что открыто в интернет, не дожидаясь планового прогона
 export function scanExposure(id: number): Promise<Server> {

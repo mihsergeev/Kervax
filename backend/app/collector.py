@@ -19,6 +19,7 @@ from sqlalchemy import and_, delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app import alerts, audit, backup, backup_growth, checks as checks_exec, custom_backups, docker_exposure, flaky, heartbeat, settings_store
+from app import changes as srv_changes
 from app import open_ports
 from app import disk_forecast as dfc
 from app.setup_scripts import current_setup_versions, gaps
@@ -205,7 +206,7 @@ _SRV_ICON = {
     # репозиторий чартов недоступен, а развернутое работает: предупреждение, а не авария
     "flux_stale": "⚠️☸️", "kube_cron": "⏰☸️",
     "exposed": "🔓", "port_new": "🚪", "pressure": "🫁", "net_health": "📶",
-    "kube_node": "🖥☸️", "kube_job": "💥☸️",
+    "kube_node": "🖥☸️", "kube_job": "💥☸️", "access_change": "🔑",
 }
 
 # Куда ведёт ссылка алерта (deep-link ?server=id&sec=…). Целимся в КОНКРЕТНУЮ метрику,
@@ -223,6 +224,7 @@ _SRV_SECTION = {
     "unit_loop": "unitloop",
     "cpu_spin": "cpueat",
     "exposed": "exposure", "port_new": "exposure", "pressure": "pressure", "net_health": "nethealth",
+    "access_change": "changes",
 }
 
 
@@ -2991,6 +2993,11 @@ def server_problems(s: Server, now: datetime, pod_names: dict[str, str] | None =
     if nets and _held_long(s, state, "net_health", now):
         add("net_health", nets[0][0], "; ".join(t for _l, _r, t in nets[:3]),
             "neterr" if nets[0][1] == "iface" else "nethealth", "net_health", state.get("net_health_since"))
+    # Изменился доступ: держится сутки, пока не отметили "это мы"
+    acc = srv_changes.unacked_alerts(s, now)
+    if acc:
+        add("access_change", 2, "изменился доступ: " + srv_changes.events_text(acc, 3), "changes", "access_change",
+            acc[-1].get("ts"))
     # Что открыто в интернет: внешняя проверка портов (open_ports, раз в 6 часов)
     ex = open_ports.exposed(s, now)
     if ex:
@@ -4685,6 +4692,20 @@ async def evaluate_servers(
                 fire_apply.append((s.id, "port_new_at", pstamp))
             else:
                 apply(s.id, "port_new_at", pstamp)
+        # Изменился доступ (helper changes-setup) - событие на каждый снимок с изменениями доступа.
+        # Без прежней отметки говорим только о свежем: иначе после сброса состояния пришла бы
+        # вся лента за три месяца
+        astamp = (s.changes or {}).get("alert_ts") if isinstance(s.changes, dict) else None
+        if astamp and st.get("access_change_at") != astamp:
+            after = st.get("access_change_at") or (now - timedelta(hours=1)).isoformat()
+            fresh_ev = srv_changes.alert_events(s, after)
+            ac = rules.get("access_change")
+            if fresh_ev and "access_change" not in mutes and ac and ac["enabled"] and _rule_scope_ok(ac, s):
+                fires.append(srv_fire(s, "access_change", ac, {
+                    "detail": "изменился доступ: " + srv_changes.events_text(fresh_ev, 6)}))
+                fire_apply.append((s.id, "access_change_at", astamp))
+            else:
+                apply(s.id, "access_change_at", astamp)
         # Упавшие разовые Job кластера - событие на каждый новый провал. Первое знакомство
         # задает точку отсчета: упавшее за прошлую неделю не шлем пачкой после обновления
         # (агент без failed_jobs в отчете: пустой список он не шлет, старше 2.26 не шлет вовсе)
@@ -5481,6 +5502,9 @@ async def collector_loop(
                 session_factory, settings, datetime.now(timezone.utc)))
             # прогноз - до алертов: они читают его из servers.disk_forecast
             await stage("прогноз дисков", dfc.update_disk_forecasts(
+                session_factory, datetime.now(timezone.utc)))
+            # лента изменений - до алертов: они берут из нее новые изменения доступа
+            await stage("изменения на сервере", srv_changes.track(
                 session_factory, datetime.now(timezone.utc)))
             await stage("серверные алерты", evaluate_servers(
                 session_factory, settings, datetime.now(timezone.utc)))

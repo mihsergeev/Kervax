@@ -76,6 +76,9 @@ SERVER_ALERT_KINDS: dict[str, tuple[str, str]] = {
     "kube_node": ("Kubernetes: нода не готова или под давлением", "{detail}"),
     # Разовый Job (миграция, задача не по расписанию) упал: BackoffLimitExceeded и т.п.
     "kube_job": ("Kubernetes: упал Job", "{detail}"),
+    # Изменился доступ к серверу (helper changes-setup): новый SSH-ключ, новый пользователь с
+    # shell или uid 0, кто-то добавлен в sudo, изменились sudoers
+    "access_change": ("Сервер: изменился доступ", "{detail}"),
     "reboot": ("Перезагрузка", "перезагружен (аптайм сброшен)"),
     "oom": ("OOM-killer", "OOM-kill: ядро убило {value} процесс(ов){victim} из-за нехватки памяти"),
     "docker_down": ("Docker: контейнер упал", "контейнер {container} не работает: {why}"),

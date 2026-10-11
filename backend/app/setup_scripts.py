@@ -104,6 +104,7 @@ _HELPER_LABEL = {
     "diskhealth-setup": "здоровье дисков",
     "units-setup": "упавшие юниты systemd",
     "dockerproxy-setup": "защита доступа к Docker",
+    "changes-setup": "изменения на сервере",
 }
 
 

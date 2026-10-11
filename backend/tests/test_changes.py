@@ -1,0 +1,133 @@
+"""Изменения на сервере: снимки helper'а changes-setup, лента, алерт на изменения доступа и
+отметка "это мы"."""
+from datetime import datetime, timedelta, timezone
+
+from sqlalchemy import select
+
+from app import changes, collector
+from app.models import Server
+
+NOW = datetime(2026, 10, 11, 12, 0, tzinfo=timezone.utc)
+T = int(NOW.timestamp())
+KEY_A = {"u": "root", "t": "ED25519", "fp": "SHA256:aaaa", "c": "admin@laptop", "f": "/root/.ssh/authorized_keys"}
+KEY_B = {"u": "deploy", "t": "RSA", "fp": "SHA256:bbbb", "c": "", "f": "/home/deploy/.ssh/authorized_keys"}
+
+
+def _snap(ts, **kw):
+    base = {"v": 1, "ts": ts, "keys": [KEY_A, KEY_A], "users": [{"n": "root", "uid": 0, "sh": "/bin/bash"}],
+            "sudo": {"groups": {"sudo": ["ops"]}, "files": {"/etc/sudoers": "1111"}},
+            "cron": {"/etc/crontab": "c1"}, "units": ["ssh.service"]}
+    base.update(kw)
+    return base
+
+
+def test_diff_every_kind():
+    old = _snap(T)
+    new = _snap(T + 600, keys=[KEY_B],
+                users=[{"n": "root", "uid": 0, "sh": "/bin/bash"}, {"n": "deploy", "uid": 1001, "sh": "/bin/bash"}],
+                sudo={"groups": {"sudo": ["deploy"]}, "files": {"/etc/sudoers": "2222", "/etc/sudoers.d/deploy": "3333"}},
+                cron={"/etc/crontab": "c2", "/etc/cron.d/miner": "c3"}, units=["ssh.service", "x.timer"])
+    ev = changes.diff(old, new)
+    assert [(e["kind"], e["act"], e["alert"], e["text"]) for e in ev] == [
+        ("key", "add", True, "добавлен SSH-ключ пользователю deploy: RSA SHA256:bbbb"),
+        ("key", "del", False, "удален SSH-ключ пользователя root: ED25519 SHA256:aaaa (admin@laptop)"),
+        ("user", "add", True, "новый пользователь deploy (uid 1001, /bin/bash)"),
+        ("sudo", "add", True, "deploy добавлен в группу sudo"),
+        ("sudo", "del", False, "ops убран из группы sudo"),
+        ("sudo", "mod", True, "изменен /etc/sudoers"),
+        ("sudo", "add", True, "добавлен /etc/sudoers.d/deploy"),
+        ("cron", "mod", False, "изменен крон /etc/crontab"),
+        ("cron", "add", False, "добавлен крон /etc/cron.d/miner"),
+        ("unit", "add", False, "включен x.timer"),
+    ]
+    # uid 0 у существующего пользователя - тоже доступ
+    ev = changes.diff(_snap(T, users=[{"n": "svc", "uid": 998, "sh": "/bin/sh"}]),
+                      _snap(T + 1, users=[{"n": "svc", "uid": 0, "sh": "/bin/sh"}]))
+    assert [(e["text"], e["alert"]) for e in ev] == [("пользователь svc получил uid 0", True)]
+
+
+def test_baseline_feed_and_ack():
+    st = changes.apply_snapshot(None, _snap(T), NOW)
+    assert st["log"] == [] and "alert_ts" not in st  # первый снимок - точка отсчета
+    assert changes.apply_snapshot(st, _snap(T), NOW) == st  # тот же снимок - ничего
+    st = changes.apply_snapshot(st, _snap(T + 600, cron={"/etc/crontab": "c9"}), NOW)
+    assert [e["text"] for e in st["log"]] == ["изменен крон /etc/crontab"] and "alert_ts" not in st
+    st = changes.apply_snapshot(st, _snap(T + 1200, cron={"/etc/crontab": "c9"}, keys=[KEY_A, KEY_B]), NOW)
+    stamp = datetime.fromtimestamp(T + 1200, timezone.utc).isoformat()
+    assert st["alert_ts"] == stamp and st["log"][0]["ts"] == stamp
+    srv = Server(name="n", token_hash="x", changes=st)
+    assert [e["text"] for e in changes.unacked_alerts(srv, NOW + timedelta(minutes=30))] == [
+        "добавлен SSH-ключ пользователю deploy: RSA SHA256:bbbb"]
+    srv.changes = dict(st, ack_ts=(NOW + timedelta(minutes=40)).isoformat())
+    assert changes.unacked_alerts(srv, NOW + timedelta(minutes=41)) == []
+    # старое уходит из ленты через 90 дней
+    later = changes.apply_snapshot(st, _snap(T + 9_000_000, keys=[KEY_A, KEY_B], cron={"/etc/crontab": "c9"}),
+                                   NOW + timedelta(days=100))
+    assert later["log"] == []
+    assert changes.view(srv)["keys"] == 2
+
+
+def _srv_row(st):
+    return Server(id=1, name="n1", token_hash="x", enabled=True, backup_not_required=True, last_seen=NOW,
+                  offline_after_seconds=120, alert_sustain_seconds=900, last_report={},
+                  alert_state={}, alert_mutes=[], cpu_alert_percent=0, mem_alert_percent=0,
+                  disk_warn_percent=0, disk_alert_percent=0, disk_crit_percent=0, temp_alert_c=0,
+                  conntrack_alert_percent=0, disk_temp_alert_c=0, db_conn_alert_percent=0,
+                  web_5xx_alert_percent=0, kube_expiry_warn_days=[], changes=st)
+
+
+def test_home_row_until_ack():
+    st = changes.apply_snapshot(changes.apply_snapshot(None, _snap(T - 600), NOW),
+                                _snap(T - 60, keys=[KEY_A, KEY_B]), NOW)
+    s = _srv_row(st)
+    rows = [p for p in collector.server_problems(s, NOW) if p["kind"] == "access_change"]
+    assert [(p["level"], p["sec"], p["text"]) for p in rows] == [
+        (2, "changes", "изменился доступ: добавлен SSH-ключ пользователю deploy: RSA SHA256:bbbb")]
+    s.changes = dict(st, ack_ts=NOW.isoformat())
+    assert not [p for p in collector.server_problems(s, NOW) if p["kind"] == "access_change"]
+
+
+async def test_access_alert_once_and_ack_api(client, auth_headers, tmp_path, monkeypatch):
+    from app.config import Settings
+    from app.db import Base, create_engine_and_factory
+
+    engine, factory = create_engine_and_factory(f"sqlite+aiosqlite:///{(tmp_path / 'c.db').as_posix()}")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    now = datetime.now(timezone.utc)
+    t0 = int(now.timestamp())
+    async with factory() as s:
+        s.add(Server(name="node", token_hash="x", enabled=True, backup_not_required=True, last_seen=now,
+                     cpu_alert_percent=0, mem_alert_percent=0,
+                     last_report={"uptime_seconds": 100000, "extras": {"changes": _snap(t0 - 600)}}))
+        await s.commit()
+    sent: list[str] = []
+
+    async def fake_send(cfg, text, parse_mode=None):
+        sent.append(text)
+        return []
+
+    monkeypatch.setattr("app.alerts.send_alert", fake_send)
+    monkeypatch.setattr(changes, "_last_track", None)
+    cfg = Settings(alert_webhook="http://hook")
+    await changes.track(factory, now)
+    await collector.evaluate_servers(factory, cfg, now)
+    assert not [m for m in sent if m.startswith("🔑")]
+    async with factory() as s:
+        srv = (await s.execute(select(Server))).scalars().one()
+        srv.last_report = {"uptime_seconds": 100000, "extras": {"changes": _snap(t0, keys=[KEY_A, KEY_B])}}
+        await s.commit()
+    monkeypatch.setattr(changes, "_last_track", None)
+    await changes.track(factory, now + timedelta(minutes=2))
+    await collector.evaluate_servers(factory, cfg, now + timedelta(minutes=2))
+    keys = [m for m in sent if m.startswith("🔑")]
+    assert len(keys) == 1 and "добавлен SSH-ключ пользователю deploy" in keys[0], sent
+    await collector.evaluate_servers(factory, cfg, now + timedelta(minutes=3))
+    assert len([m for m in sent if m.startswith("🔑")]) == 1
+    await engine.dispose()
+
+    # отметка "это мы" через API
+    r = await client.post("/api/servers", json={"name": "ack-node"}, headers=auth_headers)
+    sid = r.json()["server"]["id"]
+    r = await client.post(f"/api/servers/{sid}/changes/ack", headers=auth_headers)
+    assert r.status_code == 200 and r.json()["changes"]["ack_ts"]

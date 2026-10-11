@@ -21,6 +21,7 @@ import {
   snoozeServer,
   snoozeServerAlert,
   scanExposure,
+  ackChanges,
   updateServer,
   type ClockInfo,
   type DnsInfo,
@@ -768,7 +769,7 @@ const SEC_OF_CARD: Record<string, string> = {
   cpu: 'cpu', throttle: 'cpu', temp: 'cpu', cpueat: 'cpu',
   mem: 'mem', oom: 'mem',
   conntrack: 'conn', exposure: 'conn', nethealth: 'net', neterr: 'net', diskfill: 'disk', disktemp: 'disk', disk: 'disk', diskhealth: 'disk',
-  units: 'proc', unitloop: 'proc', pressure: 'proc',
+  units: 'proc', unitloop: 'proc', pressure: 'proc', changes: 'proc',
   web: 'web', web5xx: 'web',
 }
 
@@ -2093,6 +2094,72 @@ function OsUpdates({ server: s }: { server: Server }) {
             .filter(Boolean)
             .join(' · ')}
         </div>
+      )}
+    </div>
+  )
+}
+
+// Изменения на сервере (helper changes-setup): кто может войти и что запускается по расписанию.
+// Изменения доступа подсвечены, пока их не отметили как свои.
+const CHANGE_ICON: Record<string, string> = { key: '🔑', user: '👤', sudo: '🛡', cron: '⏰', unit: '⚙️' }
+
+function ChangesFeed({ server: s, onChanged }: { server: Server; onChanged: () => void }) {
+  const { t } = useI18n()
+  const { isViewer } = useAuth()
+  const [busy, setBusy] = useState(false)
+  const [all, setAll] = useState(false)
+  const ch = s.changes
+  if (!ch) return null
+  const ack = ch.ack_ts ?? ''
+  const fresh = ch.log.filter((e) => e.alert && e.ts > ack && Date.now() - Date.parse(e.ts) < 24 * 3600_000)
+  const shown = all ? ch.log : ch.log.slice(0, 12)
+  const doAck = async () => {
+    setBusy(true)
+    try {
+      await ackChanges(s.id)
+      onChanged()
+    } catch {
+      /* кнопка остается, можно повторить */
+    } finally {
+      setBusy(false)
+    }
+  }
+  return (
+    <div className="detail-inc changes" id="mcard-changes">
+      <div className="chart-cap">{t('Изменения на сервере')}</div>
+      <div className="muted small">
+        {t('SSH-ключей: {k}, пользователей с shell: {u}. Снимок раз в 10 минут, без содержимого ключей и кронов.', {
+          k: ch.keys,
+          u: ch.users,
+        })}
+      </div>
+      {fresh.length > 0 && !isViewer && (
+        <div className="unit-actions small">
+          <span className="t-down">{t('Изменился доступ: проверьте, что это свои.')}</span>
+          <button className="ghost small row-act" disabled={busy} onClick={doAck}>
+            {t('это мы, все в порядке')}
+          </button>
+        </div>
+      )}
+      {ch.log.length === 0 && <div className="muted small">{t('Изменений пока не было.')}</div>}
+      {shown.length > 0 && (
+        <table className="exp-table small">
+          <tbody>
+            {shown.map((e, i) => (
+              <tr key={i} className={e.alert && e.ts > ack ? 'exp-bad' : ''}>
+                <td className="muted">{new Date(e.ts).toLocaleString()}</td>
+                <td className={e.alert && e.ts > ack ? 't-down' : ''}>
+                  {CHANGE_ICON[e.kind] ?? ''} {e.text}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+      {ch.log.length > 12 && (
+        <button className="ghost small row-act exp-more" onClick={() => setAll(!all)}>
+          {all ? t('свернуть') : t('все изменения: {n}', { n: ch.log.length })}
+        </button>
       )}
     </div>
   )
@@ -5015,6 +5082,7 @@ function ServerDetail({
           <PressureCard server={s} />
           <LoopingUnits server={s} onChanged={onChanged} />
           <FailedUnits server={s} onChanged={onChanged} />
+          <ChangesFeed server={s} onChanged={onChanged} />
           <div className="chart-grid">
             <ProcCard title={t('Топ по CPU')} procs={r.top_cpu} kind="cpu" total={r.mem_total ?? 0} t={t} />
             <ProcCard title={t('Топ по памяти')} procs={r.top_mem} kind="mem" total={r.mem_total ?? 0} t={t} />
