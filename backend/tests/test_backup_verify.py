@@ -63,6 +63,6 @@ def test_alert_and_home_row():
 def test_helper_has_verify():
     """helper отдает проверку командой verify и запускает её из ежеминутного refresh"""
     src = (Path(__file__).resolve().parents[2] / "agent" / "backup-setup.sh").read_text(encoding="utf-8")
-    assert "KERVAX_SETUP_VERSION=0.34" in src
+    assert "KERVAX_SETUP_VERSION=0.35" in src and "verify_bin()" in src
     assert "  verify)        cmd_verify ;;" in src and "verify_maybe || true" in src
     assert "\r" not in src

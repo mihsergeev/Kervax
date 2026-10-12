@@ -84,7 +84,7 @@ AGENT_USER=kervax
 #       engine is read from the snapshot (its first megabytes decompress into a real dump).
 #       Result in report.d/backup-verify.json. A backup that runs every night but cannot be
 #       restored is the worst kind of backup, and nothing else shows it
-KERVAX_SETUP_VERSION=0.34  # MAJOR.MINOR; compared component-wise (0.13 > 0.2!)
+KERVAX_SETUP_VERSION=0.35  # MAJOR.MINOR; compared component-wise (0.13 > 0.2!)
 KERVAX_SETUP_ALWAYS=1  # safe on any node: installs only its own helper and spool and does not
                        # touch the backup configuration until the panel sends a command
 install -d -m 0755 "$HELPER_DIR" "$STATE_DIR" /var/lib/kervax/versions
@@ -2184,8 +2184,20 @@ VERIFY_MAX_SIZE=5M           # small files only: the check must not pull gigabyt
 # restic as the backup user, with its cache (root would build a cache of its own, and on a big
 # repository that alone is hundreds of megabytes). The env file is root-only, as for the backup
 # service (systemd reads it as root): root reads it and hands the variables over the environment.
+# The binary is the one the backup runs with: the panel's own copy or, on nodes backed up before
+# the panel took over, the system restic (PATH, then the usual places: a timer's PATH can be short).
+verify_bin() {
+  local b
+  for b in "$RESTIC_BIN" "$(command -v restic 2>/dev/null || true)" /usr/local/bin/restic /usr/bin/restic; do
+    [ -n "$b" ] && [ -x "$b" ] && { echo "$b"; return 0; }
+  done
+  return 1
+}
+
 verify_restic() {
-  local restic="$RESTIC_BIN"; [ -f "$PROV_CACERT" ] && restic="$RESTIC_BIN --cacert $PROV_CACERT"
+  local bin restic
+  bin="$(verify_bin)" || { echo "restic not found: neither $RESTIC_BIN nor in PATH" >&2; return 127; }
+  restic="$bin"; [ -f "$PROV_CACERT" ] && restic="$bin --cacert $PROV_CACERT"
   (
     set -a; . "$PROV_ENV"; set +a
     export HOME="$PROV_HOME"
