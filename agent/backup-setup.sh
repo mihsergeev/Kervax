@@ -84,7 +84,7 @@ AGENT_USER=kervax
 #       engine is read from the snapshot (its first megabytes decompress into a real dump).
 #       Result in report.d/backup-verify.json. A backup that runs every night but cannot be
 #       restored is the worst kind of backup, and nothing else shows it
-KERVAX_SETUP_VERSION=0.35  # MAJOR.MINOR; compared component-wise (0.13 > 0.2!)
+KERVAX_SETUP_VERSION=0.36  # MAJOR.MINOR; compared component-wise (0.13 > 0.2!)
 KERVAX_SETUP_ALWAYS=1  # safe on any node: installs only its own helper and spool and does not
                        # touch the backup configuration until the panel sends a command
 install -d -m 0755 "$HELPER_DIR" "$STATE_DIR" /var/lib/kervax/versions
@@ -117,6 +117,9 @@ cat > "$HELPER.new" <<'HELPER_EOF'
 # Kervax backup helper (root) - narrow operations on the restic backup. get-config (read),
 # set-paths/set-schedule/run-now (write), process-spool (execute requests from the spool).
 set -euo pipefail
+# cron runs this with PATH=/usr/bin:/bin: runuser (in /usr/sbin) was not found and the weekly
+# restore check never started from cron, only while the installer ran
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${PATH:+:$PATH}"
 
 HELPER_VER=1  # backup-helper version; the panel flags nodes with an old helper (reinstall it)
 REQ_DIR=/var/lib/kervax/backup-req
@@ -2198,15 +2201,60 @@ verify_bin() {
   return 1
 }
 
+# What the backup really runs with, from its systemd unit: the env file (EnvironmentFile=) and the
+# user (User=). On nodes backed up before the panel took over, the panel's file names mean
+# something else: /etc/systemd-resta.conf there is a notification script with curl, and reading
+# it with "." sent a false "backup failed" message on every check. Sets VENV VUSER VHOME VSCRIPT.
+verify_ctx() {
+  local timer svc f u
+  VENV=""; VUSER=""; VHOME=""; VSCRIPT=""
+  timer="$(find_timer)" || true
+  svc=""; [ -n "$timer" ] && svc="${timer%.timer}.service"
+  for f in $( [ -n "$svc" ] && systemctl show -p EnvironmentFiles --value "$svc" 2>/dev/null \
+                | sed 's/ *([a-z_]*=[a-z]*)//g' ) "$PROV_ENV"; do
+    [ -f "$f" ] && grep -qE '^(export )?RESTIC_REPOSITORY(_FILE)?=' "$f" && { VENV=$f; break; }
+  done
+  [ -n "$VENV" ] || return 1
+  u=""; [ -n "$svc" ] && u=$(systemctl show -p User --value "$svc" 2>/dev/null)
+  u=${u:-root}
+  id "$u" >/dev/null 2>&1 || return 1
+  VUSER=$u
+  if [ "$u" = "$PROV_USER" ]; then VHOME=$PROV_HOME; else VHOME=$(getent passwd "$u" | cut -d: -f6); fi
+  VHOME=${VHOME:-/root}
+  for f in "$PROV_SCRIPT" "$(find_script)"; do
+    [ -n "$f" ] && [ -f "$f" ] && grep -q '^INCLUDE_MODE=' "$f" && { VSCRIPT=$f; break; }
+  done
+  return 0
+}
+
+# The env file as data: KEY=VALUE lines for restic and the storage backends only. Never sourced -
+# whatever else is in the file must not run.
+verify_env() {
+  local line k v
+  while IFS= read -r line || [ -n "$line" ]; do
+    line=${line#export }
+    k=${line%%=*}; v=${line#*=}
+    [ "$k" != "$line" ] || continue
+    case "$k" in
+      RESTIC_*|AWS_*|B2_*|AZURE_*|GOOGLE_*|OS_*|ST_*|RCLONE_*|HTTP_PROXY|HTTPS_PROXY|NO_PROXY) ;;
+      *) continue ;;
+    esac
+    case "$k" in *[!A-Z0-9_]*) continue ;; esac
+    case "$v" in \"*\") v=${v#\"}; v=${v%\"} ;; \'*\') v=${v#\'}; v=${v%\'} ;; esac
+    export "$k=$v"
+  done < "$VENV"
+}
+
 verify_restic() {
   local bin restic
   bin="$(verify_bin)" || { echo "restic not found: neither $RESTIC_BIN nor in PATH" >&2; return 127; }
   restic="$bin"; [ -f "$PROV_CACERT" ] && restic="$bin --cacert $PROV_CACERT"
   (
-    set -a; . "$PROV_ENV"; set +a
-    export HOME="$PROV_HOME"
+    verify_env
+    export HOME="$VHOME"
     # shellcheck disable=SC2086 - $restic is the binary plus an optional --cacert, split on purpose
-    exec runuser -p -u "$PROV_USER" -- $restic "$@"
+    [ "$VUSER" = root ] && exec $restic "$@"
+    exec runuser -p -u "$VUSER" -- $restic "$@"
   )
 }
 
@@ -2216,8 +2264,8 @@ cmd_verify() {
   local now t0 err="" errf tmpf snapj snapid stime sts lock="" mode incs excs dirs=() d f live got rc
   local ok=0 skipped=0 bad="" checked=0 dumps="" e dir newest head kind
   now=$(date +%s); t0=$now
-  if [ ! -f "$PROV_ENV" ] || [ ! -f "$PROV_SCRIPT" ] || ! id "$PROV_USER" >/dev/null 2>&1; then
-    printf '{"v":1,"ts":%s,"skip":"no backup managed by the panel"}\n' "$now"; return 0
+  if ! verify_ctx; then
+    printf '{"v":1,"ts":%s,"skip":"no restic backup with an env file"}\n' "$now"; return 0
   fi
   errf=$(mktemp); tmpf=$(mktemp)
   case "$(verify_restic --help 2>/dev/null)" in *--retry-lock*) lock="--retry-lock 30m" ;; esac
@@ -2229,9 +2277,12 @@ cmd_verify() {
   sts=$(date -d "$stime" +%s 2>/dev/null || echo 0)
   [ -z "$err" ] && [ -z "$snapid" ] && err="no snapshots of this host in the repository"
   if [ -z "$err" ]; then
-    mode=$(sed -n 's/^INCLUDE_MODE="\(.*\)"$/\1/p' "$PROV_SCRIPT" | head -1)
-    incs=$(sed -n 's/^INCLUDES_STR="\(.*\)"$/\1/p' "$PROV_SCRIPT" | head -1)
-    excs=$(sed -n 's/^EXCLUDES_STR="\(.*\)"$/\1/p' "$PROV_SCRIPT" | head -1)
+    mode=""; incs=""; excs=""
+    if [ -n "$VSCRIPT" ]; then
+      mode=$(sed -n 's/^INCLUDE_MODE="\(.*\)"$/\1/p' "$VSCRIPT" | head -1)
+      incs=$(sed -n 's/^INCLUDES_STR="\(.*\)"$/\1/p' "$VSCRIPT" | head -1)
+      excs=$(sed -n 's/^EXCLUDES_STR="\(.*\)"$/\1/p' "$VSCRIPT" | head -1)
+    fi
     if [ "$mode" = include ]; then
       for d in $incs; do d=${d//\"/}; [ -e "$d" ] && dirs+=("$d"); done
     else
@@ -2286,8 +2337,8 @@ cmd_verify() {
 # Once a week after a successful backup, in the background: the per-minute refresh must not wait
 verify_maybe() {
   local age=$VERIFY_EVERY timer svc res last
-  [ -f "$PROV_ENV" ] && [ -f "$PROV_SCRIPT" ] || return 0
-  command -v runuser >/dev/null 2>&1 || return 0
+  verify_ctx || return 0
+  [ "$VUSER" = root ] || command -v runuser >/dev/null 2>&1 || return 0
   [ -f "$VERIFY_JSON" ] && age=$(( $(date +%s) - $(stat -c %Y "$VERIFY_JSON" 2>/dev/null || echo 0) ))
   [ "$age" -ge "$VERIFY_EVERY" ] || return 0
   # a check that keeps dying (timeout, no runuser) is retried every 6 hours, not every minute
