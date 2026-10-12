@@ -7,7 +7,12 @@
 Откуда стучаться: с адреса самой панели часто разрешено больше, чем остальному интернету
 (вайтлисты под мониторинг), и порт, закрытый для мира, выглядел бы открытым. Поэтому проверка
 идет через первую включенную локацию-прокси (socks5 или HTTP CONNECT), а без нее - с панели,
-и в результате записано, откуда смотрели.
+и в результате записано, откуда смотрели. По проверке с самой панели не алертим: на одной ноде
+она показала открытыми etcd, kubelet и node_exporter, а из интернета они были закрыты -
+адрес панели стоял в белом списке файрвола.
+
+Кто слушает порт: агент работает без root и видит только владельца сокета, имя процесса
+присылает helper changes-setup с 0.2 (ss -ltnp).
 
 Опасным считается сервис, которому не место в интернете: базы, очереди, Docker API, etcd,
 kubelet, экспортеры метрик. Открытый SSH и веб - норма, их просто видно в списке.
@@ -42,6 +47,11 @@ KNOWN: dict[int, tuple[str, bool]] = {
     5432: ("PostgreSQL", True), 5601: ("Kibana", True),
     5672: ("RabbitMQ", True), 5900: ("VNC", True), 5984: ("CouchDB", True), 6379: ("Redis", True),
     6443: ("Kubernetes API", False), 8086: ("InfluxDB", True), 8123: ("ClickHouse HTTP", True),
+    # служебные порты Kubernetes: сами по себе не опасны, но без имени непонятно, что это
+    179: ("BGP сети подов (Calico, kube-router)", False), 8132: ("konnectivity (Kubernetes)", False),
+    9443: ("k0s API или вебхук Kubernetes", False), 10249: ("kube-proxy, метрики", False),
+    10256: ("kube-proxy, проверка здоровья", False), 10257: ("kube-controller-manager", False),
+    10259: ("kube-scheduler", False), 20244: ("kube-router, проверка здоровья", False),
     8200: ("Vault", False), 8500: ("Consul", True), 9000: ("ClickHouse, MinIO или php-fpm", True),
     9042: ("Cassandra", True), 9090: ("Prometheus", True), 9092: ("Kafka", True),
     9093: ("Alertmanager", True), 9100: ("node_exporter", True), 9200: ("Elasticsearch", True),
@@ -103,6 +113,9 @@ def targets(srv: Server) -> tuple[list[str], dict[int, str]]:
             ips.append(ip)
     behind_nat = str(getattr(srv, "local_ip", "") or "") if not own else ""
     ports: dict[int, str] = {}
+    # кто слушает порт (helper changes-setup 0.2): {"2221": "sshd"}
+    procs = ((rep.get("extras") or {}).get("changes") or {}).get("listen")
+    procs = procs if isinstance(procs, dict) else {}
 
     def put(port, what: str) -> None:
         try:
@@ -120,15 +133,23 @@ def targets(srv: Server) -> tuple[list[str], dict[int, str]]:
                 put(p.get("pub"), f"контейнер {c.get('name') or '?'} ({c.get('image') or '?'})")
     for n in ((rep.get("kube") or {}).get("nodeports") or []):
         if isinstance(n, dict) and (n.get("proto") or "TCP").upper() == "TCP":
-            put(n.get("node_port"), f"сервис {n.get('ns', '?')}/{n.get('name', '?')} ({n.get('type') or 'NodePort'})")
+            put(n.get("node_port"), f"сервис Kubernetes {n.get('ns', '?')}/{n.get('name', '?')} ({n.get('type') or 'NodePort'})")
     for s in rep.get("listen") or []:
         if not isinstance(s, dict) or not str(s.get("p") or "").startswith("tcp"):
             continue
         bind = str(s.get("ip") or "")
         if bind in ("0.0.0.0", "::") or _public(bind) or (behind_nat and bind == behind_nat):
-            put(s.get("port"), f"процесс пользователя {s['u']}" if s.get("u") else "")
+            put(s.get("port"), _proc_text(str(procs.get(str(s.get("port"))) or ""), str(s.get("u") or "")))
     keep = sorted(ports)[:_MAX_PORTS]
     return ips[:_MAX_IPS], {p: ports[p] for p in keep}
+
+
+def _proc_text(proc: str, user: str) -> str:
+    """'процесс kube-proxy', 'процесс mysqld, пользователь mysql'; без helper'а - только владелец.
+    Пользователя оставляем: по нему classify узнает базу (mysqld -> пользователь mysql)."""
+    if proc:
+        return f"процесс {proc}" + (f", пользователь {user}" if user and user != proc else "")
+    return f"процесс пользователя {user}" if user else ""
 
 
 def classify(port: int, what: str) -> tuple[str, bool]:
@@ -141,7 +162,24 @@ def classify(port: int, what: str) -> tuple[str, bool]:
     m = _RISKY_RE.search(low)
     if m and "exporter" not in low:
         return _RISKY_NAMES[m.group(1)], True
-    return known or ("", False)
+    if known:
+        return known
+    p = _PROC_RE.match(what)
+    return _PROC_NAMES.get(p.group(1), ("", False)) if p else ("", False)
+
+
+# имя процесса (helper changes-setup 0.2) -> сервис: SSH на 2221 без него был бы безымянным
+_PROC_NAMES: dict[str, tuple[str, bool]] = {
+    "sshd": ("SSH", False), "dropbear": ("SSH", False), "nginx": ("nginx", False),
+    "caddy": ("Caddy", False), "haproxy": ("HAProxy", False), "traefik": ("Traefik", False),
+    "envoy": ("Envoy", False), "apache2": ("Apache", False), "httpd": ("Apache", False),
+    "kube-apiserver": ("Kubernetes API", False), "kubelet": ("kubelet", True),
+    "kube-proxy": ("kube-proxy", False), "kube-router": ("kube-router", False),
+    "konnectivity-server": ("konnectivity (Kubernetes)", False), "k0s": ("k0s", False),
+    "k3s": ("k3s", False), "dockerd": ("Docker API", True), "node_exporter": ("node_exporter", True),
+    "zabbix_agent2": ("Zabbix agent", False), "zabbix_agentd": ("Zabbix agent", False),
+}
+_PROC_RE = re.compile(r"процесс (?!пользователя )([^,\s]+)")
 
 
 # ---- проверка порта: напрямую, через socks5 или HTTP CONNECT ----
@@ -250,10 +288,10 @@ async def scan_server(srv: Server, proxy: str | None, via: str, now: datetime) -
         return {"ip": ip, "port": port, "state": st, "what": ports[port], "name": name, "risk": risky}
 
     rows = list(await asyncio.gather(*(one(ip, p) for ip in ips for p in ports))) if ips and ports else []
-    return merge(prev, rows, ips, via, now)
+    return merge(prev, rows, ips, via, now, own=proxy is None)
 
 
-def merge(prev: dict, rows: list[dict], ips: list[str], via: str, now: datetime) -> dict:
+def merge(prev: dict, rows: list[dict], ips: list[str], via: str, now: datetime, own: bool = False) -> dict:
     """Итог проверки с учетом прошлых. Новый порт - тот, что открыт сейчас и не был открыт ни
     в одной проверке за месяц (seen): иначе прокси, упавший на одну проверку, на следующей
     выдал бы все порты ноды за новые. Первая проверка задает точку отсчета."""
@@ -263,7 +301,7 @@ def merge(prev: dict, rows: list[dict], ips: list[str], via: str, now: datetime)
     seen = {k: v for k, v in (seen or {}).items() if _age_ok(v, now)}
     for x in opened:
         seen[f"{x['ip']}|{x['port']}"] = now.isoformat()
-    out = {"ts": now.isoformat(), "via": via, "ips": ips, "ports": rows, "seen": seen}
+    out = {"ts": now.isoformat(), "via": via, "own": own, "ips": ips, "ports": rows, "seen": seen}
     if new:
         out["new"], out["new_ts"] = new, now.isoformat()
     elif prev.get("new") and prev.get("new_ts"):
@@ -283,6 +321,13 @@ def _ex(srv: Server) -> dict:
     return ex if isinstance(ex, dict) else {}
 
 
+def from_panel(srv: Server) -> bool:
+    """Проверка шла с адреса самой панели (локации-прокси нет): если файрвол ноды пускает
+    панель, открытое тут закрыто для остальных. До 1.4.135 флага не было - смотрим на via."""
+    ex = _ex(srv)
+    return bool(ex.get("own")) if "own" in ex else ex.get("via") == "панель"
+
+
 def scanned_at(srv: Server) -> datetime | None:
     ex = _ex(srv)
     try:
@@ -297,16 +342,17 @@ def view(srv: Server) -> dict | None:
     if not ex:
         return None
     out = {k: v for k, v in ex.items() if k != "seen"}
+    out["own"] = from_panel(srv)
     out["muted"] = sorted(muted_ports(srv), key=lambda p: int(p) if p.isdigit() else 0)
     return out
 
 
 def exposed(srv: Server, now: datetime) -> list[dict]:
     """Опасные сервисы, открытые в интернет по свежей проверке, без тех, что человек отметил как
-    намеренные (alert_mutes "exposed:<порт>")."""
+    намеренные (alert_mutes "exposed:<порт>"). Проверка с самой панели не в счет."""
     ex = _ex(srv)
     ts = scanned_at(srv)
-    if ts is None or now - ts > FRESH:
+    if ts is None or now - ts > FRESH or from_panel(srv):
         return []
     muted = muted_ports(srv)
     return [x for x in ex.get("ports") or []
@@ -331,8 +377,11 @@ def muted_ports(srv: Server) -> set[str]:
 
 
 def new_ports(srv: Server, now: datetime, hours: int = 24) -> list[dict]:
-    """Порты, впервые открывшиеся снаружи за последние сутки (кроме отмеченных намеренными)."""
+    """Порты, впервые открывшиеся снаружи за последние сутки (кроме отмеченных намеренными).
+    Проверка с самой панели не в счет."""
     ex = _ex(srv)
+    if from_panel(srv):
+        return []
     try:
         ts = datetime.fromisoformat(str(ex.get("new_ts") or ""))
     except ValueError:

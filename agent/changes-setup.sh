@@ -5,11 +5,15 @@
 # /var/lib/kervax/report.d/changes.json. The panel compares snapshots, keeps the feed and
 # alerts on new keys, new users and sudo changes.
 #
+# Since 0.2 it also says which process listens on which TCP port: the agent runs unprivileged
+# and sees only the socket owner, so the panel's "open to the internet" table showed
+# "a process of user root" instead of sshd or kube-proxy.
+#
 # Only fingerprints, names and hashes leave the node: no key material, no crontab or sudoers
 # contents. The helper changes nothing.
 set -euo pipefail
 
-KERVAX_SETUP_VERSION=0.1  # MAJOR.MINOR; compared component-wise
+KERVAX_SETUP_VERSION=0.2  # MAJOR.MINOR; compared component-wise
 KERVAX_SETUP_ALWAYS=1     # safe on any node: it only reads files and systemctl
 
 HELPER_DIR=/lib65/kervax
@@ -125,10 +129,26 @@ units() {
     | while read -r u; do printf '"%s",' "$(esc "$u")"; done | sed 's/,$//'
 }
 
+# Which process listens on each TCP port, loopback skipped: {"2221":"sshd","10250":"kubelet"}
+listen_procs() {
+  command -v ss >/dev/null 2>&1 || return 0
+  ss -ltnp 2>/dev/null | awk 'NR > 1 && c < 300 {
+      addr = $4
+      if (addr ~ /^127\./ || addr ~ /^\[::1\]/ || addr ~ /^\[::ffff:127\./) next
+      n = split(addr, a, ":"); port = a[n]
+      if (port !~ /^[0-9]+$/ || (port in seen)) next
+      if (!match($0, /users:\(\("[^"]+"/)) next
+      name = substr($0, RSTART + 9, RLENGTH - 10)
+      gsub(/[\\"]/, "", name)
+      seen[port] = 1
+      printf "%s\"%s\":\"%s\"", (c++ ? "," : ""), port, name
+    }' | tr -d '\000-\037'
+}
+
 now=$(date +%s)
 tmp=$(mktemp "${OUT}.XXXXXX")
-printf '{"v":1,"ts":%s,"keys":[%s],"users":[%s],"sudo":%s,"cron":%s,"units":[%s]}\n' \
-  "$now" "$(keys)" "$(users)" "$(sudo_info)" "$(cron_info)" "$(units)" > "$tmp"
+printf '{"v":1,"ts":%s,"keys":[%s],"users":[%s],"sudo":%s,"cron":%s,"units":[%s],"listen":{%s}}\n' \
+  "$now" "$(keys)" "$(users)" "$(sudo_info)" "$(cron_info)" "$(units)" "$(listen_procs)" > "$tmp"
 chmod 0644 "$tmp"
 mv -f "$tmp" "$OUT"
 HELPER_EOF
@@ -160,4 +180,4 @@ systemctl start --no-block kervax-changes.service >/dev/null 2>&1 || true
 
 echo "$KERVAX_SETUP_VERSION" > "$STATE_DIR/versions/changes-setup.ver"
 chmod 0644 "$STATE_DIR/versions/changes-setup.ver"
-echo "changes-setup: SSH keys, users, sudo, crontabs, enabled units -> $OUT (every 10 minutes)."
+echo "changes-setup: SSH keys, users, sudo, crontabs, enabled units, listening processes -> $OUT (every 10 minutes)."

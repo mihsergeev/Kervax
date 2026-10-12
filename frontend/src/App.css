@@ -988,6 +988,8 @@ input:focus {
 .exp-table { width: 100%; border-collapse: collapse; }
 .exp-table td { padding: 0.3rem 0.5rem 0.3rem 0; border-top: 1px dashed var(--border); vertical-align: top; overflow-wrap: anywhere; }
 .exp-table tr:first-child td { border-top: 0; }
+.exp-table th { padding: 0.3rem 0.5rem 0.2rem 0; text-align: left; font-weight: 500; color: var(--text-muted); white-space: nowrap; border-bottom: 1px solid var(--border); }
+.exp-own { margin: 0.3rem 0; padding: 0.35rem 0.6rem; border-left: 3px solid var(--degraded); background: var(--hover); }
 .exp-table td:first-child { width: 4.5rem; white-space: nowrap; }
 .exp-table td:last-child { text-align: right; white-space: nowrap; }
 .exp-bad td:first-child { color: var(--down); font-weight: 600; }
@@ -1015,6 +1017,14 @@ input:focus {
 .psi-table thead td { border-top: 0; }
 @media (max-width: 640px) {
   .exp-table td:last-child { white-space: normal; }
+  /* открытые порты на телефоне: кнопка уходит под описание, а не сжимается в столбик по букве */
+  .exposure .exp-table tr { display: grid; grid-template-columns: 3.5rem 1fr auto; column-gap: 0.5rem; }
+  .exposure .exp-table tbody tr { border-top: 1px dashed var(--border); padding: 0.3rem 0; }
+  .exposure .exp-table tbody tr:first-child { border-top: 0; }
+  .exposure .exp-table td { border-top: 0; padding: 0; width: auto; }
+  .exposure .exp-table td:last-child { grid-column: 2 / -1; text-align: left; }
+  .exposure .exp-table td:last-child:empty, .exposure .exp-table th:last-child { display: none; }
+  .exposure .exp-table .row-act { white-space: nowrap; margin: 0.25rem 0 0; }
 }
 .du-item-head { display: flex; align-items: center; gap: 0.5rem; }
 .du-item-name { flex: 1; min-width: 0; overflow-wrap: anywhere; }

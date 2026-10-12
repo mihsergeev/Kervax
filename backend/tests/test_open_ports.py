@@ -48,8 +48,25 @@ def test_targets_take_what_listens_outside():
     assert ips == ["203.0.113.5", "198.51.100.7"]
     assert sorted(ports) == [22, 5432, 6380, 8443, 9100, 30080]
     assert ports[6380] == "контейнер cache (redis:7)"
-    assert ports[30080] == "сервис web/shop (NodePort)"
+    assert ports[30080] == "сервис Kubernetes web/shop (NodePort)"
     assert ports[5432] == "процесс пользователя postgres"
+
+
+def test_targets_name_the_process_from_the_helper():
+    """changes-setup 0.2 видит, какой процесс держит порт; пользователь остается для classify"""
+    rep = dict(REP, extras={"changes": {"v": 1, "ts": 1, "listen": {"22": "sshd", "5432": "postgres",
+                                                                    "9100": "node_exporter"}}})
+    _ips, ports = open_ports.targets(_srv(rep))
+    assert ports[22] == "процесс sshd, пользователь root"
+    assert ports[5432] == "процесс postgres"
+    assert ports[9100] == "процесс node_exporter"
+    assert ports[8443] == "процесс пользователя www-data"  # helper про порт не знает
+    assert open_ports.classify(3306, "процесс mysqld, пользователь mysql") == ("MySQL", True)
+    assert open_ports.classify(10249, "процесс kube-proxy, пользователь root") == ("kube-proxy, метрики", False)
+    assert open_ports.classify(2221, "процесс sshd, пользователь root") == ("SSH", False)
+    assert open_ports.classify(2376, "процесс dockerd, пользователь root") == ("Docker API", True)
+    assert open_ports.classify(12375, "процесс dockerd, пользователь root") == ("Docker API", True)
+    assert open_ports.classify(2221, "процесс пользователя root") == ("", False)
 
 
 def test_targets_behind_nat_check_the_internal_address():
@@ -75,28 +92,28 @@ def _row(port, state="open", ip="203.0.113.5", risk=False, name=""):
 
 
 def test_new_port_is_new_against_a_month_of_checks():
-    first = open_ports.merge({}, [_row(22), _row(443)], ["203.0.113.5"], "панель", NOW)
+    first = open_ports.merge({}, [_row(22), _row(443)], ["203.0.113.5"], "Казахстан, Алматы", NOW)
     assert "new" not in first  # первая проверка - точка отсчета
     t1 = NOW + timedelta(hours=6)
-    second = open_ports.merge(first, [_row(22), _row(443), _row(8080)], ["203.0.113.5"], "панель", t1)
+    second = open_ports.merge(first, [_row(22), _row(443), _row(8080)], ["203.0.113.5"], "Казахстан, Алматы", t1)
     assert [x["port"] for x in second["new"]] == [8080] and second["new_ts"] == t1.isoformat()
     # прокси упал на одну проверку: все за файрволом; потом снова открыто - это не новые порты
     t2 = t1 + timedelta(hours=6)
     third = open_ports.merge(second, [_row(22, "filtered"), _row(443, "filtered"), _row(8080, "filtered")],
-                             ["203.0.113.5"], "панель", t2)
+                             ["203.0.113.5"], "Казахстан, Алматы", t2)
     t3 = t2 + timedelta(hours=6)
-    fourth = open_ports.merge(third, [_row(22), _row(443), _row(8080)], ["203.0.113.5"], "панель", t3)
+    fourth = open_ports.merge(third, [_row(22), _row(443), _row(8080)], ["203.0.113.5"], "Казахстан, Алматы", t3)
     assert fourth["new_ts"] == t1.isoformat()  # новость все та же, с прошлого прироста
     # не был открыт больше месяца - снова новый
     t4 = t3 + timedelta(days=31)
-    fifth = open_ports.merge(fourth, [_row(22), _row(443)], ["203.0.113.5"], "панель", t4)
+    fifth = open_ports.merge(fourth, [_row(22), _row(443)], ["203.0.113.5"], "Казахстан, Алматы", t4)
     sixth = open_ports.merge(fifth, [_row(22), _row(443), _row(8080)], ["203.0.113.5"], "панель",
                              t4 + timedelta(hours=6))
     assert [x["port"] for x in sixth["new"]] == [8080]
 
 
 def test_exposed_and_new_rows_on_home():
-    ex = {"ts": NOW.isoformat(), "via": "панель", "ips": ["203.0.113.5"],
+    ex = {"ts": NOW.isoformat(), "via": "Казахстан, Алматы", "own": False, "ips": ["203.0.113.5"],
           "ports": [_row(22, name="SSH"), _row(6379, risk=True, name="Redis"), _row(5432, "filtered", risk=True)],
           "new": [_row(6379, risk=True, name="Redis")], "new_ts": (NOW - timedelta(hours=2)).isoformat(),
           "seen": {}}
@@ -121,6 +138,41 @@ def test_exposed_and_new_rows_on_home():
     assert not kinds & {"exposed", "port_new"}
     # карточке служебная история не нужна
     assert "seen" not in open_ports.view(s) and open_ports.view(s)["muted"] == []
+    assert open_ports.view(s)["own"] is False
+
+
+def test_check_from_the_panel_itself_does_not_alert():
+    """С адреса панели видно то, что открыто для панели: на одной ноде etcd, kubelet и
+    node_exporter были открыты только для нее (белый список файрвола)"""
+    ex = {"ts": NOW.isoformat(), "via": "панель", "own": True, "ips": ["203.0.113.5"],
+          "ports": [_row(2380, risk=True, name="etcd"), _row(10250, risk=True, name="kubelet")],
+          "new": [_row(2380, risk=True, name="etcd")], "new_ts": (NOW - timedelta(hours=2)).isoformat(),
+          "seen": {}}
+    s = _srv({"listen": [{}]}, ex)
+    assert not {p["kind"] for p in collector.server_problems(s, NOW)} & {"exposed", "port_new"}
+    lvl, ctx = collector._server_conditions(s, NOW)["exposed"]
+    assert lvl == 0 and ctx["own"] is True
+    assert open_ports.view(s)["own"] is True
+    # горевший алерт уходит с объяснением, а не "опасных сервисов больше нет"
+    assert collector._recovery_detail("exposed", {}, ctx).startswith("проверка шла с адреса панели")
+    assert collector._recovery_detail("exposed", {}, {"own": False}) == "опасных сервисов, открытых в интернет, больше нет"
+    # проверки до 1.4.135 без флага: с панели - значит via "панель"
+    del ex["own"]
+    assert open_ports.from_panel(s) is True
+    s.exposure = dict(ex, via="Казахстан, Алматы")
+    assert open_ports.from_panel(s) is False
+
+
+async def test_scan_without_proxy_marks_own_check(monkeypatch):
+    async def fake_probe(ip, port, proxy):
+        return "open"
+
+    monkeypatch.setattr(open_ports, "probe", fake_probe)
+    srv = _srv(REP)
+    out = await open_ports.scan_server(srv, None, "панель", NOW)
+    assert out["own"] is True
+    out = await open_ports.scan_server(srv, "socks5://127.0.0.1:1080", "Казахстан, Алматы", NOW)
+    assert out["own"] is False
 
 
 def test_text_names_unknown_ports():
@@ -225,7 +277,7 @@ async def test_port_new_alert_once_per_check(tmp_path, monkeypatch):
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     now = datetime.now(timezone.utc)
-    base = open_ports.merge({}, [_row(22, name="SSH")], ["203.0.113.5"], "панель", now - timedelta(hours=6))
+    base = open_ports.merge({}, [_row(22, name="SSH")], ["203.0.113.5"], "Казахстан, Алматы", now - timedelta(hours=6))
     async with factory() as s:
         s.add(Server(name="node", token_hash="x", enabled=True, backup_not_required=True, last_seen=now,
                      cpu_alert_percent=0, mem_alert_percent=0, last_report={"uptime_seconds": 100000},
@@ -244,7 +296,7 @@ async def test_port_new_alert_once_per_check(tmp_path, monkeypatch):
     async with factory() as s:
         srv = (await s.execute(select(Server))).scalars().one()
         srv.exposure = open_ports.merge(srv.exposure, [_row(22, name="SSH"), _row(6379, risk=True, name="Redis")],
-                                        ["203.0.113.5"], "панель", now)
+                                        ["203.0.113.5"], "Казахстан, Алматы", now)
         await s.commit()
     await collector.evaluate_servers(factory, cfg, now + timedelta(seconds=30))
     news = [m for m in sent if m.startswith("🚪")]
