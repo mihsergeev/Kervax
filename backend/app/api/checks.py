@@ -211,7 +211,8 @@ async def overview(_: CurrentUser, session: SessionDep) -> ChecksOverviewOut:
     # локаций» не отвечает на вопрос, что сломалось)
     locs = {
         loc.id: loc.name
-        for loc in await session.scalars(select(Location).where(Location.enabled.is_(True)))
+        for loc in await session.scalars(
+            select(Location).where(Location.enabled.is_(True), Location.monitors.is_(True)))
     }
     loc_stat: dict[int, list[int]] = {lid: [0, 0] for lid in locs}  # id → [down, total]
     for c in checks:
@@ -1210,7 +1211,7 @@ async def check_locations(
     check = await _get_or_404(check_id, session, user)
     enabled = list(
         await session.scalars(
-            select(Location).where(Location.enabled.is_(True)).order_by(Location.id)
+            select(Location).where(Location.enabled.is_(True), Location.monitors.is_(True)).order_by(Location.id)
         )
     )
     locations = effective_locations(check, enabled)

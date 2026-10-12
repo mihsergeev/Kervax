@@ -948,7 +948,7 @@ async def run_location_probes(
     interval = max(settings.location_probe_interval, 30)
     async with session_factory() as session:
         enabled = list(
-            await session.scalars(select(Location).where(Location.enabled.is_(True)))
+            await session.scalars(select(Location).where(Location.enabled.is_(True), Location.monitors.is_(True)))
         )
         checks = list(
             await session.scalars(
@@ -1083,7 +1083,7 @@ async def evaluate_location_alerts(
     алертится тут (её покрывает основной инцидент)."""
     async with session_factory() as session:
         enabled = list(
-            await session.scalars(select(Location).where(Location.enabled.is_(True)))
+            await session.scalars(select(Location).where(Location.enabled.is_(True), Location.monitors.is_(True)))
         )
         checks = list(
             await session.scalars(
@@ -1284,7 +1284,7 @@ def _recovery_detail(key: str, st: dict, ctx: dict) -> str:
             return ("проверка шла с адреса панели, а файрвол ноды может пускать панель и закрывать "
                     "порты для остальных: по такой проверке панель больше не алертит, нужна "
                     "локация-прокси в другой сети")
-        return "опасных сервисов, открытых в интернет, больше нет"
+        return "опасных и служебных портов, открытых в интернет, больше нет"
     if key == "pressure":
         return "сервер снова дышит: процессы не ждут память и диск, зависших нет"
     if key == "net_health":
@@ -3016,7 +3016,7 @@ def server_problems(s: Server, now: datetime, pod_names: dict[str, str] | None =
     # Что открыто в интернет: внешняя проверка портов (open_ports, раз в 6 часов)
     ex = open_ports.exposed(s, now)
     if ex:
-        add("exposed", 2, "открыто в интернет: " + open_ports.exposed_text(ex, 3), "exposure", "exposed")
+        add("exposed", open_ports.exposed_level(ex), open_ports.exposure_text(ex, 3), "exposure", "exposed")
     fresh = open_ports.new_ports(s, now)
     if fresh:
         add("port_new", 1, "в интернет открылся новый порт: " + open_ports.new_text(fresh), "exposure", "port_new",
@@ -4375,12 +4375,12 @@ def _server_conditions(s: Server, now: datetime,
     if online:
         own = custom_backups.problems(s, now)
         out["backup_custom"] = (1 if own else 0, {"jobs": "; ".join(own[:6]), "n": len(own)})
-    # Опасный сервис открыт в интернет (внешняя проверка портов): состояние, пока не закроют
-    # файрволом или не отметят порт намеренным. Свежесть проверки - в open_ports.exposed
+    # Опасный (2) или служебный (1) порт открыт в интернет (внешняя проверка портов): состояние,
+    # пока не закроют файрволом или не отметят порт намеренным. Свежесть - в open_ports.exposed
     if online:
         ex = open_ports.exposed(s, now)
-        out["exposed"] = (2 if ex else 0, {"detail": "открыто в интернет: " + open_ports.exposed_text(ex),
-                                           "n": len(ex), "own": open_ports.from_panel(s)})
+        out["exposed"] = (open_ports.exposed_level(ex), {"detail": open_ports.exposure_text(ex), "n": len(ex),
+                                                         "own": open_ports.from_panel(s)})
     # Сервер задыхается (агент 2.26): уровень - худшая из причин, выдержка - как у CPU и RAM
     if online and any(rep.get(k) for k in ("psi", "dstate", "fds")):
         pr = pressure_problems(rep)

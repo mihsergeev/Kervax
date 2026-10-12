@@ -34,7 +34,7 @@ export const SRV_ALERT_KINDS: { k: string; label: string }[] = [
   { k: 'cpu_spin', label: 'CPU: процессы в пустом цикле' },
   { k: 'backup_growth', label: 'Бэкап: резкий прирост' },
   { k: 'docker_sock', label: 'Docker: внешний прокси с docker-сокетом' },
-  { k: 'exposed', label: 'Сеть: опасный сервис открыт в интернет' },
+  { k: 'exposed', label: 'Сеть: открыто в интернет то, что должно быть закрыто' },
   { k: 'port_new', label: 'Сеть: открылся новый порт' },
   { k: 'pressure', label: 'Сервер задыхается' },
   { k: 'net_health', label: 'Сеть: потери и ошибки' },

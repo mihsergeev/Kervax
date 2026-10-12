@@ -155,7 +155,8 @@ def test_check_from_the_panel_itself_does_not_alert():
     assert open_ports.view(s)["own"] is True
     # горевший алерт уходит с объяснением, а не "опасных сервисов больше нет"
     assert collector._recovery_detail("exposed", {}, ctx).startswith("проверка шла с адреса панели")
-    assert collector._recovery_detail("exposed", {}, {"own": False}) == "опасных сервисов, открытых в интернет, больше нет"
+    assert collector._recovery_detail("exposed", {}, {"own": False}) == (
+        "опасных и служебных портов, открытых в интернет, больше нет")
     # проверки до 1.4.135 без флага: с панели - значит via "панель"
     del ex["own"]
     assert open_ports.from_panel(s) is True
@@ -183,6 +184,44 @@ def test_labels_follow_the_fresh_report():
     assert s.exposure["ports"][0]["what"] == "процесс пользователя root"  # сохраненное не трогаем
     _ips, ports = open_ports.targets(s)
     assert ports[8132] == "процесс konnectivity-server"
+
+
+def test_service_ports_should_be_closed_too():
+    """Служебные порты Kubernetes, агентов и экспортеров снаружи не нужны: желтое и предупреждение.
+    Проверка здоровья балансировщика (kube-proxy на порту NodePort) - часть сервиса, не служебное"""
+    assert open_ports.label(10249, "процесс kube-proxy, пользователь root") == {
+        "name": "kube-proxy, метрики", "risk": False, "svc": True}
+    assert open_ports.label(8080, "процесс kube-router, пользователь root")["svc"] is True
+    assert open_ports.label(6443, "процесс kube-apiserver")["svc"] is True
+    assert open_ports.label(9187, "контейнер e (prometheuscommunity/postgres-exporter)") == {
+        "name": "экспортер метрик", "risk": False, "svc": True}
+    assert open_ports.label(9100, "процесс node_exporter, пользователь nobody") == {
+        "name": "node_exporter", "risk": True, "svc": False}
+    assert open_ports.label(32530, "процесс kube-proxy, пользователь root") == {
+        "name": "проверка здоровья балансировщика (kube-proxy)", "risk": False, "svc": False}
+    assert open_ports.label(2221, "процесс sshd, пользователь root") == {"name": "SSH", "risk": False, "svc": False}
+    assert open_ports.label(30300, "сервис Kubernetes monitoring/grafana (NodePort)")["svc"] is False
+
+    rep = {"ips": ["203.0.113.5"], "listen": [{"p": "tcp6", "ip": "::", "port": 10249, "u": "root"},
+                                               {"p": "tcp6", "ip": "::", "port": 2380, "u": "etcd"}],
+           "extras": {"changes": {"v": 1, "ts": 1, "listen": {"10249": "kube-proxy", "2380": "etcd"}}}}
+    svc_row = {"ip": "203.0.113.5", "port": 10249, "state": "open", "what": "", "name": "", "risk": False}
+    etcd_row = {"ip": "203.0.113.5", "port": 2380, "state": "open", "what": "", "name": "", "risk": False}
+    ex = {"ts": NOW.isoformat(), "via": "Казахстан, Алматы", "own": False, "ips": ["203.0.113.5"],
+          "ports": [svc_row], "seen": {}}
+    s = _srv(rep, ex)
+    lvl, ctx = collector._server_conditions(s, NOW)["exposed"]
+    assert lvl == 1 and ctx["detail"] == (
+        "служебное открыто в интернет: kube-proxy, метрики 10249 (процесс kube-proxy, пользователь root) на 203.0.113.5")
+    rows = [p for p in collector.server_problems(s, NOW) if p["kind"] == "exposed"]
+    assert [p["level"] for p in rows] == [1]
+    # открылся и etcd - уже проблема, в тексте сначала опасное
+    s.exposure = dict(ex, ports=[svc_row, etcd_row])
+    lvl, ctx = collector._server_conditions(s, NOW)["exposed"]
+    assert lvl == 2 and ctx["detail"].startswith("открыто в интернет: etcd 2380 (процесс etcd) на 203.0.113.5; служебное")
+    # служебный порт открыт намеренно - остается только etcd
+    s.alert_mutes = ["exposed:10249"]
+    assert [x["port"] for x in open_ports.exposed(s, NOW)] == [2380]
 
 
 async def test_scan_without_proxy_marks_own_check(monkeypatch):
@@ -286,6 +325,35 @@ async def test_pick_proxy_prefers_socks(tmp_path):
                    Location(name="sock", url="socks5://203.0.113.7:1080", enabled=True)])
         await s.commit()
         assert await open_ports.pick_proxy(s) == ("socks5://203.0.113.7:1080", "sock")
+        # локация только для портов (мониторы через нее не ходят) - первой, даже HTTP
+        s.add(Location(name="ports", url="http://203.0.113.6:3128", enabled=True, monitors=False))
+        await s.commit()
+        assert await open_ports.pick_proxy(s) == ("http://203.0.113.6:3128", "ports")
+    await engine.dispose()
+
+
+async def test_ports_only_location_is_not_used_by_monitors(tmp_path, monkeypatch):
+    """Сайты, открытые лишь сети панели, через локацию "только порты" не проверяются"""
+    from app.config import Settings
+    from app.db import Base, create_engine_and_factory
+    from app.models import Check, Location
+
+    engine, factory = create_engine_and_factory(f"sqlite+aiosqlite:///{(tmp_path / 'm.db').as_posix()}")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    async with factory() as s:
+        s.add_all([Location(name="ports", url="http://203.0.113.6:3128", enabled=True, monitors=False),
+                   Check(name="dev", type="http", target="https://dev.example.com", enabled=True,
+                         check_locations=True)])
+        await s.commit()
+    probed: list[str] = []
+
+    async def fake_probe(check, proxy):
+        probed.append(proxy)
+
+    monkeypatch.setattr("app.checks.probe_via_proxy", fake_probe)
+    assert await collector.run_location_probes(factory, Settings()) == 0
+    assert probed == []
     await engine.dispose()
 
 

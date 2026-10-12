@@ -783,12 +783,14 @@ class LocationCreate(BaseModel):
     # http://user:pass@host:port | https://… | socks5://host:port | "" = напрямую
     url: str = Field(default="", max_length=512)
     enabled: bool = True
+    monitors: bool = True  # False - только для внешней проверки портов
 
 
 class LocationUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=64)
     url: str | None = Field(default=None, max_length=512)
     enabled: bool | None = None
+    monitors: bool | None = None
 
 
 class LocationTest(BaseModel):
@@ -808,6 +810,7 @@ class LocationOut(BaseModel):
     name: str
     url: str
     enabled: bool
+    monitors: bool = True
     created_at: datetime
 
 

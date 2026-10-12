@@ -320,6 +320,9 @@ class Location(Base):
     # прокси: http://user:pass@host:port | socks5://host:port
     url: Mapped[str] = mapped_column(String(512))
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    # гонять через нее мониторы сайтов. Выключено - точка только для внешней проверки портов:
+    # сайты, открытые лишь для своей сети, не дают ложных "недоступен из ..."
+    monitors: Mapped[bool] = mapped_column(Boolean, default=True, server_default="1")
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
