@@ -131,3 +131,24 @@ async def test_access_alert_once_and_ack_api(client, auth_headers, tmp_path, mon
     sid = r.json()["server"]["id"]
     r = await client.post(f"/api/servers/{sid}/changes/ack", headers=auth_headers)
     assert r.status_code == 200 and r.json()["changes"]["ack_ts"]
+
+
+def test_password_login_from_a_new_address():
+    from app.changes import apply_snapshot
+    t0 = datetime(2026, 10, 13, 10, 0, tzinfo=timezone.utc)
+
+    def snap(ts, *logins):
+        return {"v": 1, "ts": int(ts.timestamp()), "keys": [], "users": [], "sudo": {}, "cron": {}, "units": [],
+                "ssh": {"logins": [{"m": m, "u": u, "ip": ip} for m, u, ip in logins]}}
+    # первый снимок с входами - точка отсчета, даже вход по паролю без алерта
+    st = apply_snapshot(None, snap(t0, ("password", "corp", "198.51.100.1")), t0)
+    assert st.get("log", []) == [] and "corp|198.51.100.1" in st["ssh_seen"]
+    t1 = t0 + timedelta(minutes=10)
+    st = apply_snapshot(st, snap(t1, ("password", "corp", "198.51.100.1"), ("publickey", "ms", "198.51.100.7"),
+                                 ("password", "corp", "203.0.113.66")), t1)
+    texts = [e["text"] for e in st["log"]]
+    assert texts == ["вход по паролю: corp с 203.0.113.66, раньше с этого адреса не входил"]
+    assert st["log"][0]["alert"] is True and st["alert_ts"] == t1.isoformat()
+    t2 = t1 + timedelta(minutes=10)
+    st = apply_snapshot(st, snap(t2, ("password", "corp", "203.0.113.66")), t2)
+    assert len(st["log"]) == 1  # с этого адреса уже входил

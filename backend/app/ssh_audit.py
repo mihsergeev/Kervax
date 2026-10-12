@@ -63,10 +63,18 @@ def internet_open(srv: Server, ssh: dict, now: datetime) -> bool | None:
     if not ex or ts is None or now - ts > open_ports.FRESH or open_ports.from_panel(srv):
         return None
     ports = {int(p) for p in ssh.get("ports") or [] if str(p).isdigit()}
-    rows = [x for x in ex.get("ports") or [] if isinstance(x, dict) and x.get("port") in ports]
+    alien = open_ports.foreign(srv)  # там отвечает другой сервер
+    rows = [x for x in ex.get("ports") or [] if isinstance(x, dict) and x.get("port") in ports
+            and x.get("ip") not in alien]
     if not rows:
         return None
     return any(x.get("state") == "open" for x in rows)
+
+
+def _top(ssh: dict) -> str:
+    """' (больше всех с 203.0.113.9: 120)' - откуда перебор (changes-setup 0.4)"""
+    top = [x for x in ssh.get("fail_top") or [] if isinstance(x, dict) and x.get("ip")]
+    return f" (больше всех с {top[0]['ip']}: {top[0].get('n')})" if top else ""
 
 
 def _ports(ssh: dict) -> str:
@@ -83,8 +91,8 @@ def problems(srv: Server, now: datetime) -> list[tuple[int, str]]:
         out.append((2, f"root может войти по SSH паролем, а порт {_ports(ssh)} открыт в интернет"))
     fail = int(ssh.get("fail") or 0)
     if password_login(ssh) and fail >= BRUTE_MIN and not ssh.get("guard"):
-        out.append((1, f"идет перебор паролей SSH: {fail} неудачных входов за 10 минут, вход по паролю "
-                       f"включен, а fail2ban и подобного нет"))
+        out.append((1, f"идет перебор паролей SSH: {fail} неудачных входов за 10 минут{_top(ssh)}, вход по "
+                       f"паролю включен, а fail2ban и подобного нет"))
     return out
 
 
@@ -108,4 +116,5 @@ def view(srv: Server, now: datetime) -> dict | None:
     return {"ports": ssh.get("ports") or [], "password": password_login(ssh), "root": str(ssh.get("root") or ""),
             "root_password": root_password(ssh), "guard": str(ssh.get("guard") or ""),
             "fail": int(ssh.get("fail") or 0), "accepted_password": int(ssh.get("accp") or 0),
-            "open": internet_open(srv, ssh, now)}
+            "open": internet_open(srv, ssh, now),
+            "fail_top": [x for x in ssh.get("fail_top") or [] if isinstance(x, dict)][:5]}

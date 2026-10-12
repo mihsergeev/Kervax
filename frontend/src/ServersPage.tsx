@@ -2140,7 +2140,7 @@ function OsUpdates({ server: s }: { server: Server }) {
 
 // Изменения на сервере (helper changes-setup): кто может войти и что запускается по расписанию.
 // Изменения доступа подсвечены, пока их не отметили как свои.
-const CHANGE_ICON: Record<string, string> = { key: '🔑', user: '👤', sudo: '🛡', cron: '⏰', unit: '⚙️' }
+const CHANGE_ICON: Record<string, string> = { key: '🔑', user: '👤', sudo: '🛡', cron: '⏰', unit: '⚙️', login: '🚪' }
 
 function ChangesFeed({ server: s, onChanged }: { server: Server; onChanged: () => void }) {
   const { t } = useI18n()
@@ -2462,6 +2462,11 @@ function OpenPorts({ server: s, onChanged }: { server: Server; onChanged: () => 
           {opened.length > 0 && quietIps.length > 0 && <> · {t('на {ips} ничего не открыто', { ips: quietIps.join(', ') })}</>}
         </div>
       )}
+      {(ex?.foreign ?? []).map((f) => (
+        <div key={f.ip} className="small exp-own">
+          {t('По адресу {ip} отвечает другой сервер: там {o}, а у этой ноды {n}. Порты по этому адресу не про эту ноду, поэтому алертов по ним нет. Поправьте внешний адрес в настройках ноды.', { ip: f.ip, o: f.outside, n: f.node })}
+        </div>
+      ))}
       {ex && own && opened.length > 0 && (
         <div className="small exp-own">
           {t('Панель смотрела со своего адреса, а файрвол ноды часто пускает панель по белому списку. Тогда здесь "открыт" и то, что для остальных закрыто, поэтому по этой проверке нет ни красного, ни алертов. Чтобы видеть, что открыто для всех, добавьте в "Локациях" прокси в другой сети.')}
@@ -2578,6 +2583,12 @@ function SshLogin({ server: s }: { server: Server }) {
           <tr><td>{t('вход по паролю')}</td><td className={v.password && v.open ? 't-degraded' : ''}>{v.password ? t('включен') : t('выключен, только ключи')}</td></tr>
           <tr><td>{t('root')}</td><td className={v.root_password ? 't-down' : ''}>{rootText}</td></tr>
           <tr><td>{t('защита от перебора')}</td><td>{v.guard || t('нет')}</td></tr>
+          {(v.fail_top ?? []).length > 0 && (
+            <tr>
+              <td>{t('перебор идет с')}</td>
+              <td className="mono">{(v.fail_top ?? []).map((x) => `${x.ip} (${x.n})`).join(', ')}</td>
+            </tr>
+          )}
           <tr>
             <td>{t('неудачных входов за 10 минут')}</td>
             <td>{v.fail}{v.accepted_password > 0 && <span className="muted"> · {t('входов по паролю: {n}', { n: v.accepted_password })}</span>}</td>

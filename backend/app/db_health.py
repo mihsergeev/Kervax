@@ -84,11 +84,18 @@ def problems(rep: dict, now: datetime) -> list[tuple[int, str, str]]:
             who = _who(str(x.get("xact_db") or ""), str(x.get("xact_app") or ""))
             out.append((2 if xa >= XACT_CRIT else 1, f"{name}: транзакция идет {_dur(xa)}" + (f" ({who})" if who else ""),
                         k + ":xact"))
-        idle = _int(x.get("idle_xact"))
-        if idle >= IDLE_WARN:
+        # Простаивающая транзакция со снимком (backend_xmin, dbstat-setup 0.6) не дает VACUUM чистить
+        # мертвые строки во всей базе. Без снимка она держит только свои блокировки: на одной ноде
+        # самой старой была такая (advisory lock), а VACUUM держала соседняя после SELECT
+        idle, imin = _int(x.get("idle_xact")), _int(x.get("idle_xmin"))
+        if imin >= IDLE_WARN:
+            who = _who(str(x.get("idle_xmin_db") or ""), str(x.get("idle_xmin_app") or ""))
+            out.append((1, f"{name}: транзакция открыта и простаивает {_dur(imin)}" + (f" ({who})" if who else "")
+                           + ": держит снимок, VACUUM не может чистить мертвые строки", k + ":idle"))
+        if idle >= IDLE_WARN and idle > imin + 60:
             who = _who(str(x.get("idle_db") or ""), str(x.get("idle_app") or ""))
             out.append((1, f"{name}: транзакция открыта и простаивает {_dur(idle)}" + (f" ({who})" if who else "")
-                           + ": держит блокировки и мешает VACUUM", k + ":idle"))
+                           + ": держит блокировки", k + ":idle_lock"))
         lw, lwt = _int(x.get("lock_waits")), _int(x.get("lock_wait"))
         if lw and lwt >= LOCK_WARN:
             out.append((1, f"{name}: ждут блокировку {lw} запр., дольше всех {_dur(lwt)}", k + ":lock"))

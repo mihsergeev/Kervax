@@ -1211,6 +1211,11 @@ const EN: Record<string, string> = {
   'реплика, догнала': 'replica, caught up',
   'основная, реплик: {n}': 'primary, replicas: {n}',
   // SSH
+  'По адресу {ip} отвечает другой сервер: там {o}, а у этой ноды {n}. Порты по этому адресу не про эту ноду, поэтому алертов по ним нет. Поправьте внешний адрес в настройках ноды.':
+    'Another server answers at {ip}: it runs {o}, while this node runs {n}. Ports at this address are not this node, so they raise no alerts. Fix the external address in the node settings.',
+  '{name}: по внешнему адресу {ip} отвечает другой сервер ({o}, у ноды {n}) - поправьте внешний адрес':
+    '{name}: another server answers at the external address {ip} ({o}, the node runs {n}) - fix the external address',
+  'перебор идет с': 'brute force from',
   'SSH: опасный вход': 'SSH: risky login',
   'порт': 'port',
   'root': 'root',

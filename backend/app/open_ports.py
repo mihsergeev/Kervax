@@ -317,8 +317,103 @@ async def pick_proxy(session: AsyncSession) -> tuple[str | None, str]:
     return url, name
 
 
+# ---- баннер SSH снаружи: та ли нода отвечает по внешнему адресу ----
+
+async def _tunnel(ip: str, port: int, proxy: str | None):
+    """(reader, writer) соединения с ip:port напрямую или через прокси, ответ прокси прочитан
+    целиком: дальше в потоке только данные самого сервиса. None - не вышло."""
+    if not proxy:
+        return await asyncio.wait_for(asyncio.open_connection(ip, port), _TIMEOUT)
+    u = urlsplit(proxy)
+    host, pport = u.hostname or "", u.port or (1080 if u.scheme.startswith("socks") else 3128)
+    r, w = await asyncio.wait_for(asyncio.open_connection(host, pport), _TIMEOUT)
+    if u.scheme.startswith("socks5"):
+        auth = bool(u.username)
+        w.write(b"\x05\x01" + (b"\x02" if auth else b"\x00"))
+        await w.drain()
+        _ver, method = await r.readexactly(2)
+        if method == 0x02 and auth:
+            user, pw = unquote(u.username or "").encode(), unquote(u.password or "").encode()
+            w.write(b"\x01" + bytes([len(user)]) + user + bytes([len(pw)]) + pw)
+            await w.drain()
+            if (await r.readexactly(2))[1] != 0:
+                w.close()
+                return None
+        a = ipaddress.ip_address(ip)
+        w.write(b"\x05\x01\x00" + ((b"\x01" + a.packed) if a.version == 4 else (b"\x04" + a.packed))
+                + struct.pack(">H", port))
+        await w.drain()
+        head = await r.readexactly(4)
+        if head[1] != 0:
+            w.close()
+            return None
+        n = {1: 4, 4: 16}.get(head[3])
+        n = n if n is not None else (await r.readexactly(1))[0]
+        await r.readexactly(n + 2)
+        return r, w
+    target = f"[{ip}]:{port}" if ":" in ip else f"{ip}:{port}"
+    req = f"CONNECT {target} HTTP/1.1\r\nHost: {target}\r\n"
+    if u.username:
+        cred = f"{unquote(u.username)}:{unquote(u.password or '')}".encode()
+        req += f"Proxy-Authorization: Basic {base64.b64encode(cred).decode()}\r\n"
+    w.write((req + "\r\n").encode())
+    await w.drain()
+    status = (await r.readline()).decode("latin-1", "replace").split()
+    if len(status) < 2 or status[1] != "200":
+        w.close()
+        return None
+    while (await r.readline()) not in (b"\r\n", b"\n", b""):
+        pass
+    return r, w
+
+
+async def ssh_banner(ip: str, port: int, proxy: str | None) -> str:
+    """Первая строка, которую отдает SSH по адресу: "SSH-2.0-OpenSSH_9.6p1 Ubuntu-3ubuntu13.19"."""
+    try:
+        t = await _tunnel(ip, port, proxy)
+        if t is None:
+            return ""
+        r, w = t
+        try:
+            line = await asyncio.wait_for(r.readline(), _TIMEOUT)
+        finally:
+            w.close()
+    except (OSError, asyncio.TimeoutError, asyncio.IncompleteReadError, ValueError):
+        return ""
+    text = line.decode("latin-1", "replace").strip()
+    return text[:120] if text.startswith("SSH-") else ""
+
+
+def _ssh_block(srv: Server) -> dict:
+    ch = (((srv.last_report or {}).get("extras") or {}).get("changes") or {})
+    ssh = ch.get("ssh") if isinstance(ch, dict) else None
+    return ssh if isinstance(ssh, dict) else {}
+
+
+def _ssh_ver(text: str) -> str:
+    m = re.search(r"OpenSSH_[0-9][0-9A-Za-z.]*", text or "")
+    return m.group(0) if m else ""
+
+
+def foreign(srv: Server) -> dict[str, dict]:
+    """Внешние адреса, где отвечает ДРУГОЙ сервер: версия OpenSSH в баннере снаружи не та, что у
+    sshd ноды (helper changes-setup 0.4). На одной ноде внешний адрес в карточке вел на соседний
+    CentOS 7, и проверка портов судила о нем: "SSH открыт в интернет" было про чужой хост."""
+    node = _ssh_ver(str(_ssh_block(srv).get("banner") or ""))
+    if not node:
+        return {}
+    out = {}
+    for key, banner in (_ex(srv).get("banners") or {}).items():
+        ip = str(key).rsplit(":", 1)[0]
+        outside = _ssh_ver(str(banner or ""))
+        if outside and outside != node:
+            out[ip] = {"ip": ip, "outside": str(banner), "node": node}
+    return out
+
+
 async def scan_server(srv: Server, proxy: str | None, via: str, now: datetime) -> dict:
-    """Проверить порты ноды снаружи; результат - для servers.exposure."""
+    """Проверить порты ноды снаружи; результат - для servers.exposure. У открытых портов SSH
+    заодно читаем баннер: по нему видно, та ли нода отвечает по этому адресу."""
     ips, ports = targets(srv)
     prev = _ex(srv)
     sem = asyncio.Semaphore(_PARALLEL)
@@ -329,10 +424,18 @@ async def scan_server(srv: Server, proxy: str | None, via: str, now: datetime) -
         return {"ip": ip, "port": port, "state": st, "what": ports[port], **label(port, ports[port])}
 
     rows = list(await asyncio.gather(*(one(ip, p) for ip in ips for p in ports))) if ips and ports else []
-    return merge(prev, rows, ips, via, now, own=proxy is None)
+    ssh_ports = {int(p) for p in _ssh_block(srv).get("ports") or [] if str(p).isdigit()} or {22}
+    banners = {}
+    for x in rows:
+        if x["state"] == "open" and x["port"] in ssh_ports:
+            b = await ssh_banner(x["ip"], x["port"], proxy)
+            if b:
+                banners[f"{x['ip']}:{x['port']}"] = b
+    return merge(prev, rows, ips, via, now, own=proxy is None, banners=banners)
 
 
-def merge(prev: dict, rows: list[dict], ips: list[str], via: str, now: datetime, own: bool = False) -> dict:
+def merge(prev: dict, rows: list[dict], ips: list[str], via: str, now: datetime, own: bool = False,
+          banners: dict | None = None) -> dict:
     """Итог проверки с учетом прошлых. Новый порт - тот, что открыт сейчас и не был открыт ни
     в одной проверке за месяц (seen): иначе прокси, упавший на одну проверку, на следующей
     выдал бы все порты ноды за новые. Первая проверка задает точку отсчета."""
@@ -342,7 +445,8 @@ def merge(prev: dict, rows: list[dict], ips: list[str], via: str, now: datetime,
     seen = {k: v for k, v in (seen or {}).items() if _age_ok(v, now)}
     for x in opened:
         seen[f"{x['ip']}|{x['port']}"] = now.isoformat()
-    out = {"ts": now.isoformat(), "via": via, "own": own, "ips": ips, "ports": rows, "seen": seen}
+    out = {"ts": now.isoformat(), "via": via, "own": own, "ips": ips, "ports": rows, "seen": seen,
+           "banners": banners or {}}
     if new:
         out["new"], out["new_ts"] = new, now.isoformat()
     elif prev.get("new") and prev.get("new_ts"):
@@ -402,6 +506,7 @@ def view(srv: Server) -> dict | None:
     if ex.get("new"):
         out["new"] = _relabel(srv, ex["new"])
     out["own"] = from_panel(srv)
+    out["foreign"] = list(foreign(srv).values())
     out["muted"] = sorted(muted_ports(srv), key=lambda p: int(p) if p.isdigit() else 0)
     return out
 
@@ -414,8 +519,10 @@ def exposed(srv: Server, now: datetime) -> list[dict]:
     if ts is None or now - ts > FRESH or from_panel(srv):
         return []
     muted = muted_ports(srv)
+    alien = foreign(srv)  # адрес ведет на другой сервер: его порты не про эту ноду
     return [x for x in _relabel(srv, ex.get("ports") or [])
-            if x.get("state") == "open" and (x.get("risk") or x.get("svc")) and str(x.get("port")) not in muted]
+            if x.get("state") == "open" and (x.get("risk") or x.get("svc")) and str(x.get("port")) not in muted
+            and x.get("ip") not in alien]
 
 
 def exposed_level(rows: list[dict]) -> int:
@@ -465,7 +572,9 @@ def new_ports(srv: Server, now: datetime, hours: int = 24) -> list[dict]:
     if now - ts > timedelta(hours=hours):
         return []
     muted = muted_ports(srv)
-    return [x for x in _relabel(srv, ex.get("new") or []) if str(x.get("port")) not in muted]
+    alien = foreign(srv)
+    return [x for x in _relabel(srv, ex.get("new") or []) if str(x.get("port")) not in muted
+            and x.get("ip") not in alien]
 
 
 def new_since(srv: Server) -> str | None:

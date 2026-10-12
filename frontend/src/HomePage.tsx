@@ -360,6 +360,13 @@ function actionItems(servers: Server[], avail: string, relProblem: string, t: T)
         name: s.name, cc: s.country, sec: 'osupd',
         text: `${s.name}: ${osAdv.map((x) => x.text).join('; ')}` })
     }
+    // по внешнему адресу ноды отвечает другой сервер: проверка портов судила бы о чужом хосте
+    for (const f of s.exposure?.foreign ?? []) {
+      items.push({ key: `foreign-${s.id}-${f.ip}`, icon: '🔀', section: 'servers', id: s.id, name: s.name,
+        cc: s.country, sec: 'exposure',
+        text: t('{name}: по внешнему адресу {ip} отвечает другой сервер ({o}, у ноды {n}) - поправьте внешний адрес',
+          { name: s.name, ip: f.ip, o: f.outside, n: f.node }) })
+    }
     // SSH пускает по паролю, а порт открыт в интернет
     for (const a of s.ssh_advice ?? []) {
       items.push({ key: `ssh-${s.id}`, icon: a.level >= 2 ? '⛔' : '🔐', section: 'servers', id: s.id,

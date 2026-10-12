@@ -66,7 +66,7 @@ def test_transactions_locks_wraparound_vacuum():
                          {"db": "shop", "table": "fresh", "dead": 2_000_000, "live": 3_000_000, "vac": 3600}]))
     assert [t for _l, t, _k in db_health.problems(rep, NOW)] == [
         "PostgreSQL pg: транзакция идет 2 ч 13 мин (база shop, report-job)",
-        "PostgreSQL pg: транзакция открыта и простаивает 40 мин (база shop, api): держит блокировки и мешает VACUUM",
+        "PostgreSQL pg: транзакция открыта и простаивает 40 мин (база shop, api): держит блокировки",
         "PostgreSQL pg: ждут блокировку 3 запр., дольше всех 7 мин",
         "PostgreSQL pg: возраст транзакций базы shop 1.20 млрд, на 2.1 млрд PostgreSQL остановит запись - "
         "автоочистка не успевает замораживать строки",
@@ -89,7 +89,22 @@ def test_alert_home_and_view():
 
 def test_helper_writes_health():
     src = (Path(__file__).resolve().parents[2] / "agent" / "dbstat-setup.sh").read_text(encoding="utf-8")
-    assert "KERVAX_SETUP_VERSION=0.5" in src and "health_pg()" in src and "health_mysql()" in src
+    assert "KERVAX_SETUP_VERSION=0.6" in src and "health_pg()" in src and "health_mysql()" in src
+    assert "backend_xmin is not null" in src and "idle_xmin" in src
     assert "report.d/db-health.json" in src and "pid <> pg_backend_pid()" in src
     assert 'case "$v" in [0-9]*) ;; *) return 0 ;; esac' in src and 'case "$rec" in t|f)' in src
     assert "\r" not in src
+
+
+def test_vacuum_only_for_a_transaction_holding_a_snapshot():
+    """Две простаивающие: старшая держит advisory lock без снимка, младшая после SELECT держит
+    снимок. VACUUM мешает только вторая"""
+    rep = _rep(_pg(idle_xact=27600, idle_db="shop", idle_app="worker", idle_xmin=26880, idle_xmin_db="shop",
+                   idle_xmin_app="worker"))
+    assert [t for _l, t, _k in db_health.problems(rep, NOW)] == [
+        "PostgreSQL pg: транзакция открыта и простаивает 7 ч 28 мин (база shop, worker): держит снимок, "
+        "VACUUM не может чистить мертвые строки",
+        "PostgreSQL pg: транзакция открыта и простаивает 7 ч 40 мин (база shop, worker): держит блокировки"]
+    # одна и та же транзакция - одна строка, про VACUUM
+    one = _rep(_pg(idle_xact=4000, idle_xmin=4000))
+    assert [k for _l, _t, k in db_health.problems(one, NOW)] == ["pg:pg:idle"]

@@ -1002,6 +1002,8 @@ export type Exposure = {
   ts: string
   via: string // через какую локацию смотрели ("панель" - напрямую)
   own?: boolean // смотрели с адреса самой панели: открытое может быть открыто только для нее
+  // по этим внешним адресам отвечает другой сервер: версия SSH снаружи не та, что у ноды
+  foreign?: { ip: string; outside: string; node: string }[]
   ips: string[]
   ports: ExposedPort[]
   new?: ExposedPort[] // открылись с прошлых проверок
@@ -1432,6 +1434,7 @@ export type Server = {
   ssh?: {
     ports: number[]; password: boolean; root: string; root_password: boolean; guard: string
     fail: number; accepted_password: number; open: boolean | null
+    fail_top?: { ip: string; n: number }[] // откуда перебор, больше всех сверху
   } | null
   ssh_advice?: { kind: string; level: number; text: string }[] | null
   // здоровье баз (helper dbstat-setup 0.5): роль, отставание реплики (сек), самая долгая

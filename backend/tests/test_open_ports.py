@@ -397,3 +397,37 @@ async def test_port_new_alert_once_per_check(tmp_path, monkeypatch):
     await collector.evaluate_servers(factory, cfg, now + timedelta(seconds=60))
     assert len(sent) == n  # та же проверка - второго сообщения нет
     await engine.dispose()
+
+
+async def test_ssh_banner_direct_and_through_socks():
+    """Баннер SSH читается и напрямую, и через socks5: ответ прокси (с адресом привязки) должен быть
+    прочитан целиком, иначе его хвост принимался бы за начало баннера"""
+    async def sshd(r, w):
+        w.write(b"SSH-2.0-OpenSSH_9.6p1 Ubuntu-3ubuntu13.19\r\n")
+        await w.drain()
+        w.close()
+
+    async def socks(r, w):
+        await r.readexactly(3)  # ver, 1 method, no auth
+        w.write(b"\x05\x00")
+        await w.drain()
+        await r.readexactly(4 + 4 + 2)  # CONNECT IPv4
+        w.write(b"\x05\x00\x00\x01" + bytes([10, 0, 0, 1]) + (4242).to_bytes(2, "big"))
+        w.write(b"SSH-2.0-OpenSSH_7.4\r\n")  # дальше в туннеле - сам сервис
+        await w.drain()
+        w.close()
+
+    srv, port = await _serve(sshd)
+    async with srv:
+        assert await open_ports.ssh_banner("127.0.0.1", port, None) == "SSH-2.0-OpenSSH_9.6p1 Ubuntu-3ubuntu13.19"
+    proxy, pport = await _serve(socks)
+    async with proxy:
+        assert await open_ports.ssh_banner("203.0.113.5", 2221, f"socks5://127.0.0.1:{pport}") == "SSH-2.0-OpenSSH_7.4"
+    # не SSH - не баннер
+    async def http(r, w):
+        w.write(b"HTTP/1.1 400 Bad Request\r\n\r\n")
+        await w.drain()
+        w.close()
+    srv2, port2 = await _serve(http)
+    async with srv2:
+        assert await open_ports.ssh_banner("127.0.0.1", port2, None) == ""

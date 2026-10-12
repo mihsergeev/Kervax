@@ -109,6 +109,31 @@ def diff(old: dict, new: dict) -> list[dict]:
     return ev
 
 
+SSH_SEEN_KEEP = timedelta(days=90)
+_PASSWORD_METHODS = ("password", "keyboard-interactive", "keyboard-interactive/pam")
+
+
+def ssh_login_events(state: dict, snap: dict, stamp: str) -> list[dict]:
+    """Входы по SSH из снимка (changes-setup 0.4). Вход по паролю с адреса, с которого этот
+    пользователь раньше не входил, - событие с алертом: так выглядит подобранный пароль. Входы
+    по ключу запоминаем молча. Первый снимок с входами - точка отсчета, без событий.
+    state["ssh_seen"] обновляется на месте: {"пользователь|адрес": когда видели}."""
+    baseline = "ssh_seen" not in state
+    seen = dict(state.get("ssh_seen") or {})
+    ev = []
+    for lg in ((snap.get("ssh") or {}).get("logins") or []):
+        if not isinstance(lg, dict) or not lg.get("u") or not lg.get("ip"):
+            continue
+        key = f"{lg['u']}|{lg['ip']}"
+        if key not in seen and not baseline and str(lg.get("m") or "") in _PASSWORD_METHODS:
+            ev.append({"kind": "login", "act": "add", "alert": True,
+                       "text": f"вход по паролю: {lg['u']} с {lg['ip']}, раньше с этого адреса не входил"})
+        seen[key] = stamp
+    cutoff = (datetime.fromisoformat(stamp) - SSH_SEEN_KEEP).isoformat()
+    state["ssh_seen"] = dict(sorted(((k, v) for k, v in seen.items() if v >= cutoff), key=lambda kv: kv[1])[-500:])
+    return ev
+
+
 def apply_snapshot(state: dict | None, snap: dict, now: datetime) -> dict:
     """Новый servers.changes: снимок, лента с новыми событиями, отметка последнего алертного."""
     st = dict(state or {})
@@ -116,9 +141,10 @@ def apply_snapshot(state: dict | None, snap: dict, now: datetime) -> dict:
     if prev is not None and prev.get("ts") == snap.get("ts"):
         return st
     logv = [e for e in st.get("log") or [] if isinstance(e, dict)]
-    if prev is not None:
-        stamp = datetime.fromtimestamp(int(snap["ts"]), timezone.utc).isoformat()
-        events = [dict(e, ts=stamp) for e in diff(prev, snap)]
+    stamp = datetime.fromtimestamp(int(snap["ts"]), timezone.utc).isoformat()
+    logins = ssh_login_events(st, snap, stamp) if (snap.get("ssh") or {}).get("logins") is not None else []
+    if prev is not None or logins:
+        events = [dict(e, ts=stamp) for e in (diff(prev, snap) if prev is not None else []) + logins]
         if events:
             logv = (events + logv)
             if any(e["alert"] for e in events):

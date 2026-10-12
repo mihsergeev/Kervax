@@ -13,11 +13,16 @@
 # to a connection from the internet (Match blocks included), failed and password logins over
 # the last 10 minutes, and whether fail2ban, sshguard or crowdsec is running.
 #
+# Since 0.4: the version of its own sshd (the panel compares it with the banner it sees at the
+# node's external address: on one node that address led to another server entirely), the
+# addresses a brute force comes from, and the successful logins of the last 10 minutes with
+# their method (the panel alerts on a password login from an address never seen before).
+#
 # Only fingerprints, names and hashes leave the node: no key material, no crontab or sudoers
 # contents. The helper changes nothing.
 set -euo pipefail
 
-KERVAX_SETUP_VERSION=0.3  # MAJOR.MINOR; compared component-wise
+KERVAX_SETUP_VERSION=0.4  # MAJOR.MINOR; compared component-wise
 KERVAX_SETUP_ALWAYS=1     # safe on any node: it only reads files and systemctl
 
 HELPER_DIR=/lib65/kervax
@@ -158,24 +163,34 @@ listen_procs() {
 # of the journal.
 ssh_info() {
   command -v sshd >/dev/null 2>&1 || return 0
-  local t r ports fail accp guard g
+  local t r ports fail accp guard g j banner top logins
   t=$(sshd -T -C user=kervax-probe,host=probe.invalid,addr=203.0.113.1 2>/dev/null) || t=$(sshd -T 2>/dev/null) || return 0
   r=$(sshd -T -C user=root,host=probe.invalid,addr=203.0.113.1 2>/dev/null) || r="$t"
   sv() { printf '%s\n' "$1" | awk -v k="$2" '$1 == k { print $2; exit }'; }
   ports=$(printf '%s\n' "$t" | awk '$1 == "port" && $2 ~ /^[0-9]+$/ { print $2 }' | sort -un | head -5 | paste -sd, -)
-  fail=$(journalctl -u ssh -u sshd --since "-10min" -o cat 2>/dev/null \
-    | grep -cE "Failed (password|keyboard-interactive)|Invalid user|authentication failure" || true)
-  accp=$(journalctl -u ssh -u sshd --since "-10min" -o cat 2>/dev/null \
-    | grep -cE "Accepted (password|keyboard-interactive)" || true)
+  j=$(journalctl -u ssh -u sshd --since "-10min" -o cat 2>/dev/null | tail -n 20000)
+  fail=$(printf '%s\n' "$j" | grep -cE "Failed (password|keyboard-interactive)|Invalid user|authentication failure" || true)
+  accp=$(printf '%s\n' "$j" | grep -cE "Accepted (password|keyboard-interactive)" || true)
+  # where the brute force comes from: the five busiest addresses
+  top=$(printf '%s\n' "$j" | grep -E "Failed (password|keyboard-interactive)|Invalid user" \
+    | grep -oE "from [0-9A-Fa-f.:]+" | awk '{ print $2 }' | sort | uniq -c | sort -rn | head -5 \
+    | awk '{ printf "%s{\"ip\":\"%s\",\"n\":%s}", (NR > 1 ? "," : ""), $2, $1 }')
+  # successful logins: method, user, address
+  logins=$(printf '%s\n' "$j" | sed -nE 's/^Accepted ([a-z/-]+) for ([A-Za-z0-9._-]+) from ([0-9A-Fa-f.:]+) port .*/\1 \2 \3/p' \
+    | sort -u | head -20 | awk '{ printf "%s{\"m\":\"%s\",\"u\":\"%s\",\"ip\":\"%s\"}", (NR > 1 ? "," : ""), $1, $2, $3 }')
+  # the version of its own sshd: the panel compares it with the banner at the external address.
+  # Not by connecting to itself - tcp wrappers refuse localhost on some nodes and log every try
+  banner=$(sshd -V 2>&1 | grep -o 'OpenSSH_[0-9][0-9A-Za-z.]*' | head -1 || true)
   guard=""
   for g in fail2ban sshguard crowdsec; do
     systemctl is-active --quiet "$g" 2>/dev/null && { guard=$g; break; }
   done
-  printf '{"pass":"%s","kbd":"%s","pam":"%s","methods":"%s","root":"%s","rootpass":"%s","rootkbd":"%s","ports":[%s],"fail":%d,"accp":%d,"guard":"%s"}' \
+  printf '{"pass":"%s","kbd":"%s","pam":"%s","methods":"%s","root":"%s","rootpass":"%s","rootkbd":"%s","ports":[%s],"fail":%d,"accp":%d,"guard":"%s","banner":"%s","fail_top":[%s],"logins":[%s]}' \
     "$(esc "$(sv "$t" passwordauthentication)")" "$(esc "$(sv "$t" kbdinteractiveauthentication)")" \
     "$(esc "$(sv "$t" usepam)")" "$(esc "$(sv "$t" authenticationmethods)")" \
     "$(esc "$(sv "$r" permitrootlogin)")" "$(esc "$(sv "$r" passwordauthentication)")" \
-    "$(esc "$(sv "$r" kbdinteractiveauthentication)")" "$ports" "${fail:-0}" "${accp:-0}" "$guard"
+    "$(esc "$(sv "$r" kbdinteractiveauthentication)")" "$ports" "${fail:-0}" "${accp:-0}" "$guard" \
+    "$(esc "$banner")" "$top" "$logins"
 }
 
 now=$(date +%s)
