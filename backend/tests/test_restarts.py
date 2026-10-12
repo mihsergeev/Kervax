@@ -1,0 +1,111 @@
+"""Часто перезапускается: контейнер или под, который падает раз в час-другой. Быстрый цикл ловит
+docker_loop, а медленный - приросты RestartCount за сутки."""
+from datetime import datetime, timedelta, timezone
+
+from sqlalchemy import select
+
+from app import collector, restarts
+from app.models import Server
+
+NOW = datetime(2026, 10, 12, 12, 0, tzinfo=timezone.utc)
+
+
+def _rep(rc=0, pod_rc=0, access=True):
+    return {"docker": {"access": access, "containers": [{"name": "web", "state": "running", "restarts": rc}]},
+            "kube": {"pods": [{"ns": "shop", "name": "api-7f9", "owner": "ReplicaSet", "phase": "Running",
+                               "ready": True, "restarts": pod_rc},
+                              {"ns": "shop", "name": "migrate-x", "owner": "Job", "restarts": 9}]}}
+
+
+def _srv(state=None, mutes=None, rep=None):
+    return Server(id=1, name="n1", token_hash="x", enabled=True, backup_not_required=True, last_seen=NOW,
+                  offline_after_seconds=120, alert_sustain_seconds=900, last_report=rep or _rep(),
+                  alert_state=state or {}, alert_mutes=mutes or [], cpu_alert_percent=0, mem_alert_percent=0,
+                  disk_warn_percent=0, disk_alert_percent=0, disk_crit_percent=0, temp_alert_c=0,
+                  conntrack_alert_percent=0, disk_temp_alert_c=0, db_conn_alert_percent=0,
+                  web_5xx_alert_percent=0, kube_expiry_warn_days=[])
+
+
+def test_step_counts_increments_and_forgets():
+    cs = restarts.step(None, 3, NOW)
+    assert cs == {"rc": 3, "ev": []}  # первая точка - отсчет, прошлые перезапуски не в счет
+    cs = restarts.step(cs, 5, NOW + timedelta(hours=1))
+    cs = restarts.step(cs, 5, NOW + timedelta(hours=2))
+    cs = restarts.step(cs, 1, NOW + timedelta(hours=3))  # пересоздали при деплое - не падение
+    cs = restarts.step(cs, 2, NOW + timedelta(hours=4))
+    assert restarts.count(cs, NOW + timedelta(hours=4))[0] == 3
+    # через сутки после первого прироста он уходит из окна
+    later = NOW + timedelta(hours=25, minutes=1)
+    assert restarts.count(restarts.step(cs, 2, later), later)[0] == 1
+
+
+def test_update_keeps_counters_when_the_source_is_missing():
+    st = restarts.update(None, _rep(rc=1, pod_rc=2), NOW)
+    assert set(st) == {"docker:web", "pod:shop/api-7f9"}  # под Job - не в счет
+    st = restarts.update(st, _rep(rc=2, access=False), NOW + timedelta(minutes=1))
+    assert st["docker:web"]["rc"] == 1  # доступа к Docker нет - счетчик держим
+    st = restarts.update(st, {"docker": {"access": True, "containers": []}, "kube": {"pods": []}},
+                         NOW + timedelta(minutes=2))
+    assert st == {}  # контейнер и под пропали из отчета - забываем
+
+
+def _state(n_docker, n_pod, alerted_loop=False):
+    rs = {"docker:web": {"rc": 50, "ev": [[(NOW - timedelta(hours=i + 1)).isoformat(), 1] for i in range(n_docker)]},
+          "pod:shop/api-7f9": {"rc": 9, "ev": [[(NOW - timedelta(minutes=30)).isoformat(), n_pod]]}}
+    return {"restarts": rs, "docker": {"web": {"alerted_loop": alerted_loop}}}
+
+
+def test_problems_alert_and_home_rows():
+    s = _srv(_state(6, 22))
+    assert [x["text"] for x in restarts.problems(s, NOW)] == [
+        "контейнер web перезапускался 6 раз за сутки, последний 60 мин назад",
+        "под shop/api-7f9 перезапускался 22 раза за сутки, последний 30 мин назад"]
+    conds = collector._server_conditions(s, NOW)
+    assert conds["docker_restarts"][0] == 1 and conds["docker_restarts"][1]["sig"] == ["docker:web"]
+    assert conds["kube_restarts"][0] == 1
+    rows = [(p["kind"], p["level"], p.get("section"), p["mute"]) for p in collector.server_problems(s, NOW)
+            if p["kind"].endswith("_restarts")]
+    assert rows == [("docker_restarts", 1, "docker", "restarts:docker:web"),
+                    ("kube_restarts", 1, "kuber", "restarts:pod:shop/api-7f9")]
+    assert restarts.view(s, NOW) == {"docker:web": 6, "pod:shop/api-7f9": 22}
+    # реже пяти раз в сутки - не беда; заглушенный - молчим; быстрый цикл уже сказан docker_loop
+    assert restarts.problems(_srv(_state(4, 0)), NOW) == []
+    assert [x["key"] for x in restarts.problems(_srv(_state(6, 22), mutes=["restarts:docker:web"]), NOW)] == [
+        "pod:shop/api-7f9"]
+    assert [x["key"] for x in restarts.problems(_srv(_state(6, 22, alerted_loop=True)), NOW)] == ["pod:shop/api-7f9"]
+    assert collector._recovery_detail("docker_restarts", {}, {}) == "перезапуски стихли: за сутки меньше 5"
+
+
+async def test_alert_after_five_restarts_a_day(tmp_path, monkeypatch):
+    from app.config import Settings
+    from app.db import Base, create_engine_and_factory
+
+    engine, factory = create_engine_and_factory(f"sqlite+aiosqlite:///{(tmp_path / 'r.db').as_posix()}")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    t0 = datetime.now(timezone.utc) - timedelta(hours=6)
+    async with factory() as s:
+        s.add(Server(name="node", token_hash="x", enabled=True, backup_not_required=True, last_seen=t0,
+                     cpu_alert_percent=0, mem_alert_percent=0,
+                     last_report={"uptime_seconds": 100000, **_rep(rc=0)}))
+        await s.commit()
+    sent: list[str] = []
+
+    async def fake_send(cfg, text, parse_mode=None):
+        sent.append(text)
+        return []
+
+    monkeypatch.setattr("app.alerts.send_alert", fake_send)
+    cfg = Settings(alert_webhook="http://hook")
+    # контейнер падает раз в час: шесть часов подряд по одному перезапуску
+    for i in range(8):
+        t = t0 + timedelta(hours=i)
+        async with factory() as s:
+            srv = (await s.execute(select(Server))).scalars().one()
+            srv.last_seen = t
+            srv.last_report = {"uptime_seconds": 100000, **_rep(rc=min(i, 6))}
+            await s.commit()
+        await collector.evaluate_servers(factory, cfg, t)
+    hits = [m for m in sent if m.startswith("🔄🐳")]
+    assert len(hits) == 1 and "контейнер web перезапускался 5 раз за сутки" in hits[0], sent
+    await engine.dispose()
