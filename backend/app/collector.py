@@ -20,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app import alerts, audit, backup, backup_growth, checks as checks_exec, custom_backups, docker_exposure, flaky, heartbeat, settings_store
 from app import backup_verify
+from app import mem_trend
 from app import restarts as srv_restarts
 from app import changes as srv_changes
 from app import open_ports
@@ -210,6 +211,7 @@ _SRV_ICON = {
     "exposed": "🔓", "port_new": "🚪", "pressure": "🫁", "net_health": "📶",
     "kube_node": "🖥☸️", "kube_job": "💥☸️", "access_change": "🔑",
     "backup_restore": "🛟💾", "docker_restarts": "🔄🐳", "kube_restarts": "🔄☸️",
+    "mem_leak": "📈🧠",
 }
 
 # Куда ведёт ссылка алерта (deep-link ?server=id&sec=…). Целимся в КОНКРЕТНУЮ метрику,
@@ -227,7 +229,7 @@ _SRV_SECTION = {
     "unit_loop": "unitloop",
     "cpu_spin": "cpueat",
     "exposed": "exposure", "port_new": "exposure", "pressure": "pressure", "net_health": "nethealth",
-    "access_change": "changes",
+    "access_change": "changes", "mem_leak": "memleak",
 }
 
 
@@ -1294,6 +1296,8 @@ def _recovery_detail(key: str, st: dict, ctx: dict) -> str:
         return "сеть ноды снова в порядке: потерь, переполнений и ошибок нет"
     if key == "kube_node":
         return "ноды кластера снова Ready, давления нет"
+    if key == "mem_leak":
+        return "память больше не растет день за днем"
     if key in ("docker_restarts", "kube_restarts"):
         return f"перезапуски стихли: за сутки меньше {srv_restarts.MIN}"
     if key == "backup_restore":
@@ -3013,6 +3017,15 @@ def server_problems(s: Server, now: datetime, pod_names: dict[str, str] | None =
     if bv:
         add("backup_restore", bv[0][0], "; ".join(t for _l, t in bv[:2]), "", "backup_restore",
             section="backups", srv=False)
+    # Утечка памяти: контейнер ведет в "Докер", под - в "Кубер", процесс - в "Память" карточки
+    for x in mem_trend.problems(s, now):
+        mute = mem_trend.MUTE_PREFIX + x["key"]
+        if x["kind"] == "docker":
+            add("mem_leak", x["level"], x["text"], "", mute, section="docker")
+        elif x["kind"] == "pod":
+            add("mem_leak", x["level"], x["text"], "pods", mute, section="kuber")
+        else:
+            add("mem_leak", x["level"], x["text"], "memleak", mute)
     # Часто перезапускается (медленный цикл): контейнер ведет в "Докер", под - в "Кубер"
     for x in srv_restarts.problems(s, now):
         if x["kind"] == "docker":
@@ -4409,6 +4422,11 @@ def _server_conditions(s: Server, now: datetime,
             items = [x for x in rp if x["kind"] == kind]
             out[key] = (1 if items else 0, {"detail": "; ".join(x["text"] for x in items[:4]),
                                             "sig": [x["key"] for x in items]})
+    # Утечка памяти: дно растет суток подряд (история - в alert_state mem_trend, ведет цикл алертов)
+    if online and isinstance((s.alert_state or {}).get("mem_trend"), dict):
+        ml = mem_trend.problems(s, now)
+        out["mem_leak"] = (max((x["level"] for x in ml), default=0),
+                           {"detail": "; ".join(x["text"] for x in ml[:3]), "sig": [x["key"] for x in ml]})
     # Проверка восстановления: итог недельной проверки держится до следующей, выдержка не нужна
     if online and backup_verify.block(rep) is not None:
         bv = backup_verify.problems(rep, now)
@@ -4618,7 +4636,7 @@ async def evaluate_servers(
             if _muted(key, level, mutes):
                 continue  # тип (или его нижние уровни) заглушён для этого сервера
             prev = int(st.get(key, 0))
-            if key in ("disk_health", "units", "docker_restarts", "kube_restarts"):
+            if key in ("disk_health", "units", "docker_restarts", "kube_restarts", "mem_leak"):
                 # Тот же уровень, но сломалось НОВОЕ (второй диск при уже развалившемся
                 # RAID, второй упавший юнит): молчать нельзя, хотя уровень не вырос. Что
                 # сломано - ключи в sig.
@@ -4902,6 +4920,10 @@ async def evaluate_servers(
             rstate = srv_restarts.update(st.get("restarts"), s.last_report or {}, now)
             if rstate != (st.get("restarts") or {}):
                 apply(s.id, "restarts", rstate)
+            # суточные минимумы памяти контейнеров, подов и процессов (mem_trend)
+            mstate = mem_trend.update(st.get("mem_trend"), s.last_report or {}, now)
+            if mstate != (st.get("mem_trend") or {}):
+                apply(s.id, "mem_trend", mstate)
 
         # Очереди RabbitMQ: алертим те, что переросли свой порог. Состояние — на
         # КАЖДУЮ очередь: очередей десятки, и одна разбухшая не должна глушить
