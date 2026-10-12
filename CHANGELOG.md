@@ -4,6 +4,17 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.4.138] - 2026-10-12
+
+### Fixed
+- Проверка восстановления бэкапа (helper backup-setup 0.35) не выполнялась на нодах, где бэкап
+  настроен до панели и работает системным restic: она искала только копию панели в
+  /usr/local/lib/.restic и выдавала "restic: No such file or directory", а панель показывала
+  предупреждение "проверка восстановления не выполнилась". Теперь restic берется тот же, каким
+  идет бэкап: копия панели, если она есть, иначе системный из PATH.
+- Helper 0.35 раскатывается тем же плейбуком:
+  `ansible-playbook playbooks/kervax_helpers.yml -l kervax_outdated`.
+
 ## [1.4.137] - 2026-10-12
 
 ### Added
