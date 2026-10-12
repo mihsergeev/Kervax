@@ -543,6 +543,16 @@ function ServerServicesModal({ srv, onClose, onChanged, autoQueues, sites }: {
                     {hot && ` · ${t('есть переполненные (≥{n})', { n: QUEUE_HOT })}`}
                   </div>
                 )}
+                {it.web && (s.web_config ?? [])
+                  .filter((c) => !c.ok && it.kind.toLowerCase().startsWith(c.server))
+                  .map((c) => (
+                    <div key={c.server + c.where} className="svc-card-detail small t-degraded">
+                      {c.where && c.where !== 'host'
+                        ? t('конфиг в контейнере {c} не проходит проверку: {e}', { c: c.where, e: c.err })
+                        : t('конфиг не проходит проверку: {e}', { e: c.err })}
+                      {' '}{t('Следующий reload или перезапуск уронит сайты.')}
+                    </div>
+                  ))}
                 {it.sites && it.sites.length > 0 && (
                   <SitesList
                     sites={it.sites}

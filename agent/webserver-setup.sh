@@ -13,7 +13,10 @@ set -euo pipefail
 #       domain out of every line by that format and reports requests and 5xx per domain
 # 0.22: the domain is found in docker json logs of tab-separated formats (docker writes the tab
 #       as \u0009), and a log_format in double quotes with \" inside keeps its $host
-KERVAX_SETUP_VERSION=0.22  # MAJOR.MINOR; compared component-wise
+# 0.23: the configs are tested every 15 minutes (nginx -t on the host and in nginx containers,
+#       apachectl -t, caddy validate for a Caddyfile, haproxy -c) -> report.d/web-config.json:
+#       a config that fails the test takes the sites down at the next reload or restart
+KERVAX_SETUP_VERSION=0.23  # MAJOR.MINOR; compared component-wise
 KERVAX_SETUP_ALWAYS=1     # safe on any node: the refresh is a no-op without a web server
 
 HELPER_DIR=/lib65/kervax
@@ -367,6 +370,54 @@ collect_logs | merge_logs | sort > "$LOGTMP" 2>/dev/null || : > "$LOGTMP"
 [ -s "$LOGTMP" ] || caddy_sources >> "$LOGTMP" 2>/dev/null || true
 mv -f "$LOGTMP" /var/lib/kervax/web-logs.tsv
 chmod 0644 /var/lib/kervax/web-logs.tsv
+
+# -- config test: with a config like this the next reload or restart takes the sites down --
+# Only the first error line leaves the node (the file and line it points at), not the config.
+CFG=""
+cesc() { printf '%s' "$1" | tr -d '\000-\037' | cut -c1-240 | sed 's/\\/\\\\/g; s/"/\\"/g'; }
+# No verdict when the test could not run at all: no such program in the container, no Caddyfile
+# (caddy-docker-proxy builds its config from labels). A missing include file IS a verdict.
+CFG_NA='executable file not found|reading config (from )?file: open /etc/caddy/Caddyfile'
+cfg_run() { # server where command...
+  local srv="$1" where="$2" out rc err
+  shift 2
+  out=$(timeout 30 "$@" 2>&1); rc=$?
+  [ "$rc" -eq 124 ] && return 0  # the test did not finish in time: no verdict
+  [ "$rc" -ne 0 ] && printf '%s\n' "$out" | grep -qiE "$CFG_NA" && return 0
+  err=""
+  if [ "$rc" -ne 0 ]; then
+    err=$(printf '%s\n' "$out" | grep -m1 -iE 'emerg|error|failed|invalid|unknown|syntax' | sed 's/^nginx: //')
+    [ -n "$err" ] || err=$(printf '%s\n' "$out" | grep -m1 .)
+  fi
+  CFG="$CFG${CFG:+,}{\"server\":\"$srv\",\"where\":\"$(cesc "$where")\",\"ok\":$([ "$rc" -eq 0 ] && echo true || echo false),\"err\":\"$(cesc "$err")\"}"
+}
+check_configs() {
+  local a c
+  command -v nginx >/dev/null 2>&1 && pgrep -x nginx >/dev/null 2>&1 && cfg_run nginx host nginx -t
+  for a in apache2ctl apachectl; do
+    if command -v "$a" >/dev/null 2>&1; then
+      { pgrep -x apache2 || pgrep -x httpd; } >/dev/null 2>&1 && cfg_run apache host "$a" -t
+      break
+    fi
+  done
+  command -v caddy >/dev/null 2>&1 && [ -f /etc/caddy/Caddyfile ] && pgrep -x caddy >/dev/null 2>&1 \
+    && cfg_run caddy host caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+  command -v haproxy >/dev/null 2>&1 && [ -f /etc/haproxy/haproxy.cfg ] && pgrep -x haproxy >/dev/null 2>&1 \
+    && cfg_run haproxy host haproxy -c -f /etc/haproxy/haproxy.cfg
+  command -v docker >/dev/null 2>&1 || return 0
+  while read -r c; do
+    [ -n "$c" ] && cfg_run nginx "$c" docker exec "$c" nginx -t
+  done < <(docker ps --format '{{.Names}} {{.Image}}' 2>/dev/null | awk '/nginx/{print $1}' | sort -u)
+  # Caddy with its own Caddyfile (caddy-docker-proxy has none: CFG_NA skips it)
+  while read -r c; do
+    [ -n "$c" ] && cfg_run caddy "$c" docker exec "$c" caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+  done < <(docker ps --format '{{.Names}} {{.Image}}' 2>/dev/null | awk '/caddy/{print $1}' | sort -u)
+}
+check_configs
+CFGOUT=/var/lib/kervax/report.d/web-config.json
+printf '{"v":1,"ts":%s,"items":[%s]}\n' "$(date +%s)" "$CFG" > "$CFGOUT.tmp.$$"
+chmod 0644 "$CFGOUT.tmp.$$"
+mv -f "$CFGOUT.tmp.$$" "$CFGOUT"
 
 NGINX=$(collect_nginx | sort -u)
 APACHE=$(collect_apache | sort -u)

@@ -4,6 +4,20 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.4.143] - 2026-10-12
+
+### Added
+- Проверка конфигов веб-серверов (helper webserver-setup 0.23). Раз в 15 минут helper гоняет
+  nginx -t на хосте и в nginx-контейнерах, apachectl -t, caddy validate для Caddyfile и haproxy -c.
+  Конфиг, который не проходит проверку, сейчас ничего не ломает - работает старый, - но
+  следующий reload, перезапуск контейнера или перезагрузка ноды уронит сайты. С ноды уходит
+  только первая строка ошибки (файл и строка, куда она указывает), конфиг - нет.
+- Алерт-предупреждение "Веб-сервер: конфиг не проходит проверку", строка в "Что сломано" ведет
+  в "Сервисы", ошибка видна в карточке веб-сервера. Контейнеры, где проверить нечем (нет nginx в
+  образе, у caddy-docker-proxy нет Caddyfile), не судим.
+- Helper 0.23 раскатывается тем же плейбуком:
+  `ansible-playbook playbooks/kervax_helpers.yml -l kervax_outdated`.
+
 ## [1.4.142] - 2026-10-12
 
 ### Added
