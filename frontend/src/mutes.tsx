@@ -34,6 +34,7 @@ export const SRV_ALERT_KINDS: { k: string; label: string }[] = [
   { k: 'docker_restarts', label: 'Docker: часто перезапускается' },
   { k: 'kube_restarts', label: 'Kubernetes: под часто перезапускается' },
   { k: 'mem_leak', label: 'Память: растет день за днем' },
+  { k: 'ssh_risk', label: 'SSH: опасный вход' },
   { k: 'cpu_spin', label: 'CPU: процессы в пустом цикле' },
   { k: 'backup_growth', label: 'Бэкап: резкий прирост' },
   { k: 'docker_sock', label: 'Docker: внешний прокси с docker-сокетом' },

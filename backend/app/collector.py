@@ -22,6 +22,7 @@ from app import alerts, audit, backup, backup_growth, checks as checks_exec, cus
 from app import backup_verify
 from app import mem_trend
 from app import restarts as srv_restarts
+from app import ssh_audit
 from app import changes as srv_changes
 from app import open_ports
 from app import disk_forecast as dfc
@@ -211,7 +212,7 @@ _SRV_ICON = {
     "exposed": "🔓", "port_new": "🚪", "pressure": "🫁", "net_health": "📶",
     "kube_node": "🖥☸️", "kube_job": "💥☸️", "access_change": "🔑",
     "backup_restore": "🛟💾", "docker_restarts": "🔄🐳", "kube_restarts": "🔄☸️",
-    "mem_leak": "📈🧠",
+    "mem_leak": "📈🧠", "ssh_risk": "🔐",
 }
 
 # Куда ведёт ссылка алерта (deep-link ?server=id&sec=…). Целимся в КОНКРЕТНУЮ метрику,
@@ -229,7 +230,7 @@ _SRV_SECTION = {
     "unit_loop": "unitloop",
     "cpu_spin": "cpueat",
     "exposed": "exposure", "port_new": "exposure", "pressure": "pressure", "net_health": "nethealth",
-    "access_change": "changes", "mem_leak": "memleak",
+    "access_change": "changes", "mem_leak": "memleak", "ssh_risk": "ssh",
 }
 
 
@@ -1298,6 +1299,8 @@ def _recovery_detail(key: str, st: dict, ctx: dict) -> str:
         return "ноды кластера снова Ready, давления нет"
     if key == "mem_leak":
         return "память больше не растет день за днем"
+    if key == "ssh_risk":
+        return "SSH больше не пускает root по паролю, перебора без защиты нет"
     if key in ("docker_restarts", "kube_restarts"):
         return f"перезапуски стихли: за сутки меньше {srv_restarts.MIN}"
     if key == "backup_restore":
@@ -3017,6 +3020,9 @@ def server_problems(s: Server, now: datetime, pod_names: dict[str, str] | None =
     if bv:
         add("backup_restore", bv[0][0], "; ".join(t for _l, t in bv[:2]), "", "backup_restore",
             section="backups", srv=False)
+    # SSH: root по паролю на открытом порту, перебор паролей без fail2ban
+    for lv, txt in ssh_audit.problems(s, now):
+        add("ssh_risk", lv, txt, "ssh", "ssh_risk")
     # Утечка памяти: контейнер ведет в "Докер", под - в "Кубер", процесс - в "Память" карточки
     for x in mem_trend.problems(s, now):
         mute = mem_trend.MUTE_PREFIX + x["key"]
@@ -4422,6 +4428,10 @@ def _server_conditions(s: Server, now: datetime,
             items = [x for x in rp if x["kind"] == kind]
             out[key] = (1 if items else 0, {"detail": "; ".join(x["text"] for x in items[:4]),
                                             "sig": [x["key"] for x in items]})
+    # SSH (helper changes-setup 0.3): root по паролю на открытом порту, перебор без защиты
+    if online and ssh_audit.block(rep) is not None:
+        sp = ssh_audit.problems(s, now)
+        out["ssh_risk"] = (max((lv for lv, _t in sp), default=0), {"detail": "; ".join(t for _l, t in sp)})
     # Утечка памяти: дно растет суток подряд (история - в alert_state mem_trend, ведет цикл алертов)
     if online and isinstance((s.alert_state or {}).get("mem_trend"), dict):
         ml = mem_trend.problems(s, now)

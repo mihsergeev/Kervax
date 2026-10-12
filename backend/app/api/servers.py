@@ -17,6 +17,7 @@ from sqlalchemy import delete as sa_delete, func, select
 from app import backup_verify
 from app import mem_trend
 from app import restarts as srv_restarts
+from app import ssh_audit
 from app import changes as srv_changes
 from app import audit, backup_growth, custom_backups, docker_exposure, geoip, kube_coverage, manual_probe, open_ports, os_support
 from app.collector import (
@@ -211,6 +212,8 @@ def _out(
     o.backup_verify = backup_verify.view(server.last_report or {}, now)
     o.restarts_day = srv_restarts.view(server, now) or None
     o.mem_leaks = mem_trend.problems(server, now) or None
+    o.ssh = ssh_audit.view(server, now)
+    o.ssh_advice = ssh_audit.advice(server, now) or None
     o.proxy_outdated = docker_exposure.outdated(server.last_report or {}, now.timestamp())
     o.disk_analyze = disk_analyze_ok(server.last_report or {})
     o.fresh = _fresh_node(server, now)

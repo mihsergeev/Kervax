@@ -2553,6 +2553,41 @@ function OpenPorts({ server: s, onChanged }: { server: Server; onChanged: () => 
   )
 }
 
+// SSH: как пускает соединение из интернета (helper changes-setup 0.3). Судим только порт, открытый
+// снаружи по внешней проверке: SSH за белым списком с паролем - не дыра
+function SshLogin({ server: s }: { server: Server }) {
+  const { t } = useI18n()
+  const v = s.ssh
+  if (!v) return null
+  const probs = (s.problems ?? []).filter((p) => p.kind === 'ssh_risk')
+  const adv = s.ssh_advice ?? []
+  const openText = v.open === true ? t('открыт в интернет') : v.open === false ? t('закрыт снаружи') : t('снаружи не проверялся')
+  const rootText = v.root === 'yes' ? (v.root_password ? t('по паролю') : t('по ключу')) : v.root === 'no' ? t('запрещен') : t('только по ключу')
+  return (
+    <div className="detail-inc" id="mcard-ssh">
+      <div className="chart-cap">SSH</div>
+      {probs.map((p) => (
+        <div key={p.text} className={`small ${p.level >= 2 ? 't-down' : 't-degraded'}`}>{p.text}</div>
+      ))}
+      {probs.length === 0 && adv.map((a) => (
+        <div key={a.text} className={`small ${a.level >= 2 ? 't-down' : 't-degraded'}`}>{a.text}</div>
+      ))}
+      <table className="exp-table psi-table small">
+        <tbody>
+          <tr><td>{t('порт')}</td><td>{v.ports.join(', ')} · <span className={v.open ? 't-degraded' : 'muted'}>{openText}</span></td></tr>
+          <tr><td>{t('вход по паролю')}</td><td className={v.password && v.open ? 't-degraded' : ''}>{v.password ? t('включен') : t('выключен, только ключи')}</td></tr>
+          <tr><td>{t('root')}</td><td className={v.root_password ? 't-down' : ''}>{rootText}</td></tr>
+          <tr><td>{t('защита от перебора')}</td><td>{v.guard || t('нет')}</td></tr>
+          <tr>
+            <td>{t('неудачных входов за 10 минут')}</td>
+            <td>{v.fail}{v.accepted_password > 0 && <span className="muted"> · {t('входов по паролю: {n}', { n: v.accepted_password })}</span>}</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  )
+}
+
 function FailedUnits({ server: s, onChanged }: { server: Server; onChanged: () => void }) {
   const { t } = useI18n()
   const { isViewer } = useAuth()
@@ -5067,6 +5102,7 @@ function ServerDetail({
             )}
           </div>
           <OpenPorts server={s} onChanged={onChanged} />
+          <SshLogin server={s} />
         </MetricSection>
 
         <MetricSection id="disk" title={t('Диск')}>

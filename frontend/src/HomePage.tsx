@@ -37,7 +37,7 @@ const ISSUE_ICON: Record<string, string> = {
   docker: '🐳', kuber: '☸️', backups: '💾', docker_sock: '🔓',
   clock: '🕐', dns: '🌐', db_conn: '🔌', web_5xx: '🌐', queue: '🐇', kube_expiry: '⏳', flux_down: '☸️',
   flux_stale: '☸️', backup_dump: '🛢', backup_dump_space: '🛢', backup_cron: '🛢', backup_check: '🩺',
-  unit_loop: '🔁', kube_cron: '⏰', exposed: '🔓', port_new: '🚪', pressure: '🫁', net_health: '📶', kube_node: '☸️', kube_job: '💥', access_change: '🔑', backup_restore: '🛟', docker_restarts: '🔄', kube_restarts: '🔄', mem_leak: '📈',
+  unit_loop: '🔁', kube_cron: '⏰', exposed: '🔓', port_new: '🚪', pressure: '🫁', net_health: '📶', kube_node: '☸️', kube_job: '💥', access_change: '🔑', backup_restore: '🛟', docker_restarts: '🔄', kube_restarts: '🔄', mem_leak: '📈', ssh_risk: '🔐',
 }
 
 type T = (k: string, p?: Record<string, string | number>) => string
@@ -359,6 +359,11 @@ function actionItems(servers: Server[], avail: string, relProblem: string, t: T)
       items.push({ key: `os-${s.id}`, icon: osAdv.some((x) => x.level >= 2) ? '⛔' : '🧰', section: 'servers', id: s.id,
         name: s.name, cc: s.country, sec: 'osupd',
         text: `${s.name}: ${osAdv.map((x) => x.text).join('; ')}` })
+    }
+    // SSH пускает по паролю, а порт открыт в интернет
+    for (const a of s.ssh_advice ?? []) {
+      items.push({ key: `ssh-${s.id}`, icon: a.level >= 2 ? '⛔' : '🔐', section: 'servers', id: s.id,
+        name: s.name, cc: s.country, sec: 'ssh', text: `${s.name}: ${a.text}` })
     }
     for (const h of s.helper_advice || []) {
       // «устарел (? → v0.1)» на ноде, где helper'а нет вовсе, вводит в заблуждение:
