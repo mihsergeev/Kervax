@@ -2275,7 +2275,9 @@ function LoopingUnits({ server: s, onChanged }: { server: Server; onChanged: () 
 
 // Что открыто в интернет. Панель раз в 6 часов стучится снаружи (через первую локацию-прокси,
 // без нее - сама) ко всем портам, которые слушает нода: что из этого видно из интернета, а что
-// закрыто файрволом. Опасное - база, очередь, Docker API, kubelet, экспортер метрик.
+// закрыто файрволом. Опасное - база, очередь, Docker API, kubelet, экспортер метрик. Проверка с
+// адреса самой панели показывает, что открыто для панели: файрвол ноды часто пускает её по белому
+// списку, поэтому красного и кнопок там нет.
 const PORT_STATE: Record<ExposedPort['state'], string> = {
   open: 'открыт',
   closed: 'закрыт',
@@ -2372,16 +2374,29 @@ function OpenPorts({ server: s, onChanged }: { server: Server; onChanged: () => 
       setBusy(false)
     }
   }
+  // проверка с самой панели: "открыто" значит "открыто для панели", судить по ней нельзя
+  const own = !!ex?.own
+  // адрес в строке - только если открытые порты на адресах ноды расходятся
+  const openIps = [...new Set(opened.flatMap((g) => g.open))]
+  const quietIps = (ex?.ips ?? []).filter((ip) => !openIps.includes(ip))
+  const perRowIps = openIps.length > 1
+  const openText = (g: PortGroup) => {
+    const word = own ? t('открыт для панели') : t('открыт')
+    return perRowIps && g.open.length < openIps.length ? `${word}: ${g.open.join(', ')}` : word
+  }
   return (
     <div className="detail-inc exposure" id="mcard-exposure">
       <div className="chart-cap">{t('Что открыто в интернет')}</div>
       <div className="muted small">
         {ex
-          ? t(sinceShort(ex.ts, t) ? 'проверено снаружи {ago} назад, откуда: {via}, адреса: {ips}' : 'проверено снаружи только что, откуда: {via}, адреса: {ips}', {
-              ago: sinceShort(ex.ts, t),
-              via: t(ex.via),
-              ips: ex.ips.join(', ') || '-',
-            })
+          ? own
+            ? t(sinceShort(ex.ts, t) ? 'проверено {ago} назад с адреса самой панели' : 'проверено только что с адреса самой панели', {
+                ago: sinceShort(ex.ts, t),
+              })
+            : t(sinceShort(ex.ts, t) ? 'проверено снаружи {ago} назад через {via}' : 'проверено снаружи только что через {via}', {
+                ago: sinceShort(ex.ts, t),
+                via: t(ex.via),
+              })
           : t('Внешней проверки еще не было: панель проверяет раз в 6 часов.')}
         {!isViewer && (
           <button className="ghost small row-act" disabled={scanning} onClick={scan}>
@@ -2390,6 +2405,22 @@ function OpenPorts({ server: s, onChanged }: { server: Server; onChanged: () => 
         )}
         {err && <span className="t-down"> {err}</span>}
       </div>
+      {ex && ex.ips.length > 0 && (
+        <div className="muted small">
+          {t('адреса ноды: {ips}', { ips: ex.ips.join(', ') })}
+          {opened.length > 0 && quietIps.length > 0 && <> · {t('на {ips} ничего не открыто', { ips: quietIps.join(', ') })}</>}
+        </div>
+      )}
+      {ex && own && opened.length > 0 && (
+        <div className="small exp-own">
+          {t('Панель смотрела со своего адреса, а файрвол ноды часто пускает панель по белому списку. Тогда здесь "открыт" и то, что для остальных закрыто, поэтому по этой проверке нет ни красного, ни алертов. Чтобы видеть, что открыто для всех, добавьте в "Локациях" прокси в другой сети.')}
+        </div>
+      )}
+      {ex && !own && opened.length > 0 && (
+        <div className="muted small">
+          {t('Красным - то, чему не место в интернете: базы, очереди, etcd, kubelet, Docker API, экспортеры метрик. Такой порт закройте или отметьте "открыт намеренно", остальное - для сведения.')}
+        </div>
+      )}
       {ex && !ex.ips.length && (
         <div className="muted small">{t('Публичного адреса у ноды не нашлось: проверять нечего.')}</div>
       )}
@@ -2402,23 +2433,31 @@ function OpenPorts({ server: s, onChanged }: { server: Server; onChanged: () => 
       )}
       {shown.length > 0 && (
         <table className="exp-table small">
+          <thead>
+            <tr>
+              <th>{t('Порт')}</th>
+              <th>{t('Что слушает')}</th>
+              <th>{t('Снаружи')}</th>
+              <th />
+            </tr>
+          </thead>
           <tbody>
             {shown.map((g) => {
               const m = muted.has(String(g.port))
-              const bad = g.open.length > 0 && g.risk && !m
+              const bad = !own && g.open.length > 0 && g.risk && !m
               return (
                 <tr key={g.port} className={bad ? 'exp-bad' : ''}>
                   <td className="mono">{g.port}</td>
                   <td>
                     {g.name && <b>{g.name} </b>}
-                    <span className="muted">{g.what}</span>
-                    {fresh.has(g.port) && <span className="exp-new">{t('новый')}</span>}
+                    <span className="muted">{g.what || t('процесс не известен')}</span>
+                    {!own && fresh.has(g.port) && <span className="exp-new">{t('новый')}</span>}
                   </td>
                   <td className={bad ? 't-down' : g.open.length ? '' : 'muted'}>
-                    {g.open.length ? `${t('открыт')}: ${g.open.join(', ')}` : t(PORT_STATE[g.other])}
+                    {g.open.length ? openText(g) : t(PORT_STATE[g.other])}
                   </td>
                   <td>
-                    {m ? (
+                    {own ? null : m ? (
                       <span className="muted">
                         {t('намеренно')}{' '}
                         {!isViewer && (
@@ -2448,7 +2487,7 @@ function OpenPorts({ server: s, onChanged }: { server: Server; onChanged: () => 
           {all ? t('только открытые') : t('закрытых и за файрволом: {n}, показать', { n: groups.length - opened.length })}
         </button>
       )}
-      {opened.some((g) => g.risk && !muted.has(String(g.port))) && (
+      {!own && opened.some((g) => g.risk && !muted.has(String(g.port))) && (
         <div className="muted small unit-hint">
           {t('Закройте порт файрволом или привяжите сервис к 127.0.0.1 либо к внутреннему адресу. Порт Docker, опубликованный через -p, обходит ufw: публикуйте его как 127.0.0.1:порт:порт.')}
         </div>

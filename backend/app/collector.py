@@ -1280,6 +1280,10 @@ def _recovery_detail(key: str, st: dict, ctx: dict) -> str:
     if key == "kube_cron":
         return "CronJob кластера снова отрабатывают"
     if key == "exposed":
+        if ctx.get("own"):
+            return ("проверка шла с адреса панели, а файрвол ноды может пускать панель и закрывать "
+                    "порты для остальных: по такой проверке панель больше не алертит, нужна "
+                    "локация-прокси в другой сети")
         return "опасных сервисов, открытых в интернет, больше нет"
     if key == "pressure":
         return "сервер снова дышит: процессы не ждут память и диск, зависших нет"
@@ -4376,7 +4380,7 @@ def _server_conditions(s: Server, now: datetime,
     if online:
         ex = open_ports.exposed(s, now)
         out["exposed"] = (2 if ex else 0, {"detail": "открыто в интернет: " + open_ports.exposed_text(ex),
-                                           "n": len(ex)})
+                                           "n": len(ex), "own": open_ports.from_panel(s)})
     # Сервер задыхается (агент 2.26): уровень - худшая из причин, выдержка - как у CPU и RAM
     if online and any(rep.get(k) for k in ("psi", "dstate", "fds")):
         pr = pressure_problems(rep)

@@ -1104,8 +1104,20 @@ const EN: Record<string, string> = {
   'ок': 'ok',
   // что открыто в интернет
   'Что открыто в интернет': 'Open to the internet',
-  'проверено снаружи {ago} назад, откуда: {via}, адреса: {ips}': 'checked from outside {ago} ago, from: {via}, addresses: {ips}',
-  'проверено снаружи только что, откуда: {via}, адреса: {ips}': 'checked from outside just now, from: {via}, addresses: {ips}',
+  'проверено снаружи {ago} назад через {via}': 'checked from outside {ago} ago via {via}',
+  'проверено снаружи только что через {via}': 'checked from outside just now via {via}',
+  'проверено {ago} назад с адреса самой панели': 'checked {ago} ago from the panel\'s own address',
+  'проверено только что с адреса самой панели': 'checked just now from the panel\'s own address',
+  'адреса ноды: {ips}': 'node addresses: {ips}',
+  'на {ips} ничего не открыто': 'nothing open on {ips}',
+  'Панель смотрела со своего адреса, а файрвол ноды часто пускает панель по белому списку. Тогда здесь "открыт" и то, что для остальных закрыто, поэтому по этой проверке нет ни красного, ни алертов. Чтобы видеть, что открыто для всех, добавьте в "Локациях" прокси в другой сети.':
+    'The panel checked from its own address, and node firewalls often allow the panel by allowlist. Then "open" here includes ports closed to everyone else, so this check shows no red and sends no alerts. To see what is open to everyone, add a proxy in another network under "Locations".',
+  'Красным - то, чему не место в интернете: базы, очереди, etcd, kubelet, Docker API, экспортеры метрик. Такой порт закройте или отметьте "открыт намеренно", остальное - для сведения.':
+    'Red means it does not belong on the internet: databases, queues, etcd, kubelet, Docker API, metrics exporters. Close such a port or mark it "open on purpose", the rest is for reference.',
+  'Что слушает': 'Listening',
+  'Снаружи': 'From outside',
+  'открыт для панели': 'open to the panel',
+  'процесс не известен': 'process unknown',
   'панель': 'panel',
   'Внешней проверки еще не было: панель проверяет раз в 6 часов.': 'No outside check yet: the panel checks every 6 hours.',
   'проверить сейчас': 'check now',

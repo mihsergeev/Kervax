@@ -980,6 +980,7 @@ export type ExposedPort = {
 export type Exposure = {
   ts: string
   via: string // через какую локацию смотрели ("панель" - напрямую)
+  own?: boolean // смотрели с адреса самой панели: открытое может быть открыто только для нее
   ips: string[]
   ports: ExposedPort[]
   new?: ExposedPort[] // открылись с прошлых проверок
