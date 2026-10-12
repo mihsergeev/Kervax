@@ -839,6 +839,16 @@ export type ServerProblem = {
 }
 // Кто ест CPU группами (агент 2.21): процессы с одним именем у одного владельца. cpu - % одного
 // ядра (как top), spin - сколько из них давно крутят по ядру вхолостую, spin_age - возраст старшего
+export type DbHealth = {
+  engine: string
+  container: string
+  role: string // primary | replica
+  replicas: number
+  lag: number
+  xact: number
+  xid: number
+  problems: { level: number; text: string }[]
+}
 export type MemLeak = {
   key: string
   kind: 'docker' | 'pod' | 'proc'
@@ -1424,6 +1434,9 @@ export type Server = {
     fail: number; accepted_password: number; open: boolean | null
   } | null
   ssh_advice?: { kind: string; level: number; text: string }[] | null
+  // здоровье баз (helper dbstat-setup 0.5): роль, отставание реплики (сек), самая долгая
+  // транзакция (сек), возраст XID, найденные проблемы
+  db_health?: DbHealth[] | null
   // внешние прокси со сборкой образа старше года (built - unix-секунды)
   proxy_outdated?: { name: string; image: string; kind: string; version: string; built: number; age_days: number }[]
   // нода умеет разобрать раздел по запросу (агент 2.24 + diskusage-setup 0.6)

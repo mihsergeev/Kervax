@@ -93,6 +93,10 @@ SERVER_ALERT_KINDS: dict[str, tuple[str, str]] = {
     # SSH открыт в интернет (внешняя проверка портов) и пускает root по паролю (проблема) или
     # идет перебор паролей, а fail2ban/sshguard/crowdsec нет (предупреждение). helper changes-setup 0.3
     "ssh_risk": ("SSH: опасный вход", "{detail}"),
+    # Здоровье баз (helper dbstat-setup 0.5): реплика стоит или отстает, транзакция идет часами
+    # или висит незакрытой, запросы ждут блокировку, возраст XID ползет к wraparound, таблица
+    # давно без VACUUM
+    "db_health": ("СУБД: реплика, транзакции, VACUUM", "{detail}"),
     "reboot": ("Перезагрузка", "перезагружен (аптайм сброшен)"),
     "oom": ("OOM-killer", "OOM-kill: ядро убило {value} процесс(ов){victim} из-за нехватки памяти"),
     "docker_down": ("Docker: контейнер упал", "контейнер {container} не работает: {why}"),

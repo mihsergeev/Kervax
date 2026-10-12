@@ -1200,6 +1200,11 @@ const EN: Record<string, string> = {
   'проверено {d}: файлов совпало {n}{dumps}': 'checked {d}: {n} files matched{dumps}',
   ', дампы читаются: {e}': ', dumps readable: {e}',
   'Бэкап: проверка восстановления': 'Backup: restore check',
+  // здоровье баз
+  'СУБД: реплика, транзакции, VACUUM': 'DB: replica, transactions, VACUUM',
+  'реплика, отстает на {l}': 'replica, {l} behind',
+  'реплика, догнала': 'replica, caught up',
+  'основная, реплик: {n}': 'primary, replicas: {n}',
   // SSH
   'SSH: опасный вход': 'SSH: risky login',
   'порт': 'port',

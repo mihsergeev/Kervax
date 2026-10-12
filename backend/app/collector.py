@@ -20,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app import alerts, audit, backup, backup_growth, checks as checks_exec, custom_backups, docker_exposure, flaky, heartbeat, settings_store
 from app import backup_verify
+from app import db_health
 from app import mem_trend
 from app import restarts as srv_restarts
 from app import ssh_audit
@@ -212,7 +213,7 @@ _SRV_ICON = {
     "exposed": "🔓", "port_new": "🚪", "pressure": "🫁", "net_health": "📶",
     "kube_node": "🖥☸️", "kube_job": "💥☸️", "access_change": "🔑",
     "backup_restore": "🛟💾", "docker_restarts": "🔄🐳", "kube_restarts": "🔄☸️",
-    "mem_leak": "📈🧠", "ssh_risk": "🔐",
+    "mem_leak": "📈🧠", "ssh_risk": "🔐", "db_health": "🛢",
 }
 
 # Куда ведёт ссылка алерта (deep-link ?server=id&sec=…). Целимся в КОНКРЕТНУЮ метрику,
@@ -230,7 +231,7 @@ _SRV_SECTION = {
     "unit_loop": "unitloop",
     "cpu_spin": "cpueat",
     "exposed": "exposure", "port_new": "exposure", "pressure": "pressure", "net_health": "nethealth",
-    "access_change": "changes", "mem_leak": "memleak", "ssh_risk": "ssh",
+    "access_change": "changes", "mem_leak": "memleak", "ssh_risk": "ssh", "db_health": "services",
 }
 
 
@@ -263,6 +264,7 @@ _ALERT_SECTION = {
     "backup_restore": "backups",
     "docker_restarts": "docker",
     "kube_restarts": "kuber",
+    "db_health": "services",
 }
 
 
@@ -1299,6 +1301,8 @@ def _recovery_detail(key: str, st: dict, ctx: dict) -> str:
         return "ноды кластера снова Ready, давления нет"
     if key == "mem_leak":
         return "память больше не растет день за днем"
+    if key == "db_health":
+        return "базы снова в порядке: реплики догнали, долгих транзакций и блокировок нет"
     if key == "ssh_risk":
         return "SSH больше не пускает root по паролю, перебора без защиты нет"
     if key in ("docker_restarts", "kube_restarts"):
@@ -3020,6 +3024,9 @@ def server_problems(s: Server, now: datetime, pod_names: dict[str, str] | None =
     if bv:
         add("backup_restore", bv[0][0], "; ".join(t for _l, t in bv[:2]), "", "backup_restore",
             section="backups", srv=False)
+    # Здоровье баз: ведет в "Сервисы" ноды, где инвентарь СУБД
+    for lv, txt, _key in db_health.problems(rep, now):
+        add("db_health", lv, txt, "", "db_health", section="services")
     # SSH: root по паролю на открытом порту, перебор паролей без fail2ban
     for lv, txt in ssh_audit.problems(s, now):
         add("ssh_risk", lv, txt, "ssh", "ssh_risk")
@@ -4428,6 +4435,12 @@ def _server_conditions(s: Server, now: datetime,
             items = [x for x in rp if x["kind"] == kind]
             out[key] = (1 if items else 0, {"detail": "; ".join(x["text"] for x in items[:4]),
                                             "sig": [x["key"] for x in items]})
+    # Здоровье баз (helper dbstat-setup 0.5): реплика, долгие транзакции, блокировки, wraparound,
+    # VACUUM. sig - что именно, чтобы новая беда при том же уровне дала свой алерт
+    if online and db_health.block(rep, now) is not None:
+        dh = db_health.problems(rep, now)
+        out["db_health"] = (max((lv for lv, _t, _k in dh), default=0),
+                            {"detail": "; ".join(t for _l, t, _k in dh[:3]), "sig": [k for _l, _t, k in dh]})
     # SSH (helper changes-setup 0.3): root по паролю на открытом порту, перебор без защиты
     if online and ssh_audit.block(rep) is not None:
         sp = ssh_audit.problems(s, now)
@@ -4646,7 +4659,7 @@ async def evaluate_servers(
             if _muted(key, level, mutes):
                 continue  # тип (или его нижние уровни) заглушён для этого сервера
             prev = int(st.get(key, 0))
-            if key in ("disk_health", "units", "docker_restarts", "kube_restarts", "mem_leak"):
+            if key in ("disk_health", "units", "docker_restarts", "kube_restarts", "mem_leak", "db_health"):
                 # Тот же уровень, но сломалось НОВОЕ (второй диск при уже развалившемся
                 # RAID, второй упавший юнит): молчать нельзя, хотя уровень не вырос. Что
                 # сломано - ключи в sig.
