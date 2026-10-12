@@ -6,6 +6,7 @@ import {
   listServers,
   updateServer,
   type DBStat,
+  type DbHealth,
   type Server,
   type ServiceInfo,
 } from './api'
@@ -161,9 +162,17 @@ function fmtBytes(n: number): string {
 // Инвентарь СУБД: сколько инстансов, самые крупные базы, логины, версия. Раньше карточка
 // отвечала только «бэкапьте отдельно» — полезно, но не на первый вопрос «что внутри».
 // Паролей тут нет by design: root-хелпер отдаёт лишь имена, размеры и версию.
-function DbInventory({ db, t }: {
+// Отставание реплики коротко: 40 с, 12 мин, 3 ч
+function lagText(sec: number, t: (s: string, v?: Record<string, string | number>) => string): string {
+  if (sec < 60) return t('{n} с', { n: sec })
+  if (sec < 3600) return t('{n} мин', { n: Math.round(sec / 60) })
+  return t('{n} ч', { n: Math.round(sec / 3600) })
+}
+
+function DbInventory({ db, t, health = [] }: {
   db: DBStat[]
   t: (s: string, v?: Record<string, string | number>) => string
+  health?: DbHealth[] // здоровье этих инстансов (dbstat-setup 0.5): реплика, транзакции, VACUUM
 }) {
   const [open, setOpen] = useState(false)
   const keys = db[0]?.engine === 'redis' // у redis в size лежат ключи, а не байты
@@ -208,12 +217,22 @@ function DbInventory({ db, t }: {
             {t('коннекты: {u} из {m} ({p}%)', { u: conn.used, m: conn.max, p: connPct })}
           </span>
         )}
+        {health.map((h) => (h.role === 'replica' || h.replicas > 0) && (
+          <span key={'r' + h.container} title={h.container || undefined}>
+            {h.role === 'replica'
+              ? h.lag > 0 ? t('реплика, отстает на {l}', { l: lagText(h.lag, t) }) : t('реплика, догнала')
+              : t('основная, реплик: {n}', { n: h.replicas })}
+          </span>
+        ))}
         {rows.length > 5 && (
           <button className="svc-act" onClick={() => setOpen(!open)}>
             {open ? t('свернуть') : t('показать все')}
           </button>
         )}
       </div>
+      {health.flatMap((h) => h.problems).map((p) => (
+        <div key={p.text} className={`small ${p.level >= 2 ? 't-down' : 't-degraded'}`}>{p.text}</div>
+      ))}
       <div className={open ? 'svc-db-list open' : 'svc-db-list'}>
         {shown.map((r, i) => (
           <div key={r.cont + '/' + r.name + i} className="svc-db-row">
@@ -534,7 +553,10 @@ function ServerServicesModal({ srv, onClose, onChanged, autoQueues, sites }: {
                     onOpenCheck={sites.onOpenCheck}
                   />
                 )}
-                {it.db && <DbInventory db={it.db} t={t} />}
+                {it.db && (
+                  <DbInventory db={it.db} t={t}
+                    health={(s.db_health ?? []).filter((h) => DB_ENGINE_LABEL[h.engine] === it.kind)} />
+                )}
                 {!it.db && !it.web && !it.svc && noDbHint(it.kind, !!it.inKube, s, t) && (
                   <div className="svc-card-detail muted small">
                     {noDbHint(it.kind, !!it.inKube, s, t)}

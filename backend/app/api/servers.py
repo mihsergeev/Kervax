@@ -15,6 +15,7 @@ from fastapi.responses import FileResponse, PlainTextResponse
 from sqlalchemy import delete as sa_delete, func, select
 
 from app import backup_verify
+from app import db_health
 from app import mem_trend
 from app import restarts as srv_restarts
 from app import ssh_audit
@@ -214,6 +215,7 @@ def _out(
     o.mem_leaks = mem_trend.problems(server, now) or None
     o.ssh = ssh_audit.view(server, now)
     o.ssh_advice = ssh_audit.advice(server, now) or None
+    o.db_health = db_health.view(server.last_report or {}, now)
     o.proxy_outdated = docker_exposure.outdated(server.last_report or {}, now.timestamp())
     o.disk_analyze = disk_analyze_ok(server.last_report or {})
     o.fresh = _fresh_node(server, now)

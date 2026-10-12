@@ -8,9 +8,15 @@
 # service user, and the password (when needed) is taken from THE CONTAINER'S OWN
 # environment — exactly as the backup-setup dump helper already does. Only database and
 # login names, sizes and the version leave this script.
+#
+# Since 0.5 it also checks database health and writes /var/lib/kervax/report.d/db-health.json
+# (the agent passes report.d files through as they are): replication state and lag, the oldest
+# open transaction, lock waits, and for PostgreSQL the transaction ID age (wraparound) and
+# tables full of dead rows that have not been vacuumed for long. Query texts never leave: only
+# database, table and application names and numbers.
 set -euo pipefail
 
-KERVAX_SETUP_VERSION=0.4  # MAJOR.MINOR; compared component-wise
+KERVAX_SETUP_VERSION=0.5  # MAJOR.MINOR; compared component-wise
 KERVAX_SETUP_ALWAYS=1     # safe on any node: without a database it collects an empty file
 
 HELPER_DIR=/lib65/kervax
@@ -21,7 +27,7 @@ OUT="$STATE_DIR/db-stats.json"
 if [ "$(id -u)" != 0 ]; then echo "Root required." >&2; exit 1; fi
 
 # The parent /var/lib/kervax is set to 0755 EXPLICITLY (under umask 077 the unprivileged agent could not enter).
-install -d -m 0755 "$HELPER_DIR" "$STATE_DIR" "$STATE_DIR/versions"
+install -d -m 0755 "$HELPER_DIR" "$STATE_DIR" "$STATE_DIR/versions" "$STATE_DIR/report.d"
 
 cat > "$HELPER" <<'HELPER_EOF'
 #!/usr/bin/env bash
@@ -29,6 +35,8 @@ cat > "$HELPER" <<'HELPER_EOF'
 set -u
 OUT=/var/lib/kervax/db-stats.json
 TMP="$OUT.tmp.$$"
+HOUT=/var/lib/kervax/report.d/db-health.json
+HEALTH=""
 TO=10   # per-query timeout: a hung database must not hang the whole collection
 
 have() { command -v "$1" >/dev/null 2>&1; }
@@ -63,6 +71,9 @@ list_json() {
       printf "%s\"%s\"", (n++?",":""), s }
     END{printf "]"}'
 }
+
+# an integer or 0: whatever the engine printed, the JSON stays valid
+num() { case "${1:-}" in ''|*[!0-9-]*|-) echo 0 ;; *) echo "$1" ;; esac; }
 
 ENTRIES=""
 add_entry() { # engine container version dbs_json users_json conn_used conn_max
@@ -105,6 +116,56 @@ collect_pg() {
   cu=$(pg_q "$c" "select count(*) from pg_stat_activity where backend_type = 'client backend'" | head -1)
   cm=$(pg_q "$c" "select current_setting('max_connections')::int" | head -1)
   add_entry pg "$c" "$v" "$d" "$u" "$cu" "$cm"
+  health_pg "$c"
+}
+
+# the same as pg_q, in a given database (table statistics live per database)
+pg_q_db() { # container db query
+  local c="$1" db="$2" q="$3" u
+  if [ -n "$c" ]; then
+    u=$(docker exec "$c" printenv POSTGRES_USER 2>/dev/null || true)
+    timeout $TO docker exec -u postgres "$c" psql -d "$db" -Atqc "$q" 2>/dev/null \
+      || timeout $TO docker exec "$c" psql -d "$db" -Atqc "$q" ${u:+-U "$u"} 2>/dev/null
+  elif have runuser; then
+    timeout $TO runuser -u postgres -- psql -d "$db" -Atqc "$q" 2>/dev/null
+  fi
+}
+
+# "age|db|app" of the oldest client transaction in the given state (active / idle in transaction)
+pg_oldest() { # container state-condition
+  pg_q "$1" "select extract(epoch from now()-xact_start)::int||'|'||coalesce(datname,'')||'|'||coalesce(application_name,'') from pg_stat_activity where backend_type='client backend' and pid <> pg_backend_pid() and $2 and xact_start is not null order by xact_start limit 1" | head -1
+}
+
+health_pg() {
+  local c="$1" rec r role n lag st xa xi lw xid dead db t dn ln va
+  rec=$(pg_q "$c" "select pg_is_in_recovery()" | head -1)
+  [ -z "$rec" ] && return 0
+  if [ "$rec" = t ]; then
+    # a replica: is the WAL receiver streaming, and how far behind is the replay. Equal LSNs mean
+    # it has replayed everything it got - an idle primary is not lag
+    role=replica; n=0
+    r=$(pg_q "$c" "select coalesce((select status from pg_stat_wal_receiver limit 1),'none')||'|'||case when pg_last_wal_receive_lsn() = pg_last_wal_replay_lsn() then 0 else coalesce(extract(epoch from now() - pg_last_xact_replay_timestamp()),0)::int end" | head -1)
+    st=${r%%|*}; lag=$(num "${r#*|}")
+  else
+    role=primary; st=""
+    r=$(pg_q "$c" "select count(*)||'|'||coalesce(max(extract(epoch from replay_lag)),0)::int from pg_stat_replication" | head -1)
+    n=$(num "${r%%|*}"); lag=$(num "${r#*|}")
+  fi
+  xa=$(pg_oldest "$c" "state='active'")
+  xi=$(pg_oldest "$c" "state like 'idle in transaction%'")
+  lw=$(pg_q "$c" "select count(*)||'|'||coalesce(max(extract(epoch from now()-query_start)),0)::int from pg_stat_activity where wait_event_type='Lock'" | head -1)
+  xid=$(pg_q "$c" "select age(datfrozenxid)||'|'||datname from pg_database order by age(datfrozenxid) desc limit 1" | head -1)
+  # tables with more than a million dead rows (and over 20% of the live ones) in the three biggest
+  # databases, with seconds since the last vacuum (-1: never)
+  dead=""
+  while IFS= read -r db; do
+    [ -n "$db" ] || continue
+    while IFS='|' read -r t dn ln va; do
+      [ -n "$t" ] || continue
+      dead="$dead${dead:+,}{\"db\":\"$(esc "$db")\",\"table\":\"$(esc "$t")\",\"dead\":$(num "$dn"),\"live\":$(num "$ln"),\"vac\":$(num "$va")}"
+    done < <(pg_q_db "$c" "$db" "select relname||'|'||n_dead_tup||'|'||n_live_tup||'|'||coalesce(extract(epoch from now()-greatest(last_vacuum,last_autovacuum))::bigint,-1) from pg_stat_user_tables where n_dead_tup > 1000000 and n_dead_tup > n_live_tup * 0.2 order by n_dead_tup desc limit 3")
+  done < <(pg_q "$c" "select datname from pg_database where not datistemplate and datallowconn order by pg_database_size(datname) desc limit 3")
+  HEALTH="$HEALTH${HEALTH:+,}{\"engine\":\"pg\",\"container\":\"$(esc "$c")\",\"role\":\"$role\",\"replicas\":$n,\"lag\":$lag,\"receiver\":\"$(esc "$st")\",\"xact\":$(num "${xa%%|*}"),\"xact_db\":\"$(esc "$(printf '%s' "$xa" | cut -d'|' -f2)")\",\"xact_app\":\"$(esc "$(printf '%s' "$xa" | cut -d'|' -f3)")\",\"idle_xact\":$(num "${xi%%|*}"),\"idle_db\":\"$(esc "$(printf '%s' "$xi" | cut -d'|' -f2)")\",\"idle_app\":\"$(esc "$(printf '%s' "$xi" | cut -d'|' -f3)")\",\"lock_waits\":$(num "${lw%%|*}"),\"lock_wait\":$(num "${lw#*|}"),\"xid\":$(num "${xid%%|*}"),\"xid_db\":\"$(esc "${xid#*|}")\",\"dead\":[$dead]}"
 }
 
 # ── MySQL / MariaDB ────────────────────────────────────────────────────────────
@@ -141,6 +202,42 @@ collect_mysql() {
   [ -z "$cu" ] && cu=$(my_q "$c" "show status like 'Threads_connected'" | awk '{print $2}' | head -1)
   cm=$(my_q "$c" "select @@max_connections" | head -1)
   add_entry mysql "$c" "$v" "$d" "$u" "$cu" "$cm"
+  health_mysql "$c"
+}
+
+# like my_q, but with the header line: SHOW ... STATUS is read by column names. Vertical output
+# (\G) is no good here - with -N newer clients drop the field names there too
+my_q_hdr() { # container query
+  local c="$1" q="$2"
+  if [ -n "$c" ]; then
+    timeout $TO docker exec "$c" sh -c 'if command -v mysql >/dev/null 2>&1; then CLI=mysql; else CLI=mariadb; fi
+      MYSQL_PWD="${MYSQL_ROOT_PASSWORD:-${MARIADB_ROOT_PASSWORD:-}}" exec "$CLI" -u root -B -e "'"$q"'"' 2>/dev/null
+  elif have mysql; then
+    timeout $TO mysql -B -e "$q" 2>/dev/null
+  else
+    timeout $TO mariadb -B -e "$q" 2>/dev/null
+  fi
+}
+# a column of a one-row result with a header, by a name pattern: Seconds_Behind_Source -> 12
+mcol() { printf '%s
+' "$1" | awk -F'	' -v k="$2" 'NR == 1 { for (i = 1; i <= NF; i++) if ($i ~ k) c = i; next }
+  NR == 2 && c { print $c; exit }'; }
+
+health_mysql() {
+  local c="$1" rs role io sq lag err xa lw
+  rs=$(my_q "$c" "SHOW REPLICA STATUS\\G")
+  [ -z "$rs" ] && rs=$(my_q "$c" "SHOW SLAVE STATUS\\G")
+  if [ -n "$rs" ]; then
+    role=replica
+    io=$(mcol "$rs" '^(Replica|Slave)_IO_Running$'); sq=$(mcol "$rs" '^(Replica|Slave)_SQL_Running$')
+    lag=$(mcol "$rs" '^Seconds_Behind_(Source|Master)$'); [ "$lag" = NULL ] && lag=-1
+    err=$(mcol "$rs" '^Last_IO_Error$'); [ -n "$err" ] || err=$(mcol "$rs" '^Last_SQL_Error$')
+  else
+    role=primary; io=""; sq=""; lag=0; err=""
+  fi
+  xa=$(my_q "$c" "select count(*), coalesce(max(timestampdiff(second, trx_started, now())),0) from information_schema.innodb_trx" | head -1)
+  lw=$(my_q "$c" "select count(*), coalesce(max(timestampdiff(second, trx_wait_started, now())),0) from information_schema.innodb_trx where trx_state='LOCK WAIT'" | head -1)
+  HEALTH="$HEALTH${HEALTH:+,}{\"engine\":\"mysql\",\"container\":\"$(esc "$c")\",\"role\":\"$role\",\"io\":\"$(esc "$io")\",\"sql\":\"$(esc "$sq")\",\"lag\":$(num "$lag"),\"err\":\"$(esc "$(printf '%s' "$err" | cut -c1-200)")\",\"trx\":$(num "$(printf '%s' "$xa" | cut -f1)"),\"xact\":$(num "$(printf '%s' "$xa" | cut -f2)"),\"lock_waits\":$(num "$(printf '%s' "$lw" | cut -f1)"),\"lock_wait\":$(num "$(printf '%s' "$lw" | cut -f2)")}"
 }
 
 # ── ClickHouse ─────────────────────────────────────────────────────────────────
@@ -197,6 +294,10 @@ pgrep -x clickhouse-serv >/dev/null 2>&1 && have clickhouse-client && collect_ch
 printf '{"ts":%s,"items":[%s]}\n' "$(date +%s)" "$ENTRIES" > "$TMP"
 mv -f "$TMP" "$OUT"
 chmod 0644 "$OUT"
+mkdir -p "${HOUT%/*}"
+printf '{"v":1,"ts":%s,"items":[%s]}\n' "$(date +%s)" "$HEALTH" > "$HOUT.tmp.$$"
+chmod 0644 "$HOUT.tmp.$$"
+mv -f "$HOUT.tmp.$$" "$HOUT"
 HELPER_EOF
 chmod 0755 "$HELPER"
 
@@ -224,4 +325,4 @@ systemctl enable --now kervax-db-stats.timer >/dev/null 2>&1 || true
 
 echo "$KERVAX_SETUP_VERSION" > "$STATE_DIR/versions/dbstat-setup.ver"
 chmod 0644 "$STATE_DIR/versions/dbstat-setup.ver"
-echo "✓ dbstat-setup: database inventory -> $OUT (refreshed at boot and every 15 minutes)."
+echo "dbstat-setup: database inventory -> $OUT, health -> $STATE_DIR/report.d/db-health.json (refreshed at boot and every 15 minutes)."
