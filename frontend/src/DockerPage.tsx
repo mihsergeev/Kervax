@@ -13,6 +13,7 @@ import {
 import { useAuth } from './auth'
 import { useUrlCard } from './deeplink'
 import { useI18n } from './i18n'
+import { RESTARTS_DAY_MIN } from './mutes'
 import { OsIcon } from './osIcon'
 import { CountryFlag } from './CountryFlag'
 import { proxyBuilt } from './serverUtils'
@@ -217,9 +218,11 @@ function ContainerRow({
   onChanged,
   onDenied,
   sock = false,
+  day = 0,
 }: {
   serverId: number
   c: DockerContainer
+  day?: number // перезапусков за сутки (restarts_day)
   problem?: string // 'down' | 'loop' — по контейнеру уже отправлен алерт
   canAct: boolean
   onLogs: () => void
@@ -279,10 +282,12 @@ function ContainerRow({
           )}
           {!!c.restarts && c.restarts > 0 && (
             <span
-              className="type-chip"
-              title={t('перезапусков за всё время (RestartCount): {n} (само по себе не проблема; тревога — на устойчивый crash-loop)', { n: c.restarts })}
+              className={`type-chip${day >= RESTARTS_DAY_MIN ? ' t-degraded' : ''}`}
+              title={day >= RESTARTS_DAY_MIN
+                ? t('перезапусков за сутки: {d}, за все время: {n}. Падает раз в час-другой: между падениями работает, но теряет соединения и очереди', { d: day, n: c.restarts })
+                : t('перезапусков за все время (RestartCount): {n} (само по себе не проблема, тревога - на устойчивый crash-loop)', { n: c.restarts })}
             >
-              ⟳ {c.restarts}
+              ⟳ {c.restarts}{day > 0 && ` · ${t('{d} за сутки', { d: day })}`}
             </span>
           )}
         </div>
@@ -538,6 +543,7 @@ function DockerHostModal({
                 problem={probs[c.name]}
                 onDenied={() => setDenied(true)}
                 sock={(s.docker_exposed ?? []).some((e) => e.name === c.name)}
+                day={s.restarts_day?.['docker:' + c.name] ?? 0}
                 canAct={canAct}
                 onLogs={() => setLogs(c.name)}
                 onChanged={onChanged}

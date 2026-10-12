@@ -20,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app import alerts, audit, backup, backup_growth, checks as checks_exec, custom_backups, docker_exposure, flaky, heartbeat, settings_store
 from app import backup_verify
+from app import restarts as srv_restarts
 from app import changes as srv_changes
 from app import open_ports
 from app import disk_forecast as dfc
@@ -208,7 +209,7 @@ _SRV_ICON = {
     "flux_stale": "⚠️☸️", "kube_cron": "⏰☸️",
     "exposed": "🔓", "port_new": "🚪", "pressure": "🫁", "net_health": "📶",
     "kube_node": "🖥☸️", "kube_job": "💥☸️", "access_change": "🔑",
-    "backup_restore": "🛟💾",
+    "backup_restore": "🛟💾", "docker_restarts": "🔄🐳", "kube_restarts": "🔄☸️",
 }
 
 # Куда ведёт ссылка алерта (deep-link ?server=id&sec=…). Целимся в КОНКРЕТНУЮ метрику,
@@ -239,7 +240,7 @@ _DISK_ICON = {1: "⚠️", 2: "🔴", 3: "🚨"}
 # понимает, кого он касается (у учётки может не быть, скажем, «Бэкапов»).
 # Вкладка карточки кластера в разделе "Кубер", куда ведет ссылка алерта.
 _KUBE_TAB = {"kube_expiry": "expiry", "flux_down": "flux", "flux_stale": "flux", "kube_pod": "pods",
-             "kube_cron": "cron", "kube_node": "nodes", "kube_job": "cron"}
+             "kube_cron": "cron", "kube_node": "nodes", "kube_job": "cron", "kube_restarts": "pods"}
 
 _ALERT_SECTION = {
     "docker_loop": "docker",
@@ -257,6 +258,8 @@ _ALERT_SECTION = {
     "kube_node": "kuber",
     "kube_job": "kuber",
     "backup_restore": "backups",
+    "docker_restarts": "docker",
+    "kube_restarts": "kuber",
 }
 
 
@@ -1291,6 +1294,8 @@ def _recovery_detail(key: str, st: dict, ctx: dict) -> str:
         return "сеть ноды снова в порядке: потерь, переполнений и ошибок нет"
     if key == "kube_node":
         return "ноды кластера снова Ready, давления нет"
+    if key in ("docker_restarts", "kube_restarts"):
+        return f"перезапуски стихли: за сутки меньше {srv_restarts.MIN}"
     if key == "backup_restore":
         return "проверка восстановления снова проходит: файлы и дампы из снапшота читаются"
     label = _SRV_LABEL[key]
@@ -3008,6 +3013,12 @@ def server_problems(s: Server, now: datetime, pod_names: dict[str, str] | None =
     if bv:
         add("backup_restore", bv[0][0], "; ".join(t for _l, t in bv[:2]), "", "backup_restore",
             section="backups", srv=False)
+    # Часто перезапускается (медленный цикл): контейнер ведет в "Докер", под - в "Кубер"
+    for x in srv_restarts.problems(s, now):
+        if x["kind"] == "docker":
+            add("docker_restarts", 1, x["text"], "", srv_restarts.MUTE_PREFIX + x["key"], section="docker")
+        else:
+            add("kube_restarts", 1, x["text"], "pods", srv_restarts.MUTE_PREFIX + x["key"], section="kuber")
     # Изменился доступ: держится сутки, пока не отметили "это мы"
     acc = srv_changes.unacked_alerts(s, now)
     if acc:
@@ -4390,6 +4401,14 @@ def _server_conditions(s: Server, now: datetime,
     if online and (rep.get("tcp") or rep.get("net_ifaces")):
         nets = net_problems(rep)
         sustain_lvl("net_health", nets[0][0] if nets else 0, {"detail": "; ".join(t for _l, _r, t in nets[:4])})
+    # Часто перезапускается: приросты счетчиков за сутки ведет цикл алертов (alert_state restarts).
+    # sig - что именно, чтобы новый контейнер в той же беде дал свой алерт
+    if online and isinstance((s.alert_state or {}).get("restarts"), dict):
+        rp = srv_restarts.problems(s, now)
+        for kind, key in (("docker", "docker_restarts"), ("pod", "kube_restarts")):
+            items = [x for x in rp if x["kind"] == kind]
+            out[key] = (1 if items else 0, {"detail": "; ".join(x["text"] for x in items[:4]),
+                                            "sig": [x["key"] for x in items]})
     # Проверка восстановления: итог недельной проверки держится до следующей, выдержка не нужна
     if online and backup_verify.block(rep) is not None:
         bv = backup_verify.problems(rep, now)
@@ -4599,7 +4618,7 @@ async def evaluate_servers(
             if _muted(key, level, mutes):
                 continue  # тип (или его нижние уровни) заглушён для этого сервера
             prev = int(st.get(key, 0))
-            if key in ("disk_health", "units"):
+            if key in ("disk_health", "units", "docker_restarts", "kube_restarts"):
                 # Тот же уровень, но сломалось НОВОЕ (второй диск при уже развалившемся
                 # RAID, второй упавший юнит): молчать нельзя, хотя уровень не вырос. Что
                 # сломано - ключи в sig.
@@ -4876,6 +4895,13 @@ async def evaluate_servers(
                         srv_url(s, "unit_loop"), recovery=True))
             if ustate != (st.get("unit_loops") or {}):
                 apply(s.id, "unit_loops", ustate)
+
+        # Счетчики перезапусков контейнеров и подов за сутки (restarts): по ним условия
+        # docker_restarts и kube_restarts на следующем тике
+        if online_now:
+            rstate = srv_restarts.update(st.get("restarts"), s.last_report or {}, now)
+            if rstate != (st.get("restarts") or {}):
+                apply(s.id, "restarts", rstate)
 
         # Очереди RabbitMQ: алертим те, что переросли свой порог. Состояние — на
         # КАЖДУЮ очередь: очередей десятки, и одна разбухшая не должна глушить

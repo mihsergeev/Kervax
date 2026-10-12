@@ -834,7 +834,7 @@ export type ServerDisk = {
 // один из резолверов, остальные отвечают
 export type ServerProblem = {
   kind: string; level: number; text: string; sec: string; mute: string; since?: string | null
-  section?: 'kuber' | 'services' | 'backups'; srv?: boolean; sub?: string
+  section?: 'kuber' | 'services' | 'backups' | 'docker'; srv?: boolean; sub?: string
   unit?: string; log?: string[] // юнит в цикле перезапусков и последние строки его лога
 }
 // Кто ест CPU группами (агент 2.21): процессы с одним именем у одного владельца. cpu - % одного
@@ -1403,6 +1403,8 @@ export type Server = {
   changes?: ServerChanges | null
   // недельная проверка восстановления бэкапа (helper backup-setup 0.34)
   backup_verify?: { ts: string | null; files_ok: number; dumps_ok: string[]; level: number; problems: string[] } | null
+  // перезапусков за сутки: "docker:<имя>" | "pod:<ns>/<имя>" -> n (5 и больше - предупреждение)
+  restarts_day?: Record<string, number> | null
   // внешние прокси со сборкой образа старше года (built - unix-секунды)
   proxy_outdated?: { name: string; image: string; kind: string; version: string; built: number; age_days: number }[]
   // нода умеет разобрать раздел по запросу (агент 2.24 + diskusage-setup 0.6)

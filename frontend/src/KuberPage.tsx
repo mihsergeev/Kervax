@@ -20,6 +20,7 @@ import {
 import { useAuth } from './auth'
 import { useUrlCard } from './deeplink'
 import { useI18n } from './i18n'
+import { RESTARTS_DAY_MIN } from './mutes'
 import { OsIcon } from './osIcon'
 import { CountryFlag } from './CountryFlag'
 import { fmtBytes } from './units'
@@ -327,9 +328,11 @@ function PodRow({
   canAct,
   onLogs,
   onChanged,
+  day = 0,
 }: {
   serverId: number
   p: KubePod
+  day?: number // перезапусков за сутки (restarts_day)
   canAct: boolean
   onLogs: () => void
   onChanged: () => void
@@ -373,10 +376,12 @@ function PodRow({
           )}
           {!!p.restarts && p.restarts > 0 && (
             <span
-              className="type-chip"
-              title={t('перезапусков за всё время: {n} (само по себе не проблема; тревога — только CrashLoopBackOff)', { n: p.restarts })}
+              className={`type-chip${day >= RESTARTS_DAY_MIN ? ' t-degraded' : ''}`}
+              title={day >= RESTARTS_DAY_MIN
+                ? t('перезапусков за сутки: {d}, за все время: {n}. Падает раз в час-другой: между падениями работает, но теряет соединения и очереди', { d: day, n: p.restarts })
+                : t('перезапусков за все время: {n} (само по себе не проблема, тревога - только CrashLoopBackOff)', { n: p.restarts })}
             >
-              ⟳ {p.restarts}
+              ⟳ {p.restarts}{day > 0 && ` · ${t('{d} за сутки', { d: day })}`}
             </span>
           )}
           {p.nolim && (
@@ -638,6 +643,7 @@ function KubeHostModal({
                       canAct={canAct}
                       onLogs={() => setLogsPod(p)}
                       onChanged={onChanged}
+                      day={s.restarts_day?.[`pod:${p.ns}/${p.name}`] ?? 0}
                     />
                   ))
                 ))}

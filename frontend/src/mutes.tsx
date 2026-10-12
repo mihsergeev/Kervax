@@ -31,6 +31,8 @@ export const SRV_ALERT_KINDS: { k: string; label: string }[] = [
   { k: 'disk_forecast', label: 'Диск: скоро заполнится' },
   { k: 'units', label: 'Systemd: упавшие юниты' },
   { k: 'unit_loop', label: 'Systemd: юниты в цикле перезапусков' },
+  { k: 'docker_restarts', label: 'Docker: часто перезапускается' },
+  { k: 'kube_restarts', label: 'Kubernetes: под часто перезапускается' },
   { k: 'cpu_spin', label: 'CPU: процессы в пустом цикле' },
   { k: 'backup_growth', label: 'Бэкап: резкий прирост' },
   { k: 'docker_sock', label: 'Docker: внешний прокси с docker-сокетом' },
@@ -52,7 +54,17 @@ export const WEB_MUTE = 'web_5xx:'
 export const UNIT_MUTE = 'unit:'
 // Порт, открытый в интернет намеренно: exposed:<порт>
 export const EXPOSED_MUTE = 'exposed:'
+// Один контейнер или под, который часто перезапускается: restarts:docker:<имя> | restarts:pod:<ns>/<имя>
+export const RESTARTS_MUTE = 'restarts:'
+// Порог предупреждения "часто перезапускается": перезапусков за сутки (restarts.MIN на бэкенде)
+export const RESTARTS_DAY_MIN = 5
 export function muteKindLabel(k: string, t: TFn): string | null {
+  if (k.startsWith(RESTARTS_MUTE)) {
+    const key = k.slice(RESTARTS_MUTE.length)
+    return key.startsWith('pod:')
+      ? `${t('перезапуски пода')}: ${key.slice(4)}`
+      : `${t('перезапуски контейнера')}: ${key.replace(/^docker:/, '')}`
+  }
   if (k.startsWith(UNIT_MUTE)) return `${t('юнит')}: ${k.slice(UNIT_MUTE.length)}`
   if (k.startsWith(EXPOSED_MUTE)) return `${t('открытый порт')}: ${k.slice(EXPOSED_MUTE.length)}`
   return k.startsWith(WEB_MUTE) ? `${t('5xx по логу')}: ${k.slice(WEB_MUTE.length)}` : null

@@ -100,7 +100,7 @@ export function srvDiskPct(s: Server): number | null {
 // section и srv - куда вести с главной, если проблема не про карточку сервера (см. ServerProblem)
 export type SrvIssue = {
   tone: 't-down' | 't-degraded'; text: string; sec?: string; mute?: string; kind?: string; since?: string | null
-  section?: 'kuber' | 'services' | 'backups'; srv?: boolean
+  section?: 'kuber' | 'services' | 'backups' | 'docker'; srv?: boolean
 }
 
 // Сколько длится проблема, коротко: "40 мин", "5 ч", "3 дн". Меньше минуты - пусто: только что

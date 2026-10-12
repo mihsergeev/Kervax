@@ -1200,6 +1200,14 @@ const EN: Record<string, string> = {
   'проверено {d}: файлов совпало {n}{dumps}': 'checked {d}: {n} files matched{dumps}',
   ', дампы читаются: {e}': ', dumps readable: {e}',
   'Бэкап: проверка восстановления': 'Backup: restore check',
+  // часто перезапускается
+  'Docker: часто перезапускается': 'Docker: restarts often',
+  'Kubernetes: под часто перезапускается': 'Kubernetes: pod restarts often',
+  'перезапуски пода': 'pod restarts',
+  'перезапуски контейнера': 'container restarts',
+  '{d} за сутки': '{d} a day',
+  'перезапусков за сутки: {d}, за все время: {n}. Падает раз в час-другой: между падениями работает, но теряет соединения и очереди':
+    'restarts in a day: {d}, in total: {n}. It falls over every hour or two: works in between but loses connections and queues',
   'Kubernetes: CronJob': 'Kubernetes: CronJob',
   'Время сервера - только предупреждения': 'Server time - warnings only',
   'Время сервера - предупр. и проблемы': 'Server time - warnings and problems',
@@ -1381,12 +1389,12 @@ const EN: Record<string, string> = {
     'Restart pod “{n}” (delete — the controller will recreate it)?',
   'Перезапустить под': 'Restart pod',
   'перезапусков: {n}': 'restarts: {n}',
-  'перезапусков за всё время: {n} (само по себе не проблема; тревога — только CrashLoopBackOff)':
+  'перезапусков за все время: {n} (само по себе не проблема, тревога - только CrashLoopBackOff)':
     'restarts over lifetime: {n} (not a problem by itself; only CrashLoopBackOff is)',
   'Логи': 'Logs',
   'healthcheck: unhealthy': 'healthcheck: unhealthy',
   'перезапусков (RestartCount): {n}': 'restarts (RestartCount): {n}',
-  'перезапусков за всё время (RestartCount): {n} (само по себе не проблема; тревога — на устойчивый crash-loop)':
+  'перезапусков за все время (RestartCount): {n} (само по себе не проблема, тревога - на устойчивый crash-loop)':
     'restarts over lifetime (RestartCount): {n} (not a problem by itself; alerts fire only on sustained crash-loop)',
   'Перезапустить': 'Restart',
   'Остановить': 'Stop',
