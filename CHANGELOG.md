@@ -4,6 +4,23 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.4.145] - 2026-10-13
+
+### Fixed
+- Проверка восстановления бэкапа (helper backup-setup 0.36) на нодах, где бэкап настроен до
+  панели, подключала не тот файл. Имена файлов там означают другое: переменные бэкапа лежат в
+  /etc/systemd-rest.conf, а /etc/systemd-resta.conf - скрипт уведомления с curl. Проверка
+  подключала его через "." и выполняла: каждая попытка отправляла ложное "бэкап выполнен с
+  ошибкой", а restic оставался без репозитория ("Please specify repository location"). Теперь
+  файл переменных, пользователь и его домашний каталог берутся из юнита бэкапа (EnvironmentFile=,
+  User=), а файл читается как данные: только строки KEY=VALUE для restic и хранилищ, ничего не
+  выполняется.
+- Еженедельная проверка восстановления не запускалась по cron: у cron PATH без /usr/sbin, runuser
+  не находился, и проверка тихо выходила. Она шла только во время установки helper'а из
+  плейбука. helper теперь сам задает полный PATH.
+- Helper 0.36 раскатывается тем же плейбуком:
+  `ansible-playbook playbooks/kervax_helpers.yml -l kervax_outdated`.
+
 ## [1.4.144] - 2026-10-12
 
 ### Fixed
