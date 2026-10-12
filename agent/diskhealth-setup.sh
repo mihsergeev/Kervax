@@ -35,7 +35,10 @@ if [ "$virt" = none ] && ! command -v smartctl >/dev/null 2>&1; then
   fi
 fi
 
-cat > "$HELPER" <<'HELPER_EOF'
+# Written next to the old one and swapped in with mv: bash reads a running script as it goes,
+# and rewriting it in place (cat >) made a run that was in progress continue from the same
+# byte offset in the new text - a syntax error in the middle of a line and a failed unit.
+cat > "$HELPER.new" <<'HELPER_EOF'
 #!/usr/bin/env bash
 # Health of the physical disks -> /var/lib/kervax/report.d/disk-health.json. Read only.
 set -u
@@ -329,6 +332,7 @@ printf '{"v":1,"ts":%s,"virt":"%s","container":%s,"smart":%s,"raid":[%s],"disks"
 mv -f "$TMP" "$OUT"
 chmod 0644 "$OUT"
 HELPER_EOF
+chmod 0755 "$HELPER.new" && mv -f "$HELPER.new" "$HELPER"
 chmod 0755 "$HELPER"
 
 cat > /etc/systemd/system/kervax-disk-health.service <<EOF

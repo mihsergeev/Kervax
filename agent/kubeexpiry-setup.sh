@@ -53,7 +53,10 @@ if [ "$(id -u)" != 0 ]; then echo "Root required." >&2; exit 1; fi
 # could not enter it and would never read the file).
 install -d -m 0755 "$HELPER_DIR" "$STATE_DIR" "$STATE_DIR/versions"
 
-cat > "$HELPER" <<'HELPER_EOF'
+# Written next to the old one and swapped in with mv: bash reads a running script as it goes,
+# and rewriting it in place (cat >) made a run that was in progress continue from the same
+# byte offset in the new text - a syntax error in the middle of a line and a failed unit.
+cat > "$HELPER.new" <<'HELPER_EOF'
 #!/usr/bin/env bash
 # Collects expiry dates and Flux state -> /var/lib/kervax/kube-expiry.json.
 # Read only; no secret material is stored or transmitted.
@@ -340,6 +343,7 @@ fi
 mv -f "$TMP" "$OUT"
 chmod 0644 "$OUT"
 HELPER_EOF
+chmod 0755 "$HELPER.new" && mv -f "$HELPER.new" "$HELPER"
 chmod 0755 "$HELPER"; chown root:root "$HELPER"
 
 cat > /etc/systemd/system/kervax-kube-expiry.service <<EOF
@@ -386,7 +390,9 @@ EOF
 systemctl daemon-reload
 systemctl enable --now kervax-kube-expiry.timer >/dev/null 2>&1 || true
 systemctl enable --now kervax-kube-flux.timer >/dev/null 2>&1 || true
-"$HELPER" || true   # run once immediately so the data appears without waiting for the timer
+# the first collection right away, in the background: on a node with dozens of containers it
+# takes minutes, and the installer (ansible waits 120 seconds) must not wait for it
+systemctl start --no-block kervax-kube-expiry.service >/dev/null 2>&1 || true
 
 echo "$KERVAX_SETUP_VERSION" > "$STATE_DIR/versions/kubeexpiry-setup.ver"
 chmod 0644 "$STATE_DIR/versions/kubeexpiry-setup.ver"

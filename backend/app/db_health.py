@@ -31,7 +31,10 @@ def block(rep: dict, now: datetime) -> list[dict] | None:
             return None
     except (TypeError, ValueError):
         return None
-    return [x for x in b["items"] if isinstance(x, dict)]
+    # helper 0.5 принимал ошибку docker exec за ответ базы (postgres-exporter подходит под шаблон
+    # образа, а psql в нем нет): такие записи - не база
+    return [x for x in b["items"] if isinstance(x, dict) and "exec failed" not in str(x.get("xact_app") or "")
+            and "exec failed" not in str(x.get("receiver") or "")]
 
 
 def _dur(sec: int) -> str:

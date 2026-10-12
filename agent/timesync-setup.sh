@@ -40,7 +40,10 @@ DROPIN
   systemctl try-restart kervax-agent 2>/dev/null || true
 fi
 
-cat > "$HELPER" <<'HELPER_EOF'
+# Written next to the old one and swapped in with mv: bash reads a running script as it goes,
+# and rewriting it in place (cat >) made a run that was in progress continue from the same
+# byte offset in the new text - a syntax error in the middle of a line and a failed unit.
+cat > "$HELPER.new" <<'HELPER_EOF'
 #!/usr/bin/env bash
 # Kervax timesync helper (root): start or force clock synchronisation; when outbound NTP
 # is blocked, fall back roughly to the panel's clock over HTTP. One action only: sync.
@@ -126,6 +129,7 @@ case "${1:-}" in
   *) echo "usage: $0 {sync [https://panel]|process-spool}" >&2; exit 2 ;;
 esac
 HELPER_EOF
+chmod 0755 "$HELPER.new" && mv -f "$HELPER.new" "$HELPER"
 chmod 0755 "$HELPER"; chown root:root "$HELPER"
 
 # path unit: as soon as the agent drops a request, root executes it immediately

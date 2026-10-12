@@ -30,7 +30,10 @@ if [ "$(id -u)" != 0 ]; then echo "Root required." >&2; exit 1; fi
 # The parent /var/lib/kervax is set to 0755 EXPLICITLY (under umask 077 the unprivileged agent could not enter).
 install -d -m 0755 "$HELPER_DIR" "$STATE_DIR" "$STATE_DIR/versions" "$STATE_DIR/report.d"
 
-cat > "$HELPER" <<'HELPER_EOF'
+# Written next to the old one and swapped in with mv: bash reads a running script as it goes,
+# and rewriting it in place (cat >) made a run that was in progress continue from the same
+# byte offset in the new text - a syntax error in the middle of a line and a failed unit.
+cat > "$HELPER.new" <<'HELPER_EOF'
 #!/usr/bin/env bash
 # Snapshot of access and schedules -> /var/lib/kervax/report.d/changes.json. Read only.
 set -u
@@ -183,6 +186,7 @@ printf '{"v":1,"ts":%s,"keys":[%s],"users":[%s],"sudo":%s,"cron":%s,"units":[%s]
 chmod 0644 "$tmp"
 mv -f "$tmp" "$OUT"
 HELPER_EOF
+chmod 0755 "$HELPER.new" && mv -f "$HELPER.new" "$HELPER"
 chmod 0755 "$HELPER"
 chown root:root "$HELPER"
 

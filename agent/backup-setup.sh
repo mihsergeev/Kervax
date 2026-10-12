@@ -109,7 +109,10 @@ DROPIN
   systemctl try-restart kervax-agent 2>/dev/null || true
 fi
 
-cat > "$HELPER" <<'HELPER_EOF'
+# Written next to the old one and swapped in with mv: bash reads a running script as it goes,
+# and rewriting it in place (cat >) made a run that was in progress continue from the same
+# byte offset in the new text - a syntax error in the middle of a line and a failed unit.
+cat > "$HELPER.new" <<'HELPER_EOF'
 #!/usr/bin/env bash
 # Kervax backup helper (root) - narrow operations on the restic backup. get-config (read),
 # set-paths/set-schedule/run-now (write), process-spool (execute requests from the spool).
@@ -161,7 +164,7 @@ DUMP_HOUR=3  # the hour of the dumps' own timer (when the node has no file backu
 # ExecStartPre=- (note the minus): a failed dump must NOT cancel the file backup.
 write_run_dumps() {
   install -d -m 0755 "$DUMPS_D"
-  cat > "$RUN_DUMPS" <<'RD_EOF'
+  cat > "$RUN_DUMPS.new" <<'RD_EOF'
 #!/usr/bin/env bash
 # Kervax: run the enabled database dumps before the file backup. A failure of one engine is not
 # fatal - the others, and the backup itself, must still run.
@@ -172,7 +175,8 @@ for d in /lib65/kervax/dumps.d/*.sh; do
 done
 exit 0
 RD_EOF
-  chmod 0755 "$RUN_DUMPS"; chown root:root "$RUN_DUMPS"
+  # swapped in with mv, not rewritten in place: a dump run in progress keeps reading the old file
+  chmod 0755 "$RUN_DUMPS.new"; chown root:root "$RUN_DUMPS.new"; mv -f "$RUN_DUMPS.new" "$RUN_DUMPS"
   # WHAT TRIGGERS IT. If a file backup exists, we hook onto it (the dump runs right before
   # restic so it picks up a fresh one). If there is no backup, the dumps are still needed: a
   # local copy on the node itself that can be restored from. In that case we bring up
@@ -2332,6 +2336,7 @@ case "${1:-}" in
   *) echo "usage: $0 {get-config|custom-scan|backup-runs|set-paths <mode> <path...>|set-schedule <HH:MM>|run-now|provision <url> <repopass> <mode> <HH:MM> <delay> <ver> <cacert_b64|-> <path...>|dump-setup <engine> [container]|dump-remove <engine>|dump-status|process-spool}" >&2; exit 2 ;;
 esac
 HELPER_EOF
+chmod 0755 "$HELPER.new" && mv -f "$HELPER.new" "$HELPER"
 chmod 0755 "$HELPER"; chown root:root "$HELPER"
 
 # one immediate run plus a cron entry every minute: the config file for the panel

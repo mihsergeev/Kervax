@@ -35,6 +35,12 @@ def test_problems():
         (1, "конфиг Caddy в контейнере front не проходит проверку: Error: adapting config: unrecognized "
             "directive: revers. Следующий reload или перезапуск уронит сайты", "caddy:front")]
     assert web_config.problems(_rep(BAD, ts=T - 7200), NOW) == []  # helper давно молчит - не судим
+    # nginx в контейнере пишет ошибку строкой лога: время и pid срезаем
+    logline = {"server": "nginx", "where": "test-nginx", "ok": False, "err": '2026/10/12 20:00:37 [emerg] 56427#56427: '
+               'host not found in upstream "app-fpm" in /etc/nginx/conf.d/site.conf:34'}
+    assert web_config.problems(_rep(logline), NOW)[0][1] == (
+        'конфиг nginx в контейнере test-nginx не проходит проверку: [emerg] host not found in upstream "app-fpm" '
+        'in /etc/nginx/conf.d/site.conf:34. Следующий reload или перезапуск уронит сайты')
 
 
 def test_alert_and_home():
@@ -52,3 +58,17 @@ def test_helper_checks_configs():
     src = (Path(__file__).resolve().parents[2] / "agent" / "webserver-setup.sh").read_text(encoding="utf-8")
     assert "KERVAX_SETUP_VERSION=0.23" in src and "check_configs()" in src and "report.d/web-config.json" in src
     assert "nginx -t" in src and "caddy validate" in src and "\r" not in src
+
+
+def test_installers_swap_helpers_in_with_mv():
+    """Helper, который запускает таймер, пишется рядом и подменяется mv: перезапись на месте
+    (cat >) роняла запуск, шедший в этот момент, - bash дочитывал новый текст с середины строки"""
+    import re
+    agent = Path(__file__).resolve().parents[2] / "agent"
+    for f in sorted(agent.glob("*-setup.sh")):
+        src = f.read_text(encoding="utf-8")
+        assert not re.search(r'cat > "\$(HELPER|RATE|FIXER|RUN_DUMPS)" <<', src), f.name
+    for name in ("dbstat-setup.sh", "webserver-setup.sh", "kubeexpiry-setup.sh"):
+        src = (agent / name).read_text(encoding="utf-8")
+        assert '"$HELPER" || true' not in src and "systemctl start --no-block" in src, name
+    assert '"$RATE" || true' not in (agent / "webserver-setup.sh").read_text(encoding="utf-8")
