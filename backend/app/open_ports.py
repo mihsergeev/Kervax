@@ -144,9 +144,14 @@ def targets(srv: Server) -> tuple[list[str], dict[int, str]]:
     return ips[:_MAX_IPS], {p: ports[p] for p in keep}
 
 
+# ss отдает имя процесса не длиннее 15 символов (comm): konnectivity-server -> konnectivity-se
+_COMM_FULL = {"konnectivity-se": "konnectivity-server", "kube-controller": "kube-controller-manager"}
+
+
 def _proc_text(proc: str, user: str) -> str:
     """'процесс kube-proxy', 'процесс mysqld, пользователь mysql'; без helper'а - только владелец.
     Пользователя оставляем: по нему classify узнает базу (mysqld -> пользователь mysql)."""
+    proc = _COMM_FULL.get(proc, proc)
     if proc:
         return f"процесс {proc}" + (f", пользователь {user}" if user and user != proc else "")
     return f"процесс пользователя {user}" if user else ""
@@ -336,12 +341,32 @@ def scanned_at(srv: Server) -> datetime | None:
         return None
 
 
+def _relabel(srv: Server, rows: list) -> list[dict]:
+    """Строки проверки с подписями по свежему отчету. Подпись запоминается в момент проверки, а
+    helper мог прислать имена процессов позже: без этого таблица до 6 часов показывала бы
+    "процесс пользователя root", хотя имя уже известно."""
+    _ips, cur = targets(srv)
+    out = []
+    for x in rows:
+        if not isinstance(x, dict):
+            continue
+        what = cur.get(x.get("port"))
+        if what and what != x.get("what"):
+            name, risk = classify(x["port"], what)
+            x = dict(x, what=what, name=name, risk=risk)
+        out.append(x)
+    return out
+
+
 def view(srv: Server) -> dict | None:
     """Итог проверки для карточки: без seen (служебная история) и с отметкой намеренных портов."""
     ex = _ex(srv)
     if not ex:
         return None
     out = {k: v for k, v in ex.items() if k != "seen"}
+    out["ports"] = _relabel(srv, ex.get("ports") or [])
+    if ex.get("new"):
+        out["new"] = _relabel(srv, ex["new"])
     out["own"] = from_panel(srv)
     out["muted"] = sorted(muted_ports(srv), key=lambda p: int(p) if p.isdigit() else 0)
     return out
@@ -355,8 +380,8 @@ def exposed(srv: Server, now: datetime) -> list[dict]:
     if ts is None or now - ts > FRESH or from_panel(srv):
         return []
     muted = muted_ports(srv)
-    return [x for x in ex.get("ports") or []
-            if isinstance(x, dict) and x.get("state") == "open" and x.get("risk") and str(x.get("port")) not in muted]
+    return [x for x in _relabel(srv, ex.get("ports") or [])
+            if x.get("state") == "open" and x.get("risk") and str(x.get("port")) not in muted]
 
 
 def exposed_text(rows: list[dict], limit: int = 4) -> str:
@@ -389,7 +414,7 @@ def new_ports(srv: Server, now: datetime, hours: int = 24) -> list[dict]:
     if now - ts > timedelta(hours=hours):
         return []
     muted = muted_ports(srv)
-    return [x for x in ex.get("new") or [] if isinstance(x, dict) and str(x.get("port")) not in muted]
+    return [x for x in _relabel(srv, ex.get("new") or []) if str(x.get("port")) not in muted]
 
 
 def new_since(srv: Server) -> str | None:

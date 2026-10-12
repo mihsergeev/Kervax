@@ -163,6 +163,28 @@ def test_check_from_the_panel_itself_does_not_alert():
     assert open_ports.from_panel(s) is False
 
 
+def test_labels_follow_the_fresh_report():
+    """helper прислал имена процессов после проверки: подписи берутся из свежего отчета сразу"""
+    old = {"ip": "203.0.113.5", "port": 2221, "state": "open", "what": "процесс пользователя root", "name": "",
+           "risk": False}
+    gone = {"ip": "203.0.113.5", "port": 7000, "state": "open", "what": "процесс пользователя app", "name": "",
+            "risk": False}
+    ex = {"ts": NOW.isoformat(), "via": "Казахстан, Алматы", "own": False, "ips": ["203.0.113.5"],
+          "ports": [old, gone], "seen": {}}
+    rep = {"ips": ["203.0.113.5"], "listen": [{"p": "tcp", "ip": "0.0.0.0", "port": 2221, "u": "root"},
+                                               {"p": "tcp", "ip": "0.0.0.0", "port": 8132, "u": "konnectivity-server"}],
+           "extras": {"changes": {"v": 1, "ts": 1, "listen": {"2221": "dockerd", "8132": "konnectivity-se"}}}}
+    s = _srv(rep, ex)
+    rows = {x["port"]: x for x in open_ports.view(s)["ports"]}
+    assert rows[2221]["what"] == "процесс dockerd, пользователь root" and rows[2221]["name"] == "Docker API"
+    assert rows[7000]["what"] == "процесс пользователя app"  # порт ушел из отчета - подпись прежняя
+    # опасность тоже по свежей подписи: Docker API на 2221 - алерт без новой проверки
+    assert [x["port"] for x in open_ports.exposed(s, NOW)] == [2221]
+    assert s.exposure["ports"][0]["what"] == "процесс пользователя root"  # сохраненное не трогаем
+    _ips, ports = open_ports.targets(s)
+    assert ports[8132] == "процесс konnectivity-server"
+
+
 async def test_scan_without_proxy_marks_own_check(monkeypatch):
     async def fake_probe(ip, port, proxy):
         return "open"

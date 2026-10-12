@@ -4,6 +4,16 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.4.136] - 2026-10-12
+
+### Fixed
+- Имена процессов в "Что открыто в интернет" появлялись только после следующей проверки портов,
+  то есть до 6 часов после установки changes-setup 0.2: подпись строки запоминалась в момент
+  проверки. Теперь подписи и опасность берутся из свежего отчета при показе, сохраненная
+  проверка остается как была.
+- Обрезанные ss имена процессов показываются полностью: konnectivity-se ->
+  konnectivity-server, kube-controller -> kube-controller-manager.
+
 ## [1.4.135] - 2026-10-12
 
 ### Fixed
