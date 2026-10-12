@@ -1200,6 +1200,10 @@ const EN: Record<string, string> = {
   'проверено {d}: файлов совпало {n}{dumps}': 'checked {d}: {n} files matched{dumps}',
   ', дампы читаются: {e}': ', dumps readable: {e}',
   'Бэкап: проверка восстановления': 'Backup: restore check',
+  // сертификаты nginx
+  'Веб-сервер: сертификат истекает': 'Web server: certificate expires',
+  'сертификат {l} истек {n} дн назад ({f})': 'certificate {l} expired {n} days ago ({f})',
+  'сертификат {l} истекает через {n} дн ({f})': 'certificate {l} expires in {n} days ({f})',
   // проверка конфигов веб-серверов
   'Веб-сервер: конфиг не проходит проверку': 'Web server: config fails the test',
   'конфиг в контейнере {c} не проходит проверку: {e}': 'the config in container {c} fails the test: {e}',

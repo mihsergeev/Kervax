@@ -100,6 +100,9 @@ SERVER_ALERT_KINDS: dict[str, tuple[str, str]] = {
     # nginx -t, apachectl -t, caddy validate или haproxy -c не проходит (helper webserver-setup
     # 0.23): сейчас работает старый конфиг, следующий reload или перезапуск уронит сайты
     "web_config": ("Веб-сервер: конфиг не проходит проверку", "{detail}"),
+    # Сертификат, который отдает nginx, истекает через две недели и меньше или уже истек
+    # (helper webserver-setup 0.24); сайты за белым списком мониторы не видят
+    "web_cert": ("Веб-сервер: сертификат истекает", "{detail}"),
     "reboot": ("Перезагрузка", "перезагружен (аптайм сброшен)"),
     "oom": ("OOM-killer", "OOM-kill: ядро убило {value} процесс(ов){victim} из-за нехватки памяти"),
     "docker_down": ("Docker: контейнер упал", "контейнер {container} не работает: {why}"),

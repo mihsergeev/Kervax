@@ -1442,6 +1442,8 @@ export type Server = {
   db_health?: DbHealth[] | null
   // проверка конфигов веб-серверов (helper webserver-setup 0.23): where - "host" или контейнер
   web_config?: { server: string; where: string; ok: boolean; err: string }[] | null
+  // сертификаты nginx (helper webserver-setup 0.24): сколько дней до конца срока
+  web_certs?: { where: string; file: string; label: string; days: number }[] | null
   // внешние прокси со сборкой образа старше года (built - unix-секунды)
   proxy_outdated?: { name: string; image: string; kind: string; version: string; built: number; age_days: number }[]
   // нода умеет разобрать раздел по запросу (агент 2.24 + diskusage-setup 0.6)

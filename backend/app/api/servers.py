@@ -19,6 +19,7 @@ from app import db_health
 from app import mem_trend
 from app import restarts as srv_restarts
 from app import ssh_audit
+from app import web_certs
 from app import web_config
 from app import changes as srv_changes
 from app import audit, backup_growth, custom_backups, docker_exposure, geoip, kube_coverage, manual_probe, open_ports, os_support
@@ -218,6 +219,7 @@ def _out(
     o.ssh_advice = ssh_audit.advice(server, now) or None
     o.db_health = db_health.view(server.last_report or {}, now)
     o.web_config = web_config.view(server.last_report or {}, now)
+    o.web_certs = web_certs.view(server.last_report or {}, now)
     o.proxy_outdated = docker_exposure.outdated(server.last_report or {}, now.timestamp())
     o.disk_analyze = disk_analyze_ok(server.last_report or {})
     o.fresh = _fresh_node(server, now)
