@@ -1200,6 +1200,23 @@ const EN: Record<string, string> = {
   'проверено {d}: файлов совпало {n}{dumps}': 'checked {d}: {n} files matched{dumps}',
   ', дампы читаются: {e}': ', dumps readable: {e}',
   'Бэкап: проверка восстановления': 'Backup: restore check',
+  // SSH
+  'SSH: опасный вход': 'SSH: risky login',
+  'порт': 'port',
+  'root': 'root',
+  'открыт в интернет': 'open to the internet',
+  'закрыт снаружи': 'closed from outside',
+  'снаружи не проверялся': 'not checked from outside',
+  'по паролю': 'with a password',
+  'по ключу': 'with a key',
+  'запрещен': 'forbidden',
+  'только по ключу': 'key only',
+  'вход по паролю': 'password login',
+  'включен': 'enabled',
+  'выключен, только ключи': 'disabled, keys only',
+  'защита от перебора': 'brute-force protection',
+  'неудачных входов за 10 минут': 'failed logins in 10 minutes',
+  'входов по паролю: {n}': 'password logins: {n}',
   // утечка памяти
   'Растет память': 'Memory keeps growing',
   'Минимум памяти за сутки растет 4 суток подряд. Пила сборщика мусора и всплески минимум не двигают, а утечка поднимает его каждый день.':

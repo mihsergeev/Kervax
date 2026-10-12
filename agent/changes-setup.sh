@@ -9,11 +9,15 @@
 # and sees only the socket owner, so the panel's "open to the internet" table showed
 # "a process of user root" instead of sshd or kube-proxy.
 #
+# Since 0.3 it also reports how SSH lets people in: password and root login as sshd applies them
+# to a connection from the internet (Match blocks included), failed and password logins over
+# the last 10 minutes, and whether fail2ban, sshguard or crowdsec is running.
+#
 # Only fingerprints, names and hashes leave the node: no key material, no crontab or sudoers
 # contents. The helper changes nothing.
 set -euo pipefail
 
-KERVAX_SETUP_VERSION=0.2  # MAJOR.MINOR; compared component-wise
+KERVAX_SETUP_VERSION=0.3  # MAJOR.MINOR; compared component-wise
 KERVAX_SETUP_ALWAYS=1     # safe on any node: it only reads files and systemctl
 
 HELPER_DIR=/lib65/kervax
@@ -145,10 +149,37 @@ listen_procs() {
     }' | tr -d '\000-\037'
 }
 
+# How SSH lets people in. sshd -T -C evaluates the config for a given connection: an address from
+# the documentation range stands for "somebody on the internet", so Match blocks that open
+# passwords to the office network do not count. Failed and password logins - the last 10 minutes
+# of the journal.
+ssh_info() {
+  command -v sshd >/dev/null 2>&1 || return 0
+  local t r ports fail accp guard g
+  t=$(sshd -T -C user=kervax-probe,host=probe.invalid,addr=203.0.113.1 2>/dev/null) || t=$(sshd -T 2>/dev/null) || return 0
+  r=$(sshd -T -C user=root,host=probe.invalid,addr=203.0.113.1 2>/dev/null) || r="$t"
+  sv() { printf '%s\n' "$1" | awk -v k="$2" '$1 == k { print $2; exit }'; }
+  ports=$(printf '%s\n' "$t" | awk '$1 == "port" && $2 ~ /^[0-9]+$/ { print $2 }' | sort -un | head -5 | paste -sd, -)
+  fail=$(journalctl -u ssh -u sshd --since "-10min" -o cat 2>/dev/null \
+    | grep -cE "Failed (password|keyboard-interactive)|Invalid user|authentication failure" || true)
+  accp=$(journalctl -u ssh -u sshd --since "-10min" -o cat 2>/dev/null \
+    | grep -cE "Accepted (password|keyboard-interactive)" || true)
+  guard=""
+  for g in fail2ban sshguard crowdsec; do
+    systemctl is-active --quiet "$g" 2>/dev/null && { guard=$g; break; }
+  done
+  printf '{"pass":"%s","kbd":"%s","pam":"%s","methods":"%s","root":"%s","rootpass":"%s","rootkbd":"%s","ports":[%s],"fail":%d,"accp":%d,"guard":"%s"}' \
+    "$(esc "$(sv "$t" passwordauthentication)")" "$(esc "$(sv "$t" kbdinteractiveauthentication)")" \
+    "$(esc "$(sv "$t" usepam)")" "$(esc "$(sv "$t" authenticationmethods)")" \
+    "$(esc "$(sv "$r" permitrootlogin)")" "$(esc "$(sv "$r" passwordauthentication)")" \
+    "$(esc "$(sv "$r" kbdinteractiveauthentication)")" "$ports" "${fail:-0}" "${accp:-0}" "$guard"
+}
+
 now=$(date +%s)
 tmp=$(mktemp "${OUT}.XXXXXX")
-printf '{"v":1,"ts":%s,"keys":[%s],"users":[%s],"sudo":%s,"cron":%s,"units":[%s],"listen":{%s}}\n' \
-  "$now" "$(keys)" "$(users)" "$(sudo_info)" "$(cron_info)" "$(units)" "$(listen_procs)" > "$tmp"
+ssh=$(ssh_info)
+printf '{"v":1,"ts":%s,"keys":[%s],"users":[%s],"sudo":%s,"cron":%s,"units":[%s],"listen":{%s},"ssh":%s}\n' \
+  "$now" "$(keys)" "$(users)" "$(sudo_info)" "$(cron_info)" "$(units)" "$(listen_procs)" "${ssh:-null}" > "$tmp"
 chmod 0644 "$tmp"
 mv -f "$tmp" "$OUT"
 HELPER_EOF
@@ -180,4 +211,4 @@ systemctl start --no-block kervax-changes.service >/dev/null 2>&1 || true
 
 echo "$KERVAX_SETUP_VERSION" > "$STATE_DIR/versions/changes-setup.ver"
 chmod 0644 "$STATE_DIR/versions/changes-setup.ver"
-echo "changes-setup: SSH keys, users, sudo, crontabs, enabled units, listening processes -> $OUT (every 10 minutes)."
+echo "changes-setup: SSH keys and login settings, users, sudo, crontabs, enabled units, listening processes -> $OUT (every 10 minutes)."

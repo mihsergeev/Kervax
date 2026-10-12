@@ -1417,6 +1417,13 @@ export type Server = {
   restarts_day?: Record<string, number> | null
   // что течет памятью: дно (минимум за сутки) растет 4 суток подряд; series - эти минимумы, байты
   mem_leaks?: MemLeak[] | null
+  // SSH (helper changes-setup 0.3): как пускает соединение из интернета; open - порт открыт снаружи
+  // по внешней проверке (null - не знаем)
+  ssh?: {
+    ports: number[]; password: boolean; root: string; root_password: boolean; guard: string
+    fail: number; accepted_password: number; open: boolean | null
+  } | null
+  ssh_advice?: { kind: string; level: number; text: string }[] | null
   // внешние прокси со сборкой образа старше года (built - unix-секунды)
   proxy_outdated?: { name: string; image: string; kind: string; version: string; built: number; age_days: number }[]
   // нода умеет разобрать раздел по запросу (агент 2.24 + diskusage-setup 0.6)
