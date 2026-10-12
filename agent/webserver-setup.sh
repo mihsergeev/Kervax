@@ -16,7 +16,10 @@ set -euo pipefail
 # 0.23: the configs are tested every 15 minutes (nginx -t on the host and in nginx containers,
 #       apachectl -t, caddy validate for a Caddyfile, haproxy -c) -> report.d/web-config.json:
 #       a config that fails the test takes the sites down at the next reload or restart
-KERVAX_SETUP_VERSION=0.23  # MAJOR.MINOR; compared component-wise
+# 0.24: the certificates nginx serves (ssl_certificate on the host and in nginx containers):
+#       expiry date and names -> report.d/web-certs.json, plus whether certbot renews them.
+#       Public sites are watched by monitors, sites behind an allowlist are not
+KERVAX_SETUP_VERSION=0.24  # MAJOR.MINOR; compared component-wise
 KERVAX_SETUP_ALWAYS=1     # safe on any node: the refresh is a no-op without a web server
 
 HELPER_DIR=/lib65/kervax
@@ -421,6 +424,53 @@ CFGOUT=/var/lib/kervax/report.d/web-config.json
 printf '{"v":1,"ts":%s,"items":[%s]}\n' "$(date +%s)" "$CFG" > "$CFGOUT.tmp.$$"
 chmod 0644 "$CFGOUT.tmp.$$"
 mv -f "$CFGOUT.tmp.$$" "$CFGOUT"
+
+# -- certificates nginx serves: when they expire. Only the date, the names and the path leave --
+CERTS=""
+NCERT=0
+cert_paths() { awk '$1 == "ssl_certificate" { p = $2; sub(/;$/, "", p); gsub(/["\047]/, "", p); print p }' \
+  | grep -v '[$]' | grep -v '^data:' | sort -u | head -n 50; }
+cert_add() { # where file; the PEM comes on stdin
+  local pem end cn names
+  pem=$(cat)
+  [ -n "$pem" ] && [ "$NCERT" -lt 100 ] || return 0
+  end=$(printf '%s\n' "$pem" | openssl x509 -noout -enddate 2>/dev/null | sed -n 's/^notAfter=//p')
+  end=$(date -d "$end" +%s 2>/dev/null) || return 0
+  cn=$(printf '%s\n' "$pem" | openssl x509 -noout -subject 2>/dev/null | grep -o 'CN *= *[^,/]*' | head -1 | sed 's/CN *= *//')
+  names=$(printf '%s\n' "$pem" | openssl x509 -noout -ext subjectAltName 2>/dev/null | grep -o 'DNS:[^, ]*' \
+    | sed 's/^DNS://' | head -n 8 | paste -sd' ' -)
+  CERTS="$CERTS${CERTS:+,}{\"where\":\"$(cesc "$1")\",\"file\":\"$(cesc "$2")\",\"end\":$end,\"cn\":\"$(cesc "$cn")\",\"names\":\"$(cesc "$names")\"}"
+  NCERT=$((NCERT + 1))
+}
+collect_certs() {
+  local f c
+  command -v openssl >/dev/null 2>&1 || return 0
+  if command -v nginx >/dev/null 2>&1 && pgrep -x nginx >/dev/null 2>&1; then
+    while IFS= read -r f; do
+      [ -f "$f" ] && cert_add host "$f" < "$f"
+    done < <(nginx -T 2>/dev/null | cert_paths)
+  fi
+  command -v docker >/dev/null 2>&1 || return 0
+  while read -r c; do
+    [ -n "$c" ] || continue
+    while IFS= read -r f; do
+      docker exec "$c" cat "$f" 2>/dev/null | cert_add "$c" "$f"
+    done < <(docker exec "$c" nginx -T 2>/dev/null | cert_paths)
+  done < <(docker ps --format '{{.Names}} {{.Image}}' 2>/dev/null | awk '/nginx/{print $1}' | sort -u)
+}
+# who renews Let's Encrypt certificates: the certbot timer, a cron line, or nobody
+cert_renew() {
+  systemctl is-failed --quiet certbot.service 2>/dev/null && { echo failed; return; }
+  systemctl is-active --quiet certbot.timer 2>/dev/null && { echo timer; return; }
+  grep -qsE 'certbot|acme\.sh|letsencrypt' /etc/crontab /etc/cron.d/* /var/spool/cron/crontabs/* 2>/dev/null \
+    && { echo cron; return; }
+  echo none
+}
+collect_certs
+CERTOUT=/var/lib/kervax/report.d/web-certs.json
+printf '{"v":1,"ts":%s,"renew":"%s","certs":[%s]}\n' "$(date +%s)" "$(cert_renew)" "$CERTS" > "$CERTOUT.tmp.$$"
+chmod 0644 "$CERTOUT.tmp.$$"
+mv -f "$CERTOUT.tmp.$$" "$CERTOUT"
 
 NGINX=$(collect_nginx | sort -u)
 APACHE=$(collect_apache | sort -u)

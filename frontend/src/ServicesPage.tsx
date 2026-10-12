@@ -553,6 +553,15 @@ function ServerServicesModal({ srv, onClose, onChanged, autoQueues, sites }: {
                       {' '}{t('Следующий reload или перезапуск уронит сайты.')}
                     </div>
                   ))}
+                {it.web && it.kind.toLowerCase() === 'nginx' && (s.web_certs ?? [])
+                  .filter((c) => c.days <= 14)
+                  .map((c) => (
+                    <div key={c.where + c.file} className={`svc-card-detail small ${c.days <= 3 ? 't-down' : 't-degraded'}`}>
+                      {c.days < 0
+                        ? t('сертификат {l} истек {n} дн назад ({f})', { l: c.label, n: -c.days, f: c.file })
+                        : t('сертификат {l} истекает через {n} дн ({f})', { l: c.label, n: c.days, f: c.file })}
+                    </div>
+                  ))}
                 {it.sites && it.sites.length > 0 && (
                   <SitesList
                     sites={it.sites}

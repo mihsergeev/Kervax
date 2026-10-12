@@ -37,7 +37,7 @@ const ISSUE_ICON: Record<string, string> = {
   docker: '🐳', kuber: '☸️', backups: '💾', docker_sock: '🔓',
   clock: '🕐', dns: '🌐', db_conn: '🔌', web_5xx: '🌐', queue: '🐇', kube_expiry: '⏳', flux_down: '☸️',
   flux_stale: '☸️', backup_dump: '🛢', backup_dump_space: '🛢', backup_cron: '🛢', backup_check: '🩺',
-  unit_loop: '🔁', kube_cron: '⏰', exposed: '🔓', port_new: '🚪', pressure: '🫁', net_health: '📶', kube_node: '☸️', kube_job: '💥', access_change: '🔑', backup_restore: '🛟', docker_restarts: '🔄', kube_restarts: '🔄', mem_leak: '📈', ssh_risk: '🔐', db_health: '🛢', web_config: '🧾',
+  unit_loop: '🔁', kube_cron: '⏰', exposed: '🔓', port_new: '🚪', pressure: '🫁', net_health: '📶', kube_node: '☸️', kube_job: '💥', access_change: '🔑', backup_restore: '🛟', docker_restarts: '🔄', kube_restarts: '🔄', mem_leak: '📈', ssh_risk: '🔐', db_health: '🛢', web_config: '🧾', web_cert: '🔏',
 }
 
 type T = (k: string, p?: Record<string, string | number>) => string

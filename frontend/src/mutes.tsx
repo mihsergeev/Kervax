@@ -37,6 +37,7 @@ export const SRV_ALERT_KINDS: { k: string; label: string }[] = [
   { k: 'ssh_risk', label: 'SSH: опасный вход' },
   { k: 'db_health', label: 'СУБД: реплика, транзакции, VACUUM' },
   { k: 'web_config', label: 'Веб-сервер: конфиг не проходит проверку' },
+  { k: 'web_cert', label: 'Веб-сервер: сертификат истекает' },
   { k: 'cpu_spin', label: 'CPU: процессы в пустом цикле' },
   { k: 'backup_growth', label: 'Бэкап: резкий прирост' },
   { k: 'docker_sock', label: 'Docker: внешний прокси с docker-сокетом' },

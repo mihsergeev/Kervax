@@ -4,6 +4,21 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.4.147] - 2026-10-13
+
+### Added
+- Сертификаты, которые отдает nginx (helper webserver-setup 0.24). Раз в 15 минут helper берет
+  пути ssl_certificate из конфигов nginx на хосте и в nginx-контейнерах и читает срок каждого
+  сертификата, а заодно смотрит, кто продлевает Let's Encrypt: таймер certbot, строка в cron или
+  никто. С ноды уходят только дата, имена в сертификате и путь к файлу.
+- Алерт "Веб-сервер: сертификат истекает": две недели и меньше - предупреждение, три дня и
+  меньше или уже истек - проблема. Публичные сайты и так проверяют мониторы, а сайты за белым
+  списком и внутренние - нет, про их сертификат узнавали по ругани браузеров. Если продление
+  certbot не настроено или certbot.service упал, это сказано в тексте. Строка в "Что сломано"
+  ведет в "Сервисы", срок виден в карточке nginx.
+- Helper 0.24 раскатывается тем же плейбуком:
+  `ansible-playbook playbooks/kervax_helpers.yml -l kervax_outdated`.
+
 ## [1.4.146] - 2026-10-13
 
 ### Added
