@@ -1892,6 +1892,45 @@ const DB_IMAGE = /(postgres|mysql|mariadb|mongo|redis|valkey|keydb|clickhouse|el
 // ведет ссылка из алерта по памяти. Перезапуск - та же команда, что в разделе Docker.
 // by - чем меряем: память (раздел "Память") или CPU (раздел "CPU", агент 2.21+). Перезапуск
 // один и тот же: тот, кто съел ресурс, обычно и чинится перезапуском.
+// Что течет памятью: дно (минимум за сутки) растет 4 суток подряд. Ряд минимумов показан целиком:
+// по нему видно, что это ровный рост, а не разовый всплеск
+function MemLeaks({ server: s }: { server: Server }) {
+  const { t } = useI18n()
+  const items = s.mem_leaks ?? []
+  if (!items.length) return null
+  const kindName = { docker: t('контейнер'), pod: t('под'), proc: t('процесс') }
+  return (
+    <div className="detail-inc" id="mcard-memleak">
+      <div className="chart-cap">{t('Растет память')}</div>
+      <div className="muted small">
+        {t('Минимум памяти за сутки растет 4 суток подряд. Пила сборщика мусора и всплески минимум не двигают, а утечка поднимает его каждый день.')}
+      </div>
+      <table className="exp-table small">
+        <tbody>
+          {items.map((x) => {
+            const [comm, user] = x.name.split('@')
+            return (
+              <tr key={x.key}>
+                <td className="muted">{kindName[x.kind]}</td>
+                <td>
+                  <b>{x.kind === 'proc' ? `${comm} (${user})` : x.name}</b>{' '}
+                  <span className="muted">{x.series.map((v) => fmtBytes(v)).join(', ')}</span>
+                </td>
+                <td className={x.level >= 2 ? 't-down' : 't-degraded'}>
+                  +{fmtBytes(x.rate)} {t('в сутки')}
+                  {x.eta_days != null && x.eta_days < 30 && (
+                    <span className="muted"> · {t('памяти хватит на {d} сут', { d: x.eta_days })}</span>
+                  )}
+                </td>
+              </tr>
+            )
+          })}
+        </tbody>
+      </table>
+    </div>
+  )
+}
+
 function MemContainers({ server: s, onChanged, by = 'mem' }: { server: Server; onChanged: () => void; by?: 'mem' | 'cpu' }) {
   const { t } = useI18n()
   const { isViewer } = useAuth()
@@ -4959,6 +4998,7 @@ function ServerDetail({
               ? chartCard('oom', <OomEventList serverId={s.id} t={t} />)
               : null}
           </div>
+          <MemLeaks server={s} />
           <MemContainers server={s} onChanged={onChanged} />
           <MemPods server={s} onChanged={onChanged} />
         </MetricSection>

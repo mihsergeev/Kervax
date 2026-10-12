@@ -839,6 +839,16 @@ export type ServerProblem = {
 }
 // Кто ест CPU группами (агент 2.21): процессы с одним именем у одного владельца. cpu - % одного
 // ядра (как top), spin - сколько из них давно крутят по ядру вхолостую, spin_age - возраст старшего
+export type MemLeak = {
+  key: string
+  kind: 'docker' | 'pod' | 'proc'
+  name: string // контейнер, ns/под или "имя@пользователь"
+  rate: number // байт в сутки
+  eta_days: number | null // на сколько суток хватит свободной памяти при таком росте
+  series: number[]
+  level: number
+  text: string
+}
 export type CpuGroup = {
   comm: string
   kind?: 'container' | 'pod' | 'unit' | ''
@@ -1405,6 +1415,8 @@ export type Server = {
   backup_verify?: { ts: string | null; files_ok: number; dumps_ok: string[]; level: number; problems: string[] } | null
   // перезапусков за сутки: "docker:<имя>" | "pod:<ns>/<имя>" -> n (5 и больше - предупреждение)
   restarts_day?: Record<string, number> | null
+  // что течет памятью: дно (минимум за сутки) растет 4 суток подряд; series - эти минимумы, байты
+  mem_leaks?: MemLeak[] | null
   // внешние прокси со сборкой образа старше года (built - unix-секунды)
   proxy_outdated?: { name: string; image: string; kind: string; version: string; built: number; age_days: number }[]
   // нода умеет разобрать раздел по запросу (агент 2.24 + diskusage-setup 0.6)

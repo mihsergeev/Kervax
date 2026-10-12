@@ -33,6 +33,7 @@ export const SRV_ALERT_KINDS: { k: string; label: string }[] = [
   { k: 'unit_loop', label: 'Systemd: юниты в цикле перезапусков' },
   { k: 'docker_restarts', label: 'Docker: часто перезапускается' },
   { k: 'kube_restarts', label: 'Kubernetes: под часто перезапускается' },
+  { k: 'mem_leak', label: 'Память: растет день за днем' },
   { k: 'cpu_spin', label: 'CPU: процессы в пустом цикле' },
   { k: 'backup_growth', label: 'Бэкап: резкий прирост' },
   { k: 'docker_sock', label: 'Docker: внешний прокси с docker-сокетом' },
@@ -58,7 +59,10 @@ export const EXPOSED_MUTE = 'exposed:'
 export const RESTARTS_MUTE = 'restarts:'
 // Порог предупреждения "часто перезапускается": перезапусков за сутки (restarts.MIN на бэкенде)
 export const RESTARTS_DAY_MIN = 5
+// Один контейнер, под или процесс, чья память растет: leak:docker:<имя> | leak:pod:<ns>/<имя> | leak:proc:<имя>@<польз.>
+export const LEAK_MUTE = 'leak:'
 export function muteKindLabel(k: string, t: TFn): string | null {
+  if (k.startsWith(LEAK_MUTE)) return `${t('рост памяти')}: ${k.slice(LEAK_MUTE.length).replace(/^(docker|pod|proc):/, '')}`
   if (k.startsWith(RESTARTS_MUTE)) {
     const key = k.slice(RESTARTS_MUTE.length)
     return key.startsWith('pod:')

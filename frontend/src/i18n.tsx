@@ -1200,6 +1200,15 @@ const EN: Record<string, string> = {
   'проверено {d}: файлов совпало {n}{dumps}': 'checked {d}: {n} files matched{dumps}',
   ', дампы читаются: {e}': ', dumps readable: {e}',
   'Бэкап: проверка восстановления': 'Backup: restore check',
+  // утечка памяти
+  'Растет память': 'Memory keeps growing',
+  'Минимум памяти за сутки растет 4 суток подряд. Пила сборщика мусора и всплески минимум не двигают, а утечка поднимает его каждый день.':
+    'The daily memory minimum has grown 4 days in a row. Garbage collector sawtooth and spikes do not move the minimum, a leak raises it every day.',
+  'процесс': 'process',
+  'в сутки': 'a day',
+  'памяти хватит на {d} сут': 'memory lasts {d} days',
+  'Память: растет день за днем': 'Memory: grows day after day',
+  'рост памяти': 'memory growth',
   // часто перезапускается
   'Docker: часто перезапускается': 'Docker: restarts often',
   'Kubernetes: под часто перезапускается': 'Kubernetes: pod restarts often',
