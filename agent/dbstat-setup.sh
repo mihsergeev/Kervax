@@ -14,9 +14,13 @@
 # open transaction, lock waits, and for PostgreSQL the transaction ID age (wraparound) and
 # tables full of dead rows that have not been vacuumed for long. Query texts never leave: only
 # database, table and application names and numbers.
+#
+# Since 0.6 the oldest idle transaction that holds a snapshot (backend_xmin) is reported on its
+# own: only such a transaction keeps VACUUM from removing dead rows. One holding just an advisory
+# lock was reported as "blocks VACUUM" while the real culprit sat next to it.
 set -euo pipefail
 
-KERVAX_SETUP_VERSION=0.5  # MAJOR.MINOR; compared component-wise
+KERVAX_SETUP_VERSION=0.6  # MAJOR.MINOR; compared component-wise
 KERVAX_SETUP_ALWAYS=1     # safe on any node: without a database it collects an empty file
 
 HELPER_DIR=/lib65/kervax
@@ -158,6 +162,7 @@ health_pg() {
   fi
   xa=$(pg_oldest "$c" "state='active'")
   xi=$(pg_oldest "$c" "state like 'idle in transaction%'")
+  xm=$(pg_oldest "$c" "state like 'idle in transaction%' and backend_xmin is not null")
   lw=$(pg_q "$c" "select count(*)||'|'||coalesce(max(extract(epoch from now()-query_start)),0)::int from pg_stat_activity where wait_event_type='Lock'" | head -1)
   xid=$(pg_q "$c" "select age(datfrozenxid)||'|'||datname from pg_database order by age(datfrozenxid) desc limit 1" | head -1)
   # tables with more than a million dead rows (and over 20% of the live ones) in the three biggest
@@ -170,7 +175,7 @@ health_pg() {
       dead="$dead${dead:+,}{\"db\":\"$(esc "$db")\",\"table\":\"$(esc "$t")\",\"dead\":$(num "$dn"),\"live\":$(num "$ln"),\"vac\":$(num "$va")}"
     done < <(pg_q_db "$c" "$db" "select relname||'|'||n_dead_tup||'|'||n_live_tup||'|'||coalesce(extract(epoch from now()-greatest(last_vacuum,last_autovacuum))::bigint,-1) from pg_stat_user_tables where n_dead_tup > 1000000 and n_dead_tup > n_live_tup * 0.2 order by n_dead_tup desc limit 3")
   done < <(pg_q "$c" "select datname from pg_database where not datistemplate and datallowconn order by pg_database_size(datname) desc limit 3")
-  HEALTH="$HEALTH${HEALTH:+,}{\"engine\":\"pg\",\"container\":\"$(esc "$c")\",\"role\":\"$role\",\"replicas\":$n,\"lag\":$lag,\"receiver\":\"$(esc "$st")\",\"xact\":$(num "${xa%%|*}"),\"xact_db\":\"$(esc "$(printf '%s' "$xa" | cut -d'|' -f2)")\",\"xact_app\":\"$(esc "$(printf '%s' "$xa" | cut -d'|' -f3)")\",\"idle_xact\":$(num "${xi%%|*}"),\"idle_db\":\"$(esc "$(printf '%s' "$xi" | cut -d'|' -f2)")\",\"idle_app\":\"$(esc "$(printf '%s' "$xi" | cut -d'|' -f3)")\",\"lock_waits\":$(num "${lw%%|*}"),\"lock_wait\":$(num "${lw#*|}"),\"xid\":$(num "${xid%%|*}"),\"xid_db\":\"$(esc "${xid#*|}")\",\"dead\":[$dead]}"
+  HEALTH="$HEALTH${HEALTH:+,}{\"engine\":\"pg\",\"container\":\"$(esc "$c")\",\"role\":\"$role\",\"replicas\":$n,\"lag\":$lag,\"receiver\":\"$(esc "$st")\",\"xact\":$(num "${xa%%|*}"),\"xact_db\":\"$(esc "$(printf '%s' "$xa" | cut -d'|' -f2)")\",\"xact_app\":\"$(esc "$(printf '%s' "$xa" | cut -d'|' -f3)")\",\"idle_xact\":$(num "${xi%%|*}"),\"idle_db\":\"$(esc "$(printf '%s' "$xi" | cut -d'|' -f2)")\",\"idle_app\":\"$(esc "$(printf '%s' "$xi" | cut -d'|' -f3)")\",\"idle_xmin\":$(num "${xm%%|*}"),\"idle_xmin_db\":\"$(esc "$(printf '%s' "$xm" | cut -d'|' -f2)")\",\"idle_xmin_app\":\"$(esc "$(printf '%s' "$xm" | cut -d'|' -f3)")\",\"lock_waits\":$(num "${lw%%|*}"),\"lock_wait\":$(num "${lw#*|}"),\"xid\":$(num "${xid%%|*}"),\"xid_db\":\"$(esc "${xid#*|}")\",\"dead\":[$dead]}"
 }
 
 # ── MySQL / MariaDB ────────────────────────────────────────────────────────────

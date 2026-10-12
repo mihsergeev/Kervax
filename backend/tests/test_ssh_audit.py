@@ -58,7 +58,7 @@ def test_advice_only_when_open_to_the_internet():
     assert nog.endswith(", от перебора не защищает ни fail2ban, ни sshguard")
     assert ssh_audit.view(s, NOW) == {"ports": [2221], "password": True, "root": "prohibit-password",
                                       "root_password": False, "guard": "fail2ban", "fail": 0,
-                                      "accepted_password": 0, "open": True}
+                                      "accepted_password": 0, "open": True, "fail_top": []}
 
 
 def test_alert_on_root_password_and_unguarded_brute_force():
@@ -79,5 +79,29 @@ def test_alert_on_root_password_and_unguarded_brute_force():
 
 def test_helper_reports_ssh():
     src = (Path(__file__).resolve().parents[2] / "agent" / "changes-setup.sh").read_text(encoding="utf-8")
-    assert "KERVAX_SETUP_VERSION=0.3" in src and "ssh_info()" in src and "addr=203.0.113.1" in src
+    assert "KERVAX_SETUP_VERSION=0.4" in src and "ssh_info()" in src and "addr=203.0.113.1" in src
+    assert "sshd -V" in src and '"fail_top":[%s]' in src and '"logins":[%s]' in src
     assert "\r" not in src
+
+
+def test_brute_force_names_the_source():
+    s = _srv(ssh=_ssh(guard="", fail=120, fail_top=[{"ip": "198.51.100.9", "n": 90}, {"ip": "198.51.100.10", "n": 30}]))
+    assert ssh_audit.problems(s, NOW) == [
+        (1, "идет перебор паролей SSH: 120 неудачных входов за 10 минут (больше всех с 198.51.100.9: 90), вход по "
+            "паролю включен, а fail2ban и подобного нет")]
+
+
+def test_foreign_address_is_not_judged():
+    """Внешний адрес ведет на другой сервер (там OpenSSH_7.4, у ноды 9.6p1): порты по нему - не про
+    эту ноду, ни алерта про SSH, ни совета"""
+    ex = _ex()
+    ex["banners"] = {"203.0.113.5:2221": "SSH-2.0-OpenSSH_7.4"}
+    s = _srv(ssh=_ssh(root="yes", banner="OpenSSH_9.6p1"), exposure=ex)
+    from app import open_ports
+    assert open_ports.foreign(s) == {"203.0.113.5": {"ip": "203.0.113.5", "outside": "SSH-2.0-OpenSSH_7.4",
+                                                     "node": "OpenSSH_9.6p1"}}
+    assert ssh_audit.problems(s, NOW) == [] and ssh_audit.advice(s, NOW) == []
+    assert open_ports.view(s)["foreign"][0]["ip"] == "203.0.113.5"
+    # та же версия (другой пакет поверх) - та же нода
+    ex["banners"] = {"203.0.113.5:2221": "SSH-2.0-OpenSSH_9.6p1 Ubuntu-3ubuntu13.19"}
+    assert open_ports.foreign(_srv(ssh=_ssh(banner="OpenSSH_9.6p1"), exposure=ex)) == {}
