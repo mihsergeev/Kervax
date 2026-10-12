@@ -24,6 +24,7 @@ from app import db_health
 from app import mem_trend
 from app import restarts as srv_restarts
 from app import ssh_audit
+from app import web_config
 from app import changes as srv_changes
 from app import open_ports
 from app import disk_forecast as dfc
@@ -214,6 +215,7 @@ _SRV_ICON = {
     "kube_node": "🖥☸️", "kube_job": "💥☸️", "access_change": "🔑",
     "backup_restore": "🛟💾", "docker_restarts": "🔄🐳", "kube_restarts": "🔄☸️",
     "mem_leak": "📈🧠", "ssh_risk": "🔐", "db_health": "🛢",
+    "web_config": "🧾",
 }
 
 # Куда ведёт ссылка алерта (deep-link ?server=id&sec=…). Целимся в КОНКРЕТНУЮ метрику,
@@ -232,6 +234,7 @@ _SRV_SECTION = {
     "cpu_spin": "cpueat",
     "exposed": "exposure", "port_new": "exposure", "pressure": "pressure", "net_health": "nethealth",
     "access_change": "changes", "mem_leak": "memleak", "ssh_risk": "ssh", "db_health": "services",
+    "web_config": "services",
 }
 
 
@@ -265,6 +268,7 @@ _ALERT_SECTION = {
     "docker_restarts": "docker",
     "kube_restarts": "kuber",
     "db_health": "services",
+    "web_config": "services",
 }
 
 
@@ -1301,6 +1305,8 @@ def _recovery_detail(key: str, st: dict, ctx: dict) -> str:
         return "ноды кластера снова Ready, давления нет"
     if key == "mem_leak":
         return "память больше не растет день за днем"
+    if key == "web_config":
+        return "конфиги веб-серверов снова проходят проверку"
     if key == "db_health":
         return "базы снова в порядке: реплики догнали, долгих транзакций и блокировок нет"
     if key == "ssh_risk":
@@ -3024,6 +3030,9 @@ def server_problems(s: Server, now: datetime, pod_names: dict[str, str] | None =
     if bv:
         add("backup_restore", bv[0][0], "; ".join(t for _l, t in bv[:2]), "", "backup_restore",
             section="backups", srv=False)
+    # Конфиг веб-сервера не проходит проверку: ведет в "Сервисы" ноды
+    for lv, txt, _key in web_config.problems(rep, now):
+        add("web_config", lv, txt, "", "web_config", section="services")
     # Здоровье баз: ведет в "Сервисы" ноды, где инвентарь СУБД
     for lv, txt, _key in db_health.problems(rep, now):
         add("db_health", lv, txt, "", "db_health", section="services")
@@ -4435,6 +4444,12 @@ def _server_conditions(s: Server, now: datetime,
             items = [x for x in rp if x["kind"] == kind]
             out[key] = (1 if items else 0, {"detail": "; ".join(x["text"] for x in items[:4]),
                                             "sig": [x["key"] for x in items]})
+    # Конфиг веб-сервера не проходит проверку (helper webserver-setup 0.23): сайты упадут при
+    # следующем reload. sig - какой именно, чтобы второй сломанный конфиг дал свой алерт
+    if online and web_config.block(rep, now) is not None:
+        wc = web_config.problems(rep, now)
+        out["web_config"] = (max((lv for lv, _t, _k in wc), default=0),
+                             {"detail": "; ".join(t for _l, t, _k in wc[:3]), "sig": [k for _l, _t, k in wc]})
     # Здоровье баз (helper dbstat-setup 0.5): реплика, долгие транзакции, блокировки, wraparound,
     # VACUUM. sig - что именно, чтобы новая беда при том же уровне дала свой алерт
     if online and db_health.block(rep, now) is not None:
@@ -4659,7 +4674,8 @@ async def evaluate_servers(
             if _muted(key, level, mutes):
                 continue  # тип (или его нижние уровни) заглушён для этого сервера
             prev = int(st.get(key, 0))
-            if key in ("disk_health", "units", "docker_restarts", "kube_restarts", "mem_leak", "db_health"):
+            if key in ("disk_health", "units", "docker_restarts", "kube_restarts", "mem_leak", "db_health",
+                       "web_config"):
                 # Тот же уровень, но сломалось НОВОЕ (второй диск при уже развалившемся
                 # RAID, второй упавший юнит): молчать нельзя, хотя уровень не вырос. Что
                 # сломано - ключи в sig.

@@ -97,6 +97,9 @@ SERVER_ALERT_KINDS: dict[str, tuple[str, str]] = {
     # или висит незакрытой, запросы ждут блокировку, возраст XID ползет к wraparound, таблица
     # давно без VACUUM
     "db_health": ("СУБД: реплика, транзакции, VACUUM", "{detail}"),
+    # nginx -t, apachectl -t, caddy validate или haproxy -c не проходит (helper webserver-setup
+    # 0.23): сейчас работает старый конфиг, следующий reload или перезапуск уронит сайты
+    "web_config": ("Веб-сервер: конфиг не проходит проверку", "{detail}"),
     "reboot": ("Перезагрузка", "перезагружен (аптайм сброшен)"),
     "oom": ("OOM-killer", "OOM-kill: ядро убило {value} процесс(ов){victim} из-за нехватки памяти"),
     "docker_down": ("Docker: контейнер упал", "контейнер {container} не работает: {why}"),

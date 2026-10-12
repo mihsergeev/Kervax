@@ -1200,6 +1200,11 @@ const EN: Record<string, string> = {
   'проверено {d}: файлов совпало {n}{dumps}': 'checked {d}: {n} files matched{dumps}',
   ', дампы читаются: {e}': ', dumps readable: {e}',
   'Бэкап: проверка восстановления': 'Backup: restore check',
+  // проверка конфигов веб-серверов
+  'Веб-сервер: конфиг не проходит проверку': 'Web server: config fails the test',
+  'конфиг в контейнере {c} не проходит проверку: {e}': 'the config in container {c} fails the test: {e}',
+  'конфиг не проходит проверку: {e}': 'the config fails the test: {e}',
+  'Следующий reload или перезапуск уронит сайты.': 'The next reload or restart will take the sites down.',
   // здоровье баз
   'СУБД: реплика, транзакции, VACUUM': 'DB: replica, transactions, VACUUM',
   'реплика, отстает на {l}': 'replica, {l} behind',

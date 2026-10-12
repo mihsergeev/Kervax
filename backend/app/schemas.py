@@ -1070,6 +1070,8 @@ class ServerOut(BaseModel):
     ssh_advice: list[dict] | None = None
     # здоровье баз по движкам: роль, отставание, транзакции, проблемы (db_health.view)
     db_health: list[dict] | None = None
+    # проверка конфигов веб-серверов: [{server, where, ok, err}] (web_config.view)
+    web_config: list[dict] | None = None
     backup_audit_mutes: list[str] | None = None  # приглушённые находки покрытия (по ключу)
     backup_not_required: bool = False  # у сервера бэкап не требуется (алерт снят)
     db_dumps_ok: bool = False  # дампы СУБД настроены отдельно (пункт снят с главной)
