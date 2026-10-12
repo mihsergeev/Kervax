@@ -21,6 +21,8 @@ export function LocationsModal({ onClose, onUnauthorized }: Props) {
   const [locs, setLocs] = useState<Location[]>([])
   const [name, setName] = useState('')
   const [url, setUrl] = useState('')
+  // гонять через локацию мониторы сайтов; выключено - только внешняя проверка портов нод
+  const [monitors, setMonitors] = useState(true)
   const [origUrl, setOrigUrl] = useState('') // url на момент входа в редактирование
   const [editId, setEditId] = useState<number | null>(null)
   const [busy, setBusy] = useState(false)
@@ -42,6 +44,7 @@ export function LocationsModal({ onClose, onUnauthorized }: Props) {
   const reset = () => {
     setName('')
     setUrl('')
+    setMonitors(true)
     setOrigUrl('')
     setEditId(null)
     setTest(null)
@@ -68,8 +71,8 @@ export function LocationsModal({ onClose, onUnauthorized }: Props) {
     setBusy(true)
     setErr(null)
     try {
-      if (editId != null) await updateLocation(editId, { name, url })
-      else await createLocation({ name, url })
+      if (editId != null) await updateLocation(editId, { name, url, monitors })
+      else await createLocation({ name, url, monitors })
       reset()
       load()
     } catch (e) {
@@ -119,7 +122,8 @@ export function LocationsModal({ onClose, onUnauthorized }: Props) {
           </button>
         </div>
         <p className="muted small">
-          {t('Прокси, через которые панель проверяет сайты (HTTP/HTTPS/SOCKS5) — чтобы видеть доступность из разных сетей/регионов.')}
+          {t('Прокси, через которые панель проверяет сайты (HTTP/HTTPS/SOCKS5), чтобы видеть доступность из разных сетей/регионов.')}{' '}
+          {t('Через них же панель проверяет порты нод снаружи.')}
         </p>
 
         <div className="loc-form">
@@ -150,6 +154,13 @@ export function LocationsModal({ onClose, onUnauthorized }: Props) {
               {test.message}
             </p>
           )}
+          <label className="loc-check small">
+            <input type="checkbox" checked={monitors} onChange={(e) => setMonitors(e.target.checked)} />
+            {t('проверять через нее сайты')}
+            {!monitors && (
+              <span className="muted"> - {t('только порты нод: для сайтов, открытых лишь своей сети, не будет ложных "недоступен"')}</span>
+            )}
+          </label>
           {trimmedUrl !== '' && urlChanged && (test == null || !test.ok) && (
             <p className="muted small">
               {t('Проверьте прокси — сохранить можно только доступный.')}
@@ -186,6 +197,7 @@ export function LocationsModal({ onClose, onUnauthorized }: Props) {
                   <div className="loc-name">
                     {loc.name}
                     {!loc.enabled && <span className="type-chip off">{t('выкл')}</span>}
+                    {loc.monitors === false && <span className="type-chip">{t('только порты')}</span>}
                   </div>
                   <div className="loc-url mono">
                     {loc.url || t('напрямую, без прокси')}
@@ -198,6 +210,7 @@ export function LocationsModal({ onClose, onUnauthorized }: Props) {
                       setEditId(loc.id)
                       setName(loc.name)
                       setUrl(loc.url)
+                      setMonitors(loc.monitors !== false)
                       setOrigUrl(loc.url)
                       setTest(null)
                     }}

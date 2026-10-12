@@ -214,8 +214,8 @@ const EN: Record<string, string> = {
     'fine tuning: intervals, codes, headers, expiry',
   'скрыть тонкую настройку': 'hide fine tuning',
   'Проверять из локаций (прокси)': 'Check from locations (proxies)',
-  'Прокси, через которые панель проверяет сайты (HTTP/HTTPS/SOCKS5) — чтобы видеть доступность из разных сетей/регионов.':
-    'Proxies the panel checks sites through (HTTP/HTTPS/SOCKS5) — to see availability from different networks/regions.',
+  'Прокси, через которые панель проверяет сайты (HTTP/HTTPS/SOCKS5), чтобы видеть доступность из разных сетей/регионов.':
+    'Proxies the panel checks sites through (HTTP/HTTPS/SOCKS5), to see availability from different networks/regions.',
   'Адрес прокси': 'Proxy URL',
   'напр. Германия': 'e.g. Germany',
   'Локаций пока нет.': 'No locations yet.',
@@ -1112,8 +1112,15 @@ const EN: Record<string, string> = {
   'на {ips} ничего не открыто': 'nothing open on {ips}',
   'Панель смотрела со своего адреса, а файрвол ноды часто пускает панель по белому списку. Тогда здесь "открыт" и то, что для остальных закрыто, поэтому по этой проверке нет ни красного, ни алертов. Чтобы видеть, что открыто для всех, добавьте в "Локациях" прокси в другой сети.':
     'The panel checked from its own address, and node firewalls often allow the panel by allowlist. Then "open" here includes ports closed to everyone else, so this check shows no red and sends no alerts. To see what is open to everyone, add a proxy in another network under "Locations".',
-  'Красным - то, чему не место в интернете: базы, очереди, etcd, kubelet, Docker API, экспортеры метрик. Такой порт закройте или отметьте "открыт намеренно", остальное - для сведения.':
-    'Red means it does not belong on the internet: databases, queues, etcd, kubelet, Docker API, metrics exporters. Close such a port or mark it "open on purpose", the rest is for reference.',
+  'Красным - опасное: базы, очереди, etcd, kubelet, Docker API, node_exporter. Желтым - служебное: порты Kubernetes и сети подов, агенты и экспортеры метрик. Снаружи должно быть закрыто и то и другое, а если порт открыт специально, отметьте "открыт намеренно". Остальное (SSH, веб, ваши сервисы) - для сведения.':
+    'Red is risky: databases, queues, etcd, kubelet, Docker API, node_exporter. Yellow is internal: Kubernetes and pod network ports, agents and metrics exporters. Both should be closed from outside, and if a port is open on purpose, mark it "open on purpose". The rest (SSH, web, your services) is for reference.',
+  'закрыто снаружи ({n}):': 'closed from outside ({n}):',
+  'Через них же панель проверяет порты нод снаружи.': 'The panel also checks node ports from outside through them.',
+  'проверять через нее сайты': 'check sites through it',
+  'только порты нод: для сайтов, открытых лишь своей сети, не будет ложных "недоступен"': 'node ports only: sites open only to your network will not show false "unreachable"',
+  'только порты': 'ports only',
+  'закрыто даже для панели ({n}):': 'closed even to the panel ({n}):',
+  'не проверить ({n}):': 'could not check ({n}):',
   'Что слушает': 'Listening',
   'Снаружи': 'From outside',
   'открыт для панели': 'open to the panel',
@@ -1134,13 +1141,11 @@ const EN: Record<string, string> = {
   'намеренно': 'intended',
   'вернуть алерт': 'alert again',
   'открыт намеренно': 'open on purpose',
-  'только открытые': 'open only',
-  'закрытых и за файрволом: {n}, показать': 'closed and firewalled: {n}, show',
   'Порт {p} открыт намеренно? Панель перестанет алертить по нему.': 'Is port {p} open on purpose? The panel will stop alerting about it.',
   'Закройте порт файрволом или привяжите сервис к 127.0.0.1 либо к внутреннему адресу. Порт Docker, опубликованный через -p, обходит ufw: публикуйте его как 127.0.0.1:порт:порт.':
     'Close the port with a firewall or bind the service to 127.0.0.1 or an internal address. A Docker port published with -p bypasses ufw: publish it as 127.0.0.1:port:port.',
   'открытый порт': 'open port',
-  'Сеть: опасный сервис открыт в интернет': 'Network: risky service open to the internet',
+  'Сеть: открыто в интернет то, что должно быть закрыто': 'Network: open to the internet but should be closed',
   'Сеть: открылся новый порт': 'Network: new port opened',
   // сервер задыхается
   'Давление на ресурсы': 'Resource pressure',

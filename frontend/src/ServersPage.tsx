@@ -2274,17 +2274,20 @@ function LoopingUnits({ server: s, onChanged }: { server: Server; onChanged: () 
 }
 
 // Что открыто в интернет. Панель раз в 6 часов стучится снаружи (через первую локацию-прокси,
-// без нее - сама) ко всем портам, которые слушает нода: что из этого видно из интернета, а что
-// закрыто файрволом. Опасное - база, очередь, Docker API, kubelet, экспортер метрик. Проверка с
+// без нее - сама) ко всем портам, которые слушает нода: что видно из интернета, а что закрыто.
+// Красное - опасное (база, очередь, Docker API, kubelet, node_exporter), желтое - служебное (порты
+// Kubernetes, агенты и экспортеры метрик): снаружи должно быть закрыто и то и другое. Проверка с
 // адреса самой панели показывает, что открыто для панели: файрвол ноды часто пускает её по белому
-// списку, поэтому красного и кнопок там нет.
-const PORT_STATE: Record<ExposedPort['state'], string> = {
-  open: 'открыт',
-  closed: 'закрыт',
-  filtered: 'за файрволом',
-  unknown: 'не проверить',
+// списку, поэтому цветов и кнопок там нет.
+type PortGroup = {
+  port: number
+  name: string
+  what: string
+  risk: boolean
+  svc: boolean
+  open: string[]
+  other: ExposedPort['state']
 }
-type PortGroup = { port: number; name: string; what: string; risk: boolean; open: string[]; other: ExposedPort['state'] }
 
 // Здоровье сети ноды (агент 2.26): потери TCP, очередь accept, conntrack. Пороги - как у алерта
 // "Сеть: потери и ошибки" (collector.net_problems).
@@ -2332,21 +2335,25 @@ function OpenPorts({ server: s, onChanged }: { server: Server; onChanged: () => 
   const [busy, setBusy] = useState(false)
   const [scanning, setScanning] = useState(false)
   const [err, setErr] = useState('')
-  const [all, setAll] = useState(false)
   const ex = s.exposure
   if (!ex && !(s.last_report?.listen?.length ?? 0)) return null
+  // проверка с самой панели: "открыто" значит "открыто для панели", судить по ней нельзя
+  const own = !!ex?.own
   const muted = new Set(ex?.muted ?? [])
   const by = new Map<number, PortGroup>()
   for (const x of ex?.ports ?? []) {
-    const g = by.get(x.port) ?? { port: x.port, name: x.name, what: x.what, risk: x.risk, open: [], other: x.state }
+    const g = by.get(x.port) ?? { port: x.port, name: x.name, what: x.what, risk: x.risk, svc: !!x.svc, open: [], other: x.state }
     if (x.state === 'open') g.open.push(x.ip)
     else if (g.other !== 'filtered' && g.other !== 'closed') g.other = x.state
     by.set(x.port, g)
   }
-  const rank = (g: PortGroup) => (g.open.length ? (g.risk && !muted.has(String(g.port)) ? 0 : 1) : 2)
+  // красное - опасное, желтое - служебное: и то и другое снаружи должно быть закрыто
+  const flagged = (g: PortGroup) => !own && g.open.length > 0 && !muted.has(String(g.port))
+  const rank = (g: PortGroup) => (!g.open.length ? 3 : flagged(g) && g.risk ? 0 : flagged(g) && g.svc ? 1 : 2)
   const groups = [...by.values()].sort((a, b) => rank(a) - rank(b) || a.port - b.port)
   const opened = groups.filter((g) => g.open.length)
-  const shown = all ? groups : opened
+  const closed = groups.filter((g) => !g.open.length && g.other !== 'unknown')
+  const unknown = groups.filter((g) => !g.open.length && g.other === 'unknown')
   const fresh = new Set((ex?.new ?? []).map((x) => x.port))
   const scan = async () => {
     setScanning(true)
@@ -2374,8 +2381,6 @@ function OpenPorts({ server: s, onChanged }: { server: Server; onChanged: () => 
       setBusy(false)
     }
   }
-  // проверка с самой панели: "открыто" значит "открыто для панели", судить по ней нельзя
-  const own = !!ex?.own
   // адрес в строке - только если открытые порты на адресах ноды расходятся
   const openIps = [...new Set(opened.flatMap((g) => g.open))]
   const quietIps = (ex?.ips ?? []).filter((ip) => !openIps.includes(ip))
@@ -2384,6 +2389,13 @@ function OpenPorts({ server: s, onChanged }: { server: Server; onChanged: () => 
     const word = own ? t('открыт для панели') : t('открыт')
     return perRowIps && g.open.length < openIps.length ? `${word}: ${g.open.join(', ')}` : word
   }
+  const chips = (list: PortGroup[]) =>
+    list.map((g) => (
+      <span className="exp-chip" key={g.port}>
+        <span className="mono">{g.port}</span>
+        {g.name ? ` ${g.name}` : ''}
+      </span>
+    ))
   return (
     <div className="detail-inc exposure" id="mcard-exposure">
       <div className="chart-cap">{t('Что открыто в интернет')}</div>
@@ -2418,7 +2430,7 @@ function OpenPorts({ server: s, onChanged }: { server: Server; onChanged: () => 
       )}
       {ex && !own && opened.length > 0 && (
         <div className="muted small">
-          {t('Красным - то, чему не место в интернете: базы, очереди, etcd, kubelet, Docker API, экспортеры метрик. Такой порт закройте или отметьте "открыт намеренно", остальное - для сведения.')}
+          {t('Красным - опасное: базы, очереди, etcd, kubelet, Docker API, node_exporter. Желтым - служебное: порты Kubernetes и сети подов, агенты и экспортеры метрик. Снаружи должно быть закрыто и то и другое, а если порт открыт специально, отметьте "открыт намеренно". Остальное (SSH, веб, ваши сервисы) - для сведения.')}
         </div>
       )}
       {ex && !ex.ips.length && (
@@ -2431,7 +2443,7 @@ function OpenPorts({ server: s, onChanged }: { server: Server; onChanged: () => 
             : t('Снаружи не открыто ни одного порта из тех, что слушает нода.')}
         </div>
       )}
-      {shown.length > 0 && (
+      {opened.length > 0 && (
         <table className="exp-table small">
           <thead>
             <tr>
@@ -2442,20 +2454,19 @@ function OpenPorts({ server: s, onChanged }: { server: Server; onChanged: () => 
             </tr>
           </thead>
           <tbody>
-            {shown.map((g) => {
+            {opened.map((g) => {
               const m = muted.has(String(g.port))
-              const bad = !own && g.open.length > 0 && g.risk && !m
+              const bad = flagged(g) && g.risk
+              const warn = flagged(g) && g.svc
               return (
-                <tr key={g.port} className={bad ? 'exp-bad' : ''}>
+                <tr key={g.port} className={bad ? 'exp-bad' : warn ? 'exp-warn' : ''}>
                   <td className="mono">{g.port}</td>
                   <td>
                     {g.name && <b>{g.name} </b>}
                     <span className="muted">{g.what || t('процесс не известен')}</span>
                     {!own && fresh.has(g.port) && <span className="exp-new">{t('новый')}</span>}
                   </td>
-                  <td className={bad ? 't-down' : g.open.length ? '' : 'muted'}>
-                    {g.open.length ? openText(g) : t(PORT_STATE[g.other])}
-                  </td>
+                  <td className={bad ? 't-down' : warn ? 't-degraded' : ''}>{openText(g)}</td>
                   <td>
                     {own ? null : m ? (
                       <span className="muted">
@@ -2467,8 +2478,7 @@ function OpenPorts({ server: s, onChanged }: { server: Server; onChanged: () => 
                         )}
                       </span>
                     ) : (
-                      g.open.length > 0 &&
-                      (g.risk || fresh.has(g.port)) &&
+                      (g.risk || g.svc || fresh.has(g.port)) &&
                       !isViewer && (
                         <button className="ghost small row-act" disabled={busy} onClick={() => setMuted(g.port, true)}>
                           🔕 {t('открыт намеренно')}
@@ -2482,12 +2492,20 @@ function OpenPorts({ server: s, onChanged }: { server: Server; onChanged: () => 
           </tbody>
         </table>
       )}
-      {groups.length > opened.length && (
-        <button className="ghost small row-act exp-more" onClick={() => setAll(!all)}>
-          {all ? t('только открытые') : t('закрытых и за файрволом: {n}, показать', { n: groups.length - opened.length })}
-        </button>
+      {closed.length > 0 && (
+        <div className="small exp-closed">
+          <span className="muted">
+            {own ? t('закрыто даже для панели ({n}):', { n: closed.length }) : t('закрыто снаружи ({n}):', { n: closed.length })}
+          </span>{' '}
+          {chips(closed)}
+        </div>
       )}
-      {!own && opened.some((g) => g.risk && !muted.has(String(g.port))) && (
+      {unknown.length > 0 && (
+        <div className="small exp-closed">
+          <span className="muted">{t('не проверить ({n}):', { n: unknown.length })}</span> {chips(unknown)}
+        </div>
+      )}
+      {opened.some((g) => flagged(g) && (g.risk || g.svc)) && (
         <div className="muted small unit-hint">
           {t('Закройте порт файрволом или привяжите сервис к 127.0.0.1 либо к внутреннему адресу. Порт Docker, опубликованный через -p, обходит ufw: публикуйте его как 127.0.0.1:порт:порт.')}
         </div>

@@ -993,6 +993,20 @@ input:focus {
 .exp-table td:first-child { width: 4.5rem; white-space: nowrap; }
 .exp-table td:last-child { text-align: right; white-space: nowrap; }
 .exp-bad td:first-child { color: var(--down); font-weight: 600; }
+.exp-warn td:first-child { color: var(--degraded); font-weight: 600; }
+.exp-closed { margin-top: 0.4rem; line-height: 1.9; }
+.loc-check { display: flex; align-items: baseline; gap: 0.4rem; flex-wrap: wrap; }
+.exp-chip {
+  display: inline-block;
+  margin-right: 0.3rem;
+  padding: 0 0.4rem;
+  line-height: 1.5;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+.exp-chip .mono { color: var(--text); }
 .exp-new {
   margin-left: 0.4rem;
   padding: 0 0.35rem;

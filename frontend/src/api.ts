@@ -976,6 +976,7 @@ export type ExposedPort = {
   what: string // контейнер, сервис кластера или владелец сокета
   name: string // что это обычно за сервис
   risk: boolean // базе, очереди, Docker API и т.п. не место в интернете
+  svc?: boolean // служебный порт (Kubernetes, агент, экспортер): снаружи тоже должен быть закрыт
 }
 export type Exposure = {
   ts: string
@@ -1968,6 +1969,7 @@ export type Location = {
   name: string
   url: string
   enabled: boolean
+  monitors: boolean // false - только для внешней проверки портов
   created_at: string
 }
 
@@ -2030,13 +2032,14 @@ export function createLocation(body: {
   name: string
   url: string
   enabled?: boolean
+  monitors?: boolean
 }): Promise<Location> {
   return api<Location>('/api/locations', { method: 'POST', body: JSON.stringify(body) })
 }
 
 export function updateLocation(
   id: number,
-  body: Partial<{ name: string; url: string; enabled: boolean }>,
+  body: Partial<{ name: string; url: string; enabled: boolean; monitors: boolean }>,
 ): Promise<Location> {
   return api<Location>(`/api/locations/${id}`, {
     method: 'PATCH',

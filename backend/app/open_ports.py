@@ -15,7 +15,9 @@
 присылает helper changes-setup с 0.2 (ss -ltnp).
 
 Опасным считается сервис, которому не место в интернете: базы, очереди, Docker API, etcd,
-kubelet, экспортеры метрик. Открытый SSH и веб - норма, их просто видно в списке.
+kubelet, node_exporter. Служебные порты (Kubernetes и сети подов, агенты и экспортеры метрик)
+не дыра сами по себе, но снаружи им делать нечего: их тоже надо закрыть, алерт - предупреждение.
+Открытый SSH, веб и свои сервисы - норма, их просто видно в списке.
 """
 from __future__ import annotations
 
@@ -47,7 +49,7 @@ KNOWN: dict[int, tuple[str, bool]] = {
     5432: ("PostgreSQL", True), 5601: ("Kibana", True),
     5672: ("RabbitMQ", True), 5900: ("VNC", True), 5984: ("CouchDB", True), 6379: ("Redis", True),
     6443: ("Kubernetes API", False), 8086: ("InfluxDB", True), 8123: ("ClickHouse HTTP", True),
-    # служебные порты Kubernetes: сами по себе не опасны, но без имени непонятно, что это
+    # служебные порты Kubernetes (SERVICE_PORTS): не дыра, но снаружи им делать нечего
     179: ("BGP сети подов (Calico, kube-router)", False), 8132: ("konnectivity (Kubernetes)", False),
     9443: ("k0s API или вебхук Kubernetes", False), 10249: ("kube-proxy, метрики", False),
     10256: ("kube-proxy, проверка здоровья", False), 10257: ("kube-controller-manager", False),
@@ -59,6 +61,12 @@ KNOWN: dict[int, tuple[str, bool]] = {
     11211: ("Memcached", True), 15672: ("RabbitMQ UI", True), 26257: ("CockroachDB", True),
     27017: ("MongoDB", True), 27018: ("MongoDB", True), 27019: ("MongoDB", True),
 }
+# Служебные: порты Kubernetes и сетей подов, агенты мониторинга. Снаружи должны быть закрыты
+SERVICE_PORTS = {179, 4240, 4244, 5473, 6443, 8132, 9091, 9099, 9443, 10050, 10051, 10249, 10256, 10257,
+                 10259, 20244}
+SERVICE_PROCS = {"kube-apiserver", "kube-proxy", "kube-router", "konnectivity-server", "k0s", "k3s",
+                 "kube-controller-manager", "kube-scheduler", "calico-node", "calico-typha", "cilium-agent",
+                 "flanneld", "containerd", "zabbix_agent2", "zabbix_agentd", "zabbix_server"}
 # владелец сокета или образ контейнера -> сервис, которому не место в интернете
 # (целым словом: postgrest - веб-API, а не сама база)
 _RISKY_NAMES = {
@@ -170,7 +178,35 @@ def classify(port: int, what: str) -> tuple[str, bool]:
     if known:
         return known
     p = _PROC_RE.match(what)
+    if p and _lb_health(port, p.group(1)):
+        return "проверка здоровья балансировщика (kube-proxy)", False
     return _PROC_NAMES.get(p.group(1), ("", False)) if p else ("", False)
+
+
+def _lb_health(port: int, proc: str) -> bool:
+    """kube-proxy на порту из диапазона NodePort - healthCheckNodePort сервиса LoadBalancer:
+    по нему внешний балансировщик узнает, есть ли на ноде живые поды. Часть сервиса, а не
+    управления кластером: служебным не считаем"""
+    return proc == "kube-proxy" and 30000 <= port <= 32767
+
+
+def is_service(port: int, what: str) -> bool:
+    """Служебный порт: Kubernetes, сеть подов, агент или экспортер метрик (kube-router на 8080)"""
+    if port in SERVICE_PORTS:
+        return True
+    p = _PROC_RE.match(what)
+    if p and _lb_health(port, p.group(1)):
+        return False
+    return bool(p and p.group(1) in SERVICE_PROCS) or "exporter" in what.lower()
+
+
+def label(port: int, what: str) -> dict:
+    """Подпись строки проверки: название, опасно ли (risk) и служебный ли порт (svc)"""
+    name, risk = classify(port, what)
+    svc = not risk and is_service(port, what)
+    if svc and not name and "exporter" in what.lower():
+        name = "экспортер метрик"
+    return {"name": name, "risk": risk, "svc": svc}
 
 
 # имя процесса (helper changes-setup 0.2) -> сервис: SSH на 2221 без него был бы безымянным
@@ -266,17 +302,18 @@ async def probe(ip: str, port: int, proxy: str | None) -> str:
 
 
 async def pick_proxy(session: AsyncSession) -> tuple[str | None, str]:
-    """Включенная локация-прокси, socks5 первым (HTTP-прокси часто пускают CONNECT только на 443):
-    (url, имя); без нее - (None, "панель")."""
-    found: list[tuple[int, str, str]] = []
+    """Включенная локация-прокси: сначала заведенная только для проверки портов (monitors
+    выключено), потом socks5 (HTTP-прокси часто пускают CONNECT только на 443). (url, имя);
+    без нее - (None, "панель")."""
+    found: list[tuple[int, int, str, str]] = []
     for loc in await session.scalars(select(Location).where(Location.enabled.is_(True)).order_by(Location.id)):
         url = (loc.url or "").strip()
         scheme = urlsplit(url).scheme
         if scheme in ("socks5", "socks5h", "http", "https"):
-            found.append((0 if scheme.startswith("socks") else 1, url, loc.name))
+            found.append((0 if loc.monitors is False else 1, 0 if scheme.startswith("socks") else 1, url, loc.name))
     if not found:
         return None, "панель"
-    _rank, url, name = min(found, key=lambda x: x[0])
+    _own, _rank, url, name = min(found, key=lambda x: (x[0], x[1]))
     return url, name
 
 
@@ -289,8 +326,7 @@ async def scan_server(srv: Server, proxy: str | None, via: str, now: datetime) -
     async def one(ip: str, port: int) -> dict:
         async with sem:
             st = await probe(ip, port, proxy)
-        name, risky = classify(port, ports[port])
-        return {"ip": ip, "port": port, "state": st, "what": ports[port], "name": name, "risk": risky}
+        return {"ip": ip, "port": port, "state": st, "what": ports[port], **label(port, ports[port])}
 
     rows = list(await asyncio.gather(*(one(ip, p) for ip in ips for p in ports))) if ips and ports else []
     return merge(prev, rows, ips, via, now, own=proxy is None)
@@ -344,17 +380,15 @@ def scanned_at(srv: Server) -> datetime | None:
 def _relabel(srv: Server, rows: list) -> list[dict]:
     """Строки проверки с подписями по свежему отчету. Подпись запоминается в момент проверки, а
     helper мог прислать имена процессов позже: без этого таблица до 6 часов показывала бы
-    "процесс пользователя root", хотя имя уже известно."""
+    "процесс пользователя root", хотя имя уже известно. Опасность и служебность тоже считаем
+    заново: проверки до 1.4.137 служебных портов не отмечали."""
     _ips, cur = targets(srv)
     out = []
     for x in rows:
-        if not isinstance(x, dict):
+        if not isinstance(x, dict) or not isinstance(x.get("port"), int):
             continue
-        what = cur.get(x.get("port"))
-        if what and what != x.get("what"):
-            name, risk = classify(x["port"], what)
-            x = dict(x, what=what, name=name, risk=risk)
-        out.append(x)
+        what = cur.get(x["port"]) or str(x.get("what") or "")
+        out.append(dict(x, what=what, **label(x["port"], what)))
     return out
 
 
@@ -373,15 +407,32 @@ def view(srv: Server) -> dict | None:
 
 
 def exposed(srv: Server, now: datetime) -> list[dict]:
-    """Опасные сервисы, открытые в интернет по свежей проверке, без тех, что человек отметил как
-    намеренные (alert_mutes "exposed:<порт>"). Проверка с самой панели не в счет."""
+    """Опасные и служебные порты, открытые в интернет по свежей проверке, без тех, что человек
+    отметил как намеренные (alert_mutes "exposed:<порт>"). Проверка с самой панели не в счет."""
     ex = _ex(srv)
     ts = scanned_at(srv)
     if ts is None or now - ts > FRESH or from_panel(srv):
         return []
     muted = muted_ports(srv)
     return [x for x in _relabel(srv, ex.get("ports") or [])
-            if x.get("state") == "open" and x.get("risk") and str(x.get("port")) not in muted]
+            if x.get("state") == "open" and (x.get("risk") or x.get("svc")) and str(x.get("port")) not in muted]
+
+
+def exposed_level(rows: list[dict]) -> int:
+    """2 - открыто опасное, 1 - только служебное, 0 - ничего"""
+    return 2 if any(x.get("risk") for x in rows) else 1 if rows else 0
+
+
+def exposure_text(rows: list[dict], limit: int = 4) -> str:
+    """'открыто в интернет: etcd 2380 на ...; служебное открыто в интернет: kube-proxy 10249 на ...'"""
+    bad = [x for x in rows if x.get("risk")]
+    svc = [x for x in rows if not x.get("risk")]
+    parts = []
+    if bad:
+        parts.append("открыто в интернет: " + exposed_text(bad, limit))
+    if svc:
+        parts.append("служебное открыто в интернет: " + exposed_text(svc, limit))
+    return "; ".join(parts)
 
 
 def exposed_text(rows: list[dict], limit: int = 4) -> str:
