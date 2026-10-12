@@ -29,7 +29,10 @@ if [ "$(id -u)" != 0 ]; then echo "Root required." >&2; exit 1; fi
 # The parent /var/lib/kervax is set to 0755 EXPLICITLY (under umask 077 the unprivileged agent could not enter).
 install -d -m 0755 "$HELPER_DIR" "$STATE_DIR" "$STATE_DIR/versions" "$STATE_DIR/report.d"
 
-cat > "$HELPER" <<'HELPER_EOF'
+# Written next to the old one and swapped in with mv: bash reads a running script as it goes,
+# and rewriting it in place (cat >) made a run that was in progress continue from the same
+# byte offset in the new text - a syntax error in the middle of a line and a failed unit.
+cat > "$HELPER.new" <<'HELPER_EOF'
 #!/usr/bin/env bash
 # Collects the database inventory -> /var/lib/kervax/db-stats.json. Read only, no passwords leave.
 set -u
@@ -103,7 +106,9 @@ pg_q() { # container query
 collect_pg() {
   local c="$1" v d u cu cm
   v=$(pg_q "$c" "show server_version" | head -1 | awk '{print $1}')
-  [ -z "$v" ] && return 0
+  # a version starts with a digit; anything else is docker's own error printed to stdout (a
+  # postgres-exporter matches the image pattern but has no psql: "OCI runtime exec failed")
+  case "$v" in [0-9]*) ;; *) return 0 ;; esac
   d=$(pg_q "$c" "select datname||'|'||pg_database_size(datname) from pg_database where not datistemplate order by pg_database_size(datname) desc" | dbs_json)
   u=$(pg_q "$c" "select rolname from pg_roles where rolcanlogin order by 1" | list_json)
   # Connection slots. Only client backends are counted: pg_stat_activity also lists the
@@ -139,7 +144,7 @@ pg_oldest() { # container state-condition
 health_pg() {
   local c="$1" rec r role n lag st xa xi lw xid dead db t dn ln va
   rec=$(pg_q "$c" "select pg_is_in_recovery()" | head -1)
-  [ -z "$rec" ] && return 0
+  case "$rec" in t|f) ;; *) return 0 ;; esac
   if [ "$rec" = t ]; then
     # a replica: is the WAL receiver streaming, and how far behind is the replay. Equal LSNs mean
     # it has replayed everything it got - an idle primary is not lag
@@ -193,7 +198,9 @@ my_q() { # container query
 collect_mysql() {
   local c="$1" v d u cu cm
   v=$(my_q "$c" "select version()" | head -1)
-  [ -z "$v" ] && return 0
+  # a version starts with a digit; anything else is docker's own error printed to stdout (a
+  # postgres-exporter matches the image pattern but has no psql: "OCI runtime exec failed")
+  case "$v" in [0-9]*) ;; *) return 0 ;; esac
   d=$(my_q "$c" "select table_schema, ifnull(sum(data_length+index_length),0) from information_schema.tables where table_schema not in ('information_schema','performance_schema','sys') group by table_schema order by 2 desc" \
       | awk -F'\t' '{print $1"|"$2}' | dbs_json)
   u=$(my_q "$c" "select distinct user from mysql.user order by user" | list_json)
@@ -247,7 +254,9 @@ ch_q() { local c="$1" q="$2"; [ -n "$c" ] \
 collect_ch() {
   local c="$1" v d u
   v=$(ch_q "$c" "select version()" | head -1)
-  [ -z "$v" ] && return 0
+  # a version starts with a digit; anything else is docker's own error printed to stdout (a
+  # postgres-exporter matches the image pattern but has no psql: "OCI runtime exec failed")
+  case "$v" in [0-9]*) ;; *) return 0 ;; esac
   d=$(ch_q "$c" "select database, sum(bytes_on_disk) from system.parts where active group by database order by 2 desc format TabSeparated" \
       | awk -F'\t' '{print $1"|"$2}' | dbs_json)
   u=$(ch_q "$c" "select name from system.users order by name format TabSeparated" | list_json)
@@ -263,7 +272,9 @@ rd_q() { local c="$1" a="$2"; [ -n "$c" ] \
 collect_redis() {
   local c="$1" v d
   v=$(rd_q "$c" server | awk -F: '/^redis_version:/{print $2}' | tr -d '\r' | head -1)
-  [ -z "$v" ] && return 0
+  # a version starts with a digit; anything else is docker's own error printed to stdout (a
+  # postgres-exporter matches the image pattern but has no psql: "OCI runtime exec failed")
+  case "$v" in [0-9]*) ;; *) return 0 ;; esac
   d=$(rd_q "$c" keyspace | tr -d '\r' | awk -F'[:,=]' '/^db[0-9]+:/{print $1"|"$3}' | dbs_json)
   add_entry redis "$c" "$v" "$d" "[]"
 }
@@ -299,6 +310,7 @@ printf '{"v":1,"ts":%s,"items":[%s]}\n' "$(date +%s)" "$HEALTH" > "$HOUT.tmp.$$"
 chmod 0644 "$HOUT.tmp.$$"
 mv -f "$HOUT.tmp.$$" "$HOUT"
 HELPER_EOF
+chmod 0755 "$HELPER.new" && mv -f "$HELPER.new" "$HELPER"
 chmod 0755 "$HELPER"
 
 cat > /etc/systemd/system/kervax-db-stats.service <<EOF
@@ -321,7 +333,9 @@ EOF
 
 systemctl daemon-reload
 systemctl enable --now kervax-db-stats.timer >/dev/null 2>&1 || true
-"$HELPER" || true   # run once immediately
+# the first collection right away, in the background: on a node with dozens of containers it
+# takes minutes, and the installer (ansible waits 120 seconds) must not wait for it
+systemctl start --no-block kervax-db-stats.service >/dev/null 2>&1 || true
 
 echo "$KERVAX_SETUP_VERSION" > "$STATE_DIR/versions/dbstat-setup.ver"
 chmod 0644 "$STATE_DIR/versions/dbstat-setup.ver"

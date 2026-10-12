@@ -33,7 +33,10 @@ if [ "$(id -u)" != 0 ]; then echo "Root required." >&2; exit 1; fi
 install -d -m 0755 "$HELPER_DIR" "$STATE_DIR" "$STATE_DIR/versions" "$STATE_DIR/report.d"
 
 # -- refresh script (root, on a timer). Single quotes keep the body literal, no expansion. --
-cat > "$HELPER" <<'HELPER_EOF'
+# Written next to the old one and swapped in with mv: bash reads a running script as it goes,
+# and rewriting it in place (cat >) made a run that was in progress continue from the same
+# byte offset in the new text - a syntax error in the middle of a line and a failed unit.
+cat > "$HELPER.new" <<'HELPER_EOF'
 #!/usr/bin/env bash
 # Collects server_name from host and container nginx plus apache namevhost -> web-sites.json.
 set -u
@@ -439,10 +442,11 @@ put() { [ $c -eq 1 ] && printf ','; printf '"%s":' "$1"; printf '%s\n' "$2" | js
 mv -f "$TMP" "$OUT"
 chmod 0644 "$OUT"
 HELPER_EOF
+chmod 0755 "$HELPER.new" && mv -f "$HELPER.new" "$HELPER"
 chmod 0755 "$HELPER"
 
 # -- счёт запросов в минуту (root, раз в минуту) --
-cat > "$RATE" <<'RATE_EOF'
+cat > "$RATE.new" <<'RATE_EOF'
 #!/usr/bin/env bash
 # Сколько строк добавилось в каждый access-лог с прошлого запуска -> запросов в минуту.
 # Карту лог -> домены пишет сборщик доменов (web-logs.tsv). Из новых строк берем код ответа
@@ -836,6 +840,7 @@ printf '{"ts":%s,"rpm":%s,"e5":%s,"logs":[%s]}\n' "$now" "$TOTAL" "$T5" "$ITEMS"
 mv -f "$TMP" "$OUT"
 chmod 0644 "$OUT"
 RATE_EOF
+chmod 0755 "$RATE.new" && mv -f "$RATE.new" "$RATE"
 chmod 0755 "$RATE"
 
 cat > /etc/systemd/system/kervax-web-rate.service <<EOF
@@ -878,8 +883,11 @@ EOF
 systemctl daemon-reload
 systemctl enable --now kervax-web-sites.timer >/dev/null 2>&1 || true
 systemctl enable --now kervax-web-rate.timer >/dev/null 2>&1 || true
-"$HELPER" || true   # run once immediately so the data appears without waiting for the timer
-"$RATE" || true     # первый запуск только запоминает позиции в логах, счёт со второго
+# the first collection right away, in the background: on a node with dozens of containers it
+# takes minutes, and the installer (ansible waits 120 seconds) must not wait for it
+systemctl start --no-block kervax-web-sites.service >/dev/null 2>&1 || true
+# первый запуск только запоминает позиции в логах (счет со второго) - тоже фоном
+systemctl start --no-block kervax-web-rate.service >/dev/null 2>&1 || true
 
 echo "$KERVAX_SETUP_VERSION" > "$STATE_DIR/versions/webserver-setup.ver"
 chmod 0644 "$STATE_DIR/versions/webserver-setup.ver"

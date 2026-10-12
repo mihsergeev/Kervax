@@ -29,7 +29,10 @@ if [ "$(id -u)" != 0 ]; then echo "Root required." >&2; exit 1; fi
 # The parent /var/lib/kervax is set to 0755 EXPLICITLY (under umask 077 the unprivileged agent could not enter).
 install -d -m 0755 "$HELPER_DIR" "$STATE_DIR" "$STATE_DIR/versions" "$STATE_DIR/report.d"
 
-cat > "$HELPER" <<'HELPER_EOF'
+# Written next to the old one and swapped in with mv: bash reads a running script as it goes,
+# and rewriting it in place (cat >) made a run that was in progress continue from the same
+# byte offset in the new text - a syntax error in the middle of a line and a failed unit.
+cat > "$HELPER.new" <<'HELPER_EOF'
 #!/usr/bin/env bash
 # Where the disk space went -> /var/lib/kervax/report.d/disk-usage.json. Deletes nothing.
 set -u
@@ -411,6 +414,7 @@ printf '{"v":1,"ts":%s,"fs":[%s],"items":[%s]%s}\n' "$now" "$FSJ" "$ITEMS" "$FIX
 mv -f "$TMP" "$OUT"
 chmod 0644 "$OUT"
 HELPER_EOF
+chmod 0755 "$HELPER.new" && mv -f "$HELPER.new" "$HELPER"
 chmod 0755 "$HELPER"
 
 # Idle CPU and IO priority: a full du on a busy disk must not compete with the workload.
@@ -472,7 +476,7 @@ CONF_EOF
     chmod 0644 /etc/kervax/fix.conf
   fi
 
-  cat > "$FIXER" <<'FIXER_EOF'
+  cat > "$FIXER.new" <<'FIXER_EOF'
 #!/usr/bin/env bash
 # Kervax "Free up" actions (root), started from the panel through the spool. A fixed
 # catalogue; an action runs only when /etc/kervax/fix.conf on this node allows it.
@@ -681,6 +685,7 @@ case "${1:-}" in
   *) echo "usage: $0 process-spool | preview|run <action> [container|mount]" >&2; exit 2 ;;
 esac
 FIXER_EOF
+  chmod 0755 "$FIXER.new" && mv -f "$FIXER.new" "$FIXER"
   chmod 0755 "$FIXER"
   chown root:root "$FIXER"
 

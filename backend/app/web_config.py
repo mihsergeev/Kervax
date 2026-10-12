@@ -7,10 +7,18 @@ validate для Caddyfile и haproxy -c. Сейчас все работает н
 """
 from __future__ import annotations
 
+import re
 from datetime import datetime
 
 STALE = 3600  # блок старше часа - helper не работает, не судим по старому
 _NAMES = {"nginx": "nginx", "apache": "Apache", "caddy": "Caddy", "haproxy": "HAProxy"}
+# у nginx в контейнере ошибка идет строкой лога: "2026/10/12 20:00:37 [emerg] 56427#56427: host not
+# found ..." - время и pid читать мешают, оставляем уровень и суть
+_LOG_PREFIX = re.compile(r"^\d{4}/\d\d/\d\d \d\d:\d\d:\d\d (\[\w+\]) \d+#\d+: ")
+
+
+def _err(x: dict) -> str:
+    return _LOG_PREFIX.sub(r"\1 ", str(x.get("err") or "").strip())
 
 
 def block(rep: dict, now: datetime) -> list[dict] | None:
@@ -37,7 +45,7 @@ def problems(rep: dict, now: datetime) -> list[tuple[int, str, str]]:
         if x.get("ok") is not False:
             continue
         name = _NAMES.get(str(x.get("server") or ""), str(x.get("server") or "веб-сервер"))
-        err = str(x.get("err") or "").strip()
+        err = _err(x)
         out.append((1, f"конфиг {name} {_where(x)} не проходит проверку" + (f": {err}" if err else "")
                        + ". Следующий reload или перезапуск уронит сайты", f"{x.get('server')}:{x.get('where')}"))
     return out
@@ -49,4 +57,4 @@ def view(rep: dict, now: datetime) -> list[dict] | None:
     if items is None:
         return None
     return [{"server": str(x.get("server") or ""), "where": str(x.get("where") or ""), "ok": x.get("ok") is not False,
-             "err": str(x.get("err") or "")} for x in items]
+             "err": _err(x)} for x in items]

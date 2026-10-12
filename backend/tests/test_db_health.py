@@ -41,6 +41,10 @@ def _srv(rep):
 def test_healthy_databases_are_quiet():
     assert db_health.problems(_rep(_pg(), _my()), NOW) == []
     assert db_health.problems(_rep(_pg(xact=7200), ts=T - 7200), NOW) == []  # helper давно молчит - не судим
+    # ошибка docker exec вместо ответа базы (postgres-exporter без psql) - не база
+    junk = _pg(container="postgres-exporter", xact_app='OCI runtime exec failed: exec failed: "psql": '
+               'executable file not found in $PATH: unknown')
+    assert db_health.view(_rep(_pg(), junk), NOW)[0]["container"] == "pg" and len(db_health.view(_rep(_pg(), junk), NOW)) == 1
 
 
 def test_replication():
@@ -87,4 +91,5 @@ def test_helper_writes_health():
     src = (Path(__file__).resolve().parents[2] / "agent" / "dbstat-setup.sh").read_text(encoding="utf-8")
     assert "KERVAX_SETUP_VERSION=0.5" in src and "health_pg()" in src and "health_mysql()" in src
     assert "report.d/db-health.json" in src and "pid <> pg_backend_pid()" in src
+    assert 'case "$v" in [0-9]*) ;; *) return 0 ;; esac' in src and 'case "$rec" in t|f)' in src
     assert "\r" not in src
