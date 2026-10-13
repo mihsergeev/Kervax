@@ -98,6 +98,11 @@ _NOT_PUBLIC = [ipaddress.ip_network(n) for n in (
 _V6_GLOBAL = ipaddress.ip_network("2000::/3")
 
 
+def is_public(ip: str) -> bool:
+    """Адрес из интернета: не частный, не loopback, не CGNAT, не служебный."""
+    return _public(ip)
+
+
 def _public(ip: str) -> bool:
     try:
         a = ipaddress.ip_address(ip)

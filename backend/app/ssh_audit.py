@@ -4,6 +4,9 @@
 интернета" (адрес из документационного диапазона), так что блок Match, открывающий пароли для
 офиса, не в счет. Открыт ли порт в интернет, знает внешняя проверка портов (open_ports): без
 нее (или если смотрели с адреса самой панели) не судим - SSH за белым списком с паролем не дыра.
+Кроме одного случая: перебор с внешних адресов сам доказывает, что SSH виден из интернета. На
+одной ноде SSH был проброшен с другого адреса и номера порта (NAT 203.0.113.7:2224 -> нода:2221),
+проверка портов этого не видела, и алерт дал отбой, хотя подбирали еще 7 часов.
 
 Что делать:
 - root входит по паролю на открытый SSH - проблема и алерт;
@@ -71,6 +74,19 @@ def internet_open(srv: Server, ssh: dict, now: datetime) -> bool | None:
     return any(x.get("state") == "open" for x in rows)
 
 
+def brute_from_internet(ssh: dict) -> bool:
+    """Идет перебор, и с внешних адресов (changes-setup 0.4 шлет, откуда больше всего попыток)."""
+    if int(ssh.get("fail") or 0) < BRUTE_MIN:
+        return False
+    return any(open_ports.is_public(str(x.get("ip") or ""))
+               for x in ssh.get("fail_top") or [] if isinstance(x, dict))
+
+
+def reachable(srv: Server, ssh: dict, now: datetime) -> bool:
+    """SSH виден из интернета: по внешней проверке портов или по перебору с внешних адресов."""
+    return internet_open(srv, ssh, now) is True or brute_from_internet(ssh)
+
+
 def _top(ssh: dict) -> str:
     """' (больше всех с 203.0.113.9: 120)' - откуда перебор (changes-setup 0.4)"""
     top = [x for x in ssh.get("fail_top") or [] if isinstance(x, dict) and x.get("ip")]
@@ -84,7 +100,7 @@ def _ports(ssh: dict) -> str:
 def problems(srv: Server, now: datetime) -> list[tuple[int, str]]:
     """(уровень, текст) для алерта ssh_risk и "Что сломано"."""
     ssh = block(srv.last_report or {})
-    if ssh is None or internet_open(srv, ssh, now) is not True:
+    if ssh is None or not reachable(srv, ssh, now):
         return []
     out = []
     if root_password(ssh):
@@ -99,7 +115,7 @@ def problems(srv: Server, now: datetime) -> list[tuple[int, str]]:
 def advice(srv: Server, now: datetime) -> list[dict]:
     """Пункт "Требует действий": вход по паролю на SSH, открытом в интернет."""
     ssh = block(srv.last_report or {})
-    if ssh is None or not password_login(ssh) or internet_open(srv, ssh, now) is not True:
+    if ssh is None or not password_login(ssh) or not reachable(srv, ssh, now):
         return []
     text = (f"SSH пускает по паролю, а порт {_ports(ssh)} открыт в интернет: оставьте вход по ключам "
             f"(PasswordAuthentication no)")
@@ -116,5 +132,5 @@ def view(srv: Server, now: datetime) -> dict | None:
     return {"ports": ssh.get("ports") or [], "password": password_login(ssh), "root": str(ssh.get("root") or ""),
             "root_password": root_password(ssh), "guard": str(ssh.get("guard") or ""),
             "fail": int(ssh.get("fail") or 0), "accepted_password": int(ssh.get("accp") or 0),
-            "open": internet_open(srv, ssh, now),
+            "open": True if brute_from_internet(ssh) else internet_open(srv, ssh, now),
             "fail_top": [x for x in ssh.get("fail_top") or [] if isinstance(x, dict)][:5]}

@@ -105,3 +105,21 @@ def test_foreign_address_is_not_judged():
     # та же версия (другой пакет поверх) - та же нода
     ex["banners"] = {"203.0.113.5:2221": "SSH-2.0-OpenSSH_9.6p1 Ubuntu-3ubuntu13.19"}
     assert open_ports.foreign(_srv(ssh=_ssh(banner="OpenSSH_9.6p1"), exposure=ex)) == {}
+
+
+def test_brute_force_from_the_internet_proves_ssh_is_open():
+    """SSH проброшен с другого адреса и порта (NAT 203.0.113.7:2224 -> нода:2221): проверка портов
+    видит по внешнему адресу чужой сервер и молчит, но перебор с внешних адресов говорит сам за себя"""
+    ex = _ex()
+    ex["banners"] = {"203.0.113.5:2221": "SSH-2.0-OpenSSH_7.4"}
+    top = [{"ip": "198.51.100.9", "n": 90}]
+    s = _srv(ssh=_ssh(guard="", fail=180, fail_top=top, banner="OpenSSH_9.6p1"), exposure=ex)
+    assert ssh_audit.internet_open(s, ssh_audit.block(s.last_report), NOW) is None
+    assert [lvl for lvl, _ in ssh_audit.problems(s, NOW)] == [1]
+    assert ssh_audit.advice(s, NOW)[0]["kind"] == "ssh_password" and ssh_audit.view(s, NOW)["open"] is True
+    # перебор из своей сети (частные адреса) или редкие опечатки - не доказательство
+    lan = _srv(ssh=_ssh(guard="", fail=180, fail_top=[{"ip": "10.0.0.5", "n": 180}], banner="OpenSSH_9.6p1"),
+               exposure=ex)
+    assert ssh_audit.problems(lan, NOW) == [] and ssh_audit.advice(lan, NOW) == []
+    few = _srv(ssh=_ssh(guard="", fail=5, fail_top=top, banner="OpenSSH_9.6p1"), exposure=ex)
+    assert ssh_audit.problems(few, NOW) == []
