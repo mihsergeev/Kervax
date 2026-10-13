@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from datetime import date, datetime, timedelta
 
+from app import podnames
 from app.models import Server
 
 LEAK_DAYS = 4  # суток подряд растет дно: 5 точек
@@ -130,10 +131,12 @@ def problems(s: Server, now: datetime) -> list[dict]:
         return []
     muted = {m[len(MUTE_PREFIX):] for m in (s.alert_mutes or []) if m.startswith(MUTE_PREFIX)}
     rep = s.last_report or {}
+    ctrl = podnames.ctrls(rep)
     free = max(int(rep.get("mem_total") or 0) - int(rep.get("mem_used") or 0), 0)
     out = []
     for key in sorted(st):
-        if key in muted:
+        # мьют на под глушит и его ворклоад: после деплоя у пода новое имя
+        if podnames.muted(muted, key, ctrl.get(key, "")):
             continue
         lk = leak(st[key])
         if lk is None:

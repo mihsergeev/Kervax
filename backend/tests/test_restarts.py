@@ -109,3 +109,106 @@ async def test_alert_after_five_restarts_a_day(tmp_path, monkeypatch):
     hits = [m for m in sent if m.startswith("🔄🐳")]
     assert len(hits) == 1 and "контейнер web перезапускался 5 раз за сутки" in hits[0], sent
     await engine.dispose()
+
+
+def test_pod_names_come_down_to_their_workload():
+    from app import podnames
+    assert podnames.workload("mail-worker-6b8b56c769-f4k8m") == "mail-worker"   # деплоймент
+    assert podnames.workload("scheduler-9d79c684f-6z4n7") == "scheduler"
+    assert podnames.workload("node-exporter-x7k2p") == "node-exporter"                  # демонсет
+    assert podnames.workload("rabbitmq-0") == "rabbitmq"                                # стейтфулсет
+    assert podnames.workload("api-7f9") == "api-7f9"                                    # не похоже - как есть
+    assert podnames.workload("whatever-abcde", "deployment/front") == "front"           # ctrl агента главнее
+    # мьют, поставленный на под до деплоя, глушит новые поды того же деплоймента
+    old = {"pod:shop/mail-worker-6b8b56c769-f4k8m"}
+    assert podnames.muted(old, "pod:shop/mail-worker-789cd65bb8-nkftn")
+    assert podnames.muted(old, "pod:shop/mail-worker", "deployment/mail-worker")
+    assert not podnames.muted(old, "pod:shop2/mail-worker-789cd65bb8-nkftn")       # другой namespace
+    assert not podnames.muted(old, "pod:shop/crawler-649ccd4dfd-tn87l")
+
+
+def _dev_rep(*pods):
+    return {"kube": {"pods": [{"ns": "shop", "name": n, "owner": "ReplicaSet", "ctrl": f"deployment/{c}",
+                               "phase": "Running", "ready": True, "restarts": 5} for n, c in pods]}}
+
+
+def _five(*keys):
+    return {"restarts": {k: {"rc": 5, "ev": [[(NOW - timedelta(minutes=10 + i)).isoformat(), 1] for i in range(5)]}
+                         for k in keys}}
+
+
+def test_pods_of_one_deployment_are_one_line_and_mutes_survive_a_deploy():
+    """На одной ноде перезапуски подов заглушили руками, деплоймент перекатился, у подов новые
+    имена - и заглушенное снова пришло алертом, а два пода одного деплоймента шли двумя строками."""
+    rep = _dev_rep(("mail-worker-789cd65bb8-nkftn", "mail-worker"),
+                      ("mail-worker-789cd65bb8-xmszd", "mail-worker"),
+                      ("importer-795d8cc8c-fttx8", "importer"))
+    st = _five("pod:shop/mail-worker-789cd65bb8-nkftn", "pod:shop/mail-worker-789cd65bb8-xmszd",
+               "pod:shop/importer-795d8cc8c-fttx8")
+    pr = restarts.problems(_srv(st, rep=rep), NOW)
+    assert [(x["key"], x["text"]) for x in pr] == [
+        ("pod:shop/importer", "под shop/importer-795d8cc8c-fttx8 перезапускался 5 раз за сутки, последний 10 мин назад"),
+        ("pod:shop/mail-worker", "поды shop/mail-worker (2 шт.) перезапускались 10 раз за сутки, последний 10 мин назад")]
+    # мьюты, поставленные на поды прошлой выкатки
+    old = ["restarts:pod:shop/mail-worker-6b8b56c769-f4k8m", "restarts:pod:shop/importer-5bfc9d5574-csqbv"]
+    assert restarts.problems(_srv(st, mutes=old, rep=rep), NOW) == []
+    # новый мьют ставится на деплоймент (ключ строки в "Что сломано")
+    rows = [p["mute"] for p in collector.server_problems(_srv(st, rep=rep), NOW) if p["kind"] == "kube_restarts"]
+    assert rows == ["restarts:pod:shop/importer", "restarts:pod:shop/mail-worker"]
+
+
+async def test_another_deployment_within_the_hour_is_the_same_story(tmp_path, monkeypatch):
+    """Перезапуски считаются за сутки: еще один деплоймент перешел порог через минуту после
+    сообщения - не второе сообщение. Старый sig по подам не дает "нового". Заглушили все -
+    отбоя "перезапуски стихли" нет: ничего не стихло."""
+    from app.config import Settings
+    from app.db import Base, create_engine_and_factory
+
+    engine, factory = create_engine_and_factory(f"sqlite+aiosqlite:///{(tmp_path / 's.db').as_posix()}")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    t0 = datetime.now(timezone.utc)
+    pods = [("mail-worker-789cd65bb8-nkftn", "mail-worker"), ("importer-795d8cc8c-fttx8", "importer"),
+            ("scheduler-5d88689b5d-rg5d7", "scheduler"), ("crawler-649ccd4dfd-zz4k8", "crawler")]
+    async with factory() as s:
+        s.add(Server(name="node", token_hash="x", enabled=True, backup_not_required=True, last_seen=t0,
+                     cpu_alert_percent=0, mem_alert_percent=0, last_report={"uptime_seconds": 100000}))
+        await s.commit()
+    sent: list[str] = []
+
+    async def fake_send(cfg, text, parse_mode=None):
+        sent.append(text)
+        return []
+
+    monkeypatch.setattr("app.alerts.send_alert", fake_send)
+    cfg = Settings(alert_webhook="http://hook")
+
+    async def tick(t, hot, state=None, mutes=None):
+        async with factory() as s:
+            srv = (await s.execute(select(Server))).scalars().one()
+            srv.last_seen, srv.last_report = t, {"uptime_seconds": 100000, **_dev_rep(*pods)}
+            st = dict(srv.alert_state or {}) if state is None else state
+            st["restarts"] = {f"pod:shop/{n}": {"rc": 5, "ev": [[(t - timedelta(minutes=5 + i)).isoformat(), 1] for i in range(5)]}
+                              for n, _c in hot}
+            srv.alert_state = st
+            if mutes is not None:
+                srv.alert_mutes = mutes
+            await s.commit()
+        await collector.evaluate_servers(factory, cfg, t)
+
+    # sig старой панели - по подам: тот же под под ключом деплоймента не новость
+    await tick(t0, pods[:1], state={"kube_restarts": 1, "kube_restarts_sig": ["pod:shop/mail-worker-789cd65bb8-nkftn"]})
+    assert sent == []
+    await tick(t0 + timedelta(minutes=1), pods[:2])        # та же история, хотя сообщения от этой панели не было
+    assert len(sent) == 1
+    await tick(t0 + timedelta(minutes=2), pods[:3])        # через минуту после сообщения - молчим
+    assert len(sent) == 1
+    await tick(t0 + timedelta(minutes=70), pods[:4])       # через час - уже новое
+    assert len(sent) == 2 and "crawler" in sent[1]
+    await tick(t0 + timedelta(minutes=72), pods[:4],
+               mutes=[f"restarts:pod:shop/{c}" for _n, c in pods])
+    assert len(sent) == 2                                    # заглушили все: отбоя нет
+    async with factory() as s:
+        srv = (await s.execute(select(Server))).scalars().one()
+        assert int(srv.alert_state.get("kube_restarts", 0)) == 0
+    await engine.dispose()
