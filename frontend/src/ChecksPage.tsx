@@ -255,6 +255,7 @@ export function ChecksPage({ onUnauthorized, openCheckId, onConsumed }: Props) {
     http: 'HTTP',
     tcp_port: 'TCP',
     cert: 'TLS',
+    push: 'PUSH',
   }
   // базовая группировка. Порядок групп: «по группе» — по первому появлению в
   // sort_order (ручной, двигается перетаскиванием), «Без группы» всегда в конце;
@@ -919,7 +920,7 @@ function CheckRow({
   checked?: boolean
 }) {
   const { t } = useI18n()
-  const typeLabel = { http: 'HTTP', tcp_port: 'TCP', cert: 'TLS' }[c.type]
+  const typeLabel = { http: 'HTTP', tcp_port: 'TCP', cert: 'TLS', push: 'PUSH' }[c.type]
   const metric =
     c.type === 'cert' && c.last_value != null
       ? t('{n} дн.', { n: Math.round(c.last_value) })
@@ -1032,7 +1033,9 @@ function CheckRow({
           {!c.enabled && <span className="type-chip off">{t('выкл')}</span>}
         </div>
         <div className="check-target">
-          {c.target}{c.port ? `:${c.port}` : ''}
+          {c.type === 'push'
+            ? t('сигнал не реже, чем раз в {period}', { period: pushPeriodLabel(c.push_period || 3600, t) })
+            : `${c.target}${c.port ? `:${c.port}` : ''}`}
           {(c.extra_paths ?? []).length > 0 && (
             <span
               className="check-target-paths"
@@ -1059,3 +1062,9 @@ function CheckRow({
   )
 }
 
+// Период push-монитора словами для строки списка: 15 мин, 6 ч, 1 сутки
+function pushPeriodLabel(sec: number, t: (s: string, v?: Record<string, string | number>) => string): string {
+  if (sec % 86400 === 0) return t('{n} сут', { n: sec / 86400 })
+  if (sec % 3600 === 0) return t('{n} ч', { n: sec / 3600 })
+  return t('{n} мин', { n: Math.round(sec / 60) })
+}

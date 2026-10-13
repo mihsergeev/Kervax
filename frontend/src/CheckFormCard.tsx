@@ -163,12 +163,20 @@ export function CheckFormCard({
           <span>{t('Тип')}</span>
           <select
             value={form.type}
-            onChange={(e) => set({ type: e.target.value as CheckType })}
+            onChange={(e) => {
+              const type = e.target.value as CheckType
+              // у push адреса нет: панель выдаст свой, а форме нужно непустое поле
+              if (type === 'push') set({ type, target: 'push', push_period: form.push_period || 3600 })
+              else set({ type, target: form.target === 'push' ? '' : form.target })
+            }}
           >
             <option value="http">{t('HTTP(S) — сайт/эндпоинт')}</option>
             <option value="tcp_port">{t('TCP-порт')}</option>
+            <option value="push">{t('Push — сигнал от скрипта или крона')}</option>
           </select>
         </label>
+        {form.type === 'push' && <PushFields form={form} set={set} />}
+        {form.type !== 'push' && (
         <label className="field field-wide">
           <span>{form.type === 'http' ? t('URL или домен') : t('Хост (домен/IP)')}</span>
           <input
@@ -182,6 +190,7 @@ export function CheckFormCard({
             </span>
           )}
         </label>
+        )}
         {form.type === 'http' && (
           <label className="field field-wide">
             <span>{t('Дополнительные пути')}</span>
@@ -290,10 +299,12 @@ export function CheckFormCard({
       {/* Всё остальное имеет рабочее умолчание, и на форме добавления оно только мешало:
           чтобы завести монитор, достаточно имени и адреса. Раскрывается одним кликом, а у
           монитора, где что-то уже отличается от умолчаний, открыто сразу. */}
+      {form.type !== 'push' && (
       <button type="button" className="ghost adv-toggle" onClick={() => setAdv(!adv)}>
         {adv ? t('скрыть тонкую настройку') : t('тонкая настройка: интервалы, коды, заголовки, сроки')}
       </button>
-      {adv && (
+      )}
+      {adv && form.type !== 'push' && (
         <>
       <div className="form-grid">
         <label className="field">
@@ -537,5 +548,62 @@ export function CheckFormCard({
         </button>
       </div>
     </div>
+  )
+}
+
+// Как часто скрипт обязан постучаться. Пресеты закрывают почти все кроны, остальное - минутами.
+const PUSH_PERIODS: [number, string][] = [
+  [300, '5 мин'],
+  [900, '15 мин'],
+  [3600, '1 ч'],
+  [6 * 3600, '6 ч'],
+  [86400, '1 сутки'],
+  [7 * 86400, '1 неделя'],
+]
+
+function PushFields({ form, set }: { form: CheckForm; set: (p: Partial<CheckForm>) => void }) {
+  const { t } = useI18n()
+  const period = form.push_period || 3600
+  const preset = PUSH_PERIODS.some(([v]) => v === period)
+  return (
+    <>
+      <label className="field">
+        <span>{t('Сигнал не реже, чем раз в')}</span>
+        <select
+          value={preset ? String(period) : 'custom'}
+          onChange={(e) => set({ push_period: e.target.value === 'custom' ? period : Number(e.target.value) })}
+        >
+          {PUSH_PERIODS.map(([v, label]) => (
+            <option key={v} value={v}>
+              {t(label)}
+            </option>
+          ))}
+          <option value="custom">{t('свой, в минутах')}</option>
+        </select>
+      </label>
+      {!preset && (
+        <label className="field">
+          <span>{t('Период, минут')}</span>
+          <input
+            type="number"
+            min={1}
+            value={Math.round(period / 60)}
+            onChange={(e) => set({ push_period: Math.max(1, Number(e.target.value) || 1) * 60 })}
+          />
+        </label>
+      )}
+      <label className="field">
+        <span>{t('Допуск, минут (0 = десятая часть периода)')}</span>
+        <input
+          type="number"
+          min={0}
+          value={Math.round((form.push_grace || 0) / 60)}
+          onChange={(e) => set({ push_grace: Math.max(0, Number(e.target.value) || 0) * 60 })}
+        />
+      </label>
+      <span className="field-hint muted small field-wide">
+        {t('Адрес для скрипта появится в карточке монитора после сохранения. Нет сигнала дольше периода и допуска или скрипт сообщил об ошибке - алерт.')}
+      </span>
+    </>
   )
 }

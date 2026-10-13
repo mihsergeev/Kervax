@@ -964,7 +964,47 @@ async def _run_cert(check) -> CheckOutcome:
     return CheckOutcome("up", value=rdays, message=f"сертификат: {int(days)} дн. до истечения")
 
 
-_RUNNERS = {"http": _run_http, "tcp_port": _run_tcp_port, "cert": _run_cert}
+def _dur(sec: float) -> str:
+    """Длительность по-человечески: 5 мин, 3 ч, 2 дн."""
+    sec = int(sec)
+    if sec < 3600:
+        return f"{max(sec // 60, 1)} мин"
+    if sec < 86400 * 2:
+        h, m = divmod(sec // 60, 60)
+        return f"{h} ч" + (f" {m} мин" if m and h < 6 else "")
+    return f"{sec // 86400} дн"
+
+
+def push_limits(check) -> tuple[int, int]:
+    """(период, допуск) push-монитора в секундах. Допуск по умолчанию - десятая часть
+    периода, но не меньше 2 минут: крон стартует не в нулевую секунду, скрипт идет не мгновенно."""
+    period = max(int(getattr(check, "push_period", 0) or 0), 60)
+    grace = int(getattr(check, "push_grace", 0) or 0) or max(120, period // 10)
+    return period, grace
+
+
+async def _run_push(check) -> CheckOutcome:
+    """Push-монитор никуда не ходит: смотрит, когда скрипт стучался в последний раз."""
+    now = datetime.now(timezone.utc)
+    period, grace = push_limits(check)
+    last = getattr(check, "push_at", None)
+    if last is not None and last.tzinfo is None:
+        last = last.replace(tzinfo=timezone.utc)
+    if last is None:
+        born = getattr(check, "created_at", None) or now
+        born = born if born.tzinfo else born.replace(tzinfo=timezone.utc)
+        if (now - born).total_seconds() > period + grace:
+            return CheckOutcome("down", message=f"сигнала от скрипта не было ни разу, ждали каждые {_dur(period)}")
+        return CheckOutcome("up", message="ждем первый сигнал")
+    age = (now - last).total_seconds()
+    if age > period + grace:
+        return CheckOutcome("down", message=f"нет сигнала {_dur(age)}, ждали каждые {_dur(period)}")
+    if getattr(check, "push_fail", ""):
+        return CheckOutcome("down", message=f"скрипт сообщил об ошибке: {check.push_fail}")
+    return CheckOutcome("up", message=f"сигнал {_dur(age)} назад")
+
+
+_RUNNERS = {"http": _run_http, "tcp_port": _run_tcp_port, "cert": _run_cert, "push": _run_push}
 
 
 async def _run_once(check) -> CheckOutcome:

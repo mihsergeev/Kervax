@@ -2358,6 +2358,28 @@ async def backup_credentials(
 # --- раздача агента (публично: бинарь и скрипт не секретны, токен передаётся отдельно) ---
 
 
+_PUSH_OK = frozenset({"", "up", "ok", "0", "success"})
+_PUSH_TOKEN = re.compile(r"[A-Za-z0-9_-]{16,64}")
+
+
+@agent_router.api_route("/push/{token}", methods=["GET", "POST", "HEAD"])
+async def push_signal(token: str, session: SessionDep, status_: str = Query("", alias="status"),
+                      msg: str = Query("", max_length=500)) -> dict:
+    """Сигнал push-монитора: скрипт или крон стучится сюда после прогона. Без логина: адрес
+    и есть секрет. ?status=down (или ненулевой код выхода, ?status=$?) - прогон не удался,
+    ?msg=... - что сказать в алерте. Путь под /api/agent, его белый список caddy пропускает."""
+    if not _PUSH_TOKEN.fullmatch(token):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "unknown push token")
+    check = await session.scalar(select(Check).where(Check.push_token == token, Check.type == "push"))
+    if check is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "unknown push token")
+    st = status_.strip().lower()
+    check.push_at = datetime.now(timezone.utc)
+    check.push_fail = "" if st in _PUSH_OK else ((msg.strip() or f"status={st}")[:255])
+    await session.commit()
+    return {"ok": True}
+
+
 @agent_router.get("/install.sh")
 async def install_script() -> PlainTextResponse:
     path = os.path.join(get_settings().agent_dist_dir, "install.sh")

@@ -942,7 +942,8 @@ async def _send_alerts(
         if rk and check_id is not None and rk in mutes.get(check_id, set()):
             continue  # тип заглушён именно для этого монитора
         tgt, typ, prt = meta.get(check_id, ("", "http", 0))
-        host = _display_host(tgt, typ, prt)
+        # у push-монитора нет адреса: в заголовке алерта его имя
+        host = name if typ == "push" else _display_host(tgt, typ, prt)
         site_url = _site_url(tgt, typ)  # ссылка «открыть сам сайт» (без query/токена)
         link_url = f"{base}/?check={check_id}" if base and check_id is not None else ""
         zone = ""
@@ -958,7 +959,7 @@ async def _send_alerts(
                 commits.append((kind, inc_id, check_id, flag))
                 continue
         same = None
-        if kind in ("bad", "recovery") and tgt:
+        if kind in ("bad", "recovery") and tgt and typ != "push":
             same = (kind, status, checks_exec._registrable_domain(tgt))
             if same in same_at:
                 same_hosts[same].append(host or name)

@@ -36,7 +36,7 @@ def _clean_paths(v: list[str] | None) -> list[str] | None:
     return out
 
 
-CheckType = Literal["http", "tcp_port", "cert"]
+CheckType = Literal["http", "tcp_port", "cert", "push"]
 
 
 class LoginRequest(BaseModel):
@@ -171,6 +171,9 @@ class CheckCreate(BaseModel):
 
     # additional paths of the same site, checked with the main address (see checks.extra_paths_of)
     extra_paths: list[str] = []
+    # push: сигнал ждем каждые push_period секунд, плюс допуск (0 = десятая часть, от 2 минут)
+    push_period: int = Field(default=3600, ge=60, le=31 * 86400)
+    push_grace: int = Field(default=0, ge=0, le=7 * 86400)
 
     _clean = field_validator("ssl_warn_days", "domain_warn_days")(_clean_warn_days)
     _paths = field_validator("extra_paths")(_clean_paths)
@@ -198,6 +201,8 @@ class CheckUpdate(BaseModel):
     auth_pass: str | None = Field(default=None, max_length=256)
     http_headers: str | None = Field(default=None, max_length=4096)
     ignore_tls: bool | None = None
+    push_period: int | None = Field(default=None, ge=60, le=31 * 86400)
+    push_grace: int | None = Field(default=None, ge=0, le=7 * 86400)
     probe_local: bool | None = None
     check_all_ips: bool | None = None
     check_ssl: bool | None = None
@@ -517,6 +522,12 @@ class CheckOut(BaseModel):
     name: str
     type: str
     target: str
+    # push: токен адреса /api/agent/push/<токен>, период, допуск, последний сигнал
+    push_token: str = ""
+    push_period: int = 0
+    push_grace: int = 0
+    push_at: datetime | None = None
+    push_fail: str = ""
     port: int
     enabled: bool
     group_name: str
