@@ -24,6 +24,7 @@ from app import db_health
 from app import access_audit
 from app import docker_risk
 from app import listen_watch
+from app import podnames
 from app import mem_trend
 from app import restarts as srv_restarts
 from app import ssh_audit
@@ -3239,6 +3240,24 @@ def backup_units(s: Server, rep: dict) -> set[str]:
     return out
 
 
+# Медленные счетчики за сутки: новый объект в той же беде в течение часа после сообщения -
+# та же история, отдельного сообщения нет (см. цикл алертов)
+_SIG_STORY = frozenset({"docker_restarts", "kube_restarts"})
+_SIG_STORY_S = 3600
+
+
+def _sig_all_quiet(s: Server, key: str, sig: set[str], now: datetime) -> bool:
+    """Все, о чем сказал алерт, теперь заглушено человеком или не алертит по замыслу (свой
+    helper): уровень упал не потому, что стихло, и отбой слать нельзя."""
+    if key == "units":
+        muted = units_muted(s, now)
+        return all(own_helper_unit(u) or u in muted for u in sig)
+    if key in ("docker_restarts", "kube_restarts"):
+        muted = srv_restarts.muted_keys(s)
+        return all(podnames.muted(muted, k) for k in sig)
+    return False
+
+
 def units_hold(s: Server, bad: list[dict], now: datetime, muted: set[str]) -> dict[str, list]:
     """Юниты для алерта с выдержкой отбоя: {юнит: [с какого момента его нет среди упавших
     или None, уровень]}. Пропавший держится, пока не прошла выдержка; держим только те, про
@@ -4881,20 +4900,33 @@ async def evaluate_servers(
                 sk = f"{key}_sig"
                 old_sig = set(st.get(sk) or [])
                 new_sig = set(ctx.get("sig") or [])
-                if key == "units" and prev and not level and old_sig and all(map(own_helper_unit, old_sig)):
-                    # объявлен был только свой helper: алерта по нему больше нет, нет и отбоя
+                if key == "kube_restarts":
+                    # sig был по подам, стал по ворклоадам: та же беда под новым ключом не новость
+                    old_sig = {podnames.pod_key(x) for x in old_sig}
+                if prev and not level and old_sig and _sig_all_quiet(s, key, old_sig, now):
+                    # объявленное теперь заглушено (или это свой helper, по которому алерта
+                    # больше нет): ничего не стихло, отбой был бы неправдой
                     rec_apply.append((s.id, sk, []))
                     rec_apply.append((s.id, key, 0))
                     continue
                 if level == prev:
                     if level and new_sig - old_sig:
-                        fires.append(srv_fire(s, key, rule, ctx))
-                        fire_apply.append((s.id, sk, sorted(new_sig)))
+                        said = _parse_iso(str(st.get(f"{key}_said") or ""))
+                        if key in _SIG_STORY and said is not None and (now - said).total_seconds() < _SIG_STORY_S:
+                            # Перезапуски считаются за сутки: еще один деплоймент перешел порог
+                            # через минуту после сообщения - та же история (на одной ноде
+                            # два сообщения подряд), он виден в "Что сломано"
+                            apply(s.id, sk, sorted(new_sig))
+                        else:
+                            fires.append(srv_fire(s, key, rule, ctx))
+                            fire_apply.append((s.id, sk, sorted(new_sig)))
+                            fire_apply.append((s.id, f"{key}_said", now.isoformat()))
                     elif new_sig != old_sig:
                         apply(s.id, sk, sorted(new_sig))
                     continue
                 if level > prev:
                     fire_apply.append((s.id, sk, sorted(new_sig)))
+                    fire_apply.append((s.id, f"{key}_said", now.isoformat()))
                 elif level:
                     apply(s.id, sk, sorted(new_sig))
                 else:

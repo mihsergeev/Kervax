@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
+from app import podnames
 from app.models import Server
 
 WINDOW = 86400  # сутки
@@ -93,17 +94,24 @@ def _ago(last: datetime | None, now: datetime) -> str:
     return f", последний {m} мин назад" if m < 120 else f", последний {m // 60} ч назад"
 
 
+def muted_keys(s: Server) -> set[str]:
+    return {m[len(MUTE_PREFIX):] for m in (s.alert_mutes or []) if m.startswith(MUTE_PREFIX)}
+
+
 def problems(s: Server, now: datetime) -> list[dict]:
     """Что перезапускается чаще MIN раз за сутки: {"key", "kind" (docker|pod), "name", "n", "text"}.
-    Без заглушенных ("restarts:<ключ>") и без контейнеров, по которым уже ушел алерт о быстром
-    цикле (docker_loop): там и так все сказано."""
+    Поды - по ворклоаду (key "pod:<ns>/<деплоймент>"): два пода одного деплоймента - одна строка,
+    а мьют переживает деплой, после которого у подов новые имена. Без заглушенных
+    ("restarts:<ключ>", в том числе старый мьют на под того же ворклоада) и без контейнеров, по
+    которым уже ушел алерт о быстром цикле (docker_loop): там и так все сказано."""
     st = s.alert_state or {}
     rs = st.get("restarts") if isinstance(st.get("restarts"), dict) else {}
     dk = st.get("docker") if isinstance(st.get("docker"), dict) else {}
-    muted = {m[len(MUTE_PREFIX):] for m in (s.alert_mutes or []) if m.startswith(MUTE_PREFIX)}
-    out = []
+    muted = muted_keys(s)
+    ctrl = podnames.ctrls(s.last_report)
+    groups: dict[str, list[tuple[str, int, datetime | None]]] = {}
     for key in sorted(rs):
-        if key in muted:
+        if podnames.muted(muted, key, ctrl.get(key, "")):
             continue
         n, last = count(rs[key], now)
         if n < MIN:
@@ -111,9 +119,18 @@ def problems(s: Server, now: datetime) -> list[dict]:
         kind, _, name = key.partition(":")
         if kind == "docker" and (dk.get(name) or {}).get("alerted_loop"):
             continue
-        what = "контейнер" if kind == "docker" else "под"
-        out.append({"key": key, "kind": kind, "name": name, "n": n,
-                    "text": f"{what} {name} перезапускался {n} {_times(n)} за сутки{_ago(last, now)}"})
+        groups.setdefault(podnames.pod_key(key, ctrl.get(key, "")), []).append((name, n, last))
+    out = []
+    for gk, items in groups.items():
+        kind, _, gname = gk.partition(":")
+        total = sum(n for _name, n, _last in items)
+        last = max((t for _n, _c, t in items if t is not None), default=None)
+        if len(items) == 1:
+            what = "контейнер" if kind == "docker" else "под"
+            text = f"{what} {items[0][0]} перезапускался {total} {_times(total)} за сутки{_ago(last, now)}"
+        else:
+            text = f"поды {gname} ({len(items)} шт.) перезапускались {total} {_times(total)} за сутки{_ago(last, now)}"
+        out.append({"key": gk, "kind": kind, "name": gname, "n": total, "text": text})
     return out
 
 

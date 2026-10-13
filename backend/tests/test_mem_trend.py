@@ -96,3 +96,11 @@ def test_problems_alert_and_home_rows():
     assert mem_trend.problems(_srv(_state(**{"docker:worker": [500, 700, 900, 1100, 1300]}),
                                    mutes=["leak:docker:worker"]), NOW) == []
     assert collector._recovery_detail("mem_leak", {}, {}) == "память больше не растет день за днем"
+
+
+def test_pod_mute_survives_a_deploy():
+    """Мьют роста памяти ставится на под, а после деплоя у пода новое имя: глушим ворклоад."""
+    st = _state(**{"pod:shop/mail-worker-789cd65bb8-nkftn": [500, 700, 900, 1100, 1300]})
+    assert [x["key"] for x in mem_trend.problems(_srv(st), NOW)] == ["pod:shop/mail-worker-789cd65bb8-nkftn"]
+    assert mem_trend.problems(_srv(st, mutes=["leak:pod:shop/mail-worker-6b8b56c769-f4k8m"]), NOW) == []
+    assert mem_trend.problems(_srv(st, mutes=["leak:pod:shop2/mail-worker-6b8b56c769-f4k8m"]), NOW) != []
