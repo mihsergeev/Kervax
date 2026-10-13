@@ -1200,6 +1200,10 @@ const EN: Record<string, string> = {
   'проверено {d}: файлов совпало {n}{dumps}': 'checked {d}: {n} files matched{dumps}',
   ', дампы читаются: {e}': ', dumps readable: {e}',
   'Бэкап: проверка восстановления': 'Backup: restore check',
+  // пропавший порт, диск тормозит
+  'Сервер: пропал порт': 'Server: port gone',
+  'пропавший порт': 'gone port',
+  'Диск тормозит': 'Disk is slow',
   // сертификаты nginx
   'Веб-сервер: сертификат истекает': 'Web server: certificate expires',
   'сертификат {l} истек {n} дн назад ({f})': 'certificate {l} expired {n} days ago ({f})',
