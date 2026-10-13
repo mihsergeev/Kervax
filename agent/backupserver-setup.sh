@@ -69,7 +69,11 @@ fi
 #       report the error of the last failed cleanup run
 # 0.31: a cleanup that meets a running backup says BUSY and counts as done instead of failing
 #       (a backup of a big repository runs for a day or two)
-KERVAX_SETUP_VERSION=0.31  # MAJOR.MINOR; compared component-wise (0.13 > 0.2!)
+# 0.32: a new client got 401 on its first backup through the TLS rest-server. Each rest-server
+#       re-reads htpasswd by itself at most every 30 seconds, the first time 30 seconds after
+#       its start, and provisioning waited only for the HTTP one. Now every rest-server over
+#       this data gets SIGHUP (re-read now) and provisioning waits until both ports accept the user
+KERVAX_SETUP_VERSION=0.32  # MAJOR.MINOR; compared component-wise (0.13 > 0.2!)
 # Which nodes need this helper at all. Read by the ansible playbook on the
 # CONTROL machine and evaluated as a shell condition ON THE NODE, so a new
 # helper lands where it belongs without anyone editing the playbook.
@@ -173,6 +177,20 @@ server_restic_min() {
 
 # where the certificate actually is: the new layout, otherwise the old one (a node may not
 # have gone through the migration - stats/get-cert/ufw must see HTTPS either way)
+# Every rest-server over this data (HTTP and the TLS one) re-reads htpasswd by itself at most
+# every 30 seconds, and the first time only 30 seconds after its start: the TLS container came
+# up 24 seconds before a new client's first backup and answered it 401. SIGHUP makes rest-server
+# re-read the file at once. Only rest-server containers: a stranger on the port is left alone.
+rest_reload_htpasswd() {
+  command -v docker >/dev/null 2>&1 || return 0
+  local id
+  for id in $( { docker ps -q --filter "publish=$(rest_port)"; docker ps -q --filter "publish=$TLS_PORT"; } 2>/dev/null | sort -u); do
+    case "$(docker inspect -f '{{.Config.Image}}' "$id" 2>/dev/null)" in
+      *rest-server*) docker kill -s HUP "$id" >/dev/null 2>&1 || true ;;
+    esac
+  done
+}
+
 tls_dir() {
   if [ -f "$TLS_DIR/cert.pem" ]; then echo "$TLS_DIR"
   elif [ -f "$TLS_DIR_OLD/cert.pem" ]; then echo "$TLS_DIR_OLD"
@@ -1081,19 +1099,26 @@ cmd_provision_client() {
   # password can be rotated freely: it is not about data encryption, and the panel hands the
   # client a new one)
   htpasswd -bB -C 10 "$HTPASSWD" "$name" "$hpass" >/dev/null 2>&1 || { echo "htpasswd failed" >&2; return 2; }
-  # 1a) WAIT until the rest-server sees the new user. It re-reads htpasswd on file change, and
-  # between the write and the re-read there is a window: an init starting immediately gets a
-  # 401 and the whole provisioning fails (seen on a live node - the first run 401, every
-  # subsequent one fine). We poll until the credentials work.
+  # 1a) WAIT until the rest-servers see the new user. Each re-reads htpasswd by itself only
+  # every 30 seconds, so they get SIGHUP; an init or a client backup that comes before the
+  # re-read gets a 401 (seen on live nodes: the HTTP one at init, the TLS one at the client's
+  # first backup). Both ports are polled until the credentials work; 40 seconds cover the
+  # 30-second self check if a signal did not get through.
+  rest_reload_htpasswd
   if command -v curl >/dev/null 2>&1; then
-    local i code
-    for i in 1 2 3 4 5 6 7 8 9 10; do
+    local i code tcode=200 tls=""
+    command -v docker >/dev/null 2>&1 && [ -n "$(docker ps -q --filter "publish=$TLS_PORT" 2>/dev/null)" ] && tls=1
+    for i in $(seq 1 40); do
       code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 \
              -u "$name:$hpass" "http://127.0.0.1:$(rest_port)/$name/config" 2>/dev/null || echo 000)
-      [ "$code" = "401" ] || break   # 404/403/200 - the credentials are already accepted
+      [ -n "$tls" ] && tcode=$(curl -sk -o /dev/null -w '%{http_code}' --max-time 5 \
+             -u "$name:$hpass" "https://127.0.0.1:$TLS_PORT/$name/config" 2>/dev/null || echo 000)
+      # 404/403/200 - the credentials are already accepted
+      [ "$code" != "401" ] && [ "$tcode" != "401" ] && break
       sleep 1
     done
-    [ "$code" = "401" ] && { echo "the rest-server did not accept the new user within 10s (htpasswd written, authentication still fails)" >&2; return 2; }
+    [ "$code" = "401" ] && { echo "the rest-server did not accept the new user within 40s (htpasswd written, authentication still fails)" >&2; return 2; }
+    [ "$tcode" = "401" ] && { echo "the TLS rest-server on :$TLS_PORT did not accept the new user within 40s (htpasswd written, authentication still fails)" >&2; return 2; }
   else
     sleep 2   # without curl there is nothing to check with - give the server time to re-read the file
   fi
