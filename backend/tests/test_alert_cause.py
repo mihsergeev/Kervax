@@ -293,6 +293,13 @@ async def test_dead_pod_of_a_controller_alerts_and_jobs_do_not(tmp_path, monkeyp
         srv.last_seen = now + timedelta(minutes=10)
         await s.commit()
     await collector.evaluate_servers(factory, settings, now + timedelta(minutes=10))
+    # под в CrashLoopBackOff между падениями бывает Running: отбой только после 15 минут
+    assert sent == []
+    async with factory() as s:
+        srv = await s.scalar(select(Server))
+        srv.last_seen = now + timedelta(minutes=26)
+        await s.commit()
+    await collector.evaluate_servers(factory, settings, now + timedelta(minutes=26))
     assert len(sent) == 1 and "снова в норме" in sent[0]
     await engine.dispose()
 
@@ -863,4 +870,47 @@ async def test_disk_alert_says_where_the_space_went(tmp_path, monkeypatch):
     assert len(sent) == 1 and "88%" in sent[0]
     assert "больше всего места: /var/lib/docker 50.0 ГБ" in sent[0]
     assert "без риска освобождается ~5.8 ГБ" in sent[0]
+    await engine.dispose()
+
+
+async def test_busy_server_cpu_does_not_flap_around_the_threshold(tmp_path, monkeypatch):
+    """Нода каждый день сидит на 80-100% CPU: переходила 90%, через 15 минут "снова в норме: 89%",
+    через час опять алерт. Снимаем только ниже порога на 10 пунктов и спустя выдержку."""
+    engine, factory = await _panel(tmp_path, "hyst.db")
+    start = datetime.now(timezone.utc) - timedelta(hours=5)
+    async with factory() as s:
+        s.add(Server(name="busy", token_hash="x", enabled=True, backup_not_required=True,
+                     last_seen=start, last_report={"cpu_percent": 95}, cpu_alert_percent=90,
+                     mem_alert_percent=0, disk_alert_percent=0, alert_sustain_seconds=900))
+        await s.commit()
+    sent: list[str] = []
+
+    async def fake_send(cfg, text, parse_mode=None):
+        sent.append(text)
+        return []
+
+    monkeypatch.setattr("app.alerts.send_alert", fake_send)
+    settings = Settings(alert_webhook="http://hook")
+
+    async def tick(minutes: int, cpu: float) -> None:
+        now = start + timedelta(minutes=minutes)
+        async with factory() as s:
+            srv = await s.scalar(select(Server))
+            srv.last_seen, srv.last_report = now, {"cpu_percent": cpu}
+            await s.commit()
+        await collector.evaluate_servers(factory, settings, now)
+
+    for m in range(0, 17, 2):
+        await tick(m, 95)
+    assert len(sent) == 1 and "CPU 95%" in sent[0]
+    for m in range(18, 80, 2):              # 83-89%: ниже порога, но выше линии снятия
+        await tick(m, 89 if m % 4 else 83)
+    await tick(80, 97)                      # снова выше порога - тот же алерт, не новый
+    for m in range(82, 92, 2):              # ниже линии снятия, но меньше выдержки
+        await tick(m, 70)
+    await tick(92, 85)                      # вернулось в полосу - отсчет снятия заново
+    assert len(sent) == 1
+    for m in range(94, 112, 2):
+        await tick(m, 70)
+    assert len(sent) == 2 and "CPU снова в норме: 70%" in sent[1]
     await engine.dispose()

@@ -119,6 +119,13 @@ async def test_pressure_alert_lifecycle(tmp_path, monkeypatch):
     assert len(sent) == 1 and sent[0].startswith("🫁 "), sent
     assert "не хватает памяти: все процессы разом стоят 22% времени" in sent[0]
     assert "java" in sent[0]  # кто ест память
+    # отбой только после часа спокойствия: ночной дамп давал три пары "сработало - отбой" за два часа
     await tick(1, CALM)
+    await tick(30)
+    await tick(5, heavy)                    # снова пошло внутри часа - та же история
+    await tick(5, CALM)
+    await tick(50)
+    assert len(sent) == 1, sent
+    await tick(15)
     assert len(sent) == 2 and sent[1].startswith("✅") and "сервер снова дышит" in sent[1], sent
     await engine.dispose()
