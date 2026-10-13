@@ -21,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app import alerts, audit, backup, backup_growth, checks as checks_exec, custom_backups, docker_exposure, flaky, heartbeat, settings_store
 from app import backup_verify
 from app import db_health
+from app import listen_watch
 from app import mem_trend
 from app import restarts as srv_restarts
 from app import ssh_audit
@@ -216,7 +217,7 @@ _SRV_ICON = {
     "kube_node": "🖥☸️", "kube_job": "💥☸️", "access_change": "🔑",
     "backup_restore": "🛟💾", "docker_restarts": "🔄🐳", "kube_restarts": "🔄☸️",
     "mem_leak": "📈🧠", "ssh_risk": "🔐", "db_health": "🛢",
-    "web_config": "🧾", "web_cert": "🔏",
+    "web_config": "🧾", "web_cert": "🔏", "listen_gone": "🔌", "disk_slow": "🐢",
 }
 
 # Куда ведёт ссылка алерта (deep-link ?server=id&sec=…). Целимся в КОНКРЕТНУЮ метрику,
@@ -235,7 +236,7 @@ _SRV_SECTION = {
     "cpu_spin": "cpueat",
     "exposed": "exposure", "port_new": "exposure", "pressure": "pressure", "net_health": "nethealth",
     "access_change": "changes", "mem_leak": "memleak", "ssh_risk": "ssh", "db_health": "services",
-    "web_config": "services", "web_cert": "services",
+    "web_config": "services", "web_cert": "services", "listen_gone": "exposure", "disk_slow": "disklat",
 }
 
 
@@ -1307,6 +1308,10 @@ def _recovery_detail(key: str, st: dict, ctx: dict) -> str:
         return "ноды кластера снова Ready, давления нет"
     if key == "mem_leak":
         return "память больше не растет день за днем"
+    if key == "listen_gone":
+        return "пропавшие порты снова слушаются или сняты с наблюдения"
+    if key == "disk_slow":
+        return "задержка диска снова в норме"
     if key == "web_cert":
         return "сертификаты веб-серверов снова в сроке"
     if key == "web_config":
@@ -2824,6 +2829,39 @@ def net_problems(rep: dict) -> list[tuple[int, str, str]]:
     return out
 
 
+# Диск тормозит: задержка ввода-вывода (await) устойчиво высокая. За неделю истории парка
+# (13.10.2026) задержка выше 100 мс не держалась нигде даже 5 минут подряд, выше 50 мс - только на
+# дисках серверов бэкапов во время бэкапа: порог 100 мс с выдержкой алерта шума не дает.
+_DISK_SLOW_MS = 100
+_DISK_SLOW_CRIT_MS = 500
+_DISK_GLITCH_MS = 60000  # счетчик сбросился или перевалил: 717 секунд на NVMe - не задержка
+_DISK_SKIP = ("loop", "ram", "sr", "zram", "fd")
+
+
+def disk_slow(rep: dict) -> tuple[int, str]:
+    """(уровень, текст) по самому медленному диску сейчас; выдержку добавляют вызывающие"""
+    worst = None
+    for d in (rep or {}).get("disk_devs") or []:
+        if not isinstance(d, dict):
+            continue
+        dev = str(d.get("dev") or "")
+        if not dev or dev.startswith(_DISK_SKIP):
+            continue
+        try:
+            aw, util = float(d.get("await") or 0), float(d.get("util") or 0)
+        except (TypeError, ValueError):
+            continue
+        if aw >= _DISK_GLITCH_MS:
+            continue
+        if worst is None or aw > worst[0]:
+            worst = (aw, dev, util)
+    if worst is None or worst[0] < _DISK_SLOW_MS:
+        return 0, ""
+    aw, dev, util = worst
+    return (2 if aw >= _DISK_SLOW_CRIT_MS else 1,
+            f"диск {dev} тормозит: задержка {round(aw)} мс, загружен на {round(util)}%")
+
+
 def _held_long(s: Server, state: dict, key: str, now: datetime) -> bool:
     """Держится ли "<вид>_since" дольше выдержки алерта: главная показывает то же, что алертит."""
     since = _parse_iso(state.get(f"{key}_since") or "")
@@ -3034,6 +3072,13 @@ def server_problems(s: Server, now: datetime, pod_names: dict[str, str] | None =
     if bv:
         add("backup_restore", bv[0][0], "; ".join(t for _l, t in bv[:2]), "", "backup_restore",
             section="backups", srv=False)
+    # Пропал порт, который слушался неделями
+    for x in listen_watch.problems(s, now):
+        add("listen_gone", 1, x["text"], "exposure", listen_watch.MUTE_PREFIX + x["port"])
+    # Диск тормозит: как и у алерта, только то, что держится дольше выдержки
+    dl, dtext = disk_slow(rep)
+    if dl and _held_long(s, state, "disk_slow", now):
+        add("disk_slow", dl, dtext, "disklat", "disk_slow", state.get("disk_slow_since"))
     # Сертификат nginx истекает: ведет в "Сервисы" ноды
     for lv, txt, _key in web_certs.problems(rep, now):
         add("web_cert", lv, txt, "", "web_cert", section="services")
@@ -4451,6 +4496,15 @@ def _server_conditions(s: Server, now: datetime,
             items = [x for x in rp if x["kind"] == kind]
             out[key] = (1 if items else 0, {"detail": "; ".join(x["text"] for x in items[:4]),
                                             "sig": [x["key"] for x in items]})
+    # Пропал порт, который слушался неделями (история - alert_state listen_hist, ведет цикл алертов)
+    if online and isinstance((s.alert_state or {}).get("listen_hist"), dict):
+        lg = listen_watch.problems(s, now)
+        out["listen_gone"] = (1 if lg else 0, {"detail": "; ".join(x["text"] for x in lg[:3]),
+                                               "sig": [x["key"] for x in lg]})
+    # Диск тормозит: задержка выше порога держится дольше выдержки
+    if online and rep.get("disk_devs"):
+        dl, dtext = disk_slow(rep)
+        sustain_lvl("disk_slow", dl, {"detail": dtext})
     # Сертификат nginx истекает или истек (helper webserver-setup 0.24)
     if online and web_certs.block(rep, now) is not None:
         wce = web_certs.problems(rep, now)
@@ -4687,7 +4741,7 @@ async def evaluate_servers(
                 continue  # тип (или его нижние уровни) заглушён для этого сервера
             prev = int(st.get(key, 0))
             if key in ("disk_health", "units", "docker_restarts", "kube_restarts", "mem_leak", "db_health",
-                       "web_config", "web_cert"):
+                       "web_config", "web_cert", "listen_gone"):
                 # Тот же уровень, но сломалось НОВОЕ (второй диск при уже развалившемся
                 # RAID, второй упавший юнит): молчать нельзя, хотя уровень не вырос. Что
                 # сломано - ключи в sig.
@@ -4971,6 +5025,10 @@ async def evaluate_servers(
             rstate = srv_restarts.update(st.get("restarts"), s.last_report or {}, now)
             if rstate != (st.get("restarts") or {}):
                 apply(s.id, "restarts", rstate)
+            # история слушающих портов: какой порт держится неделями и пропал (listen_watch)
+            lstate = listen_watch.update(st.get("listen_hist"), s.last_report or {}, now)
+            if lstate is not None and lstate != (st.get("listen_hist") or {}):
+                apply(s.id, "listen_hist", lstate)
             # суточные минимумы памяти контейнеров, подов и процессов (mem_trend)
             mstate = mem_trend.update(st.get("mem_trend"), s.last_report or {}, now)
             if mstate != (st.get("mem_trend") or {}):

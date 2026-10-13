@@ -38,6 +38,8 @@ export const SRV_ALERT_KINDS: { k: string; label: string }[] = [
   { k: 'db_health', label: 'СУБД: реплика, транзакции, VACUUM' },
   { k: 'web_config', label: 'Веб-сервер: конфиг не проходит проверку' },
   { k: 'web_cert', label: 'Веб-сервер: сертификат истекает' },
+  { k: 'listen_gone', label: 'Сервер: пропал порт' },
+  { k: 'disk_slow', label: 'Диск тормозит' },
   { k: 'cpu_spin', label: 'CPU: процессы в пустом цикле' },
   { k: 'backup_growth', label: 'Бэкап: резкий прирост' },
   { k: 'docker_sock', label: 'Docker: внешний прокси с docker-сокетом' },
@@ -65,7 +67,10 @@ export const RESTARTS_MUTE = 'restarts:'
 export const RESTARTS_DAY_MIN = 5
 // Один контейнер, под или процесс, чья память растет: leak:docker:<имя> | leak:pod:<ns>/<имя> | leak:proc:<имя>@<польз.>
 export const LEAK_MUTE = 'leak:'
+// Один пропавший порт: listen:<порт>
+export const LISTEN_MUTE = 'listen:'
 export function muteKindLabel(k: string, t: TFn): string | null {
+  if (k.startsWith(LISTEN_MUTE)) return `${t('пропавший порт')}: ${k.slice(LISTEN_MUTE.length)}`
   if (k.startsWith(LEAK_MUTE)) return `${t('рост памяти')}: ${k.slice(LEAK_MUTE.length).replace(/^(docker|pod|proc):/, '')}`
   if (k.startsWith(RESTARTS_MUTE)) {
     const key = k.slice(RESTARTS_MUTE.length)
