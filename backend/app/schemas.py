@@ -528,6 +528,10 @@ class CheckOut(BaseModel):
     push_grace: int = 0
     push_at: datetime | None = None
     push_fail: str = ""
+    # заметка о мониторе: текст, кто и когда писал
+    note: str = ""
+    note_by: str = ""
+    note_at: datetime | None = None
     port: int
     enabled: bool
     group_name: str
@@ -1063,6 +1067,10 @@ class ServerOut(BaseModel):
     last_seen: datetime | None
     snooze_until: datetime | None = None
     alert_snoozes: dict[str, datetime] | None = None  # {тип: до} — точечный снуз
+    # заметка о сервере: текст, кто и когда писал
+    note: str = ""
+    note_by: str = ""
+    note_at: datetime | None = None
     online: bool = False  # вычисляется (last_seen в пределах offline_after)
     cpu_alert_percent: int
     mem_alert_percent: int
@@ -1620,3 +1628,8 @@ class LocationResultOut(BaseModel):
     latency_ms: int | None
     message: str
     checked_at: datetime
+
+
+class NoteIn(BaseModel):
+    """Заметка к серверу или монитору; пустая строка - убрать."""
+    text: str = Field(default="", max_length=2000)

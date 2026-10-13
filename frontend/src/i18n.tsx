@@ -1901,6 +1901,12 @@ const EN: Record<string, string> = {
   'Сигнала еще не было': 'No signal yet',
   'скрипт сообщил об ошибке: {msg}': 'the script reported an error: {msg}',
   'Выдать новый адрес': 'Issue a new address',
+  'Что важно знать дежурному: что сломано, кто в курсе, когда починят':
+    'What the on-call person should know: what is broken, who is on it, when it gets fixed',
+  'Убрать заметку': 'Remove the note',
+  'Заметка приходит строкой в алертах': 'The note comes as a line in alerts',
+  'добавить заметку': 'add a note',
+  'Изменить заметку': 'Edit the note',
   'сигнал не реже, чем раз в {period}': 'a signal at least once every {period}',
   '{n} сут': '{n} d',
   'Адрес для скрипта видят админ и редактор': 'Only admins and editors see the address for the script',

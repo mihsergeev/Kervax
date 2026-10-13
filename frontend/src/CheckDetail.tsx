@@ -8,6 +8,7 @@ import {
   checkUptime,
   listIncidents,
   rotatePushToken,
+  setCheckNote,
   runCheck,
   runCheckResult,
   snoozeCheck,
@@ -28,6 +29,7 @@ import { StatusBar, type BarStatus } from './charts/StatusBar'
 import { useI18n } from './i18n'
 import { expiryText } from './checkUtils'
 import { useAuth } from './auth'
+import { NoteBar } from './NoteBar'
 
 type Props = {
   check: Check
@@ -388,6 +390,23 @@ export function CheckDetail({ check, groups, onClose, onSaved, onRun, onDelete, 
             </button>
           </div>
         </div>
+        {!editing && (
+          <NoteBar
+            note={check.note}
+            by={check.note_by}
+            at={check.note_at}
+            canEdit={!isViewer}
+            onSave={async (text) => {
+              try {
+                await setCheckNote(check.id, text)
+                onSaved?.()
+              } catch (e) {
+                if (e instanceof ApiError && e.status === 401) onUnauthorized()
+                throw e
+              }
+            }}
+          />
+        )}
         {check.type === 'push' ? (
           <PushInfo check={check} canEdit={!isViewer} />
         ) : (

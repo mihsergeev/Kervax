@@ -249,6 +249,10 @@ class Check(Base):
     push_grace: Mapped[int] = mapped_column(Integer, default=0)   # допуск сверху, 0 = авто
     push_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     push_fail: Mapped[str] = mapped_column(String(255), default="")  # скрипт сообщил об ошибке
+    # заметка о мониторе, как у сервера: в карточке, в списке и строкой в алертах
+    note: Mapped[str] = mapped_column(Text, default="")
+    note_by: Mapped[str] = mapped_column(String(128), default="")
+    note_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_latency_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     last_value: Mapped[float | None] = mapped_column(Float, nullable=True)  # дни сертификата и т.п.
     last_checked_at: Mapped[datetime | None] = mapped_column(
@@ -603,6 +607,11 @@ class Server(Base):
     # или старая группа снапшотов, которые хранятся как есть (сервера больше нет, разовый
     # бэкап, проект заморожен). Не устаревают и не проблема, но проверка целостности идет.
     backup_repo_archive: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    # заметка о сервере для всех, кто его видит ("диск sda под замену, тикет у хостера"):
+    # в карточке, в списке, в "Что сломано" и строкой в каждом алерте по серверу
+    note: Mapped[str] = mapped_column(Text, default="")
+    note_by: Mapped[str] = mapped_column(String(128), default="")
+    note_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # последняя внешняя проверка портов: что открыто в интернет (app/open_ports.py)
     exposure: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     # изменения на сервере (app/changes.py): последний снимок helper'а и лента изменений

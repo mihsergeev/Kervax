@@ -34,6 +34,7 @@ from app.models import (
     User,
 )
 from app.schemas import (
+    NoteIn,
     LocalProbeSuggestionsOut,
     LocalProbeSuggestion,
     LocalProbeApplyIn,
@@ -117,6 +118,7 @@ def _run_out(check: Check, user, **extra) -> CheckRunOut:
     if user.role not in ("admin", "editor"):
         out.auth_pass = ""
         out.http_headers = ""
+        out.push_token = ""
     for key, value in extra.items():
         setattr(out, key, value)
     return out
@@ -186,9 +188,12 @@ async def _recent_beats(session, n: int = 30) -> dict[int, list[str]]:
 
 
 @router.get("/overview", response_model=ChecksOverviewOut)
-async def overview(_: CurrentUser, session: SessionDep) -> ChecksOverviewOut:
+async def overview(user: CurrentUser, session: SessionDep) -> ChecksOverviewOut:
+    # как и список: учетке с нарезанными группами - только ее мониторы
     checks = list(
-        await session.scalars(select(Check).order_by(Check.sort_order, Check.id))
+        await session.scalars(
+            scope_query(user, select(Check), Check, "sites").order_by(Check.sort_order, Check.id)
+        )
     )
     # статусные счётчики — только по ВКЛЮЧЁННЫМ (выключенный «down» — не проблема);
     # выключенные считаем отдельно, чтобы их можно было найти плиткой-фильтром
@@ -246,8 +251,15 @@ async def overview(_: CurrentUser, session: SessionDep) -> ChecksOverviewOut:
         if pids else {}
     )
     outs = []
+    secrets_ok = user.role in ("admin", "editor")
     for c in checks:
         co = CheckOut.model_validate(c)
+        if not secrets_ok:
+            # секреты гасим на модели ответа, как в _run_out: роль "только просмотр" их не
+            # получает и отсюда (раньше обзор отдавал пароль сайта и заголовки всем)
+            co.auth_pass = ""
+            co.http_headers = ""
+            co.push_token = ""
         co.probe_server_name = pnames.get(c.probe_server_id or 0)
         co.uptime_24h = uptime.get(c.id)
         co.beats = beats.get(c.id)
@@ -852,6 +864,20 @@ def _push_defaults(check: Check) -> None:
     check.check_domain = False
     check.extra_paths = []
     check.push_period = max(int(check.push_period or 0), 60) or 3600
+
+
+@router.put("/{check_id}/note", response_model=CheckOut)
+async def set_check_note(check_id: int, body: NoteIn, user: CurrentUser, session: SessionDep) -> Check:
+    """Заметка о мониторе: видна в карточке и едет строкой в его алертах."""
+    check = await _get_or_404(check_id, session, user)
+    text = body.text.strip()
+    check.note = text
+    check.note_by = user.username if text else ""
+    check.note_at = datetime.now(timezone.utc) if text else None
+    await session.commit()
+    await session.refresh(check)
+    await audit.record(session, user.username, "check_note", check.name, text[:200])
+    return _hide_secrets(check, user)
 
 
 @router.post("/{check_id}/push-token", response_model=CheckOut)

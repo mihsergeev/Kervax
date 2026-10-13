@@ -55,6 +55,7 @@ from app.models import (
     WebErrorSample,
 )
 from app.schemas import (
+    NoteIn,
     AgentConfigOut,
     AgentReleaseOut,
     AgentReportIn,
@@ -1120,6 +1121,23 @@ async def snooze_server(
     await session.refresh(server)
     await audit.record(session, user.username, "server_snooze", server.name, f"{body.hours}ч")
     return _out(server, datetime.now(timezone.utc))
+
+
+@router.put("/{server_id}/note", response_model=ServerOut)
+async def set_server_note(
+    server_id: int, body: NoteIn, user: CurrentUser, session: SessionDep
+) -> ServerOut:
+    """Заметка о сервере: видна всем, кто видит сервер, и едет строкой в его алертах."""
+    server = await _get_or_404(server_id, session, user)
+    text = body.text.strip()
+    now = datetime.now(timezone.utc)
+    server.note = text
+    server.note_by = user.username if text else ""
+    server.note_at = now if text else None
+    await session.commit()
+    await session.refresh(server)
+    await audit.record(session, user.username, "server_note", server.name, text[:200])
+    return _out(server, now)
 
 
 @router.post("/{server_id}/exposure/scan", response_model=ServerOut)

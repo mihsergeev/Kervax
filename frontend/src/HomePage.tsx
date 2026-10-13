@@ -723,6 +723,7 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
   type Broken = {
     key: string; id: number; name: string; cc?: string; tone: 't-down' | 't-degraded'; text: string
     kind: string; section: Section; srv?: boolean; sec?: string; mute?: string; since?: string | null
+    note?: string
   }
   const fromProbs = (items: ProbItem[], section: Section): Broken[] =>
     canSee(section)
@@ -740,7 +741,7 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
         .map((i, n) => ({
           key: `${s.id}-${n}`, id: s.id, name: s.name, cc: s.country, tone: i.tone, text: i.text,
           kind: i.kind ?? 'server', section: (i.section ?? 'servers') as Section, srv: i.srv ?? true,
-          sec: i.sec, mute: i.mute, since: i.since,
+          sec: i.sec, mute: i.mute, since: i.since, note: s.note,
         }))
         .filter((i) => canSee(i.section)),
     ),
@@ -785,6 +786,11 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
                 <span className="home-attention-txt">
                   <CountryFlag code={it.cc} /> <b>{it.name}</b> - {it.text}
                   {sinceShort(it.since, t) && <span className="muted"> · {sinceShort(it.since, t)}</span>}
+                  {it.note && (
+                    <span className="note-chip" title={it.note}>
+                      {' '}📝
+                    </span>
+                  )}
                 </span>
                 {it.mute && (
                   <span className="quick-mute" title={t('Приглушить')}
