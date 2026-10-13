@@ -148,7 +148,11 @@ mkdir -p "$BIN_DIR"
 # path, a flaky uplink) a single-shot download never finishes - it dies at the same
 # place every time and starts over. Resuming picks up where the previous attempt
 # stopped, so the binary arrives across several passes.
-curl -fsSL --connect-timeout 15 --retry 5 --retry-delay 3 --retry-all-errors \
+# --retry-all-errors came in curl 7.71: on Ubuntu 20.04 (curl 7.68) the option was unknown, curl
+# refused to start, and the installer blamed the panel's firewall. Only where curl knows it.
+RETRY_ALL=""
+{ curl --help all; curl --help; } 2>/dev/null | grep -q -- '--retry-all-errors' && RETRY_ALL="--retry-all-errors"
+curl -fsSL --connect-timeout 15 --retry 5 --retry-delay 3 $RETRY_ALL \
      -C - "${URL%/}/api/agent/download/$ARCH" -o "$BIN.new" || {
   echo "✗ The panel is unreachable from this server. If it sits behind a firewall," >&2
   echo "  add the server IP in its settings, wait about 2 minutes and retry." >&2
