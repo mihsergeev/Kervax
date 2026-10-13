@@ -946,3 +946,5 @@ class TgAlert(Base):
     # эскалация: сколько раз уже повторили и когда в последний раз
     esc_level: Mapped[int] = mapped_column(Integer, default=0)
     esc_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # пришел отбой: эскалировать нечего, кнопки глушения больше не нужны
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

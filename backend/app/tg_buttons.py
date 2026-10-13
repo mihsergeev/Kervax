@@ -74,6 +74,9 @@ def keyboard(aid: int, kind: str, *, muted: bool = False, acked: bool = False,
 
 def row_keyboard(row: TgAlert) -> dict:
     undo = row.undo or {}
+    if row.resolved_at is not None:
+        # беда ушла: глушить и брать нечего, но заглушенное кнопкой надо уметь вернуть
+        return {"inline_keyboard": [[_btn("↩️ Вернуть алерты", row.id, OP_UNDO)]] if "mute" in undo else []}
     return keyboard(row.id, row.kind, muted="mute" in undo, acked=bool(row.acked_by),
                     us_done=bool(undo.get("us")))
 
@@ -88,6 +91,8 @@ def row_text(row: TgAlert, tz: str, now: datetime | None = None) -> str:
         lines.append(f"✅ {_esc(str(undo.get('us_by') or ''))}: это мы")
     if row.muted:
         lines.append(_esc(row.muted))
+    if row.resolved_at is not None:
+        lines.append(f"✅ снова в норме в {hhmm(row.resolved_at, tz, now)}")
     text = row.text or ""
     if lines:
         text = text[: 4000 - sum(len(x) + 1 for x in lines)] + "\n\n" + "\n".join(lines)

@@ -677,6 +677,10 @@ class AlertConfigOut(BaseModel):
     tg_buttons: bool = False  # кнопки под алертами и команды бота
     tz: str = ""  # часовой пояс панели ("до утра" у кнопки)
     tg_poll: dict = {}  # как идет опрос бота: status ok|conflict|error|off, error, ts, bot
+    # эскалация: enabled, after_min, repeat, chat, users, kinds
+    escalation: dict = {}
+    # кому можно эскалировать: учетки панели и привязан ли у них Telegram
+    esc_candidates: list[dict] = []
 
 
 class AlertConfigIn(BaseModel):
@@ -688,6 +692,16 @@ class AlertConfigIn(BaseModel):
     muted: bool = False
     tg_buttons: bool = False
     tz: str = Field(default="", max_length=64)
+    escalation: "EscalationIn | None" = None
+
+
+class EscalationIn(BaseModel):
+    enabled: bool = False
+    after_min: int = Field(default=15, ge=5, le=720)
+    repeat: int = Field(default=1, ge=1, le=5)
+    chat: str = Field(default="", max_length=64)
+    users: list[str] = Field(default_factory=list, max_length=50)
+    kinds: list[str] = Field(default_factory=lambda: ["down", "offline"], max_length=50)
 
 
 class AlertTestResult(BaseModel):

@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { ApiError, getAlerts, putAlerts, testAlerts, type AlertConfig } from './api'
+import { ApiError, getAlerts, putAlerts, testAlerts, type AlertConfig, type Escalation } from './api'
 import { ServerAlertRulesSection, SiteAlertRulesSection } from './ServerAlertRules'
 import { useI18n } from './i18n'
 
@@ -19,6 +19,8 @@ export function AlertsModal({ onClose, onUnauthorized }: Props) {
   const [buttons, setButtons] = useState(false)
   const [tz, setTz] = useState('')
   const [poll, setPoll] = useState<AlertConfig['tg_poll'] | null>(null)
+  const [esc, setEsc] = useState<Escalation | null>(null)
+  const [escUsers, setEscUsers] = useState<AlertConfig['esc_candidates']>([])
   const [enabled, setEnabled] = useState(false)
   const [busy, setBusy] = useState(false)
   const [msg, setMsg] = useState<string | null>(null)
@@ -36,6 +38,8 @@ export function AlertsModal({ onClose, onUnauthorized }: Props) {
         setButtons(c.tg_buttons)
         setTz(c.tz)
         setPoll(c.tg_poll)
+        setEsc(c.escalation)
+        setEscUsers(c.esc_candidates)
         setEnabled(c.enabled)
       })
       .catch(() => onUnauthorized())
@@ -52,6 +56,7 @@ export function AlertsModal({ onClose, onUnauthorized }: Props) {
       muted,
       tg_buttons: buttons,
       tz,
+      ...(esc ? { escalation: esc } : {}),
     })
     setTgApi(c.telegram_api)
     setEnabled(c.enabled)
@@ -60,6 +65,7 @@ export function AlertsModal({ onClose, onUnauthorized }: Props) {
     setButtons(c.tg_buttons)
     setTz(c.tz)
     setPoll(c.tg_poll)
+    setEsc(c.escalation)
     return c
   }
 
@@ -150,6 +156,7 @@ export function AlertsModal({ onClose, onUnauthorized }: Props) {
                 <input value={tz} onChange={(e) => setTz(e.target.value)} placeholder="Europe/Moscow" />
               </label>
               {poll && <TgPollState poll={poll} />}
+              {esc && <EscalationForm esc={esc} users={escUsers} onChange={setEsc} />}
             </>
           )}
         </div>
@@ -239,4 +246,100 @@ function TgPollState({ poll }: { poll: AlertConfig['tg_poll'] }) {
   if (poll.status === 'error')
     return <p className="form-error">{t('Бот не отвечает: {err}', { err: poll.error })}</p>
   return <p className="muted small">{t('Опрос бота запустится в течение 20 секунд после сохранения.')}</p>
+}
+
+// виды алертов, которые имеет смысл повторять: то, что ломает работу прямо сейчас
+const ESC_KINDS: [string, string][] = [
+  ['down', 'Сайт недоступен'],
+  ['offline', 'Сервер недоступен'],
+  ['disk', 'Диск'],
+  ['disk_health', 'Диск: поломка'],
+  ['units', 'Systemd: упал юнит'],
+  ['ssl', 'Сертификат'],
+  ['kube_node', 'Kubernetes: нода не готова или под давлением'],
+  ['backup_failed', 'Бэкап: ошибка'],
+]
+
+function EscalationForm({
+  esc,
+  users,
+  onChange,
+}: {
+  esc: Escalation
+  users: AlertConfig['esc_candidates']
+  onChange: (e: Escalation) => void
+}) {
+  const { t } = useI18n()
+  const set = (p: Partial<Escalation>) => onChange({ ...esc, ...p })
+  const toggle = (list: string[], v: string, on: boolean) =>
+    on ? [...list.filter((x) => x !== v), v] : list.filter((x) => x !== v)
+  return (
+    <div className="settings-group">
+      <label className="check-toggle">
+        <input type="checkbox" checked={esc.enabled} onChange={(e) => set({ enabled: e.target.checked })} />
+        <span>
+          <b>{t('Эскалация')}</b>
+          <span className="muted small">
+            {t('Если на алерт никто не нажал «взял» и беда не ушла, повторить его в другой чат или выбранным людям в личку.')}
+          </span>
+        </span>
+      </label>
+      {esc.enabled && (
+        <>
+          <label className="field">
+            <span>{t('Через, минут')}</span>
+            <input
+              type="number"
+              min={5}
+              max={720}
+              value={esc.after_min}
+              onChange={(e) => set({ after_min: Math.max(5, Number(e.target.value) || 15) })}
+            />
+          </label>
+          <label className="field">
+            <span>{t('Сколько раз повторить')}</span>
+            <input
+              type="number"
+              min={1}
+              max={5}
+              value={esc.repeat}
+              onChange={(e) => set({ repeat: Math.min(5, Math.max(1, Number(e.target.value) || 1)) })}
+            />
+          </label>
+          <label className="field">
+            <span>{t('Чат эскалации (ID, можно пусто)')}</span>
+            <input value={esc.chat} onChange={(e) => set({ chat: e.target.value })} placeholder="-1001234567890" />
+          </label>
+          <div className="field">
+            <span>{t('Кому в личку')}</span>
+            {users.map((u) => (
+              <label key={u.username} className="tg-row">
+                <input
+                  type="checkbox"
+                  disabled={!u.linked}
+                  checked={esc.users.includes(u.username)}
+                  onChange={(e) => set({ users: toggle(esc.users, u.username, e.target.checked) })}
+                />
+                {u.username}
+                {!u.linked && <span className="muted small"> {t('(Telegram не привязан)')}</span>}
+              </label>
+            ))}
+          </div>
+          <div className="field">
+            <span>{t('Какие алерты повторять')}</span>
+            {ESC_KINDS.map(([k, label]) => (
+              <label key={k} className="tg-row">
+                <input
+                  type="checkbox"
+                  checked={esc.kinds.includes(k)}
+                  onChange={(e) => set({ kinds: toggle(esc.kinds, k, e.target.checked) })}
+                />
+                {t(label)}
+              </label>
+            ))}
+          </div>
+        </>
+      )}
+    </div>
+  )
 }

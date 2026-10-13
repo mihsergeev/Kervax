@@ -1878,6 +1878,19 @@ const EN: Record<string, string> = {
   'Этого бота уже читает другая программа или панель. Заведите для панели отдельного бота у @BotFather и укажите его токен.':
     'Another program or panel already reads this bot. Create a separate bot for this panel with @BotFather and set its token.',
   'Бот не отвечает: {err}': 'The bot does not respond: {err}',
+  'Эскалация': 'Escalation',
+  'Если на алерт никто не нажал «взял» и беда не ушла, повторить его в другой чат или выбранным людям в личку.':
+    'If nobody pressed "on it" and the problem is still there, repeat the alert to another chat or to chosen people in private.',
+  'Через, минут': 'After, minutes',
+  'Сколько раз повторить': 'How many times to repeat',
+  'Чат эскалации (ID, можно пусто)': 'Escalation chat (ID, may be empty)',
+  'Кому в личку': 'Private messages to',
+  '(Telegram не привязан)': '(Telegram not linked)',
+  'Какие алерты повторять': 'Which alerts to repeat',
+  'Сайт недоступен': 'Site is down',
+  'Systemd: упал юнит': 'Systemd: unit failed',
+  'Сертификат': 'Certificate',
+  'Kubernetes: нода не готова или под давлением': 'Kubernetes: node not ready or under pressure',
   'Опрос бота запустится в течение 20 секунд после сохранения.': 'Bot polling starts within 20 seconds after saving.',
   'Временно тушит все уведомления. Инциденты продолжают фиксироваться.':
     'Temporarily silences all notifications. Incidents are still recorded.',

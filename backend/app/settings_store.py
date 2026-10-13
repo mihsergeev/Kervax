@@ -12,6 +12,9 @@ ALERTS_KEY = "alerts"
 MUTED_KEY = "alerts_muted"
 # состояние опроса бота (кнопки под алертами): offset getUpdates и что видно в настройках
 TG_POLL_KEY = "tg_poll"
+# эскалация: кому повторять алерт, на который никто не нажал "взял"
+ESC_KEY = "alerts_escalation"
+ESC_KINDS_DEFAULT = ["down", "offline"]
 UNCOVERED_KEY = "uncovered_digest_sent"
 VAULT_META_KEY = "backup_vault_meta"  # соль/итерации/verifier сейфа (СЕКРЕТОВ НЕТ)
 RETENTION_KEY = "retention"
@@ -338,6 +341,38 @@ async def set_alert_config(
             }
         ),
     )
+
+
+def _esc_clean(data: dict) -> dict:
+    def num(v, lo, hi, dflt):
+        try:
+            return max(lo, min(hi, int(v)))
+        except (TypeError, ValueError):
+            return dflt
+    kinds = data.get("kinds")
+    return {
+        "enabled": bool(data.get("enabled", False)),
+        "after_min": num(data.get("after_min"), 5, 720, 15),
+        "repeat": num(data.get("repeat"), 1, 5, 1),
+        "chat": str(data.get("chat") or "").strip()[:64],
+        "users": [str(u)[:64] for u in (data.get("users") or []) if str(u).strip()][:50],
+        "kinds": [str(k)[:40] for k in kinds][:50] if isinstance(kinds, list) else list(ESC_KINDS_DEFAULT),
+    }
+
+
+async def get_escalation(session: AsyncSession) -> dict:
+    """Эскалация: включена ли, через сколько минут без "взял", сколько повторов, в какой чат и
+    каким учеткам, по каким видам алертов."""
+    raw = await _get_raw(session, ESC_KEY)
+    try:
+        data = json.loads(raw) if raw else {}
+    except ValueError:
+        data = {}
+    return _esc_clean(data if isinstance(data, dict) else {})
+
+
+async def set_escalation(session: AsyncSession, data: dict) -> None:
+    await _set_raw(session, ESC_KEY, json.dumps(_esc_clean(data), ensure_ascii=False))
 
 
 async def get_tg_poll(session: AsyncSession) -> dict:

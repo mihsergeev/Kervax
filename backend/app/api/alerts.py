@@ -7,7 +7,7 @@ from sqlalchemy import select
 from app import alerts, audit, collector, settings_store, tg_bot
 from app.config import get_settings
 from app.deps import AdminUser, SessionDep
-from app.models import Check, Server
+from app.models import Check, Server, User
 from app.schemas import (
     MuteWarning,
     AlertCoverageOut,
@@ -38,6 +38,11 @@ async def _current(session, settings) -> AlertConfigOut:
         tg_buttons=cfg["tg_buttons"],
         tz=cfg["tz"],
         tg_poll=tg_bot.poll_state_out(await settings_store.get_tg_poll(session)),
+        escalation=await settings_store.get_escalation(session),
+        esc_candidates=[
+            {"username": u.username, "linked": bool(u.tg_chat_id)}
+            for u in (await session.scalars(select(User).order_by(User.username))).all()
+        ],
     )
 
 
@@ -67,6 +72,8 @@ async def put_alerts(
         body.tg_buttons,
         body.tz,
     )
+    if body.escalation is not None:
+        await settings_store.set_escalation(session, body.escalation.model_dump())
     await settings_store.set_muted(session, body.muted)
     await audit.record(session, user.username, "alerts_config", "")
     return await _current(session, settings)
