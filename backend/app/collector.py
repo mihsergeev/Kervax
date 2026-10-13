@@ -1596,6 +1596,8 @@ _BACKUP_STALE_SECONDS = 2 * 86400
 # «бэкап не настроен» — не инцидент, а задача «на сделать»: даём сутки и на настройку
 # новой ноды, и на переконфигурацию существующей, прежде чем беспокоить инженера
 _BACKUP_MISSING_GRACE = 86400
+# Тишина для только что добавленного сервера (см. evaluate_servers): helper'ы ставятся, отчеты неполные
+_NEW_SERVER_QUIET = 900
 # Репозиторий на бэкап-сервере «устарел», если в него давно не принимали бэкап.
 # 3 дня для ежедневных бэкапов; разовые/неактуальные репо глушатся мьютом.
 _BACKUP_REPO_STALE_SECONDS = 3 * 86400
@@ -3222,6 +3224,21 @@ def own_helper_unit(name: str) -> bool:
     return bool(_OWN_HELPER_UNIT.fullmatch(name))
 
 
+# Юниты бэкапа: про упавший прогон уже говорят алерты бэкапа ("последний бэкап завершился с
+# ошибкой", свои бэкапы ноды), второй алерт по тому же прогону не нужен. Основной сервис - тот
+# же список, по которому его ищет агент.
+_BACKUP_SERVICES = ("systemd-rest.service", "restic-backup.service", "restic.service")
+
+
+def backup_units(s: Server, rep: dict) -> set[str]:
+    out = set(_BACKUP_SERVICES) if (rep.get("backup") or {}).get("configured") else set()
+    for j in custom_backups.jobs_of(s):
+        u = str(j.get("unit") or "")
+        if u:
+            out.add(u)
+    return out
+
+
 def units_hold(s: Server, bad: list[dict], now: datetime, muted: set[str]) -> dict[str, list]:
     """Юниты для алерта с выдержкой отбоя: {юнит: [с какого момента его нет среди упавших
     или None, уровень]}. Пропавший держится, пока не прошла выдержка; держим только те, про
@@ -4411,9 +4428,10 @@ def _server_conditions(s: Server, now: datetime,
     if ub is not None:
         ref = float(rep.get("clock_unix") or 0) or now.timestamp()
         muted_u = units_muted(s, now)
+        covered = backup_units(s, rep)
         bad = [u for u in ub.get("units") or []
                if isinstance(u, dict) and u.get("unit") and u["unit"] not in muted_u
-               and not own_helper_unit(str(u["unit"]))
+               and not own_helper_unit(str(u["unit"])) and u["unit"] not in covered
                and ref - float(u.get("since") or 0) >= _UNIT_MIN_AGE]
         hold = units_hold(s, bad, now, muted_u)
         u_lvl = max((h[1] for h in hold.values()), default=0)
@@ -4782,6 +4800,12 @@ async def evaluate_servers(
         # снуз: сервер временно приглушён — алерты не шлём (но состояние не трогаем,
         # чтобы после снуза оставшаяся проблема снова сработала)
         if s.snooze_until is not None and _aware(s.snooze_until) > now:
+            continue
+        # Только что добавленный сервер: первые минуты ставятся helper'ы, и первые отчеты
+        # неполные (у сервера бэкапов "чистка не работает" ушла через минуту после добавления и
+        # через минуту отбилась). Состояние не трогаем: что останется, придет после тишины.
+        created = getattr(s, "created_at", None)
+        if created is not None and 0 <= (now - _aware(created)).total_seconds() < _NEW_SERVER_QUIET:
             continue
         # заглушённые типы: постоянные мьюты + точечный ВРЕМЕННЫЙ снуз отдельных
         # типов (напр. приглушить OOM на день, но продолжать слать offline/CPU)
