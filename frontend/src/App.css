@@ -5750,3 +5750,51 @@ button.type-chip { cursor: pointer; border: 1px solid transparent; font-family: 
   color: var(--accent);
   background: color-mix(in srgb, var(--accent) 12%, transparent);
 }
+
+/* Заметка в карточке сервера и монитора */
+.note-bar {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+  margin: 0 0 0.6rem;
+  padding: 0.5rem 0.75rem;
+  border-radius: 10px;
+  border: 1px solid color-mix(in srgb, #d8a530 40%, var(--border));
+  background: color-mix(in srgb, #d8a530 9%, transparent);
+  line-height: 1.4;
+}
+.note-bar-ic {
+  flex-shrink: 0;
+}
+.note-bar-body {
+  flex: 1;
+  min-width: 0;
+}
+.note-bar-text {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.note-bar-edit {
+  flex-direction: column;
+  align-items: stretch;
+}
+.note-bar-edit textarea {
+  width: 100%;
+  box-sizing: border-box;
+  resize: vertical;
+}
+.note-bar-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+}
+.note-add {
+  align-self: flex-start;
+  margin: 0 0 0.5rem;
+}
+.note-chip {
+  cursor: help;
+  font-size: 0.85em;
+  margin-left: 0.25rem;
+}

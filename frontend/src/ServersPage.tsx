@@ -4,6 +4,7 @@ import {
   agentUpdate,
   agentUpdateCancel,
   ApiError,
+  setServerNote,
   backupCommand,
   backupCommandStatus,
   createServer,
@@ -64,6 +65,7 @@ import {
 } from './mutes'
 import { useAuth } from './auth'
 import { AlertHistoryModal } from './AlertHistoryModal'
+import { NoteBar } from './NoteBar'
 
 type MetricKey =
   | 'cpu'
@@ -3761,6 +3763,11 @@ function ServerRow({
           <OsIcon os={s.os} />
           <CountryFlag code={s.country} />
           {s.name}
+          {s.note && (
+            <span className="note-chip" title={s.note}>
+              📝
+            </span>
+          )}
           {showGroup && s.group_name && (
             <span className="type-chip group-chip">{s.group_name}</span>
           )}
@@ -4860,6 +4867,23 @@ function ServerDetail({
             </button>
           </div>
         </div>
+        {!editing && (
+          <NoteBar
+            note={s.note}
+            by={s.note_by}
+            at={s.note_at}
+            canEdit={!isViewer}
+            onSave={async (text) => {
+              try {
+                await setServerNote(s.id, text)
+                onChanged()
+              } catch (e) {
+                if (e instanceof ApiError && e.status === 401) onUnauthorized()
+                throw e
+              }
+            }}
+          />
+        )}
         {!editing && !isViewer && (
           <SnoozeBar
             snoozeUntil={s.snooze_until}

@@ -16,7 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import settings_store, tg_buttons
 from app.config import Settings
-from app.models import AlertEvent, TgAlert, User
+from app.models import AlertEvent, Check, Server, TgAlert, User
 
 log = logging.getLogger("kervax.alerts")
 
@@ -257,6 +257,8 @@ async def dispatch(
         return True
     if not can_send:
         return False
+    if session_factory is not None:
+        messages = await with_notes(session_factory, messages)
     # кнопки под алертами: запись нужна до отправки, ее id едет в кнопках
     rows: dict[int, int] = {}
     if session_factory is not None and buttons_on(cfg):
@@ -294,6 +296,58 @@ async def dispatch(
     if session_factory is not None and delivered:
         await record_history(session_factory, delivered)
     return ok
+
+
+_NOTE_MAX = 300
+
+
+def _ref_ids(ref: str) -> tuple[str, list[int]]:
+    """"srv:5" -> ("srv", [5]), "chk:3,4" -> ("chk", [3, 4]); мусор -> ("", [])."""
+    kind, _, rest = (ref or "").partition(":")
+    ids = [int(x) for x in rest.split(",") if x.strip().isdigit()]
+    return (kind, ids) if kind in ("srv", "chk") and ids else ("", [])
+
+
+async def with_notes(session_factory, messages: list[str]) -> list[str]:
+    """Дописать к алерту заметку о сервере или мониторе ("диск под замену, тикет у хостера"):
+    дежурный видит контекст прямо в чате, не открывая панель. Отбою заметка не нужна, а
+    сбой чтения не должен мешать отправке - тогда уходит как есть."""
+    want: dict[str, set[int]] = {"srv": set(), "chk": set()}
+    for m in messages:
+        if getattr(m, "recovery", False):
+            continue
+        kind, ids = _ref_ids(getattr(m, "ref", ""))
+        if kind:
+            want[kind].update(ids)
+    if not want["srv"] and not want["chk"]:
+        return messages
+    notes: dict[tuple[str, int], str] = {}
+    try:
+        async with session_factory() as session:
+            for kind, model in (("srv", Server), ("chk", Check)):
+                if want[kind]:
+                    rows = await session.execute(
+                        select(model.id, model.note).where(model.id.in_(want[kind]), model.note != ""))
+                    notes.update({(kind, i): n for i, n in rows.all()})
+    except Exception:  # noqa: BLE001
+        log.warning("alert notes: read failed", exc_info=True)
+        return messages
+    if not notes:
+        return messages
+    out: list[str] = []
+    for m in messages:
+        kind, ids = _ref_ids(getattr(m, "ref", ""))
+        got = [] if getattr(m, "recovery", False) else list(dict.fromkeys(
+            notes[(kind, i)] for i in ids if (kind, i) in notes))
+        if not got:
+            out.append(m)
+            continue
+        text = " · ".join(" ".join(n.split()) for n in got)
+        if len(text) > _NOTE_MAX:
+            text = text[:_NOTE_MAX - 3].rstrip() + "..."
+        out.append(Msg(f"{m}\n📝 <i>{html.escape(text)}</i>", m.section, m.group, m.kind,
+                       m.target, m.recovery, m.ref))
+    return out
 
 
 def _channel_count(cfg: dict) -> int:

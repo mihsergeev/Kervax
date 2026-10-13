@@ -192,6 +192,9 @@ export type Check = {
   push_grace?: number
   push_at?: string | null
   push_fail?: string
+  note?: string
+  note_by?: string
+  note_at?: string | null
   port: number
   enabled: boolean
   group_name: string
@@ -1493,6 +1496,10 @@ export type Server = {
   last_seen: string | null
   snooze_until: string | null
   alert_snoozes: Record<string, string> | null // {тип: ISO-до} — точечный снуз
+  // заметка о сервере: текст, кто и когда писал
+  note?: string
+  note_by?: string
+  note_at?: string | null
   online: boolean
   cpu_alert_percent: number
   mem_alert_percent: number
@@ -2189,4 +2196,13 @@ export function checkLocations(id: number): Promise<LocationResult[]> {
 // Новый адрес push-монитора: старый перестает приниматься сразу
 export function rotatePushToken(id: number): Promise<Check> {
   return api<Check>(`/api/checks/${id}/push-token`, { method: 'POST' })
+}
+
+// Заметка к серверу или монитору; пустая строка убирает ее
+export function setServerNote(id: number, text: string): Promise<Server> {
+  return api<Server>(`/api/servers/${id}/note`, { method: 'PUT', body: JSON.stringify({ text }) })
+}
+
+export function setCheckNote(id: number, text: string): Promise<Check> {
+  return api<Check>(`/api/checks/${id}/note`, { method: 'PUT', body: JSON.stringify({ text }) })
 }
