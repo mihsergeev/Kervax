@@ -1,8 +1,10 @@
-from fastapi import APIRouter
+from zoneinfo import ZoneInfo
+
+from fastapi import APIRouter, HTTPException, status
 
 from sqlalchemy import select
 
-from app import alerts, audit, collector, settings_store
+from app import alerts, audit, collector, settings_store, tg_bot
 from app.config import get_settings
 from app.deps import AdminUser, SessionDep
 from app.models import Check, Server
@@ -33,6 +35,9 @@ async def _current(session, settings) -> AlertConfigOut:
         flood_threshold=cfg["flood_threshold"],
         enabled=alerts.alerts_enabled(cfg),
         muted=muted,
+        tg_buttons=cfg["tg_buttons"],
+        tz=cfg["tz"],
+        tg_poll=tg_bot.poll_state_out(await settings_store.get_tg_poll(session)),
     )
 
 
@@ -46,6 +51,12 @@ async def put_alerts(
     body: AlertConfigIn, user: AdminUser, session: SessionDep
 ) -> AlertConfigOut:
     settings = get_settings()
+    if body.tz.strip():
+        try:
+            ZoneInfo(body.tz.strip())
+        except Exception:  # noqa: BLE001
+            raise HTTPException(status.HTTP_400_BAD_REQUEST,
+                                f"Неизвестный часовой пояс: {body.tz}. Пример: Europe/Moscow")
     await settings_store.set_alert_config(
         session,
         body.telegram_token,
@@ -53,6 +64,8 @@ async def put_alerts(
         body.webhook,
         body.telegram_api,
         body.flood_threshold,
+        body.tg_buttons,
+        body.tz,
     )
     await settings_store.set_muted(session, body.muted)
     await audit.record(session, user.username, "alerts_config", "")

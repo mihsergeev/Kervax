@@ -12,7 +12,7 @@ import httpx
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app import settings_store
+from app import settings_store, tg_buttons
 from app.config import Settings
 from app.models import AlertEvent, User
 
@@ -33,15 +33,19 @@ class Msg(str):
     kind: str
     target: str
     recovery: bool
+    # что глушат кнопки под алертом в Telegram: "srv:<id>" или "chk:<id>[,<id>...]";
+    # пусто - кнопок нет
+    ref: str
 
     def __new__(cls, text: str, section: str = "", group: str = "", kind: str = "",
-                target: str = "", recovery: bool = False) -> "Msg":
+                target: str = "", recovery: bool = False, ref: str = "") -> "Msg":
         obj = super().__new__(cls, text)
         obj.section = section
         obj.group = group
         obj.kind = kind
         obj.target = target
         obj.recovery = recovery
+        obj.ref = ref
         return obj
 
 
@@ -83,27 +87,40 @@ def alerts_enabled(cfg: dict) -> bool:
 
 
 async def tg_send(
-    api: str, token: str, chat: str, text: str, parse_mode: str | None = None
-) -> None:
-    """Одно сообщение в Telegram. Бросает исключение — обработка на вызывающем."""
+    api: str, token: str, chat: str, text: str, parse_mode: str | None = None,
+    reply_markup: dict | None = None,
+) -> int | None:
+    """Одно сообщение в Telegram. Бросает исключение — обработка на вызывающем.
+    Возвращает message_id (нужен, чтобы потом дописать в сообщение "взял" или "заглушено")."""
     base = (api or "https://api.telegram.org").rstrip("/")
     payload = {"chat_id": chat, "text": text, "disable_web_page_preview": True}
     if parse_mode:
         payload["parse_mode"] = parse_mode
+    if reply_markup:
+        payload["reply_markup"] = reply_markup
     async with httpx.AsyncClient(timeout=10) as http:
         r = await http.post(f"{base}/bot{token}/sendMessage", json=payload)
         r.raise_for_status()
+    try:
+        return int(r.json()["result"]["message_id"])
+    except Exception:  # noqa: BLE001 - без id сообщение просто не поправить потом
+        return None
 
 
-async def send_alert(cfg: dict, text: str, parse_mode: str | None = None) -> list[str]:
+async def send_alert(cfg: dict, text: str, parse_mode: str | None = None,
+                     reply_markup: dict | None = None, sent: list | None = None) -> list[str]:
     """Шлёт текст во все настроенные каналы. Возвращает список ошибок (пустой = ок).
     parse_mode="HTML" — для сайтовых алертов со ссылкой <a href> в тексте (тогда
-    весь динамический контент обязан быть html-экранирован вызывающим)."""
+    весь динамический контент обязан быть html-экранирован вызывающим).
+    reply_markup - кнопки под сообщением в Telegram; sent - сюда дописывается, куда ушло."""
     errors: list[str] = []
     token, chat = cfg.get("telegram_token"), cfg.get("telegram_chat")
     if token and chat:
         try:
-            await tg_send(cfg.get("telegram_api", ""), token, chat, text, parse_mode)
+            mid = await tg_send(cfg.get("telegram_api", ""), token, chat, text, parse_mode,
+                                reply_markup)
+            if sent is not None and mid is not None:
+                sent.append({"chat": str(chat), "id": mid})
         except Exception as exc:  # noqa: BLE001 — алерт не должен ронять цикл
             errors.append(f"Telegram: {exc}")
             log.warning("Telegram-алерт не отправлен: %s", exc)
@@ -131,9 +148,15 @@ def _digest(messages: list[str]) -> str:
     return f"🌊 {len(messages)} алертов за раз —\n\n{body}"
 
 
+def buttons_on(cfg: dict) -> bool:
+    """Кнопки под алертами: включены в настройках и есть общий бот (его панель и читает)."""
+    return bool(cfg.get("tg_buttons") and cfg.get("telegram_token"))
+
+
 async def send_personal(
     session_factory, cfg: dict, messages: list[str], threshold: int,
-    parse_mode: str | None = None,
+    parse_mode: str | None = None, rows: dict[int, int] | None = None,
+    sent: dict[int, list] | None = None,
 ) -> None:
     """Персональная доставка: каждому — только его алерты (см. wants).
 
@@ -158,13 +181,20 @@ async def send_personal(
         token = user.tg_token or common
         if not token:
             continue
-        mine = [m for m in messages if wants(user, m)]
+        mine = [i for i, m in enumerate(messages) if wants(user, m)]
         if not mine:
             continue
-        batch = [_digest(mine)] if threshold and len(mine) >= threshold else mine
-        for text in batch:
+        # кнопки нажимаются в общем боте: у своего бота человека их некому прочитать
+        own_bot = bool(user.tg_token) and user.tg_token != common
+        digest = bool(threshold and len(mine) >= threshold)
+        batch = [(None, _digest([messages[i] for i in mine]))] if digest else [(i, messages[i]) for i in mine]
+        for i, text in batch:
+            aid = (rows or {}).get(i) if i is not None and not own_bot else None
+            markup = tg_buttons.keyboard(aid, getattr(text, "kind", "")) if aid else None
             try:
-                await tg_send(api, token, user.tg_chat_id, text, parse_mode)
+                mid = await tg_send(api, token, user.tg_chat_id, text, parse_mode, markup)
+                if aid and mid is not None and sent is not None:
+                    sent.setdefault(aid, []).append({"chat": str(user.tg_chat_id), "id": mid})
             except Exception as exc:  # noqa: BLE001
                 log.warning("персональный алерт для %s не отправлен: %s", user.username, exc)
                 break  # чат недоступен — остальные сообщения этому же адресату тоже
@@ -187,10 +217,15 @@ async def dispatch(
         return True
     if not can_send:
         return False
+    # кнопки под алертами: запись нужна до отправки, ее id едет в кнопках
+    rows: dict[int, int] = {}
+    if session_factory is not None and buttons_on(cfg):
+        rows = await tg_buttons.prepare(session_factory, messages)
+    sent: dict[int, list] = {}
     # тихие часы/выключенные каналы уже отсеяны выше (can_send) — персональные
     # получатели подчиняются тем же правилам, отдельного «ночью можно» у них нет
     if session_factory is not None:
-        await send_personal(session_factory, cfg, messages, threshold, parse_mode)
+        await send_personal(session_factory, cfg, messages, threshold, parse_mode, rows, sent)
     channels = _channel_count(cfg)
     if threshold and len(messages) >= threshold:
         errors = await send_alert(cfg, _digest(messages), parse_mode)
@@ -198,12 +233,22 @@ async def dispatch(
         ok = not errors
     else:
         ok, delivered = True, []
-        for m in messages:
-            errors = await send_alert(cfg, m, parse_mode)
+        for i, m in enumerate(messages):
+            aid = rows.get(i)
+            out: list = []
+            if aid:
+                markup = tg_buttons.keyboard(aid, getattr(m, "kind", ""))
+                errors = await send_alert(cfg, m, parse_mode, markup, out)
+            else:
+                errors = await send_alert(cfg, m, parse_mode)
+            if aid and out:
+                sent.setdefault(aid, []).extend(out)
             if errors:
                 ok = False  # хотя бы один канал не принял - повторим на следующем цикле
             if len(errors) < channels:
                 delivered.append(m)
+    if rows:
+        await tg_buttons.store_sent(session_factory, sent)
     if session_factory is not None and delivered:
         await record_history(session_factory, delivered)
     return ok

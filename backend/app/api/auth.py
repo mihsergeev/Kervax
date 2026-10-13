@@ -238,10 +238,20 @@ async def telegram_confirm(user: CurrentUser, session: SessionDep) -> TelegramOu
     offset намеренно НЕ передаём: апдейты остаются в очереди Telegram, иначе
     привязка одного сотрудника «съедала» бы сообщения остальных."""
     if not user.tg_link_code:
+        if user.tg_chat_id:
+            return await _tg_state(session, user)  # код уже нашел бот панели
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Сначала получите код")
     api, token = await _tg_api(session, user)
     if not token:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Бот не настроен")
+    cfg = await settings_store.get_alert_config(session, get_settings())
+    if alerts.buttons_on(cfg) and token == cfg.get("telegram_token"):
+        # апдейты общего бота читает сама панель (кнопки под алертами): getUpdates отсюда
+        # получил бы 409, а код найдет и привяжет опрос бота
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND,
+            "Код еще не дошел до бота - отправьте его и нажмите еще раз через пару секунд",
+        )
     try:
         async with httpx.AsyncClient(timeout=15) as http:
             r = await http.get(f"{api}/bot{token}/getUpdates", params={"limit": 100})

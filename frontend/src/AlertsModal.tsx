@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { ApiError, getAlerts, putAlerts, testAlerts } from './api'
+import { ApiError, getAlerts, putAlerts, testAlerts, type AlertConfig } from './api'
 import { ServerAlertRulesSection, SiteAlertRulesSection } from './ServerAlertRules'
 import { useI18n } from './i18n'
 
@@ -16,6 +16,9 @@ export function AlertsModal({ onClose, onUnauthorized }: Props) {
   const [webhook, setWebhook] = useState('')
   const [flood, setFlood] = useState(6)
   const [muted, setMuted] = useState(false)
+  const [buttons, setButtons] = useState(false)
+  const [tz, setTz] = useState('')
+  const [poll, setPoll] = useState<AlertConfig['tg_poll'] | null>(null)
   const [enabled, setEnabled] = useState(false)
   const [busy, setBusy] = useState(false)
   const [msg, setMsg] = useState<string | null>(null)
@@ -30,6 +33,9 @@ export function AlertsModal({ onClose, onUnauthorized }: Props) {
         setWebhook(c.webhook)
         setFlood(c.flood_threshold)
         setMuted(c.muted)
+        setButtons(c.tg_buttons)
+        setTz(c.tz)
+        setPoll(c.tg_poll)
         setEnabled(c.enabled)
       })
       .catch(() => onUnauthorized())
@@ -44,11 +50,16 @@ export function AlertsModal({ onClose, onUnauthorized }: Props) {
       webhook,
       flood_threshold: flood,
       muted,
+      tg_buttons: buttons,
+      tz,
     })
     setTgApi(c.telegram_api)
     setEnabled(c.enabled)
     setMuted(c.muted)
     setFlood(c.flood_threshold)
+    setButtons(c.tg_buttons)
+    setTz(c.tz)
+    setPoll(c.tg_poll)
     return c
   }
 
@@ -123,6 +134,24 @@ export function AlertsModal({ onClose, onUnauthorized }: Props) {
           <p className="muted small">
             {t('Свой прокси/зеркало Bot API, если api.telegram.org недоступен. Пусто = по умолчанию.')}
           </p>
+          <label className="check-toggle">
+            <input type="checkbox" checked={buttons} onChange={(e) => setButtons(e.target.checked)} />
+            <span>
+              <b>{t('Кнопки под алертами и команды боту')}</b>
+              <span className="muted small">
+                {t('Под алертом: заглушить на час, до утра или насовсем, «взял». Команды в чате: /status, /mutes. Панель сама читает сообщения бота: если этого бота уже читает другая программа или вторая панель, заведите для панели отдельного бота.')}
+              </span>
+            </span>
+          </label>
+          {buttons && (
+            <>
+              <label className="field">
+                <span>{t('Часовой пояс («до утра» = до 9:00)')}</span>
+                <input value={tz} onChange={(e) => setTz(e.target.value)} placeholder="Europe/Moscow" />
+              </label>
+              {poll && <TgPollState poll={poll} />}
+            </>
+          )}
         </div>
 
         <div className="settings-group">
@@ -190,4 +219,24 @@ export function AlertsModal({ onClose, onUnauthorized }: Props) {
       </div>
     </div>
   )
+}
+
+// Как идет чтение бота: после сохранения галки опрос стартует в течение 20 секунд.
+function TgPollState({ poll }: { poll: AlertConfig['tg_poll'] }) {
+  const { t } = useI18n()
+  if (poll.status === 'ok')
+    return (
+      <p className="muted small">
+        <span className="sdot sdot-up" /> {t('Бот {bot} читается, кнопки работают', { bot: poll.bot })}
+      </p>
+    )
+  if (poll.status === 'conflict')
+    return (
+      <p className="form-error">
+        {t('Этого бота уже читает другая программа или панель. Заведите для панели отдельного бота у @BotFather и укажите его токен.')}
+      </p>
+    )
+  if (poll.status === 'error')
+    return <p className="form-error">{t('Бот не отвечает: {err}', { err: poll.error })}</p>
+  return <p className="muted small">{t('Опрос бота запустится в течение 20 секунд после сохранения.')}</p>
 }

@@ -657,6 +657,10 @@ export type AlertConfig = {
   flood_threshold: number
   enabled: boolean
   muted: boolean
+  tg_buttons: boolean
+  tz: string
+  // как идет опрос бота (кнопки под алертами): ok | conflict | error | off
+  tg_poll: { status: string; error: string; ts: string; bot: string }
 }
 
 export function getAlerts(): Promise<AlertConfig> {
@@ -670,6 +674,8 @@ export function putAlerts(body: {
   webhook: string
   flood_threshold: number
   muted: boolean
+  tg_buttons: boolean
+  tz: string
 }): Promise<AlertConfig> {
   return api<AlertConfig>('/api/alerts', { method: 'PUT', body: JSON.stringify(body) })
 }
