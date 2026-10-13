@@ -161,7 +161,7 @@ export function disable2FA(otp: string): Promise<TwoFAStatus> {
 
 // --- мониторы сайтов/сервисов ---
 
-export type CheckType = 'http' | 'tcp_port' | 'cert'
+export type CheckType = 'http' | 'tcp_port' | 'cert' | 'push'
 export type CheckStatus = 'up' | 'degraded' | 'down' | 'unknown'
 
 // разбивка проверки по IP (режим «проверять все адреса домена»)
@@ -186,6 +186,12 @@ export type Check = {
   name: string
   type: CheckType
   target: string
+  // push: адрес /api/agent/push/<токен>, сигнал ждем каждые push_period секунд
+  push_token?: string
+  push_period?: number
+  push_grace?: number
+  push_at?: string | null
+  push_fail?: string
   port: number
   enabled: boolean
   group_name: string
@@ -259,6 +265,8 @@ export type CheckForm = {
   name: string
   type: CheckType
   target: string
+  push_period?: number
+  push_grace?: number
   group_name?: string
   port?: number
   enabled?: boolean
@@ -534,6 +542,8 @@ export function checkToForm(c: Check): CheckForm {
     location_ids: c.location_ids,
     alert_mutes: c.alert_mutes ?? [],
     extra_paths: c.extra_paths ?? [],
+    push_period: c.push_period,
+    push_grace: c.push_grace,
   }
 }
 
@@ -2174,4 +2184,9 @@ export type LocationResult = {
 
 export function checkLocations(id: number): Promise<LocationResult[]> {
   return api<LocationResult[]>(`/api/checks/${id}/locations`)
+}
+
+// Новый адрес push-монитора: старый перестает приниматься сразу
+export function rotatePushToken(id: number): Promise<Check> {
+  return api<Check>(`/api/checks/${id}/push-token`, { method: 'POST' })
 }

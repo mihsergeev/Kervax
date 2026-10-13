@@ -7,6 +7,7 @@ import {
   checkToForm,
   checkUptime,
   listIncidents,
+  rotatePushToken,
   runCheck,
   runCheckResult,
   snoozeCheck,
@@ -354,7 +355,7 @@ export function CheckDetail({ check, groups, onClose, onSaved, onRun, onDelete, 
             <span className={`sdot sdot-${check.last_status}`} />
             <h3>{check.name}</h3>
             <span className="type-chip">
-              {{ http: 'HTTP', tcp_port: 'TCP', cert: 'TLS' }[check.type]}
+              {{ http: 'HTTP', tcp_port: 'TCP', cert: 'TLS', push: 'PUSH' }[check.type]}
             </span>
           </div>
           <div className="detail-head-actions">
@@ -387,10 +388,14 @@ export function CheckDetail({ check, groups, onClose, onSaved, onRun, onDelete, 
             </button>
           </div>
         </div>
-        <div className="detail-target">
-          {check.target}
-          {check.port ? `:${check.port}` : ''}
-        </div>
+        {check.type === 'push' ? (
+          <PushInfo check={check} canEdit={!isViewer} />
+        ) : (
+          <div className="detail-target">
+            {check.target}
+            {check.port ? `:${check.port}` : ''}
+          </div>
+        )}
 
         {!editing && !isViewer && (
           <SnoozeControl
@@ -962,6 +967,69 @@ function UptimeTile({ label, value }: { label: string; value: number | null | un
         {value == null ? '—' : `${value}%`}
       </div>
       <div className="uptime-lbl">{label}</div>
+    </div>
+  )
+}
+
+// Адрес push-монитора и как его дергать: из крона после успешного прогона или всегда, с кодом выхода.
+function PushInfo({ check, canEdit }: { check: Check; canEdit: boolean }) {
+  const { t } = useI18n()
+  const [token, setToken] = useState(check.push_token || '')
+  const [busy, setBusy] = useState(false)
+  const url = `${window.location.origin}/api/agent/push/${token}`
+  const ok = `/path/to/backup.sh && curl -fsS -m 10 --retry 3 ${url} >/dev/null`
+  const always = `/path/to/backup.sh; curl -fsS -m 10 --retry 3 "${url}?status=$?" >/dev/null`
+  const rotate = async () => {
+    if (!window.confirm(t('Выдать новый адрес? Старый перестанет приниматься сразу, скрипт надо будет поправить.'))) return
+    setBusy(true)
+    try {
+      const c = await rotatePushToken(check.id)
+      setToken(c.push_token || '')
+    } finally {
+      setBusy(false)
+    }
+  }
+  const copy = (s: string) => navigator.clipboard?.writeText(s)
+  const last = (
+    <div className="muted small">
+      {check.push_at
+        ? t('Последний сигнал: {when}', { when: new Date(check.push_at).toLocaleString() })
+        : t('Сигнала еще не было')}
+      {check.push_fail ? ` · ${t('скрипт сообщил об ошибке: {msg}', { msg: check.push_fail })}` : ''}
+    </div>
+  )
+  // токен - секрет, роль "только просмотр" его не получает
+  if (!token) {
+    return (
+      <div className="push-info">
+        {last}
+        <div className="muted small">{t('Адрес для скрипта видят админ и редактор')}</div>
+      </div>
+    )
+  }
+  return (
+    <div className="push-info">
+      <div className="muted small">{t('Адрес для скрипта (секрет, не публикуйте):')}</div>
+      <div className="agent-advice-cmd">
+        <pre>{url}</pre>
+        <button className="ghost" onClick={() => copy(url)}>{t('Копировать')}</button>
+      </div>
+      <div className="muted small">{t('Сигнал только после успешного прогона:')}</div>
+      <div className="agent-advice-cmd">
+        <pre>{ok}</pre>
+        <button className="ghost" onClick={() => copy(ok)}>{t('Копировать')}</button>
+      </div>
+      <div className="muted small">{t('Сигнал всегда, с кодом выхода (ненулевой = ошибка, придет сразу):')}</div>
+      <div className="agent-advice-cmd">
+        <pre>{always}</pre>
+        <button className="ghost" onClick={() => copy(always)}>{t('Копировать')}</button>
+      </div>
+      {last}
+      {canEdit && (
+        <button className="ghost" disabled={busy} onClick={rotate}>
+          {t('Выдать новый адрес')}
+        </button>
+      )}
     </div>
   )
 }

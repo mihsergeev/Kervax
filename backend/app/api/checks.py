@@ -1,6 +1,8 @@
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlparse
 
+import secrets
+
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Query, Request, status
 from sqlalchemy import case, delete as sa_delete, func, select
 
@@ -71,11 +73,13 @@ def _hide_secrets(check: Check, user) -> Check:
 
     auth_pass — пароль от закрытого раздела сайта, http_headers часто содержит
     «Authorization: Bearer …». Роль «только просмотр» заводят как раз для тех,
-    кому доступ к таким вещам не выдавали."""
+    кому доступ к таким вещам не выдавали. push_token - сам адрес push-монитора: кто его
+    знает, тот может стучаться за упавший крон и гасить алерт."""
     if user.role in ("admin", "editor"):
         return check
     check.auth_pass = ""
     check.http_headers = ""
+    check.push_token = ""
     return check
 
 
@@ -425,7 +429,7 @@ async def _first_check(session_factory, check_id: int) -> None:
 def _host_of(check: Check) -> str:
     """Хост, который монитор реально проверяет — чтобы сопоставить с доменом сервиса."""
     target = (check.target or "").strip().lower()
-    if not target:
+    if not target or check.type == "push":
         return ""
     if check.type == "http":
         if "://" not in target:
@@ -815,6 +819,7 @@ async def create_check(
             status.HTTP_403_FORBIDDEN, "Группа недоступна для этой учётной записи"
         )
     check = Check(**body.model_dump())
+    _push_defaults(check)
     _one_probe_source(check)
     # новый монитор — в конец списка (иначе прыгнул бы наверх при ручном порядке)
     max_order = await session.scalar(select(func.max(Check.sort_order)))
@@ -825,6 +830,41 @@ async def create_check(
     await audit.record(session, user.username, "check_create", check.name, check.type)
     # первую проверку — в фон, чтобы создание не висело на медленном/недоступном сайте
     background.add_task(_first_check, request.app.state.session_factory, check.id)
+    return check
+
+
+def _push_defaults(check: Check) -> None:
+    """Push-монитор никуда не ходит: проверка раз в минуту только сверяет время последнего
+    сигнала, повторы и локации ему ни к чему, а адрес - его собственный токен."""
+    if check.type != "push":
+        return
+    if not check.push_token:
+        check.push_token = secrets.token_urlsafe(24)
+    check.target = "push"
+    check.port = 0
+    check.interval_seconds = 60
+    check.retries = 0
+    check.alert_after_failures = 1
+    check.check_locations = False
+    check.probe_local = False
+    check.check_all_ips = False
+    check.check_ssl = False
+    check.check_domain = False
+    check.extra_paths = []
+    check.push_period = max(int(check.push_period or 0), 60) or 3600
+
+
+@router.post("/{check_id}/push-token", response_model=CheckOut)
+async def rotate_push_token(check_id: int, user: CurrentUser, session: SessionDep) -> Check:
+    """Новый адрес для push-монитора (старый утек или скрипт переносят): старый перестает
+    приниматься сразу."""
+    check = await _get_or_404(check_id, session, user)
+    if check.type != "push":
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Это не push-монитор")
+    check.push_token = secrets.token_urlsafe(24)
+    await session.commit()
+    await session.refresh(check)
+    await audit.record(session, user.username, "push_token", check.name)
     return check
 
 
@@ -876,6 +916,7 @@ async def update_check(
     old_paths = list(check.extra_paths or [])
     for field, value in body.model_dump(exclude_unset=True).items():
         setattr(check, field, value)
+    _push_defaults(check)
     new_paths = list(check.extra_paths or [])
     if new_paths != old_paths:
         # a new path of a local monitor has no agent result yet: waiting, not down

@@ -243,6 +243,12 @@ class Check(Base):
     last_ip_results: Mapped[list | None] = mapped_column(JSON, nullable=True, default=None)
     # the last check split by additional paths: [{path,status,latency_ms,message}]
     last_path_results: Mapped[list | None] = mapped_column(JSON, nullable=True, default=None)
+    # push-монитор: скрипт или крон сам стучится в /api/agent/push/<токен>, панель только ждет
+    push_token: Mapped[str] = mapped_column(String(48), default="", index=True)
+    push_period: Mapped[int] = mapped_column(Integer, default=0)  # сигнал каждые N секунд
+    push_grace: Mapped[int] = mapped_column(Integer, default=0)   # допуск сверху, 0 = авто
+    push_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    push_fail: Mapped[str] = mapped_column(String(255), default="")  # скрипт сообщил об ошибке
     last_latency_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     last_value: Mapped[float | None] = mapped_column(Float, nullable=True)  # дни сертификата и т.п.
     last_checked_at: Mapped[datetime | None] = mapped_column(

@@ -183,6 +183,7 @@ def check_secrets() -> None:
     masked = {  # поле → файл, где оно гасится или выдаётся под гейтом
         "auth_pass": "backend/app/api/checks.py",     # _hide_secrets по роли
         "http_headers": "backend/app/api/checks.py",  # там же
+        "push_token": "backend/app/api/checks.py",    # там же: адрес push-монитора
         "telegram_token": "backend/app/api/alerts.py",  # весь роутер — AdminUser
         "repopass": "backend/app/api/servers.py",     # ключ бэкапа — AdminUser
     }
