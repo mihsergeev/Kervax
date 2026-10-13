@@ -16,6 +16,7 @@ from app.api import (
     checks,
     health,
     locations,
+    maintenance,
     servers,
     settings as settings_api,
     users as users_api,
@@ -98,6 +99,7 @@ def create_app() -> FastAPI:
     # история алертов - для всех учеток, но под их права (как персональная рассылка)
     app.include_router(alert_history.router, prefix="/api")
     app.include_router(locations.router, prefix="/api")
+    app.include_router(maintenance.router, prefix="/api")
     app.include_router(servers.router, prefix="/api")
     app.include_router(servers.agent_router, prefix="/api")
     app.include_router(settings_api.router, prefix="/api")

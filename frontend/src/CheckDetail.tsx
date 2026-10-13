@@ -33,6 +33,7 @@ import { expiryText } from './checkUtils'
 import { useAuth } from './auth'
 import { NoteBar } from './NoteBar'
 import { KnownCheckBar, KnownDialog } from './KnownDialog'
+import { MaintBanner } from './MaintModal'
 
 type Props = {
   check: Check
@@ -394,6 +395,7 @@ export function CheckDetail({ check, groups, onClose, onSaved, onRun, onDelete, 
             </button>
           </div>
         </div>
+        {!editing && <MaintBanner kind="check" id={check.id} />}
         {!editing && (
           <NoteBar
             note={check.note}

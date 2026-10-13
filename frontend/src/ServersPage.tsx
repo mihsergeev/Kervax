@@ -68,6 +68,7 @@ import { useAuth } from './auth'
 import { AlertHistoryModal } from './AlertHistoryModal'
 import { NoteBar } from './NoteBar'
 import { KnownServerList } from './KnownDialog'
+import { MaintBanner, MaintChip } from './MaintModal'
 
 type MetricKey =
   | 'cpu'
@@ -3775,6 +3776,7 @@ function ServerRow({
               📌
             </span>
           )}
+          <MaintChip kind="server" id={s.id} />
           {showGroup && s.group_name && (
             <span className="type-chip group-chip">{s.group_name}</span>
           )}
@@ -4874,6 +4876,7 @@ function ServerDetail({
             </button>
           </div>
         </div>
+        {!editing && <MaintBanner kind="server" id={s.id} />}
         {!editing && (
           <NoteBar
             note={s.note}

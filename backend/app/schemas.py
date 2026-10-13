@@ -1642,3 +1642,35 @@ class KnownIn(BaseModel):
     """Отметить проблему известной: что про нее знают и на сколько дней (0 - пока не уйдет)."""
     text: str = Field(min_length=1, max_length=500)
     days: int = Field(default=0, ge=0, le=90)
+
+
+class MaintIn(BaseModel):
+    """Окно обслуживания. Проверки (конец позже начала, длина, дни недели) - в API: там они
+    отвечают человеку строкой, а не списком ошибок pydantic."""
+    title: str = Field(min_length=1, max_length=200)
+    server_ids: list[int] = Field(default_factory=list, max_length=1000)
+    check_ids: list[int] = Field(default_factory=list, max_length=1000)
+    starts_at: datetime
+    ends_at: datetime
+    repeat: Literal["", "daily", "weekly"] = ""
+    weekdays: list[int] = Field(default_factory=list, max_length=7)
+    verify: bool = True
+    note: str = Field(default="", max_length=1000)
+
+
+class MaintOut(BaseModel):
+    id: int
+    title: str
+    server_ids: list[int]
+    check_ids: list[int]
+    starts_at: datetime
+    ends_at: datetime
+    repeat: str
+    weekdays: list[int]
+    verify: bool
+    note: str
+    created_by: str
+    active: bool = False             # идет прямо сейчас
+    cur_end: datetime | None = None  # когда кончится текущее вхождение
+    next_start: datetime | None = None
+    finished: bool = False           # разовое и уже прошло

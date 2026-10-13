@@ -21,9 +21,9 @@ from datetime import datetime, timedelta, timezone
 import httpx
 from sqlalchemy import delete, select
 
-from app import alerts, audit, known, settings_store, tg_buttons
-from app.config import Settings
-from app.models import Check, Server, TgAlert, User
+from app import alerts, audit, known, maint, settings_store, tg_buttons
+from app.config import Settings, get_settings
+from app.models import Check, MaintenanceWindow, Server, TgAlert, User
 
 log = logging.getLogger("kervax.tg_bot")
 
@@ -379,6 +379,15 @@ async def status_text(session, user: User | None, now: datetime) -> str:
     servers = (await session.scalars(select(Server).where(Server.enabled.is_(True)))).all()
     checks = (await session.scalars(select(Check).where(Check.enabled.is_(True)))).all()
     lines, n_srv = [], 0
+    # идущие окна обслуживания: строкой сверху, а их серверы и мониторы помечены 🚧
+    tz = (await settings_store.get_alert_config(session, get_settings())).get("tz") or "Europe/Moscow"
+    windows = list(await session.scalars(select(MaintenanceWindow)))
+    m_srv, m_chk = maint.active(windows, now, tz)
+    maint_lines = []
+    for w in windows:
+        cur = maint.current(w, now, tz)
+        if cur is not None:
+            maint_lines.append(f"🚧 Обслуживание: {html.escape(w.title)} до {tg_buttons.hhmm(cur[1], tz, now)}")
     for s in sorted(servers, key=lambda x: x.name):
         if user is not None and not alerts.wants(user, alerts.Msg("", "servers", s.group_name or "")):
             continue
@@ -397,7 +406,7 @@ async def status_text(session, user: User | None, now: datetime) -> str:
         for k in sorted(active, key=lambda k: (k != "offline", -int(st.get(k) or 0), k)):
             mark = "🔕 " if (snoozed or k in mutes) else ("📌 " if k in kn else "")
             parts.append(mark + _label(k))
-        lines.append(f"<b>{html.escape(s.name)}</b>: {html.escape(', '.join(parts))}")
+        lines.append(("🚧 " if s.id in m_srv else "") + f"<b>{html.escape(s.name)}</b>: {html.escape(', '.join(parts))}")
     down = [c for c in checks if c.last_status == "down"
             and (user is None or alerts.wants(user, alerts.Msg("", "sites", c.group_name or "")))]
     if down:
@@ -406,11 +415,12 @@ async def status_text(session, user: User | None, now: datetime) -> str:
         for c in sorted(down, key=lambda x: x.name):
             snz = c.snooze_until is not None and _aware(c.snooze_until) > now
             kn = isinstance(c.known_issue, dict) and not known.expired(c.known_issue, now)
-            lines.append(("🔕 " if snz else "📌 " if kn else "• ") + html.escape(c.name))
+            lines.append(("🚧 " if c.id in m_chk else "🔕 " if snz else "📌 " if kn else "• ") + html.escape(c.name))
     if not lines:
-        return f"✅ Все в порядке: серверов {len(servers)}, сайтов {len(checks)}"
+        ok = f"✅ Все в порядке: серверов {len(servers)}, сайтов {len(checks)}"
+        return _cut([ok] + ([""] + maint_lines if maint_lines else []))
     head = f"🔴 Горит: серверов {n_srv}" + (f", сайтов {len(down)}" if down else "")
-    return _cut([head, ""] + lines)
+    return _cut([head] + maint_lines + [""] + lines)
 
 
 async def mutes_text(session, user: User | None, now: datetime, tz: str) -> str:
