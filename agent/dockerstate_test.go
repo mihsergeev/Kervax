@@ -63,3 +63,38 @@ func TestDockerInspectStopped(t *testing.T) {
 		t.Fatalf("running json: %s", b)
 	}
 }
+
+// Ключи от хоста: privileged, опасные --cap-add (с префиксом CAP_ и без), --pid=host и какие
+// bind-монтирования только на чтение. Безобидные capabilities (NET_ADMIN) не шлем.
+func TestDockerInspectHostAccess(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/containers/vpn/json":
+			w.Write([]byte(`{"HostConfig":{"Privileged":true,"CapAdd":["NET_ADMIN","CAP_SYS_MODULE","sys_module"],"PidMode":"host"},` +
+				`"Mounts":[{"Type":"bind","Source":"/","RW":false},{"Type":"bind","Source":"/var/run/docker.sock","RW":true},` +
+				`{"Type":"volume","Source":"/var/lib/docker/volumes/x/_data","RW":false}]}`))
+		case "/containers/app/json":
+			w.Write([]byte(`{"HostConfig":{"CapAdd":["NET_ADMIN"],"PidMode":""},"Mounts":[{"Type":"bind","Source":"/srv/app","RW":true}]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	base, _ := url.Parse(srv.URL)
+	cl := &http.Client{Transport: dockerRT{base}}
+
+	v := dockerContainer{Name: "vpn", State: "running"}
+	dockerInspect(cl, "vpn", &v)
+	if !v.Priv || !v.PidHost || strings.Join(v.Caps, ",") != "SYS_MODULE" || strings.Join(v.RO, ",") != "/" ||
+		strings.Join(v.Binds, ",") != "/,/var/run/docker.sock" {
+		t.Fatalf("vpn: %+v", v)
+	}
+	a := dockerContainer{Name: "app", State: "running"}
+	dockerInspect(cl, "app", &a)
+	b, _ := json.Marshal(a)
+	for _, k := range []string{`"priv"`, `"caps"`, `"pid_host"`, `"ro"`} {
+		if strings.Contains(string(b), k) {
+			t.Fatalf("app json carries %s: %s", k, b)
+		}
+	}
+}

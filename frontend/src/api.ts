@@ -1417,6 +1417,9 @@ export type Server = {
   docker_alerts?: Record<string, string>
   // внешние прокси (caddy-docker-proxy, traefik) с docker-сокетом: взлом прокси - root на хосте
   docker_exposed?: { name: string; image: string; kind: string }[]
+  // контейнеры с ключами от хоста сверх положенного по назначению: privileged, опасные
+  // capabilities, docker-сокет, корень хоста на запись; muted - заглушен точечно
+  docker_risk?: DockerRisk[]
   // что открыто в интернет: внешняя проверка портов раз в 6 часов
   exposure?: Exposure | null
   // что сделать с ОС: конец поддержки, перезагрузка, обновления безопасности (level 2 - уже дыра)
@@ -1717,6 +1720,16 @@ export function listServers(): Promise<Server[]> {
 export function createServer(body: ServerForm): Promise<ServerEnroll> {
   return api<ServerEnroll>('/api/servers', { method: 'POST', body: JSON.stringify(body) })
 }
+// контейнер с ключами от хоста: flags - priv, caps, sock, host (docker_risk.view)
+export interface DockerRisk {
+  name: string
+  image: string
+  flags: string[]
+  caps: string[]
+  text: string
+  muted: boolean
+}
+
 export function updateServer(
   id: number,
   body: Partial<ServerForm> & {

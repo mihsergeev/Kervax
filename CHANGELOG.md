@@ -4,6 +4,24 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.4.150] - 2026-10-13
+
+### Added
+- Контейнеры с ключами от хоста (агент 2.27, пункт в "Требует действий" и алерт "Docker:
+  контейнер с ключами от хоста"). Взлом приложения в таком контейнере - root на сервере:
+  privileged, опасные capabilities (SYS_ADMIN, SYS_MODULE, SYS_PTRACE, DAC_READ_SEARCH и
+  подобные), docker-сокет (только на чтение не спасает: API тот же) или корень хоста, /etc,
+  /root, /boot на запись. Агент 2.27 шлет privileged, capabilities и какие монтирования только
+  на чтение, пути монтирований он шлет давно, поэтому docker-сокет виден и со старым агентом.
+- Инструментам, которым это нужно по назначению, разрешено ровно нужное: прокси сокета,
+  cadvisor, node-exporter, сборщики логов и метрик (promtail, alloy, vector, netdata),
+  Portainer, watchtower, CI-раннеры, Coolify, VPN Amnezia, docker-in-docker. promtail с
+  docker-сокетом - норма, promtail в privileged - уже пункт. Сокет у внешних прокси (traefik,
+  caddy-docker-proxy) и дальше флагает алерт про внешний прокси, здесь он не повторяется.
+- В разделе Docker у хоста видно, у какого контейнера какие ключи и как это поправить. Если так
+  задумано, кнопка "по назначению" убирает контейнер из пункта и алерта, вернуть можно там же.
+- Агент обновляется из панели (OTA): карточка сервера или "Обновить все".
+
 ## [1.4.149] - 2026-10-13
 
 ### Added

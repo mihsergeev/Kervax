@@ -5,6 +5,7 @@ import {
   dockerCommand,
   dockerCommandStatus,
   listServers,
+  updateServer,
   type DockerCommand,
   type DockerContainer,
   type DockerInfo,
@@ -13,10 +14,10 @@ import {
 import { useAuth } from './auth'
 import { useUrlCard } from './deeplink'
 import { useI18n } from './i18n'
-import { RESTARTS_DAY_MIN } from './mutes'
+import { DOCKRISK_MUTE, RESTARTS_DAY_MIN } from './mutes'
 import { OsIcon } from './osIcon'
 import { CountryFlag } from './CountryFlag'
-import { proxyBuilt } from './serverUtils'
+import { dockRiskText, proxyBuilt } from './serverUtils'
 
 // Вкладка «Docker»: КОМПАКТНЫЙ список хостов с докером; клик по хосту → модалка
 // с его контейнерами (версии, статусы, кнопки, логи). Так масштабируется на 100+
@@ -177,6 +178,68 @@ function ProxyOldWarning({ items }: { items: ProxyOld[] }) {
       <div className="muted small">
         {t('Обновлять лучше через стенд рядом: новый образ на других портах, сравнить ответы всех доменов, потом переключить, а старый тег держать для отката. Ноды с этой проблемой плагин инвентаря ansible собирает в группу kervax_proxy_old, caddy по роли обновляет caddy_harden.yml.')}
       </div>
+    </div>
+  )
+}
+
+// Контейнеры с ключами от хоста сверх положенного по назначению: что это значит, как поправить и
+// кнопка "по назначению" (точечный мут dockrisk:<имя>), если так задумано.
+const RISK_FIX: Record<string, string> = {
+  priv: 'privileged: уберите privileged: true и дайте только нужные capabilities (cap_add) и устройства (devices).',
+  caps: 'capabilities: уберите из cap_add SYS_ADMIN, SYS_MODULE, SYS_PTRACE и подобные, если приложение работает без них.',
+  sock: 'docker-сокет: если приложению нужен список контейнеров или события, пусть ходит через прокси сокета только на чтение (wollomatic/socket-proxy во внутренней сети), а сам сокет уберите из volumes.',
+  host: 'корень хоста: смонтируйте только нужный каталог и, если писать туда не нужно, с :ro.',
+}
+
+function RiskWarning({ server: s, canAct, onChanged }: { server: Server; canAct: boolean; onChanged: () => void }) {
+  const { t } = useI18n()
+  const [busy, setBusy] = useState('')
+  const items = s.docker_risk ?? []
+  const live = items.filter((x) => !x.muted)
+  const muted = items.filter((x) => x.muted)
+  const flags = [...new Set(live.flatMap((x) => x.flags))].filter((f) => RISK_FIX[f])
+  const toggle = (name: string, on: boolean) => {
+    const key = DOCKRISK_MUTE + name
+    const cur = s.alert_mutes ?? []
+    setBusy(name)
+    updateServer(s.id, { alert_mutes: on ? [...new Set([...cur, key])] : cur.filter((m) => m !== key) })
+      .then(onChanged)
+      .catch(() => {})
+      .finally(() => setBusy(''))
+  }
+  return (
+    <div className="docker-noaccess docker-sock-warn">
+      {live.length > 0 && (
+        <>
+          <div className="form-error small">
+            {t('У контейнеров ключи от хоста: взлом приложения в них даст root на сервере.')}
+          </div>
+          {live.map((x) => (
+            <div key={x.name} className="small">
+              <span className="mono">{x.name}</span> <span className="muted">({x.image})</span>: {dockRiskText(x, t)}
+              {canAct && (
+                <button className="ghost small" disabled={busy === x.name} onClick={() => toggle(x.name, true)}
+                  title={t('Так задумано: убрать из "Требует действий" и не алертить по этому контейнеру')}>
+                  {t('по назначению')}
+                </button>
+              )}
+            </div>
+          ))}
+          {flags.map((f) => (
+            <div key={f} className="muted small">{t(RISK_FIX[f])}</div>
+          ))}
+        </>
+      )}
+      {muted.length > 0 && (
+        <div className="muted small">
+          {t('По назначению: {list}', { list: muted.map((x) => `${x.name} (${dockRiskText(x, t)})`).join(', ') })}
+          {canAct && muted.map((x) => (
+            <button key={x.name} className="ghost small" disabled={busy === x.name} onClick={() => toggle(x.name, false)}>
+              {t('вернуть {name}', { name: x.name })}
+            </button>
+          ))}
+        </div>
+      )}
     </div>
   )
 }
@@ -527,6 +590,7 @@ function DockerHostModal({
         {denied && docker.access && <EnableBlock readonly />}
         {(s.docker_exposed?.length ?? 0) > 0 && <SockWarning items={s.docker_exposed ?? []} />}
         {(s.proxy_outdated?.length ?? 0) > 0 && <ProxyOldWarning items={s.proxy_outdated ?? []} />}
+        {(s.docker_risk?.length ?? 0) > 0 && <RiskWarning server={s} canAct={canAct} onChanged={onChanged} />}
         {!docker.access ? (
           <EnableBlock />
         ) : cs.length === 0 ? (
@@ -594,6 +658,11 @@ function HostRow({
           {(s.docker_exposed?.length ?? 0) > 0 && (
             <span className="type-chip off" title={t('внешний прокси держит docker-сокет: взлом прокси даст root на хосте')}>
               🔓 docker.sock
+            </span>
+          )}
+          {(s.docker_risk ?? []).some((x) => !x.muted) && (
+            <span className="type-chip off" title={t('у контейнеров ключи от хоста: взлом приложения в них даст root на сервере')}>
+              🔑 {(s.docker_risk ?? []).filter((x) => !x.muted).map((x) => x.name).join(', ')}
             </span>
           )}
           {(s.proxy_outdated?.length ?? 0) > 0 && (

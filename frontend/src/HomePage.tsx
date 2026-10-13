@@ -18,7 +18,7 @@ import {
   type Server,
 } from './api'
 import type { Section } from './App'
-import { backupWindowNote, fmtSetupVersion, proxyBuilt, sinceShort, srvIssues } from './serverUtils'
+import { backupWindowNote, dockRiskText, fmtSetupVersion, proxyBuilt, sinceShort, srvIssues } from './serverUtils'
 import { useI18n } from './i18n'
 import { expiryText, registrableDomain } from './checkUtils'
 import { useAuth } from './auth'
@@ -366,6 +366,14 @@ function actionItems(servers: Server[], avail: string, relProblem: string, t: T)
         cc: s.country, sec: 'exposure',
         text: t('{name}: по внешнему адресу {ip} отвечает другой сервер ({o}, у ноды {n}) - поправьте внешний адрес',
           { name: s.name, ip: f.ip, o: f.outside, n: f.node }) })
+    }
+    // у контейнеров ключи от хоста сверх положенного: ведем в Docker, там что поправить и
+    // кнопка "по назначению"
+    const risk = (s.docker_risk ?? []).filter((x) => !x.muted)
+    if (risk.length > 0 && !(s.alert_mutes ?? []).includes('docker_risk')) {
+      items.push({ key: `dockrisk-${s.id}`, icon: '🔑', section: 'docker', id: s.id, name: s.name, cc: s.country,
+        text: t('{name}: у контейнеров ключи от хоста: {list} - взлом приложения в них даст root на сервере',
+          { name: s.name, list: risk.map((x) => `${x.name} (${dockRiskText(x, t)})`).join(', ') }) })
     }
     // SSH пускает по паролю, а порт открыт в интернет
     for (const a of s.ssh_advice ?? []) {

@@ -1,4 +1,4 @@
-import type { DiskHealth, DiskUsage, Server, ServerReport, UnitsBlock, WebRate } from './api'
+import type { DiskHealth, DiskUsage, DockerRisk, Server, ServerReport, UnitsBlock, WebRate } from './api'
 import { tr } from './i18n'
 
 // Запросы в минуту по access-логам ноды: блок кладёт root-хелпер webserver-setup, агент
@@ -199,6 +199,12 @@ export function proxyBuilt(p: { version?: string; built: number }): string {
   const d = new Date(p.built * 1000)
   const when = `${String(d.getMonth() + 1).padStart(2, '0')}.${d.getFullYear()}`
   return p.version ? `${p.version}, ${when}` : when
+}
+
+// Ключи от хоста у контейнера словами: "privileged, docker-сокет", "cap SYS_ADMIN"
+export function dockRiskText(x: DockerRisk, t: (k: string, p?: Record<string, string | number>) => string): string {
+  const word: Record<string, string> = { priv: 'privileged', sock: t('docker-сокет'), host: t('корень хоста на запись') }
+  return x.flags.map((f) => (f === 'caps' ? `cap ${x.caps.join(', ')}` : word[f] ?? f)).join(', ')
 }
 
 // Вышел ли бэкап за «ночное окно». Мягкое уведомление (не алерт): бэкап либо ещё идёт

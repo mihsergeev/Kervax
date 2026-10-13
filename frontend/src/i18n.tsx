@@ -1200,6 +1200,30 @@ const EN: Record<string, string> = {
   'проверено {d}: файлов совпало {n}{dumps}': 'checked {d}: {n} files matched{dumps}',
   ', дампы читаются: {e}': ', dumps readable: {e}',
   'Бэкап: проверка восстановления': 'Backup: restore check',
+  // контейнеры с ключами от хоста
+  '{name}: у контейнеров ключи от хоста: {list} - взлом приложения в них даст root на сервере':
+    '{name}: containers hold the keys to the host: {list} - breaking into the app inside gives root on the server',
+  'docker-сокет': 'docker socket',
+  'корень хоста на запись': 'host root writable',
+  'Docker: контейнер с ключами от хоста': 'Docker: container with the keys to the host',
+  'ключи от хоста по назначению': 'host access by design',
+  'У контейнеров ключи от хоста: взлом приложения в них даст root на сервере.':
+    'These containers hold the keys to the host: breaking into the app inside gives root on the server.',
+  'у контейнеров ключи от хоста: взлом приложения в них даст root на сервере':
+    'containers hold the keys to the host: breaking into the app inside gives root on the server',
+  'Так задумано: убрать из "Требует действий" и не алертить по этому контейнеру':
+    'This is intended: drop it from "Action needed" and do not alert on this container',
+  'по назначению': 'by design',
+  'По назначению: {list}': 'By design: {list}',
+  'вернуть {name}': 'bring back {name}',
+  'privileged: уберите privileged: true и дайте только нужные capabilities (cap_add) и устройства (devices).':
+    'privileged: remove privileged: true and grant only the capabilities (cap_add) and devices (devices) it needs.',
+  'capabilities: уберите из cap_add SYS_ADMIN, SYS_MODULE, SYS_PTRACE и подобные, если приложение работает без них.':
+    'capabilities: drop SYS_ADMIN, SYS_MODULE, SYS_PTRACE and the like from cap_add if the app works without them.',
+  'docker-сокет: если приложению нужен список контейнеров или события, пусть ходит через прокси сокета только на чтение (wollomatic/socket-proxy во внутренней сети), а сам сокет уберите из volumes.':
+    'docker socket: if the app needs the container list or events, let it go through a read-only socket proxy (wollomatic/socket-proxy on an internal network) and remove the socket itself from volumes.',
+  'корень хоста: смонтируйте только нужный каталог и, если писать туда не нужно, с :ro.':
+    'host root: mount only the directory it needs, and with :ro if it does not have to write there.',
   // пропавший порт, диск тормозит
   'Сервер: пропал порт': 'Server: port gone',
   'пропавший порт': 'gone port',
