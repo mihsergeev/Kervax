@@ -7,7 +7,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="KERVAX_", env_file=".env")
 
     app_name: str = "Kervax"
-    version: str = "1.4.157"
+    version: str = "1.4.158"
     debug: bool = False
     # Внешний URL панели — если задан, в алерты добавляется ссылка на монитор
     # (напр. https://kervax.example.com). Пусто = ссылку не добавляем.
@@ -89,6 +89,8 @@ class Settings(BaseSettings):
     # антифлуд: при ≥ N новых алертов за один цикл шлём один дайджест вместо потока
     # (0 = выключить группировку)
     alert_flood_threshold: int = 6
+    # Часовой пояс панели: "до утра" у кнопки под алертом - до 9:00 по нему
+    alert_tz: str = "Europe/Moscow"
 
     # --- Авто-бэкап БД ---
     backup_interval_hours: int = 24

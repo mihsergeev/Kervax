@@ -674,6 +674,9 @@ class AlertConfigOut(BaseModel):
     flood_threshold: int  # ≥N алертов за цикл → один дайджест (0 = выкл)
     enabled: bool
     muted: bool  # временная пауза всех алертов
+    tg_buttons: bool = False  # кнопки под алертами и команды бота
+    tz: str = ""  # часовой пояс панели ("до утра" у кнопки)
+    tg_poll: dict = {}  # как идет опрос бота: status ok|conflict|error|off, error, ts, bot
 
 
 class AlertConfigIn(BaseModel):
@@ -683,6 +686,8 @@ class AlertConfigIn(BaseModel):
     webhook: str = Field(default="", max_length=512)
     flood_threshold: int = Field(default=6, ge=0, le=1000)
     muted: bool = False
+    tg_buttons: bool = False
+    tz: str = Field(default="", max_length=64)
 
 
 class AlertTestResult(BaseModel):

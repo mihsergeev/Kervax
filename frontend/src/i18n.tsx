@@ -1870,6 +1870,15 @@ const EN: Record<string, string> = {
   'Поиск сервера…': 'Search server…',
   'Сохранить правила': 'Save rules',
   'Не слать алерты (пауза)': 'Mute alerts (pause)',
+  'Кнопки под алертами и команды боту': 'Buttons under alerts and bot commands',
+  'Под алертом: заглушить на час, до утра или насовсем, «взял». Команды в чате: /status, /mutes. Панель сама читает сообщения бота: если этого бота уже читает другая программа или вторая панель, заведите для панели отдельного бота.':
+    'Under each alert: mute for an hour, until morning or for good, "on it". Chat commands: /status, /mutes. The panel reads the bot updates itself: if another program or a second panel already reads this bot, create a separate bot for this panel.',
+  'Часовой пояс («до утра» = до 9:00)': 'Time zone ("until morning" = until 9:00)',
+  'Бот {bot} читается, кнопки работают': 'Bot {bot} is being read, buttons work',
+  'Этого бота уже читает другая программа или панель. Заведите для панели отдельного бота у @BotFather и укажите его токен.':
+    'Another program or panel already reads this bot. Create a separate bot for this panel with @BotFather and set its token.',
+  'Бот не отвечает: {err}': 'The bot does not respond: {err}',
+  'Опрос бота запустится в течение 20 секунд после сохранения.': 'Bot polling starts within 20 seconds after saving.',
   'Временно тушит все уведомления. Инциденты продолжают фиксироваться.':
     'Temporarily silences all notifications. Incidents are still recorded.',
   '⏸ Алерты на паузе': '⏸ Alerts paused',

@@ -28,6 +28,7 @@ from app import podnames
 from app import mem_trend
 from app import restarts as srv_restarts
 from app import ssh_audit
+from app import tg_bot
 from app import web_certs
 from app import web_config
 from app import changes as srv_changes
@@ -282,7 +283,7 @@ _ALERT_SECTION = {
 
 def _server_alert_text(
     kind: str, name: str, detail: str, link_url: str = "",
-    recovery: bool = False, icon: str = "", group: str = "",
+    recovery: bool = False, icon: str = "", group: str = "", ref: str = "",
 ) -> alerts.Msg:
     """Дефолтный формат серверного алерта — как у сайтов, без «Kervax:»:
     «<иконка> <сервер> — <detail>», где имя сервера — ссылка на монитор в панели
@@ -297,7 +298,7 @@ def _server_alert_text(
     return alerts.Msg(
         f"{icon} {linked}" + (f" — {d}" if d else ""),
         _ALERT_SECTION.get(kind, "servers"),
-        group, kind=kind, target=name, recovery=recovery,
+        group, kind=kind, target=name, recovery=recovery, ref=ref,
     )
 
 
@@ -928,6 +929,8 @@ async def _send_alerts(
     # статус на одном домене в одном тике - одно сообщение, остальные адреса дописаны.
     same_at: dict[tuple, int] = {}
     same_hosts: dict[tuple, list[str]] = {}
+    # мониторы, свернутые в чужое сообщение: кнопки под ним глушат их все
+    more_ids: dict[int, list[int]] = {}
     # Pending(*p): на вход может прийти и голый кортеж (в т.ч. из тестов) —
     # приводим к именованному, недостающий icon подставит дефолт
     for kind, name, status, msg, inc_id, check_id, flag, icon in map(_as_pending, pending):
@@ -950,6 +953,8 @@ async def _send_alerts(
             host, site_url = zone, ""
             if zone in dom_at:
                 dom_n[zone] = dom_n.get(zone, 1) + 1
+                if check_id is not None:
+                    more_ids.setdefault(dom_at[zone], []).append(check_id)
                 commits.append((kind, inc_id, check_id, flag))
                 continue
         same = None
@@ -957,6 +962,8 @@ async def _send_alerts(
             same = (kind, status, checks_exec._registrable_domain(tgt))
             if same in same_at:
                 same_hosts[same].append(host or name)
+                if check_id is not None:
+                    more_ids.setdefault(same_at[same], []).append(check_id)
                 commits.append((kind, inc_id, check_id, flag))
                 continue
         if rule is not None:
@@ -986,7 +993,8 @@ async def _send_alerts(
         # в истории отбой лежит под тем же видом, что и сама беда: фильтр по виду
         # показывает историю целиком
         texts.append(alerts.Msg(text, "sites", grp or "", kind=_SITE_HISTORY_KIND.get(kind, rk or kind),
-                                target=name, recovery=kind in _SITE_RECOVERY))
+                                target=name, recovery=kind in _SITE_RECOVERY,
+                                ref=f"chk:{check_id}" if check_id is not None and rk else ""))
         commits.append((kind, inc_id, check_id, flag))
 
     # дописываем счётчик только там, где мониторов реально больше одного
@@ -996,7 +1004,7 @@ async def _send_alerts(
             old = texts[idx]
             texts[idx] = alerts.Msg(
                 f"{old} · мониторов: {n}", old.section, old.group,
-                kind=old.kind, target=old.target, recovery=old.recovery,
+                kind=old.kind, target=old.target, recovery=old.recovery, ref=old.ref,
             )
 
     for key, idx in same_at.items():
@@ -1005,7 +1013,15 @@ async def _send_alerts(
             old = texts[idx]
             texts[idx] = alerts.Msg(
                 f"{old}\n↳ и {html.escape(', '.join(more))}", old.section, old.group,
-                kind=old.kind, target=old.target, recovery=old.recovery,
+                kind=old.kind, target=old.target, recovery=old.recovery, ref=old.ref,
+            )
+
+    for idx, ids in more_ids.items():
+        old = texts[idx]
+        if old.ref:
+            texts[idx] = alerts.Msg(
+                str(old), old.section, old.group, kind=old.kind, target=old.target,
+                recovery=old.recovery, ref=old.ref + "".join(f",{i}" for i in ids),
             )
 
     # parse_mode=HTML: имя монитора идёт ссылкой <a href>. Весь контент экранирован.
@@ -4864,13 +4880,13 @@ async def evaluate_servers(
                 ico = "⛔"  # срок не «скоро», а уже вышел — это поломка, а не напоминание
             return _server_alert_text(
                 key, s.name, _fmt_rule(default, s, ctx), url, icon=ico,
-                group=s.group_name or "",
+                group=s.group_name or "", ref=f"srv:{s.id}",
             )
         txt = html.escape(_fmt_rule(rule["text"], s, ctx))
         return alerts.Msg(
             txt + (f"\n🔗 {html.escape(url)}" if url else ""),
             _ALERT_SECTION.get(key, "servers"),
-            s.group_name or "", kind=key, target=s.name,
+            s.group_name or "", kind=key, target=s.name, ref=f"srv:{s.id}",
         )
 
     # Сначала СОБИРАЕМ все переходы за тик (не шлём внутри цикла), чтобы при
@@ -5896,6 +5912,8 @@ async def collector_loop(
     # кричал «панель зависла», хотя она просто занята. Реальные отказы (процесс
     # мёртв, цикл событий завис, БД недоступна) по-прежнему валят запись пульса.
     hb_task = asyncio.create_task(heartbeat.heartbeat_loop(session_factory, settings))
+    # кнопки под алертами и команды боту: своя задача, long polling держит запрос до 25 с
+    tg_task = asyncio.create_task(tg_bot.poll_loop(session_factory, settings))
     last_prune: datetime | None = None
     # Стадии изолированы друг от друга. Была одна try на весь тик, и NameError в
     # серверных алертах уносил с собой прунинг и автобэкап панели — при этом наружу
@@ -5954,3 +5972,4 @@ async def collector_loop(
             await asyncio.sleep(settings.scheduler_tick)
     finally:
         hb_task.cancel()
+        tg_task.cancel()

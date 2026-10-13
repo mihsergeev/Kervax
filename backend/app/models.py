@@ -918,3 +918,31 @@ class AlertEvent(Base):
     grp: Mapped[str] = mapped_column(String(255), default="")     # группа объекта
     recovery: Mapped[bool] = mapped_column(Boolean, default=False)
     text: Mapped[str] = mapped_column(Text, default="")           # текст без HTML-разметки
+
+
+class TgAlert(Base):
+    """Алерт, ушедший в Telegram с кнопками. Кнопка несет только id этой записи (в callback_data
+    влезает 64 байта): что глушить (ref + kind), куда ушли копии (чтобы дописать "взял Петя" во
+    все чаты сразу) и что вернуть по "вернуть". Пишется до отправки, потому что id нужен в
+    кнопках; не ушедшее повторится на следующем тике новой записью, старые чистит опрос бота."""
+
+    __tablename__ = "tg_alerts"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    ts: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), index=True
+    )
+    ref: Mapped[str] = mapped_column(String(255), default="")     # srv:<id> или chk:<id>[,<id>...]
+    kind: Mapped[str] = mapped_column(String(40), default="")     # вид алерта
+    target: Mapped[str] = mapped_column(String(255), default="")  # сервер или монитор
+    section: Mapped[str] = mapped_column(String(20), default="")
+    grp: Mapped[str] = mapped_column(String(255), default="")
+    text: Mapped[str] = mapped_column(Text, default="")           # HTML как отправлен, для правки
+    messages: Mapped[list | None] = mapped_column(JSON, nullable=True)  # [{"chat", "id"}]
+    acked_by: Mapped[str] = mapped_column(String(128), default="")
+    acked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    muted: Mapped[str] = mapped_column(String(255), default="")   # строка статуса про мьют
+    undo: Mapped[dict | None] = mapped_column(JSON, nullable=True)  # как вернуть мьют
+    # эскалация: сколько раз уже повторили и когда в последний раз
+    esc_level: Mapped[int] = mapped_column(Integer, default=0)
+    esc_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

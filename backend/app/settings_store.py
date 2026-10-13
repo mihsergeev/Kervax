@@ -10,6 +10,8 @@ from app.models import AppSetting
 
 ALERTS_KEY = "alerts"
 MUTED_KEY = "alerts_muted"
+# состояние опроса бота (кнопки под алертами): offset getUpdates и что видно в настройках
+TG_POLL_KEY = "tg_poll"
 UNCOVERED_KEY = "uncovered_digest_sent"
 VAULT_META_KEY = "backup_vault_meta"  # соль/итерации/verifier сейфа (СЕКРЕТОВ НЕТ)
 RETENTION_KEY = "retention"
@@ -304,6 +306,10 @@ async def get_alert_config(session: AsyncSession, settings: Settings) -> dict:
         "flood_threshold": int(
             data.get("flood_threshold", settings.alert_flood_threshold)
         ),
+        # кнопки под алертами и команды бота: панель читает апдейты бота. Выключено по
+        # умолчанию - если этого бота уже читает кто-то еще, мы бы забирали его апдейты
+        "tg_buttons": bool(data.get("tg_buttons", False)),
+        "tz": data.get("tz") or settings.alert_tz,
     }
 
 
@@ -314,6 +320,8 @@ async def set_alert_config(
     webhook: str,
     telegram_api: str = "",
     flood_threshold: int = 6,
+    tg_buttons: bool = False,
+    tz: str = "",
 ) -> None:
     await _set_raw(
         session,
@@ -325,9 +333,25 @@ async def set_alert_config(
                 "telegram_api": telegram_api.strip().rstrip("/"),
                 "webhook": webhook.strip(),
                 "flood_threshold": max(0, min(1000, int(flood_threshold))),
+                "tg_buttons": bool(tg_buttons),
+                "tz": tz.strip(),
             }
         ),
     )
+
+
+async def get_tg_poll(session: AsyncSession) -> dict:
+    """Состояние опроса бота: offset, статус (ok, conflict, error, off), когда, имя бота."""
+    raw = await _get_raw(session, TG_POLL_KEY)
+    try:
+        data = json.loads(raw) if raw else {}
+    except ValueError:
+        data = {}
+    return data if isinstance(data, dict) else {}
+
+
+async def set_tg_poll(session: AsyncSession, data: dict) -> None:
+    await _set_raw(session, TG_POLL_KEY, json.dumps(data, ensure_ascii=False))
 
 
 async def get_muted(session: AsyncSession) -> bool:
