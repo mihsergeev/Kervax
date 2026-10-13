@@ -24,6 +24,7 @@ import {
 import type { Section } from './App'
 import { backupWindowNote, dockRiskText, fmtSetupVersion, knownActive, proxyBuilt, shortList, sinceShort, srvIssues, srvKnown, knownMeta } from './serverUtils'
 import { KnownDialog } from './KnownDialog'
+import { MaintChip, MaintHome } from './MaintModal'
 import { useI18n } from './i18n'
 import { expiryText, registrableDomain } from './checkUtils'
 import { useAuth } from './auth'
@@ -681,6 +682,12 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
     )
     .sort((a, b) => (a.last_status === 'down' ? 0 : 1) - (b.last_status === 'down' ? 0 : 1))
   const allUp = ov && downChecks.length === 0
+  // лежащие, но отмеченные известной проблемой: "все в норме" про них было бы неправдой
+  const knownDown = (ov?.checks ?? []).filter(
+    (c) =>
+      c.enabled && knownActive(c.known_issue) &&
+      (c.last_status === 'down' || c.last_status === 'degraded' || !!c.flaky_since),
+  ).length
   const srvTotal = servers?.length ?? 0
   const srvOnline = servers?.filter((s) => s.online).length ?? 0
   const srvOffline = srvTotal - srvOnline
@@ -840,6 +847,7 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
                 <span className="home-attention-txt">
                   <CountryFlag code={it.cc} /> <b>{it.name}</b> - {it.text}
                   {sinceShort(it.since, t) && <span className="muted"> · {sinceShort(it.since, t)}</span>}
+                  {it.srv && it.section === 'servers' && <MaintChip kind="server" id={it.id} />}
                   {it.note && (
                     <span className="note-chip" title={it.note}>
                       {' '}📝
@@ -872,6 +880,7 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
           </div>
         </div>
       )}
+      <MaintHome />
       {knownRows.length > 0 && (
         <div className="home-attention home-attention-known">
           <div className="home-attention-head">
@@ -1008,7 +1017,9 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
           ) : (
             <>
               <div className="home-headline">
-                {allUp ? (
+                {allUp && knownDown > 0 ? (
+                  <span className="muted">{t('Новых проблем нет, известных: {n}', { n: knownDown })}</span>
+                ) : allUp ? (
                   <span className="t-up">{t('Все {n} в норме', { n: ov.total })}</span>
                 ) : (
                   <span className="t-down">

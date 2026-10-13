@@ -2238,3 +2238,40 @@ export function setCheckKnown(id: number, text: string, days: number): Promise<C
 export function dropCheckKnown(id: number): Promise<Check> {
   return api<Check>(`/api/checks/${id}/known`, { method: 'DELETE' })
 }
+
+// Окно обслуживания (backend app/maint.py): алерты по выбранным серверам и мониторам молчат,
+// после окна - сверка. repeat: "" разово, daily каждый день, weekly по weekdays (0 = пн).
+export type MaintIn = {
+  title: string
+  server_ids: number[]
+  check_ids: number[]
+  starts_at: string
+  ends_at: string
+  repeat: '' | 'daily' | 'weekly'
+  weekdays: number[]
+  verify: boolean
+  note: string
+}
+
+export type MaintWindow = MaintIn & {
+  id: number
+  created_by: string
+  active: boolean
+  cur_end: string | null
+  next_start: string | null
+  finished: boolean
+}
+
+export const listMaint = () => api<MaintWindow[]>('/api/maintenance')
+
+export function createMaint(body: MaintIn): Promise<MaintWindow> {
+  return api<MaintWindow>('/api/maintenance', { method: 'POST', body: JSON.stringify(body) })
+}
+
+export function updateMaint(id: number, body: MaintIn): Promise<MaintWindow> {
+  return api<MaintWindow>(`/api/maintenance/${id}`, { method: 'PUT', body: JSON.stringify(body) })
+}
+
+export function deleteMaint(id: number): Promise<void> {
+  return api<void>(`/api/maintenance/${id}`, { method: 'DELETE' })
+}

@@ -968,3 +968,28 @@ class TgAlert(Base):
     esc_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # пришел отбой: эскалировать нечего, кнопки глушения больше не нужны
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class MaintenanceWindow(Base):
+    """Окно обслуживания: плановые работы, пока алерты по выбранным серверам и мониторам
+    молчат; после окна - сверка, все ли вернулось (app/maint.py)."""
+
+    __tablename__ = "maintenance_windows"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    title: Mapped[str] = mapped_column(String(200))
+    server_ids: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    check_ids: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    # разовое окно - с и по; повторяющееся - то же время и длительность каждый день или по дням
+    starts_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    ends_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    repeat: Mapped[str] = mapped_column(String(10), default="")  # "" | daily | weekly
+    weekdays: Mapped[list | None] = mapped_column(JSON, nullable=True)  # 0 = понедельник
+    verify: Mapped[bool] = mapped_column(Boolean, default=True)  # сверка после окна
+    note: Mapped[str] = mapped_column(Text, default="")
+    created_by: Mapped[str] = mapped_column(String(128), default="")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    # конец вхождения, по которому сверка уже была
+    verified_end: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

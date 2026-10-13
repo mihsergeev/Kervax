@@ -29,6 +29,7 @@ from app import mem_trend
 from app import restarts as srv_restarts
 from app import ssh_audit
 from app import known as known_mod
+from app import maint
 from app import tg_bot
 from app import web_certs
 from app import web_config
@@ -40,6 +41,7 @@ from app.config import Settings, get_settings
 from app.models import (
     AgentPathProbe,
     AuditLog,
+    MaintenanceWindow,
     AgentProbe,
     Check,
     CheckIncident,
@@ -910,6 +912,10 @@ async def _send_alerts(
         meta: dict[int, tuple[str, str, int]] = {}  # id → (target, type, port) для хоста
         snoozed: set[int] = set()  # мониторы с активным снузом — алерты не шлём
         known_ids: set[int] = set()  # мониторы с известной проблемой - молчим про сбой
+        # окна обслуживания: монитор в идущем окне молчит, как под снузом
+        _ms, maint_chk = maint.active(list(await session.scalars(select(MaintenanceWindow))), now,
+                                      cfg.get("tz") or "Europe/Moscow")
+        snoozed.update(i for i in ids if i in maint_chk)
         if ids:
             rows = await session.execute(
                 select(
@@ -4831,7 +4837,10 @@ async def evaluate_servers(
         muted = await settings_store.get_muted(session)
         rules = await settings_store.get_server_alert_rules(session)
         web_err = await web_error_window(session, now)
+        windows = list(await session.scalars(select(MaintenanceWindow)))
     can_send = alerts.alerts_enabled(cfg) and not muted
+    # окна обслуживания: сервер в идущем окне молчит, как под снузом (app/maint.py)
+    maint_srv, _mc = maint.active(windows, now, cfg.get("tz") or "Europe/Moscow")
     base = settings.panel_url.rstrip("/")
     threshold = int(cfg.get("flood_threshold", 6))
 
@@ -4935,6 +4944,8 @@ async def evaluate_servers(
         # чтобы после снуза оставшаяся проблема снова сработала)
         if s.snooze_until is not None and _aware(s.snooze_until) > now:
             continue
+        if s.id in maint_srv:
+            continue  # идет окно обслуживания: то же, что снуз, после окна оставшееся сработает
         # Только что добавленный сервер: первые минуты ставятся helper'ы, и первые отчеты
         # неполные (у сервера бэкапов "чистка не работает" ушла через минуту после добавления и
         # через минуту отбилась). Состояние не трогаем: что останется, придет после тишины.
@@ -5573,6 +5584,53 @@ async def evaluate_servers(
             await session.commit()
 
 
+async def maintenance_tick(
+    session_factory: async_sessionmaker[AsyncSession], settings: Settings, now: datetime
+) -> None:
+    """Сверка после окон обслуживания и уборка давно прошедших разовых окон (app/maint.py).
+    Сверка через maint.VERIFY_AFTER после конца: к этому времени сборщик уже прошел по
+    серверам без снуза, и alert_state говорит, что сломано на самом деле."""
+    msgs: list[alerts.Msg] = []
+    async with session_factory() as session:
+        windows = list(await session.scalars(select(MaintenanceWindow)))
+        if not windows:
+            return
+        cfg = await settings_store.get_alert_config(session, settings)
+        muted = await settings_store.get_muted(session)
+        tz = cfg.get("tz") or "Europe/Moscow"
+        for w in windows:
+            if maint.finished(w, now) and (now - _aware(w.ends_at)).total_seconds() > maint.KEEP_DONE:
+                await session.delete(w)
+                continue
+            occ = maint.due_verify(w, now, tz)
+            if occ is None:
+                continue
+            w.verified_end = occ[1]
+            srvs = list(await session.scalars(select(Server).where(
+                Server.id.in_(w.server_ids or []), Server.enabled.is_(True)))) if w.server_ids else []
+            chks = list(await session.scalars(select(Check).where(
+                Check.id.in_(w.check_ids or []), Check.enabled.is_(True)))) if w.check_ids else []
+            bad: list[str] = []
+            for s in sorted(srvs, key=lambda x: x.name):
+                if not seen_online(s, now):
+                    bad.append(f"{s.name} - не на связи")
+                    continue
+                st = s.alert_state or {}
+                kinds = sorted(k for k, v in st.items() if k in settings_store.SERVER_ALERT_KINDS
+                               and isinstance(v, int) and not isinstance(v, bool) and v > 0)
+                if kinds:
+                    bad.append(f"{s.name} - " + ", ".join(settings_store.SERVER_ALERT_KINDS[k][0] for k in kinds))
+            for c in sorted(chks, key=lambda x: x.name):
+                if c.last_status in ("down", "degraded"):
+                    bad.append(f"{c.name} - " + ("недоступен" if c.last_status == "down" else "тормозит"))
+            text = maint.verify_text(w.title, bad, len(srvs), len(chks))
+            msgs.append(alerts.Msg(("⚠️ " if bad else "🚧 ") + html.escape(text), "servers", "", kind="maint"))
+        await session.commit()
+    if msgs and not muted and alerts.alerts_enabled(cfg):
+        await alerts.dispatch(cfg, True, msgs, int(cfg.get("flood_threshold", 6)), parse_mode="HTML",
+                              session_factory=session_factory)
+
+
 # Команда живёт секунды: агент забирает её за 1-15с, helper отвечает в пределах 90с
 # (столько же ждёт спул на ноде). Всё, что висит дольше, до ноды не доехало.
 _CMD_STUCK_SECONDS = 10 * 60
@@ -6009,6 +6067,8 @@ async def collector_loop(
             await stage("изменения на сервере", srv_changes.track(
                 session_factory, datetime.now(timezone.utc)))
             await stage("серверные алерты", evaluate_servers(
+                session_factory, settings, datetime.now(timezone.utc)))
+            await stage("окна обслуживания", maintenance_tick(
                 session_factory, settings, datetime.now(timezone.utc)))
             await stage("авто-очистка дисков", autofix_disks(
                 session_factory, datetime.now(timezone.utc)))

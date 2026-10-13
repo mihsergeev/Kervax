@@ -23,6 +23,7 @@ import { CheckFormCard } from './CheckFormCard'
 import { StatusBar } from './charts/StatusBar'
 import { ImportModal } from './ImportModal'
 import { useI18n } from './i18n'
+import { MaintChip } from './MaintModal'
 import { useAuth } from './auth'
 
 type Props = {
@@ -978,6 +979,7 @@ function CheckRow({
               📌
             </span>
           )}
+          <MaintChip kind="check" id={c.id} />
           <span className="type-chip">{typeLabel}</span>
           {/* Зелёный по локальной проверке — это не то же самое, что «сайт виден
               посетителям»: снаружи он закрыт белым списком. Метка обязательна,

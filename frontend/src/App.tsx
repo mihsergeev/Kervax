@@ -6,6 +6,7 @@ import { useUrlSection } from './deeplink'
 import { BrandLogo, useBranding } from './BrandLogo'
 import { AboutModal } from './AboutModal'
 import { AlertsModal } from './AlertsModal'
+import { MaintModal } from './MaintModal'
 import { AlertHistoryModal } from './AlertHistoryModal'
 import { ChecksPage } from './ChecksPage'
 import { HomePage } from './HomePage'
@@ -36,6 +37,7 @@ type Modal =
   | 'backup'
   | 'users'
   | 'history'
+  | 'maint'
   | null
 export type Section = 'home' | 'sites' | 'servers' | 'docker' | 'kuber' | 'services' | 'backups'
 const SECTIONS: Section[] = ['home', 'sites', 'servers', 'docker', 'kuber', 'services', 'backups']
@@ -366,6 +368,15 @@ export default function App() {
                   <button
                     className="menu-item"
                     onClick={() => {
+                      setModal('maint')
+                      setMenuOpen(false)
+                    }}
+                  >
+                    {t('Окна обслуживания')}
+                  </button>
+                  <button
+                    className="menu-item"
+                    onClick={() => {
                       setModal('history')
                       setMenuOpen(false)
                     }}
@@ -483,6 +494,9 @@ export default function App() {
       )}
       {modal === 'alerts' && (
         <AlertsModal onClose={() => setModal(null)} onUnauthorized={logout} />
+      )}
+      {modal === 'maint' && (
+        <MaintModal onClose={() => setModal(null)} onUnauthorized={logout} />
       )}
       {modal === 'locations' && (
         <LocationsModal onClose={() => setModal(null)} onUnauthorized={logout} />

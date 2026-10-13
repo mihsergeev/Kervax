@@ -5838,3 +5838,107 @@ button.type-chip { cursor: pointer; border: 1px solid transparent; font-family: 
   justify-content: space-between;
   gap: 0.5rem;
 }
+
+/* Окна обслуживания */
+.maint-modal {
+  width: 760px;
+  max-width: calc(100vw - 2rem);
+}
+.maint-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  margin-top: 0.8rem;
+}
+.maint-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.6rem;
+  padding: 0.55rem 0.7rem;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+.maint-row-main {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.maint-row-actions {
+  display: flex;
+  flex-shrink: 0;
+  gap: 0.3rem;
+}
+.maint-done {
+  opacity: 0.6;
+}
+.maint-live {
+  border-color: color-mix(in srgb, #d8a530 50%, var(--border));
+  background: color-mix(in srgb, #d8a530 15%, transparent);
+}
+.maint-form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  padding: 0.7rem;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+.maint-times {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 0.6rem;
+}
+.maint-days {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.8rem;
+}
+.maint-pick-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 0.6rem;
+}
+.maint-pick {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  min-width: 0;
+}
+.maint-pick-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+.maint-pick-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  max-height: 180px;
+  overflow-y: auto;
+  padding: 0.3rem 0.4rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.maint-bar {
+  border-color: color-mix(in srgb, #d8a530 45%, var(--border));
+  background: color-mix(in srgb, #d8a530 10%, transparent);
+}
+.maint-home-row {
+  cursor: default;
+}
+/* галка слева, подпись справа: глобальный label выстроен колонкой */
+.check-inline {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 0.45rem;
+  cursor: pointer;
+}
+.check-inline input {
+  width: 16px;
+  height: 16px;
+  flex: 0 0 auto;
+  margin: 0;
+  accent-color: #3563e9;
+  cursor: pointer;
+}
