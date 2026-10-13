@@ -43,7 +43,7 @@ import (
 	"time"
 )
 
-const version = "2.26"
+const version = "2.27"
 
 // Публичный ключ для проверки подписи релизов агента (Ed25519, base64).
 // ПУСТО по умолчанию → самообновление ВЫКЛЮЧЕНО (агент никогда не заменяет себя).
@@ -651,10 +651,16 @@ type dockerContainer struct {
 	ImgVer     string `json:"img_ver,omitempty"`     // org.opencontainers.image.version
 	ImgCreated int64  `json:"img_created,omitempty"` // сборка образа, unix-секунды
 	// опубликованные порты (docker -p): какой контейнер стоит за портом, открытым на хосте
-	Ports   []dockerPort `json:"ports,omitempty"`
-	imageID string       // id образа: по нему дата сборки из /images/json
-	ip      string       // IP контейнера для скрейпа метрик; в отчёт НЕ уходит (строчная)
-	id      string       // id контейнера: по нему процесс находит свой контейнер (cpu_groups)
+	Ports []dockerPort `json:"ports,omitempty"`
+	// Ключи от хоста: --privileged, опасные --cap-add, --pid=host и какие bind-монтирования только
+	// на чтение (остальные из binds - на запись). Взлом приложения в таком контейнере - root на сервере.
+	Priv    bool     `json:"priv,omitempty"`
+	Caps    []string `json:"caps,omitempty"` // только из hostCaps, без префикса CAP_
+	PidHost bool     `json:"pid_host,omitempty"`
+	RO      []string `json:"ro,omitempty"`
+	imageID string   // id образа: по нему дата сборки из /images/json
+	ip      string   // IP контейнера для скрейпа метрик; в отчёт НЕ уходит (строчная)
+	id      string   // id контейнера: по нему процесс находит свой контейнер (cpu_groups)
 }
 
 // пропускная способность одного сетевого интерфейса, байт/сек + ошибки/дропы, пакетов/сек
@@ -3959,6 +3965,25 @@ func collectDocker() *dockerInfo {
 	return di
 }
 
+// hostCaps - capabilities, с которыми из контейнера выходят на хост: монтировать (SYS_ADMIN),
+// грузить модули ядра, читать память чужих процессов, обходить права на файлы, eBPF.
+var hostCaps = map[string]bool{"ALL": true, "SYS_ADMIN": true, "SYS_MODULE": true, "SYS_PTRACE": true,
+	"SYS_RAWIO": true, "DAC_READ_SEARCH": true, "BPF": true}
+
+// hostCapsOf - из --cap-add только опасные, без префикса CAP_ (докер пишет то так, то так)
+func hostCapsOf(add []string) []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, c := range add {
+		c = strings.TrimPrefix(strings.ToUpper(strings.TrimSpace(c)), "CAP_")
+		if hostCaps[c] && !seen[c] {
+			seen[c] = true
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
 // edgeProxyImage - образ внешнего прокси (как image_kind в панели): caddy, caddy-docker-proxy,
 // traefik, nginx-proxy. Только для них агент шлет версию и дату сборки образа: такой прокси
 // смотрит в интернет, и старая сборка - это непочиненные дыры.
@@ -4097,10 +4122,14 @@ func dockerInspect(cl *http.Client, id string, dc *dockerContainer) {
 				Name              string
 				MaximumRetryCount int
 			}
+			Privileged bool
+			CapAdd     []string
+			PidMode    string
 		}
 		Mounts []struct {
 			Type   string
 			Source string
+			RW     bool
 		}
 		NetworkSettings struct {
 			Networks map[string]struct{ IPAddress string }
@@ -4142,8 +4171,14 @@ func dockerInspect(cl *http.Client, id string, dc *dockerContainer) {
 	for _, m := range ins.Mounts {
 		if m.Type == "bind" && strings.HasPrefix(m.Source, "/") {
 			dc.Binds = append(dc.Binds, m.Source)
+			if !m.RW {
+				dc.RO = append(dc.RO, m.Source)
+			}
 		}
 	}
+	dc.Priv = ins.HostConfig.Privileged
+	dc.Caps = hostCapsOf(ins.HostConfig.CapAdd)
+	dc.PidHost = ins.HostConfig.PidMode == "host"
 	// IP контейнера — только для скрейпа прикладных метрик (RabbitMQ и т.п.), в отчёт не уходит
 	for _, n := range ins.NetworkSettings.Networks {
 		if n.IPAddress != "" {

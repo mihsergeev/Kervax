@@ -43,6 +43,7 @@ export const SRV_ALERT_KINDS: { k: string; label: string }[] = [
   { k: 'cpu_spin', label: 'CPU: процессы в пустом цикле' },
   { k: 'backup_growth', label: 'Бэкап: резкий прирост' },
   { k: 'docker_sock', label: 'Docker: внешний прокси с docker-сокетом' },
+  { k: 'docker_risk', label: 'Docker: контейнер с ключами от хоста' },
   { k: 'exposed', label: 'Сеть: открыто в интернет то, что должно быть закрыто' },
   { k: 'port_new', label: 'Сеть: открылся новый порт' },
   { k: 'pressure', label: 'Сервер задыхается' },
@@ -69,7 +70,10 @@ export const RESTARTS_DAY_MIN = 5
 export const LEAK_MUTE = 'leak:'
 // Один пропавший порт: listen:<порт>
 export const LISTEN_MUTE = 'listen:'
+// Один контейнер с ключами от хоста, которому они нужны намеренно: dockrisk:<имя>
+export const DOCKRISK_MUTE = 'dockrisk:'
 export function muteKindLabel(k: string, t: TFn): string | null {
+  if (k.startsWith(DOCKRISK_MUTE)) return `${t('ключи от хоста по назначению')}: ${k.slice(DOCKRISK_MUTE.length)}`
   if (k.startsWith(LISTEN_MUTE)) return `${t('пропавший порт')}: ${k.slice(LISTEN_MUTE.length)}`
   if (k.startsWith(LEAK_MUTE)) return `${t('рост памяти')}: ${k.slice(LEAK_MUTE.length).replace(/^(docker|pod|proc):/, '')}`
   if (k.startsWith(RESTARTS_MUTE)) {

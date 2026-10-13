@@ -18,6 +18,7 @@ from app import backup_verify
 from app import db_health
 from app import mem_trend
 from app import restarts as srv_restarts
+from app import docker_risk
 from app import ssh_audit
 from app import web_certs
 from app import web_config
@@ -209,6 +210,7 @@ def _out(
     o.country = geoip.country_of(server.external_ip) or geoip.country_of(server.agent_ip)
     o.docker_alerts = _docker_alerts(server)
     o.docker_exposed = docker_exposure.exposed(server.last_report or {})
+    o.docker_risk = docker_risk.view(server)
     o.exposure = open_ports.view(server)
     o.os_advice = os_support.advice(server.last_report or {}, now)
     o.changes = srv_changes.view(server)

@@ -21,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app import alerts, audit, backup, backup_growth, checks as checks_exec, custom_backups, docker_exposure, flaky, heartbeat, settings_store
 from app import backup_verify
 from app import db_health
+from app import docker_risk
 from app import listen_watch
 from app import mem_trend
 from app import restarts as srv_restarts
@@ -208,7 +209,7 @@ _SRV_ICON = {
     "backup_dump": "💾", "backup_dump_space": "🈵", "backup_cron": "💾", "backup_custom": "💾",
     "clock": "🕐", "dns": "🌐", "disk_health": "💽", "inode": "⚠️", "disk_forecast": "📈", "units": "⚙️",
     "unit_loop": "🔁⚙️",
-    "cpu_spin": "🌀", "backup_growth": "💾📈", "docker_sock": "🔓🐳",
+    "cpu_spin": "🌀", "backup_growth": "💾📈", "docker_sock": "🔓🐳", "docker_risk": "🔑🐳",
     # ⏳ — срок ещё не вышел, есть время спланировать; 🔥 — доставка уже встала
     "kube_expiry": "⏳", "flux_down": "🔥☸️", "kube_pod": "☸️🔥", "web_5xx": "🌐🔥",
     # репозиторий чартов недоступен, а развернутое работает: предупреждение, а не авария
@@ -255,6 +256,7 @@ _ALERT_SECTION = {
     "docker_loop": "docker",
     "docker_down": "docker",
     "docker_sock": "docker",
+    "docker_risk": "docker",
     "queue": "services",
     "backup_repo": "backups",
     "backup_rotation": "backups",
@@ -1218,6 +1220,7 @@ _SRV_LABEL = {
     "cpu_spin": "процессы в пустом цикле",
     "backup_growth": "прирост бэкапа",
     "docker_sock": "docker-сокет у внешнего прокси",
+    "docker_risk": "контейнеры с ключами от хоста",
     "exposed": "открытые в интернет сервисы",
     "pressure": "давление на ресурсы",
     "net_health": "сеть ноды",
@@ -1290,6 +1293,8 @@ def _recovery_detail(key: str, st: dict, ctx: dict) -> str:
         return "прирост бэкапа снова обычный"
     if key == "docker_sock":
         return "внешний прокси больше не держит docker-сокет"
+    if key == "docker_risk":
+        return "контейнеров с ключами от хоста больше нет"
     if key == "flux_stale":
         return "репозиторий чартов снова отвечает"
     if key == "kube_cron":
@@ -4348,6 +4353,12 @@ def _server_conditions(s: Server, now: datetime,
         ex = docker_exposure.exposed(rep)
         out["docker_sock"] = (1 if ex else 0, {"detail": docker_exposure.text(ex),
                                                "sig": sorted(e["name"] for e in ex)})
+        # Контейнер с ключами от хоста сверх положенного по назначению (privileged, опасные
+        # capabilities, docker-сокет, корень хоста на запись). Пункт - в "Требует действий",
+        # заглушенные точечно ("dockrisk:<имя>") не в счет; sig - контейнер и его ключи.
+        dr = docker_risk.advice(s)
+        out["docker_risk"] = (1 if dr else 0, {"detail": docker_risk.text(dr),
+                                               "sig": sorted(f"{x['name']}:{','.join(x['flags'])}" for x in dr)})
 
     # Сдвиг часов: локальное время ноды (clock_unix) vs время панели на приёме. По модулю;
     # порог warn 5с / проблема 30с / крит 5мин. Дебаунс (как sustain): разовый спайк —
@@ -4741,7 +4752,7 @@ async def evaluate_servers(
                 continue  # тип (или его нижние уровни) заглушён для этого сервера
             prev = int(st.get(key, 0))
             if key in ("disk_health", "units", "docker_restarts", "kube_restarts", "mem_leak", "db_health",
-                       "web_config", "web_cert", "listen_gone"):
+                       "web_config", "web_cert", "listen_gone", "docker_risk"):
                 # Тот же уровень, но сломалось НОВОЕ (второй диск при уже развалившемся
                 # RAID, второй упавший юнит): молчать нельзя, хотя уровень не вырос. Что
                 # сломано - ключи в sig.
