@@ -14,7 +14,7 @@ import {
 import { useAuth } from './auth'
 import { useUrlCard } from './deeplink'
 import { useI18n } from './i18n'
-import { DOCKRISK_MUTE, RESTARTS_DAY_MIN } from './mutes'
+import { DOCKRISK_MUTE, NOBOOT_MUTE, RESTARTS_DAY_MIN } from './mutes'
 import { OsIcon } from './osIcon'
 import { CountryFlag } from './CountryFlag'
 import { dockRiskText, proxyBuilt } from './serverUtils'
@@ -233,6 +233,75 @@ function RiskWarning({ server: s, canAct, onChanged }: { server: Server; canAct:
       {muted.length > 0 && (
         <div className="muted small">
           {t('По назначению: {list}', { list: muted.map((x) => `${x.name} (${dockRiskText(x, t)})`).join(', ') })}
+          {canAct && muted.map((x) => (
+            <button key={x.name} className="ghost small" disabled={busy === x.name} onClick={() => toggle(x.name, false)}>
+              {t('вернуть {name}', { name: x.name })}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+// Контейнеры, которые после перезагрузки не поднимутся: restart policy no или on-failure. Одна
+// команда на все и кнопка "не нужен после перезагрузки" (мут noboot:<имя>), если так задумано.
+function NoBootWarning({ server: s, canAct, onChanged }: { server: Server; canAct: boolean; onChanged: () => void }) {
+  const { t } = useI18n()
+  const [busy, setBusy] = useState('')
+  const [copied, setCopied] = useState(false)
+  const items = s.noboot?.docker ?? []
+  const live = items.filter((x) => !x.muted)
+  const muted = items.filter((x) => x.muted)
+  const cmd = `docker update --restart unless-stopped ${live.map((x) => x.name).join(' ')}`
+  const toggle = (name: string, on: boolean) => {
+    const key = NOBOOT_MUTE + name
+    const cur = s.alert_mutes ?? []
+    setBusy(name)
+    updateServer(s.id, { alert_mutes: on ? [...new Set([...cur, key])] : cur.filter((m) => m !== key) })
+      .then(onChanged)
+      .catch(() => {})
+      .finally(() => setBusy(''))
+  }
+  return (
+    <div className="docker-noaccess docker-sock-warn">
+      {live.length > 0 && (
+        <>
+          <div className="form-error small">
+            {t('После перезагрузки не поднимутся: у контейнеров нет restart policy (или on-failure), докер запускает после ребута только always и unless-stopped.')}
+          </div>
+          {live.map((x) => (
+            <div key={x.name} className="small">
+              <span className="mono">{x.name}</span> <span className="muted">({x.image}, restart {x.policy})</span>
+              {canAct && (
+                <button className="ghost small" disabled={busy === x.name} onClick={() => toggle(x.name, true)}
+                  title={t('Так задумано: не напоминать про этот контейнер')}>
+                  {t('не нужен после перезагрузки')}
+                </button>
+              )}
+            </div>
+          ))}
+          <div className="agent-advice-cmd">
+            <pre>{cmd}</pre>
+            <button
+              className="ghost"
+              onClick={() => {
+                navigator.clipboard?.writeText(cmd)
+                setCopied(true)
+                window.setTimeout(() => setCopied(false), 1500)
+              }}
+            >
+              {copied ? t('Скопировано') : t('Копировать')}
+            </button>
+          </div>
+          <div className="muted small">
+            {t('Если контейнер из compose, поправьте и сам файл (restart: unless-stopped), иначе следующий up вернет как было.')}
+          </div>
+        </>
+      )}
+      {muted.length > 0 && (
+        <div className="muted small">
+          {t('Не нужны после перезагрузки: {list}', { list: muted.map((x) => x.name).join(', ') })}
           {canAct && muted.map((x) => (
             <button key={x.name} className="ghost small" disabled={busy === x.name} onClick={() => toggle(x.name, false)}>
               {t('вернуть {name}', { name: x.name })}
@@ -591,6 +660,7 @@ function DockerHostModal({
         {(s.docker_exposed?.length ?? 0) > 0 && <SockWarning items={s.docker_exposed ?? []} />}
         {(s.proxy_outdated?.length ?? 0) > 0 && <ProxyOldWarning items={s.proxy_outdated ?? []} />}
         {(s.docker_risk?.length ?? 0) > 0 && <RiskWarning server={s} canAct={canAct} onChanged={onChanged} />}
+        {(s.noboot?.docker.length ?? 0) > 0 && <NoBootWarning server={s} canAct={canAct} onChanged={onChanged} />}
         {!docker.access ? (
           <EnableBlock />
         ) : cs.length === 0 ? (
@@ -658,6 +728,11 @@ function HostRow({
           {(s.docker_exposed?.length ?? 0) > 0 && (
             <span className="type-chip off" title={t('внешний прокси держит docker-сокет: взлом прокси даст root на хосте')}>
               🔓 docker.sock
+            </span>
+          )}
+          {(s.noboot?.docker ?? []).some((x) => !x.muted) && (
+            <span className="type-chip off" title={t('после перезагрузки не поднимутся: нет restart policy')}>
+              🔁 {(s.noboot?.docker ?? []).filter((x) => !x.muted).length}
             </span>
           )}
           {(s.docker_risk ?? []).some((x) => !x.muted) && (

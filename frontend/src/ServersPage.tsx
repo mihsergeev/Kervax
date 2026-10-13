@@ -56,6 +56,8 @@ import {
   UNIT_MUTE,
   WEB_MUTE,
   EXPOSED_MUTE,
+  NOBOOT_MUTE,
+  ACCESS_MUTE,
   muteKindLabel,
   SRV_ALERT_KINDS,
   collectMutes,
@@ -2552,6 +2554,126 @@ function OpenPorts({ server: s, onChanged }: { server: Server; onChanged: () => 
       {opened.some((g) => flagged(g) && (g.risk || g.svc)) && (
         <div className="muted small unit-hint">
           {t('Закройте порт файрволом или привяжите сервис к 127.0.0.1 либо к внутреннему адресу. Порт Docker, опубликованный через -p, обходит ufw: публикуйте его как 127.0.0.1:порт:порт.')}
+        </div>
+      )}
+    </div>
+  )
+}
+
+// Точечный мут из карточки: добавить или снять ключ в alert_mutes сервера
+function useMuteToggle(s: Server, onChanged: () => void) {
+  const [busy, setBusy] = useState('')
+  const toggle = (key: string, on: boolean) => {
+    const cur = s.alert_mutes ?? []
+    setBusy(key)
+    updateServer(s.id, { alert_mutes: on ? [...new Set([...cur, key])] : cur.filter((m) => m !== key) })
+      .then(onChanged)
+      .catch(() => {})
+      .finally(() => setBusy(''))
+  }
+  return { busy, toggle }
+}
+
+// Доступы (helper changes-setup 0.5): кто может войти, чем, с sudo ли без пароля и когда входил.
+// Последний вход - по журналу sshd, не только по lastlog: ansible и CI ходят без терминала.
+function AccessCard({ server: s, onChanged }: { server: Server; onChanged: () => void }) {
+  const { t } = useI18n()
+  const { isViewer } = useAuth()
+  const { busy, toggle } = useMuteToggle(s, onChanged)
+  const v = s.access
+  if (!v || v.accounts.length === 0) return null
+  const probs = (s.problems ?? []).filter((p) => p.kind === 'access_risk')
+  const day = (ts: number) => (ts ? new Date(ts * 1000).toLocaleDateString() : t('не было'))
+  const pw: Record<string, string> = { P: t('задан'), L: t('заблокирован'), NP: t('пустой') }
+  return (
+    <div className="detail-inc" id="mcard-access">
+      <div className="chart-cap">{t('Доступы')}</div>
+      {probs.map((p) => (
+        <div key={p.text} className="small t-down">{p.text}</div>
+      ))}
+      <table className="exp-table psi-table small">
+        <thead>
+          <tr>
+            <th>{t('учетка')}</th>
+            <th>{t('пароль')}</th>
+            <th>{t('ключей')}</th>
+            <th>sudo</th>
+            <th>{t('последний вход')}</th>
+            <th />
+          </tr>
+        </thead>
+        <tbody>
+          {v.accounts.map((a) => (
+            <tr key={a.name} className={a.stale && !a.muted ? 'exp-bad' : ''}>
+              <td className="mono">{a.name}{a.uid === 0 && a.name !== 'root' ? ' (uid 0)' : ''}</td>
+              <td className={a.pw === 'NP' ? 't-down' : ''}>{pw[a.pw] ?? '-'}</td>
+              <td className={a.weak.length > 0 ? 't-degraded' : ''} title={a.weak.join(', ')}>
+                {a.keys}{a.weak.length > 0 ? ` (${t('слабых: {n}', { n: a.weak.length })})` : ''}
+              </td>
+              <td>{a.nopasswd ? t('без пароля') : ''}</td>
+              <td className={a.stale && !a.muted ? 't-degraded' : ''}>{day(a.last)}</td>
+              <td>
+                {a.stale && !isViewer && (
+                  <button className="ghost small" disabled={busy === ACCESS_MUTE + a.name}
+                    onClick={() => toggle(ACCESS_MUTE + a.name, !a.muted)}>
+                    {a.muted ? t('вернуть') : t('нужна')}
+                  </button>
+                )}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <div className="muted small">
+        {t('Входы по журналу sshd видны с {d}. Ненужную учетку заблокируйте (usermod -L -e 1 <имя>) или уберите ее ключи.', {
+          d: v.seen_since ? new Date(v.seen_since * 1000).toLocaleDateString() : '-',
+        })}
+      </div>
+    </div>
+  )
+}
+
+// Сервисы, которые работают, но после перезагрузки не запустятся (helper units-setup 0.3)
+function NoBootUnits({ server: s, onChanged }: { server: Server; onChanged: () => void }) {
+  const { t } = useI18n()
+  const { isViewer } = useAuth()
+  const { busy, toggle } = useMuteToggle(s, onChanged)
+  const [copied, setCopied] = useState(false)
+  const units = s.noboot?.units ?? []
+  if (units.length === 0) return null
+  const live = units.filter((u) => !u.muted)
+  const cmd = `systemctl enable ${live.map((u) => u.unit).join(' ')}`
+  return (
+    <div className="detail-inc" id="mcard-noboot">
+      <div className="chart-cap">{t('Не запустятся после перезагрузки')}</div>
+      <div className="muted small">
+        {t('Работают, но не включены: их запустили systemctl start без enable, и после ребута их не будет.')}
+      </div>
+      {units.map((u) => (
+        <div key={u.unit} className={`small${u.muted ? ' muted' : ''}`}>
+          <span className="mono">{u.unit}</span>
+          {u.started > 0 && <span className="muted"> · {t('работает с {d}', { d: new Date(u.started * 1000).toLocaleDateString() })}</span>}
+          {!isViewer && (
+            <button className="ghost small" disabled={busy === NOBOOT_MUTE + u.unit}
+              onClick={() => toggle(NOBOOT_MUTE + u.unit, !u.muted)}>
+              {u.muted ? t('вернуть') : t('не нужен после перезагрузки')}
+            </button>
+          )}
+        </div>
+      ))}
+      {live.length > 0 && (
+        <div className="agent-advice-cmd">
+          <pre>{cmd}</pre>
+          <button
+            className="ghost"
+            onClick={() => {
+              navigator.clipboard?.writeText(cmd)
+              setCopied(true)
+              window.setTimeout(() => setCopied(false), 1500)
+            }}
+          >
+            {copied ? t('Скопировано') : t('Копировать')}
+          </button>
         </div>
       )}
     </div>
@@ -5114,6 +5236,7 @@ function ServerDetail({
           </div>
           <OpenPorts server={s} onChanged={onChanged} />
           <SshLogin server={s} />
+          <AccessCard server={s} onChanged={onChanged} />
         </MetricSection>
 
         <MetricSection id="disk" title={t('Диск')}>
@@ -5226,6 +5349,7 @@ function ServerDetail({
           <PressureCard server={s} />
           <LoopingUnits server={s} onChanged={onChanged} />
           <FailedUnits server={s} onChanged={onChanged} />
+          <NoBootUnits server={s} onChanged={onChanged} />
           <ChangesFeed server={s} onChanged={onChanged} />
           <div className="chart-grid">
             <ProcCard title={t('Топ по CPU')} procs={r.top_cpu} kind="cpu" total={r.mem_total ?? 0} t={t} />

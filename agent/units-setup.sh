@@ -4,12 +4,16 @@
 # services systemd restarts by itself (0.2: a crash loop never shows as failed), and writes
 # /var/lib/kervax/report.d/units.json. The agent hands report.d to the panel as is.
 #
+# Since 0.3 it also lists running services that will not start after a reboot: started with
+# "systemctl start" but never enabled, and nothing else (a socket, timer, path, D-Bus or another
+# unit) pulls them in. Everything looks fine until the next reboot, then the service is gone.
+#
 # The panel can restart a failed unit or clear its failed mark through a spool, the same
 # scheme as the other helpers. Only a unit that is failed right now: the panel cannot touch
 # a working service.
 set -euo pipefail
 
-KERVAX_SETUP_VERSION=0.2  # MAJOR.MINOR; compared component-wise
+KERVAX_SETUP_VERSION=0.3  # MAJOR.MINOR; compared component-wise
 KERVAX_SETUP_ALWAYS=1     # safe on any node: it only reads systemctl and the journal
 
 HELPER_DIR=/lib65/kervax
@@ -124,10 +128,37 @@ $(systemctl show --no-pager -p Id -p NRestarts -p ActiveState -p SubState -p Res
   END { emit() }')
 EOF_R
   fi
+  # Running services that will not come back after a reboot. enabled-runtime is left out: netplan
+  # and other generators recreate it at every boot; so are units under /run (generated).
+  local noboot="" k=0 running
+  running=$(systemctl list-units --type=service --state=running --no-legend --plain --no-pager 2>/dev/null | awk '{print $1}')
+  if [ -n "$running" ]; then
+    while IFS=$'\t' read -r id mono; do
+      unit_ok "$id" || continue
+      [ "$k" -lt 50 ] || break
+      k=$((k + 1))
+      started=0
+      case "$mono" in ''|0|*[!0-9]*) ;; *) started=$(( now - (up - mono) / 1000000 )) ;; esac
+      noboot="$noboot${noboot:+,}{\"unit\":\"$(esc "$id")\",\"started\":$started}"
+    done <<EOF_N
+$(systemctl show --no-pager -p Id -p UnitFileState -p TriggeredBy -p WantedBy -p RequiredBy -p BoundBy \
+    -p PartOf -p Transient -p BusName -p FragmentPath -p ActiveEnterTimestampMonotonic -- $running 2>/dev/null | awk -F= '
+  function emit() {
+    if (id != "" && st == "disabled" && trig == "" && wb == "" && rb == "" && bb == "" && po == "" \
+        && tr != "yes" && bus == "" && frag !~ /^\/run\//) print id "\t" mono
+  }
+  NF == 0 { emit(); id = st = trig = wb = rb = bb = po = tr = bus = frag = mono = ""; next }
+  $1 == "Id" { id = $2 } $1 == "UnitFileState" { st = $2 } $1 == "TriggeredBy" { trig = $2 }
+  $1 == "WantedBy" { wb = $2 } $1 == "RequiredBy" { rb = $2 } $1 == "BoundBy" { bb = $2 }
+  $1 == "PartOf" { po = $2 } $1 == "Transient" { tr = $2 } $1 == "BusName" { bus = $2 }
+  $1 == "FragmentPath" { frag = $2 } $1 == "ActiveEnterTimestampMonotonic" { mono = $2 }
+  END { emit() }')
+EOF_N
+  fi
   rm -f "$tmp"
   local fix=false
   [ -d "$REQ_DIR" ] && fix=true
-  printf '{"v":1,"ts":%s,"units":[%s],"restarting":[%s],"fix":%s}\n' "$now" "$units" "$restarting" "$fix" > "$OUT.tmp.$$"
+  printf '{"v":1,"ts":%s,"units":[%s],"restarting":[%s],"noboot":[%s],"fix":%s}\n' "$now" "$units" "$restarting" "$noboot" "$fix" > "$OUT.tmp.$$"
   mv -f "$OUT.tmp.$$" "$OUT"
   chmod 0644 "$OUT"
 }

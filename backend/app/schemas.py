@@ -164,7 +164,7 @@ class CheckCreate(BaseModel):
     check_ssl: bool = True
     check_domain: bool = True
     ssl_warn_days: list[int] = [14, 7, 1]
-    domain_warn_days: list[int] = [7, 1]
+    domain_warn_days: list[int] = [30, 7, 1]
     check_locations: bool = False  # локации опциональны — по умолчанию не через прокси
     location_ids: list[int] | None = None
     alert_mutes: list[str] | None = None  # типы алертов, заглушённые для этого монитора
@@ -1071,6 +1071,14 @@ class ServerOut(BaseModel):
     ssh: dict | None = None
     # что сделать с SSH: вход по паролю на открытом порту (ssh_audit.advice) - в "Требует действий"
     ssh_advice: list[dict] | None = None
+    # не переживет перезагрузку: {"docker": [{name, image, policy, muted}], "units": [{unit, started,
+    # muted}]} (reboot_survive.view) и незаглушенные имена для "Требует действий" (reboot_survive.advice)
+    noboot: dict | None = None
+    noboot_advice: dict | None = None
+    # учетки с shell: {"accounts": [{name, uid, pw, last, keys, weak, nopasswd, access, stale, muted}],
+    # "seen_since"} (access_audit.view) и имена для "Требует действий": {"stale", "weak"}
+    access: dict | None = None
+    access_advice: dict | None = None
     # здоровье баз по движкам: роль, отставание, транзакции, проблемы (db_health.view)
     db_health: list[dict] | None = None
     # проверка конфигов веб-серверов: [{server, where, ok, err}] (web_config.view)

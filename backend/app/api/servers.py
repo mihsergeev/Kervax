@@ -18,7 +18,9 @@ from app import backup_verify
 from app import db_health
 from app import mem_trend
 from app import restarts as srv_restarts
+from app import access_audit
 from app import docker_risk
+from app import reboot_survive
 from app import ssh_audit
 from app import web_certs
 from app import web_config
@@ -219,6 +221,10 @@ def _out(
     o.mem_leaks = mem_trend.problems(server, now) or None
     o.ssh = ssh_audit.view(server, now)
     o.ssh_advice = ssh_audit.advice(server, now) or None
+    o.noboot = reboot_survive.view(server, now)
+    o.noboot_advice = reboot_survive.advice(server, now)
+    o.access = access_audit.view(server, now)
+    o.access_advice = access_audit.advice(server, now)
     o.db_health = db_health.view(server.last_report or {}, now)
     o.web_config = web_config.view(server.last_report or {}, now)
     o.web_certs = web_certs.view(server.last_report or {}, now)
