@@ -21,7 +21,7 @@ from datetime import datetime, timedelta, timezone
 import httpx
 from sqlalchemy import delete, select
 
-from app import alerts, audit, settings_store, tg_buttons
+from app import alerts, audit, known, settings_store, tg_buttons
 from app.config import Settings
 from app.models import Check, Server, TgAlert, User
 
@@ -390,9 +390,13 @@ async def status_text(session, user: User | None, now: datetime) -> str:
         n_srv += 1
         mutes = _server_mutes(s, now)
         snoozed = s.snooze_until is not None and _aware(s.snooze_until) > now
+        # известные проблемы (app/known.py): про них знают, помечаем, а не прячем
+        kn = {k for k, e in (s.known_issues or {}).items()
+              if isinstance(e, dict) and not e.get("worse") and not known.expired(e, now)}
         parts = []
         for k in sorted(active, key=lambda k: (k != "offline", -int(st.get(k) or 0), k)):
-            parts.append(("🔕 " if (snoozed or k in mutes) else "") + _label(k))
+            mark = "🔕 " if (snoozed or k in mutes) else ("📌 " if k in kn else "")
+            parts.append(mark + _label(k))
         lines.append(f"<b>{html.escape(s.name)}</b>: {html.escape(', '.join(parts))}")
     down = [c for c in checks if c.last_status == "down"
             and (user is None or alerts.wants(user, alerts.Msg("", "sites", c.group_name or "")))]
@@ -401,7 +405,8 @@ async def status_text(session, user: User | None, now: datetime) -> str:
         lines.append(f"<b>Сайты лежат: {len(down)}</b>")
         for c in sorted(down, key=lambda x: x.name):
             snz = c.snooze_until is not None and _aware(c.snooze_until) > now
-            lines.append(("🔕 " if snz else "• ") + html.escape(c.name))
+            kn = isinstance(c.known_issue, dict) and not known.expired(c.known_issue, now)
+            lines.append(("🔕 " if snz else "📌 " if kn else "• ") + html.escape(c.name))
     if not lines:
         return f"✅ Все в порядке: серверов {len(servers)}, сайтов {len(checks)}"
     head = f"🔴 Горит: серверов {n_srv}" + (f", сайтов {len(down)}" if down else "")

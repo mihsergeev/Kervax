@@ -532,6 +532,7 @@ class CheckOut(BaseModel):
     note: str = ""
     note_by: str = ""
     note_at: datetime | None = None
+    known_issue: dict | None = None  # известная проблема монитора (app/known.py)
     port: int
     enabled: bool
     group_name: str
@@ -1071,6 +1072,8 @@ class ServerOut(BaseModel):
     note: str = ""
     note_by: str = ""
     note_at: datetime | None = None
+    # известные проблемы по видам алертов (app/known.py); worse - стало хуже отмеченного
+    known_issues: dict[str, dict] | None = None
     online: bool = False  # вычисляется (last_seen в пределах offline_after)
     cpu_alert_percent: int
     mem_alert_percent: int
@@ -1633,3 +1636,9 @@ class LocationResultOut(BaseModel):
 class NoteIn(BaseModel):
     """Заметка к серверу или монитору; пустая строка - убрать."""
     text: str = Field(default="", max_length=2000)
+
+
+class KnownIn(BaseModel):
+    """Отметить проблему известной: что про нее знают и на сколько дней (0 - пока не уйдет)."""
+    text: str = Field(min_length=1, max_length=500)
+    days: int = Field(default=0, ge=0, le=90)

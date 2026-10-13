@@ -7,7 +7,9 @@ import {
   checkToForm,
   checkUptime,
   listIncidents,
+  dropCheckKnown,
   rotatePushToken,
+  setCheckKnown,
   setCheckNote,
   runCheck,
   runCheckResult,
@@ -30,6 +32,7 @@ import { useI18n } from './i18n'
 import { expiryText } from './checkUtils'
 import { useAuth } from './auth'
 import { NoteBar } from './NoteBar'
+import { KnownCheckBar, KnownDialog } from './KnownDialog'
 
 type Props = {
   check: Check
@@ -134,6 +137,7 @@ export function CheckDetail({ check, groups, onClose, onSaved, onRun, onDelete, 
   // не дожидаясь очередного автообновления
   const [run, setRun] = useState<RunState | null>(null)
   const [refresh, setRefresh] = useState(0)
+  const [knownOpen, setKnownOpen] = useState(false) // отметить сбой известной проблемой
 
   // редактирование прямо в модалке
   const [editing, setEditing] = useState(false)
@@ -404,6 +408,32 @@ export function CheckDetail({ check, groups, onClose, onSaved, onRun, onDelete, 
                 if (e instanceof ApiError && e.status === 401) onUnauthorized()
                 throw e
               }
+            }}
+          />
+        )}
+        {!editing &&
+          (check.known_issue ? (
+            <KnownCheckBar
+              known={check.known_issue}
+              canEdit={!isViewer}
+              onDrop={async () => {
+                await dropCheckKnown(check.id)
+                onSaved?.()
+              }}
+            />
+          ) : !isViewer && (check.last_status === 'down' || check.last_status === 'degraded' || !!check.flaky_since) ? (
+            <button className="ghost small note-add" onClick={() => setKnownOpen(true)}>
+              📌 {t('отметить как известную проблему')}
+            </button>
+          ) : null)}
+        {knownOpen && (
+          <KnownDialog
+            title={check.name}
+            onClose={() => setKnownOpen(false)}
+            onSave={async (text, days) => {
+              await setCheckKnown(check.id, text, days)
+              setKnownOpen(false)
+              onSaved?.()
             }}
           />
         )}

@@ -195,6 +195,7 @@ export type Check = {
   note?: string
   note_by?: string
   note_at?: string | null
+  known_issue?: KnownIssue | null
   port: number
   enabled: boolean
   group_name: string
@@ -1500,6 +1501,7 @@ export type Server = {
   note?: string
   note_by?: string
   note_at?: string | null
+  known_issues?: Record<string, KnownIssue> | null // известные проблемы по видам алертов
   online: boolean
   cpu_alert_percent: number
   mem_alert_percent: number
@@ -2205,4 +2207,34 @@ export function setServerNote(id: number, text: string): Promise<Server> {
 
 export function setCheckNote(id: number, text: string): Promise<Check> {
   return api<Check>(`/api/checks/${id}/note`, { method: 'PUT', body: JSON.stringify({ text }) })
+}
+
+// Известная проблема (backend app/known.py): про беду знают, алерт молчит, пока не стало хуже;
+// ушла сама - отметка закрывается, вышел срок - алерт приходит как обычно. worse - стало хуже
+// отмеченного, алерт ушел.
+export type KnownIssue = {
+  text: string
+  by?: string
+  at?: string
+  until?: string | null
+  worse?: boolean
+}
+
+export function setServerKnown(id: number, kind: string, text: string, days: number): Promise<Server> {
+  return api<Server>(`/api/servers/${id}/known/${encodeURIComponent(kind)}`, {
+    method: 'PUT',
+    body: JSON.stringify({ text, days }),
+  })
+}
+
+export function dropServerKnown(id: number, kind: string): Promise<Server> {
+  return api<Server>(`/api/servers/${id}/known/${encodeURIComponent(kind)}`, { method: 'DELETE' })
+}
+
+export function setCheckKnown(id: number, text: string, days: number): Promise<Check> {
+  return api<Check>(`/api/checks/${id}/known`, { method: 'PUT', body: JSON.stringify({ text, days }) })
+}
+
+export function dropCheckKnown(id: number): Promise<Check> {
+  return api<Check>(`/api/checks/${id}/known`, { method: 'DELETE' })
 }

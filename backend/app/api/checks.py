@@ -6,7 +6,7 @@ import secrets
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Query, Request, status
 from sqlalchemy import case, delete as sa_delete, func, select
 
-from app import audit, domain_probe, manual_probe
+from app import audit, domain_probe, known, manual_probe
 from app.checks import status_matches
 from app import checks as checks_exec
 from app.collector import (
@@ -34,6 +34,7 @@ from app.models import (
     User,
 )
 from app.schemas import (
+    KnownIn,
     NoteIn,
     LocalProbeSuggestionsOut,
     LocalProbeSuggestion,
@@ -877,6 +878,32 @@ async def set_check_note(check_id: int, body: NoteIn, user: CurrentUser, session
     await session.commit()
     await session.refresh(check)
     await audit.record(session, user.username, "check_note", check.name, text[:200])
+    return _hide_secrets(check, user)
+
+
+@router.put("/{check_id}/known", response_model=CheckOut)
+async def set_check_known(check_id: int, body: KnownIn, user: CurrentUser, session: SessionDep) -> Check:
+    """Отметить, что монитор лежит известно почему: алерт молчит, отметка закроется, когда он
+    поднимется, или по сроку (app/known.py)."""
+    check = await _get_or_404(check_id, session, user)
+    if check.last_status == "up" and check.flaky_since is None:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Монитор сейчас работает")
+    check.known_issue = known.new_entry(body.text, user.username, body.days, datetime.now(timezone.utc))
+    await session.commit()
+    await session.refresh(check)
+    await audit.record(session, user.username, "known_set", check.name, body.text[:200])
+    return _hide_secrets(check, user)
+
+
+@router.delete("/{check_id}/known", response_model=CheckOut)
+async def drop_check_known(check_id: int, user: CurrentUser, session: SessionDep) -> Check:
+    """Снять отметку: если монитор все еще лежит, алерт уйдет на ближайшей проверке."""
+    check = await _get_or_404(check_id, session, user)
+    if check.known_issue is not None:
+        check.known_issue = None
+        await session.commit()
+        await session.refresh(check)
+        await audit.record(session, user.username, "known_drop", check.name)
     return _hide_secrets(check, user)
 
 

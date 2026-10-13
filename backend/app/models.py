@@ -253,6 +253,8 @@ class Check(Base):
     note: Mapped[str] = mapped_column(Text, default="")
     note_by: Mapped[str] = mapped_column(String(128), default="")
     note_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # известная проблема монитора: {text, by, at, until, gone_at, reminded_at} (app/known.py)
+    known_issue: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     last_latency_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     last_value: Mapped[float | None] = mapped_column(Float, nullable=True)  # дни сертификата и т.п.
     last_checked_at: Mapped[datetime | None] = mapped_column(
@@ -612,6 +614,9 @@ class Server(Base):
     note: Mapped[str] = mapped_column(Text, default="")
     note_by: Mapped[str] = mapped_column(String(128), default="")
     note_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # известные проблемы: {вид алерта: {text, by, at, until, level, sig, worse, gone_at,
+    # reminded_at}} - алерт молчит, пока не стало хуже, само закрывается (app/known.py)
+    known_issues: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     # последняя внешняя проверка портов: что открыто в интернет (app/open_ports.py)
     exposure: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     # изменения на сервере (app/changes.py): последний снимок helper'а и лента изменений

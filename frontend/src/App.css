@@ -5798,3 +5798,43 @@ button.type-chip { cursor: pointer; border: 1px solid transparent; font-family: 
   font-size: 0.85em;
   margin-left: 0.25rem;
 }
+
+/* Известные проблемы: серый блок на главной вместо "Что сломано", плашка в карточке */
+.home-attention-known {
+  border-color: var(--border);
+  background: color-mix(in srgb, var(--text) 4%, transparent);
+}
+.home-attention-known .home-attention-n {
+  background: color-mix(in srgb, var(--text) 10%, transparent);
+}
+.home-attention-known .home-attention-row:hover {
+  background: color-mix(in srgb, var(--text) 7%, transparent);
+}
+.home-attention-known .home-attention-txt { font-weight: 400; }
+.home-attention-known .home-attention-txt b { font-weight: 600; }
+.dot.known {
+  background: color-mix(in srgb, var(--text) 35%, transparent);
+}
+.known-dialog {
+  max-width: 480px;
+  width: calc(100% - 32px);
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+.known-dialog textarea {
+  width: 100%;
+  box-sizing: border-box;
+  resize: vertical;
+}
+.known-bar {
+  border-color: color-mix(in srgb, var(--text) 18%, var(--border));
+  background: color-mix(in srgb, var(--text) 4%, transparent);
+}
+.known-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
