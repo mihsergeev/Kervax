@@ -4,6 +4,17 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.4.154] - 2026-10-13
+
+### Fixed
+- Новый клиент нового сервера бэкапов получал 401 на первом бэкапе, если ходил через TLS
+  rest-server (порт 64101). Каждый rest-server сам перечитывает htpasswd не чаще раза в 30 секунд,
+  первый раз через 30 секунд после старта, а выдача клиента ждала, пока логин примет только HTTP
+  rest-server на 64100. TLS-контейнер, поднятый за полминуты до первого бэкапа клиента, его логина
+  еще не знал. helper backupserver-setup 0.32 после записи htpasswd шлет SIGHUP всем rest-server
+  над этими данными (перечитать сразу) и ждет, пока логин примут оба порта. Раскатка:
+  `ansible-playbook playbooks/kervax_helpers.yml -l kervax_outdated`.
+
 ## [1.4.153] - 2026-10-13
 
 ### Fixed

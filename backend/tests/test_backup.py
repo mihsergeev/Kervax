@@ -666,3 +666,18 @@ async def test_prune_problems_in_the_server_list(client, auth_headers):
     r = await client.post(f"/api/servers/{sid}/backup/repo-archive", headers=auth_headers,
                           json={"repo": "backup-e", "archived": True})
     assert r.json()["bsrv_prune"] == {}
+
+
+def test_new_client_user_reaches_every_rest_server():
+    """Новый клиент получил 401 на первом бэкапе через TLS rest-server: каждый rest-server сам
+    перечитывает htpasswd раз в 30 секунд (первый раз через 30 секунд после старта), а выдача
+    клиента ждала только HTTP. Теперь SIGHUP всем rest-server над данными и ожидание обоих портов."""
+    from pathlib import Path
+    src = (Path(__file__).resolve().parents[2] / "agent" / "backupserver-setup.sh").read_text(encoding="utf-8")
+    assert "KERVAX_SETUP_VERSION=0.32" in src and b"\r" not in src.encode()
+    body = src[src.index("cmd_provision_client() {"):]
+    hp, sig, tls = body.index("htpasswd -bB"), body.index("rest_reload_htpasswd"), body.index('"https://127.0.0.1:$TLS_PORT/$name/config"')
+    assert hp < sig < tls < body.index("$RESTIC_BIN\" init")
+    fn = src[src.index("rest_reload_htpasswd() {"):]
+    fn = fn[:fn.index("\n}\n")]
+    assert "docker kill -s HUP" in fn and "*rest-server*)" in fn and "$TLS_PORT" in fn
