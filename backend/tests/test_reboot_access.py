@@ -124,8 +124,22 @@ def test_second_root_and_empty_password_alert():
 
 def test_helpers_report_the_new_fields():
     ch = (AGENT / "changes-setup.sh").read_text(encoding="utf-8")
-    assert "KERVAX_SETUP_VERSION=0.5" in ch and '"seen_since":%s' in ch and '\\"pw\\":' in ch and '"nopasswd":[%s]' in ch
+    assert "KERVAX_SETUP_VERSION=0.6" in ch and '"seen_since":%s' in ch and '\\"pw\\":' in ch and '"nopasswd":[%s]' in ch
     un = (AGENT / "units-setup.sh").read_text(encoding="utf-8")
     assert "KERVAX_SETUP_VERSION=0.3" in un and '"noboot":[%s]' in un
     for f in ("changes-setup.sh", "units-setup.sh"):
         assert b"\r" not in (AGENT / f).read_bytes()
+
+
+def test_journal_reads_cannot_hang_under_systemd():
+    """systemd запускает сервис с проигнорированным SIGPIPE: "journalctl | head -1" не останавливал
+    journalctl на первой строке, он дочитывал журнал в гигабайты, и юнит убивался по таймауту
+    на каждом запуске (changes-setup 0.5 на нодах с большим журналом)"""
+    import re
+    for f in sorted(AGENT.glob("*.sh")):
+        for line in f.read_text(encoding="utf-8").splitlines():
+            if not line.lstrip().startswith("#") and re.search(r"\bjournalctl\b[^#]*\|\s*head\b", line):
+                assert "timeout " in line, f"{f.name}: {line.strip()}"
+    ch = (AGENT / "changes-setup.sh").read_text(encoding="utf-8")
+    assert "IgnoreSIGPIPE=no" in ch and "journalctl -r -u ssh -u sshd" in ch
+    assert '"$tmp"' in ch and ch.index('tmp=$(mktemp "${OUT}.XXXXXX")') > ch.index('lastseen_update "$now"')

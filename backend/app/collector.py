@@ -3203,6 +3203,43 @@ _UNIT_RESULT = {
 }
 _SIGNALS = {6: "ABRT", 9: "KILL", 11: "SEGV", 15: "TERM"}
 
+# Свои helper'ы панели: снимки для отчета по таймеру и обработчики кнопок (*-req). Упавший
+# helper - ошибка Kervax, а не сервера: в "Что сломано" он виден, алерта нет. changes-setup 0.5,
+# который не укладывался во время на нодах с большим журналом, прислал алерт с каждой такой
+# ноды, и каждые 10 минут снова. kervax-agent и kervax-dumps (дампы баз для бэкапа) не тут.
+_OWN_HELPER_UNIT = re.compile(
+    r"kervax-(changes|db-stats|disk-health|disk-usage|kube-expiry|kube-flux|units|web-rate|web-sites"
+    r"|[a-z]+-req)\.service")
+
+# Задание по таймеру, которое падает на каждом запуске, между падениями несколько минут
+# работает и в failed не числится: уходили "упавших юнитов больше нет" и через пару минут
+# снова "упал". Юнит, про который уже сказали, считается упавшим еще 20 минут после того,
+# как пропал из упавших.
+_UNIT_RECOVER_HOLD = 1200
+
+
+def own_helper_unit(name: str) -> bool:
+    return bool(_OWN_HELPER_UNIT.fullmatch(name))
+
+
+def units_hold(s: Server, bad: list[dict], now: datetime, muted: set[str]) -> dict[str, list]:
+    """Юниты для алерта с выдержкой отбоя: {юнит: [с какого момента его нет среди упавших
+    или None, уровень]}. Пропавший держится, пока не прошла выдержка; держим только те, про
+    которые алерт уже ушел (units_sig). Заглушенный уходит сразу."""
+    st = s.alert_state or {}
+    prev = st.get("units_hold") if isinstance(st.get("units_hold"), dict) else {}
+    out: dict[str, list] = {u["unit"]: [None, unit_level(u)] for u in bad}
+    for name in sorted(set(st.get("units_sig") or []) - out.keys()):
+        if name in muted or own_helper_unit(name):
+            continue
+        p = prev.get(name)
+        p = p if isinstance(p, list) and len(p) == 2 else [None, 1]
+        gone = _parse_iso(str(p[0])) if p[0] else None
+        gone = gone or now
+        if (now - gone).total_seconds() < _UNIT_RECOVER_HOLD:
+            out[name] = [gone.isoformat(), int(p[1] or 1)]
+    return out
+
 
 def units_block(rep: dict) -> dict | None:
     """Блок упавших юнитов из отчета (report.d/units.json, агент отдает как есть)."""
@@ -4376,12 +4413,14 @@ def _server_conditions(s: Server, now: datetime,
         muted_u = units_muted(s, now)
         bad = [u for u in ub.get("units") or []
                if isinstance(u, dict) and u.get("unit") and u["unit"] not in muted_u
+               and not own_helper_unit(str(u["unit"]))
                and ref - float(u.get("since") or 0) >= _UNIT_MIN_AGE]
-        u_lvl = max((unit_level(u) for u in bad), default=0)
+        hold = units_hold(s, bad, now, muted_u)
+        u_lvl = max((h[1] for h in hold.values()), default=0)
         out["units"] = (u_lvl, {
             "detail": units_text(bad, ref) if bad else "", "level": u_lvl,
             # какие юниты лежат: новый упавший при том же уровне - повод для сообщения
-            "sig": sorted(u["unit"] for u in bad),
+            "sig": sorted(hold), "hold": hold,
         })
 
     # Одинаковые процессы, которые давно крутят по ядру каждый (агент 2.21). На k8s-a-prc 47
@@ -4793,6 +4832,9 @@ async def evaluate_servers(
             # с какого момента подряд тормозит каждый резолвер DNS (для "Что сломано")
             if "res" in cx and (st.get(f"{k}_res") or {}) != cx["res"]:
                 apply(s.id, f"{k}_res", cx["res"] or None)
+            # выдержка отбоя упавших юнитов: с какого момента юнита нет среди упавших
+            if "hold" in cx and (st.get(f"{k}_hold") or {}) != cx["hold"]:
+                apply(s.id, f"{k}_hold", cx["hold"] or None)
             # с какого момента проблема видна - для "Что сломано" ("sda изношен - 2 дня");
             # ведем для любого вида и до проверки мьютов: заглушенное тоже остается проблемой
             frm = st.get(f"{k}_from")
@@ -4815,6 +4857,11 @@ async def evaluate_servers(
                 sk = f"{key}_sig"
                 old_sig = set(st.get(sk) or [])
                 new_sig = set(ctx.get("sig") or [])
+                if key == "units" and prev and not level and old_sig and all(map(own_helper_unit, old_sig)):
+                    # объявлен был только свой helper: алерта по нему больше нет, нет и отбоя
+                    rec_apply.append((s.id, sk, []))
+                    rec_apply.append((s.id, key, 0))
+                    continue
                 if level == prev:
                     if level and new_sig - old_sig:
                         fires.append(srv_fire(s, key, rule, ctx))

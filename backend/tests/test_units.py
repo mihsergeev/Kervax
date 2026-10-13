@@ -93,7 +93,11 @@ async def test_units_alert_lifecycle(tmp_path, monkeypatch):
     await tick([CERTBOT, NGINX, dict(NGINX, unit="php-fpm.service")],
                mutes=["unit:certbot.service", "unit:php-fpm.service"])
     assert len(sent) == 3
-    await tick([CERTBOT])  # nginx поднялся, certbot заглушен
+    # nginx поднялся, certbot заглушен: отбой не сразу, пропавший юнит держится 20 минут
+    for _ in range(10):
+        await tick([CERTBOT])
+    assert len(sent) == 3
+    await tick([CERTBOT])
     assert len(sent) == 4 and sent[3].startswith("✅") and "упавших юнитов больше нет" in sent[3]
     await engine.dispose()
 
@@ -203,3 +207,92 @@ async def test_unit_loop_alert_lifecycle(tmp_path, monkeypatch):
         await tick(n, mutes=["unit:worker.service"])
     assert len(sent) == 2
     await engine.dispose()
+
+
+async def test_timer_job_failing_every_run_does_not_flap(tmp_path, monkeypatch):
+    """Задание по таймеру падает на каждом запуске и между падениями пару минут работает (в
+    failed не числится): одно сообщение, без "больше нет" и нового "упал" каждые 10 минут.
+    Свой helper панели (kervax-changes) не алертит вовсе, но виден в "Что сломано"; алерт,
+    объявленный по нему старой панелью, гасится без отбоя."""
+    from app import collector
+    from app.config import Settings
+    from app.db import Base, create_engine_and_factory
+    from app.models import Server
+
+    engine, factory = create_engine_and_factory(f"sqlite+aiosqlite:///{(tmp_path / 'f.db').as_posix()}")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    now = datetime.now(timezone.utc)
+    helper = dict(CERTBOT, unit="kervax-changes.service", result="timeout", status=0)
+
+    def report(units):
+        ts = int(now.timestamp())
+        return {"clock_unix": ts, "uptime_seconds": 100000,
+                "extras": {"units": {"v": 1, "ts": ts - 30, "units": units, "fix": True}}}
+
+    async with factory() as s:
+        s.add(Server(name="node", token_hash="x", enabled=True, backup_not_required=True,
+                     last_seen=now, cpu_alert_percent=0, mem_alert_percent=0, last_report=report([])))
+        await s.commit()
+    sent: list[str] = []
+
+    async def fake_send(cfg, text, parse_mode=None):
+        sent.append(text)
+        return []
+
+    monkeypatch.setattr("app.alerts.send_alert", fake_send)
+    cfg = Settings(alert_webhook="http://hook")
+
+    async def tick(units, state=None):
+        nonlocal now
+        now = now + timedelta(minutes=2)
+        old = int(now.timestamp()) - 600
+        async with factory() as s:
+            srv = (await s.execute(select(Server))).scalars().one()
+            srv.last_seen = now
+            srv.last_report = report([dict(u, since=u.get("since") or old) for u in units])
+            if state is not None:
+                srv.alert_state = state
+            await s.commit()
+        await collector.evaluate_servers(factory, cfg, now)
+        async with factory() as s:
+            return (await s.execute(select(Server))).scalars().one()
+
+    await tick([CERTBOT])
+    assert len(sent) == 1 and "certbot.service" in sent[0]
+    for _ in range(4):  # три цикла таймера: 8 минут лежит, 2 минуты снова работает
+        await tick([CERTBOT])
+        await tick([CERTBOT])
+        await tick([CERTBOT])
+        await tick([CERTBOT])
+        await tick([])
+    assert len(sent) == 1
+
+    # свой helper: ни алерта, ни отбоя, но в "Что сломано" он есть
+    for _ in range(3):
+        srv = await tick([CERTBOT, helper])
+    assert len(sent) == 1
+    assert any(p["kind"] == "units" and "kervax-changes" in p["text"]
+               for p in collector.server_problems(srv, now))
+    st = dict(srv.alert_state)
+    st.update({"units": 1, "units_sig": ["kervax-changes.service"], "units_hold": {}})
+    await tick([helper], state=st)  # объявила старая панель: гасим молча
+    srv = await tick([helper])
+    assert len(sent) == 1 and int(srv.alert_state.get("units", 0)) == 0
+    await engine.dispose()
+
+
+def test_every_kervax_unit_is_either_own_helper_or_alerting():
+    """Новый helper со своим юнитом: решить, алертит ли его падение (kervax-agent и дампы баз
+    для бэкапа - да, снимки для отчета и обработчики кнопок - нет)."""
+    import re
+    from pathlib import Path
+
+    from app.collector import own_helper_unit
+    agent = Path(__file__).resolve().parents[2] / "agent"
+    names = set()
+    for f in agent.glob("*.sh"):
+        names |= set(re.findall(r"kervax-[a-z0-9-]+\.service", f.read_text(encoding="utf-8")))
+    alerting = {"kervax-agent.service", "kervax-dumps.service"}
+    assert names - alerting and all(own_helper_unit(n) for n in names - alerting), sorted(names)
+    assert not any(own_helper_unit(n) for n in alerting)
