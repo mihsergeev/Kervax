@@ -296,3 +296,65 @@ def test_every_kervax_unit_is_either_own_helper_or_alerting():
     alerting = {"kervax-agent.service", "kervax-dumps.service"}
     assert names - alerting and all(own_helper_unit(n) for n in names - alerting), sorted(names)
     assert not any(own_helper_unit(n) for n in alerting)
+
+
+async def test_backup_unit_and_new_server_stay_quiet(tmp_path, monkeypatch):
+    """Упавший юнит бэкапа - уже алерт "последний бэкап завершился с ошибкой", второго по юниту
+    нет (и по своим бэкапам ноды). Только что добавленный сервер первые 15 минут молчит: helper'ы
+    ставятся, отчеты неполные; что осталось, приходит после тишины."""
+    from app import collector
+    from app.config import Settings
+    from app.db import Base, create_engine_and_factory
+    from app.models import Server
+
+    engine, factory = create_engine_and_factory(f"sqlite+aiosqlite:///{(tmp_path / 'b.db').as_posix()}")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    now = datetime.now(timezone.utc)
+    rest = dict(CERTBOT, unit="systemd-rest.service")
+    custom = dict(CERTBOT, unit="pg-dump.service")
+
+    def report(units):
+        ts = int(now.timestamp())
+        old = ts - 600
+        return {"clock_unix": ts, "uptime_seconds": 100000, "backup": {"present": True, "configured": True},
+                "extras": {"units": {"v": 1, "ts": ts - 30, "units": [dict(u, since=old) for u in units], "fix": True},
+                           "custom-backups": {"v": 1, "ts": ts, "jobs": [{"id": "systemd:pg-dump.timer", "unit": "pg-dump.service"}]}}}
+
+    from tests.test_reboot_access import _srv
+    srv = _srv(report([rest, custom]))
+    srv.last_seen = now
+    assert collector.backup_units(srv, srv.last_report) >= {"systemd-rest.service", "pg-dump.service"}
+    assert collector._server_conditions(srv, now)["units"][0] == 0
+    srv.last_report = report([rest, custom, CERTBOT])
+    assert collector._server_conditions(srv, now)["units"][1]["sig"] == ["certbot.service"]
+
+    monkeypatch.setattr(collector, "_NEW_SERVER_QUIET", 900)
+    async with factory() as s:
+        s.add(Server(name="fresh", token_hash="x", enabled=True, backup_not_required=True, last_seen=now,
+                     created_at=now, cpu_alert_percent=0, mem_alert_percent=0, last_report=report([CERTBOT])))
+        await s.commit()
+    sent: list[str] = []
+
+    async def fake_send(cfg, text, parse_mode=None):
+        sent.append(text)
+        return []
+
+    monkeypatch.setattr("app.alerts.send_alert", fake_send)
+    cfg = Settings(alert_webhook="http://hook")
+    for minutes in (2, 10, 14):
+        now = datetime.now(timezone.utc) + timedelta(minutes=minutes)
+        async with factory() as s:
+            row = (await s.execute(select(Server))).scalars().one()
+            row.last_seen, row.last_report = now, report([CERTBOT])
+            await s.commit()
+        await collector.evaluate_servers(factory, cfg, now)
+    assert sent == []
+    now = datetime.now(timezone.utc) + timedelta(minutes=16)
+    async with factory() as s:
+        row = (await s.execute(select(Server))).scalars().one()
+        row.last_seen, row.last_report = now, report([CERTBOT])
+        await s.commit()
+    await collector.evaluate_servers(factory, cfg, now)
+    assert len(sent) == 1 and "certbot.service" in sent[0]
+    await engine.dispose()

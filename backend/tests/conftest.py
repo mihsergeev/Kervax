@@ -52,6 +52,15 @@ def _panel_started_long_ago():
     collector._PANEL_STARTED = original
 
 
+@pytest.fixture(autouse=True)
+def _servers_added_long_ago(monkeypatch):
+    """Без тишины для только что добавленного сервера: в тестах сервер всегда создан "сейчас",
+    и любой тест на алерт проверял бы пустоту. Саму тишину проверяет свой тест."""
+    from app import collector
+
+    monkeypatch.setattr(collector, "_NEW_SERVER_QUIET", 0)
+
+
 # Фикстуры сброса лимитера больше нет: счётчик неудачных входов лежит в базе,
 # а база у каждого теста своя временная — сбрасывать глобальное состояние нечего.
 
