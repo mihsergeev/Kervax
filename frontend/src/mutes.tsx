@@ -44,6 +44,7 @@ export const SRV_ALERT_KINDS: { k: string; label: string }[] = [
   { k: 'backup_growth', label: 'Бэкап: резкий прирост' },
   { k: 'docker_sock', label: 'Docker: внешний прокси с docker-сокетом' },
   { k: 'docker_risk', label: 'Docker: контейнер с ключами от хоста' },
+  { k: 'access_risk', label: 'Доступ: второй root или пустой пароль' },
   { k: 'exposed', label: 'Сеть: открыто в интернет то, что должно быть закрыто' },
   { k: 'port_new', label: 'Сеть: открылся новый порт' },
   { k: 'pressure', label: 'Сервер задыхается' },
@@ -72,7 +73,15 @@ export const LEAK_MUTE = 'leak:'
 export const LISTEN_MUTE = 'listen:'
 // Один контейнер с ключами от хоста, которому они нужны намеренно: dockrisk:<имя>
 export const DOCKRISK_MUTE = 'dockrisk:'
+// Контейнер или юнит, которому не нужно подниматься после перезагрузки: noboot:<имя>
+export const NOBOOT_MUTE = 'noboot:'
+// Учетка, которая нужна, хотя в нее давно не входят: access:<пользователь>
+export const ACCESS_MUTE = 'access:'
 export function muteKindLabel(k: string, t: TFn): string | null {
+  if (k === 'noboot') return t('Не переживет перезагрузку')
+  if (k === 'access_audit') return t('Доступы: заброшенные учетки и слабые ключи')
+  if (k.startsWith(NOBOOT_MUTE)) return `${t('не нужен после перезагрузки')}: ${k.slice(NOBOOT_MUTE.length)}`
+  if (k.startsWith(ACCESS_MUTE)) return `${t('учетка нужна')}: ${k.slice(ACCESS_MUTE.length)}`
   if (k.startsWith(DOCKRISK_MUTE)) return `${t('ключи от хоста по назначению')}: ${k.slice(DOCKRISK_MUTE.length)}`
   if (k.startsWith(LISTEN_MUTE)) return `${t('пропавший порт')}: ${k.slice(LISTEN_MUTE.length)}`
   if (k.startsWith(LEAK_MUTE)) return `${t('рост памяти')}: ${k.slice(LEAK_MUTE.length).replace(/^(docker|pod|proc):/, '')}`

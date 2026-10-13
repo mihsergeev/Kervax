@@ -1440,6 +1440,12 @@ export type Server = {
     fail_top?: { ip: string; n: number }[] // откуда перебор, больше всех сверху
   } | null
   ssh_advice?: { kind: string; level: number; text: string }[] | null
+  // не переживет перезагрузку: контейнеры без restart policy, юниты без enable
+  noboot?: NoBoot | null
+  noboot_advice?: { docker: string[]; units: string[] } | null
+  // учетки с shell: пароль, ключи, sudo без пароля, последний вход (helper changes-setup 0.5)
+  access?: { accounts: AccessAccount[]; seen_since: number } | null
+  access_advice?: { stale: string[]; weak: string[] } | null
   // здоровье баз (helper dbstat-setup 0.5): роль, отставание реплики (сек), самая долгая
   // транзакция (сек), возраст XID, найденные проблемы
   db_health?: DbHealth[] | null
@@ -1720,6 +1726,27 @@ export function listServers(): Promise<Server[]> {
 export function createServer(body: ServerForm): Promise<ServerEnroll> {
   return api<ServerEnroll>('/api/servers', { method: 'POST', body: JSON.stringify(body) })
 }
+// не переживет перезагрузку (reboot_survive.view); muted - заглушен точечно ("по назначению")
+export interface NoBoot {
+  docker: { name: string; image: string; policy: string; muted: boolean }[]
+  units: { unit: string; started: number; muted: boolean }[]
+}
+
+// учетка с shell (access_audit.view): pw - P задан, L заблокирован, NP пустой; last - последний
+// вход по SSH, unix-секунды, 0 - не было; stale - доступ есть, а входов давно нет
+export interface AccessAccount {
+  name: string
+  uid: number
+  pw: string
+  last: number
+  keys: number
+  weak: string[]
+  nopasswd: boolean
+  access: boolean
+  stale: boolean
+  muted: boolean
+}
+
 // контейнер с ключами от хоста: flags - priv, caps, sock, host (docker_risk.view)
 export interface DockerRisk {
   name: string

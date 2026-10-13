@@ -201,6 +201,11 @@ export function proxyBuilt(p: { version?: string; built: number }): string {
   return p.version ? `${p.version}, ${when}` : when
 }
 
+// Список для одной строки: первые n и "и еще N"
+export function shortList(xs: string[], t: (k: string, p?: Record<string, string | number>) => string, n = 5): string {
+  return xs.length <= n ? xs.join(', ') : `${xs.slice(0, n).join(', ')} ${t('и еще {n}', { n: xs.length - n })}`
+}
+
 // Ключи от хоста у контейнера словами: "privileged, docker-сокет", "cap SYS_ADMIN"
 export function dockRiskText(x: DockerRisk, t: (k: string, p?: Record<string, string | number>) => string): string {
   const word: Record<string, string> = { priv: 'privileged', sock: t('docker-сокет'), host: t('корень хоста на запись') }

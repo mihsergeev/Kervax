@@ -52,7 +52,7 @@ const EMPTY: CheckForm = {
   check_ssl: true,
   check_domain: true,
   ssl_warn_days: [14, 7, 1],
-  domain_warn_days: [7, 1],
+  domain_warn_days: [30, 7, 1],
   enabled: true,
   extra_paths: [],
 }

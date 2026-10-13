@@ -79,7 +79,7 @@ def test_alert_on_root_password_and_unguarded_brute_force():
 
 def test_helper_reports_ssh():
     src = (Path(__file__).resolve().parents[2] / "agent" / "changes-setup.sh").read_text(encoding="utf-8")
-    assert "KERVAX_SETUP_VERSION=0.4" in src and "ssh_info()" in src and "addr=203.0.113.1" in src
+    assert "KERVAX_SETUP_VERSION=0.5" in src and "ssh_info()" in src and "addr=203.0.113.1" in src
     assert "sshd -V" in src and '"fail_top":[%s]' in src and '"logins":[%s]' in src
     assert "\r" not in src
 

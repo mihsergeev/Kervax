@@ -204,14 +204,106 @@ async def _domain_days_whois_ru(domain: str, timeout: float) -> tuple[int | None
     return None, "нет данных WHOIS"
 
 
+# Зоны без RDAP (.io, .me, .ws, .kg, .am, .gg: на 13.10.2026 rdap.org отвечает на них 404, у 19
+# мониторов срок домена был неизвестен). WHOIS-сервер зоны берем у IANA (строка refer:), дату -
+# из известных полей ответа. У .gg даты нет, есть ежегодный срок оплаты: "fee due on 30th June
+# each year" - берем ближайший.
+_IANA_WHOIS = "whois.iana.org"
+_WHOIS_SERVERS: dict[str, str | None] = {}  # зона -> WHOIS-сервер регистратуры, на время процесса
+_EXPIRY_LINE = re.compile(
+    r"^\s*(?:Registry Expiry Date|Registrar Registration Expiration Date|Expiration Date|Expiry Date"
+    r"|Expires(?: on)?|Record expires on|expire|paid-till)\s*:\s*(.+?)\s*$", re.I | re.M)
+_FEE_DUE = re.compile(r"fee due on\s+(\d{1,2})(?:st|nd|rd|th)?\s+([A-Za-z]+)\s+each year", re.I)
+_DATE_FORMATS = ("%a %b %d %H:%M:%S %Y", "%Y-%m-%d %H:%M:%S", "%d-%b-%Y", "%d.%m.%Y", "%Y/%m/%d", "%d/%m/%Y")
+
+
+async def _whois_query(server: str, query: str, timeout: float) -> str:
+    reader, writer = await asyncio.wait_for(asyncio.open_connection(server, 43), timeout)
+    try:
+        writer.write((query + "\r\n").encode("ascii", "ignore"))
+        await writer.drain()
+        chunks = []
+        while sum(len(c) for c in chunks) < 262144:
+            b = await asyncio.wait_for(reader.read(65536), timeout)
+            if not b:
+                break
+            chunks.append(b)
+        return b"".join(chunks).decode("utf-8", "replace")
+    finally:
+        writer.close()
+
+
+def _whois_date(s: str) -> datetime | None:
+    """Дата из строки WHOIS: ISO, 'YYYY.MM.DD' или один из форматов регистратур."""
+    dt = _parse_date(s)
+    if dt is not None:
+        return dt
+    for fmt in _DATE_FORMATS:
+        try:
+            return datetime.strptime(s.strip(), fmt).replace(tzinfo=timezone.utc)
+        except ValueError:
+            continue
+    return None
+
+
+def _whois_expiry(text: str, now: datetime | None = None) -> datetime | None:
+    """Срок регистрации из ответа WHOIS или None."""
+    for m in _EXPIRY_LINE.finditer(text):
+        dt = _whois_date(m.group(1))
+        if dt is not None:
+            return dt
+    m = _FEE_DUE.search(text)
+    if m:
+        now = now or datetime.now(timezone.utc)
+        try:
+            due = datetime.strptime(f"{m.group(1)} {m.group(2)} {now.year}", "%d %B %Y").replace(tzinfo=timezone.utc)
+        except ValueError:
+            return None
+        return due if due >= now.replace(hour=0, minute=0, second=0, microsecond=0) else due.replace(year=now.year + 1)
+    return None
+
+
+async def _domain_days_whois(domain: str, timeout: float) -> tuple[int | None, str]:
+    """Срок через WHOIS регистратуры зоны (сервер - по ссылке IANA)."""
+    query = _to_ascii(domain)
+    tld = query.rsplit(".", 1)[-1]
+    try:
+        if tld not in _WHOIS_SERVERS:
+            iana = await _whois_query(_IANA_WHOIS, tld, timeout)
+            m = re.search(r"^(?:refer|whois):\s*(\S+)", iana, re.M)
+            _WHOIS_SERVERS[tld] = m.group(1) if m else None
+        server = _WHOIS_SERVERS[tld]
+        if not server:
+            return None, "нет данных RDAP и WHOIS"
+        text = await _whois_query(server, query, timeout)
+    except (asyncio.TimeoutError, OSError) as exc:
+        return None, humanize_error(str(exc) or type(exc).__name__)
+    dt = _whois_expiry(text)
+    if dt is not None:
+        return _days_until(dt), "ok"
+    low = text.lower()
+    if "no match" in low or "not found" in low or "no entries found" in low:
+        return None, "домен не зарегистрирован"
+    return None, "нет даты в WHOIS"
+
+
 async def _domain_days(domain: str, timeout: float) -> tuple[int | None, str]:
     """Срок регистрации домена. RDAP по умолчанию; для российских зон (нет RDAP) —
-    WHOIS-регистратуры. None = данных нет — не повод для алерта."""
+    WHOIS-регистратуры, для остальных зон без RDAP - WHOIS по ссылке IANA. None = данных
+    нет — не повод для алерта."""
     if not domain or "." not in domain:
         return None, "некорректный домен"
+    if domain.rsplit(".", 1)[-1].isdigit():
+        return None, "IP-адрес, не домен"
     if domain.endswith(_RU_ZONES):
         return await _domain_days_whois_ru(domain, timeout)
-    return await _domain_days_rdap(domain, timeout)
+    days, msg = await _domain_days_rdap(domain, timeout)
+    if days is None:
+        # RDAP зоны нет или он лежит (у .kg rdap.org ведет на неотвечающий сервер) - спросим WHOIS
+        wdays, wmsg = await _domain_days_whois(domain, timeout)
+        if wdays is not None or msg == "нет данных RDAP":
+            return wdays, wmsg
+    return days, msg
 
 
 # --- бережный доступ к регистратурам: кэш по registrable-домену + серийная

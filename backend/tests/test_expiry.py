@@ -101,3 +101,67 @@ def test_apply_expiry_domain_and_invalid_ssl_no_alert():
     assert _apply(row, ExpiryInfo(domain_days=20, domain_message="ok")) == []
     # невалидный TLS (ssl_days None) НЕ порождает алерт здесь
     assert _apply(row, ExpiryInfo(ssl_days=None, ssl_message="невалиден")) == []
+
+
+async def test_domain_days_falls_back_to_whois_without_rdap(monkeypatch):
+    """Зона без RDAP (.io и т.п.): rdap.org отвечает 404, срок берем из WHOIS регистратуры по
+    ссылке IANA"""
+    async def no_rdap(domain, timeout):
+        return None, "нет данных RDAP"
+
+    asked = []
+
+    async def fake_query(server, query, timeout):
+        asked.append((server, query))
+        if server == "whois.iana.org":
+            return "domain:       IO\nrefer:        whois.nic.example\n"
+        return "Domain Name: example.io\nRegistry Expiry Date: 2099-04-06T21:47:56Z\n"
+
+    monkeypatch.setattr("app.checks._domain_days_rdap", no_rdap)
+    monkeypatch.setattr("app.checks._whois_query", fake_query)
+    checks_mod._WHOIS_SERVERS.pop("io", None)
+    days, msg = await checks_mod._domain_days("example.io", 10.0)
+    assert msg == "ok" and days > 20000
+    assert asked == [("whois.iana.org", "io"), ("whois.nic.example", "example.io")]
+    # сервер зоны запомнен: второй домен - сразу к регистратуре
+    await checks_mod._domain_days("other.io", 10.0)
+    assert asked[-1] == ("whois.nic.example", "other.io") and len(asked) == 3
+
+
+def test_whois_expiry_formats():
+    from datetime import datetime, timezone
+    from app.checks import _whois_expiry
+    now = datetime(2026, 10, 13, tzinfo=timezone.utc)
+    assert _whois_expiry("Registrar Registration Expiration Date: 2027-10-05T12:00:36Z").year == 2027
+    assert _whois_expiry("Record expires on: Mon May 24 12:09:00 2027").month == 5
+    assert _whois_expiry("Expires:       2027-12-01").day == 1
+    # .gg: ежегодный срок оплаты - ближайший 30 июня
+    assert _whois_expiry("Registry fee due on 30th June each year", now) == datetime(2027, 6, 30, tzinfo=timezone.utc)
+    assert _whois_expiry("Registry fee due on 1st December each year", now) == datetime(2026, 12, 1, tzinfo=timezone.utc)
+    assert _whois_expiry("nothing here") is None
+
+
+def test_domain_reminder_once_per_domain():
+    """Десять мониторов на поддоменах одного домена: напоминание одно, с доменом в тексте"""
+    from app.collector import DomainAlerts
+    rows = [_row(id=i, target=f"https://s{i}.example.com", domain_warn_days=[30, 7, 1]) for i in (1, 2, 3)]
+    doms = DomainAlerts([(r.id, r.target, r.name, None, 60) for r in rows])
+    sent = []
+    for r in rows:
+        pending: list = []
+        _apply_expiry(r, ExpiryInfo(domain_days=27, domain_message="ok"), None, pending, doms)
+        for p in pending:
+            if p[6]:
+                setattr(r, p[6][0], p[6][1])
+        sent += pending
+    assert len(sent) == 1 and sent[0][3] == "регистрация домена example.com истекает через 27 дн. (мониторов на нем: 3)"
+    assert [r.domain_alerted_days for r in rows] == [30, 30, 30]
+    # продлили: подтверждение тоже одно
+    doms = DomainAlerts([(r.id, r.target, r.name, r.domain_alerted_days, 27) for r in rows])
+    renew = []
+    for r in rows:
+        pending = []
+        _apply_expiry(r, ExpiryInfo(domain_days=390, domain_message="ok"), None, pending, doms)
+        renew += pending
+    assert len(renew) == 1 and "example.com продлена" in renew[0][3]
+    assert [r.domain_alerted_days for r in rows] == [None, None, None]

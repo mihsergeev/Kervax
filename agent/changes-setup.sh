@@ -18,11 +18,19 @@
 # addresses a brute force comes from, and the successful logins of the last 10 minutes with
 # their method (the panel alerts on a password login from an address never seen before).
 #
+# Since 0.5: who still has access and does not use it. Key length (a DSA or short RSA key is
+# weak), whether an account has a usable password, who gets sudo without a password, and the last
+# SSH login of every account. lastlog sees only sessions with a terminal (ansible, CI and scp never
+# show there), so the helper keeps its own record from the sshd log in /var/lib/kervax/ssh-lastseen:
+# filled once from everything the journal still holds, then every run from the last minutes.
+# "seen_since" is how far back that record reaches: the panel calls an account unused only when it
+# has looked long enough.
+#
 # Only fingerprints, names and hashes leave the node: no key material, no crontab or sudoers
-# contents. The helper changes nothing.
+# contents, no password hashes (only "set", "locked" or "empty"). The helper changes nothing.
 set -euo pipefail
 
-KERVAX_SETUP_VERSION=0.4  # MAJOR.MINOR; compared component-wise
+KERVAX_SETUP_VERSION=0.5  # MAJOR.MINOR; compared component-wise
 KERVAX_SETUP_ALWAYS=1     # safe on any node: it only reads files and systemctl
 
 HELPER_DIR=/lib65/kervax
@@ -44,6 +52,7 @@ cat > "$HELPER.new" <<'HELPER_EOF'
 set -u
 export LC_ALL=C
 OUT=/var/lib/kervax/report.d/changes.json
+LASTSEEN=/var/lib/kervax/ssh-lastseen
 MAX=200
 
 # JSON string body: control characters dropped, backslash and quote escaped. One raw control
@@ -82,7 +91,7 @@ keys() {
         type=${type%)}
         comment=${rest% (*}
         [ "$comment" = "no comment" ] && comment=""
-        out="$out${out:+,}{\"u\":\"$(esc "$user")\",\"t\":\"$(esc "$type")\",\"fp\":\"$(esc "$fp")\",\"c\":\"$(esc "$(printf '%s' "$comment" | cut -c1-60)")\",\"f\":\"$(esc "$f")\"}"
+        out="$out${out:+,}{\"u\":\"$(esc "$user")\",\"t\":\"$(esc "$type")\",\"b\":${bits//[!0-9]/},\"fp\":\"$(esc "$fp")\",\"c\":\"$(esc "$(printf '%s' "$comment" | cut -c1-60)")\",\"f\":\"$(esc "$f")\"}"
         n=$((n + 1))
         [ "$n" -ge "$MAX" ] && break 3
       done < <(ssh-keygen -lf "$f" 2>/dev/null)
@@ -91,12 +100,52 @@ keys() {
   printf '%s' "$out"
 }
 
-# Users who can log in (a real shell) and every uid 0 account whatever its shell
+# Last SSH login per user from the sshd log, interactive or not: "user unixtime" lines, the first
+# line "#since unixtime" - the oldest journal entry when the record was started.
+lastseen_update() {
+  local now=$1 new since
+  command -v journalctl >/dev/null 2>&1 || return 0
+  new=$(mktemp)
+  if [ -s "$LASTSEEN" ]; then
+    since=$(sed -n 's/^#since //p' "$LASTSEEN" | head -1)
+    { grep -v '^#' "$LASTSEEN"
+      journalctl -u ssh -u sshd --since "-15min" -o short-unix --no-pager 2>/dev/null | lastseen_parse
+    } | lastseen_max > "$new"
+  else
+    since=$(journalctl -o short-unix --no-pager 2>/dev/null | head -1 | cut -d. -f1)
+    journalctl -u ssh -u sshd -o short-unix --no-pager 2>/dev/null | lastseen_parse | lastseen_max > "$new"
+  fi
+  case "$since" in ''|*[!0-9]*) since=$now ;; esac
+  { echo "#since $since"; cat "$new"; } > "$LASTSEEN.tmp" && chmod 0600 "$LASTSEEN.tmp" && mv -f "$LASTSEEN.tmp" "$LASTSEEN"
+  rm -f "$new"
+}
+lastseen_parse() {
+  grep -F 'Accepted ' | sed -nE 's/^([0-9]+)(\.[0-9]+)? .*Accepted [a-z/-]+ for ([A-Za-z0-9._@-]+) from .*/\3 \1/p'
+}
+lastseen_max() {
+  awk 'NF == 2 && $2 ~ /^[0-9]+$/ { if (!($1 in m) || $2 + 0 > m[$1] + 0) m[$1] = $2 } END { for (u in m) print u, m[u] }'
+}
+
+# Last interactive login from lastlog (0 - never or no lastlog)
+lastlog_ts() {
+  local d
+  command -v lastlog >/dev/null 2>&1 || { echo 0; return; }
+  d=$(lastlog -u "$1" 2>/dev/null | awk 'NR == 2 && !/Never logged in/ { print $(NF-5), $(NF-4), $(NF-3), $(NF-2), $(NF-1), $NF }')
+  [ -n "$d" ] && date -d "$d" +%s 2>/dev/null || echo 0
+}
+
+# Users who can log in (a real shell) and every uid 0 account whatever its shell: password state
+# from /etc/shadow (P - set, L - locked, NP - empty; never the hash) and the last SSH login
 users() {
-  local out="" n=0 user uid shell
+  local out="" n=0 user uid shell pw last seen
   while IFS=: read -r user _ uid _ _ _ shell; do
     case "$shell" in */nologin|*/false|*/sync|*/halt|*/shutdown|'') [ "$uid" = 0 ] || continue ;; esac
-    out="$out${out:+,}{\"n\":\"$(esc "$user")\",\"uid\":${uid//[!0-9]/},\"sh\":\"$(esc "$shell")\"}"
+    pw=$(awk -F: -v u="$user" '$1 == u { h = $2; print (h == "" ? "NP" : (h ~ /^[!*]/ ? "L" : "P")); exit }' /etc/shadow 2>/dev/null)
+    last=$(lastlog_ts "$user")
+    seen=$(awk -v u="$user" '$1 == u { print $2; exit }' "$LASTSEEN" 2>/dev/null)
+    case "$seen" in ''|*[!0-9]*) seen=0 ;; esac
+    [ "$seen" -gt "${last:-0}" ] && last=$seen
+    out="$out${out:+,}{\"n\":\"$(esc "$user")\",\"uid\":${uid//[!0-9]/},\"sh\":\"$(esc "$shell")\",\"pw\":\"${pw:-}\",\"last\":${last:-0}}"
     n=$((n + 1))
     [ "$n" -ge "$MAX" ] && break
   done < /etc/passwd
@@ -116,7 +165,11 @@ sudo_info() {
     [ -f "$f" ] || continue
     files="$files${files:+,}\"$(esc "$f")\":\"$(h16 "$f")\""
   done
-  printf '{"groups":{%s},"files":{%s}}' "$groups" "$files"
+  # who gets sudo without a password: the first word of every NOPASSWD rule (user or %group)
+  local nopw
+  nopw=$(cat /etc/sudoers /etc/sudoers.d/* 2>/dev/null | grep -E '^[^#]*NOPASSWD' | grep -vE '^[[:space:]]*Defaults' \
+    | awk '{ print $1 }' | sort -u | head -50 | while read -r m; do printf '"%s",' "$(esc "$m")"; done | sed 's/,$//')
+  printf '{"groups":{%s},"files":{%s},"nopasswd":[%s]}' "$groups" "$files" "$nopw"
 }
 
 # Crontabs: system, cron.d, per-user spools and the run-parts directories - hashes only
@@ -196,8 +249,11 @@ ssh_info() {
 now=$(date +%s)
 tmp=$(mktemp "${OUT}.XXXXXX")
 ssh=$(ssh_info)
-printf '{"v":1,"ts":%s,"keys":[%s],"users":[%s],"sudo":%s,"cron":%s,"units":[%s],"listen":{%s},"ssh":%s}\n' \
-  "$now" "$(keys)" "$(users)" "$(sudo_info)" "$(cron_info)" "$(units)" "$(listen_procs)" "${ssh:-null}" > "$tmp"
+lastseen_update "$now"
+seen_since=$(sed -n 's/^#since //p' "$LASTSEEN" 2>/dev/null | head -1)
+case "$seen_since" in ''|*[!0-9]*) seen_since=0 ;; esac
+printf '{"v":1,"ts":%s,"keys":[%s],"users":[%s],"sudo":%s,"cron":%s,"units":[%s],"listen":{%s},"ssh":%s,"seen_since":%s}\n' \
+  "$now" "$(keys)" "$(users)" "$(sudo_info)" "$(cron_info)" "$(units)" "$(listen_procs)" "${ssh:-null}" "$seen_since" > "$tmp"
 chmod 0644 "$tmp"
 mv -f "$tmp" "$OUT"
 HELPER_EOF

@@ -191,9 +191,10 @@ class Check(Base):
     # срок/валидность TLS-сертификата и срок регистрации домена (RDAP)
     check_ssl: Mapped[bool] = mapped_column(Boolean, default=True)
     check_domain: Mapped[bool] = mapped_column(Boolean, default=True)
-    # пороги напоминаний (дней до истечения) — эскалация: SSL [14,7,1], домен [7,1]
+    # пороги напоминаний (дней до истечения) — эскалация: SSL [14,7,1], домен [30,7,1]: на
+    # продление домена бывает нужна оплата и согласование, неделя - поздно
     ssl_warn_days: Mapped[list[int]] = mapped_column(JSON, default=lambda: [14, 7, 1])
-    domain_warn_days: Mapped[list[int]] = mapped_column(JSON, default=lambda: [7, 1])
+    domain_warn_days: Mapped[list[int]] = mapped_column(JSON, default=lambda: [30, 7, 1])
     # проверять этот сайт ещё и через прокси-локации (см. Location) — по умолчанию вкл.
     check_locations: Mapped[bool] = mapped_column(Boolean, default=True)
     # какие именно локации использовать: None = все включённые (дефолт),

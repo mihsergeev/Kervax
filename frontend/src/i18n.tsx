@@ -1200,6 +1200,44 @@ const EN: Record<string, string> = {
   'проверено {d}: файлов совпало {n}{dumps}': 'checked {d}: {n} files matched{dumps}',
   ', дампы читаются: {e}': ', dumps readable: {e}',
   'Бэкап: проверка восстановления': 'Backup: restore check',
+  // не переживет перезагрузку, доступы
+  '{name}: после перезагрузки не запустятся {list}: работают, но не включены':
+    '{name}: {list} will not start after a reboot: running but not enabled',
+  '{name}: после перезагрузки не поднимутся контейнеры без restart policy: {list}':
+    '{name}: containers without a restart policy will not come back after a reboot: {list}',
+  '{name}: слабые SSH-ключи у {list} - замените на ed25519': '{name}: weak SSH keys for {list} - replace them with ed25519',
+  '{name}: учетки с доступом, в которые давно не входят: {list} - проверьте, нужны ли они':
+    '{name}: accounts with access that nobody has used for a long time: {list} - check whether they are still needed',
+  'Входы по журналу sshd видны с {d}. Ненужную учетку заблокируйте (usermod -L -e 1 <имя>) или уберите ее ключи.':
+    'Logins from the sshd log are known since {d}. Lock an account that is not needed (usermod -L -e 1 <name>) or remove its keys.',
+  'Доступы': 'Access',
+  'Доступ: второй root или пустой пароль': 'Access: a second root or an empty password',
+  'Доступы: заброшенные учетки и слабые ключи': 'Access: unused accounts and weak keys',
+  'Если контейнер из compose, поправьте и сам файл (restart: unless-stopped), иначе следующий up вернет как было.':
+    'If the container comes from compose, fix the file too (restart: unless-stopped), or the next up brings it back.',
+  'Не запустятся после перезагрузки': 'Will not start after a reboot',
+  'Не нужны после перезагрузки: {list}': 'Not needed after a reboot: {list}',
+  'Не переживет перезагрузку': 'Will not survive a reboot',
+  'После перезагрузки не поднимутся: у контейнеров нет restart policy (или on-failure), докер запускает после ребута только always и unless-stopped.':
+    'These will not come back after a reboot: they have no restart policy (or on-failure), and after a reboot Docker starts only always and unless-stopped.',
+  'Работают, но не включены: их запустили systemctl start без enable, и после ребута их не будет.':
+    'Running but not enabled: they were started with systemctl start without enable and will be gone after a reboot.',
+  'Так задумано: не напоминать про этот контейнер': 'This is intended: do not remind about this container',
+  'без пароля': 'no password',
+  'заблокирован': 'locked',
+  'задан': 'set',
+  'и еще {n}': 'and {n} more',
+  'ключей': 'keys',
+  'не было': 'never',
+  'не нужен после перезагрузки': 'not needed after a reboot',
+  'нужна': 'needed',
+  'после перезагрузки не поднимутся: нет restart policy': 'will not come back after a reboot: no restart policy',
+  'последний вход': 'last login',
+  'пустой': 'empty',
+  'работает с {d}': 'running since {d}',
+  'слабых: {n}': 'weak: {n}',
+  'учетка': 'account',
+  'учетка нужна': 'account needed',
   // контейнеры с ключами от хоста
   '{name}: у контейнеров ключи от хоста: {list} - взлом приложения в них даст root на сервере':
     '{name}: containers hold the keys to the host: {list} - breaking into the app inside gives root on the server',

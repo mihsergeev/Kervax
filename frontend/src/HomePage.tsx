@@ -18,7 +18,7 @@ import {
   type Server,
 } from './api'
 import type { Section } from './App'
-import { backupWindowNote, dockRiskText, fmtSetupVersion, proxyBuilt, sinceShort, srvIssues } from './serverUtils'
+import { backupWindowNote, dockRiskText, fmtSetupVersion, proxyBuilt, shortList, sinceShort, srvIssues } from './serverUtils'
 import { useI18n } from './i18n'
 import { expiryText, registrableDomain } from './checkUtils'
 import { useAuth } from './auth'
@@ -37,7 +37,7 @@ const ISSUE_ICON: Record<string, string> = {
   docker: '🐳', kuber: '☸️', backups: '💾', docker_sock: '🔓',
   clock: '🕐', dns: '🌐', db_conn: '🔌', web_5xx: '🌐', queue: '🐇', kube_expiry: '⏳', flux_down: '☸️',
   flux_stale: '☸️', backup_dump: '🛢', backup_dump_space: '🛢', backup_cron: '🛢', backup_check: '🩺',
-  unit_loop: '🔁', kube_cron: '⏰', exposed: '🔓', port_new: '🚪', pressure: '🫁', net_health: '📶', kube_node: '☸️', kube_job: '💥', access_change: '🔑', backup_restore: '🛟', docker_restarts: '🔄', kube_restarts: '🔄', mem_leak: '📈', ssh_risk: '🔐', db_health: '🛢', web_config: '🧾', web_cert: '🔏', listen_gone: '🔌', disk_slow: '🐢',
+  unit_loop: '🔁', kube_cron: '⏰', exposed: '🔓', port_new: '🚪', pressure: '🫁', net_health: '📶', kube_node: '☸️', kube_job: '💥', access_change: '🔑', backup_restore: '🛟', docker_restarts: '🔄', kube_restarts: '🔄', mem_leak: '📈', ssh_risk: '🔐', db_health: '🛢', web_config: '🧾', web_cert: '🔏', listen_gone: '🔌', disk_slow: '🐢', access_risk: '🗝',
 }
 
 type T = (k: string, p?: Record<string, string | number>) => string
@@ -375,6 +375,26 @@ function actionItems(servers: Server[], avail: string, relProblem: string, t: T)
         text: t('{name}: у контейнеров ключи от хоста: {list} - взлом приложения в них даст root на сервере',
           { name: s.name, list: risk.map((x) => `${x.name} (${dockRiskText(x, t)})`).join(', ') }) })
     }
+    // не переживет перезагрузку: контейнеры - в Docker (там команда), юниты - в карточку
+    const nb = s.noboot_advice
+    if (nb && nb.docker.length > 0)
+      items.push({ key: `noboot-d-${s.id}`, icon: '🔁', section: 'docker', id: s.id, name: s.name, cc: s.country,
+        text: t('{name}: после перезагрузки не поднимутся контейнеры без restart policy: {list}',
+          { name: s.name, list: shortList(nb.docker, t) }) })
+    if (nb && nb.units.length > 0)
+      items.push({ key: `noboot-u-${s.id}`, icon: '🔁', section: 'servers', id: s.id, name: s.name, cc: s.country,
+        sec: 'noboot', text: t('{name}: после перезагрузки не запустятся {list}: работают, но не включены',
+          { name: s.name, list: shortList(nb.units, t) }) })
+    // учетки с доступом, в которые давно не входят, и слабые ключи
+    const ac = s.access_advice
+    if (ac && ac.stale.length > 0)
+      items.push({ key: `access-s-${s.id}`, icon: '🗝', section: 'servers', id: s.id, name: s.name, cc: s.country,
+        sec: 'access', text: t('{name}: учетки с доступом, в которые давно не входят: {list} - проверьте, нужны ли они',
+          { name: s.name, list: shortList(ac.stale, t) }) })
+    if (ac && ac.weak.length > 0)
+      items.push({ key: `access-w-${s.id}`, icon: '🗝', section: 'servers', id: s.id, name: s.name, cc: s.country,
+        sec: 'access', text: t('{name}: слабые SSH-ключи у {list} - замените на ed25519',
+          { name: s.name, list: shortList(ac.weak, t) }) })
     // SSH пускает по паролю, а порт открыт в интернет
     for (const a of s.ssh_advice ?? []) {
       items.push({ key: `ssh-${s.id}`, icon: a.level >= 2 ? '⛔' : '🔐', section: 'servers', id: s.id,

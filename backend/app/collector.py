@@ -21,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app import alerts, audit, backup, backup_growth, checks as checks_exec, custom_backups, docker_exposure, flaky, heartbeat, settings_store
 from app import backup_verify
 from app import db_health
+from app import access_audit
 from app import docker_risk
 from app import listen_watch
 from app import mem_trend
@@ -217,7 +218,7 @@ _SRV_ICON = {
     "exposed": "🔓", "port_new": "🚪", "pressure": "🫁", "net_health": "📶",
     "kube_node": "🖥☸️", "kube_job": "💥☸️", "access_change": "🔑",
     "backup_restore": "🛟💾", "docker_restarts": "🔄🐳", "kube_restarts": "🔄☸️",
-    "mem_leak": "📈🧠", "ssh_risk": "🔐", "db_health": "🛢",
+    "mem_leak": "📈🧠", "ssh_risk": "🔐", "access_risk": "🗝", "db_health": "🛢",
     "web_config": "🧾", "web_cert": "🔏", "listen_gone": "🔌", "disk_slow": "🐢",
 }
 
@@ -236,7 +237,8 @@ _SRV_SECTION = {
     "unit_loop": "unitloop",
     "cpu_spin": "cpueat",
     "exposed": "exposure", "port_new": "exposure", "pressure": "pressure", "net_health": "nethealth",
-    "access_change": "changes", "mem_leak": "memleak", "ssh_risk": "ssh", "db_health": "services",
+    "access_change": "changes", "mem_leak": "memleak", "ssh_risk": "ssh", "access_risk": "access",
+    "db_health": "services",
     "web_config": "services", "web_cert": "services", "listen_gone": "exposure", "disk_slow": "disklat",
 }
 
@@ -374,10 +376,39 @@ def _expiry_text(what: str, days: int, expired: str) -> str:
     return expired
 
 
-def _apply_expiry(row: Check, info, now: datetime, pending: list) -> None:
+class DomainAlerts:
+    """Срок регистрации - один на домен, а мониторов на его поддоменах бывает десяток: на одном
+    домене их 10, и напоминание пришло бы десять раз. Шлем одно на домен и порог, остальным
+    мониторам порог отмечаем молча. Состояние - из всех мониторов на начало прохода."""
+
+    def __init__(self, rows) -> None:
+        # домен -> {id монитора: [alerted_days, domain_days]}
+        self.by: dict[str, dict[int, list]] = {}
+        for cid, target, name, alerted, days in rows:
+            self.by.setdefault(checks_exec._registrable_domain(target or name or ""), {})[cid] = [alerted, days]
+
+    def count(self, dom: str) -> int:
+        return len(self.by.get(dom) or {})
+
+    def should_alert(self, dom: str, cid: int, bucket: int) -> bool:
+        """Порог по домену еще не отмечен ни у одного другого монитора."""
+        others = [a for c, (a, _) in (self.by.get(dom) or {}).items() if c != cid and a is not None]
+        self.by.setdefault(dom, {}).setdefault(cid, [None, None])[0] = bucket
+        return not any(a <= bucket for a in others)
+
+    def first_renewed(self, dom: str, cid: int, days: int, limit: int) -> bool:
+        """Продление еще не объявлено: ни у одного другого монитора домена эскалация не сброшена
+        со свежим сроком за порогами."""
+        others = [(a, d) for c, (a, d) in (self.by.get(dom) or {}).items() if c != cid]
+        self.by.setdefault(dom, {})[cid] = [None, days]
+        return not any(a is None and d is not None and d > limit for a, d in others)
+
+
+def _apply_expiry(row: Check, info, now: datetime, pending: list, doms: DomainAlerts | None = None) -> None:
     """Сохраняет сроки TLS/домена и ставит эскалационные напоминания (по одному
     на каждый порог из ssl_warn_days/domain_warn_days). Невалидный/истёкший TLS
-    на https уже даёт down основной проверки — здесь только про сроки."""
+    на https уже даёт down основной проверки — здесь только про сроки. Срок домена -
+    одним сообщением на домен (doms)."""
     row.expiry_checked_at = now
     # проба вернула дни → сохраняем; вернула None (таймаут/сбой) → НЕ затираем ранее
     # полученную валидную дату транзиентной ошибкой (иначе «домен: ConnectTimeout»).
@@ -415,23 +446,32 @@ def _apply_expiry(row: Check, info, now: datetime, pending: list) -> None:
 
     if row.check_domain and info.domain_days is not None:
         thr = row.domain_warn_days or []
+        dom = checks_exec._registrable_domain(row.target or row.name or "")
+        n = doms.count(dom) if doms else 1
+        more = f" (мониторов на нем: {n})" if n > 1 else ""
         if thr and info.domain_days > max(thr):
-            if row.domain_alerted_days is not None:
+            if row.domain_alerted_days is not None and (
+                    doms is None or doms.first_renewed(dom, row.id, info.domain_days, max(thr))):
                 pending.append((
                     "domain", row.name, "",
-                    f"регистрация домена продлена, до истечения {info.domain_days} дн.",
+                    f"регистрация домена {dom} продлена, до истечения {info.domain_days} дн.",
                     None, row.id, None, "✅",
                 ))
+            elif doms is not None:
+                doms.first_renewed(dom, row.id, info.domain_days, max(thr))
             row.domain_alerted_days = None
         bucket = _expiry_bucket(info.domain_days, thr, row.domain_alerted_days)
         if bucket is not None:
-            txt = _expiry_text(
-                "регистрация домена", info.domain_days, "регистрация домена истекла"
-            )
-            pending.append(
-                ("domain", row.name, "", txt, None, row.id, ("domain_alerted_days", bucket),
-                 _expiry_icon("domain", info.domain_days))
-            )
+            if doms is None or doms.should_alert(dom, row.id, bucket):
+                txt = _expiry_text(
+                    f"регистрация домена {dom}", info.domain_days, f"регистрация домена {dom} истекла"
+                ) + more
+                pending.append(
+                    ("domain", row.name, "", txt, None, row.id, ("domain_alerted_days", bucket),
+                     _expiry_icon("domain", info.domain_days))
+                )
+            else:
+                row.domain_alerted_days = bucket  # о домене уже сказано по другому монитору
 
 
 def _host_of_target(target: str) -> str:
@@ -777,6 +817,11 @@ async def run_due_checks(
     pending: list[Pending] = []
 
     async with session_factory() as session:
+        doms = None
+        if exp_map:
+            doms = DomainAlerts((await session.execute(
+                select(Check.id, Check.target, Check.name, Check.domain_alerted_days, Check.domain_days)
+                .where(Check.check_domain.is_(True)))).all())
         for check, res in zip(due, outcomes):
             outcome = (
                 res
@@ -788,7 +833,7 @@ async def run_due_checks(
                 continue
             await record_outcome(session, row, outcome, now, pending)
             if check.id in exp_map:
-                _apply_expiry(row, exp_map[check.id], now, pending)
+                _apply_expiry(row, exp_map[check.id], now, pending, doms)
         await session.commit()
 
     if pending:
@@ -1221,6 +1266,7 @@ _SRV_LABEL = {
     "backup_growth": "прирост бэкапа",
     "docker_sock": "docker-сокет у внешнего прокси",
     "docker_risk": "контейнеры с ключами от хоста",
+    "access_risk": "второй root или пустой пароль",
     "exposed": "открытые в интернет сервисы",
     "pressure": "давление на ресурсы",
     "net_health": "сеть ноды",
@@ -1325,6 +1371,8 @@ def _recovery_detail(key: str, st: dict, ctx: dict) -> str:
         return "базы снова в порядке: реплики догнали, долгих транзакций и блокировок нет"
     if key == "ssh_risk":
         return "SSH больше не пускает root по паролю, перебора без защиты нет"
+    if key == "access_risk":
+        return "второго root и учеток с пустым паролем больше нет"
     if key in ("docker_restarts", "kube_restarts"):
         return f"перезапуски стихли: за сутки меньше {srv_restarts.MIN}"
     if key == "backup_restore":
@@ -3096,6 +3144,9 @@ def server_problems(s: Server, now: datetime, pod_names: dict[str, str] | None =
     # SSH: root по паролю на открытом порту, перебор паролей без fail2ban
     for lv, txt in ssh_audit.problems(s, now):
         add("ssh_risk", lv, txt, "ssh", "ssh_risk")
+    # Второй root, пустой пароль (helper changes-setup): ведет в "Доступы" карточки
+    for lv, txt in access_audit.problems(s):
+        add("access_risk", lv, txt, "access", "access_risk")
     # Утечка памяти: контейнер ведет в "Докер", под - в "Кубер", процесс - в "Память" карточки
     for x in mem_trend.problems(s, now):
         mute = mem_trend.MUTE_PREFIX + x["key"]
@@ -4537,6 +4588,11 @@ def _server_conditions(s: Server, now: datetime,
     if online and ssh_audit.block(rep) is not None:
         sp = ssh_audit.problems(s, now)
         out["ssh_risk"] = (max((lv for lv, _t in sp), default=0), {"detail": "; ".join(t for _l, t in sp)})
+    # Второй root (uid 0) или учетка с пустым паролем: так выглядит закладка или забытая дыра
+    if online and srv_changes.snapshot(rep) is not None:
+        ar = access_audit.problems(s)
+        out["access_risk"] = (max((lv for lv, _t in ar), default=0),
+                              {"detail": "; ".join(t for _l, t in ar), "sig": sorted(t for _l, t in ar)})
     # Утечка памяти: дно растет суток подряд (история - в alert_state mem_trend, ведет цикл алертов)
     if online and isinstance((s.alert_state or {}).get("mem_trend"), dict):
         ml = mem_trend.problems(s, now)
@@ -4752,7 +4808,7 @@ async def evaluate_servers(
                 continue  # тип (или его нижние уровни) заглушён для этого сервера
             prev = int(st.get(key, 0))
             if key in ("disk_health", "units", "docker_restarts", "kube_restarts", "mem_leak", "db_health",
-                       "web_config", "web_cert", "listen_gone", "docker_risk"):
+                       "web_config", "web_cert", "listen_gone", "docker_risk", "access_risk"):
                 # Тот же уровень, но сломалось НОВОЕ (второй диск при уже развалившемся
                 # RAID, второй упавший юнит): молчать нельзя, хотя уровень не вырос. Что
                 # сломано - ключи в sig.
