@@ -973,6 +973,11 @@ function CheckRow({
               📝
             </span>
           )}
+          {c.known_issue && (
+            <span className="note-chip" title={c.known_issue.text}>
+              📌
+            </span>
+          )}
           <span className="type-chip">{typeLabel}</span>
           {/* Зелёный по локальной проверке — это не то же самое, что «сайт виден
               посетителям»: снаружи он закрыт белым списком. Метка обязательна,

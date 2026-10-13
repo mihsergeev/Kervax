@@ -1,4 +1,4 @@
-import type { DiskHealth, DiskUsage, DockerRisk, Server, ServerReport, UnitsBlock, WebRate } from './api'
+import type { KnownIssue, DiskHealth, DiskUsage, DockerRisk, Server, ServerReport, UnitsBlock, WebRate } from './api'
 import { tr } from './i18n'
 
 // Запросы в минуту по access-логам ноды: блок кладёт root-хелпер webserver-setup, агент
@@ -132,14 +132,12 @@ function srvIssueMuted(i: SrvIssue, mutes: Set<string>): boolean {
   return false
 }
 
-export function srvIssues(
+function srvIssuesRaw(
   s: Server,
   t: (k: string, p?: Record<string, string | number>) => string,
 ): SrvIssue[] {
-  const mutes = new Set(s.alert_mutes ?? [])
-  const keep = (arr: SrvIssue[]) => arr.filter((i) => !srvIssueMuted(i, mutes))
   if (!s.online)
-    return keep([{ tone: 't-down', text: t('оффлайн'), mute: 'offline', kind: 'offline', since: s.last_seen }])
+    return [{ tone: 't-down', text: t('оффлайн'), mute: 'offline', kind: 'offline', since: s.last_seen }]
   const out: SrvIssue[] = []
   const cpu = srvCpuPct(s)
   if (cpu != null && s.cpu_alert_percent && cpu >= s.cpu_alert_percent)
@@ -184,7 +182,40 @@ export function srvIssues(
       since: p.since, section: p.section, srv: p.srv })
   // с какого момента: панель запоминает начало проблемы каждого вида (alert_since)
   for (const i of out) if (i.since === undefined && i.kind) i.since = s.alert_since?.[i.kind] ?? null
-  return keep(out)
+  return out
+}
+
+// Отметка "известная проблема" еще в силе: срок не вышел (сборщик снимет ее и сам, но до
+// его тика главная не должна прятать то, о чем снова пойдут алерты)
+export function knownActive(k?: KnownIssue | null): k is KnownIssue {
+  return !!k && (!k.until || Date.parse(k.until) > Date.now())
+}
+
+// Известная проблема этого вида, если не стало хуже отмеченного
+export function srvKnownOf(s: Server, i: SrvIssue): KnownIssue | null {
+  const k = i.kind ? s.known_issues?.[i.kind] : undefined
+  return knownActive(k) && !k.worse ? k : null
+}
+
+// Проблемы сервера без приглушенных и без известных: известные показываются отдельно (srvKnown)
+export function srvIssues(
+  s: Server,
+  t: (k: string, p?: Record<string, string | number>) => string,
+): SrvIssue[] {
+  const mutes = new Set(s.alert_mutes ?? [])
+  return srvIssuesRaw(s, t).filter((i) => !srvIssueMuted(i, mutes) && !srvKnownOf(s, i))
+}
+
+// Известные проблемы сервера: что сломано и что про это написали
+export function srvKnown(
+  s: Server,
+  t: (k: string, p?: Record<string, string | number>) => string,
+): (SrvIssue & { known: KnownIssue })[] {
+  const mutes = new Set(s.alert_mutes ?? [])
+  return srvIssuesRaw(s, t).flatMap((i) => {
+    const k = srvKnownOf(s, i)
+    return k && !srvIssueMuted(i, mutes) ? [{ ...i, known: k }] : []
+  })
 }
 
 // Версия setup-скрипта — строка «мажор.минор» (0.12). Показываем как есть; про
@@ -241,4 +272,11 @@ export function backupWindowNote(s: Server): string | null {
               { at: hhmm(ended), to: deadline })
   }
   return null
+}
+
+// Кто отметил и до какого числа: "admin, до 20.10.2026"
+export function knownMeta(k: KnownIssue, t: (k: string, p?: Record<string, string | number>) => string): string {
+  const parts = [k.by || '']
+  if (k.until) parts.push(t('до {d}', { d: new Date(k.until).toLocaleDateString() }))
+  return parts.filter(Boolean).join(', ')
 }

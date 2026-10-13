@@ -4,6 +4,7 @@ import {
   agentUpdate,
   agentUpdateCancel,
   ApiError,
+  dropServerKnown,
   setServerNote,
   backupCommand,
   backupCommandStatus,
@@ -66,6 +67,7 @@ import {
 import { useAuth } from './auth'
 import { AlertHistoryModal } from './AlertHistoryModal'
 import { NoteBar } from './NoteBar'
+import { KnownServerList } from './KnownDialog'
 
 type MetricKey =
   | 'cpu'
@@ -3768,6 +3770,11 @@ function ServerRow({
               📝
             </span>
           )}
+          {Object.keys(s.known_issues ?? {}).length > 0 && (
+            <span className="note-chip" title={Object.values(s.known_issues ?? {}).map((k) => k.text).join('; ')}>
+              📌
+            </span>
+          )}
           {showGroup && s.group_name && (
             <span className="type-chip group-chip">{s.group_name}</span>
           )}
@@ -4880,6 +4887,20 @@ function ServerDetail({
               } catch (e) {
                 if (e instanceof ApiError && e.status === 401) onUnauthorized()
                 throw e
+              }
+            }}
+          />
+        )}
+        {!editing && Object.keys(s.known_issues ?? {}).length > 0 && (
+          <KnownServerList
+            items={s.known_issues ?? {}}
+            canEdit={!isViewer}
+            onDrop={async (kind) => {
+              try {
+                await dropServerKnown(s.id, kind)
+                onChanged()
+              } catch (e) {
+                if (e instanceof ApiError && e.status === 401) onUnauthorized()
               }
             }}
           />

@@ -28,6 +28,7 @@ from app import podnames
 from app import mem_trend
 from app import restarts as srv_restarts
 from app import ssh_audit
+from app import known as known_mod
 from app import tg_bot
 from app import web_certs
 from app import web_config
@@ -38,6 +39,7 @@ from app.setup_scripts import current_setup_versions, gaps
 from app.config import Settings, get_settings
 from app.models import (
     AgentPathProbe,
+    AuditLog,
     AgentProbe,
     Check,
     CheckIncident,
@@ -646,6 +648,16 @@ async def record_outcome(
             pending.append(("recovery", row.name, "up", msg, None, row.id, None, ""))
     if not manual:
         await _flaky_step(session, row, new_status, msg, now, pending)
+    if row.known_issue and not manual:
+        # известная проблема монитора: закрыть, когда он поднялся и держится, или по сроку
+        new_k, what = known_mod.step_check(row.known_issue, new_status == "up" and row.flaky_since is None, now)
+        if new_k != row.known_issue:
+            row.known_issue = new_k
+        if what in ("closed", "expired"):
+            session.add(AuditLog(username="авто", action="known_" + what, target=row.name[:255], detail=""))
+        if what == "remind" and new_k is not None:
+            pending.append(Pending("known", row.name, new_status,
+                                   known_mod.remind_text(msg or new_status, new_k, now), None, row.id, None, "📌"))
 
     row.last_status = new_status
     row.last_message = msg
@@ -897,19 +909,22 @@ async def _send_alerts(
         mutes: dict[int, set] = {}  # заглушённые типы алертов по монитору
         meta: dict[int, tuple[str, str, int]] = {}  # id → (target, type, port) для хоста
         snoozed: set[int] = set()  # мониторы с активным снузом — алерты не шлём
+        known_ids: set[int] = set()  # мониторы с известной проблемой - молчим про сбой
         if ids:
             rows = await session.execute(
                 select(
                     Check.id, Check.group_name, Check.alert_mutes,
-                    Check.target, Check.type, Check.port, Check.snooze_until,
+                    Check.target, Check.type, Check.port, Check.snooze_until, Check.known_issue,
                 ).where(Check.id.in_(ids))
             )
-            for i, g, m, tgt, typ, prt, snz in rows.all():
+            for i, g, m, tgt, typ, prt, snz, kn in rows.all():
                 groups[i] = g
                 mutes[i] = set(m or [])
                 meta[i] = (tgt, typ, prt)
                 if snz is not None and _aware(snz) > now:
                     snoozed.add(i)
+                if isinstance(kn, dict) and not known_mod.expired(kn, now):
+                    known_ids.add(i)
     if muted or not alerts.alerts_enabled(cfg):
         return
     base = settings.panel_url.rstrip("/")
@@ -941,6 +956,13 @@ async def _send_alerts(
             continue  # монитор временно приглушён (снуз) — не шлём, но и не помечаем
         if rk and check_id is not None and rk in mutes.get(check_id, set()):
             continue  # тип заглушён именно для этого монитора
+        if kind == "known":
+            # напоминание об известной проблеме монитора: без кнопок и без свертки по домену
+            texts.append(alerts.Msg(f"{icon or '📌'} <b>{html.escape(name)}</b> — {html.escape(msg)}",
+                                    "sites", grp or "", kind="known", target=name))
+            continue
+        if check_id is not None and check_id in known_ids and kind in ("bad", "flaky", "locpart"):
+            continue  # известная проблема: про нее знают, молчим, пока не закроется или не выйдет срок
         tgt, typ, prt = meta.get(check_id, ("", "http", 0))
         # у push-монитора нет адреса: в заголовке алерта его имя
         host = name if typ == "push" else _display_host(tgt, typ, prt)
@@ -4900,6 +4922,8 @@ async def evaluate_servers(
     recoveries: list[alerts.Msg] = []
     fire_apply: list[tuple[int, str, object]] = []  # (sid, key, value)
     rec_apply: list[tuple[int, str, object]] = []
+    # известные проблемы, которые сборщик обновил или закрыл: (sid, вид, at записи, новая|None)
+    known_upd: list[tuple[int, str, str | None, dict | None, str]] = []
 
     def apply(sid: int, key: str, value: object) -> None:
         cur_by_id[sid][key] = value
@@ -4979,12 +5003,37 @@ async def evaluate_servers(
                 apply(s.id, f"{k}_from", now.isoformat())
             elif _lvl <= 0 and frm:
                 apply(s.id, f"{k}_from", None)
+        # Известные проблемы (app/known.py): снимок того, что отметили, закрытие, когда ушла
+        # сама или вышел срок, и напоминание раз в неделю, что она все еще висит
+        known_now: dict[str, dict] = {}
+        talking = seen_online(s, now)
+        for kk, ent in (s.known_issues or {}).items():
+            if not isinstance(ent, dict):
+                continue
+            if not talking:
+                # нода молчит: что с ее диском, неизвестно, и "проблема ушла" было бы неправдой
+                known_now[kk] = ent
+                continue
+            k_lvl, k_ctx = conds.get(kk, (0, {}))
+            new_k, what = known_mod.step(ent, k_lvl, k_ctx.get("sig"), now)
+            if new_k != ent:
+                known_upd.append((s.id, kk, ent.get("at"), new_k, what))
+            if new_k is None:
+                continue
+            known_now[kk] = new_k
+            if what == "remind":
+                label = settings_store.SERVER_ALERT_KINDS.get(kk, (kk,))[0]
+                fires.append(_server_alert_text(
+                    "known", s.name, known_mod.remind_text(label, new_k, now), srv_url(s, kk),
+                    icon="📌", group=s.group_name or ""))
         for key, (level, ctx) in conds.items():
             rule = rules.get(key) or _fallback_rule(key)
             if not rule["enabled"] or not _rule_scope_ok(rule, s):
                 continue  # правило выключено или сервер вне области применения
             if _muted(key, level, mutes):
                 continue  # тип (или его нижние уровни) заглушён для этого сервера
+            if known_mod.covers(known_now.get(key), level, ctx.get("sig")):
+                continue  # известная проблема: про нее знают, молчим, пока не стало хуже
             prev = int(st.get(key, 0))
             if key in ("disk_health", "units", "docker_restarts", "kube_restarts", "mem_leak", "db_health",
                        "web_config", "web_cert", "listen_gone", "docker_risk", "access_risk"):
@@ -5504,12 +5553,23 @@ async def evaluate_servers(
         for sid, key, value in rec_apply:
             apply(sid, key, value)
 
-    if changed_ids:
+    if changed_ids or known_upd:
         async with session_factory() as session:
             for sid in changed_ids:
                 row = await session.get(Server, sid)
                 if row is not None:
                     row.alert_state = cur_by_id[sid]
+            for sid, kk, at, new_k, what in known_upd:
+                row = await session.get(Server, sid)
+                cur = dict((row.known_issues if row is not None else None) or {})
+                if not isinstance(cur.get(kk), dict) or cur[kk].get("at") != at:
+                    continue  # отметку успели поменять руками - их версия главнее
+                if new_k is None:
+                    cur.pop(kk)
+                    session.add(AuditLog(username="авто", action="known_" + what, target=row.name[:255], detail=kk))
+                else:
+                    cur[kk] = new_k
+                row.known_issues = cur or None
             await session.commit()
 
 

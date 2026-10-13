@@ -16,9 +16,14 @@ import {
   type LocalProbeSuggestion,
   type MuteWarning,
   type Server,
+  dropCheckKnown,
+  dropServerKnown,
+  setServerKnown,
+  type KnownIssue,
 } from './api'
 import type { Section } from './App'
-import { backupWindowNote, dockRiskText, fmtSetupVersion, proxyBuilt, shortList, sinceShort, srvIssues } from './serverUtils'
+import { backupWindowNote, dockRiskText, fmtSetupVersion, knownActive, proxyBuilt, shortList, sinceShort, srvIssues, srvKnown, knownMeta } from './serverUtils'
+import { KnownDialog } from './KnownDialog'
 import { useI18n } from './i18n'
 import { expiryText, registrableDomain } from './checkUtils'
 import { useAuth } from './auth'
@@ -601,13 +606,15 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
   // Главная — витрина всех разделов, поэтому она обязана уважать нарезку доступа:
   // иначе учётка без «Бэкапов» видит на ней и карточку бэкапов, и пункты, ведущие
   // в закрытый раздел (клик по ним всё равно упрётся в 403).
-  const { sections } = useAuth()
+  const { sections, isViewer } = useAuth()
   const canSee = useCallback(
     (sec: Section) => sections.length === 0 || sections.includes(sec),
     [sections],
   )
   const [ov, setOv] = useState<ChecksOverview | null>(null)
   const [servers, setServers] = useState<Server[] | null>(null)
+  // отметить проблему сервера известной (📌 в "Что сломано")
+  const [knownFor, setKnownFor] = useState<{ id: number; kind: string; title: string } | null>(null)
   const [avail, setAvail] = useState('')
   const [relProblem, setRelProblem] = useState('')
   const [probeHints, setProbeHints] = useState<LocalProbeSuggestion[]>([])
@@ -668,7 +675,9 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
     .filter(
       (c) =>
         c.enabled &&
-        (c.last_status === 'down' || c.last_status === 'degraded' || !!c.flaky_since),
+        (c.last_status === 'down' || c.last_status === 'degraded' || !!c.flaky_since) &&
+        // известная проблема - не в "проблемах", она в своем блоке
+        !knownActive(c.known_issue),
     )
     .sort((a, b) => (a.last_status === 'down' ? 0 : 1) - (b.last_status === 'down' ? 0 : 1))
   const allUp = ov && downChecks.length === 0
@@ -724,6 +733,7 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
     key: string; id: number; name: string; cc?: string; tone: 't-down' | 't-degraded'; text: string
     kind: string; section: Section; srv?: boolean; sec?: string; mute?: string; since?: string | null
     note?: string
+    markable?: boolean // можно отметить известной: вид, который панель сейчас видит у сервера
   }
   const fromProbs = (items: ProbItem[], section: Section): Broken[] =>
     canSee(section)
@@ -742,6 +752,7 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
           key: `${s.id}-${n}`, id: s.id, name: s.name, cc: s.country, tone: i.tone, text: i.text,
           kind: i.kind ?? 'server', section: (i.section ?? 'servers') as Section, srv: i.srv ?? true,
           sec: i.sec, mute: i.mute, since: i.since, note: s.note,
+          markable: !!i.kind && i.kind !== 'offline' && !!s.alert_since?.[i.kind],
         }))
         .filter((i) => canSee(i.section)),
     ),
@@ -749,6 +760,38 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
     ...fromProbs(kubeProbs, 'kuber'),
     ...fromProbs(backupProbs, 'backups'),
   ].sort((a, b) => (a.tone === b.tone ? a.name.localeCompare(b.name) : a.tone === 't-down' ? -1 : 1))
+
+  // Известные проблемы: про них знают (backend app/known.py), алерт молчит, пока не стало хуже.
+  // Отдельный серый блок вместо "Что сломано": видно, что висит и что про это написали.
+  type KnownRow = {
+    key: string; id: number; name: string; cc?: string; text: string; kind: string; section: Section
+    srv?: boolean; sec?: string; known: KnownIssue; check?: boolean
+  }
+  const knownRows: KnownRow[] = [
+    ...srvList.flatMap((s) =>
+      srvKnown(s, t)
+        .map((i, n) => ({
+          key: `k-${s.id}-${n}`, id: s.id, name: s.name, cc: s.country, text: i.text,
+          kind: i.kind ?? 'server', section: (i.section ?? 'servers') as Section, srv: i.srv ?? true,
+          sec: i.sec, known: i.known,
+        }))
+        .filter((i) => canSee(i.section)),
+    ),
+    ...(canSee('sites')
+      ? (ov?.checks ?? [])
+          .filter(
+            (c) =>
+              c.enabled && knownActive(c.known_issue) &&
+              (c.last_status === 'down' || c.last_status === 'degraded' || !!c.flaky_since),
+          )
+          .map((c) => ({
+            key: `kc-${c.id}`, id: c.id, name: c.name, text: c.last_message || c.last_status,
+            kind: 'site', section: 'sites' as Section, known: c.known_issue as KnownIssue, check: true,
+          }))
+      : []),
+  ]
+  const dropKnown = (it: KnownRow) =>
+    (it.check ? dropCheckKnown(it.id) : dropServerKnown(it.id, it.kind)).then(load).catch(() => {})
 
   // Хосты для ansible-кнопки «обновить сразу на N нодах»: те, что плейбук реально чинит —
   // устаревший helper (переустановка) ИЛИ не включён watchdog (helper agent-watchdog, ALWAYS).
@@ -766,6 +809,17 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
   return (
     <div>
       <p className="tagline">{t('Мониторинг инфраструктуры')}</p>
+      {knownFor && (
+        <KnownDialog
+          title={knownFor.title}
+          onClose={() => setKnownFor(null)}
+          onSave={async (text, days) => {
+            await setServerKnown(knownFor.id, knownFor.kind, text, days)
+            setKnownFor(null)
+            load()
+          }}
+        />
+      )}
       {mutes.length > 0 && <MuteHint items={mutes} onOpen={onOpen} onDone={load} />}
       {broken.length > 0 && (
         <div className={`home-attention home-attention-broken${broken.some((x) => x.tone === 't-down') ? ' has-down' : ''}`}>
@@ -792,6 +846,15 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
                     </span>
                   )}
                 </span>
+                {it.markable && !isViewer && (
+                  <span className="quick-mute" title={t('Известная проблема: алерт молчит, пока не станет хуже')}
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      setKnownFor({ id: it.id, kind: it.kind, title: `${it.name} - ${it.text}` })
+                    }}>
+                    📌
+                  </span>
+                )}
                 {it.mute && (
                   <span className="quick-mute" title={t('Приглушить')}
                     onClick={(e) => { e.stopPropagation(); quickMute(it.id, [it.mute!]) }}>
@@ -806,6 +869,41 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
                 {brokenAll ? t('свернуть') : t('…и ещё {n}', { n: broken.length - BROKEN_LIMIT })}
               </button>
             )}
+          </div>
+        </div>
+      )}
+      {knownRows.length > 0 && (
+        <div className="home-attention home-attention-known">
+          <div className="home-attention-head">
+            <span className="home-attention-ic">📌</span>
+            {t('Известные проблемы')}
+            <span className="home-attention-n">{knownRows.length}</span>
+          </div>
+          <div className="home-attention-list">
+            {knownRows.map((it) => (
+              <button
+                key={it.key}
+                className="home-attention-row"
+                onClick={() => onOpen(it.section, it.id, it.srv, it.sec)}
+              >
+                <span className="dot known" />
+                <span className="home-attention-ico">{it.check ? '🌐' : (ISSUE_ICON[it.kind] ?? '⚠️')}</span>
+                <span className="home-attention-txt">
+                  <CountryFlag code={it.cc} /> <b>{it.name}</b> - {it.text}
+                  <span className="muted">
+                    {' '}· {it.known.text}
+                    {knownMeta(it.known, t) ? ` (${knownMeta(it.known, t)})` : ''}
+                  </span>
+                </span>
+                {!isViewer && (
+                  <span className="quick-mute" title={t('Снять отметку: если проблема осталась, придет алерт')}
+                    onClick={(e) => { e.stopPropagation(); dropKnown(it) }}>
+                    ✕
+                  </span>
+                )}
+                <span className="home-open">→</span>
+              </button>
+            ))}
           </div>
         </div>
       )}

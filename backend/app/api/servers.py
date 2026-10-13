@@ -25,6 +25,7 @@ from app import ssh_audit
 from app import web_certs
 from app import web_config
 from app import changes as srv_changes
+from app import known
 from app import audit, backup_growth, custom_backups, docker_exposure, geoip, kube_coverage, manual_probe, open_ports, os_support
 from app.collector import (
     _backup_problem_repos, alert_since, backup_cadence, backup_rotation_items, backup_unmonitored,
@@ -55,6 +56,7 @@ from app.models import (
     WebErrorSample,
 )
 from app.schemas import (
+    KnownIn,
     NoteIn,
     AgentConfigOut,
     AgentReleaseOut,
@@ -1138,6 +1140,43 @@ async def set_server_note(
     await session.refresh(server)
     await audit.record(session, user.username, "server_note", server.name, text[:200])
     return _out(server, now)
+
+
+@router.put("/{server_id}/known/{kind}", response_model=ServerOut)
+async def set_server_known(
+    server_id: int, kind: str, body: KnownIn, user: CurrentUser, session: SessionDep
+) -> ServerOut:
+    """Отметить проблему сервера известной: алерт по ней молчит, пока не станет хуже, а
+    когда она уйдет сама, отметка закроется (app/known.py)."""
+    server = await _get_or_404(server_id, session, user)
+    if kind == "offline":
+        raise HTTPException(status.HTTP_400_BAD_REQUEST,
+                            "Недоступность так не отмечается: для работ на сервере нужен снуз")
+    if not (server.alert_state or {}).get(f"{kind}_from"):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Этой проблемы сейчас нет")
+    now = datetime.now(timezone.utc)
+    cur = dict(server.known_issues or {})
+    cur[kind] = known.new_entry(body.text, user.username, body.days, now)
+    server.known_issues = cur
+    await session.commit()
+    await session.refresh(server)
+    await audit.record(session, user.username, "known_set", server.name, f"{kind}: {body.text[:200]}")
+    return _out(server, now)
+
+
+@router.delete("/{server_id}/known/{kind}", response_model=ServerOut)
+async def drop_server_known(
+    server_id: int, kind: str, user: CurrentUser, session: SessionDep
+) -> ServerOut:
+    """Снять отметку: если проблема осталась, алерт уйдет на ближайшем тике."""
+    server = await _get_or_404(server_id, session, user)
+    cur = dict(server.known_issues or {})
+    if cur.pop(kind, None) is not None:
+        server.known_issues = cur or None
+        await session.commit()
+        await session.refresh(server)
+        await audit.record(session, user.username, "known_drop", server.name, kind)
+    return _out(server, datetime.now(timezone.utc))
 
 
 @router.post("/{server_id}/exposure/scan", response_model=ServerOut)
