@@ -19,6 +19,11 @@ LOCK_WARN = 300  # запрос ждет блокировку дольше 5 м�
 XID_WARN = 1_000_000_000  # на 2.1 млрд PostgreSQL остановится, чтобы не потерять данные
 XID_CRIT = 1_500_000_000
 VAC_DAYS = 7
+# Дамп держит одну транзакцию от начала до конца, это его природа: ночной pg_dump большой базы
+# шел четыре часа и давал алерт "транзакция идет 1 ч". Про дамп скажем, только если он идет
+# больше 12 часов - тогда он, скорее всего, завис.
+_DUMP_APPS = ("pg_dump", "pg_dumpall", "pg_basebackup")
+DUMP_XACT_WARN = 12 * 3600
 STALE = 3600  # блок старше часа - helper не работает, не судим по старому
 
 
@@ -80,7 +85,7 @@ def problems(rep: dict, now: datetime) -> list[tuple[int, str, str]]:
         elif lag >= LAG_WARN:
             out.append((2 if lag >= LAG_CRIT else 1, f"{name}: реплика отстает от основной на {_dur(lag)}", k + ":lag"))
         xa = _int(x.get("xact"))
-        if xa >= XACT_WARN:
+        if xa >= XACT_WARN and not (str(x.get("xact_app") or "").startswith(_DUMP_APPS) and xa < DUMP_XACT_WARN):
             who = _who(str(x.get("xact_db") or ""), str(x.get("xact_app") or ""))
             out.append((2 if xa >= XACT_CRIT else 1, f"{name}: транзакция идет {_dur(xa)}" + (f" ({who})" if who else ""),
                         k + ":xact"))

@@ -923,6 +923,11 @@ async def _send_alerts(
     # остальные напишут по второму разу), а сообщение отправляем одно.
     dom_at: dict[str, int] = {}   # registrable-домен → индекс его текста в texts
     dom_n: dict[str, int] = {}    # сколько мониторов он покрывает
+    # Сайт и его www (или два поддомена за одним фронтом) падают и поднимаются одним тиком и
+    # одинаково: было по сообщению на монитор, с отбоями четыре вместо двух. Одинаковый вид и
+    # статус на одном домене в одном тике - одно сообщение, остальные адреса дописаны.
+    same_at: dict[tuple, int] = {}
+    same_hosts: dict[tuple, list[str]] = {}
     # Pending(*p): на вход может прийти и голый кортеж (в т.ч. из тестов) —
     # приводим к именованному, недостающий icon подставит дефолт
     for kind, name, status, msg, inc_id, check_id, flag, icon in map(_as_pending, pending):
@@ -947,6 +952,13 @@ async def _send_alerts(
                 dom_n[zone] = dom_n.get(zone, 1) + 1
                 commits.append((kind, inc_id, check_id, flag))
                 continue
+        same = None
+        if kind in ("bad", "recovery") and tgt:
+            same = (kind, status, checks_exec._registrable_domain(tgt))
+            if same in same_at:
+                same_hosts[same].append(host or name)
+                commits.append((kind, inc_id, check_id, flag))
+                continue
         if rule is not None:
             if not rule["enabled"] or not _site_scope_ok(rule, check_id, grp):
                 continue  # тип выключен или монитор вне области применения
@@ -968,6 +980,9 @@ async def _send_alerts(
         if zone:
             dom_at[zone] = len(texts)
             dom_n[zone] = 1
+        if same is not None:
+            same_at[same] = len(texts)
+            same_hosts[same] = []
         # в истории отбой лежит под тем же видом, что и сама беда: фильтр по виду
         # показывает историю целиком
         texts.append(alerts.Msg(text, "sites", grp or "", kind=_SITE_HISTORY_KIND.get(kind, rk or kind),
@@ -981,6 +996,15 @@ async def _send_alerts(
             old = texts[idx]
             texts[idx] = alerts.Msg(
                 f"{old} · мониторов: {n}", old.section, old.group,
+                kind=old.kind, target=old.target, recovery=old.recovery,
+            )
+
+    for key, idx in same_at.items():
+        more = same_hosts.get(key) or []
+        if more:
+            old = texts[idx]
+            texts[idx] = alerts.Msg(
+                f"{old}\n↳ и {html.escape(', '.join(more))}", old.section, old.group,
                 kind=old.kind, target=old.target, recovery=old.recovery,
             )
 
@@ -3242,7 +3266,7 @@ def backup_units(s: Server, rep: dict) -> set[str]:
 
 # Медленные счетчики за сутки: новый объект в той же беде в течение часа после сообщения -
 # та же история, отдельного сообщения нет (см. цикл алертов)
-_SIG_STORY = frozenset({"docker_restarts", "kube_restarts"})
+_SIG_STORY = frozenset({"docker_restarts", "kube_restarts", "db_health"})
 _SIG_STORY_S = 3600
 
 
@@ -3662,6 +3686,23 @@ def cause_text(rep: dict, kind: str, base: dict[str, float], now: datetime | Non
 _FLAP_METRIC_KINDS = frozenset({"cpu", "mem", "disk", "temp", "conntrack", "db_conn", "disktemp",
                                 "web_5xx"})
 _FLAP_METRIC_WINDOW = 6 * 3600
+
+# Отбой "сервер задыхается", сети и медленного диска - только после часа спокойствия. Ночной
+# pg_dump на одной ноде дал три пары "сработало - отбой" за два часа: диск то не успевал, то
+# успевал, а история одна.
+_CALM_S = 3600
+# Под в CrashLoopBackOff между падениями на минуту становится Running: без выдержки отбоя
+# приходило "снова в норме" посреди цикла падений.
+_POD_CALM_S = 900
+# Репозиторий чартов недоступен: развернутое работает, не придут только новые версии чартов.
+# Час-другой сети до репозитория нет - это не повод писать (три пары за неделю на одной ноде).
+_FLUX_STALE_HOLD = 2 * 3600
+
+# Гистерезис CPU и RAM: алерт снимается, только когда значение ниже порога на _HYST пунктов и
+# держится там выдержку. Нода, которая каждый день сидит на 80-100% CPU, переходила 90%, через
+# 15 минут получала "снова в норме: 89%", а через час новый алерт: до восьми сообщений в день о
+# том, что сервер просто загружен.
+_HYST = 10
 _FLAP_METRIC_LIMIT = 3
 
 
@@ -4196,30 +4237,59 @@ def _server_conditions(s: Server, now: datetime,
     _ss = getattr(s, "alert_sustain_seconds", None)
     sustain_s = _SUSTAIN_DEFAULT if _ss is None else max(int(_ss), 0)
 
-    def sustain(key: str, breach: bool, ctx: dict) -> None:
+    def sustain(key: str, breach: bool, ctx: dict, below: bool | None = None,
+                cool_s: float | None = None, hold_s: float | None = None) -> None:
         """Пороговую метрику алертим лишь если превышение ДЕРЖИТСЯ ≥ sustain_s секунд
         (гасим кратковременные спайки). Момент начала «жарки» пишем в ctx["since"]
-        (persist каждый тик); None = вернулось в норму / оффлайн → сброс."""
-        if breach and online:
+        (persist каждый тик); None = вернулось в норму / оффлайн → сброс.
+        below - значение уже ниже линии снятия (порог минус _HYST). Пока алерт висит, а до
+        линии не дошло, это все еще превышение; снимаем, когда ниже нее пробыло выдержку
+        (ctx["cool"] - с какого момента). cool_s и hold_s - своя выдержка отбоя и срабатывания
+        вместо общей."""
+        alerted = below is not None and int(state.get(key, 0) or 0) >= 1
+        cool = None
+        if online and (breach or (alerted and not below)):
             since = state.get(f"{key}_since") or now.isoformat()
             started = _parse_iso(since)
             held = (now - started).total_seconds() if started else 0.0
-            lvl = 1 if held >= sustain_s else 0
+            lvl = 1 if held >= (sustain_s if hold_s is None else hold_s) else 0
+        elif online and alerted:
+            started = _parse_iso(str(state.get(f"{key}_cool") or "")) or now
+            if (now - started).total_seconds() < (sustain_s if cool_s is None else cool_s):
+                since, lvl, cool = state.get(f"{key}_since"), 1, started.isoformat()
+            else:
+                since, lvl = None, 0
         else:
             since, lvl = None, 0
         ctx["since"] = since
+        if below is not None:
+            ctx["cool"] = cool
         out[key] = (lvl, ctx)
 
-    def sustain_lvl(key: str, lvl: int, ctx: dict) -> None:
-        """Как sustain, но с уровнем: худшая причина сейчас, если беда держится дольше выдержки."""
+    def sustain_lvl(key: str, lvl: int, ctx: dict, cool_s: float | None = None) -> None:
+        """Как sustain, но с уровнем: худшая причина сейчас, если беда держится дольше выдержки.
+        cool_s - отбой ушедшего алерта только после стольких секунд спокойствия: заходы внутри
+        этого времени - одна история, уровень держится прежний."""
+        alerted = int(state.get(key, 0) or 0) if cool_s is not None else 0
+        cool = None
         if lvl and online:
             since = state.get(f"{key}_since") or now.isoformat()
             started = _parse_iso(since)
             held = (now - started).total_seconds() if started else 0.0
             lvl = lvl if held >= sustain_s else 0
+            if alerted and not lvl:
+                lvl = alerted  # снова пошло внутри истории: уровень тот же, без нового сообщения
+        elif online and alerted:
+            started = _parse_iso(str(state.get(f"{key}_cool") or "")) or now
+            if (now - started).total_seconds() < cool_s:
+                since, lvl, cool = state.get(f"{key}_since"), alerted, started.isoformat()
+            else:
+                since, lvl = None, 0
         else:
             since, lvl = None, 0
         ctx["since"] = since
+        if cool_s is not None:
+            ctx["cool"] = cool
         out[key] = (lvl, ctx)
 
     rep = s.last_report or {}
@@ -4228,11 +4298,13 @@ def _server_conditions(s: Server, now: datetime,
         # cause заполняется в момент отправки (нужна история метрик), но в ctx он
         # обязан быть всегда: без него шаблон с {cause} не отрендерится
         sustain("cpu", cpu >= s.cpu_alert_percent,
-                {"value": round(cpu), "threshold": s.cpu_alert_percent, "cause": ""})
+                {"value": round(cpu), "threshold": s.cpu_alert_percent, "cause": ""},
+                below=cpu < s.cpu_alert_percent - _HYST)
     if s.mem_alert_percent and rep.get("mem_total"):
         memp = rep.get("mem_used", 0) / rep["mem_total"] * 100
         sustain("mem", memp >= s.mem_alert_percent,
-                {"value": round(memp), "threshold": s.mem_alert_percent, "cause": ""})
+                {"value": round(memp), "threshold": s.mem_alert_percent, "cause": ""},
+                below=memp < s.mem_alert_percent - _HYST)
     if rep.get("disks"):
         worst, worst_mount = max(
             ((d["used"] / d["total"] * 100, d.get("mount")) for d in rep["disks"] if d.get("total")),
@@ -4336,7 +4408,7 @@ def _server_conditions(s: Server, now: datetime,
     if rep.get("flux") is not None:
         fx = flux_state(rep)
         if fx is not None and fx[0] == "flux_stale":
-            sustain("flux_stale", True, fx[1])
+            sustain("flux_stale", True, fx[1], hold_s=_FLUX_STALE_HOLD)
             sustain("flux_down", False, {})
         elif fx is not None:
             sustain("flux_down", True, fx[1])
@@ -4372,7 +4444,8 @@ def _server_conditions(s: Server, now: datetime,
     if online and (rep.get("kube") or {}).get("access"):
         bad_pods = kube_bad_pods(rep)
         sustain("kube_pod", bool(bad_pods),
-                {"pods": bad_pods_text(bad_pods), "n": len(bad_pods)})
+                {"pods": bad_pods_text(bad_pods), "n": len(bad_pods)},
+                below=not bad_pods, cool_s=_POD_CALM_S)
 
     if s.disk_temp_alert_c:  # макс по устройствам с датчиком (на VM датчика обычно нет)
         temps = [d["temp"] for d in (rep.get("disk_devs") or []) if d.get("temp") is not None]
@@ -4620,12 +4693,13 @@ def _server_conditions(s: Server, now: datetime,
     # Сервер задыхается (агент 2.26): уровень - худшая из причин, выдержка - как у CPU и RAM
     if online and any(rep.get(k) for k in ("psi", "dstate", "fds")):
         pr = pressure_problems(rep)
-        sustain_lvl("pressure", pr[0][0] if pr else 0, {"detail": "; ".join(t for _l, _r, t in pr[:3]),
+        sustain_lvl("pressure", pr[0][0] if pr else 0, cool_s=_CALM_S, ctx={"detail": "; ".join(t for _l, _r, t in pr[:3]),
                                                         "res": pr[0][1] if pr else "", "cause": ""})
     # Сеть ноды: потери TCP, очередь accept, conntrack, ошибки и дропы интерфейсов
     if online and (rep.get("tcp") or rep.get("net_ifaces")):
         nets = net_problems(rep)
-        sustain_lvl("net_health", nets[0][0] if nets else 0, {"detail": "; ".join(t for _l, _r, t in nets[:4])})
+        sustain_lvl("net_health", nets[0][0] if nets else 0, {"detail": "; ".join(t for _l, _r, t in nets[:4])},
+                    cool_s=_CALM_S)
     # Часто перезапускается: приросты счетчиков за сутки ведет цикл алертов (alert_state restarts).
     # sig - что именно, чтобы новый контейнер в той же беде дал свой алерт
     if online and isinstance((s.alert_state or {}).get("restarts"), dict):
@@ -4642,7 +4716,7 @@ def _server_conditions(s: Server, now: datetime,
     # Диск тормозит: задержка выше порога держится дольше выдержки
     if online and rep.get("disk_devs"):
         dl, dtext = disk_slow(rep)
-        sustain_lvl("disk_slow", dl, {"detail": dtext})
+        sustain_lvl("disk_slow", dl, {"detail": dtext}, cool_s=_CALM_S)
     # Сертификат nginx истекает или истек (helper webserver-setup 0.24)
     if online and web_certs.block(rep, now) is not None:
         wce = web_certs.problems(rep, now)
@@ -4875,6 +4949,9 @@ async def evaluate_servers(
             # с какого момента подряд тормозит каждый резолвер DNS (для "Что сломано")
             if "res" in cx and (st.get(f"{k}_res") or {}) != cx["res"]:
                 apply(s.id, f"{k}_res", cx["res"] or None)
+            # гистерезис CPU и RAM: с какого момента значение ниже линии снятия
+            if "cool" in cx and st.get(f"{k}_cool") != cx["cool"]:
+                apply(s.id, f"{k}_cool", cx["cool"])
             # выдержка отбоя упавших юнитов: с какого момента юнита нет среди упавших
             if "hold" in cx and (st.get(f"{k}_hold") or {}) != cx["hold"]:
                 apply(s.id, f"{k}_hold", cx["hold"] or None)

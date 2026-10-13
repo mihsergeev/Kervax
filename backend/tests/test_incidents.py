@@ -439,3 +439,39 @@ async def test_domain_alert_collapses_by_registrable_domain(tmp_path, monkeypatc
         for cid in ids:
             row = await s.get(Check, cid)
             assert row.domain_alerted_days == 7, cid
+
+
+async def test_site_and_its_www_failing_together_are_one_message(tmp_path, monkeypatch):
+    """Сайт и его www (или два поддомена за одним фронтом) падают и поднимаются одним тиком:
+    было по сообщению на монитор, с отбоями четыре вместо двух."""
+    from datetime import datetime, timezone
+    engine, factory = create_engine_and_factory(f"sqlite+aiosqlite:///{(tmp_path / 'same.db').as_posix()}")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    async with factory() as s:
+        for n, t in (("example.com", "https://example.com"), ("www.example.com", "https://www.example.com"),
+                     ("go.example.com", "https://go.example.com"), ("other.org", "https://other.org")):
+            s.add(Check(name=n, type="http", target=t, interval_seconds=60, enabled=True))
+        await s.commit()
+        ids = {c.name: c.id for c in (await s.scalars(select(Check))).all()}
+    sent: list = []
+
+    async def fake_send(cfg, text, parse_mode=None):
+        sent.append(text)
+        return []
+
+    monkeypatch.setattr("app.alerts.send_alert", fake_send)
+    settings = Settings(alert_webhook="http://hook")
+    pending = [("bad", "example.com", "degraded", "медленно: 3630 мс", None, ids["example.com"], None),
+               ("bad", "www.example.com", "degraded", "медленно: 3673 мс", None, ids["www.example.com"], None),
+               ("bad", "go.example.com", "down", "доступ запрещён (HTTP 403)", None, ids["go.example.com"], None),
+               ("bad", "other.org", "degraded", "медленно: 4000 мс", None, ids["other.org"], None)]
+    await collector._send_alerts(factory, settings, pending, datetime.now(timezone.utc))
+    assert len(sent) == 3, sent                      # другой статус и другой домен - отдельно
+    assert "медленно: 3630 мс" in sent[0] and "и www.example.com" in sent[0]
+    sent.clear()
+    rec = [("recovery", "example.com", "up", "HTTP 200 · 614 мс", None, ids["example.com"], None),
+           ("recovery", "www.example.com", "up", "HTTP 200 · 352 мс", None, ids["www.example.com"], None)]
+    await collector._send_alerts(factory, settings, rec, datetime.now(timezone.utc))
+    assert len(sent) == 1 and "и www.example.com" in sent[0]
+    await engine.dispose()

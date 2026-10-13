@@ -1427,7 +1427,10 @@ async def test_flux_chart_repo_down_is_a_warning_with_a_hint():
          "message": 'failed to fetch Helm repository index: failed to cache index to temporary file: '
                     'Get "https://charts.jetstack.io/index.yaml": dial tcp 8.6.112.0:443: i/o timeout'},
     ]})
+    # развернутое работает: про недоступный репозиторий чартов - только после двух часов
     s.alert_state = {"flux_stale_since": (now - timedelta(minutes=20)).isoformat()}
+    assert collector._server_conditions(s, now)["flux_stale"][0] == 0
+    s.alert_state = {"flux_stale_since": (now - timedelta(hours=2, minutes=1)).isoformat()}
     cond = collector._server_conditions(s, now)
     assert cond["flux_down"][0] == 0
     assert cond["flux_stale"][0] == 1

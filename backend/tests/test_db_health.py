@@ -108,3 +108,19 @@ def test_vacuum_only_for_a_transaction_holding_a_snapshot():
     # одна и та же транзакция - одна строка, про VACUUM
     one = _rep(_pg(idle_xact=4000, idle_xmin=4000))
     assert [k for _l, _t, k in db_health.problems(one, NOW)] == ["pg:pg:idle"]
+
+
+def test_a_dump_holds_its_transaction_by_design():
+    """Ночной pg_dump большой базы шел четыре часа и давал алерт "транзакция идет 1 ч": дамп
+    держит одну транзакцию от начала до конца. Про него - только если идет больше 12 часов."""
+    from datetime import datetime, timezone
+    from app import db_health
+    now = datetime(2026, 10, 13, 12, 0, tzinfo=timezone.utc)
+
+    def rep(xact, app):
+        return {"extras": {"db-health": {"v": 1, "ts": now.timestamp(), "items": [
+            {"engine": "pg", "container": "pg", "role": "primary", "xact": xact, "xact_db": "feed", "xact_app": app}]}}}
+    assert db_health.problems(rep(4 * 3600, "pg_dump"), now) == []
+    assert db_health.problems(rep(4 * 3600, "pg_basebackup"), now) == []
+    assert [k for _l, _t, k in db_health.problems(rep(13 * 3600, "pg_dump"), now)] == ["pg:pg:xact"]
+    assert [k for _l, _t, k in db_health.problems(rep(2 * 3600, "worker"), now)] == ["pg:pg:xact"]
