@@ -4,6 +4,14 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.4.148] - 2026-10-13
+
+### Fixed
+- Агент не ставился на Ubuntu 20.04: установщик скачивал его с ключом curl --retry-all-errors,
+  который появился только в curl 7.71, а там стоит 7.68. curl отказывался запускаться, и
+  установщик писал "панель недоступна с этого сервера", хотя дело было не в фаерволе. Теперь
+  ключ добавляется, только если curl его знает.
+
 ## [1.4.147] - 2026-10-13
 
 ### Added

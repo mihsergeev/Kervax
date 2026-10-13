@@ -148,7 +148,11 @@ mkdir -p "$BIN_DIR"
 # аплинк), скачивание одним заходом не заканчивается никогда — рвётся на одном и том же
 # месте и начинается заново. Докачка продолжает с места обрыва, и бинарь доезжает за
 # несколько проходов.
-curl -fsSL --connect-timeout 15 --retry 5 --retry-delay 3 --retry-all-errors \
+# --retry-all-errors появился в curl 7.71: на Ubuntu 20.04 (curl 7.68) ключ был незнаком, curl
+# не запускался, а установщик валил все на фаервол панели. Только там, где curl его знает.
+RETRY_ALL=""
+{ curl --help all; curl --help; } 2>/dev/null | grep -q -- '--retry-all-errors' && RETRY_ALL="--retry-all-errors"
+curl -fsSL --connect-timeout 15 --retry 5 --retry-delay 3 $RETRY_ALL \
      -C - "${URL%/}/api/agent/download/$ARCH" -o "$BIN.new" || {
   echo "✗ Панель недоступна с этого сервера. Если она за фаерволом — укажите" >&2
   echo "  «IP сервера» в её настройках и подождите ~2 мин (cron-синк), затем повторите." >&2
