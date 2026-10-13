@@ -26,11 +26,17 @@
 # "seen_since" is how far back that record reaches: the panel calls an account unused only when it
 # has looked long enough.
 #
+# 0.6: 0.5 hung on nodes with a big journal and the unit was killed after two minutes, every run.
+# systemd starts a service with SIGPIPE ignored, so "journalctl | head -1" (the oldest journal
+# entry) did not stop journalctl at the first line: it read gigabytes of journal to the end. The
+# unit now takes SIGPIPE back, every journalctl has a timeout, and the first fill reads the sshd
+# log newest first: cut short, it still covers everything back to the oldest login it reached.
+#
 # Only fingerprints, names and hashes leave the node: no key material, no crontab or sudoers
 # contents, no password hashes (only "set", "locked" or "empty"). The helper changes nothing.
 set -euo pipefail
 
-KERVAX_SETUP_VERSION=0.5  # MAJOR.MINOR; compared component-wise
+KERVAX_SETUP_VERSION=0.6  # MAJOR.MINOR; compared component-wise
 KERVAX_SETUP_ALWAYS=1     # safe on any node: it only reads files and systemctl
 
 HELPER_DIR=/lib65/kervax
@@ -101,23 +107,26 @@ keys() {
 }
 
 # Last SSH login per user from the sshd log, interactive or not: "user unixtime" lines, the first
-# line "#since unixtime" - the oldest journal entry when the record was started.
+# line "#since unixtime" - how far back the record reaches. The first fill goes newest first, so
+# when it is cut short (or journalctl fails) the record reaches back only to the oldest login it
+# read, never further than what was actually looked at.
 lastseen_update() {
-  local now=$1 new since
+  local now=$1 since raw="$LASTSEEN.raw"
   command -v journalctl >/dev/null 2>&1 || return 0
-  new=$(mktemp)
   if [ -s "$LASTSEEN" ]; then
     since=$(sed -n 's/^#since //p' "$LASTSEEN" | head -1)
     { grep -v '^#' "$LASTSEEN"
-      journalctl -u ssh -u sshd --since "-15min" -o short-unix --no-pager 2>/dev/null | lastseen_parse
-    } | lastseen_max > "$new"
+      timeout 30 journalctl -u ssh -u sshd --since "-15min" -o short-unix --no-pager 2>/dev/null | lastseen_parse
+    } | lastseen_max > "$raw"
   else
-    since=$(journalctl -o short-unix --no-pager 2>/dev/null | head -1 | cut -d. -f1)
-    journalctl -u ssh -u sshd -o short-unix --no-pager 2>/dev/null | lastseen_parse | lastseen_max > "$new"
+    since=$(timeout 20 journalctl -o short-unix --no-pager 2>/dev/null | head -1 | cut -d. -f1)
+    timeout 60 journalctl -r -u ssh -u sshd -o short-unix --no-pager 2>/dev/null | lastseen_parse > "$raw"
+    [ "${PIPESTATUS[0]}" = 0 ] || since=$(tail -n 1 "$raw" | cut -d' ' -f2)
+    lastseen_max < "$raw" > "$raw.max" && mv -f "$raw.max" "$raw"
   fi
   case "$since" in ''|*[!0-9]*) since=$now ;; esac
-  { echo "#since $since"; cat "$new"; } > "$LASTSEEN.tmp" && chmod 0600 "$LASTSEEN.tmp" && mv -f "$LASTSEEN.tmp" "$LASTSEEN"
-  rm -f "$new"
+  { echo "#since $since"; cat "$raw"; } > "$LASTSEEN.tmp" && chmod 0600 "$LASTSEEN.tmp" && mv -f "$LASTSEEN.tmp" "$LASTSEEN"
+  rm -f "$raw"
 }
 lastseen_parse() {
   grep -F 'Accepted ' | sed -nE 's/^([0-9]+)(\.[0-9]+)? .*Accepted [a-z/-]+ for ([A-Za-z0-9._@-]+) from .*/\3 \1/p'
@@ -221,7 +230,7 @@ ssh_info() {
   r=$(sshd -T -C user=root,host=probe.invalid,addr=203.0.113.1 2>/dev/null) || r="$t"
   sv() { printf '%s\n' "$1" | awk -v k="$2" '$1 == k { print $2; exit }'; }
   ports=$(printf '%s\n' "$t" | awk '$1 == "port" && $2 ~ /^[0-9]+$/ { print $2 }' | sort -un | head -5 | paste -sd, -)
-  j=$(journalctl -u ssh -u sshd --since "-10min" -o cat 2>/dev/null | tail -n 20000)
+  j=$(timeout 30 journalctl -u ssh -u sshd --since "-10min" -o cat 2>/dev/null | tail -n 20000)
   fail=$(printf '%s\n' "$j" | grep -cE "Failed (password|keyboard-interactive)|Invalid user|authentication failure" || true)
   accp=$(printf '%s\n' "$j" | grep -cE "Accepted (password|keyboard-interactive)" || true)
   # where the brute force comes from: the five busiest addresses
@@ -247,13 +256,17 @@ ssh_info() {
 }
 
 now=$(date +%s)
-tmp=$(mktemp "${OUT}.XXXXXX")
+# A run killed half way (0.5 on a big journal) left its temp file behind
+find "${OUT%/*}" -maxdepth 1 -name "${OUT##*/}.??????" -mmin +20 -delete 2>/dev/null
+rm -f "$LASTSEEN.raw" "$LASTSEEN.raw.max" "$LASTSEEN.tmp"
 ssh=$(ssh_info)
 lastseen_update "$now"
 seen_since=$(sed -n 's/^#since //p' "$LASTSEEN" 2>/dev/null | head -1)
 case "$seen_since" in ''|*[!0-9]*) seen_since=0 ;; esac
-printf '{"v":1,"ts":%s,"keys":[%s],"users":[%s],"sudo":%s,"cron":%s,"units":[%s],"listen":{%s},"ssh":%s,"seen_since":%s}\n' \
-  "$now" "$(keys)" "$(users)" "$(sudo_info)" "$(cron_info)" "$(units)" "$(listen_procs)" "${ssh:-null}" "$seen_since" > "$tmp"
+json=$(printf '{"v":1,"ts":%s,"keys":[%s],"users":[%s],"sudo":%s,"cron":%s,"units":[%s],"listen":{%s},"ssh":%s,"seen_since":%s}' \
+  "$now" "$(keys)" "$(users)" "$(sudo_info)" "$(cron_info)" "$(units)" "$(listen_procs)" "${ssh:-null}" "$seen_since")
+tmp=$(mktemp "${OUT}.XXXXXX")
+printf '%s\n' "$json" > "$tmp"
 chmod 0644 "$tmp"
 mv -f "$tmp" "$OUT"
 HELPER_EOF
@@ -269,6 +282,8 @@ Type=oneshot
 ExecStart=$HELPER
 Nice=10
 TimeoutStartSec=2min
+# "journalctl | head -1" stops journalctl only when SIGPIPE kills it; systemd ignores SIGPIPE by default
+IgnoreSIGPIPE=no
 EOF
 cat > /etc/systemd/system/kervax-changes.timer <<'EOF'
 [Unit]
