@@ -8,13 +8,15 @@ import html
 import logging
 import re
 
+from datetime import datetime, timezone
+
 import httpx
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import settings_store, tg_buttons
 from app.config import Settings
-from app.models import AlertEvent, User
+from app.models import AlertEvent, TgAlert, User
 
 log = logging.getLogger("kervax.alerts")
 
@@ -148,6 +150,44 @@ def _digest(messages: list[str]) -> str:
     return f"🌊 {len(messages)} алертов за раз —\n\n{body}"
 
 
+async def tg_edit(cfg: dict, chat: str, message_id: int, text: str, reply_markup: dict) -> None:
+    """Поправить отправленное сообщение: дописать статус и сменить кнопки. Сбой не страшен."""
+    base = (cfg.get("telegram_api") or "https://api.telegram.org").rstrip("/")
+    try:
+        async with httpx.AsyncClient(timeout=10) as http:
+            await http.post(f"{base}/bot{cfg['telegram_token']}/editMessageText", json={
+                "chat_id": chat, "message_id": message_id, "text": text, "parse_mode": "HTML",
+                "disable_web_page_preview": True, "reply_markup": reply_markup,
+            })
+    except Exception:  # noqa: BLE001
+        log.warning("сообщение %s/%s не поправлено", chat, message_id, exc_info=True)
+
+
+async def tg_resolve(session_factory, cfg: dict, messages: list) -> None:
+    """Пришел отбой: алерты с кнопками про то же (вид + объект) помечаем решенными и
+    дописываем в них "снова в норме" - эскалировать и глушить больше нечего."""
+    pairs = {(getattr(m, "kind", ""), getattr(m, "target", "")) for m in messages
+             if getattr(m, "recovery", False) and getattr(m, "kind", "")}
+    if not pairs:
+        return
+    now = datetime.now(timezone.utc)
+    try:
+        async with session_factory() as session:
+            rows = (await session.scalars(select(TgAlert).where(
+                TgAlert.resolved_at.is_(None), TgAlert.kind.in_({k for k, _ in pairs})))).all()
+            rows = [r for r in rows if (r.kind, r.target) in pairs]
+            for r in rows:
+                r.resolved_at = now
+            await session.commit()
+            tz = cfg.get("tz") or "UTC"
+            for r in rows:
+                text, markup = tg_buttons.row_text(r, tz, now), tg_buttons.row_keyboard(r)
+                for m in r.messages or []:
+                    await tg_edit(cfg, m.get("chat"), m.get("id"), text, markup)
+    except Exception:  # noqa: BLE001
+        log.warning("отбой не отмечен в алертах с кнопками", exc_info=True)
+
+
 def buttons_on(cfg: dict) -> bool:
     """Кнопки под алертами: включены в настройках и есть общий бот (его панель и читает)."""
     return bool(cfg.get("tg_buttons") and cfg.get("telegram_token"))
@@ -249,6 +289,8 @@ async def dispatch(
                 delivered.append(m)
     if rows:
         await tg_buttons.store_sent(session_factory, sent)
+    if session_factory is not None and buttons_on(cfg):
+        await tg_resolve(session_factory, cfg, messages)
     if session_factory is not None and delivered:
         await record_history(session_factory, delivered)
     return ok

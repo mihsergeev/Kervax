@@ -419,3 +419,144 @@ async def test_link_confirm_while_bot_polls(client, auth_headers, tg):
         await s.commit()
     r = await client.post("/api/auth/telegram/confirm", headers=auth_headers)
     assert r.status_code == 200 and r.json()["chat_id"] == "31337"
+
+
+# --- эскалация -------------------------------------------------------------------------------
+
+async def _esc_setup(f, **kw):
+    await _set_cfg(f)
+    async with f() as s:
+        await settings_store.set_tg_poll(s, {"status": "ok"})
+        await settings_store.set_escalation(s, {"enabled": True, "after_min": 15, "repeat": 2,
+                                                "chat": "-200", "kinds": ["offline", "down"], **kw})
+
+
+async def _esc_row(f, sid, kind="offline", minutes_ago=20, **kw) -> int:
+    async with f() as s:
+        row = TgAlert(ref=f"srv:{sid}", kind=kind, target="web-a", text="🔴 web-a — недоступен",
+                      messages=[{"chat": "-100", "id": 7}], ts=NOW - timedelta(minutes=minutes_ago), **kw)
+        s.add(row)
+        await s.commit()
+        return row.id
+
+
+async def test_escalation_repeats_unacked_alert(client, tg):
+    f = _factory(client)
+    await _esc_setup(f)
+    sid = await _server(f, alert_state={"offline": 1})
+    aid = await _esc_row(f, sid)
+    assert await tg_bot.escalate(f, collector.get_settings(), NOW) == 1
+    msg = tg.of("sendMessage")[-1]
+    assert msg["chat_id"] == "-200" and msg["text"].startswith("⏰ Никто не взял за 20 мин")
+    assert msg["reply_markup"]["inline_keyboard"][1][0]["text"] == "✋ Взял"
+    async with f() as s:
+        row = await s.get(TgAlert, aid)
+    assert row.esc_level == 1 and {m["chat"] for m in row.messages} == {"-100", "-200"}
+    # второй повтор - только через 15 минут после первого
+    assert await tg_bot.escalate(f, collector.get_settings(), NOW + timedelta(minutes=5)) == 0
+    assert await tg_bot.escalate(f, collector.get_settings(), NOW + timedelta(minutes=16)) == 1
+    # больше двух повторов не шлем
+    assert await tg_bot.escalate(f, collector.get_settings(), NOW + timedelta(hours=2)) == 0
+
+
+async def test_escalation_skips_acked_muted_and_early(client, tg):
+    f = _factory(client)
+    await _esc_setup(f)
+    sid = await _server(f, alert_state={"offline": 1})
+    await _esc_row(f, sid, acked_by="petya")
+    await _esc_row(f, sid, undo={"mute": {"t": "snooze", "prev": None}})
+    await _esc_row(f, sid, minutes_ago=5)
+    await _esc_row(f, sid, kind="disk")  # вид не выбран для эскалации
+    assert await tg_bot.escalate(f, collector.get_settings(), NOW) == 0
+
+
+async def test_escalation_stops_when_muted_in_panel_or_gone(client, tg):
+    f = _factory(client)
+    await _esc_setup(f)
+    muted = await _server(f, name="m", alert_state={"offline": 1}, alert_mutes=["offline"])
+    gone = await _server(f, name="g", alert_state={"offline": 0})
+    a1 = await _esc_row(f, muted)
+    a2 = await _esc_row(f, gone)
+    assert await tg_bot.escalate(f, collector.get_settings(), NOW) == 0
+    async with f() as s:
+        r1, r2 = await s.get(TgAlert, a1), await s.get(TgAlert, a2)
+    assert r1.esc_level == 2           # заглушили руками - больше не повторяем
+    assert r2.resolved_at is not None  # беда ушла без отбоя - отмечено решенным
+
+
+async def test_escalation_to_linked_users(client, tg):
+    f = _factory(client)
+    async with f() as s:
+        s.add_all([User(username="ivan", password_hash="x", role="operator", tg_chat_id="777"),
+                   User(username="own", password_hash="x", role="operator", tg_chat_id="888",
+                        tg_token="OTHER")])
+        await s.commit()
+    await _esc_setup(f, chat="", users=["ivan", "own"])
+    sid = await _server(f, alert_state={"offline": 1})
+    await _esc_row(f, sid)
+    assert await tg_bot.escalate(f, collector.get_settings(), NOW) == 1
+    # у "own" свой бот: кнопки там некому прочитать, туда не повторяем
+    assert [m["chat_id"] for m in tg.of("sendMessage")] == ["777"]
+
+
+async def test_escalation_off_or_paused(client, tg):
+    f = _factory(client)
+    await _esc_setup(f, enabled=False)
+    sid = await _server(f, alert_state={"offline": 1})
+    await _esc_row(f, sid)
+    assert await tg_bot.escalate(f, collector.get_settings(), NOW) == 0
+    await _esc_setup(f)
+    async with f() as s:
+        await settings_store.set_muted(s, True)
+    assert await tg_bot.escalate(f, collector.get_settings(), NOW) == 0
+
+
+async def test_recovery_resolves_and_strips_buttons(client, tg):
+    """Отбой про тот же вид и сервер: запись решена, кнопки глушения убраны, "вернуть"
+    остается, если вид заглушили кнопкой."""
+    f = _factory(client)
+    sid = await _server(f)
+    plain = await _row(f, f"srv:{sid}", "disk")
+    muted = await _row(f, f"srv:{sid}", "cpu")
+    async with f() as s:
+        r = await s.get(TgAlert, muted)
+        r.undo = {"mute": {"t": "snooze", "prev": None}}
+        await s.commit()
+    rec = [collector._server_alert_text("disk", "web-a", "снова в норме", recovery=True),
+           collector._server_alert_text("cpu", "web-a", "снова в норме", recovery=True)]
+    await alerts.dispatch(CFG, True, rec, 6, session_factory=f)
+    async with f() as s:
+        assert (await s.get(TgAlert, plain)).resolved_at is not None
+    edits = {e["message_id"]: e for e in tg.of("editMessageText")}
+    assert len(tg.of("editMessageText")) == 2
+    marks = [e["reply_markup"]["inline_keyboard"] for e in tg.of("editMessageText")]
+    assert [] in marks and [[{"text": "↩️ Вернуть алерты", "callback_data": f"kx:{muted}:un"}]] in marks
+    assert all("✅ снова в норме в" in e["text"] for e in edits.values())
+
+
+async def test_api_escalation_roundtrip(client, auth_headers, tg):
+    body = {"telegram_token": "T", "telegram_chat": "-100", "telegram_api": "", "webhook": "",
+            "flood_threshold": 6, "muted": False, "tg_buttons": True, "tz": "",
+            "escalation": {"enabled": True, "after_min": 30, "repeat": 3, "chat": "-5",
+                           "users": ["admin"], "kinds": ["down"]}}
+    r = await client.put("/api/alerts", json=body, headers=auth_headers)
+    assert r.status_code == 200
+    j = r.json()
+    assert j["escalation"] == {"enabled": True, "after_min": 30, "repeat": 3, "chat": "-5",
+                               "users": ["admin"], "kinds": ["down"]}
+    assert {"username": "admin", "linked": False} in j["esc_candidates"]
+    # без поля escalation настройки эскалации не трогаем
+    r = await client.put("/api/alerts", json={k: v for k, v in body.items() if k != "escalation"},
+                         headers=auth_headers)
+    assert r.json()["escalation"]["after_min"] == 30
+
+
+async def test_no_escalation_while_bot_unread(client, tg):
+    """Бота не читаем (409): нажатие "взял" до панели не дойдет - не повторяем."""
+    f = _factory(client)
+    await _esc_setup(f)
+    async with f() as s:
+        await settings_store.set_tg_poll(s, {"status": "conflict"})
+    sid = await _server(f, alert_state={"offline": 1})
+    await _esc_row(f, sid)
+    assert await tg_bot.escalate(f, collector.get_settings(), NOW) == 0

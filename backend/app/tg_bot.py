@@ -230,13 +230,93 @@ async def _refresh(cfg: dict, row: TgAlert, tz: str) -> None:
     text = tg_buttons.row_text(row, tz)
     markup = tg_buttons.row_keyboard(row)
     for m in row.messages or []:
-        try:
-            await _call(cfg, "editMessageText", {
-                "chat_id": m.get("chat"), "message_id": m.get("id"), "text": text,
-                "parse_mode": "HTML", "disable_web_page_preview": True, "reply_markup": markup,
-            })
-        except Exception:  # noqa: BLE001 - одна недоступная копия не мешает остальным
-            log.warning("не поправлено сообщение %s", m, exc_info=True)
+        await alerts.tg_edit(cfg, m.get("chat"), m.get("id"), text, markup)
+
+
+# --- эскалация --------------------------------------------------------------------------------
+
+async def _still_wanted(session, row: TgAlert, now: datetime) -> bool | None:
+    """Стоит ли еще повторять: True - да, False - заглушили в панели или объекта нет (больше не
+    повторять), None - беда ушла, а отбой не пришел (заглушен, мигание) - отметить решенным."""
+    obj, ids = _ref(row)
+    if obj == "srv" and ids:
+        s = await session.get(Server, ids[0])
+        if s is None or not s.enabled:
+            return False
+        if (s.snooze_until is not None and _aware(s.snooze_until) > now) or row.kind in _server_mutes(s, now):
+            return False
+        lvl = (s.alert_state or {}).get(row.kind)
+        if isinstance(lvl, int) and not isinstance(lvl, bool) and lvl <= 0:
+            return None
+        return True
+    if obj == "chk" and ids:
+        c = await session.get(Check, ids[0])
+        if c is None or not c.enabled:
+            return False
+        if (c.snooze_until is not None and _aware(c.snooze_until) > now) or row.kind in (c.alert_mutes or []):
+            return False
+        if row.kind == "down" and c.last_status != "down":
+            return None
+        return True
+    return False
+
+
+async def escalate(session_factory, settings: Settings, now: datetime | None = None) -> int:
+    """Повтор алертов, на которые никто не нажал "взял": через N минут - в чат эскалации и
+    выбранным учеткам, и так до заданного числа повторов. Возвращает, сколько повторено."""
+    now = now or datetime.now(timezone.utc)
+    async with session_factory() as session:
+        cfg = await settings_store.get_alert_config(session, settings)
+        esc = await settings_store.get_escalation(session)
+        if not (alerts.buttons_on(cfg) and esc["enabled"]) or await settings_store.get_muted(session):
+            return 0
+        # бот не читается (409, сеть): "взял" до нас не доходит, и повтор был бы враньем
+        if (await settings_store.get_tg_poll(session)).get("status") != "ok":
+            return 0
+        chats = [esc["chat"]] if esc["chat"] else []
+        if esc["users"]:
+            for u in (await session.scalars(select(User).where(User.username.in_(esc["users"])))).all():
+                if u.tg_chat_id and (not u.tg_token or u.tg_token == cfg.get("telegram_token")):
+                    chats.append(u.tg_chat_id)
+        chats = list(dict.fromkeys(c for c in chats if c))
+        if not chats:
+            return 0
+        after = timedelta(minutes=esc["after_min"])
+        rows = (await session.scalars(select(TgAlert).where(
+            TgAlert.acked_by == "", TgAlert.resolved_at.is_(None),
+            TgAlert.esc_level < esc["repeat"], TgAlert.kind.in_(esc["kinds"]),
+            TgAlert.ts > now - timedelta(days=2)))).all()
+        tz = cfg.get("tz") or "UTC"
+        done = 0
+        for row in rows:
+            start = _aware(row.esc_at) or _aware(row.ts) or now
+            if now - start < after or "mute" in (row.undo or {}):
+                continue
+            wanted = await _still_wanted(session, row, now)
+            if wanted is None:
+                row.resolved_at = now
+                continue
+            if not wanted:
+                row.esc_level = esc["repeat"]  # заглушили руками: больше не повторяем
+                continue
+            mins = int((now - _aware(row.ts)).total_seconds() // 60) if row.ts else esc["after_min"]
+            text = f"⏰ Никто не взял за {mins} мин\n\n" + tg_buttons.row_text(row, tz, now)
+            sent = []
+            for chat in chats:
+                try:
+                    mid = await alerts.tg_send(cfg.get("telegram_api", ""), cfg["telegram_token"], chat,
+                                               text, "HTML", tg_buttons.row_keyboard(row))
+                    if mid is not None:
+                        sent.append({"chat": str(chat), "id": mid})
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("эскалация в %s не отправлена: %s", chat, exc)
+            if not sent:
+                continue  # никуда не ушло - попробуем на следующем заходе
+            row.messages = list(row.messages or []) + sent
+            row.esc_level, row.esc_at = row.esc_level + 1, now
+            done += 1
+        await session.commit()
+    return done
 
 
 async def handle_callback(session_factory, cfg: dict, cq: dict, now: datetime) -> None:
@@ -512,6 +592,10 @@ async def poll_loop(session_factory, settings: Settings) -> None:
         except Exception:  # noqa: BLE001
             log.exception("опрос бота упал")
             wait = _BACKOFF_ERR
+        try:
+            await escalate(session_factory, settings)
+        except Exception:  # noqa: BLE001
+            log.exception("эскалация упала")
         now = datetime.now(timezone.utc)
         if last_clean is None or now - last_clean > timedelta(days=1):
             await _cleanup(session_factory)

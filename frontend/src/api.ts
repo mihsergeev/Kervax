@@ -661,6 +661,18 @@ export type AlertConfig = {
   tz: string
   // как идет опрос бота (кнопки под алертами): ok | conflict | error | off
   tg_poll: { status: string; error: string; ts: string; bot: string }
+  escalation: Escalation
+  esc_candidates: { username: string; linked: boolean }[]
+}
+
+// Повтор алерта, на который никто не нажал «взял»
+export type Escalation = {
+  enabled: boolean
+  after_min: number
+  repeat: number
+  chat: string
+  users: string[]
+  kinds: string[]
 }
 
 export function getAlerts(): Promise<AlertConfig> {
@@ -676,6 +688,7 @@ export function putAlerts(body: {
   muted: boolean
   tg_buttons: boolean
   tz: string
+  escalation?: Escalation
 }): Promise<AlertConfig> {
   return api<AlertConfig>('/api/alerts', { method: 'PUT', body: JSON.stringify(body) })
 }
