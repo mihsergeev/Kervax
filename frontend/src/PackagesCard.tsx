@@ -52,13 +52,15 @@ export function PackagesCard({ server: s, onUnauthorized }: Props) {
   if (!sum?.n) return null
   const shown = want ? res : null
   return (
-    <div className="detail-inc pkgs" id="mcard-pkgs">
-      <div className="chart-cap">{t('Пакеты')}</div>
-      <div className="pkgs-bar">
+    <div className="chart-card net-card" id="mcard-pkgs">
+      <div className="net-head">
+        <div className="chart-cap">{t('Пакеты')}</div>
         <span className="muted small">
           {t('установлено: {n}', { n: sum.n })}
           {sum.mgr ? ` (${sum.mgr})` : ''}
         </span>
+      </div>
+      <div className="pkgs-bar">
         <input
           className="pkgs-search"
           value={q}

@@ -303,8 +303,10 @@ export function JournalCard({ server: s }: { server: Server }) {
   if (isViewer) return null
   const block = journalBlocker(s)
   return (
-    <div className="detail-inc" id="mcard-journal">
-      <div className="chart-cap">{t('Журнал systemd')}</div>
+    <div className="chart-card net-card net-card-narrow" id="mcard-journal">
+      <div className="net-head">
+        <div className="chart-cap">{t('Журнал systemd')}</div>
+      </div>
       {block ? (
         <div className="muted small">
           {block === 'agent'

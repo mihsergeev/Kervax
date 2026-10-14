@@ -1429,6 +1429,16 @@ const EN: Record<string, string> = {
   'все в порядке': 'all fine',
   'Ошибки ввода-вывода': 'I/O errors',
   'за 10 мин': 'in 10 min',
+  // процессы: плитки давления
+  '{r}: ждут': '{r}: waiting',
+  'все стоят {p}': 'all stalled {p}',
+  'за 10 с {p}': '10 s {p}',
+  'В D-state': 'In D-state',
+  'ждут диск или сеть': 'waiting for disk or network',
+  'Файловые дескрипторы': 'File descriptors',
+  '{u} из {m}': '{u} of {m}',
+  'Процент - доля времени за минуту, когда хоть один процесс ждал ресурс, "все стоят" - когда ждали все сразу. D-state - процессы, которые ждут диск или сеть и не прерываются.':
+    'The percentage is the share of the last minute when at least one process waited for the resource, "all stalled" is when all of them waited at once. D-state processes wait for disk or network and cannot be interrupted.',
   // утечка памяти
   'Растет память': 'Memory keeps growing',
   'Минимум памяти за сутки растет 4 суток подряд. Пила сборщика мусора и всплески минимум не двигают, а утечка поднимает его каждый день.':

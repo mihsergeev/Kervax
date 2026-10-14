@@ -2315,37 +2315,40 @@ function ChangesFeed({ server: s, onChanged }: { server: Server; onChanged: () =
       setBusy(false)
     }
   }
+  const when = (ts: string) =>
+    new Date(ts).toLocaleString([], { day: '2-digit', month: '2-digit', year: '2-digit', hour: '2-digit', minute: '2-digit' })
   return (
-    <div className="detail-inc changes" id="mcard-changes">
-      <div className="chart-cap">{t('Изменения на сервере')}</div>
-      <div className="muted small">
+    <div className="chart-card net-card net-card-wide" id="mcard-changes">
+      <div className="net-head">
+        <div className="chart-cap">{t('Изменения на сервере')}</div>
+        {fresh.length > 0 && !isViewer && (
+          <button className="ghost small row-act" disabled={busy} onClick={doAck}>
+            {t('это мы, все в порядке')}
+          </button>
+        )}
+      </div>
+      <div className="net-sub">
         {t('SSH-ключей: {k}, пользователей с shell: {u}. Снимок раз в 10 минут, без содержимого ключей и кронов.', {
           k: ch.keys,
           u: ch.users,
         })}
       </div>
-      {fresh.length > 0 && !isViewer && (
-        <div className="unit-actions small">
-          <span className="t-down">{t('Изменился доступ: проверьте, что это свои.')}</span>
-          <button className="ghost small row-act" disabled={busy} onClick={doAck}>
-            {t('это мы, все в порядке')}
-          </button>
-        </div>
-      )}
+      {fresh.length > 0 && <div className="net-prob">{t('Изменился доступ: проверьте, что это свои.')}</div>}
       {ch.log.length === 0 && <div className="muted small">{t('Изменений пока не было.')}</div>}
       {shown.length > 0 && (
-        <table className="exp-table small">
-          <tbody>
-            {shown.map((e, i) => (
-              <tr key={i} className={e.alert && e.ts > ack ? 'exp-bad' : ''}>
-                <td className="muted">{new Date(e.ts).toLocaleString()}</td>
-                <td className={e.alert && e.ts > ack ? 't-down' : ''}>
+        <div className="ch-list small">
+          {shown.map((e, i) => {
+            const hot = e.alert && e.ts > ack
+            return (
+              <div key={i} className={`ch-row${hot ? ' ch-row-hot' : ''}`}>
+                <span className="ch-time mono muted" title={new Date(e.ts).toLocaleString()}>{when(e.ts)}</span>
+                <span className={`ch-text${hot ? ' t-down' : ''}`}>
                   {CHANGE_ICON[e.kind] ?? ''} {e.text}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+                </span>
+              </div>
+            )
+          })}
+        </div>
       )}
       {ch.log.length > 12 && (
         <button className="ghost small row-act exp-more" onClick={() => setAll(!all)}>
@@ -2362,57 +2365,58 @@ function PressureCard({ server: s }: { server: Server }) {
   const psi = r?.psi
   if (!psi && !r?.dstate && !r?.fds) return null
   const prob = (s.problems ?? []).find((p) => p.kind === 'pressure')
-  const cell = (k: string, lim: number) => {
-    const a = psi?.[`${k}_10`]
-    const b = psi?.[`${k}_60`]
-    if (a == null && b == null) return <td className="muted">-</td>
-    const hot = lim > 0 && (b ?? 0) >= lim
-    return (
-      <td className={hot ? 't-down' : ''}>
-        {(a ?? 0).toFixed(1)}% / {(b ?? 0).toFixed(1)}%
-      </td>
-    )
-  }
+  const pc = (v: number) => `${v.toFixed(v > 0 && v < 10 ? 1 : 0)}%`
   const fdPct = r?.fds && r.fds.max > 0 ? (r.fds.used / r.fds.max) * 100 : null
   const ds = r?.dstate
   return (
-    <div className="detail-inc pressure" id="mcard-pressure">
-      <div className="chart-cap">{t('Давление на ресурсы')}</div>
-      {prob && <div className="t-down small">{prob.text}</div>}
-      {psi && (
-        <table className="exp-table psi-table small">
-          <thead>
-            <tr>
-              <td />
-              <td className="muted">{t('ждут (some)')}</td>
-              <td className="muted">{t('все стоят (full)')}</td>
-            </tr>
-          </thead>
-          <tbody>
-            {PSI_ROWS.map((x) => (
-              <tr key={x.k}>
-                <td>{t(x.label)}</td>
-                {cell(`${x.k}_some`, x.some)}
-                {cell(`${x.k}_full`, x.full)}
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      )}
-      {psi && <div className="muted small">{t('доля времени, когда процессы ждали ресурс: за 10 секунд / за минуту')}</div>}
-      {ds && (
-        <div className={`small ${ds.n >= 5 ? 't-down' : ''}`}>
-          {t('В D-state (ждут диск или сеть): {n}', { n: ds.n })}
-          {(ds.top?.length ?? 0) > 0 && <span className="muted"> - {ds.top!.map((x) => `${x.c} (${x.n})`).join(', ')}</span>}
-        </div>
-      )}
-      {r?.fds && fdPct != null && (
-        <div className={`small ${fdPct >= 80 ? 't-down' : ''}`}>
-          {t('Файловые дескрипторы: {u} из {m} ({p}%)', {
-            u: fmtNum(r.fds.used),
-            m: fmtNum(r.fds.max),
-            p: fdPct.toFixed(fdPct < 1 ? 2 : 0),
+    <div className="chart-card net-card net-card-wide" id="mcard-pressure">
+      <div className="net-head">
+        <div className="chart-cap">{t('Давление на ресурсы')}</div>
+      </div>
+      {prob && <div className="net-prob">{prob.text}</div>}
+      <div className="net-tiles">
+        {psi &&
+          PSI_ROWS.map((x) => {
+            const some = psi[`${x.k}_some_60`]
+            const full = psi[`${x.k}_full_60`]
+            const some10 = psi[`${x.k}_some_10`]
+            if (some == null && full == null && some10 == null) return null
+            // пороги как у алерта "Сервер задыхается": по минутному среднему
+            const hot = (x.some > 0 && (some ?? 0) >= x.some) || (x.full > 0 && (full ?? 0) >= x.full)
+            const sub = [
+              full != null ? t('все стоят {p}', { p: pc(full) }) : '',
+              some10 != null ? t('за 10 с {p}', { p: pc(some10) }) : '',
+            ].filter(Boolean)
+            return (
+              <NetTile
+                key={x.k}
+                label={t('{r}: ждут', { r: t(x.label) })}
+                value={pc(some ?? 0)}
+                sub={sub.join(' · ')}
+                tone={hot ? 'bad' : undefined}
+              />
+            )
           })}
+        {ds && (
+          <NetTile
+            label={t('В D-state')}
+            value={String(ds.n)}
+            sub={(ds.top?.length ?? 0) > 0 ? ds.top!.map((x) => `${x.c} (${x.n})`).join(', ') : t('ждут диск или сеть')}
+            tone={ds.n >= 5 ? 'bad' : undefined}
+          />
+        )}
+        {r?.fds && fdPct != null && (
+          <NetTile
+            label={t('Файловые дескрипторы')}
+            value={`${fdPct.toFixed(fdPct < 1 ? 2 : 0)}%`}
+            sub={t('{u} из {m}', { u: fmtNum(r.fds.used), m: fmtNum(r.fds.max) })}
+            tone={fdPct >= 80 ? 'bad' : undefined}
+          />
+        )}
+      </div>
+      {psi && (
+        <div className="net-foot">
+          {t('Процент - доля времени за минуту, когда хоть один процесс ждал ресурс, "все стоят" - когда ждали все сразу. D-state - процессы, которые ждут диск или сеть и не прерываются.')}
         </div>
       )}
     </div>
@@ -2440,12 +2444,14 @@ function LoopingUnits({ server: s, onChanged }: { server: Server; onChanged: () 
     }
   }
   return (
-    <div className="detail-inc" id="mcard-unitloop">
-      <div className="chart-cap">{t('Юниты в цикле перезапусков')}</div>
+    <div className="chart-card net-card net-card-wide" id="mcard-unitloop">
+      <div className="net-head">
+        <div className="chart-cap">{t('Юниты в цикле перезапусков')}</div>
+      </div>
       {rows.map((p) => (
         <div key={p.unit} className="unit-row">
           <div className="unit-head">
-            <span className="sdot sdot-down" />
+            <span className="lk-dot lk-dot-bad" />
             <span className="t-down">{p.text}</span>
             {sinceShort(p.since, t) && <span className="muted small">{sinceShort(p.since, t)}</span>}
           </div>
@@ -2873,23 +2879,32 @@ function NoBootUnits({ server: s, onChanged }: { server: Server; onChanged: () =
   const live = units.filter((u) => !u.muted)
   const cmd = `systemctl enable ${live.map((u) => u.unit).join(' ')}`
   return (
-    <div className="detail-inc" id="mcard-noboot">
-      <div className="chart-cap">{t('Не запустятся после перезагрузки')}</div>
-      <div className="muted small">
+    <div className="chart-card net-card" id="mcard-noboot">
+      <div className="net-head">
+        <div className="chart-cap">{t('Не запустятся после перезагрузки')}</div>
+      </div>
+      <div className="net-sub">
         {t('Работают, но не включены: их запустили systemctl start без enable, и после ребута их не будет.')}
       </div>
-      {units.map((u) => (
-        <div key={u.unit} className={`small${u.muted ? ' muted' : ''}`}>
-          <span className="mono">{u.unit}</span>
-          {u.started > 0 && <span className="muted"> · {t('работает с {d}', { d: new Date(u.started * 1000).toLocaleDateString() })}</span>}
-          {!isViewer && (
-            <button className="ghost small" disabled={busy === NOBOOT_MUTE + u.unit}
-              onClick={() => toggle(NOBOOT_MUTE + u.unit, !u.muted)}>
-              {u.muted ? t('вернуть') : t('не нужен после перезагрузки')}
-            </button>
-          )}
-        </div>
-      ))}
+      <div className="loc-results">
+        {units.map((u) => (
+          <div key={u.unit} className={`loc-res nb-row${u.muted ? ' loc-res-off' : ''}`}>
+            <span className={`lk-dot${u.muted ? '' : ' lk-dot-warn'}`} />
+            <span className="mono nb-name">{u.unit}</span>
+            {u.started > 0 && (
+              <span className="muted small nb-since">
+                {t('работает с {d}', { d: new Date(u.started * 1000).toLocaleDateString() })}
+              </span>
+            )}
+            {!isViewer && (
+              <button className="ghost small row-act" disabled={busy === NOBOOT_MUTE + u.unit}
+                onClick={() => toggle(NOBOOT_MUTE + u.unit, !u.muted)}>
+                {u.muted ? t('вернуть') : t('не нужен после перезагрузки')}
+              </button>
+            )}
+          </div>
+        ))}
+      </div>
       {live.length > 0 && (
         <div className="agent-advice-cmd">
           <pre>{cmd}</pre>
@@ -3042,8 +3057,10 @@ function FailedUnits({ server: s, onChanged }: { server: Server; onChanged: () =
     })
   }
   return (
-    <div className="detail-inc" id="mcard-units">
-      <div className="chart-cap">{t('Упавшие юниты systemd')}</div>
+    <div className="chart-card net-card net-card-wide" id="mcard-units">
+      <div className="net-head">
+        <div className="chart-cap">{t('Упавшие юниты systemd')}</div>
+      </div>
       {!agentOk && !isViewer && ub.fix && (
         <div className="muted small du-note">{t('Кнопки перезапуска появятся после обновления агента до 2.17.')}</div>
       )}
@@ -3060,7 +3077,7 @@ function FailedUnits({ server: s, onChanged }: { server: Server; onChanged: () =
           return (
             <div key={u.unit} className={`unit-row${perm || snoozed ? ' unit-muted' : ''}`}>
               <div className="unit-head">
-                <span className={`sdot sdot-${unitLevel(u) === 2 ? 'down' : 'degraded'}`} />
+                <span className={`lk-dot lk-dot-${unitLevel(u) === 2 ? 'bad' : 'warn'}`} />
                 <span className="mono unit-name">{u.unit}</span>
                 <span className={unitLevel(u) === 2 ? 't-down' : 't-degraded'}>{unitWhy(u, t)}</span>
                 <span className="muted small">{ago(u)}</span>
@@ -5605,13 +5622,15 @@ function ServerDetail({
         </MetricSection>
 
         <MetricSection id="proc" title={t('Процессы')}>
-          <PressureCard server={s} />
-          <LoopingUnits server={s} onChanged={onChanged} />
-          <FailedUnits server={s} onChanged={onChanged} />
-          <NoBootUnits server={s} onChanged={onChanged} />
-          <JournalCard server={s} />
-          <ChangesFeed server={s} onChanged={onChanged} />
-          <PackagesCard server={s} onUnauthorized={onUnauthorized} />
+          <div className="net-cards">
+            <LoopingUnits server={s} onChanged={onChanged} />
+            <FailedUnits server={s} onChanged={onChanged} />
+            <PressureCard server={s} />
+            <NoBootUnits server={s} onChanged={onChanged} />
+            <ChangesFeed server={s} onChanged={onChanged} />
+            <JournalCard server={s} />
+            <PackagesCard server={s} onUnauthorized={onUnauthorized} />
+          </div>
           <div className="chart-grid">
             <ProcCard title={t('Топ по CPU')} procs={r.top_cpu} kind="cpu" total={r.mem_total ?? 0} t={t} />
             <ProcCard title={t('Топ по памяти')} procs={r.top_mem} kind="mem" total={r.mem_total ?? 0} t={t} />

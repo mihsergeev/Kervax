@@ -1014,7 +1014,6 @@ input:focus {
   color: #fff;
 }
 .exp-more { align-self: flex-start; }
-.pressure { margin-bottom: 0.8rem; }
 /* раздел "Сеть": здоровье, связь с другими серверами, трафик за месяц (NetLinks.tsx) -
    карточки как у графиков, числа плитками как stat-панели Grafana */
 .net-cards { display: flex; flex-wrap: wrap; gap: 0.75rem; margin-top: 0.75rem; align-items: stretch; }
@@ -1075,6 +1074,21 @@ input:focus {
 .ds-act .du-fix-btn:hover:not(:disabled) { background: var(--card-hover); }
 .net-card .du-note, .net-card .dh-note, .net-card .dh-io { margin: 0; }
 .net-card > .du-fs { margin-top: 0; }
+/* "Процессы": юниты рамками-строками, журнал узкой карточкой, изменения как панель логов */
+.net-cards > .net-card-narrow { flex: 0 1 300px; }
+.net-card .unit-row, .net-card .unit-row:first-of-type { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 0.5rem 0.7rem; }
+.net-card .unit-row .lk-dot { align-self: center; }
+.net-card .pkgs-bar { margin: 0; }
+.loc-res.nb-row { flex-wrap: wrap; }
+.nb-name { flex: 1 1 auto; min-width: 0; font-weight: 600; overflow-wrap: anywhere; }
+.nb-since { flex: 0 0 auto; }
+.nb-row .row-act { margin: 0; }
+.ch-list { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 0.15rem 0; }
+.ch-row { display: grid; grid-template-columns: 7.5rem minmax(0, 1fr); gap: 0.7rem; padding: 0.3rem 0.7rem; border-top: 1px solid color-mix(in srgb, var(--border) 60%, transparent); border-left: 3px solid transparent; }
+.ch-row:first-child { border-top: 0; }
+.ch-row-hot { border-left-color: var(--down); background: rgba(239, 68, 68, 0.06); }
+.ch-time { white-space: nowrap; font-variant-numeric: tabular-nums; }
+.ch-text { overflow-wrap: anywhere; }
 .net-tone-muted { color: var(--text-muted); }
 .net-foot { color: var(--text-muted); font-size: 0.78rem; display: flex; flex-direction: column; gap: 0.2rem; }
 /* строки связей: точка состояния, имя и адрес, мини-график за час, время подключения */
@@ -1151,10 +1165,9 @@ input:focus {
   /* находки: имя не сжимается в столбик, размер и кнопка переносятся строкой ниже */
   .du-item .du-item-head { flex-wrap: wrap; row-gap: 0.3rem; }
   .du-item-head .du-item-name { flex: 1 1 55%; }
+  /* изменения: время над текстом */
+  .ch-row { grid-template-columns: minmax(0, 1fr); gap: 0.1rem; }
 }
-.changes { margin: 0.8rem 0; }
-.changes .exp-table td:first-child { width: 10.5rem; }
-.changes .exp-table td:last-child { text-align: left; white-space: normal; }
 .osupd {
   margin: 0.6rem 0;
   padding: 0.6rem 0.8rem;
