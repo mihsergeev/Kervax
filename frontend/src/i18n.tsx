@@ -1437,6 +1437,21 @@ const EN: Record<string, string> = {
   'ждут диск или сеть': 'waiting for disk or network',
   'Файловые дескрипторы': 'File descriptors',
   '{u} из {m}': '{u} of {m}',
+  // CPU и память: плитки "сейчас"
+  'Загрузка CPU': 'CPU usage',
+  'алерт от {p}': 'alert from {p}',
+  '5 и 15 мин: {a} / {b}': '5 and 15 min: {a} / {b}',
+  'Самое загруженное ядро': 'Busiest core',
+  'ядро {n}': 'core {n}',
+  'Температура': 'Temperature',
+  'Частота': 'Frequency',
+  'Тепловой троттлинг': 'Thermal throttling',
+  'за последний отчет': 'in the last report',
+  'Занято': 'Used',
+  'Доступно': 'Available',
+  'из них кэш {n}': 'cache {n} of it',
+  'Обмен со swap': 'Swap traffic',
+  'загрузка {a} · выгрузка {b}': 'in {a} · out {b}',
   'Процент - доля времени за минуту, когда хоть один процесс ждал ресурс, "все стоят" - когда ждали все сразу. D-state - процессы, которые ждут диск или сеть и не прерываются.':
     'The percentage is the share of the last minute when at least one process waited for the resource, "all stalled" is when all of them waited at once. D-state processes wait for disk or network and cannot be interrupted.',
   // утечка памяти

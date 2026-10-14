@@ -4,6 +4,15 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.4.184] - 2026-10-15
+
+### Changed
+- Разделы "CPU" и "Память" в стиле "Сети". Сверху плитки "сейчас": загрузка CPU (цвет по
+  порогу алерта сервера), load average, ядра и модель, самое загруженное ядро, температура,
+  частота на железе и тепловой троттлинг; у памяти - занято, доступно и кэш, swap, обмен со
+  swap и OOM-киллы. Контейнеры, поды и процессы по CPU и памяти - карточками рядом друг с
+  другом, "Растет память" - строками с цветной точкой и приростом в сутки справа.
+
 ## [1.4.183] - 2026-10-15
 
 ### Changed

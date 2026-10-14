@@ -1089,6 +1089,12 @@ input:focus {
 .ch-row-hot { border-left-color: var(--down); background: rgba(239, 68, 68, 0.06); }
 .ch-time { white-space: nowrap; font-variant-numeric: tabular-nums; }
 .ch-text { overflow-wrap: anywhere; }
+/* "CPU" и "Память": плитки "сейчас" над графиками, утечки строками */
+.net-cards.now-cards { margin: 0 0 0.75rem; }
+.now-card { padding-top: 0.75rem; }
+.loc-res.ml-row { gap: 0.7rem; }
+.ml-main { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
+.ml-rate { flex: 0 0 auto; text-align: right; }
 .net-tone-muted { color: var(--text-muted); }
 .net-foot { color: var(--text-muted); font-size: 0.78rem; display: flex; flex-direction: column; gap: 0.2rem; }
 /* строки связей: точка состояния, имя и адрес, мини-график за час, время подключения */
@@ -1167,6 +1173,8 @@ input:focus {
   .du-item-head .du-item-name { flex: 1 1 55%; }
   /* изменения: время над текстом */
   .ch-row { grid-template-columns: minmax(0, 1fr); gap: 0.1rem; }
+  .loc-res.ml-row { flex-wrap: wrap; }
+  .ml-rate { flex-basis: 100%; text-align: left; padding-left: calc(9px + 0.7rem); }
 }
 .osupd {
   margin: 0.6rem 0;
@@ -1195,7 +1203,6 @@ input:focus {
 .du-lvl-careful { color: var(--degraded); }
 .du-lvl-manual { color: var(--text-muted); }
 .du-note { margin: 0.2rem 0 0.4rem; }
-.mem-cont { margin-top: 0.8rem; }
 .mc-row .loc-res-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .mc-row .loc-res-metric { min-width: 4.5rem; text-align: right; }
 .mc-row .loc-res-msg { min-width: 2.5rem; }
