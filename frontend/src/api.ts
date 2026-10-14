@@ -1914,6 +1914,8 @@ export type NetLink = {
   fresh: boolean
   last_ts: string | null
   held: boolean // сервер, с которым связь, сам молчит
+  // мини-график за час: по точке на 2 минуты [время подключения, худшая доля неудач] или null
+  spark?: ([number | null, number] | null)[] | null
 }
 export type NetLinksOut = {
   links: NetLink[]

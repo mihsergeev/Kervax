@@ -1017,39 +1017,89 @@ input:focus {
 }
 .exp-more { align-self: flex-start; }
 .pressure { margin-bottom: 0.8rem; }
-.nethealth { margin-top: 0.8rem; }
-/* связь с другими серверами и трафик за месяц (NetLinks.tsx) */
-#mcard-links, #mcard-traffic { margin-top: 0.8rem; }
-.lk-table { width: 100%; table-layout: fixed; }
-.lk-table td { overflow-wrap: anywhere; vertical-align: top; white-space: normal; }
-.lk-table td:first-child { width: auto; white-space: normal; }
-.lk-table td:nth-child(2) { width: 42%; white-space: normal; text-align: left; }
-.lk-table .lk-act { width: 2.6rem; text-align: right; }
-.lk-host { font-size: 0.75rem; }
-.lk-chart { margin: 0.2rem 0 0.4rem; }
-.lk-table .lk-chart-row td { white-space: normal; text-align: left; }
-.lk-chart .win-switch { margin-bottom: 0.3rem; }
-.lk-form { display: flex; flex-wrap: wrap; gap: 0.4rem; align-items: center; margin-top: 0.5rem; }
+/* раздел "Сеть": здоровье, связь с другими серверами, трафик за месяц (NetLinks.tsx) -
+   карточки как у графиков, числа плитками как stat-панели Grafana */
+.net-cards { display: flex; flex-wrap: wrap; gap: 0.75rem; margin-top: 0.75rem; align-items: stretch; }
+.net-cards > .net-card { flex: 1 1 380px; min-width: 0; margin-top: 0; display: flex; flex-direction: column; gap: 0.55rem; }
+.net-cards > .net-card-wide { flex-basis: 100%; }
+.net-head { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; min-height: 1.6rem; }
+.net-head .row-act { margin: 0; }
+.net-period { margin-left: 0.5rem; color: var(--text); font-weight: 500; letter-spacing: 0; text-transform: none; }
+.net-prob { color: var(--down); font-size: 0.85rem; background: rgba(239, 68, 68, 0.08); border: 1px solid rgba(239, 68, 68, 0.3); border-radius: 6px; padding: 0.35rem 0.6rem; }
+.net-tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 0.45rem; }
+/* длинные подписи в две строки: числа в ряду плиток стоят на одной высоте */
+.nethealth .net-tile-label { min-height: 2.5em; }
+.net-tile { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 0.5rem 0.7rem 0.55rem; min-width: 0; }
+.net-tile-label { color: var(--text-muted); font-size: 0.74rem; line-height: 1.25; }
+.net-tile-value { font-size: 1.45rem; font-weight: 600; line-height: 1.2; margin-top: 0.2rem; font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.net-tile-unit { font-size: 0.8rem; font-weight: 500; color: var(--text-muted); }
+.net-tile-sub { color: var(--text-muted); font-size: 0.72rem; margin-top: 0.15rem; line-height: 1.3; }
+.net-tile-ok .net-tile-value, .net-tone-ok { color: var(--up); }
+.net-tile-warn .net-tile-value, .net-tone-warn { color: var(--degraded); }
+.net-tile-bad { border-color: rgba(239, 68, 68, 0.45); }
+.net-tile-bad .net-tile-value, .net-tone-bad { color: var(--down); }
+.net-tile-muted .net-tile-value { color: var(--text-muted); font-size: 1.05rem; padding: 0.15rem 0 0.1rem; }
+.net-tone-muted { color: var(--text-muted); }
+.net-foot { color: var(--text-muted); font-size: 0.78rem; display: flex; flex-direction: column; gap: 0.2rem; }
+/* строки связей: точка состояния, имя и адрес, мини-график за час, время подключения */
+/* два класса: базовый .loc-res{align-items:center} объявлен ниже в файле и иначе центрировал строку */
+.loc-res.lk-row { flex-direction: column; align-items: stretch; padding: 0; gap: 0; }
+.loc-res.lk-row-open { border-color: var(--border-strong); }
+.lk-main { display: flex; align-items: center; gap: 0.7rem; padding: 0.5rem 0.7rem; cursor: pointer; min-width: 0; }
+.lk-main:hover { background: var(--card-hover); border-radius: 8px; }
+.lk-dot { width: 9px; height: 9px; border-radius: 50%; flex: 0 0 auto; background: var(--text-muted); }
+.lk-dot-ok { background: var(--up); }
+.lk-dot-warn { background: var(--degraded); }
+.lk-dot-bad { background: var(--down); }
+.lk-name { flex: 1 1 auto; min-width: 0; }
+.lk-title { display: flex; align-items: baseline; flex-wrap: wrap; gap: 0 0.1rem; }
+.lk-target { font-weight: 600; }
+.lk-note { margin-left: 0.5rem; font-size: 0.75rem; color: var(--text-muted); background: var(--bg-card); border: 1px solid var(--border); border-radius: 4px; padding: 0 0.35rem; }
+.lk-host { font-size: 0.75rem; margin-top: 0.1rem; }
+.lk-spark { flex: 0 0 104px; width: 104px; height: 28px; }
+.lk-spark-line { fill: none; stroke: #5a8fc7; stroke-width: 1.5; vector-effect: non-scaling-stroke; }
+.lk-spark-loss { fill: var(--down); }
+.lk-val { flex: 0 0 auto; min-width: 5.5rem; text-align: right; font-weight: 600; font-variant-numeric: tabular-nums; }
+.lk-val-sub { font-size: 0.72rem; font-weight: 500; color: var(--text-muted); }
+.lk-del { flex: 0 0 auto; background: transparent; border: none; box-shadow: none; color: var(--text-muted); font-size: 1.05rem; line-height: 1; padding: 0.15rem 0.3rem; cursor: pointer; border-radius: 4px; }
+.lk-del:hover { color: var(--down); background: rgba(239, 68, 68, 0.1); }
+.lk-chart { padding: 0.2rem 0.7rem 0.6rem; border-top: 1px solid var(--border); }
+.lk-chart .win-switch { margin: 0.45rem 0; }
+.lk-chart-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 0.6rem; }
+.lk-form { display: flex; flex-wrap: wrap; gap: 0.4rem; align-items: center; }
 .lk-form input, .lk-form select { min-width: 0; font-size: 0.85rem; }
 .lk-form label { display: inline-flex; flex-direction: row; align-items: center; gap: 0.3rem; white-space: nowrap; }
 .lk-form .lk-port { width: 5rem; }
 .lk-form > div { flex-basis: 100%; }
-.lk-meter { height: 4px; background: var(--border); border-radius: 2px; margin-top: 0.25rem; overflow: hidden; }
+.lk-meter { height: 4px; background: var(--border); border-radius: 2px; margin-top: 0.4rem; overflow: hidden; }
 .lk-meter span { display: block; height: 100%; background: var(--up); }
 .lk-meter span.warn { background: var(--degraded); }
 .lk-meter span.bad { background: var(--down); }
-.lk-bars { margin-top: 0.5rem; }
-.lk-svg { width: 100%; height: auto; display: block; }
+/* столбики трафика по дням */
+.lk-bars { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 0.45rem 0.6rem 0.3rem; }
+.lk-svg { display: block; max-width: 100%; }
 .lk-grid { stroke: var(--border); stroke-width: 1; }
 .lk-axis { fill: var(--text-muted); font-size: 10px; }
+.lk-hit { fill: transparent; }
+.lk-hover { fill: var(--card-hover); }
 .lk-tx { fill: #5a8fc7; }
-.lk-rx { fill: #57a894; opacity: 0.75; }
-.lk-legend { display: flex; flex-wrap: wrap; align-items: center; gap: 0.3rem; }
+.lk-rx { fill: #57a894; opacity: 0.8; }
+.lk-legend { display: flex; flex-wrap: wrap; align-items: center; gap: 0.35rem; font-size: 0.78rem; color: var(--text-muted); margin-bottom: 0.2rem; }
+.lk-legend .net-tile-label { margin-right: 0.4rem; }
 .lk-sw { display: inline-block; width: 10px; height: 10px; border-radius: 2px; }
 .lk-sw.lk-tx { background: #5a8fc7; }
-.lk-sw.lk-rx { background: #57a894; opacity: 0.75; }
-.lk-tip { margin-left: auto; }
-.lk-periods { margin-top: 0.3rem; }
+.lk-sw.lk-rx { background: #57a894; opacity: 0.8; }
+.lk-tip { margin-left: auto; color: var(--text); font-variant-numeric: tabular-nums; }
+@media (max-width: 560px) {
+  .lk-spark { display: none; }
+  /* узко: точка | имя | крестик, значение второй строкой под именем */
+  .lk-main { display: grid; grid-template-columns: 9px minmax(0, 1fr) auto; column-gap: 0.6rem; row-gap: 0.15rem; }
+  .lk-val { grid-column: 2; grid-row: 2; text-align: left; min-width: 0; }
+  .lk-del { grid-column: 3; grid-row: 1; }
+  .net-head { flex-wrap: wrap; }
+  .net-tile-value { font-size: 1.25rem; }
+  .net-tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
 .changes { margin: 0.8rem 0; }
 .changes .exp-table td:first-child { width: 10.5rem; }
 .changes .exp-table td:last-child { text-align: left; white-space: normal; }
