@@ -43,7 +43,7 @@ import (
 	"time"
 )
 
-const version = "2.29"
+const version = "2.30"
 
 // Публичный ключ для проверки подписи релизов агента (Ed25519, base64).
 // ПУСТО по умолчанию → самообновление ВЫКЛЮЧЕНО (агент никогда не заменяет себя).
@@ -6608,6 +6608,9 @@ type tcpRates struct {
 	ListenOvf  float64 `json:"listen_ovf"`
 	ListenDrop float64 `json:"listen_drop"`
 	CtDrop     float64 `json:"ct_drop"`
+	// повторы SYN: подключения, на которые никто не ответил (торрент-клиент за VPN, мертвый
+	// адрес, сканер). Входят в Retrans, но это не потери на пути - панель вычитает их (2.30+)
+	SynRetrans float64 `json:"syn_retrans"`
 }
 
 // tcpCtr - накопительные счетчики для tcpRates
@@ -6615,6 +6618,7 @@ type tcpCtr struct {
 	ok, okExt, okCt                bool
 	out, retrans, inErrs           uint64
 	listenOvf, listenDrop, ctDrops uint64
+	synRetrans                     uint64
 }
 
 // osUpdates - обновления ОС: нужна ли перезагрузка и с каких пор, ожидающие обновления (и
@@ -6930,6 +6934,7 @@ func readTCP() tcpCtr {
 	if b, err := os.ReadFile("/proc/net/netstat"); err == nil {
 		m := pairCounters(string(b), "TcpExt")
 		c.listenOvf, c.listenDrop = m["ListenOverflows"], m["ListenDrops"]
+		c.synRetrans = m["TCPSynRetrans"]
 		c.okExt = len(m) > 0
 	}
 	if b, err := os.ReadFile("/proc/net/stat/nf_conntrack"); err == nil {
@@ -6952,6 +6957,7 @@ func tcpRate(cur, prev tcpCtr, el float64) *tcpRates {
 		InErrs: rate(cur.inErrs, prev.inErrs)}
 	if cur.okExt && prev.okExt {
 		r.ListenOvf, r.ListenDrop = rate(cur.listenOvf, prev.listenOvf), rate(cur.listenDrop, prev.listenDrop)
+		r.SynRetrans = rate(cur.synRetrans, prev.synRetrans)
 	}
 	if cur.okCt && prev.okCt {
 		r.CtDrop = rate(cur.ctDrops, prev.ctDrops)

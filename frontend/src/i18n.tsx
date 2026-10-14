@@ -1185,6 +1185,9 @@ const EN: Record<string, string> = {
   // сеть ноды
   'Здоровье сети': 'Network health',
   'TCP повторно': 'TCP retransmits',
+  'Подключения без ответа': 'Unanswered connections',
+  '(повторы SYN: торрент-клиент за VPN, мертвый адрес или сканер; в потери не входят)':
+    '(SYN retries: a torrent client behind a VPN, a dead address or a scanner; not counted as loss)',
   'сегм/с': 'segm/s',
   'из': 'of',
   'Очередь accept переполнена': 'Accept queue overflows',

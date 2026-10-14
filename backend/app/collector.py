@@ -3031,6 +3031,10 @@ def net_problems(rep: dict) -> list[tuple[int, str, str]]:
     if ct >= _CT_DROP_MIN:
         out.append((2, "conntrack", f"conntrack выбрасывает новые соединения: {ct:.0f} в секунду"))
     sent, again = _num(tcp.get("out")), _num(tcp.get("retrans"))
+    # Повторы SYN - подключения, на которые никто не ответил, а не потери на пути: торрент-клиент
+    # за VPN на ноде-входе давал "28% сегментов уходят повторно" при чистой сети (агент 2.30+)
+    syn = min(_num(tcp.get("syn_retrans")), again)
+    sent, again = max(sent - syn, 0.0), again - syn
     if sent >= _RETRANS_MIN_OUT and again / sent * 100 >= _RETRANS_PCT:
         out.append((1, "retrans", f"TCP теряет пакеты: {again / sent * 100:.0f}% сегментов уходят повторно"))
     ovf = _num(tcp.get("listen_ovf"))

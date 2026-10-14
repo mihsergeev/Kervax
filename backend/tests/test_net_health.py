@@ -37,6 +37,11 @@ def test_each_cause():
         (1, "iface", "eth0: 3 ошибки в секунду"),
         (1, "iface", "eth0: 250 дропов в секунду"),
     ]
+    # повторы SYN (подключения без ответа: торрент за VPN) - не потери: 670 из 680 повторов
+    vpn = {"tcp": {"out": 1870.0, "retrans": 678.0, "syn_retrans": 674.0}}
+    assert collector.net_problems(vpn) == []
+    # а настоящие потери на том же фоне видно
+    assert collector.net_problems({"tcp": {"out": 1870.0, "retrans": 900.0, "syn_retrans": 674.0}})[0][1] == "retrans"
     # на тихой ноде доля повторов прыгает от пары потерь - не судим
     assert collector.net_problems({"tcp": {"out": 20.0, "retrans": 10.0}}) == []
     assert collector.net_problems({"tcp": {"out": "x"}, "net_ifaces": ["y", {"if": "eth0", "errs": None}]}) == []

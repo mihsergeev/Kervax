@@ -2356,8 +2356,12 @@ function NetHealth({ server: s }: { server: Server }) {
   const tcp = s.last_report?.tcp
   if (!tcp) return null
   const prob = (s.problems ?? []).find((p) => p.kind === 'net_health')
-  const pct = tcp.out > 0 ? (tcp.retrans / tcp.out) * 100 : 0
-  const lossy = tcp.out >= 100 && pct >= 10
+  // повторы SYN (подключения без ответа) - не потери: вычитаем, как collector.net_problems
+  const syn = Math.min(tcp.syn_retrans ?? 0, tcp.retrans)
+  const out = Math.max(tcp.out - syn, 0)
+  const again = tcp.retrans - syn
+  const pct = out > 0 ? (again / out) * 100 : 0
+  const lossy = out >= 100 && pct >= 10
   const rate = (v: number) => (v >= 10 ? v.toFixed(0) : v.toFixed(v > 0 && v < 0.1 ? 2 : 1))
   return (
     <div className="detail-inc nethealth" id="mcard-nethealth">
@@ -2368,9 +2372,20 @@ function NetHealth({ server: s }: { server: Server }) {
           <tr>
             <td>{t('TCP повторно')}</td>
             <td className={lossy ? 't-down' : ''}>
-              {pct.toFixed(pct < 1 ? 2 : 1)}% <span className="muted">({rate(tcp.retrans)} {t('из')} {rate(tcp.out)} {t('сегм/с')})</span>
+              {pct.toFixed(pct < 1 ? 2 : 1)}% <span className="muted">({rate(again)} {t('из')} {rate(out)} {t('сегм/с')})</span>
             </td>
           </tr>
+          {syn >= 1 && (
+            <tr>
+              <td>{t('Подключения без ответа')}</td>
+              <td>
+                {rate(syn)} {t('в сек')}{' '}
+                <span className="muted">
+                  {t('(повторы SYN: торрент-клиент за VPN, мертвый адрес или сканер; в потери не входят)')}
+                </span>
+              </td>
+            </tr>
+          )}
           <tr>
             <td>{t('Очередь accept переполнена')}</td>
             <td className={tcp.listen_ovf >= 1 ? 't-down' : ''}>{rate(tcp.listen_ovf)} {t('в сек')}</td>
