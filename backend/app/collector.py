@@ -12,6 +12,7 @@ import random
 import re
 import statistics
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from typing import NamedTuple
 from urllib.parse import urlparse
 
@@ -29,6 +30,7 @@ from app import mem_trend
 from app import restarts as srv_restarts
 from app import ssh_audit
 from app import known as known_mod
+from app import parents as parents_mod
 from app import maint
 from app import tg_bot
 from app import web_certs
@@ -922,14 +924,22 @@ async def _send_alerts(
         _ms, maint_chk = maint.active(list(await session.scalars(select(MaintenanceWindow))), now,
                                       cfg.get("tz") or "Europe/Moscow")
         snoozed.update(i for i in ids if i in maint_chk)
+        # Зависимости (app/parents.py): родитель монитора молчит - сбой придерживаем, он строкой в
+        # сообщении про сервер; родитель на обслуживании - молчим, как в самом окне. Не помечаем:
+        # родитель вернулся, а монитор все еще лежит - алерт придет следующим тиком.
+        held: set[int] = set()
+        fail_ids = {p.check_id for p in map(_as_pending, pending)
+                    if p.check_id is not None and p.kind in ("bad", "flaky", "locpart")}
         if ids:
             rows = await session.execute(
                 select(
                     Check.id, Check.group_name, Check.alert_mutes,
                     Check.target, Check.type, Check.port, Check.snooze_until, Check.known_issue,
+                    Check.probe_local, Check.probe_server_id, Check.parent_mode, Check.parent_server_id,
                 ).where(Check.id.in_(ids))
             )
-            for i, g, m, tgt, typ, prt, snz, kn in rows.all():
+            lite: list[SimpleNamespace] = []
+            for i, g, m, tgt, typ, prt, snz, kn, pl, ps, pm, pp in rows.all():
                 groups[i] = g
                 mutes[i] = set(m or [])
                 meta[i] = (tgt, typ, prt)
@@ -937,6 +947,19 @@ async def _send_alerts(
                     snoozed.add(i)
                 if isinstance(kn, dict) and not known_mod.expired(kn, now):
                     known_ids.add(i)
+                if i in fail_ids:
+                    lite.append(SimpleNamespace(id=i, target=tgt, type=typ, probe_local=pl, probe_server_id=ps,
+                                                parent_mode=pm, parent_server_id=pp))
+            if lite:
+                psrv = await parents_mod.load_servers(session)
+                pidx = parents_mod.Index(psrv)
+                silent = parents_mod.silent_ids(psrv, now, seen_online, panel_just_started(now))
+                for c in lite:
+                    pids = {pid for pid, _w in parents_mod.parents_of(c, pidx)}
+                    if pids & silent:
+                        held.add(c.id)
+                    elif pids & _ms:
+                        snoozed.add(c.id)
     if muted or not alerts.alerts_enabled(cfg):
         return
     base = settings.panel_url.rstrip("/")
@@ -975,6 +998,8 @@ async def _send_alerts(
             continue
         if check_id is not None and check_id in known_ids and kind in ("bad", "flaky", "locpart"):
             continue  # известная проблема: про нее знают, молчим, пока не закроется или не выйдет срок
+        if check_id is not None and check_id in held and kind in ("bad", "flaky", "locpart"):
+            continue  # родитель молчит: лежит из-за него, это строка в сообщении про сервер
         tgt, typ, prt = meta.get(check_id, ("", "http", 0))
         # у push-монитора нет адреса: в заголовке алерта его имя
         host = name if typ == "push" else _display_host(tgt, typ, prt)
@@ -4845,9 +4870,38 @@ async def evaluate_servers(
         rules = await settings_store.get_server_alert_rules(session)
         web_err = await web_error_window(session, now)
         windows = list(await session.scalars(select(MaintenanceWindow)))
+        # лежащие мониторы - чтобы назвать их в сообщении про сервер, от которого они зависят
+        down_checks = [SimpleNamespace(id=i, name=n, target=t, type=ty, probe_local=pl, probe_server_id=ps,
+                                       parent_mode=pm, parent_server_id=pp)
+                       for i, n, t, ty, pl, ps, pm, pp in (await session.execute(select(
+                           Check.id, Check.name, Check.target, Check.type, Check.probe_local,
+                           Check.probe_server_id, Check.parent_mode, Check.parent_server_id,
+                       ).where(Check.enabled.is_(True), Check.last_status == "down"))).all()]
     can_send = alerts.alerts_enabled(cfg) and not muted
     # окна обслуживания: сервер в идущем окне молчит, как под снузом (app/maint.py)
     maint_srv, _mc = maint.active(windows, now, cfg.get("tz") or "Europe/Moscow")
+    # Зависимости (app/parents.py): кто сейчас молчит, что из-за этого лежит и кто стоит за ним.
+    # Сервер за молчащим (или обслуживаемым) родителем про "недоступен" не пишет, он строкой
+    # в сообщении про родителя; так же названы лежащие мониторы родителя.
+    pidx = parents_mod.Index(servers)
+    silent = parents_mod.silent_ids(servers, now, seen_online, panel_just_started(now))
+    kids_down: dict[int, list[str]] = {}
+    for _c in down_checks:
+        for _pid, _why in parents_mod.parents_of(_c, pidx):
+            kids_down.setdefault(_pid, []).append(_c.name)
+    kids_quiet: dict[int, list[str]] = {}
+    for _s in sorted(servers, key=lambda x: x.name):
+        if _s.parent_id and _s.id in silent:
+            kids_quiet.setdefault(_s.parent_id, []).append(_s.name)
+
+    def deps_tail(sid: int) -> str:
+        parts = []
+        if kids_quiet.get(sid):
+            parts.append(f"↳ за ним молчат: {html.escape(parents_mod.list_text(kids_quiet[sid]))}")
+        if kids_down.get(sid):
+            parts.append(f"↳ лежат мониторы: {html.escape(parents_mod.list_text(sorted(kids_down[sid])))}")
+        return "".join("\n" + x for x in parts)
+
     base = settings.panel_url.rstrip("/")
     threshold = int(cfg.get("flood_threshold", 6))
 
@@ -4997,10 +5051,17 @@ async def evaluate_servers(
                     srv_url(s, fk), recovery=True, group=s.group_name or "",
                 ))
         conds = _server_conditions(s, now, web_err.get(s.id), pod_names)
+        # Нода молчит: про ее CPU, память и диски ничего не известно. Все, кроме самого
+        # "недоступен", замирает как было: ни срабатываний, ни отбоев, ни сброса выдержек.
+        # Иначе пороговые условия на молчащей ноде падали в ноль, и объявленный CPU получал
+        # "снова в норме" ровно тогда, когда нода пропала (и после каждого деплоя панели).
+        talking = seen_online(s, now)
         # состояние дебаунса ведём КАЖДЫЙ тик, даже без смены уровня алерта — иначе
         # оно не накопится (при level==prev цикл ниже делает continue без записи).
         # «<тип>_since» — момент начала «жарки» (по времени); throttle — «_streak».
         for k, (_lvl, cx) in conds.items():
+            if not talking and k != "offline":
+                continue
             if "since" in cx and st.get(f"{k}_since") != cx["since"]:
                 apply(s.id, f"{k}_since", cx["since"])
             if "streak" in cx and int(st.get(f"{k}_streak", 0)) != cx["streak"]:
@@ -5024,7 +5085,6 @@ async def evaluate_servers(
         # Известные проблемы (app/known.py): снимок того, что отметили, закрытие, когда ушла
         # сама или вышел срок, и напоминание раз в неделю, что она все еще висит
         known_now: dict[str, dict] = {}
-        talking = seen_online(s, now)
         for kk, ent in (s.known_issues or {}).items():
             if not isinstance(ent, dict):
                 continue
@@ -5045,9 +5105,17 @@ async def evaluate_servers(
                     "known", s.name, known_mod.remind_text(label, new_k, now), srv_url(s, kk),
                     icon="📌", group=s.group_name or ""))
         for key, (level, ctx) in conds.items():
+            if not talking and key != "offline":
+                continue  # нода молчит: остальное замерло (см. выше)
             rule = rules.get(key) or _fallback_rule(key)
             if not rule["enabled"] or not _rule_scope_ok(rule, s):
                 continue  # правило выключено или сервер вне области применения
+            if key == "offline" and level > int(st.get(key, 0)) and s.parent_id \
+                    and (s.parent_id in silent or s.parent_id in maint_srv):
+                # стоит за молчащим (или обслуживаемым) сервером: молчит из-за него, это строка в
+                # его сообщении. Состояние не трогаем: родитель вернулся, а этот все еще молчит -
+                # придет свой "недоступен"
+                continue
             if _muted(key, level, mutes):
                 continue  # тип (или его нижние уровни) заглушён для этого сервера
             if known_mod.covers(known_now.get(key), level, ctx.get("sig")):
@@ -5137,7 +5205,12 @@ async def evaluate_servers(
                                 ses, s.id, now, web_muted_keys(s, now)))
                     except Exception:
                         log.warning("не собрал, где ошибки 5xx на %s", s.name, exc_info=True)
-                fires.append(srv_fire(s, key, rule, ctx))
+                fmsg = srv_fire(s, key, rule, ctx)
+                if key == "offline" and (tail := deps_tail(s.id)):
+                    # что молчит и лежит из-за него: их собственные алерты придержаны
+                    fmsg = alerts.Msg(fmsg + tail, fmsg.section, fmsg.group, fmsg.kind, fmsg.target,
+                                      fmsg.recovery, fmsg.ref)
+                fires.append(fmsg)
                 fire_apply.append((s.id, key, level))
                 if key in _SRV_UNIT and ctx.get("value") is not None:
                     # запоминаем ОБЪЯВЛЕННОЕ значение — из него отбой построит «было N».

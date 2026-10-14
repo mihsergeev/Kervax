@@ -199,6 +199,11 @@ export type Check = {
   dns_server?: string
   dns_baseline?: string[] | null
   dns_last?: string[] | null
+  // от какого сервера зависит: auto - панель находит сама, server - parent_server_id, off - ни от чего.
+  // parents - на ком монитор держится на самом деле (why: local, site, ip, manual)
+  parent_mode?: ParentMode
+  parent_server_id?: number | null
+  parents?: CheckParent[]
   note?: string
   note_by?: string
   note_at?: string | null
@@ -272,6 +277,14 @@ export type ChecksOverview = {
 }
 
 // поля, отправляемые при создании/редактировании (бэкенд подставит дефолты)
+export type ParentMode = 'auto' | 'server' | 'off'
+export interface CheckParent {
+  id: number
+  name: string
+  why: 'local' | 'site' | 'ip' | 'manual'
+  silent?: boolean // родитель молчит: алерты монитора ждут его
+}
+
 export type CheckForm = {
   name: string
   type: CheckType
@@ -282,6 +295,8 @@ export type CheckForm = {
   dns_expect?: string
   dns_match?: 'equal' | 'contains'
   dns_server?: string
+  parent_mode?: ParentMode
+  parent_server_id?: number | null
   group_name?: string
   port?: number
   enabled?: boolean
@@ -563,6 +578,8 @@ export function checkToForm(c: Check): CheckForm {
     dns_expect: c.dns_expect,
     dns_match: c.dns_match,
     dns_server: c.dns_server,
+    parent_mode: c.parent_mode ?? 'auto',
+    parent_server_id: c.parent_server_id ?? null,
   }
 }
 
@@ -1547,6 +1564,7 @@ export type Server = {
   backup_anytime?: boolean // бэкап в любое время — не уведомлять о выходе за окно
   offline_after_seconds: number
   alert_sustain_seconds: number // сколько держать превышение до алерта, сек
+  parent_id?: number | null // за каким сервером стоит (шлюз, VPN): пока тот молчит, про этот не пишем
   agent_update_note?: string | null // «обновление докачивается: 59% (3.4 из 5.8 МБ)»
   agent_advice: string[] // чего агенту не хватает в systemd-юните (человекочитаемо)
   agent_fix_command: string | null // команда-фикс для ноды (drop-in) или null
@@ -1821,6 +1839,7 @@ export function updateServer(
     queue_alert_depth?: number // порог глубины очереди RabbitMQ (0 = выкл)
     queue_alert_over?: Record<string, number> // порог по конкретной очереди
     disk_autofix?: boolean // авто-очистка диска (меняет только админ)
+    parent_id?: number | null // за каким сервером стоит, null - ни за кем
   },
 ): Promise<Server> {
   return api<Server>(`/api/servers/${id}`, { method: 'PATCH', body: JSON.stringify(body) })

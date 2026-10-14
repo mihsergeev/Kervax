@@ -981,6 +981,18 @@ function CheckRow({
             </span>
           )}
           <MaintChip kind="check" id={c.id} />
+          {/* родитель молчит: монитор лежит из-за него, свой алерт ждет (app/parents.py) */}
+          {(c.parents ?? []).filter((p) => p.silent).map((p) => (
+            <span
+              key={p.id}
+              className="type-chip parent-chip"
+              title={t('Сервер {srv} не на связи: алерт монитора ждет его, монитор назван в сообщении про сервер', {
+                srv: p.name,
+              })}
+            >
+              ⛓ {p.name}
+            </span>
+          ))}
           <span className="type-chip">{typeLabel}</span>
           {/* Зелёный по локальной проверке — это не то же самое, что «сайт виден
               посетителям»: снаружи он закрыт белым списком. Метка обязательна,

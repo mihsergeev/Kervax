@@ -5952,3 +5952,40 @@ button.type-chip { cursor: pointer; border: 1px solid transparent; font-family: 
   margin-bottom: 0.6rem;
   overflow-wrap: anywhere;
 }
+
+/* зависимости: от какого сервера зависит монитор, за каким стоит сервер (ParentBar.tsx) */
+.parent-bar {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  margin: 0 0 0.6rem;
+  padding: 0.35rem 0.6rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 0.9rem;
+  overflow-wrap: anywhere;
+}
+.parent-bar-body {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.15rem 0.9rem;
+  flex: 1;
+  min-width: 0;
+}
+.parent-bar-silent {
+  border-color: var(--warn, #c9a227);
+}
+.parent-bar-warn {
+  color: var(--warn, #c9a227);
+}
+.parent-bar-edit {
+  flex-direction: column;
+  align-items: stretch;
+}
+.parent-bar-edit .field {
+  max-width: 420px;
+}
+.parent-chip {
+  border-color: var(--warn, #c9a227);
+  color: var(--warn, #c9a227);
+}

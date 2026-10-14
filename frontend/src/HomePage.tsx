@@ -750,13 +750,22 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
           kind: section, section, srv: p.srv, since: p.since,
         }))
       : []
+  // сервер молчит вместе со шлюзом, за которым стоит: причина в строке, свой алерт он ждет
+  const srvById = new Map(srvList.map((s) => [s.id, s]))
+  const behindSilent = (s: Server) => {
+    const p = s.parent_id ? srvById.get(s.parent_id) : undefined
+    return p && !p.online ? p.name : ''
+  }
   const broken: Broken[] = [
     // проблемы сервера ведут в его карточку, а то, что чинится в другом разделе (сроки и Flux,
     // очереди, дампы), - туда, и видно тем, кому этот раздел открыт
     ...srvList.flatMap((s) =>
       srvIssues(s, t)
         .map((i, n) => ({
-          key: `${s.id}-${n}`, id: s.id, name: s.name, cc: s.country, tone: i.tone, text: i.text,
+          key: `${s.id}-${n}`, id: s.id, name: s.name, cc: s.country, tone: i.tone,
+          text: i.kind === 'offline' && behindSilent(s)
+            ? `${i.text} · ⛓ ${t('за {srv}, он тоже молчит', { srv: behindSilent(s) })}`
+            : i.text,
           kind: i.kind ?? 'server', section: (i.section ?? 'servers') as Section, srv: i.srv ?? true,
           sec: i.sec, mute: i.mute, since: i.since, note: s.note,
           markable: !!i.kind && i.kind !== 'offline' && !!s.alert_since?.[i.kind],
@@ -1043,6 +1052,11 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
                     <div key={c.id} className="home-warn">
                       <span className={`dot ${c.last_status === 'down' ? 'down' : 'degraded'}`} />
                       <span className="warn-name">{c.name}</span>
+                      {(c.parents ?? []).filter((p) => p.silent).map((p) => (
+                        <span key={p.id} className="type-chip parent-chip" title={t('сервер не на связи, алерты монитора ждут его')}>
+                          ⛓ {p.name}
+                        </span>
+                      ))}
                       <span className="muted small">
                         {c.last_status === 'down'
                           ? t('Недоступно')
