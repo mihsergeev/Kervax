@@ -10,6 +10,7 @@ import { MaintModal } from './MaintModal'
 import { AlertHistoryModal } from './AlertHistoryModal'
 import { ReportModal } from './ReportModal'
 import { SearchModal } from './SearchModal'
+import { DepMapModal } from './DepMapModal'
 import { ChecksPage } from './ChecksPage'
 import { HomePage } from './HomePage'
 import { LocationsModal } from './LocationsModal'
@@ -42,6 +43,7 @@ type Modal =
   | 'report'
   | 'maint'
   | 'search'
+  | 'depmap'
   | null
 export type Section = 'home' | 'sites' | 'servers' | 'docker' | 'kuber' | 'services' | 'backups'
 const SECTIONS: Section[] = ['home', 'sites', 'servers', 'docker', 'kuber', 'services', 'backups']
@@ -422,6 +424,15 @@ export default function App() {
                   <button
                     className="menu-item"
                     onClick={() => {
+                      setModal('depmap')
+                      setMenuOpen(false)
+                    }}
+                  >
+                    {t('Карта зависимостей')}
+                  </button>
+                  <button
+                    className="menu-item"
+                    onClick={() => {
                       setModal('history')
                       setMenuOpen(false)
                     }}
@@ -538,6 +549,16 @@ export default function App() {
         <AlertHistoryModal onClose={() => setModal(null)} onUnauthorized={logout} />
       )}
       {modal === 'report' && <ReportModal onClose={() => setModal(null)} onUnauthorized={logout} />}
+      {modal === 'depmap' && (
+        <DepMapModal
+          onClose={() => setModal(null)}
+          onUnauthorized={logout}
+          onOpen={(sec, id) => {
+            setModal(null)
+            openTarget(sec, id)
+          }}
+        />
+      )}
       {modal === 'search' && (
         <SearchModal
           onClose={() => setModal(null)}

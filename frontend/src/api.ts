@@ -2406,3 +2406,11 @@ export type TimelineResult = { since: string; until: string; events: TimelineEve
 export function getServerTimeline(id: number, days: number): Promise<TimelineResult> {
   return api<TimelineResult>(`/api/servers/${id}/timeline?days=${days}`)
 }
+
+// --- карта зависимостей (backend api/depmap.py) ---
+export type DepMapServer = { id: number; name: string; group: string; parent_id: number | null; online: boolean; enabled: boolean }
+export type DepMapCheck = { id: number; name: string; status: string; parents: { id: number; why: string }[] }
+export type DepMap = { servers: DepMapServer[]; checks: DepMapCheck[] }
+export function getDepMap(): Promise<DepMap> {
+  return api<DepMap>('/api/depmap')
+}

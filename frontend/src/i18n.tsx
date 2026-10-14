@@ -1980,6 +1980,25 @@ const EN: Record<string, string> = {
   'Монитор': 'Monitor',
   'Остальные {n} без сбоев': 'The other {n} had no failures',
   'Отчет': 'Report',
+  // --- карта зависимостей ---
+  'на нем держатся серверы ({s}) и мониторы ({c})': 'servers ({s}) and monitors ({c}) depend on it',
+  'на нем держатся серверы: {n}': 'servers depending on it: {n}',
+  'на нем держатся мониторы: {n}': 'monitors depending on it: {n}',
+  'Карта зависимостей': 'Dependency map',
+  'проверяется изнутри этого сервера': 'checked from inside this server',
+  'домен обслуживает этот сервер': 'this server serves the domain',
+  'цель - адрес этого сервера': 'the target is the address of this server',
+  'еще {n}': '{n} more',
+  'лежат сейчас: {n}': 'down now: {n}',
+  'Те же связи, по которым панель придерживает алерты: замолчал сервер - его мониторы и серверы за ним не шумят отдельно, а названы в его сообщении. Сервер за шлюзом задается в карточке сервера, сервер монитора - в карточке монитора.':
+    'The same links the panel uses to hold alerts: when a server goes silent, its monitors and the servers behind it do not alert separately but are listed in its message. The gateway of a server is set in the server card, the server of a monitor in the monitor card.',
+  'найти сервер или монитор': 'find a server or monitor',
+  'молчит': 'silent',
+  'лежит': 'down',
+  'Связей пока нет: ни один монитор не привязан к серверу.':
+    'No links yet: no monitor is tied to a server.',
+  'Мониторы без сервера: {n}': 'Monitors without a server: {n}',
+  'Серверы без связей: {n}': 'Servers without links: {n}',
   // --- хронология сервера ---
   'Хронология': 'Timeline',
   'Система': 'System',
