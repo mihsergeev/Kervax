@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { type ReactNode, useCallback, useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import {
   agentUpdate,
@@ -2080,6 +2080,66 @@ function MemLeaks({ server: s }: { server: Server }) {
           )
         })}
       </div>
+    </div>
+  )
+}
+
+// Плитки шапки карточки: CPU, память, худший раздел диска и сеть. Нажатие ведет в раздел, как
+// пункт навигации слева (свернутый раздел раскрывается)
+function goSection(id: string) {
+  const el = document.getElementById(`msec-${id}`)
+  if (!el) return
+  if (!el.querySelector('.metric-section-body')) {
+    ;(el.querySelector('.metric-section-head') as HTMLElement | null)?.click()
+  }
+  el.scrollIntoView({ behavior: 'smooth', block: 'start' })
+}
+
+function SrvTiles({ r }: { r: ServerReport }) {
+  const { t } = useI18n()
+  const lv = (p: number | null): 'ok' | 'warn' | 'bad' | undefined =>
+    p == null ? undefined : p >= 90 ? 'bad' : p >= 75 ? 'warn' : 'ok'
+  const cpu = r.cpu_percent != null ? Math.round(r.cpu_percent) : null
+  const mem = pct(r.mem_used, r.mem_total)
+  // диск - самый заполненный раздел (при нескольких показываем худший и их число)
+  const ds = (r.disks ?? []).filter((d) => d.total)
+  const worst = ds.length ? ds.reduce((a, b) => (b.used / b.total > a.used / a.total ? b : a)) : null
+  const dp = worst ? Math.round((worst.used / worst.total) * 100) : null
+  const go = (sec: string, tile: ReactNode) => (
+    <button className="srv-tile-btn" onClick={() => goSection(sec)} title={t('к разделу')}>
+      {tile}
+    </button>
+  )
+  return (
+    <div className="net-tiles srv-tiles">
+      {go('cpu', <NetTile label="CPU" value={cpu != null ? `${cpu}%` : '—'} sub={`load ${r.load?.[0] ?? '—'}`} tone={lv(cpu)} />)}
+      {go(
+        'mem',
+        <NetTile
+          label={t('Память')}
+          value={mem != null ? `${mem}%` : '—'}
+          sub={`${fmtBytes(r.mem_used)} / ${fmtBytes(r.mem_total)}`}
+          tone={lv(mem)}
+        />,
+      )}
+      {worst &&
+        go(
+          'disk',
+          <NetTile
+            label={t('Диск')}
+            value={`${dp}%`}
+            sub={`${worst.mount}${ds.length > 1 ? ` · ${ds.length} ${t('разд.')}` : ''}`}
+            tone={lv(dp)}
+          />,
+        )}
+      {go(
+        'net',
+        <NetTile
+          label={t('Сеть')}
+          value={`↓ ${fmtRate(r.net_rx)}`}
+          sub={`↑ ${fmtRate(r.net_tx)}${(r.swap_total ?? 0) > 0 ? ` · swap ${fmtBytes(r.swap_used)}` : ''}`}
+        />,
+      )}
     </div>
   )
 }
@@ -5463,43 +5523,7 @@ function ServerDetail({
             </div>
           </div>
         ))}
-        <div className="uptime-tiles">
-          <div className="uptime-tile">
-            <div className={`uptime-val ${toneOf(r.cpu_percent != null ? Math.round(r.cpu_percent) : null)}`}>
-              {r.cpu_percent != null ? `${Math.round(r.cpu_percent)}%` : '—'}
-            </div>
-            <div className="uptime-lbl">CPU · load {r.load?.[0] ?? '—'}</div>
-          </div>
-          <div className="uptime-tile">
-            <div className={`uptime-val ${toneOf(pct(r.mem_used, r.mem_total))}`}>
-              {pct(r.mem_used, r.mem_total) ?? '—'}%
-            </div>
-            <div className="uptime-lbl">RAM {fmtBytes(r.mem_used)} / {fmtBytes(r.mem_total)}</div>
-          </div>
-          {(() => {
-            // диск — самый загруженный раздел (при нескольких показываем худший + их число)
-            const ds = (r.disks ?? []).filter((d) => d.total)
-            if (!ds.length) return null
-            const worst = ds.reduce((a, b) => (b.used / b.total > a.used / a.total ? b : a))
-            const p = Math.round((worst.used / worst.total) * 100)
-            return (
-              <div className="uptime-tile">
-                <div className={`uptime-val ${toneOf(p)}`}>{p}%</div>
-                <div className="uptime-lbl">
-                  {t('Диск')} · {worst.mount}
-                  {ds.length > 1 ? ` · ${ds.length} ${t('разд.')}` : ''}
-                </div>
-              </div>
-            )
-          })()}
-          <div className="uptime-tile">
-            <div className="uptime-val srv-net-val">
-              <span className="t-up">↓ {fmtRate(r.net_rx)}</span>
-              <span className="muted">↑ {fmtRate(r.net_tx)}</span>
-            </div>
-            <div className="uptime-lbl">{t('Сеть')} · swap {fmtBytes(r.swap_used)}</div>
-          </div>
-        </div>
+        <SrvTiles r={r} />
 
         <div className="detail-toolbar">
           <div className="win-switch">
