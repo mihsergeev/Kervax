@@ -1,4 +1,4 @@
-import { Fragment, useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import {
   ApiError,
   addLink,
@@ -8,6 +8,7 @@ import {
   getTraffic,
   updateServer,
   type LinkPoint,
+  type NetLink,
   type NetLinksOut,
   type Server,
   type TrafficOut,
@@ -19,14 +20,16 @@ import { byteUnits } from './units'
 
 // Связь с другими серверами (агент 2.31, app/netlinks.py): раз в 30 секунд агент трижды
 // пробует открыть TCP-соединение с адресом и меряет время рукопожатия. И трафик за месяц по
-// настоящим сетевым картам с лимитом тарифа (app/traffic.py).
+// настоящим сетевым картам с лимитом тарифа (app/traffic.py). Вид - как stat-панели Grafana:
+// плитки с крупным числом, строки связей с точкой состояния и мини-графиком за час.
 
 type TFn = (k: string, p?: Record<string, string | number>) => string
+type Tone = 'ok' | 'warn' | 'bad' | 'muted'
 const PERIODS = [1, 6, 24, 168]
 const REFRESH_MS = 30_000
 
 // Десятичные единицы, как в тарифах хостеров: 20 ТБ = 20 * 10^12 байт
-function fmtDec(n: number): string {
+function decParts(n: number): [string, string] {
   const u = byteUnits()
   let v = n
   let i = 0
@@ -34,7 +37,10 @@ function fmtDec(n: number): string {
     v /= 1000
     i++
   }
-  return `${v >= 100 || i === 0 ? v.toFixed(0) : v.toFixed(1).replace(/\.0$/, '')} ${u[i]}`
+  return [v >= 100 || i === 0 ? v.toFixed(0) : v.toFixed(1).replace(/\.0$/, ''), u[i]]
+}
+function fmtDec(n: number): string {
+  return decParts(n).join(' ')
 }
 
 function ddmm(iso: string): string {
@@ -51,6 +57,78 @@ function prevDay(iso: string): string {
 function ms(v: number | null | undefined, t: TFn): string {
   if (v == null) return '—'
   return `${v >= 100 ? Math.round(v) : v.toFixed(1)} ${t('мс')}`
+}
+
+// Плитка с крупным числом: метрика сети, трафик. tone красит число, bad - еще и рамку.
+export function NetTile({
+  label,
+  value,
+  unit,
+  sub,
+  tone,
+  title,
+  children,
+}: {
+  label: string
+  value: string
+  unit?: string
+  sub?: string
+  tone?: Tone
+  title?: string
+  children?: ReactNode
+}) {
+  return (
+    <div className={`net-tile${tone ? ` net-tile-${tone}` : ''}`} title={title}>
+      <div className="net-tile-label">{label}</div>
+      <div className="net-tile-value">
+        {value}
+        {unit && <span className="net-tile-unit"> {unit}</span>}
+      </div>
+      {sub && <div className="net-tile-sub">{sub}</div>}
+      {children}
+    </div>
+  )
+}
+
+// Мини-график времени подключения за час: линия по 2-минутным точкам, красные метки внизу -
+// где были неудачные попытки
+function Spark({ points }: { points: NetLink['spark'] }) {
+  const pts = points ?? []
+  const W = 120
+  const H = 28
+  const vals = pts.map((p) => (p ? p[0] : null)).filter((v): v is number => v != null)
+  if (!pts.length || (!vals.length && !pts.some((p) => p && p[1] > 0))) return <span className="lk-spark" />
+  const lo = Math.min(...vals)
+  const hi = Math.max(...vals)
+  const span = hi - lo
+  const step = W / pts.length
+  // ровная линия - посередине, а не прижатой к низу
+  const y = (v: number) => (span ? H - 6 - ((v - lo) / span) * (H - 10) : (H - 4) / 2)
+  const segs: string[] = []
+  let cur = ''
+  pts.forEach((p, i) => {
+    const v = p ? p[0] : null
+    if (v == null) {
+      if (cur) segs.push(cur)
+      cur = ''
+      return
+    }
+    const x = (i + 0.5) * step
+    cur += `${cur ? 'L' : 'M'}${x.toFixed(1)},${y(v).toFixed(1)}`
+  })
+  if (cur) segs.push(cur)
+  return (
+    <svg className="lk-spark" viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" aria-hidden>
+      {pts.map((p, i) =>
+        p && p[1] > 0 ? (
+          <rect key={i} x={i * step + 0.5} y={H - 3} width={Math.max(step - 1, 1)} height={3} className="lk-spark-loss" />
+        ) : null,
+      )}
+      {segs.map((d, i) => (
+        <path key={i} d={d} className="lk-spark-line" />
+      ))}
+    </svg>
+  )
 }
 
 function LinkChart({ serverId, linkId }: { serverId: number; linkId: number }) {
@@ -84,31 +162,45 @@ function LinkChart({ serverId, linkId }: { serverId: number; linkId: number }) {
       {pts == null ? (
         <div className="muted small">{t('загрузка…')}</div>
       ) : (
-        <>
-          <div className="muted small">{t('Время подключения')}</div>
-          <MultiLineChart
-            height={120}
-            fmtX={fmtX}
-            fmtY={(v) => ms(v, t)}
-            yMin={0}
-            series={[
-              { name: t('медиана'), color: '#5a8fc7', points: p.map((x) => ({ t: x.t, y: x.rtt })) },
-              { name: t('худшее'), color: '#d9a441', points: p.map((x) => ({ t: x.t, y: x.rtt_max })) },
-            ]}
-          />
-          <div className="muted small">{t('Неудачные попытки, %')}</div>
-          <MultiLineChart
-            height={90}
-            fmtX={fmtX}
-            yMin={0}
-            yMax={100}
-            unit="%"
-            series={[{ name: t('неудачи'), color: '#d65a5a', points: p.map((x) => ({ t: x.t, y: x.loss })) }]}
-          />
-        </>
+        <div className="lk-chart-grid">
+          <div>
+            <div className="net-tile-label">{t('Время подключения')}</div>
+            <MultiLineChart
+              height={130}
+              fmtX={fmtX}
+              fmtY={(v) => ms(v, t)}
+              yMin={0}
+              series={[
+                { name: t('медиана'), color: '#5a8fc7', points: p.map((x) => ({ t: x.t, y: x.rtt })) },
+                { name: t('худшее'), color: '#d9a441', points: p.map((x) => ({ t: x.t, y: x.rtt_max })) },
+              ]}
+            />
+          </div>
+          <div>
+            <div className="net-tile-label">{t('Неудачные попытки, %')}</div>
+            <MultiLineChart
+              height={130}
+              fmtX={fmtX}
+              yMin={0}
+              yMax={100}
+              unit="%"
+              series={[{ name: t('неудачи'), color: '#d65a5a', points: p.map((x) => ({ t: x.t, y: x.loss })) }]}
+            />
+          </div>
+        </div>
       )}
     </div>
   )
+}
+
+function linkView(l: NetLink, agentOk: boolean, t: TFn): { tone: Tone; value: string; sub?: string } {
+  const loss = l.loss ?? 0
+  if (!l.fresh) return { tone: 'muted', value: agentOk ? t('ждем первую проверку') : t('нет данных') }
+  if (l.held) return { tone: 'muted', value: t('сервер сам молчит') }
+  if (loss >= 100) return { tone: 'bad', value: t('нет связи'), sub: l.err || undefined }
+  if (loss >= 20) return { tone: 'bad', value: t('теряет {p}%', { p: Math.round(loss) }), sub: l.err || undefined }
+  if (loss > 0) return { tone: 'warn', value: ms(l.rtt, t), sub: t('неудач {p}%', { p: Math.round(loss) }) }
+  return { tone: 'ok', value: ms(l.rtt, t) }
 }
 
 export function LinksCard({ server: s }: { server: Server }) {
@@ -133,6 +225,7 @@ export function LinksCard({ server: s }: { server: Server }) {
   }, [load])
   if (!data || (!data.agent_ok && data.links.length === 0)) return null
   const prob = (s.problems ?? []).find((p) => p.kind === 'link')
+  const canAdd = !isViewer && data.agent_ok && data.links.length < data.max
   const pickTarget = (v: string) => {
     setTarget(v)
     const tg = data.targets.find((x) => String(x.id) === v)
@@ -170,76 +263,68 @@ export function LinksCard({ server: s }: { server: Server }) {
       /* кнопка остается, можно повторить */
     }
   }
-  const state = (l: NetLinksOut['links'][number]) => {
-    if (!l.fresh) return <span className="muted">{data.agent_ok ? t('ждем первую проверку') : t('нет данных')}</span>
-    if (l.held) return <span className="muted">{t('сервер сам молчит')}</span>
-    if ((l.loss ?? 0) >= 100) return <span className="t-down">{t('нет связи')}{l.err ? `: ${l.err}` : ''}</span>
-    if ((l.loss ?? 0) >= 20)
-      return (
-        <span className="t-down">
-          {t('теряет {p}% попыток', { p: Math.round(l.loss ?? 0) })}
-          {l.err ? ` (${l.err})` : ''}
-        </span>
-      )
-    if ((l.loss ?? 0) > 0)
-      return (
-        <span className="t-degraded">
-          {ms(l.rtt, t)} · {t('неудач {p}%', { p: Math.round(l.loss ?? 0) })}
-        </span>
-      )
-    return <span className="t-up">{ms(l.rtt, t)}</span>
-  }
   return (
-    <div className="detail-inc" id="mcard-links">
-      <div className="chart-cap">{t('Связь с другими серверами')}</div>
-      {prob && <div className="t-down small">{prob.text}</div>}
-      {!data.agent_ok && (
-        <div className="muted small">{t('Связь проверяет агент 2.31 и новее: обновите агент.')}</div>
-      )}
-      {data.links.length === 0 ? (
+    <div className="chart-card net-card" id="mcard-links">
+      <div className="net-head">
+        <div className="chart-cap">{t('Связь с другими серверами')}</div>
+        {canAdd && !adding && (
+          <button className="ghost small row-act" onClick={() => setAdding(true)}>
+            + {t('Добавить связь')}
+          </button>
+        )}
+      </div>
+      {prob && <div className="net-prob">{prob.text}</div>}
+      {!data.agent_ok && <div className="muted small">{t('Связь проверяет агент 2.31 и новее: обновите агент.')}</div>}
+      {data.links.length === 0 && !adding && (
         <div className="muted small">
           {t('Агент будет раз в 30 секунд открывать TCP-соединение с адресом и мерить время: вход VPN с выходом, приложение с базой. Алерт, если связь пропала или теряет попытки.')}
         </div>
-      ) : (
-        <table className="exp-table psi-table small lk-table">
-          <tbody>
-            {data.links.map((l) => (
-              <Fragment key={l.id}>
-                <tr>
-                  <td>
-                    <button className="linklike" onClick={() => setOpen(open === l.id ? null : l.id)}>
-                      {l.target_name ?? l.host}
-                      <span className="muted">:{l.port}</span>
-                    </button>
-                    {l.note && <span className="muted"> {l.note}</span>}
-                    {l.target_name && <div className="muted mono lk-host">{l.host}</div>}
-                  </td>
-                  <td>{state(l)}</td>
-                  {!isViewer && (
-                    <td className="lk-act">
-                      <button className="ghost small row-act" title={t('Убрать')} onClick={() => remove(l.id, l.name)}>
-                        ×
-                      </button>
-                    </td>
-                  )}
-                </tr>
-                {open === l.id && (
-                  <tr className="lk-chart-row">
-                    <td colSpan={isViewer ? 2 : 3}>
-                      <LinkChart serverId={s.id} linkId={l.id} />
-                    </td>
-                  </tr>
-                )}
-              </Fragment>
-            ))}
-          </tbody>
-        </table>
       )}
-      {!isViewer && data.agent_ok && !adding && data.links.length < data.max && (
-        <div className="unit-actions small">
-          <button className="ghost small row-act" onClick={() => setAdding(true)}>
-            {t('Добавить связь')}
-          </button>
+      {data.links.length > 0 && (
+        <div className="loc-results">
+          {data.links.map((l) => {
+            const v = linkView(l, data.agent_ok, t)
+            return (
+              <div key={l.id} className={`loc-res lk-row${open === l.id ? ' lk-row-open' : ''}`}>
+                <div
+                  className="lk-main"
+                  role="button"
+                  tabIndex={0}
+                  title={t('График за период')}
+                  onClick={() => setOpen(open === l.id ? null : l.id)}
+                  onKeyDown={(e) => (e.key === 'Enter' || e.key === ' ') && setOpen(open === l.id ? null : l.id)}
+                >
+                  <span className={`lk-dot lk-dot-${v.tone}`} />
+                  <div className="lk-name">
+                    <div className="lk-title">
+                      <span className="lk-target">{l.target_name ?? l.host}</span>
+                      <span className="muted">:{l.port}</span>
+                      {l.note && <span className="lk-note">{l.note}</span>}
+                    </div>
+                    {l.target_name && <div className="muted mono lk-host">{l.host}</div>}
+                  </div>
+                  <Spark points={l.spark} />
+                  <div className={`lk-val net-tone-${v.tone}`}>
+                    <div>{v.value}</div>
+                    {v.sub && <div className="lk-val-sub">{v.sub}</div>}
+                  </div>
+                  {!isViewer && (
+                    <button
+                      className="lk-del"
+                      title={t('Убрать')}
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        remove(l.id, l.name)
+                      }}
+                    >
+                      ×
+                    </button>
+                  )}
+                </div>
+                {open === l.id && <LinkChart serverId={s.id} linkId={l.id} />}
+              </div>
+            )
+          })}
         </div>
       )}
       {adding && (
@@ -282,22 +367,38 @@ export function LinksCard({ server: s }: { server: Server }) {
 
 function DayBars({ days, t }: { days: TrafficOut['days']; t: TFn }) {
   const [hi, setHi] = useState<number | null>(null)
-  if (days.length === 0) return null
-  const W = 640
-  const H = 120
+  // рисуем в настоящую ширину карточки: в растянутом viewBox подписи осей росли вместе с ней
+  const box = useRef<HTMLDivElement>(null)
+  const [W, setW] = useState(640)
+  const has = days.length > 0
+  useEffect(() => {
+    const el = box.current
+    if (!el) return
+    const ro = new ResizeObserver(([e]) => setW(Math.max(280, Math.round(e.contentRect.width))))
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [has])
+  if (!has) return null
+  const H = 150
   const L = 52
   const B = 18
   const max = Math.max(...days.map((d) => d.rx + d.tx), 1)
   // круглая верхняя граница сетки: 1, 2, 5 x 10^n
   const pow = 10 ** Math.floor(Math.log10(max))
   const top = [1, 2, 5, 10].map((k) => k * pow).find((v) => v >= max) ?? max
-  const bw = (W - L - 4) / days.length
+  // меньше двух недель - столбики не растягиваем на всю ширину, иначе один день - плита
+  const bw = (W - L - 4) / Math.max(days.length, 14)
   const y = (v: number) => H - B - (v / top) * (H - B - 6)
   const grid = [0, 0.25, 0.5, 0.75, 1].map((k) => k * top)
   const d = hi != null ? days[hi] : null
   return (
-    <div className="lk-bars">
-      <svg viewBox={`0 0 ${W} ${H}`} className="lk-svg" onMouseLeave={() => setHi(null)}>
+    <div className="lk-bars" ref={box}>
+      <div className="lk-legend">
+        <span className="net-tile-label">{t('По дням')}</span>
+        <span className="lk-sw lk-tx" /> {t('исходящий')} <span className="lk-sw lk-rx" /> {t('входящий')}
+        <span className="lk-tip">{d ? `${ddmm(d.day)}: ↑ ${fmtDec(d.tx)} · ↓ ${fmtDec(d.rx)}` : ''}</span>
+      </div>
+      <svg width={W} height={H} viewBox={`0 0 ${W} ${H}`} className="lk-svg" onMouseLeave={() => setHi(null)}>
         {grid.map((g) => (
           <g key={g}>
             <line x1={L} x2={W} y1={y(g)} y2={y(g)} className="lk-grid" />
@@ -308,7 +409,7 @@ function DayBars({ days, t }: { days: TrafficOut['days']; t: TFn }) {
         ))}
         {days.map((x, i) => (
           <g key={x.day} onMouseEnter={() => setHi(i)}>
-            <rect x={L + i * bw} y={6} width={bw} height={H - B - 6} fill="transparent" />
+            <rect x={L + i * bw} y={6} width={bw} height={H - B - 6} className={hi === i ? 'lk-hover' : 'lk-hit'} />
             <rect x={L + i * bw + 1} y={y(x.tx)} width={Math.max(bw - 2, 1)} height={H - B - y(x.tx)} className="lk-tx" />
             <rect
               x={L + i * bw + 1}
@@ -325,14 +426,6 @@ function DayBars({ days, t }: { days: TrafficOut['days']; t: TFn }) {
           </g>
         ))}
       </svg>
-      <div className="muted small lk-legend">
-        <span className="lk-sw lk-tx" /> {t('исходящий')} <span className="lk-sw lk-rx" /> {t('входящий')}
-        {d && (
-          <span className="lk-tip">
-            {ddmm(d.day)}: ↑ {fmtDec(d.tx)} · ↓ {fmtDec(d.rx)}
-          </span>
-        )}
-      </div>
     </div>
   )
 }
@@ -382,87 +475,27 @@ export function TrafficCard({ server: s, onChanged }: { server: Server; onChange
     }
   }
   const pct = sum && sum.limit ? (sum.used / sum.limit) * 100 : 0
-  const tone = pct >= 100 ? 't-down' : pct >= 90 || (sum?.forecast ?? 0) > (sum?.limit || Infinity) ? 't-degraded' : ''
+  const over = !!sum && sum.limit > 0 && (sum.forecast ?? 0) > sum.limit
+  const limTone: Tone | undefined = pct >= 100 ? 'bad' : pct >= 90 || over ? 'warn' : undefined
   const what = data.count === 'both' ? t('весь трафик') : t('исходящий')
+  const [txV, txU] = decParts(sum?.tx ?? 0)
+  const [rxV, rxU] = decParts(sum?.rx ?? 0)
+  const fc = sum?.forecast != null ? decParts(sum.forecast) : null
   return (
-    <div className="detail-inc" id="mcard-traffic">
-      <div className="chart-cap">
-        {t('Трафик за месяц')}
-        {sum && <span className="muted"> {ddmm(sum.start)}-{ddmm(prevDay(sum.end))}</span>}
-      </div>
-      {prob && <div className="t-down small">{prob.text}</div>}
-      {!data.agent_ok && <div className="muted small">{t('Трафик считает агент 2.31 и новее: обновите агент.')}</div>}
-      {sum && (
-        <table className="exp-table psi-table small">
-          <tbody>
-            <tr>
-              <td>{t('Исходящий')}</td>
-              <td>{fmtDec(sum.tx)}</td>
-            </tr>
-            <tr>
-              <td>{t('Входящий')}</td>
-              <td>{fmtDec(sum.rx)}</td>
-            </tr>
-            {sum.limit > 0 && (
-              <tr>
-                <td>{t('Лимит тарифа')}</td>
-                <td className={tone}>
-                  {t('{u} из {l} ({p}%), считается {what}', {
-                    u: fmtDec(sum.used),
-                    l: fmtDec(sum.limit),
-                    p: pct >= 10 ? Math.round(pct) : pct.toFixed(1),
-                    what,
-                  })}
-                  <div className="lk-meter">
-                    <span style={{ width: `${Math.min(pct, 100)}%` }} className={pct >= 100 ? 'bad' : pct >= 90 ? 'warn' : ''} />
-                  </div>
-                </td>
-              </tr>
-            )}
-            <tr>
-              <td>{t('К концу периода')}</td>
-              <td className={sum.limit && (sum.forecast ?? 0) > sum.limit ? 't-degraded' : ''}>
-                {sum.forecast != null
-                  ? t('около {v} при нынешнем темпе', { v: fmtDec(sum.forecast) })
-                  : t('прогноз появится через трое суток данных')}
-              </td>
-            </tr>
-          </tbody>
-        </table>
-      )}
-      {sum && !sum.full && data.since && (
-        <div className="muted small">
-          {t('Считаем с {d}: раньше агент счетчики не отдавал, начало периода не вошло.', {
-            d: new Date(data.since).toLocaleDateString([], { day: '2-digit', month: '2-digit' }),
-          })}
+    <div className="chart-card net-card net-card-wide" id="mcard-traffic">
+      <div className="net-head">
+        <div className="chart-cap">
+          {t('Трафик за месяц')}
+          {sum && <span className="net-period">{ddmm(sum.start)}-{ddmm(prevDay(sum.end))}</span>}
         </div>
-      )}
-      <DayBars days={data.days} t={t} />
-      {data.periods.length > 1 && (
-        <div className="muted small lk-periods">
-          {t('Прошлые периоды')}:{' '}
-          {data.periods
-            .slice(0, -1)
-            .reverse()
-            .slice(0, 6)
-            .map((p) => `${ddmm(p.start)} ↑ ${fmtDec(p.tx)} ↓ ${fmtDec(p.rx)}`)
-            .join(' · ')}
-        </div>
-      )}
-      <div className="muted small">
-        {data.ifaces.length
-          ? t('Считается по сетевым картам: {list}. Туннели, мосты docker и veth не входят, иначе один пакет считался бы два-три раза.', {
-              list: data.ifaces.join(', '),
-            })
-          : t('Агент не нашел у сервера настоящих сетевых карт.')}
-      </div>
-      {!isViewer && !edit && (
-        <div className="unit-actions small">
+        {!isViewer && !edit && (
           <button className="ghost small row-act" onClick={startEdit}>
             {data.limit_gb ? t('Изменить лимит тарифа') : t('Задать лимит тарифа')}
           </button>
-        </div>
-      )}
+        )}
+      </div>
+      {prob && <div className="net-prob">{prob.text}</div>}
+      {!data.agent_ok && <div className="muted small">{t('Трафик считает агент 2.31 и новее: обновите агент.')}</div>}
       {edit && (
         <div className="lk-form small">
           <input
@@ -500,6 +533,61 @@ export function TrafficCard({ server: s, onChanged }: { server: Server; onChange
           {err && <div className="t-down">{err}</div>}
         </div>
       )}
+      {sum && (
+        <div className="net-tiles">
+          <NetTile label={t('Исходящий')} value={txV} unit={txU} sub={t('за период')} />
+          <NetTile label={t('Входящий')} value={rxV} unit={rxU} sub={t('за период')} />
+          {sum.limit > 0 ? (
+            <NetTile
+              label={t('Лимит тарифа')}
+              value={`${pct >= 10 ? Math.round(pct) : pct.toFixed(1)}%`}
+              sub={t('{u} из {l}, считается {what}', { u: fmtDec(sum.used), l: fmtDec(sum.limit), what })}
+              tone={limTone}
+            >
+              <div className="lk-meter">
+                <span style={{ width: `${Math.min(pct, 100)}%` }} className={pct >= 100 ? 'bad' : pct >= 90 ? 'warn' : ''} />
+              </div>
+            </NetTile>
+          ) : (
+            <NetTile label={t('Лимит тарифа')} value={t('нет')} sub={t('только данные, без алертов')} tone="muted" />
+          )}
+          <NetTile
+            label={t('К концу периода')}
+            value={fc ? fc[0] : '—'}
+            unit={fc ? fc[1] : undefined}
+            sub={fc ? t('при нынешнем темпе') : t('прогноз появится через трое суток данных')}
+            tone={over ? 'warn' : fc ? undefined : 'muted'}
+          />
+        </div>
+      )}
+      <DayBars days={data.days} t={t} />
+      <div className="net-foot">
+        {sum && !sum.full && data.since && (
+          <div>
+            {t('Считаем с {d}: раньше агент счетчики не отдавал, начало периода не вошло.', {
+              d: new Date(data.since).toLocaleDateString([], { day: '2-digit', month: '2-digit' }),
+            })}
+          </div>
+        )}
+        {data.periods.length > 1 && (
+          <div>
+            {t('Прошлые периоды')}:{' '}
+            {data.periods
+              .slice(0, -1)
+              .reverse()
+              .slice(0, 6)
+              .map((p) => `${ddmm(p.start)} ↑ ${fmtDec(p.tx)} ↓ ${fmtDec(p.rx)}`)
+              .join(' · ')}
+          </div>
+        )}
+        <div>
+          {data.ifaces.length
+            ? t('Считается по сетевым картам: {list}. Туннели, мосты docker и veth не входят, иначе один пакет считался бы два-три раза.', {
+                list: data.ifaces.join(', '),
+              })
+            : t('Агент не нашел у сервера настоящих сетевых карт.')}
+        </div>
+      </div>
     </div>
   )
 }

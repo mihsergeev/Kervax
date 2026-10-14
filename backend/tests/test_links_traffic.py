@@ -46,6 +46,8 @@ async def test_link_flow(client, auth_headers):
     assert "links" not in (srv.get("last_report") or {})
     pts = (await client.get(f"{url}/{lid}/history?hours=1", headers=auth_headers)).json()["points"]
     assert len(pts) == 1 and pts[0]["loss"] == 100.0 and pts[0]["rtt"] is None
+    sp = ln["spark"]
+    assert len(sp) == 30 and sp[-1] == [None, 100.0] and sp[0] is None
     # окно 5 минут: следующая порция удачная - доля неудач за окно половина
     rep = dict(REP, links=[{"id": lid, "sent": 3, "ok": 3, "rtt_ms": 41.2, "rtt_max": 44.0}])
     await client.post("/api/agent/report", json=rep, headers=ah)

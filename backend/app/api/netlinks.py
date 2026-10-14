@@ -21,6 +21,8 @@ from app.models import LinkSample, Server, ServerLink, ServerTraffic
 router = APIRouter(prefix="/servers", tags=["servers"])
 
 LINK_AGENT = (2, 31)
+SPARK_MIN = 60  # мини-график у каждой связи: последний час
+SPARK_STEP = 120  # по точке на 2 минуты
 TRAFFIC_DAYS = 62
 
 
@@ -51,6 +53,7 @@ async def list_links(server_id: int, user: CurrentUser, session: SessionDep) -> 
     rows = list(await session.scalars(
         select(ServerLink).where(ServerLink.server_id == server.id).order_by(ServerLink.id)))
     names, silent = await netlinks.target_names(session, rows, now)
+    spark = await _sparks(session, [r.id for r in rows], now)
     links = []
     for r in rows:
         fresh = r.last_ts is not None and now - _aware(r.last_ts) <= netlinks.FRESH
@@ -62,6 +65,7 @@ async def list_links(server_id: int, user: CurrentUser, session: SessionDep) -> 
             "err": r.last_err if fresh else "", "fresh": fresh,
             "last_ts": _aware(r.last_ts).isoformat() if r.last_ts else None,
             "held": r.target_server_id in silent,
+            "spark": spark.get(r.id),
         })
     targets = [
         {"id": s.id, "name": s.name, "ip": s.external_ip, "local_ip": s.local_ip}
@@ -70,6 +74,34 @@ async def list_links(server_id: int, user: CurrentUser, session: SessionDep) -> 
     ]
     return {"links": links, "targets": targets, "max": netlinks.MAX_PER_SERVER,
             "agent_ok": _ver(server.agent_version) >= LINK_AGENT}
+
+
+async def _sparks(session, ids: list[int], now: datetime) -> dict[int, list]:
+    """Мини-график связей за час: по точке на 2 минуты [среднее время подключения, худшая доля
+    неудач] или None, если проверок не было."""
+    if not ids:
+        return {}
+    since = now - timedelta(minutes=SPARK_MIN)
+    n = SPARK_MIN * 60 // SPARK_STEP
+    by: dict[int, dict[int, list]] = {}
+    for lid, ts, loss, rtt in (await session.execute(
+        select(LinkSample.link_id, LinkSample.ts, LinkSample.loss, LinkSample.rtt)
+        .where(LinkSample.link_id.in_(ids), LinkSample.ts >= since)
+    )).all():
+        b = min(max(int((_aware(ts) - since).total_seconds() // SPARK_STEP), 0), n - 1)
+        by.setdefault(lid, {}).setdefault(b, []).append((loss, rtt))
+    out: dict[int, list] = {}
+    for lid, bk in by.items():
+        pts: list = []
+        for b in range(n):
+            g = bk.get(b)
+            if not g:
+                pts.append(None)
+                continue
+            rtts = [x[1] for x in g if x[1] is not None]
+            pts.append([round(sum(rtts) / len(rtts), 1) if rtts else None, max(x[0] or 0 for x in g)])
+        out[lid] = pts
+    return out
 
 
 @router.post("/{server_id}/links", status_code=status.HTTP_201_CREATED)

@@ -71,7 +71,7 @@ import { ServerParentBar } from './ParentBar'
 import { TimelineCard } from './TimelineCard'
 import { PackagesCard } from './PackagesCard'
 import { JournalCard, JournalModal, journalBlocker } from './UnitJournal'
-import { LinksCard, TrafficCard } from './NetLinks'
+import { LinksCard, NetTile, TrafficCard } from './NetLinks'
 import { KnownServerList } from './KnownDialog'
 import { MaintBanner, MaintChip } from './MaintModal'
 
@@ -2364,43 +2364,35 @@ function NetHealth({ server: s }: { server: Server }) {
   const pct = out > 0 ? (again / out) * 100 : 0
   const lossy = out >= 100 && pct >= 10
   const rate = (v: number) => (v >= 10 ? v.toFixed(0) : v.toFixed(v > 0 && v < 0.1 ? 2 : 1))
+  const perSec = (v: number, bad: boolean) => (
+    { value: rate(v), unit: t('в сек'), tone: bad ? ('bad' as const) : undefined }
+  )
   return (
-    <div className="detail-inc nethealth" id="mcard-nethealth">
-      <div className="chart-cap">{t('Здоровье сети')}</div>
-      {prob && <div className="t-down small">{prob.text}</div>}
-      <table className="exp-table psi-table small">
-        <tbody>
-          <tr>
-            <td>{t('TCP повторно')}</td>
-            <td className={lossy ? 't-down' : ''}>
-              {pct.toFixed(pct < 1 ? 2 : 1)}% <span className="muted">({rate(again)} {t('из')} {rate(out)} {t('сегм/с')})</span>
-            </td>
-          </tr>
-          {syn >= 1 && (
-            <tr>
-              <td>{t('Подключения без ответа')}</td>
-              <td>
-                {rate(syn)} {t('в сек')}{' '}
-                <span className="muted">
-                  {t('(повторы SYN: торрент-клиент за VPN, мертвый адрес или сканер; в потери не входят)')}
-                </span>
-              </td>
-            </tr>
-          )}
-          <tr>
-            <td>{t('Очередь accept переполнена')}</td>
-            <td className={tcp.listen_ovf >= 1 ? 't-down' : ''}>{rate(tcp.listen_ovf)} {t('в сек')}</td>
-          </tr>
-          <tr>
-            <td>{t('conntrack выбросил')}</td>
-            <td className={tcp.ct_drop >= 1 ? 't-down' : ''}>{rate(tcp.ct_drop)} {t('в сек')}</td>
-          </tr>
-          <tr>
-            <td>{t('Входящие с ошибкой')}</td>
-            <td>{rate(tcp.in_errs)} {t('в сек')}</td>
-          </tr>
-        </tbody>
-      </table>
+    <div className="chart-card net-card nethealth" id="mcard-nethealth">
+      <div className="net-head">
+        <div className="chart-cap">{t('Здоровье сети')}</div>
+      </div>
+      {prob && <div className="net-prob">{prob.text}</div>}
+      <div className="net-tiles">
+        <NetTile
+          label={t('TCP повторно')}
+          value={`${pct.toFixed(pct < 1 ? 2 : 1)}%`}
+          sub={`${rate(again)} ${t('из')} ${rate(out)} ${t('сегм/с')}`}
+          tone={lossy ? 'bad' : 'ok'}
+        />
+        {syn >= 1 && (
+          <NetTile
+            label={t('Подключения без ответа')}
+            {...perSec(syn, false)}
+            sub={t('повторы SYN, в потери не входят')}
+            title={t('(повторы SYN: торрент-клиент за VPN, мертвый адрес или сканер; в потери не входят)')}
+            tone="warn"
+          />
+        )}
+        <NetTile label={t('Очередь accept переполнена')} {...perSec(tcp.listen_ovf, tcp.listen_ovf >= 1)} />
+        <NetTile label={t('conntrack выбросил')} {...perSec(tcp.ct_drop, tcp.ct_drop >= 1)} />
+        <NetTile label={t('Входящие с ошибкой')} {...perSec(tcp.in_errs, false)} />
+      </div>
     </div>
   )
 }
@@ -5294,9 +5286,11 @@ function ServerDetail({
                 />,
               )}
           </div>
-          <NetHealth server={s} />
-          <LinksCard server={s} />
-          <TrafficCard server={s} onChanged={onChanged} />
+          <div className="net-cards">
+            <NetHealth server={s} />
+            <LinksCard server={s} />
+            <TrafficCard server={s} onChanged={onChanged} />
+          </div>
         </MetricSection>
 
         <MetricSection id="conn" title={t('Соединения')}>
