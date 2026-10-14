@@ -39,6 +39,8 @@ from app import web_config
 from app import changes as srv_changes
 from app import timeline as timeline_mod
 from app import open_ports
+from app import netlinks
+from app import traffic as traffic_mod
 from app import disk_forecast as dfc
 from app.setup_scripts import current_setup_versions, gaps
 from app.config import Settings, get_settings
@@ -60,9 +62,11 @@ from app.models import (
     LocationSample,
     OomEvent,
     AlertEvent,
+    LinkSample,
     ProbeRequest,
     Server,
     ServerMetric,
+    ServerTraffic,
     WebErrorSample,
 )
 
@@ -225,7 +229,7 @@ _SRV_ICON = {
     "kube_expiry": "⏳", "flux_down": "🔥☸️", "kube_pod": "☸️🔥", "web_5xx": "🌐🔥",
     # репозиторий чартов недоступен, а развернутое работает: предупреждение, а не авария
     "flux_stale": "⚠️☸️", "kube_cron": "⏰☸️",
-    "exposed": "🔓", "port_new": "🚪", "pressure": "🫁", "net_health": "📶",
+    "exposed": "🔓", "port_new": "🚪", "pressure": "🫁", "net_health": "📶", "link": "🔗", "traffic": "📊",
     "kube_node": "🖥☸️", "kube_job": "💥☸️", "access_change": "🔑",
     "backup_restore": "🛟💾", "docker_restarts": "🔄🐳", "kube_restarts": "🔄☸️",
     "mem_leak": "📈🧠", "ssh_risk": "🔐", "access_risk": "🗝", "db_health": "🛢",
@@ -247,6 +251,7 @@ _SRV_SECTION = {
     "unit_loop": "unitloop",
     "cpu_spin": "cpueat",
     "exposed": "exposure", "port_new": "exposure", "pressure": "pressure", "net_health": "nethealth",
+    "link": "links", "traffic": "traffic",
     "access_change": "changes", "mem_leak": "memleak", "ssh_risk": "ssh", "access_risk": "access",
     "db_health": "services",
     "web_config": "services", "web_cert": "services", "listen_gone": "exposure", "disk_slow": "disklat",
@@ -1439,6 +1444,8 @@ _SRV_LABEL = {
     "exposed": "открытые в интернет сервисы",
     "pressure": "давление на ресурсы",
     "net_health": "сеть ноды",
+    "link": "связь между серверами",
+    "traffic": "трафик",
     "kube_node": "ноды kubernetes",
     "backup_restore": "проверка восстановления",
 }
@@ -1524,6 +1531,10 @@ def _recovery_detail(key: str, st: dict, ctx: dict) -> str:
         return "сервер снова дышит: процессы не ждут память и диск, зависших нет"
     if key == "net_health":
         return "сеть ноды снова в порядке: потерь, переполнений и ошибок нет"
+    if key == "link":
+        return "связь с другими серверами снова в порядке"
+    if key == "traffic":
+        return "трафик снова в пределах лимита тарифа"
     if key == "kube_node":
         return "ноды кластера снова Ready, давления нет"
     if key == "mem_leak":
@@ -3295,6 +3306,12 @@ def server_problems(s: Server, now: datetime, pod_names: dict[str, str] | None =
     if nets and _held_long(s, state, "net_health", now):
         add("net_health", nets[0][0], "; ".join(t for _l, _r, t in nets[:3]),
             "neterr" if nets[0][1] == "iface" else "nethealth", "net_health", state.get("net_health_since"))
+    lk = netlinks.problems(getattr(s, "links_state", None))
+    if lk and _held_long(s, state, "link", now):
+        add("link", lk[0][0], "; ".join(t for _l, _i, t in lk[:3]), "links", "link", state.get("link_since"))
+    tl, tt = traffic_mod.problem(getattr(s, "traffic_sum", None), now)
+    if tl and _held_long(s, state, "traffic", now):
+        add("traffic", tl, tt, "traffic", "traffic", state.get("traffic_since"))
     # Проверка восстановления бэкапа (helper backup-setup 0.34): ведет в "Бэкапы" клиента
     bv = backup_verify.problems(rep, now)
     if bv:
@@ -3665,7 +3682,7 @@ def groups_text(groups: list[dict], pod_names: dict[str, str] | None = None) -> 
 # Что из alert_state отдать как "с какого момента проблема": "<вид>_from" ставит цикл алертов
 # для любого вида, а у пороговых метрик точнее "<вид>_since" - начало превышения, а не алерта.
 _SINCE_KEYS = ("cpu", "mem", "temp", "conntrack", "disktemp", "db_conn", "web_5xx", "clock",
-               "backup_missing", "dns", "pressure", "net_health", "kube_node")
+               "backup_missing", "dns", "pressure", "net_health", "kube_node", "link", "traffic")
 
 
 def alert_since(s: Server) -> dict[str, str]:
@@ -3839,6 +3856,7 @@ _FLAP_METRIC_WINDOW = 6 * 3600
 # pg_dump на одной ноде дал три пары "сработало - отбой" за два часа: диск то не успевал, то
 # успевал, а история одна.
 _CALM_S = 3600
+_TRAFFIC_CALM_S = 12 * 3600
 # Под в CrashLoopBackOff между падениями на минуту становится Running: без выдержки отбоя
 # приходило "снова в норме" посреди цикла падений.
 _POD_CALM_S = 900
@@ -4848,6 +4866,21 @@ def _server_conditions(s: Server, now: datetime,
         nets = net_problems(rep)
         sustain_lvl("net_health", nets[0][0] if nets else 0, {"detail": "; ".join(t for _l, _r, t in nets[:4])},
                     cool_s=_CALM_S)
+    # Связь с другими серверами (агент 2.31, app/netlinks.py). sig - какие связи в беде: новая
+    # сломанная связь при уже объявленной - новое сообщение, та же снова - нет (держим до отбоя)
+    links_state = getattr(s, "links_state", None)
+    if online and (links_state or state.get("link")):
+        lk = netlinks.problems(links_state)
+        sig = {str(i) for _l, i, _t in lk}
+        if int(state.get("link", 0) or 0):
+            sig |= set(state.get("link_sig") or [])
+        sustain_lvl("link", lk[0][0] if lk else 0, {"detail": "; ".join(t for _l, _i, t in lk[:4]),
+                                                    "sig": sorted(sig)}, cool_s=_CALM_S)
+    # Трафик против лимита тарифа (app/traffic.py): прогноз ходит у границы, поэтому отбой только
+    # после полусуток спокойствия
+    tl, tt = traffic_mod.problem(getattr(s, "traffic_sum", None), now)
+    if online and (tl or state.get("traffic")):
+        sustain_lvl("traffic", tl, {"detail": tt}, cool_s=_TRAFFIC_CALM_S)
     # Часто перезапускается: приросты счетчиков за сутки ведет цикл алертов (alert_state restarts).
     # sig - что именно, чтобы новый контейнер в той же беде дал свой алерт
     if online and isinstance((s.alert_state or {}).get("restarts"), dict):
@@ -5193,7 +5226,7 @@ async def evaluate_servers(
                 continue  # известная проблема: про нее знают, молчим, пока не стало хуже
             prev = int(st.get(key, 0))
             if key in ("disk_health", "units", "docker_restarts", "kube_restarts", "mem_leak", "db_health",
-                       "web_config", "web_cert", "listen_gone", "docker_risk", "access_risk"):
+                       "web_config", "web_cert", "listen_gone", "docker_risk", "access_risk", "link"):
                 # Тот же уровень, но сломалось НОВОЕ (второй диск при уже развалившемся
                 # RAID, второй упавший юнит): молчать нельзя, хотя уровень не вырос. Что
                 # сломано - ключи в sig.
@@ -6014,6 +6047,8 @@ async def _prune(
             .values(lines=None)
         )
         await session.execute(delete(OomEvent).where(OomEvent.ts < srv_cutoff))
+        await session.execute(delete(LinkSample).where(LinkSample.ts < srv_cutoff))
+        await session.execute(delete(ServerTraffic).where(ServerTraffic.day < (now - traffic_mod.KEEP).date()))
         # история алертов маленькая, а нужна надолго: "как часто это было за квартал"
         await session.execute(delete(AlertEvent).where(AlertEvent.ts < now - _ALERT_HISTORY_KEEP))
         # docker/kube-команды (с логами) держим коротко — неделя, не тайм-серия

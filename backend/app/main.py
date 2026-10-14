@@ -18,6 +18,7 @@ from app.api import (
     health,
     locations,
     maintenance,
+    netlinks as netlinks_api,
     report,
     search,
     servers,
@@ -107,6 +108,8 @@ def create_app() -> FastAPI:
     app.include_router(locations.router, prefix="/api")
     app.include_router(maintenance.router, prefix="/api")
     app.include_router(servers.router, prefix="/api")
+    # связь между серверами и трафик за месяц (карточки сервера)
+    app.include_router(netlinks_api.router, prefix="/api")
     app.include_router(servers.agent_router, prefix="/api")
     app.include_router(settings_api.router, prefix="/api")
     app.include_router(ansible_api.router, prefix="/api")

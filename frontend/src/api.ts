@@ -1595,6 +1595,10 @@ export type Server = {
   offline_after_seconds: number
   alert_sustain_seconds: number // сколько держать превышение до алерта, сек
   parent_id?: number | null // за каким сервером стоит (шлюз, VPN): пока тот молчит, про этот не пишем
+  // лимит трафика тарифа (app/traffic.py): ГБ (0 - нет), что считает хостер, день начала периода
+  traffic_limit_gb?: number
+  traffic_count?: 'out' | 'both'
+  traffic_cycle_day?: number
   agent_update_note?: string | null // «обновление докачивается: 59% (3.4 из 5.8 МБ)»
   agent_advice: string[] // чего агенту не хватает в systemd-юните (человекочитаемо)
   agent_fix_command: string | null // команда-фикс для ноды (drop-in) или null
@@ -1870,6 +1874,9 @@ export function updateServer(
     queue_alert_over?: Record<string, number> // порог по конкретной очереди
     disk_autofix?: boolean // авто-очистка диска (меняет только админ)
     parent_id?: number | null // за каким сервером стоит, null - ни за кем
+    traffic_limit_gb?: number // лимит трафика тарифа, ГБ (0 - без лимита)
+    traffic_count?: 'out' | 'both'
+    traffic_cycle_day?: number
   },
 ): Promise<Server> {
   return api<Server>(`/api/servers/${id}`, { method: 'PATCH', body: JSON.stringify(body) })
@@ -1892,6 +1899,64 @@ export function snoozeServer(id: number, hours: number): Promise<Server> {
     body: JSON.stringify({ hours }),
   })
 }
+// Связь с другими серверами (агент 2.31): агент пробует открыть TCP-соединение с адресом
+export type NetLink = {
+  id: number
+  target_server_id: number | null
+  host: string
+  port: number
+  note: string
+  name: string
+  target_name: string | null
+  loss: number | null // доля неудачных попыток за 5 минут, %
+  rtt: number | null // время подключения, мс
+  err: string
+  fresh: boolean
+  last_ts: string | null
+  held: boolean // сервер, с которым связь, сам молчит
+}
+export type NetLinksOut = {
+  links: NetLink[]
+  targets: { id: number; name: string; ip: string; local_ip: string }[]
+  max: number
+  agent_ok: boolean
+}
+export type LinkPoint = { ts: string; loss: number; rtt: number | null; rtt_max: number | null }
+export const getLinks = (id: number) => api<NetLinksOut>(`/api/servers/${id}/links`)
+export const addLink = (
+  id: number,
+  body: { target_server_id: number | null; host: string; port: number; note: string },
+) => api<{ id: number }>(`/api/servers/${id}/links`, { method: 'POST', body: JSON.stringify(body) })
+export const deleteLink = (id: number, linkId: number) =>
+  api<void>(`/api/servers/${id}/links/${linkId}`, { method: 'DELETE' })
+export const getLinkHistory = (id: number, linkId: number, hours: number) =>
+  api<{ points: LinkPoint[]; step: number }>(`/api/servers/${id}/links/${linkId}/history?hours=${hours}`)
+// Трафик по настоящим сетевым картам: сутки, сводка за период тарифа, прошлые периоды
+export type TrafficSum = {
+  start: string
+  end: string // не включая
+  rx: number
+  tx: number
+  used: number
+  count: 'out' | 'both'
+  limit: number // байты, 0 - без лимита
+  forecast: number | null
+  days: number
+  left: number
+  full: boolean // данные с самого начала периода
+}
+export type TrafficOut = {
+  days: { day: string; rx: number; tx: number }[]
+  periods: { start: string; rx: number; tx: number }[]
+  sum: TrafficSum | null
+  limit_gb: number
+  count: 'out' | 'both'
+  cycle_day: number
+  ifaces: string[]
+  agent_ok: boolean
+  since: string | null
+}
+export const getTraffic = (id: number) => api<TrafficOut>(`/api/servers/${id}/traffic`)
 export type OomEvent = { ts: string; victim: string; count: number }
 export function serverOomEvents(id: number, limit = 50): Promise<OomEvent[]> {
   return api<OomEvent[]>(`/api/servers/${id}/oom-events?limit=${limit}`)

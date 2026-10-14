@@ -71,6 +71,7 @@ import { ServerParentBar } from './ParentBar'
 import { TimelineCard } from './TimelineCard'
 import { PackagesCard } from './PackagesCard'
 import { JournalCard, JournalModal, journalBlocker } from './UnitJournal'
+import { LinksCard, TrafficCard } from './NetLinks'
 import { KnownServerList } from './KnownDialog'
 import { MaintBanner, MaintChip } from './MaintModal'
 
@@ -779,7 +780,7 @@ function MetricSection({
 const SEC_OF_CARD: Record<string, string> = {
   cpu: 'cpu', throttle: 'cpu', temp: 'cpu', cpueat: 'cpu',
   mem: 'mem', oom: 'mem',
-  conntrack: 'conn', exposure: 'conn', nethealth: 'net', neterr: 'net', diskfill: 'disk', disktemp: 'disk', disk: 'disk', diskhealth: 'disk',
+  conntrack: 'conn', exposure: 'conn', nethealth: 'net', neterr: 'net', links: 'net', traffic: 'net', diskfill: 'disk', disktemp: 'disk', disk: 'disk', diskhealth: 'disk',
   units: 'proc', unitloop: 'proc', pressure: 'proc', changes: 'proc', pkgs: 'proc', journal: 'proc',
   web: 'web', web5xx: 'web',
 }
@@ -5294,6 +5295,8 @@ function ServerDetail({
               )}
           </div>
           <NetHealth server={s} />
+          <LinksCard server={s} />
+          <TrafficCard server={s} onChanged={onChanged} />
         </MetricSection>
 
         <MetricSection id="conn" title={t('Соединения')}>

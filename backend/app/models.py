@@ -11,12 +11,13 @@
 Модуль импортируется alembic/env.py, чтобы наполнить Base.metadata.
 """
 
-from datetime import datetime
+from datetime import date, datetime
 
 from sqlalchemy import (
     JSON,
     BigInteger,
     Boolean,
+    Date,
     DateTime,
     Float,
     Index,
@@ -677,10 +678,70 @@ class Server(Base):
     # процесса из kmsg, best-effort от агента; пусто, если агент не смог прочитать).
     oom_total: Mapped[int] = mapped_column(Integer, default=0)
     oom_victim: Mapped[str] = mapped_column(String(200), default="")
+    # связь с другими серверами (app/netlinks.py): сводка последних проверок для алерта и
+    # "Что сломано" - [{id, name, loss, rtt, err, held}]
+    links_state: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    # трафик (app/traffic.py): прошлые счетчики настоящих карт {"since", "c": {карта: [rx, tx]}},
+    # сводка за расчетный период и лимит тарифа. Лимит в ГБ (10^9 байт, как у хостеров), 0 - без
+    # лимита; что считает хостер: out - только исходящий, both - весь; с какого числа период
+    traffic_ctr: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    traffic_sum: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    traffic_limit_gb: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    traffic_count: Mapped[str] = mapped_column(String(8), default="out", server_default="out")
+    traffic_cycle_day: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
+
+
+class ServerLink(Base):
+    """Связь между серверами (app/netlinks.py): агент сервера server_id проверяет, открывается
+    ли TCP-соединение с host:port. target_server_id - если это сервер панели (для имени и чтобы
+    не алертить, пока он сам молчит)."""
+
+    __tablename__ = "server_links"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    server_id: Mapped[int] = mapped_column(Integer, index=True)
+    target_server_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    host: Mapped[str] = mapped_column(String(253))
+    port: Mapped[int] = mapped_column(Integer)
+    note: Mapped[str] = mapped_column(String(64), default="", server_default="")
+    # попытки за последние 5 минут [[epoch, sent, ok]] - по ним доля неудач для алерта
+    win: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    last_ts: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_loss: Mapped[float | None] = mapped_column(Float, nullable=True)
+    last_rtt: Mapped[float | None] = mapped_column(Float, nullable=True)
+    last_err: Mapped[str] = mapped_column(String(200), default="", server_default="")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+
+class LinkSample(Base):
+    """Порция проверок связи из одного отчета: доля неудач, медиана и худшее время подключения."""
+
+    __tablename__ = "link_samples"
+    __table_args__ = (Index("ix_link_samples_lookup", "link_id", "ts"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    link_id: Mapped[int] = mapped_column(Integer)
+    ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    loss: Mapped[float] = mapped_column(Float, default=0.0)
+    rtt: Mapped[float | None] = mapped_column(Float, nullable=True)
+    rtt_max: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+
+class ServerTraffic(Base):
+    """Трафик сервера за сутки (UTC) по настоящим сетевым картам, байты."""
+
+    __tablename__ = "server_traffic"
+
+    server_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    day: Mapped[date] = mapped_column(Date, primary_key=True)
+    rx: Mapped[int] = mapped_column(BigInteger, default=0)
+    tx: Mapped[int] = mapped_column(BigInteger, default=0)
 
 
 class ServerMetric(Base):
