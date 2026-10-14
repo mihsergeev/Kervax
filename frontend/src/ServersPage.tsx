@@ -783,7 +783,8 @@ const SEC_OF_CARD: Record<string, string> = {
   web: 'web', web5xx: 'web',
 }
 
-// Веб - последним: раздел есть не на каждой ноде, и в середине он сдвигал привычные.
+// Веб - в конце графиков: раздел есть не на каждой ноде, и в середине он сдвигал привычные.
+// Хронология - самой последней, отдельно от графиков.
 const DETAIL_SECTIONS = [
   { id: 'cpu', label: 'CPU' },
   { id: 'mem', label: 'Память' },
@@ -791,8 +792,8 @@ const DETAIL_SECTIONS = [
   { id: 'conn', label: 'Соединения' },
   { id: 'disk', label: 'Диск' },
   { id: 'proc', label: 'Процессы' },
-  { id: 'timeline', label: 'Хронология' },
   { id: 'web', label: 'Веб' },
+  { id: 'timeline', label: 'Хронология' },
 ]
 // отдельной константой: новый массив на каждый рендер пересоздавал бы слежение за скроллом
 const DETAIL_SECTIONS_NO_WEB = DETAIL_SECTIONS.filter((x) => x.id !== 'web')
@@ -5414,12 +5415,7 @@ function ServerDetail({
           </div>
         </MetricSection>
 
-        {/* что менялось и что было - одной лентой: первый вопрос при разборе сбоя */}
-        <MetricSection id="timeline" title={t('Хронология')}>
-          <TimelineCard serverId={s.id} onUnauthorized={onUnauthorized} />
-        </MetricSection>
-
-        {/* Веб - последним: раздел есть не на каждой ноде. Сюда ведет ссылка из алерта
+        {/* Веб - после остальных графиков: раздел есть не на каждой ноде. Сюда ведет ссылка из алерта
             по 5xx: сначала список - где ошибки, какие коды и пути, - потом графики. */}
         {hasWeb && (
           <MetricSection id="web" title={t('Веб')}>
@@ -5468,6 +5464,12 @@ function ServerDetail({
             </div>
           </MetricSection>
         )}
+
+        {/* что менялось и что было - одной лентой. В самом низу, после графиков и раздела веба: это
+            разбор, а не метрики, и смотреть ее удобнее без графиков на том же экране */}
+        <MetricSection id="timeline" title={t('Хронология')}>
+          <TimelineCard serverId={s.id} onUnauthorized={onUnauthorized} />
+        </MetricSection>
           </div>
         </div>
 

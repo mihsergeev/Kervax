@@ -590,6 +590,9 @@ const EN: Record<string, string> = {
     'Agent update {v} available — {n} node(s) behind. Open “Servers” →',
   'Требует внимания': 'Needs attention',
   'Требует действий': 'Action needed',
+  'Обновления': 'Updates',
+  'helper «{helper}» не установлен ({b}): нод - {n} ({list})': 'helper "{helper}" is not installed ({b}): {n} nodes ({list})',
+  'helper «{helper}» устарел ({a} → {b}): нод - {n} ({list})': 'helper "{helper}" is outdated ({a} → {b}): {n} nodes ({list})',
   '…и ещё {n}': '…and {n} more',
   '{name}: бэкап-сервер — включите статистику (backupserver-setup)':
     '{name}: backup server — enable stats (backupserver-setup)',
