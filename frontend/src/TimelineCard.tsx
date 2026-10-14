@@ -39,6 +39,7 @@ export function TimelineCard({ serverId, onUnauthorized }: Props) {
   const [err, setErr] = useState('')
   const [off, setOff] = useState<Set<string>>(() => new Set())
   const [limit, setLimit] = useState(100)
+  const [opened, setOpened] = useState<Set<string>>(() => new Set())
   const key = `${serverId}|${days}`
   const busy = loaded !== key
 
@@ -118,6 +119,17 @@ export function TimelineCard({ serverId, onUnauthorized }: Props) {
   }
 
   const shown = events.slice(0, limit)
+  const openKey = (e: TimelineEvent) => `${e.kind}|${e.ts}`
+  const flip = (k: string) =>
+    setOpened((prev) => {
+      const n = new Set(prev)
+      if (n.has(k)) n.delete(k)
+      else n.add(k)
+      return n
+    })
+  // строка прогона пакетов: обновлен - старая и новая версия, поставлен и удален - с плюсом и минусом
+  const pkgLine = (x: { a: string; p: string; o: string; n: string }) =>
+    x.a === 'upgrade' ? `${x.p} ${x.o} -> ${x.n}` : x.a === 'install' ? `+ ${x.p} ${x.n}` : `- ${x.p} ${x.o}`
   return (
     <div className="detail-inc tl-card" id="mcard-timeline">
       <div className="tl-head">
@@ -155,6 +167,8 @@ export function TimelineCard({ serverId, onUnauthorized }: Props) {
           {shown.map((e, i) => {
             const day = fmtDay(e.ts)
             const head = i === 0 || fmtDay(shown[i - 1].ts) !== day
+            const more = e.kind === 'pkgs' && (e.data?.length ?? 0) > 0
+            const isOpen = more && opened.has(openKey(e))
             return (
               <div key={i}>
                 {head && <div className="tl-day">{day}</div>}
@@ -163,8 +177,24 @@ export function TimelineCard({ serverId, onUnauthorized }: Props) {
                   <span className="tl-icon" aria-hidden="true">
                     {e.cat === 'alert' && e.recovery ? '✅' : (ICON[e.cat] ?? '•')}
                   </span>
-                  <span className="tl-text">{text(e)}</span>
+                  <span className="tl-text">
+                    {text(e)}
+                    {more && (
+                      <button className="ghost small tl-more" onClick={() => flip(openKey(e))}>
+                        {isOpen ? t('свернуть') : t('подробно')}
+                      </button>
+                    )}
+                  </span>
                 </div>
+                {isOpen && (
+                  <div className="tl-pkgs small">
+                    {e.data!.map((x, j) => (
+                      <div key={j} className={`tl-pkg tl-pkg-${x.a}`}>
+                        {pkgLine(x)}
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
             )
           })}
@@ -176,7 +206,9 @@ export function TimelineCard({ serverId, onUnauthorized }: Props) {
         </button>
       )}
       <div className="muted small tl-foot">
-        {t('Контейнеры, система и порты записываются с 1.4.168. Доступ и кроны - из снимков раз в 10 минут.')}
+        {t(
+          'Контейнеры, система и порты записываются с 1.4.168, пакеты по журналу установок - с агента 2.28. Доступ и кроны - из снимков раз в 10 минут.',
+        )}
       </div>
     </div>
   )

@@ -69,6 +69,7 @@ import { AlertHistoryModal } from './AlertHistoryModal'
 import { NoteBar } from './NoteBar'
 import { ServerParentBar } from './ParentBar'
 import { TimelineCard } from './TimelineCard'
+import { PackagesCard } from './PackagesCard'
 import { KnownServerList } from './KnownDialog'
 import { MaintBanner, MaintChip } from './MaintModal'
 
@@ -778,7 +779,7 @@ const SEC_OF_CARD: Record<string, string> = {
   cpu: 'cpu', throttle: 'cpu', temp: 'cpu', cpueat: 'cpu',
   mem: 'mem', oom: 'mem',
   conntrack: 'conn', exposure: 'conn', nethealth: 'net', neterr: 'net', diskfill: 'disk', disktemp: 'disk', disk: 'disk', diskhealth: 'disk',
-  units: 'proc', unitloop: 'proc', pressure: 'proc', changes: 'proc',
+  units: 'proc', unitloop: 'proc', pressure: 'proc', changes: 'proc', pkgs: 'proc',
   web: 'web', web5xx: 'web',
 }
 
@@ -5406,6 +5407,7 @@ function ServerDetail({
           <FailedUnits server={s} onChanged={onChanged} />
           <NoBootUnits server={s} onChanged={onChanged} />
           <ChangesFeed server={s} onChanged={onChanged} />
+          <PackagesCard server={s} onUnauthorized={onUnauthorized} />
           <div className="chart-grid">
             <ProcCard title={t('Топ по CPU')} procs={r.top_cpu} kind="cpu" total={r.mem_total ?? 0} t={t} />
             <ProcCard title={t('Топ по памяти')} procs={r.top_mem} kind="mem" total={r.mem_total ?? 0} t={t} />

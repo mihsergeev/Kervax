@@ -43,7 +43,7 @@ import (
 	"time"
 )
 
-const version = "2.27"
+const version = "2.28"
 
 // Публичный ключ для проверки подписи релизов агента (Ed25519, base64).
 // ПУСТО по умолчанию → самообновление ВЫКЛЮЧЕНО (агент никогда не заменяет себя).
@@ -234,6 +234,10 @@ type report struct {
 	Fds    *fdInfo            `json:"fds,omitempty"`
 	TCP    *tcpRates          `json:"tcp,omitempty"`
 	OSUpd  *osUpdates         `json:"os_upd,omitempty"`
+	// Агент 2.28: пакеты. В отчете только отпечаток списка (сам список - по просьбе панели,
+	// кусками, см. uploadPkgs) и новые строки журнала установок.
+	Pkgs  *pkgSum `json:"pkgs,omitempty"`
+	PkgEv []pkgEv `json:"pkg_ev,omitempty"`
 	// Готовые JSON-блоки root-хелперов из /var/lib/kervax/report.d/<имя>.json. Агент их не
 	// разбирает, а пересылает как есть: хелпер, которому нужно что-то сообщить панели
 	// (например, найденные на ноде свои бэкапы), больше не требует нового агента.
@@ -712,6 +716,8 @@ type config struct {
 	// Сайты этого сервера, которые панель проверить не может (белый список IP
 	// снаружи рвёт соединение). Проверяем их сами — см. runSiteProbes.
 	SiteProbes []siteProbe `json:"site_probes"`
+	// Панели нужен список пакетов: отпечаток в отчете не совпал с тем, что у нее есть
+	WantPkgs bool `json:"want_pkgs"`
 }
 
 // Задание на локальную проверку сайта. URL здесь — НЕ адрес, куда идти: соединяемся
@@ -3188,6 +3194,11 @@ func collect(prev sample) (report, sample) {
 		r.IPs = *ips
 	}
 	r.OSUpd = osUpdLatest.Load()
+	if pl := pkgLatest.Load(); pl != nil {
+		sum := pl.sum
+		r.Pkgs = &sum
+	}
+	r.PkgEv = pkgEvPeek()
 	return r, cur
 }
 
@@ -6323,6 +6334,8 @@ func main() {
 	// обновления ОС раз в час, слушающие порты и адреса раз в 5 минут
 	go osUpdLoop()
 	go hostScanLoop()
+	// пакеты и журнал установок раз в минуту (список перечитывается, только если менялся)
+	go pkgLoop()
 
 	const maxCycle = 90 * time.Second
 	kick := make(chan struct{}, 1)
@@ -6380,6 +6393,10 @@ func main() {
 			fmt.Fprintf(os.Stderr, "kervax-agent: отправка не удалась: %v\n", err)
 		} else {
 			lastOK.Store(time.Now().Unix()) // отчёт реально принят панелью
+			pkgEvDrop(len(r.PkgEv))         // события журнала дошли - из очереди их
+			if cfg.WantPkgs && time.Now().Unix() >= pkgRetryAt.Load() && pkgUploading.CompareAndSwap(false, true) {
+				go uploadPkgs(url, token)
+			}
 			if cfg.Interval > 0 {
 				interval = time.Duration(cfg.Interval) * time.Second
 			}
@@ -7023,6 +7040,361 @@ func osUpdLoop() {
 		osUpdLatest.Store(collectOSUpdates(time.Now()))
 		time.Sleep(time.Hour)
 	}
+}
+
+// ============================ Пакеты (агент 2.28) ============================
+// Список установленных пакетов и журнал установок: для поиска "где старый openssl" и для
+// хронологии "что обновили перед сбоем". Только данные - ни советов, ни алертов.
+//
+// Список большой (тысяча пакетов - десятки КБ), а за DPI соединение умирает на ~16-24 КБ
+// отданного (см. panelTransport). Поэтому в отчете только отпечаток списка. Панель, у которой
+// отпечаток другой, просит список (want_pkgs), и агент шлет его кусками, каждый своим
+// соединением. Журнал (dpkg.log) уходит в отчетах новыми строками.
+
+type pkgSum struct {
+	Mgr string `json:"mgr"`
+	N   int    `json:"n"`
+	H   string `json:"h"`
+	Log bool   `json:"log,omitempty"` // журнал установок читается: события придут в pkg_ev
+}
+
+type pkgEv struct {
+	T int64  `json:"t"`
+	A string `json:"a"` // install | upgrade | remove | purge
+	P string `json:"p"`
+	O string `json:"o,omitempty"` // версия до
+	N string `json:"n,omitempty"` // версия после
+}
+
+type pkgList struct {
+	sum   pkgSum
+	items [][2]string
+	stamp int64 // mtime базы пакетов, по которой собран список
+}
+
+const (
+	dpkgStatusPath = "/var/lib/dpkg/status"
+	dpkgLogPath    = "/var/log/dpkg.log"
+	apkDBPath      = "/lib/apk/db/installed"
+	pkgChunk       = 250  // пакетов в одном куске: ~10 КБ JSON, после gzip пара КБ
+	pkgMaxParts    = 80   // больше кусков панель не примет (AgentPackagesIn.parts)
+	pkgRetryPause  = 600  // список не дошел - следующая попытка не раньше чем через 10 минут
+	pkgEvPerReport = 300  // событий журнала в одном отчете, остальное в следующих
+	pkgEvQueueMax  = 3000 // панель долго не принимает - старое выбрасываем
+	pkgEvBackfill  = 48 * time.Hour
+)
+
+var (
+	pkgLatest    atomic.Pointer[pkgList]
+	pkgEvMu      sync.Mutex
+	pkgEvQueue   []pkgEv
+	pkgUploading atomic.Bool
+	pkgRetryAt   atomic.Int64
+)
+
+// parseDpkgStatus - установленные пакеты из /var/lib/dpkg/status. Пакет нескольких
+// архитектур (multiarch) с одинаковой версией - одна строка.
+func parseDpkgStatus(b []byte) [][2]string {
+	seen := map[[2]string]bool{}
+	var out [][2]string
+	for _, st := range strings.Split(string(b), "\n\n") {
+		var name, ver, status string
+		for _, l := range strings.Split(st, "\n") {
+			switch {
+			case strings.HasPrefix(l, "Package: "):
+				name = strings.TrimSpace(l[len("Package: "):])
+			case strings.HasPrefix(l, "Version: "):
+				ver = strings.TrimSpace(l[len("Version: "):])
+			case strings.HasPrefix(l, "Status: "):
+				status = strings.TrimSpace(l[len("Status: "):])
+			}
+		}
+		k := [2]string{name, ver}
+		if name == "" || ver == "" || !strings.HasSuffix(status, " installed") || seen[k] {
+			continue
+		}
+		seen[k] = true
+		out = append(out, k)
+	}
+	return out
+}
+
+// parseApkInstalled - /lib/apk/db/installed: блоки "P:имя", "V:версия".
+func parseApkInstalled(b []byte) [][2]string {
+	var out [][2]string
+	for _, st := range strings.Split(string(b), "\n\n") {
+		var name, ver string
+		for _, l := range strings.Split(st, "\n") {
+			if strings.HasPrefix(l, "P:") {
+				name = strings.TrimSpace(l[2:])
+			} else if strings.HasPrefix(l, "V:") {
+				ver = strings.TrimSpace(l[2:])
+			}
+		}
+		if name != "" && ver != "" {
+			out = append(out, [2]string{name, ver})
+		}
+	}
+	return out
+}
+
+// parseRpmQa - вывод rpm -qa с форматом "%{NAME}\t%{EPOCHNUM}:%{VERSION}-%{RELEASE}".
+func parseRpmQa(b []byte) [][2]string {
+	var out [][2]string
+	for _, l := range strings.Split(string(b), "\n") {
+		name, ver, ok := strings.Cut(strings.TrimSpace(l), "\t")
+		if !ok || name == "" || ver == "" || name == "gpg-pubkey" {
+			continue
+		}
+		out = append(out, [2]string{name, strings.TrimPrefix(ver, "0:")})
+	}
+	return out
+}
+
+func pkgHash(items [][2]string) string {
+	h := sha256.New()
+	for _, it := range items {
+		h.Write([]byte(it[0] + "\t" + it[1] + "\n"))
+	}
+	return hex.EncodeToString(h.Sum(nil))[:16]
+}
+
+// rpmDBStamp - время последней правки базы rpm (у новых систем она в sysimage).
+func rpmDBStamp() int64 {
+	var stamp int64
+	for _, p := range []string{"/usr/lib/sysimage/rpm", "/var/lib/rpm"} {
+		for _, f := range []string{"", "rpmdb.sqlite", "Packages", "Packages.db"} {
+			if t := mtime(filepath.Join(p, f)); t > stamp {
+				stamp = t
+			}
+		}
+	}
+	return stamp
+}
+
+// collectPkgs - список пакетов, если база менялась с прошлого раза.
+func collectPkgs(prev *pkgList) *pkgList {
+	var mgr string
+	var stamp int64
+	switch {
+	case fileExists(dpkgStatusPath):
+		mgr, stamp = "dpkg", mtime(dpkgStatusPath)
+	case fileExists(apkDBPath):
+		mgr, stamp = "apk", mtime(apkDBPath)
+	case fileExists("/usr/bin/rpm") || fileExists("/bin/rpm"):
+		mgr, stamp = "rpm", rpmDBStamp()
+	default:
+		return nil
+	}
+	if prev != nil && prev.sum.Mgr == mgr && prev.stamp == stamp && stamp != 0 {
+		return prev
+	}
+	var items [][2]string
+	switch mgr {
+	case "dpkg":
+		if b, err := os.ReadFile(dpkgStatusPath); err == nil {
+			items = parseDpkgStatus(b)
+		}
+	case "apk":
+		if b, err := os.ReadFile(apkDBPath); err == nil {
+			items = parseApkInstalled(b)
+		}
+	case "rpm":
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		out, err := exec.CommandContext(ctx, "rpm", "-qa", "--qf", "%{NAME}\\t%{EPOCHNUM}:%{VERSION}-%{RELEASE}\\n").Output()
+		cancel()
+		if err == nil {
+			items = parseRpmQa(out)
+		}
+	}
+	if len(items) == 0 {
+		return prev
+	}
+	sort.Slice(items, func(i, j int) bool {
+		if items[i][0] != items[j][0] {
+			return items[i][0] < items[j][0]
+		}
+		return items[i][1] < items[j][1]
+	})
+	return &pkgList{
+		sum:   pkgSum{Mgr: mgr, N: len(items), H: pkgHash(items), Log: mgr == "dpkg" && fileExists(dpkgLogPath)},
+		items: items, stamp: stamp,
+	}
+}
+
+// parseDpkgLogLine - "2026-10-14 12:03:11 upgrade openssl:amd64 3.0.2-0ubuntu1.15 3.0.2-0ubuntu1.18".
+// Время в журнале местное, без зоны.
+func parseDpkgLogLine(l string, loc *time.Location) (pkgEv, bool) {
+	f := strings.Fields(l)
+	if len(f) < 6 {
+		return pkgEv{}, false
+	}
+	switch f[2] {
+	case "install", "upgrade", "remove", "purge":
+	default:
+		return pkgEv{}, false
+	}
+	t, err := time.ParseInLocation("2006-01-02 15:04:05", f[0]+" "+f[1], loc)
+	if err != nil {
+		return pkgEv{}, false
+	}
+	name, _, _ := strings.Cut(f[3], ":")
+	o, n := f[4], f[5]
+	if o == "<none>" {
+		o = ""
+	}
+	if n == "<none>" {
+		n = ""
+	}
+	return pkgEv{T: t.Unix(), A: f[2], P: name, O: o, N: n}, true
+}
+
+// dpkgTail читает журнал с места, где остановились. Ротация (другой inode или файл короче
+// прочитанного) - новый файл с начала.
+type dpkgTail struct {
+	ino uint64
+	off int64
+}
+
+func (dt *dpkgTail) next(path string, since int64, loc *time.Location) []pkgEv {
+	fi, err := os.Stat(path)
+	if err != nil {
+		return nil
+	}
+	var ino uint64
+	if st, ok := fi.Sys().(*syscall.Stat_t); ok {
+		ino = st.Ino
+	}
+	if ino != dt.ino || fi.Size() < dt.off {
+		dt.ino, dt.off = ino, 0
+	}
+	if fi.Size() == dt.off {
+		return nil
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return nil
+	}
+	defer f.Close()
+	if _, err := f.Seek(dt.off, io.SeekStart); err != nil {
+		return nil
+	}
+	b, err := io.ReadAll(io.LimitReader(f, 8<<20))
+	if err != nil {
+		return nil
+	}
+	// только целые строки: недописанную дочитаем в следующий раз
+	end := bytes.LastIndexByte(b, '\n')
+	if end < 0 {
+		return nil
+	}
+	dt.off += int64(end + 1)
+	var out []pkgEv
+	for _, l := range strings.Split(string(b[:end]), "\n") {
+		if ev, ok := parseDpkgLogLine(l, loc); ok && ev.T >= since {
+			out = append(out, ev)
+		}
+	}
+	return out
+}
+
+func pkgEvPush(evs []pkgEv) {
+	if len(evs) == 0 {
+		return
+	}
+	pkgEvMu.Lock()
+	pkgEvQueue = append(pkgEvQueue, evs...)
+	if len(pkgEvQueue) > pkgEvQueueMax {
+		pkgEvQueue = pkgEvQueue[len(pkgEvQueue)-pkgEvQueueMax:]
+	}
+	pkgEvMu.Unlock()
+}
+
+func pkgEvPeek() []pkgEv {
+	pkgEvMu.Lock()
+	defer pkgEvMu.Unlock()
+	n := min(len(pkgEvQueue), pkgEvPerReport)
+	if n == 0 {
+		return nil
+	}
+	return append([]pkgEv(nil), pkgEvQueue[:n]...)
+}
+
+// pkgEvDrop - панель приняла отчет: отправленное убираем из очереди
+func pkgEvDrop(n int) {
+	pkgEvMu.Lock()
+	n = min(n, len(pkgEvQueue))
+	pkgEvQueue = pkgEvQueue[n:]
+	pkgEvMu.Unlock()
+}
+
+// pkgLoop - список пакетов (перечитываем, только если база менялась, и раз в сутки) и новые
+// строки журнала раз в минуту. При старте журнал за двое суток: панель отбросит виденное.
+func pkgLoop() {
+	time.Sleep(40 * time.Second)
+	var tail dpkgTail
+	since := time.Now().Add(-pkgEvBackfill).Unix()
+	var lastFull time.Time
+	for {
+		prev := pkgLatest.Load()
+		if time.Since(lastFull) > 24*time.Hour {
+			prev, lastFull = nil, time.Now()
+		}
+		if pl := collectPkgs(prev); pl != nil {
+			pkgLatest.Store(pl)
+		}
+		if fileExists(dpkgLogPath) {
+			pkgEvPush(tail.next(dpkgLogPath, since, time.Local))
+		}
+		time.Sleep(time.Minute)
+	}
+}
+
+// uploadPkgs - список пакетов кусками по просьбе панели. Каждый кусок своим соединением
+// (reportClient без keep-alive): за DPI так ни один не упирается в счетчик байт. Сорвалось -
+// бросаем, панель попросит снова, но не раньше чем через pkgRetryPause.
+func uploadPkgs(panelURL, token string) {
+	defer pkgUploading.Store(false)
+	pl := pkgLatest.Load()
+	if pl == nil {
+		return
+	}
+	// не дошло - пауза, иначе каждый отчет (раз в минуту) начинал бы заново
+	pkgRetryAt.Store(time.Now().Unix() + pkgRetryPause)
+	items := pl.items
+	if len(items) > pkgChunk*pkgMaxParts {
+		items = items[:pkgChunk*pkgMaxParts]
+	}
+	parts := max((len(items)+pkgChunk-1)/pkgChunk, 1)
+	endpoint := strings.TrimRight(panelURL, "/") + "/api/agent/packages"
+	for i := 0; i < parts; i++ {
+		lo, hi := i*pkgChunk, min((i+1)*pkgChunk, len(items))
+		raw, _ := json.Marshal(map[string]any{"h": pl.sum.H, "mgr": pl.sum.Mgr, "part": i, "parts": parts,
+			"items": items[lo:hi]})
+		var buf bytes.Buffer
+		zw := gzip.NewWriter(&buf)
+		zw.Write(raw)
+		zw.Close()
+		req, err := http.NewRequest("POST", endpoint, bytes.NewReader(buf.Bytes()))
+		if err != nil {
+			return
+		}
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Content-Encoding", "gzip")
+		resp, err := reportClient.Do(req)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "kervax-agent: список пакетов не отправлен: %v\n", err)
+			return
+		}
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != 200 {
+			fmt.Fprintf(os.Stderr, "kervax-agent: список пакетов: панель ответила %d\n", resp.StatusCode)
+			return
+		}
+	}
+	pkgRetryAt.Store(0)
 }
 
 // truncRunes обрезает строку до n символов (не байт)

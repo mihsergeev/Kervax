@@ -1,9 +1,12 @@
 """Поиск по всему парку (Ctrl+K): серверы, мониторы, сайты, контейнеры, порты, базы и сервисы,
-очереди, поды, пользователи и SSH-ключи, юниты, кроны, версии ПО.
+очереди, поды, пользователи и SSH-ключи, юниты, кроны, версии ПО и пакеты.
 
 Отдельно ничего не копим: все берется из последних отчетов агентов. Записи сервера строятся
 один раз на каждый новый отчет и живут в памяти процесса, сам поиск - подстроки по ним, без БД.
 Из отчета читаются только нужные ветки, а не весь JSON (у большой ноды он за 200 КБ).
+
+Пакеты (агент 2.28, app/packages.py) - одна запись на пакет с версией по всем видимым
+серверам: "openssl 3.0.2-0ubuntu1.15" и на каких серверах он стоит.
 
 Ответ - группы по видам, в каждой лучшие PER_KIND записей и сколько нашлось всего. Подписи
 (sub, tag, hint) - это данные и ключи, слова к ним подставляет фронт на языке учетки.
@@ -14,15 +17,15 @@ from dataclasses import dataclass, field
 
 from sqlalchemy import select
 
-from app.models import Server
+from app.models import Server, ServerPackages
 
 # порядок групп в ответе: сначала сами объекты, потом то, что на них нашлось
 KINDS = ("server", "check", "site", "container", "port", "db", "queue", "pod",
-         "user", "key", "unit", "cron", "version")
+         "user", "key", "unit", "cron", "version", "package")
 # раздел панели, без которого вид не показываем (и куда ведет клик)
 SECTION = {
     "server": "servers", "site": "servers", "port": "servers", "user": "servers", "key": "servers",
-    "unit": "servers", "cron": "servers", "version": "servers",
+    "unit": "servers", "cron": "servers", "version": "servers", "package": "servers",
     "container": "docker", "pod": "kuber", "db": "services", "queue": "services", "check": "sites",
 }
 PER_KIND = 8
@@ -236,7 +239,7 @@ def check_entry(c) -> Entry:
 # --- кэш записей по серверам ------------------------------------------------------------------
 
 _SRV_COLS = (Server.id, Server.name, Server.group_name, Server.hostname, Server.os, Server.agent_version,
-             Server.local_ip, Server.external_ip, Server.agent_ip, Server.note, Server.last_seen)
+             Server.local_ip, Server.external_ip, Server.agent_ip, Server.note, Server.last_seen, Server.pkg_hash)
 _cache: dict[int, tuple[tuple, list[Entry]]] = {}
 
 
@@ -261,10 +264,50 @@ async def server_entries(session, rows, full: bool = False) -> list[Entry]:
         alive = {r.id for r in rows}
         for sid in [k for k in _cache if k not in alive]:
             _cache.pop(sid, None)
+        for sid in [k for k in _pkg_items if k not in alive]:
+            _pkg_items.pop(sid, None)
     out: list[Entry] = []
     for r in rows:
         out += _cache[r.id][1]
     return out
+
+
+# --- пакеты: одна запись на пакет с версией, в подписи - где он стоит -------------------------
+
+_pkg_items: dict[int, tuple[str, list]] = {}
+# готовые записи по набору видимых серверов: у учеток с разными группами наборы разные
+_pkg_index: dict[tuple, list[Entry]] = {}
+_PKG_INDEX_MAX = 8
+# сколько серверов называть в подписи, остальные - числом
+PKG_NAMES = 3
+
+
+async def package_entries(session, rows) -> list[Entry]:
+    have = [r for r in rows if r.pkg_hash]
+    stale = [r for r in have if _pkg_items.get(r.id, ("",))[0] != r.pkg_hash]
+    if stale:
+        got = {row[0]: row[1] or [] for row in (await session.execute(
+            select(ServerPackages.server_id, ServerPackages.items)
+            .where(ServerPackages.server_id.in_([r.id for r in stale]))
+        )).all()}
+        for r in stale:
+            _pkg_items[r.id] = (r.pkg_hash, got.get(r.id, []))
+    key = tuple(sorted((r.id, r.name, r.pkg_hash) for r in have))
+    entries = _pkg_index.get(key)
+    if entries is None:
+        by: dict[tuple[str, str], list] = {}
+        for r in sorted(have, key=lambda x: x.name.lower()):
+            for it in _pkg_items[r.id][1]:
+                if isinstance(it, list) and len(it) == 2:
+                    by.setdefault((it[0], it[1]), []).append(r)
+        # подпись: версия, на скольких серверах, первые из них по имени
+        entries = [Entry("package", name, srvs[0].id, [ver, str(len(srvs)), *(x.name for x in srvs[:PKG_NAMES])],
+                         sec="pkgs", fields=[("ver", ver)])
+                   for (name, ver), srvs in by.items()]
+        while len(_pkg_index) >= _PKG_INDEX_MAX:
+            _pkg_index.pop(next(iter(_pkg_index)))
+        _pkg_index[key] = entries
+    return entries
 
 
 # --- сам поиск --------------------------------------------------------------------------------

@@ -533,6 +533,9 @@ class Server(Base):
     # data/agent_allow_ips, а хостовый скрипт (ops/agent-firewall-sync.sh)
     # разрешает эти адреса в ufw/firewalld, если панель закрыта фаерволом
     agent_ip: Mapped[str] = mapped_column(String(64), default="")
+    # отпечаток списка пакетов, который у панели есть (app/packages.py): не совпал с отчетом -
+    # агента просят прислать список
+    pkg_hash: Mapped[str] = mapped_column(String(32), default="", server_default="")
     # полный последний снимок (диски/swap/uptime/проверки) — JSON
     last_report: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     # когда последний раз положили строку в server_metrics. Отчёты приходят
@@ -1026,6 +1029,8 @@ class ServerEvent(Base):
     obj: Mapped[str] = mapped_column(String(255), default="")   # контейнер, порт; у системных пусто
     text: Mapped[str] = mapped_column(Text, default="")
     n: Mapped[int] = mapped_column(Integer, default=1)          # падения подряд сливаются в одно
+    # подробности, если они есть: у прогона apt - список пакетов с версиями
+    data: Mapped[list | dict | None] = mapped_column(JSON, nullable=True)
 
 
 class TimelineState(Base):
@@ -1035,3 +1040,21 @@ class TimelineState(Base):
 
     server_id: Mapped[int] = mapped_column(Integer, primary_key=True)
     state: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+
+
+class ServerPackages(Base):
+    """Установленные пакеты сервера (агент 2.28, app/packages.py): список целиком и куски,
+    которые еще собираются. Отдельно от servers по той же причине, что и хронология."""
+
+    __tablename__ = "server_packages"
+
+    server_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    mgr: Mapped[str] = mapped_column(String(8), default="")       # dpkg | rpm | apk
+    hash: Mapped[str] = mapped_column(String(32), default="")
+    n: Mapped[int] = mapped_column(Integer, default=0)
+    items: Mapped[list | None] = mapped_column(JSON, nullable=True)  # [[имя, версия], ...]
+    ts: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    pending: Mapped[dict | None] = mapped_column(JSON, nullable=True)  # {h, parts, mgr, got: {номер: items}}
+    # докуда журнал установок уже разобран: время последней строки и строки с этим временем
+    ev_ts: Mapped[int] = mapped_column(BigInteger, default=0)
+    ev_keys: Mapped[list | None] = mapped_column(JSON, nullable=True)

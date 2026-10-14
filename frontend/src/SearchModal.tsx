@@ -76,6 +76,14 @@ export function SearchModal({ onClose, onUnauthorized, onOpen }: Props) {
 
   const open = (it: SearchItem) => {
     saveRecent(query)
+    // пакет: карточка пакетов (PackagesCard) откроется уже с ним в фильтре
+    if (it.sec === 'pkgs') {
+      try {
+        sessionStorage.setItem('kervax_pkgs_q', JSON.stringify({ id: it.id, q: it.title, ts: Date.now() }))
+      } catch {
+        // без хранилища карточка просто откроется с пустым фильтром
+      }
+    }
     onOpen(it.section as Section, it.id, it.sec || undefined)
   }
 
@@ -108,6 +116,7 @@ export function SearchModal({ onClose, onUnauthorized, onOpen }: Props) {
       unit: t('Юниты systemd'),
       cron: t('Кроны'),
       version: t('Версии'),
+      package: t('Пакеты'),
     })[k] ?? k
 
   const tagLabel = (it: SearchItem) =>
@@ -136,9 +145,16 @@ export function SearchModal({ onClose, onUnauthorized, onOpen }: Props) {
       pod: t('под'),
       fp: t('отпечаток'),
       addr: t('адрес'),
+      ver: t('версия'),
     })[k] ?? k
 
   const subText = (g: string, it: SearchItem) => {
+    // у пакета: версия, на скольких серверах, первые из них
+    if (g === 'package' && it.sub.length >= 2) {
+      const [ver, n, ...names] = it.sub
+      const more = Number(n) - names.length
+      return `${ver} · ${names.join(', ')}${more > 0 ? ' ' + t('и еще {n}', { n: more }) : ''}`
+    }
     const parts = [...it.sub]
     // у пода последним приходит число подов контроллера
     if (g === 'pod' && parts.length === 3) parts[2] = t('подов: {n}', { n: parts[2] })
