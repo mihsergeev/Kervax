@@ -28,6 +28,7 @@ from app import changes as srv_changes
 from app import known
 from app import parents as parents_mod
 from app import timeline as timeline_mod
+from app import packages as packages_mod
 from app import audit, backup_growth, custom_backups, docker_exposure, geoip, kube_coverage, manual_probe, open_ports, os_support
 from app.collector import (
     _backup_problem_repos, alert_since, backup_cadence, backup_rotation_items, backup_unmonitored,
@@ -62,6 +63,7 @@ from app.schemas import (
     NoteIn,
     AgentConfigOut,
     AgentReleaseOut,
+    AgentPackagesIn,
     AgentReportIn,
     AgentSiteProbesIn,
     AgentUpdateCancel,
@@ -1199,6 +1201,14 @@ async def exposure_scan(server_id: int, user: CurrentUser, session: SessionDep) 
     await session.refresh(s)
     await audit.record(session, user.username, "exposure_scan", s.name, via)
     return _out(s, datetime.now(timezone.utc))
+
+
+@router.get("/{server_id}/packages")
+async def server_packages(server_id: int, user: CurrentUser, session: SessionDep,
+                          q: str = Query("", max_length=100)) -> dict:
+    """Установленные пакеты сервера (агент 2.28), с фильтром по имени и версии."""
+    await _get_or_404(server_id, session, user)
+    return await packages_mod.list_for(session, server_id, q)
 
 
 @router.get("/{server_id}/timeline")
@@ -2790,6 +2800,8 @@ async def agent_report(
         session.add(OomEvent(server_id=server.id, ts=now, victim=victim, count=oom_delta))
     await _store_web_errors(session, server, body, now)
     report_dict = body.model_dump()
+    # журнал установок - разовый, в хронологию; в last_report ему жить незачем
+    report_dict.pop("pkg_ev", None)
     # сдвиг часов: локальное время ноды (на момент отправки) минус время панели на приёме.
     # Работает даже если у ноды нет доступа к NTP — агент до панели по HTTPS достучался.
     # В разницу входит дорога отчета, при медленном DNS это секунды, поэтому берем минимум
@@ -2801,6 +2813,11 @@ async def agent_report(
         report_dict["clock_skew_sec"] = cw["win"][0][1]
     server.last_report = report_dict
     server.last_seen = now
+    if body.pkg_ev:
+        await packages_mod.store_events(session, server, body.pkg_ev, now)
+    # отпечаток списка пакетов не совпал с тем, что у панели есть - пусть пришлет список
+    want_pkgs = bool(isinstance(body.pkgs, dict) and body.pkgs.get("h")
+                     and str(body.pkgs["h"])[:32] != (server.pkg_hash or ""))
     if server.first_report_at is None:
         server.first_report_at = now
 
@@ -2834,8 +2851,25 @@ async def agent_report(
         ),
         checks=[], update=upd,
         docker_commands=cmds, kube_commands=kcmds, backup_commands=bcmds,
-        site_probes=probes,
+        site_probes=probes, want_pkgs=want_pkgs,
     )
+
+
+@agent_router.post("/packages")
+async def agent_packages(
+    body: AgentPackagesIn, session: SessionDep, authorization: str = Header(default=""),
+) -> dict:
+    """Кусок списка пакетов (app/packages.py): агент шлет их по одному, каждым своим соединением."""
+    token = authorization.removeprefix("Bearer ").strip()
+    server = await session.scalar(select(Server).where(Server.token_hash == hash_agent_token(token))) if token else None
+    if server is None or not server.enabled:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Неверный токен агента")
+    if body.part >= body.parts:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "номер куска больше их числа")
+    done = await packages_mod.store_part(session, server, body.h, body.mgr, body.part, body.parts, body.items,
+                                         datetime.now(timezone.utc))
+    await session.commit()
+    return {"ok": True, "done": done}
 
 
 async def _store_site_probes(session, server_id: int, results: list, now) -> list:

@@ -1163,6 +1163,8 @@ export type ServerReport = {
   // TCP за секунду (агент 2.26): отправлено сегментов, из них повторно, переполнения очереди
   // accept и выброшенные из нее, новые соединения, выброшенные conntrack, входящие с ошибкой
   tcp?: { out: number; retrans: number; in_errs: number; listen_ovf: number; listen_drop: number; ct_drop: number }
+  // пакеты (агент 2.28): сколько и каким менеджером; сам список - getServerPackages
+  pkgs?: { mgr?: string; n?: number; h?: string; log?: boolean }
   // обновления ОС (агент 2.26, раз в час): updates/security -1 - не apt
   os_upd?: {
     reboot?: boolean
@@ -2401,10 +2403,18 @@ export type TimelineEvent = {
   end?: string
   recovery?: boolean
   alert?: boolean
+  // прогон пакетов (kind "pkgs"): что именно поставили, обновили и удалили
+  data?: { a: string; p: string; o: string; n: string }[]
 }
 export type TimelineResult = { since: string; until: string; events: TimelineEvent[]; cats: Record<string, number> }
 export function getServerTimeline(id: number, days: number): Promise<TimelineResult> {
   return api<TimelineResult>(`/api/servers/${id}/timeline?days=${days}`)
+}
+
+// --- пакеты сервера (backend app/packages.py, агент 2.28) ---
+export type ServerPackages = { mgr: string; n: number; ts: string | null; items: [string, string][]; total: number }
+export function getServerPackages(id: number, q: string): Promise<ServerPackages> {
+  return api<ServerPackages>(`/api/servers/${id}/packages?q=${encodeURIComponent(q)}`)
 }
 
 // --- карта зависимостей (backend api/depmap.py) ---

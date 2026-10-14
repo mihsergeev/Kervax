@@ -22,6 +22,8 @@ async def search(user: CurrentUser, session: SessionDep, q: str = Query("", max_
             scope_query(user, select(*search_mod._SRV_COLS), Server, "servers")
         )).all()
         entries += await search_mod.server_entries(session, rows, full=not (user.server_groups or []))
+        if "servers" in sections:
+            entries += await search_mod.package_entries(session, rows)
     if "sites" in sections:
         entries += [search_mod.check_entry(c) for c in (await session.execute(
             scope_query(user, select(Check.id, Check.name, Check.type, Check.target, Check.group_name, Check.note),

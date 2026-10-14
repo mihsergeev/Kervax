@@ -1409,6 +1409,9 @@ class AgentReportIn(BaseModel):
     fds: dict | None = None
     tcp: dict | None = None
     os_upd: dict | None = None
+    # агент 2.28: отпечаток списка пакетов {mgr, n, h, log} и новые строки журнала установок
+    pkgs: dict | None = None
+    pkg_ev: list[dict] = Field(default_factory=list, max_length=600)
     # блоки root-хелперов как есть: {"custom-backups": {...}} (агент 2.8+, report.d)
     extras: dict | None = None
 
@@ -1431,6 +1434,18 @@ class AgentConfigOut(BaseModel):
     # (белый список IP). [{id,url,method,timeout_ms,expected_status,keyword_up,
     #  keyword_down,headers,auth_user,auth_pass,ignore_tls,interval}]
     site_probes: list[dict] = []
+    # у панели другой отпечаток списка пакетов: агент шлет список кусками (app/packages.py)
+    want_pkgs: bool = False
+
+
+class AgentPackagesIn(BaseModel):
+    """Кусок списка пакетов от агента."""
+
+    h: str = Field(min_length=1, max_length=32)
+    mgr: str = Field(default="", max_length=8)
+    part: int = Field(ge=0, le=79)
+    parts: int = Field(ge=1, le=80)
+    items: list[list[str]] = Field(default_factory=list, max_length=600)
 
 
 class DockerCommandIn(BaseModel):

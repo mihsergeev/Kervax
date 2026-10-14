@@ -24,7 +24,7 @@ from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import delete, select, update
 
-from app.models import Server, ServerEvent, TimelineState
+from app.models import Server, ServerEvent, ServerPackages, TimelineState
 
 log = logging.getLogger("kervax.timeline")
 
@@ -53,6 +53,7 @@ _PARTS = {
     "procs": ("extras", "changes", "listen"),
     "os_upd": ("os_upd",),
     "os": ("os",),
+    "pkgs": ("pkgs",),
 }
 
 
@@ -113,6 +114,8 @@ def snapshot(row, rep: dict) -> dict:
         "upd": _i(upd.get("updates")) if upd else None, "upd_ts": _i(upd.get("upd_ts")) or 0,
         "rb_ts": (_i(upd.get("reboot_ts")) or 0) if upd.get("reboot") else 0,
         "rb_pkgs": [str(x) for x in (upd.get("reboot_pkgs") or [])][:6], "ua": _i(upd.get("unatt_ts")) or 0,
+        # агент присылает журнал установок: обновления видны по пакетам, счетчик не нужен
+        "pkh": bool((rep.get("pkgs") or {}).get("log")) if isinstance(rep.get("pkgs"), dict) else False,
     }
 
 
@@ -204,7 +207,8 @@ def diff(prev: dict | None, cur: dict, pend: dict) -> tuple[list[dict], dict]:
         ev.append(_ev(_iso(cur.get("upd_ts")) or ts, "system", "kernel_new", "",
                       f"установлено ядро {cur['kn']}, заработает после перезагрузки"))
     a, b = prev.get("upd"), cur.get("upd")
-    if isinstance(a, int) and isinstance(b, int) and 0 <= b < a and cur.get("upd_ts") != prev.get("upd_ts"):
+    if isinstance(a, int) and isinstance(b, int) and 0 <= b < a and cur.get("upd_ts") != prev.get("upd_ts") \
+            and not cur.get("pkh"):
         # когда именно - точно не знаем: ставили между двумя подсчетами (раз в час). Если между
         # ними прошли автообновления - это они
         ua = cur.get("ua") or 0
@@ -297,6 +301,7 @@ async def forget(session, server_id: int) -> None:
     """Сервер удален - его хронология тоже."""
     await session.execute(delete(ServerEvent).where(ServerEvent.server_id == server_id))
     await session.execute(delete(TimelineState).where(TimelineState.server_id == server_id))
+    await session.execute(delete(ServerPackages).where(ServerPackages.server_id == server_id))
 
 
 # --- "перед этим" для алертов ----------------------------------------------------------------
@@ -393,7 +398,8 @@ async def view(session, srv, user, since: datetime, until: datetime, tz: str) ->
                                   ServerEvent.ts <= until)
         .order_by(ServerEvent.ts.desc()).limit(_VIEW_MAX)
     ):
-        out.append({"ts": _iso(e.ts), "cat": e.cat, "kind": e.kind, "obj": e.obj, "text": e.text, "n": e.n})
+        out.append({"ts": _iso(e.ts), "cat": e.cat, "kind": e.kind, "obj": e.obj, "text": e.text, "n": e.n}
+                   | ({"data": e.data} if e.data else {}))
     lo, hi = since.isoformat(), until.isoformat()
     ch = srv.changes if isinstance(getattr(srv, "changes", None), dict) else {}
     for e in ch.get("log") or []:

@@ -2026,8 +2026,17 @@ const EN: Record<string, string> = {
   'до': 'until',
   'За этот период ничего не происходило.': 'Nothing happened in this period.',
   'показать еще ({n})': 'show more ({n})',
-  'Контейнеры, система и порты записываются с 1.4.168. Доступ и кроны - из снимков раз в 10 минут.':
-    'Containers, system and ports are recorded since 1.4.168. Access and cron come from snapshots every 10 minutes.',
+  'Контейнеры, система и порты записываются с 1.4.168, пакеты по журналу установок - с агента 2.28. Доступ и кроны - из снимков раз в 10 минут.':
+    'Containers, system and ports are recorded since 1.4.168, packages from the install log since agent 2.28. Access and cron come from snapshots every 10 minutes.',
+  'подробно': 'details',
+  // --- пакеты на серверах ---
+  'Пакеты': 'Packages',
+  'установлено: {n}': 'installed: {n}',
+  'имя или версия': 'name or version',
+  'весь список': 'full list',
+  'Список еще не пришел: агент пришлет его со следующим отчетом.':
+    'The list has not arrived yet: the agent will send it with the next report.',
+  'показаны первые {k} из {n}, уточните фильтр': 'showing the first {k} of {n}, narrow the filter',
   // --- поиск по парку ---
   'Сайты на серверах': 'Sites on servers',
   'Контейнеры': 'Containers',
