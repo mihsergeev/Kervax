@@ -30,6 +30,7 @@ services:
       dockerfile: backend/Dockerfile
       args:
         AGENT_PUBKEY: ${KERVAX_AGENT_PUBKEY:-}
+        DEPS_EPOCH: ${KERVAX_DEPS_EPOCH:-}
     restart: unless-stopped
     security_opt:
       - no-new-privileges:true

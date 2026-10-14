@@ -285,6 +285,14 @@ function AnsibleHint({ hosts }: { hosts: string[] }) {
   )
 }
 
+// "Что сломано": текст проблемы - шапка и подробности ("ошибки 5xx: 18% запросов",
+// "старые снапшоты не вычищаются - repo-a (256 дн.)"). Одинаковая шапка у предупреждений с
+// разных серверов - одна строка с раскрытием; красное не сворачивается никогда.
+function splitHead(text: string): [string, string] {
+  const m = /^(.+?)(?: - |: )([\s\S]+)$/.exec(text)
+  return m ? [m[1], m[2]] : [text, '']
+}
+
 // Строка блока "Требует действий": пункт как есть или группа одинаковых с разных серверов
 type ActRow = { one: ActItem } | { grp: string; items: ActItem[] }
 
@@ -864,6 +872,21 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
     ...fromProbs(kubeProbs, 'kuber'),
     ...fromProbs(backupProbs, 'backups'),
   ].sort((a, b) => (a.tone === b.tone ? a.name.localeCompare(b.name) : a.tone === 't-down' ? -1 : 1))
+  // предупреждения с одинаковой шапкой с двух и больше серверов - одна строка; красное - как есть
+  type BrokenRow = { one: Broken } | { grp: string; head: string; items: Broken[] }
+  const brokenKey = (b: Broken) => (b.tone === 't-down' ? '' : `${b.kind}|${splitHead(b.text)[0]}`)
+  const brokenBy = new Map<string, Broken[]>()
+  for (const b of broken) {
+    const k = brokenKey(b)
+    if (k) brokenBy.set(k, [...(brokenBy.get(k) ?? []), b])
+  }
+  const brokenRows: BrokenRow[] = []
+  for (const b of broken) {
+    const k = brokenKey(b)
+    const list = k ? brokenBy.get(k)! : null
+    if (!list || new Set(list.map((x) => x.id)).size < 2) brokenRows.push({ one: b })
+    else if (list[0] === b) brokenRows.push({ grp: k, head: splitHead(b.text)[0], items: list })
+  }
 
   // Известные проблемы: про них знают (backend app/known.py), алерт молчит, пока не стало хуже.
   // Отдельный серый блок вместо "Что сломано": видно, что висит и что про это написали.
@@ -910,6 +933,63 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
       .filter((s) => s.online && s.helper_rollout)
       .map((s) => s.hostname || s.name),
   )].sort()
+  // строка "Что сломано"; sub - внутри раскрытой группы: сервер и подробности без шапки
+  const brokenRow = (it: Broken, sub = false) => (
+    <button
+      key={it.key}
+      className={`home-attention-row${sub ? ' home-attention-subrow' : ''}`}
+      onClick={() => onOpen(it.section, it.id, it.srv, it.sec)}
+    >
+      {!sub && <span className={`dot ${it.tone === 't-down' ? 'down' : 'degraded'}`} />}
+      {!sub && <span className="home-attention-ico">{ISSUE_ICON[it.kind] ?? '⚠️'}</span>}
+      <span className="home-attention-txt">
+        <CountryFlag code={it.cc} /> <b>{it.name}</b>
+        {sub ? (splitHead(it.text)[1] ? <span className="muted"> - {splitHead(it.text)[1]}</span> : null) : ` - ${it.text}`}
+        {sinceShort(it.since, t) && <span className="muted"> · {sinceShort(it.since, t)}</span>}
+        {it.srv && it.section === 'servers' && <MaintChip kind="server" id={it.id} />}
+        {it.note && (
+          <span className="note-chip" title={it.note}>
+            {' '}📝
+          </span>
+        )}
+      </span>
+      {it.markable && !isViewer && (
+        <span className="quick-mute" title={t('Известная проблема: алерт молчит, пока не станет хуже')}
+          onClick={(e) => {
+            e.stopPropagation()
+            setKnownFor({ id: it.id, kind: it.kind, title: `${it.name} - ${it.text}` })
+          }}>
+          📌
+        </span>
+      )}
+      {it.mute && (
+        <span className="quick-mute" title={t('Приглушить')}
+          onClick={(e) => { e.stopPropagation(); quickMute(it.id, [it.mute!]) }}>
+          🔕
+        </span>
+      )}
+      <span className="home-open">→</span>
+    </button>
+  )
+  const brokenGrpRow = (r: BrokenRow) => {
+    if ('one' in r) return brokenRow(r.one)
+    const open = openGrps.has(`b-${r.grp}`)
+    const names = shortList([...new Set(r.items.map((x) => x.name))], t, 4)
+    return (
+      <div key={`bg-${r.grp}`} className="home-attention-grpbox">
+        <button className={`home-attention-row${open ? ' open' : ''}`} onClick={() => toggleGrp(`b-${r.grp}`)}>
+          <span className="dot degraded" />
+          <span className="home-attention-ico">{ISSUE_ICON[r.items[0].kind] ?? '⚠️'}</span>
+          <span className="home-attention-txt">
+            {r.head}
+            <span className="muted"> · {t('серверов: {n}', { n: new Set(r.items.map((x) => x.id)).size })} ({names})</span>
+          </span>
+          <span className="home-open">{open ? '▾' : '▸'}</span>
+        </button>
+        {open && <div className="home-attention-sub">{r.items.map((x) => brokenRow(x, true))}</div>}
+      </div>
+    )
+  }
   const actRow = (it: ActItem) => (
     <button key={it.key} className="home-attention-row" onClick={() => onOpen(it.section, it.id, it.srv, it.sec)}>
       <span className={`dot ${it.fleet ? 'fleet' : 'degraded'}`} />
@@ -971,48 +1051,13 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
           <div className="home-attention-head">
             <span className="home-attention-ic">🛠</span>
             {t('Что сломано')}
-            <span className="home-attention-n">{broken.length}</span>
+            <span className="home-attention-n">{brokenRows.length}</span>
           </div>
           <div className="home-attention-list">
-            {(brokenAll ? broken : broken.slice(0, BROKEN_LIMIT)).map((it) => (
-              <button
-                key={it.key}
-                className="home-attention-row"
-                onClick={() => onOpen(it.section, it.id, it.srv, it.sec)}
-              >
-                <span className={`dot ${it.tone === 't-down' ? 'down' : 'degraded'}`} />
-                <span className="home-attention-ico">{ISSUE_ICON[it.kind] ?? '⚠️'}</span>
-                <span className="home-attention-txt">
-                  <CountryFlag code={it.cc} /> <b>{it.name}</b> - {it.text}
-                  {sinceShort(it.since, t) && <span className="muted"> · {sinceShort(it.since, t)}</span>}
-                  {it.srv && it.section === 'servers' && <MaintChip kind="server" id={it.id} />}
-                  {it.note && (
-                    <span className="note-chip" title={it.note}>
-                      {' '}📝
-                    </span>
-                  )}
-                </span>
-                {it.markable && !isViewer && (
-                  <span className="quick-mute" title={t('Известная проблема: алерт молчит, пока не станет хуже')}
-                    onClick={(e) => {
-                      e.stopPropagation()
-                      setKnownFor({ id: it.id, kind: it.kind, title: `${it.name} - ${it.text}` })
-                    }}>
-                    📌
-                  </span>
-                )}
-                {it.mute && (
-                  <span className="quick-mute" title={t('Приглушить')}
-                    onClick={(e) => { e.stopPropagation(); quickMute(it.id, [it.mute!]) }}>
-                    🔕
-                  </span>
-                )}
-                <span className="home-open">→</span>
-              </button>
-            ))}
-            {broken.length > BROKEN_LIMIT && (
+            {(brokenAll ? brokenRows : brokenRows.slice(0, BROKEN_LIMIT)).map(brokenGrpRow)}
+            {brokenRows.length > BROKEN_LIMIT && (
               <button className="ghost small home-attention-more" onClick={() => setBrokenAll(!brokenAll)}>
-                {brokenAll ? t('свернуть') : t('…и ещё {n}', { n: broken.length - BROKEN_LIMIT })}
+                {brokenAll ? t('свернуть') : t('…и ещё {n}', { n: brokenRows.length - BROKEN_LIMIT })}
               </button>
             )}
           </div>

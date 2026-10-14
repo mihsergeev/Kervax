@@ -1,7 +1,15 @@
+# package.json и lock без версии панели: она меняется каждый релиз, и из-за нее npm ci шел с
+# нуля на каждой выкладке. Здесь версия заменяется на 0.0.0 - слой с npm ci пересобирается,
+# только когда меняются сами зависимости (lock фиксирует их точно, отставать нечему).
+FROM node:26-alpine AS deps
+WORKDIR /d
+COPY package.json package-lock.json ./
+RUN node -e "const fs = require('fs'); for (const f of ['package.json', 'package-lock.json']) { const j = JSON.parse(fs.readFileSync(f, 'utf8')); j.version = '0.0.0'; if (j.packages && j.packages['']) j.packages[''].version = '0.0.0'; fs.writeFileSync(f, JSON.stringify(j)) }"
+
 FROM node:26-alpine AS build
 
 WORKDIR /build
-COPY package.json package-lock.json ./
+COPY --from=deps /d/package.json /d/package-lock.json ./
 RUN npm ci
 COPY . .
 RUN npm run build

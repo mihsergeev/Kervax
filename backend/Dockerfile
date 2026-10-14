@@ -20,6 +20,14 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath \
 # Сжатые копии - для самообновления агентов 2.18+: в 2.4 раза меньше, на канале за DPI это
 # минуты вместо получаса. Подпись им не нужна: агент сверяет с манифестом распакованное.
 
+# --- список зависимостей бэкенда, без версии панели ---
+# pyproject.toml меняется каждый релиз (версия), и раньше из-за этого каждая выкладка ставила
+# все пакеты с PyPI заново: на панели в РФ это минуты. Список зависимостей отдельно - слой с
+# pip install пересобирается, только когда меняется сам список (или неделя, см. DEPS_EPOCH).
+FROM python:3.14-slim AS deps
+COPY backend/pyproject.toml /p.toml
+RUN python -c "import tomllib; d = tomllib.load(open('/p.toml', 'rb')); open('/req.txt', 'w').write(chr(10).join(d['project']['dependencies']) + chr(10))"
+
 # --- бэкенд ---
 FROM python:3.14-slim
 
@@ -37,9 +45,18 @@ RUN set -eu; \
 
 WORKDIR /srv
 
+# Зависимости - до кода. Диапазоны ">=" без пересборки застыли бы навсегда, поэтому слой
+# пересобирается и раз в неделю: ops/deploy.sh передает DEPS_EPOCH - номер недели, и
+# исправления безопасности (cryptography и т.п.) приезжают не позже чем через неделю.
+# Без DEPS_EPOCH (сборка руками) - только при смене списка.
+ARG DEPS_EPOCH=
+COPY --from=deps /req.txt /tmp/req.txt
+RUN echo "dependencies, week ${DEPS_EPOCH:-none}" \
+ && pip install --no-cache-dir -r /tmp/req.txt hatchling
+
 COPY backend/pyproject.toml ./
 COPY backend/app ./app
-RUN pip install --no-cache-dir .
+RUN pip install --no-cache-dir --no-deps --no-build-isolation .
 
 COPY backend/alembic.ini ./
 COPY backend/alembic ./alembic

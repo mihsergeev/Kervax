@@ -58,6 +58,8 @@ services:
       args:
         # пусто → самообновление агента выключено; впиши пубключ для secure-автообновления
         AGENT_PUBKEY: ${KERVAX_AGENT_PUBKEY:-}
+        # номер недели от ops/deploy.sh: раз в неделю зависимости бэкенда ставятся заново
+        DEPS_EPOCH: ${KERVAX_DEPS_EPOCH:-}
     restart: unless-stopped
     security_opt:
       - no-new-privileges:true
