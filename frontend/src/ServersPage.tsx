@@ -2052,33 +2052,147 @@ function MemLeaks({ server: s }: { server: Server }) {
   if (!items.length) return null
   const kindName = { docker: t('контейнер'), pod: t('под'), proc: t('процесс') }
   return (
-    <div className="detail-inc" id="mcard-memleak">
-      <div className="chart-cap">{t('Растет память')}</div>
-      <div className="muted small">
+    <div className="chart-card net-card net-card-wide" id="mcard-memleak">
+      <div className="net-head">
+        <div className="chart-cap">{t('Растет память')}</div>
+      </div>
+      <div className="net-sub">
         {t('Минимум памяти за сутки растет 4 суток подряд. Пила сборщика мусора и всплески минимум не двигают, а утечка поднимает его каждый день.')}
       </div>
-      <table className="exp-table small">
-        <tbody>
-          {items.map((x) => {
-            const [comm, user] = x.name.split('@')
-            return (
-              <tr key={x.key}>
-                <td className="muted">{kindName[x.kind]}</td>
-                <td>
-                  <b>{x.kind === 'proc' ? `${comm} (${user})` : x.name}</b>{' '}
-                  <span className="muted">{x.series.map((v) => fmtBytes(v)).join(', ')}</span>
-                </td>
-                <td className={x.level >= 2 ? 't-down' : 't-degraded'}>
-                  +{fmtBytes(x.rate)} {t('в сутки')}
-                  {x.eta_days != null && x.eta_days < 30 && (
-                    <span className="muted"> · {t('памяти хватит на {d} сут', { d: x.eta_days })}</span>
-                  )}
-                </td>
-              </tr>
-            )
-          })}
-        </tbody>
-      </table>
+      <div className="loc-results">
+        {items.map((x) => {
+          const [comm, user] = x.name.split('@')
+          const bad = x.level >= 2
+          return (
+            <div key={x.key} className="loc-res ml-row">
+              <span className={`lk-dot lk-dot-${bad ? 'bad' : 'warn'}`} />
+              <div className="ml-main">
+                <span className="acc-tag">{kindName[x.kind]}</span> <b>{x.kind === 'proc' ? `${comm} (${user})` : x.name}</b>
+                <div className="muted small">{x.series.map((v) => fmtBytes(v)).join(', ')}</div>
+              </div>
+              <div className="ml-rate">
+                <span className={bad ? 't-down' : 't-degraded'}>+{fmtBytes(x.rate)} {t('в сутки')}</span>
+                {x.eta_days != null && x.eta_days < 30 && (
+                  <div className="muted small">{t('памяти хватит на {d} сут', { d: x.eta_days })}</div>
+                )}
+              </div>
+            </div>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
+// CPU сейчас: плитки над графиками, как stat-панели Grafana. Пороги цвета - алерта сервера
+// (без него 90%), желтое - на подходе
+function CpuNow({ server: s }: { server: Server }) {
+  const { t } = useI18n()
+  const r = s.last_report
+  if (!r || r.cpu_percent == null) return null
+  const cpu = r.cpu_percent
+  const hi = s.cpu_alert_percent || 90
+  const load = r.load ?? []
+  const cores = r.cpu_cores_pct ?? []
+  const top = cores.length > 1 ? cores.reduce((a, v, i) => (v > cores[a] ? i : a), 0) : -1
+  return (
+    <div className="chart-card net-card net-card-wide now-card">
+      <div className="net-tiles">
+        <NetTile
+          label={t('Загрузка CPU')}
+          value={`${Math.round(cpu)}%`}
+          sub={s.cpu_alert_percent ? t('алерт от {p}', { p: `${s.cpu_alert_percent}%` }) : undefined}
+          tone={cpu >= hi ? 'bad' : cpu >= Math.min(75, hi - 10) ? 'warn' : undefined}
+        />
+        {load.length > 0 && (
+          <NetTile
+            label={t('Load average')}
+            value={load[0].toFixed(2)}
+            sub={load.length >= 3 ? t('5 и 15 мин: {a} / {b}', { a: load[1].toFixed(2), b: load[2].toFixed(2) }) : undefined}
+          />
+        )}
+        {(r.cpu_cores ?? 0) > 0 && (
+          <NetTile label={t('Ядра')} value={String(r.cpu_cores)} sub={r.cpu_model || undefined} title={r.cpu_model || undefined} />
+        )}
+        {top >= 0 && (
+          <NetTile
+            label={t('Самое загруженное ядро')}
+            value={`${Math.round(cores[top])}%`}
+            sub={t('ядро {n}', { n: top })}
+            tone={cores[top] >= 95 ? 'warn' : undefined}
+          />
+        )}
+        {r.cpu_temp != null && (
+          <NetTile
+            label={t('Температура')}
+            value={fmtTempC(r.cpu_temp)}
+            sub={s.temp_alert_c ? t('алерт от {p}', { p: fmtTempC(s.temp_alert_c) }) : undefined}
+            tone={s.temp_alert_c && r.cpu_temp >= s.temp_alert_c ? 'bad' : undefined}
+          />
+        )}
+        {r.cpu_freq != null && !r.is_vm && <NetTile label={t('Частота')} value={fmtMHz(r.cpu_freq)} />}
+        {r.cpu_throttle != null && (
+          <NetTile
+            label={t('Тепловой троттлинг')}
+            value={String(Math.round(r.cpu_throttle))}
+            sub={t('за последний отчет')}
+            tone={r.cpu_throttle > 0 ? 'warn' : 'ok'}
+          />
+        )}
+      </div>
+    </div>
+  )
+}
+
+// Память сейчас: занято, доступно, swap и OOM-киллы плитками над графиками
+function MemNow({ server: s }: { server: Server }) {
+  const { t } = useI18n()
+  const r = s.last_report
+  const total = r?.mem_total ?? 0
+  if (!r || total <= 0) return null
+  const used = r.mem_used ?? 0
+  const p = (used / total) * 100
+  const hi = s.mem_alert_percent || 90
+  const swapT = r.swap_total ?? 0
+  const swapP = swapT > 0 ? ((r.swap_used ?? 0) / swapT) * 100 : 0
+  return (
+    <div className="chart-card net-card net-card-wide now-card">
+      <div className="net-tiles">
+        <NetTile
+          label={t('Занято')}
+          value={`${Math.round(p)}%`}
+          sub={t('{u} из {m}', { u: fmtBytes(used), m: fmtBytes(total) })}
+          tone={p >= hi ? 'bad' : p >= Math.min(80, hi - 10) ? 'warn' : undefined}
+        />
+        <NetTile
+          label={t('Доступно')}
+          value={fmtBytes(Math.max(0, total - used))}
+          sub={t('из них кэш {n}', { n: fmtBytes(r.mem_cached ?? 0) })}
+        />
+        {swapT > 0 && (
+          <NetTile
+            label="Swap"
+            value={`${Math.round(swapP)}%`}
+            sub={t('{u} из {m}', { u: fmtBytes(r.swap_used ?? 0), m: fmtBytes(swapT) })}
+            tone={swapP >= 80 ? 'warn' : undefined}
+          />
+        )}
+        {swapT > 0 && (
+          <NetTile
+            label={t('Обмен со swap')}
+            value={fmtRate((r.swap_in ?? 0) + (r.swap_out ?? 0))}
+            sub={t('загрузка {a} · выгрузка {b}', { a: fmtRate(r.swap_in), b: fmtRate(r.swap_out) })}
+          />
+        )}
+        {r.oom_kill != null && (
+          <NetTile
+            label={t('OOM-киллы')}
+            value={String(Math.round(r.oom_kill))}
+            sub={t('за последний отчет')}
+            tone={r.oom_kill > 0 ? 'bad' : 'ok'}
+          />
+        )}
+      </div>
     </div>
   )
 }
@@ -2114,8 +2228,10 @@ function MemContainers({ server: s, onChanged, by = 'mem' }: { server: Server; o
     }
   }
   return (
-    <div className="detail-inc mem-cont">
-      <div className="chart-cap">{by === 'cpu' ? t('Контейнеры по CPU') : t('Контейнеры по памяти')}</div>
+    <div className="chart-card net-card">
+      <div className="net-head">
+        <div className="chart-cap">{by === 'cpu' ? t('Контейнеры по CPU') : t('Контейнеры по памяти')}</div>
+      </div>
       <div className="loc-results">
         {list.map((c) => {
           const db = DB_IMAGE.test(c.image) || DB_IMAGE.test(c.name)
@@ -3197,8 +3313,10 @@ function MemPods({ server: s, onChanged, by = 'mem' }: { server: Server; onChang
     }
   }
   return (
-    <div className="detail-inc mem-cont">
-      <div className="chart-cap">{by === 'cpu' ? t('Поды по CPU') : t('Поды по памяти')}</div>
+    <div className="chart-card net-card">
+      <div className="net-head">
+        <div className="chart-cap">{by === 'cpu' ? t('Поды по CPU') : t('Поды по памяти')}</div>
+      </div>
       <div className="loc-results">
         {list.map((p) => {
           const key = `${p.ns}/${p.name}`
@@ -3268,8 +3386,10 @@ function CpuGroups({ server: s }: { server: Server }) {
   const age = (sec: number) =>
     sec >= 86400 ? t('{n} дн', { n: Math.floor(sec / 86400) }) : t('{n} ч', { n: Math.floor(sec / 3600) })
   return (
-    <div className="detail-inc mem-cont">
-      <div className="chart-cap">{t('Процессы по CPU')}</div>
+    <div className="chart-card net-card">
+      <div className="net-head">
+        <div className="chart-cap">{t('Процессы по CPU')}</div>
+      </div>
       <div className="loc-results">
         {groups.map((g, i) => (
           <div key={`${g.comm}-${g.owner}-${i}`} className={`loc-res mc-row cg-row${(g.spin ?? 0) >= 3 ? ' t-degraded' : ''}`}>
@@ -5403,6 +5523,9 @@ function ServerDetail({
           />
           <div className="detail-sections">
         <MetricSection id="cpu" title="CPU">
+          <div className="net-cards now-cards">
+            <CpuNow server={s} />
+          </div>
           <div className="chart-grid">
             {chartCard(
               'cpu',
@@ -5434,7 +5557,7 @@ function ServerDetail({
             {r.cpu_throttle != null ? chartCard('throttle') : null}
           </div>
           {/* кто ест CPU: сюда ведет алерт о процессах в пустом цикле (sec=cpueat) */}
-          <div id="mcard-cpueat">
+          <div className="net-cards" id="mcard-cpueat">
             <MemContainers server={s} onChanged={onChanged} by="cpu" />
             <MemPods server={s} onChanged={onChanged} by="cpu" />
             <CpuGroups server={s} />
@@ -5442,6 +5565,9 @@ function ServerDetail({
         </MetricSection>
 
         <MetricSection id="mem" title={t('Память')}>
+          <div className="net-cards now-cards">
+            <MemNow server={s} />
+          </div>
           <div className="chart-grid">
             {chartCard(
               'mem',
@@ -5476,9 +5602,11 @@ function ServerDetail({
               ? chartCard('oom', <OomEventList serverId={s.id} t={t} />)
               : null}
           </div>
-          <MemLeaks server={s} />
-          <MemContainers server={s} onChanged={onChanged} />
-          <MemPods server={s} onChanged={onChanged} />
+          <div className="net-cards">
+            <MemLeaks server={s} />
+            <MemContainers server={s} onChanged={onChanged} />
+            <MemPods server={s} onChanged={onChanged} />
+          </div>
         </MetricSection>
 
         <MetricSection id="net" title={t('Сеть')}>
