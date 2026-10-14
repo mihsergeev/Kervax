@@ -676,8 +676,8 @@ input:focus {
 .home-tiles .net-tile-label { display: flex; align-items: center; gap: 0.35rem; }
 .home-tiles .sec-icon { width: 1.15em; height: 1.15em; }
 .net-cards.home-blocks { margin-top: 0; }
-.home-cap { display: flex; align-items: center; gap: 0.45rem; }
-.home-n {
+.net-cap { display: flex; align-items: center; gap: 0.45rem; }
+.net-n {
   min-width: 1.3rem;
   padding: 0 0.4rem;
   border-radius: 999px;
@@ -687,9 +687,9 @@ input:focus {
   color: var(--text);
   background: color-mix(in srgb, var(--text) 10%, transparent);
 }
-.home-n-bad { color: var(--down); background: rgba(239, 68, 68, 0.15); }
-.home-n-warn { color: var(--degraded); background: rgba(245, 158, 11, 0.15); }
-.home-n-info { color: #3b82f6; background: rgba(59, 130, 246, 0.15); }
+.net-n-bad { color: var(--down); background: rgba(239, 68, 68, 0.15); }
+.net-n-warn { color: var(--degraded); background: rgba(245, 158, 11, 0.15); }
+.net-n-info { color: #3b82f6; background: rgba(59, 130, 246, 0.15); }
 /* настоящая беда в блоке (а не только предупреждения) - красная рамка */
 .home-block.has-down { border-color: rgba(239, 68, 68, 0.45); }
 .home-block .ansible-hint { margin: 0; }
@@ -6445,4 +6445,32 @@ button.dm-sec-btn {
 }
 .dm-srv-off {
   background: var(--border-strong);
+}
+
+/* Docker в стиле "Сети": сводка плитками, хосты - строками в карточке группы, в модалке хоста
+   плитки и карточки. Свои классы dk-*: docker-row и docker-host-row общие с Кубером,
+   Сервисами и Бэкапами. Блок в конце файла: перебивает полосы docker-row того же веса */
+.dk-tiles { margin: 0.2rem 0 0.75rem; }
+.net-cards.dk-groups { margin-top: 0; }
+.loc-res.dk-host { gap: 0.7rem; padding: 0.55rem 0.8rem; }
+.dk-host-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 0.15rem; }
+.dk-host-name { display: flex; align-items: center; flex-wrap: wrap; gap: 0.35rem; font-weight: 600; }
+.dk-host-count { flex-shrink: 0; font-weight: 700; font-size: 0.95rem; }
+.dk-modal .dk-tiles { margin: 0 0 0.75rem; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); }
+.net-cards.dk-cards { margin-top: 0; }
+.dk-modal .modal-toolbar { margin: 0; }
+/* в строках контейнеров тон показывает точка, цветная полоса слева не нужна */
+.dk-modal .docker-row { border-left-width: 1px; border-left-color: var(--border); }
+.dk-modal .docker-row.docker-row-down { border-color: rgba(239, 68, 68, 0.45); }
+.dk-modal .docker-row.docker-row-loop { border-color: rgba(245, 158, 11, 0.45); }
+.dk-c-use { margin-top: 0.1rem; }
+.loc-res.dk-warn-row { gap: 0.6rem; flex-wrap: wrap; }
+.dk-warn-main { flex: 1 1 14rem; min-width: 0; overflow-wrap: anywhere; }
+.dk-muted-list button { margin-left: 0.4rem; }
+/* на телефоне статус и кнопки контейнера - второй строкой, иначе имя и образ сжимались в ноль */
+@media (max-width: 560px) {
+  .dk-modal .docker-row { flex-wrap: wrap; row-gap: 0.4rem; }
+  .dk-modal .docker-row .docker-c-main { flex: 1 1 calc(100% - 1.5rem); }
+  .dk-modal .docker-row .docker-c-status { margin-left: 1.3rem; }
+  .dk-modal .docker-row .docker-actions { margin-left: auto; }
 }

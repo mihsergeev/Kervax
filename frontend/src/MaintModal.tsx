@@ -407,9 +407,9 @@ export function MaintHome() {
   return (
     <div className="chart-card net-card home-block">
       <div className="net-head">
-        <div className="chart-cap home-cap">
+        <div className="chart-cap net-cap">
           {live.length ? t('Идет обслуживание') : t('Скоро обслуживание')}
-          <span className={`home-n${live.length ? ' home-n-warn' : ''}`}>{live.length || soon.length}</span>
+          <span className={`net-n${live.length ? ' net-n-warn' : ''}`}>{live.length || soon.length}</span>
         </div>
       </div>
       <div className="home-attention-list">

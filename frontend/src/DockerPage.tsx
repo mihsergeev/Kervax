@@ -18,6 +18,8 @@ import { DOCKRISK_MUTE, NOBOOT_MUTE, RESTARTS_DAY_MIN } from './mutes'
 import { OsIcon } from './osIcon'
 import { CountryFlag } from './CountryFlag'
 import { dockRiskText, proxyBuilt } from './serverUtils'
+import { NetTile } from './NetLinks'
+import { fmtBytes } from './units'
 
 // Вкладка «Docker»: КОМПАКТНЫЙ список хостов с докером; клик по хосту → модалка
 // с его контейнерами (версии, статусы, кнопки, логи). Так масштабируется на 100+
@@ -34,6 +36,10 @@ function dockerTone(c: DockerContainer, problem?: string): string {
   return 't-degraded'
 }
 const RESTART_POLICIES = new Set(['always', 'unless-stopped', 'on-failure'])
+// точка строки контейнера по тону: остановленный штатно - серая
+const DOT: Record<string, string> = { 't-up': ' lk-dot-ok', 't-down': ' lk-dot-bad', 't-degraded': ' lk-dot-warn' }
+// подпись плитки из частей: пустые выкидываем
+const subOf = (...parts: (string | false | 0 | undefined)[]) => parts.filter(Boolean).join(' · ')
 
 const DOCKER_ENABLE_CMD = `DGID=$(getent group docker | cut -d: -f3)
 sudo docker rm -f kervax-docker-proxy 2>/dev/null
@@ -122,8 +128,11 @@ function SockWarning({ items }: { items: { name: string; image: string; kind: st
   const [copied, setCopied] = useState('')
   const kinds = [...new Set(items.map((i) => i.kind))].filter((k) => SOCK_FIX[k])
   return (
-    <div className="docker-noaccess docker-sock-warn">
-      <div className="form-error small">
+    <div className="chart-card net-card net-card-wide">
+      <div className="net-head">
+        <div className="chart-cap">{t('Прокси держит docker-сокет')}</div>
+      </div>
+      <div className="net-prob">
         {t('{list}: docker-сокет смонтирован целиком. Прокси смотрит в интернет, а сокет - это root на хосте: одна дыра в прокси, и чужой получает весь сервер. Пусть прокси читает докер через прокси сокета только на чтение (список контейнеров, сети, события), а сам сокет из его volumes уберите. Что добавить в compose:',
           { list: items.map((i) => `${i.name} (${i.kind})`).join(', ') })}
       </div>
@@ -142,7 +151,7 @@ function SockWarning({ items }: { items: { name: string; image: string; kind: st
           </button>
         </div>
       ))}
-      <div className="muted small">
+      <div className="net-foot">
         {t('Проверка после замены: в логе docker-api нет строк blocked request, сайты отвечают как раньше. Ноды с этой проблемой плагин инвентаря ansible собирает в группу kervax_docker_sock.')}
       </div>
     </div>
@@ -167,15 +176,18 @@ function ProxyOldWarning({ items }: { items: ProxyOld[] }) {
   const { t } = useI18n()
   const keys = [...new Set(items.map(proxyHintKey))].filter((k) => PROXY_HINT[k])
   return (
-    <div className="docker-noaccess docker-sock-warn">
-      <div className="form-error small">
+    <div className="chart-card net-card net-card-wide">
+      <div className="net-head">
+        <div className="chart-cap">{t('Старый образ прокси')}</div>
+      </div>
+      <div className="net-note">
         {t('{list}: образ собран больше года назад. Прокси смотрит в интернет, а за год в нем закрывают не одну дыру.',
           { list: items.map((p) => `${p.name} (${proxyBuilt(p)})`).join(', ') })}
       </div>
       {keys.map((k) => (
-        <div key={k} className="muted small">{t(PROXY_HINT[k])}</div>
+        <div key={k} className="small">{t(PROXY_HINT[k])}</div>
       ))}
-      <div className="muted small">
+      <div className="net-foot">
         {t('Обновлять лучше через стенд рядом: новый образ на других портах, сравнить ответы всех доменов, потом переключить, а старый тег держать для отката. Ноды с этой проблемой плагин инвентаря ansible собирает в группу kervax_proxy_old, caddy по роли обновляет caddy_harden.yml.')}
       </div>
     </div>
@@ -208,36 +220,51 @@ function RiskWarning({ server: s, canAct, onChanged }: { server: Server; canAct:
       .finally(() => setBusy(''))
   }
   return (
-    <div className="docker-noaccess docker-sock-warn">
+    <div className="chart-card net-card net-card-wide">
+      <div className="net-head">
+        <div className="chart-cap">{t('Ключи от хоста')}</div>
+      </div>
       {live.length > 0 && (
         <>
-          <div className="form-error small">
+          <div className="net-prob">
             {t('У контейнеров ключи от хоста: взлом приложения в них даст root на сервере.')}
           </div>
-          {live.map((x) => (
-            <div key={x.name} className="small">
-              <span className="mono">{x.name}</span> <span className="muted">({x.image})</span>: {dockRiskText(x, t)}
-              {canAct && (
-                <button className="ghost small" disabled={busy === x.name} onClick={() => toggle(x.name, true)}
-                  title={t('Так задумано: убрать из "Требует действий" и не алертить по этому контейнеру')}>
-                  {t('по назначению')}
-                </button>
-              )}
+          <div className="loc-results">
+            {live.map((x) => (
+              <div key={x.name} className="loc-res dk-warn-row">
+                <span className="lk-dot lk-dot-bad" />
+                <div className="dk-warn-main">
+                  <span className="mono">{x.name}</span> <span className="muted small">({x.image})</span>
+                  <div className="small">{dockRiskText(x, t)}</div>
+                </div>
+                {canAct && (
+                  <button className="ghost small" disabled={busy === x.name} onClick={() => toggle(x.name, true)}
+                    title={t('Так задумано: убрать из "Требует действий" и не алертить по этому контейнеру')}>
+                    {t('по назначению')}
+                  </button>
+                )}
+              </div>
+            ))}
+          </div>
+          {flags.length > 0 && (
+            <div className="net-foot">
+              {flags.map((f) => (
+                <div key={f}>{t(RISK_FIX[f])}</div>
+              ))}
             </div>
-          ))}
-          {flags.map((f) => (
-            <div key={f} className="muted small">{t(RISK_FIX[f])}</div>
-          ))}
+          )}
         </>
       )}
       {muted.length > 0 && (
-        <div className="muted small">
-          {t('По назначению: {list}', { list: muted.map((x) => `${x.name} (${dockRiskText(x, t)})`).join(', ') })}
-          {canAct && muted.map((x) => (
-            <button key={x.name} className="ghost small" disabled={busy === x.name} onClick={() => toggle(x.name, false)}>
-              {t('вернуть {name}', { name: x.name })}
-            </button>
-          ))}
+        <div className="net-foot dk-muted-list">
+          <div>
+            {t('По назначению: {list}', { list: muted.map((x) => `${x.name} (${dockRiskText(x, t)})`).join(', ') })}
+            {canAct && muted.map((x) => (
+              <button key={x.name} className="ghost small" disabled={busy === x.name} onClick={() => toggle(x.name, false)}>
+                {t('вернуть {name}', { name: x.name })}
+              </button>
+            ))}
+          </div>
         </div>
       )}
     </div>
@@ -264,23 +291,31 @@ function NoBootWarning({ server: s, canAct, onChanged }: { server: Server; canAc
       .finally(() => setBusy(''))
   }
   return (
-    <div className="docker-noaccess docker-sock-warn">
+    <div className="chart-card net-card net-card-wide">
+      <div className="net-head">
+        <div className="chart-cap">{t('Не поднимутся после перезагрузки')}</div>
+      </div>
       {live.length > 0 && (
         <>
-          <div className="form-error small">
+          <div className="net-note">
             {t('После перезагрузки не поднимутся: у контейнеров нет restart policy (или on-failure), докер запускает после ребута только always и unless-stopped.')}
           </div>
-          {live.map((x) => (
-            <div key={x.name} className="small">
-              <span className="mono">{x.name}</span> <span className="muted">({x.image}, restart {x.policy})</span>
-              {canAct && (
-                <button className="ghost small" disabled={busy === x.name} onClick={() => toggle(x.name, true)}
-                  title={t('Так задумано: не напоминать про этот контейнер')}>
-                  {t('не нужен после перезагрузки')}
-                </button>
-              )}
-            </div>
-          ))}
+          <div className="loc-results">
+            {live.map((x) => (
+              <div key={x.name} className="loc-res dk-warn-row">
+                <span className="lk-dot lk-dot-warn" />
+                <div className="dk-warn-main">
+                  <span className="mono">{x.name}</span> <span className="muted small">({x.image}, restart {x.policy})</span>
+                </div>
+                {canAct && (
+                  <button className="ghost small" disabled={busy === x.name} onClick={() => toggle(x.name, true)}
+                    title={t('Так задумано: не напоминать про этот контейнер')}>
+                    {t('не нужен после перезагрузки')}
+                  </button>
+                )}
+              </div>
+            ))}
+          </div>
           <div className="agent-advice-cmd">
             <pre>{cmd}</pre>
             <button
@@ -294,19 +329,21 @@ function NoBootWarning({ server: s, canAct, onChanged }: { server: Server; canAc
               {copied ? t('Скопировано') : t('Копировать')}
             </button>
           </div>
-          <div className="muted small">
+          <div className="net-foot">
             {t('Если контейнер из compose, поправьте и сам файл (restart: unless-stopped), иначе следующий up вернет как было.')}
           </div>
         </>
       )}
       {muted.length > 0 && (
-        <div className="muted small">
-          {t('Не нужны после перезагрузки: {list}', { list: muted.map((x) => x.name).join(', ') })}
-          {canAct && muted.map((x) => (
-            <button key={x.name} className="ghost small" disabled={busy === x.name} onClick={() => toggle(x.name, false)}>
-              {t('вернуть {name}', { name: x.name })}
-            </button>
-          ))}
+        <div className="net-foot dk-muted-list">
+          <div>
+            {t('Не нужны после перезагрузки: {list}', { list: muted.map((x) => x.name).join(', ') })}
+            {canAct && muted.map((x) => (
+              <button key={x.name} className="ghost small" disabled={busy === x.name} onClick={() => toggle(x.name, false)}>
+                {t('вернуть {name}', { name: x.name })}
+              </button>
+            ))}
+          </div>
         </div>
       )}
     </div>
@@ -318,8 +355,11 @@ function EnableBlock({ readonly = false }: { readonly?: boolean }) {
   const { t } = useI18n()
   const [copied, setCopied] = useState(false)
   return (
-    <div className="docker-noaccess">
-      <div className={readonly ? 'form-error small' : 'muted small'}>
+    <div className="chart-card net-card net-card-wide">
+      <div className="net-head">
+        <div className="chart-cap">{readonly ? t('Доступ только на чтение') : t('Нет доступа к контейнерам')}</div>
+      </div>
+      <div className={readonly ? 'net-prob' : 'net-note'}>
         {readonly
           ? t('Прокси docker-сокета на этой ноде пускает только чтение, поэтому перезапуск, стоп и старт дают 403. Замените его этой командой: просмотр плюс перезапуск, стоп и старт, без exec, создания контейнеров и образов, слушает только 127.0.0.1 хоста.')
           : t('Docker установлен (версии видны). Список контейнеров скрыт — включите read-only доступ (docker-socket-proxy: только просмотр + restart, без exec/root). Новым нодам — флаг --docker при установке.')}
@@ -385,6 +425,8 @@ function ContainerRow({
   }
   const running = c.state === 'running'
   const tone = dockerTone(c, problem)
+  // крутящийся по кругу и unhealthy обычно running: точку по алерту и healthcheck, не по state
+  const dot = problem === 'down' ? ' lk-dot-bad' : problem || c.health === 'unhealthy' ? ' lk-dot-warn' : DOT[tone] ?? ''
   // агент 2.22+ сказал, что ошибки запуска нет: значит, остановили руками
   const byHand = tone === 't-muted' && c.exit !== undefined && RESTART_POLICIES.has(c.policy ?? '')
   // problem приходит из alert_state бэкенда: подсвечиваем ровно те контейнеры, про
@@ -394,6 +436,7 @@ function ContainerRow({
     <div
       className={`loc-res docker-row ${tone === 't-muted' ? 'docker-row-stopped' : tone}${problem ? ` docker-row-${problem}` : ''}`}
     >
+      <span className={`lk-dot${dot}`} />
       <div className="docker-c-main">
         <div className="docker-c-name mono">
           {problem && (
@@ -426,6 +469,11 @@ function ContainerRow({
         <div className="docker-c-img mono muted small" title={c.image}>
           {c.image}
         </div>
+        {running && (c.cpu != null || c.mem != null) && (
+          <div className="dk-c-use mono muted small">
+            {[c.cpu != null ? `CPU ${Math.round(c.cpu)}%` : '', c.mem != null ? fmtBytes(c.mem) : ''].filter(Boolean).join(' · ')}
+          </div>
+        )}
         {c.err && !running && (
           <div className="form-error small docker-c-err" title={c.err}>
             {t('докер не смог запустить')}: {c.err}
@@ -575,7 +623,8 @@ function LogsModal({
   )
 }
 
-// Модалка хоста: контейнеры + действия. Логи — вложенная модалка сверху.
+// Модалка хоста: сверху плитки (версия, запущено, аварии, ресурсы, перезапуски за сутки), под
+// ними карточка контейнеров с действиями, ниже - что поправить на хосте. Логи - модалка сверху.
 function DockerHostModal({
   server: s,
   docker,
@@ -616,75 +665,125 @@ function DockerHostModal({
     .filter((c) => !ql || `${c.name} ${c.image} ${c.status}`.toLowerCase().includes(ql))
     .slice()
     .sort((a, b) => byProblem(a, b) || cmp[sort](a, b))
+  // плитки: аварии - по ним ушел алерт (упал или крутится по кругу); перезапуски - за сутки
+  const pv = Object.values(probs)
+  const pDown = pv.filter((p) => p === 'down').length
+  const unhealthy = cs.filter((c) => c.health === 'unhealthy').length
+  const days = cs.map((c) => ({ name: c.name, n: s.restarts_day?.['docker:' + c.name] ?? 0 })).filter((x) => x.n > 0)
+  const dayTop = days.reduce<{ name: string; n: number } | null>((a, b) => (!a || b.n > a.n ? b : a), null)
+  const used = cs.filter((c) => c.state === 'running' && (c.mem != null || c.cpu != null))
+  const memSum = used.reduce((n, c) => n + (c.mem ?? 0), 0)
+  const cpuSum = used.reduce((n, c) => n + (c.cpu ?? 0), 0)
   return createPortal(
     <div className="modal-backdrop">
-      <div className="card modal docker-modal" onClick={(e) => e.stopPropagation()}>
+      <div className="card modal docker-modal dk-modal" onClick={(e) => e.stopPropagation()}>
         <div className="clients-head">
           <h3>
             <span className={`sdot ${s.online ? 'sdot-up' : 'sdot-down'}`} />{' '}
             <OsIcon os={s.os} /> <CountryFlag code={s.country} /> {s.name}
+            {s.group_name && <span className="type-chip group-chip">{s.group_name}</span>}
           </h3>
           <button className="ghost" onClick={onClose}>
             {t('Закрыть')}
           </button>
         </div>
-        <div className="docker-host-head">
-          {s.group_name && <span className="type-chip group-chip">{s.group_name}</span>}
-          <span className="type-chip">Docker {docker.version || '—'}</span>
-          {docker.compose && <span className="type-chip">compose {docker.compose}</span>}
-          {docker.access && cs.length > 0 && (
-            <span className="muted small">{t('{r} из {n} запущено', { r: running, n: cs.length })}</span>
+        <div className="net-tiles dk-tiles">
+          <NetTile label="Docker" value={docker.version || '—'} sub={docker.compose ? `compose ${docker.compose}` : undefined} />
+          {docker.access && (
+            <NetTile
+              label={t('Запущено')}
+              value={String(running)}
+              unit={t('из {n}', { n: cs.length })}
+              sub={stopped ? t('остановлено: {n}', { n: stopped }) : t('все запущены')}
+              tone={stopped ? undefined : 'ok'}
+            />
           )}
-          {docker.access && stopped > 0 && (
-            <button className="ghost small docker-hide-stopped" onClick={() => setHideStopped((v) => !v)}>
-              {hideStopped ? t('Показать остановленные ({n})', { n: stopped }) : t('Скрыть остановленные ({n})', { n: stopped })}
-            </button>
+          {docker.access && (
+            <NetTile
+              label={t('Аварии')}
+              value={String(pv.length)}
+              sub={subOf(
+                pDown > 0 && t('упали: {n}', { n: pDown }),
+                pv.length - pDown > 0 && t('по кругу: {n}', { n: pv.length - pDown }),
+                unhealthy > 0 && t('unhealthy: {n}', { n: unhealthy }),
+              ) || t('нет')}
+              tone={pv.length ? 'bad' : unhealthy ? 'warn' : 'ok'}
+            />
+          )}
+          {docker.access && used.length > 0 && (
+            <NetTile label={t('Память контейнеров')} value={fmtBytes(memSum)} sub={`CPU ${Math.round(cpuSum)}%`} />
+          )}
+          {docker.access && (
+            <NetTile
+              label={t('Перезапусков за сутки')}
+              value={String(days.reduce((n, x) => n + x.n, 0))}
+              sub={dayTop ? `${dayTop.name}: ${dayTop.n}` : t('нет')}
+              tone={dayTop && dayTop.n >= RESTARTS_DAY_MIN ? 'warn' : undefined}
+            />
           )}
         </div>
-        {docker.access && cs.length > 5 && (
-          <div className="modal-toolbar">
-            <input
-              className="checks-search modal-search"
-              placeholder={t('Фильтр: имя, образ…')}
-              value={q}
-              onChange={(e) => setQ(e.target.value)}
-            />
-            <select className="modal-sort" value={sort} onChange={(e) => setSort(e.target.value as typeof sort)}>
-              <option value="state">{t('сорт: статус')}</option>
-              <option value="name">{t('сорт: имя')}</option>
-              <option value="restarts">{t('сорт: рестарты')}</option>
-            </select>
-          </div>
-        )}
-        {denied && docker.access && <EnableBlock readonly />}
-        {(s.docker_exposed?.length ?? 0) > 0 && <SockWarning items={s.docker_exposed ?? []} />}
-        {(s.proxy_outdated?.length ?? 0) > 0 && <ProxyOldWarning items={s.proxy_outdated ?? []} />}
-        {(s.docker_risk?.length ?? 0) > 0 && <RiskWarning server={s} canAct={canAct} onChanged={onChanged} />}
-        {(s.noboot?.docker.length ?? 0) > 0 && <NoBootWarning server={s} canAct={canAct} onChanged={onChanged} />}
-        {!docker.access ? (
-          <EnableBlock />
-        ) : cs.length === 0 ? (
-          <div className="muted small">{t('Контейнеров нет')}</div>
-        ) : shown.length === 0 ? (
-          <div className="muted small">{t('Ничего не найдено.')}</div>
-        ) : (
-          <div className="loc-results docker-clist docker-clist-scroll">
-            {shown.map((c) => (
-              <ContainerRow
-                key={c.name}
-                serverId={s.id}
-                c={c}
-                problem={probs[c.name]}
-                onDenied={() => setDenied(true)}
-                sock={(s.docker_exposed ?? []).some((e) => e.name === c.name)}
-                day={s.restarts_day?.['docker:' + c.name] ?? 0}
-                canAct={canAct}
-                onLogs={() => setLogs(c.name)}
-                onChanged={onChanged}
-              />
-            ))}
-          </div>
-        )}
+        <div className="net-cards dk-cards">
+          {denied && docker.access && <EnableBlock readonly />}
+          {!docker.access ? (
+            <EnableBlock />
+          ) : (
+            <div className="chart-card net-card net-card-wide">
+              <div className="net-head">
+                <div className="chart-cap net-cap">
+                  {t('Контейнеры')}
+                  <span className="net-n">{cs.length}</span>
+                </div>
+                {stopped > 0 && (
+                  <button className="ghost small docker-hide-stopped" onClick={() => setHideStopped((v) => !v)}>
+                    {hideStopped ? t('Показать остановленные ({n})', { n: stopped }) : t('Скрыть остановленные ({n})', { n: stopped })}
+                  </button>
+                )}
+              </div>
+              {cs.length > 5 && (
+                <div className="modal-toolbar">
+                  <input
+                    className="checks-search modal-search"
+                    placeholder={t('Фильтр: имя, образ…')}
+                    value={q}
+                    onChange={(e) => setQ(e.target.value)}
+                  />
+                  <select className="modal-sort" value={sort} onChange={(e) => setSort(e.target.value as typeof sort)}>
+                    <option value="state">{t('сорт: статус')}</option>
+                    <option value="name">{t('сорт: имя')}</option>
+                    <option value="restarts">{t('сорт: рестарты')}</option>
+                  </select>
+                </div>
+              )}
+              {cs.length === 0 ? (
+                <div className="muted small">{t('Контейнеров нет')}</div>
+              ) : shown.length === 0 ? (
+                <div className="muted small">{t('Ничего не найдено.')}</div>
+              ) : (
+                <div className="loc-results docker-clist docker-clist-scroll">
+                  {shown.map((c) => (
+                    <ContainerRow
+                      key={c.name}
+                      serverId={s.id}
+                      c={c}
+                      problem={probs[c.name]}
+                      onDenied={() => setDenied(true)}
+                      sock={(s.docker_exposed ?? []).some((e) => e.name === c.name)}
+                      day={s.restarts_day?.['docker:' + c.name] ?? 0}
+                      canAct={canAct}
+                      onLogs={() => setLogs(c.name)}
+                      onChanged={onChanged}
+                    />
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+          {/* что поправить на хосте - под контейнерами: длинные команды не уводят список вниз */}
+          {(s.docker_exposed?.length ?? 0) > 0 && <SockWarning items={s.docker_exposed ?? []} />}
+          {(s.proxy_outdated?.length ?? 0) > 0 && <ProxyOldWarning items={s.proxy_outdated ?? []} />}
+          {(s.docker_risk?.length ?? 0) > 0 && <RiskWarning server={s} canAct={canAct} onChanged={onChanged} />}
+          {(s.noboot?.docker.length ?? 0) > 0 && <NoBootWarning server={s} canAct={canAct} onChanged={onChanged} />}
+        </div>
       </div>
       {logs && <LogsModal server={s} container={logs} onClose={() => setLogs(null)} />}
     </div>,
@@ -701,6 +800,8 @@ function DockerLogo() {
   )
 }
 
+// Строка хоста: точка - на связи ли нода, справа запущено из всех. Красное - по контейнеру
+// ушел алерт, желтое - есть остановленные
 function HostRow({
   server: s,
   docker,
@@ -715,16 +816,22 @@ function HostRow({
   const { t } = useI18n()
   const cs = docker.containers ?? []
   const running = cs.filter((c) => c.state === 'running').length
+  const probs = Object.keys(s.docker_alerts ?? {}).length
   return (
-    <button className="check-row srv-row docker-host-row" onClick={onOpen}>
-      <span className={`sdot ${s.online ? 'sdot-up' : 'sdot-down'}`} />
-      <div className="check-main">
-        <div className="check-name">
+    <button className="loc-res loc-res-btn dk-host" onClick={onOpen}>
+      <span className={`lk-dot ${s.online ? 'lk-dot-ok' : 'lk-dot-bad'}`} title={s.online ? t('на связи') : t('не на связи')} />
+      <div className="dk-host-main">
+        <div className="dk-host-name">
           <OsIcon os={s.os} />
           <CountryFlag code={s.country} />
           {s.name}
           {showGroup && s.group_name && <span className="type-chip group-chip">{s.group_name}</span>}
           {!docker.access && <span className="type-chip off">{t('нет доступа')}</span>}
+          {probs > 0 && (
+            <span className="type-chip off" title={t('по контейнерам ушел алерт: упали или крутятся по кругу')}>
+              🔥 {probs}
+            </span>
+          )}
           {(s.docker_exposed?.length ?? 0) > 0 && (
             <span className="type-chip off" title={t('внешний прокси держит docker-сокет: взлом прокси даст root на хосте')}>
               🔓 docker.sock
@@ -746,14 +853,14 @@ function HostRow({
             </span>
           )}
         </div>
-        <div className="check-target mono muted small">
+        <div className="mono muted small">
           Docker {docker.version || '—'}
           {docker.compose ? ` · compose ${docker.compose}` : ''}
         </div>
       </div>
-      <div className="docker-host-count mono">
+      <div className="dk-host-count mono">
         {docker.access ? (
-          <span className={running < cs.length ? 't-degraded' : 't-up'}>
+          <span className={probs ? 't-down' : running < cs.length ? 't-degraded' : 't-up'}>
             {t('{r}/{n}', { r: running, n: cs.length })}
           </span>
         ) : (
@@ -855,6 +962,28 @@ export function DockerPage({
         })()
 
   const open = allHosts.find(({ s }) => s.id === openId)
+  // сводка по всем хостам: что запущено, что упало и где есть что поправить
+  const cAll = allHosts.flatMap(({ d }) => d.containers ?? [])
+  const noAccess = allHosts.filter(({ d }) => !d.access).length
+  const offline = allHosts.filter(({ s }) => !s.online).length
+  const alerts = allHosts.flatMap(({ s }) => Object.values(s.docker_alerts ?? {}))
+  const aDown = alerts.filter((a) => a === 'down').length
+  const unhealthy = cAll.filter((c) => c.health === 'unhealthy').length
+  const flappy = allHosts.reduce(
+    (n, { s }) => n + Object.entries(s.restarts_day ?? {}).filter(([k, v]) => k.startsWith('docker:') && v >= RESTARTS_DAY_MIN).length,
+    0,
+  )
+  const sockN = allHosts.filter(({ s }) => (s.docker_exposed?.length ?? 0) > 0).length
+  const riskN = allHosts.filter(({ s }) => (s.docker_risk ?? []).some((x) => !x.muted)).length
+  const nobootN = allHosts.filter(({ s }) => (s.noboot?.docker ?? []).some((x) => !x.muted)).length
+  const oldN = allHosts.filter(({ s }) => (s.proxy_outdated?.length ?? 0) > 0).length
+  const attn = allHosts.filter(
+    ({ s }) =>
+      (s.docker_exposed?.length ?? 0) > 0 ||
+      (s.docker_risk ?? []).some((x) => !x.muted) ||
+      (s.noboot?.docker ?? []).some((x) => !x.muted) ||
+      (s.proxy_outdated?.length ?? 0) > 0,
+  ).length
 
   return (
     <div>
@@ -879,13 +1008,50 @@ export function DockerPage({
               </button>
             </div>
           )}
-          {allHosts.length > 0 && (
-            <span className="muted small">
-              {t('{h} хостов · {c} контейнеров запущено', { h: allHosts.length, c: totalRunning })}
-            </span>
-          )}
         </div>
       </div>
+      {allHosts.length > 0 && (
+        <div className="net-tiles dk-tiles">
+          <NetTile
+            label={t('Хосты с Docker')}
+            value={String(allHosts.length)}
+            sub={subOf(
+              noAccess > 0 && t('без доступа: {n}', { n: noAccess }),
+              offline > 0 && t('не на связи: {n}', { n: offline }),
+            ) || t('все на связи')}
+            tone={noAccess || offline ? 'warn' : 'ok'}
+          />
+          <NetTile
+            label={t('Контейнеры запущены')}
+            value={String(totalRunning)}
+            unit={t('из {n}', { n: cAll.length })}
+            sub={cAll.length > totalRunning ? t('остановлено: {n}', { n: cAll.length - totalRunning }) : t('все запущены')}
+            tone={cAll.length > totalRunning ? undefined : 'ok'}
+          />
+          <NetTile
+            label={t('Аварии')}
+            value={String(alerts.length)}
+            sub={subOf(
+              aDown > 0 && t('упали: {n}', { n: aDown }),
+              alerts.length - aDown > 0 && t('по кругу: {n}', { n: alerts.length - aDown }),
+              unhealthy > 0 && t('unhealthy: {n}', { n: unhealthy }),
+              flappy > 0 && t('часто перезапускаются: {n}', { n: flappy }),
+            ) || t('нет')}
+            tone={alerts.length ? 'bad' : unhealthy || flappy ? 'warn' : 'ok'}
+          />
+          <NetTile
+            label={t('Хосты с замечаниями')}
+            value={String(attn)}
+            sub={subOf(
+              sockN > 0 && t('docker-сокет у прокси: {n}', { n: sockN }),
+              riskN > 0 && t('ключи от хоста: {n}', { n: riskN }),
+              nobootN > 0 && t('без restart policy: {n}', { n: nobootN }),
+              oldN > 0 && t('старый прокси: {n}', { n: oldN }),
+            ) || t('все в порядке')}
+            tone={attn ? 'warn' : 'ok'}
+          />
+        </div>
+      )}
       {allHosts.length > 1 && (
         <div className="checks-search-row">
           <input
@@ -910,27 +1076,31 @@ export function DockerPage({
       {servers && allHosts.length > 0 && hosts.length === 0 && (
         <div className="card muted">{t('Ничего не найдено.')}</div>
       )}
-      {groups.map((g) => (
-        <div key={g.key} className="mon-group">
-          {groupBy !== 'none' && (
-            <div className="mon-group-head docker-group-head">
-              <span className="mon-group-name">{g.label}</span>
-              <span className="mon-group-n">{g.items.length}</span>
+      {hosts.length > 0 && (
+        <div className="net-cards dk-groups">
+          {groups.map((g) => (
+            <div key={g.key} className="chart-card net-card net-card-wide">
+              <div className="net-head">
+                <div className="chart-cap net-cap">
+                  {groupBy === 'none' ? t('Хосты') : g.label}
+                  <span className="net-n">{g.items.length}</span>
+                </div>
+              </div>
+              <div className="loc-results">
+                {g.items.map(({ s, d }) => (
+                  <HostRow
+                    key={s.id}
+                    server={s}
+                    docker={d}
+                    showGroup={groupBy !== 'group'}
+                    onOpen={() => setOpenId(s.id)}
+                  />
+                ))}
+              </div>
             </div>
-          )}
-          <div className="check-list">
-            {g.items.map(({ s, d }) => (
-              <HostRow
-                key={s.id}
-                server={s}
-                docker={d}
-                showGroup={groupBy !== 'group'}
-                onOpen={() => setOpenId(s.id)}
-              />
-            ))}
-          </div>
+          ))}
         </div>
-      ))}
+      )}
       {open && (
         <DockerHostModal
           server={open.s}

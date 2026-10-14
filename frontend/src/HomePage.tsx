@@ -188,9 +188,9 @@ function MuteHint({
   return (
     <div className="chart-card net-card net-card-wide home-block home-attention-mute">
       <div className="net-head">
-        <div className="chart-cap home-cap">
+        <div className="chart-cap net-cap">
           {t('Алерты не придут')}
-          <span className="home-n home-n-warn">{items.length}</span>
+          <span className="net-n net-n-warn">{items.length}</span>
         </div>
       </div>
       <div className="muted small home-attention-note">
@@ -1099,9 +1099,9 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
   // шапка карточки блока: подпись и счетчик, тон счетчика - по самому тяжелому в блоке
   const cap = (title: string, n?: number, tone?: 'bad' | 'warn' | 'info') => (
     <div className="net-head">
-      <div className="chart-cap home-cap">
+      <div className="chart-cap net-cap">
         {title}
-        {n ? <span className={`home-n${tone ? ` home-n-${tone}` : ''}`}>{n}</span> : null}
+        {n ? <span className={`net-n${tone ? ` net-n-${tone}` : ''}`}>{n}</span> : null}
       </div>
     </div>
   )
