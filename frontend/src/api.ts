@@ -2314,3 +2314,60 @@ export function deleteMaint(id: number): Promise<void> {
 export function acceptDns(id: number): Promise<CheckRun> {
   return api<CheckRun>(`/api/checks/${id}/dns-accept`, { method: 'POST' })
 }
+
+// Отчет за период (backend app/api/report.py): только в панели, в Telegram не уходит
+export interface ReportSite {
+  id: number
+  name: string
+  group: string
+  uptime: number | null
+  incidents: number
+  downtime_s: number
+  longest_s: number
+  last_at: string | null
+  open: boolean
+}
+export interface ReportServer {
+  id: number
+  name: string
+  group: string
+  offline_s: number
+  gaps: number
+  longest_s: number
+  alerts: number
+  kinds: { kind: string; label: string; n: number }[]
+}
+export interface ReportTotals {
+  uptime: number | null
+  incidents: number
+  downtime_s: number
+}
+export interface Report {
+  days: number
+  since: string
+  until: string
+  prev_ok: boolean
+  sites?: ReportTotals & { total: number; affected: number; prev: ReportTotals | null; items: ReportSite[]; more: number }
+  servers?: {
+    total: number
+    with_gaps: number
+    offline_s: number
+    prev_offline_s: number
+    prev_ok?: boolean // прошлый период целиком есть в хранении метрик
+    panel_s: number
+    panel_gaps: number
+    items: ReportServer[]
+    more: number
+  }
+  noise: {
+    fires: number
+    prev_fires: number
+    top: { kind: string; label: string; target: string; n: number }[]
+    backups: { target: string; n: number; kinds: string[] }[]
+  }
+  // окно за период одной строкой: сколько раз было, start/end - последнее вхождение
+  maint: { title: string; repeat: string; count: number; start: string; end: string; servers: number; checks: number }[]
+}
+export function getReport(days: number): Promise<Report> {
+  return api<Report>(`/api/report?days=${days}`)
+}
