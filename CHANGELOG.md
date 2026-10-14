@@ -4,6 +4,13 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.4.176] - 2026-10-14
+
+### Fixed
+- Журнал systemd: если ответ уперся в предел размера агента (90 000 байт), окно пишет, что
+  показаны последние N строк и больше за раз не передать. Раньше на запрос 1000 строк молча
+  приходило, например, 622, без объяснения.
+
 ## [1.4.175] - 2026-10-14
 
 ### Added

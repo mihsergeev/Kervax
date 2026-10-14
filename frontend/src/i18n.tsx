@@ -2082,6 +2082,8 @@ const EN: Record<string, string> = {
     'Asked {s} whether the site opens from inside: waiting for the agent',
   '{s} не ответил на проверку изнутри': '{s} did not answer the inside check',
   // --- журнал systemd по запросу ---
+  'Показаны последние {n} строк: больше за один раз агент не передает, сократите период или поднимите приоритет.':
+    'Showing the last {n} lines: the agent does not send more at once, shorten the period or raise the priority.',
   'не удалось получить журнал': 'could not get the journal',
   'Имя юнита вида nginx.service или nginx': 'A unit name like nginx.service or nginx',
   'предупреждения': 'warnings',
