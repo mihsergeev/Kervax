@@ -14,6 +14,7 @@ from app.api import (
     backup as backup_api,
     branding,
     checks,
+    depmap,
     health,
     locations,
     maintenance,
@@ -102,6 +103,7 @@ def create_app() -> FastAPI:
     app.include_router(alert_history.router, prefix="/api")
     app.include_router(report.router, prefix="/api")
     app.include_router(search.router, prefix="/api")
+    app.include_router(depmap.router, prefix="/api")
     app.include_router(locations.router, prefix="/api")
     app.include_router(maintenance.router, prefix="/api")
     app.include_router(servers.router, prefix="/api")
