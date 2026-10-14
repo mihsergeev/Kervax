@@ -670,147 +670,87 @@ input:focus {
   font-size: 0.82rem;
   cursor: pointer;
 }
-.home-attention {
-  margin: 0 0 1.1rem;
-  padding: 0.8rem 1rem;
-  border-radius: 12px;
-  border: 1px solid color-mix(in srgb, #f0a020 35%, var(--border));
-  background: color-mix(in srgb, #f0a020 8%, transparent);
-}
-.home-attention-head {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-  font-weight: 700;
-  font-size: 1rem;
-  margin-bottom: 0.5rem;
-}
-.home-attention-ic {
-  font-size: 1.05rem;
-}
-.home-attention-n {
-  min-width: 1.4rem;
-  text-align: center;
-  padding: 0.02rem 0.4rem;
+/* Главная в стиле раздела "Сеть": сводка плитками (клик - в раздел), блоки - карточками,
+   пункты - строками со своей подложкой и рамкой. Тон блока - в счетчике у подписи */
+.home-tiles { margin: 0 0 0.75rem; }
+.home-tiles .net-tile-label { display: flex; align-items: center; gap: 0.35rem; }
+.home-tiles .sec-icon { width: 1.15em; height: 1.15em; }
+.net-cards.home-blocks { margin-top: 0; }
+.home-cap { display: flex; align-items: center; gap: 0.45rem; }
+.home-n {
+  min-width: 1.3rem;
+  padding: 0 0.4rem;
   border-radius: 999px;
-  background: color-mix(in srgb, #f0a020 25%, transparent);
-  font-size: 0.85rem;
+  text-align: center;
+  font-size: 0.72rem;
+  letter-spacing: 0;
+  color: var(--text);
+  background: color-mix(in srgb, var(--text) 10%, transparent);
 }
-.home-attention-list {
-  display: flex;
-  flex-direction: column;
-  gap: 0.15rem;
-}
+.home-n-bad { color: var(--down); background: rgba(239, 68, 68, 0.15); }
+.home-n-warn { color: var(--degraded); background: rgba(245, 158, 11, 0.15); }
+.home-n-info { color: #3b82f6; background: rgba(59, 130, 246, 0.15); }
+/* настоящая беда в блоке (а не только предупреждения) - красная рамка */
+.home-block.has-down { border-color: rgba(239, 68, 68, 0.45); }
+.home-block .ansible-hint { margin: 0; }
+.home-attention-list { display: flex; flex-direction: column; gap: 0.3rem; }
 .home-attention-row {
-  display: flex;
-  align-items: center;
-  gap: 0.55rem;
-  width: 100%;
-  text-align: left;
-  background: transparent;
-  border: none;
-  box-shadow: none;
-  color: var(--text);
-  padding: 0.4rem 0.3rem;
-  border-radius: 8px;
-  cursor: pointer;
-  font-size: 0.92rem;
-}
-.home-attention-row:hover {
-  background: color-mix(in srgb, #f0a020 12%, transparent);
-}
-.home-attention-ico {
-  flex-shrink: 0;
-}
-.home-attention-row .warn-name {
-  flex: 1;
-  min-width: 0;
-}
-.home-attention-more {
-  padding: 0.3rem;
-}
-/* "Что сломано": красная рамка, когда есть настоящие проблемы, а не только предупреждения;
-   имя сервера жирным, сама беда - обычным, чтобы строка читалась как "где - что" */
-.home-attention-broken.has-down {
-  border-color: color-mix(in srgb, #e5534b 40%, var(--border));
-  background: color-mix(in srgb, #e5534b 7%, transparent);
-}
-.home-attention-broken .home-attention-txt { font-weight: 400; }
-.home-attention-broken .home-attention-txt b { font-weight: 600; }
-/* Текст пункта «Требует действий» — СВОЙ класс, а не .warn-name: тот придуман для
-   компактных строк SSL/доменов (nowrap + ellipsis + max-width:45%) и резал предложение
-   на середине, из-за чего было непонятно, что делать. Здесь наоборот — переносим. */
-.home-attention-txt {
-  flex: 1;
-  min-width: 0;
-  font-weight: 600;
-  white-space: normal;
-  overflow-wrap: anywhere;
-}
-/* карточка раздела: вся плитка кликабельна (div role=button), строки перехватывают клик */
-.home-card-clickable {
-  cursor: pointer;
-}
-.sec-icon {
-  width: 1.35em;
-  height: 1.35em;
-  flex-shrink: 0;
-}
-.home-card-title {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-}
-.home-warn-btn {
-  width: 100%;
-  text-align: left;
-  background: transparent;
-  border: none;
-  box-shadow: none;
-  color: var(--text);
-  cursor: pointer;
-  border-radius: 6px;
-}
-.home-warn-btn:hover {
-  background: color-mix(in srgb, var(--text) 7%, transparent);
-}
-.home-warn-btn {
-  align-items: flex-start;
-}
-.home-warn-btn .home-open {
-  margin-left: auto;
-  flex-shrink: 0;
-}
-/* в строках-кнопках весь текст проблемы в .warn-name — не усекаем, переносим */
-.home-warn-btn .warn-name {
-  flex: 1;
-  min-width: 0;
-  max-width: none;
-  white-space: normal;
-  overflow: visible;
-  text-overflow: clip;
-}
-.home-agent-upd {
   display: flex;
   align-items: center;
   gap: 0.6rem;
   width: 100%;
   text-align: left;
-  margin: 0 0 1rem;
-  padding: 0.7rem 1rem;
-  border-radius: 10px;
-  border: 1px solid color-mix(in srgb, #f0a020 45%, var(--border));
-  background: color-mix(in srgb, #f0a020 12%, transparent);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: none;
+  padding: 0.45rem 0.7rem;
   color: var(--text);
+  font: inherit;
+  font-size: 0.9rem;
   cursor: pointer;
-  font-size: 0.92rem;
+  transition: border-color 0.12s ease, background 0.12s ease;
 }
-.home-agent-upd:hover {
-  background: color-mix(in srgb, #f0a020 18%, transparent);
+.home-attention-row:hover { background: var(--card-hover); border-color: var(--border-strong); }
+.home-attention-ico { flex-shrink: 0; }
+.home-attention-more { align-self: flex-start; padding: 0.3rem 0.5rem; }
+/* текст пункта переносим, а не режем: обрезанное на середине предложение непонятно */
+.home-attention-txt { flex: 1; min-width: 0; white-space: normal; overflow-wrap: anywhere; }
+.home-attention-txt b { font-weight: 600; }
+/* группа одинаковых пунктов с разных серверов: одна рамка на заголовок и серверы под ним */
+.home-attention-grpbox { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; }
+.home-attention-grpbox.open { border-color: var(--border-strong); }
+.home-attention-grpbox > .home-attention-row { border: 0; background: none; }
+.home-attention-grpbox > .home-attention-row:hover { background: var(--card-hover); }
+.home-attention-sub {
+  display: flex;
+  flex-direction: column;
+  padding: 0.2rem 0.4rem 0.35rem 2.3rem;
+  border-top: 1px dashed var(--border);
 }
-.home-agent-upd-ic {
-  font-size: 1.1rem;
-  color: #f0a020;
+.home-attention-sub .home-attention-row { border: 0; background: none; padding: 0.25rem 0.4rem; font-size: 0.86rem; }
+.home-attention-sub .home-attention-row:hover { background: var(--card-hover); }
+/* группы в "Требует действий": серверное сверху, бэкапное ниже */
+.home-attention-grp { display: flex; flex-direction: column; gap: 0.3rem; }
+.home-attention-grp + .home-attention-grp { margin-top: 0.4rem; }
+.home-attention-grp-head { padding: 0.1rem 0.1rem 0; text-transform: uppercase; letter-spacing: 0.04em; font-size: 0.72rem; }
+@media (max-width: 600px) {
+  .home-attention-sub { padding-left: 0.6rem; }
+}
+/* "Алерты не придут": кликается не строка, а кнопки на ней, поэтому без подсветки строки.
+   На узком экране кнопки уезжают под текст, иначе имя рвалось в столбик по слогам */
+.home-attention-note { margin-top: -0.2rem; }
+.home-attention-mute .home-attention-row { cursor: default; gap: 0.4rem; flex-wrap: wrap; }
+.home-attention-mute .home-attention-row:hover { background: var(--bg); border-color: var(--border); }
+.home-attention-mute .home-attention-txt { flex: 1 1 14rem; }
+.home-attention-mute .home-attention-row > button { flex-shrink: 0; }
+.home-attention-mute > button { align-self: flex-start; }
+/* окна обслуживания - к сведению, строка никуда не ведет */
+.home-attention-row.maint-home-row { cursor: default; }
+.home-attention-row.maint-home-row:hover { background: var(--bg); border-color: var(--border); }
+.sec-icon {
+  width: 1.35em;
+  height: 1.35em;
   flex-shrink: 0;
 }
 .kv-list {
@@ -1114,6 +1054,7 @@ button.srv-tile-btn:hover .net-tile { border-color: var(--border-strong); backgr
 .lk-dot-ok { background: var(--up); }
 .lk-dot-warn { background: var(--degraded); }
 .lk-dot-bad { background: var(--down); }
+.lk-dot-info { background: #3b82f6; }
 .lk-name { flex: 1 1 auto; min-width: 0; }
 .lk-title { display: flex; align-items: baseline; flex-wrap: wrap; gap: 0 0.1rem; }
 .lk-target { font-weight: 600; }
@@ -2783,138 +2724,12 @@ select:focus {
 
 /* ---------- главная (сводка) ---------- */
 
-/* колоночная раскладка: 3 независимые колонки, внутри карточки стопкой. Высокие
-   карточки (Сайты/Бэкапы) не ломают выравнивание соседних колонок («не уезжает»).
-   Группировка: Сайты+Сервера | Docker+Kubernetes | Бэкапы. */
-.home-cols {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 1rem;
-  align-items: start;
-}
-/* учётка видит не все разделы → колонок меньше, растягиваем оставшиеся */
-.home-cols.cols-2 {
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-}
-.home-cols.cols-1 {
-  grid-template-columns: minmax(0, 1fr);
-  max-width: 640px;
-}
-.home-col {
-  display: flex;
-  flex-direction: column;
-  gap: 1rem;
-  min-width: 0;
-}
-@media (max-width: 1100px) {
-  .home-cols {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-  .home-cols.cols-1 {
-    grid-template-columns: minmax(0, 1fr);
-  }
-}
-@media (max-width: 680px) {
-  .home-cols {
-    grid-template-columns: 1fr;
-  }
-}
-.home-card {
-  display: flex;
-  flex-direction: column;
-  text-align: left;
-  background: var(--bg-card);
-  border: 1px solid var(--border);
-  border-radius: 14px;
-  padding: 0 1.35rem 1.25rem;
-  color: var(--text);
-  box-shadow: none;
-  cursor: pointer;
-  transition: border-color 0.15s ease, background 0.15s ease;
-}
-.home-card:hover {
-  background: var(--card-hover);
-  border-color: var(--border-strong);
-}
-/* шапка карточки — общий разделитель снизу, всегда на одном уровне */
-.home-card-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  height: 3.4rem;
-  border-bottom: 1px solid var(--border);
-  margin-bottom: 1rem;
-}
-.home-card-head h3 {
-  margin: 0;
-  font-size: 1.1rem;
-}
 .home-open {
   color: var(--text-muted);
   font-size: 0.82rem;
   font-weight: 600;
   transition: color 0.15s ease;
 }
-.home-card:hover .home-open {
-  color: var(--accent, #4b74ff);
-}
-.home-headline {
-  font-size: 1.4rem;
-  font-weight: 700;
-  margin-bottom: 0.7rem;
-}
-.home-stat-row {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 0.4rem;
-}
-/* мини-статы как чипы */
-.home-mini {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.4rem;
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 0.3rem 0.6rem;
-  font-size: 0.82rem;
-}
-.home-mini-num {
-  font-weight: 700;
-  font-size: 0.95rem;
-}
-.home-inc {
-  margin-top: 0.75rem;
-  color: var(--down);
-  font-weight: 600;
-  font-size: 0.85rem;
-}
-.home-warns {
-  margin-top: 0.9rem;
-  padding-top: 0.75rem;
-  border-top: 1px solid var(--border);
-  display: flex;
-  flex-direction: column;
-  gap: 0.5rem;
-}
-.home-warn {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-  font-size: 0.85rem;
-}
-.warn-tone {
-  filter: saturate(1.1);
-}
-.warn-name {
-  font-weight: 600;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  max-width: 45%;
-}
-
 /* ---------- опции SSL/домен в форме ---------- */
 
 .expiry-opts {
@@ -5360,43 +5175,6 @@ button.adopt-mark {
   font-size: 0.72rem;
 }
 
-/* группы в «Требует действий»: серверное сверху, бэкапное ниже */
-.home-attention-grp + .home-attention-grp {
-  margin-top: 0.5rem;
-  padding-top: 0.4rem;
-  border-top: 1px dashed var(--border);
-}
-/* группа одинаковых пунктов с разных серверов: строка-заголовок и серверы под ней */
-.home-attention-row.open {
-  background: color-mix(in srgb, #f0a020 8%, transparent);
-}
-.home-attention-sub {
-  margin: 0 0 0.3rem 2.1rem;
-  padding-left: 0.6rem;
-  border-left: 2px solid color-mix(in srgb, #f0a020 35%, var(--border));
-}
-.home-attention-subrow {
-  padding-top: 0.15rem;
-  padding-bottom: 0.15rem;
-  font-size: 0.92em;
-}
-.home-attention-subrow .home-attention-txt {
-  font-weight: 400;
-}
-.home-attention-subrow .home-attention-txt b {
-  font-weight: 600;
-}
-@media (max-width: 600px) {
-  .home-attention-sub {
-    margin-left: 0.6rem;
-  }
-}
-.home-attention-grp-head {
-  padding: 0.1rem 0.3rem 0.25rem;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  font-size: 0.72rem;
-}
 
 /* пояснение под галкой «дампы вне панели» — с отступом под чекбокс */
 .coverage-hint {
@@ -5534,10 +5312,6 @@ button.adopt-mark {
 .linklike:hover { background: none; filter: brightness(1.2); }
 
 /* мягкое уведомление о выходе бэкапа за окно — приглушённое, не тревожное */
-.home-notice { margin: 12px 0; padding: 10px 14px; border: 1px solid var(--border); border-radius: 10px; background: var(--hover); }
-.home-notice-head { margin-bottom: 6px; }
-.home-notice-row { display: flex; align-items: center; gap: 8px; width: 100%; background: none; border: none; padding: 6px 4px; cursor: pointer; color: var(--text); text-align: left; border-radius: 6px; }
-.home-notice-row:hover { background: var(--hover); }
 .backup-window-note { color: var(--degraded); font-size: 0.85rem; margin: 4px 0; }
 .backup-anytime-row { margin-top: 6px; }
 
@@ -5819,11 +5593,6 @@ body:has(.modal-backdrop) {
   flex-basis: 100%;
 }
 
-/* Предложение «проверять локально»: отдельный блок, потому что это не авария и не
-   задача на ноде, а находка — панель заметила, что сайт живёт на её же сервере. */
-.home-attention-probe .home-attention-ic {
-  filter: none;
-}
 .local-probe-hint {
   margin-top: 0.5rem;
 }
@@ -5845,31 +5614,6 @@ body:has(.modal-backdrop) {
   margin: -0.3rem 0 0.5rem;
 }
 
-/* Блок «Алерты не придут»: не авария, а предупреждение о молчании — своя рамка,
-   чтобы не путать с «Требует действий». */
-.home-attention-mute .home-attention-ic { filter: none; }
-.home-attention-note { margin: 0.3rem 0 0.5rem; }
-/* В «Алерты не придут» кликается не строка, а кнопки на ней: сама строка — div,
-   и рука-курсор с подсветкой обещали бы переход, которого нет. */
-.home-attention-mute .home-attention-row {
-  cursor: default;
-  gap: 0.4rem;
-  /* На узком экране кнопки уезжают под текст. Без переноса они забирали место у
-     имени, и оно рвалось в столбик по слогам. */
-  flex-wrap: wrap;
-}
-.home-attention-mute .home-attention-row:hover {
-  background: transparent;
-}
-.home-attention-mute .home-attention-txt {
-  flex: 1 1 14rem;
-}
-.home-attention-mute .home-attention-row > button {
-  flex-shrink: 0;
-}
-.home-attention-mute > button {
-  margin-top: 0.4rem;
-}
 /* «показать прежние» под списком инцидентов и журнала: спокойная строка, а не
    акцент — это выход в архив, а не действие, которого от инженера ждут. */
 /* «Сервер недоступен» — спокойная, но заметная полоса под именем ноды. Красной
@@ -6016,36 +5760,6 @@ button.type-chip { cursor: pointer; border: 1px solid transparent; font-family: 
   margin-left: 0.25rem;
 }
 
-/* Известные проблемы: серый блок на главной вместо "Что сломано", плашка в карточке */
-/* "Обновления": агент и helper'ы по всему парку - синим, отдельно от строк по серверам */
-.home-attention-fleet {
-  border-color: color-mix(in srgb, #3b82f6 35%, var(--border));
-  background: color-mix(in srgb, #3b82f6 7%, transparent);
-}
-.home-attention-fleet .home-attention-row:hover {
-  background: color-mix(in srgb, #3b82f6 12%, transparent);
-}
-.home-attention-fleet .ansible-hint {
-  margin-left: 0.3rem;
-}
-.dot.fleet {
-  background: #3b82f6;
-}
-.home-attention-known {
-  border-color: var(--border);
-  background: color-mix(in srgb, var(--text) 4%, transparent);
-}
-.home-attention-known .home-attention-n {
-  background: color-mix(in srgb, var(--text) 10%, transparent);
-}
-.home-attention-known .home-attention-row:hover {
-  background: color-mix(in srgb, var(--text) 7%, transparent);
-}
-.home-attention-known .home-attention-txt { font-weight: 400; }
-.home-attention-known .home-attention-txt b { font-weight: 600; }
-.dot.known {
-  background: color-mix(in srgb, var(--text) 35%, transparent);
-}
 .known-dialog {
   max-width: 480px;
   width: calc(100% - 32px);

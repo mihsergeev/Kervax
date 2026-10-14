@@ -405,15 +405,17 @@ export function MaintHome() {
       .filter(Boolean)
       .join(', ')
   return (
-    <div className="home-attention home-attention-known">
-      <div className="home-attention-head">
-        <span className="home-attention-ic">🚧</span>
-        {live.length ? t('Идет обслуживание') : t('Скоро обслуживание')}
-        <span className="home-attention-n">{live.length || soon.length}</span>
+    <div className="chart-card net-card home-block">
+      <div className="net-head">
+        <div className="chart-cap home-cap">
+          {live.length ? t('Идет обслуживание') : t('Скоро обслуживание')}
+          <span className={`home-n${live.length ? ' home-n-warn' : ''}`}>{live.length || soon.length}</span>
+        </div>
       </div>
       <div className="home-attention-list">
         {live.map((w) => (
           <div key={w.id} className="home-attention-row maint-home-row">
+            <span className="lk-dot lk-dot-warn" />
             <span className="home-attention-txt">
               <b>{w.title}</b> - {t('до {t}', { t: maintTime(w.cur_end) })}
               <span className="muted"> · {scope(w)}</span>
@@ -422,6 +424,7 @@ export function MaintHome() {
         ))}
         {soon.map((w) => (
           <div key={w.id} className="home-attention-row maint-home-row muted">
+            <span className="lk-dot" />
             <span className="home-attention-txt">
               {t('в {t}', { t: maintTime(w.next_start) })}: {w.title}
               <span> · {scope(w)}</span>

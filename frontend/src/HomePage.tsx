@@ -30,6 +30,7 @@ import { expiryText, registrableDomain } from './checkUtils'
 import { useAuth } from './auth'
 import { IconBackups, IconDocker, IconKube, IconServers, IconSites } from './icons'
 import { CountryFlag } from './CountryFlag'
+import { NetTile, type Tone } from './NetLinks'
 
 // сколько проблемных строк показывать в карточках главной
 const HOME_LIST_LIMIT = 25
@@ -185,11 +186,12 @@ function MuteHint({
     }
   }
   return (
-    <div className="home-attention home-attention-mute">
-      <div className="home-attention-head">
-        <span className="home-attention-ic">🔕</span>
-        {t('Алерты не придут')}
-        <span className="home-attention-n">{items.length}</span>
+    <div className="chart-card net-card net-card-wide home-block home-attention-mute">
+      <div className="net-head">
+        <div className="chart-cap home-cap">
+          {t('Алерты не придут')}
+          <span className="home-n home-n-warn">{items.length}</span>
+        </div>
       </div>
       <div className="muted small home-attention-note">
         {t('По этим объектам не сработает ни один алерт: они не попадают ни в одну область действия правил. Метрики собираются и графики рисуются — но когда что-то сломается, не придёт ничего.')}
@@ -200,7 +202,7 @@ function MuteHint({
       <div className="home-attention-list">
         {items.slice(0, ATTENTION_LIMIT).map((m) => (
           <div key={`${m.kind}-${m.id}`} className="home-attention-row">
-            <span className="dot degraded" />
+            <span className="lk-dot lk-dot-warn" />
             <span className="home-attention-ico">{m.kind === 'server' ? '🖥' : '🌐'}</span>
             <span className="home-attention-txt">
               {m.name} — {muteReason(m, t)}
@@ -769,7 +771,6 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
         !knownActive(c.known_issue),
     )
     .sort((a, b) => (a.last_status === 'down' ? 0 : 1) - (b.last_status === 'down' ? 0 : 1))
-  const allUp = ov && downChecks.length === 0
   // лежащие, но отмеченные известной проблемой: "все в норме" про них было бы неправдой
   const knownDown = (ov?.checks ?? []).filter(
     (c) =>
@@ -778,7 +779,6 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
   ).length
   const srvTotal = servers?.length ?? 0
   const srvOnline = servers?.filter((s) => s.online).length ?? 0
-  const srvOffline = srvTotal - srvOnline
   // проблемные серверы (оффлайн + перегрузка ресурсов) — что именно не так
   // проблема = есть t-down (оффлайн / ≥порога alert/crit); предупреждение = только
   // t-degraded (warn, напр. диск 85%). Раньше всё валилось в «Проблемы» скопом.
@@ -922,12 +922,6 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
 
   // Хосты для ansible-кнопки «обновить сразу на N нодах»: те, что плейбук реально чинит —
   // устаревший helper (переустановка) ИЛИ не включён watchdog (helper agent-watchdog, ALWAYS).
-  // Сетка главной — 3 колонки; если разделы колонки закрыты, колонку не рендерим
-  // вовсе, иначе в вёрстке остаётся пустая треть.
-  const colSites = canSee('sites') || canSee('servers')
-  const colDocker = canSee('docker') || canSee('kuber')
-  const colBackups = canSee('backups')
-  const homeCols = [colSites, colDocker, colBackups].filter(Boolean).length
   const rolloutHosts = [...new Set(
     srvList
       .filter((s) => s.online && s.helper_rollout)
@@ -940,7 +934,7 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
       className={`home-attention-row${sub ? ' home-attention-subrow' : ''}`}
       onClick={() => onOpen(it.section, it.id, it.srv, it.sec)}
     >
-      {!sub && <span className={`dot ${it.tone === 't-down' ? 'down' : 'degraded'}`} />}
+      {!sub && <span className={`lk-dot ${it.tone === 't-down' ? 'lk-dot-bad' : 'lk-dot-warn'}`} />}
       {!sub && <span className="home-attention-ico">{ISSUE_ICON[it.kind] ?? '⚠️'}</span>}
       <span className="home-attention-txt">
         <CountryFlag code={it.cc} /> <b>{it.name}</b>
@@ -976,9 +970,9 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
     const open = openGrps.has(`b-${r.grp}`)
     const names = shortList([...new Set(r.items.map((x) => x.name))], t, 4)
     return (
-      <div key={`bg-${r.grp}`} className="home-attention-grpbox">
-        <button className={`home-attention-row${open ? ' open' : ''}`} onClick={() => toggleGrp(`b-${r.grp}`)}>
-          <span className="dot degraded" />
+      <div key={`bg-${r.grp}`} className={`home-attention-grpbox${open ? ' open' : ''}`}>
+        <button className="home-attention-row" onClick={() => toggleGrp(`b-${r.grp}`)}>
+          <span className="lk-dot lk-dot-warn" />
           <span className="home-attention-ico">{ISSUE_ICON[r.items[0].kind] ?? '⚠️'}</span>
           <span className="home-attention-txt">
             {r.head}
@@ -992,7 +986,7 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
   }
   const actRow = (it: ActItem) => (
     <button key={it.key} className="home-attention-row" onClick={() => onOpen(it.section, it.id, it.srv, it.sec)}>
-      <span className={`dot ${it.fleet ? 'fleet' : 'degraded'}`} />
+      <span className={`lk-dot ${it.fleet ? 'lk-dot-info' : 'lk-dot-warn'}`} />
       <span className="home-attention-ico">{it.icon}</span>
       <span className="home-attention-txt">
         <CountryFlag code={it.cc} /> {it.text}
@@ -1017,9 +1011,9 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
     const names = shortList(r.items.map((x) => x.name ?? ''), t, 4)
     const icon = r.items.some((x) => x.icon === '⛔') ? '⛔' : r.items[0].icon
     return (
-      <div key={`g-${r.grp}`} className="home-attention-grpbox">
-        <button className={`home-attention-row${open ? ' open' : ''}`} onClick={() => toggleGrp(r.grp)}>
-          <span className="dot degraded" />
+      <div key={`g-${r.grp}`} className={`home-attention-grpbox${open ? ' open' : ''}`}>
+        <button className="home-attention-row" onClick={() => toggleGrp(r.grp)}>
+          <span className="lk-dot lk-dot-warn" />
           <span className="home-attention-ico">{icon}</span>
           <span className="home-attention-txt">
             {grpLabel(r.grp, t)}
@@ -1031,6 +1025,86 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
       </div>
     )
   }
+  // Сводка сверху: плитка на раздел, клик ведет в него. Тон плитки - по худшему в разделе:
+  // красная - есть настоящая беда, желтая - только предупреждения
+  const probTone = (list: ProbItem[]): Tone => (list.some((p) => p.down) ? 'bad' : list.length ? 'warn' : 'ok')
+  const subOf = (...parts: (string | false | 0 | undefined)[]) => parts.filter(Boolean).join(' · ')
+  const tile = (sec: Section, icon: ReactNode, label: string, value: string, sub: string, tone: Tone, unit?: string) => (
+    <button key={sec} className="srv-tile-btn" onClick={() => onNavigate(sec)} title={t('Открыть')}>
+      <NetTile label={<>{icon}{label}</>} value={value} unit={unit} sub={sub} tone={tone} />
+    </button>
+  )
+  const siteDown = downChecks.filter((c) => c.last_status === 'down').length
+  const kubeAll = [...kubeProbs, ...sectionProbs('kuber')]
+  const backupAll = [...backupProbs, ...sectionProbs('backups')]
+  const tiles: ReactNode[] = []
+  if (canSee('sites'))
+    tiles.push(
+      ov == null || ov.total === 0
+        ? tile('sites', <IconSites />, t('Сайты работают'), '—', ov == null ? t('загрузка…') : t('Мониторов пока нет.'), 'muted')
+        : tile(
+            'sites', <IconSites />, t('Сайты работают'), String(ov.up),
+            subOf(
+              downChecks.length ? t('проблем: {n}', { n: downChecks.length }) : !knownDown && t('все в норме'),
+              knownDown && t('известных: {n}', { n: knownDown }),
+              ov.open_incidents > 0 && t('{n} откр. инцидентов', { n: ov.open_incidents }),
+            ),
+            siteDown ? 'bad' : downChecks.length ? 'warn' : 'ok',
+            t('из {n}', { n: ov.total }),
+          ),
+    )
+  if (canSee('servers'))
+    tiles.push(
+      servers == null || srvTotal === 0
+        ? tile('servers', <IconServers />, t('Серверы онлайн'), '—', servers == null ? t('загрузка…') : t('Серверов пока нет.'), 'muted')
+        : tile(
+            'servers', <IconServers />, t('Серверы онлайн'), String(srvOnline),
+            // оффлайн-нода уже сидит в srvDown (srvIssues отдает ей "оффлайн"), отдельно не плюсуем
+            subOf(
+              srvDown.length > 0 && t('проблем: {n}', { n: srvDown.length }),
+              srvWarn.length > 0 && t('предупреждений: {n}', { n: srvWarn.length }),
+              !srvProblems.length && t('все в норме'),
+            ),
+            srvDown.length ? 'bad' : srvWarn.length ? 'warn' : 'ok',
+            t('из {n}', { n: srvTotal }),
+          ),
+    )
+  // Docker, Кубер и бэкапы - только если в разделе есть что показать
+  if (canSee('docker') && dockerHosts.length)
+    tiles.push(tile(
+      'docker', <IconDocker />, t('Контейнеры Docker'), String(dockerRunning),
+      subOf(t('хостов: {n}', { n: dockerHosts.length }), dockerProbs.length > 0 && t('проблем: {n}', { n: dockerProbs.length })),
+      probTone(dockerProbs),
+    ))
+  if (canSee('kuber') && kubeHosts.length)
+    tiles.push(tile(
+      'kuber', <IconKube />, t('Поды Kubernetes'), String(kubePods),
+      subOf(t('кластеров: {n}', { n: kubeHosts.length }), kubeAll.length > 0 && t('проблем: {n}', { n: kubeAll.length })),
+      probTone(kubeAll),
+    ))
+  if (canSee('backups') && backupClients.length + backupServers.length)
+    tiles.push(tile(
+      'backups', <IconBackups />, t('Серверов под бэкапом'), String(backupClients.length),
+      subOf(
+        backupServers.length > 0 && t('серверов бэкапа: {n}', { n: backupServers.length }),
+        backupAll.length > 0 ? t('проблем: {n}', { n: backupAll.length }) : t('все свежие'),
+      ),
+      probTone(backupAll),
+    ))
+  // бэкап вышел за ночное окно: мягкое уведомление (НЕ алерт, не в Telegram)
+  const late = canSee('backups')
+    ? srvList.map((s) => ({ s, note: backupWindowNote(s) })).filter((x) => x.note)
+    : []
+  const siteRows = canSee('sites') ? downChecks.length + warns.length : 0
+  // шапка карточки блока: подпись и счетчик, тон счетчика - по самому тяжелому в блоке
+  const cap = (title: string, n?: number, tone?: 'bad' | 'warn' | 'info') => (
+    <div className="net-head">
+      <div className="chart-cap home-cap">
+        {title}
+        {n ? <span className={`home-n${tone ? ` home-n-${tone}` : ''}`}>{n}</span> : null}
+      </div>
+    </div>
+  )
   return (
     <div>
       <p className="tagline">{t('Мониторинг инфраструктуры')}</p>
@@ -1045,14 +1119,12 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
           }}
         />
       )}
+      {tiles.length > 0 && <div className="net-tiles home-tiles">{tiles}</div>}
+      <div className="net-cards home-blocks">
       {mutes.length > 0 && <MuteHint items={mutes} onOpen={onOpen} onDone={load} />}
       {broken.length > 0 && (
-        <div className={`home-attention home-attention-broken${broken.some((x) => x.tone === 't-down') ? ' has-down' : ''}`}>
-          <div className="home-attention-head">
-            <span className="home-attention-ic">🛠</span>
-            {t('Что сломано')}
-            <span className="home-attention-n">{brokenRows.length}</span>
-          </div>
+        <div className={`chart-card net-card net-card-wide home-block home-attention-broken${broken.some((x) => x.tone === 't-down') ? ' has-down' : ''}`}>
+          {cap(t('Что сломано'), brokenRows.length, broken.some((x) => x.tone === 't-down') ? 'bad' : 'warn')}
           <div className="home-attention-list">
             {(brokenAll ? brokenRows : brokenRows.slice(0, BROKEN_LIMIT)).map(brokenGrpRow)}
             {brokenRows.length > BROKEN_LIMIT && (
@@ -1063,14 +1135,67 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
           </div>
         </div>
       )}
+      {/* Сайты: лежащие мониторы и истекающие SSL/домены. Клик - в сам монитор */}
+      {siteRows > 0 && (
+        <div className={`chart-card net-card home-block${siteDown ? ' has-down' : ''}`}>
+          {cap(t('Сайты'), siteRows, siteDown ? 'bad' : 'warn')}
+          <div className="home-attention-list">
+            {downChecks.slice(0, HOME_LIST_LIMIT).map((c) => (
+              <button key={c.id} className="home-attention-row" onClick={() => onOpen('sites', c.id)}>
+                <span className={`lk-dot ${c.last_status === 'down' ? 'lk-dot-bad' : 'lk-dot-warn'}`} />
+                <span className="home-attention-ico">🌐</span>
+                <span className="home-attention-txt">
+                  <b>{c.name}</b>
+                  {(c.parents ?? []).filter((p) => p.silent).map((p) => (
+                    <span key={p.id} className="type-chip parent-chip" title={t('сервер не на связи, алерты монитора ждут его')}>
+                      ⛓ {p.name}
+                    </span>
+                  ))}
+                  <span className="muted">
+                    {' - '}
+                    {c.last_status === 'down'
+                      ? t('Недоступно')
+                      : c.last_status === 'degraded'
+                        ? t('Деградация')
+                        : t('Отвечает через раз')}
+                    {c.last_status !== 'up' && c.last_message ? ` · ${c.last_message}` : ''}
+                  </span>
+                </span>
+                <span className="home-open">→</span>
+              </button>
+            ))}
+            {downChecks.length > HOME_LIST_LIMIT && (
+              <button className="ghost small home-attention-more" onClick={() => onNavigate('sites')}>
+                {t('…ещё {n}', { n: downChecks.length - HOME_LIST_LIMIT })}
+              </button>
+            )}
+            {warns.slice(0, HOME_LIST_LIMIT).map((w) => (
+              <button key={`${w.kind}-${w.id}`} className="home-attention-row" onClick={() => onOpen('sites', w.id)}>
+                <span className={`lk-dot ${w.days <= 3 ? 'lk-dot-bad' : 'lk-dot-warn'}`} />
+                <span className="home-attention-ico">{w.kind === 'ssl' ? '🔐' : '🌐'}</span>
+                <span className="home-attention-txt">
+                  <b>{w.name}</b>
+                  <span className="muted">
+                    {' - '}
+                    {w.kind === 'ssl' ? t('SSL') : t('домен')} · {expiryText(w.days, t)}
+                    {w.more ? ` · ${t('мониторов: {n}', { n: w.more + 1 })}` : ''}
+                  </span>
+                </span>
+                <span className="home-open">→</span>
+              </button>
+            ))}
+            {warns.length > HOME_LIST_LIMIT && (
+              <button className="ghost small home-attention-more" onClick={() => onNavigate('sites')}>
+                {t('…ещё {n}', { n: warns.length - HOME_LIST_LIMIT })}
+              </button>
+            )}
+          </div>
+        </div>
+      )}
       <MaintHome />
       {knownRows.length > 0 && (
-        <div className="home-attention home-attention-known">
-          <div className="home-attention-head">
-            <span className="home-attention-ic">📌</span>
-            {t('Известные проблемы')}
-            <span className="home-attention-n">{knownRows.length}</span>
-          </div>
+        <div className="chart-card net-card home-block home-attention-known">
+          {cap(t('Известные проблемы'), knownRows.length)}
           <div className="home-attention-list">
             {knownRows.map((it) => (
               <button
@@ -1078,7 +1203,7 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
                 className="home-attention-row"
                 onClick={() => onOpen(it.section, it.id, it.srv, it.sec)}
               >
-                <span className="dot known" />
+                <span className="lk-dot" />
                 <span className="home-attention-ico">{it.check ? '🌐' : (ISSUE_ICON[it.kind] ?? '⚠️')}</span>
                 <span className="home-attention-txt">
                   <CountryFlag code={it.cc} /> <b>{it.name}</b> - {it.text}
@@ -1100,34 +1225,21 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
         </div>
       )}
       {probeHints.length > 0 && (
-        <div className="home-attention home-attention-probe">
-          <div className="home-attention-head">
-            <span className="home-attention-ic">🏠</span>
-            {t('Похоже на белый список')}
-            <span className="home-attention-n">{probeHints.length}</span>
-          </div>
+        <div className="chart-card net-card home-block home-attention-probe">
+          {cap(t('Похоже на белый список'), probeHints.length)}
           <LocalProbeHint items={probeHints} onDone={load} />
         </div>
       )}
       {(fleet.length > 0 || (canSee('servers') && rolloutHosts.length > 0)) && (
-        <div className="home-attention home-attention-fleet">
-          <div className="home-attention-head">
-            <span className="home-attention-ic">⬆</span>
-            {t('Обновления')}
-          </div>
-          <div className="home-attention-list">
-            {fleet.map(actRow)}
-          </div>
+        <div className="chart-card net-card home-block home-attention-fleet">
+          {cap(t('Обновления'), fleet.length, 'info')}
+          {fleet.length > 0 && <div className="home-attention-list">{fleet.map(actRow)}</div>}
           {canSee('servers') && rolloutHosts.length > 0 && <AnsibleHint hosts={rolloutHosts} />}
         </div>
       )}
       {actions.length > 0 && (
-        <div className="home-attention">
-          <div className="home-attention-head">
-            <span className="home-attention-ic">⚠️</span>
-            {t('Требует действий')}
-            <span className="home-attention-n">{actRowsN}</span>
-          </div>
+        <div className="chart-card net-card net-card-wide home-block">
+          {cap(t('Требует действий'), actRowsN, 'warn')}
           <div className="home-attention-list">
             {/* Делим по тому, КУДА ведёт пункт: чинится на сервере (агент, helper'ы,
                 доступы) — сверху; бэкапное — ниже, оно обычно менее срочное. */}
@@ -1151,271 +1263,25 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
         </div>
       )}
       {/* Мягкие уведомления (НЕ алерты, не в Telegram): бэкап вышел за ночное окно.
-          Отдельный блок, приглушённый — это «к сведению», а не «требует действий». */}
-      {(() => {
-        if (!canSee('backups')) return null // уведомление ведёт в закрытый раздел
-        const late = srvList
-          .map((s) => ({ s, note: backupWindowNote(s) }))
-          .filter((x) => x.note)
-        if (late.length === 0) return null
-        return (
-          <div className="home-notice">
-            <div className="home-notice-head muted small">
-              ⏰ {t('Бэкап вышел за окно ({n})', { n: late.length })}
-            </div>
+          Приглушённо - это «к сведению», а не «требует действий». */}
+      {late.length > 0 && (
+        <div className="chart-card net-card home-block">
+          {cap(t('Бэкап вышел за окно'), late.length)}
+          <div className="home-attention-list">
             {late.slice(0, 6).map(({ s, note }) => (
-              <button key={s.id} className="home-notice-row"
-                onClick={() => onOpen('backups', s.id)}>
+              <button key={s.id} className="home-attention-row" onClick={() => onOpen('backups', s.id)}>
+                <span className="lk-dot" />
                 <span className="home-attention-ico">💾</span>
                 <span className="home-attention-txt">
-                  <CountryFlag code={s.country} /> {s.name}: {note}
+                  <CountryFlag code={s.country} /> <b>{s.name}</b> - {note}
                 </span>
                 <span className="home-open">→</span>
               </button>
             ))}
           </div>
-        )
-      })()}
-      <div className={`home-cols cols-${homeCols}`}>
-        {colSites && (
-        <div className="home-col">
-        {/* --- Сайты --- */}
-        {canSee('sites') && (
-        <button className="home-card" onClick={() => onNavigate('sites')}>
-          <div className="home-card-head">
-            <h3 className="home-card-title"><IconSites /><span>{t('Сайты')}</span></h3>
-            <span className="home-open">{t('Открыть →')}</span>
-          </div>
-
-          {ov == null ? (
-            <div className="muted small">{t('загрузка…')}</div>
-          ) : ov.total === 0 ? (
-            <div className="muted small">{t('Мониторов пока нет.')}</div>
-          ) : (
-            <>
-              <div className="home-headline">
-                {allUp && knownDown > 0 ? (
-                  <span className="muted">{t('Новых проблем нет, известных: {n}', { n: knownDown })}</span>
-                ) : allUp ? (
-                  <span className="t-up">{t('Все {n} в норме', { n: ov.total })}</span>
-                ) : (
-                  <span className="t-down">
-                    {t('Проблемы: {n}', { n: downChecks.length })}
-                  </span>
-                )}
-              </div>
-              <div className="home-stat-row">
-                <Mini dot="up" label={t('Работает')} value={ov.up} />
-                <Mini dot="degraded" label={t('Деградация')} value={ov.degraded} />
-                <Mini dot="down" label={t('Недоступно')} value={ov.down} />
-              </div>
-              {ov.open_incidents > 0 && (
-                <div className="home-inc">
-                  {t('{n} откр. инцидентов', { n: ov.open_incidents })}
-                </div>
-              )}
-              {downChecks.length > 0 && (
-                <div className="home-warns">
-                  {downChecks.slice(0, HOME_LIST_LIMIT).map((c) => (
-                    <div key={c.id} className="home-warn">
-                      <span className={`dot ${c.last_status === 'down' ? 'down' : 'degraded'}`} />
-                      <span className="warn-name">{c.name}</span>
-                      {(c.parents ?? []).filter((p) => p.silent).map((p) => (
-                        <span key={p.id} className="type-chip parent-chip" title={t('сервер не на связи, алерты монитора ждут его')}>
-                          ⛓ {p.name}
-                        </span>
-                      ))}
-                      <span className="muted small">
-                        {c.last_status === 'down'
-                          ? t('Недоступно')
-                          : c.last_status === 'degraded'
-                            ? t('Деградация')
-                            : t('Отвечает через раз')}
-                        {c.last_status !== 'up' && c.last_message ? ` · ${c.last_message}` : ''}
-                      </span>
-                    </div>
-                  ))}
-                  {downChecks.length > HOME_LIST_LIMIT && (
-                    <div className="muted small">
-                      {t('…ещё {n}', { n: downChecks.length - HOME_LIST_LIMIT })}
-                    </div>
-                  )}
-                </div>
-              )}
-              {warns.length > 0 && (
-                <div className="home-warns">
-                  {warns.slice(0, HOME_LIST_LIMIT).map((w, i) => (
-                    <div key={i} className="home-warn">
-                      <span className={`warn-tone ${w.days <= 3 ? 't-down' : 't-degraded'}`}>
-                        {w.kind === 'ssl' ? '🔐' : '🌐'}
-                      </span>
-                      <span className="warn-name">{w.name}</span>
-                      <span className="muted small">
-                        {w.kind === 'ssl' ? t('SSL') : t('домен')} ·{' '}
-                        {expiryText(w.days, t)}
-                        {w.more ? ` · ${t('мониторов: {n}', { n: w.more + 1 })}` : ''}
-                      </span>
-                    </div>
-                  ))}
-                  {warns.length > HOME_LIST_LIMIT && (
-                    <div className="muted small">
-                      {t('…ещё {n}', { n: warns.length - HOME_LIST_LIMIT })}
-                    </div>
-                  )}
-                </div>
-              )}
-            </>
-          )}
-        </button>
-
-        )}
-
-        {/* --- Сервера --- */}
-        {canSee('servers') && (
-        <button
-          className="home-card"
-          onClick={() => onNavigate('servers')}
-        >
-          <div className="home-card-head">
-            <h3 className="home-card-title"><IconServers /><span>{t('Серверы')}</span></h3>
-            <span className="home-open">{t('Открыть →')}</span>
-          </div>
-
-          {servers == null ? (
-            <div className="muted small">{t('загрузка…')}</div>
-          ) : srvTotal === 0 ? (
-            <div className="muted small">{t('Серверов пока нет.')}</div>
-          ) : (
-            <>
-              <div className="home-headline">
-                {srvDown.length > 0 ? (
-                  /* оффлайн-нода УЖЕ сидит в srvDown (srvIssues отдаёт ей «оффлайн»),
-                     складывать её с srvOffline нельзя — выходило «Проблемы: 2» на одну ноду */
-                  <span className="t-down">{t('Проблемы: {n}', { n: srvDown.length })}</span>
-                ) : srvWarn.length > 0 ? (
-                  <span className="t-degraded">{t('Предупреждения: {n}', { n: srvWarn.length })}</span>
-                ) : (
-                  <span className="t-up">{t('Все {n} онлайн', { n: srvTotal })}</span>
-                )}
-              </div>
-              <div className="home-stat-row">
-                <Mini dot="up" label={t('Онлайн')} value={srvOnline} />
-                <Mini dot="down" label={t('Оффлайн')} value={srvOffline} />
-              </div>
-              {/* сами проблемы - в блоке сверху, по строке на каждую и с переходом в
-                  нужный раздел карточки; здесь только счетчики, без повтора */}
-            </>
-          )}
-        </button>
-        )}
         </div>
-        )}
-
-        {colDocker && (
-        <div className="home-col">
-        {/* --- Docker --- */}
-        {canSee('docker') && (
-        <SectionCard
-          title="Docker" icon={<IconDocker />} section="docker" total={dockerHosts.length}
-          okText={t('Все хосты ок')}
-          stats={
-            <div className="home-stat-row">
-              <Mini dot="up" label={t('Хостов')} value={dockerHosts.length} />
-              <Mini dot="up" label={t('Контейнеров')} value={dockerRunning} />
-            </div>
-          }
-          problems={dockerProbs} onNavigate={onNavigate} t={t}
-        />
-        )}
-
-        {/* --- Kubernetes --- */}
-        {canSee('kuber') && (
-        <SectionCard
-          title="Kubernetes" icon={<IconKube />} section="kuber" total={kubeHosts.length}
-          okText={t('Все кластеры ок')}
-          stats={
-            <div className="home-stat-row">
-              <Mini dot="up" label={t('Кластеров')} value={kubeHosts.length} />
-              <Mini dot="up" label={t('Подов')} value={kubePods} />
-            </div>
-          }
-          problems={[...kubeProbs, ...sectionProbs('kuber')]} onNavigate={onNavigate} t={t}
-        />
-        )}
-        </div>
-        )}
-
-        {colBackups && (
-        <div className="home-col">
-        {/* --- Бэкапы --- */}
-        <SectionCard
-          title={t('Бэкапы')} icon={<IconBackups />} section="backups" total={backupClients.length + backupServers.length}
-          okText={t('Все свежие')}
-          stats={
-            <div className="home-stat-row">
-              <Mini dot="up" label={t('Клиентов')} value={backupClients.length} />
-              <Mini dot="up" label={t('Серверов')} value={backupServers.length} />
-            </div>
-          }
-          problems={[...backupProbs, ...sectionProbs('backups')]} onNavigate={onNavigate} t={t}
-        />
-        </div>
-        )}
+      )}
       </div>
-    </div>
-  )
-}
-
-function Mini({
-  dot,
-  label,
-  value,
-}: {
-  dot: 'up' | 'degraded' | 'down'
-  label: string
-  value: number
-}) {
-  return (
-    <div className="home-mini">
-      <span className={`dot ${dot}`} />
-      <span className={`home-mini-num t-${dot}`}>{value}</span>
-      <span className="muted small">{label}</span>
-    </div>
-  )
-}
-
-// Карточка раздела (Docker/Kubernetes/Бэкапы): ВСЯ плитка кликабельна (в раздел), сами
-// проблемы с переходом в конкретный хост - в блоке "Что сломано" сверху, здесь счетчик.
-// Не рендерится, если в разделе нет объектов.
-function SectionCard({
-  title, icon, section, total, okText, stats, problems, onNavigate, t,
-}: {
-  title: string
-  icon: ReactNode
-  section: Section
-  total: number
-  okText: string
-  stats?: ReactNode
-  problems: ProbItem[]
-  onNavigate: (s: Section) => void
-  t: T
-}) {
-  if (total === 0) return null
-  return (
-    <div className="home-card home-card-clickable" role="button" tabIndex={0} onClick={() => onNavigate(section)}>
-      <div className="home-card-head">
-        <h3 className="home-card-title">{icon}<span>{title}</span></h3>
-        <span className="home-open">{t('Открыть →')}</span>
-      </div>
-      <div className="home-headline">
-        {problems.length > 0 ? (
-          <span className="t-down">{t('Проблемы: {n}', { n: problems.length })}</span>
-        ) : (
-          <span className="t-up">{okText}</span>
-        )}
-      </div>
-      {stats}
-      {/* сами проблемы - в блоке сверху вместе со всеми остальными, здесь только счетчик */}
     </div>
   )
 }
