@@ -131,8 +131,8 @@ export function TimelineCard({ serverId, onUnauthorized }: Props) {
   const pkgLine = (x: { a: string; p: string; o: string; n: string }) =>
     x.a === 'upgrade' ? `${x.p} ${x.o} -> ${x.n}` : x.a === 'install' ? `+ ${x.p} ${x.n}` : `- ${x.p} ${x.o}`
   return (
-    <div className="detail-inc tl-card" id="mcard-timeline">
-      <div className="tl-head">
+    <div className="chart-card net-card net-card-wide tl-card" id="mcard-timeline">
+      <div className="net-head">
         <div className="win-switch">
           {PERIODS.map((d) => (
             <button key={d} className={`win-btn${d === days ? ' win-btn-active' : ''}`} onClick={() => setDays(d)}>
@@ -142,18 +142,24 @@ export function TimelineCard({ serverId, onUnauthorized }: Props) {
         </div>
         {busy && <span className="muted small">{t('загрузка…')}</span>}
       </div>
-      <div className="tl-filters">
+      {/* плитки - счетчики групп и они же фильтр: нажатая группа скрывается из ленты */}
+      <div className="net-tiles tl-tiles">
         {GROUPS.map((g) => {
           const n = g.cats.reduce((a, c) => a + (counts[c] ?? 0), 0)
           if (!n) return null
+          const hidden = off.has(g.key)
           return (
             <button
               key={g.key}
-              className={`ghost small tl-chip${off.has(g.key) ? ' tl-chip-off' : ''}`}
+              className={`net-tile tl-tile${hidden ? ' tl-tile-off' : ''}`}
               onClick={() => toggle(g.key)}
-              title={off.has(g.key) ? t('показать') : t('скрыть')}
+              title={hidden ? t('показать') : t('скрыть')}
+              aria-pressed={!hidden}
             >
-              {ICON[g.key]} {groupLabel(g.key)} <span className="muted">{n}</span>
+              <div className="net-tile-label">
+                {ICON[g.key]} {groupLabel(g.key)}
+              </div>
+              <div className="net-tile-value">{n}</div>
             </button>
           )
         })}
@@ -205,10 +211,13 @@ export function TimelineCard({ serverId, onUnauthorized }: Props) {
           {t('показать еще ({n})', { n: events.length - limit })}
         </button>
       )}
-      <div className="muted small tl-foot">
-        {t(
-          'Контейнеры, система и порты записываются с 1.4.168, пакеты по журналу установок - с агента 2.28. Доступ и кроны - из снимков раз в 10 минут.',
-        )}
+      <div className="net-foot">
+        <div>{t('Плитки сверху - фильтр: нажмите, чтобы скрыть группу из ленты.')}</div>
+        <div>
+          {t(
+            'Контейнеры, система и порты записываются с 1.4.168, пакеты по журналу установок - с агента 2.28. Доступ и кроны - из снимков раз в 10 минут.',
+          )}
+        </div>
       </div>
     </div>
   )
