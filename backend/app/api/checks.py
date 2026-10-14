@@ -1214,6 +1214,7 @@ async def _run_via_agent(check, user, session, request, background) -> CheckRunO
             ProbeRequest.check_id == check.id,
             ProbeRequest.server_id == srv.id,
             ProbeRequest.url == "",
+            ProbeRequest.kind == "",
             ProbeRequest.ts.is_(None),
             ProbeRequest.created_at
             >= now - timedelta(seconds=manual_probe.deadline_seconds(check)),
@@ -1302,6 +1303,10 @@ def _bin_samples(samples, hours: float, interval: int) -> list[CheckSampleOut]:
         grp = buckets[b]
         lats = [x.latency_ms for x in grp if x.latency_ms is not None]
         vals = [v for x in grp if (v := getattr(x, "value", None)) is not None]
+
+        def avg(attr: str, grp=grp) -> int | None:
+            got = [v for x in grp if (v := getattr(x, attr, None)) is not None]
+            return round(sum(got) / len(got)) if got else None
         worst = "up"
         for x in grp:
             if x.status == "down":
@@ -1316,6 +1321,10 @@ def _bin_samples(samples, hours: float, interval: int) -> list[CheckSampleOut]:
                 latency_ms=round(sum(lats) / len(lats)) if lats else None,
                 value=round(sum(vals) / len(vals), 1) if vals else None,
                 message="",
+                ph_dns=avg("ph_dns"),
+                ph_connect=avg("ph_connect"),
+                ph_tls=avg("ph_tls"),
+                ph_wait=avg("ph_wait"),
             )
         )
     return points

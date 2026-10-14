@@ -26,6 +26,7 @@ import {
   type Uptime,
 } from './api'
 import { CheckFormCard } from './CheckFormCard'
+import { CheckWhere, phaseSeries } from './CheckPhases'
 import { SnoozeControl } from './SnoozeControl'
 import { StackedAreaChart } from './charts/StackedAreaChart'
 import { StatusBar, type BarStatus } from './charts/StatusBar'
@@ -320,7 +321,9 @@ export function CheckDetail({ check, groups, onClose, onSaved, onRun, onDelete, 
 
   const isCert = check.type === 'cert'
   const chartTs = (points ?? []).map((p) => new Date(p.ts).getTime())
-  const chartSeries = [
+  // основная серия http-монитора - по фазам (DNS, подключение, TLS, ожидание, загрузка)
+  const phased = !isCert && !selectedIp && selDirect ? phaseSeries(points, t) : null
+  const chartSeries = phased ?? [
     {
       name: isCert ? t('дн.') : t('мс'),
       color: isCert ? '#22c55e' : '#4b74ff',
@@ -634,6 +637,8 @@ export function CheckDetail({ check, groups, onClose, onSaved, onRun, onDelete, 
 
         <StatusBar segments={segments} />
 
+        <CheckWhere check={check} />
+
         <div className="chart-block chart-card">
           <button className="chart-cap chart-cap-btn" onClick={() => setZoomOpen(true)}>
             <span>{chartCap}</span>
@@ -801,7 +806,8 @@ function CheckChartModal({
   }, [check.id, hours, locationId, zoom])
 
   const ts = (points ?? []).map((p) => new Date(p.ts).getTime())
-  const series = [
+  const phased = !isCert && !locationId ? phaseSeries(points, t) : null
+  const series = phased ?? [
     {
       name: isCert ? t('дн.') : t('мс'),
       color: isCert ? '#22c55e' : '#4b74ff',

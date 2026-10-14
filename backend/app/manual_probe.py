@@ -23,6 +23,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import checks as checks_exec
+from app import inside_probe
 from app.collector import _aware, record_outcome
 from app.models import AgentPathProbe, AgentProbe, Check, DomainProbe, ProbeRequest, Server
 
@@ -231,6 +232,12 @@ async def ingest(
         req.cert_issuer = str(r.get("cert_issuer") or "")[:128]
         req.via = str(r.get("via") or "")[:128]
 
+        if req.kind == inside_probe.KIND:
+            # сайт из панели упал, спрашивали сервер сайта: ответ - в монитор, статус не трогаем
+            check = await session.get(Check, req.check_id)
+            if check is not None:
+                inside_probe.store(check, req, server_id, now)
+            continue
         if req.check_id == 0:
             await _ingest_domain(session, req, now)
             continue

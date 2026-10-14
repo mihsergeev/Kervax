@@ -236,6 +236,9 @@ export type Check = {
   // пути того же сайта, которые проверяются вместе с основным адресом (напр. /health у API)
   extra_paths: string[]
   last_path_results: PathResult[] | null
+  // фазы последней проверки из панели и проверка изнутри сервера сайта при сбое (CheckPhases.tsx)
+  last_phases?: CheckPhases | null
+  last_inside?: CheckInside | null
   check_ssl: boolean
   check_domain: boolean
   ssl_warn_days: number[]
@@ -639,6 +642,30 @@ export type CheckSample = {
   latency_ms: number | null
   value: number | null
   message: string
+  // фазы запроса, мс (среднее по точке); нет - у точки разбивки нет
+  ph_dns?: number | null
+  ph_connect?: number | null
+  ph_tls?: number | null
+  ph_wait?: number | null
+}
+// фазы http-запроса, мс; fail - фаза, на которой запрос оборвался
+export type CheckPhases = {
+  dns?: number
+  connect?: number
+  tls?: number
+  wait?: number
+  body?: number
+  fail?: 'dns' | 'connect' | 'tls' | 'wait' | 'body'
+}
+// проверка изнутри сервера сайта: asked - когда спросили, ts - когда агент ответил
+export type CheckInside = {
+  asked?: string
+  ts?: string
+  server_id?: number
+  server?: string
+  status?: CheckStatus
+  latency_ms?: number | null
+  message?: string
 }
 
 export function checkHistory(

@@ -243,6 +243,11 @@ class Check(Base):
     last_ip_results: Mapped[list | None] = mapped_column(JSON, nullable=True, default=None)
     # the last check split by additional paths: [{path,status,latency_ms,message}]
     last_path_results: Mapped[list | None] = mapped_column(JSON, nullable=True, default=None)
+    # фазы последней проверки из панели (http): мс на DNS, подключение, TLS, ожидание ответа,
+    # загрузку; "fail" - фаза, на которой запрос оборвался (checks._Phases)
+    last_phases: Mapped[dict | None] = mapped_column(JSON, nullable=True, default=None)
+    # проверка изнутри сервера сайта при сбое (app/inside_probe.py): кого спросили, что ответил
+    last_inside: Mapped[dict | None] = mapped_column(JSON, nullable=True, default=None)
     # push-монитор: скрипт или крон сам стучится в /api/agent/push/<токен>, панель только ждет
     push_token: Mapped[str] = mapped_column(String(48), default="", index=True)
     push_period: Mapped[int] = mapped_column(Integer, default=0)  # сигнал каждые N секунд
@@ -313,6 +318,11 @@ class CheckSample(Base):
     latency_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     value: Mapped[float | None] = mapped_column(Float, nullable=True)
     message: Mapped[str] = mapped_column(String(512), default="")
+    # фазы запроса, мс (http из панели): из чего сложилось время ответа на графике
+    ph_dns: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    ph_connect: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    ph_tls: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    ph_wait: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
 
 class CheckIncident(Base):
@@ -434,6 +444,9 @@ class ProbeRequest(Base):
     check_id: Mapped[int] = mapped_column(Integer, index=True)
     server_id: Mapped[int] = mapped_column(Integer, index=True)
     url: Mapped[str] = mapped_column(String(512), default="")
+    # "" - кнопка "Проверить сейчас"; "inside" - сайт из панели упал, спросили сервер сайта,
+    # открывается ли он изнутри (app/inside_probe.py)
+    kind: Mapped[str] = mapped_column(String(16), default="", server_default="")
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )

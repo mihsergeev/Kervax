@@ -2064,6 +2064,23 @@ const EN: Record<string, string> = {
   'Список еще не пришел: агент пришлет его со следующим отчетом.':
     'The list has not arrived yet: the agent will send it with the next report.',
   'показаны первые {k} из {n}, уточните фильтр': 'showing the first {k} of {n}, narrow the filter',
+  // --- где ломается сайт: фазы запроса и проверка изнутри ---
+  'подключение': 'connect',
+  'ожидание ответа': 'waiting for response',
+  'без разбивки': 'no breakdown',
+  'сервер': 'server',
+  'Где оборвался запрос': 'Where the request broke',
+  'Из чего сложилось время ответа': 'What the response time is made of',
+  'оборвалось здесь': 'broke here',
+  'Изнутри {s} при сбое открывался': 'From inside {s} it opened during the failure',
+  'приложение живо, снаружи мешает сеть, блокировка или белый список':
+    'the application is alive, the network, a block or an allowlist is in the way from outside',
+  'Изнутри {s} при сбое тоже не открывался': 'From inside {s} it did not open either',
+  'дело в самом сервере или приложении': 'the server or the application itself is at fault',
+  '{t} назад': '{t} ago',
+  'Спросили {s}, открывается ли сайт изнутри: ждем ответ агента':
+    'Asked {s} whether the site opens from inside: waiting for the agent',
+  '{s} не ответил на проверку изнутри': '{s} did not answer the inside check',
   // --- журнал systemd по запросу ---
   'не удалось получить журнал': 'could not get the journal',
   'Имя юнита вида nginx.service или nginx': 'A unit name like nginx.service or nginx',

@@ -597,6 +597,8 @@ class CheckOut(BaseModel):
     last_ip_results: list | None = None
     extra_paths: list[str] = []
     last_path_results: list | None = None
+    last_phases: dict | None = None
+    last_inside: dict | None = None
     last_latency_ms: int | None
     last_value: float | None
     last_checked_at: datetime | None
@@ -640,6 +642,11 @@ class CheckSampleOut(BaseModel):
     latency_ms: int | None
     value: float | None
     message: str
+    # фазы запроса, мс (среднее по точкам бакета); None - у точек фаз нет
+    ph_dns: int | None = None
+    ph_connect: int | None = None
+    ph_tls: int | None = None
+    ph_wait: int | None = None
 
 
 class CheckHistoryOut(BaseModel):

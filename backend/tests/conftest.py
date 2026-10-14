@@ -61,6 +61,42 @@ def _servers_added_long_ago(monkeypatch):
     monkeypatch.setattr(collector, "_NEW_SERVER_QUIET", 0)
 
 
+@pytest.fixture(autouse=True)
+def _no_dns_lookups(monkeypatch):
+    """Мониторы из панели меряют DNS отдельным запросом (checks._dns_time). В тестах сеть не
+    трогаем: домены там выдуманные, а резолвер на машине разработчика бывает медленным."""
+    from app import checks
+
+    async def no_lookup(url, timeout):
+        return None, True
+
+    monkeypatch.setattr(checks, "_dns_time", no_lookup)
+
+
+@pytest.fixture(autouse=True)
+def _no_dns_lookups(monkeypatch):
+    """Мониторы из панели меряют DNS отдельным запросом (checks._dns_time). В тестах сеть не
+    трогаем: домены там выдуманные, а резолвер на машине разработчика бывает медленным."""
+    from app import checks
+
+    async def no_lookup(url, timeout):
+        return None, True
+
+    monkeypatch.setattr(checks, "_dns_time", no_lookup)
+
+
+@pytest.fixture(autouse=True)
+def _no_dns_lookups(monkeypatch):
+    """Мониторы из панели меряют DNS отдельным запросом (checks._dns_time). В тестах сеть не
+    трогаем: домены там выдуманные, а резолвер на машине разработчика бывает медленным."""
+    from app import checks
+
+    async def no_lookup(url, timeout):
+        return None, True
+
+    monkeypatch.setattr(checks, "_dns_time", no_lookup)
+
+
 # Фикстуры сброса лимитера больше нет: счётчик неудачных входов лежит в базе,
 # а база у каждого теста своя временная — сбрасывать глобальное состояние нечего.
 

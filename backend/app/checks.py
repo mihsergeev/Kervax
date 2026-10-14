@@ -5,6 +5,7 @@
 """
 
 import asyncio
+import ipaddress
 import re
 import math
 import json
@@ -43,6 +44,8 @@ class CheckOutcome:
     path_results: list | None = None
     # dns: что ответил резолвер (нормализованные значения), None - не DNS или не дошли
     answers: list | None = None
+    # фазы http-запроса из панели (_Phases.result): мс по фазам и где оборвался
+    phases: dict | None = None
 
 
 def status_matches(code: int, spec: str) -> bool:
@@ -830,6 +833,102 @@ async def _run_http_all_ips(check, url: str, method: str, auth, timeout, degrade
     )
 
 
+class _Phases:
+    """Фазы HTTP-запроса по событиям httpcore (extensions["trace"]): подключение, TLS,
+    ожидание ответа, загрузка тела. Через редиректы складываются; fail - фаза, на которой
+    запрос оборвался. DNS меряется отдельно (_dns_time): httpcore резолвит адрес внутри
+    подключения, и своего события у этого нет."""
+
+    _OF = {
+        "connection.connect_tcp": "connect", "connection.start_tls": "tls",
+        "http11.receive_response_headers": "wait", "http2.receive_response_headers": "wait",
+        "http11.receive_response_body": "body", "http2.receive_response_body": "body",
+    }
+
+    def __init__(self) -> None:
+        self.ms: dict[str, float] = {}
+        self.fail = ""
+        self.dns_ms: float | None = None
+        self.dns_ok = True
+        self._t0: dict[str, float] = {}
+
+    def ext(self) -> dict:
+        return {"trace": self._trace}
+
+    async def _trace(self, name: str, info: dict) -> None:
+        base, _, ev = name.rpartition(".")
+        ph = self._OF.get(base)
+        if ph is None:
+            return
+        now = time.perf_counter()
+        if ev == "started":
+            self._t0[ph] = now
+        elif ph in self._t0:
+            self.ms[ph] = self.ms.get(ph, 0.0) + (now - self._t0.pop(ph)) * 1000
+            if ev == "failed":
+                self.fail = ph
+
+    def _failed_at(self) -> str:
+        # адрес не нашелся - подключение падает на резолве: это DNS, а не TCP
+        return "dns" if self.fail == "connect" and not self.dns_ok else self.fail
+
+    def result(self, exc: Exception | None = None) -> dict | None:
+        out: dict = {k: int(round(v)) for k, v in self.ms.items()}
+        if self.dns_ms is not None:
+            out["dns"] = int(round(self.dns_ms))
+        if exc is not None and (f := self._failed_at()):
+            out["fail"] = f
+        return out or None
+
+    def why(self, exc: Exception) -> str:
+        """Где завис запрос - вместо общего "истекло время ожидания". Только таймауты и обрыв
+        посреди ответа: отказ в соединении, сертификат и прочее говорят сами за себя."""
+        f = self._failed_at()
+        sec = _secs((self.dns_ms or 0) if f == "dns" else self.ms.get(f, 0.0))
+        if isinstance(exc, httpx.TimeoutException):
+            return {
+                "dns": f"DNS не ответил за {sec}",
+                "connect": f"сервер не принимает соединение: {sec} без ответа",
+                "tls": f"соединение есть, но TLS-рукопожатие висит: {sec} без ответа",
+                "wait": f"сервер принял запрос, но не ответил за {sec}",
+                "body": f"ответ начал приходить, но не догрузился за {sec}",
+            }.get(f, "")
+        if f == "body":
+            return _short(f"ответ оборвался на середине ({(str(exc) or type(exc).__name__)[:120]})")
+        return ""
+
+
+def _secs(ms: float) -> str:
+    s = ms / 1000
+    return f"{s:.0f} с" if s >= 10 else f"{s:.1f} с".replace(".0 с", " с")
+
+
+async def _dns_time(url: str, timeout: float) -> tuple[float | None, bool]:
+    """Сколько резолвится домен сайта: (мс, нашелся ли). У адреса-IP DNS нет: (None, True)."""
+    host = urlparse(url).hostname or ""
+    if not host:
+        return None, True
+    try:
+        ipaddress.ip_address(host)
+        return None, True
+    except ValueError:
+        pass
+    t0 = time.perf_counter()
+    try:
+        await asyncio.wait_for(
+            asyncio.get_running_loop().getaddrinfo(host, None, type=socket.SOCK_STREAM), timeout
+        )
+        ok = True
+    except (OSError, asyncio.TimeoutError, UnicodeError):
+        ok = False
+    return (time.perf_counter() - t0) * 1000, ok
+
+
+def _with_phases(out: CheckOutcome, phases: dict | None) -> CheckOutcome:
+    out.phases = phases
+    return out
+
+
 async def _run_http(
     check, proxy: str | None = None, degraded_ms: int | None = None,
     timeout_ms: int | None = None,
@@ -876,29 +975,41 @@ async def _run_http(
     # это не «всё ок»: сайт задумывался как https, но по факту доступен только http.
     fell_back = False
     base = url
+    # фазы запроса - только у прямой проверки: через прокси подключение и TLS идут к самому
+    # прокси, и фазы рассказывали бы про него, а не про сайт
+    ph = _Phases() if proxy is None else None
+    if ph is not None:
+        ph.dns_ms, ph.dns_ok = await _dns_time(url, timeout)
     t0 = time.perf_counter()
     try:
-        r, body = await attempt(url)
+        r, body = await attempt(url, extensions=ph.ext() if ph is not None else None)
+        phases = ph.result() if ph is not None else None
     except httpx.HTTPError as exc:
+        phases = ph.result(exc) if ph is not None else None
         # любой сбой https (не подключился / SSL / оборвал соединение / таймаут) —
         # и схему подставили сами → пробуем http. Поднялся → «только HTTP» (degraded).
         if auto_scheme and url.startswith("https://"):
+            ph2 = _Phases() if ph is not None else None
             try:
-                r, body = await attempt("http://" + raw)
+                r, body = await attempt("http://" + raw, extensions=ph2.ext() if ph2 is not None else None)
                 fell_back = True
                 base = "http://" + raw
+                if ph2 is not None:
+                    ph2.dns_ms, ph2.dns_ok = ph.dns_ms, ph.dns_ok
+                    phases = ph2.result()
             except httpx.HTTPError as exc2:
-                return await _check_paths(check, CheckOutcome(
+                return _with_phases(await _check_paths(check, CheckOutcome(
                     "down", message=_short(str(exc2) or type(exc2).__name__)
-                ), base, attempt, degraded_ms)
+                ), base, attempt, degraded_ms), phases)
         else:
-            return await _check_paths(check, CheckOutcome(
-                "down", message=humanize_error(str(exc) or type(exc).__name__)
-            ), base, attempt, degraded_ms)
+            why = ph.why(exc) if ph is not None else ""
+            return _with_phases(await _check_paths(check, CheckOutcome(
+                "down", message=why or humanize_error(str(exc) or type(exc).__name__)
+            ), base, attempt, degraded_ms), phases)
     latency = int((time.perf_counter() - t0) * 1000)
-    return await _check_paths(
+    return _with_phases(await _check_paths(
         check, _eval_http(check, r, body, latency, fell_back, degraded_ms), base, attempt, degraded_ms
-    )
+    ), phases)
 
 
 async def _check_paths(check, main: CheckOutcome, base: str, attempt, degraded_ms: int) -> CheckOutcome:

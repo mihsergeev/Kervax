@@ -1252,6 +1252,37 @@ input:focus {
   background: #1b1e26;
   color: #dde2ea;
 }
+/* где ломается сайт: фазы последней проверки (CheckPhases.tsx) */
+.ph-bar {
+  display: flex;
+  gap: 2px;
+  height: 10px;
+  margin: 0.35rem 0;
+  border-radius: 3px;
+  overflow: hidden;
+}
+.ph-seg {
+  min-width: 4px;
+}
+.ph-seg.ph-fail {
+  background-image: repeating-linear-gradient(45deg, transparent 0 4px, rgba(0, 0, 0, 0.35) 4px 8px);
+  box-shadow: inset 0 0 0 2px var(--down);
+}
+.ph-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem 0.9rem;
+}
+.ph-legend i {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin-right: 0.3rem;
+  border-radius: 2px;
+}
+.ph-inside {
+  margin-top: 0.35rem;
+}
 /* журнал systemd по запросу (UnitJournal.tsx) */
 .jr-unit {
   display: flex;
