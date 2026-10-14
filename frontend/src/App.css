@@ -1057,6 +1057,24 @@ input:focus {
 .acc-tag-bad { color: var(--down); border-color: rgba(239, 68, 68, 0.45); }
 .acc-last { flex: 0 0 auto; font-size: 0.85rem; white-space: nowrap; font-variant-numeric: tabular-nums; }
 .acc-act { flex: 0 0 auto; }
+/* "Диск": разделы строками с полоской заполнения */
+.loc-res.ds-row { flex-direction: column; align-items: stretch; gap: 0.3rem; }
+.ds-main { display: flex; align-items: center; gap: 0.7rem; min-width: 0; }
+.ds-mount { flex: 0 0 11rem; min-width: 0; font-weight: 600; overflow-wrap: anywhere; }
+.ds-bar { flex: 1 1 auto; min-width: 60px; height: 6px; background: var(--border); border-radius: 3px; overflow: hidden; }
+.ds-bar span { display: block; height: 100%; background: var(--up); border-radius: 3px; }
+.ds-bar span.warn { background: var(--degraded); }
+.ds-bar span.bad { background: var(--down); }
+.ds-pct { flex: 0 0 3rem; text-align: right; font-weight: 600; font-variant-numeric: tabular-nums; }
+.ds-size { flex: 0 0 auto; min-width: 10rem; font-size: 0.82rem; text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.ds-extra { padding-left: calc(9px + 0.7rem); display: flex; flex-direction: column; gap: 0.15rem; }
+.ds-extra:empty { display: none; }
+.ds-act { flex: 0 0 auto; min-width: 5.8rem; max-width: 16rem; display: flex; justify-content: flex-end; text-align: right; }
+.ds-act .du-analyze { margin: 0; }
+.ds-act .du-fix-btn { background: transparent; color: var(--text); border: 1px solid var(--border-strong); box-shadow: none; padding: 0.1rem 0.55rem; font-size: 0.78rem; }
+.ds-act .du-fix-btn:hover:not(:disabled) { background: var(--card-hover); }
+.net-card .du-note, .net-card .dh-note, .net-card .dh-io { margin: 0; }
+.net-card > .du-fs { margin-top: 0; }
 .net-tone-muted { color: var(--text-muted); }
 .net-foot { color: var(--text-muted); font-size: 0.78rem; display: flex; flex-direction: column; gap: 0.2rem; }
 /* строки связей: точка состояния, имя и адрес, мини-график за час, время подключения */
@@ -1122,6 +1140,17 @@ input:focus {
   .exp-state, .exp-act { grid-column: 3; justify-self: start; }
   .loc-res.acc-row { display: grid; grid-template-columns: 9px minmax(0, 1fr); column-gap: 0.55rem; row-gap: 0.25rem; }
   .acc-last, .acc-act { grid-column: 2; justify-self: start; }
+  /* раздел: точка | имя | процент, полоска и размер строками ниже */
+  .ds-main { display: grid; grid-template-columns: 9px minmax(0, 1fr) auto; column-gap: 0.55rem; row-gap: 0.3rem; }
+  .ds-mount { grid-column: 2; }
+  .ds-bar { grid-column: 2 / -1; grid-row: 2; }
+  .ds-size { grid-column: 2 / -1; grid-row: 3; text-align: left; min-width: 0; white-space: normal; }
+  .ds-extra { padding-left: calc(9px + 0.55rem); }
+  .ds-act { grid-column: 2 / -1; grid-row: 4; justify-self: start; }
+  .ds-act:empty { display: none; }
+  /* находки: имя не сжимается в столбик, размер и кнопка переносятся строкой ниже */
+  .du-item .du-item-head { flex-wrap: wrap; row-gap: 0.3rem; }
+  .du-item-head .du-item-name { flex: 1 1 55%; }
 }
 .changes { margin: 0.8rem 0; }
 .changes .exp-table td:first-child { width: 10.5rem; }

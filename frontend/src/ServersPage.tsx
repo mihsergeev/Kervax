@@ -1425,6 +1425,8 @@ function dhFailing(d: DiskHealthDisk): boolean {
   return d.failing || /FAIL/i.test(d.health)
 }
 
+const DH_DOT: Record<DhTone, string> = { up: 'lk-dot lk-dot-ok', degraded: 'lk-dot lk-dot-warn', down: 'lk-dot lk-dot-bad' }
+
 function dhTone(d: DiskHealthDisk): DhTone {
   const crit = parseInt(d.crit || '0', 16) || 0
   const worn = (d.wear ?? 0) >= 100
@@ -1474,9 +1476,39 @@ function DiskHealthBlock({ r }: { r: ServerReport }) {
   const io = dh.io ?? { count: 0, last: [] }
   // на VM без массивов и без ошибок сказать нечего
   if (!bare && !raid.length && !io.count) return null
+  const raidBad = raid.filter((a) => a.state === 'inactive' || (a.total > 0 && a.active < a.total)).length
+  const tones = disks.map(dhTone)
+  const diskBad = tones.filter((x) => x !== 'up').length + missing.length
+  const diskDown = tones.includes('down') || missing.length > 0
   return (
-    <div className="detail-inc" id="mcard-diskhealth">
-      <div className="chart-cap">{t('Здоровье дисков')}</div>
+    <div className="chart-card net-card net-card-wide" id="mcard-diskhealth">
+      <div className="net-head">
+        <div className="chart-cap">{t('Здоровье дисков')}</div>
+      </div>
+      <div className="net-tiles">
+        {raid.length > 0 && (
+          <NetTile
+            label={t('Массивы RAID')}
+            value={String(raid.length)}
+            sub={raidBad ? t('деградировали: {n}', { n: raidBad }) : t('все собраны')}
+            tone={raidBad ? 'bad' : 'ok'}
+          />
+        )}
+        {(disks.length > 0 || missing.length > 0) && (
+          <NetTile
+            label={t('Диски')}
+            value={String(disks.length)}
+            sub={diskBad ? t('с проблемами: {n}', { n: diskBad }) : t('все в порядке')}
+            tone={diskDown ? 'bad' : diskBad ? 'warn' : 'ok'}
+          />
+        )}
+        <NetTile
+          label={t('Ошибки ввода-вывода')}
+          value={String(io.count)}
+          unit={t('за 10 мин')}
+          tone={io.count >= 10 ? 'bad' : io.count ? 'warn' : 'ok'}
+        />
+      </div>
       {bare && !dh.smart && (
         <div className="muted small dh-note">
           {t('smartmontools не установлен, SMART не читается: его ставит helper diskhealth-setup.')}
@@ -1503,7 +1535,7 @@ function DiskHealthBlock({ r }: { r: ServerReport }) {
           ].filter(Boolean)
           return (
             <div key={a.dev} className="loc-res loc-res-wrap">
-              <span className={`sdot sdot-${tone}`} />
+              <span className={DH_DOT[tone]} />
               <div className="loc-res-name mono">{a.dev}</div>
               <div className="loc-res-metric mono">{a.map || a.state}</div>
               <div className="loc-res-msg muted small">{msg.join(' · ')}</div>
@@ -1532,7 +1564,7 @@ function DiskHealthBlock({ r }: { r: ServerReport }) {
           )
           return (
             <div key={d.dev + d.serial} className="loc-res loc-res-wrap dh-disk">
-              <span className={`sdot sdot-${tone}`} />
+              <span className={DH_DOT[tone]} />
               <div className="loc-res-name mono">{d.dev}</div>
               <div className={`loc-res-metric ${tone === 'down' ? 't-down' : tone === 'degraded' ? 't-degraded' : ''}`}>
                 {dhDiskState(d, t)}
@@ -1551,7 +1583,7 @@ function DiskHealthBlock({ r }: { r: ServerReport }) {
           const ago = Math.max(0, dh.ts - m.last)
           return (
             <div key={'gone-' + m.serial} className="loc-res loc-res-wrap">
-              <span className="sdot sdot-down" />
+              <span className="lk-dot lk-dot-bad" />
               <div className="loc-res-name mono">{m.dev}</div>
               <div className="loc-res-metric t-down">{t('пропал')}</div>
               <div className="loc-res-msg muted small">
@@ -1567,12 +1599,115 @@ function DiskHealthBlock({ r }: { r: ServerReport }) {
       </div>
       {io.count > 0 && (
         <div className="dh-io">
-          <div className={`small ${io.count >= 10 ? 't-down' : 'muted'}`}>
+          <div className={io.count >= 10 ? 'net-prob' : 'muted small'}>
             {t('Ошибки ввода-вывода в журнале ядра за 10 минут: {n}', { n: io.count })}
           </div>
           {io.last.length > 0 && <pre className="dh-io-lines mono">{io.last.join('\n')}</pre>}
         </div>
       )}
+    </div>
+  )
+}
+
+// Диски: место и inode по разделам, прогноз заполнения. Плитки сверху - самый заполненный
+// раздел, ближайшее заполнение и самый загруженный диск; разделы строками с полоской
+function DiskSpaceCard({ server: s, r, onChanged }: { server: Server; r: ServerReport; onChanged: () => void }) {
+  const { t } = useI18n()
+  const { isViewer } = useAuth()
+  const disks = r.disks ?? []
+  if (!disks.length) return null
+  const fc = diskForecast(s, r)
+  const analyzed = new Set((diskUsage(r)?.fs ?? []).map((f) => f.mount))
+  const rows = disks.map((d) => {
+    const p = pct(d.used, d.total) ?? 0
+    // inode с агента 2.15; точка красится по худшему из места и inode
+    const ip = d.inodes ? Math.round(((d.inodes_used ?? 0) / d.inodes) * 100) : null
+    return { d, p, ip, fc: fc.filter((i) => i.mount === d.mount) }
+  })
+  const level = (p: number) => (p >= 90 ? 'bad' : p >= 75 ? 'warn' : 'ok')
+  const top = rows.reduce((a, b) => (b.p > a.p ? b : a))
+  const soon = fc.length ? fc.reduce((a, b) => (b.eta_h < a.eta_h ? b : a)) : null
+  const devs = r.disk_devs ?? []
+  const busy = devs.length ? devs.reduce((a, b) => (b.util > a.util ? b : a)) : null
+  // место под "Разобрать" держим во всех строках, чтобы полоски кончались ровно
+  const actCol = !!s.disk_analyze && !isViewer && rows.some(({ d }) => !analyzed.has(d.mount))
+  const grow = (i: DiskForecastItem) => t('растет на ~{r}% в сутки', { r: i.rate < 10 ? +i.rate.toFixed(1) : Math.round(i.rate) })
+  return (
+    <div className="chart-card net-card net-card-wide" id="mcard-diskfill">
+      <div className="net-head">
+        <div className="chart-cap">{t('Диски')}</div>
+      </div>
+      <div className="net-tiles">
+        <NetTile
+          label={t('Заполнено больше всего')}
+          value={`${top.p}%`}
+          sub={`${top.d.mount} · ${t('свободно {n}', { n: fmtBytes(Math.max(0, top.d.total - top.d.used)) })}`}
+          tone={level(top.p)}
+        />
+        <NetTile
+          label={t('Прогноз заполнения')}
+          value={
+            !soon
+              ? t('не грозит')
+              : soon.eta_h < 1
+                ? t('меньше часа')
+                : soon.eta_h < 48
+                  ? t('через {n} ч', { n: Math.round(soon.eta_h) })
+                  : t('через {n} дн', { n: Math.round(soon.eta_h / 24) })
+          }
+          sub={soon ? `${soon.kind === 'inode' ? 'inode ' : ''}${soon.mount} · ${grow(soon)}` : t('в ближайший месяц')}
+          tone={!soon ? 'ok' : soon.eta_h <= 24 ? 'bad' : soon.eta_h <= 5 * 24 ? 'warn' : undefined}
+        />
+        {busy && (
+          <NetTile
+            label={t('Самый загруженный диск')}
+            value={`${busy.util}%`}
+            sub={`${busy.dev} · ${t('ответ {v}', { v: fmtMs(busy.await) })}`}
+            tone={busy.util >= 90 ? 'warn' : undefined}
+          />
+        )}
+      </div>
+      <div className="loc-results">
+        {rows.map(({ d, p, ip, fc: items }) => {
+          const lv = level(Math.max(p, ip ?? 0))
+          // кнопка "Разобрать" - в конце строки; без нее (старый агент) подсказка уходит вниз
+          const analyze = !analyzed.has(d.mount) && (
+            <DiskAnalyze server={s} mount={d.mount} forecast={items.length > 0} onChanged={onChanged} />
+          )
+          return (
+            <div key={d.mount} className="loc-res ds-row">
+              <div className="ds-main">
+                <span className={`lk-dot lk-dot-${lv}`} />
+                <span className="ds-mount mono">{d.mount}</span>
+                <div className="ds-bar">
+                  <span className={level(p)} style={{ width: `${Math.min(p, 100)}%` }} />
+                </div>
+                <span className={`ds-pct${level(p) !== 'ok' ? ` net-tone-${level(p)}` : ''}`}>{p}%</span>
+                <span className="ds-size muted">
+                  {fmtBytes(d.used)} / {fmtBytes(d.total)}
+                  {ip != null && (
+                    <>
+                      {' · '}
+                      <span className={ip >= 75 ? toneOf(ip) : ''}>inode {ip}%</span>
+                    </>
+                  )}
+                </span>
+                {actCol && <span className="ds-act">{analyze}</span>}
+              </div>
+              <div className="ds-extra small">
+                {items.map((i) => (
+                  <div key={i.kind} className={i.eta_h <= 24 ? 't-down' : i.eta_h <= 5 * 24 ? 't-degraded' : ''}>
+                    {(i.kind === 'inode' ? t('inode кончатся {when}', { when: etaText(i.eta_h, t) }) : t('заполнится {when}', { when: etaText(i.eta_h, t) })) +
+                      ' ' +
+                      t('(растет на ~{r}% в сутки)', { r: i.rate < 10 ? +i.rate.toFixed(1) : Math.round(i.rate) })}
+                  </div>
+                ))}
+                {!s.disk_analyze && analyze}
+              </div>
+            </div>
+          )
+        })}
+      </div>
     </div>
   )
 }
@@ -1672,8 +1807,10 @@ function DiskUsageBlock({ server: s, onChanged }: { server: Server; onChanged: (
     // исчезал вместе с "Освобождено", и казалось, что все сломалось.
     if (!done.length) return null
     return (
-      <div className="du-block">
-        <div className="chart-cap">{t('На что ушло место')}</div>
+      <div className="chart-card net-card net-card-wide du-block" id="mcard-du">
+        <div className="net-head">
+          <div className="chart-cap">{t('На что ушло место')}</div>
+        </div>
         <div className="du-fix-line small">
           <span className="t-up">{t('Освобождено {n}', { n: fmtBytes(done.reduce((a, b) => a + b, 0)) })}</span>
           <span className="muted">
@@ -1759,10 +1896,10 @@ function DiskUsageBlock({ server: s, onChanged }: { server: Server; onChanged: (
     }
   }
   return (
-    <div className="du-block">
-      <div className="chart-cap">
-        {t('На что ушло место')}
-        <span className="muted small du-age"> · {t('замер {n} мин назад', { n: age })}</span>
+    <div className="chart-card net-card net-card-wide du-block" id="mcard-du">
+      <div className="net-head">
+        <div className="chart-cap">{t('На что ушло место')}</div>
+        <span className="muted small">{t('замер {n} мин назад', { n: age })}</span>
       </div>
       {fixNote && <div className="muted small du-note">{fixNote}</div>}
       {s.disk_autofix ? (
@@ -5460,50 +5597,10 @@ function ServerDetail({
               )}
             {chartCard('disk')}
           </div>
-          <DiskHealthBlock r={r} />
-          <div className="detail-inc" id="mcard-diskfill">
-            <div className="chart-cap">{t('Диски')}</div>
-            {r.disks?.length ? (
-              <div className="loc-results">
-                {r.disks.map((d) => {
-                  const p = pct(d.used, d.total)
-                  // inode с агента 2.15; точка красится по худшему из места и inode
-                  const ip = d.inodes ? Math.round(((d.inodes_used ?? 0) / d.inodes) * 100) : null
-                  const tone = toneOf(Math.max(p ?? 0, ip ?? 0))
-                  const fc = diskForecast(s, r).filter((i) => i.mount === d.mount)
-                  const analyzed = (diskUsage(r)?.fs ?? []).some((f) => f.mount === d.mount)
-                  return (
-                    <div key={d.mount} className="loc-res loc-res-wrap">
-                      <span className={`sdot sdot-${tone === 't-down' ? 'down' : tone === 't-degraded' ? 'degraded' : 'up'}`} />
-                      <div className="loc-res-name mono">{d.mount}</div>
-                      <div className="loc-res-metric">{p}%</div>
-                      <div className="loc-res-msg muted small">
-                        {fmtBytes(d.used)} / {fmtBytes(d.total)}
-                        {ip != null && (
-                          <>
-                            {' · '}
-                            <span className={ip >= 75 ? toneOf(ip) : ''}>inode {ip}%</span>
-                          </>
-                        )}
-                        {fc.map((i) => (
-                          <div key={i.kind} className={i.eta_h <= 24 ? 't-down' : i.eta_h <= 5 * 24 ? 't-degraded' : ''}>
-                            {(i.kind === 'inode' ? t('inode кончатся {when}', { when: etaText(i.eta_h, t) }) : t('заполнится {when}', { when: etaText(i.eta_h, t) })) +
-                              ' ' +
-                              t('(растет на ~{r}% в сутки)', { r: i.rate < 10 ? +i.rate.toFixed(1) : Math.round(i.rate) })}
-                          </div>
-                        ))}
-                        {!analyzed && (
-                          <DiskAnalyze server={s} mount={d.mount} forecast={fc.length > 0} onChanged={onChanged} />
-                        )}
-                      </div>
-                    </div>
-                  )
-                })}
-              </div>
-            ) : (
-              <div className="muted small">—</div>
-            )}
+          <div className="net-cards">
+            <DiskSpaceCard server={s} r={r} onChanged={onChanged} />
             <DiskUsageBlock server={s} onChanged={onChanged} />
+            <DiskHealthBlock r={r} />
           </div>
         </MetricSection>
 
