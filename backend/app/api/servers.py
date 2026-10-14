@@ -29,6 +29,8 @@ from app import known
 from app import parents as parents_mod
 from app import timeline as timeline_mod
 from app import packages as packages_mod
+from app import netlinks
+from app import traffic as traffic_mod
 from app import audit, backup_growth, custom_backups, docker_exposure, geoip, kube_coverage, manual_probe, open_ports, os_support
 from app.collector import (
     _backup_problem_repos, alert_since, backup_cadence, backup_rotation_items, backup_unmonitored,
@@ -55,6 +57,7 @@ from app.models import (
     OomEvent,
     Server,
     ServerMetric,
+    ServerTraffic,
     User,
     WebErrorSample,
 )
@@ -105,6 +108,9 @@ log = logging.getLogger("kervax.servers")
 
 router = APIRouter(prefix="/servers", tags=["servers"])
 agent_router = APIRouter(prefix="/agent", tags=["agent"])
+# счетчики байт с загрузки (агент 2.31) нужны только трафику за месяц (app/traffic.py), в
+# истории метрик им не место
+_IFACE_TOTALS = ("rx_total", "tx_total", "phys")
 
 
 def _is_online(server: Server, now: datetime) -> bool:
@@ -1328,6 +1334,8 @@ async def delete_server(
         sa_update(Check).where(Check.parent_server_id == server_id)
         .values(parent_server_id=None, parent_mode="auto"))
     await timeline_mod.forget(session, server_id)
+    await netlinks.forget(session, server_id)
+    await session.execute(sa_delete(ServerTraffic).where(ServerTraffic.server_id == server_id))
     await session.delete(server)
     await session.commit()
     await _write_agent_allowlist(session)
@@ -2766,7 +2774,8 @@ async def agent_report(
                 mem_dirty=round(body.mem_dirty),
                 mem_writeback=round(body.mem_writeback),
                 disks=disks_pct or None,
-                net_ifaces=body.net_ifaces or None,
+                net_ifaces=[{k: v for k, v in i.items() if k not in _IFACE_TOTALS}
+                            for i in body.net_ifaces if isinstance(i, dict)] or None,
                 disk_devs=body.disk_devs or None,
                 conntrack_count=round(body.conntrack_count),
                 conntrack_max=round(body.conntrack_max),
@@ -2810,6 +2819,8 @@ async def agent_report(
     report_dict = body.model_dump()
     # журнал установок - разовый, в хронологию; в last_report ему жить незачем
     report_dict.pop("pkg_ev", None)
+    # связи живут в своих таблицах (app/netlinks.py)
+    report_dict.pop("links", None)
     # сдвиг часов: локальное время ноды (на момент отправки) минус время панели на приёме.
     # Работает даже если у ноды нет доступа к NTP — агент до панели по HTTPS достучался.
     # В разницу входит дорога отчета, при медленном DNS это секунды, поэтому берем минимум
@@ -2828,6 +2839,8 @@ async def agent_report(
                      and str(body.pkgs["h"])[:32] != (server.pkg_hash or ""))
     if server.first_report_at is None:
         server.first_report_at = now
+    await traffic_mod.ingest(session, server, body.net_ifaces, now)
+    link_tasks = await netlinks.handle(session, server, body.links, now)
 
     # Сигнал обновления: только если админ выставил target и агент ещё не на ней.
     # Агент сам проверит подпись/хеш/анти-откат — панель лишь просит.
@@ -2859,7 +2872,7 @@ async def agent_report(
         ),
         checks=[], update=upd,
         docker_commands=cmds, kube_commands=kcmds, backup_commands=bcmds,
-        site_probes=probes, want_pkgs=want_pkgs,
+        site_probes=probes, want_pkgs=want_pkgs, links=link_tasks,
     )
 
 

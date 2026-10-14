@@ -930,6 +930,10 @@ class ServerUpdate(BaseModel):
     offline_after_seconds: int | None = Field(default=None, ge=30, le=86400)
     alert_sustain_seconds: int | None = Field(default=None, ge=0, le=86400)
     parent_id: int | None = None  # None - ни за кем не стоит
+    # лимит трафика тарифа (app/traffic.py): ГБ, 0 - без лимита; что считает хостер; день начала
+    traffic_limit_gb: int | None = Field(default=None, ge=0, le=10_000_000)
+    traffic_count: str | None = Field(default=None, pattern=r"^(out|both)$")
+    traffic_cycle_day: int | None = Field(default=None, ge=1, le=28)
 
     _kube_days = field_validator("kube_expiry_warn_days")(_clean_warn_days)
 
@@ -1167,6 +1171,9 @@ class ServerOut(BaseModel):
     db_dumps_ok: bool = False  # дампы СУБД настроены отдельно (пункт снят с главной)
     backup_deadline_hour: int = 8  # окно бэкапа: до какого часа должен закончиться
     backup_anytime: bool = False  # бэкап в любое время — не уведомлять о выходе за окно
+    traffic_limit_gb: int = 0  # лимит трафика тарифа, ГБ (0 - нет)
+    traffic_count: str = "out"
+    traffic_cycle_day: int = 1
     offline_after_seconds: int
     alert_sustain_seconds: int = 900
     # самодиагностика: чего агенту не хватает в systemd-юните + команда-фикс (или пусто)
@@ -1419,6 +1426,8 @@ class AgentReportIn(BaseModel):
     # агент 2.28: отпечаток списка пакетов {mgr, n, h, log} и новые строки журнала установок
     pkgs: dict | None = None
     pkg_ev: list[dict] = Field(default_factory=list, max_length=600)
+    # агент 2.31: связь с другими серверами [{id, sent, ok, rtt_ms, rtt_max, err}] (app/netlinks.py)
+    links: list[dict] = Field(default_factory=list, max_length=64)
     # блоки root-хелперов как есть: {"custom-backups": {...}} (агент 2.8+, report.d)
     extras: dict | None = None
 
@@ -1443,6 +1452,8 @@ class AgentConfigOut(BaseModel):
     site_probes: list[dict] = []
     # у панели другой отпечаток списка пакетов: агент шлет список кусками (app/packages.py)
     want_pkgs: bool = False
+    # связь с другими серверами: куда пробовать открыть TCP-соединение [{id, host, port}]
+    links: list[dict] = []
 
 
 class AgentPackagesIn(BaseModel):

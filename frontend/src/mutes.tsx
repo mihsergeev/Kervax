@@ -49,6 +49,8 @@ export const SRV_ALERT_KINDS: { k: string; label: string }[] = [
   { k: 'port_new', label: 'Сеть: открылся новый порт' },
   { k: 'pressure', label: 'Сервер задыхается' },
   { k: 'net_health', label: 'Сеть: потери и ошибки' },
+  { k: 'link', label: 'Сеть: связь между серверами' },
+  { k: 'traffic', label: 'Сеть: лимит трафика тарифа' },
   { k: 'access_change', label: 'Сервер: изменился доступ' },
   { k: 'reboot', label: 'Перезагрузка' },
   { k: 'oom', label: 'OOM-killer' },

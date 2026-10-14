@@ -1018,6 +1018,38 @@ input:focus {
 .exp-more { align-self: flex-start; }
 .pressure { margin-bottom: 0.8rem; }
 .nethealth { margin-top: 0.8rem; }
+/* связь с другими серверами и трафик за месяц (NetLinks.tsx) */
+#mcard-links, #mcard-traffic { margin-top: 0.8rem; }
+.lk-table { width: 100%; table-layout: fixed; }
+.lk-table td { overflow-wrap: anywhere; vertical-align: top; white-space: normal; }
+.lk-table td:first-child { width: auto; white-space: normal; }
+.lk-table td:nth-child(2) { width: 42%; white-space: normal; text-align: left; }
+.lk-table .lk-act { width: 2.6rem; text-align: right; }
+.lk-host { font-size: 0.75rem; }
+.lk-chart { margin: 0.2rem 0 0.4rem; }
+.lk-table .lk-chart-row td { white-space: normal; text-align: left; }
+.lk-chart .win-switch { margin-bottom: 0.3rem; }
+.lk-form { display: flex; flex-wrap: wrap; gap: 0.4rem; align-items: center; margin-top: 0.5rem; }
+.lk-form input, .lk-form select { min-width: 0; font-size: 0.85rem; }
+.lk-form label { display: inline-flex; flex-direction: row; align-items: center; gap: 0.3rem; white-space: nowrap; }
+.lk-form .lk-port { width: 5rem; }
+.lk-form > div { flex-basis: 100%; }
+.lk-meter { height: 4px; background: var(--border); border-radius: 2px; margin-top: 0.25rem; overflow: hidden; }
+.lk-meter span { display: block; height: 100%; background: var(--up); }
+.lk-meter span.warn { background: var(--degraded); }
+.lk-meter span.bad { background: var(--down); }
+.lk-bars { margin-top: 0.5rem; }
+.lk-svg { width: 100%; height: auto; display: block; }
+.lk-grid { stroke: var(--border); stroke-width: 1; }
+.lk-axis { fill: var(--text-muted); font-size: 10px; }
+.lk-tx { fill: #5a8fc7; }
+.lk-rx { fill: #57a894; opacity: 0.75; }
+.lk-legend { display: flex; flex-wrap: wrap; align-items: center; gap: 0.3rem; }
+.lk-sw { display: inline-block; width: 10px; height: 10px; border-radius: 2px; }
+.lk-sw.lk-tx { background: #5a8fc7; }
+.lk-sw.lk-rx { background: #57a894; opacity: 0.75; }
+.lk-tip { margin-left: auto; }
+.lk-periods { margin-top: 0.3rem; }
 .changes { margin: 0.8rem 0; }
 .changes .exp-table td:first-child { width: 10.5rem; }
 .changes .exp-table td:last-child { text-align: left; white-space: normal; }

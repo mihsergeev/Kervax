@@ -43,7 +43,7 @@ import (
 	"time"
 )
 
-const version = "2.30"
+const version = "2.31"
 
 // Публичный ключ для проверки подписи релизов агента (Ed25519, base64).
 // ПУСТО по умолчанию → самообновление ВЫКЛЮЧЕНО (агент никогда не заменяет себя).
@@ -147,6 +147,7 @@ type report struct {
 	Flux          []fluxState   `json:"flux,omitempty"`
 	// результаты локальных проверок сайтов (панель до них не дотягивается сама)
 	SiteProbes    []siteProbeResult `json:"site_probes,omitempty"`
+	Links         []linkResult      `json:"links,omitempty"` // связь с другими серверами (links.go)
 	NetRx         float64       `json:"net_rx"`                 // байт/сек
 	NetTx         float64       `json:"net_tx"`
 	DiskRead      float64       `json:"disk_read"`       // байт/сек, чтение с дисков
@@ -674,6 +675,11 @@ type ifaceRate struct {
 	Tx    float64 `json:"tx"`
 	Errs  float64 `json:"errs"`  // rx+tx ошибок в секунду
 	Drops float64 `json:"drops"` // rx+tx дропнутых пакетов в секунду
+	// 2.31: счетчики байт с загрузки и настоящая ли это сетевая карта - из них панель
+	// считает трафик за день и за месяц (physIface)
+	RxTotal uint64 `json:"rx_total"`
+	TxTotal uint64 `json:"tx_total"`
+	Phys    bool   `json:"phys,omitempty"`
 }
 
 // загрузка/задержка/температура одного дискового устройства
@@ -716,6 +722,8 @@ type config struct {
 	// Сайты этого сервера, которые панель проверить не может (белый список IP
 	// снаружи рвёт соединение). Проверяем их сами — см. runSiteProbes.
 	SiteProbes []siteProbe `json:"site_probes"`
+	// Связь с другими серверами: куда пробовать открыть TCP-соединение (links.go)
+	Links []linkTask `json:"links"`
 	// Панели нужен список пакетов: отпечаток в отчете не совпал с тем, что у нее есть
 	WantPkgs bool `json:"want_pkgs"`
 }
@@ -3064,8 +3072,9 @@ func collect(prev sample) (report, sample) {
 		for name, c := range cur.nifs {
 			if p, ok := prev.nifs[name]; ok {
 				netIfaces = append(netIfaces, ifaceRate{
-					name, rate(c.rx, p.rx), rate(c.tx, p.tx),
-					rate(c.errs, p.errs), rate(c.drops, p.drops),
+					If: name, Rx: rate(c.rx, p.rx), Tx: rate(c.tx, p.tx),
+					Errs: rate(c.errs, p.errs), Drops: rate(c.drops, p.drops),
+					RxTotal: c.rx, TxTotal: c.tx, Phys: physIface(name),
 				})
 			}
 		}
@@ -3186,6 +3195,7 @@ func collect(prev sample) (report, sample) {
 	if kn, _ := siteKnown.Load().(*map[int]bool); kn != nil {
 		r.SiteProbes = collectSiteProbes(*kn)
 	}
+	r.Links = collectLinks()
 	// 2.26: давление, зависшие на диске процессы, дескрипторы и TCP - на каждый отчет (дешево);
 	// порты, адреса и обновления ОС - из фоновых замеров
 	r.PSI = readPSI()
@@ -6547,6 +6557,7 @@ func main() {
 				known[sp.ID] = true
 			}
 			siteKnown.Store(&known)
+			runLinks(cfg.Links)
 			// команды из очереди — в отдельных горутинах (не блокируем цикл/вотчдог)
 			for _, c := range cfg.DockerCommands {
 				go runDockerCommand(url, token, c)
@@ -7583,4 +7594,188 @@ func kubeNodePorts(cl *http.Client, kc *kubeConf) []kubeNodePort {
 		}
 	}
 	return out
+}
+
+// Связь с другими серверами (агент 2.31). Панель присылает адреса host:port, агент раз в
+// linkEvery пробует открыть к каждому TCP-соединение linkTries раз и копит до отчета, сколько
+// попыток прошло и за сколько. Только установить и сразу закрыть соединение, ни байта данных.
+// Адресов не больше linkMax и такт фиксированный: захваченная панель не превратит агентов
+// в сканер сети.
+
+const (
+	linkEvery   = 30 * time.Second
+	linkTries   = 3
+	linkTimeout = 3 * time.Second
+	linkMax     = 16
+	linkPar     = 8
+)
+
+type linkTask struct {
+	ID   int    `json:"id"`
+	Host string `json:"host"`
+	Port int    `json:"port"`
+}
+
+type linkResult struct {
+	ID     int     `json:"id"`
+	Sent   int     `json:"sent"`
+	OK     int     `json:"ok"`
+	RttMs  float64 `json:"rtt_ms"`        // медиана удачных попыток, мс (время TCP-рукопожатия)
+	RttMax float64 `json:"rtt_max"`       // худшая удачная попытка
+	Err    string  `json:"err,omitempty"` // последняя ошибка, если были неудачи
+}
+
+type linkAcc struct {
+	sent, ok int
+	rtts     []float64
+	err      string
+}
+
+var (
+	linkMu      sync.Mutex
+	linkAccs    = map[int]*linkAcc{}
+	linkRunAt   = map[int]time.Time{}
+	linkProbing atomic.Bool
+	linkKnown   atomic.Value // *map[int]bool - адреса из последнего ответа панели
+)
+
+func linkValid(t linkTask) bool {
+	h := t.Host
+	return t.ID > 0 && t.Port > 0 && t.Port < 65536 && h != "" && len(h) <= 253 &&
+		!strings.ContainsAny(h, " \t/\\@#?%")
+}
+
+// runLinks - созревшие проверки связи в фоне, параллельно (не больше linkPar сразу)
+func runLinks(list []linkTask) {
+	if len(list) > linkMax {
+		list = list[:linkMax]
+	}
+	known := make(map[int]bool, len(list))
+	for _, t := range list {
+		known[t.ID] = true
+	}
+	linkKnown.Store(&known)
+	if len(list) == 0 || !linkProbing.CompareAndSwap(false, true) {
+		return
+	}
+	go func() {
+		defer linkProbing.Store(false)
+		now := time.Now()
+		var due []linkTask
+		linkMu.Lock()
+		for id := range linkRunAt {
+			if !known[id] {
+				delete(linkRunAt, id)
+			}
+		}
+		for _, t := range list {
+			if last, seen := linkRunAt[t.ID]; linkValid(t) && (!seen || now.Sub(last) >= linkEvery) {
+				linkRunAt[t.ID] = now
+				due = append(due, t)
+			}
+		}
+		linkMu.Unlock()
+		sem := make(chan struct{}, linkPar)
+		var wg sync.WaitGroup
+		for _, t := range due {
+			wg.Add(1)
+			sem <- struct{}{}
+			go func(t linkTask) {
+				defer func() { <-sem; wg.Done() }()
+				probeLink(t)
+			}(t)
+		}
+		wg.Wait()
+	}()
+}
+
+func probeLink(t linkTask) {
+	addr := net.JoinHostPort(t.Host, strconv.Itoa(t.Port))
+	var rtts []float64
+	lastErr := ""
+	for i := 0; i < linkTries; i++ {
+		if i > 0 {
+			time.Sleep(200 * time.Millisecond)
+		}
+		t0 := time.Now()
+		c, err := net.DialTimeout("tcp", addr, linkTimeout)
+		if err != nil {
+			lastErr = shortNetErr(err)
+			continue
+		}
+		rtts = append(rtts, float64(time.Since(t0).Microseconds())/1000)
+		c.Close()
+	}
+	linkMu.Lock()
+	defer linkMu.Unlock()
+	a := linkAccs[t.ID]
+	if a == nil {
+		a = &linkAcc{}
+		linkAccs[t.ID] = a
+	}
+	a.sent += linkTries
+	a.ok += len(rtts)
+	a.rtts = append(a.rtts, rtts...)
+	if len(a.rtts) > 120 {
+		a.rtts = a.rtts[len(a.rtts)-120:]
+	}
+	if lastErr != "" {
+		a.err = lastErr
+	}
+}
+
+// shortNetErr - ошибка подключения коротко: панели нужен вид беды, а не стек адресов
+func shortNetErr(err error) string {
+	var ne net.Error
+	if errors.As(err, &ne) && ne.Timeout() {
+		return "timeout"
+	}
+	s := err.Error()
+	for _, k := range []string{"connection refused", "no route to host", "network is unreachable",
+		"no such host", "connection reset"} {
+		if strings.Contains(s, k) {
+			return k
+		}
+	}
+	if len(s) > 120 {
+		s = s[:120]
+	}
+	return s
+}
+
+// collectLinks - накопленное с прошлого отчета. Адреса, которые панель больше не присылает,
+// забываем, иначе снятая связь жила бы в отчетах вечно.
+func collectLinks() []linkResult {
+	kn, _ := linkKnown.Load().(*map[int]bool)
+	linkMu.Lock()
+	defer linkMu.Unlock()
+	out := make([]linkResult, 0, len(linkAccs))
+	for id, a := range linkAccs {
+		delete(linkAccs, id)
+		if kn == nil || !(*kn)[id] || a.sent == 0 {
+			continue
+		}
+		r := linkResult{ID: id, Sent: a.sent, OK: a.ok}
+		if a.ok < a.sent {
+			r.Err = a.err
+		}
+		if len(a.rtts) > 0 {
+			s := append([]float64(nil), a.rtts...)
+			sort.Float64s(s)
+			r.RttMs = round1(s[len(s)/2])
+			r.RttMax = round1(s[len(s)-1])
+		}
+		out = append(out, r)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	return out
+}
+
+// physIface - настоящая сетевая карта (у нее есть устройство в /sys), а не docker0, мост,
+// veth или туннель. Трафик за месяц считается только по ним: на VPN-ноде один и тот же пакет
+// проходит и через карту, и через туннель, и через мост docker - сумма всех интерфейсов
+// показывала бы трафик в два-три раза больше настоящего.
+func physIface(name string) bool {
+	_, err := os.Stat("/sys/class/net/" + name + "/device")
+	return err == nil
 }
