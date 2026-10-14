@@ -24,7 +24,7 @@ import { byteUnits } from './units'
 // плитки с крупным числом, строки связей с точкой состояния и мини-графиком за час.
 
 type TFn = (k: string, p?: Record<string, string | number>) => string
-type Tone = 'ok' | 'warn' | 'bad' | 'muted'
+export type Tone = 'ok' | 'warn' | 'bad' | 'muted'
 const PERIODS = [1, 6, 24, 168]
 const REFRESH_MS = 30_000
 
@@ -69,7 +69,7 @@ export function NetTile({
   title,
   children,
 }: {
-  label: string
+  label: ReactNode
   value: string
   unit?: string
   sub?: string

@@ -1473,6 +1473,22 @@ const EN: Record<string, string> = {
   'с {d}': 'since {d}',
   'Автообновления': 'Automatic updates',
   'последний прогон {d}': 'last run {d}',
+  // главная: сводка плитками
+  'Сайты работают': 'Sites up',
+  'Серверы онлайн': 'Servers online',
+  'Контейнеры Docker': 'Docker containers',
+  'Поды Kubernetes': 'Kubernetes pods',
+  'Серверов под бэкапом': 'Servers backed up',
+  'из {n}': 'of {n}',
+  'проблем: {n}': 'problems: {n}',
+  'предупреждений: {n}': 'warnings: {n}',
+  'известных: {n}': 'known: {n}',
+  'все в норме': 'all good',
+  'все свежие': 'all fresh',
+  'хостов: {n}': 'hosts: {n}',
+  'кластеров: {n}': 'clusters: {n}',
+  'серверов бэкапа: {n}': 'backup servers: {n}',
+  'Бэкап вышел за окно': 'Backup ran past its window',
   'Процент - доля времени за минуту, когда хоть один процесс ждал ресурс, "все стоят" - когда ждали все сразу. D-state - процессы, которые ждут диск или сеть и не прерываются.':
     'The percentage is the share of the last minute when at least one process waited for the resource, "all stalled" is when all of them waited at once. D-state processes wait for disk or network and cannot be interrupted.',
   // утечка памяти
