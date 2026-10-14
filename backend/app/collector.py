@@ -21,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app import alerts, audit, backup, backup_growth, checks as checks_exec, custom_backups, docker_exposure, flaky, heartbeat, settings_store
 from app import backup_verify
+from app import inside_probe
 from app import db_health
 from app import access_audit
 from app import docker_risk
@@ -580,6 +581,13 @@ def _paths_warming_up(c: Check, now: datetime) -> bool:
     return (now - max(stamps)).total_seconds() < limit
 
 
+def _sample_phases(ph: dict | None) -> dict:
+    """Фазы запроса в колонки снимка (CheckSample.ph_*): из них график времени ответа."""
+    if not isinstance(ph, dict):
+        return {}
+    return {f"ph_{k}": ph[k] for k in ("dns", "connect", "tls", "wait") if isinstance(ph.get(k), int)}
+
+
 async def record_outcome(
     session: AsyncSession,
     row: Check,
@@ -610,6 +618,7 @@ async def record_outcome(
             value=outcome.value,
             message=msg,
             ts=now,
+            **_sample_phases(outcome.phases),
         )
     )
     new_status = outcome.status
@@ -617,6 +626,13 @@ async def record_outcome(
         row.consecutive_fails = 0
     elif not manual:
         row.consecutive_fails = (row.consecutive_fails or 0) + 1
+    if new_status == "down" and not manual and row.consecutive_fails == 1:
+        # первый сбой сайта из панели: спросить его сервер, открывается ли он изнутри. Порог
+        # алерта обычно две неудачи, и к алерту ответ уже будет - строкой в том же сообщении
+        try:
+            await inside_probe.request(session, row, now)
+        except Exception:
+            log.warning("не попросил проверку изнутри для %s", row.name, exc_info=True)
 
     open_inc = await session.scalar(
         select(CheckIncident).where(
@@ -687,6 +703,7 @@ async def record_outcome(
     # тайм-серию по каждому адресу (для графика времени ответа по IP)
     # split by additional paths: the card shows which path failed (None: the monitor has no paths)
     row.last_path_results = outcome.path_results
+    row.last_phases = outcome.phases
     if outcome.ip_results is not None:
         row.last_ip_results = outcome.ip_results
         for ipr in outcome.ip_results:
@@ -952,16 +969,21 @@ async def _send_alerts(
         # сайт лег - что менялось за час до этого на сервере, от которого он зависит
         down_ids = {p.check_id for p in map(_as_pending, pending) if p.check_id is not None and p.kind == "bad"}
         before_by: dict[int, str] = {}
+        # сайт лег снаружи - открывается ли он изнутри своего сервера (app/inside_probe.py)
+        inside_by: dict[int, str] = {}
         if ids:
             rows = await session.execute(
                 select(
                     Check.id, Check.group_name, Check.alert_mutes,
                     Check.target, Check.type, Check.port, Check.snooze_until, Check.known_issue,
                     Check.probe_local, Check.probe_server_id, Check.parent_mode, Check.parent_server_id,
+                    Check.last_inside,
                 ).where(Check.id.in_(ids))
             )
             lite: list[SimpleNamespace] = []
-            for i, g, m, tgt, typ, prt, snz, kn, pl, ps, pm, pp in rows.all():
+            for i, g, m, tgt, typ, prt, snz, kn, pl, ps, pm, pp, li in rows.all():
+                if i in down_ids and (line := inside_probe.alert_line(li, now)):
+                    inside_by[i] = line
                 groups[i] = g
                 mutes[i] = set(m or [])
                 meta[i] = (tgt, typ, prt)
@@ -1092,6 +1114,8 @@ async def _send_alerts(
         if same is not None:
             same_at[same] = len(texts)
             same_hosts[same] = []
+        if kind == "bad" and check_id in inside_by:
+            text += "\n" + html.escape(inside_by[check_id])
         if kind == "bad" and check_id in before_by:
             text += "\n" + html.escape(before_by[check_id])
         # в истории отбой лежит под тем же видом, что и сама беда: фильтр по виду
