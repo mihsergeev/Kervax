@@ -1247,6 +1247,9 @@ const EN: Record<string, string> = {
   'при нынешнем темпе': 'at the current rate',
   '{u} из {l}, считается {what}': '{u} of {l}, counting {what}',
   'повторы SYN, в потери не входят': 'SYN retries, not counted as loss',
+  'Повторы уходят': 'Retransmits go to',
+  'Почти все к одному адресу: это канал до него, а не сеть сервера, поэтому без алерта.':
+    'Almost all go to one address: that is the path to it, not the server network, so no alert.',
   // kubernetes: ноды, Job, гигиена подов
   'без лимита памяти': 'no memory limit',
   'без проб': 'no probes',
