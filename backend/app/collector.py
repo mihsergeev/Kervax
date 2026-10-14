@@ -36,6 +36,7 @@ from app import tg_bot
 from app import web_certs
 from app import web_config
 from app import changes as srv_changes
+from app import timeline as timeline_mod
 from app import open_ports
 from app import disk_forecast as dfc
 from app.setup_scripts import current_setup_versions, gaps
@@ -903,6 +904,24 @@ def _as_pending(item) -> Pending:
     return item if isinstance(item, Pending) else Pending(*item)
 
 
+async def _with_before(session_factory, msg: "alerts.Msg", s, end: datetime,
+                       exclude: frozenset = frozenset()) -> "alerts.Msg":
+    """Дописывает к алерту, что менялось на сервере за час до сбоя (app/timeline.py)."""
+    try:
+        start = end - timeline_mod.BEFORE
+        async with session_factory() as ses:
+            evs = (await timeline_mod.events_between(ses, [s.id], start, end)).get(s.id, [])
+        ch = s.changes.get("log") if isinstance(getattr(s, "changes", None), dict) else []
+        tail = timeline_mod.before_text(evs, ch or [], start, end, exclude)
+    except Exception:
+        log.warning("не собрал, что менялось перед сбоем на %s", getattr(s, "name", "?"), exc_info=True)
+        return msg
+    if not tail:
+        return msg
+    return alerts.Msg(msg + "\n" + html.escape(tail), msg.section, msg.group, msg.kind, msg.target,
+                      msg.recovery, msg.ref)
+
+
 async def _send_alerts(
     session_factory, settings: Settings, pending, now: datetime
 ) -> None:
@@ -930,6 +949,9 @@ async def _send_alerts(
         held: set[int] = set()
         fail_ids = {p.check_id for p in map(_as_pending, pending)
                     if p.check_id is not None and p.kind in ("bad", "flaky", "locpart")}
+        # сайт лег - что менялось за час до этого на сервере, от которого он зависит
+        down_ids = {p.check_id for p in map(_as_pending, pending) if p.check_id is not None and p.kind == "bad"}
+        before_by: dict[int, str] = {}
         if ids:
             rows = await session.execute(
                 select(
@@ -954,12 +976,31 @@ async def _send_alerts(
                 psrv = await parents_mod.load_servers(session)
                 pidx = parents_mod.Index(psrv)
                 silent = parents_mod.silent_ids(psrv, now, seen_online, panel_just_started(now))
+                pids_by: dict[int, set[int]] = {}
                 for c in lite:
                     pids = {pid for pid, _w in parents_mod.parents_of(c, pidx)}
                     if pids & silent:
                         held.add(c.id)
                     elif pids & _ms:
                         snoozed.add(c.id)
+                    elif c.id in down_ids and pids:
+                        pids_by[c.id] = pids
+                if pids_by:
+                    try:
+                        all_p = set().union(*pids_by.values())
+                        b_start = now - timeline_mod.BEFORE
+                        evs = await timeline_mod.events_between(session, all_p, b_start, now)
+                        chl = {sid: (ch or {}).get("log") or [] for sid, ch in (await session.execute(
+                            select(Server.id, Server.changes).where(Server.id.in_(all_p)))).all()
+                            if isinstance(ch, dict)}
+                        for cid, pids in pids_by.items():
+                            tail = timeline_mod.before_text(
+                                [e for p_ in pids for e in evs.get(p_, [])],
+                                [e for p_ in pids for e in chl.get(p_, [])], b_start, now)
+                            if tail:
+                                before_by[cid] = tail
+                    except Exception:
+                        log.warning("не собрал, что менялось перед падением сайтов", exc_info=True)
     if muted or not alerts.alerts_enabled(cfg):
         return
     base = settings.panel_url.rstrip("/")
@@ -1051,6 +1092,8 @@ async def _send_alerts(
         if same is not None:
             same_at[same] = len(texts)
             same_hosts[same] = []
+        if kind == "bad" and check_id in before_by:
+            text += "\n" + html.escape(before_by[check_id])
         # в истории отбой лежит под тем же видом, что и сама беда: фильтр по виду
         # показывает историю целиком
         texts.append(alerts.Msg(text, "sites", grp or "", kind=_SITE_HISTORY_KIND.get(kind, rk or kind),
@@ -5210,6 +5253,10 @@ async def evaluate_servers(
                     # что молчит и лежит из-за него: их собственные алерты придержаны
                     fmsg = alerts.Msg(fmsg + tail, fmsg.section, fmsg.group, fmsg.kind, fmsg.target,
                                       fmsg.recovery, fmsg.ref)
+                if key in ("offline", "web_5xx"):
+                    # что менялось на сервере за час до сбоя: деплой, перезагрузка, пакеты
+                    fmsg = await _with_before(session_factory, fmsg, s,
+                                              _aware(s.last_seen) if key == "offline" and s.last_seen else now)
                 fires.append(fmsg)
                 fire_apply.append((s.id, key, level))
                 if key in _SRV_UNIT and ctx.get("value") is not None:
@@ -5363,9 +5410,11 @@ async def evaluate_servers(
                     started = _parse_iso(since)
                     held = (now - started).total_seconds() if started else 0.0
                     if held >= sustain_s and not was_down and down_ok:
-                        fires.append(srv_fire(s, "docker_down", r_down,
-                                              {"container": name, "state": state, "policy": policy or "no",
-                                               "why": why}))
+                        # перед этим - без событий самого контейнера: что он упал, и так понятно
+                        fires.append(await _with_before(session_factory, srv_fire(
+                            s, "docker_down", r_down,
+                            {"container": name, "state": state, "policy": policy or "no", "why": why},
+                        ), s, started or now, frozenset({name})))
                         cs["alerted_down"] = True
                 else:
                     cs["down_since"] = None
@@ -6145,6 +6194,9 @@ async def collector_loop(
                 session_factory, datetime.now(timezone.utc)))
             # лента изменений - до алертов: они берут из нее новые изменения доступа
             await stage("изменения на сервере", srv_changes.track(
+                session_factory, datetime.now(timezone.utc)))
+            # хронология - тоже до алертов: строка "перед этим" берет из нее последние события
+            await stage("хронология серверов", timeline_mod.track(
                 session_factory, datetime.now(timezone.utc)))
             await stage("серверные алерты", evaluate_servers(
                 session_factory, settings, datetime.now(timezone.utc)))

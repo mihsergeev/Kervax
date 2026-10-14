@@ -2388,3 +2388,21 @@ export type SearchResult = { q: string; groups: { kind: string; total: number; i
 export function search(q: string): Promise<SearchResult> {
   return api<SearchResult>(`/api/search?q=${encodeURIComponent(q)}`)
 }
+
+// --- хронология сервера (backend app/timeline.py) ---
+export type TimelineEvent = {
+  ts: string
+  cat: string
+  kind: string
+  text: string
+  obj?: string
+  n?: number
+  user?: string
+  end?: string
+  recovery?: boolean
+  alert?: boolean
+}
+export type TimelineResult = { since: string; until: string; events: TimelineEvent[]; cats: Record<string, number> }
+export function getServerTimeline(id: number, days: number): Promise<TimelineResult> {
+  return api<TimelineResult>(`/api/servers/${id}/timeline?days=${days}`)
+}
