@@ -247,7 +247,10 @@ fi
 
 # -- Build --------------------------------------------------------------------
 say "Building and starting: $SERVICES"
-ssh "$HOST" "cd '$DIR' && sudo docker compose $FILES up -d --build $SERVICES 2>&1 | tail -6" \
+# DEPS_EPOCH - номер недели: зависимости бэкенда в отдельном слое, и он пересобирается раз в
+# неделю или при смене их списка, а не на каждом релизе (backend/Dockerfile)
+EPOCH=$(date -u +%G-%V)
+ssh "$HOST" "cd '$DIR' && sudo env KERVAX_DEPS_EPOCH=$EPOCH docker compose $FILES up -d --build $SERVICES 2>&1 | tail -6" \
     || die "the build failed - production stayed on its previous containers"
 
 # -- Verification -------------------------------------------------------------
@@ -302,6 +305,11 @@ echo "  tracebacks in the backend log over 3 minutes: ${ERR_AFTER:-0}"
 [ "${ERR_AFTER:-0}" = "0" ] || BAD=1
 
 if [ "$BAD" = "0" ]; then
+    # Кэш сборки старше недели - вон: он копился с каждым релизом (14.10.2026 на одной панели
+    # 143 ГБ при диске, заполненном на 86%). Недельный остается, следующая сборка не медленнее.
+    FREED=$(ssh "$HOST" "sudo docker builder prune -f --filter until=168h 2>/dev/null" \
+        | sed -n 's/^Total reclaimed space:[[:space:]]*//p; s/^Total:[[:space:]]*//p' | tail -1)
+    echo "  build cache older than a week freed: ${FREED:-0B}"
     printf '\n\033[32m✓ %s: %s deployed and verified in %s s\033[0m\n' "$HOST" "$VERSION" "$(( $(date +%s) - T_HOST ))"
 else
     die "verification failed - see the output above (docker compose $FILES logs --tail=50)"
