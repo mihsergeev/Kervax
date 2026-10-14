@@ -5800,6 +5800,20 @@ button.type-chip { cursor: pointer; border: 1px solid transparent; font-family: 
 }
 
 /* Известные проблемы: серый блок на главной вместо "Что сломано", плашка в карточке */
+/* "Обновления": агент и helper'ы по всему парку - синим, отдельно от строк по серверам */
+.home-attention-fleet {
+  border-color: color-mix(in srgb, #3b82f6 35%, var(--border));
+  background: color-mix(in srgb, #3b82f6 7%, transparent);
+}
+.home-attention-fleet .home-attention-row:hover {
+  background: color-mix(in srgb, #3b82f6 12%, transparent);
+}
+.home-attention-fleet .ansible-hint {
+  margin-left: 0.3rem;
+}
+.dot.fleet {
+  background: #3b82f6;
+}
 .home-attention-known {
   border-color: var(--border);
   background: color-mix(in srgb, var(--text) 4%, transparent);
@@ -6281,6 +6295,11 @@ button.tl-chip-off {
 }
 .tl-foot {
   margin-top: 0.6rem;
+}
+/* хронология - последний раздел карточки: высотой в экран, чтобы, долистав до нее, графики
+   выше уходили за край, а не висели над лентой */
+#msec-timeline .metric-section-body {
+  min-height: calc(100vh - 7rem);
 }
 .tl-more {
   margin-left: 0.4rem;

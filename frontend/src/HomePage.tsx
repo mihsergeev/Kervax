@@ -49,7 +49,12 @@ const ISSUE_ICON: Record<string, string> = {
 type T = (k: string, p?: Record<string, string | number>) => string
 // cc — ISO-код страны ноды (бэкенд определяет по IP): в этих списках сервер
 // представлен строкой, объекта под рукой нет, поэтому код кладём в сам пункт
-type ActItem = { key: string; icon: string; section: Section; id?: number; text: string; srv?: boolean; sec?: string; cc?: string; name?: string }
+type ActItem = {
+  key: string; icon: string; section: Section; id?: number; text: string; srv?: boolean; sec?: string; cc?: string; name?: string
+  // обновление по парку (агент, helper'ы, настройка юнита): отдельный блок "Обновления" над
+  // "Требует действий", иначе среди длинных строк по серверам эти пункты терялись
+  fleet?: boolean
+}
 // name - имя сервера: по нему "Что сломано" пишет "сервер - что" (text начинается с "имя: ")
 type ProbItem = {
   key: string; id?: number; down: boolean; text: string; srv?: boolean; cc?: string; name?: string
@@ -281,11 +286,11 @@ function actionItems(servers: Server[], avail: string, relProblem: string, t: T)
   // Релиз агента собран криво (раздаётся не тот бинарь, что подписан) — обновлять
   // нечем, и без этой строки поломка молчит: агенты просто вечно отвергают обновление.
   if (relProblem) {
-    items.push({ key: 'agent-release', icon: '⛔', section: 'servers', text: relProblem })
+    items.push({ key: 'agent-release', icon: '⛔', section: 'servers', text: relProblem, fleet: true })
   }
   const behind = servers.filter((s) => s.online && s.agent_version && avail && s.agent_version !== avail)
   if (behind.length > 0) {
-    items.push({ key: 'agent-upd', icon: '⬆', section: 'servers',
+    items.push({ key: 'agent-upd', icon: '⬆', section: 'servers', fleet: true,
       text: t('Доступно обновление агента {v}: отстаёт нод — {n}', { v: avail, n: behind.length }) })
   }
   // Требования к systemd-ЮНИТУ агента (watchdog и т.п.): агент шлёт caps, бэкенд → agent_advice
@@ -297,9 +302,11 @@ function actionItems(servers: Server[], avail: string, relProblem: string, t: T)
     for (const title of s.agent_advice || []) advCount.set(title, (advCount.get(title) || 0) + 1)
   }
   for (const [title, n] of advCount) {
-    items.push({ key: `adv-${title}`, icon: '🩺', section: 'servers',
+    items.push({ key: `adv-${title}`, icon: '🩺', section: 'servers', fleet: true,
       text: t('{what}: нод без настройки — {n}', { what: title, n }) })
   }
+  // helper -> ноды, где его ставить или обновлять: одной строкой на helper, а не на ноду
+  const helpers = new Map<string, { name: string; fresh: boolean; a: string; b: string; nodes: Server[] }>()
   for (const s of servers) {
     if (!s.online) continue
     const rep = s.last_report
@@ -410,16 +417,26 @@ function actionItems(servers: Server[], avail: string, relProblem: string, t: T)
       // «устарел (? → v0.1)» на ноде, где helper'а нет вовсе, вводит в заблуждение:
       // это не обновление, а первая установка, и делается она тем же прогоном.
       const fresh = !h.installed
-      items.push({ key: `hlp-${h.name}-${s.id}`, icon: '🧩', section: 'servers', id: s.id, name: s.name, cc: s.country,
-        text: fresh
-          ? t('{name}: helper «{helper}» не установлен ({b}) — поставьте', {
-              name: s.name, helper: h.name, b: fmtSetupVersion(h.current),
-            })
-          : t('{name}: helper «{helper}» устарел ({a} → {b}) — переустановите', {
-              name: s.name, helper: h.name,
-              a: fmtSetupVersion(h.installed), b: fmtSetupVersion(h.current),
-            }) })
+      const k = `${h.name}|${fresh ? '' : fmtSetupVersion(h.installed)}|${fmtSetupVersion(h.current)}`
+      const g = helpers.get(k) ?? { name: h.name, fresh, a: fmtSetupVersion(h.installed), b: fmtSetupVersion(h.current), nodes: [] }
+      g.nodes.push(s)
+      helpers.set(k, g)
     }
+  }
+  // одна нода - как раньше, с ее именем; клик ведет в карточку, там команда переустановки
+  for (const [k, g] of helpers) {
+    const s = g.nodes[0]
+    const many = g.nodes.length > 1
+    const names = shortList(g.nodes.map((x) => x.name), t, 4)
+    items.push({ key: `hlp-${k}`, icon: '🧩', section: 'servers', id: s.id, name: many ? undefined : s.name,
+      cc: many ? undefined : s.country, fleet: true,
+      text: g.fresh
+        ? many
+          ? t('helper «{helper}» не установлен ({b}): нод - {n} ({list})', { helper: g.name, b: g.b, n: g.nodes.length, list: names })
+          : t('{name}: helper «{helper}» не установлен ({b}) — поставьте', { name: s.name, helper: g.name, b: g.b })
+        : many
+          ? t('helper «{helper}» устарел ({a} → {b}): нод - {n} ({list})', { helper: g.name, a: g.a, b: g.b, n: g.nodes.length, list: names })
+          : t('{name}: helper «{helper}» устарел ({a} → {b}) — переустановите', { name: s.name, helper: g.name, a: g.a, b: g.b }) })
   }
   return items
 }
@@ -714,7 +731,9 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
   const srvWarn = srvProblems.filter((p) => !p.down)
 
   const srvList = servers ?? []
-  const actions = actionItems(srvList, avail, relProblem, t).filter((x) => canSee(x.section))
+  const allActions = actionItems(srvList, avail, relProblem, t).filter((x) => canSee(x.section))
+  const fleet = allActions.filter((x) => x.fleet)
+  const actions = allActions.filter((x) => !x.fleet)
   const dockerHosts = srvList.filter((s) => s.last_report?.docker?.present && s.last_report.docker.access)
   const dockerRunning = dockerHosts.reduce((n, s) => n + (s.last_report?.docker?.containers?.filter((c) => c.state === 'running').length ?? 0), 0)
   const dockerProbs = dockerProblems(srvList, t)
@@ -822,6 +841,16 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
       .filter((s) => s.online && s.helper_rollout)
       .map((s) => s.hostname || s.name),
   )].sort()
+  const actRow = (it: ActItem) => (
+    <button key={it.key} className="home-attention-row" onClick={() => onOpen(it.section, it.id, it.srv, it.sec)}>
+      <span className={`dot ${it.fleet ? 'fleet' : 'degraded'}`} />
+      <span className="home-attention-ico">{it.icon}</span>
+      <span className="home-attention-txt">
+        <CountryFlag code={it.cc} /> {it.text}
+      </span>
+      <span className="home-open">→</span>
+    </button>
+  )
   return (
     <div>
       <p className="tagline">{t('Мониторинг инфраструктуры')}</p>
@@ -935,6 +964,18 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
           <LocalProbeHint items={probeHints} onDone={load} />
         </div>
       )}
+      {(fleet.length > 0 || (canSee('servers') && rolloutHosts.length > 0)) && (
+        <div className="home-attention home-attention-fleet">
+          <div className="home-attention-head">
+            <span className="home-attention-ic">⬆</span>
+            {t('Обновления')}
+          </div>
+          <div className="home-attention-list">
+            {fleet.map(actRow)}
+          </div>
+          {canSee('servers') && rolloutHosts.length > 0 && <AnsibleHint hosts={rolloutHosts} />}
+        </div>
+      )}
       {actions.length > 0 && (
         <div className="home-attention">
           <div className="home-attention-head">
@@ -956,25 +997,11 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
                     actions.some((x) => x.section !== 'backups') && (
                       <div className="home-attention-grp-head muted small">{grp.label}</div>
                     )}
-                  {grp.items.slice(0, ATTENTION_LIMIT).map((it) => (
-                    <button
-                      key={it.key}
-                      className="home-attention-row"
-                      onClick={() => onOpen(it.section, it.id, it.srv, it.sec)}
-                    >
-                      <span className="dot degraded" />
-                      <span className="home-attention-ico">{it.icon}</span>
-                      <span className="home-attention-txt"><CountryFlag code={it.cc} /> {it.text}</span>
-                      <span className="home-open">→</span>
-                    </button>
-                  ))}
+                  {grp.items.slice(0, ATTENTION_LIMIT).map(actRow)}
                   {grp.items.length > ATTENTION_LIMIT && (
                     <div className="muted small home-attention-more">
                       {t('…и ещё {n}', { n: grp.items.length - ATTENTION_LIMIT })}
                     </div>
-                  )}
-                  {grp.key === 'srv' && rolloutHosts.length > 1 && (
-                    <AnsibleHint hosts={rolloutHosts} />
                   )}
                 </div>
               ),
