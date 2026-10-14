@@ -1190,7 +1190,12 @@ export type ServerReport = {
   // TCP за секунду (агент 2.26): отправлено сегментов, из них повторно, переполнения очереди
   // accept и выброшенные из нее, новые соединения, выброшенные conntrack, входящие с ошибкой
   // syn_retrans - повторы SYN (подключения без ответа), агент 2.30+: в потери не входят
-  tcp?: { out: number; retrans: number; in_errs: number; listen_ovf: number; listen_drop: number; ct_drop: number; syn_retrans?: number }
+  // peers - к кому уходят повторы, когда их много (агент 2.32), peers_total - прирост повторов по всем соединениям
+  tcp?: {
+    out: number; retrans: number; in_errs: number; listen_ovf: number; listen_drop: number; ct_drop: number; syn_retrans?: number
+    peers?: { ip: string; retrans: number; socks?: number; proc?: string; port?: number }[]
+    peers_total?: number
+  }
   // пакеты (агент 2.28): сколько и каким менеджером; сам список - getServerPackages
   pkgs?: { mgr?: string; n?: number; h?: string; log?: boolean }
   // обновления ОС (агент 2.26, раз в час): updates/security -1 - не apt

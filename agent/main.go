@@ -43,7 +43,7 @@ import (
 	"time"
 )
 
-const version = "2.31"
+const version = "2.32"
 
 // Публичный ключ для проверки подписи релизов агента (Ed25519, base64).
 // ПУСТО по умолчанию → самообновление ВЫКЛЮЧЕНО (агент никогда не заменяет себя).
@@ -3202,6 +3202,9 @@ func collect(prev sample) (report, sample) {
 	r.DState = dstate(cur.procs)
 	r.Fds = readFds()
 	r.TCP = tcpRate(cur.tcp, prev.tcp, cur.at.Sub(prev.at).Seconds())
+	if r.TCP != nil {
+		r.TCP.Peers, r.TCP.PeersTotal = retransPeers(r.TCP)
+	}
 	if l := listenLatest.Load(); l != nil {
 		r.Listen = *l
 	}
@@ -6622,6 +6625,10 @@ type tcpRates struct {
 	// повторы SYN: подключения, на которые никто не ответил (торрент-клиент за VPN, мертвый
 	// адрес, сканер). Входят в Retrans, но это не потери на пути - панель вычитает их (2.30+)
 	SynRetrans float64 `json:"syn_retrans"`
+	// 2.32: к кому уходят повторы, когда их много (retransPeers), и прирост повторов по всем
+	// соединениям за тот же промежуток - панель считает долю главного получателя
+	Peers      []tcpPeer `json:"peers,omitempty"`
+	PeersTotal uint64    `json:"peers_total,omitempty"`
 }
 
 // tcpCtr - накопительные счетчики для tcpRates
@@ -7778,4 +7785,198 @@ func collectLinks() []linkResult {
 func physIface(name string) bool {
 	_, err := os.Stat("/sys/class/net/" + name + "/device")
 	return err == nil
+}
+
+// Куда уходят повторы TCP (агент 2.32). Доля повторов сама по себе не говорит, что делать:
+// 18% бывает и от сломанного канала сервера, и от одной большой выгрузки через плохую сеть
+// к одному получателю (сервер при этом в порядке). Когда повторов много, агент смотрит
+// ss -ti и складывает прирост повторов каждого соединения с прошлого просмотра по адресам
+// получателей. Первый просмотр - только точка отсчета.
+const (
+	peersMinOut   = 50.0 // сегментов/с: на тихой ноде доля прыгает от пары потерь
+	peersMinShare = 0.03 // доля повторов (без SYN), с которой смотрим получателей
+	peersEvery    = 25 * time.Second
+	peersTop      = 3
+)
+
+type tcpPeer struct {
+	IP      string `json:"ip"`
+	Retrans uint64 `json:"retrans"` // повторов с прошлого просмотра
+	Socks   int    `json:"socks"`
+	Proc    string `json:"proc,omitempty"`
+	Port    int    `json:"port,omitempty"` // локальный порт, если у всех соединений он один
+}
+
+type peerAcc struct {
+	retrans uint64
+	socks   int
+	procs   map[string]int
+	ports   map[int]bool
+}
+
+var (
+	peersMu   sync.Mutex
+	peersPrev map[string]uint64 // "локальный|удаленный" -> всего повторов соединения
+	peersAt   time.Time
+)
+
+// retransPeersGate - повторов (без SYN) столько, что стоит посмотреть, к кому они уходят
+func retransPeersGate(r *tcpRates) bool {
+	return r != nil && r.Out >= peersMinOut && (r.Retrans-r.SynRetrans)/r.Out >= peersMinShare
+}
+
+// retransPeers - получатели с наибольшим приростом повторов и сумма прироста по всем
+func retransPeers(r *tcpRates) ([]tcpPeer, uint64) {
+	if !retransPeersGate(r) {
+		return nil, 0
+	}
+	peersMu.Lock()
+	defer peersMu.Unlock()
+	now := time.Now()
+	if now.Sub(peersAt) < peersEvery {
+		return nil, 0
+	}
+	out := cmdOut(4*time.Second, "ss", "-tinpH", "state", "established")
+	if out == "" {
+		return nil, 0
+	}
+	cur := parseSSRetrans(out)
+	prev, fresh := peersPrev, now.Sub(peersAt) < 3*time.Minute
+	peersPrev, peersAt = cur.totals, now
+	if prev == nil || !fresh {
+		return nil, 0
+	}
+	return aggregatePeers(prev, cur)
+}
+
+// aggregatePeers - прирост повторов по адресам между двумя просмотрами; соединения, которых
+// в прошлый раз не было, не считаем (их повторы могли накопиться когда угодно)
+func aggregatePeers(prev map[string]uint64, cur ssRetrans) ([]tcpPeer, uint64) {
+	accs := map[string]*peerAcc{}
+	var total uint64
+	for key, tot := range cur.totals {
+		was, seen := prev[key]
+		if !seen || tot <= was {
+			continue
+		}
+		d := tot - was
+		total += d
+		ip, port, proc := cur.peer[key], cur.port[key], cur.proc[key]
+		a := accs[ip]
+		if a == nil {
+			a = &peerAcc{procs: map[string]int{}, ports: map[int]bool{}}
+			accs[ip] = a
+		}
+		a.retrans += d
+		a.socks++
+		if proc != "" {
+			a.procs[proc]++
+		}
+		a.ports[port] = true
+	}
+	res := make([]tcpPeer, 0, len(accs))
+	for ip, a := range accs {
+		p := tcpPeer{IP: ip, Retrans: a.retrans, Socks: a.socks}
+		best := 0
+		for name, n := range a.procs {
+			if n > best || (n == best && name < p.Proc) {
+				p.Proc, best = name, n
+			}
+		}
+		if len(a.ports) == 1 {
+			for port := range a.ports {
+				p.Port = port
+			}
+		}
+		res = append(res, p)
+	}
+	sort.Slice(res, func(i, j int) bool {
+		if res[i].Retrans != res[j].Retrans {
+			return res[i].Retrans > res[j].Retrans
+		}
+		return res[i].IP < res[j].IP
+	})
+	if len(res) > peersTop {
+		res = res[:peersTop]
+	}
+	return res, total
+}
+
+type ssRetrans struct {
+	totals map[string]uint64
+	peer   map[string]string
+	port   map[string]int
+	proc   map[string]string
+}
+
+// parseSSRetrans разбирает ss -tinpH state established: строка соединения ("0 0 локальный
+// удаленный users:((...))"), под ней строка tcp_info с retrans:сейчас/всего (нет поля - повторов
+// не было)
+func parseSSRetrans(out string) ssRetrans {
+	r := ssRetrans{totals: map[string]uint64{}, peer: map[string]string{}, port: map[string]int{},
+		proc: map[string]string{}}
+	key := ""
+	for _, line := range strings.Split(out, "\n") {
+		if line == "" {
+			continue
+		}
+		if line[0] != ' ' && line[0] != '\t' {
+			f := strings.Fields(line)
+			key = ""
+			if len(f) < 4 {
+				continue
+			}
+			_, lp := splitHostPort(f[2])
+			ph, _ := splitHostPort(f[3])
+			if ph == "" {
+				continue
+			}
+			key = f[2] + "|" + f[3]
+			r.peer[key], r.port[key], r.totals[key] = ph, lp, 0
+			if i := strings.Index(line, `users:(("`); i >= 0 {
+				rest := line[i+9:]
+				if j := strings.IndexByte(rest, '"'); j > 0 {
+					r.proc[key] = rest[:j]
+				}
+			}
+			continue
+		}
+		if key == "" {
+			continue
+		}
+		if i := strings.Index(line, " retrans:"); i >= 0 {
+			v := line[i+9:]
+			if j := strings.IndexAny(v, " \t"); j >= 0 {
+				v = v[:j]
+			}
+			if k := strings.IndexByte(v, '/'); k >= 0 {
+				if n, err := strconv.ParseUint(v[k+1:], 10, 64); err == nil {
+					r.totals[key] = n
+				}
+			}
+		}
+	}
+	return r
+}
+
+// splitHostPort - "1.2.3.4:443", "[2001:db8::1]:443", "[::ffff:1.2.3.4]:443", "*:22" -> адрес
+// без скобок и префикса ::ffff:, порт
+func splitHostPort(s string) (string, int) {
+	i := strings.LastIndexByte(s, ':')
+	if i <= 0 {
+		return "", 0
+	}
+	host, port := s[:i], 0
+	if n, err := strconv.Atoi(s[i+1:]); err == nil {
+		port = n
+	}
+	host = strings.TrimSuffix(strings.TrimPrefix(host, "["), "]")
+	host = strings.TrimPrefix(host, "::ffff:")
+	if j := strings.IndexByte(host, '%'); j >= 0 {
+		host = host[:j]
+	}
+	if host == "*" {
+		host = ""
+	}
+	return host, port
 }

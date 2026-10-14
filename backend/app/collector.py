@@ -3024,6 +3024,11 @@ _IF_ERRS_MIN = 1.0
 # высокий; виртуальные мосты и туннели Docker и Kubernetes не считаем
 _IF_DROPS_MIN = 100.0
 _IF_VIRTUAL = ("docker", "br-", "cali", "flannel", "cni", "kube-", "vxlan", "tunl", "lxc", "virbr", "weave")
+# К кому уходят повторы (агент 2.32 смотрит ss -ti, когда их много). Почти все к одному адресу -
+# это канал до него, а не сеть сервера: одна большая выгрузка через плохую сеть давала "18%
+# сегментов уходят повторно" при здоровом сервере. Такое не алертим, видно в карточке.
+_PEER_DOMINANT = 0.8
+_PEER_MIN_TOTAL = 30  # повторов за просмотр: по меньшему числу о получателях не судим
 
 
 def _num(v) -> float:
@@ -3031,6 +3036,24 @@ def _num(v) -> float:
         return float(v or 0)
     except (TypeError, ValueError):
         return 0.0
+
+
+def retrans_peers(tcp: dict) -> tuple[list[dict], float]:
+    """Получатели повторов TCP из отчета (агент 2.32) и доля главного из них. Пусто - агент
+    старый или повторов слишком мало, чтобы судить."""
+    peers = [p for p in (tcp.get("peers") or []) if isinstance(p, dict) and p.get("ip")]
+    total = _num(tcp.get("peers_total"))
+    if not peers or total < _PEER_MIN_TOTAL:
+        return [], 0.0
+    return peers, min(_num(peers[0].get("retrans")) / total, 1.0)
+
+
+def peer_label(p: dict) -> str:
+    """'198.51.100.7 (caddy:443)': адрес, процесс и локальный порт, если агент их узнал."""
+    what = str(p.get("proc") or "")
+    if p.get("port"):
+        what = f"{what}:{p['port']}" if what else f"порт {p['port']}"
+    return f"{p.get('ip')} ({what})" if what else str(p.get("ip"))
 
 
 def net_problems(rep: dict) -> list[tuple[int, str, str]]:
@@ -3047,7 +3070,12 @@ def net_problems(rep: dict) -> list[tuple[int, str, str]]:
     syn = min(_num(tcp.get("syn_retrans")), again)
     sent, again = max(sent - syn, 0.0), again - syn
     if sent >= _RETRANS_MIN_OUT and again / sent * 100 >= _RETRANS_PCT:
-        out.append((1, "retrans", f"TCP теряет пакеты: {again / sent * 100:.0f}% сегментов уходят повторно"))
+        peers, top = retrans_peers(tcp)
+        if not (peers and top >= _PEER_DOMINANT):
+            txt = f"TCP теряет пакеты: {again / sent * 100:.0f}% уходит повторно"
+            if peers:
+                txt += ", больше всего к " + ", ".join(peer_label(p) for p in peers[:2])
+            out.append((1, "retrans", txt))
     ovf = _num(tcp.get("listen_ovf"))
     if ovf >= _LISTEN_OVF_MIN:
         n = round(ovf)
@@ -3066,6 +3094,24 @@ def net_problems(rep: dict) -> list[tuple[int, str, str]]:
             out.append((1, "iface", f"{name}: {n} {_plural(n, 'дроп', 'дропа', 'дропов')} в секунду"))
     out.sort(key=lambda x: -x[0])
     return out
+
+
+def net_hint(rep: dict, nets: list[tuple[int, str, str]]) -> str:
+    """Вторая строка алерта: что это значит и куда смотреть - по главной причине."""
+    if not nets:
+        return ""
+    _lvl, kind, text = nets[0]
+    if kind == "retrans":
+        if retrans_peers(rep.get("tcp") if isinstance(rep.get("tcp"), dict) else {})[0]:
+            return "потери у разных получателей сразу: похоже на канал или сетевую карту сервера, стоит спросить хостера"
+        return "соединения тормозят; к кому уходят повторы: ss -ti | grep retrans"
+    if kind == "conntrack":
+        return "новые подключения к серверу теряются: таблица conntrack забита"
+    if kind == "listen":
+        return "клиенты ловят таймауты подключения: сервис перегружен или у него мал backlog"
+    if "ошиб" in text:
+        return "битые пакеты на карте: кабель, порт или драйвер, это к хостеру"
+    return "карта не успевает принимать пакеты: мало буферов (ethtool -G) или CPU на прерывания"
 
 
 # Диск тормозит: задержка ввода-вывода (await) устойчиво высокая. За неделю истории парка
@@ -4864,7 +4910,9 @@ def _server_conditions(s: Server, now: datetime,
     # Сеть ноды: потери TCP, очередь accept, conntrack, ошибки и дропы интерфейсов
     if online and (rep.get("tcp") or rep.get("net_ifaces")):
         nets = net_problems(rep)
-        sustain_lvl("net_health", nets[0][0] if nets else 0, {"detail": "; ".join(t for _l, _r, t in nets[:4])},
+        hint = net_hint(rep, nets)
+        sustain_lvl("net_health", nets[0][0] if nets else 0,
+                    {"detail": "; ".join(t for _l, _r, t in nets[:4]) + (f"\n↳ {hint}" if hint else "")},
                     cool_s=_CALM_S)
     # Связь с другими серверами (агент 2.31, app/netlinks.py). sig - какие связи в беде: новая
     # сломанная связь при уже объявленной - новое сообщение, та же снова - нет (держим до отбоя)

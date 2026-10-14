@@ -32,7 +32,7 @@ def test_each_cause():
            "net_ifaces": [{"if": "eth0", "errs": 3.0, "drops": 250.0}, {"if": "docker0", "errs": 0, "drops": 900}]}
     assert collector.net_problems(rep) == [
         (2, "conntrack", "conntrack выбрасывает новые соединения: 12 в секунду"),
-        (1, "retrans", "TCP теряет пакеты: 18% сегментов уходят повторно"),
+        (1, "retrans", "TCP теряет пакеты: 18% уходит повторно"),
         (1, "listen", "сервис не успевает принимать соединения: очередь accept переполняется 4 раза в секунду"),
         (1, "iface", "eth0: 3 ошибки в секунду"),
         (1, "iface", "eth0: 250 дропов в секунду"),
@@ -47,6 +47,36 @@ def test_each_cause():
     assert collector.net_problems({"tcp": {"out": "x"}, "net_ifaces": ["y", {"if": "eth0", "errs": None}]}) == []
 
 
+def test_retrans_peers_and_hint():
+    """Агент 2.32 говорит, к кому уходят повторы. Почти все к одному адресу - канал до него, не
+    алертим; к разным - называем главных и подсказываем, что это похоже на сеть сервера."""
+    one = {"tcp": {"out": 1000.0, "retrans": 180.0, "peers_total": 400,
+                   "peers": [{"ip": "198.51.100.20", "retrans": 390, "socks": 1, "proc": "sshd", "port": 22}]}}
+    assert collector.net_problems(one) == []
+    many = {"tcp": {"out": 1000.0, "retrans": 180.0, "peers_total": 400, "peers": [
+        {"ip": "198.51.100.7", "retrans": 120, "proc": "caddy", "port": 443},
+        {"ip": "203.0.113.9", "retrans": 90}, {"ip": "192.0.2.4", "retrans": 50, "port": 5432}]}}
+    nets = collector.net_problems(many)
+    assert nets == [(1, "retrans", "TCP теряет пакеты: 18% уходит повторно, больше всего к 198.51.100.7 (caddy:443), "
+                                   "203.0.113.9")]
+    assert collector.net_hint(many, nets).startswith("потери у разных получателей сразу")
+    # повторов мало - о получателях не судим, алерт как раньше
+    few = {"tcp": dict(one["tcp"], peers_total=10)}
+    assert collector.net_problems(few)[0][2] == "TCP теряет пакеты: 18% уходит повторно"
+    assert collector.net_hint(few, collector.net_problems(few)) == "соединения тормозят; к кому уходят повторы: ss -ti | grep retrans"
+    assert collector.peer_label({"ip": "192.0.2.4", "port": 5432}) == "192.0.2.4 (порт 5432)"
+    # вторая строка в тексте алерта
+    s = _srv(many, {"net_health_since": (NOW - timedelta(minutes=16)).isoformat()})
+    lvl, ctx = collector._server_conditions(s, NOW)["net_health"]
+    assert lvl == 1 and ctx["detail"].endswith("\n↳ потери у разных получателей сразу: похоже на канал или сетевую карту "
+                                               "сервера, стоит спросить хостера")
+    rows = [p for p in collector.server_problems(s, NOW) if p["kind"] == "net_health"]
+    assert "↳" not in rows[0]["text"]
+    assert collector.net_hint({}, [(2, "conntrack", "x")]).startswith("новые подключения")
+    assert collector.net_hint({}, [(1, "iface", "eth0: 3 ошибки в секунду")]).startswith("битые пакеты")
+    assert collector.net_hint({}, [(1, "iface", "eth0: 250 дропов в секунду")]).startswith("карта не успевает")
+
+
 def test_sustain_and_home_row():
     bad = dict(CALM, tcp=dict(CALM["tcp"], ct_drop=30.0))
     s = _srv(bad)
@@ -55,7 +85,8 @@ def test_sustain_and_home_row():
     assert not [p for p in collector.server_problems(s, NOW) if p["kind"] == "net_health"]
     s.alert_state = {"net_health_since": (NOW - timedelta(minutes=16)).isoformat()}
     lvl, ctx = collector._server_conditions(s, NOW)["net_health"]
-    assert lvl == 2 and ctx["detail"] == "conntrack выбрасывает новые соединения: 30 в секунду"
+    assert lvl == 2 and ctx["detail"] == ("conntrack выбрасывает новые соединения: 30 в секунду\n↳ новые подключения к "
+                                          "серверу теряются: таблица conntrack забита")
     rows = [p for p in collector.server_problems(s, NOW) if p["kind"] == "net_health"]
     assert [(p["level"], p["sec"], p["mute"]) for p in rows] == [(2, "nethealth", "net_health")]
     # ошибки интерфейса ведут к графику ошибок, а не к TCP

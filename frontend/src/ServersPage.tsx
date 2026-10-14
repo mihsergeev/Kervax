@@ -2363,6 +2363,15 @@ function NetHealth({ server: s }: { server: Server }) {
   const again = tcp.retrans - syn
   const pct = out > 0 ? (again / out) * 100 : 0
   const lossy = out >= 100 && pct >= 10
+  // к кому уходят повторы (агент 2.32): почти все к одному адресу - канал до него, алерта нет
+  // (collector.retrans_peers, те же пороги)
+  const ptotal = tcp.peers_total ?? 0
+  const peers = ptotal >= 30 ? (tcp.peers ?? []) : []
+  const dominant = peers.length > 0 && peers[0].retrans / ptotal >= 0.8
+  const peerName = (p: (typeof peers)[number]) => {
+    const what = p.port ? (p.proc ? `${p.proc}:${p.port}` : `:${p.port}`) : (p.proc ?? '')
+    return what ? `${p.ip} (${what})` : p.ip
+  }
   const rate = (v: number) => (v >= 10 ? v.toFixed(0) : v.toFixed(v > 0 && v < 0.1 ? 2 : 1))
   const perSec = (v: number, bad: boolean) => (
     { value: rate(v), unit: t('в сек'), tone: bad ? ('bad' as const) : undefined }
@@ -2378,7 +2387,7 @@ function NetHealth({ server: s }: { server: Server }) {
           label={t('TCP повторно')}
           value={`${pct.toFixed(pct < 1 ? 2 : 1)}%`}
           sub={`${rate(again)} ${t('из')} ${rate(out)} ${t('сегм/с')}`}
-          tone={lossy ? 'bad' : 'ok'}
+          tone={lossy ? (dominant ? 'warn' : 'bad') : 'ok'}
         />
         {syn >= 1 && (
           <NetTile
@@ -2393,6 +2402,17 @@ function NetHealth({ server: s }: { server: Server }) {
         <NetTile label={t('conntrack выбросил')} {...perSec(tcp.ct_drop, tcp.ct_drop >= 1)} />
         <NetTile label={t('Входящие с ошибкой')} {...perSec(tcp.in_errs, false)} />
       </div>
+      {peers.length > 0 && (
+        <div className="net-foot">
+          <div>
+            {t('Повторы уходят')}:{' '}
+            {peers.map((p) => `${peerName(p)} ${Math.round((p.retrans / ptotal) * 100)}%`).join(' · ')}
+          </div>
+          {dominant && lossy && (
+            <div>{t('Почти все к одному адресу: это канал до него, а не сеть сервера, поэтому без алерта.')}</div>
+          )}
+        </div>
+      )}
     </div>
   )
 }
