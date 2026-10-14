@@ -263,6 +263,10 @@ class Check(Base):
     dns_server: Mapped[str] = mapped_column(String(64), default="")
     dns_baseline: Mapped[list | None] = mapped_column(JSON, nullable=True)  # запомненный ответ
     dns_last: Mapped[list | None] = mapped_column(JSON, nullable=True)      # последний ответ
+    # от какого сервера зависит (app/parents.py): auto - панель находит сама, server - задан
+    # руками в parent_server_id, off - ни от чего. Пока родитель молчит, алерт придерживается
+    parent_mode: Mapped[str] = mapped_column(String(8), default="auto")
+    parent_server_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     last_latency_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     last_value: Mapped[float | None] = mapped_column(Float, nullable=True)  # дни сертификата и т.п.
     last_checked_at: Mapped[datetime | None] = mapped_column(
@@ -625,6 +629,9 @@ class Server(Base):
     # известные проблемы: {вид алерта: {text, by, at, until, level, sig, worse, gone_at,
     # reminded_at}} - алерт молчит, пока не стало хуже, само закрывается (app/known.py)
     known_issues: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    # сервер, за которым стоит этот (шлюз, VPN, гипервизор): пока тот молчит, "недоступен" про
+    # этот не шлем, он строкой в сообщении про родителя (app/parents.py)
+    parent_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     # последняя внешняя проверка портов: что открыто в интернет (app/open_ports.py)
     exposure: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     # изменения на сервере (app/changes.py): последний снимок helper'а и лента изменений

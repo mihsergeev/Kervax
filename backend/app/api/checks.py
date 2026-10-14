@@ -8,11 +8,13 @@ from fastapi import APIRouter, BackgroundTasks, HTTPException, Query, Request, s
 from sqlalchemy import case, delete as sa_delete, func, select
 
 from app import audit, domain_probe, known, manual_probe
+from app import parents as parents_mod
 from app.checks import status_matches
 from app import checks as checks_exec
 from app.collector import (
     _aware,
     effective_locations,
+    panel_just_started,
     record_outcome,
     seen_online,
     send_alerts_soon,
@@ -137,7 +139,48 @@ async def list_checks(user: CurrentUser, session: SessionDep) -> list[Check]:
     # expunge_all: ниже правим поля объектов, а они привязаны к сессии — без отвязки
     # SQLAlchemy запишет «очистку» секретов обратно в базу на ближайшем flush
     session.expunge_all()
+    await _with_parents(session, user, rows)
     return [_hide_secrets(c, user) for c in rows]
+
+
+async def _parents_index(session) -> tuple[parents_mod.Index, dict[int, str], set[int]]:
+    """Серверы для подписи родителей: индекс, группы (чужую не называем) и кто молчит."""
+    servers = await parents_mod.load_servers(session)
+    now = datetime.now(timezone.utc)
+    silent = parents_mod.silent_ids(servers, now, seen_online, panel_just_started(now))
+    return parents_mod.Index(servers), {x.id: x.group_name for x in servers}, silent
+
+
+def _parents_out(c, idx, groups, silent, user) -> list[dict]:
+    """[{id, name, why, silent}]: silent - родитель молчит, и алерты монитора ждут его."""
+    return [
+        {"id": pid, "name": idx.names.get(pid, ""), "why": why, "silent": pid in silent}
+        for pid, why in parents_mod.parents_of(c, idx)
+        if group_allowed(user, groups.get(pid, ""), "servers")
+    ]
+
+
+async def _with_parents(session, user, checks) -> None:
+    """Фактические родители мониторов (app/parents.py) - подпись "зависит от" в карточке и
+    списке. Вешается обычным атрибутом: объекты к этому моменту отвязаны от сессии или
+    сохранены, в базу это не пишется. Сервер чужой группы не называем."""
+    if not checks:
+        return
+    idx, groups, silent = await _parents_index(session)
+    for c in checks:
+        c.parents = _parents_out(c, idx, groups, silent, user)
+
+
+async def _parent_check(check: Check, session, user) -> None:
+    """Ручной родитель монитора: сервер должен существовать и быть виден учетке."""
+    if (check.parent_mode or "auto") != "server":
+        check.parent_server_id = None
+        return
+    if not check.parent_server_id:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Выберите сервер, от которого зависит монитор")
+    srv = await session.get(Server, check.parent_server_id)
+    if srv is None or not group_allowed(user, srv.group_name, "servers"):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Такого сервера нет")
 
 
 async def _uptime_24h(session) -> dict[int, float]:
@@ -254,6 +297,7 @@ async def overview(user: CurrentUser, session: SessionDep) -> ChecksOverviewOut:
     )
     outs = []
     secrets_ok = user.role in ("admin", "editor")
+    pidx, pgroups, psilent = await _parents_index(session)
     for c in checks:
         co = CheckOut.model_validate(c)
         if not secrets_ok:
@@ -263,6 +307,7 @@ async def overview(user: CurrentUser, session: SessionDep) -> ChecksOverviewOut:
             co.http_headers = ""
             co.push_token = ""
         co.probe_server_name = pnames.get(c.probe_server_id or 0)
+        co.parents = _parents_out(c, pidx, pgroups, psilent, user)
         co.uptime_24h = uptime.get(c.id)
         co.beats = beats.get(c.id)
         co.loc_down = (
@@ -835,6 +880,7 @@ async def create_check(
     check = Check(**body.model_dump())
     _push_defaults(check)
     _dns_defaults(check)
+    await _parent_check(check, session, user)
     _one_probe_source(check)
     # новый монитор — в конец списка (иначе прыгнул бы наверх при ручном порядке)
     max_order = await session.scalar(select(func.max(Check.sort_order)))
@@ -845,6 +891,7 @@ async def create_check(
     await audit.record(session, user.username, "check_create", check.name, check.type)
     # первую проверку — в фон, чтобы создание не висело на медленном/недоступном сайте
     background.add_task(_first_check, request.app.state.session_factory, check.id)
+    await _with_parents(session, user, [check])
     return check
 
 
@@ -1008,6 +1055,7 @@ async def _close_if_disabled(session, checks: list[Check]) -> None:
 async def get_check(check_id: int, user: CurrentUser, session: SessionDep) -> Check:
     check = await _get_or_404(check_id, session, user)
     session.expunge_all()
+    await _with_parents(session, user, [check])
     return _hide_secrets(check, user)
 
 
@@ -1022,6 +1070,7 @@ async def update_check(
         setattr(check, field, value)
     _push_defaults(check)
     _dns_defaults(check)
+    await _parent_check(check, session, user)
     if check.type == "dns" and (check.target, check.dns_type, check.dns_server) != old_dns:
         # спрашиваем другое - старый запомненный ответ к нему не относится
         check.dns_baseline = None
@@ -1042,6 +1091,7 @@ async def update_check(
     await session.commit()
     await session.refresh(check)
     await audit.record(session, user.username, "check_update", check.name)
+    await _with_parents(session, user, [check])
     return check
 
 

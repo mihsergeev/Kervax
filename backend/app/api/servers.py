@@ -12,7 +12,7 @@ from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, Query, Request, status
 from fastapi.responses import FileResponse, PlainTextResponse
-from sqlalchemy import delete as sa_delete, func, select
+from sqlalchemy import delete as sa_delete, func, select, update as sa_update
 
 from app import backup_verify
 from app import db_health
@@ -26,6 +26,7 @@ from app import web_certs
 from app import web_config
 from app import changes as srv_changes
 from app import known
+from app import parents as parents_mod
 from app import audit, backup_growth, custom_backups, docker_exposure, geoip, kube_coverage, manual_probe, open_ports, os_support
 from app.collector import (
     _backup_problem_repos, alert_since, backup_cadence, backup_rotation_items, backup_unmonitored,
@@ -1258,12 +1259,28 @@ async def update_server(
     if fields.get("name") is not None:
         fields["name"] = fields["name"].strip()
         await _name_free(session, fields["name"], exclude_id=server.id)
+    parent_changed = "parent_id" in fields and fields["parent_id"] != server.parent_id
+    if parent_changed and fields["parent_id"] is not None:
+        pid = fields["parent_id"]
+        if pid == server.id:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "Сервер не может стоять сам за собой")
+        parent = await _get_or_404(pid, session, user)  # чужую группу не выбрать
+        chain = {i: p for i, p in (await session.execute(select(Server.id, Server.parent_id))).all() if p}
+        if parents_mod.would_cycle(server.id, pid, chain):
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                f"{parent.name} сам стоит за {server.name}: такая связь замкнет цепочку")
     for field, value in fields.items():
         setattr(server, field, value)
     await session.commit()
     await session.refresh(server)
     await _write_agent_allowlist(session)
     await audit.record(session, user.username, "server_update", server.name)
+    if parent_changed:
+        pname = (await session.scalar(select(Server.name).where(Server.id == server.parent_id))
+                 if server.parent_id else None)
+        await audit.record(session, user.username, "server_parent", server.name,
+                           f"за {pname}" if pname else "ни за кем")
     if autofix_changed:
         await audit.record(session, user.username,
                            "disk_autofix_on" if autofix else "disk_autofix_off", server.name)
@@ -1279,6 +1296,12 @@ async def delete_server(
     await session.execute(
         sa_delete(ServerMetric).where(ServerMetric.server_id == server_id)
     )
+    # кто стоял за этим сервером или зависел от него вручную - теперь ни за кем, а мониторы
+    # снова ищут родителя сами
+    await session.execute(sa_update(Server).where(Server.parent_id == server_id).values(parent_id=None))
+    await session.execute(
+        sa_update(Check).where(Check.parent_server_id == server_id)
+        .values(parent_server_id=None, parent_mode="auto"))
     await session.delete(server)
     await session.commit()
     await _write_agent_allowlist(session)

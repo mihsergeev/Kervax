@@ -67,6 +67,7 @@ import {
 import { useAuth } from './auth'
 import { AlertHistoryModal } from './AlertHistoryModal'
 import { NoteBar } from './NoteBar'
+import { ServerParentBar } from './ParentBar'
 import { KnownServerList } from './KnownDialog'
 import { MaintBanner, MaintChip } from './MaintModal'
 
@@ -3640,6 +3641,7 @@ export function ServersPage({ onUnauthorized, openServerId, openServerSec, onCon
       {detail && (
         <ServerDetail
           server={detail}
+          servers={servers ?? []}
           available={avail}
           groups={serverGroups}
           initialSection={detailSec ?? urlSec}
@@ -4605,6 +4607,7 @@ function ServerChartModal({
 
 function ServerDetail({
   server: s,
+  servers,
   available,
   groups,
   initialSection,
@@ -4613,6 +4616,7 @@ function ServerDetail({
   onUnauthorized,
 }: {
   server: Server
+  servers: Server[]
   available: string
   groups: string[]
   initialSection?: string | null
@@ -4894,6 +4898,7 @@ function ServerDetail({
             }}
           />
         )}
+        {!editing && <ServerParentBar server={s} servers={servers} canEdit={!isViewer} onSaved={onChanged} />}
         {!editing && Object.keys(s.known_issues ?? {}).length > 0 && (
           <KnownServerList
             items={s.known_issues ?? {}}

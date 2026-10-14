@@ -179,6 +179,9 @@ class CheckCreate(BaseModel):
     dns_expect: str = Field(default="", max_length=4000)
     dns_match: Literal["equal", "contains"] = "equal"
     dns_server: str = Field(default="", max_length=64)
+    # от какого сервера зависит (app/parents.py): auto, server (parent_server_id) или off
+    parent_mode: Literal["auto", "server", "off"] = "auto"
+    parent_server_id: int | None = None
 
     _clean = field_validator("ssl_warn_days", "domain_warn_days")(_clean_warn_days)
     _paths = field_validator("extra_paths")(_clean_paths)
@@ -212,6 +215,8 @@ class CheckUpdate(BaseModel):
     dns_expect: str | None = Field(default=None, max_length=4000)
     dns_match: Literal["equal", "contains"] | None = None
     dns_server: str | None = Field(default=None, max_length=64)
+    parent_mode: Literal["auto", "server", "off"] | None = None
+    parent_server_id: int | None = None
     probe_local: bool | None = None
     check_all_ips: bool | None = None
     check_ssl: bool | None = None
@@ -549,6 +554,11 @@ class CheckOut(BaseModel):
     dns_server: str = ""
     dns_baseline: list[str] | None = None
     dns_last: list[str] | None = None
+    parent_mode: str = "auto"
+    parent_server_id: int | None = None
+    # от кого монитор зависит на самом деле (вычисляется): [{id, name, why, silent}], why - local,
+    # site, ip или manual. Пусто - ни от кого
+    parents: list[dict] = Field(default_factory=list)
     port: int
     enabled: bool
     group_name: str
@@ -912,6 +922,7 @@ class ServerUpdate(BaseModel):
     backup_anytime: bool | None = None  # бэкап в любое время (не уведомлять о дневном)
     offline_after_seconds: int | None = Field(default=None, ge=30, le=86400)
     alert_sustain_seconds: int | None = Field(default=None, ge=0, le=86400)
+    parent_id: int | None = None  # None - ни за кем не стоит
 
     _kube_days = field_validator("kube_expiry_warn_days")(_clean_warn_days)
 
@@ -1090,6 +1101,8 @@ class ServerOut(BaseModel):
     note_at: datetime | None = None
     # известные проблемы по видам алертов (app/known.py); worse - стало хуже отмеченного
     known_issues: dict[str, dict] | None = None
+    # за каким сервером стоит (шлюз, VPN): пока тот молчит, "недоступен" про этот не шлем
+    parent_id: int | None = None
     online: bool = False  # вычисляется (last_seen в пределах offline_after)
     cpu_alert_percent: int
     mem_alert_percent: int

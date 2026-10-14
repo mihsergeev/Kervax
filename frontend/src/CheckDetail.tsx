@@ -33,6 +33,7 @@ import { useI18n } from './i18n'
 import { expiryText } from './checkUtils'
 import { useAuth } from './auth'
 import { NoteBar } from './NoteBar'
+import { CheckParentBar } from './ParentBar'
 import { KnownCheckBar, KnownDialog } from './KnownDialog'
 import { MaintBanner } from './MaintModal'
 
@@ -414,6 +415,7 @@ export function CheckDetail({ check, groups, onClose, onSaved, onRun, onDelete, 
             }}
           />
         )}
+        {!editing && <CheckParentBar check={check} canEdit={!isViewer} onSaved={() => onSaved?.()} />}
         {!editing &&
           (check.known_issue ? (
             <KnownCheckBar
