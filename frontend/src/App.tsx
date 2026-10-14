@@ -8,6 +8,7 @@ import { AboutModal } from './AboutModal'
 import { AlertsModal } from './AlertsModal'
 import { MaintModal } from './MaintModal'
 import { AlertHistoryModal } from './AlertHistoryModal'
+import { ReportModal } from './ReportModal'
 import { ChecksPage } from './ChecksPage'
 import { HomePage } from './HomePage'
 import { LocationsModal } from './LocationsModal'
@@ -37,6 +38,7 @@ type Modal =
   | 'backup'
   | 'users'
   | 'history'
+  | 'report'
   | 'maint'
   | null
 export type Section = 'home' | 'sites' | 'servers' | 'docker' | 'kuber' | 'services' | 'backups'
@@ -377,6 +379,15 @@ export default function App() {
                   <button
                     className="menu-item"
                     onClick={() => {
+                      setModal('report')
+                      setMenuOpen(false)
+                    }}
+                  >
+                    {t('Отчет')}
+                  </button>
+                  <button
+                    className="menu-item"
+                    onClick={() => {
                       setModal('history')
                       setMenuOpen(false)
                     }}
@@ -492,6 +503,7 @@ export default function App() {
       {modal === 'history' && (
         <AlertHistoryModal onClose={() => setModal(null)} onUnauthorized={logout} />
       )}
+      {modal === 'report' && <ReportModal onClose={() => setModal(null)} onUnauthorized={logout} />}
       {modal === 'alerts' && (
         <AlertsModal onClose={() => setModal(null)} onUnauthorized={logout} />
       )}

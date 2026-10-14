@@ -5989,3 +5989,85 @@ button.type-chip { cursor: pointer; border: 1px solid transparent; font-family: 
   border-color: var(--warn, #c9a227);
   color: var(--warn, #c9a227);
 }
+
+/* отчет за период (ReportModal.tsx) */
+.rep-modal {
+  max-width: 980px;
+  max-height: 90vh;
+  overflow-y: auto;
+}
+.rep-tiles {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: 0.6rem;
+  margin: 0.6rem 0 1rem;
+}
+.rep-tile {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.6rem 0.75rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+.rep-tile-label {
+  font-size: 0.78rem;
+  color: var(--text-muted);
+}
+.rep-tile-val {
+  font-size: 1.5rem;
+  font-weight: 700;
+}
+.rep-good { color: var(--up, #2ea043); }
+.rep-bad { color: var(--down, #f85149); }
+.rep-sec {
+  margin-bottom: 1.1rem;
+}
+.rep-sec h4 {
+  margin: 0 0 0.45rem;
+  font-size: 0.95rem;
+}
+.rep-table-wrap {
+  overflow-x: auto;
+}
+.rep-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.86rem;
+}
+.rep-table th {
+  text-align: left;
+  font-weight: 500;
+  color: var(--text-muted);
+  font-size: 0.78rem;
+  padding: 0.25rem 0.5rem 0.25rem 0;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+.rep-table td {
+  padding: 0.3rem 0.5rem 0.3rem 0;
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 50%, transparent);
+  vertical-align: top;
+}
+.rep-table td.num {
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.rep-table .type-chip {
+  margin: 0 0.25rem 0.15rem 0;
+}
+.rep-open {
+  margin-left: 0.4rem;
+  color: var(--down, #f85149);
+  border-color: var(--down, #f85149);
+}
+.rep-bar {
+  cursor: default;
+}
+.rep-line {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.2rem 0.75rem;
+  align-items: baseline;
+  padding: 0.2rem 0;
+}
