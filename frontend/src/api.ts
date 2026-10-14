@@ -2371,3 +2371,20 @@ export interface Report {
 export function getReport(days: number): Promise<Report> {
   return api<Report>(`/api/report?days=${days}`)
 }
+
+// --- поиск по парку (backend app/search.py) ---
+export type SearchItem = {
+  title: string
+  // подпись: данные (сервер, образ, адреса), слова к ним фронт подставляет сам
+  sub: string[]
+  id: number
+  section: string
+  sec: string
+  tag: string
+  hint_k: string
+  hint_v: string
+}
+export type SearchResult = { q: string; groups: { kind: string; total: number; items: SearchItem[] }[] }
+export function search(q: string): Promise<SearchResult> {
+  return api<SearchResult>(`/api/search?q=${encodeURIComponent(q)}`)
+}

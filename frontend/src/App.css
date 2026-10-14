@@ -6071,3 +6071,144 @@ button.type-chip { cursor: pointer; border: 1px solid transparent; font-family: 
   align-items: baseline;
   padding: 0.2rem 0;
 }
+
+/* ---------- поиск по парку (SearchModal) ---------- */
+.search-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+}
+.search-btn kbd,
+.search-foot kbd {
+  font: inherit;
+  font-size: 0.72rem;
+  padding: 0 0.3rem;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text-muted);
+}
+.search-modal {
+  width: 680px;
+  padding: 0;
+  gap: 0;
+  overflow: hidden;
+}
+.search-input,
+.search-input:focus {
+  width: 100%;
+  box-sizing: border-box;
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  border-radius: 0;
+  background: transparent;
+  padding: 0.95rem 1.1rem;
+  font-size: 1.02rem;
+}
+.search-results {
+  max-height: min(62vh, 560px);
+  overflow-y: auto;
+  padding: 0.25rem 0 0.4rem;
+}
+.search-empty {
+  padding: 0.8rem 1.1rem;
+  margin: 0;
+}
+.search-recent {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  margin-bottom: 0.7rem;
+}
+.search-recent-btn {
+  padding: 0.2rem 0.6rem;
+  font-size: 0.82rem;
+}
+.search-group-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.6rem 1.1rem 0.2rem;
+  font-size: 0.72rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+.search-group-head span:last-child:not(:first-child) {
+  text-transform: none;
+  letter-spacing: 0;
+}
+button.search-item {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0.1rem;
+  width: 100%;
+  text-align: left;
+  padding: 0.38rem 1.1rem;
+  background: none;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  color: var(--text);
+  font-weight: 400;
+  transform: none;
+}
+button.search-item:hover,
+button.search-item-active {
+  background: var(--hover);
+}
+button.search-item-active {
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+.search-item-title {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  min-width: 0;
+}
+.search-item-name {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.search-hint {
+  flex-shrink: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.75rem;
+  color: var(--accent);
+}
+.search-item-sub {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.search-foot {
+  display: flex;
+  gap: 1rem;
+  padding: 0.5rem 1.1rem;
+  border-top: 1px solid var(--border);
+}
+/* пока шапка тесная, от кнопки остается лупа: иначе меню переносилось на вторую строку */
+@media (max-width: 1200px) {
+  .search-btn {
+    padding: 0.4rem 0.6rem;
+  }
+  .search-btn-label,
+  .search-btn kbd {
+    display: none;
+  }
+}
+@media (max-width: 600px) {
+  .search-foot {
+    display: none;
+  }
+  .search-modal {
+    width: calc(100vw - 1rem);
+  }
+}
