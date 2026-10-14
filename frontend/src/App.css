@@ -6455,33 +6455,37 @@ button.search-item-active {
 }
 
 /* ---------- хронология сервера (TimelineCard) ---------- */
-.tl-head {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 0.6rem;
-  margin-bottom: 0.5rem;
+.tl-card .win-switch { margin: 0; }
+/* плитки-фильтры: кнопки в виде плиток, скрытая группа бледнее и зачеркнута */
+button.tl-tile {
+  text-align: left;
+  cursor: pointer;
+  color: var(--text);
+  font: inherit;
+  box-shadow: none;
+  transition: border-color 0.12s ease, opacity 0.12s ease;
 }
-.tl-filters {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.35rem;
-  margin-bottom: 0.6rem;
+button.tl-tile:hover {
+  border-color: var(--border-strong);
+  background: var(--card-hover);
 }
-button.tl-chip {
-  padding: 0.15rem 0.55rem;
-  font-size: 0.8rem;
-}
-button.tl-chip-off {
+button.tl-tile-off {
   opacity: 0.45;
+}
+button.tl-tile-off .net-tile-value {
   text-decoration: line-through;
 }
+/* лента как панель логов: время, значок, текст; алерт и сбой - красной полосой слева */
 .tl-list {
   display: flex;
   flex-direction: column;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0 0 0.25rem;
 }
 .tl-day {
-  margin: 0.6rem 0 0.15rem;
+  padding: 0.55rem 0.7rem 0.2rem;
   font-size: 0.72rem;
   letter-spacing: 0.04em;
   text-transform: uppercase;
@@ -6492,9 +6496,19 @@ button.tl-chip-off {
   grid-template-columns: 3.2rem 1.4rem 1fr;
   align-items: baseline;
   gap: 0.2rem;
-  padding: 0.18rem 0;
+  padding: 0.22rem 0.7rem 0.22rem calc(0.7rem - 3px);
   font-size: 0.85rem;
   border-bottom: 1px solid color-mix(in srgb, var(--border) 45%, transparent);
+  border-left: 3px solid transparent;
+}
+.tl-fire,
+.tl-warn,
+.tl-crash {
+  border-left-color: var(--down);
+  background: rgba(239, 68, 68, 0.06);
+}
+.tl-alert:not(.tl-fire) {
+  border-left-color: var(--up);
 }
 .tl-time {
   color: var(--text-muted);
@@ -6520,9 +6534,6 @@ button.tl-chip-off {
 .tl-config .tl-text {
   color: var(--text-muted);
 }
-.tl-foot {
-  margin-top: 0.6rem;
-}
 /* хронология - последний раздел карточки: высотой в экран, чтобы, долистав до нее, графики
    выше уходили за край, а не висели над лентой */
 #msec-timeline .metric-section-body {
@@ -6534,7 +6545,7 @@ button.tl-chip-off {
   font-size: 0.75rem;
 }
 .tl-pkgs {
-  margin: 0.15rem 0 0.35rem 4.8rem;
+  margin: 0.15rem 0.7rem 0.35rem 5.5rem;
   padding-left: 0.6rem;
   border-left: 2px solid var(--border);
   font-family: ui-monospace, monospace;

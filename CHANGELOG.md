@@ -4,6 +4,14 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.4.185] - 2026-10-15
+
+### Changed
+- "Хронология" в стиле "Сети". Счетчики групп (контейнеры, система, порты, доступ и кроны,
+  алерты, панель) - плитками, они же фильтр: нажатая плитка бледнеет и группа уходит из
+  ленты. Лента - как панель логов: день заголовком, время и значок слева, алерты и падения с
+  красной полосой, отбой алерта с зеленой. Переключатель периода в шапке карточки.
+
 ## [1.4.184] - 2026-10-15
 
 ### Changed

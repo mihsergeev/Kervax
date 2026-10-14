@@ -5818,7 +5818,9 @@ function ServerDetail({
         {/* что менялось и что было - одной лентой. В самом низу, после графиков и раздела веба: это
             разбор, а не метрики, и смотреть ее удобнее без графиков на том же экране */}
         <MetricSection id="timeline" title={t('Хронология')}>
-          <TimelineCard serverId={s.id} onUnauthorized={onUnauthorized} />
+          <div className="net-cards">
+            <TimelineCard serverId={s.id} onUnauthorized={onUnauthorized} />
+          </div>
         </MetricSection>
           </div>
         </div>
