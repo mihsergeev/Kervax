@@ -122,6 +122,41 @@ async def test_unit_fix_command(client, auth_headers):
     assert r.status_code == 200 and "unit:certbot.service" in (r.json()["alert_snoozes"] or {})
 
 
+async def test_unit_journal_command(client, auth_headers):
+    """Журнал юнита, всей системы или ядра: команда уходит агенту с периодом, лимитом строк и
+    приоритетом; текст журнала возвращается результатом команды."""
+    r = await client.post("/api/servers", json={"name": "j"}, headers=auth_headers)
+    token, sid = r.json()["token"], r.json()["server"]["id"]
+    ah = {"Authorization": f"Bearer {token}"}
+    url = f"/api/servers/{sid}/backup/command"
+    r = await client.post(url, json={"action": "unit_journal", "unit": "nginx.service", "since_min": 360,
+                                     "lines": 500, "prio": "warning"}, headers=auth_headers)
+    assert r.status_code == 200 and r.json()["status"] == "pending"
+    cid = r.json()["id"]
+    k = await client.post(url, json={"action": "unit_journal", "unit": "_kernel"}, headers=auth_headers)
+    assert k.status_code == 200
+    rep = {"agent_version": "2.29", "mem_used": 1, "mem_total": 2, "disks": [{"mount": "/", "used": 1, "total": 2}]}
+    cmds = (await client.post("/api/agent/report", json=rep, headers=ah)).json()["backup_commands"]
+    assert cmds[0] == {"id": cid, "action": "unit_journal", "mode": "exclude", "paths": [], "schedule": "",
+                       "name": "nginx.service", "since": 360, "lines": 500, "prio": "warning"}
+    assert cmds[1]["name"] == "_kernel" and cmds[1]["since"] == 60 and cmds[1]["prio"] == "info"
+    text = "2026-10-14T12:00:00+0300 web-a nginx[1]: started\n" * 1500
+    assert (await client.post("/api/agent/backup-result", json={"id": cid, "ok": True, "output": text},
+                              headers=ah)).status_code == 200
+    st = (await client.get(f"{url}/{cid}", headers=auth_headers)).json()
+    assert st["status"] == "done" and st["result"] == text
+    for body in ({"action": "unit_journal"},  # без юнита
+                 {"action": "unit_journal", "unit": "_root"},
+                 {"action": "unit_journal", "unit": "nginx.service", "since_min": 20000},
+                 {"action": "unit_journal", "unit": "nginx.service", "lines": 5000},
+                 {"action": "unit_journal", "unit": "nginx.service", "prio": "debug"},
+                 {"action": "unit_journal", "unit": "x.service;reboot"}):
+        assert (await client.post(url, json=body, headers=auth_headers)).status_code in (400, 422), body
+    # перезапускать "весь журнал" нельзя - имя только для чтения
+    bad = await client.post(url, json={"action": "unit_fix", "mode": "restart", "unit": "_all"}, headers=auth_headers)
+    assert bad.status_code == 400
+
+
 WORKER = {"unit": "worker.service", "active": "activating", "sub": "auto-restart", "result": "exit-code",
           "status": 3, "started": 0, "log": ["boom: config not found"]}
 

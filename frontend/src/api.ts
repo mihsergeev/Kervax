@@ -1938,6 +1938,8 @@ export function backupCommand(
     | { action: 'disk_fix'; mode: 'run'; fix: 'analyze'; mount: string }
     // упавший юнит systemd: перезапустить или сбросить отметку (helper units-setup)
     | { action: 'unit_fix'; mode: 'restart' | 'reset'; unit: string }
+    // журнал юнита, всей системы (_all) или ядра (_kernel): helper units-setup 0.4, агент 2.29
+    | { action: 'unit_journal'; unit: string; since_min: number; lines: number; prio: 'info' | 'warning' | 'err' }
     | { action: 'dump_remove'; engine: string; container: string }
     | {
         action: 'dump_setup'
