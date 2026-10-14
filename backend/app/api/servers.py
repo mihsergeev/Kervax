@@ -27,6 +27,7 @@ from app import web_config
 from app import changes as srv_changes
 from app import known
 from app import parents as parents_mod
+from app import timeline as timeline_mod
 from app import audit, backup_growth, custom_backups, docker_exposure, geoip, kube_coverage, manual_probe, open_ports, os_support
 from app.collector import (
     _backup_problem_repos, alert_since, backup_cadence, backup_rotation_items, backup_unmonitored,
@@ -1200,6 +1201,20 @@ async def exposure_scan(server_id: int, user: CurrentUser, session: SessionDep) 
     return _out(s, datetime.now(timezone.utc))
 
 
+@router.get("/{server_id}/timeline")
+async def server_timeline(
+    server_id: int, user: CurrentUser, session: SessionDep, days: int = Query(7, ge=1, le=90)
+) -> dict:
+    """Хронология сервера одной лентой (app/timeline.py): что менялось и что с ним было."""
+    from app import settings_store
+
+    s = await _get_or_404(server_id, session, user)
+    now = datetime.now(timezone.utc)
+    cfg = await settings_store.get_alert_config(session, get_settings())
+    return await timeline_mod.view(session, s, user, now - timedelta(days=days), now,
+                                   cfg.get("tz") or "Europe/Moscow")
+
+
 @router.post("/{server_id}/changes/ack", response_model=ServerOut)
 async def changes_ack(server_id: int, user: CurrentUser, session: SessionDep) -> ServerOut:
     """Изменения доступа на сервере сделали свои: строка "изменился доступ" уходит с главной.
@@ -1302,6 +1317,7 @@ async def delete_server(
     await session.execute(
         sa_update(Check).where(Check.parent_server_id == server_id)
         .values(parent_server_id=None, parent_mode="auto"))
+    await timeline_mod.forget(session, server_id)
     await session.delete(server)
     await session.commit()
     await _write_agent_allowlist(session)

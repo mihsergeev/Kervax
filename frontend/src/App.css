@@ -6212,3 +6212,73 @@ button.search-item-active {
     width: calc(100vw - 1rem);
   }
 }
+
+/* ---------- хронология сервера (TimelineCard) ---------- */
+.tl-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.6rem;
+  margin-bottom: 0.5rem;
+}
+.tl-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  margin-bottom: 0.6rem;
+}
+button.tl-chip {
+  padding: 0.15rem 0.55rem;
+  font-size: 0.8rem;
+}
+button.tl-chip-off {
+  opacity: 0.45;
+  text-decoration: line-through;
+}
+.tl-list {
+  display: flex;
+  flex-direction: column;
+}
+.tl-day {
+  margin: 0.6rem 0 0.15rem;
+  font-size: 0.72rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+.tl-row {
+  display: grid;
+  grid-template-columns: 3.2rem 1.4rem 1fr;
+  align-items: baseline;
+  gap: 0.2rem;
+  padding: 0.18rem 0;
+  font-size: 0.85rem;
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 45%, transparent);
+}
+.tl-time {
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+.tl-icon {
+  text-align: center;
+  font-size: 0.8rem;
+}
+.tl-text {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.tl-fire .tl-text,
+.tl-warn .tl-text,
+.tl-crash .tl-text {
+  color: var(--down);
+}
+.tl-alert:not(.tl-fire) .tl-text {
+  color: var(--up);
+}
+.tl-panel .tl-text,
+.tl-config .tl-text {
+  color: var(--text-muted);
+}
+.tl-foot {
+  margin-top: 0.6rem;
+}

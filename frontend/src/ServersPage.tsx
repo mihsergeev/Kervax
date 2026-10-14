@@ -68,6 +68,7 @@ import { useAuth } from './auth'
 import { AlertHistoryModal } from './AlertHistoryModal'
 import { NoteBar } from './NoteBar'
 import { ServerParentBar } from './ParentBar'
+import { TimelineCard } from './TimelineCard'
 import { KnownServerList } from './KnownDialog'
 import { MaintBanner, MaintChip } from './MaintModal'
 
@@ -789,6 +790,7 @@ const DETAIL_SECTIONS = [
   { id: 'conn', label: 'Соединения' },
   { id: 'disk', label: 'Диск' },
   { id: 'proc', label: 'Процессы' },
+  { id: 'timeline', label: 'Хронология' },
   { id: 'web', label: 'Веб' },
 ]
 // отдельной константой: новый массив на каждый рендер пересоздавал бы слежение за скроллом
@@ -5408,6 +5410,11 @@ function ServerDetail({
             <ProcCard title={t('Топ по CPU')} procs={r.top_cpu} kind="cpu" total={r.mem_total ?? 0} t={t} />
             <ProcCard title={t('Топ по памяти')} procs={r.top_mem} kind="mem" total={r.mem_total ?? 0} t={t} />
           </div>
+        </MetricSection>
+
+        {/* что менялось и что было - одной лентой: первый вопрос при разборе сбоя */}
+        <MetricSection id="timeline" title={t('Хронология')}>
+          <TimelineCard serverId={s.id} onUnauthorized={onUnauthorized} />
         </MetricSection>
 
         {/* Веб - последним: раздел есть не на каждой ноде. Сюда ведет ссылка из алерта

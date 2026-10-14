@@ -1008,3 +1008,30 @@ class MaintenanceWindow(Base):
     )
     # конец вхождения, по которому сверка уже была
     verified_end: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class ServerEvent(Base):
+    """Хронология сервера (app/timeline.py): что на нем поменялось, чего больше нигде не видно -
+    контейнеры, перезагрузки, пакеты и ядро, версии, порты. Отдельной таблицей, а не JSON в
+    servers: строку сервера панель читает каждый тик, а лента у ноды с деплоями длинная."""
+
+    __tablename__ = "server_events"
+    __table_args__ = (Index("ix_server_events_server_ts", "server_id", "ts"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    server_id: Mapped[int] = mapped_column(Integer)
+    ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    cat: Mapped[str] = mapped_column(String(12), default="")    # deploy | crash | state | system | ports
+    kind: Mapped[str] = mapped_column(String(16), default="")   # image, restart, reboot, packages...
+    obj: Mapped[str] = mapped_column(String(255), default="")   # контейнер, порт; у системных пусто
+    text: Mapped[str] = mapped_column(Text, default="")
+    n: Mapped[int] = mapped_column(Integer, default=1)          # падения подряд сливаются в одно
+
+
+class TimelineState(Base):
+    """Прошлый снимок сервера для хронологии и изменения, которые еще ждут подтверждения."""
+
+    __tablename__ = "timeline_state"
+
+    server_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    state: Mapped[dict | None] = mapped_column(JSON, nullable=True)
