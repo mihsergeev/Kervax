@@ -139,8 +139,10 @@ export function JournalModal({ server: s, unit: unit0, onClose }: { server: Serv
     { k: 'err', l: t('ошибки') },
   ]
   const title = p.target === '_all' ? t('Весь журнал') : p.target === '_kernel' ? t('Ядро') : p.target || t('Журнал')
-  // ровно столько строк, сколько просили: за период их, скорее всего, больше
+  // ровно столько строк, сколько просили: за период их, скорее всего, больше. Или агент
+  // обрезал ответ по размеру (90 000 байт, агент 2.29): строк меньше, чем просили
   const cut = all.length >= p.lines
+  const bySize = !cut && (text?.length ?? 0) >= 80_000
   return createPortal(
     <div className="modal-backdrop">
       <div className="card modal logs-modal" onClick={(e) => e.stopPropagation()}>
@@ -282,7 +284,9 @@ export function JournalModal({ server: s, unit: unit0, onClose }: { server: Serv
         <div className="muted small">
           {cut
             ? t('Показаны последние {n} строк: за период их больше, сократите период или поднимите приоритет.', { n: p.lines })
-            : t('Журнал не хранится в панели - читается с ноды по запросу.')}
+            : bySize
+              ? t('Показаны последние {n} строк: больше за один раз агент не передает, сократите период или поднимите приоритет.', { n: all.length })
+              : t('Журнал не хранится в панели - читается с ноды по запросу.')}
         </div>
       </div>
     </div>,
