@@ -1091,6 +1091,13 @@ input:focus {
 .ch-text { overflow-wrap: anywhere; }
 /* "CPU" и "Память": плитки "сейчас" над графиками, утечки строками */
 .net-cards.now-cards { margin: 0 0 0.75rem; }
+/* плитки шапки карточки: те же плитки, крупнее, кнопкой в раздел */
+.srv-tiles { margin-top: 0.2rem; }
+.srv-tiles .net-tile-value { font-size: 1.6rem; }
+button.srv-tile-btn { display: block; min-width: 0; padding: 0; margin: 0; background: none; border: 0; box-shadow: none; text-align: left; font: inherit; color: inherit; cursor: pointer; border-radius: 8px; }
+button.srv-tile-btn:hover { background: none; }
+button.srv-tile-btn .net-tile { height: 100%; transition: border-color 0.12s ease, background 0.12s ease; }
+button.srv-tile-btn:hover .net-tile { border-color: var(--border-strong); background: var(--card-hover); }
 .now-card { padding-top: 0.75rem; }
 .loc-res.ml-row { gap: 0.7rem; }
 .ml-main { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }

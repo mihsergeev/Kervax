@@ -4,6 +4,13 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.4.186] - 2026-10-15
+
+### Changed
+- Плитки в шапке карточки сервера (CPU, память, самый заполненный диск, сеть) - такие же,
+  как в разделах: подпись сверху, значение, подробности под ним, цвет по заполнению. Нажатие
+  на плитку ведет в ее раздел, свернутый раздел раскрывается.
+
 ## [1.4.185] - 2026-10-15
 
 ### Changed
