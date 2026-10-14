@@ -640,6 +640,30 @@ const EN: Record<string, string> = {
     'Run on the backup server as root. The password is read from prune-env inside the command and never appears in the process list.',
   'Покрытие': 'Coverage',
   'На серверах': 'On servers',
+  'серверов: {n}': 'servers: {n}',
+  'учетки с доступом, в которые давно не входят - проверьте, нужны ли они':
+    'accounts with access that nobody has used for a long time - check whether they are needed',
+  'слабые SSH-ключи - замените на ed25519': 'weak SSH keys - replace them with ed25519',
+  'поддержка ОС кончилась или скоро кончится': 'OS support has ended or ends soon',
+  'нужна перезагрузка после обновлений': 'a reboot is needed after updates',
+  'не установлены обновления безопасности': 'security updates are not installed',
+  'список пакетов давно не обновлялся': 'the package list has not been refreshed for a long time',
+  'SSH пускает по паролю': 'SSH accepts passwords',
+  'после перезагрузки не запустятся юниты: работают, но не включены':
+    'units will not start after a reboot: running but not enabled',
+  'после перезагрузки не поднимутся контейнеры без restart policy':
+    'containers without a restart policy will not come back after a reboot',
+  'базы без отдельного дампа': 'databases without a separate dump',
+  'Docker без доступа - включите read-only proxy': 'Docker without access - enable the read-only proxy',
+  'Kubernetes без доступа - запустите kube-setup': 'Kubernetes without access - run kube-setup',
+  'устарел образ внешнего прокси - обновите': 'the external proxy image is outdated - update it',
+  'ноды кластера без агента': 'cluster nodes without the agent',
+  'на сервере бэкапов старый restic - обновите': 'old restic on the backup server - update it',
+  'бэкап-сервер без статистики - запустите backupserver-setup': 'backup server without statistics - run backupserver-setup',
+  'по внешнему адресу отвечает другой сервер - поправьте внешний адрес':
+    'another server answers on the external address - fix the external address',
+  'у контейнеров ключи от хоста - взлом приложения в них даст root на сервере':
+    'containers hold keys to the host - breaking into the app gives root on the server',
   'По бэкапам': 'Backups',
   'выключить': 'turn off',
   'Выключить дампы {eng}? Локальные файлы дампов будут удалены; история останется в restic.':

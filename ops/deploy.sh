@@ -31,6 +31,8 @@
 set -eu
 
 HOST=""; REF="HEAD"; DIR=/app/kervax; DRY=0; ALL=0
+# время на панель - в итоговой строке: видно, какая из них тормозит выкладку
+T_HOST=$(date +%s)
 while [ $# -gt 0 ]; do
     case "$1" in
         --dry-run) DRY=1; shift ;;
@@ -300,7 +302,7 @@ echo "  tracebacks in the backend log over 3 minutes: ${ERR_AFTER:-0}"
 [ "${ERR_AFTER:-0}" = "0" ] || BAD=1
 
 if [ "$BAD" = "0" ]; then
-    printf '\n\033[32m✓ %s: %s deployed and verified\033[0m\n' "$HOST" "$VERSION"
+    printf '\n\033[32m✓ %s: %s deployed and verified in %s s\033[0m\n' "$HOST" "$VERSION" "$(( $(date +%s) - T_HOST ))"
 else
     die "verification failed - see the output above (docker compose $FILES logs --tail=50)"
 fi

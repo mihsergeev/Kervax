@@ -54,6 +54,10 @@ type ActItem = {
   // обновление по парку (агент, helper'ы, настройка юнита): отдельный блок "Обновления" над
   // "Требует действий", иначе среди длинных строк по серверам эти пункты терялись
   fleet?: boolean
+  // вид проблемы: одинаковые на двух и больше серверах сворачиваются в одну строку со списком
+  // серверов (раскрывается кликом); detail - что именно на этом сервере, без его имени
+  grp?: string
+  detail?: string
 }
 // name - имя сервера: по нему "Что сломано" пишет "сервер - что" (text начинается с "имя: ")
 type ProbItem = {
@@ -281,6 +285,51 @@ function AnsibleHint({ hosts }: { hosts: string[] }) {
   )
 }
 
+// Строка блока "Требует действий": пункт как есть или группа одинаковых с разных серверов
+type ActRow = { one: ActItem } | { grp: string; items: ActItem[] }
+
+function groupActs(items: ActItem[]): ActRow[] {
+  const by = new Map<string, ActItem[]>()
+  for (const it of items) if (it.grp) by.set(it.grp, [...(by.get(it.grp) ?? []), it])
+  const rows: ActRow[] = []
+  const done = new Set<string>()
+  for (const it of items) {
+    const list = it.grp ? by.get(it.grp)! : null
+    if (!list || list.length < 2) rows.push({ one: it })
+    else if (!done.has(it.grp!)) {
+      done.add(it.grp!)
+      rows.push({ grp: it.grp!, items: list })
+    }
+  }
+  const bad = (r: ActRow) => ('one' in r ? r.one.icon === '⛔' : r.items.some((x) => x.icon === '⛔'))
+  return rows.sort((a, b) => Number(bad(b)) - Number(bad(a)))
+}
+
+// Подпись группы: что за проблема, без имени сервера (оно в списке после)
+function grpLabel(grp: string, t: T): string {
+  const fixed: Record<string, string> = {
+    'access-s': t('учетки с доступом, в которые давно не входят - проверьте, нужны ли они'),
+    'access-w': t('слабые SSH-ключи - замените на ed25519'),
+    'os-eol': t('поддержка ОС кончилась или скоро кончится'),
+    'os-reboot': t('нужна перезагрузка после обновлений'),
+    'os-security': t('не установлены обновления безопасности'),
+    'os-apt': t('список пакетов давно не обновлялся'),
+    'ssh-ssh_password': t('SSH пускает по паролю'),
+    'noboot-u': t('после перезагрузки не запустятся юниты: работают, но не включены'),
+    'noboot-d': t('после перезагрузки не поднимутся контейнеры без restart policy'),
+    dbdump: t('базы без отдельного дампа'),
+    'd-acc': t('Docker без доступа - включите read-only proxy'),
+    'k-acc': t('Kubernetes без доступа - запустите kube-setup'),
+    'd-old': t('устарел образ внешнего прокси - обновите'),
+    'k-noagent': t('ноды кластера без агента'),
+    'bs-restic': t('на сервере бэкапов старый restic - обновите'),
+    'bs-setup': t('бэкап-сервер без статистики - запустите backupserver-setup'),
+    foreign: t('по внешнему адресу отвечает другой сервер - поправьте внешний адрес'),
+    dockrisk: t('у контейнеров ключи от хоста - взлом приложения в них даст root на сервере'),
+  }
+  return fixed[grp] ?? grp
+}
+
 function actionItems(servers: Server[], avail: string, relProblem: string, t: T): ActItem[] {
   const items: ActItem[] = []
   // Релиз агента собран криво (раздаётся не тот бинарь, что подписан) — обновлять
@@ -313,22 +362,21 @@ function actionItems(servers: Server[], avail: string, relProblem: string, t: T)
     // Только что поставленная нода: установщик еще поднимает прокси Docker и ставит helper'ы
     // (их бэкенд в эти минуты и не требует). Без паузы плашки мигали и пропадали сами.
     if (rep?.docker?.present && !rep.docker.access && !s.fresh) {
-      items.push({ key: `d-acc-${s.id}`, icon: '🐳', section: 'docker', id: s.id, name: s.name, cc: s.country,
+      items.push({ key: `d-acc-${s.id}`, icon: '🐳', section: 'docker', id: s.id, name: s.name, cc: s.country, grp: 'd-acc',
         text: t('{name}: Docker без доступа — включите read-only proxy', { name: s.name }) })
     }
     if (rep?.kube?.present && !rep.kube.access && !s.fresh) {
-      items.push({ key: `k-acc-${s.id}`, icon: '☸', section: 'kuber', id: s.id, name: s.name, cc: s.country,
+      items.push({ key: `k-acc-${s.id}`, icon: '☸', section: 'kuber', id: s.id, name: s.name, cc: s.country, grp: 'k-acc',
         text: t('{name}: Kubernetes без доступа — запустите kube-setup', { name: s.name }) })
     }
     // Внешний прокси на старом образе: смотрит в интернет, а за год в caddy и traefik закрывают
     // не одну дыру. Ведем в Docker ноды: там написано, на что и как обновить.
     const old = s.proxy_outdated ?? []
     if (old.length > 0) {
+      const list = old.map((p) => `${p.name} (${proxyBuilt(p)})`).join(', ')
       items.push({ key: `d-old-${s.id}`, icon: '🧓', section: 'docker', id: s.id, name: s.name, cc: s.country,
-        text: t('{name}: устарел образ внешнего прокси {list} - обновите', {
-          name: s.name,
-          list: old.map((p) => `${p.name} (${proxyBuilt(p)})`).join(', '),
-        }) })
+        grp: 'd-old', detail: list,
+        text: t('{name}: устарел образ внешнего прокси {list} - обновите', { name: s.name, list }) })
     }
     // Ноды кластера без агента: на них не видно ни дисков, ни SMART, ни упавших юнитов, ни
     // процессов (на k8s-a-prc так неделями жгли 45 ядер зависшие chrome). Ведем во
@@ -337,18 +385,21 @@ function actionItems(servers: Server[], avail: string, relProblem: string, t: T)
     if (unmon.length > 0) {
       const names = unmon.slice(0, 4).map((n) => n.name).join(', ') + (unmon.length > 4 ? ', ...' : '')
       items.push({ key: `k-noagent-${s.id}`, icon: '☸', section: 'kuber', id: s.id, name: s.name, cc: s.country, sec: 'nodes',
+        grp: 'k-noagent', detail: `${unmon.length} (${names})`,
         text: t('{name}: нод кластера без агента - {n} ({nodes})', { name: s.name, n: unmon.length, nodes: names }) })
     }
     // restic самого сервера бэкапов (prune, forget, check) старше той версии, до которой его
     // обновляет helper: обычно обновление не скачалось. Ведем в модалку сервера, там команда.
     if (s.bsrv_restic_old) {
       items.push({ key: `bs-restic-${s.id}`, icon: '🧓', section: 'backups', id: s.id, name: s.name, cc: s.country, srv: true,
+        grp: 'bs-restic', detail: `restic ${s.bsrv_restic_old}`,
         text: t('{name}: на сервере бэкапов старый restic {v} - обновите', { name: s.name, v: s.bsrv_restic_old }) })
     }
     // бэкап-сервер найден (по docker), но статистики репо нет → нужен backupserver-setup
     const bs = rep?.backup_server
     if (bs?.present && (!bs.repos || bs.repos.length === 0)) {
       items.push({ key: `bs-setup-${s.id}`, icon: '🗄', section: 'backups', id: s.id, name: s.name, cc: s.country, srv: true,
+        grp: 'bs-setup',
         text: t('{name}: бэкап-сервер — включите статистику (backupserver-setup)', { name: s.name }) })
     }
     // setup-скрипты (helper'ы) устарели → переустановить. Версии сверяет бэкенд (helper_advice);
@@ -361,22 +412,21 @@ function actionItems(servers: Server[], avail: string, relProblem: string, t: T)
     if (dbs.length > 0 && !s.db_dumps_ok) {
       // всё про бэкап живёт в разделе «Бэкапы»; там модалка открывается для ЛЮБОЙ ноды —
       // клиента, бэкап-сервера или вообще без бэкапа (иначе пункт вёл бы в пустоту)
+      const db = dbs.map((x) => x.subject).join(', ')
       items.push({ key: `dbdump-${s.id}`, icon: '🛢', section: 'backups', id: s.id, name: s.name, cc: s.country,
-        text: t('{name}: {db} — нужен отдельный дамп',
-          { name: s.name, db: dbs.map((x) => x.subject).join(', ') }) })
+        grp: 'dbdump', detail: db, text: t('{name}: {db} — нужен отдельный дамп', { name: s.name, db }) })
     }
-    // ОС: конец поддержки, перезагрузка, обновления безопасности. Одной строкой на ноду, чтобы
-    // десяток нод с отложенной перезагрузкой не превратил список в обои
-    const osAdv = s.os_advice ?? []
-    if (osAdv.length > 0) {
-      items.push({ key: `os-${s.id}`, icon: osAdv.some((x) => x.level >= 2) ? '⛔' : '🧰', section: 'servers', id: s.id,
-        name: s.name, cc: s.country, sec: 'osupd',
-        text: `${s.name}: ${osAdv.map((x) => x.text).join('; ')}` })
+    // ОС: конец поддержки, перезагрузка, обновления безопасности - по пункту на вид совета:
+    // десяток нод с отложенной перезагрузкой сворачивается в одну строку "нужна перезагрузка"
+    for (const x of s.os_advice ?? []) {
+      items.push({ key: `os-${x.kind}-${s.id}`, icon: x.level >= 2 ? '⛔' : '🧰', section: 'servers', id: s.id,
+        name: s.name, cc: s.country, sec: 'osupd', grp: `os-${x.kind}`, detail: x.text,
+        text: `${s.name}: ${x.text}` })
     }
     // по внешнему адресу ноды отвечает другой сервер: проверка портов судила бы о чужом хосте
     for (const f of s.exposure?.foreign ?? []) {
       items.push({ key: `foreign-${s.id}-${f.ip}`, icon: '🔀', section: 'servers', id: s.id, name: s.name,
-        cc: s.country, sec: 'exposure',
+        cc: s.country, sec: 'exposure', grp: 'foreign', detail: `${f.ip}: ${f.outside}`,
         text: t('{name}: по внешнему адресу {ip} отвечает другой сервер ({o}, у ноды {n}) - поправьте внешний адрес',
           { name: s.name, ip: f.ip, o: f.outside, n: f.node }) })
     }
@@ -384,34 +434,37 @@ function actionItems(servers: Server[], avail: string, relProblem: string, t: T)
     // кнопка "по назначению"
     const risk = (s.docker_risk ?? []).filter((x) => !x.muted)
     if (risk.length > 0 && !(s.alert_mutes ?? []).includes('docker_risk')) {
+      const list = risk.map((x) => `${x.name} (${dockRiskText(x, t)})`).join(', ')
       items.push({ key: `dockrisk-${s.id}`, icon: '🔑', section: 'docker', id: s.id, name: s.name, cc: s.country,
+        grp: 'dockrisk', detail: list,
         text: t('{name}: у контейнеров ключи от хоста: {list} - взлом приложения в них даст root на сервере',
-          { name: s.name, list: risk.map((x) => `${x.name} (${dockRiskText(x, t)})`).join(', ') }) })
+          { name: s.name, list }) })
     }
     // не переживет перезагрузку: контейнеры - в Docker (там команда), юниты - в карточку
     const nb = s.noboot_advice
     if (nb && nb.docker.length > 0)
       items.push({ key: `noboot-d-${s.id}`, icon: '🔁', section: 'docker', id: s.id, name: s.name, cc: s.country,
+        grp: 'noboot-d', detail: shortList(nb.docker, t),
         text: t('{name}: после перезагрузки не поднимутся контейнеры без restart policy: {list}',
           { name: s.name, list: shortList(nb.docker, t) }) })
     if (nb && nb.units.length > 0)
       items.push({ key: `noboot-u-${s.id}`, icon: '🔁', section: 'servers', id: s.id, name: s.name, cc: s.country,
-        sec: 'noboot', text: t('{name}: после перезагрузки не запустятся {list}: работают, но не включены',
+        sec: 'noboot', grp: 'noboot-u', detail: shortList(nb.units, t), text: t('{name}: после перезагрузки не запустятся {list}: работают, но не включены',
           { name: s.name, list: shortList(nb.units, t) }) })
     // учетки с доступом, в которые давно не входят, и слабые ключи
     const ac = s.access_advice
     if (ac && ac.stale.length > 0)
       items.push({ key: `access-s-${s.id}`, icon: '🗝', section: 'servers', id: s.id, name: s.name, cc: s.country,
-        sec: 'access', text: t('{name}: учетки с доступом, в которые давно не входят: {list} - проверьте, нужны ли они',
+        sec: 'access', grp: 'access-s', detail: shortList(ac.stale, t), text: t('{name}: учетки с доступом, в которые давно не входят: {list} - проверьте, нужны ли они',
           { name: s.name, list: shortList(ac.stale, t) }) })
     if (ac && ac.weak.length > 0)
       items.push({ key: `access-w-${s.id}`, icon: '🗝', section: 'servers', id: s.id, name: s.name, cc: s.country,
-        sec: 'access', text: t('{name}: слабые SSH-ключи у {list} - замените на ed25519',
+        sec: 'access', grp: 'access-w', detail: shortList(ac.weak, t), text: t('{name}: слабые SSH-ключи у {list} - замените на ed25519',
           { name: s.name, list: shortList(ac.weak, t) }) })
     // SSH пускает по паролю, а порт открыт в интернет
     for (const a of s.ssh_advice ?? []) {
       items.push({ key: `ssh-${s.id}`, icon: a.level >= 2 ? '⛔' : '🔐', section: 'servers', id: s.id,
-        name: s.name, cc: s.country, sec: 'ssh', text: `${s.name}: ${a.text}` })
+        name: s.name, cc: s.country, sec: 'ssh', grp: `ssh-${a.kind}`, detail: a.text, text: `${s.name}: ${a.text}` })
     }
     for (const h of s.helper_advice || []) {
       // «устарел (? → v0.1)» на ноде, где helper'а нет вовсе, вводит в заблуждение:
@@ -638,6 +691,16 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
   const [probeHints, setProbeHints] = useState<LocalProbeSuggestion[]>([])
   const [mutes, setMutes] = useState<MuteWarning[]>([])
   const [brokenAll, setBrokenAll] = useState(false)
+  // "Требует действий": раскрытые группы и показ всех строк сверх ATTENTION_LIMIT
+  const [openGrps, setOpenGrps] = useState<Set<string>>(() => new Set())
+  const [actAll, setActAll] = useState(false)
+  const toggleGrp = (g: string) =>
+    setOpenGrps((prev) => {
+      const n = new Set(prev)
+      if (n.has(g)) n.delete(g)
+      else n.add(g)
+      return n
+    })
 
   useEffect(() => {
     getAgentRelease()
@@ -734,6 +797,12 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
   const allActions = actionItems(srvList, avail, relProblem, t).filter((x) => canSee(x.section))
   const fleet = allActions.filter((x) => x.fleet)
   const actions = allActions.filter((x) => !x.fleet)
+  // по разделам: на серверах - сверху, бэкапное - ниже; внутри одинаковое свернуто в группы
+  const actGroups = [
+    { key: 'srv', label: t('На серверах'), rows: groupActs(actions.filter((x) => x.section !== 'backups')) },
+    { key: 'bak', label: t('По бэкапам'), rows: groupActs(actions.filter((x) => x.section === 'backups')) },
+  ]
+  const actRowsN = actGroups.reduce((n, g) => n + g.rows.length, 0)
   const dockerHosts = srvList.filter((s) => s.last_report?.docker?.present && s.last_report.docker.access)
   const dockerRunning = dockerHosts.reduce((n, s) => n + (s.last_report?.docker?.containers?.filter((c) => c.state === 'running').length ?? 0), 0)
   const dockerProbs = dockerProblems(srvList, t)
@@ -851,6 +920,37 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
       <span className="home-open">→</span>
     </button>
   )
+  // строка внутри раскрытой группы: сервер и что на нем, без повтора самой проблемы
+  const subRow = (it: ActItem) => (
+    <button key={it.key} className="home-attention-row home-attention-subrow"
+      onClick={() => onOpen(it.section, it.id, it.srv, it.sec)}>
+      <span className="home-attention-txt">
+        <CountryFlag code={it.cc} /> <b>{it.name}</b>
+        {it.detail ? <span className="muted"> - {it.detail}</span> : null}
+      </span>
+      <span className="home-open">→</span>
+    </button>
+  )
+  const grpRow = (r: ActRow) => {
+    if ('one' in r) return actRow(r.one)
+    const open = openGrps.has(r.grp)
+    const names = shortList(r.items.map((x) => x.name ?? ''), t, 4)
+    const icon = r.items.some((x) => x.icon === '⛔') ? '⛔' : r.items[0].icon
+    return (
+      <div key={`g-${r.grp}`} className="home-attention-grpbox">
+        <button className={`home-attention-row${open ? ' open' : ''}`} onClick={() => toggleGrp(r.grp)}>
+          <span className="dot degraded" />
+          <span className="home-attention-ico">{icon}</span>
+          <span className="home-attention-txt">
+            {grpLabel(r.grp, t)}
+            <span className="muted"> · {t('серверов: {n}', { n: r.items.length })} ({names})</span>
+          </span>
+          <span className="home-open">{open ? '▾' : '▸'}</span>
+        </button>
+        {open && <div className="home-attention-sub">{r.items.map(subRow)}</div>}
+      </div>
+    )
+  }
   return (
     <div>
       <p className="tagline">{t('Мониторинг инфраструктуры')}</p>
@@ -981,27 +1081,23 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
           <div className="home-attention-head">
             <span className="home-attention-ic">⚠️</span>
             {t('Требует действий')}
-            <span className="home-attention-n">{actions.length}</span>
+            <span className="home-attention-n">{actRowsN}</span>
           </div>
           <div className="home-attention-list">
             {/* Делим по тому, КУДА ведёт пункт: чинится на сервере (агент, helper'ы,
                 доступы) — сверху; бэкапное — ниже, оно обычно менее срочное. */}
-            {([
-              { key: 'srv', label: t('На серверах'), items: actions.filter((x) => x.section !== 'backups') },
-              { key: 'bak', label: t('По бэкапам'), items: actions.filter((x) => x.section === 'backups') },
-            ] as const).map((grp) =>
-              grp.items.length === 0 ? null : (
+            {actGroups.map((grp) =>
+              grp.rows.length === 0 ? null : (
                 <div key={grp.key} className="home-attention-grp">
                   {/* заголовок только если есть ОБЕ группы — иначе он лишний шум */}
-                  {actions.some((x) => x.section === 'backups') &&
-                    actions.some((x) => x.section !== 'backups') && (
-                      <div className="home-attention-grp-head muted small">{grp.label}</div>
-                    )}
-                  {grp.items.slice(0, ATTENTION_LIMIT).map(actRow)}
-                  {grp.items.length > ATTENTION_LIMIT && (
-                    <div className="muted small home-attention-more">
-                      {t('…и ещё {n}', { n: grp.items.length - ATTENTION_LIMIT })}
-                    </div>
+                  {actGroups.every((g) => g.rows.length > 0) && (
+                    <div className="home-attention-grp-head muted small">{grp.label}</div>
+                  )}
+                  {(actAll ? grp.rows : grp.rows.slice(0, ATTENTION_LIMIT)).map(grpRow)}
+                  {grp.rows.length > ATTENTION_LIMIT && (
+                    <button className="ghost small home-attention-more" onClick={() => setActAll(!actAll)}>
+                      {actAll ? t('свернуть') : t('…и ещё {n}', { n: grp.rows.length - ATTENTION_LIMIT })}
+                    </button>
                   )}
                 </div>
               ),
