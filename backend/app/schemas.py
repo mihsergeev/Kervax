@@ -36,7 +36,7 @@ def _clean_paths(v: list[str] | None) -> list[str] | None:
     return out
 
 
-CheckType = Literal["http", "tcp_port", "cert", "push"]
+CheckType = Literal["http", "tcp_port", "cert", "push", "dns"]
 
 
 class LoginRequest(BaseModel):
@@ -174,6 +174,11 @@ class CheckCreate(BaseModel):
     # push: сигнал ждем каждые push_period секунд, плюс допуск (0 = десятая часть, от 2 минут)
     push_period: int = Field(default=3600, ge=60, le=31 * 86400)
     push_grace: int = Field(default=0, ge=0, le=7 * 86400)
+    # dns: тип записи, ожидаемые значения по строке, equal | contains, IP резолвера
+    dns_type: Literal["", "A", "AAAA", "CNAME", "MX", "NS", "TXT"] = ""
+    dns_expect: str = Field(default="", max_length=4000)
+    dns_match: Literal["equal", "contains"] = "equal"
+    dns_server: str = Field(default="", max_length=64)
 
     _clean = field_validator("ssl_warn_days", "domain_warn_days")(_clean_warn_days)
     _paths = field_validator("extra_paths")(_clean_paths)
@@ -203,6 +208,10 @@ class CheckUpdate(BaseModel):
     ignore_tls: bool | None = None
     push_period: int | None = Field(default=None, ge=60, le=31 * 86400)
     push_grace: int | None = Field(default=None, ge=0, le=7 * 86400)
+    dns_type: Literal["", "A", "AAAA", "CNAME", "MX", "NS", "TXT"] | None = None
+    dns_expect: str | None = Field(default=None, max_length=4000)
+    dns_match: Literal["equal", "contains"] | None = None
+    dns_server: str | None = Field(default=None, max_length=64)
     probe_local: bool | None = None
     check_all_ips: bool | None = None
     check_ssl: bool | None = None
@@ -533,6 +542,13 @@ class CheckOut(BaseModel):
     note_by: str = ""
     note_at: datetime | None = None
     known_issue: dict | None = None  # известная проблема монитора (app/known.py)
+    # dns: что спрашиваем и что ждем; baseline - запомненный ответ, last - последний
+    dns_type: str = ""
+    dns_expect: str = ""
+    dns_match: str = "equal"
+    dns_server: str = ""
+    dns_baseline: list[str] | None = None
+    dns_last: list[str] | None = None
     port: int
     enabled: bool
     group_name: str

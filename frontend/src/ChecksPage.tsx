@@ -257,6 +257,7 @@ export function ChecksPage({ onUnauthorized, openCheckId, onConsumed }: Props) {
     tcp_port: 'TCP',
     cert: 'TLS',
     push: 'PUSH',
+    dns: 'DNS',
   }
   // базовая группировка. Порядок групп: «по группе» — по первому появлению в
   // sort_order (ручной, двигается перетаскиванием), «Без группы» всегда в конце;
@@ -921,7 +922,7 @@ function CheckRow({
   checked?: boolean
 }) {
   const { t } = useI18n()
-  const typeLabel = { http: 'HTTP', tcp_port: 'TCP', cert: 'TLS', push: 'PUSH' }[c.type]
+  const typeLabel = { http: 'HTTP', tcp_port: 'TCP', cert: 'TLS', push: 'PUSH', dns: 'DNS' }[c.type]
   const metric =
     c.type === 'cert' && c.last_value != null
       ? t('{n} дн.', { n: Math.round(c.last_value) })
@@ -1047,7 +1048,9 @@ function CheckRow({
         <div className="check-target">
           {c.type === 'push'
             ? t('сигнал не реже, чем раз в {period}', { period: pushPeriodLabel(c.push_period || 3600, t) })
-            : `${c.target}${c.port ? `:${c.port}` : ''}`}
+            : c.type === 'dns'
+              ? `${c.target} ${c.dns_type || 'A'}`
+              : `${c.target}${c.port ? `:${c.port}` : ''}`}
           {(c.extra_paths ?? []).length > 0 && (
             <span
               className="check-target-paths"

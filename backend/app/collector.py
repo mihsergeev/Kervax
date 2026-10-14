@@ -661,6 +661,12 @@ async def record_outcome(
             pending.append(Pending("known", row.name, new_status,
                                    known_mod.remind_text(msg or new_status, new_k, now), None, row.id, None, "📌"))
 
+    if row.type == "dns" and outcome.answers is not None:
+        # последний ответ - для кнопки "принять"; первый удачный без ожидаемого - запоминаем
+        row.dns_last = outcome.answers
+        if outcome.status == "up" and outcome.answers and not row.dns_baseline and not (row.dns_expect or "").strip():
+            row.dns_baseline = outcome.answers
+
     row.last_status = new_status
     row.last_message = msg
     row.last_latency_ms = outcome.latency_ms
@@ -987,7 +993,8 @@ async def _send_alerts(
                 commits.append((kind, inc_id, check_id, flag))
                 continue
         same = None
-        if kind in ("bad", "recovery") and tgt and typ != "push":
+        # push и dns в один заголовок не сворачиваем: у каждого свой смысл, а не "тот же сайт"
+        if kind in ("bad", "recovery") and tgt and typ not in ("push", "dns"):
             same = (kind, status, checks_exec._registrable_domain(tgt))
             if same in same_at:
                 same_hosts[same].append(host or name)

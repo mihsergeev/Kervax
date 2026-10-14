@@ -41,6 +41,8 @@ class CheckOutcome:
     ip_results: list | None = None
     # разбивка по дополнительным путям монитора: [{path,status,latency_ms,message}]
     path_results: list | None = None
+    # dns: что ответил резолвер (нормализованные значения), None - не DNS или не дошли
+    answers: list | None = None
 
 
 def status_matches(code: int, spec: str) -> bool:
@@ -1004,7 +1006,95 @@ async def _run_push(check) -> CheckOutcome:
     return CheckOutcome("up", message=f"сигнал {_dur(age)} назад")
 
 
-_RUNNERS = {"http": _run_http, "tcp_port": _run_tcp_port, "cert": _run_cert, "push": _run_push}
+DNS_TYPES = ("A", "AAAA", "CNAME", "MX", "NS", "TXT")
+
+
+def dns_value(rtype: str, rdata) -> str:
+    """Запись как ее видит человек: адрес, имя без точки на конце, "10 mx.example.com", текст."""
+    if rtype in ("A", "AAAA"):
+        return str(rdata.address)
+    if rtype == "MX":
+        return f"{rdata.preference} {str(rdata.exchange).rstrip('.').lower()}"
+    if rtype in ("CNAME", "NS"):
+        return str(rdata.target).rstrip(".").lower()
+    if rtype == "TXT":
+        return b"".join(rdata.strings).decode("utf-8", "replace")
+    return str(rdata)
+
+
+def dns_key(rtype: str, value: str) -> str:
+    """Ключ сравнения: у MX без приоритета имя сравниваем одно (ждали mx.example.com - годится
+    и "10 mx.example.com"), регистр важен только в TXT, точка на конце имени не важна."""
+    v = value.strip()
+    if rtype == "TXT":
+        return v.strip('"')
+    v = v.lower().rstrip(".")
+    if rtype == "MX":
+        parts = v.split()
+        return parts[-1] if parts else v
+    return v
+
+
+def dns_expected(text: str, rtype: str) -> list[str]:
+    out: list[str] = []
+    for line in (text or "").splitlines():
+        line = line.strip()
+        if line and line not in out:
+            out.append(line)
+    return out
+
+
+async def _run_dns(check) -> CheckOutcome:
+    """DNS-монитор: запись в ожидаемое значение, а без ожидаемого - не изменилась с первого
+    ответа (его запоминает record_outcome). Сменился A у домена, пропал MX, уехал NS к другому
+    регистратору - алерт; принять новый ответ можно кнопкой в карточке."""
+    import dns.asyncresolver
+    import dns.exception
+    import dns.resolver
+
+    rtype = (getattr(check, "dns_type", "") or "A").upper()
+    name = (check.target or "").strip()
+    server = (getattr(check, "dns_server", "") or "").strip()
+    timeout = max(check.timeout_ms, 1000) / 1000.0
+    res = dns.asyncresolver.Resolver(configure=not server)
+    if server:
+        res.nameservers = [server]
+    res.lifetime = timeout
+    t0 = time.monotonic()
+    try:
+        ans = await res.resolve(name, rtype, raise_on_no_answer=False)
+    except dns.resolver.NXDOMAIN:
+        return CheckOutcome("down", message=f"домен {name} не существует (NXDOMAIN)", answers=[])
+    except dns.resolver.NoNameservers:
+        return CheckOutcome("down", message="DNS-серверы отказали (SERVFAIL или REFUSED)")
+    except dns.exception.Timeout:
+        return CheckOutcome("down", message=f"DNS не ответил за {timeout:g} с")
+    except Exception as e:  # noqa: BLE001 - любая беда резолвера это сбой монитора, а не панели
+        return CheckOutcome("down", message=_short(f"ошибка DNS: {e}"))
+    latency = int((time.monotonic() - t0) * 1000)
+    vals = sorted({dns_value(rtype, r) for r in ans.rrset}) if ans.rrset is not None else []
+    if not vals:
+        return CheckOutcome("down", latency_ms=latency, message=f"записей {rtype} нет", answers=[])
+    shown = _short(f"{rtype}: " + ", ".join(vals))
+    keys = {dns_key(rtype, v) for v in vals}
+    expect = dns_expected(getattr(check, "dns_expect", ""), rtype)
+    if expect:
+        want = {dns_key(rtype, e) for e in expect}
+        ok = want <= keys if getattr(check, "dns_match", "equal") == "contains" else keys == want
+        if not ok:
+            return CheckOutcome("down", latency_ms=latency, answers=vals,
+                                message=_short(f"{shown}; ждали {', '.join(expect)}"))
+        return CheckOutcome("up", latency_ms=latency, message=shown, answers=vals)
+    base = getattr(check, "dns_baseline", None) or []
+    if not base:
+        return CheckOutcome("up", latency_ms=latency, message=shown + " (запомнили)", answers=vals)
+    if keys != {dns_key(rtype, b) for b in base}:
+        return CheckOutcome("down", latency_ms=latency, answers=vals,
+                            message=_short(f"ответ изменился: было {', '.join(base)}, стало {', '.join(vals)}"))
+    return CheckOutcome("up", latency_ms=latency, message=shown, answers=vals)
+
+
+_RUNNERS = {"http": _run_http, "tcp_port": _run_tcp_port, "cert": _run_cert, "push": _run_push, "dns": _run_dns}
 
 
 async def _run_once(check) -> CheckOutcome:
