@@ -25,6 +25,7 @@ import {
   scanExposure,
   ackChanges,
   updateServer,
+  type AccessAccount,
   type ClockInfo,
   type DnsInfo,
   type ExposedPort,
@@ -2443,6 +2444,8 @@ function OpenPorts({ server: s, onChanged }: { server: Server; onChanged: () => 
   const closed = groups.filter((g) => !g.open.length && g.other !== 'unknown')
   const unknown = groups.filter((g) => !g.open.length && g.other === 'unknown')
   const fresh = new Set((ex?.new ?? []).map((x) => x.port))
+  const dangerous = opened.filter((g) => flagged(g) && g.risk).length
+  const service = opened.filter((g) => flagged(g) && !g.risk && g.svc).length
   const scan = async () => {
     setScanning(true)
     setErr('')
@@ -2484,51 +2487,72 @@ function OpenPorts({ server: s, onChanged }: { server: Server; onChanged: () => 
         {g.name ? ` ${g.name}` : ''}
       </span>
     ))
+  const ago = ex ? sinceShort(ex.ts, t) : ''
+  const toFix = opened.some((g) => flagged(g) && (g.risk || g.svc))
   return (
-    <div className="detail-inc exposure" id="mcard-exposure">
-      <div className="chart-cap">{t('Что открыто в интернет')}</div>
-      <div className="muted small">
-        {ex
-          ? own
-            ? t(sinceShort(ex.ts, t) ? 'проверено {ago} назад с адреса самой панели' : 'проверено только что с адреса самой панели', {
-                ago: sinceShort(ex.ts, t),
-              })
-            : t(sinceShort(ex.ts, t) ? 'проверено снаружи {ago} назад через {via}' : 'проверено снаружи только что через {via}', {
-                ago: sinceShort(ex.ts, t),
-                via: t(ex.via),
-              })
-          : t('Внешней проверки еще не было: панель проверяет раз в 6 часов.')}
+    <div className="chart-card net-card net-card-wide" id="mcard-exposure">
+      <div className="net-head">
+        <div className="chart-cap">{t('Что открыто в интернет')}</div>
         {!isViewer && (
           <button className="ghost small row-act" disabled={scanning} onClick={scan}>
             {scanning ? t('проверяю...') : t('проверить сейчас')}
           </button>
         )}
+      </div>
+      <div className="net-sub">
+        {ex
+          ? own
+            ? t(ago ? 'проверено {ago} назад с адреса самой панели' : 'проверено только что с адреса самой панели', { ago })
+            : t(ago ? 'проверено снаружи {ago} назад через {via}' : 'проверено снаружи только что через {via}', {
+                ago,
+                via: t(ex.via),
+              })
+          : t('Внешней проверки еще не было: панель проверяет раз в 6 часов.')}
+        {ex && ex.ips.length > 0 && <> · {t('адреса ноды: {ips}', { ips: ex.ips.join(', ') })}</>}
+        {opened.length > 0 && quietIps.length > 0 && <> · {t('на {ips} ничего не открыто', { ips: quietIps.join(', ') })}</>}
         {err && <span className="t-down"> {err}</span>}
       </div>
-      {ex && ex.ips.length > 0 && (
-        <div className="muted small">
-          {t('адреса ноды: {ips}', { ips: ex.ips.join(', ') })}
-          {opened.length > 0 && quietIps.length > 0 && <> · {t('на {ips} ничего не открыто', { ips: quietIps.join(', ') })}</>}
-        </div>
-      )}
       {(ex?.foreign ?? []).map((f) => (
-        <div key={f.ip} className="small exp-own">
+        <div key={f.ip} className="net-note">
           {t('По адресу {ip} отвечает другой сервер: там {o}, а у этой ноды {n}. Порты по этому адресу не про эту ноду, поэтому алертов по ним нет. Поправьте внешний адрес в настройках ноды.', { ip: f.ip, o: f.outside, n: f.node })}
         </div>
       ))}
       {ex && own && opened.length > 0 && (
-        <div className="small exp-own">
+        <div className="net-note">
           {t('Панель смотрела со своего адреса, а файрвол ноды часто пускает панель по белому списку. Тогда здесь "открыт" и то, что для остальных закрыто, поэтому по этой проверке нет ни красного, ни алертов. Чтобы видеть, что открыто для всех, добавьте в "Локациях" прокси в другой сети.')}
         </div>
       )}
-      {ex && !own && opened.length > 0 && (
-        <div className="muted small">
-          {t('Красным - опасное: базы, очереди, etcd, kubelet, Docker API, node_exporter. Желтым - служебное: порты Kubernetes и сети подов, агенты и экспортеры метрик. Снаружи должно быть закрыто и то и другое, а если порт открыт специально, отметьте "открыт намеренно". Остальное (SSH, веб, ваши сервисы) - для сведения.')}
+      {ex && ex.ips.length > 0 && groups.length > 0 && (
+        <div className="net-tiles">
+          <NetTile
+            label={own ? t('Открыто для панели') : t('Открыто снаружи')}
+            value={String(opened.length)}
+            sub={t('из {n} портов, что слушает нода', { n: groups.length })}
+          />
+          {!own && (
+            <NetTile
+              label={t('Опасных')}
+              value={String(dangerous)}
+              sub={t('базы, очереди, Docker API, kubelet')}
+              tone={dangerous ? 'bad' : 'ok'}
+            />
+          )}
+          {!own && (
+            <NetTile
+              label={t('Служебных')}
+              value={String(service)}
+              sub={t('Kubernetes, агенты, экспортеры')}
+              tone={service ? 'warn' : 'ok'}
+            />
+          )}
+          <NetTile
+            label={own ? t('Закрыто даже для панели') : t('Закрыто снаружи')}
+            value={String(closed.length)}
+            sub={unknown.length ? t('не проверить: {n}', { n: unknown.length }) : undefined}
+          />
         </div>
       )}
-      {ex && !ex.ips.length && (
-        <div className="muted small">{t('Публичного адреса у ноды не нашлось: проверять нечего.')}</div>
-      )}
+      {ex && !ex.ips.length && <div className="muted small">{t('Публичного адреса у ноды не нашлось: проверять нечего.')}</div>}
       {ex && ex.ips.length > 0 && !opened.length && (
         <div className="muted small">
           {groups.length > 0 && groups.every((g) => g.other === 'unknown')
@@ -2537,53 +2561,42 @@ function OpenPorts({ server: s, onChanged }: { server: Server; onChanged: () => 
         </div>
       )}
       {opened.length > 0 && (
-        <table className="exp-table small">
-          <thead>
-            <tr>
-              <th>{t('Порт')}</th>
-              <th>{t('Что слушает')}</th>
-              <th>{t('Снаружи')}</th>
-              <th />
-            </tr>
-          </thead>
-          <tbody>
-            {opened.map((g) => {
-              const m = muted.has(String(g.port))
-              const bad = flagged(g) && g.risk
-              const warn = flagged(g) && g.svc
-              return (
-                <tr key={g.port} className={bad ? 'exp-bad' : warn ? 'exp-warn' : ''}>
-                  <td className="mono">{g.port}</td>
-                  <td>
-                    {g.name && <b>{g.name} </b>}
-                    <span className="muted">{g.what || t('процесс не известен')}</span>
-                    {!own && fresh.has(g.port) && <span className="exp-new">{t('новый')}</span>}
-                  </td>
-                  <td className={bad ? 't-down' : warn ? 't-degraded' : ''}>{openText(g)}</td>
-                  <td>
-                    {own ? null : m ? (
-                      <span className="muted">
-                        {t('намеренно')}{' '}
-                        {!isViewer && (
-                          <button className="ghost small row-act" disabled={busy} onClick={() => setMuted(g.port, false)}>
-                            {t('вернуть алерт')}
-                          </button>
-                        )}
-                      </span>
-                    ) : (
-                      (g.risk || g.svc || fresh.has(g.port)) &&
-                      !isViewer && (
-                        <button className="ghost small row-act" disabled={busy} onClick={() => setMuted(g.port, true)}>
-                          🔕 {t('открыт намеренно')}
-                        </button>
-                      )
+        <div className="loc-results">
+          {opened.map((g) => {
+            const m = muted.has(String(g.port))
+            const bad = flagged(g) && g.risk
+            const warn = flagged(g) && g.svc
+            return (
+              <div key={g.port} className="loc-res exp-row">
+                <span className={`lk-dot${bad ? ' lk-dot-bad' : warn ? ' lk-dot-warn' : ''}`} />
+                <span className={`exp-port mono${bad ? ' net-tone-bad' : warn ? ' net-tone-warn' : ''}`}>{g.port}</span>
+                <div className="exp-what">
+                  {g.name && <b>{g.name} </b>}
+                  <span className="muted">{g.what || t('процесс не известен')}</span>
+                  {!own && fresh.has(g.port) && <span className="exp-new">{t('новый')}</span>}
+                </div>
+                <div className={`exp-state ${bad ? 't-down' : warn ? 't-degraded' : 'muted'}`}>{openText(g)}</div>
+                {own ? null : m ? (
+                  <span className="muted exp-act">
+                    {t('намеренно')}{' '}
+                    {!isViewer && (
+                      <button className="ghost small row-act" disabled={busy} onClick={() => setMuted(g.port, false)}>
+                        {t('вернуть алерт')}
+                      </button>
                     )}
-                  </td>
-                </tr>
-              )
-            })}
-          </tbody>
-        </table>
+                  </span>
+                ) : (
+                  (g.risk || g.svc || fresh.has(g.port)) &&
+                  !isViewer && (
+                    <button className="ghost small row-act exp-act" disabled={busy} onClick={() => setMuted(g.port, true)}>
+                      🔕 {t('открыт намеренно')}
+                    </button>
+                  )
+                )}
+              </div>
+            )
+          })}
+        </div>
       )}
       {closed.length > 0 && (
         <div className="small exp-closed">
@@ -2598,9 +2611,18 @@ function OpenPorts({ server: s, onChanged }: { server: Server; onChanged: () => 
           <span className="muted">{t('не проверить ({n}):', { n: unknown.length })}</span> {chips(unknown)}
         </div>
       )}
-      {opened.some((g) => flagged(g) && (g.risk || g.svc)) && (
-        <div className="muted small unit-hint">
-          {t('Закройте порт файрволом или привяжите сервис к 127.0.0.1 либо к внутреннему адресу. Порт Docker, опубликованный через -p, обходит ufw: публикуйте его как 127.0.0.1:порт:порт.')}
+      {(toFix || (ex && !own && opened.length > 0)) && (
+        <div className="net-foot">
+          {toFix && (
+            <div className="exp-fix">
+              {t('Закройте порт файрволом или привяжите сервис к 127.0.0.1 либо к внутреннему адресу. Порт Docker, опубликованный через -p, обходит ufw: публикуйте его как 127.0.0.1:порт:порт.')}
+            </div>
+          )}
+          {ex && !own && opened.length > 0 && (
+            <div>
+              {t('Красным - опасное: базы, очереди, etcd, kubelet, Docker API, node_exporter. Желтым - служебное: порты Kubernetes и сети подов, агенты и экспортеры метрик. Снаружи должно быть закрыто и то и другое, а если порт открыт специально, отметьте "открыт намеренно". Остальное (SSH, веб, ваши сервисы) - для сведения.')}
+            </div>
+          )}
         </div>
       )}
     </div>
@@ -2630,48 +2652,71 @@ function AccessCard({ server: s, onChanged }: { server: Server; onChanged: () =>
   const v = s.access
   if (!v || v.accounts.length === 0) return null
   const probs = (s.problems ?? []).filter((p) => p.kind === 'access_risk')
-  const day = (ts: number) => (ts ? new Date(ts * 1000).toLocaleDateString() : t('не было'))
   const pw: Record<string, string> = { P: t('задан'), L: t('заблокирован'), NP: t('пустой') }
+  const root2 = (a: AccessAccount) => a.uid === 0 && a.name !== 'root'
+  // красное - второй root и пустой пароль (алерт), желтое - заброшенная учетка и слабые ключи
+  const tone = (a: AccessAccount) =>
+    root2(a) || a.pw === 'NP' ? 'bad' : (a.stale && !a.muted) || a.weak.length > 0 ? 'warn' : a.access ? 'ok' : ''
+  const rank: Record<string, number> = { bad: 0, warn: 1, ok: 2, '': 3 }
+  const rows = [...v.accounts].sort((a, b) => rank[tone(a)] - rank[tone(b)])
+  const stale = v.accounts.filter((a) => a.stale && !a.muted).length
+  const nopw = v.accounts.filter((a) => a.nopasswd).length
   return (
-    <div className="detail-inc" id="mcard-access">
-      <div className="chart-cap">{t('Доступы')}</div>
+    <div className="chart-card net-card" id="mcard-access">
+      <div className="net-head">
+        <div className="chart-cap">{t('Доступы')}</div>
+      </div>
       {probs.map((p) => (
-        <div key={p.text} className="small t-down">{p.text}</div>
+        <div key={p.text} className="net-prob">{p.text}</div>
       ))}
-      <table className="exp-table psi-table small">
-        <thead>
-          <tr>
-            <th>{t('учетка')}</th>
-            <th>{t('пароль')}</th>
-            <th>{t('ключей')}</th>
-            <th>sudo</th>
-            <th>{t('последний вход')}</th>
-            <th />
-          </tr>
-        </thead>
-        <tbody>
-          {v.accounts.map((a) => (
-            <tr key={a.name} className={a.stale && !a.muted ? 'exp-bad' : ''}>
-              <td className="mono">{a.name}{a.uid === 0 && a.name !== 'root' ? ' (uid 0)' : ''}</td>
-              <td className={a.pw === 'NP' ? 't-down' : ''}>{pw[a.pw] ?? '-'}</td>
-              <td className={a.weak.length > 0 ? 't-degraded' : ''} title={a.weak.join(', ')}>
-                {a.keys}{a.weak.length > 0 ? ` (${t('слабых: {n}', { n: a.weak.length })})` : ''}
-              </td>
-              <td>{a.nopasswd ? t('без пароля') : ''}</td>
-              <td className={a.stale && !a.muted ? 't-degraded' : ''}>{day(a.last)}</td>
-              <td>
-                {a.stale && !isViewer && (
-                  <button className="ghost small" disabled={busy === ACCESS_MUTE + a.name}
-                    onClick={() => toggle(ACCESS_MUTE + a.name, !a.muted)}>
-                    {a.muted ? t('вернуть') : t('нужна')}
-                  </button>
+      <div className="net-tiles">
+        <NetTile
+          label={t('Могут войти')}
+          value={String(v.accounts.filter((a) => a.access).length)}
+          sub={t('из {n} учеток с shell', { n: v.accounts.length })}
+        />
+        <NetTile
+          label={t('Давно не входили')}
+          value={String(stale)}
+          sub={t('больше 90 дней, а доступ есть')}
+          tone={stale ? 'warn' : 'ok'}
+        />
+        <NetTile label={t('sudo без пароля')} value={String(nopw)} />
+      </div>
+      <div className="loc-results">
+        {rows.map((a) => {
+          const tn = tone(a)
+          return (
+            <div key={a.name} className="loc-res acc-row">
+              <span className={`lk-dot${tn ? ` lk-dot-${tn}` : ''}`} />
+              <div className="acc-main">
+                <span className="mono acc-name">{a.name}</span>
+                {root2(a) && <span className="acc-tag acc-tag-bad">uid 0</span>}
+                <span className={`acc-tag${a.pw === 'NP' ? ' acc-tag-bad' : ''}`}>
+                  {t('пароль')} {pw[a.pw] ?? '-'}
+                </span>
+                {a.keys > 0 && (
+                  <span className={`acc-tag${a.weak.length > 0 ? ' acc-tag-warn' : ''}`} title={a.weak.join(', ')}>
+                    {t('ключей: {n}', { n: a.keys })}
+                    {a.weak.length > 0 ? `, ${t('слабых: {n}', { n: a.weak.length })}` : ''}
+                  </span>
                 )}
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-      <div className="muted small">
+                {a.nopasswd && <span className="acc-tag">sudo {t('без пароля')}</span>}
+              </div>
+              <div className={`acc-last ${a.stale && !a.muted ? 't-degraded' : 'muted'}`}>
+                {a.last ? t('вход {d}', { d: new Date(a.last * 1000).toLocaleDateString() }) : t('не входили')}
+              </div>
+              {a.stale && !isViewer && (
+                <button className="ghost small row-act acc-act" disabled={busy === ACCESS_MUTE + a.name}
+                  onClick={() => toggle(ACCESS_MUTE + a.name, !a.muted)}>
+                  {a.muted ? t('вернуть') : t('учетка нужна')}
+                </button>
+              )}
+            </div>
+          )
+        })}
+      </div>
+      <div className="net-foot">
         {t('Входы по журналу sshd видны с {d}. Ненужную учетку заблокируйте (usermod -L -e 1 <имя>) или уберите ее ключи.', {
           d: v.seen_since ? new Date(v.seen_since * 1000).toLocaleDateString() : '-',
         })}
@@ -2734,36 +2779,45 @@ function SshLogin({ server: s }: { server: Server }) {
   const v = s.ssh
   if (!v) return null
   const probs = (s.problems ?? []).filter((p) => p.kind === 'ssh_risk')
-  const adv = s.ssh_advice ?? []
+  const notes = probs.length > 0 ? probs : (s.ssh_advice ?? [])
   const openText = v.open === true ? t('открыт в интернет') : v.open === false ? t('закрыт снаружи') : t('снаружи не проверялся')
   const rootText = v.root === 'yes' ? (v.root_password ? t('по паролю') : t('по ключу')) : v.root === 'no' ? t('запрещен') : t('только по ключу')
+  const top = v.fail_top ?? []
   return (
-    <div className="detail-inc" id="mcard-ssh">
-      <div className="chart-cap">SSH</div>
-      {probs.map((p) => (
-        <div key={p.text} className={`small ${p.level >= 2 ? 't-down' : 't-degraded'}`}>{p.text}</div>
+    <div className="chart-card net-card" id="mcard-ssh">
+      <div className="net-head">
+        <div className="chart-cap">SSH</div>
+      </div>
+      {notes.map((p) => (
+        <div key={p.text} className={p.level >= 2 ? 'net-prob' : 'net-note'}>{p.text}</div>
       ))}
-      {probs.length === 0 && adv.map((a) => (
-        <div key={a.text} className={`small ${a.level >= 2 ? 't-down' : 't-degraded'}`}>{a.text}</div>
-      ))}
-      <table className="exp-table psi-table small">
-        <tbody>
-          <tr><td>{t('порт')}</td><td>{v.ports.join(', ')} · <span className={v.open ? 't-degraded' : 'muted'}>{openText}</span></td></tr>
-          <tr><td>{t('вход по паролю')}</td><td className={v.password && v.open ? 't-degraded' : ''}>{v.password ? t('включен') : t('выключен, только ключи')}</td></tr>
-          <tr><td>{t('root')}</td><td className={v.root_password ? 't-down' : ''}>{rootText}</td></tr>
-          <tr><td>{t('защита от перебора')}</td><td>{v.guard || t('нет')}</td></tr>
-          {(v.fail_top ?? []).length > 0 && (
-            <tr>
-              <td>{t('перебор идет с')}</td>
-              <td className="mono">{(v.fail_top ?? []).map((x) => `${x.ip} (${x.n})`).join(', ')}</td>
-            </tr>
-          )}
-          <tr>
-            <td>{t('неудачных входов за 10 минут')}</td>
-            <td>{v.fail}{v.accepted_password > 0 && <span className="muted"> · {t('входов по паролю: {n}', { n: v.accepted_password })}</span>}</td>
-          </tr>
-        </tbody>
-      </table>
+      <div className="net-tiles net-tiles-text">
+        <NetTile label={t('Порт')} value={v.ports.join(', ')} sub={openText} />
+        <NetTile
+          label={t('Вход по паролю')}
+          value={v.password ? t('включен') : t('выключен')}
+          sub={v.password ? undefined : t('только ключи')}
+          tone={v.password ? (v.open ? 'warn' : undefined) : 'ok'}
+        />
+        <NetTile label={t('Вход root')} value={rootText} tone={v.root_password ? 'bad' : v.root === 'no' ? 'ok' : undefined} />
+        <NetTile
+          label={t('Защита от перебора')}
+          value={v.guard || t('нет')}
+          tone={v.guard ? 'ok' : v.open ? 'warn' : undefined}
+        />
+        <NetTile
+          label={t('Неудачных входов за 10 минут')}
+          value={String(v.fail)}
+          sub={v.accepted_password > 0 ? t('входов по паролю: {n}', { n: v.accepted_password }) : undefined}
+        />
+      </div>
+      {top.length > 0 && (
+        <div className="net-foot">
+          <div>
+            {t('перебор идет с')}: <span className="mono">{top.map((x) => `${x.ip} (${x.n})`).join(', ')}</span>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
@@ -5340,9 +5394,11 @@ function ServerDetail({
               </div>,
             )}
           </div>
-          <OpenPorts server={s} onChanged={onChanged} />
-          <SshLogin server={s} />
-          <AccessCard server={s} onChanged={onChanged} />
+          <div className="net-cards">
+            <OpenPorts server={s} onChanged={onChanged} />
+            <SshLogin server={s} />
+            <AccessCard server={s} onChanged={onChanged} />
+          </div>
         </MetricSection>
 
         <MetricSection id="disk" title={t('Диск')}>

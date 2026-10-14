@@ -984,12 +984,10 @@ input:focus {
 .unit-hint { margin-top: 0.3rem; }
 .unit-actions { display: flex; align-items: center; gap: 0.4rem; flex-wrap: wrap; margin-top: 0.35rem; }
 /* что открыто в интернет */
-.exposure { margin-top: 0.8rem; }
 .exp-table { width: 100%; border-collapse: collapse; }
 .exp-table td { padding: 0.3rem 0.5rem 0.3rem 0; border-top: 1px dashed var(--border); vertical-align: top; overflow-wrap: anywhere; }
 .exp-table tr:first-child td { border-top: 0; }
 .exp-table th { padding: 0.3rem 0.5rem 0.2rem 0; text-align: left; font-weight: 500; color: var(--text-muted); white-space: nowrap; border-bottom: 1px solid var(--border); }
-.exp-own { margin: 0.3rem 0; padding: 0.35rem 0.6rem; border-left: 3px solid var(--degraded); background: var(--hover); }
 .exp-table td:first-child { width: 4.5rem; white-space: nowrap; }
 .exp-table td:last-child { text-align: right; white-space: nowrap; }
 .exp-bad td:first-child { color: var(--down); font-weight: 600; }
@@ -1039,6 +1037,26 @@ input:focus {
 .net-tile-bad { border-color: rgba(239, 68, 68, 0.45); }
 .net-tile-bad .net-tile-value, .net-tone-bad { color: var(--down); }
 .net-tile-muted .net-tile-value { color: var(--text-muted); font-size: 1.05rem; padding: 0.15rem 0 0.1rem; }
+/* плитки со словами вместо чисел ("включен", "по ключу"): мельче, чтобы не резались */
+.net-tiles-text .net-tile-value { font-size: 1.05rem; padding: 0.15rem 0 0.1rem; white-space: normal; }
+.net-sub { color: var(--text-muted); font-size: 0.8rem; margin-top: -0.3rem; overflow-wrap: anywhere; }
+.net-note { font-size: 0.85rem; background: rgba(245, 158, 11, 0.08); border: 1px solid rgba(245, 158, 11, 0.35); border-radius: 6px; padding: 0.35rem 0.6rem; }
+/* "Соединения": открытые порты и учетки строками, как связи в "Сети" */
+.loc-res.exp-row { gap: 0.7rem; }
+.exp-port { flex: 0 0 3.4rem; font-weight: 600; font-variant-numeric: tabular-nums; }
+.exp-what { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
+.exp-state { flex: 0 0 auto; white-space: nowrap; font-size: 0.85rem; }
+.exp-act { flex: 0 0 auto; white-space: nowrap; }
+.exp-row .row-act, .acc-row .row-act { margin: 0; }
+.net-card .exp-closed { margin-top: 0; }
+.loc-res.acc-row { gap: 0.7rem; }
+.acc-main { flex: 1 1 auto; min-width: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 0.3rem 0.4rem; }
+.acc-name { font-weight: 600; margin-right: 0.2rem; overflow-wrap: anywhere; }
+.acc-tag { font-size: 0.74rem; color: var(--text-muted); border: 1px solid var(--border); border-radius: 4px; padding: 0 0.35rem; white-space: nowrap; }
+.acc-tag-warn { color: var(--degraded); border-color: rgba(245, 158, 11, 0.45); }
+.acc-tag-bad { color: var(--down); border-color: rgba(239, 68, 68, 0.45); }
+.acc-last { flex: 0 0 auto; font-size: 0.85rem; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.acc-act { flex: 0 0 auto; }
 .net-tone-muted { color: var(--text-muted); }
 .net-foot { color: var(--text-muted); font-size: 0.78rem; display: flex; flex-direction: column; gap: 0.2rem; }
 /* строки связей: точка состояния, имя и адрес, мини-график за час, время подключения */
@@ -1099,6 +1117,11 @@ input:focus {
   .net-head { flex-wrap: wrap; }
   .net-tile-value { font-size: 1.25rem; }
   .net-tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  /* узко: точка | порт | что слушает, состояние и кнопка второй строкой */
+  .loc-res.exp-row { display: grid; grid-template-columns: 9px 3rem minmax(0, 1fr); column-gap: 0.55rem; row-gap: 0.25rem; }
+  .exp-state, .exp-act { grid-column: 3; justify-self: start; }
+  .loc-res.acc-row { display: grid; grid-template-columns: 9px minmax(0, 1fr); column-gap: 0.55rem; row-gap: 0.25rem; }
+  .acc-last, .acc-act { grid-column: 2; justify-self: start; }
 }
 .changes { margin: 0.8rem 0; }
 .changes .exp-table td:first-child { width: 10.5rem; }
@@ -1113,14 +1136,6 @@ input:focus {
 .psi-table thead td { border-top: 0; }
 @media (max-width: 640px) {
   .exp-table td:last-child { white-space: normal; }
-  /* открытые порты на телефоне: кнопка уходит под описание, а не сжимается в столбик по букве */
-  .exposure .exp-table tr { display: grid; grid-template-columns: 3.5rem 1fr auto; column-gap: 0.5rem; }
-  .exposure .exp-table tbody tr { border-top: 1px dashed var(--border); padding: 0.3rem 0; }
-  .exposure .exp-table tbody tr:first-child { border-top: 0; }
-  .exposure .exp-table td { border-top: 0; padding: 0; width: auto; }
-  .exposure .exp-table td:last-child { grid-column: 2 / -1; text-align: left; }
-  .exposure .exp-table td:last-child:empty, .exposure .exp-table th:last-child { display: none; }
-  .exposure .exp-table .row-act { white-space: nowrap; margin: 0.25rem 0 0; }
 }
 .du-item-head { display: flex; align-items: center; gap: 0.5rem; }
 .du-item-name { flex: 1; min-width: 0; overflow-wrap: anywhere; }
