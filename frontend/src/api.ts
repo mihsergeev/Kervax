@@ -161,7 +161,7 @@ export function disable2FA(otp: string): Promise<TwoFAStatus> {
 
 // --- мониторы сайтов/сервисов ---
 
-export type CheckType = 'http' | 'tcp_port' | 'cert' | 'push'
+export type CheckType = 'http' | 'tcp_port' | 'cert' | 'push' | 'dns'
 export type CheckStatus = 'up' | 'degraded' | 'down' | 'unknown'
 
 // разбивка проверки по IP (режим «проверять все адреса домена»)
@@ -192,6 +192,13 @@ export type Check = {
   push_grace?: number
   push_at?: string | null
   push_fail?: string
+  // dns: тип записи, ожидаемое по строке, equal | contains, резолвер; baseline - запомненный ответ
+  dns_type?: string
+  dns_expect?: string
+  dns_match?: 'equal' | 'contains'
+  dns_server?: string
+  dns_baseline?: string[] | null
+  dns_last?: string[] | null
   note?: string
   note_by?: string
   note_at?: string | null
@@ -271,6 +278,10 @@ export type CheckForm = {
   target: string
   push_period?: number
   push_grace?: number
+  dns_type?: string
+  dns_expect?: string
+  dns_match?: 'equal' | 'contains'
+  dns_server?: string
   group_name?: string
   port?: number
   enabled?: boolean
@@ -548,6 +559,10 @@ export function checkToForm(c: Check): CheckForm {
     extra_paths: c.extra_paths ?? [],
     push_period: c.push_period,
     push_grace: c.push_grace,
+    dns_type: c.dns_type,
+    dns_expect: c.dns_expect,
+    dns_match: c.dns_match,
+    dns_server: c.dns_server,
   }
 }
 
@@ -2274,4 +2289,9 @@ export function updateMaint(id: number, body: MaintIn): Promise<MaintWindow> {
 
 export function deleteMaint(id: number): Promise<void> {
   return api<void>(`/api/maintenance/${id}`, { method: 'DELETE' })
+}
+
+// DNS-монитор: принять текущий ответ как правильный и сразу перепроверить
+export function acceptDns(id: number): Promise<CheckRun> {
+  return api<CheckRun>(`/api/checks/${id}/dns-accept`, { method: 'POST' })
 }

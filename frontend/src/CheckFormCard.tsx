@@ -167,18 +167,27 @@ export function CheckFormCard({
               const type = e.target.value as CheckType
               // у push адреса нет: панель выдаст свой, а форме нужно непустое поле
               if (type === 'push') set({ type, target: 'push', push_period: form.push_period || 3600 })
+              else if (type === 'dns')
+                // DNS меняется редко: раз в 5 минут хватает, а резолверы не любят частых вопросов
+                set({
+                  type,
+                  target: form.target === 'push' ? '' : form.target,
+                  dns_type: form.dns_type || 'A',
+                  interval_seconds: (form.interval_seconds ?? 60) < 300 ? 300 : form.interval_seconds,
+                })
               else set({ type, target: form.target === 'push' ? '' : form.target })
             }}
           >
             <option value="http">{t('HTTP(S) — сайт/эндпоинт')}</option>
             <option value="tcp_port">{t('TCP-порт')}</option>
             <option value="push">{t('Push — сигнал от скрипта или крона')}</option>
+            <option value="dns">{t('DNS — записи домена')}</option>
           </select>
         </label>
         {form.type === 'push' && <PushFields form={form} set={set} />}
         {form.type !== 'push' && (
         <label className="field field-wide">
-          <span>{form.type === 'http' ? t('URL или домен') : t('Хост (домен/IP)')}</span>
+          <span>{form.type === 'http' ? t('URL или домен') : form.type === 'dns' ? t('Домен') : t('Хост (домен/IP)')}</span>
           <input
             value={form.target}
             onChange={(e) => set({ target: e.target.value })}
@@ -191,6 +200,7 @@ export function CheckFormCard({
           )}
         </label>
         )}
+        {form.type === 'dns' && <DnsFields form={form} set={set} />}
         {form.type === 'http' && (
           <label className="field field-wide">
             <span>{t('Дополнительные пути')}</span>
@@ -604,6 +614,61 @@ function PushFields({ form, set }: { form: CheckForm; set: (p: Partial<CheckForm
       <span className="field-hint muted small field-wide">
         {t('Адрес для скрипта появится в карточке монитора после сохранения. Нет сигнала дольше периода и допуска или скрипт сообщил об ошибке - алерт.')}
       </span>
+    </>
+  )
+}
+
+const DNS_TYPES = ['A', 'AAAA', 'CNAME', 'MX', 'NS', 'TXT']
+
+// DNS-монитор: какую запись спрашивать и что ждать. Без ожидаемого панель запомнит первый ответ
+// и пришлет алерт, когда он изменится.
+function DnsFields({ form, set }: { form: CheckForm; set: (p: Partial<CheckForm>) => void }) {
+  const { t } = useI18n()
+  return (
+    <>
+      <label className="field">
+        <span>{t('Запись')}</span>
+        <select value={form.dns_type || 'A'} onChange={(e) => set({ dns_type: e.target.value })}>
+          {DNS_TYPES.map((x) => (
+            <option key={x} value={x}>
+              {x}
+            </option>
+          ))}
+        </select>
+      </label>
+      <label className="field">
+        <span>{t('DNS-сервер (IP)')}</span>
+        <input
+          value={form.dns_server ?? ''}
+          placeholder={t('системный')}
+          onChange={(e) => set({ dns_server: e.target.value })}
+        />
+      </label>
+      <label className="field field-wide">
+        <span>{t('Ожидаемый ответ, по строке')}</span>
+        <textarea
+          className="mono"
+          rows={Math.min(Math.max((form.dns_expect ?? '').split('\n').length, 2), 6)}
+          value={form.dns_expect ?? ''}
+          placeholder={form.dns_type === 'MX' ? 'mx1.example.com\nmx2.example.com' : '203.0.113.10'}
+          onChange={(e) => set({ dns_expect: e.target.value })}
+        />
+        <span className="field-hint muted small">
+          {t('Пусто - запомним первый ответ и пришлем алерт, когда он изменится. У MX можно без приоритета.')}
+        </span>
+      </label>
+      {(form.dns_expect ?? '').trim() !== '' && (
+        <label className="field">
+          <span>{t('Сравнение')}</span>
+          <select
+            value={form.dns_match ?? 'equal'}
+            onChange={(e) => set({ dns_match: e.target.value as 'equal' | 'contains' })}
+          >
+            <option value="equal">{t('ответ совпадает целиком')}</option>
+            <option value="contains">{t('ответ содержит все эти')}</option>
+          </select>
+        </label>
+      )}
     </>
   )
 }

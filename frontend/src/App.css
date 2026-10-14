@@ -5942,3 +5942,13 @@ button.type-chip { cursor: pointer; border: 1px solid transparent; font-family: 
   accent-color: #3563e9;
   cursor: pointer;
 }
+
+/* DNS-монитор в карточке */
+.dns-info {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.3rem;
+  margin-bottom: 0.6rem;
+  overflow-wrap: anywhere;
+}

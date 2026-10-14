@@ -255,6 +255,14 @@ class Check(Base):
     note_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # известная проблема монитора: {text, by, at, until, gone_at, reminded_at} (app/known.py)
     known_issue: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    # DNS-монитор: какую запись спрашивать, что ждать (по строке; пусто - запомнить первый
+    # ответ и следить за изменениями), equal или contains, свой резолвер (пусто - системный)
+    dns_type: Mapped[str] = mapped_column(String(8), default="")
+    dns_expect: Mapped[str] = mapped_column(Text, default="")
+    dns_match: Mapped[str] = mapped_column(String(8), default="equal")
+    dns_server: Mapped[str] = mapped_column(String(64), default="")
+    dns_baseline: Mapped[list | None] = mapped_column(JSON, nullable=True)  # запомненный ответ
+    dns_last: Mapped[list | None] = mapped_column(JSON, nullable=True)      # последний ответ
     last_latency_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     last_value: Mapped[float | None] = mapped_column(Float, nullable=True)  # дни сертификата и т.п.
     last_checked_at: Mapped[datetime | None] = mapped_column(

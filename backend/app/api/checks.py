@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlparse
 
+import ipaddress
 import secrets
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Query, Request, status
@@ -442,7 +443,7 @@ async def _first_check(session_factory, check_id: int) -> None:
 def _host_of(check: Check) -> str:
     """Хост, который монитор реально проверяет — чтобы сопоставить с доменом сервиса."""
     target = (check.target or "").strip().lower()
-    if not target or check.type == "push":
+    if not target or check.type in ("push", "dns"):
         return ""
     if check.type == "http":
         if "://" not in target:
@@ -833,6 +834,7 @@ async def create_check(
         )
     check = Check(**body.model_dump())
     _push_defaults(check)
+    _dns_defaults(check)
     _one_probe_source(check)
     # новый монитор — в конец списка (иначе прыгнул бы наверх при ручном порядке)
     max_order = await session.scalar(select(func.max(Check.sort_order)))
@@ -921,6 +923,54 @@ async def rotate_push_token(check_id: int, user: CurrentUser, session: SessionDe
     return check
 
 
+def _dns_defaults(check: Check) -> None:
+    """DNS-монитор спрашивает резолвер, а не сайт: имя без схемы и пути, тип по умолчанию A,
+    резолвер - только IP. Повторы и локации ему ни к чему, сроки TLS и домена тоже."""
+    if check.type != "dns":
+        return
+    t = (check.target or "").strip().lower()
+    t = t.split("://", 1)[-1].split("/", 1)[0].split("?", 1)[0]
+    if t.count(":") == 1:
+        t = t.split(":", 1)[0]
+    check.target = t.rstrip(".")
+    if not check.target or len(check.target) > 253 or any(ch.isspace() or ch in "/@" for ch in check.target):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Для DNS-монитора нужно имя домена, например example.com")
+    check.dns_type = check.dns_type or "A"
+    srv = (check.dns_server or "").strip()
+    if srv:
+        try:
+            ipaddress.ip_address(srv)
+        except ValueError:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "DNS-сервер - это IP-адрес, например 1.1.1.1") from None
+    check.dns_server = srv
+    check.port = 0
+    check.retries = min(check.retries or 0, 1)
+    check.check_locations = False
+    check.probe_local = False
+    check.check_all_ips = False
+    check.check_ssl = False
+    check.check_domain = False
+    check.extra_paths = []
+
+
+@router.post("/{check_id}/dns-accept", response_model=CheckRunOut)
+async def dns_accept(
+    check_id: int, user: CurrentUser, session: SessionDep, request: Request, background: BackgroundTasks
+) -> CheckRunOut:
+    """Принять текущий ответ DNS как правильный (переезд был плановый) и сразу перепроверить:
+    монитор зеленеет, отбой уходит как обычно."""
+    check = await _get_or_404(check_id, session, user)
+    if check.type != "dns" or not check.dns_last:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Принимать нечего: ответа DNS еще не было")
+    check.dns_baseline = list(check.dns_last)
+    await session.commit()
+    await audit.record(session, user.username, "dns_accept", check.name, ", ".join(check.dns_baseline)[:500])
+    outcome, now, pending = await _execute_and_store(session, check)
+    background.add_task(send_alerts_soon, request.app.state.session_factory, pending, now)
+    return _run_out(check, user, run_status=outcome.status, run_message=outcome.message[:512],
+                    run_latency_ms=outcome.latency_ms, run_at=now, run_source="panel")
+
+
 def _one_probe_source(check: Check) -> None:
     """Проверять можно ИЛИ изнутри сервера, ИЛИ из локаций, но не одновременно.
 
@@ -967,9 +1017,15 @@ async def update_check(
 ) -> Check:
     check = await _get_or_404(check_id, session, user)
     old_paths = list(check.extra_paths or [])
+    old_dns = (check.target, check.dns_type, check.dns_server)
     for field, value in body.model_dump(exclude_unset=True).items():
         setattr(check, field, value)
     _push_defaults(check)
+    _dns_defaults(check)
+    if check.type == "dns" and (check.target, check.dns_type, check.dns_server) != old_dns:
+        # спрашиваем другое - старый запомненный ответ к нему не относится
+        check.dns_baseline = None
+        check.dns_last = None
     new_paths = list(check.extra_paths or [])
     if new_paths != old_paths:
         # a new path of a local monitor has no agent result yet: waiting, not down

@@ -7,6 +7,7 @@ import {
   checkToForm,
   checkUptime,
   listIncidents,
+  acceptDns,
   dropCheckKnown,
   rotatePushToken,
   setCheckKnown,
@@ -362,7 +363,7 @@ export function CheckDetail({ check, groups, onClose, onSaved, onRun, onDelete, 
             <span className={`sdot sdot-${check.last_status}`} />
             <h3>{check.name}</h3>
             <span className="type-chip">
-              {{ http: 'HTTP', tcp_port: 'TCP', cert: 'TLS', push: 'PUSH' }[check.type]}
+              {{ http: 'HTTP', tcp_port: 'TCP', cert: 'TLS', push: 'PUSH', dns: 'DNS' }[check.type]}
             </span>
           </div>
           <div className="detail-head-actions">
@@ -441,6 +442,8 @@ export function CheckDetail({ check, groups, onClose, onSaved, onRun, onDelete, 
         )}
         {check.type === 'push' ? (
           <PushInfo check={check} canEdit={!isViewer} />
+        ) : check.type === 'dns' ? (
+          <DnsInfo check={check} canEdit={!isViewer} onAccepted={() => onSaved?.()} />
         ) : (
           <div className="detail-target">
             {check.target}
@@ -1081,6 +1084,57 @@ function PushInfo({ check, canEdit }: { check: Check; canEdit: boolean }) {
           {t('Выдать новый адрес')}
         </button>
       )}
+    </div>
+  )
+}
+
+// DNS-монитор: что спрашиваем, что ждем или что запомнили, что ответили сейчас. Ответ сменился
+// по плану (переехали) - "принять" делает его правильным, монитор зеленеет сразу.
+function DnsInfo({ check, canEdit, onAccepted }: { check: Check; canEdit: boolean; onAccepted: () => void }) {
+  const { t } = useI18n()
+  const [busy, setBusy] = useState(false)
+  const [err, setErr] = useState('')
+  const expect = (check.dns_expect ?? '').split('\n').map((x) => x.trim()).filter(Boolean)
+  const base = check.dns_baseline ?? []
+  const last = check.dns_last ?? []
+  const same = (a: string[], b: string[]) => [...a].sort().join('|') === [...b].sort().join('|')
+  const changed = expect.length === 0 && base.length > 0 && last.length > 0 && !same(base, last)
+  const accept = async () => {
+    setBusy(true)
+    setErr('')
+    try {
+      await acceptDns(check.id)
+      onAccepted()
+    } catch (e) {
+      setErr(String((e as Error).message || e))
+    } finally {
+      setBusy(false)
+    }
+  }
+  return (
+    <div className="dns-info">
+      <div className="detail-target">
+        {check.target} <span className="type-chip">{check.dns_type || 'A'}</span>
+        {check.dns_server && <span className="muted small"> @{check.dns_server}</span>}
+      </div>
+      <div className="muted small">
+        {expect.length > 0
+          ? `${check.dns_match === 'contains' ? t('ждем, что ответ содержит') : t('ждем ответ')}: ${expect.join(', ')}`
+          : base.length > 0
+            ? `${t('запомнили')}: ${base.join(', ')}`
+            : t('ответа еще не было: первый запомним и будем следить за изменениями')}
+      </div>
+      {last.length > 0 && (
+        <div className="small">
+          {t('сейчас')}: <span className="mono">{last.join(', ')}</span>
+        </div>
+      )}
+      {changed && canEdit && (
+        <button className="ghost small" disabled={busy} onClick={accept}>
+          {t('Принять новый ответ как правильный')}
+        </button>
+      )}
+      {err && <div className="muted small">{err}</div>}
     </div>
   )
 }
