@@ -70,10 +70,10 @@ func TestPairCountersAndConntrack(t *testing.T) {
 }
 
 func TestTCPRate(t *testing.T) {
-	prev := tcpCtr{ok: true, okExt: true, okCt: true, out: 1000, retrans: 10, listenOvf: 5, ctDrops: 0}
-	cur := tcpCtr{ok: true, okExt: true, okCt: true, out: 2000, retrans: 60, listenOvf: 35, ctDrops: 20}
+	prev := tcpCtr{ok: true, okExt: true, okCt: true, out: 1000, retrans: 10, listenOvf: 5, ctDrops: 0, synRetrans: 4}
+	cur := tcpCtr{ok: true, okExt: true, okCt: true, out: 2000, retrans: 60, listenOvf: 35, ctDrops: 20, synRetrans: 44}
 	r := tcpRate(cur, prev, 10)
-	if r == nil || r.Out != 100 || r.Retrans != 5 || r.ListenOvf != 3 || r.CtDrop != 2 {
+	if r == nil || r.Out != 100 || r.Retrans != 5 || r.ListenOvf != 3 || r.CtDrop != 2 || r.SynRetrans != 4 {
 		t.Fatalf("rate: %+v", r)
 	}
 	// счетчик сбросился (перезагрузка) - не отрицательная скорость
