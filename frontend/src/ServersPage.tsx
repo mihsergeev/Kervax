@@ -70,6 +70,7 @@ import { NoteBar } from './NoteBar'
 import { ServerParentBar } from './ParentBar'
 import { TimelineCard } from './TimelineCard'
 import { PackagesCard } from './PackagesCard'
+import { JournalCard, JournalModal, journalBlocker } from './UnitJournal'
 import { KnownServerList } from './KnownDialog'
 import { MaintBanner, MaintChip } from './MaintModal'
 
@@ -779,7 +780,7 @@ const SEC_OF_CARD: Record<string, string> = {
   cpu: 'cpu', throttle: 'cpu', temp: 'cpu', cpueat: 'cpu',
   mem: 'mem', oom: 'mem',
   conntrack: 'conn', exposure: 'conn', nethealth: 'net', neterr: 'net', diskfill: 'disk', disktemp: 'disk', disk: 'disk', diskhealth: 'disk',
-  units: 'proc', unitloop: 'proc', pressure: 'proc', changes: 'proc', pkgs: 'proc',
+  units: 'proc', unitloop: 'proc', pressure: 'proc', changes: 'proc', pkgs: 'proc', journal: 'proc',
   web: 'web', web5xx: 'web',
 }
 
@@ -2283,8 +2284,10 @@ function LoopingUnits({ server: s, onChanged }: { server: Server; onChanged: () 
   const { t } = useI18n()
   const { isViewer } = useAuth()
   const [busy, setBusy] = useState(false)
+  const [jr, setJr] = useState<string | null>(null)
   const rows = (s.problems ?? []).filter((p) => p.kind === 'unit_loop' && p.unit)
   if (!rows.length) return null
+  const canJournal = !isViewer && !journalBlocker(s)
   const mute = async (unit: string) => {
     if (!window.confirm(t('Не алертить по {u}? Юнит перестанет алертить и как упавший, и как перезапускающийся.', { u: unit }))) return
     setBusy(true)
@@ -2313,6 +2316,11 @@ function LoopingUnits({ server: s, onChanged }: { server: Server; onChanged: () 
           </div>
           {!isViewer && (
             <div className="unit-actions small">
+              {canJournal && (
+                <button className="ghost small row-act" onClick={() => setJr(p.unit!)}>
+                  {t('Журнал')}
+                </button>
+              )}
               <button className="ghost small row-act" disabled={busy} onClick={() => mute(p.unit!)}>
                 🔕 {t('не алертить по этому юниту')}
               </button>
@@ -2320,6 +2328,7 @@ function LoopingUnits({ server: s, onChanged }: { server: Server; onChanged: () 
           )}
         </div>
       ))}
+      {jr && <JournalModal server={s} unit={jr} onClose={() => setJr(null)} />}
     </div>
   )
 }
@@ -2738,9 +2747,11 @@ function FailedUnits({ server: s, onChanged }: { server: Server; onChanged: () =
   const [picking, setPicking] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const [copied, setCopied] = useState<string | null>(null)
+  const [jr, setJr] = useState<string | null>(null)
   const r = s.last_report
   const ub = unitsBlock(r)
   if (!ub || !ub.units.length) return null
+  const canJournal = !isViewer && !journalBlocker(s)
   const agentOk = verAtLeast(r?.agent_version, UNITS_AGENT)
   const canFix = ub.fix && agentOk && !isViewer
   const ref = r?.clock_unix || ub.ts
@@ -2858,6 +2869,11 @@ function FailedUnits({ server: s, onChanged }: { server: Server; onChanged: () =
                 </div>
               )}
               <div className="unit-actions small">
+                {canJournal && (
+                  <button className="ghost small row-act" onClick={() => setJr(u.unit)}>
+                    {t('Журнал')}
+                  </button>
+                )}
                 {canFix && !us?.busy && (
                   <>
                     <button className="ghost small row-act" onClick={() => run(u.unit, 'restart')}>
@@ -2905,6 +2921,7 @@ function FailedUnits({ server: s, onChanged }: { server: Server; onChanged: () =
             </div>
           )
         })}
+      {jr && <JournalModal server={s} unit={jr} onClose={() => setJr(null)} />}
     </div>
   )
 }
@@ -5407,6 +5424,7 @@ function ServerDetail({
           <LoopingUnits server={s} onChanged={onChanged} />
           <FailedUnits server={s} onChanged={onChanged} />
           <NoBootUnits server={s} onChanged={onChanged} />
+          <JournalCard server={s} />
           <ChangesFeed server={s} onChanged={onChanged} />
           <PackagesCard server={s} onUnauthorized={onUnauthorized} />
           <div className="chart-grid">

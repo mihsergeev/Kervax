@@ -1252,6 +1252,31 @@ input:focus {
   background: #1b1e26;
   color: #dde2ea;
 }
+/* журнал systemd по запросу (UnitJournal.tsx) */
+.jr-unit {
+  display: flex;
+  gap: 0.4rem;
+  align-items: center;
+  flex: 1 1 16rem;
+  min-width: 0;
+}
+.jr-unit input {
+  flex: 1;
+  min-width: 0;
+}
+.jr-filter {
+  flex: 1 1 14rem;
+  min-width: 0;
+}
+.logs-pre .jr-err {
+  color: #ff8a80;
+}
+.logs-pre .jr-warn {
+  color: #ffd180;
+}
+.logs-pre.jr-stale {
+  opacity: 0.55;
+}
 .logs-empty {
   margin: 0.5rem 0;
   padding: 1.4rem 0.7rem;

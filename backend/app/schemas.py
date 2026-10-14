@@ -1528,13 +1528,16 @@ _BACKUP_PATH = r"^/[A-Za-z0-9._/+-]+$"  # '+' — для /lost+found (станд
 
 
 _UNIT_NAME = r"^$|^[A-Za-z0-9@._:\\][A-Za-z0-9@._:\\-]*\.(service|socket|timer|mount|automount|swap|path)$"
+# unit_journal читает еще весь журнал (_all) и ядро (_kernel)
+_UNIT_OR_ALL = _UNIT_NAME + r"|^_(all|kernel)$"
 
 
 class BackupCommandIn(BaseModel):
     """Панель → очередь: управление restic-бэкапом ноды (через узкий helper).
     Только белый список: set_paths (include/exclude), set_schedule, run_now."""
 
-    action: str = Field(pattern="^(set_paths|set_schedule|run_now|dump_setup|dump_remove|restic_update|update_image|timesync|disk_fix|unit_fix)$")
+    action: str = Field(pattern="^(set_paths|set_schedule|run_now|dump_setup|dump_remove|restic_update|update_image|timesync|disk_fix|unit_fix"
+                        "|unit_journal)$")
     # include/exclude - для путей бэкапа; preview/run - для disk_fix; restart/reset - для unit_fix
     mode: str = Field(default="exclude", pattern="^(include|exclude|preview|run|restart|reset)$")
     paths: list[str] = Field(default_factory=list, max_length=200)
@@ -1559,7 +1562,12 @@ class BackupCommandIn(BaseModel):
     mount: str = Field(default="", max_length=256, pattern=r"^$|^/[A-Za-z0-9/._-]*$")
     # unit_fix: упавший юнит systemd (helper units-setup трогает его, только пока тот упал).
     # Обратный слэш - так systemd экранирует имена mount-юнитов (mnt-my\x20disk.mount).
-    unit: str = Field(default="", max_length=200, pattern=_UNIT_NAME)
+    unit: str = Field(default="", max_length=200, pattern=_UNIT_OR_ALL)
+    # unit_journal: журнал юнита (или _all / _kernel) за последние since_min минут, не больше
+    # lines строк, приоритет не ниже prio. Те же пределы зажимают агент и helper.
+    since_min: int = Field(default=60, ge=1, le=10080)
+    lines: int = Field(default=300, ge=10, le=1000)
+    prio: str = Field(default="info", pattern="^(err|warning|info)$")
 
     @field_validator("paths")
     @classmethod

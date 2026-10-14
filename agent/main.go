@@ -43,7 +43,7 @@ import (
 	"time"
 )
 
-const version = "2.28"
+const version = "2.29"
 
 // Публичный ключ для проверки подписи релизов агента (Ed25519, base64).
 // ПУСТО по умолчанию → самообновление ВЫКЛЮЧЕНО (агент никогда не заменяет себя).
@@ -807,6 +807,11 @@ type backupCommand struct {
 	DumpDir     string `json:"dump_dir,omitempty"`     // dump_setup: каталог дампов
 	DumpKeep    int    `json:"dump_keep,omitempty"`    // dump_setup: сколько последних хранить
 	DumpMinFree int    `json:"dump_minfree,omitempty"` // dump_setup: минимум свободного места, %
+	// unit_journal: журнал юнита (Name, или _all / _kernel) за Since минут, не больше Lines
+	// строк, приоритет не ниже Prio (err / warning / info)
+	Since int    `json:"since,omitempty"`
+	Lines int    `json:"lines,omitempty"`
+	Prio  string `json:"prio,omitempty"`
 }
 
 // панель кладёт это в ответ, когда для сервера выставлена target-версия
@@ -5933,6 +5938,25 @@ func runBackupCommand(panelURL, token string, cmd backupCommand) {
 		res, out := spoolInFor(unitsReqDir, unitsResDir, cmd.ID, lines, "units-setup", 6*time.Minute)
 		postBackupResult(panelURL, token, cmd.ID, res, out)
 		return
+	case "unit_journal":
+		// журнал юнита, всей системы или ядра - только чтение. Helper units-setup 0.4 отдает
+		// текст сжатым в base64 одной строкой; панели - текстом, хвост в пределах ее лимита
+		lines, ok := unitJournalLines(cmd)
+		if !ok {
+			postBackupResult(panelURL, token, cmd.ID, false, "неизвестный юнит")
+			return
+		}
+		res, out := spoolInFor(unitsReqDir, unitsResDir, cmd.ID, lines, "units-setup", 90*time.Second)
+		if res {
+			text, err := unpackJournal(out)
+			if err != nil {
+				res, out = false, "journal: "+err.Error()
+			} else {
+				out = tailText(text, journalMaxOut)
+			}
+		}
+		postBackupResult(panelURL, token, cmd.ID, res, out)
+		return
 	default:
 		postBackupResult(panelURL, token, cmd.ID, false, "неизвестное действие")
 		return
@@ -6109,6 +6133,62 @@ func unitFixLines(cmd backupCommand) ([]string, bool) {
 	return []string{"op=" + cmd.Mode, "unit=" + u}, true
 }
 
+// journalMaxOut - сколько текста журнала отдавать панели: она принимает до 100 000 символов
+const journalMaxOut = 90_000
+
+// unitJournalLines - запрос helper'у units-setup на чтение журнала. Юнит проверяется так же,
+// как для перезапуска; _all - весь журнал, _kernel - ядро. Числа helper еще раз зажимает сам.
+func unitJournalLines(cmd backupCommand) ([]string, bool) {
+	u := cmd.Name
+	if u != "_all" && u != "_kernel" {
+		if _, ok := unitFixLines(backupCommand{Mode: "restart", Name: u}); !ok {
+			return nil, false
+		}
+	}
+	since := min(max(cmd.Since, 1), 10080)
+	n := cmd.Lines
+	if n <= 0 {
+		n = 300
+	}
+	n = min(max(n, 10), 1000)
+	prio := cmd.Prio
+	if prio != "err" && prio != "warning" {
+		prio = "info"
+	}
+	return []string{"op=journal", "unit=" + u, fmt.Sprintf("since=%d", since), fmt.Sprintf("lines=%d", n),
+		"prio=" + prio}, true
+}
+
+// unpackJournal - base64 от gzip, как его пишет helper, в текст (не больше 4 МБ)
+func unpackJournal(s string) (string, error) {
+	raw, err := base64.StdEncoding.DecodeString(strings.TrimSpace(s))
+	if err != nil {
+		return "", err
+	}
+	zr, err := gzip.NewReader(bytes.NewReader(raw))
+	if err != nil {
+		return "", err
+	}
+	defer zr.Close()
+	b, err := io.ReadAll(io.LimitReader(zr, 4<<20))
+	if err != nil {
+		return "", err
+	}
+	return strings.ToValidUTF8(string(b), "?"), nil
+}
+
+// tailText - последние max байт текста с начала строки: в журнале важнее свежее
+func tailText(s string, limit int) string {
+	if len(s) <= limit {
+		return s
+	}
+	s = s[len(s)-limit:]
+	if i := strings.IndexByte(s, '\n'); i >= 0 && i < len(s)-1 {
+		s = s[i+1:]
+	}
+	return strings.ToValidUTF8(s, "")
+}
+
 // spoolIn — атомарно кладёт запрос в <reqDir> и ждёт ответ в <resDir>. Файл 0600:
 // запросы могут нести секреты (repopass/hpass), процессор их сразу удаляет.
 func spoolIn(reqDir, resDir string, cmdID int, lines []string, helper string) (bool, string) {
@@ -6152,11 +6232,23 @@ func spoolInFor(reqDir, resDir string, cmdID int, lines []string, helper string,
 
 func postBackupResult(panelURL, token string, id int, ok bool, output string) {
 	body, _ := json.Marshal(map[string]any{"id": id, "ok": ok, "output": output})
+	// большой ответ (журнал, разбор места) - сжатым: нода за DPI не протолкнет десятки КБ
+	gz := len(body) > 8<<10
+	if gz {
+		var buf bytes.Buffer
+		zw := gzip.NewWriter(&buf)
+		zw.Write(body)
+		zw.Close()
+		body = buf.Bytes()
+	}
 	req, err := http.NewRequest("POST", strings.TrimRight(panelURL, "/")+"/api/agent/backup-result", bytes.NewReader(body))
 	if err != nil {
 		return
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
+	if gz {
+		req.Header.Set("Content-Encoding", "gzip")
+	}
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := (&http.Client{Timeout: 15 * time.Second}).Do(req)
 	if err != nil {

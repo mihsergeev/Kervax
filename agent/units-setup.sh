@@ -11,9 +11,13 @@
 # The panel can restart a failed unit or clear its failed mark through a spool, the same
 # scheme as the other helpers. Only a unit that is failed right now: the panel cannot touch
 # a working service.
+#
+# Since 0.4 the panel can also read the journal through the same spool: of one unit, of the
+# whole system or of the kernel, for a period, up to 1000 lines, at a minimum priority. Read
+# only: journalctl with fixed arguments, the unit name checked like for restart.
 set -euo pipefail
 
-KERVAX_SETUP_VERSION=0.3  # MAJOR.MINOR; compared component-wise
+KERVAX_SETUP_VERSION=0.4  # MAJOR.MINOR; compared component-wise
 KERVAX_SETUP_ALWAYS=1     # safe on any node: it only reads systemctl and the journal
 
 HELPER_DIR=/lib65/kervax
@@ -163,18 +167,51 @@ EOF_N
   chmod 0644 "$OUT"
 }
 
+# The journal for the panel: of a unit, of the whole system (_all) or of the kernel (_kernel),
+# for the last N minutes, at most N lines, at a minimum priority. The text goes back gzipped
+# and in base64 on one line: the result file is "key=value" lines.
+journal_out() {
+  local unit=$1 since=$2 lines=$3 prio=$4 tmp
+  local -a sel
+  case "$unit" in
+    _all) sel=() ;;
+    _kernel) sel=(-k) ;;
+    *) unit_ok "$unit" || return 1; sel=(-u "$unit") ;;
+  esac
+  case "$since" in ''|*[!0-9]*) since=60 ;; esac
+  [ "$since" -ge 1 ] || since=1
+  [ "$since" -le 10080 ] || since=10080
+  case "$lines" in ''|*[!0-9]*) lines=300 ;; esac
+  [ "$lines" -ge 10 ] || lines=10
+  [ "$lines" -le 1000 ] || lines=1000
+  case "$prio" in err|warning|info) ;; *) prio=info ;; esac
+  tmp=$(mktemp)
+  timeout 30 journalctl ${sel[@]+"${sel[@]}"} --since "-${since}min" -n "$lines" -p "$prio" -o short-iso --no-pager \
+    > "$tmp" 2>&1
+  head -c 300000 "$tmp" | gzip -c | base64 | tr -d '\n'
+  rm -f "$tmp"
+}
+
 process_spool() {
-  local req id line k v op unit ok out rc state result tmp
+  local req id line k v op unit ok out rc state result tmp since lines prio changed=0
   for req in "$REQ_DIR"/*.req; do
     [ -f "$req" ] || continue
     id=$(basename "$req" .req)
-    op=""; unit=""
+    op=""; unit=""; since=""; lines=""; prio=""
     while IFS= read -r line; do
       k=${line%%=*}; v=${line#*=}
-      case "$k" in op) op=$v ;; unit) unit=$v ;; esac
+      case "$k" in op) op=$v ;; unit) unit=$v ;; since) since=$v ;; lines) lines=$v ;; prio) prio=$v ;; esac
     done < "$req"
     rm -f "$req"
     ok=false
+    if [ "$op" = journal ]; then
+      if out=$(journal_out "$unit" "$since" "$lines" "$prio"); then ok=true; else out="bad request"; fi
+      printf 'ok=%s\noutput=%s\n' "$ok" "$out" > "$RES_DIR/$id.res.tmp"
+      mv -f "$RES_DIR/$id.res.tmp" "$RES_DIR/$id.res"
+      chmod 0644 "$RES_DIR/$id.res"
+      continue
+    fi
+    changed=1
     if ! unit_ok "$unit" || { [ "$op" != restart ] && [ "$op" != reset ]; }; then
       out="bad request"
     elif ! systemctl is-failed --quiet -- "$unit"; then
@@ -198,8 +235,9 @@ process_spool() {
     mv -f "$RES_DIR/$id.res.tmp" "$RES_DIR/$id.res"
     chmod 0644 "$RES_DIR/$id.res"
   done
-  # the panel should see the new state at once, not in a minute
-  scan
+  # the panel should see the new state at once, not in a minute (reading the journal changes nothing)
+  [ "$changed" = 1 ] && scan
+  return 0
 }
 
 case "${1:-scan}" in

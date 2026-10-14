@@ -2064,6 +2064,31 @@ const EN: Record<string, string> = {
   'Список еще не пришел: агент пришлет его со следующим отчетом.':
     'The list has not arrived yet: the agent will send it with the next report.',
   'показаны первые {k} из {n}, уточните фильтр': 'showing the first {k} of {n}, narrow the filter',
+  // --- журнал systemd по запросу ---
+  'не удалось получить журнал': 'could not get the journal',
+  'Имя юнита вида nginx.service или nginx': 'A unit name like nginx.service or nginx',
+  'предупреждения': 'warnings',
+  'Весь журнал': 'Whole journal',
+  'Ядро': 'Kernel',
+  'Журнал': 'Journal',
+  'весь журнал': 'whole journal',
+  '{n} строк': '{n} lines',
+  'фильтр по тексту': 'filter by text',
+  'строк: {k} из {n}': 'lines: {k} of {n}',
+  'строк: {n}': 'lines: {n}',
+  'Выберите юнит или весь журнал.': 'Pick a unit or the whole journal.',
+  'Запрашиваю журнал у агента…': 'Asking the agent for the journal…',
+  'Нет записей за выбранный период. Увеличьте период или выберите "все" вместо ошибок.':
+    'No entries for this period. Widen the period or pick "all" instead of errors.',
+  'Под фильтр ничего не попало.': 'Nothing matches the filter.',
+  'Показаны последние {n} строк: за период их больше, сократите период или поднимите приоритет.':
+    'Showing the last {n} lines: the period has more, shorten it or raise the priority.',
+  'Журнал не хранится в панели - читается с ноды по запросу.':
+    'The journal is not stored in the panel, it is read from the node on request.',
+  'Журнал откроется после обновления агента до 2.29.': 'The journal opens after the agent is updated to 2.29.',
+  'Журнал читается через helper units-setup 0.4: обновите его (блок "Обновления" на главной).':
+    'The journal is read through the units-setup 0.4 helper: update it ("Updates" block on the home page).',
+  'Юнит...': 'Unit...',
   // --- поиск по парку ---
   'Сайты на серверах': 'Sites on servers',
   'Контейнеры': 'Containers',

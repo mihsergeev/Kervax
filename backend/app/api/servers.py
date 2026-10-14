@@ -1820,7 +1820,7 @@ async def _take_backup_commands(session, server_id: int) -> list[dict]:
 
 # Сколько ждать ответа агента, прежде чем считать команду пропавшей. disk_fix дольше:
 # docker builder prune по кэшу в десятки ГБ идет минутами, агент ждет helper до 15 минут.
-_CMD_TIMEOUT = {"disk_fix": 16 * 60, "unit_fix": 7 * 60}
+_CMD_TIMEOUT = {"disk_fix": 16 * 60, "unit_fix": 7 * 60, "unit_journal": 2 * 60}
 
 
 def _backup_cmd_out(c: BackupCommand, now: datetime) -> BackupCommandOut:
@@ -1864,9 +1864,15 @@ async def backup_command(
     elif body.action == "unit_fix":
         # Перезапустить упавший юнит или сбросить его отметку. Рабочий сервис так не тронуть:
         # helper на ноде делает это, только пока юнит упал.
-        if body.mode not in ("restart", "reset") or not body.unit:
+        if body.mode not in ("restart", "reset") or not body.unit or body.unit.startswith("_"):
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "не указан юнит или действие")
         payload = {"name": body.unit}
+    elif body.action == "unit_journal":
+        # Журнал юнита, всей системы (_all) или ядра (_kernel): только чтение, через тот же
+        # helper units-setup (0.4+). Viewer'у не дает общий запрет изменяющих методов.
+        if not body.unit:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "не указан юнит")
+        payload = {"name": body.unit, "since": body.since_min, "lines": body.lines, "prio": body.prio}
     elif body.mode in ("preview", "run", "restart", "reset"):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "этот режим - только у disk_fix и unit_fix")
     elif body.action in ("dump_setup", "dump_remove"):
@@ -1891,6 +1897,8 @@ async def backup_command(
                   + (f":{body.mount}" if body.fix == "analyze" else ""))[:120]
     if body.action == "unit_fix":
         target = f"{body.unit}:{body.mode}"[:120]
+    if body.action == "unit_journal":
+        target = f"{body.unit}:journal:{body.since_min}m:{body.prio}"[:120]
     await audit.record(session, user.username, f"backup_{body.action}", target, f"srv={server_id}")
     return BackupCommandOut.model_validate(c)
 
