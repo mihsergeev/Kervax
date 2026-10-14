@@ -1183,12 +1183,6 @@ button.srv-tile-btn:hover .net-tile { border-color: var(--border-strong); backgr
   .loc-res.ml-row { flex-wrap: wrap; }
   .ml-rate { flex-basis: 100%; text-align: left; padding-left: calc(9px + 0.7rem); }
 }
-.osupd {
-  margin: 0.6rem 0;
-  padding: 0.6rem 0.8rem;
-  border: 1px solid var(--border);
-  border-radius: 10px;
-}
 .psi-table td:last-child { text-align: left; }
 .psi-table thead td { border-top: 0; }
 @media (max-width: 640px) {
@@ -1855,16 +1849,8 @@ button.srv-tile-btn:hover .net-tile { border-color: var(--border-strong); backgr
 }
 
 /* ошибки 5xx по логам: куда ведёт алерт. Лог - строкой, под ним коды, пути и время */
-.web-err {
-  display: flex;
-  flex-direction: column;
-  gap: 0.55rem;
-  margin: 0.2rem 0 0.9rem;
-}
-.web-err-cap {
-  margin-bottom: 0.1rem;
-}
 .web-err-row {
+  background: var(--bg);
   padding: 0.55rem 0.7rem;
   border: 1px solid var(--border);
   border-left: 3px solid var(--down);
@@ -1915,9 +1901,6 @@ button.srv-tile-btn:hover .net-tile { border-color: var(--border-strong); backgr
   word-break: break-all;
   max-height: 14rem;
   overflow: auto;
-}
-.web-err-empty {
-  margin: 0.2rem 0 0.9rem;
 }
 
 /* поле пароля с кнопкой показать/скрыть (HTTP-аутентификация монитора) */

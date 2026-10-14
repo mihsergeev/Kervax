@@ -1154,10 +1154,20 @@ function WebErrorList({
   const fmt = (ts: string) =>
     new Date(ts).toLocaleString([], { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })
   if (rows.length === 0)
-    return <div className="web-err-empty muted small">{t('За сутки ответов 5xx не было.')}</div>
+    return (
+      <div className="chart-card net-card net-card-wide">
+        <div className="net-head">
+          <div className="chart-cap">{t('Ответы 5xx за сутки')}</div>
+        </div>
+        <div className="muted small">{t('За сутки ответов 5xx не было.')}</div>
+      </div>
+    )
   return (
-    <div className="web-err">
-      <div className="web-err-cap muted small">{t('Ответы 5xx за сутки по логам веб-сервера')}</div>
+    <div className="chart-card net-card net-card-wide">
+      <div className="net-head">
+        <div className="chart-cap">{t('Ответы 5xx за сутки')}</div>
+        <span className="muted small">{t('по логам веб-сервера')}</span>
+      </div>
       {rows.map((r) => {
         const codes = Object.entries(r.codes || {}).sort((a, b) => b[1] - a[1])
         const kind = WEB_MUTE + (r.key || r.label || r.log)
@@ -2084,6 +2094,56 @@ function MemLeaks({ server: s }: { server: Server }) {
   )
 }
 
+// Веб сейчас: запросы и 5xx за последнюю минуту по всем логам, самый нагруженный лог. Доля 5xx
+// красная от порога алерта сервера (порог алерта - за 15 минут, тут минута: для глаза)
+function WebNow({ server: s }: { server: Server }) {
+  const { t } = useI18n()
+  const r = s.last_report
+  const wr = webRate(r)
+  if (!wr) return null
+  const e5 = wr.e5 ?? 0
+  const share = wr.rpm > 0 ? (e5 / wr.rpm) * 100 : 0
+  const thr = s.web_5xx_alert_percent
+  const logs = wr.logs ?? []
+  const busy = logs.length ? logs.reduce((a, b) => (b.rpm > a.rpm ? b : a)) : null
+  const un = webUnparsed(r)
+  return (
+    <div className="chart-card net-card net-card-wide now-card">
+      <div className="net-tiles">
+        <NetTile label={t('Запросов в минуту')} value={fmtCount(wr.rpm)} />
+        <NetTile
+          label={t('5xx в минуту')}
+          value={fmtCount(e5)}
+          sub={wr.rpm > 0 ? t('{p}% запросов', { p: share < 1 ? share.toFixed(2) : share.toFixed(1) }) : undefined}
+          tone={thr > 0 && share >= thr ? 'bad' : e5 > 0 ? 'warn' : 'ok'}
+        />
+        {busy && busy.rpm > 0 && (
+          <NetTile
+            label={t('Самый нагруженный лог')}
+            value={fmtCount(busy.rpm)}
+            unit={t('в мин')}
+            sub={webLogLabel(busy)}
+            title={busy.log}
+          />
+        )}
+        <NetTile
+          label={t('Логов под наблюдением')}
+          value={String(logs.length)}
+          sub={t('с запросами за минуту: {n}', { n: logs.filter((l) => l.rpm > 0).length })}
+        />
+        {un > 0 && (
+          <NetTile
+            label={t('Без кода ответа')}
+            value={fmtCount(un)}
+            sub={t('формат лога не разобран')}
+            tone="warn"
+          />
+        )}
+      </div>
+    </div>
+  )
+}
+
 // Плитки шапки карточки: CPU, память, худший раздел диска и сеть. Нажатие ведет в раздел, как
 // пункт навигации слева (свернутый раздел раскрывается)
 function goSection(id: string) {
@@ -2443,25 +2503,52 @@ function OsUpdates({ server: s }: { server: Server }) {
   const day = (ts?: number) => (ts ? new Date(ts * 1000).toLocaleDateString() : '')
   const unatt = u?.unatt === 'on' ? t('включены') : u?.unatt === 'off' ? t('выключены') : u?.unatt === 'none' ? t('не установлены') : ''
   return (
-    <div className="detail-inc osupd" id="mcard-osupd">
-      <div className="chart-cap">{t('Обновления ОС')}</div>
-      {adv.map((a) => (
-        <div key={a.kind} className={`small ${a.level >= 2 ? 't-down' : 't-degraded'}`}>{a.text}</div>
-      ))}
-      {u && (
-        <div className="muted small">
-          {[
-            s.last_report?.os,
-            u.kernel && t('ядро {k}', { k: u.kernel }),
-            u.updates >= 0 && t('обновлений {n}, из них безопасности {m}', { n: u.updates, m: u.security }),
-            unatt && t('автообновления: {s}', { s: unatt }) + (u.unatt_ts ? ` (${day(u.unatt_ts)})` : ''),
-            u.apt_ts ? t('apt update: {d}', { d: day(u.apt_ts) }) : '',
-            u.reboot ? t('нужна перезагрузка с {d}', { d: day(u.reboot_ts) }) : '',
-          ]
-            .filter(Boolean)
-            .join(' · ')}
+    <div className="net-cards osupd-cards">
+      <div className="chart-card net-card net-card-wide" id="mcard-osupd">
+        <div className="net-head">
+          <div className="chart-cap">{t('Обновления ОС')}</div>
+          {s.last_report?.os && <span className="muted small">{s.last_report.os}</span>}
         </div>
-      )}
+        {adv.map((a) => (
+          <div key={a.kind} className={a.level >= 2 ? 'net-prob' : 'net-note'}>{a.text}</div>
+        ))}
+        {u && (
+          <div className="net-tiles net-tiles-text">
+            {u.updates >= 0 && (
+              <NetTile
+                label={t('Ждут установки')}
+                value={String(u.updates)}
+                sub={t('из них безопасности {n}', { n: u.security })}
+                tone={u.security > 0 ? 'warn' : u.updates > 0 ? undefined : 'ok'}
+              />
+            )}
+            {u.kernel && (
+              <NetTile
+                label={t('Ядро')}
+                value={u.kernel}
+                sub={u.kernel_new ? t('после перезагрузки {k}', { k: u.kernel_new }) : undefined}
+                title={u.kernel}
+              />
+            )}
+            <NetTile
+              label={t('Перезагрузка')}
+              value={u.reboot ? t('нужна') : t('не нужна')}
+              sub={u.reboot && u.reboot_ts ? t('с {d}', { d: day(u.reboot_ts) }) : undefined}
+              title={(u.reboot_pkgs ?? []).join(', ') || undefined}
+              tone={u.reboot ? 'warn' : 'ok'}
+            />
+            {unatt && (
+              <NetTile
+                label={t('Автообновления')}
+                value={unatt}
+                sub={u.unatt_ts ? t('последний прогон {d}', { d: day(u.unatt_ts) }) : undefined}
+                tone={u.unatt === 'on' ? 'ok' : 'warn'}
+              />
+            )}
+            {u.apt_ts ? <NetTile label="apt update" value={day(u.apt_ts)} /> : null}
+          </div>
+        )}
+      </div>
     </div>
   )
 }
@@ -5793,7 +5880,10 @@ function ServerDetail({
             по 5xx: сначала список - где ошибки, какие коды и пути, - потом графики. */}
         {hasWeb && (
           <MetricSection id="web" title={t('Веб')}>
-            <WebErrorList server={s} t={t} onChanged={onChanged} onUnauthorized={onUnauthorized} />
+            <div className="net-cards now-cards">
+              <WebNow server={s} />
+              <WebErrorList server={s} t={t} onChanged={onChanged} onUnauthorized={onUnauthorized} />
+            </div>
             <div className="chart-grid">
               {chartCard(
                 'web',
