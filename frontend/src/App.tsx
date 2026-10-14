@@ -9,6 +9,7 @@ import { AlertsModal } from './AlertsModal'
 import { MaintModal } from './MaintModal'
 import { AlertHistoryModal } from './AlertHistoryModal'
 import { ReportModal } from './ReportModal'
+import { SearchModal } from './SearchModal'
 import { ChecksPage } from './ChecksPage'
 import { HomePage } from './HomePage'
 import { LocationsModal } from './LocationsModal'
@@ -40,6 +41,7 @@ type Modal =
   | 'history'
   | 'report'
   | 'maint'
+  | 'search'
   | null
 export type Section = 'home' | 'sites' | 'servers' | 'docker' | 'kuber' | 'services' | 'backups'
 const SECTIONS: Section[] = ['home', 'sites', 'servers', 'docker', 'kuber', 'services', 'backups']
@@ -155,6 +157,23 @@ export default function App() {
   const [branding, reloadBranding] = useBranding()
   const [menuOpen, setMenuOpen] = useState(false)
   const [modal, setModal] = useState<Modal>(null)
+  // Ctrl+K (на любой раскладке - по коду клавиши) или "/" вне поля ввода - поиск по парку
+  useEffect(() => {
+    if (!authed) return
+    const onKey = (e: KeyboardEvent) => {
+      const el = e.target as HTMLElement | null
+      const typing = !!el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable)
+      if ((e.ctrlKey || e.metaKey) && e.code === 'KeyK') {
+        e.preventDefault()
+        setModal('search')
+      } else if (e.key === '/' && !typing && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        e.preventDefault()
+        setModal((m) => m ?? 'search')
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [authed])
   const [theme, setThemeState] = useState<'dark' | 'light'>(
     () => (localStorage.getItem('kervax_theme') as 'dark' | 'light') || 'dark',
   )
@@ -275,6 +294,21 @@ export default function App() {
           </div>
         )}
         <div className="spacer" />
+        {authed && (
+          <button
+            className="ghost search-btn"
+            onClick={() => setModal('search')}
+            title={t('Поиск по всем серверам')}
+            aria-label={t('Поиск')}
+          >
+            <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+              <circle cx="7" cy="7" r="4.6" fill="none" stroke="currentColor" strokeWidth="1.6" />
+              <line x1="10.4" y1="10.4" x2="14" y2="14" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+            </svg>
+            <span className="search-btn-label">{t('Поиск')}</span>
+            <kbd>Ctrl K</kbd>
+          </button>
+        )}
         <button className="ghost" onClick={toggleTheme}>
           {t('Тема')}
         </button>
@@ -504,6 +538,16 @@ export default function App() {
         <AlertHistoryModal onClose={() => setModal(null)} onUnauthorized={logout} />
       )}
       {modal === 'report' && <ReportModal onClose={() => setModal(null)} onUnauthorized={logout} />}
+      {modal === 'search' && (
+        <SearchModal
+          onClose={() => setModal(null)}
+          onUnauthorized={logout}
+          onOpen={(sec, id, detail) => {
+            setModal(null)
+            openTarget(sec, id, false, detail)
+          }}
+        />
+      )}
       {modal === 'alerts' && (
         <AlertsModal onClose={() => setModal(null)} onUnauthorized={logout} />
       )}
