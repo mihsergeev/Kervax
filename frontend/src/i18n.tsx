@@ -660,8 +660,6 @@ const EN: Record<string, string> = {
   'ноды кластера без агента': 'cluster nodes without the agent',
   'на сервере бэкапов старый restic - обновите': 'old restic on the backup server - update it',
   'бэкап-сервер без статистики - запустите backupserver-setup': 'backup server without statistics - run backupserver-setup',
-  'по внешнему адресу отвечает другой сервер - поправьте внешний адрес':
-    'another server answers on the external address - fix the external address',
   'у контейнеров ключи от хоста - взлом приложения в них даст root на сервере':
     'containers hold keys to the host - breaking into the app gives root on the server',
   'По бэкапам': 'Backups',
@@ -1393,10 +1391,10 @@ const EN: Record<string, string> = {
   'реплика, догнала': 'replica, caught up',
   'основная, реплик: {n}': 'primary, replicas: {n}',
   // SSH
-  'По адресу {ip} отвечает другой сервер: там {o}, а у этой ноды {n}. Порты по этому адресу не про эту ноду, поэтому алертов по ним нет. Поправьте внешний адрес в настройках ноды.':
-    'Another server answers at {ip}: it runs {o}, while this node runs {n}. Ports at this address are not this node, so they raise no alerts. Fix the external address in the node settings.',
-  '{name}: по внешнему адресу {ip} отвечает другой сервер ({o}, у ноды {n}) - поправьте внешний адрес':
-    '{name}: another server answers at the external address {ip} ({o}, the node runs {n}) - fix the external address',
+  'По адресу {ip} отвечает другой сервер: там {o}, а у этой ноды {n}. Порты по этому адресу не про эту ноду, поэтому алертов по ним нет.':
+    'Another server answers at {ip}: it runs {o}, while this node runs {n}. Ports at this address are not this node, so they raise no alerts.',
+  'Нода ходит в интернет через NAT: панель видит ее с адреса {ip}, а там отвечает сам шлюз ({o}, у ноды {n}). Порты по этому адресу не про ноду, алертов по ним нет. Делать ничего не нужно: входящие идут на другие адреса.':
+    'The node reaches the internet through NAT: the panel sees it from {ip}, where the gateway itself answers ({o}, the node runs {n}). Ports at this address are not the node and raise no alerts. Nothing to do: incoming traffic uses other addresses.',
   'перебор идет с': 'brute force from',
   'SSH: опасный вход': 'SSH: risky login',
   'порт': 'port',
@@ -2216,7 +2214,6 @@ const EN: Record<string, string> = {
   'не задано': 'not set',
   'ничего не заглушено': 'nothing muted',
   'нужна перезагрузка': 'reboot required',
-  'по внешнему адресу {ip} отвечает другой сервер ({o}, у ноды {n})': 'another server answers on the external address {ip} ({o}, the node has {n})',
   'после перезагрузки не запустятся {list}: работают, но не включены': 'will not start after a reboot: {list} (running but not enabled)',
   'последнее: {text}, {d}': 'latest: {text}, {d}',
   'сверка пока только для Ubuntu': 'checked for Ubuntu only so far',

@@ -335,7 +335,6 @@ function grpLabel(grp: string, t: T): string {
     'k-noagent': t('ноды кластера без агента'),
     'bs-restic': t('на сервере бэкапов старый restic - обновите'),
     'bs-setup': t('бэкап-сервер без статистики - запустите backupserver-setup'),
-    foreign: t('по внешнему адресу отвечает другой сервер - поправьте внешний адрес'),
     dockrisk: t('у контейнеров ключи от хоста - взлом приложения в них даст root на сервере'),
   }
   return fixed[grp] ?? grp
@@ -434,13 +433,8 @@ function actionItems(servers: Server[], avail: string, relProblem: string, t: T)
         name: s.name, cc: s.country, sec: 'osupd', grp: `os-${x.kind}`, detail: x.text,
         text: `${s.name}: ${x.text}` })
     }
-    // по внешнему адресу ноды отвечает другой сервер: проверка портов судила бы о чужом хосте
-    for (const f of s.exposure?.foreign ?? []) {
-      items.push({ key: `foreign-${s.id}-${f.ip}`, icon: '🔀', section: 'servers', id: s.id, name: s.name,
-        cc: s.country, sec: 'exposure', grp: 'foreign', detail: `${f.ip}: ${f.outside}`,
-        text: t('{name}: по внешнему адресу {ip} отвечает другой сервер ({o}, у ноды {n}) - поправьте внешний адрес',
-          { name: s.name, ip: f.ip, o: f.outside, n: f.node }) })
-    }
+    // Чужой сервер по внешнему адресу сюда не идет: это шлюз исходящего NAT, а внешний адрес панель
+    // берет из запроса агента, поправить нечего. Совет "поправьте внешний адрес" был невыполним
     // у контейнеров ключи от хоста сверх положенного: ведем в Docker, там что поправить и
     // кнопка "по назначению"
     const risk = (s.docker_risk ?? []).filter((x) => !x.muted)

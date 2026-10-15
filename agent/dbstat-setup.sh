@@ -18,9 +18,14 @@
 # Since 0.6 the oldest idle transaction that holds a snapshot (backend_xmin) is reported on its
 # own: only such a transaction keeps VACUUM from removing dead rows. One holding just an advisory
 # lock was reported as "blocks VACUUM" while the real culprit sat next to it.
+#
+# Since 0.7 a container without the postgres role is queried as its POSTGRES_USER in an explicit
+# database (POSTGRES_DB, else postgres). psql -U <user> picks a database named after the user, and
+# a container created with POSTGRES_USER=app POSTGRES_DB=appdb has no such database: every query
+# failed and the inventory stayed empty on a live PostgreSQL.
 set -euo pipefail
 
-KERVAX_SETUP_VERSION=0.6  # MAJOR.MINOR; compared component-wise
+KERVAX_SETUP_VERSION=0.7  # MAJOR.MINOR; compared component-wise
 KERVAX_SETUP_ALWAYS=1     # safe on any node: without a database it collects an empty file
 
 HELPER_DIR=/lib65/kervax
@@ -98,11 +103,12 @@ add_entry() { # engine container version dbs_json users_json conn_used conn_max
 # psql runs as the postgres service user (peer authentication over the socket), so no
 # password is needed; falls back to the container's POSTGRES_USER for non-standard images.
 pg_q() { # container query
-  local c="$1" q="$2" u
+  local c="$1" q="$2" u d
   if [ -n "$c" ]; then
     u=$(docker exec "$c" printenv POSTGRES_USER 2>/dev/null || true)
+    d=$(docker exec "$c" printenv POSTGRES_DB 2>/dev/null || true)
     timeout $TO docker exec -u postgres "$c" psql -Atqc "$q" 2>/dev/null \
-      || timeout $TO docker exec "$c" psql -Atqc "$q" ${u:+-U "$u"} 2>/dev/null
+      || timeout $TO docker exec "$c" psql -d "${d:-postgres}" -Atqc "$q" ${u:+-U "$u"} 2>/dev/null
   else
     timeout $TO su -s /bin/sh postgres -c "psql -Atqc \"$q\"" 2>/dev/null
   fi
