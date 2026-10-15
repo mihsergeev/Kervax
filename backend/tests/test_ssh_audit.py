@@ -99,9 +99,14 @@ def test_foreign_address_is_not_judged():
     s = _srv(ssh=_ssh(root="yes", banner="OpenSSH_9.6p1"), exposure=ex)
     from app import open_ports
     assert open_ports.foreign(s) == {"203.0.113.5": {"ip": "203.0.113.5", "outside": "SSH-2.0-OpenSSH_7.4",
-                                                     "node": "OpenSSH_9.6p1"}}
+                                                     "node": "OpenSSH_9.6p1", "nat": False}}
     assert ssh_audit.problems(s, NOW) == [] and ssh_audit.advice(s, NOW) == []
     assert open_ports.view(s)["foreign"][0]["ip"] == "203.0.113.5"
+    # это адрес, с которого приходят отчеты, а на интерфейсах его нет: исходящий NAT, там сам шлюз
+    s.external_ip = "203.0.113.5"
+    assert open_ports.foreign(s)["203.0.113.5"]["nat"] is True
+    s.last_report["ips"] = ["203.0.113.5"]
+    assert open_ports.foreign(s)["203.0.113.5"]["nat"] is False
     # та же версия (другой пакет поверх) - та же нода
     ex["banners"] = {"203.0.113.5:2221": "SSH-2.0-OpenSSH_9.6p1 Ubuntu-3ubuntu13.19"}
     assert open_ports.foreign(_srv(ssh=_ssh(banner="OpenSSH_9.6p1"), exposure=ex)) == {}

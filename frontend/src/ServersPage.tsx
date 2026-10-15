@@ -830,8 +830,6 @@ function serverSecInfo(c: {
     add(secOfLink(i.sec) ?? 'overview', i.tone === 't-down' ? 2 : 1, i.text, i.since)
   }
   for (const a of s.os_advice ?? []) add('updates', a.level, a.text)
-  for (const f of s.exposure?.foreign ?? [])
-    add('ports', 1, t('по внешнему адресу {ip} отвечает другой сервер ({o}, у ноды {n})', { ip: f.ip, o: f.outside, n: f.node }))
   const nb = s.noboot_advice?.units ?? []
   if (nb.length) add('units', 1, t('после перезагрузки не запустятся {list}: работают, но не включены', { list: shortList(nb, t) }))
   // как в карточке SSH: при проблеме совет не повторяем
@@ -3078,7 +3076,9 @@ function OpenPorts({ server: s, onChanged }: { server: Server; onChanged: () => 
       </div>
       {(ex?.foreign ?? []).map((f) => (
         <div key={f.ip} className="net-note">
-          {t('По адресу {ip} отвечает другой сервер: там {o}, а у этой ноды {n}. Порты по этому адресу не про эту ноду, поэтому алертов по ним нет. Поправьте внешний адрес в настройках ноды.', { ip: f.ip, o: f.outside, n: f.node })}
+          {f.nat
+            ? t('Нода ходит в интернет через NAT: панель видит ее с адреса {ip}, а там отвечает сам шлюз ({o}, у ноды {n}). Порты по этому адресу не про ноду, алертов по ним нет. Делать ничего не нужно: входящие идут на другие адреса.', { ip: f.ip, o: f.outside, n: f.node })
+            : t('По адресу {ip} отвечает другой сервер: там {o}, а у этой ноды {n}. Порты по этому адресу не про эту ноду, поэтому алертов по ним нет.', { ip: f.ip, o: f.outside, n: f.node })}
         </div>
       ))}
       {ex && own && opened.length > 0 && (

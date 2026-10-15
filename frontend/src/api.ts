@@ -1097,7 +1097,7 @@ export type Exposure = {
   via: string // через какую локацию смотрели ("панель" - напрямую)
   own?: boolean // смотрели с адреса самой панели: открытое может быть открыто только для нее
   // по этим внешним адресам отвечает другой сервер: версия SSH снаружи не та, что у ноды
-  foreign?: { ip: string; outside: string; node: string }[]
+  foreign?: { ip: string; outside: string; node: string; nat?: boolean }[] // nat - адрес исходящего NAT, там сам шлюз
   ips: string[]
   ports: ExposedPort[]
   new?: ExposedPort[] // открылись с прошлых проверок

@@ -432,16 +432,22 @@ def _ssh_ver(text: str) -> str:
 def foreign(srv: Server) -> dict[str, dict]:
     """Внешние адреса, где отвечает ДРУГОЙ сервер: версия OpenSSH в баннере снаружи не та, что у
     sshd ноды (helper changes-setup 0.4). На одной ноде внешний адрес в карточке вел на соседний
-    CentOS 7, и проверка портов судила о нем: "SSH открыт в интернет" было про чужой хост."""
+    CentOS 7, и проверка портов судила о нем: "SSH открыт в интернет" было про чужой хост.
+
+    nat - это адрес, с которого приходят отчеты агента (external_ip), а на интерфейсах ноды его
+    нет: нода ходит наружу через NAT, и отвечает там сам шлюз. Входящие при этом идут другими
+    адресами (DNAT), поправить тут нечего: external_ip не настройка, панель берет его из запроса."""
     node = _ssh_ver(str(_ssh_block(srv).get("banner") or ""))
     if not node:
         return {}
+    ext = str(getattr(srv, "external_ip", "") or "")
+    own = {str(ip) for ip in (srv.last_report or {}).get("ips") or []}
     out = {}
     for key, banner in (_ex(srv).get("banners") or {}).items():
         ip = str(key).rsplit(":", 1)[0]
         outside = _ssh_ver(str(banner or ""))
         if outside and outside != node:
-            out[ip] = {"ip": ip, "outside": str(banner), "node": node}
+            out[ip] = {"ip": ip, "outside": str(banner), "node": node, "nat": ip == ext and ip not in own}
     return out
 
 
