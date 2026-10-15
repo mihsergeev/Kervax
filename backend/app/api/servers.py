@@ -812,6 +812,7 @@ def _backup_coverage(server: Server) -> list[BackupAudit]:
                     kind="db", subject=eng, gap=False, pods=pods[:4],
                     detail=f"под не запущен ({all_down[0]}) — база не работает, "
                            f"дамп настроен: CronJob {existing[eng]}",
+                    note=f"под не запущен ({all_down[0]}), база не работает; дамп: CronJob {existing[eng]}",
                 ))
                 continue
             # дамп уже есть (CronJob в кластере) — сообщаем как факт, без кнопки.
@@ -821,6 +822,7 @@ def _backup_coverage(server: Server) -> list[BackupAudit]:
             out.append(BackupAudit(
                 kind="db_ok", subject=eng, gap=False,
                 detail=f"дамп уже настроен: CronJob {existing[eng]}",
+                note=f"дамп: CronJob {existing[eng]}",
                 container=names[0] if len(names) == 1 else "",
                 pods=pods[:4],
             ))
@@ -858,6 +860,7 @@ def _backup_coverage(server: Server) -> list[BackupAudit]:
                     kind="db", subject=eng, gap=False, instance=inst,
                     detail=f"{where_txt} — под не запущен ({down[0]}), "
                            "дамп снять не с чего: сначала поднимите базу",
+                    note=f"под не запущен ({down[0]}), дамп снять не с чего: сначала поднимите базу",
                     container=inst, pods=inst_pods[:4],
                 ))
                 continue
@@ -866,6 +869,7 @@ def _backup_coverage(server: Server) -> list[BackupAudit]:
                 out.append(BackupAudit(
                     kind="db_ok", subject=eng, gap=False, instance=inst,
                     detail=f"{where_txt} — свой бэкап: {custom_backups.label(own)}",
+                    note=f"свой бэкап: {custom_backups.label(own)}",
                     container=inst, pods=inst_pods[:4],
                 ))
                 continue
@@ -889,6 +893,7 @@ def _backup_coverage(server: Server) -> list[BackupAudit]:
                     kind="db", subject=eng, gap=False, instance=inst,
                     detail=f"{where_txt} — дамп включён, но свежего файла нет больше двух суток,"
                            " проверьте, снимается ли он",
+                    note="свежего файла дампа нет больше двух суток, проверьте, снимается ли он",
                     dump_engine=code, can_dump=True, container=inst, pods=inst_pods[:4],
                 ))
                 continue
@@ -898,6 +903,8 @@ def _backup_coverage(server: Server) -> list[BackupAudit]:
                     detail=(f"{where_txt} — дамп снимается раз в сутки по своему таймеру, "
                             "копия только на этой ноде" if own_timer
                             else f"{where_txt} — дамп снимает панель перед каждым бэкапом"),
+                    note=("дамп раз в сутки по своему таймеру, копия только на ноде" if own_timer
+                          else "дамп перед каждым бэкапом"),
                     dump_engine=code, can_dump=True, container=inst, pods=inst_pods[:4],
                 ))
                 continue
@@ -912,6 +919,7 @@ def _backup_coverage(server: Server) -> list[BackupAudit]:
                         kind="db", subject=eng, gap=False, instance=inst,
                         detail=f"{where_txt} — дамп включён, но после бэкапа файлов в /backup"
                                " нет, проверьте, снимается ли он",
+                        note="после бэкапа файлов дампа нет, проверьте, снимается ли он",
                         dump_engine=code, can_dump=True, container=inst, pods=inst_pods[:4],
                     ))
                 else:
@@ -921,6 +929,8 @@ def _backup_coverage(server: Server) -> list[BackupAudit]:
                         detail=(f"{where_txt} — дамп включён, первый снимется ночью по своему таймеру"
                                 if own_timer
                                 else f"{where_txt} — дамп включён, первый снимется в ближайший бэкап"),
+                        note=("первый дамп снимется ночью по своему таймеру" if own_timer
+                              else "первый дамп снимется в ближайший бэкап"),
                         dump_engine=code, can_dump=True, container=inst, pods=inst_pods[:4],
                     ))
                 continue
@@ -939,6 +949,7 @@ def _backup_coverage(server: Server) -> list[BackupAudit]:
                 detail=f"{where_txt} — файловый снапшот живой базы может не восстановиться"
                        + (f", бэкапьте отдельно: {howto}" if howto else "")
                        + (f" — {block}" if block else ""),
+                note=", ".join(x for x in (f"бэкапить отдельно: {howto}" if howto else "", block) if x),
                 dump_engine=code, can_dump=can_dump,
                 downtime=_DUMP_DOWNTIME.get(code, "") if can_dump and not kube else "",
                 container=inst, pods=inst_pods[:4],
@@ -986,6 +997,8 @@ def _backup_coverage(server: Server) -> list[BackupAudit]:
     mutes = set(server.backup_audit_mutes or [])
     for a in out:
         a.key = f"{a.kind}:{a.subject}" + (f":{a.instance}" if a.instance else "")
+        if not a.note and a.kind != "db":
+            a.note = a.detail
         a.muted = a.key in mutes
     return out
 

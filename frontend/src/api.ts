@@ -1754,6 +1754,7 @@ export type BackupAudit = {
   kind: string // mount / bind / db
   subject: string // путь или имя контейнера
   detail: string
+  note?: string // одна короткая строка для карточки: без «где» и общих слов
   gap: boolean // true = данных нет в бэкапе; false = есть, но восстановимость под вопросом
   dump_engine?: string // pg/mysql/ch — код движка; пусто = дампить не умеем
   can_dump?: boolean // true = панель снимет дамп сама (docker, локально, из пода); false = причина в detail

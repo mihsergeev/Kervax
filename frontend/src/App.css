@@ -5231,6 +5231,57 @@ button.adopt-mark {
 .coverage-mute:hover { opacity: 1; }
 .coverage-item { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .coverage-muted { margin-top: 6px; opacity: 0.75; }
+/* "Покрытие" в две колонки, как карточка портов: слева "Под вопросом" (оранжевая, без
+   подкраски, когда пусто), справа "Бэкапится" (зеленая). В строке значок, имя, экземпляр,
+   метка, кнопки и одна строка состояния; длинные объяснения - в "как это работает" */
+.cov-card { container-type: inline-size; }
+.cov-cols { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.6rem; align-items: start; }
+.cov-col { container-type: inline-size; border: 1px solid var(--border); border-radius: 8px; padding: 0.5rem 0.7rem 0.3rem; min-width: 0; }
+.cov-col-q { border-color: color-mix(in srgb, var(--degraded) 40%, var(--border)); background: color-mix(in srgb, var(--degraded) 4%, transparent); }
+.cov-col-q.cov-col-calm { border-color: var(--border); background: transparent; }
+.cov-col-ok { border-color: color-mix(in srgb, var(--up) 30%, var(--border)); background: color-mix(in srgb, var(--up) 4%, transparent); }
+.cov-col-h { display: flex; align-items: baseline; flex-wrap: wrap; gap: 0.2rem 0.45rem; font-weight: 600; font-size: 0.88rem; margin-bottom: 0.15rem; }
+.cov-n { font-variant-numeric: tabular-nums; }
+.cov-col-sub { font-weight: 400; font-size: 0.76rem; color: var(--text-muted); }
+.cov-col-sub .linklike { font-size: inherit; }
+.cov-li { display: grid; grid-template-columns: 22px minmax(0, 1fr) auto; gap: 0.15rem 0.55rem; align-items: center; padding: 0.45rem 0;
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 60%, transparent); }
+.cov-li:last-child { border-bottom: 0; }
+.cov-ico { display: inline-flex; justify-content: center; }
+.cov-nm { display: flex; flex-wrap: wrap; align-items: center; gap: 0.3rem 0.45rem; min-width: 0; font-size: 0.9rem; }
+.cov-nm .type-chip { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* форма дампа в колонке: каталог отдельной строкой во всю ширину, поле не вылезает за рамку */
+.cov-full .dump-config { min-width: 0; }
+.cov-full .dump-cfg-row:first-of-type { grid-template-columns: minmax(0, 1fr); gap: 4px; }
+.cov-full .dump-cfg-dir { min-width: 0; }
+.cov-act { display: flex; align-items: center; gap: 0.25rem; }
+.cov-act .svc-act, .cov-act .coverage-mute { margin: 0; }
+.cov-ln { grid-column: 2 / -1; font-size: 0.8rem; color: var(--text-muted); overflow-wrap: anywhere; }
+.cov-full { grid-column: 2 / -1; min-width: 0; }
+.cov-ib { padding: 0.1rem 0.4rem; color: var(--text-muted); }
+.cov-tag { font-size: 0.72rem; padding: 0 0.45rem; border-radius: 999px; white-space: nowrap; border: 1px solid transparent; }
+.cov-tag-bad { color: var(--down); background: rgba(239, 68, 68, 0.1); border-color: rgba(239, 68, 68, 0.4); }
+.cov-tag-wait { color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); border-color: color-mix(in srgb, var(--accent) 38%, transparent); }
+.cov-empty { color: var(--up); font-size: 0.86rem; padding: 0.3rem 0; }
+.cov-gaps { border: 1px solid rgba(239, 68, 68, 0.4); background: rgba(239, 68, 68, 0.05); border-radius: 8px; padding: 0.45rem 0.7rem;
+  display: flex; flex-direction: column; gap: 0.25rem; font-size: 0.85rem; }
+.cov-gaps-h { color: var(--down); font-weight: 600; }
+.cov-gap { display: flex; flex-wrap: wrap; align-items: center; gap: 0.2rem 0.5rem; overflow-wrap: anywhere; }
+.cov-foot { display: flex; flex-direction: column; gap: 0.35rem; }
+.cov-foot .coverage-muted { margin-top: 0; }
+.cov-q { display: inline-flex; width: 16px; height: 16px; border-radius: 50%; border: 1px solid var(--border-strong); font-size: 0.68rem;
+  align-items: center; justify-content: center; color: var(--text-muted); cursor: help; flex: 0 0 auto; }
+.cov-how summary { cursor: pointer; color: var(--text-muted); font-size: 0.8rem; }
+.cov-how p { margin: 0.35rem 0 0; font-size: 0.8rem; color: var(--text-muted); line-height: 1.45; }
+/* модалка бэкапа ~760px: колонки там рядом, как в прототипе; друг под друга - уже на телефоне */
+@container (max-width: 600px) {
+  .cov-cols { grid-template-columns: minmax(0, 1fr); }
+}
+/* узкая колонка: кнопки под строкой состояния, имя не сжимается до переносов по буквам */
+@container (max-width: 300px) {
+  .cov-li { grid-template-columns: 22px minmax(0, 1fr); }
+  .cov-act { grid-column: 2; grid-row: 3; flex-wrap: wrap; }
+}
 
 /* массовая зачистка: условие отбора в строку, поле дней узкое */
 .bulk-cleanup { margin-top: 10px; }
