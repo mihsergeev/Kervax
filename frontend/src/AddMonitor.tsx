@@ -2,9 +2,11 @@ import { useEffect, useRef, useState, type ReactNode } from 'react'
 import {
   ApiError,
   getSiteAlertRules,
+  listLocations,
   tryCheck,
   tryCheckInside,
   type CheckForm,
+  type Location,
   type CheckTryOut,
   type ServerAlertRules,
   type TryIn,
@@ -14,15 +16,20 @@ import {
   type TryResult,
 } from './api'
 import { useI18n } from './i18n'
+import { MON_ALERT_KINDS } from './checkUtils'
 
 // Форма нового монитора: адрес, пробная проверка и выбор "откуда проверять" по ее итогам.
 // Старая форма спрашивала тип, адрес и способ проверки вслепую: увидит ли панель сайт,
 // человек узнавал от красного монитора и алерта. Здесь адрес проверяется до сохранения - с
 // панели, изнутри сервера, где нашелся домен, и из локаций (backend app/try_probe.py), а
-// рабочий способ выбран сам. Правка монитора, push и DNS остаются в CheckFormCard.
+// рабочий способ выбран сам. Push и DNS остаются в CheckFormCard.
+//
+// Правка монитора - та же форма (editing): адрес и настройки берутся из монитора, проверка
+// запускается сама при открытии, но сохранить можно и без нее. По итогам проверки форма в
+// правке ничего не меняет сама, только подсказывает: человек открыл ее поменять что-то свое.
 
 type Where = 'panel' | 'local' | 'locations'
-type Preset = 'n1' | 'n3' | 'm5'
+type Preset = 'n1' | 'n3' | 'm5' | 'own'
 type Slot<T> = { st: 'wait' } | { st: 'ok'; v: T } | { st: 'err'; msg: string }
 type Addr = { type: 'http' | 'tcp_port'; target: string; port: number }
 type Tried = Addr & {
@@ -35,13 +42,16 @@ type Tried = Addr & {
 
 type Props = {
   base: CheckForm
+  // правка существующего монитора: base - его настройки, checkId - он сам (не дубль себе)
+  editing?: boolean
+  checkId?: number
   groups: string[]
   busy: boolean
   error: string | null
   onSubmit: (form: CheckForm) => void
   onCancel: () => void
-  onClassic: (type: 'push' | 'dns') => void
-  onOpenCheck: (id: number) => void
+  onClassic?: (type: 'push' | 'dns') => void
+  onOpenCheck?: (id: number) => void
   onUnauthorized: () => void
 }
 
@@ -100,6 +110,33 @@ function headersText(json: string): string {
   }
 }
 
+// адрес монитора в поле формы: у порта - хост:порт, IPv6 в скобках
+function addrOf(f: CheckForm): string {
+  if (f.type !== 'tcp_port' || !f.port) return f.target
+  return f.target.includes(':') ? `[${f.target}]:${f.port}` : `${f.target}:${f.port}`
+}
+
+// тонкую настройку в правке раскрываем сразу, если в ней уже что-то свое
+function advTouched(f: CheckForm, authShown: boolean): boolean {
+  const days = (v: number[] | undefined, d: number[]) => (v ?? d).join(',') !== d.join(',')
+  return (
+    (f.interval_seconds ?? 60) !== 60 ||
+    (f.degraded_ms ?? 2000) !== 2000 ||
+    !['', '200-399', '200-399,401'].includes(f.expected_status ?? '') ||
+    !!f.keyword_up ||
+    !!f.keyword_down ||
+    (f.extra_paths ?? []).length > 0 ||
+    (!!f.http_headers && !authShown) ||
+    !!f.ignore_tls ||
+    (f.retries ?? 3) !== 3 ||
+    (f.degraded_after_failures ?? 10) !== 10 ||
+    days(f.ssl_warn_days, [14, 7, 1]) ||
+    days(f.domain_warn_days, [30, 7, 1]) ||
+    (f.alert_mutes ?? []).length > 0 ||
+    f.location_ids != null
+  )
+}
+
 // что из формы меняет ответ сайта на вход: код-норма, логин, заголовки
 const authKey = (f: CheckForm) =>
   JSON.stringify([f.expected_status ?? '', f.auth_method ?? '', f.auth_user ?? '', f.auth_pass ?? '', f.http_headers ?? ''])
@@ -108,6 +145,8 @@ const done = <T,>(s: Slot<T> | null | undefined): T | undefined => (s && s.st ==
 
 export function AddMonitor({
   base,
+  editing = false,
+  checkId,
   groups,
   busy,
   error,
@@ -118,23 +157,38 @@ export function AddMonitor({
   onUnauthorized,
 }: Props) {
   const { t } = useI18n()
-  const [addr, setAddr] = useState('')
+  const [addr, setAddr] = useState(() => (editing ? addrOf(base) : ''))
   const [form, setForm] = useState<CheckForm>(base)
   const set = (patch: Partial<CheckForm>) => setForm((f) => ({ ...f, ...patch }))
   const [tried, setTried] = useState<Tried | null>(null)
   const runRef = useRef(0)
   const unauthRef = useRef(onUnauthorized)
   unauthRef.current = onUnauthorized
-  const [where, setWhere] = useState<Where>('panel')
-  const [whereTouched, setWhereTouched] = useState(false)
-  const [name, setName] = useState<string | null>(null) // null = подставлять из адреса
-  const [group, setGroup] = useState<string | null>(null) // null = как у мониторов домена
-  const [preset, setPreset] = useState<Preset>('n3')
-  const [adv, setAdv] = useState(false)
+  const [where, setWhere] = useState<Where>(() =>
+    !editing ? 'panel' : base.probe_local ? 'local' : base.check_locations ? 'locations' : 'panel',
+  )
+  // в правке способ уже выбран человеком, и проверка его не переключает
+  const [whereTouched, setWhereTouched] = useState(editing)
+  const [name, setName] = useState<string | null>(editing ? base.name : null) // null = из адреса
+  const [group, setGroup] = useState<string | null>(editing ? base.group_name ?? '' : null) // null = как у мониторов домена
+  const ownFails = base.alert_after_failures ?? 3
+  const [preset, setPreset] = useState<Preset>(() => {
+    if (!editing) return 'n3'
+    const every = base.interval_seconds ?? 60
+    return ownFails === 1 ? 'n1' : ownFails === 3 ? 'n3' : ownFails === Math.max(1, Math.round(300 / every)) ? 'm5' : 'own'
+  })
+  const hasCreds = base.auth_method === 'basic' || !!base.http_headers
+  const [adv, setAdv] = useState(() => editing && advTouched(base, hasCreds))
   const [addOff, setAddOff] = useState(false)
-  const [auth, setAuth] = useState<'ok401' | 'give'>('ok401')
+  // '' - в правке: сайт просит вход, а что с этим делать, монитор еще не решил
+  const [auth, setAuth] = useState<'ok401' | 'give' | ''>(() =>
+    !editing ? 'ok401' : hasCreds ? 'give' : statusOk(401, base.expected_status || '200-399') ? 'ok401' : '',
+  )
   // блок входа не прячем, когда с логином сайт ответил 200: там то, что человек вписал
-  const [authSeen, setAuthSeen] = useState(false)
+  const [authSeen, setAuthSeen] = useState(editing && hasCreds)
+  const [allLocs, setAllLocs] = useState<Location[]>([])
+  const [sslTxt, setSslTxt] = useState(() => (base.ssl_warn_days ?? [14, 7, 1]).join(', '))
+  const [domTxt, setDomTxt] = useState(() => (base.domain_warn_days ?? [30, 7, 1]).join(', '))
   const [hdrText, setHdrText] = useState(() => headersText(base.http_headers ?? ''))
   const [pathsText, setPathsText] = useState(() => (base.extra_paths ?? []).join('\n'))
   const [rules, setRules] = useState<ServerAlertRules | null>(null)
@@ -142,6 +196,7 @@ export function AddMonitor({
   // правила алертов видит только админ; без них предпросмотр в обычном формате
   useEffect(() => {
     getSiteAlertRules().then(setRules).catch(() => {})
+    listLocations().then(setAllLocs).catch(() => {})
   }, [])
   // ответы прежнего нажатия после закрытия формы никуда не пишем
   useEffect(() => () => void runRef.current++, [])
@@ -168,7 +223,7 @@ export function AddMonitor({
     if (!a.target) return
     const run = ++runRef.current
     const isHttp = a.type === 'http'
-    setWhereTouched(false)
+    if (!editing) setWhereTouched(false)
     if (tried && tried.target !== a.target) setAuthSeen(false)
     setTried({
       ...a,
@@ -186,6 +241,7 @@ export function AddMonitor({
       return { st: 'err', msg: e instanceof Error ? e.message : t('Ошибка') }
     }
     const body: Omit<TryIn, 'part'> = {
+      check_id: checkId,
       type: a.type,
       target: a.target,
       port: a.port,
@@ -220,6 +276,12 @@ export function AddMonitor({
       (e) => put({ inside: fail(e) }),
     )
   }
+
+  // в правке монитор уже есть: видно сразу, как он сейчас открывается
+  useEffect(() => {
+    if (editing) probe()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   // ответ агента забираем опросом, пока он в пути
   const insideSlot = tried?.inside
@@ -260,6 +322,8 @@ export function AddMonitor({
   const srv = inside?.server_name || ''
   const insideKnown = !!inside && inside.kind !== 'no_server'
   const panelPending = fresh && tried.panel.st === 'wait'
+  // правка: адрес поменяли, а проверка была по старому
+  const stale = !!tried && !fresh
 
   // Что показала проверка и откуда лучше проверять. Локации не советуем никогда: у такого
   // монитора основной статус все равно с панели, локации только добавляются к нему.
@@ -275,7 +339,9 @@ export function AddMonitor({
         rec: '',
         tone: 'bad',
         dead: true,
-        text: t('С панели порт не открывается: {msg}. Изнутри сервера и из локаций проверяются только сайты, поэтому такой монитор сразу будет красным. Проверьте адрес и порт, а если сервис только поднимается, можно добавить выключенным.', { msg }),
+        text: editing
+          ? t('С панели порт не открывается: {msg}. Изнутри сервера и из локаций проверяются только сайты. Проверьте адрес и порт, а если сервис на обслуживании, монитор можно выключить ниже.', { msg })
+          : t('С панели порт не открывается: {msg}. Изнутри сервера и из локаций проверяются только сайты, поэтому такой монитор сразу будет красным. Проверьте адрес и порт, а если сервис только поднимается, можно добавить выключенным.', { msg }),
       }
     }
     if ((has401 || authSeen) && auth === 'give' && (!panelWorks || tried.auth !== authKey(form)))
@@ -285,13 +351,24 @@ export function AddMonitor({
         dead: false,
         text: t('Сайт просит вход (401): впишите заголовок или логин и пароль ниже и нажмите "проверить снова".'),
       }
-    if (ips && ipBad.length && ipBad.length < ips.length)
+    if (has401 && auth === '' && !panelWorks)
       return {
         rec: 'panel',
         tone: 'warn',
         dead: false,
-        text: t('Открывается, но из {n} адресов домена с ошибкой отвечают {bad}: часть посетителей видит ошибку. Включено "проверять все адреса", поэтому монитор будет красным, пока их не починят. Не нужно - снимите галочку ниже.', { n: ips.length, bad: ipBad.map((x) => x.ip).join(', ') }),
+        text: t('Сайт просит вход (401), а монитор считает это сбоем. Выберите ниже: считать 401 нормой или дать доступ.'),
       }
+    if (ips && ipBad.length && ipBad.length < ips.length) {
+      const v = { n: ips.length, bad: ipBad.map((x) => x.ip).join(', ') }
+      return {
+        rec: 'panel',
+        tone: 'warn',
+        dead: false,
+        text: form.check_all_ips
+          ? t('Открывается, но из {n} адресов домена с ошибкой отвечают {bad}: часть посетителей видит ошибку. Включено "проверять все адреса", поэтому монитор будет красным, пока их не починят. Не нужно - снимите галочку ниже.', v)
+          : t('Открывается, но из {n} адресов домена с ошибкой отвечают {bad}: часть посетителей видит ошибку. Монитор этого не заметит, пока не включить "проверять все адреса" ниже.', v),
+      }
+    }
     if (panelWorks) {
       let text =
         panel.code === 401
@@ -323,7 +400,9 @@ export function AddMonitor({
       rec: '',
       tone: 'bad',
       dead: true,
-      text: t('Сейчас адрес не открывается ниоткуда: {msg}. Если добавить так, монитор сразу будет красным и придет алерт. Проверьте адрес, а если сайт только поднимается, можно добавить выключенным.', { msg }),
+      text: editing
+        ? t('Сейчас адрес не открывается ниоткуда: {msg}. Проверьте адрес, а если сайт на обслуживании, монитор можно выключить ниже.', { msg })
+        : t('Сейчас адрес не открывается ниоткуда: {msg}. Если добавить так, монитор сразу будет красным и придет алерт. Проверьте адрес, а если сайт только поднимается, можно добавить выключенным.', { msg }),
     }
   }
   const verdict = assess()
@@ -334,13 +413,13 @@ export function AddMonitor({
   }, [verdict.rec, whereTouched])
   // проверять все адреса - когда один из них уже сейчас отвечает ошибкой
   useEffect(() => {
-    if (panel) set({ check_all_ips: ipBad.length > 0 && !!ips && ipBad.length < ips.length })
+    if (panel && !editing) set({ check_all_ips: ipBad.length > 0 && !!ips && ipBad.length < ips.length })
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [panel])
   // сайт просит вход: по умолчанию 401 - норма, монитор следит, что сайт жив
   useEffect(() => {
     if (has401) setAuthSeen(true)
-    if (has401 && auth === 'ok401' && !statusOk(401, expected)) set({ expected_status: '200-399,401' })
+    if (has401 && !editing && auth === 'ok401' && !statusOk(401, expected)) set({ expected_status: '200-399,401' })
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [has401])
 
@@ -353,16 +432,25 @@ export function AddMonitor({
   const shownName = name ?? displayHost(cur)
   const shownGroup = group ?? (ctx?.group || '')
   const interval = form.interval_seconds ?? 60
-  const presetFails = (p: Preset) => (p === 'n1' ? 1 : p === 'n3' ? 3 : Math.max(1, Math.round(300 / interval)))
+  const presetFails = (p: Preset) =>
+    p === 'n1' ? 1 : p === 'n3' ? 3 : p === 'm5' ? Math.max(1, Math.round(300 / interval)) : ownFails
   const presetLabel: Record<Preset, string> = {
     n1: t('сразу'),
     n3: t('после 3 сбоев подряд'),
     m5: t('если лежит 5 минут'),
+    own: t('после {n} сбоев подряд', { n: ownFails }),
   }
   const presetHint: Record<Preset, string> = {
     n1: t('после первой неудачной проверки'),
     n3: t('около {n} мин: единичный сбой не будит', { n: Math.max(1, Math.round((3 * interval) / 60)) }),
     m5: t('для того, что иногда моргает'),
+    own: t('так настроено у этого монитора'),
+  }
+  // свой порог показываем, только если он уже стоит у монитора
+  const presets: Preset[] = editing && ownFails && presetOfBase() === 'own' ? ['n1', 'n3', 'm5', 'own'] : ['n1', 'n3', 'm5']
+  function presetOfBase(): Preset {
+    const every = base.interval_seconds ?? 60
+    return ownFails === 1 ? 'n1' : ownFails === 3 ? 'n3' : ownFails === Math.max(1, Math.round(300 / every)) ? 'm5' : 'own'
   }
   const whereLabel =
     where === 'local'
@@ -371,7 +459,9 @@ export function AddMonitor({
         ? t('с панели и из локаций')
         : t('с панели')
   const everyLabel = interval % 60 === 0 ? t('раз в {n} мин', { n: interval / 60 }) : t('раз в {n} с', { n: interval })
-  const canAdd = fresh && !panelPending && tried.panel.st !== 'err' && shownName.trim() !== '' && !busy
+  const canAdd = editing
+    ? !!cur.target && shownName.trim() !== '' && !busy
+    : fresh && !panelPending && tried.panel.st !== 'err' && shownName.trim() !== '' && !busy
   const hdr = headersJson(hdrText)
 
   const submit = () => {
@@ -385,7 +475,7 @@ export function AddMonitor({
       probe_local: where === 'local',
       check_locations: where === 'locations',
       alert_after_failures: presetFails(preset),
-      enabled: !(verdict.dead && addOff),
+      enabled: editing ? form.enabled ?? true : !(verdict.dead && addOff),
     }
     if (!http) Object.assign(out, { check_ssl: false, check_domain: false, check_all_ips: false, extra_paths: [] })
     onSubmit(out)
@@ -420,7 +510,10 @@ export function AddMonitor({
     ) : (
       resLine(p)
     )
+  // результата по этому адресу еще нет: проверка идет или адрес поменяли после нее
+  const notYet = () => (stale ? <span className="muted">{t('не проверено: адрес поменялся')}</span> : spin(t('проверяю...')))
   const insideLine = () => {
+    if (!fresh) return notYet()
     const s = tried?.inside
     if (!s || s.st === 'wait') return spin(t('проверяю...'))
     if (s.st === 'err') return <span className="muted">{s.msg}</span>
@@ -433,6 +526,7 @@ export function AddMonitor({
     return resLine(v)
   }
   const locLine = () => {
+    if (!fresh) return notYet()
     const s = tried?.locs
     if (!s || s.st === 'wait') return spin(t('проверяю...'))
     if (s.st === 'err') return <span className="muted">{s.msg}</span>
@@ -461,7 +555,7 @@ export function AddMonitor({
       desc: http
         ? t('Из интернета, как посетитель. Подходит почти всем сайтам.')
         : t('Подключение к порту из интернета, с самой панели.'),
-      line: !fresh || tried.panel.st === 'wait' ? spin(t('проверяю...')) : tried.panel.st === 'err' ? <span className="t-down">{tried.panel.msg}</span> : panel ? panelLine(panel) : null,
+      line: !fresh ? notYet() : tried.panel.st === 'wait' ? spin(t('проверяю...')) : tried.panel.st === 'err' ? <span className="t-down">{tried.panel.msg}</span> : panel ? panelLine(panel) : null,
       off: false,
     },
     {
@@ -535,24 +629,38 @@ export function AddMonitor({
       {ments && ` · ${ments}`}
     </div>
   )
-  const off = verdict.dead && addOff
+  const off = editing ? form.enabled === false : verdict.dead && addOff
   const bubbleNote = off
-    ? t('Монитор добавится выключенным: алертов не будет, пока его не включат.')
+    ? editing
+      ? t('Монитор выключен: алертов не будет, пока его не включат.')
+      : t('Монитор добавится выключенным: алертов не будет, пока его не включат.')
     : ruleOff
       ? t('По правилам алертов этот монитор алерт о падении не шлет.')
       : failingNow || locPart
-        ? t('Так придет сразу после добавления: адрес сейчас не открывается.')
+        ? editing
+          ? t('Так придет после сохранения: адрес сейчас не открывается.')
+          : t('Так придет сразу после добавления: адрес сейчас не открывается.')
         : t('Так придет алерт, если адрес перестанет открываться.')
 
+  // выбор локаций: null = все, [] = ни одной, [id...] = эти
+  const proxyLocs = allLocs.filter((l) => l.enabled)
+  const locIds = form.location_ids
+  const locOn = (id: number) => locIds == null || locIds.includes(id)
+  const toggleLoc = (id: number) => {
+    const ids = locIds == null ? proxyLocs.map((l) => l.id) : locIds
+    set({ location_ids: locOn(id) ? ids.filter((x) => x !== id) : [...ids, id] })
+  }
+  const parseDays = (v: string) => v.split(/[^0-9]+/).filter(Boolean).map(Number)
+
   return (
-    <div className="card am">
-      <h3 className="am-h">{t('Новый монитор')}</h3>
+    <div className={editing ? 'am am-edit' : 'card am'}>
+      {!editing && <h3 className="am-h">{t('Новый монитор')}</h3>}
       <span className="am-lab">{t('Что проверять')}</span>
       <div className="am-addr">
         <input
           className="mono"
           value={addr}
-          autoFocus
+          autoFocus={!editing}
           placeholder="shop.example.com"
           spellCheck={false}
           onChange={(e) => setAddr(e.target.value)}
@@ -574,18 +682,22 @@ export function AddMonitor({
           {http
             ? t('Сайт, адрес API или хост:порт.')
             : t('Нужен сайт на этом порту - допишите https:// в начале.')}{' '}
-          {t('Нужно другое:')}{' '}
-          <button type="button" className="am-link" onClick={() => onClassic('push')}>
-            {t('сигнал от скрипта')}
-          </button>
-          {', '}
-          <button type="button" className="am-link" onClick={() => onClassic('dns')}>
-            {t('DNS-записи')}
-          </button>
+          {onClassic && !editing && (
+            <>
+              {t('Нужно другое:')}{' '}
+              <button type="button" className="am-link" onClick={() => onClassic('push')}>
+                {t('сигнал от скрипта')}
+              </button>
+              {', '}
+              <button type="button" className="am-link" onClick={() => onClassic('dns')}>
+                {t('DNS-записи')}
+              </button>
+            </>
+          )}
         </span>
       </div>
 
-      {!fresh && (
+      {!fresh && (!editing || stale) && (
         <div className="am-note">
           {tried
             ? t('Адрес поменялся - проверьте снова.')
@@ -593,7 +705,7 @@ export function AddMonitor({
         </div>
       )}
 
-      {fresh && (
+      {(fresh || editing) && (
         <>
           <div className="am-sec">
             <h4>{t('Откуда проверять')}</h4>
@@ -602,8 +714,8 @@ export function AddMonitor({
                 <button
                   type="button"
                   key={o.k}
-                  disabled={o.off}
-                  className={`am-opt${where === o.k ? ' on' : ''}${o.off ? ' off' : ''}`}
+                  disabled={o.off && where !== o.k}
+                  className={`am-opt${where === o.k ? ' on' : ''}${o.off && where !== o.k ? ' off' : ''}`}
                   onClick={() => {
                     setWhere(o.k)
                     setWhereTouched(true)
@@ -623,16 +735,20 @@ export function AddMonitor({
             {verdict.text && <div className={`am-note ${verdict.tone}`}>{verdict.text}</div>}
             {ctx?.existing_id != null && (
               <div className="am-note warn">
-                {t('На этот адрес уже есть монитор "{name}": второй будет слать те же алерты.', { name: ctx.existing_name })}{' '}
-                <button type="button" className="am-link" onClick={() => onOpenCheck(ctx.existing_id as number)}>
-                  {t('открыть его')}
-                </button>
+                {editing
+                  ? t('Этот адрес смотрит еще монитор "{name}": оба шлют те же алерты.', { name: ctx.existing_name })
+                  : t('На этот адрес уже есть монитор "{name}": второй будет слать те же алерты.', { name: ctx.existing_name })}{' '}
+                {onOpenCheck && (
+                  <button type="button" className="am-link" onClick={() => onOpenCheck(ctx.existing_id as number)}>
+                    {t('открыть его')}
+                  </button>
+                )}
               </div>
             )}
             {(has401 || authSeen) && http && (
               <div className="am-box">
                 <div className="am-row">
-                  <b className="small">{t('Сайт просит вход')}</b>
+                  <b className="small">{has401 ? t('Сайт просит вход') : t('Вход и заголовки')}</b>
                   <div className="win-switch">
                     <button type="button" className={`win-btn${auth === 'ok401' ? ' win-btn-active' : ''}`} onClick={() => chooseAuth('ok401')}>
                       {t('401 - норма')}
@@ -705,7 +821,7 @@ export function AddMonitor({
             )}
           </div>
 
-          {(http || verdict.dead) && (
+          {(http || verdict.dead || editing) && (
             <div className="am-sec">
               <h4>{t('Что еще проверить')}</h4>
               <div className="am-cks">
@@ -714,7 +830,7 @@ export function AddMonitor({
                     <input type="checkbox" checked={form.check_ssl ?? true} onChange={(e) => set({ check_ssl: e.target.checked })} />
                     <span>
                       {t('Следить за сертификатом')}{' '}
-                      {tried.exp?.st === 'wait' ? (
+                      {fresh && tried.exp?.st === 'wait' ? (
                         <span className="run-spin" />
                       ) : exp?.ssl_days != null ? (
                         <span className={exp.ssl_days < 14 ? 't-degraded' : 'muted'}>{t('сейчас {n} дн.', { n: exp.ssl_days })}</span>
@@ -730,7 +846,7 @@ export function AddMonitor({
                     <input type="checkbox" checked={form.check_domain ?? true} onChange={(e) => set({ check_domain: e.target.checked })} />
                     <span>
                       {t('Следить за сроком домена')}{' '}
-                      {tried.exp?.st === 'wait' ? (
+                      {fresh && tried.exp?.st === 'wait' ? (
                         <span className="run-spin" />
                       ) : exp?.domain_days != null ? (
                         <span className={exp.domain_days < 30 ? 't-degraded' : 'muted'}>{t('сейчас {n} дн.', { n: exp.domain_days })}</span>
@@ -741,16 +857,25 @@ export function AddMonitor({
                     </span>
                   </label>
                 )}
-                {ips && (
+                {(ips || (editing && http && form.check_all_ips)) && (
                   <label className="am-ck">
                     <input type="checkbox" checked={form.check_all_ips ?? false} onChange={(e) => set({ check_all_ips: e.target.checked })} />
                     <span>
-                      {t('Проверять все адреса домена ({n})', { n: ips.length })}
+                      {ips ? t('Проверять все адреса домена ({n})', { n: ips.length }) : t('Проверять все адреса домена')}
                       <small>{t('иначе мертвый адрес за балансировщиком не видно')}</small>
                     </span>
                   </label>
                 )}
-                {verdict.dead && (
+                {editing && (
+                  <label className="am-ck">
+                    <input type="checkbox" checked={form.enabled ?? true} onChange={(e) => set({ enabled: e.target.checked })} />
+                    <span>
+                      {t('Монитор включен')}
+                      <small>{t('выключенный не проверяется и не шлет алертов')}</small>
+                    </span>
+                  </label>
+                )}
+                {verdict.dead && !editing && (
                   <label className="am-ck">
                     <input type="checkbox" checked={addOff} onChange={(e) => setAddOff(e.target.checked)} />
                     <span>
@@ -790,7 +915,7 @@ export function AddMonitor({
           <div className="am-sec">
             <span className="am-lab">{t('Слать алерт')}</span>
             <div className="win-switch">
-              {(['n1', 'n3', 'm5'] as Preset[]).map((p) => (
+              {presets.map((p) => (
                 <button
                   type="button"
                   key={p}
@@ -810,9 +935,13 @@ export function AddMonitor({
                 {t('тонкая настройка')}
               </button>{' '}
               <span className="muted small">
-                {http
-                  ? t('- интервал, ожидаемый ответ, пути, заголовки. Все это можно поменять и потом в карточке монитора.')
-                  : t('- интервал и порог "медленно". Можно поменять и потом в карточке монитора.')}
+                {editing
+                  ? http
+                    ? t('- интервал, ожидаемый ответ, пути, заголовки, повторы, локации, заглушенные алерты.')
+                    : t('- интервал, порог "медленно", повторы, заглушенные алерты.')
+                  : http
+                    ? t('- интервал, ожидаемый ответ, пути, заголовки. Все это можно поменять и потом в карточке монитора.')
+                    : t('- интервал и порог "медленно". Можно поменять и потом в карточке монитора.')}
               </span>
             </div>
           ) : (
@@ -840,6 +969,24 @@ export function AddMonitor({
                     onChange={(e) => set({ degraded_ms: Number(e.target.value) || 0 })}
                   />
                 </label>
+                <label className="field">
+                  <span>{t('Повторы при сбое')}</span>
+                  <input
+                    type="number"
+                    value={form.retries ?? 3}
+                    onChange={(e) => set({ retries: Number(e.target.value) || 0 })}
+                    title={t('Считать «упавшим» и слать алерт, только если провалятся все попытки подряд.')}
+                  />
+                </label>
+                <label className="field">
+                  <span>{t('Алерт «медленно» после N подряд')}</span>
+                  <input
+                    type="number"
+                    value={form.degraded_after_failures ?? 10}
+                    onChange={(e) => set({ degraded_after_failures: Number(e.target.value) || 0 })}
+                    title={t('Отдельный, обычно больший порог для деградации (медленных ответов) — она шумнее падения.')}
+                  />
+                </label>
                 {http && (
                   <>
                     <label className="field">
@@ -854,9 +1001,49 @@ export function AddMonitor({
                       <span>{t('Слово в ответе (должно быть)')}</span>
                       <input value={form.keyword_up ?? ''} onChange={(e) => set({ keyword_up: e.target.value })} />
                     </label>
+                    <label className="field">
+                      <span>{t('Слово-стоп (не должно быть)')}</span>
+                      <input value={form.keyword_down ?? ''} onChange={(e) => set({ keyword_down: e.target.value })} />
+                    </label>
+                    <label className="field">
+                      <span>{t('Сертификат: напоминать за, дн.')}</span>
+                      <input
+                        value={sslTxt}
+                        placeholder="14, 7, 1"
+                        onChange={(e) => {
+                          setSslTxt(e.target.value)
+                          set({ ssl_warn_days: parseDays(e.target.value) })
+                        }}
+                      />
+                    </label>
+                    <label className="field">
+                      <span>{t('Домен: напоминать за, дн.')}</span>
+                      <input
+                        value={domTxt}
+                        placeholder="30, 7, 1"
+                        onChange={(e) => {
+                          setDomTxt(e.target.value)
+                          set({ domain_warn_days: parseDays(e.target.value) })
+                        }}
+                      />
+                    </label>
                   </>
                 )}
               </div>
+              {http && where === 'locations' && proxyLocs.length > 0 && (
+                <div className="am-locs">
+                  <span className="am-lab">{t('Из каких локаций проверять:')}</span>
+                  {proxyLocs.map((l) => (
+                    <label className="am-ck" key={l.id}>
+                      <input type="checkbox" checked={locOn(l.id)} onChange={() => toggleLoc(l.id)} />
+                      <span>
+                        {l.name}
+                        {!l.url && <span className="type-chip">{t('напрямую')}</span>}
+                      </span>
+                    </label>
+                  ))}
+                </div>
+              )}
               {http && (
                 <div className="am-grid2">
                   <label className="field">
@@ -900,6 +1087,28 @@ export function AddMonitor({
                   </span>
                 </label>
               )}
+              {editing && (
+                <div className="am-mutes">
+                  <span className="muted small">{t('Не слать алерты этого монитора:')}</span>
+                  <div className="mute-chips">
+                    {MON_ALERT_KINDS.map(({ k, label }) => {
+                      const mutes = form.alert_mutes ?? []
+                      const muted = mutes.includes(k)
+                      return (
+                        <button
+                          key={k}
+                          type="button"
+                          className={`mute-chip${muted ? ' mute-chip-on' : ''}`}
+                          onClick={() => set({ alert_mutes: muted ? mutes.filter((x) => x !== k) : [...mutes, k] })}
+                        >
+                          {muted ? '🔕 ' : ''}
+                          {t(label)}
+                        </button>
+                      )
+                    })}
+                  </div>
+                </div>
+              )}
               <div className="muted small">{t('После правок нажмите "Проверить снова": проверка пойдет уже с ними.')}</div>
             </div>
           )}
@@ -932,7 +1141,7 @@ export function AddMonitor({
           {t('Отмена')}
         </button>
         <button type="button" disabled={!canAdd} onClick={submit}>
-          {busy ? t('Сохраняю...') : t('Добавить монитор')}
+          {busy ? t('Сохраняю...') : editing ? t('Сохранить') : t('Добавить монитор')}
         </button>
       </div>
     </div>

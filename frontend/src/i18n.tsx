@@ -3202,6 +3202,40 @@ const EN: Record<string, string> = {
   'SSL-сертификат': 'TLS certificate',
   'Домен': 'Domain',
   // --- новый монитор: пробная проверка (AddMonitor) ---
+  'С панели порт не открывается: {msg}. Изнутри сервера и из локаций проверяются только сайты. Проверьте адрес и порт, а если сервис на обслуживании, монитор можно выключить ниже.':
+    'The port does not open from the panel: {msg}. Only sites can be checked from inside a server or from locations. Check the address and the port; if the service is under maintenance, you can disable the monitor below.',
+  'Сайт просит вход (401), а монитор считает это сбоем. Выберите ниже: считать 401 нормой или дать доступ.':
+    'The site asks to sign in (401), and the monitor counts it as a failure. Choose below: treat 401 as normal or give access.',
+  'Открывается, но из {n} адресов домена с ошибкой отвечают {bad}: часть посетителей видит ошибку. Монитор этого не заметит, пока не включить "проверять все адреса" ниже.':
+    'It opens, but of the {n} addresses of the domain {bad} answer with an error: some visitors see it. The monitor will not notice until "check every address" is turned on below.',
+  'Сейчас адрес не открывается ниоткуда: {msg}. Проверьте адрес, а если сайт на обслуживании, монитор можно выключить ниже.':
+    'The address opens from nowhere right now: {msg}. Check the address; if the site is under maintenance, you can disable the monitor below.',
+  'после {n} сбоев подряд':
+    'after {n} failures in a row',
+  'так настроено у этого монитора':
+    'this is how this monitor is set up',
+  'не проверено: адрес поменялся':
+    'not checked: the address changed',
+  'Монитор выключен: алертов не будет, пока его не включат.':
+    'The monitor is disabled: no alerts until it is enabled.',
+  'Так придет после сохранения: адрес сейчас не открывается.':
+    'This arrives after saving: the address does not open now.',
+  'Этот адрес смотрит еще монитор "{name}": оба шлют те же алерты.':
+    'Monitor "{name}" watches this address too: both send the same alerts.',
+  'Вход и заголовки':
+    'Sign-in and headers',
+  'Проверять все адреса домена':
+    'Check every address of the domain',
+  'Монитор включен':
+    'Monitor enabled',
+  'выключенный не проверяется и не шлет алертов':
+    'a disabled monitor is not checked and sends no alerts',
+  '- интервал, ожидаемый ответ, пути, заголовки, повторы, локации, заглушенные алерты.':
+    '- interval, expected answer, paths, headers, retries, locations, muted alerts.',
+  '- интервал, порог "медленно", повторы, заглушенные алерты.':
+    '- interval, the "slow" threshold, retries, muted alerts.',
+  'Сертификат: напоминать за, дн.':
+    'Certificate: remind, days before',
   'Порт открыт с панели.':
     'The port is open from the panel.',
   'С панели порт не открывается: {msg}. Изнутри сервера и из локаций проверяются только сайты, поэтому такой монитор сразу будет красным. Проверьте адрес и порт, а если сервис только поднимается, можно добавить выключенным.':
