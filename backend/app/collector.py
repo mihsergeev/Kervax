@@ -908,6 +908,9 @@ _SITE_RULE_KIND = {
     "domain": "domain", "locpart": "locpart", "locrec": "locpart",
     "flaky": "flaky", "flakyrec": "flaky",
 }
+# раздел карточки монитора по алерту: сроки - в "Сертификат и домен", частичная доступность - в
+# "Локации"; лежит и через раз - на сводку, там строка что и где оборвалось
+_SITE_SEC = {"ssl": "exp", "domain": "exp", "locpart": "loc", "locrec": "loc"}
 # История алертов: отбой - под видом самой беды, чтобы фильтр показывал ее целиком
 _SITE_HISTORY_KIND = {"bad": "down", "recovery": "down"}
 _SITE_RECOVERY = frozenset({"recovery", "locrec", "flakyrec"})
@@ -1083,7 +1086,8 @@ async def _send_alerts(
         # у push-монитора нет адреса: в заголовке алерта его имя
         host = name if typ == "push" else _display_host(tgt, typ, prt)
         site_url = _site_url(tgt, typ)  # ссылка «открыть сам сайт» (без query/токена)
-        link_url = f"{base}/?check={check_id}" if base and check_id is not None else ""
+        link_url = (f"{base}/?check={check_id}" + (f"&sec={_SITE_SEC[kind]}" if kind in _SITE_SEC else "")
+                    if base and check_id is not None else "")
         zone = ""
         if kind == "domain":
             # в шапке показываем САМО истекающее имя, а не поддомен одного из

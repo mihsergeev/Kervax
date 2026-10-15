@@ -36,3 +36,13 @@ export function registrableDomain(target: string): string {
   const last2 = labels.slice(-2).join('.')
   return MULTI_TLD.has(last2) ? labels.slice(-3).join('.') : last2
 }
+
+// Виды алертов монитора, которые можно не слать (alert_mutes): форма монитора и раздел "Алерты"
+// карточки
+export const MON_ALERT_KINDS: { k: string; label: string }[] = [
+  { k: 'down', label: 'Недоступен / деградация' },
+  { k: 'flaky', label: 'Отвечает через раз' },
+  { k: 'ssl', label: 'SSL-сертификат' },
+  { k: 'domain', label: 'Домен' },
+  { k: 'locpart', label: 'Частичная доступность (локации)' },
+]

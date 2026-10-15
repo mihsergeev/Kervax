@@ -29,6 +29,7 @@ import { useAuth } from './auth'
 type Props = {
   onUnauthorized: () => void
   openCheckId?: number | null
+  openSec?: string | null // раздел карточки монитора из ссылки: ?check=id&sec=exp
   onConsumed?: () => void
 }
 
@@ -72,7 +73,7 @@ function warnBadge(days: number, warn: number[]): string {
   return days <= Math.min(...warn) ? 't-down' : 't-degraded'
 }
 
-export function ChecksPage({ onUnauthorized, openCheckId, onConsumed }: Props) {
+export function ChecksPage({ onUnauthorized, openCheckId, openSec = null, onConsumed }: Props) {
   const { t } = useI18n()
   const { isViewer } = useAuth()
   const [ov, setOv] = useState<ChecksOverview | null>(null)
@@ -87,6 +88,8 @@ export function ChecksPage({ onUnauthorized, openCheckId, onConsumed }: Props) {
   const [form, setForm] = useState<CheckForm>(EMPTY)
   const [busy, setBusy] = useState(false)
   const [detailId, setDetailId] = useState<number | null>(null)
+  // раздел из ссылки - до первого открытия карточки этого монитора
+  const [linkSec, setLinkSec] = useState<{ id: number | null; sec: string | null }>({ id: null, sec: null })
   const [bulkOpen, setBulkOpen] = useState(false)
   // область bulk-настройки: null = ко всем; массив id = к выбранным
   const [bulkIds, setBulkIds] = useState<number[] | null>(null)
@@ -169,9 +172,10 @@ export function ChecksPage({ onUnauthorized, openCheckId, onConsumed }: Props) {
   useEffect(() => {
     if (openCheckId) {
       setDetailId(openCheckId)
+      setLinkSec({ id: openCheckId, sec: openSec })
       onConsumed?.()
     }
-  }, [openCheckId, onConsumed])
+  }, [openCheckId, openSec, onConsumed])
   useUrlCard('check', detailId)
 
   // что реально можно предложить добавить: без масок/regexp, без уже покрытых и без
@@ -819,9 +823,14 @@ export function ChecksPage({ onUnauthorized, openCheckId, onConsumed }: Props) {
 
       {detail && (
         <CheckDetail
+          key={detail.id}
           check={detail}
           groups={groupNames}
-          onClose={() => setDetailId(null)}
+          initialSec={linkSec.id === detail.id ? linkSec.sec : null}
+          onClose={() => {
+            setDetailId(null)
+            setLinkSec({ id: null, sec: null })
+          }}
           onSaved={load}
           onRun={load}
           onDelete={async () => {
