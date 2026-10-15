@@ -627,7 +627,7 @@ async def discovered_probes(user: CurrentUser, session: SessionDep) -> DomainPro
     )
 
 
-async def _try_context(body: CheckTryIn, user, session) -> dict:
+async def _try_context(body: CheckTryIn, chk, user, session) -> dict:
     """Группа мониторов того же домена (подставить в форму) и монитор, который уже смотрит
     этот адрес: второй такой же монитор - дубль алертов."""
     def addr(target: str) -> tuple[str, str]:
@@ -636,12 +636,12 @@ async def _try_context(body: CheckTryIn, user, session) -> dict:
         parsed = urlparse(t if "://" in t else "http://" + t)
         return (parsed.hostname or "").strip("."), parsed.path.rstrip("/")
 
-    want = addr(body.target)
-    zone = checks_exec._registrable_domain(body.target)
+    want = addr(chk.target)
+    zone = checks_exec._registrable_domain(chk.target)
     groups: dict[str, int] = {}
     existing = None
     for check in await session.scalars(select(Check).order_by(Check.id)):
-        if not group_allowed(user, check.group_name, "sites") or check.type in ("push", "dns"):
+        if not group_allowed(user, check.group_name, "sites") or check.type == "push":
             continue
         if check.id == body.check_id:
             continue
@@ -652,6 +652,8 @@ async def _try_context(body: CheckTryIn, user, session) -> dict:
             body.type == "http" and check.type == "http" and got == want
             or body.type == "tcp_port" and check.type == "tcp_port"
             and got[0] == want[0] and check.port == body.port
+            or body.type == "dns" and check.type == "dns" and got[0] == want[0]
+            and (check.dns_type or "A") == (chk.dns_type or "A")
         )
         if existing is None and same:
             existing = check
@@ -670,8 +672,16 @@ async def try_check(body: CheckTryIn, user: CurrentUser, session: SessionDep) ->
     ходит туда же, куда ходил бы монитор, и не больше. Сервер для проверки изнутри
     выбирается из серверов учетки, а агент и так ходит только на свой localhost."""
     chk = try_probe.check_of(body)
+    if body.type == "dns":
+        _dns_defaults(chk)  # имя без схемы и пути, резолвер - только IP, как у сохраненного
+        chk.retries = 0
+        own = await session.get(Check, body.check_id) if body.check_id else None
+        # правка: без ожидаемого монитор сравнивает с запомненным ответом - проба тоже
+        if (own is not None and own.type == "dns" and group_allowed(user, own.group_name, "sites")
+                and own.target == chk.target and (own.dns_type or "A") == chk.dns_type):
+            chk.dns_baseline = list(own.dns_baseline or [])
     if body.part == "panel":
-        return CheckTryOut(panel=await try_probe.panel(chk), **await _try_context(body, user, session))
+        return CheckTryOut(panel=await try_probe.panel(chk), **await _try_context(body, chk, user, session))
     if body.type != "http":
         # срок сертификата, локации и проверка изнутри бывают только у сайтов
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Это проверяется только у сайтов")

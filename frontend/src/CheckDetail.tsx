@@ -197,7 +197,8 @@ export function CheckDetail({ check, groups, initialSec, onClose, onSaved, onRun
     setForm((f) => (f ? { ...f, ...patch } : f))
   const canSave =
     !!form && form.name.trim() !== '' && form.target.trim() !== '' && !saving
-  const newForm = !!form && (form.type === 'http' || form.type === 'tcp_port')
+  // старая форма осталась только у прежних мониторов сертификата
+  const newForm = !!form && form.type !== 'cert'
 
   const submitEdit = async (next?: CheckForm) => {
     const body = next ?? form

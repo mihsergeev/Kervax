@@ -104,6 +104,58 @@ async def test_tcp_port_is_checked_from_the_panel_only(client, auth_headers, mon
         assert r.status_code == 400
 
 
+async def test_dns_shows_the_answer_before_saving(client, auth_headers, monkeypatch):
+    """DNS-монитор: до сохранения видно, что резолвер отвечает сейчас. Проба ничего не
+    запоминает, а в правке сравнивает с ответом, который монитор уже запомнил."""
+    seen = []
+
+    async def fake_run(check):
+        seen.append(check)
+        if check.dns_baseline:
+            return checks_exec.CheckOutcome(
+                "down", 12, message="ответ изменился: было 203.0.113.10, стало 203.0.113.20",
+                answers=["203.0.113.20"])
+        return checks_exec.CheckOutcome("up", 12, message="A: 203.0.113.20 (запомнили)",
+                                        answers=["203.0.113.20"])
+
+    monkeypatch.setattr("app.checks.run_check", fake_run)
+    body = {"type": "dns", "target": "https://Example.com/path", "part": "panel"}
+    r = await client.post("/api/checks/try", headers=auth_headers, json=body)
+    assert r.status_code == 200, r.text
+    p = r.json()["panel"]
+    # имя нормализовано как у сохраненного монитора, тип по умолчанию A, одна попытка
+    assert seen[0].target == "example.com" and seen[0].dns_type == "A" and seen[0].retries == 0
+    assert p["answers"] == ["203.0.113.20"] and p["baseline"] == "new"
+    assert p["message"] == "A: 203.0.113.20"
+
+    async with _factory(client)() as s:
+        mon = Check(name="dns", type="dns", target="example.com", dns_type="A",
+                    dns_baseline=["203.0.113.10"])
+        s.add(mon)
+        await s.commit()
+        mid = mon.id
+    # новый монитор на ту же запись - дубль
+    r = await client.post("/api/checks/try", headers=auth_headers, json=body)
+    assert r.json()["existing_id"] == mid
+    # правка этого монитора: сравнили с запомненным ответом
+    r = await client.post("/api/checks/try", headers=auth_headers, json=dict(body, check_id=mid))
+    p = r.json()["panel"]
+    assert seen[-1].dns_baseline == ["203.0.113.10"]
+    assert p["status"] == "down" and p["baseline"] == "kept" and r.json()["existing_id"] is None
+    # запись другого типа - уже не та, с чем сравнивать нечего
+    r = await client.post("/api/checks/try", headers=auth_headers,
+                          json=dict(body, check_id=mid, dns_type="MX"))
+    assert seen[-1].dns_baseline == [] and r.json()["panel"]["baseline"] == "new"
+
+    r = await client.post("/api/checks/try", headers=auth_headers,
+                          json={"type": "dns", "target": "example.com", "part": "panel",
+                                "dns_server": "dns.example.com"})
+    assert r.status_code == 400
+    r = await client.post("/api/checks/try", headers=auth_headers,
+                          json={"type": "dns", "target": "example.com", "part": "inside"})
+    assert r.status_code == 400
+
+
 async def test_inside_goes_to_the_agent_with_the_form_settings(client, auth_headers):
     """Сайт за белым списком: панель видит 403, а агент сервера сайта проверяет его на
     localhost с теми же кодом, заголовком и входом, что заведут в монитор."""

@@ -7024,3 +7024,8 @@ button.am-link.small { font-size: 0.82rem; }
 .am-edit { margin: 0; }
 .am-locs { margin-top: 0.7rem; display: flex; flex-direction: column; gap: 0.35rem; }
 .am-mutes { margin-top: 0.7rem; }
+/* push: свой период минутами под пресетами */
+.am-period { max-width: 12rem; margin-top: 0.6rem; }
+.am-box .field + .am-row { margin-top: 0.4rem; }
+/* в форме монитора переключатели на телефоне переносятся, а не вылезают за карточку */
+.am .win-switch { flex-wrap: wrap; max-width: 100%; }
