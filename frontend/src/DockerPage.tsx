@@ -231,9 +231,9 @@ function RiskWarning({ server: s, canAct, onChanged }: { server: Server; canAct:
           </div>
           <div className="loc-results">
             {live.map((x) => (
-              <div key={x.name} className="loc-res dk-warn-row">
+              <div key={x.name} className="loc-res hs-warn-row">
                 <span className="lk-dot lk-dot-bad" />
-                <div className="dk-warn-main">
+                <div className="hs-warn-main">
                   <span className="mono">{x.name}</span> <span className="muted small">({x.image})</span>
                   <div className="small">{dockRiskText(x, t)}</div>
                 </div>
@@ -256,7 +256,7 @@ function RiskWarning({ server: s, canAct, onChanged }: { server: Server; canAct:
         </>
       )}
       {muted.length > 0 && (
-        <div className="net-foot dk-muted-list">
+        <div className="net-foot hs-muted-list">
           <div>
             {t('По назначению: {list}', { list: muted.map((x) => `${x.name} (${dockRiskText(x, t)})`).join(', ') })}
             {canAct && muted.map((x) => (
@@ -302,9 +302,9 @@ function NoBootWarning({ server: s, canAct, onChanged }: { server: Server; canAc
           </div>
           <div className="loc-results">
             {live.map((x) => (
-              <div key={x.name} className="loc-res dk-warn-row">
+              <div key={x.name} className="loc-res hs-warn-row">
                 <span className="lk-dot lk-dot-warn" />
-                <div className="dk-warn-main">
+                <div className="hs-warn-main">
                   <span className="mono">{x.name}</span> <span className="muted small">({x.image}, restart {x.policy})</span>
                 </div>
                 {canAct && (
@@ -335,7 +335,7 @@ function NoBootWarning({ server: s, canAct, onChanged }: { server: Server; canAc
         </>
       )}
       {muted.length > 0 && (
-        <div className="net-foot dk-muted-list">
+        <div className="net-foot hs-muted-list">
           <div>
             {t('Не нужны после перезагрузки: {list}', { list: muted.map((x) => x.name).join(', ') })}
             {canAct && muted.map((x) => (
@@ -470,7 +470,7 @@ function ContainerRow({
           {c.image}
         </div>
         {running && (c.cpu != null || c.mem != null) && (
-          <div className="dk-c-use mono muted small">
+          <div className="hs-c-use mono muted small">
             {[c.cpu != null ? `CPU ${Math.round(c.cpu)}%` : '', c.mem != null ? fmtBytes(c.mem) : ''].filter(Boolean).join(' · ')}
           </div>
         )}
@@ -676,7 +676,7 @@ function DockerHostModal({
   const cpuSum = used.reduce((n, c) => n + (c.cpu ?? 0), 0)
   return createPortal(
     <div className="modal-backdrop">
-      <div className="card modal docker-modal dk-modal" onClick={(e) => e.stopPropagation()}>
+      <div className="card modal docker-modal hs-modal" onClick={(e) => e.stopPropagation()}>
         <div className="clients-head">
           <h3>
             <span className={`sdot ${s.online ? 'sdot-up' : 'sdot-down'}`} />{' '}
@@ -687,7 +687,7 @@ function DockerHostModal({
             {t('Закрыть')}
           </button>
         </div>
-        <div className="net-tiles dk-tiles">
+        <div className="net-tiles hs-tiles">
           <NetTile label="Docker" value={docker.version || '—'} sub={docker.compose ? `compose ${docker.compose}` : undefined} />
           {docker.access && (
             <NetTile
@@ -722,7 +722,7 @@ function DockerHostModal({
             />
           )}
         </div>
-        <div className="net-cards dk-cards">
+        <div className="net-cards hs-cards">
           {denied && docker.access && <EnableBlock readonly />}
           {!docker.access ? (
             <EnableBlock />
@@ -818,10 +818,10 @@ function HostRow({
   const running = cs.filter((c) => c.state === 'running').length
   const probs = Object.keys(s.docker_alerts ?? {}).length
   return (
-    <button className="loc-res loc-res-btn dk-host" onClick={onOpen}>
+    <button className="loc-res loc-res-btn hs-host" onClick={onOpen}>
       <span className={`lk-dot ${s.online ? 'lk-dot-ok' : 'lk-dot-bad'}`} title={s.online ? t('на связи') : t('не на связи')} />
-      <div className="dk-host-main">
-        <div className="dk-host-name">
+      <div className="hs-host-main">
+        <div className="hs-host-name">
           <OsIcon os={s.os} />
           <CountryFlag code={s.country} />
           {s.name}
@@ -858,7 +858,7 @@ function HostRow({
           {docker.compose ? ` · compose ${docker.compose}` : ''}
         </div>
       </div>
-      <div className="dk-host-count mono">
+      <div className="hs-host-count mono">
         {docker.access ? (
           <span className={probs ? 't-down' : running < cs.length ? 't-degraded' : 't-up'}>
             {t('{r}/{n}', { r: running, n: cs.length })}
@@ -1011,7 +1011,7 @@ export function DockerPage({
         </div>
       </div>
       {allHosts.length > 0 && (
-        <div className="net-tiles dk-tiles">
+        <div className="net-tiles hs-tiles">
           <NetTile
             label={t('Хосты с Docker')}
             value={String(allHosts.length)}
@@ -1077,7 +1077,7 @@ export function DockerPage({
         <div className="card muted">{t('Ничего не найдено.')}</div>
       )}
       {hosts.length > 0 && (
-        <div className="net-cards dk-groups">
+        <div className="net-cards hs-groups">
           {groups.map((g) => (
             <div key={g.key} className="chart-card net-card net-card-wide">
               <div className="net-head">

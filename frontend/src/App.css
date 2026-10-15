@@ -6447,30 +6447,32 @@ button.dm-sec-btn {
   background: var(--border-strong);
 }
 
-/* Docker в стиле "Сети": сводка плитками, хосты - строками в карточке группы, в модалке хоста
-   плитки и карточки. Свои классы dk-*: docker-row и docker-host-row общие с Кубером,
-   Сервисами и Бэкапами. Блок в конце файла: перебивает полосы docker-row того же веса */
-.dk-tiles { margin: 0.2rem 0 0.75rem; }
-.net-cards.dk-groups { margin-top: 0; }
-.loc-res.dk-host { gap: 0.7rem; padding: 0.55rem 0.8rem; }
-.dk-host-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 0.15rem; }
-.dk-host-name { display: flex; align-items: center; flex-wrap: wrap; gap: 0.35rem; font-weight: 600; }
-.dk-host-count { flex-shrink: 0; font-weight: 700; font-size: 0.95rem; }
-.dk-modal .dk-tiles { margin: 0 0 0.75rem; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); }
-.net-cards.dk-cards { margin-top: 0; }
-.dk-modal .modal-toolbar { margin: 0; }
+/* Разделы хостов (Docker, Кубер) в стиле "Сети": сводка плитками, хосты - строками в карточке
+   группы, в модалке хоста плитки и карточки. Свои классы hs-*: старые docker-row и
+   docker-host-row еще живут на других страницах. Блок в конце файла: перебивает полосы
+   docker-row того же веса */
+.hs-tiles { margin: 0.2rem 0 0.75rem; }
+.net-cards.hs-groups { margin-top: 0; }
+.loc-res.hs-host { gap: 0.7rem; padding: 0.55rem 0.8rem; }
+.hs-host-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 0.15rem; }
+.hs-host-name { display: flex; align-items: center; flex-wrap: wrap; gap: 0.35rem; font-weight: 600; }
+.hs-host-count { flex-shrink: 0; font-weight: 700; font-size: 0.95rem; }
+.hs-modal .hs-tiles { margin: 0 0 0.75rem; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); }
+.net-cards.hs-cards { margin-top: 0; }
+.hs-modal .modal-toolbar { margin: 0; }
+.hs-modal .kube-tabs { margin: 0; flex-wrap: wrap; }
 /* в строках контейнеров тон показывает точка, цветная полоса слева не нужна */
-.dk-modal .docker-row { border-left-width: 1px; border-left-color: var(--border); }
-.dk-modal .docker-row.docker-row-down { border-color: rgba(239, 68, 68, 0.45); }
-.dk-modal .docker-row.docker-row-loop { border-color: rgba(245, 158, 11, 0.45); }
-.dk-c-use { margin-top: 0.1rem; }
-.loc-res.dk-warn-row { gap: 0.6rem; flex-wrap: wrap; }
-.dk-warn-main { flex: 1 1 14rem; min-width: 0; overflow-wrap: anywhere; }
-.dk-muted-list button { margin-left: 0.4rem; }
+.hs-modal .docker-row { border-left-width: 1px; border-left-color: var(--border); }
+.hs-modal .docker-row.docker-row-down { border-color: rgba(239, 68, 68, 0.45); }
+.hs-modal .docker-row.docker-row-loop { border-color: rgba(245, 158, 11, 0.45); }
+.hs-c-use { margin-top: 0.1rem; }
+.loc-res.hs-warn-row { gap: 0.6rem; flex-wrap: wrap; }
+.hs-warn-main { flex: 1 1 14rem; min-width: 0; overflow-wrap: anywhere; }
+.hs-muted-list button { margin-left: 0.4rem; }
 /* на телефоне статус и кнопки контейнера - второй строкой, иначе имя и образ сжимались в ноль */
 @media (max-width: 560px) {
-  .dk-modal .docker-row { flex-wrap: wrap; row-gap: 0.4rem; }
-  .dk-modal .docker-row .docker-c-main { flex: 1 1 calc(100% - 1.5rem); }
-  .dk-modal .docker-row .docker-c-status { margin-left: 1.3rem; }
-  .dk-modal .docker-row .docker-actions { margin-left: auto; }
+  .hs-modal .docker-row { flex-wrap: wrap; row-gap: 0.4rem; }
+  .hs-modal .docker-row .docker-c-main { flex: 1 1 calc(100% - 1.5rem); }
+  .hs-modal .docker-row .docker-c-status { margin-left: 1.3rem; }
+  .hs-modal .docker-row .docker-actions { margin-left: auto; }
 }
