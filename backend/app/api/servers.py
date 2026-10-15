@@ -35,7 +35,7 @@ from app import audit, backup_growth, custom_backups, docker_exposure, geoip, ku
 from app.collector import (
     _backup_problem_repos, alert_since, backup_cadence, backup_rotation_items, backup_unmonitored,
     bsrv_extra, bsrv_restic_old, clock_skew_window, cron_job_issues, disk_analyze_ok, prune_problems, repo_reason, docker_since,
-    dump_local_stale, needed_pod_names, panel_server_names, pod_uid_names,
+    backup_run_start, dump_local_stale, needed_pod_names, panel_server_names, pod_uid_names,
     send_alerts_soon, send_autofix_note, server_problems, web_5xx_total, web_breakdown,
     web_error_window, web_label_key, web_log_label, web_rate_total,
 )
@@ -903,10 +903,11 @@ def _backup_coverage(server: Server) -> list[BackupAudit]:
                 continue
             if dump:
                 # Только что включили? Файлов ещё нет законно — первый дамп в ближайший
-                # бэкап. «Проблема» лишь если бэкап уже прошёл ПОСЛЕ включения, а файла нет.
+                # бэкап. «Проблема» лишь если бэкап уже НАЧАЛСЯ после включения, а файла нет:
+                # дампы снимаются в начале прогона, включенный посреди долгого бэкапа ждет
+                # следующего (backup_run_start).
                 enabled = dump.get("enabled_ts") or 0
-                last_bk = (bk.get("last_backup_ts") or 0)
-                if enabled and last_bk and last_bk > enabled:
+                if enabled and backup_run_start(bk) > enabled:
                     out.append(BackupAudit(
                         kind="db", subject=eng, gap=False, instance=inst,
                         detail=f"{where_txt} — дамп включён, но после бэкапа файлов в /backup"

@@ -129,3 +129,28 @@ def test_card_warns_about_a_stale_local_dump():
     quiet = _server([_dump(last_ts=T - 60 * H, enabled_ts=T - 90 * H)])
     quiet.last_seen = NOW - timedelta(hours=40)
     assert ch(quiet).kind == "db_ok"
+
+
+def test_dump_enabled_during_a_long_backup_waits_for_the_next():
+    """Живой случай (15.10.2026): бэкап шел 52 минуты, дампы включили через 3 и 9 минут после
+    его старта. Дампы снимаются в начале прогона, в этот бэкап они попасть не могли, а панель
+    сравнивала включение с концом прогона: ложный алерт и оранжевое в покрытии."""
+    def ch(server):
+        return next(a for a in _backup_coverage(server) if a.subject == "ClickHouse")
+
+    start, end = T - 60 * 60, T - 8 * 60
+    bk = {"configured": True, "metric_present": True, "success": 1, "last_backup_ts": end,
+          "started_ts": start, "duration_sec": end - start, "full_duration_sec": end - start}
+    mid = _server([_dump(files=0, last_ts=0, enabled_ts=start + 3 * 60)], backup=bk, state=HELD)
+    assert _cond(mid)[0] == 0
+    card = ch(mid)
+    assert card.kind == "db_ok" and "первый снимется в ближайший бэкап" in card.detail
+    # бэкап начался после включения, а файлов нет - дамп правда не снимается
+    late = _server([_dump(files=0, last_ts=0, enabled_ts=start - 60)], backup=bk, state=HELD)
+    assert _cond(late)[0] == 1
+    assert ch(late).kind == "db" and "после бэкапа файлов" in ch(late).detail
+    # идет новый прогон (старт позже конца прошлого): старт прошлого - по длительности restic
+    running = dict(bk, started_ts=T - 60)
+    assert collector.backup_run_start(running) == start
+    assert collector.backup_run_start({"last_backup_ts": end, "started_ts": start}) == start
+    assert collector.backup_run_start({}) == 0
