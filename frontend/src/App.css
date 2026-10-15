@@ -691,7 +691,26 @@ input:focus {
 .net-n-warn { color: var(--degraded); background: rgba(245, 158, 11, 0.15); }
 .net-n-info { color: #3b82f6; background: rgba(59, 130, 246, 0.15); }
 /* настоящая беда в блоке (а не только предупреждения) - красная рамка */
-.home-block.has-down { border-color: rgba(239, 68, 68, 0.45); }
+/* Блоки главной подкрашены по смыслу, как до перевода на карточки (юзер выбрал по прототипам
+   15.10.2026): по умолчанию оранжевым - требует внимания, с настоящей бедой - красным,
+   обновления - синим, известное и "к сведению" - серым. --tone задает и подсветку строк */
+.net-card.home-block {
+  --tone: #f0a020;
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--tone) 6%, var(--bg-card));
+  border-color: color-mix(in srgb, var(--tone) 35%, var(--border));
+}
+.net-card.home-block.has-down {
+  --tone: #e5534b;
+  background: color-mix(in srgb, var(--tone) 7%, var(--bg-card));
+  border-color: color-mix(in srgb, var(--tone) 45%, var(--border));
+}
+.net-card.home-block.home-attention-fleet { --tone: #3b82f6; }
+.net-card.home-block.home-attention-known, .net-card.home-block.home-attention-soft {
+  --tone: var(--text);
+  background: color-mix(in srgb, var(--text) 3%, var(--bg-card));
+  border-color: var(--border);
+}
 .home-block .ansible-hint { margin: 0; }
 .home-attention-list { display: flex; flex-direction: column; gap: 0.3rem; }
 .home-attention-row {
@@ -700,28 +719,26 @@ input:focus {
   gap: 0.6rem;
   width: 100%;
   text-align: left;
-  background: var(--bg);
-  border: 1px solid var(--border);
+  background: transparent;
+  border: 1px solid transparent;
   border-radius: 8px;
   box-shadow: none;
-  padding: 0.45rem 0.7rem;
+  padding: 0.4rem 0.3rem;
   color: var(--text);
   font: inherit;
   font-size: 0.9rem;
   cursor: pointer;
-  transition: border-color 0.12s ease, background 0.12s ease;
+  transition: background 0.12s ease;
 }
-.home-attention-row:hover { background: var(--card-hover); border-color: var(--border-strong); }
+.home-attention-row:hover { background: color-mix(in srgb, var(--tone, #f0a020) 12%, transparent); }
 .home-attention-ico { flex-shrink: 0; }
 .home-attention-more { align-self: flex-start; padding: 0.3rem 0.5rem; }
 /* текст пункта переносим, а не режем: обрезанное на середине предложение непонятно */
 .home-attention-txt { flex: 1; min-width: 0; white-space: normal; overflow-wrap: anywhere; }
 .home-attention-txt b { font-weight: 600; }
 /* группа одинаковых пунктов с разных серверов: одна рамка на заголовок и серверы под ним */
-.home-attention-grpbox { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; }
-.home-attention-grpbox.open { border-color: var(--border-strong); }
-.home-attention-grpbox > .home-attention-row { border: 0; background: none; }
-.home-attention-grpbox > .home-attention-row:hover { background: var(--card-hover); }
+.home-attention-grpbox { border-radius: 8px; }
+.home-attention-grpbox.open { background: color-mix(in srgb, var(--tone, #f0a020) 6%, transparent); }
 .home-attention-sub {
   display: flex;
   flex-direction: column;
@@ -729,7 +746,6 @@ input:focus {
   border-top: 1px dashed var(--border);
 }
 .home-attention-sub .home-attention-row { border: 0; background: none; padding: 0.25rem 0.4rem; font-size: 0.86rem; }
-.home-attention-sub .home-attention-row:hover { background: var(--card-hover); }
 /* группы в "Требует действий": серверное сверху, бэкапное ниже */
 .home-attention-grp { display: flex; flex-direction: column; gap: 0.3rem; }
 .home-attention-grp + .home-attention-grp { margin-top: 0.4rem; }
@@ -741,13 +757,13 @@ input:focus {
    На узком экране кнопки уезжают под текст, иначе имя рвалось в столбик по слогам */
 .home-attention-note { margin-top: -0.2rem; }
 .home-attention-mute .home-attention-row { cursor: default; gap: 0.4rem; flex-wrap: wrap; }
-.home-attention-mute .home-attention-row:hover { background: var(--bg); border-color: var(--border); }
+.home-attention-mute .home-attention-row:hover { background: transparent; }
 .home-attention-mute .home-attention-txt { flex: 1 1 14rem; }
 .home-attention-mute .home-attention-row > button { flex-shrink: 0; }
 .home-attention-mute > button { align-self: flex-start; }
 /* окна обслуживания - к сведению, строка никуда не ведет */
 .home-attention-row.maint-home-row { cursor: default; }
-.home-attention-row.maint-home-row:hover { background: var(--bg); border-color: var(--border); }
+.home-attention-row.maint-home-row:hover { background: transparent; }
 .sec-icon {
   width: 1.35em;
   height: 1.35em;
@@ -6406,6 +6422,9 @@ button.dm-sec-btn {
 .hs-host-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 0.15rem; }
 .hs-host-name { display: flex; align-items: center; flex-wrap: wrap; gap: 0.35rem; font-weight: 600; }
 .hs-host-count { flex-shrink: 0; font-weight: 700; font-size: 0.95rem; }
+/* строки хостов в разделах - без подложки и рамки, как строки главной; подсветка при наведении */
+.loc-res.hs-host { background: transparent; border-color: transparent; }
+.loc-res-btn.hs-host:hover { background: var(--hover); border-color: transparent; }
 .hs-modal .hs-tiles { margin: 0 0 0.75rem; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); }
 .net-cards.hs-cards { margin-top: 0; }
 .hs-modal .modal-toolbar { margin: 0; }
