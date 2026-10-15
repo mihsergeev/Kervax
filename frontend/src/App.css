@@ -6274,6 +6274,129 @@ button.tl-tile-off .net-tile-value {
   overflow-wrap: anywhere;
 }
 
+/* ---------- уязвимости (VulnsCard, VulnsModal) ---------- */
+.vuln-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  margin-top: 0.4rem;
+}
+.vuln-row {
+  padding: 0.4rem 0.3rem;
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 45%, transparent);
+  min-width: 0;
+}
+.vuln-row:last-child {
+  border-bottom: 0;
+}
+.vuln-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.35rem 0.5rem;
+  min-width: 0;
+}
+.vuln-name {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+.vuln-ver {
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+.vuln-tag {
+  font-size: 0.72rem;
+  line-height: 1.5;
+  padding: 0 0.45rem;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--degraded) 55%, var(--border));
+  color: var(--degraded);
+  white-space: nowrap;
+}
+.vuln-tag-kev {
+  border-color: color-mix(in srgb, var(--down) 60%, var(--border));
+  color: var(--down);
+  background: color-mix(in srgb, var(--down) 10%, transparent);
+}
+.vuln-tag-pro {
+  border-color: var(--border);
+  color: var(--text-muted);
+}
+.vuln-bins {
+  margin: 0.15rem 0 0 1.05rem;
+  overflow-wrap: anywhere;
+}
+.vuln-cves {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.2rem 0.6rem;
+  margin: 0.2rem 0 0 1.05rem;
+  font-size: 0.8rem;
+}
+.vuln-cve {
+  color: var(--text-muted);
+  text-decoration: none;
+  font-variant-numeric: tabular-nums;
+}
+.vuln-cve:hover {
+  color: var(--text);
+  text-decoration: underline;
+}
+.vuln-cve-kev {
+  color: var(--down);
+  font-weight: 600;
+}
+.vuln-eol {
+  margin-top: 0.35rem;
+  padding: 0.35rem 0.5rem;
+  border-radius: 6px;
+  border: 1px solid color-mix(in srgb, var(--degraded) 45%, var(--border));
+  background: color-mix(in srgb, var(--degraded) 8%, transparent);
+}
+.vuln-fix {
+  margin-top: 0.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+.vuln-cmd {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+  min-width: 0;
+}
+.vuln-cmd code {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 0.3rem 0.45rem;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--text) 6%, transparent);
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+.vuln-servers {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin-top: 0.6rem;
+}
+.vuln-srv {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 0.45rem 0.6rem;
+  min-width: 0;
+}
+.vuln-srv-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.35rem 0.6rem;
+}
+.vuln-feeds {
+  margin-top: 0.8rem;
+}
+
 /* ---------- карта зависимостей (DepMapModal) ---------- */
 .dm-modal {
   width: min(1200px, calc(100vw - 2rem));

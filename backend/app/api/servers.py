@@ -1217,6 +1217,15 @@ async def server_packages(server_id: int, user: CurrentUser, session: SessionDep
     return await packages_mod.list_for(session, server_id, q)
 
 
+@router.get("/{server_id}/vulns")
+async def server_vulns(server_id: int, user: CurrentUser, session: SessionDep) -> dict:
+    """Важные уязвимости в пакетах сервера (app/vulns.py): critical и уже эксплуатируемые, только
+    те, что закрываются обновлением."""
+    from app import vulns as vulns_mod
+    s = await _get_or_404(server_id, session, user)
+    return await vulns_mod.for_server(session, s)
+
+
 @router.get("/{server_id}/timeline")
 async def server_timeline(
     server_id: int, user: CurrentUser, session: SessionDep, days: int = Query(7, ge=1, le=90)

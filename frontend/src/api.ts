@@ -2519,6 +2519,42 @@ export function getServerPackages(id: number, q: string): Promise<ServerPackages
   return api<ServerPackages>(`/api/servers/${id}/packages?q=${encodeURIComponent(q)}`)
 }
 
+// --- важные уязвимости (backend app/vulns.py) ---
+export type VulnCve = { id: string; prio: string; cvss: number; kev: boolean }
+export type VulnFinding = {
+  src: string
+  pkgs: [string, string][]
+  fixed: string
+  pro: boolean
+  kernel: boolean
+  cves: VulnCve[]
+}
+export type VulnSummary = { pkgs: number; cves: number; critical: number; kev: number; pro: number; kernel: boolean }
+export type ServerVulns = {
+  release: string
+  os: string
+  eol: string
+  pkgs: number
+  pkgs_ts: string | null
+  feed_ts: string | null
+  feed_gen: string
+  feed_err: string
+  pro_on: boolean
+  found: VulnFinding[]
+  summary: VulnSummary
+}
+export function getServerVulns(id: number): Promise<ServerVulns> {
+  return api<ServerVulns>(`/api/servers/${id}/vulns`)
+}
+export type FleetVulnServer = ServerVulns & { id: number; name: string; group: string }
+export type FleetVulns = {
+  servers: FleetVulnServer[]
+  feeds: { release: string; ts: string | null; gen: string; err: string }[]
+}
+export function getFleetVulns(): Promise<FleetVulns> {
+  return api<FleetVulns>('/api/vulns')
+}
+
 // --- карта зависимостей (backend api/depmap.py) ---
 export type DepMapServer = { id: number; name: string; group: string; parent_id: number | null; online: boolean; enabled: boolean }
 export type DepMapCheck = { id: number; name: string; status: string; parents: { id: number; why: string }[] }

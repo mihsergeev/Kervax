@@ -2325,6 +2325,46 @@ const EN: Record<string, string> = {
   'установлено: {n}': 'installed: {n}',
   'имя или версия': 'name or version',
   'весь список': 'full list',
+  // Уязвимости
+  'Уязвимости': 'Vulnerabilities',
+  'ядро ({src})': 'kernel ({src})',
+  'эксплуатируется: {n}': 'exploited: {n}',
+  'critical: {n}': 'critical: {n}',
+  'только в Ubuntu Pro': 'Ubuntu Pro only',
+  'обновить и перезагрузить': 'upgrade and reboot',
+  'уже эксплуатируют (CISA KEV)': 'exploited in the wild (CISA KEV)',
+  '{os}: обычная поддержка кончилась ({eol}), исправления выходят только в Ubuntu Pro.':
+    '{os}: standard support ended ({eol}), fixes are only released in Ubuntu Pro.',
+  'Pro подключен.': 'Pro is attached.',
+  'Pro не подключен.': 'Pro is not attached.',
+  'важных CVE: {n}': 'important CVEs: {n}',
+  'важных нет': 'none important',
+  'Сверка с базой уязвимостей пока только для Ubuntu.': 'Vulnerability matching is only available for Ubuntu so far.',
+  'База уязвимостей не скачалась: {err}': 'The vulnerability database failed to download: {err}',
+  'База уязвимостей еще не скачана: панель скачивает ее раз в сутки, первый раз - в течение 10 минут.':
+    'The vulnerability database is not downloaded yet: the panel fetches it once a day, the first time within 10 minutes.',
+  'Только critical и уже эксплуатируемые (CISA KEV), которые закрываются обновлением. База Canonical от {d}.':
+    'Only critical and already exploited (CISA KEV) ones that an update fixes. Canonical database of {d}.',
+  'скопировано': 'copied',
+  'копировать': 'copy',
+  'Ядро закрывается только перезагрузкой в новое: sudo apt full-upgrade, затем перезагрузка.':
+    'The kernel is only fixed by rebooting into a new one: sudo apt full-upgrade, then reboot.',
+  'Только critical и уже эксплуатируемые (CISA KEV), которые закрываются обновлением: средние и мелкие не показываются. Пакеты сверяются с базой Canonical, ядро - работающее, а не установленное.':
+    'Only critical and already exploited (CISA KEV) ones that an update fixes: medium and minor ones are not shown. Packages are matched against the Canonical database, the kernel is the running one, not the installed one.',
+  'CVE, пакет или сервер': 'CVE, package or server',
+  'с важными уязвимостями: {n}': 'with important vulnerabilities: {n}',
+  'с эксплуатируемыми: {n}': 'with exploited: {n}',
+  'ждут нового ядра: {n}': 'waiting for a new kernel: {n}',
+  'Базы уязвимостей еще не скачаны: панель скачивает их раз в сутки, первый раз - в течение 10 минут.':
+    'Vulnerability databases are not downloaded yet: the panel fetches them once a day, the first time within 10 minutes.',
+  'пакетов: {n}': 'packages: {n}',
+  'Без важных уязвимостей: {n}': 'No important vulnerabilities: {n}',
+  'Не проверены: {n}': 'Not checked: {n}',
+  'не Ubuntu': 'not Ubuntu',
+  'список пакетов еще не пришел': 'the package list has not arrived yet',
+  'база уязвимостей еще не скачана': 'the vulnerability database is not downloaded yet',
+  'Базы Canonical:': 'Canonical databases:',
+  'ошибка: {e}': 'error: {e}',
   'Список еще не пришел: агент пришлет его со следующим отчетом.':
     'The list has not arrived yet: the agent will send it with the next report.',
   'показаны первые {k} из {n}, уточните фильтр': 'showing the first {k} of {n}, narrow the filter',
