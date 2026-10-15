@@ -1,13 +1,16 @@
 :root {
-  --bg: #0f1117;
-  --bg-card: #171a23;
-  --border: #262b38;
+  /* три слоя: страница темнее всего, вложенное (строки, плитки, поля) посередине,
+     карточки светлее - иначе все сливается в один цвет */
+  --bg-page: #0b0d12;
+  --bg: #141821;
+  --bg-card: #1b1f2a;
+  --border: #2c3242;
   --text: #e6e9f0;
-  --text-muted: #8b93a7;
+  --text-muted: #98a0b4;
 
   --hover: rgba(255, 255, 255, 0.06);
-  --card-hover: #191d28;
-  --border-strong: #333c50;
+  --card-hover: #232837;
+  --border-strong: #3f485e;
 
   /* статусы мониторов */
   --up: #22c55e;
@@ -20,6 +23,7 @@
 }
 
 :root[data-theme='light'] {
+  --bg-page: #e4e8ef;
   --bg: #e4e8ef;
   --bg-card: #ffffff;
   --border: #ccd3de;
@@ -50,7 +54,7 @@
 
 body {
   margin: 0;
-  background: var(--bg);
+  background: var(--bg-page);
   color: var(--text);
   -webkit-font-smoothing: antialiased;
 }

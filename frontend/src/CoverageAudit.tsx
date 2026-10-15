@@ -325,8 +325,10 @@ export function CoverageAudit({ server: s, canManage, onChanged }: {
   // ранний выход — после всех хуков: иначе при опустевшем списке менялся бы их порядок
   if (items.length === 0) return null
   return (
-    <div className="coverage-audit">
-      <div className="backup-manage-head">{t('Покрытие')}</div>
+    <div className="chart-card net-card net-card-wide coverage-audit">
+      <div className="net-head">
+        <div className="chart-cap net-cap">{t('Покрытие')}</div>
+      </div>
       {gaps.length > 0 && (
         <div className="coverage-group">
           <div className="form-error small">

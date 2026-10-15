@@ -31,7 +31,7 @@ import {
 } from './api'
 import { updateServer } from './api'
 import { backupWindowNote } from './serverUtils'
-import { OsIcon, osShort } from './osIcon'
+import { OsIcon } from './osIcon'
 import { CoverageAudit } from './CoverageAudit'
 import { helperText } from './helperText'
 import { bulkCleanupScript, safeRepoName } from './bulkCleanupScript'
@@ -42,6 +42,7 @@ import { MuteChip, MutesBanner, collectMutes } from './mutes'
 import { VaultPanel } from './VaultPanel'
 import { CountryFlag } from './CountryFlag'
 import { byteUnits, fmtDur } from './units'
+import { NetTile, type Tone } from './NetLinks'
 
 async function runAndWait(
   serverId: number,
@@ -85,6 +86,16 @@ function statusTone(st: BStatus): string {
   if (st === 'failed' || st === 'stale') return 't-down'
   if (st === 'skipped') return 't-degraded'
   return 't-degraded'
+}
+// тон плитки по статусу бэкапа
+const TILE: Record<BStatus, Tone | undefined> = { ok: 'ok', failed: 'bad', stale: 'bad', skipped: 'warn', unknown: undefined }
+// точка строки по тону и подпись плитки из частей (пустые выкидываем)
+const DOT: Record<string, string> = { 't-up': ' lk-dot-ok', 't-down': ' lk-dot-bad', 't-degraded': ' lk-dot-warn' }
+const subOf = (...parts: (string | false | 0 | undefined)[]) => parts.filter(Boolean).join(' · ')
+// заполнение тома с репозиториями, % (null: helper старше 0.18, данных нет)
+function diskPct(info: BackupServerInfo): number | null {
+  const total = info.disk_total || 0
+  return total ? Math.min(100, Math.round(((info.disk_used || 0) / total) * 100)) : null
 }
 
 // «живой» бэкап: есть systemd-таймер ИЛИ restic на месте и хоть раз бэкапил. Только
@@ -327,8 +338,6 @@ function ManageSection({ server: s, backup: b, onChanged }: { server: Server; ba
 
   return (
     <div className="backup-manage" id="backup-manage-schedule">
-      <div className="backup-manage-head">{t('Управление')}</div>
-
       <div className="backup-manage-row">
         <label className="backup-manage-label">{t('Расписание (ежедневно)')}</label>
         {/* type="time" — браузер сам не даёт набрать «02333:00323»: раньше это было
@@ -559,9 +568,14 @@ function OwnBackups({ server: s, canManage, onChanged }: {
     <OwnBackupRow key={j.id} job={j} canManage={canManage} busy={busy === j.id} onToggle={() => toggle(j)} />
   )
   return (
-    <div className="own-backups">
-      <div className="chart-cap">{t('Свои бэкапы на ноде')}</div>
-      <div className="muted small own-backups-lead">
+    <div className="chart-card net-card net-card-wide own-backups">
+      <div className="net-head">
+        <div className="chart-cap net-cap">
+          {t('Свои бэкапы на ноде')}
+          <span className={`net-n${ownBackupProblems(s).length ? ' net-n-bad' : ''}`}>{active.length}</span>
+        </div>
+      </div>
+      <div className="net-sub">
         {t('Настроены без панели. Панель нашла их сама и следит за их работой, ничего на ноде не меняя.')}
       </div>
       {active.length > 0 && <div className="own-backups-list">{active.map(row)}</div>}
@@ -626,134 +640,161 @@ function BackupModal({
       <span className="kv-v mono small">{v}</span>
     </div>
   )
+  // сколько restic добавляет за прогон: это и раздувает бэкап-сервер
+  const runs = backupRuns(s)
+  const last = runs.length ? runs[runs.length - 1] : null
+  const usual = runs.length > 1 ? usualGrowth(runs.slice(0, -1)) : 0
+  const dumpBytes = (b.dumps ?? []).reduce((a, d) => a + (d.size_bytes || 0), 0)
+  const dumpFiles = (b.dumps ?? []).reduce((a, d) => a + (d.files || 0), 0)
+  const hm = (ts: number) => new Date(ts * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+  // full > restic заметно → показываем обе: дамп занимает время ДО restic,
+  // и по одной restic-длительности не понять, когда бэкап реально закончился
+  const withDumps = (b.full_duration_sec || 0) > (b.duration_sec || 0) + 2
+  const win = backupWindowNote(s)
+  const v = s.backup_verify
+  const helperOld = canManage && b.manageable && (b.helper_version || 0) < CURRENT_BACKUP_HELPER
   return createPortal(
     <div className="modal-backdrop">
-      <div className="card modal docker-modal" onClick={(e) => e.stopPropagation()}>
+      <div className="card modal docker-modal hs-modal" onClick={(e) => e.stopPropagation()}>
         <div className="clients-head">
           <h3>
             <span className={`sdot ${s.online ? 'sdot-up' : 'sdot-down'}`} />{' '}
             <OsIcon os={s.os} /> <CountryFlag code={s.country} /> {s.name}
+            {s.group_name && <span className="type-chip group-chip">{s.group_name}</span>}
           </h3>
           <button className="ghost" onClick={onClose}>
             {t('Закрыть')}
           </button>
         </div>
-        <div className="docker-host-head">
-          {s.group_name && <span className="type-chip group-chip">{s.group_name}</span>}
-          <span className={`type-chip ${statusTone(st)}`}>{stLabel[st]}</span>
-          {b.restic_version && <span className="type-chip mono">{shortRestic(b.restic_version)}</span>}
-          {s.os && <span className="type-chip">{osShort(s.os)}</span>}
-        </div>
-        <div className="kv-list">
-          {row(t('Последний бэкап'), b.last_backup_ts
-            ? `${fmtAgo(b.last_backup_ts)} · ${new Date(b.last_backup_ts * 1000).toLocaleString()}`
-            : '—')}
-          {row(t('Результат'), b.metric_present
-            ? (b.success === 1 ? t('успех') : t('ошибка'))
-            : b.ts_source === 'systemd'
-              ? `${b.service_result === 'success' ? t('успех') : b.service_result || t('нет данных')} ${t('(по systemd)')}`
-              : t('нет метрики'))}
-          {row(t('Длительность'),
-            // full > restic заметно → показываем обе: дамп занимает время ДО restic,
-            // и по одной restic-длительности не понять, когда бэкап реально закончился
-            (b.full_duration_sec || 0) > (b.duration_sec || 0) + 2
-              ? `${fmtDur(b.full_duration_sec)} ${t('(дампы + restic)')} · restic ${fmtDur(b.duration_sec)}`
-              : fmtDur(b.duration_sec))}
-          {(b.started_ts || 0) > 0 && b.last_backup_ts && row(t('Окно бэкапа'),
-            `${new Date(b.started_ts! * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} → ${new Date(b.last_backup_ts * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`)}
-          {backupWindowNote(s) && (
-            <div className="backup-window-note">⏰ {t('Не уложился в окно')}: {backupWindowNote(s)}</div>
+        <div className="net-tiles hs-tiles">
+          <NetTile label={t('Последний бэкап')} value={fmtAgo(b.last_backup_ts)} sub={stLabel[st]} tone={TILE[st]} />
+          <NetTile
+            label={t('Длительность')}
+            value={fmtDur(withDumps ? b.full_duration_sec : b.duration_sec)}
+            sub={subOf(
+              withDumps && t('с дампами'),
+              (b.started_ts || 0) > 0 && !!b.last_backup_ts && `${hm(b.started_ts!)}-${hm(b.last_backup_ts)}`,
+            ) || undefined}
+            tone={win ? 'warn' : undefined}
+          />
+          {repo && (repo.size_bytes || 0) > 0 && (
+            <NetTile label={t('В репозитории')} value={fmtBytes(repo.size_bytes)} sub={t('снапшотов: {n}', { n: repo.snapshots })} />
           )}
-          {row(t('Пропущен (лок занят)'), b.skipped ? t('да') : '—')}
-          {row(t('Таймер'), `${b.timer_enabled ? t('включён') : t('выключен')} · ${b.timer_active ? t('активен') : t('неактивен')}`)}
-          {b.service_result && row(t('Сервис'), b.service_result)}
-          {b.repo_dest && row(t('Куда бэкапится'), b.repo_dest)}
-          {/* объёмы: дампы БД (что кладём на диск перед restic) + физический размер репо
-              на бэкап-сервере (вся история, дедуп+сжатие). Логический размер снапшота требует
-              пароля репо (агенту недоступен) — не показываем, репо-размер понятнее. */}
-          {(() => {
-            const dumpBytes = (b.dumps ?? []).reduce((a, d) => a + (d.size_bytes || 0), 0)
-            const dumpFiles = (b.dumps ?? []).reduce((a, d) => a + (d.files || 0), 0)
-            return dumpBytes > 0
-              ? row(t('Дампы БД'), `${fmtBytes(dumpBytes)} · ${t('файлов: {n}', { n: dumpFiles })}`)
-              : null
-          })()}
-          {repo && (repo.size_bytes || 0) > 0 && row(t('В репозитории'),
-            `${fmtBytes(repo.size_bytes)} · ${t('снапшотов: {n}', { n: repo.snapshots })}`)}
-          {(() => {
-            // сколько restic добавляет за прогон: это и раздувает бэкап-сервер
-            const runs = backupRuns(s)
-            if (!runs.length) return null
-            const last = runs[runs.length - 1]
-            return (
-              <>
-                {row(t('Последний прогон'), t('добавил {s} (до сжатия {a}) · прочитано {p} за {d}', {
-                  s: fmtBytes(last.st), a: fmtBytes(last.add), p: fmtBytes(last.proc), d: fmtDur(last.dur),
-                }))}
-                {runs.length > 1 && row(t('Обычно за прогон'), fmtBytes(usualGrowth(runs.slice(0, -1))))}
-                <div className="growth-wrap">
-                  <GrowthBars runs={runs.slice(-40)} />
-                  <div className="muted small">
-                    {t('сколько каждый прогон добавил в репозиторий, последние {n}, свежий справа', { n: Math.min(runs.length, 40) })}
-                  </div>
-                  {s.backup_growth && <div className="small t-degraded">⚠ {s.backup_growth.text}</div>}
-                </div>
-              </>
-            )
-          })()}
-          {s.backup_verify && row(t('Восстановление'), (
-            <span className={s.backup_verify.level >= 2 ? 't-down' : s.backup_verify.level === 1 ? 't-degraded' : ''}>
-              {s.backup_verify.problems.length > 0
-                ? s.backup_verify.problems.join('; ')
-                : t('проверено {d}: файлов совпало {n}{dumps}', {
-                    d: s.backup_verify.ts ? new Date(s.backup_verify.ts).toLocaleDateString() : '?',
-                    n: s.backup_verify.files_ok,
-                    dumps: s.backup_verify.dumps_ok.length
-                      ? t(', дампы читаются: {e}', { e: s.backup_verify.dumps_ok.join(', ') })
-                      : '',
-                  })}
-            </span>
-          ))}
-          {row('restic', (
-            <span className="restic-row">
-              {b.restic_found ? (shortRestic(b.restic_version) || t('найден')) : t('не найден')}
-              {canManage && resticOld && !rdone && (
-                <button className="restic-update-btn" disabled={rbusy} onClick={updateRestic}>
-                  {rbusy ? '…' : `⬆ ${t('обновить до {v}', { v: RESTIC_TARGET })}`}
-                </button>
-              )}
-              {rdone && <span className="t-up small">✓ {t('обновлено до {v} — версия в шапке обновится через минуту', { v: RESTIC_TARGET })}</span>}
-              {rmsg && !rdone && <span className="muted small"> · {rmsg}</span>}
-            </span>
-          ))}
+          {last && (
+            <NetTile
+              label={t('Последний прогон')}
+              value={`+${fmtBytes(last.st)}`}
+              sub={usual ? t('обычно {s}', { s: fmtBytes(usual) }) : undefined}
+              tone={s.backup_growth ? 'warn' : undefined}
+            />
+          )}
+          {v && (
+            <NetTile
+              label={t('Восстановление')}
+              value={v.level >= 2 ? t('не прошло') : v.problems.length ? t('замечания') : t('проверено')}
+              sub={v.ts ? new Date(v.ts).toLocaleDateString() : undefined}
+              tone={v.level >= 2 ? 'bad' : v.problems.length ? 'warn' : 'ok'}
+            />
+          )}
+          {(!b.restic_found || resticOld) && (
+            <NetTile
+              label="restic"
+              value={resticVer || t('не найден')}
+              sub={resticOld ? t('есть {v}', { v: RESTIC_TARGET }) : undefined}
+              tone={resticOld ? 'warn' : 'bad'}
+            />
+          )}
         </div>
-        {b.notes && b.notes.length > 0 && (
-          <div className="backup-notes">
-            {b.notes.map((n, i) => (
-              <div key={i} className="form-error small">⚠️ {n}</div>
+        <div className="net-cards hs-cards">
+          <div className="chart-card net-card net-card-wide">
+            <div className="net-head">
+              <div className="chart-cap net-cap">{t('Бэкап')}</div>
+            </div>
+            {(b.notes ?? []).map((n, i) => (
+              <div key={i} className="net-prob">{n}</div>
             ))}
+            {win && <div className="net-note">{t('Не уложился в окно')}: {win}</div>}
+            {v && v.problems.map((p) => (
+              <div key={p} className={v.level >= 2 ? 'net-prob' : 'net-note'}>{p}</div>
+            ))}
+            <div className="kv-list">
+              {row(t('Последний бэкап'), b.last_backup_ts
+                ? `${fmtAgo(b.last_backup_ts)} · ${new Date(b.last_backup_ts * 1000).toLocaleString()}`
+                : '—')}
+              {row(t('Результат'), b.metric_present
+                ? (b.success === 1 ? t('успех') : t('ошибка'))
+                : b.ts_source === 'systemd'
+                  ? `${b.service_result === 'success' ? t('успех') : b.service_result || t('нет данных')} ${t('(по systemd)')}`
+                  : t('нет метрики'))}
+              {row(t('Длительность'), withDumps
+                ? `${fmtDur(b.full_duration_sec)} ${t('(дампы + restic)')} · restic ${fmtDur(b.duration_sec)}`
+                : fmtDur(b.duration_sec))}
+              {(b.started_ts || 0) > 0 && b.last_backup_ts && row(t('Окно бэкапа'),
+                `${hm(b.started_ts!)} → ${hm(b.last_backup_ts)}`)}
+              {row(t('Пропущен (лок занят)'), b.skipped ? t('да') : '—')}
+              {row(t('Таймер'), `${b.timer_enabled ? t('включён') : t('выключен')} · ${b.timer_active ? t('активен') : t('неактивен')}`)}
+              {b.service_result && row(t('Сервис'), b.service_result)}
+              {b.repo_dest && row(t('Куда бэкапится'), b.repo_dest)}
+              {/* объёмы: дампы БД (что кладём на диск перед restic) + физический размер репо
+                  на бэкап-сервере (вся история, дедуп+сжатие). Логический размер снапшота требует
+                  пароля репо (агенту недоступен) — не показываем, репо-размер понятнее. */}
+              {dumpBytes > 0 && row(t('Дампы БД'), `${fmtBytes(dumpBytes)} · ${t('файлов: {n}', { n: dumpFiles })}`)}
+              {repo && (repo.size_bytes || 0) > 0 && row(t('В репозитории'),
+                `${fmtBytes(repo.size_bytes)} · ${t('снапшотов: {n}', { n: repo.snapshots })}`)}
+              {last && row(t('Последний прогон'), t('добавил {s} (до сжатия {a}) · прочитано {p} за {d}', {
+                s: fmtBytes(last.st), a: fmtBytes(last.add), p: fmtBytes(last.proc), d: fmtDur(last.dur),
+              }))}
+              {runs.length > 1 && row(t('Обычно за прогон'), fmtBytes(usual))}
+              {v && v.problems.length === 0 && row(t('Восстановление'), t('проверено {d}: файлов совпало {n}{dumps}', {
+                d: v.ts ? new Date(v.ts).toLocaleDateString() : '?',
+                n: v.files_ok,
+                dumps: v.dumps_ok.length ? t(', дампы читаются: {e}', { e: v.dumps_ok.join(', ') }) : '',
+              }))}
+              {row('restic', (
+                <span className="restic-row">
+                  {b.restic_found ? (shortRestic(b.restic_version) || t('найден')) : t('не найден')}
+                  {canManage && resticOld && !rdone && (
+                    <button className="restic-update-btn" disabled={rbusy} onClick={updateRestic}>
+                      {rbusy ? '…' : `⬆ ${t('обновить до {v}', { v: RESTIC_TARGET })}`}
+                    </button>
+                  )}
+                  {rdone && <span className="t-up small">✓ {t('обновлено до {v} — версия в шапке обновится через минуту', { v: RESTIC_TARGET })}</span>}
+                  {rmsg && !rdone && <span className="muted small"> · {rmsg}</span>}
+                </span>
+              ))}
+            </div>
+            {last && (
+              <div className="growth-wrap">
+                <GrowthBars runs={runs.slice(-40)} />
+                <div className="muted small">
+                  {t('сколько каждый прогон добавил в репозиторий, последние {n}, свежий справа', { n: Math.min(runs.length, 40) })}
+                </div>
+                {s.backup_growth && <div className="small t-degraded">⚠ {s.backup_growth.text}</div>}
+              </div>
+            )}
           </div>
-        )}
-        <OwnBackups server={s} canManage={canManage} onChanged={onChanged} />
-        <CoverageAudit server={s} canManage={canManage} onChanged={onChanged} />
-        {canManage && b.manageable && (b.helper_version || 0) < CURRENT_BACKUP_HELPER && (
-          <div className="form-error small" style={{ marginTop: '0.5rem' }}>
-            ⚠️ {t('helper на ноде устарел — переустановите, чтобы подхватить новые фичи/фиксы:')}
+          <OwnBackups server={s} canManage={canManage} onChanged={onChanged} />
+          <CoverageAudit server={s} canManage={canManage} onChanged={onChanged} />
+          <div className="chart-card net-card net-card-wide">
+            <div className="net-head">
+              <div className="chart-cap net-cap">{t('Управление')}</div>
+            </div>
+            {helperOld && (
+              <div className="net-note">{t('helper на ноде устарел — переустановите, чтобы подхватить новые фичи/фиксы:')}</div>
+            )}
+            {helperOld && <EnableManage />}
+            {/* пароль репозитория = ключ дешифровки бэкапа: только админу (см. бэкенд) */}
+            {isAdmin && b.manageable && <RestoreInfo server={s} />}
+            {canManage && b.manageable ? (
+              <ManageSection server={s} backup={b} onChanged={onChanged} />
+            ) : (
+              <div className="net-foot">
+                {t('Статус читается без секретов. Управление доступно после установки helper на ноде (кнопка ниже).')}
+              </div>
+            )}
+            {!b.manageable && <EnableManage />}
           </div>
-        )}
-        {canManage && b.manageable && (b.helper_version || 0) < CURRENT_BACKUP_HELPER && <EnableManage />}
-        {/* пароль репозитория = ключ дешифровки бэкапа: только админу (см. бэкенд) */}
-        {isAdmin && b.manageable && <RestoreInfo server={s} />}
-        {canManage && b.manageable ? (
-          <ManageSection server={s} backup={b} onChanged={onChanged} />
-        ) : (
-          <div className="muted small">
-            {t('Статус читается без секретов. Управление доступно после установки helper на ноде (кнопка ниже).')}
-          </div>
-        )}
-        {!b.manageable && (
-          <EnableManage />
-        )}
+        </div>
       </div>
     </div>,
     document.body,
@@ -884,10 +925,10 @@ function HostRow({
   // «покрытие» — базы/тома, которые решили не бэкапить: аудит по ним молчит навсегда
   const auditMutes = collectMutes(s, t, ['audit'])
   return (
-    <button className="check-row srv-row docker-host-row" onClick={onOpen}>
-      <span className={`sdot ${s.online ? 'sdot-up' : 'sdot-down'}`} />
-      <div className="check-main">
-        <div className="check-name">
+    <button className="loc-res loc-res-btn hs-host" onClick={onOpen}>
+      <span className={`lk-dot ${s.online ? 'lk-dot-ok' : 'lk-dot-bad'}`} title={s.online ? t('на связи') : t('не на связи')} />
+      <div className="hs-host-main">
+        <div className="hs-host-name">
           <OsIcon os={s.os} />
           <CountryFlag code={s.country} />
           {s.name}
@@ -914,7 +955,7 @@ function HostRow({
           🗄 {dest}
         </div>
       )}
-      <div className="docker-host-count mono">
+      <div className="hs-host-count mono">
         <span className={statusTone(st)}>{stLabel[st]}</span>
       </div>
     </button>
@@ -1057,7 +1098,7 @@ function ServerResticOld({ ver, target }: { ver: string; target: string }) {
   const [copied, setCopied] = useState(false)
   const cmd = 'sudo /lib65/kervax/kervax-backupserver-helper restic-update'
   return (
-    <div className="small growth-sum t-degraded">
+    <div className="net-note">
       {t('На сервере restic {v}, а helper ставит {target} (ту же версию, что у клиентов). Обычно его обновляет установка helper\'а, если скачать не вышло, запустите на сервере:', { v: ver, target })}
       <div className="agent-advice-cmd">
         <pre>{cmd}</pre>
@@ -1387,6 +1428,7 @@ function RepoRow({ server: s, r, ctx, canAct, onChanged, growth, unmonitored }: 
   return (
     <div className={`loc-res docker-row repo-row repo-row-col ${tone}`}>
       <div className="repo-row-main">
+      <span className={`lk-dot${DOT[tone] ?? ''}`} />
       <div className="docker-c-main">
         <div className="docker-c-name mono">
           {r.name}
@@ -1629,6 +1671,7 @@ function ArchivedRow({ server: s, r, entry, canAct, onChanged }: {
   return (
     <div className="loc-res docker-row repo-row repo-row-col repo-archived">
       <div className="repo-row-main">
+        <span className="lk-dot" />
         <div className="docker-c-main">
           <div className="docker-c-name mono">
             {r.name}
@@ -1746,36 +1789,6 @@ function EnableTls({ server: s, onChanged }: { server: Server; onChanged: () => 
   )
 }
 
-/** Заполнение тома с репозиториями — первое, что нужно видеть на бэкап-сервере:
- * кончившееся место останавливает бэкапы всего парка разом. Меряем df ПО КАТАЛОГУ
- * ДАННЫХ (root-helper), а не общий диск ноды: репозитории обычно на отдельном томе.
- * Данные появляются с helper 0.18 — на старых просто не рисуем полоску. */
-function StorageBar({ info, t }: { info: BackupServerInfo; t: (k: string, p?: Record<string, string | number>) => string }) {
-  const total = info.disk_total || 0
-  if (!total) return null
-  const used = info.disk_used || 0
-  const free = info.disk_free ?? Math.max(total - used, 0)
-  const pct = Math.min(100, Math.round((used / total) * 100))
-  // пороги как у дисков серверов: 90% — уже проблема, 80% — пора смотреть
-  const tone = pct >= 90 ? 't-down' : pct >= 80 ? 't-degraded' : 't-up'
-  return (
-    <div className="bs-storage" title={info.data_dir || ''}>
-      <div className="bs-storage-top">
-        <span className="muted small">
-          {t('Место на диске')}
-          {info.data_dir ? <span className="mono"> · {info.data_dir}</span> : null}
-        </span>
-        <span className={`mono small ${tone}`}>
-          {t('свободно {f} из {tt}', { f: fmtBytes(free), tt: fmtBytes(total) })} · {pct}%
-        </span>
-      </div>
-      <div className="srv-bar">
-        <span className={`srv-bar-fill ${tone}`} style={{ width: `${pct}%` }} />
-      </div>
-    </div>
-  )
-}
-
 function BackupServerModal({ server: s, info, servers, canAct, onChanged, onClose }: {
   server: Server; info: BackupServerInfo; servers: Server[]; canAct: boolean; onChanged: () => void; onClose: () => void
 }) {
@@ -1826,130 +1839,169 @@ function BackupServerModal({ server: s, info, servers, canAct, onChanged, onClos
     .filter((r) => !onlyUnmon || unmon.has(r.name))
     .slice()
     .sort(rcmp[sort])
+  const pct = diskPct(info)
+  const free = info.disk_free ?? Math.max((info.disk_total || 0) - (info.disk_used || 0), 0)
+  const srvOld = !!info.version && verLt(info.version, RESTSRV_TARGET)
+  const tlsPort = info.tls_port || 64101
   return createPortal(
     <div className="modal-backdrop">
-      <div className="card modal docker-modal" onClick={(e) => e.stopPropagation()}>
+      <div className="card modal docker-modal hs-modal" onClick={(e) => e.stopPropagation()}>
         <div className="clients-head">
           <h3>
             <span className={`sdot ${s.online ? 'sdot-up' : 'sdot-down'}`} />{' '}
             <OsIcon os={s.os} /> <CountryFlag code={s.country} /> {s.name}
+            {s.group_name && <span className="type-chip group-chip">{s.group_name}</span>}
           </h3>
           <button className="ghost" onClick={onClose}>
             {t('Закрыть')}
           </button>
         </div>
-        <StorageBar info={info} t={t} />
-        <div className="docker-host-head">
-          <span className="type-chip">🗄 rest-server {info.version || '—'}</span>
+        {/* Место на томе с репозиториями — первой плиткой: кончившееся место останавливает
+            бэкапы всего парка разом. Меряем df ПО КАТАЛОГУ ДАННЫХ (root-helper), а не общий
+            диск ноды: репозитории обычно на отдельном томе. На helper старше 0.18 данных нет. */}
+        <div className="net-tiles hs-tiles">
+          {pct != null && (
+            <NetTile
+              label={t('Место на диске')}
+              value={`${pct}%`}
+              sub={t('свободно {f} из {tt}', { f: fmtBytes(free), tt: fmtBytes(info.disk_total) })}
+              tone={pct >= 90 ? 'bad' : pct >= 80 ? 'warn' : 'ok'}
+              title={info.data_dir || undefined}
+            />
+          )}
+          <NetTile
+            label={t('Репозитории')}
+            value={String(all.length)}
+            sub={subOf(
+              bad > 0 && t('проблемных: {b}', { b: bad }),
+              archivedRepos.length > 0 && t('в архиве: {n}', { n: archivedRepos.length }),
+            ) || (all.length ? t('все ок') : undefined)}
+            tone={bad ? 'bad' : all.length ? 'ok' : undefined}
+          />
+          <NetTile
+            label="rest-server"
+            value={info.version || '—'}
+            sub={subOf(info.running ? t('запущен') : t('остановлен'), srvOld && t('есть {v}', { v: RESTSRV_TARGET }))}
+            tone={!info.running ? 'bad' : srvOld ? 'warn' : undefined}
+          >
+            {canAct && srvOld && (
+              <div className="hs-tile-act"><RestServerUpdate server={s} info={info} onChanged={onChanged} /></div>
+            )}
+          </NetTile>
+          <NetTile
+            label={t('Протокол')}
+            value={info.tls_front ? 'HTTPS' : 'HTTP'}
+            sub={info.tls_front ? t('порт {p}', { p: tlsPort }) : t('без TLS')}
+            tone={info.tls_front ? 'ok' : undefined}
+            title={info.tls_front
+              ? t('клиенты ходят по HTTPS (self-signed TLS-фронт на порту {p})', { p: tlsPort })
+              : t('трафик по HTTP без TLS. Данные шифрует restic на клиенте, но логин/пароль и метаданные идут открыто. Можно включить HTTPS (self-signed) кнопкой ниже.')}
+          >
+            {canAct && !info.tls_front && (
+              <div className="hs-tile-act"><EnableTls server={s} onChanged={onChanged} /></div>
+            )}
+          </NetTile>
           {ext?.restic && (
-            <span className={`type-chip ${s.bsrv_restic_old ? 't-degraded' : ''}`}
-              title={t('restic, которым сервер сам чистит и проверяет репозитории (prune, forget, check)')}>
-              restic {ext.restic}
-            </span>
+            <NetTile
+              label="restic"
+              value={ext.restic}
+              sub={s.bsrv_restic_old ? t('есть {v}', { v: ext.restic_target || RESTIC_TARGET }) : t('для чистки и проверки')}
+              tone={s.bsrv_restic_old ? 'warn' : undefined}
+              title={t('restic, которым сервер сам чистит и проверяет репозитории (prune, forget, check)')}
+            />
           )}
-          {s.os && <span className="type-chip">{osShort(s.os)}</span>}
-          <span className={`type-chip ${info.running ? 't-up' : 't-down'}`}>
-            {info.running ? t('запущен') : t('остановлен')}
-          </span>
-          {info.tls_front ? (
-            <span className="type-chip t-up" title={t('клиенты ходят по HTTPS (self-signed TLS-фронт на порту {p})', { p: info.tls_port || 64101 })}>
-              🔒 HTTPS
-            </span>
-          ) : (
-            <span className="type-chip off" title={t('трафик по HTTP без TLS. Данные шифрует restic на клиенте, но логин/пароль и метаданные идут открыто. Можно включить HTTPS (self-signed) кнопкой ниже.')}>
-              HTTP
-            </span>
-          )}
-          <span className="muted small">
-            {bad > 0
-              ? t('репозиториев: {n} · проблемных: {b}', { n: all.length, b: bad })
-              : t('репозиториев: {n} · все ок', { n: all.length })}
-            {archivedRepos.length > 0 && ` · ${t('в архиве: {n}', { n: archivedRepos.length })}`}
-          </span>
-          {unmon.size > 0 && (
-            <button className={`type-chip ${onlyUnmon ? 'on' : ''}`} onClick={() => setOnlyUnmon(!onlyUnmon)}
-              title={t('Клиенты этих репозиториев не подключены к панели. Сломанный бэкап панель видит только по ритму: опоздавший бэкап через интервал и еще четверть его, ежедневный через 30 часов. Агент на ноде сказал бы сразу, как бэкап упал.')}>
-              {t('без агента в панели: {n}', { n: unmon.size })}
-            </button>
-          )}
-          {canAct && <RestServerUpdate server={s} info={info} onChanged={onChanged} />}
-          {canAct && !info.tls_front && <EnableTls server={s} onChanged={onChanged} />}
         </div>
-        {s.bsrv_restic_old && <ServerResticOld ver={s.bsrv_restic_old} target={ext?.restic_target || ''} />}
-        {legacy && legacyN > 0 && (
-          <div className={`small growth-sum ${legacy.where ? 'muted' : 't-down'}`}>
-            {legacy.where
-              ? t('Старый скрипт {script} чистит репозиториев: {n}, расписание {when} ({where})', {
-                script: legacy.script, n: legacyN, when: cronTime(legacy.schedule), where: legacy.where,
-              }) + (legacy.log_ts ? `, ${t('последний прогон {ago}', { ago: fmtAgo(legacy.log_ts) })}` : '')
-              : t('Старый скрипт {script} описывает репозиториев: {n}, но не запланирован ни в cron, ни в systemd, их никто не чистит', {
-                script: legacy.script, n: legacyN,
-              })}
-            {(legacy.missing?.length ?? 0) > 0 && (
-              <div className="t-degraded">
-                {t('В нем еще блоки на удаленные репозитории ({n}): {list}. Скрипт каждый день проверяет их и шлет ошибку по каждому, в этом шуме тонут настоящие. Эти блоки стоит убрать из скрипта.', {
-                  n: legacy.missing?.length ?? 0, list: (legacy.missing ?? []).join(', '),
+        <div className="net-cards hs-cards">
+          <div className="chart-card net-card net-card-wide">
+            <div className="net-head">
+              <div className="chart-cap net-cap">
+                {t('Репозитории')}
+                <span className={`net-n${bad ? ' net-n-bad' : ''}`}>{all.length}</span>
+              </div>
+              {unmon.size > 0 && (
+                <button className={`type-chip ${onlyUnmon ? 'on' : ''}`} onClick={() => setOnlyUnmon(!onlyUnmon)}
+                  title={t('Клиенты этих репозиториев не подключены к панели. Сломанный бэкап панель видит только по ритму: опоздавший бэкап через интервал и еще четверть его, ежедневный через 30 часов. Агент на ноде сказал бы сразу, как бэкап упал.')}>
+                  {t('без агента в панели: {n}', { n: unmon.size })}
+                </button>
+              )}
+            </div>
+            {s.bsrv_restic_old && <ServerResticOld ver={s.bsrv_restic_old} target={ext?.restic_target || ''} />}
+            {legacy && legacyN > 0 && (
+              <div className={!legacy.where ? 'net-prob' : (legacy.missing?.length ?? 0) > 0 ? 'net-note' : 'net-foot'}>
+                {legacy.where
+                  ? t('Старый скрипт {script} чистит репозиториев: {n}, расписание {when} ({where})', {
+                    script: legacy.script, n: legacyN, when: cronTime(legacy.schedule), where: legacy.where,
+                  }) + (legacy.log_ts ? `, ${t('последний прогон {ago}', { ago: fmtAgo(legacy.log_ts) })}` : '')
+                  : t('Старый скрипт {script} описывает репозиториев: {n}, но не запланирован ни в cron, ни в systemd, их никто не чистит', {
+                    script: legacy.script, n: legacyN,
+                  })}
+                {(legacy.missing?.length ?? 0) > 0 && (
+                  <div>
+                    {t('В нем еще блоки на удаленные репозитории ({n}): {list}. Скрипт каждый день проверяет их и шлет ошибку по каждому, в этом шуме тонут настоящие. Эти блоки стоит убрать из скрипта.', {
+                      n: legacy.missing?.length ?? 0, list: (legacy.missing ?? []).join(', '),
+                    })}
+                  </div>
+                )}
+              </div>
+            )}
+            {growers.length > 0 && (
+              <div className="muted small">
+                {t('За прогон клиенты добавляют около {s}: {top}', {
+                  s: fmtBytes(growTotal),
+                  top: growers.slice(0, 4).map((x) => `${x.name} ${fmtBytes(x.g)}`).join(', '),
                 })}
               </div>
             )}
-          </div>
-        )}
-        {growers.length > 0 && (
-          <div className="muted small growth-sum">
-            {t('За прогон клиенты добавляют около {s}: {top}', {
-              s: fmtBytes(growTotal),
-              top: growers.slice(0, 4).map((x) => `${x.name} ${fmtBytes(x.g)}`).join(', '),
-            })}
-          </div>
-        )}
-        {all.length === 0 ? (
-          <EnableServerStats />
-        ) : (
-          <>
-            {all.length > 5 && (
-              <div className="modal-toolbar">
-                <input className="checks-search modal-search" placeholder={t('Фильтр: имя репозитория…')}
-                  value={q} onChange={(e) => setQ(e.target.value)} />
-                <select className="modal-sort" value={sort} onChange={(e) => setSort(e.target.value as typeof sort)}>
-                  <option value="problems">{t('сорт: проблемные')}</option>
-                  <option value="name">{t('сорт: имя')}</option>
-                  <option value="size">{t('сорт: размер')}</option>
-                  <option value="age">{t('сорт: старые')}</option>
-                  <option value="snapshots">{t('сорт: снапшоты')}</option>
-                  {growers.length > 0 && <option value="growth">{t('сорт: прирост')}</option>}
-                </select>
-              </div>
+            {all.length === 0 ? (
+              <EnableServerStats />
+            ) : (
+              <>
+                {all.length > 5 && (
+                  <div className="modal-toolbar">
+                    <input className="checks-search modal-search" placeholder={t('Фильтр: имя репозитория…')}
+                      value={q} onChange={(e) => setQ(e.target.value)} />
+                    <select className="modal-sort" value={sort} onChange={(e) => setSort(e.target.value as typeof sort)}>
+                      <option value="problems">{t('сорт: проблемные')}</option>
+                      <option value="name">{t('сорт: имя')}</option>
+                      <option value="size">{t('сорт: размер')}</option>
+                      <option value="age">{t('сорт: старые')}</option>
+                      <option value="snapshots">{t('сорт: снапшоты')}</option>
+                      {growers.length > 0 && <option value="growth">{t('сорт: прирост')}</option>}
+                    </select>
+                  </div>
+                )}
+                <div className="loc-results docker-clist docker-clist-scroll">
+                  {repos.length === 0 ? (
+                    <div className="muted small">{t('Ничего не найдено.')}</div>
+                  ) : (
+                    repos.map((r) => (
+                      <RepoRow key={r.name} server={s} r={r} ctx={ctx} canAct={canAct} onChanged={onChanged}
+                        growth={growthOf.get(r.name)} unmonitored={unmon.has(r.name)} />
+                    ))
+                  )}
+                </div>
+              </>
             )}
-            <div className="loc-results docker-clist docker-clist-scroll">
-              {repos.length === 0 ? (
-                <div className="muted small">{t('Ничего не найдено.')}</div>
-              ) : (
-                repos.map((r) => (
-                  <RepoRow key={r.name} server={s} r={r} ctx={ctx} canAct={canAct} onChanged={onChanged}
-                    growth={growthOf.get(r.name)} unmonitored={unmon.has(r.name)} />
-                ))
-              )}
+            {archivedRepos.length > 0 && (
+              <details className="repo-archive-section">
+                <summary>
+                  🗄 {t('Архив: {n} ({sz})', { n: archivedRepos.length, sz: fmtBytes(archivedBytes) })}
+                  <span className="muted small"> {t('хранятся как есть, без алертов; проверка целостности идет')}</span>
+                </summary>
+                <div className="loc-results docker-clist">
+                  {archivedRepos.map((r) => (
+                    <ArchivedRow key={r.name} server={s} r={r} entry={(s.backup_repo_archive ?? {})[r.name]}
+                      canAct={canAct} onChanged={onChanged} />
+                  ))}
+                </div>
+              </details>
+            )}
+            {canAct && all.length > 0 && <BulkCleanup server={s} all={all} muted={muted} />}
+            <div className="net-foot">
+              {t('Читается на сервере без паролей: config (валидность), снапшоты, размер, свежесть, лок, политика хранения. Опоздавшие и устаревшие - красным и алертят. То, что хранится как есть (сервера больше нет, разовый бэкап, проект заморожен), уберите в архив (🗄), временное приглушите (🔕).')}
             </div>
-          </>
-        )}
-        {archivedRepos.length > 0 && (
-          <details className="repo-archive-section">
-            <summary>
-              🗄 {t('Архив: {n} ({sz})', { n: archivedRepos.length, sz: fmtBytes(archivedBytes) })}
-              <span className="muted small"> {t('хранятся как есть, без алертов; проверка целостности идет')}</span>
-            </summary>
-            <div className="loc-results docker-clist">
-              {archivedRepos.map((r) => (
-                <ArchivedRow key={r.name} server={s} r={r} entry={(s.backup_repo_archive ?? {})[r.name]}
-                  canAct={canAct} onChanged={onChanged} />
-              ))}
-            </div>
-          </details>
-        )}
-        {canAct && all.length > 0 && <BulkCleanup server={s} all={all} muted={muted} />}
-        <CoverageAudit server={s} canManage={canAct} onChanged={onChanged} />
-        <div className="muted small">
-          {t('Читается на сервере без паролей: config (валидность), снапшоты, размер, свежесть, лок, политика хранения. Опоздавшие и устаревшие - красным и алертят. То, что хранится как есть (сервера больше нет, разовый бэкап, проект заморожен), уберите в архив (🗄), временное приглушите (🔕).')}
+          </div>
+          <CoverageAudit server={s} canManage={canAct} onChanged={onChanged} />
         </div>
       </div>
     </div>,
@@ -2037,15 +2089,19 @@ function BackupServerRow({ server: s, info, onOpen }: { server: Server; info: Ba
   const repos = (info.repos ?? []).filter((r) => !ctx.archived.has(r.name))
   const archivedN = (info.repos ?? []).length - repos.length
   const bad = repos.filter((r) => repoBad(r, ctx)).length
+  const pct = diskPct(info)
   // и покрытие тоже: бэкап-сервер в списке клиентов не рендерится, так что его
   // заглушённые пункты покрытия иначе оказались бы только в сводке
   const repoMutes = collectMutes(s, t, ['repo', 'audit'])
   return (
-    <button className="check-row srv-row docker-host-row" onClick={onOpen}>
-      <span className={`sdot ${s.online ? 'sdot-up' : 'sdot-down'}`} />
-      <div className="check-main">
-        <div className="check-name">
-          🗄 <OsIcon os={s.os} /> <CountryFlag code={s.country} /> {s.name}
+    <button className="loc-res loc-res-btn hs-host" onClick={onOpen}>
+      <span className={`lk-dot ${s.online ? 'lk-dot-ok' : 'lk-dot-bad'}`} title={s.online ? t('на связи') : t('не на связи')} />
+      <div className="hs-host-main">
+        <div className="hs-host-name">
+          <OsIcon os={s.os} />
+          <CountryFlag code={s.country} />
+          {s.name}
+          {s.group_name && <span className="type-chip group-chip">{s.group_name}</span>}
           <span className="type-chip">rest-server {info.version || '—'}</span>
           {repoMutes.length > 0 && <MuteChip items={repoMutes} t={t} />}
           {!info.running && <span className="type-chip off">{t('остановлен')}</span>}
@@ -2055,13 +2111,19 @@ function BackupServerRow({ server: s, info, onOpen }: { server: Server; info: Ba
             </span>
           )}
         </div>
-        <div className="check-target mono muted small">
+        <div className="mono muted small">
           {t('репозиториев: {n}', { n: repos.length })}
           {bad > 0 ? ` · ${t('проблемных: {b}', { b: bad })}` : ''}
           {archivedN > 0 ? ` · ${t('в архиве: {n}', { n: archivedN })}` : ''}
+          {pct != null && (
+            <>
+              {' · '}
+              <span className={pct >= 90 ? 't-down' : pct >= 80 ? 't-degraded' : ''}>{t('диск занят на {p}%', { p: pct })}</span>
+            </>
+          )}
         </div>
       </div>
-      <div className="docker-host-count mono">
+      <div className="hs-host-count mono">
         <span className={bad > 0 ? 't-down' : 't-up'}>
           {bad > 0 ? `${bad} ⚠` : `${repos.length}`}
         </span>
@@ -2117,16 +2179,17 @@ function NoBackupRow({ server: s, canAct, onSetup, onDeploy, onCoverage, onChang
     }
   }
   return (
-    <div className={`loc-res docker-row ${optedOut ? 't-muted' : 't-down'}`}>
-      <div className="docker-c-main">
-        <div className="docker-c-name">
+    <div className="loc-res hs-host hs-nb">
+      <span className={`lk-dot${optedOut ? '' : ' lk-dot-bad'}`} />
+      <div className="hs-host-main">
+        <div className="hs-host-name">
           <CountryFlag code={s.country} />
           {s.name}
           {s.group_name && <span className="type-chip group-chip">{s.group_name}</span>}
           {optedOut && <span className="type-chip">{t('не требуется')}</span>}
           <OwnBackupsChip server={s} />
         </div>
-        <div className="check-target mono muted small">{serverAddr(s)}</div>
+        <div className="mono muted small">{serverAddr(s)}</div>
       </div>
       <div className="nobackup-actions">
         {canAct && !optedOut && (
@@ -2543,10 +2606,23 @@ export function BackupsPage({
   // требуют бэкапа (галка не стоит) — наверх, красным; «не требуется» — в отдельный подвал внизу
   const noBackupReq = noBackupAll.filter((s) => !s.backup_not_required).sort((a, b) => a.name.localeCompare(b.name))
   const noBackupOpt = noBackupAll.filter((s) => s.backup_not_required).sort((a, b) => a.name.localeCompare(b.name))
-  const problems = allHosts.filter(({ s, d }) => {
-    const st = backupStatus(d)
-    return st === 'failed' || st === 'stale' || ownBackupProblems(s).length > 0
-  }).length + ownOnly.filter((s) => ownBackupProblems(s).length > 0).length
+  // сводка плитками: клиенты по статусу, ноды без бэкапа, бэкап-серверы, проверка восстановления
+  const failedN = allHosts.filter(({ d }) => backupStatus(d) === 'failed').length
+  const staleN = allHosts.filter(({ d }) => backupStatus(d) === 'stale').length
+  const ownBadN = allHosts.filter(({ s }) => ownBackupProblems(s).length > 0).length
+  const ownOnlyBadN = ownOnly.filter((s) => ownBackupProblems(s).length > 0).length
+  const srvStat = srvHosts.map(({ s, d }) => {
+    const ctx = repoCtx(s)
+    const repos = (d.repos ?? []).filter((r) => !ctx.archived.has(r.name))
+    return { repos: repos.length, bad: repos.filter((r) => repoBad(r, ctx)).length, pct: diskPct(d) ?? -1, down: !d.running }
+  })
+  const repoN = srvStat.reduce((a, x) => a + x.repos, 0)
+  const repoBadN = srvStat.reduce((a, x) => a + x.bad, 0)
+  const srvDownN = srvStat.filter((x) => x.down).length
+  const pctMax = Math.max(-1, ...srvStat.map((x) => x.pct))
+  const verified = allHosts.filter(({ s }) => s.backup_verify)
+  const verBadN = verified.filter(({ s }) => (s.backup_verify?.level ?? 0) >= 2).length
+  const verWarnN = verified.filter(({ s }) => (s.backup_verify?.level ?? 0) === 1).length
   const q = query.trim().toLowerCase()
   // Поиск обязан действовать на ВСЮ страницу. Раньше он сужал только клиентов, а
   // бэкап-серверы и «не требуется» оставались как есть — при активном фильтре это
@@ -2609,15 +2685,57 @@ export function BackupsPage({
               </button>
             </div>
           )}
-          {allHosts.length > 0 && (
-            <span className="muted small">
-              {problems > 0
-                ? t('{n} нод · {p} проблем', { n: allHosts.length, p: problems })
-                : t('{n} нод · все свежие', { n: allHosts.length })}
-            </span>
-          )}
         </div>
       </div>
+      {servers && allHosts.length + srvHosts.length + noBackupAll.length + ownOnly.length > 0 && (
+        <div className="net-tiles hs-tiles">
+          <NetTile
+            label={t('Клиенты')}
+            value={String(allHosts.length)}
+            sub={subOf(
+              failedN > 0 && t('ошибка: {n}', { n: failedN }),
+              staleN > 0 && t('не свежий: {n}', { n: staleN }),
+              ownBadN > 0 && t('свой бэкап с проблемой: {n}', { n: ownBadN }),
+            ) || (allHosts.length ? t('все свежие') : undefined)}
+            tone={failedN || staleN ? 'bad' : ownBadN ? 'warn' : allHosts.length ? 'ok' : undefined}
+          />
+          <NetTile
+            label={t('Без бэкапа')}
+            value={String(noBackupReq.length)}
+            sub={subOf(
+              ownOnly.length > 0 && t('свой бэкап: {n}', { n: ownOnly.length }),
+              ownOnlyBadN > 0 && t('с проблемой: {n}', { n: ownOnlyBadN }),
+              noBackupOpt.length > 0 && t('не требуется: {n}', { n: noBackupOpt.length }),
+            ) || t('у всех нод есть')}
+            tone={noBackupReq.length || ownOnlyBadN ? 'bad' : 'ok'}
+          />
+          {srvHosts.length > 0 && (
+            <NetTile
+              label={t('Бэкап-серверы')}
+              value={String(srvHosts.length)}
+              sub={subOf(
+                t('репозиториев: {n}', { n: repoN }),
+                repoBadN > 0 && t('проблемных: {b}', { b: repoBadN }),
+                srvDownN > 0 && t('остановлено: {n}', { n: srvDownN }),
+                pctMax >= 0 && t('диск до {p}%', { p: pctMax }),
+              )}
+              tone={repoBadN || srvDownN || pctMax >= 90 ? 'bad' : pctMax >= 80 ? 'warn' : 'ok'}
+            />
+          )}
+          {verified.length > 0 && (
+            <NetTile
+              label={t('Восстановление проверено')}
+              value={String(verified.length - verBadN - verWarnN)}
+              unit={t('из {n}', { n: allHosts.length })}
+              sub={subOf(
+                verBadN > 0 && t('не прошло: {n}', { n: verBadN }),
+                verWarnN > 0 && t('с замечаниями: {n}', { n: verWarnN }),
+              ) || undefined}
+              tone={verBadN ? 'bad' : verWarnN ? 'warn' : verified.length === allHosts.length ? 'ok' : undefined}
+            />
+          )}
+        </div>
+      )}
       {allHosts.length > 1 && (
         <div className="checks-search-row">
           {/* Chrome видел на странице поля пароля (сейф), считал её формой входа и
@@ -2644,127 +2762,139 @@ export function BackupsPage({
         </div>
       )}
       {err && <p className="form-error">{err}</p>}
-      {srvHostsView.length > 0 && (
-        <div className="mon-group">
-          <div className="mon-group-head docker-group-head">
-            <span className="mon-group-name">🗄 {t('Бэкап-серверы')}</span>
-            <span className="mon-group-n">{srvHostsView.length}</span>
-          </div>
-          <div className="check-list">
-            {srvHostsView.map(({ s, d }) => (
-              <BackupServerRow key={s.id} server={s} info={d} onOpen={() => setOpenSrvId(s.id)} />
-            ))}
-          </div>
-        </div>
-      )}
-      {noBackupReqView.length > 0 && (
-        <div className="mon-group">
-          <div className="mon-group-head docker-group-head">
-            <span className="mon-group-name">⚠️ {t('Без бэкапа')}</span>
-            <span className="mon-group-n">{noBackupReqView.length}</span>
-          </div>
-          <div className="check-list">
-            {noBackupReqView.map((s) => (
-              <NoBackupRow key={s.id} server={s} canAct={!isViewer}
-                onSetup={() => setSetupSrv(s)} onDeploy={() => setDeploySrv(s)} onChanged={load} />
-            ))}
-          </div>
-        </div>
-      )}
-      {ownOnlyView.length > 0 && (
-        <div className="mon-group">
-          <div className="mon-group-head docker-group-head">
-            <span className="mon-group-name">🧰 {t('Свой бэкап (настроен без панели)')}</span>
-            <span className="mon-group-n">{ownOnlyView.length}</span>
-          </div>
-          <div className="check-list">
-            {ownOnlyView.map((s) => {
-              const bad = ownBackupProblems(s).length > 0
-              return (
-                <button key={s.id} className={`loc-res docker-row own-only-row${bad ? ' t-down' : ''}`}
-                  onClick={() => setCovId(s.id)}>
-                  <div className="docker-c-main">
-                    <div className="docker-c-name">
-                      <CountryFlag code={s.country} />
-                      {s.name}
-                      {s.group_name && <span className="type-chip group-chip">{s.group_name}</span>}
-                      <OwnBackupsChip server={s} />
-                    </div>
-                    <div className="check-target mono muted small">{serverAddr(s)}</div>
-                  </div>
-                </button>
-              )
-            })}
-          </div>
-        </div>
-      )}
-      {srvHostsView.length + noBackupReqView.length + noBackupOptView.length + ownOnlyView.length > 0 && hosts.length > 0 && (
-        <div className="mon-group-head docker-group-head backup-clients-head">
-          <span className="mon-group-name">{t('Клиенты (что бэкапится)')}</span>
-        </div>
-      )}
       {servers && allHosts.length === 0 && srvHosts.length === 0 && noBackupAll.length === 0 && ownOnly.length === 0 && (
         <div className="card muted">
           {t('Ноды с restic-бэкапом не найдены. Агент определяет бэкап сам (метрики + systemd); если бэкап есть, но раздел пуст — обновите агент.')}
         </div>
       )}
-      {servers && allHosts.length > 0 && hosts.length === 0 && (
-        <div className="card muted">
-          {q
-            ? t('По запросу «{q}» ничего нет — это фильтр, а не отсутствие бэкапов.', { q: query.trim() })
-            : t('Ничего не найдено.')}
-          {q && (
-            <button className="ghost search-clear" onClick={() => setQuery('')}>
-              {t('Сбросить')}
-            </button>
-          )}
-        </div>
-      )}
-      {groups.map((g) => (
-        <div key={g.key} className="mon-group">
-          {groupBy !== 'none' && (
-            <div className="mon-group-head docker-group-head">
-              <span className="mon-group-name">{g.label}</span>
-              <span className="mon-group-n">{g.items.length}</span>
+      <div className="net-cards hs-groups">
+        {srvHostsView.length > 0 && (
+          <div className="chart-card net-card net-card-wide">
+            <div className="net-head">
+              <div className="chart-cap net-cap">
+                {t('Бэкап-серверы')}
+                <span className="net-n">{srvHostsView.length}</span>
+              </div>
             </div>
-          )}
-          <div className="check-list">
-            {g.items.map(({ s, d }) => (
-              <HostRow
-                key={s.id}
-                server={s}
-                backup={d}
-                showGroup={groupBy !== 'group'}
-                dest={backupDestName(d.repo_dest, servers ?? [], s)}
-                onOpen={() => setOpenId(s.id)}
-              />
-            ))}
-          </div>
-        </div>
-      ))}
-      {/* «не требуется» — подвал: это не проблема, а осознанно снятые ноды. Отделено
-          чертой, свёрнуто по умолчанию, состояние помним между заходами. */}
-      {noBackupOptView.length > 0 && (
-        <div className="mon-group nobackup-optout backup-optout-footer">
-          <div className="mon-group-head docker-group-head">
-            <span className="mon-group-name muted">{t('Бэкап не требуется')}</span>
-            <span className="mon-group-n">{noBackupOptView.length}</span>
-            <button className="ghost optout-toggle" onClick={() => setShowOptOut(!showOptOut)}>
-              {showOptOut ? t('скрыть') : t('показать')}
-            </button>
-          </div>
-          {showOptOut && (
-            <div className="check-list">
-              {noBackupOptView.map((s) => (
-                <NoBackupRow key={s.id} server={s} canAct={!isViewer}
-                  onSetup={() => setSetupSrv(s)} onDeploy={() => setDeploySrv(s)}
-                  onCoverage={(s.backup_audit?.length ?? 0) > 0 ? () => setCovId(s.id) : undefined}
-                  onChanged={load} />
+            <div className="loc-results">
+              {srvHostsView.map(({ s, d }) => (
+                <BackupServerRow key={s.id} server={s} info={d} onOpen={() => setOpenSrvId(s.id)} />
               ))}
             </div>
-          )}
-        </div>
-      )}
+          </div>
+        )}
+        {noBackupReqView.length > 0 && (
+          <div className="chart-card net-card net-card-wide">
+            <div className="net-head">
+              <div className="chart-cap net-cap">
+                {t('Без бэкапа')}
+                <span className="net-n net-n-bad">{noBackupReqView.length}</span>
+              </div>
+            </div>
+            <div className="loc-results">
+              {noBackupReqView.map((s) => (
+                <NoBackupRow key={s.id} server={s} canAct={!isViewer}
+                  onSetup={() => setSetupSrv(s)} onDeploy={() => setDeploySrv(s)} onChanged={load} />
+              ))}
+            </div>
+          </div>
+        )}
+        {ownOnlyView.length > 0 && (
+          <div className="chart-card net-card net-card-wide">
+            <div className="net-head">
+              <div className="chart-cap net-cap">
+                {t('Свой бэкап (настроен без панели)')}
+                <span className="net-n">{ownOnlyView.length}</span>
+              </div>
+            </div>
+            <div className="loc-results">
+              {ownOnlyView.map((s) => {
+                const bad = ownBackupProblems(s).length > 0
+                return (
+                  <button key={s.id} className="loc-res loc-res-btn hs-host" onClick={() => setCovId(s.id)}>
+                    <span className={`lk-dot ${bad ? 'lk-dot-bad' : 'lk-dot-ok'}`}
+                      title={bad ? t('свой бэкап с проблемой') : t('свой бэкап работает')} />
+                    <div className="hs-host-main">
+                      <div className="hs-host-name">
+                        <CountryFlag code={s.country} />
+                        {s.name}
+                        {s.group_name && <span className="type-chip group-chip">{s.group_name}</span>}
+                        <OwnBackupsChip server={s} />
+                      </div>
+                      <div className="mono muted small">{serverAddr(s)}</div>
+                    </div>
+                  </button>
+                )
+              })}
+            </div>
+          </div>
+        )}
+        {groupBy !== 'none' && hosts.length > 0 &&
+          srvHostsView.length + noBackupReqView.length + noBackupOptView.length + ownOnlyView.length > 0 && (
+          <div className="chart-cap hs-sect">{t('Клиенты (что бэкапится)')}</div>
+        )}
+        {servers && allHosts.length > 0 && hosts.length === 0 && (
+          <div className="chart-card net-card net-card-wide muted">
+            <div>
+              {q
+                ? t('По запросу «{q}» ничего нет — это фильтр, а не отсутствие бэкапов.', { q: query.trim() })
+                : t('Ничего не найдено.')}
+              {q && (
+                <button className="ghost search-clear" onClick={() => setQuery('')}>
+                  {t('Сбросить')}
+                </button>
+              )}
+            </div>
+          </div>
+        )}
+        {groups.filter((g) => g.items.length > 0).map((g) => (
+          <div key={g.key} className="chart-card net-card net-card-wide">
+            <div className="net-head">
+              <div className="chart-cap net-cap">
+                {groupBy === 'none' ? t('Клиенты') : g.label}
+                <span className="net-n">{g.items.length}</span>
+              </div>
+            </div>
+            <div className="loc-results">
+              {g.items.map(({ s, d }) => (
+                <HostRow
+                  key={s.id}
+                  server={s}
+                  backup={d}
+                  showGroup={groupBy !== 'group'}
+                  dest={backupDestName(d.repo_dest, servers ?? [], s)}
+                  onOpen={() => setOpenId(s.id)}
+                />
+              ))}
+            </div>
+          </div>
+        ))}
+        {/* «не требуется» — подвал: это не проблема, а осознанно снятые ноды. Свёрнуто
+            по умолчанию, состояние помним между заходами. */}
+        {noBackupOptView.length > 0 && (
+          <div className="chart-card net-card net-card-wide hs-optout">
+            <div className="net-head">
+              <div className="chart-cap net-cap">
+                {t('Бэкап не требуется')}
+                <span className="net-n">{noBackupOptView.length}</span>
+              </div>
+              <button className="ghost small" onClick={() => setShowOptOut(!showOptOut)}>
+                {showOptOut ? t('скрыть') : t('показать')}
+              </button>
+            </div>
+            {showOptOut && (
+              <div className="loc-results">
+                {noBackupOptView.map((s) => (
+                  <NoBackupRow key={s.id} server={s} canAct={!isViewer}
+                    onSetup={() => setSetupSrv(s)} onDeploy={() => setDeploySrv(s)}
+                    onCoverage={(s.backup_audit?.length ?? 0) > 0 ? () => setCovId(s.id) : undefined}
+                    onChanged={load} />
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
       {/* Сейф доступов — в подвале, рядом со справочными блоками: это не ежедневная
           работа, а страховка на день восстановления. Виден только админам. */}
       {!isViewer && <VaultPanel servers={servers ?? []} />}
