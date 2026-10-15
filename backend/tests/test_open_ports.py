@@ -431,3 +431,76 @@ async def test_ssh_banner_direct_and_through_socks():
     srv2, port2 = await _serve(http)
     async with srv2:
         assert await open_ports.ssh_banner("127.0.0.1", port2, None) == ""
+
+
+# ---- порты LoadBalancer и сайты через Cloudflare ----
+
+LB_REP = {
+    "ips": ["203.0.113.5"],
+    "listen": [{"p": "tcp", "ip": "0.0.0.0", "port": 2221, "u": "root"}],
+    "kube": {"nodeports": [
+        {"ns": "default", "name": "envoy-main", "type": "LoadBalancer", "port": 80, "node_port": 31196, "proto": "TCP"},
+        {"ns": "default", "name": "envoy-main", "type": "LoadBalancer", "port": 443, "node_port": 31996, "proto": "TCP"},
+        {"ns": "default", "name": "metrics", "type": "NodePort", "port": 9100, "node_port": 30100, "proto": "TCP"},
+    ]},
+    "web_services": [{"kind": "Envoy", "source": "kubernetes", "sites": ["a.example.com", "b.example.com"]},
+                     {"kind": "nginx", "sites": ["*.example.com", "203.0.113.5", "c.example.org"]}],
+}
+
+
+def test_targets_take_load_balancer_ports():
+    """Шлюз в кластере слушает 80 и 443 через DNAT kube-proxy: сокета нет, а снаружи порт есть"""
+    _ips, ports = open_ports.targets(_srv(LB_REP))
+    assert sorted(ports) == [80, 443, 2221, 30100, 31196, 31996]
+    assert ports[443] == "сервис Kubernetes default/envoy-main (LoadBalancer)"
+    assert ports[30100] == "сервис Kubernetes default/metrics (NodePort)"
+    assert open_ports.label(443, ports[443]) == {"name": "HTTPS", "risk": False, "svc": False}
+    # ingress-nginx в сети хоста слушает 443 сам: подпись - процесс
+    rep = dict(LB_REP, listen=[*LB_REP["listen"], {"p": "tcp", "ip": "0.0.0.0", "port": 443, "u": "www-data"}])
+    assert open_ports.targets(_srv(rep))[1][443] == "процесс пользователя www-data"
+
+
+def test_new_rules_are_a_baseline_not_new_ports():
+    """Старая проверка (до порта LoadBalancer): 443 был открыт и раньше, просто не проверялся"""
+    old = {"ts": NOW.isoformat(), "via": "Казахстан, Алматы", "ips": ["203.0.113.5"], "ports": [_row(2221)],
+           "seen": {"203.0.113.5|2221": NOW.isoformat()}}
+    t1 = NOW + timedelta(hours=1)
+    first = open_ports.merge(old, [_row(2221), _row(443)], ["203.0.113.5"], "Казахстан, Алматы", t1)
+    assert "new" not in first and first["rules"] == open_ports.RULES and "203.0.113.5|443" in first["seen"]
+    second = open_ports.merge(first, [_row(2221), _row(443), _row(8080)], ["203.0.113.5"], "Казахстан, Алматы",
+                              t1 + timedelta(hours=6))
+    assert [x["port"] for x in second["new"]] == [8080]
+
+
+def test_site_names_and_cloudflare_addresses():
+    assert open_ports.site_names(_srv(LB_REP)) == ["a.example.com", "b.example.com", "c.example.org"]
+    assert open_ports.is_cloudflare("188.114.96.1") and open_ports.is_cloudflare("104.18.30.120")
+    assert open_ports.is_cloudflare("2606:4700::6810:1e78") and open_ports.is_cloudflare("8.6.112.0")
+    assert not open_ports.is_cloudflare("203.0.113.5") and not open_ports.is_cloudflare("nope")
+
+
+async def test_cloudflare_only_and_bypass(monkeypatch):
+    """Сайты идут через Cloudflare: 443 напрямую закрыт - открыт только для Cloudflare, 80 открыт -
+    Cloudflare можно обойти. Без таких сайтов отметок нет."""
+    dns = {"a.example.com": ["188.114.96.1", "2606:4700::1"], "b.example.com": ["188.114.97.4"],
+           "c.example.org": ["203.0.113.5"]}
+
+    async def fake_resolve(name):
+        return dns.get(name, [])
+
+    async def fake_probe(ip, port, proxy):
+        return "open" if port in (80, 2221) else "filtered"
+
+    monkeypatch.setattr(open_ports, "_resolve", fake_resolve)
+    monkeypatch.setattr(open_ports, "probe", fake_probe)
+    srv = _srv(LB_REP)
+    srv.exposure = await open_ports.scan_server(srv, "socks5://127.0.0.1:1080", "Казахстан, Алматы", NOW)
+    assert srv.exposure["cf"] == {"sites": ["a.example.com", "b.example.com"], "n": 2, "checked": 3, "total": 3}
+    marks = {x["port"]: x.get("cf") for x in open_ports.view(srv)["ports"]}
+    assert marks == {80: "also", 443: "only", 2221: None, 31196: None, 31996: None, 30100: None}
+    assert open_ports.exposed(srv, NOW) == []  # закрытый для мира порт - не алерт
+
+    dns.update({"a.example.com": ["203.0.113.5"], "b.example.com": []})
+    srv.exposure = await open_ports.scan_server(srv, "socks5://127.0.0.1:1080", "Казахстан, Алматы", NOW)
+    assert srv.exposure["cf"]["n"] == 0
+    assert all("cf" not in x for x in open_ports.view(srv)["ports"])

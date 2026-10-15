@@ -1089,6 +1089,8 @@ export type ExposedPort = {
   name: string // что это обычно за сервис
   risk: boolean // базе, очереди, Docker API и т.п. не место в интернете
   svc?: boolean // служебный порт (Kubernetes, агент, экспортер): снаружи тоже должен быть закрыт
+  // 80 и 443 при сайтах ноды за Cloudflare: only - напрямую закрыт, also - открыт и в обход него
+  cf?: 'only' | 'also'
 }
 export type Exposure = {
   ts: string
@@ -1101,6 +1103,8 @@ export type Exposure = {
   new?: ExposedPort[] // открылись с прошлых проверок
   new_ts?: string
   muted?: string[] // порты, отмеченные как открытые намеренно
+  // сайты ноды, чьи домены смотрят в Cloudflare: первые 10, всего n из проверенных checked
+  cf?: { sites: string[]; n: number; checked: number; total: number }
 }
 
 // Одно изменение на сервере: kind key/user/sudo/cron/unit, act add/del/mod; alert - изменение

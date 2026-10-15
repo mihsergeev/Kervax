@@ -18,6 +18,14 @@
 kubelet, node_exporter. Служебные порты (Kubernetes и сети подов, агенты и экспортеры метрик)
 не дыра сами по себе, но снаружи им делать нечего: их тоже надо закрыть, алерт - предупреждение.
 Открытый SSH, веб и свои сервисы - норма, их просто видно в списке.
+
+Порт сервиса LoadBalancer kube-proxy заворачивает в под правилом DNAT, сокета под ним нет, и в
+listen его не видно: шлюз Envoy с сайтами на 80 и 443 в проверку не попадал. Теперь он
+проверяется на адресах ноды - на наших кластерах адрес балансировщика и есть адрес ноды (MetalLB).
+
+Через Cloudflare: если домены сайтов ноды смотрят в адреса Cloudflare, а 80 или 443 напрямую
+закрыт, порт открыт только для Cloudflare (белый список его адресов в файрволе или
+NetworkPolicy). Открыт напрямую - Cloudflare можно обойти, это видно отметкой в строке.
 """
 from __future__ import annotations
 
@@ -26,6 +34,7 @@ import base64
 import ipaddress
 import logging
 import re
+import socket
 import struct
 from datetime import datetime, timedelta, timezone
 from urllib.parse import unquote, urlsplit
@@ -87,6 +96,21 @@ _MAX_IPS = 4
 _TIMEOUT = 4.0
 _PARALLEL = 16
 MUTE_PREFIX = "exposed:"
+# Версия правил выбора портов. Новые правила (2 - порты LoadBalancer) добавляют порты, которые и
+# раньше были открыты: первая проверка по ним - точка отсчета, а не "новый порт" на половине парка
+RULES = 2
+
+# Адреса Cloudflare (www.cloudflare.com/ips) и два, что он с 10.2026 отдает российским резолверам
+_CF_NETS = [ipaddress.ip_network(n) for n in (
+    "173.245.48.0/20", "103.21.244.0/22", "103.22.200.0/22", "103.31.4.0/22", "141.101.64.0/18",
+    "108.162.192.0/18", "190.93.240.0/20", "188.114.96.0/20", "197.234.240.0/22", "198.41.128.0/17",
+    "162.158.0.0/15", "104.16.0.0/13", "104.24.0.0/14", "172.64.0.0/13", "131.0.72.0/22",
+    "8.6.112.0/24", "8.47.69.0/24",
+    "2400:cb00::/32", "2606:4700::/32", "2803:f800::/32", "2405:b500::/32", "2405:8100::/32",
+    "2a06:98c0::/29", "2c0f:f248::/32")]
+CF_PORTS = {80, 443}
+_CF_LOOK = 24  # доменов ноды за проверку: понять, идут ли сайты через Cloudflare, хватает и части
+_DNS_TIMEOUT = 3.0
 
 
 # не публичные: частные сети, CGNAT и меш (100.64/10), loopback, link-local, мультикаст. Как у
@@ -153,6 +177,11 @@ def targets(srv: Server) -> tuple[list[str], dict[int, str]]:
         bind = str(s.get("ip") or "")
         if bind in ("0.0.0.0", "::") or _public(bind) or (behind_nat and bind == behind_nat):
             put(s.get("port"), _proc_text(str(procs.get(str(s.get("port"))) or ""), str(s.get("u") or "")))
+    # порт LoadBalancer на адресе ноды: сокета нет, kube-proxy заворачивает его в под (DNAT).
+    # После listen: если порт все же слушает процесс (ingress-nginx в сети хоста), подпись - его
+    for n in ((rep.get("kube") or {}).get("nodeports") or []):
+        if isinstance(n, dict) and n.get("type") == "LoadBalancer" and (n.get("proto") or "TCP").upper() == "TCP":
+            put(n.get("port"), f"сервис Kubernetes {n.get('ns', '?')}/{n.get('name', '?')} (LoadBalancer)")
     keep = sorted(ports)[:_MAX_PORTS]
     return ips[:_MAX_IPS], {p: ports[p] for p in keep}
 
@@ -416,6 +445,60 @@ def foreign(srv: Server) -> dict[str, dict]:
     return out
 
 
+# ---- сайты ноды через Cloudflare ----
+
+def is_cloudflare(ip: str) -> bool:
+    try:
+        a = ipaddress.ip_address(ip)
+    except ValueError:
+        return False
+    return any(a.version == n.version and a in n for n in _CF_NETS)
+
+
+def site_names(srv: Server) -> list[str]:
+    """Домены сайтов ноды из веб-серверов, что прислал агент (nginx, Caddy, Envoy в кластере)."""
+    out: set[str] = set()
+    for w in (srv.last_report or {}).get("web_services") or []:
+        for d in (w.get("sites") or []) if isinstance(w, dict) else []:
+            d = str(d or "").strip().lower().rstrip(".")
+            if "." in d and "*" not in d and " " not in d and not _is_ip(d):
+                out.add(d)
+    return sorted(out)
+
+
+def _is_ip(text: str) -> bool:
+    try:
+        ipaddress.ip_address(text)
+    except ValueError:
+        return False
+    return True
+
+
+async def _resolve(name: str) -> list[str]:
+    try:
+        infos = await asyncio.wait_for(asyncio.get_running_loop().getaddrinfo(name, 443, type=socket.SOCK_STREAM),
+                                       _DNS_TIMEOUT)
+    except (OSError, asyncio.TimeoutError, UnicodeError):
+        return []
+    return sorted({i[4][0] for i in infos})
+
+
+async def cf_sites(srv: Server) -> dict:
+    """Какие сайты ноды идут через Cloudflare: все адреса домена - его. Смотрим не больше
+    _CF_LOOK доменов: на ноде с сотнями сайтов важно, есть ли такие вообще."""
+    names = site_names(srv)
+    look = names[:_CF_LOOK]
+    sem = asyncio.Semaphore(8)
+
+    async def one(name: str) -> list[str]:
+        async with sem:
+            return await _resolve(name)
+
+    found = await asyncio.gather(*(one(n) for n in look))
+    cf = [n for n, addrs in zip(look, found) if addrs and all(is_cloudflare(a) for a in addrs)]
+    return {"sites": cf[:10], "n": len(cf), "checked": len(look), "total": len(names)}
+
+
 async def scan_server(srv: Server, proxy: str | None, via: str, now: datetime) -> dict:
     """Проверить порты ноды снаружи; результат - для servers.exposure. У открытых портов SSH
     заодно читаем баннер: по нему видно, та ли нода отвечает по этому адресу."""
@@ -436,22 +519,29 @@ async def scan_server(srv: Server, proxy: str | None, via: str, now: datetime) -
             b = await ssh_banner(x["ip"], x["port"], proxy)
             if b:
                 banners[f"{x['ip']}:{x['port']}"] = b
-    return merge(prev, rows, ips, via, now, own=proxy is None, banners=banners)
+    cf = await cf_sites(srv) if any(p in CF_PORTS for p in ports) else None
+    return merge(prev, rows, ips, via, now, own=proxy is None, banners=banners, cf=cf)
 
 
 def merge(prev: dict, rows: list[dict], ips: list[str], via: str, now: datetime, own: bool = False,
-          banners: dict | None = None) -> dict:
+          banners: dict | None = None, cf: dict | None = None) -> dict:
     """Итог проверки с учетом прошлых. Новый порт - тот, что открыт сейчас и не был открыт ни
     в одной проверке за месяц (seen): иначе прокси, упавший на одну проверку, на следующей
-    выдал бы все порты ноды за новые. Первая проверка задает точку отсчета."""
+    выдал бы все порты ноды за новые. Первая проверка и первая после смены правил (RULES)
+    задают точку отсчета."""
     seen = dict(prev.get("seen") or {}) if isinstance(prev.get("seen"), dict) else None
+    if seen is not None and int(prev.get("rules") or 1) < RULES:
+        seen = None
     opened = [x for x in rows if x["state"] == "open"]
     new = [x for x in opened if f"{x['ip']}|{x['port']}" not in seen] if seen is not None else []
-    seen = {k: v for k, v in (seen or {}).items() if _age_ok(v, now)}
+    seen = {k: v for k, v in (prev.get("seen") or {}).items() if _age_ok(v, now)} \
+        if isinstance(prev.get("seen"), dict) else {}
     for x in opened:
         seen[f"{x['ip']}|{x['port']}"] = now.isoformat()
     out = {"ts": now.isoformat(), "via": via, "own": own, "ips": ips, "ports": rows, "seen": seen,
-           "banners": banners or {}}
+           "banners": banners or {}, "rules": RULES}
+    if cf is not None:
+        out["cf"] = cf
     if new:
         out["new"], out["new_ts"] = new, now.isoformat()
     elif prev.get("new") and prev.get("new_ts"):
@@ -511,9 +601,20 @@ def view(srv: Server) -> dict | None:
     if ex.get("new"):
         out["new"] = _relabel(srv, ex["new"])
     out["own"] = from_panel(srv)
+    _mark_cf(out)
     out["foreign"] = list(foreign(srv).values())
     out["muted"] = sorted(muted_ports(srv), key=lambda p: int(p) if p.isdigit() else 0)
     return out
+
+
+def _mark_cf(out: dict) -> None:
+    """Сайты ноды идут через Cloudflare: 80 и 443, закрытые напрямую, открыты только для него
+    (cf: only), открытые - и в обход него (cf: also)."""
+    if not (out.get("cf") or {}).get("n"):
+        return
+    for x in out["ports"]:
+        if x["port"] in CF_PORTS and x.get("state") in ("open", "closed", "filtered"):
+            x["cf"] = "also" if x["state"] == "open" else "only"
 
 
 def exposed(srv: Server, now: datetime) -> list[dict]:
@@ -611,7 +712,8 @@ async def _scan_due(session_factory: async_sessionmaker[AsyncSession], now: date
             if now - seen > timedelta(minutes=10):
                 continue
             last = scanned_at(srv)
-            if last is None or now - last >= SCAN_EVERY:
+            # правила выбора портов поменялись - проверяем сразу, не дожидаясь 6 часов
+            if last is None or now - last >= SCAN_EVERY or int(_ex(srv).get("rules") or 1) < RULES:
                 due.append((last or datetime.min.replace(tzinfo=timezone.utc), srv.id))
         due.sort()
         n = 0
