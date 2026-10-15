@@ -448,6 +448,10 @@ class ProbeRequest(Base):
     # "" - кнопка "Проверить сейчас"; "inside" - сайт из панели упал, спросили сервер сайта,
     # открывается ли он изнутри (app/inside_probe.py)
     kind: Mapped[str] = mapped_column(String(16), default="", server_default="")
+    # "try" - пробная проверка из формы нового монитора (app/try_probe.py): монитора еще нет,
+    # и настройки из формы (код, слова, заголовки, вход) едут здесь. Секреты стираются,
+    # как только пришел ответ
+    spec: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )

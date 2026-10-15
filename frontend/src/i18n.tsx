@@ -3201,6 +3201,201 @@ const EN: Record<string, string> = {
   'Домен истекает': 'Domain expiring',
   'SSL-сертификат': 'TLS certificate',
   'Домен': 'Domain',
+  // --- новый монитор: пробная проверка (AddMonitor) ---
+  'Порт открыт с панели.':
+    'The port is open from the panel.',
+  'С панели порт не открывается: {msg}. Изнутри сервера и из локаций проверяются только сайты, поэтому такой монитор сразу будет красным. Проверьте адрес и порт, а если сервис только поднимается, можно добавить выключенным.':
+    'The port does not open from the panel: {msg}. Only sites can be checked from inside a server or from locations, so this monitor will be red right away. Check the address and the port; if the service is still coming up, you can add it disabled.',
+  'Открывается, но из {n} адресов домена с ошибкой отвечают {bad}: часть посетителей видит ошибку. Включено "проверять все адреса", поэтому монитор будет красным, пока их не починят. Не нужно - снимите галочку ниже.':
+    'It opens, but of the {n} addresses of the domain {bad} answer with an error: some visitors see it. "Check every address" is on, so the monitor stays red until they are fixed. Not needed? Untick it below.',
+  'Сайт отвечает, но просит вход (401). Сейчас 401 считается нормой: монитор следит только, что сайт жив. Чтобы проверять с входом, выберите "дать доступ".':
+    'The site answers but asks to sign in (401). For now 401 counts as normal: the monitor only watches that the site is alive. To check behind the sign-in, choose "give access".',
+  'Открывается, но {msg}. Лучше всего проверять с панели: так его видят посетители.':
+    'It opens, but {msg}. Checking from the panel is best: that is how visitors see it.',
+  'Открывается с панели. Лучше всего проверять с панели: так его видят посетители.':
+    'It opens from the panel. Checking from the panel is best: that is how visitors see it.',
+  'Из локаций {names} не открывается.':
+    'It does not open from these locations: {names}.',
+  'С панели не открывается ({msg}), а изнутри {srv} работает. Проверять изнутри сервера: агент {srv} откроет сайт на localhost с этим именем. Такой монитор скажет, что сайт жив, но не скажет, видят ли его посетители.':
+    'It does not open from the panel ({msg}), but works from inside {srv}. Check from inside the server: the agent on {srv} opens the site on localhost under this name. Such a monitor tells that the site is alive, not whether visitors can see it.',
+  'С панели не открывается ({msg}). Жду ответ изнутри {srv}...':
+    'It does not open from the panel ({msg}). Waiting for the answer from inside {srv}...',
+  'С панели не открывается ({msg}), хотя из локаций {names} открывается: похоже, панель не пускают (белый список или блокировка). Монитор с панели будет красным: пустите адрес панели или проверяйте изнутри сервера, если сайт на сервере с агентом.':
+    'It does not open from the panel ({msg}), though it opens from {names}: the panel seems to be kept out (an allowlist or a block). A monitor from the panel will be red: let the panel address in, or check from inside the server if the site runs on a server with the agent.',
+  'С панели не открывается ({msg}). Проверяю остальное...':
+    'It does not open from the panel ({msg}). Checking the rest...',
+  'Сейчас адрес не открывается ниоткуда: {msg}. Если добавить так, монитор сразу будет красным и придет алерт. Проверьте адрес, а если сайт только поднимается, можно добавить выключенным.':
+    'The address opens from nowhere right now: {msg}. Added like this, the monitor turns red at once and an alert goes out. Check the address; if the site is still coming up, you can add it disabled.',
+  'сразу':
+    'at once',
+  'после 3 сбоев подряд':
+    'after 3 failures in a row',
+  'если лежит 5 минут':
+    'if down for 5 minutes',
+  'после первой неудачной проверки':
+    'after the first failed check',
+  'около {n} мин: единичный сбой не будит':
+    'about {n} min: a single glitch wakes nobody',
+  'для того, что иногда моргает':
+    'for things that blink now and then',
+  'изнутри {srv}':
+    'from inside {srv}',
+  'сервера':
+    'the server',
+  'с панели и из локаций':
+    'from the panel and the locations',
+  'с панели':
+    'from the panel',
+  'раз в {n} мин':
+    'every {n} min',
+  'раз в {n} с':
+    'every {n} s',
+  '{ok} из {n} адресов отвечают':
+    '{ok} of {n} addresses answer',
+  'жду агента {srv}...':
+    'waiting for the agent on {srv}...',
+  'недоступно':
+    'not available',
+  'сервер не на связи':
+    'the server is offline',
+  'агент не ответил за {n} с':
+    'the agent did not answer within {n} s',
+  'открывается из {ok} из {n}':
+    'opens from {ok} of {n}',
+  'нет: {list}':
+    'not from: {list}',
+  'Из интернета, как посетитель. Подходит почти всем сайтам.':
+    'From the internet, like a visitor. Fits almost every site.',
+  'Подключение к порту из интернета, с самой панели.':
+    'A connection to the port from the internet, from the panel itself.',
+  'Изнутри {srv}':
+    'From inside {srv}',
+  'Изнутри сервера проверяются только сайты.':
+    'Only sites can be checked from inside a server.',
+  'Домен не нашелся на серверах с агентом: проверять изнутри некому.':
+    'The domain was not found on servers with the agent: nobody can check it from inside.',
+  'Агент откроет сайт на самом сервере, через localhost. Для сайтов за белым списком.':
+    'The agent opens the site on the server itself, via localhost. For sites behind an allowlist.',
+  'домен есть в {web} на {srv}':
+    'the domain is in {web} on {srv}',
+  'Как с панели, и еще через прокси из других стран и сетей: видно, если сайт не открывается из какой-то сети.':
+    'Like from the panel, plus through proxies in other countries and networks: shows when the site does not open from some network.',
+  'Через локации проверяются только сайты.':
+    'Only sites can be checked through locations.',
+  'сервер не ответил на попытку соединения (ConnectTimeout)':
+    'the server did not answer the connection attempt (ConnectTimeout)',
+  'порт {port}: недоступен':
+    'port {port}: unreachable',
+  'монитор':
+    'monitor',
+  'доступен':
+    'reachable',
+  'Монитор добавится выключенным: алертов не будет, пока его не включат.':
+    'The monitor is added disabled: no alerts until it is enabled.',
+  'По правилам алертов этот монитор алерт о падении не шлет.':
+    'By the alert rules this monitor sends no down alert.',
+  'Так придет сразу после добавления: адрес сейчас не открывается.':
+    'This arrives right after adding: the address does not open now.',
+  'Так придет алерт, если адрес перестанет открываться.':
+    'This is the alert you get if the address stops opening.',
+  'Новый монитор':
+    'New monitor',
+  'Что проверять':
+    'What to check',
+  'Проверить снова':
+    'Check again',
+  'это сайт':
+    'a site',
+  'это TCP-порт {port}':
+    'TCP port {port}',
+  'Сайт, адрес API или хост:порт.':
+    'A site, an API address or host:port.',
+  'Нужен сайт на этом порту - допишите https:// в начале.':
+    'Need a site on this port? Put https:// in front.',
+  'Нужно другое:':
+    'Something else:',
+  'сигнал от скрипта':
+    'a signal from a script',
+  'DNS-записи':
+    'DNS records',
+  'Адрес поменялся - проверьте снова.':
+    'The address changed, check it again.',
+  'Нажмите "Проверить": панель откроет адрес с панели, изнутри сервера, где нашелся домен, и из локаций. Так видно, работает ли он, еще до сохранения.':
+    'Press "Check": the panel opens the address from the panel, from inside the server where the domain was found, and from the locations. You see whether it works before saving.',
+  'лучше так':
+    'best',
+  'На этот адрес уже есть монитор "{name}": второй будет слать те же алерты.':
+    'This address already has a monitor "{name}": a second one would send the same alerts.',
+  'открыть его':
+    'open it',
+  'Сайт просит вход':
+    'The site asks to sign in',
+  '401 - норма':
+    '401 is fine',
+  'дать доступ':
+    'give access',
+  'Заголовок, по строке':
+    'Headers, one per line',
+  'или логин (HTTP Basic)':
+    'or a login (HTTP Basic)',
+  'Заголовок пишется как "Имя: значение": {list}':
+    'A header is written as "Name: value": {list}',
+  'проверить снова':
+    'check again',
+  'в алерты не попадает, наблюдатели его не видят':
+    'never goes into alerts, viewers do not see it',
+  'Что еще проверить':
+    'What else to check',
+  'Следить за сертификатом':
+    'Watch the certificate',
+  'сейчас {n} дн.':
+    'now {n} d',
+  'напомню за {days} дн.':
+    'reminders {days} days before',
+  'Проверять все адреса домена ({n})':
+    'Check every address of the domain ({n})',
+  'иначе мертвый адрес за балансировщиком не видно':
+    'otherwise a dead address behind a load balancer goes unseen',
+  'Добавить выключенным':
+    'Add disabled',
+  'включите, когда заработает':
+    'enable it once it works',
+  'Слать алерт':
+    'Send the alert',
+  'тонкая настройка':
+    'fine tuning',
+  '- интервал, ожидаемый ответ, пути, заголовки. Все это можно поменять и потом в карточке монитора.':
+    '- interval, expected answer, paths, headers. All of it can be changed later in the monitor card.',
+  '- интервал и порог "медленно". Можно поменять и потом в карточке монитора.':
+    '- interval and the "slow" threshold. Can be changed later in the monitor card.',
+  'Тонкая настройка':
+    'Fine tuning',
+  'Не проверять сертификат':
+    'Do not verify the certificate',
+  'самоподписанный или выпущен на другое имя':
+    'self-signed or issued for another name',
+  'После правок нажмите "Проверить снова": проверка пойдет уже с ними.':
+    'After changes press "Check again": the check runs with them.',
+  'Так придет алерт':
+    'What the alert looks like',
+  'Будет:':
+    'Result:',
+  'проверять':
+    'checked',
+  'алерт':
+    'alert',
+  'выключенным':
+    'disabled',
+  'Сначала проверка, потом сохранение.':
+    'Check first, then save.',
+  'Сохраняю...':
+    'Saving...',
+  'Добавить монитор':
+    'Add monitor',
+  'просит вход (HTTP 401)':
+    'asks to sign in (HTTP 401)',
+  'Сайт просит вход (401): впишите заголовок или логин и пароль ниже и нажмите "проверить снова".':
+    'The site asks to sign in (401): fill in a header or a login and password below and press "check again".',
 }
 
 type Ctx = {

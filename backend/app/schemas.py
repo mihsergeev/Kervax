@@ -187,6 +187,74 @@ class CheckCreate(BaseModel):
     _paths = field_validator("extra_paths")(_clean_paths)
 
 
+class CheckTryIn(BaseModel):
+    """Пробная проверка из формы нового монитора (app/try_probe.py): только то, что влияет
+    на сам запрос. part - какую часть проверить: форма спрашивает их одновременно."""
+
+    part: Literal["panel", "expiry", "locations", "inside"]
+    type: Literal["http", "tcp_port"]
+    target: str = Field(min_length=1, max_length=512)
+    port: int = Field(default=0, ge=0, le=65535)
+    timeout_ms: int = Field(default=10000, ge=1000, le=60000)
+    degraded_ms: int = Field(default=2000, ge=1, le=60000)
+    method: str = Field(default="GET", pattern=_METHOD)
+    expected_status: str = Field(default="200-399", max_length=32)
+    keyword_up: str = Field(default="", max_length=256)
+    keyword_down: str = Field(default="", max_length=256)
+    auth_method: str = Field(default="", pattern="^(|basic)$")
+    auth_user: str = Field(default="", max_length=128)
+    auth_pass: str = Field(default="", max_length=256)
+    http_headers: str = Field(default="", max_length=4096)
+    ignore_tls: bool = False
+    extra_paths: list[str] = []
+
+    _paths = field_validator("extra_paths")(_clean_paths)
+
+
+class TryResult(BaseModel):
+    status: str  # up | degraded | down | pending | none
+    latency_ms: int | None = None
+    message: str = ""
+    # вид беды одним словом и HTTP-код (domain_probe._kind); для inside еще no_server,
+    # offline, no_answer
+    kind: str = ""
+    code: int = 0
+
+
+class TryPanel(TryResult):
+    ip_results: list | None = None
+    path_results: list | None = None
+
+
+class TryLocation(TryResult):
+    id: int
+    name: str
+
+
+class TryInside(TryResult):
+    server_id: int | None = None
+    server_name: str = ""
+    web: str = ""  # какой веб-сервер держит домен: nginx, caddy, ingress...
+    request_id: int | None = None
+    fast: bool = False
+    deadline: int = 0
+
+
+class CheckTryOut(BaseModel):
+    panel: TryPanel | None = None
+    ssl_days: int | None = None
+    ssl_message: str = ""
+    domain_days: int | None = None
+    domain_message: str = ""
+    locations: list[TryLocation] | None = None
+    inside: TryInside | None = None
+    # с частью panel: группа мониторов того же домена и монитор, который уже смотрит
+    # этот адрес (чтобы не завести второй такой же)
+    group: str = ""
+    existing_id: int | None = None
+    existing_name: str = ""
+
+
 class CheckUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=128)
     type: CheckType | None = None
