@@ -24,9 +24,9 @@ import { RESTARTS_DAY_MIN } from './mutes'
 import { OsIcon } from './osIcon'
 import { CountryFlag } from './CountryFlag'
 import { fmtBytes } from './units'
-import { shortList, sinceShort, srvIssues } from './serverUtils'
+import { shortList, sinceShort, srvIssues, srvMuted } from './serverUtils'
 import { EnrollModal, fmtRel, InstallModal } from './ServersPage'
-import { CardNav, FreshChip, OvAreas, OvRows, secInfoOf, type OvRow, type SecDef, type SecInfo, type SecItem } from './cardLayout'
+import { CardNav, FreshChip, markMuted, OvAreas, OvRows, secInfoOf, type OvRow, type SecDef, type SecInfo, type SecItem } from './cardLayout'
 import { NetTile } from './NetLinks'
 
 // Вкладка «Кубер»: КОМПАКТНЫЙ список хостов с кластером; клик по хосту → модалка
@@ -638,6 +638,8 @@ function KubeHostModal({
       list: shortList(wlPartial.map((w) => `${w.ns}/${w.name} ${w.ready}/${w.desired}`), t, 3),
     }))
   if (fluxBroken.length) soft('flux', t('не в Ready: {n}', { n: fluxBroken.length }))
+  markMuted(info, srvMuted(s, t).filter((i) => i.section === 'kuber')
+    .map((i) => ({ sec: KUBE_SEC_IDS.has(i.sec ?? '') ? i.sec! : 'overview', text: i.text })), t)
   // гигиена подов - справка, не проблема: серым, ведет в поды, где про нее написано
   const hyg: SecInfo = hygiene.nolim || hygiene.noprobe
     ? { level: 0, n: 0, idle: true, line: t('без лимита памяти {a}, без проб {b}', { a: hygiene.nolim, b: hygiene.noprobe }) }

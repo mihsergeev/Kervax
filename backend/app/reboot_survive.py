@@ -10,8 +10,9 @@ docker update --restart unless-stopped <имя>.
 systemctl enable <юнит>.
 
 Не считаем: задачи swarm (имя.N.id, их перезапускает swarm), контейнеры Kubernetes (k8s_*),
-контейнеры Coolify (его sentinel без restart policy поднимает сам Coolify) и то, что работает
-меньше суток: разовые задачи и только что запущенное. Точечный мут - "noboot:<имя>", весь пункт -
+контейнеры Coolify (его sentinel без restart policy поднимает сам Coolify), консоли getty на
+терминалах (getty@tty6 systemd поднимает сам, когда на терминал переключились, enable им не нужен)
+и то, что работает меньше суток: разовые задачи и только что запущенное. Точечный мут - "noboot:<имя>", весь пункт -
 "noboot".
 """
 from __future__ import annotations
@@ -26,6 +27,7 @@ MUTE_ALL = "noboot"
 _DAY = 86400
 _STALE_BLOCK = 3600  # helper units-setup пишет раз в минуту
 _SWARM_TASK = re.compile(r"\.\d+\.[a-z0-9]{25}$")
+_ON_DEMAND_UNIT = re.compile(r"^(getty|autovt|serial-getty|container-getty|console-getty)@")
 _UP_DAYS = re.compile(r"^Up (?:About an? |\d+ )(day|week|month|year)s?\b")
 
 
@@ -65,7 +67,7 @@ def units(rep: dict, now: datetime) -> list[dict]:
         return []  # helper давно не отчитывался: список устарел
     out = []
     for u in ub.get("noboot") or []:
-        if not isinstance(u, dict) or not u.get("unit"):
+        if not isinstance(u, dict) or not u.get("unit") or _ON_DEMAND_UNIT.match(str(u["unit"])):
             continue
         started = int(u.get("started") or 0)
         if started and now.timestamp() - started < _DAY:

@@ -1,4 +1,4 @@
-import type { KnownIssue, DiskHealth, DiskUsage, DockerRisk, Server, ServerReport, UnitsBlock, WebRate } from './api'
+import type { BackupAudit, KnownIssue, DiskHealth, DiskUsage, DockerRisk, Server, ServerReport, UnitsBlock, WebRate } from './api'
 import { tr } from './i18n'
 
 // Запросы в минуту по access-логам ноды: блок кладёт root-хелпер webserver-setup, агент
@@ -206,6 +206,16 @@ export function srvIssues(
   return srvIssuesRaw(s, t).filter((i) => !srvIssueMuted(i, mutes) && !srvKnownOf(s, i))
 }
 
+// Приглушенные проблемы сервера: на главной их нет, а в карточке раздел с такой проблемой серый с
+// пометкой, а не зеленый "все в порядке" рядом с "истёк" или "с проблемой 1"
+export function srvMuted(
+  s: Server,
+  t: (k: string, p?: Record<string, string | number>) => string,
+): SrvIssue[] {
+  const mutes = new Set(s.alert_mutes ?? [])
+  return srvIssuesRaw(s, t).filter((i) => srvIssueMuted(i, mutes))
+}
+
 // Известные проблемы сервера: что сломано и что про это написали
 export function srvKnown(
   s: Server,
@@ -235,6 +245,18 @@ export function proxyBuilt(p: { version?: string; built: number }): string {
 // Список для одной строки: первые n и "и еще N"
 export function shortList(xs: string[], t: (k: string, p?: Record<string, string | number>) => string, n = 5): string {
   return xs.length <= n ? xs.join(', ') : `${xs.slice(0, n).join(', ')} ${t('и еще {n}', { n: xs.length - n })}`
+}
+
+// Базы без дампа по именам. Одинаковые СУБД различаются местом: "PostgreSQL (default/postgres)",
+// иначе выходило "PostgreSQL, PostgreSQL - нужен отдельный дамп", и непонятно, о каких базах речь
+export function dbAuditNames(xs: BackupAudit[]): string[] {
+  const where = (x: BackupAudit) => {
+    const inst = x.instance || x.container || ''
+    const m = /^k8s\.([^.]+)\.[a-z]+\.(.+)$/.exec(inst)
+    return m ? `${m[1]}/${m[2]}` : inst
+  }
+  return xs.map((x) =>
+    xs.filter((y) => y.subject === x.subject).length > 1 && where(x) ? `${x.subject} (${where(x)})` : x.subject)
 }
 
 // Ключи от хоста у контейнера словами: "privileged, docker-сокет", "cap SYS_ADMIN"

@@ -786,7 +786,8 @@ _STATUS_ORDER = {"down": 0, "degraded": 1, "up": 2}
 async def _run_http_all_ips(check, url: str, method: str, auth, timeout, degraded_ms, attempt):
     """Проверяет КАЖДЫЙ IP домена (Host+SNI = домен, TLS проверяется по домену).
     Возвращает агрегат: худший статус побеждает; None → у домена ≤1 адрес (тогда
-    вызывающий делает обычную одиночную проверку). Ловит мёртвый бэкенд за LB."""
+    вызывающий делает обычную одиночную проверку, а разбивку оставляет пустой: адрес один).
+    Ловит мёртвый бэкенд за LB."""
     parsed = urlparse(url)
     host = parsed.hostname
     if not host:
@@ -924,8 +925,10 @@ async def _dns_time(url: str, timeout: float) -> tuple[float | None, bool]:
     return (time.perf_counter() - t0) * 1000, ok
 
 
-def _with_phases(out: CheckOutcome, phases: dict | None) -> CheckOutcome:
+def _with_phases(out: CheckOutcome, phases: dict | None, one_ip: bool = False) -> CheckOutcome:
     out.phases = phases
+    if one_ip and out.ip_results is None:
+        out.ip_results = []  # "проверять все адреса", а у домена один: карточка так и скажет
     return out
 
 
@@ -965,11 +968,14 @@ async def _run_http(
 
     # опция «проверять все адреса домена» (по умолчанию выкл.) — только для прямых
     # проверок; через прокси адреса резолвит сам прокси, пинить IP смысла нет
+    one_ip = False
     if getattr(check, "check_all_ips", False) and proxy is None:
         multi = await _run_http_all_ips(check, url, method, auth, timeout, degraded_ms, attempt)
         if multi is not None:
             return await _check_paths(check, multi, url, attempt, degraded_ms)
-        # ≤1 адрес → падаем в обычную одиночную проверку ниже
+        # ≤1 адрес → падаем в обычную одиночную проверку ниже. Разбивка пустая, а не None: иначе
+        # карточка не отличит "у домена один адрес" от "еще не проверяли"
+        one_ip = True
 
     # HTTPS не поднялся, а схему подставили сами и пришлось откатиться на http —
     # это не «всё ок»: сайт задумывался как https, но по факту доступен только http.
@@ -1000,16 +1006,16 @@ async def _run_http(
             except httpx.HTTPError as exc2:
                 return _with_phases(await _check_paths(check, CheckOutcome(
                     "down", message=_short(str(exc2) or type(exc2).__name__)
-                ), base, attempt, degraded_ms), phases)
+                ), base, attempt, degraded_ms), phases, one_ip)
         else:
             why = ph.why(exc) if ph is not None else ""
             return _with_phases(await _check_paths(check, CheckOutcome(
                 "down", message=why or humanize_error(str(exc) or type(exc).__name__)
-            ), base, attempt, degraded_ms), phases)
+            ), base, attempt, degraded_ms), phases, one_ip)
     latency = int((time.perf_counter() - t0) * 1000)
     return _with_phases(await _check_paths(
         check, _eval_http(check, r, body, latency, fell_back, degraded_ms), base, attempt, degraded_ms
-    ), phases)
+    ), phases, one_ip)
 
 
 async def _check_paths(check, main: CheckOutcome, base: str, attempt, degraded_ms: int) -> CheckOutcome:

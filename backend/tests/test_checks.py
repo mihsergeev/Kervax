@@ -206,10 +206,13 @@ async def test_run_http_all_ips_aggregates(monkeypatch):
     outcome = await checks_exec._run_http(check)
     assert outcome.status == "up" and "2" in outcome.message
 
-    # один адрес → None-ветка → обычная одиночная проверка (не падаем)
+    # один адрес → None-ветка → обычная одиночная проверка (не падаем), разбивка пустая:
+    # карточка пишет "у домена один адрес", а не "еще нет разбивки"
     monkeypatch.setattr("app.checks._resolve_ips", lambda host, port: _aiolist(["10.0.0.1"]))
     outcome = await checks_exec._run_http(check)
-    assert outcome.status == "up"
+    assert outcome.status == "up" and outcome.ip_results == []
+    check.check_all_ips = False
+    assert (await checks_exec._run_http(check)).ip_results is None
 
 
 async def _aiolist(v):

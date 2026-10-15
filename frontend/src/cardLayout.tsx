@@ -41,6 +41,23 @@ export function secInfoOf(
   }
 }
 
+// Заглушенные проблемы разделов: без них раздел зеленый "все в порядке", хотя рядом в нем "истёк" или
+// "с проблемой 1". Серым и с пометкой видно, что проблема есть, а алерт по ней заглушен. Другие
+// замечания и желтые строки раздела важнее, их не трогаем
+export function markMuted(
+  info: Record<string, SecInfo>,
+  muted: { sec: string; text: string }[],
+  t: (k: string, p?: Record<string, string | number>) => string,
+): void {
+  const seen = new Set<string>()
+  for (const { sec, text } of muted) {
+    const cur = info[sec]
+    if (!cur || cur.level || seen.has(sec)) continue
+    seen.add(sec)
+    info[sec] = { ...cur, idle: true, line: t('заглушено: {text}', { text }) }
+  }
+}
+
 // "новое · 2 ч": проблема раздела появилась меньше суток назад
 export function FreshChip({ since }: { since: string }) {
   const { t } = useI18n()

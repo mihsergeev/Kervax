@@ -46,7 +46,8 @@ def _units(*noboot, ts=TS):
 
 
 def test_units_started_without_enable():
-    rep = _units({"unit": "myapp.service", "started": TS - 3 * DAY}, {"unit": "debug.service", "started": TS - 600})
+    rep = _units({"unit": "myapp.service", "started": TS - 3 * DAY}, {"unit": "debug.service", "started": TS - 600},
+                 {"unit": "getty@tty6.service", "started": TS - 40 * DAY})  # консоль по требованию, не служба
     assert reboot_survive.units(rep, NOW) == [{"unit": "myapp.service", "started": TS - 3 * DAY}]
     assert reboot_survive.units(_units({"unit": "x.service", "started": 0}, ts=TS - 2 * 3600), NOW) == []  # helper молчит
 

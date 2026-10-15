@@ -17,9 +17,9 @@ import { useI18n } from './i18n'
 import { DOCKRISK_MUTE, NOBOOT_MUTE, RESTARTS_DAY_MIN } from './mutes'
 import { OsIcon } from './osIcon'
 import { CountryFlag } from './CountryFlag'
-import { dockRiskText, proxyBuilt, shortList, srvIssues } from './serverUtils'
+import { dockRiskText, proxyBuilt, shortList, srvIssues, srvMuted } from './serverUtils'
 import { fmtRel } from './ServersPage'
-import { CardNav, FreshChip, OvAreas, OvRows, secInfoOf, type OvRow, type SecDef, type SecInfo, type SecItem } from './cardLayout'
+import { CardNav, FreshChip, markMuted, OvAreas, OvRows, secInfoOf, type OvRow, type SecDef, type SecInfo, type SecItem } from './cardLayout'
 import { NetTile } from './NetLinks'
 import { fmtBytes } from './units'
 
@@ -792,6 +792,16 @@ function DockerHostModal({
     info.containers = { ...info.containers, level: 1, line: t('unhealthy: {list}', { list: shortList(unhealthy.map((c) => c.name), t, 3) }) }
   if (!s.docker_risk && !info.host.level) info.host.idle = true
   if (!policyKnown && !info.boot.level) info.boot.idle = true
+  if (live) {
+    const riskAll = (s.docker_risk ?? []).filter((x) => !x.muted)
+    markMuted(info, [
+      ...srvMuted(s, t).filter((i) => i.section === 'docker').map((i) => ({ sec: 'containers', text: i.text })),
+      ...(exposed.length && mutes.has('docker_sock')
+        ? [{ sec: 'host', text: t('docker-сокет у {list}', { list: shortList(exposed.map((e) => e.name), t, 3) }) }] : []),
+      ...(riskAll.length && mutes.has('docker_risk')
+        ? [{ sec: 'host', text: t('ключи от хоста у {list}', { list: shortList(riskAll.map((x) => x.name), t, 3) }) }] : []),
+    ], t)
+  }
 
   const rows: OvRow[] = DOCKER_SECTIONS.flatMap(({ id, label }) =>
     (items[id] ?? []).map((x) => ({
