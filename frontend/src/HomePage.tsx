@@ -384,7 +384,7 @@ function actionItems(servers: Server[], avail: string, relProblem: string, t: T)
     const old = s.proxy_outdated ?? []
     if (old.length > 0) {
       const list = old.map((p) => `${p.name} (${proxyBuilt(p)})`).join(', ')
-      items.push({ key: `d-old-${s.id}`, icon: '🧓', section: 'docker', id: s.id, name: s.name, cc: s.country,
+      items.push({ key: `d-old-${s.id}`, icon: '🧓', section: 'docker', id: s.id, name: s.name, cc: s.country, sec: 'proxy',
         grp: 'd-old', detail: list,
         text: t('{name}: устарел образ внешнего прокси {list} - обновите', { name: s.name, list }) })
     }
@@ -445,7 +445,7 @@ function actionItems(servers: Server[], avail: string, relProblem: string, t: T)
     const risk = (s.docker_risk ?? []).filter((x) => !x.muted)
     if (risk.length > 0 && !(s.alert_mutes ?? []).includes('docker_risk')) {
       const list = risk.map((x) => `${x.name} (${dockRiskText(x, t)})`).join(', ')
-      items.push({ key: `dockrisk-${s.id}`, icon: '🔑', section: 'docker', id: s.id, name: s.name, cc: s.country,
+      items.push({ key: `dockrisk-${s.id}`, icon: '🔑', section: 'docker', id: s.id, name: s.name, cc: s.country, sec: 'host',
         grp: 'dockrisk', detail: list,
         text: t('{name}: у контейнеров ключи от хоста: {list} - взлом приложения в них даст root на сервере',
           { name: s.name, list }) })
@@ -453,7 +453,7 @@ function actionItems(servers: Server[], avail: string, relProblem: string, t: T)
     // не переживет перезагрузку: контейнеры - в Docker (там команда), юниты - в карточку
     const nb = s.noboot_advice
     if (nb && nb.docker.length > 0)
-      items.push({ key: `noboot-d-${s.id}`, icon: '🔁', section: 'docker', id: s.id, name: s.name, cc: s.country,
+      items.push({ key: `noboot-d-${s.id}`, icon: '🔁', section: 'docker', id: s.id, name: s.name, cc: s.country, sec: 'boot',
         grp: 'noboot-d', detail: shortList(nb.docker, t),
         text: t('{name}: после перезагрузки не поднимутся контейнеры без restart policy: {list}',
           { name: s.name, list: shortList(nb.docker, t) }) })

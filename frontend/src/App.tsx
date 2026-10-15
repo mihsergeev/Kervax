@@ -87,6 +87,11 @@ export default function App() {
   const [openCheckId, setOpenCheckId] = useState<number | null>(() => urlNum('check'))
   const [openServerId, setOpenServerId] = useState<number | null>(() => urlNum('server'))
   const [openDockerId, setOpenDockerId] = useState<number | null>(() => urlNum('docker'))
+  // ?docker=<id>&sec=host - раздел карточки Docker-ноды (из алерта, с главной, после F5)
+  const [openDockerSec, setOpenDockerSec] = useState<string | null>(() => {
+    const p = new URLSearchParams(window.location.search)
+    return p.get('docker') ? p.get('sec') : null
+  })
   const [openKubeId, setOpenKubeId] = useState<number | null>(() => urlNum('kube'))
   // ?kube=<id>&ktab=expiry - из алерта про сроки: кластер сразу в разделе "Сроки". ?sec= пишет
   // сама карточка кластера, по нему открываем после F5 и по отправленной ссылке
@@ -110,7 +115,10 @@ export default function App() {
       setDeepSec(detailSec ?? null)
       if (sec === 'sites') setOpenCheckId(id)
       else if (sec === 'servers') setOpenServerId(id)
-      else if (sec === 'docker') setOpenDockerId(id)
+      else if (sec === 'docker') {
+        setOpenDockerId(id)
+        setOpenDockerSec(detailSec || null)
+      }
       else if (sec === 'kuber') {
         setOpenKubeId(id)
         if (detailSec) setOpenKubeTab(detailSec) // вкладка кластера: "ноды без агента" -> nodes
@@ -507,7 +515,15 @@ export default function App() {
         ) : section === 'sites' ? (
           <ChecksPage onUnauthorized={logout} openCheckId={openCheckId} onConsumed={() => setOpenCheckId(null)} />
         ) : section === 'docker' ? (
-          <DockerPage onUnauthorized={logout} openHostId={openDockerId} onConsumed={() => setOpenDockerId(null)} />
+          <DockerPage
+            onUnauthorized={logout}
+            openHostId={openDockerId}
+            openSec={openDockerSec}
+            onConsumed={() => {
+              setOpenDockerId(null)
+              setOpenDockerSec(null)
+            }}
+          />
         ) : section === 'kuber' ? (
           <KuberPage
             onUnauthorized={logout}

@@ -267,6 +267,9 @@ _DISK_ICON = {1: "⚠️", 2: "🔴", 3: "🚨"}
 # Раздел панели, к которому относится алерт — по нему персональная рассылка
 # понимает, кого он касается (у учётки может не быть, скажем, «Бэкапов»).
 # Вкладка карточки кластера в разделе "Кубер", куда ведет ссылка алерта.
+# раздел карточки Docker-ноды по алерту: контейнеры или ключи от хоста
+_DOCKER_SEC = {"docker_loop": "containers", "docker_down": "containers", "docker_restarts": "containers",
+               "docker_sock": "host", "docker_risk": "host"}
 _KUBE_TAB = {"kube_expiry": "expiry", "flux_down": "flux", "flux_stale": "flux", "kube_pod": "pods",
              "kube_cron": "cron", "kube_node": "nodes", "kube_job": "cron", "kube_restarts": "pods"}
 
@@ -5080,11 +5083,12 @@ async def evaluate_servers(
     def srv_url(s: Server, key: str = "") -> str:
         """Ссылка на деталь сервера. Для типовых алертов добавляем &sec=<раздел>,
         чтобы клик открывал СРАЗУ нужный дашборд (OOM/RAM → «Память», CPU → «CPU» и т.д.).
-        Docker-алерты ведут на раздел «Докер» с открытой карточкой хоста (?docker=id)."""
+        Docker-алерты ведут на раздел «Докер» с открытой карточкой хоста и сразу в ее раздел
+        (?docker=id&sec=host)."""
         if not (base and s.id is not None):
             return ""
         if key.startswith("docker"):
-            return f"{base}/?docker={s.id}"
+            return f"{base}/?docker={s.id}" + (f"&sec={_DOCKER_SEC[key]}" if key in _DOCKER_SEC else "")
         if key == "queue":
             # ведём СРАЗУ в очереди этой ноды: из алерта человек идёт смотреть,
             # что там накопилось, а не в общий список сервисов
