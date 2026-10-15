@@ -1402,10 +1402,13 @@ const EN: Record<string, string> = {
   'на {ips}': 'on {ips}',
   'ничего не открыто': 'nothing is open',
   'ничего не закрыто': 'nothing is closed',
-  'Сайты ноды идут через Cloudflare: {sites}.': 'Sites on this node go through Cloudflare: {sites}.',
-  'Напрямую закрыто: {ports} - туда пускают только Cloudflare.': 'Closed directly: {ports}, only Cloudflare is let in.',
-  'Напрямую открыто: {ports} - защиту Cloudflare можно обойти по адресу ноды. Если так не задумано, пустите туда только адреса Cloudflare.':
-    'Open directly: {ports}, so Cloudflare protection can be bypassed via the node address. If that is not intended, allow only Cloudflare addresses there.',
+  'Сайты через Cloudflare': 'Sites behind Cloudflare',
+  'проверено {c} из {n}': 'checked {c} of {n}',
+  'Напрямую закрыто:': 'Closed directly:',
+  'туда пускают только Cloudflare': 'only Cloudflare is let in',
+  'Напрямую открыто:': 'Open directly:',
+  'защиту Cloudflare можно обойти по адресу ноды. Если так не задумано, пустите туда только адреса Cloudflare':
+    'Cloudflare protection can be bypassed via the node address. If that is not intended, allow only Cloudflare addresses there',
   'Вход по паролю': 'Password login',
   'только ключи': 'keys only',
   'Вход root': 'Root login',

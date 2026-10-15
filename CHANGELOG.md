@@ -4,6 +4,14 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.4.198] - 2026-10-15
+
+### Changed
+- Сайты через Cloudflare в карточке "Что открыто в интернет" - отдельной плашкой под колонками,
+  а не сплошным текстом в подвале: домены чипами по общей части (example.com, дальше только
+  dev, s3-dev, stage), ниже строкой с замком, что напрямую закрыто или открыто. Если доменов на
+  ноде больше, чем проверено, это написано в заголовке.
+
 ## [1.4.197] - 2026-10-15
 
 ### Changed

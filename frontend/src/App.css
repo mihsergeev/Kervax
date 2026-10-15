@@ -1025,6 +1025,16 @@ input:focus {
 .exp-li-closed > .exp-cf, .exp-cf { color: #f38020; }
 .exp-tag-cf { color: #f38020; background: rgba(243, 128, 32, 0.12); border: 1px solid rgba(243, 128, 32, 0.35); }
 :root[data-theme='light'] .exp-tag-cf { color: #b45309; }
+/* сайты через Cloudflare: плашка под колонками, домены чипами по общей части */
+.exp-cf-box { display: flex; flex-direction: column; gap: 0.4rem; padding: 0.5rem 0.7rem; border-radius: 8px; font-size: 0.86rem;
+  border: 1px solid color-mix(in srgb, #f38020 32%, var(--border)); background: color-mix(in srgb, #f38020 4%, transparent); }
+.exp-cf-h { display: flex; align-items: center; flex-wrap: wrap; gap: 0.45rem; font-weight: 600; font-size: 0.88rem; }
+.exp-cf-sub { color: var(--text-muted); font-weight: 400; font-size: 0.78rem; }
+.exp-cf-group { display: flex; flex-wrap: wrap; align-items: center; gap: 0.3rem; }
+.exp-cf-group .exp-chip { margin-right: 0; color: var(--text); }
+.exp-cf-base { color: var(--text-muted); margin-right: 0.2rem; overflow-wrap: anywhere; }
+.exp-cf-line { display: flex; align-items: flex-start; gap: 0.45rem; }
+.exp-cf-line > span:first-child { display: inline-flex; padding-top: 0.2rem; }
 /* колонки встают друг под друга по ширине самой карточки, а не окна: в узком содержимом
    страницы сервера карточка уже окна; в узкой колонке кнопка уходит под имя порта */
 .exp-card { container-type: inline-size; }
