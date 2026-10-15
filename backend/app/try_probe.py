@@ -33,6 +33,8 @@ from app.config import get_settings
 from app.models import Location, ProbeRequest, Server
 
 KIND = "try"
+# так checks._run_dns помечает ответ, который монитор запомнил как правильный
+REMEMBERED = " (запомнили)"
 
 
 def check_of(body) -> SimpleNamespace:
@@ -51,6 +53,11 @@ def check_of(body) -> SimpleNamespace:
     # адреса домена смотрим всегда: мертвый адрес за балансировщиком иначе не увидеть,
     # а включить "проверять все адреса" форма предложит сама
     chk.check_all_ips = body.type == "http"
+    chk.dns_type = body.dns_type
+    chk.dns_server = body.dns_server
+    chk.dns_expect = body.dns_expect
+    chk.dns_match = body.dns_match
+    chk.dns_baseline = []
     return chk
 
 
@@ -71,6 +78,14 @@ async def panel(chk) -> dict:
     out = result(outcome)
     out["ip_results"] = outcome.ip_results
     out["path_results"] = outcome.path_results
+    if chk.type == "dns":
+        out["answers"] = outcome.answers
+        # без ожидаемого монитор запоминает первый ответ; у пробы запоминать нечего
+        if out["message"].endswith(REMEMBERED):
+            out["message"] = out["message"][: -len(REMEMBERED)]
+            out["baseline"] = "new"
+        elif chk.dns_baseline and not (chk.dns_expect or "").strip():
+            out["baseline"] = "kept"
     return out
 
 

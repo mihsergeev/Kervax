@@ -194,7 +194,7 @@ class CheckTryIn(BaseModel):
     part: Literal["panel", "expiry", "locations", "inside"]
     # правка монитора: сам он дублем себе не считается
     check_id: int | None = None
-    type: Literal["http", "tcp_port"]
+    type: Literal["http", "tcp_port", "dns"]
     target: str = Field(min_length=1, max_length=512)
     port: int = Field(default=0, ge=0, le=65535)
     timeout_ms: int = Field(default=10000, ge=1000, le=60000)
@@ -209,6 +209,11 @@ class CheckTryIn(BaseModel):
     http_headers: str = Field(default="", max_length=4096)
     ignore_tls: bool = False
     extra_paths: list[str] = []
+    # dns: какую запись спросить, у какого резолвера и что ждать
+    dns_type: Literal["", "A", "AAAA", "CNAME", "MX", "NS", "TXT"] = ""
+    dns_server: str = Field(default="", max_length=64)
+    dns_expect: str = Field(default="", max_length=4000)
+    dns_match: Literal["equal", "contains"] = "equal"
 
     _paths = field_validator("extra_paths")(_clean_paths)
 
@@ -226,6 +231,10 @@ class TryResult(BaseModel):
 class TryPanel(TryResult):
     ip_results: list | None = None
     path_results: list | None = None
+    # dns: что ответил резолвер, и с чем сравнили: "new" - запомненного ответа еще нет
+    # (монитор запомнит этот), "kept" - сравнили с тем, что монитор уже запомнил
+    answers: list | None = None
+    baseline: str = ""
 
 
 class TryLocation(TryResult):

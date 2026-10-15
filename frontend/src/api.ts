@@ -600,7 +600,7 @@ export type TryPart = 'panel' | 'expiry' | 'locations' | 'inside'
 export type TryIn = {
   part: TryPart
   check_id?: number // правка: сам монитор дублем себе не считается
-  type: 'http' | 'tcp_port'
+  type: 'http' | 'tcp_port' | 'dns'
   target: string
   port?: number
   timeout_ms?: number
@@ -615,6 +615,10 @@ export type TryIn = {
   http_headers?: string
   ignore_tls?: boolean
   extra_paths?: string[]
+  dns_type?: string
+  dns_server?: string
+  dns_expect?: string
+  dns_match?: 'equal' | 'contains'
 }
 export type TryResult = {
   status: 'up' | 'degraded' | 'down' | 'pending' | 'none'
@@ -628,6 +632,10 @@ export type TryResult = {
 export type TryPanel = TryResult & {
   ip_results: { ip: string; status: string; latency_ms: number | null; message: string }[] | null
   path_results: { path: string; status: string; latency_ms: number | null; message: string }[] | null
+  // dns: что ответил резолвер; baseline "new" - монитор запомнит этот ответ, "kept" - сравнили
+  // с тем, что он уже запомнил
+  answers?: string[] | null
+  baseline?: '' | 'new' | 'kept'
 }
 export type TryLocation = TryResult & { id: number; name: string }
 export type TryInside = TryResult & {

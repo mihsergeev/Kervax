@@ -3202,6 +3202,90 @@ const EN: Record<string, string> = {
   'SSL-сертификат': 'TLS certificate',
   'Домен': 'Domain',
   // --- новый монитор: пробная проверка (AddMonitor) ---
+  'Настройки поменялись - нажмите "проверить снова": ответ сравнится уже с ними.':
+    'The settings changed - press "check again": the answer will be compared with them.',
+  'Ответ совпадает с ожидаемым. Станет другим - придет алерт.':
+    'The answer matches the expected one. If it becomes different, an alert arrives.',
+  'Ответ тот же, что монитор запомнил. Изменится - придет алерт.':
+    'The answer is the same as the one the monitor remembered. If it changes, an alert arrives.',
+  'Монитор запомнит этот ответ и пришлет алерт, когда он изменится.':
+    'The monitor will remember this answer and send an alert when it changes.',
+  'Монитор запомнит этот ответ и пришлет алерт, когда он изменится. Если ответ должен быть другим, задайте его ниже.':
+    'The monitor will remember this answer and send an alert when it changes. If the answer should be different, set it below.',
+  'DNS сейчас не дает ответа: {msg}. Проверьте имя и тип записи, а если так и задумано, монитор можно выключить ниже.':
+    'DNS gives no answer right now: {msg}. Check the name and the record type; if this is intended, you can disable the monitor below.',
+  'DNS сейчас не дает ответа: {msg}. Если добавить так, монитор сразу будет красным и придет алерт. Проверьте имя и тип записи.':
+    'DNS gives no answer right now: {msg}. If you add it like this, the monitor turns red at once and an alert arrives. Check the name and the record type.',
+  'Ответ не тот, что ждем: {msg}. Монитор будет красным, пока ответ не станет таким.':
+    'The answer is not the expected one: {msg}. The monitor stays red until the answer becomes the expected one.',
+  'Ответ не тот, что ждем: {msg}. Если добавить так, монитор сразу будет красным и придет алерт.':
+    'The answer is not the expected one: {msg}. If you add it like this, the monitor turns red at once and an alert arrives.',
+  '{msg}. Монитор пришлет алерт; если новый ответ правильный, примите его кнопкой в карточке монитора.':
+    '{msg}. The monitor will send an alert; if the new answer is right, accept it with the button in the monitor card.',
+  '{h} ч {m} мин':
+    '{h} h {m} min',
+  'сайт или порт':
+    'a site or a port',
+  'название монитора':
+    'monitor name',
+  'нет сигнала {dur}, ждали каждые {every}':
+    'no signal for {dur}, expected every {every}',
+  'записей {type} нет':
+    'no {type} records',
+  'Так придет алерт, если скрипт не постучится вовремя. Сообщит об ошибке - придет сразу, с ее текстом.':
+    'This is the alert if the script does not report in time. If it reports an error, the alert arrives at once, with its text.',
+  'Так придет после сохранения: ответ DNS сейчас не тот.':
+    'This arrives after saving: the DNS answer is wrong now.',
+  'Так придет сразу после добавления: ответ DNS сейчас не тот.':
+    'This arrives right after adding: the DNS answer is wrong now.',
+  'Так придет алерт, если ответ DNS изменится или пропадет.':
+    'This is the alert if the DNS answer changes or disappears.',
+  'Эту запись смотрит еще монитор "{name}": оба шлют те же алерты.':
+    'Monitor "{name}" watches this record too: both send the same alerts.',
+  'На эту запись уже есть монитор "{name}": второй будет слать те же алерты.':
+    'There is already a monitor "{name}" for this record: a second one would send the same alerts.',
+  'свой':
+    'custom',
+  'Алерт, если сигнала нет дольше {dur} или скрипт сообщил об ошибке.':
+    'An alert if there is no signal for longer than {dur} or the script reports an error.',
+  'Адрес для скрипта появится в карточке монитора после сохранения.':
+    'The address for the script appears in the monitor card after saving.',
+  'Что отвечает DNS':
+    'What DNS answers',
+  'задать ожидаемый ответ':
+    'set the expected answer',
+  '- если ответ должен быть именно таким, а не просто не меняться.':
+    '- if the answer must be exactly this, not just stay the same.',
+  'Скрипт или крон сам стучится в панель после каждого прогона: бэкап, выгрузка, очередь.':
+    'The script or cron job reports to the panel itself after each run: a backup, an export, a queue.',
+  'Домен и какую запись спрашивать.':
+    'The domain and which record to ask for.',
+  'Имя поменялось - проверьте снова.':
+    'The name changed - check again.',
+  'Нажмите "Проверить": панель спросит запись у DNS и покажет ответ еще до сохранения.':
+    'Press "Check": the panel asks DNS for the record and shows the answer before saving.',
+  'напр. ночной бэкап':
+    'e.g. nightly backup',
+  '- допуск по времени, заглушенные алерты.':
+    '- time allowance, muted alerts.',
+  '- допуск по времени. Можно поменять и потом в карточке монитора.':
+    '- time allowance. It can also be changed later in the monitor card.',
+  '- интервал, DNS-сервер, заглушенные алерты.':
+    '- interval, DNS server, muted alerts.',
+  '- интервал и DNS-сервер. Можно поменять и потом в карточке монитора.':
+    '- interval and DNS server. They can also be changed later in the monitor card.',
+  'сейчас {dur}: крон стартует не в нулевую секунду, а скрипт идет не мгновенно':
+    'now {dur}: cron does not start at second zero, and the script takes time',
+  'ждать сигнал':
+    'expect a signal',
+  'раз в {every}':
+    'every {every}',
+  'если его нет {dur}':
+    'if it is missing for {dur}',
+  'Назовите монитор: название будет в алерте.':
+    'Name the monitor: the name goes into the alert.',
+  'запись {type}':
+    'the {type} record',
   'С панели порт не открывается: {msg}. Изнутри сервера и из локаций проверяются только сайты. Проверьте адрес и порт, а если сервис на обслуживании, монитор можно выключить ниже.':
     'The port does not open from the panel: {msg}. Only sites can be checked from inside a server or from locations. Check the address and the port; if the service is under maintenance, you can disable the monitor below.',
   'Сайт просит вход (401), а монитор считает это сбоем. Выберите ниже: считать 401 нормой или дать доступ.':

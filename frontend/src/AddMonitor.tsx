@@ -22,18 +22,25 @@ import { MON_ALERT_KINDS } from './checkUtils'
 // Старая форма спрашивала тип, адрес и способ проверки вслепую: увидит ли панель сайт,
 // человек узнавал от красного монитора и алерта. Здесь адрес проверяется до сохранения - с
 // панели, изнутри сервера, где нашелся домен, и из локаций (backend app/try_probe.py), а
-// рабочий способ выбран сам. Push и DNS остаются в CheckFormCard.
+// рабочий способ выбран сам.
+//
+// DNS-монитор проверяется так же, до сохранения: видно, что резолвер отвечает сейчас, и что
+// монитор с этим сделает - запомнит ответ или сравнит с ожидаемым. Push никуда не ходит, у него
+// проверять нечего: только как часто ждать сигнал.
 //
 // Правка монитора - та же форма (editing): адрес и настройки берутся из монитора, проверка
 // запускается сама при открытии, но сохранить можно и без нее. По итогам проверки форма в
 // правке ничего не меняет сама, только подсказывает: человек открыл ее поменять что-то свое.
 
+type Kind = 'addr' | 'dns' | 'push'
 type Where = 'panel' | 'local' | 'locations'
 type Preset = 'n1' | 'n3' | 'm5' | 'own'
 type Slot<T> = { st: 'wait' } | { st: 'ok'; v: T } | { st: 'err'; msg: string }
-type Addr = { type: 'http' | 'tcp_port'; target: string; port: number }
+type Addr = { type: 'http' | 'tcp_port' | 'dns' | 'push'; target: string; port: number }
 type Tried = Addr & {
   auth: string // настройки входа, с которыми шла проверка (authKey)
+  ask: string // dns: какую запись спросили
+  dns: string // dns: резолвер и ожидаемый ответ, с которыми шла проверка (dnsKey)
   panel: Slot<CheckTryOut>
   exp: Slot<CheckTryOut> | null
   locs: Slot<TryLocation[]> | null
@@ -50,13 +57,36 @@ type Props = {
   error: string | null
   onSubmit: (form: CheckForm) => void
   onCancel: () => void
-  onClassic?: (type: 'push' | 'dns') => void
   onOpenCheck?: (id: number) => void
   onUnauthorized: () => void
 }
 
 const WAIT = { st: 'wait' } as const
 const SCHEME = /^[a-z][a-z0-9+.-]*:\/\//i
+const DNS_TYPES = ['A', 'AAAA', 'CNAME', 'MX', 'NS', 'TXT']
+// как часто скрипт обязан постучаться: пресеты закрывают почти все кроны, остальное - минутами
+const PUSH_PERIODS: [number, string][] = [
+  [300, '5 мин'],
+  [900, '15 мин'],
+  [3600, '1 ч'],
+  [6 * 3600, '6 ч'],
+  [86400, '1 сутки'],
+  [7 * 86400, '1 неделя'],
+]
+
+// имя для DNS как его сохранит панель (checks._dns_defaults): без схемы, пути, порта и точки
+function dnsName(raw: string): string {
+  let v = raw.trim().toLowerCase().replace(SCHEME, '').split(/[/?#]/)[0]
+  if ((v.match(/:/g) ?? []).length === 1) v = v.split(':')[0]
+  return v.replace(/\.+$/, '')
+}
+
+// резолвер и ожидаемый ответ: поменяли - прежняя проверка уже не про них
+const dnsKey = (f: CheckForm) =>
+  JSON.stringify([(f.dns_server ?? '').trim(), (f.dns_expect ?? '').trim(), f.dns_match ?? 'equal'])
+
+// допуск push по умолчанию - десятая часть периода, но не меньше 2 минут (checks.push_limits)
+const pushGrace = (f: CheckForm) => f.push_grace || Math.max(120, Math.floor((f.push_period || 3600) / 10))
 
 // "db.example.com:5432" - порт, остальное - сайт; со схемой в начале - всегда сайт
 function parseAddr(raw: string): Addr {
@@ -112,6 +142,7 @@ function headersText(json: string): string {
 
 // адрес монитора в поле формы: у порта - хост:порт, IPv6 в скобках
 function addrOf(f: CheckForm): string {
+  if (f.type === 'push') return ''
   if (f.type !== 'tcp_port' || !f.port) return f.target
   return f.target.includes(':') ? `[${f.target}]:${f.port}` : `${f.target}:${f.port}`
 }
@@ -119,6 +150,9 @@ function addrOf(f: CheckForm): string {
 // тонкую настройку в правке раскрываем сразу, если в ней уже что-то свое
 function advTouched(f: CheckForm, authShown: boolean): boolean {
   const days = (v: number[] | undefined, d: number[]) => (v ?? d).join(',') !== d.join(',')
+  if (f.type === 'push') return !!f.push_grace || (f.alert_mutes ?? []).length > 0
+  if (f.type === 'dns')
+    return (f.interval_seconds ?? 300) !== 300 || !!f.dns_server || (f.alert_mutes ?? []).length > 0
   return (
     (f.interval_seconds ?? 60) !== 60 ||
     (f.degraded_ms ?? 2000) !== 2000 ||
@@ -152,11 +186,11 @@ export function AddMonitor({
   error,
   onSubmit,
   onCancel,
-  onClassic,
   onOpenCheck,
   onUnauthorized,
 }: Props) {
   const { t } = useI18n()
+  const [kind, setKind] = useState<Kind>(base.type === 'push' ? 'push' : base.type === 'dns' ? 'dns' : 'addr')
   const [addr, setAddr] = useState(() => (editing ? addrOf(base) : ''))
   const [form, setForm] = useState<CheckForm>(base)
   const set = (patch: Partial<CheckForm>) => setForm((f) => ({ ...f, ...patch }))
@@ -192,6 +226,10 @@ export function AddMonitor({
   const [hdrText, setHdrText] = useState(() => headersText(base.http_headers ?? ''))
   const [pathsText, setPathsText] = useState(() => (base.extra_paths ?? []).join('\n'))
   const [rules, setRules] = useState<ServerAlertRules | null>(null)
+  // dns: поле ожидаемого ответа; пустое - монитор запомнит первый ответ
+  const [wantOpen, setWantOpen] = useState(() => !!(base.dns_expect ?? '').trim())
+  // push: свой период минутами, когда ни один пресет не подходит
+  const [ownPeriod, setOwnPeriod] = useState(() => !PUSH_PERIODS.some(([v]) => v === (base.push_period || 3600)))
 
   // правила алертов видит только админ; без них предпросмотр в обычном формате
   useEffect(() => {
@@ -201,15 +239,31 @@ export function AddMonitor({
   // ответы прежнего нажатия после закрытия формы никуда не пишем
   useEffect(() => () => void runRef.current++, [])
 
-  const cur = parseAddr(addr)
-  const fresh = !!tried && tried.target === cur.target && tried.type === cur.type && tried.port === cur.port
+  const isDns = kind === 'dns'
+  const isPush = kind === 'push'
+  const addrFor = (raw: string): Addr =>
+    kind === 'push'
+      ? { type: 'push', target: '', port: 0 }
+      : kind === 'dns'
+        ? { type: 'dns', target: dnsName(raw), port: 0 }
+        : parseAddr(raw)
+  const askOf = (f: CheckForm, type: Addr['type']) => (type === 'dns' ? f.dns_type || 'A' : '')
+  const cur = addrFor(addr)
+  const fresh =
+    !!tried &&
+    tried.target === cur.target &&
+    tried.type === cur.type &&
+    tried.port === cur.port &&
+    tried.ask === askOf(form, cur.type)
   const panel = fresh ? done(tried.panel)?.panel ?? undefined : undefined
   const ctx = fresh ? done(tried.panel) : undefined
   const exp = fresh ? done(tried.exp) : undefined
   const locs = fresh ? done(tried.locs) : undefined
   const inside = fresh ? done(tried.inside) : undefined
   const http = cur.type === 'http'
+  const isTcp = cur.type === 'tcp_port'
   const expected = form.expected_status || '200-399'
+  const dnsType = form.dns_type || 'A'
 
   // "работает": отвечает, либо ответ - код, который в форме объявлен нормой (401 и т.п.)
   const works = (r: TryResult | undefined) =>
@@ -218,8 +272,10 @@ export function AddMonitor({
       r.status === 'degraded' ||
       (r.status === 'down' && r.kind === 'http' && r.code > 0 && statusOk(r.code, expected)))
 
-  const probe = () => {
-    const a = parseAddr(addr)
+  // over - то, что поменяли этим же нажатием и чего в form еще нет (тип записи, ожидаемый ответ)
+  const probe = (over: Partial<CheckForm> = {}) => {
+    const f = { ...form, ...over }
+    const a = addrFor(addr)
     if (!a.target) return
     const run = ++runRef.current
     const isHttp = a.type === 'http'
@@ -227,7 +283,9 @@ export function AddMonitor({
     if (tried && tried.target !== a.target) setAuthSeen(false)
     setTried({
       ...a,
-      auth: authKey(form),
+      auth: authKey(f),
+      ask: askOf(f, a.type),
+      dns: dnsKey(f),
       panel: WAIT,
       exp: isHttp ? WAIT : null,
       locs: isHttp ? WAIT : null,
@@ -240,24 +298,36 @@ export function AddMonitor({
       if (e instanceof ApiError && e.status === 401) onUnauthorized()
       return { st: 'err', msg: e instanceof Error ? e.message : t('Ошибка') }
     }
-    const body: Omit<TryIn, 'part'> = {
-      check_id: checkId,
-      type: a.type,
-      target: a.target,
-      port: a.port,
-      timeout_ms: form.timeout_ms,
-      degraded_ms: form.degraded_ms,
-      method: form.method,
-      expected_status: form.expected_status,
-      keyword_up: form.keyword_up,
-      keyword_down: form.keyword_down,
-      auth_method: form.auth_method ?? '',
-      auth_user: form.auth_user ?? '',
-      auth_pass: form.auth_pass ?? '',
-      http_headers: form.http_headers ?? '',
-      ignore_tls: form.ignore_tls,
-      extra_paths: form.extra_paths,
-    }
+    const body: Omit<TryIn, 'part'> =
+      a.type === 'dns'
+        ? {
+            check_id: checkId,
+            type: 'dns',
+            target: a.target,
+            timeout_ms: f.timeout_ms,
+            dns_type: askOf(f, a.type),
+            dns_server: (f.dns_server ?? '').trim(),
+            dns_expect: f.dns_expect ?? '',
+            dns_match: f.dns_match ?? 'equal',
+          }
+        : {
+            check_id: checkId,
+            type: a.type === 'tcp_port' ? 'tcp_port' : 'http',
+            target: a.target,
+            port: a.port,
+            timeout_ms: f.timeout_ms,
+            degraded_ms: f.degraded_ms,
+            method: f.method,
+            expected_status: f.expected_status,
+            keyword_up: f.keyword_up,
+            keyword_down: f.keyword_down,
+            auth_method: f.auth_method ?? '',
+            auth_user: f.auth_user ?? '',
+            auth_pass: f.auth_pass ?? '',
+            http_headers: f.http_headers ?? '',
+            ignore_tls: f.ignore_tls,
+            extra_paths: f.extra_paths,
+          }
     tryCheck({ ...body, part: 'panel' }).then(
       (v) => put({ panel: { st: 'ok', v } }),
       (e) => put({ panel: fail(e) }),
@@ -333,7 +403,8 @@ export function AddMonitor({
     if (tried.panel.st === 'err') return { ...none, tone: 'bad', text: tried.panel.msg }
     if (!panel) return none
     const msg = panel.message
-    if (!http) {
+    if (isDns) return assessDns(panel)
+    if (isTcp) {
       if (panelWorks) return { rec: 'panel', tone: 'ok', text: t('Порт открыт с панели.'), dead: false }
       return {
         rec: '',
@@ -405,6 +476,49 @@ export function AddMonitor({
         : t('Сейчас адрес не открывается ниоткуда: {msg}. Если добавить так, монитор сразу будет красным и придет алерт. Проверьте адрес, а если сайт только поднимается, можно добавить выключенным.', { msg }),
     }
   }
+  // DNS: что ответил резолвер и что с этим сделает монитор
+  function assessDns(p: TryPanel): { rec: Where | ''; tone: string; text: string; dead: boolean } {
+    const msg = p.message
+    const want = !!(form.dns_expect ?? '').trim()
+    if (tried && tried.dns !== dnsKey(form))
+      return { rec: '', tone: 'warn', dead: false, text: t('Настройки поменялись - нажмите "проверить снова": ответ сравнится уже с ними.') }
+    if (p.status !== 'down') {
+      const text = want
+        ? t('Ответ совпадает с ожидаемым. Станет другим - придет алерт.')
+        : p.baseline === 'kept'
+          ? t('Ответ тот же, что монитор запомнил. Изменится - придет алерт.')
+          : editing
+            ? t('Монитор запомнит этот ответ и пришлет алерт, когда он изменится.')
+            : t('Монитор запомнит этот ответ и пришлет алерт, когда он изменится. Если ответ должен быть другим, задайте его ниже.')
+      return { rec: '', tone: 'ok', dead: false, text }
+    }
+    if (!(p.answers ?? []).length)
+      return {
+        rec: '',
+        tone: 'bad',
+        dead: true,
+        text: editing
+          ? t('DNS сейчас не дает ответа: {msg}. Проверьте имя и тип записи, а если так и задумано, монитор можно выключить ниже.', { msg })
+          : t('DNS сейчас не дает ответа: {msg}. Если добавить так, монитор сразу будет красным и придет алерт. Проверьте имя и тип записи.', { msg }),
+      }
+    if (want)
+      return {
+        rec: '',
+        tone: 'bad',
+        dead: true,
+        text: editing
+          ? t('Ответ не тот, что ждем: {msg}. Монитор будет красным, пока ответ не станет таким.', { msg })
+          : t('Ответ не тот, что ждем: {msg}. Если добавить так, монитор сразу будет красным и придет алерт.', { msg }),
+      }
+    return {
+      rec: '',
+      tone: 'warn',
+      dead: false,
+      text: t('{msg}. Монитор пришлет алерт; если новый ответ правильный, примите его кнопкой в карточке монитора.', {
+        msg: msg.charAt(0).toUpperCase() + msg.slice(1),
+      }),
+    }
+  }
   const verdict = assess()
 
   // выбор по итогам проверки, пока человек не выбрал сам
@@ -429,9 +543,22 @@ export function AddMonitor({
     else set({ expected_status: '200-399' })
   }
 
-  const shownName = name ?? displayHost(cur)
+  const autoName = isPush ? '' : isDns ? (cur.target ? `DNS ${cur.target}${dnsType !== 'A' ? ` ${dnsType}` : ''}` : '') : displayHost(cur)
+  const shownName = name ?? autoName
   const shownGroup = group ?? (ctx?.group || '')
-  const interval = form.interval_seconds ?? 60
+  const interval = form.interval_seconds ?? (isDns ? 300 : 60)
+  // длительность, как ее пишет алерт push (checks._dur): 5 мин, 1 ч 30 мин, 2 дн
+  const dur = (sec: number) => {
+    if (sec < 3600) return t('{n} мин', { n: Math.max(Math.floor(sec / 60), 1) })
+    if (sec < 2 * 86400) {
+      const h = Math.floor(sec / 3600)
+      const m = Math.floor(sec / 60) % 60
+      return m && h < 6 ? t('{h} ч {m} мин', { h, m }) : t('{n} ч', { n: h })
+    }
+    return t('{n} дн', { n: Math.floor(sec / 86400) })
+  }
+  const period = Math.max(form.push_period || 3600, 60)
+  const grace = pushGrace(form)
   const presetFails = (p: Preset) =>
     p === 'n1' ? 1 : p === 'n3' ? 3 : p === 'm5' ? Math.max(1, Math.round(300 / interval)) : ownFails
   const presetLabel: Record<Preset, string> = {
@@ -446,8 +573,11 @@ export function AddMonitor({
     m5: t('для того, что иногда моргает'),
     own: t('так настроено у этого монитора'),
   }
-  // свой порог показываем, только если он уже стоит у монитора
-  const presets: Preset[] = editing && ownFails && presetOfBase() === 'own' ? ['n1', 'n3', 'm5', 'own'] : ['n1', 'n3', 'm5']
+  // свой порог показываем, только если он уже стоит у монитора; "5 минут" - если это не те же
+  // 1 или 3 сбоя (у DNS проверка и так раз в 5 минут)
+  const presets: Preset[] = (['n1', 'n3', 'm5', 'own'] as Preset[]).filter((p) =>
+    p === 'm5' ? ![1, 3].includes(presetFails('m5')) : p === 'own' ? editing && !!ownFails && presetOfBase() === 'own' : true,
+  )
   function presetOfBase(): Preset {
     const every = base.interval_seconds ?? 60
     return ownFails === 1 ? 'n1' : ownFails === 3 ? 'n3' : ownFails === Math.max(1, Math.round(300 / every)) ? 'm5' : 'own'
@@ -459,9 +589,11 @@ export function AddMonitor({
         ? t('с панели и из локаций')
         : t('с панели')
   const everyLabel = interval % 60 === 0 ? t('раз в {n} мин', { n: interval / 60 }) : t('раз в {n} с', { n: interval })
-  const canAdd = editing
-    ? !!cur.target && shownName.trim() !== '' && !busy
-    : fresh && !panelPending && tried.panel.st !== 'err' && shownName.trim() !== '' && !busy
+  // push проверять нечего: хватит названия
+  const canAdd =
+    editing || isPush
+      ? (isPush || !!cur.target) && shownName.trim() !== '' && !busy
+      : fresh && !panelPending && tried.panel.st !== 'err' && shownName.trim() !== '' && !busy
   const hdr = headersJson(hdrText)
 
   const submit = () => {
@@ -478,7 +610,29 @@ export function AddMonitor({
       enabled: editing ? form.enabled ?? true : !(verdict.dead && addOff),
     }
     if (!http) Object.assign(out, { check_ssl: false, check_domain: false, check_all_ips: false, extra_paths: [] })
+    if (isDns || isPush) Object.assign(out, { probe_local: false, check_locations: false })
+    if (isDns) out.dns_type = dnsType
+    // у push адреса нет: панель выдаст свой; алерт - с первого же пропуска
+    if (isPush) Object.assign(out, { target: 'push', push_period: period, alert_after_failures: 1 })
     onSubmit(out)
+  }
+
+  const switchKind = (k: Kind) => {
+    runRef.current++
+    setTried(null)
+    setKind(k)
+    // DNS меняется редко: раз в 5 минут хватает, а резолверы не любят частых вопросов
+    if (k === 'dns') {
+      set({ dns_type: form.dns_type || 'A', interval_seconds: Math.max(form.interval_seconds ?? 60, 300) })
+      setAddr((v) => dnsName(v))
+    }
+    if (k === 'addr' && (form.interval_seconds ?? 60) === 300) set({ interval_seconds: 60 })
+    if (k === 'push') set({ push_period: form.push_period || 3600 })
+  }
+  const kindLabel: Record<Kind, string> = {
+    addr: t('сайт или порт'),
+    dns: t('DNS-записи'),
+    push: t('сигнал от скрипта'),
   }
 
   // ---- куски разметки ----
@@ -586,13 +740,18 @@ export function AddMonitor({
   // сервер не на связи или агент молчит - ответа сайта нет, и пример алерта обычный
   const answered = !!chosen && ['up', 'degraded', 'down'].includes(chosen.status) && !!chosen.message
   const failingNow = answered && (where === 'local' ? !works(chosen) : !panelWorks)
-  const host = displayHost(cur)
+  // у push адреса нет: в заголовке алерта его имя (collector)
+  const host = isPush ? shownName || t('название монитора') : isDns ? cur.target : displayHost(cur)
   const ments = (shownName.match(/@[A-Za-z0-9_]+/g) ?? []).join(' ')
-  const sample = failingNow
-    ? chosen.message
-    : http
-      ? t('сервер не ответил на попытку соединения (ConnectTimeout)')
-      : t('порт {port}: недоступен', { port: cur.port })
+  const sample = isPush
+    ? t('нет сигнала {dur}, ждали каждые {every}', { dur: dur(period + grace), every: dur(period) })
+    : failingNow
+      ? chosen.message
+      : http
+        ? t('сервер не ответил на попытку соединения (ConnectTimeout)')
+        : isDns
+          ? t('записей {type} нет', { type: dnsType })
+          : t('порт {port}: недоступен', { port: cur.port })
   const rule = rules?.rules?.down
   const dflt = rules?.kinds.find((k) => k.key === 'down')?.default_text
   const custom = !!rule && !!dflt && rule.text !== dflt && !rule.text.startsWith('🔴 Kervax:')
@@ -636,11 +795,19 @@ export function AddMonitor({
       : t('Монитор добавится выключенным: алертов не будет, пока его не включат.')
     : ruleOff
       ? t('По правилам алертов этот монитор алерт о падении не шлет.')
-      : failingNow || locPart
-        ? editing
-          ? t('Так придет после сохранения: адрес сейчас не открывается.')
-          : t('Так придет сразу после добавления: адрес сейчас не открывается.')
-        : t('Так придет алерт, если адрес перестанет открываться.')
+      : isPush
+        ? t('Так придет алерт, если скрипт не постучится вовремя. Сообщит об ошибке - придет сразу, с ее текстом.')
+        : isDns
+          ? failingNow
+            ? editing
+              ? t('Так придет после сохранения: ответ DNS сейчас не тот.')
+              : t('Так придет сразу после добавления: ответ DNS сейчас не тот.')
+            : t('Так придет алерт, если ответ DNS изменится или пропадет.')
+          : failingNow || locPart
+            ? editing
+              ? t('Так придет после сохранения: адрес сейчас не открывается.')
+              : t('Так придет сразу после добавления: адрес сейчас не открывается.')
+            : t('Так придет алерт, если адрес перестанет открываться.')
 
   // выбор локаций: null = все, [] = ни одной, [id...] = эти
   const proxyLocs = allLocs.filter((l) => l.enabled)
@@ -652,61 +819,234 @@ export function AddMonitor({
   }
   const parseDays = (v: string) => v.split(/[^0-9]+/).filter(Boolean).map(Number)
 
+  const existingNote = ctx?.existing_id != null && (
+    <div className="am-note warn">
+      {isDns
+        ? editing
+          ? t('Эту запись смотрит еще монитор "{name}": оба шлют те же алерты.', { name: ctx.existing_name })
+          : t('На эту запись уже есть монитор "{name}": второй будет слать те же алерты.', { name: ctx.existing_name })
+        : editing
+          ? t('Этот адрес смотрит еще монитор "{name}": оба шлют те же алерты.', { name: ctx.existing_name })
+          : t('На этот адрес уже есть монитор "{name}": второй будет слать те же алерты.', { name: ctx.existing_name })}{' '}
+      {onOpenCheck && (
+        <button type="button" className="am-link" onClick={() => onOpenCheck(ctx.existing_id as number)}>
+          {t('открыть его')}
+        </button>
+      )}
+    </div>
+  )
+
+  // ---- push: как часто ждать сигнал ----
+  const pushSec = (
+    <div className="am-sec">
+      <span className="am-lab">{t('Сигнал не реже, чем раз в')}</span>
+      <div className="win-switch">
+        {PUSH_PERIODS.map(([v, label]) => (
+          <button
+            type="button"
+            key={v}
+            className={`win-btn${!ownPeriod && period === v ? ' win-btn-active' : ''}`}
+            onClick={() => {
+              setOwnPeriod(false)
+              set({ push_period: v })
+            }}
+          >
+            {t(label)}
+          </button>
+        ))}
+        <button type="button" className={`win-btn${ownPeriod ? ' win-btn-active' : ''}`} onClick={() => setOwnPeriod(true)}>
+          {t('свой')}
+        </button>
+      </div>
+      {ownPeriod && (
+        <label className="field am-period">
+          <span>{t('Период, минут')}</span>
+          <input
+            type="number"
+            min={1}
+            value={Math.round(period / 60)}
+            onChange={(e) => set({ push_period: Math.max(1, Number(e.target.value) || 1) * 60 })}
+          />
+        </label>
+      )}
+      <div className="muted small am-hint">
+        {t('Алерт, если сигнала нет дольше {dur} или скрипт сообщил об ошибке.', { dur: dur(period + grace) })}{' '}
+        {!editing && t('Адрес для скрипта появится в карточке монитора после сохранения.')}
+      </div>
+    </div>
+  )
+
+  // ---- DNS: что отвечает сейчас и что ждать ----
+  const answers = panel?.answers ?? []
+  const wantText = form.dns_expect ?? ''
+  const dnsSec = (
+    <div className="am-sec">
+      <h4>{t('Что отвечает DNS')}</h4>
+      {!fresh ? (
+        notYet()
+      ) : tried.panel.st === 'wait' ? (
+        spin(t('проверяю...'))
+      ) : answers.length > 0 ? (
+        <div className="am-ips">
+          {answers.map((a) => (
+            <div key={a} className="am-res">
+              {dot(panel?.status === 'down' ? 'down' : 'up')}
+              <span className="mono">{a}</span>
+            </div>
+          ))}
+        </div>
+      ) : null}
+      {verdict.text && <div className={`am-note ${verdict.tone}`}>{verdict.text}</div>}
+      {existingNote}
+      {wantOpen ? (
+        <div className="am-box">
+          <label className="field">
+            <span>{t('Ожидаемый ответ, по строке')}</span>
+            <textarea
+              className="mono"
+              rows={Math.min(Math.max(wantText.split('\n').length, 2), 6)}
+              value={wantText}
+              placeholder={dnsType === 'MX' ? 'mx1.example.com\nmx2.example.com' : '203.0.113.10'}
+              spellCheck={false}
+              onChange={(e) => set({ dns_expect: e.target.value })}
+            />
+            <span className="field-hint muted small">
+              {t('Пусто - запомним первый ответ и пришлем алерт, когда он изменится. У MX можно без приоритета.')}
+            </span>
+          </label>
+          <div className="am-row">
+            {wantText.trim() !== '' && (
+              <div className="win-switch">
+                {(['equal', 'contains'] as const).map((m) => (
+                  <button
+                    type="button"
+                    key={m}
+                    className={`win-btn${(form.dns_match ?? 'equal') === m ? ' win-btn-active' : ''}`}
+                    onClick={() => set({ dns_match: m })}
+                  >
+                    {m === 'equal' ? t('ответ совпадает целиком') : t('ответ содержит все эти')}
+                  </button>
+                ))}
+              </div>
+            )}
+            <button type="button" className="ghost" disabled={!cur.target || panelPending} onClick={() => probe()}>
+              {t('проверить снова')}
+            </button>
+          </div>
+        </div>
+      ) : (
+        <div className="muted small am-hint">
+          <button
+            type="button"
+            className="am-link small"
+            onClick={() => {
+              setWantOpen(true)
+              // чаще всего ждут ровно то, что DNS отвечает сейчас: подставляем, поправить можно
+              if (answers.length && !wantText.trim()) {
+                const v = answers.join('\n')
+                set({ dns_expect: v })
+                probe({ dns_expect: v })
+              }
+            }}
+          >
+            {t('задать ожидаемый ответ')}
+          </button>{' '}
+          {t('- если ответ должен быть именно таким, а не просто не меняться.')}
+        </div>
+      )}
+    </div>
+  )
+
   return (
     <div className={editing ? 'am am-edit' : 'card am'}>
       {!editing && <h3 className="am-h">{t('Новый монитор')}</h3>}
       <span className="am-lab">{t('Что проверять')}</span>
-      <div className="am-addr">
-        <input
-          className="mono"
-          value={addr}
-          autoFocus={!editing}
-          placeholder="shop.example.com"
-          spellCheck={false}
-          onChange={(e) => setAddr(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter') probe()
-          }}
-        />
-        <button type="button" disabled={!cur.target || panelPending} onClick={probe}>
-          {fresh ? t('Проверить снова') : t('Проверить')}
-        </button>
-      </div>
+      {!isPush && (
+        <div className="am-addr">
+          <input
+            className="mono"
+            value={addr}
+            autoFocus={!editing}
+            placeholder={isDns ? 'example.com' : 'shop.example.com'}
+            spellCheck={false}
+            onChange={(e) => setAddr(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') probe()
+            }}
+          />
+          <button type="button" disabled={!cur.target || panelPending} onClick={() => probe()}>
+            {fresh ? t('Проверить снова') : t('Проверить')}
+          </button>
+        </div>
+      )}
       <div className="am-type">
-        {cur.target && (
-          <span className="type-chip on">
-            {http ? t('это сайт') : t('это TCP-порт {port}', { port: cur.port })}
-          </span>
+        {isDns ? (
+          <div className="win-switch" title={t('Запись')}>
+            {DNS_TYPES.map((x) => (
+              <button
+                type="button"
+                key={x}
+                className={`win-btn${dnsType === x ? ' win-btn-active' : ''}`}
+                onClick={() => {
+                  set({ dns_type: x })
+                  // другая запись - другой ответ: спрашиваем сразу, если имя уже вписано
+                  if (cur.target) probe({ dns_type: x })
+                }}
+              >
+                {x}
+              </button>
+            ))}
+          </div>
+        ) : (
+          (cur.target || isPush) && (
+            <span className="type-chip on">
+              {isPush ? t('сигнал от скрипта') : http ? t('это сайт') : t('это TCP-порт {port}', { port: cur.port })}
+            </span>
+          )
         )}
         <span className="muted small">
-          {http
-            ? t('Сайт, адрес API или хост:порт.')
-            : t('Нужен сайт на этом порту - допишите https:// в начале.')}{' '}
-          {onClassic && !editing && (
+          {isPush
+            ? t('Скрипт или крон сам стучится в панель после каждого прогона: бэкап, выгрузка, очередь.')
+            : isDns
+              ? t('Домен и какую запись спрашивать.')
+              : http
+                ? t('Сайт, адрес API или хост:порт.')
+                : t('Нужен сайт на этом порту - допишите https:// в начале.')}{' '}
+          {!editing && (
             <>
               {t('Нужно другое:')}{' '}
-              <button type="button" className="am-link" onClick={() => onClassic('push')}>
-                {t('сигнал от скрипта')}
-              </button>
-              {', '}
-              <button type="button" className="am-link" onClick={() => onClassic('dns')}>
-                {t('DNS-записи')}
-              </button>
+              {(['addr', 'dns', 'push'] as Kind[])
+                .filter((k) => k !== kind)
+                .map((k, i) => (
+                  <span key={k}>
+                    {i > 0 && ', '}
+                    <button type="button" className="am-link" onClick={() => switchKind(k)}>
+                      {kindLabel[k]}
+                    </button>
+                  </span>
+                ))}
             </>
           )}
         </span>
       </div>
 
-      {!fresh && (!editing || stale) && (
+      {!isPush && !fresh && (!editing || stale) && (
         <div className="am-note">
           {tried
-            ? t('Адрес поменялся - проверьте снова.')
-            : t('Нажмите "Проверить": панель откроет адрес с панели, изнутри сервера, где нашелся домен, и из локаций. Так видно, работает ли он, еще до сохранения.')}
+            ? isDns
+              ? t('Имя поменялось - проверьте снова.')
+              : t('Адрес поменялся - проверьте снова.')
+            : isDns
+              ? t('Нажмите "Проверить": панель спросит запись у DNS и покажет ответ еще до сохранения.')
+              : t('Нажмите "Проверить": панель откроет адрес с панели, изнутри сервера, где нашелся домен, и из локаций. Так видно, работает ли он, еще до сохранения.')}
         </div>
       )}
 
-      {(fresh || editing) && (
+      {(fresh || editing || isPush) && (
         <>
+          {isPush && pushSec}
+          {isDns && dnsSec}
+          {kind === 'addr' && (
           <div className="am-sec">
             <h4>{t('Откуда проверять')}</h4>
             <div className="am-opts">
@@ -733,18 +1073,7 @@ export function AddMonitor({
               ))}
             </div>
             {verdict.text && <div className={`am-note ${verdict.tone}`}>{verdict.text}</div>}
-            {ctx?.existing_id != null && (
-              <div className="am-note warn">
-                {editing
-                  ? t('Этот адрес смотрит еще монитор "{name}": оба шлют те же алерты.', { name: ctx.existing_name })
-                  : t('На этот адрес уже есть монитор "{name}": второй будет слать те же алерты.', { name: ctx.existing_name })}{' '}
-                {onOpenCheck && (
-                  <button type="button" className="am-link" onClick={() => onOpenCheck(ctx.existing_id as number)}>
-                    {t('открыть его')}
-                  </button>
-                )}
-              </div>
-            )}
+            {existingNote}
             {(has401 || authSeen) && http && (
               <div className="am-box">
                 <div className="am-row">
@@ -799,7 +1128,7 @@ export function AddMonitor({
                       <div className="form-error small">{t('Заголовок пишется как "Имя: значение": {list}', { list: hdr.bad.join(', ') })}</div>
                     )}
                     <div className="am-row">
-                      <button type="button" className="ghost" disabled={panelPending} onClick={probe}>
+                      <button type="button" className="ghost" disabled={panelPending} onClick={() => probe()}>
                         {t('проверить снова')}
                       </button>
                       <span className="muted small">{t('в алерты не попадает, наблюдатели его не видят')}</span>
@@ -820,6 +1149,7 @@ export function AddMonitor({
               </div>
             )}
           </div>
+          )}
 
           {(http || verdict.dead || editing) && (
             <div className="am-sec">
@@ -891,7 +1221,12 @@ export function AddMonitor({
           <div className="am-sec am-grid2">
             <label className="field">
               <span>{t('Название')}</span>
-              <input value={shownName} onChange={(e) => setName(e.target.value)} />
+              <input
+                value={shownName}
+                autoFocus={isPush && !editing}
+                placeholder={isPush ? t('напр. ночной бэкап') : undefined}
+                onChange={(e) => setName(e.target.value)}
+              />
               <span className="field-hint muted small">
                 {t('Название попадает в текст алерта: @упоминания в нём тегнут людей в Telegram.')}
               </span>
@@ -912,6 +1247,7 @@ export function AddMonitor({
             </label>
           </div>
 
+          {!isPush && (
           <div className="am-sec">
             <span className="am-lab">{t('Слать алерт')}</span>
             <div className="win-switch">
@@ -928,6 +1264,7 @@ export function AddMonitor({
             </div>
             <div className="muted small am-hint">{presetHint[preset]}</div>
           </div>
+          )}
 
           {!adv ? (
             <div className="am-sec">
@@ -935,13 +1272,21 @@ export function AddMonitor({
                 {t('тонкая настройка')}
               </button>{' '}
               <span className="muted small">
-                {editing
-                  ? http
-                    ? t('- интервал, ожидаемый ответ, пути, заголовки, повторы, локации, заглушенные алерты.')
-                    : t('- интервал, порог "медленно", повторы, заглушенные алерты.')
-                  : http
-                    ? t('- интервал, ожидаемый ответ, пути, заголовки. Все это можно поменять и потом в карточке монитора.')
-                    : t('- интервал и порог "медленно". Можно поменять и потом в карточке монитора.')}
+                {isPush
+                  ? editing
+                    ? t('- допуск по времени, заглушенные алерты.')
+                    : t('- допуск по времени. Можно поменять и потом в карточке монитора.')
+                  : isDns
+                    ? editing
+                      ? t('- интервал, DNS-сервер, заглушенные алерты.')
+                      : t('- интервал и DNS-сервер. Можно поменять и потом в карточке монитора.')
+                    : editing
+                      ? http
+                        ? t('- интервал, ожидаемый ответ, пути, заголовки, повторы, локации, заглушенные алерты.')
+                        : t('- интервал, порог "медленно", повторы, заглушенные алерты.')
+                      : http
+                        ? t('- интервал, ожидаемый ответ, пути, заголовки. Все это можно поменять и потом в карточке монитора.')
+                        : t('- интервал и порог "медленно". Можно поменять и потом в карточке монитора.')}
               </span>
             </div>
           ) : (
@@ -952,6 +1297,43 @@ export function AddMonitor({
                   {t('свернуть')}
                 </button>
               </div>
+              {isPush && (
+                <label className="field">
+                  <span>{t('Допуск, минут (0 = десятая часть периода)')}</span>
+                  <input
+                    type="number"
+                    min={0}
+                    value={Math.round((form.push_grace || 0) / 60)}
+                    onChange={(e) => set({ push_grace: Math.max(0, Number(e.target.value) || 0) * 60 })}
+                  />
+                  <span className="field-hint muted small">
+                    {t('сейчас {dur}: крон стартует не в нулевую секунду, а скрипт идет не мгновенно', { dur: dur(grace) })}
+                  </span>
+                </label>
+              )}
+              {isDns && (
+                <div className="form-grid">
+                  <label className="field">
+                    <span>{t('Интервал, сек')}</span>
+                    <input
+                      type="number"
+                      value={interval}
+                      onChange={(e) => set({ interval_seconds: Number(e.target.value) || 0 })}
+                    />
+                  </label>
+                  <label className="field">
+                    <span>{t('DNS-сервер (IP)')}</span>
+                    <input
+                      className="mono"
+                      value={form.dns_server ?? ''}
+                      placeholder={t('системный')}
+                      spellCheck={false}
+                      onChange={(e) => set({ dns_server: e.target.value })}
+                    />
+                  </label>
+                </div>
+              )}
+              {kind === 'addr' && (
               <div className="form-grid">
                 <label className="field">
                   <span>{t('Интервал, сек')}</span>
@@ -1030,6 +1412,7 @@ export function AddMonitor({
                   </>
                 )}
               </div>
+              )}
               {http && where === 'locations' && proxyLocs.length > 0 && (
                 <div className="am-locs">
                   <span className="am-lab">{t('Из каких локаций проверять:')}</span>
@@ -1109,7 +1492,9 @@ export function AddMonitor({
                   </div>
                 </div>
               )}
-              <div className="muted small">{t('После правок нажмите "Проверить снова": проверка пойдет уже с ними.')}</div>
+              {!isPush && (
+                <div className="muted small">{t('После правок нажмите "Проверить снова": проверка пойдет уже с ними.')}</div>
+              )}
             </div>
           )}
 
@@ -1126,9 +1511,20 @@ export function AddMonitor({
 
       <div className="am-foot">
         <div className="am-sum">
-          {fresh && !panelPending ? (
+          {isPush ? (
+            shownName.trim() ? (
+              <>
+                {t('Будет:')} <b>{shownName}</b>, {t('ждать сигнал')} <b>{t('раз в {every}', { every: dur(period) })}</b>,{' '}
+                {t('алерт')} <b>{t('если его нет {dur}', { dur: dur(period + grace) })}</b>
+                {off && <>, <b>{t('выключенным')}</b></>}
+              </>
+            ) : (
+              t('Назовите монитор: название будет в алерте.')
+            )
+          ) : fresh && !panelPending ? (
             <>
-              {t('Будет:')} <b>{shownName}</b>, {t('проверять')} <b>{whereLabel}</b> {everyLabel},{' '}
+              {t('Будет:')} <b>{shownName}</b>, {t('проверять')}{' '}
+              <b>{isDns ? t('запись {type}', { type: dnsType }) : whereLabel}</b> {everyLabel},{' '}
               {t('алерт')} <b>{presetLabel[preset]}</b>
               {off && <>, <b>{t('выключенным')}</b></>}
             </>
