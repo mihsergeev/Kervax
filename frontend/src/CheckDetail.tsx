@@ -665,8 +665,8 @@ export function CheckDetail({ check, groups, initialSec, onClose, onSaved, onRun
                 </button>
               </div>
             )}
-            {/* сайт и порт - той же формой, что и новый монитор, с пробной проверкой;
-                push и DNS проверять заранее нечем, у них прежняя форма */}
+            {/* сайт, порт, DNS и push - той же формой, что и новый монитор, с пробной проверкой;
+                прежняя форма осталась только у старых мониторов сертификата */}
             {newForm ? (
               <AddMonitor
                 editing

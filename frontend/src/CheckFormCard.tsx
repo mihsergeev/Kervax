@@ -1,7 +1,11 @@
 import { useEffect, useState } from 'react'
-import { listLocations, type CheckForm, type CheckType, type Location } from './api'
+import { listLocations, type CheckForm, type Location } from './api'
 import { useI18n } from './i18n'
 import { MON_ALERT_KINDS } from './checkUtils'
+
+// Прежняя форма монитора. С 1.4.216 сайт, порт, DNS и push добавляются и правятся в AddMonitor,
+// с пробной проверкой; здесь правятся только старые мониторы сертификата (type cert), которые
+// можно завести лишь через API. Тип в правке не меняется, поэтому выбора типа здесь нет.
 
 // типы сайтовых алертов, которые можно точечно заглушить для монитора (ключи = SITE_ALERT_KINDS)
 
@@ -153,35 +157,8 @@ export function CheckFormCard({
             {t('Название попадает в текст алерта: @упоминания в нём тегнут людей в Telegram.')}
           </span>
         </label>
-        <label className="field">
-          <span>{t('Тип')}</span>
-          <select
-            value={form.type}
-            onChange={(e) => {
-              const type = e.target.value as CheckType
-              // у push адреса нет: панель выдаст свой, а форме нужно непустое поле
-              if (type === 'push') set({ type, target: 'push', push_period: form.push_period || 3600 })
-              else if (type === 'dns')
-                // DNS меняется редко: раз в 5 минут хватает, а резолверы не любят частых вопросов
-                set({
-                  type,
-                  target: form.target === 'push' ? '' : form.target,
-                  dns_type: form.dns_type || 'A',
-                  interval_seconds: (form.interval_seconds ?? 60) < 300 ? 300 : form.interval_seconds,
-                })
-              else set({ type, target: form.target === 'push' ? '' : form.target })
-            }}
-          >
-            <option value="http">{t('HTTP(S) — сайт/эндпоинт')}</option>
-            <option value="tcp_port">{t('TCP-порт')}</option>
-            <option value="push">{t('Push — сигнал от скрипта или крона')}</option>
-            <option value="dns">{t('DNS — записи домена')}</option>
-          </select>
-        </label>
-        {form.type === 'push' && <PushFields form={form} set={set} />}
-        {form.type !== 'push' && (
         <label className="field field-wide">
-          <span>{form.type === 'http' ? t('URL или домен') : form.type === 'dns' ? t('Домен') : t('Хост (домен/IP)')}</span>
+          <span>{form.type === 'http' ? t('URL или домен') : t('Хост (домен/IP)')}</span>
           <input
             value={form.target}
             onChange={(e) => set({ target: e.target.value })}
@@ -193,8 +170,6 @@ export function CheckFormCard({
             </span>
           )}
         </label>
-        )}
-        {form.type === 'dns' && <DnsFields form={form} set={set} />}
         {form.type === 'http' && (
           <label className="field field-wide">
             <span>{t('Дополнительные пути')}</span>
@@ -303,12 +278,10 @@ export function CheckFormCard({
       {/* Всё остальное имеет рабочее умолчание, и на форме добавления оно только мешало:
           чтобы завести монитор, достаточно имени и адреса. Раскрывается одним кликом, а у
           монитора, где что-то уже отличается от умолчаний, открыто сразу. */}
-      {form.type !== 'push' && (
       <button type="button" className="ghost adv-toggle" onClick={() => setAdv(!adv)}>
         {adv ? t('скрыть тонкую настройку') : t('тонкая настройка: интервалы, коды, заголовки, сроки')}
       </button>
-      )}
-      {adv && form.type !== 'push' && (
+      {adv && (
         <>
       <div className="form-grid">
         <label className="field">
@@ -552,117 +525,5 @@ export function CheckFormCard({
         </button>
       </div>
     </div>
-  )
-}
-
-// Как часто скрипт обязан постучаться. Пресеты закрывают почти все кроны, остальное - минутами.
-const PUSH_PERIODS: [number, string][] = [
-  [300, '5 мин'],
-  [900, '15 мин'],
-  [3600, '1 ч'],
-  [6 * 3600, '6 ч'],
-  [86400, '1 сутки'],
-  [7 * 86400, '1 неделя'],
-]
-
-function PushFields({ form, set }: { form: CheckForm; set: (p: Partial<CheckForm>) => void }) {
-  const { t } = useI18n()
-  const period = form.push_period || 3600
-  const preset = PUSH_PERIODS.some(([v]) => v === period)
-  return (
-    <>
-      <label className="field">
-        <span>{t('Сигнал не реже, чем раз в')}</span>
-        <select
-          value={preset ? String(period) : 'custom'}
-          onChange={(e) => set({ push_period: e.target.value === 'custom' ? period : Number(e.target.value) })}
-        >
-          {PUSH_PERIODS.map(([v, label]) => (
-            <option key={v} value={v}>
-              {t(label)}
-            </option>
-          ))}
-          <option value="custom">{t('свой, в минутах')}</option>
-        </select>
-      </label>
-      {!preset && (
-        <label className="field">
-          <span>{t('Период, минут')}</span>
-          <input
-            type="number"
-            min={1}
-            value={Math.round(period / 60)}
-            onChange={(e) => set({ push_period: Math.max(1, Number(e.target.value) || 1) * 60 })}
-          />
-        </label>
-      )}
-      <label className="field">
-        <span>{t('Допуск, минут (0 = десятая часть периода)')}</span>
-        <input
-          type="number"
-          min={0}
-          value={Math.round((form.push_grace || 0) / 60)}
-          onChange={(e) => set({ push_grace: Math.max(0, Number(e.target.value) || 0) * 60 })}
-        />
-      </label>
-      <span className="field-hint muted small field-wide">
-        {t('Адрес для скрипта появится в карточке монитора после сохранения. Нет сигнала дольше периода и допуска или скрипт сообщил об ошибке - алерт.')}
-      </span>
-    </>
-  )
-}
-
-const DNS_TYPES = ['A', 'AAAA', 'CNAME', 'MX', 'NS', 'TXT']
-
-// DNS-монитор: какую запись спрашивать и что ждать. Без ожидаемого панель запомнит первый ответ
-// и пришлет алерт, когда он изменится.
-function DnsFields({ form, set }: { form: CheckForm; set: (p: Partial<CheckForm>) => void }) {
-  const { t } = useI18n()
-  return (
-    <>
-      <label className="field">
-        <span>{t('Запись')}</span>
-        <select value={form.dns_type || 'A'} onChange={(e) => set({ dns_type: e.target.value })}>
-          {DNS_TYPES.map((x) => (
-            <option key={x} value={x}>
-              {x}
-            </option>
-          ))}
-        </select>
-      </label>
-      <label className="field">
-        <span>{t('DNS-сервер (IP)')}</span>
-        <input
-          value={form.dns_server ?? ''}
-          placeholder={t('системный')}
-          onChange={(e) => set({ dns_server: e.target.value })}
-        />
-      </label>
-      <label className="field field-wide">
-        <span>{t('Ожидаемый ответ, по строке')}</span>
-        <textarea
-          className="mono"
-          rows={Math.min(Math.max((form.dns_expect ?? '').split('\n').length, 2), 6)}
-          value={form.dns_expect ?? ''}
-          placeholder={form.dns_type === 'MX' ? 'mx1.example.com\nmx2.example.com' : '203.0.113.10'}
-          onChange={(e) => set({ dns_expect: e.target.value })}
-        />
-        <span className="field-hint muted small">
-          {t('Пусто - запомним первый ответ и пришлем алерт, когда он изменится. У MX можно без приоритета.')}
-        </span>
-      </label>
-      {(form.dns_expect ?? '').trim() !== '' && (
-        <label className="field">
-          <span>{t('Сравнение')}</span>
-          <select
-            value={form.dns_match ?? 'equal'}
-            onChange={(e) => set({ dns_match: e.target.value as 'equal' | 'contains' })}
-          >
-            <option value="equal">{t('ответ совпадает целиком')}</option>
-            <option value="contains">{t('ответ содержит все эти')}</option>
-          </select>
-        </label>
-      )}
-    </>
   )
 }

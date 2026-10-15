@@ -4,6 +4,14 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.4.217] - 2026-10-16
+
+### Removed
+- Из прежней формы монитора убраны поля push и DNS и выбор типа: сайт, порт, DNS и push теперь
+  добавляются и правятся новой формой, а прежняя открывается только у старых мониторов
+  сертификата, заведенных через API. Тип в правке не меняется, и список с "HTTP(S)" у такого
+  монитора только путал.
+
 ## [1.4.216] - 2026-10-16
 
 ### Changed
