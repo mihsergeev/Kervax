@@ -106,6 +106,11 @@ export default function App() {
     return p.get('backup') ? p.get('sec') : null
   })
   const [openBackupSrvId, setOpenBackupSrvId] = useState<number | null>(() => urlNum('backupsrv'))
+  // ?backupsrv=<id>&sec=cleanup - раздел окна сервера бэкапов
+  const [openBackupSrvSec, setOpenBackupSrvSec] = useState<string | null>(() => {
+    const p = new URLSearchParams(window.location.search)
+    return p.get('backupsrv') ? p.get('sec') : null
+  })
   // ?services=<id>&sec=queues - раздел карточки сервисов ноды (из алерта, после F5). &queues=1 -
   // так вели в очереди старые алерты
   const [openServicesId, setOpenServicesId] = useState<number | null>(() => urlNum('services'))
@@ -135,8 +140,10 @@ export default function App() {
         setOpenServicesSec(detailSec || null)
       }
       else if (sec === 'backups') {
-        if (srv) setOpenBackupSrvId(id)
-        else {
+        if (srv) {
+          setOpenBackupSrvId(id)
+          setOpenBackupSrvSec(detailSec || null)
+        } else {
           setOpenBackupId(id)
           setOpenBackupSec(detailSec || null)
         }
@@ -564,11 +571,15 @@ export default function App() {
             openHostId={openBackupId}
             openSec={openBackupSec}
             openSrvHostId={openBackupSrvId}
+            openSrvSec={openBackupSrvSec}
             onConsumed={() => {
               setOpenBackupId(null)
               setOpenBackupSec(null)
             }}
-            onSrvConsumed={() => setOpenBackupSrvId(null)}
+            onSrvConsumed={() => {
+              setOpenBackupSrvId(null)
+              setOpenBackupSrvSec(null)
+            }}
           />
         ) : (
           <ServersPage

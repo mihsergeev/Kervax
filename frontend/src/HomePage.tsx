@@ -64,6 +64,7 @@ type ActItem = {
 type ProbItem = {
   key: string; id?: number; down: boolean; text: string; srv?: boolean; cc?: string; name?: string
   since?: string | null // с какого момента (ISO), для "Что сломано"
+  sec?: string // раздел карточки, куда ведет строка
 }
 
 // самое раннее из известных начал: у нескольких упавших контейнеров хоста - старшее
@@ -401,14 +402,14 @@ function actionItems(servers: Server[], avail: string, relProblem: string, t: T)
     // restic самого сервера бэкапов (prune, forget, check) старше той версии, до которой его
     // обновляет helper: обычно обновление не скачалось. Ведем в модалку сервера, там команда.
     if (s.bsrv_restic_old) {
-      items.push({ key: `bs-restic-${s.id}`, icon: '🧓', section: 'backups', id: s.id, name: s.name, cc: s.country, srv: true,
+      items.push({ key: `bs-restic-${s.id}`, icon: '🧓', section: 'backups', id: s.id, name: s.name, cc: s.country, srv: true, sec: 'server',
         grp: 'bs-restic', detail: `restic ${s.bsrv_restic_old}`,
         text: t('{name}: на сервере бэкапов старый restic {v} - обновите', { name: s.name, v: s.bsrv_restic_old }) })
     }
     // бэкап-сервер найден (по docker), но статистики репо нет → нужен backupserver-setup
     const bs = rep?.backup_server
     if (bs?.present && (!bs.repos || bs.repos.length === 0)) {
-      items.push({ key: `bs-setup-${s.id}`, icon: '🗄', section: 'backups', id: s.id, name: s.name, cc: s.country, srv: true,
+      items.push({ key: `bs-setup-${s.id}`, icon: '🗄', section: 'backups', id: s.id, name: s.name, cc: s.country, srv: true, sec: 'repos',
         grp: 'bs-setup',
         text: t('{name}: бэкап-сервер — включите статистику (backupserver-setup)', { name: s.name }) })
     }
@@ -519,14 +520,14 @@ function dockerProblems(servers: Server[], t: T): ProbItem[] {
     const loop = d.containers.filter((c) => al[c.name] === 'loop').map((c) => c.name)
     if (down.length > 0)
       out.push({
-        key: `d-down-${s.id}`, id: s.id, name: s.name, cc: s.country, down: true,
+        key: `d-down-${s.id}`, id: s.id, name: s.name, cc: s.country, down: true, sec: 'containers',
         since: earliest(down.map((n) => s.docker_since?.[n])),
         text: t(down.length === 1 ? '{name}: не работает контейнер {list}' : '{name}: не работают контейнеры {list}',
           { name: s.name, list: down.join(', ') }),
       })
     if (loop.length > 0)
       out.push({
-        key: `d-loop-${s.id}`, id: s.id, name: s.name, cc: s.country, down: true,
+        key: `d-loop-${s.id}`, id: s.id, name: s.name, cc: s.country, down: true, sec: 'containers',
         text: t(loop.length === 1 ? '{name}: перезапускается в цикле {list}' : '{name}: перезапускаются в цикле {list}',
           { name: s.name, list: loop.join(', ') }),
       })
@@ -535,7 +536,7 @@ function dockerProblems(servers: Server[], t: T): ProbItem[] {
     const ex = s.docker_exposed ?? []
     if (ex.length > 0 && !(s.alert_mutes ?? []).includes('docker_sock'))
       out.push({
-        key: `d-sock-${s.id}`, id: s.id, name: s.name, cc: s.country, down: false,
+        key: `d-sock-${s.id}`, id: s.id, name: s.name, cc: s.country, down: false, sec: 'host',
         text: t('{name}: docker-сокет у {list} - взлом прокси даст root на хосте',
           { name: s.name, list: ex.map((e) => e.name).join(', ') }),
       })
@@ -551,8 +552,8 @@ function kubeProblems(servers: Server[], t: T): ProbItem[] {
     if (!k?.access) continue
     const nr = (k.nodes || []).filter((n) => !n.ready).length
     const bad = (k.pods || []).filter((p) => !podFinished(p) && (p.phase === 'Failed' || (p.reason ? K_BAD_POD.includes(p.reason) : false))).length
-    if (nr > 0) out.push({ key: `k-node-${s.id}`, id: s.id, name: s.name, cc: s.country, down: true, text: t('{name}: нод NotReady — {n}', { name: s.name, n: nr }) })
-    if (bad > 0) out.push({ key: `k-pod-${s.id}`, id: s.id, name: s.name, cc: s.country, down: true, since: s.alert_since?.kube_pod, text: t('{name}: проблемных подов — {n}', { name: s.name, n: bad }) })
+    if (nr > 0) out.push({ key: `k-node-${s.id}`, id: s.id, name: s.name, cc: s.country, down: true, sec: 'nodes', text: t('{name}: нод NotReady — {n}', { name: s.name, n: nr }) })
+    if (bad > 0) out.push({ key: `k-pod-${s.id}`, id: s.id, name: s.name, cc: s.country, down: true, sec: 'pods', since: s.alert_since?.kube_pod, text: t('{name}: проблемных подов — {n}', { name: s.name, n: bad }) })
   }
   return out
 }
@@ -564,14 +565,14 @@ function backupProblems(servers: Server[], t: T): ProbItem[] {
     if (!s.online) continue
     const b = s.last_report?.backup
     if (b?.present && b.metric_present) {
-      if (b.success === 0) out.push({ key: `b-fail-${s.id}`, id: s.id, name: s.name, cc: s.country, down: true, since: s.alert_since?.backup_failed, text: t('{name}: бэкап завершился с ошибкой', { name: s.name }) })
-      else if (b.last_backup_ts && Date.now() / 1000 - b.last_backup_ts > 2 * 86400) out.push({ key: `b-stale-${s.id}`, id: s.id, name: s.name, cc: s.country, down: false, since: s.alert_since?.backup_stale, text: t('{name}: бэкап не свежий', { name: s.name }) })
+      if (b.success === 0) out.push({ key: `b-fail-${s.id}`, id: s.id, name: s.name, cc: s.country, down: true, sec: 'runs', since: s.alert_since?.backup_failed, text: t('{name}: бэкап завершился с ошибкой', { name: s.name }) })
+      else if (b.last_backup_ts && Date.now() / 1000 - b.last_backup_ts > 2 * 86400) out.push({ key: `b-stale-${s.id}`, id: s.id, name: s.name, cc: s.country, down: false, sec: 'runs', since: s.alert_since?.backup_stale, text: t('{name}: бэкап не свежий', { name: s.name }) })
     }
     const bs = s.last_report?.backup_server
     // свои бэкапы ноды (настроены без панели): упал прогон, давно не отрабатывал, выключен
     const own = (s.custom_backups ?? []).filter((j) => ['failed', 'stale', 'disabled'].includes(j.status))
     if (own.length > 0) {
-      out.push({ key: `b-own-${s.id}`, id: s.id, name: s.name, cc: s.country, down: own.some((j) => j.status === 'failed'), since: s.alert_since?.backup_custom,
+      out.push({ key: `b-own-${s.id}`, id: s.id, name: s.name, cc: s.country, sec: 'own', down: own.some((j) => j.status === 'failed'), since: s.alert_since?.backup_custom,
         text: t('{name}: свой бэкап не отрабатывает — {jobs}', {
           name: s.name, jobs: own.map((j) => `${j.name} (${j.problem})`).join(', '),
         }) })
@@ -579,7 +580,7 @@ function backupProblems(servers: Server[], t: T): ProbItem[] {
     // прогон добавил в разы больше обычного (helper backup-setup 0.32, считает бэкенд)
     const g = s.backup_growth
     if (g && !(s.alert_mutes ?? []).includes('backup_growth'))
-      out.push({ key: `b-growth-${s.id}`, id: s.id, name: s.name, cc: s.country, down: false,
+      out.push({ key: `b-growth-${s.id}`, id: s.id, name: s.name, cc: s.country, down: false, sec: 'runs',
         since: new Date(g.ts * 1000).toISOString(), text: `${s.name}: ${g.text}` })
     const ownFiles = (s.custom_backups ?? []).some((j) => j.files && !j.ignored)
     // сервер без настроенного бэкапа (и не помеченный «не требуется», и не сам бэкап-сервер)
@@ -587,7 +588,7 @@ function backupProblems(servers: Server[], t: T): ProbItem[] {
       out.push({ key: `b-none-${s.id}`, id: s.id, name: s.name, cc: s.country, down: false, since: s.alert_since?.backup_missing, text: t('{name}: бэкап не настроен', { name: s.name }) })
     }
     if (bs?.present) {
-      if (!bs.running) out.push({ key: `bs-stop-${s.id}`, id: s.id, name: s.name, cc: s.country, down: true, srv: true, text: t('{name}: rest-server остановлен', { name: s.name }) })
+      if (!bs.running) out.push({ key: `bs-stop-${s.id}`, id: s.id, name: s.name, cc: s.country, down: true, srv: true, sec: 'server', text: t('{name}: rest-server остановлен', { name: s.name }) })
       const rmuted = new Set(s.backup_repo_mutes ?? [])
       const smuted = new Set(s.alert_mutes ?? [])
       const now = Date.now() / 1000
@@ -598,7 +599,7 @@ function backupProblems(servers: Server[], t: T): ProbItem[] {
       const locked = live.filter((r) => r.locked && r.lock_ts && now - r.lock_ts > 86400)
       if (locked.length > 0 && !smuted.has('backup_lock'))
         out.push({
-          key: `bs-lock-${s.id}`, id: s.id, name: s.name, cc: s.country, down: true, srv: true,
+          key: `bs-lock-${s.id}`, id: s.id, name: s.name, cc: s.country, down: true, srv: true, sec: 'repos',
           since: new Date(Math.min(...locked.map((r) => r.lock_ts ?? now)) * 1000).toISOString(),
           text: t('{name}: залочен больше суток, чистка не идет - {list}', {
             name: s.name,
@@ -608,7 +609,7 @@ function backupProblems(servers: Server[], t: T): ProbItem[] {
       // те же репозитории, что в алерте backup_repo: бэкенд считает их с ритмом бэкапов (клиент
       // без агента опаздывает через сутки с небольшим), без приглушенных и архива
       const badNames = Object.keys(s.bsrv_repo_reasons ?? {}).sort()
-      if (badNames.length > 0) out.push({ key: `bs-repo-${s.id}`, id: s.id, name: s.name, cc: s.country, down: true, srv: true, since: s.alert_since?.backup_repo,
+      if (badNames.length > 0) out.push({ key: `bs-repo-${s.id}`, id: s.id, name: s.name, cc: s.country, down: true, srv: true, sec: 'repos', since: s.alert_since?.backup_repo,
         text: t('{name}: репозиториев с проблемой - {n} ({list})', { name: s.name, n: badNames.length,
           list: badNames.slice(0, 3).join(', ') + (badNames.length > 3 ? ', ...' : '') }) })
       // чистка не работает (не открывает репозиторий, падает, не запускается): те же
@@ -616,7 +617,7 @@ function backupProblems(servers: Server[], t: T): ProbItem[] {
       const pruneNames = Object.keys(s.bsrv_prune ?? {}).sort()
       if (pruneNames.length > 0 && !smuted.has('backup_prune'))
         out.push({
-          key: `bs-prune-${s.id}`, id: s.id, name: s.name, cc: s.country, down: true, srv: true,
+          key: `bs-prune-${s.id}`, id: s.id, name: s.name, cc: s.country, down: true, srv: true, sec: 'cleanup',
           text: t('{name}: чистка не работает - {list}', {
             name: s.name, list: pruneNames.slice(0, 3).join(', ') + (pruneNames.length > 3 ? ', ...' : ''),
           }),
@@ -625,7 +626,7 @@ function backupProblems(servers: Server[], t: T): ProbItem[] {
       const rot = s.bsrv_rotation ?? []
       if (rot.length > 0 && !smuted.has('backup_rotation'))
         out.push({
-          key: `bs-rot-${s.id}`, id: s.id, name: s.name, cc: s.country, down: false, srv: true,
+          key: `bs-rot-${s.id}`, id: s.id, name: s.name, cc: s.country, down: false, srv: true, sec: 'cleanup',
           text: t('{name}: старые снапшоты не вычищаются - {list}', { name: s.name, list: rot.join(', ') }),
         })
     }
@@ -843,7 +844,7 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
       ? items.map((p) => ({
           key: p.key, id: p.id ?? 0, name: p.name ?? '', cc: p.cc, tone: p.down ? 't-down' : 't-degraded',
           text: p.name && p.text.startsWith(p.name + ': ') ? p.text.slice(p.name.length + 2) : p.text,
-          kind: section, section, srv: p.srv, since: p.since,
+          kind: section, section, srv: p.srv, sec: p.sec, since: p.since,
         }))
       : []
   // сервер молчит вместе со шлюзом, за которым стоит: причина в строке, свой алерт он ждет

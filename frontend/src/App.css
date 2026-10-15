@@ -5509,6 +5509,8 @@ button.adopt-mark {
 .cov-gap { display: flex; flex-wrap: wrap; align-items: center; gap: 0.2rem 0.5rem; overflow-wrap: anywhere; }
 .cov-foot { display: flex; flex-direction: column; gap: 0.35rem; }
 .cov-foot .coverage-muted { margin-top: 0; }
+/* в подвале покрытия подпись длинная: на телефоне переносится, а не уезжает за край окна */
+.cov-foot .nobackup-check { white-space: normal; flex-shrink: 1; }
 .cov-q { display: inline-flex; width: 16px; height: 16px; border-radius: 50%; border: 1px solid var(--border-strong); font-size: 0.68rem;
   align-items: center; justify-content: center; color: var(--text-muted); cursor: help; flex: 0 0 auto; }
 .cov-how summary { cursor: pointer; color: var(--text-muted); font-size: 0.8rem; }
