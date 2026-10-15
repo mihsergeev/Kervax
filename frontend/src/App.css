@@ -3537,6 +3537,7 @@ button.srv-nav-item.active {
 /* фильтр и сортировка списка - в шапке раздела справа */
 .srv-main-head > .modal-toolbar.srv-head-tools { flex: 1 1 18rem; flex-wrap: wrap; justify-content: flex-end; max-width: 34rem; margin: 0 0 0 auto; }
 .srv-head-tools .modal-search { min-width: 9rem; }
+.srv-main-head > .srv-head-btn { margin-left: auto; }
 .srv-sec > .kube-hint { margin: 0; }
 .srv-sec {
   display: flex;

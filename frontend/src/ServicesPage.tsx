@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import {
   ApiError,
@@ -12,8 +12,10 @@ import {
 } from './api'
 import { useI18n } from './i18n'
 import { useAuth } from './auth'
-import { useUrlCard } from './deeplink'
-import { webRate } from './serverUtils'
+import { useUrlCard, useUrlParam } from './deeplink'
+import { srvIssues, webRate } from './serverUtils'
+import { fmtRel } from './ServersPage'
+import { CardNav, FreshChip, OvAreas, OvRows, secInfoOf, type OvRow, type SecDef, type SecInfo, type SecItem } from './cardLayout'
 import { AdoptSitesModal, adoptable } from './AdoptSitesModal'
 import { EngineIcon } from './engineIcon'
 import { OsIcon } from './osIcon'
@@ -25,7 +27,8 @@ import { NetTile } from './NetLinks'
 // ingress-нод бывают сотни доменов — «10 + ещё 390» неюзабельно). Рядом с каждым —
 // признак «уже под мониторингом»; завести новые можно кнопкой, она открывает общий
 // мастер (AdoptSitesModal) — отмечать сотни доменов плюсиками по одному невозможно.
-function SitesList({ sites, t, hosts, skip, onAdopt, onOpenCheck }: {
+function SitesList({ sites, t, hosts, skip, onAdopt, onOpenCheck, full = false }: {
+  full?: boolean // раздел "Сайты" карточки ноды: список сразу целиком, с фильтром
   sites: string[]
   t: (s: string, v?: Record<string, string | number>) => string
   hosts: Record<string, number> | null // null = список мониторов недоступен учётке
@@ -33,7 +36,8 @@ function SitesList({ sites, t, hosts, skip, onAdopt, onOpenCheck }: {
   onAdopt?: (domains: string[]) => void
   onOpenCheck?: (id: number) => void
 }) {
-  const [open, setOpen] = useState(false)
+  const [opened, setOpen] = useState(false)
+  const open = full || opened
   const [q, setQ] = useState('')
   const PREVIEW = 6
   const ql = q.trim().toLowerCase()
@@ -48,7 +52,7 @@ function SitesList({ sites, t, hosts, skip, onAdopt, onOpenCheck }: {
     <div className="svc-sites">
       <div className="svc-sites-head">
         <span className="svc-sites-count">{t('сайтов: {n}', { n: sites.length })}</span>
-        {sites.length > PREVIEW && (
+        {sites.length > PREVIEW && !full && (
           <button className="svc-act" onClick={() => setOpen(!open)}>
             {open ? t('свернуть') : t('показать все')}
           </button>
@@ -357,29 +361,19 @@ function hotQueues(items: SvcItem[]): number {
   return items.reduce((n, it) => n + (it.svc?.queues ?? []).filter((q) => qDepth(q) >= QUEUE_HOT).length, 0)
 }
 
-// Очереди RabbitMQ одной ноды (вложенная модалка из карточки сервисов)
-function QueuesModal({ server, svc, onClose, onChanged }: {
+// Очереди RabbitMQ одного инстанса - прямо в разделе "Очереди" карточки ноды. Раньше это была
+// вторая модалка поверх карточки
+function QueueList({ server, svc, busy, save }: {
   server: Server
   svc: ServiceInfo
-  onClose: () => void
-  onChanged: () => void
+  busy: boolean
+  save: (body: Parameters<typeof updateServer>[1]) => void
 }) {
   const { t } = useI18n()
   const [q, setQ] = useState('')
-  const [busy, setBusy] = useState(false)
   // порог общий по ноде и переопределения по конкретным очередям — оба живут на сервере
   const depth = server.queue_alert_depth ?? 0
   const over = server.queue_alert_over ?? {}
-  const [draft, setDraft] = useState(String(depth || ''))
-  const save = async (body: Parameters<typeof updateServer>[1]) => {
-    setBusy(true)
-    try {
-      await updateServer(server.id, body)
-      onChanged()
-    } finally {
-      setBusy(false)
-    }
-  }
   // порог конкретной очереди: своё значение важнее общего; 0 = не алертить
   const thrOf = (key: string) => (key in over ? over[key] : depth)
   // Черновики ввода держим отдельно от сохранённых значений: поле правится посимвольно,
@@ -404,298 +398,456 @@ function QueuesModal({ server, svc, onClose, onChanged }: {
     save({ queue_alert_over: next })
   }
   const ql = q.trim().toLowerCase()
-  const queues = (svc.queues ?? []).filter((x) => !ql || x.name.toLowerCase().includes(ql))
-  const withMsgs = (svc.queues ?? []).filter((x) => qDepth(x) > 0).length
-  const hotN = (svc.queues ?? []).filter((x) => qDepth(x) >= QUEUE_HOT).length
-  const msgsAll = (svc.queues ?? []).reduce((a, x) => a + qDepth(x), 0)
+  const all = svc.queues ?? []
+  const queues = all.filter((x) => !ql || x.name.toLowerCase().includes(ql))
+  const withMsgs = all.filter((x) => qDepth(x) > 0).length
+  const hotN = all.filter((x) => qDepth(x) >= QUEUE_HOT).length
+  const msgsAll = all.reduce((a, x) => a + qDepth(x), 0)
+  return (
+    <div className="chart-card net-card net-card-wide">
+      <div className="net-head">
+        <div className="hs-svc-title">
+          <span className="svc-ico"><EngineIcon name="RabbitMQ" /></span>
+          RabbitMQ
+          <span className="net-n">{svc.total ?? all.length}</span>
+        </div>
+      </div>
+      {svc.source && <div className="net-sub mono">{svc.source}</div>}
+      <div className="small muted">
+        {subOf(
+          t('с сообщениями: {n}', { n: withMsgs }),
+          t('сообщений: {m}', { m: rpmText(msgsAll) }),
+          hotN > 0 && t('переполнены: {n} (от {m} сообщений)', { n: hotN, m: QUEUE_HOT }),
+        )}
+      </div>
+      {all.length > 8 && (
+        <div className="modal-toolbar">
+          <input className="checks-search modal-search" placeholder={t('Фильтр: имя очереди…')}
+            value={q} onChange={(e) => setQ(e.target.value)} />
+        </div>
+      )}
+      <div className="loc-results docker-clist">
+        {queues.length === 0 ? (
+          <div className="muted small">{t('Ничего не найдено.')}</div>
+        ) : (
+          queues.map((x) => {
+            const d = qDepth(x)
+            const tone = d >= QUEUE_HOT ? 't-down' : d > 0 ? 't-degraded' : 't-up'
+            const key = queueKey(svc.source || '', x)
+            const eff = thrOf(key)
+            return (
+              <div key={(x.vhost || '') + '/' + x.name} className={`loc-res docker-row ${tone}`}>
+                <span className={`lk-dot${DOT[tone]}`} />
+                <div className="docker-c-main">
+                  <div className="docker-c-name mono">{x.name}</div>
+                  {x.vhost && x.vhost !== '/' && (
+                    <div className="docker-c-img mono muted small">vhost: {x.vhost}</div>
+                  )}
+                </div>
+                <div className="queue-nums mono">
+                  <span title={t('в очереди, ждут доставки')}>{x.ready}</span>
+                  {(x.unacked ?? 0) > 0 && (
+                    <span className="muted" title={t('взяты консьюмером, ещё не подтверждены')}>+{x.unacked}</span>
+                  )}
+                </div>
+                <input
+                  className={`mono queue-thr-cell${eff > 0 ? ' queue-alert-on' : ''}`}
+                  type="number"
+                  min={0}
+                  disabled={busy}
+                  placeholder={t('выкл')}
+                  value={draftOf(key)}
+                  title={t('Порог этой очереди: с этого числа сообщений алертим. Пусто или 0 — не алертить.')}
+                  onChange={(e) => setDrafts((dd) => ({ ...dd, [key]: e.target.value }))}
+                  onBlur={() => commitQueue(key)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') e.currentTarget.blur()
+                  }}
+                />
+              </div>
+            )
+          })
+        )}
+      </div>
+      {(svc.total ?? 0) > all.length && (
+        <div className="net-foot">
+          {t('Показаны {n} самых глубоких из {m} — остальные пустые.', { n: all.length, m: svc.total ?? 0 })}
+        </div>
+      )}
+    </div>
+  )
+}
+
+// Карточка сервисов ноды: меню разделов слева, на экране один раздел, как у сервера (cardLayout).
+// Раньше шла карточка на каждый сервис вперемешку (nginx с сайтами и сертификатами, базы,
+// RabbitMQ), а очереди открывались второй модалкой. Теперь веб, сайты, сертификаты, базы и
+// очереди - своими разделами, на сводке проблемы из "Что сломано", плитки и карта.
+const SVC_SECTIONS: SecDef[] = [
+  { id: 'overview', label: 'Сводка', group: '' },
+  { id: 'web', label: 'Веб-серверы', group: 'Веб' },
+  { id: 'sites', label: 'Сайты', group: 'Веб' },
+  { id: 'certs', label: 'Сертификаты', group: 'Веб' },
+  { id: 'db', label: 'Базы и хранилища', group: 'Данные' },
+  { id: 'queues', label: 'Очереди', group: 'Данные' },
+]
+const SVC_SEC_IDS = new Set(SVC_SECTIONS.map((x) => x.id))
+// раздел карточки по виду проблемы, если бэкенд его не назвал (старый бэкенд в кэше вкладки)
+const SVC_SEC_OF_KIND: Record<string, string> = {
+  queue: 'queues', web_cert: 'certs', web_config: 'web', db_health: 'db', db_conn: 'db',
+}
+
+function ServerServicesModal({ srv, onClose, onChanged, initialSec, sites }: {
+  srv: SrvServices
+  onClose: () => void
+  onChanged: () => void
+  initialSec?: string | null // из ссылки алерта: ?services=id&sec=queues (или старое &queues=1)
+  sites: SitesCtx // «какие домены уже мониторятся» + как завести новый
+}) {
+  const { t } = useI18n()
+  const s = srv.server
+  const [active, setActive] = useState<string>(() => (SVC_SEC_IDS.has(initialSec ?? '') ? initialSec! : 'overview'))
+  const layoutRef = useRef<HTMLDivElement>(null)
+  const go = (id: string) => {
+    setActive(id)
+    const el = layoutRef.current
+    if (el && el.getBoundingClientRect().top < 0) el.scrollIntoView({ block: 'start' })
+  }
+  const [busy, setBusy] = useState(false)
+  const save = (body: Parameters<typeof updateServer>[1]) => {
+    setBusy(true)
+    updateServer(s.id, body)
+      .then(onChanged)
+      .catch(() => {})
+      .finally(() => setBusy(false))
+  }
+  const depth = s.queue_alert_depth ?? 0
+  const [draft, setDraft] = useState(String(depth || ''))
+  const web = srv.items.filter((it) => it.web)
+  const siteList = [...new Set(web.flatMap((it) => it.sites ?? []))]
+  const missing = missingSites(siteList, sites)
+  const rate = webRate(s.last_report)
+  // СУБД сверху, под ними прочее, что держит данные (Grafana, Prometheus, etcd): их тоже находит аудит
+  const isDb = (it: SvcItem) => Object.values(DB_ENGINE_LABEL).includes(it.kind)
+  const dbItems = srv.items.filter((it) => !it.web && !it.svc).sort((a, b) => Number(isDb(b)) - Number(isDb(a)))
+  const dbs = dbItems.flatMap((it) => it.db ?? [])
+  const dbRows = dbs.flatMap((d) => (d.engine === 'redis' ? [] : d.dbs ?? []))
+  const rabbit = srv.items.filter((it) => it.svc?.kind === 'rabbitmq')
+  const qAll = rabbit.flatMap((it) => it.svc?.queues ?? [])
+  const qHot = qAll.filter((x) => qDepth(x) >= QUEUE_HOT).length
+  const certs = (s.web_certs ?? []).slice().sort((a, b) => a.days - b.days)
+  const cfg = s.web_config ?? []
+
+  const shown: Record<string, boolean> = {
+    overview: true,
+    web: web.length > 0,
+    sites: siteList.length > 0,
+    certs: certs.length > 0,
+    db: dbItems.length > 0,
+    queues: rabbit.length > 0,
+  }
+  const secs = SVC_SECTIONS.filter((x) => shown[x.id])
+  const cur = secs.find((x) => x.id === active) ?? secs[0]
+  useUrlParam('sec', cur.id === 'overview' ? null : cur.id)
+
+  // Замечания по разделам - те же проблемы, что в "Что сломано": конфиг и сертификаты веб-сервера,
+  // здоровье и коннекты баз, переполненные очереди
+  const items: Record<string, SecItem[]> = {}
+  for (const i of srvIssues(s, t).filter((x) => x.section === 'services')) {
+    const sec = SVC_SEC_IDS.has(i.sec ?? '') ? i.sec! : (SVC_SEC_OF_KIND[i.kind ?? ''] ?? 'overview')
+    ;(items[sec] ??= []).push({ level: i.tone === 't-down' ? 2 : 1, text: i.text, since: i.since })
+  }
+  const nextCert = certs[0]
+  const ok: Record<string, string> = {
+    web: subOf(
+      web.map((it) => it.kind).join(', '),
+      cfg.length > 0 && cfg.every((c) => c.ok) && t('конфиг проходит проверку'),
+      rate ? t('{n} запросов/мин', { n: rpmText(rate.rpm) }) : false,
+    ),
+    sites: sites.hosts ? t('всего {n}, все на мониторинге', { n: siteList.length }) : t('всего {n}', { n: siteList.length }),
+    certs: nextCert ? t('ближайший: {l} через {n} дн', { l: nextCert.label, n: nextCert.days }) : '',
+    db: subOf(
+      [...new Set(dbItems.map((it) => it.kind))].join(', '),
+      dbRows.length > 0 && t('баз: {n}', { n: dbRows.length }),
+      dbRows.length > 0 && fmtBytes(dbRows.reduce((a, r) => a + r.size, 0)),
+    ),
+    queues: t('очередей: {n}, сообщений: {m}', {
+      n: rabbit.reduce((n, it) => n + (it.svc?.total ?? 0), 0),
+      m: rpmText(qAll.reduce((a, x) => a + qDepth(x), 0)),
+    }),
+  }
+  const info: Record<string, SecInfo> = {}
+  for (const { id } of SVC_SECTIONS) info[id] = secInfoOf(items[id] ?? [], ok[id] ?? '', t)
+  // Не проблема, но и не "все в порядке": сайты без монитора, глубокие очереди без порога
+  // алерта. Желтым на карте, без числа в меню
+  const soft = (id: string, line: string) => {
+    if (!info[id].level) info[id] = { ...info[id], level: 1, line }
+  }
+  if (missing > 0) soft('sites', t('всего {n}, без монитора {m}', { n: siteList.length, m: missing }))
+  if (qHot > 0) soft('queues', t('переполнены: {n} (от {m} сообщений)', { n: qHot, m: QUEUE_HOT }))
+
+  const rows: OvRow[] = SVC_SECTIONS.flatMap(({ id, label }) =>
+    (items[id] ?? []).map((x) => ({
+      tone: x.level >= 2 ? ('t-down' as const) : ('t-degraded' as const),
+      text: x.text,
+      since: x.since,
+      act: id !== 'overview' && shown[id] ? { label: t(label), onClick: () => go(id) } : undefined,
+    })),
+  ).sort((a, b) => Number(b.tone === 't-down') - Number(a.tone === 't-down'))
+  const tileTone = (sec: string, base?: 'bad' | 'warn' | 'ok') =>
+    info[sec].n > 0 ? (info[sec].level >= 2 ? 'bad' : 'warn') : base
+  const tileLabel = (sec: string, label: string) =>
+    info[sec].fresh ? <>{label} <FreshChip since={info[sec].fresh!} /></> : label
+  // версия движка, если ее знает инвентарь баз
+  const verOf = (it: SvcItem) => it.db?.map((d) => d.version).find(Boolean)
+
   return createPortal(
     <div className="modal-backdrop" onClick={onClose}>
-      <div className="card modal docker-modal hs-modal" onClick={(e) => e.stopPropagation()}>
-        <div className="clients-head">
-          <h3><span className="sdot sdot-up" /> <CountryFlag code={server.country} /> {server.name} · <EngineIcon name="RabbitMQ" /> RabbitMQ</h3>
-          <button className="ghost" onClick={onClose}>{t('Закрыть')}</button>
-        </div>
-        <div className="net-tiles hs-tiles">
-          <NetTile label={t('Очередей')} value={String(svc.total ?? (svc.queues ?? []).length)} sub={svc.source || undefined} />
-          <NetTile label={t('С сообщениями')} value={String(withMsgs)} />
-          <NetTile label={t('Сообщений')} value={rpmText(msgsAll)} />
-          <NetTile
-            label={t('Переполнены')}
-            value={String(hotN)}
-            sub={t('от {n} сообщений', { n: QUEUE_HOT })}
-            tone={hotN ? 'warn' : 'ok'}
-          />
-        </div>
-        <div className="net-cards hs-cards">
-          <div className="chart-card net-card net-card-wide">
-            <div className="net-head">
-              <div className="chart-cap">{t('Алерт по очередям')}</div>
-            </div>
-            {/* Порог общий для всех очередей ноды; у отдельной очереди его можно
-                переопределить или выключить — полем в её строке. */}
-            <div className="queue-alert-cfg">
-              <span className="muted small">{t('Алерт, когда в очереди накопилось')}</span>
-              <input
-                className="mono queue-thr-input"
-                type="number"
-                min={0}
-                placeholder="0"
-                value={draft}
-                disabled={busy}
-                onChange={(e) => setDraft(e.target.value)}
-                onBlur={() => {
-                  const v = Math.max(0, Math.round(Number(draft) || 0))
-                  if (v !== depth) save({ queue_alert_depth: v })
-                }}
-              />
-              <span className="muted small">
-                {t('сообщений и больше — сразу во всех очередях ниже. У любой очереди значение можно поправить или стереть.')}
-              </span>
-            </div>
+      <div className="card detail detail-server hs-modal" onClick={(e) => e.stopPropagation()}>
+        <div className="detail-head">
+          <div className="detail-title">
+            <span className={`sdot ${s.online ? 'sdot-up' : 'sdot-down'}`} />
+            <OsIcon os={s.os} size={18} />
+            <CountryFlag code={s.country} />
+            <h3>{s.name}</h3>
+            {s.group_name && <span className="type-chip group-chip">{s.group_name}</span>}
           </div>
-          <div className="chart-card net-card net-card-wide">
-            <div className="net-head">
-              <div className="chart-cap net-cap">
-                {t('Очереди')}
-                <span className="net-n">{(svc.queues ?? []).length}</span>
-              </div>
-            </div>
-            <div className="modal-toolbar">
-              <input className="checks-search modal-search" placeholder={t('Фильтр: имя очереди…')}
-                value={q} onChange={(e) => setQ(e.target.value)} />
-            </div>
-            <div className="loc-results docker-clist docker-clist-scroll">
-              {queues.length === 0 ? (
-                <div className="muted small">{t('Ничего не найдено.')}</div>
-              ) : (
-                queues.map((x) => {
-                  const d = qDepth(x)
-                  const tone = d >= QUEUE_HOT ? 't-down' : d > 0 ? 't-degraded' : 't-up'
-                  return (
-                    <div key={(x.vhost || '') + '/' + x.name} className={`loc-res docker-row ${tone}`}>
-                      <span className={`lk-dot${DOT[tone]}`} />
-                      <div className="docker-c-main">
-                        <div className="docker-c-name mono">{x.name}</div>
-                        {x.vhost && x.vhost !== '/' && (
-                          <div className="docker-c-img mono muted small">vhost: {x.vhost}</div>
-                        )}
-                      </div>
-                      <div className="queue-nums mono">
-                        <span title={t('в очереди, ждут доставки')}>{x.ready}</span>
-                        {(x.unacked ?? 0) > 0 && (
-                          <span className="muted" title={t('взяты консьюмером, ещё не подтверждены')}>+{x.unacked}</span>
-                        )}
-                      </div>
-                      {(() => {
-                        const key = queueKey(svc.source || '', x)
-                        const eff = thrOf(key)
-                        return (
-                          <input
-                            className={`mono queue-thr-cell${eff > 0 ? ' queue-alert-on' : ''}`}
-                            type="number"
-                            min={0}
-                            disabled={busy}
-                            placeholder={t('выкл')}
-                            value={draftOf(key)}
-                            title={t('Порог этой очереди: с этого числа сообщений алертим. Пусто или 0 — не алертить.')}
-                            onChange={(e) => setDrafts((dd) => ({ ...dd, [key]: e.target.value }))}
-                            onBlur={() => commitQueue(key)}
-                            onKeyDown={(e) => {
-                              if (e.key === 'Enter') e.currentTarget.blur()
-                            }}
-                          />
-                        )
-                      })()}
-                    </div>
-                  )
-                })
+          <div className="detail-head-actions">
+            <button className="ghost icon-btn" onClick={onClose} title={t('Закрыть')}>
+              ✕
+            </button>
+          </div>
+        </div>
+        <div className="srv-meta srv-meta-line">
+          {srv.items.map((it, i) => (
+            <span key={it.kind + i} className="srv-meta-item" title={it.where || undefined}>
+              <span className="svc-ico"><EngineIcon name={it.kind} /></span>
+              {it.kind}
+              {verOf(it) && <span className="srv-meta-k mono">{verOf(it)}</span>}
+            </span>
+          ))}
+          <span className="srv-meta-item">
+            <span className="srv-meta-k">{t('обновлено')}</span> {fmtRel(s.last_seen)}
+          </span>
+        </div>
+        <div className="srv-layout" ref={layoutRef}>
+          <CardNav secs={secs} active={cur.id} info={info} onGo={go} />
+          <div className="srv-main">
+            <div className="srv-main-head">
+              <h4>{t(cur.label)}</h4>
+              {cur.id === 'sites' && sites.canAdd && missing > 0 && (
+                <button className="svc-act svc-act-primary srv-head-btn" onClick={() => sites.openWizard(siteList)}>
+                  {t('на мониторинг: {n}', { n: missing })}
+                </button>
               )}
             </div>
-            {(svc.total ?? 0) > (svc.queues?.length ?? 0) && (
-              <div className="net-foot">
-                {t('Показаны {n} самых глубоких из {m} — остальные пустые.', {
-                  n: svc.queues?.length ?? 0, m: svc.total ?? 0,
+
+            {cur.id === 'overview' && (
+              <div className="srv-sec">
+                <OvRows rows={rows} />
+                <div className="net-tiles srv-tiles">
+                  {siteList.length > 0 && (
+                    <button className="srv-tile-btn" onClick={() => go('sites')} title={t('к разделу')}>
+                      <NetTile
+                        label={tileLabel('sites', t('Сайтов'))}
+                        value={String(siteList.length)}
+                        sub={sites.hosts ? (missing ? t('без монитора: {n}', { n: missing }) : t('все на мониторинге')) : undefined}
+                        tone={sites.hosts && !missing ? 'ok' : undefined}
+                      />
+                    </button>
+                  )}
+                  {rate && (
+                    <button className="srv-tile-btn" onClick={() => go('web')} title={t('к разделу')}>
+                      <NetTile
+                        label={tileLabel('web', t('Запросов в минуту'))}
+                        value={rpmText(rate.rpm)}
+                        sub={(rate.e5 ?? 0) > 0
+                          ? t('5xx: {n} ({p}%)', { n: rpmText(rate.e5 ?? 0), p: (((rate.e5 ?? 0) / Math.max(rate.rpm, 1)) * 100).toFixed(2) })
+                          : t('без 5xx')}
+                        tone={tileTone('web')}
+                      />
+                    </button>
+                  )}
+                  {dbItems.length > 0 && (
+                    <button className="srv-tile-btn" onClick={() => go('db')} title={t('к разделу')}>
+                      <NetTile
+                        label={tileLabel('db', t('Базы'))}
+                        value={String(dbRows.length)}
+                        sub={subOf(
+                          dbs.length > 1 && t('инстансов: {n}', { n: dbs.length }),
+                          dbRows.length > 0 && fmtBytes(dbRows.reduce((a, r) => a + r.size, 0)),
+                        ) || undefined}
+                        tone={tileTone('db', 'ok')}
+                      />
+                    </button>
+                  )}
+                  {rabbit.length > 0 && (
+                    <button className="srv-tile-btn" onClick={() => go('queues')} title={t('к разделу')}>
+                      <NetTile
+                        label={tileLabel('queues', t('Очереди'))}
+                        value={String(rabbit.reduce((n, it) => n + (it.svc?.total ?? 0), 0))}
+                        sub={t('сообщений: {m}', { m: rpmText(qAll.reduce((a, x) => a + qDepth(x), 0)) })}
+                        tone={tileTone('queues', qHot ? 'warn' : 'ok')}
+                      />
+                    </button>
+                  )}
+                </div>
+                <OvAreas
+                  cap={t('Сервисы по областям')}
+                  items={SVC_SECTIONS.filter((x) => x.id !== 'overview' && shown[x.id]).map((x) => ({ id: x.id, label: x.label, info: info[x.id] }))}
+                  onGo={go}
+                />
+              </div>
+            )}
+
+            {cur.id === 'web' && (
+              <div className="net-cards">
+                {web.map((it, i) => {
+                  const cfgOf = cfg.filter((c) => it.kind.toLowerCase().startsWith(c.server))
+                  const cfgBad = cfgOf.filter((c) => !c.ok)
+                  return (
+                    <div key={it.kind + i} className={`chart-card net-card net-card-wide${cfgBad.length ? ' net-card-bad' : ''}`}>
+                      <div className="net-head">
+                        <div className="hs-svc-title">
+                          <span className="svc-ico"><EngineIcon name={it.kind} /></span>
+                          {it.kind}
+                        </div>
+                      </div>
+                      {it.where && <div className="net-sub mono">{it.where}</div>}
+                      {cfgBad.map((c) => (
+                        <div key={c.server + c.where} className="net-prob">
+                          {c.where && c.where !== 'host'
+                            ? t('конфиг в контейнере {c} не проходит проверку: {e}', { c: c.where, e: c.err })
+                            : t('конфиг не проходит проверку: {e}', { e: c.err })}
+                          {' '}{t('Следующий reload или перезапуск уронит сайты.')}
+                        </div>
+                      ))}
+                      {cfgOf.length > 0 && !cfgBad.length && (
+                        <div className="small t-up">{t('конфиг проходит проверку')}</div>
+                      )}
+                      {/* поток запросов: его считает helper по access-логам, поэтому он есть
+                          только у хостового и контейнерного nginx */}
+                      {it.kind === 'nginx' && rate && (
+                        <div className="small muted">
+                          {t('{n} запросов/мин', { n: rpmText(rate.rpm) })}
+                          {(rate.logs ?? []).length > 1 && ` · ${t('самые нагруженные: {list}', {
+                            list: rate.logs!.slice()
+                              .sort((a, b) => b.rpm - a.rpm)
+                              .slice(0, 3)
+                              .map((l) => `${l.sites?.[0] || l.log.split('/').pop()} ${rpmText(l.rpm)}`)
+                              .join(', '),
+                          })}`}
+                        </div>
+                      )}
+                      {it.sites && it.sites.length > 0 ? (
+                        <div className="small muted">{t('сайтов: {n}', { n: it.sites.length })}</div>
+                      ) : (
+                        <div className="net-foot">{noSitesHint(it.kind, s, t)}</div>
+                      )}
+                    </div>
+                  )
                 })}
+              </div>
+            )}
+
+            {cur.id === 'sites' && (
+              <div className="net-cards">
+                {web.filter((it) => it.sites?.length).map((it, i) => (
+                  <div key={it.kind + i} className="chart-card net-card net-card-wide">
+                    <div className="net-head">
+                      <div className="hs-svc-title">
+                        <span className="svc-ico"><EngineIcon name={it.kind} /></span>
+                        {it.kind}
+                      </div>
+                    </div>
+                    {it.where && <div className="net-sub mono">{it.where}</div>}
+                    <SitesList
+                      full
+                      sites={it.sites!}
+                      t={t}
+                      hosts={sites.hosts}
+                      skip={sites.skip}
+                      onOpenCheck={sites.onOpenCheck}
+                    />
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {cur.id === 'certs' && (
+              <div className="loc-results docker-clist">
+                {certs.map((c) => {
+                  const tone = c.days <= 3 ? 't-down' : c.days <= 14 ? 't-degraded' : 't-up'
+                  return (
+                    <div key={c.where + c.file} className={`loc-res docker-row ${tone}`}>
+                      <span className={`lk-dot${DOT[tone]}`} />
+                      <div className="docker-c-main">
+                        <div className="docker-c-name mono">{c.label}</div>
+                        <div className="docker-c-img mono muted small">
+                          {c.file}{c.where && c.where !== 'host' ? ` · ${c.where}` : ''}
+                        </div>
+                      </div>
+                      <div className={`docker-c-status mono small ${tone}`}>
+                        {c.days < 0 ? t('истек {n} дн назад', { n: -c.days }) : t('{n} дн.', { n: c.days })}
+                      </div>
+                    </div>
+                  )
+                })}
+              </div>
+            )}
+
+            {cur.id === 'db' && (
+              <div className="net-cards">
+                {dbItems.map((it, i) => (
+                  <div key={it.kind + i} className="chart-card net-card net-card-wide">
+                    <div className="net-head">
+                      <div className="hs-svc-title">
+                        <span className="svc-ico"><EngineIcon name={it.kind} /></span>
+                        {it.kind}
+                      </div>
+                    </div>
+                    {it.where && <div className="net-sub mono">{it.where}</div>}
+                    {it.db ? (
+                      <DbInventory db={it.db} t={t}
+                        health={(s.db_health ?? []).filter((h) => DB_ENGINE_LABEL[h.engine] === it.kind)} />
+                    ) : (
+                      noDbHint(it.kind, !!it.inKube, s, t) && <div className="net-foot">{noDbHint(it.kind, !!it.inKube, s, t)}</div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {cur.id === 'queues' && (
+              <div className="srv-sec">
+                {/* Порог общий для всех очередей ноды; у отдельной очереди его можно
+                    переопределить или выключить — полем в её строке. */}
+                <div className="queue-alert-cfg">
+                  <span className="muted small">{t('Алерт, когда в очереди накопилось')}</span>
+                  <input
+                    className="mono queue-thr-input"
+                    type="number"
+                    min={0}
+                    placeholder="0"
+                    value={draft}
+                    disabled={busy}
+                    onChange={(e) => setDraft(e.target.value)}
+                    onBlur={() => {
+                      const v = Math.max(0, Math.round(Number(draft) || 0))
+                      if (v !== depth) save({ queue_alert_depth: v })
+                    }}
+                  />
+                  <span className="muted small">
+                    {t('сообщений и больше — сразу во всех очередях ниже. У любой очереди значение можно поправить или стереть.')}
+                  </span>
+                </div>
+                {rabbit.map((it, i) => (
+                  <QueueList key={(it.svc?.source ?? '') + i} server={s} svc={it.svc!} busy={busy} save={save} />
+                ))}
               </div>
             )}
           </div>
         </div>
       </div>
-    </div>,
-    document.body,
-  )
-}
-
-// Карточка ноды: сверху плитки (сервисы, сайты, запросы, базы, очереди), под ними карточка на
-// каждый сервис - где он работает, что с ним не так и детали: сайты, базы, очереди
-function ServerServicesModal({ srv, onClose, onChanged, autoQueues, sites }: {
-  srv: SrvServices
-  onClose: () => void
-  onChanged: () => void
-  autoQueues?: boolean // пришли из алерта (?queues=1) — сразу раскрыть очереди
-  sites: SitesCtx // «какие домены уже мониторятся» + как завести новый
-}) {
-  const { t } = useI18n()
-  const s = srv.server
-  // Из алерта по очереди приходим СРАЗУ к очередям: иначе человек попадает в общий
-  // список сервисов ноды и должен искать нужный RabbitMQ руками.
-  const [queues, setQueues] = useState<ServiceInfo | null>(
-    () => (autoQueues ? srv.items.find((x) => x.svc?.kind === 'rabbitmq')?.svc ?? null : null),
-  )
-  const web = srv.items.filter((it) => it.web)
-  const siteList = [...new Set(web.flatMap((it) => it.sites ?? []))]
-  const missing = missingSites(siteList, sites)
-  const rate = webRate(s.last_report)
-  const dbs = srv.items.flatMap((it) => it.db ?? [])
-  const dbRows = dbs.flatMap((d) => (d.engine === 'redis' ? [] : d.dbs ?? []))
-  const dbProbs = (s.db_health ?? []).flatMap((h) => h.problems)
-  const rabbit = srv.items.filter((it) => it.svc?.kind === 'rabbitmq')
-  const qAll = rabbit.flatMap((it) => it.svc?.queues ?? [])
-  const qHot = qAll.filter((x) => qDepth(x) >= QUEUE_HOT).length
-  return createPortal(
-    <div className="modal-backdrop" onClick={onClose}>
-      <div className="card modal docker-modal hs-modal" onClick={(e) => e.stopPropagation()}>
-        <div className="clients-head">
-          <h3>
-            <span className={`sdot ${s.online ? 'sdot-up' : 'sdot-down'}`} />{' '}
-            <OsIcon os={s.os} /> <CountryFlag code={s.country} /> {s.name}
-            {s.group_name && <span className="type-chip group-chip">{s.group_name}</span>}
-          </h3>
-          <button className="ghost" onClick={onClose}>{t('Закрыть')}</button>
-        </div>
-        <div className="net-tiles hs-tiles">
-          <NetTile label={t('Сервисов')} value={String(srv.items.length)} sub={srv.items.map((it) => it.kind).join(', ')} />
-          {web.length > 0 && (
-            <NetTile
-              label={t('Сайтов')}
-              value={String(siteList.length)}
-              sub={sites.hosts ? (missing ? t('без монитора: {n}', { n: missing }) : t('все на мониторинге')) : undefined}
-              tone={sites.hosts && !missing ? 'ok' : undefined}
-            />
-          )}
-          {rate && (
-            <NetTile
-              label={t('Запросов в минуту')}
-              value={rpmText(rate.rpm)}
-              sub={(rate.e5 ?? 0) > 0
-                ? t('5xx: {n} ({p}%)', { n: rpmText(rate.e5 ?? 0), p: (((rate.e5 ?? 0) / Math.max(rate.rpm, 1)) * 100).toFixed(2) })
-                : t('без 5xx')}
-            />
-          )}
-          {dbs.length > 0 && (
-            <NetTile
-              label={t('Базы')}
-              value={String(dbRows.length)}
-              sub={subOf(
-                dbs.length > 1 && t('инстансов: {n}', { n: dbs.length }),
-                dbRows.length > 0 && fmtBytes(dbRows.reduce((a, r) => a + r.size, 0)),
-                dbProbs.some((p) => p.level >= 2) && t('проблем: {n}', { n: dbProbs.filter((p) => p.level >= 2).length }),
-                dbProbs.some((p) => p.level < 2) && t('предупреждений: {n}', { n: dbProbs.filter((p) => p.level < 2).length }),
-              )}
-              tone={dbProbs.some((p) => p.level >= 2) ? 'bad' : dbProbs.length ? 'warn' : undefined}
-            />
-          )}
-          {rabbit.length > 0 && (
-            <NetTile
-              label={t('Очереди')}
-              value={String(rabbit.reduce((n, it) => n + (it.svc?.total ?? 0), 0))}
-              sub={subOf(
-                t('сообщений: {m}', { m: rpmText(qAll.reduce((a, x) => a + qDepth(x), 0)) }),
-                qHot > 0 && t('переполнены: {n}', { n: qHot }),
-              )}
-              tone={qHot ? 'warn' : 'ok'}
-            />
-          )}
-        </div>
-        <div className="net-cards hs-cards">
-          {srv.items.map((it, i) => {
-            const total = it.svc?.total ?? 0
-            const msgs = (it.svc?.queues ?? []).reduce((a, q) => a + qDepth(q), 0)
-            const hot = (it.svc?.queues ?? []).filter((q) => qDepth(q) >= QUEUE_HOT).length
-            const cfgBad = it.web ? (s.web_config ?? []).filter((c) => !c.ok && it.kind.toLowerCase().startsWith(c.server)) : []
-            const certs = it.web && it.kind.toLowerCase() === 'nginx' ? (s.web_certs ?? []).filter((c) => c.days <= 14) : []
-            const bad = cfgBad.length > 0 || certs.some((c) => c.days <= 3)
-            return (
-              <div key={it.kind + '-' + i} className={`chart-card net-card${bad ? ' net-card-bad' : ''}`}>
-                <div className="net-head">
-                  <div className="hs-svc-title">
-                    <span className="svc-ico"><EngineIcon name={it.kind} /></span>
-                    {it.kind}
-                  </div>
-                  {it.svc?.kind === 'rabbitmq' && (
-                    <button className="ghost small" onClick={() => setQueues(it.svc!)}>
-                      {t('очереди')}
-                    </button>
-                  )}
-                </div>
-                {it.where && <div className="net-sub mono">{it.where}</div>}
-                {it.svc?.kind === 'rabbitmq' && (
-                  <div className="small muted">
-                    {t('очередей: {n}', { n: total })}
-                    {msgs > 0 && ` · ${t('сообщений: {m}', { m: msgs })}`}
-                  </div>
-                )}
-                {hot > 0 && (
-                  <div className="net-note">
-                    {t('Переполнено очередей: {n} (от {m} сообщений). Обычно это отставший или упавший консьюмер.', { n: hot, m: QUEUE_HOT })}
-                  </div>
-                )}
-                {cfgBad.map((c) => (
-                  <div key={c.server + c.where} className="net-prob">
-                    {c.where && c.where !== 'host'
-                      ? t('конфиг в контейнере {c} не проходит проверку: {e}', { c: c.where, e: c.err })
-                      : t('конфиг не проходит проверку: {e}', { e: c.err })}
-                    {' '}{t('Следующий reload или перезапуск уронит сайты.')}
-                  </div>
-                ))}
-                {certs.map((c) => (
-                  <div key={c.where + c.file} className={c.days <= 3 ? 'net-prob' : 'net-note'}>
-                    {c.days < 0
-                      ? t('сертификат {l} истек {n} дн назад ({f})', { l: c.label, n: -c.days, f: c.file })
-                      : t('сертификат {l} истекает через {n} дн ({f})', { l: c.label, n: c.days, f: c.file })}
-                  </div>
-                ))}
-                {/* поток запросов: его считает helper по access-логам, поэтому он есть
-                    только у хостового и контейнерного nginx */}
-                {it.kind === 'nginx' && rate && (rate.logs ?? []).length > 1 && (
-                  <div className="small muted">
-                    {t('самые нагруженные: {list}', {
-                      list: rate.logs!.slice()
-                        .sort((a, b) => b.rpm - a.rpm)
-                        .slice(0, 3)
-                        .map((l) => `${l.sites?.[0] || l.log.split('/').pop()} ${rpmText(l.rpm)}`)
-                        .join(', '),
-                    })}
-                  </div>
-                )}
-                {it.sites && it.sites.length > 0 && (
-                  <SitesList
-                    sites={it.sites}
-                    t={t}
-                    hosts={sites.hosts}
-                    skip={sites.skip}
-                    onAdopt={sites.canAdd ? sites.openWizard : undefined}
-                    onOpenCheck={sites.onOpenCheck}
-                  />
-                )}
-                {it.db && (
-                  <DbInventory db={it.db} t={t}
-                    health={(s.db_health ?? []).filter((h) => DB_ENGINE_LABEL[h.engine] === it.kind)} />
-                )}
-                {!it.db && !it.web && !it.svc && noDbHint(it.kind, !!it.inKube, s, t) && (
-                  <div className="net-foot">{noDbHint(it.kind, !!it.inKube, s, t)}</div>
-                )}
-                {it.web && !it.sites?.length && (
-                  <div className="net-foot">{noSitesHint(it.kind, s, t)}</div>
-                )}
-              </div>
-            )
-          })}
-        </div>
-      </div>
-      {queues && (
-        <QueuesModal server={s} svc={queues} onClose={() => setQueues(null)} onChanged={onChanged} />
-      )}
     </div>,
     document.body,
   )
@@ -757,10 +909,10 @@ type SitesCtx = {
   onOpenCheck?: (id: number) => void
 }
 
-export function ServicesPage({ onUnauthorized, openServerId, openQueues, onConsumed, onOpenCheck }: {
+export function ServicesPage({ onUnauthorized, openServerId, openSec, onConsumed, onOpenCheck }: {
   onUnauthorized: () => void
   openServerId?: number | null
-  openQueues?: boolean
+  openSec?: string | null // раздел карточки из ссылки: ?services=id&sec=queues
   onConsumed?: () => void
   onOpenCheck?: (id: number) => void // перейти к монитору в разделе «Сайты»
 }) {
@@ -775,6 +927,8 @@ export function ServicesPage({ onUnauthorized, openServerId, openQueues, onConsu
   // домены, с которыми открыт мастер «поставить на мониторинг» (null = закрыт)
   const [wizard, setWizard] = useState<string[] | null>(null)
   const [openId, setOpenId] = useState<number | null>(null)
+  // раздел из ссылки - до первого открытия карточки этой ноды
+  const [linkSec, setLinkSec] = useState<{ id: number | null; sec: string | null }>({ id: null, sec: null })
   const [query, setQuery] = useState('')
   const [searchRo, setSearchRo] = useState(true) // защита от автозаполнения, см. «Бэкапы»
   const [groupBy, setGroupBy] = useState<'none' | 'group'>(
@@ -820,8 +974,9 @@ export function ServicesPage({ onUnauthorized, openServerId, openQueues, onConsu
   useEffect(() => {
     if (openServerId == null || servers == null) return
     setOpenId(openServerId)
+    setLinkSec({ id: openServerId, sec: openSec ?? null })
     onConsumed?.()
-  }, [openServerId, servers, onConsumed])
+  }, [openServerId, openSec, servers, onConsumed])
   useUrlCard('services', openId)
 
   useEffect(() => {
@@ -984,10 +1139,14 @@ export function ServicesPage({ onUnauthorized, openServerId, openQueues, onConsu
       )}
       {open && (
         <ServerServicesModal
+          key={open.server.id}
           srv={open}
-          onClose={() => setOpenId(null)}
+          onClose={() => {
+            setOpenId(null)
+            setLinkSec({ id: null, sec: null })
+          }}
           onChanged={load}
-          autoQueues={!!openQueues && open.server.id === openServerId}
+          initialSec={linkSec.id === open.server.id ? linkSec.sec : null}
           sites={sitesCtx}
         />
       )}
