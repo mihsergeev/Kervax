@@ -500,7 +500,7 @@ export function AdoptSitesModal({
   }
 
   return createPortal(
-    <div className="modal-backdrop" onClick={onClose}>
+    <div className="modal-backdrop">
       <div className="card modal adopt-modal" onClick={(e) => e.stopPropagation()}>
         <div className="clients-head">
           <h3>{title}</h3>

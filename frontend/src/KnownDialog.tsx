@@ -39,7 +39,7 @@ export function KnownDialog({
     }
   }
   return (
-    <div className="modal-backdrop" onClick={onClose}>
+    <div className="modal-backdrop">
       <div className="card known-dialog" onClick={(e) => e.stopPropagation()}>
         <h3>📌 {t('Известная проблема')}</h3>
         <div className="muted small">{title}</div>

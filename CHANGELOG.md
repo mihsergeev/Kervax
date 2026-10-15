@@ -4,6 +4,13 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.4.213] - 2026-10-15
+
+### Fixed
+- Окно "Домены, найденные на серверах" закрывалось от клика мимо, и выбранные домены пропадали.
+  Так же вели себя диалог известной проблемы и карточка сервисов. Теперь они, как остальные окна
+  панели, закрываются только кнопкой.
+
 ## [1.4.212] - 2026-10-15
 
 ### Fixed

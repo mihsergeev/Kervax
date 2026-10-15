@@ -609,7 +609,7 @@ function ServerServicesModal({ srv, onClose, onChanged, initialSec, sites }: {
   })
 
   return createPortal(
-    <div className="modal-backdrop" onClick={onClose}>
+    <div className="modal-backdrop">
       <div className="card detail detail-server hs-modal" onClick={(e) => e.stopPropagation()}>
         <div className="detail-head">
           <div className="detail-title">
