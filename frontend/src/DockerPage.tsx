@@ -703,6 +703,10 @@ function DockerHostModal({
   const exposed = s.docker_exposed ?? []
   const outdated = s.proxy_outdated ?? []
   const proxies = cs.filter((c) => PROXY_IMAGE.test(c.image))
+  // Пустой noboot с бэкенда значит "все поднимутся", а не "нет данных": бэкенд отдает его, только
+  // когда есть что показать. Нет данных - когда агент не прислал restart policy ни у одного
+  // контейнера (старый агент)
+  const policyKnown = cs.length === 0 || cs.some((c) => c.policy != null)
 
   // Разделы: контейнеры и замечания есть, когда есть доступ к докеру; прокси - когда он на ноде
   // есть (или его образ устарел)
@@ -779,7 +783,7 @@ function DockerHostModal({
     proxy: proxies.length
       ? t('{list}, образ моложе года', { list: shortList(proxies.map((c) => c.name), t, 3) })
       : '',
-    boot: s.noboot ? t('все контейнеры поднимутся после перезагрузки') : t('нет данных'),
+    boot: policyKnown ? t('все контейнеры поднимутся после перезагрузки') : t('нет данных'),
   }
   const info: Record<string, SecInfo> = {}
   for (const { id } of DOCKER_SECTIONS) info[id] = secInfoOf(items[id] ?? [], ok[id] ?? '', t)
@@ -787,7 +791,7 @@ function DockerHostModal({
   if (live && unhealthy.length && !info.containers.level)
     info.containers = { ...info.containers, level: 1, line: t('unhealthy: {list}', { list: shortList(unhealthy.map((c) => c.name), t, 3) }) }
   if (!s.docker_risk && !info.host.level) info.host.idle = true
-  if (!s.noboot && !info.boot.level) info.boot.idle = true
+  if (!policyKnown && !info.boot.level) info.boot.idle = true
 
   const rows: OvRow[] = DOCKER_SECTIONS.flatMap(({ id, label }) =>
     (items[id] ?? []).map((x) => ({
@@ -975,9 +979,9 @@ function DockerHostModal({
                     <NoBootWarning server={s} canAct={canAct} onChanged={onChanged} />
                   ) : (
                     <div className="srv-empty">
-                      {s.noboot
+                      {policyKnown
                         ? t('У всех контейнеров restart policy always или unless-stopped: после перезагрузки докер поднимет их сам.')
-                        : t('Агент этой ноды еще не отдает restart policy контейнеров: обновите агент.')}
+                        : t('Агент {v} не прислал restart policy контейнеров. Обновите его: кнопка "Обновить все" в разделе "Серверы" или стрелка у версии агента в карточке сервера.', { v: s.agent_version || '' })}
                     </div>
                   )}
                 </div>

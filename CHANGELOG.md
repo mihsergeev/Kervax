@@ -4,6 +4,15 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.4.209] - 2026-10-15
+
+### Fixed
+- В карточке Docker раздел "Перезагрузка" у ноды, где у всех контейнеров есть restart policy,
+  писал "агент еще не отдает restart policy: обновите агент", а на карте был серым "нет данных".
+  Пустой список с бэкенда значит "все поднимутся", теперь так и написано. Про старый агент раздел
+  говорит, только если агент не прислал policy ни у одного контейнера, и подсказывает, где его
+  обновить.
+
 ## [1.4.208] - 2026-10-15
 
 ### Changed

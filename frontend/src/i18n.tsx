@@ -2169,7 +2169,8 @@ const EN: Record<string, string> = {
   'Агент этой ноды еще не отдает ключи контейнеров от хоста: обновите агент.': 'The agent on this node does not report container host keys yet: update the agent.',
   'Внешний прокси {list}: образ собран меньше года назад.': 'External proxy {list}: the image was built less than a year ago.',
   'У всех контейнеров restart policy always или unless-stopped: после перезагрузки докер поднимет их сам.': 'All containers have restart policy always or unless-stopped: Docker brings them back after a reboot.',
-  'Агент этой ноды еще не отдает restart policy контейнеров: обновите агент.': 'The agent on this node does not report container restart policies yet: update the agent.',
+  'Агент {v} не прислал restart policy контейнеров. Обновите его: кнопка "Обновить все" в разделе "Серверы" или стрелка у версии агента в карточке сервера.':
+    'Agent {v} did not send container restart policies. Update it: the "Update all" button in "Servers" or the arrow next to the agent version on the server card.',
   'Гигиена подов': 'Pod hygiene',
   'падают поды: {list}': 'failing pods: {list}',
   'ноды не готовы (NotReady): {list}': 'nodes not ready (NotReady): {list}',
