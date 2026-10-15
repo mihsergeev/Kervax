@@ -13,6 +13,7 @@ import {
   dockerCommand,
   dockerCommandStatus,
   getAgentRelease,
+  getServerTimeline,
   getServerVulns,
   kubeCommand,
   kubeCommandStatus,
@@ -46,6 +47,7 @@ import {
   type ServerMetric,
   type ServerReport,
   type ServerVulns,
+  type TimelineResult,
 } from './api'
 import { StackedAreaChart, type Series } from './charts/StackedAreaChart'
 import { diskHealth, diskUsage, fmtSetupVersion, shortList, sinceShort, unitsBlock, srvIssues, type SrvIssue, webLogLabel, webRate, webSeriesName, webUnparsed } from './serverUtils'
@@ -75,7 +77,7 @@ import { AlertHistoryModal } from './AlertHistoryModal'
 import type { Section } from './App'
 import { NoteBar } from './NoteBar'
 import { ServerDeps, useDependentChecks } from './ParentBar'
-import { TimelineCard } from './TimelineCard'
+import { TimelineCard, TL_ICON } from './TimelineCard'
 import { PackagesCard } from './PackagesCard'
 import { VulnsCard } from './VulnsCard'
 import { JournalCard, JournalModal, journalBlocker } from './UnitJournal'
@@ -807,8 +809,11 @@ function secOfLink(sec?: string | null): string | null {
 
 // Состояние раздела для меню и сводки: level - самое серьезное замечание (0 - все в порядке),
 // n - число замечаний у пункта меню, line - строка на карте сервера: первое замечание или
-// коротко, что там; idle - данных нет (helper не стоит, снаружи не проверяли), точка серая
-type SecInfo = { level: 0 | 1 | 2; n: number; line: string; idle?: boolean }
+// коротко, что там; idle - данных нет (helper не стоит, снаружи не проверяли), точка серая;
+// fresh - с какого момента видна самая новая проблема раздела, если она появилась меньше суток назад
+type SecInfo = { level: 0 | 1 | 2; n: number; line: string; idle?: boolean; fresh?: string }
+// "новое" - проблема появилась меньше суток назад: так одинаково у всех, без "с прошлого захода"
+const FRESH_MS = 24 * 3600_000
 
 // Замечания и строка по разделам. Проблемы те же, что в "Что сломано" (srvIssues), советы - те
 // же, что в "Требует действий" на главной. Уязвимости только справка, но на карте видно, что
@@ -825,12 +830,12 @@ function serverSecInfo(c: {
 }): Record<string, SecInfo> {
   const { s, t, issues } = c
   const r = s.last_report ?? {}
-  const items: Record<string, { level: 1 | 2; text: string }[]> = {}
-  const add = (sec: string, level: number, text: string) =>
-    (items[sec] ??= []).push({ level: level >= 2 ? 2 : 1, text })
+  const items: Record<string, { level: 1 | 2; text: string; since?: string | null }[]> = {}
+  const add = (sec: string, level: number, text: string, since?: string | null) =>
+    (items[sec] ??= []).push({ level: level >= 2 ? 2 : 1, text, since })
   for (const i of issues) {
     if (i.section || i.kind === 'offline') continue
-    add(secOfLink(i.sec) ?? 'overview', i.tone === 't-down' ? 2 : 1, i.text)
+    add(secOfLink(i.sec) ?? 'overview', i.tone === 't-down' ? 2 : 1, i.text, i.since)
   }
   for (const a of s.os_advice ?? []) add('updates', a.level, a.text)
   for (const f of s.exposure?.foreign ?? [])
@@ -896,10 +901,16 @@ function serverSecInfo(c: {
   const out: Record<string, SecInfo> = {}
   for (const { id } of DETAIL_SECTIONS) {
     const xs = items[id] ?? []
+    const fresh = xs
+      .map((x) => x.since ?? '')
+      .filter((x) => x && Date.now() - Date.parse(x) < FRESH_MS)
+      .sort()
+      .pop()
     out[id] = {
       level: xs.reduce<0 | 1 | 2>((a, x) => (x.level > a ? x.level : a), 0),
       n: xs.length,
       line: xs.length ? xs[0].text + (xs.length > 1 ? ` ${t('и еще {n}', { n: xs.length - 1 })}` : '') : (ok[id] ?? ''),
+      fresh,
     }
   }
   // справка и заглушки - желтым, но не проблемой: на карте видно, что там не пусто
@@ -912,6 +923,53 @@ function serverSecInfo(c: {
     !parent && !behind && !c.kids.length && 'deps']
   for (const id of idle) if (id && !out[id].level) out[id].idle = true
   return out
+}
+
+// "новое · 2 ч": проблема раздела появилась меньше суток назад
+function FreshChip({ since }: { since: string }) {
+  const { t } = useI18n()
+  const ago = sinceShort(since, t)
+  return <span className="srv-new" title={new Date(since).toLocaleString()}>{ago ? `${t('новое')} · ${ago}` : t('новое')}</span>
+}
+
+// "За сутки" на сводке: сколько проблем появилось, сколько ушло и сколько было изменений на
+// сервере, и последние строки из той же хронологии. Действия людей в панели сюда не идут
+const DAY_CHANGE = new Set(['deploy', 'crash', 'state', 'system', 'ports', 'access', 'config'])
+function DayBlock({ day, onMore }: { day: TimelineResult | null; onMore: () => void }) {
+  const { t } = useI18n()
+  if (!day) return null
+  const evs = day.events.filter((e) => e.cat === 'alert' || DAY_CHANGE.has(e.cat))
+  const up = evs.filter((e) => e.cat === 'alert' && !e.recovery).length
+  const gone = evs.filter((e) => e.cat === 'alert' && e.recovery).length
+  const ch = evs.length - up - gone
+  const when = (ts: string) =>
+    new Date(ts).toLocaleString([], { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })
+  return (
+    <div className="day-box">
+      <div className="day-head">
+        <b>{t('За сутки')}</b>
+        {evs.length > 0 ? (
+          <>
+            <span className="day-cnt">{t('появилось')} <b className={up ? 't-down' : ''}>{up}</b></span>
+            <span className="day-cnt">{t('ушло')} <b className={gone ? 't-up' : ''}>{gone}</b></span>
+            <span className="day-cnt">{t('изменений на сервере')} <b>{ch}</b></span>
+          </>
+        ) : (
+          <span className="muted small">{t('алертов не было, на сервере ничего не менялось')}</span>
+        )}
+        <button className="ghost small row-act" onClick={onMore}>
+          {t('вся хронология')} ›
+        </button>
+      </div>
+      {evs.slice(0, 5).map((e, i) => (
+        <div key={i} className={`day-row${e.cat === 'alert' && !e.recovery ? ' day-row-fire' : ''}`}>
+          <span className="day-ic" aria-hidden="true">{e.cat === 'alert' ? (e.recovery ? '✅' : '🔥') : (TL_ICON[e.cat] ?? '•')}</span>
+          <span className="day-text">{e.text}</span>
+          <span className="day-time">{when(e.ts)}</span>
+        </div>
+      ))}
+    </div>
+  )
 }
 
 // Меню разделов: группы подписями, у пункта с замечаниями число цветом самого серьезного.
@@ -939,6 +997,7 @@ function SrvNav({ secs, active, info, onGo }: {
             {s.group && s.group !== secs[i - 1]?.group && <div className="srv-nav-grp">{t(s.group)}</div>}
             <button className={`srv-nav-item${active === s.id ? ' active' : ''}`} onClick={() => onGo(s.id)}>
               <span className="srv-nav-label">{t(s.label)}</span>
+              {x?.fresh && <span className="srv-new">{t('новое')}</span>}
               {x && x.n > 0 && x.level > 0 && (
                 <span className={`srv-nav-n srv-nav-n-${x.level >= 2 ? 'bad' : 'warn'}`}>{x.n}</span>
               )}
@@ -2250,7 +2309,7 @@ function SrvTiles({ r, M, info, onGo }: {
     const x = info[sec]
     return (
       <button key={sec} className="srv-tile-btn" onClick={() => onGo(sec)} title={t('к разделу')}>
-        <NetTile label={label} value={value} sub={sub} tone={tone(p, sec)}>
+        <NetTile label={x?.fresh ? <>{label} <FreshChip since={x.fresh} /></> : label} value={value} sub={sub} tone={tone(p, sec)}>
           {x && x.n > 0 && (
             <div className={`srv-tile-issue ${x.level >= 2 ? 't-down' : 't-degraded'}`} title={x.line}>{x.line}</div>
           )}
@@ -5453,6 +5512,22 @@ function ServerDetail({
     }
   }, [s.id, pkgN, pkgHash, kernelNow])
   const kids = useDependentChecks(s.id)
+  // хронология за сутки для блока на сводке: грузится, пока сводка открыта, раз в минуту заново
+  const [day, setDay] = useState<TimelineResult | null>(null)
+  useEffect(() => {
+    if (active !== 'overview' || !hasReport) return
+    let alive = true
+    const run = () =>
+      getServerTimeline(s.id, 1)
+        .then((v) => { if (alive) setDay(v) })
+        .catch(() => {})
+    run()
+    const id = window.setInterval(run, 60000)
+    return () => {
+      alive = false
+      window.clearInterval(id)
+    }
+  }, [s.id, active, hasReport])
 
   async function del() {
     if (
@@ -5672,6 +5747,7 @@ function ServerDetail({
           ))}
         </div>
       )}
+      <DayBlock day={day} onMore={() => go('timeline')} />
       <SrvTiles r={r} M={M} info={info} onGo={go} />
       <div className="ov-cap">{t('Сервер по областям')}</div>
       <div className="ov-areas">
@@ -5683,6 +5759,7 @@ function ServerDetail({
             <button key={id} className={`ov-area${lv ? ` ov-area-${lv}` : ''}`} onClick={() => go(id)}>
               <span className="ov-area-h">
                 <span>{t(def.label)}</span>
+                {x.fresh && <FreshChip since={x.fresh} />}
                 <span className={`lk-dot${lv ? ` lk-dot-${lv}` : x.line && !x.idle ? ' lk-dot-ok' : ''}`} />
               </span>
               <span className="ov-area-s">{x.line || '—'}</span>
