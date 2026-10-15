@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import {
   ApiError,
@@ -18,14 +18,15 @@ import {
   type ServerEnroll,
 } from './api'
 import { useAuth } from './auth'
-import { useUrlCard } from './deeplink'
+import { useUrlCard, useUrlParam } from './deeplink'
 import { useI18n } from './i18n'
 import { RESTARTS_DAY_MIN } from './mutes'
 import { OsIcon } from './osIcon'
 import { CountryFlag } from './CountryFlag'
 import { fmtBytes } from './units'
-import { sinceShort } from './serverUtils'
-import { EnrollModal, InstallModal } from './ServersPage'
+import { shortList, sinceShort, srvIssues } from './serverUtils'
+import { EnrollModal, fmtRel, InstallModal } from './ServersPage'
+import { CardNav, FreshChip, OvAreas, OvRows, secInfoOf, type OvRow, type SecDef, type SecInfo, type SecItem } from './cardLayout'
 import { NetTile } from './NetLinks'
 
 // Вкладка «Кубер»: КОМПАКТНЫЙ список хостов с кластером; клик по хосту → модалка
@@ -430,10 +431,23 @@ function PodRow({
   )
 }
 
-// Модалка хоста-кластера: сверху плитки (версия, ноды, поды, нагрузка, перезапуски, сроки, Flux),
-// под ними карточка с вкладками: поды, воркоады, CronJob, ноды, сроки, Flux. Логи пода - модалка сверху.
-type KubeTab = 'pods' | 'finished' | 'workloads' | 'cron' | 'nodes' | 'expiry' | 'flux'
-const KUBE_TABS: KubeTab[] = ['pods', 'finished', 'workloads', 'cron', 'nodes', 'expiry', 'flux']
+// Карточка кластера: меню разделов слева, на экране один раздел, как у сервера (cardLayout).
+// Раньше вкладки шли переключателем над списком, над ним плитки, и одно и то же было видно в
+// плитке, в подписи вкладки и в плашке. На сводке проблемы кластера из "Что сломано", плитки и
+// карта по областям. Логи пода - модалка сверху.
+const KUBE_SECTIONS: SecDef[] = [
+  { id: 'overview', label: 'Сводка', group: '' },
+  { id: 'pods', label: 'Поды', group: 'Нагрузка' },
+  { id: 'finished', label: 'Завершенные', group: 'Нагрузка' },
+  { id: 'workloads', label: 'Воркоады', group: 'Нагрузка' },
+  { id: 'cron', label: 'CronJob', group: 'Нагрузка' },
+  { id: 'nodes', label: 'Ноды', group: 'Кластер' },
+  { id: 'expiry', label: 'Сроки', group: 'Кластер' },
+  { id: 'flux', label: 'Flux', group: 'Кластер' },
+]
+const KUBE_SEC_IDS = new Set(KUBE_SECTIONS.map((x) => x.id))
+// разделы со списком: у них фильтр в шапке
+const KUBE_FILTER = new Set(['pods', 'finished', 'workloads', 'cron', 'flux'])
 
 function KubeHostModal({
   server: s,
@@ -447,18 +461,27 @@ function KubeHostModal({
   server: Server
   kube: KubeInfo
   canAct: boolean
-  initialTab?: string | null // из ссылки алерта: ?kube=id&ktab=expiry
+  initialTab?: string | null // из ссылки алерта: ?kube=id&ktab=expiry, или ?kube=id&sec=expiry
   onClose: () => void
   onChanged: () => void
   onAddNode: (n: KubeNodeRef) => void // завести ноду кластера в панели (форма добавления сервера)
 }) {
   const { t } = useI18n()
   const [logsPod, setLogsPod] = useState<KubePod | null>(null)
-  const [tab, setTab] = useState<KubeTab>(
-    () => (KUBE_TABS as string[]).includes(initialTab ?? '') ? (initialTab as KubeTab) : 'pods',
-  )
+  // открытый раздел: сводка или тот, куда вела ссылка; в адресе он виден (?sec=), ссылкой на
+  // раздел можно поделиться
+  const [active, setActive] = useState<string>(() => (KUBE_SEC_IDS.has(initialTab ?? '') ? initialTab! : 'overview'))
   const [q, setQ] = useState('')
   const [sort, setSort] = useState<'state' | 'name' | 'restarts' | 'ns' | 'mem' | 'cpu'>('state')
+  const layoutRef = useRef<HTMLDivElement>(null)
+  // другой раздел - с начала и без фильтра прошлого; если страница прокручена ниже меню,
+  // подкручиваем к началу разделов
+  const go = (id: string) => {
+    setActive(id)
+    setQ('')
+    const el = layoutRef.current
+    if (el && el.getBoundingClientRect().top < 0) el.scrollIntoView({ block: 'start' })
+  }
   const nodes = kube.nodes ?? []
   const workloads = kube.workloads ?? []
   const pods = kube.pods ?? []
@@ -506,79 +529,47 @@ function KubeHostModal({
   const flux: FluxState[] = s.last_report?.flux ?? []
   const fluxBroken = flux.filter((f) => !f.ready && !FLUX_TRANSIENT.has(f.reason ?? ''))
   const horizon = expiryHorizon(s)
-  const expirySoon = expiry.filter((e) => daysLeft(e.expires) <= horizon).length
   const doneCount = pods.filter(podFinished).length
-  // вкладка «Завершённые» есть только пока они есть; если последний завершённый пропал
-  // (удалили/сборщик подчистил) — не залипаем на исчезнувшей вкладке. Так же со сроками и Flux.
-  const curTab =
-    (tab === 'finished' && doneCount === 0) ||
-    (tab === 'expiry' && expiry.length === 0) ||
-    (tab === 'flux' && flux.length === 0) ||
-    (tab === 'cron' && cronjobs.length === 0 && failedJobs.length === 0)
-      ? 'pods'
-      : tab
-  // «Поды» = только живые; завершённые (история Job/CronJob) — своя вкладка, чтобы не
+  const doneFailed = pods.filter((p) => podFinished(p) && p.phase === 'Failed').length
+
+  // Разделы, которые есть у этого кластера. Завершенные - пока они есть, сроки и Flux - когда
+  // их собирает helper; без доступа к kube-api остаются сводка, сроки и Flux
+  const shown: Record<string, boolean> = {
+    overview: true,
+    pods: kube.access,
+    finished: kube.access && doneCount > 0,
+    workloads: kube.access,
+    cron: kube.access && (cronjobs.length > 0 || failedJobs.length > 0),
+    nodes: kube.access,
+    expiry: expiry.length > 0,
+    flux: flux.length > 0,
+  }
+  const secs = KUBE_SECTIONS.filter((x) => shown[x.id])
+  // раздел пропал (последний завершенный под подчистили) - на сводку, а не на пустое место
+  const cur = secs.find((x) => x.id === active) ?? secs[0]
+  useUrlParam('sec', cur.id === 'overview' ? null : cur.id)
+
+  // «Поды» = только живые; завершённые (история Job/CronJob) — свой раздел, чтобы не
   // подмешивались к тому, что надо чинить
   const fpods = pods
-    .filter((p) => (curTab === 'finished' ? podFinished(p) : !podFinished(p)))
+    .filter((p) => (cur.id === 'finished' ? podFinished(p) : !podFinished(p)))
     .filter((p) => !ql || `${p.name} ${p.ns} ${p.reason ?? ''}`.toLowerCase().includes(ql))
     .slice()
     .sort(pcmp[sort])
   const fworkloads = workloads.filter((w) => !ql || `${w.name} ${w.ns} ${w.kind}`.toLowerCase().includes(ql))
-  // сломанные сверху: вкладку открывают, чтобы найти, что не доехало
+  // сломанные сверху: раздел открывают, чтобы найти, что не доехало
   const fflux = flux
     .filter((f) => !ql || `${f.where} ${f.kind} ${f.reason ?? ''}`.toLowerCase().includes(ql))
     .slice()
     .sort((a, b) => Number(a.ready) - Number(b.ready) || a.where.localeCompare(b.where))
   const nodesReady = nodes.filter((n) => n.ready).length
   const { running: podsRunning, active: podsActive } = podCounts(pods)
-  const tabs: { k: typeof tab; l: string; title?: string }[] = [
-    { k: 'pods', l: t('Поды ({n})', { n: podsActive }) },
-    ...(doneCount > 0
-      ? [{
-          k: 'finished' as const,
-          l: t('Завершённые ({n})', { n: doneCount }),
-          title: t('Завершённые Job/CronJob-поды — историческая запись, а не живой воркоад. Их не нужно чинить; удалите под, чтобы убрать из списка.'),
-        }]
-      : []),
-    { k: 'workloads', l: t('Воркоады ({n})', { n: workloads.length }) },
-    ...(cronjobs.length > 0 || failedJobs.length > 0
-      ? [{
-          k: 'cron' as const,
-          l: cronBad + failedJobs.length > 0
-            ? t('CronJob ⚠ ({n})', { n: cronBad + failedJobs.length })
-            : t('CronJob ({n})', { n: cronjobs.length }),
-          title: t('Задания по расписанию: последний запуск и последний успешный. Упавший или переставший отрабатывать CronJob дает алерт.'),
-        }]
-      : []),
-    { k: 'nodes', l: t('Ноды ({n})', { n: nodes.length }) },
-    ...(expiry.length > 0
-      ? [{
-          k: 'expiry' as const,
-          l: expirySoon > 0 ? t('Сроки ⏳ ({n})', { n: expirySoon }) : t('Сроки ({n})', { n: expiry.length }),
-          title: t(
-            'Сертификаты, kubeconfig-и и токены Flux с их сроками. Собирает root-хелпер на самой ноде: панель токенов не видит.',
-          ),
-        }]
-      : []),
-    // Flux — своя вкладка: сроки отвечают «когда сломается», Flux — «что уже не доезжает»,
-    // и в одном списке второе терялось под десятками сертификатов
-    ...(flux.length > 0
-      ? [{
-          k: 'flux' as const,
-          l: fluxBroken.length > 0 ? t('Flux ⚠ ({n})', { n: fluxBroken.length }) : t('Flux ({n})', { n: flux.length }),
-          title: t(
-            'Ресурсы Flux и их готовность. Не в Ready — доставка встала: запущенное продолжает работать, а новые изменения из git не доезжают.',
-          ),
-        }]
-      : []),
-  ]
-  // плитки: нагрузка нод по metrics-server, перезапуски подов за сутки, ближайший срок и Flux
+  // плитки: нагрузка нод по metrics-server, перезапуски подов за сутки
   const memUse = nodes.reduce((n, x) => n + (x.use?.mem ?? 0), 0)
   const memCap = nodes.reduce((n, x) => n + (x.use && x.cap ? x.cap.mem : 0), 0)
   const cpuUse = nodes.reduce((n, x) => n + (x.use?.cpu_m ?? 0), 0)
   const cpuCap = nodes.reduce((n, x) => n + (x.use && x.cap ? x.cap.cpu_m : 0), 0)
-  const podsBad = pods.filter((p) => !podFinished(p) && podTone(p) === 't-down').length
+  const badPods = pods.filter((p) => !podFinished(p) && podTone(p) === 't-down')
   const nodesPress = nodes.filter((n) => (n.pressure ?? []).length > 0).length
   const days = pods
     .map((p) => ({ name: p.name, n: s.restarts_day?.[`pod:${p.ns}/${p.name}`] ?? 0 }))
@@ -586,114 +577,204 @@ function KubeHostModal({
   const dayTop = days.reduce<{ name: string; n: number } | null>((a, b) => (!a || b.n > a.n ? b : a), null)
   const next = expiry[0]
   const nextDays = next ? daysLeft(next.expires) : 0
+  const daysText = (d: number) => (d < 0 ? t('истёк') : d === 0 ? t('сегодня') : t('{n} дн.', { n: d }))
   const pct = (u: number, c: number) => (c ? Math.round((u / c) * 100) : 0)
-  return createPortal(
-    <div className="modal-backdrop">
-      <div className="card modal docker-modal hs-modal" onClick={(e) => e.stopPropagation()}>
-        <div className="clients-head">
-          <h3>
-            <span className={`sdot ${s.online ? 'sdot-up' : 'sdot-down'}`} />{' '}
-            <OsIcon os={s.os} /> <CountryFlag code={s.country} /> {s.name}
-            {s.group_name && <span className="type-chip group-chip">{s.group_name}</span>}
-          </h3>
-          <button className="ghost" onClick={onClose}>
-            {t('Закрыть')}
-          </button>
-        </div>
-        <div className="net-tiles hs-tiles">
-          <NetTile
-            label="Kubernetes"
-            value={(kube.version || '—').split('+')[0]}
-            title={kube.version}
-            sub={subOf(kube.flavor || 'k8s', kube.access && `ns: ${kube.namespaces ?? 0}`)}
-          />
-          {kube.access && (
+  const wlPartial = workloads.filter((w) => w.desired > 0 && w.ready < w.desired)
+
+  // Замечания по разделам. Проблемы те же, что в "Что сломано" на главной: с бэкенда (сроки,
+  // Flux, CronJob, ноды, утечки и перезапуски подов) и те, что главная считает сама (падающие
+  // поды, ноды NotReady). Ноды без агента - совет из "Требует действий"
+  const live = s.online && kube.access
+  const issues = srvIssues(s, t).filter((i) => i.section === 'kuber')
+  const items: Record<string, SecItem[]> = {}
+  const add = (sec: string, x: SecItem) => (items[KUBE_SEC_IDS.has(sec) ? sec : 'overview'] ??= []).push(x)
+  for (const i of issues) add(i.sec ?? '', { level: i.tone === 't-down' ? 2 : 1, text: i.text, since: i.since })
+  if (live && badPods.length)
+    add('pods', {
+      level: 2,
+      count: badPods.length,
+      since: s.alert_since?.kube_pod,
+      text: t('падают поды: {list}', {
+        list: shortList(badPods.map((p) => `${p.ns}/${p.name} (${p.reason || p.phase})`), t, 3),
+      }),
+    })
+  // NotReady с бэкенда (kube_node) приходит после выдержки и про то же - без повтора
+  const notReady = nodes.filter((n) => !n.ready)
+  if (live && notReady.length && !issues.some((i) => i.kind === 'kube_node'))
+    add('nodes', {
+      level: 2,
+      count: notReady.length,
+      since: s.alert_since?.kube_node,
+      text: t('ноды не готовы (NotReady): {list}', { list: shortList(notReady.map((n) => n.name), t, 3) }),
+    })
+  if (live && unmon.size)
+    add('nodes', { level: 1, count: unmon.size, text: t('нод без агента: {list}', { list: shortList([...unmon.keys()], t, 3) }) })
+
+  // коротко, что в разделе, когда замечаний нет
+  const ok: Record<string, string> = {
+    pods: podsActive ? t('работают {a} из {b}', { a: podsRunning, b: podsActive }) : t('Подов нет'),
+    finished: t('завершенных подов: {n}, упали {m}', { n: doneCount, m: doneFailed }),
+    workloads: workloads.length
+      ? t('в полном составе {a} из {b}', { a: workloads.length - wlPartial.length, b: workloads.length })
+      : t('Воркоадов нет'),
+    cron: cronBad
+      ? t('заданий: {n}, с проблемой {m}', { n: cronjobs.length, m: cronBad })
+      : t('заданий: {n}, все отрабатывают', { n: cronjobs.length }),
+    nodes: t('готовы {a} из {b}', { a: nodesReady, b: nodes.length }),
+    expiry: next ? t('ближайший: {what}, {d}', { what: t(EXPIRY_KIND[next.kind] ?? next.kind), d: daysText(nextDays) }) : '',
+    flux: t('ресурсов: {n}, все в Ready', { n: flux.length }),
+  }
+  const info: Record<string, SecInfo> = {}
+  for (const { id } of KUBE_SECTIONS) info[id] = secInfoOf(items[id] ?? [], ok[id] ?? '', t)
+  // Не проблема, но и не "все в порядке": поды и воркоады не в полном составе (идет выкат или
+  // под не поднимается), Flux не в Ready раньше выдержки алерта. Желтым на карте, без числа в меню
+  const soft = (id: string, line: string) => {
+    if (!info[id].level) info[id] = { ...info[id], level: 1, line }
+  }
+  const podsWait = podsActive - podsRunning - badPods.length
+  if (live && podsWait > 0) soft('pods', `${t('не готовы: {n}', { n: podsWait })}, ${ok.pods}`)
+  if (live && wlPartial.length)
+    soft('workloads', t('не в полном составе: {list}', {
+      list: shortList(wlPartial.map((w) => `${w.ns}/${w.name} ${w.ready}/${w.desired}`), t, 3),
+    }))
+  if (fluxBroken.length) soft('flux', t('не в Ready: {n}', { n: fluxBroken.length }))
+  // гигиена подов - справка, не проблема: серым, ведет в поды, где про нее написано
+  const hyg: SecInfo = hygiene.nolim || hygiene.noprobe
+    ? { level: 0, n: 0, idle: true, line: t('без лимита памяти {a}, без проб {b}', { a: hygiene.nolim, b: hygiene.noprobe }) }
+    : { level: 0, n: 0, line: t('у всех подов есть лимиты и пробы') }
+
+  // строки сводки: все замечания кластера, красные сверху, у каждой - раздел, где разбирать
+  const rows: OvRow[] = KUBE_SECTIONS.flatMap(({ id, label }) =>
+    (items[id] ?? []).map((x) => ({
+      tone: x.level >= 2 ? ('t-down' as const) : ('t-degraded' as const),
+      text: x.text,
+      since: x.since,
+      act: id !== 'overview' && shown[id] ? { label: t(label), onClick: () => go(id) } : undefined,
+    })),
+  ).sort((a, b) => Number(b.tone === 't-down') - Number(a.tone === 't-down'))
+  const tileTone = (sec: string, base: 'bad' | 'warn' | 'ok' | undefined) =>
+    info[sec].n > 0 && info[sec].level >= 2 ? 'bad' : base
+  const tileLabel = (sec: string, label: string) =>
+    info[sec].fresh ? <>{label} <FreshChip since={info[sec].fresh!} /></> : label
+
+  const overview = (
+    <div className="srv-sec">
+      {!kube.access && <EnableBlock />}
+      <OvRows rows={rows} />
+      {kube.access && (
+        <div className="net-tiles srv-tiles">
+          <button className="srv-tile-btn" onClick={() => go('nodes')} title={t('к разделу')}>
             <NetTile
-              label={t('Ноды готовы')}
+              label={tileLabel('nodes', t('Ноды готовы'))}
               value={String(nodesReady)}
               unit={t('из {n}', { n: nodes.length })}
               sub={subOf(
                 nodesPress > 0 && t('под давлением: {n}', { n: nodesPress }),
                 unmon.size > 0 && t('без агента: {n}', { n: unmon.size }),
               ) || t('все готовы')}
-              tone={nodesReady < nodes.length ? 'bad' : nodesPress || unmon.size ? 'warn' : 'ok'}
+              tone={tileTone('nodes', nodesReady < nodes.length ? 'bad' : nodesPress || unmon.size ? 'warn' : 'ok')}
             />
-          )}
-          {kube.access && (
+          </button>
+          <button className="srv-tile-btn" onClick={() => go('pods')} title={t('к разделу')}>
             <NetTile
-              label={t('Поды работают')}
+              label={tileLabel('pods', t('Поды работают'))}
               value={String(podsRunning)}
               unit={t('из {n}', { n: podsActive })}
               sub={subOf(
-                podsBad > 0 && t('падают: {n}', { n: podsBad }),
-                podsActive - podsRunning - podsBad > 0 && t('не готовы: {n}', { n: podsActive - podsRunning - podsBad }),
+                badPods.length > 0 && t('падают: {n}', { n: badPods.length }),
+                podsWait > 0 && t('не готовы: {n}', { n: podsWait }),
               ) || t('все работают')}
-              tone={podsBad ? 'bad' : podsRunning < podsActive ? 'warn' : 'ok'}
+              tone={tileTone('pods', badPods.length ? 'bad' : podsRunning < podsActive ? 'warn' : 'ok')}
             />
+          </button>
+          {memCap > 0 && (
+            <button className="srv-tile-btn" onClick={() => go('nodes')} title={t('к разделу')}>
+              <NetTile
+                label={t('Память нод')}
+                value={`${pct(memUse, memCap)}%`}
+                sub={subOf(`${fmtBytes(memUse)} / ${fmtBytes(memCap)}`, cpuCap > 0 && `CPU ${pct(cpuUse, cpuCap)}%`)}
+                tone={pct(memUse, memCap) >= 90 ? 'bad' : pct(memUse, memCap) >= 75 ? 'warn' : undefined}
+              />
+            </button>
           )}
-          {kube.access && memCap > 0 && (
-            <NetTile
-              label={t('Память нод')}
-              value={`${pct(memUse, memCap)}%`}
-              sub={subOf(`${fmtBytes(memUse)} / ${fmtBytes(memCap)}`, cpuCap > 0 && `CPU ${pct(cpuUse, cpuCap)}%`)}
-              tone={pct(memUse, memCap) >= 90 ? 'bad' : pct(memUse, memCap) >= 75 ? 'warn' : undefined}
-            />
-          )}
-          {kube.access && (
+          <button className="srv-tile-btn" onClick={() => { go('pods'); setSort('restarts') }} title={t('к разделу')}>
             <NetTile
               label={t('Перезапусков за сутки')}
               value={String(days.reduce((n, x) => n + x.n, 0))}
               sub={dayTop ? `${dayTop.name}: ${dayTop.n}` : t('нет')}
               tone={dayTop && dayTop.n >= RESTARTS_DAY_MIN ? 'warn' : undefined}
             />
-          )}
-          {next && (
-            <NetTile
-              label={t('Ближайший срок')}
-              value={nextDays < 0 ? t('истёк') : nextDays === 0 ? t('сегодня') : t('{n} дн.', { n: nextDays })}
-              sub={t(EXPIRY_KIND[next.kind] ?? next.kind)}
-              title={next.where}
-              tone={nextDays < 0 ? 'bad' : nextDays <= horizon ? 'warn' : 'ok'}
-            />
-          )}
-          {flux.length > 0 && (
-            <NetTile
-              label="Flux"
-              value={String(flux.length - fluxBroken.length)}
-              unit={t('из {n}', { n: flux.length })}
-              sub={fluxBroken.length ? t('не в Ready: {n}', { n: fluxBroken.length }) : t('все в Ready')}
-              tone={fluxBroken.length ? 'bad' : 'ok'}
-            />
-          )}
+          </button>
         </div>
-        <div className="net-cards hs-cards">
-          {!kube.access ? (
-            <EnableBlock />
-          ) : (
-            <div className="chart-card net-card net-card-wide">
-              <div className="net-head">
-                <div className="win-switch kube-tabs">
-                  {tabs.map(({ k, l, title }) => (
-                    <button
-                      key={k}
-                      className={`win-btn${curTab === k ? ' win-btn-active' : ''}`}
-                      onClick={() => setTab(k)}
-                      title={title}
-                    >
-                      {l}
-                    </button>
-                  ))}
-                </div>
-              </div>
-              {curTab !== 'nodes' && curTab !== 'expiry' && (
-                <div className="modal-toolbar">
+      )}
+      <OvAreas
+        cap={t('Кластер по областям')}
+        items={[
+          ...KUBE_SECTIONS.filter((x) => x.id !== 'overview' && shown[x.id]).map((x) => ({ id: x.id, label: x.label, info: info[x.id] })),
+          ...(kube.access && pods.length ? [{ id: 'hygiene', label: 'Гигиена подов', info: hyg, go: 'pods' }] : []),
+        ]}
+        onGo={go}
+      />
+    </div>
+  )
+
+  const empty = (text: string) => <div className="srv-empty">{text}</div>
+  return createPortal(
+    <div className="modal-backdrop">
+      <div className="card detail detail-server hs-modal" onClick={(e) => e.stopPropagation()}>
+        <div className="detail-head">
+          <div className="detail-title">
+            <span className={`sdot ${s.online ? 'sdot-up' : 'sdot-down'}`} />
+            <OsIcon os={s.os} size={18} />
+            <CountryFlag code={s.country} />
+            <h3>{s.name}</h3>
+            {s.group_name && <span className="type-chip group-chip">{s.group_name}</span>}
+          </div>
+          <div className="detail-head-actions">
+            <button className="ghost icon-btn" onClick={onClose} title={t('Закрыть')}>
+              ✕
+            </button>
+          </div>
+        </div>
+        {!s.online && (
+          <div className="srv-offline-note">
+            <span className="srv-offline-ic">🔴</span>
+            <span>
+              <b>{t('Сервер недоступен')}</b>{' '}
+              {t('— агент молчит {ago}. Всё, что ниже, — последние данные, снятые тогда же.', { ago: fmtRel(s.last_seen) })}
+            </span>
+          </div>
+        )}
+        <div className="srv-meta srv-meta-line">
+          <span className="srv-meta-item" title={kube.version}>
+            <span className="srv-meta-k">Kubernetes</span> {(kube.version || '—').split('+')[0]}
+            {kube.flavor ? ` (${kube.flavor})` : ''}
+          </span>
+          {kube.access && (
+            <>
+              <span className="srv-meta-item"><span className="srv-meta-k">namespace</span> {kube.namespaces ?? 0}</span>
+              <span className="srv-meta-item"><span className="srv-meta-k">{t('нод')}</span> {nodes.length}</span>
+              <span className="srv-meta-item"><span className="srv-meta-k">{t('подов')}</span> {podsActive}</span>
+            </>
+          )}
+          <span className="srv-meta-item">
+            <span className="srv-meta-k">{t('обновлено')}</span> {fmtRel(s.last_seen)}
+          </span>
+        </div>
+        <div className="srv-layout" ref={layoutRef}>
+          <CardNav secs={secs} active={cur.id} info={info} onGo={go} />
+          <div className="srv-main">
+            <div className="srv-main-head">
+              <h4>{t(cur.label)}</h4>
+              {KUBE_FILTER.has(cur.id) && (
+                <div className="modal-toolbar srv-head-tools">
                   <input
                     className="checks-search modal-search"
                     placeholder={t('Фильтр: имя, namespace…')}
                     value={q}
                     onChange={(e) => setQ(e.target.value)}
                   />
-                  {(curTab === 'pods' || curTab === 'finished') && (
+                  {(cur.id === 'pods' || cur.id === 'finished') && (
                     <select className="modal-sort" value={sort} onChange={(e) => setSort(e.target.value as typeof sort)}>
                       <option value="state">{t('сорт: статус')}</option>
                       <option value="name">{t('сорт: имя')}</option>
@@ -705,68 +786,75 @@ function KubeHostModal({
                   )}
                 </div>
               )}
-              {curTab === 'pods' && (hygiene.nolim > 0 || hygiene.noprobe > 0) && (
-                <div className="net-note">
-                  {t('Без лимита памяти: {a}, без проб: {b}. Не авария, но под без лимита может съесть ноду, а без проб зависший под никто не перезапустит.', {
-                    a: hygiene.nolim,
-                    b: hygiene.noprobe,
-                  })}
+            </div>
+
+            {cur.id === 'overview' && overview}
+
+            {(cur.id === 'pods' || cur.id === 'finished') && (
+              <div className="srv-sec">
+                {cur.id === 'finished' && (
+                  <p className="muted small kube-hint">
+                    {t('Завершённые Job/CronJob-поды — историческая запись, а не живой воркоад. Их не нужно чинить; удалите под, чтобы убрать из списка.')}
+                  </p>
+                )}
+                {cur.id === 'pods' && (hygiene.nolim > 0 || hygiene.noprobe > 0) && (
+                  <div className="net-note">
+                    {t('Без лимита памяти: {a}, без проб: {b}. Не авария, но под без лимита может съесть ноду, а без проб зависший под никто не перезапустит.', {
+                      a: hygiene.nolim,
+                      b: hygiene.noprobe,
+                    })}
+                  </div>
+                )}
+                <div className="loc-results docker-clist">
+                  {pods.length === 0
+                    ? empty(t('Подов нет'))
+                    : fpods.length === 0
+                      ? empty(t('Ничего не найдено.'))
+                      : fpods.map((p) => (
+                          <PodRow
+                            key={p.ns + '/' + p.name}
+                            serverId={s.id}
+                            p={p}
+                            canAct={canAct}
+                            onLogs={() => setLogsPod(p)}
+                            onChanged={onChanged}
+                            day={s.restarts_day?.[`pod:${p.ns}/${p.name}`] ?? 0}
+                          />
+                        ))}
                 </div>
-              )}
-              {curTab === 'cron' && failedJobs.length > 0 && (
-                <div className="net-prob">
-                  {t('Упавшие за неделю Job, запущенные не по расписанию (миграции, разовые задачи): {n}', { n: failedJobs.length })}
-                </div>
-              )}
-              {curTab === 'flux' && fluxBroken.length > 0 && (
-                <div className="net-prob">
-                  {t('Доставка Flux встала: {n} ресурс(ов) не в Ready. Уже запущенное продолжает работать — по метрикам это не видно.', {
-                    n: fluxBroken.length,
-                  })}
-                </div>
-              )}
-              {curTab === 'nodes' && unmon.size > 0 && (
-                <div className="net-note">
-                  {t('Нод без агента: {n}. На них панель не видит диски, SMART, упавшие юниты и процессы - только то, что отдает Kubernetes.', { n: unmon.size })}
-                </div>
-              )}
-              <div className="loc-results docker-clist docker-clist-scroll">
-                {(curTab === 'pods' || curTab === 'finished') &&
-                  (pods.length === 0 ? (
-                    <div className="muted small">{t('Подов нет')}</div>
-                  ) : fpods.length === 0 ? (
-                    <div className="muted small">{t('Ничего не найдено.')}</div>
-                  ) : (
-                    fpods.map((p) => (
-                      <PodRow
-                        key={p.ns + '/' + p.name}
-                        serverId={s.id}
-                        p={p}
-                        canAct={canAct}
-                        onLogs={() => setLogsPod(p)}
-                        onChanged={onChanged}
-                        day={s.restarts_day?.[`pod:${p.ns}/${p.name}`] ?? 0}
-                      />
-                    ))
-                  ))}
-                {curTab === 'workloads' &&
-                  (workloads.length === 0 ? (
-                    <div className="muted small">{t('Воркоадов нет')}</div>
-                  ) : fworkloads.length === 0 ? (
-                    <div className="muted small">{t('Ничего не найдено.')}</div>
-                  ) : (
-                    fworkloads.map((w) => (
-                      <WorkloadRow
-                        key={w.kind + '/' + w.ns + '/' + w.name}
-                        serverId={s.id}
-                        w={w}
-                        canAct={canAct}
-                        onChanged={onChanged}
-                      />
-                    ))
-                  ))}
-                {curTab === 'cron' &&
-                  failedJobs.map((j) => (
+              </div>
+            )}
+
+            {cur.id === 'workloads' && (
+              <div className="loc-results docker-clist">
+                {workloads.length === 0
+                  ? empty(t('Воркоадов нет'))
+                  : fworkloads.length === 0
+                    ? empty(t('Ничего не найдено.'))
+                    : fworkloads.map((w) => (
+                        <WorkloadRow
+                          key={w.kind + '/' + w.ns + '/' + w.name}
+                          serverId={s.id}
+                          w={w}
+                          canAct={canAct}
+                          onChanged={onChanged}
+                        />
+                      ))}
+              </div>
+            )}
+
+            {cur.id === 'cron' && (
+              <div className="srv-sec">
+                <p className="muted small kube-hint">
+                  {t('Задания по расписанию: последний запуск и последний успешный. Упавший или переставший отрабатывать CronJob дает алерт.')}
+                </p>
+                {failedJobs.length > 0 && (
+                  <div className="net-prob">
+                    {t('Упавшие за неделю Job, запущенные не по расписанию (миграции, разовые задачи): {n}', { n: failedJobs.length })}
+                  </div>
+                )}
+                <div className="loc-results docker-clist">
+                  {failedJobs.map((j) => (
                     <div className="loc-res docker-row t-down" key={`job/${j.ns}/${j.name}/${j.ts ?? 0}`}>
                       <span className="lk-dot lk-dot-bad" />
                       <div className="docker-c-main">
@@ -781,8 +869,7 @@ function KubeHostModal({
                       <div className="docker-c-status mono small t-down">{j.reason || 'Failed'}</div>
                     </div>
                   ))}
-                {curTab === 'cron' &&
-                  cronjobs
+                  {cronjobs
                     .filter((c) => !ql || `${c.ns}/${c.name} ${c.image ?? ''}`.toLowerCase().includes(ql))
                     .map((c) => {
                       const key = `${c.ns}/${c.name}`
@@ -811,60 +898,22 @@ function KubeHostModal({
                         </div>
                       )
                     })}
-                {curTab === 'expiry' &&
-                  expiry.map((e) => {
-                    const d = daysLeft(e.expires)
-                    const tone = expiryTone(d, horizon)
-                    return (
-                      <div className={`loc-res docker-row ${tone}`} key={e.kind + '/' + e.where + '/' + (e.note ?? '')}>
-                        <span className={`lk-dot${DOT[tone] ?? ' lk-dot-ok'}`} />
-                        <div className="docker-c-main">
-                          <div className="docker-c-name mono">
-                            {e.where}
-                            <span className="type-chip">{t(EXPIRY_KIND[e.kind] ?? e.kind)}</span>
-                          </div>
-                          <div className="docker-c-img mono muted small">
-                            {new Date(e.expires * 1000).toLocaleDateString()}
-                            {e.note ? ` · ${e.note}` : ''}
-                          </div>
-                        </div>
-                        <div className={`docker-c-status mono small ${tone}`}>
-                          {d < 0 ? t('истёк') : d === 0 ? t('сегодня') : t('{n} дн.', { n: d })}
-                        </div>
-                      </div>
-                    )
-                  })}
-                {curTab === 'flux' && (
-                  <>
-                    {fflux.length === 0 && <div className="muted small">{t('Ничего не найдено.')}</div>}
-                    {fflux.map((f) => {
-                      const tone = f.ready ? 't-up' : FLUX_TRANSIENT.has(f.reason ?? '') ? '' : 't-down'
-                      return (
-                        <div className={`loc-res docker-row ${tone}`} key={f.kind + '/' + f.where}>
-                          <span className={`lk-dot${DOT[tone] ?? ''}`} />
-                          <div className="docker-c-main">
-                            <div className="docker-c-name mono">
-                              {f.where}
-                              <span className="type-chip">{f.kind}</span>
-                            </div>
-                            <div className="docker-c-img mono muted small">
-                              {f.reason || ''}
-                              {f.message ? ` · ${f.message}` : ''}
-                            </div>
-                          </div>
-                          <div className={`docker-c-status mono small ${f.ready ? 't-up' : 't-down'}`}>
-                            {f.ready ? 'Ready' : 'NotReady'}
-                          </div>
-                        </div>
-                      )
-                    })}
-                  </>
+                </div>
+              </div>
+            )}
+
+            {cur.id === 'nodes' && (
+              <div className="srv-sec">
+                {unmon.size > 0 && (
+                  <div className="net-note">
+                    {t('Нод без агента: {n}. На них панель не видит диски, SMART, упавшие юниты и процессы - только то, что отдает Kubernetes.', { n: unmon.size })}
+                  </div>
                 )}
-                {curTab === 'nodes' &&
-                  nodes.map((n) => {
+                <div className="loc-results docker-clist">
+                  {nodes.map((n) => {
                     const tone = !n.ready ? 't-down' : (n.pressure ?? []).length ? 't-degraded' : 't-up'
                     return (
-                      <div className={`loc-res docker-row ${n.ready && !(n.pressure ?? []).length ? 't-up' : 't-down'}`} key={n.name}>
+                      <div className={`loc-res docker-row ${tone}`} key={n.name}>
                         <span className={`lk-dot${DOT[tone]}`} />
                         <div className="docker-c-main">
                           <div className="docker-c-name mono">
@@ -919,9 +968,79 @@ function KubeHostModal({
                       </div>
                     )
                   })}
+                </div>
               </div>
-            </div>
-          )}
+            )}
+
+            {cur.id === 'expiry' && (
+              <div className="srv-sec">
+                <p className="muted small kube-hint">
+                  {t('Сертификаты, kubeconfig-и и токены Flux с их сроками. Собирает root-хелпер на самой ноде: панель токенов не видит.')}
+                </p>
+                <div className="loc-results docker-clist">
+                  {expiry.map((e) => {
+                    const d = daysLeft(e.expires)
+                    const tone = expiryTone(d, horizon)
+                    return (
+                      <div className={`loc-res docker-row ${tone}`} key={e.kind + '/' + e.where + '/' + (e.note ?? '')}>
+                        <span className={`lk-dot${DOT[tone] ?? ' lk-dot-ok'}`} />
+                        <div className="docker-c-main">
+                          <div className="docker-c-name mono">
+                            {e.where}
+                            <span className="type-chip">{t(EXPIRY_KIND[e.kind] ?? e.kind)}</span>
+                          </div>
+                          <div className="docker-c-img mono muted small">
+                            {new Date(e.expires * 1000).toLocaleDateString()}
+                            {e.note ? ` · ${e.note}` : ''}
+                          </div>
+                        </div>
+                        <div className={`docker-c-status mono small ${tone}`}>{daysText(d)}</div>
+                      </div>
+                    )
+                  })}
+                </div>
+              </div>
+            )}
+
+            {cur.id === 'flux' && (
+              <div className="srv-sec">
+                <p className="muted small kube-hint">
+                  {t('Ресурсы Flux и их готовность. Не в Ready — доставка встала: запущенное продолжает работать, а новые изменения из git не доезжают.')}
+                </p>
+                {fluxBroken.length > 0 && (
+                  <div className="net-prob">
+                    {t('Доставка Flux встала: {n} ресурс(ов) не в Ready. Уже запущенное продолжает работать — по метрикам это не видно.', {
+                      n: fluxBroken.length,
+                    })}
+                  </div>
+                )}
+                <div className="loc-results docker-clist">
+                  {fflux.length === 0 && empty(t('Ничего не найдено.'))}
+                  {fflux.map((f) => {
+                    const tone = f.ready ? 't-up' : FLUX_TRANSIENT.has(f.reason ?? '') ? '' : 't-down'
+                    return (
+                      <div className={`loc-res docker-row ${tone}`} key={f.kind + '/' + f.where}>
+                        <span className={`lk-dot${DOT[tone] ?? ''}`} />
+                        <div className="docker-c-main">
+                          <div className="docker-c-name mono">
+                            {f.where}
+                            <span className="type-chip">{f.kind}</span>
+                          </div>
+                          <div className="docker-c-img mono muted small">
+                            {f.reason || ''}
+                            {f.message ? ` · ${f.message}` : ''}
+                          </div>
+                        </div>
+                        <div className={`docker-c-status mono small ${f.ready ? 't-up' : 't-down'}`}>
+                          {f.ready ? 'Ready' : 'NotReady'}
+                        </div>
+                      </div>
+                    )
+                  })}
+                </div>
+              </div>
+            )}
+          </div>
         </div>
       </div>
       {logsPod && <PodLogsModal server={s} pod={logsPod} onClose={() => setLogsPod(null)} />}
@@ -1244,6 +1363,7 @@ export function KuberPage({
       )}
       {open && (
         <KubeHostModal
+          key={open.s.id}
           server={open.s}
           kube={open.d}
           canAct={!isViewer && open.d.access}

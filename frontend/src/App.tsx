@@ -88,10 +88,12 @@ export default function App() {
   const [openServerId, setOpenServerId] = useState<number | null>(() => urlNum('server'))
   const [openDockerId, setOpenDockerId] = useState<number | null>(() => urlNum('docker'))
   const [openKubeId, setOpenKubeId] = useState<number | null>(() => urlNum('kube'))
-  // ?kube=<id>&ktab=expiry - из алерта про сроки: кластер сразу на вкладке "Сроки"
-  const [openKubeTab, setOpenKubeTab] = useState<string | null>(
-    () => new URLSearchParams(window.location.search).get('ktab'),
-  )
+  // ?kube=<id>&ktab=expiry - из алерта про сроки: кластер сразу в разделе "Сроки". ?sec= пишет
+  // сама карточка кластера, по нему открываем после F5 и по отправленной ссылке
+  const [openKubeTab, setOpenKubeTab] = useState<string | null>(() => {
+    const p = new URLSearchParams(window.location.search)
+    return p.get('ktab') ?? (p.get('kube') ? p.get('sec') : null)
+  })
   const [openBackupId, setOpenBackupId] = useState<number | null>(() => urlNum('backup'))
   const [openBackupSrvId, setOpenBackupSrvId] = useState<number | null>(() => urlNum('backupsrv'))
   // ?services=<id>[&queues=1] — из алерта по очереди RabbitMQ: открыть ноду и сразу очереди

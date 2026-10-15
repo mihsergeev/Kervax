@@ -1,4 +1,4 @@
-import { Fragment, type ReactNode, useCallback, useEffect, useRef, useState } from 'react'
+import { type ReactNode, useCallback, useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import {
   agentUpdate,
@@ -55,6 +55,7 @@ import { OsIcon } from './osIcon'
 import { CountryFlag } from './CountryFlag'
 import { currentLang, useI18n } from './i18n'
 import { useUrlCard, useUrlParam } from './deeplink'
+import { CardNav, FreshChip, OvAreas, OvRows, secInfoOf, type SecDef, type SecInfo, type SecItem } from './cardLayout'
 import { fmtBytes, rateUnits, timeUnits } from './units'
 import {
   MuteChip,
@@ -538,7 +539,7 @@ function fmtUptime(s?: number): string {
   const [D, H, M] = en ? ['d', 'h', 'm'] : ['д', 'ч', 'м']
   return d > 0 ? `${d}${D} ${h}${H}` : h > 0 ? `${h}${H} ${m}${M}` : `${m}${M}`
 }
-function fmtRel(iso: string | null): string {
+export function fmtRel(iso: string | null): string {
   if (!iso) return '—'
   const sec = Math.max(0, (Date.now() - new Date(iso).getTime()) / 1000)
   const ago = (n: number, ru: string, en: string) =>
@@ -757,8 +758,7 @@ const SRV_WINDOWS: { label: string; hours: number }[] = [
 
 // Разделы карточки сервера: меню слева по группам, на экране один раздел. Раньше все шло одной
 // лентой, а над ней копились заметка, зависимости, заглушки, обновления ОС и плитки, и меню
-// уезжало под них. group - подпись группы в меню (у сводки ее нет)
-type SecDef = { id: string; label: string; group: string }
+// уезжало под них. Меню, карта и строки сводки общие с остальными карточками (cardLayout)
 const DETAIL_SECTIONS: SecDef[] = [
   { id: 'overview', label: 'Сводка', group: '' },
   { id: 'cpu', label: 'CPU', group: 'Ресурсы' },
@@ -807,14 +807,6 @@ function secOfLink(sec?: string | null): string | null {
   return SEC_IDS.has(sec) ? sec : (SEC_OF_CARD[sec] ?? null)
 }
 
-// Состояние раздела для меню и сводки: level - самое серьезное замечание (0 - все в порядке),
-// n - число замечаний у пункта меню, line - строка на карте сервера: первое замечание или
-// коротко, что там; idle - данных нет (helper не стоит, снаружи не проверяли), точка серая;
-// fresh - с какого момента видна самая новая проблема раздела, если она появилась меньше суток назад
-type SecInfo = { level: 0 | 1 | 2; n: number; line: string; idle?: boolean; fresh?: string }
-// "новое" - проблема появилась меньше суток назад: так одинаково у всех, без "с прошлого захода"
-const FRESH_MS = 24 * 3600_000
-
 // Замечания и строка по разделам. Проблемы те же, что в "Что сломано" (srvIssues), советы - те
 // же, что в "Требует действий" на главной. Уязвимости только справка, но на карте видно, что
 // они есть. Проблемы, которые разбираются в другом разделе панели (Бэкапы, Кубер), сюда не
@@ -830,7 +822,7 @@ function serverSecInfo(c: {
 }): Record<string, SecInfo> {
   const { s, t, issues } = c
   const r = s.last_report ?? {}
-  const items: Record<string, { level: 1 | 2; text: string; since?: string | null }[]> = {}
+  const items: Record<string, SecItem[]> = {}
   const add = (sec: string, level: number, text: string, since?: string | null) =>
     (items[sec] ??= []).push({ level: level >= 2 ? 2 : 1, text, since })
   for (const i of issues) {
@@ -899,20 +891,7 @@ function serverSecInfo(c: {
   ].filter(Boolean).join(', ')
 
   const out: Record<string, SecInfo> = {}
-  for (const { id } of DETAIL_SECTIONS) {
-    const xs = items[id] ?? []
-    const fresh = xs
-      .map((x) => x.since ?? '')
-      .filter((x) => x && Date.now() - Date.parse(x) < FRESH_MS)
-      .sort()
-      .pop()
-    out[id] = {
-      level: xs.reduce<0 | 1 | 2>((a, x) => (x.level > a ? x.level : a), 0),
-      n: xs.length,
-      line: xs.length ? xs[0].text + (xs.length > 1 ? ` ${t('и еще {n}', { n: xs.length - 1 })}` : '') : (ok[id] ?? ''),
-      fresh,
-    }
-  }
+  for (const { id } of DETAIL_SECTIONS) out[id] = secInfoOf(items[id] ?? [], ok[id] ?? '', t)
   // справка и заглушки - желтым, но не проблемой: на карте видно, что там не пусто
   if (v?.release && v.feed_ts && v.summary.pkgs)
     out.vulns = { level: 1, n: v.summary.pkgs, line: t('важных CVE: {n}, пакетов: {p}', { n: v.summary.cves, p: v.summary.pkgs }) }
@@ -923,13 +902,6 @@ function serverSecInfo(c: {
     !parent && !behind && !c.kids.length && 'deps']
   for (const id of idle) if (id && !out[id].level) out[id].idle = true
   return out
-}
-
-// "новое · 2 ч": проблема раздела появилась меньше суток назад
-function FreshChip({ since }: { since: string }) {
-  const { t } = useI18n()
-  const ago = sinceShort(since, t)
-  return <span className="srv-new" title={new Date(since).toLocaleString()}>{ago ? `${t('новое')} · ${ago}` : t('новое')}</span>
 }
 
 // "За сутки" на сводке: сколько проблем появилось, сколько ушло и сколько было изменений на
@@ -969,43 +941,6 @@ function DayBlock({ day, onMore }: { day: TimelineResult | null; onMore: () => v
         </div>
       ))}
     </div>
-  )
-}
-
-// Меню разделов: группы подписями, у пункта с замечаниями число цветом самого серьезного.
-// На телефоне - лентой над разделом, текущий пункт подкручивается в видимую часть
-function SrvNav({ secs, active, info, onGo }: {
-  secs: SecDef[]
-  active: string
-  info: Record<string, SecInfo>
-  onGo: (id: string) => void
-}) {
-  const { t } = useI18n()
-  const ref = useRef<HTMLElement>(null)
-  useEffect(() => {
-    const nav = ref.current
-    const el = nav?.querySelector<HTMLElement>('.srv-nav-item.active')
-    if (!nav || !el || nav.scrollWidth <= nav.clientWidth) return
-    nav.scrollLeft = el.offsetLeft - nav.clientWidth / 2 + el.offsetWidth / 2
-  }, [active])
-  return (
-    <nav className="srv-nav" ref={ref} aria-label={t('Разделы')}>
-      {secs.map((s, i) => {
-        const x = info[s.id]
-        return (
-          <Fragment key={s.id}>
-            {s.group && s.group !== secs[i - 1]?.group && <div className="srv-nav-grp">{t(s.group)}</div>}
-            <button className={`srv-nav-item${active === s.id ? ' active' : ''}`} onClick={() => onGo(s.id)}>
-              <span className="srv-nav-label">{t(s.label)}</span>
-              {x?.fresh && <span className="srv-new">{t('новое')}</span>}
-              {x && x.n > 0 && x.level > 0 && (
-                <span className={`srv-nav-n srv-nav-n-${x.level >= 2 ? 'bad' : 'warn'}`}>{x.n}</span>
-              )}
-            </button>
-          </Fragment>
-        )
-      })}
-    </nav>
   )
 }
 
@@ -5731,42 +5666,27 @@ function ServerDetail({
           </div>
         </div>
       ))}
-      {ovIssues.length > 0 && (
-        <div className="ov-issues">
-          {ovIssues.map((i, n) => (
-            <div key={n} className="ov-issue">
-              <span className={`lk-dot ${i.tone === 't-down' ? 'lk-dot-bad' : 'lk-dot-warn'}`} />
-              <span className="ov-issue-text">{i.text}</span>
-              {sinceShort(i.since, t) && <span className="muted small">{sinceShort(i.since, t)}</span>}
-              {i.section && onOpenSection && (
-                <button className="ghost small row-act" onClick={() => onOpenSection(i.section!, i.srv, i.sec)}>
-                  {t(SECTION_LABEL[i.section] ?? i.section)} ›
-                </button>
-              )}
-            </div>
-          ))}
-        </div>
-      )}
+      <OvRows
+        rows={ovIssues.map((i) => ({
+          tone: i.tone,
+          text: i.text,
+          since: i.since,
+          act: i.section && onOpenSection
+            ? { label: t(SECTION_LABEL[i.section] ?? i.section), onClick: () => onOpenSection(i.section!, i.srv, i.sec) }
+            : undefined,
+        }))}
+      />
       <DayBlock day={day} onMore={() => go('timeline')} />
       <SrvTiles r={r} M={M} info={info} onGo={go} />
-      <div className="ov-cap">{t('Сервер по областям')}</div>
-      <div className="ov-areas">
-        {AREA_SECS.filter((id) => secs.some((x) => x.id === id)).map((id) => {
-          const x = info[id]
-          const def = DETAIL_SECTIONS.find((d) => d.id === id)!
-          const lv = x.level >= 2 ? 'bad' : x.level ? 'warn' : ''
-          return (
-            <button key={id} className={`ov-area${lv ? ` ov-area-${lv}` : ''}`} onClick={() => go(id)}>
-              <span className="ov-area-h">
-                <span>{t(def.label)}</span>
-                {x.fresh && <FreshChip since={x.fresh} />}
-                <span className={`lk-dot${lv ? ` lk-dot-${lv}` : x.line && !x.idle ? ' lk-dot-ok' : ''}`} />
-              </span>
-              <span className="ov-area-s">{x.line || '—'}</span>
-            </button>
-          )
-        })}
-      </div>
+      <OvAreas
+        cap={t('Сервер по областям')}
+        items={AREA_SECS.filter((id) => secs.some((x) => x.id === id)).map((id) => ({
+          id,
+          label: DETAIL_SECTIONS.find((d) => d.id === id)!.label,
+          info: info[id],
+        }))}
+        onGo={go}
+      />
     </div>
   )
 
@@ -5934,7 +5854,7 @@ function ServerDetail({
           </div>
         ) : (
         <div className="srv-layout" ref={layoutRef}>
-          <SrvNav secs={secs} active={active} info={info} onGo={go} />
+          <CardNav secs={secs} active={active} info={info} onGo={go} />
           <div className="srv-main">
             <div className="srv-main-head">
               <h4>{t(cur.label)}</h4>

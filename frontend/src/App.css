@@ -3534,6 +3534,9 @@ button.srv-nav-item.active {
   font-weight: 650;
 }
 .srv-main-head .win-switch { margin-left: auto; }
+/* фильтр и сортировка списка - в шапке раздела справа */
+.srv-main-head > .modal-toolbar.srv-head-tools { flex: 1 1 18rem; max-width: 28rem; margin: 0 0 0 auto; }
+.srv-sec > .kube-hint { margin: 0; }
 .srv-sec {
   display: flex;
   flex-direction: column;
