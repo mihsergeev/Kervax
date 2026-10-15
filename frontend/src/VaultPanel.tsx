@@ -255,8 +255,8 @@ export function VaultPanel({ servers }: { servers: Server[] }) {
   if (meta === null) return null
 
   return (
-    <div className="vault-box">
-      <div className="backup-manage-head">🔐 {t('Доступы к бэкапам')}</div>
+    <div className="chart-card vault-box">
+      <div className="chart-cap vault-cap">{t('Доступы к бэкапам')}</div>
       {!meta.salt ? (
         <>
           <div className="muted small vault-hint">

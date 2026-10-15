@@ -777,9 +777,6 @@ input:focus {
 .backup-notes {
   margin: 0.5rem 0;
 }
-.backup-clients-head {
-  margin-top: 0.6rem;
-}
 .backup-enable {
   margin-top: 0.6rem;
   display: flex;
@@ -1446,19 +1443,6 @@ button.srv-tile-btn:hover .net-tile { border-color: var(--border-strong); backgr
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-/* «подвал» опнутых из бэкапа — отделён сверху и приглушён, чтобы не мозолил */
-.nobackup-optout {
-  margin-top: 1.1rem;
-  padding-top: 0.5rem;
-  border-top: 1px dashed var(--border);
-  opacity: 0.75;
-}
-/* аудит покрытия бэкапа в модалке ноды */
-.coverage-audit {
-  margin-top: 0.9rem;
-  padding-top: 0.6rem;
-  border-top: 1px solid var(--border);
-}
 .coverage-group {
   margin: 0.4rem 0 0.6rem;
 }
@@ -1493,15 +1477,6 @@ button.srv-tile-btn:hover .net-tile { border-color: var(--border-strong); backgr
 }
 .repo-cleanup .agent-advice-cmd {
   margin: 0.35rem 0;
-}
-/* подвал страницы «Бэкапы»: осознанно снятые ноды — отбиваем сильнее и уводим вниз */
-.backup-optout-footer {
-  margin-top: 2rem;
-}
-.backup-optout-footer .optout-toggle {
-  margin-left: auto;
-  padding: 0.15rem 0.5rem;
-  font-size: 0.8rem;
 }
 /* галочка «бэкапить не требуется» в строке без бэкапа */
 .nobackup-check {
@@ -1951,7 +1926,7 @@ button.srv-tile-btn:hover .net-tile { border-color: var(--border-strong); backgr
 body {
   background:
     radial-gradient(1100px 420px at 50% -120px, rgba(53, 99, 233, 0.08), transparent 70%),
-    var(--bg);
+    var(--bg-page);
   background-attachment: fixed;
 }
 
@@ -4848,9 +4823,6 @@ button.svc-site-on:hover {
 .own-backups {
   margin-top: 0.9rem;
 }
-.own-backups-lead {
-  margin: 0.15rem 0 0.5rem;
-}
 .own-backups-list {
   display: flex;
   flex-direction: column;
@@ -4894,11 +4866,6 @@ button.svc-site-on:hover {
 }
 .own-backup-ignored {
   opacity: 0.6;
-}
-.own-only-row {
-  width: 100%;
-  text-align: left;
-  cursor: pointer;
 }
 .brand-dark-actions {
   display: flex;
@@ -5231,12 +5198,9 @@ button.adopt-mark {
 }
 /* сейф доступов: визуально отдельный блок — это не сводка, а хранилище ключей */
 .vault-box {
-  margin: 1.25rem 0 0;
-  padding: 0.8rem 1rem;
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  background: var(--bg-card);
+  margin: 1rem 0 0;
 }
+.vault-cap { margin-bottom: 0.5rem; }
 .vault-hint {
   margin-bottom: 0.6rem;
   max-width: 60rem;
@@ -5389,21 +5353,6 @@ button.adopt-mark {
   cursor: help;
 }
 
-/* Заполнение тома с репозиториями — над чипами бэкап-сервера: кончившееся место
-   останавливает бэкапы всего парка, поэтому смотреть на это надо первым делом. */
-.bs-storage {
-  margin: 10px 0 2px;
-}
-.bs-storage-top {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 10px;
-  margin-bottom: 4px;
-  flex-wrap: wrap;
-}
-
-/* «без алерта» у инцидента: приглушённая метка — это не ошибка, а следствие порога */
 .inc-noalert {
   opacity: 0.75;
   cursor: help;
@@ -6465,6 +6414,19 @@ button.dm-sec-btn {
 .net-card.net-card-bad { border-color: rgba(239, 68, 68, 0.45); }
 .hs-svc-title { display: flex; align-items: center; gap: 0.4rem; font-weight: 600; }
 .hs-modal .svc-db, .hs-modal .svc-sites, .hs-modal .queue-alert-cfg { margin: 0; }
+/* "Бэкапы": подпись "Клиенты" между карточками, подвал "не требуется", блоки модалок в карточках */
+.net-cards > .hs-sect { flex-basis: 100%; margin: 0.35rem 0 -0.35rem; }
+.net-cards > .hs-optout { opacity: 0.8; margin-top: 0.6rem; }
+.loc-res.hs-nb { flex-wrap: wrap; }
+.hs-nb .nobackup-actions { flex-wrap: wrap; max-width: 100%; margin-left: auto; }
+.hs-tile-act { margin-top: 0.35rem; display: flex; flex-wrap: wrap; align-items: center; gap: 0.3rem; font-size: 0.72rem; }
+.hs-tile-act .restic-update-btn { padding: 3px 9px; font-size: 0.75rem; white-space: normal; max-width: 100%; text-align: left; }
+/* мета репозитория переносится, а не обрезается краем строки (на телефоне резалась на полуслове) */
+.hs-modal .repo-row, .hs-modal .repo-row .repo-meta { white-space: normal; }
+.hs-modal .kv-list, .hs-modal .growth-wrap, .hs-modal .backup-enable { margin: 0; }
+.hs-modal .backup-manage, .hs-modal .restore-info { margin-top: 0; padding-top: 0; border-top: 0; }
+.net-card .coverage-group { margin: 0; }
+.hs-modal .repo-row.t-down { border-color: rgba(239, 68, 68, 0.45); }
 /* в строках контейнеров тон показывает точка, цветная полоса слева не нужна */
 .hs-modal .docker-row { border-left-width: 1px; border-left-color: var(--border); }
 .hs-modal .docker-row.docker-row-down { border-color: rgba(239, 68, 68, 0.45); }
@@ -6475,6 +6437,8 @@ button.dm-sec-btn {
 .hs-muted-list button { margin-left: 0.4rem; }
 /* на телефоне статус и кнопки контейнера - второй строкой, иначе имя и образ сжимались в ноль */
 @media (max-width: 560px) {
+  /* куда бэкапится - в карточке клиента, на телефоне колонка сжимала имя и мету в ноль */
+  .hs-host .backup-dest { display: none; }
   .hs-modal .docker-row { flex-wrap: wrap; row-gap: 0.4rem; }
   .hs-modal .docker-row .docker-c-main { flex: 1 1 calc(100% - 1.5rem); }
   .hs-modal .docker-row .docker-c-status { margin-left: 1.3rem; }
