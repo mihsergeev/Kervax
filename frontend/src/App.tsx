@@ -100,6 +100,11 @@ export default function App() {
     return p.get('ktab') ?? (p.get('kube') ? p.get('sec') : null)
   })
   const [openBackupId, setOpenBackupId] = useState<number | null>(() => urlNum('backup'))
+  // ?backup=<id>&sec=coverage - раздел окна бэкапа ноды (из алерта, с главной, после F5)
+  const [openBackupSec, setOpenBackupSec] = useState<string | null>(() => {
+    const p = new URLSearchParams(window.location.search)
+    return p.get('backup') ? p.get('sec') : null
+  })
   const [openBackupSrvId, setOpenBackupSrvId] = useState<number | null>(() => urlNum('backupsrv'))
   // ?services=<id>&sec=queues - раздел карточки сервисов ноды (из алерта, после F5). &queues=1 -
   // так вели в очереди старые алерты
@@ -131,7 +136,10 @@ export default function App() {
       }
       else if (sec === 'backups') {
         if (srv) setOpenBackupSrvId(id)
-        else setOpenBackupId(id)
+        else {
+          setOpenBackupId(id)
+          setOpenBackupSec(detailSec || null)
+        }
       }
     }
     setSection(sec)
@@ -554,8 +562,12 @@ export default function App() {
           <BackupsPage
             onUnauthorized={logout}
             openHostId={openBackupId}
+            openSec={openBackupSec}
             openSrvHostId={openBackupSrvId}
-            onConsumed={() => setOpenBackupId(null)}
+            onConsumed={() => {
+              setOpenBackupId(null)
+              setOpenBackupSec(null)
+            }}
             onSrvConsumed={() => setOpenBackupSrvId(null)}
           />
         ) : (

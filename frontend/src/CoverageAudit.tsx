@@ -70,8 +70,10 @@ function instLabel(inst: string): string {
 // Аудит покрытия: панель сверяет, что на ноде есть, с тем, что реально попадает в бэкап.
 // Две категории: ДЫРА (данных в бэкапе нет) и РИСК (данные есть, но восстановимость под
 // вопросом — живая СУБД). Алертов по этому намеренно нет: сначала смотрим, не шумит ли.
-export function CoverageAudit({ server: s, canManage, onChanged }: {
+export function CoverageAudit({ server: s, canManage, onChanged, onSchedule, bare = false }: {
   server: Server; canManage: boolean; onChanged: () => void
+  onSchedule?: () => void // открыть раздел "Расписание и пути" окна бэкапа
+  bare?: boolean // без своего заголовка: он уже в шапке раздела окна
 }) {
   const { t } = useI18n()
   const [busy, setBusy] = useState(false)
@@ -355,9 +357,11 @@ export function CoverageAudit({ server: s, canManage, onChanged }: {
   const showCols = risks.length > 0 || okItems.length > 0 || (dbSelfManaged && dbRisks.length > 0)
   return (
     <div className="chart-card net-card net-card-wide coverage-audit cov-card">
-      <div className="net-head">
-        <div className="chart-cap net-cap">{t('Покрытие')}</div>
-      </div>
+      {!bare && (
+        <div className="net-head">
+          <div className="chart-cap net-cap">{t('Покрытие')}</div>
+        </div>
+      )}
       {showCols && (
         <div className="net-tiles">
           <NetTile label={t('Баз на ноде')} value={String(live.filter(isDb).length)}
@@ -427,10 +431,11 @@ export function CoverageAudit({ server: s, canManage, onChanged }: {
                     : bk?.schedule
                       ? t('дамп снимается перед бэкапом в {time}', { time: bk.schedule })
                       : t('дамп снимается перед каждым бэкапом')}
-                  {!dumpsAreLocalOnly && hasSchedule && (
+                  {!dumpsAreLocalOnly && (hasSchedule || onSchedule) && (
                     <>
                       {' · '}
                       <button className="linklike" onClick={() => {
+                        if (onSchedule) return onSchedule()
                         document.getElementById('backup-manage-schedule')
                           ?.scrollIntoView({ behavior: 'smooth', block: 'center' })
                       }}>

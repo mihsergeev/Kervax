@@ -423,7 +423,7 @@ function actionItems(servers: Server[], avail: string, relProblem: string, t: T)
       // всё про бэкап живёт в разделе «Бэкапы»; там модалка открывается для ЛЮБОЙ ноды —
       // клиента, бэкап-сервера или вообще без бэкапа (иначе пункт вёл бы в пустоту)
       const db = dbs.map((x) => x.subject).join(', ')
-      items.push({ key: `dbdump-${s.id}`, icon: '🛢', section: 'backups', id: s.id, name: s.name, cc: s.country,
+      items.push({ key: `dbdump-${s.id}`, icon: '🛢', section: 'backups', id: s.id, name: s.name, cc: s.country, sec: 'coverage',
         grp: 'dbdump', detail: db, text: t('{name}: {db} — нужен отдельный дамп', { name: s.name, db }) })
     }
     // ОС: конец поддержки, перезагрузка, обновления безопасности - по пункту на вид совета:

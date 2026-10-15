@@ -268,6 +268,10 @@ _DISK_ICON = {1: "⚠️", 2: "🔴", 3: "🚨"}
 # раздел карточки Docker-ноды по алерту: контейнеры или ключи от хоста
 _DOCKER_SEC = {"docker_loop": "containers", "docker_down": "containers", "docker_restarts": "containers",
                "docker_sock": "host", "docker_risk": "host"}
+# раздел окна бэкапа ноды по алерту
+_BACKUP_SEC = {"backup_failed": "runs", "backup_stale": "runs", "backup_growth": "runs", "backup_dump": "coverage",
+               "backup_dump_space": "coverage", "backup_cron": "coverage", "backup_restore": "restore",
+               "backup_custom": "own"}
 # раздел карточки сервисов ноды по алерту и по проблеме
 _SVC_SEC = {"queue": "queues", "db_conn": "db", "db_health": "db", "web_config": "web", "web_cert": "certs"}
 _KUBE_TAB = {"kube_expiry": "expiry", "flux_down": "flux", "flux_stale": "flux", "kube_pod": "pods",
@@ -3334,16 +3338,16 @@ def server_problems(s: Server, now: datetime, pod_names: dict[str, str] | None =
     # дампа), пропущенный из-за места - сразу
     broken, _why, skipped, free = dump_issues(rep, now)
     if broken and state.get("backup_dump_from"):
-        add("backup_dump", 2, "дамп СУБД не обновляется: " + ", ".join(broken), "", "backup_dump",
+        add("backup_dump", 2, "дамп СУБД не обновляется: " + ", ".join(broken), "coverage", "backup_dump",
             state.get("backup_dump_since"), section="backups", srv=False)
     if skipped:
         add("backup_dump_space", 2, f"дамп пропущен, мало места (свободно {free}%): " + ", ".join(skipped),
-            "", "backup_dump_space", section="backups", srv=False)
+            "coverage", "backup_dump_space", section="backups", srv=False)
     if (rep.get("kube") or {}).get("access"):
         cron = _cron_dump_problems(rep, now)
         if cron:
             add("backup_cron", 2, "дамп-CronJob не отрабатывает: " + "; ".join(cron[:3])
-                + (f" и еще {len(cron) - 3}" if len(cron) > 3 else ""), "", "backup_cron",
+                + (f" и еще {len(cron) - 3}" if len(cron) > 3 else ""), "coverage", "backup_cron",
                 section="backups", srv=False)
         kc = sorted(f"{n} ({why})" for n, why in cron_job_issues(rep, now, dumps=False).items())
         if kc:
@@ -3384,7 +3388,7 @@ def server_problems(s: Server, now: datetime, pod_names: dict[str, str] | None =
     # Проверка восстановления бэкапа (helper backup-setup 0.34): ведет в "Бэкапы" клиента
     bv = backup_verify.problems(rep, now)
     if bv:
-        add("backup_restore", bv[0][0], "; ".join(t for _l, t in bv[:2]), "", "backup_restore",
+        add("backup_restore", bv[0][0], "; ".join(t for _l, t in bv[:2]), "restore", "backup_restore",
             section="backups", srv=False)
     # Пропал порт, который слушался неделями
     for x in listen_watch.problems(s, now):
@@ -5101,7 +5105,7 @@ async def evaluate_servers(
                    "backup_prune"):
             return f"{base}/?backupsrv={s.id}"
         if key.startswith("backup"):
-            return f"{base}/?backup={s.id}"
+            return f"{base}/?backup={s.id}" + (f"&sec={_BACKUP_SEC[key]}" if key in _BACKUP_SEC else "")
         sec = _SRV_SECTION.get(key)
         return f"{base}/?server={s.id}" + (f"&sec={sec}" if sec else "")
 
