@@ -84,7 +84,14 @@ AGENT_USER=kervax
 #       engine is read from the snapshot (its first megabytes decompress into a real dump).
 #       Result in report.d/backup-verify.json. A backup that runs every night but cannot be
 #       restored is the worst kind of backup, and nothing else shows it
-KERVAX_SETUP_VERSION=0.36  # MAJOR.MINOR; compared component-wise (0.13 > 0.2!)
+# 0.37: a metrics file of the node's own backup is read whole: every metric named after the file
+#       counts (ru_copy.prom -> ru_copy_*), not only the ones that say backup/dump/snapshot, and the
+#       last success is taken from *_last_success*/*_last_backup* first, then *_last_run*/*finish*,
+#       then any other timestamp. A cron job or a timer that writes such a file is a backup job even
+#       if nothing in its name says so, and the job gets its schedule. Before, a copy job that runs
+#       twice a week showed the time of the copied snapshot as its last success and no schedule,
+#       and the panel called it stale
+KERVAX_SETUP_VERSION=0.37  # MAJOR.MINOR; compared component-wise (0.13 > 0.2!)
 KERVAX_SETUP_ALWAYS=1  # safe on any node: installs only its own helper and spool and does not
                        # touch the backup configuration until the panel sends a command
 install -d -m 0755 "$HELPER_DIR" "$STATE_DIR" /var/lib/kervax/versions
@@ -1544,10 +1551,14 @@ cb_script_of() {
 cb_body() { [ -n "$1" ] && [ -f "$1" ] && grep -Iq . "$1" 2>/dev/null && head -c 65536 "$1" 2>/dev/null | tr -d '\000'; }
 
 # Metrics a backup script leaves for node_exporter. One file = one job; per-database series
-# become its "dbs". Status: *_ok/*_success must be 1, *_failed/*_errors must be 0; the stalest
-# *_last_success*/*timestamp* is the job's last success.
+# become its "dbs". A file is a backup job when a metric in it says backup/dump/snapshot; then every
+# metric named after the file counts as well ($2 - the file name without .prom). Status:
+# *_ok/*_success must be 1, *_failed/*_errors must be 0. The last success is the stalest
+# *_last_success*/*_last_backup*; without those - the stalest *_last_run*/*finish*, then any other
+# timestamp, and first_seen/created/start only as the last resort: a copy job also reports the time
+# of the snapshot it copied, and that is not when the job last succeeded.
 cb_prom_parse() {
-  awk '
+  awk -v pfx="${2:+${2}_}" '
     function lab(s, key) {
       if (match(s, key "=\"[^\"]*\"")) return substr(s, RSTART + length(key) + 2, RLENGTH - length(key) - 3)
       return ""
@@ -1560,13 +1571,19 @@ cb_prom_parse() {
       if (val == "") next
       ln = tolower(name)
       if (ln ~ /^restic_(last_backup|server)_/) next
-      if (ln !~ /backup|dump|snapshot|borg|walg|wal_g|pgbackrest|barman/) next
-      found = 1; names[name] = 1
+      own = (length(pfx) >= 5 && index(ln, tolower(pfx)) == 1)
+      if (ln ~ /backup|dump|snapshot|borg|walg|wal_g|pgbackrest|barman/) found = 1
+      else if (!own) next
+      names[name] = 1
       db = lab(labels, "db"); if (db == "") db = lab(labels, "database")
       lv = labels; gsub(/[a-zA-Z_][a-zA-Z0-9_]*="/, " ", lv); gsub(/"/, " ", lv); labtext = labtext " " lv
       v = val + 0
-      if (ln ~ /last_success|last_backup|last_run|timestamp/) {
-        if (v > 1000000000) { if (mints == 0 || v < mints) mints = v; if (db != "") { dbs[db] = 1; dbts[db] = v } }
+      if (ln ~ /last_success|last_backup|last_run|last_finish|finish|timestamp/) {
+        if (v > 1000000000) {
+          cls = (ln ~ /last_success|last_backup/) ? 1 : (ln ~ /last_run|finish/) ? 2 : (ln ~ /first_seen|created|start/) ? 4 : 3
+          if (!(cls in mt) || v < mt[cls]) mt[cls] = v
+          if (db != "") { dbs[db] = 1; dbts[db] = v }
+        }
       } else if (ln ~ /(_ok|_success|_succeeded)$/) {
         checks++; if (v != 1) bad++; if (db != "") { dbs[db] = 1; dbok[db] = v }
       } else if (ln ~ /(_failed|_failure|_failures|_errors?)$/) {
@@ -1579,6 +1596,7 @@ cb_prom_parse() {
     }
     END {
       if (!found) exit
+      mints = 0; for (c = 1; c <= 4; c++) if (c in mt) { mints = mt[c]; break }
       n = ""; for (k in names) n = n " " k; print "NAMES" n
       printf "TS %d\n", mints
       printf "OK %d %d\n", checks, bad
@@ -1850,9 +1868,9 @@ cmd_custom_scan() {
   for dir in "${CB_PROM_DIRS[@]}"; do
     for f in "$dir"/*.prom; do
       [ -f "$f" ] || continue
-      parsed="$(cb_prom_parse "$f")"
-      [ -n "$parsed" ] || continue
       base="$(basename "$f" .prom)"
+      parsed="$(cb_prom_parse "$f" "$base")"
+      [ -n "$parsed" ] || continue
       names=""; ts=0; checks=0; bad=0; size=0; dur=0; lab=""; dbs=""
       while IFS= read -r line; do
         case "$line" in
@@ -1880,6 +1898,7 @@ cmd_custom_scan() {
     local text="$1" id nm pfx
     for id in "${!mj_names[@]}"; do
       [ -n "${mj_used[$id]:-}" ] && continue
+      if grep -qF -- "$id.prom" <<<"$text"; then printf '%s' "$id"; return; fi
       for nm in ${mj_names[$id]}; do
         if grep -qF -- "$nm" <<<"$text"; then printf '%s' "$id"; return; fi
       done
@@ -1889,6 +1908,17 @@ cmd_custom_scan() {
         printf '%s' "$id"; return
       fi
     done
+  }
+
+  # does the text write one of the found metrics files: its file name or a full metric name in it.
+  # Such a job is a backup job whatever it is called (ru-copy.sh: restic copy, metrics in ru_copy.prom)
+  cb_writes_metrics() {
+    local text="$1" id nm
+    for id in "${!mj_names[@]}"; do
+      grep -qF -- "$id.prom" <<<"$text" && return 0
+      for nm in ${mj_names[$id]}; do grep -qF -- "$nm" <<<"$text" && return 0; done
+    done
+    return 1
   }
 
   # $1 id, $2 kind, $3 name, $4 description, $5 schedule, $6 names and commands, $7 script body,
@@ -1930,7 +1960,8 @@ cmd_custom_scan() {
     done <<<"$props"
     script="$(cb_script_of "$(printf '%s' "$execs" | sed -n 's/.*argv\[\]=\([^;]*\);.*/\1/p')")"
     body="$(cb_body "$script")"
-    if ! [[ "${t,,} ${svc,,}" =~ $CB_NAME_RE ]] && ! grep -qiE "$CB_TOOL_RE" <<<"$body"; then continue; fi
+    if ! [[ "${t,,} ${svc,,}" =~ $CB_NAME_RE ]] && ! grep -qiE "$CB_TOOL_RE" <<<"$body" \
+       && ! cb_writes_metrics "$execs"$'\n'"$body"; then continue; fi
     cb_maintenance_only "$t $svc $desc" "$body" && continue
     cal="$(systemctl show "$t" --timestamp=unix -p TimersCalendar --value 2>/dev/null)"
     next="$(printf '%s' "$cal" | sed -n 's/.*next_elapse=@\([0-9]*\).*/\1/p' | head -1)"
@@ -1956,7 +1987,8 @@ cmd_custom_scan() {
     [[ "${cmd,,}" =~ $CB_SKIP_RE ]] && continue
     script="$(cb_script_of "$cmd")"
     body="$(cb_body "$script")"
-    if ! [[ "${cmd,,}" =~ $CB_NAME_RE ]] && ! grep -qiE "$CB_TOOL_RE" <<<"$cmd"$'\n'"$body"; then continue; fi
+    if ! [[ "${cmd,,}" =~ $CB_NAME_RE ]] && ! grep -qiE "$CB_TOOL_RE" <<<"$cmd"$'\n'"$body" \
+       && ! cb_writes_metrics "$cmd"$'\n'"$body"; then continue; fi
     cb_maintenance_only "$cmd" "$body" && continue
     # the command is hashed, never sent: it may carry a password
     id="cron:$(printf '%s|%s' "$user" "$cmd" | sha1sum | cut -c1-12)"
