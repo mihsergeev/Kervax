@@ -2756,6 +2756,26 @@ type PortGroup = {
   svc: boolean
   open: string[]
   other: ExposedPort['state']
+  // сайты ноды идут через Cloudflare: only - напрямую порт закрыт, also - открыт и в обход него
+  cf?: 'only' | 'also'
+}
+
+// замок для колонок "открыто" и "закрыто"; облако - порт, открытый только для Cloudflare
+function LockIcon({ open = false }: { open?: boolean }) {
+  return (
+    <svg className="exp-ic" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" aria-hidden>
+      <rect x="3" y="7" width="10" height="7" rx="1.5" />
+      <path d={open ? 'M5.5 7V5a2.5 2.5 0 0 1 4.9-.7' : 'M5.5 7V5a2.5 2.5 0 0 1 5 0v2'} />
+    </svg>
+  )
+}
+
+function CloudIcon() {
+  return (
+    <svg className="exp-ic exp-cf" viewBox="0 0 16 16" fill="currentColor" aria-hidden>
+      <path d="M12.2 13H4.3a3.3 3.3 0 0 1-.5-6.56A4.3 4.3 0 0 1 12 6.3 3.35 3.35 0 0 1 12.2 13z" />
+    </svg>
+  )
 }
 
 // Здоровье сети ноды (агент 2.26): потери TCP, очередь accept, conntrack. Пороги - как у алерта
@@ -2841,6 +2861,7 @@ function OpenPorts({ server: s, onChanged }: { server: Server; onChanged: () => 
     const g = by.get(x.port) ?? { port: x.port, name: x.name, what: x.what, risk: x.risk, svc: !!x.svc, open: [], other: x.state }
     if (x.state === 'open') g.open.push(x.ip)
     else if (g.other !== 'filtered' && g.other !== 'closed') g.other = x.state
+    if (x.cf === 'also' || (x.cf === 'only' && !g.cf)) g.cf = x.cf
     by.set(x.port, g)
   }
   // красное - опасное, желтое - служебное: и то и другое снаружи должно быть закрыто
@@ -2848,7 +2869,10 @@ function OpenPorts({ server: s, onChanged }: { server: Server; onChanged: () => 
   const rank = (g: PortGroup) => (!g.open.length ? 3 : flagged(g) && g.risk ? 0 : flagged(g) && g.svc ? 1 : 2)
   const groups = [...by.values()].sort((a, b) => rank(a) - rank(b) || a.port - b.port)
   const opened = groups.filter((g) => g.open.length)
-  const closed = groups.filter((g) => !g.open.length && g.other !== 'unknown')
+  // закрытое: сначала то, что открыто только для Cloudflare
+  const closed = groups
+    .filter((g) => !g.open.length && g.other !== 'unknown')
+    .sort((a, b) => Number(b.cf === 'only') - Number(a.cf === 'only'))
   const unknown = groups.filter((g) => !g.open.length && g.other === 'unknown')
   const fresh = new Set((ex?.new ?? []).map((x) => x.port))
   const dangerous = opened.filter((g) => flagged(g) && g.risk).length
@@ -2883,10 +2907,6 @@ function OpenPorts({ server: s, onChanged }: { server: Server; onChanged: () => 
   const openIps = [...new Set(opened.flatMap((g) => g.open))]
   const quietIps = (ex?.ips ?? []).filter((ip) => !openIps.includes(ip))
   const perRowIps = openIps.length > 1
-  const openText = (g: PortGroup) => {
-    const word = own ? t('открыт для панели') : t('открыт')
-    return perRowIps && g.open.length < openIps.length ? `${word}: ${g.open.join(', ')}` : word
-  }
   const chips = (list: PortGroup[]) =>
     list.map((g) => (
       <span className="exp-chip" key={g.port}>
@@ -2896,8 +2916,69 @@ function OpenPorts({ server: s, onChanged }: { server: Server; onChanged: () => 
     ))
   const ago = ex ? sinceShort(ex.ts, t) : ''
   const toFix = opened.some((g) => flagged(g) && (g.risk || g.svc))
+  const cfOnly = closed.filter((g) => g.cf === 'only')
+  const cfAlso = opened.filter((g) => g.cf === 'also')
+  const cfSites = ex?.cf?.sites ?? []
+  const cfMore = (ex?.cf?.n ?? 0) - cfSites.length
+  const closedSub = [
+    cfOnly.length ? t('только через Cloudflare: {n}', { n: cfOnly.length }) : '',
+    unknown.length ? t('не проверить: {n}', { n: unknown.length }) : '',
+  ].filter(Boolean)
+  const openRow = (g: PortGroup) => {
+    const m = muted.has(String(g.port))
+    const bad = flagged(g) && g.risk
+    const warn = flagged(g) && g.svc
+    const where = perRowIps && g.open.length < openIps.length ? g.open.join(', ') : ''
+    return (
+      <div key={g.port} className="exp-li">
+        <span className={`lk-dot${bad ? ' lk-dot-bad' : warn ? ' lk-dot-warn' : own ? '' : ' lk-dot-info'}`} />
+        <span className={`exp-port mono${bad ? ' net-tone-bad' : warn ? ' net-tone-warn' : ''}`}>{g.port}</span>
+        <div className="exp-what">
+          {g.name ? <b>{g.name}</b> : <span>{g.what || t('процесс не известен')}</span>}
+          {!own && fresh.has(g.port) && <> <span className="exp-new">{t('новый')}</span></>}
+          {g.cf === 'also' && (
+            <>
+              {' '}
+              <span className="exp-tag exp-tag-cf" title={t('Сайты ноды идут через Cloudflare, а порт открыт и напрямую: защиту Cloudflare можно обойти по адресу ноды.')}>
+                {t('в обход Cloudflare')}
+              </span>
+            </>
+          )}
+          {g.name && g.what && <> <span className="exp-proc">{g.what}</span></>}
+          {where && <> <span className="exp-proc">{t('на {ips}', { ips: where })}</span></>}
+        </div>
+        {own ? null : m ? (
+          <span className="muted exp-act">
+            {t('намеренно')}{' '}
+            {!isViewer && (
+              <button className="ghost small row-act" disabled={busy} onClick={() => setMuted(g.port, false)}>
+                {t('вернуть алерт')}
+              </button>
+            )}
+          </span>
+        ) : (
+          (g.risk || g.svc || fresh.has(g.port)) &&
+          !isViewer && (
+            <button className="ghost small row-act exp-act" disabled={busy} onClick={() => setMuted(g.port, true)}>
+              🔕 {t('открыт намеренно')}
+            </button>
+          )
+        )}
+      </div>
+    )
+  }
+  const closedRow = (g: PortGroup) => (
+    <div key={g.port} className="exp-li exp-li-closed">
+      {g.cf === 'only' ? <CloudIcon /> : <LockIcon />}
+      <span className="exp-port mono">{g.port}</span>
+      <div className="exp-what">
+        <span>{g.name || g.what || t('процесс не известен')}</span>
+        {g.cf === 'only' && <> <span className="exp-tag exp-tag-cf">{t('только через Cloudflare')}</span></>}
+      </div>
+    </div>
+  )
   return (
-    <div className="chart-card net-card net-card-wide" id="mcard-exposure">
+    <div className="chart-card net-card net-card-wide exp-card" id="mcard-exposure">
       <div className="net-head">
         <div className="chart-cap">{t('Что открыто в интернет')}</div>
         {!isViewer && (
@@ -2955,62 +3036,44 @@ function OpenPorts({ server: s, onChanged }: { server: Server; onChanged: () => 
           <NetTile
             label={own ? t('Закрыто даже для панели') : t('Закрыто снаружи')}
             value={String(closed.length)}
-            sub={unknown.length ? t('не проверить: {n}', { n: unknown.length }) : undefined}
+            sub={closedSub.length ? closedSub.join(' · ') : undefined}
           />
         </div>
       )}
       {ex && !ex.ips.length && <div className="muted small">{t('Публичного адреса у ноды не нашлось: проверять нечего.')}</div>}
-      {ex && ex.ips.length > 0 && !opened.length && (
+      {ex && ex.ips.length > 0 && !opened.length && !closed.length && groups.length > 0 && (
         <div className="muted small">
-          {groups.length > 0 && groups.every((g) => g.other === 'unknown')
-            ? t('Проверить не вышло: {via} не отвечает или не пропускает соединения на эти порты.', { via: t(ex.via) })
-            : t('Снаружи не открыто ни одного порта из тех, что слушает нода.')}
+          {t('Проверить не вышло: {via} не отвечает или не пропускает соединения на эти порты.', { via: t(ex.via) })}
         </div>
       )}
-      {opened.length > 0 && (
-        <div className="loc-results">
-          {opened.map((g) => {
-            const m = muted.has(String(g.port))
-            const bad = flagged(g) && g.risk
-            const warn = flagged(g) && g.svc
-            return (
-              <div key={g.port} className="loc-res exp-row">
-                <span className={`lk-dot${bad ? ' lk-dot-bad' : warn ? ' lk-dot-warn' : ''}`} />
-                <span className={`exp-port mono${bad ? ' net-tone-bad' : warn ? ' net-tone-warn' : ''}`}>{g.port}</span>
-                <div className="exp-what">
-                  {g.name && <b>{g.name} </b>}
-                  <span className="muted">{g.what || t('процесс не известен')}</span>
-                  {!own && fresh.has(g.port) && <span className="exp-new">{t('новый')}</span>}
-                </div>
-                <div className={`exp-state ${bad ? 't-down' : warn ? 't-degraded' : 'muted'}`}>{openText(g)}</div>
-                {own ? null : m ? (
-                  <span className="muted exp-act">
-                    {t('намеренно')}{' '}
-                    {!isViewer && (
-                      <button className="ghost small row-act" disabled={busy} onClick={() => setMuted(g.port, false)}>
-                        {t('вернуть алерт')}
-                      </button>
-                    )}
-                  </span>
-                ) : (
-                  (g.risk || g.svc || fresh.has(g.port)) &&
-                  !isViewer && (
-                    <button className="ghost small row-act exp-act" disabled={busy} onClick={() => setMuted(g.port, true)}>
-                      🔕 {t('открыт намеренно')}
-                    </button>
-                  )
-                )}
-              </div>
-            )
-          })}
-        </div>
-      )}
-      {closed.length > 0 && (
-        <div className="small exp-closed">
-          <span className="muted">
-            {own ? t('закрыто даже для панели ({n}):', { n: closed.length }) : t('закрыто снаружи ({n}):', { n: closed.length })}
-          </span>{' '}
-          {chips(closed)}
+      {(opened.length > 0 || closed.length > 0) && (
+        <div className="exp-cols">
+          <div className={`exp-col exp-col-open${dangerous ? ' exp-col-bad' : service ? ' exp-col-warn' : ''}`}>
+            <div className="exp-col-h">
+              <span className={dangerous ? 'net-tone-bad' : service ? 'net-tone-warn' : 'exp-tone-info'}>
+                <LockIcon open />
+              </span>
+              {own ? t('Открыто для панели') : t('Открыто снаружи')} <span className="exp-col-n">{opened.length}</span>
+            </div>
+            {opened.length > 0 ? (
+              <div className="exp-lst">{opened.map(openRow)}</div>
+            ) : (
+              <div className="exp-empty">✓ {t('ничего не открыто')}</div>
+            )}
+          </div>
+          <div className="exp-col exp-col-closed">
+            <div className="exp-col-h">
+              <span className="net-tone-ok">
+                <LockIcon />
+              </span>
+              {own ? t('Закрыто даже для панели') : t('Закрыто снаружи')} <span className="exp-col-n">{closed.length}</span>
+            </div>
+            {closed.length > 0 ? (
+              <div className="exp-lst">{closed.map(closedRow)}</div>
+            ) : (
+              <div className="exp-empty muted">{t('ничего не закрыто')}</div>
+            )}
+          </div>
         </div>
       )}
       {unknown.length > 0 && (
@@ -3018,11 +3081,20 @@ function OpenPorts({ server: s, onChanged }: { server: Server; onChanged: () => 
           <span className="muted">{t('не проверить ({n}):', { n: unknown.length })}</span> {chips(unknown)}
         </div>
       )}
-      {(toFix || (ex && !own && opened.length > 0)) && (
+      {(toFix || cfOnly.length > 0 || cfAlso.length > 0 || (ex && !own && opened.length > 0)) && (
         <div className="net-foot">
           {toFix && (
             <div className="exp-fix">
               {t('Закройте порт файрволом или привяжите сервис к 127.0.0.1 либо к внутреннему адресу. Порт Docker, опубликованный через -p, обходит ufw: публикуйте его как 127.0.0.1:порт:порт.')}
+            </div>
+          )}
+          {(cfOnly.length > 0 || cfAlso.length > 0) && (
+            <div>
+              {t('Сайты ноды идут через Cloudflare: {sites}.', {
+                sites: cfSites.join(', ') + (cfMore > 0 ? ' ' + t('и еще {n}', { n: cfMore }) : ''),
+              })}
+              {cfOnly.length > 0 && <> {t('Напрямую закрыто: {ports} - туда пускают только Cloudflare.', { ports: cfOnly.map((g) => g.port).join(', ') })}</>}
+              {cfAlso.length > 0 && <> {t('Напрямую открыто: {ports} - защиту Cloudflare можно обойти по адресу ноды. Если так не задумано, пустите туда только адреса Cloudflare.', { ports: cfAlso.map((g) => g.port).join(', ') })}</>}
             </div>
           )}
           {ex && !own && opened.length > 0 && (

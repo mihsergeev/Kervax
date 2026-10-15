@@ -993,13 +993,50 @@ input:focus {
 .net-tiles-text .net-tile-value { font-size: 1.05rem; padding: 0.15rem 0 0.1rem; white-space: normal; }
 .net-sub { color: var(--text-muted); font-size: 0.8rem; margin-top: -0.3rem; overflow-wrap: anywhere; }
 .net-note { font-size: 0.85rem; background: rgba(245, 158, 11, 0.08); border: 1px solid rgba(245, 158, 11, 0.35); border-radius: 6px; padding: 0.35rem 0.6rem; }
-/* "Соединения": открытые порты и учетки строками, как связи в "Сети" */
-.loc-res.exp-row { gap: 0.7rem; }
-.exp-port { flex: 0 0 3.4rem; font-weight: 600; font-variant-numeric: tabular-nums; }
-.exp-what { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
-.exp-state { flex: 0 0 auto; white-space: nowrap; font-size: 0.85rem; }
-.exp-act { flex: 0 0 auto; white-space: nowrap; }
-.exp-row .row-act, .acc-row .row-act { margin: 0; }
+/* "Что открыто в интернет": две колонки - открыто снаружи и закрыто, в каждой ровный список
+   точка (или замок), порт, сервис. Открытые подкрашены, только когда там опасное или служебное */
+.exp-cols { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.6rem; align-items: start; }
+.exp-col { border: 1px solid var(--border); border-radius: 8px; padding: 0.5rem 0.7rem 0.4rem; min-width: 0; }
+.exp-col-bad { border-color: color-mix(in srgb, var(--down) 40%, var(--border)); background: color-mix(in srgb, var(--down) 5%, transparent); }
+.exp-col-warn { border-color: color-mix(in srgb, var(--degraded) 40%, var(--border)); background: color-mix(in srgb, var(--degraded) 5%, transparent); }
+.exp-col-closed { border-color: color-mix(in srgb, var(--up) 30%, var(--border)); background: color-mix(in srgb, var(--up) 4%, transparent); }
+.exp-col-h { display: flex; align-items: center; gap: 0.45rem; font-weight: 600; font-size: 0.88rem; margin-bottom: 0.25rem; }
+.exp-col-h > span:first-child { display: inline-flex; }
+.exp-col-n { font-variant-numeric: tabular-nums; }
+.exp-tone-info { color: var(--accent); }
+.exp-ic { width: 13px; height: 13px; flex: 0 0 auto; display: block; }
+.exp-lst { display: flex; flex-direction: column; }
+.exp-li { display: grid; grid-template-columns: 14px 3.2rem minmax(0, 1fr) auto; align-items: center; gap: 0.5rem;
+  padding: 0.28rem 0.1rem; font-size: 0.86rem; border-bottom: 1px solid color-mix(in srgb, var(--border) 60%, transparent); }
+.exp-li:last-child { border-bottom: 0; }
+.exp-li > .lk-dot, .exp-li > .exp-ic { justify-self: center; }
+.exp-li .lk-dot-info { background: var(--accent); }
+.exp-li-closed > .exp-ic { color: var(--up); }
+.exp-li-closed .exp-port { color: var(--text-muted); font-weight: 500; }
+.exp-port { text-align: right; font-weight: 600; font-variant-numeric: tabular-nums; }
+.exp-what { min-width: 0; overflow-wrap: anywhere; }
+.exp-proc { color: var(--text-muted); font-size: 0.78rem; }
+.exp-li .exp-new { margin-left: 0; }
+.exp-act { white-space: nowrap; }
+.exp-li .row-act, .acc-row .row-act { margin: 0; }
+.exp-empty { color: var(--up); font-size: 0.86rem; padding: 0.3rem 0.1rem; }
+.exp-tag { display: inline-block; padding: 0 0.35rem; border-radius: 4px; font-size: 0.72rem; white-space: nowrap; }
+/* Cloudflare: его оранжевый, в светлой теме темнее, иначе текст не читается */
+.exp-li-closed > .exp-cf, .exp-cf { color: #f38020; }
+.exp-tag-cf { color: #f38020; background: rgba(243, 128, 32, 0.12); border: 1px solid rgba(243, 128, 32, 0.35); }
+:root[data-theme='light'] .exp-tag-cf { color: #b45309; }
+/* колонки встают друг под друга по ширине самой карточки, а не окна: в узком содержимом
+   страницы сервера карточка уже окна; в узкой колонке кнопка уходит под имя порта */
+.exp-card { container-type: inline-size; }
+.exp-col { container-type: inline-size; }
+@container (max-width: 760px) {
+  .exp-cols { grid-template-columns: minmax(0, 1fr); }
+}
+@container (max-width: 460px) {
+  .exp-li { grid-template-columns: 14px 2.8rem minmax(0, 1fr); }
+  .exp-li .exp-act { grid-column: 2 / -1; justify-self: end; }
+  .exp-li span.exp-act { white-space: normal; text-align: right; }
+}
 .net-card .exp-closed { margin-top: 0; }
 .loc-res.acc-row { gap: 0.7rem; }
 .acc-main { flex: 1 1 auto; min-width: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 0.3rem 0.4rem; }
