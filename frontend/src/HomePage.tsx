@@ -1265,7 +1265,7 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
       {/* Мягкие уведомления (НЕ алерты, не в Telegram): бэкап вышел за ночное окно.
           Приглушённо - это «к сведению», а не «требует действий». */}
       {late.length > 0 && (
-        <div className="chart-card net-card home-block">
+        <div className="chart-card net-card home-block home-attention-soft">
           {cap(t('Бэкап вышел за окно'), late.length)}
           <div className="home-attention-list">
             {late.slice(0, 6).map(({ s, note }) => (
