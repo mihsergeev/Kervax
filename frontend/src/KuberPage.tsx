@@ -26,6 +26,7 @@ import { CountryFlag } from './CountryFlag'
 import { fmtBytes } from './units'
 import { sinceShort } from './serverUtils'
 import { EnrollModal, InstallModal } from './ServersPage'
+import { NetTile } from './NetLinks'
 
 // Вкладка «Кубер»: КОМПАКТНЫЙ список хостов с кластером; клик по хосту → модалка
 // с нодами, воркоадами и подами (статусы, рестарты, логи, управление). Агент читает
@@ -51,6 +52,11 @@ const EXPIRY_KIND: Record<string, string> = {
 // Ready=False по этим причинам — работа, а не поломка: Flux тянет артефакт или
 // докатывает релиз.
 const FLUX_TRANSIENT = new Set(['Progressing', 'Reconciling', 'ProgressingWithRetry', 'Unknown'])
+
+// точка строки по тону: приглушенное и нейтральное - серая
+const DOT: Record<string, string> = { 't-up': ' lk-dot-ok', 't-down': ' lk-dot-bad', 't-degraded': ' lk-dot-warn' }
+// подпись плитки из частей: пустые выкидываем
+const subOf = (...parts: (string | false | 0 | undefined)[]) => parts.filter(Boolean).join(' · ')
 
 // К ближайшему, а не вниз — как считает бэкенд в алерте: остаток 4 дня 23 часа
 // это «5 дн.», иначе панель и Telegram называют один и тот же срок по-разному.
@@ -133,8 +139,11 @@ function EnableBlock() {
   const { t } = useI18n()
   const [copied, setCopied] = useState(false)
   return (
-    <div className="docker-noaccess">
-      <div className="muted small">
+    <div className="chart-card net-card net-card-wide">
+      <div className="net-head">
+        <div className="chart-cap">{t('Нет доступа к kube-api')}</div>
+      </div>
+      <div className="net-note">
         {t('Кластер найден, но агент не имеет доступа к kube-api. Включите read-only + точечное управление: скрипт создаёт ServiceAccount с узким RBAC (не cluster-admin) и кладёт токен для агента.')}
       </div>
       <div className="agent-advice-cmd">
@@ -298,6 +307,7 @@ function WorkloadRow({
   }
   return (
     <div className={`loc-res docker-row ${workloadTone(w)}`}>
+      <span className={`lk-dot${DOT[workloadTone(w)] ?? ''}`} />
       <div className="docker-c-main">
         <div className="docker-c-name mono">
           <span className="type-chip">{w.kind}</span> {w.name}
@@ -360,6 +370,7 @@ function PodRow({
   }
   return (
     <div className={`loc-res docker-row ${podTone(p)}`}>
+      <span className={`lk-dot${DOT[podTone(p)] ?? ''}`} />
       <div className="docker-c-main">
         <div className="docker-c-name mono">
           {p.name}
@@ -419,7 +430,8 @@ function PodRow({
   )
 }
 
-// Модалка хоста-кластера: ноды + воркоады + поды. Логи пода — вложенная модалка.
+// Модалка хоста-кластера: сверху плитки (версия, ноды, поды, нагрузка, перезапуски, сроки, Flux),
+// под ними карточка с вкладками: поды, воркоады, CronJob, ноды, сроки, Flux. Логи пода - модалка сверху.
 type KubeTab = 'pods' | 'finished' | 'workloads' | 'cron' | 'nodes' | 'expiry' | 'flux'
 const KUBE_TABS: KubeTab[] = ['pods', 'finished', 'workloads', 'cron', 'nodes', 'expiry', 'flux']
 
@@ -561,115 +573,202 @@ function KubeHostModal({
         }]
       : []),
   ]
+  // плитки: нагрузка нод по metrics-server, перезапуски подов за сутки, ближайший срок и Flux
+  const memUse = nodes.reduce((n, x) => n + (x.use?.mem ?? 0), 0)
+  const memCap = nodes.reduce((n, x) => n + (x.use && x.cap ? x.cap.mem : 0), 0)
+  const cpuUse = nodes.reduce((n, x) => n + (x.use?.cpu_m ?? 0), 0)
+  const cpuCap = nodes.reduce((n, x) => n + (x.use && x.cap ? x.cap.cpu_m : 0), 0)
+  const podsBad = pods.filter((p) => !podFinished(p) && podTone(p) === 't-down').length
+  const nodesPress = nodes.filter((n) => (n.pressure ?? []).length > 0).length
+  const days = pods
+    .map((p) => ({ name: p.name, n: s.restarts_day?.[`pod:${p.ns}/${p.name}`] ?? 0 }))
+    .filter((x) => x.n > 0)
+  const dayTop = days.reduce<{ name: string; n: number } | null>((a, b) => (!a || b.n > a.n ? b : a), null)
+  const next = expiry[0]
+  const nextDays = next ? daysLeft(next.expires) : 0
+  const pct = (u: number, c: number) => (c ? Math.round((u / c) * 100) : 0)
   return createPortal(
     <div className="modal-backdrop">
-      <div className="card modal docker-modal" onClick={(e) => e.stopPropagation()}>
+      <div className="card modal docker-modal hs-modal" onClick={(e) => e.stopPropagation()}>
         <div className="clients-head">
           <h3>
             <span className={`sdot ${s.online ? 'sdot-up' : 'sdot-down'}`} />{' '}
             <OsIcon os={s.os} /> <CountryFlag code={s.country} /> {s.name}
+            {s.group_name && <span className="type-chip group-chip">{s.group_name}</span>}
           </h3>
           <button className="ghost" onClick={onClose}>
             {t('Закрыть')}
           </button>
         </div>
-        <div className="docker-host-head">
-          {s.group_name && <span className="type-chip group-chip">{s.group_name}</span>}
-          <span className="type-chip">{kube.flavor || 'k8s'} {kube.version || '—'}</span>
+        <div className="net-tiles hs-tiles">
+          <NetTile
+            label="Kubernetes"
+            value={(kube.version || '—').split('+')[0]}
+            title={kube.version}
+            sub={subOf(kube.flavor || 'k8s', kube.access && `ns: ${kube.namespaces ?? 0}`)}
+          />
           {kube.access && (
-            <span className="muted small">
-              {t('ноды {nr}/{nn} · поды {pr}/{pn} · ns {ns}', {
-                nr: nodesReady, nn: nodes.length, pr: podsRunning, pn: podsActive, ns: kube.namespaces ?? 0,
-              })}
-            </span>
+            <NetTile
+              label={t('Ноды готовы')}
+              value={String(nodesReady)}
+              unit={t('из {n}', { n: nodes.length })}
+              sub={subOf(
+                nodesPress > 0 && t('под давлением: {n}', { n: nodesPress }),
+                unmon.size > 0 && t('без агента: {n}', { n: unmon.size }),
+              ) || t('все готовы')}
+              tone={nodesReady < nodes.length ? 'bad' : nodesPress || unmon.size ? 'warn' : 'ok'}
+            />
+          )}
+          {kube.access && (
+            <NetTile
+              label={t('Поды работают')}
+              value={String(podsRunning)}
+              unit={t('из {n}', { n: podsActive })}
+              sub={subOf(
+                podsBad > 0 && t('падают: {n}', { n: podsBad }),
+                podsActive - podsRunning - podsBad > 0 && t('не готовы: {n}', { n: podsActive - podsRunning - podsBad }),
+              ) || t('все работают')}
+              tone={podsBad ? 'bad' : podsRunning < podsActive ? 'warn' : 'ok'}
+            />
+          )}
+          {kube.access && memCap > 0 && (
+            <NetTile
+              label={t('Память нод')}
+              value={`${pct(memUse, memCap)}%`}
+              sub={subOf(`${fmtBytes(memUse)} / ${fmtBytes(memCap)}`, cpuCap > 0 && `CPU ${pct(cpuUse, cpuCap)}%`)}
+              tone={pct(memUse, memCap) >= 90 ? 'bad' : pct(memUse, memCap) >= 75 ? 'warn' : undefined}
+            />
+          )}
+          {kube.access && (
+            <NetTile
+              label={t('Перезапусков за сутки')}
+              value={String(days.reduce((n, x) => n + x.n, 0))}
+              sub={dayTop ? `${dayTop.name}: ${dayTop.n}` : t('нет')}
+              tone={dayTop && dayTop.n >= RESTARTS_DAY_MIN ? 'warn' : undefined}
+            />
+          )}
+          {next && (
+            <NetTile
+              label={t('Ближайший срок')}
+              value={nextDays < 0 ? t('истёк') : nextDays === 0 ? t('сегодня') : t('{n} дн.', { n: nextDays })}
+              sub={t(EXPIRY_KIND[next.kind] ?? next.kind)}
+              title={next.where}
+              tone={nextDays < 0 ? 'bad' : nextDays <= horizon ? 'warn' : 'ok'}
+            />
+          )}
+          {flux.length > 0 && (
+            <NetTile
+              label="Flux"
+              value={String(flux.length - fluxBroken.length)}
+              unit={t('из {n}', { n: flux.length })}
+              sub={fluxBroken.length ? t('не в Ready: {n}', { n: fluxBroken.length }) : t('все в Ready')}
+              tone={fluxBroken.length ? 'bad' : 'ok'}
+            />
           )}
         </div>
-        {!kube.access ? (
-          <EnableBlock />
-        ) : (
-          <>
-            <div className="win-switch kube-tabs">
-              {tabs.map(({ k, l, title }) => (
-                <button
-                  key={k}
-                  className={`win-btn${curTab === k ? ' win-btn-active' : ''}`}
-                  onClick={() => setTab(k)}
-                  title={title}
-                >
-                  {l}
-                </button>
-              ))}
-            </div>
-            {curTab !== 'nodes' && curTab !== 'expiry' && (
-              <div className="modal-toolbar">
-                <input
-                  className="checks-search modal-search"
-                  placeholder={t('Фильтр: имя, namespace…')}
-                  value={q}
-                  onChange={(e) => setQ(e.target.value)}
-                />
-                {(curTab === 'pods' || curTab === 'finished') && (
-                  <select className="modal-sort" value={sort} onChange={(e) => setSort(e.target.value as typeof sort)}>
-                    <option value="state">{t('сорт: статус')}</option>
-                    <option value="name">{t('сорт: имя')}</option>
-                    <option value="restarts">{t('сорт: рестарты')}</option>
-                    <option value="ns">{t('сорт: namespace')}</option>
-                    {hasUse && <option value="mem">{t('сорт: память')}</option>}
-                    {hasUse && <option value="cpu">{t('сорт: CPU')}</option>}
-                  </select>
-                )}
+        <div className="net-cards hs-cards">
+          {!kube.access ? (
+            <EnableBlock />
+          ) : (
+            <div className="chart-card net-card net-card-wide">
+              <div className="net-head">
+                <div className="win-switch kube-tabs">
+                  {tabs.map(({ k, l, title }) => (
+                    <button
+                      key={k}
+                      className={`win-btn${curTab === k ? ' win-btn-active' : ''}`}
+                      onClick={() => setTab(k)}
+                      title={title}
+                    >
+                      {l}
+                    </button>
+                  ))}
+                </div>
               </div>
-            )}
-            <div className="loc-results docker-clist docker-clist-scroll">
+              {curTab !== 'nodes' && curTab !== 'expiry' && (
+                <div className="modal-toolbar">
+                  <input
+                    className="checks-search modal-search"
+                    placeholder={t('Фильтр: имя, namespace…')}
+                    value={q}
+                    onChange={(e) => setQ(e.target.value)}
+                  />
+                  {(curTab === 'pods' || curTab === 'finished') && (
+                    <select className="modal-sort" value={sort} onChange={(e) => setSort(e.target.value as typeof sort)}>
+                      <option value="state">{t('сорт: статус')}</option>
+                      <option value="name">{t('сорт: имя')}</option>
+                      <option value="restarts">{t('сорт: рестарты')}</option>
+                      <option value="ns">{t('сорт: namespace')}</option>
+                      {hasUse && <option value="mem">{t('сорт: память')}</option>}
+                      {hasUse && <option value="cpu">{t('сорт: CPU')}</option>}
+                    </select>
+                  )}
+                </div>
+              )}
               {curTab === 'pods' && (hygiene.nolim > 0 || hygiene.noprobe > 0) && (
-                <div className="kube-noagent-hint muted small">
+                <div className="net-note">
                   {t('Без лимита памяти: {a}, без проб: {b}. Не авария, но под без лимита может съесть ноду, а без проб зависший под никто не перезапустит.', {
                     a: hygiene.nolim,
                     b: hygiene.noprobe,
                   })}
                 </div>
               )}
-              {(curTab === 'pods' || curTab === 'finished') &&
-                (pods.length === 0 ? (
-                  <div className="muted small">{t('Подов нет')}</div>
-                ) : fpods.length === 0 ? (
-                  <div className="muted small">{t('Ничего не найдено.')}</div>
-                ) : (
-                  fpods.map((p) => (
-                    <PodRow
-                      key={p.ns + '/' + p.name}
-                      serverId={s.id}
-                      p={p}
-                      canAct={canAct}
-                      onLogs={() => setLogsPod(p)}
-                      onChanged={onChanged}
-                      day={s.restarts_day?.[`pod:${p.ns}/${p.name}`] ?? 0}
-                    />
-                  ))
-                ))}
-              {curTab === 'workloads' &&
-                (workloads.length === 0 ? (
-                  <div className="muted small">{t('Воркоадов нет')}</div>
-                ) : fworkloads.length === 0 ? (
-                  <div className="muted small">{t('Ничего не найдено.')}</div>
-                ) : (
-                  fworkloads.map((w) => (
-                    <WorkloadRow
-                      key={w.kind + '/' + w.ns + '/' + w.name}
-                      serverId={s.id}
-                      w={w}
-                      canAct={canAct}
-                      onChanged={onChanged}
-                    />
-                  ))
-                ))}
               {curTab === 'cron' && failedJobs.length > 0 && (
-                <>
-                  <div className="kube-expiry-note t-down">
-                    {t('Упавшие за неделю Job, запущенные не по расписанию (миграции, разовые задачи): {n}', { n: failedJobs.length })}
-                  </div>
-                  {failedJobs.map((j) => (
+                <div className="net-prob">
+                  {t('Упавшие за неделю Job, запущенные не по расписанию (миграции, разовые задачи): {n}', { n: failedJobs.length })}
+                </div>
+              )}
+              {curTab === 'flux' && fluxBroken.length > 0 && (
+                <div className="net-prob">
+                  {t('Доставка Flux встала: {n} ресурс(ов) не в Ready. Уже запущенное продолжает работать — по метрикам это не видно.', {
+                    n: fluxBroken.length,
+                  })}
+                </div>
+              )}
+              {curTab === 'nodes' && unmon.size > 0 && (
+                <div className="net-note">
+                  {t('Нод без агента: {n}. На них панель не видит диски, SMART, упавшие юниты и процессы - только то, что отдает Kubernetes.', { n: unmon.size })}
+                </div>
+              )}
+              <div className="loc-results docker-clist docker-clist-scroll">
+                {(curTab === 'pods' || curTab === 'finished') &&
+                  (pods.length === 0 ? (
+                    <div className="muted small">{t('Подов нет')}</div>
+                  ) : fpods.length === 0 ? (
+                    <div className="muted small">{t('Ничего не найдено.')}</div>
+                  ) : (
+                    fpods.map((p) => (
+                      <PodRow
+                        key={p.ns + '/' + p.name}
+                        serverId={s.id}
+                        p={p}
+                        canAct={canAct}
+                        onLogs={() => setLogsPod(p)}
+                        onChanged={onChanged}
+                        day={s.restarts_day?.[`pod:${p.ns}/${p.name}`] ?? 0}
+                      />
+                    ))
+                  ))}
+                {curTab === 'workloads' &&
+                  (workloads.length === 0 ? (
+                    <div className="muted small">{t('Воркоадов нет')}</div>
+                  ) : fworkloads.length === 0 ? (
+                    <div className="muted small">{t('Ничего не найдено.')}</div>
+                  ) : (
+                    fworkloads.map((w) => (
+                      <WorkloadRow
+                        key={w.kind + '/' + w.ns + '/' + w.name}
+                        serverId={s.id}
+                        w={w}
+                        canAct={canAct}
+                        onChanged={onChanged}
+                      />
+                    ))
+                  ))}
+                {curTab === 'cron' &&
+                  failedJobs.map((j) => (
                     <div className="loc-res docker-row t-down" key={`job/${j.ns}/${j.name}/${j.ts ?? 0}`}>
+                      <span className="lk-dot lk-dot-bad" />
                       <div className="docker-c-main">
                         <div className="docker-c-name mono">
                           {j.ns}/{j.name}
@@ -682,153 +781,148 @@ function KubeHostModal({
                       <div className="docker-c-status mono small t-down">{j.reason || 'Failed'}</div>
                     </div>
                   ))}
-                </>
-              )}
-              {curTab === 'cron' &&
-                cronjobs
-                  .filter((c) => !ql || `${c.ns}/${c.name} ${c.image ?? ''}`.toLowerCase().includes(ql))
-                  .map((c) => {
-                    const key = `${c.ns}/${c.name}`
-                    const issue = cronIssues[key]
-                    const ago = (ts?: number) => (ts ? sinceShort(new Date(ts * 1000).toISOString(), t) || t('только что') : '')
-                    const tone = issue ? (c.suspend ? 't-degraded' : 't-down') : c.suspend ? '' : 't-up'
+                {curTab === 'cron' &&
+                  cronjobs
+                    .filter((c) => !ql || `${c.ns}/${c.name} ${c.image ?? ''}`.toLowerCase().includes(ql))
+                    .map((c) => {
+                      const key = `${c.ns}/${c.name}`
+                      const issue = cronIssues[key]
+                      const ago = (ts?: number) => (ts ? sinceShort(new Date(ts * 1000).toISOString(), t) || t('только что') : '')
+                      const tone = issue ? (c.suspend ? 't-degraded' : 't-down') : c.suspend ? '' : 't-up'
+                      return (
+                        <div className={`loc-res docker-row ${tone}`} key={key}>
+                          <span className={`lk-dot${DOT[tone] ?? ''}`} />
+                          <div className="docker-c-main">
+                            <div className="docker-c-name mono">
+                              {key}
+                              {c.schedule && <span className="type-chip">{c.schedule}</span>}
+                            </div>
+                            <div className="docker-c-img mono muted small">
+                              {c.last_schedule
+                                ? t('запуск {a} назад', { a: ago(c.last_schedule) })
+                                : t('еще не запускался')}
+                              {c.last_success ? ` · ${t('успешный {a} назад', { a: ago(c.last_success) })}` : ''}
+                              {c.image ? ` · ${c.image}` : ''}
+                            </div>
+                          </div>
+                          <div className={`docker-c-status mono small ${tone}`}>
+                            {issue || (c.suspend ? t('приостановлен') : c.active ? t('идет') : t('ок'))}
+                          </div>
+                        </div>
+                      )
+                    })}
+                {curTab === 'expiry' &&
+                  expiry.map((e) => {
+                    const d = daysLeft(e.expires)
+                    const tone = expiryTone(d, horizon)
                     return (
-                      <div className={`loc-res docker-row ${tone}`} key={key}>
+                      <div className={`loc-res docker-row ${tone}`} key={e.kind + '/' + e.where + '/' + (e.note ?? '')}>
+                        <span className={`lk-dot${DOT[tone] ?? ' lk-dot-ok'}`} />
                         <div className="docker-c-main">
                           <div className="docker-c-name mono">
-                            {key}
-                            {c.schedule && <span className="type-chip">{c.schedule}</span>}
+                            {e.where}
+                            <span className="type-chip">{t(EXPIRY_KIND[e.kind] ?? e.kind)}</span>
                           </div>
                           <div className="docker-c-img mono muted small">
-                            {c.last_schedule
-                              ? t('запуск {a} назад', { a: ago(c.last_schedule) })
-                              : t('еще не запускался')}
-                            {c.last_success ? ` · ${t('успешный {a} назад', { a: ago(c.last_success) })}` : ''}
-                            {c.image ? ` · ${c.image}` : ''}
+                            {new Date(e.expires * 1000).toLocaleDateString()}
+                            {e.note ? ` · ${e.note}` : ''}
                           </div>
                         </div>
                         <div className={`docker-c-status mono small ${tone}`}>
-                          {issue || (c.suspend ? t('приостановлен') : c.active ? t('идет') : t('ок'))}
+                          {d < 0 ? t('истёк') : d === 0 ? t('сегодня') : t('{n} дн.', { n: d })}
                         </div>
                       </div>
                     )
                   })}
-              {curTab === 'expiry' &&
-                expiry.map((e) => {
-                  const d = daysLeft(e.expires)
-                  return (
-                    <div className={`loc-res docker-row ${expiryTone(d, horizon)}`} key={e.kind + '/' + e.where + '/' + (e.note ?? '')}>
-                      <div className="docker-c-main">
-                        <div className="docker-c-name mono">
-                          {e.where}
-                          <span className="type-chip">{t(EXPIRY_KIND[e.kind] ?? e.kind)}</span>
+                {curTab === 'flux' && (
+                  <>
+                    {fflux.length === 0 && <div className="muted small">{t('Ничего не найдено.')}</div>}
+                    {fflux.map((f) => {
+                      const tone = f.ready ? 't-up' : FLUX_TRANSIENT.has(f.reason ?? '') ? '' : 't-down'
+                      return (
+                        <div className={`loc-res docker-row ${tone}`} key={f.kind + '/' + f.where}>
+                          <span className={`lk-dot${DOT[tone] ?? ''}`} />
+                          <div className="docker-c-main">
+                            <div className="docker-c-name mono">
+                              {f.where}
+                              <span className="type-chip">{f.kind}</span>
+                            </div>
+                            <div className="docker-c-img mono muted small">
+                              {f.reason || ''}
+                              {f.message ? ` · ${f.message}` : ''}
+                            </div>
+                          </div>
+                          <div className={`docker-c-status mono small ${f.ready ? 't-up' : 't-down'}`}>
+                            {f.ready ? 'Ready' : 'NotReady'}
+                          </div>
                         </div>
-                        <div className="docker-c-img mono muted small">
-                          {new Date(e.expires * 1000).toLocaleDateString()}
-                          {e.note ? ` · ${e.note}` : ''}
-                        </div>
-                      </div>
-                      <div className={`docker-c-status mono small ${expiryTone(d, horizon)}`}>
-                        {d < 0 ? t('истёк') : d === 0 ? t('сегодня') : t('{n} дн.', { n: d })}
-                      </div>
-                    </div>
-                  )
-                })}
-              {curTab === 'flux' && (
-                <>
-                  {fluxBroken.length > 0 && (
-                    <div className="kube-expiry-note t-down">
-                      {t('Доставка Flux встала: {n} ресурс(ов) не в Ready. Уже запущенное продолжает работать — по метрикам это не видно.', {
-                        n: fluxBroken.length,
-                      })}
-                    </div>
-                  )}
-                  {fflux.length === 0 && <div className="muted small">{t('Ничего не найдено.')}</div>}
-                  {fflux.map((f) => (
-                    <div
-                      className={`loc-res docker-row ${f.ready ? 't-up' : FLUX_TRANSIENT.has(f.reason ?? '') ? '' : 't-down'}`}
-                      key={f.kind + '/' + f.where}
-                    >
-                      <div className="docker-c-main">
-                        <div className="docker-c-name mono">
-                          {f.where}
-                          <span className="type-chip">{f.kind}</span>
-                        </div>
-                        <div className="docker-c-img mono muted small">
-                          {f.reason || ''}
-                          {f.message ? ` · ${f.message}` : ''}
-                        </div>
-                      </div>
-                      <div className={`docker-c-status mono small ${f.ready ? 't-up' : 't-down'}`}>
-                        {f.ready ? 'Ready' : 'NotReady'}
-                      </div>
-                    </div>
-                  ))}
-                </>
-              )}
-              {curTab === 'nodes' && unmon.size > 0 && (
-                <div className="kube-noagent-hint muted small">
-                  {t('Нод без агента: {n}. На них панель не видит диски, SMART, упавшие юниты и процессы - только то, что отдает Kubernetes.', { n: unmon.size })}
-                </div>
-              )}
-              {curTab === 'nodes' &&
-                nodes.map((n) => (
-                  <div className={`loc-res docker-row ${n.ready && !(n.pressure ?? []).length ? 't-up' : 't-down'}`} key={n.name}>
-                    <div className="docker-c-main">
-                      <div className="docker-c-name mono">
-                        {n.name}
-                        {n.roles && <span className="type-chip">{n.roles}</span>}
-                        {unmon.has(n.name) && <span className="type-chip t-degraded">{t('без агента')}</span>}
-                        {(n.pressure ?? []).map((c) => (
-                          <span className="type-chip off" key={c}>{c}</span>
-                        ))}
-                        {ignoredNodes.has(n.name) && (
-                          <span className="type-chip muted" title={t('отмечено, что агент здесь не нужен')}>
-                            {t('агент не нужен')}
-                          </span>
-                        )}
-                      </div>
-                      <div className="docker-c-img kube-node-line mono muted small">
-                        {n.version || ''}{n.ip ? ` · ${n.ip}` : ''}
-                      </div>
-                      {n.use && (
-                        <div className="docker-c-img kube-node-line mono muted small">
-                          {t('память {u} из {c}', { u: fmtBytes(n.use.mem), c: n.cap ? fmtBytes(n.cap.mem) : '?' })}
-                          {n.cap?.mem ? ` (${Math.round((n.use.mem / n.cap.mem) * 100)}%)` : ''}
-                          {' · '}
-                          {t('CPU {u} из {c}', { u: fmtCores(n.use.cpu_m), c: n.cap ? fmtCores(n.cap.cpu_m) : '?' })}
-                        </div>
-                      )}
-                      {canAct && (unmon.has(n.name) || ignoredNodes.has(n.name)) && (
-                        <div className="kube-node-acts">
-                          {unmon.has(n.name) ? (
-                            <>
-                              <button className="small" onClick={() => onAddNode(unmon.get(n.name)!)}>
-                                {t('Добавить в панель')}
-                              </button>
-                              <button className="ghost small" disabled={nodeBusy === n.name}
-                                onClick={() => setNodeIgnored(n.name, true)}>
-                                {t('Агент не нужен')}
-                              </button>
-                            </>
-                          ) : (
-                            <button className="ghost small" disabled={nodeBusy === n.name}
-                              onClick={() => setNodeIgnored(n.name, false)}>
-                              {t('Вернуть подсказку')}
-                            </button>
+                      )
+                    })}
+                  </>
+                )}
+                {curTab === 'nodes' &&
+                  nodes.map((n) => {
+                    const tone = !n.ready ? 't-down' : (n.pressure ?? []).length ? 't-degraded' : 't-up'
+                    return (
+                      <div className={`loc-res docker-row ${n.ready && !(n.pressure ?? []).length ? 't-up' : 't-down'}`} key={n.name}>
+                        <span className={`lk-dot${DOT[tone]}`} />
+                        <div className="docker-c-main">
+                          <div className="docker-c-name mono">
+                            {n.name}
+                            {n.roles && <span className="type-chip">{n.roles}</span>}
+                            {unmon.has(n.name) && <span className="type-chip t-degraded">{t('без агента')}</span>}
+                            {(n.pressure ?? []).map((c) => (
+                              <span className="type-chip off" key={c}>{c}</span>
+                            ))}
+                            {ignoredNodes.has(n.name) && (
+                              <span className="type-chip muted" title={t('отмечено, что агент здесь не нужен')}>
+                                {t('агент не нужен')}
+                              </span>
+                            )}
+                          </div>
+                          <div className="docker-c-img kube-node-line mono muted small">
+                            {n.version || ''}{n.ip ? ` · ${n.ip}` : ''}
+                          </div>
+                          {n.use && (
+                            <div className="docker-c-img kube-node-line mono muted small">
+                              {t('память {u} из {c}', { u: fmtBytes(n.use.mem), c: n.cap ? fmtBytes(n.cap.mem) : '?' })}
+                              {n.cap?.mem ? ` (${Math.round((n.use.mem / n.cap.mem) * 100)}%)` : ''}
+                              {' · '}
+                              {t('CPU {u} из {c}', { u: fmtCores(n.use.cpu_m), c: n.cap ? fmtCores(n.cap.cpu_m) : '?' })}
+                            </div>
                           )}
-                          {nodeErr && nodeErr.node === n.name && <span className="form-error small">{nodeErr.msg}</span>}
+                          {canAct && (unmon.has(n.name) || ignoredNodes.has(n.name)) && (
+                            <div className="kube-node-acts">
+                              {unmon.has(n.name) ? (
+                                <>
+                                  <button className="small" onClick={() => onAddNode(unmon.get(n.name)!)}>
+                                    {t('Добавить в панель')}
+                                  </button>
+                                  <button className="ghost small" disabled={nodeBusy === n.name}
+                                    onClick={() => setNodeIgnored(n.name, true)}>
+                                    {t('Агент не нужен')}
+                                  </button>
+                                </>
+                              ) : (
+                                <button className="ghost small" disabled={nodeBusy === n.name}
+                                  onClick={() => setNodeIgnored(n.name, false)}>
+                                  {t('Вернуть подсказку')}
+                                </button>
+                              )}
+                              {nodeErr && nodeErr.node === n.name && <span className="form-error small">{nodeErr.msg}</span>}
+                            </div>
+                          )}
                         </div>
-                      )}
-                    </div>
-                    <div className={`docker-c-status mono small ${n.ready ? 't-up' : 't-down'}`}>
-                      {n.ready ? 'Ready' : 'NotReady'}
-                    </div>
-                  </div>
-                ))}
+                        <div className={`docker-c-status mono small ${n.ready ? 't-up' : 't-down'}`}>
+                          {n.ready ? 'Ready' : 'NotReady'}
+                        </div>
+                      </div>
+                    )
+                  })}
+              </div>
             </div>
-          </>
-        )}
+          )}
+        </div>
       </div>
       {logsPod && <PodLogsModal server={s} pod={logsPod} onClose={() => setLogsPod(null)} />}
     </div>,
@@ -836,6 +930,8 @@ function KubeHostModal({
   )
 }
 
+// Строка кластера: точка - на связи ли нода, справа работающие поды из тех, что должны
+// работать. Красное - падают поды или нода не готова, желтое - не все поды готовы
 function HostRow({
   server: s,
   kube,
@@ -852,6 +948,7 @@ function HostRow({
   const pods = kube.pods ?? []
   const nodesReady = nodes.filter((n) => n.ready).length
   const { running, active } = podCounts(pods)
+  const bad = pods.filter((p) => !podFinished(p) && podTone(p) === 't-down').length
   // Сроки видны прямо в списке: истёкший токен Flux не меняет ни одного счётчика
   // подов, и без отдельной пометки хост в списке выглядит совершенно здоровым.
   const fluxBroken = (s.last_report?.flux ?? []).filter(
@@ -859,15 +956,25 @@ function HostRow({
   ).length
   const soon = (s.last_report?.kube_expiry ?? []).filter((e) => daysLeft(e.expires) <= expiryHorizon(s)).length
   return (
-    <button className="check-row srv-row docker-host-row" onClick={onOpen}>
-      <span className={`sdot ${s.online ? 'sdot-up' : 'sdot-down'}`} />
-      <div className="check-main">
-        <div className="check-name">
+    <button className="loc-res loc-res-btn hs-host" onClick={onOpen}>
+      <span className={`lk-dot ${s.online ? 'lk-dot-ok' : 'lk-dot-bad'}`} title={s.online ? t('на связи') : t('не на связи')} />
+      <div className="hs-host-main">
+        <div className="hs-host-name">
           <OsIcon os={s.os} />
           <CountryFlag code={s.country} />
           {s.name}
           {showGroup && s.group_name && <span className="type-chip group-chip">{s.group_name}</span>}
           {!kube.access && <span className="type-chip off">{t('нет доступа')}</span>}
+          {bad > 0 && (
+            <span className="type-chip off" title={t('поды падают: CrashLoopBackOff, ошибка образа или запуска')}>
+              🔥 {bad}
+            </span>
+          )}
+          {kube.access && nodesReady < nodes.length && (
+            <span className="type-chip off" title={t('ноды не в Ready')}>
+              {t('ноды {r}/{n}', { r: nodesReady, n: nodes.length })}
+            </span>
+          )}
           {fluxBroken > 0 && (
             <span className="type-chip t-down" title={t('Ресурсы Flux не в Ready — доставка встала')}>
               {t('Flux ⚠ {n}', { n: fluxBroken })}
@@ -879,14 +986,14 @@ function HostRow({
             </span>
           )}
         </div>
-        <div className="check-target mono muted small">
+        <div className="mono muted small">
           {kube.flavor || 'k8s'} {kube.version || '—'}
           {kube.access ? ` · ${t('ноды {r}/{n}', { r: nodesReady, n: nodes.length })}` : ''}
         </div>
       </div>
-      <div className="docker-host-count mono">
+      <div className="hs-host-count mono">
         {kube.access ? (
-          <span className={running < active ? 't-degraded' : 't-up'}>
+          <span className={bad || nodesReady < nodes.length ? 't-down' : running < active ? 't-degraded' : 't-up'}>
             {t('{r}/{n}', { r: running, n: active })}
           </span>
         ) : (
@@ -995,6 +1102,27 @@ export function KuberPage({
         })()
 
   const open = allHosts.find(({ s }) => s.id === openId)
+  // сводка по всем кластерам: ноды, поды и то, что встало или скоро истечет
+  const noAccess = allHosts.filter(({ d }) => !d.access).length
+  const offline = allHosts.filter(({ s }) => !s.online).length
+  const nAll = allHosts.flatMap(({ d }) => (d.access ? d.nodes ?? [] : []))
+  const nReady = nAll.filter((n) => n.ready).length
+  const nPress = nAll.filter((n) => n.ready && (n.pressure ?? []).length > 0).length
+  const nUnmon = allHosts.reduce((n, { s }) => n + (s.kube_unmonitored ?? []).length, 0)
+  const pAll = allHosts.flatMap(({ d }) => (d.access ? d.pods ?? [] : []))
+  const { running: pRun, active: pAct } = podCounts(pAll)
+  const pBad = pAll.filter((p) => !podFinished(p) && podTone(p) === 't-down').length
+  const fluxN = allHosts.filter(({ s }) => (s.last_report?.flux ?? []).some((f) => !f.ready && !FLUX_TRANSIENT.has(f.reason ?? ''))).length
+  const expiredN = allHosts.filter(({ s }) => (s.last_report?.kube_expiry ?? []).some((e) => daysLeft(e.expires) < 0)).length
+  const soonN = allHosts.filter(({ s }) =>
+    (s.last_report?.kube_expiry ?? []).some((e) => daysLeft(e.expires) >= 0 && daysLeft(e.expires) <= expiryHorizon(s))).length
+  const cronN = allHosts.filter(({ s }) =>
+    Object.keys(s.kube_cron_issues ?? {}).length > 0 || (s.last_report?.kube?.failed_jobs ?? []).length > 0).length
+  const attn = allHosts.filter(({ s }) =>
+    (s.last_report?.flux ?? []).some((f) => !f.ready && !FLUX_TRANSIENT.has(f.reason ?? '')) ||
+    (s.last_report?.kube_expiry ?? []).some((e) => daysLeft(e.expires) <= expiryHorizon(s)) ||
+    Object.keys(s.kube_cron_issues ?? {}).length > 0 ||
+    (s.last_report?.kube?.failed_jobs ?? []).length > 0).length
 
   return (
     <div>
@@ -1019,11 +1147,52 @@ export function KuberPage({
               </button>
             </div>
           )}
-          {allHosts.length > 0 && (
-            <span className="muted small">{t('{n} кластеров', { n: allHosts.length })}</span>
-          )}
         </div>
       </div>
+      {allHosts.length > 0 && (
+        <div className="net-tiles hs-tiles">
+          <NetTile
+            label={t('Кластеры')}
+            value={String(allHosts.length)}
+            sub={subOf(
+              noAccess > 0 && t('без доступа: {n}', { n: noAccess }),
+              offline > 0 && t('не на связи: {n}', { n: offline }),
+            ) || t('все на связи')}
+            tone={noAccess || offline ? 'warn' : 'ok'}
+          />
+          <NetTile
+            label={t('Ноды готовы')}
+            value={String(nReady)}
+            unit={t('из {n}', { n: nAll.length })}
+            sub={subOf(
+              nPress > 0 && t('под давлением: {n}', { n: nPress }),
+              nUnmon > 0 && t('без агента: {n}', { n: nUnmon }),
+            ) || t('все готовы')}
+            tone={nReady < nAll.length ? 'bad' : nPress || nUnmon ? 'warn' : 'ok'}
+          />
+          <NetTile
+            label={t('Поды работают')}
+            value={String(pRun)}
+            unit={t('из {n}', { n: pAct })}
+            sub={subOf(
+              pBad > 0 && t('падают: {n}', { n: pBad }),
+              pAct - pRun - pBad > 0 && t('не готовы: {n}', { n: pAct - pRun - pBad }),
+            ) || t('все работают')}
+            tone={pBad ? 'bad' : pRun < pAct ? 'warn' : 'ok'}
+          />
+          <NetTile
+            label={t('Кластеры с замечаниями')}
+            value={String(attn)}
+            sub={subOf(
+              fluxN > 0 && t('Flux встал: {n}', { n: fluxN }),
+              expiredN > 0 && t('сроки истекли: {n}', { n: expiredN }),
+              soonN > 0 && t('сроки скоро: {n}', { n: soonN }),
+              cronN > 0 && t('задания упали: {n}', { n: cronN }),
+            ) || t('все в порядке')}
+            tone={fluxN || expiredN ? 'bad' : attn ? 'warn' : 'ok'}
+          />
+        </div>
+      )}
       {allHosts.length > 1 && (
         <div className="checks-search-row">
           <input
@@ -1048,27 +1217,31 @@ export function KuberPage({
       {servers && allHosts.length > 0 && hosts.length === 0 && (
         <div className="card muted">{t('Ничего не найдено.')}</div>
       )}
-      {groups.map((g) => (
-        <div key={g.key} className="mon-group">
-          {groupBy !== 'none' && (
-            <div className="mon-group-head docker-group-head">
-              <span className="mon-group-name">{g.label}</span>
-              <span className="mon-group-n">{g.items.length}</span>
+      {hosts.length > 0 && (
+        <div className="net-cards hs-groups">
+          {groups.map((g) => (
+            <div key={g.key} className="chart-card net-card net-card-wide">
+              <div className="net-head">
+                <div className="chart-cap net-cap">
+                  {groupBy === 'none' ? t('Кластеры') : g.label}
+                  <span className="net-n">{g.items.length}</span>
+                </div>
+              </div>
+              <div className="loc-results">
+                {g.items.map(({ s, d }) => (
+                  <HostRow
+                    key={s.id}
+                    server={s}
+                    kube={d}
+                    showGroup={groupBy !== 'group'}
+                    onOpen={() => setOpenId(s.id)}
+                  />
+                ))}
+              </div>
             </div>
-          )}
-          <div className="check-list">
-            {g.items.map(({ s, d }) => (
-              <HostRow
-                key={s.id}
-                server={s}
-                kube={d}
-                showGroup={groupBy !== 'group'}
-                onOpen={() => setOpenId(s.id)}
-              />
-            ))}
-          </div>
+          ))}
         </div>
-      ))}
+      )}
       {open && (
         <KubeHostModal
           server={open.s}
