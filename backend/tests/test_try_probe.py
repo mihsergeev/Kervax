@@ -60,6 +60,10 @@ async def test_panel_part_is_one_attempt_and_sees_every_address(client, auth_hea
     # группа - как у мониторов того же домена; этот адрес уже смотрит другой монитор
     assert out["group"] == "Магазин"
     assert out["existing_name"] == "админка"
+    # правка самой "админки": она себе не дубль
+    r = await client.post("/api/checks/try", headers=auth_headers,
+                          json=dict(FORM, part="panel", check_id=out["existing_id"]))
+    assert r.json()["existing_id"] is None
     # ничего не заведено
     async with _factory(client)() as s:
         assert await s.scalar(select(func.count()).select_from(Check)) == 3

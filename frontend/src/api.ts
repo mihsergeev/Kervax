@@ -599,6 +599,7 @@ export function createCheck(body: CheckForm): Promise<Check> {
 export type TryPart = 'panel' | 'expiry' | 'locations' | 'inside'
 export type TryIn = {
   part: TryPart
+  check_id?: number // правка: сам монитор дублем себе не считается
   type: 'http' | 'tcp_port'
   target: string
   port?: number

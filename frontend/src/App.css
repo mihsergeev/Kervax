@@ -7020,3 +7020,7 @@ label.am-ck small { display: block; color: var(--text-muted); font-size: 0.78rem
 .am .win-btn-active,
 .am .win-btn-active:hover { background: color-mix(in srgb, var(--accent) 24%, transparent); color: var(--text); }
 button.am-link.small { font-size: 0.82rem; }
+/* правка монитора той же формой: внутри модалки карточка уже есть */
+.am-edit { margin: 0; }
+.am-locs { margin-top: 0.7rem; display: flex; flex-direction: column; gap: 0.35rem; }
+.am-mutes { margin-top: 0.7rem; }

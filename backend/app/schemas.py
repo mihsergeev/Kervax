@@ -192,6 +192,8 @@ class CheckTryIn(BaseModel):
     на сам запрос. part - какую часть проверить: форма спрашивает их одновременно."""
 
     part: Literal["panel", "expiry", "locations", "inside"]
+    # правка монитора: сам он дублем себе не считается
+    check_id: int | None = None
     type: Literal["http", "tcp_port"]
     target: str = Field(min_length=1, max_length=512)
     port: int = Field(default=0, ge=0, le=65535)

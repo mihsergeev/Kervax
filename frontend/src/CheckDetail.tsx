@@ -26,6 +26,7 @@ import {
   type Uptime,
 } from './api'
 import { CheckFormCard } from './CheckFormCard'
+import { AddMonitor } from './AddMonitor'
 import { CheckWhere, phaseSeries } from './CheckPhases'
 import { SnoozeControl } from './SnoozeControl'
 import { StackedAreaChart } from './charts/StackedAreaChart'
@@ -196,13 +197,15 @@ export function CheckDetail({ check, groups, initialSec, onClose, onSaved, onRun
     setForm((f) => (f ? { ...f, ...patch } : f))
   const canSave =
     !!form && form.name.trim() !== '' && form.target.trim() !== '' && !saving
+  const newForm = !!form && (form.type === 'http' || form.type === 'tcp_port')
 
-  const submitEdit = async () => {
-    if (!form) return
+  const submitEdit = async (next?: CheckForm) => {
+    const body = next ?? form
+    if (!body) return
     setSaving(true)
     setSaveErr(null)
     try {
-      await updateCheck(check.id, form)
+      await updateCheck(check.id, body)
       setEditing(false)
       onSaved?.()
     } catch (e) {
@@ -652,7 +655,7 @@ export function CheckDetail({ check, groups, initialSec, onClose, onSaved, onRun
                 }
               }}
             />
-            {saveErr && <p className="form-error">{saveErr}</p>}
+            {saveErr && !newForm && <p className="form-error">{saveErr}</p>}
             {/* удаление - сверху и отдельно, чтобы не нажать случайно рядом с "Сохранить" */}
             {onDelete && (
               <div className="edit-danger-top">
@@ -661,17 +664,33 @@ export function CheckDetail({ check, groups, initialSec, onClose, onSaved, onRun
                 </button>
               </div>
             )}
-            <CheckFormCard
-              bare
-              form={form}
-              set={setField}
-              editing
-              busy={saving}
-              canSubmit={canSave}
-              onSubmit={submitEdit}
-              onCancel={() => setEditing(false)}
-              groups={groups}
-            />
+            {/* сайт и порт - той же формой, что и новый монитор, с пробной проверкой;
+                push и DNS проверять заранее нечем, у них прежняя форма */}
+            {newForm ? (
+              <AddMonitor
+                editing
+                checkId={check.id}
+                base={form}
+                groups={groups ?? []}
+                busy={saving}
+                error={saveErr}
+                onSubmit={submitEdit}
+                onCancel={() => setEditing(false)}
+                onUnauthorized={onUnauthorized}
+              />
+            ) : (
+              <CheckFormCard
+                bare
+                form={form}
+                set={setField}
+                editing
+                busy={saving}
+                canSubmit={canSave}
+                onSubmit={() => submitEdit()}
+                onCancel={() => setEditing(false)}
+                groups={groups}
+              />
+            )}
           </>
         ) : (
           <>

@@ -643,6 +643,8 @@ async def _try_context(body: CheckTryIn, user, session) -> dict:
     for check in await session.scalars(select(Check).order_by(Check.id)):
         if not group_allowed(user, check.group_name, "sites") or check.type in ("push", "dns"):
             continue
+        if check.id == body.check_id:
+            continue
         if check.group_name and checks_exec._registrable_domain(check.target or "") == zone:
             groups[check.group_name] = groups.get(check.group_name, 0) + 1
         got = addr(check.target)
