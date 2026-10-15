@@ -2770,6 +2770,19 @@ function LockIcon({ open = false }: { open?: boolean }) {
   )
 }
 
+// Домены по общей части: dev.example.com и s3.example.com -> example.com: dev, s3. Общая часть -
+// два последних уровня, а у example.com.cy и example.co.uk три
+function siteGroups(sites: string[]): { base: string; subs: string[] }[] {
+  const by = new Map<string, string[]>()
+  for (const d of sites) {
+    const p = d.split('.')
+    const n = p.length > 2 && p[p.length - 1].length === 2 && p[p.length - 2].length <= 3 ? 3 : 2
+    const base = p.slice(-n).join('.')
+    by.set(base, [...(by.get(base) ?? []), p.slice(0, -n).join('.')])
+  }
+  return [...by.entries()].map(([base, subs]) => ({ base, subs }))
+}
+
 function CloudIcon() {
   return (
     <svg className="exp-ic exp-cf" viewBox="0 0 16 16" fill="currentColor" aria-hidden>
@@ -3076,25 +3089,63 @@ function OpenPorts({ server: s, onChanged }: { server: Server; onChanged: () => 
           </div>
         </div>
       )}
+      {(cfOnly.length > 0 || cfAlso.length > 0) && (
+        <div className="exp-cf-box">
+          <div className="exp-cf-h">
+            <CloudIcon />
+            {t('Сайты через Cloudflare')} <span className="exp-col-n">{ex?.cf?.n ?? cfSites.length}</span>
+            {ex?.cf && ex.cf.checked < ex.cf.total && (
+              <span className="exp-cf-sub">{t('проверено {c} из {n}', { c: ex.cf.checked, n: ex.cf.total })}</span>
+            )}
+          </div>
+          {siteGroups(cfSites).map((g) => (
+            <div key={g.base} className="exp-cf-group">
+              {/* сам домен в списке - он и подпись группы, иначе подпись серым */}
+              {g.subs.includes('') ? <span className="exp-chip">{g.base}</span> : <span className="exp-cf-base">{g.base}</span>}
+              {g.subs.filter(Boolean).map((sub) => (
+                <span key={sub} className="exp-chip">
+                  {sub}
+                </span>
+              ))}
+            </div>
+          ))}
+          {cfMore > 0 && <div className="exp-cf-sub">{t('и еще {n}', { n: cfMore })}</div>}
+          {cfOnly.length > 0 && (
+            <div className="exp-cf-line">
+              <span className="net-tone-ok">
+                <LockIcon />
+              </span>
+              <span>
+                {t('Напрямую закрыто:')} <b className="mono">{cfOnly.map((g) => g.port).join(', ')}</b>
+                {', '}
+                {t('туда пускают только Cloudflare')}
+              </span>
+            </div>
+          )}
+          {cfAlso.length > 0 && (
+            <div className="exp-cf-line">
+              <span className="exp-cf">
+                <LockIcon open />
+              </span>
+              <span>
+                {t('Напрямую открыто:')} <b className="mono">{cfAlso.map((g) => g.port).join(', ')}</b>
+                {', '}
+                {t('защиту Cloudflare можно обойти по адресу ноды. Если так не задумано, пустите туда только адреса Cloudflare')}
+              </span>
+            </div>
+          )}
+        </div>
+      )}
       {unknown.length > 0 && (
         <div className="small exp-closed">
           <span className="muted">{t('не проверить ({n}):', { n: unknown.length })}</span> {chips(unknown)}
         </div>
       )}
-      {(toFix || cfOnly.length > 0 || cfAlso.length > 0 || (ex && !own && opened.length > 0)) && (
+      {(toFix || (ex && !own && opened.length > 0)) && (
         <div className="net-foot">
           {toFix && (
             <div className="exp-fix">
               {t('Закройте порт файрволом или привяжите сервис к 127.0.0.1 либо к внутреннему адресу. Порт Docker, опубликованный через -p, обходит ufw: публикуйте его как 127.0.0.1:порт:порт.')}
-            </div>
-          )}
-          {(cfOnly.length > 0 || cfAlso.length > 0) && (
-            <div>
-              {t('Сайты ноды идут через Cloudflare: {sites}.', {
-                sites: cfSites.join(', ') + (cfMore > 0 ? ' ' + t('и еще {n}', { n: cfMore }) : ''),
-              })}
-              {cfOnly.length > 0 && <> {t('Напрямую закрыто: {ports} - туда пускают только Cloudflare.', { ports: cfOnly.map((g) => g.port).join(', ') })}</>}
-              {cfAlso.length > 0 && <> {t('Напрямую открыто: {ports} - защиту Cloudflare можно обойти по адресу ноды. Если так не задумано, пустите туда только адреса Cloudflare.', { ports: cfAlso.map((g) => g.port).join(', ') })}</>}
             </div>
           )}
           {ex && !own && opened.length > 0 && (
