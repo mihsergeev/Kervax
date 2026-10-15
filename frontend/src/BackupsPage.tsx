@@ -1407,7 +1407,7 @@ function RotationInfo({ r, x, legacy, prune, t }: {
         </span>
       ) : null}
       {ts > 0 && (
-        <span className={prune ? 't-down' : ''} title={prune || (r.rotation_ok === 0 ? t('последний прогон завершился ошибкой') : '')}>
+        <span className={prune ? 't-down' : ''} title={!prune && r.rotation_ok === 0 ? t('последний прогон завершился ошибкой') : undefined}>
           {t('чистка')}: {fmtAgo(ts)}
           {removed >= 0 && ` (${t('снято {n}', { n: removed })})`}
         </span>
@@ -1649,7 +1649,7 @@ function RepoRow({ server: s, r, ctx, canAct, onChanged, growth, unmonitored }: 
           )}
           {st === 'stale' && <span className="type-chip off" title={staleTitle}>{cad ? t('опоздал') : t('устарел')}</span>}
           {ctx.prune[r.name] && !isMuted && (
-            <span className="type-chip off" title={ctx.prune[r.name]}>{t('чистка не работает')}</span>
+            <span className="type-chip off">{t('чистка не работает')}</span>
           )}
           {(growth ?? 0) > 0 && (
             <span className="type-chip" title={t('обычный прирост за прогон после сжатия')}>
@@ -1986,12 +1986,35 @@ function EnableTls({ server: s, onChanged }: { server: Server; onChanged: () => 
   )
 }
 
-function BackupServerModal({ server: s, info, servers, canAct, onChanged, onClose }: {
-  server: Server; info: BackupServerInfo; servers: Server[]; canAct: boolean; onChanged: () => void; onClose: () => void
+// Окно сервера бэкапов: меню разделов слева, на экране один раздел, как у карточек (cardLayout).
+// Раньше шли плитки (в двух еще и кнопки обновления rest-server и включения HTTPS), потом длинная
+// карточка репозиториев с архивом и массовой чисткой внутри, потом покрытие
+const BSRV_SECTIONS: SecDef[] = [
+  { id: 'overview', label: 'Сводка', group: '' },
+  { id: 'repos', label: 'Репозитории', group: 'Репозитории' },
+  { id: 'archive', label: 'Архив', group: 'Репозитории' },
+  { id: 'cleanup', label: 'Чистка', group: 'Репозитории' },
+  { id: 'server', label: 'Сервер', group: 'Нода' },
+  { id: 'coverage', label: 'Покрытие', group: 'Нода' },
+]
+const BSRV_SEC_IDS = new Set(BSRV_SECTIONS.map((x) => x.id))
+
+function BackupServerModal({ server: s, info, servers, canAct, initialSec, onChanged, onClose }: {
+  server: Server; info: BackupServerInfo; servers: Server[]; canAct: boolean
+  initialSec?: string | null // из ссылки алерта или с главной: ?backupsrv=id&sec=cleanup
+  onChanged: () => void; onClose: () => void
 }) {
   const { t } = useI18n()
   const [q, setQ] = useState('')
   const [sort, setSort] = useState<'problems' | 'name' | 'size' | 'age' | 'snapshots' | 'growth'>('problems')
+  const [active, setActive] = useState<string>(() => (BSRV_SEC_IDS.has(initialSec ?? '') ? initialSec! : 'overview'))
+  const layoutRef = useRef<HTMLDivElement>(null)
+  const go = (id: string) => {
+    setActive(id)
+    setQ('')
+    const el = layoutRef.current
+    if (el && el.getBoundingClientRect().top < 0) el.scrollIntoView({ block: 'start' })
+  }
   // клиенты без агента в панели: сломанный бэкап панель видит только по ритму бэкапов
   const unmon = new Set(s.bsrv_unmonitored ?? [])
   const [onlyUnmon, setOnlyUnmon] = useState(false)
@@ -2007,7 +2030,7 @@ function BackupServerModal({ server: s, info, servers, canAct, onChanged, onClos
   const ctx = repoCtx(s)
   const muted = ctx.muted
   const every = info.repos ?? []
-  // архив отдельным разделом внизу: в общем списке он выглядел бы заброшкой среди живых
+  // архив отдельным разделом: в общем списке он выглядел бы заброшкой среди живых
   const all = every.filter((r) => !ctx.archived.has(r.name))
   const archivedRepos = every.filter((r) => ctx.archived.has(r.name)).sort((a, b) => a.name.localeCompare(b.name))
   const archivedBytes = archivedRepos.reduce((a, r) => a + (r.size_bytes || 0), 0)
@@ -2040,165 +2063,358 @@ function BackupServerModal({ server: s, info, servers, canAct, onChanged, onClos
   const free = info.disk_free ?? Math.max((info.disk_total || 0) - (info.disk_used || 0), 0)
   const srvOld = !!info.version && verLt(info.version, RESTSRV_TARGET)
   const tlsPort = info.tls_port || 64101
+  const now = Date.now() / 1000
+  // недельная проверка целостности за две недели: сколько прошло из тех, что вообще проверяются
+  const checked = Object.entries(ext?.repos ?? {}).filter(([n, x]) => !ctx.archived.has(n) && !!x.check_ts && now - x.check_ts < 14 * 86400)
+  const checkedOk = checked.filter(([, x]) => x.check_ok === 1).length
+  const smuted = new Set(s.alert_mutes ?? [])
+  const audit = (s.backup_audit ?? []).filter((x) => !x.muted)
+  const pruneNames = Object.keys(ctx.prune).filter((n) => !muted.has(n) && !ctx.archived.has(n)).sort()
+  const rot = s.bsrv_rotation ?? []
+
+  const shown: Record<string, boolean> = {
+    overview: true,
+    repos: true,
+    archive: archivedRepos.length > 0,
+    cleanup: all.length > 0,
+    server: true,
+    coverage: (s.backup_audit?.length ?? 0) > 0,
+  }
+  const secs = BSRV_SECTIONS.filter((x) => shown[x.id])
+  const cur = secs.find((x) => x.id === active) ?? secs[0]
+  useUrlParam('sec', cur.id === 'overview' ? null : cur.id)
+
+  // Замечания по разделам - те же, что в "Что сломано" на главной: rest-server остановлен,
+  // висячие локи, опоздавшие и битые репозитории, неработающая чистка, невычищаемые снапшоты,
+  // проверка целостности с бэкенда. Старый restic, пустая статистика и отдельный дамп для базы -
+  // советы из "Требует действий"
+  const items: Record<string, SecItem[]> = {}
+  const add = (sec: string, x: SecItem) => (items[sec] ??= []).push(x)
+  if (s.online) {
+    if (!info.running) add('server', { level: 2, text: t('rest-server остановлен') })
+    const locked = all.filter((r) => !muted.has(r.name) && r.locked && r.lock_ts && now - r.lock_ts > 86400)
+    if (locked.length && !smuted.has('backup_lock'))
+      add('repos', {
+        level: 2,
+        count: locked.length,
+        since: new Date(Math.min(...locked.map((r) => r.lock_ts ?? now)) * 1000).toISOString(),
+        text: t('залочен больше суток, чистка не идет: {list}', {
+          list: locked.map((r) => `${r.name} (${Math.floor((now - (r.lock_ts ?? now)) / 86400)} ${t('дн.')})`).join(', '),
+        }),
+      })
+    const badNames = Object.keys(s.bsrv_repo_reasons ?? {}).sort()
+    if (badNames.length)
+      add('repos', {
+        level: 2,
+        count: badNames.length,
+        since: s.alert_since?.backup_repo,
+        text: t('репозиториев с проблемой: {n} ({list})', { n: badNames.length, list: shortList(badNames, t, 3) }),
+      })
+    for (const i of srvIssues(s, t).filter((x) => x.section === 'backups' && x.srv))
+      add(BSRV_SEC_IDS.has(i.sec ?? '') ? i.sec! : 'repos', { level: i.tone === 't-down' ? 2 : 1, text: i.text, since: i.since })
+    if (pruneNames.length && !smuted.has('backup_prune'))
+      add('cleanup', { level: 2, count: pruneNames.length, text: t('чистка не работает: {list}', { list: shortList(pruneNames, t, 3) }) })
+    if (rot.length && !smuted.has('backup_rotation'))
+      add('cleanup', { level: 1, count: rot.length, text: t('старые снапшоты не вычищаются: {list}', { list: shortList(rot, t, 3) }) })
+    if (s.bsrv_restic_old)
+      add('server', { level: 1, text: t('на сервере бэкапов старый restic {v} - обновите', { v: s.bsrv_restic_old }) })
+    if (!every.length)
+      add('repos', { level: 1, text: t('статистики репозиториев нет: включите ее (backupserver-setup)') })
+    const dbs = audit.filter((x) => x.kind === 'db')
+    if (dbs.length && !s.db_dumps_ok)
+      add('coverage', {
+        level: 1,
+        count: dbs.length,
+        text: t('{db} - нужен отдельный дамп', { db: shortList(dbs.map((x) => x.subject), t, 3) }),
+      })
+  }
+  const okDb = audit.filter((x) => x.kind === 'db_ok').length
+  const ok: Record<string, string> = {
+    repos: all.length ? t('репозиториев: {n}, все в порядке', { n: all.length }) : '',
+    archive: t('репозиториев: {n}, {sz}', { n: archivedRepos.length, sz: fmtBytes(archivedBytes) }),
+    cleanup: ext ? t('чистка и проверка идут у всех') : t('нет данных'),
+    server: subOf(
+      info.version && `rest-server ${info.version}`,
+      info.tls_front ? 'HTTPS' : 'HTTP',
+      info.running ? t('запущен') : t('остановлен'),
+    ),
+    coverage: okDb ? t('бэкапится баз: {n}', { n: okDb }) : t('баз не найдено'),
+  }
+  const infoSec: Record<string, SecInfo> = {}
+  for (const { id } of BSRV_SECTIONS) infoSec[id] = secInfoOf(items[id] ?? [], ok[id] ?? '', t)
+  // не проблема, но и не "все в порядке": старый rest-server, трафик без HTTPS
+  const soft = (id: string, line: string) => {
+    if (!infoSec[id].level) infoSec[id] = { ...infoSec[id], level: 1, line }
+  }
+  if (srvOld) soft('server', t('rest-server {v}, есть {t}', { v: info.version ?? '', t: RESTSRV_TARGET }))
+  else if (!info.tls_front) soft('server', t('клиенты ходят по HTTP, без TLS'))
+  const gaps = audit.filter((x) => x.gap)
+  if (gaps.length) soft('coverage', t('не бэкапится: {list}', { list: shortList(gaps.map((x) => x.subject), t, 3) }))
+  if (!ext && !infoSec.cleanup.level) infoSec.cleanup.idle = true
+
+  const rows: OvRow[] = BSRV_SECTIONS.flatMap(({ id, label }) =>
+    (items[id] ?? []).map((x) => ({
+      tone: x.level >= 2 ? ('t-down' as const) : ('t-degraded' as const),
+      text: x.text,
+      since: x.since,
+      act: shown[id] ? { label: t(label), onClick: () => go(id) } : undefined,
+    })),
+  ).sort((a, b) => Number(b.tone === 't-down') - Number(a.tone === 't-down'))
+  const tileLabel = (sec: string, label: string) =>
+    infoSec[sec].fresh ? <>{label} <FreshChip since={infoSec[sec].fresh!} /></> : label
+  const row = (k: string, v: ReactNode) => (
+    <div className="kv-row">
+      <span className="kv-k muted small">{k}</span>
+      <span className="kv-v mono small">{v}</span>
+    </div>
+  )
+
   return createPortal(
     <div className="modal-backdrop">
-      <div className="card modal docker-modal hs-modal" onClick={(e) => e.stopPropagation()}>
-        <div className="clients-head">
-          <h3>
-            <span className={`sdot ${s.online ? 'sdot-up' : 'sdot-down'}`} />{' '}
-            <OsIcon os={s.os} /> <CountryFlag code={s.country} /> {s.name}
+      <div className="card detail detail-server hs-modal" onClick={(e) => e.stopPropagation()}>
+        <div className="detail-head">
+          <div className="detail-title">
+            <span className={`sdot ${s.online ? 'sdot-up' : 'sdot-down'}`} />
+            <OsIcon os={s.os} size={18} />
+            <CountryFlag code={s.country} />
+            <h3>{s.name}</h3>
             {s.group_name && <span className="type-chip group-chip">{s.group_name}</span>}
-          </h3>
-          <button className="ghost" onClick={onClose}>
-            {t('Закрыть')}
-          </button>
+          </div>
+          <div className="detail-head-actions">
+            <button className="ghost icon-btn" onClick={onClose} title={t('Закрыть')}>
+              ✕
+            </button>
+          </div>
         </div>
-        {/* Место на томе с репозиториями — первой плиткой: кончившееся место останавливает
-            бэкапы всего парка разом. Меряем df ПО КАТАЛОГУ ДАННЫХ (root-helper), а не общий
-            диск ноды: репозитории обычно на отдельном томе. На helper старше 0.18 данных нет. */}
-        <div className="net-tiles hs-tiles">
-          {pct != null && (
-            <NetTile
-              label={t('Место на диске')}
-              value={`${pct}%`}
-              sub={t('свободно {f} из {tt}', { f: fmtBytes(free), tt: fmtBytes(info.disk_total) })}
-              tone={pct >= 90 ? 'bad' : pct >= 80 ? 'warn' : 'ok'}
-              title={info.data_dir || undefined}
-            />
-          )}
-          <NetTile
-            label={t('Репозитории')}
-            value={String(all.length)}
-            sub={subOf(
-              bad > 0 && t('проблемных: {b}', { b: bad }),
-              archivedRepos.length > 0 && t('в архиве: {n}', { n: archivedRepos.length }),
-            ) || (all.length ? t('все ок') : undefined)}
-            tone={bad ? 'bad' : all.length ? 'ok' : undefined}
-          />
-          <NetTile
-            label="rest-server"
-            value={info.version || '—'}
-            sub={subOf(info.running ? t('запущен') : t('остановлен'), srvOld && t('есть {v}', { v: RESTSRV_TARGET }))}
-            tone={!info.running ? 'bad' : srvOld ? 'warn' : undefined}
-          >
-            {canAct && srvOld && (
-              <div className="hs-tile-act"><RestServerUpdate server={s} info={info} onChanged={onChanged} /></div>
-            )}
-          </NetTile>
-          <NetTile
-            label={t('Протокол')}
-            value={info.tls_front ? 'HTTPS' : 'HTTP'}
-            sub={info.tls_front ? t('порт {p}', { p: tlsPort }) : t('без TLS')}
-            tone={info.tls_front ? 'ok' : undefined}
-            title={info.tls_front
-              ? t('клиенты ходят по HTTPS (self-signed TLS-фронт на порту {p})', { p: tlsPort })
-              : t('трафик по HTTP без TLS. Данные шифрует restic на клиенте, но логин/пароль и метаданные идут открыто. Можно включить HTTPS (self-signed) кнопкой ниже.')}
-          >
-            {canAct && !info.tls_front && (
-              <div className="hs-tile-act"><EnableTls server={s} onChanged={onChanged} /></div>
-            )}
-          </NetTile>
+        <div className="srv-meta srv-meta-line">
+          <span className="srv-meta-item">
+            <span className="srv-meta-k">rest-server</span>{' '}
+            <span className={!info.running ? 't-down' : srvOld ? 't-degraded' : undefined}>{info.version || '—'}</span>
+          </span>
+          <span className="srv-meta-item">
+            <span className={info.tls_front ? 't-up' : undefined}>{info.tls_front ? 'HTTPS' : 'HTTP'}</span>
+            {info.tls_front && ` :${tlsPort}`}
+          </span>
           {ext?.restic && (
-            <NetTile
-              label="restic"
-              value={ext.restic}
-              sub={s.bsrv_restic_old ? t('есть {v}', { v: ext.restic_target || RESTIC_TARGET }) : t('для чистки и проверки')}
-              tone={s.bsrv_restic_old ? 'warn' : undefined}
-              title={t('restic, которым сервер сам чистит и проверяет репозитории (prune, forget, check)')}
-            />
+            <span className="srv-meta-item">
+              <span className="srv-meta-k">restic</span>{' '}
+              <span className={s.bsrv_restic_old ? 't-degraded' : undefined}>{ext.restic}</span>
+            </span>
           )}
+          {info.data_dir && (
+            <span className="srv-meta-item"><span className="srv-meta-k">{t('данные')}</span> <span className="mono">{info.data_dir}</span></span>
+          )}
+          <span className="srv-meta-item">
+            <span className="srv-meta-k">{t('обновлено')}</span> {fmtRel(s.last_seen)}
+          </span>
         </div>
-        <div className="net-cards hs-cards">
-          <div className="chart-card net-card net-card-wide">
-            <div className="net-head">
-              <div className="chart-cap net-cap">
-                {t('Репозитории')}
-                <span className={`net-n${bad ? ' net-n-bad' : ''}`}>{all.length}</span>
-              </div>
-              {unmon.size > 0 && (
-                <button className={`type-chip ${onlyUnmon ? 'on' : ''}`} onClick={() => setOnlyUnmon(!onlyUnmon)}
-                  title={t('Клиенты этих репозиториев не подключены к панели. Сломанный бэкап панель видит только по ритму: опоздавший бэкап через интервал и еще четверть его, ежедневный через 30 часов. Агент на ноде сказал бы сразу, как бэкап упал.')}>
-                  {t('без агента в панели: {n}', { n: unmon.size })}
-                </button>
+        <div className="srv-layout" ref={layoutRef}>
+          <CardNav secs={secs} active={cur.id} info={infoSec} onGo={go} />
+          <div className="srv-main">
+            <div className="srv-main-head">
+              <h4>{t(cur.label)}</h4>
+              {cur.id === 'repos' && all.length > 0 && (
+                <div className="modal-toolbar srv-head-tools">
+                  {all.length > 5 && (
+                    <input className="checks-search modal-search" placeholder={t('Фильтр: имя репозитория…')}
+                      value={q} onChange={(e) => setQ(e.target.value)} />
+                  )}
+                  <select className="modal-sort" value={sort} onChange={(e) => setSort(e.target.value as typeof sort)}>
+                    <option value="problems">{t('сорт: проблемные')}</option>
+                    <option value="name">{t('сорт: имя')}</option>
+                    <option value="size">{t('сорт: размер')}</option>
+                    <option value="age">{t('сорт: старые')}</option>
+                    <option value="snapshots">{t('сорт: снапшоты')}</option>
+                    {growers.length > 0 && <option value="growth">{t('сорт: прирост')}</option>}
+                  </select>
+                  {unmon.size > 0 && (
+                    <button className={`type-chip ${onlyUnmon ? 'on' : ''}`} onClick={() => setOnlyUnmon(!onlyUnmon)}
+                      title={t('Клиенты этих репозиториев не подключены к панели. Сломанный бэкап панель видит только по ритму: опоздавший бэкап через интервал и еще четверть его, ежедневный через 30 часов. Агент на ноде сказал бы сразу, как бэкап упал.')}>
+                      {t('без агента в панели: {n}', { n: unmon.size })}
+                    </button>
+                  )}
+                </div>
               )}
             </div>
-            {s.bsrv_restic_old && <ServerResticOld ver={s.bsrv_restic_old} target={ext?.restic_target || ''} />}
-            {legacy && legacyN > 0 && (
-              <div className={!legacy.where ? 'net-prob' : (legacy.missing?.length ?? 0) > 0 ? 'net-note' : 'net-foot'}>
-                {legacy.where
-                  ? t('Старый скрипт {script} чистит репозиториев: {n}, расписание {when} ({where})', {
-                    script: legacy.script, n: legacyN, when: cronTime(legacy.schedule), where: legacy.where,
-                  }) + (legacy.log_ts ? `, ${t('последний прогон {ago}', { ago: fmtAgo(legacy.log_ts) })}` : '')
-                  : t('Старый скрипт {script} описывает репозиториев: {n}, но не запланирован ни в cron, ни в systemd, их никто не чистит', {
-                    script: legacy.script, n: legacyN,
-                  })}
-                {(legacy.missing?.length ?? 0) > 0 && (
-                  <div>
-                    {t('В нем еще блоки на удаленные репозитории ({n}): {list}. Скрипт каждый день проверяет их и шлет ошибку по каждому, в этом шуме тонут настоящие. Эти блоки стоит убрать из скрипта.', {
-                      n: legacy.missing?.length ?? 0, list: (legacy.missing ?? []).join(', '),
+
+            {cur.id === 'overview' && (
+              <div className="srv-sec">
+                <OvRows rows={rows} />
+                <div className="net-tiles srv-tiles">
+                  {/* Место на томе с репозиториями - первой плиткой: кончившееся место останавливает
+                      бэкапы всего парка разом. Меряем df ПО КАТАЛОГУ ДАННЫХ (root-helper), а не общий
+                      диск ноды: репозитории обычно на отдельном томе. На helper старше 0.18 данных нет. */}
+                  {pct != null && (
+                    <button className="srv-tile-btn" onClick={() => go('server')} title={t('к разделу')}>
+                      <NetTile
+                        label={t('Место на диске')}
+                        value={`${pct}%`}
+                        sub={t('свободно {f} из {tt}', { f: fmtBytes(free), tt: fmtBytes(info.disk_total) })}
+                        tone={pct >= 90 ? 'bad' : pct >= 80 ? 'warn' : 'ok'}
+                        title={info.data_dir || undefined}
+                      />
+                    </button>
+                  )}
+                  <button className="srv-tile-btn" onClick={() => go('repos')} title={t('к разделу')}>
+                    <NetTile
+                      label={tileLabel('repos', t('Репозитории'))}
+                      value={String(all.length)}
+                      sub={subOf(
+                        bad > 0 && t('проблемных: {b}', { b: bad }),
+                        archivedRepos.length > 0 && t('в архиве: {n}', { n: archivedRepos.length }),
+                      ) || (all.length ? t('все ок') : undefined)}
+                      tone={bad ? 'bad' : all.length ? 'ok' : undefined}
+                    />
+                  </button>
+                  {checked.length > 0 && (
+                    <button className="srv-tile-btn" onClick={() => go('repos')} title={t('к разделу')}>
+                      <NetTile
+                        label={t('Проверка целостности')}
+                        value={String(checkedOk)}
+                        unit={t('из {n}', { n: checked.length })}
+                        sub={t('за 14 дней')}
+                        tone={ctx.checks.size ? 'bad' : 'ok'}
+                      />
+                    </button>
+                  )}
+                  {growers.length > 0 && (
+                    <button className="srv-tile-btn" onClick={() => { go('repos'); setSort('growth') }} title={t('к разделу')}>
+                      <NetTile
+                        label={t('Прирост за прогон')}
+                        value={`+${fmtBytes(growTotal)}`}
+                        sub={t('больше всех {name}: {s}', { name: growers[0].name, s: fmtBytes(growers[0].g) })}
+                      />
+                    </button>
+                  )}
+                </div>
+                <OvAreas
+                  cap={t('Сервер по областям')}
+                  items={BSRV_SECTIONS.filter((x) => x.id !== 'overview' && shown[x.id]).map((x) => ({ id: x.id, label: x.label, info: infoSec[x.id] }))}
+                  onGo={go}
+                />
+              </div>
+            )}
+
+            {cur.id === 'repos' && (
+              <div className="srv-sec">
+                {growers.length > 0 && (
+                  <div className="muted small">
+                    {t('За прогон клиенты добавляют около {s}: {top}', {
+                      s: fmtBytes(growTotal),
+                      top: growers.slice(0, 4).map((x) => `${x.name} ${fmtBytes(x.g)}`).join(', '),
                     })}
                   </div>
                 )}
-              </div>
-            )}
-            {growers.length > 0 && (
-              <div className="muted small">
-                {t('За прогон клиенты добавляют около {s}: {top}', {
-                  s: fmtBytes(growTotal),
-                  top: growers.slice(0, 4).map((x) => `${x.name} ${fmtBytes(x.g)}`).join(', '),
-                })}
-              </div>
-            )}
-            {all.length === 0 ? (
-              <EnableServerStats />
-            ) : (
-              <>
-                {all.length > 5 && (
-                  <div className="modal-toolbar">
-                    <input className="checks-search modal-search" placeholder={t('Фильтр: имя репозитория…')}
-                      value={q} onChange={(e) => setQ(e.target.value)} />
-                    <select className="modal-sort" value={sort} onChange={(e) => setSort(e.target.value as typeof sort)}>
-                      <option value="problems">{t('сорт: проблемные')}</option>
-                      <option value="name">{t('сорт: имя')}</option>
-                      <option value="size">{t('сорт: размер')}</option>
-                      <option value="age">{t('сорт: старые')}</option>
-                      <option value="snapshots">{t('сорт: снапшоты')}</option>
-                      {growers.length > 0 && <option value="growth">{t('сорт: прирост')}</option>}
-                    </select>
+                {all.length === 0 ? (
+                  <EnableServerStats />
+                ) : (
+                  <div className="loc-results docker-clist">
+                    {repos.length === 0 ? (
+                      <div className="srv-empty">{t('Ничего не найдено.')}</div>
+                    ) : (
+                      repos.map((r) => (
+                        <RepoRow key={r.name} server={s} r={r} ctx={ctx} canAct={canAct} onChanged={onChanged}
+                          growth={growthOf.get(r.name)} unmonitored={unmon.has(r.name)} />
+                      ))
+                    )}
                   </div>
                 )}
-                <div className="loc-results docker-clist docker-clist-scroll">
-                  {repos.length === 0 ? (
-                    <div className="muted small">{t('Ничего не найдено.')}</div>
-                  ) : (
-                    repos.map((r) => (
-                      <RepoRow key={r.name} server={s} r={r} ctx={ctx} canAct={canAct} onChanged={onChanged}
-                        growth={growthOf.get(r.name)} unmonitored={unmon.has(r.name)} />
-                    ))
-                  )}
+                <div className="net-foot">
+                  {t('Читается на сервере без паролей: config (валидность), снапшоты, размер, свежесть, лок, политика хранения. Опоздавшие и устаревшие - красным и алертят. То, что хранится как есть (сервера больше нет, разовый бэкап, проект заморожен), уберите в архив (🗄), временное приглушите (🔕).')}
                 </div>
-              </>
+              </div>
             )}
-            {archivedRepos.length > 0 && (
-              <details className="repo-archive-section">
-                <summary>
-                  🗄 {t('Архив: {n} ({sz})', { n: archivedRepos.length, sz: fmtBytes(archivedBytes) })}
-                  <span className="muted small"> {t('хранятся как есть, без алертов; проверка целостности идет')}</span>
-                </summary>
+
+            {cur.id === 'archive' && (
+              <div className="srv-sec">
+                <div className="muted small">
+                  {t('Архив: {n} ({sz})', { n: archivedRepos.length, sz: fmtBytes(archivedBytes) })}
+                  {' · '}{t('хранятся как есть, без алертов; проверка целостности идет')}
+                </div>
                 <div className="loc-results docker-clist">
                   {archivedRepos.map((r) => (
                     <ArchivedRow key={r.name} server={s} r={r} entry={(s.backup_repo_archive ?? {})[r.name]}
                       canAct={canAct} onChanged={onChanged} />
                   ))}
                 </div>
-              </details>
+              </div>
             )}
-            {canAct && all.length > 0 && <BulkCleanup server={s} all={all} muted={muted} />}
-            <div className="net-foot">
-              {t('Читается на сервере без паролей: config (валидность), снапшоты, размер, свежесть, лок, политика хранения. Опоздавшие и устаревшие - красным и алертят. То, что хранится как есть (сервера больше нет, разовый бэкап, проект заморожен), уберите в архив (🗄), временное приглушите (🔕).')}
-            </div>
+
+            {cur.id === 'cleanup' && (
+              <div className="srv-sec">
+                {legacy && legacyN > 0 && (
+                  <div className={!legacy.where ? 'net-prob' : (legacy.missing?.length ?? 0) > 0 ? 'net-note' : 'net-foot'}>
+                    {legacy.where
+                      ? t('Старый скрипт {script} чистит репозиториев: {n}, расписание {when} ({where})', {
+                        script: legacy.script, n: legacyN, when: cronTime(legacy.schedule), where: legacy.where,
+                      }) + (legacy.log_ts ? `, ${t('последний прогон {ago}', { ago: fmtAgo(legacy.log_ts) })}` : '')
+                      : t('Старый скрипт {script} описывает репозиториев: {n}, но не запланирован ни в cron, ни в systemd, их никто не чистит', {
+                        script: legacy.script, n: legacyN,
+                      })}
+                    {(legacy.missing?.length ?? 0) > 0 && (
+                      <div>
+                        {t('В нем еще блоки на удаленные репозитории ({n}): {list}. Скрипт каждый день проверяет их и шлет ошибку по каждому, в этом шуме тонут настоящие. Эти блоки стоит убрать из скрипта.', {
+                          n: legacy.missing?.length ?? 0, list: (legacy.missing ?? []).join(', '),
+                        })}
+                      </div>
+                    )}
+                  </div>
+                )}
+                {/* где не работает чистка - один список с причинами; в списке репозиториев
+                    причина строкой под самим репозиторием */}
+                {pruneNames.length > 0 && (
+                  <div className="loc-results docker-clist">
+                    {pruneNames.map((n) => (
+                      <div key={n} className="loc-res docker-row t-down">
+                        <span className="lk-dot lk-dot-bad" />
+                        <div className="docker-c-main">
+                          <div className="docker-c-name mono">{n}</div>
+                          <div className="docker-c-img small t-down">{ctx.prune[n]}</div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                {rot.length > 0 && (
+                  <div className="net-note">{t('старые снапшоты не вычищаются: {list}', { list: rot.join(', ') })}</div>
+                )}
+                {!pruneNames.length && !rot.length && !(legacy && legacyN > 0) && (
+                  <div className="srv-empty">{ok.cleanup}</div>
+                )}
+                {canAct && <BulkCleanup server={s} all={all} muted={muted} />}
+              </div>
+            )}
+
+            {cur.id === 'server' && (
+              <div className="srv-sec">
+                {!info.running && <div className="net-prob">{t('rest-server остановлен')}</div>}
+                <div className="kv-list">
+                  {row('rest-server', (
+                    <span className="restic-row">
+                      {info.version || '—'} · {info.running ? t('запущен') : t('остановлен')}
+                      {srvOld && <span className="t-degraded"> · {t('есть {v}', { v: RESTSRV_TARGET })}</span>}
+                    </span>
+                  ))}
+                  {row(t('Протокол'), info.tls_front
+                    ? `HTTPS · ${t('порт {p}', { p: tlsPort })}`
+                    : `HTTP · ${t('без TLS')}`)}
+                  {ext?.restic && row('restic', `${ext.restic} · ${t('для чистки и проверки')}`)}
+                  {info.data_dir && row(t('данные'), info.data_dir)}
+                  {pct != null && row(t('Место на диске'), `${pct}% · ${t('свободно {f} из {tt}', { f: fmtBytes(free), tt: fmtBytes(info.disk_total) })}`)}
+                </div>
+                {canAct && srvOld && <RestServerUpdate server={s} info={info} onChanged={onChanged} />}
+                {!info.tls_front && (
+                  <div className="net-note">
+                    {t('трафик по HTTP без TLS. Данные шифрует restic на клиенте, но логин/пароль и метаданные идут открыто. Можно включить HTTPS (self-signed) кнопкой ниже.')}
+                  </div>
+                )}
+                {canAct && !info.tls_front && <EnableTls server={s} onChanged={onChanged} />}
+                {s.bsrv_restic_old && <ServerResticOld ver={s.bsrv_restic_old} target={ext?.restic_target || ''} />}
+              </div>
+            )}
+
+            {cur.id === 'coverage' && <CoverageAudit server={s} canManage={canAct} onChanged={onChanged} bare />}
           </div>
-          <CoverageAudit server={s} canManage={canAct} onChanged={onChanged} />
         </div>
       </div>
     </div>,
@@ -2701,6 +2917,7 @@ export function BackupsPage({
   openHostId = null,
   openSec = null,
   openSrvHostId = null,
+  openSrvSec = null,
   onConsumed,
   onSrvConsumed,
 }: {
@@ -2708,6 +2925,7 @@ export function BackupsPage({
   openHostId?: number | null
   openSec?: string | null // раздел окна бэкапа ноды из ссылки: ?backup=id&sec=coverage
   openSrvHostId?: number | null
+  openSrvSec?: string | null // раздел окна сервера бэкапов: ?backupsrv=id&sec=cleanup
   onConsumed?: () => void
   onSrvConsumed?: () => void
 }) {
@@ -2719,6 +2937,7 @@ export function BackupsPage({
   // раздел из ссылки - до первого открытия окна этой ноды
   const [linkSec, setLinkSec] = useState<{ id: number | null; sec: string | null }>({ id: openHostId, sec: openSec })
   const [openSrvId, setOpenSrvId] = useState<number | null>(openSrvHostId)
+  const [linkSrvSec, setLinkSrvSec] = useState<{ id: number | null; sec: string | null }>({ id: openSrvHostId, sec: openSrvSec })
   const [setupSrv, setSetupSrv] = useState<Server | null>(null)
   const [deploySrv, setDeploySrv] = useState<Server | null>(null)
   // Только id, а не сам объект: модалка обязана видеть свежий сервер после каждой
@@ -2743,9 +2962,10 @@ export function BackupsPage({
   useEffect(() => {
     if (openSrvHostId != null) {
       setOpenSrvId(openSrvHostId)
+      setLinkSrvSec({ id: openSrvHostId, sec: openSrvSec })
       onSrvConsumed?.()
     }
-  }, [openSrvHostId, onSrvConsumed])
+  }, [openSrvHostId, openSrvSec, onSrvConsumed])
   useUrlCard('backup', openId)
   useUrlCard('backupsrv', openSrvId)
   const [query, setQuery] = useState('')
@@ -3131,12 +3351,17 @@ export function BackupsPage({
       )}
       {openSrv && (
         <BackupServerModal
+          key={openSrv.s.id}
           server={openSrv.s}
           info={openSrv.d}
           servers={servers ?? []}
           canAct={!isViewer}
+          initialSec={linkSrvSec.id === openSrv.s.id ? linkSrvSec.sec : null}
           onChanged={load}
-          onClose={() => setOpenSrvId(null)}
+          onClose={() => {
+            setOpenSrvId(null)
+            setLinkSrvSec({ id: null, sec: null })
+          }}
         />
       )}
       {setupSrv && (

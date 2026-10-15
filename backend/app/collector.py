@@ -272,6 +272,9 @@ _DOCKER_SEC = {"docker_loop": "containers", "docker_down": "containers", "docker
 _BACKUP_SEC = {"backup_failed": "runs", "backup_stale": "runs", "backup_growth": "runs", "backup_dump": "coverage",
                "backup_dump_space": "coverage", "backup_cron": "coverage", "backup_restore": "restore",
                "backup_custom": "own"}
+# раздел окна сервера бэкапов по алерту и по проблеме
+_BSRV_SEC = {"backup_repo": "repos", "backup_lock": "repos", "backup_unmonitored": "repos", "backup_check": "repos",
+             "backup_prune": "cleanup", "backup_rotation": "cleanup"}
 # раздел карточки сервисов ноды по алерту и по проблеме
 _SVC_SEC = {"queue": "queues", "db_conn": "db", "db_health": "db", "web_config": "web", "web_cert": "certs"}
 _KUBE_TAB = {"kube_expiry": "expiry", "flux_down": "flux", "flux_stale": "flux", "kube_pod": "pods",
@@ -3368,7 +3371,7 @@ def server_problems(s: Server, now: datetime, pod_names: dict[str, str] | None =
         bad = failed_checks(bsrv, bsrv_extra(rep), set(getattr(s, "backup_repo_mutes", None) or []), now)
         if bad:
             add("backup_check", 2, "не прошла проверка целостности: " + ", ".join(bad[:3])
-                + (f" и еще {len(bad) - 3}" if len(bad) > 3 else ""), "", "backup_check",
+                + (f" и еще {len(bad) - 3}" if len(bad) > 3 else ""), _BSRV_SEC["backup_check"], "backup_check",
                 section="backups", srv=True)
     # Сервер задыхается: как и у алерта, только то, что держится дольше выдержки
     pr = pressure_problems(rep)
@@ -5101,9 +5104,8 @@ async def evaluate_servers(
             # Раздел "Кубер" с открытым кластером и сразу на нужной вкладке: сроки, Flux,
             # поды. В карточке сервера кластера нет, и ссылка вела мимо.
             return f"{base}/?kube={s.id}&ktab={_KUBE_TAB[key]}"
-        if key in ("backup_repo", "backup_rotation", "backup_lock", "backup_unmonitored", "backup_check",
-                   "backup_prune"):
-            return f"{base}/?backupsrv={s.id}"
+        if key in _BSRV_SEC:
+            return f"{base}/?backupsrv={s.id}&sec={_BSRV_SEC[key]}"
         if key.startswith("backup"):
             return f"{base}/?backup={s.id}" + (f"&sec={_BACKUP_SEC[key]}" if key in _BACKUP_SEC else "")
         sec = _SRV_SECTION.get(key)
