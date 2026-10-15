@@ -1,5 +1,15 @@
 import { useEffect, useState } from 'react'
-import { ApiError, getAlerts, putAlerts, testAlerts, type AlertConfig, type Escalation } from './api'
+import {
+  ApiError,
+  getAlerts,
+  putAlerts,
+  testAlertRoute,
+  testAlerts,
+  type AlertConfig,
+  type AlertRoute,
+  type AlertRoutes,
+  type Escalation,
+} from './api'
 import { ServerAlertRulesSection, SiteAlertRulesSection } from './ServerAlertRules'
 import { useI18n } from './i18n'
 
@@ -21,6 +31,9 @@ export function AlertsModal({ onClose, onUnauthorized }: Props) {
   const [poll, setPoll] = useState<AlertConfig['tg_poll'] | null>(null)
   const [esc, setEsc] = useState<Escalation | null>(null)
   const [escUsers, setEscUsers] = useState<AlertConfig['esc_candidates']>([])
+  const [routes, setRoutes] = useState<AlertRoutes | null>(null)
+  const [routeGroups, setRouteGroups] = useState<AlertConfig['route_groups']>({ servers: [], sites: [] })
+  const [routesState, setRoutesState] = useState<AlertConfig['routes_state']>({})
   const [enabled, setEnabled] = useState(false)
   const [busy, setBusy] = useState(false)
   const [msg, setMsg] = useState<string | null>(null)
@@ -40,6 +53,9 @@ export function AlertsModal({ onClose, onUnauthorized }: Props) {
         setPoll(c.tg_poll)
         setEsc(c.escalation)
         setEscUsers(c.esc_candidates)
+        setRoutes(c.routes)
+        setRouteGroups(c.route_groups)
+        setRoutesState(c.routes_state)
         setEnabled(c.enabled)
       })
       .catch(() => onUnauthorized())
@@ -57,6 +73,7 @@ export function AlertsModal({ onClose, onUnauthorized }: Props) {
       tg_buttons: buttons,
       tz,
       ...(esc ? { escalation: esc } : {}),
+      ...(routes ? { routes } : {}),
     })
     setTgApi(c.telegram_api)
     setEnabled(c.enabled)
@@ -66,7 +83,21 @@ export function AlertsModal({ onClose, onUnauthorized }: Props) {
     setTz(c.tz)
     setPoll(c.tg_poll)
     setEsc(c.escalation)
+    setRoutes(c.routes)
+    setRoutesState(c.routes_state)
     return c
+  }
+
+  // проверка чата по группам: сначала сохраняем форму, чтобы чат и его группы уже были
+  async function testRoute(chat: string): Promise<string> {
+    try {
+      await persist()
+      const r = await testAlertRoute(chat)
+      return r.sent ? '' : r.errors.join('; ') || t('Не отправлено — проверьте настройки.')
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 401) onUnauthorized()
+      return e instanceof Error ? e.message : t('Ошибка')
+    }
   }
 
   async function save() {
@@ -160,6 +191,16 @@ export function AlertsModal({ onClose, onUnauthorized }: Props) {
             </>
           )}
         </div>
+
+        {routes && (
+          <RoutesForm
+            routes={routes}
+            groups={routeGroups}
+            state={routesState}
+            onChange={setRoutes}
+            onTest={testRoute}
+          />
+        )}
 
         <div className="settings-group">
           <h4>Webhook</h4>
@@ -339,6 +380,132 @@ function EscalationForm({
             ))}
           </div>
         </>
+      )}
+    </div>
+  )
+}
+
+const NEW_ROUTE: AlertRoute = { name: '', chat: '', server_groups: [], site_groups: [] }
+
+// Чаты по группам: разработчикам проекта - алерты только его серверов и сайтов, а основной чат
+// получает все или только то, что никуда больше не ушло.
+function RoutesForm({
+  routes,
+  groups,
+  state,
+  onChange,
+  onTest,
+}: {
+  routes: AlertRoutes
+  groups: AlertConfig['route_groups']
+  state: AlertConfig['routes_state']
+  onChange: (r: AlertRoutes) => void
+  onTest: (chat: string) => Promise<string>
+}) {
+  const { t } = useI18n()
+  const [tested, setTested] = useState<Record<number, string>>({})
+  const [busy, setBusy] = useState<number | null>(null)
+  const setChat = (i: number, p: Partial<AlertRoute>) =>
+    onChange({ ...routes, chats: routes.chats.map((c, j) => (j === i ? { ...c, ...p } : c)) })
+  const toggle = (list: string[], v: string) => (list.includes(v) ? list.filter((x) => x !== v) : [...list, v])
+  // группа могла пропасть с серверов, а в чате остаться - показываем и ее, чтобы можно было снять
+  const names = (all: string[], mine: string[]) => [...all, ...mine.filter((g) => !all.includes(g))]
+  const test = async (i: number) => {
+    setBusy(i)
+    const err = await onTest(routes.chats[i].chat)
+    setTested((x) => ({ ...x, [i]: err || 'ok' }))
+    setBusy(null)
+  }
+  const pick = (i: number, field: 'server_groups' | 'site_groups', all: string[]) => {
+    const mine = routes.chats[i][field]
+    const list = names(all, mine)
+    if (!list.length) return <span className="muted small">{t('групп нет')}</span>
+    return list.map((g) => (
+      <label key={g} className="tg-row">
+        <input type="checkbox" checked={mine.includes(g)} onChange={() => setChat(i, { [field]: toggle(mine, g) })} />
+        {g}
+      </label>
+    ))
+  }
+  return (
+    <div className="settings-group">
+      <h4>{t('Чаты по группам')}</h4>
+      <p className="muted small">
+        {t('Алерты серверов и сайтов из выбранных групп уходят в отдельный чат: например, разработчикам - только про их проект. Бота нужно добавить в этот чат. Id группы видно в Telegram, а если включены команды боту, бот подскажет его в ответ на /id.')}
+      </p>
+      {routes.chats.map((c, i) => (
+        <div key={i} className="route-card">
+          <div className="form-grid">
+            <label className="field">
+              <span>{t('Название')}</span>
+              <input value={c.name} placeholder={t('напр. Разработка')} onChange={(e) => setChat(i, { name: e.target.value })} />
+            </label>
+            <label className="field">
+              <span>Chat ID</span>
+              <input value={c.chat} placeholder="-1001234567890" onChange={(e) => setChat(i, { chat: e.target.value })} />
+            </label>
+          </div>
+          <div className="form-grid">
+            <div className="field">
+              <span>{t('Группы серверов')}</span>
+              {pick(i, 'server_groups', groups.servers)}
+            </div>
+            <div className="field">
+              <span>{t('Группы сайтов')}</span>
+              {pick(i, 'site_groups', groups.sites)}
+            </div>
+          </div>
+          {state[c.chat] && !tested[i] && (
+            <p className="form-error small">
+              {t('Последнее сообщение чат не принял ({at}): {err}. Такие алерты уходят в основной чат.', {
+                at: new Date(state[c.chat].at).toLocaleString(),
+                err: state[c.chat].err,
+              })}
+            </p>
+          )}
+          {tested[i] && tested[i] !== 'ok' && <p className="form-error small">{tested[i]}</p>}
+          {tested[i] === 'ok' && <p className="form-ok small">{t('Проверочное сообщение отправлено.')}</p>}
+          <div className="modal-actions" style={{ justifyContent: 'flex-start' }}>
+            <button className="ghost" disabled={!c.chat.trim() || busy !== null} onClick={() => test(i)}>
+              {busy === i ? t('…') : t('Проверить')}
+            </button>
+            <button
+              className="ghost"
+              onClick={() => onChange({ ...routes, chats: routes.chats.filter((_, j) => j !== i) })}
+            >
+              {t('Убрать')}
+            </button>
+          </div>
+        </div>
+      ))}
+      <button className="ghost" onClick={() => onChange({ ...routes, chats: [...routes.chats, { ...NEW_ROUTE }] })}>
+        {t('+ Добавить чат')}
+      </button>
+      {routes.chats.length > 0 && (
+        <div className="field route-main">
+          <span>{t('Основной чат получает')}</span>
+          <div className="win-switch">
+            <button
+              type="button"
+              className={`win-btn${routes.main === 'all' ? ' win-btn-active' : ''}`}
+              onClick={() => onChange({ ...routes, main: 'all' })}
+            >
+              {t('все алерты')}
+            </button>
+            <button
+              type="button"
+              className={`win-btn${routes.main === 'rest' ? ' win-btn-active' : ''}`}
+              onClick={() => onChange({ ...routes, main: 'rest' })}
+            >
+              {t('только остальное')}
+            </button>
+          </div>
+          <span className="muted small">
+            {routes.main === 'rest'
+              ? t('Алерты групп, у которых есть свой чат, в основной чат не попадают. Туда идут остальные группы, серверы без группы и общие алерты панели.')
+              : t('Основной чат получает все алерты, а чаты по группам - копии про свои группы.')}
+          </span>
+        </div>
       )}
     </div>
   )

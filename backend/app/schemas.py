@@ -809,6 +809,12 @@ class AlertConfigOut(BaseModel):
     escalation: dict = {}
     # кому можно эскалировать: учетки панели и привязан ли у них Telegram
     esc_candidates: list[dict] = []
+    # чаты по группам: {main: all|rest, chats: [{name, chat, server_groups, site_groups}]}
+    routes: dict = {}
+    # какие группы есть у серверов и сайтов - для выбора в чатах по группам
+    route_groups: dict = {}
+    # чаты, которые последний раз не приняли сообщение: {chat: {err, at}}
+    routes_state: dict = {}
 
 
 class AlertConfigIn(BaseModel):
@@ -821,6 +827,23 @@ class AlertConfigIn(BaseModel):
     tg_buttons: bool = False
     tz: str = Field(default="", max_length=64)
     escalation: "EscalationIn | None" = None
+    routes: "RoutesIn | None" = None
+
+
+class RouteIn(BaseModel):
+    name: str = Field(default="", max_length=64)
+    chat: str = Field(default="", max_length=64)
+    server_groups: list[str] = Field(default_factory=list, max_length=100)
+    site_groups: list[str] = Field(default_factory=list, max_length=100)
+
+
+class RoutesIn(BaseModel):
+    main: Literal["all", "rest"] = "all"
+    chats: list[RouteIn] = Field(default_factory=list, max_length=20)
+
+
+class RouteTestIn(BaseModel):
+    chat: str = Field(min_length=1, max_length=64)
 
 
 class EscalationIn(BaseModel):

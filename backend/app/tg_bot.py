@@ -39,7 +39,8 @@ _MAX_TEXT = 3900
 HELP = (
     "Команды:\n"
     "/status - что сейчас горит\n"
-    "/mutes - что заглушено\n\n"
+    "/mutes - что заглушено\n"
+    "/id - id этого чата для настроек панели\n\n"
     "Кнопки под алертом: заглушить этот вид алерта на час, до 9 утра или насовсем, "
     "\"взял\" - отметить, что занимаешься. Заглушенное возвращает кнопка \"Вернуть алерты\"."
 )
@@ -465,6 +466,12 @@ async def _chat_user(session, cfg: dict, chat: str) -> tuple[bool, User | None]:
     которая получает алерты через общего бота."""
     if chat and chat == str(cfg.get("telegram_chat") or ""):
         return True, None
+    # чат по группам: /status и /mutes - только про его группы, как у учетки с этими группами
+    route = next((r for r in (cfg.get("routes") or {}).get("chats") or [] if r["chat"] == chat), None)
+    if route is not None:
+        return True, User(username=route.get("name") or chat, sections=None,
+                          server_groups=route["server_groups"] or ["\x00"],
+                          site_groups=route["site_groups"] or ["\x00"])
     user = await session.scalar(select(User).where(User.tg_chat_id == chat))
     if user is not None and (not user.tg_token or user.tg_token == cfg.get("telegram_token")):
         return True, user
@@ -496,6 +503,9 @@ async def handle_message(session_factory, cfg: dict, msg: dict, now: datetime) -
     async with session_factory() as session:
         if cmd == "/link" and len(parts) > 1:
             reply = await _link(session, cfg, msg, parts[1].strip().upper())
+        elif cmd == "/id":
+            # id чата для настроек панели (основной чат, чаты по группам, эскалация)
+            reply = f"id этого чата: <code>{html.escape(chat)}</code>"
         elif cmd in ("/status", "/mutes", "/help", "/start"):
             ok, user = await _chat_user(session, cfg, chat)
             if not ok:

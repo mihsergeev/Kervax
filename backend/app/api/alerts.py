@@ -16,6 +16,7 @@ from app.schemas import (
     AlertConfigIn,
     AlertConfigOut,
     AlertTestResult,
+    RouteTestIn,
     ServerAlertKindInfo,
     ServerAlertRulesIn,
     ServerAlertRulesOut,
@@ -43,6 +44,12 @@ async def _current(session, settings) -> AlertConfigOut:
             {"username": u.username, "linked": bool(u.tg_chat_id)}
             for u in (await session.scalars(select(User).order_by(User.username))).all()
         ],
+        routes=cfg["routes"],
+        route_groups={
+            "servers": sorted({g for g in await session.scalars(select(Server.group_name)) if g}),
+            "sites": sorted({g for g in await session.scalars(select(Check.group_name)) if g}),
+        },
+        routes_state=await settings_store.get_routes_state(session),
     )
 
 
@@ -74,9 +81,29 @@ async def put_alerts(
     )
     if body.escalation is not None:
         await settings_store.set_escalation(session, body.escalation.model_dump())
+    if body.routes is not None:
+        await settings_store.set_routes(session, body.routes.model_dump())
     await settings_store.set_muted(session, body.muted)
     await audit.record(session, user.username, "alerts_config", "")
     return await _current(session, settings)
+
+
+@router.post("/routes/test", response_model=AlertTestResult)
+async def test_route(body: RouteTestIn, user: AdminUser, session: SessionDep) -> AlertTestResult:
+    """Проверка чата по группам: дойдет ли туда сообщение общего бота."""
+    cfg = await settings_store.get_alert_config(session, get_settings())
+    if not cfg.get("telegram_token"):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Сначала укажите токен бота")
+    chat = body.chat.strip()
+    route = next((r for r in cfg["routes"]["chats"] if r["chat"] == chat), None)
+    groups = ", ".join((route or {}).get("server_groups", []) + (route or {}).get("site_groups", []))
+    text = "🔔 Проверка: сюда будут приходить алерты" + (f" групп {groups}" if groups else "") + "."
+    try:
+        await alerts.tg_send(cfg.get("telegram_api", ""), cfg["telegram_token"], chat, text)
+    except Exception as exc:  # noqa: BLE001
+        return AlertTestResult(sent=False, errors=[f"Telegram: {exc}"])
+    await audit.record(session, user.username, "alerts_route_test", chat)
+    return AlertTestResult(sent=True)
 
 
 @router.get("/server-rules", response_model=ServerAlertRulesOut)

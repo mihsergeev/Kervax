@@ -809,7 +809,17 @@ export type AlertConfig = {
   tg_poll: { status: string; error: string; ts: string; bot: string }
   escalation: Escalation
   esc_candidates: { username: string; linked: boolean }[]
+  routes: AlertRoutes
+  // группы серверов и сайтов - для выбора в чатах по группам
+  route_groups: { servers: string[]; sites: string[] }
+  // чаты, которые последний раз не приняли сообщение
+  routes_state: Record<string, { err: string; at: string }>
 }
+
+// Чаты по группам: алерты выбранных групп идут еще и в свои чаты. main: 'all' - основной чат
+// получает все, 'rest' - только то, что не ушло в чаты по группам
+export type AlertRoute = { name: string; chat: string; server_groups: string[]; site_groups: string[] }
+export type AlertRoutes = { main: 'all' | 'rest'; chats: AlertRoute[] }
 
 // Повтор алерта, на который никто не нажал «взял»
 export type Escalation = {
@@ -835,8 +845,13 @@ export function putAlerts(body: {
   tg_buttons: boolean
   tz: string
   escalation?: Escalation
+  routes?: AlertRoutes
 }): Promise<AlertConfig> {
   return api<AlertConfig>('/api/alerts', { method: 'PUT', body: JSON.stringify(body) })
+}
+
+export function testAlertRoute(chat: string): Promise<{ sent: boolean; errors: string[] }> {
+  return api('/api/alerts/routes/test', { method: 'POST', body: JSON.stringify({ chat }) })
 }
 
 export function testAlerts(): Promise<{ sent: boolean; errors: string[] }> {

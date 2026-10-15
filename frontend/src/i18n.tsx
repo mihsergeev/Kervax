@@ -3161,6 +3161,41 @@ const EN: Record<string, string> = {
   'Домен истекает': 'Domain expiring',
   'SSL-сертификат': 'TLS certificate',
   'Домен': 'Domain',
+  // --- чаты по группам (AlertsModal) ---
+  'групп нет':
+    'no groups',
+  'Чаты по группам':
+    'Chats by group',
+  'Алерты серверов и сайтов из выбранных групп уходят в отдельный чат: например, разработчикам - только про их проект. Бота нужно добавить в этот чат. Id группы видно в Telegram, а если включены команды боту, бот подскажет его в ответ на /id.':
+    'Alerts of servers and sites from the selected groups go to a separate chat: for example, developers get only their project. Add the bot to that chat. The group id is shown in Telegram, and if bot commands are on, the bot replies to /id with it.',
+  'напр. Разработка':
+    'e.g. Development',
+  'Последнее сообщение чат не принял ({at}): {err}. Такие алерты уходят в основной чат.':
+    'The chat did not accept the last message ({at}): {err}. Such alerts go to the main chat.',
+  'Проверочное сообщение отправлено.':
+    'The test message was sent.',
+  '+ Добавить чат':
+    '+ Add chat',
+  'Основной чат получает':
+    'The main chat gets',
+  'все алерты':
+    'all alerts',
+  'только остальное':
+    'only the rest',
+  'Алерты групп, у которых есть свой чат, в основной чат не попадают. Туда идут остальные группы, серверы без группы и общие алерты панели.':
+    'Alerts of groups that have their own chat do not go to the main chat. It gets the other groups, servers without a group and panel-wide alerts.',
+  'Основной чат получает все алерты, а чаты по группам - копии про свои группы.':
+    'The main chat gets all alerts, and the group chats get copies about their groups.',
+  'только группы: {list}':
+    'only groups: {list}',
+  'только серверов: {n}':
+    'only servers: {n}',
+  'только мониторов: {n}':
+    'only monitors: {n}',
+  'У видов алертов ({n}) осталось старое ограничение по группам или объектам: алерты остальных по ним не уходят никуда, даже в основной чат. Разделять алерты по чатам теперь можно в "Чаты по группам" выше.':
+    'Alert types ({n}) still have an old limit by group or object: alerts of everything else for them go nowhere, not even to the main chat. Alerts can now be split between chats in "Chats by group" above.',
+  'Снять ограничения':
+    'Remove the limits',
   // --- новый монитор: пробная проверка (AddMonitor) ---
   'Это монитор сертификата старого типа: его настройки меняются только через API. Удалить его можно кнопкой выше, а за сертификатом следит и обычный монитор сайта.':
     'This is an old-style certificate monitor: its settings can only be changed through the API. You can delete it with the button above, and a regular site monitor watches the certificate too.',
