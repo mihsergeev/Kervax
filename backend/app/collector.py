@@ -1836,6 +1836,23 @@ def dump_local_stale(d: dict, now_ts: float) -> bool:
     return ref > 0 and now_ts - ref > _DUMP_LOCAL_LAG_SECONDS
 
 
+def backup_run_start(bk: dict) -> int:
+    """Когда стартовал последний ЗАВЕРШЕННЫЙ бэкап. Дампы снимаются в самом начале прогона
+    (ExecStartPre), поэтому дамп, включенный посреди долгого бэкапа, в этот прогон не попал. По
+    концу прогона (last_backup_ts) судить нельзя: на одной ноде бэкап шел 52 минуты, дампы
+    включили через 3 и 9 минут после его старта, и панель решила, что бэкап после включения
+    прошел, а файлов нет - алерт "дамп не обновляется" и оранжевое в покрытии.
+    started_ts - старт последнего запуска; если он позже конца, идет новый прогон, и старт
+    завершенного оцениваем по длительности restic."""
+    last = bk.get("last_backup_ts") or 0
+    if not last:
+        return 0
+    st = bk.get("started_ts") or 0
+    if st and st <= last:
+        return st
+    return max(0, last - (bk.get("duration_sec") or 0))
+
+
 def _dump_problems(bk: dict) -> list[str]:
     """Движки, чей дамп настроен, но не снимается. Два признака поломки: файлов нет
     вовсе (ни один дамп не удался) либо дамп отстал от последнего успешного бэкапа
@@ -1843,6 +1860,7 @@ def _dump_problems(bk: dict) -> list[str]:
     отдельный алерт с actionable-текстом (_dump_skipped). Возвращает метки «движок»
     (с контейнером, если баз одного типа несколько). Пусто, если всё свежо."""
     last_backup = bk.get("last_backup_ts") or 0
+    run_start = backup_run_start(bk)
     out: list[str] = []
     for d in bk.get("dumps") or []:
         if d.get("skipped"):
@@ -1854,10 +1872,11 @@ def _dump_problems(bk: dict) -> list[str]:
         # «файлов нет» — проблема ТОЛЬКО если бэкап уже проходил ПОСЛЕ включения дампа,
         # а файла всё равно нет (дамп реально падает). Сразу после включения файлов ещё
         # нет законно: первый дамп снимется в ближайший бэкап. enabled_ts — mtime скрипта
-        # дампа. Без этой проверки панель ныла «файлов нет» в первые же секунды.
+        # дампа. Без этой проверки панель ныла «файлов нет» в первые же секунды. Сравниваем
+        # со стартом прогона, а не с концом: дампы снимаются в начале (backup_run_start).
         if files == 0 or dts == 0:
-            if enabled and last_backup and last_backup > enabled:
-                out.append(label)  # бэкап был после включения, а дампа нет → падает
+            if enabled and run_start > enabled:
+                out.append(label)  # бэкап начался после включения, а дампа нет → падает
             # иначе: только включили, расписание ещё не наступило — молчим
         elif last_backup and (last_backup - dts) > _BACKUP_DUMP_LAG_SECONDS:
             out.append(label)  # бэкап прошёл, а дамп остался старым → падает
