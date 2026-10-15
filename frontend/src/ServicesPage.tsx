@@ -599,6 +599,11 @@ function ServerServicesModal({ srv, onClose, onChanged, initialSec, sites }: {
     info[sec].fresh ? <>{label} <FreshChip since={info[sec].fresh!} /></> : label
   // версия движка, если ее знает инвентарь баз
   const verOf = (it: SvcItem) => it.db?.map((d) => d.version).find(Boolean)
+  // строка под именем: по пункту на вид сервиса, сколько их и где - в подсказке
+  const metaKinds = [...new Set(srv.items.map((it) => it.kind))].map((kind) => {
+    const xs = srv.items.filter((it) => it.kind === kind)
+    return { it: xs.find(verOf) ?? xs[0], n: xs.length, where: xs.map((x) => x.where).filter(Boolean).join('\n') }
+  })
 
   return createPortal(
     <div className="modal-backdrop" onClick={onClose}>
@@ -618,10 +623,11 @@ function ServerServicesModal({ srv, onClose, onChanged, initialSec, sites }: {
           </div>
         </div>
         <div className="srv-meta srv-meta-line">
-          {srv.items.map((it, i) => (
-            <span key={it.kind + i} className="srv-meta-item" title={it.where || undefined}>
+          {metaKinds.map(({ it, n, where }) => (
+            <span key={it.kind} className="srv-meta-item" title={where || undefined}>
               <span className="svc-ico"><EngineIcon name={it.kind} /></span>
               {it.kind}
+              {n > 1 && ` (${n})`}
               {verOf(it) && <span className="srv-meta-k mono">{verOf(it)}</span>}
             </span>
           ))}
@@ -667,15 +673,19 @@ function ServerServicesModal({ srv, onClose, onChanged, initialSec, sites }: {
                       />
                     </button>
                   )}
-                  {dbItems.length > 0 && (
+                  {/* Без инвентаря (базы в подах, нет dbstat-setup, база не ответила) число баз
+                      неизвестно: плитка считает СУБД, а не ноль баз рядом с PostgreSQL на карте */}
+                  {dbItems.length > 0 && (dbRows.length > 0 || dbItems.some(isDb)) && (
                     <button className="srv-tile-btn" onClick={() => go('db')} title={t('к разделу')}>
                       <NetTile
-                        label={tileLabel('db', t('Базы'))}
-                        value={String(dbRows.length)}
-                        sub={subOf(
-                          dbs.length > 1 && t('инстансов: {n}', { n: dbs.length }),
-                          dbRows.length > 0 && fmtBytes(dbRows.reduce((a, r) => a + r.size, 0)),
-                        ) || undefined}
+                        label={tileLabel('db', dbRows.length ? t('Базы') : t('СУБД'))}
+                        value={String(dbRows.length || dbItems.filter(isDb).length)}
+                        sub={(dbRows.length
+                          ? subOf(
+                              dbs.length > 1 && t('инстансов: {n}', { n: dbs.length }),
+                              fmtBytes(dbRows.reduce((a, r) => a + r.size, 0)),
+                            )
+                          : t('состав баз не виден')) || undefined}
                         tone={tileTone('db', 'ok')}
                       />
                     </button>
