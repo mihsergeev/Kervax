@@ -30,13 +30,15 @@ import {
   type Server,
 } from './api'
 import { updateServer } from './api'
-import { backupWindowNote } from './serverUtils'
+import { backupWindowNote, shortList, srvIssues } from './serverUtils'
+import { fmtRel } from './ServersPage'
+import { CardNav, FreshChip, OvAreas, OvRows, secInfoOf, type OvRow, type SecDef, type SecInfo, type SecItem } from './cardLayout'
 import { OsIcon } from './osIcon'
 import { CoverageAudit } from './CoverageAudit'
 import { helperText } from './helperText'
 import { bulkCleanupScript, safeRepoName } from './bulkCleanupScript'
 import { useAuth } from './auth'
-import { useUrlCard } from './deeplink'
+import { useUrlCard, useUrlParam } from './deeplink'
 import { useI18n, currentLang, tr } from './i18n'
 import { MuteChip, MutesBanner, collectMutes } from './mutes'
 import { VaultPanel } from './VaultPanel'
@@ -541,8 +543,9 @@ function OwnBackupRow({ job: j, canManage, busy, onToggle }: {
   )
 }
 
-function OwnBackups({ server: s, canManage, onChanged }: {
+function OwnBackups({ server: s, canManage, onChanged, bare = false }: {
   server: Server; canManage: boolean; onChanged: () => void
+  bare?: boolean // без своего заголовка: он уже в шапке раздела окна
 }) {
   const { t } = useI18n()
   const [busy, setBusy] = useState<string | null>(null)
@@ -569,12 +572,14 @@ function OwnBackups({ server: s, canManage, onChanged }: {
   )
   return (
     <div className="chart-card net-card net-card-wide own-backups">
-      <div className="net-head">
-        <div className="chart-cap net-cap">
-          {t('Свои бэкапы на ноде')}
-          <span className={`net-n${ownBackupProblems(s).length ? ' net-n-bad' : ''}`}>{active.length}</span>
+      {!bare && (
+        <div className="net-head">
+          <div className="chart-cap net-cap">
+            {t('Свои бэкапы на ноде')}
+            <span className={`net-n${ownBackupProblems(s).length ? ' net-n-bad' : ''}`}>{active.length}</span>
+          </div>
         </div>
-      </div>
+      )}
       <div className="net-sub">
         {t('Настроены без панели. Панель нашла их сама и следит за их работой, ничего на ноде не меняя.')}
       </div>
@@ -590,18 +595,39 @@ function OwnBackups({ server: s, canManage, onChanged }: {
   )
 }
 
+// Окно бэкапа ноды: меню разделов слева, на экране один раздел, как у карточки сервера
+// (cardLayout). Раньше сверху шли плитки, под ними тот же набор строкой "ключ - значение", потом
+// покрытие, свои бэкапы и управление одной лентой. Куда бэкапится - в строке под именем
+const BK_SECTIONS: SecDef[] = [
+  { id: 'overview', label: 'Сводка', group: '' },
+  { id: 'runs', label: 'Прогоны', group: 'Бэкап' },
+  { id: 'coverage', label: 'Покрытие', group: 'Бэкап' },
+  { id: 'own', label: 'Свои бэкапы', group: 'Бэкап' },
+  { id: 'restore', label: 'Восстановление', group: 'Бэкап' },
+  { id: 'manage', label: 'Расписание и пути', group: 'Настройка' },
+]
+const BK_SEC_IDS = new Set(BK_SECTIONS.map((x) => x.id))
+// раздел по виду проблемы, если бэкенд его не назвал
+const BK_SEC_OF_KIND: Record<string, string> = {
+  backup_dump: 'coverage', backup_dump_space: 'coverage', backup_cron: 'coverage', backup_restore: 'restore',
+}
+
 function BackupModal({
   server: s,
   backup: b,
   repo,
+  dest,
   canManage,
+  initialSec,
   onChanged,
   onClose,
 }: {
   server: Server
   backup: BackupInfo
   repo?: RepoStat
+  dest: string // сервер бэкапов, куда идет этот бэкап
   canManage: boolean
+  initialSec?: string | null // из ссылки алерта или с главной: ?backup=id&sec=coverage
   onChanged: () => void
   onClose: () => void
 }) {
@@ -612,6 +638,13 @@ function BackupModal({
   // оптимистично прячем кнопку сразу после успеха: версия в отчёте обновится лишь со
   // следующим тиком агента (~15с), а «кнопка не пропала» читается как «не сработало»
   const [rdone, setRdone] = useState(false)
+  const [active, setActive] = useState<string>(() => (BK_SEC_IDS.has(initialSec ?? '') ? initialSec! : 'overview'))
+  const layoutRef = useRef<HTMLDivElement>(null)
+  const go = (id: string) => {
+    setActive(id)
+    const el = layoutRef.current
+    if (el && el.getBoundingClientRect().top < 0) el.scrollIntoView({ block: 'start' })
+  }
   const st = backupStatus(b)
   const stLabel: Record<BStatus, string> = {
     ok: t('свежий'), failed: t('ошибка'), stale: t('не свежий'),
@@ -653,146 +686,310 @@ function BackupModal({
   const win = backupWindowNote(s)
   const v = s.backup_verify
   const helperOld = canManage && b.manageable && (b.helper_version || 0) < CURRENT_BACKUP_HELPER
+  const audit = (s.backup_audit ?? []).filter((x) => !x.muted)
+  const own = s.custom_backups ?? []
+  const ownBad = ownBackupProblems(s)
+  const mutes = new Set(s.alert_mutes ?? [])
+
+  const shown: Record<string, boolean> = {
+    overview: true,
+    runs: true,
+    coverage: (s.backup_audit?.length ?? 0) > 0,
+    own: own.length > 0,
+    restore: true,
+    manage: true,
+  }
+  const secs = BK_SECTIONS.filter((x) => shown[x.id])
+  const cur = secs.find((x) => x.id === active) ?? secs[0]
+  useUrlParam('sec', cur.id === 'overview' ? null : cur.id)
+
+  // Замечания по разделам - те же, что в "Что сломано" на главной: прогон с ошибкой, бэкап не
+  // свежий, скачок прироста, свои бэкапы, дампы и проверка восстановления с бэкенда. Отдельный
+  // дамп для базы - совет из "Требует действий"
+  const items: Record<string, SecItem[]> = {}
+  const add = (sec: string, x: SecItem) => (items[sec] ??= []).push(x)
+  if (s.online) {
+    if (b.metric_present && b.success === 0)
+      add('runs', { level: 2, text: t('бэкап завершился с ошибкой'), since: s.alert_since?.backup_failed })
+    else if (b.metric_present && b.last_backup_ts && Date.now() / 1000 - b.last_backup_ts > STALE_SECONDS)
+      add('runs', { level: 1, text: t('бэкап не свежий: последний {ago}', { ago: fmtAgo(b.last_backup_ts) }), since: s.alert_since?.backup_stale })
+    const g = s.backup_growth
+    if (g && !mutes.has('backup_growth'))
+      add('runs', { level: 1, text: g.text, since: new Date(g.ts * 1000).toISOString() })
+    if (ownBad.length)
+      add('own', {
+        level: ownBad.some((j) => j.status === 'failed') ? 2 : 1,
+        count: ownBad.length,
+        since: s.alert_since?.backup_custom,
+        text: t('свой бэкап не отрабатывает: {jobs}', { jobs: ownBad.map((j) => `${j.name} (${j.problem})`).join(', ') }),
+      })
+    for (const i of srvIssues(s, t).filter((x) => x.section === 'backups' && !x.srv)) {
+      const sec = BK_SEC_IDS.has(i.sec ?? '') ? i.sec! : (BK_SEC_OF_KIND[i.kind ?? ''] ?? 'runs')
+      add(sec, { level: i.tone === 't-down' ? 2 : 1, text: i.text, since: i.since })
+    }
+    const dbs = audit.filter((x) => x.kind === 'db')
+    if (dbs.length && !s.db_dumps_ok)
+      add('coverage', {
+        level: 1,
+        count: dbs.length,
+        text: t('{db} - нужен отдельный дамп', { db: shortList(dbs.map((x) => x.subject), t, 3) }),
+      })
+  }
+  const okDb = audit.filter((x) => x.kind === 'db_ok').length
+  const ok: Record<string, string> = {
+    runs: b.last_backup_ts
+      ? last
+        ? t('последний {ago}, добавил {s}', { ago: fmtAgo(b.last_backup_ts), s: fmtBytes(last.st) })
+        : t('последний {ago}', { ago: fmtAgo(b.last_backup_ts) })
+      : t('бэкапа еще не было'),
+    coverage: okDb ? t('бэкапится баз: {n}', { n: okDb }) : t('баз не найдено'),
+    own: t('заданий: {n}, все отрабатывают', { n: own.filter((j) => !j.ignored).length }),
+    restore: v
+      ? t('проверено {d}: файлов совпало {n}{dumps}', {
+          d: v.ts ? new Date(v.ts).toLocaleDateString() : '?',
+          n: v.files_ok,
+          dumps: v.dumps_ok.length ? t(', дампы читаются: {e}', { e: v.dumps_ok.join(', ') }) : '',
+        })
+      : t('проверки еще не было'),
+    manage: b.manageable
+      ? subOf(
+          b.schedule && t('каждый день {time}', { time: b.schedule }),
+          b.mode === 'include'
+            ? t('только {n} путей', { n: (b.includes ?? []).length })
+            : t('исключено путей: {n}', { n: (b.excludes ?? []).length }),
+        )
+      : t('управление недоступно без helper'),
+  }
+  const info: Record<string, SecInfo> = {}
+  for (const { id } of BK_SECTIONS) info[id] = secInfoOf(items[id] ?? [], ok[id] ?? '', t)
+  // Не проблема, но и не "все в порядке": прогон не уложился в окно или пропущен, дыры в
+  // покрытии, старый restic или helper. Желтым на карте, без числа в меню
+  const soft = (id: string, line: string) => {
+    if (!info[id].level) info[id] = { ...info[id], level: 1, line }
+  }
+  if (win) soft('runs', win)
+  else if (st !== 'ok' && st !== 'unknown' && !items.runs) soft('runs', stLabel[st])
+  const gaps = audit.filter((x) => x.gap)
+  if (gaps.length) soft('coverage', t('не бэкапится: {list}', { list: shortList(gaps.map((x) => x.subject), t, 3) }))
+  if (!b.restic_found) soft('manage', t('restic не найден'))
+  else if (resticOld) soft('manage', t('restic {v}, есть {t}', { v: resticVer, t: RESTIC_TARGET }))
+  else if (helperOld) soft('manage', t('helper на ноде устарел'))
+  if (!v && !info.restore.level) info.restore.idle = true
+
+  const rows: OvRow[] = BK_SECTIONS.flatMap(({ id, label }) =>
+    (items[id] ?? []).map((x) => ({
+      tone: x.level >= 2 ? ('t-down' as const) : ('t-degraded' as const),
+      text: x.text,
+      since: x.since,
+      act: shown[id] ? { label: t(label), onClick: () => go(id) } : undefined,
+    })),
+  ).sort((a, b) => Number(b.tone === 't-down') - Number(a.tone === 't-down'))
+  const tileLabel = (sec: string, label: string) =>
+    info[sec].fresh ? <>{label} <FreshChip since={info[sec].fresh!} /></> : label
+
   return createPortal(
     <div className="modal-backdrop">
-      <div className="card modal docker-modal hs-modal" onClick={(e) => e.stopPropagation()}>
-        <div className="clients-head">
-          <h3>
-            <span className={`sdot ${s.online ? 'sdot-up' : 'sdot-down'}`} />{' '}
-            <OsIcon os={s.os} /> <CountryFlag code={s.country} /> {s.name}
+      <div className="card detail detail-server hs-modal" onClick={(e) => e.stopPropagation()}>
+        <div className="detail-head">
+          <div className="detail-title">
+            <span className={`sdot ${s.online ? 'sdot-up' : 'sdot-down'}`} />
+            <OsIcon os={s.os} size={18} />
+            <CountryFlag code={s.country} />
+            <h3>{s.name}</h3>
             {s.group_name && <span className="type-chip group-chip">{s.group_name}</span>}
-          </h3>
-          <button className="ghost" onClick={onClose}>
-            {t('Закрыть')}
-          </button>
+          </div>
+          <div className="detail-head-actions">
+            <button className="ghost icon-btn" onClick={onClose} title={t('Закрыть')}>
+              ✕
+            </button>
+          </div>
         </div>
-        <div className="net-tiles hs-tiles">
-          <NetTile label={t('Последний бэкап')} value={fmtAgo(b.last_backup_ts)} sub={stLabel[st]} tone={TILE[st]} />
-          <NetTile
-            label={t('Длительность')}
-            value={fmtDur(withDumps ? b.full_duration_sec : b.duration_sec)}
-            sub={subOf(
-              withDumps && t('с дампами'),
-              (b.started_ts || 0) > 0 && !!b.last_backup_ts && `${hm(b.started_ts!)}-${hm(b.last_backup_ts)}`,
-            ) || undefined}
-            tone={win ? 'warn' : undefined}
-          />
-          {repo && (repo.size_bytes || 0) > 0 && (
-            <NetTile label={t('В репозитории')} value={fmtBytes(repo.size_bytes)} sub={t('снапшотов: {n}', { n: repo.snapshots })} />
+        <div className="srv-meta srv-meta-line">
+          {(dest || b.repo_dest) && (
+            <span className="srv-meta-item" title={b.repo_dest || undefined}>
+              <span className="srv-meta-k">{t('куда')}</span> {dest || b.repo_dest}
+            </span>
           )}
-          {last && (
-            <NetTile
-              label={t('Последний прогон')}
-              value={`+${fmtBytes(last.st)}`}
-              sub={usual ? t('обычно {s}', { s: fmtBytes(usual) }) : undefined}
-              tone={s.backup_growth ? 'warn' : undefined}
-            />
+          <span className="srv-meta-item">
+            <span className="srv-meta-k">restic</span>{' '}
+            <span className={!b.restic_found ? 't-down' : resticOld ? 't-degraded' : undefined}>
+              {resticVer || (b.restic_found ? t('найден') : t('не найден'))}
+            </span>
+          </span>
+          {b.schedule && (
+            <span className="srv-meta-item">
+              <span className="srv-meta-k">{t('расписание')}</span> {b.schedule}
+              {s.backup_anytime ? '' : `, ${t('до {h}:00', { h: s.backup_deadline_hour ?? 8 })}`}
+            </span>
           )}
-          {v && (
-            <NetTile
-              label={t('Восстановление')}
-              value={v.level >= 2 ? t('не прошло') : v.problems.length ? t('замечания') : t('проверено')}
-              sub={v.ts ? new Date(v.ts).toLocaleDateString() : undefined}
-              tone={v.level >= 2 ? 'bad' : v.problems.length ? 'warn' : 'ok'}
-            />
+          {!!b.helper_version && (
+            <span className="srv-meta-item"><span className="srv-meta-k">helper</span> {b.helper_version}</span>
           )}
-          {(!b.restic_found || resticOld) && (
-            <NetTile
-              label="restic"
-              value={resticVer || t('не найден')}
-              sub={resticOld ? t('есть {v}', { v: RESTIC_TARGET }) : undefined}
-              tone={resticOld ? 'warn' : 'bad'}
-            />
-          )}
+          <span className="srv-meta-item">
+            <span className="srv-meta-k">{t('обновлено')}</span> {fmtRel(s.last_seen)}
+          </span>
         </div>
-        <div className="net-cards hs-cards">
-          <div className="chart-card net-card net-card-wide">
-            <div className="net-head">
-              <div className="chart-cap net-cap">{t('Бэкап')}</div>
+        <div className="srv-layout" ref={layoutRef}>
+          <CardNav secs={secs} active={cur.id} info={info} onGo={go} />
+          <div className="srv-main">
+            <div className="srv-main-head">
+              <h4>{t(cur.label)}</h4>
             </div>
-            {(b.notes ?? []).map((n, i) => (
-              <div key={i} className="net-prob">{n}</div>
-            ))}
-            {win && <div className="net-note">{t('Не уложился в окно')}: {win}</div>}
-            {v && v.problems.map((p) => (
-              <div key={p} className={v.level >= 2 ? 'net-prob' : 'net-note'}>{p}</div>
-            ))}
-            <div className="kv-list">
-              {row(t('Последний бэкап'), b.last_backup_ts
-                ? `${fmtAgo(b.last_backup_ts)} · ${new Date(b.last_backup_ts * 1000).toLocaleString()}`
-                : '—')}
-              {row(t('Результат'), b.metric_present
-                ? (b.success === 1 ? t('успех') : t('ошибка'))
-                : b.ts_source === 'systemd'
-                  ? `${b.service_result === 'success' ? t('успех') : b.service_result || t('нет данных')} ${t('(по systemd)')}`
-                  : t('нет метрики'))}
-              {row(t('Длительность'), withDumps
-                ? `${fmtDur(b.full_duration_sec)} ${t('(дампы + restic)')} · restic ${fmtDur(b.duration_sec)}`
-                : fmtDur(b.duration_sec))}
-              {(b.started_ts || 0) > 0 && b.last_backup_ts && row(t('Окно бэкапа'),
-                `${hm(b.started_ts!)} → ${hm(b.last_backup_ts)}`)}
-              {row(t('Пропущен (лок занят)'), b.skipped ? t('да') : '—')}
-              {row(t('Таймер'), `${b.timer_enabled ? t('включён') : t('выключен')} · ${b.timer_active ? t('активен') : t('неактивен')}`)}
-              {b.service_result && row(t('Сервис'), b.service_result)}
-              {b.repo_dest && row(t('Куда бэкапится'), b.repo_dest)}
-              {/* объёмы: дампы БД (что кладём на диск перед restic) + физический размер репо
-                  на бэкап-сервере (вся история, дедуп+сжатие). Логический размер снапшота требует
-                  пароля репо (агенту недоступен) — не показываем, репо-размер понятнее. */}
-              {dumpBytes > 0 && row(t('Дампы БД'), `${fmtBytes(dumpBytes)} · ${t('файлов: {n}', { n: dumpFiles })}`)}
-              {repo && (repo.size_bytes || 0) > 0 && row(t('В репозитории'),
-                `${fmtBytes(repo.size_bytes)} · ${t('снапшотов: {n}', { n: repo.snapshots })}`)}
-              {last && row(t('Последний прогон'), t('добавил {s} (до сжатия {a}) · прочитано {p} за {d}', {
-                s: fmtBytes(last.st), a: fmtBytes(last.add), p: fmtBytes(last.proc), d: fmtDur(last.dur),
-              }))}
-              {runs.length > 1 && row(t('Обычно за прогон'), fmtBytes(usual))}
-              {v && v.problems.length === 0 && row(t('Восстановление'), t('проверено {d}: файлов совпало {n}{dumps}', {
-                d: v.ts ? new Date(v.ts).toLocaleDateString() : '?',
-                n: v.files_ok,
-                dumps: v.dumps_ok.length ? t(', дампы читаются: {e}', { e: v.dumps_ok.join(', ') }) : '',
-              }))}
-              {row('restic', (
-                <span className="restic-row">
-                  {b.restic_found ? (shortRestic(b.restic_version) || t('найден')) : t('не найден')}
-                  {canManage && resticOld && !rdone && (
-                    <button className="restic-update-btn" disabled={rbusy} onClick={updateRestic}>
-                      {rbusy ? '…' : `⬆ ${t('обновить до {v}', { v: RESTIC_TARGET })}`}
+
+            {cur.id === 'overview' && (
+              <div className="srv-sec">
+                <OvRows rows={rows} />
+                <div className="net-tiles srv-tiles">
+                  <button className="srv-tile-btn" onClick={() => go('runs')} title={t('к разделу')}>
+                    <NetTile label={tileLabel('runs', t('Последний бэкап'))} value={fmtAgo(b.last_backup_ts)} sub={stLabel[st]} tone={TILE[st]} />
+                  </button>
+                  <button className="srv-tile-btn" onClick={() => go('runs')} title={t('к разделу')}>
+                    <NetTile
+                      label={t('Длительность')}
+                      value={fmtDur(withDumps ? b.full_duration_sec : b.duration_sec)}
+                      sub={subOf(
+                        withDumps && t('с дампами'),
+                        (b.started_ts || 0) > 0 && !!b.last_backup_ts && `${hm(b.started_ts!)}-${hm(b.last_backup_ts)}`,
+                      ) || undefined}
+                      tone={win ? 'warn' : undefined}
+                    />
+                  </button>
+                  {repo && (repo.size_bytes || 0) > 0 && (
+                    <button className="srv-tile-btn" onClick={() => go('runs')} title={t('к разделу')}>
+                      <NetTile label={t('В репозитории')} value={fmtBytes(repo.size_bytes)} sub={t('снапшотов: {n}', { n: repo.snapshots })} />
                     </button>
                   )}
-                  {rdone && <span className="t-up small">✓ {t('обновлено до {v} — версия в шапке обновится через минуту', { v: RESTIC_TARGET })}</span>}
-                  {rmsg && !rdone && <span className="muted small"> · {rmsg}</span>}
-                </span>
-              ))}
-            </div>
-            {last && (
-              <div className="growth-wrap">
-                <GrowthBars runs={runs.slice(-40)} />
-                <div className="muted small">
-                  {t('сколько каждый прогон добавил в репозиторий, последние {n}, свежий справа', { n: Math.min(runs.length, 40) })}
+                  {v && (
+                    <button className="srv-tile-btn" onClick={() => go('restore')} title={t('к разделу')}>
+                      <NetTile
+                        label={tileLabel('restore', t('Восстановление'))}
+                        value={v.level >= 2 ? t('не прошло') : v.problems.length ? t('замечания') : t('проверено')}
+                        sub={v.ts ? new Date(v.ts).toLocaleDateString() : undefined}
+                        tone={v.level >= 2 ? 'bad' : v.problems.length ? 'warn' : 'ok'}
+                      />
+                    </button>
+                  )}
                 </div>
-                {s.backup_growth && <div className="small t-degraded">⚠ {s.backup_growth.text}</div>}
+                <OvAreas
+                  cap={t('Бэкап по областям')}
+                  items={BK_SECTIONS.filter((x) => x.id !== 'overview' && shown[x.id]).map((x) => ({ id: x.id, label: x.label, info: info[x.id] }))}
+                  onGo={go}
+                />
               </div>
             )}
-          </div>
-          <OwnBackups server={s} canManage={canManage} onChanged={onChanged} />
-          <CoverageAudit server={s} canManage={canManage} onChanged={onChanged} />
-          <div className="chart-card net-card net-card-wide">
-            <div className="net-head">
-              <div className="chart-cap net-cap">{t('Управление')}</div>
-            </div>
-            {helperOld && (
-              <div className="net-note">{t('helper на ноде устарел — переустановите, чтобы подхватить новые фичи/фиксы:')}</div>
-            )}
-            {helperOld && <EnableManage />}
-            {/* пароль репозитория = ключ дешифровки бэкапа: только админу (см. бэкенд) */}
-            {isAdmin && b.manageable && <RestoreInfo server={s} />}
-            {canManage && b.manageable ? (
-              <ManageSection server={s} backup={b} onChanged={onChanged} />
-            ) : (
-              <div className="net-foot">
-                {t('Статус читается без секретов. Управление доступно после установки helper на ноде (кнопка ниже).')}
+
+            {cur.id === 'runs' && (
+              <div className="srv-sec">
+                {(b.notes ?? []).map((n, i) => (
+                  <div key={i} className="net-prob">{n}</div>
+                ))}
+                {win && <div className="net-note">{t('Не уложился в окно')}: {win}</div>}
+                <div className="chart-card net-card net-card-wide">
+                  <div className="kv-list">
+                    {row(t('Последний бэкап'), b.last_backup_ts
+                      ? `${fmtAgo(b.last_backup_ts)} · ${new Date(b.last_backup_ts * 1000).toLocaleString()}`
+                      : '—')}
+                    {row(t('Результат'), b.metric_present
+                      ? (b.success === 1 ? t('успех') : t('ошибка'))
+                      : b.ts_source === 'systemd'
+                        ? `${b.service_result === 'success' ? t('успех') : b.service_result || t('нет данных')} ${t('(по systemd)')}`
+                        : t('нет метрики'))}
+                    {row(t('Длительность'), withDumps
+                      ? `${fmtDur(b.full_duration_sec)} ${t('(дампы + restic)')} · restic ${fmtDur(b.duration_sec)}`
+                      : fmtDur(b.duration_sec))}
+                    {(b.started_ts || 0) > 0 && b.last_backup_ts && row(t('Окно бэкапа'),
+                      `${hm(b.started_ts!)} → ${hm(b.last_backup_ts)}`)}
+                    {row(t('Пропущен (лок занят)'), b.skipped ? t('да') : '—')}
+                    {row(t('Таймер'), `${b.timer_enabled ? t('включён') : t('выключен')} · ${b.timer_active ? t('активен') : t('неактивен')}`)}
+                    {b.service_result && row(t('Сервис'), b.service_result)}
+                    {/* объёмы: дампы БД (что кладём на диск перед restic) + физический размер репо
+                        на бэкап-сервере (вся история, дедуп+сжатие). Логический размер снапшота требует
+                        пароля репо (агенту недоступен) — не показываем, репо-размер понятнее. */}
+                    {dumpBytes > 0 && row(t('Дампы БД'), `${fmtBytes(dumpBytes)} · ${t('файлов: {n}', { n: dumpFiles })}`)}
+                    {repo && (repo.size_bytes || 0) > 0 && row(t('В репозитории'),
+                      `${fmtBytes(repo.size_bytes)} · ${t('снапшотов: {n}', { n: repo.snapshots })}`)}
+                    {last && row(t('Последний прогон'), t('добавил {s} (до сжатия {a}) · прочитано {p} за {d}', {
+                      s: fmtBytes(last.st), a: fmtBytes(last.add), p: fmtBytes(last.proc), d: fmtDur(last.dur),
+                    }))}
+                    {runs.length > 1 && row(t('Обычно за прогон'), fmtBytes(usual))}
+                  </div>
+                </div>
+                {last && (
+                  <div className="chart-card net-card net-card-wide">
+                    <div className="net-head">
+                      <div className="chart-cap">{t('Прирост по прогонам')}</div>
+                    </div>
+                    <div className="growth-wrap">
+                      <GrowthBars runs={runs.slice(-40)} />
+                      <div className="muted small">
+                        {t('сколько каждый прогон добавил в репозиторий, последние {n}, свежий справа', { n: Math.min(runs.length, 40) })}
+                      </div>
+                      {s.backup_growth && <div className="small t-degraded">⚠ {s.backup_growth.text}</div>}
+                    </div>
+                  </div>
+                )}
               </div>
             )}
-            {!b.manageable && <EnableManage />}
+
+            {cur.id === 'coverage' && (
+              <CoverageAudit server={s} canManage={canManage} onChanged={onChanged} bare
+                onSchedule={b.manageable && canManage ? () => go('manage') : undefined} />
+            )}
+
+            {cur.id === 'own' && <OwnBackups server={s} canManage={canManage} onChanged={onChanged} bare />}
+
+            {cur.id === 'restore' && (
+              <div className="srv-sec">
+                {v ? (
+                  v.problems.length ? (
+                    v.problems.map((p) => (
+                      <div key={p} className={v.level >= 2 ? 'net-prob' : 'net-note'}>{p}</div>
+                    ))
+                  ) : (
+                    <div className="small t-up">{ok.restore}</div>
+                  )
+                ) : (
+                  <div className="srv-empty">{t('Проверки восстановления еще не было: ее делает helper бэкапа на ноде (backup-setup 0.34 и новее).')}</div>
+                )}
+                {/* пароль репозитория = ключ дешифровки бэкапа: только админу (см. бэкенд) */}
+                {isAdmin && b.manageable && (
+                  <div className="chart-card net-card net-card-wide">
+                    <RestoreInfo server={s} />
+                  </div>
+                )}
+              </div>
+            )}
+
+            {cur.id === 'manage' && (
+              <div className="srv-sec">
+                <div className="kv-list">
+                  {row('restic', (
+                    <span className="restic-row">
+                      {b.restic_found ? (shortRestic(b.restic_version) || t('найден')) : t('не найден')}
+                      {canManage && resticOld && !rdone && (
+                        <button className="restic-update-btn" disabled={rbusy} onClick={updateRestic}>
+                          {rbusy ? '…' : `⬆ ${t('обновить до {v}', { v: RESTIC_TARGET })}`}
+                        </button>
+                      )}
+                      {rdone && <span className="t-up small">✓ {t('обновлено до {v} — версия в шапке обновится через минуту', { v: RESTIC_TARGET })}</span>}
+                      {rmsg && !rdone && <span className="muted small"> · {rmsg}</span>}
+                    </span>
+                  ))}
+                </div>
+                {helperOld && (
+                  <div className="net-note">{t('helper на ноде устарел — переустановите, чтобы подхватить новые фичи/фиксы:')}</div>
+                )}
+                {helperOld && <EnableManage />}
+                {canManage && b.manageable ? (
+                  <ManageSection server={s} backup={b} onChanged={onChanged} />
+                ) : (
+                  <div className="net-foot">
+                    {t('Статус читается без секретов. Управление доступно после установки helper на ноде (кнопка ниже).')}
+                  </div>
+                )}
+                {!b.manageable && <EnableManage />}
+              </div>
+            )}
           </div>
         </div>
       </div>
@@ -2502,12 +2699,14 @@ type BHost = { s: Server; d: BackupInfo }
 export function BackupsPage({
   onUnauthorized,
   openHostId = null,
+  openSec = null,
   openSrvHostId = null,
   onConsumed,
   onSrvConsumed,
 }: {
   onUnauthorized: () => void
   openHostId?: number | null
+  openSec?: string | null // раздел окна бэкапа ноды из ссылки: ?backup=id&sec=coverage
   openSrvHostId?: number | null
   onConsumed?: () => void
   onSrvConsumed?: () => void
@@ -2517,6 +2716,8 @@ export function BackupsPage({
   const [servers, setServers] = useState<Server[] | null>(null)
   const [err, setErr] = useState<string | null>(null)
   const [openId, setOpenId] = useState<number | null>(openHostId)
+  // раздел из ссылки - до первого открытия окна этой ноды
+  const [linkSec, setLinkSec] = useState<{ id: number | null; sec: string | null }>({ id: openHostId, sec: openSec })
   const [openSrvId, setOpenSrvId] = useState<number | null>(openSrvHostId)
   const [setupSrv, setSetupSrv] = useState<Server | null>(null)
   const [deploySrv, setDeploySrv] = useState<Server | null>(null)
@@ -2535,9 +2736,10 @@ export function BackupsPage({
   useEffect(() => {
     if (openHostId != null) {
       setOpenId(openHostId)
+      setLinkSec({ id: openHostId, sec: openSec })
       onConsumed?.()
     }
-  }, [openHostId, onConsumed])
+  }, [openHostId, openSec, onConsumed])
   useEffect(() => {
     if (openSrvHostId != null) {
       setOpenSrvId(openSrvHostId)
@@ -2913,12 +3115,18 @@ export function BackupsPage({
       />
       {open && (
         <BackupModal
+          key={open.s.id}
           server={open.s}
           backup={open.d}
           repo={backupRepoStat(open.d.repo_dest, servers ?? [], open.s)}
+          dest={backupDestName(open.d.repo_dest, servers ?? [], open.s)}
           canManage={!isViewer}
+          initialSec={linkSec.id === open.s.id ? linkSec.sec : null}
           onChanged={load}
-          onClose={() => setOpenId(null)}
+          onClose={() => {
+            setOpenId(null)
+            setLinkSec({ id: null, sec: null })
+          }}
         />
       )}
       {openSrv && (
