@@ -6461,6 +6461,10 @@ button.dm-sec-btn {
 .net-cards.hs-cards { margin-top: 0; }
 .hs-modal .modal-toolbar { margin: 0; }
 .hs-modal .kube-tabs { margin: 0; flex-wrap: wrap; }
+/* карточка с настоящей бедой (конфиг веб-сервера с ошибкой, истекший сертификат) */
+.net-card.net-card-bad { border-color: rgba(239, 68, 68, 0.45); }
+.hs-svc-title { display: flex; align-items: center; gap: 0.4rem; font-weight: 600; }
+.hs-modal .svc-db, .hs-modal .svc-sites, .hs-modal .queue-alert-cfg { margin: 0; }
 /* в строках контейнеров тон показывает точка, цветная полоса слева не нужна */
 .hs-modal .docker-row { border-left-width: 1px; border-left-color: var(--border); }
 .hs-modal .docker-row.docker-row-down { border-color: rgba(239, 68, 68, 0.45); }
