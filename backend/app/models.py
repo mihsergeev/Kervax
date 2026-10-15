@@ -1132,3 +1132,17 @@ class ServerPackages(Base):
     # докуда журнал установок уже разобран: время последней строки и строки с этим временем
     ev_ts: Mapped[int] = mapped_column(BigInteger, default=0)
     ev_keys: Mapped[list | None] = mapped_column(JSON, nullable=True)
+
+
+class VulnFeed(Base):
+    """База важных уязвимостей релиза Ubuntu (app/vulns.py): уже отобранное из OVAL Canonical и
+    каталога CISA KEV. Обновляется раз в сутки, при ошибке остаются вчерашние данные."""
+
+    __tablename__ = "vuln_feeds"
+
+    release: Mapped[str] = mapped_column(String(16), primary_key=True)  # noble, jammy, ...
+    data: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    gen: Mapped[str] = mapped_column(String(40), default="")   # когда Canonical собрал базу
+    ts: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)  # когда скачали
+    tried: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    err: Mapped[str] = mapped_column(String(300), default="")

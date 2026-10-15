@@ -11,6 +11,7 @@ import { AlertHistoryModal } from './AlertHistoryModal'
 import { ReportModal } from './ReportModal'
 import { SearchModal } from './SearchModal'
 import { DepMapModal } from './DepMapModal'
+import { VulnsModal } from './VulnsModal'
 import { ChecksPage } from './ChecksPage'
 import { HomePage } from './HomePage'
 import { LocationsModal } from './LocationsModal'
@@ -44,6 +45,7 @@ type Modal =
   | 'maint'
   | 'search'
   | 'depmap'
+  | 'vulns'
   | null
 export type Section = 'home' | 'sites' | 'servers' | 'docker' | 'kuber' | 'services' | 'backups'
 const SECTIONS: Section[] = ['home', 'sites', 'servers', 'docker', 'kuber', 'services', 'backups']
@@ -433,6 +435,15 @@ export default function App() {
                   <button
                     className="menu-item"
                     onClick={() => {
+                      setModal('vulns')
+                      setMenuOpen(false)
+                    }}
+                  >
+                    {t('Уязвимости')}
+                  </button>
+                  <button
+                    className="menu-item"
+                    onClick={() => {
                       setModal('history')
                       setMenuOpen(false)
                     }}
@@ -551,6 +562,16 @@ export default function App() {
       {modal === 'report' && <ReportModal onClose={() => setModal(null)} onUnauthorized={logout} />}
       {modal === 'depmap' && (
         <DepMapModal
+          onClose={() => setModal(null)}
+          onUnauthorized={logout}
+          onOpen={(sec, id) => {
+            setModal(null)
+            openTarget(sec, id)
+          }}
+        />
+      )}
+      {modal === 'vulns' && (
+        <VulnsModal
           onClose={() => setModal(null)}
           onUnauthorized={logout}
           onOpen={(sec, id) => {

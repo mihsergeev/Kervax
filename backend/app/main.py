@@ -25,6 +25,7 @@ from app.api import (
     settings as settings_api,
     users as users_api,
     vault as vault_api,
+    vulns as vulns_api,
 )
 from app.bootstrap import ensure_admin, ensure_default_location
 from app.collector import collector_loop
@@ -105,6 +106,7 @@ def create_app() -> FastAPI:
     app.include_router(report.router, prefix="/api")
     app.include_router(search.router, prefix="/api")
     app.include_router(depmap.router, prefix="/api")
+    app.include_router(vulns_api.router, prefix="/api")
     app.include_router(locations.router, prefix="/api")
     app.include_router(maintenance.router, prefix="/api")
     app.include_router(servers.router, prefix="/api")

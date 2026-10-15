@@ -71,6 +71,7 @@ import { NoteBar } from './NoteBar'
 import { ServerParentBar } from './ParentBar'
 import { TimelineCard } from './TimelineCard'
 import { PackagesCard } from './PackagesCard'
+import { VulnsCard } from './VulnsCard'
 import { JournalCard, JournalModal, journalBlocker } from './UnitJournal'
 import { LinksCard, NetTile, TrafficCard } from './NetLinks'
 import { KnownServerList } from './KnownDialog'
@@ -5869,6 +5870,7 @@ function ServerDetail({
             <ChangesFeed server={s} onChanged={onChanged} />
             <JournalCard server={s} />
             <PackagesCard server={s} onUnauthorized={onUnauthorized} />
+            <VulnsCard server={s} onUnauthorized={onUnauthorized} />
           </div>
           <div className="chart-grid">
             <ProcCard title={t('Топ по CPU')} procs={r.top_cpu} kind="cpu" total={r.mem_total ?? 0} t={t} />

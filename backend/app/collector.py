@@ -39,6 +39,7 @@ from app import web_config
 from app import changes as srv_changes
 from app import timeline as timeline_mod
 from app import open_ports
+from app import vulns as vulns_mod
 from app import netlinks
 from app import traffic as traffic_mod
 from app import disk_forecast as dfc
@@ -6320,6 +6321,9 @@ async def collector_loop(
             await stage("зависшие команды", _expire_commands(session_factory))
             # внешняя проверка портов идет фоном: закрытый файрволом порт отвечает только таймаутом
             await stage("что открыто в интернет", open_ports.start_scan(
+                session_factory, datetime.now(timezone.utc)))
+            # базы уязвимостей раз в сутки, загрузка и разбор фоном
+            await stage("базы уязвимостей", vulns_mod.start_refresh(
                 session_factory, datetime.now(timezone.utc)))
             # Прунинг двигает границу ретеншена медленно — незачем каждый тик гонять
             # DELETE по 3 большим таблицам. Раз в prune_interval_seconds (по умолч. час).
