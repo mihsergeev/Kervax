@@ -594,6 +594,70 @@ export function createCheck(body: CheckForm): Promise<Check> {
   return api<Check>('/api/checks', { method: 'POST', body: JSON.stringify(body) })
 }
 
+// Пробная проверка нового монитора до сохранения (backend app/try_probe.py). Части форма
+// спрашивает одновременно: панель отвечает за доли секунды, а локации и срок домена дольше.
+export type TryPart = 'panel' | 'expiry' | 'locations' | 'inside'
+export type TryIn = {
+  part: TryPart
+  type: 'http' | 'tcp_port'
+  target: string
+  port?: number
+  timeout_ms?: number
+  degraded_ms?: number
+  method?: string
+  expected_status?: string
+  keyword_up?: string
+  keyword_down?: string
+  auth_method?: string
+  auth_user?: string
+  auth_pass?: string
+  http_headers?: string
+  ignore_tls?: boolean
+  extra_paths?: string[]
+}
+export type TryResult = {
+  status: 'up' | 'degraded' | 'down' | 'pending' | 'none'
+  latency_ms: number | null
+  message: string
+  // вид беды одним словом (http, reset, tls, dns, refused, timeout, connect, other) и код;
+  // у проверки изнутри еще no_server, offline, no_answer
+  kind: string
+  code: number
+}
+export type TryPanel = TryResult & {
+  ip_results: { ip: string; status: string; latency_ms: number | null; message: string }[] | null
+  path_results: { path: string; status: string; latency_ms: number | null; message: string }[] | null
+}
+export type TryLocation = TryResult & { id: number; name: string }
+export type TryInside = TryResult & {
+  server_id: number | null
+  server_name: string
+  web: string
+  request_id: number | null
+  fast: boolean
+  deadline: number
+}
+export type CheckTryOut = {
+  panel: TryPanel | null
+  ssl_days: number | null
+  ssl_message: string
+  domain_days: number | null
+  domain_message: string
+  locations: TryLocation[] | null
+  inside: TryInside | null
+  group: string
+  existing_id: number | null
+  existing_name: string
+}
+
+export function tryCheck(body: TryIn): Promise<CheckTryOut> {
+  return api<CheckTryOut>('/api/checks/try', { method: 'POST', body: JSON.stringify(body) })
+}
+
+export function tryCheckInside(requestId: number): Promise<CheckTryOut> {
+  return api<CheckTryOut>(`/api/checks/try/${requestId}`)
+}
+
 export function updateCheck(id: number, body: Partial<CheckForm>): Promise<Check> {
   return api<Check>(`/api/checks/${id}`, {
     method: 'PATCH',

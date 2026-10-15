@@ -20,6 +20,7 @@ import { expiryText } from './checkUtils'
 import { useUrlCard } from './deeplink'
 import { AdoptSitesModal, adoptable } from './AdoptSitesModal'
 import { CheckFormCard } from './CheckFormCard'
+import { AddMonitor } from './AddMonitor'
 import { StatusBar } from './charts/StatusBar'
 import { ImportModal } from './ImportModal'
 import { useI18n } from './i18n'
@@ -86,6 +87,9 @@ export function ChecksPage({ onUnauthorized, openCheckId, openSec = null, onCons
   const [wizard, setWizard] = useState(false)
   const [editId, setEditId] = useState<number | null>(null)
   const [form, setForm] = useState<CheckForm>(EMPTY)
+  // новый монитор - через форму с пробной проверкой (AddMonitor); push и DNS - старой формой
+  const [classic, setClassic] = useState(false)
+  const [addErr, setAddErr] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const [detailId, setDetailId] = useState<number | null>(null)
   // раздел из ссылки - до первого открытия карточки этого монитора
@@ -188,7 +192,34 @@ export function ChecksPage({ onUnauthorized, openCheckId, openSec = null, onCons
   const openAdd = () => {
     setEditId(null)
     setForm(EMPTY)
+    setClassic(false)
+    setAddErr(null)
     setFormOpen(true)
+  }
+
+  const openClassic = (type: 'push' | 'dns') => {
+    // у push адреса нет: панель выдаст свой; DNS меняется редко, раз в 5 минут хватает
+    setForm(
+      type === 'push'
+        ? { ...EMPTY, type, target: 'push', push_period: 3600 }
+        : { ...EMPTY, type, dns_type: 'A', interval_seconds: 300 },
+    )
+    setClassic(true)
+  }
+
+  const submitNew = async (f: CheckForm) => {
+    setBusy(true)
+    setAddErr(null)
+    try {
+      await createCheck(f)
+      setFormOpen(false)
+      load()
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 401) return onUnauthorized()
+      setAddErr(e instanceof Error ? e.message : t('Ошибка'))
+    } finally {
+      setBusy(false)
+    }
   }
 
   const submit = async () => {
@@ -701,7 +732,24 @@ export function ChecksPage({ onUnauthorized, openCheckId, openSec = null, onCons
         />
       )}
 
-      {formOpen && (
+      {formOpen && editId == null && !classic && (
+        <AddMonitor
+          base={EMPTY}
+          groups={groupNames}
+          busy={busy}
+          error={addErr}
+          onSubmit={submitNew}
+          onCancel={() => setFormOpen(false)}
+          onClassic={openClassic}
+          onOpenCheck={(id) => {
+            setFormOpen(false)
+            setDetailId(id)
+          }}
+          onUnauthorized={onUnauthorized}
+        />
+      )}
+
+      {formOpen && (editId != null || classic) && (
         <CheckFormCard
           key={editId ?? 'new'}
           form={form}

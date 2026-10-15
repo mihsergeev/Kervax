@@ -50,6 +50,28 @@ def domain_check(url: str) -> SimpleNamespace:
     )
 
 
+# Что пробная проверка из формы нового монитора может передать агенту (ProbeRequest.spec).
+# Остальное - как у монитора по умолчанию.
+SPEC_FIELDS = ("method", "timeout_ms", "expected_status", "keyword_up", "keyword_down",
+               "http_headers", "auth_method", "auth_user", "auth_pass", "ignore_tls")
+# пароль и заголовки (там бывает токен) не должны лежать в базе дольше, чем нужны агенту
+SPEC_SECRETS = ("auth_pass", "http_headers")
+
+
+def request_check(req: ProbeRequest) -> SimpleNamespace:
+    """Монитор, которого еще нет, для запроса без монитора: умолчания плюс настройки из формы."""
+    chk = domain_check(req.url)
+    for key, value in (req.spec or {}).items():
+        if key in SPEC_FIELDS:
+            setattr(chk, key, value)
+    return chk
+
+
+def drop_secrets(req: ProbeRequest) -> None:
+    if req.spec and any(k in req.spec for k in SPEC_SECRETS):
+        req.spec = {k: v for k, v in req.spec.items() if k not in SPEC_SECRETS}
+
+
 # Additional paths of a local monitor go to the agent as separate planned tasks. The agent
 # keeps its state by task number and knows nothing about monitors, so every path needs a
 # number of its own that maps back to the monitor and the path: a base far above monitor ids,
@@ -162,7 +184,7 @@ async def _open(session: AsyncSession, server: Server, now: datetime) -> list[tu
     out = []
     for req, chk in rows:
         if req.check_id == 0 and req.url:
-            chk = domain_check(req.url)
+            chk = request_check(req)
         elif req.url and chk is not None:
             # a path of the monitor: the request keeps the path, the rest comes from the monitor
             chk = checks_exec.path_view(chk, req.url)
@@ -336,10 +358,11 @@ async def _ingest_domain(session: AsyncSession, req: ProbeRequest, now: datetime
 
     Ни монитора, ни инцидентов тут нет. Строку ищем по номеру запроса: если домен
     успели перепроверить, у строки уже другой запрос, и опоздавший ответ её не тронет."""
-    chk = domain_check(req.url)
+    chk = request_check(req)
     outcome = checks_exec.outcome_from_agent(chk, req, now, chk.degraded_ms)
     req.status = outcome.status
     req.message = outcome.message[:512]
+    drop_secrets(req)
     row = await session.scalar(select(DomainProbe).where(DomainProbe.local_request_id == req.id))
     if row is None:
         return

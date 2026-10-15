@@ -7,7 +7,7 @@ import secrets
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Query, Request, status
 from sqlalchemy import case, delete as sa_delete, func, select
 
-from app import audit, domain_probe, known, manual_probe
+from app import audit, domain_probe, known, manual_probe, try_probe
 from app import parents as parents_mod
 from app.checks import status_matches
 from app import checks as checks_exec
@@ -57,6 +57,8 @@ from app.schemas import (
     CheckReorder,
     CheckRunOut,
     CheckSampleOut,
+    CheckTryIn,
+    CheckTryOut,
     CheckUpdate,
     ChecksOverviewOut,
     DiscoveredDomain,
@@ -623,6 +625,76 @@ async def discovered_probes(user: CurrentUser, session: SessionDep) -> DomainPro
     return DomainProbesOut(
         items=await domain_probe.rows_out(session, list(_serving_servers(servers)), labels, now)
     )
+
+
+async def _try_context(body: CheckTryIn, user, session) -> dict:
+    """Группа мониторов того же домена (подставить в форму) и монитор, который уже смотрит
+    этот адрес: второй такой же монитор - дубль алертов."""
+    def addr(target: str) -> tuple[str, str]:
+        """Сайт - хост и путь (другой путь того же домена - другой монитор), порт - хост."""
+        t = (target or "").strip().lower()
+        parsed = urlparse(t if "://" in t else "http://" + t)
+        return (parsed.hostname or "").strip("."), parsed.path.rstrip("/")
+
+    want = addr(body.target)
+    zone = checks_exec._registrable_domain(body.target)
+    groups: dict[str, int] = {}
+    existing = None
+    for check in await session.scalars(select(Check).order_by(Check.id)):
+        if not group_allowed(user, check.group_name, "sites") or check.type in ("push", "dns"):
+            continue
+        if check.group_name and checks_exec._registrable_domain(check.target or "") == zone:
+            groups[check.group_name] = groups.get(check.group_name, 0) + 1
+        got = addr(check.target)
+        same = want[0] and (
+            body.type == "http" and check.type == "http" and got == want
+            or body.type == "tcp_port" and check.type == "tcp_port"
+            and got[0] == want[0] and check.port == body.port
+        )
+        if existing is None and same:
+            existing = check
+    return {
+        "group": max(groups, key=lambda g: groups[g]) if groups else "",
+        "existing_id": existing.id if existing else None,
+        "existing_name": existing.name if existing else "",
+    }
+
+
+@router.post("/try", response_model=CheckTryOut)
+async def try_check(body: CheckTryIn, user: CurrentUser, session: SessionDep) -> CheckTryOut:
+    """Пробная проверка нового монитора до сохранения (см. try_probe). Ничего не заводит.
+
+    Только для тех, кто может завести монитор (просмотр отсекает CurrentUser): проверка
+    ходит туда же, куда ходил бы монитор, и не больше. Сервер для проверки изнутри
+    выбирается из серверов учетки, а агент и так ходит только на свой localhost."""
+    chk = try_probe.check_of(body)
+    if body.part == "panel":
+        return CheckTryOut(panel=await try_probe.panel(chk), **await _try_context(body, user, session))
+    if body.type != "http":
+        # срок сертификата, локации и проверка изнутри бывают только у сайтов
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Это проверяется только у сайтов")
+    if body.part == "expiry":
+        return CheckTryOut(**await try_probe.expiry(chk))
+    if body.part == "locations":
+        return CheckTryOut(locations=await try_probe.locations(session, chk))
+    servers = list(await session.scalars(scope_query(user, select(Server), Server)))
+    out = await try_probe.inside(session, body, servers, datetime.now(timezone.utc))
+    await session.commit()
+    return CheckTryOut(inside=out)
+
+
+@router.get("/try/{request_id}", response_model=CheckTryOut)
+async def try_check_inside(request_id: int, user: CurrentUser, session: SessionDep) -> CheckTryOut:
+    """Ответ агента на пробную проверку изнутри - форма спрашивает, пока ждет."""
+    req = await session.get(ProbeRequest, request_id)
+    srv = await session.get(Server, req.server_id) if req is not None else None
+    allowed = srv is not None and await session.scalar(
+        scope_query(user, select(Server.id), Server).where(Server.id == srv.id))
+    if req is None or req.kind != try_probe.KIND or not allowed:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Проверка не найдена")
+    out = try_probe.inside_answer(req, srv, datetime.now(timezone.utc))
+    await session.commit()
+    return CheckTryOut(inside=out)
 
 
 # Коды, которыми прокси говорит «ты не в списке»: сайт при этом ЖИВ. 401 не берём —

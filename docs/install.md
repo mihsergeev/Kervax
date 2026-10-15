@@ -248,10 +248,13 @@ runs no shell, and the panel stores nothing but a SHA-256 of its token.
 
 ## Your first site
 
-**"Add monitor"** — an address is enough: `example.com` or
-`https://example.com/health`. The scheme is detected automatically, the TLS
-certificate and the domain registration start being tracked on their own, and
-history and uptime begin with the very first check.
+**"Add monitor"**: type an address (`example.com`,
+`https://example.com/health`, or `db.example.com:5432` for a port) and press
+"Check". Before anything is saved, the panel opens the address from the panel
+itself, from inside the server where the domain was found, and from the
+locations, shows how each of them went and picks the one that works. The scheme
+is detected automatically, the TLS certificate and the domain registration are
+tracked on their own, and history and uptime begin with the very first check.
 
 ---
 
