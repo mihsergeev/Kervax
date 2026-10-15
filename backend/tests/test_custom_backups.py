@@ -81,6 +81,20 @@ def test_statuses():
     assert custom_backups.evaluate(_jobs()[0], NOW, {"systemd:n8n-sqlite-backup.timer"}).status == "ignored"
 
 
+def test_prometheus_flag_file_is_not_a_job():
+    """restic_backup_monitoring_disabled.prom глушит алерты restic в Prometheus. Бэкапом он не
+    является, и задание "не понять" в разделе висеть не должно"""
+    flag = {"id": "metrics:restic_backup_monitoring_disabled", "kind": "metrics",
+            "name": "restic_backup_monitoring_disabled", "schedule": "", "ok": -1, "ok_ts": 0,
+            "metrics": "/var/lib/node_exporter/textfile_collector/restic_backup_monitoring_disabled.prom"}
+    s = _server(jobs=_jobs() + [flag])
+    assert "restic_backup_monitoring_disabled" not in {v.name for v in custom_backups.views(s, NOW)}
+    assert len(custom_backups.jobs_of(s)) == 3
+    # задание cron с похожим словом в имени остается
+    cron = dict(flag, id="cron:1", kind="cron", name="restic_backup_monitoring_disabled")
+    assert len(custom_backups.jobs_of(_server(jobs=[cron]))) == 1
+
+
 def test_frozen_scan_raises_nothing():
     """helper перестал запускаться: застывший снимок не должен через двое суток превратиться
     в «нет свежего бэкапа» по заданиям, которые исправно работают."""

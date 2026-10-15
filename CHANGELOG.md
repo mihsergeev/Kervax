@@ -4,6 +4,17 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.4.195] - 2026-10-15
+
+### Fixed
+- Простаивающая транзакция без снимка больше не дает отдельную строку "держит блокировки". На
+  одной ноде воркер сутками держал так один advisory lock: VACUUM он не мешает, ждущих нет, а
+  строка висела в "Что сломано". Про такую транзакцию теперь говорится, только когда кто-то
+  ждет блокировку, в той же строке: скорее всего держит она.
+- Файл-флаг restic_backup_monitoring_disabled.prom, которым глушат алерты restic в
+  Prometheus, больше не показывается в разделе "Бэкапы" как свое задание со статусом "не
+  понять".
+
 ## [1.4.194] - 2026-10-15
 
 ### Fixed
