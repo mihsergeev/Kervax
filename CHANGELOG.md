@@ -4,6 +4,14 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.4.218] - 2026-10-16
+
+### Removed
+- Прежняя форма монитора удалена целиком, вместе с ее стилями и переводами: все мониторы
+  добавляются и правятся новой формой. У старого монитора сертификата, который можно завести только
+  через API, в правке вместо формы теперь объяснение, что его настройки меняются через API;
+  заметка и удаление у него остались.
+
 ## [1.4.217] - 2026-10-16
 
 ### Removed

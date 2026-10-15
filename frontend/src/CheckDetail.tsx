@@ -25,7 +25,6 @@ import {
   type LocationResult,
   type Uptime,
 } from './api'
-import { CheckFormCard } from './CheckFormCard'
 import { AddMonitor } from './AddMonitor'
 import { CheckWhere, phaseSeries } from './CheckPhases'
 import { SnoozeControl } from './SnoozeControl'
@@ -193,12 +192,8 @@ export function CheckDetail({ check, groups, initialSec, onClose, onSaved, onRun
     setSaveErr(null)
     setEditing(true)
   }
-  const setField = (patch: Partial<CheckForm>) =>
-    setForm((f) => (f ? { ...f, ...patch } : f))
-  const canSave =
-    !!form && form.name.trim() !== '' && form.target.trim() !== '' && !saving
-  // старая форма осталась только у прежних мониторов сертификата
-  const newForm = !!form && form.type !== 'cert'
+  // старый монитор сертификата формы не имеет: его заводят и меняют только через API
+  const certOnly = check.type === 'cert'
 
   const submitEdit = async (next?: CheckForm) => {
     const body = next ?? form
@@ -656,7 +651,6 @@ export function CheckDetail({ check, groups, initialSec, onClose, onSaved, onRun
                 }
               }}
             />
-            {saveErr && !newForm && <p className="form-error">{saveErr}</p>}
             {/* удаление - сверху и отдельно, чтобы не нажать случайно рядом с "Сохранить" */}
             {onDelete && (
               <div className="edit-danger-top">
@@ -665,9 +659,20 @@ export function CheckDetail({ check, groups, initialSec, onClose, onSaved, onRun
                 </button>
               </div>
             )}
-            {/* сайт, порт, DNS и push - той же формой, что и новый монитор, с пробной проверкой;
-                прежняя форма осталась только у старых мониторов сертификата */}
-            {newForm ? (
+            {/* правка - той же формой, что и новый монитор, с пробной проверкой; заметка и
+                удаление выше есть у всех, включая старый монитор сертификата */}
+            {certOnly ? (
+              <div className="card">
+                <p className="muted small">
+                  {t('Это монитор сертификата старого типа: его настройки меняются только через API. Удалить его можно кнопкой выше, а за сертификатом следит и обычный монитор сайта.')}
+                </p>
+                <div className="modal-actions">
+                  <button className="ghost" onClick={() => setEditing(false)}>
+                    {t('Закрыть')}
+                  </button>
+                </div>
+              </div>
+            ) : (
               <AddMonitor
                 editing
                 checkId={check.id}
@@ -678,18 +683,6 @@ export function CheckDetail({ check, groups, initialSec, onClose, onSaved, onRun
                 onSubmit={submitEdit}
                 onCancel={() => setEditing(false)}
                 onUnauthorized={onUnauthorized}
-              />
-            ) : (
-              <CheckFormCard
-                bare
-                form={form}
-                set={setField}
-                editing
-                busy={saving}
-                canSubmit={canSave}
-                onSubmit={() => submitEdit()}
-                onCancel={() => setEditing(false)}
-                groups={groups}
               />
             )}
           </>

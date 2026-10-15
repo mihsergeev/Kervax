@@ -461,23 +461,6 @@ input:focus {
 .stat-num-muted {
   color: var(--text-muted);
 }
-/* textarea кастомных HTTP-заголовков монитора (JSON) */
-.headers-input {
-  resize: vertical;
-  min-height: 3.2rem;
-  line-height: 1.4;
-  padding: 0.5rem 0.7rem;
-  border-radius: 8px;
-  border: 1px solid var(--border);
-  background: var(--bg);
-  color: var(--text);
-  font-size: 0.85rem;
-}
-.headers-input:focus {
-  outline: none;
-  border-color: var(--border-strong);
-}
-
 /* быстрый снуз алертов (монитор/сервер) */
 .snooze-ctl {
   display: flex;
@@ -2064,9 +2047,6 @@ body {
   flex-shrink: 0;
 }
 
-.check-form {
-  margin-bottom: 1rem;
-}
 .form-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
@@ -2075,10 +2055,6 @@ body {
 .field-wide {
   grid-column: 1 / -1;
 }
-.check-form .field {
-  margin: 0;
-}
-
 select {
   background: var(--bg);
   border: 1px solid var(--border);
@@ -2552,10 +2528,6 @@ select:focus {
   color: var(--text-muted);
   opacity: 0.8;
 }
-.paths-input {
-  font-family: Consolas, 'Cascadia Mono', monospace;
-  line-height: 1.5;
-}
 .check-meta {
   text-align: right;
   min-width: 0;
@@ -2768,37 +2740,6 @@ select:focus {
   font-weight: 600;
   transition: color 0.15s ease;
 }
-/* ---------- опции SSL/домен в форме ---------- */
-
-.expiry-opts {
-  display: flex;
-  flex-direction: column;
-  gap: 0.5rem;
-  margin: 0.85rem 0 0.2rem;
-  padding-top: 0.7rem;
-  border-top: 1px solid var(--border);
-}
-.expiry-opt {
-  display: flex;
-  align-items: center;
-  gap: 1rem;
-  flex-wrap: wrap;
-}
-.expiry-opt .checkbox {
-  margin: 0;
-}
-.inline-days {
-  flex-direction: row;
-  align-items: center;
-  gap: 0.45rem;
-  font-size: 0.8rem;
-  color: var(--text-muted);
-}
-.inline-days input {
-  width: 6.5rem;
-  padding: 0.3rem 0.5rem;
-}
-
 /* --- шапка списка + массовое применение --- */
 .checks-head-actions {
   display: flex;
@@ -2876,21 +2817,6 @@ select:focus {
 .bulk-row input {
   width: 9rem;
   flex-shrink: 0;
-}
-
-/* выбор локаций в форме монитора */
-.loc-pick {
-  display: flex;
-  flex-direction: column;
-  gap: 0.3rem;
-  margin: 0.4rem 0 0.2rem;
-  padding: 0.6rem 0.8rem;
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: 9px;
-}
-.loc-pick-item {
-  margin: 0.1rem 0;
 }
 
 /* ---------- плитки SSL/домена в детали ---------- */
@@ -5927,21 +5853,6 @@ body:has(.modal-backdrop) {
    акцент — это выход в архив, а не действие, которого от инженера ждут. */
 /* «Сервер недоступен» — спокойная, но заметная полоса под именем ноды. Красной
    заливки нет намеренно: авария уже случилась, кричать нечем, а читать придётся. */
-/* «Откуда проверять» — один выбор из трёх, а не россыпь галочек по форме. */
-.probe-where {
-  display: flex;
-  flex-direction: column;
-  gap: 0.35rem;
-  margin: 0.2rem 0 0.6rem;
-}
-.probe-switch {
-  align-self: flex-start;
-}
-/* Раскрытие тонкой настройки: ссылка, а не кнопка-акцент — это не действие формы. */
-.adv-toggle {
-  align-self: flex-start;
-  margin: 0.1rem 0 0.5rem;
-}
 
 .srv-offline-note {
   display: flex;

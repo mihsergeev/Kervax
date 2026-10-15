@@ -170,7 +170,6 @@ const EN: Record<string, string> = {
   'TCP-порт': 'TCP port',
   'TLS-сертификат': 'TLS certificate',
   'URL': 'URL',
-  'Хост (домен/IP)': 'Host (domain/IP)',
   'Порт': 'Port',
   'Интервал, сек': 'Interval, s',
   'Порог «медленно», мс': 'Slow threshold, ms',
@@ -178,8 +177,6 @@ const EN: Record<string, string> = {
   'Считать «упавшим» и слать алерт, только если провалятся все попытки подряд.':
     'Mark down and alert only if all consecutive attempts fail.',
   'Алерт после N сбоев подряд': 'Alert after N failures in a row',
-  'Сколько «плохих» проверок подряд до отправки алерта (гасит редкие флапы).':
-    'How many bad checks in a row before alerting (damps rare flaps).',
   'Алерт «медленно» после N подряд': 'Slow alert after N in a row',
   'Отдельный, обычно больший порог для деградации (медленных ответов) — она шумнее падения.':
     'A separate, usually higher threshold for degraded (slow) responses — noisier than an outage.',
@@ -205,14 +202,6 @@ const EN: Record<string, string> = {
   'С панели': 'From the panel',
   'Изнутри сервера': 'From the server itself',
   'Из локаций': 'From locations',
-  'Обычная проверка снаружи, с самой панели.': 'A normal check from outside, made by the panel.',
-  'Для сайта, закрытого белым списком: панель к нему не пойдёт, проверит агент на том сервере, чей веб-сервер держит этот домен — панель найдёт его сама. Он постучится на localhost с этим именем. Проверка изнутри не доказывает, что сайт виден посетителям, а белый список должен пускать 127.0.0.1 и подсеть докера.':
-    'For a site closed behind an allow-list: the panel will not go there. The agent on the server whose web server holds this domain does it instead — the panel finds that server itself — knocking on localhost with this host name. A check from inside does not prove the site is reachable for visitors, and the allow-list must admit 127.0.0.1 and the docker subnet.',
-  'Через прокси-локации: видно, доступен ли сайт из разных сетей и стран.':
-    'Through proxy locations: shows whether the site is reachable from different networks and countries.',
-  'тонкая настройка: интервалы, коды, заголовки, сроки':
-    'fine tuning: intervals, codes, headers, expiry',
-  'скрыть тонкую настройку': 'hide fine tuning',
   'Проверять из локаций (прокси)': 'Check from locations (proxies)',
   'Прокси, через которые панель проверяет сайты (HTTP/HTTPS/SOCKS5), чтобы видеть доступность из разных сетей/регионов.':
     'Proxies the panel checks sites through (HTTP/HTTPS/SOCKS5), to see availability from different networks/regions.',
@@ -233,7 +222,6 @@ const EN: Record<string, string> = {
     'No locations yet — add them in ⚙ → Locations.',
 
   // --- пороги напоминаний / массовое применение ---
-  'напоминать за, дн.': 'remind, days before',
   'Применить ко всем': 'Apply to all',
   'Применить ко всем мониторам': 'Apply to all monitors',
   'Отметьте поля, которые применить ко всем мониторам разом. Остальные настройки не тронутся.':
@@ -263,7 +251,6 @@ const EN: Record<string, string> = {
   'Ожидаемый статус': 'Expected status',
   'Слово в ответе (должно быть)': 'Keyword (must be present)',
   'Слово-стоп (не должно быть)': 'Stop-word (must be absent)',
-  'Включён': 'Enabled',
   'Сохранить': 'Save',
   'Добавить': 'Add',
   'Считать оффлайн после, сек': 'Mark offline after, sec',
@@ -307,16 +294,6 @@ const EN: Record<string, string> = {
   'Проблемы': 'Issues',
   'По умолчанию алерт выглядит так: «адрес 🔴 — имя-ссылкой на монитор — текст ошибки». Свой текст в поле выше отключает адрес и ссылку.':
     'By default an alert looks like: "address 🔴 — name-as-link-to-monitor — error text". A custom text above turns off the address and the link.',
-  'Аутентификация': 'Authentication',
-  'Нет': 'None',
-  'HTTP-заголовки (JSON, опционально)': 'HTTP headers (JSON, optional)',
-  'Игнорировать ошибки TLS/SSL (самоподписанный / истёкший / чужой хост)':
-    'Ignore TLS/SSL errors (self-signed / expired / wrong host)',
-  '⚠ Невалидный JSON — заголовки не применятся.': '⚠ Invalid JSON — headers won’t be applied.',
-  'Доп. заголовки к запросу (напр. токен), если сайт без них отдаёт 401.':
-    'Extra request headers (e.g. a token) for sites that return 401 without them.',
-  'Проверять все IP-адреса домена (ловит мёртвый бэкенд за балансировщиком)':
-    'Check all of the domain’s IP addresses (catches a dead backend behind a load balancer)',
   'Проверить': 'Test',
   'Проверяю…': 'Testing…',
   'Проверьте прокси — сохранить можно только доступный.':
@@ -1877,9 +1854,7 @@ const EN: Record<string, string> = {
     'The domain has a single address: nothing to compare, the regular check covers it. The breakdown appears once there are more addresses.',
   'Разбивки по адресам еще нет: появится после ближайшей проверки.': 'No per-address breakdown yet: it appears after the next check.',
   'у домена один адрес': 'the domain has one address',
-  'HTTP Basic (логин/пароль)': 'HTTP Basic (login/password)',
   'Показать': 'Show',
-  'Скрыть': 'Hide',
   'IP сервера (опционально)': 'Server IP (optional)',
   'На сервере уже стоит агент другой панели?': 'Already running an agent for another panel on this server?',
   'Допишите третий аргумент — любое имя этого инстанса — в самый конец команды, через пробел после токена:':
@@ -2403,9 +2378,6 @@ const EN: Record<string, string> = {
   'выключен': 'off',
   'Всё': 'All',
   'нет': 'none',
-  'URL или домен': 'URL or domain',
-  'Схему можно не писать — определим сами (приоритет https).':
-    'You can omit the scheme — we detect it (https first).',
   'Алерты сайтов': 'Site alerts',
   'Поиск монитора…': 'Search monitor…',
   'Куда': 'Apply to',
@@ -2918,9 +2890,6 @@ const EN: Record<string, string> = {
   'группа': 'group',
   'Дополнительные пути': 'Additional paths',
   'Дополнительные пути: {list}': 'Additional paths: {list}',
-  'Путь должен начинаться с /: {list}': 'A path must start with /: {list}',
-  'По одному на строку, например /health для API. Проверяются вместе с основным адресом и тем же способом, и монитор падает, если не отвечает любой из них.':
-    'One per line, for example /health for the API. They are checked together with the main address and the same way, and the monitor goes down if any of them does not respond.',
   'Пути ещё не проверялись: результат появится после ближайшей проверки.':
     'The paths have not been checked yet, the result will appear after the next check.',
   'добавляем…': 'adding…',
@@ -3187,15 +3156,14 @@ const EN: Record<string, string> = {
   'Маска или regexp — монитору нужен конкретный адрес':
     'Wildcard or regexp — a monitor needs a concrete address',
   'нет данных': 'no data',
-  'Следить за SSL-сертификатом (валидность и срок)':
-    'Watch TLS certificate (validity & expiry)',
-  'Следить за сроком регистрации домена': 'Watch domain registration expiry',
   'предупредить за, дн.': 'warn, days before',
   'SSL истекает': 'SSL expiring',
   'Домен истекает': 'Domain expiring',
   'SSL-сертификат': 'TLS certificate',
   'Домен': 'Domain',
   // --- новый монитор: пробная проверка (AddMonitor) ---
+  'Это монитор сертификата старого типа: его настройки меняются только через API. Удалить его можно кнопкой выше, а за сертификатом следит и обычный монитор сайта.':
+    'This is an old-style certificate monitor: its settings can only be changed through the API. You can delete it with the button above, and a regular site monitor watches the certificate too.',
   'Настройки поменялись - нажмите "проверить снова": ответ сравнится уже с ними.':
     'The settings changed - press "check again": the answer will be compared with them.',
   'Ответ совпадает с ожидаемым. Станет другим - придет алерт.':
