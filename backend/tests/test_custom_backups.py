@@ -100,6 +100,15 @@ def test_intervals():
     assert custom_backups.cron_interval("*/15 * * * *") == 900
     assert custom_backups.cron_interval("0 */6 * * *") == 6 * 3600
     assert custom_backups.cron_interval("0 3 * * 0") == 7 * 86400
+    # дни недели: самый длинный перерыв между ними, а не "раз в неделю"
+    assert custom_backups.cron_interval("30 9 * * 3,6") == 4 * 86400
+    assert custom_backups.cron_interval("0 3 * * 1-5") == 3 * 86400
+    assert custom_backups.cron_interval("0 3 * * mon,thu") == 4 * 86400
+    assert custom_backups.cron_interval("0 * * * 1-5") == 3 * 86400
+    assert custom_backups.cron_interval("15 2 * * 7") == 7 * 86400
+    assert custom_backups.cron_interval("0 3 * * 1-7") == 86400
+    assert custom_backups.cron_interval("0 */6 * * 0-6") == 6 * 3600
+    assert custom_backups.cron_interval("0 3 * * fri-mon") == 7 * 86400
     assert custom_backups.cron_interval("@hourly") == 3600
     assert custom_backups.calendar_interval("*-*-* 01:30:00") == 86400
     assert custom_backups.calendar_interval("weekly") == 7 * 86400

@@ -36,6 +36,41 @@ def jobs_of(server) -> list[dict]:
     return [j for j in (jobs or []) if isinstance(j, dict) and j.get("id")]
 
 
+_DOW_NAMES = {"sun": 0, "mon": 1, "tue": 2, "wed": 3, "thu": 4, "fri": 5, "sat": 6}
+
+
+def _dow_num(v: str) -> int | None:
+    v = v.strip().lower()
+    if v.isdigit() and int(v) <= 7:
+        return int(v) % 7
+    return _DOW_NAMES.get(v[:3])
+
+
+def dow_gap_days(dow: str) -> int | None:
+    """Самый длинный перерыв между днями недели cron (3,6 -> 4: с субботы до среды), в днях.
+    None - поле не разобрать. Диапазон с переходом через неделю (fri-mon) cron не понимает."""
+    days: set[int] = set()
+    for part in dow.split(","):
+        rng, _, st = part.partition("/")
+        step = int(st) if st.isdigit() and int(st) > 0 else 1
+        if rng == "*":
+            a, b = 0, 6
+        elif "-" in rng:
+            x, y = rng.split("-", 1)
+            a, b = _dow_num(x), _dow_num(y)
+            if b == 0 and y.strip() == "7":
+                b = 7  # 1-7: до воскресенья включительно
+        else:
+            a = b = _dow_num(rng)
+        if a is None or b is None or b < a:
+            return None
+        days.update(d % 7 for d in range(a, b + 1, step))
+    if not days:
+        return None
+    s = sorted(days)
+    return max([y - x for x, y in zip(s, s[1:])] + [s[0] + 7 - s[-1]])
+
+
 def cron_interval(sched: str) -> int:
     """Грубая оценка интервала cron-расписания (5 полей или @daily) в секундах."""
     s = (sched or "").strip()
@@ -47,6 +82,14 @@ def cron_interval(sched: str) -> int:
     if len(p) != 5:
         return _DAY
     minute, hour, dom, _mon, dow = p
+    # Дни недели решают раньше всего: задание по средам и субботам молчит до 4 дней, сколько бы
+    # раз в день оно ни шло. Раньше любой список дней считался "раз в неделю"
+    if dow != "*":
+        gap = dow_gap_days(dow)
+        if gap is None:
+            return 7 * _DAY
+        if gap >= 2:
+            return gap * _DAY
 
     def step(v: str) -> int:
         try:
@@ -64,8 +107,6 @@ def cron_interval(sched: str) -> int:
         return step(hour) * 3600
     if "," in hour:
         return max(_DAY // (hour.count(",") + 1), 3600)
-    if dow != "*":
-        return 7 * _DAY
     if dom.startswith("*/"):
         return step(dom) * _DAY
     if dom != "*":
