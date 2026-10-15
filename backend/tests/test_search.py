@@ -95,7 +95,7 @@ async def test_search_finds_everything(client, auth_headers):
     g = await q("80")
     assert [x["title"] for x in g["port"]["items"]] == [":80"]
     assert g["port"]["items"][0]["sub"] == ["web-a", "tcp", "docker-proxy", "0.0.0.0, ::"]
-    assert (await q(":5432"))["port"]["items"][0]["sec"] == "conn"
+    assert (await q(":5432"))["port"]["items"][0]["sec"] == "exposure"
     # по имени процесса порт находится, кроме прокси докера
     assert (await q("java"))["port"]["items"][0]["title"] == ":8080"
     assert "port" not in await q("docker-proxy")
@@ -113,7 +113,7 @@ async def test_search_finds_everything(client, auth_headers):
     assert pod["title"] == "deployment/api" and pod["sub"] == ["k8s-b", "prod", "2"] and pod["tag"] == "bad"
 
     # пользователи и ключи (ключ один раз, хоть и у двух пользователей)
-    assert (await q("deploy"))["user"]["items"][0]["sec"] == "proc"
+    assert (await q("deploy"))["user"]["items"][0]["sec"] == "access"
     keys = (await q("ivan@"))["key"]
     assert keys["total"] == 1 and keys["items"][0]["title"] == "ivan@laptop"
     assert (await q("SHA256:abc"))["key"]["items"][0]["hint_k"] == "fp"

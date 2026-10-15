@@ -10,12 +10,17 @@ import { useEffect } from 'react'
 // ведёт себя ровно как раньше. Писателей двое - раздел (App) и открытая карточка
 // (страница раздела), поэтому оба кладут своё в общий объект, а строку собирает flush:
 // каждый сам по себе затирал бы чужой параметр.
-const cur: { section: string; cards: Record<string, number> } = { section: '', cards: {} }
+// extra - уточнение к открытой карточке (раздел карточки сервера: ?server=12&sec=ports)
+const cur: { section: string; cards: Record<string, number>; extra: Record<string, string> } = {
+  section: '',
+  cards: {},
+  extra: {},
+}
 
 function flush(): void {
   const open = Object.entries(cur.cards)
   const q = open.length
-    ? open.map(([k, v]) => `${k}=${v}`).join('&')
+    ? [...open.map(([k, v]) => `${k}=${v}`), ...Object.entries(cur.extra).map(([k, v]) => `${k}=${encodeURIComponent(v)}`)].join('&')
     : cur.section && cur.section !== 'home'
       ? `section=${cur.section}`
       : ''
@@ -46,4 +51,18 @@ export function useUrlCard(param: string, id: number | null | undefined): void {
       flush()
     }
   }, [param, id])
+}
+
+/** Уточнение к открытой карточке в адресе: раздел карточки сервера (?server=12&sec=ports).
+    Без открытой карточки не пишется, при закрытии убирается. */
+export function useUrlParam(param: string, value: string | null): void {
+  useEffect(() => {
+    if (value == null) delete cur.extra[param]
+    else cur.extra[param] = value
+    flush()
+    return () => {
+      delete cur.extra[param]
+      flush()
+    }
+  }, [param, value])
 }

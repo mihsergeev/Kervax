@@ -1,4 +1,4 @@
-import { type ReactNode, useCallback, useEffect, useRef, useState } from 'react'
+import { Fragment, type ReactNode, useCallback, useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import {
   agentUpdate,
@@ -13,6 +13,7 @@ import {
   dockerCommand,
   dockerCommandStatus,
   getAgentRelease,
+  getServerVulns,
   kubeCommand,
   kubeCommandStatus,
   listServers,
@@ -44,13 +45,14 @@ import {
   type ServerEnroll,
   type ServerMetric,
   type ServerReport,
+  type ServerVulns,
 } from './api'
 import { StackedAreaChart, type Series } from './charts/StackedAreaChart'
-import { diskHealth, diskUsage, fmtSetupVersion, sinceShort, unitsBlock, srvIssues, webLogLabel, webRate, webSeriesName, webUnparsed } from './serverUtils'
+import { diskHealth, diskUsage, fmtSetupVersion, shortList, sinceShort, unitsBlock, srvIssues, type SrvIssue, webLogLabel, webRate, webSeriesName, webUnparsed } from './serverUtils'
 import { OsIcon } from './osIcon'
 import { CountryFlag } from './CountryFlag'
 import { currentLang, useI18n } from './i18n'
-import { useUrlCard } from './deeplink'
+import { useUrlCard, useUrlParam } from './deeplink'
 import { fmtBytes, rateUnits, timeUnits } from './units'
 import {
   MuteChip,
@@ -64,16 +66,20 @@ import {
   muteKindLabel,
   SRV_ALERT_KINDS,
   collectMutes,
+  muteBrief,
+  muteText,
+  type MuteItem,
 } from './mutes'
 import { useAuth } from './auth'
 import { AlertHistoryModal } from './AlertHistoryModal'
+import type { Section } from './App'
 import { NoteBar } from './NoteBar'
-import { ServerParentBar } from './ParentBar'
+import { ServerDeps, useDependentChecks } from './ParentBar'
 import { TimelineCard } from './TimelineCard'
 import { PackagesCard } from './PackagesCard'
 import { VulnsCard } from './VulnsCard'
 import { JournalCard, JournalModal, journalBlocker } from './UnitJournal'
-import { LinksCard, NetTile, TrafficCard } from './NetLinks'
+import { LinksCard, NetTile, TrafficCard, type Tone } from './NetLinks'
 import { KnownServerList } from './KnownDialog'
 import { MaintBanner, MaintChip } from './MaintModal'
 
@@ -514,6 +520,8 @@ type Props = {
   openServerId?: number | null
   openServerSec?: string | null
   onConsumed?: () => void
+  // открыть другой раздел панели (из карточки сервера: проблема бэкапа ведет в "Бэкапы")
+  onOpen?: (sec: Section, id?: number, srv?: boolean, detailSec?: string) => void
 }
 
 function pct(used?: number, total?: number): number | null {
@@ -745,149 +753,220 @@ const SRV_WINDOWS: { label: string; hours: number }[] = [
   { label: '90д', hours: 2160 },
 ]
 
-// Сворачиваемая секция графиков (CPU/Память/Диск/Сеть/…). Состояние — в localStorage
-// по id, чтобы масштабироваться на десятки графиков без бесконечной простыни.
-function MetricSection({
-  id,
-  title,
-  children,
-}: {
-  id: string
-  title: string
-  children: React.ReactNode
-}) {
-  const [open, setOpen] = useState(
-    () => localStorage.getItem(`kervax_sec_${id}`) !== '0',
-  )
-  const toggle = () => {
-    const n = !open
-    setOpen(n)
-    localStorage.setItem(`kervax_sec_${id}`, n ? '1' : '0')
-  }
-  return (
-    <div className="metric-section" id={`msec-${id}`}>
-      <button className="metric-section-head" onClick={toggle}>
-        <span className="metric-section-caret">{open ? '▾' : '▸'}</span>
-        {title}
-      </button>
-      {open && <div className="metric-section-body">{children}</div>}
-    </div>
-  )
-}
-
-// Липкая боковая навигация по секциям детали сервера: клик → раскрыть (если
-// свёрнута) и проскроллить; активная секция подсвечивается по позиции скролла.
-// Какому разделу принадлежит карточка метрики: запасной путь для ссылок из алертов,
-// когда самой карточки на этой ноде нет (условный рендер).
-const SEC_OF_CARD: Record<string, string> = {
-  cpu: 'cpu', throttle: 'cpu', temp: 'cpu', cpueat: 'cpu',
-  mem: 'mem', oom: 'mem',
-  conntrack: 'conn', exposure: 'conn', nethealth: 'net', neterr: 'net', links: 'net', traffic: 'net', diskfill: 'disk', disktemp: 'disk', disk: 'disk', diskhealth: 'disk',
-  units: 'proc', unitloop: 'proc', pressure: 'proc', changes: 'proc', pkgs: 'proc', journal: 'proc',
-  web: 'web', web5xx: 'web',
-}
-
-// Веб - в конце графиков: раздел есть не на каждой ноде, и в середине он сдвигал привычные.
-// Хронология - самой последней, отдельно от графиков.
-const DETAIL_SECTIONS = [
-  { id: 'cpu', label: 'CPU' },
-  { id: 'mem', label: 'Память' },
-  { id: 'net', label: 'Сеть' },
-  { id: 'conn', label: 'Соединения' },
-  { id: 'disk', label: 'Диск' },
-  { id: 'proc', label: 'Процессы' },
-  { id: 'web', label: 'Веб' },
-  { id: 'timeline', label: 'Хронология' },
+// Разделы карточки сервера: меню слева по группам, на экране один раздел. Раньше все шло одной
+// лентой, а над ней копились заметка, зависимости, заглушки, обновления ОС и плитки, и меню
+// уезжало под них. group - подпись группы в меню (у сводки ее нет)
+type SecDef = { id: string; label: string; group: string }
+const DETAIL_SECTIONS: SecDef[] = [
+  { id: 'overview', label: 'Сводка', group: '' },
+  { id: 'cpu', label: 'CPU', group: 'Ресурсы' },
+  { id: 'mem', label: 'Память', group: 'Ресурсы' },
+  { id: 'disk', label: 'Диск', group: 'Ресурсы' },
+  { id: 'net', label: 'Сеть', group: 'Ресурсы' },
+  { id: 'ports', label: 'Порты', group: 'Безопасность' },
+  { id: 'access', label: 'SSH и доступы', group: 'Безопасность' },
+  { id: 'updates', label: 'Обновления ОС', group: 'Безопасность' },
+  { id: 'vulns', label: 'Уязвимости', group: 'Безопасность' },
+  { id: 'units', label: 'Службы', group: 'Система' },
+  { id: 'proc', label: 'Процессы', group: 'Система' },
+  { id: 'pkgs', label: 'Пакеты', group: 'Система' },
+  { id: 'journal', label: 'Журнал', group: 'Система' },
+  { id: 'changes', label: 'Изменения', group: 'Система' },
+  { id: 'web', label: 'Веб', group: 'Сервисы' },
+  { id: 'deps', label: 'Зависимости', group: 'Сервисы' },
+  { id: 'alerts', label: 'Алерты', group: 'События' },
+  { id: 'timeline', label: 'Хронология', group: 'События' },
 ]
-// отдельной константой: новый массив на каждый рендер пересоздавал бы слежение за скроллом
-const DETAIL_SECTIONS_NO_WEB = DETAIL_SECTIONS.filter((x) => x.id !== 'web')
+const SEC_IDS = new Set(DETAIL_SECTIONS.map((x) => x.id))
+// разделы с графиками: у них переключатель периода
+const CHART_SECS = new Set(['cpu', 'mem', 'disk', 'net', 'web'])
+// карта сервера на сводке: ресурсы там плитками, здесь остальное, у чего есть состояние
+const AREA_SECS = ['ports', 'access', 'updates', 'vulns', 'units', 'proc', 'changes', 'web', 'deps', 'alerts']
+// куда ведут проблемы, которые разбираются в другом разделе панели
+const SECTION_LABEL: Record<string, string> = { services: 'Сервисы', kuber: 'Кубер', backups: 'Бэкапы', docker: 'Докер' }
+
+// Какому разделу принадлежит карточка: ссылки из алертов и с главной ведут на карточку
+// (?sec=diskfill), а открыть надо ее раздел. conn - раздел старой ленты, для старых ссылок;
+// часы и DNS разбираются на сводке
+const SEC_OF_CARD: Record<string, string> = {
+  cores: 'cpu', freq: 'cpu', throttle: 'cpu', temp: 'cpu', cpueat: 'cpu',
+  swap: 'mem', memwb: 'mem', oom: 'mem', memleak: 'mem',
+  netifrx: 'net', netiftx: 'net', neterr: 'net', nethealth: 'net', links: 'net', traffic: 'net',
+  conntrack: 'net', sockets: 'net',
+  diskio: 'disk', diskiops: 'disk', diskutil: 'disk', disklat: 'disk', disktemp: 'disk', diskfill: 'disk',
+  diskhealth: 'disk', du: 'disk',
+  exposure: 'ports', conn: 'ports', ssh: 'access', osupd: 'updates',
+  unitloop: 'units', noboot: 'units', pressure: 'proc', web5xx: 'web',
+  clock: 'overview', dns: 'overview',
+}
 // раздел, к которому ведет ссылка ?sec=: сам раздел или тот, где лежит карточка
 function secOfLink(sec?: string | null): string | null {
   if (!sec) return null
-  return DETAIL_SECTIONS.some((x) => x.id === sec) ? sec : (SEC_OF_CARD[sec] ?? null)
+  return SEC_IDS.has(sec) ? sec : (SEC_OF_CARD[sec] ?? null)
 }
-function DetailNav({
-  t,
-  sections = DETAIL_SECTIONS,
-  initial,
-}: {
-  t: (s: string) => string
-  sections?: { id: string; label: string }[]
-  initial?: string | null
-}) {
-  const [active, setActive] = useState(initial || 'cpu')
-  // После клика по пункту или перехода по ссылке подсветка стоит на выбранном разделе,
-  // пока человек сам не крутанет страницу. Иначе её сбивала сама прокрутка: по ссылке
-  // на "Веб" горела "Сеть" (карточка веба вставала по центру, а верхнюю треть экрана,
-  // по которой считалась подсветка, занимал конец сети), а короткий последний раздел
-  // не доезжает до этой трети вообще.
-  const holdRef = useRef(!!initial)
-  useEffect(() => {
-    if (!initial) return
-    setActive(initial)
-    holdRef.current = true
-  }, [initial])
-  useEffect(() => {
-    const release = () => {
-      holdRef.current = false
-    }
-    const opt = { capture: true, passive: true }
-    const evs = ['wheel', 'touchmove', 'keydown', 'mousedown'] as const
-    evs.forEach((e) => window.addEventListener(e, release, opt))
-    return () => evs.forEach((e) => window.removeEventListener(e, release, opt))
-  }, [])
-  useEffect(() => {
-    let raf = 0
-    const spy = (e: Event) => {
-      if (raf || holdRef.current) return
-      const box = e.target instanceof HTMLElement ? e.target : document.scrollingElement
-      raf = requestAnimationFrame(() => {
-        raf = 0
-        const els = sections
-          .map((s) => document.getElementById(`msec-${s.id}`))
-          .filter((x): x is HTMLElement => x != null)
-        if (!box || !els.length || !box.contains(els[0])) return
-        // активный - последний раздел, чей верх уже прошел линию на трети экрана
-        const line = window.innerHeight * 0.3
-        let cur = els[0]
-        for (const el of els) if (el.getBoundingClientRect().top <= line) cur = el
-        // докрутили до конца - последний видимый раздел, иначе короткий последний не
-        // загорится никогда
-        if (box.scrollTop + box.clientHeight >= box.scrollHeight - 4) {
-          const seen = els.filter((el) => el.getBoundingClientRect().top < window.innerHeight)
-          cur = seen[seen.length - 1] ?? cur
-        }
-        setActive(cur.id.replace('msec-', ''))
-      })
-    }
-    document.addEventListener('scroll', spy, { capture: true, passive: true })
-    return () => {
-      document.removeEventListener('scroll', spy, { capture: true })
-      cancelAnimationFrame(raf)
-    }
-  }, [sections])
-  const go = (id: string) => {
-    const el = document.getElementById(`msec-${id}`)
-    if (!el) return
-    if (!el.querySelector('.metric-section-body')) {
-      ;(el.querySelector('.metric-section-head') as HTMLElement | null)?.click()
-    }
-    setActive(id)
-    holdRef.current = true
-    el.scrollIntoView({ behavior: 'smooth', block: 'start' })
+
+// Состояние раздела для меню и сводки: level - самое серьезное замечание (0 - все в порядке),
+// n - число замечаний у пункта меню, line - строка на карте сервера: первое замечание или
+// коротко, что там; idle - данных нет (helper не стоит, снаружи не проверяли), точка серая
+type SecInfo = { level: 0 | 1 | 2; n: number; line: string; idle?: boolean }
+
+// Замечания и строка по разделам. Проблемы те же, что в "Что сломано" (srvIssues), советы - те
+// же, что в "Требует действий" на главной. Уязвимости только справка, но на карте видно, что
+// они есть. Проблемы, которые разбираются в другом разделе панели (Бэкапы, Кубер), сюда не
+// попадают: они на сводке строками со ссылкой туда
+function serverSecInfo(c: {
+  s: Server
+  t: TFn
+  issues: SrvIssue[]
+  vulns: ServerVulns | null
+  kids: { id: number; name: string }[]
+  servers: Server[]
+  mutes: MuteItem[]
+}): Record<string, SecInfo> {
+  const { s, t, issues } = c
+  const r = s.last_report ?? {}
+  const items: Record<string, { level: 1 | 2; text: string }[]> = {}
+  const add = (sec: string, level: number, text: string) =>
+    (items[sec] ??= []).push({ level: level >= 2 ? 2 : 1, text })
+  for (const i of issues) {
+    if (i.section || i.kind === 'offline') continue
+    add(secOfLink(i.sec) ?? 'overview', i.tone === 't-down' ? 2 : 1, i.text)
   }
+  for (const a of s.os_advice ?? []) add('updates', a.level, a.text)
+  for (const f of s.exposure?.foreign ?? [])
+    add('ports', 1, t('по внешнему адресу {ip} отвечает другой сервер ({o}, у ноды {n})', { ip: f.ip, o: f.outside, n: f.node }))
+  const nb = s.noboot_advice?.units ?? []
+  if (nb.length) add('units', 1, t('после перезагрузки не запустятся {list}: работают, но не включены', { list: shortList(nb, t) }))
+  // как в карточке SSH: при проблеме совет не повторяем
+  if (!issues.some((i) => i.kind === 'ssh_risk')) for (const a of s.ssh_advice ?? []) add('access', a.level, a.text)
+  const ac = s.access_advice
+  if (ac?.stale.length) add('access', 1, t('учетки с доступом, в которые давно не входят: {list}', { list: shortList(ac.stale, t) }))
+  if (ac?.weak.length) add('access', 1, t('слабые SSH-ключи у {list}', { list: shortList(ac.weak, t) }))
+
+  // коротко, что в разделе, когда замечаний нет
+  const ok: Record<string, string> = {}
+  const ex = s.exposure
+  if (ex) {
+    const open = [...new Set(ex.ports.filter((p) => p.state === 'open').map((p) => p.port))].sort((a, b) => a - b)
+    ok.ports = open.length
+      ? t('снаружи открыто: {list}', { list: shortList(open.map(String), t, 6) })
+      : t('снаружи ничего не открыто')
+  } else ok.ports = t('снаружи еще не проверяли')
+  const ssh = s.ssh
+  ok.access = [
+    ssh ? `SSH ${ssh.ports.join(', ')}` : '',
+    ssh ? (ssh.password ? t('вход по паролю') : t('только ключи')) : '',
+    ssh?.guard ?? '',
+    s.access?.accounts.length ? t('учеток с доступом: {n}', { n: s.access.accounts.length }) : '',
+  ].filter(Boolean).join(', ')
+  const u = r.os_upd
+  if (u)
+    ok.updates = [
+      u.updates > 0
+        ? t('ждут установки: {n}, безопасности {s}', { n: u.updates, s: u.security })
+        : u.updates === 0 ? t('все обновления установлены') : '',
+      u.reboot ? t('нужна перезагрузка') : '',
+    ].filter(Boolean).join(', ')
+  const v = c.vulns
+  ok.vulns = !v ? '' : !v.release ? t('сверка пока только для Ubuntu') : !v.feed_ts ? t('база уязвимостей еще не скачана') : t('важных нет')
+  ok.units = unitsBlock(r) ? t('упавших служб нет') : t('нет данных')
+  const top = r.top_cpu?.[0]
+  ok.proc = top ? t('больше всех CPU: {name}, {p}', { name: top.comm, p: `${top.cpu.toFixed(1)}%` }) : ''
+  const last = s.changes?.log[0]
+  ok.changes = last
+    ? t('последнее: {text}, {d}', { text: last.text, d: new Date(last.ts).toLocaleDateString() })
+    : t('изменений не было')
+  const wr = webRate(r)
+  ok.web = wr
+    ? t('{n} запросов/мин, 5xx {p}', { n: fmtCount(wr.rpm), p: `${(wr.rpm ? ((wr.e5 ?? 0) / wr.rpm) * 100 : 0).toFixed(2)}%` })
+    : t('сейчас нет данных')
+  const parent = s.parent_id ? c.servers.find((x) => x.id === s.parent_id) : undefined
+  const behind = c.servers.filter((x) => x.parent_id === s.id).length
+  ok.deps = [
+    parent ? t('стоит за {name}', { name: parent.name }) : '',
+    behind ? t('за ним серверов: {n}', { n: behind }) : '',
+    c.kids.length ? t('зависят мониторов: {n}', { n: c.kids.length }) : '',
+  ].filter(Boolean).join(', ') || t('не задано')
+  const known = Object.keys(s.known_issues ?? {}).length
+  ok.alerts = [
+    c.mutes.length ? t('заглушено: {list}', { list: muteBrief(c.mutes, t) }) : t('ничего не заглушено'),
+    known ? t('известных проблем: {n}', { n: known }) : '',
+  ].filter(Boolean).join(', ')
+
+  const out: Record<string, SecInfo> = {}
+  for (const { id } of DETAIL_SECTIONS) {
+    const xs = items[id] ?? []
+    out[id] = {
+      level: xs.reduce<0 | 1 | 2>((a, x) => (x.level > a ? x.level : a), 0),
+      n: xs.length,
+      line: xs.length ? xs[0].text + (xs.length > 1 ? ` ${t('и еще {n}', { n: xs.length - 1 })}` : '') : (ok[id] ?? ''),
+    }
+  }
+  // справка и заглушки - желтым, но не проблемой: на карте видно, что там не пусто
+  if (v?.release && v.feed_ts && v.summary.pkgs)
+    out.vulns = { level: 1, n: v.summary.pkgs, line: t('важных CVE: {n}, пакетов: {p}', { n: v.summary.cves, p: v.summary.pkgs }) }
+  if (c.mutes.length && !out.alerts.n) out.alerts = { level: 1, n: c.mutes.length, line: ok.alerts }
+  if (parent && !parent.online && !out.deps.n)
+    out.deps = { level: 1, n: 0, line: t('стоит за {name}, он не на связи', { name: parent.name }) }
+  const idle = [!ex && 'ports', !unitsBlock(r) && 'units', !wr && 'web', !!v && (!v.release || !v.feed_ts) && 'vulns',
+    !parent && !behind && !c.kids.length && 'deps']
+  for (const id of idle) if (id && !out[id].level) out[id].idle = true
+  return out
+}
+
+// Меню разделов: группы подписями, у пункта с замечаниями число цветом самого серьезного.
+// На телефоне - лентой над разделом, текущий пункт подкручивается в видимую часть
+function SrvNav({ secs, active, info, onGo }: {
+  secs: SecDef[]
+  active: string
+  info: Record<string, SecInfo>
+  onGo: (id: string) => void
+}) {
+  const { t } = useI18n()
+  const ref = useRef<HTMLElement>(null)
+  useEffect(() => {
+    const nav = ref.current
+    const el = nav?.querySelector<HTMLElement>('.srv-nav-item.active')
+    if (!nav || !el || nav.scrollWidth <= nav.clientWidth) return
+    nav.scrollLeft = el.offsetLeft - nav.clientWidth / 2 + el.offsetWidth / 2
+  }, [active])
   return (
-    <nav className="detail-nav" aria-label={t('Разделы')}>
-      {sections.map((s) => (
-        <button
-          key={s.id}
-          className={`detail-nav-item${active === s.id ? ' active' : ''}`}
-          onClick={() => go(s.id)}
-        >
-          {t(s.label)}
-        </button>
-      ))}
+    <nav className="srv-nav" ref={ref} aria-label={t('Разделы')}>
+      {secs.map((s, i) => {
+        const x = info[s.id]
+        return (
+          <Fragment key={s.id}>
+            {s.group && s.group !== secs[i - 1]?.group && <div className="srv-nav-grp">{t(s.group)}</div>}
+            <button className={`srv-nav-item${active === s.id ? ' active' : ''}`} onClick={() => onGo(s.id)}>
+              <span className="srv-nav-label">{t(s.label)}</span>
+              {x && x.n > 0 && x.level > 0 && (
+                <span className={`srv-nav-n srv-nav-n-${x.level >= 2 ? 'bad' : 'warn'}`}>{x.n}</span>
+              )}
+            </button>
+          </Fragment>
+        )
+      })}
     </nav>
+  )
+}
+
+// Мини-график в плитке сводки: период одной линией, без осей. max - верх шкалы (у процентов
+// 100, у сети - пик за период)
+function TileSpark({ vals, max, color }: { vals: (number | null)[]; max?: number; color: string }) {
+  const pts = vals.filter((v): v is number => v != null)
+  if (pts.length < 2) return null
+  // не больше 60 точек: средним по корзинам, чтобы за 90 дней не рисовать тысячи
+  const n = Math.min(60, pts.length)
+  const avg = Array.from({ length: n }, (_, i) => {
+    const part = pts.slice(Math.floor((i * pts.length) / n), Math.floor(((i + 1) * pts.length) / n))
+    return part.reduce((a, x) => a + x, 0) / (part.length || 1)
+  })
+  const hi = max ?? Math.max(...avg, 1)
+  const d = avg.map((x, i) => `${((i / (n - 1)) * 100).toFixed(1)},${(23 - Math.min(x / hi, 1) * 21).toFixed(1)}`).join(' ')
+  return (
+    <svg className="tile-spark" viewBox="0 0 100 24" preserveAspectRatio="none" aria-hidden="true">
+      <polyline points={d} fill="none" stroke={color} strokeWidth="1.3" vectorEffect="non-scaling-stroke" />
+    </svg>
   )
 }
 
@@ -2145,62 +2224,53 @@ function WebNow({ server: s }: { server: Server }) {
   )
 }
 
-// Плитки шапки карточки: CPU, память, худший раздел диска и сеть. Нажатие ведет в раздел, как
-// пункт навигации слева (свернутый раздел раскрывается)
-function goSection(id: string) {
-  const el = document.getElementById(`msec-${id}`)
-  if (!el) return
-  if (!el.querySelector('.metric-section-body')) {
-    ;(el.querySelector('.metric-section-head') as HTMLElement | null)?.click()
-  }
-  el.scrollIntoView({ behavior: 'smooth', block: 'start' })
-}
-
-function SrvTiles({ r }: { r: ServerReport }) {
+// Плитки сводки: CPU, память, худший раздел диска и сеть, с линией за выбранный период.
+// Нажатие ведет в раздел. Замечание раздела (поломка диска, утечка памяти) - строкой в плитке
+// и ее цветом
+function SrvTiles({ r, M, info, onGo }: {
+  r: ServerReport
+  M: ServerMetric[]
+  info: Record<string, SecInfo>
+  onGo: (id: string) => void
+}) {
   const { t } = useI18n()
-  const lv = (p: number | null): 'ok' | 'warn' | 'bad' | undefined =>
-    p == null ? undefined : p >= 90 ? 'bad' : p >= 75 ? 'warn' : 'ok'
+  const tone = (p: number | null, sec: string): Tone | undefined => {
+    const x = info[sec]?.level ?? 0
+    if (x >= 2 || (p != null && p >= 90)) return 'bad'
+    if (x >= 1 || (p != null && p >= 75)) return 'warn'
+    return p == null ? undefined : 'ok'
+  }
   const cpu = r.cpu_percent != null ? Math.round(r.cpu_percent) : null
   const mem = pct(r.mem_used, r.mem_total)
   // диск - самый заполненный раздел (при нескольких показываем худший и их число)
   const ds = (r.disks ?? []).filter((d) => d.total)
   const worst = ds.length ? ds.reduce((a, b) => (b.used / b.total > a.used / a.total ? b : a)) : null
   const dp = worst ? Math.round((worst.used / worst.total) * 100) : null
-  const go = (sec: string, tile: ReactNode) => (
-    <button className="srv-tile-btn" onClick={() => goSection(sec)} title={t('к разделу')}>
-      {tile}
-    </button>
-  )
+  const tile = (sec: string, label: string, value: string, sub: string, p: number | null, spark: ReactNode) => {
+    const x = info[sec]
+    return (
+      <button key={sec} className="srv-tile-btn" onClick={() => onGo(sec)} title={t('к разделу')}>
+        <NetTile label={label} value={value} sub={sub} tone={tone(p, sec)}>
+          {x && x.n > 0 && (
+            <div className={`srv-tile-issue ${x.level >= 2 ? 't-down' : 't-degraded'}`} title={x.line}>{x.line}</div>
+          )}
+          {spark}
+        </NetTile>
+      </button>
+    )
+  }
   return (
     <div className="net-tiles srv-tiles">
-      {go('cpu', <NetTile label="CPU" value={cpu != null ? `${cpu}%` : '—'} sub={`load ${r.load?.[0] ?? '—'}`} tone={lv(cpu)} />)}
-      {go(
-        'mem',
-        <NetTile
-          label={t('Память')}
-          value={mem != null ? `${mem}%` : '—'}
-          sub={`${fmtBytes(r.mem_used)} / ${fmtBytes(r.mem_total)}`}
-          tone={lv(mem)}
-        />,
-      )}
+      {tile('cpu', 'CPU', cpu != null ? `${cpu}%` : '—', `load ${r.load?.[0] ?? '—'}`, cpu,
+        <TileSpark vals={M.map((m) => m.cpu_percent)} max={100} color="#5a8fc7" />)}
+      {tile('mem', t('Память'), mem != null ? `${mem}%` : '—', `${fmtBytes(r.mem_used)} / ${fmtBytes(r.mem_total)}`, mem,
+        <TileSpark vals={M.map((m) => m.mem_percent)} max={100} color="#4fa79a" />)}
       {worst &&
-        go(
-          'disk',
-          <NetTile
-            label={t('Диск')}
-            value={`${dp}%`}
-            sub={`${worst.mount}${ds.length > 1 ? ` · ${ds.length} ${t('разд.')}` : ''}`}
-            tone={lv(dp)}
-          />,
-        )}
-      {go(
-        'net',
-        <NetTile
-          label={t('Сеть')}
-          value={`↓ ${fmtRate(r.net_rx)}`}
-          sub={`↑ ${fmtRate(r.net_tx)}${(r.swap_total ?? 0) > 0 ? ` · swap ${fmtBytes(r.swap_used)}` : ''}`}
-        />,
-      )}
+        tile('disk', t('Диск'), `${dp}%`, `${worst.mount}${ds.length > 1 ? ` · ${ds.length} ${t('разд.')}` : ''}`, dp,
+          <TileSpark vals={M.map((m) => m.disk_percent)} max={100} color="#cf9b52" />)}
+      {tile('net', t('Сеть'), `↓ ${fmtRate(r.net_rx)}`,
+        `↑ ${fmtRate(r.net_tx)}${(r.swap_total ?? 0) > 0 ? ` · swap ${fmtBytes(r.swap_used)}` : ''}`, null,
+        <TileSpark vals={M.map((m) => m.net_rx)} color="#57a894" />)}
     </div>
   )
 }
@@ -2508,7 +2578,6 @@ function OsUpdates({ server: s }: { server: Server }) {
       <div className="chart-card net-card net-card-wide" id="mcard-osupd">
         <div className="net-head">
           <div className="chart-cap">{t('Обновления ОС')}</div>
-          {s.last_report?.os && <span className="muted small">{s.last_report.os}</span>}
         </div>
         {adv.map((a) => (
           <div key={a.kind} className={a.level >= 2 ? 'net-prob' : 'net-note'}>{a.text}</div>
@@ -3785,7 +3854,7 @@ function Meter({ label, value }: { label: string; value: number | null }) {
   )
 }
 
-export function ServersPage({ onUnauthorized, openServerId, openServerSec, onConsumed }: Props) {
+export function ServersPage({ onUnauthorized, openServerId, openServerSec, onConsumed, onOpen }: Props) {
   const { t } = useI18n()
   const { isViewer } = useAuth()
   const [servers, setServers] = useState<Server[] | null>(null)
@@ -4296,6 +4365,16 @@ export function ServersPage({ onUnauthorized, openServerId, openServerSec, onCon
           onClose={() => { setDetailId(null); setDetailSec(null); setUrlSec(null) }}
           onChanged={load}
           onUnauthorized={onUnauthorized}
+          onOpenSection={
+            onOpen
+              ? (sec, srv, dsec) => {
+                  setDetailId(null)
+                  setDetailSec(null)
+                  setUrlSec(null)
+                  onOpen(sec, detail.id, srv, dsec)
+                }
+              : undefined
+          }
         />
       )}
     </div>
@@ -5262,6 +5341,7 @@ function ServerDetail({
   onClose,
   onChanged,
   onUnauthorized,
+  onOpenSection,
 }: {
   server: Server
   servers: Server[]
@@ -5271,6 +5351,8 @@ function ServerDetail({
   onClose: () => void
   onChanged: () => void
   onUnauthorized: () => void
+  // проблема разбирается в другом разделе панели (Бэкапы, Кубер): закрыть карточку и открыть там
+  onOpenSection?: (section: Section, srv?: boolean, sec?: string) => void
 }) {
   const { t } = useI18n()
   const { isViewer } = useAuth()
@@ -5305,53 +5387,72 @@ function ServerDetail({
     return () => window.clearInterval(id)
   }, [s.id, hours])
 
-  // диплинк из алерта (?server=id&sec=…): открыть деталь сразу на нужном разделе
-  const scrolledRef = useRef(false)
+  // открытый раздел: сводка или тот, куда вела ссылка; в адресе он виден (?sec=), ссылкой
+  // на раздел можно поделиться
+  const [active, setActive] = useState<string>(() => secOfLink(initialSection) ?? 'overview')
+  useUrlParam('sec', active === 'overview' ? null : active)
+  const layoutRef = useRef<HTMLDivElement>(null)
+  // Другой раздел: показываем его с начала. Если страница уже прокручена ниже меню (длинный
+  // раздел графиков), подкручиваем к началу разделов, иначе новый раздел открылся бы с середины
+  const go = (id: string) => {
+    setActive(id)
+    const el = layoutRef.current
+    if (el && el.getBoundingClientRect().top < 0) el.scrollIntoView({ block: 'start' })
+  }
+
+  // Ссылка из алерта или с главной (?sec=diskfill): открыть раздел, а карточку - в центр экрана.
+  // Графики догружаются и сдвигают ее вниз, поэтому через полторы секунды еще раз, если человек
+  // сам не крутил страницу
+  const hasReport = !!s.last_report
+  const linkedRef = useRef<string | null>(null)
   useEffect(() => {
-    if (!initialSection || scrolledRef.current || !s.last_report) return
-    const secId = secOfLink(initialSection)
-    let inner = 0
-    let again = 0
-    // Графики догружаются после прокрутки и сдвигают карточку вниз, за край экрана. Если
-    // человек сам не крутил страницу, через полторы секунды прокручиваем к ней еще раз.
+    if (!initialSection || !hasReport || linkedRef.current === initialSection) return
+    const sec = secOfLink(initialSection) ?? 'overview'
+    setActive(sec)
+    if (sec === initialSection) {
+      linkedRef.current = initialSection
+      return
+    }
     let touched = false
     const touch = () => { touched = true }
     window.addEventListener('wheel', touch, { once: true, passive: true })
     window.addEventListener('touchstart', touch, { once: true, passive: true })
     window.addEventListener('keydown', touch, { once: true })
-    const id = window.setTimeout(() => {
-      // свернутый раздел раскрываем: ссылка ведет к графикам, а не к заголовку
-      const sec = document.getElementById(`msec-${secId ?? ''}`)
-      const head = sec && !sec.querySelector('.metric-section-body')
-        ? sec.querySelector<HTMLElement>('.metric-section-head')
-        : null
-      head?.click()
-      inner = window.setTimeout(() => {
-        // Ссылка на раздел - к его началу, на карточку - карточку в центр экрана. По
-        // "sec=web" раньше открывалась карточка графика (id у них общий), и список ошибок
-        // над ней уезжал за верх экрана, а по такой ссылке он самое нужное. Карточки
-        // может не быть (датчика температуры диска нет) - тогда к её разделу.
-        const go = (behavior: ScrollBehavior) => {
-          const card = secId === initialSection ? null : document.getElementById(`mcard-${initialSection}`)
-          if (card) card.scrollIntoView({ behavior, block: 'center' })
-          else document.getElementById(`msec-${secId ?? ''}`)?.scrollIntoView({ behavior, block: 'start' })
-        }
-        // отметка - только когда прокрутили: эффект перезапускается (StrictMode в разработке,
-        // обновление отчета), и отмененный таймер иначе оставлял карточку наверху
-        scrolledRef.current = true
-        go('smooth')
-        again = window.setTimeout(() => { if (!touched) go('auto') }, 1500)
-      }, head ? 60 : 0)
-    }, 200) // ждём вёрстку модалки
+    const show = (behavior: ScrollBehavior) =>
+      document.getElementById(`mcard-${initialSection}`)?.scrollIntoView({ behavior, block: 'center' })
+    // отметка - только когда прокрутили: эффект перезапускается (StrictMode в разработке), и
+    // отмененный таймер иначе оставлял раздел без прокрутки к карточке
+    const first = window.setTimeout(() => {
+      linkedRef.current = initialSection
+      show('smooth')
+    }, 200)
+    const again = window.setTimeout(() => { if (!touched) show('auto') }, 1700)
     return () => {
-      window.clearTimeout(id)
-      window.clearTimeout(inner)
+      window.clearTimeout(first)
       window.clearTimeout(again)
       window.removeEventListener('wheel', touch)
       window.removeEventListener('touchstart', touch)
       window.removeEventListener('keydown', touch)
     }
-  }, [initialSection, s.last_report])
+  }, [initialSection, hasReport])
+
+  // Уязвимости - для карты сервера и пункта меню (сама карточка грузит их сама, когда открыта).
+  // Перезапрос - когда сменились пакеты или ядро, как у карточки
+  const [vulns, setVulns] = useState<ServerVulns | null>(null)
+  const pkgN = r.pkgs?.n ?? 0
+  const pkgHash = r.pkgs?.h ?? ''
+  const kernelNow = r.os_upd?.kernel ?? ''
+  useEffect(() => {
+    if (!pkgN) return
+    let alive = true
+    getServerVulns(s.id)
+      .then((v) => { if (alive) setVulns(v) })
+      .catch(() => {})
+    return () => {
+      alive = false
+    }
+  }, [s.id, pkgN, pkgHash, kernelNow])
+  const kids = useDependentChecks(s.id)
 
   async function del() {
     if (
@@ -5502,6 +5603,96 @@ function ServerDetail({
     )
   }
 
+  const issues = srvIssues(s, t)
+  const muteItems = collectMutes(s, t, ['alert'])
+  const info = serverSecInfo({ s, t, issues, vulns, kids, servers, mutes: muteItems })
+  // Пункт меню есть, только когда в разделе есть что показать. Открытый раздел остается всегда:
+  // по ссылке на веб данные догружаются, и раздел не должен пропасть из-под рук
+  const shown = (id: string): boolean => {
+    switch (id) {
+      case 'web': return hasWeb
+      case 'access': return !!(s.ssh || s.access?.accounts.length)
+      case 'updates': return !!(r.os_upd || s.os_advice?.length)
+      case 'vulns':
+      case 'pkgs': return !!r.pkgs?.n
+      case 'journal': return !isViewer
+      case 'changes': return !!s.changes
+      default: return true
+    }
+  }
+  const secs = DETAIL_SECTIONS.filter((x) => x.id === active || shown(x.id))
+  const cur = DETAIL_SECTIONS.find((x) => x.id === active) ?? DETAIL_SECTIONS[0]
+  // на сводке строками: проблемы из другого раздела панели (со ссылкой туда) и то, у чего нет
+  // своего раздела. Часы и DNS не здесь: у них свои блоки с тем, что делать
+  const ovIssues = issues.filter(
+    (i) => i.section || (i.kind !== 'offline' && i.kind !== 'clock' && i.kind !== 'dns' && (secOfLink(i.sec) ?? 'overview') === 'overview'),
+  )
+  const known = s.known_issues ?? {}
+  const ub = unitsBlock(r)
+
+  const overview = (
+    <div className="srv-sec">
+      {!isViewer && (s.agent_fix_command || (s.helper_advice?.length ?? 0) > 0) && (
+        <ServerFixBanner titles={s.agent_advice} command={s.agent_fix_command} helpers={s.helper_advice || []} t={t} />
+      )}
+      {/* сдвиг часов: ломает TOTP, TLS и логи, плюс команда фикса */}
+      {r.clock && Math.abs(r.clock_skew_sec ?? 0) >= 5 && (
+        <ClockFix server={s} clock={r.clock} skew={r.clock_skew_sec} canManage={!isViewer} />
+      )}
+      {/* DNS тормозит или не резолвит (сразу, проблемой - после выдержки алерта) либо дольше
+          10 минут лежит один из резолверов: что именно и что с этим делать прямо сейчас. Совет -
+          по тому, как нода ходит в DNS */}
+      {(s.problems ?? []).filter((p) => p.kind === 'dns').map((p) => (
+        <div key="dns" className="dns-problem small">
+          <span className={p.level >= 2 ? 't-down' : 't-degraded'}>{p.text}</span>
+          <div className="muted">
+            {p.sub === 'resolver'
+              ? t('Остальные резолверы отвечают, и имена резолвятся, но запасного нет: уберите неработающий из настроек сети ноды (netplan, /etc/resolv.conf) или замените рабочим.')
+              : r.dns?.mode === 'local'
+                ? t('Ноду обслуживает свой резолвер (unbound, dnsmasq): проверьте его и серверы, куда он пересылает запросы.')
+                : r.dns?.mode === 'direct'
+                  ? t('Пока резолверы провайдера тормозят, можно поставить первыми в /etc/resolv.conf публичные (nameserver 1.1.1.1 и 8.8.8.8): запросы идут к резолверам по порядку.')
+                  : t('Пока резолверы провайдера тормозят, можно добавить на ноде публичные: DNS=1.1.1.1 8.8.8.8 в /etc/systemd/resolved.conf.d/. systemd-resolved спросит их вместе с резолверами сети и возьмет первый ответ.')}
+          </div>
+        </div>
+      ))}
+      {ovIssues.length > 0 && (
+        <div className="ov-issues">
+          {ovIssues.map((i, n) => (
+            <div key={n} className="ov-issue">
+              <span className={`lk-dot ${i.tone === 't-down' ? 'lk-dot-bad' : 'lk-dot-warn'}`} />
+              <span className="ov-issue-text">{i.text}</span>
+              {sinceShort(i.since, t) && <span className="muted small">{sinceShort(i.since, t)}</span>}
+              {i.section && onOpenSection && (
+                <button className="ghost small row-act" onClick={() => onOpenSection(i.section!, i.srv, i.sec)}>
+                  {t(SECTION_LABEL[i.section] ?? i.section)} ›
+                </button>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+      <SrvTiles r={r} M={M} info={info} onGo={go} />
+      <div className="ov-cap">{t('Сервер по областям')}</div>
+      <div className="ov-areas">
+        {AREA_SECS.filter((id) => secs.some((x) => x.id === id)).map((id) => {
+          const x = info[id]
+          const def = DETAIL_SECTIONS.find((d) => d.id === id)!
+          const lv = x.level >= 2 ? 'bad' : x.level ? 'warn' : ''
+          return (
+            <button key={id} className={`ov-area${lv ? ` ov-area-${lv}` : ''}`} onClick={() => go(id)}>
+              <span className="ov-area-h">
+                <span>{t(def.label)}</span>
+                <span className={`lk-dot${lv ? ` lk-dot-${lv}` : x.line && !x.idle ? ' lk-dot-ok' : ''}`} />
+              </span>
+              <span className="ov-area-s">{x.line || '—'}</span>
+            </button>
+          )
+        })}
+      </div>
+    </div>
+  )
+
   return (
     <>
     <div className="modal-backdrop">
@@ -5513,6 +5704,22 @@ function ServerDetail({
             <CountryFlag code={s.country} />
             <h3>{s.name}</h3>
             {s.group_name && <span className="type-chip group-chip">{s.group_name}</span>}
+            {/* что заглушено - значком, сами заглушки в разделе "Алерты" */}
+            {muteItems.length > 0 && !editing && (
+              <button className="srv-head-chip" onClick={() => go('alerts')}>
+                <MuteChip items={muteItems} t={t} />
+              </button>
+            )}
+            {/* заметка живет в редактировании сервера, здесь - значком с текстом в подсказке */}
+            {s.note && !editing && (
+              <button
+                className="srv-head-chip srv-head-note"
+                title={s.note}
+                onClick={isViewer ? undefined : startEdit}
+              >
+                📝
+              </button>
+            )}
           </div>
           <div className="detail-head-actions">
             <button className="ghost icon-btn" onClick={() => setHistOpen(true)} title={t('История алертов')}>
@@ -5529,86 +5736,6 @@ function ServerDetail({
           </div>
         </div>
         {!editing && <MaintBanner kind="server" id={s.id} />}
-        {!editing && (
-          <NoteBar
-            note={s.note}
-            by={s.note_by}
-            at={s.note_at}
-            canEdit={!isViewer}
-            onSave={async (text) => {
-              try {
-                await setServerNote(s.id, text)
-                onChanged()
-              } catch (e) {
-                if (e instanceof ApiError && e.status === 401) onUnauthorized()
-                throw e
-              }
-            }}
-          />
-        )}
-        {!editing && <ServerParentBar server={s} servers={servers} canEdit={!isViewer} onSaved={onChanged} />}
-        {!editing && Object.keys(s.known_issues ?? {}).length > 0 && (
-          <KnownServerList
-            items={s.known_issues ?? {}}
-            canEdit={!isViewer}
-            onDrop={async (kind) => {
-              try {
-                await dropServerKnown(s.id, kind)
-                onChanged()
-              } catch (e) {
-                if (e instanceof ApiError && e.status === 401) onUnauthorized()
-              }
-            }}
-          />
-        )}
-        {!editing && !isViewer && (
-          <SnoozeBar
-            snoozeUntil={s.snooze_until}
-            snoozes={s.alert_snoozes}
-            mutes={s.alert_mutes ?? []}
-            busy={snoozing}
-            onUnmute={async (kind) => {
-              setSnoozing(true)
-              try {
-                await updateServer(s.id, {
-                  alert_mutes: (s.alert_mutes ?? []).filter((x) => x !== kind),
-                })
-                onChanged()
-              } catch (e) {
-                if (e instanceof ApiError && e.status === 401) onUnauthorized()
-              } finally {
-                setSnoozing(false)
-              }
-            }}
-            onSnooze={async (kind, hours) => {
-              setSnoozing(true)
-              try {
-                if (hours < 0) {
-                  // «постоянно» — это не снуз, а мьют: снуз всегда имеет срок и
-                  // истекает, а тут нужно, чтобы порог молчал, пока его не вернут
-                  const cur = s.alert_mutes ?? []
-                  const add = kind === null ? SRV_ALERT_KINDS.map((x) => x.k) : [kind]
-                  await updateServer(s.id, { alert_mutes: [...new Set([...cur, ...add])] })
-                } else if (kind === null) await snoozeServer(s.id, hours)
-                else await snoozeServerAlert(s.id, kind, hours)
-                onChanged()
-              } catch (e) {
-                if (e instanceof ApiError && e.status === 401) onUnauthorized()
-              } finally {
-                setSnoozing(false)
-              }
-            }}
-          />
-        )}
-        {!editing && !isViewer && (s.agent_fix_command || (s.helper_advice?.length ?? 0) > 0) && (
-          <ServerFixBanner
-            titles={s.agent_advice}
-            command={s.agent_fix_command}
-            helpers={s.helper_advice || []}
-            t={t}
-          />
-        )}
-        {!editing && s.online && <OsUpdates server={s} />}
         {/* Карточка молчащей ноды показывала свежие на вид проценты и «обновлено N
             назад» мелким шрифтом среди прочей меты — выглядело как рабочий сервер.
             Говорим прямо, и сразу под именем: цифры ниже historical, а не текущие. */}
@@ -5625,7 +5752,7 @@ function ServerDetail({
           </div>
         )}
         {s.last_report ? (
-          <div className="srv-meta">
+          <div className="srv-meta srv-meta-line">
             {s.os && <span className="srv-meta-item">{s.os}</span>}
             {r.is_vm !== undefined && (
               <span className="srv-meta-item">
@@ -5692,17 +5819,34 @@ function ServerDetail({
         )}
 
         {editing && form ? (
-          <ServerEditCard
-            form={form}
-            set={(patch) => setForm({ ...form, ...patch })}
-            busy={saving}
-            err={saveErr}
-            groups={groups}
-            isVm={r.is_vm === true}
-            onSubmit={submitEdit}
-            onCancel={() => setEditing(false)}
-            onDelete={del}
-          />
+          <>
+            <NoteBar
+              note={s.note}
+              by={s.note_by}
+              at={s.note_at}
+              canEdit={!isViewer}
+              onSave={async (text) => {
+                try {
+                  await setServerNote(s.id, text)
+                  onChanged()
+                } catch (e) {
+                  if (e instanceof ApiError && e.status === 401) onUnauthorized()
+                  throw e
+                }
+              }}
+            />
+            <ServerEditCard
+              form={form}
+              set={(patch) => setForm({ ...form, ...patch })}
+              busy={saving}
+              err={saveErr}
+              groups={groups}
+              isVm={r.is_vm === true}
+              onSubmit={submitEdit}
+              onCancel={() => setEditing(false)}
+              onDelete={del}
+            />
+          </>
         ) : !s.last_report ? (
           <div className="srv-nodata">
             <span className={`sdot ${s.online ? 'sdot-up' : 'sdot-down'}`} />
@@ -5712,52 +5856,30 @@ function ServerDetail({
             </p>
           </div>
         ) : (
-        <>
-        {/* сдвиг часов — прямо в шапке: важная штука (ломает TOTP/TLS/логи), плюс команда фикса */}
-        {r.clock && Math.abs(r.clock_skew_sec ?? 0) >= 5 && (
-          <ClockFix server={s} clock={r.clock} skew={r.clock_skew_sec} canManage={!isViewer} />
-        )}
-        {/* DNS тормозит или не резолвит (сразу, проблемой - после выдержки алерта) либо дольше
-            10 минут лежит один из резолверов: что именно и что с этим делать прямо сейчас. Совет -
-            по тому, как нода ходит в DNS */}
-        {(s.problems ?? []).filter((p) => p.kind === 'dns').map((p) => (
-          <div key="dns" className="dns-problem small">
-            <span className={p.level >= 2 ? 't-down' : 't-degraded'}>{p.text}</span>
-            <div className="muted">
-              {p.sub === 'resolver'
-                ? t('Остальные резолверы отвечают, и имена резолвятся, но запасного нет: уберите неработающий из настроек сети ноды (netplan, /etc/resolv.conf) или замените рабочим.')
-                : r.dns?.mode === 'local'
-                  ? t('Ноду обслуживает свой резолвер (unbound, dnsmasq): проверьте его и серверы, куда он пересылает запросы.')
-                  : r.dns?.mode === 'direct'
-                    ? t('Пока резолверы провайдера тормозят, можно поставить первыми в /etc/resolv.conf публичные (nameserver 1.1.1.1 и 8.8.8.8): запросы идут к резолверам по порядку.')
-                    : t('Пока резолверы провайдера тормозят, можно добавить на ноде публичные: DNS=1.1.1.1 8.8.8.8 в /etc/systemd/resolved.conf.d/. systemd-resolved спросит их вместе с резолверами сети и возьмет первый ответ.')}
+        <div className="srv-layout" ref={layoutRef}>
+          <SrvNav secs={secs} active={active} info={info} onGo={go} />
+          <div className="srv-main">
+            <div className="srv-main-head">
+              <h4>{t(cur.label)}</h4>
+              {CHART_SECS.has(active) && (
+                <div className="win-switch">
+                  {SRV_WINDOWS.map((w) => (
+                    <button
+                      key={w.hours}
+                      className={`win-btn${hours === w.hours ? ' win-btn-active' : ''}`}
+                      onClick={() => setHours(w.hours)}
+                    >
+                      {t(w.label)}
+                    </button>
+                  ))}
+                </div>
+              )}
             </div>
-          </div>
-        ))}
-        <SrvTiles r={r} />
 
-        <div className="detail-toolbar">
-          <div className="win-switch">
-            {SRV_WINDOWS.map((w) => (
-              <button
-                key={w.hours}
-                className={`win-btn${hours === w.hours ? ' win-btn-active' : ''}`}
-                onClick={() => setHours(w.hours)}
-              >
-                {t(w.label)}
-              </button>
-            ))}
-          </div>
-        </div>
+        {active === 'overview' && overview}
 
-        <div className="detail-body">
-          <DetailNav
-            t={t}
-            sections={hasWeb ? DETAIL_SECTIONS : DETAIL_SECTIONS_NO_WEB}
-            initial={secOfLink(initialSection)}
-          />
-          <div className="detail-sections">
-        <MetricSection id="cpu" title="CPU">
+        {active === 'cpu' && (
+          <div className="srv-sec">
           <div className="net-cards now-cards">
             <CpuNow server={s} />
           </div>
@@ -5797,9 +5919,11 @@ function ServerDetail({
             <MemPods server={s} onChanged={onChanged} by="cpu" />
             <CpuGroups server={s} />
           </div>
-        </MetricSection>
+          </div>
+        )}
 
-        <MetricSection id="mem" title={t('Память')}>
+        {active === 'mem' && (
+          <div className="srv-sec">
           <div className="net-cards now-cards">
             <MemNow server={s} />
           </div>
@@ -5842,84 +5966,18 @@ function ServerDetail({
             <MemContainers server={s} onChanged={onChanged} />
             <MemPods server={s} onChanged={onChanged} />
           </div>
-        </MetricSection>
-
-        <MetricSection id="net" title={t('Сеть')}>
-          <div className="chart-grid">
-            {chartCard(
-              'net',
-              <div className="loc-results chart-stats">
-                <StatRow color="#57a894" name={t('↓ приём')} value={fmtRate(r.net_rx)} />
-                <StatRow color="#5a8fc7" name={t('↑ отдача')} value={fmtRate(r.net_tx)} />
-              </div>,
-            )}
-            {(r.net_ifaces?.length ?? 0) > 0 &&
-              chartCard(
-                'netifrx',
-                <EntStats
-                  items={r.net_ifaces!}
-                  nameOf={(n) => n.if}
-                  sortVal={(n) => n.rx + n.tx}
-                  render={(n) => `↓ ${fmtRate(n.rx)}  ↑ ${fmtRate(n.tx)}`}
-                  palette={CORE_COLORS}
-                />,
-              )}
-            {(r.net_ifaces?.length ?? 0) > 0 && chartCard('netiftx')}
-            {(r.net_ifaces?.length ?? 0) > 0 &&
-              chartCard(
-                'neterr',
-                <EntStats
-                  items={r.net_ifaces!}
-                  nameOf={(n) => n.if}
-                  sortVal={(n) => n.errs + n.drops}
-                  render={(n) => `${t('ошибки')} ${fmtErr(n.errs)} · ${t('дропы')} ${fmtErr(n.drops)}`}
-                  palette={CORE_COLORS}
-                />,
-              )}
           </div>
+        )}
+
+        {active === 'disk' && (
+          <div className="srv-sec">
           <div className="net-cards">
-            <NetHealth server={s} />
-            <LinksCard server={s} />
-            <TrafficCard server={s} onChanged={onChanged} />
+            <DiskSpaceCard server={s} r={r} onChanged={onChanged} />
+            <DiskUsageBlock server={s} onChanged={onChanged} />
+            <DiskHealthBlock r={r} />
           </div>
-        </MetricSection>
-
-        <MetricSection id="conn" title={t('Соединения')}>
           <div className="chart-grid">
-            {(r.conntrack_max ?? 0) > 0 &&
-              chartCard(
-                'conntrack',
-                <div className="loc-results chart-stats">
-                  <StatRow
-                    color="#5a8fc7"
-                    name="conntrack"
-                    value={`${fmtNum(r.conntrack_count)} / ${fmtNum(r.conntrack_max)}`}
-                  />
-                  <StatRow
-                    name={t('заполнение')}
-                    value={`${(((r.conntrack_count ?? 0) / (r.conntrack_max || 1)) * 100).toFixed(1)}%`}
-                  />
-                </div>,
-              )}
-            {chartCard(
-              'sockets',
-              <div className="loc-results chart-stats">
-                <StatRow color="#5a8fc7" name="TCP" value={fmtNum(r.sock_tcp)} />
-                <StatRow color="#cf9b52" name="time-wait" value={fmtNum(r.sock_tcp_tw)} />
-                <StatRow color="#57a894" name="UDP" value={fmtNum(r.sock_udp)} />
-                <StatRow name={t('всего')} value={fmtNum(r.sock_used)} />
-              </div>,
-            )}
-          </div>
-          <div className="net-cards">
-            <OpenPorts server={s} onChanged={onChanged} />
-            <SshLogin server={s} />
-            <AccessCard server={s} onChanged={onChanged} />
-          </div>
-        </MetricSection>
-
-        <MetricSection id="disk" title={t('Диск')}>
-          <div className="chart-grid">
+            {chartCard('disk')}
             {chartCard(
               'diskio',
               <div className="loc-results chart-stats">
@@ -5975,36 +6033,170 @@ function ServerDetail({
                   palette={DISK_PALETTE}
                 />,
               )}
-            {chartCard('disk')}
           </div>
-          <div className="net-cards">
-            <DiskSpaceCard server={s} r={r} onChanged={onChanged} />
-            <DiskUsageBlock server={s} onChanged={onChanged} />
-            <DiskHealthBlock r={r} />
           </div>
-        </MetricSection>
+        )}
 
-        <MetricSection id="proc" title={t('Процессы')}>
+        {/* сеть вместе с соединениями: conntrack и сокеты раньше были отдельным разделом,
+            и порты приходилось искать то в сети, то в соединениях */}
+        {active === 'net' && (
+          <div className="srv-sec">
+          <div className="chart-grid">
+            {chartCard(
+              'net',
+              <div className="loc-results chart-stats">
+                <StatRow color="#57a894" name={t('↓ приём')} value={fmtRate(r.net_rx)} />
+                <StatRow color="#5a8fc7" name={t('↑ отдача')} value={fmtRate(r.net_tx)} />
+              </div>,
+            )}
+            {(r.net_ifaces?.length ?? 0) > 0 &&
+              chartCard(
+                'netifrx',
+                <EntStats
+                  items={r.net_ifaces!}
+                  nameOf={(n) => n.if}
+                  sortVal={(n) => n.rx + n.tx}
+                  render={(n) => `↓ ${fmtRate(n.rx)}  ↑ ${fmtRate(n.tx)}`}
+                  palette={CORE_COLORS}
+                />,
+              )}
+            {(r.net_ifaces?.length ?? 0) > 0 && chartCard('netiftx')}
+            {(r.net_ifaces?.length ?? 0) > 0 &&
+              chartCard(
+                'neterr',
+                <EntStats
+                  items={r.net_ifaces!}
+                  nameOf={(n) => n.if}
+                  sortVal={(n) => n.errs + n.drops}
+                  render={(n) => `${t('ошибки')} ${fmtErr(n.errs)} · ${t('дропы')} ${fmtErr(n.drops)}`}
+                  palette={CORE_COLORS}
+                />,
+              )}
+          </div>
           <div className="net-cards">
-            <LoopingUnits server={s} onChanged={onChanged} />
-            <FailedUnits server={s} onChanged={onChanged} />
-            <PressureCard server={s} />
-            <NoBootUnits server={s} onChanged={onChanged} />
-            <ChangesFeed server={s} onChanged={onChanged} />
-            <JournalCard server={s} />
-            <PackagesCard server={s} onUnauthorized={onUnauthorized} />
-            <VulnsCard server={s} onUnauthorized={onUnauthorized} />
+            <NetHealth server={s} />
+            <LinksCard server={s} />
+            <TrafficCard server={s} onChanged={onChanged} />
           </div>
           <div className="chart-grid">
-            <ProcCard title={t('Топ по CPU')} procs={r.top_cpu} kind="cpu" total={r.mem_total ?? 0} t={t} />
-            <ProcCard title={t('Топ по памяти')} procs={r.top_mem} kind="mem" total={r.mem_total ?? 0} t={t} />
+            {(r.conntrack_max ?? 0) > 0 &&
+              chartCard(
+                'conntrack',
+                <div className="loc-results chart-stats">
+                  <StatRow
+                    color="#5a8fc7"
+                    name="conntrack"
+                    value={`${fmtNum(r.conntrack_count)} / ${fmtNum(r.conntrack_max)}`}
+                  />
+                  <StatRow
+                    name={t('заполнение')}
+                    value={`${(((r.conntrack_count ?? 0) / (r.conntrack_max || 1)) * 100).toFixed(1)}%`}
+                  />
+                </div>,
+              )}
+            {chartCard(
+              'sockets',
+              <div className="loc-results chart-stats">
+                <StatRow color="#5a8fc7" name="TCP" value={fmtNum(r.sock_tcp)} />
+                <StatRow color="#cf9b52" name="time-wait" value={fmtNum(r.sock_tcp_tw)} />
+                <StatRow color="#57a894" name="UDP" value={fmtNum(r.sock_udp)} />
+                <StatRow name={t('всего')} value={fmtNum(r.sock_used)} />
+              </div>,
+            )}
           </div>
-        </MetricSection>
+          </div>
+        )}
 
-        {/* Веб - после остальных графиков: раздел есть не на каждой ноде. Сюда ведет ссылка из алерта
-            по 5xx: сначала список - где ошибки, какие коды и пути, - потом графики. */}
-        {hasWeb && (
-          <MetricSection id="web" title={t('Веб')}>
+        {active === 'ports' && (
+          <div className="srv-sec">
+            {s.exposure || r.listen?.length ? (
+              <div className="net-cards">
+                <OpenPorts server={s} onChanged={onChanged} />
+              </div>
+            ) : (
+              <div className="srv-empty">{t('Снаружи еще не проверяли: проверка идет раз в 6 часов.')}</div>
+            )}
+          </div>
+        )}
+
+        {active === 'access' && (
+          <div className="srv-sec">
+            <div className="net-cards">
+              <SshLogin server={s} />
+              <AccessCard server={s} onChanged={onChanged} />
+            </div>
+          </div>
+        )}
+
+        {active === 'updates' && (
+          <div className="srv-sec">
+            <OsUpdates server={s} />
+          </div>
+        )}
+
+        {active === 'vulns' && (
+          <div className="srv-sec">
+            <div className="net-cards">
+              <VulnsCard server={s} onUnauthorized={onUnauthorized} />
+            </div>
+          </div>
+        )}
+
+        {active === 'units' && (
+          <div className="srv-sec">
+            <div className="net-cards">
+              <LoopingUnits server={s} onChanged={onChanged} />
+              <FailedUnits server={s} onChanged={onChanged} />
+              <NoBootUnits server={s} onChanged={onChanged} />
+            </div>
+            {!ub?.units.length && info.units.level === 0 && (
+              <div className="srv-empty">
+                {ub ? `✓ ${t('Упавших служб нет.')}` : t('Нет данных: на ноде не установлен helper units-setup.')}
+              </div>
+            )}
+          </div>
+        )}
+
+        {active === 'proc' && (
+          <div className="srv-sec">
+            <div className="net-cards">
+              <PressureCard server={s} />
+            </div>
+            <div className="chart-grid">
+              <ProcCard title={t('Топ по CPU')} procs={r.top_cpu} kind="cpu" total={r.mem_total ?? 0} t={t} />
+              <ProcCard title={t('Топ по памяти')} procs={r.top_mem} kind="mem" total={r.mem_total ?? 0} t={t} />
+            </div>
+          </div>
+        )}
+
+        {active === 'pkgs' && (
+          <div className="srv-sec">
+            <div className="net-cards">
+              <PackagesCard server={s} onUnauthorized={onUnauthorized} />
+            </div>
+          </div>
+        )}
+
+        {active === 'journal' && (
+          <div className="srv-sec">
+            <div className="net-cards">
+              <JournalCard server={s} />
+            </div>
+          </div>
+        )}
+
+        {active === 'changes' && (
+          <div className="srv-sec">
+            <div className="net-cards">
+              <ChangesFeed server={s} onChanged={onChanged} />
+            </div>
+          </div>
+        )}
+
+        {/* Веб: сюда ведет ссылка из алерта по 5xx - сначала список, где ошибки, какие коды и
+            пути, потом графики */}
+        {active === 'web' && (
+          <div className="srv-sec">
             <div className="net-cards now-cards">
               <WebNow server={s} />
               <WebErrorList server={s} t={t} onChanged={onChanged} onUnauthorized={onUnauthorized} />
@@ -6051,20 +6243,95 @@ function ServerDetail({
                 </div>,
               )}
             </div>
-          </MetricSection>
+          </div>
         )}
 
-        {/* что менялось и что было - одной лентой. В самом низу, после графиков и раздела веба: это
-            разбор, а не метрики, и смотреть ее удобнее без графиков на том же экране */}
-        <MetricSection id="timeline" title={t('Хронология')}>
-          <div className="net-cards">
-            <TimelineCard serverId={s.id} onUnauthorized={onUnauthorized} />
+        {active === 'deps' && (
+          <div className="srv-sec">
+            <ServerDeps server={s} servers={servers} kids={kids} canEdit={!isViewer} onSaved={onChanged} />
           </div>
-        </MetricSection>
+        )}
+
+        {active === 'alerts' && (
+          <div className="srv-sec">
+            {!isViewer ? (
+              <SnoozeBar
+                snoozeUntil={s.snooze_until}
+                snoozes={s.alert_snoozes}
+                mutes={s.alert_mutes ?? []}
+                busy={snoozing}
+                onUnmute={async (kind) => {
+                  setSnoozing(true)
+                  try {
+                    await updateServer(s.id, {
+                      alert_mutes: (s.alert_mutes ?? []).filter((x) => x !== kind),
+                    })
+                    onChanged()
+                  } catch (e) {
+                    if (e instanceof ApiError && e.status === 401) onUnauthorized()
+                  } finally {
+                    setSnoozing(false)
+                  }
+                }}
+                onSnooze={async (kind, hours) => {
+                  setSnoozing(true)
+                  try {
+                    if (hours < 0) {
+                      // «постоянно» — это не снуз, а мьют: снуз всегда имеет срок и
+                      // истекает, а тут нужно, чтобы порог молчал, пока его не вернут
+                      const cur = s.alert_mutes ?? []
+                      const add = kind === null ? SRV_ALERT_KINDS.map((x) => x.k) : [kind]
+                      await updateServer(s.id, { alert_mutes: [...new Set([...cur, ...add])] })
+                    } else if (kind === null) await snoozeServer(s.id, hours)
+                    else await snoozeServerAlert(s.id, kind, hours)
+                    onChanged()
+                  } catch (e) {
+                    if (e instanceof ApiError && e.status === 401) onUnauthorized()
+                  } finally {
+                    setSnoozing(false)
+                  }
+                }}
+              />
+            ) : muteItems.length > 0 ? (
+              <div className="snooze-active-list">
+                {muteItems.map((i) => (
+                  <span key={i.label} className="snooze-active-chip">🔕 {muteText(i, t)}</span>
+                ))}
+              </div>
+            ) : (
+              <div className="srv-empty">{t('Ничего не заглушено.')}</div>
+            )}
+            {Object.keys(known).length > 0 && (
+              <KnownServerList
+                items={known}
+                canEdit={!isViewer}
+                onDrop={async (kind) => {
+                  try {
+                    await dropServerKnown(s.id, kind)
+                    onChanged()
+                  } catch (e) {
+                    if (e instanceof ApiError && e.status === 401) onUnauthorized()
+                  }
+                }}
+              />
+            )}
+            <div>
+              <button className="ghost" onClick={() => setHistOpen(true)}>
+                🔔 {t('История алертов')}
+              </button>
+            </div>
+          </div>
+        )}
+
+        {active === 'timeline' && (
+          <div className="srv-sec">
+            <div className="net-cards">
+              <TimelineCard serverId={s.id} onUnauthorized={onUnauthorized} />
+            </div>
+          </div>
+        )}
           </div>
         </div>
-
-        </>
         )}
         <ScrollTopBtn t={t} />
       </div>

@@ -135,7 +135,7 @@ def build_server(srv, rep: dict) -> list[Entry]:
         proc = procs.get(str(port), "")
         f = [("process", proc)] if proc and proc not in _NOISY_PROC else []
         out.append(Entry("port", f":{port}", sid, _sub(name, proto, proc or p["u"], ", ".join(p["ips"])),
-                         sec="conn", fields=f, port=port))
+                         sec="exposure", fields=f, port=port))
 
     engines_seen: set[str] = set()
     for d in _l(rep.get("db_stats")):
@@ -190,7 +190,7 @@ def build_server(srv, rep: dict) -> list[Entry]:
         u = _d(u)
         un = _s(u.get("n"))
         if un:
-            out.append(Entry("user", un, sid, _sub(name, f"uid {u.get('uid')}", _s(u.get("sh"))), sec="proc",
+            out.append(Entry("user", un, sid, _sub(name, f"uid {u.get('uid')}", _s(u.get("sh"))), sec="access",
                              fields=[("", un)]))
     keys_seen: set[str] = set()
     for k in _l(ch.get("keys")):
@@ -199,16 +199,16 @@ def build_server(srv, rep: dict) -> list[Entry]:
         if not fp or fp in keys_seen:
             continue
         keys_seen.add(fp)
-        out.append(Entry("key", comment or fp, sid, _sub(name, _s(k.get("u")), _s(k.get("t"))), sec="proc",
+        out.append(Entry("key", comment or fp, sid, _sub(name, _s(k.get("u")), _s(k.get("t"))), sec="access",
                          fields=[("", comment), ("fp", fp)]))
     for unit in _l(ch.get("units")):
         unit = _s(unit)
         if unit:
-            out.append(Entry("unit", unit, sid, _sub(name), sec="proc", fields=[("", unit)]))
+            out.append(Entry("unit", unit, sid, _sub(name), sec="changes", fields=[("", unit)]))
     for path in _d(ch.get("cron")):
         path = _s(path)
         if path:
-            out.append(Entry("cron", path, sid, _sub(name), sec="proc", fields=[("", path)]))
+            out.append(Entry("cron", path, sid, _sub(name), sec="changes", fields=[("", path)]))
 
     versions = (
         ("os", os_name),
