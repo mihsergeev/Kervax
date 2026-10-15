@@ -135,15 +135,42 @@ export function CheckParentBar({
   )
 }
 
-// Сервер: за каким стоит (шлюз, VPN, гипервизор), кто стоит за ним и какие мониторы от него зависят
-export function ServerParentBar({
+// Мониторы, которые зависят от сервера: пока он молчит, их алерты ждут его
+export function useDependentChecks(serverId: number): { id: number; name: string }[] {
+  const [kids, setKids] = useState<{ id: number; name: string }[]>([])
+  useEffect(() => {
+    let alive = true
+    checksOverview()
+      .then((o) => {
+        if (alive)
+          setKids(
+            o.checks
+              .filter((c) => (c.parents ?? []).some((p) => p.id === serverId))
+              .map((c) => ({ id: c.id, name: c.name }))
+              .sort((a, b) => a.name.localeCompare(b.name)),
+          )
+      })
+      .catch(() => {})
+    return () => {
+      alive = false
+    }
+  }, [serverId])
+  return kids
+}
+
+// Раздел "Зависимости" карточки сервера: за каким стоит (шлюз, VPN, гипервизор), кто стоит
+// за ним и какие мониторы от него зависят. Раньше это была строка над графиками, и мониторы
+// дальше шестого прятались в "и еще N"
+export function ServerDeps({
   server,
   servers,
+  kids,
   canEdit,
   onSaved,
 }: {
   server: Server
   servers: Server[]
+  kids: { id: number; name: string }[]
   canEdit: boolean
   onSaved: () => void
 }) {
@@ -152,22 +179,9 @@ export function ServerParentBar({
   const [draft, setDraft] = useState(0)
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState('')
-  const [kids, setKids] = useState<string[]>([])
-  useEffect(() => {
-    let alive = true
-    checksOverview()
-      .then((o) => {
-        if (alive)
-          setKids(o.checks.filter((c) => (c.parents ?? []).some((p) => p.id === server.id)).map((c) => c.name))
-      })
-      .catch(() => {})
-    return () => {
-      alive = false
-    }
-  }, [server.id])
   const byId = new Map(servers.map((s) => [s.id, s]))
   const parent = server.parent_id ? byId.get(server.parent_id) : undefined
-  const behind = servers.filter((s) => s.parent_id === server.id)
+  const behind = servers.filter((s) => s.parent_id === server.id).sort((a, b) => a.name.localeCompare(b.name))
   // в выборе нет самого сервера и тех, кто стоит за ним (цепочка замкнулась бы)
   const under = (id: number): boolean => {
     let cur = byId.get(id)?.parent_id
@@ -195,84 +209,92 @@ export function ServerParentBar({
     }
   }
 
-  if (editing)
-    return (
-      <div className="parent-bar parent-bar-edit">
-        <label className="field">
-          <span>{t('Стоит за сервером')}</span>
-          <select value={draft} onChange={(e) => setDraft(Number(e.target.value))}>
-            <option value={0}>{t('ни за каким')}</option>
-            {choices.map((s) => (
-              <option key={s.id} value={s.id}>
-                {s.name}
-              </option>
-            ))}
-          </select>
-        </label>
-        <div className="note-bar-actions">
-          <button disabled={busy} onClick={save}>
-            {t('Сохранить')}
-          </button>
-          <button className="ghost" disabled={busy} onClick={() => setEditing(false)}>
-            {t('Отмена')}
-          </button>
-          <span className="muted small">
-            {t('Шлюз, VPN или гипервизор: пока он молчит, про этот сервер не пишем, он строкой в сообщении про него')}
-          </span>
-        </div>
-        {err && <div className="muted small">{err}</div>}
-      </div>
-    )
-
-  if (!parent && !behind.length && !kids.length) {
-    if (!canEdit) return null
-    return (
-      <button
-        className="ghost small note-add"
-        onClick={() => {
-          setDraft(0)
-          setErr('')
-          setEditing(true)
-        }}
-      >
-        ⛓ {t('указать, за каким сервером стоит')}
-      </button>
-    )
-  }
-  const names = (xs: string[]) => (xs.length > 6 ? `${xs.slice(0, 6).join(', ')} ${t('и еще {n}', { n: xs.length - 6 })}` : xs.join(', '))
   return (
-    <div className={`parent-bar${parent && !parent.online ? ' parent-bar-silent' : ''}`}>
-      <span className="note-bar-ic">⛓</span>
-      <span className="parent-bar-body">
-        {parent && (
-          <span>
-            {t('стоит за')} <a href={`/?server=${parent.id}`}>{parent.name}</a>
-            {!parent.online && <span className="parent-bar-warn"> · {t('не на связи')}</span>}
-          </span>
+    <div className="net-cards">
+      <div className="chart-card net-card net-card-wide">
+        <div className="net-head">
+          <div className="chart-cap">{t('Стоит за сервером')}</div>
+          {canEdit && !editing && (
+            <button
+              className="ghost small row-act"
+              onClick={() => {
+                setDraft(server.parent_id ?? 0)
+                setErr('')
+                setEditing(true)
+              }}
+            >
+              {t('изменить')}
+            </button>
+          )}
+        </div>
+        {editing ? (
+          <div className="deps-edit">
+            <select value={draft} onChange={(e) => setDraft(Number(e.target.value))}>
+              <option value={0}>{t('ни за каким')}</option>
+              {choices.map((s) => (
+                <option key={s.id} value={s.id}>
+                  {s.name}
+                </option>
+              ))}
+            </select>
+            <button disabled={busy} onClick={save}>
+              {t('Сохранить')}
+            </button>
+            <button className="ghost" disabled={busy} onClick={() => setEditing(false)}>
+              {t('Отмена')}
+            </button>
+          </div>
+        ) : parent ? (
+          <div className="deps-list">
+            <a href={`/?server=${parent.id}`}>{parent.name}</a>
+            {!parent.online && <span className="parent-bar-warn">{t('не на связи')}</span>}
+          </div>
+        ) : (
+          <div className="muted small">{t('ни за каким')}</div>
         )}
-        {behind.length > 0 && (
-          <span>
-            {t('за ним')}: {names(behind.map((s) => s.name).sort())}
-          </span>
+        {err && <div className="form-error small">{err}</div>}
+        <div className="net-sub">
+          {t('Шлюз, VPN или гипервизор: пока он молчит, про этот сервер не пишем, он строкой в сообщении про него')}
+        </div>
+      </div>
+      <div className="chart-card net-card">
+        <div className="net-head">
+          <div className="chart-cap">{t('За ним стоят')}</div>
+          <span className="muted small">{behind.length}</span>
+        </div>
+        {behind.length ? (
+          <div className="deps-list">
+            {behind.map((s) => (
+              <a key={s.id} href={`/?server=${s.id}`}>
+                {s.name}
+              </a>
+            ))}
+          </div>
+        ) : (
+          <div className="muted small">{t('никто')}</div>
         )}
-        {kids.length > 0 && (
-          <span>
-            {t('зависят мониторы')}: {names(kids)}
-          </span>
+        <div className="net-sub">{t('Пока этот сервер молчит, про них не пишем отдельно')}</div>
+      </div>
+      <div className="chart-card net-card">
+        <div className="net-head">
+          <div className="chart-cap">{t('Зависят мониторы')}</div>
+          <span className="muted small">{kids.length}</span>
+        </div>
+        {kids.length ? (
+          <div className="deps-list">
+            {kids.map((k) => (
+              <a key={k.id} href={`/?check=${k.id}`}>
+                {k.name}
+              </a>
+            ))}
+          </div>
+        ) : (
+          <div className="muted small">{t('ни один')}</div>
         )}
-      </span>
-      {canEdit && (
-        <button
-          className="ghost small"
-          onClick={() => {
-            setDraft(server.parent_id ?? 0)
-            setErr('')
-            setEditing(true)
-          }}
-        >
-          {t('изменить')}
-        </button>
-      )}
+        <div className="net-sub">
+          {t('Пока сервер молчит, их алерты ждут его, а сами мониторы названы в сообщении про сервер')}
+        </div>
+      </div>
     </div>
   )
 }

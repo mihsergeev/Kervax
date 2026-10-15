@@ -3440,60 +3440,282 @@ select:focus {
 }
 
 /* ---------- секции метрик + сетка графиков (масштаб на 20+ графиков) ---------- */
-/* деталь сервера шире обычной модалки; графики — одной колонкой во всю ширину,
-   слева — липкий рельс навигации по секциям */
+/* деталь сервера шире обычной модалки; графики - одной колонкой во всю ширину */
 .detail.detail-server {
   width: min(1360px, 94vw);
 }
-.detail-body {
-  display: flex;
-  align-items: flex-start;
-  gap: 1rem;
+/* Карточка сервера: меню разделов слева с самого верха, справа один раздел. Разделитель -
+   рамкой у раздела: меню короче раздела, и линия у меню обрывалась бы на середине */
+.srv-layout {
+  display: grid;
+  grid-template-columns: 200px minmax(0, 1fr);
+  align-items: start;
+  margin-top: 0.15rem;
+  border-top: 1px solid var(--border);
 }
-.detail-sections {
-  flex: 1 1 auto;
-  min-width: 0; /* иначе широкие графики распирают flex-колонку */
-}
-.detail-nav {
+.srv-nav {
   position: sticky;
-  top: 12px;
-  align-self: flex-start;
-  flex: 0 0 148px;
+  top: 0;
   display: flex;
   flex-direction: column;
-  gap: 2px;
-  max-height: calc(100vh - 24px);
+  gap: 1px;
+  max-height: 100vh;
   overflow-y: auto;
-  padding-top: 0.3rem;
+  padding: 0.55rem 0.8rem 0.8rem 0;
+  scrollbar-width: thin;
 }
-.detail-nav-item {
-  text-align: left;
-  background: transparent;
-  border: none;
-  border-left: 2px solid transparent;
-  border-radius: 0;
-  padding: 7px 12px;
-  color: var(--text-muted);
-  font-size: 0.8rem;
-  font-weight: 600;
-  letter-spacing: 0.03em;
+.srv-nav-grp {
+  padding: 0.85rem 0.7rem 0.25rem;
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
   text-transform: uppercase;
-  cursor: pointer;
-  transition: color 0.12s, border-color 0.12s, background 0.12s;
+  color: var(--text-muted);
+  opacity: 0.8;
 }
-/* фон своим цветом: без него пункт под курсором заливался градиентом обычной кнопки */
-.detail-nav-item:hover {
-  color: var(--text);
+button.srv-nav-item {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  width: 100%;
+  padding: 0.36rem 0.7rem;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  box-shadow: none;
+  color: var(--text-muted);
+  font-size: 0.86rem;
+  font-weight: 500;
+  text-align: left;
+}
+button.srv-nav-item:hover {
   background: var(--hover);
-}
-.detail-nav-item.active {
   color: var(--text);
-  border-left-color: #5a8fc7;
-  background: rgba(90, 143, 199, 0.1);
 }
+button.srv-nav-item.active {
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  box-shadow: inset 2px 0 0 var(--accent);
+  color: var(--text);
+}
+.srv-nav-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.srv-nav-n {
+  flex: 0 0 auto;
+  padding: 0.16rem 0.42rem;
+  border-radius: 999px;
+  font-size: 0.7rem;
+  font-weight: 600;
+  line-height: 1;
+}
+.srv-nav-n-warn { color: var(--degraded); background: color-mix(in srgb, var(--degraded) 15%, transparent); }
+.srv-nav-n-bad { color: var(--down); background: color-mix(in srgb, var(--down) 15%, transparent); }
+.srv-main {
+  min-width: 0;
+  min-height: 70vh;
+  padding: 0.55rem 0 0 1.2rem;
+  border-left: 1px solid var(--border);
+}
+.srv-main-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.6rem 1rem;
+  min-height: 2.1rem;
+  margin-bottom: 0.7rem;
+}
+.srv-main-head h4 {
+  margin: 0;
+  font-size: 1.05rem;
+  font-weight: 650;
+}
+.srv-main-head .win-switch { margin-left: auto; }
+.srv-sec {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+.srv-empty {
+  padding: 1rem 0;
+  color: var(--text-muted);
+}
+/* строка о сервере: текстом через промежутки, без рамок у каждого пункта */
+.srv-meta.srv-meta-line {
+  gap: 0.2rem 1.1rem;
+  margin-top: -0.35rem;
+}
+.srv-meta-line .srv-meta-item {
+  padding: 0;
+  border: 0;
+  background: none;
+  font-size: 0.8rem;
+}
+/* значки в шапке: что заглушено и заметка. На узком экране уходят на вторую строку, а не
+   сжимают имя сервера до одной буквы */
+.detail-server .detail-title { flex-wrap: wrap; row-gap: 0.3rem; }
+.detail-server .detail-title .type-chip { white-space: nowrap; }
+button.srv-head-chip {
+  padding: 0;
+  border: 0;
+  background: none;
+  box-shadow: none;
+  color: inherit;
+  font: inherit;
+  line-height: 1;
+}
+button.srv-head-chip:hover { background: none; filter: brightness(1.15); }
+button.srv-head-note { font-size: 1rem; }
+/* сводка */
+.ov-issues {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg);
+}
+.ov-issue {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.45rem 0.8rem;
+  border-top: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
+  font-size: 0.86rem;
+}
+.ov-issue:first-child { border-top: 0; }
+.ov-issue-text { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
+.ov-issue .row-act { margin: 0; flex: 0 0 auto; }
+.ov-cap {
+  margin-top: 0.35rem;
+  font-size: 0.74rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+.ov-areas {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(235px, 100%), 1fr));
+  gap: 0.55rem;
+}
+button.ov-area {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  min-width: 0;
+  padding: 0.6rem 0.8rem;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg);
+  box-shadow: none;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+}
+button.ov-area:hover {
+  border-color: var(--border-strong);
+  background: var(--card-hover);
+}
+.ov-area-h {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+.ov-area-s {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  font-size: 0.8rem;
+  color: var(--text-muted);
+}
+button.ov-area-warn { border-color: color-mix(in srgb, var(--degraded) 45%, var(--border)); }
+button.ov-area-warn .ov-area-s { color: color-mix(in srgb, var(--degraded) 80%, var(--text)); }
+button.ov-area-bad {
+  border-color: color-mix(in srgb, var(--down) 50%, var(--border));
+  background: color-mix(in srgb, var(--down) 5%, var(--bg));
+}
+button.ov-area-bad .ov-area-s { color: color-mix(in srgb, var(--down) 75%, var(--text)); }
+/* линия - по низу плитки: у плиток с замечанием текст выше, и линии стояли бы вразнобой */
+.srv-tiles .net-tile {
+  display: flex;
+  flex-direction: column;
+}
+.tile-spark {
+  display: block;
+  flex: 0 0 auto;
+  width: 100%;
+  height: 24px;
+  margin-top: auto;
+  padding-top: 0.35rem;
+  box-sizing: content-box;
+}
+/* замечание в плитке - две строки, целиком в подсказке и в разделе */
+.srv-tile-issue {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  margin-top: 0.2rem;
+  font-size: 0.75rem;
+  overflow-wrap: anywhere;
+}
+/* раздел "Зависимости" */
+.deps-list {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.35rem;
+}
+.deps-list a {
+  padding: 0.15rem 0.55rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 0.82rem;
+  text-decoration: none;
+}
+.deps-list a:hover { border-color: var(--border-strong); }
+.deps-edit {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem;
+}
+/* телефон: меню лентой над разделом, прилипает к верху */
 @media (max-width: 760px) {
-  .detail-nav {
-    display: none;
+  .srv-layout {
+    grid-template-columns: minmax(0, 1fr);
+    border-top: 0;
+  }
+  .srv-nav {
+    z-index: 3;
+    flex-direction: row;
+    gap: 0.2rem;
+    max-height: none;
+    overflow-x: auto;
+    overflow-y: hidden;
+    padding: 0.35rem 0;
+    border-bottom: 1px solid var(--border);
+    background: var(--bg-card);
+    scrollbar-width: none;
+  }
+  .srv-nav-grp { display: none; }
+  button.srv-nav-item {
+    flex: 0 0 auto;
+    width: auto;
+    white-space: nowrap;
+  }
+  button.srv-nav-item.active { box-shadow: inset 0 -2px 0 var(--accent); }
+  .srv-main {
+    padding-left: 0;
+    border-left: 0;
   }
 }
 .scroll-top-btn {
@@ -3527,40 +3749,6 @@ select:focus {
   opacity: 0;
   pointer-events: none;
   transform: translateY(10px);
-}
-.metric-section {
-  margin: 1rem 0 0.2rem;
-}
-.metric-section-head {
-  width: 100%;
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-  padding: 0.4rem 0.15rem;
-  margin-bottom: 0.6rem;
-  background: transparent;
-  border: none;
-  border-bottom: 1px solid var(--border);
-  color: var(--text-muted);
-  font-size: 0.78rem;
-  font-weight: 700;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-  cursor: pointer;
-  text-align: left;
-}
-.metric-section-head:hover {
-  color: var(--text);
-}
-.metric-section-caret {
-  font-size: 0.7rem;
-  width: 0.8rem;
-  flex-shrink: 0;
-}
-.metric-section-body {
-  display: flex;
-  flex-direction: column;
-  gap: 0.75rem;
 }
 .chart-grid {
   display: grid;
@@ -6300,11 +6488,6 @@ button.tl-tile-off .net-tile-value {
 .tl-panel .tl-text,
 .tl-config .tl-text {
   color: var(--text-muted);
-}
-/* хронология - последний раздел карточки: высотой в экран, чтобы, долистав до нее, графики
-   выше уходили за край, а не висели над лентой */
-#msec-timeline .metric-section-body {
-  min-height: calc(100vh - 7rem);
 }
 .tl-more {
   margin-left: 0.4rem;

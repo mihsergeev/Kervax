@@ -538,6 +538,7 @@ export default function App() {
             openServerId={openServerId}
             openServerSec={deepSec ?? openServerSec}
             onConsumed={() => setOpenServerId(null)}
+            onOpen={openTarget}
           />
         )
       ) : (
