@@ -246,7 +246,6 @@ _SRV_SECTION = {
     "cpu": "cpu", "throttle": "throttle", "temp": "temp",
     "mem": "mem", "oom": "oom",
     "conntrack": "conntrack", "disk": "diskfill", "disktemp": "disktemp",
-    "db_conn": "services",
     "kube_expiry": "kube", "flux_down": "kube", "flux_stale": "kube", "kube_pod": "kube", "web_5xx": "web",
     "clock": "clock", "disk_health": "diskhealth", "inode": "diskfill", "disk_forecast": "diskfill", "units": "units",
     "unit_loop": "unitloop",
@@ -254,8 +253,7 @@ _SRV_SECTION = {
     "exposed": "exposure", "port_new": "exposure", "pressure": "pressure", "net_health": "nethealth",
     "link": "links", "traffic": "traffic",
     "access_change": "changes", "mem_leak": "memleak", "ssh_risk": "ssh", "access_risk": "access",
-    "db_health": "services",
-    "web_config": "services", "web_cert": "services", "listen_gone": "exposure", "disk_slow": "disklat",
+    "listen_gone": "exposure", "disk_slow": "disklat",
 }
 
 
@@ -270,6 +268,8 @@ _DISK_ICON = {1: "⚠️", 2: "🔴", 3: "🚨"}
 # раздел карточки Docker-ноды по алерту: контейнеры или ключи от хоста
 _DOCKER_SEC = {"docker_loop": "containers", "docker_down": "containers", "docker_restarts": "containers",
                "docker_sock": "host", "docker_risk": "host"}
+# раздел карточки сервисов ноды по алерту и по проблеме
+_SVC_SEC = {"queue": "queues", "db_conn": "db", "db_health": "db", "web_config": "web", "web_cert": "certs"}
 _KUBE_TAB = {"kube_expiry": "expiry", "flux_down": "flux", "flux_stale": "flux", "kube_pod": "pods",
              "kube_cron": "cron", "kube_node": "nodes", "kube_job": "cron", "kube_restarts": "pods"}
 
@@ -3298,7 +3298,7 @@ def server_problems(s: Server, now: datetime, pod_names: dict[str, str] | None =
         pct, db = worst
         add("db_conn", 2, f"{db.get('container') or db.get('engine') or 'СУБД'}: занято "
             f"{db.get('conn_used') or 0} из {db.get('conn_max') or 0} подключений ({round(pct)}%)",
-            "", "db_conn", state.get("db_conn_since"), section="services")
+            "db", "db_conn", state.get("db_conn_since"), section="services")
     # Ошибки 5xx: окно алерта (15 минут), без часа после него, который держит алерт одной историей
     w5 = web_5xx_now(s, web_err, now)
     if w5 is not None and w5[0] and w5[2]:
@@ -3314,7 +3314,7 @@ def server_problems(s: Server, now: datetime, pod_names: dict[str, str] | None =
                 hot.append(f"{q.get('name') or '?'} ({queue_depth(q)})")
     if hot:
         add("queue", 2, "переполнены очереди RabbitMQ: " + ", ".join(hot[:3])
-            + (f" и еще {len(hot) - 3}" if len(hot) > 3 else ""), "", "queue", section="services")
+            + (f" и еще {len(hot) - 3}" if len(hot) > 3 else ""), "queues", "queue", section="services")
     # Сроки кластера: ближайший в пределах дальнего порога. За последний порог и истекший - проблема
     wd = kube_warn_days(s) if getattr(s, "kube_expiry_warn_days", None) else []
     soon = kube_expiry_soon(rep, wd, now) if wd else None
@@ -3395,13 +3395,13 @@ def server_problems(s: Server, now: datetime, pod_names: dict[str, str] | None =
         add("disk_slow", dl, dtext, "disklat", "disk_slow", state.get("disk_slow_since"))
     # Сертификат nginx истекает: ведет в "Сервисы" ноды
     for lv, txt, _key in web_certs.problems(rep, now):
-        add("web_cert", lv, txt, "", "web_cert", section="services")
+        add("web_cert", lv, txt, "certs", "web_cert", section="services")
     # Конфиг веб-сервера не проходит проверку: ведет в "Сервисы" ноды
     for lv, txt, _key in web_config.problems(rep, now):
-        add("web_config", lv, txt, "", "web_config", section="services")
+        add("web_config", lv, txt, "web", "web_config", section="services")
     # Здоровье баз: ведет в "Сервисы" ноды, где инвентарь СУБД
     for lv, txt, _key in db_health.problems(rep, now):
-        add("db_health", lv, txt, "", "db_health", section="services")
+        add("db_health", lv, txt, "db", "db_health", section="services")
     # SSH: root по паролю на открытом порту, перебор паролей без fail2ban
     for lv, txt in ssh_audit.problems(s, now):
         add("ssh_risk", lv, txt, "ssh", "ssh_risk")
@@ -3412,7 +3412,7 @@ def server_problems(s: Server, now: datetime, pod_names: dict[str, str] | None =
     for x in mem_trend.problems(s, now):
         mute = mem_trend.MUTE_PREFIX + x["key"]
         if x["kind"] == "docker":
-            add("mem_leak", x["level"], x["text"], "", mute, section="docker")
+            add("mem_leak", x["level"], x["text"], "containers", mute, section="docker")
         elif x["kind"] == "pod":
             add("mem_leak", x["level"], x["text"], "pods", mute, section="kuber")
         else:
@@ -3420,7 +3420,7 @@ def server_problems(s: Server, now: datetime, pod_names: dict[str, str] | None =
     # Часто перезапускается (медленный цикл): контейнер ведет в "Докер", под - в "Кубер"
     for x in srv_restarts.problems(s, now):
         if x["kind"] == "docker":
-            add("docker_restarts", 1, x["text"], "", srv_restarts.MUTE_PREFIX + x["key"], section="docker")
+            add("docker_restarts", 1, x["text"], "containers", srv_restarts.MUTE_PREFIX + x["key"], section="docker")
         else:
             add("kube_restarts", 1, x["text"], "pods", srv_restarts.MUTE_PREFIX + x["key"], section="kuber")
     # Изменился доступ: держится сутки, пока не отметили "это мы"
@@ -5089,10 +5089,10 @@ async def evaluate_servers(
             return ""
         if key.startswith("docker"):
             return f"{base}/?docker={s.id}" + (f"&sec={_DOCKER_SEC[key]}" if key in _DOCKER_SEC else "")
-        if key == "queue":
-            # ведём СРАЗУ в очереди этой ноды: из алерта человек идёт смотреть,
-            # что там накопилось, а не в общий список сервисов
-            return f"{base}/?services={s.id}&queues=1"
+        if key in _SVC_SEC:
+            # ведём СРАЗУ в раздел карточки сервисов ноды: из алерта по очереди человек идёт
+            # смотреть, что там накопилось, по сертификату - в сертификаты
+            return f"{base}/?services={s.id}&sec={_SVC_SEC[key]}"
         if key in _KUBE_TAB:
             # Раздел "Кубер" с открытым кластером и сразу на нужной вкладке: сроки, Flux,
             # поды. В карточке сервера кластера нет, и ссылка вела мимо.

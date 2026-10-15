@@ -101,11 +101,13 @@ export default function App() {
   })
   const [openBackupId, setOpenBackupId] = useState<number | null>(() => urlNum('backup'))
   const [openBackupSrvId, setOpenBackupSrvId] = useState<number | null>(() => urlNum('backupsrv'))
-  // ?services=<id>[&queues=1] — из алерта по очереди RabbitMQ: открыть ноду и сразу очереди
+  // ?services=<id>&sec=queues - раздел карточки сервисов ноды (из алерта, после F5). &queues=1 -
+  // так вели в очереди старые алерты
   const [openServicesId, setOpenServicesId] = useState<number | null>(() => urlNum('services'))
-  const [openQueues] = useState<boolean>(
-    () => new URLSearchParams(window.location.search).get('queues') === '1',
-  )
+  const [openServicesSec, setOpenServicesSec] = useState<string | null>(() => {
+    const p = new URLSearchParams(window.location.search)
+    return p.get('services') ? (p.get('queues') === '1' ? 'queues' : p.get('sec')) : null
+  })
   // открыть конкретный элемент в разделе (с главной «Требует внимания»/карточек).
   // srv=true для раздела «Бэкапы» → открыть карточку бэкап-СЕРВЕРА, а не клиента.
   const openTarget = useCallback((sec: Section, id?: number, srv?: boolean, detailSec?: string) => {
@@ -123,7 +125,10 @@ export default function App() {
         setOpenKubeId(id)
         if (detailSec) setOpenKubeTab(detailSec) // вкладка кластера: "ноды без агента" -> nodes
       }
-      else if (sec === 'services') setOpenServicesId(id)
+      else if (sec === 'services') {
+        setOpenServicesId(id)
+        setOpenServicesSec(detailSec || null)
+      }
       else if (sec === 'backups') {
         if (srv) setOpenBackupSrvId(id)
         else setOpenBackupId(id)
@@ -538,8 +543,11 @@ export default function App() {
           <ServicesPage
             onUnauthorized={logout}
             openServerId={openServicesId}
-            openQueues={openQueues}
-            onConsumed={() => setOpenServicesId(null)}
+            openSec={openServicesSec}
+            onConsumed={() => {
+              setOpenServicesId(null)
+              setOpenServicesSec(null)
+            }}
             onOpenCheck={(id) => openTarget('sites', id)}
           />
         ) : section === 'backups' ? (
