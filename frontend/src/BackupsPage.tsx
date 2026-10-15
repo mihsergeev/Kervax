@@ -30,9 +30,9 @@ import {
   type Server,
 } from './api'
 import { updateServer } from './api'
-import { backupWindowNote, shortList, srvIssues } from './serverUtils'
+import { backupWindowNote, dbAuditNames, shortList, srvIssues, srvMuted } from './serverUtils'
 import { fmtRel } from './ServersPage'
-import { CardNav, FreshChip, OvAreas, OvRows, secInfoOf, type OvRow, type SecDef, type SecInfo, type SecItem } from './cardLayout'
+import { CardNav, FreshChip, markMuted, OvAreas, OvRows, secInfoOf, type OvRow, type SecDef, type SecInfo, type SecItem } from './cardLayout'
 import { OsIcon } from './osIcon'
 import { CoverageAudit } from './CoverageAudit'
 import { helperText } from './helperText'
@@ -732,7 +732,7 @@ function BackupModal({
       add('coverage', {
         level: 1,
         count: dbs.length,
-        text: t('{db} - нужен отдельный дамп', { db: shortList(dbs.map((x) => x.subject), t, 3) }),
+        text: t('{db} - нужен отдельный дамп', { db: shortList(dbAuditNames(dbs), t, 3) }),
       })
   }
   const okDb = audit.filter((x) => x.kind === 'db_ok').length
@@ -775,6 +775,9 @@ function BackupModal({
   else if (resticOld) soft('manage', t('restic {v}, есть {t}', { v: resticVer, t: RESTIC_TARGET }))
   else if (helperOld) soft('manage', t('helper на ноде устарел'))
   if (!v && !info.restore.level) info.restore.idle = true
+  markMuted(info, srvMuted(s, t).filter((i) => i.section === 'backups' && !i.srv).map((i) => ({
+    sec: BK_SEC_IDS.has(i.sec ?? '') ? i.sec! : (BK_SEC_OF_KIND[i.kind ?? ''] ?? 'runs'), text: i.text,
+  })), t)
 
   const rows: OvRow[] = BK_SECTIONS.flatMap(({ id, label }) =>
     (items[id] ?? []).map((x) => ({
@@ -2128,7 +2131,7 @@ function BackupServerModal({ server: s, info, servers, canAct, initialSec, onCha
       add('coverage', {
         level: 1,
         count: dbs.length,
-        text: t('{db} - нужен отдельный дамп', { db: shortList(dbs.map((x) => x.subject), t, 3) }),
+        text: t('{db} - нужен отдельный дамп', { db: shortList(dbAuditNames(dbs), t, 3) }),
       })
   }
   const okDb = audit.filter((x) => x.kind === 'db_ok').length
@@ -2154,6 +2157,19 @@ function BackupServerModal({ server: s, info, servers, canAct, initialSec, onCha
   const gaps = audit.filter((x) => x.gap)
   if (gaps.length) soft('coverage', t('не бэкапится: {list}', { list: shortList(gaps.map((x) => x.subject), t, 3) }))
   if (!ext && !infoSec.cleanup.level) infoSec.cleanup.idle = true
+  if (s.online) {
+    const lockedAll = all.filter((r) => !muted.has(r.name) && r.locked && r.lock_ts && now - r.lock_ts > 86400)
+    markMuted(infoSec, [
+      ...srvMuted(s, t).filter((i) => i.section === 'backups' && i.srv)
+        .map((i) => ({ sec: BSRV_SEC_IDS.has(i.sec ?? '') ? i.sec! : 'repos', text: i.text })),
+      ...(lockedAll.length && smuted.has('backup_lock')
+        ? [{ sec: 'repos', text: t('залочен больше суток: {list}', { list: shortList(lockedAll.map((r) => r.name), t, 3) }) }] : []),
+      ...(pruneNames.length && smuted.has('backup_prune')
+        ? [{ sec: 'cleanup', text: t('чистка не работает: {list}', { list: shortList(pruneNames, t, 3) }) }] : []),
+      ...(rot.length && smuted.has('backup_rotation')
+        ? [{ sec: 'cleanup', text: t('старые снапшоты не вычищаются: {list}', { list: shortList(rot, t, 3) }) }] : []),
+    ], t)
+  }
 
   const rows: OvRow[] = BSRV_SECTIONS.flatMap(({ id, label }) =>
     (items[id] ?? []).map((x) => ({

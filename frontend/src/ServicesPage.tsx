@@ -13,9 +13,9 @@ import {
 import { useI18n } from './i18n'
 import { useAuth } from './auth'
 import { useUrlCard, useUrlParam } from './deeplink'
-import { srvIssues, webRate } from './serverUtils'
+import { srvIssues, srvMuted, webRate } from './serverUtils'
 import { fmtRel } from './ServersPage'
-import { CardNav, FreshChip, OvAreas, OvRows, secInfoOf, type OvRow, type SecDef, type SecInfo, type SecItem } from './cardLayout'
+import { CardNav, FreshChip, markMuted, OvAreas, OvRows, secInfoOf, type OvRow, type SecDef, type SecInfo, type SecItem } from './cardLayout'
 import { AdoptSitesModal, adoptable } from './AdoptSitesModal'
 import { EngineIcon } from './engineIcon'
 import { OsIcon } from './osIcon'
@@ -584,6 +584,9 @@ function ServerServicesModal({ srv, onClose, onChanged, initialSec, sites }: {
   }
   if (missing > 0) soft('sites', t('всего {n}, без монитора {m}', { n: siteList.length, m: missing }))
   if (qHot > 0) soft('queues', t('переполнены: {n} (от {m} сообщений)', { n: qHot, m: QUEUE_HOT }))
+  markMuted(info, srvMuted(s, t).filter((i) => i.section === 'services').map((i) => ({
+    sec: SVC_SEC_IDS.has(i.sec ?? '') ? i.sec! : (SVC_SEC_OF_KIND[i.kind ?? ''] ?? 'overview'), text: i.text,
+  })), t)
 
   const rows: OvRow[] = SVC_SECTIONS.flatMap(({ id, label }) =>
     (items[id] ?? []).map((x) => ({

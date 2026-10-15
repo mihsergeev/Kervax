@@ -210,21 +210,27 @@ def test_kube_cronjobs_other_than_dumps():
          "last_schedule": ts - 9 * 86400, "last_success": ts - 9 * 86400},      # перестал стартовать
         {"ns": "tech", "name": "busy", "image": "php:8", "schedule": "0 * * * *", "active": 1,
          "last_schedule": ts - 600, "last_success": ts - 5 * 86400},           # идет прямо сейчас
+        {"ns": "kube-system", "name": "descheduler", "image": "descheduler:v0.35", "schedule": "*/5 * * * *",
+         "active": 1, "last_schedule": ts - 132 * 86400},                      # прогон завис
+        {"ns": "tech", "name": "nightly", "image": "php:8", "schedule": "0 1 * * *", "active": 1,
+         "last_schedule": ts - 30 * 3600, "last_success": ts - 2 * 86400},     # долгий, но еще в пределах
         {"ns": "db", "name": "pg-backup", "image": "postgres:16", "schedule": "30 2 * * *", "suspend": True},
     ]
     rep = {"clock_unix": ts, "kube": {"access": True, "cronjobs": crons}}
     assert collector.cron_job_issues(rep, now, dumps=False) == {
         "hub/geoip-update": "последний прогон не удался",
         "tech/report": "нет успешного прогона 9.0 дн",
+        "kube-system/descheduler": "прогон идет 132.0 дн, новых запусков нет",
     }
     assert collector.cron_job_issues(rep, now, dumps=True) == {"db/pg-backup": "приостановлен"}
     s = _srv(now, rep)
     got = _probs(s, now, "kube_cron")
     assert [(p["level"], p["section"], p["sec"], p["mute"]) for p in got] == [(1, "kuber", "cron", "kube_cron")]
     assert got[0]["text"] == ("CronJob не отрабатывают: hub/geoip-update (последний прогон не удался); "
+                              "kube-system/descheduler (прогон идет 132.0 дн, новых запусков нет); "
                               "tech/report (нет успешного прогона 9.0 дн)")
     lvl, ctx = collector._server_conditions(s, now)["kube_cron"]
-    assert lvl == 1 and ctx["n"] == 2
+    assert lvl == 1 and ctx["n"] == 3
     rep["kube"]["cronjobs"] = crons[1:2]
     assert _probs(s, now, "kube_cron") == [] and collector._server_conditions(s, now)["kube_cron"][0] == 0
 

@@ -1961,7 +1961,9 @@ def _cron_interval_seconds(sched: str) -> int:
 def cron_job_issues(rep: dict, now: datetime, dumps: bool) -> dict[str, str]:
     """Проблемные CronJob кластера: {ns/имя: причина}. dumps=True - только дамп-CronJob'ы
     (у них и "приостановлен" - проблема: бэкап встал), иначе все остальные (приостановленный
-    обычный крон - чье-то решение, не поломка). Идущий прямо сейчас прогон (active) не трогаем.
+    обычный крон - чье-то решение, не поломка). Идущий прямо сейчас прогон (active) не трогаем,
+    если он не завис: идет дольше двух интервалов (минимум сутки), а новых запусков нет. Так
+    стоял descheduler раз в 5 минут, у которого прогон "шел" 132 дня.
     Порог несвежести - 2 интервала расписания (минимум 2ч): daily-крон молчит сутки, но не
     пропустит "не отработал 2 дня" - даже если CronJob вообще перестал стартовать (тогда
     last_schedule и last_success замирают вместе, и сравнение ls-ok эту дыру не ловит)."""
@@ -1975,11 +1977,14 @@ def cron_job_issues(rep: dict, now: datetime, dumps: bool) -> dict[str, str]:
             if dumps:
                 out[name] = "приостановлен"
             continue
-        if cj.get("active"):
-            continue  # прогон идёт — рано паниковать
         ls = int(cj.get("last_schedule") or 0)
         ok = int(cj.get("last_success") or 0)
-        stale_after = max(_cron_interval_seconds(cj.get("schedule", "")) * 2, 2 * 3600)
+        every = _cron_interval_seconds(cj.get("schedule", ""))
+        if cj.get("active"):
+            if ls and nowts - ls > max(every * 2, 86400):
+                out[name] = f"прогон идет {round((nowts - ls) / 86400, 1)} дн, новых запусков нет"
+            continue  # прогон идёт — рано паниковать
+        stale_after = max(every * 2, 2 * 3600)
         if ok > 0 and nowts - ok > stale_after:
             what = "дампа" if dumps else "прогона"
             out[name] = f"нет успешного {what} {round((nowts - ok) / 86400, 1)} дн"

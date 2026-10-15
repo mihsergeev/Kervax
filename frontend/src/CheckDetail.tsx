@@ -397,6 +397,8 @@ export function CheckDetail({ check, groups, initialSec, onClose, onSaved, onRun
 
   const paths = check.last_path_results ?? []
   const ips = check.last_ip_results ?? []
+  // "проверять все адреса", а у домена адрес один: бэкенд пишет пустую разбивку (null - еще не проверяли)
+  const oneIp = !!check.check_all_ips && Array.isArray(check.last_ip_results) && check.last_ip_results.length === 0
   const parents = check.parents ?? []
   const mutes = check.alert_mutes ?? []
   const snoozed = !!check.snooze_until && new Date(check.snooze_until).getTime() > nowMs
@@ -410,8 +412,10 @@ export function CheckDetail({ check, groups, initialSec, onClose, onSaved, onRun
     dns: check.type === 'dns',
     // у push и DNS нет ни локаций, ни путей, ни сроков, даже если флаги остались от другого типа
     loc: probed && check.check_locations,
-    paths: probed && ((check.extra_paths ?? []).length > 0 || check.check_all_ips),
-    exp: probed && (check.check_ssl || check.check_domain),
+    // пути, все адреса домена и сроки панель проверяет только у HTTP: у TCP-монитора раздел был бы
+    // вечным "нет данных"
+    paths: check.type === 'http' && ((check.extra_paths ?? []).length > 0 || check.check_all_ips),
+    exp: check.type === 'http' && (check.check_ssl || check.check_domain),
     inc: true,
     log: true,
     deps: true,
@@ -458,6 +462,7 @@ export function CheckDetail({ check, groups, initialSec, onClose, onSaved, onRun
     paths: subOf(
       paths.length > 0 && t('путей: {n}', { n: paths.length }),
       ips.length > 0 && t('адресов домена: {n}', { n: ips.length }),
+      oneIp && t('у домена один адрес'),
     ) || t('нет данных'),
     exp: subOf(
       check.check_ssl && check.ssl_days != null && `${t('сертификат')} ${expiryText(check.ssl_days, t)}`,
@@ -851,7 +856,9 @@ export function CheckDetail({ check, groups, initialSec, onClose, onSaved, onRun
                       ))}
                       {ips.length === 0 && (
                         <div className="muted small">
-                          {t('Ещё нет разбивки по IP — проверка идёт в фоне (или у домена один адрес).')}
+                          {oneIp
+                            ? t('У домена один адрес: сравнивать нечего, его проверяет обычная проверка. Разбивка появится, когда адресов станет больше.')
+                            : t('Разбивки по адресам еще нет: появится после ближайшей проверки.')}
                         </div>
                       )}
                     </div>

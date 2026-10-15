@@ -22,7 +22,7 @@ import {
   type KnownIssue,
 } from './api'
 import type { Section } from './App'
-import { backupWindowNote, dockRiskText, fmtSetupVersion, knownActive, proxyBuilt, shortList, sinceShort, srvIssues, srvKnown, knownMeta } from './serverUtils'
+import { backupWindowNote, dbAuditNames, dockRiskText, fmtSetupVersion, knownActive, proxyBuilt, shortList, sinceShort, srvIssues, srvKnown, knownMeta } from './serverUtils'
 import { KnownDialog } from './KnownDialog'
 import { MaintChip, MaintHome } from './MaintModal'
 import { useI18n } from './i18n'
@@ -423,7 +423,7 @@ function actionItems(servers: Server[], avail: string, relProblem: string, t: T)
     if (dbs.length > 0 && !s.db_dumps_ok) {
       // всё про бэкап живёт в разделе «Бэкапы»; там модалка открывается для ЛЮБОЙ ноды —
       // клиента, бэкап-сервера или вообще без бэкапа (иначе пункт вёл бы в пустоту)
-      const db = dbs.map((x) => x.subject).join(', ')
+      const db = dbAuditNames(dbs).join(', ')
       items.push({ key: `dbdump-${s.id}`, icon: '🛢', section: 'backups', id: s.id, name: s.name, cc: s.country, sec: 'coverage',
         grp: 'dbdump', detail: db, text: t('{name}: {db} — нужен отдельный дамп', { name: s.name, db }) })
     }

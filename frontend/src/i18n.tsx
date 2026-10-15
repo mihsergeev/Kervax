@@ -1875,8 +1875,10 @@ const EN: Record<string, string> = {
   'IP-адреса домена': 'Domain IP addresses',
   'Время ответа · IP {ip}': 'Response time · IP {ip}',
   'Показать время ответа этого IP': 'Show this IP’s response time',
-  'Ещё нет разбивки по IP — проверка идёт в фоне (или у домена один адрес).':
-    'No per-IP breakdown yet — the check is running in the background (or the domain has a single address).',
+  'У домена один адрес: сравнивать нечего, его проверяет обычная проверка. Разбивка появится, когда адресов станет больше.':
+    'The domain has a single address: nothing to compare, the regular check covers it. The breakdown appears once there are more addresses.',
+  'Разбивки по адресам еще нет: появится после ближайшей проверки.': 'No per-address breakdown yet: it appears after the next check.',
+  'у домена один адрес': 'the domain has one address',
   'HTTP Basic (логин/пароль)': 'HTTP Basic (login/password)',
   'Показать': 'Show',
   'Скрыть': 'Hide',
@@ -2095,6 +2097,9 @@ const EN: Record<string, string> = {
   'на каком сервере работает, панель не определила': 'the panel could not tell which server runs it',
   'связей нет: ни за кем не стоит, мониторов на нем нет': 'no links: not behind another server, no monitors on it',
   'СУБД': 'DBMS',
+  'заглушено: {text}': 'muted: {text}',
+  'docker-сокет у {list}': 'docker socket in {list}',
+  'залочен больше суток: {list}': 'locked for over a day: {list}',
   'состав баз не виден': 'databases not visible',
   'сигнал раз в': 'signal every',
   'rest-server {v}, есть {t}': 'rest-server {v}, {t} is out',
