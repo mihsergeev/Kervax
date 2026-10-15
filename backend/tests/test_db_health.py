@@ -66,8 +66,8 @@ def test_transactions_locks_wraparound_vacuum():
                          {"db": "shop", "table": "fresh", "dead": 2_000_000, "live": 3_000_000, "vac": 3600}]))
     assert [t for _l, t, _k in db_health.problems(rep, NOW)] == [
         "PostgreSQL pg: транзакция идет 2 ч 13 мин (база shop, report-job)",
-        "PostgreSQL pg: транзакция открыта и простаивает 40 мин (база shop, api): держит блокировки",
-        "PostgreSQL pg: ждут блокировку 3 запр., дольше всех 7 мин",
+        "PostgreSQL pg: ждут блокировку 3 запр., дольше всех 7 мин, а транзакция простаивает 40 мин "
+        "(база shop, api) - держит, скорее всего, она",
         "PostgreSQL pg: возраст транзакций базы shop 1.20 млрд, на 2.1 млрд PostgreSQL остановит запись - "
         "автоочистка не успевает замораживать строки",
         "PostgreSQL pg: в shop.events 5.4 млн мертвых строк, 60% от живых, VACUUM не было ни разу"]
@@ -103,8 +103,10 @@ def test_vacuum_only_for_a_transaction_holding_a_snapshot():
                    idle_xmin_app="worker"))
     assert [t for _l, t, _k in db_health.problems(rep, NOW)] == [
         "PostgreSQL pg: транзакция открыта и простаивает 7 ч 28 мин (база shop, worker): держит снимок, "
-        "VACUUM не может чистить мертвые строки",
-        "PostgreSQL pg: транзакция открыта и простаивает 7 ч 40 мин (база shop, worker): держит блокировки"]
+        "VACUUM не может чистить мертвые строки"]
+    # без снимка и без ждущих она никому не мешает: воркер сутками держит один advisory lock
+    lock_only = _rep(_pg(idle_xact=71332, idle_db="shop", idle_app="worker"))
+    assert db_health.problems(lock_only, NOW) == []
     # одна и та же транзакция - одна строка, про VACUUM
     one = _rep(_pg(idle_xact=4000, idle_xmin=4000))
     assert [k for _l, _t, k in db_health.problems(one, NOW)] == ["pg:pg:idle"]

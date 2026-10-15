@@ -8,6 +8,7 @@ Neo4j, ансибл-роль, пишущая метрики для node_exporter
 получается статус: работает, упал, давно не отрабатывал, не понять.
 """
 
+import re
 from datetime import datetime
 
 from app.schemas import CustomBackupDb, CustomBackupOut
@@ -31,9 +32,19 @@ def _block(server) -> dict:
     return block if isinstance(block, dict) else {}
 
 
+# Файл-флаг для правил Prometheus, а не бэкап: restic_backup_monitoring_disabled.prom кладут, чтобы
+# заглушить алерты restic на хосте. helper видит в имени "backup" и отдает его заданием без статуса,
+# и в разделе висит вечное "не понять"
+_FLAG_RE = re.compile(r"monitoring_disabled|alerts?_(silence|disabled)|silence")
+
+
+def _is_flag(job: dict) -> bool:
+    return job.get("kind") == "metrics" and bool(_FLAG_RE.search(str(job.get("name") or "").lower()))
+
+
 def jobs_of(server) -> list[dict]:
     jobs = _block(server).get("jobs")
-    return [j for j in (jobs or []) if isinstance(j, dict) and j.get("id")]
+    return [j for j in (jobs or []) if isinstance(j, dict) and j.get("id") and not _is_flag(j)]
 
 
 _DOW_NAMES = {"sun": 0, "mon": 1, "tue": 2, "wed": 3, "thu": 4, "fri": 5, "sat": 6}

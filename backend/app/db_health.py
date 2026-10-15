@@ -97,13 +97,16 @@ def problems(rep: dict, now: datetime) -> list[tuple[int, str, str]]:
             who = _who(str(x.get("idle_xmin_db") or ""), str(x.get("idle_xmin_app") or ""))
             out.append((1, f"{name}: транзакция открыта и простаивает {_dur(imin)}" + (f" ({who})" if who else "")
                            + ": держит снимок, VACUUM не может чистить мертвые строки", k + ":idle"))
-        if idle >= IDLE_WARN and idle > imin + 60:
-            who = _who(str(x.get("idle_db") or ""), str(x.get("idle_app") or ""))
-            out.append((1, f"{name}: транзакция открыта и простаивает {_dur(idle)}" + (f" ({who})" if who else "")
-                           + ": держит блокировки", k + ":idle_lock"))
+        # Простаивающая без снимка сама по себе никому не мешает: на одной ноде воркер сутками держит
+        # так один advisory lock, и строка "держит блокировки" только шумела. Про нее - когда кто-то
+        # ждет блокировку, в той же строке: скорее всего держит она
         lw, lwt = _int(x.get("lock_waits")), _int(x.get("lock_wait"))
         if lw and lwt >= LOCK_WARN:
-            out.append((1, f"{name}: ждут блокировку {lw} запр., дольше всех {_dur(lwt)}", k + ":lock"))
+            txt = f"{name}: ждут блокировку {lw} запр., дольше всех {_dur(lwt)}"
+            if idle >= IDLE_WARN and idle > imin + 60:
+                who = _who(str(x.get("idle_db") or ""), str(x.get("idle_app") or ""))
+                txt += f", а транзакция простаивает {_dur(idle)}" + (f" ({who})" if who else "") + " - держит, скорее всего, она"
+            out.append((1, txt, k + ":lock"))
         xid = _int(x.get("xid"))
         if xid >= XID_WARN:
             out.append((2 if xid >= XID_CRIT else 1,
