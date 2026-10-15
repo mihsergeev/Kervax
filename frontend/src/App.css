@@ -3665,6 +3665,53 @@ button.ov-area-bad .ov-area-s { color: color-mix(in srgb, var(--down) 75%, var(-
   font-size: 0.75rem;
   overflow-wrap: anywhere;
 }
+/* "новое": проблема появилась меньше суток назад */
+.srv-new {
+  flex: 0 0 auto;
+  padding: 0.1rem 0.45rem;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  color: color-mix(in srgb, var(--accent) 70%, var(--text));
+  font-size: 0.68rem;
+  font-weight: 600;
+  line-height: 1.2;
+  letter-spacing: 0;
+  text-transform: none;
+  white-space: nowrap;
+}
+.ov-area-h .srv-new { margin-right: auto; }
+/* "За сутки" на сводке */
+.day-box {
+  border: 1px solid color-mix(in srgb, var(--accent) 32%, var(--border));
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--accent) 4%, var(--bg));
+}
+.day-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.35rem 0.9rem;
+  padding: 0.5rem 0.8rem;
+}
+.day-head b { font-size: 0.88rem; }
+.day-head .row-act { margin: 0 0 0 auto; }
+.day-cnt { font-size: 0.8rem; color: var(--text-muted); }
+.day-cnt b { font-size: inherit; font-weight: 650; color: var(--text); }
+.day-cnt b.t-down { color: var(--down); }
+.day-cnt b.t-up { color: var(--up); }
+.day-row {
+  display: grid;
+  grid-template-columns: 1.3rem minmax(0, 1fr) auto;
+  align-items: baseline;
+  gap: 0.6rem;
+  padding: 0.4rem 0.8rem;
+  border-top: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
+  font-size: 0.84rem;
+}
+.day-row-fire .day-text { color: color-mix(in srgb, var(--down) 70%, var(--text)); }
+.day-ic { text-align: center; }
+.day-text { overflow-wrap: anywhere; }
+.day-time { color: var(--text-muted); font-size: 0.75rem; white-space: nowrap; font-variant-numeric: tabular-nums; }
 /* раздел "Зависимости" */
 .deps-list {
   display: flex;

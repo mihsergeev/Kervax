@@ -26,6 +26,8 @@ const ICON: Record<string, string> = {
   alert: '🔥',
   panel: '👤',
 }
+// те же значки - в блоке "За сутки" на сводке карточки
+export const TL_ICON = ICON
 
 type Props = { serverId: number; onUnauthorized: () => void }
 
