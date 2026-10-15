@@ -85,6 +85,11 @@ export default function App() {
   }
   const urlSection = new URLSearchParams(window.location.search).get('section')
   const [openCheckId, setOpenCheckId] = useState<number | null>(() => urlNum('check'))
+  // ?check=<id>&sec=exp - раздел карточки монитора (из алерта, после F5)
+  const [openCheckSec, setOpenCheckSec] = useState<string | null>(() => {
+    const p = new URLSearchParams(window.location.search)
+    return p.get('check') ? p.get('sec') : null
+  })
   const [openServerId, setOpenServerId] = useState<number | null>(() => urlNum('server'))
   const [openDockerId, setOpenDockerId] = useState<number | null>(() => urlNum('docker'))
   // ?docker=<id>&sec=host - раздел карточки Docker-ноды (из алерта, с главной, после F5)
@@ -125,7 +130,10 @@ export default function App() {
       // секция ВНУТРИ детали сервера (msec-*): пункт про бэкап должен приземлять сразу
       // в «Бэкап», а не в начало длинной страницы метрик
       setDeepSec(detailSec ?? null)
-      if (sec === 'sites') setOpenCheckId(id)
+      if (sec === 'sites') {
+        setOpenCheckId(id)
+        setOpenCheckSec(detailSec || null)
+      }
       else if (sec === 'servers') setOpenServerId(id)
       else if (sec === 'docker') {
         setOpenDockerId(id)
@@ -533,7 +541,15 @@ export default function App() {
         section === 'home' ? (
           <HomePage onNavigate={setSection} onOpen={openTarget} onUnauthorized={logout} />
         ) : section === 'sites' ? (
-          <ChecksPage onUnauthorized={logout} openCheckId={openCheckId} onConsumed={() => setOpenCheckId(null)} />
+          <ChecksPage
+            onUnauthorized={logout}
+            openCheckId={openCheckId}
+            openSec={openCheckSec}
+            onConsumed={() => {
+              setOpenCheckId(null)
+              setOpenCheckSec(null)
+            }}
+          />
         ) : section === 'docker' ? (
           <DockerPage
             onUnauthorized={logout}

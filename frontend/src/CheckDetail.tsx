@@ -31,16 +31,23 @@ import { SnoozeControl } from './SnoozeControl'
 import { StackedAreaChart } from './charts/StackedAreaChart'
 import { StatusBar, type BarStatus } from './charts/StatusBar'
 import { useI18n } from './i18n'
-import { expiryText } from './checkUtils'
+import { MON_ALERT_KINDS, expiryText } from './checkUtils'
 import { useAuth } from './auth'
 import { NoteBar } from './NoteBar'
 import { CheckParentBar } from './ParentBar'
 import { KnownCheckBar, KnownDialog } from './KnownDialog'
 import { MaintBanner } from './MaintModal'
+import { CardNav, OvAreas, OvRows, secInfoOf, type OvRow, type SecDef, type SecInfo, type SecItem } from './cardLayout'
+import { NetTile, type Tone } from './NetLinks'
+import { useUrlParam } from './deeplink'
+import { fmtRel } from './ServersPage'
+import { fmtDur } from './units'
+import { knownActive } from './serverUtils'
 
 type Props = {
   check: Check
   groups?: string[]
+  initialSec?: string | null // раздел из ссылки алерта: ?check=id&sec=exp
   onClose: () => void
   onSaved?: () => void
   onRun?: () => void // ручная проверка закончилась — обновить список
@@ -61,11 +68,6 @@ function fmtDateTime(ts: string): string {
     hour: '2-digit',
     minute: '2-digit',
   })
-}
-
-function tone(u: number | null): string {
-  if (u == null) return ''
-  return u >= 99 ? 't-up' : u >= 95 ? 't-degraded' : 't-down'
 }
 
 // Состояние ручной проверки: идёт → готово (вердикт) или «проверить не удалось».
@@ -116,7 +118,34 @@ function NoAlertChip({ inc, t }: { inc: Incident; t: (k: string, p?: Record<stri
   return <span className="type-chip inc-noalert" title={hint}>{t('без алерта')}</span>
 }
 
-export function CheckDetail({ check, groups, onClose, onSaved, onRun, onDelete, onUnauthorized }: Props) {
+// Карточка монитора по разделам, как карточки серверов (cardLayout): меню слева, на экране один
+// раздел. Раньше все шло одной лентой - плитки аптайма, сроки, локации, пути, график, инциденты и
+// журнал, где сбои повторялись дважды. У push-монитора вместо времени ответа "Сигнал", у DNS
+// еще "Записи DNS"
+const CHECK_SECTIONS: SecDef[] = [
+  { id: 'overview', label: 'Сводка', group: '' },
+  { id: 'rt', label: 'Время ответа', group: 'Проверка' },
+  { id: 'signal', label: 'Сигнал', group: 'Проверка' },
+  { id: 'dns', label: 'Записи DNS', group: 'Проверка' },
+  { id: 'loc', label: 'Локации', group: 'Проверка' },
+  { id: 'paths', label: 'Пути и адреса', group: 'Проверка' },
+  { id: 'exp', label: 'Сертификат и домен', group: 'Проверка' },
+  { id: 'inc', label: 'Инциденты', group: 'История' },
+  { id: 'log', label: 'Журнал проверок', group: 'История' },
+  { id: 'deps', label: 'Зависимости', group: 'Связи' },
+  { id: 'alerts', label: 'Алерты', group: 'Связи' },
+]
+const CHECK_SEC_IDS = new Set(CHECK_SECTIONS.map((x) => x.id))
+// разделы, которым нужно окно 24ч/7д/30д: переключатель в шапке раздела
+const WIN_SECS = new Set(['overview', 'rt', 'signal', 'dns', 'inc', 'log'])
+const subOf = (...parts: (string | false | 0 | null | undefined)[]) => parts.filter(Boolean).join(' · ')
+const maxWarn = (w: number[]) => (w.length ? Math.max(...w) : 0)
+// интервал без нулевого хвоста: "1м", а не "1м 0с"
+const fmtEvery = (s?: number) => fmtDur(s).replace(/ 0\D+$/, '')
+const upTone = (u: number | null | undefined): Tone | undefined =>
+  u == null ? undefined : u >= 99 ? 'ok' : u >= 95 ? 'warn' : 'bad'
+
+export function CheckDetail({ check, groups, initialSec, onClose, onSaved, onRun, onDelete, onUnauthorized }: Props) {
   const { t } = useI18n()
   const { isViewer } = useAuth()
   const [hours, setHours] = useState(24)
@@ -125,7 +154,8 @@ export function CheckDetail({ check, groups, onClose, onSaved, onRun, onDelete, 
   const [incidents, setIncidents] = useState<Incident[]>([])
   const [locs, setLocs] = useState<LocationResult[]>([])
   const [logRows, setLogRows] = useState<CheckSample[]>([])
-  const [logFailed, setLogFailed] = useState(true) // по умолчанию только сбои
+  // сбои показывают инциденты, журнал по умолчанию - все проверки
+  const [logFailed, setLogFailed] = useState(false)
   // Старое разворачивают руками. Открытая карточка показывает выбранное окно —
   // иначе первым же экраном встречает сбой недельной давности, и кажется, что
   // с сайтом что-то не так прямо сейчас.
@@ -142,8 +172,15 @@ export function CheckDetail({ check, groups, onClose, onSaved, onRun, onDelete, 
   const [run, setRun] = useState<RunState | null>(null)
   const [refresh, setRefresh] = useState(0)
   const [knownOpen, setKnownOpen] = useState(false) // отметить сбой известной проблемой
+  const [active, setActive] = useState<string>(() => (CHECK_SEC_IDS.has(initialSec ?? '') ? initialSec! : 'overview'))
+  const layoutRef = useRef<HTMLDivElement>(null)
+  const go = (id: string) => {
+    setActive(id)
+    const el = layoutRef.current
+    if (el && el.getBoundingClientRect().top < 0) el.scrollIntoView({ block: 'start' })
+  }
 
-  // редактирование прямо в модалке
+  // редактирование прямо в модалке: там же заметка и удаление, как у сервера
   const [editing, setEditing] = useState(false)
   const [snoozing, setSnoozing] = useState(false)
   const [form, setForm] = useState<CheckForm | null>(null)
@@ -358,10 +395,152 @@ export function CheckDetail({ check, groups, onClose, onSaved, onRun, onDelete, 
           }`,
         }))
 
+  const paths = check.last_path_results ?? []
+  const ips = check.last_ip_results ?? []
+  const parents = check.parents ?? []
+  const mutes = check.alert_mutes ?? []
+  const snoozed = !!check.snooze_until && new Date(check.snooze_until).getTime() > nowMs
+  const known = knownActive(check.known_issue) ? check.known_issue : null
+  const mainSec = check.type === 'push' ? 'signal' : check.type === 'dns' ? 'dns' : 'rt'
+  const probed = check.type !== 'push' && check.type !== 'dns'
+  const shown: Record<string, boolean> = {
+    overview: true,
+    rt: check.type !== 'push',
+    signal: check.type === 'push',
+    dns: check.type === 'dns',
+    // у push и DNS нет ни локаций, ни путей, ни сроков, даже если флаги остались от другого типа
+    loc: probed && check.check_locations,
+    paths: probed && ((check.extra_paths ?? []).length > 0 || check.check_all_ips),
+    exp: probed && (check.check_ssl || check.check_domain),
+    inc: true,
+    log: true,
+    deps: true,
+    alerts: true,
+  }
+  // у TLS-монитора на графике не время ответа, а сколько осталось сертификату
+  const secs = CHECK_SECTIONS.filter((x) => shown[x.id]).map((x) =>
+    x.id === 'rt' && isCert ? { ...x, label: 'Срок сертификата' } : x,
+  )
+  const cur = secs.find((x) => x.id === active) ?? secs[0]
+  useUrlParam('sec', editing || cur.id === 'overview' ? null : cur.id)
+
+  // Замечания - те же, что на главной в блоке "Сайты": лежит, деградирует или отвечает через раз
+  // (кроме отмеченного известной проблемой) и истекающие сертификат и домен
+  const items: Record<string, SecItem[]> = {}
+  const add = (sec: string, x: SecItem) => (items[sec] ??= []).push(x)
+  const st = check.last_status
+  const bad = check.enabled && (st === 'down' || st === 'degraded' || !!check.flaky_since)
+  const stText = st === 'down' ? t('Недоступно') : st === 'degraded' ? t('Деградация') : t('Отвечает через раз')
+  const openInc = incidents.find((i) => !i.ended_at)
+  if (bad && !known)
+    add(mainSec, {
+      level: st === 'down' ? 2 : 1,
+      text: stText + (st !== 'up' && check.last_message ? ` · ${check.last_message}` : ''),
+      since: st === 'up' ? check.flaky_since : openInc?.started_at,
+    })
+  if (shown.exp && check.check_ssl && check.ssl_days != null && check.ssl_days <= maxWarn(check.ssl_warn_days))
+    add('exp', { level: check.ssl_days <= 3 ? 2 : 1, text: `${t('SSL-сертификат')}: ${expiryText(check.ssl_days, t)}` })
+  if (shown.exp && check.check_domain && check.domain_days != null && check.domain_days <= maxWarn(check.domain_warn_days))
+    add('exp', { level: check.domain_days <= 3 ? 2 : 1, text: `${t('Домен')}: ${expiryText(check.domain_days, t)}` })
+
+  const lat = (points ?? []).map((p) => p.latency_ms).filter((x): x is number => x != null).sort((a, b) => a - b)
+  const usual = lat.length >= 5 ? lat[Math.floor(lat.length / 2)] : null
+  const lastInc = incidents[0]
+  const ok: Record<string, string> = {
+    rt: isCert
+      ? check.last_value != null ? t('осталось {n} дн.', { n: Math.round(check.last_value) }) : t('нет данных')
+      : check.last_latency_ms != null
+        ? subOf(t('сейчас {ms} мс', { ms: check.last_latency_ms }), usual != null && t('обычно {ms} мс', { ms: usual }))
+        : t('нет данных'),
+    signal: check.push_at ? t('последний сигнал {ago}', { ago: fmtRel(check.push_at) }) : t('Сигнала еще не было'),
+    dns: (check.dns_last ?? []).length ? `${t('сейчас')}: ${(check.dns_last ?? []).join(', ')}` : t('нет данных'),
+    loc: locs.length ? t('видят все: {list}', { list: locs.map((l) => l.name).join(', ') }) : t('нет данных'),
+    paths: subOf(
+      paths.length > 0 && t('путей: {n}', { n: paths.length }),
+      ips.length > 0 && t('адресов домена: {n}', { n: ips.length }),
+    ) || t('нет данных'),
+    exp: subOf(
+      check.check_ssl && check.ssl_days != null && `${t('сертификат')} ${expiryText(check.ssl_days, t)}`,
+      check.check_domain && check.domain_days != null && `${t('домен')} ${expiryText(check.domain_days, t)}`,
+    ) || t('нет данных'),
+    inc: incFresh.length
+      ? t('за {w}: {n}, последний {t}', { w: winLabel, n: incFresh.length, t: fmtDateTime(incFresh[0].started_at) })
+      : lastInc
+        ? t('за {w} не было, последний {t}', { w: winLabel, t: fmtDateTime(lastInc.started_at) })
+        : t('Инцидентов не было.'),
+    log: check.last_checked_at ? t('последняя проверка {ago}', { ago: fmtRel(check.last_checked_at) }) : t('Пока пусто.'),
+    deps: parents.length
+      ? t('зависит от {list}', { list: parents.map((p) => p.name).join(', ') })
+      : (check.parent_mode ?? 'auto') === 'off' ? t('ни от какого сервера не зависит') : t('сервер не найден'),
+    alerts: snoozed
+      ? t('алерты заглушены до {t}', { t: fmtDateTime(check.snooze_until!) })
+      : mutes.length
+        ? t('не слать: {list}', { list: mutes.map((k) => t(MON_ALERT_KINDS.find((x) => x.k === k)?.label ?? k)).join(', ') })
+        : t('ничего не заглушено'),
+  }
+  const info: Record<string, SecInfo> = {}
+  for (const { id } of CHECK_SECTIONS) info[id] = secInfoOf(items[id] ?? [], ok[id] ?? '', t)
+  // не проблема с главной, но и не "все в порядке": желтым на карте, без числа в меню
+  const soft = (id: string, line: string) => {
+    if (!info[id].level) info[id] = { ...info[id], level: 1, line }
+  }
+  if (!check.enabled) soft(mainSec, t('монитор выключен'))
+  else if (bad && known) soft(mainSec, stText)
+  // лежит целиком - не отвечает ни одна локация, в loc_down (частичная доступность) их нет
+  const locDown = [...new Set([...(check.loc_down ?? []), ...locs.filter((l) => l.enabled && l.status === 'down').map((l) => l.name)])]
+  if (locDown.length) soft('loc', t('не отвечает из: {list}', { list: locDown.join(', ') }))
+  const pathsBy = (s: string) => [...paths.filter((r) => r.status === s).map((r) => r.path), ...ips.filter((r) => r.status === s).map((r) => r.ip)]
+  if (pathsBy('down').length) soft('paths', t('не отвечает: {list}', { list: pathsBy('down').join(', ') }))
+  else if (pathsBy('degraded').length) soft('paths', t('медленно отвечает: {list}', { list: pathsBy('degraded').join(', ') }))
+  const silent = parents.filter((p) => p.silent)
+  if (silent.length) soft('deps', t('{list}: сервер не на связи, алерты монитора ждут его', { list: silent.map((p) => p.name).join(', ') }))
+  if (known) soft('alerts', t('известная проблема: {text}', { text: known.text }))
+  if (!incidents.length) info.inc.idle = true
+
+  const rows: OvRow[] = CHECK_SECTIONS.flatMap(({ id }) =>
+    (items[id] ?? []).map((x) => ({
+      tone: x.level >= 2 ? ('t-down' as const) : ('t-degraded' as const),
+      text: x.text,
+      since: x.since,
+      act: shown[id] ? { label: t(secs.find((s) => s.id === id)?.label ?? id), onClick: () => go(id) } : undefined,
+    })),
+  ).sort((a, b) => Number(b.tone === 't-down') - Number(a.tone === 't-down'))
+  const alertAfterMin = Math.round((check.alert_after_failures * check.interval_seconds) / 60)
+
+  const statusBar = (
+    <>
+      <div className="chart-cap">{t('Доступность за {w}', { w: winLabel })}</div>
+      <StatusBar segments={segments} />
+    </>
+  )
+  const chartBlock = (
+    <div className="chart-block chart-card">
+      <button className="chart-cap chart-cap-btn" onClick={() => setZoomOpen(true)}>
+        <span>{chartCap}</span>
+        <span className="chart-expand" title={t('Открыть на весь экран')}>⤢</span>
+      </button>
+      {points == null ? (
+        <div className="chart-empty">{t('загрузка…')}</div>
+      ) : chartTs.length ? (
+        <StackedAreaChart
+          ts={chartTs}
+          series={chartSeries}
+          fmtY={fmtCY}
+          fmtV={fmtCV}
+          fmtTime={fmtX}
+          height={170}
+          onExpand={() => setZoomOpen(true)}
+        />
+      ) : (
+        <div className="chart-empty">—</div>
+      )}
+    </div>
+  )
+
   return (
     <>
     <div className="modal-backdrop">
-      <div className="card detail">
+      <div className="card detail detail-server hs-modal">
         <div className="detail-head">
           <div className="detail-title">
             <span className={`sdot sdot-${check.last_status}`} />
@@ -369,6 +548,23 @@ export function CheckDetail({ check, groups, onClose, onSaved, onRun, onDelete, 
             <span className="type-chip">
               {{ http: 'HTTP', tcp_port: 'TCP', cert: 'TLS', push: 'PUSH', dns: 'DNS' }[check.type]}
             </span>
+            {check.group_name && <span className="type-chip group-chip">{check.group_name}</span>}
+            {/* что заглушено - значком, сами заглушки в разделе "Алерты" */}
+            {(snoozed || mutes.length > 0) && !editing && (
+              <button className="srv-head-chip" onClick={() => go('alerts')} title={ok.alerts}>
+                🔕
+              </button>
+            )}
+            {/* заметка живет в редактировании монитора, здесь - значком с текстом в подсказке */}
+            {check.note && !editing && (
+              <button
+                className="srv-head-chip srv-head-note"
+                title={check.note}
+                onClick={isViewer ? undefined : startEdit}
+              >
+                📝
+              </button>
+            )}
           </div>
           <div className="detail-head-actions">
             {!editing && !isViewer && onRun && (
@@ -386,97 +582,80 @@ export function CheckDetail({ check, groups, onClose, onSaved, onRun, onDelete, 
                 ✎
               </button>
             )}
-            {!editing && !isViewer && onDelete && (
-              <button
-                className="ghost icon-btn icon-btn-danger"
-                onClick={onDelete}
-                title={t('Удалить')}
-              >
-                🗑
-              </button>
-            )}
             <button className="ghost icon-btn" onClick={onClose} title={t('Закрыть')}>
               ✕
             </button>
           </div>
         </div>
+        <div className="srv-meta srv-meta-line">
+          {check.type !== 'push' && (
+            <span className="srv-meta-item mono">
+              {check.target}
+              {check.port ? `:${check.port}` : ''}
+            </span>
+          )}
+          {check.type === 'dns' && (
+            <span className="srv-meta-item">
+              {check.dns_type || 'A'}
+              {check.dns_server ? ` @${check.dns_server}` : ''}
+            </span>
+          )}
+          <span className="srv-meta-item">
+            <span className="srv-meta-k">{check.type === 'push' ? t('сигнал раз в') : t('раз в')}</span>{' '}
+            {fmtEvery(check.type === 'push' ? check.push_period : check.interval_seconds)}
+          </span>
+          {check.type === 'push' ? (
+            <span className="srv-meta-item">{t('последний сигнал {ago}', { ago: fmtRel(check.push_at ?? null) })}</span>
+          ) : (
+            <span className="srv-meta-item">
+              <span className="srv-meta-k">{t('проверен')}</span> {fmtRel(check.last_checked_at)}
+            </span>
+          )}
+          {check.last_latency_ms != null && !isCert && check.type !== 'push' && (
+            <span className="srv-meta-item">
+              <span className="srv-meta-k">{t('ответ')}</span> {check.last_latency_ms} {t('мс')}
+            </span>
+          )}
+          {shown.loc && (
+            <span className="srv-meta-item">
+              <span className="srv-meta-k">{t('с локаций')}</span> {locs.length || (check.location_ids ?? []).length}
+            </span>
+          )}
+          {check.probe_local && (
+            <span className="srv-meta-item">
+              <span className="srv-meta-k">{t('изнутри')}</span> {check.probe_server_name || '—'}
+            </span>
+          )}
+          {!check.enabled && <span className="srv-meta-item t-degraded">{t('выключен')}</span>}
+        </div>
         {!editing && <MaintBanner kind="check" id={check.id} />}
-        {!editing && (
-          <NoteBar
-            note={check.note}
-            by={check.note_by}
-            at={check.note_at}
-            canEdit={!isViewer}
-            onSave={async (text) => {
-              try {
-                await setCheckNote(check.id, text)
-                onSaved?.()
-              } catch (e) {
-                if (e instanceof ApiError && e.status === 401) onUnauthorized()
-                throw e
-              }
-            }}
-          />
-        )}
-        {!editing && <CheckParentBar check={check} canEdit={!isViewer} onSaved={() => onSaved?.()} />}
-        {!editing &&
-          (check.known_issue ? (
-            <KnownCheckBar
-              known={check.known_issue}
-              canEdit={!isViewer}
-              onDrop={async () => {
-                await dropCheckKnown(check.id)
-                onSaved?.()
-              }}
-            />
-          ) : !isViewer && (check.last_status === 'down' || check.last_status === 'degraded' || !!check.flaky_since) ? (
-            <button className="ghost small note-add" onClick={() => setKnownOpen(true)}>
-              📌 {t('отметить как известную проблему')}
-            </button>
-          ) : null)}
-        {knownOpen && (
-          <KnownDialog
-            title={check.name}
-            onClose={() => setKnownOpen(false)}
-            onSave={async (text, days) => {
-              await setCheckKnown(check.id, text, days)
-              setKnownOpen(false)
-              onSaved?.()
-            }}
-          />
-        )}
-        {check.type === 'push' ? (
-          <PushInfo check={check} canEdit={!isViewer} />
-        ) : check.type === 'dns' ? (
-          <DnsInfo check={check} canEdit={!isViewer} onAccepted={() => onSaved?.()} />
-        ) : (
-          <div className="detail-target">
-            {check.target}
-            {check.port ? `:${check.port}` : ''}
-          </div>
-        )}
-
-        {!editing && !isViewer && (
-          <SnoozeControl
-            snoozeUntil={check.snooze_until}
-            busy={snoozing}
-            onSnooze={async (hours) => {
-              setSnoozing(true)
-              try {
-                await snoozeCheck(check.id, hours)
-                onSaved?.()
-              } catch (e) {
-                fail(e)
-              } finally {
-                setSnoozing(false)
-              }
-            }}
-          />
-        )}
 
         {editing && form ? (
           <>
+            <NoteBar
+              note={check.note}
+              by={check.note_by}
+              at={check.note_at}
+              canEdit={!isViewer}
+              onSave={async (text) => {
+                try {
+                  await setCheckNote(check.id, text)
+                  onSaved?.()
+                } catch (e) {
+                  if (e instanceof ApiError && e.status === 401) onUnauthorized()
+                  throw e
+                }
+              }}
+            />
             {saveErr && <p className="form-error">{saveErr}</p>}
+            {/* удаление - сверху и отдельно, чтобы не нажать случайно рядом с "Сохранить" */}
+            {onDelete && (
+              <div className="edit-danger-top">
+                <button className="ghost danger-btn" onClick={onDelete} disabled={saving}>
+                  🗑 {t('Удалить монитор')}
+                </button>
+              </div>
+            )}
             <CheckFormCard
               bare
               form={form}
@@ -492,275 +671,433 @@ export function CheckDetail({ check, groups, onClose, onSaved, onRun, onDelete, 
         ) : (
           <>
         {err && <p className="form-error">{err}</p>}
+        <div className="srv-layout" ref={layoutRef}>
+          <CardNav secs={secs} active={cur.id} info={info} onGo={go} />
+          <div className="srv-main">
+            <div className="srv-main-head">
+              <h4>{t(cur.label)}</h4>
+              {WIN_SECS.has(cur.id) && (
+                <div className="win-switch">
+                  {WINDOWS.map((w) => (
+                    <button
+                      key={w.key}
+                      className={`win-btn${hours === w.hours ? ' win-btn-active' : ''}`}
+                      onClick={() => setHours(w.hours)}
+                    >
+                      {t(w.label)}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
 
-        <div className="uptime-tiles">
-          <UptimeTile label={t('Аптайм 24ч')} value={uptime?.day} />
-          <UptimeTile label={t('Аптайм 7д')} value={uptime?.week} />
-          <UptimeTile label={t('Аптайм 30д')} value={uptime?.month} />
-        </div>
-
-        {(check.check_ssl || check.check_domain) && (
-          <div className="expiry-pills">
-            {check.check_ssl && (
-              <ExpiryPill
-                icon="🔐"
-                label={t('SSL-сертификат')}
-                days={check.ssl_days}
-                warn={check.ssl_warn_days}
-                message={check.ssl_message}
-              />
+            {cur.id === 'overview' && (
+              <div className="srv-sec">
+                <OvRows rows={rows} />
+                {/* лежит - сразу видно, на какой фазе оборвался запрос и что изнутри сервера */}
+                {st !== 'up' && <CheckWhere check={check} />}
+                <div className="net-tiles srv-tiles">
+                  <button className="srv-tile-btn" onClick={() => go(mainSec)} title={t('к разделу')}>
+                    <NetTile
+                      label={t('Сейчас')}
+                      value={statusWord(st, t)}
+                      sub={subOf(
+                        check.last_latency_ms != null && !isCert && check.type !== 'push' && `${check.last_latency_ms} ${t('мс')}`,
+                        check.last_checked_at && fmtRel(check.last_checked_at),
+                      ) || undefined}
+                      tone={st === 'up' ? 'ok' : st === 'degraded' ? 'warn' : st === 'down' ? 'bad' : undefined}
+                    />
+                  </button>
+                  {([[t('Аптайм 24ч'), uptime?.day], [t('Аптайм 7д'), uptime?.week], [t('Аптайм 30д'), uptime?.month]] as const).map(([label, v]) => (
+                    <button key={label} className="srv-tile-btn" onClick={() => go('inc')} title={t('к разделу')}>
+                      <NetTile label={label} value={v == null ? '—' : `${v}%`} tone={upTone(v)} />
+                    </button>
+                  ))}
+                </div>
+                {statusBar}
+                <OvAreas
+                  cap={t('Монитор по областям')}
+                  items={secs.filter((x) => x.id !== 'overview').map((x) => ({ id: x.id, label: x.label, info: info[x.id] }))}
+                  onGo={go}
+                />
+              </div>
             )}
-            {check.check_domain && (
-              <ExpiryPill
-                icon="🌐"
-                label={t('Домен')}
-                days={check.domain_days}
-                warn={check.domain_warn_days}
-                message={check.domain_message}
-              />
+
+            {cur.id === 'rt' && (
+              <div className="srv-sec">
+                {statusBar}
+                <CheckWhere check={check} />
+                {(selectedIp || !selDirect) && (
+                  <div>
+                    <button
+                      className="ghost small"
+                      onClick={() => {
+                        setSelectedIp(null)
+                        setSelectedLoc(locs.find((l) => l.direct)?.location_id ?? null)
+                      }}
+                    >
+                      {t('показать основную проверку')}
+                    </button>
+                  </div>
+                )}
+                {chartBlock}
+              </div>
             )}
-          </div>
-        )}
 
-        {check.check_locations && (
-          <div className="detail-locs">
-            <div className="chart-cap">{t('Локации')}</div>
-            <div className="loc-results">
-              {locs.map((r) => (
-                <button
-                  key={r.location_id}
-                  className={
-                    'loc-res loc-res-btn' +
-                    (r.location_id === selectedLoc ? ' loc-res-active' : '') +
-                    (!r.enabled ? ' loc-res-off' : '')
-                  }
-                  onClick={() => {
-                    setSelectedLoc(r.location_id)
-                    setSelectedIp(null) // локация активна → график по локации
-                  }}
-                  title={t('проверено: {t}', { t: fmtDateTime(r.checked_at) })}
-                >
-                  <span className={`sdot sdot-${r.status}`} />
-                  <div className="loc-res-name">
-                    {r.name}
-                    {r.direct && <span className="type-chip">{t('напрямую')}</span>}
-                  </div>
-                  <div className="loc-res-metric">
-                    {r.latency_ms != null ? `${r.latency_ms} ${t('мс')}` : '—'}
-                  </div>
-                  <div className="loc-res-msg muted small" title={r.message}>
-                    {r.message || '—'}
-                  </div>
-                </button>
-              ))}
-              {locs.length === 0 && (
-                <div className="muted small">
-                  {t('Ещё нет данных из локаций — проверка идёт в фоне.')}
+            {cur.id === 'signal' && (
+              <div className="srv-sec">
+                {statusBar}
+                <PushInfo check={check} canEdit={!isViewer} />
+              </div>
+            )}
+
+            {cur.id === 'dns' && (
+              <div className="srv-sec">
+                {statusBar}
+                <DnsInfo check={check} canEdit={!isViewer} onAccepted={() => onSaved?.()} />
+              </div>
+            )}
+
+            {cur.id === 'loc' && (
+              <div className="srv-sec">
+                <div className="loc-results">
+                  {locs.map((r) => (
+                    <button
+                      key={r.location_id}
+                      className={
+                        'loc-res loc-res-btn' +
+                        (r.location_id === selectedLoc ? ' loc-res-active' : '') +
+                        (!r.enabled ? ' loc-res-off' : '')
+                      }
+                      onClick={() => {
+                        setSelectedLoc(r.location_id)
+                        setSelectedIp(null) // локация активна → график по локации
+                        go('rt')
+                      }}
+                      title={t('проверено: {t}', { t: fmtDateTime(r.checked_at) })}
+                    >
+                      <span className={`sdot sdot-${r.status}`} />
+                      <div className="loc-res-name">
+                        {r.name}
+                        {r.direct && <span className="type-chip">{t('напрямую')}</span>}
+                      </div>
+                      <div className="loc-res-metric">
+                        {r.latency_ms != null ? `${r.latency_ms} ${t('мс')}` : '—'}
+                      </div>
+                      <div className="loc-res-msg muted small" title={r.message}>
+                        {r.message || '—'}
+                      </div>
+                    </button>
+                  ))}
+                  {locs.length === 0 && (
+                    <div className="srv-empty">
+                      {t('Ещё нет данных из локаций — проверка идёт в фоне.')}
+                    </div>
+                  )}
                 </div>
-              )}
-            </div>
-          </div>
-        )}
+                <div className="net-foot">{t('Клик по локации - ее время ответа на графике')}</div>
+              </div>
+            )}
 
-        {(check.extra_paths ?? []).length > 0 && (
-          <div className="detail-locs">
-            <div className="chart-cap">{t('Дополнительные пути')}</div>
-            <div className="loc-results">
-              {(check.last_path_results ?? []).map((r) => (
-                <div key={r.path} className="loc-res">
-                  <span className={`sdot sdot-${r.status === 'pending' || r.status === 'skipped' ? 'unknown' : r.status}`} />
-                  <div className="loc-res-name mono">{r.path}</div>
-                  <div className="loc-res-metric">
-                    {r.latency_ms != null ? `${r.latency_ms} ${t('мс')}` : '—'}
-                  </div>
-                  <div className="loc-res-msg muted small" title={r.message}>
-                    {r.message || '—'}
-                  </div>
-                </div>
-              ))}
-              {(check.last_path_results ?? []).length === 0 && (
-                <div className="muted small">
-                  {t('Пути ещё не проверялись: результат появится после ближайшей проверки.')}
-                </div>
-              )}
-            </div>
-          </div>
-        )}
-
-        {check.check_all_ips && (
-          <div className="detail-locs">
-            <div className="chart-cap">{t('IP-адреса домена')}</div>
-            <div className="loc-results">
-              {(check.last_ip_results ?? []).map((r) => (
-                <button
-                  key={r.ip}
-                  className={
-                    'loc-res loc-res-btn' + (r.ip === selectedIp ? ' loc-res-active' : '')
-                  }
-                  onClick={() =>
-                    setSelectedIp((cur) => (cur === r.ip ? null : r.ip))
-                  }
-                  title={t('Показать время ответа этого IP')}
-                >
-                  <span className={`sdot sdot-${r.status}`} />
-                  <div className="loc-res-name mono">{r.ip}</div>
-                  <div className="loc-res-metric">
-                    {r.latency_ms != null ? `${r.latency_ms} ${t('мс')}` : '—'}
-                  </div>
-                  <div className="loc-res-msg muted small" title={r.message}>
-                    {r.message || '—'}
-                  </div>
-                </button>
-              ))}
-              {(check.last_ip_results ?? []).length === 0 && (
-                <div className="muted small">
-                  {t('Ещё нет разбивки по IP — проверка идёт в фоне (или у домена один адрес).')}
-                </div>
-              )}
-            </div>
-          </div>
-        )}
-
-        <div className="detail-toolbar">
-          <div className="win-switch">
-            {WINDOWS.map((w) => (
-              <button
-                key={w.key}
-                className={`win-btn${hours === w.hours ? ' win-btn-active' : ''}`}
-                onClick={() => setHours(w.hours)}
-              >
-                {t(w.label)}
-              </button>
-            ))}
-          </div>
-        </div>
-
-        <StatusBar segments={segments} />
-
-        <CheckWhere check={check} />
-
-        <div className="chart-block chart-card">
-          <button className="chart-cap chart-cap-btn" onClick={() => setZoomOpen(true)}>
-            <span>{chartCap}</span>
-            <span className="chart-expand" title={t('Открыть на весь экран')}>⤢</span>
-          </button>
-          {points == null ? (
-            <div className="chart-empty">{t('загрузка…')}</div>
-          ) : chartTs.length ? (
-            <StackedAreaChart
-              ts={chartTs}
-              series={chartSeries}
-              fmtY={fmtCY}
-              fmtV={fmtCV}
-              fmtTime={fmtX}
-              height={150}
-              onExpand={() => setZoomOpen(true)}
-            />
-          ) : (
-            <div className="chart-empty">—</div>
-          )}
-        </div>
-
-        <div className="detail-inc">
-          <div className="chart-cap">{t('Инциденты')}</div>
-          {incidents.length === 0 ? (
-            <div className="muted small">{t('Инцидентов не было.')}</div>
-          ) : incShown.length === 0 ? (
-            <div className="muted small">
-              {t('За {w} инцидентов не было.', { w: winLabel })}{' '}
-              {t('последний — {t}', { t: fmtDateTime(incidents[0].started_at) })}
-            </div>
-          ) : (
-            <div className="inc-list">
-              {incShown.map((inc) => (
-                <div key={inc.id} className="inc-item">
-                  <span className={`sdot sdot-${inc.status}`} />
-                  <div className="inc-when">
-                    <div>{fmtDateTime(inc.started_at)}</div>
-                    <div className="muted small">
-                      {inc.ended_at
-                        ? t('до {t}', { t: fmtDateTime(inc.ended_at) })
-                        : t('идёт сейчас')}
+            {cur.id === 'paths' && (
+              <div className="srv-sec">
+                {(check.extra_paths ?? []).length > 0 && (
+                  <div className="detail-locs">
+                    <div className="chart-cap">{t('Дополнительные пути')}</div>
+                    <div className="loc-results">
+                      {paths.map((r) => (
+                        <div key={r.path} className="loc-res">
+                          <span className={`sdot sdot-${r.status === 'pending' || r.status === 'skipped' ? 'unknown' : r.status}`} />
+                          <div className="loc-res-name mono">{r.path}</div>
+                          <div className="loc-res-metric">
+                            {r.latency_ms != null ? `${r.latency_ms} ${t('мс')}` : '—'}
+                          </div>
+                          <div className="loc-res-msg muted small" title={r.message}>
+                            {r.message || '—'}
+                          </div>
+                        </div>
+                      ))}
+                      {paths.length === 0 && (
+                        <div className="muted small">
+                          {t('Пути ещё не проверялись: результат появится после ближайшей проверки.')}
+                        </div>
+                      )}
                     </div>
                   </div>
-                  <div className="inc-msg muted small" title={inc.last_message}>
-                    {inc.last_message || '—'}
+                )}
+                {check.check_all_ips && (
+                  <div className="detail-locs">
+                    <div className="chart-cap">{t('IP-адреса домена')}</div>
+                    <div className="loc-results">
+                      {ips.map((r) => (
+                        <button
+                          key={r.ip}
+                          className={'loc-res loc-res-btn' + (r.ip === selectedIp ? ' loc-res-active' : '')}
+                          onClick={() => {
+                            setSelectedIp(r.ip)
+                            go('rt')
+                          }}
+                          title={t('Показать время ответа этого IP')}
+                        >
+                          <span className={`sdot sdot-${r.status}`} />
+                          <div className="loc-res-name mono">{r.ip}</div>
+                          <div className="loc-res-metric">
+                            {r.latency_ms != null ? `${r.latency_ms} ${t('мс')}` : '—'}
+                          </div>
+                          <div className="loc-res-msg muted small" title={r.message}>
+                            {r.message || '—'}
+                          </div>
+                        </button>
+                      ))}
+                      {ips.length === 0 && (
+                        <div className="muted small">
+                          {t('Ещё нет разбивки по IP — проверка идёт в фоне (или у домена один адрес).')}
+                        </div>
+                      )}
+                    </div>
                   </div>
-                  {/* «Сайт лежал, а алерта не было» — самый частый вопрос к панели.
-                      Ответ должен стоять прямо у инцидента: короткий сбой не набирает
-                      порог «N проверок подряд», и это видно без похода в базу. */}
-                  {inc.notified === false && <NoAlertChip inc={inc} t={t} />}
-                </div>
-              ))}
-            </div>
-          )}
-          {incHidden > 0 && (
-            <button className="ghost small stale-more" onClick={() => setOldInc(!oldInc)}>
-              {oldInc
-                ? t('скрыть прежние')
-                : t('показать прежние ({n})', { n: incHidden })}
-            </button>
-          )}
-        </div>
+                )}
+              </div>
+            )}
 
-        <div className="detail-log">
-          <div className="log-head">
-            <div className="chart-cap">{t('Журнал проверок')}</div>
-            <div className="win-switch log-switch">
-              <button
-                className={`win-btn${logFailed ? ' win-btn-active' : ''}`}
-                onClick={() => setLogFailed(true)}
-              >
-                {t('Только сбои')}
-              </button>
-              <button
-                className={`win-btn${!logFailed ? ' win-btn-active' : ''}`}
-                onClick={() => setLogFailed(false)}
-              >
-                {t('Все')}
-              </button>
-            </div>
-          </div>
-          {logRows.length === 0 ? (
-            <div className="muted small">
-              {logFailed ? t('Сбоев не было.') : t('Пока пусто.')}
-            </div>
-          ) : logShown.length === 0 ? (
-            <div className="muted small">
-              {logFailed
-                ? t('За {w} сбоев не было.', { w: winLabel })
-                : t('За {w} проверок нет.', { w: winLabel })}{' '}
-              {logFailed &&
-                t('последний — {t}', { t: fmtDateTime(logRows[0].ts) })}
-            </div>
-          ) : (
-            <div className="log-list">
-              {logShown.map((s, i) => (
-                <div key={i} className="log-item">
-                  <span className={`sdot sdot-${s.status}`} />
-                  <span className="log-time muted small">{fmtDateTime(s.ts)}</span>
-                  <span className="log-metric">
-                    {s.latency_ms != null ? `${s.latency_ms} ${t('мс')}` : '—'}
-                  </span>
-                  <span className="log-msg mono small" title={s.message}>
-                    {s.message || '—'}
-                  </span>
+            {cur.id === 'exp' && (
+              <div className="srv-sec">
+                <div className="expiry-pills">
+                  {check.check_ssl && (
+                    <ExpiryPill
+                      icon="🔐"
+                      label={t('SSL-сертификат')}
+                      days={check.ssl_days}
+                      warn={check.ssl_warn_days}
+                      message={check.ssl_message}
+                    />
+                  )}
+                  {check.check_domain && (
+                    <ExpiryPill
+                      icon="🌐"
+                      label={t('Домен')}
+                      days={check.domain_days}
+                      warn={check.domain_warn_days}
+                      message={check.domain_message}
+                    />
+                  )}
                 </div>
-              ))}
-            </div>
-          )}
-          {logHidden > 0 && (
-            <button className="ghost small stale-more" onClick={() => setOldLog(!oldLog)}>
-              {oldLog
-                ? t('скрыть прежние')
-                : t('показать прежние ({n})', { n: logHidden })}
-            </button>
-          )}
+                <div className="kv-list">
+                  {check.check_ssl && (
+                    <div className="kv-row">
+                      <span className="kv-k muted small">{t('SSL-сертификат')}</span>
+                      <span className="kv-v small">
+                        {subOf(check.ssl_message, check.ssl_warn_days.length > 0 && t('предупреждать за {d} дн.', { d: check.ssl_warn_days.join(', ') }))}
+                      </span>
+                    </div>
+                  )}
+                  {check.check_domain && (
+                    <div className="kv-row">
+                      <span className="kv-k muted small">{t('Домен')}</span>
+                      <span className="kv-v small">
+                        {subOf(check.domain_message, check.domain_warn_days.length > 0 && t('предупреждать за {d} дн.', { d: check.domain_warn_days.join(', ') }))}
+                      </span>
+                    </div>
+                  )}
+                  {check.expiry_checked_at && (
+                    <div className="kv-row">
+                      <span className="kv-k muted small">{t('проверено')}</span>
+                      <span className="kv-v small">{fmtRel(check.expiry_checked_at)}</span>
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {cur.id === 'inc' && (
+              <div className="srv-sec">
+                {incidents.length === 0 ? (
+                  <div className="srv-empty">{t('Инцидентов не было.')}</div>
+                ) : incShown.length === 0 ? (
+                  <div className="muted small">
+                    {t('За {w} инцидентов не было.', { w: winLabel })}{' '}
+                    {t('последний — {t}', { t: fmtDateTime(incidents[0].started_at) })}
+                  </div>
+                ) : (
+                  <div className="inc-list">
+                    {incShown.map((inc) => (
+                      <div key={inc.id} className="inc-item">
+                        <span className={`sdot sdot-${inc.status}`} />
+                        <div className="inc-when">
+                          <div>{fmtDateTime(inc.started_at)}</div>
+                          <div className="muted small">
+                            {inc.ended_at
+                              ? t('до {t}', { t: fmtDateTime(inc.ended_at) })
+                              : t('идёт сейчас')}
+                          </div>
+                        </div>
+                        <div className="inc-msg muted small" title={inc.last_message}>
+                          {inc.last_message || '—'}
+                        </div>
+                        {/* «Сайт лежал, а алерта не было» — самый частый вопрос к панели.
+                            Ответ должен стоять прямо у инцидента: короткий сбой не набирает
+                            порог «N проверок подряд», и это видно без похода в базу. */}
+                        {inc.notified === false && <NoAlertChip inc={inc} t={t} />}
+                      </div>
+                    ))}
+                  </div>
+                )}
+                {incHidden > 0 && (
+                  <button className="ghost small stale-more" onClick={() => setOldInc(!oldInc)}>
+                    {oldInc
+                      ? t('скрыть прежние')
+                      : t('показать прежние ({n})', { n: incHidden })}
+                  </button>
+                )}
+              </div>
+            )}
+
+            {cur.id === 'log' && (
+              <div className="srv-sec">
+                <div className="win-switch log-switch">
+                  <button
+                    className={`win-btn${!logFailed ? ' win-btn-active' : ''}`}
+                    onClick={() => setLogFailed(false)}
+                  >
+                    {t('Все')}
+                  </button>
+                  <button
+                    className={`win-btn${logFailed ? ' win-btn-active' : ''}`}
+                    onClick={() => setLogFailed(true)}
+                  >
+                    {t('Только сбои')}
+                  </button>
+                </div>
+                {logRows.length === 0 ? (
+                  <div className="srv-empty">
+                    {logFailed ? t('Сбоев не было.') : t('Пока пусто.')}
+                  </div>
+                ) : logShown.length === 0 ? (
+                  <div className="muted small">
+                    {logFailed
+                      ? t('За {w} сбоев не было.', { w: winLabel })
+                      : t('За {w} проверок нет.', { w: winLabel })}{' '}
+                    {logFailed &&
+                      t('последний — {t}', { t: fmtDateTime(logRows[0].ts) })}
+                  </div>
+                ) : (
+                  <div className="log-list">
+                    {logShown.map((s, i) => (
+                      <div key={i} className="log-item">
+                        <span className={`sdot sdot-${s.status}`} />
+                        <span className="log-time muted small">{fmtDateTime(s.ts)}</span>
+                        <span className="log-metric">
+                          {s.latency_ms != null ? `${s.latency_ms} ${t('мс')}` : '—'}
+                        </span>
+                        <span className="log-msg mono small" title={s.message}>
+                          {s.message || '—'}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                {logHidden > 0 && (
+                  <button className="ghost small stale-more" onClick={() => setOldLog(!oldLog)}>
+                    {oldLog
+                      ? t('скрыть прежние')
+                      : t('показать прежние ({n})', { n: logHidden })}
+                  </button>
+                )}
+              </div>
+            )}
+
+            {cur.id === 'deps' && (
+              <div className="srv-sec">
+                <CheckParentBar check={check} canEdit={!isViewer} onSaved={() => onSaved?.()} />
+                {!parents.length && isViewer && <div className="srv-empty">{ok.deps}</div>}
+                <div className="net-foot">
+                  {t('Пока сервер молчит, алерт монитора ждет его, а сам монитор назван в сообщении про сервер')}
+                </div>
+              </div>
+            )}
+
+            {cur.id === 'alerts' && (
+              <div className="srv-sec">
+                {!isViewer ? (
+                  <SnoozeControl
+                    snoozeUntil={check.snooze_until}
+                    busy={snoozing}
+                    onSnooze={async (hours) => {
+                      setSnoozing(true)
+                      try {
+                        await snoozeCheck(check.id, hours)
+                        onSaved?.()
+                      } catch (e) {
+                        fail(e)
+                      } finally {
+                        setSnoozing(false)
+                      }
+                    }}
+                  />
+                ) : snoozed ? (
+                  <div className="muted small">🔕 {ok.alerts}</div>
+                ) : null}
+                <div className="kv-list">
+                  <div className="kv-row">
+                    <span className="kv-k muted small">{t('Не слать алерты этого монитора:')}</span>
+                    <span className="kv-v small">
+                      {mutes.length
+                        ? mutes.map((k) => t(MON_ALERT_KINDS.find((x) => x.k === k)?.label ?? k)).join(', ')
+                        : t('все виды включены')}
+                      {!isViewer && (
+                        <>
+                          {' '}
+                          <button className="ghost small" onClick={startEdit}>
+                            {t('изменить')}
+                          </button>
+                        </>
+                      )}
+                    </span>
+                  </div>
+                  {check.type !== 'push' && check.alert_after_failures > 0 && (
+                    <div className="kv-row">
+                      <span className="kv-k muted small">{t('Когда уходит алерт')}</span>
+                      <span className="kv-v small">
+                        {t('после {n} неудачных проверок подряд, это около {m} мин', { n: check.alert_after_failures, m: alertAfterMin })}
+                      </span>
+                    </div>
+                  )}
+                </div>
+                {check.known_issue ? (
+                  <KnownCheckBar
+                    known={check.known_issue}
+                    canEdit={!isViewer}
+                    onDrop={async () => {
+                      await dropCheckKnown(check.id)
+                      onSaved?.()
+                    }}
+                  />
+                ) : !isViewer && (st === 'down' || st === 'degraded' || !!check.flaky_since) ? (
+                  <div>
+                    <button className="ghost small note-add" onClick={() => setKnownOpen(true)}>
+                      📌 {t('отметить как известную проблему')}
+                    </button>
+                  </div>
+                ) : null}
+              </div>
+            )}
+          </div>
         </div>
           </>
         )}
       </div>
     </div>
+    {knownOpen && (
+      <KnownDialog
+        title={check.name}
+        onClose={() => setKnownOpen(false)}
+        onSave={async (text, days) => {
+          await setCheckKnown(check.id, text, days)
+          setKnownOpen(false)
+          onSaved?.()
+        }}
+      />
+    )}
     {run && <RunVerdict run={run} onClose={closeRun} />}
     {zoomOpen && (
       <CheckChartModal
@@ -1022,17 +1359,6 @@ function ExpiryPill({
   )
 }
 
-function UptimeTile({ label, value }: { label: string; value: number | null | undefined }) {
-  return (
-    <div className="uptime-tile">
-      <div className={`uptime-val ${tone(value ?? null)}`}>
-        {value == null ? '—' : `${value}%`}
-      </div>
-      <div className="uptime-lbl">{label}</div>
-    </div>
-  )
-}
-
 // Адрес push-монитора и как его дергать: из крона после успешного прогона или всегда, с кодом выхода.
 function PushInfo({ check, canEdit }: { check: Check; canEdit: boolean }) {
   const { t } = useI18n()
@@ -1121,10 +1447,7 @@ function DnsInfo({ check, canEdit, onAccepted }: { check: Check; canEdit: boolea
   }
   return (
     <div className="dns-info">
-      <div className="detail-target">
-        {check.target} <span className="type-chip">{check.dns_type || 'A'}</span>
-        {check.dns_server && <span className="muted small"> @{check.dns_server}</span>}
-      </div>
+      {/* имя, тип записи и резолвер - в строке под названием монитора */}
       <div className="muted small">
         {expect.length > 0
           ? `${check.dns_match === 'contains' ? t('ждем, что ответ содержит') : t('ждем ответ')}: ${expect.join(', ')}`

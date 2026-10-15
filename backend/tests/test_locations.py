@@ -182,6 +182,7 @@ async def test_location_partial_alert(tmp_path, monkeypatch):
     assert len(sent) == 1
     assert "🟢 Прямая — доступен" in sent[0] and "🔴 Прокси — недоступен" in sent[0]
     assert "https://p.example.com/?check=" in sent[0]  # диплинк на монитор
+    assert "sec=loc" in sent[0]  # сразу в раздел "Локации"
 
     # тот же набор «упавших» → без повторного алерта
     sent.clear()
