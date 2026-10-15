@@ -14,6 +14,10 @@ MUTED_KEY = "alerts_muted"
 TG_POLL_KEY = "tg_poll"
 # эскалация: кому повторять алерт, на который никто не нажал "взял"
 ESC_KEY = "alerts_escalation"
+# чаты по группам: алерты выбранных групп серверов и сайтов идут еще и в свои чаты
+ROUTES_KEY = "alerts_routes"
+# какой чат по группам последним не принял сообщение: видно в настройках
+ROUTES_STATE_KEY = "alerts_routes_state"
 ESC_KINDS_DEFAULT = ["down", "offline"]
 UNCOVERED_KEY = "uncovered_digest_sent"
 VAULT_META_KEY = "backup_vault_meta"  # соль/итерации/verifier сейфа (СЕКРЕТОВ НЕТ)
@@ -319,6 +323,8 @@ async def get_alert_config(session: AsyncSession, settings: Settings) -> dict:
         # умолчанию - если этого бота уже читает кто-то еще, мы бы забирали его апдейты
         "tg_buttons": bool(data.get("tg_buttons", False)),
         "tz": data.get("tz") or settings.alert_tz,
+        # чаты по группам: отдельный ключ, чтобы сохранение основных настроек их не стирало
+        "routes": await get_routes(session),
     }
 
 
@@ -364,6 +370,61 @@ def _esc_clean(data: dict) -> dict:
         "users": [str(u)[:64] for u in (data.get("users") or []) if str(u).strip()][:50],
         "kinds": [str(k)[:40] for k in kinds][:50] if isinstance(kinds, list) else list(ESC_KINDS_DEFAULT),
     }
+
+
+def _names(v) -> list[str]:
+    out: list[str] = []
+    for x in v if isinstance(v, list) else []:
+        x = str(x).strip()[:128]
+        if x and x not in out:
+            out.append(x)
+    return out[:100]
+
+
+def _routes_clean(data: dict) -> dict:
+    """main: "all" - основной чат получает все алерты, "rest" - только то, что не ушло в чаты по
+    группам. chats: [{name, chat, server_groups, site_groups}], чат без групп ничего не получает."""
+    chats = []
+    for c in data.get("chats") or []:
+        if not isinstance(c, dict):
+            continue
+        chat = str(c.get("chat") or "").strip()[:64]
+        if not chat:
+            continue
+        chats.append({
+            "name": str(c.get("name") or "").strip()[:64],
+            "chat": chat,
+            "server_groups": _names(c.get("server_groups")),
+            "site_groups": _names(c.get("site_groups")),
+        })
+    return {"main": "rest" if data.get("main") == "rest" else "all", "chats": chats[:20]}
+
+
+async def get_routes(session: AsyncSession) -> dict:
+    raw = await _get_raw(session, ROUTES_KEY)
+    try:
+        data = json.loads(raw) if raw else {}
+    except ValueError:
+        data = {}
+    return _routes_clean(data if isinstance(data, dict) else {})
+
+
+async def set_routes(session: AsyncSession, data: dict) -> None:
+    await _set_raw(session, ROUTES_KEY, json.dumps(_routes_clean(data), ensure_ascii=False))
+
+
+async def get_routes_state(session: AsyncSession) -> dict:
+    """{chat: {"err": текст, "at": когда}} - чаты, которые последний раз не приняли сообщение."""
+    raw = await _get_raw(session, ROUTES_STATE_KEY)
+    try:
+        data = json.loads(raw) if raw else {}
+    except ValueError:
+        data = {}
+    return data if isinstance(data, dict) else {}
+
+
+async def set_routes_state(session: AsyncSession, data: dict) -> None:
+    await _set_raw(session, ROUTES_STATE_KEY, json.dumps(data, ensure_ascii=False))
 
 
 async def get_escalation(session: AsyncSession) -> dict:

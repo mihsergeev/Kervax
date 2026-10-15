@@ -12,6 +12,9 @@ import { useI18n } from './i18n'
 
 // Редактор ГЛОБАЛЬНЫХ правил алертов (серверов или сайтов): тумблер вкл/выкл + текст.
 // Правила применяются КО ВСЕМ. Пороги и точечные исключения — в карточке сущности.
+// Область правила (только группы, серверы, мониторы) здесь больше не задается, но у старых
+// установок она могла остаться и действует: ее видно в строке правила, а снять можно кнопкой.
+// Разделять алерты по группам теперь удобнее через "Чаты по группам".
 function AlertRulesSection({
   title,
   getRules,
@@ -57,14 +60,8 @@ function AlertRulesSection({
     setErr(null)
     setMsg(null)
     try {
-      // все правила — глобальные (ко всем); scope больше не задаётся тут
-      const rules: Record<string, Rule> = Object.fromEntries(
-        Object.entries(data.rules).map(([k, r]) => [
-          k,
-          { ...r, scope_type: 'all' as const, scope: [] },
-        ]),
-      )
-      setData(await putRules(rules))
+      // область здесь не задается, но и не сбрасывается молча: снимает ее только кнопка
+      setData(await putRules(data.rules))
       setMsg(t('Сохранено.'))
     } catch (e) {
       fail(e)
@@ -74,6 +71,27 @@ function AlertRulesSection({
   }
 
   if (!data) return <p className="muted small">{t('загрузка…')}</p>
+
+  const scoped = data.kinds.filter((k) => data.rules[k.key].scope_type !== 'all')
+  const scopeLabel = (r: Rule) =>
+    r.scope_type === 'groups'
+      ? t('только группы: {list}', { list: r.scope.join(', ') || '-' })
+      : r.scope_type === 'servers'
+        ? t('только серверов: {n}', { n: r.scope.length })
+        : r.scope_type === 'checks'
+          ? t('только мониторов: {n}', { n: r.scope.length })
+          : t('ко всем')
+  const unscope = () =>
+    setData((d) =>
+      d
+        ? {
+            ...d,
+            rules: Object.fromEntries(
+              Object.entries(d.rules).map(([k, r]) => [k, { ...r, scope_type: 'all' as const, scope: [] }]),
+            ),
+          }
+        : d,
+    )
 
   return (
     <div className="settings-group">
@@ -102,7 +120,7 @@ function AlertRulesSection({
                 />
                 <span className="arule-name">{k.label}</span>
                 <span className="arule-sum muted small">
-                  {r.enabled ? t('ко всем') : t('выключен')}
+                  {r.enabled ? scopeLabel(r) : t('выключен')}
                 </span>
                 <span className="arule-caret">{expanded ? '▾' : '▸'}</span>
               </div>
@@ -127,9 +145,18 @@ function AlertRulesSection({
 
       {err && <p className="form-error">{err}</p>}
       {msg && <p className="form-ok">{msg}</p>}
-      <p className="muted small">
-        {t('Правила действуют на все. Пороги и исключения — в настройках конкретного сервера/монитора.')}
-      </p>
+      {scoped.length > 0 ? (
+        <div className="form-error small">
+          {t('У видов алертов ({n}) осталось старое ограничение по группам или объектам: алерты остальных по ним не уходят никуда, даже в основной чат. Разделять алерты по чатам теперь можно в "Чаты по группам" выше.', { n: scoped.length })}{' '}
+          <button className="ghost small" onClick={unscope}>
+            {t('Снять ограничения')}
+          </button>
+        </div>
+      ) : (
+        <p className="muted small">
+          {t('Правила действуют на все. Пороги и исключения — в настройках конкретного сервера/монитора.')}
+        </p>
+      )}
       {hint && <p className="muted small">{hint}</p>}
       <div className="modal-actions" style={{ justifyContent: 'flex-start' }}>
         <button onClick={save} disabled={busy}>

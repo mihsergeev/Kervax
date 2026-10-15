@@ -59,6 +59,32 @@ def _msg_scope(m: str) -> tuple[str, str]:
     return (getattr(m, "section", ""), getattr(m, "group", ""))
 
 
+def route_hits(cfg: dict, m: str) -> list[dict]:
+    """Чаты по группам, которым положен этот алерт: группа объекта есть в списке чата. Алерт без
+    группы (общий, про саму панель, сервер вне групп) в чаты по группам не идет."""
+    section, group = _msg_scope(m)
+    if not section or not group:
+        return []
+    field = "server_groups" if section in _SERVER_SECTIONS else "site_groups"
+    return [r for r in (cfg.get("routes") or {}).get("chats") or [] if group in r.get(field, [])]
+
+
+def chats_for(cfg: dict, m: str) -> list[str]:
+    """Куда в Telegram идет алерт: основной чат (всё или только то, что не забрали чаты по
+    группам) и чаты по группам. Без повторов, основной первым."""
+    main = str(cfg.get("telegram_chat") or "") if cfg.get("telegram_token") else ""
+    if not cfg.get("telegram_token"):
+        return []
+    hits = [r["chat"] for r in route_hits(cfg, m)]
+    out: list[str] = []
+    if main and ((cfg.get("routes") or {}).get("main") != "rest" or not hits):
+        out.append(main)
+    for c in hits:
+        if c not in out:
+            out.append(c)
+    return out
+
+
 def wants(user: User, m: str) -> bool:
     """Касается ли алерт этого человека — ровно та же нарезка, что и в панели.
 
@@ -268,27 +294,24 @@ async def dispatch(
     # получатели подчиняются тем же правилам, отдельного «ночью можно» у них нет
     if session_factory is not None:
         await send_personal(session_factory, cfg, messages, threshold, parse_mode, rows, sent)
-    channels = _channel_count(cfg)
-    if threshold and len(messages) >= threshold:
-        errors = await send_alert(cfg, _digest(messages), parse_mode)
-        delivered = list(messages) if len(errors) < channels else []
-        ok = not errors
+    main = str(cfg.get("telegram_chat") or "") if cfg.get("telegram_token") else ""
+    on_main = [bool(main) and main in chats_for(cfg, m) for m in messages]
+    everything = list(range(len(messages)))
+    if not main or all(on_main):
+        ok, got = await _send_common(cfg, everything, messages, threshold, parse_mode, rows, sent)
     else:
-        ok, delivered = True, []
-        for i, m in enumerate(messages):
-            aid = rows.get(i)
-            out: list = []
-            if aid:
-                markup = tg_buttons.keyboard(aid, getattr(m, "kind", ""))
-                errors = await send_alert(cfg, m, parse_mode, markup, out)
-            else:
-                errors = await send_alert(cfg, m, parse_mode)
-            if aid and out:
-                sent.setdefault(aid, []).extend(out)
-            if errors:
-                ok = False  # хотя бы один канал не принял - повторим на следующем цикле
-            if len(errors) < channels:
-                delivered.append(m)
+        # основной чат получает только остальное, а вебхук - все, как и раньше
+        ok, got = await _send_common({**cfg, "webhook": ""}, [i for i in everything if on_main[i]],
+                                     messages, threshold, parse_mode, rows, sent)
+        if cfg.get("webhook"):
+            ok2, got2 = await _send_common({**cfg, "telegram_chat": ""}, everything, messages,
+                                           threshold, parse_mode, {}, sent)
+            ok, got = ok and ok2, got | got2
+    if cfg.get("telegram_token"):
+        rok, rgot = await _send_routes(cfg, messages, threshold, parse_mode, rows, sent,
+                                       session_factory)
+        ok, got = ok and rok, got | rgot
+    delivered = [m for i, m in enumerate(messages) if i in got]
     if rows:
         await tg_buttons.store_sent(session_factory, sent)
     if session_factory is not None and buttons_on(cfg):
@@ -353,6 +376,127 @@ async def with_notes(session_factory, messages: list[str]) -> list[str]:
 def _channel_count(cfg: dict) -> int:
     """Сколько общих каналов настроено: алерт считается полученным, если принял хоть один."""
     return int(bool(cfg.get("telegram_token") and cfg.get("telegram_chat"))) + int(bool(cfg.get("webhook")))
+
+
+async def _send_common(cfg: dict, idx: list[int], messages: list[str], threshold: int,
+                       parse_mode: str | None, rows: dict[int, int], sent: dict[int, list]
+                       ) -> tuple[bool, set[int]]:
+    """Основной чат и вебхук: дайджестом, если сообщений много, иначе по одному. Хотя бы один
+    канал не принял - повтор на следующем цикле. Возвращает, все ли ушло, и что дошло хоть куда."""
+    channels = _channel_count(cfg)
+    if not idx or not channels:
+        return True, set()
+    if threshold and len(idx) >= threshold:
+        errors = await send_alert(cfg, _digest([messages[i] for i in idx]), parse_mode)
+        return not errors, (set(idx) if len(errors) < channels else set())
+    ok, got = True, set()
+    for i in idx:
+        m = messages[i]
+        aid = rows.get(i)
+        out: list = []
+        if aid:
+            markup = tg_buttons.keyboard(aid, getattr(m, "kind", ""))
+            errors = await send_alert(cfg, m, parse_mode, markup, out)
+        else:
+            errors = await send_alert(cfg, m, parse_mode)
+        if aid and out:
+            sent.setdefault(aid, []).extend(out)
+        if errors:
+            ok = False  # хотя бы один канал не принял - повторим на следующем цикле
+        if len(errors) < channels:
+            got.add(i)
+    return ok, got
+
+
+async def _send_batch(cfg: dict, chat: str, items: list[tuple[int, str]], threshold: int,
+                      parse_mode: str | None, rows: dict[int, int], sent: dict[int, list]
+                      ) -> tuple[list[int], str]:
+    """Пачка сообщений в чат по группам: дайджестом, если их много, иначе по одному с кнопками.
+    Возвращает, какие не ушли, и текст последней ошибки."""
+    api, token = cfg.get("telegram_api", ""), cfg["telegram_token"]
+    if threshold and len(items) >= threshold:
+        try:
+            await tg_send(api, token, chat, _digest([t for _, t in items]), parse_mode)
+            return [], ""
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Telegram-алерт в чат %s не отправлен: %s", chat, exc)
+            return [i for i, _ in items], str(exc)
+    failed: list[int] = []
+    err = ""
+    for i, text in items:
+        aid = rows.get(i)
+        markup = tg_buttons.keyboard(aid, getattr(text, "kind", "")) if aid else None
+        try:
+            mid = await tg_send(api, token, chat, text, parse_mode, markup)
+            if aid and mid is not None:
+                sent.setdefault(aid, []).append({"chat": chat, "id": mid})
+        except Exception as exc:  # noqa: BLE001 — алерт не должен ронять цикл
+            log.warning("Telegram-алерт в чат %s не отправлен: %s", chat, exc)
+            failed.append(i)
+            err = str(exc)
+    return failed, err
+
+
+def _fallback_text(m: str, name: str, err: str, parse_mode: str | None) -> str:
+    """Сообщение, которое чат по группам не принял, в основном чате: с припиской, почему оно
+    здесь - иначе непонятно, откуда в основном чате алерты чужой группы."""
+    note = f"не дошло в чат «{name}»: {err[:150]}"
+    return f"{m}\n↪ {html.escape(note) if parse_mode == 'HTML' else note}"
+
+
+async def _send_routes(cfg: dict, messages: list[str], threshold: int, parse_mode: str | None,
+                       rows: dict[int, int], sent: dict[int, list], session_factory=None
+                       ) -> tuple[bool, set[int]]:
+    """Чаты по группам. Чат, который не принял сообщение, повтора не вызывает (иначе основной
+    чат получал бы тот же алерт каждый цикл): сообщение уходит в основной чат с припиской, если
+    тот его еще не получил, а ошибка видна в настройках."""
+    main = str(cfg.get("telegram_chat") or "")
+    names = {r["chat"]: r.get("name") or r["chat"] for r in (cfg.get("routes") or {}).get("chats") or []}
+    plan: dict[str, list[tuple[int, str]]] = {}
+    for i, m in enumerate(messages):
+        for chat in chats_for(cfg, m):
+            if chat != main:
+                plan.setdefault(chat, []).append((i, m))
+    if not plan:
+        return True, set()
+    got: set[int] = set()
+    errors: dict[str, str] = {}
+    fallback: list[str] = []
+    back: list[int] = []
+    for chat, items in plan.items():
+        failed, err = await _send_batch(cfg, chat, items, threshold, parse_mode, rows, sent)
+        got.update(i for i, _ in items if i not in failed)
+        if failed:
+            errors[chat] = err
+        for i in failed:
+            if main and main not in chats_for(cfg, messages[i]) and i not in back:
+                back.append(i)
+                fallback.append(_fallback_text(messages[i], names.get(chat, chat), err, parse_mode))
+    ok = True
+    if fallback:
+        fok, fgot = await _send_common({**cfg, "webhook": ""}, list(range(len(fallback))), fallback,
+                                       threshold, parse_mode, {}, sent)
+        ok = fok
+        got.update(back[j] for j in fgot)
+    if session_factory is not None:
+        await _note_routes(session_factory, set(plan), errors)
+    return ok, got
+
+
+async def _note_routes(session_factory, used: set[str], errors: dict[str, str]) -> None:
+    """Запомнить, какой чат по группам не принял сообщение (и забыть, когда снова принял)."""
+    try:
+        async with session_factory() as session:
+            state = await settings_store.get_routes_state(session)
+            new = {c: v for c, v in state.items() if c not in used or c in errors}
+            now = datetime.now(timezone.utc).isoformat()
+            for c, e in errors.items():
+                new[c] = {"err": e[:300], "at": now}
+            if new != state:
+                await settings_store.set_routes_state(session, new)
+                await session.commit()
+    except Exception:  # noqa: BLE001
+        log.warning("состояние чатов по группам не записано", exc_info=True)
 
 
 _TAG = re.compile(r"<[^>]+>")
