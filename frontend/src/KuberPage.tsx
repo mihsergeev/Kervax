@@ -439,7 +439,7 @@ const KUBE_SECTIONS: SecDef[] = [
   { id: 'overview', label: 'Сводка', group: '' },
   { id: 'pods', label: 'Поды', group: 'Нагрузка' },
   { id: 'finished', label: 'Завершенные', group: 'Нагрузка' },
-  { id: 'workloads', label: 'Воркоады', group: 'Нагрузка' },
+  { id: 'workloads', label: 'Ворклоады', group: 'Нагрузка' },
   { id: 'cron', label: 'CronJob', group: 'Нагрузка' },
   { id: 'nodes', label: 'Ноды', group: 'Кластер' },
   { id: 'expiry', label: 'Сроки', group: 'Кластер' },
@@ -616,7 +616,7 @@ function KubeHostModal({
     finished: t('завершенных подов: {n}, упали {m}', { n: doneCount, m: doneFailed }),
     workloads: workloads.length
       ? t('в полном составе {a} из {b}', { a: workloads.length - wlPartial.length, b: workloads.length })
-      : t('Воркоадов нет'),
+      : t('Ворклоадов нет'),
     cron: cronBad
       ? t('заданий: {n}, с проблемой {m}', { n: cronjobs.length, m: cronBad })
       : t('заданий: {n}, все отрабатывают', { n: cronjobs.length }),
@@ -828,7 +828,7 @@ function KubeHostModal({
             {cur.id === 'workloads' && (
               <div className="loc-results docker-clist">
                 {workloads.length === 0
-                  ? empty(t('Воркоадов нет'))
+                  ? empty(t('Ворклоадов нет'))
                   : fworkloads.length === 0
                     ? empty(t('Ничего не найдено.'))
                     : fworkloads.map((w) => (

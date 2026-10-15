@@ -13,6 +13,7 @@ helper changes-setup раз в 10 минут снимает отпечатки S
 from __future__ import annotations
 
 import logging
+import re
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select
@@ -109,6 +110,48 @@ def diff(old: dict, new: dict) -> list[dict]:
     return ev
 
 
+# Добавленное и потом убранное: что именно добавили (по тексту события, в старых записях
+# ленты другого нет) и как сказать, что этого уже нет
+_ADD_DEL = [
+    ("key", re.compile(r"^добавлен SSH-ключ пользователю (\S+): (.+)$"),
+     re.compile(r"^удален SSH-ключ пользователя (\S+): (.+)$"), "позже удален"),
+    ("user", re.compile(r"^новый пользователь (\S+) \("),
+     re.compile(r"^пользователь (\S+) больше не может войти или удален$"), "позже удален или больше не может войти"),
+    ("sudo", re.compile(r"^(\S+) добавлен в группу (\S+)$"), re.compile(r"^(\S+) убран из группы (\S+)$"), "позже убран"),
+    ("sudo", re.compile(r"^добавлен (/\S+)$"), re.compile(r"^удален (/\S+)$"), "позже удален"),
+]
+
+
+def _subject(e: dict) -> tuple[str | None, tuple | None, str]:
+    """("add"/"del", что именно, пометка) для событий, у которых бывает пара."""
+    text = str(e.get("text") or "")
+    for i, (kind, add_re, del_re, note) in enumerate(_ADD_DEL):
+        if e.get("kind") != kind:
+            continue
+        for act, rx in (("add", add_re), ("del", del_re)):
+            m = rx.match(text)
+            if m and e.get("act") == act:
+                return act, (i, *m.groups()), note
+    return None, None, ""
+
+
+def annotate(log: list[dict]) -> list[dict]:
+    """Копия ленты (новые сверху), где добавленное и позже убранное помечено: "добавлен ключ"
+    без пометки читается как висящий доступ, хотя ключ уже сняли. Строка не прячется - видно,
+    что ключ кто-то на время клал."""
+    removed: set[tuple] = set()
+    out = []
+    for e in log:
+        act, subj, note = _subject(e) if isinstance(e, dict) else (None, None, "")
+        if act == "del":
+            removed.add(subj)
+        elif act == "add" and subj in removed:
+            removed.discard(subj)  # еще раньше могли добавить и снять снова - то отдельная пара
+            e = dict(e, text=f"{e['text']} ({note})")
+        out.append(e)
+    return out
+
+
 SSH_SEEN_KEEP = timedelta(days=90)
 _PASSWORD_METHODS = ("password", "keyboard-interactive", "keyboard-interactive/pam")
 
@@ -160,7 +203,7 @@ def unacked_alerts(srv: Server, now: datetime, hours: int = HOME_HOURS) -> list[
     st = srv.changes if isinstance(getattr(srv, "changes", None), dict) else {}
     since = (now - timedelta(hours=hours)).isoformat()
     ack = str(st.get("ack_ts") or "")
-    return [e for e in st.get("log") or [] if isinstance(e, dict) and e.get("alert")
+    return [e for e in annotate(st.get("log") or []) if isinstance(e, dict) and e.get("alert")
             and str(e.get("ts") or "") >= since and str(e.get("ts") or "") > ack]
 
 
@@ -183,7 +226,7 @@ def view(srv: Server) -> dict | None:
     if not st:
         return None
     snap = st.get("snap") or {}
-    return {"log": (st.get("log") or [])[:60], "ack_ts": st.get("ack_ts"),
+    return {"log": annotate(st.get("log") or [])[:60], "ack_ts": st.get("ack_ts"),
             "snap_ts": snap.get("ts"), "keys": len(_keys(snap)), "users": len(_users(snap))}
 
 

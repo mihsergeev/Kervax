@@ -67,6 +67,26 @@ def test_baseline_feed_and_ack():
     assert changes.view(srv)["keys"] == 2
 
 
+def test_added_then_removed_is_marked():
+    """Ключ положили и сняли: в ленте и на главной строка остается, но с пометкой."""
+    st = changes.apply_snapshot(None, _snap(T - 1800), NOW)
+    st = changes.apply_snapshot(st, _snap(T - 1200, keys=[KEY_A, KEY_B],
+                                         sudo={"groups": {"sudo": ["ops", "deploy"]}, "files": {"/etc/sudoers": "1111"}}), NOW)
+    st = changes.apply_snapshot(st, _snap(T - 600, keys=[KEY_A]), NOW)
+    srv = Server(name="n", token_hash="x", changes=st)
+    assert [e["text"] for e in changes.unacked_alerts(srv, NOW)] == [
+        "добавлен SSH-ключ пользователю deploy: RSA SHA256:bbbb (позже удален)",
+        "deploy добавлен в группу sudo (позже убран)"]
+    assert changes.view(srv)["log"][2]["text"].endswith("(позже удален)")
+    assert not st["log"][2]["text"].endswith(")")  # в базе текст как был
+    # положили снова - новое добавление без пометки, старое с пометкой
+    st = changes.apply_snapshot(st, _snap(T - 60, keys=[KEY_A, KEY_B]), NOW)
+    srv.changes = st
+    assert [e["text"] for e in changes.unacked_alerts(srv, NOW) if e["kind"] == "key"] == [
+        "добавлен SSH-ключ пользователю deploy: RSA SHA256:bbbb",
+        "добавлен SSH-ключ пользователю deploy: RSA SHA256:bbbb (позже удален)"]
+
+
 def _srv_row(st):
     return Server(id=1, name="n1", token_hash="x", enabled=True, backup_not_required=True, last_seen=NOW,
                   offline_after_seconds=120, alert_sustain_seconds=900, last_report={},

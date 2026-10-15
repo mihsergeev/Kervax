@@ -471,7 +471,7 @@ export function CheckDetail({ check, groups, initialSec, onClose, onSaved, onRun
     log: check.last_checked_at ? t('последняя проверка {ago}', { ago: fmtRel(check.last_checked_at) }) : t('Пока пусто.'),
     deps: parents.length
       ? t('зависит от {list}', { list: parents.map((p) => p.name).join(', ') })
-      : (check.parent_mode ?? 'auto') === 'off' ? t('ни от какого сервера не зависит') : t('сервер не найден'),
+      : (check.parent_mode ?? 'auto') === 'off' ? t('ни от какого сервера не зависит') : t('на каком сервере работает, панель не определила'),
     alerts: snoozed
       ? t('алерты заглушены до {t}', { t: fmtDateTime(check.snooze_until!) })
       : mutes.length

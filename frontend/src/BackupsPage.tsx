@@ -2064,8 +2064,11 @@ function BackupServerModal({ server: s, info, servers, canAct, initialSec, onCha
   const srvOld = !!info.version && verLt(info.version, RESTSRV_TARGET)
   const tlsPort = info.tls_port || 64101
   const now = Date.now() / 1000
-  // недельная проверка целостности за две недели: сколько прошло из тех, что вообще проверяются
-  const checked = Object.entries(ext?.repos ?? {}).filter(([n, x]) => !ctx.archived.has(n) && !!x.check_ts && now - x.check_ts < 14 * 86400)
+  // недельная проверка целостности за две недели: сколько прошло из тех, что вообще проверялись.
+  // check_ok -1 - проверки еще не было: helper заранее ставит дату первой, и такой репозиторий
+  // выглядел бы проваленным ("1 из 4")
+  const checked = Object.entries(ext?.repos ?? {}).filter(([n, x]) =>
+    !ctx.archived.has(n) && (x.check_ok ?? -1) >= 0 && !!x.check_ts && now - x.check_ts < 14 * 86400)
   const checkedOk = checked.filter(([, x]) => x.check_ok === 1).length
   const smuted = new Set(s.alert_mutes ?? [])
   const audit = (s.backup_audit ?? []).filter((x) => !x.muted)
@@ -3006,10 +3009,10 @@ export function BackupsPage({
   const allHosts = (servers ?? [])
     .map((s) => ({ s, d: s.last_report?.backup }))
     // клиент = ЖИВОЙ бэкап (см. backupAlive). Мёртвый бэкап (снесли restic+таймер,
-    // остался лишь осиротевший метрик) — НЕ клиент, уходит в «Без бэкапа».
-    .filter((x): x is BHost =>
-      backupAlive(x.d) && !x.s.last_report?.backup_server?.present,
-    )
+    // остался лишь осиротевший метрик) — НЕ клиент, уходит в «Без бэкапа». Сервер бэкапов со
+    // своим живым бэкапом на другой сервер - тоже клиент: иначе его бэкап нигде не виден, а
+    // ссылка ?backup=id из алерта уводила в окно сервера
+    .filter((x): x is BHost => backupAlive(x.d))
   // заглушённое по бэкапам: репозитории (у бэкап-серверов) и пункты покрытия (у клиентов)
   const backupMuted = (servers ?? [])
     .map((s) => ({ s, items: collectMutes(s, t, ['repo', 'audit']) }))

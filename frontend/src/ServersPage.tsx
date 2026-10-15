@@ -883,7 +883,7 @@ function serverSecInfo(c: {
     parent ? t('стоит за {name}', { name: parent.name }) : '',
     behind ? t('за ним серверов: {n}', { n: behind }) : '',
     c.kids.length ? t('зависят мониторов: {n}', { n: c.kids.length }) : '',
-  ].filter(Boolean).join(', ') || t('не задано')
+  ].filter(Boolean).join(', ') || t('связей нет: ни за кем не стоит, мониторов на нем нет')
   const known = Object.keys(s.known_issues ?? {}).length
   ok.alerts = [
     c.mutes.length ? t('заглушено: {list}', { list: muteBrief(c.mutes, t) }) : t('ничего не заглушено'),

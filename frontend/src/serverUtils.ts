@@ -257,6 +257,9 @@ export function backupWindowNote(s: Server): string | null {
   const hourOf = (ts: number) => new Date(ts * 1000).getHours()
   const hhmm = (ts: number) =>
     new Date(ts * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+  // Окно - ночь до дедлайна. Начатый днем или вечером (расписание на 18:00, запуск руками) в
+  // окно и не собирался: "позже окна" про него вводило в заблуждение
+  if (started && hourOf(started) >= deadline && hourOf(started) < 22) return null
   // бэкап ещё идёт (последний старт новее последнего завершения), и уже позже дедлайна
   const running = started > ended
   if (running) {
