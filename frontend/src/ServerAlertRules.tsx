@@ -1,78 +1,55 @@
-import { useCallback, useEffect, useState } from 'react'
-import {
-  ApiError,
-  getServerAlertRules,
-  getSiteAlertRules,
-  putServerAlertRules,
-  putSiteAlertRules,
-  type ServerAlertRule as Rule,
-  type ServerAlertRules as Rules,
-} from './api'
+import { useState } from 'react'
+import { type ServerAlertRule as Rule, type ServerAlertRules as Rules } from './api'
 import { useI18n } from './i18n'
 
 // Редактор ГЛОБАЛЬНЫХ правил алертов (серверов или сайтов): тумблер вкл/выкл + текст.
 // Правила применяются КО ВСЕМ. Пороги и точечные исключения — в карточке сущности.
 // Область правила (только группы, серверы, мониторы) здесь больше не задается, но у старых
 // установок она могла остаться и действует: ее видно в строке правила, а снять можно кнопкой.
-// Разделять алерты по группам теперь удобнее через "Чаты по группам".
-function AlertRulesSection({
-  title,
-  getRules,
-  putRules,
-  onUnauthorized,
+// Загружает и сохраняет правила окно алертов, здесь только правка. Подпись справа - только у
+// выключенных и ограниченных: "ко всем" в каждой строке из 65 было шумом.
+
+export const scopedKinds = (d: Rules) => d.kinds.filter((k) => d.rules[k.key] && d.rules[k.key].scope_type !== 'all')
+
+export const unscopeRules = (d: Rules): Rules => ({
+  ...d,
+  rules: Object.fromEntries(
+    Object.entries(d.rules).map(([k, r]) => [k, { ...r, scope_type: 'all' as const, scope: [] }]),
+  ),
+})
+
+// Старое ограничение правил: алерты остальных по этим видам не уходят никуда
+export function ScopedNote({ n, onUnscope }: { n: number; onUnscope: () => void }) {
+  const { t } = useI18n()
+  return (
+    <div className="al-note al-note-bad">
+      <span>
+        {t('У видов алертов ({n}) осталось старое ограничение по группам или объектам: алерты остальных по ним не уходят никуда, даже в основной чат.', { n })}
+      </span>
+      <button className="ghost small" onClick={onUnscope}>
+        {t('Снять ограничения')}
+      </button>
+    </div>
+  )
+}
+
+export function AlertRulesList({
+  data,
+  onChange,
   hint,
 }: {
-  title: string
-  getRules: () => Promise<Rules>
-  putRules: (r: Record<string, Rule>) => Promise<Rules>
-  onUnauthorized: () => void
+  data: Rules | null
+  onChange: (d: Rules) => void
   hint?: string
 }) {
   const { t } = useI18n()
-  const [data, setData] = useState<Rules | null>(null)
   const [open, setOpen] = useState<string | null>(null)
-  const [busy, setBusy] = useState(false)
-  const [msg, setMsg] = useState<string | null>(null)
-  const [err, setErr] = useState<string | null>(null)
-
-  const fail = useCallback(
-    (e: unknown) => {
-      if (e instanceof ApiError && e.status === 401) return onUnauthorized()
-      setErr(e instanceof Error ? e.message : t('Ошибка'))
-    },
-    [onUnauthorized, t],
-  )
-
-  useEffect(() => {
-    getRules().then(setData).catch(fail)
-  }, [getRules, fail])
-
-  function setRule(kind: string, patch: Partial<Rule>) {
-    setData((d) =>
-      d ? { ...d, rules: { ...d.rules, [kind]: { ...d.rules[kind], ...patch } } } : d,
-    )
-    setMsg(null)
-  }
-
-  async function save() {
-    if (!data) return
-    setBusy(true)
-    setErr(null)
-    setMsg(null)
-    try {
-      // область здесь не задается, но и не сбрасывается молча: снимает ее только кнопка
-      setData(await putRules(data.rules))
-      setMsg(t('Сохранено.'))
-    } catch (e) {
-      fail(e)
-    } finally {
-      setBusy(false)
-    }
-  }
 
   if (!data) return <p className="muted small">{t('загрузка…')}</p>
 
-  const scoped = data.kinds.filter((k) => data.rules[k.key].scope_type !== 'all')
+  const setRule = (kind: string, patch: Partial<Rule>) =>
+    onChange({ ...data, rules: { ...data.rules, [kind]: { ...data.rules[kind], ...patch } } })
+  const scoped = scopedKinds(data)
   const scopeLabel = (r: Rule) =>
     r.scope_type === 'groups'
       ? t('только группы: {list}', { list: r.scope.join(', ') || '-' })
@@ -80,22 +57,11 @@ function AlertRulesSection({
         ? t('только серверов: {n}', { n: r.scope.length })
         : r.scope_type === 'checks'
           ? t('только мониторов: {n}', { n: r.scope.length })
-          : t('ко всем')
-  const unscope = () =>
-    setData((d) =>
-      d
-        ? {
-            ...d,
-            rules: Object.fromEntries(
-              Object.entries(d.rules).map(([k, r]) => [k, { ...r, scope_type: 'all' as const, scope: [] }]),
-            ),
-          }
-        : d,
-    )
+          : ''
 
   return (
-    <div className="settings-group">
-      <h4>{title}</h4>
+    <>
+      {scoped.length > 0 && <ScopedNote n={scoped.length} onUnscope={() => onChange(unscopeRules(data))} />}
       <div className="arule-list">
         {data.kinds.map((k) => {
           const r = data.rules[k.key]
@@ -119,7 +85,7 @@ function AlertRulesSection({
                   onChange={(e) => setRule(k.key, { enabled: e.target.checked })}
                 />
                 <span className="arule-name">{k.label}</span>
-                <span className="arule-sum muted small">
+                <span className={`arule-sum small${r.enabled && r.scope_type !== 'all' ? ' t-degraded' : ' muted'}`}>
                   {r.enabled ? scopeLabel(r) : t('выключен')}
                 </span>
                 <span className="arule-caret">{expanded ? '▾' : '▸'}</span>
@@ -142,52 +108,7 @@ function AlertRulesSection({
           )
         })}
       </div>
-
-      {err && <p className="form-error">{err}</p>}
-      {msg && <p className="form-ok">{msg}</p>}
-      {scoped.length > 0 ? (
-        <div className="form-error small">
-          {t('У видов алертов ({n}) осталось старое ограничение по группам или объектам: алерты остальных по ним не уходят никуда, даже в основной чат. Разделять алерты по чатам теперь можно в "Чаты по группам" выше.', { n: scoped.length })}{' '}
-          <button className="ghost small" onClick={unscope}>
-            {t('Снять ограничения')}
-          </button>
-        </div>
-      ) : (
-        <p className="muted small">
-          {t('Правила действуют на все. Пороги и исключения — в настройках конкретного сервера/монитора.')}
-        </p>
-      )}
       {hint && <p className="muted small">{hint}</p>}
-      <div className="modal-actions" style={{ justifyContent: 'flex-start' }}>
-        <button onClick={save} disabled={busy}>
-          {busy ? t('…') : t('Сохранить правила')}
-        </button>
-      </div>
-    </div>
-  )
-}
-
-export function ServerAlertRulesSection({ onUnauthorized }: { onUnauthorized: () => void }) {
-  const { t } = useI18n()
-  return (
-    <AlertRulesSection
-      title={t('Алерты серверов')}
-      getRules={getServerAlertRules}
-      putRules={putServerAlertRules}
-      onUnauthorized={onUnauthorized}
-    />
-  )
-}
-
-export function SiteAlertRulesSection({ onUnauthorized }: { onUnauthorized: () => void }) {
-  const { t } = useI18n()
-  return (
-    <AlertRulesSection
-      title={t('Алерты сайтов')}
-      getRules={getSiteAlertRules}
-      putRules={putSiteAlertRules}
-      onUnauthorized={onUnauthorized}
-      hint={t('По умолчанию алерт выглядит так: «адрес 🔴 — имя-ссылкой на монитор — текст ошибки». Свой текст в поле выше отключает адрес и ссылку.')}
-    />
+    </>
   )
 }
