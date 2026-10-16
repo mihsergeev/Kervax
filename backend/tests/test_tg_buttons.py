@@ -125,7 +125,7 @@ async def test_no_buttons_when_disabled(client, tg):
 
 async def test_digest_has_no_buttons(client, tg):
     f = _factory(client)
-    msgs = [collector._server_alert_text("disk", f"web-{i}", "92%", ref=f"srv:{i}") for i in range(3)]
+    msgs = [collector._server_alert_text("disk", f"web-{i}", f"9{i}%", ref=f"srv:{i}") for i in range(3)]
     await alerts.dispatch(CFG, True, msgs, 2, session_factory=f)
     assert len(tg.of("sendMessage")) == 1 and "reply_markup" not in tg.of("sendMessage")[0]
 
@@ -560,3 +560,56 @@ async def test_no_escalation_while_bot_unread(client, tg):
     sid = await _server(f, alert_state={"offline": 1})
     await _esc_row(f, sid)
     assert await tg_bot.escalate(f, collector.get_settings(), NOW) == 0
+
+
+async def test_storm_one_message_buttons_cover_all(client, tg):
+    """Один сбой на трех серверах - одно сообщение; кнопка глушит у всех, "вернуть" - у всех;
+    история по каждому серверу; запись решена, когда вернулись все."""
+    f = _factory(client)
+    ids = [await _server(f, name=f"web-{c}") for c in "abc"]
+    fires = [collector._server_alert_text("units", f"web-{c}", f"упал x.service: ошибка, {n} мин назад",
+                                          "https://kx/s", ref=f"srv:{i}")
+             for c, n, i in zip("abc", (2, 3, 2), ids)]
+    assert await alerts.dispatch(CFG, True, fires, 6, parse_mode="HTML", session_factory=f)
+    sends = tg.of("sendMessage")
+    assert len(sends) == 1
+    assert sends[0]["text"].startswith("⚙️ <b>3 сервера</b> — упал x.service: ошибка, 2 мин назад\n↳ ")
+    assert sends[0]["text"].count('<a href="https://kx/s">web-') == 3
+    async with f() as s:
+        row = (await s.scalars(select(TgAlert))).one()
+        hist = (await s.scalars(select(alerts.AlertEvent))).all()
+    assert row.ref == "srv:" + ",".join(map(str, ids))
+    assert sorted(h.target for h in hist) == ["web-a", "web-b", "web-c"]
+    await _press(f, row.id, "h1")
+    async with f() as s:
+        assert all("units" in srv.alert_snoozes for srv in [await s.get(Server, i) for i in ids])
+    await _press(f, row.id, "un")
+    async with f() as s:
+        assert all("units" not in (srv.alert_snoozes or {}) for srv in [await s.get(Server, i) for i in ids])
+    # отбои в разные тики: первый не решает, последний решает (у вернувшегося уровень 0)
+    async with f() as s:
+        for i in ids[:2]:
+            (await s.get(Server, i)).alert_state = {"units": 0}
+        (await s.get(Server, ids[2])).alert_state = {"units": 2}
+        await s.commit()
+    rec = collector._server_alert_text("units", "web-a", "упавших юнитов больше нет", recovery=True)
+    await alerts.dispatch(CFG, True, [rec], 6, session_factory=f)
+    async with f() as s:
+        assert (await s.get(TgAlert, row.id)).resolved_at is None
+    rec = collector._server_alert_text("units", "web-c", "упавших юнитов больше нет", recovery=True)
+    await alerts.dispatch(CFG, True, [rec], 6, session_factory=f)
+    async with f() as s:
+        assert (await s.get(TgAlert, row.id)).resolved_at is not None
+
+
+async def test_storm_old_undo_records_still_work(client, tg):
+    """Записи до 1.4.246: prev и added про один сервер, без словаря."""
+    f = _factory(client)
+    sid = await _server(f, alert_mutes=["disk"])
+    aid = await _row(f, f"srv:{sid}", "disk")
+    async with f() as s:
+        (await s.get(TgAlert, aid)).undo = {"mute": {"t": "mute", "added": True}}
+        await s.commit()
+    await _press(f, aid, "un")
+    async with f() as s:
+        assert "disk" not in ((await s.get(Server, sid)).alert_mutes or [])

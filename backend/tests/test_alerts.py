@@ -123,3 +123,29 @@ async def test_alert_coverage_apply_widens_scope(client, auth_headers):
     assert "CORP" in after[[k for k in after if k != off][0]]["scope"]
     assert after[off]["scope"] == ["SHOP"], "выключенное правило тронули"
     assert after[off]["enabled"] is False, "выключенное правило включили"
+
+
+def test_merge_storm_same_failure_only():
+    """Склеиваются одинаковые сбои с трех и больше серверов; разные числа, группы и двое - нет."""
+    from app import collector
+
+    def srv(kind, name, detail, group="", rec=False, sid=1):
+        return collector._server_alert_text(kind, name, detail, "https://kx/" + name, recovery=rec,
+                                            group=group, ref="" if rec else f"srv:{sid}")
+
+    two = [srv("units", f"web-{c}", "упал x.service, 2 мин назад") for c in "ab"]
+    assert alerts.merge_storm(two) == two
+    disk = [srv("disk", f"web-{c}", f"занят на 9{n}%") for c, n in zip("abc", (1, 2, 3))]
+    assert alerts.merge_storm(disk) == disk
+    grp = [srv("units", f"web-{c}", "упал x.service", group=g) for c, g in zip("abc", ("a", "a", "b"))]
+    assert len(alerts.merge_storm(grp)) == 3
+    recs = [srv("units", f"web-{c}", "упавших юнитов больше нет", rec=True) for c in "abcd"]
+    other = srv("cpu", "db-a", "CPU 95%")
+    out = alerts.merge_storm([other] + recs)
+    assert len(out) == 2 and out[0] == other
+    m = out[1]
+    assert m.recovery and m.target == "web-a, web-b, web-c, web-d" and len(m.parts) == 4
+    assert str(m).startswith("✅ <b>4 сервера</b> — упавших юнитов больше нет\n↳ ")
+    many = [srv("units", f"web-{i}", "упал x.service", sid=i) for i in range(35)]
+    m = alerts.merge_storm(many)[0]
+    assert "<b>35 серверов</b>" in m and m.endswith("и еще 5") and m.ref.startswith("srv:0,1,2")

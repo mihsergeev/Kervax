@@ -133,7 +133,7 @@ async def test_broken_main_is_retried(client, tg):
 
 
 async def test_digest_per_chat(client, tg):
-    msgs = [_srv(f"web-{i}", "web") for i in range(3)] + [_srv("infra-a", "infra")]
+    msgs = [_srv(f"web-{i}", "web", k) for i, k in enumerate(("disk", "cpu", "mem"))] + [_srv("infra-a", "infra")]
     assert await alerts.dispatch(_cfg("rest"), True, msgs, 3, parse_mode="HTML")
     route = tg.to("-200")
     assert len(route) == 1 and route[0].startswith("🌊 3 алертов")

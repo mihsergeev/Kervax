@@ -59,6 +59,83 @@ def _msg_scope(m: str) -> tuple[str, str]:
     return (getattr(m, "section", ""), getattr(m, "group", ""))
 
 
+# Шторм: один и тот же сбой сразу на нескольких серверах. 13.10 на шести серверах каждой панели
+# разом упал один и тот же сервис, и каждый сервер прислал свое сообщение. С STORM_MIN серверов
+# за раз уходит одно сообщение со списком. Склеиваются только одинаковые: тот же вид, раздел и
+# группа (маршруты по группам не ломаются), тот же текст без имени сервера и "N мин назад".
+# Разные числа (диск 91% и 97%) - разные сообщения. Заметка о сервере делает текст другим, и
+# такой сервер идет своим сообщением.
+STORM_MIN = 3
+_STORM_NAMES = 30
+_AGO = re.compile(r"\d+\s*(?:с|сек|мин|ч|дн|д)\.?\s+назад")
+_HREF = re.compile(r'<a href="[^"]*">')
+# "это мы" и остальное, где кнопка про один сервер
+_STORM_SKIP = frozenset({"access_change"})
+
+
+def _servers_word(n: int) -> str:
+    if n % 10 == 1 and n % 100 != 11:
+        return "сервер"
+    if n % 10 in (2, 3, 4) and n % 100 not in (12, 13, 14):
+        return "сервера"
+    return "серверов"
+
+
+def _storm_key(m) -> tuple | None:
+    if not isinstance(m, Msg) or not m.target or m.kind in _STORM_SKIP:
+        return None
+    if m.ref and not m.ref.startswith("srv:"):
+        return None  # мониторы сайтов склеиваются своим путем, по доменам
+    if not m.ref and not (m.recovery and m.section in _SERVER_SECTIONS):
+        return None
+    nm = html.escape(m.target)
+    text = str(m)
+    if nm not in text:
+        return None  # свой шаблон без имени сервера: не понять, что у них общего
+    norm = _AGO.sub("#назад", _HREF.sub("<a>", text.replace(nm, "\x00")))
+    return (m.kind, m.section, m.group, m.recovery, norm)
+
+
+def _linked(m: Msg) -> str:
+    nm = html.escape(m.target)
+    hit = re.search(r'<a href="[^"]*">' + re.escape(nm) + "</a>", str(m))
+    return hit.group(0) if hit else nm
+
+
+def _storm_msg(parts: list) -> Msg:
+    first = parts[0]
+    names = list(dict.fromkeys(p.target for p in parts))
+    links = list(dict.fromkeys(_linked(p) for p in parts))
+    shown = links[:_STORM_NAMES]
+    more = f" и еще {len(links) - len(shown)}" if len(links) > len(shown) else ""
+    head, _, tail = str(first).partition("\n")
+    label = f"<b>{len(names)} {_servers_word(len(names))}</b>"
+    own = _linked(first)
+    head = head.replace(own, label, 1) if own in head else head
+    body = head + "\n↳ " + ", ".join(shown) + more + (f"\n{tail}" if tail else "")
+    ids = [x for p in parts for x in str(p.ref or "").partition(":")[2].split(",") if x.strip().isdigit()]
+    ref = "srv:" + ",".join(dict.fromkeys(ids)) if ids else ""
+    out = Msg(body, first.section, first.group, first.kind, ", ".join(names), first.recovery, ref)
+    out.parts = list(parts)  # история пишется по каждому серверу
+    return out
+
+
+def merge_storm(messages: list) -> list:
+    """Одинаковые сообщения с STORM_MIN и больше серверов - одним, на месте первого."""
+    groups: dict[tuple, list[int]] = {}
+    for i, m in enumerate(messages):
+        k = _storm_key(m)
+        if k is not None:
+            groups.setdefault(k, []).append(i)
+    big = {idx[0]: idx for idx in groups.values()
+           if len({messages[i].target for i in idx}) >= STORM_MIN}
+    if not big:
+        return messages
+    drop = {i for idx in big.values() for i in idx[1:]}
+    return [_storm_msg([messages[j] for j in big[i]]) if i in big else m
+            for i, m in enumerate(messages) if i not in drop]
+
+
 def route_hits(cfg: dict, m: str) -> list[dict]:
     """Чаты по группам, которым положен этот алерт: группа объекта есть в списке чата. Алерт без
     группы (общий, про саму панель, сервер вне групп) в чаты по группам не идет."""
@@ -197,8 +274,9 @@ async def tg_edit(cfg: dict, chat: str, message_id: int, text: str, reply_markup
 async def tg_resolve(session_factory, cfg: dict, messages: list) -> None:
     """Пришел отбой: алерты с кнопками про то же (вид + объект) помечаем решенными и
     дописываем в них "снова в норме" - эскалировать и глушить больше нечего."""
-    pairs = {(getattr(m, "kind", ""), getattr(m, "target", "")) for m in messages
-             if getattr(m, "recovery", False) and getattr(m, "kind", "")}
+    pairs = {(getattr(p, "kind", ""), getattr(p, "target", "")) for m in messages
+             if getattr(m, "recovery", False) and getattr(m, "kind", "")
+             for p in getattr(m, "parts", None) or [m]}
     if not pairs:
         return
     now = datetime.now(timezone.utc)
@@ -206,7 +284,7 @@ async def tg_resolve(session_factory, cfg: dict, messages: list) -> None:
         async with session_factory() as session:
             rows = (await session.scalars(select(TgAlert).where(
                 TgAlert.resolved_at.is_(None), TgAlert.kind.in_({k for k, _ in pairs})))).all()
-            rows = [r for r in rows if (r.kind, r.target) in pairs]
+            rows = [r for r in rows if (r.kind, r.target) in pairs or await _storm_back(session, r, pairs)]
             for r in rows:
                 r.resolved_at = now
             await session.commit()
@@ -217,6 +295,22 @@ async def tg_resolve(session_factory, cfg: dict, messages: list) -> None:
                     await tg_edit(cfg, m.get("chat"), m.get("id"), text, markup)
     except Exception:  # noqa: BLE001
         log.warning("отбой не отмечен в алертах с кнопками", exc_info=True)
+
+
+async def _storm_back(session, row: TgAlert, pairs: set) -> bool:
+    """Алерт про несколько серверов сразу решен, когда вернулись все: отбой в этой пачке или
+    уже записанный в состоянии сервера (отбои приходят в разные тики)."""
+    obj, ids = _ref_ids(row.ref)
+    if obj != "srv" or len(ids) < 2:
+        return False
+    for i in ids:
+        s = await session.get(Server, i)
+        if s is None or (row.kind, s.name) in pairs:
+            continue
+        lvl = (s.alert_state or {}).get(row.kind)
+        if not isinstance(lvl, int) or lvl > 0:
+            return False
+    return True
 
 
 def buttons_on(cfg: dict) -> bool:
@@ -290,6 +384,7 @@ async def dispatch(
         return False
     if session_factory is not None:
         messages = await with_notes(session_factory, messages)
+    messages = merge_storm(messages)
     # кнопки под алертами: запись нужна до отправки, ее id едет в кнопках
     rows: dict[int, int] = {}
     if session_factory is not None and buttons_on(cfg):
@@ -513,7 +608,7 @@ async def record_history(session_factory, messages: list[str]) -> None:
     ушел, и вторая копия в чате хуже пропуска в истории."""
     try:
         async with session_factory() as session:
-            for m in messages:
+            for m in [p for x in messages for p in getattr(x, "parts", None) or [x]]:
                 session.add(AlertEvent(
                     kind=str(getattr(m, "kind", "") or "")[:40],
                     target=str(getattr(m, "target", "") or "")[:255],
