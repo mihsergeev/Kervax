@@ -73,7 +73,8 @@ def test_problems_alert_and_home_rows():
     assert [x["key"] for x in restarts.problems(_srv(_state(6, 22), mutes=["restarts:docker:web"]), NOW)] == [
         "pod:shop/api-7f9"]
     assert [x["key"] for x in restarts.problems(_srv(_state(6, 22, alerted_loop=True)), NOW)] == ["pod:shop/api-7f9"]
-    assert collector._recovery_detail("docker_restarts", {}, {}) == "перезапуски стихли: за сутки меньше 5"
+    assert collector._recovery_detail("docker_restarts", {}, {}) == "контейнеры восстановлены, частых перезапусков нет"
+    assert collector._recovery_detail("kube_restarts", {}, {}) == "поды восстановлены, частых перезапусков нет"
 
 
 async def test_alert_after_five_restarts_a_day(tmp_path, monkeypatch):
@@ -160,7 +161,7 @@ def test_pods_of_one_deployment_are_one_line_and_mutes_survive_a_deploy():
 async def test_another_deployment_within_the_hour_is_the_same_story(tmp_path, monkeypatch):
     """Перезапуски считаются за сутки: еще один деплоймент перешел порог через минуту после
     сообщения - не второе сообщение. Старый sig по подам не дает "нового". Заглушили все -
-    отбоя "перезапуски стихли" нет: ничего не стихло."""
+    отбоя "частых перезапусков нет" нет: ничего не стихло."""
     from app.config import Settings
     from app.db import Base, create_engine_and_factory
 

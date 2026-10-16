@@ -1702,8 +1702,10 @@ def _recovery_detail(key: str, st: dict, ctx: dict) -> str:
         return "SSH больше не пускает root по паролю, перебора без защиты нет"
     if key == "access_risk":
         return "второго root и учеток с пустым паролем больше нет"
-    if key in ("docker_restarts", "kube_restarts"):
-        return f"перезапуски стихли: за сутки меньше {srv_restarts.MIN}"
+    if key == "kube_restarts":
+        return "поды восстановлены, частых перезапусков нет"
+    if key == "docker_restarts":
+        return "контейнеры восстановлены, частых перезапусков нет"
     if key == "backup_restore":
         return "проверка восстановления снова проходит: файлы и дампы из снапшота читаются"
     label = _SRV_LABEL[key]
@@ -4374,7 +4376,7 @@ def _flapping(s: Server, st: dict, now: datetime, apply, note: list, url: str = 
                 "offline", s.name,
                 f"связь нестабильна: {cnt} обрыва(ов) за {_FLAP_WINDOW // 60} мин — "
                 "дальше молчу, пока не устаканится",
-                url,
+                url, group=s.group_name or "",
             )
         )
     return True
@@ -5560,7 +5562,7 @@ async def evaluate_servers(
                     else _recovery_detail(key, st, ctx)
                 )
                 recoveries.append(
-                    _server_alert_text(key, s.name, detail, srv_url(s, key), recovery=True)
+                    _server_alert_text(key, s.name, detail, srv_url(s, key), recovery=True, group=s.group_name or "")
                 )
                 rec_apply.append((s.id, key, 0))
                 if key == "offline":
@@ -5678,7 +5680,7 @@ async def evaluate_servers(
                     if loop_ok:
                         recoveries.append(_server_alert_text(
                             "docker_loop", s.name, f"контейнер {name}: перезапуски прекратились",
-                            srv_url(s, "docker_loop"), recovery=True))
+                            srv_url(s, "docker_loop"), recovery=True, group=s.group_name or ""))
                     cs["alerted_loop"] = False
                 # «упал»: не работает и это авария (docker_down_why: не остановлен руками),
                 # держится ≥ sustain
@@ -5706,7 +5708,7 @@ async def evaluate_servers(
                             back = (f"контейнер {name} снова работает" if state == "running"
                                     else f"контейнер {name} остановлен штатно, тревога снята")
                             recoveries.append(_server_alert_text(
-                                "docker_down", s.name, back, srv_url(s, "docker_down"), recovery=True))
+                                "docker_down", s.name, back, srv_url(s, "docker_down"), recovery=True, group=s.group_name or ""))
                         cs["alerted_down"] = False
                 dstate[name] = cs
             # контейнеры, пропавшие из списка (удалены/пересозданы) — чистим состояние
@@ -5741,7 +5743,7 @@ async def evaluate_servers(
                     if not quiet:
                         recoveries.append(_server_alert_text(
                             "unit_loop", s.name, f"{name}: перезапуски прекратились",
-                            srv_url(s, "unit_loop"), recovery=True))
+                            srv_url(s, "unit_loop"), recovery=True, group=s.group_name or ""))
                     cs["alerted"] = False
                 ustate[name] = cs
             # юнит пропал из списка: счетчик обнулили ручным restart, юнит убрали, перезагрузка
@@ -5750,7 +5752,7 @@ async def evaluate_servers(
                 if cs.get("alerted") and ul_ok and gone not in muted_u:
                     recoveries.append(_server_alert_text(
                         "unit_loop", s.name, f"{gone}: перезапуски прекратились",
-                        srv_url(s, "unit_loop"), recovery=True))
+                        srv_url(s, "unit_loop"), recovery=True, group=s.group_name or ""))
             if ustate != (st.get("unit_loops") or {}):
                 apply(s.id, "unit_loops", ustate)
 
@@ -5798,7 +5800,7 @@ async def evaluate_servers(
                             "queue", s.name,
                             f"очередь {q.get('name') or '?'} ({src or 'rabbitmq'}) "
                             f"снова в норме: {depth} < {thr}",
-                            srv_url(s, "queue"), recovery=True))
+                            srv_url(s, "queue"), recovery=True, group=s.group_name or ""))
                         qstate[key] = False
             # очередь удалили/переименовали — состояние по ней больше не нужно
             for gone in [k for k in qstate if k not in seen_q]:
@@ -5828,7 +5830,7 @@ async def evaluate_servers(
             elif not stale and was_stale:
                 recoveries.append(_server_alert_text(
                     "backup_rotation", s.name, "ротация снова вычищает старые снапшоты",
-                    srv_url(s, "backup_rotation"), recovery=True))
+                    srv_url(s, "backup_rotation"), recovery=True, group=s.group_name or ""))
                 rec_apply.append((s.id, "rotation_stale", 0))
 
         # Висячий лок дольше суток: чистка и проверка репозитория не идут. Раньше он был
@@ -5856,7 +5858,7 @@ async def evaluate_servers(
             elif not locks and prev_names:
                 recoveries.append(_server_alert_text(
                     "backup_lock", s.name, "висячих локов в репозиториях больше нет",
-                    srv_url(s, "backup_lock"), recovery=True))
+                    srv_url(s, "backup_lock"), recovery=True, group=s.group_name or ""))
                 rec_apply.append((s.id, "backup_locks", {}))
 
         # Не прошла недельная проверка целостности репозитория. Как и с локом: при новом
@@ -5877,7 +5879,7 @@ async def evaluate_servers(
             elif not bad and prev_names:
                 recoveries.append(_server_alert_text(
                     "backup_check", s.name, "проверка целостности репозиториев снова проходит",
-                    srv_url(s, "backup_check"), recovery=True))
+                    srv_url(s, "backup_check"), recovery=True, group=s.group_name or ""))
                 rec_apply.append((s.id, "backup_checks", {}))
 
         # Чистка репозитория не работает: не открывает репозиторий, падает, пропущена или не
@@ -5908,7 +5910,7 @@ async def evaluate_servers(
             elif not names and prev_names:
                 recoveries.append(_server_alert_text(
                     "backup_prune", s.name, "чистка репозиториев снова работает",
-                    srv_url(s, "backup_prune"), recovery=True))
+                    srv_url(s, "backup_prune"), recovery=True, group=s.group_name or ""))
                 rec_apply.append((s.id, "backup_prunes", {}))
 
         # Новый клиент бэкап-сервера без агента в панели. Алерт только про новых: тех, кто
@@ -5962,7 +5964,7 @@ async def evaluate_servers(
             elif not probs and prev_active:
                 recoveries.append(_server_alert_text(
                     "backup_repo", s.name, "все репозитории снова в норме",
-                    srv_url(s, "backup_repo"), recovery=True))
+                    srv_url(s, "backup_repo"), recovery=True, group=s.group_name or ""))
                 rec_apply.append((s.id, "backup_repos", []))
 
     # parse_mode=HTML: имя сервера идёт ссылкой <a href> (как у сайтов). Контент экранирован.
