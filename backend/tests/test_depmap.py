@@ -24,6 +24,7 @@ async def _fill(client) -> dict:
             Check(name="api-b", type="tcp_port", target="api.internal:443", group_name="shop",
                   parent_mode="server", parent_server_id=node.id),
             Check(name="off-z", type="http", target="https://a.example/z", enabled=False),
+            Check(name="free-y", type="http", target="https://y.example/", parent_mode="off"),
         ])
         await s.commit()
         return {"gw": gw.id, "node": node.id, "web": web.id, "old": off.id}
@@ -40,7 +41,11 @@ async def test_depmap(client, auth_headers):
     assert "off-z" not in chk  # выключенные мониторы на карте не нужны
     assert chk["site-a"]["parents"] == [{"id": ids["web"], "why": "site"}] and chk["site-a"]["status"] == "down"
     assert chk["api-b"]["parents"] == [{"id": ids["node"], "why": "manual"}]
-    assert chk["site-x"]["parents"] == []
+    assert chk["site-x"]["parents"] == [] and chk["site-x"]["mode"] == "auto"
+    # отвязанный руками отличается от того, чей сервер панель не нашла
+    assert chk["free-y"]["parents"] == [] and chk["free-y"]["mode"] == "off"
+    assert chk["api-b"]["target"] == "api.internal:443" and chk["api-b"]["type"] == "tcp_port"
+    assert srv["gw-a"]["last_seen"] and srv["old-d"]["last_seen"] is None
 
 
 async def test_depmap_respects_access(client, auth_headers):

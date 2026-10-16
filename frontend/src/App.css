@@ -6633,53 +6633,13 @@ button.tl-tile-off .net-tile-value {
   margin-top: 0.8rem;
 }
 
-/* ---------- карта зависимостей (DepMapModal) ---------- */
+/* ---------- окно уязвимостей (VulnsModal): чипы серверов ---------- */
 .dm-modal {
   width: min(1200px, calc(100vw - 2rem));
 }
 .dm-search {
   flex: 1 1 220px;
   max-width: 340px;
-}
-.dm-legend {
-  display: inline-flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 0.35rem;
-}
-.dm-leg {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.3rem;
-  margin-right: 0.6rem;
-  white-space: nowrap;
-}
-.dm-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
-  gap: 0.75rem;
-  align-items: start;
-}
-.dm-node {
-  display: flex;
-  flex-direction: column;
-  gap: 0.35rem;
-}
-.dm-root {
-  padding: 0.7rem 0.8rem;
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  background: color-mix(in srgb, var(--border) 14%, transparent);
-  transition: border-color 0.15s ease;
-}
-.dm-root:hover {
-  border-color: color-mix(in srgb, var(--accent) 60%, var(--border));
-}
-.dm-head {
-  display: flex;
-  align-items: center;
-  gap: 0.45rem;
-  min-width: 0;
 }
 button.dm-name {
   background: none;
@@ -6696,17 +6656,6 @@ button.dm-name {
 button.dm-name:hover {
   background: none;
   color: var(--accent);
-}
-.dm-impact {
-  color: var(--text-muted);
-}
-.dm-kids {
-  display: flex;
-  flex-direction: column;
-  gap: 0.55rem;
-  margin: 0.2rem 0 0 0.35rem;
-  padding-left: 0.8rem;
-  border-left: 2px solid var(--border);
 }
 .dm-chips {
   display: flex;
@@ -6733,42 +6682,24 @@ button.dm-chip {
 button.dm-chip:hover {
   background: var(--hover);
 }
-button.dm-chip.dm-st-down {
-  border-color: color-mix(in srgb, var(--down) 60%, var(--border));
-  color: var(--down);
-}
-button.dm-more,
 button.dm-sec-btn {
   padding: 0.1rem 0.5rem;
   font-size: 0.78rem;
 }
-.dm-hit {
-  outline: 2px solid color-mix(in srgb, var(--accent) 70%, transparent);
-  outline-offset: 1px;
-  border-radius: 4px;
-}
-.dm-dot {
+
+/* карта зависимостей (DepMapModal): у таблиц мониторов раздела одна сетка, адрес монитора
+   в одну строку с многоточием */
+.sec-tbl.dm-mons { table-layout: fixed; }
+.dm-mons td:first-child { width: 45%; }
+.dm-mons td:last-child { width: 7.5rem; }
+.dm-mons .ans-node { white-space: normal; overflow-wrap: anywhere; }
+.dm-tgt {
   display: inline-block;
-  flex: 0 0 auto;
-  width: 0.55rem;
-  height: 0.55rem;
-  border-radius: 50%;
-  background: var(--text-muted);
-}
-.dm-srv-up,
-.dm-st-up .dm-dot {
-  background: var(--up);
-}
-.dm-srv-down,
-.dm-st-down .dm-dot,
-.dm-st-down-dot {
-  background: var(--down);
-}
-.dm-st-degraded .dm-dot {
-  background: var(--degraded);
-}
-.dm-srv-off {
-  background: var(--border-strong);
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: bottom;
 }
 
 /* Разделы хостов (Docker, Кубер) в стиле "Сети": сводка плитками, хосты - строками в карточке

@@ -2789,8 +2789,25 @@ export function getFleetVulns(): Promise<FleetVulns> {
 }
 
 // --- карта зависимостей (backend api/depmap.py) ---
-export type DepMapServer = { id: number; name: string; group: string; parent_id: number | null; online: boolean; enabled: boolean }
-export type DepMapCheck = { id: number; name: string; status: string; parents: { id: number; why: string }[] }
+export type DepMapServer = {
+  id: number
+  name: string
+  group: string
+  parent_id: number | null
+  online: boolean
+  enabled: boolean
+  last_seen: string | null
+}
+// mode: off - отвязан руками, ни от какого сервера не зависит
+export type DepMapCheck = {
+  id: number
+  name: string
+  type: string
+  target: string
+  status: string
+  mode: string
+  parents: { id: number; why: string }[]
+}
 export type DepMap = { servers: DepMapServer[]; checks: DepMapCheck[] }
 export function getDepMap(): Promise<DepMap> {
   return api<DepMap>('/api/depmap')
