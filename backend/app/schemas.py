@@ -180,8 +180,9 @@ class CheckCreate(BaseModel):
     check_all_ips: bool = False
     check_ssl: bool = True
     check_domain: bool = True
-    ssl_warn_days: list[int] = [14, 7, 1]
-    domain_warn_days: list[int] = [30, 7, 1]
+    # алерт за неделю и за день; за месяц срок только виден в списке сайтов и карточке
+    ssl_warn_days: list[int] = [7, 1]
+    domain_warn_days: list[int] = [7, 1]
     check_locations: bool = False  # локации опциональны — по умолчанию не через прокси
     location_ids: list[int] | None = None
     alert_mutes: list[str] | None = None  # типы алертов, заглушённые для этого монитора

@@ -1075,7 +1075,7 @@ async def _run_cert(check) -> CheckOutcome:
     if days is None:
         return CheckOutcome("down", message=_short(f"сертификат {msg}"))
     rdays = round(days, 1)
-    warn = max(check.ssl_warn_days) if check.ssl_warn_days else 14
+    warn = max(check.ssl_warn_days) if check.ssl_warn_days else 7
     if days <= 0:
         return CheckOutcome("down", value=rdays, message="сертификат истёк")
     if days < warn:

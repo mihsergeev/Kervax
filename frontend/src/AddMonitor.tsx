@@ -16,7 +16,7 @@ import {
   type TryResult,
 } from './api'
 import { useI18n } from './i18n'
-import { MON_ALERT_KINDS } from './checkUtils'
+import { EXPIRY_WARN_DAYS, MON_ALERT_KINDS } from './checkUtils'
 
 // Форма нового монитора: адрес, пробная проверка и выбор "откуда проверять" по ее итогам.
 // Старая форма спрашивала тип, адрес и способ проверки вслепую: увидит ли панель сайт,
@@ -164,8 +164,8 @@ function advTouched(f: CheckForm, authShown: boolean): boolean {
     !!f.ignore_tls ||
     (f.retries ?? 3) !== 3 ||
     (f.degraded_after_failures ?? 10) !== 10 ||
-    days(f.ssl_warn_days, [14, 7, 1]) ||
-    days(f.domain_warn_days, [30, 7, 1]) ||
+    days(f.ssl_warn_days, EXPIRY_WARN_DAYS) ||
+    days(f.domain_warn_days, EXPIRY_WARN_DAYS) ||
     (f.alert_mutes ?? []).length > 0 ||
     f.location_ids != null
   )
@@ -221,8 +221,8 @@ export function AddMonitor({
   // блок входа не прячем, когда с логином сайт ответил 200: там то, что человек вписал
   const [authSeen, setAuthSeen] = useState(editing && hasCreds)
   const [allLocs, setAllLocs] = useState<Location[]>([])
-  const [sslTxt, setSslTxt] = useState(() => (base.ssl_warn_days ?? [14, 7, 1]).join(', '))
-  const [domTxt, setDomTxt] = useState(() => (base.domain_warn_days ?? [30, 7, 1]).join(', '))
+  const [sslTxt, setSslTxt] = useState(() => (base.ssl_warn_days ?? EXPIRY_WARN_DAYS).join(', '))
+  const [domTxt, setDomTxt] = useState(() => (base.domain_warn_days ?? EXPIRY_WARN_DAYS).join(', '))
   const [hdrText, setHdrText] = useState(() => headersText(base.http_headers ?? ''))
   const [pathsText, setPathsText] = useState(() => (base.extra_paths ?? []).join('\n'))
   const [rules, setRules] = useState<ServerAlertRules | null>(null)
@@ -1167,7 +1167,7 @@ export function AddMonitor({
                       ) : (
                         exp?.ssl_message && <span className="muted">{exp.ssl_message}</span>
                       )}
-                      <small>{t('напомню за {days} дн.', { days: (form.ssl_warn_days ?? [14, 7, 1]).join(', ') })}</small>
+                      <small>{t('напомню за {days} дн.', { days: (form.ssl_warn_days ?? EXPIRY_WARN_DAYS).join(', ') })}</small>
                     </span>
                   </label>
                 )}
@@ -1183,7 +1183,7 @@ export function AddMonitor({
                       ) : (
                         exp?.domain_message && <span className="muted">{exp.domain_message}</span>
                       )}
-                      <small>{t('напомню за {days} дн.', { days: (form.domain_warn_days ?? [30, 7, 1]).join(', ') })}</small>
+                      <small>{t('напомню за {days} дн.', { days: (form.domain_warn_days ?? EXPIRY_WARN_DAYS).join(', ') })}</small>
                     </span>
                   </label>
                 )}

@@ -69,6 +69,7 @@ import {
   muteKindLabel,
   SRV_ALERT_KINDS,
   collectMutes,
+  isDecision,
   muteBrief,
   muteText,
   type MuteItem,
@@ -6255,7 +6256,7 @@ function ServerDetail({
               <SnoozeBar
                 snoozeUntil={s.snooze_until}
                 snoozes={s.alert_snoozes}
-                mutes={s.alert_mutes ?? []}
+                mutes={(s.alert_mutes ?? []).filter((k) => !isDecision(k))}
                 busy={snoozing}
                 onUnmute={async (kind) => {
                   setSnoozing(true)

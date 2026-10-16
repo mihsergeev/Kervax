@@ -10,8 +10,11 @@ from __future__ import annotations
 
 from datetime import datetime
 
-WARN_DAYS = 14  # Let's Encrypt продлевает за 30 дней: за две недели продление уже точно не идет
-CRIT_DAYS = 3
+# Алерт за неделю и за день, как у сроков сайтов и Kubernetes. Let's Encrypt продлевает за 30 дней:
+# за неделю продление уже точно не идет, а времени разобраться еще хватает. Сертификаты ближе
+# месяца видны в разделе "Сертификаты" карточки и в "Сервисах", но это не алерт
+WARN_DAYS = 7
+CRIT_DAYS = 1
 STALE = 3600  # блок старше часа - helper не работает, не судим по старому
 
 
@@ -46,7 +49,7 @@ def _renew_note(b: dict, c: dict) -> str:
 
 
 def problems(rep: dict, now: datetime) -> list[tuple[int, str, str]]:
-    """(уровень, текст, ключ): истек или истекает - 2 при трех днях и меньше, 1 при двух неделях."""
+    """(уровень, текст, ключ): истек или истекает - 2 при дне и меньше, 1 при неделе."""
     b = block(rep, now)
     out: list[tuple[int, str, str]] = []
     seen = set()

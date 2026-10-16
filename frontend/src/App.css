@@ -2793,6 +2793,11 @@ select:focus {
 .uptime-badge.t-down {
   color: var(--down);
 }
+/* срок до месяца: видно, но не алерт и не "Что сломано" (expiryTone) */
+.uptime-badge.t-soon,
+.expiry-days.t-soon {
+  color: var(--text-muted);
+}
 
 .inc-badge {
   font-size: 0.72rem;
@@ -2813,6 +2818,9 @@ select:focus {
 }
 .t-down {
   color: var(--down);
+}
+.t-soon {
+  color: var(--text-muted);
 }
 
 /* кликабельный логотип в шапке */

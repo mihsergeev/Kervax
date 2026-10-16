@@ -17,7 +17,7 @@ const FIELDS: { key: keyof CheckBulk; label: string; kind: Kind; def: string }[]
   { key: 'alert_after_failures', label: 'Алерт после N сбоев подряд', kind: 'num', def: '3' },
   { key: 'degraded_after_failures', label: 'Алерт «медленно» после N подряд', kind: 'num', def: '10' },
   { key: 'expected_status', label: 'Ожидаемый статус', kind: 'text', def: '200-399' },
-  { key: 'ssl_warn_days', label: 'SSL: напоминать за, дн.', kind: 'days', def: '14, 7, 1' },
+  { key: 'ssl_warn_days', label: 'SSL: напоминать за, дн.', kind: 'days', def: '7, 1' },
   { key: 'domain_warn_days', label: 'Домен: напоминать за, дн.', kind: 'days', def: '7, 1' },
   // булевы переключатели (вкл/выкл разом)
   { key: 'check_locations', label: 'Проверять из локаций (прокси)', kind: 'bool', def: 'off' },

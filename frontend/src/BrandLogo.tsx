@@ -99,7 +99,8 @@ export function useLogoViews(
 
 type Props = {
   where: 'header' | 'login'
-  branding: Branding | null
+  // undefined - еще не знаем (первый заход, ответа пока нет), null - запрос не удался
+  branding: Branding | null | undefined
 }
 
 // Логотип панели: свой, если загружен, иначе штатный Kervax.
@@ -115,6 +116,9 @@ export function BrandLogo({ where, branding }: Props) {
     has && branding?.dark_logo ? { url: brandingLogoUrl(branding.version, true) } : null
   const views = useLogoViews(main, dark, branding?.plate ?? 'auto')
 
+  // Пока не знаем, свой ли логотип, место держим пустым: штатный Kervax на секунду перед своим
+  // (Ctrl+F5 на входе) выглядел как чужая панель
+  if (branding === undefined) return <span className={`brand-custom brand-${where}`} aria-hidden />
   if (!branding?.logo || broken) {
     return header ? <BrandHorizontal height={40} /> : <BrandLockup width={170} />
   }
@@ -145,15 +149,37 @@ export function BrandLogo({ where, branding }: Props) {
   )
 }
 
-// Загружает состояние брендирования один раз на монтирование.
-export function useBranding(): [Branding | null, () => void] {
-  const [b, setB] = useState<Branding | null>(null)
+// Последний ответ /api/branding в браузере: со следующего захода логотип (свой или штатный)
+// рисуется сразу, а не после запроса. Пропал localStorage - просто ждем ответа с пустым местом.
+const BRAND_KEY = 'kervax_branding'
+
+function cachedBranding(): Branding | undefined {
+  try {
+    const v = localStorage.getItem(BRAND_KEY)
+    return v ? (JSON.parse(v) as Branding) : undefined
+  } catch {
+    return undefined
+  }
+}
+
+// Загружает состояние брендирования один раз на монтирование: сначала из кеша, потом с сервера.
+export function useBranding(): [Branding | null | undefined, () => void] {
+  const [b, setB] = useState<Branding | null | undefined>(cachedBranding)
   const [tick, setTick] = useState(0)
   useEffect(() => {
     let alive = true
     getBranding()
-      .then((r) => alive && setB(r))
-      .catch(() => alive && setB(null))
+      .then((r) => {
+        if (!alive) return
+        setB(r)
+        try {
+          localStorage.setItem(BRAND_KEY, JSON.stringify(r))
+        } catch {
+          /* без кеша - просто без мгновенного логотипа */
+        }
+      })
+      // не ответил - оставляем то, что было в кеше; кеша нет - штатный логотип
+      .catch(() => alive && setB((cur) => (cur === undefined ? null : cur)))
     return () => {
       alive = false
     }
