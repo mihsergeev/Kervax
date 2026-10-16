@@ -2440,24 +2440,88 @@ const EN: Record<string, string> = {
   'Остальные {n} без сбоев': 'The other {n} had no failures',
   'Отчет': 'Report',
   // --- карта зависимостей ---
-  'на нем держатся серверы ({s}) и мониторы ({c})': 'servers ({s}) and monitors ({c}) depend on it',
-  'на нем держатся серверы: {n}': 'servers depending on it: {n}',
-  'на нем держатся мониторы: {n}': 'monitors depending on it: {n}',
+  'Замолчит сервер - то, что ниже, не пришлет каждый свой алерт: оно перечислено в его сообщении, а свой алерт придет только от того, что не поднимется вместе с сервером.':
+    'If the server goes silent, what is below does not send an alert each: it is listed in its message, and only what does not come back together with the server sends its own alert.',
+  'Лежат':
+    'Down',
+  'Сервер {state}: алерты того, что на нем держится, ждут его.':
+    'The server is {state}: alerts of what depends on it wait for it.',
+  'ни с чем не связан':
+    'not linked to anything',
+  'серверов за ним: {n}':
+    'servers behind it: {n}',
+  'Алерт по этим мониторам приходит сам по себе, даже если молчит сервер, на котором они работают. Сервер задается в карточке монитора, в разделе Зависимости - туда и ведет имя.':
+    'These monitors alert on their own, even when the server they run on is silent. The server is set in the monitor card, in the Dependencies section, which is where the name leads.',
+  'Без связей':
+    'Without links',
+  'Держится':
+    'Depends on it',
+  'Домен на этом сервере':
+    'Domain served by this server',
+  'И еще {n} - уточните поиск.':
+    '{n} more, refine the search.',
+  'Карточка сервера':
+    'Server card',
+  'Мониторы без сервера':
+    'Monitors without a server',
+  'Ни один монитор не привязан к этим серверам, и за ними никто не стоит: замолчит такой сервер - придет только его алерт.':
+    'No monitor is tied to these servers and no server stands behind them: if one goes silent, only its own alert arrives.',
+  'Ничего не нашлось.':
+    'Nothing found.',
+  'Отвязаны вручную · {n}':
+    'Unlinked by hand · {n}',
+  'Панель не нашла сервер · {n}':
+    'Server not found by the panel · {n}',
+  'Привязаны вручную':
+    'Linked by hand',
+  'Проверяются изнутри сервера':
+    'Checked from inside the server',
+  'Серверы без связей':
+    'Servers without links',
+  'Серверы за ним':
+    'Servers behind it',
+  'Серверы за ним · {n}':
+    'Servers behind it · {n}',
+  'Серверы за шлюзом':
+    'Servers behind a gateway',
+  'Серверы, на которых что-то держится':
+    'Servers something depends on',
+  'Стоит за':
+    'Behind',
+  'Те же связи, по которым панель придерживает алерты: замолчал сервер - мониторы и серверы за ним не шумят по отдельности, а перечислены в его сообщении. Сервер монитора панель находит сама, когда он однозначен, иначе его задают в карточке монитора; шлюз сервера - в карточке сервера.':
+    'The same links the panel uses to hold alerts: when a server goes silent, the monitors and servers behind it do not alert one by one but are listed in its message. The panel finds the server of a monitor itself when it is unambiguous, otherwise it is set in the monitor card; the gateway of a server is set in the server card.',
+  'Фильтр: имя или адрес монитора…':
+    'Filter: monitor name or address…',
+  'Фильтр: имя сервера…':
+    'Filter: server name…',
+  'Цель - адрес сервера':
+    'Target is the server address',
+  'Что ляжет вместе с сервером':
+    'What goes down with the server',
+  'алерт по каждому придет отдельно':
+    'each one alerts separately',
+  'мониторов на них: {n}':
+    'monitors on them: {n}',
+  'на':
+    'on',
+  'на них ничего не держится':
+    'nothing depends on them',
+  'не на связи {ago}':
+    'offline for {ago}',
+  'отвязан вручную':
+    'unlinked by hand',
+  'сервер не найден':
+    'server not found',
+  'сервер не найден: {a}, отвязаны вручную: {b}':
+    'server not found: {a}, unlinked by hand: {b}',
+  'серверов: {s}, мониторов: {c}':
+    'servers: {s}, monitors: {c}',
   'Карта зависимостей': 'Dependency map',
-  'проверяется изнутри этого сервера': 'checked from inside this server',
-  'домен обслуживает этот сервер': 'this server serves the domain',
-  'цель - адрес этого сервера': 'the target is the address of this server',
   'еще {n}': '{n} more',
-  'лежат сейчас: {n}': 'down now: {n}',
-  'Те же связи, по которым панель придерживает алерты: замолчал сервер - его мониторы и серверы за ним не шумят отдельно, а названы в его сообщении. Сервер за шлюзом задается в карточке сервера, сервер монитора - в карточке монитора.':
-    'The same links the panel uses to hold alerts: when a server goes silent, its monitors and the servers behind it do not alert separately but are listed in its message. The gateway of a server is set in the server card, the server of a monitor in the monitor card.',
   'найти сервер или монитор': 'find a server or monitor',
   'молчит': 'silent',
-  'лежит': 'down',
   'Связей пока нет: ни один монитор не привязан к серверу.':
     'No links yet: no monitor is tied to a server.',
-  'Мониторы без сервера: {n}': 'Monitors without a server: {n}',
-  'Серверы без связей: {n}': 'Servers without links: {n}',
   // --- хронология сервера ---
   'Хронология': 'Timeline',
   'Система': 'System',

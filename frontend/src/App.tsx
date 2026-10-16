@@ -639,9 +639,9 @@ export default function App() {
         <DepMapModal
           onClose={() => setModal(null)}
           onUnauthorized={logout}
-          onOpen={(sec, id) => {
+          onOpen={(sec, id, sub) => {
             setModal(null)
-            openTarget(sec, id)
+            openTarget(sec, id, undefined, sub)
           }}
         />
       )}

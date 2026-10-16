@@ -1,4 +1,4 @@
-"""Карта зависимостей (страница из меню): кто за кем стоит и какие мониторы на каком сервере.
+"""Карта зависимостей (окно под шестеренкой): кто за кем стоит и какие мониторы на каком сервере.
 
 Связи те же, по которым панель придерживает алерты (app/parents.py): ручной родитель сервера
 (шлюз, VPN, гипервизор) и фактический родитель монитора - найденный сам по однозначным
@@ -18,6 +18,12 @@ from app.models import Check
 router = APIRouter(prefix="/depmap", tags=["depmap"])
 
 
+def _iso(dt: datetime | None) -> str | None:
+    if dt is None:
+        return None
+    return (dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)).isoformat()
+
+
 @router.get("")
 async def depmap(user: CurrentUser, session: SessionDep) -> dict:
     sections = set(user_sections(user))
@@ -32,6 +38,7 @@ async def depmap(user: CurrentUser, session: SessionDep) -> dict:
         "id": s.id, "name": s.name, "group": s.group_name,
         "parent_id": s.parent_id if s.parent_id in vis and s.parent_id != s.id else None,
         "online": bool(s.enabled) and seen_online(s, now), "enabled": bool(s.enabled),
+        "last_seen": _iso(s.last_seen),
     } for s in sorted(visible, key=lambda x: x.name.lower())]
     out_c = []
     if "sites" in sections:
@@ -43,8 +50,10 @@ async def depmap(user: CurrentUser, session: SessionDep) -> dict:
             c = SimpleNamespace(id=r.id, target=r.target, type=r.type, probe_local=r.probe_local,
                                 probe_server_id=r.probe_server_id, parent_mode=r.parent_mode,
                                 parent_server_id=r.parent_server_id)
+            # mode: off - отвязан руками (ни от какого сервера не зависит), иначе auto или server
             out_c.append({
-                "id": r.id, "name": r.name, "status": r.last_status or "unknown",
+                "id": r.id, "name": r.name, "type": r.type, "target": r.target or "",
+                "status": r.last_status or "unknown", "mode": r.parent_mode or "auto",
                 "parents": [{"id": pid, "why": why} for pid, why in parents_mod.parents_of(c, idx) if pid in vis],
             })
         out_c.sort(key=lambda x: x["name"].lower())
