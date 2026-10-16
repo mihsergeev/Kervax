@@ -2431,7 +2431,6 @@ const EN: Record<string, string> = {
   'это его адрес': 'it is its address',
   'задано вручную': 'set manually',
   '{n} дней': '{n} days',
-  'Алертов': 'Alerts',
   'Алертов пришло': 'Alerts received',
   'Аптайм': 'Uptime',
   'Бэкапы: что ломалось': 'Backups: what broke',
@@ -2621,9 +2620,7 @@ const EN: Record<string, string> = {
   'Сервер': 'Server',
   'Серверы не пропадали, алертов по ним не было': 'No server went missing and there were no alerts about them',
   'Серверы, недоступность': 'Servers, unavailability',
-  'Чаще всего': 'Most often',
   'Что шумело': 'What was noisy',
-  'алертов: {n}': 'alerts: {n}',
   'без отбоев': 'recoveries not counted',
   'и еще {n} со сбоями': 'and {n} more with failures',
   'к прошлому периоду': 'vs the previous period',
@@ -4156,12 +4153,20 @@ const EN: Record<string, string> = {
   'тормозит':
     'slow',
   // --- окно Отчет разделами (ReportModal, reportHtml) ---
+  '{n} раз':
+    '{n} times',
+  '{n} раза':
+    '{n} times',
+  'Что было':
+    'What happened',
+  'И еще {n} реже - в истории алертов.':
+    '{n} more, less often: see the alert history.',
+  'Что именно срабатывало и где. Если одно и то же приходит каждый день - стоит починить, поправить порог или заглушить.':
+    'What exactly fired and where. If the same thing fires every day, fix it, adjust the threshold or mute it.',
   '{m} мин {s} с':
     '{m} min {s} s',
   '{s} с':
     '{s} s',
-  'Алерт':
-    'Alert',
   'Алертов за период не было.':
     'No alerts in the period.',
   'Алерты по дням':
@@ -4192,10 +4197,6 @@ const EN: Record<string, string> = {
     'Servers that went missing or triggered alerts. Downtime comes from gaps in agent reports: a muted alert does not cancel it.',
   'Скачать отчет':
     'Download report',
-  'Сколько':
-    'Count',
-  'Срабатывания алертов без отбоев. Если одно и то же приходит каждый день - стоит поправить порог или заглушить.':
-    'Alert firings without recoveries. If the same thing fires every day, adjust the threshold or mute it.',
   'Сформирован {d}':
     'Generated {d}',
   'Хуже всего':

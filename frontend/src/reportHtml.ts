@@ -1,4 +1,5 @@
-import type { Report } from './api'
+import type { Report, ReportNoise } from './api'
+import { isBackup, noiseGroups, noiseWhen, times } from './reportNoise'
 
 // Отчет одним HTML-файлом для передачи: все стили внутри, без внешних шрифтов и скриптов,
 // светлая и темная тема по настройке системы, читается на телефоне и печатается.
@@ -77,6 +78,29 @@ function table(head: string[], rows: string[][], num: number[] = []): string {
   return `<div class="tw"><table${head.length > 3 ? ' class="stack"' : ''}><thead><tr>${th}</tr></thead><tbody>${tr}</tbody></table></div>`
 }
 
+// что шумело: объект строкой-заголовком, под ним что именно, почему и когда; редкое у
+// сервера после первых строк - одной строкой "и еще N", файл читают, а не листают
+const PER_TARGET = 10
+
+function noiseTable(items: ReportNoise[], t: T): string {
+  const rows = noiseGroups(items)
+    .map((g) => {
+      const head = `<tr class="grp"><td colspan="2"><span class="mono">${esc(g[0].target)}</span></td></tr>`
+      const lines = g
+        .slice(0, PER_TARGET)
+        .map(
+          (x) =>
+            `<tr><td><div>${esc(x.what)}</div>${x.note ? `<div class="muted small">${esc(x.note)}</div>` : ''}</td>` +
+            `<td class="num small"><div>${esc(noiseWhen(x))}</div>${x.n > 1 ? `<div class="muted">${esc(times(x.n, t))}</div>` : ''}</td></tr>`,
+        )
+        .join('')
+      const more = g.length > PER_TARGET ? `<tr><td colspan="2" class="muted small">${esc(t('и еще {n}', { n: g.length - PER_TARGET }))}</td></tr>` : ''
+      return head + lines + more
+    })
+    .join('')
+  return `<div class="tw"><table class="noise"><tbody>${rows}</tbody></table></div>`
+}
+
 function tile(label: string, value: string, sub: string, tone = ''): string {
   return `<div class="tile${tone ? ` ${tone}` : ''}"><div class="tl">${esc(label)}</div><div class="tv">${esc(value)}</div><div class="ts">${esc(sub)}</div></div>`
 }
@@ -116,10 +140,10 @@ export function reportHtml(r: Report, t: T, brand: string): string {
       `<p class="note">${esc(t('Панель не принимала отчеты {d}, раз: {n}. В простой серверов это не входит.', { d: dur(servers.panel_s, t), n: servers.panel_gaps }))}</p>`,
     )
 
-  if (chart && (sites || servers)) {
+  if (chart && (sites?.downtime_s || servers?.offline_s)) {
     const ser: Series[] = []
-    if (sites) ser.push({ label: t('простой сайтов'), cls: 'c-sites', values: sites.per_day })
-    if (servers) ser.push({ label: t('простой серверов'), cls: 'c-servers', values: servers.per_day })
+    if (sites?.downtime_s) ser.push({ label: t('простой сайтов'), cls: 'c-sites', values: sites.per_day })
+    if (servers?.offline_s) ser.push({ label: t('простой серверов'), cls: 'c-servers', values: servers.per_day })
     parts.push(`<h2>${esc(t('Простой по дням'))}</h2>${bars(r.day_labels, ser, (n) => (n ? dur(n, t) : '0'), t)}`)
   }
   if (chart)
@@ -148,43 +172,38 @@ export function reportHtml(r: Report, t: T, brand: string): string {
     )
   }
   if (servers) {
+    // никто не пропадал - колонки недоступности пустые, не показываем их
+    const anyOff = servers.items.some((s) => s.offline_s > 0)
     parts.push(`<h2>${esc(t('Серверы'))}</h2>`)
     parts.push(
       servers.items.length === 0
         ? `<p class="muted">${esc(t('Серверы не пропадали, алертов по ним не было'))}</p>`
         : table(
-            [t('Сервер'), t('Недоступен'), t('Раз'), t('Самый долгий'), t('Алертов'), t('Чаще всего')],
-            servers.items.map((s) => [
-              esc(s.name),
-              esc(dur(s.offline_s, t)),
-              s.gaps ? String(s.gaps) : '-',
-              esc(dur(s.longest_s, t)),
-              s.alerts ? String(s.alerts) : '-',
-              s.kinds.map((k) => `<span class="chip">${esc(k.label)} ${k.n}</span>`).join(' '),
-            ]),
-            [1, 2, 3, 4],
+            anyOff ? [t('Сервер'), t('Недоступен'), t('Раз'), t('Самый долгий'), t('Что было')] : [t('Сервер'), t('Что было')],
+            servers.items.map((s) => {
+              const things = s.things
+                .map((x) => `<div>${esc(x.what)}${x.n > 1 ? ` <span class="muted">${esc(times(x.n, t))}</span>` : ''}</div>`)
+                .join('')
+              const name = `<span class="mono">${esc(s.name)}</span>`
+              return anyOff
+                ? [name, esc(dur(s.offline_s, t)), s.gaps ? String(s.gaps) : '-', esc(dur(s.longest_s, t)), things]
+                : [name, things]
+            }),
+            anyOff ? [1, 2, 3] : [],
           ),
     )
   }
-  if (noise.top.length) {
+  // бэкапы - своим разделом, в "что шумело" их не повторяем
+  const other = noise.items.filter((x) => !isBackup(x))
+  const backups = noise.items.filter(isBackup)
+  if (other.length) {
     parts.push(`<h2>${esc(t('Что шумело'))}</h2>`)
-    parts.push(
-      table(
-        [t('Объект'), t('Алерт'), t('Сколько')],
-        noise.top.map((x) => [`<span class="mono">${esc(x.target)}</span>`, esc(x.label), String(x.n)]),
-        [2],
-      ),
-    )
+    parts.push(noiseTable(other, t))
+    if (noise.more > 0) parts.push(`<p class="muted">${esc(t('И еще {n} реже - в истории алертов.', { n: noise.more }))}</p>`)
   }
-  if (noise.backups.length) {
+  if (backups.length) {
     parts.push(`<h2>${esc(t('Бэкапы: что ломалось'))}</h2>`)
-    parts.push(
-      table(
-        [t('Бэкап'), t('Что'), t('Алертов')],
-        noise.backups.map((b) => [`<span class="mono">${esc(b.target)}</span>`, esc(b.kinds.join(', ')), String(b.n)]),
-        [2],
-      ),
-    )
+    parts.push(noiseTable(backups, t))
   }
   if (r.maint.length) {
     parts.push(`<h2>${esc(t('Окна обслуживания'))}</h2>`)
@@ -228,6 +247,9 @@ header { margin-bottom: 18px; }
 h1 { margin: 0 0 4px; font-size: 22px; }
 h2 { margin: 26px 0 10px; font-size: 16px; }
 .muted { color: var(--muted); }
+.small { font-size: 12px; }
+.noise .grp td { padding-top: 12px; font-weight: 600; background: color-mix(in srgb, var(--border) 35%, transparent); }
+.noise td.num { width: 1%; }
 .mono { font-family: ui-monospace, Consolas, monospace; font-size: 13px; }
 .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 10px; }
 .tile { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; }

@@ -55,12 +55,15 @@ async def test_report_week(client, auth_headers):
     assert srv["panel_gaps"] == 1 and abs(srv["panel_s"] - 660) < 70
     web_a = next(x for x in srv["items"] if x["name"] == "web-a")
     assert web_a["gaps"] == 1 and abs(web_a["offline_s"] - 1260) < 70
-    assert web_a["alerts"] == 3 and web_a["kinds"][0]["kind"] == "disk"
+    assert web_a["alerts"] == 3 and web_a["things"][0]["n"] == 3
     assert srv["with_gaps"] == 1
     noise = j["noise"]
     assert noise["fires"] == 5 and noise["prev_fires"] == 1
-    assert noise["top"][0] == {"kind": "disk", "label": noise["top"][0]["label"], "target": "web-a", "n": 3}
-    assert noise["backups"][0]["target"] == "web-b" and noise["backups"][0]["n"] == 2
+    # без текста алерта "что" - название вида; ссылка - на карточку сервера
+    top = noise["items"][0]
+    assert (top["target"], top["kind"], top["n"], top["srv_id"]) == ("web-a", "disk", 3, ids["web_a"])
+    bk = next(x for x in noise["items"] if x["kind"] == "backup_failed")
+    assert bk["target"] == "web-b" and bk["n"] == 2 and bk["days"] == 1
     assert [m["title"] for m in j["maint"]] == ["ядро"]
     # по дням: все случилось за последние часы - сегодня (или вчера, если сутки только начались)
     days = j["day_labels"]
@@ -80,3 +83,26 @@ async def test_report_respects_groups(client, auth_headers):
     j = (await client.get("/api/report?days=1", headers=h)).json()
     assert j["sites"]["total"] == 0 and j["servers"]["total"] == 0
     assert j["noise"]["fires"] == 0 and j["maint"] == []
+
+
+async def test_report_noise_says_what_exactly(client, auth_headers):
+    f = client._transport.app.state.session_factory  # noqa: SLF001
+    now = datetime.now(timezone.utc)
+    unit = "⚠️⚙️ web-a — упал app-sync.service: код 1, {m} мин назад\n↳ ModuleNotFoundError: No module named 'requests'"
+    pods = ("🔄☸️ web-a — под shop/worker-7fb484cbcb-wvkcj перезапускался 5 раз за сутки; "
+            "под shop/worker-7fb484cbcb-xmszd перезапускался 6 раз за сутки")
+    async with f() as s:
+        s.add(Server(name="web-a", token_hash="t-web-a", enabled=True, last_seen=now))
+        for h, m in ((30, 3), (5, 40)):
+            s.add(AlertEvent(ts=now - timedelta(hours=h), kind="units", target="web-a", section="servers",
+                             text=unit.format(m=m)))
+        s.add(AlertEvent(ts=now - timedelta(hours=1), kind="kube_restarts", target="web-a", section="kuber", text=pods))
+        await s.commit()
+    j = (await client.get("/api/report?days=7", headers=auth_headers)).json()
+    rows = {x["what"]: x for x in j["noise"]["items"]}
+    u = rows["упал app-sync.service"]
+    assert u["n"] == 2 and u["days"] == 2 and u["note"] == "код 1: ModuleNotFoundError: No module named 'requests'"
+    # два пода одного deployment - одна беда
+    assert rows["перезапускается под shop/worker"]["n"] == 1
+    web_a = next(x for x in j["servers"]["items"] if x["name"] == "web-a")
+    assert [t["what"] for t in web_a["things"]] == ["упал app-sync.service", "перезапускается под shop/worker"]
