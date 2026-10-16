@@ -970,7 +970,9 @@ export type AlertHistory = {
     fires: number
     recoveries: number
     kinds: { kind: string; label: string; n: number }[] // чаще всего срабатывали, за весь период
-    targets: { target: string; n: number }[]
+    targets: { target: string; section: string; n: number; srv_id: number | null; chk_id: number | null }[]
+    items: ReportNoise[] // что шумело: что именно и где, как в отчете
+    more_items: number
   }
 }
 export type AlertHistoryQuery = {
