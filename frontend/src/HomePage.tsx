@@ -22,7 +22,7 @@ import {
   type KnownIssue,
 } from './api'
 import type { Section } from './App'
-import { backupAlive, backupWindowNote, dbAuditNames, dockRiskText, fmtSetupVersion, knownActive, proxyBuilt, shortList, sinceShort, srvIssues, srvKnown, knownMeta } from './serverUtils'
+import { backupAlive, backupWindowNote, dbAuditNames, knownText, dockRiskText, fmtSetupVersion, knownActive, proxyBuilt, shortList, sinceShort, srvIssues, srvKnown, knownMeta } from './serverUtils'
 import { KnownDialog } from './KnownDialog'
 import { MaintChip, MaintHome } from './MaintModal'
 import { useI18n } from './i18n'
@@ -404,6 +404,12 @@ function actionItems(servers: Server[], avail: string, relProblem: string, t: T)
       items.push({ key: `bs-restic-${s.id}`, icon: '🧓', section: 'backups', id: s.id, name: s.name, cc: s.country, srv: true, sec: 'server',
         grp: 'bs-restic', detail: `restic ${s.bsrv_restic_old}`,
         text: t('{name}: на сервере бэкапов старый restic {v} - обновите', { name: s.name, v: s.bsrv_restic_old }) })
+    }
+    // Идет подключение (backend app/onboard.py): алертом уходят только офлайн и критичный диск,
+    // остальное ждет, пока человек посмотрит, что нашлось, и закроет подключение в карточке
+    if (s.onboard) {
+      items.push({ key: `onb-${s.id}`, icon: '🆕', section: 'servers', id: s.id, name: s.name, cc: s.country, grp: 'onb',
+        text: t('{name}: идет подключение - посмотрите, что нашлось, и закройте его в карточке', { name: s.name }) })
     }
     // бэкап-сервер найден (по docker), но статистики репо нет → нужен backupserver-setup
     const bs = rep?.backup_server
@@ -1203,7 +1209,7 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
                 <span className="home-attention-txt">
                   <CountryFlag code={it.cc} /> <b>{it.name}</b> - {it.text}
                   <span className="muted">
-                    {' '}· {it.known.text}
+                    {' '}· {knownText(it.known, t)}
                     {knownMeta(it.known, t) ? ` (${knownMeta(it.known, t)})` : ''}
                   </span>
                 </span>

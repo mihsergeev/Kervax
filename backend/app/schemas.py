@@ -1364,6 +1364,12 @@ class ServerOut(BaseModel):
     note_at: datetime | None = None
     # известные проблемы по видам алертов (app/known.py); worse - стало хуже отмеченного
     known_issues: dict[str, dict] | None = None
+    # подключение нового сервера (app/onboard.py): идет - {until, tg, main, chats} (куда пойдут
+    # алерты, имена чатов без id), закрыто - None
+    onboard: dict | None = None
+    onboard_done_at: datetime | None = None
+    onboard_by: str = ""
+    first_report_at: datetime | None = None
     # за каким сервером стоит (шлюз, VPN): пока тот молчит, "недоступен" про этот не шлем
     parent_id: int | None = None
     online: bool = False  # вычисляется (last_seen в пределах offline_after)

@@ -35,6 +35,7 @@ from app import mem_trend
 from app import restarts as srv_restarts
 from app import ssh_audit
 from app import known as known_mod
+from app import onboard as onboard_mod
 from app import parents as parents_mod
 from app import maint
 from app import tg_bot
@@ -5325,6 +5326,14 @@ async def evaluate_servers(
     rec_apply: list[tuple[int, str, object]] = []
     # известные проблемы, которые сборщик обновил или закрыл: (sid, вид, at записи, новая|None)
     known_upd: list[tuple[int, str, str | None, dict | None, str]] = []
+    # новые известные проблемы: что было при подключении сервера (sid, вид, запись)
+    known_add: list[tuple[int, str, dict]] = []
+    # сервер закрыл подключение сам (вышел ONBOARD_MAX): sid -> что стало известным
+    onboard_closed: dict[int, list[str]] = {}
+    # где в очередях начинается каждый сервер: у серверов на подключении после цикла
+    # отправляется только офлайн и критичный диск (onboard_mod.split)
+    marks: list[tuple[int | None, int, int, int, int]] = []
+    onboarding: set[int] = set()
 
     def apply(sid: int, key: str, value: object) -> None:
         cur_by_id[sid][key] = value
@@ -5332,6 +5341,7 @@ async def evaluate_servers(
 
     for s in servers:
         st = cur_by_id[s.id]
+        marks.append((s.id, len(fires), len(fire_apply), len(recoveries), len(rec_apply)))
         # снуз: сервер временно приглушён — алерты не шлём (но состояние не трогаем,
         # чтобы после снуза оставшаяся проблема снова сработала)
         if s.snooze_until is not None and _aware(s.snooze_until) > now:
@@ -5344,6 +5354,12 @@ async def evaluate_servers(
         created = getattr(s, "created_at", None)
         if created is not None and 0 <= (now - _aware(created)).total_seconds() < _NEW_SERVER_QUIET:
             continue
+        # Идет подключение (app/onboard.py): пороги придерживаются, события молча двигают отметку
+        onb = onboard_mod.active(s, now)
+        if onb:
+            onboarding.add(s.id)
+            if not st.get("onboard"):
+                apply(s.id, "onboard", 1)
         # заглушённые типы: постоянные мьюты + точечный ВРЕМЕННЫЙ снуз отдельных
         # типов (напр. приглушить OOM на день, но продолжать слать offline/CPU)
         mutes = set(s.alert_mutes or [])
@@ -5416,6 +5432,7 @@ async def evaluate_servers(
         # Известные проблемы (app/known.py): снимок того, что отметили, закрытие, когда ушла
         # сама или вышел срок, и напоминание раз в неделю, что она все еще висит
         known_now: dict[str, dict] = {}
+        reminds: list[tuple[str, dict]] = []
         for kk, ent in (s.known_issues or {}).items():
             if not isinstance(ent, dict):
                 continue
@@ -5431,10 +5448,32 @@ async def evaluate_servers(
                 continue
             known_now[kk] = new_k
             if what == "remind":
-                label = settings_store.SERVER_ALERT_KINDS.get(kk, (kk,))[0]
-                fires.append(_server_alert_text(
-                    "known", s.name, known_mod.remind_text(label, new_k, now), srv_url(s, kk),
-                    icon="📌", group=s.group_name or ""))
+                reminds.append((kk, new_k))
+        if reminds:
+            # Отмеченные разом (что было при подключении) напоминают о себе в один тик: одним
+            # сообщением на сервер, а не по сообщению на каждую
+            lines = [known_mod.remind_text(settings_store.SERVER_ALERT_KINDS.get(kk, (kk,))[0], e, now)
+                     for kk, e in reminds]
+            fires.append(_server_alert_text(
+                "known", s.name, lines[0] if len(lines) == 1 else "; ".join(lines),
+                srv_url(s, reminds[0][0]), icon="📌", group=s.group_name or ""))
+        # Подключение закрыто (человеком или само): что все еще сломано и не объявлялось,
+        # становится известной проблемой. Алерт придет, если станет хуже или сломается новое
+        if not onb and st.get("onboard") and talking:
+            made = []
+            for key, (level, k_ctx) in conds.items():
+                if key == "offline" or level <= 0 or int(st.get(key, 0)) or key in known_now:
+                    continue
+                rule = rules.get(key) or _fallback_rule(key)
+                if not rule["enabled"] or not _rule_scope_ok(rule, s) or _muted(key, level, mutes):
+                    continue
+                ent = onboard_mod.known_entry(s.onboard_by, now, level, k_ctx.get("sig"))
+                known_now[key] = ent
+                known_add.append((s.id, key, ent))
+                made.append(key)
+            apply(s.id, "onboard", 0)
+            if s.onboard_done_at is None:
+                onboard_closed[s.id] = made
         for key, (level, ctx) in conds.items():
             if not talking and key != "offline":
                 continue  # нода молчит: остальное замерло (см. выше)
@@ -5451,6 +5490,10 @@ async def evaluate_servers(
                 continue  # тип (или его нижние уровни) заглушён для этого сервера
             if known_mod.covers(known_now.get(key), level, ctx.get("sig")):
                 continue  # известная проблема: про нее знают, молчим, пока не стало хуже
+            if onb and not onboard_mod.cond_ok(key, level) and level > int(st.get(key, 0)):
+                # идет подключение: придерживаем без записи состояния. Видно в карточке и в "Что
+                # сломано"; что останется к закрытию, станет известной проблемой
+                continue
             prev = int(st.get(key, 0))
             if key in ("disk_health", "units", "docker_restarts", "kube_restarts", "mem_leak", "db_health",
                        "web_config", "web_cert", "listen_gone", "docker_risk", "access_risk", "link"):
@@ -5976,6 +6019,26 @@ async def evaluate_servers(
                     srv_url(s, "backup_repo"), recovery=True, group=s.group_name or ""))
                 rec_apply.append((s.id, "backup_repos", []))
 
+    if onboarding:
+        # У серверов на подключении уходит только офлайн и критичный диск. Отметки придержанных
+        # событий пишутся сразу, как будто сообщение дошло: после закрытия старое не придет
+        marks.append((None, len(fires), len(fire_apply), len(recoveries), len(rec_apply)))
+        now_apply: list[tuple[int, str, object]] = []
+        nf, nfa, nr, nra = [], [], [], []
+        for (sid, f0, a0, r0, ra0), (_n, f1, a1, r1, ra1) in zip(marks, marks[1:]):
+            if sid in onboarding:
+                kf, kfa = onboard_mod.split(sid, fires[f0:f1], fire_apply[a0:a1], now_apply)
+                kr, kra = onboard_mod.split(sid, recoveries[r0:r1], rec_apply[ra0:ra1], now_apply)
+            else:
+                kf, kfa, kr, kra = fires[f0:f1], fire_apply[a0:a1], recoveries[r0:r1], rec_apply[ra0:ra1]
+            nf += kf
+            nfa += kfa
+            nr += kr
+            nra += kra
+        fires[:], fire_apply[:], recoveries[:], rec_apply[:] = nf, nfa, nr, nra
+        for sid, key, value in now_apply:
+            apply(sid, key, value)
+
     # parse_mode=HTML: имя сервера идёт ссылкой <a href> (как у сайтов). Контент экранирован.
     if await alerts.dispatch(cfg, can_send, fires, threshold, parse_mode="HTML",
                              session_factory=session_factory):
@@ -5986,7 +6049,7 @@ async def evaluate_servers(
         for sid, key, value in rec_apply:
             apply(sid, key, value)
 
-    if changed_ids or known_upd:
+    if changed_ids or known_upd or known_add or onboard_closed:
         async with session_factory() as session:
             for sid in changed_ids:
                 row = await session.get(Server, sid)
@@ -6003,6 +6066,20 @@ async def evaluate_servers(
                 else:
                     cur[kk] = new_k
                 row.known_issues = cur or None
+            for sid, kk, ent in known_add:
+                row = await session.get(Server, sid)
+                if row is None:
+                    continue
+                cur = dict(row.known_issues or {})
+                if kk not in cur:  # отметку успели поставить руками - их версия главнее
+                    cur[kk] = ent
+                    row.known_issues = cur
+            for sid, made in onboard_closed.items():
+                row = await session.get(Server, sid)
+                if row is not None and row.onboard_done_at is None:
+                    row.onboard_done_at, row.onboard_by = now, "авто"
+                    session.add(AuditLog(username="авто", action="onboard_done", target=row.name[:255],
+                                         detail=", ".join(made)))
             await session.commit()
 
 

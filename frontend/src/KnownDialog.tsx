@@ -2,7 +2,7 @@ import { useState } from 'react'
 import type { KnownIssue } from './api'
 import { useI18n } from './i18n'
 import { SRV_ALERT_KINDS } from './mutes'
-import { knownMeta } from './serverUtils'
+import { knownMeta, knownText } from './serverUtils'
 
 const KNOWN_DAYS: [number, string][] = [
   [0, 'пока не починится'],
@@ -144,7 +144,7 @@ export function KnownCheckBar({
       <span className="note-bar-ic">📌</span>
       <div className="note-bar-body">
         <div>
-          <b>{t('Известная проблема')}:</b> {known.text}
+          <b>{t('Известная проблема')}:</b> {knownText(known, t)}
         </div>
         <div className="muted small">
           {[knownMeta(known, t), t('алерт о сбое молчит, отметка закроется, когда монитор поднимется')]

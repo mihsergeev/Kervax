@@ -734,6 +734,12 @@ class Server(Base):
     traffic_limit_gb: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     traffic_count: Mapped[str] = mapped_column(String(8), default="out", server_default="out")
     traffic_cycle_day: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
+    # подключение нового сервера (app/onboard.py): пока не закрыто, алертом уходят только
+    # офлайн и критичный диск, остальное копится в карточке. Кто и когда закрыл; "авто" - само
+    # через ONBOARD_MAX. Открывает подключение только заведение сервера в панели (create_server
+    # ставит метку "onboard" в alert_state), а не любая запись в таблицу
+    onboard_done_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    onboard_by: Mapped[str] = mapped_column(String(128), default="", server_default="")
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()

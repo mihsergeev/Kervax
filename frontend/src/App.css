@@ -6636,6 +6636,17 @@ button.tl-tile-off .net-tile-value {
 /* чип со списком контейнеров (ключи от хоста у трех агентов CI) распирал страницу на телефоне */
 .hs-host-name .type-chip { flex-shrink: 1; min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
 .hs-host-count { flex-shrink: 0; font-weight: 700; font-size: 0.95rem; }
+/* подключение нового сервера (OnboardBlock): чек-лист в начале сводки */
+.onb-card { border: 1px solid var(--border); border-left: 3px solid var(--accent); border-radius: 8px;
+  padding: 0.6rem 0.8rem; margin-bottom: 0.8rem; display: flex; flex-direction: column; gap: 0.4rem; }
+.onb-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.3rem 0.8rem; }
+.onb-list { display: flex; flex-direction: column; gap: 0.25rem; }
+.onb-row { display: flex; align-items: center; gap: 0.5rem; font-size: 0.9rem; min-width: 0; }
+.onb-row > .lk-dot { flex-shrink: 0; }
+.onb-txt { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.onb-found { overflow-wrap: anywhere; }
+.onb-foot { display: flex; justify-content: flex-end; }
+.onb-chip { border-color: var(--accent); color: var(--accent); }
 /* строки хостов в разделах - без подложки и рамки, как строки главной; подсветка при наведении */
 .loc-res.hs-host { background: transparent; border-color: transparent; }
 .loc-res-btn.hs-host:hover { background: var(--hover); border-color: transparent; }
