@@ -144,3 +144,28 @@ async def test_first_report_marks_the_node_fresh(client, auth_headers):
     await _report(client, token, hostname="fresh-one", setup_versions={})
     srv = [x for x in (await client.get("/api/servers", headers=auth_headers)).json() if x["name"] == "fresh-one"][0]
     assert srv["fresh"] is True and srv["helper_advice"] == []
+
+
+async def test_window_sees_the_inventory_with_details(client, auth_headers, monkeypatch):
+    """Окно Ansible показывает то же, что получит плагин инвентаря, с подробностями: до какой
+    версии обновится helper. Без токена: админ видит инвентарь еще до того, как включит доступ."""
+    for where in ("app.api.ansible.current_setup_versions",
+                  "app.api.servers._current_setup_versions"):
+        monkeypatch.setattr(where, lambda: {"timesync-setup": "0.3"})
+    r = await client.post("/api/servers", json={"name": "web-a"}, headers=auth_headers)
+    await _report(client, r.json()["token"], hostname="web-a", setup_versions={"timesync-setup": "0.2"})
+    await client.post("/api/servers", json={"name": "never-reported"}, headers=auth_headers)
+
+    r = await client.get("/api/settings/ansible/nodes", headers=auth_headers)
+    assert r.status_code == 200, r.text
+    nodes = r.json()["nodes"]
+    assert [n["name"] for n in nodes] == ["web-a"]
+    n = nodes[0]
+    assert n["rollout"] is True and n["online"] is True and n["issues"] == []
+    assert [(a["name"], a["installed"], a["current"]) for a in n["outdated"]] == [("timesync-setup", "0.2", "0.3")]
+    viewer = await _mk_viewer(client, auth_headers)
+    assert (await client.get("/api/settings/ansible/nodes", headers=viewer)).status_code == 403
+    # плагин получает тот же расчет
+    token = (await client.post("/api/settings/ansible", headers=auth_headers)).json()["token"]
+    r = await client.get("/api/ansible/servers", headers={"Authorization": f"Bearer {token}"})
+    assert [(x["name"], x["rollout"], x["outdated"]) for x in r.json()["servers"]] == [("web-a", True, ["timesync-setup"])]

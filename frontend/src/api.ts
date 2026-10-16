@@ -980,6 +980,28 @@ export function getAnsibleAccess(): Promise<AnsibleAccess> {
   return api<AnsibleAccess>('/api/settings/ansible')
 }
 
+// Нода инвентаря ansible для окна: то же, что получает плагин, с подробностями
+export type AnsibleNode = {
+  id: number
+  name: string
+  hostname: string
+  ips: string[]
+  online: boolean
+  enabled: boolean
+  rollout: boolean // в группе kervax_outdated
+  outdated: HelperAdvice[]
+  watchdog_off: boolean
+  issues: string[] // docker_sock / proxy_old / restic_old
+  sock: { name: string; image: string; kind: string }[]
+  proxy_old: { name: string; image: string; kind: string; version: string; built: number; age_days: number }[]
+  restic: string
+  restic_target: string
+}
+
+export function getAnsibleNodes(): Promise<{ nodes: AnsibleNode[] }> {
+  return api('/api/settings/ansible/nodes')
+}
+
 export function issueAnsibleToken(): Promise<{ token: string; created_at: string }> {
   return api('/api/settings/ansible', { method: 'POST' })
 }

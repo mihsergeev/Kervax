@@ -1888,14 +1888,6 @@ const EN: Record<string, string> = {
     'Issue a new token? The old one stops working right away.',
   'Отключить доступ ansible? Плагин инвентаря перестанет получать ноды этой панели.':
     'Turn off ansible access? The inventory plugin will stop getting the nodes of this panel.',
-  'Плагин инвентаря в репо ansible (inventory_plugins/kervax_panels.py) спрашивает у каждой панели её ноды и собирает группы: kervax - все ноды с агентом, kervax_outdated - где плейбук что-то обновит. Тогда helper-скрипты на всех панелях обновляет одна команда:':
-    'The inventory plugin in the ansible repo (inventory_plugins/kervax_panels.py) asks every panel for its nodes and builds groups: kervax - all nodes with the agent, kervax_outdated - where the playbook will update something. Then one command updates the helpers on all panels:',
-  'Токен открывает только список нод - имена и адреса, без секретов и без управления.':
-    'The token opens only the node list - names and addresses, no secrets and no control.',
-  'Доступ включен': 'Access is on',
-  'Доступ выключен': 'Access is off',
-  'Токен выпущен: {a}. Ansible спрашивал последний раз: {b}.':
-    'Token issued: {a}. Ansible last asked: {b}.',
   'Токен показывается один раз. Добавьте эти строки в inventories/kervax_panels.yml, в список panels:':
     'The token is shown only once. Add these lines to inventories/kervax_panels.yml, under panels:',
   'Отключить': 'Turn off',
@@ -3734,6 +3726,93 @@ const EN: Record<string, string> = {
     'data will be about {n}',
   'Старое удаляется {every}':
     'Old data is deleted {every}',
+  // --- окно Ansible разделами (AnsibleModal) ---
+  '{h}: поставить {b}': '{h}: install {b}',
+  'Helper-скрипты': 'Helper scripts',
+  'Старый прокси': 'Old proxy',
+  'Старый restic': 'Old restic',
+  'Ansible не видит ноды этой панели: доступ выключен.':
+    'Ansible does not see the nodes of this panel: access is off.',
+  'Ansible спрашивал':
+    'Ansible asked',
+  'ansible спрашивал {a}':
+    'ansible asked {a}',
+  'restic самого сервера бэкапов старше целевой версии. Обычно его обновляет установка helper-скрипта, если скачать не вышло - одной командой.':
+    'restic on the backup server itself is older than the target version. Installing the helper script usually updates it; if the download failed, one command does it.',
+  '{a} назад':
+    '{a} ago',
+  'Адрес':
+    'Address',
+  'В группах проблем':
+    'In problem groups',
+  'В группе ни одной ноды.':
+    'No nodes in the group.',
+  'Внешний прокси (caddy, traefik) держит docker-сокет: взлом прокси - root на ноде. Плейбук ставит прокси docker-api только на чтение и переключает на него.':
+    'The edge proxy (caddy, traefik) holds the docker socket: breaking into the proxy means root on the node. The playbook installs a read-only docker-api proxy and switches to it.',
+  'Все ноды':
+    'All nodes',
+  'Все ноды панели, от которых был хоть один отчет агента. Ansible находит их в своем инвентаре по имени, hostname или адресу.':
+    'All panel nodes that sent at least one agent report. Ansible finds them in its inventory by name, hostname or address.',
+  'Доступ ansible выключен: ansible этой панели не видит, группы в инвентарь не попадут.':
+    'Ansible access is off: ansible does not see this panel, and the groups will not get into the inventory.',
+  'Не на связи, в группу не попадут, пока не вернутся: {list}.':
+    'Offline, they will not get into the group until they are back: {list}.',
+  'Не на связи, обновятся, когда вернутся: {list}.':
+    'Offline, they will be updated when they are back: {list}.',
+  'Нод в инвентаре':
+    'Nodes in the inventory',
+  'Ноды в группе: {n}':
+    'Nodes in the group: {n}',
+  'Ноды на связи, где устарел helper или не включен сторож агента. Плейбук ставит только устаревшее, остальное пропускает.':
+    'Online nodes with an outdated helper or without the agent watchdog. The playbook installs only what is outdated and skips the rest.',
+  'Обновит плейбук':
+    'Playbook will update',
+  'Образ внешнего прокси старше года. caddy обновляет тот же caddy_harden.yml (роль ставит закрепленную версию), traefik - руками: между версиями у него меняются настройки.':
+    'The edge proxy image is older than a year. caddy is updated by the same caddy_harden.yml (the role installs a pinned version), traefik by hand: its settings change between versions.',
+  'Плагин инвентаря (inventory_plugins/kervax_panels.py) спрашивает у каждой панели ее ноды по этому токену и собирает группы kervax_*. Тогда одна команда обновляет helper-скрипты на всех панелях сразу.':
+    'The inventory plugin (inventory_plugins/kervax_panels.py) asks every panel for its nodes with this token and builds the kervax_* groups. Then one command updates helper scripts on all panels at once.',
+  'Плейбукам нечего делать: helper-скрипты везде свежие, проблем нет.':
+    'Nothing for the playbooks to do: helper scripts are up to date everywhere, no problems.',
+  'Прокси с docker-сокетом':
+    'Proxy with the docker socket',
+  'Старый restic на сервере бэкапов':
+    'Old restic on the backup server',
+  'Токен':
+    'Token',
+  'Токен выпущен':
+    'Token issued',
+  'Токен открывает только список нод: имена, адреса и что на них обновить. Без секретов и без управления. Если плейбук запускали позже, чем здесь написано, у этой панели в kervax_panels.yml старый токен или неверный адрес.':
+    'The token opens only the node list: names, addresses and what to update on them. No secrets and no control. If the playbook ran later than shown here, kervax_panels.yml has an old token or a wrong address for this panel.',
+  'Что ansible получит от этой панели: группы нод для плейбуков. Helper-скрипты на нодах ставит человек плейбуком, панель сама root-скрипты не запускает.':
+    'What ansible gets from this panel: node groups for playbooks. A person installs helper scripts on nodes with a playbook; the panel never runs root scripts itself.',
+  'Что запустить':
+    'What to run',
+  'Что обновит плейбук':
+    'What the playbook will update',
+  'Что обновится':
+    'What gets updated',
+  'Что там':
+    'What is there',
+  'группа kervax':
+    'group kervax',
+  'доступ выключен':
+    'access is off',
+  'еще ни разу':
+    'never yet',
+  'нод: {n}':
+    'nodes: {n}',
+  'прокси и restic':
+    'proxy and restic',
+  'сборка {d}':
+    'built {d}',
+  'сторож агента не включен':
+    'agent watchdog is off',
+  'токен выпущен, ansible еще не спрашивал':
+    'token issued, ansible has not asked yet',
+  'Группы инвентаря':
+    'Inventory groups',
+  'Нод':
+    'Nodes',
 }
 
 type Ctx = {

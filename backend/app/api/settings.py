@@ -5,7 +5,7 @@ from fastapi import APIRouter
 from app import audit, retention, settings_store
 from app.config import get_settings
 from app.deps import AdminUser, SessionDep
-from app.schemas import AnsibleAccessOut, AnsibleTokenOut, RetentionConfig, RetentionOverview
+from app.schemas import AnsibleAccessOut, AnsibleNodesOut, AnsibleTokenOut, RetentionConfig, RetentionOverview
 from app.security import generate_agent_token, hash_agent_token
 
 router = APIRouter(prefix="/settings", tags=["settings"])
@@ -41,6 +41,14 @@ async def get_ansible_access(_: AdminUser, session: SessionDep) -> AnsibleAccess
     acc = await settings_store.get_ansible_access(session)
     return AnsibleAccessOut(enabled=bool(acc.get("hash")), created_at=acc.get("created_at"),
                             used_at=acc.get("used_at"))
+
+
+@router.get("/ansible/nodes", response_model=AnsibleNodesOut)
+async def ansible_nodes(_: AdminUser, session: SessionDep) -> AnsibleNodesOut:
+    """Что ansible получит от панели (группы инвентаря) с подробностями - для окна Ansible.
+    Работает и без токена: админ смотрит, что будет в инвентаре, еще до того, как его включит."""
+    from app.api.ansible import nodes
+    return AnsibleNodesOut(nodes=await nodes(session, datetime.now(timezone.utc)))
 
 
 @router.post("/ansible", response_model=AnsibleTokenOut)

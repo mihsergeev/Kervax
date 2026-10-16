@@ -676,7 +676,14 @@ export default function App() {
         <RetentionModal onClose={() => setModal(null)} onUnauthorized={logout} />
       )}
       {modal === 'ansible' && (
-        <AnsibleModal onClose={() => setModal(null)} onUnauthorized={logout} />
+        <AnsibleModal
+          onClose={() => setModal(null)}
+          onUnauthorized={logout}
+          onOpenServer={(id) => {
+            setModal(null)
+            openTarget('servers', id)
+          }}
+        />
       )}
       {modal === 'backup' && (
         <BackupModal onClose={() => setModal(null)} onUnauthorized={logout} />

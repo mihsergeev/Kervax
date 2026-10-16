@@ -890,6 +890,10 @@ class AnsibleAccessOut(BaseModel):
     used_at: str | None = None
 
 
+class AnsibleNodesOut(BaseModel):
+    nodes: list["AnsibleNodeOut"]
+
+
 class AnsibleTokenOut(BaseModel):
     """Новый токен ansible - показывается один раз, в базе остается только хеш."""
 
@@ -919,6 +923,26 @@ class AnsibleServerOut(BaseModel):
 class AnsibleServersOut(BaseModel):
     version: str
     servers: list[AnsibleServerOut]
+
+
+class AnsibleNodeOut(BaseModel):
+    """Нода инвентаря ansible для окна панели: то же, что получает плагин, и подробности -
+    какие helper'ы и до какой версии обновит плейбук, что за прокси и restic в группах проблем."""
+
+    id: int
+    name: str
+    hostname: str = ""
+    ips: list[str] = []
+    online: bool
+    enabled: bool
+    rollout: bool                                # в группе kervax_outdated
+    outdated: list["HelperAdvice"] = []
+    watchdog_off: bool = False                   # сторож агента не включен, его ставит плейбук
+    issues: list[str] = []                       # docker_sock / proxy_old / restic_old
+    sock: list[dict] = []                        # прокси с docker-сокетом: name, image, kind
+    proxy_old: list[dict] = []                   # старые образы прокси: name, image, version, age_days
+    restic: str = ""                             # restic сервера бэкапов, если старше целевого
+    restic_target: str = ""
 
 
 class RetentionConfig(BaseModel):
