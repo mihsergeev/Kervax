@@ -2320,6 +2320,11 @@ export type Location = {
   url: string
   enabled: boolean
   monitors: boolean // false - только для внешней проверки портов
+  // куда выходит в интернет по последней проверке: адрес и ISO-код страны, '' - не определилось;
+  // exit_at null - еще не проверяли
+  exit_ip: string
+  exit_country: string
+  exit_at: string | null
   created_at: string
 }
 
@@ -2383,13 +2388,15 @@ export function createLocation(body: {
   url: string
   enabled?: boolean
   monitors?: boolean
+  exit_ip?: string
+  exit_country?: string
 }): Promise<Location> {
   return api<Location>('/api/locations', { method: 'POST', body: JSON.stringify(body) })
 }
 
 export function updateLocation(
   id: number,
-  body: Partial<{ name: string; url: string; enabled: boolean; monitors: boolean }>,
+  body: Partial<{ name: string; url: string; enabled: boolean; monitors: boolean; exit_ip: string; exit_country: string }>,
 ): Promise<Location> {
   return api<Location>(`/api/locations/${id}`, {
     method: 'PATCH',
@@ -2401,7 +2408,42 @@ export function deleteLocation(id: number): Promise<void> {
   return api<void>(`/api/locations/${id}`, { method: 'DELETE' })
 }
 
-export type ProxyTestResult = { ok: boolean; message: string; latency_ms: number | null }
+export type ProxyTestResult = {
+  ok: boolean
+  message: string
+  latency_ms: number | null
+  exit_ip: string
+  exit_country: string
+}
+
+// Проверка сохраненной локации: заодно запоминает, где она выходит в интернет
+export function testSavedLocation(id: number): Promise<ProxyTestResult> {
+  return api<ProxyTestResult>(`/api/locations/${id}/test`, { method: 'POST' })
+}
+
+// Окно локаций: как каждая проверяет, через какую смотрят порты нод, где какой сайт недоступен
+export type LocSiteCell = { status: string; message: string; fails: number }
+export type LocationStat = {
+  id: number
+  checks: number
+  up: number
+  degraded: number
+  down: number
+  up_pct: number | null
+  avg_ms: number | null
+  last_at: string | null
+  broken: boolean
+  error: string
+}
+export type LocationsOverview = {
+  locations: LocationStat[]
+  ports_location_id: number | null
+  sites: { check_id: number; name: string; group: string; main: LocSiteCell; cells: Record<string, LocSiteCell> }[]
+}
+
+export function getLocationsOverview(): Promise<LocationsOverview> {
+  return api<LocationsOverview>('/api/locations/overview')
+}
 
 // Проверка доступности прокси локации (идёт ли через него трафик).
 export function testProxy(url: string): Promise<ProxyTestResult> {

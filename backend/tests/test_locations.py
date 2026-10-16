@@ -1,6 +1,7 @@
 from types import SimpleNamespace
 
 import httpx
+import pytest
 from sqlalchemy import func, select
 
 from app import bootstrap, checks as checks_mod, collector
@@ -487,3 +488,122 @@ async def test_partial_outage_that_lasts_still_alerts(tmp_path, monkeypatch):
     await collector.evaluate_location_alerts(factory, settings, now + timedelta(minutes=1))
     assert len(sent) == 1 and "снова доступен" in sent[0]
     await engine.dispose()
+
+
+def _factory(client):
+    return client._transport.app.state.session_factory  # noqa: SLF001
+
+
+async def test_locations_overview(client: httpx.AsyncClient, auth_headers):
+    """Окно локаций: числа по каждой, сломанный прокси, порты нод и таблица "где недоступно"."""
+    f = _factory(client)
+    async with f() as s:
+        direct = Location(name="Панель", url="", enabled=True)
+        kz = Location(name="KZ", url="http://user:pass@203.0.113.10:3128", enabled=True)
+        dead = Location(name="RU", url="socks5://203.0.113.30:1080", enabled=True)
+        ports = Location(name="Порты", url="socks5://203.0.113.20:1080", enabled=True, monitors=False)
+        s.add_all([direct, kz, dead, ports])
+        a = Check(name="shop", type="http", target="https://shop.example", enabled=True,
+                  check_locations=True, last_status="up")
+        b = Check(name="api", type="http", target="https://api.example", enabled=True,
+                  check_locations=True, last_status="up")
+        c = Check(name="blog", type="http", target="https://blog.example", enabled=True,
+                  check_locations=True, last_status="down", last_message="HTTP 502")
+        s.add_all([a, b, c])
+        await s.commit()
+        for chk, kz_st in ((a, "down"), (b, "up"), (c, "down")):
+            s.add(LocationResult(check_id=chk.id, location_id=kz.id, status=kz_st,
+                                 message="connect timeout" if kz_st == "down" else "", consecutive_fails=3))
+            s.add(LocationResult(check_id=chk.id, location_id=dead.id, status="down",
+                                 message="прокси не отвечает", consecutive_fails=9))
+            s.add(LocationSample(check_id=chk.id, location_id=kz.id, status=kz_st, latency_ms=1000))
+        await s.commit()
+        ids = {x.name: x.id for x in (direct, kz, dead, ports)}
+        checks = {x.name: x.id for x in (a, b, c)}
+
+    r = await client.get("/api/locations/overview", headers=auth_headers)
+    assert r.status_code == 200, r.text
+    d = r.json()
+    by = {x["id"]: x for x in d["locations"]}
+    # "напрямую" - основная проверка всех мониторов
+    assert by[ids["Панель"]]["checks"] == 3 and by[ids["Панель"]]["down"] == 1
+    assert by[ids["KZ"]]["checks"] == 3 and by[ids["KZ"]]["down"] == 2 and not by[ids["KZ"]]["broken"]
+    assert by[ids["KZ"]]["avg_ms"] == 1000 and by[ids["KZ"]]["up_pct"] == pytest.approx(33.3)
+    # все отсюда недоступны, а напрямую часть отвечает - сломан сам прокси
+    assert by[ids["RU"]]["broken"] and by[ids["RU"]]["error"] == "прокси не отвечает"
+    assert by[ids["Порты"]]["checks"] == 0
+    assert d["ports_location_id"] == ids["Порты"]
+    # в таблице: blog лежит везде, shop недоступен из KZ; api - только из сломанного прокси, его нет
+    rows = {x["name"]: x for x in d["sites"]}
+    assert set(rows) == {"shop", "blog"}
+    assert rows["shop"]["main"]["status"] == "up"
+    assert rows["shop"]["cells"][str(ids["KZ"])]["status"] == "down"
+    assert rows["blog"]["check_id"] == checks["blog"]
+
+
+async def test_location_exit_saved(client: httpx.AsyncClient, auth_headers, monkeypatch):
+    """Выход в интернет: из проверки при создании, при смене адреса без проверки сбрасывается,
+    проверка сохраненной локации запоминает его заново."""
+    r = await client.post("/api/locations", json={"name": "KZ", "url": "http://203.0.113.10:3128",
+                                                  "exit_ip": "203.0.113.10", "exit_country": "kz"},
+                          headers=auth_headers)
+    assert r.status_code == 201
+    loc = r.json()
+    assert loc["exit_country"] == "KZ" and loc["exit_ip"] == "203.0.113.10" and loc["exit_at"]
+
+    r = await client.patch(f"/api/locations/{loc['id']}", json={"url": "http://203.0.113.11:3128"},
+                           headers=auth_headers)
+    assert r.json()["exit_country"] == "" and r.json()["exit_at"] is None
+
+    async def fake_test(url, timeout_s=10.0):
+        return True, "прокси работает", 120
+
+    async def fake_exit(url, timeout_s=6.0):
+        assert url == "http://203.0.113.11:3128"
+        return "203.0.113.11", "DE"
+
+    monkeypatch.setattr("app.checks.test_proxy", fake_test)
+    monkeypatch.setattr("app.checks.proxy_exit", fake_exit)
+    r = await client.post(f"/api/locations/{loc['id']}/test", headers=auth_headers)
+    assert r.status_code == 200 and r.json()["exit_country"] == "DE"
+    r = await client.get("/api/locations", headers=auth_headers)
+    assert r.json()[0]["exit_country"] == "DE" and r.json()[0]["exit_ip"] == "203.0.113.11"
+
+    # проверка нового адреса тоже говорит, где выход
+    r = await client.post("/api/locations/test", json={"url": "http://203.0.113.11:3128"}, headers=auth_headers)
+    assert r.json()["exit_ip"] == "203.0.113.11"
+
+
+async def test_proxy_exit_parses_trace(monkeypatch):
+    """Cloudflare trace: адрес и страна; без loc= страна по офлайн-таблице, сбой - пусто."""
+    from app import checks as ce
+
+    class Resp:
+        def __init__(self, text):
+            self.text = text
+
+    def client_with(text=None, exc=None):
+        class C:
+            def __init__(self, **kw):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *a):
+                return False
+
+            async def get(self, url):
+                assert "cdn-cgi/trace" in url
+                if exc:
+                    raise exc
+                return Resp(text)
+        return C
+
+    monkeypatch.setattr("app.checks.httpx.AsyncClient", client_with("fl=1\nip=203.0.113.10\nloc=KZ\n"))
+    assert await ce.proxy_exit("http://203.0.113.10:3128") == ("203.0.113.10", "KZ")
+    monkeypatch.setattr("app.geoip.country_of", lambda ip: "FI")
+    monkeypatch.setattr("app.checks.httpx.AsyncClient", client_with("ip=203.0.113.11\nloc=XX\n"))
+    assert await ce.proxy_exit("") == ("203.0.113.11", "FI")
+    monkeypatch.setattr("app.checks.httpx.AsyncClient", client_with(exc=httpx.ConnectError("refused")))
+    assert await ce.proxy_exit("http://203.0.113.10:3128") == ("", "")

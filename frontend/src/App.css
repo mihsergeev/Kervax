@@ -453,8 +453,8 @@ input:focus {
 .users-modal {
   width: min(560px, calc(100vw - 2rem));
 }
-/* алерты: как карточка сервера - меню разделов слева, один раздел со своей прокруткой, а кнопки
-   внизу окна видны всегда. Высота - вся видимая часть под отступами .modal-backdrop */
+/* алерты и локации: как карточка сервера - меню разделов слева, один раздел со своей прокруткой,
+   а кнопки внизу окна видны всегда. Высота - вся видимая часть под отступами .modal-backdrop */
 .alerts-modal {
   width: min(1040px, calc(100vw - 2rem));
   height: min(860px, calc(100vh - 8vh - 2rem));
@@ -934,7 +934,6 @@ input:focus {
 .exp-bad td:first-child { color: var(--down); font-weight: 600; }
 .exp-warn td:first-child { color: var(--degraded); font-weight: 600; }
 .exp-closed { margin-top: 0.4rem; line-height: 1.9; }
-.loc-check { display: flex; align-items: baseline; gap: 0.4rem; flex-wrap: wrap; }
 .exp-chip {
   display: inline-block;
   margin-right: 0.3rem;
@@ -4073,61 +4072,6 @@ textarea:focus {
   line-height: 1.5;
 }
 
-/* --- локации (модалка) --- */
-.loc-form {
-  display: flex;
-  gap: 0.6rem;
-  align-items: flex-end;
-  flex-wrap: wrap;
-  margin: 0.6rem 0;
-}
-.loc-form .field {
-  flex: 1 1 40%;
-  margin: 0;
-}
-.loc-form-actions {
-  display: flex;
-  gap: 0.5rem;
-}
-.loc-list {
-  display: flex;
-  flex-direction: column;
-  gap: 0.4rem;
-  margin-top: 0.5rem;
-}
-.loc-row {
-  display: flex;
-  align-items: center;
-  gap: 0.7rem;
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: 9px;
-  padding: 0.5rem 0.7rem;
-}
-.loc-toggle {
-  margin: 0;
-}
-.loc-toggle input {
-  width: auto;
-}
-.loc-main {
-  flex: 1;
-  min-width: 0;
-}
-.loc-name {
-  font-weight: 600;
-  display: flex;
-  align-items: center;
-  gap: 0.4rem;
-}
-.loc-url {
-  color: var(--text-muted);
-  font-size: 0.8rem;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
 /* --- локации в детали монитора --- */
 .detail-locs {
   display: flex;
@@ -6921,6 +6865,44 @@ button.al-chip.al-chip-on:hover { border-color: color-mix(in srgb, var(--accent)
 .al-dest-main { border-color: var(--border-strong); background: transparent; }
 .route-main { gap: 0.4rem; }
 .route-main .win-switch { align-self: flex-start; flex-wrap: wrap; }
+/* окно локаций (LocationsModal): раскладка, заметки и подвал - al-* от окна алертов */
+.lc-chips { display: flex; flex-wrap: wrap; gap: 0.35rem; }
+.type-chip.lc-chip-acc { border-color: color-mix(in srgb, var(--accent) 55%, transparent); background: color-mix(in srgb, var(--accent) 14%, transparent); color: var(--text); }
+.type-chip.lc-chip-warn { border-color: color-mix(in srgb, var(--degraded) 50%, transparent); color: var(--degraded); }
+.lc-note-info { color: var(--text); border-color: color-mix(in srgb, var(--accent) 35%, var(--border)); background: color-mix(in srgb, var(--accent) 6%, transparent); }
+.lc-tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr)); gap: 0.5rem; }
+.lc-tile { display: flex; flex-direction: column; gap: 0.1rem; padding: 0.55rem 0.8rem; border: 1px solid var(--border); border-radius: 10px; background: var(--bg); }
+.lc-tile b { font-size: 1.2rem; font-weight: 650; }
+.lc-tile span { font-size: 0.76rem; color: var(--text-muted); }
+.lc-tile-ok b { color: var(--up); }
+.lc-tile-bad b { color: var(--down); }
+.lc-rows { display: flex; flex-direction: column; gap: 0.3rem; }
+.lc-row { display: grid; grid-template-columns: 10px minmax(8rem, 16rem) minmax(0, 1fr) auto; align-items: center; gap: 0.6rem; padding: 0.4rem 0.7rem; border: 1px solid var(--border); border-radius: 8px; background: var(--bg); }
+.lc-msg { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lc-site { min-width: 0; overflow-wrap: anywhere; }
+button.lc-link,
+button.lc-link:hover { background: none; color: var(--text); font-weight: 600; text-decoration: none; }
+button.lc-link:hover { text-decoration: underline; }
+.lc-exit .country-flag { margin: 0 0.15rem; }
+.al-main .srv-main-head h4 .country-flag { margin-left: 0.5rem; }
+button.ghost.lc-del { color: var(--down); border-color: color-mix(in srgb, var(--down) 40%, var(--border)); }
+.lc-mx-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: 10px; }
+.lc-mx { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+.lc-mx th,
+.lc-mx td { padding: 0.45rem 0.7rem; border-bottom: 1px solid var(--border); text-align: left; white-space: nowrap; }
+.lc-mx th { background: color-mix(in srgb, var(--bg) 60%, var(--bg-card)); color: var(--text-muted); font-size: 0.76rem; font-weight: 600; }
+.lc-mx tbody tr:last-child td { border-bottom: 0; }
+.lc-cell { display: inline-block; min-width: 4.5rem; padding: 0.1rem 0.5rem; border-radius: 6px; font-size: 0.76rem; text-align: center; }
+.lc-cell-ok { color: var(--up); background: color-mix(in srgb, var(--up) 12%, transparent); }
+.lc-cell-bad { color: var(--down); background: color-mix(in srgb, var(--down) 14%, transparent); }
+.lc-cell-deg { color: var(--degraded); background: color-mix(in srgb, var(--degraded) 12%, transparent); }
+.lc-cell-na { color: var(--text-muted); }
+@media (max-width: 760px) {
+  .lc-row { grid-template-columns: 10px minmax(0, 1fr) auto; }
+  .lc-row > .type-chip { grid-row: 1; grid-column: 3; }
+  .lc-msg { grid-column: 2 / -1; }
+  .lc-sub { display: none; }
+}
 @media (max-width: 760px) {
   .alerts-modal { padding: 1rem 0.9rem 0.8rem; }
   .al-body { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); border-top: 0; }
