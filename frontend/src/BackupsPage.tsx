@@ -30,7 +30,7 @@ import {
   type Server,
 } from './api'
 import { updateServer } from './api'
-import { backupWindowNote, dbAuditNames, shortList, srvIssues, srvMuted } from './serverUtils'
+import { backupAlive, backupWindowNote, dbAuditNames, shortList, srvIssues, srvMuted } from './serverUtils'
 import { fmtRel } from './ServersPage'
 import { CardNav, FreshChip, markMuted, OvAreas, OvRows, secInfoOf, type OvRow, type SecDef, type SecInfo, type SecItem } from './cardLayout'
 import { OsIcon } from './osIcon'
@@ -98,15 +98,6 @@ const subOf = (...parts: (string | false | 0 | undefined)[]) => parts.filter(Boo
 function diskPct(info: BackupServerInfo): number | null {
   const total = info.disk_total || 0
   return total ? Math.min(100, Math.round(((info.disk_used || 0) / total) * 100)) : null
-}
-
-// «живой» бэкап: есть systemd-таймер ИЛИ restic на месте и хоть раз бэкапил. Только
-// осиротевший метрик (restic снесён, таймера нет) — мёртвый бэкап → нода в «Без бэкапа».
-function backupAlive(b?: BackupInfo | null): boolean {
-  if (!b || !b.present) return false
-  if (b.configured) return true
-  if (b.restic_found && b.metric_present) return true
-  return false
 }
 
 // имя бэкап-сервера назначения из repo_dest (rest://host:port/name → host → имя ноды-сервера)

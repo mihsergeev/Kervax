@@ -33,6 +33,10 @@ KEEP = timedelta(days=90)
 BEFORE = timedelta(minutes=60)
 # порты от этого и выше - эфемерные, их открывает кто угодно на минуту
 _EPHEMERAL = 32768
+# порт, сменившийся столько раз за окно, дальше молчит в хронологии до конца окна: на одной ноде
+# 123/udp открывался и закрывался 159 раз за 10 дней
+_FLAP_MAX = 4
+_FLAP_WINDOW = timedelta(hours=24)
 # падения одного контейнера в пределах этого окна сливаются в одно событие со счетом
 _CRASH_MERGE = timedelta(minutes=30)
 # отчет старше - нода молчит, сравнивать нечего
@@ -104,7 +108,9 @@ def snapshot(row, rep: dict) -> dict:
             port = _i(x.get("port")) if isinstance(x, dict) else None
             if port is None or port <= 0 or port >= _EPHEMERAL:
                 continue
-            p[f"{port}/{x.get('p') or 'tcp'}"] = str(procs.get(str(port)) or "")
+            key, proc = f"{port}/{x.get('p') or 'tcp'}", str(procs.get(str(port)) or "")
+            if _service(key, proc):
+                p[key] = proc
     upd = rep.get("os_upd") if isinstance(rep.get("os_upd"), dict) else {}
     return {
         "ts": _iso(row.last_seen), "c": c, "p": p, "boot": _iso(row.rebooted_at),
@@ -117,6 +123,14 @@ def snapshot(row, rep: dict) -> dict:
         # агент присылает журнал установок: обновления видны по пакетам, счетчик не нужен
         "pkh": bool((rep.get("pkgs") or {}).get("log")) if isinstance(rep.get("pkgs"), dict) else False,
     }
+
+
+def _service(key: str, proc: str) -> bool:
+    """Слушающий сокет - сервис, а не клиентская сессия. UDP-сокет на порту от 1024 без известного
+    процесса - сессия: xray и VPN открывают такой на каждую UDP-сессию клиента, живет он минуты, и
+    на одной ноде это давало 52 тысячи строк "открыт/закрыт порт" за 10 дней."""
+    port, _, proto = key.partition("/")
+    return not (proto.startswith("udp") and port.isdigit() and int(port) >= 1024 and not proc)
 
 
 def _ev(ts: str, cat: str, kind: str, obj: str, text: str) -> dict:
@@ -185,13 +199,28 @@ def diff(prev: dict | None, cur: dict, pend: dict) -> tuple[list[dict], dict]:
 
     pp, cp = prev.get("p"), cur.get("p")
     if isinstance(pp, dict) and isinstance(cp, dict):
+        # снимки, сохраненные до правила _service, чистим тем же правилом: иначе все сессии из
+        # них разом пришли бы строками "закрыт порт"
+        pp = {k: v for k, v in pp.items() if _service(k, v)}
+        cp = {k: v for k, v in cp.items() if _service(k, v)}
+        cur["p"] = cp
         added, gone, conf = _confirm(pp, cp, pend, "p", ts)
-        for key, at in added:
-            proc = cp.get(key) or ""
-            ev.append(_ev(at, "ports", "open", key, f"открыт порт {key}" + (f" ({proc})" if proc else "")))
-        for key, at in gone:
-            proc = pp.get(key) or ""
-            ev.append(_ev(at, "ports", "close", key, f"закрыт порт {key}" + (f" ({proc})" if proc else "")))
+        try:
+            cutoff = (datetime.fromisoformat(ts) - _FLAP_WINDOW).isoformat()
+        except ValueError:
+            cutoff = ""
+        flap = {k: [t for t in v if t >= cutoff] for k, v in (pend.get("pflap") or {}).items()}
+        for key, at, kind, word, src in [(k, a, "open", "открыт", cp) for k, a in added] + \
+                [(k, a, "close", "закрыт", pp) for k, a in gone]:
+            hist = flap.setdefault(key, [])
+            hist.append(at)
+            if len(hist) == _FLAP_MAX:
+                ev.append(_ev(at, "ports", "flap", key, f"порт {key} то открывается, то закрывается: "
+                              "дальше в хронологию не пишется, пока не утихнет на сутки"))
+            elif len(hist) < _FLAP_MAX:
+                proc = src.get(key) or ""
+                ev.append(_ev(at, "ports", kind, key, f"{word} порт {key}" + (f" ({proc})" if proc else "")))
+        pend["pflap"] = {k: v for k, v in flap.items() if v}
         out["p"] = conf
     elif cp is None:
         out["p"] = pp

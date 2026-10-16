@@ -1,4 +1,4 @@
-import type { BackupAudit, KnownIssue, DiskHealth, DiskUsage, DockerRisk, Server, ServerReport, UnitsBlock, WebRate } from './api'
+import type { BackupAudit, BackupInfo, KnownIssue, DiskHealth, DiskUsage, DockerRisk, Server, ServerReport, UnitsBlock, WebRate } from './api'
 import { tr } from './i18n'
 
 // Запросы в минуту по access-логам ноды: блок кладёт root-хелпер webserver-setup, агент
@@ -263,6 +263,17 @@ export function dbAuditNames(xs: BackupAudit[]): string[] {
 export function dockRiskText(x: DockerRisk, t: (k: string, p?: Record<string, string | number>) => string): string {
   const word: Record<string, string> = { priv: 'privileged', sock: t('docker-сокет'), host: t('корень хоста на запись') }
   return x.flags.map((f) => (f === 'caps' ? `cap ${x.caps.join(', ')}` : word[f] ?? f)).join(', ')
+}
+
+// «живой» бэкап: есть systemd-таймер ИЛИ restic на месте и хоть раз бэкапил. Только
+// осиротевший метрик (restic снесён, таймера нет) — мёртвый бэкап → нода в «Без бэкапа».
+// Один helper backup-setup без настроенного restic - тоже не бэкап: по нему главная
+// показывала "под бэкапом 8, все свежие" там, где в "Бэкапах" клиентов 0.
+export function backupAlive(b?: BackupInfo | null): boolean {
+  if (!b || !b.present) return false
+  if (b.configured) return true
+  if (b.restic_found && b.metric_present) return true
+  return false
 }
 
 // Вышел ли бэкап за «ночное окно». Мягкое уведомление (не алерт): бэкап либо ещё идёт

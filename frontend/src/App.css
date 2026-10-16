@@ -748,6 +748,12 @@ input:focus {
 .home-attention-grp-head { padding: 0.1rem 0.1rem 0; text-transform: uppercase; letter-spacing: 0.04em; font-size: 0.72rem; }
 @media (max-width: 600px) {
   .home-attention-sub { padding-left: 0.6rem; }
+  /* кнопки пункта (закрепить, заглушить, открыть) уезжают под текст: справа они сжимали его
+     до трети строки, и путь к сертификату на телефоне рвался по слогам на десять строк */
+  .home-attention-row { flex-wrap: wrap; row-gap: 0.1rem; align-items: flex-start; }
+  .home-attention-row > .lk-dot { margin-top: 0.45rem; }
+  .home-attention-txt { flex: 1 1 calc(100% - 3rem); }
+  .home-attention-row .quick-mute ~ .quick-mute { margin-left: 0; }
 }
 /* "Алерты не придут": кликается не строка, а кнопки на ней, поэтому без подсветки строки.
    На узком экране кнопки уезжают под текст, иначе имя рвалось в столбик по слогам */
@@ -2356,9 +2362,14 @@ select:focus {
 .mute-sum-chip:hover {
   border-color: var(--accent);
 }
+/* на телефоне чип не шире строки: длинное "перезапуски пода: ..." режется многоточием, а не
+   распирает страницу */
+.mute-sum-chip { max-width: 100%; min-width: 0; }
+.mute-sum-chip > b, .mute-sum-when { flex-shrink: 0; white-space: nowrap; }
 .mute-sum-what {
   color: var(--text-muted);
   max-width: 22rem;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -6622,6 +6633,8 @@ button.tl-tile-off .net-tile-value {
 .loc-res.hs-host { gap: 0.7rem; padding: 0.55rem 0.8rem; }
 .hs-host-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 0.15rem; }
 .hs-host-name { display: flex; align-items: center; flex-wrap: wrap; gap: 0.35rem; font-weight: 600; }
+/* чип со списком контейнеров (ключи от хоста у трех агентов CI) распирал страницу на телефоне */
+.hs-host-name .type-chip { flex-shrink: 1; min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
 .hs-host-count { flex-shrink: 0; font-weight: 700; font-size: 0.95rem; }
 /* строки хостов в разделах - без подложки и рамки, как строки главной; подсветка при наведении */
 .loc-res.hs-host { background: transparent; border-color: transparent; }
