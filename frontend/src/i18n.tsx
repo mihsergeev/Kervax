@@ -2433,6 +2433,91 @@ const EN: Record<string, string> = {
   'Монитор': 'Monitor',
   'Остальные {n} без сбоев': 'The other {n} had no failures',
   'Отчет': 'Report',
+  // --- Защита входа: блокировка адресов и белый список (LoginGuardSec) ---
+  'Адрес или подсеть':
+    'Address or subnet',
+  'Белый список':
+    'Allowlist',
+  'Блокировать':
+    'Block',
+  'Ваш адрес сейчас:':
+    'Your address now:',
+  'До':
+    'Until',
+  'За сутки неудачных входов не было.':
+    'No failed sign-ins in the last 24 hours.',
+  'Заблокированы сейчас':
+    'Blocked now',
+  'Какие логины':
+    'Logins tried',
+  'Неудач':
+    'Failures',
+  'Неудачные входы за сутки':
+    'Failed sign-ins in 24 hours',
+  'Неудачных входов за {w} минут':
+    'Failed sign-ins within {w} minutes',
+  'Подпись':
+    'Label',
+  'Попыток в блокировке':
+    'Attempts while blocked',
+  'После {n} неудачных входов за {w} минут адрес блокируется {ban}, повторно за сутки - на сутки. С адресов из белого списка вход не блокируется никогда, но пароль и код с них все равно нужны.':
+    'After {n} failed sign-ins within {w} minutes the address is blocked {ban}, a repeat within a day blocks it for a day. Addresses on the allowlist are never blocked, but they still need the password and the code.',
+  'Последняя':
+    'Last',
+  'Правило':
+    'Rule',
+  'Пусто: блокируется любой адрес.':
+    'Empty: any address can be blocked.',
+  'Разблокировать':
+    'Unblock',
+  'Сейчас никто не заблокирован.':
+    'Nobody is blocked now.',
+  'белый список':
+    'allowlist',
+  'в белом списке ({n})':
+    'on the allowlist ({n})',
+  'ваш':
+    'yours',
+  'добавить мой адрес':
+    'add my address',
+  'заблокирован до {h}':
+    'blocked until {h}',
+  'мой адрес':
+    'my address',
+  'на 15 минут':
+    'for 15 minutes',
+  'на 6 часов':
+    'for 6 hours',
+  'на {n} мин':
+    'for {n} min',
+  'на сутки':
+    'for a day',
+  'на час':
+    'for an hour',
+  'например, офис':
+    'e.g. office',
+  'повторно':
+    'repeat',
+  'Адрес {k} разблокирован.':
+    'Address {k} unblocked.',
+  'Защита':
+    'Protection',
+  'Защита входа':
+    'Sign-in protection',
+  'Защита входа сохранена.':
+    'Sign-in protection saved.',
+  'блок {n}':
+    'blocked {n}',
+  'изменил защиту входа':
+    'changed sign-in protection',
+  'к защите входа':
+    'to sign-in protection',
+  'после {n} неудач за {w} мин, {ban}':
+    'after {n} failures within {w} min, {ban}',
+  'разблокировал адрес':
+    'unblocked an address',
+  'Слишком много неудачных входов с этого адреса, попробуйте через {n} мин.':
+    'Too many failed sign-ins from this address, try again in {n} min.',
   // --- Моя учетка и О панели разделами (AccountModal, AboutModal) ---
   'Ваша учетка: пароль, вход по коду из приложения и свои алерты в Telegram. Роль, разделы и группы задает админ в окне Пользователи.':
     'Your account: password, sign-in with an app code and your own Telegram alerts. The role, sections and groups are set by an admin in the Users window.',
@@ -4180,8 +4265,6 @@ const EN: Record<string, string> = {
     'changed retention',
   'импорт мониторов':
     'imported monitors',
-  'к журналу':
-    'to the log',
   'не включена, включает сам пользователь в своем меню':
     'off, the user turns it on in their own menu',
   'не входил':

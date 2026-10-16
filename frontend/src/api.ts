@@ -119,6 +119,47 @@ export type UsersOverview = { users: UserCard[]; audit: AuditEntry[]; fails_24h:
 export function getUsersOverview(): Promise<UsersOverview> {
   return api<UsersOverview>('/api/users/overview')
 }
+// защита входа: правило блокировки, белый список, блокировки и неудачные входы по адресам
+export type AllowEntry = { net: string; note: string }
+export type LoginBanRow = {
+  key: string
+  since: string
+  until: string
+  failures: number
+  logins: string
+  repeat: boolean
+  blocked: number
+  allowed: boolean
+}
+export type LoginFailRow = {
+  key: string
+  fails: number
+  logins: string[]
+  last: string
+  allowed: string | null
+  banned_until: string | null
+}
+export type LoginGuard = {
+  max_failures: number
+  ban_minutes: number
+  window_minutes: number
+  fail_choices: number[]
+  ban_choices: number[]
+  allow: AllowEntry[]
+  my_ip: string
+  my_allowed: string | null
+  bans: LoginBanRow[]
+  recent: LoginFailRow[]
+}
+export function getLoginGuard(): Promise<LoginGuard> {
+  return api<LoginGuard>('/api/login-guard')
+}
+export function saveLoginGuard(body: { max_failures: number; ban_minutes: number; allow: AllowEntry[] }): Promise<LoginGuard> {
+  return api<LoginGuard>('/api/login-guard', { method: 'PUT', body: JSON.stringify(body) })
+}
+export function unbanLogin(key: string): Promise<LoginGuard> {
+  return api<LoginGuard>('/api/login-guard/unban', { method: 'POST', body: JSON.stringify({ key }) })
+}
 export function listUsers(): Promise<PanelUser[]> {
   return api<PanelUser[]>('/api/users')
 }

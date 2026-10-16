@@ -197,9 +197,9 @@ async def test_login_limiter_is_shared_between_processes(client: httpx.AsyncClie
             await ratelimit.record_failure(writer, "203.0.113.77")
 
     async with app.state.session_factory() as reader:  # «другой воркер»
-        assert await ratelimit.is_locked(reader, "203.0.113.77")
-        assert not await ratelimit.is_locked(reader, "198.51.100.4")
+        assert await ratelimit.active_ban(reader, "203.0.113.77")
+        assert not await ratelimit.active_ban(reader, "198.51.100.4")
 
     async with app.state.session_factory() as reader:
-        await ratelimit.clear(reader, "203.0.113.77")
-        assert not await ratelimit.is_locked(reader, "203.0.113.77")
+        await ratelimit.unban(reader, "203.0.113.77")
+        assert not await ratelimit.active_ban(reader, "203.0.113.77")
