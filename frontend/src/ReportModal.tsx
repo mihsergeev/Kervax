@@ -1,10 +1,11 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react'
-import { ApiError, getReport, type Report } from './api'
+import { ApiError, getReport, type Report, type ReportNoise } from './api'
 import { useBranding } from './BrandLogo'
 import { CardNav, type SecDef } from './cardLayout'
 import { useI18n } from './i18n'
 import { NetTile } from './NetLinks'
 import { downloadReportHtml } from './reportHtml'
+import { isBackup, noiseGroups, noiseWhen, times } from './reportNoise'
 import { fmtDur } from './units'
 
 // Отчет за период (backend app/api/report.py) как карточка сервера: сводка с плитками и
@@ -24,7 +25,7 @@ const LEAD: Record<string, string> = {
   over: 'Что ломалось за период, сколько лежало и что шумело. Это не алерт: смотрят здесь, раз в неделю.',
   sites: 'Мониторы, которые лежали или отвечали не всегда. Аптайм - по проверкам, простой - по инцидентам, пока монитор лежал.',
   servers: 'Серверы, которые пропадали или по которым приходили алерты. Простой - по пропускам в отчетах агента: заглушенный алерт его не отменяет.',
-  noise: 'Срабатывания алертов без отбоев. Если одно и то же приходит каждый день - стоит поправить порог или заглушить.',
+  noise: 'Что именно срабатывало и где. Если одно и то же приходит каждый день - стоит починить, поправить порог или заглушить.',
   backups: 'Бэкапы, по которым приходили алерты: не сделался, устарел, не сходится ротация.',
   maint: 'Плановые работы за период: пока окно шло, алерты по его серверам и мониторам молчали.',
 }
@@ -94,6 +95,53 @@ function DayBars({ labels, series, fmt, t }: { labels: string[]; series: Series[
   )
 }
 
+const PER_TARGET = 6
+
+// Что шумело таблицей: объект строкой-заголовком, под ним что именно, почему и когда. Без
+// полосок и счетчиков в лоб: важно, что и где, а число раз - мелко рядом с датой.
+function NoiseTable({ items, t, name }: { items: ReportNoise[]; t: T; name: (x: ReportNoise) => ReactNode }) {
+  const [open, setOpen] = useState<Set<string>>(new Set())
+  return (
+    <table className="sec-tbl rp-noise">
+      <tbody>
+        {noiseGroups(items).map((g) => {
+          const k = `${g[0].section}|${g[0].target}`
+          const all = open.has(k)
+          const shown = all ? g : g.slice(0, PER_TARGET)
+          return [
+            <tr key={k} className="rp-noise-grp">
+              <td colSpan={2}>{name(g[0])}</td>
+            </tr>,
+            ...shown.map((x) => (
+              <tr key={`${k}|${x.kind}|${x.what}`}>
+                <td title={x.label}>
+                  <div>{x.what}</div>
+                  {x.note && <div className="muted small">{x.note}</div>}
+                </td>
+                <td className="num small">
+                  <div>{noiseWhen(x)}</div>
+                  {x.n > 1 && <div className="muted">{times(x.n, t)}</div>}
+                </td>
+              </tr>
+            )),
+            ...(g.length > shown.length
+              ? [
+                  <tr key={`${k}|more`}>
+                    <td colSpan={2}>
+                      <button className="linklike small" onClick={() => setOpen(new Set([...open, k]))}>
+                        {t('и еще {n}', { n: g.length - shown.length })}
+                      </button>
+                    </td>
+                  </tr>,
+                ]
+              : []),
+          ]
+        })}
+      </tbody>
+    </table>
+  )
+}
+
 export function ReportModal({ onClose, onUnauthorized, onOpen }: Props) {
   const { t } = useI18n()
   const [branding] = useBranding()
@@ -138,21 +186,26 @@ export function ReportModal({ onClose, onUnauthorized, onOpen }: Props) {
   const noise = data?.noise
   const labels = data?.day_labels ?? []
   const chart = labels.length >= 7
+  // бэкапы - своим разделом, в "что шумело" их не повторяем
+  const backups = (noise?.items ?? []).filter(isBackup)
+  const other = (noise?.items ?? []).filter((x) => !isBackup(x))
+  // никто не пропадал - колонки недоступности пустые, не показываем их
+  const anyOff = (servers?.items ?? []).some((s) => s.offline_s > 0)
 
   const SECS: SecDef[] = [
     { id: 'over', label: 'Сводка', group: '' },
     ...(sites ? [{ id: 'sites', label: 'Сайты', group: 'Что ломалось' }] : []),
     ...(servers ? [{ id: 'servers', label: 'Серверы', group: 'Что ломалось' }] : []),
     { id: 'noise', label: 'Что шумело', group: 'Алерты' },
-    ...(noise && noise.backups.length ? [{ id: 'backups', label: 'Бэкапы', group: 'Алерты' }] : []),
+    ...(backups.length ? [{ id: 'backups', label: 'Бэкапы', group: 'Алерты' }] : []),
     { id: 'maint', label: 'Окна обслуживания', group: 'Работы' },
   ]
   const side: Record<string, string> = {}
   if (data) {
     if (sites) side.sites = String(sites.affected)
     if (servers) side.servers = String(servers.items.length)
-    if (noise) side.noise = String(noise.fires)
-    if (noise?.backups.length) side.backups = String(noise.backups.length)
+    if (noise) side.noise = String(other.length + noise.more)
+    if (backups.length) side.backups = String(backups.length)
     side.maint = String(data.maint.length)
   }
   const cur = SECS.find((s) => s.id === sec) ?? SECS[0]
@@ -162,20 +215,25 @@ export function ReportModal({ onClose, onUnauthorized, onOpen }: Props) {
       {name}
     </button>
   )
+  // имя объекта в шуме: ссылка на карточку, если она есть у этой учетки
+  const noiseName = (x: ReportNoise) =>
+    x.srv_id != null ? link('server', x.srv_id, x.target) : x.chk_id != null ? link('check', x.chk_id, x.target) : x.target
   const tile = (to: string, node: ReactNode) => (
     <button className="srv-tile-btn" onClick={() => go(to)} title={t('к разделу')}>
       {node}
     </button>
   )
+  // простоя не было - пустой график не рисуем
   const downChart = (withSites: boolean, withServers: boolean) =>
-    chart && (
+    chart &&
+    ((withSites && !!sites?.downtime_s) || (withServers && !!servers?.offline_s)) && (
       <DayBars
         t={t}
         labels={labels}
         fmt={mins}
         series={[
-          ...(withSites && sites ? [{ key: 's', label: t('простой сайтов'), cls: 'rp-c-sites', values: sites.per_day }] : []),
-          ...(withServers && servers
+          ...(withSites && sites?.downtime_s ? [{ key: 's', label: t('простой сайтов'), cls: 'rp-c-sites', values: sites.per_day }] : []),
+          ...(withServers && servers?.offline_s
             ? [{ key: 'v', label: t('простой серверов'), cls: 'rp-c-servers', values: servers.per_day }]
             : []),
         ]}
@@ -281,7 +339,7 @@ export function ReportModal({ onClose, onUnauthorized, onOpen }: Props) {
                         </span>
                       </div>
                     )}
-                    {chart && (sites || servers) && (
+                    {chart && (!!sites?.downtime_s || !!servers?.offline_s) && (
                       <>
                         <div className="srv-nav-grp rt-cap">{t('Простой по дням')}</div>
                         {downChart(true, true)}
@@ -312,12 +370,12 @@ export function ReportModal({ onClose, onUnauthorized, onOpen }: Props) {
                             <td className="small">{t('недоступен {d}', { d: fmtDur(s.offline_s) })}</td>
                           </tr>,
                         )
-                      for (const x of (noise?.top ?? []).slice(0, 3))
+                      for (const x of (noise?.items ?? []).filter((x) => x.n > 1).slice(0, 3))
                         rows.push(
-                          <tr key={`n${x.kind}|${x.target}`}>
-                            <td className="mono small">{x.target}</td>
-                            <td className="muted small">{x.label}</td>
-                            <td className="small">{t('алертов: {n}', { n: x.n })}</td>
+                          <tr key={`n${x.kind}|${x.target}|${x.what}`}>
+                            <td>{noiseName(x)}</td>
+                            <td className="small">{x.what}</td>
+                            <td className="small">{times(x.n, t)}</td>
                           </tr>,
                         )
                       return rows.length ? (
@@ -394,29 +452,28 @@ export function ReportModal({ onClose, onUnauthorized, onOpen }: Props) {
                         <thead>
                           <tr>
                             <th>{t('Сервер')}</th>
-                            <th className="num">{t('Недоступен')}</th>
-                            <th className="num hide-m">{t('Раз')}</th>
-                            <th className="num hide-m">{t('Самый долгий')}</th>
-                            <th className="num">{t('Алертов')}</th>
-                            <th className="hide-m">{t('Чаще всего')}</th>
+                            {anyOff && <th className="num">{t('Недоступен')}</th>}
+                            {anyOff && <th className="num hide-m">{t('Раз')}</th>}
+                            {anyOff && <th className="num hide-m">{t('Самый долгий')}</th>}
+                            <th>{t('Что было')}</th>
                           </tr>
                         </thead>
                         <tbody>
                           {servers.items.map((s) => (
                             <tr key={s.id}>
-                              <td>{link('server', s.id, s.name)}</td>
-                              <td className="num">{fmtDur(s.offline_s)}</td>
-                              <td className="num hide-m">{s.gaps || '—'}</td>
-                              <td className="num hide-m">{fmtDur(s.longest_s)}</td>
-                              <td className="num">{s.alerts || '—'}</td>
-                              <td className="hide-m">
-                                <span className="ans-chips">
-                                  {s.kinds.map((k) => (
-                                    <span key={k.kind} className="type-chip">
-                                      {k.label} {k.n}
-                                    </span>
-                                  ))}
-                                </span>
+                              <td className="nowrap">{link('server', s.id, s.name)}</td>
+                              {anyOff && <td className="num">{fmtDur(s.offline_s)}</td>}
+                              {anyOff && <td className="num hide-m">{s.gaps || '—'}</td>}
+                              {anyOff && <td className="num hide-m">{fmtDur(s.longest_s)}</td>}
+                              <td className="small">
+                                {s.things.length === 0
+                                  ? '—'
+                                  : s.things.map((x) => (
+                                      <div key={x.what}>
+                                        {x.what}
+                                        {x.n > 1 && <span className="muted"> {times(x.n, t)}</span>}
+                                      </div>
+                                    ))}
                               </td>
                             </tr>
                           ))}
@@ -429,38 +486,20 @@ export function ReportModal({ onClose, onUnauthorized, onOpen }: Props) {
                 {cur.id === 'noise' && noise && (
                   <>
                     {alertChart}
-                    {noise.top.length === 0 ? (
+                    {other.length === 0 ? (
                       <p className="muted small">{t('Алертов за период не было.')}</p>
                     ) : (
                       <>
-                        <div className="srv-nav-grp rt-cap">{t('Чаще всего')}</div>
-                        {noise.top.map((x) => (
-                          <div key={`${x.kind}|${x.target}`} className="ah-bar rep-bar">
-                            <span className="ah-bar-fill" style={{ width: `${(x.n / noise.top[0].n) * 100}%` }} />
-                            <span className="ah-bar-label">
-                              <span className="mono">{x.target}</span> <span className="muted">· {x.label}</span>
-                            </span>
-                            <span className="ah-bar-n">{x.n}</span>
-                          </div>
-                        ))}
+                        <NoiseTable items={other} t={t} name={noiseName} />
+                        {noise.more > 0 && (
+                          <p className="muted small">{t('И еще {n} реже - в истории алертов.', { n: noise.more })}</p>
+                        )}
                       </>
                     )}
                   </>
                 )}
 
-                {cur.id === 'backups' && noise && (
-                  <table className="sec-tbl">
-                    <tbody>
-                      {noise.backups.map((b) => (
-                        <tr key={b.target}>
-                          <td className="mono">{b.target}</td>
-                          <td className="small">{b.kinds.join(', ')}</td>
-                          <td className="num small">{t('алертов: {n}', { n: b.n })}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                )}
+                {cur.id === 'backups' && <NoiseTable items={backups} t={t} name={noiseName} />}
 
                 {cur.id === 'maint' &&
                   (data.maint.length === 0 ? (

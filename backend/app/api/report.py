@@ -6,7 +6,8 @@
 - серверы: пропуски в минутных метриках. Не по алертам: заглушенный или не доставленный алерт
   простой не отменяет. Пропуск, который был сразу у большинства серверов, - это лежала сама
   панель (деплой, рестарт), а не серверы: его вычитаем и показываем отдельно;
-- шум и бэкапы: история доставленных алертов (180 дней);
+- шум и бэкапы: история доставленных алертов (180 дней); что именно было (какой юнит, под,
+  репозиторий) - из текста алерта, app/alert_what.py;
 - окна обслуживания: их вхождения за период;
 - по дням (в часовом поясе алертов): алерты, простой сайтов и серверов - видно, был это один
   плохой день или так каждый день.
@@ -19,7 +20,7 @@ from zoneinfo import ZoneInfo
 from fastapi import APIRouter, Query
 from sqlalchemy import case, func, or_, select
 
-from app import maint, settings_store
+from app import alert_what, maint, settings_store
 from app.api.alert_history import _label, _scope as _alert_scope
 from app.collector import _OFFLINE_ALERT_EXTRA, seen_online
 from app.config import get_settings
@@ -30,6 +31,10 @@ router = APIRouter(prefix="/report", tags=["report"])
 
 # сколько строк в таблицах отчета: дальше это уже не обзор, а история
 _TOP = 50
+# строк "что шумело": каждая - своя беда своего объекта, больше - уже история алертов
+_NOISE_MAX = 150
+# сколько бед показать у сервера в таблице серверов
+_THINGS = 3
 # пропуск метрик сразу у такой доли серверов (и не меньше чем у трех) - лежала панель
 _PANEL_SHARE = 0.6
 
@@ -217,11 +222,11 @@ async def _servers(session, user, since, until, prev_since, now, buckets) -> dic
         al = alerts.get(s.name) or {}
         if not g and not al:
             continue
-        top = sorted(al.items(), key=lambda kv: -kv[1])[:4]
+        # что именно было на сервере ("things") дописывает report() из разбора шума
         items.append({
             "id": s.id, "name": s.name, "group": s.group_name or "", "offline_s": int(off), "gaps": len(g),
             "longest_s": int(max(((b - a).total_seconds() for a, b in g), default=0)),
-            "alerts": sum(al.values()), "kinds": [{"kind": k, "label": _label(k), "n": n} for k, n in top],
+            "alerts": sum(al.values()), "things": [],
         })
     items.sort(key=lambda r: (-r["offline_s"], -r["alerts"], r["name"]))
     total_off = int(sum((b - a).total_seconds() for lst in gaps.values() for a, b in lst))
@@ -234,41 +239,65 @@ async def _servers(session, user, since, until, prev_since, now, buckets) -> dic
     }
 
 
-async def _noise(session, user, since, until, prev_since, buckets) -> dict:
-    """Что шумело: срабатывания (отбои шумом не считаем) по виду и объекту."""
+def _day_of(ts: datetime, buckets) -> int:
+    for i, (_d, a, b) in enumerate(buckets):
+        if a <= ts < b:
+            return i
+    return -1
+
+
+async def _noise(session, user, since, until, prev_since, buckets, sections: set[str]) -> dict:
+    """Что шумело: срабатывания (отбои шумом не считаем). Строка - что именно и где: какой юнит
+    упал, какой под перезапускается, какой репозиторий опоздал (из текста алерта,
+    app/alert_what.py), сколько раз и в какие дни. Вид алерта без конкретики ("Systemd: упал
+    юнит, 4") не говорит, что чинить."""
     def fired(a, b):
         return _alert_scope(user, select(AlertEvent).where(
             AlertEvent.ts >= a, AlertEvent.ts < b, AlertEvent.recovery.is_(False))).subquery()
 
     cur = fired(since, until)
-    n = func.count().label("n")
     total = await session.scalar(select(func.count()).select_from(cur)) or 0
     prev = await session.scalar(select(func.count()).select_from(fired(prev_since, since))) or 0
-    top = (await session.execute(
-        select(cur.c.kind, cur.c.target, n).where(cur.c.kind != "", cur.c.target != "")
-        .group_by(cur.c.kind, cur.c.target).order_by(n.desc(), cur.c.target).limit(10)
-    )).all()
-    backups = (await session.execute(
-        select(cur.c.target, cur.c.kind, n).where(cur.c.kind.like("backup%"), cur.c.target != "")
-        .group_by(cur.c.target, cur.c.kind)
-    )).all()
     per_day = [0] * len(buckets)
-    for (ts,) in (await session.execute(select(cur.c.ts))).all():
+    groups: dict[tuple, dict] = {}
+    rows = (await session.execute(
+        select(cur.c.ts, cur.c.kind, cur.c.target, cur.c.section, cur.c.text).order_by(cur.c.ts))).all()
+    for ts, kind, target, section, text in rows:
         ts = _aware(ts)
-        for i, (_d, a, b) in enumerate(buckets):
-            if a <= ts < b:
-                per_day[i] += 1
-                break
-    bk: dict[str, dict] = {}
-    for tgt, kind, cnt in backups:
-        x = bk.setdefault(tgt, {"target": tgt, "n": 0, "kinds": []})
-        x["n"] += cnt
-        x["kinds"].append(_label(kind))
-    return {
-        "fires": total, "prev_fires": prev, "per_day": per_day,
-        "top": [{"kind": k, "label": _label(k), "target": t, "n": c} for k, t, c in top],
-        "backups": sorted(bk.values(), key=lambda x: -x["n"])[:_TOP],
-    }
+        day = _day_of(ts, buckets)
+        if day >= 0:
+            per_day[day] += 1
+        if not target:
+            continue  # про саму панель ("новое без покрытия") - не беда объекта
+        for what, why in alert_what.items(kind, text) or [(_label(kind), "")]:
+            g = groups.setdefault((target, kind, alert_what.key(what)), {
+                "target": target, "section": section, "kind": kind, "label": _label(kind),
+                "n": 0, "first": ts, "notes": [], "days": set()})
+            g["n"] += 1
+            g["what"], g["last"] = what, ts
+            g["days"].add(day)
+            if why:
+                g["notes"].append(why)
+    # имя в истории - имя сервера или монитора: по нему ссылка на карточку
+    srv: dict[str, int] = {}
+    chk: dict[str, int] = {}
+    if "servers" in sections:
+        srv = {n: i for i, n in (await session.execute(
+            scope_query(user, select(Server.id, Server.name), Server, "servers"))).all()}
+    if "sites" in sections:
+        chk = {n: i for i, n in (await session.execute(
+            scope_query(user, select(Check.id, Check.name), Check, "sites"))).all()}
+    items = []
+    for g in sorted(groups.values(), key=lambda g: (-g["n"], -g["last"].timestamp())):
+        items.append({
+            "target": g["target"], "section": g["section"], "kind": g["kind"], "label": g["label"],
+            "what": g["what"], "note": alert_what.merge_notes(g["notes"]), "n": g["n"],
+            "days": len(g["days"]), "first": g["first"].isoformat(), "last": g["last"].isoformat(),
+            "srv_id": srv.get(g["target"]) if g["section"] != "sites" else None,
+            "chk_id": chk.get(g["target"]) if g["section"] == "sites" else None,
+        })
+    return {"fires": total, "prev_fires": prev, "per_day": per_day,
+            "items": items[:_NOISE_MAX], "more": max(len(items) - _NOISE_MAX, 0), "_all": items}
 
 
 async def _maint(session, user, since, until, srv_ids: set[int], chk_ids: set[int], tz: str) -> list[dict]:
@@ -321,8 +350,10 @@ async def report(user: CurrentUser, session: SessionDep, days: int = Query(7, ge
         out["servers"]["prev_ok"] = days * 2 <= get_settings().server_metric_retention_days
         srv_ids = {i for (i,) in (await session.execute(
             scope_query(user, select(Server.id), Server, "servers"))).all()}
-    out["noise"] = await _noise(session, user, since, until, prev_since, buckets)
-    if "backups" not in sections:
-        out["noise"]["backups"] = []
+    out["noise"] = await _noise(session, user, since, until, prev_since, buckets, sections)
+    every = out["noise"].pop("_all")
+    for s in (out.get("servers") or {}).get("items", []):
+        s["things"] = [{"what": x["what"], "n": x["n"]} for x in every
+                       if x["target"] == s["name"] and x["section"] != "sites"][:_THINGS]
     out["maint"] = await _maint(session, user, since, until, srv_ids, chk_ids, tz)
     return out

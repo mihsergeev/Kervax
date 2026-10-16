@@ -6203,16 +6203,17 @@ button.type-chip { cursor: pointer; border: 1px solid transparent; font-family: 
   color: var(--down, #f85149);
   border-color: var(--down, #f85149);
 }
-.rep-bar {
-  cursor: default;
+/* что шумело: объект строкой-заголовком, под ним что именно и когда */
+.rp-noise .rp-noise-grp td {
+  padding-top: 0.8rem;
+  font-weight: 600;
+  font-size: 0.95rem;
+  border-bottom-color: transparent;
 }
-.rep-line {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.2rem 0.75rem;
-  align-items: baseline;
-  padding: 0.2rem 0;
-}
+.rp-noise .rp-noise-grp .linklike { font-weight: 600; font-size: inherit; text-decoration: none; }
+.rp-noise .rp-noise-grp .linklike:hover { text-decoration: underline; }
+.rp-noise tr:not(.rp-noise-grp) td:first-child { padding-left: 1rem; overflow-wrap: anywhere; }
+.rp-noise td.num { width: 1%; white-space: nowrap; vertical-align: top; }
 
 /* ---------- поиск по парку (SearchModal) ---------- */
 .search-btn {

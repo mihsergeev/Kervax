@@ -2646,7 +2646,22 @@ export interface ReportServer {
   gaps: number
   longest_s: number
   alerts: number
-  kinds: { kind: string; label: string; n: number }[]
+  things: { what: string; n: number }[] // что именно было, самое частое первым
+}
+// что шумело: что именно (какой юнит, под, репозиторий - из текста алерта) и где
+export interface ReportNoise {
+  target: string
+  section: string
+  kind: string
+  label: string // вид алерта: подсказка, сама строка - what
+  what: string
+  note: string // коротко почему: код выхода, причина, кто ел CPU
+  n: number
+  days: number // в скольких днях периода было
+  first: string
+  last: string
+  srv_id: number | null
+  chk_id: number | null
 }
 export interface ReportTotals {
   uptime: number | null
@@ -2684,8 +2699,8 @@ export interface Report {
     fires: number
     prev_fires: number
     per_day: number[] // алертов за день
-    top: { kind: string; label: string; target: string; n: number }[]
-    backups: { target: string; n: number; kinds: string[] }[]
+    items: ReportNoise[]
+    more: number
   }
   // окно за период одной строкой: сколько раз было, start/end - последнее вхождение
   maint: { title: string; repeat: string; count: number; start: string; end: string; servers: number; checks: number }[]
