@@ -148,6 +148,15 @@ const RULE_KIND_LABELS: Record<string, string> = {
   flux_stale: 'Flux: репозиторий чартов недоступен',
 }
 
+// Алерты подов, Job и CronJob кластера: пока идет разработка, поды пересоздаются и Job падают,
+// их глушат разом из карточки кластера. Ноды, сроки и Flux - инфраструктура, они остаются
+export const KUBE_WORK_KINDS = ['kube_pod', 'kube_restarts', 'kube_job', 'kube_cron']
+
+// Подпись вида алерта: свои у ключей с хвостом, дальше пороговые виды и виды правил
+export function kindLabel(k: string, t: TFn): string {
+  return muteKindLabel(k, t) ?? t(SNOOZE_KINDS.find((x) => x.k === k)?.label ?? RULE_KIND_LABELS[k] ?? k)
+}
+
 // Всё заглушённое по серверу. groups сужает до «своей» страницы.
 export function collectMutes(
   s: Server,
@@ -155,8 +164,7 @@ export function collectMutes(
   groups: MuteGroup[] = ['alert', 'repo', 'audit'],
   now = Date.now(),
 ): MuteItem[] {
-  const label = (k: string) =>
-    muteKindLabel(k, t) ?? t(SNOOZE_KINDS.find((x) => x.k === k)?.label ?? RULE_KIND_LABELS[k] ?? k)
+  const label = (k: string) => kindLabel(k, t)
   const out: MuteItem[] = []
   if (groups.includes('alert')) {
     if (s.snooze_until && new Date(s.snooze_until).getTime() > now)

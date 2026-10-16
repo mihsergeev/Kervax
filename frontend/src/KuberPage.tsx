@@ -7,6 +7,8 @@ import {
   kubeNodeIgnore,
   listServers,
   podFinished,
+  snoozeServerAlert,
+  updateServer,
   type FluxState,
   type KubeCommand,
   type KubeExpiry,
@@ -20,7 +22,7 @@ import {
 import { useAuth } from './auth'
 import { useUrlCard, useUrlParam } from './deeplink'
 import { useI18n } from './i18n'
-import { RESTARTS_DAY_MIN } from './mutes'
+import { kindLabel, KUBE_WORK_KINDS, RESTARTS_DAY_MIN } from './mutes'
 import { OsIcon } from './osIcon'
 import { CountryFlag } from './CountryFlag'
 import { fmtBytes } from './units'
@@ -160,6 +162,170 @@ function EnableBlock() {
           {copied ? t('Скопировано') : t('Копировать')}
         </button>
       </div>
+    </div>
+  )
+}
+
+// Под упавшего Job: <job>-<5 символов>, у индексного <job>-<номер>-<5 символов>; длинное имя
+// Kubernetes обрезает до 58 символов. Тот же разбор, что у лога в алерте (app/job_logs.py)
+function jobPod(pods: KubePod[], ns: string, name: string): KubePod | null {
+  const esc = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const re = new RegExp(`^${esc}-(?:\\d+-)?[a-z0-9]{5}$`)
+  const base = `${name}-`
+  const mine = pods.filter(
+    (p) =>
+      p.ns === ns &&
+      p.owner === 'Job' &&
+      (re.test(p.name) || (base.length > 58 && p.name.length === 63 && p.name.startsWith(base.slice(0, 58)))),
+  )
+  return mine.find((p) => p.phase === 'Failed') ?? mine[0] ?? null
+}
+
+// метка времени в начале строки (логи идут с timestamps) в коротком хвосте только мешает
+const LOG_TS = /^\d{4}-\d\d-\d\dT[\d:.]+(?:Z|[+-]\d\d:\d\d) /
+
+// Конец лога упавшего Job прямо в списке: раздел открывают из алерта, чтобы узнать, почему
+// упал. Весь лог - модалкой, как у пода
+function JobLog({ server, pod, onOpen }: { server: Server; pod: KubePod; onOpen: () => void }) {
+  const { t } = useI18n()
+  const [text, setText] = useState<string | null>(null)
+  const [err, setErr] = useState<string | null>(null)
+  useEffect(() => {
+    let alive = true
+    runAndWait(server.id, pod.ns, 'pod', pod.name, 'logs', { tail: 40 })
+      .then((r) => {
+        if (!alive) return
+        if (r.status === 'done')
+          setText((r.result ?? '').split('\n').map((l) => l.replace(LOG_TS, '')).filter((l) => l.trim()).slice(-25).join('\n'))
+        else setErr(r.result || t('не удалось получить логи'))
+      })
+      .catch(() => alive && setErr(t('не удалось получить логи')))
+    return () => {
+      alive = false
+    }
+  }, [server.id, pod.ns, pod.name, t])
+  return (
+    <div className="job-log">
+      <div className="job-log-head small">
+        <span className="muted mono">
+          {t('под {pod}, конец лога', { pod: pod.name })}
+          {pod.reason ? ` (${pod.reason})` : ''}
+        </span>
+        <button className="ghost small" onClick={onOpen}>
+          {t('Весь лог')}
+        </button>
+      </div>
+      {err ? (
+        <div className="form-error small">{err}</div>
+      ) : text == null ? (
+        <div className="muted small">{t('Запрашиваю логи у агента…')}</div>
+      ) : text === '' ? (
+        <div className="muted small">{t('в лог ничего не написал')}</div>
+      ) : (
+        <pre className="web-err-lines mono">{text}</pre>
+      )}
+    </div>
+  )
+}
+
+const MUTE_FOR = [
+  { h: 1, l: '1 час' },
+  { h: 24, l: '1 день' },
+  { h: 24 * 7, l: '1 неделя' },
+  // -1 - насовсем: не снуз (он всегда со сроком), а alert_mutes
+  { h: -1, l: 'постоянно' },
+]
+
+// Заглушить алерты сервера: kinds на hours часов, -1 - постоянно, 0 - снять
+async function muteKinds(s: Server, kinds: string[], hours: number) {
+  if (hours < 0) {
+    await updateServer(s.id, { alert_mutes: [...new Set([...(s.alert_mutes ?? []), ...kinds])] })
+    return
+  }
+  if (hours === 0 && kinds.some((k) => (s.alert_mutes ?? []).includes(k)))
+    await updateServer(s.id, { alert_mutes: (s.alert_mutes ?? []).filter((x) => !kinds.includes(x)) })
+  for (const k of kinds) if (hours > 0 || s.alert_snoozes?.[k]) await snoozeServerAlert(s.id, k, hours)
+}
+
+// Алерты подов, Job и CronJob кластера на время: идет разработка, поды пересоздаются, Job
+// падают. Выбор срока - по кнопке в шапке, заглушенное - чипами под шапкой, видно из любого
+// раздела. Все четыре с одним сроком - одним чипом
+function KubeMuteBar({
+  server: s,
+  open,
+  canAct,
+  onClose,
+  onChanged,
+}: {
+  server: Server
+  open: boolean
+  canAct: boolean
+  onClose: () => void
+  onChanged: () => void
+}) {
+  const { t } = useI18n()
+  const [busy, setBusy] = useState(false)
+  const [err, setErr] = useState<string | null>(null)
+  const now = Date.now()
+  const perm = new Set(s.alert_mutes ?? [])
+  const active = KUBE_WORK_KINDS.flatMap((k) => {
+    if (perm.has(k)) return [{ k, until: null as string | null }]
+    const u = s.alert_snoozes?.[k]
+    return u && new Date(u).getTime() > now ? [{ k, until: u }] : []
+  })
+  if (!(open && canAct) && active.length === 0) return null
+  const run = async (kinds: string[], hours: number) => {
+    setBusy(true)
+    setErr(null)
+    try {
+      await muteKinds(s, kinds, hours)
+      onChanged()
+      onClose()
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : t('Ошибка'))
+    } finally {
+      setBusy(false)
+    }
+  }
+  const fmt = (u: string) =>
+    new Date(u).toLocaleString([], { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })
+  const when = (u: string | null) => (u ? t('до {t}', { t: fmt(u) }) : t('постоянно'))
+  const short = (k: string) => kindLabel(k, t).replace(/^Kubernetes: /, '')
+  const same =
+    active.length === KUBE_WORK_KINDS.length &&
+    active.every((x) => (x.until ?? '').slice(0, 16) === (active[0].until ?? '').slice(0, 16))
+  const chips = same ? [{ ks: KUBE_WORK_KINDS, label: t('поды, Job и CronJob'), until: active[0].until }]
+    : active.map((x) => ({ ks: [x.k], label: short(x.k), until: x.until }))
+  return (
+    <div className="kube-mute">
+      {open && canAct && (
+        <div className="web-err-mute small">
+          <span className="muted">🔕 {t('не алертить о подах, Job и CronJob этого кластера:')}</span>
+          {MUTE_FOR.map(({ h, l }) => (
+            <button key={h} className="ghost small" disabled={busy} onClick={() => run(KUBE_WORK_KINDS, h)}>
+              {t(l)}
+            </button>
+          ))}
+          <button className="ghost small" disabled={busy} onClick={onClose}>
+            {t('Отмена')}
+          </button>
+        </div>
+      )}
+      {chips.length > 0 && (
+        <div className="snooze-active-list">
+          {chips.map((c) => (
+            <span key={c.ks.join()} className="snooze-active-chip">
+              🔕 {t('не алертят: {what}', { what: c.label })} · {when(c.until)}
+              {canAct && (
+                <button className="chip-x" disabled={busy} title={t('Снять')} onClick={() => run(c.ks, 0)}>
+                  ✕
+                </button>
+              )}
+            </span>
+          ))}
+        </div>
+      )}
+      {err && <p className="form-error">{err}</p>}
     </div>
   )
 }
@@ -468,6 +634,9 @@ function KubeHostModal({
 }) {
   const { t } = useI18n()
   const [logsPod, setLogsPod] = useState<KubePod | null>(null)
+  const [muteOpen, setMuteOpen] = useState(false)
+  const [jobMuting, setJobMuting] = useState(false)
+  const [jobBusy, setJobBusy] = useState(false)
   // открытый раздел: сводка или тот, куда вела ссылка; в адресе он виден (?sec=), ссылкой на
   // раздел можно поделиться
   const [active, setActive] = useState<string>(() => (KUBE_SEC_IDS.has(initialTab ?? '') ? initialTab! : 'overview'))
@@ -492,6 +661,18 @@ function KubeHostModal({
     || `${a.ns}/${a.name}`.localeCompare(`${b.ns}/${b.name}`))
   const cronBad = cronjobs.filter((c) => cronIssues[`${c.ns}/${c.name}`]).length
   const failedJobs = (s.last_report?.kube?.failed_jobs ?? []).slice().sort((a, b) => (b.ts ?? 0) - (a.ts ?? 0))
+  const jobSnooze = s.alert_snoozes?.kube_job
+  const jobMuted = (s.alert_mutes ?? []).includes('kube_job') || (!!jobSnooze && new Date(jobSnooze).getTime() > Date.now())
+  const muteJobs = async (hours: number) => {
+    setJobBusy(true)
+    try {
+      await muteKinds(s, ['kube_job'], hours)
+      setJobMuting(false)
+      onChanged()
+    } finally {
+      setJobBusy(false)
+    }
+  }
   const hygiene = {
     nolim: pods.filter((p) => p.nolim).length,
     noprobe: pods.filter((p) => p.noprobe).length,
@@ -733,6 +914,11 @@ function KubeHostModal({
             {s.group_name && <span className="type-chip group-chip">{s.group_name}</span>}
           </div>
           <div className="detail-head-actions">
+            {canAct && (
+              <button className="ghost icon-btn" onClick={() => setMuteOpen((v) => !v)} title={t('Заглушить алерты подов и Job')}>
+                🔕
+              </button>
+            )}
             <button className="ghost icon-btn" onClick={onClose} title={t('Закрыть')}>
               ✕
             </button>
@@ -763,6 +949,7 @@ function KubeHostModal({
             <span className="srv-meta-k">{t('обновлено')}</span> {fmtRel(s.last_seen)}
           </span>
         </div>
+        <KubeMuteBar server={s} open={muteOpen} canAct={canAct} onClose={() => setMuteOpen(false)} onChanged={onChanged} />
         <div className="srv-layout" ref={layoutRef}>
           <CardNav secs={secs} active={cur.id} info={info} onGo={go} />
           <div className="srv-main">
@@ -855,22 +1042,59 @@ function KubeHostModal({
                     {t('Упавшие за неделю Job, запущенные не по расписанию (миграции, разовые задачи): {n}', { n: failedJobs.length })}
                   </div>
                 )}
+                {/* заглушенное видно чипом под шапкой, здесь только кнопка */}
+                {failedJobs.length > 0 && canAct && !jobMuted && (
+                  <div className="web-err-mute small">
+                    {jobMuting ? (
+                      <>
+                        <span className="muted">🔕 {t('не алертить об упавших Job:')}</span>
+                        {MUTE_FOR.map(({ h, l }) => (
+                          <button key={h} className="ghost small" disabled={jobBusy} onClick={() => muteJobs(h)}>
+                            {t(l)}
+                          </button>
+                        ))}
+                        <button className="ghost small" disabled={jobBusy} onClick={() => setJobMuting(false)}>
+                          {t('Отмена')}
+                        </button>
+                      </>
+                    ) : (
+                      <button className="ghost small" onClick={() => setJobMuting(true)}>
+                        🔕 {t('не алертить об упавших Job')}
+                      </button>
+                    )}
+                  </div>
+                )}
                 <div className="loc-results docker-clist">
-                  {failedJobs.map((j) => (
-                    <div className="loc-res docker-row t-down" key={`job/${j.ns}/${j.name}/${j.ts ?? 0}`}>
-                      <span className="lk-dot lk-dot-bad" />
-                      <div className="docker-c-main">
-                        <div className="docker-c-name mono">
-                          {j.ns}/{j.name}
-                          <span className="type-chip">Job</span>
+                  {failedJobs.map((j, i) => {
+                    const pod = jobPod(pods, j.ns, j.name)
+                    return (
+                      <div className="loc-res docker-row job-row t-down" key={`job/${j.ns}/${j.name}/${j.ts ?? 0}`}>
+                        <div className="job-main">
+                          <span className="lk-dot lk-dot-bad" />
+                          <div className="docker-c-main">
+                            <div className="docker-c-name mono">
+                              {j.ns}/{j.name}
+                              <span className="type-chip">Job</span>
+                            </div>
+                            <div className="docker-c-img mono muted small">
+                              {j.ts ? t('упал {a} назад', { a: sinceShort(new Date(j.ts * 1000).toISOString(), t) || t('только что') }) : ''}
+                              {!pod && ` · ${t('пода уже нет, лога тоже')}`}
+                            </div>
+                          </div>
+                          <div className="docker-c-status mono small t-down">{j.reason || 'Failed'}</div>
                         </div>
-                        <div className="docker-c-img mono muted small">
-                          {j.ts ? t('упал {a} назад', { a: sinceShort(new Date(j.ts * 1000).toISOString(), t) || t('только что') }) : ''}
-                        </div>
+                        {/* лог сразу у трех свежих: дальше - старое, его открывают руками */}
+                        {pod && canAct && s.online && i < 3 && <JobLog server={s} pod={pod} onOpen={() => setLogsPod(pod)} />}
+                        {pod && canAct && (!s.online || i >= 3) && (
+                          <div className="job-log">
+                            <button className="ghost small" onClick={() => setLogsPod(pod)}>
+                              {t('Лог пода {pod}', { pod: pod.name })}
+                            </button>
+                          </div>
+                        )}
                       </div>
-                      <div className="docker-c-status mono small t-down">{j.reason || 'Failed'}</div>
-                    </div>
-                  ))}
+                    )
+                  })}
                   {cronjobs
                     .filter((c) => !ql || `${c.ns}/${c.name} ${c.image ?? ''}`.toLowerCase().includes(ql))
                     .map((c) => {
