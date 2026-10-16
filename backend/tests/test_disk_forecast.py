@@ -42,6 +42,36 @@ def test_jump_next_to_noise_is_not_growth():
     assert dfc.growth_rate(series(fn), NOW) is None
 
 
+def test_two_step_upload_then_flat_is_not_growth(monkeypatch):
+    """web-a 14.10: вечером залили видео (35 -> 51%), ночной бэкап скопировал его в /backup
+    (46 -> 69%), дальше полтора суток ровно. Минимумы суток росли оба дня и сопоставимо, и панель
+    обещала заполнение через 21 час. Последние сутки ровные - роста нет."""
+    def fn(ago):
+        if ago > 2.05:
+            return 35.5
+        if ago > 1.6:
+            return 51.0
+        if ago > 1.55:
+            return 46.3
+        return 69.4
+    pts = series(fn)
+    assert dfc.growth_rate(pts, NOW) is None
+    # без проверки последних суток это был бы "тренд" ~17% в сутки
+    monkeypatch.setattr(dfc, "GOING_SHARE", float("-inf"))
+    assert abs(dfc.growth_rate(pts, NOW) - 17) < 0.5
+    monkeypatch.undo()
+    # пока заливка идет и в последние сутки (минимум ниже текущего на темп) - это прогноз
+    assert dfc.growth_rate(series(lambda ago: 35 + 15 * (3 - ago)), NOW) is not None
+
+
+def test_nightly_burst_growth_stays_a_trend():
+    """Бэкап-сервер: раз в ночь +1%, днем ровно. Рывок всегда в последних сутках, поэтому
+    сейчас заполнение выше минимума суток на темп - в любое время дня."""
+    for shift in (0.05, 0.3, 0.6, 0.95):
+        pts = series(lambda ago, s=shift: 60 + int(3 - ago + s))
+        assert dfc.growth_rate(pts, NOW) is not None, shift
+
+
 def test_growth_must_be_comparable_and_above_noise():
     # ускорение в пределах STEP_RATIO - все еще тренд
     pts = series(lambda ago: 70 + (1 * (3 - ago) if ago >= 1 else 2 + 3 * (1 - ago)))
