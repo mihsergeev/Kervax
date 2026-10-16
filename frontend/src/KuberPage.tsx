@@ -1447,23 +1447,28 @@ export function KuberPage({
         })()
 
   const open = allHosts.find(({ s }) => s.id === openId)
-  // сводка по всем кластерам: ноды, поды и то, что встало или скоро истечет
-  const noAccess = allHosts.filter(({ d }) => !d.access).length
-  const offline = allHosts.filter(({ s }) => !s.online).length
-  const nAll = allHosts.flatMap(({ d }) => (d.access ? d.nodes ?? [] : []))
+  // Сводка: ноды, поды и то, что встало или скоро истечет. Считаем по кластерам на связи: у
+  // молчащих данные старые, и "все работают" по ним было бы неправдой. Молчащие названы в первой
+  // плитке по именам. Ноды и поды - по кластерам с доступом к API, замечания - по всем на связи
+  // (сроки и Flux приносят helper'ы); когда считать не по чему, плитки нет
+  const live = allHosts.filter(({ s }) => s.online)
+  const names = (xs: KHost[]) => shortList(xs.map(({ s }) => s.name), t, 2)
+  const offHosts = allHosts.filter(({ s }) => !s.online)
+  const noAccHosts = live.filter(({ d }) => !d.access)
+  const nAll = live.flatMap(({ d }) => (d.access ? d.nodes ?? [] : []))
   const nReady = nAll.filter((n) => n.ready).length
   const nPress = nAll.filter((n) => n.ready && (n.pressure ?? []).length > 0).length
-  const nUnmon = allHosts.reduce((n, { s }) => n + (s.kube_unmonitored ?? []).length, 0)
-  const pAll = allHosts.flatMap(({ d }) => (d.access ? d.pods ?? [] : []))
+  const nUnmon = live.reduce((n, { s }) => n + (s.kube_unmonitored ?? []).length, 0)
+  const pAll = live.flatMap(({ d }) => (d.access ? d.pods ?? [] : []))
   const { running: pRun, active: pAct } = podCounts(pAll)
   const pBad = pAll.filter((p) => !podFinished(p) && podTone(p) === 't-down').length
-  const fluxN = allHosts.filter(({ s }) => (s.last_report?.flux ?? []).some((f) => !f.ready && !FLUX_TRANSIENT.has(f.reason ?? ''))).length
-  const expiredN = allHosts.filter(({ s }) => (s.last_report?.kube_expiry ?? []).some((e) => daysLeft(e.expires) < 0)).length
-  const soonN = allHosts.filter(({ s }) =>
-    (s.last_report?.kube_expiry ?? []).some((e) => daysLeft(e.expires) >= 0 && daysLeft(e.expires) <= expiryHorizon(s))).length
-  const cronN = allHosts.filter(({ s }) =>
-    Object.keys(s.kube_cron_issues ?? {}).length > 0 || (s.last_report?.kube?.failed_jobs ?? []).length > 0).length
-  const attn = allHosts.filter(({ s }) =>
+  const fluxHosts = live.filter(({ s }) => (s.last_report?.flux ?? []).some((f) => !f.ready && !FLUX_TRANSIENT.has(f.reason ?? '')))
+  const expiredHosts = live.filter(({ s }) => (s.last_report?.kube_expiry ?? []).some((e) => daysLeft(e.expires) < 0))
+  const soonHosts = live.filter(({ s }) =>
+    (s.last_report?.kube_expiry ?? []).some((e) => daysLeft(e.expires) >= 0 && daysLeft(e.expires) <= expiryHorizon(s)))
+  const cronHosts = live.filter(({ s }) =>
+    Object.keys(s.kube_cron_issues ?? {}).length > 0 || (s.last_report?.kube?.failed_jobs ?? []).length > 0)
+  const attn = live.filter(({ s }) =>
     (s.last_report?.flux ?? []).some((f) => !f.ready && !FLUX_TRANSIENT.has(f.reason ?? '')) ||
     (s.last_report?.kube_expiry ?? []).some((e) => daysLeft(e.expires) <= expiryHorizon(s)) ||
     Object.keys(s.kube_cron_issues ?? {}).length > 0 ||
@@ -1500,11 +1505,12 @@ export function KuberPage({
             label={t('Кластеры')}
             value={String(allHosts.length)}
             sub={subOf(
-              noAccess > 0 && t('без доступа: {n}', { n: noAccess }),
-              offline > 0 && t('не на связи: {n}', { n: offline }),
+              noAccHosts.length > 0 && t('без доступа: {list}', { list: names(noAccHosts) }),
+              offHosts.length > 0 && t('не на связи: {list}', { list: names(offHosts) }),
             ) || t('все на связи')}
-            tone={noAccess || offline ? 'warn' : 'ok'}
+            tone={noAccHosts.length || offHosts.length ? 'warn' : 'ok'}
           />
+          {live.some(({ d }) => d.access) && <>
           <NetTile
             label={t('Ноды готовы')}
             value={String(nReady)}
@@ -1525,17 +1531,20 @@ export function KuberPage({
             ) || t('все работают')}
             tone={pBad ? 'bad' : pRun < pAct ? 'warn' : 'ok'}
           />
+          </>}
+          {live.length > 0 && <>
           <NetTile
             label={t('Кластеры с замечаниями')}
             value={String(attn)}
             sub={subOf(
-              fluxN > 0 && t('Flux встал: {n}', { n: fluxN }),
-              expiredN > 0 && t('сроки истекли: {n}', { n: expiredN }),
-              soonN > 0 && t('сроки скоро: {n}', { n: soonN }),
-              cronN > 0 && t('задания упали: {n}', { n: cronN }),
+              fluxHosts.length > 0 && t('Flux встал: {list}', { list: names(fluxHosts) }),
+              expiredHosts.length > 0 && t('сроки истекли: {list}', { list: names(expiredHosts) }),
+              soonHosts.length > 0 && t('сроки скоро: {list}', { list: names(soonHosts) }),
+              cronHosts.length > 0 && t('задания упали: {list}', { list: names(cronHosts) }),
             ) || t('все в порядке')}
-            tone={fluxN || expiredN ? 'bad' : attn ? 'warn' : 'ok'}
+            tone={fluxHosts.length || expiredHosts.length ? 'bad' : attn ? 'warn' : 'ok'}
           />
+          </>}
         </div>
       )}
       {allHosts.length > 1 && (

@@ -1824,6 +1824,12 @@ export type Server = {
   note_by?: string
   note_at?: string | null
   known_issues?: Record<string, KnownIssue> | null // известные проблемы по видам алертов
+  // подключение нового сервера (backend app/onboard.py): идет - до когда и куда пойдут алерты
+  // (имена чатов, tg/main/chats только в списке серверов), закрыто - null
+  onboard?: { until: string; tg?: boolean; main?: boolean; chats?: string[] } | null
+  onboard_done_at?: string | null
+  onboard_by?: string
+  first_report_at?: string | null
   online: boolean
   cpu_alert_percent: number
   mem_alert_percent: number
@@ -2654,6 +2660,11 @@ export type KnownIssue = {
   at?: string
   until?: string | null
   worse?: boolean
+  onboard?: boolean // поставлена при закрытии подключения: "было при подключении"
+}
+
+export function finishOnboard(id: number): Promise<Server> {
+  return api<Server>(`/api/servers/${id}/onboard/done`, { method: 'POST' })
 }
 
 export function setServerKnown(id: number, kind: string, text: string, days: number): Promise<Server> {

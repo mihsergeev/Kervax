@@ -1146,10 +1146,6 @@ export function DockerPage({
   const allHosts = (servers ?? [])
     .map((s) => ({ s, d: s.last_report?.docker }))
     .filter((x): x is DHost => !!x.d?.present)
-  const totalRunning = allHosts.reduce(
-    (n, { d }) => n + (d.containers?.filter((c) => c.state === 'running').length ?? 0),
-    0,
-  )
   const q = query.trim().toLowerCase()
   const hosts = allHosts
     .filter(({ s, d }) => {
@@ -1183,22 +1179,28 @@ export function DockerPage({
         })()
 
   const open = allHosts.find(({ s }) => s.id === openId)
-  // сводка по всем хостам: что запущено, что упало и где есть что поправить
-  const cAll = allHosts.flatMap(({ d }) => d.containers ?? [])
-  const noAccess = allHosts.filter(({ d }) => !d.access).length
-  const offline = allHosts.filter(({ s }) => !s.online).length
-  const alerts = allHosts.flatMap(({ s }) => Object.values(s.docker_alerts ?? {}))
+  // Сводка: что запущено, что упало и где есть что поправить. Считаем по хостам на связи: у
+  // молчащих данные старые, и "все запущены" по ним было бы неправдой. Молчащие названы в
+  // первой плитке по именам, а когда не осталось ни одного хоста на связи с доступом, остальных
+  // плиток нет: "0 из 0, все запущены" ничего бы не сказало
+  const live = allHosts.filter(({ s }) => s.online)
+  const names = (xs: DHost[]) => shortList(xs.map(({ s }) => s.name), t, 2)
+  const offHosts = allHosts.filter(({ s }) => !s.online)
+  const noAccHosts = live.filter(({ d }) => !d.access)
+  const cAll = live.flatMap(({ d }) => d.containers ?? [])
+  const totalRunning = cAll.filter((c) => c.state === 'running').length
+  const alerts = live.flatMap(({ s }) => Object.values(s.docker_alerts ?? {}))
   const aDown = alerts.filter((a) => a === 'down').length
   const unhealthy = cAll.filter((c) => c.health === 'unhealthy').length
-  const flappy = allHosts.reduce(
+  const flappy = live.reduce(
     (n, { s }) => n + Object.entries(s.restarts_day ?? {}).filter(([k, v]) => k.startsWith('docker:') && v >= RESTARTS_DAY_MIN).length,
     0,
   )
-  const sockN = allHosts.filter(({ s }) => (s.docker_exposed?.length ?? 0) > 0).length
-  const riskN = allHosts.filter(({ s }) => (s.docker_risk ?? []).some((x) => !x.muted)).length
-  const nobootN = allHosts.filter(({ s }) => (s.noboot?.docker ?? []).some((x) => !x.muted)).length
-  const oldN = allHosts.filter(({ s }) => (s.proxy_outdated?.length ?? 0) > 0).length
-  const attn = allHosts.filter(
+  const sockHosts = live.filter(({ s }) => (s.docker_exposed?.length ?? 0) > 0)
+  const riskHosts = live.filter(({ s }) => (s.docker_risk ?? []).some((x) => !x.muted))
+  const nobootHosts = live.filter(({ s }) => (s.noboot?.docker ?? []).some((x) => !x.muted))
+  const oldHosts = live.filter(({ s }) => (s.proxy_outdated?.length ?? 0) > 0)
+  const attn = live.filter(
     ({ s }) =>
       (s.docker_exposed?.length ?? 0) > 0 ||
       (s.docker_risk ?? []).some((x) => !x.muted) ||
@@ -1237,11 +1239,12 @@ export function DockerPage({
             label={t('Хосты с Docker')}
             value={String(allHosts.length)}
             sub={subOf(
-              noAccess > 0 && t('без доступа: {n}', { n: noAccess }),
-              offline > 0 && t('не на связи: {n}', { n: offline }),
+              noAccHosts.length > 0 && t('без доступа: {list}', { list: names(noAccHosts) }),
+              offHosts.length > 0 && t('не на связи: {list}', { list: names(offHosts) }),
             ) || t('все на связи')}
-            tone={noAccess || offline ? 'warn' : 'ok'}
+            tone={noAccHosts.length || offHosts.length ? 'warn' : 'ok'}
           />
+          {live.some(({ d }) => d.access) && <>
           <NetTile
             label={t('Контейнеры запущены')}
             value={String(totalRunning)}
@@ -1264,13 +1267,14 @@ export function DockerPage({
             label={t('Хосты с замечаниями')}
             value={String(attn)}
             sub={subOf(
-              sockN > 0 && t('docker-сокет у прокси: {n}', { n: sockN }),
-              riskN > 0 && t('ключи от хоста: {n}', { n: riskN }),
-              nobootN > 0 && t('без restart policy: {n}', { n: nobootN }),
-              oldN > 0 && t('старый прокси: {n}', { n: oldN }),
+              sockHosts.length > 0 && t('docker-сокет у прокси: {list}', { list: names(sockHosts) }),
+              riskHosts.length > 0 && t('ключи от хоста: {list}', { list: names(riskHosts) }),
+              nobootHosts.length > 0 && t('без restart policy: {list}', { list: names(nobootHosts) }),
+              oldHosts.length > 0 && t('старый прокси: {list}', { list: names(oldHosts) }),
             ) || t('все в порядке')}
             tone={attn ? 'warn' : 'ok'}
           />
+          </>}
         </div>
       )}
       {allHosts.length > 1 && (

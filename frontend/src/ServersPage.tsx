@@ -50,6 +50,7 @@ import {
   type TimelineResult,
 } from './api'
 import { StackedAreaChart, type Series } from './charts/StackedAreaChart'
+import { OnboardBlock } from './OnboardBlock'
 import { diskHealth, diskUsage, fmtSetupVersion, shortList, sinceShort, unitsBlock, srvIssues, type SrvIssue, webLogLabel, webRate, webSeriesName, webUnparsed } from './serverUtils'
 import { OsIcon } from './osIcon'
 import { CountryFlag } from './CountryFlag'
@@ -5643,6 +5644,7 @@ function ServerDetail({
 
   const overview = (
     <div className="srv-sec">
+      <OnboardBlock server={s} t={t} canManage={!isViewer} onChanged={onChanged} onOpenSection={onOpenSection} />
       {!isViewer && (s.agent_fix_command || (s.helper_advice?.length ?? 0) > 0) && (
         <ServerFixBanner titles={s.agent_advice} command={s.agent_fix_command} helpers={s.helper_advice || []} t={t} />
       )}
@@ -5702,6 +5704,7 @@ function ServerDetail({
             <CountryFlag code={s.country} />
             <h3>{s.name}</h3>
             {s.group_name && <span className="type-chip group-chip">{s.group_name}</span>}
+            {s.onboard && <span className="type-chip onb-chip">{t('подключается')}</span>}
             {/* что заглушено - значком, сами заглушки в разделе "Алерты" */}
             {muteItems.length > 0 && !editing && (
               <button className="srv-head-chip" onClick={() => go('alerts')}>

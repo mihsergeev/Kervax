@@ -27,6 +27,7 @@ from app import web_certs
 from app import web_config
 from app import changes as srv_changes
 from app import known
+from app import onboard
 from app import parents as parents_mod
 from app import timeline as timeline_mod
 from app import packages as packages_mod
@@ -245,6 +246,8 @@ def _out(
     o.proxy_outdated = docker_exposure.outdated(server.last_report or {}, now.timestamp())
     o.disk_analyze = disk_analyze_ok(server.last_report or {})
     o.fresh = _fresh_node(server, now)
+    if onboard.active(server, now):
+        o.onboard = {"until": onboard.until(server).isoformat()}
     o.problems = server_problems(server, now, pod_names, web_err)
     if ((server.last_report or {}).get("kube") or {}).get("access"):
         o.kube_cron_issues = {**cron_job_issues(server.last_report, now, True),
@@ -418,9 +421,16 @@ async def list_servers(user: CurrentUser, session: SessionDep) -> list[ServerOut
     # ошибки 5xx за 15 минут по всем нодам - двумя запросами на весь список, для "Что сломано"
     web_err = await web_error_window(session, now)
     bogus = await request_watch.server_issues(session)
+    # куда пойдут алерты серверов на подключении: строка чек-листа в карточке
+    cfg = None
+    if any(onboard.active(s, now) for s in servers):
+        from app import settings_store
+        cfg = await settings_store.get_alert_config(session, get_settings())
     outs = []
     for s in servers:
         o = _out(s, now, cur, names, web_err.get(s.id))
+        if o.onboard is not None and cfg is not None:
+            o.onboard |= onboard.destinations(cfg, s.group_name or "")
         if s.id in bogus:
             o.problems = [*o.problems, bogus[s.id]]
         o.kube_unmonitored = _unmonitored(s, index)
@@ -444,7 +454,10 @@ async def create_server(
     name = body.name.strip()
     await _name_free(session, name)
     token = generate_agent_token()
-    server = Server(**(body.model_dump() | {"name": name}), token_hash=hash_agent_token(token))
+    # подключение открыто (app/onboard.py): пока его не закроют, от сервера уходит алертом только
+    # офлайн и критичный диск. Метка в состоянии - чтобы сборщик знал, что было что закрывать
+    server = Server(**(body.model_dump() | {"name": name}), token_hash=hash_agent_token(token),
+                    onboard_done_at=None, alert_state={"onboard": 1})
     session.add(server)
     await session.commit()
     await session.refresh(server)
@@ -1193,6 +1206,20 @@ async def set_server_known(
     await session.commit()
     await session.refresh(server)
     await audit.record(session, user.username, "known_set", server.name, f"{kind}: {body.text[:200]}")
+    return _out(server, now)
+
+
+@router.post("/{server_id}/onboard/done", response_model=ServerOut)
+async def finish_onboard(server_id: int, user: CurrentUser, session: SessionDep) -> ServerOut:
+    """Закрыть подключение: что сейчас сломано, на следующем тике станет известной проблемой
+    ("было при подключении"), дальше алерты как у всех (app/onboard.py)."""
+    server = await _get_or_404(server_id, session, user)
+    now = datetime.now(timezone.utc)
+    if server.onboard_done_at is None:
+        server.onboard_done_at, server.onboard_by = now, user.username
+        await session.commit()
+        await session.refresh(server)
+        await audit.record(session, user.username, "onboard_done", server.name)
     return _out(server, now)
 
 

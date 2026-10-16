@@ -30,7 +30,7 @@ import {
   type Server,
 } from './api'
 import { updateServer } from './api'
-import { backupAlive, backupWindowNote, dbAuditNames, shortList, srvIssues, srvMuted } from './serverUtils'
+import { backupAlive, backupWindowNote, dbAuditNames, hasOwnFileBackup, shortList, srvIssues, srvMuted } from './serverUtils'
 import { fmtRel } from './ServersPage'
 import { CardNav, FreshChip, markMuted, OvAreas, OvRows, secInfoOf, type OvRow, type SecDef, type SecInfo, type SecItem } from './cardLayout'
 import { OsIcon } from './osIcon'
@@ -415,10 +415,6 @@ function verLt(v: string, target: string): boolean {
 const OWN_PROBLEM = ['failed', 'stale', 'disabled']
 function ownBackupProblems(s: Server): CustomBackup[] {
   return (s.custom_backups ?? []).filter((j) => OWN_PROBLEM.includes(j.status))
-}
-// свой файловый бэкап ноды (restic/borg/rsync без панели) — нода не «без бэкапа»
-function hasOwnFileBackup(s: Server): boolean {
-  return (s.custom_backups ?? []).some((j) => j.files && !j.ignored)
 }
 
 // «0 4 * * *» и «*-*-* 04:00:00» — это «ежедневно 04:00»; остальное показываем как есть

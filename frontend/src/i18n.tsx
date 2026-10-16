@@ -1477,8 +1477,8 @@ const EN: Record<string, string> = {
   'Бэкап вышел за окно': 'Backup ran past its window',
   // Docker: сводка и модалка хоста плитками
   'Хосты с Docker': 'Docker hosts',
-  'без доступа: {n}': 'no access: {n}',
-  'не на связи: {n}': 'not reporting: {n}',
+  'без доступа: {list}': 'no access: {list}',
+  'не на связи: {list}': 'not reporting: {list}',
   'все на связи': 'all reporting',
   'Контейнеры запущены': 'Containers running',
   'остановлено: {n}': 'stopped: {n}',
@@ -1488,10 +1488,10 @@ const EN: Record<string, string> = {
   'по кругу: {n}': 'restart loop: {n}',
   'часто перезапускаются: {n}': 'restart often: {n}',
   'Хосты с замечаниями': 'Hosts with findings',
-  'docker-сокет у прокси: {n}': 'docker socket in a proxy: {n}',
-  'ключи от хоста: {n}': 'host keys: {n}',
-  'без restart policy: {n}': 'no restart policy: {n}',
-  'старый прокси: {n}': 'old proxy: {n}',
+  'docker-сокет у прокси: {list}': 'docker socket in a proxy: {list}',
+  'ключи от хоста: {list}': 'host keys: {list}',
+  'без restart policy: {list}': 'no restart policy: {list}',
+  'старый прокси: {list}': 'old proxy: {list}',
   'Хосты': 'Hosts',
   'по контейнерам ушел алерт: упали или крутятся по кругу': 'an alert went out for containers: down or in a restart loop',
   'Запущено': 'Running',
@@ -1514,10 +1514,10 @@ const EN: Record<string, string> = {
   'не готовы: {n}': 'not ready: {n}',
   'все работают': 'all running',
   'Кластеры с замечаниями': 'Clusters with findings',
-  'Flux встал: {n}': 'Flux stuck: {n}',
-  'сроки истекли: {n}': 'expired: {n}',
-  'сроки скоро: {n}': 'expiring soon: {n}',
-  'задания упали: {n}': 'jobs failed: {n}',
+  'Flux встал: {list}': 'Flux stuck: {list}',
+  'сроки истекли: {list}': 'expired: {list}',
+  'сроки скоро: {list}': 'expiring soon: {list}',
+  'задания упали: {list}': 'jobs failed: {list}',
   'Память нод': 'Node memory',
   'Ближайший срок': 'Next expiry',
   'не в Ready: {n}': 'not Ready: {n}',
@@ -4621,6 +4621,64 @@ const EN: Record<string, string> = {
     'server downtime',
   'сайт':
     'site',
+  'Подключение сервера':
+    'Server onboarding',
+  'закроется само {when}':
+    'closes by itself on {when}',
+  'Пока идет подключение, в Telegram уходят только недоступность и критичный диск. Остальное видно здесь и в "Что сломано".':
+    'While onboarding is open, only unavailability and a critical disk go to Telegram. Everything else is shown here and in "What\'s broken".',
+  'агент еще не отчитался: поставьте его командой, которую панель выдала при добавлении':
+    'the agent has not reported yet: install it with the command the panel gave when the server was added',
+  'агент на связи':
+    'the agent is reporting',
+  'агент отчитывался, но сейчас не на связи':
+    'the agent reported before but is not reporting now',
+  'доступ к Docker':
+    'Docker access',
+  'доступ к Kubernetes':
+    'Kubernetes access',
+  'установщик ставит helper\'ы: первые 20 минут после первого отчета':
+    'the installer is setting up helpers: the first 20 minutes after the first report',
+  'не хватает: {list} - команда ниже':
+    'missing: {list}, the command is below',
+  'не хватает: {list}':
+    'missing: {list}',
+  'helper\'ы на месте':
+    'helpers are in place',
+  'это сервер бэкапов':
+    'this is a backup server',
+  'свой бэкап, панель за ним следит':
+    'own backup, the panel watches it',
+  'бэкап не требуется (отмечено)':
+    'backup not required (marked)',
+  'бэкап не настроен: настройте или отметьте, что он не нужен':
+    'no backup: set it up or mark that it is not needed',
+  'основной чат':
+    'main chat',
+  'чат {name}':
+    'chat {name}',
+  'чат группы':
+    'group chat',
+  'алерты в Telegram никуда не уйдут: не настроен чат':
+    'alerts will not go anywhere in Telegram: no chat is set up',
+  'алерты пойдут: {where}':
+    'alerts go to: {where}',
+  'сервер без группы':
+    'server without a group',
+  'Нашлось при подключении':
+    'Found at onboarding',
+  'Когда закроете подключение, это станет известными проблемами: алерт придет, только если станет хуже или сломается новое.':
+    'When you close onboarding, these become known issues: an alert comes only if it gets worse or something new breaks.',
+  'Закрыть подключение':
+    'Close onboarding',
+  'подключается':
+    'onboarding',
+  'было при подключении':
+    'was there at onboarding',
+  '{name}: идет подключение - посмотрите, что нашлось, и закройте его в карточке':
+    '{name}: onboarding is open, check what was found and close it in the server card',
+  'закрыл подключение сервера':
+    'closed server onboarding',
 }
 
 type Ctx = {

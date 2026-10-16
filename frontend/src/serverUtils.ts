@@ -276,6 +276,11 @@ export function backupAlive(b?: BackupInfo | null): boolean {
   return false
 }
 
+// свой файловый бэкап ноды (restic/borg/rsync без панели) — нода не «без бэкапа»
+export function hasOwnFileBackup(s: Server): boolean {
+  return (s.custom_backups ?? []).some((j) => j.files && !j.ignored)
+}
+
 // Вышел ли бэкап за «ночное окно». Мягкое уведомление (не алерт): бэкап либо ещё идёт
 // после дедлайна, либо завершился позже него. backup_anytime отключает проверку — для
 // нод, где дневной бэкап это норма. Возвращает текст уведомления или null.
@@ -311,6 +316,11 @@ export function backupWindowNote(s: Server): string | null {
 }
 
 // Кто отметил и до какого числа: "admin, до 20.10.2026"
+// Текст отметки: что написал человек, а у поставленной при закрытии подключения - перевод
+export function knownText(k: KnownIssue, t: (k: string, p?: Record<string, string | number>) => string): string {
+  return k.onboard ? t('было при подключении') : k.text
+}
+
 export function knownMeta(k: KnownIssue, t: (k: string, p?: Record<string, string | number>) => string): string {
   const parts = [k.by || '']
   if (k.until) parts.push(t('до {d}', { d: new Date(k.until).toLocaleDateString() }))
