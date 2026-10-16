@@ -1,3 +1,4 @@
+import ipaddress
 import secrets
 import string
 
@@ -30,8 +31,41 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 _DUMMY_HASH = hash_password("no-such-user-timing-guard")
 
 
+# адреса своих прокси: docker-сети, локальная сеть хоста
+_PROXY_NETS = [
+    ipaddress.ip_network(n)
+    for n in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "127.0.0.0/8", "::1/128", "fc00::/7")
+]
+
+
+def _is_proxy(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    return any(ip in n for n in _PROXY_NETS)
+
+
 def _client_key(request: Request) -> str:
-    return request.client.host if request.client else "unknown"
+    """Адрес того, кто входит. Панель стоит за своими прокси (caddy, за ним nginx фронтенда)
+    в docker-сети, и адрес соединения - это прокси: все входы в журнале выглядели одним
+    частным адресом, а блокировка после неудач запирала всех сразу, а не того, кто подбирает
+    пароль. Каждый прокси дописывает в X-Forwarded-For, от кого пришел запрос: справа налево
+    пропускаем свои прокси, первый чужой адрес - клиент. Заголовку верим, только когда
+    соединение от своего прокси: снаружи его можно подставить любой."""
+    host = request.client.host if request.client else "unknown"
+    try:
+        if not _is_proxy(ipaddress.ip_address(host)):
+            return host
+    except ValueError:
+        return host
+    chain = []
+    for part in request.headers.get("x-forwarded-for", "").split(","):
+        try:
+            chain.append(ipaddress.ip_address(part.strip()))
+        except ValueError:
+            continue
+    for ip in reversed(chain):
+        if not _is_proxy(ip):
+            return str(ip)
+    # все из локальной сети: вход изнутри, левый адрес - тот, кого увидел первый прокси
+    return str(chain[0]) if chain else host
 
 
 async def _record_failure(session, settings, key: str, username: str, action: str) -> None:

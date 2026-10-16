@@ -96,6 +96,19 @@ export type AccessGroups = { servers: string[]; sites: string[] }
 export function listAccessGroups(): Promise<AccessGroups> {
   return api<AccessGroups>('/api/users/groups')
 }
+// Окно "Пользователи": учетки с последним входом и действиями из журнала, сам журнал
+export type AuditEntry = { id: number; ts: string; username: string; action: string; target: string; detail: string }
+export type UserCard = PanelUser & {
+  tg_linked: boolean
+  last_login: string | null
+  last_ip: string
+  fails_24h: number
+  actions_30d: number
+}
+export type UsersOverview = { users: UserCard[]; audit: AuditEntry[]; fails_24h: number; fail_ips_24h: number }
+export function getUsersOverview(): Promise<UsersOverview> {
+  return api<UsersOverview>('/api/users/overview')
+}
 export function listUsers(): Promise<PanelUser[]> {
   return api<PanelUser[]>('/api/users')
 }

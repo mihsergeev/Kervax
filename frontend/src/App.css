@@ -1869,6 +1869,16 @@ button.srv-tile-btn:hover .net-tile { border-color: var(--border-strong); backgr
   overflow: auto;
 }
 
+/* окно "Пользователи" (UsersModal): имя с ролью в таблице, роль и пароль узкими полями */
+.us-name { display: inline-flex; align-items: center; flex-wrap: wrap; gap: 0.4rem; }
+.us-role { max-width: 16rem; }
+.us-form { flex-wrap: wrap; }
+.us-form .field { flex: 1 1 12rem; min-width: 0; }
+.us-pw { margin: 0; }
+.us-pw input { width: 16rem; max-width: 100%; }
+.us-who select { min-width: 10rem; }
+.sec-tbl td.nowrap { white-space: nowrap; }
+
 /* окно "Бэкап" (BackupModal): кнопки у файла в таблице */
 .bk-acts { display: inline-flex; gap: 0.35rem; white-space: nowrap; }
 /* сроки кнопками в окнах под шестеренкой: на узком экране переносятся, а не вылезают */
@@ -1909,6 +1919,10 @@ button.srv-tile-btn:hover .net-tile { border-color: var(--border-strong); backgr
 .sec-tbl th, .sec-tbl td { padding: 0.4rem 0.6rem; border-bottom: 1px solid var(--border); text-align: left; }
 .sec-tbl th { font-size: 0.72rem; font-weight: 600; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.04em; }
 .sec-tbl .num { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+@media (max-width: 560px) {
+  .sec-tbl th, .sec-tbl td { padding: 0.4rem 0.4rem; }
+  .sec-tbl td { overflow-wrap: anywhere; }
+}
 @media (max-width: 560px) {
   .sec-tbl td.muted { display: none; }
 }

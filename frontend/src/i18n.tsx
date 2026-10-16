@@ -40,16 +40,10 @@ const EN: Record<string, string> = {
   'Админ': 'Admin',
   'Роль': 'Role',
   'Сбросить пароль': 'Reset password',
-  'Новая учётка': 'New account',
   'Пароль (мин. {n})': 'Password (min. {n})',
-  'Пароль обновлён': 'Password updated',
-  'Пароль минимум {n} символов': 'Password must be at least {n} characters',
-  'Нет учёток.': 'No accounts.',
   'Учётка «Только просмотр» видит все данные, но ничего не может менять.':
     'A "View only" account can see everything but change nothing.',
   'Удалить учётку «{name}»?': 'Delete account "{name}"?',
-  'Новый пароль для «{name}» (мин. {n} симв.):':
-    'New password for "{name}" (min. {n} chars):',
   'Не удалось войти': 'Sign in failed',
   'Неверный логин или пароль': 'Wrong login or password',
   'Код из приложения (2FA)': 'Code from the app (2FA)',
@@ -906,8 +900,6 @@ const EN: Record<string, string> = {
   'Свою учётку удалить нельзя': 'You cannot delete your own account',
   'Это последний администратор — панель останется без управления': 'This is the last administrator — the panel would be left unmanaged',
   'Доступ': 'Access',
-  'Свернуть': 'Collapse',
-  'Сохранить доступ': 'Save access',
   'не отмечено — доступны все': 'nothing checked — all allowed',
   'не отмечено — видны все': 'nothing checked — all visible',
   'Групп пока нет': 'No groups yet',
@@ -915,7 +907,6 @@ const EN: Record<string, string> = {
   'все группы': 'all groups',
   'разделов: {n}': 'sections: {n}',
   'групп: {n}': 'groups: {n}',
-  'Роль задаёт, что можно менять; разделы — какие вкладки видны; группы — какие серверы и мониторы вообще доступны. Пусто в разделах или группах означает «без ограничений».': 'The role defines what can be changed; sections — which tabs are visible; groups — which servers and monitors are accessible at all. Empty sections or groups mean no restrictions.',
   'Алерт, когда в очереди накопилось': 'Alert when the queue holds',
   'Порог этой очереди: с этого числа сообщений алертим. Пусто или 0 — не алертить.': 'Threshold for this queue: alert from this message count. Empty or 0 — no alerts.',
   'сообщений и больше — сразу во всех очередях ниже. У любой очереди значение можно поправить или стереть.': 'messages or more — applied to every queue below. Any queue can be adjusted or cleared.',
@@ -3897,6 +3888,189 @@ const EN: Record<string, string> = {
     'Backups on the panel disk, newest first. Any of them can be downloaded or used to restore the panel.',
   'Свежий бэкап файлом на этот компьютер или восстановление из такого файла, например при переезде панели на другой сервер.':
     'A fresh backup as a file on this computer, or a restore from such a file, for example when moving the panel to another server.',
+  // --- окно Пользователи разделами (UsersModal) ---
+  'Админов: {n}':
+    'Admins: {n}',
+  'Админу область не режется: он управляет учетками и может снять ее себе сам.':
+    'An admin has no scope limits: they manage accounts and could remove any limit themselves.',
+  'Алерты в Telegram':
+    'Telegram alerts',
+  'В журнале записей нет.':
+    'No log entries.',
+  'Входы':
+    'Logins',
+  'Действий за 30 дней':
+    'Actions in 30 days',
+  'Доступ сохранен.':
+    'Access saved.',
+  'Журнал действий':
+    'Action log',
+  'Записей нет.':
+    'No entries.',
+  'Кто':
+    'Who',
+  'Кто и что менял в панели, входы и неудачные попытки. Показаны последние {n} записей.':
+    'Who changed what in the panel, logins and failed attempts. The last {n} entries are shown.',
+  'Может все, включая учетки и настройки панели.':
+    'Can do everything, including accounts and panel settings.',
+  'Неудачных входов за сутки':
+    'Failed logins in 24 h',
+  'Новая учетка':
+    'New account',
+  'Новый пароль (мин. {n})':
+    'New password (min. {n})',
+  'Объект':
+    'Object',
+  'Пароль обновлен, прежние входы этой учетки сброшены.':
+    'Password updated, existing sessions of this account are signed out.',
+  'Показаны первые 200 из {n}.':
+    'The first 200 of {n} are shown.',
+  'Последние действия':
+    'Recent actions',
+  'Последний вход':
+    'Last login',
+  'Правит в разрешенных разделах, учетки и настройки панели ему не видны.':
+    'Edits in the allowed sections; accounts and panel settings are hidden.',
+  'Роль задает, что можно менять, разделы - какие вкладки видны, группы - какие серверы и мониторы вообще доступны. Пусто в разделах или группах - без ограничений.':
+    'The role sets what can be changed, sections set which tabs are visible, groups set which servers and monitors are available at all. Empty sections or groups mean no limits.',
+  'С 2FA':
+    'With 2FA',
+  'Создана':
+    'Created',
+  'Только логин, пароль и роль. Какие разделы и группы видны - в карточке учетки после создания.':
+    'Only login, password and role. Which sections and groups are visible is set in the account card after it is created.',
+  'Только смотрит, ничего не меняет.':
+    'Only looks, changes nothing.',
+  'Удаление':
+    'Deletion',
+  'Удалить учетку':
+    'Delete account',
+  'Учетка':
+    'Account',
+  'Учетка создана.':
+    'Account created.',
+  'Учетка создана. Какие разделы и группы ей видны - в доступе ниже.':
+    'Account created. Which sections and groups it sees is set in the access block below.',
+  'Учетки':
+    'Accounts',
+  'Учеток':
+    'Accounts',
+  'админ':
+    'admin',
+  'админов {a} · правка {e} · просмотр {v}':
+    'admins {a} · edit {e} · view {v}',
+  'блокировка входа':
+    'login lockout',
+  'весь журнал учетки':
+    'full log of the account',
+  'включает сам пользователь':
+    'each user turns it on',
+  'включена':
+    'on',
+  'включил 2FA':
+    'turned on 2FA',
+  'восстановил панель из бэкапа':
+    'restored the panel from a backup',
+  'все разделы и группы':
+    'all sections and groups',
+  'вход':
+    'login',
+  'вход заблокирован':
+    'login blocked',
+  'вы: {u}':
+    'you: {u}',
+  'выключил 2FA':
+    'turned off 2FA',
+  'выпустил токен ansible':
+    'issued the ansible token',
+  'добавил локацию':
+    'added a location',
+  'добавил монитор':
+    'added a monitor',
+  'добавил окно обслуживания':
+    'added a maintenance window',
+  'добавил связь между серверами':
+    'added a link between servers',
+  'еще не входил':
+    'has not logged in yet',
+  'заглушил алерт сервера':
+    'snoozed a server alert',
+  'заметка к монитору':
+    'monitor note',
+  'заметка к серверу':
+    'server note',
+  'изменил автобэкап':
+    'changed auto backup',
+  'изменил алерты':
+    'changed alerts',
+  'изменил доступ учетки':
+    'changed account access',
+  'изменил локацию':
+    'changed a location',
+  'изменил монитор':
+    'changed a monitor',
+  'изменил окно обслуживания':
+    'changed a maintenance window',
+  'изменил сервер':
+    'changed a server',
+  'изменил сроки хранения':
+    'changed retention',
+  'импорт мониторов':
+    'imported monitors',
+  'к журналу':
+    'to the log',
+  'не включена, включает сам пользователь в своем меню':
+    'off, the user turns it on in their own menu',
+  'не входил':
+    'never',
+  'не привязаны':
+    'not linked',
+  'неверный код 2FA':
+    'wrong 2FA code',
+  'неверный пароль':
+    'wrong password',
+  'отвязал Telegram':
+    'unlinked Telegram',
+  'отключил доступ ansible':
+    'turned off ansible access',
+  'открыл сейф бэкапов':
+    'opened the backup vault',
+  'посмотрел доступы бэкапа':
+    'viewed backup credentials',
+  'правка':
+    'edit',
+  'привязал Telegram':
+    'linked Telegram',
+  'привязаны':
+    'linked',
+  'просмотр':
+    'view',
+  'с адресов: {n}':
+    'from addresses: {n}',
+  'сбросил пароль учетки':
+    'reset an account password',
+  'сменил свой пароль':
+    'changed own password',
+  'создал бэкап панели':
+    'created a panel backup',
+  'создал учетку':
+    'created an account',
+  'удалил локацию':
+    'deleted a location',
+  'удалил монитор':
+    'deleted a monitor',
+  'удалил мониторы':
+    'deleted monitors',
+  'удалил окно обслуживания':
+    'deleted a maintenance window',
+  'удалил связь между серверами':
+    'deleted a link between servers',
+  'удалил сервер':
+    'deleted a server',
+  'удалил учетку':
+    'deleted an account',
+  'учеток: {n}':
+    'accounts: {n}',
 }
 
 type Ctx = {

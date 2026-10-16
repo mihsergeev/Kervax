@@ -101,6 +101,23 @@ class UserListItem(BaseModel):
     created_at: datetime
 
 
+class UserCardOut(UserListItem):
+    """Учетка для окна "Пользователи": к роли и области - вход и действия из журнала."""
+
+    tg_linked: bool = False  # личные алерты в Telegram привязаны
+    last_login: datetime | None = None
+    last_ip: str = ""
+    fails_24h: int = 0  # неудачные входы под этим логином за сутки
+    actions_30d: int = 0  # действия за 30 дней, без входов
+
+
+class UsersOverview(BaseModel):
+    users: list[UserCardOut]
+    audit: list["AuditEntryOut"]  # журнал действий, новые сверху
+    fails_24h: int  # все неудачные входы за сутки, и под несуществующими логинами
+    fail_ips_24h: int  # с скольких адресов
+
+
 class PasswordChangeRequest(BaseModel):
     current_password: str = Field(min_length=1, max_length=128)
     new_password: str = Field(min_length=MIN_PASSWORD_LEN, max_length=128)

@@ -180,3 +180,27 @@ async def test_first_admin_needs_a_long_password(tmp_path):
         Settings(admin_user="admin", admin_password="a" * MIN_PASSWORD_LEN, **strong),
     )
     await engine.dispose()
+
+
+async def test_users_window_sees_logins_failures_and_the_action_log(client, auth_headers):
+    vh = await _mk_viewer(client, auth_headers)
+    await client.post("/api/auth/login", json={"username": "watcher", "password": "wrong-pass-0001"})
+    await client.post("/api/auth/login", json={"username": "nobody", "password": "wrong-pass-0001"})
+    # просмотр не видит окно
+    assert (await client.get("/api/users/overview", headers=vh)).status_code == 403
+
+    r = await client.get("/api/users/overview", headers=auth_headers)
+    assert r.status_code == 200, r.text
+    ov = r.json()
+    users = {u["username"]: u for u in ov["users"]}
+    w = users["watcher"]
+    assert w["role"] == "viewer" and w["last_login"] and w["last_ip"]
+    assert w["fails_24h"] == 1 and w["tg_linked"] is False
+    # создание учетки - действие админа, входы в счет действий не идут
+    assert users["admin"]["actions_30d"] == 1 and w["actions_30d"] == 0
+    # неудачные входы всего - и под несуществующим логином
+    assert ov["fails_24h"] == 2 and ov["fail_ips_24h"] == 1
+    acts = [a["action"] for a in ov["audit"]]
+    assert acts[0] == "login_fail" and "user_create" in acts
+    # время с поясом: на SQLite без него окно сдвигало вход на разницу с UTC
+    assert w["last_login"].endswith(("Z", "+00:00")) and ov["audit"][0]["ts"].endswith(("Z", "+00:00"))

@@ -10,13 +10,23 @@
 там же, а группы — в выборках и при доступе к объекту по id.
 """
 
+from datetime import datetime, timedelta, timezone
+
 from fastapi import APIRouter, HTTPException, status
 from sqlalchemy import func, select
 
 from app import audit
 from app.deps import AdminUser, SessionDep
-from app.models import Check, Server, User
-from app.schemas import UserCreate, UserListItem, UserResetPassword, UserUpdate
+from app.models import AuditLog, Check, Server, User
+from app.schemas import (
+    AuditEntryOut,
+    UserCardOut,
+    UserCreate,
+    UserListItem,
+    UserResetPassword,
+    UsersOverview,
+    UserUpdate,
+)
 from app.security import hash_password
 
 router = APIRouter(prefix="/users", tags=["users"])
@@ -25,6 +35,82 @@ router = APIRouter(prefix="/users", tags=["users"])
 @router.get("", response_model=list[UserListItem])
 async def list_users(_: AdminUser, session: SessionDep) -> list[User]:
     return list(await session.scalars(select(User).order_by(User.id)))
+
+
+# неудачные входы: неверный пароль и неверный код 2FA
+_FAILS = ("login_fail", "login_2fa_fail")
+_LOGINS = ("login_ok", "login_blocked", "login_lockout") + _FAILS
+AUDIT_SHOWN = 500
+
+
+def _aware(ts: datetime | None) -> datetime | None:
+    # SQLite отдает время без пояса, а пишется оно в UTC
+    if ts is None:
+        return None
+    return ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
+
+
+@router.get("/overview", response_model=UsersOverview)
+async def users_overview(_: AdminUser, session: SessionDep) -> UsersOverview:
+    """Окно "Пользователи": учетки с последним входом, неудачными входами за сутки и числом
+    действий за 30 дней, и журнал действий - больше его нигде не видно."""
+    now = datetime.now(timezone.utc)
+    users = list(await session.scalars(select(User).order_by(User.id)))
+    last_id = (
+        select(func.max(AuditLog.id)).where(AuditLog.action == "login_ok").group_by(AuditLog.username)
+    )
+    last = {
+        name: (ts, ip)
+        for name, ts, ip in await session.execute(
+            select(AuditLog.username, AuditLog.ts, AuditLog.target).where(AuditLog.id.in_(last_id))
+        )
+    }
+    day = now - timedelta(days=1)
+    fails = {
+        name: n
+        for name, n in await session.execute(
+            select(AuditLog.username, func.count())
+            .where(AuditLog.action.in_(_FAILS), AuditLog.ts >= day)
+            .group_by(AuditLog.username)
+        )
+    }
+    fail_ips = await session.scalar(
+        select(func.count(func.distinct(AuditLog.target))).where(
+            AuditLog.action.in_(_FAILS), AuditLog.ts >= day
+        )
+    )
+    acts = {
+        name: n
+        for name, n in await session.execute(
+            select(AuditLog.username, func.count())
+            .where(AuditLog.action.not_in(_LOGINS), AuditLog.ts >= now - timedelta(days=30))
+            .group_by(AuditLog.username)
+        )
+    }
+    cards = []
+    for u in users:
+        ts, ip = last.get(u.username, (None, ""))
+        base = UserListItem.model_validate(u).model_dump()
+        base["created_at"] = _aware(base["created_at"])
+        cards.append(
+            UserCardOut(
+                **base,
+                tg_linked=bool(u.tg_chat_id),
+                last_login=_aware(ts),
+                last_ip=ip or "",
+                fails_24h=fails.get(u.username, 0),
+                actions_30d=acts.get(u.username, 0),
+            )
+        )
+    log = await session.scalars(select(AuditLog).order_by(AuditLog.id.desc()).limit(AUDIT_SHOWN))
+    return UsersOverview(
+        users=cards,
+        audit=[
+            AuditEntryOut.model_validate(a).model_copy(update={"ts": _aware(a.ts)}) for a in log
+        ],
+        fails_24h=sum(fails.values()),
+        fail_ips_24h=int(fail_ips or 0),
+    )
 
 
 @router.post("", response_model=UserListItem, status_code=status.HTTP_201_CREATED)
