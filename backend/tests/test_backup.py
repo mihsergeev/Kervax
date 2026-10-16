@@ -40,6 +40,52 @@ async def test_backup_export_restore_roundtrip(
     assert any(c["name"] == "m1" for c in ov["checks"])
 
 
+async def test_backup_keeps_links_windows_hidden_domains_and_old_files_do_not_wipe_them(
+    client: httpx.AsyncClient, auth_headers
+):
+    r = await client.post(
+        "/api/checks/discovered/ignore", json={"domains": ["dev.example.com"]}, headers=auth_headers
+    )
+    assert r.status_code == 200
+
+    # окно видит, что войдет в бэкап, и что автобэкап еще не делался
+    r = await client.get("/api/backup/overview", headers=auth_headers)
+    assert r.status_code == 200
+    ov = r.json()
+    parts = {p["key"]: p["rows"] for p in ov["parts"]}
+    assert parts["ignored_domains"] == 1
+    assert {"server_links", "maintenance_windows", "backup_vault"} <= parts.keys()
+    assert ov["last_auto"] is None and ov["files"] == [] and ov["total_bytes"] == 0
+    assert ov["next_auto"] is not None  # включен по умолчанию: на ближайшем проходе
+
+    data = (await client.get("/api/backup/export", headers=auth_headers)).json()
+    assert [d["domain"] for d in data["tables"]["ignored_domains"]] == ["dev.example.com"]
+    for k in ("server_links", "maintenance_windows", "backup_vault"):
+        assert k in data["tables"]
+
+    # файл старой версии без этих таблиц: скрытые домены остаются как есть
+    old = {**data, "tables": {k: v for k, v in data["tables"].items() if k != "ignored_domains"}}
+    r = await client.post("/api/backup/restore", json=old, headers=auth_headers)
+    assert r.status_code == 200 and "ignored_domains" not in r.json()["restored"]
+    again = (await client.get("/api/backup/export", headers=auth_headers)).json()
+    assert len(again["tables"]["ignored_domains"]) == 1
+
+    # а свежий файл возвращает их из бэкапа
+    await client.post(
+        "/api/checks/discovered/ignore",
+        json={"domains": ["dev.example.com"], "ignore": False},
+        headers=auth_headers,
+    )
+    r = await client.post("/api/backup/restore", json=data, headers=auth_headers)
+    assert r.json()["restored"]["ignored_domains"] == 1
+
+    # сделанный сейчас бэкап виден в окне с размером и следующим сроком
+    r = await client.post("/api/backup/run", headers=auth_headers)
+    assert r.status_code == 200
+    ov = (await client.get("/api/backup/overview", headers=auth_headers)).json()
+    assert len(ov["files"]) == 1 and ov["total_bytes"] == ov["files"][0]["size"] > 0
+
+
 async def test_backup_restore_rejects_foreign_file(
     client: httpx.AsyncClient, auth_headers
 ):

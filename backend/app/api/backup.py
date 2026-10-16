@@ -1,9 +1,11 @@
+from datetime import datetime, timedelta, timezone
+
 from fastapi import APIRouter, Body, HTTPException, status
 
 from app import audit, backup, settings_store
 from app.config import get_settings
 from app.deps import AdminUser, SessionDep
-from app.schemas import BackupConfig, BackupFileInfo, RestoreResult
+from app.schemas import BackupConfig, BackupFileInfo, BackupOverview, BackupPart, RestoreResult
 
 router = APIRouter(prefix="/backup", tags=["backup"])
 
@@ -22,6 +24,28 @@ async def put_config(
     await audit.record(session, user.username, "backup_config", "")
     cfg = await settings_store.get_backup_config(session, get_settings())
     return BackupConfig(**cfg)
+
+
+@router.get("/overview", response_model=BackupOverview)
+async def overview(_: AdminUser, session: SessionDep) -> BackupOverview:
+    settings = get_settings()
+    cfg = await settings_store.get_backup_config(session, settings)
+    raw = await settings_store.get_raw(session, settings_store.BACKUP_LAST_KEY)
+    last = datetime.fromisoformat(raw) if raw else None
+    files = backup.list_files(settings)
+    nxt = None
+    if cfg["interval_hours"] > 0:
+        # без прошлого автобэкапа - на ближайшем проходе сборщика
+        nxt = last + timedelta(hours=cfg["interval_hours"]) if last else datetime.now(timezone.utc)
+    return BackupOverview(
+        interval_hours=cfg["interval_hours"],
+        keep=cfg["keep"],
+        last_auto=last,
+        next_auto=nxt,
+        files=[BackupFileInfo(**f) for f in files],
+        total_bytes=sum(f["size"] for f in files),
+        parts=[BackupPart(**p) for p in await backup.contents(session)],
+    )
 
 
 @router.get("/export")

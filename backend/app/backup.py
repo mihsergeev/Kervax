@@ -1,8 +1,12 @@
 """Экспорт/импорт конфигурации панели в JSON — БЕЗ тяжёлых тайм-серий (метрик).
 
-В бэкап попадают мониторы, инциденты, локации, серверы (агенты) и настройки.
-НЕ попадают: check_samples / location_samples / server_metrics (метрики),
-логи аудита и пользователи (админ восстанавливается из env при старте).
+В бэкап попадают мониторы, инциденты, локации, серверы (агенты), связи между серверами,
+окна обслуживания, скрытые домены, сейф бэкапов (зашифрован паролем сейфа, без него это шум)
+и настройки. НЕ попадают: check_samples / location_samples / server_metrics (метрики),
+история алертов, логи аудита и пользователи (админ восстанавливается из env при старте).
+
+Восстановление трогает только таблицы, которые есть в файле: старый файл без связей или сейфа
+их не сотрет.
 """
 
 import json
@@ -10,11 +14,21 @@ import os
 import re
 from datetime import datetime, timezone
 
-from sqlalchemy import DateTime, delete, select, text
+from sqlalchemy import DateTime, delete, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import Settings
-from app.models import AppSetting, Check, CheckIncident, Location, Server
+from app.models import (
+    AppSetting,
+    BackupVaultItem,
+    Check,
+    CheckIncident,
+    IgnoredDomain,
+    Location,
+    MaintenanceWindow,
+    Server,
+    ServerLink,
+)
 
 FORMAT_VERSION = 1
 
@@ -24,11 +38,17 @@ _MODELS = [
     ("checks", Check),
     ("check_incidents", CheckIncident),
     ("servers", Server),
+    ("server_links", ServerLink),
+    ("maintenance_windows", MaintenanceWindow),
+    ("ignored_domains", IgnoredDomain),
+    ("backup_vault", BackupVaultItem),
     ("app_settings", AppSetting),
 ]
 
 # поля-снимок метрик у серверов — обнуляем (это метрики, не конфиг)
 _SERVER_METRIC_FIELDS = ("last_report", "last_seen")
+# у связи между серверами - последние попытки и замер, агент пришлет новые
+_LINK_STATE_FIELDS = {"win": None, "last_ts": None, "last_loss": None, "last_rtt": None, "last_err": ""}
 
 _NAME_RE = re.compile(r"^kervax-backup-\d{8}-\d{6}\.json$")
 
@@ -70,6 +90,8 @@ async def export_data(session: AsyncSession) -> dict:
             if model is Server:
                 for f in _SERVER_METRIC_FIELDS:
                     d[f] = None
+            if model is ServerLink:
+                d.update(_LINK_STATE_FIELDS)
             serialized.append(d)
         tables[name] = serialized
     return {
@@ -86,13 +108,17 @@ async def import_data(session: AsyncSession, data: dict, settings: Settings) -> 
     if data.get("format") != FORMAT_VERSION:
         raise ValueError(f"Несовместимая версия бэкапа: {data.get('format')}")
     tables = data["tables"]
+    if not isinstance(tables, dict):
+        raise ValueError("Это не файл бэкапа Kervax")
+    # только таблицы из файла: в бэкапе старой версии нет связей, окон и сейфа - их не трогаем
+    present = [(n, m) for n, m in _MODELS if isinstance(tables.get(n), list)]
 
     # чистим существующие (в обратном порядке) и вставляем заново
-    for _name, model in reversed(_MODELS):
+    for _name, model in reversed(present):
         await session.execute(delete(model))
     counts: dict = {}
-    for name, model in _MODELS:
-        rows = tables.get(name) or []
+    for name, model in present:
+        rows = tables[name]
         for row in rows:
             session.add(model(**_deserialize(row, model)))
         counts[name] = len(rows)
@@ -100,7 +126,7 @@ async def import_data(session: AsyncSession, data: dict, settings: Settings) -> 
     # Postgres: после вставки явных id надо подвинуть sequence, иначе следующая
     # авто-вставка словит конфликт по primary key.
     if settings.db_url.startswith("postgresql"):
-        for _name, model in _MODELS:
+        for _name, model in present:
             if any(c.name == "id" for c in _cols(model)):
                 tbl = model.__tablename__
                 await session.execute(
@@ -111,6 +137,15 @@ async def import_data(session: AsyncSession, data: dict, settings: Settings) -> 
                 )
     await session.commit()
     return counts
+
+
+async def contents(session: AsyncSession) -> list[dict]:
+    """Что попадет в бэкап: сколько записей в каждой таблице."""
+    out = []
+    for name, model in _MODELS:
+        n = await session.scalar(select(func.count()).select_from(model))
+        out.append({"key": name, "rows": int(n or 0)})
+    return out
 
 
 # --- файлы автобэкапа на диске ---
