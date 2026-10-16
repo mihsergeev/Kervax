@@ -71,6 +71,16 @@ export function me(): Promise<UserOut> {
   return api<UserOut>('/api/auth/me')
 }
 
+// своя учетка: последние входы с адресами, неудачные попытки за сутки, когда менялся пароль
+export type MyActivity = {
+  logins: { ts: string; action: string; ip: string }[]
+  fails_24h: number
+  password_changed: string | null
+}
+export function getMyActivity(): Promise<MyActivity> {
+  return api<MyActivity>('/api/auth/me/activity')
+}
+
 // --- управление учётками (только админ) ---
 export type PanelUser = {
   id: number

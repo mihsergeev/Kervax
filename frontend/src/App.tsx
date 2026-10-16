@@ -5,6 +5,7 @@ import { useI18n, type Lang } from './i18n'
 import { useUrlSection } from './deeplink'
 import { BrandLogo, useBranding } from './BrandLogo'
 import { AboutModal } from './AboutModal'
+import { AccountModal } from './AccountModal'
 import { AlertsModal } from './AlertsModal'
 import { MaintModal } from './MaintModal'
 import { AlertHistoryModal } from './AlertHistoryModal'
@@ -24,15 +25,10 @@ import { DockerPage } from './DockerPage'
 import { KuberPage } from './KuberPage'
 import { ServicesPage } from './ServicesPage'
 import { BackupsPage } from './BackupsPage'
-import { PasswordModal } from './PasswordModal'
-import { TwoFAModal } from './TwoFAModal'
-import { TelegramModal } from './TelegramModal'
 import { UsersModal } from './UsersModal'
 
 type Modal =
-  | 'password'
-  | '2fa'
-  | 'telegram'
+  | 'account'
   | 'about'
   | 'alerts'
   | 'locations'
@@ -491,29 +487,11 @@ export default function App() {
                   <button
                     className="menu-item"
                     onClick={() => {
-                      setModal('password')
+                      setModal('account')
                       setMenuOpen(false)
                     }}
                   >
-                    {t('Сменить пароль')}
-                  </button>
-                  <button
-                    className="menu-item"
-                    onClick={() => {
-                      setModal('2fa')
-                      setMenuOpen(false)
-                    }}
-                  >
-                    {t('Двухфакторная аутентификация')}
-                  </button>
-                  <button
-                    className="menu-item"
-                    onClick={() => {
-                      setModal('telegram')
-                      setMenuOpen(false)
-                    }}
-                  >
-                    {t('Мои алерты в Telegram')}
+                    {t('Моя учетка')}
                   </button>
                   <button
                     className="menu-item"
@@ -610,17 +588,9 @@ export default function App() {
         <LoginPage onLogin={loadMe} />
       )}
 
-      {modal === 'password' && (
-        <PasswordModal onClose={() => setModal(null)} onUnauthorized={logout} />
-      )}
+      {modal === 'account' && <AccountModal onClose={() => setModal(null)} onUnauthorized={logout} />}
       {modal === 'about' && (
         <AboutModal onClose={() => setModal(null)} onBrandingChanged={reloadBranding} />
-      )}
-      {modal === 'telegram' && (
-        <TelegramModal onClose={() => setModal(null)} onUnauthorized={logout} />
-      )}
-      {modal === '2fa' && (
-        <TwoFAModal onClose={() => setModal(null)} onUnauthorized={logout} />
       )}
       {modal === 'history' && (
         <AlertHistoryModal

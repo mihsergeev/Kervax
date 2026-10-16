@@ -12,6 +12,7 @@ import { useLogoViews } from './BrandLogo'
 import type { LogoSource } from './logoAdapt'
 import { BrandMark } from './Logo'
 import { useAuth } from './auth'
+import { CardNav, type SecDef } from './cardLayout'
 import { useI18n } from './i18n'
 
 export const KERVAX_URL = 'https://github.com/mihsergeev/Kervax'
@@ -19,55 +20,79 @@ const MAX_KB = 512
 
 // «О панели» из меню: что это, куда идти за исходниками — и здесь же админ меняет
 // логотип. Отдельным пунктом меню настройка логотипа выглядела как что-то важное
-// и частое, хотя её трогают один раз за всё время жизни установки.
+// и частое, хотя её трогают один раз за всё время жизни установки. Раскладка как у
+// карточки сервера: раздел "Логотип" виден только админу.
 export function AboutModal({ onClose, onBrandingChanged }: {
   onClose: () => void
   onBrandingChanged: () => void
 }) {
   const { t } = useI18n()
   const { isAdmin } = useAuth()
+  const [sec, setSec] = useState('about')
   // версия — с бэкенда: см. getHealth в api.ts
   const [version, setVersion] = useState('')
   useEffect(() => {
     getHealth().then((h) => setVersion(h.version)).catch(() => setVersion(''))
   }, [])
+  const SECS: SecDef[] = [
+    { id: 'about', label: 'О панели', group: '' },
+    ...(isAdmin ? [{ id: 'logo', label: 'Логотип', group: 'Оформление' }] : []),
+  ]
+  const cur = SECS.find((s) => s.id === sec) ?? SECS[0]
   return (
     <div className="modal-backdrop" onClick={onClose}>
-      <div className="card modal about-modal" onClick={(e) => e.stopPropagation()}>
-        <div className="clients-head">
+      <div className="card modal alerts-modal al-small" onClick={(e) => e.stopPropagation()}>
+        <div className="al-head">
           <h3>{t('О панели Kervax')}</h3>
           <button className="ghost" onClick={onClose}>{t('Закрыть')}</button>
         </div>
-
-        <div className="about-head">
-          <BrandMark height={48} />
-          <div>
-            <div className="about-name">Kervax</div>
-            <div className="muted small">
-              {version ? `${t('версия')} ${version} · ` : ''}AGPL-3.0
+        <div className="al-body">
+          <CardNav secs={SECS} active={cur.id} info={{}} onGo={setSec} />
+          <div className="al-main">
+            <div className="srv-main-head">
+              <h4>{t(cur.label)}</h4>
+            </div>
+            <div className="srv-sec">
+              {cur.id === 'about' && <AboutSec version={version} />}
+              {cur.id === 'logo' && <BrandingSection onChanged={onBrandingChanged} />}
             </div>
           </div>
         </div>
-
-        <p className="about-lead">
-          {t('Следит за сайтами, серверами, Docker, Kubernetes и бэкапами — и пишет в Telegram, когда что-то ломается.')}
-        </p>
-
-        <div className="about-links">
-          <a href={KERVAX_URL} target="_blank" rel="noopener noreferrer">
-            {t('Исходный код на GitHub')}
-          </a>
-          <a href={`${KERVAX_URL}/issues`} target="_blank" rel="noopener noreferrer">
-            {t('Сообщить о проблеме')}
-          </a>
-          <a href={`${KERVAX_URL}/blob/main/LICENSE`} target="_blank" rel="noopener noreferrer">
-            {t('Лицензия')}
-          </a>
-        </div>
-
-        {isAdmin && <BrandingSection onChanged={onBrandingChanged} />}
       </div>
     </div>
+  )
+}
+
+function AboutSec({ version }: { version: string }) {
+  const { t } = useI18n()
+  return (
+    <>
+      <div className="about-head">
+        <BrandMark height={48} />
+        <div>
+          <div className="about-name">Kervax</div>
+          <div className="muted small">
+            {version ? `${t('версия')} ${version} · ` : ''}AGPL-3.0
+          </div>
+        </div>
+      </div>
+
+      <p className="about-lead">
+        {t('Следит за сайтами, серверами, Docker, Kubernetes и бэкапами — и пишет в Telegram, когда что-то ломается.')}
+      </p>
+
+      <div className="about-links">
+        <a href={KERVAX_URL} target="_blank" rel="noopener noreferrer">
+          {t('Исходный код на GitHub')}
+        </a>
+        <a href={`${KERVAX_URL}/issues`} target="_blank" rel="noopener noreferrer">
+          {t('Сообщить о проблеме')}
+        </a>
+        <a href={`${KERVAX_URL}/blob/main/LICENSE`} target="_blank" rel="noopener noreferrer">
+          {t('Лицензия')}
+        </a>
+      </div>
+    </>
   )
 }
 
@@ -78,7 +103,6 @@ export function AboutModal({ onClose, onBrandingChanged }: {
 function BrandingSection({ onChanged }: { onChanged: () => void }) {
   const { t } = useI18n()
   const [st, setSt] = useState<Branding | null>(null)
-  const [open, setOpen] = useState(false)
   // новый основной файл (data-URL) и его текст, если это SVG
   const [data, setData] = useState('')
   const [dataSvg, setDataSvg] = useState<string | null>(null)
@@ -237,112 +261,104 @@ function BrandingSection({ onChanged }: { onChanged: () => void }) {
   }
 
   return (
-    <div className="about-branding">
-      <button className="ghost about-brand-toggle" onClick={() => setOpen(!open)}>
-        {open ? t('свернуть настройку логотипа') : t('Поставить свой логотип')}
-      </button>
+    <div>
+      <p className="muted small al-lead">
+        {t('Заменяет логотип в шапке и на экране входа. PNG, SVG, WebP или JPEG до {n} КБ.', { n: MAX_KB })}
+      </p>
 
-      {open && (
+      <label className="brand-file">
+        {t('Файл логотипа')}
+        <input
+          type="file"
+          accept="image/png,image/svg+xml,image/webp,image/jpeg,image/gif"
+          onChange={(e) => pickMain(e.target.files?.[0])}
+        />
+      </label>
+
+      {mainSrc && (
         <>
-          <p className="muted small">
-            {t('Заменяет логотип в шапке и на экране входа. PNG, SVG, WebP или JPEG до {n} КБ.', { n: MAX_KB })}
-          </p>
+          <div className="brand-preview-row">
+            {previews.map((pv) => (
+              <div key={pv.theme} className={`brand-preview brand-preview-${pv.theme}`}>
+                <div className="brand-preview-lbl muted small">{pv.label}</div>
+                <span className={`brand-custom${pv.view?.plate ? ' brand-plate' : ''}`}>
+                  <img
+                    src={pv.view?.src ?? pv.fallback}
+                    alt=""
+                    style={{ height: 38, visibility: pv.view ? undefined : 'hidden' }}
+                  />
+                </span>
+              </div>
+            ))}
+          </div>
+          {hints.map((h) => (
+            <div key={h} className="muted small">
+              {h}
+            </div>
+          ))}
 
           <label className="brand-file">
-            {t('Файл логотипа')}
+            {t('Вариант для тёмной темы (необязательно)')}
             <input
               type="file"
               accept="image/png,image/svg+xml,image/webp,image/jpeg,image/gif"
-              onChange={(e) => pickMain(e.target.files?.[0])}
+              onChange={(e) => pickDark(e.target.files?.[0])}
             />
+            <span className="muted small">
+              {t('Нужен, только если для тёмного фона у логотипа есть своя версия: цвета основного панель подстраивает под тему сама.')}
+            </span>
           </label>
-
-          {mainSrc && (
-            <>
-              <div className="brand-preview-row">
-                {previews.map((pv) => (
-                  <div key={pv.theme} className={`brand-preview brand-preview-${pv.theme}`}>
-                    <div className="brand-preview-lbl muted small">{pv.label}</div>
-                    <span className={`brand-custom${pv.view?.plate ? ' brand-plate' : ''}`}>
-                      <img
-                        src={pv.view?.src ?? pv.fallback}
-                        alt=""
-                        style={{ height: 38, visibility: pv.view ? undefined : 'hidden' }}
-                      />
-                    </span>
-                  </div>
-                ))}
-              </div>
-              {hints.map((h) => (
-                <div key={h} className="muted small">
-                  {h}
-                </div>
-              ))}
-
-              <label className="brand-file">
-                {t('Вариант для тёмной темы (необязательно)')}
-                <input
-                  type="file"
-                  accept="image/png,image/svg+xml,image/webp,image/jpeg,image/gif"
-                  onChange={(e) => pickDark(e.target.files?.[0])}
-                />
-                <span className="muted small">
-                  {t('Нужен, только если для тёмного фона у логотипа есть своя версия: цвета основного панель подстраивает под тему сама.')}
-                </span>
-              </label>
-              {hasDark && (
-                <div className="brand-dark-actions">
-                  <button
-                    className="ghost small"
-                    onClick={() => {
-                      setDark('')
-                      setDarkSvg(null)
-                      setDarkRemove(true)
-                    }}
-                  >
-                    {t('Убрать вариант для тёмной темы')}
-                  </button>
-                </div>
-              )}
-            </>
-          )}
-
-          <label className="brand-row">
-            {t('Оформление')}
-            <select value={plate} onChange={(e) => setPlate(e.target.value as typeof plate)}>
-              <option value="auto">{t('авто: подстроить цвета под тему')}</option>
-              <option value="always">{t('всегда на плашке')}</option>
-              <option value="never">{t('как есть')}</option>
-            </select>
-          </label>
-
-          <label className="brand-row">
-            {t('Подпись рядом с логотипом')}
-            <input
-              value={title}
-              maxLength={64}
-              placeholder={t('например, название компании')}
-              onChange={(e) => setTitle(e.target.value)}
-            />
-          </label>
-
-          {err && <p className="form-error">{err}</p>}
-          {note && <p className="tg-ok">{note}</p>}
-
-          <div className="tg-actions">
-            {/* файл заново выбирать не нужно: у залитого логотипа можно поменять
-                оформление, подпись и вариант для тёмной темы */}
-            <button className="primary" disabled={busy || !(data || st?.logo)} onClick={save}>
-              {busy ? t('сохраняем…') : t('Сохранить логотип')}
-            </button>
-            {st?.logo && (
-              <button className="ghost" disabled={busy} onClick={clear}>
-                {t('Вернуть стандартный')}
+          {hasDark && (
+            <div className="brand-dark-actions">
+              <button
+                className="ghost small"
+                onClick={() => {
+                  setDark('')
+                  setDarkSvg(null)
+                  setDarkRemove(true)
+                }}
+              >
+                {t('Убрать вариант для тёмной темы')}
               </button>
-            )}
-          </div>
+            </div>
+          )}
         </>
       )}
+
+      <label className="brand-row">
+        {t('Оформление')}
+        <select value={plate} onChange={(e) => setPlate(e.target.value as typeof plate)}>
+          <option value="auto">{t('авто: подстроить цвета под тему')}</option>
+          <option value="always">{t('всегда на плашке')}</option>
+          <option value="never">{t('как есть')}</option>
+        </select>
+      </label>
+
+      <label className="brand-row">
+        {t('Подпись рядом с логотипом')}
+        <input
+          value={title}
+          maxLength={64}
+          placeholder={t('например, название компании')}
+          onChange={(e) => setTitle(e.target.value)}
+        />
+      </label>
+
+      {err && <p className="form-error">{err}</p>}
+      {note && <p className="tg-ok">{note}</p>}
+
+      <div className="tg-actions">
+        {/* файл заново выбирать не нужно: у залитого логотипа можно поменять
+            оформление, подпись и вариант для тёмной темы */}
+        <button className="primary" disabled={busy || !(data || st?.logo)} onClick={save}>
+          {busy ? t('сохраняем…') : t('Сохранить логотип')}
+        </button>
+        {st?.logo && (
+          <button className="ghost" disabled={busy} onClick={clear}>
+            {t('Вернуть стандартный')}
+          </button>
+        )}
+      </div>
     </div>
   )
 }

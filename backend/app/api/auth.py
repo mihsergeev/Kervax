@@ -1,15 +1,16 @@
 import ipaddress
 import secrets
 import string
+from datetime import datetime, timedelta, timezone
 
 import httpx
 from fastapi import APIRouter, HTTPException, Request, status
-from sqlalchemy import select
+from sqlalchemy import and_, func, or_, select
 
 from app import alerts, audit, ratelimit, settings_store, totp
 from app.config import get_settings
 from app.deps import CurrentUser, SessionDep
-from app.models import User
+from app.models import AuditLog, User
 from app.schemas import (
     LoginRequest,
     PasswordChangeRequest,
@@ -152,6 +153,38 @@ async def change_password(
 @router.get("/me", response_model=UserOut)
 async def me(user: CurrentUser) -> User:
     return user
+
+
+# входы под учеткой: удачные, неудачные (пароль, код 2FA) и блокировки после перебора
+_MY_LOGINS = ("login_ok", "login_fail", "login_2fa_fail", "login_blocked", "login_lockout")
+_MY_FAILS = ("login_fail", "login_2fa_fail")
+_MY_SHOWN = 10
+
+
+def _aware(ts: datetime | None) -> datetime | None:
+    return ts if ts is None or ts.tzinfo else ts.replace(tzinfo=timezone.utc)
+
+
+@router.get("/me/activity")
+async def my_activity(user: CurrentUser, session: SessionDep) -> dict:
+    """Окно "Моя учетка": последние входы под этой учеткой с адресами, неудачные попытки за
+    сутки (не подбирают ли пароль) и когда менялся пароль - сам или сброс админом. Весь журнал
+    видит только админ, здесь - только свое."""
+    rows = (await session.execute(
+        select(AuditLog.ts, AuditLog.action, AuditLog.target)
+        .where(AuditLog.username == user.username, AuditLog.action.in_(_MY_LOGINS))
+        .order_by(AuditLog.id.desc()).limit(_MY_SHOWN))).all()
+    fails = await session.scalar(select(func.count()).select_from(AuditLog).where(
+        AuditLog.username == user.username, AuditLog.action.in_(_MY_FAILS),
+        AuditLog.ts >= datetime.now(timezone.utc) - timedelta(days=1))) or 0
+    pw = await session.scalar(select(func.max(AuditLog.ts)).where(or_(
+        and_(AuditLog.username == user.username, AuditLog.action == "password_change"),
+        and_(AuditLog.action == "user_reset_pw", AuditLog.target == user.username))))
+    return {
+        "logins": [{"ts": _aware(ts).isoformat(), "action": a, "ip": ip or ""} for ts, a, ip in rows],
+        "fails_24h": fails,
+        "password_changed": _aware(pw).isoformat() if pw else None,
+    }
 
 
 @router.get("/2fa", response_model=TwoFAStatusOut)

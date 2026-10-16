@@ -222,8 +222,8 @@ cd /opt/kervax && sudo docker compose exec -T backend \
 Open the panel's address and sign in as `admin` with the password from `.env`.
 Right after that:
 
-1. **Change the password** (⚙ → "Change password") — it ends every other session.
-2. **Turn on 2FA** in the same menu. The panel governs access to your
+1. **Change the password** (⚙ → "My account" → "Password") — it ends every other session.
+2. **Turn on 2FA** in the same window ("App code"). The panel governs access to your
    infrastructure; one password is not enough for it.
 3. If you left `KERVAX_ALLOW_IPS` empty, put your address in and apply:
    `sudo docker compose up -d frontend`.
