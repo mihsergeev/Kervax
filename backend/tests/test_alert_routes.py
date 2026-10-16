@@ -222,3 +222,37 @@ async def test_dispatch_reads_routes_from_settings(client, tg):
         from app.config import get_settings
         cfg = await settings_store.get_alert_config(s, get_settings())
     assert cfg["routes"]["main"] == "rest" and cfg["routes"]["chats"][0]["chat"] == "-200"
+
+
+def test_server_alerts_carry_group():
+    """Отбой без группы уходил только в основной чат: в чат по группам и людям с доступом лишь к
+    этой группе он не доходил, хотя сам алерт туда приходил. Каждый вызов _server_alert_text
+    обязан передать группу сервера."""
+    import inspect
+    import re
+
+    from app import collector
+
+    src = inspect.getsource(collector)
+    missing = []
+    for m in re.finditer(r"_server_alert_text\(", src):
+        if src[max(0, m.start() - 4):m.start()] == "def ":
+            continue
+        i, depth = m.end(), 1
+        while depth:
+            depth += src[i] == "("
+            depth -= src[i] == ")"
+            i += 1
+        if "group=" not in src[m.start():i]:
+            missing.append(src.count("\n", 0, m.start()) + 1)
+    assert not missing, f"серверный алерт без группы, строки collector.py: {missing}"
+
+
+def test_recovery_goes_to_group_chat():
+    """Отбой серверного алерта с группой уходит в чат этой группы, как и сам алерт."""
+    from app import collector
+
+    cfg = _cfg("all")
+    msg = collector._server_alert_text("kube_restarts", "web-a", "поды восстановлены", recovery=True, group="web")
+    assert msg.group == "web" and msg.recovery
+    assert "-200" in alerts.chats_for(cfg, msg)
