@@ -20,6 +20,7 @@ from app.api import (
     login_guard,
     maintenance,
     netlinks as netlinks_api,
+    panel_requests,
     report,
     search,
     servers,
@@ -33,6 +34,7 @@ from app.collector import collector_loop
 from app.config import get_settings
 from app.db import create_engine_and_factory
 from app.gzip_request import GzipRequestMiddleware
+from app.request_watch import RequestWatchMiddleware
 
 _WEAK_SECRETS = {"", "changeme", "dev-insecure-change-me"}
 _WEAK_PASSWORDS = {"", "changeme", "admin"}
@@ -95,11 +97,14 @@ def create_app() -> FastAPI:
 
     # агент 1.90+ шлёт отчёт сжатым — см. gzip_request (обход DPI по счётчику байт)
     app.add_middleware(GzipRequestMiddleware)
+    # счетчик левых запросов к API: отказы и всплески по адресам (app/request_watch.py)
+    app.add_middleware(RequestWatchMiddleware)
 
     app.include_router(health.router, prefix="/api")
     app.include_router(auth.router, prefix="/api")
     app.include_router(users_api.router, prefix="/api")
     app.include_router(login_guard.router, prefix="/api")
+    app.include_router(panel_requests.router, prefix="/api")
     app.include_router(audit.router, prefix="/api")
     app.include_router(checks.router, prefix="/api")
     app.include_router(alerts.router, prefix="/api")

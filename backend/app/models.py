@@ -104,6 +104,23 @@ class LoginBan(Base):
     alerted: Mapped[bool] = mapped_column(Boolean, default=False)
 
 
+class RequestStat(Base):
+    """Запросы к API панели с одного адреса за минуту - только минуты с отказами (401, 403, 404,
+    405, 422, 429) или с всплеском. Пишет счетчик в каждом процессе панели (app/request_watch.py),
+    поэтому за одну минуту и адрес строк может быть несколько. codes - {код: сколько}, paths -
+    самые частые адреса ("401 /api/agent/commands": сколько; у всплеска без отказов - без кода)."""
+
+    __tablename__ = "request_stats"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    minute: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    key: Mapped[str] = mapped_column(String(64), index=True)
+    total: Mapped[int] = mapped_column(Integer, default=0)
+    bad: Mapped[int] = mapped_column(Integer, default=0)
+    codes: Mapped[dict] = mapped_column(JSON, default=dict)
+    paths: Mapped[dict] = mapped_column(JSON, default=dict)
+
+
 class AuditLog(Base):
     """Журнал действий: кто/когда/что сделал (вход, смена пароля, мониторы…)."""
 

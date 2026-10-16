@@ -45,6 +45,7 @@ const FIXED: Record<string, string> = {
   web_lines: 'Строки ошибок 5xx: адреса клиентов, запросы',
   domain_probes: 'Проверки домена при добавлении сайта',
   probes: 'Ручные проверки',
+  panel_requests: 'Левые запросы к панели',
 }
 const PRESETS: [number, string][] = [
   [7, '7д'],

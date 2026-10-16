@@ -2433,6 +2433,39 @@ const EN: Record<string, string> = {
   'Монитор': 'Monitor',
   'Остальные {n} без сбоев': 'The other {n} had no failures',
   'Отчет': 'Report',
+  // --- Левые запросы к панели (PanelRequestsSec) ---
+  'Панель: левые запросы':
+    'Panel: bogus requests',
+  'За сутки отказов и всплесков не было.':
+    'No rejections or bursts in the last 24 hours.',
+  'Отказов':
+    'Rejected',
+  'Откуда':
+    'From',
+  'Панель считает запросы к своему API по адресам. Алерт - когда с одного адреса за {w} минут пришло {bad} отказов (неверный токен агента, удаленный push, перебор адресов) или больше {flood} запросов на каждый сервер за этим адресом, обычный агент шлет около {typ}. Неудачные входы считает защита входа.':
+    'The panel counts requests to its API by address. An alert goes out when one address gets {bad} rejections within {w} minutes (a wrong agent token, a deleted push, probing of paths) or sends more than {flood} requests per server behind that address, while a normal agent sends about {typ}. Failed sign-ins are handled by sign-in protection.',
+  'Пик в минуту':
+    'Peak per minute',
+  'С':
+    'Since',
+  'Сейчас левых запросов нет.':
+    'No bogus requests right now.',
+  'и еще адресов: {n}':
+    'and {n} more addresses',
+  'не сервер панели':
+    'not a panel server',
+  'серверы: {s}':
+    'servers: {s}',
+  'Запросы к панели':
+    'Requests to the panel',
+  'Левые запросы в панель':
+    'Bogus requests to the panel',
+  'к запросам к панели':
+    'to requests to the panel',
+  'сейчас {n}':
+    'now {n}',
+  'Левые запросы к панели':
+    'Bogus requests to the panel',
   // --- Защита входа: блокировка адресов и белый список (LoginGuardSec) ---
   'Адрес или подсеть':
     'Address or subnet',

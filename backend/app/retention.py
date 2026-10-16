@@ -25,6 +25,7 @@ COMMANDS_KEEP = timedelta(days=7)        # команды Docker, Kubernetes, б
 WEB_LINES_KEEP = timedelta(days=7)       # строки 5xx: в них адреса клиентов и запросы целиком
 DOMAIN_PROBES_KEEP = timedelta(days=7)   # проверки домена из мастера живут часы
 PROBES_KEEP = timedelta(days=1)          # ручные проверки нужны на время ожидания ответа
+REQUESTS_KEEP = timedelta(days=2)        # левые запросы к панели: алерту нужны 10 минут, окну - сутки
 
 # группы со сроком из настроек: ключ срока и таблицы, первая - главная (самая старая запись)
 GROUPS = {
@@ -40,6 +41,7 @@ FIXED = [
     ("web_lines", WEB_LINES_KEEP, []),
     ("domain_probes", DOMAIN_PROBES_KEEP, ["domain_probes"]),
     ("probes", PROBES_KEEP, ["probe_requests"]),
+    ("panel_requests", REQUESTS_KEEP, ["request_stats"]),
 ]
 # примерный размер строки с индексами, байт (по продам) - только для оценки в SQLite
 _ROW = {"server_metrics": 1400, "check_samples": 150, "location_samples": 150, "check_ip_samples": 220,
