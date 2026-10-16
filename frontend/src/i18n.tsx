@@ -2612,7 +2612,6 @@ const EN: Record<string, string> = {
   'Ничего не нашлось': 'Nothing found',
   'показано {n} из {m}, уточните запрос': 'showing {n} of {m}, narrow the query',
   'выбрать': 'select',
-  'Панель не принимала отчеты': 'The panel was not accepting reports',
   'Последний': 'Last',
   'Раз': 'Times',
   'Сайты со сбоями': 'Sites with failures',
@@ -2631,7 +2630,6 @@ const EN: Record<string, string> = {
   'как в прошлый период': 'same as the previous period',
   'лежит сейчас': 'down now',
   'пропадали: {n} из {m}': 'went missing: {n} of {m}',
-  'раз: {n}, в простой серверов не входит': 'times: {n}, not counted as server downtime',
   'сбоев не было': 'no failures',
   'сбоев: {n}, лежали {d}': 'failures: {n}, down for {d}',
   'сутки': '24 hours',
@@ -4157,6 +4155,69 @@ const EN: Record<string, string> = {
     'past: {n}',
   'тормозит':
     'slow',
+  // --- окно Отчет разделами (ReportModal, reportHtml) ---
+  '{m} мин {s} с':
+    '{m} min {s} s',
+  '{s} с':
+    '{s} s',
+  'Алерт':
+    'Alert',
+  'Алертов за период не было.':
+    'No alerts in the period.',
+  'Алерты по дням':
+    'Alerts by day',
+  'Бэкапы, по которым приходили алерты: не сделался, устарел, не сходится ротация.':
+    'Backups that triggered alerts: failed, stale, retention does not add up.',
+  'За {n} дн.: {p}':
+    '{n} days: {p}',
+  'За период ничего не ломалось и не шумело.':
+    'Nothing broke or made noise in the period.',
+  'Мониторы, которые лежали или отвечали не всегда. Аптайм - по проверкам, простой - по инцидентам, пока монитор лежал.':
+    'Monitors that were down or did not always respond. Uptime comes from checks, downtime from incidents while the monitor was down.',
+  'Одним HTML-файлом: открывается в любом браузере, можно переслать или распечатать':
+    'A single HTML file: opens in any browser, can be forwarded or printed',
+  'Окон обслуживания за период не было.':
+    'No maintenance windows in the period.',
+  'Отчет {brand}':
+    '{brand} report',
+  'Панель не принимала отчеты {d}, раз: {n}. В простой серверов это не входит.':
+    'The panel did not accept reports for {d}, times: {n}. This is not counted as server downtime.',
+  'Плановые работы за период: пока окно шло, алерты по его серверам и мониторам молчали.':
+    'Planned work in the period: while a window was in progress, alerts for its servers and monitors were silent.',
+  'Простой по дням':
+    'Downtime by day',
+  'Работы':
+    'Work',
+  'Серверы, которые пропадали или по которым приходили алерты. Простой - по пропускам в отчетах агента: заглушенный алерт его не отменяет.':
+    'Servers that went missing or triggered alerts. Downtime comes from gaps in agent reports: a muted alert does not cancel it.',
+  'Скачать отчет':
+    'Download report',
+  'Сколько':
+    'Count',
+  'Срабатывания алертов без отбоев. Если одно и то же приходит каждый день - стоит поправить порог или заглушить.':
+    'Alert firings without recoveries. If the same thing fires every day, adjust the threshold or mute it.',
+  'Сформирован {d}':
+    'Generated {d}',
+  'Хуже всего':
+    'Worst',
+  'Что ломалось':
+    'What broke',
+  'Что ломалось за период, сколько лежало и что шумело. Это не алерт: смотрят здесь, раз в неделю.':
+    'What broke in the period, how long it was down and what made noise. This is not an alert: it is read here, once a week.',
+  'алертов':
+    'alerts',
+  'за период пусто':
+    'nothing in the period',
+  'лежал {d}':
+    'down {d}',
+  'недоступен {d}':
+    'unavailable {d}',
+  'простой сайтов':
+    'site downtime',
+  'простой серверов':
+    'server downtime',
+  'сайт':
+    'site',
 }
 
 type Ctx = {

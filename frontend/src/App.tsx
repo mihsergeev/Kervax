@@ -625,7 +625,16 @@ export default function App() {
       {modal === 'history' && (
         <AlertHistoryModal onClose={() => setModal(null)} onUnauthorized={logout} />
       )}
-      {modal === 'report' && <ReportModal onClose={() => setModal(null)} onUnauthorized={logout} />}
+      {modal === 'report' && (
+        <ReportModal
+          onClose={() => setModal(null)}
+          onUnauthorized={logout}
+          onOpen={(kind, id) => {
+            setModal(null)
+            openTarget(kind === 'server' ? 'servers' : 'sites', id)
+          }}
+        />
+      )}
       {modal === 'depmap' && (
         <DepMapModal
           onClose={() => setModal(null)}

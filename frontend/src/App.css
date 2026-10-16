@@ -1869,6 +1869,24 @@ button.srv-tile-btn:hover .net-tile { border-color: var(--border-strong); backgr
   overflow: auto;
 }
 
+/* окно "Отчет" (ReportModal): столбики по дням, плотно, сетка через четверть высоты */
+.rp-chart-box { display: flex; flex-direction: column; gap: 0.3rem; }
+.rp-chart {
+  position: relative; display: flex; align-items: flex-end; gap: 2px; height: 110px; padding-top: 0.9rem;
+  border-bottom: 1px solid var(--border);
+  background: repeating-linear-gradient(to top, transparent 0, transparent calc(25% - 1px), color-mix(in srgb, var(--border) 55%, transparent) calc(25% - 1px), color-mix(in srgb, var(--border) 55%, transparent) 25%);
+}
+.rp-max { position: absolute; top: 0; left: 0; font-size: 0.68rem; color: var(--text-muted); font-variant-numeric: tabular-nums; }
+.rp-col { flex: 1 1 0; min-width: 0; height: 100%; display: flex; flex-direction: column-reverse; }
+.rp-col:hover { background: color-mix(in srgb, var(--border) 35%, transparent); }
+.rp-seg { display: block; width: 100%; min-height: 2px; }
+.rp-c-alerts { background: #4b74ff; }
+.rp-c-sites { background: var(--down); }
+.rp-c-servers { background: var(--degraded); }
+.rp-x { display: flex; gap: 2px; font-size: 0.66rem; color: var(--text-muted); font-variant-numeric: tabular-nums; }
+.rp-x span { flex: 1 1 0; min-width: 0; text-align: center; white-space: nowrap; overflow: visible; }
+.rp-busy { opacity: 0.6; }
+
 /* окно "Окна обслуживания" (MaintModal): поля окна в разделе и в новом окне */
 .mw-fields { display: flex; flex-direction: column; gap: 0.6rem; }
 
@@ -6907,6 +6925,7 @@ button.am-link.small { font-size: 0.82rem; }
 /* окно алертов (AlertsModal): шапка, меню и раздел, подвал с кнопками */
 .al-head { display: flex; align-items: center; gap: 0.8rem; padding-bottom: 0.8rem; }
 .al-head > .ghost { margin-left: auto; }
+.al-head-btns { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 0.5rem; margin-left: auto; }
 .al-state { display: inline-flex; align-items: center; gap: 0.4rem; }
 .al-body { flex: 1 1 auto; min-height: 0; display: grid; grid-template-columns: 200px minmax(0, 1fr); border-top: 1px solid var(--border); }
 .al-body > .srv-nav { position: static; max-height: none; min-height: 0; }

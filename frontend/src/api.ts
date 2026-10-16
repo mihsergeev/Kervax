@@ -2658,7 +2658,16 @@ export interface Report {
   since: string
   until: string
   prev_ok: boolean
-  sites?: ReportTotals & { total: number; affected: number; prev: ReportTotals | null; items: ReportSite[]; more: number }
+  // дни периода в часовом поясе алертов; per_day ниже - по ним же
+  day_labels: string[]
+  sites?: ReportTotals & {
+    total: number
+    affected: number
+    prev: ReportTotals | null
+    items: ReportSite[]
+    more: number
+    per_day: number[] // секунд простоя за день
+  }
   servers?: {
     total: number
     with_gaps: number
@@ -2669,10 +2678,12 @@ export interface Report {
     panel_gaps: number
     items: ReportServer[]
     more: number
+    per_day: number[] // секунд недоступности за день
   }
   noise: {
     fires: number
     prev_fires: number
+    per_day: number[] // алертов за день
     top: { kind: string; label: string; target: string; n: number }[]
     backups: { target: string; n: number; kinds: string[] }[]
   }

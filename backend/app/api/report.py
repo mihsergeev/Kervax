@@ -7,11 +7,14 @@
   простой не отменяет. Пропуск, который был сразу у большинства серверов, - это лежала сама
   панель (деплой, рестарт), а не серверы: его вычитаем и показываем отдельно;
 - шум и бэкапы: история доставленных алертов (180 дней);
-- окна обслуживания: их вхождения за период.
+- окна обслуживания: их вхождения за период;
+- по дням (в часовом поясе алертов): алерты, простой сайтов и серверов - видно, был это один
+  плохой день или так каждый день.
 Права как в разделах: учетка видит только свои группы и разделы.
 """
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, time, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Query
 from sqlalchemy import case, func, or_, select
@@ -45,6 +48,27 @@ def _iso(ts: datetime | None) -> str | None:
     return _aware(ts).isoformat() if ts else None
 
 
+def _day_buckets(since: datetime, until: datetime, tz: str) -> list[tuple[str, datetime, datetime]]:
+    """Дни периода в часовом поясе алертов: (дата, начало, конец), крайние обрезаны периодом."""
+    try:
+        zone = ZoneInfo(tz)
+    except Exception:  # noqa: BLE001 - неизвестный пояс в настройках: считаем по UTC
+        zone = timezone.utc
+    d, last = since.astimezone(zone).date(), until.astimezone(zone).date()
+    out = []
+    while d <= last:
+        a = datetime.combine(d, time.min, zone)
+        b = datetime.combine(d + timedelta(days=1), time.min, zone)
+        out.append((d.isoformat(), max(a, since), min(b, until)))
+        d += timedelta(days=1)
+    return out
+
+
+def _per_day(spans, buckets) -> list[int]:
+    """Сколько секунд из отрезков пришлось на каждый день."""
+    return [int(sum(_overlap(s, e, a, b) for s, e in spans)) for _d, a, b in buckets]
+
+
 async def _site_stats(session, ids: list[int], since: datetime, until: datetime) -> tuple[dict, dict]:
     """Аптайм по снимкам и простой по инцидентам "лежит" за [since, until)."""
     up_n = func.sum(case((CheckSample.status == "up", 1), else_=0))
@@ -68,16 +92,18 @@ async def _site_stats(session, ids: list[int], since: datetime, until: datetime)
         ):
             s, e = _aware(i.started_at), _aware(i.ended_at) or until
             d = _overlap(s, e, since, until)
-            x = inc.setdefault(i.check_id, {"n": 0, "down": 0.0, "longest": 0.0, "last": None, "open": False})
+            x = inc.setdefault(i.check_id, {"n": 0, "down": 0.0, "longest": 0.0, "last": None, "open": False,
+                                            "spans": []})
             x["n"] += 1
             x["down"] += d
+            x["spans"].append((s, e))
             x["longest"] = max(x["longest"], (e - s).total_seconds())
             x["last"] = max(x["last"], s) if x["last"] else s
             x["open"] = x["open"] or i.ended_at is None
     return up, inc
 
 
-async def _sites(session, user, since, until, prev_since, prev_ok) -> dict:
+async def _sites(session, user, since, until, prev_since, prev_ok, buckets) -> dict:
     checks = list(await session.scalars(
         scope_query(user, select(Check).where(Check.enabled.is_(True)), Check, "sites")))
     ids = [c.id for c in checks]
@@ -109,8 +135,9 @@ async def _sites(session, user, since, until, prev_since, prev_ok) -> dict:
     if prev_ok:
         p_up, p_inc = await _site_stats(session, ids, prev_since, since)
         prev = totals(p_up, p_inc)
+    spans = [sp for v in inc.values() for sp in v["spans"]]
     return {"total": len(checks), "affected": len(items), **totals(up, inc), "prev": prev,
-            "items": items[:_TOP], "more": max(len(items) - _TOP, 0)}
+            "items": items[:_TOP], "more": max(len(items) - _TOP, 0), "per_day": _per_day(spans, buckets)}
 
 
 def _gap_seconds(dialect: str, a, b):
@@ -168,7 +195,7 @@ async def _offline_gaps(session, servers, since, until, now, tail: bool = True) 
     return gaps, [(a, b) for a, b in merged]
 
 
-async def _servers(session, user, since, until, prev_since, now) -> dict:
+async def _servers(session, user, since, until, prev_since, now, buckets) -> dict:
     servers = list(await session.scalars(
         scope_query(user, select(Server).where(Server.enabled.is_(True)), Server, "servers")))
     gaps, panel = await _offline_gaps(session, servers, since, until, now)
@@ -203,10 +230,11 @@ async def _servers(session, user, since, until, prev_since, now) -> dict:
         "total": len(servers), "with_gaps": sum(1 for v in gaps.values() if v), "offline_s": total_off,
         "prev_offline_s": prev_off, "panel_s": int(sum((b - a).total_seconds() for a, b in panel)),
         "panel_gaps": len(panel), "items": items[:_TOP], "more": max(len(items) - _TOP, 0),
+        "per_day": _per_day([sp for lst in gaps.values() for sp in lst], buckets),
     }
 
 
-async def _noise(session, user, since, until, prev_since) -> dict:
+async def _noise(session, user, since, until, prev_since, buckets) -> dict:
     """Что шумело: срабатывания (отбои шумом не считаем) по виду и объекту."""
     def fired(a, b):
         return _alert_scope(user, select(AlertEvent).where(
@@ -224,13 +252,20 @@ async def _noise(session, user, since, until, prev_since) -> dict:
         select(cur.c.target, cur.c.kind, n).where(cur.c.kind.like("backup%"), cur.c.target != "")
         .group_by(cur.c.target, cur.c.kind)
     )).all()
+    per_day = [0] * len(buckets)
+    for (ts,) in (await session.execute(select(cur.c.ts))).all():
+        ts = _aware(ts)
+        for i, (_d, a, b) in enumerate(buckets):
+            if a <= ts < b:
+                per_day[i] += 1
+                break
     bk: dict[str, dict] = {}
     for tgt, kind, cnt in backups:
         x = bk.setdefault(tgt, {"target": tgt, "n": 0, "kinds": []})
         x["n"] += cnt
         x["kinds"].append(_label(kind))
     return {
-        "fires": total, "prev_fires": prev,
+        "fires": total, "prev_fires": prev, "per_day": per_day,
         "top": [{"kind": k, "label": _label(k), "target": t, "n": c} for k, t, c in top],
         "backups": sorted(bk.values(), key=lambda x: -x["n"])[:_TOP],
     }
@@ -269,23 +304,25 @@ async def report(user: CurrentUser, session: SessionDep, days: int = Query(7, ge
     keep = get_settings().sample_retention_days
     sections = set(user_sections(user))
     cfg = await settings_store.get_alert_config(session, get_settings())
+    tz = cfg.get("tz") or "Europe/Moscow"
+    buckets = _day_buckets(since, until, tz)
     out: dict = {"days": days, "since": since.isoformat(), "until": until.isoformat(),
                  # снимки сайтов живут keep дней: прошлый период целиком есть только для коротких
-                 "prev_ok": days * 2 <= keep}
+                 "prev_ok": days * 2 <= keep, "day_labels": [d for d, _a, _b in buckets]}
     srv_ids: set[int] = set()
     chk_ids: set[int] = set()
     if "sites" in sections:
-        out["sites"] = await _sites(session, user, since, until, prev_since, out["prev_ok"])
+        out["sites"] = await _sites(session, user, since, until, prev_since, out["prev_ok"], buckets)
         chk_ids = {i for (i,) in (await session.execute(
             scope_query(user, select(Check.id), Check, "sites"))).all()}
     if "servers" in sections:
-        out["servers"] = await _servers(session, user, since, until, prev_since, now)
+        out["servers"] = await _servers(session, user, since, until, prev_since, now, buckets)
         # минутные метрики живут server_metric_retention_days: иначе прошлый период пустой
         out["servers"]["prev_ok"] = days * 2 <= get_settings().server_metric_retention_days
         srv_ids = {i for (i,) in (await session.execute(
             scope_query(user, select(Server.id), Server, "servers"))).all()}
-    out["noise"] = await _noise(session, user, since, until, prev_since)
+    out["noise"] = await _noise(session, user, since, until, prev_since, buckets)
     if "backups" not in sections:
         out["noise"]["backups"] = []
-    out["maint"] = await _maint(session, user, since, until, srv_ids, chk_ids, cfg.get("tz") or "Europe/Moscow")
+    out["maint"] = await _maint(session, user, since, until, srv_ids, chk_ids, tz)
     return out
