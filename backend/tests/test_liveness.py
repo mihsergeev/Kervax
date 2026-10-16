@@ -107,3 +107,50 @@ async def test_offline_alert_says_whether_server_answers(tmp_path, monkeypatch):
     async with factory() as s:
         assert (await s.get(Server, 1)).alert_state.get("offline_probe") is None
     await engine.dispose()
+
+
+async def test_baseline_tells_firewall_from_down(tmp_path, monkeypatch):
+    """Эталон: пока сервер на связи, панель проверяет, достукивается ли до него. Не достукивалась -
+    молчание в момент алерта ничего не значит; достукивалась - лежит сервер или сеть."""
+    engine, factory = create_engine_and_factory(f"sqlite+aiosqlite:///{(tmp_path / 'k.db').as_posix()}")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    now = datetime.now(timezone.utc)
+    async with factory() as s:
+        s.add(Server(name="web-a", token_hash="x", enabled=True, last_seen=now,
+                     last_report=_report(), exposure=_exposure()))
+        s.add(Server(name="web-b", token_hash="y", enabled=True, last_seen=now,
+                     last_report=_report(ips=["203.0.113.20"]), exposure=None))
+        # молчит давно - эталон ему не снимаем
+        s.add(Server(name="web-c", token_hash="z", enabled=True, last_seen=now - timedelta(hours=1),
+                     last_report=_report(ips=["203.0.113.30"]), exposure=None))
+        await s.commit()
+    up = {("203.0.113.10", 2221)}
+
+    async def fake_probe(ip, port, proxy):
+        return "open" if (ip, port) in up else "filtered"
+
+    async def fake_banner(ip, port, proxy):
+        return SSH_NODE
+
+    monkeypatch.setattr(open_ports, "probe", fake_probe)
+    monkeypatch.setattr(open_ports, "ssh_banner", fake_banner)
+    assert await liveness._base_due(factory, now) == 2
+    assert await liveness._base_due(factory, now + timedelta(hours=1)) == 0  # свежий - не трогаем
+    async with factory() as s:
+        a, b, c = [await s.get(Server, i) for i in (1, 2, 3)]
+        assert a.liveness_base["state"] == "alive" and a.liveness_base["where"] == "203.0.113.10:2221"
+        assert b.liveness_base["state"] == "silent" and c.liveness_base is None
+    # что отвечало на связи - первым в очереди
+    assert liveness.candidates(a)[0] == ("203.0.113.10", 2221, True)
+    # сервер замолчал целиком
+    up.clear()
+    r = await liveness.check(a)
+    assert r["state"] == "silent" and r["was"] == "203.0.113.10:2221"
+    assert "хотя на связи отвечал" in liveness.text(r) and "файрволом" not in liveness.text(r)
+    r = await liveness.check(b)
+    assert r["state"] == "blind" and "проверить с панели нельзя" in liveness.text(r)
+    # эталон мог попасть на сбой сети: если сервер ответил, это важнее
+    up.add(("203.0.113.20", 2221))
+    assert (await liveness.check(b))["state"] == "alive"
+    await engine.dispose()

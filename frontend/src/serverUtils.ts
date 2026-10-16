@@ -144,7 +144,10 @@ function srvIssuesRaw(
     const p = s.offline_probe
     const why = p?.state === 'alive' ? t('сервер отвечает ({where}), молчит агент', { where: p.where ?? '' })
       : p?.state === 'refused' ? t('адрес отвечает отказом ({where}), похоже на перезагрузку', { where: p.where ?? '' })
-        : p?.state === 'silent' ? t('с панели сервер тоже не отвечает') : ''
+        : p?.state === 'silent' && p.was ? t('с панели сервер тоже не отвечает, хотя на связи отвечал ({where})', { where: p.was })
+          : p?.state === 'silent' ? t('с панели сервер тоже не отвечает')
+            // эталон: и на связи панель до сервера не достукивалась, молчание ничего не значит
+            : p?.state === 'blind' ? t('с панели не проверить: порты закрыты для нее') : ''
     return [{ tone: 't-down', text: why ? `${t('оффлайн')} - ${why}` : t('оффлайн'), mute: 'offline', kind: 'offline', since: s.last_seen }]
   }
   const out: SrvIssue[] = []

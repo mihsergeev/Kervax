@@ -4633,6 +4633,10 @@ const EN: Record<string, string> = {
     'issues: {list}',
   'с панели сервер тоже не отвечает':
     'the server does not answer the panel either',
+  'с панели сервер тоже не отвечает, хотя на связи отвечал ({where})':
+    'the server does not answer the panel either, though it did while online ({where})',
+  'с панели не проверить: порты закрыты для нее':
+    'cannot be checked from the panel: its ports are closed to it',
   'свежих данных нет':
     'no fresh data',
   'сервер отвечает ({where}), молчит агент':

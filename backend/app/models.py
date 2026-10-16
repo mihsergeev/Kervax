@@ -740,6 +740,9 @@ class Server(Base):
     # ставит метку "onboard" в alert_state), а не любая запись в таблицу
     onboard_done_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     onboard_by: Mapped[str] = mapped_column(String(128), default="", server_default="")
+    # эталон проверки "жив ли сервер" (app/liveness.py): достукивается ли панель до него, пока он
+    # на связи - {state, where, ts}. Своя колонка: alert_state целиком переписывает цикл алертов
+    liveness_base: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
