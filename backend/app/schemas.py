@@ -1007,6 +1007,24 @@ class RestoreResult(BaseModel):
     restored: dict[str, int]
 
 
+class BackupPart(BaseModel):
+    key: str  # таблица в файле бэкапа: checks, servers, ...
+    rows: int
+
+
+class BackupOverview(BaseModel):
+    """Окно "Бэкап": настройки автобэкапа, когда был последний и будет следующий, файлы
+    на сервере и что входит в бэкап."""
+
+    interval_hours: int
+    keep: int
+    last_auto: datetime | None = None
+    next_auto: datetime | None = None
+    files: list[BackupFileInfo]
+    total_bytes: int
+    parts: list[BackupPart]
+
+
 # --- локации (прокси) ---
 
 

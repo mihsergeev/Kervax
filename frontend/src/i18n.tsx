@@ -2250,8 +2250,6 @@ const EN: Record<string, string> = {
 
   // --- бэкап ---
   'Бэкап': 'Backup',
-  'Бэкап содержит мониторы, серверы, локации и настройки — без метрик (тайм-серий) и без учётных записей: пользователей, их роли и доступы после восстановления придётся завести заново.':
-    'A backup contains monitors, servers, locations and settings — without metrics (time-series) and without accounts: users, their roles and permissions have to be created again after a restore.',
   'Алерт по коннектам СУБД, % (0 = выкл)': 'Database connection alert, % (0 = off)',
   // --- сроки Kubernetes и Flux ---
   'Предупреждать о сроках Kubernetes за, дн. (через запятую, пусто = выкл)':
@@ -2315,13 +2313,7 @@ const EN: Record<string, string> = {
   'этом движке': 'this engine',
   'Скачать бэкап': 'Download backup',
   'Восстановить из файла': 'Restore from file',
-  'Автобэкап на сервере': 'Auto-backup on the server',
-  'Панель сама сохраняет бэкапы на диск. Интервал 0 = выключить.':
-    'The panel saves backups to disk itself. Interval 0 = off.',
-  'Раз в, часов': 'Every, hours',
-  'Хранить файлов': 'Keep files',
   'Создать сейчас': 'Create now',
-  'Бэкапы на сервере': 'Backups on the server',
   'Пока нет файлов.': 'No files yet.',
   'Бэкап создан на сервере.': 'Backup created on the server.',
   'Файл не является корректным JSON.': 'The file is not valid JSON.',
@@ -3813,6 +3805,98 @@ const EN: Record<string, string> = {
     'Inventory groups',
   'Нод':
     'Nodes',
+  // --- окно Бэкап разделами (BackupModal) ---
+  'новых бэкапов не будет': 'no new backups',
+  'Автобэкап':
+    'Auto backup',
+  'Автобэкап {every}, хранить файлов: {n}':
+    'Auto backup {every}, files to keep: {n}',
+  'Автобэкап выключен: панель сама бэкап не делает, есть только то, что скачали руками.':
+    'Auto backup is off: the panel makes no backups itself, there is only what was downloaded by hand.',
+  'Автобэкап выключен: файлы на диске останутся, новых не будет.':
+    'Auto backup is off: the files on disk stay, no new ones will appear.',
+  'Восстановить':
+    'Restore',
+  'Всего {n}. Хранятся последние {k}, лишние удаляются при следующем бэкапе.':
+    'Total {n}. The last {k} are kept, extra ones are deleted on the next backup.',
+  'Выбрать файл…':
+    'Choose a file…',
+  'Как часто':
+    'How often',
+  'Когда':
+    'When',
+  'Мониторы, серверы, локации и настройки панели заменятся тем, что в файле. Пользователи остаются как есть. Файл старой версии без каких-то таблиц их не трогает.':
+    'Monitors, servers, locations and panel settings are replaced with what is in the file. Users stay as they are. A file from an older version without some tables leaves those tables alone.',
+  'Не входит: метрики и история (графики, алерты, хронология), журнал действий и пользователи - их роли и доступы после восстановления заводятся заново.':
+    'Not included: metrics and history (charts, alerts, timeline), the action log and users - their roles and access are set up again after a restore.',
+  'Последний автобэкап - {when}.':
+    'Last auto backup: {when}.',
+  'Размер':
+    'Size',
+  'Свежий бэкап прямо сейчас - файлом на этот компьютер. На диск панели он не пишется.':
+    'A fresh backup right now, as a file on this computer. It is not written to the panel disk.',
+  'Скачать и восстановить':
+    'Download and restore',
+  'Сколько файлов хранить':
+    'How many files to keep',
+  'Следующий - {when}.':
+    'Next: {when}.',
+  'Файлов {n} - это бэкапы за {d} дн., на диске около {size}.':
+    '{n} files cover {d} days of backups, about {size} on disk.',
+  'Файлов на диске':
+    'Files on disk',
+  'Файлы':
+    'Files',
+  'Что входит в бэкап':
+    'What the backup includes',
+  'автобэкап выключен':
+    'auto backup is off',
+  'бэкапов еще нет':
+    'no backups yet',
+  'в ближайшие минуты':
+    'in the next few minutes',
+  'еще ни одного файла':
+    'no files yet',
+  'последний {a}':
+    'last {a}',
+  'свое число':
+    'custom number',
+  'свой интервал, часов':
+    'custom interval, hours',
+  'следующий {when}':
+    'next {when}',
+  'хранить файлов: {n}':
+    'files to keep: {n}',
+  'через {n} мин':
+    'in {n} min',
+  'Инциденты мониторов':
+    'Monitor incidents',
+  'Скрытые домены':
+    'Hidden domains',
+  'Сейф бэкапов':
+    'Backup vault',
+  'Настройки панели':
+    'Panel settings',
+  'зашифрован паролем сейфа':
+    'encrypted with the vault password',
+  'алерты, Telegram, группы, сроки':
+    'alerts, Telegram, groups, retention',
+  '12 ч':
+    '12 h',
+  '2 дня':
+    '2 days',
+  'На сервере':
+    'On the server',
+  'Вручную':
+    'By hand',
+  'Бэкап панели - ее настройки одним файлом: мониторы, серверы, локации, алерты. Из него панель восстанавливается целиком или переезжает на другой сервер.':
+    'The panel backup is its configuration in one file: monitors, servers, locations, alerts. The panel is restored from it as a whole or moved to another server.',
+  'Панель сама сохраняет бэкап на свой диск по расписанию и хранит последние файлы, старые удаляет.':
+    'The panel saves a backup to its own disk on a schedule, keeps the latest files and deletes old ones.',
+  'Бэкапы на диске панели, новые сверху. Любой можно скачать или восстановить из него панель.':
+    'Backups on the panel disk, newest first. Any of them can be downloaded or used to restore the panel.',
+  'Свежий бэкап файлом на этот компьютер или восстановление из такого файла, например при переезде панели на другой сервер.':
+    'A fresh backup as a file on this computer, or a restore from such a file, for example when moving the panel to another server.',
 }
 
 type Ctx = {

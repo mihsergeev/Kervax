@@ -1869,6 +1869,15 @@ button.srv-tile-btn:hover .net-tile { border-color: var(--border-strong); backgr
   overflow: auto;
 }
 
+/* окно "Бэкап" (BackupModal): кнопки у файла в таблице */
+.bk-acts { display: inline-flex; gap: 0.35rem; white-space: nowrap; }
+/* сроки кнопками в окнах под шестеренкой: на узком экране переносятся, а не вылезают */
+.alerts-modal .win-switch { flex-wrap: wrap; }
+.alerts-modal .win-btn { white-space: nowrap; }
+@media (max-width: 560px) {
+  .bk-acts { flex-direction: column; align-items: stretch; }
+}
+
 /* окно Ansible (AnsibleModal): имя группы инвентаря, ноды таблицей sec-tbl */
 .ans-grp { font-family: ui-monospace, Consolas, monospace; font-size: 0.8rem; font-weight: 600; color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); border-radius: 6px; padding: 0.05rem 0.45rem; margin-right: 0.45rem; }
 .ans-node { display: inline-flex; align-items: center; gap: 0.45rem; white-space: nowrap; }
@@ -3741,6 +3750,8 @@ button.ov-area-bad .ov-area-s { color: color-mix(in srgb, var(--down) 75%, var(-
     scrollbar-width: none;
   }
   .srv-nav-grp { display: none; }
+  /* подпись внутри раздела окна (rt-cap) - не группа меню, ее показываем */
+  .srv-nav-grp.rt-cap { display: block; }
   button.srv-nav-item {
     flex: 0 0 auto;
     width: auto;

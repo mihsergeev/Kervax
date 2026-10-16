@@ -1014,6 +1014,19 @@ export function revokeAnsibleToken(): Promise<void> {
 
 export type BackupConfig = { interval_hours: number; keep: number }
 export type BackupFileInfo = { name: string; size: number; created_at: string }
+// Окно "Бэкап": расписание, последний и следующий автобэкап, файлы на диске и что входит в бэкап
+export type BackupOverview = {
+  interval_hours: number
+  keep: number
+  last_auto: string | null
+  next_auto: string | null
+  files: BackupFileInfo[]
+  total_bytes: number
+  parts: { key: string; rows: number }[]
+}
+export function getBackupOverview(): Promise<BackupOverview> {
+  return api<BackupOverview>('/api/backup/overview')
+}
 
 export function getBackupConfig(): Promise<BackupConfig> {
   return api<BackupConfig>('/api/backup/config')
