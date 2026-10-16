@@ -54,9 +54,16 @@ _tasks: set[asyncio.Task] = set()
 _TOKENISH = re.compile(r"[0-9a-fA-F-]{12,}|[A-Za-z0-9_-]{20,}")
 
 
+# Всплеском считаются только запросы агентов, push-скриптов и ansible: открытая вкладка панели
+# с кликами дает десятки запросов в минуту с одного адреса, и это не повод для алерта.
+# Отказы считаются на любые адреса.
+MACHINE = ("/api/agent/", "/api/ansible/")
+PUSH = "/api/agent/push/"
+
+
 def norm_path(path: str) -> str:
-    """Адрес без id и токенов: /api/servers/12 -> /api/servers/{id}, /api/push/<токен> ->
-    /api/push/{token}, чтобы одинаковые запросы складывались."""
+    """Адрес без id и токенов: /api/servers/12 -> /api/servers/{id}, /api/agent/push/<токен> ->
+    /api/agent/push/{token}, чтобы одинаковые запросы складывались."""
     parts = []
     for seg in path.split("/")[:7]:
         if seg.isdigit():
@@ -76,12 +83,16 @@ def count(key: str, path: str, status: int, minute: int | None = None) -> tuple[
         snap = (_minute, _buckets)
         _buckets = {}
     _minute = m
+    machine = path.startswith(MACHINE)
+    if not machine and status not in BAD:
+        return snap
     b = _buckets.get(key)
     if b is None:
         if len(_buckets) >= _KEYS_MAX:
             return snap
         b = _buckets[key] = {"total": 0, "bad": 0, "codes": Counter(), "paths": Counter(), "top": Counter()}
-    b["total"] += 1
+    if machine:
+        b["total"] += 1
     p = norm_path(path)
     if status in BAD:
         b["bad"] += 1
@@ -199,13 +210,13 @@ def hint(a: dict, n_srv: int) -> str:
         top = bad.most_common(1)[0][0] if bad else ""
         code, _, path = top.partition(" ")
         distinct = len({p.partition(" ")[2] for p in bad})
+        if code == "404" and path.startswith(PUSH):
+            return "push-монитор удален или его адрес сменился, а скрипт продолжает слать"
         if code in ("401", "403") and path.startswith("/api/agent/"):
             return ("агент шлет неверный токен: сервер переустановили или удалили из панели, а агент на нем "
                     "остался. Переустановите агент или удалите его с сервера")
         if code == "401" and path.startswith("/api/ansible/"):
             return "ansible ходит со старым токеном: выпустите новый в окне Ansible и обновите инвентарь"
-        if code == "404" and path.startswith("/api/push/"):
-            return "push-монитор удален или его адрес сменился, а скрипт продолжает слать"
         if code == "404" and distinct >= 5:
             return "перебирает адреса API, похоже на сканер"
         if code == "429":
@@ -216,10 +227,15 @@ def hint(a: dict, n_srv: int) -> str:
             return "запросы с неправильными данными: похоже на старую версию агента или скрипта"
         return ""
     top = a["paths"].most_common(1)[0][0] if a["paths"] else ""
+    if top.startswith(PUSH):
+        return "скрипт push-монитора шлет слишком часто: проверьте, как часто его запускает крон"
     if top.startswith("/api/agent/"):
         return ("агент шлет запросы слишком часто: похоже, на сервере работает несколько его копий или он "
                 "перезапускается в цикле")
-    return f"чаще всего {top}" if top else ""
+    if top.startswith("/api/ansible/"):
+        return "ansible ходит в панель слишком часто: проверьте, не запущено ли несколько плейбуков в цикле"
+    # адреса и так видны списком рядом, повторять самый частый незачем
+    return ""
 
 
 def what(a: dict, n_srv: int) -> str:

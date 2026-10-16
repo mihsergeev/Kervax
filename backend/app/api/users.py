@@ -19,7 +19,6 @@ from app import audit
 from app.deps import AdminUser, SessionDep
 from app.models import AuditLog, Check, Server, User
 from app.schemas import (
-    AuditEntryOut,
     UserCardOut,
     UserCreate,
     UserListItem,
@@ -105,9 +104,7 @@ async def users_overview(_: AdminUser, session: SessionDep) -> UsersOverview:
     log = await session.scalars(select(AuditLog).order_by(AuditLog.id.desc()).limit(AUDIT_SHOWN))
     return UsersOverview(
         users=cards,
-        audit=[
-            AuditEntryOut.model_validate(a).model_copy(update={"ts": _aware(a.ts)}) for a in log
-        ],
+        audit=await audit.readable(session, list(log)),
         fails_24h=sum(fails.values()),
         fail_ips_24h=int(fail_ips or 0),
     )

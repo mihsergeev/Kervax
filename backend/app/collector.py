@@ -1643,7 +1643,7 @@ def bad_pods_text(pods: list[dict], limit: int = 4) -> str:
             # почему не встает в расписание (агент 2.26): "0/3 nodes are available: ..."
             why += ": " + str(p["msg"])[:140]
         restarts = int(p.get("restarts") or 0)
-        tail = f", {restarts} рестарта" if restarts >= 5 else ""
+        tail = f", {restarts} {_plural(restarts, 'рестарт', 'рестарта', 'рестартов')}" if restarts >= 5 else ""
         items.append(f"{p.get('ns', '?')}/{p.get('name', '?')} ({why}{tail})")
     if len(pods) > limit:
         items.append(f"и ещё {len(pods) - limit}")

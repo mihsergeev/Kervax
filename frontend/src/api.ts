@@ -2789,6 +2789,7 @@ export interface Report {
   noise: {
     fires: number
     prev_fires: number
+    prev_ok?: boolean
     per_day: number[] // алертов за день
     items: ReportNoise[]
     more: number

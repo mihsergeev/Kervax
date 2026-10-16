@@ -21,6 +21,7 @@ import {
   type UsersOverview,
 } from './api'
 import { ROLE_LABEL, ROLE_SHORT, ROLE_WHAT, SECTION_LABEL, SECTIONS } from './access'
+import { actLabel } from './auditActs'
 import { useAuth } from './auth'
 import { CardNav, type SecDef } from './cardLayout'
 import { useI18n } from './i18n'
@@ -42,52 +43,6 @@ type T = (s: string, p?: Record<string, string | number>) => string
 
 
 // действия журнала по-человечески; чего здесь нет - показываем как записано
-const ACT: Record<string, string> = {
-  login_ok: 'вход',
-  login_fail: 'неверный пароль',
-  login_2fa_fail: 'неверный код 2FA',
-  login_blocked: 'вход заблокирован',
-  login_lockout: 'блокировка входа',
-  login_guard: 'изменил защиту входа',
-  login_unban: 'разблокировал адрес',
-  user_create: 'создал учетку',
-  user_delete: 'удалил учетку',
-  user_scope: 'изменил доступ учетки',
-  user_reset_pw: 'сбросил пароль учетки',
-  password_change: 'сменил свой пароль',
-  '2fa_enable': 'включил 2FA',
-  '2fa_disable': 'выключил 2FA',
-  server_create: 'добавил сервер',
-  server_update: 'изменил сервер',
-  server_delete: 'удалил сервер',
-  server_note: 'заметка к серверу',
-  server_snooze: 'заглушил алерт сервера',
-  check_create: 'добавил монитор',
-  check_update: 'изменил монитор',
-  check_delete: 'удалил монитор',
-  check_note: 'заметка к монитору',
-  checks_import: 'импорт мониторов',
-  checks_bulk_delete: 'удалил мониторы',
-  location_create: 'добавил локацию',
-  location_update: 'изменил локацию',
-  location_delete: 'удалил локацию',
-  link_add: 'добавил связь между серверами',
-  link_delete: 'удалил связь между серверами',
-  maint_create: 'добавил окно обслуживания',
-  maint_update: 'изменил окно обслуживания',
-  maint_delete: 'удалил окно обслуживания',
-  alerts_config: 'изменил алерты',
-  retention_config: 'изменил сроки хранения',
-  backup_config: 'изменил автобэкап',
-  backup_run: 'создал бэкап панели',
-  backup_restore: 'восстановил панель из бэкапа',
-  vault_open: 'открыл сейф бэкапов',
-  backup_credentials_view: 'посмотрел доступы бэкапа',
-  ansible_token_issue: 'выпустил токен ansible',
-  ansible_token_revoke: 'отключил доступ ansible',
-  tg_link: 'привязал Telegram',
-  tg_unlink: 'отвязал Telegram',
-}
 const LOGIN_ACTS = new Set(['login_ok', 'login_fail', 'login_2fa_fail', 'login_blocked', 'login_lockout'])
 const FAIL_ACTS = new Set(['login_fail', 'login_2fa_fail', 'login_blocked', 'login_lockout'])
 
@@ -310,7 +265,7 @@ export function UsersModal({ onClose, onUnauthorized }: Props) {
     const a = sinceShort(iso, t)
     return a ? t('{a} назад', { a }) : t('только что')
   }
-  const actText = (a: AuditEntry) => t(ACT[a.action] ?? a.action)
+  const actText = (a: AuditEntry) => actLabel(a.action, t, a.target)
   const admins = users.filter((u) => u.role === 'admin')
   const with2fa = users.filter((u) => u.totp_enabled).length
   const nameBtn = (u: UserCard) => (

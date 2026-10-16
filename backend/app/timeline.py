@@ -22,7 +22,7 @@ import logging
 import re
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, or_, select, update
 
 from app.models import Server, ServerEvent, ServerPackages, TimelineState
 
@@ -416,11 +416,15 @@ async def view(session, srv, user, since: datetime, until: datetime, tz: str) ->
                     "recovery": bool(a.recovery)})
     if getattr(user, "role", "") == "admin":
         for a in await session.scalars(
-            select(AuditLog).where(AuditLog.target == srv.name, AuditLog.ts >= since, AuditLog.ts <= until)
+            select(AuditLog).where(or_(AuditLog.target == srv.name, AuditLog.detail == f"srv={srv.id}"),
+                                   AuditLog.ts >= since, AuditLog.ts <= until)
             .order_by(AuditLog.ts.desc()).limit(300)
         ):
+            # действия с контейнером, подом, бэкапом пишутся по номеру сервера (srv=N), а объект
+            # у них - сам контейнер или под: его и показываем
+            by_id = a.detail == f"srv={srv.id}"
             out.append({"ts": _iso(a.ts), "cat": "panel", "kind": a.action, "user": a.username,
-                        "text": (a.detail or "")[:300]})
+                        "text": ((a.target if by_id else a.detail) or "")[:300]})
     for w in await session.scalars(select(MaintenanceWindow)):
         if srv.id not in (w.server_ids or []):
             continue

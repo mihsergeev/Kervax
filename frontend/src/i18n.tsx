@@ -2760,20 +2760,13 @@ const EN: Record<string, string> = {
   'Система': 'System',
   'Доступ и кроны': 'Access and cron',
   'Панель': 'Panel',
-  'изменил настройки сервера': 'changed server settings',
-  'заглушил алерт': 'muted an alert',
   'перевыпустил токен агента': 'reissued the agent token',
   'указал, за каким сервером стоит': 'set the server it sits behind',
-  'изменил заметку': 'changed the note',
-  'изменил правила алертов': 'changed alert rules',
   'добавил сервер': 'added the server',
   'отметил известную проблему': 'marked a known issue',
   'снял известную проблему': 'cleared a known issue',
   'запустил бэкап': 'started a backup',
-  'запустил восстановление': 'started a restore',
-  'изменил настройки бэкапа': 'changed backup settings',
   'освободил место на диске': 'freed disk space',
-  'посмотрел доступы к бэкапу': 'viewed backup credentials',
   'отметил изменения доступа своими': 'acknowledged access changes',
   'проверил, что открыто в интернет': 'checked what is open to the internet',
   'отменил обновление агента': 'cancelled the agent update',
@@ -2914,6 +2907,7 @@ const EN: Record<string, string> = {
   'и еще {n} со сбоями': 'and {n} more with failures',
   'к прошлому периоду': 'vs the previous period',
   'как в прошлый период': 'same as the previous period',
+  'в прошлый период было {n}': 'previous period: {n}',
   'лежит сейчас': 'down now',
   'пропадали: {n} из {m}': 'went missing: {n} of {m}',
   'сбоев не было': 'no failures',
@@ -4316,6 +4310,130 @@ const EN: Record<string, string> = {
     'opened the backup vault',
   'посмотрел доступы бэкапа':
     'viewed backup credentials',
+  'посмотрел, на что ушло место':
+    'looked at what takes the space',
+  'посмотрел, что можно освободить':
+    'previewed what can be freed',
+  'изменил свои уведомления в Telegram':
+    'changed own Telegram notifications',
+  'взял алерт в Telegram':
+    'took an alert in Telegram',
+  'заглушил алерт в Telegram':
+    'snoozed an alert in Telegram',
+  'вернул алерты в Telegram':
+    'unmuted alerts in Telegram',
+  'заглушил один вид алертов сервера':
+    'snoozed one kind of server alert',
+  'изменил правила алертов серверов':
+    'changed server alert rules',
+  'включил автоочистку диска':
+    'turned on disk auto cleanup',
+  'выключил автоочистку диска':
+    'turned off disk auto cleanup',
+  'известная проблема прошла':
+    'known issue cleared',
+  'истек срок известной проблемы':
+    'known issue expired',
+  'обновление агента':
+    'agent update',
+  'раскатка агента':
+    'agent rollout',
+  'перезапустил контейнер':
+    'restarted a container',
+  'остановил контейнер':
+    'stopped a container',
+  'запустил контейнер':
+    'started a container',
+  'посмотрел логи контейнера':
+    'viewed container logs',
+  'перезапустил поды':
+    'restarted pods',
+  'удалил под':
+    'deleted a pod',
+  'посмотрел логи пода':
+    'viewed pod logs',
+  'отметил, что агент на ноде не нужен':
+    'marked a node as not needing an agent',
+  'вернул ноду в проверку агентов':
+    'put a node back into the agent check',
+  'заглушил монитор':
+    'snoozed a monitor',
+  'изменил мониторы пачкой':
+    'changed monitors in bulk',
+  'добавил найденные сайты':
+    'added discovered sites',
+  'поменял порядок мониторов':
+    'reordered monitors',
+  'изменил правила алертов сайтов':
+    'changed site alert rules',
+  'выпустил новый адрес push':
+    'issued a new push URL',
+  'принял новые DNS-записи':
+    'accepted new DNS records',
+  'скрыл домены':
+    'hid domains',
+  'вернул домены':
+    'brought domains back',
+  'проверил чат алертов':
+    'tested an alert chat',
+  'сменил логотип':
+    'changed the logo',
+  'вернул стандартный логотип':
+    'restored the default logo',
+  'настроил бэкап сервера':
+    'set up server backup',
+  'изменил пути бэкапа':
+    'changed backup paths',
+  'изменил расписание бэкапа':
+    'changed the backup schedule',
+  'настроил дампы баз':
+    'set up database dumps',
+  'убрал дампы баз':
+    'removed database dumps',
+  'обновил restic':
+    'updated restic',
+  'обновил образ rest-server':
+    'updated the rest-server image',
+  'включил синхронизацию часов':
+    'turned on clock sync',
+  'починил юнит':
+    'fixed a unit',
+  'посмотрел журнал юнитов':
+    'viewed the unit journal',
+  'убрал из проверки бэкапа':
+    'excluded from the backup check',
+  'вернул в проверку бэкапа':
+    'put back into the backup check',
+  'заглушил репозиторий бэкапа':
+    'muted a backup repository',
+  'вернул алерты репозитория бэкапа':
+    'unmuted a backup repository',
+  'убрал репозиторий бэкапа в архив':
+    'archived a backup repository',
+  'вернул репозиторий бэкапа из архива':
+    'unarchived a backup repository',
+  'развернул сервер бэкапов':
+    'deployed a backup server',
+  'включил TLS на сервере бэкапов':
+    'enabled TLS on a backup server',
+  'перестал следить за своим бэкапом':
+    'stopped watching a custom backup',
+  'вернул слежку за своим бэкапом':
+    'resumed watching a custom backup',
+  'настроил сейф бэкапов':
+    'set up the backup vault',
+  'положил доступы в сейф':
+    'stored credentials in the vault',
+  'удалил запись из сейфа':
+    'deleted a vault entry',
+  'стер сейф бэкапов':
+    'wiped the backup vault',
+  'бэкап':
+    'backup',
+  'сейф бэкапов':
+    'backup vault',
+  'эксп.':
+    'expl.',
   'правка':
     'edit',
   'привязал Telegram':
