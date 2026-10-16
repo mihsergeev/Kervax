@@ -18,7 +18,11 @@
 где отвечает именно эта нода (адрес шлюза NAT с чужим SSH отброшен, open_ports.foreign), плюс SSH
 на собственных публичных адресах ноды и на адресе, заданном вручную (agent_ip). По частному
 адресу у панели может отвечать другая машина, поэтому у SSH сверяется версия OpenSSH в баннере
-с той, что у sshd ноды."""
+с той, что у sshd ноды.
+
+Адрес, который есть у нескольких серверов панели (общий фронт или балансировщик, шлюз NAT,
+плавающий адрес), отвечает и тогда, когда одна из машин за ним лежит. Обычные порты на таком
+адресе не в счет, остается SSH со сверкой баннера (shared)."""
 
 from __future__ import annotations
 
@@ -38,12 +42,35 @@ _MAX = 6
 BASE_EVERY = timedelta(hours=24)
 _LOOK_EVERY = timedelta(minutes=10)
 _BASE_BATCH = 12
+# эталоны без этой версии считаются не снятыми: 1.4.244 судил и по общим адресам
+BASE_V = 2
 _running: asyncio.Task | None = None
 _last_start: datetime | None = None
 
 
-def candidates(srv) -> list[tuple[str, int, bool]]:
-    """(адрес, порт, сверять баннер SSH) - не больше _MAX, сначала проверенные снаружи."""
+def _addrs(srv) -> set[str]:
+    """Публичные адреса, по которым панель знает сервер."""
+    ex = open_ports._ex(srv)
+    out = {str(ip) for ip in ex.get("ips") or []}
+    out |= {str(x["ip"]) for x in ex.get("ports") or [] if isinstance(x, dict) and x.get("ip")}
+    out |= {str(ip) for ip in (srv.last_report or {}).get("ips") or []}
+    out |= {str(getattr(srv, "agent_ip", "") or ""), str(getattr(srv, "external_ip", "") or "")}
+    return {ip for ip in out if ip and open_ports.is_public(ip)}
+
+
+def shared(servers) -> dict[int, frozenset[str]]:
+    """Для каждого сервера - его адреса, которые есть и у других серверов панели."""
+    by_ip: dict[str, set[int]] = {}
+    addrs = {srv.id: _addrs(srv) for srv in servers}
+    for sid, ips in addrs.items():
+        for ip in ips:
+            by_ip.setdefault(ip, set()).add(sid)
+    return {sid: frozenset(ip for ip in ips if len(by_ip[ip]) > 1) for sid, ips in addrs.items()}
+
+
+def candidates(srv, common: frozenset[str] = frozenset()) -> list[tuple[str, int, bool]]:
+    """(адрес, порт, сверять баннер SSH) - не больше _MAX, сначала проверенные снаружи. common -
+    адреса, общие с другими серверами (shared): на них только SSH."""
     rep = srv.last_report or {}
     bad = set(open_ports.foreign(srv))
     ssh = sorted({int(p) for p in open_ports._ssh_block(srv).get("ports") or [] if str(p).isdigit()} or {22})
@@ -51,6 +78,8 @@ def candidates(srv) -> list[tuple[str, int, bool]]:
     seen: set[tuple[str, int]] = set()
 
     def add(ip: str, port: int, check: bool) -> None:
+        if ip in common and not check:
+            return  # на общем адресе порт ответит и без этой машины
         if ip and (ip, port) not in seen and len(out) < _MAX:
             seen.add((ip, port))
             out.append((ip, port, check))
@@ -77,17 +106,17 @@ def candidates(srv) -> list[tuple[str, int, bool]]:
 
 def reachable(base) -> bool | None:
     """Достукивалась ли панель до сервера, пока он был на связи; None - эталона еще нет."""
-    if not isinstance(base, dict) or "state" not in base:
+    if not isinstance(base, dict) or "state" not in base or base.get("v") != BASE_V:
         return None
     return base["state"] in ("alive", "refused")
 
 
-async def check(srv, offline: bool = True) -> dict | None:
+async def check(srv, offline: bool = True, common: frozenset[str] = frozenset()) -> dict | None:
     """{state: alive|refused|silent|blind, where: "адрес:порт", tried: [...]} или None, если
     стучаться некуда (агент не прислал ни адресов, ни портов). blind - сервер молчит, но панель и на
     связи до него не достукивалась, так что молчание ничего не значит. Стучимся все равно: эталон
     мог попасть на сбой сети, а ответ сервера полезен и тогда."""
-    pairs = candidates(srv)
+    pairs = candidates(srv, common)
     if not pairs:
         return None
     base = getattr(srv, "liveness_base", None)
@@ -139,16 +168,17 @@ async def _base_due(session_factory: async_sessionmaker[AsyncSession], now: date
     """Эталон для серверов на связи, у кого его нет или он старше BASE_EVERY."""
     async with session_factory() as s:
         servers = list(await s.scalars(select(Server).where(Server.enabled.is_(True))))
+    common = shared(servers)
     due = []
     for srv in servers:
         if srv.last_seen is None:
             continue
         seen = srv.last_seen if srv.last_seen.tzinfo else srv.last_seen.replace(tzinfo=timezone.utc)
-        if now - seen > timedelta(minutes=3) or not candidates(srv):
+        if now - seen > timedelta(minutes=3) or not candidates(srv, common[srv.id]):
             continue
         base = srv.liveness_base if isinstance(srv.liveness_base, dict) else {}
         try:
-            at = datetime.fromisoformat(str(base.get("ts") or ""))
+            at = datetime.fromisoformat(str(base.get("ts") or "")) if base.get("v") == BASE_V else None
         except ValueError:
             at = None
         if at is None or now - at >= BASE_EVERY:
@@ -157,14 +187,16 @@ async def _base_due(session_factory: async_sessionmaker[AsyncSession], now: date
     batch = [srv for _at, srv in due[:_BASE_BATCH]]
     if not batch:
         return 0
-    res = await asyncio.gather(*(check(srv, offline=False) for srv in batch), return_exceptions=True)
+    res = await asyncio.gather(*(check(srv, offline=False, common=common[srv.id]) for srv in batch),
+                         return_exceptions=True)
     async with session_factory() as s:
         for srv, r in zip(batch, res):
             if isinstance(r, Exception) or r is None:
                 continue
             row = await s.get(Server, srv.id)
             if row is not None:
-                row.liveness_base = {"state": r["state"], "where": r["where"], "ts": now.isoformat()}
+                row.liveness_base = {"state": r["state"], "where": r["where"], "ts": now.isoformat(),
+                                     "v": BASE_V}
         await s.commit()
     return len(batch)
 
