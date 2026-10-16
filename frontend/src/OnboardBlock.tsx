@@ -13,12 +13,15 @@ const head = (s: string) => s.split(/ - |: /)[0]
 // Подключение нового сервера (backend app/onboard.py): что еще не сделано и что нашлось. Пока
 // подключение идет, в Telegram уходят только недоступность и критичный диск, остальное копится
 // здесь и в "Что сломано"; при закрытии то, что осталось, становится известными проблемами.
-export function OnboardBlock({ server: s, t, canManage, onChanged, onOpenSection }: {
+export function OnboardBlock({ server: s, t, canManage, onChanged, onOpenSection, onInstall }: {
   server: Server
   t: T
   canManage: boolean
   onChanged: () => void
   onOpenSection?: (section: Section, srv?: boolean, sec?: string) => void
+  // команда установки заново: только пока агент ни разу не отчитался, у работающего агента новый
+  // токен оборвал бы связь
+  onInstall?: () => void
 }) {
   const [busy, setBusy] = useState(false)
   const ob = s.onboard
@@ -26,7 +29,8 @@ export function OnboardBlock({ server: s, t, canManage, onChanged, onOpenSection
   const r = s.last_report ?? {}
   const rows: Row[] = []
   if (!s.first_report_at) {
-    rows.push({ key: 'agent', ok: false, text: t('агент еще не отчитался: поставьте его командой, которую панель выдала при добавлении') })
+    rows.push({ key: 'agent', ok: false, text: t('агент еще не отчитался: поставьте его на сервере'),
+      act: onInstall ? { label: t('Команда установки'), onClick: onInstall } : undefined })
   } else {
     rows.push(s.online
       ? { key: 'agent', ok: true, text: t('агент на связи') }
@@ -41,7 +45,7 @@ export function OnboardBlock({ server: s, t, canManage, onChanged, onOpenSection
       ? t('не хватает: {list} - команда ниже', { list: shortList(miss, t, 4) })
       : t('не хватает: {list}', { list: shortList(miss, t, 4) }) })
     else rows.push({ key: 'helpers', ok: true, text: t("helper'ы на месте") })
-    const toBackups = onOpenSection ? { label: t('Бэкапы'), onClick: () => onOpenSection('backups', false, 'coverage') } : undefined
+    const toBackups = onOpenSection ? { label: `${t('Бэкапы')} →`, onClick: () => onOpenSection('backups', false, 'coverage') } : undefined
     if (r.backup_server?.present) rows.push({ key: 'backup', ok: true, text: t('это сервер бэкапов') })
     else if (backupAlive(r.backup)) rows.push({ key: 'backup', ok: true, text: t('бэкап настроен') })
     else if (hasOwnFileBackup(s)) rows.push({ key: 'backup', ok: true, text: t('свой бэкап, панель за ним следит') })
@@ -90,7 +94,7 @@ export function OnboardBlock({ server: s, t, canManage, onChanged, onOpenSection
           <div key={x.key} className="onb-row">
             <span className={`lk-dot ${x.ok === true ? 'lk-dot-ok' : x.ok === false ? 'lk-dot-warn' : ''}`} />
             <span className="onb-txt">{x.text}</span>
-            {x.act && <button className="ghost small-btn" onClick={x.act.onClick}>{x.act.label} →</button>}
+            {x.act && <button className="ghost small-btn" onClick={x.act.onClick}>{x.act.label}</button>}
           </div>
         ))}
       </div>

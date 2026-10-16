@@ -246,6 +246,9 @@ def _out(
     o.proxy_outdated = docker_exposure.outdated(server.last_report or {}, now.timestamp())
     o.disk_analyze = disk_analyze_ok(server.last_report or {})
     o.fresh = _fresh_node(server, now)
+    # недоступен: что ответил сервер панели в момент алерта (app/liveness.py)
+    probe = (server.alert_state or {}).get("offline_probe")
+    o.offline_probe = probe if isinstance(probe, dict) and not o.online else None
     if onboard.active(server, now):
         o.onboard = {"until": onboard.until(server).isoformat()}
     o.problems = server_problems(server, now, pod_names, web_err)

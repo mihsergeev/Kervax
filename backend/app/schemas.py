@@ -1367,6 +1367,9 @@ class ServerOut(BaseModel):
     # подключение нового сервера (app/onboard.py): идет - {until, tg, main, chats} (куда пойдут
     # алерты, имена чатов без id), закрыто - None
     onboard: dict | None = None
+    # недоступен: ответил ли сервер панели в момент алерта (app/liveness.py) -
+    # {state: alive|refused|silent, where, tried, ts}
+    offline_probe: dict | None = None
     onboard_done_at: datetime | None = None
     onboard_by: str = ""
     first_report_at: datetime | None = None

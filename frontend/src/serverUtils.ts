@@ -136,8 +136,17 @@ function srvIssuesRaw(
   s: Server,
   t: (k: string, p?: Record<string, string | number>) => string,
 ): SrvIssue[] {
-  if (!s.online)
-    return [{ tone: 't-down', text: t('оффлайн'), mute: 'offline', kind: 'offline', since: s.last_seen }]
+  // агента еще не ставили: задача, а не поломка (алерта "недоступен" по такому серверу и нет)
+  if (!s.online && !s.last_seen)
+    return [{ tone: 't-degraded', text: t('агент ещё не выходил на связь'), mute: 'offline', kind: 'offline' }]
+  if (!s.online) {
+    // что ответил сервер панели в момент алерта: молчит агент или сама машина (backend app/liveness.py)
+    const p = s.offline_probe
+    const why = p?.state === 'alive' ? t('сервер отвечает ({where}), молчит агент', { where: p.where ?? '' })
+      : p?.state === 'refused' ? t('адрес отвечает отказом ({where}), похоже на перезагрузку', { where: p.where ?? '' })
+        : p?.state === 'silent' ? t('с панели сервер тоже не отвечает') : ''
+    return [{ tone: 't-down', text: why ? `${t('оффлайн')} - ${why}` : t('оффлайн'), mute: 'offline', kind: 'offline', since: s.last_seen }]
+  }
   const out: SrvIssue[] = []
   const cpu = srvCpuPct(s)
   if (cpu != null && s.cpu_alert_percent && cpu >= s.cpu_alert_percent)

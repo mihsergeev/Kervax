@@ -1531,10 +1531,10 @@ const EN: Record<string, string> = {
   'Базы данных': 'Databases',
   'Веб-серверы': 'Web servers',
   'без монитора: {n}': 'not monitored: {n}',
-  'конфиг с ошибкой: {n}': 'config errors: {n}',
-  'сертификаты истекают: {n}': 'certificates expiring: {n}',
+  'конфиг с ошибкой: {list}': 'config errors: {list}',
+  'сертификаты истекают: {list}': 'certificates expiring: {list}',
   'Очереди RabbitMQ': 'RabbitMQ queues',
-  'переполнены: {n}': 'overflowing: {n}',
+  'переполнены: {list}': 'overflowing: {list}',
   'Ноды': 'Nodes',
   'переполненные очереди RabbitMQ': 'overflowing RabbitMQ queues',
   'конфиг веб-сервера не проходит проверку': 'web server config fails the check',
@@ -4621,14 +4621,30 @@ const EN: Record<string, string> = {
     'server downtime',
   'сайт':
     'site',
+  'Панель выпустит новый токен: прежняя команда перестанет работать.':
+    'The panel issues a new token: the previous command stops working.',
+  'Команда установки':
+    'Install command',
+  'адрес отвечает отказом ({where}), похоже на перезагрузку':
+    'the address refuses ({where}), looks like a reboot',
+  'предупреждения: {list}':
+    'warnings: {list}',
+  'проблемы: {list}':
+    'issues: {list}',
+  'с панели сервер тоже не отвечает':
+    'the server does not answer the panel either',
+  'свежих данных нет':
+    'no fresh data',
+  'сервер отвечает ({where}), молчит агент':
+    'the server answers ({where}), the agent is silent',
   'Подключение сервера':
     'Server onboarding',
   'закроется само {when}':
     'closes by itself on {when}',
   'Пока идет подключение, в Telegram уходят только недоступность и критичный диск. Остальное видно здесь и в "Что сломано".':
     'While onboarding is open, only unavailability and a critical disk go to Telegram. Everything else is shown here and in "What\'s broken".',
-  'агент еще не отчитался: поставьте его командой, которую панель выдала при добавлении':
-    'the agent has not reported yet: install it with the command the panel gave when the server was added',
+  'агент еще не отчитался: поставьте его на сервере':
+    'the agent has not reported yet: install it on the server',
   'агент на связи':
     'the agent is reporting',
   'агент отчитывался, но сейчас не на связи':

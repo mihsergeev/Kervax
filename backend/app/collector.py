@@ -36,6 +36,7 @@ from app import restarts as srv_restarts
 from app import ssh_audit
 from app import known as known_mod
 from app import onboard as onboard_mod
+from app import liveness
 from app import parents as parents_mod
 from app import maint
 from app import tg_bot
@@ -1934,6 +1935,9 @@ _BACKUP_STALE_SECONDS = 2 * 86400
 _BACKUP_MISSING_GRACE = 86400
 # Тишина для только что добавленного сервера (см. evaluate_servers): helper'ы ставятся, отчеты неполные
 _NEW_SERVER_QUIET = 900
+# Сколько недоступных серверов за тик панель проверяет сама (app/liveness.py): каждая проверка -
+# до нескольких секунд, а при обрыве сети у самой панели молчат все разом
+_LIVENESS_PER_TICK = 6
 # Репозиторий на бэкап-сервере «устарел», если в него давно не принимали бэкап.
 # 3 дня для ежедневных бэкапов; разовые/неактуальные репо глушатся мьютом.
 _BACKUP_REPO_STALE_SECONDS = 3 * 86400
@@ -5334,6 +5338,7 @@ async def evaluate_servers(
     # отправляется только офлайн и критичный диск (onboard_mod.split)
     marks: list[tuple[int | None, int, int, int, int]] = []
     onboarding: set[int] = set()
+    probes_left = _LIVENESS_PER_TICK
 
     def apply(sid: int, key: str, value: object) -> None:
         cur_by_id[sid][key] = value
@@ -5584,6 +5589,18 @@ async def evaluate_servers(
                     # что молчит и лежит из-за него: их собственные алерты придержаны
                     fmsg = alerts.Msg(fmsg + tail, fmsg.section, fmsg.group, fmsg.kind, fmsg.target,
                                       fmsg.recovery, fmsg.ref)
+                if key == "offline" and probes_left > 0:
+                    # молчит агент или сам сервер: панель стучится к нему сама (app/liveness.py)
+                    probes_left -= 1
+                    try:
+                        live = await liveness.check(s)
+                    except Exception:
+                        log.warning("не проверил, жив ли %s", s.name, exc_info=True)
+                        live = None
+                    if live:
+                        fmsg = alerts.Msg(fmsg + "\n↳ " + html.escape(liveness.text(live)), fmsg.section,
+                                          fmsg.group, fmsg.kind, fmsg.target, fmsg.recovery, fmsg.ref)
+                        fire_apply.append((s.id, "offline_probe", live | {"ts": now.isoformat()}))
                 if key in ("offline", "web_5xx"):
                     # что менялось на сервере за час до сбоя: деплой, перезагрузка, пакеты
                     fmsg = await _with_before(session_factory, fmsg, s,
@@ -5614,6 +5631,7 @@ async def evaluate_servers(
                 rec_apply.append((s.id, key, 0))
                 if key == "offline":
                     rec_apply.append((s.id, "offline_said", 0))
+                    rec_apply.append((s.id, "offline_probe", None))
             else:  # де-эскалация (crit→problem): без алерта, просто снижаем уровень
                 apply(s.id, key, level)
         # перезагрузка (аптайм сброшен) — одноразовый алерт на новый rebooted_at
