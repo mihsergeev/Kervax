@@ -140,6 +140,7 @@ async def test_baseline_tells_firewall_from_down(tmp_path, monkeypatch):
     async with factory() as s:
         a, b, c = [await s.get(Server, i) for i in (1, 2, 3)]
         assert a.liveness_base["state"] == "alive" and a.liveness_base["where"] == "203.0.113.10:2221"
+        assert a.liveness_base["v"] == liveness.BASE_V
         assert b.liveness_base["state"] == "silent" and c.liveness_base is None
     # что отвечало на связи - первым в очереди
     assert liveness.candidates(a)[0] == ("203.0.113.10", 2221, True)
@@ -154,3 +155,20 @@ async def test_baseline_tells_firewall_from_down(tmp_path, monkeypatch):
     up.add(("203.0.113.20", 2221))
     assert (await liveness.check(b))["state"] == "alive"
     await engine.dispose()
+
+
+def test_shared_address_counts_only_ssh():
+    """Общий фронт перед двумя серверами отвечает на 443 и тогда, когда один из них лежит."""
+    ex = {"ts": "2026-10-17T00:00:00+00:00", "via": "панель", "own": True, "ips": ["203.0.113.50"],
+          "ports": [{"ip": "203.0.113.50", "port": 443, "state": "open"},
+                    {"ip": "203.0.113.50", "port": 2221, "state": "open"}]}
+    a = Server(id=1, name="app-a", last_report=_report(ips=["10.0.0.5"]), exposure=ex)
+    b = Server(id=2, name="app-b", last_report=_report(ips=["10.0.0.6"]), exposure=ex)
+    c = Server(id=3, name="web-c", last_report=_report(ips=["203.0.113.60"]), exposure=None)
+    common = liveness.shared([a, b, c])
+    assert common[1] == {"203.0.113.50"} and common[3] == frozenset()
+    assert liveness.candidates(a) == [("203.0.113.50", 443, False), ("203.0.113.50", 2221, True)]
+    assert liveness.candidates(a, common[1]) == [("203.0.113.50", 2221, True)]
+    # эталон 1.4.244 (без версии) мог судить по общему адресу - его как будто нет
+    assert liveness.reachable({"state": "alive", "where": "203.0.113.50:443"}) is None
+    assert liveness.reachable({"state": "silent", "where": "", "v": liveness.BASE_V}) is False

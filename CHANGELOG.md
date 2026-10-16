@@ -4,6 +4,14 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.4.245] - 2026-10-17
+
+### Fixed
+- Недоступен: адрес, общий для нескольких серверов панели (фронт или балансировщик перед ними,
+  шлюз NAT), отвечает и тогда, когда одна из машин за ним лежит, а панель писала "сервер
+  отвечает, молчит агент". Теперь обычные порты на таком адресе не в счет, остается SSH со
+  сверкой версии в баннере. Эталоны, снятые 1.4.244, снимаются заново.
+
 ## [1.4.244] - 2026-10-17
 
 ### Added

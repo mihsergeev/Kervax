@@ -5339,6 +5339,7 @@ async def evaluate_servers(
     marks: list[tuple[int | None, int, int, int, int]] = []
     onboarding: set[int] = set()
     probes_left = _LIVENESS_PER_TICK
+    live_common = liveness.shared(servers)  # адреса, общие для нескольких серверов: там только SSH
 
     def apply(sid: int, key: str, value: object) -> None:
         cur_by_id[sid][key] = value
@@ -5593,7 +5594,7 @@ async def evaluate_servers(
                     # молчит агент или сам сервер: панель стучится к нему сама (app/liveness.py)
                     probes_left -= 1
                     try:
-                        live = await liveness.check(s)
+                        live = await liveness.check(s, common=live_common.get(s.id, frozenset()))
                     except Exception:
                         log.warning("не проверил, жив ли %s", s.name, exc_info=True)
                         live = None
