@@ -17,6 +17,7 @@ from app.api import (
     depmap,
     health,
     locations,
+    login_guard,
     maintenance,
     netlinks as netlinks_api,
     report,
@@ -98,6 +99,7 @@ def create_app() -> FastAPI:
     app.include_router(health.router, prefix="/api")
     app.include_router(auth.router, prefix="/api")
     app.include_router(users_api.router, prefix="/api")
+    app.include_router(login_guard.router, prefix="/api")
     app.include_router(audit.router, prefix="/api")
     app.include_router(checks.router, prefix="/api")
     app.include_router(alerts.router, prefix="/api")

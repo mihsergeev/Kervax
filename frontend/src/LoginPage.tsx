@@ -46,6 +46,9 @@ export function LoginPage({ onLogin }: Props) {
         } else {
           setError(t('Неверный логин или пароль'))
         }
+      } else if (err instanceof ApiError && err.status === 429 && err.message.startsWith('locked:')) {
+        // адрес заблокирован после неудачных входов: маркер с минутами до конца блокировки
+        setError(t('Слишком много неудачных входов с этого адреса, попробуйте через {n} мин.', { n: err.message.slice(7) }))
       } else {
         setError(err instanceof Error ? err.message : t('Не удалось войти'))
       }

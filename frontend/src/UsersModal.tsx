@@ -3,13 +3,17 @@ import {
   ApiError,
   createUser,
   deleteUser,
+  getLoginGuard,
   getUsersOverview,
   listAccessGroups,
   resetUserPassword,
+  saveLoginGuard,
+  unbanLogin,
   updateUser,
   MIN_PASSWORD_LEN,
   type AccessGroups,
   type AuditEntry,
+  type LoginGuard,
   type Role,
   type UserCard,
   type UsersOverview,
@@ -18,6 +22,8 @@ import { ROLE_LABEL, ROLE_SHORT, ROLE_WHAT, SECTION_LABEL, SECTIONS } from './ac
 import { useAuth } from './auth'
 import { CardNav, type SecDef } from './cardLayout'
 import { useI18n } from './i18n'
+import { LoginGuardSec } from './LoginGuardSec'
+import { banWords, guardDraftOf, sameGuard, type GuardDraft } from './loginGuard'
 import { NetTile } from './NetLinks'
 import { sinceShort } from './serverUtils'
 
@@ -39,6 +45,8 @@ const ACT: Record<string, string> = {
   login_2fa_fail: 'неверный код 2FA',
   login_blocked: 'вход заблокирован',
   login_lockout: 'блокировка входа',
+  login_guard: 'изменил защиту входа',
+  login_unban: 'разблокировал адрес',
   user_create: 'создал учетку',
   user_delete: 'удалил учетку',
   user_scope: 'изменил доступ учетки',
@@ -157,6 +165,8 @@ export function UsersModal({ onClose, onUnauthorized }: Props) {
   const { t } = useI18n()
   const { username: meName } = useAuth()
   const [ov, setOv] = useState<UsersOverview | null>(null)
+  const [guard, setGuard] = useState<LoginGuard | null>(null)
+  const [gDraft, setGDraft] = useState<GuardDraft | null>(null)
   const [groups, setGroups] = useState<AccessGroups>({ servers: [], sites: [] })
   const [sec, setSec] = useState('over')
   const [draft, setDraft] = useState<Draft | null>(null)
@@ -182,21 +192,26 @@ export function UsersModal({ onClose, onUnauthorized }: Props) {
     [onUnauthorized, t],
   )
   const load = useCallback(() => getUsersOverview().then(setOv).catch(fail), [fail])
+  const loadGuard = useCallback(() => getLoginGuard().then(setGuard).catch(fail), [fail])
   useEffect(() => {
     load()
+    loadGuard()
     listAccessGroups()
       .then(setGroups)
       .catch(() => setGroups({ servers: [], sites: [] }))
-  }, [load])
+  }, [load, loadGuard])
 
   const users = ov?.users ?? []
   const curUser = sec.startsWith('u') ? users.find((u) => `u${u.id}` === sec) : undefined
   const d = curUser ? (draft && draft.id === curUser.id ? draft : draftOf(curUser)) : null
-  const dirty = !!curUser && !!d && !sameDraft(d, draftOf(curUser))
+  const gd = guard ? (gDraft ?? guardDraftOf(guard)) : null
+  const gDirty = sec === 'guard' && !!guard && !!gd && !sameGuard(gd, guardDraftOf(guard))
+  const dirty = (!!curUser && !!d && !sameDraft(d, draftOf(curUser))) || gDirty
 
   const go = (id: string) => {
     if (dirty && !window.confirm(t('Уйти без сохранения? Изменения пропадут.'))) return
     setDraft(null)
+    setGDraft(null)
     setPw('')
     setErr(null)
     setMsg(null)
@@ -238,6 +253,18 @@ export function UsersModal({ onClose, onUnauthorized }: Props) {
       await load()
       setDraft(null)
       return t('Доступ сохранен.')
+    })
+  const saveGuard = () =>
+    act(async () => {
+      if (!gd) return
+      setGuard(await saveLoginGuard(gd))
+      setGDraft(null)
+      return t('Защита входа сохранена.')
+    })
+  const unban = (key: string) =>
+    act(async () => {
+      setGuard(await unbanLogin(key))
+      return t('Адрес {k} разблокирован.', { k: key })
     })
   const create = () =>
     act(async () => {
@@ -316,10 +343,12 @@ export function UsersModal({ onClose, onUnauthorized }: Props) {
     { id: 'over', label: 'Сводка', group: '' },
     ...users.map((u) => ({ id: `u${u.id}`, label: u.username, group: 'Учетки' })),
     { id: 'new', label: 'Новая учетка', group: 'Добавить' },
+    { id: 'guard', label: 'Защита входа', group: 'Защита' },
     { id: 'log', label: 'Журнал действий', group: 'Журнал' },
   ]
   const side: Record<string, string> = {}
   for (const u of users) side[`u${u.id}`] = t(ROLE_SHORT[u.role] ?? u.role)
+  if (guard?.bans.length) side.guard = t('блок {n}', { n: guard.bans.length })
   const cur = SECS.find((s) => s.id === sec) ?? SECS[0]
 
   const audit = ov?.audit ?? []
@@ -370,15 +399,7 @@ export function UsersModal({ onClose, onUnauthorized }: Props) {
                         })}
                       />
                       <NetTile label={t('С 2FA')} value={`${with2fa} / ${users.length}`} sub={t('включает сам пользователь')} />
-                      <button
-                        className="srv-tile-btn"
-                        onClick={() => {
-                          go('log')
-                          setLogKind('logins')
-                          setLogWho('')
-                        }}
-                        title={t('к журналу')}
-                      >
+                      <button className="srv-tile-btn" onClick={() => go('guard')} title={t('к защите входа')}>
                         <NetTile
                           label={t('Неудачных входов за сутки')}
                           value={String(ov.fails_24h)}
@@ -386,6 +407,24 @@ export function UsersModal({ onClose, onUnauthorized }: Props) {
                           tone={ov.fails_24h ? 'warn' : undefined}
                         />
                       </button>
+                      {guard && (
+                        <button className="srv-tile-btn" onClick={() => go('guard')} title={t('к защите входа')}>
+                          <NetTile
+                            label={t('Заблокированы сейчас')}
+                            value={guard.bans.length ? guard.bans.map((b) => b.key).slice(0, 2).join(', ') : t('никто')}
+                            sub={
+                              guard.bans.length > 2
+                                ? t('и еще {n}', { n: guard.bans.length - 2 })
+                                : t('после {n} неудач за {w} мин, {ban}', {
+                                    n: guard.max_failures,
+                                    w: guard.window_minutes,
+                                    ban: banWords(guard.ban_minutes, t),
+                                  })
+                            }
+                            tone={guard.bans.length ? 'warn' : undefined}
+                          />
+                        </button>
+                      )}
                     </div>
                     <table className="sec-tbl">
                       <thead>
@@ -571,6 +610,13 @@ export function UsersModal({ onClose, onUnauthorized }: Props) {
                   </>
                 )}
 
+                {cur.id === 'guard' &&
+                  (guard && gd ? (
+                    <LoginGuardSec guard={guard} draft={gd} onDraft={(x) => (setMsg(null), setGDraft(x))} onUnban={unban} busy={busy} t={t} />
+                  ) : (
+                    <p className="muted small">{t('загрузка…')}</p>
+                  ))}
+
                 {cur.id === 'log' && (
                   <>
                     <p className="muted small al-lead">
@@ -623,7 +669,7 @@ export function UsersModal({ onClose, onUnauthorized }: Props) {
           ) : dirty ? (
             <span className="al-dirty small">
               <span className="lk-dot lk-dot-warn" />
-              {t('Есть несохраненные изменения')} · {curUser?.username}
+              {t('Есть несохраненные изменения')} · {curUser ? curUser.username : t('Защита входа')}
             </span>
           ) : ov ? (
             <span className="muted small">
@@ -633,12 +679,17 @@ export function UsersModal({ onClose, onUnauthorized }: Props) {
           ) : null}
           <span className="al-foot-btns">
             {dirty && (
-              <button className="ghost" onClick={() => setDraft(null)} disabled={busy}>
+              <button className="ghost" onClick={() => (setDraft(null), setGDraft(null))} disabled={busy}>
                 {t('Отмена')}
               </button>
             )}
             {curUser && (
               <button onClick={saveAccess} disabled={!dirty || busy}>
+                {busy ? t('…') : t('Сохранить')}
+              </button>
+            )}
+            {cur.id === 'guard' && guard && (
+              <button onClick={saveGuard} disabled={!gDirty || busy}>
                 {busy ? t('…') : t('Сохранить')}
               </button>
             )}

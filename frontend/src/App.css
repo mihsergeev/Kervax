@@ -1903,6 +1903,12 @@ button.srv-tile-btn:hover .net-tile { border-color: var(--border-strong); backgr
 .us-role { max-width: 16rem; }
 .us-form { flex-wrap: wrap; }
 .us-form .field { flex: 1 1 12rem; min-width: 0; }
+/* защита входа (LoginGuardSec): правило и строка добавления в белый список */
+.form-row.lg-rule, .form-row.lg-add { flex-wrap: wrap; align-items: flex-end; }
+.form-row.lg-rule .field { flex: 0 1 14rem; min-width: 0; }
+.form-row.lg-add .field { flex: 1 1 12rem; min-width: 0; }
+.form-row.lg-add > button { margin-bottom: 0.5rem; }
+.type-chip.lg-banned { color: var(--degraded); }
 .us-pw { margin: 0; }
 .us-pw input { width: 16rem; max-width: 100%; }
 .us-who select { min-width: 10rem; }

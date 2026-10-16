@@ -119,8 +119,9 @@ get alerts about what they are responsible for.
 - The agent connects **out** over HTTPS. The panel never opens a connection into
   your servers and keeps only a SHA-256 of each agent token.
 - The panel refuses to start with a default or weak secret; passwords are at
-  least 12 characters. Sign-in is JWT plus optional TOTP, with login
-  rate-limiting and an audit log.
+  least 12 characters. Sign-in is JWT plus optional TOTP and an audit log; an
+  address is blocked after repeated failed sign-ins, with an allowlist that is
+  never blocked.
 - Nothing runs as root: the backend is uid 10001, the frontend is the
   unprivileged nginx image, and every container has `no-new-privileges`.
 - Roles are enforced in the API, not just in the UI: an account limited to a

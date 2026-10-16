@@ -1,4 +1,5 @@
 import ipaddress
+import math
 import secrets
 import string
 from datetime import datetime, timedelta, timezone
@@ -10,7 +11,7 @@ from sqlalchemy import and_, func, or_, select
 from app import alerts, audit, ratelimit, settings_store, totp
 from app.config import get_settings
 from app.deps import CurrentUser, SessionDep
-from app.models import AuditLog, User
+from app.models import AuditLog, LoginBan, User
 from app.schemas import (
     LoginRequest,
     PasswordChangeRequest,
@@ -69,20 +70,59 @@ def _client_key(request: Request) -> str:
     return str(chain[0]) if chain else host
 
 
-async def _record_failure(session, settings, key: str, username: str, action: str) -> None:
-    """Пишет неудачный вход в журнал; на переходе в блокировку — алерт (брутфорс)."""
-    locked_now = await ratelimit.record_failure(session, key)
+def ban_words(minutes: int) -> str:
+    return {15: "на 15 минут", 60: "на час", 360: "на 6 часов", 1440: "на сутки"}.get(
+        minutes, f"на {minutes} мин")
+
+
+async def _lockout_alert(session, settings, ban: LoginBan) -> None:
+    """Алерт о подборе пароля. Один на адрес: повторная блокировка того же адреса за сутки идет
+    без алерта (она и так на сутки). И не чаще раза в час: при подборе с сотни адресов иначе
+    пришла бы сотня сообщений - кого заблокировали молча, перечисляет следующий алерт, а все
+    видно в окне Пользователи."""
+    others = select(LoginBan.id).where(LoginBan.id != ban.id)
+    if await session.scalar(others.where(
+            LoginBan.alerted.is_(True), LoginBan.created_at >= ban.created_at - timedelta(hours=1)).limit(1)):
+        return
+    quiet = list(await session.scalars(select(LoginBan).where(
+        LoginBan.id != ban.id, LoginBan.alerted.is_(False), LoginBan.repeat.is_(False),
+        LoginBan.created_at >= ban.created_at - timedelta(days=1)).order_by(LoginBan.id)))
+    for b in [ban, *quiet]:
+        b.alerted = True
+    await session.commit()
+    minutes = round((ban.until - ban.created_at).total_seconds() / 60)
+    text = f"🚨 Kervax: {ban.failures} неудачных входов за 15 минут с адреса {ban.key}"
+    if ban.logins:
+        text += f" (логины: {ban.logins})"
+    text += f" - адрес заблокирован {ban_words(minutes)}."
+    keys = list(dict.fromkeys(b.key for b in quiet if b.key != ban.key))
+    if keys:
+        text += f"\nЗа сутки заблокированы еще: {', '.join(keys[:5])}"
+        text += f" и еще {len(keys) - 5}." if len(keys) > 5 else "."
+    text += "\nБелый список и разблокировка - в окне Пользователи, раздел Защита входа."
+    await alerts.security_alert(session, settings, text)
+
+
+async def _record_failure(
+    session, settings, key: str, username: str, action: str, guard: ratelimit.Guard, trusted: bool,
+) -> None:
+    """Пишет неудачный вход в журнал и считает его; на переходе в блокировку - запись о ней и
+    алерт (подбор пароля). Адрес из белого списка не считается: только запись в журнале."""
+    if trusted:
+        await audit.record(session, username, action, key, "адрес в белом списке")
+        return
+    ban = await ratelimit.record_failure(session, key, guard, username)
     await audit.record(session, username, action, key)
-    if locked_now:
-        await audit.record(
-            session, username, "login_lockout", key,
-            f"{ratelimit.MAX_FAILURES} неудачных попыток",
-        )
-        await alerts.security_alert(
-            session, settings,
-            f"🚨 Kervax: {ratelimit.MAX_FAILURES} неудачных попыток входа подряд "
-            f"с IP {key} — вход временно заблокирован.",
-        )
+    if ban is None:
+        return
+    minutes = round((ban.until - ban.created_at).total_seconds() / 60)
+    await audit.record(
+        session, username, "login_lockout", key,
+        f"{ban.failures} неудачных входов за 15 минут, блокировка {ban_words(minutes)}"
+        + (" (повторно за сутки)" if ban.repeat else ""),
+    )
+    if not ban.repeat:
+        await _lockout_alert(session, settings, ban)
 
 
 @router.post("/login", response_model=TokenResponse)
@@ -91,12 +131,14 @@ async def login(
 ) -> TokenResponse:
     settings = get_settings()
     key = _client_key(request)
-    if await ratelimit.is_locked(session, key):
-        await audit.record(session, body.username, "login_blocked", key, "rate-limited")
-        raise HTTPException(
-            status.HTTP_429_TOO_MANY_REQUESTS,
-            "Слишком много попыток входа — подождите несколько минут",
-        )
+    guard = await ratelimit.load(session)
+    trusted = guard.allowed(key) is not None
+    ban = None if trusted else await ratelimit.active_ban(session, key)
+    if ban is not None:
+        await ratelimit.note_blocked(session, ban)
+        left = (_aware(ban.until) - datetime.now(timezone.utc)).total_seconds()
+        # маркер для страницы входа: она пишет, через сколько минут пробовать
+        raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, f"locked:{max(1, math.ceil(left / 60))}")
     user = await session.scalar(select(User).where(User.username == body.username))
     # verify_password вызываем всегда (в т.ч. по фиктивному хэшу), чтобы время
     # ответа не зависело от существования логина
@@ -104,7 +146,7 @@ async def login(
         body.password, user.password_hash if user else _DUMMY_HASH
     )
     if user is None or not password_ok:
-        await _record_failure(session, settings, key, body.username, "login_fail")
+        await _record_failure(session, settings, key, body.username, "login_fail", guard, trusted)
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Неверный логин или пароль")
     if user.totp_enabled:
         # detail — машиночитаемый маркер для фронта (показать поле кода)
@@ -113,7 +155,7 @@ async def login(
         counter = totp.matched_counter(user.totp_secret, body.otp)
         # отвергаем неверный код И уже использованный (защита от replay)
         if counter is None or counter <= user.totp_last_counter:
-            await _record_failure(session, settings, key, body.username, "login_2fa_fail")
+            await _record_failure(session, settings, key, body.username, "login_2fa_fail", guard, trusted)
             raise HTTPException(status.HTTP_401_UNAUTHORIZED, "2fa_invalid")
         user.totp_last_counter = counter
         await session.commit()  # фиксируем счётчик ДО audit (у audit свой rollback)

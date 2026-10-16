@@ -83,6 +83,25 @@ class LoginFailure(Base):
     ts: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), index=True
     )
+    username: Mapped[str] = mapped_column(String(64), default="")  # какой логин пробовали
+
+
+class LoginBan(Base):
+    """Адрес, заблокированный после неудачных входов (см. app/ratelimit.py): до until вход с
+    него не проверяет пароль, а сразу отвечает 429. repeat - повторная блокировка за сутки (она
+    длиннее и без алерта), blocked - сколько попыток пришло во время блокировки."""
+
+    __tablename__ = "login_bans"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    key: Mapped[str] = mapped_column(String(64), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    until: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    failures: Mapped[int] = mapped_column(Integer, default=0)
+    logins: Mapped[str] = mapped_column(String(255), default="")
+    repeat: Mapped[bool] = mapped_column(Boolean, default=False)
+    blocked: Mapped[int] = mapped_column(Integer, default=0)
+    alerted: Mapped[bool] = mapped_column(Boolean, default=False)
 
 
 class AuditLog(Base):
