@@ -517,12 +517,12 @@ async def test_server_alert_flood_digest(tmp_path, monkeypatch):
         return []
 
     monkeypatch.setattr("app.alerts.send_alert", fake_send)
-    # порог 6 → 8 срабатываний схлопываются в ОДИН дайджест
+    # 8 одинаковых "недоступен" - одно сообщение со списком серверов (alerts.merge_storm)
     settings = Settings(alert_webhook="http://hook", alert_flood_threshold=6)
     await collector.evaluate_servers(factory, settings, now)
-    assert len(sent) == 1 and "🌊" in sent[0] and "8" in sent[0]
+    assert len(sent) == 1 and "8 серверов" in sent[0] and all(f"node{i}" in sent[0] for i in range(8))
 
-    # порог 0 = выкл → каждое сработавшее шлётся отдельно (8 сообщений)
+    # порог дайджеста 0 = выкл: склейка от него не зависит, все равно одно сообщение
     async with factory() as s:
         for srv in await s.scalars(__import__("sqlalchemy").select(Server)):
             srv.alert_state = None
@@ -530,7 +530,7 @@ async def test_server_alert_flood_digest(tmp_path, monkeypatch):
     sent.clear()
     settings = Settings(alert_webhook="http://hook", alert_flood_threshold=0)
     await collector.evaluate_servers(factory, settings, now)
-    assert len(sent) == 8
+    assert len(sent) == 1 and "8 серверов" in sent[0]
     await engine.dispose()
 
 

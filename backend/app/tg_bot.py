@@ -112,20 +112,25 @@ async def _mute(session, row: TgAlert, until: datetime | None) -> dict | None:
     obj, ids = _ref(row)
     now = datetime.now(timezone.utc)
     if obj == "srv" and ids:
-        s = await session.get(Server, ids[0])
-        if s is None:
+        # несколько серверов - одно сообщение про один сбой на всех (alerts.merge_storm)
+        servers = [s for s in [await session.get(Server, i) for i in ids] if s is not None]
+        if not servers:
             return None
         if until is not None:
-            prev = (s.alert_snoozes or {}).get(row.kind)
-            snoozes = {k: v for k, v in (s.alert_snoozes or {}).items()
-                       if k != row.kind and (_parse(v) or now) > now}
-            snoozes[row.kind] = until.isoformat()
-            s.alert_snoozes = snoozes
+            prev = {}
+            for s in servers:
+                prev[str(s.id)] = (s.alert_snoozes or {}).get(row.kind)
+                snoozes = {k: v for k, v in (s.alert_snoozes or {}).items()
+                           if k != row.kind and (_parse(v) or now) > now}
+                snoozes[row.kind] = until.isoformat()
+                s.alert_snoozes = snoozes
             return {"t": "snooze", "prev": prev}
-        mutes = list(s.alert_mutes or [])
-        added = row.kind not in mutes
-        if added:
-            s.alert_mutes = mutes + [row.kind]
+        added = []
+        for s in servers:
+            mutes = list(s.alert_mutes or [])
+            if row.kind not in mutes:
+                s.alert_mutes = mutes + [row.kind]
+                added.append(s.id)
         return {"t": "mute", "added": added}
     if obj == "chk" and ids:
         checks = [c for c in [await session.get(Check, i) for i in ids] if c is not None]
@@ -151,18 +156,23 @@ async def _unmute(session, row: TgAlert, how: dict) -> None:
     obj, ids = _ref(row)
     t = how.get("t")
     if obj == "srv" and ids:
-        s = await session.get(Server, ids[0])
-        if s is None:
-            return
-        if t == "snooze":
-            snoozes = dict(s.alert_snoozes or {})
-            snoozes.pop(row.kind, None)
-            prev = _parse(how.get("prev"))
-            if prev is not None and prev > datetime.now(timezone.utc):
-                snoozes[row.kind] = prev.isoformat()
-            s.alert_snoozes = snoozes
-        elif t == "mute" and how.get("added"):
-            s.alert_mutes = [m for m in (s.alert_mutes or []) if m != row.kind]
+        for n, i in enumerate(ids):
+            s = await session.get(Server, i)
+            if s is None:
+                continue
+            if t == "snooze":
+                # до 1.4.246 prev и added - про один сервер, без словаря и списка
+                p = how.get("prev")
+                snoozes = dict(s.alert_snoozes or {})
+                snoozes.pop(row.kind, None)
+                prev = _parse(p.get(str(i)) if isinstance(p, dict) else (p if n == 0 else None))
+                if prev is not None and prev > datetime.now(timezone.utc):
+                    snoozes[row.kind] = prev.isoformat()
+                s.alert_snoozes = snoozes
+            elif t == "mute":
+                a = how.get("added")
+                if (i in a) if isinstance(a, list) else (bool(a) and n == 0):
+                    s.alert_mutes = [m for m in (s.alert_mutes or []) if m != row.kind]
     elif obj == "chk":
         for i in ids:
             c = await session.get(Check, i)
@@ -236,20 +246,28 @@ async def _refresh(cfg: dict, row: TgAlert, tz: str) -> None:
 
 # --- эскалация --------------------------------------------------------------------------------
 
+async def _srv_wanted(session, row: TgAlert, sid: int, now: datetime) -> bool | None:
+    s = await session.get(Server, sid)
+    if s is None or not s.enabled:
+        return False
+    if (s.snooze_until is not None and _aware(s.snooze_until) > now) or row.kind in _server_mutes(s, now):
+        return False
+    lvl = (s.alert_state or {}).get(row.kind)
+    if isinstance(lvl, int) and not isinstance(lvl, bool) and lvl <= 0:
+        return None
+    return True
+
+
 async def _still_wanted(session, row: TgAlert, now: datetime) -> bool | None:
     """Стоит ли еще повторять: True - да, False - заглушили в панели или объекта нет (больше не
     повторять), None - беда ушла, а отбой не пришел (заглушен, мигание) - отметить решенным."""
     obj, ids = _ref(row)
     if obj == "srv" and ids:
-        s = await session.get(Server, ids[0])
-        if s is None or not s.enabled:
-            return False
-        if (s.snooze_until is not None and _aware(s.snooze_until) > now) or row.kind in _server_mutes(s, now):
-            return False
-        lvl = (s.alert_state or {}).get(row.kind)
-        if isinstance(lvl, int) and not isinstance(lvl, bool) and lvl <= 0:
-            return None
-        return True
+        # про несколько серверов: повторять, пока не вернутся все незаглушенные
+        res = [await _srv_wanted(session, row, i, now) for i in ids]
+        if True in res:
+            return True
+        return None if None in res else False
     if obj == "chk" and ids:
         c = await session.get(Check, ids[0])
         if c is None or not c.enabled:
