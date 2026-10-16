@@ -335,20 +335,24 @@ async def probe(ip: str, port: int, proxy: str | None) -> str:
     return await _direct(ip, port)
 
 
+def port_location(locs) -> Location | None:
+    """Через какую локацию смотреть порты нод снаружи: включенная локация-прокси, сначала
+    заведенная только для проверки портов (monitors выключено), потом socks5 (HTTP-прокси часто
+    пускают CONNECT только на 443). None - такой нет, порты смотрит сама панель."""
+    found: list[tuple[int, int, int, Location]] = []
+    for loc in locs:
+        scheme = urlsplit((loc.url or "").strip()).scheme
+        if loc.enabled and scheme in ("socks5", "socks5h", "http", "https"):
+            found.append((0 if loc.monitors is False else 1, 0 if scheme.startswith("socks") else 1, loc.id, loc))
+    return min(found, key=lambda x: x[:3])[3] if found else None
+
+
 async def pick_proxy(session: AsyncSession) -> tuple[str | None, str]:
-    """Включенная локация-прокси: сначала заведенная только для проверки портов (monitors
-    выключено), потом socks5 (HTTP-прокси часто пускают CONNECT только на 443). (url, имя);
-    без нее - (None, "панель")."""
-    found: list[tuple[int, int, str, str]] = []
-    for loc in await session.scalars(select(Location).where(Location.enabled.is_(True)).order_by(Location.id)):
-        url = (loc.url or "").strip()
-        scheme = urlsplit(url).scheme
-        if scheme in ("socks5", "socks5h", "http", "https"):
-            found.append((0 if loc.monitors is False else 1, 0 if scheme.startswith("socks") else 1, url, loc.name))
-    if not found:
+    """Прокси для проверки портов (port_location): (url, имя); без него - (None, "панель")."""
+    loc = port_location(await session.scalars(select(Location).order_by(Location.id)))
+    if loc is None:
         return None, "панель"
-    _own, _rank, url, name = min(found, key=lambda x: (x[0], x[1]))
-    return url, name
+    return loc.url.strip(), loc.name
 
 
 # ---- баннер SSH снаружи: та ли нода отвечает по внешнему адресу ----

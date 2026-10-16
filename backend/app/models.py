@@ -359,6 +359,11 @@ class Location(Base):
     # гонять через нее мониторы сайтов. Выключено - точка только для внешней проверки портов:
     # сайты, открытые лишь для своей сети, не дают ложных "недоступен из ..."
     monitors: Mapped[bool] = mapped_column(Boolean, default=True, server_default="1")
+    # куда локация выходит в интернет по последней проверке прокси: адрес и страна ('' - не
+    # определилось). exit_at - когда проверяли, None - еще ни разу: окно локаций узнает сам
+    exit_ip: Mapped[str] = mapped_column(String(64), default="", server_default="")
+    exit_country: Mapped[str] = mapped_column(String(2), default="", server_default="")
+    exit_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )

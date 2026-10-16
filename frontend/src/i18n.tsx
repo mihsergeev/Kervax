@@ -203,18 +203,14 @@ const EN: Record<string, string> = {
   'Изнутри сервера': 'From the server itself',
   'Из локаций': 'From locations',
   'Проверять из локаций (прокси)': 'Check from locations (proxies)',
-  'Прокси, через которые панель проверяет сайты (HTTP/HTTPS/SOCKS5), чтобы видеть доступность из разных сетей/регионов.':
-    'Proxies the panel checks sites through (HTTP/HTTPS/SOCKS5), to see availability from different networks/regions.',
   'Адрес прокси': 'Proxy URL',
   'напр. Германия': 'e.g. Germany',
-  'Локаций пока нет.': 'No locations yet.',
   'Удалить локацию «{name}»?': 'Delete location “{name}”?',
   'Включена': 'Enabled',
   'Ещё нет данных из локаций — проверка идёт в фоне.':
     'No location data yet — checks run in the background.',
   'проверено: {t}': 'checked: {t}',
   'socks5://… (пусто = напрямую)': 'socks5://… (empty = direct)',
-  'напрямую, без прокси': 'direct, no proxy',
   'напрямую': 'direct',
   'Время ответа · {loc}': 'Response time · {loc}',
   'Из каких локаций проверять:': 'Which locations to check from:',
@@ -1147,10 +1143,6 @@ const EN: Record<string, string> = {
     'The panel checked from its own address, and node firewalls often allow the panel by allowlist. Then "open" here includes ports closed to everyone else, so this check shows no red and sends no alerts. To see what is open to everyone, add a proxy in another network under "Locations".',
   'Красным - опасное: базы, очереди, etcd, kubelet, Docker API, node_exporter. Желтым - служебное: порты Kubernetes и сети подов, агенты и экспортеры метрик. Снаружи должно быть закрыто и то и другое, а если порт открыт специально, отметьте "открыт намеренно". Остальное (SSH, веб, ваши сервисы) - для сведения.':
     'Red is risky: databases, queues, etcd, kubelet, Docker API, node_exporter. Yellow is internal: Kubernetes and pod network ports, agents and metrics exporters. Both should be closed from outside, and if a port is open on purpose, mark it "open on purpose". The rest (SSH, web, your services) is for reference.',
-  'Через них же панель проверяет порты нод снаружи.': 'The panel also checks node ports from outside through them.',
-  'проверять через нее сайты': 'check sites through it',
-  'только порты нод: для сайтов, открытых лишь своей сети, не будет ложных "недоступен"': 'node ports only: sites open only to your network will not show false "unreachable"',
-  'только порты': 'ports only',
   'не проверить ({n}):': 'could not check ({n}):',
   'Что слушает': 'Listening',
   'Снаружи': 'From outside',
@@ -3151,6 +3143,97 @@ const EN: Record<string, string> = {
   'Домен истекает': 'Domain expiring',
   'SSL-сертификат': 'TLS certificate',
   'Домен': 'Domain',
+  // --- окно локаций разделами (LocationsModal) ---
+  'Уйти без сохранения? Изменения пропадут.':
+    'Leave without saving? The changes will be lost.',
+  'Локация добавлена.':
+    'Location added.',
+  'Где недоступно':
+    'Where it is down',
+  'Новая локация':
+    'New location',
+  'Откуда панель проверяет сайты и порты нод':
+    'Where the panel checks sites and node ports from',
+  'Нужны только название и адрес. Прокси проверяется сразу, сохранить можно только рабочий.':
+    'Only a name and an address are needed. The proxy is checked right away, and only a working one can be saved.',
+  'Настройки':
+    'Settings',
+  'выход в интернет:':
+    'exit to the internet:',
+  'Выход в интернет:':
+    'Exit to the internet:',
+  'HTTP, HTTPS или SOCKS5, логин и пароль можно в адресе: socks5://user:pass@host:1080.':
+    'HTTP, HTTPS or SOCKS5, a login and password can go in the address: socks5://user:pass@host:1080.',
+  'Пустой адрес - проверка с самой панели, это основная проверка всех мониторов.':
+    'An empty address means checking from the panel itself, which is the main check of all monitors.',
+  'Проверять через нее сайты':
+    'Check sites through it',
+  'Выключено - только порты нод снаружи: для сайтов, открытых лишь своей сети, не будет ложных "недоступен".':
+    'Off: only node ports from outside, so sites open only to your own network do not get a false "down".',
+  'Удалить локацию':
+    'Delete location',
+  'основная проверка':
+    'main check',
+  'без сайтов':
+    'no sites',
+  'порты нод снаружи':
+    'node ports from outside',
+  'выключена':
+    'off',
+  'Локация выключена: через нее ничего не проверяется.':
+    'The location is off: nothing is checked through it.',
+  'Эта локация только для внешней проверки портов нод: через нее панель смотрит, какие порты видны из интернета. Сайты через нее не проверяются, поэтому сайты, открытые лишь своей сети, не дают ложных "недоступен".':
+    'This location is only for checking node ports from outside: the panel uses it to see which ports are visible from the internet. Sites are not checked through it, so sites open only to your own network do not get a false "down".',
+  'Отсюда недоступны все сайты ({n}), а с самой панели часть из них отвечает: похоже, сломан сам прокси. Ошибка: {err}':
+    'All sites ({n}) are down from here, while some of them respond from the panel itself: the proxy itself looks broken. Error: {err}',
+  'Проверить прокси':
+    'Check proxy',
+  'мониторов':
+    'monitors',
+  'сайтов проверяется':
+    'sites checked',
+  'доступно за сутки':
+    'available over 24 h',
+  'средний ответ':
+    'average response',
+  'недоступны сейчас':
+    'down now',
+  'Недоступны отсюда':
+    'Down from here',
+  'только отсюда':
+    'only from here',
+  'и из других':
+    'from others too',
+  '"Только отсюда" - из остальных мест сайт отвечает: похоже на блокировку или фильтр по стране, а не на падение.':
+    '"Only from here": the site responds from the other places, which looks like blocking or a country filter rather than an outage.',
+  'отсюда не проверяется':
+    'not checked from here',
+  'медленно':
+    'slow',
+  'Сайты, которые сейчас недоступны хоть откуда-то: с самой панели или через локации. Недоступен из одной, а из других отвечает - похоже на блокировку по стране или фильтр, а не на падение сайта.':
+    'Sites that are down from at least one place right now: from the panel itself or through locations. Down from one place but responding from others looks like blocking by country or a filter, not a site outage.',
+  'Прокси локации «{name}» не отвечает: ее столбец в таблице не в счет.':
+    'The proxy of the location "{name}" does not respond: its column in the table does not count.',
+  'Через прокси пока ничего не проверяется: добавьте локацию, тогда будет видно, откуда сайт недоступен.':
+    'Nothing is checked through a proxy yet: add a location to see where a site is down from.',
+  '✓ Все сайты отвечают отовсюду.':
+    '✓ All sites respond from everywhere.',
+  'Сайт':
+    'Site',
+  'Сама панель':
+    'The panel itself',
+  'Показаны первые 300 сайтов.':
+    'The first 300 sites are shown.',
+  'напрямую, с самой панели':
+    'direct, from the panel itself',
+  'SOCKS5-прокси':
+    'SOCKS5 proxy',
+  'HTTPS-прокси':
+    'HTTPS proxy',
+  'HTTP-прокси':
+    'HTTP proxy',
+  '+ Добавить локацию':
+    '+ Add location',
   // --- окно алертов разделами (AlertsModal) ---
   'Чаты и группы':
     'Chats and groups',

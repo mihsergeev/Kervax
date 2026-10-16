@@ -1287,6 +1287,31 @@ async def test_proxy(proxy_url: str, timeout_s: float = 10.0) -> tuple[bool, str
     return False, last or "прокси недоступен", None
 
 
+_EXIT_TRACE = "https://cloudflare.com/cdn-cgi/trace"
+
+
+async def proxy_exit(proxy_url: str, timeout_s: float = 6.0) -> tuple[str, str]:
+    """Куда выходит в интернет прокси, а с пустым адресом - сама панель: (адрес, ISO-код
+    страны). Cloudflare trace отдает и то и другое, страну без loc= берем из офлайн-таблицы по
+    адресу. Это подсказка в окне локаций, а не проверка: не вышло - ('', '')."""
+    from app import geoip
+
+    try:
+        async with httpx.AsyncClient(
+            timeout=timeout_s, proxy=proxy_url.strip() or None, headers={"User-Agent": _USER_AGENT},
+        ) as client:
+            r = await client.get(_EXIT_TRACE)
+        text = str(getattr(r, "text", "") or "")
+    except Exception:  # noqa: BLE001 - выход не узнали, прокси при этом может работать
+        return "", ""
+    kv = dict(line.split("=", 1) for line in text.splitlines() if "=" in line)
+    ip = kv.get("ip", "").strip()[:64]
+    cc = kv.get("loc", "").strip().upper()
+    if not re.fullmatch(r"[A-Z]{2}", cc) or cc in ("XX", "T1"):
+        cc = geoip.country_of(ip)
+    return ip, cc
+
+
 async def run_check(check) -> CheckOutcome:
     """Исполняет монитор с повторами при неуспехе: до (1 + retries) попыток.
     Возвращает первый успех (up); если успеха не было — исход последней попытки.

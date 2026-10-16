@@ -663,7 +663,14 @@ export default function App() {
         <MaintModal onClose={() => setModal(null)} onUnauthorized={logout} />
       )}
       {modal === 'locations' && (
-        <LocationsModal onClose={() => setModal(null)} onUnauthorized={logout} />
+        <LocationsModal
+          onClose={() => setModal(null)}
+          onUnauthorized={logout}
+          onOpenCheck={(id) => {
+            setModal(null)
+            openTarget('sites', id)
+          }}
+        />
       )}
       {modal === 'retention' && (
         <RetentionModal onClose={() => setModal(null)} onUnauthorized={logout} />

@@ -954,6 +954,9 @@ class LocationCreate(BaseModel):
     url: str = Field(default="", max_length=512)
     enabled: bool = True
     monitors: bool = True  # False - только для внешней проверки портов
+    # куда прокси выходит в интернет - из проверки, которую окно только что сделало
+    exit_ip: str = Field(default="", max_length=64)
+    exit_country: str = Field(default="", max_length=2)
 
 
 class LocationUpdate(BaseModel):
@@ -961,6 +964,8 @@ class LocationUpdate(BaseModel):
     url: str | None = Field(default=None, max_length=512)
     enabled: bool | None = None
     monitors: bool | None = None
+    exit_ip: str | None = Field(default=None, max_length=64)
+    exit_country: str | None = Field(default=None, max_length=2)
 
 
 class LocationTest(BaseModel):
@@ -971,6 +976,46 @@ class ProxyTestResult(BaseModel):
     ok: bool
     message: str
     latency_ms: int | None = None
+    # куда прокси выходит в интернет: адрес и ISO-код страны, '' - не определилось
+    exit_ip: str = ""
+    exit_country: str = ""
+
+
+# Окно локаций: как каждая проверяет сейчас и за сутки, и где какой сайт недоступен
+class LocationStat(BaseModel):
+    id: int
+    checks: int = 0  # сколько мониторов проверяется через нее (у "напрямую" - все включенные)
+    up: int = 0
+    degraded: int = 0
+    down: int = 0
+    up_pct: float | None = None  # доля проверок за сутки без "недоступен"
+    avg_ms: int | None = None
+    last_at: datetime | None = None
+    # все проверенные через нее сайты недоступны, а напрямую часть отвечает: сломан сам прокси
+    broken: bool = False
+    error: str = ""
+
+
+class LocSiteCell(BaseModel):
+    status: str
+    message: str = ""
+    fails: int = 0
+
+
+class LocSiteRow(BaseModel):
+    check_id: int
+    name: str
+    group: str = ""
+    main: LocSiteCell  # основная проверка, с самой панели
+    cells: dict[int, LocSiteCell] = {}  # id локации-прокси -> последний результат
+
+
+class LocationsOverview(BaseModel):
+    locations: list[LocationStat]
+    # через какую локацию панель смотрит порты нод снаружи; None - сама панель
+    ports_location_id: int | None = None
+    # сайты, недоступные хоть откуда-то (сломанные прокси не в счет)
+    sites: list[LocSiteRow]
 
 
 class LocationOut(BaseModel):
@@ -981,6 +1026,9 @@ class LocationOut(BaseModel):
     url: str
     enabled: bool
     monitors: bool = True
+    exit_ip: str = ""
+    exit_country: str = ""
+    exit_at: datetime | None = None
     created_at: datetime
 
 
