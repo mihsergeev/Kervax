@@ -14,6 +14,7 @@ import {
   type UserCard,
   type UsersOverview,
 } from './api'
+import { ROLE_LABEL, ROLE_SHORT, ROLE_WHAT, SECTION_LABEL, SECTIONS } from './access'
 import { useAuth } from './auth'
 import { CardNav, type SecDef } from './cardLayout'
 import { useI18n } from './i18n'
@@ -30,33 +31,6 @@ type Props = {
 }
 type T = (s: string, p?: Record<string, string | number>) => string
 
-// Разделы верхнего меню. Ключи ДОЛЖНЫ совпадать с ALL_SECTIONS в backend/app/deps.py:
-// по ним бэкенд решает, какие маршруты открыты, а фронт - какие вкладки рисовать.
-const SECTIONS: { key: string; label: string }[] = [
-  { key: 'sites', label: 'Сайты' },
-  { key: 'servers', label: 'Серверы' },
-  { key: 'docker', label: 'Докер' },
-  { key: 'kuber', label: 'Кубер' },
-  { key: 'services', label: 'Сервисы' },
-  { key: 'backups', label: 'Бэкапы' },
-]
-const SECTION_LABEL: Record<string, string> = Object.fromEntries(SECTIONS.map((x) => [x.key, x.label]))
-
-const ROLE_LABEL: Record<string, string> = {
-  admin: 'Админ',
-  editor: 'Правка',
-  viewer: 'Только просмотр',
-}
-const ROLE_SHORT: Record<string, string> = {
-  admin: 'админ',
-  editor: 'правка',
-  viewer: 'просмотр',
-}
-const ROLE_WHAT: Record<string, string> = {
-  admin: 'Может все, включая учетки и настройки панели.',
-  editor: 'Правит в разрешенных разделах, учетки и настройки панели ему не видны.',
-  viewer: 'Только смотрит, ничего не меняет.',
-}
 
 // действия журнала по-человечески; чего здесь нет - показываем как записано
 const ACT: Record<string, string> = {

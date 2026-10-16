@@ -435,7 +435,7 @@ def check_password_len() -> None:
         fail("password", f"минимум пароля разошёлся: бэкенд {back.group(1)}, фронт {front.group(1)}")
     # число, вписанное мимо константы, — та же беда в профиль
     hard = re.findall(r"(?:password|пароль)[^\n]{0,40}length\s*[<>]=?\s*(\d+)",
-                      read("frontend/src/PasswordModal.tsx") + read("frontend/src/UsersModal.tsx"),
+                      read("frontend/src/AccountModal.tsx") + read("frontend/src/UsersModal.tsx"),
                       re.I)
     for n in hard:
         fail("password", f"длина пароля вписана числом ({n}) вместо MIN_PASSWORD_LEN")

@@ -51,8 +51,6 @@ const EN: Record<string, string> = {
 
   // --- смена пароля ---
   'Сменить пароль': 'Change password',
-  'Смена пароля завершит все другие активные сессии.':
-    'Changing the password ends all other active sessions.',
   'Текущий пароль': 'Current password',
   'Новый пароль (мин. {n} символов)': 'New password (min. {n} characters)',
   'Повторите новый пароль': 'Repeat new password',
@@ -63,7 +61,6 @@ const EN: Record<string, string> = {
   'Пароли не совпадают': 'Passwords do not match',
 
   // --- 2FA ---
-  'Двухфакторная аутентификация': 'Two-factor authentication',
   '2FA включена. Вход требует код из приложения.':
     '2FA is on. Login requires a code from the app.',
   'Чтобы отключить, введите текущий код из приложения-аутентификатора.':
@@ -2436,6 +2433,47 @@ const EN: Record<string, string> = {
   'Монитор': 'Monitor',
   'Остальные {n} без сбоев': 'The other {n} had no failures',
   'Отчет': 'Report',
+  // --- Моя учетка и О панели разделами (AccountModal, AboutModal) ---
+  'Ваша учетка: пароль, вход по коду из приложения и свои алерты в Telegram. Роль, разделы и группы задает админ в окне Пользователи.':
+    'Your account: password, sign-in with an app code and your own Telegram alerts. The role, sections and groups are set by an admin in the Users window.',
+  'Вход':
+    'Sign-in',
+  'Код из приложения':
+    'App code',
+  'Моя учетка':
+    'My account',
+  'Пароль менялся':
+    'Password changed',
+  'Последние входы':
+    'Recent sign-ins',
+  'Последний раз пароль менялся {d}.':
+    'The password was last changed on {d}.',
+  'Смена пароля завершит все другие сессии: везде, кроме этого окна, придется войти заново.':
+    'Changing the password ends every other session: you will have to sign in again everywhere except this window.',
+  'Уведомления':
+    'Notifications',
+  'в журнале нет':
+    'not in the log',
+  'вкл':
+    'on',
+  'вход только по паролю':
+    'password only',
+  'заблокирован после перебора':
+    'blocked after repeated failures',
+  'под вашим логином':
+    'with your login',
+  'при входе спрашивается код':
+    'a code is asked at sign-in',
+  'приходят':
+    'arrive',
+  'чат {id}':
+    'chat {id}',
+  'чат не привязан':
+    'chat not linked',
+  'Логотип':
+    'Logo',
+  'О панели':
+    'About',
   // --- окно История алертов разделами (AlertHistoryModal) ---
   'Все сообщения':
     'All messages',
@@ -3022,14 +3060,11 @@ const EN: Record<string, string> = {
   'По этому инциденту алерт не отправлялся.': 'No alert was sent for this incident.',
   'Алерт уходит после {n} неудачных проверок подряд — это около {m} мин непрерывного сбоя. Этот инцидент закончился раньше. Порог меняется в настройках монитора.':
     'An alert is sent after {n} consecutive failures — about {m} min of continuous downtime. This incident ended sooner. The threshold is in the monitor settings.',
-  'Мои алерты в Telegram': 'My Telegram alerts',
   'О панели Kervax': 'About Kervax',
   'версия': 'version',
   'Лицензия': 'License',
   'Следит за сайтами, серверами, Docker, Kubernetes и бэкапами — и пишет в Telegram, когда что-то ломается.':
     'Watches sites, servers, Docker, Kubernetes and backups — and messages you on Telegram when something breaks.',
-  'Поставить свой логотип': 'Use your own logo',
-  'свернуть настройку логотипа': 'hide logo settings',
   'Исходный код на GitHub': 'Source code on GitHub',
   'Сообщить о проблеме': 'Report an issue',
   'Заменяет логотип в шапке и на экране входа. PNG, SVG, WebP или JPEG до {n} КБ.':

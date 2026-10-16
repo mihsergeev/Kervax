@@ -462,6 +462,14 @@ input:focus {
   gap: 0;
   padding-bottom: 0.9rem;
 }
+/* маленькие окна в той же раскладке (Моя учетка, О панели): разделов мало, полная высота пустая */
+.alerts-modal.al-small {
+  width: min(820px, calc(100vw - 2rem));
+  height: min(620px, calc(100vh - 8vh - 2rem));
+  height: min(620px, calc(100dvh - 8vh - 2rem));
+}
+.ac-form { display: flex; flex-direction: column; gap: 0.6rem; margin-bottom: 0.6rem; }
+.qr-wrap.ac-qr { align-self: flex-start; }
 /* плитка «Выключены» — нейтрально-приглушённая цифра */
 .stat-num-muted {
   color: var(--text-muted);
@@ -5165,18 +5173,6 @@ button.svc-site-on:hover {
   border-color: color-mix(in srgb, var(--accent) 55%, var(--border-strong));
   background: color-mix(in srgb, var(--accent) 12%, var(--bg-card));
 }
-/* переключатель настройки логотипа — тоже кнопка, а не голубая ссылка */
-.about-brand-toggle {
-  padding: 0.38rem 0.75rem;
-  font-size: 0.85rem;
-}
-/* настройка логотипа живёт здесь же, но свёрнутой: её трогают один раз */
-.about-branding {
-  margin-top: 1rem;
-  padding-top: 0.9rem;
-  border-top: 1px solid var(--border);
-}
-
 /* ---- личные алерты в Telegram ---- */
 .tg-state {
   display: flex;
