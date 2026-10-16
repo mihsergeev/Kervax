@@ -453,9 +453,14 @@ input:focus {
 .users-modal {
   width: min(560px, calc(100vw - 2rem));
 }
-/* алерты: длинные токены/URL — модалка заметно шире базовой */
+/* алерты: как карточка сервера - меню разделов слева, один раздел со своей прокруткой, а кнопки
+   внизу окна видны всегда. Высота - вся видимая часть под отступами .modal-backdrop */
 .alerts-modal {
-  width: min(680px, calc(100vw - 2rem));
+  width: min(1040px, calc(100vw - 2rem));
+  height: min(860px, calc(100vh - 8vh - 2rem));
+  height: min(860px, calc(100dvh - 8vh - 2rem));
+  gap: 0;
+  padding-bottom: 0.9rem;
 }
 /* плитка «Выключены» — нейтрально-приглушённая цифра */
 .stat-num-muted {
@@ -4259,72 +4264,6 @@ textarea:focus {
   font: inherit;
   font-size: 0.85rem;
 }
-.arule-scope {
-  display: flex;
-  align-items: center;
-  gap: 0.7rem;
-  flex-wrap: wrap;
-}
-/* поиск-типахед выбора групп/серверов */
-.scope-picker {
-  display: flex;
-  flex-direction: column;
-  gap: 0.4rem;
-}
-.scope-chips {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.3rem;
-}
-.scope-chip-x {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.3rem;
-  background: rgba(53, 99, 233, 0.15);
-  border: 1px solid #3563e9;
-  border-radius: 7px;
-  padding: 0.2rem 0.45rem;
-  font-size: 0.8rem;
-  color: var(--text);
-  cursor: pointer;
-}
-.scope-chip-x:hover .scope-x {
-  color: #f87171;
-}
-.scope-x {
-  color: var(--text-muted);
-  font-size: 0.7rem;
-}
-.scope-search {
-  font-size: 0.82rem;
-}
-.scope-drop {
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: var(--bg);
-  max-height: 220px;
-  overflow-y: auto;
-}
-.scope-drop-item {
-  display: block;
-  width: 100%;
-  text-align: left;
-  background: transparent;
-  border: none;
-  box-shadow: none;
-  padding: 0.4rem 0.7rem;
-  color: var(--text);
-  font: inherit;
-  font-size: 0.85rem;
-  cursor: pointer;
-}
-.scope-drop-item:hover {
-  background: var(--hover);
-}
-.scope-drop-empty,
-.scope-drop-more {
-  padding: 0.4rem 0.7rem;
-}
 
 /* галочка-переключатель с подписью и описанием */
 .check-toggle {
@@ -6940,8 +6879,52 @@ button.am-link.small { font-size: 0.82rem; }
 .am-box .field + .am-row { margin-top: 0.4rem; }
 /* в форме монитора переключатели на телефоне переносятся, а не вылезают за карточку */
 .am .win-switch { flex-wrap: wrap; max-width: 100%; }
-/* чаты по группам в настройках алертов */
-.route-card { border: 1px solid var(--border); border-radius: 10px; padding: 0.6rem 0.8rem; margin: 0.6rem 0; }
-.route-card .tg-row { margin-bottom: 0.3rem; }
-.route-main { margin-top: 0.8rem; gap: 0.4rem; }
+/* окно алертов (AlertsModal): шапка, меню и раздел, подвал с кнопками */
+.al-head { display: flex; align-items: center; gap: 0.8rem; padding-bottom: 0.8rem; }
+.al-head > .ghost { margin-left: auto; }
+.al-state { display: inline-flex; align-items: center; gap: 0.4rem; }
+.al-body { flex: 1 1 auto; min-height: 0; display: grid; grid-template-columns: 200px minmax(0, 1fr); border-top: 1px solid var(--border); }
+.al-body > .srv-nav { position: static; max-height: none; min-height: 0; }
+.al-main { min-width: 0; min-height: 0; overflow-y: auto; padding: 0.55rem 0.3rem 1rem 1.2rem; border-left: 1px solid var(--border); scrollbar-width: thin; }
+.al-main .srv-main-head { min-height: 0; margin-bottom: 0.2rem; }
+.al-lead { margin: 0 0 0.9rem; max-width: 46rem; }
+.al-main .srv-sec { max-width: 52rem; }
+.al-foot { display: flex; align-items: center; flex-wrap: wrap; gap: 0.6rem 1rem; padding-top: 0.8rem; border-top: 1px solid var(--border); }
+.al-foot-btns { display: flex; gap: 0.6rem; margin-left: auto; }
+.al-dirty { display: inline-flex; align-items: center; gap: 0.4rem; color: var(--degraded); }
+.al-narrow { max-width: 22rem; }
+.al-note { display: flex; align-items: center; flex-wrap: wrap; gap: 0.5rem 0.8rem; padding: 0.55rem 0.8rem; border: 1px solid; border-radius: 9px; font-size: 0.85rem; line-height: 1.4; }
+.al-note > span { flex: 1 1 18rem; }
+.al-note-warn { color: var(--degraded); border-color: color-mix(in srgb, var(--degraded) 40%, var(--border)); background: color-mix(in srgb, var(--degraded) 7%, transparent); }
+.al-note-bad { color: var(--down); border-color: color-mix(in srgb, var(--down) 40%, var(--border)); background: color-mix(in srgb, var(--down) 7%, transparent); }
+.al-box { display: flex; flex-direction: column; gap: 0.7rem; padding: 0.75rem 0.9rem; border: 1px solid var(--border); border-radius: 11px; }
+.al-box-head { display: flex; align-items: center; flex-wrap: wrap; gap: 0.6rem; }
+.al-box-acts { display: flex; gap: 0.4rem; margin-left: auto; }
+.al-pick { display: flex; flex-direction: column; gap: 0.35rem; }
+.al-chips { display: flex; flex-wrap: wrap; gap: 0.35rem; }
+button.al-chip { padding: 0.18rem 0.65rem; border: 1px solid var(--border-strong); border-radius: 999px; background: transparent; box-shadow: none; color: var(--text-muted); font-size: 0.8rem; font-weight: 500; }
+button.al-chip:hover { background: var(--hover); color: var(--text); }
+button.al-chip.al-chip-on,
+button.al-chip.al-chip-on:hover { border-color: color-mix(in srgb, var(--accent) 70%, transparent); background: color-mix(in srgb, var(--accent) 18%, transparent); color: var(--text); }
+.al-add { align-self: flex-start; }
+/* правила алертов в окне - в две колонки, их больше шестидесяти */
+.al-main .arule-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(21rem, 100%), 1fr)); align-items: start; margin-top: 0; }
+/* карта "группа -> куда уходят алерты" */
+.al-flow { display: flex; flex-direction: column; gap: 0.35rem; }
+.al-flow-row { display: grid; grid-template-columns: minmax(8rem, 15rem) 1.4rem minmax(0, 1fr); align-items: center; gap: 0.5rem; padding: 0.4rem 0.7rem; border: 1px solid var(--border); border-radius: 9px; background: var(--bg); }
+.al-flow-g { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 0.5rem; min-width: 0; line-height: 1.3; }
+.al-flow-g b { font-size: 0.9rem; overflow-wrap: anywhere; }
+.al-flow-ar { color: var(--text-muted); text-align: center; }
+.al-flow-to { display: flex; flex-wrap: wrap; align-items: center; gap: 0.35rem; }
+.al-flow-lost { border-color: color-mix(in srgb, var(--down) 45%, var(--border)); }
+.al-dest { padding: 0.12rem 0.6rem; border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent); border-radius: 999px; background: color-mix(in srgb, var(--accent) 14%, transparent); color: var(--text); font-size: 0.8rem; }
+.al-dest-main { border-color: var(--border-strong); background: transparent; }
+.route-main { gap: 0.4rem; }
 .route-main .win-switch { align-self: flex-start; flex-wrap: wrap; }
+@media (max-width: 760px) {
+  .alerts-modal { padding: 1rem 0.9rem 0.8rem; }
+  .al-body { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); border-top: 0; }
+  .al-main { padding: 0.6rem 0 1rem; border-left: 0; }
+  .al-flow-row { grid-template-columns: minmax(0, 1fr); gap: 0.3rem; }
+  .al-flow-ar { display: none; }
+}

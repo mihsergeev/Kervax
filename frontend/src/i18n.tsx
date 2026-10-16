@@ -2214,11 +2214,8 @@ const EN: Record<string, string> = {
   'Пока сервер молчит, их алерты ждут его, а сами мониторы названы в сообщении про сервер': 'While the server is silent, their alerts wait for it, and the monitors are listed in the message about the server',
   'Наверх': 'Back to top',
   'Текст сообщения': 'Message text',
-  'ко всем': 'all',
   'Не слать алерты этого сервера:': 'Mute these alerts for this server:',
   'Не слать алерты этого монитора:': 'Mute these alerts for this monitor:',
-  'Правила действуют на все. Пороги и исключения — в настройках конкретного сервера/монитора.':
-    'Rules apply to all. Thresholds and exceptions live in the specific server/monitor settings.',
   'Недоступен / деградация': 'Down / degraded',
   'Отвечает через раз': 'Intermittent failures',
   'Частичная доступность (локации)': 'Partial availability (locations)',
@@ -2227,7 +2224,6 @@ const EN: Record<string, string> = {
   'Температура диска': 'Disk temperature',
   'Температура CPU': 'CPU temperature',
   'Перезагрузка': 'Reboot',
-  'Антифлуд': 'Flood control',
   'Группировать при ≥ N алертов за цикл (0 = выкл)': 'Group at ≥ N alerts per cycle (0 = off)',
   'При массовых событиях (упал стек/аплинк) шлём один дайджест вместо потока сообщений.': 'On mass events (a stack/uplink going down) we send one digest instead of a flood of messages.',
   'Соединения': 'Connections',
@@ -2360,8 +2356,6 @@ const EN: Record<string, string> = {
 
   // --- алерты / инциденты / uptime ---
   'Алерты': 'Alerts',
-  'Уведомления о падении/восстановлении мониторов и скором истечении сертификатов.':
-    'Notifications about monitor downtime/recovery and soon-expiring certificates.',
   'Токен бота': 'Bot token',
   'Адрес API (для обхода блокировок)': 'API URL (bypass blocking)',
   'Свой прокси/зеркало Bot API, если api.telegram.org недоступен. Пусто = по умолчанию.':
@@ -2384,11 +2378,8 @@ const EN: Record<string, string> = {
   'Текст': 'Text',
   'Поиск группы…': 'Search group…',
   'Поиск сервера…': 'Search server…',
-  'Сохранить правила': 'Save rules',
   'Не слать алерты (пауза)': 'Mute alerts (pause)',
   'Кнопки под алертами и команды боту': 'Buttons under alerts and bot commands',
-  'Под алертом: заглушить на час, до утра или насовсем, «взял». Команды в чате: /status, /mutes. Панель сама читает сообщения бота: если этого бота уже читает другая программа или вторая панель, заведите для панели отдельного бота.':
-    'Under each alert: mute for an hour, until morning or for good, "on it". Chat commands: /status, /mutes. The panel reads the bot updates itself: if another program or a second panel already reads this bot, create a separate bot for this panel.',
   'Часовой пояс («до утра» = до 9:00)': 'Time zone ("until morning" = until 9:00)',
   'Бот {bot} читается, кнопки работают': 'Bot {bot} is being read, buttons work',
   'Этого бота уже читает другая программа или панель. Заведите для панели отдельного бота у @BotFather и укажите его токен.':
@@ -2746,7 +2737,6 @@ const EN: Record<string, string> = {
   'Временно тушит все уведомления. Инциденты продолжают фиксироваться.':
     'Temporarily silences all notifications. Incidents are still recorded.',
   '⏸ Алерты на паузе': '⏸ Alerts paused',
-  'Каналы настроены ✓': 'Channels configured ✓',
   'Каналы не настроены': 'Channels not configured',
   'Заполните Telegram (токен и Chat ID) или Webhook.':
     'Fill in Telegram (token and Chat ID) or a Webhook.',
@@ -3161,11 +3151,70 @@ const EN: Record<string, string> = {
   'Домен истекает': 'Domain expiring',
   'SSL-сертификат': 'TLS certificate',
   'Домен': 'Domain',
+  // --- окно алертов разделами (AlertsModal) ---
+  'Чаты и группы':
+    'Chats and groups',
+  'Бот и адрес API':
+    'Bot and API address',
+  'Кнопки и эскалация':
+    'Buttons and escalation',
+  'Антифлуд и пауза':
+    'Flood control and pause',
+  'Куда слать':
+    'Where to send',
+  'Как слать':
+    'How to send',
+  'Что слать':
+    'What to send',
+  'Куда уходят алерты каждой группы. Основной чат получает все или только то, что не забрали чаты групп.':
+    'Where the alerts of each group go. The main chat gets everything or only what the group chats did not take.',
+  'Токен выдает @BotFather. Один бот шлет во все чаты: основной, чаты групп и эскалацию.':
+    'The token comes from @BotFather. One bot sends to all chats: the main one, group chats and escalation.',
+  'Для своих систем: каждый алерт уходит POST-запросом, текст в поле text JSON. Webhook получает все алерты, без деления по группам.':
+    'For your own systems: every alert is sent as a POST request, the text is in the text field of the JSON. The webhook gets all alerts, without splitting by group.',
+  'Что можно сделать с алертом прямо в Telegram.':
+    'What you can do with an alert right in Telegram.',
+  'Когда что-то упало массово, и когда алерты нужно на время выключить.':
+    'When many things fail at once, and when alerts need to be turned off for a while.',
+  'Какие алерты о серверах слать и каким текстом. Пороги и исключения - в карточке сервера.':
+    'Which server alerts to send and with what text. Thresholds and exceptions are in the server card.',
+  'Какие алерты о сайтах слать и каким текстом. Пороги и исключения - в карточке монитора.':
+    'Which site alerts to send and with what text. Thresholds and exceptions are in the monitor card.',
+  'Закрыть без сохранения? Изменения пропадут.':
+    'Close without saving? The changes will be lost.',
+  'Каналы настроены':
+    'Channels configured',
+  'Сначала укажите токен бота: без него в Telegram ничего не уйдет.':
+    'Set the bot token first: without it nothing goes to Telegram.',
+  'Под алертом: заглушить на час, до утра или насовсем, «взял». Команды в чате: /status, /mutes, /id. Панель сама читает сообщения бота: если этого бота уже читает другая программа или вторая панель, заведите для панели отдельного бота.':
+    'Under each alert: mute for an hour, until morning or for good, "on it". Chat commands: /status, /mutes, /id. The panel reads the bot updates itself: if another program or a second panel already reads this bot, create a separate bot for this panel.',
+  'Эскалация работает вместе с кнопками: алерт повторяется, пока никто не нажал «взял».':
+    'Escalation works together with the buttons: the alert is repeated until somebody presses "on it".',
+  'Есть несохраненные изменения':
+    'There are unsaved changes',
+  'Основной чат':
+    'Main chat',
+  'серверы и сайты':
+    'servers and sites',
+  'сайты':
+    'sites',
+  'Общие алерты':
+    'Panel-wide alerts',
+  'про саму панель':
+    'about the panel itself',
+  'никуда':
+    'nowhere',
+  'Webhook получает все алерты, без деления по группам.':
+    'The webhook gets all alerts, without splitting by group.',
+  'Чат для групп':
+    'Group chat',
+  '+ Чат для групп':
+    '+ Group chat',
+  'У видов алертов ({n}) осталось старое ограничение по группам или объектам: алерты остальных по ним не уходят никуда, даже в основной чат.':
+    'Alert types ({n}) still have an old limit by group or object: alerts of everything else for them go nowhere, not even to the main chat.',
   // --- чаты по группам (AlertsModal) ---
   'групп нет':
     'no groups',
-  'Чаты по группам':
-    'Chats by group',
   'Алерты серверов и сайтов из выбранных групп уходят в отдельный чат: например, разработчикам - только про их проект. Бота нужно добавить в этот чат. Id группы видно в Telegram, а если включены команды боту, бот подскажет его в ответ на /id.':
     'Alerts of servers and sites from the selected groups go to a separate chat: for example, developers get only their project. Add the bot to that chat. The group id is shown in Telegram, and if bot commands are on, the bot replies to /id with it.',
   'напр. Разработка':
@@ -3174,8 +3223,6 @@ const EN: Record<string, string> = {
     'The chat did not accept the last message ({at}): {err}. Such alerts go to the main chat.',
   'Проверочное сообщение отправлено.':
     'The test message was sent.',
-  '+ Добавить чат':
-    '+ Add chat',
   'Основной чат получает':
     'The main chat gets',
   'все алерты':
@@ -3192,8 +3239,6 @@ const EN: Record<string, string> = {
     'only servers: {n}',
   'только мониторов: {n}':
     'only monitors: {n}',
-  'У видов алертов ({n}) осталось старое ограничение по группам или объектам: алерты остальных по ним не уходят никуда, даже в основной чат. Разделять алерты по чатам теперь можно в "Чаты по группам" выше.':
-    'Alert types ({n}) still have an old limit by group or object: alerts of everything else for them go nowhere, not even to the main chat. Alerts can now be split between chats in "Chats by group" above.',
   'Снять ограничения':
     'Remove the limits',
   // --- новый монитор: пробная проверка (AddMonitor) ---
