@@ -6643,6 +6643,9 @@ async def collector_loop(
             # внешняя проверка портов идет фоном: закрытый файрволом порт отвечает только таймаутом
             await stage("что открыто в интернет", open_ports.start_scan(
                 session_factory, datetime.now(timezone.utc)))
+            # достукивается ли панель до серверов на связи: эталон для строки в "недоступен"
+            await stage("эталон связи с серверами", liveness.start_baseline(
+                session_factory, datetime.now(timezone.utc)))
             # базы уязвимостей раз в сутки, загрузка и разбор фоном
             await stage("базы уязвимостей", vulns_mod.start_refresh(
                 session_factory, datetime.now(timezone.utc)))
