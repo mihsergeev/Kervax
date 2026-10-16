@@ -23,7 +23,7 @@ KNOWN_TEXT = "было при подключении"
 # виды, которые уходят алертом и во время подключения
 _SEND = frozenset({"offline", "disk", "inode"})
 # их отметки в состоянии остаются в очереди вместе с сообщением (запишутся, когда дошло)
-_SEND_STATE = frozenset({"offline", "offline_said", "disk", "disk_val", "inode", "inode_val"})
+_SEND_STATE = frozenset({"offline", "offline_said", "offline_probe", "disk", "disk_val", "inode", "inode_val"})
 
 
 def _aware(t: datetime | None) -> datetime | None:

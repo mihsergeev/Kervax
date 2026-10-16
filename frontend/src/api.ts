@@ -1828,6 +1828,8 @@ export type Server = {
   // (имена чатов, tg/main/chats только в списке серверов), закрыто - null
   onboard?: { until: string; tg?: boolean; main?: boolean; chats?: string[] } | null
   onboard_done_at?: string | null
+  // недоступен: что ответил сервер панели в момент алерта (backend app/liveness.py)
+  offline_probe?: { state: 'alive' | 'refused' | 'silent'; where?: string; tried?: string[]; ts?: string } | null
   onboard_by?: string
   first_report_at?: string | null
   online: boolean

@@ -18,6 +18,7 @@ import {
   kubeCommand,
   kubeCommandStatus,
   listServers,
+  rotateServerToken,
   serverMetrics,
   serverOomEvents,
   serverWebErrors,
@@ -4637,7 +4638,7 @@ export function EnrollModal({
   )
 }
 
-export function InstallModal({ enroll, onClose }: { enroll: ServerEnroll; onClose: () => void }) {
+export function InstallModal({ enroll, onClose, title }: { enroll: ServerEnroll; onClose: () => void; title?: string }) {
   const { t } = useI18n()
   const [copied, setCopied] = useState(false)
   // живая проверка: поллим сервер, пока агент не пришлёт первый отчёт
@@ -4659,7 +4660,7 @@ export function InstallModal({ enroll, onClose }: { enroll: ServerEnroll; onClos
     <div className="modal-backdrop">
       <div className="card modal" onClick={(e) => e.stopPropagation()}>
         <div className="clients-head">
-          <h3>{t('Сервер создан')}</h3>
+          <h3>{title ?? t('Сервер создан')}</h3>
           <button className="ghost" onClick={onClose}>
             {t('Закрыть')}
           </button>
@@ -5355,6 +5356,15 @@ function ServerDetail({
   const [updBusy, setUpdBusy] = useState(false)
   const [snoozing, setSnoozing] = useState(false)
   const [histOpen, setHistOpen] = useState(false)
+  // команда установки заново (чек-лист подключения): новый токен, старая команда не сработает
+  const [enroll, setEnroll] = useState<ServerEnroll | null>(null)
+  const reissue = async () => {
+    try {
+      setEnroll(await rotateServerToken(s.id))
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 401) onUnauthorized()
+    }
+  }
   const doUpdate = async (fn: () => Promise<Server[]>) => {
     setUpdBusy(true)
     try {
@@ -5644,7 +5654,8 @@ function ServerDetail({
 
   const overview = (
     <div className="srv-sec">
-      <OnboardBlock server={s} t={t} canManage={!isViewer} onChanged={onChanged} onOpenSection={onOpenSection} />
+      <OnboardBlock server={s} t={t} canManage={!isViewer} onChanged={onChanged} onOpenSection={onOpenSection}
+        onInstall={isViewer ? undefined : reissue} />
       {!isViewer && (s.agent_fix_command || (s.helper_advice?.length ?? 0) > 0) && (
         <ServerFixBanner titles={s.agent_advice} command={s.agent_fix_command} helpers={s.helper_advice || []} t={t} />
       )}
@@ -5855,6 +5866,13 @@ function ServerDetail({
             <p className="muted small">
               {t('Агент ещё не выходил на связь. Установите и запустите kervax-agent на ноде — метрики появятся здесь. Изменить или удалить сервер — кнопка ✎.')}
             </p>
+            {/* команда показывается один раз при добавлении; потеряли - новая с новым токеном */}
+            {!isViewer && !s.first_report_at && (
+              <>
+                <button className="small-btn" onClick={reissue}>{t('Команда установки')}</button>
+                <p className="muted small">{t('Панель выпустит новый токен: прежняя команда перестанет работать.')}</p>
+              </>
+            )}
           </div>
         ) : (
         <div className="srv-layout" ref={layoutRef}>
@@ -6342,6 +6360,9 @@ function ServerDetail({
     )}
     {histOpen && (
       <AlertHistoryModal initialTarget={s.name} onClose={() => setHistOpen(false)} onUnauthorized={onUnauthorized} />
+    )}
+    {enroll && (
+      <InstallModal enroll={enroll} title={t('Команда установки')} onClose={() => { setEnroll(null); onChanged() }} />
     )}
     </>
   )

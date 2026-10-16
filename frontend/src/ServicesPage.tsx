@@ -13,7 +13,7 @@ import {
 import { useI18n } from './i18n'
 import { useAuth } from './auth'
 import { useUrlCard, useUrlParam } from './deeplink'
-import { srvIssues, srvMuted, webRate } from './serverUtils'
+import { shortList, srvIssues, srvMuted, webRate } from './serverUtils'
 import { fmtRel } from './ServersPage'
 import { CardNav, FreshChip, markMuted, OvAreas, OvRows, secInfoOf, type OvRow, type SecDef, type SecInfo, type SecItem } from './cardLayout'
 import { AdoptSitesModal, adoptable } from './AdoptSitesModal'
@@ -1027,20 +1027,27 @@ export function ServicesPage({ onUnauthorized, openServerId, openSec, onConsumed
             .sort((a, b) => (a[0] || '￿').localeCompare(b[0] || '￿'))
             .map(([k, items]) => ({ key: k || '__none__', label: k, items }))
         })()
-  // сводка по парку: базы, веб-серверы и очереди - и что с ними не так
+  // Сводка по парку: базы, веб-серверы и очереди - и что с ними не так. Сколько чего стоит -
+  // по всем нодам, а что сломано - только по нодам на связи: у молчащих данные старые, и "все в
+  // порядке" по ним было бы неправдой. Молчащие названы в первой плитке, проблемы - по именам
+  const live = all.filter((r) => r.server.online)
+  const names = (xs: string[]) => shortList([...new Set(xs)], t, 2)
+  const offNames = all.filter((r) => !r.server.online).map((r) => r.server.name)
   const kindsAll = new Set(all.flatMap((r) => r.items.map((i) => i.kind)))
   const svcAll = all.flatMap((r) => r.items.map((it) => ({ it, s: r.server })))
   const dbItems = svcAll.filter(({ it }) => !it.web && !it.svc)
-  const dbProbs = all.flatMap((r) => (r.server.db_health ?? []).flatMap((h) => h.problems))
+  const dbBad = live.filter((r) => (r.server.db_health ?? []).some((h) => h.problems.some((p) => p.level >= 2))).map((r) => r.server.name)
+  const dbWarn = live.filter((r) => (r.server.db_health ?? []).some((h) => h.problems.some((p) => p.level < 2))).map((r) => r.server.name)
   const webItems = svcAll.filter(({ it }) => it.web)
   const siteN = webItems.reduce((n, { it }) => n + (it.sites?.length ?? 0), 0)
   const missN = all.reduce((n, r) => n + missingSites([...new Set(r.items.flatMap((it) => it.sites ?? []))], sitesCtx), 0)
-  const cfgN = all.reduce((n, r) => n + (r.server.web_config ?? []).filter((c) => !c.ok).length, 0)
-  // сертификаты ближе месяца - видно; алертный порог (неделя, день) - цветом плитки
+  const cfgBad = live.filter((r) => (r.server.web_config ?? []).some((c) => !c.ok)).map((r) => r.server.name)
+  // сертификаты ближе месяца - видно; алертный порог (неделя, день) - цветом плитки. Срок не
+  // устаревает, поэтому по всем нодам
   const certs = all.flatMap((r) => (r.server.web_certs ?? []).filter((c) => c.days <= EXPIRY_SHOW_DAYS))
-  const rabbit = svcAll.filter(({ it }) => it.svc?.kind === 'rabbitmq')
+  const rabbit = svcAll.filter(({ it, s }) => it.svc?.kind === 'rabbitmq' && s.online)
   const qAll = rabbit.flatMap(({ it }) => it.svc?.queues ?? [])
-  const qHot = qAll.filter((x) => qDepth(x) >= QUEUE_HOT).length
+  const qHot = qAll.filter((x) => qDepth(x) >= QUEUE_HOT)
 
   return (
     <div>
@@ -1069,16 +1076,20 @@ export function ServicesPage({ onUnauthorized, openServerId, openSec, onConsumed
           <NetTile
             label={t('Ноды с сервисами')}
             value={String(all.length)}
-            sub={t('типов сервисов: {n}', { n: kindsAll.size })}
+            sub={subOf(
+              t('типов сервисов: {n}', { n: kindsAll.size }),
+              offNames.length > 0 && t('не на связи: {list}', { list: names(offNames) }),
+            )}
+            tone={offNames.length ? 'warn' : undefined}
           />
           <NetTile
             label={t('Базы данных')}
             value={String(dbItems.length)}
-            sub={subOf(
-              dbProbs.some((p) => p.level >= 2) && t('проблем: {n}', { n: dbProbs.filter((p) => p.level >= 2).length }),
-              dbProbs.some((p) => p.level < 2) && t('предупреждений: {n}', { n: dbProbs.filter((p) => p.level < 2).length }),
-            ) || t('все в порядке')}
-            tone={dbProbs.some((p) => p.level >= 2) ? 'bad' : dbProbs.length ? 'warn' : 'ok'}
+            sub={live.length ? subOf(
+              dbBad.length > 0 && t('проблемы: {list}', { list: names(dbBad) }),
+              dbWarn.length > 0 && t('предупреждения: {list}', { list: names(dbWarn) }),
+            ) || t('все в порядке') : t('свежих данных нет')}
+            tone={!live.length ? undefined : dbBad.length ? 'bad' : dbWarn.length ? 'warn' : 'ok'}
           />
           <NetTile
             label={t('Веб-серверы')}
@@ -1086,10 +1097,10 @@ export function ServicesPage({ onUnauthorized, openServerId, openSec, onConsumed
             sub={subOf(
               t('сайтов: {n}', { n: siteN }),
               sitesCtx.hosts != null && missN > 0 && t('без монитора: {n}', { n: missN }),
-              cfgN > 0 && t('конфиг с ошибкой: {n}', { n: cfgN }),
-              certs.length > 0 && t('сертификаты истекают: {n}', { n: certs.length }),
+              cfgBad.length > 0 && t('конфиг с ошибкой: {list}', { list: names(cfgBad) }),
+              certs.length > 0 && t('сертификаты истекают: {list}', { list: names(certs.map((c) => c.label)) }),
             )}
-            tone={cfgN || certs.some((c) => c.days <= 1) ? 'bad' : certs.some((c) => c.days <= 7) ? 'warn' : 'ok'}
+            tone={cfgBad.length || certs.some((c) => c.days <= 1) ? 'bad' : certs.some((c) => c.days <= 7) ? 'warn' : 'ok'}
           />
           {rabbit.length > 0 && (
             <NetTile
@@ -1097,9 +1108,9 @@ export function ServicesPage({ onUnauthorized, openServerId, openSec, onConsumed
               value={String(rabbit.reduce((n, { it }) => n + (it.svc?.total ?? 0), 0))}
               sub={subOf(
                 t('сообщений: {m}', { m: rpmText(qAll.reduce((a, x) => a + qDepth(x), 0)) }),
-                qHot > 0 && t('переполнены: {n}', { n: qHot }),
+                qHot.length > 0 && t('переполнены: {list}', { list: names(qHot.map((x) => x.name)) }),
               )}
-              tone={qHot ? 'warn' : 'ok'}
+              tone={qHot.length ? 'warn' : 'ok'}
             />
           )}
         </div>
