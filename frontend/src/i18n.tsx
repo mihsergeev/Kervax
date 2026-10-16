@@ -183,17 +183,9 @@ const EN: Record<string, string> = {
 
   // --- хранение данных (retention) ---
   'Хранение данных': 'Data retention',
-  'Данные старше указанного срока удаляются автоматически. Дольше хранить — больше места в БД.':
-    'Data older than the given period is deleted automatically. Keeping longer uses more DB space.',
   'Метрики серверов': 'Server metrics',
-  'CPU / память / сеть / диск с агентов.': 'CPU / memory / network / disk from agents.',
-  'История проверок сайтов': 'Site check history',
-  'Время ответа и статусы мониторов, инциденты.':
-    'Monitor response times and statuses, incidents.',
-  'Хранить, дней': 'Keep, days',
   'полгода': 'half-year',
   'год': 'year',
-  '2 года': '2 years',
 
   // --- локации (прокси) ---
   'Локации': 'Locations',
@@ -3651,6 +3643,97 @@ const EN: Record<string, string> = {
   'поды, Job и CronJob': 'pods, Jobs and CronJobs',
   'не алертить об упавших Job:': 'do not alert about failed Jobs:',
   'не алертить об упавших Job': 'do not alert about failed Jobs',
+  // --- окно хранения данных разделами (RetentionModal) ---
+  'История проверок':
+    'Check history',
+  'CPU, память, сеть и диски с агентов, связь между серверами, ошибки 5xx, OOM. Старше срока удаляется само.':
+    'CPU, memory, network and disks from agents, links between servers, 5xx errors, OOM. Anything older than the term is deleted automatically.',
+  'Время ответа и статусы мониторов, проверки через локации, адреса сайтов, закрытые инциденты. Старше срока удаляется само.':
+    'Monitor response times and statuses, checks through locations, site addresses, closed incidents. Anything older than the term is deleted automatically.',
+  'Метрики с агентов':
+    'Agent metrics',
+  'Связь между серверами':
+    'Links between servers',
+  'Ошибки 5xx по сайтам':
+    '5xx errors by site',
+  'OOM':
+    'OOM',
+  'Проверки мониторов':
+    'Monitor checks',
+  'Проверки через локации':
+    'Checks through locations',
+  'Адреса сайтов':
+    'Site addresses',
+  'Хронология серверов':
+    'Server timeline',
+  'Трафик по дням':
+    'Daily traffic',
+  'Команды Docker, Kubernetes и бэкапа':
+    'Docker, Kubernetes and backup commands',
+  'Строки ошибок 5xx: адреса клиентов, запросы':
+    '5xx error lines: client addresses, requests',
+  'Проверки домена при добавлении сайта':
+    'Domain checks when adding a site',
+  'Ручные проверки':
+    'Manual checks',
+  '14д':
+    '14d',
+  'Срок хранения':
+    'Retention',
+  'Постоянные сроки':
+    'Fixed terms',
+  'Без настройки':
+    'Not configurable',
+  'Сколько занимает база панели и из чего она состоит. Больше всего места у двух видов данных, срок которых настраивается.':
+    'How much space the panel database takes and what it consists of. Most of it belongs to the two kinds of data whose retention is configurable.',
+  'Эти данные чистятся по своим срокам: они маленькие или нужны ровно столько.':
+    'This data is cleaned up on its own schedule: it is small or needed exactly that long.',
+  'Остальное':
+    'Everything else',
+  'свой срок, дней':
+    'custom term, days',
+  'Сейчас {now}, прибавляется около {day} в сутки.':
+    'Now {now}, growing by about {day} a day.',
+  'Самая старая запись - {d}.':
+    'The oldest record is from {d}.',
+  'Сейчас {now} за {d} дн. При {w} дн. будет около':
+    'Now {now} for {d} d. With {w} d it will be about',
+  'база дорастет за {n} дн.':
+    'the database gets there in {n} d',
+  'Сейчас {now} за {d} дн. При {w} дн. данных станет около':
+    'Now {now} for {d} d. With {w} d the data will shrink to about',
+  'Лишнее удалится при ближайшей чистке, а место останется за базой под новые записи. Графики за период длиннее срока будут пустыми.':
+    'The excess is deleted at the next cleanup, and the database keeps the space for new records. Charts for periods longer than the term will be empty.',
+  'Из чего состоит':
+    'What it consists of',
+  '{n} записей':
+    '{n} records',
+  'База {n}':
+    'Database {n}',
+  'размеры таблиц примерные':
+    'table sizes are estimates',
+  'данных будет около':
+    'data will be about',
+  'После сохранения':
+    'After saving',
+  '{now}, +{day} в сутки':
+    '{now}, +{day} a day',
+  'Что':
+    'What',
+  'Срок':
+    'Term',
+  'Занимает':
+    'Takes',
+  'в ошибках 5xx':
+    'in 5xx errors',
+  'Настройки, серверы, мониторы, журнал действий':
+    'Settings, servers, monitors, audit log',
+  'пока есть':
+    'while it exists',
+  'данных будет около {n}':
+    'data will be about {n}',
+  'Старое удаляется {every}':
+    'Old data is deleted {every}',
 }
 
 type Ctx = {
