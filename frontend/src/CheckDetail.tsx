@@ -31,7 +31,7 @@ import { SnoozeControl } from './SnoozeControl'
 import { StackedAreaChart } from './charts/StackedAreaChart'
 import { StatusBar, type BarStatus } from './charts/StatusBar'
 import { useI18n } from './i18n'
-import { MON_ALERT_KINDS, expiryText } from './checkUtils'
+import { MON_ALERT_KINDS, expiryText, expiryTone } from './checkUtils'
 import { useAuth } from './auth'
 import { NoteBar } from './NoteBar'
 import { CheckParentBar } from './ParentBar'
@@ -1363,10 +1363,7 @@ function ExpiryPill({
   message: string
 }) {
   const { t } = useI18n()
-  const warnMax = warn.length ? Math.max(...warn) : 0
-  const warnMin = warn.length ? Math.min(...warn) : 0
-  const tn =
-    days == null ? '' : days <= warnMin ? 't-down' : days <= warnMax ? 't-degraded' : 't-up'
+  const tn = days == null ? '' : expiryTone(days, warn) || 't-up'
   const text = days == null ? message || t('нет данных') : expiryText(days, t)
   return (
     <div className="expiry-pill" title={message}>

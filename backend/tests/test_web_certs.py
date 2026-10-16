@@ -1,4 +1,4 @@
-"""Сертификаты nginx (helper webserver-setup 0.24): истекает через две недели и меньше или истек."""
+"""Сертификаты nginx (helper webserver-setup 0.24): истекает через неделю и меньше или истек."""
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -30,27 +30,30 @@ def _srv(rep):
 
 def test_expiry_levels():
     assert web_certs.problems(_rep(_c(60)), NOW) == []
-    assert web_certs.problems(_rep(_c(10.5)), NOW) == [
-        (1, "сертификат shop.example.com, www.shop.example.com истекает через 10 дн (на хосте: "
+    # за месяц и даже за десять дней - не беда: срок виден в "Сертификатах", алерт - с недели
+    assert web_certs.problems(_rep(_c(10.5)), NOW) == []
+    assert web_certs.problems(_rep(_c(5.5)), NOW) == [
+        (1, "сертификат shop.example.com, www.shop.example.com истекает через 5 дн (на хосте: "
             "/etc/letsencrypt/live/shop.example.com/fullchain.pem)",
          "host:/etc/letsencrypt/live/shop.example.com/fullchain.pem")]
-    assert web_certs.problems(_rep(_c(2)), NOW)[0][0] == 2
+    assert web_certs.problems(_rep(_c(2)), NOW)[0][0] == 1
+    assert web_certs.problems(_rep(_c(0.5)), NOW)[0][0] == 2
     expired = web_certs.problems(_rep(_c(-3, file="/certs/api.pem", where="front", names="")), NOW)
     assert expired == [(2, "сертификат shop.example.com истек 3 дн назад (в контейнере front: /certs/api.pem), "
                            "сайты на нем уже отдают ошибку", "front:/certs/api.pem")]
     # продление не настроено - так и пишем; не Let's Encrypt - не пишем
-    assert web_certs.problems(_rep(_c(10), renew="none"), NOW)[0][1].endswith(", продление certbot не настроено")
-    assert web_certs.problems(_rep(_c(10, file="/etc/ssl/own.pem"), renew="none"), NOW)[0][1].endswith(".pem)")
-    assert web_certs.problems(_rep(_c(10), ts=T - 7200), NOW) == []  # helper давно молчит - не судим
+    assert web_certs.problems(_rep(_c(5), renew="none"), NOW)[0][1].endswith(", продление certbot не настроено")
+    assert web_certs.problems(_rep(_c(5, file="/etc/ssl/own.pem"), renew="none"), NOW)[0][1].endswith(".pem)")
+    assert web_certs.problems(_rep(_c(5), ts=T - 7200), NOW) == []  # helper давно молчит - не судим
 
 
 def test_alert_home_and_view():
-    s = _srv(_rep(_c(10), _c(-1, file="/certs/old.pem", where="front")))
+    s = _srv(_rep(_c(5), _c(-1, file="/certs/old.pem", where="front")))
     lvl, ctx = collector._server_conditions(s, NOW)["web_cert"]
     assert lvl == 2 and ctx["sig"] == ["front:/certs/old.pem", "host:/etc/letsencrypt/live/shop.example.com/fullchain.pem"]
     rows = [(p["level"], p.get("section")) for p in collector.server_problems(s, NOW) if p["kind"] == "web_cert"]
     assert rows == [(2, "services"), (1, "services")]
-    assert [x["days"] for x in web_certs.view(s.last_report, NOW)] == [-1, 10]
+    assert [x["days"] for x in web_certs.view(s.last_report, NOW)] == [-1, 5]
     assert collector._server_conditions(_srv(_rep(_c(60))), NOW)["web_cert"][0] == 0
     assert collector._recovery_detail("web_cert", {}, {}) == "сертификаты веб-серверов снова в сроке"
 

@@ -22,6 +22,7 @@ import { OsIcon } from './osIcon'
 import { CountryFlag } from './CountryFlag'
 import { byteUnits } from './units'
 import { NetTile } from './NetLinks'
+import { EXPIRY_SHOW_DAYS, EXPIRY_WARN_DAYS, expiryTone } from './checkUtils'
 
 // Список сайтов веб-сервиса: превью + раскрытие в скроллящийся список с фильтром (у
 // ingress-нод бывают сотни доменов — «10 + ещё 390» неюзабельно). Рядом с каждым —
@@ -122,7 +123,7 @@ type SrvServices = { server: Server; items: SvcItem[] }
 
 const QUEUE_HOT = 100 // очередь глубже — подсвечиваем: обычно отставший консьюмер
 // точка строки очереди по тону
-const DOT: Record<string, string> = { 't-up': ' lk-dot-ok', 't-down': ' lk-dot-bad', 't-degraded': ' lk-dot-warn' }
+const DOT: Record<string, string> = { 't-up': ' lk-dot-ok', 't-down': ' lk-dot-bad', 't-degraded': ' lk-dot-warn', 't-soon': '' }
 // подпись плитки из частей: пустые выкидываем
 const subOf = (...parts: (string | false | 0 | undefined)[]) => parts.filter(Boolean).join(' · ')
 
@@ -789,7 +790,7 @@ function ServerServicesModal({ srv, onClose, onChanged, initialSec, sites }: {
             {cur.id === 'certs' && (
               <div className="loc-results docker-clist">
                 {certs.map((c) => {
-                  const tone = c.days <= 3 ? 't-down' : c.days <= 14 ? 't-degraded' : 't-up'
+                  const tone = expiryTone(c.days, EXPIRY_WARN_DAYS) || 't-up'
                   return (
                     <div key={c.where + c.file} className={`loc-res docker-row ${tone}`}>
                       <span className={`lk-dot${DOT[tone]}`} />
@@ -1035,7 +1036,8 @@ export function ServicesPage({ onUnauthorized, openServerId, openSec, onConsumed
   const siteN = webItems.reduce((n, { it }) => n + (it.sites?.length ?? 0), 0)
   const missN = all.reduce((n, r) => n + missingSites([...new Set(r.items.flatMap((it) => it.sites ?? []))], sitesCtx), 0)
   const cfgN = all.reduce((n, r) => n + (r.server.web_config ?? []).filter((c) => !c.ok).length, 0)
-  const certs = all.flatMap((r) => (r.server.web_certs ?? []).filter((c) => c.days <= 14))
+  // сертификаты ближе месяца - видно; алертный порог (неделя, день) - цветом плитки
+  const certs = all.flatMap((r) => (r.server.web_certs ?? []).filter((c) => c.days <= EXPIRY_SHOW_DAYS))
   const rabbit = svcAll.filter(({ it }) => it.svc?.kind === 'rabbitmq')
   const qAll = rabbit.flatMap(({ it }) => it.svc?.queues ?? [])
   const qHot = qAll.filter((x) => qDepth(x) >= QUEUE_HOT).length
@@ -1087,7 +1089,7 @@ export function ServicesPage({ onUnauthorized, openServerId, openSec, onConsumed
               cfgN > 0 && t('конфиг с ошибкой: {n}', { n: cfgN }),
               certs.length > 0 && t('сертификаты истекают: {n}', { n: certs.length }),
             )}
-            tone={cfgN || certs.some((c) => c.days <= 3) ? 'bad' : certs.length ? 'warn' : 'ok'}
+            tone={cfgN || certs.some((c) => c.days <= 1) ? 'bad' : certs.some((c) => c.days <= 7) ? 'warn' : 'ok'}
           />
           {rabbit.length > 0 && (
             <NetTile

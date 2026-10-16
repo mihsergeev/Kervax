@@ -8,6 +8,18 @@ type T = (s: string, v?: Record<string, string | number>) => string
 // почти сутки. Раньше здесь стояло `days <= 0 ? 'истёк'`, и монитор живого сайта
 // в день истечения показывал пугающее «истёк». Та же логика на бэкенде —
 // backend/app/collector.py, _expiry_text (тексты алертов).
+// Сроки сертификата и домена: алертят пороги монитора (по умолчанию за 7 и за 1 день), а за
+// месяц срок только виден - в списке сайтов и карточке, не в "Что сломано" и не алертом
+export const EXPIRY_SHOW_DAYS = 30
+export const EXPIRY_WARN_DAYS = [7, 1]
+
+// Цвет срока: ближний порог - красный, дальний - желтый, до месяца - приглушенный, дальше - пусто
+export function expiryTone(days: number, warn: number[]): '' | 't-down' | 't-degraded' | 't-soon' {
+  if (warn.length && days <= Math.min(...warn)) return 't-down'
+  if (warn.length && days <= Math.max(...warn)) return 't-degraded'
+  return days <= EXPIRY_SHOW_DAYS ? 't-soon' : ''
+}
+
 export function expiryText(days: number, t: T): string {
   if (days < 0) return t('истёк')
   if (days === 0) return t('сегодня')

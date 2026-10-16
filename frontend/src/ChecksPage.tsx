@@ -15,7 +15,7 @@ import {
 } from './api'
 import { BulkModal } from './BulkModal'
 import { CheckDetail } from './CheckDetail'
-import { expiryText } from './checkUtils'
+import { EXPIRY_WARN_DAYS, expiryText, expiryTone } from './checkUtils'
 import { useUrlCard } from './deeplink'
 import { AdoptSitesModal, adoptable } from './AdoptSitesModal'
 import { AddMonitor } from './AddMonitor'
@@ -52,8 +52,8 @@ const EMPTY: CheckForm = {
   probe_local: false,
   check_ssl: true,
   check_domain: true,
-  ssl_warn_days: [14, 7, 1],
-  domain_warn_days: [30, 7, 1],
+  ssl_warn_days: EXPIRY_WARN_DAYS,
+  domain_warn_days: EXPIRY_WARN_DAYS,
   enabled: true,
   extra_paths: [],
 }
@@ -67,10 +67,8 @@ function uptimeTone(u: number): CheckStatus {
 }
 
 // класс бейджа истечения: '' = не показывать, иначе тон по порогам
-function warnBadge(days: number, warn: number[]): string {
-  if (!warn.length || days > Math.max(...warn)) return ''
-  return days <= Math.min(...warn) ? 't-down' : 't-degraded'
-}
+// срок в строке списка: с месяца до истечения, алертный порог - цветом (expiryTone)
+const warnBadge = expiryTone
 
 export function ChecksPage({ onUnauthorized, openCheckId, openSec = null, onConsumed }: Props) {
   const { t } = useI18n()

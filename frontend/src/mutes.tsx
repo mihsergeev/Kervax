@@ -79,6 +79,11 @@ export const DOCKRISK_MUTE = 'dockrisk:'
 export const NOBOOT_MUTE = 'noboot:'
 // Учетка, которая нужна, хотя в нее давно не входят: access:<пользователь>
 export const ACCESS_MUTE = 'access:'
+// Решения "так и должно быть": учетка нужна, порт открыт намеренно, ключи от хоста по назначению,
+// не нужен после перезагрузки. Хранятся в alert_mutes, но это не заглушенный алерт: в "Заглушено"
+// и чипе "бессрочно" их нет, видны и снимаются там, где поставлены (раздел карточки, "вернуть")
+const DECISIONS = [ACCESS_MUTE, EXPOSED_MUTE, DOCKRISK_MUTE, NOBOOT_MUTE]
+export const isDecision = (k: string) => DECISIONS.some((p) => k.startsWith(p))
 export function muteKindLabel(k: string, t: TFn): string | null {
   if (k === 'noboot') return t('Не переживет перезагрузку')
   if (k === 'access_audit') return t('Доступы: заброшенные учетки и слабые ключи')
@@ -171,7 +176,7 @@ export function collectMutes(
       out.push({ label: t('Весь сервер'), until: s.snooze_until, group: 'alert' })
     for (const [k, u] of Object.entries(s.alert_snoozes ?? {}))
       if (new Date(u).getTime() > now) out.push({ label: label(k), until: u, group: 'alert' })
-    for (const k of s.alert_mutes ?? []) out.push({ label: label(k), until: null, group: 'alert' })
+    for (const k of s.alert_mutes ?? []) if (!isDecision(k)) out.push({ label: label(k), until: null, group: 'alert' })
   }
   if (groups.includes('repo'))
     for (const r of s.backup_repo_mutes ?? [])

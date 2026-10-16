@@ -7,7 +7,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="KERVAX_", env_file=".env")
 
     app_name: str = "Kervax"
-    version: str = "1.4.231"
+    version: str = "1.4.232"
     debug: bool = False
     # Внешний URL панели — если задан, в алерты добавляется ссылка на монитор
     # (напр. https://kervax.example.com). Пусто = ссылку не добавляем.
@@ -46,8 +46,8 @@ class Settings(BaseSettings):
     location_timeout_extra_ms: int = 10000
     location_retries: int = 2
     # Дефолтные пороги напоминаний (дней до истечения): эскалация SSL и домена.
-    default_ssl_warn_days: list[int] = [14, 7, 1]
-    default_domain_warn_days: list[int] = [30, 7, 1]
+    default_ssl_warn_days: list[int] = [7, 1]
+    default_domain_warn_days: list[int] = [7, 1]
     # Как часто обновлять «медленные» сроки (TLS/домен) — они меняются редко,
     # а RDAP-запросы лучше не частить. Часов.
     expiry_refresh_hours: int = 6
