@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { ApiError, getServerVulns, type Server, type ServerVulns, type VulnFinding } from './api'
+import { ApiError, getServerVulns, type Server, type ServerVulns, type VulnCve, type VulnFinding } from './api'
 import { useI18n } from './i18n'
 
 // Важные уязвимости в пакетах сервера (backend app/vulns.py). Только справка, как и пакеты: ни
@@ -15,13 +15,39 @@ function cveUrl(id: string): string {
   return `https://ubuntu.com/security/${encodeURIComponent(id)}`
 }
 
+// CVE ссылками на ubuntu.com, уже эксплуатируемые выделены; длинный список - по кнопке
+export function VulnCves({ cves }: { cves: VulnCve[] }) {
+  const { t } = useI18n()
+  const [all, setAll] = useState(false)
+  const shown = all ? cves : cves.slice(0, CVES)
+  return (
+    <div className="vuln-cves">
+      {shown.map((c) => (
+        <a
+          key={c.id}
+          className={`vuln-cve${c.kev ? ' vuln-cve-kev' : ''}`}
+          href={cveUrl(c.id)}
+          target="_blank"
+          rel="noreferrer"
+          title={`${c.prio}${c.cvss ? `, CVSS ${c.cvss}` : ''}${c.kev ? `, ${t('уже эксплуатируют (CISA KEV)')}` : ''}`}
+        >
+          {c.id}
+        </a>
+      ))}
+      {cves.length > CVES && (
+        <button className="ghost small row-act" onClick={() => setAll(!all)}>
+          {all ? t('свернуть') : t('еще {n}', { n: cves.length - CVES })}
+        </button>
+      )}
+    </div>
+  )
+}
+
 // одна строка: исходный пакет (или ядро), что стоит, чем закрывается, какие CVE
 export function VulnRow({ f, proOn }: { f: VulnFinding; proOn: boolean }) {
   const { t } = useI18n()
-  const [all, setAll] = useState(false)
   const kev = f.cves.filter((c) => c.kev).length
   const crit = f.cves.filter((c) => c.prio === 'critical').length
-  const shown = all ? f.cves : f.cves.slice(0, CVES)
   const installed = f.pkgs[0]?.[1] ?? ''
   const bins = f.kernel ? [] : f.pkgs.map((p) => p[0])
   return (
@@ -38,25 +64,7 @@ export function VulnRow({ f, proOn }: { f: VulnFinding; proOn: boolean }) {
         {f.kernel && <span className="vuln-tag vuln-tag-pro">{t('обновить и перезагрузить')}</span>}
       </div>
       {bins.length > 1 && <div className="muted small vuln-bins">{bins.join(', ')}</div>}
-      <div className="vuln-cves">
-        {shown.map((c) => (
-          <a
-            key={c.id}
-            className={`vuln-cve${c.kev ? ' vuln-cve-kev' : ''}`}
-            href={cveUrl(c.id)}
-            target="_blank"
-            rel="noreferrer"
-            title={`${c.prio}${c.cvss ? `, CVSS ${c.cvss}` : ''}${c.kev ? `, ${t('уже эксплуатируют (CISA KEV)')}` : ''}`}
-          >
-            {c.id}
-          </a>
-        ))}
-        {f.cves.length > CVES && (
-          <button className="ghost small row-act" onClick={() => setAll(!all)}>
-            {all ? t('свернуть') : t('еще {n}', { n: f.cves.length - CVES })}
-          </button>
-        )}
-      </div>
+      <VulnCves cves={f.cves} />
     </div>
   )
 }
@@ -65,6 +73,41 @@ export function VulnRow({ f, proOn }: { f: VulnFinding; proOn: boolean }) {
 function upgradeCmd(found: VulnFinding[], proOn: boolean): string {
   const bins = [...new Set(found.filter((f) => !f.kernel && (proOn || !f.pro)).flatMap((f) => f.pkgs.map((p) => p[0])))]
   return bins.length ? `sudo apt update && sudo apt install --only-upgrade ${bins.join(' ')}` : ''
+}
+
+// как закрыть: команда обновления пакетов с кнопкой "копировать" и что делать с ядром.
+// Находки одного сервера или одного пакета на разных серверах: apt с --only-upgrade пропускает
+// то, чего на сервере нет, так что команда одна на все
+export function VulnFix({ found, proOn }: { found: VulnFinding[]; proOn: boolean }) {
+  const { t } = useI18n()
+  const [copied, setCopied] = useState(false)
+  const cmd = upgradeCmd(found, proOn)
+  const kernel = found.some((f) => f.kernel)
+  if (!cmd && !kernel) return null
+  return (
+    <div className="vuln-fix small">
+      {cmd && (
+        <div className="vuln-cmd">
+          <code className="mono">{cmd}</code>
+          <button
+            className="ghost small row-act"
+            onClick={() => {
+              navigator.clipboard?.writeText(cmd)
+              setCopied(true)
+              window.setTimeout(() => setCopied(false), 1500)
+            }}
+          >
+            {copied ? t('скопировано') : t('копировать')}
+          </button>
+        </div>
+      )}
+      {kernel && (
+        <div className="muted">
+          {t('Ядро закрывается только перезагрузкой в новое: sudo apt full-upgrade, затем перезагрузка.')}
+        </div>
+      )}
+    </div>
+  )
 }
 
 export function VulnsNote({ v }: { v: Pick<ServerVulns, 'release' | 'eol' | 'pro_on' | 'os'> }) {
@@ -86,7 +129,6 @@ export function VulnsCard({ server: s, onUnauthorized }: Props) {
   const sum = s.last_report?.pkgs
   const [v, setV] = useState<ServerVulns | null>(null)
   const [err, setErr] = useState('')
-  const [copied, setCopied] = useState(false)
   const hash = sum?.h ?? ''
   const kernel = s.last_report?.os_upd?.kernel ?? ''
 
@@ -110,8 +152,6 @@ export function VulnsCard({ server: s, onUnauthorized }: Props) {
 
   if (!sum?.n) return null
   const n = v?.summary.pkgs ?? 0
-  const cmd = v ? upgradeCmd(v.found, v.pro_on) : ''
-  const hasKernel = !!v?.found.some((f) => f.kernel)
   return (
     <div className="chart-card net-card net-card-wide" id="mcard-vulns">
       <div className="net-head">
@@ -147,30 +187,7 @@ export function VulnsCard({ server: s, onUnauthorized }: Props) {
               ))}
             </div>
           )}
-          {(cmd || hasKernel) && (
-            <div className="vuln-fix small">
-              {cmd && (
-                <div className="vuln-cmd">
-                  <code className="mono">{cmd}</code>
-                  <button
-                    className="ghost small row-act"
-                    onClick={() => {
-                      navigator.clipboard?.writeText(cmd)
-                      setCopied(true)
-                      window.setTimeout(() => setCopied(false), 1500)
-                    }}
-                  >
-                    {copied ? t('скопировано') : t('копировать')}
-                  </button>
-                </div>
-              )}
-              {hasKernel && (
-                <div className="muted">
-                  {t('Ядро закрывается только перезагрузкой в новое: sudo apt full-upgrade, затем перезагрузка.')}
-                </div>
-              )}
-            </div>
-          )}
+          <VulnFix found={v.found} proOn={v.pro_on} />
         </>
       )}
     </div>

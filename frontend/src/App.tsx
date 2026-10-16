@@ -649,9 +649,9 @@ export default function App() {
         <VulnsModal
           onClose={() => setModal(null)}
           onUnauthorized={logout}
-          onOpen={(sec, id) => {
+          onOpen={(sec, id, sub) => {
             setModal(null)
-            openTarget(sec, id)
+            openTarget(sec, id, undefined, sub)
           }}
         />
       )}
