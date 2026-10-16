@@ -82,6 +82,28 @@ async def test_login_rate_limited_after_failures(client: httpx.AsyncClient):
     assert r.status_code == 429
 
 
+async def test_login_lockout_and_log_use_the_address_behind_the_proxy(client: httpx.AsyncClient, auth_headers):
+    """За своим прокси адрес соединения у всех один: блокировка по нему запирала всех.
+    Берем последний адрес из X-Forwarded-For - его дописывает прокси."""
+    from app import ratelimit
+
+    # caddy пишет адрес клиента, nginx фронтенда дописывает caddy; что подставил сам
+    # клиент левее - не в счет
+    bad = {"X-Forwarded-For": "198.51.100.9, 203.0.113.50, 172.18.0.5"}
+    for _ in range(ratelimit.MAX_FAILURES):
+        r = await client.post("/api/auth/login", json={"username": "admin", "password": "bad"}, headers=bad)
+        assert r.status_code == 401
+    r = await client.post("/api/auth/login", json={"username": "admin", "password": "testpass-2026"}, headers=bad)
+    assert r.status_code == 429
+    # другой человек за тем же прокси входит спокойно
+    ok = {"X-Forwarded-For": "203.0.113.60, 172.18.0.5"}
+    r = await client.post("/api/auth/login", json={"username": "admin", "password": "testpass-2026"}, headers=ok)
+    assert r.status_code == 200
+    log = (await client.get("/api/audit?limit=50", headers=auth_headers)).json()
+    assert log[0]["action"] == "login_ok" and log[0]["target"] == "203.0.113.60"
+    assert any(e["action"] == "login_fail" and e["target"] == "203.0.113.50" for e in log)
+
+
 async def test_login_events_audited(client: httpx.AsyncClient, auth_headers):
     # auth_headers уже сделал успешный вход (login_ok); добавим неудачный
     await client.post(
