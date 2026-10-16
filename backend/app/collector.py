@@ -11,6 +11,7 @@ import logging
 import random
 import re
 import statistics
+from collections import Counter
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import NamedTuple
@@ -133,6 +134,37 @@ def effective_locations(check: Check, enabled: list[Location]) -> list[Location]
         return list(enabled)
     idset = set(ids)
     return [loc for loc in enabled if loc.id in idset]
+
+
+# Сколько мониторов должно проверяться через локацию, чтобы "недоступны все" значило "сломан
+# прокси": при одном-двух сайтах это с той же вероятностью блокировка их обоих в той стране
+_BROKEN_MIN_CHECKS = 3
+
+
+def broken_location_ids(
+    probing: list[Location], checks: list[Check], results: dict, min_fails: int = 1
+) -> set[int]:
+    """Локации, у которых, похоже, сломан сам прокси: через нее проверяется не меньше трех
+    мониторов, все они отсюда недоступны (каждый - не меньше min_fails раз подряд), а с самой
+    панели хоть один отвечает. Тогда "недоступен из ..." по каждому сайту - шум, а не беда сайтов."""
+    out: set[int] = set()
+    for loc in probing:
+        if not loc.url:
+            continue
+        got = [
+            (c, r)
+            for c in checks
+            if c.enabled and c.check_locations and c.type == "http"
+            and loc in effective_locations(c, probing)
+            and (r := results.get((c.id, loc.id))) is not None
+        ]
+        if (
+            len(got) >= _BROKEN_MIN_CHECKS
+            and all(r.status == "down" and (r.consecutive_fails or 0) >= min_fails for _c, r in got)
+            and any(c.last_status in ("up", "degraded") for c, _r in got)
+        ):
+            out.add(loc.id)
+    return out
 
 
 async def _gather_capped(coros, limit: int, jitter_s: float):
@@ -1350,6 +1382,10 @@ async def evaluate_location_alerts(
             for r in await session.scalars(select(LocationResult))
         }
     await _forget_stale_locations(session_factory, enabled)
+    # прокси, который лег целиком, - один алерт про него, а не "недоступен из ..." по каждому сайту
+    broken = await _confirm_broken(
+        broken_location_ids(enabled, checks, results, min_fails=2), enabled, now
+    )
 
     pending: list = []
     # (check_id, откуда не виден, с какого момента) — новое состояние. Копится
@@ -1362,6 +1398,14 @@ async def evaluate_location_alerts(
         n_up = n_down = 0
         thr = max(c.alert_after_failures, 1)  # столько же подряд-сбоев, как для основного алерта
         for loc in effective_locations(c, enabled):
+            if loc.id in broken:
+                # о сломанном прокси - отдельный алерт. Уже объявленную "недоступен отсюда" не
+                # трогаем: ни нового алерта, ни ложного "снова доступен отовсюду"
+                if c.loc_alerted and loc.id in c.loc_alerted:
+                    lines.append(f"🔴 {loc.name} — недоступен")
+                    down_ids.append(loc.id)
+                    n_down += 1
+                continue
             if not loc.url:  # прямая = основная проверка
                 st, cf = c.last_status, c.consecutive_fails
             else:
@@ -1433,6 +1477,96 @@ async def evaluate_location_alerts(
             await _send_alerts(session_factory, settings, pending, now)
         except Exception:  # noqa: BLE001
             log.exception("ошибка отправки локационных алертов")
+    try:
+        await _proxy_alerts(session_factory, settings, enabled, checks, results, broken, now)
+    except Exception:  # noqa: BLE001
+        log.exception("ошибка алерта о сломанном прокси локации")
+
+
+# Подтверждение "сломан прокси": сам прокси проверяем запросом через него. Отвечает - значит,
+# сайты недоступны из той страны по-настоящему (блокировка), и про них нужны обычные алерты.
+# Ответ помним 5 минут, чтобы не дергать прокси каждый тик
+_PROXY_CONFIRM_TTL = 300
+_proxy_confirm: dict[int, tuple[float, bool]] = {}
+
+
+async def _confirm_broken(suspect: set[int], enabled: list[Location], now: datetime) -> set[int]:
+    out: set[int] = set()
+    ts = now.timestamp()
+    for loc in enabled:
+        if loc.id not in suspect:
+            _proxy_confirm.pop(loc.id, None)
+            continue
+        hit = _proxy_confirm.get(loc.id)
+        if hit is None or ts - hit[0] >= _PROXY_CONFIRM_TTL:
+            ok, _msg, _lat = await checks_exec.test_proxy(loc.url)
+            hit = (ts, ok)
+            _proxy_confirm[loc.id] = hit
+        if not hit[1]:
+            out.add(loc.id)
+    return out
+
+
+async def _proxy_alerts(
+    session_factory, settings: Settings, enabled: list[Location], checks: list[Check],
+    results: dict, broken: set[int], now: datetime,
+) -> None:
+    """Один алерт "прокси локации не отвечает" после выдержки и отбой, когда заработал.
+    Подчиняется правилу "Частичная доступность (локации)": это его алерты он заменяет."""
+    async with session_factory() as session:
+        raw = await settings_store.get_raw(session, settings_store.LOC_BROKEN_KEY)
+        if not broken and raw in (None, "", "{}"):
+            return  # все прокси живы и не было - нечего ни слать, ни запоминать
+        cfg = await settings_store.get_alert_config(session, settings)
+        muted = await settings_store.get_muted(session)
+        rule = (await settings_store.get_site_alert_rules(session)).get("locpart") or {}
+    try:
+        state = json.loads(raw) if raw else {}
+    except ValueError:
+        state = {}
+    names = {loc.id: loc.name for loc in enabled}
+    new: dict[str, dict] = {}
+    fires: list[tuple[str, str]] = []  # (id, текст)
+    recs: list[tuple[str, str]] = []
+    for lid in broken:
+        key, cur = str(lid), state.get(str(lid)) or {}
+        got = [r for c in checks if (r := results.get((c.id, lid))) is not None and r.status == "down"]
+        err = Counter(r.message for r in got).most_common(1)[0][0] if got else ""
+        since = cur.get("since") or now.isoformat()
+        item = {"since": since, "err": err[:200], "notified": bool(cur.get("notified"))}
+        new[key] = item
+        if not item["notified"] and (now - datetime.fromisoformat(since)).total_seconds() >= _LOC_PARTIAL_SUSTAIN:
+            name = html.escape(names.get(lid, "?"))
+            fires.append((key, (
+                f"🧭 Прокси локации «{name}» не отвечает: недоступны все сайты ({len(got)}), "
+                f"которые через нее проверяются, а с самой панели часть из них отвечает."
+                + (f"\nОшибка: {html.escape(err[:200])}" if err else "")
+                + f"\nАлерты «недоступен из {name}» по сайтам не шлются, пока прокси не заработает."
+            )))
+    for key, cur in state.items():
+        if key in new or not cur.get("notified"):
+            continue
+        if int(key) in names:
+            recs.append((key, f"✅ Прокси локации «{html.escape(names[int(key)])}» снова работает"))
+        # локацию убрали или выключили - отбой не нужен
+    can_send = bool(rule.get("enabled", True)) and not muted and alerts.alerts_enabled(cfg)
+    msgs = [alerts.Msg(t, "sites", "", kind="locpart", target=names.get(int(k), ""), recovery=False)
+            for k, t in fires]
+    msgs += [alerts.Msg(t, "sites", "", kind="locpart", target=names.get(int(k), ""), recovery=True)
+             for k, t in recs]
+    delivered = bool(msgs) and can_send and await alerts.dispatch(
+        cfg, True, msgs, int(cfg.get("flood_threshold", 6)), parse_mode="HTML",
+        session_factory=session_factory,
+    )
+    if delivered:
+        for key, _t in fires:
+            new[key]["notified"] = True
+    else:
+        for key, _t in recs:  # отбой не дошел - попробуем на следующем тике
+            new[key] = state[key]
+    if new != state:
+        async with session_factory() as session:
+            await settings_store.set_raw(session, settings_store.LOC_BROKEN_KEY, json.dumps(new))
 
 
 _SRV_LABEL = {

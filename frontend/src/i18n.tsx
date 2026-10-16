@@ -3184,8 +3184,8 @@ const EN: Record<string, string> = {
     'The location is off: nothing is checked through it.',
   'Эта локация только для внешней проверки портов нод: через нее панель смотрит, какие порты видны из интернета. Сайты через нее не проверяются, поэтому сайты, открытые лишь своей сети, не дают ложных "недоступен".':
     'This location is only for checking node ports from outside: the panel uses it to see which ports are visible from the internet. Sites are not checked through it, so sites open only to your own network do not get a false "down".',
-  'Отсюда недоступны все сайты ({n}), а с самой панели часть из них отвечает: похоже, сломан сам прокси. Ошибка: {err}':
-    'All sites ({n}) are down from here, while some of them respond from the panel itself: the proxy itself looks broken. Error: {err}',
+  'Сломан сам прокси: отсюда недоступны все сайты ({n}), с самой панели часть из них отвечает, а сам прокси не отвечает на проверку. Вместо алертов по каждому сайту приходит один алерт про прокси. Ошибка: {err}':
+    'The proxy itself is broken: all sites ({n}) are down from here, some of them respond from the panel itself, and the proxy does not answer the check. Instead of an alert for every site, one alert about the proxy is sent. Error: {err}',
   'Проверить прокси':
     'Check proxy',
   'мониторов':
