@@ -4071,6 +4071,92 @@ const EN: Record<string, string> = {
     'deleted an account',
   'учеток: {n}':
     'accounts: {n}',
+  // --- окно Окна обслуживания разделами (MaintModal) ---
+  'Окно идет: алерты по выбранным серверам и мониторам молчат.':
+    'The window is in progress: alerts for the selected servers and monitors are silent.',
+  'Окно прошло. Прошедшие разовые окна удаляются через месяц.':
+    'The window is over. Past one-off windows are deleted after a month.',
+  'Пока окно идет, алерты по выбранным серверам и мониторам молчат.':
+    'While the window is in progress, alerts for the selected servers and monitors are silent.',
+  'скоро': 'soon',
+  '2 ч':
+    '2 h',
+  '30 мин':
+    '30 min',
+  '4 ч':
+    '4 h',
+  '8 ч':
+    '8 h',
+  '{name} - не на связи':
+    '{name} - offline',
+  '{name} - недоступен':
+    '{name} - down',
+  '{name} - тормозит':
+    '{name} - slow',
+  'Ближайшее':
+    'Next',
+  'Завел':
+    'Created by',
+  'Закончить сейчас':
+    'End now',
+  'Затронет':
+    'Affects',
+  'Идет сейчас':
+    'In progress',
+  'Настройки окна':
+    'Window settings',
+  'Начать сейчас':
+    'Start now',
+  'Окна':
+    'Windows',
+  'Окно':
+    'Window',
+  'Окно закончено, алерты снова идут.':
+    'The window has ended, alerts are back on.',
+  'Окно продлено на час.':
+    'The window is extended by an hour.',
+  'Окно создано. Сверку после окна и заметку можно поменять ниже.':
+    'Window created. The after-window check and the note can be changed below.',
+  'Окон: {n}':
+    'Windows: {n}',
+  'Повторяющихся':
+    'Recurring',
+  'Продлить на час':
+    'Extend by an hour',
+  'Прошедшие':
+    'Past',
+  'Сверка после окна':
+    'After-window check',
+  'Сейчас все в норме.':
+    'Everything is fine right now.',
+  'Сейчас не в норме: {list}.':
+    'Not fine right now: {list}.',
+  'Удалить окно':
+    'Delete window',
+  'Что делаем, когда и что затронет. Сверка после окна включена, ее и заметку можно поменять в разделе окна после создания.':
+    'What is being done, when, and what it affects. The after-window check is on; it and the note can be changed in the window section after creation.',
+  'Что затронет и как оно сейчас':
+    'What it affects and how it is now',
+  'Что затронуто и как оно сейчас':
+    'What is affected and how it is now',
+  'ближайшее {when}':
+    'next {when}',
+  'да, через 5 минут после конца':
+    'yes, 5 minutes after the end',
+  'идет: {n}':
+    'in progress: {n}',
+  'каждый день или по дням недели':
+    'daily or on weekdays',
+  'не запланировано':
+    'nothing planned',
+  'ничего':
+    'nothing',
+  'окон нет':
+    'no windows',
+  'прошедших: {n}':
+    'past: {n}',
+  'тормозит':
+    'slow',
 }
 
 type Ctx = {
