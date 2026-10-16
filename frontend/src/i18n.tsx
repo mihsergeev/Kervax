@@ -2439,6 +2439,63 @@ const EN: Record<string, string> = {
   'Монитор': 'Monitor',
   'Остальные {n} без сбоев': 'The other {n} had no failures',
   'Отчет': 'Report',
+  // --- окно Уязвимости разделами (VulnsModal) ---
+  '{os}: исправления только в Ubuntu Pro':
+    '{os}: fixes only in Ubuntu Pro',
+  'База {rel} не скачалась: {err}':
+    'The {rel} database did not download: {err}',
+  'Базы Canonical от {d}: {list}':
+    'Canonical databases from {d}: {list}',
+  'Базы Canonical: {list}':
+    'Canonical databases: {list}',
+  'Без важных':
+    'No important ones',
+  'Без важных уязвимостей':
+    'No important vulnerabilities',
+  'Без обычной поддержки':
+    'Out of standard support',
+  'Где':
+    'Where',
+  'Ждут нового ядра':
+    'Waiting for a new kernel',
+  'Из исходного пакета {src} на серверах стоят: {list}.':
+    'Installed from the {src} source package: {list}.',
+  'Исправление только в Ubuntu Pro, а он не подключен: {list}.':
+    'The fix is only in Ubuntu Pro, which is not attached: {list}.',
+  'Исправлено в':
+    'Fixed in',
+  'Не проверены':
+    'Not checked',
+  'Остальные':
+    'Others',
+  'Пакет':
+    'Package',
+  'Пакеты и ядро сверены с базой Canonical: critical и эксплуатируемых уязвимостей, которые закрываются обновлением, нет.':
+    'Packages and the kernel are checked against the Canonical database: no critical or exploited vulnerabilities that an update fixes.',
+  'Пакеты обновить':
+    'Packages to update',
+  'С важными уязвимостями':
+    'With important vulnerabilities',
+  'Сверяется работающее ядро, а не установленное: новое начинает действовать только после перезагрузки.':
+    'The running kernel is checked, not the installed one: a new kernel takes effect only after a reboot.',
+  'Стоит':
+    'Installed',
+  'Что обновить':
+    'What to update',
+  'Эксплуатируется':
+    'Exploited',
+  'Эти серверы не с чем сверить: сверка пока только для Ubuntu, и нужен список пакетов от агента.':
+    'These servers cannot be checked: checks work only for Ubuntu for now and need the package list from the agent.',
+  'база уязвимостей не скачалась: {err}':
+    'the vulnerability database did not download: {err}',
+  'из проверенных {n}':
+    'of {n} checked',
+  'из проверенных {n}, с эксплуатируемыми: {k}':
+    'of {n} checked, with exploited ones: {k}',
+  'на серверах: {n}':
+    'on servers: {n}',
+  'от {d}':
+    'from {d}',
   // --- карта зависимостей ---
   'Замолчит сервер - то, что ниже, не пришлет каждый свой алерт: оно перечислено в его сообщении, а свой алерт придет только от того, что не поднимется вместе с сервером.':
     'If the server goes silent, what is below does not send an alert each: it is listed in its message, and only what does not come back together with the server sends its own alert.',
@@ -2584,19 +2641,11 @@ const EN: Record<string, string> = {
   'Только critical и уже эксплуатируемые (CISA KEV), которые закрываются обновлением: средние и мелкие не показываются. Пакеты сверяются с базой Canonical, ядро - работающее, а не установленное.':
     'Only critical and already exploited (CISA KEV) ones that an update fixes: medium and minor ones are not shown. Packages are matched against the Canonical database, the kernel is the running one, not the installed one.',
   'CVE, пакет или сервер': 'CVE, package or server',
-  'с важными уязвимостями: {n}': 'with important vulnerabilities: {n}',
-  'с эксплуатируемыми: {n}': 'with exploited: {n}',
-  'ждут нового ядра: {n}': 'waiting for a new kernel: {n}',
   'Базы уязвимостей еще не скачаны: панель скачивает их раз в сутки, первый раз - в течение 10 минут.':
     'Vulnerability databases are not downloaded yet: the panel fetches them once a day, the first time within 10 minutes.',
-  'пакетов: {n}': 'packages: {n}',
-  'Без важных уязвимостей: {n}': 'No important vulnerabilities: {n}',
-  'Не проверены: {n}': 'Not checked: {n}',
   'не Ubuntu': 'not Ubuntu',
   'список пакетов еще не пришел': 'the package list has not arrived yet',
   'база уязвимостей еще не скачана': 'the vulnerability database is not downloaded yet',
-  'Базы Canonical:': 'Canonical databases:',
-  'ошибка: {e}': 'error: {e}',
   'Список еще не пришел: агент пришлет его со следующим отчетом.':
     'The list has not arrived yet: the agent will send it with the next report.',
   'показаны первые {k} из {n}, уточните фильтр': 'showing the first {k} of {n}, narrow the filter',

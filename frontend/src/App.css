@@ -6611,81 +6611,9 @@ button.tl-tile-off .net-tile-value {
   overflow-wrap: anywhere;
   white-space: pre-wrap;
 }
-.vuln-servers {
-  display: flex;
-  flex-direction: column;
-  gap: 0.5rem;
-  margin-top: 0.6rem;
-}
-.vuln-srv {
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  padding: 0.45rem 0.6rem;
-  min-width: 0;
-}
-.vuln-srv-head {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 0.35rem 0.6rem;
-}
-.vuln-feeds {
-  margin-top: 0.8rem;
-}
-
-/* ---------- окно уязвимостей (VulnsModal): чипы серверов ---------- */
-.dm-modal {
-  width: min(1200px, calc(100vw - 2rem));
-}
-.dm-search {
-  flex: 1 1 220px;
-  max-width: 340px;
-}
-button.dm-name {
-  background: none;
-  border: 0;
-  box-shadow: none;
-  padding: 0;
-  color: var(--text);
-  font-weight: 600;
-  font-size: 0.92rem;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-button.dm-name:hover {
-  background: none;
-  color: var(--accent);
-}
-.dm-chips {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.3rem;
-}
-button.dm-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.3rem;
-  max-width: 100%;
-  padding: 0.12rem 0.5rem;
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  background: transparent;
-  box-shadow: none;
-  color: var(--text);
-  font-size: 0.78rem;
-  font-weight: 400;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-button.dm-chip:hover {
-  background: var(--hover);
-}
-button.dm-sec-btn {
-  padding: 0.1rem 0.5rem;
-  font-size: 0.78rem;
-}
+/* окно уязвимостей (VulnsModal): CVE пакета без отступа строки, подпись баз под таблицей */
+.srv-sec > .vuln-cves { margin-left: 0; }
+.vu-feeds { margin: 0.9rem 0 0; }
 
 /* карта зависимостей (DepMapModal): у таблиц мониторов раздела одна сетка, адрес монитора
    в одну строку с многоточием */
