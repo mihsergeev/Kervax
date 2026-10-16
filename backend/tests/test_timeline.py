@@ -281,3 +281,34 @@ async def test_site_down_alert_says_what_changed_on_its_server(client, monkeypat
     by = {m.target: str(m) for m in sent}
     assert "↳ за час до этого: новый образ: shop-web-1" in by["site-a"]
     assert "↳" not in by["site-b"]  # у сайта без сервера в панели строки нет
+
+
+def test_udp_sessions_and_flapping_ports_stay_out():
+    """На двух VPN-нодах xray открывал UDP-сокет на случайном порту на каждую сессию клиента:
+    52 тысячи строк "открыт/закрыт порт" за 10 дней. А 123/udp открывался и закрывался 159 раз."""
+    t0 = datetime(2026, 10, 16, tzinfo=timezone.utc)
+
+    def at(m):
+        return (t0 + timedelta(minutes=m)).isoformat()
+
+    pend: dict = {}
+    base = {"22/tcp": "sshd", "443/tcp": "xray"}
+    # снимок, сохраненный до правила, с сессией внутри: она уходит без строки "закрыт порт"
+    _, snap = timeline.diff(None, _snap(at(0), {}, dict(base, **{"17123/udp6": ""})), pend)
+    got = []
+    for i in range(1, 13):
+        ports = dict(base, **{f"{20000 + i}/udp6": ""})
+        if (i - 1) // 2 % 2 == 0:
+            ports["123/udp"] = ""  # NTP без имени процесса, но порт ниже 1024 - это сервис
+        ev, snap = timeline.diff(snap, _snap(at(i), {}, ports), pend)
+        got += [(e["kind"], e["obj"]) for e in ev]
+    assert all(not o.endswith("udp6") for _, o in got), got
+    assert [k for k, o in got if o == "123/udp"] == ["open", "close", "open", "flap"], got
+    # через сутки тишины порт снова пишется
+    for m in (60 * 25, 60 * 25 + 1):
+        ev, snap = timeline.diff(snap, _snap(at(m), {}, dict(base, **{"123/udp": ""})), pend)
+    assert [(e["kind"], e["obj"]) for e in ev] == [("open", "123/udp")], ev
+    # UDP с известным процессом - событие
+    for m in (60 * 26, 60 * 26 + 1):
+        ev, snap = timeline.diff(snap, _snap(at(m), {}, dict(base, **{"123/udp": "", "5353/udp": "avahi-daemon"})), pend)
+    assert [(e["kind"], e["obj"]) for e in ev] == [("open", "5353/udp")], ev

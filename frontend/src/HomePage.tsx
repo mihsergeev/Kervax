@@ -22,7 +22,7 @@ import {
   type KnownIssue,
 } from './api'
 import type { Section } from './App'
-import { backupWindowNote, dbAuditNames, dockRiskText, fmtSetupVersion, knownActive, proxyBuilt, shortList, sinceShort, srvIssues, srvKnown, knownMeta } from './serverUtils'
+import { backupAlive, backupWindowNote, dbAuditNames, dockRiskText, fmtSetupVersion, knownActive, proxyBuilt, shortList, sinceShort, srvIssues, srvKnown, knownMeta } from './serverUtils'
 import { KnownDialog } from './KnownDialog'
 import { MaintChip, MaintHome } from './MaintModal'
 import { useI18n } from './i18n'
@@ -812,7 +812,7 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
   const kubeHosts = srvList.filter((s) => s.last_report?.kube?.present && s.last_report.kube.access)
   const kubePods = kubeHosts.reduce((n, s) => n + (s.last_report?.kube?.pods?.filter((p) => p.phase === 'Running').length ?? 0), 0)
   const kubeProbs = kubeProblems(srvList, t)
-  const backupClients = srvList.filter((s) => s.last_report?.backup?.present)
+  const backupClients = srvList.filter((s) => backupAlive(s.last_report?.backup))
   const backupServers = srvList.filter((s) => s.last_report?.backup_server?.present)
   const backupProbs = backupProblems(srvList, t)
   // проблемы с бэкенда, которые относятся к разделу (сроки и Flux - к "Куберу", дампы и проверки
