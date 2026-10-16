@@ -903,6 +903,30 @@ export function getRetention(): Promise<Retention> {
   return api<Retention>('/api/settings/retention')
 }
 
+// Окно "Хранение данных": размер базы и из чего она состоит (app/retention.py)
+export type RetentionPart = { key: string; bytes: number; rows?: number | null }
+export type RetentionGroup = {
+  id: 'srv' | 'chk'
+  days: number
+  oldest?: string | null
+  bytes: number
+  span_days: number // за сколько дней накоплено лежащее, не больше срока
+  per_day: number
+  parts: RetentionPart[]
+}
+export type RetentionOverview = {
+  db_bytes: number | null
+  estimated: boolean // SQLite без dbstat: размеры таблиц - оценка по числу строк
+  groups: RetentionGroup[]
+  fixed: { key: string; days: number; bytes?: number | null; rows?: number | null }[]
+  other_bytes: number | null
+  prune_every: number
+}
+
+export function getRetentionOverview(): Promise<RetentionOverview> {
+  return api<RetentionOverview>('/api/settings/retention/overview')
+}
+
 export function putRetention(body: Retention): Promise<Retention> {
   return api<Retention>('/api/settings/retention', {
     method: 'PUT',

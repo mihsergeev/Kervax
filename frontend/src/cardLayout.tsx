@@ -67,10 +67,12 @@ export function FreshChip({ since }: { since: string }) {
 
 // Меню разделов: группы подписями, у пункта с замечаниями число цветом самого серьезного.
 // На телефоне - лентой над разделом, текущий пункт подкручивается в видимую часть
-export function CardNav({ secs, active, info, onGo }: {
+// side - короткое значение справа у пункта (размер, срок), когда числа замечаний там нет
+export function CardNav({ secs, active, info, side, onGo }: {
   secs: SecDef[]
   active: string
   info: Record<string, SecInfo>
+  side?: Record<string, string>
   onGo: (id: string) => void
 }) {
   const { t } = useI18n()
@@ -91,9 +93,11 @@ export function CardNav({ secs, active, info, onGo }: {
             <button className={`srv-nav-item${active === s.id ? ' active' : ''}`} onClick={() => onGo(s.id)}>
               <span className="srv-nav-label">{t(s.label)}</span>
               {x?.fresh && <span className="srv-new">{t('новое')}</span>}
-              {x && x.n > 0 && x.level > 0 && (
+              {x && x.n > 0 && x.level > 0 ? (
                 <span className={`srv-nav-n srv-nav-n-${x.level >= 2 ? 'bad' : 'warn'}`}>{x.n}</span>
-              )}
+              ) : side?.[s.id] ? (
+                <span className="srv-nav-side">{side[s.id]}</span>
+              ) : null}
             </button>
           </Fragment>
         )

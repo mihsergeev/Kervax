@@ -2,10 +2,10 @@ from datetime import datetime, timezone
 
 from fastapi import APIRouter
 
-from app import audit, settings_store
+from app import audit, retention, settings_store
 from app.config import get_settings
 from app.deps import AdminUser, SessionDep
-from app.schemas import AnsibleAccessOut, AnsibleTokenOut, RetentionConfig
+from app.schemas import AnsibleAccessOut, AnsibleTokenOut, RetentionConfig, RetentionOverview
 from app.security import generate_agent_token, hash_agent_token
 
 router = APIRouter(prefix="/settings", tags=["settings"])
@@ -15,6 +15,12 @@ router = APIRouter(prefix="/settings", tags=["settings"])
 async def get_retention(_: AdminUser, session: SessionDep) -> RetentionConfig:
     ret = await settings_store.get_retention(session, get_settings())
     return RetentionConfig(**ret)
+
+
+@router.get("/retention/overview", response_model=RetentionOverview)
+async def retention_overview(_: AdminUser, session: SessionDep) -> RetentionOverview:
+    """Сколько занимает база и из чего состоит: для окна "Хранение данных"."""
+    return RetentionOverview(**await retention.overview(session, get_settings(), datetime.now(timezone.utc)))
 
 
 @router.put("/retention", response_model=RetentionConfig)

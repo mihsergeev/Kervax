@@ -928,6 +928,44 @@ class RetentionConfig(BaseModel):
     sample_days: int = Field(ge=1, le=3650)  # история проверок сайтов
 
 
+class RetentionPart(BaseModel):
+    key: str              # таблица
+    bytes: int
+    rows: int | None = None
+
+
+class RetentionGroup(BaseModel):
+    """Данные со сроком из настроек: сколько занимают, самая старая запись, прирост в сутки."""
+
+    id: str               # srv - метрики серверов, chk - история проверок
+    days: int
+    oldest: datetime | None = None
+    bytes: int
+    span_days: float = 0      # за сколько дней накоплено лежащее (не больше срока)
+    per_day: int
+    parts: list[RetentionPart]
+
+
+class RetentionFixed(BaseModel):
+    """Данные со своим постоянным сроком. bytes None - своего размера нет (часть другой таблицы)."""
+
+    key: str
+    days: int
+    bytes: int | None = None
+    rows: int | None = None
+
+
+class RetentionOverview(BaseModel):
+    """Окно "Хранение данных": размер базы и из чего она состоит (app/retention.py)."""
+
+    db_bytes: int | None = None
+    estimated: bool = False   # SQLite без dbstat: размеры таблиц - оценка по числу строк
+    groups: list[RetentionGroup]
+    fixed: list[RetentionFixed]
+    other_bytes: int | None = None
+    prune_every: int          # секунд между чистками старого
+
+
 class BackupConfig(BaseModel):
     """Автобэкап: интервал (часы, 0 = выкл) и сколько файлов хранить."""
 

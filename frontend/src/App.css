@@ -1869,6 +1869,30 @@ button.srv-tile-btn:hover .net-tile { border-color: var(--border-strong); backgr
   overflow: auto;
 }
 
+/* окно "Хранение данных" (RetentionModal): полоса размера базы по видам данных */
+.srv-nav-side { margin-left: auto; font-size: 0.74rem; color: var(--text-muted); white-space: nowrap; font-variant-numeric: tabular-nums; }
+.rt-big { font-size: 1.6rem; font-weight: 650; font-variant-numeric: tabular-nums; }
+.rt-bar { display: flex; height: 14px; border-radius: 7px; overflow: hidden; background: var(--bg); border: 1px solid var(--border); }
+.rt-bar span { height: 100%; }
+.rt-legend { display: flex; flex-wrap: wrap; gap: 0.3rem 1rem; }
+.rt-legend span { display: inline-flex; align-items: center; gap: 0.4rem; }
+.rt-sw { width: 10px; height: 10px; border-radius: 3px; display: inline-block; flex: 0 0 auto; }
+.rt-c-srv { background: #4b74ff; }
+.rt-c-chk { background: #22c3a6; }
+.rt-c-other { background: #5d6579; }
+.rt-cap { padding: 0.6rem 0 0; }
+.rt-row { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 0.6rem 0.8rem; }
+.rt-days { margin: 0; }
+.rt-days input { width: 7rem; }
+.rt-proj { margin: 0; line-height: 1.45; }
+.rt-tbl { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+.rt-tbl th, .rt-tbl td { padding: 0.4rem 0.6rem; border-bottom: 1px solid var(--border); text-align: left; }
+.rt-tbl th { font-size: 0.72rem; font-weight: 600; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.04em; }
+.rt-tbl .num { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+@media (max-width: 560px) {
+  .rt-tbl td.muted { display: none; }
+}
+
 /* упавший Job: строка, под ней конец лога его пода */
 .loc-res.job-row { flex-direction: column; align-items: stretch; gap: 0.35rem; }
 .job-main { display: flex; align-items: center; gap: 0.7rem; min-width: 0; }
