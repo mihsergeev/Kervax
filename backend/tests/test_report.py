@@ -62,6 +62,11 @@ async def test_report_week(client, auth_headers):
     assert noise["top"][0] == {"kind": "disk", "label": noise["top"][0]["label"], "target": "web-a", "n": 3}
     assert noise["backups"][0]["target"] == "web-b" and noise["backups"][0]["n"] == 2
     assert [m["title"] for m in j["maint"]] == ["ядро"]
+    # по дням: все случилось за последние часы - сегодня (или вчера, если сутки только начались)
+    days = j["day_labels"]
+    assert len(days) == 8 and len(noise["per_day"]) == 8 == len(sites["per_day"]) == len(srv["per_day"])
+    assert sum(noise["per_day"]) == 5 and sum(noise["per_day"][-2:]) == 5
+    assert abs(sum(sites["per_day"]) - 600) < 5 and abs(sum(srv["per_day"]) - 1260) < 70
 
 
 async def test_report_respects_groups(client, auth_headers):
