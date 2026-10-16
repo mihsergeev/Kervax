@@ -73,6 +73,16 @@ def _no_dns_lookups(monkeypatch):
     monkeypatch.setattr(checks, "_dns_time", no_lookup)
 
 
+@pytest.fixture(autouse=True)
+def _job_logs_clean():
+    """Запросы логов упавших Job живут в памяти планировщика: тесту - с чистого листа."""
+    from app import job_logs
+
+    job_logs.reset()
+    yield
+    job_logs.reset()
+
+
 # Фикстуры сброса лимитера больше нет: счётчик неудачных входов лежит в базе,
 # а база у каждого теста своя временная — сбрасывать глобальное состояние нечего.
 

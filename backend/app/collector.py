@@ -23,6 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app import alerts, audit, backup, backup_growth, checks as checks_exec, custom_backups, docker_exposure, flaky, heartbeat, settings_store
 from app import backup_verify
 from app import inside_probe
+from app import job_logs
 from app import db_health
 from app import access_audit
 from app import docker_risk
@@ -5608,17 +5609,22 @@ async def evaluate_servers(
         k_rep = s.last_report or {}
         if (k_rep.get("kube") or {}).get("access") and _ver_tuple(k_rep.get("agent_version")) >= (2, 26):
             jobs = kube_failed_jobs(k_rep)
-            keys = sorted(f"{j.get('ns')}/{j.get('name')}@{_int(j.get('ts'))}" for j in jobs)
+            keys = sorted(job_logs.job_key(j) for j in jobs)
             seen = st.get("kube_jobs_seen")
             if seen is None:
                 apply(s.id, "kube_jobs_seen", keys)
             elif set(keys) - set(seen):
-                fresh = [j for j in jobs if f"{j.get('ns')}/{j.get('name')}@{_int(j.get('ts'))}" not in set(seen)]
+                fresh = [j for j in jobs if job_logs.job_key(j) not in set(seen)]
                 kj = rules.get("kube_job")
                 if "kube_job" not in mutes and kj and kj["enabled"] and _rule_scope_ok(kj, s):
-                    fires.append(srv_fire(s, "kube_job", kj, {
-                        "detail": ("упал Job: " if len(fresh) == 1 else "упали Job: ") + failed_jobs_text(fresh, 5)}))
-                    fire_apply.append((s.id, "kube_jobs_seen", keys))
+                    # хвост лога пода просит стадия "логи упавших Job"; пока агент не ответил
+                    # (до job_logs._WAIT), алерт ждет следующего тика, kube_jobs_seen не трогаем
+                    logs = job_logs.collect(s.id, k_rep, fresh, now.timestamp())
+                    if logs is not None:
+                        fires.append(job_logs.attach(srv_fire(s, "kube_job", kj, {
+                            "detail": ("упал Job: " if len(fresh) == 1 else "упали Job: ")
+                            + failed_jobs_text(fresh, 5)}), logs))
+                        fire_apply.append((s.id, "kube_jobs_seen", keys))
                 else:
                     apply(s.id, "kube_jobs_seen", keys)
             elif sorted(seen) != keys:
@@ -6167,6 +6173,44 @@ def disk_analyze_ok(rep: dict) -> bool:
             and _ver_tuple(hv) >= _ANALYZE_HELPER)
 
 
+async def request_job_logs(session_factory: async_sessionmaker[AsyncSession], now: datetime) -> int:
+    """Логи упавших Job для алерта (app/job_logs.py): на новый упавший Job - команда logs его
+    поду, на готовые команды - забрать ответ. Возвращает, сколько команд поставлено."""
+    now_ts = now.timestamp()
+    queued = 0
+    async with session_factory() as session:
+        for s in list(await session.scalars(select(Server).where(Server.enabled.is_(True)))):
+            rep = s.last_report or {}
+            if not (rep.get("kube") or {}).get("access") or _ver_tuple(rep.get("agent_version")) < (2, 26):
+                continue
+            seen = (s.alert_state or {}).get("kube_jobs_seen")
+            if seen is None or "kube_job" in (s.alert_mutes or []):
+                continue
+            snoozed = _parse_iso((s.alert_snoozes or {}).get("kube_job") or "")
+            if snoozed is not None and snoozed > now:
+                continue
+            fresh = [j for j in kube_failed_jobs(rep) if job_logs.job_key(j) not in set(seen)]
+            for j in fresh[:job_logs._JOBS]:
+                pod = job_logs.ask(s.id, rep, j, now_ts)
+                if pod is None:
+                    continue
+                c = KubeCommand(server_id=s.id, ns=pod[0], kind="pod", name=pod[1], action="logs",
+                                tail=job_logs._TAIL)
+                session.add(c)
+                await session.flush()
+                job_logs.asked(s.id, j, c.id)
+                queued += 1
+        want = job_logs.waiting_cmds()
+        if want:
+            rows = await session.execute(select(KubeCommand.id, KubeCommand.status, KubeCommand.result).where(
+                KubeCommand.id.in_(want), KubeCommand.status.in_(("done", "error"))))
+            for cid, status, result in rows.all():
+                job_logs.answered(cid, status == "done", result or "")
+        await session.commit()
+    job_logs.prune(now_ts)
+    return queued
+
+
 async def request_disk_analysis(session_factory: async_sessionmaker[AsyncSession], now: datetime) -> int:
     """Ставит в очередь разбор раздела, который по прогнозу заполнится в пределах предупреждения,
     а разбора у него нет. По одной команде disk_fix на сервер за раз, раздел - не чаще раза в
@@ -6483,6 +6527,9 @@ async def collector_loop(
                 session_factory, datetime.now(timezone.utc)))
             # хронология - тоже до алертов: строка "перед этим" берет из нее последние события
             await stage("хронология серверов", timeline_mod.track(
+                session_factory, datetime.now(timezone.utc)))
+            # логи упавших Job - до алертов: алерт о Job ждет хвост лога его пода
+            await stage("логи упавших Job", request_job_logs(
                 session_factory, datetime.now(timezone.utc)))
             await stage("серверные алерты", evaluate_servers(
                 session_factory, settings, datetime.now(timezone.utc)))

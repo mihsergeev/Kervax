@@ -103,3 +103,125 @@ async def test_failed_job_event(tmp_path, monkeypatch):
     await collector.evaluate_servers(factory, cfg, now + timedelta(seconds=60))
     assert len([m for m in sent if m.startswith("💥☸️")]) == 1
     await engine.dispose()
+
+
+def test_job_pod_and_log_tail():
+    from app import job_logs
+
+    rep = _kube(pods=[
+        {"ns": "shop", "name": "migrate-42-x7k2p", "owner": "Job", "phase": "Failed", "reason": "Error"},
+        {"ns": "shop", "name": "migrate-42-extra-ab3cd", "owner": "Job", "phase": "Failed"},  # другой Job
+        {"ns": "ops", "name": "migrate-42-q1w2e", "owner": "Job", "phase": "Failed"},  # другой namespace
+        {"ns": "shop", "name": "batch-0-k9m8n", "owner": "Job", "phase": "Succeeded"},  # индексный Job
+    ])
+    assert job_logs.find_pod(rep, {"ns": "shop", "name": "migrate-42"})["name"] == "migrate-42-x7k2p"
+    assert job_logs.find_pod(rep, {"ns": "shop", "name": "batch"})["name"] == "batch-0-k9m8n"
+    assert job_logs.find_pod(rep, {"ns": "shop", "name": "gone"}) is None
+    raw = ("2026-10-16T11:15:58.123456789Z start\n\n"
+           "2026-10-16T11:15:59.000000001Z \x1b[31mValueError: bad address\x1b[0m\n")
+    assert job_logs.tail_text(raw) == "start\nValueError: bad address"
+    long = "\n".join(f"line {i}" for i in range(100))
+    assert job_logs.tail_text(long).splitlines() == [f"line {i}" for i in range(85, 100)]
+    assert len(job_logs.tail_text(long, chars=30)) <= 30
+
+
+async def test_failed_job_alert_carries_log(tmp_path, monkeypatch):
+    """Алерт о Job ждет хвост лога его пода и приходит уже с ним: почему упал, видно в чате."""
+    from app.config import Settings
+    from app.db import Base, create_engine_and_factory
+    from app.models import KubeCommand
+
+    engine, factory = create_engine_and_factory(f"sqlite+aiosqlite:///{(tmp_path / 'k.db').as_posix()}")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    now = datetime.now(timezone.utc)
+    ts = int(now.timestamp())
+    async with factory() as s:
+        s.add(Server(name="k8s-a", token_hash="x", enabled=True, backup_not_required=True, last_seen=now,
+                     cpu_alert_percent=0, mem_alert_percent=0, last_report=_kube()))
+        await s.commit()
+    sent: list[str] = []
+
+    async def fake_send(cfg, text, parse_mode=None, **kw):
+        sent.append(text)
+        return []
+
+    monkeypatch.setattr("app.alerts.send_alert", fake_send)
+    cfg = Settings(alert_webhook="http://hook")
+    await collector.evaluate_servers(factory, cfg, now)
+    pods = [{"ns": "shop", "name": "migrate-42-x7k2p", "owner": "Job", "phase": "Failed", "reason": "Error"}]
+    async with factory() as s:
+        srv = (await s.execute(select(Server))).scalars().one()
+        srv.last_report = _kube(pods=pods, failed_jobs=[
+            {"ns": "shop", "name": "migrate-42", "ts": ts, "reason": "BackoffLimitExceeded"}])
+        await s.commit()
+    t1 = now + timedelta(seconds=30)
+    assert await collector.request_job_logs(factory, t1) == 1
+    await collector.evaluate_servers(factory, cfg, t1)
+    assert not [m for m in sent if m.startswith("💥☸️")]  # ждем ответ агента
+    async with factory() as s:
+        cmd = (await s.execute(select(KubeCommand))).scalars().one()
+        assert (cmd.ns, cmd.name, cmd.action) == ("shop", "migrate-42-x7k2p", "logs")
+        cmd.status, cmd.ok = "done", True
+        cmd.result = "2026-10-16T11:15:58Z connecting\n2026-10-16T11:15:59Z ValueError: bad <address>\n"
+        await s.commit()
+    t2 = now + timedelta(seconds=60)
+    assert await collector.request_job_logs(factory, t2) == 0  # повторно не спрашиваем
+    await collector.evaluate_servers(factory, cfg, t2)
+    jobs = [m for m in sent if m.startswith("💥☸️")]
+    assert len(jobs) == 1, sent
+    assert "упал Job: shop/migrate-42 (BackoffLimitExceeded)" in jobs[0]
+    assert "↳ под migrate-42-x7k2p (Error), конец лога:\n<pre>connecting\nValueError: bad &lt;address&gt;</pre>" in jobs[0]
+    await collector.evaluate_servers(factory, cfg, now + timedelta(seconds=90))
+    assert len([m for m in sent if m.startswith("💥☸️")]) == 1
+    await engine.dispose()
+
+
+async def test_failed_job_alert_does_not_wait_forever(tmp_path, monkeypatch):
+    """Агент не ответил - алерт уходит без лога после _WAIT, а не висит."""
+    from app import job_logs
+    from app.config import Settings
+    from app.db import Base, create_engine_and_factory
+
+    engine, factory = create_engine_and_factory(f"sqlite+aiosqlite:///{(tmp_path / 'k.db').as_posix()}")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    now = datetime.now(timezone.utc)
+    ts = int(now.timestamp())
+    async with factory() as s:
+        s.add(Server(name="k8s-a", token_hash="x", enabled=True, backup_not_required=True, last_seen=now,
+                     cpu_alert_percent=0, mem_alert_percent=0, last_report=_kube()))
+        await s.commit()
+    sent: list[str] = []
+
+    async def fake_send(cfg, text, parse_mode=None, **kw):
+        sent.append(text)
+        return []
+
+    monkeypatch.setattr("app.alerts.send_alert", fake_send)
+    cfg = Settings(alert_webhook="http://hook")
+    await collector.evaluate_servers(factory, cfg, now)
+    async with factory() as s:
+        srv = (await s.execute(select(Server))).scalars().one()
+        srv.last_report = _kube(
+            pods=[{"ns": "shop", "name": "migrate-42-x7k2p", "owner": "Job", "phase": "Failed"}],
+            failed_jobs=[{"ns": "shop", "name": "migrate-42", "ts": ts, "reason": "BackoffLimitExceeded"}])
+        await s.commit()
+    for sec in (30, 60, 90):
+        await collector.request_job_logs(factory, now + timedelta(seconds=sec))
+        await collector.evaluate_servers(factory, cfg, now + timedelta(seconds=sec))
+    assert not [m for m in sent if m.startswith("💥☸️")]
+    late = now + timedelta(seconds=30 + job_logs._WAIT + 1)
+    await collector.request_job_logs(factory, late)
+    await collector.evaluate_servers(factory, cfg, late)
+    jobs = [m for m in sent if m.startswith("💥☸️")]
+    assert len(jobs) == 1 and "<pre>" not in jobs[0]
+    await engine.dispose()
+
+
+def test_digest_drops_job_logs():
+    from app import alerts
+
+    m = "💥☸️ k8s-a - упал Job: shop/migrate-42\n↳ под migrate-42-x7k2p, конец лога:\n<pre>boom</pre>"
+    d = alerts._digest([m] * 6)
+    assert "<pre>" not in d and "boom" not in d and d.count("упал Job: shop/migrate-42") == 6

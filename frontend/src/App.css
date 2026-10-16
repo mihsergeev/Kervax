@@ -1869,6 +1869,19 @@ button.srv-tile-btn:hover .net-tile { border-color: var(--border-strong); backgr
   overflow: auto;
 }
 
+/* упавший Job: строка, под ней конец лога его пода */
+.loc-res.job-row { flex-direction: column; align-items: stretch; gap: 0.35rem; }
+.job-main { display: flex; align-items: center; gap: 0.7rem; min-width: 0; }
+.job-main .docker-c-main { flex: 1 1 auto; min-width: 0; }
+.job-log { padding-left: calc(9px + 0.7rem); min-width: 0; }
+.job-log-head { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; flex-wrap: wrap; }
+.job-log-head .muted { overflow-wrap: anywhere; }
+/* строка красная (t-down), лог - обычным цветом: красный абзац не читается */
+.job-row .web-err-lines { color: var(--text); }
+/* глушение алертов кластера: под шапкой карточки, видно из любого раздела */
+.kube-mute { display: flex; flex-direction: column; gap: 0.35rem; margin: 0.1rem 0 0.5rem; }
+.kube-mute .snooze-active-list { margin-top: 0; }
+
 /* поле пароля с кнопкой показать/скрыть (HTTP-аутентификация монитора) */
 .pass-row {
   display: flex;
@@ -6718,6 +6731,11 @@ button.dm-sec-btn {
   .hs-modal .docker-row .docker-c-main { flex: 1 1 calc(100% - 1.5rem); }
   .hs-modal .docker-row .docker-c-status { margin-left: 1.3rem; }
   .hs-modal .docker-row .docker-actions { margin-left: auto; }
+  /* упавший Job: строка и лог друг под другом, переносится сама строка, а не колонка */
+  .hs-modal .docker-row.job-row { flex-wrap: nowrap; }
+  .hs-modal .job-main { flex-wrap: wrap; row-gap: 0.4rem; }
+  .hs-modal .job-main .docker-c-main { flex: 1 1 calc(100% - 1.5rem); }
+  .hs-modal .job-main .docker-c-status { margin-left: 1.3rem; }
 }
 
 /* ---------- новый монитор: адрес, пробная проверка, откуда проверять (AddMonitor.tsx) ---------- */

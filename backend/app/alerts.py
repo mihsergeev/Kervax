@@ -167,8 +167,13 @@ async def send_alert(cfg: dict, text: str, parse_mode: str | None = None,
 _DIGEST_LINES = 15  # сколько сообщений показать в дайджесте (остальные — счётчиком)
 
 
+_PRE = re.compile(r"\n[^\n]*\n<pre>.*?</pre>", re.S)
+
+
 def _digest(messages: list[str]) -> str:
-    head = messages[:_DIGEST_LINES]
+    # хвост лога у алерта о Job в дайджест не берем: в пачке он не читается и раздувает
+    # сообщение за предел Telegram
+    head = [_PRE.sub("", m) for m in messages[:_DIGEST_LINES]]
     extra = len(messages) - len(head)
     body = "\n\n".join(head)
     if extra:

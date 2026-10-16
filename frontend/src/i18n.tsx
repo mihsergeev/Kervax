@@ -3639,6 +3639,18 @@ const EN: Record<string, string> = {
     'asks to sign in (HTTP 401)',
   'Сайт просит вход (401): впишите заголовок или логин и пароль ниже и нажмите "проверить снова".':
     'The site asks to sign in (401): fill in a header or a login and password below and press "check again".',
+  // --- лог упавшего Job и глушение алертов кластера (KuberPage) ---
+  'под {pod}, конец лога': 'pod {pod}, end of the log',
+  'Весь лог': 'Full log',
+  'в лог ничего не написал': 'wrote nothing to the log',
+  'пода уже нет, лога тоже': 'the pod is gone, and its log with it',
+  'Лог пода {pod}': 'Log of pod {pod}',
+  'Заглушить алерты подов и Job': 'Mute pod and Job alerts',
+  'не алертить о подах, Job и CronJob этого кластера:': 'do not alert about pods, Jobs and CronJobs of this cluster:',
+  'не алертят: {what}': 'not alerting: {what}',
+  'поды, Job и CronJob': 'pods, Jobs and CronJobs',
+  'не алертить об упавших Job:': 'do not alert about failed Jobs:',
+  'не алертить об упавших Job': 'do not alert about failed Jobs',
 }
 
 type Ctx = {
