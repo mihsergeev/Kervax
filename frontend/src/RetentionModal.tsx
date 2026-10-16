@@ -216,7 +216,7 @@ export function RetentionModal({ onClose, onUnauthorized }: Props) {
           )}
         </p>
         <div className="srv-nav-grp rt-cap">{t('Из чего состоит')}</div>
-        <table className="rt-tbl">
+        <table className="sec-tbl">
           <tbody>
             {g.parts.map((p) => (
               <tr key={p.key}>
@@ -300,7 +300,7 @@ export function RetentionModal({ onClose, onUnauthorized }: Props) {
                 {g && groupPage(sec as Gid, g)}
                 {cur.id === 'fix' && (
                   <div className="srv-sec">
-                    <table className="rt-tbl">
+                    <table className="sec-tbl">
                       <thead>
                         <tr>
                           <th>{t('Что')}</th>
