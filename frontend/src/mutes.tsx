@@ -56,6 +56,7 @@ export const SRV_ALERT_KINDS: { k: string; label: string }[] = [
   { k: 'oom', label: 'OOM-killer' },
   { k: 'web_5xx', label: 'Веб: ошибки 5xx' },
   { k: 'kube_pod', label: 'Kubernetes: поды' },
+  { k: 'bogus_requests', label: 'Левые запросы в панель' },
 ]
 
 // Заглушенные 5xx одного лога (домена): ключ web_5xx:<ключ лога>. Подпись - с самим

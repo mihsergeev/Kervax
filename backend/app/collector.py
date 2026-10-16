@@ -22,6 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app import alerts, audit, backup, backup_growth, checks as checks_exec, custom_backups, docker_exposure, flaky, heartbeat, settings_store
 from app import backup_verify
+from app import request_watch
 from app import inside_probe
 from app import job_logs
 from app import retention as retention_mod
@@ -68,6 +69,7 @@ from app.models import (
     AlertEvent,
     LinkSample,
     ProbeRequest,
+    RequestStat,
     Server,
     ServerMetric,
     ServerTraffic,
@@ -6329,6 +6331,10 @@ async def _prune(
         await session.execute(
             delete(ProbeRequest).where(ProbeRequest.created_at < now - retention_mod.PROBES_KEEP)
         )
+        # левые запросы к панели: алерту нужны последние 10 минут, окну - сутки
+        await session.execute(
+            delete(RequestStat).where(RequestStat.minute < now - retention_mod.REQUESTS_KEEP)
+        )
         # разовые проверки доменов из мастера живут часы; неделя — с большим запасом
         await session.execute(
             delete(DomainProbe).where(DomainProbe.started_at < now - retention_mod.DOMAIN_PROBES_KEEP)
@@ -6537,6 +6543,8 @@ async def collector_loop(
             await stage("разбор дисков по прогнозу", request_disk_analysis(
                 session_factory, datetime.now(timezone.utc)))
             await stage("зависшие команды", _expire_commands(session_factory))
+            await stage("левые запросы к панели", request_watch.check(
+                session_factory, settings, datetime.now(timezone.utc)))
             # внешняя проверка портов идет фоном: закрытый файрволом порт отвечает только таймаутом
             await stage("что открыто в интернет", open_ports.start_scan(
                 session_factory, datetime.now(timezone.utc)))

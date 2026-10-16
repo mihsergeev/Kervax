@@ -157,6 +157,44 @@ export function getLoginGuard(): Promise<LoginGuard> {
 export function saveLoginGuard(body: { max_failures: number; ban_minutes: number; allow: AllowEntry[] }): Promise<LoginGuard> {
   return api<LoginGuard>('/api/login-guard', { method: 'PUT', body: JSON.stringify(body) })
 }
+// левые запросы к панели: что сейчас в алерте и кто за сутки слал отказы или всплески
+export type PanelReqServer = { id: number; name: string }
+export type PanelReqActive = {
+  key: string
+  who: string
+  servers: PanelReqServer[]
+  since: string | null
+  last_over: string | null
+  what: string
+  hint: string
+  notified: boolean
+}
+export type PanelReqSource = {
+  key: string
+  who: string
+  servers: PanelReqServer[]
+  bad: number
+  peak: number
+  codes: Record<string, number>
+  paths: [string, number][]
+  first: string
+  last: string
+  active: boolean
+  hint: string
+}
+export type PanelRequests = {
+  window_min: number
+  bad_limit: number
+  flood_per_server: number
+  typical_per_server: number
+  write_floor: number
+  active: PanelReqActive[]
+  sources: PanelReqSource[]
+  more: number
+}
+export function getPanelRequests(): Promise<PanelRequests> {
+  return api<PanelRequests>('/api/panel-requests')
+}
 export function unbanLogin(key: string): Promise<LoginGuard> {
   return api<LoginGuard>('/api/login-guard/unban', { method: 'POST', body: JSON.stringify({ key }) })
 }

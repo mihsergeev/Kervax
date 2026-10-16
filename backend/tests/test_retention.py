@@ -74,7 +74,7 @@ async def test_retention_overview(client: httpx.AsyncClient, auth_headers):
     assert srv["span_days"] < 1  # прогноз в окне считает от того, что реально накоплено
     assert [(f["key"], f["days"]) for f in d["fixed"]] == [
         ("alerts", 180), ("timeline", 90), ("traffic", 400), ("commands", 7), ("web_lines", 7),
-        ("domain_probes", 7), ("probes", 1)]
+        ("domain_probes", 7), ("probes", 1), ("panel_requests", 2)]
     assert next(f for f in d["fixed"] if f["key"] == "web_lines")["bytes"] is None  # колонка, не таблица
     # срок из настроек виден и здесь
     await client.put("/api/settings/retention", json={"server_days": 90, "sample_days": 14}, headers=auth_headers)

@@ -15,6 +15,7 @@ from fastapi.responses import FileResponse, PlainTextResponse
 from sqlalchemy import delete as sa_delete, func, select, update as sa_update
 
 from app import backup_verify
+from app import request_watch
 from app import db_health
 from app import mem_trend
 from app import restarts as srv_restarts
@@ -416,9 +417,12 @@ async def list_servers(user: CurrentUser, session: SessionDep) -> list[ServerOut
     panel = panel_server_names(every)
     # ошибки 5xx за 15 минут по всем нодам - двумя запросами на весь список, для "Что сломано"
     web_err = await web_error_window(session, now)
+    bogus = await request_watch.server_issues(session)
     outs = []
     for s in servers:
         o = _out(s, now, cur, names, web_err.get(s.id))
+        if s.id in bogus:
+            o.problems = [*o.problems, bogus[s.id]]
         o.kube_unmonitored = _unmonitored(s, index)
         bs = (s.last_report or {}).get("backup_server") or {}
         if bs.get("present"):
@@ -1131,7 +1135,11 @@ async def agent_update_cancel(
 @router.get("/{server_id}", response_model=ServerOut)
 async def get_server(server_id: int, user: CurrentUser, session: SessionDep) -> ServerOut:
     server = await _get_or_404(server_id, session, user)
-    return _out(server, datetime.now(timezone.utc))
+    o = _out(server, datetime.now(timezone.utc))
+    bogus = (await request_watch.server_issues(session)).get(server.id)
+    if bogus:
+        o.problems = [*o.problems, bogus]
+    return o
 
 
 @router.post("/{server_id}/snooze", response_model=ServerOut)

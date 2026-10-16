@@ -4,6 +4,7 @@ import {
   createUser,
   deleteUser,
   getLoginGuard,
+  getPanelRequests,
   getUsersOverview,
   listAccessGroups,
   resetUserPassword,
@@ -14,6 +15,7 @@ import {
   type AccessGroups,
   type AuditEntry,
   type LoginGuard,
+  type PanelRequests,
   type Role,
   type UserCard,
   type UsersOverview,
@@ -23,6 +25,7 @@ import { useAuth } from './auth'
 import { CardNav, type SecDef } from './cardLayout'
 import { useI18n } from './i18n'
 import { LoginGuardSec } from './LoginGuardSec'
+import { PanelRequestsSec } from './PanelRequestsSec'
 import { banWords, guardDraftOf, sameGuard, type GuardDraft } from './loginGuard'
 import { NetTile } from './NetLinks'
 import { sinceShort } from './serverUtils'
@@ -167,6 +170,7 @@ export function UsersModal({ onClose, onUnauthorized }: Props) {
   const [ov, setOv] = useState<UsersOverview | null>(null)
   const [guard, setGuard] = useState<LoginGuard | null>(null)
   const [gDraft, setGDraft] = useState<GuardDraft | null>(null)
+  const [preq, setPreq] = useState<PanelRequests | null>(null)
   const [groups, setGroups] = useState<AccessGroups>({ servers: [], sites: [] })
   const [sec, setSec] = useState('over')
   const [draft, setDraft] = useState<Draft | null>(null)
@@ -196,6 +200,9 @@ export function UsersModal({ onClose, onUnauthorized }: Props) {
   useEffect(() => {
     load()
     loadGuard()
+    getPanelRequests()
+      .then(setPreq)
+      .catch(() => setPreq(null))
     listAccessGroups()
       .then(setGroups)
       .catch(() => setGroups({ servers: [], sites: [] }))
@@ -344,11 +351,13 @@ export function UsersModal({ onClose, onUnauthorized }: Props) {
     ...users.map((u) => ({ id: `u${u.id}`, label: u.username, group: 'Учетки' })),
     { id: 'new', label: 'Новая учетка', group: 'Добавить' },
     { id: 'guard', label: 'Защита входа', group: 'Защита' },
+    { id: 'reqs', label: 'Запросы к панели', group: 'Защита' },
     { id: 'log', label: 'Журнал действий', group: 'Журнал' },
   ]
   const side: Record<string, string> = {}
   for (const u of users) side[`u${u.id}`] = t(ROLE_SHORT[u.role] ?? u.role)
   if (guard?.bans.length) side.guard = t('блок {n}', { n: guard.bans.length })
+  if (preq?.active.length) side.reqs = t('сейчас {n}', { n: preq.active.length })
   const cur = SECS.find((s) => s.id === sec) ?? SECS[0]
 
   const audit = ov?.audit ?? []
@@ -422,6 +431,16 @@ export function UsersModal({ onClose, onUnauthorized }: Props) {
                                   })
                             }
                             tone={guard.bans.length ? 'warn' : undefined}
+                          />
+                        </button>
+                      )}
+                      {!!preq?.active.length && (
+                        <button className="srv-tile-btn" onClick={() => go('reqs')} title={t('к запросам к панели')}>
+                          <NetTile
+                            label={t('Левые запросы в панель')}
+                            value={preq.active.map((a) => (a.servers.length === 1 ? a.servers[0].name : a.key)).slice(0, 2).join(', ')}
+                            sub={preq.active.length > 2 ? t('и еще {n}', { n: preq.active.length - 2 }) : preq.active[0].what}
+                            tone="bad"
                           />
                         </button>
                       )}
@@ -616,6 +635,9 @@ export function UsersModal({ onClose, onUnauthorized }: Props) {
                   ) : (
                     <p className="muted small">{t('загрузка…')}</p>
                   ))}
+
+                {cur.id === 'reqs' &&
+                  (preq ? <PanelRequestsSec data={preq} t={t} /> : <p className="muted small">{t('загрузка…')}</p>)}
 
                 {cur.id === 'log' && (
                   <>
