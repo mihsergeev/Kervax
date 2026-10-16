@@ -20,8 +20,8 @@ from zoneinfo import ZoneInfo
 from fastapi import APIRouter, Query
 from sqlalchemy import case, func, or_, select
 
-from app import alert_what, maint, settings_store
-from app.api.alert_history import _label, _scope as _alert_scope
+from app import maint, settings_store
+from app.api.alert_history import _scope as _alert_scope, group_fires, noise_item, target_ids
 from app.collector import _OFFLINE_ALERT_EXTRA, seen_online
 from app.config import get_settings
 from app.deps import CurrentUser, SessionDep, scope_query, user_sections
@@ -259,43 +259,15 @@ async def _noise(session, user, since, until, prev_since, buckets, sections: set
     total = await session.scalar(select(func.count()).select_from(cur)) or 0
     prev = await session.scalar(select(func.count()).select_from(fired(prev_since, since))) or 0
     per_day = [0] * len(buckets)
-    groups: dict[tuple, dict] = {}
     rows = (await session.execute(
         select(cur.c.ts, cur.c.kind, cur.c.target, cur.c.section, cur.c.text).order_by(cur.c.ts))).all()
-    for ts, kind, target, section, text in rows:
-        ts = _aware(ts)
-        day = _day_of(ts, buckets)
+    for r in rows:
+        day = _day_of(_aware(r.ts), buckets)
         if day >= 0:
             per_day[day] += 1
-        if not target:
-            continue  # про саму панель ("новое без покрытия") - не беда объекта
-        for what, why in alert_what.items(kind, text) or [(_label(kind), "")]:
-            g = groups.setdefault((target, kind, alert_what.key(what)), {
-                "target": target, "section": section, "kind": kind, "label": _label(kind),
-                "n": 0, "first": ts, "notes": [], "days": set()})
-            g["n"] += 1
-            g["what"], g["last"] = what, ts
-            g["days"].add(day)
-            if why:
-                g["notes"].append(why)
-    # имя в истории - имя сервера или монитора: по нему ссылка на карточку
-    srv: dict[str, int] = {}
-    chk: dict[str, int] = {}
-    if "servers" in sections:
-        srv = {n: i for i, n in (await session.execute(
-            scope_query(user, select(Server.id, Server.name), Server, "servers"))).all()}
-    if "sites" in sections:
-        chk = {n: i for i, n in (await session.execute(
-            scope_query(user, select(Check.id, Check.name), Check, "sites"))).all()}
-    items = []
-    for g in sorted(groups.values(), key=lambda g: (-g["n"], -g["last"].timestamp())):
-        items.append({
-            "target": g["target"], "section": g["section"], "kind": g["kind"], "label": g["label"],
-            "what": g["what"], "note": alert_what.merge_notes(g["notes"]), "n": g["n"],
-            "days": len(g["days"]), "first": g["first"].isoformat(), "last": g["last"].isoformat(),
-            "srv_id": srv.get(g["target"]) if g["section"] != "sites" else None,
-            "chk_id": chk.get(g["target"]) if g["section"] == "sites" else None,
-        })
+    groups = group_fires(rows, lambda ts: _day_of(ts, buckets))
+    srv, chk = await target_ids(session, user, sections)
+    items = [noise_item(g, srv, chk) for g in groups]
     return {"fires": total, "prev_fires": prev, "per_day": per_day,
             "items": items[:_NOISE_MAX], "more": max(len(items) - _NOISE_MAX, 0), "_all": items}
 

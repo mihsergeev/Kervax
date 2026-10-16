@@ -1013,15 +1013,12 @@ const EN: Record<string, string> = {
   'Бэкап-сервер: репозитории': 'Backup server: repositories',
   'Бэкап-сервер: репозиторий залочен': 'Backup server: repository locked',
   'История алертов': 'Alert history',
-  'за {n} дн.': 'last {n} d',
   'все': 'all',
   'только срабатывания': 'alerts only',
   'только отбои': 'recoveries only',
   'Поиск по тексту': 'Search the text',
   'Снять фильтр': 'Clear the filter',
   'Срабатываний: {f}, отбоев: {r}': 'Alerts: {f}, recoveries: {r}',
-  'Чаще всего: виды': 'Most frequent: kinds',
-  'Чаще всего: серверы и мониторы': 'Most frequent: servers and monitors',
   'За этот период алертов не было.': 'No alerts in this period.',
   'Показать раньше': 'Show earlier',
   'без агента в панели: {n}': 'no agent in the panel: {n}',
@@ -2439,6 +2436,29 @@ const EN: Record<string, string> = {
   'Монитор': 'Monitor',
   'Остальные {n} без сбоев': 'The other {n} had no failures',
   'Отчет': 'Report',
+  // --- окно История алертов разделами (AlertHistoryModal) ---
+  'Все сообщения':
+    'All messages',
+  'И еще {n} реже - в ленте.':
+    '{n} more, less often - in the feed.',
+  'Каждый доставленный алерт и отбой хранится полгода. Что шумело - что именно и где, как в отчете: имя ведет к объекту, строка - к сообщениям про это.':
+    'Every delivered alert and recovery is kept for half a year. What was noisy shows what exactly and where, as in the report: the name leads to the object, the row to the messages about it.',
+  'Карточка':
+    'Card',
+  'Сообщения':
+    'Messages',
+  'Срабатываний':
+    'Alerts fired',
+  'Чаще всего':
+    'Most often',
+  'к сообщениям':
+    'to the messages',
+  'любой вид':
+    'any kind',
+  'отбоев: {n}':
+    'recoveries: {n}',
+  'отбой':
+    'recovery',
   // --- окно Уязвимости разделами (VulnsModal) ---
   '{os}: исправления только в Ubuntu Pro':
     '{os}: fixes only in Ubuntu Pro',

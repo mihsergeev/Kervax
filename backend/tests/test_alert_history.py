@@ -70,7 +70,13 @@ async def test_history_is_cut_by_the_users_scope(client: httpx.AsyncClient, auth
     d = r.json()
     assert len(d["events"]) == 6 and d["summary"]["fires"] == 5 and d["summary"]["recoveries"] == 1
     # больше всего шумит db-01: сводка считает срабатывания, отбои не шум
-    assert d["summary"]["targets"][0] == {"target": "db-01", "n": 2}
+    assert d["summary"]["targets"][0] == {"target": "db-01", "section": "servers", "n": 2,
+                                          "srv_id": None, "chk_id": None}
+    # что шумело - что именно и где: два "диск" на db-01 одной строкой, отбой не шум, сообщение
+    # без объекта (про саму панель) не беда объекта
+    items = {(x["target"], x["kind"]): x for x in d["summary"]["items"]}
+    assert items[("db-01", "disk")]["n"] == 2 and items[("shop", "down")]["n"] == 1
+    assert len(items) == 2 and d["summary"]["more_items"] == 0
     assert d["summary"]["kinds"][0]["kind"] == "disk" and d["summary"]["kinds"][0]["label"] == "Диск"
     datetime.fromisoformat(d["events"][0]["ts"]).astimezone(timezone.utc)
 

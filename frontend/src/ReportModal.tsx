@@ -5,7 +5,8 @@ import { CardNav, type SecDef } from './cardLayout'
 import { useI18n } from './i18n'
 import { NetTile } from './NetLinks'
 import { downloadReportHtml } from './reportHtml'
-import { isBackup, noiseGroups, noiseWhen, times } from './reportNoise'
+import { NoiseTable } from './NoiseTable'
+import { isBackup, times } from './reportNoise'
 import { fmtDur } from './units'
 
 // Отчет за период (backend app/api/report.py) как карточка сервера: сводка с плитками и
@@ -92,53 +93,6 @@ function DayBars({ labels, series, fmt, t }: { labels: string[]; series: Series[
         {max === 0 && <span className="muted">{t('за период пусто')}</span>}
       </div>
     </div>
-  )
-}
-
-const PER_TARGET = 6
-
-// Что шумело таблицей: объект строкой-заголовком, под ним что именно, почему и когда. Без
-// полосок и счетчиков в лоб: важно, что и где, а число раз - мелко рядом с датой.
-function NoiseTable({ items, t, name }: { items: ReportNoise[]; t: T; name: (x: ReportNoise) => ReactNode }) {
-  const [open, setOpen] = useState<Set<string>>(new Set())
-  return (
-    <table className="sec-tbl rp-noise">
-      <tbody>
-        {noiseGroups(items).map((g) => {
-          const k = `${g[0].section}|${g[0].target}`
-          const all = open.has(k)
-          const shown = all ? g : g.slice(0, PER_TARGET)
-          return [
-            <tr key={k} className="rp-noise-grp">
-              <td colSpan={2}>{name(g[0])}</td>
-            </tr>,
-            ...shown.map((x) => (
-              <tr key={`${k}|${x.kind}|${x.what}`}>
-                <td title={x.label}>
-                  <div>{x.what}</div>
-                  {x.note && <div className="muted small">{x.note}</div>}
-                </td>
-                <td className="num small">
-                  <div>{noiseWhen(x)}</div>
-                  {x.n > 1 && <div className="muted">{times(x.n, t)}</div>}
-                </td>
-              </tr>
-            )),
-            ...(g.length > shown.length
-              ? [
-                  <tr key={`${k}|more`}>
-                    <td colSpan={2}>
-                      <button className="linklike small" onClick={() => setOpen(new Set([...open, k]))}>
-                        {t('и еще {n}', { n: g.length - shown.length })}
-                      </button>
-                    </td>
-                  </tr>,
-                ]
-              : []),
-          ]
-        })}
-      </tbody>
-    </table>
   )
 }
 
@@ -490,7 +444,7 @@ export function ReportModal({ onClose, onUnauthorized, onOpen }: Props) {
                       <p className="muted small">{t('Алертов за период не было.')}</p>
                     ) : (
                       <>
-                        <NoiseTable items={other} t={t} name={noiseName} />
+                        <NoiseTable items={other} name={noiseName} />
                         {noise.more > 0 && (
                           <p className="muted small">{t('И еще {n} реже - в истории алертов.', { n: noise.more })}</p>
                         )}
@@ -499,7 +453,7 @@ export function ReportModal({ onClose, onUnauthorized, onOpen }: Props) {
                   </>
                 )}
 
-                {cur.id === 'backups' && <NoiseTable items={backups} t={t} name={noiseName} />}
+                {cur.id === 'backups' && <NoiseTable items={backups} name={noiseName} />}
 
                 {cur.id === 'maint' &&
                   (data.maint.length === 0 ? (

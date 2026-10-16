@@ -623,7 +623,14 @@ export default function App() {
         <TwoFAModal onClose={() => setModal(null)} onUnauthorized={logout} />
       )}
       {modal === 'history' && (
-        <AlertHistoryModal onClose={() => setModal(null)} onUnauthorized={logout} />
+        <AlertHistoryModal
+          onClose={() => setModal(null)}
+          onUnauthorized={logout}
+          onOpen={(kind, id) => {
+            setModal(null)
+            openTarget(kind === 'server' ? 'servers' : 'sites', id)
+          }}
+        />
       )}
       {modal === 'report' && (
         <ReportModal
