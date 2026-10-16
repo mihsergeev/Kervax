@@ -441,7 +441,7 @@ function LocState({
       ) : stat?.broken ? (
         <div className="al-note al-note-bad">
           <span>
-            {t('Отсюда недоступны все сайты ({n}), а с самой панели часть из них отвечает: похоже, сломан сам прокси. Ошибка: {err}', { n: stat.checks, err: stat.error })}
+            {t('Сломан сам прокси: отсюда недоступны все сайты ({n}), с самой панели часть из них отвечает, а сам прокси не отвечает на проверку. Вместо алертов по каждому сайту приходит один алерт про прокси. Ошибка: {err}', { n: stat.checks, err: stat.error })}
           </span>
           <button className="ghost small" onClick={onTest} disabled={testing}>
             {testing ? t('Проверяю…') : t('Проверить прокси')}

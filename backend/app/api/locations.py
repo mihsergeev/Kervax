@@ -1,10 +1,11 @@
+import json
 from collections import Counter
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, HTTPException, status
 from sqlalchemy import case, delete as sa_delete, func, select
 
-from app import audit, checks, collector, open_ports
+from app import audit, checks, collector, open_ports, settings_store
 from app.deps import AdminUser, CurrentUser, SessionDep
 from app.models import Check, CheckSample, Location, LocationResult, LocationSample
 from app.schemas import (
@@ -106,7 +107,13 @@ async def locations_overview(_: AdminUser, session: SessionDep) -> LocationsOver
         return int(round(avg)) if avg is not None else None
 
     stats: list[LocationStat] = []
-    broken: set[int] = set()
+    # сломанный - только тот, что планировщик подтвердил запросом через сам прокси: если прокси
+    # отвечает, сайты недоступны из той страны по-настоящему, и их надо видеть в таблице
+    try:
+        confirmed = {int(k) for k in json.loads(await settings_store.get_raw(session, settings_store.LOC_BROKEN_KEY) or "{}")}
+    except (ValueError, TypeError):
+        confirmed = set()
+    broken = collector.broken_location_ids(probing, active, results) & confirmed
     for loc in locs:
         if not loc.url.strip():
             stats.append(LocationStat(
@@ -123,12 +130,7 @@ async def locations_overview(_: AdminUser, session: SessionDep) -> LocationsOver
         mine = via[loc.id]
         got = [r for c in mine if (r := results.get((c.id, loc.id))) is not None]
         n, okn, avg = day.get(loc.id, (0, 0, None))
-        # все проверенные отсюда недоступны, а напрямую часть из них отвечает - это прокси
-        dead = len(got) >= 2 and all(r.status == "down" for r in got) and any(
-            c.last_status in ("up", "degraded") for c in mine
-        )
-        if dead:
-            broken.add(loc.id)
+        dead = loc.id in broken  # все отсюда недоступны, а напрямую часть отвечает - это прокси
         stats.append(LocationStat(
             id=loc.id,
             checks=len(mine),

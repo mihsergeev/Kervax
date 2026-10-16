@@ -520,6 +520,9 @@ async def test_locations_overview(client: httpx.AsyncClient, auth_headers):
         await s.commit()
         ids = {x.name: x.id for x in (direct, kz, dead, ports)}
         checks = {x.name: x.id for x in (a, b, c)}
+        # планировщик подтвердил запросом через прокси, что RU не отвечает
+        from app import settings_store
+        await settings_store.set_raw(s, settings_store.LOC_BROKEN_KEY, '{"%d": {"notified": false}}' % dead.id)
 
     r = await client.get("/api/locations/overview", headers=auth_headers)
     assert r.status_code == 200, r.text
@@ -607,3 +610,102 @@ async def test_proxy_exit_parses_trace(monkeypatch):
     assert await ce.proxy_exit("") == ("203.0.113.11", "FI")
     monkeypatch.setattr("app.checks.httpx.AsyncClient", client_with(exc=httpx.ConnectError("refused")))
     assert await ce.proxy_exit("http://203.0.113.10:3128") == ("", "")
+
+
+async def test_broken_proxy_one_alert(tmp_path, monkeypatch):
+    """Прокси лег целиком: один алерт про прокси после выдержки, без "недоступен из ..." по
+    каждому сайту, и отбой, когда заработал. Если сам прокси отвечает, это блокировка сайтов в
+    той стране - тогда обычные алерты по сайтам."""
+    from datetime import datetime, timedelta, timezone
+
+    collector._proxy_confirm.clear()
+    db = (tmp_path / "bp.db").as_posix()
+    engine, factory = create_engine_and_factory(f"sqlite+aiosqlite:///{db}")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    async with factory() as s:
+        for n in ("a", "b", "c"):
+            s.add(Check(name=n, type="http", target=f"https://{n}.example",
+                        enabled=True, check_locations=True, last_status="up"))
+        s.add(Location(name="Прямая", url="", enabled=True))
+        s.add(Location(name="KZ", url="http://203.0.113.10:3128", enabled=True))
+        await s.commit()
+    async with factory() as s:
+        proxy = (await s.scalars(select(Location).where(Location.url != ""))).one()
+        for cid in await s.scalars(select(Check.id)):
+            s.add(LocationResult(check_id=cid, location_id=proxy.id, status="down",
+                                 message="proxy: connect timeout", consecutive_fails=5))
+        await s.commit()
+
+    sent: list[str] = []
+
+    async def fake_send(cfg, text, parse_mode=None):
+        sent.append(text)
+        return []
+
+    proxy_ok = {"v": False}
+    tested: list[str] = []
+
+    async def fake_test(url, timeout_s=10.0):
+        tested.append(url)
+        return proxy_ok["v"], "x", None
+
+    monkeypatch.setattr("app.alerts.send_alert", fake_send)
+    monkeypatch.setattr("app.checks.test_proxy", fake_test)
+    settings = Settings(alert_webhook="http://hook", panel_url="https://p.example.com/")
+    now = datetime.now(timezone.utc)
+
+    await collector.evaluate_location_alerts(factory, settings, now)
+    assert sent == [] and tested == ["http://203.0.113.10:3128"]  # выдержка еще идет
+
+    # после выдержки - один алерт про прокси, по сайтам ничего
+    now += timedelta(seconds=collector._LOC_PARTIAL_SUSTAIN + 30)
+    await collector.evaluate_location_alerts(factory, settings, now)
+    assert len(sent) == 1, sent
+    assert "Прокси локации «KZ» не отвечает" in sent[0] and "connect timeout" in sent[0]
+
+    # тот же сломанный прокси - без повтора
+    sent.clear()
+    now += timedelta(seconds=60)
+    await collector.evaluate_location_alerts(factory, settings, now)
+    assert sent == []
+    assert len(tested) == 2  # ответ прокси помним 5 минут, не дергаем каждый тик
+
+    # прокси заработал - отбой
+    async with factory() as s:
+        for r in await s.scalars(select(LocationResult)):
+            r.status, r.consecutive_fails = "up", 0
+        await s.commit()
+    await collector.evaluate_location_alerts(factory, settings, now)
+    assert len(sent) == 1 and "снова работает" in sent[0]
+
+    # все недоступны, но сам прокси отвечает - это блокировка сайтов, алерты по сайтам
+    sent.clear()
+    collector._proxy_confirm.clear()
+    proxy_ok["v"] = True
+    async with factory() as s:
+        for r in await s.scalars(select(LocationResult)):
+            r.status, r.consecutive_fails = "down", 5
+        await s.commit()
+    await collector.evaluate_location_alerts(factory, settings, now)
+    now += timedelta(seconds=collector._LOC_PARTIAL_SUSTAIN + 30)
+    await collector.evaluate_location_alerts(factory, settings, now)
+    assert sent and all("Прокси локации" not in t for t in sent)
+    assert any("🔴 KZ — недоступен" in t for t in sent)
+    await engine.dispose()
+
+
+def test_broken_location_needs_three_checks():
+    """Два недоступных сайта - еще не "сломан прокси": это может быть блокировка обоих."""
+    loc = SimpleNamespace(id=2, url="http://203.0.113.10:3128")
+    mk = lambda i: SimpleNamespace(id=i, enabled=True, check_locations=True, type="http",  # noqa: E731
+                                   location_ids=None, last_status="up")
+    res = lambda ids: {(i, 2): SimpleNamespace(status="down", consecutive_fails=3) for i in ids}  # noqa: E731
+    two = [mk(1), mk(2)]
+    assert collector.broken_location_ids([loc], two, res([1, 2])) == set()
+    three = two + [mk(3)]
+    assert collector.broken_location_ids([loc], three, res([1, 2, 3])) == {2}
+    # с панели тоже все лежат - это беда сайтов, а не прокси
+    for c in three:
+        c.last_status = "down"
+    assert collector.broken_location_ids([loc], three, res([1, 2, 3])) == set()

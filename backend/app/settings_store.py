@@ -18,6 +18,8 @@ ESC_KEY = "alerts_escalation"
 ROUTES_KEY = "alerts_routes"
 # какой чат по группам последним не принял сообщение: видно в настройках
 ROUTES_STATE_KEY = "alerts_routes_state"
+# локации со сломанным прокси: {id: {since, err, notified}} - один алерт на прокси, а не по сайтам
+LOC_BROKEN_KEY = "locations_broken"
 ESC_KINDS_DEFAULT = ["down", "offline"]
 UNCOVERED_KEY = "uncovered_digest_sent"
 VAULT_META_KEY = "backup_vault_meta"  # соль/итерации/verifier сейфа (СЕКРЕТОВ НЕТ)
