@@ -28,7 +28,7 @@ def _fake_dispatch(monkeypatch) -> list:
 
 def test_paths_fold_ids_and_tokens():
     assert rw.norm_path("/api/servers/12/notes") == "/api/servers/{id}/notes"
-    assert rw.norm_path("/api/push/9f2c41d0a7b84e6f9c2d") == "/api/push/{token}"
+    assert rw.norm_path("/api/agent/push/9f2c41d0a7b84e6f9c2d") == "/api/agent/push/{token}"
     assert rw.norm_path("/api/agent/commands") == "/api/agent/commands"
 
 
@@ -62,6 +62,36 @@ async def test_minute_without_rejections_is_not_written():
     assert [(r.key, r.total, r.bad, r.paths) for r in rows] == [
         ("203.0.113.91", rw.WRITE_FLOOR, 0, {"/api/agent/report": rw.WRITE_FLOOR})]
     rw.reset()
+
+
+async def test_panel_clicks_are_not_a_burst():
+    """На проде открытая панель дала "всплеск" 62 запроса в минуту с адреса админа. Всплеск - только
+    запросы агентов, push и ansible, а отказы считаются на любые адреса."""
+    rw.reset()
+    for _ in range(rw.FLOOD_PER_SERVER):
+        rw.count("203.0.113.92", "/api/servers", 200, minute=200)
+    for _ in range(3):
+        rw.count("203.0.113.93", "/api/servers/7", 403, minute=200)
+    rows = rw._rows(*rw.count("x", "/api/x", 200, minute=201))
+    assert [(r.key, r.total, r.bad, r.paths) for r in rows] == [
+        ("203.0.113.93", 0, 3, {"403 /api/servers/{id}": 3})]
+    rw.reset()
+
+
+def test_hints_name_the_source():
+    def agg(bad=0, total=0, paths=None, codes=None):
+        from collections import Counter
+        return {"bad": bad, "total": total, "paths": Counter(paths or {}), "codes": Counter(codes or {})}
+
+    gone = agg(bad=rw.BAD_LIMIT, paths={"404 /api/agent/push/{token}": rw.BAD_LIMIT}, codes={404: rw.BAD_LIMIT})
+    assert rw.hint(gone, 1).startswith("push-монитор удален")
+    push = agg(total=rw.FLOOD_PER_SERVER, paths={"/api/agent/push/{token}": rw.FLOOD_PER_SERVER})
+    assert rw.hint(push, 1).startswith("скрипт push-монитора")
+    agent = agg(total=rw.FLOOD_PER_SERVER, paths={"/api/agent/report": rw.FLOOD_PER_SERVER})
+    assert rw.hint(agent, 1).startswith("агент шлет")
+    # самый частый адрес и так виден списком рядом
+    other = agg(total=rw.FLOOD_PER_SERVER, paths={"/api/agent/x": 1, "/api/other": rw.FLOOD_PER_SERVER})
+    assert rw.hint(other, 1) == ""
 
 
 async def _server(f, name: str, ip: str) -> int:
@@ -142,7 +172,7 @@ async def test_muted_server_gets_no_alert(client: httpx.AsyncClient, monkeypatch
         await s.execute(update(Server).where(Server.id == sid).values(alert_mutes=["bogus_requests"]))
         await s.commit()
     now = datetime.now(timezone.utc)
-    await _rows(f, now, "203.0.113.6", 5, 15, {"404": 15}, {"404 /api/push/{token}": 15})
+    await _rows(f, now, "203.0.113.6", 5, 15, {"404": 15}, {"404 /api/agent/push/{token}": 15})
     await rw.check(f, Settings(alert_webhook="http://hook"), now)
     assert sent == []
 

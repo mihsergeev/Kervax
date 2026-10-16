@@ -246,7 +246,12 @@ export function VulnsModal({ onClose, onUnauthorized, onOpen }: Props) {
                   <th className="hide-m">{t('Где')}</th>
                   <th className="num">{t('Серверов')}</th>
                   <th className="num">CVE</th>
-                  {anyKev && <th className="num">{t('Эксплуатируется')}</th>}
+                  {anyKev && (
+                    <th className="num" title={t('Эксплуатируется')}>
+                    <span className="hide-m">{t('Эксплуатируется')}</span>
+                    <span className="only-m">{t('эксп.')}</span>
+                  </th>
+                  )}
                 </tr>
               </thead>
               <tbody>
@@ -343,7 +348,12 @@ export function VulnsModal({ onClose, onUnauthorized, onOpen }: Props) {
               <th>{p.kernel ? t('Работает') : t('Стоит')}</th>
               <th className="hide-m">{t('Исправлено в')}</th>
               <th className="num">CVE</th>
-              {p.kev > 0 && <th className="num">{t('Эксплуатируется')}</th>}
+              {p.kev > 0 && (
+                <th className="num" title={t('Эксплуатируется')}>
+                  <span className="hide-m">{t('Эксплуатируется')}</span>
+                  <span className="only-m">{t('эксп.')}</span>
+                </th>
+              )}
             </tr>
           </thead>
           <tbody>
@@ -367,7 +377,8 @@ export function VulnsModal({ onClose, onUnauthorized, onOpen }: Props) {
             })}
           </tbody>
         </table>
-        <VulnFix found={p.hits.map((h) => h.f)} proOn />
+        {/* без подключенного Pro apt такое исправление не поставит: команда - только для остальных */}
+        <VulnFix found={p.hits.filter((h) => !pro.includes(h)).map((h) => h.f)} proOn />
         <div className="srv-nav-grp rt-cap">CVE · {p.cves.length}</div>
         <VulnCves cves={p.cves} />
       </>

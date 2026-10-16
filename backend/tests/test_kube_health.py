@@ -225,3 +225,11 @@ def test_digest_drops_job_logs():
     m = "💥☸️ k8s-a - упал Job: shop/migrate-42\n↳ под migrate-42-x7k2p, конец лога:\n<pre>boom</pre>"
     d = alerts._digest([m] * 6)
     assert "<pre>" not in d and "boom" not in d and d.count("упал Job: shop/migrate-42") == 6
+
+
+def test_restarts_are_declined():
+    """На проде в истории алертов было "CrashLoopBackOff, 7 рестарта"."""
+    pods = [{"ns": "default", "name": f"api-{n}", "reason": "CrashLoopBackOff", "restarts": n} for n in (7, 21, 83)]
+    assert collector.bad_pods_text(pods) == (
+        "default/api-7 (CrashLoopBackOff, 7 рестартов), default/api-21 (CrashLoopBackOff, 21 рестарт), "
+        "default/api-83 (CrashLoopBackOff, 83 рестарта)")

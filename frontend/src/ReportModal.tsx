@@ -37,14 +37,19 @@ function Delta({ cur, prev, unit, lowerBetter }: { cur: number; prev: number; un
   const d = cur - prev
   if (Math.abs(d) < (unit === 'pp' ? 0.005 : 0.5)) return <div className="muted small">{t('как в прошлый период')}</div>
   const good = lowerBetter ? d < 0 : d > 0
+  // от малого числа проценты ничего не говорят: было 6, стало 107 - это "+1683%"
+  if (unit === 'n' && (prev === 0 || Math.abs(d) > prev * 2))
+    return (
+      <div className={`small rep-delta ${good ? 'rep-good' : 'rep-bad'}`}>
+        {t('в прошлый период было {n}', { n: Math.round(prev) })}
+      </div>
+    )
   const txt =
     unit === 'pp'
       ? t('{d} п.п.', { d: `${d > 0 ? '+' : ''}${d.toFixed(2)}` })
       : unit === 's'
         ? `${d > 0 ? '+' : '-'}${fmtDur(Math.abs(Math.round(d)))}`
-        : prev > 0
-          ? `${d > 0 ? '+' : ''}${Math.round((d / prev) * 100)}%`
-          : `+${Math.round(d)}`
+        : `${d > 0 ? '+' : ''}${Math.round((d / prev) * 100)}%`
   return (
     <div className={`small rep-delta ${good ? 'rep-good' : 'rep-bad'}`}>
       {txt} {t('к прошлому периоду')}
@@ -279,7 +284,9 @@ export function ReportModal({ onClose, onUnauthorized, onOpen }: Props) {
                         tile(
                           'noise',
                           <NetTile label={t('Алертов пришло')} value={String(noise.fires)} sub={t('без отбоев')}>
-                            <Delta cur={noise.fires} prev={noise.prev_fires} unit="n" lowerBetter />
+                            {noise.prev_ok !== false && (
+                              <Delta cur={noise.fires} prev={noise.prev_fires} unit="n" lowerBetter />
+                            )}
                           </NetTile>,
                         )}
                     </div>

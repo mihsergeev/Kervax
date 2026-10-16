@@ -258,6 +258,10 @@ async def _noise(session, user, since, until, prev_since, buckets, sections: set
     cur = fired(since, until)
     total = await session.scalar(select(func.count()).select_from(cur)) or 0
     prev = await session.scalar(select(func.count()).select_from(fired(prev_since, since))) or 0
+    # история алертов пишется с какого-то дня (с обновления, где она появилась, или после срока
+    # хранения): прошлый период, покрытый ею не целиком, дал на проде "+1683% к прошлому периоду"
+    first = await session.scalar(select(func.min(AlertEvent.ts)))
+    prev_ok = first is not None and _aware(first) <= prev_since
     per_day = [0] * len(buckets)
     rows = (await session.execute(
         select(cur.c.ts, cur.c.kind, cur.c.target, cur.c.section, cur.c.text).order_by(cur.c.ts))).all()
@@ -268,7 +272,7 @@ async def _noise(session, user, since, until, prev_since, buckets, sections: set
     groups = group_fires(rows, lambda ts: _day_of(ts, buckets))
     srv, chk = await target_ids(session, user, sections)
     items = [noise_item(g, srv, chk) for g in groups]
-    return {"fires": total, "prev_fires": prev, "per_day": per_day,
+    return {"fires": total, "prev_fires": prev, "prev_ok": prev_ok, "per_day": per_day,
             "items": items[:_NOISE_MAX], "more": max(len(items) - _NOISE_MAX, 0), "_all": items}
 
 

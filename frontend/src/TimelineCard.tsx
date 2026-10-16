@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { ApiError, getServerTimeline, type TimelineEvent, type TimelineResult } from './api'
+import { actLabel } from './auditActs'
 import { useI18n } from './i18n'
 
 // Хронология сервера (backend app/timeline.py): деплои и контейнеры, система, порты, доступ,
@@ -75,27 +76,6 @@ export function TimelineCard({ serverId, onUnauthorized }: Props) {
       panel: t('Панель'),
     })[k] ?? k
 
-  const auditLabel = (k: string) =>
-    ({
-      server_update: t('изменил настройки сервера'),
-      server_snooze: t('заглушил алерт'),
-      server_rotate: t('перевыпустил токен агента'),
-      server_parent: t('указал, за каким сервером стоит'),
-      server_note: t('изменил заметку'),
-      server_alert_rules: t('изменил правила алертов'),
-      server_create: t('добавил сервер'),
-      known_set: t('отметил известную проблему'),
-      known_drop: t('снял известную проблему'),
-      backup_run: t('запустил бэкап'),
-      backup_restore: t('запустил восстановление'),
-      backup_config: t('изменил настройки бэкапа'),
-      backup_disk_fix: t('освободил место на диске'),
-      backup_credentials_view: t('посмотрел доступы к бэкапу'),
-      changes_ack: t('отметил изменения доступа своими'),
-      exposure_scan: t('проверил, что открыто в интернет'),
-      agent_update_cancel: t('отменил обновление агента'),
-      local_probe_apply: t('перенес проверки на сервер'),
-    })[k] ?? k
 
   const counts = data?.cats ?? {}
   const events = useMemo(() => (data?.events ?? []).filter((e) => !off.has(groupOf(e.cat))), [data, off])
@@ -115,7 +95,7 @@ export function TimelineCard({ serverId, onUnauthorized }: Props) {
     if (e.cat === 'panel') {
       if (e.kind === 'maint') return `${t('окно обслуживания')}: ${e.text}${e.end ? ` (${t('до')} ${fmtTime(e.end)})` : ''}`
       if (e.kind === 'note') return `${t('заметка')} (${e.user}): ${e.text}`
-      return `${e.user}: ${auditLabel(e.kind)}${e.text ? ` · ${e.text}` : ''}`
+      return `${e.user}: ${actLabel(e.kind, t, e.text)}${e.text ? ` · ${e.text}` : ''}`
     }
     return e.text
   }

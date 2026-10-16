@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import ast
 import io
 import json
 import os
@@ -421,6 +422,38 @@ def check_version() -> None:
     print(f"версия: {v}, во всех трёх файлах и в CHANGELOG")
 
 
+def check_audit_labels() -> None:
+    """Действие журнала без подписи показывается в Журнале действий и ленте сервера сырым
+    кодом: на копиях продов так висели 37 действий ("backup_disk_fix · srv=23"). Действие из
+    audit.record должно быть в auditActs.ts, а семейство f"docker_{...}" - в его FAMILY."""
+    src = read("frontend/src/auditActs.ts")
+    acts = set(re.findall(r"^\s+'?([a-z0-9_]+)'?: '", src, re.M))
+    fams = set(re.findall(r"\['([a-z_]+)', '", src))
+    seen = 0
+    for root, _, files in os.walk("backend/app"):
+        for f in sorted(files):
+            if not f.endswith(".py"):
+                continue
+            path = os.path.join(root, f).replace(BS, "/")
+            for node in ast.walk(ast.parse(read(path))):
+                if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                        and node.func.attr == "record" and isinstance(node.func.value, ast.Name)
+                        and node.func.value.id == "audit" and len(node.args) >= 3):
+                    continue
+                a = node.args[2]
+                for x in (a.body, a.orelse) if isinstance(a, ast.IfExp) else (a,):
+                    if isinstance(x, ast.Constant) and isinstance(x.value, str):
+                        seen += 1
+                        if x.value not in acts:
+                            fail("audit", f"{path}:{node.lineno}: нет подписи действия «{x.value}» в auditActs.ts")
+                    elif isinstance(x, ast.JoinedStr) and x.values and isinstance(x.values[0], ast.Constant):
+                        seen += 1
+                        pre = str(x.values[0].value)
+                        if pre not in fams:
+                            fail("audit", f"{path}:{node.lineno}: семейства «{pre}...» нет в FAMILY auditActs.ts")
+    print(f"действий журнала с подписью: {seen}")
+
+
 def check_password_len() -> None:
     """Минимальная длина пароля записана в двух местах — они должны совпадать.
 
@@ -479,7 +512,7 @@ def main() -> int:
         print("запускать из корня репозитория", file=sys.stderr)
         return 2
     for fn in (check_helpers, check_alerts, check_rbac, check_secrets,
-               check_migrations, check_i18n, check_i18n_literals,
+               check_migrations, check_i18n, check_i18n_literals, check_audit_labels,
                check_password_len, check_version, check_compose_overlays,
                check_compose_file_pinned, check_agent_release_matches,
                check_agent_go_image):

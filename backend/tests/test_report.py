@@ -59,6 +59,8 @@ async def test_report_week(client, auth_headers):
     assert srv["with_gaps"] == 1
     noise = j["noise"]
     assert noise["fires"] == 5 and noise["prev_fires"] == 1
+    # самый старый алерт - 8 дней назад: прошлая неделя покрыта историей не целиком
+    assert noise["prev_ok"] is False
     # без текста алерта "что" - название вида; ссылка - на карточку сервера
     top = noise["items"][0]
     assert (top["target"], top["kind"], top["n"], top["srv_id"]) == ("web-a", "disk", 3, ids["web_a"])
@@ -106,3 +108,16 @@ async def test_report_noise_says_what_exactly(client, auth_headers):
     assert rows["перезапускается под shop/worker"]["n"] == 1
     web_a = next(x for x in j["servers"]["items"] if x["name"] == "web-a")
     assert [t["what"] for t in web_a["things"]] == ["упал app-sync.service", "перезапускается под shop/worker"]
+
+
+async def test_alert_delta_needs_full_previous_period(client, auth_headers):
+    """Сравнение алертов с прошлым периодом - только когда история алертов покрывает его целиком."""
+    f = client._transport.app.state.session_factory  # noqa: SLF001
+    now = datetime.now(timezone.utc)
+    async with f() as s:
+        s.add(AlertEvent(ts=now - timedelta(days=15), kind="disk", target="web-a", section="servers"))
+        s.add(AlertEvent(ts=now - timedelta(days=10), kind="disk", target="web-a", section="servers"))
+        s.add(AlertEvent(ts=now - timedelta(days=1), kind="disk", target="web-a", section="servers"))
+        await s.commit()
+    noise = (await client.get("/api/report?days=7", headers=auth_headers)).json()["noise"]
+    assert (noise["fires"], noise["prev_fires"], noise["prev_ok"]) == (1, 1, True)

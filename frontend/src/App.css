@@ -1930,8 +1930,13 @@ button.srv-tile-btn:hover .net-tile { border-color: var(--border-strong); backgr
 .sec-tbl tr.ans-off td { opacity: 0.55; }
 .ans-kv { display: grid; grid-template-columns: max-content 1fr; gap: 0.35rem 1rem; }
 .ans-acts { display: flex; flex-wrap: wrap; gap: 0.5rem; }
+.sec-tbl .only-m { display: none; }
 @media (max-width: 560px) {
   .sec-tbl .hide-m { display: none; }
+  .sec-tbl .only-m { display: inline; }
+  /* длинное имя сервера без пробелов распирало таблицу за экран */
+  .sec-tbl .ans-node { white-space: normal; }
+  .sec-tbl .ans-node .linklike { white-space: normal; overflow-wrap: anywhere; text-align: left; min-width: 0; }
 }
 
 /* окно "Хранение данных" (RetentionModal): полоса размера базы по видам данных */
@@ -5868,6 +5873,8 @@ body:has(.modal-backdrop) {
 /* История алертов (AlertHistoryModal): лента по дням, отбор в строку */
 .ah-tools { flex-wrap: wrap; }
 .ah-tools .modal-search { flex: 1 1 12rem; }
+/* список видов растягивался по самой длинной подписи и вылезал за экран телефона */
+.ah-tools select { max-width: 100%; min-width: 0; }
 .ah-chip { cursor: pointer; }
 .ah-row {
   padding: 6px 8px;
