@@ -1869,6 +1869,9 @@ button.srv-tile-btn:hover .net-tile { border-color: var(--border-strong); backgr
   overflow: auto;
 }
 
+/* окно "Окна обслуживания" (MaintModal): поля окна в разделе и в новом окне */
+.mw-fields { display: flex; flex-direction: column; gap: 0.6rem; }
+
 /* окно "Пользователи" (UsersModal): имя с ролью в таблице, роль и пароль узкими полями */
 .us-name { display: inline-flex; align-items: center; flex-wrap: wrap; gap: 0.4rem; }
 .us-role { max-width: 16rem; }

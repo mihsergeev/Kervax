@@ -660,7 +660,14 @@ export default function App() {
         <AlertsModal onClose={() => setModal(null)} onUnauthorized={logout} />
       )}
       {modal === 'maint' && (
-        <MaintModal onClose={() => setModal(null)} onUnauthorized={logout} />
+        <MaintModal
+          onClose={() => setModal(null)}
+          onUnauthorized={logout}
+          onOpen={(kind, id) => {
+            setModal(null)
+            openTarget(kind === 'server' ? 'servers' : 'sites', id)
+          }}
+        />
       )}
       {modal === 'locations' && (
         <LocationsModal
