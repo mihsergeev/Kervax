@@ -743,6 +743,8 @@ class Server(Base):
     # эталон проверки "жив ли сервер" (app/liveness.py): достукивается ли панель до него, пока он
     # на связи - {state, where, ts}. Своя колонка: alert_state целиком переписывает цикл алертов
     liveness_base: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    # история износа SSD и прогноз до 90% и 100% (app/disk_wear.py), по серийникам дисков
+    disk_wear: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()

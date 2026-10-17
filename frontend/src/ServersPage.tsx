@@ -38,6 +38,7 @@ import {
   type DiskUsageDir,
   type DiskUsageFs,
   type DiskUsageItem,
+  type DiskWear,
   type HelperAdvice,
   type OomEvent,
   type ProcStat,
@@ -1521,6 +1522,22 @@ function dhTone(d: DiskHealthDisk): DhTone {
   return 'up'
 }
 
+// дата из ISO "2027-01-05" как 05.01.2027
+function isoDay(d: string): string {
+  const [y, m, dd] = d.split('-')
+  return y && m && dd ? `${dd}.${m}.${y}` : d
+}
+
+// прогноз износа диска одной строкой: когда 90% и 100% и откуда скорость
+function wearForecast(w: DiskWear, t: TFn): string {
+  return [
+    w.d90 ? t('90% примерно к {d}', { d: isoDay(w.d90) }) : '',
+    w.d100 ? t('100% примерно к {d}', { d: isoDay(w.d100) }) : '',
+    t('{r}% в сутки', { r: w.rate.toFixed(w.rate < 0.1 ? 3 : 2) }),
+    w.src === 'lifetime' ? t('по средней за всю жизнь диска') : t('по замеру'),
+  ].filter(Boolean).join(' · ')
+}
+
 function dhPoh(h: number, t: TFn): string {
   if (h < 48) return t('{n} ч', { n: h })
   if (h < 24 * 365) return t('{n} дн', { n: Math.round(h / 24) })
@@ -1550,7 +1567,7 @@ function dhSync(sync: string, t: TFn): string {
       : t('восстановление {n}%', { n })
 }
 
-function DiskHealthBlock({ r }: { r: ServerReport }) {
+function DiskHealthBlock({ r, wear }: { r: ServerReport; wear?: DiskWear[] }) {
   const { t } = useI18n()
   const dh = diskHealth(r)
   if (!dh) return null
@@ -1647,6 +1664,7 @@ function DiskHealthBlock({ r }: { r: ServerReport }) {
           const grow = DH_GROW.filter(([k]) => (d.grow?.[k] ?? 0) > 0).map(
             ([k, label]) => `${t(label)} +${d.grow[k]}`,
           )
+          const fc = (wear ?? []).find((w) => w.serial === d.serial)
           return (
             <div key={d.dev + d.serial} className="loc-res loc-res-wrap dh-disk">
               <span className={DH_DOT[tone]} />
@@ -1660,6 +1678,7 @@ function DiskHealthBlock({ r }: { r: ServerReport }) {
                 {grow.length > 0 && (
                   <div className="t-degraded">{t('за сутки: {v}', { v: grow.join(', ') })}</div>
                 )}
+                {fc && <div className={fc.soon ? 't-degraded' : ''}>{wearForecast(fc, t)}</div>}
               </div>
             </div>
           )
@@ -5993,7 +6012,7 @@ function ServerDetail({
           <div className="net-cards">
             <DiskSpaceCard server={s} r={r} onChanged={onChanged} />
             <DiskUsageBlock server={s} onChanged={onChanged} />
-            <DiskHealthBlock r={r} />
+            <DiskHealthBlock r={r} wear={s.wear_forecast} />
           </div>
           <div className="chart-grid">
             {chartCard('disk')}

@@ -1752,6 +1752,17 @@ export type BackupServerInfo = {
   disk_free?: number
   repos?: RepoStat[]
 }
+export interface DiskWear {
+  dev: string
+  serial: string
+  wear: number
+  rate: number
+  src: 'measured' | 'lifetime' | ''
+  d90: string | null
+  d100: string | null
+  soon: boolean
+}
+
 export type Server = {
   id: number
   name: string
@@ -1830,6 +1841,8 @@ export type Server = {
   onboard_done_at?: string | null
   // недоступен: что ответил сервер панели в момент алерта (backend app/liveness.py)
   offline_probe?: { state: 'alive' | 'refused' | 'silent' | 'blind'; where?: string; tried?: string[]; was?: string; ts?: string } | null
+  // прогноз износа SSD (backend app/disk_wear.py): d90/d100 - даты ISO, src - замер или средняя за жизнь
+  wear_forecast?: DiskWear[]
   onboard_by?: string
   first_report_at?: string | null
   online: boolean

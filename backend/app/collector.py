@@ -37,6 +37,7 @@ from app import ssh_audit
 from app import known as known_mod
 from app import onboard as onboard_mod
 from app import liveness
+from app import disk_wear
 from app import parents as parents_mod
 from app import maint
 from app import tg_bot
@@ -2850,15 +2851,18 @@ def _int(v) -> int:
         return 0
 
 
-def disk_health_problems(block: dict, short: bool = False) -> list[tuple[int, str, str]]:
+def disk_health_problems(block: dict, short: bool = False,
+                         wear_hist: dict | None = None) -> list[tuple[int, str, str]]:
     """Поломки дисков: (уровень, ключ, текст), серьезные первыми. Ключ стабилен между
     отчетами: по нему алерт понимает, что сломалось НОВОЕ (второй диск при уже
     развалившемся RAID), а не то, о чем уже сказано. Склеенные в одну строку массивы
     дают по записи на массив без текста и одну запись с текстом без ключа: досинхронизи-
     ровавшийся первым md42 не должен выглядеть новой поломкой md43. Ошибки журнала ядра
     сюда не входят, у них своя выдержка (см. _server_conditions). short - диск только по
-    имени, без модели и серийника: для сводки на главной."""
+    имени, без модели и серийника: для сводки на главной. wear_hist - servers.disk_wear:
+    диск дойдет до 90% износа меньше чем через два месяца (app/disk_wear.py)."""
     out: list[tuple[int, str, str]] = []
+    soon: list[str] = []
     # RAID с одинаковой бедой склеиваем: оба массива на двух дисках теряют разделы одного
     # и того же умершего диска, и "md42: 1 из 2; md43: 1 из 2" - это одна новость
     degraded: dict[str, list[str]] = {}
@@ -2931,6 +2935,13 @@ def disk_health_problems(block: dict, short: bool = False) -> list[tuple[int, st
                                          "передачи (CRC), проверьте кабель или разъем"))
         if wear is not None and wear >= _DISK_WEAR_WARN and not failing:
             out.append((1, f"wear:{ser}", f"диск {name}: износ {wear}%, пора планировать замену"))
+        rec = wear_hist.get(ser) if isinstance(wear_hist, dict) else None
+        if (isinstance(rec, dict) and rec.get("soon") and rec.get("d90") and not failing
+                and wear is not None and wear < _DISK_WEAR_WARN):
+            soon.append(name)
+            out.append((1, f"wearsoon:{ser}", disk_wear.soon_text(name, rec, short)))
+    if len(soon) >= 2 and not short:
+        out.append((1, "", "эти диски изнашиваются вместе: менять по одному, не дожидаясь 90% на всех"))
 
     ts = _int(block.get("ts"))
     for m in block.get("missing") or []:
@@ -3376,7 +3387,7 @@ def server_problems(s: Server, now: datetime, pod_names: dict[str, str] | None =
 
     hb = disk_health_block(rep)
     if hb is not None:
-        for lvl, _key, txt in disk_health_problems(hb, short=True):
+        for lvl, _key, txt in disk_health_problems(hb, short=True, wear_hist=s.disk_wear):
             if txt:
                 add("disk_health", lvl, txt, "diskhealth", "disk_health")
         n = _int((hb.get("io") or {}).get("count"))
@@ -4856,7 +4867,7 @@ def _server_conditions(s: Server, now: datetime,
     # недоступной ноды свой алерт. Выдержки нет: развалившийся массив сам не соберется.
     hb = disk_health_block(rep) if online else None
     if hb is not None:
-        probs = disk_health_problems(hb)
+        probs = disk_health_problems(hb, wear_hist=s.disk_wear)
         # Ошибки ввода-вывода: окно helper'а 10 минут, сверху держим час с последней пачки
         # (since), чтобы пачки внутри часа были одной историей. Момент пачки обновляем раз
         # в 5 минут: иначе alert_state переписывался бы каждый тик, пока сыплются ошибки.
@@ -6647,6 +6658,9 @@ async def collector_loop(
             # достукивается ли панель до серверов на связи: эталон для строки в "недоступен"
             await stage("эталон связи с серверами", liveness.start_baseline(
                 session_factory, datetime.now(timezone.utc)))
+            # история износа SSD для прогноза до 90% (раз в час)
+            await stage("износ дисков", disk_wear.refresh(
+                session_factory, datetime.now(timezone.utc), disk_health_block))
             # базы уязвимостей раз в сутки, загрузка и разбор фоном
             await stage("базы уязвимостей", vulns_mod.start_refresh(
                 session_factory, datetime.now(timezone.utc)))

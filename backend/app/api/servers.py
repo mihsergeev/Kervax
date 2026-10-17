@@ -15,6 +15,7 @@ from fastapi.responses import FileResponse, PlainTextResponse
 from sqlalchemy import delete as sa_delete, func, select, update as sa_update
 
 from app import backup_verify
+from app import disk_wear
 from app import request_watch
 from app import db_health
 from app import mem_trend
@@ -38,7 +39,7 @@ from app.collector import (
     _backup_problem_repos, alert_since, backup_cadence, backup_rotation_items, backup_unmonitored,
     bsrv_extra, bsrv_restic_old, clock_skew_window, cron_job_issues, disk_analyze_ok, prune_problems, repo_reason, docker_since,
     backup_run_start, dump_local_stale, needed_pod_names, panel_server_names, pod_uid_names,
-    send_alerts_soon, send_autofix_note, server_problems, web_5xx_total, web_breakdown,
+    disk_health_block, send_alerts_soon, send_autofix_note, server_problems, web_5xx_total, web_breakdown,
     web_error_window, web_label_key, web_log_label, web_rate_total,
 )
 from app.setup_scripts import (
@@ -260,6 +261,7 @@ def _out(
     o.backup_growth = backup_growth.jump(server, now)
     o.bsrv_rotation = backup_rotation_items(server, now)
     o.bsrv_restic_old = bsrv_restic_old(server.last_report or {})
+    o.wear_forecast = disk_wear.card(disk_health_block(server.last_report or {}), server.disk_wear)
     o.bsrv_cadence = _cadences(server.last_report or {})
     bs = (server.last_report or {}).get("backup_server") or {}
     if bs.get("present"):

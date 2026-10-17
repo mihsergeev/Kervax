@@ -4637,6 +4637,18 @@ const EN: Record<string, string> = {
     'the server does not answer the panel either, though it did while online ({where})',
   'с панели не проверить: порты закрыты для нее':
     'cannot be checked from the panel: its ports are closed to it',
+  '90% примерно к {d}':
+    '90% around {d}',
+  '100% примерно к {d}':
+    '100% around {d}',
+  '{r}% в сутки':
+    '{r}% a day',
+  'по средней за всю жизнь диска':
+    'from the lifetime average',
+  'по замеру':
+    'measured',
+  '{name}: диски {disks} дойдут до 90% износа примерно к {d} - запланируйте замену':
+    '{name}: disks {disks} reach 90% wear around {d} - plan a replacement',
   'свежих данных нет':
     'no fresh data',
   'сервер отвечает ({where}), молчит агент':

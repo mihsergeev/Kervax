@@ -1370,6 +1370,8 @@ class ServerOut(BaseModel):
     # недоступен: ответил ли сервер панели в момент алерта (app/liveness.py) -
     # {state: alive|refused|silent, where, tried, ts}
     offline_probe: dict | None = None
+    # прогноз износа SSD по дискам из отчета (app/disk_wear.py)
+    wear_forecast: list[dict] = Field(default_factory=list)
     onboard_done_at: datetime | None = None
     onboard_by: str = ""
     first_report_at: datetime | None = None
