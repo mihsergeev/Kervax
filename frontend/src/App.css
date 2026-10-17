@@ -1155,6 +1155,25 @@ button.srv-tile-btn:hover .net-tile { border-color: var(--border-strong); backgr
 .lk-sw.lk-tx { background: #5a8fc7; }
 .lk-sw.lk-rx { background: #57a894; opacity: 0.8; }
 .lk-tip { margin-left: auto; color: var(--text); font-variant-numeric: tabular-nums; }
+/* кто качает трафик и кто пишет на диск: имя, столбики по дням недели, цифры */
+/* общая сетка на все строки (subgrid): колонка цифр по самой длинной строке, столбики друг под другом */
+.ub-list { display: grid; grid-template-columns: minmax(0, 1fr) auto max-content; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 0.1rem 0; }
+.ub-row { display: grid; grid-column: 1 / -1; grid-template-columns: subgrid; gap: 0.4rem 0.9rem; align-items: center; padding: 0.35rem 0.7rem; border-top: 1px solid color-mix(in srgb, var(--border) 60%, transparent); }
+.ub-row:first-child { border-top: 0; }
+.ub-main { min-width: 0; }
+.ub-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ub-days { display: flex; align-items: flex-end; gap: 2px; height: 24px; }
+.ub-days i { display: block; width: 7px; border-radius: 1px; }
+.ub-days .ub-net { background: #5a8fc7; }
+.ub-days .ub-disk { background: #9a7fd1; }
+.ub-days .ub-today { opacity: 0.55; }
+.ub-days .ub-zero { height: 1px; background: var(--border); }
+.ub-nums { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.ub-more { margin: 0.35rem 0 0; align-self: flex-start; }
+@media (max-width: 600px) {
+  .ub-list { grid-template-columns: minmax(0, 1fr) auto; }
+  .ub-nums { grid-column: 1 / -1; text-align: left; }
+}
 @media (max-width: 560px) {
   .lk-spark { display: none; }
   /* узко: точка | имя | крестик, значение второй строкой под именем */

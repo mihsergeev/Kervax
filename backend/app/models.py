@@ -734,6 +734,8 @@ class Server(Base):
     traffic_limit_gb: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     traffic_count: Mapped[str] = mapped_column(String(8), default="out", server_default="out")
     traffic_cycle_day: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
+    # когда топы "кто качает трафик" и "кто пишет на диск" в последний раз легли в server_usage
+    usage_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # подключение нового сервера (app/onboard.py): пока не закрыто, алертом уходят только
     # офлайн и критичный диск, остальное копится в карточке. Кто и когда закрыл; "авто" - само
     # через ONBOARD_MAX. Открывает подключение только заведение сервера в панели (create_server
@@ -798,6 +800,22 @@ class ServerTraffic(Base):
     day: Mapped[date] = mapped_column(Date, primary_key=True)
     rx: Mapped[int] = mapped_column(BigInteger, default=0)
     tx: Mapped[int] = mapped_column(BigInteger, default=0)
+
+
+class ServerUsage(Base):
+    """Кто качает трафик и кто пишет на диск, по часам (app/usage.py), байты: у net в a принято,
+    в b отдано, у disk в a записано, в b прочитано."""
+
+    __tablename__ = "server_usage"
+    __table_args__ = (Index("ix_server_usage_hour", "hour"),)
+
+    server_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    metric: Mapped[str] = mapped_column(String(8), primary_key=True)  # net / disk
+    hour: Mapped[int] = mapped_column(Integer, primary_key=True)  # часов с 1970 года, UTC
+    name: Mapped[str] = mapped_column(String(200), primary_key=True)
+    kind: Mapped[str] = mapped_column(String(16), default="")  # container / pod / unit
+    a: Mapped[int] = mapped_column(BigInteger, default=0)
+    b: Mapped[int] = mapped_column(BigInteger, default=0)
 
 
 class ServerMetric(Base):

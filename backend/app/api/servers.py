@@ -34,6 +34,7 @@ from app import timeline as timeline_mod
 from app import packages as packages_mod
 from app import netlinks
 from app import traffic as traffic_mod
+from app import usage as usage_mod
 from app import audit, backup_growth, custom_backups, docker_exposure, geoip, kube_coverage, manual_probe, open_ports, os_support
 from app.collector import (
     _backup_problem_repos, alert_since, backup_cadence, backup_rotation_items, backup_unmonitored,
@@ -61,6 +62,7 @@ from app.models import (
     Server,
     ServerMetric,
     ServerTraffic,
+    ServerUsage,
     User,
     WebErrorSample,
 )
@@ -1399,6 +1401,7 @@ async def delete_server(
     await timeline_mod.forget(session, server_id)
     await netlinks.forget(session, server_id)
     await session.execute(sa_delete(ServerTraffic).where(ServerTraffic.server_id == server_id))
+    await session.execute(sa_delete(ServerUsage).where(ServerUsage.server_id == server_id))
     await session.delete(server)
     await session.commit()
     await _write_agent_allowlist(session)
@@ -2903,6 +2906,7 @@ async def agent_report(
     if server.first_report_at is None:
         server.first_report_at = now
     await traffic_mod.ingest(session, server, body.net_ifaces, now)
+    await usage_mod.ingest(session, server, body.net_users, body.disk_writers, now)
     link_tasks = await netlinks.handle(session, server, body.links, now)
 
     # Сигнал обновления: только если админ выставил target и агент ещё не на ней.

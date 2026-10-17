@@ -1662,6 +1662,8 @@ class AgentReportIn(BaseModel):
     # кто пишет на диск за последний час (агент 2.33): [{kind, name, w, r, s}]
     disk_writers: list[dict] = Field(default_factory=list, max_length=50)
     disk_writers_v1: bool = False
+    # кто качает трафик за последний час (агент 2.34): [{kind, name, rx, tx, s}]
+    net_users: list[dict] = Field(default_factory=list, max_length=50)
     conntrack_count: float = 0.0
     conntrack_max: float = 0.0
     sock_used: float = 0.0

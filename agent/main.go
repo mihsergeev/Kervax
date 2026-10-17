@@ -43,7 +43,7 @@ import (
 	"time"
 )
 
-const version = "2.33"
+const version = "2.34"
 
 // Публичный ключ для проверки подписи релизов агента (Ed25519, base64).
 // ПУСТО по умолчанию → самообновление ВЫКЛЮЧЕНО (агент никогда не заменяет себя).
@@ -120,40 +120,40 @@ type disk struct {
 }
 
 type report struct {
-	Hostname      string        `json:"hostname"`
-	OS            string        `json:"os"`
-	AgentVersion  string        `json:"agent_version"`
-	CPUModel      string        `json:"cpu_model"` // напр. «AMD Ryzen 9 7900X3D»
-	IsVM          bool          `json:"is_vm"`     // виртуалка ли (hypervisor-флаг/DMI)
-	Virt          string        `json:"virt"`      // тип гипервизора: Hyper-V/KVM/VMware/… ('' = железо)
-	LocalIP       string        `json:"local_ip"`
-	Uptime        int64         `json:"uptime_seconds"`
-	CPUPercent    float64       `json:"cpu_percent"`
-	MemUsed       uint64        `json:"mem_used"`
-	MemTotal      uint64        `json:"mem_total"`
-	SwapUsed      uint64        `json:"swap_used"`
-	SwapTotal     uint64        `json:"swap_total"`
-	Load          []float64     `json:"load"`
-	Disks         []disk        `json:"disks"`
-	DBEngines     []string      `json:"db_engines,omitempty"`   // СУБД на ноде (нужен дамп, не файловый снапшот)
-	Services      []serviceInfo `json:"services,omitempty"`     // прикладные метрики (очереди RabbitMQ и т.п.)
-	WebServices   []webService  `json:"web_services,omitempty"` // веб-серверы/прокси (nginx/envoy/…) + сайты
-	DBStats       []dbStat      `json:"db_stats,omitempty"`     // инвентарь СУБД: базы, размеры, логины (root-хелпер dbstat-setup)
+	Hostname     string        `json:"hostname"`
+	OS           string        `json:"os"`
+	AgentVersion string        `json:"agent_version"`
+	CPUModel     string        `json:"cpu_model"` // напр. «AMD Ryzen 9 7900X3D»
+	IsVM         bool          `json:"is_vm"`     // виртуалка ли (hypervisor-флаг/DMI)
+	Virt         string        `json:"virt"`      // тип гипервизора: Hyper-V/KVM/VMware/… ('' = железо)
+	LocalIP      string        `json:"local_ip"`
+	Uptime       int64         `json:"uptime_seconds"`
+	CPUPercent   float64       `json:"cpu_percent"`
+	MemUsed      uint64        `json:"mem_used"`
+	MemTotal     uint64        `json:"mem_total"`
+	SwapUsed     uint64        `json:"swap_used"`
+	SwapTotal    uint64        `json:"swap_total"`
+	Load         []float64     `json:"load"`
+	Disks        []disk        `json:"disks"`
+	DBEngines    []string      `json:"db_engines,omitempty"`   // СУБД на ноде (нужен дамп, не файловый снапшот)
+	Services     []serviceInfo `json:"services,omitempty"`     // прикладные метрики (очереди RabbitMQ и т.п.)
+	WebServices  []webService  `json:"web_services,omitempty"` // веб-серверы/прокси (nginx/envoy/…) + сайты
+	DBStats      []dbStat      `json:"db_stats,omitempty"`     // инвентарь СУБД: базы, размеры, логины (root-хелпер dbstat-setup)
 	// Сроки того, на чём кластер молча умирает: PKI control-plane, kubeconfig'и,
 	// сертификат kubelet, TLS-секреты и креды Flux. Считает root-хелпер
 	// kubeexpiry-setup, агент только читает готовые даты — ни ключей, ни токенов
 	// он не видит. Flux — состояния Ready: срок можно проспать, а токен отозвать.
-	KubeExpiry    []kubeExpiry  `json:"kube_expiry,omitempty"`
-	Flux          []fluxState   `json:"flux,omitempty"`
+	KubeExpiry []kubeExpiry `json:"kube_expiry,omitempty"`
+	Flux       []fluxState  `json:"flux,omitempty"`
 	// результаты локальных проверок сайтов (панель до них не дотягивается сама)
 	SiteProbes    []siteProbeResult `json:"site_probes,omitempty"`
 	Links         []linkResult      `json:"links,omitempty"` // связь с другими серверами (links.go)
-	NetRx         float64       `json:"net_rx"`                 // байт/сек
-	NetTx         float64       `json:"net_tx"`
-	DiskRead      float64       `json:"disk_read"`       // байт/сек, чтение с дисков
-	DiskWrite     float64       `json:"disk_write"`      // байт/сек, запись на диски
-	DiskReadIOPS  float64       `json:"disk_read_iops"`  // операций чтения/сек
-	DiskWriteIOPS float64       `json:"disk_write_iops"` // операций записи/сек
+	NetRx         float64           `json:"net_rx"`          // байт/сек
+	NetTx         float64           `json:"net_tx"`
+	DiskRead      float64           `json:"disk_read"`       // байт/сек, чтение с дисков
+	DiskWrite     float64           `json:"disk_write"`      // байт/сек, запись на диски
+	DiskReadIOPS  float64           `json:"disk_read_iops"`  // операций чтения/сек
+	DiskWriteIOPS float64           `json:"disk_write_iops"` // операций записи/сек
 	// разбивка CPU по состояниям, % (для стек-графика)
 	CPUCores  int     `json:"cpu_cores"`
 	CPUUser   float64 `json:"cpu_user"`
@@ -188,6 +188,8 @@ type report struct {
 	// кто пишет на диск за последний час: контейнеры, поды и юниты systemd по io.stat их cgroup
 	DiskWriters   []ioWriter `json:"disk_writers,omitempty"`
 	DiskWritersV1 bool       `json:"disk_writers_v1,omitempty"` // cgroup v1: отложенная запись в счетчики не попадает
+	// кто качает трафик за последний час: контейнеры и поды по счетчикам их сетевого пространства
+	NetUsers []netUser `json:"net_users,omitempty"`
 	// таблица conntrack + сокеты (мгновенные значения)
 	ConntrackCount float64 `json:"conntrack_count"`
 	ConntrackMax   float64 `json:"conntrack_max"`
@@ -2936,7 +2938,8 @@ func ioTargets(root string, conts map[string]string) []ioTarget {
 		if id == "" || strings.ContainsAny(id, "/.") {
 			continue
 		}
-		for _, d := range []string{root + "/system.slice/docker-" + id + ".scope", root + "/docker/" + id, root + "/blkio/docker/" + id} {
+		for _, d := range []string{root + "/system.slice/docker-" + id + ".scope", root + "/docker/" + id, root + "/blkio/docker/" + id,
+			root + "/blkio/system.slice/docker-" + id + ".scope"} {
 			if isDir(d) {
 				out = append(out, ioTarget{"c:" + id, "container", id, d})
 				break
@@ -3032,22 +3035,7 @@ func diskWriters(root string, conts, pods map[string]string, now time.Time) ([]i
 		if len(h) < 2 || (w == h[0].w && r == h[0].r) {
 			continue
 		}
-		name := t.id
-		switch t.kind {
-		case "container":
-			if n := conts[t.id]; n != "" {
-				name = n
-			} else if len(t.id) > 12 {
-				name = t.id[:12]
-			}
-		case "pod":
-			if n := pods[t.id]; n != "" {
-				name = n
-			} else if len(t.id) >= 8 {
-				name = "pod " + t.id[:8]
-			}
-		}
-		list = append(list, ioWriter{Kind: t.kind, Name: name, W: w - h[0].w, R: r - h[0].r, S: int(now.Sub(h[0].at).Seconds())})
+		list = append(list, ioWriter{Kind: t.kind, Name: ioName(t, conts, pods), W: w - h[0].w, R: r - h[0].r, S: int(now.Sub(h[0].at).Seconds())})
 	}
 	for k := range ioState.hist {
 		if !seen[k] {
@@ -3065,6 +3053,238 @@ func diskWriters(root string, conts, pods map[string]string, now time.Time) ([]i
 	}
 	ioState.top, ioState.v1 = list, v1
 	return list, v1
+}
+
+// ioName - как цель называть людям: имя контейнера или под namespace/имя, без них - начало id
+func ioName(t ioTarget, conts, pods map[string]string) string {
+	switch t.kind {
+	case "container":
+		if n := conts[t.id]; n != "" {
+			return n
+		} else if len(t.id) > 12 {
+			return t.id[:12]
+		}
+	case "pod":
+		if n := pods[t.id]; n != "" {
+			return n
+		} else if len(t.id) >= 8 {
+			return "pod " + t.id[:8]
+		}
+	}
+	return t.id
+}
+
+// ── Кто качает трафик ──────────────────────────────────────────────────────────
+// Принято и отдано за последний час контейнерами docker и подами этой ноды - рядом с лимитом
+// тарифа первый вопрос, кто его съел. У cgroup сетевых счетчиков нет, поэтому через процесс:
+// первый pid из cgroup.procs и его /proc/<pid>/net/dev - интерфейсы его сетевого пространства,
+// кроме lo. Это читается и не от root, а ссылка /proc/<pid>/ns/net - нет, поэтому пространство
+// узнается по inode файла net/dev: он общий у процессов одного пространства и свой у каждого.
+// Сеть хоста (network_mode: host, hostNetwork) - inode как у самого агента, такие пропускаются:
+// это трафик всего сервера. Контейнеры в одном пространстве (network_mode: container:X) - одна
+// строка. В счетчики входит и обмен с другими контейнерами этого сервера, не только внешний.
+
+type netUser struct {
+	Kind string `json:"kind"` // container / pod
+	Name string `json:"name"`
+	Rx   uint64 `json:"rx"` // байт принято за окно
+	Tx   uint64 `json:"tx"` // байт отдано за окно
+	S    int    `json:"s"`  // окно, секунд
+}
+
+const netTopN = 8
+
+var netState = struct {
+	sync.Mutex
+	hist map[string][]ioSample // r - принято, w - отдано
+	last time.Time
+	top  []netUser
+}{hist: map[string][]ioSample{}}
+
+// cgroupPid - первый процесс cgroup. На v2 процессы живут только в листьях: у пода они в
+// каталогах его контейнеров, у контейнера с systemd внутри - в init.scope.
+func cgroupPid(dir string, depth int) string {
+	if b, err := os.ReadFile(dir + "/cgroup.procs"); err == nil {
+		if f := strings.Fields(string(b)); len(f) > 0 {
+			return f[0]
+		}
+	}
+	if depth >= 3 {
+		return ""
+	}
+	ents, err := os.ReadDir(dir)
+	if err != nil {
+		return ""
+	}
+	for _, e := range ents {
+		if e.IsDir() {
+			if p := cgroupPid(dir+"/"+e.Name(), depth+1); p != "" {
+				return p
+			}
+		}
+	}
+	return ""
+}
+
+// fileIno - inode файла, "" если его не видно
+func fileIno(path string) string {
+	st, err := os.Stat(path)
+	if err != nil {
+		return ""
+	}
+	if s, ok := st.Sys().(*syscall.Stat_t); ok {
+		return strconv.FormatUint(uint64(s.Ino), 10)
+	}
+	return ""
+}
+
+// netDevBytes - принято и отдано всеми интерфейсами из net/dev, кроме lo
+func netDevBytes(path string) (rx, tx uint64, ok bool) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return 0, 0, false
+	}
+	for _, ln := range strings.Split(string(b), "\n") {
+		name, rest, found := strings.Cut(ln, ":")
+		if !found || strings.TrimSpace(name) == "lo" {
+			continue
+		}
+		f := strings.Fields(rest)
+		if len(f) < 9 {
+			continue
+		}
+		r, e1 := strconv.ParseUint(f[0], 10, 64)
+		w, e2 := strconv.ParseUint(f[8], 10, 64)
+		if e1 != nil || e2 != nil {
+			continue
+		}
+		rx += r
+		tx += w
+	}
+	return rx, tx, true
+}
+
+// netUsers - кто больше всех отдал и принял за последний час. Замер не чаще ioStep, между
+// замерами отдается прошлый результат. Счетчик меньше прошлого или сменились имена - пространство
+// пересоздано (inode освобожденного достается следующему), его история заново.
+func netUsers(root, proc string, conts, pods map[string]string, now time.Time) []netUser {
+	netState.Lock()
+	defer netState.Unlock()
+	if !netState.last.IsZero() && now.Sub(netState.last) < ioStep {
+		return netState.top
+	}
+	netState.last = now
+	host := fileIno(proc + "/self/net/dev")
+	if host == "" {
+		// не отличить сеть хоста - контейнер с ней показал бы трафик всего сервера
+		netState.top = nil
+		return nil
+	}
+	type space struct {
+		pid   string
+		pod   bool
+		names []string
+	}
+	spaces := map[string]*space{}
+	for _, t := range ioTargets(root, conts) {
+		if t.kind != "container" && t.kind != "pod" {
+			continue
+		}
+		pid := cgroupPid(t.dir, 0)
+		if pid == "" {
+			continue
+		}
+		ino := fileIno(proc + "/" + pid + "/net/dev")
+		if ino == "" || ino == host {
+			continue
+		}
+		sp := spaces[ino]
+		if sp == nil {
+			sp = &space{pid: pid}
+			spaces[ino] = sp
+		}
+		// контейнеры пода, видные и через docker (cri-dockerd), - это сам под
+		if t.kind == "pod" && !sp.pod {
+			sp.pod, sp.pid, sp.names = true, pid, nil
+		}
+		if (t.kind == "pod") == sp.pod {
+			sp.names = append(sp.names, ioName(t, conts, pods))
+		}
+	}
+	seen := map[string]bool{}
+	var list []netUser
+	for ino, sp := range spaces {
+		rx, tx, ok := netDevBytes(proc + "/" + sp.pid + "/net/dev")
+		if !ok {
+			continue
+		}
+		sort.Strings(sp.names)
+		name := strings.Join(sp.names, ", ")
+		key := ino + "|" + name
+		seen[key] = true
+		h := netState.hist[key]
+		if n := len(h); n > 0 && (rx < h[n-1].r || tx < h[n-1].w) {
+			h = nil
+		}
+		h = append(h, ioSample{now, rx, tx})
+		for len(h) > 1 && now.Sub(h[0].at) > ioKeep {
+			h = h[1:]
+		}
+		netState.hist[key] = h
+		if len(h) < 2 || (rx == h[0].r && tx == h[0].w) {
+			continue
+		}
+		kind := "container"
+		if sp.pod {
+			kind = "pod"
+		}
+		list = append(list, netUser{Kind: kind, Name: name, Rx: rx - h[0].r, Tx: tx - h[0].w, S: int(now.Sub(h[0].at).Seconds())})
+	}
+	for k := range netState.hist {
+		if !seen[k] {
+			delete(netState.hist, k)
+		}
+	}
+	netState.top = netTop(list, netTopN)
+	return netState.top
+}
+
+// netTop - n больше всех отдавших и n больше всех принявших (хостер считает либо исходящий, либо
+// весь трафик), по сумме сверху вниз
+func netTop(list []netUser, n int) []netUser {
+	byTotal := func(l []netUser) {
+		sort.Slice(l, func(i, j int) bool {
+			if a, b := l[i].Rx+l[i].Tx, l[j].Rx+l[j].Tx; a != b {
+				return a > b
+			}
+			return l[i].Name < l[j].Name
+		})
+	}
+	if len(list) <= n {
+		byTotal(list)
+		return list
+	}
+	pick := map[int]bool{}
+	idx := make([]int, len(list))
+	for i := range idx {
+		idx[i] = i
+	}
+	sort.Slice(idx, func(a, b int) bool { return list[idx[a]].Tx > list[idx[b]].Tx })
+	for _, i := range idx[:n] {
+		pick[i] = true
+	}
+	sort.Slice(idx, func(a, b int) bool { return list[idx[a]].Rx > list[idx[b]].Rx })
+	for _, i := range idx[:n] {
+		pick[i] = true
+	}
+	var out []netUser
+	for i, u := range list {
+		if pick[i] {
+			out = append(out, u)
+		}
+	}
+	byTotal(out)
+	return out
 }
 
 // uidCache — ленивый кэш uid→имя из /etc/passwd (одно чтение файла).
@@ -3469,6 +3689,7 @@ func collect(prev sample) (report, sample) {
 	cn, pn := containerNames(dk), podNames(r.Kube)
 	r.CPUGroups = cpuGroups(prev, cur, cn, pn)
 	r.DiskWriters, r.DiskWritersV1 = diskWriters("/sys/fs/cgroup", cn, pn, time.Now())
+	r.NetUsers = netUsers("/sys/fs/cgroup", "/proc", cn, pn, time.Now())
 	r.Services = collectServices(dk, r.Kube)
 	r.WebServices = collectWebServices(r.Kube)
 	r.DBStats = collectDBStats()

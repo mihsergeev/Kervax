@@ -49,6 +49,7 @@ from app import open_ports
 from app import vulns as vulns_mod
 from app import netlinks
 from app import traffic as traffic_mod
+from app import usage as usage_mod
 from app import disk_forecast as dfc
 from app.setup_scripts import current_setup_versions, gaps
 from app.config import Settings, get_settings
@@ -76,6 +77,7 @@ from app.models import (
     Server,
     ServerMetric,
     ServerTraffic,
+    ServerUsage,
     WebErrorSample,
 )
 
@@ -6432,6 +6434,8 @@ async def _prune(
         await session.execute(delete(OomEvent).where(OomEvent.ts < srv_cutoff))
         await session.execute(delete(LinkSample).where(LinkSample.ts < srv_cutoff))
         await session.execute(delete(ServerTraffic).where(ServerTraffic.day < (now - traffic_mod.KEEP).date()))
+        await session.execute(delete(ServerUsage).where(
+            ServerUsage.hour < int((now - usage_mod.KEEP).timestamp() // 3600)))
         # история алертов маленькая, а нужна надолго: "как часто это было за квартал"
         await session.execute(delete(AlertEvent).where(AlertEvent.ts < now - _ALERT_HISTORY_KEEP))
         # docker/kube-команды (с логами) держим коротко — неделя, не тайм-серия
