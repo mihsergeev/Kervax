@@ -1,6 +1,6 @@
 """Здоровье баз (helper dbstat-setup 0.5): репликация, долгие транзакции, блокировки, wraparound,
 таблицы, которые давно не вакуумились. Блок extras["db-health"], helper обновляет его раз в
-15 минут.
+15 минут. С 0.8 у PostgreSQL еще и "что грузит базу" за последний час (load_view).
 
 Почему это отдельно от инвентаря: база может быть жива и отвечать, а реплика уже час не
 получает WAL, незакрытая транзакция держит блокировки и не дает VACUUM чистить, а возраст XID
@@ -126,6 +126,50 @@ def problems(rep: dict, now: datetime) -> list[tuple[int, str, str]]:
     return out
 
 
+# Что грузит PostgreSQL (dbstat-setup 0.8): разница счетчиков со снимком примерно часовой давности и
+# самые долгие запросы из pg_stat_statements. Без алертов: это разбор для того, кто пришел выяснять,
+# почему база тормозит или диски изнашиваются, а не авария
+_LOAD_KEYS = ("temp_b", "temp_f", "xact", "rd", "wal_rec", "fpi", "wal_b", "wbf", "ck_t", "ck_r")
+
+
+def load_view(x: dict) -> dict | None:
+    """Счетчики в пересчете на час (None - эта версия PostgreSQL их не считает) и самые долгие
+    запросы с долей во времени всех запросов"""
+    ld = x.get("load")
+    if not isinstance(ld, dict):
+        return None
+    win = _int(ld.get("win"))
+    out: dict = {"win": max(win, 0), "pss": str(ld.get("pss") or ""), "qtext": max(_int(ld.get("qtext")), 0),
+                 "cut": bool(ld.get("cut")), "top": []}
+    if win <= 0:
+        return out
+    k = 3600 / win
+    for key in _LOAD_KEYS:
+        v = _int(ld.get(key))
+        out[key] = round(v * k) if v >= 0 else None
+    ms_all = max(_int(ld.get("ms_all")), 0)
+    out["ms_all"] = round(ms_all * k)
+    # Одинаковый текст в одной базе - один запрос: PostgreSQL заводит отдельную запись на каждую роль
+    # и каждый набор типов параметров, на одной ноде самый тяжелый SELECT шел тремя записями
+    top: dict[tuple[str, str], dict] = {}
+    for q in ld.get("top") or []:
+        if not isinstance(q, dict):
+            continue
+        txt = str(q.get("q") or "")
+        key = (str(q.get("db") or ""), txt or "#" + str(q.get("id") or ""))
+        r = top.setdefault(key, {"db": key[0], "q": txt, "calls": 0, "ms": 0, "temp": 0, "rd": 0})
+        for f in ("calls", "ms", "temp", "rd"):
+            r[f] += max(_int(q.get(f)), 0)
+    rows = sorted(top.values(), key=lambda r: -r["ms"])
+    for r in rows:
+        r["share"] = round(r["ms"] * 100 / ms_all) if ms_all else 0
+        r["avg_ms"] = round(r["ms"] / r["calls"], 1) if r["calls"] else 0
+        for f in ("calls", "ms", "temp", "rd"):
+            r[f] = round(r[f] * k)
+    out["top"] = rows
+    return out
+
+
 def view(rep: dict, now: datetime) -> list[dict] | None:
     """Для раздела "Сервисы": по движку роль, отставание, самая долгая транзакция и проблемы"""
     items = block(rep, now)
@@ -138,5 +182,5 @@ def view(rep: dict, now: datetime) -> list[dict] | None:
         mine = [{"level": lv, "text": t} for lv, t, key in probs if key.startswith(k + ":")]
         out.append({"engine": x.get("engine"), "container": x.get("container") or "", "role": x.get("role") or "",
                     "replicas": _int(x.get("replicas")), "lag": _int(x.get("lag")), "xact": _int(x.get("xact")),
-                    "xid": _int(x.get("xid")), "problems": mine})
+                    "xid": _int(x.get("xid")), "problems": mine, "load": load_view(x)})
     return out

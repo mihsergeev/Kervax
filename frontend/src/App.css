@@ -4591,6 +4591,52 @@ textarea:focus {
 .svc-db-row:last-child {
   border-bottom: 0;
 }
+/* что грузит базу (dbstat-setup 0.8) */
+.svc-db-load {
+  margin-top: 0.6rem;
+  padding-top: 0.5rem;
+  border-top: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  min-width: 0;
+}
+.svc-db-load-head {
+  display: flex;
+  align-items: baseline;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+}
+.svc-db-load-title {
+  font-weight: 600;
+  font-size: 0.85rem;
+}
+.svc-db-load-facts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.2rem 1rem;
+  color: var(--text-muted);
+}
+.svc-db-load-q {
+  padding: 0.25rem 0;
+  min-width: 0;
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 45%, transparent);
+}
+.svc-db-load-q:last-child {
+  border-bottom: 0;
+}
+.svc-db-load-text {
+  font-size: 0.8rem;
+  word-break: break-all;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  cursor: pointer;
+}
+.svc-db-load-text.open {
+  display: block;
+}
 .svc-sites {
   margin-top: 0.35rem;
 }

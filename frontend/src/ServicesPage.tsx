@@ -7,10 +7,11 @@ import {
   updateServer,
   type DBStat,
   type DbHealth,
+  type DbLoad,
   type Server,
   type ServiceInfo,
 } from './api'
-import { useI18n } from './i18n'
+import { currentLang, useI18n } from './i18n'
 import { useAuth } from './auth'
 import { useUrlCard, useUrlParam } from './deeplink'
 import { shortList, srvIssues, srvMuted, webRate } from './serverUtils'
@@ -179,6 +180,94 @@ function lagText(sec: number, t: (s: string, v?: Record<string, string | number>
   return t('{n} ч', { n: Math.round(sec / 3600) })
 }
 
+// Что грузит PostgreSQL за последний час (dbstat-setup 0.8): временные файлы, чтение, WAL, чекпоинты
+// и самые долгие запросы. Без алертов - это разбор, когда пришли выяснять, почему база тормозит или
+// изнашиваются диски. Подсказки - только то, что из этих цифр прямо следует
+const LOAD_QUIET_MS = 60_000 // запросы заняли меньше минуты за час - топ ни о чем не говорит
+const LOAD_TEMP_HINT = 10 * 1024 ** 3 // временных файлов больше 10 ГБ в час
+const LOAD_WBF_HINT = 100
+
+function fmtCount(n: number): string {
+  return Math.round(n).toLocaleString(currentLang() === 'ru' ? 'ru-RU' : 'en-US')
+}
+
+function DbLoadBlock({ ld, name, t }: { ld: DbLoad; name: string; t: (s: string, v?: Record<string, string | number>) => string }) {
+  const facts: string[] = []
+  const hints: string[] = []
+  if (ld.win > 0) {
+    if (ld.temp_b) facts.push(t('временные файлы {s} в час', { s: fmtBytes(ld.temp_b) }))
+    if (ld.rd) facts.push(t('чтение мимо shared_buffers {s} в час', { s: fmtBytes(ld.rd) }))
+    if (ld.wal_b) {
+      const fpi = ld.wal_rec && ld.fpi != null ? Math.round((ld.fpi * 100) / ld.wal_rec) : null
+      facts.push(t('WAL {s} в час', { s: fmtBytes(ld.wal_b) }) + (fpi != null ? `, ${t('полные копии страниц: {p}% записей', { p: fpi })}` : ''))
+    }
+    if (ld.ck_t != null && ld.ck_r != null) facts.push(t('чекпоинты: {a} по времени, {b} по объему WAL', { a: ld.ck_t, b: ld.ck_r }))
+    if (ld.wbf) facts.push(t('буфер WAL переполнялся {n} раз за час', { n: fmtCount(ld.wbf) }))
+    if (ld.xact != null) facts.push(t('{n} транзакций в секунду', { n: (ld.xact / 3600).toFixed(ld.xact < 36000 ? 1 : 0) }))
+    if ((ld.temp_b ?? 0) >= LOAD_TEMP_HINT)
+      hints.push(t('Запросы пишут временные файлы {s} в час: сортировки и хеши не помещаются в work_mem, это запись на диск и его износ. Какие именно - видно по временным файлам у запросов ниже', { s: fmtBytes(ld.temp_b ?? 0) }))
+    // от трех в час: единичный по запросу дают CHECKPOINT, pg_basebackup, CREATE DATABASE
+    if ((ld.ck_r ?? 0) >= 3 && (ld.ck_r ?? 0) >= (ld.ck_t ?? 0))
+      hints.push(t('Чекпоинты чаще идут по объему WAL, чем по времени: max_wal_size мал для такой записи, а после каждого чекпоинта страницы снова пишутся в WAL целиком'))
+    if ((ld.wbf ?? 0) >= LOAD_WBF_HINT)
+      hints.push(t('Буфер WAL переполнялся {n} раз за час: запросы ждали записи WAL на диск, стоит увеличить wal_buffers (нужен перезапуск)', { n: fmtCount(ld.wbf ?? 0) }))
+  }
+  if (ld.pss === 'off')
+    hints.push(t('Самые долгие запросы покажет pg_stat_statements: добавьте его в shared_preload_libraries (нужен перезапуск PostgreSQL) и выполните CREATE EXTENSION pg_stat_statements'))
+  if (ld.pss === 'noext')
+    hints.push(t('pg_stat_statements загружен, но расширение не создано ни в одной базе: выполните CREATE EXTENSION pg_stat_statements, перезапуск не нужен. Панель увидит его в течение часа'))
+  if (ld.qtext > 1024 ** 3)
+    hints.push(t('Тексты запросов pg_stat_statements занимают {s}: так бывает, когда один запрос приходит с разным числом значений (многострочный INSERT, длинный IN), и каждый вариант хранится отдельно со своим текстом. Они вытесняют из статистики другие запросы, а каждое чтение текстов поднимает файл в память целиком, поэтому новые тексты панель читает раз в 6 часов', { s: fmtBytes(ld.qtext) }))
+  if (ld.cut) hints.push(t('Запросы не показаны: на сервере много инстансов, и отчет не вместил бы все'))
+  const [open, setOpen] = useState<number | null>(null) // текст запроса целиком по нажатию (на телефоне нет подсказки)
+  const quiet = (ld.ms_all ?? 0) < LOAD_QUIET_MS
+  const multiDb = new Set(ld.top.map((q) => q.db).filter(Boolean)).size > 1
+  return (
+    <div className="svc-db-load">
+      <div className="svc-db-load-head">
+        <span className="svc-db-load-title">{t('Что грузит базу')}</span>
+        {name && <span className="mono muted small">{name}</span>}
+        {ld.win > 0 && (
+          <span className="muted small">
+            {ld.win >= 3000 ? t('за последний час') : t('за {n} мин, в пересчете на час', { n: Math.max(1, Math.round(ld.win / 60)) })}
+          </span>
+        )}
+      </div>
+      {ld.win <= 0 && ld.pss !== 'off' && ld.pss !== 'noext' && (
+        <div className="muted small">{t('Собираю данные: первая картина через 15 минут, за полный час - через час')}</div>
+      )}
+      {facts.length > 0 && <div className="svc-db-load-facts small">{facts.map((f) => <span key={f}>{f}</span>)}</div>}
+      {ld.win > 0 && ld.pss === 'on' && !ld.cut && quiet && (
+        <div className="muted small">{t('Запросы заняли {s} с за час - база почти не нагружена', { s: Math.round((ld.ms_all ?? 0) / 1000) })}</div>
+      )}
+      {ld.win > 0 && !quiet && ld.top.length > 0 && (
+        <div className="svc-db-load-top">
+          {ld.top.map((q, i) => (
+            <div key={i} className="svc-db-load-q">
+              <div className={q.q ? `mono svc-db-load-text${open === i ? ' open' : ''}` : 'muted small'} title={q.q || undefined}
+                onClick={() => q.q && setOpen(open === i ? null : i)}>
+                {q.q || (q.db ? t('текст скрыт: в нем пароль или секрет') : t('текст еще не прочитан'))}
+              </div>
+              <div className="muted small">
+                {[
+                  t('{p}% времени запросов', { p: q.share }),
+                  t('{n} вызовов', { n: fmtCount(q.calls) }),
+                  q.avg_ms >= 1000
+                    ? t('{s} с в среднем', { s: (q.avg_ms / 1000).toFixed(q.avg_ms >= 10000 ? 0 : 1) })
+                    : t('{ms} мс в среднем', { ms: q.avg_ms >= 10 ? Math.round(q.avg_ms) : q.avg_ms }),
+                  q.temp > 0 ? t('временные файлы {s}', { s: fmtBytes(q.temp) }) : '',
+                  multiDb && q.db ? t('база {db}', { db: q.db }) : '',
+                ].filter(Boolean).join(' · ')}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+      {hints.map((h) => <div key={h} className="net-note">{h}</div>)}
+    </div>
+  )
+}
+
 function DbInventory({ db, t, health = [] }: {
   db: DBStat[]
   t: (s: string, v?: Record<string, string | number>) => string
@@ -256,6 +345,9 @@ function DbInventory({ db, t, health = [] }: {
           </div>
         ))}
       </div>
+      {health.filter((h) => h.load).map((h) => (
+        <DbLoadBlock key={'l' + h.container} ld={h.load as DbLoad} name={health.length > 1 ? h.container : ''} t={t} />
+      ))}
     </div>
   )
 }
