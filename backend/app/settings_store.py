@@ -118,7 +118,7 @@ SERVER_ALERT_KINDS: dict[str, tuple[str, str]] = {
     # Здоровье баз (helper dbstat-setup 0.5): реплика стоит или отстает, транзакция идет часами
     # или висит незакрытой, запросы ждут блокировку, возраст XID ползет к wraparound, таблица
     # давно без VACUUM
-    "db_health": ("СУБД: реплика, транзакции, VACUUM", "{detail}"),
+    "db_health": ("СУБД: реплика, транзакции, запись, VACUUM", "{detail}"),
     # nginx -t, apachectl -t, caddy validate или haproxy -c не проходит (helper webserver-setup
     # 0.23): сейчас работает старый конфиг, следующий reload или перезапуск уронит сайты
     "web_config": ("Веб-сервер: конфиг не проходит проверку", "{detail}"),

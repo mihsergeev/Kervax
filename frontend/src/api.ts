@@ -1196,6 +1196,43 @@ export type DbHealth = {
   problems: { level: number; text: string }[]
   load?: DbLoad | null // что грузит PostgreSQL за последний час (dbstat-setup 0.8)
   advice?: DbAdvice[] // советы по настройкам (dbstat-setup 0.9), текст по ключу k рисует фронт
+  ch?: ChHealth // ClickHouse (dbstat-setup 0.10)
+  rd?: RdHealth // Redis (dbstat-setup 0.10)
+}
+// ClickHouse: партиция с наибольшим числом кусков и пороги замедления и отказа вставок, мутации,
+// реплики и очередь репликации, вставки с прошлого прогона helper'а (win секунд), самые долгие
+// запросы за час из query_log (тексты нормализованы, литералы - ?)
+export type ChHealth = {
+  parts: { max: number; tbl: string; part: string; delay: number; throw: number }
+  mut: { n: number; age: number; tbl: string; err: string }
+  rep: { n: number; ro: number; delay: number; queue: number; ro_tbl: string; q_n: number; q_age: number; q_err: string }
+  detached: number
+  merges: number
+  merge_max: number
+  ins: { win: number; n: number; fail: number; rej: number; del: number }
+  qlog: boolean
+  qerr: number
+  top: { n: number; ms: number; rd: number; mem: number; q: string }[]
+  cut: number
+}
+// Redis: память и политика вытеснения, последний снимок и AOF, вытеснение и отказы в подключении и
+// самые тяжелые команды с прошлого прогона (win секунд, us - микросекунды)
+export type RdHealth = {
+  link: string
+  down: number
+  mem: number
+  maxmem: number
+  policy: string
+  rdb: string
+  rdb_changes: number
+  rdb_age: number
+  aof: number
+  aof_status: string
+  stop_writes: string
+  win: number
+  evicted: number
+  rejected: number
+  cmds: { c: string; n: number; us: number }[]
 }
 // Совет по настройкам PostgreSQL: k - что именно, остальное - цифры для текста (байты, штуки)
 export type DbAdvice = { k: string } & Record<string, string | number | boolean>

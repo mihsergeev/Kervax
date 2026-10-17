@@ -36,7 +36,7 @@
 # container on stop. The panel compares them with the load and gives advice; nothing is changed here.
 set -euo pipefail
 
-KERVAX_SETUP_VERSION=0.9  # MAJOR.MINOR; compared component-wise
+KERVAX_SETUP_VERSION=0.10  # MAJOR.MINOR; compared component-wise
 KERVAX_SETUP_ALWAYS=1     # safe on any node: without a database it collects an empty file
 
 HELPER_DIR=/lib65/kervax
@@ -472,22 +472,177 @@ collect_ch() {
       | awk -F'\t' '{print $1"|"$2}' | dbs_json)
   u=$(ch_q "$c" "select name from system.users order by name format TabSeparated" | list_json)
   add_entry clickhouse "$c" "$v" "$d" "$u"
+  health_ch "$c"
+}
+
+# ── ClickHouse health (0.10) ───────────────────────────────────────────────────
+# What breaks ClickHouse writes: too many parts in one partition (from parts_to_delay_insert inserts
+# slow down, from parts_to_throw_insert they fail with TOO_MANY_PARTS), inserts already rejected or
+# delayed since the last run, a replica gone read-only or lagging, a replication queue that stopped,
+# mutations that fail or hang. Plus what loads it over the last hour, from system.query_log where
+# query logging is on: normalized texts (normalizeQuery, literals become ?), the ones that look like
+# a secret are not sent. Insert counters since the last run come from a small state file per
+# instance in LOAD_DIR (the engine counts them since its start)
+TOP_CH=5
+# several queries in one docker exec: on one node there are dozens of ClickHouse instances, and an
+# exec per query took longer than the queries. Every query returns exactly one row, so the answer
+# is read by line number
+ch_mq() { # container queries
+  if [ -n "$1" ]; then timeout $TO docker exec "$1" clickhouse-client -n --format TSV --query "$2" 2>/dev/null
+  else timeout $TO clickhouse-client -n --format TSV --query "$2" 2>/dev/null; fi
+}
+ch_f() { printf '%s' "$1" | cut -f"$2"; }
+health_ch() {
+  local c="$1" f now out up pm lim mu rp rq det mg ev ci cf cr cd pt pu pi pf pr pd
+  local win=0 ins=0 fail=0 rej=0 del=0 ql=false qe=0 top="" cut=0 entry
+  f="$LOAD_DIR/ch-$(printf '%s' "${c:-host}" | tr -c 'A-Za-z0-9_.-' '_')"
+  install -d -m 0700 "$LOAD_DIR" 2>/dev/null || return 0
+  now=$(date +%s)
+  out=$(ch_mq "$c" "select uptime();
+select max(c), argMax(t, c), argMax(p, c) from (select database || '.' || table as t, partition_id as p, count() as c from system.parts where active group by t, p);
+select anyIf(value, name = 'parts_to_delay_insert'), anyIf(value, name = 'parts_to_throw_insert') from system.merge_tree_settings;
+select count(), if(count() = 0, 0, toUInt32(now()) - toUInt32(min(create_time))), any(database || '.' || table), replaceRegexpAll(substring(anyIf(latest_fail_reason, latest_fail_reason != ''), 1, 200), '[\t\n\r]+', ' ') from system.mutations where not is_done;
+select count(), countIf(is_readonly), max(absolute_delay), max(queue_size), anyIf(database || '.' || table, is_readonly) from system.replicas;
+select count(), if(count() = 0, 0, toUInt32(now()) - toUInt32(min(create_time))), replaceRegexpAll(substring(anyIf(last_exception, last_exception != ''), 1, 200), '[\t\n\r]+', ' ') from system.replication_queue;
+select count() from system.detached_parts;
+select count(), toUInt32(max(elapsed)) from system.merges;
+select sumIf(value, event = 'InsertQuery'), sumIf(value, event = 'FailedInsertQuery'), sumIf(value, event = 'RejectedInserts'), sumIf(value, event = 'DelayedInserts') from system.events;
+select count() from system.tables where database = 'system' and name = 'query_log'")
+  # a query that failed stops the rest: without all ten lines nothing here can be trusted
+  [ "$(printf '%s\n' "$out" | grep -c .)" = 10 ] || return 0
+  up=$(num "$(printf '%s\n' "$out" | sed -n 1p)")
+  [ "$up" -gt 0 ] || return 0
+  pm=$(printf '%s\n' "$out" | sed -n 2p); lim=$(printf '%s\n' "$out" | sed -n 3p)
+  mu=$(printf '%s\n' "$out" | sed -n 4p); rp=$(printf '%s\n' "$out" | sed -n 5p)
+  rq=$(printf '%s\n' "$out" | sed -n 6p); det=$(printf '%s\n' "$out" | sed -n 7p)
+  mg=$(printf '%s\n' "$out" | sed -n 8p); ev=$(printf '%s\n' "$out" | sed -n 9p)
+  ci=$(num "$(ch_f "$ev" 1)"); cf=$(num "$(ch_f "$ev" 2)"); cr=$(num "$(ch_f "$ev" 3)"); cd=$(num "$(ch_f "$ev" 4)")
+  if [ -s "$f" ]; then
+    IFS='|' read -r pt pu pi pf pr pd < "$f"
+    pt=$(num "$pt"); pu=$(num "$pu")
+    # a smaller uptime - the engine restarted and counts from zero: no difference this time
+    if [ "$up" -ge "$pu" ] && [ "$now" -gt "$pt" ] && [ $((now - pt)) -le 7200 ]; then
+      win=$((now - pt)); ins=$((ci - $(num "$pi"))); fail=$((cf - $(num "$pf")))
+      rej=$((cr - $(num "$pr"))); del=$((cd - $(num "$pd")))
+    fi
+  fi
+  printf '%s|%s|%s|%s|%s|%s\n' "$now" "$up" "$ci" "$cf" "$cr" "$cd" > "$f"
+  if [ "$(printf '%s\n' "$out" | sed -n 10p)" = 1 ]; then
+    ql=true
+    out=$(ch_mq "$c" "select count() from system.query_log where event_time > now() - 3600 and type in ('ExceptionBeforeStart', 'ExceptionWhileProcessing');
+select count(), sum(query_duration_ms), sum(read_bytes), max(memory_usage), replaceRegexpAll(substring(normalizeQuery(any(query)), 1, $QTEXT_MAX), '[\t\n\r]+', ' ') from system.query_log where event_time > now() - 3600 and type = 'QueryFinish' group by normalized_query_hash order by 2 desc limit $TOP_CH")
+    qe=$(num "$(printf '%s\n' "$out" | sed -n 1p)")
+    top=$(printf '%s\n' "$out" | sed 1d | awk -F'\t' 'BEGIN { n = 0 }
+      NF >= 5 && $1 ~ /^[0-9]+$/ && $2 ~ /^[0-9]+$/ && $3 ~ /^[0-9]+$/ && $4 ~ /^[0-9]+$/ {
+        q = $5; if (tolower(q) ~ /passw|secret|token|identified|encrypt/) q = ""
+        gsub(/\\/, " ", q); gsub(/"/, "'"'"'", q); gsub(/[\001-\037]/, " ", q)
+        printf "%s{\"n\":%s,\"ms\":%s,\"rd\":%s,\"mem\":%s,\"q\":\"%s\"}", (n++ ? "," : ""), $1, $2, $3, $4, q }')
+    # the agent drops a report.d file over 256 KB whole: the texts share the budget with PostgreSQL
+    if [ $((LOAD_BYTES + ${#top})) -gt "$LOAD_BUDGET" ]; then top=""; cut=1; fi
+    LOAD_BYTES=$((LOAD_BYTES + ${#top}))
+  fi
+  entry="{\"engine\":\"clickhouse\",\"container\":\"$(esc "$c")\",\"role\":\"\",\"replicas\":0,\"lag\":0"
+  entry="$entry,\"parts\":{\"max\":$(num "$(ch_f "$pm" 1)"),\"tbl\":\"$(esc "$(ch_f "$pm" 2)")\",\"part\":\"$(esc "$(ch_f "$pm" 3)")\",\"delay\":$(num "$(ch_f "$lim" 1)"),\"throw\":$(num "$(ch_f "$lim" 2)")}"
+  entry="$entry,\"mut\":{\"n\":$(num "$(ch_f "$mu" 1)"),\"age\":$(num "$(ch_f "$mu" 2)"),\"tbl\":\"$(esc "$(ch_f "$mu" 3)")\",\"err\":\"$(esc "$(ch_f "$mu" 4)")\"}"
+  entry="$entry,\"rep\":{\"n\":$(num "$(ch_f "$rp" 1)"),\"ro\":$(num "$(ch_f "$rp" 2)"),\"delay\":$(num "$(ch_f "$rp" 3)"),\"queue\":$(num "$(ch_f "$rp" 4)"),\"ro_tbl\":\"$(esc "$(ch_f "$rp" 5)")\",\"q_n\":$(num "$(ch_f "$rq" 1)"),\"q_age\":$(num "$(ch_f "$rq" 2)"),\"q_err\":\"$(esc "$(ch_f "$rq" 3)")\"}"
+  entry="$entry,\"detached\":$(num "$det"),\"merges\":$(num "$(ch_f "$mg" 1)"),\"merge_max\":$(num "$(ch_f "$mg" 2)")"
+  entry="$entry,\"ins\":{\"win\":$win,\"n\":$ins,\"fail\":$fail,\"rej\":$rej,\"del\":$del},\"qlog\":$ql,\"qerr\":$qe,\"top\":[$top],\"cut\":$cut}"
+  HEALTH="$HEALTH${HEALTH:+,}$entry"
 }
 
 # ── Redis ──────────────────────────────────────────────────────────────────────
 # Redis "databases" are db0..dbN; instead of a size we show the key count (only a total
 # size exists, via used_memory, and it is not broken down per database).
-rd_q() { local c="$1" a="$2"; [ -n "$c" ] \
-  && timeout $TO docker exec "$c" redis-cli info "$a" 2>/dev/null \
-  || timeout $TO redis-cli info "$a" 2>/dev/null; }
+#
+# A Redis with a password (0.10): compose usually puts --requirepass into the container command,
+# sometimes it is REDIS_PASSWORD in the environment or requirepass in the config file the server
+# starts with. It is read here and handed to redis-cli on stdin (REDISCLI_AUTH), so it never shows
+# up in the process list, and it does not leave the node
+RDPW=""
+rd_pw() { # container -> the password or nothing
+  local c="$1" cmd pw conf
+  if [ -z "$c" ]; then
+    [ -r /etc/redis/redis.conf ] && awk '$1 == "requirepass" {print $2; exit}' /etc/redis/redis.conf | tr -d "\"'"
+    return 0
+  fi
+  cmd=$(docker inspect -f '{{range .Config.Cmd}}{{println .}}{{end}}' "$c" 2>/dev/null | tr ' \t' '\n\n')
+  pw=$(printf '%s\n' "$cmd" | awk 'p { print; exit } $0 == "--requirepass" { p = 1; next } /^--requirepass=/ { sub(/^--requirepass=/, ""); print; exit }' | tr -d "\"'")
+  [ -z "$pw" ] && pw=$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$c" 2>/dev/null | sed -n 's/^REDIS_PASSWORD=//p' | head -1)
+  if [ -z "$pw" ]; then
+    conf=$(printf '%s\n' "$cmd" | grep -m1 '\.conf$')
+    [ -n "$conf" ] && pw=$(timeout $TO docker exec "$c" cat "$conf" 2>/dev/null | awk '$1 == "requirepass" {print $2; exit}' | tr -d "\"'")
+  fi
+  printf '%s' "$pw"
+}
+rd_cli() { # container args... -> redis-cli output; the password (RDPW) goes on stdin
+  local c="$1"; shift
+  if [ -z "$RDPW" ]; then
+    if [ -n "$c" ]; then timeout $TO docker exec "$c" redis-cli "$@" 2>/dev/null
+    else timeout $TO redis-cli "$@" 2>/dev/null; fi
+  elif [ -n "$c" ]; then
+    printf '%s\n' "$RDPW" | timeout $TO docker exec -i "$c" sh -c 'read -r REDISCLI_AUTH; export REDISCLI_AUTH; exec redis-cli "$@"' sh "$@" 2>/dev/null
+  else
+    printf '%s\n' "$RDPW" | timeout $TO sh -c 'read -r REDISCLI_AUTH; export REDISCLI_AUTH; exec redis-cli "$@"' sh "$@" 2>/dev/null
+  fi
+}
+rd_q() { rd_cli "$1" info "$2"; }
 collect_redis() {
-  local c="$1" v d
+  local c="$1" v d cl
+  RDPW=$(rd_pw "$c")
   v=$(rd_q "$c" server | awk -F: '/^redis_version:/{print $2}' | tr -d '\r' | head -1)
   # a version starts with a digit; anything else is docker's own error printed to stdout (a
   # postgres-exporter matches the image pattern but has no psql: "OCI runtime exec failed")
-  case "$v" in [0-9]*) ;; *) return 0 ;; esac
+  case "$v" in [0-9]*) ;; *) RDPW=""; return 0 ;; esac
   d=$(rd_q "$c" keyspace | tr -d '\r' | awk -F'[:,=]' '/^db[0-9]+:/{print $1"|"$3}' | dbs_json)
-  add_entry redis "$c" "$v" "$d" "[]"
+  cl=$(rd_q "$c" clients | tr -d '\r')
+  add_entry redis "$c" "$v" "$d" "[]" "$(num "$(printf '%s\n' "$cl" | awk -F: '$1 == "connected_clients" {print $2}')")" \
+    "$(num "$(printf '%s\n' "$cl" | awk -F: '$1 == "maxclients" {print $2}')")"
+  health_redis "$c"
+  RDPW=""
+}
+
+# ── Redis health (0.10) ────────────────────────────────────────────────────────
+# What makes Redis refuse writes or lose data: a snapshot or AOF that cannot be written (with
+# stop-writes-on-bgsave-error, the default, every write then fails with MISCONF), memory at
+# maxmemory under noeviction (OOM on every write), a replica that lost its primary, connections
+# refused at maxclients. Plus the heaviest commands since the last run, from INFO commandstats: only
+# command names and time, no keys or values
+TOP_RD=5
+health_redis() {
+  local c="$1" f now inf up role link down rep mem maxm pol rdb chg last aof aofs evk rjc sw cs
+  local pt pu pe pr win=0 ev=0 rj=0 cmds="" age=-1
+  f="$LOAD_DIR/rd-$(printf '%s' "${c:-host}" | tr -c 'A-Za-z0-9_.-' '_')"
+  install -d -m 0700 "$LOAD_DIR" 2>/dev/null || return 0
+  now=$(date +%s)
+  inf=$(rd_cli "$c" info all | tr -d '\r')
+  up=$(num "$(printf '%s\n' "$inf" | awk -F: '$1 == "uptime_in_seconds" {print $2; exit}')")
+  [ "$up" -gt 0 ] || return 0
+  rg() { printf '%s\n' "$inf" | awk -F: -v k="$1" '$1 == k {print $2; exit}'; }
+  role=$(rg role); link=$(rg master_link_status); down=$(num "$(rg master_link_down_since_seconds)")
+  rep=$(num "$(rg connected_slaves)"); mem=$(num "$(rg used_memory)"); maxm=$(num "$(rg maxmemory)")
+  pol=$(rg maxmemory_policy); rdb=$(rg rdb_last_bgsave_status); chg=$(num "$(rg rdb_changes_since_last_save)")
+  last=$(num "$(rg rdb_last_save_time)"); aof=$(num "$(rg aof_enabled)"); aofs=$(rg aof_last_write_status)
+  evk=$(num "$(rg evicted_keys)"); rjc=$(num "$(rg rejected_connections)")
+  [ "$last" -gt 0 ] && age=$((now - last))
+  # CONFIG may be renamed or disabled - then the flag stays unknown
+  sw=$(rd_cli "$c" config get stop-writes-on-bgsave-error | tr -d '\r' | sed -n 2p)
+  case "$sw" in yes|no) ;; *) sw="" ;; esac
+  # cmdstat_get:calls=10,usec=20,usec_per_call=2.00,... -> "get 10 20". INFO and CONFIG are this
+  # helper's own: on an idle Redis they would top the list
+  cs=$(printf '%s\n' "$inf" | awk -F'[:,=]' '/^cmdstat_/ { sub(/^cmdstat_/, "", $1); gsub(/[^A-Za-z0-9_|-]/, "", $1); if ($1 ~ /^(info|config)($|[|])/) next; if ($3 ~ /^[0-9]+$/ && $5 ~ /^[0-9]+$/) print $1, $3, $5 }')
+  if [ -s "$f" ]; then
+    read -r pt pu pe pr < "$f"
+    pt=$(num "$pt"); pu=$(num "$pu")
+    if [ "$up" -ge "$pu" ] && [ "$now" -gt "$pt" ] && [ $((now - pt)) -le 7200 ]; then
+      win=$((now - pt)); ev=$((evk - $(num "$pe"))); rj=$((rjc - $(num "$pr")))
+      cmds=$(printf '%s\n' "$cs" | awk 'FILENAME == ARGV[1] { if (FNR > 1) { pc[$1] = $2; pu[$1] = $3 } next }
+          NF == 3 { dc = $2 - pc[$1]; du = $3 - pu[$1]; if (dc > 0 && du > 0) print du, dc, $1 }' "$f" - \
+        | sort -rn | head -"$TOP_RD" | awk 'BEGIN { n = 0 } { printf "%s{\"c\":\"%s\",\"n\":%s,\"us\":%s}", (n++ ? "," : ""), $3, $2, $1 }')
+    fi
+  fi
+  { printf '%s %s %s %s\n' "$now" "$up" "$evk" "$rjc"; printf '%s\n' "$cs"; } > "$f"
+  case "$role" in master) role=primary ;; slave) role=replica ;; esac
+  HEALTH="$HEALTH${HEALTH:+,}{\"engine\":\"redis\",\"container\":\"$(esc "$c")\",\"role\":\"$(esc "$role")\",\"replicas\":$rep,\"lag\":0,\"link\":\"$(esc "$link")\",\"down\":$down,\"mem\":$mem,\"maxmem\":$maxm,\"policy\":\"$(esc "$pol")\",\"rdb\":\"$(esc "$rdb")\",\"rdb_changes\":$chg,\"rdb_age\":$age,\"aof\":$aof,\"aof_status\":\"$(esc "$aofs")\",\"stop_writes\":\"$sw\",\"win\":$win,\"evicted\":$ev,\"rejected\":$rj,\"cmds\":[$cmds]}"
 }
 
 # -- sweep: containers by image plus host processes --------------------------------

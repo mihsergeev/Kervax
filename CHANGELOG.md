@@ -4,6 +4,23 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.4.252] - 2026-10-18
+
+### Added
+- Здоровье ClickHouse и Redis (helper dbstat-setup 0.10). У ClickHouse helper смотрит то, что
+  ломает запись: партицию с наибольшим числом кусков против порогов parts_to_delay_insert и
+  parts_to_throw_insert из самой базы, вставки, отклоненные и замедленные с прошлого прогона,
+  реплики в режиме только чтения и их отставание, стоящую очередь репликации, мутации с ошибкой или
+  идущие часами. Где включен query_log, видны самые долгие запросы за час (тексты нормализованы,
+  литералы заменены на ?, похожие на секрет не уходят). У Redis: снимок или AOF, которые не
+  пишутся на диск (с stop-writes-on-bgsave-error запись отклоняется), память у maxmemory при
+  noeviction, реплика без связи с основной, отказы в подключении, вытеснение ключей и самые тяжелые
+  команды по INFO commandstats (только имена и время). Алерт - только на то, что ломает запись или
+  стоит. В карточке базы по строке на инстанс, проблемные сверху, у ClickHouse запросы по нажатию.
+  Helper теперь видит и Redis с паролем: пароль берется из команды запуска контейнера, переменной
+  REDIS_PASSWORD или конфига и передается redis-cli через stdin, в списке процессов его не видно.
+  Подключения Redis показываются, как у PostgreSQL. Helper нужно обновить на серверах.
+
 ## [1.4.251] - 2026-10-17
 
 ### Changed

@@ -89,7 +89,7 @@ def test_alert_home_and_view():
 
 def test_helper_writes_health():
     src = (Path(__file__).resolve().parents[2] / "agent" / "dbstat-setup.sh").read_text(encoding="utf-8")
-    assert "KERVAX_SETUP_VERSION=0.9" in src and "health_pg()" in src and "health_mysql()" in src
+    assert "KERVAX_SETUP_VERSION=0.10" in src and "health_pg()" in src and "health_mysql()" in src
     # 0.7: без роли postgres - под пользователем контейнера в явную базу, а не в базу с его именем
     assert 'psql -d "${d:-postgres}" -Atqc "$q" ${u:+-U "$u"}' in src
     assert "backend_xmin is not null" in src and "idle_xmin" in src
@@ -140,7 +140,7 @@ def test_helper_collects_load():
     # тексты с паролями и секретами не уходят
     assert "~* '(passw|secret|token|identified|pgp_sym|encrypt)' then ''" in src
     # пустой первый файл: FNR == NR ловил строки второго файла как первого, топ выходил пустым
-    assert "FNR == NR" not in src and src.count("FILENAME == ARGV[1]") == 3
+    assert "FNR == NR" not in src and src.count("FILENAME == ARGV[1]") == 4  # четвертый - команды Redis (0.10)
     # отчет больше 256 КБ агент выбрасывает целиком - бюджет на топы
     assert "LOAD_BUDGET=131072" in src and '\\"cut\\":1}' in src
 
@@ -245,3 +245,101 @@ def test_advice_in_view_uses_disks_and_db_sizes():
     rep["extras"]["disk-health"]["disks"].append({"dev": "nvme0n1", "rota": 0})
     assert db_health._ssd(rep) is True
     assert db_health.view(_rep(_my()), NOW)[0]["advice"] == []
+
+
+def _ch(**kw):
+    x = {"engine": "clickhouse", "container": "ch", "role": "", "replicas": 0, "lag": 0,
+         "parts": {"max": 12, "tbl": "shop.events", "part": "202610", "delay": 1000, "throw": 3000},
+         "mut": {"n": 0, "age": 0, "tbl": "", "err": ""},
+         "rep": {"n": 0, "ro": 0, "delay": 0, "queue": 0, "ro_tbl": "", "q_n": 0, "q_age": 0, "q_err": ""},
+         "detached": 0, "merges": 1, "merge_max": 3, "ins": {"win": 900, "n": 400, "fail": 0, "rej": 0, "del": 0},
+         "qlog": True, "qerr": 0, "top": [{"n": 16, "ms": 589, "rd": 14584845, "mem": 5853296, "q": "SELECT count() FROM t WHERE a = ?"}],
+         "cut": 0}
+    for k, v in kw.items():
+        if isinstance(v, dict) and isinstance(x.get(k), dict):
+            x[k] = {**x[k], **v}
+        else:
+            x[k] = v
+    return x
+
+
+def _rd(**kw):
+    x = {"engine": "redis", "container": "cache", "role": "primary", "replicas": 0, "lag": 0, "link": "", "down": 0,
+         "mem": 300 << 20, "maxmem": 0, "policy": "noeviction", "rdb": "ok", "rdb_changes": 2, "rdb_age": 600,
+         "aof": 0, "aof_status": "ok", "stop_writes": "yes", "win": 900, "evicted": 0, "rejected": 0,
+         "cmds": [{"c": "get", "n": 1200, "us": 4000}]}
+    x.update(kw)
+    return x
+
+
+def _probs(*items):
+    return db_health.problems(_rep(*items), NOW)
+
+
+def test_helper_watches_clickhouse_and_redis():
+    src = (Path(__file__).resolve().parents[2] / "agent" / "dbstat-setup.sh").read_text(encoding="utf-8")
+    assert "health_ch()" in src and "health_redis()" in src and 'health_ch "$c"' in src and 'health_redis "$c"' in src
+    # одна команда docker exec на все запросы ClickHouse, ответ - ровно десять строк
+    assert "clickhouse-client -n --format TSV" in src and '= 10 ] || return 0' in src
+    assert "parts_to_throw_insert" in src and "RejectedInserts" in src and "normalizeQuery" in src
+    # пароль Redis уходит в redis-cli через stdin, не в аргументах (его видно в ps)
+    assert "read -r REDISCLI_AUTH; export REDISCLI_AUTH" in src and "--requirepass" in src
+    assert "REDISCLI_AUTH=" not in src.replace("read -r REDISCLI_AUTH", "")
+    assert "cmdstat_" in src and "stop-writes-on-bgsave-error" in src
+
+
+def test_clickhouse_quiet_when_healthy():
+    assert _probs(_ch()) == []
+
+
+def test_clickhouse_parts_inserts_replicas_mutations():
+    p = _probs(_ch(parts={"max": 2600}))
+    assert p[0][0] == 2 and "в shop.events (партиция 202610) 2600 кусков, при 3000 вставки начнут отклоняться" in p[0][1]
+    p = _probs(_ch(parts={"max": 1200}))
+    assert p[0][0] == 1 and "с 1000 вставки замедляются" in p[0][1]
+    # старая версия: пороги 150 и 300
+    assert _probs(_ch(parts={"max": 250, "delay": 150, "throw": 300}))[0][0] == 2
+    p = _probs(_ch(ins={"rej": 37}))
+    assert p[0] == (2, "ClickHouse ch: за 15 мин отклонено вставок: 37 - слишком много кусков в партиции (TOO_MANY_PARTS)",
+                    "clickhouse:ch:rej")
+    assert _probs(_ch(ins={"del": 5}))[0][0] == 1
+    p = _probs(_ch(rep={"n": 3, "ro": 2, "ro_tbl": "shop.orders"}))
+    assert p[0][0] == 2 and "shop.orders в режиме только чтения (еще таких: 1)" in p[0][1]
+    assert _probs(_ch(rep={"n": 3, "delay": 2000}))[0][:2] == (2, "ClickHouse ch: реплика отстает на 33 мин")
+    p = _probs(_ch(rep={"n": 3, "q_n": 4, "q_age": 7200, "q_err": "Code: 999. Keeper session expired"}))
+    assert p[0][0] == 1 and "очередь репликации стоит, самой старой задаче 2 ч 0 мин: Code: 999" in p[0][1]
+    p = _probs(_ch(mut={"n": 1, "age": 120, "tbl": "shop.events", "err": "Code: 341. Cannot parse"}))
+    assert p[0] == (1, "ClickHouse ch: мутация в shop.events не выполняется: Code: 341. Cannot parse", "clickhouse:ch:mut")
+    assert _probs(_ch(mut={"n": 1, "age": 7 * 3600, "tbl": "shop.events"}))[0][1].endswith("идет 7 ч 0 мин")
+    # без окна (первый прогон или перезапуск) счетчики вставок не судим
+    assert _probs(_ch(ins={"win": 0, "rej": 5})) == []
+
+
+def test_redis_writes_memory_replica():
+    assert _probs(_rd()) == []
+    p = _probs(_rd(rdb="err"))
+    assert p[0][0] == 2 and "отклоняет запись (MISCONF)" in p[0][1]
+    p = _probs(_rd(rdb="err", stop_writes="no"))
+    assert p[0][0] == 1 and "при перезапуске пропадет" in p[0][1]
+    assert _probs(_rd(aof=1, aof_status="err"))[0][0] == 2
+    p = _probs(_rd(maxmem=1 << 30, mem=int(0.99 * (1 << 30))))
+    assert p[0][0] == 2 and "память кончилась (1014 МБ из 1.0 ГБ), политика noeviction" in p[0][1]
+    assert _probs(_rd(maxmem=1 << 30, mem=int(0.92 * (1 << 30))))[0][0] == 1
+    # с вытеснением упор в maxmemory - так и задумано
+    assert _probs(_rd(maxmem=1 << 30, mem=1 << 30, policy="allkeys-lru", evicted=500)) == []
+    p = _probs(_rd(role="replica", link="down", down=600))
+    assert p[0] == (2, "Redis cache: реплика потеряла связь с основной 10 мин назад", "redis:cache:link")
+    assert _probs(_rd(role="replica", link="down", down=30)) == []
+    assert _probs(_rd(rejected=12))[0][0] == 1
+
+
+def test_view_passes_clickhouse_and_redis_facts():
+    v = db_health.view(_rep(_ch(), _rd(rdb="err")), NOW)
+    ch, rd = v
+    assert ch["ch"]["parts"]["max"] == 12 and ch["ch"]["top"][0]["q"].startswith("SELECT") and ch["problems"] == []
+    assert rd["rd"]["cmds"][0]["c"] == "get" and rd["problems"][0]["level"] == 2 and "ch" not in rd
+    # в алерт и "Что сломано" идут через тот же db_health
+    s = _srv(_rep(_rd(rdb="err")))
+    lvl, ctx = collector._server_conditions(s, NOW)["db_health"]
+    assert lvl == 2 and "Redis cache: не может сохранить снимок" in ctx["detail"]
+
