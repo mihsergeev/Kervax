@@ -4,6 +4,16 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.4.253] - 2026-10-18
+
+### Fixed
+- certbot из snap больше не считается ненастроенным продлением (helper webserver-setup 0.25).
+  certbot, поставленный из snap, продлевает сертификаты через snap.certbot.renew.timer, а helper
+  смотрел только certbot.timer и cron: в отчете было renew none, и у сертификата, который скоро
+  истекает, панель писала "продление certbot не настроено", хотя продление работало. Теперь
+  активный snap.certbot.renew.timer считается таймером, упавший snap.certbot.renew.service -
+  упавшим продлением. Helper нужно обновить на серверах.
+
 ## [1.4.252] - 2026-10-18
 
 ### Added
