@@ -109,3 +109,21 @@ async def test_servers_api_with_wear_history(client, auth_headers):
     srv = [x for x in r.json() if x["name"] == "web-a"][0]
     assert [w["dev"] for w in srv["wear_forecast"]] == ["nvme0n1", "nvme1n1"]
     assert "disk_wear" not in srv
+
+
+def test_writer_line_next_to_wear():
+    # кто больше всех пишет: темп за окно растягивается на сутки, меньше 50 ГБ в сутки - не повод
+    big = {"kind": "container", "name": "pg", "w": 40 * 10**9, "r": 0, "s": 3600}
+    assert disk_wear.writer_text([{"kind": "unit", "name": "x.service", "w": 10**9, "r": 0, "s": 3600}, big]) == (
+        "больше всех на диск пишет контейнер pg: около 894 ГБ в сутки")
+    assert disk_wear.writer_text([{"kind": "unit", "name": "user.slice", "w": 3 * 10**9, "r": 0, "s": 1800}]) == (
+        "больше всех на диск пишет сессии и cron (user.slice): около 134 ГБ в сутки")
+    assert disk_wear.writer_text([{"kind": "pod", "name": "a/b", "w": 10**9, "r": 0, "s": 3600}]) == ""
+    assert disk_wear.writer_text(None) == "" and disk_wear.writer_text(["x", {"w": "?"}]) == ""
+    hist = {"A": {"wear": 80, "rate": 0.2, "src": "measured", "d90": "2026-12-06", "soon": True}}
+    block = _block(_disk("A", 80))
+    probs = collector.disk_health_problems(block, wear_hist=hist, writers=[big])
+    assert (1, "", "больше всех на диск пишет контейнер pg: около 894 ГБ в сутки") in probs
+    # в сводку на главной не идет, без скорого износа тоже
+    assert not any("пишет" in p[2] for p in collector.disk_health_problems(block, short=True, wear_hist=hist, writers=[big]))
+    assert not any("пишет" in p[2] for p in collector.disk_health_problems(block, writers=[big]))

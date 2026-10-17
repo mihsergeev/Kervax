@@ -2851,8 +2851,8 @@ def _int(v) -> int:
         return 0
 
 
-def disk_health_problems(block: dict, short: bool = False,
-                         wear_hist: dict | None = None) -> list[tuple[int, str, str]]:
+def disk_health_problems(block: dict, short: bool = False, wear_hist: dict | None = None,
+                         writers: list | None = None) -> list[tuple[int, str, str]]:
     """Поломки дисков: (уровень, ключ, текст), серьезные первыми. Ключ стабилен между
     отчетами: по нему алерт понимает, что сломалось НОВОЕ (второй диск при уже
     развалившемся RAID), а не то, о чем уже сказано. Склеенные в одну строку массивы
@@ -2860,7 +2860,8 @@ def disk_health_problems(block: dict, short: bool = False,
     ровавшийся первым md42 не должен выглядеть новой поломкой md43. Ошибки журнала ядра
     сюда не входят, у них своя выдержка (см. _server_conditions). short - диск только по
     имени, без модели и серийника: для сводки на главной. wear_hist - servers.disk_wear:
-    диск дойдет до 90% износа меньше чем через два месяца (app/disk_wear.py)."""
+    диск дойдет до 90% износа меньше чем через два месяца (app/disk_wear.py). writers -
+    disk_writers агента: к такому износу строка, кто больше всех пишет."""
     out: list[tuple[int, str, str]] = []
     soon: list[str] = []
     # RAID с одинаковой бедой склеиваем: оба массива на двух дисках теряют разделы одного
@@ -2942,6 +2943,8 @@ def disk_health_problems(block: dict, short: bool = False,
             out.append((1, f"wearsoon:{ser}", disk_wear.soon_text(name, rec, short)))
     if len(soon) >= 2 and not short:
         out.append((1, "", "эти диски изнашиваются вместе: менять по одному, не дожидаясь 90% на всех"))
+    if soon and not short and (wt := disk_wear.writer_text(writers)):
+        out.append((1, "", wt))
 
     ts = _int(block.get("ts"))
     for m in block.get("missing") or []:
@@ -4867,7 +4870,7 @@ def _server_conditions(s: Server, now: datetime,
     # недоступной ноды свой алерт. Выдержки нет: развалившийся массив сам не соберется.
     hb = disk_health_block(rep) if online else None
     if hb is not None:
-        probs = disk_health_problems(hb, wear_hist=s.disk_wear)
+        probs = disk_health_problems(hb, wear_hist=s.disk_wear, writers=rep.get("disk_writers"))
         # Ошибки ввода-вывода: окно helper'а 10 минут, сверху держим час с последней пачки
         # (since), чтобы пачки внутри часа были одной историей. Момент пачки обновляем раз
         # в 5 минут: иначе alert_state переписывался бы каждый тик, пока сыплются ошибки.
@@ -4942,8 +4945,8 @@ def _server_conditions(s: Server, now: datetime,
 
     # Одинаковые процессы, которые давно крутят по ядру каждый (агент 2.21). На k8s-a-prc 47
     # зависших chrome жгли 45 ядер из 96, а CPU-алерт молчал: до порога не доходило. Агент
-    # старше 2.21 групп не шлет - ключа нет, как у юнитов без helper'а.
-    if online and "cpu_groups" in rep:
+    # старше 2.21 групп не шлет - None, как у юнитов без helper'а.
+    if online and rep.get("cpu_groups") is not None:
         spin = spin_groups(rep)
         out["cpu_spin"] = (1 if spin else 0, {"detail": spin_text(spin, pod_names) if spin else ""})
 
