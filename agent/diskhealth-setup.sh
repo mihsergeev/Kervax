@@ -5,11 +5,12 @@
 # every 2 minutes. The agent hands report.d to the panel as is, so no agent release is needed.
 #
 # Read only. On bare metal it installs smartmontools when missing - without the recommended
-# packages, which would pull in a mail server. On a virtual machine there is no SMART, so only
-# RAID and the kernel log are watched.
+# packages, which would pull in a mail server. On a virtual machine there is no SMART: RAID and the
+# kernel log are watched, and the virtual disks are only listed (name, size, model), so the panel
+# can tell a VM from a dedicated server and show what the VM has.
 set -euo pipefail
 
-KERVAX_SETUP_VERSION=0.1  # MAJOR.MINOR; compared component-wise
+KERVAX_SETUP_VERSION=0.2  # MAJOR.MINOR; compared component-wise
 KERVAX_SETUP_ALWAYS=1     # safe on any node: without RAID or SMART it reports an empty block
 
 HELPER_DIR=/lib65/kervax
@@ -124,9 +125,21 @@ add_disk() {    # dev model serial type size rota ok err [smart fields as k=v...
   DISKS="$DISKS${DISKS:+,}{\"dev\":\"$(esc "$dev")\",\"model\":\"$(esc "$model")\",\"serial\":\"$(esc "$serial")\",\"type\":\"$(esc "$tran")\",\"size\":$(num "$size"),\"rota\":$(num "$rota"),\"ok\":$ok,\"err\":\"$(esc "$err")\",\"health\":\"$(esc "$health")\",\"failing\":$( [ "$failing" = 1 ] && echo true || echo false),\"temp\":$(num "$temp"),\"wear\":$(num "$wear"),\"spare\":$(num "$spare"),\"spare_thr\":$(num "$sparethr"),\"media\":$(num "$media"),\"crit\":\"$(esc "$crit")\",\"poh\":$(num "$poh"),\"realloc\":$(num "$realloc"),\"pending\":$(num "$pending"),\"uncorr\":$(num "$uncorr"),\"crc\":$(num "$crc"),\"grow\":{$grow}}"
 }
 
+# lsblk -P (KEY="value") turned into "|"-separated lines: with spaces or tabs read would collapse
+# an empty column (no TRAN, no model) and every field after it would shift
+lsblk_disks() {
+  lsblk -d -n -b -P -o NAME,TYPE,SIZE,TRAN,ROTA,RM,SERIAL,MODEL 2>/dev/null | awk '
+    function val(k,   r) {
+      if (match($0, "(^| )" k "=\"[^\"]*\"")) {
+        r = substr($0, RSTART, RLENGTH); sub(/^ /, "", r); r = substr(r, length(k) + 3); sub(/"$/, "", r)
+        gsub(/\|/, "/", r); return r
+      }
+      return ""
+    }
+    { printf "%s|%s|%s|%s|%s|%s|%s|%s\n", val("NAME"), val("TYPE"), val("SIZE"), val("TRAN"), val("ROTA"), val("RM"), val("SERIAL"), val("MODEL") }'
+}
+
 if [ "$virt" = none ]; then
-  # lsblk -P (KEY="value") turned into "|"-separated lines: with spaces or tabs read would
-  # collapse an empty column (no TRAN, no model) and every field after it would shift
   while IFS='|' read -r name type size tran rota rm serial model; do
     [ "$type" = disk ] || continue
     case "$name" in loop*|ram*|zram*|sr*|fd*|rbd*|nbd*|md*|dm-*|drbd*) continue ;; esac
@@ -241,15 +254,7 @@ if [ "$virt" = none ]; then
     fi
     add_disk "$name" "$model" "$serial" "$tran" "$size" "$rota" "$ok" "$err" "$@"
   done <<EOF_LSBLK
-$(lsblk -d -n -b -P -o NAME,TYPE,SIZE,TRAN,ROTA,RM,SERIAL,MODEL 2>/dev/null | awk '
-    function val(k,   r) {
-      if (match($0, "(^| )" k "=\"[^\"]*\"")) {
-        r = substr($0, RSTART, RLENGTH); sub(/^ /, "", r); r = substr(r, length(k) + 3); sub(/"$/, "", r)
-        gsub(/\|/, "/", r); return r
-      }
-      return ""
-    }
-    { printf "%s|%s|%s|%s|%s|%s|%s|%s\n", val("NAME"), val("TYPE"), val("SIZE"), val("TRAN"), val("ROTA"), val("RM"), val("SERIAL"), val("MODEL") }')
+$(lsblk_disks)
 EOF_LSBLK
 
   # An NVMe controller whose namespace never came up has no block device at all: lsblk does not
@@ -265,6 +270,20 @@ EOF_LSBLK
 "
     add_disk "$cn" "$model" "$serial" nvme "" "" false "no_namespace${st:+_}$(printf '%s' "$st" | tr -cd 'A-Za-z0-9_-')"
   done
+elif ! $container; then
+  # A virtual machine: its disks have no SMART and no wear, the physical ones are seen only by the
+  # host. They are listed as is (err=virtual) and are not remembered for "vanished": a cloud
+  # volume gets detached on purpose
+  while IFS='|' read -r name type size tran rota rm serial model; do
+    [ "$type" = disk ] || continue
+    case "$name" in loop*|ram*|zram*|sr*|fd*|rbd*|nbd*|md*|dm-*|drbd*) continue ;; esac
+    case "$name" in ''|*[!A-Za-z0-9_-]*) continue ;; esac
+    if [ "$rm" = 1 ]; then continue; fi
+    model=$(printf '%b' "$model"); serial=$(printf '%b' "$serial")
+    add_disk "$name" "$model" "$serial" "$tran" "$size" "$rota" true virtual
+  done <<EOF_VLSBLK
+$(lsblk_disks)
+EOF_VLSBLK
 fi
 
 # -- disks that vanished: seen within a week, not present now --

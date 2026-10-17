@@ -239,4 +239,9 @@ def test_advice_in_view_uses_disks_and_db_sizes():
     assert keys == ["random_page_cost", "effective_cache_size", "shared_buffers_low"]
     rep["extras"]["disk-health"]["disks"][1]["rota"] = 1  # есть HDD - про random_page_cost молчим
     assert "random_page_cost" not in [a["k"] for a in db_health.view(rep, NOW)[0]["advice"]]
+    # диски ВМ не в счет: rotational у них выставляет гипервизор, на ВМ тип дисков неизвестен
+    rep["extras"]["disk-health"]["disks"] = [{"dev": "sda", "rota": 1, "err": "virtual"}]
+    assert db_health._ssd(rep) is None
+    rep["extras"]["disk-health"]["disks"].append({"dev": "nvme0n1", "rota": 0})
+    assert db_health._ssd(rep) is True
     assert db_health.view(_rep(_my()), NOW)[0]["advice"] == []

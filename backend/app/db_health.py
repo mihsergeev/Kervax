@@ -199,9 +199,10 @@ def _flt(v, default: float = 0.0) -> float:
 
 
 def _ssd(rep: dict) -> bool | None:
-    """Все диски сервера SSD (helper diskhealth-setup), None - неизвестно"""
+    """Все диски сервера SSD (helper diskhealth-setup), None - неизвестно. Диски ВМ не в счет:
+    rotational у виртуального диска выставляет гипервизор как попало"""
     disks = (((rep or {}).get("extras") or {}).get("disk-health") or {}).get("disks") or []
-    rota = [d.get("rota") for d in disks if isinstance(d, dict)]
+    rota = [d.get("rota") for d in disks if isinstance(d, dict) and d.get("err") != "virtual"]
     if not rota:
         return None
     return all(r == 0 for r in rota)

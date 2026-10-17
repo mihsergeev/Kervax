@@ -2897,6 +2897,8 @@ def disk_health_problems(block: dict, short: bool = False, wear_hist: dict | Non
         name = str(d.get("dev") or "?") if short else _disk_title(d)
         ser = str(d.get("serial") or d.get("dev") or "?")
         err = str(d.get("err") or "")
+        if err == "virtual":  # диск ВМ (helper 0.2): SMART нет, здоровье железа видит хостер
+            continue
         if d.get("ok") is False:
             if err == "dead":
                 why = "не определяется (размер 0)"

@@ -34,7 +34,9 @@ import {
   type ExposedPort,
   type DiskForecastItem,
   type FailedUnit,
+  type DiskHealth,
   type DiskHealthDisk,
+  type DiskHealthRaid,
   type DiskUsageDir,
   type DiskUsageFs,
   type DiskUsageItem,
@@ -1511,7 +1513,8 @@ function dhFailing(d: DiskHealthDisk): boolean {
   return d.failing || /FAIL/i.test(d.health)
 }
 
-const DH_DOT: Record<DhTone, string> = { up: 'lk-dot lk-dot-ok', degraded: 'lk-dot lk-dot-warn', down: 'lk-dot lk-dot-bad' }
+type DhLv = 'ok' | 'warn' | 'bad'
+const DH_LV: Record<DhTone, DhLv> = { up: 'ok', degraded: 'warn', down: 'bad' }
 
 function dhTone(d: DiskHealthDisk): DhTone {
   const crit = parseInt(d.crit || '0', 16) || 0
@@ -1610,140 +1613,375 @@ function DiskWritersBlock({ r }: { r: ServerReport }) {
   )
 }
 
+// Плашка SMART - только сам статус: PASSED зеленый, даже когда плитка желтая из-за износа или
+// секторов (это видно по рамке и по полосе). Выработавший ресурс SSD SMART тоже зовет FAILED, но
+// такой диск еще работает - плашка желтая, как его строка в алерте
+function dhChip(d: DiskHealthDisk): DhLv | 'mut' {
+  if (d.err === 'virtual' || d.err === 'nosmart') return 'mut'
+  if (!d.ok) return 'bad'
+  if (dhFailing(d)) return (d.wear ?? 0) >= 100 ? 'warn' : 'bad'
+  return 'ok'
+}
+
+// Полоса износа: от 90% красная, от 70% или при скором прогнозе желтая
+function dhWearLv(d: DiskHealthDisk, fc?: DiskWear): DhLv {
+  const w = d.wear ?? 0
+  return w >= 90 ? 'bad' : w >= 70 || fc?.soon ? 'warn' : 'ok'
+}
+
+// Раздел массива -> диск: sda2 -> sda, nvme0n1p2 -> nvme0n1, целый диск как есть
+function dhDiskOf(part: string): string {
+  const m = /^(.*\d)p\d+$/.exec(part) || /^(\D+)\d+$/.exec(part)
+  return m ? m[1] : part
+}
+
+function dhRaidDown(a: DiskHealthRaid): boolean {
+  return a.state === 'inactive' || (a.total > 0 && a.active < a.total)
+}
+
+function dhSyncPct(sync: string): number | null {
+  const m = sync.match(/^(?:recovery|resync|reshape|check)=([\d.]+)%$/)
+  return m ? Math.round(parseFloat(m[1])) : null
+}
+
+// systemd-detect-virt -> как гипервизор называют люди
+const DH_VIRT: Record<string, string> = {
+  kvm: 'KVM', qemu: 'QEMU', vmware: 'VMware', microsoft: 'Hyper-V', xen: 'Xen', oracle: 'VirtualBox',
+  amazon: 'AWS', google: 'Google Cloud', parallels: 'Parallels', bochs: 'Bochs', powervm: 'PowerVM', zvm: 'z/VM',
+}
+
+// Диск ВМ по имени из disk_devs агента: helper до 0.2 виртуальные диски не перечислял
+function dhVirtualDisk(dev: string): DiskHealthDisk {
+  return {
+    dev, model: '', serial: '', type: '', size: null, rota: null, ok: true, err: 'virtual', health: '', failing: false,
+    temp: null, wear: null, spare: null, spare_thr: null, media: null, crit: '', poh: null, realloc: null,
+    pending: null, uncorr: null, crc: null, grow: {},
+  }
+}
+
+const dhCrit = (d: DiskHealthDisk) => parseInt(d.crit || '0', 16) || 0
+
+// Картинка диска по типу: планка NVMe, 2.5" SSD, HDD с пластиной; у диска ВМ контур пунктиром
+function DhIcon({ d, lv }: { d?: DiskHealthDisk; lv: string }) {
+  const p = {
+    className: `dh-ico net-tone-${lv}`, width: 30, height: 30, viewBox: '0 0 26 26', fill: 'none',
+    stroke: 'currentColor', strokeWidth: 1.5, 'aria-hidden': true,
+  }
+  if (d?.err === 'virtual')
+    return (
+      <svg {...p}>
+        <rect x="4" y="2.5" width="18" height="21" rx="2" strokeDasharray="3 2.2" />
+        <rect x="8" y="7" width="10" height="7" rx="1" fill="currentColor" stroke="none" opacity=".3" />
+        <path d="M9 18.5h8" />
+      </svg>
+    )
+  if (d?.type === 'nvme')
+    return (
+      <svg {...p}>
+        <rect x="2" y="8" width="22" height="10" rx="1.5" />
+        <path d="M5 18v-2M8 18v-2M11 18v-2" />
+        <rect x="13" y="10.5" width="4" height="5" rx=".5" fill="currentColor" stroke="none" opacity=".55" />
+        <rect x="18.5" y="10.5" width="3.5" height="5" rx=".5" fill="currentColor" stroke="none" opacity=".55" />
+        <circle cx="5" cy="13" r="1" fill="currentColor" stroke="none" />
+      </svg>
+    )
+  if (d?.rota === 1)
+    return (
+      <svg {...p}>
+        <rect x="4" y="2.5" width="18" height="21" rx="2" />
+        <circle cx="13" cy="11" r="5.5" />
+        <circle cx="13" cy="11" r="1.2" fill="currentColor" stroke="none" />
+        <path d="M19 19l-4.5-5.5" />
+        <circle cx="7" cy="20.5" r=".8" fill="currentColor" stroke="none" />
+      </svg>
+    )
+  return (
+    <svg {...p}>
+      <rect x="4" y="2.5" width="18" height="21" rx="2" />
+      <rect x="7.5" y="6" width="11" height="8" rx="1" fill="currentColor" stroke="none" opacity=".35" />
+      <path d="M8 20h10M8 17.5h4" />
+    </svg>
+  )
+}
+
+type DhPill = { lv: DhLv | 'info' | 'mut'; text: string }
+
+// Сводка вместо плиток-счетчиков: что именно не так и с каким диском или массивом
+function dhSummary(dh: DiskHealth, disks: DiskHealthDisk[], wear: DiskWear[] | undefined, t: TFn): DhPill[] {
+  const out: DhPill[] = []
+  const raid = dh.raid ?? []
+  const down = raid.filter(dhRaidDown)
+  for (const a of down)
+    out.push({
+      lv: 'bad',
+      text: a.state === 'inactive'
+        ? t('{dev} не собран', { dev: a.dev })
+        : t('{dev} {lvl}: работает {a} из {n}', { dev: a.dev, lvl: a.level, a: a.active, n: a.total }) +
+          (a.failed ? `, ${t('сбойный {d}', { d: a.failed })}` : ''),
+    })
+  if (raid.length && !down.length)
+    out.push({
+      lv: 'ok',
+      text: raid.length === 1 ? t('{dev} собран', { dev: raid[0].dev }) : t('массивы {list} собраны', { list: raid.map((a) => a.dev).join(', ') }),
+    })
+  for (const a of raid) {
+    const s = dhSync(a.sync, t)
+    if (s) out.push({ lv: 'info', text: `${a.dev}: ${s}` })
+  }
+  for (const m of dh.missing ?? []) out.push({ lv: 'bad', text: t('{dev} пропал', { dev: m.dev }) })
+  let ok = 0
+  let phys = 0
+  const nosmart: string[] = []
+  for (const d of disks) {
+    if (d.err === 'virtual') continue
+    phys++
+    const tn = dhTone(d)
+    const fc = (wear ?? []).find((w) => w.serial === d.serial)
+    if (tn === 'up') {
+      if (fc?.soon && fc.d90) out.push({ lv: 'warn', text: `${d.dev}: ${t('90% износа примерно к {d}', { d: isoDay(fc.d90) })}` })
+      else if (d.err === 'nosmart') nosmart.push(d.dev)
+      else ok++
+      continue
+    }
+    const why = [
+      !d.ok || dhFailing(d) ? dhDiskState(d, t) : '',
+      dhCrit(d) ? t('предупреждение NVMe {c}', { c: d.crit }) : '',
+      (d.wear ?? 0) >= 90 ? t('износ {n}%', { n: d.wear ?? 0 }) : '',
+      ...DH_GROW.filter(([k]) => (d.grow?.[k] ?? 0) > 0).map(([k, label]) => t('за сутки: {v}', { v: `${t(label)} +${d.grow[k]}` })),
+    ].filter(Boolean)
+    out.push({ lv: DH_LV[tn], text: `${d.dev}: ${why.join(', ') || dhDiskState(d, t)}` })
+  }
+  if (nosmart.length) out.push({ lv: 'mut', text: t('SMART не читается: {list}', { list: nosmart.join(', ') }) })
+  if (ok) out.push({ lv: 'ok', text: ok === phys ? t('все диски в порядке') : t('остальные диски в порядке') })
+  if (dh.virt !== 'none' && !dh.container)
+    out.push({ lv: 'mut', text: t('виртуальная машина {v}: здоровье физических дисков видит только хостер', { v: DH_VIRT[dh.virt] ?? dh.virt }) })
+  const io = dh.io?.count ?? 0
+  out.push(io ? { lv: io >= 10 ? 'bad' : 'warn', text: t('ошибки ввода-вывода за 10 мин: {n}', { n: io }) } : { lv: 'ok', text: t('ошибок ввода-вывода нет') })
+  return out
+}
+
+// Массив строкой: разделы подкрашены по своему диску - видно, что задевает сбойный диск
+function DhArray({ a, byDev }: { a: DiskHealthRaid; byDev: Map<string, DiskHealthDisk> }) {
+  const { t } = useI18n()
+  const down = dhRaidDown(a)
+  const lv: DhLv = down ? 'bad' : a.failed ? 'warn' : 'ok'
+  const list = (s: string) => s.split(/\s+/).filter(Boolean)
+  const parts = list(a.members)
+  const failed = list(a.failed)
+  // места в массиве, которые некому занять: диск пропал целиком
+  const gap = a.total > 0 ? Math.max(0, a.total - parts.length - failed.length) : 0
+  const pct = dhSyncPct(a.sync)
+  return (
+    <div className="dh-arr">
+      <span className={`lk-dot lk-dot-${lv}`} />
+      <span className="dh-arrname mono">{a.dev}</span>
+      {a.level && <span className="dh-chip dh-chip-mut">{a.level}</span>}
+      <div className="dh-parts">
+        {parts.map((p) => {
+          const d = byDev.get(dhDiskOf(p))
+          const pl: DhLv = d && d.err !== 'virtual' ? DH_LV[dhTone(d)] : 'ok'
+          return (
+            <span key={p} className={`dh-part${pl !== 'ok' ? ` dh-part-${pl}` : ''}`}>
+              <span className={`lk-dot lk-dot-${pl}`} />
+              <span className="mono">{p}</span>
+            </span>
+          )
+        })}
+        {failed.map((p) => (
+          <span key={'f-' + p} className="dh-part dh-part-bad">
+            <span className="lk-dot lk-dot-bad" />
+            <span className="mono">{p}</span> {t('сбой')}
+          </span>
+        ))}
+        {list(a.spare).map((p) => (
+          <span key={'s-' + p} className="dh-part dh-part-spare">
+            <span className="mono">{p}</span> {t('запасной')}
+          </span>
+        ))}
+        {Array.from({ length: gap }, (_, i) => (
+          <span key={'g' + i} className="dh-part dh-part-gap">{t('нет диска')}</span>
+        ))}
+      </div>
+      <div className={`dh-arrstate ${down ? 't-down' : 'muted'}`}>
+        {pct != null && (
+          <span className="dh-sync">
+            <span className="dh-syncbar"><span style={{ width: `${pct}%` }} /></span>
+            {dhSync(a.sync, t)}
+          </span>
+        )}
+        <span>
+          {a.state === 'inactive'
+            ? t('не собран')
+            : down
+              ? t('работает {a} из {n} дисков', { a: a.active, n: a.total })
+              : t('в порядке')}
+        </span>
+      </div>
+    </div>
+  )
+}
+
+// Плитка диска. Физический: SMART, износ с отметкой 90% и прогнозом, температура, наработка,
+// серийник (по нему диск меняют в ЦОД). Диск ВМ: здоровья у него нет, только загрузка и ответ
+function DhDiskTile({ d, fc, dev }: { d: DiskHealthDisk; fc?: DiskWear; dev?: { util: number; await: number } }) {
+  const { t } = useI18n()
+  const virtual = d.err === 'virtual'
+  const lv: DhLv = virtual ? 'ok' : DH_LV[dhTone(d)]
+  const kind = virtual ? '' : d.type === 'nvme' ? 'NVMe' : d.rota === 1 ? 'HDD' : d.rota === 0 ? 'SSD' : ''
+  const head = [d.model, kind, d.size ? fmtBytes(d.size) : ''].filter(Boolean).join(' · ')
+  const wl = dhWearLv(d, fc)
+  const counters = [
+    d.realloc ? t('переназначено {n}', { n: d.realloc }) : '',
+    d.pending ? t('нечитаемых {n}', { n: d.pending }) : '',
+    d.uncorr ? t('неисправимых {n}', { n: d.uncorr }) : '',
+    d.media ? t('ошибок носителя {n}', { n: d.media }) : '',
+    d.crc ? t('ошибок CRC {n}', { n: d.crc }) : '',
+    dhCrit(d) ? t('предупреждение NVMe {c}', { c: d.crit }) : '',
+  ].filter(Boolean)
+  const grow = DH_GROW.filter(([k]) => (d.grow?.[k] ?? 0) > 0).map(([k, label]) => `${t(label)} +${d.grow[k]}`)
+  const stats: [string, string, boolean][] = (
+    virtual
+      ? [[t('загрузка'), dev ? `${Math.round(dev.util)}%` : '', false], [t('ответ'), dev ? fmtMs(dev.await) : '', false]]
+      : [[t('температура'), d.temp != null ? fmtTempC(d.temp) : '', false], [t('наработка'), d.poh != null ? dhPoh(d.poh, t) : '', false], [t('серийник'), d.serial, true]]
+  ).filter(([, v]) => v) as [string, string, boolean][]
+  const fcText =
+    d.wear == null
+      ? ''
+      : d.wear >= 100
+        ? t('ресурс записи исчерпан')
+        : [
+            d.wear >= 90 ? t('пора менять') : fc?.d90 ? t('90% примерно к {d}', { d: isoDay(fc.d90) }) : '',
+            fc && fc.rate
+              ? `${t('{r}% в сутки', { r: fc.rate.toFixed(fc.rate < 0.1 ? 3 : 2) })} ${fc.src === 'lifetime' ? t('по средней за жизнь') : t('по замеру')}`
+              : '',
+          ].filter(Boolean).join(' · ')
+  return (
+    <div className={`dh-tile${lv !== 'ok' ? ` dh-tile-${lv}` : ''}`}>
+      <div className="dh-thead">
+        <DhIcon d={d} lv={virtual ? 'muted' : lv} />
+        <div className="dh-tid">
+          <div className="dh-tname mono">{d.dev}</div>
+          {head && <div className="dh-tmodel muted" title={head}>{head}</div>}
+        </div>
+        <span className={`dh-chip dh-chip-${dhChip(d)}`}>{virtual ? t('виртуальный') : dhDiskState(d, t)}</span>
+      </div>
+      {!virtual &&
+        (!d.ok ? (
+          <div className="dh-fc t-down">{t('SMART не читается: проверить диск, кабель или контроллер')}</div>
+        ) : d.err === 'nosmart' ? (
+          <div className="dh-fc muted">{t('SMART не читается: диск за аппаратным RAID или неизвестным контроллером')}</div>
+        ) : d.wear != null ? (
+          <>
+            <div className="dh-wear muted">
+              <span>{t('износ')}</span>
+              <div className="dh-wbar">
+                <span className={wl} style={{ width: `${Math.min(d.wear, 100)}%` }} />
+                <i />
+              </div>
+              <b className={wl !== 'ok' ? `net-tone-${wl}` : undefined}>{d.wear}%</b>
+            </div>
+            {fcText && (
+              <div className={`dh-fc ${d.wear >= 90 || fc?.soon ? 't-degraded' : 'muted'}`} title={fc ? wearForecast(fc, t) : undefined}>
+                {fcText}
+              </div>
+            )}
+          </>
+        ) : (
+          <div className="dh-fc muted">{d.rota === 1 ? t('HDD износ не сообщает, следим за секторами') : t('износ диск не сообщает')}</div>
+        ))}
+      {stats.length > 0 && (
+        <div className="dh-stats">
+          {stats.map(([k, v, mono]) => (
+            <div key={k} className={mono ? 'dh-wide' : undefined}>
+              <span>{k}</span>
+              <b className={mono ? 'mono' : undefined} title={mono ? v : undefined}>{v}</b>
+            </div>
+          ))}
+        </div>
+      )}
+      {counters.length > 0 && <div className="dh-cnt muted">{counters.join(' · ')}</div>}
+      {grow.length > 0 && <div className="dh-cnt t-degraded">{t('за сутки: {v}', { v: grow.join(', ') })}</div>}
+    </div>
+  )
+}
+
+// Здоровье дисков: сводка, массивы, плитки. На дедике - физические диски со SMART, на ВМ -
+// виртуальные (helper 0.2, со старым - имена из disk_devs агента): их здоровье видит хостер
 function DiskHealthBlock({ r, wear }: { r: ServerReport; wear?: DiskWear[] }) {
   const { t } = useI18n()
   const dh = diskHealth(r)
   if (!dh) return null
   const bare = dh.virt === 'none' && !dh.container
+  const vm = dh.virt !== 'none' && !dh.container
   const raid = dh.raid ?? []
-  const disks = dh.disks ?? []
   const missing = dh.missing ?? []
   const io = dh.io ?? { count: 0, last: [] }
-  // на VM без массивов и без ошибок сказать нечего
-  if (!bare && !raid.length && !io.count) return null
-  const raidBad = raid.filter((a) => a.state === 'inactive' || (a.total > 0 && a.active < a.total)).length
-  const tones = disks.map(dhTone)
-  const diskBad = tones.filter((x) => x !== 'up').length + missing.length
-  const diskDown = tones.includes('down') || missing.length > 0
+  const devs = r.disk_devs ?? []
+  let disks = dh.disks ?? []
+  if (vm && !disks.length) disks = devs.map((x) => dhVirtualDisk(x.dev))
+  // в контейнере сказать нечего: массивы и журнал ядра чужие, диски тоже
+  if (!bare && !raid.length && !io.count && !disks.length) return null
+  const byDev = new Map(disks.map((d) => [d.dev, d]))
+  const pills = dhSummary(dh, disks, wear, t)
   return (
     <div className="chart-card net-card net-card-wide" id="mcard-diskhealth">
       <div className="net-head">
         <div className="chart-cap">{t('Здоровье дисков')}</div>
       </div>
-      <div className="net-tiles">
-        {raid.length > 0 && (
-          <NetTile
-            label={t('Массивы RAID')}
-            value={String(raid.length)}
-            sub={raidBad ? t('деградировали: {n}', { n: raidBad }) : t('все собраны')}
-            tone={raidBad ? 'bad' : 'ok'}
-          />
-        )}
-        {(disks.length > 0 || missing.length > 0) && (
-          <NetTile
-            label={t('Диски')}
-            value={String(disks.length)}
-            sub={diskBad ? t('с проблемами: {n}', { n: diskBad }) : t('все в порядке')}
-            tone={diskDown ? 'bad' : diskBad ? 'warn' : 'ok'}
-          />
-        )}
-        <NetTile
-          label={t('Ошибки ввода-вывода')}
-          value={String(io.count)}
-          unit={t('за 10 мин')}
-          tone={io.count >= 10 ? 'bad' : io.count ? 'warn' : 'ok'}
-        />
+      <div className="dh-sum">
+        {pills.map((p, i) => (
+          <span key={i} className={`dh-pill${p.lv === 'warn' || p.lv === 'bad' ? ` dh-pill-${p.lv}` : ''}`}>
+            <span className={p.lv === 'mut' ? 'lk-dot' : `lk-dot lk-dot-${p.lv}`} />
+            {p.text}
+          </span>
+        ))}
       </div>
       {bare && !dh.smart && (
         <div className="muted small dh-note">
           {t('smartmontools не установлен, SMART не читается: его ставит helper diskhealth-setup.')}
         </div>
       )}
-      <div className="loc-results">
-        {raid.map((a) => {
-          const degraded = a.state === 'inactive' || (a.total > 0 && a.active < a.total)
-          const tone: DhTone = degraded ? 'down' : a.failed ? 'degraded' : 'up'
-          const sync = dhSync(a.sync, t)
-          const msg = [
-            a.level,
-            a.state === 'inactive'
-              ? t('не собран')
-              : a.total > 0
-                ? degraded
-                  ? t('работает {a} из {n} дисков', { a: a.active, n: a.total })
-                  : t('в порядке')
-                : '',
-            a.members,
-            a.failed ? t('сбойный {d}', { d: a.failed }) : '',
-            a.spare ? t('запасной {d}', { d: a.spare }) : '',
-            sync,
-          ].filter(Boolean)
-          return (
-            <div key={a.dev} className="loc-res loc-res-wrap">
-              <span className={DH_DOT[tone]} />
-              <div className="loc-res-name mono">{a.dev}</div>
-              <div className="loc-res-metric mono">{a.map || a.state}</div>
-              <div className="loc-res-msg muted small">{msg.join(' · ')}</div>
-            </div>
-          )
-        })}
-        {disks.map((d) => {
-          const tone = dhTone(d)
-          const meta = [
-            d.model,
-            d.serial,
-            d.size ? fmtBytes(d.size) : '',
-            d.wear != null ? t('износ {n}%', { n: d.wear }) : '',
-            d.temp != null ? fmtTempC(d.temp) : '',
-            d.poh != null ? t('наработка {v}', { v: dhPoh(d.poh, t) }) : '',
-          ].filter(Boolean)
-          const counters = [
-            d.realloc ? t('переназначено {n}', { n: d.realloc }) : '',
-            d.pending ? t('нечитаемых {n}', { n: d.pending }) : '',
-            d.uncorr ? t('неисправимых {n}', { n: d.uncorr }) : '',
-            d.media ? t('ошибок носителя {n}', { n: d.media }) : '',
-            d.crc ? t('ошибок CRC {n}', { n: d.crc }) : '',
-          ].filter(Boolean)
-          const grow = DH_GROW.filter(([k]) => (d.grow?.[k] ?? 0) > 0).map(
-            ([k, label]) => `${t(label)} +${d.grow[k]}`,
-          )
-          const fc = (wear ?? []).find((w) => w.serial === d.serial)
-          return (
-            <div key={d.dev + d.serial} className="loc-res loc-res-wrap dh-disk">
-              <span className={DH_DOT[tone]} />
-              <div className="loc-res-name mono">{d.dev}</div>
-              <div className={`loc-res-metric ${tone === 'down' ? 't-down' : tone === 'degraded' ? 't-degraded' : ''}`}>
-                {dhDiskState(d, t)}
+      {raid.length > 0 && (
+        <div className="dh-arrays">
+          {raid.map((a) => (
+            <DhArray key={a.dev} a={a} byDev={byDev} />
+          ))}
+        </div>
+      )}
+      {(disks.length > 0 || missing.length > 0) && (
+        <div className="dh-tiles">
+          {disks.map((d) => (
+            <DhDiskTile
+              key={d.dev + d.serial}
+              d={d}
+              fc={(wear ?? []).find((w) => w.serial === d.serial)}
+              dev={devs.find((x) => x.dev === d.dev)}
+            />
+          ))}
+          {missing.map((m) => {
+            const ago = Math.max(0, dh.ts - m.last)
+            return (
+              <div key={'gone-' + m.serial} className="dh-tile dh-tile-bad dh-tile-gone">
+                <div className="dh-thead">
+                  <DhIcon lv="bad" />
+                  <div className="dh-tid">
+                    <div className="dh-tname mono">{m.dev}</div>
+                    {m.model && <div className="dh-tmodel muted">{m.model}</div>}
+                  </div>
+                  <span className="dh-chip dh-chip-bad">{t('пропал')}</span>
+                </div>
+                <div className="dh-fc t-down">
+                  {ago >= 3600
+                    ? t('последний раз виден {n} ч назад', { n: Math.floor(ago / 3600) })
+                    : t('последний раз виден {n} мин назад', { n: Math.max(1, Math.floor(ago / 60)) })}
+                  {m.serial ? ` · ${m.serial}` : ''}
+                </div>
               </div>
-              <div className="loc-res-msg muted small">
-                {meta.join(' · ')}
-                {counters.length > 0 && <div>{counters.join(' · ')}</div>}
-                {grow.length > 0 && (
-                  <div className="t-degraded">{t('за сутки: {v}', { v: grow.join(', ') })}</div>
-                )}
-                {fc && <div className={fc.soon ? 't-degraded' : ''}>{wearForecast(fc, t)}</div>}
-              </div>
-            </div>
-          )
-        })}
-        {missing.map((m) => {
-          const ago = Math.max(0, dh.ts - m.last)
-          return (
-            <div key={'gone-' + m.serial} className="loc-res loc-res-wrap">
-              <span className="lk-dot lk-dot-bad" />
-              <div className="loc-res-name mono">{m.dev}</div>
-              <div className="loc-res-metric t-down">{t('пропал')}</div>
-              <div className="loc-res-msg muted small">
-                {[m.model, m.serial].filter(Boolean).join(' · ')} ·{' '}
-                {ago >= 3600
-                  ? t('последний раз виден {n} ч назад', { n: Math.floor(ago / 3600) })
-                  : t('последний раз виден {n} мин назад', { n: Math.max(1, Math.floor(ago / 60)) })}
-              </div>
-            </div>
-          )
-        })}
-        {bare && !disks.length && !raid.length && <div className="muted small">—</div>}
-      </div>
+            )
+          })}
+        </div>
+      )}
+      {bare && !disks.length && !raid.length && !missing.length && <div className="muted small">—</div>}
       {io.count > 0 && (
         <div className="dh-io">
           <div className={io.count >= 10 ? 'net-prob' : 'muted small'}>
