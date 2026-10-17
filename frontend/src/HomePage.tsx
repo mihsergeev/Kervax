@@ -73,6 +73,9 @@ function earliest(list: (string | null | undefined)[]): string | null {
   return ok[0] ?? null
 }
 
+// с какого срока до 90% износа диска звать запланировать замену (полгода)
+const WEAR_PLAN_MS = 183 * 86400 * 1000
+
 const K_BAD_POD = ['CrashLoopBackOff', 'ImagePullBackOff', 'ErrImagePull', 'Error', 'OOMKilled', 'CreateContainerError']
 
 // ВЕРХНИЙ блок: только то, что требует РУЧНОГО действия на ноде — обновить агент или
@@ -397,6 +400,17 @@ function actionItems(servers: Server[], avail: string, relProblem: string, t: T)
       items.push({ key: `k-noagent-${s.id}`, icon: '☸', section: 'kuber', id: s.id, name: s.name, cc: s.country, sec: 'nodes',
         grp: 'k-noagent', detail: `${unmon.length} (${names})`,
         text: t('{name}: нод кластера без агента - {n} ({nodes})', { name: s.name, n: unmon.length, nodes: names }) })
+    }
+    // Диски дойдут до 90% износа меньше чем через полгода (backend app/disk_wear.py). Ближе двух
+    // месяцев это уже строка в "Что сломано" и алерт, здесь не дублируем
+    const plan = (s.wear_forecast ?? []).filter((w) => !w.soon && w.d90 && Date.parse(w.d90) - Date.now() < WEAR_PLAN_MS)
+    if (plan.length > 0) {
+      const when = plan.map((w) => w.d90 as string).sort()[0]
+      const day = when.split('-').reverse().join('.')
+      const disks = plan.map((w) => w.dev).join(', ')
+      items.push({ key: `wear-${s.id}`, icon: '💽', section: 'servers', id: s.id, name: s.name, cc: s.country, sec: 'diskhealth',
+        grp: 'wear-plan', detail: `${disks}: ${day}`,
+        text: t('{name}: диски {disks} дойдут до 90% износа примерно к {d} - запланируйте замену', { name: s.name, disks, d: day }) })
     }
     // restic самого сервера бэкапов (prune, forget, check) старше той версии, до которой его
     // обновляет helper: обычно обновление не скачалось. Ведем в модалку сервера, там команда.
