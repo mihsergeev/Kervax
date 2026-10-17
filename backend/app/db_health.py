@@ -1,7 +1,7 @@
 """Здоровье баз (helper dbstat-setup 0.5): репликация, долгие транзакции, блокировки, wraparound,
 таблицы, которые давно не вакуумились. Блок extras["db-health"], helper обновляет его раз в
 15 минут. С 0.8 у PostgreSQL еще и "что грузит базу" за последний час (load_view), с 0.9 настройки
-и советы по ним (advice).
+и советы по ним (advice), с 0.10 здоровье ClickHouse и Redis (_ch_problems, _rd_problems).
 
 Почему это отдельно от инвентаря: база может быть жива и отвечать, а реплика уже час не
 получает WAL, незакрытая транзакция держит блокировки и не дает VACUUM чистить, а возраст XID
@@ -26,6 +26,15 @@ VAC_DAYS = 7
 _DUMP_APPS = ("pg_dump", "pg_dumpall", "pg_basebackup")
 DUMP_XACT_WARN = 12 * 3600
 STALE = 3600  # блок старше часа - helper не работает, не судим по старому
+# ClickHouse: куски в одной партиции. С parts_to_delay_insert вставки замедляются, с
+# parts_to_throw_insert отклоняются (TOO_MANY_PARTS); старые версии - 150 и 300, новые - 1000 и 3000
+CH_THROW_NEAR = 0.8  # от 80% порога отказа - уже авария: слияния не успевают за вставками
+MUT_WARN = 6 * 3600  # мутация без ошибки идет 6 часов - скорее всего, встала
+CH_QUEUE_WARN = 3600  # задача репликации висит час с ошибкой
+RD_MEM_WARN = 0.9  # Redis с noeviction: от 90% maxmemory - предупреждение, от 98% запись отклоняется
+RD_MEM_CRIT = 0.98
+RD_LINK_DOWN = 120  # реплика без связи с основной 2 минуты
+_ENG = {"pg": "PostgreSQL", "mysql": "MySQL", "clickhouse": "ClickHouse", "redis": "Redis"}
 
 
 def block(rep: dict, now: datetime) -> list[dict] | None:
@@ -63,15 +72,98 @@ def _who(db: str, app: str) -> str:
     return ", ".join(p for p in parts if p)
 
 
+def _mins(sec: int) -> str:
+    return f"{max(round(sec / 60), 1)} мин"
+
+
+def _gib(n: int) -> str:
+    return f"{n / (1 << 30):.1f} ГБ" if n >= 1 << 30 else f"{round(n / (1 << 20))} МБ"
+
+
+def _ch_problems(x: dict, name: str, k: str) -> list[tuple[int, str, str]]:
+    """ClickHouse (dbstat-setup 0.10): только то, что ломает запись или стоит"""
+    out: list[tuple[int, str, str]] = []
+    p = x.get("parts") if isinstance(x.get("parts"), dict) else {}
+    mx, dl, th = _int(p.get("max")), _int(p.get("delay")), _int(p.get("throw"))
+    where = f"{p.get('tbl') or '?'} (партиция {p.get('part') or '?'})"
+    if th and mx >= th * CH_THROW_NEAR:
+        out.append((2, f"{name}: в {where} {mx} кусков, при {th} вставки начнут отклоняться - слияния не успевают "
+                       "за вставками", k + ":parts"))
+    elif dl and mx >= dl:
+        out.append((1, f"{name}: в {where} {mx} кусков, с {dl} вставки замедляются - слияния не успевают",
+                    k + ":parts"))
+    ins = x.get("ins") if isinstance(x.get("ins"), dict) else {}
+    win = _int(ins.get("win"))
+    if win and _int(ins.get("rej")) > 0:
+        out.append((2, f"{name}: за {_mins(win)} отклонено вставок: {_int(ins.get('rej'))} - слишком много кусков "
+                       "в партиции (TOO_MANY_PARTS)", k + ":rej"))
+    elif win and _int(ins.get("del")) > 0:
+        out.append((1, f"{name}: за {_mins(win)} вставки замедлялись {_int(ins.get('del'))} раз - кусков больше "
+                       "parts_to_delay_insert", k + ":delay"))
+    rp = x.get("rep") if isinstance(x.get("rep"), dict) else {}
+    if _int(rp.get("ro")) > 0:
+        out.append((2, f"{name}: реплицируемая таблица {rp.get('ro_tbl') or '?'} в режиме только чтения"
+                       + (f" (еще таких: {_int(rp.get('ro')) - 1})" if _int(rp.get("ro")) > 1 else "")
+                       + " - нет связи с Keeper или кончилось место, запись в нее отклоняется", k + ":ro"))
+    rl = _int(rp.get("delay"))
+    if rl >= LAG_WARN:
+        out.append((2 if rl >= LAG_CRIT else 1, f"{name}: реплика отстает на {_dur(rl)}", k + ":lag"))
+    if _int(rp.get("q_age")) >= CH_QUEUE_WARN and str(rp.get("q_err") or "").strip():
+        out.append((1, f"{name}: очередь репликации стоит, самой старой задаче {_dur(_int(rp.get('q_age')))}: "
+                       f"{str(rp.get('q_err'))[:160]}", k + ":queue"))
+    mu = x.get("mut") if isinstance(x.get("mut"), dict) else {}
+    err = str(mu.get("err") or "").strip()
+    if _int(mu.get("n")) and err:
+        out.append((1, f"{name}: мутация в {mu.get('tbl') or '?'} не выполняется: {err[:160]}", k + ":mut"))
+    elif _int(mu.get("n")) and _int(mu.get("age")) >= MUT_WARN:
+        out.append((1, f"{name}: мутация в {mu.get('tbl') or '?'} идет {_dur(_int(mu.get('age')))}", k + ":mut"))
+    return out
+
+
+def _rd_problems(x: dict, name: str, k: str) -> list[tuple[int, str, str]]:
+    """Redis (dbstat-setup 0.10): отказ в записи, потеря данных при перезапуске, отвалившаяся реплика"""
+    out: list[tuple[int, str, str]] = []
+    if x.get("rdb") == "err":
+        if x.get("stop_writes") == "no":
+            out.append((1, f"{name}: не может сохранить снимок на диск - при перезапуске пропадет все, что "
+                           "записано после последнего снимка", k + ":rdb"))
+        else:
+            out.append((2, f"{name}: не может сохранить снимок на диск и отклоняет запись (MISCONF) - проверьте "
+                           "место и права на каталог данных", k + ":rdb"))
+    if _int(x.get("aof")) and x.get("aof_status") == "err":
+        out.append((2, f"{name}: не может писать AOF на диск и отклоняет запись", k + ":aof"))
+    mem, mx = _int(x.get("mem")), _int(x.get("maxmem"))
+    if mx and x.get("policy") == "noeviction":
+        pct = mem / mx
+        if pct >= RD_MEM_CRIT:
+            out.append((2, f"{name}: память кончилась ({_gib(mem)} из {_gib(mx)}), политика noeviction - запись "
+                           "отклоняется (OOM)", k + ":mem"))
+        elif pct >= RD_MEM_WARN:
+            out.append((1, f"{name}: занято {round(pct * 100)}% maxmemory ({_gib(mem)} из {_gib(mx)}), при 100% "
+                           "запись начнет отклоняться (noeviction)", k + ":mem"))
+    if x.get("role") == "replica" and x.get("link") == "down" and _int(x.get("down")) >= RD_LINK_DOWN:
+        out.append((2, f"{name}: реплика потеряла связь с основной {_dur(_int(x.get('down')))} назад", k + ":link"))
+    win, rj = _int(x.get("win")), _int(x.get("rejected"))
+    if win and rj > 0:
+        out.append((1, f"{name}: за {_mins(win)} отклонено подключений: {rj} - упор в maxclients", k + ":conn"))
+    return out
+
+
 def problems(rep: dict, now: datetime) -> list[tuple[int, str, str]]:
     """(уровень, текст, ключ): ключ - что именно сломалось, чтобы новая беда дала свой алерт"""
     items = block(rep, now)
     out: list[tuple[int, str, str]] = []
     for x in items or []:
-        eng = "PostgreSQL" if x.get("engine") == "pg" else "MySQL" if x.get("engine") == "mysql" else "СУБД"
+        eng = _ENG.get(str(x.get("engine")), "СУБД")
         where = str(x.get("container") or "")
         name = f"{eng} {where}" if where else f"{eng} на хосте"
         k = f"{x.get('engine')}:{where}"
+        if x.get("engine") == "clickhouse":
+            out.extend(_ch_problems(x, name, k))
+            continue
+        if x.get("engine") == "redis":
+            out.extend(_rd_problems(x, name, k))
+            continue
         lag = _int(x.get("lag"))
         if x.get("role") == "replica":
             if x.get("engine") == "pg" and str(x.get("receiver") or "") != "streaming":
@@ -292,7 +384,17 @@ def view(rep: dict, now: datetime) -> list[dict] | None:
         lv = load_view(x)
         adv = advice(x, lv, pg_count=pg_count, ssd=ssd, db_size=_db_size(rep, str(x.get("container") or ""))) \
             if x.get("engine") == "pg" else []
-        out.append({"engine": x.get("engine"), "container": x.get("container") or "", "role": x.get("role") or "",
-                    "replicas": _int(x.get("replicas")), "lag": _int(x.get("lag")), "xact": _int(x.get("xact")),
-                    "xid": _int(x.get("xid")), "problems": mine, "load": lv, "advice": adv})
+        o = {"engine": x.get("engine"), "container": x.get("container") or "", "role": x.get("role") or "",
+             "replicas": _int(x.get("replicas")), "lag": _int(x.get("lag")), "xact": _int(x.get("xact")),
+             "xid": _int(x.get("xid")), "problems": mine, "load": lv, "advice": adv}
+        # ClickHouse и Redis - факты для карточки как есть: куски, мутации, реплики, вставки, запросы;
+        # память, снимок, вытеснение, тяжелые команды
+        if x.get("engine") == "clickhouse":
+            o["ch"] = {key: x.get(key) for key in ("parts", "mut", "rep", "detached", "merges", "merge_max", "ins",
+                                                   "qlog", "qerr", "top", "cut")}
+        elif x.get("engine") == "redis":
+            o["rd"] = {key: x.get(key) for key in ("link", "down", "mem", "maxmem", "policy", "rdb", "rdb_changes",
+                                                   "rdb_age", "aof", "aof_status", "stop_writes", "win", "evicted",
+                                                   "rejected", "cmds")}
+        out.append(o)
     return out

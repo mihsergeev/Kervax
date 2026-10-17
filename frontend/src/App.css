@@ -4678,6 +4678,38 @@ textarea:focus {
 .svc-db-load-text.open {
   display: block;
 }
+/* ClickHouse и Redis: строка на инстанс (dbstat-setup 0.10) */
+.svc-eng-row {
+  padding: 0.3rem 0;
+  min-width: 0;
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 45%, transparent);
+}
+.svc-eng-row:last-child {
+  border-bottom: 0;
+}
+/* имя | факты | кнопка; имя одной ширины во всех строках, чтобы факты шли ровной колонкой */
+.svc-eng-head {
+  display: grid;
+  grid-template-columns: 220px minmax(0, 1fr) auto;
+  align-items: baseline;
+  gap: 0.2rem 0.75rem;
+}
+.svc-eng-name {
+  font-weight: 600;
+  font-size: 0.85rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+@media (max-width: 600px) {
+  .svc-eng-head {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+  .svc-eng-head .svc-db-load-facts {
+    grid-column: 1 / -1;
+    grid-row: 2;
+  }
+}
 .svc-sites {
   margin-top: 0.35rem;
 }

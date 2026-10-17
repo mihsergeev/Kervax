@@ -35,7 +35,7 @@ export const SRV_ALERT_KINDS: { k: string; label: string }[] = [
   { k: 'kube_restarts', label: 'Kubernetes: под часто перезапускается' },
   { k: 'mem_leak', label: 'Память: растет день за днем' },
   { k: 'ssh_risk', label: 'SSH: опасный вход' },
-  { k: 'db_health', label: 'СУБД: реплика, транзакции, VACUUM' },
+  { k: 'db_health', label: 'СУБД: реплика, транзакции, запись, VACUUM' },
   { k: 'web_config', label: 'Веб-сервер: конфиг не проходит проверку' },
   { k: 'web_cert', label: 'Веб-сервер: сертификат истекает' },
   { k: 'listen_gone', label: 'Сервер: пропал порт' },

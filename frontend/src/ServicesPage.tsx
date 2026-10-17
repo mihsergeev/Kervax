@@ -7,7 +7,9 @@ import {
   updateServer,
   type DBStat,
   type DbAdvice,
+  type ChHealth,
   type DbHealth,
+  type RdHealth,
   type DbLoad,
   type Server,
   type ServiceInfo,
@@ -311,6 +313,149 @@ function DbLoadBlock({ load, advice, name, t }: {
   )
 }
 
+// ClickHouse и Redis (dbstat-setup 0.10): по строке на инстанс, проблемные сверху. На одной ноде их
+// бывают десятки, полный блок на каждый растянул бы карточку на несколько экранов
+const ENG_ROWS = 6
+type TFn = (s: string, v?: Record<string, string | number>) => string
+
+function durMs(ms: number, t: TFn): string {
+  if (ms < 1000) return t('{ms} мс', { ms: ms >= 10 ? Math.round(ms) : +ms.toFixed(1) })
+  if (ms < 60_000) return t('{n} с', { n: +(ms / 1000).toFixed(ms < 10_000 ? 1 : 0) })
+  return t('{n} мин', { n: Math.round(ms / 60_000) })
+}
+
+type EngFact = { text: string; tone?: string }
+
+function chFacts(ch: ChHealth, t: TFn): EngFact[] {
+  const f: EngFact[] = []
+  const p = ch.parts
+  if (p && p.max > 0)
+    f.push({
+      text: `${t('кусков в партиции до {n}', { n: p.max })} (${p.tbl})`,
+      tone: p.throw && p.max >= p.throw * 0.8 ? 't-down' : p.delay && p.max >= p.delay ? 't-degraded' : undefined,
+    })
+  const ins = ch.ins
+  if (ins && ins.win > 0) {
+    f.push({ text: t('вставок за {m} мин: {n}', { m: Math.max(1, Math.round(ins.win / 60)), n: fmtCount(ins.n) }) })
+    if (ins.rej > 0) f.push({ text: t('отклонено вставок: {n}', { n: fmtCount(ins.rej) }), tone: 't-down' })
+    if (ins.del > 0) f.push({ text: t('замедлено вставок: {n}', { n: fmtCount(ins.del) }), tone: 't-degraded' })
+  }
+  if (ch.merges) f.push({ text: t('слияний сейчас: {n}', { n: ch.merges }) })
+  if (ch.mut?.n) f.push({ text: t('мутаций в работе: {n}', { n: ch.mut.n }), tone: ch.mut.err ? 't-degraded' : undefined })
+  if (ch.rep?.n)
+    f.push({ text: t('реплицируемых таблиц: {n}', { n: ch.rep.n }) + (ch.rep.q_n ? `, ${t('в очереди репликации {n}', { n: ch.rep.q_n })}` : '') })
+  if (ch.detached) f.push({ text: t('отцепленных кусков: {n}', { n: ch.detached }) })
+  if (ch.qerr) f.push({ text: t('запросов с ошибкой за час: {n}', { n: fmtCount(ch.qerr) }) })
+  const ms = (ch.top ?? []).reduce((a, q) => a + q.ms, 0)
+  if (ms) f.push({ text: t('самые долгие запросы заняли {d} за час', { d: durMs(ms, t) }) })
+  if (!ch.qlog) f.push({ text: t('query_log выключен: запросы не видны') })
+  if (ch.cut) f.push({ text: t('запросы не вместились в отчет') })
+  return f
+}
+
+function ChTop({ top, t }: { top: ChHealth['top']; t: TFn }) {
+  const [open, setOpen] = useState<number | null>(null) // текст запроса целиком по нажатию
+  return (
+    <div className="svc-db-load-top">
+      {top.map((q, i) => (
+        <div key={i} className="svc-db-load-q">
+          <div className={q.q ? `mono svc-db-load-text${open === i ? ' open' : ''}` : 'muted small'} title={q.q || undefined}
+            onClick={() => q.q && setOpen(open === i ? null : i)}>
+            {q.q || t('текст скрыт: в нем пароль или секрет')}
+          </div>
+          <div className="muted small">
+            {[
+              t('{n} вызовов', { n: fmtCount(q.n) }),
+              t('всего {d}', { d: durMs(q.ms, t) }),
+              q.n ? t('{d} в среднем', { d: durMs(q.ms / q.n, t) }) : '',
+              q.rd ? t('прочитано {s}', { s: fmtBytes(q.rd) }) : '',
+              q.mem ? t('память до {s}', { s: fmtBytes(q.mem) }) : '',
+            ].filter(Boolean).join(' · ')}
+          </div>
+        </div>
+      ))}
+    </div>
+  )
+}
+
+function rdFacts(rd: RdHealth, t: TFn): EngFact[] {
+  const f: EngFact[] = []
+  if (rd.maxmem > 0) {
+    const pct = rd.mem / rd.maxmem
+    f.push({
+      text: `${t('память {u} из {m}', { u: fmtBytes(rd.mem), m: fmtBytes(rd.maxmem) })} (${rd.policy})`,
+      tone: rd.policy === 'noeviction' ? (pct >= 0.98 ? 't-down' : pct >= 0.9 ? 't-degraded' : undefined) : undefined,
+    })
+  } else f.push({ text: t('память {u}, без лимита', { u: fmtBytes(rd.mem) }) })
+  if (rd.rdb === 'err') f.push({ text: t('снимок на диск не сохраняется'), tone: 't-down' })
+  else if (rd.rdb_age >= 0)
+    f.push({ text: t('снимок {d} назад', { d: lagText(rd.rdb_age, t) }) + (rd.rdb_changes ? `, ${t('изменений после него: {n}', { n: fmtCount(rd.rdb_changes) })}` : '') })
+  if (rd.aof) f.push(rd.aof_status === 'err' ? { text: t('AOF не пишется'), tone: 't-down' } : { text: 'AOF' })
+  if (rd.win > 0 && rd.evicted > 0)
+    f.push({ text: t('вытеснено ключей за {m} мин: {n}', { m: Math.max(1, Math.round(rd.win / 60)), n: fmtCount(rd.evicted) }) })
+  if (rd.win > 0 && rd.rejected > 0) f.push({ text: t('отклонено подключений: {n}', { n: fmtCount(rd.rejected) }), tone: 't-degraded' })
+  // меньше секунды на команды за окно - Redis почти не нагружен, топ ни о чем не говорит
+  const cmds = (rd.cmds ?? []).slice(0, 3)
+  if (cmds.length && (rd.cmds ?? []).reduce((a, c) => a + c.us, 0) >= 1_000_000)
+    f.push({
+      text: t('тяжелее всех за {m} мин: {list}', {
+        m: Math.max(1, Math.round(rd.win / 60)),
+        list: cmds.map((c) => t('{c} {d} на {n} вызовов', { c: c.c, d: durMs(c.us / 1000, t), n: fmtCount(c.n) })).join(', '),
+      }),
+    })
+  return f
+}
+
+// Список инстансов движка: имя, факты строкой, у ClickHouse по нажатию - самые долгие запросы
+function EngineList({ items, kind, t }: { items: DbHealth[]; kind: 'ch' | 'rd'; t: TFn }) {
+  const [all, setAll] = useState(false)
+  const [open, setOpen] = useState<string | null>(null)
+  const weight = (h: DbHealth) =>
+    (h.problems.length ? 1e18 : 0) + (kind === 'ch' ? (h.ch?.top ?? []).reduce((a, q) => a + q.ms, 0) : h.rd?.mem ?? 0)
+  const rows = [...items].sort((a, b) => weight(b) - weight(a))
+  const shown = all ? rows : rows.slice(0, ENG_ROWS)
+  const multi = rows.length > 1
+  return (
+    <div className="svc-db-load">
+      <div className="svc-db-load-head">
+        <span className="svc-db-load-title">
+          {kind === 'ch' ? t('ClickHouse: куски, вставки, запросы') : t('Redis: память, снимки, команды')}
+        </span>
+        {rows.length > ENG_ROWS && (
+          <button className="svc-act" onClick={() => setAll(!all)}>{all ? t('свернуть') : t('показать все')}</button>
+        )}
+      </div>
+      {shown.map((h) => {
+        const facts = kind === 'ch' && h.ch ? chFacts(h.ch, t) : h.rd ? rdFacts(h.rd, t) : []
+        const top = kind === 'ch' ? h.ch?.top ?? [] : []
+        const isOpen = !multi || open === h.container
+        return (
+          <div key={h.container} className="svc-eng-row">
+            {multi ? (
+              <div className="svc-eng-head">
+                <span className="mono svc-eng-name" title={h.container || undefined}>{h.container || t('на хосте')}</span>
+                <span className="svc-db-load-facts small">
+                  {facts.map((f) => <span key={f.text} className={f.tone}>{f.text}</span>)}
+                </span>
+                {top.length > 0 ? (
+                  <button className="svc-act" onClick={() => setOpen(isOpen ? null : h.container)}>
+                    {isOpen ? t('скрыть запросы') : t('запросы')}
+                  </button>
+                ) : <span />}
+              </div>
+            ) : (
+              <span className="svc-db-load-facts small">
+                {facts.map((f) => <span key={f.text} className={f.tone}>{f.text}</span>)}
+              </span>
+            )}
+            {isOpen && top.length > 0 && <ChTop top={top} t={t} />}
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
 function DbInventory({ db, t, health = [] }: {
   db: DBStat[]
   t: (s: string, v?: Record<string, string | number>) => string
@@ -391,6 +536,8 @@ function DbInventory({ db, t, health = [] }: {
       {health.filter((h) => h.load || (h.advice ?? []).length > 0).map((h) => (
         <DbLoadBlock key={'l' + h.container} load={h.load} advice={h.advice ?? []} name={health.length > 1 ? h.container : ''} t={t} />
       ))}
+      {health.some((h) => h.ch) && <EngineList items={health.filter((h) => h.ch)} kind="ch" t={t} />}
+      {health.some((h) => h.rd) && <EngineList items={health.filter((h) => h.rd)} kind="rd" t={t} />}
     </div>
   )
 }
