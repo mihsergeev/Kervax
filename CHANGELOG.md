@@ -4,6 +4,32 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.4.255] - 2026-10-18
+
+### Added
+- Версии без поддержки (агент 2.35). Панель находит PHP, Node.js, Python, Ruby, Java, PostgreSQL,
+  MySQL, MariaDB, Redis, Valkey, MongoDB, Elasticsearch, ClickHouse, RabbitMQ, ZooKeeper, nginx,
+  Traefik, HAProxy, Caddy, Grafana и образы Alpine, Ubuntu, Debian, CentOS и сверяет их со сроками
+  поддержки. Версия контейнера берется из инвентаря баз (самая точная), из переменных окружения
+  образа (PHP_VERSION, NGINX_VERSION, у bitnami BITNAMI_APP_NAME и APP_VERSION - их наследуют и
+  образы приложений, собранные поверх, так видно PHP 7.4 в образе shop-app:prod и версию у
+  nginx:latest), у известных образов - из метки версии и тега. Агент 2.35 отдает из окружения
+  только эти ключи, пароли туда не попадают. На хосте смотрятся пакеты сторонних репозиториев
+  (pgdg, sury, nodesource, nginx.org, MariaDB, MySQL, Redis, MongoDB, Elastic, ClickHouse): пакеты
+  дистрибутива он чинит, пока жива ОС, их срок - поддержка ОС. Версия старше самого старого
+  цикла в таблице - без поддержки.
+- Сроки - офлайн-снимок endoflife.date (backend/app/data/eol.json, обновляет ops/build-eol.py),
+  панель в интернет за ними не ходит.
+- В карточке сервера раздел "Обновления" (бывший "Обновления ОС"): блок "Версии ПО" - все
+  найденное по продукту и циклу, без поддержки сверху, где стоит и до какого числа, образы без
+  версии в теге и образы, которые больше года не пересобирались. В "Требует действий" на сервер
+  одна строка ("без поддержки PostgreSQL 12, PHP 7.3 и 7.4"), такие серверы сворачиваются в один
+  пункт, за полгода до конца поддержки - отдельный. Алертов нет.
+
+### Changed
+- Агент 2.35 отдает метку версии и дату сборки образа у всех контейнеров, а не только у внешних
+  прокси.
+
 ## [1.4.254] - 2026-10-18
 
 ### Added

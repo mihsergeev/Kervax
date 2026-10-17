@@ -10,26 +10,9 @@ import (
 	"time"
 )
 
-func TestEdgeProxyImage(t *testing.T) {
-	for img, want := range map[string]bool{
-		"traefik:v2.5.5": true,
-		"docker.io/library/traefik:v3.1@sha256:abc": true,
-		"lucaslorentz/caddy-docker-proxy:ci-alpine": true,
-		"caddy:2.10-alpine":                         true,
-		"nginxproxy/nginx-proxy:1.6":                true,
-		"registry.local:5000/infra/traefik":         true,
-		"nginx:latest":                              false,
-		"wollomatic/socket-proxy:1":                 false,
-		"jc21/nginx-proxy-manager:latest":           false,
-	} {
-		if got := edgeProxyImage(img); got != want {
-			t.Errorf("%s: %v, want %v", img, got, want)
-		}
-	}
-}
-
-// Внешним прокси агент отдает версию из метки образа и дату его сборки, остальным - ничего. Список
-// образов спрашивается раз в полчаса, и отказ старого прокси агента (403) тоже помнится.
+// Версию из метки образа и дату сборки агент отдает у всех контейнеров (до 2.35 - только у прокси),
+// версии из окружения - только из imageVerKeys. Список образов спрашивается раз в полчаса, и отказ
+// старого прокси агента (403) тоже помнится.
 func TestProxyImageVersionAndBuildDate(t *testing.T) {
 	imageList.at = time.Time{}
 	lists := 0
@@ -39,7 +22,8 @@ func TestProxyImageVersionAndBuildDate(t *testing.T) {
 		case "/containers/edge/json":
 			w.Write([]byte(`{"State":{},"Config":{"Labels":{"org.opencontainers.image.version":"v2.5.5","traefik.enable":"true"}}}`))
 		case "/containers/app/json":
-			w.Write([]byte(`{"State":{},"Config":{"Labels":{"org.opencontainers.image.version":"1.2.3"}}}`))
+			w.Write([]byte(`{"State":{},"Config":{"Labels":{"org.opencontainers.image.version":"1.2.3"},` +
+				`"Env":["PATH=/usr/local/bin","PHP_VERSION=7.4.33","DB_PASSWORD=s3cret","NODE_VERSION=$(id)","APP_SECRET=x"]}}`))
 		case "/images/json":
 			lists++
 			if deny {
@@ -65,11 +49,12 @@ func TestProxyImageVersionAndBuildDate(t *testing.T) {
 	if cs[0].ImgVer != "v2.5.5" || cs[0].ImgCreated != 1638316800 {
 		t.Fatalf("edge proxy: %+v", cs[0])
 	}
-	if cs[1].ImgVer != "" || cs[1].ImgCreated != 0 {
-		t.Fatalf("an ordinary container must not carry image fields: %+v", cs[1])
+	if cs[1].ImgVer != "1.2.3" || cs[1].ImgCreated != 1790000000 || len(cs[1].Ver) != 1 || cs[1].Ver["PHP_VERSION"] != "7.4.33" {
+		t.Fatalf("app: %+v", cs[1])
 	}
+	// пароли из окружения в отчет не попадают
 	b, _ := json.Marshal(cs[1])
-	if strings.Contains(string(b), "img_") {
+	if strings.Contains(string(b), "s3cret") || strings.Contains(string(b), "PATH") || strings.Contains(string(b), "id)") {
 		t.Fatalf("app json: %s", b)
 	}
 	// второй отчет в пределах получаса - без нового запроса списка
@@ -84,10 +69,10 @@ func TestProxyImageVersionAndBuildDate(t *testing.T) {
 	if lists != 2 || cs[0].ImgCreated != 0 {
 		t.Fatalf("after 403: lists=%d edge=%+v", lists, cs[0])
 	}
-	// без внешних прокси список не нужен вовсе
+	// без контейнеров список не нужен вовсе
 	imageList.at = time.Time{}
-	imageBuildDates(cl, []dockerContainer{app}, now)
+	imageBuildDates(cl, nil, now)
 	if lists != 2 {
-		t.Fatalf("image list asked without proxies")
+		t.Fatalf("image list asked without containers")
 	}
 }

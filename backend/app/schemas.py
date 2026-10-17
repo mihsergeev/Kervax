@@ -1403,6 +1403,8 @@ class ServerOut(BaseModel):
     exposure: dict | None = None
     # что сделать с ОС ноды (os_support.advice): конец поддержки, перезагрузка, обновления
     os_advice: list[dict] | None = None
+    # версии без поддержки (software.advice): PHP, СУБД, прокси, у которых кончилась поддержка
+    sw_advice: list[dict] | None = None
     # изменения на сервере (changes.view): лента и отметка "это мы"
     changes: dict | None = None
     # итог недельной проверки восстановления бэкапа (backup_verify.view)

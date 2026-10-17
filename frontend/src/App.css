@@ -1170,6 +1170,19 @@ button.srv-tile-btn:hover .net-tile { border-color: var(--border-strong); backgr
 .ub-days .ub-zero { height: 1px; background: var(--border); }
 .ub-nums { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
 .ub-more { margin: 0.35rem 0 0; align-self: flex-start; }
+/* версии ПО: точка, продукт и цикл, где стоит, срок */
+.sw-list { display: grid; grid-template-columns: auto max-content minmax(0, 1fr) max-content; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 0.1rem 0; }
+.sw-row { display: grid; grid-column: 1 / -1; grid-template-columns: subgrid; gap: 0.3rem 0.7rem; align-items: center; padding: 0.3rem 0.7rem; border-top: 1px solid color-mix(in srgb, var(--border) 60%, transparent); }
+.sw-row:first-child { border-top: 0; }
+.sw-name { font-weight: 600; white-space: nowrap; }
+.sw-where { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sw-term { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.sw-old { display: flex; flex-direction: column; gap: 0.35rem; }
+.sw-old > button { align-self: flex-start; margin: 0; }
+@media (max-width: 600px) {
+  .sw-list { grid-template-columns: auto minmax(0, 1fr) max-content; }
+  .sw-where { grid-column: 2 / -1; white-space: normal; }
+}
 @media (max-width: 600px) {
   .ub-list { grid-template-columns: minmax(0, 1fr) auto; }
   .ub-nums { grid-column: 1 / -1; text-align: left; }

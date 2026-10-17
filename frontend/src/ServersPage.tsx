@@ -90,6 +90,7 @@ import { VulnsCard } from './VulnsCard'
 import { JournalCard, JournalModal, journalBlocker } from './UnitJournal'
 import { LinksCard, NetTile, TrafficCard, type Tone } from './NetLinks'
 import { DiskWritersBlock, NetUsersCard } from './Usage'
+import { SoftwareCard } from './Software'
 import { KnownServerList } from './KnownDialog'
 import { MaintBanner, MaintChip } from './MaintModal'
 
@@ -774,7 +775,7 @@ const DETAIL_SECTIONS: SecDef[] = [
   { id: 'net', label: 'Сеть', group: 'Ресурсы' },
   { id: 'ports', label: 'Порты', group: 'Безопасность' },
   { id: 'access', label: 'SSH и доступы', group: 'Безопасность' },
-  { id: 'updates', label: 'Обновления ОС', group: 'Безопасность' },
+  { id: 'updates', label: 'Обновления', group: 'Безопасность' },
   { id: 'vulns', label: 'Уязвимости', group: 'Безопасность' },
   { id: 'units', label: 'Службы', group: 'Система' },
   { id: 'proc', label: 'Процессы', group: 'Система' },
@@ -804,7 +805,7 @@ const SEC_OF_CARD: Record<string, string> = {
   conntrack: 'net', sockets: 'net',
   diskio: 'disk', diskiops: 'disk', diskutil: 'disk', disklat: 'disk', disktemp: 'disk', diskfill: 'disk',
   diskhealth: 'disk', du: 'disk', diskwrite: 'disk',
-  exposure: 'ports', conn: 'ports', ssh: 'access', osupd: 'updates',
+  exposure: 'ports', conn: 'ports', ssh: 'access', osupd: 'updates', software: 'updates',
   unitloop: 'units', noboot: 'units', pressure: 'proc', web5xx: 'web',
   clock: 'overview', dns: 'overview',
 }
@@ -837,6 +838,7 @@ function serverSecInfo(c: {
     add(secOfLink(i.sec) ?? 'overview', i.tone === 't-down' ? 2 : 1, i.text, i.since)
   }
   for (const a of s.os_advice ?? []) add('updates', a.level, a.text)
+  for (const a of s.sw_advice ?? []) add('updates', a.level, a.text)
   const nb = s.noboot_advice?.units ?? []
   if (nb.length) add('units', 1, t('после перезагрузки не запустятся {list}: работают, но не включены', { list: shortList(nb, t) }))
   // как в карточке SSH: при проблеме совет не повторяем
@@ -5895,7 +5897,7 @@ function ServerDetail({
     switch (id) {
       case 'web': return hasWeb
       case 'access': return !!(s.ssh || s.access?.accounts.length)
-      case 'updates': return !!(r.os_upd || s.os_advice?.length)
+      case 'updates': return !!(r.os_upd || s.os_advice?.length || s.sw_advice?.length || r.docker?.containers?.length)
       case 'vulns':
       case 'pkgs': return !!r.pkgs?.n
       case 'journal': return !isViewer
@@ -6413,6 +6415,7 @@ function ServerDetail({
         {active === 'updates' && (
           <div className="srv-sec">
             <OsUpdates server={s} />
+            <SoftwareCard server={s} />
           </div>
         )}
 

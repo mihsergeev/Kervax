@@ -38,6 +38,7 @@ from app import known as known_mod
 from app import onboard as onboard_mod
 from app import liveness
 from app import disk_wear
+from app import software as software_mod
 from app import parents as parents_mod
 from app import maint
 from app import tg_bot
@@ -6670,6 +6671,8 @@ async def collector_loop(
             # история износа SSD для прогноза до 90% (раз в час)
             await stage("износ дисков", disk_wear.refresh(
                 session_factory, datetime.now(timezone.utc), disk_health_block))
+            # версии без поддержки: пакеты сторонних репозиториев из списков пакетов (раз в час)
+            await stage("версии ПО", software_mod.refresh(session_factory, datetime.now(timezone.utc)))
             # базы уязвимостей раз в сутки, загрузка и разбор фоном
             await stage("базы уязвимостей", vulns_mod.start_refresh(
                 session_factory, datetime.now(timezone.utc)))
