@@ -89,7 +89,7 @@ def test_alert_home_and_view():
 
 def test_helper_writes_health():
     src = (Path(__file__).resolve().parents[2] / "agent" / "dbstat-setup.sh").read_text(encoding="utf-8")
-    assert "KERVAX_SETUP_VERSION=0.7" in src and "health_pg()" in src and "health_mysql()" in src
+    assert "KERVAX_SETUP_VERSION=0.8" in src and "health_pg()" in src and "health_mysql()" in src
     # 0.7: без роли postgres - под пользователем контейнера в явную базу, а не в базу с его именем
     assert 'psql -d "${d:-postgres}" -Atqc "$q" ${u:+-U "$u"}' in src
     assert "backend_xmin is not null" in src and "idle_xmin" in src
@@ -128,3 +128,46 @@ def test_a_dump_holds_its_transaction_by_design():
     assert db_health.problems(rep(4 * 3600, "pg_basebackup"), now) == []
     assert [k for _l, _t, k in db_health.problems(rep(13 * 3600, "pg_dump"), now)] == ["pg:pg:xact"]
     assert [k for _l, _t, k in db_health.problems(rep(2 * 3600, "worker"), now)] == ["pg:pg:xact"]
+
+
+def test_helper_collects_load():
+    """0.8: что грузит PostgreSQL - снимки счетчиков, тексты только для топа и из кэша"""
+    src = (Path(__file__).resolve().parents[2] / "agent" / "dbstat-setup.sh").read_text(encoding="utf-8")
+    assert "load_pg()" in src and 'ld=$(load_pg "$c")' in src and "LOAD_DIR=/var/lib/kervax/db-load" in src
+    # без текстов при снимке: файл текстов на одной ноде был 3.9 ГБ и читается целиком
+    assert "from pg_stat_statements(false)" in src and "pg_stat_statements(true)" in src
+    assert "QTEXT_BIG=1073741824" in src and "pgss_query_texts.stat" in src
+    # тексты с паролями и секретами не уходят
+    assert "~* '(passw|secret|token|identified|pgp_sym|encrypt)' then ''" in src
+    # пустой первый файл: FNR == NR ловил строки второго файла как первого, топ выходил пустым
+    assert "FNR == NR" not in src and src.count("FILENAME == ARGV[1]") == 3
+    # отчет больше 256 КБ агент выбрасывает целиком - бюджет на топы
+    assert "LOAD_BUDGET=131072" in src and '\\"cut\\":1}' in src
+
+
+def test_load_view_per_hour_and_merged_top():
+    ld = {"win": 1800, "pss": "on", "qtext": 3_900_000_000, "temp_b": 1000, "temp_f": 3, "xact": 18000, "rd": 50,
+          "wal_rec": 1000, "fpi": 40, "wal_b": 2000, "wbf": 10, "ck_t": 1, "ck_r": 0, "ms_all": 1000,
+          "top": [
+              {"id": "1", "db": "shop", "q": "select * from t order by id offset $1", "calls": 2, "ms": 300, "temp": 100, "rd": 0},
+              {"id": "-2", "db": "shop", "q": "select * from t order by id offset $1", "calls": 4, "ms": 200, "temp": 50, "rd": 0},
+              {"id": "3", "db": "shop", "q": "", "calls": 1, "ms": 400, "temp": 0, "rd": 8},
+              "junk"]}
+    v = db_health.view(_rep(_pg(load=ld)), NOW)[0]["load"]
+    assert v["win"] == 1800 and v["temp_b"] == 2000 and v["xact"] == 36000 and v["ck_r"] == 0 and v["ms_all"] == 2000
+    # один текст в одной базе - одна строка (у PostgreSQL отдельная запись на роль и типы параметров)
+    assert [(r["q"][:6], r["calls"], r["ms"], r["share"]) for r in v["top"]] == [("select", 12, 1000, 50), ("", 2, 800, 40)]
+    assert v["top"][0]["avg_ms"] == 83.3 and v["top"][0]["temp"] == 300
+    assert v["qtext"] == 3_900_000_000 and v["cut"] is False
+
+
+def test_load_view_old_versions_and_first_run():
+    # первый прогон: снимков еще нет
+    assert db_health.view(_rep(_pg(load={"win": 0, "pss": "noext", "qtext": 0})), NOW)[0]["load"] == {
+        "win": 0, "pss": "noext", "qtext": 0, "cut": False, "top": []}
+    # PostgreSQL до 14 не считает WAL (-1), helper 0.7 вообще без load
+    v = db_health.view(_rep(_pg(load={"win": 3600, "pss": "off", "qtext": 0, "wal_b": -1, "temp_b": 0})), NOW)[0]["load"]
+    assert v["wal_b"] is None and v["temp_b"] == 0 and v["top"] == []
+    assert db_health.view(_rep(_pg()), NOW)[0]["load"] is None
+    # нагрузка - не проблема: ни строк, ни алерта
+    assert db_health.problems(_rep(_pg(load={"win": 3600, "pss": "on", "temp_b": 10**13, "ms_all": 10**9})), NOW) == []

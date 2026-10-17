@@ -1336,6 +1336,40 @@ const EN: Record<string, string> = {
   'реплика, отстает на {l}': 'replica, {l} behind',
   'реплика, догнала': 'replica, caught up',
   'основная, реплик: {n}': 'primary, replicas: {n}',
+  // что грузит базу
+  'Что грузит базу': 'What loads the database',
+  'за последний час': 'over the last hour',
+  'за {n} мин, в пересчете на час': 'over {n} min, per hour',
+  'временные файлы {s} в час': 'temporary files {s} an hour',
+  'чтение мимо shared_buffers {s} в час': 'reads past shared_buffers {s} an hour',
+  'WAL {s} в час': 'WAL {s} an hour',
+  'полные копии страниц: {p}% записей': 'full page images: {p}% of records',
+  'чекпоинты: {a} по времени, {b} по объему WAL': 'checkpoints: {a} by time, {b} by WAL volume',
+  'буфер WAL переполнялся {n} раз за час': 'WAL buffer filled up {n} times an hour',
+  '{n} транзакций в секунду': '{n} transactions a second',
+  'Запросы пишут временные файлы {s} в час: сортировки и хеши не помещаются в work_mem, это запись на диск и его износ. Какие именно - видно по временным файлам у запросов ниже':
+    'Queries write {s} of temporary files an hour: sorts and hashes do not fit into work_mem, which means disk writes and wear. Which ones - see temporary files of the queries below',
+  'Чекпоинты чаще идут по объему WAL, чем по времени: max_wal_size мал для такой записи, а после каждого чекпоинта страницы снова пишутся в WAL целиком':
+    'Checkpoints are triggered by WAL volume more often than by time: max_wal_size is too small for this write rate, and after every checkpoint pages are written to WAL in full again',
+  'Буфер WAL переполнялся {n} раз за час: запросы ждали записи WAL на диск, стоит увеличить wal_buffers (нужен перезапуск)':
+    'The WAL buffer filled up {n} times an hour: queries waited for WAL to be written to disk, consider a larger wal_buffers (needs a restart)',
+  'Самые долгие запросы покажет pg_stat_statements: добавьте его в shared_preload_libraries (нужен перезапуск PostgreSQL) и выполните CREATE EXTENSION pg_stat_statements':
+    'pg_stat_statements shows the slowest queries: add it to shared_preload_libraries (needs a PostgreSQL restart) and run CREATE EXTENSION pg_stat_statements',
+  'pg_stat_statements загружен, но расширение не создано ни в одной базе: выполните CREATE EXTENSION pg_stat_statements, перезапуск не нужен. Панель увидит его в течение часа':
+    'pg_stat_statements is loaded, but the extension is not created in any database: run CREATE EXTENSION pg_stat_statements, no restart needed. The panel picks it up within an hour',
+  'Тексты запросов pg_stat_statements занимают {s}: так бывает, когда один запрос приходит с разным числом значений (многострочный INSERT, длинный IN), и каждый вариант хранится отдельно со своим текстом. Они вытесняют из статистики другие запросы, а каждое чтение текстов поднимает файл в память целиком, поэтому новые тексты панель читает раз в 6 часов':
+    'pg_stat_statements query texts take {s}: this happens when one query comes with a varying number of values (a multi-row INSERT, a long IN) and every variant is stored separately with its own text. They push other queries out of the statistics, and every read of the texts loads the whole file into memory, so the panel reads new texts every 6 hours',
+  'Запросы не показаны: на сервере много инстансов, и отчет не вместил бы все': 'Queries are not shown: the server has many instances, and the report would not fit them all',
+  'Собираю данные: первая картина через 15 минут, за полный час - через час': 'Collecting data: the first picture in 15 minutes, a full hour in an hour',
+  'Запросы заняли {s} с за час - база почти не нагружена': 'Queries took {s} s in an hour - the database is almost idle',
+  'текст скрыт: в нем пароль или секрет': 'text hidden: it contains a password or a secret',
+  'текст еще не прочитан': 'text not read yet',
+  '{p}% времени запросов': '{p}% of query time',
+  '{n} вызовов': '{n} calls',
+  '{ms} мс в среднем': '{ms} ms on average',
+  '{s} с в среднем': '{s} s on average',
+  'временные файлы {s}': 'temporary files {s}',
+  'база {db}': 'database {db}',
   // SSH
   'По адресу {ip} отвечает другой сервер: там {o}, а у этой ноды {n}. Порты по этому адресу не про эту ноду, поэтому алертов по ним нет.':
     'Another server answers at {ip}: it runs {o}, while this node runs {n}. Ports at this address are not this node, so they raise no alerts.',

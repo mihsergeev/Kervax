@@ -13,7 +13,7 @@
 # (the agent passes report.d files through as they are): replication state and lag, the oldest
 # open transaction, lock waits, and for PostgreSQL the transaction ID age (wraparound) and
 # tables full of dead rows that have not been vacuumed for long. Query texts never leave: only
-# database, table and application names and numbers.
+# database, table and application names and numbers (until 0.8, see below).
 #
 # Since 0.6 the oldest idle transaction that holds a snapshot (backend_xmin) is reported on its
 # own: only such a transaction keeps VACUUM from removing dead rows. One holding just an advisory
@@ -23,9 +23,15 @@
 # database (POSTGRES_DB, else postgres). psql -U <user> picks a database named after the user, and
 # a container created with POSTGRES_USER=app POSTGRES_DB=appdb has no such database: every query
 # failed and the inventory stayed empty on a live PostgreSQL.
+#
+# Since 0.8 PostgreSQL also reports what loads it, over about the last hour: temporary files, disk
+# reads, WAL and its full page images, checkpoints by time and by WAL volume, WAL buffer overflows
+# and, with pg_stat_statements, the statements that took the most time. Their texts are the
+# normalized ones PostgreSQL itself keeps (constants replaced by $1, $2...), cut to 300 characters;
+# a text that mentions a password, a secret or a token is not sent at all.
 set -euo pipefail
 
-KERVAX_SETUP_VERSION=0.7  # MAJOR.MINOR; compared component-wise
+KERVAX_SETUP_VERSION=0.8  # MAJOR.MINOR; compared component-wise
 KERVAX_SETUP_ALWAYS=1     # safe on any node: without a database it collects an empty file
 
 HELPER_DIR=/lib65/kervax
@@ -152,7 +158,7 @@ pg_oldest() { # container state-condition
 }
 
 health_pg() {
-  local c="$1" rec r role n lag st xa xi lw xid dead db t dn ln va
+  local c="$1" rec r role n lag st xa xi lw xid dead db t dn ln va ld
   rec=$(pg_q "$c" "select pg_is_in_recovery()" | head -1)
   case "$rec" in t|f) ;; *) return 0 ;; esac
   if [ "$rec" = t ]; then
@@ -181,7 +187,171 @@ health_pg() {
       dead="$dead${dead:+,}{\"db\":\"$(esc "$db")\",\"table\":\"$(esc "$t")\",\"dead\":$(num "$dn"),\"live\":$(num "$ln"),\"vac\":$(num "$va")}"
     done < <(pg_q_db "$c" "$db" "select relname||'|'||n_dead_tup||'|'||n_live_tup||'|'||coalesce(extract(epoch from now()-greatest(last_vacuum,last_autovacuum))::bigint,-1) from pg_stat_user_tables where n_dead_tup > 1000000 and n_dead_tup > n_live_tup * 0.2 order by n_dead_tup desc limit 3")
   done < <(pg_q "$c" "select datname from pg_database where not datistemplate and datallowconn order by pg_database_size(datname) desc limit 3")
-  HEALTH="$HEALTH${HEALTH:+,}{\"engine\":\"pg\",\"container\":\"$(esc "$c")\",\"role\":\"$role\",\"replicas\":$n,\"lag\":$lag,\"receiver\":\"$(esc "$st")\",\"xact\":$(num "${xa%%|*}"),\"xact_db\":\"$(esc "$(printf '%s' "$xa" | cut -d'|' -f2)")\",\"xact_app\":\"$(esc "$(printf '%s' "$xa" | cut -d'|' -f3)")\",\"idle_xact\":$(num "${xi%%|*}"),\"idle_db\":\"$(esc "$(printf '%s' "$xi" | cut -d'|' -f2)")\",\"idle_app\":\"$(esc "$(printf '%s' "$xi" | cut -d'|' -f3)")\",\"idle_xmin\":$(num "${xm%%|*}"),\"idle_xmin_db\":\"$(esc "$(printf '%s' "$xm" | cut -d'|' -f2)")\",\"idle_xmin_app\":\"$(esc "$(printf '%s' "$xm" | cut -d'|' -f3)")\",\"lock_waits\":$(num "${lw%%|*}"),\"lock_wait\":$(num "${lw#*|}"),\"xid\":$(num "${xid%%|*}"),\"xid_db\":\"$(esc "${xid#*|}")\",\"dead\":[$dead]}"
+  ld=$(load_pg "$c")
+  # the agent drops a report.d file over 256 KB whole, health and all: past LOAD_BUDGET the
+  # statements are left out (a node can hold dozens of instances)
+  case "$ld" in *',"top":['*) [ $((LOAD_BYTES + ${#ld})) -gt "$LOAD_BUDGET" ] && ld="${ld%%,\"top\":*},\"top\":[],\"cut\":1}" ;; esac
+  LOAD_BYTES=$((LOAD_BYTES + ${#ld}))
+  HEALTH="$HEALTH${HEALTH:+,}{\"engine\":\"pg\",\"container\":\"$(esc "$c")\",\"role\":\"$role\",\"replicas\":$n,\"lag\":$lag,\"receiver\":\"$(esc "$st")\",\"xact\":$(num "${xa%%|*}"),\"xact_db\":\"$(esc "$(printf '%s' "$xa" | cut -d'|' -f2)")\",\"xact_app\":\"$(esc "$(printf '%s' "$xa" | cut -d'|' -f3)")\",\"idle_xact\":$(num "${xi%%|*}"),\"idle_db\":\"$(esc "$(printf '%s' "$xi" | cut -d'|' -f2)")\",\"idle_app\":\"$(esc "$(printf '%s' "$xi" | cut -d'|' -f3)")\",\"idle_xmin\":$(num "${xm%%|*}"),\"idle_xmin_db\":\"$(esc "$(printf '%s' "$xm" | cut -d'|' -f2)")\",\"idle_xmin_app\":\"$(esc "$(printf '%s' "$xm" | cut -d'|' -f3)")\",\"lock_waits\":$(num "${lw%%|*}"),\"lock_wait\":$(num "${lw#*|}"),\"xid\":$(num "${xid%%|*}"),\"xid_db\":\"$(esc "${xid#*|}")\",\"dead\":[$dead]${ld:+,\"load\":$ld}}"
+}
+
+# ── What loads PostgreSQL (0.8) ────────────────────────────────────────────────
+# The engine counts temporary files, disk reads, WAL and checkpoints since its start, and
+# pg_stat_statements counts time per statement since its last reset (on one node - seven months).
+# Such totals say nothing about now, so every run keeps a snapshot and reports the difference with
+# the newest one at least LOAD_BASE seconds old: about an hour of load, not 15 minutes of noise.
+# Snapshots live in LOAD_DIR, a directory per instance; without texts a statement takes ~50 bytes
+# (half a megabyte at the default 10 000 statements).
+#
+# Texts are read only for the few top statements and cached here. pg_stat_statements reads its
+# WHOLE texts file into memory on every read with texts: on one node that file was 3.9 GB
+# (multi-row INSERTs with a varying number of rows, each variant an entry with an 8 MB text) and a
+# single read took 21 seconds. Above QTEXT_BIG new texts are read at most every QTEXT_EVERY seconds.
+LOAD_DIR=/var/lib/kervax/db-load
+LOAD_BASE=3000
+LOAD_KEEP=4800
+QTEXT_MAX=300
+QTEXT_BIG=1073741824
+QTEXT_EVERY=21600
+TOP_TIME=5
+TOP_TEMP=2
+LOAD_BUDGET=131072
+LOAD_BYTES=0
+
+# numbers separated by "|" (a negative one means "this version does not count it")
+nums() { printf '%s' "$1" | grep -Eq '^-?[0-9]+(\|-?[0-9]+)*$'; }
+
+load_pg() { # container -> a JSON object on stdout, nothing when the engine does not answer
+  local c="$1" dir now vn bs cnt wal ck pre pss=off db="" at tcol topq="" snap ts age base="" fb="" win=0
+  local qtext miss line reset tb tf xa rd wr fp wb wf kt kr msall top
+  dir="$LOAD_DIR/$(printf '%s' "${c:-host}" | tr -c 'A-Za-z0-9_.-' '_')"
+  install -d -m 0700 "$LOAD_DIR" "$dir" 2>/dev/null || return 0
+  now=$(date +%s)
+  vn=$(num "$(pg_q "$c" "show server_version_num" | head -1)")
+  [ "$vn" -ge 100000 ] || return 0
+  bs=$(num "$(pg_q "$c" "show block_size" | head -1)"); [ "$bs" -gt 0 ] || bs=8192
+  cnt=$(pg_q "$c" "select coalesce(sum(temp_bytes),0)||'|'||coalesce(sum(temp_files),0)||'|'||coalesce(sum(xact_commit),0)||'|'||coalesce(sum(blks_read),0) from pg_stat_database" | head -1)
+  nums "$cnt" || return 0
+  wal="-1|-1|-1|-1"
+  [ "$vn" -ge 140000 ] && wal=$(pg_q "$c" "select wal_records||'|'||wal_fpi||'|'||wal_bytes||'|'||wal_buffers_full from pg_stat_wal" | head -1)
+  nums "$wal" || wal="-1|-1|-1|-1"
+  if [ "$vn" -ge 170000 ]; then ck=$(pg_q "$c" "select num_timed||'|'||num_requested from pg_stat_checkpointer" | head -1)
+  else ck=$(pg_q "$c" "select checkpoints_timed||'|'||checkpoints_req from pg_stat_bgwriter" | head -1); fi
+  nums "$ck" || ck="-1|-1"
+
+  # pg_stat_statements: loaded at start (shared_preload_libraries) and its view created by CREATE
+  # EXTENSION in at least one database - the view exists only there. The database found last time
+  # is checked first; "not created anywhere" is rechecked every LOAD_BASE seconds, a node can hold
+  # dozens of instances
+  pre=$(pg_q "$c" "show shared_preload_libraries" | head -1 | tr -d " '\"")
+  case ",$pre," in
+    *,pg_stat_statements,*)
+      pss=noext
+      at=$(num "$(cat "$dir/pssno" 2>/dev/null)")
+      if [ -s "$dir/pssdb" ] || [ $((now - at)) -ge "$LOAD_BASE" ]; then
+        while IFS= read -r db; do
+          [ -n "$db" ] || continue
+          if [ "$(pg_q_db "$c" "$db" "select 1 from pg_extension where extname = 'pg_stat_statements'" | head -1)" = 1 ]; then
+            pss=on; break
+          fi
+        done < <(cat "$dir/pssdb" 2>/dev/null; pg_q "$c" "select datname from pg_database where not datistemplate and datallowconn order by datname = 'postgres' desc, pg_database_size(datname) desc limit 20")
+      fi
+      if [ "$pss" = on ]; then printf '%s\n' "$db" > "$dir/pssdb"; rm -f "$dir/pssno"
+      else rm -f "$dir/pssdb"; [ $((now - at)) -ge "$LOAD_BASE" ] && echo "$now" > "$dir/pssno"; fi
+      ;;
+  esac
+
+  # the snapshot: instance counters, then statements without texts ("P" - statements were read, a
+  # snapshot without them must not turn seven months of totals into one hour)
+  snap="$dir/$now.snap"
+  {
+    echo "C|$cnt|$wal|$ck"
+    if [ "$pss" = on ]; then
+      tcol=total_exec_time; [ "$vn" -ge 130000 ] || tcol=total_time
+      [ "$vn" -ge 140000 ] && topq=" and toplevel"
+      echo "P|1"
+      pg_q_db "$c" "$db" "select 'Q|'||queryid||'|'||dbid||'|'||userid||'|'||calls||'|'||round($tcol)::bigint||'|'||temp_blks_written||'|'||shared_blks_read from pg_stat_statements(false) where queryid is not null$topq"
+    fi
+  } > "$snap.tmp" && mv -f "$snap.tmp" "$snap"
+
+  # the base: the newest snapshot at least LOAD_BASE old, else the oldest there is
+  for ts in $(ls "$dir" | sed -n 's/^\([0-9][0-9]*\)\.snap$/\1/p' | sort -n); do
+    age=$((now - ts))
+    [ "$age" -gt 0 ] || continue
+    [ -n "$fb" ] || fb=$ts
+    [ "$age" -ge "$LOAD_BASE" ] && base=$ts
+  done
+  [ -n "$base" ] || base=$fb
+  for ts in $(ls "$dir" | sed -n 's/^\([0-9][0-9]*\)\.snap$/\1/p'); do
+    [ $((now - ts)) -gt "$LOAD_KEEP" ] && [ "$ts" != "$base" ] && rm -f "$dir/$ts.snap"
+  done
+
+  qtext=0
+  [ "$pss" = on ] && qtext=$(num "$(pg_q_db "$c" "$db" "select coalesce((pg_stat_file('pg_stat_tmp/pgss_query_texts.stat', true)).size, 0)" | head -1)")
+  if [ -z "$base" ]; then
+    printf '{"win":0,"pss":"%s","qtext":%s}' "$pss" "$qtext"
+    return 0
+  fi
+  win=$((now - base))
+
+  # differences. A counter below its base means a reset (pg_stat_reset, a crash) - no window this
+  # time. A statement missing from the base is new or came back after eviction: its counters
+  # started from zero inside the window. Block counts become bytes
+  awk -F'|' -v bs="$bs" '
+    FILENAME == ARGV[1] { if ($1 == "C") for (i = 2; i <= NF; i++) b[i] = $i
+                else if ($1 == "P") havep = 1
+                else if ($1 == "Q") { k = $2 FS $3 FS $4; pc[k] = $5; pm[k] = $6; pt[k] = $7; pr[k] = $8 }
+                next }
+    $1 == "C" { s = "D"
+                for (i = 2; i <= NF; i++) {
+                  if ($i < 0 || b[i] == "" || b[i] < 0) d = -1
+                  else { d = $i - b[i]; if (d < 0) { reset = 1; d = -1 } }
+                  if (i == 5 && d > 0) d = d * bs
+                  s = s "|" sprintf("%.0f", d) }
+                print s; next }
+    $1 == "Q" && havep { k = $2 FS $3 FS $4
+                if ((k in pc) && $5 >= pc[k]) { dc = $5 - pc[k]; dm = $6 - pm[k]; dt = $7 - pt[k]; dr = $8 - pr[k] }
+                else { dc = $5; dm = $6; dt = $7; dr = $8 }
+                if (dc <= 0) next
+                all += dm
+                if (dm > 0) printf "Q|%s|%.0f|%.0f|%.0f|%.0f\n", k, dc, dm, dt * bs, dr * bs }
+    END { printf "S|%.0f|%d\n", all, reset }' "$dir/$base.snap" "$snap" > "$dir/delta"
+  line=$(sed -n 's/^D|//p' "$dir/delta")
+  reset=$(sed -n 's/^S|[0-9]*|//p' "$dir/delta")
+  msall=$(num "$(sed -n 's/^S|\([0-9]*\)|.*/\1/p' "$dir/delta")")
+  if [ "$reset" = 1 ] || [ -z "$line" ]; then
+    rm -f "$dir/delta"
+    printf '{"win":0,"pss":"%s","qtext":%s}' "$pss" "$qtext"
+    return 0
+  fi
+  IFS='|' read -r tb tf xa rd wr fp wb wf kt kr <<< "$line"
+
+  top=""
+  if [ "$pss" = on ]; then
+    # the top: TOP_TIME by time, plus up to TOP_TEMP more by temporary files
+    { grep '^Q|' "$dir/delta" | sort -t'|' -k6,6nr | head -n "$TOP_TIME"
+      grep '^Q|' "$dir/delta" | awk -F'|' '$7 > 0' | sort -t'|' -k7,7nr | head -n $((TOP_TIME + TOP_TEMP))
+    } | awk -F'|' '!seen[$2 FS $3 FS $4]++' | head -n $((TOP_TIME + TOP_TEMP)) > "$dir/top"
+    touch "$dir/texts"
+    miss=$(awk -F'|' 'FILENAME == ARGV[1] { have[$1 FS $2 FS $3] = 1; next } !(($2 FS $3 FS $4) in have) { print $2 }' "$dir/texts" "$dir/top" | sort -u | paste -sd, -)
+    at=$(num "$(cat "$dir/texts.at" 2>/dev/null)")
+    if [ -n "$miss" ] && { [ "$qtext" -le "$QTEXT_BIG" ] || [ $((now - at)) -ge "$QTEXT_EVERY" ]; }; then
+      echo "$now" > "$dir/texts.at"
+      # whitespace is collapsed on the first 2000 characters only: regexp_replace over thousands of
+      # 8 MB texts hung for minutes. The secret check runs on the whole text
+      ( TO=120; pg_q_db "$c" "$db" "select s.queryid||'|'||s.dbid||'|'||s.userid||'|'||coalesce(d.datname,'')||'|'||case when s.query ~* '(passw|secret|token|identified|pgp_sym|encrypt)' then '' else left(regexp_replace(left(s.query, 2000), '\s+', ' ', 'g'), $QTEXT_MAX) end from pg_stat_statements(true) s left join pg_database d on d.oid = s.dbid where s.queryid in ($miss)$topq" ) > "$dir/texts.new"
+      cat "$dir/texts.new" "$dir/texts" | awk -F'|' 'NF >= 5 && !seen[$1 FS $2 FS $3]++' | head -n 200 > "$dir/texts.tmp" && mv -f "$dir/texts.tmp" "$dir/texts"
+      rm -f "$dir/texts.new"
+    fi
+    top=$(awk -F'|' 'function j(s) { gsub(/\\/, "\\\\", s); gsub(/"/, "\\\"", s); return s }
+      FILENAME == ARGV[1] { k = $1 FS $2 FS $3; db[k] = $4; q = $0; for (i = 0; i < 4; i++) q = substr(q, index(q, "|") + 1); tx[k] = q; next }
+      { k = $2 FS $3 FS $4
+        printf "%s{\"id\":\"%s\",\"db\":\"%s\",\"q\":\"%s\",\"calls\":%.0f,\"ms\":%.0f,\"temp\":%.0f,\"rd\":%.0f}", (n++ ? "," : ""), j($2), j(db[k]), j(tx[k]), $5, $6, $7, $8 }' "$dir/texts" "$dir/top" | tr -d '\000-\037')
+  fi
+  rm -f "$dir/delta" "$dir/top"
+  printf '{"win":%s,"pss":"%s","qtext":%s,"temp_b":%s,"temp_f":%s,"xact":%s,"rd":%s,"wal_rec":%s,"fpi":%s,"wal_b":%s,"wbf":%s,"ck_t":%s,"ck_r":%s,"ms_all":%s,"top":[%s]}' \
+    "$win" "$pss" "$qtext" "$(num "$tb")" "$(num "$tf")" "$(num "$xa")" "$(num "$rd")" "$(num "$wr")" "$(num "$fp")" \
+    "$(num "$wb")" "$(num "$wf")" "$(num "$kt")" "$(num "$kr")" "$msall" "$top"
 }
 
 # ── MySQL / MariaDB ────────────────────────────────────────────────────────────

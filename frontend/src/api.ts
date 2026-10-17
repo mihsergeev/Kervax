@@ -1191,6 +1191,31 @@ export type DbHealth = {
   xact: number
   xid: number
   problems: { level: number; text: string }[]
+  load?: DbLoad | null // что грузит PostgreSQL за последний час (dbstat-setup 0.8)
+}
+// Запрос из pg_stat_statements: время, вызовы, временные файлы и чтение в пересчете на час, доля
+// во времени всех запросов. Пустой q: с db - текст скрыт (пароль, секрет), без db - еще не прочитан
+export type DbLoadQuery = { db: string; q: string; calls: number; ms: number; temp: number; rd: number; share: number; avg_ms: number }
+// Счетчики в пересчете на час, null - эта версия PostgreSQL их не считает. win - за сколько секунд
+// замер (0 - helper только начал копить снимки или счетчики сбросили). pss: on / noext (загружен,
+// расширение не создано) / off. qtext - размер файла текстов pg_stat_statements
+export type DbLoad = {
+  win: number
+  pss: string
+  qtext: number
+  cut: boolean
+  temp_b?: number | null
+  temp_f?: number | null
+  xact?: number | null
+  rd?: number | null
+  wal_rec?: number | null
+  fpi?: number | null
+  wal_b?: number | null
+  wbf?: number | null
+  ck_t?: number | null
+  ck_r?: number | null
+  ms_all?: number
+  top: DbLoadQuery[]
 }
 export type MemLeak = {
   key: string
