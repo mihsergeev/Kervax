@@ -1192,7 +1192,10 @@ export type DbHealth = {
   xid: number
   problems: { level: number; text: string }[]
   load?: DbLoad | null // что грузит PostgreSQL за последний час (dbstat-setup 0.8)
+  advice?: DbAdvice[] // советы по настройкам (dbstat-setup 0.9), текст по ключу k рисует фронт
 }
+// Совет по настройкам PostgreSQL: k - что именно, остальное - цифры для текста (байты, штуки)
+export type DbAdvice = { k: string } & Record<string, string | number | boolean>
 // Запрос из pg_stat_statements: время, вызовы, временные файлы и чтение в пересчете на час, доля
 // во времени всех запросов. Пустой q: с db - текст скрыт (пароль, секрет), без db - еще не прочитан
 export type DbLoadQuery = { db: string; q: string; calls: number; ms: number; temp: number; rd: number; share: number; avg_ms: number }

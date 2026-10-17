@@ -1344,15 +1344,41 @@ const EN: Record<string, string> = {
   'чтение мимо shared_buffers {s} в час': 'reads past shared_buffers {s} an hour',
   'WAL {s} в час': 'WAL {s} an hour',
   'полные копии страниц: {p}% записей': 'full page images: {p}% of records',
-  'чекпоинты: {a} по времени, {b} по объему WAL': 'checkpoints: {a} by time, {b} by WAL volume',
+  'чекпоинты: {a} по времени, {b} внеплановых': 'checkpoints: {a} by time, {b} requested',
   'буфер WAL переполнялся {n} раз за час': 'WAL buffer filled up {n} times an hour',
   '{n} транзакций в секунду': '{n} transactions a second',
-  'Запросы пишут временные файлы {s} в час: сортировки и хеши не помещаются в work_mem, это запись на диск и его износ. Какие именно - видно по временным файлам у запросов ниже':
-    'Queries write {s} of temporary files an hour: sorts and hashes do not fit into work_mem, which means disk writes and wear. Which ones - see temporary files of the queries below',
-  'Чекпоинты чаще идут по объему WAL, чем по времени: max_wal_size мал для такой записи, а после каждого чекпоинта страницы снова пишутся в WAL целиком':
-    'Checkpoints are triggered by WAL volume more often than by time: max_wal_size is too small for this write rate, and after every checkpoint pages are written to WAL in full again',
-  'Буфер WAL переполнялся {n} раз за час: запросы ждали записи WAL на диск, стоит увеличить wal_buffers (нужен перезапуск)':
-    'The WAL buffer filled up {n} times an hour: queries waited for WAL to be written to disk, consider a larger wal_buffers (needs a restart)',
+  'Что поправить в настройках': 'What to fix in the settings',
+  'Настройки PostgreSQL': 'PostgreSQL settings',
+  'Ядро держит {have} huge pages, а postgres работает без них: видимо, страницы выделены после его запуска. Нужен перезапуск postgres':
+    'The kernel holds {have} huge pages, but postgres runs without them: the pages were probably reserved after it started. postgres needs a restart',
+  'shared_buffers {sb} без huge pages: таблицы страниц на сервере занимают {pt}, каждое подключение отображает все буферы страницами по 4 КБ. Нужно vm.nr_hugepages = {need} в /etc/sysctl.d{hp} и перезапуск postgres. На работающем сервере ядро может не найти столько свободных блоков, надежнее выделять при остановленном postgres':
+    'shared_buffers {sb} without huge pages: page tables on the server take {pt}, every connection maps all the buffers with 4 KB pages. Set vm.nr_hugepages = {need} in /etc/sysctl.d{hp} and restart postgres. On a running server the kernel may not find that many free blocks, reserving them while postgres is stopped is more reliable',
+  ', huge_pages = try': ', huge_pages = try',
+  'Чекпоинты чаще идут по объему WAL, чем по времени: при {wal} WAL в час max_wal_size {cur} мал, а после каждого чекпоинта страницы снова пишутся в WAL целиком. Примерно {rec} хватит, чтобы чекпоинты шли по checkpoint_timeout, перезапуск не нужен':
+    'Checkpoints are triggered by WAL volume more often than by time: with {wal} of WAL an hour max_wal_size {cur} is too small, and after every checkpoint pages are written to WAL in full again. About {rec} lets checkpoints follow checkpoint_timeout, no restart needed',
+  'Буфер WAL переполнялся {n} раз за час: запросы ждали записи WAL на диск. wal_buffers {cur}, обычно хватает 64-128 МБ (нужен перезапуск)':
+    'The WAL buffer filled up {n} times an hour: queries waited for WAL to be written to disk. wal_buffers is {cur}, 64-128 MB is usually enough (needs a restart)',
+  'wal_compression = {cur}{alias}: pglz самый медленный вариант, lz4 сжимает почти так же и в разы быстрее. Поставить lz4 можно без перезапуска':
+    'wal_compression = {cur}{alias}: pglz is the slowest option, lz4 compresses almost as well and several times faster. Switching to lz4 needs no restart',
+  ' (это pglz)': ' (that is pglz)',
+  'Сжатие WAL выключено, а WAL {wal} в час, полные копии страниц - {fpi}% записей: wal_compression = lz4 уменьшит WAL и запись на диск, перезапуск не нужен':
+    'WAL compression is off, while WAL is {wal} an hour and full page images are {fpi}% of records: wal_compression = lz4 cuts WAL and disk writes, no restart needed',
+  'Docker при остановке ждет postgres {to} с, потом убивает: с буферами {sb} остановка может не успеть, и тогда после docker stop или перезагрузки сервера база восстанавливается как после аварии. В compose stop_grace_period: 5m (контейнер пересоздается), для ручной остановки docker stop -t 600':
+    'On stop docker waits {to} s for postgres, then kills it: with {sb} of buffers the shutdown may not make it, and then after docker stop or a server reboot the database recovers as after a crash. In compose stop_grace_period: 5m (the container is recreated), for a manual stop docker stop -t 600',
+  'Сигнал остановки SIGTERM: postgres ждет, пока отключатся все клиенты, а пул соединений сам не отключится. Нужен stop_signal: SIGINT':
+    'The stop signal is SIGTERM: postgres waits for all clients to disconnect, and a connection pool never disconnects by itself. Use stop_signal: SIGINT',
+  'Запросы пишут временные файлы {s} в час: сортировки и хеши не помещаются в work_mem ({wm}), это запись на диск и его износ. Поднимать work_mem осторожно: он выделяется на каждую операцию каждого подключения, а max_connections {mc}. Обычно дешевле поправить запросы с временными файлами':
+    'Queries write {s} of temporary files an hour: sorts and hashes do not fit into work_mem ({wm}), which means disk writes and wear. Raise work_mem with care: it is allocated per operation of every connection, and max_connections is {mc}. Fixing the queries with temporary files is usually cheaper',
+  'random_page_cost = {v}, а диски SSD: планировщик считает чтение по индексу в разы дороже последовательного и зря выбирает полный проход таблицы. Для SSD обычно 1.1, перезапуск не нужен':
+    'random_page_cost = {v} on SSD disks: the planner thinks an index read costs several times a sequential one and picks full table scans for nothing. 1.1 is usual for SSD, no restart needed',
+  'effective_cache_size {ecs} при {mem} памяти: планировщик думает, что кэша мало, и реже выбирает индексы. Обычно 50-75% памяти, перезапуск не нужен':
+    'effective_cache_size {ecs} with {mem} of memory: the planner thinks the cache is small and picks indexes less often. 50-75% of memory is usual, no restart needed',
+  'shared_buffers {sb} при {mem} памяти{lim}, а база намного больше буферов: обычно ставят около 25% памяти (нужен перезапуск)':
+    'shared_buffers {sb} with {mem} of memory{lim}, while the database is much larger than the buffers: about 25% of memory is usual (needs a restart)',
+  ' (лимит контейнера)': ' (container limit)',
+  'shared_buffers {sb}, а это больше половины памяти ({mem}{lim}): остальному серверу и кэшу ОС остается мало, обычно ставят около 25% (нужен перезапуск)':
+    'shared_buffers {sb} is more than half of memory ({mem}{lim}): little is left for the rest of the server and the OS cache, about 25% is usual (needs a restart)',
+  ', лимит контейнера': ', container limit',
   'Самые долгие запросы покажет pg_stat_statements: добавьте его в shared_preload_libraries (нужен перезапуск PostgreSQL) и выполните CREATE EXTENSION pg_stat_statements':
     'pg_stat_statements shows the slowest queries: add it to shared_preload_libraries (needs a PostgreSQL restart) and run CREATE EXTENSION pg_stat_statements',
   'pg_stat_statements загружен, но расширение не создано ни в одной базе: выполните CREATE EXTENSION pg_stat_statements, перезапуск не нужен. Панель увидит его в течение часа':
