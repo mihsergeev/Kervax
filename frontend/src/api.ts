@@ -1182,6 +1182,9 @@ export type ServerProblem = {
 }
 // Кто ест CPU группами (агент 2.21): процессы с одним именем у одного владельца. cpu - % одного
 // ядра (как top), spin - сколько из них давно крутят по ядру вхолостую, spin_age - возраст старшего
+// Пишущий на диск по io.stat его cgroup: записано и прочитано за s секунд (около часа, у недавно
+// запущенного меньше)
+export type DiskWriter = { kind: 'container' | 'pod' | 'unit'; name: string; w: number; r: number; s: number }
 export type DbHealth = {
   engine: string
   container: string
@@ -1436,6 +1439,8 @@ export type ServerReport = {
   top_cpu?: ProcStat[]
   top_mem?: ProcStat[]
   cpu_groups?: CpuGroup[] // кто ест CPU группами с владельцем (агент 2.21+)
+  disk_writers?: DiskWriter[] // кто пишет на диск за последний час (агент 2.33+)
+  disk_writers_v1?: boolean // cgroup v1: отложенная запись в счетчики не попадает
   conntrack_count?: number
   conntrack_max?: number
   sock_used?: number

@@ -116,6 +116,40 @@ def soon_text(name: str, rec: dict, short: bool = False) -> str:
     return f"{base} ({float(rec.get('rate') or 0):.2f}% в сутки, {how}) - пора заказывать замену"
 
 
+# Кто пишет на диск (агент 2.33, disk_writers): строка к прогнозу износа. Меньше 50 ГБ в сутки
+# износ не делает, называть некого
+_WRITER_MIN_DAY = 50 * 10**9
+_KIND = {"container": "контейнер", "pod": "под", "unit": "юнит"}
+
+
+def _bytes(n: float) -> str:
+    """Двоичные, как fmtBytes в карточке "Кто пишет на диск": цифры алерта и карточки совпадают"""
+    for unit, k in (("ТБ", 2**40), ("ГБ", 2**30), ("МБ", 2**20)):
+        if n >= k:
+            v = n / k
+            return f"{v:.1f} {unit}" if v < 10 else f"{v:.0f} {unit}"
+    return f"{n:.0f} Б"
+
+
+def writer_text(writers) -> str:
+    """Кто больше всех пишет на диск, в сутках, если это заметно для износа"""
+    best, day = None, 0.0
+    for w in writers or []:
+        if not isinstance(w, dict):
+            continue
+        try:
+            d = float(w.get("w") or 0) * 86400 / max(float(w.get("s") or 0), 60)
+        except (TypeError, ValueError):
+            continue
+        if d > day:
+            best, day = w, d
+    if not best or day < _WRITER_MIN_DAY:
+        return ""
+    name = str(best.get("name") or "?")
+    who = "сессии и cron (user.slice)" if name == "user.slice" else f"{_KIND.get(str(best.get('kind')), '')} {name}".strip()
+    return f"больше всех на диск пишет {who}: около {_bytes(day)} в сутки"
+
+
 def card(block: dict | None, hist: dict | None) -> list[dict]:
     """Прогноз по дискам, которые сейчас в отчете: для карточки и "Требует действий"."""
     if not block or not isinstance(hist, dict):

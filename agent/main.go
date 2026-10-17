@@ -43,7 +43,7 @@ import (
 	"time"
 )
 
-const version = "2.32"
+const version = "2.33"
 
 // Публичный ключ для проверки подписи релизов агента (Ed25519, base64).
 // ПУСТО по умолчанию → самообновление ВЫКЛЮЧЕНО (агент никогда не заменяет себя).
@@ -185,6 +185,9 @@ type report struct {
 	// кто ест CPU группами: одинаковые процессы одного владельца (контейнер, под, юнит)
 	// складываются, и видно, сколько из них давно крутят ядро вхолостую
 	CPUGroups []cpuGroup `json:"cpu_groups,omitempty"`
+	// кто пишет на диск за последний час: контейнеры, поды и юниты systemd по io.stat их cgroup
+	DiskWriters   []ioWriter `json:"disk_writers,omitempty"`
+	DiskWritersV1 bool       `json:"disk_writers_v1,omitempty"` // cgroup v1: отложенная запись в счетчики не попадает
 	// таблица conntrack + сокеты (мгновенные значения)
 	ConntrackCount float64 `json:"conntrack_count"`
 	ConntrackMax   float64 `json:"conntrack_max"`
@@ -2788,6 +2791,282 @@ func podCPUWalk(dir string, depth int, out map[string]uint64) {
 	}
 }
 
+// ── Кто пишет на диск ──────────────────────────────────────────────────────────
+// Запись и чтение за последний час по cgroup контейнеров docker, подов этой ноды и юнитов systemd
+// (плюс user.slice - сессии и cron). Рядом с прогнозом износа SSD первый вопрос - кто это пишет, а
+// /proc/<pid>/io чужих процессов агенту не прочитать: он работает не от root. io.stat у cgroup открыт
+// всем. На cgroup v2 туда попадает и отложенная запись (writeback относится к cgroup, испачкавшей
+// страницы), на v1 видна только прямая - об этом флаг disk_writers_v1.
+
+// ioWriter - один пишущий: что это, сколько записал и прочитал и за сколько секунд (у недавно
+// запущенного окно короче часа).
+type ioWriter struct {
+	Kind string `json:"kind"` // container / pod / unit
+	Name string `json:"name"`
+	W    uint64 `json:"w"` // байт записано за окно
+	R    uint64 `json:"r"` // байт прочитано за окно
+	S    int    `json:"s"` // окно, секунд
+}
+
+const (
+	ioStep = time.Minute      // чаще незачем: io.stat у сотни cgroup раз в 15 секунд - пустая работа
+	ioKeep = 65 * time.Minute // окно - около часа
+	ioTopN = 8
+)
+
+type ioSample struct {
+	at   time.Time
+	r, w uint64
+}
+
+var ioState = struct {
+	sync.Mutex
+	hist   map[string][]ioSample
+	last   time.Time
+	top    []ioWriter
+	v1     bool
+	devs   map[string]string // "259:0" -> "nvme0n1"
+	devsAt time.Time
+}{hist: map[string][]ioSample{}}
+
+// ioDevName - имя блочного устройства по maj:min из /sys/dev/block, с кэшем на час. Вызывается под
+// ioState.Lock.
+func ioDevName(mm string) string {
+	if n, ok := ioState.devs[mm]; ok {
+		return n
+	}
+	n := ""
+	if l, err := os.Readlink("/sys/dev/block/" + mm); err == nil {
+		n = filepath.Base(l)
+	}
+	if ioState.devs == nil {
+		ioState.devs = map[string]string{}
+	}
+	ioState.devs[mm] = n
+	return n
+}
+
+// cgroupIO - прочитано и записано cgroup: io.stat (v2) или blkio.throttle.io_service_bytes (v1).
+// Над RAID и LVM считается логический уровень (md, dm): с зеркалом на дисках записи вдвое больше,
+// чем сделал сам процесс, а вопрос - кто пишет. loop, zram и ram - не диски.
+func cgroupIO(dir string, devName func(string) string) (r, w uint64, v1, ok bool) {
+	type rw struct{ r, w uint64 }
+	per := map[string]*rw{}
+	if b, err := os.ReadFile(dir + "/io.stat"); err == nil {
+		for _, ln := range strings.Split(string(b), "\n") {
+			f := strings.Fields(ln)
+			if len(f) < 2 {
+				continue
+			}
+			x := &rw{}
+			for _, kv := range f[1:] {
+				k, v, found := strings.Cut(kv, "=")
+				if !found {
+					continue
+				}
+				n, _ := strconv.ParseUint(v, 10, 64)
+				switch k {
+				case "rbytes":
+					x.r = n
+				case "wbytes":
+					x.w = n
+				}
+			}
+			per[f[0]] = x
+		}
+		ok = true
+	} else if b, err := os.ReadFile(dir + "/blkio.throttle.io_service_bytes"); err == nil {
+		for _, ln := range strings.Split(string(b), "\n") {
+			f := strings.Fields(ln)
+			if len(f) != 3 {
+				continue
+			}
+			n, _ := strconv.ParseUint(f[2], 10, 64)
+			x := per[f[0]]
+			if x == nil {
+				x = &rw{}
+				per[f[0]] = x
+			}
+			switch f[1] {
+			case "Read":
+				x.r = n
+			case "Write":
+				x.w = n
+			}
+		}
+		ok, v1 = true, true
+	}
+	if !ok {
+		return
+	}
+	names := map[string]string{}
+	logical := false
+	for d := range per {
+		n := devName(d)
+		names[d] = n
+		if strings.HasPrefix(n, "md") || strings.HasPrefix(n, "dm-") {
+			logical = true
+		}
+	}
+	for d, x := range per {
+		n := names[d]
+		if strings.HasPrefix(n, "loop") || strings.HasPrefix(n, "zram") || strings.HasPrefix(n, "ram") {
+			continue
+		}
+		if (strings.HasPrefix(n, "md") || strings.HasPrefix(n, "dm-")) != logical {
+			continue
+		}
+		r += x.r
+		w += x.w
+	}
+	return
+}
+
+type ioTarget struct{ key, kind, id, dir string }
+
+// ioTargets - чью запись считаем. Раскладки cgroup те же, что у containerCPU и podCPU, у v1 - в
+// контроллере blkio.
+func ioTargets(root string, conts map[string]string) []ioTarget {
+	var out []ioTarget
+	isDir := func(d string) bool {
+		st, err := os.Stat(d)
+		return err == nil && st.IsDir()
+	}
+	for id := range conts {
+		if id == "" || strings.ContainsAny(id, "/.") {
+			continue
+		}
+		for _, d := range []string{root + "/system.slice/docker-" + id + ".scope", root + "/docker/" + id, root + "/blkio/docker/" + id} {
+			if isDir(d) {
+				out = append(out, ioTarget{"c:" + id, "container", id, d})
+				break
+			}
+		}
+	}
+	for _, base := range []string{root, root + "/blkio"} {
+		pods := map[string]string{}
+		if top, err := os.ReadDir(base); err == nil {
+			for _, e := range top {
+				if e.IsDir() && strings.HasPrefix(e.Name(), "kubepods") {
+					ioPodDirs(base+"/"+e.Name(), 0, pods)
+				}
+			}
+		}
+		for uid, d := range pods {
+			out = append(out, ioTarget{"p:" + uid, "pod", uid, d})
+		}
+		if len(pods) > 0 {
+			break
+		}
+	}
+	for _, base := range []string{root + "/system.slice", root + "/blkio/system.slice"} {
+		ents, err := os.ReadDir(base)
+		if err != nil {
+			continue
+		}
+		for _, e := range ents {
+			if e.IsDir() && strings.HasSuffix(e.Name(), ".service") {
+				out = append(out, ioTarget{"u:" + e.Name(), "unit", e.Name(), base + "/" + e.Name()})
+			}
+		}
+		if u := filepath.Dir(base) + "/user.slice"; isDir(u) {
+			out = append(out, ioTarget{"u:user.slice", "unit", "user.slice", u})
+		}
+		break
+	}
+	return out
+}
+
+func ioPodDirs(dir string, depth int, out map[string]string) {
+	ents, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	for _, e := range ents {
+		if !e.IsDir() {
+			continue
+		}
+		sub := dir + "/" + e.Name()
+		if uid := podUID(e.Name()); uid != "" {
+			out[uid] = sub
+			continue
+		}
+		if depth < 2 {
+			ioPodDirs(sub, depth+1, out)
+		}
+	}
+}
+
+// diskWriters - топ пишущих за последний час. Замер не чаще ioStep, между замерами отдается прошлый
+// результат. Счетчик меньше прошлого (контейнер пересоздан с тем же id, cgroup новая) - история
+// этой cgroup заново.
+func diskWriters(root string, conts, pods map[string]string, now time.Time) ([]ioWriter, bool) {
+	ioState.Lock()
+	defer ioState.Unlock()
+	if !ioState.last.IsZero() && now.Sub(ioState.last) < ioStep {
+		return ioState.top, ioState.v1
+	}
+	ioState.last = now
+	if now.Sub(ioState.devsAt) > time.Hour {
+		ioState.devs, ioState.devsAt = nil, now
+	}
+	seen := map[string]bool{}
+	var list []ioWriter
+	v1 := false
+	for _, t := range ioTargets(root, conts) {
+		r, w, isV1, ok := cgroupIO(t.dir, ioDevName)
+		if !ok {
+			continue
+		}
+		v1 = v1 || isV1
+		seen[t.key] = true
+		h := ioState.hist[t.key]
+		if n := len(h); n > 0 && (r < h[n-1].r || w < h[n-1].w) {
+			h = nil
+		}
+		h = append(h, ioSample{now, r, w})
+		for len(h) > 1 && now.Sub(h[0].at) > ioKeep {
+			h = h[1:]
+		}
+		ioState.hist[t.key] = h
+		if len(h) < 2 || (w == h[0].w && r == h[0].r) {
+			continue
+		}
+		name := t.id
+		switch t.kind {
+		case "container":
+			if n := conts[t.id]; n != "" {
+				name = n
+			} else if len(t.id) > 12 {
+				name = t.id[:12]
+			}
+		case "pod":
+			if n := pods[t.id]; n != "" {
+				name = n
+			} else if len(t.id) >= 8 {
+				name = "pod " + t.id[:8]
+			}
+		}
+		list = append(list, ioWriter{Kind: t.kind, Name: name, W: w - h[0].w, R: r - h[0].r, S: int(now.Sub(h[0].at).Seconds())})
+	}
+	for k := range ioState.hist {
+		if !seen[k] {
+			delete(ioState.hist, k)
+		}
+	}
+	sort.Slice(list, func(i, j int) bool {
+		if list[i].W != list[j].W {
+			return list[i].W > list[j].W
+		}
+		return list[i].R > list[j].R
+	})
+	if len(list) > ioTopN {
+		list = list[:ioTopN]
+	}
+	ioState.top, ioState.v1 = list, v1
+	return list, v1
+}
+
 // uidCache — ленивый кэш uid→имя из /etc/passwd (одно чтение файла).
 var (
 	uidCacheOnce sync.Once
@@ -3187,7 +3466,9 @@ func collect(prev sample) (report, sample) {
 	// kube собираем в переменную: он же нужен для скрейпа сервисов (podIP есть только там)
 	r.Kube = collectKube()
 	// группы процессов - после docker и kube: им нужны имена контейнеров и подов
-	r.CPUGroups = cpuGroups(prev, cur, containerNames(dk), podNames(r.Kube))
+	cn, pn := containerNames(dk), podNames(r.Kube)
+	r.CPUGroups = cpuGroups(prev, cur, cn, pn)
+	r.DiskWriters, r.DiskWritersV1 = diskWriters("/sys/fs/cgroup", cn, pn, time.Now())
 	r.Services = collectServices(dk, r.Kube)
 	r.WebServices = collectWebServices(r.Kube)
 	r.DBStats = collectDBStats()

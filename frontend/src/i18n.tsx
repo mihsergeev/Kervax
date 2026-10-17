@@ -1338,6 +1338,14 @@ const EN: Record<string, string> = {
   'основная, реплик: {n}': 'primary, replicas: {n}',
   // что грузит базу
   'Что грузит базу': 'What loads the database',
+  // кто пишет на диск
+  'Кто пишет на диск': 'Who writes to disk',
+  'сессии и cron': 'sessions and cron',
+  'чтение {s} в час': 'reads {s} an hour',
+  'запись {h} в час': 'writes {h} an hour',
+  'около {d} в сутки': 'about {d} a day',
+  'cgroup v1: в эти цифры попадает только прямая запись, отложенная через кэш страниц не видна':
+    'cgroup v1: only direct writes get into these numbers, buffered writes through the page cache are not visible',
   'за последний час': 'over the last hour',
   'за {n} мин, в пересчете на час': 'over {n} min, per hour',
   'временные файлы {s} в час': 'temporary files {s} an hour',

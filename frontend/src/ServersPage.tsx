@@ -800,7 +800,7 @@ const SEC_OF_CARD: Record<string, string> = {
   netifrx: 'net', netiftx: 'net', neterr: 'net', nethealth: 'net', links: 'net', traffic: 'net',
   conntrack: 'net', sockets: 'net',
   diskio: 'disk', diskiops: 'disk', diskutil: 'disk', disklat: 'disk', disktemp: 'disk', diskfill: 'disk',
-  diskhealth: 'disk', du: 'disk',
+  diskhealth: 'disk', du: 'disk', diskwrite: 'disk',
   exposure: 'ports', conn: 'ports', ssh: 'access', osupd: 'updates',
   unitloop: 'units', noboot: 'units', pressure: 'proc', web5xx: 'web',
   clock: 'overview', dns: 'overview',
@@ -1565,6 +1565,49 @@ function dhSync(sync: string, t: TFn): string {
     : m[1] === 'reshape'
       ? t('перестройка {n}%', { n })
       : t('восстановление {n}%', { n })
+}
+
+// Кто пишет на диск за последний час (агент 2.33): контейнеры, поды, юниты systemd по io.stat их
+// cgroup. Рядом со здоровьем и прогнозом износа: когда SSD изнашивается быстро, первым вопросом
+// идет, кто именно пишет. Сутки - тот же темп, растянутый на 24 часа
+function DiskWritersBlock({ r }: { r: ServerReport }) {
+  const { t } = useI18n()
+  const list = (r.disk_writers ?? []).filter((w) => w.s > 0 && (w.w > 0 || w.r > 0))
+  if (!list.length) return null
+  const perH = (v: number, s: number) => (v * 3600) / s
+  const kind = (w: { kind: string; name: string }) =>
+    w.name === 'user.slice' ? t('сессии и cron') : w.kind === 'container' ? t('контейнер') : w.kind === 'pod' ? t('под') : t('юнит')
+  const win = Math.max(...list.map((w) => w.s))
+  return (
+    <div className="chart-card net-card net-card-wide" id="mcard-diskwrite">
+      <div className="net-head">
+        <div className="chart-cap">{t('Кто пишет на диск')}</div>
+        <span className="muted small">
+          {win >= 3000 ? t('за последний час') : t('за {n} мин, в пересчете на час', { n: Math.max(1, Math.round(win / 60)) })}
+        </span>
+      </div>
+      <div className="loc-results">
+        {list.map((w) => (
+          <div key={w.kind + w.name} className="loc-res docker-row">
+            <div className="docker-c-main">
+              <div className="docker-c-name mono">{w.name === 'user.slice' ? kind(w) : w.name}</div>
+              <div className="docker-c-img muted small">
+                {[w.name === 'user.slice' ? 'user.slice' : kind(w), w.r > 0 ? t('чтение {s} в час', { s: fmtBytes(perH(w.r, w.s)) }) : '']
+                  .filter(Boolean).join(' · ')}
+              </div>
+            </div>
+            <div className="docker-c-status mono small">
+              {t('запись {h} в час', { h: fmtBytes(perH(w.w, w.s)) })}
+              <div className="muted">{t('около {d} в сутки', { d: fmtBytes(perH(w.w, w.s) * 24) })}</div>
+            </div>
+          </div>
+        ))}
+      </div>
+      {r.disk_writers_v1 && (
+        <div className="net-foot">{t('cgroup v1: в эти цифры попадает только прямая запись, отложенная через кэш страниц не видна')}</div>
+      )}
+    </div>
+  )
 }
 
 function DiskHealthBlock({ r, wear }: { r: ServerReport; wear?: DiskWear[] }) {
@@ -6013,6 +6056,7 @@ function ServerDetail({
             <DiskSpaceCard server={s} r={r} onChanged={onChanged} />
             <DiskUsageBlock server={s} onChanged={onChanged} />
             <DiskHealthBlock r={r} wear={s.wear_forecast} />
+            <DiskWritersBlock r={r} />
           </div>
           <div className="chart-grid">
             {chartCard('disk')}

@@ -1655,6 +1655,13 @@ class AgentReportIn(BaseModel):
     disk_devs: list[dict] = []  # [{"dev","util","await","temp"}] — % / мс / °C по устройствам
     top_cpu: list[dict] = []  # [{"pid","comm","cpu","rss"}] — снапшот, в last_report
     top_mem: list[dict] = []
+    # кто ест CPU группами (агент 2.21): [{comm, kind, owner, n, cpu, spin, spin_age}]. Агент слал
+    # их с 06.10.2026, а здесь поля не было - pydantic выбрасывал, и cpu_spin молчал до 1.4.250.
+    # None - агент старше 2.21 (или групп нет вовсе): молчание не значит, что никто не крутит
+    cpu_groups: list[dict] | None = Field(default=None, max_length=200)
+    # кто пишет на диск за последний час (агент 2.33): [{kind, name, w, r, s}]
+    disk_writers: list[dict] = Field(default_factory=list, max_length=50)
+    disk_writers_v1: bool = False
     conntrack_count: float = 0.0
     conntrack_max: float = 0.0
     sock_used: float = 0.0
