@@ -1,6 +1,7 @@
 """Здоровье баз (helper dbstat-setup 0.5): репликация, долгие транзакции, блокировки, wraparound,
 таблицы, которые давно не вакуумились. Блок extras["db-health"], helper обновляет его раз в
-15 минут. С 0.8 у PostgreSQL еще и "что грузит базу" за последний час (load_view).
+15 минут. С 0.8 у PostgreSQL еще и "что грузит базу" за последний час (load_view), с 0.9 настройки
+и советы по ним (advice).
 
 Почему это отдельно от инвентаря: база может быть жива и отвечать, а реплика уже час не
 получает WAL, незакрытая транзакция держит блокировки и не дает VACUUM чистить, а возраст XID
@@ -170,17 +171,127 @@ def load_view(x: dict) -> dict | None:
     return out
 
 
+# Советы по настройкам PostgreSQL (dbstat-setup 0.9): настройки против машины и против нагрузки из
+# load_view. Только то, что прямо следует из цифр. Без алертов и без строк в "Что сломано": это не
+# поломка, а то, что стоит поправить при случае. Текст рисует фронт по ключу k (там же перевод)
+GIB = 1 << 30
+MIB = 1 << 20
+HP_MIN_SB = 8 * GIB  # с каких буферов звать на huge pages: таблицы страниц растут с каждым подключением
+STOP_MIN_SB = GIB  # с каких буферов 10 секунд docker на остановку мало
+STOP_OK = 60
+TEMP_ADVICE = 10 * GIB  # временных файлов в час
+WBF_ADVICE = 100  # переполнений буфера WAL в час
+WB_GOOD = 128 * MIB
+
+
+def _pow2_gib(n: float) -> int:
+    g = 1
+    while g * GIB < n:
+        g *= 2
+    return g * GIB
+
+
+def _flt(v, default: float = 0.0) -> float:
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return default
+
+
+def _ssd(rep: dict) -> bool | None:
+    """Все диски сервера SSD (helper diskhealth-setup), None - неизвестно"""
+    disks = (((rep or {}).get("extras") or {}).get("disk-health") or {}).get("disks") or []
+    rota = [d.get("rota") for d in disks if isinstance(d, dict)]
+    if not rota:
+        return None
+    return all(r == 0 for r in rota)
+
+
+def _db_size(rep: dict, container: str) -> int:
+    for d in (rep or {}).get("db_stats") or []:
+        if isinstance(d, dict) and d.get("engine") == "pg" and (d.get("container") or "") == container:
+            return sum(_int(x.get("size")) for x in d.get("dbs") or [] if isinstance(x, dict))
+    return 0
+
+
+def advice(x: dict, lv: dict | None, *, pg_count: int = 1, ssd: bool | None = None, db_size: int = 0) -> list[dict]:
+    cf = x.get("cfg")
+    if not isinstance(cf, dict):
+        return []
+    out: list[dict] = []
+    sb, mem = _int(cf.get("sb")), _int(cf.get("mem"))
+    hp, hps = str(cf.get("hp") or ""), str(cf.get("hps") or "")
+    hpn, hpt, hpsz = _int(cf.get("hpn")), _int(cf.get("hpt")), _int(cf.get("hpsz")) or 2 * MIB
+    # Huge pages. С huge_pages = on без них postgres не запустился бы; до PG17 не видно, взял ли он их,
+    # и если ядро держит достаточно, считаем, что взял
+    if sb >= HP_MIN_SB and hp != "on" and hps != "on":
+        need = hpn or -(-int(sb * 1.05) // hpsz)
+        if hps == "off" or hpt < need:
+            out.append({"k": "hugepages", "sb": sb, "pt": _int(cf.get("pt")), "need": need, "have": hpt, "hp": hp})
+    load = lv if isinstance(lv, dict) and lv.get("win") else {}
+    wal_b = load.get("wal_b") or 0
+    ck_t, ck_r = load.get("ck_t"), load.get("ck_r")
+    # Чекпоинты по объему WAL: в цикле checkpoint_timeout пишется wal_b * ckt / 3600, а чекпоинт по объему
+    # наступает на max_wal_size / (1 + checkpoint_completion_target). Внеплановые дают и CHECKPOINT,
+    # pg_basebackup, CREATE DATABASE: поэтому от трех в час и только если WAL между чекпоинтами правда
+    # подходит к порогу - при 48 МБ WAL в час гигабайтный max_wal_size ни при чем
+    mws, ckt, cct = _int(cf.get("mws")), _int(cf.get("ckt")), _flt(cf.get("cct"), 0.9)
+    per_ck = wal_b / max((ck_t or 0) + (ck_r or 0), 1)
+    if ck_r is not None and ck_r >= 3 and ck_r >= (ck_t or 0) and ckt and per_ck >= mws / (1 + cct) * 0.5:
+        rec = _pow2_gib(max(wal_b * ckt / 3600 * (1 + cct) * 1.25, mws * 2))
+        out.append({"k": "max_wal_size", "cur": mws, "rec": rec, "wal": wal_b})
+    wb, wbf = _int(cf.get("wb")), load.get("wbf") or 0
+    if wbf >= WBF_ADVICE and 0 < wb < WB_GOOD:
+        out.append({"k": "wal_buffers", "cur": wb, "n": wbf})
+    # pglz самый медленный; lz4 в сборках PG15+ есть всегда. Выключенное сжатие - только если WAL много и
+    # заметная часть его - полные копии страниц
+    walc, vn = str(cf.get("walc") or ""), _int(cf.get("v"))
+    if vn >= 150000 and walc in ("pglz", "on"):
+        out.append({"k": "wal_compression", "cur": walc})
+    elif vn >= 150000 and walc == "off" and wal_b >= GIB and load.get("wal_rec"):
+        fpi = round((load.get("fpi") or 0) * 100 / load["wal_rec"])
+        if fpi >= 5:
+            out.append({"k": "wal_compression_off", "wal": wal_b, "fpi": fpi})
+    # docker ждет 10 секунд и убивает: остановка с большими буферами не успевает дописать чекпоинт, и
+    # после каждого docker stop или перезагрузки база восстанавливается как после аварии. SIGTERM -
+    # "умная" остановка, она ждет отключения всех клиентов, а пул соединений не отключится сам
+    sto, sig = _int(cf.get("stop_to")), str(cf.get("stop_sig") or "")
+    if x.get("container") and ((sb >= STOP_MIN_SB and sto < STOP_OK) or sig == "SIGTERM"):
+        out.append({"k": "stop_timeout", "to": 10 if sto < 0 else sto, "sb": sb, "sig": sig})
+    temp = load.get("temp_b") or 0
+    if temp >= TEMP_ADVICE:
+        out.append({"k": "temp", "temp": temp, "wm": _int(cf.get("wm")), "mc": _int(cf.get("mc"))})
+    # Остальное - про планировщик и память; на маленькой базе или при нескольких инстансах на машине
+    # (каждому своя доля) советовать проценты от памяти нельзя
+    rpc = _flt(cf.get("rpc"))
+    if ssd and rpc >= 3.5 and db_size >= GIB:
+        out.append({"k": "random_page_cost", "v": rpc})
+    if pg_count == 1 and db_size >= 4 * GIB and mem >= 16 * GIB and 0 < _int(cf.get("ecs")) <= 4 * GIB:
+        out.append({"k": "effective_cache_size", "ecs": _int(cf.get("ecs")), "mem": mem})
+    if pg_count == 1 and mem >= 8 * GIB and sb:
+        if sb < mem * 0.1 and db_size >= 4 * sb:
+            out.append({"k": "shared_buffers_low", "sb": sb, "mem": mem, "lim": bool(cf.get("mem_lim"))})
+        elif sb > mem * 0.5:
+            out.append({"k": "shared_buffers_high", "sb": sb, "mem": mem, "lim": bool(cf.get("mem_lim"))})
+    return out
+
+
 def view(rep: dict, now: datetime) -> list[dict] | None:
     """Для раздела "Сервисы": по движку роль, отставание, самая долгая транзакция и проблемы"""
     items = block(rep, now)
     if items is None:
         return None
     probs = problems(rep, now)
+    pg_count = sum(1 for x in items if x.get("engine") == "pg")
+    ssd = _ssd(rep)
     out = []
     for x in items:
         k = f"{x.get('engine')}:{x.get('container') or ''}"
         mine = [{"level": lv, "text": t} for lv, t, key in probs if key.startswith(k + ":")]
+        lv = load_view(x)
+        adv = advice(x, lv, pg_count=pg_count, ssd=ssd, db_size=_db_size(rep, str(x.get("container") or ""))) \
+            if x.get("engine") == "pg" else []
         out.append({"engine": x.get("engine"), "container": x.get("container") or "", "role": x.get("role") or "",
                     "replicas": _int(x.get("replicas")), "lag": _int(x.get("lag")), "xact": _int(x.get("xact")),
-                    "xid": _int(x.get("xid")), "problems": mine, "load": load_view(x)})
+                    "xid": _int(x.get("xid")), "problems": mine, "load": lv, "advice": adv})
     return out

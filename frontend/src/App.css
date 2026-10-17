@@ -4611,6 +4611,12 @@ textarea:focus {
   font-weight: 600;
   font-size: 0.85rem;
 }
+.svc-db-load-sub {
+  margin-top: 0.2rem;
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--text-muted);
+}
 .svc-db-load-facts {
   display: flex;
   flex-wrap: wrap;

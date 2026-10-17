@@ -6,6 +6,7 @@ import {
   listServers,
   updateServer,
   type DBStat,
+  type DbAdvice,
   type DbHealth,
   type DbLoad,
   type Server,
@@ -184,16 +185,63 @@ function lagText(sec: number, t: (s: string, v?: Record<string, string | number>
 // и самые долгие запросы. Без алертов - это разбор, когда пришли выяснять, почему база тормозит или
 // изнашиваются диски. Подсказки - только то, что из этих цифр прямо следует
 const LOAD_QUIET_MS = 60_000 // запросы заняли меньше минуты за час - топ ни о чем не говорит
-const LOAD_TEMP_HINT = 10 * 1024 ** 3 // временных файлов больше 10 ГБ в час
-const LOAD_WBF_HINT = 100
 
 function fmtCount(n: number): string {
   return Math.round(n).toLocaleString(currentLang() === 'ru' ? 'ru-RU' : 'en-US')
 }
 
-function DbLoadBlock({ ld, name, t }: { ld: DbLoad; name: string; t: (s: string, v?: Record<string, string | number>) => string }) {
+// Совет по настройкам (backend db_health.advice) словами: что не так, на сколько поправить и нужен ли перезапуск
+function adviceText(a: DbAdvice, t: (s: string, v?: Record<string, string | number>) => string): string {
+  const n = (k: string) => Number(a[k] ?? 0)
+  const b = (k: string) => fmtBytes(n(k))
+  switch (a.k) {
+    case 'hugepages':
+      return a.hp === 'try' && n('have') >= n('need')
+        ? t('Ядро держит {have} huge pages, а postgres работает без них: видимо, страницы выделены после его запуска. Нужен перезапуск postgres', { have: fmtCount(n('have')) })
+        : t('shared_buffers {sb} без huge pages: таблицы страниц на сервере занимают {pt}, каждое подключение отображает все буферы страницами по 4 КБ. Нужно vm.nr_hugepages = {need} в /etc/sysctl.d{hp} и перезапуск postgres. На работающем сервере ядро может не найти столько свободных блоков, надежнее выделять при остановленном postgres', { sb: b('sb'), pt: b('pt'), need: n('need'), hp: a.hp === 'off' ? t(', huge_pages = try') : '' })
+    case 'max_wal_size':
+      return t('Чекпоинты чаще идут по объему WAL, чем по времени: при {wal} WAL в час max_wal_size {cur} мал, а после каждого чекпоинта страницы снова пишутся в WAL целиком. Примерно {rec} хватит, чтобы чекпоинты шли по checkpoint_timeout, перезапуск не нужен', { wal: b('wal'), cur: b('cur'), rec: b('rec') })
+    case 'wal_buffers':
+      return t('Буфер WAL переполнялся {n} раз за час: запросы ждали записи WAL на диск. wal_buffers {cur}, обычно хватает 64-128 МБ (нужен перезапуск)', { n: fmtCount(n('n')), cur: b('cur') })
+    case 'wal_compression':
+      return t('wal_compression = {cur}{alias}: pglz самый медленный вариант, lz4 сжимает почти так же и в разы быстрее. Поставить lz4 можно без перезапуска', { cur: String(a.cur), alias: a.cur === 'on' ? t(' (это pglz)') : '' })
+    case 'wal_compression_off':
+      return t('Сжатие WAL выключено, а WAL {wal} в час, полные копии страниц - {fpi}% записей: wal_compression = lz4 уменьшит WAL и запись на диск, перезапуск не нужен', { wal: b('wal'), fpi: n('fpi') })
+    case 'stop_timeout':
+      return [
+        n('to') < 60 && n('sb') >= 1024 ** 3
+          ? t('Docker при остановке ждет postgres {to} с, потом убивает: с буферами {sb} остановка может не успеть, и тогда после docker stop или перезагрузки сервера база восстанавливается как после аварии. В compose stop_grace_period: 5m (контейнер пересоздается), для ручной остановки docker stop -t 600', { to: n('to'), sb: b('sb') })
+          : '',
+        a.sig === 'SIGTERM'
+          ? t('Сигнал остановки SIGTERM: postgres ждет, пока отключатся все клиенты, а пул соединений сам не отключится. Нужен stop_signal: SIGINT')
+          : '',
+      ].filter(Boolean).join(' ')
+    case 'temp':
+      return t('Запросы пишут временные файлы {s} в час: сортировки и хеши не помещаются в work_mem ({wm}), это запись на диск и его износ. Поднимать work_mem осторожно: он выделяется на каждую операцию каждого подключения, а max_connections {mc}. Обычно дешевле поправить запросы с временными файлами', { s: b('temp'), wm: b('wm'), mc: n('mc') })
+    case 'random_page_cost':
+      return t('random_page_cost = {v}, а диски SSD: планировщик считает чтение по индексу в разы дороже последовательного и зря выбирает полный проход таблицы. Для SSD обычно 1.1, перезапуск не нужен', { v: n('v') })
+    case 'effective_cache_size':
+      return t('effective_cache_size {ecs} при {mem} памяти: планировщик думает, что кэша мало, и реже выбирает индексы. Обычно 50-75% памяти, перезапуск не нужен', { ecs: b('ecs'), mem: b('mem') })
+    case 'shared_buffers_low':
+      return t('shared_buffers {sb} при {mem} памяти{lim}, а база намного больше буферов: обычно ставят около 25% памяти (нужен перезапуск)', { sb: b('sb'), mem: b('mem'), lim: a.lim ? t(' (лимит контейнера)') : '' })
+    case 'shared_buffers_high':
+      return t('shared_buffers {sb}, а это больше половины памяти ({mem}{lim}): остальному серверу и кэшу ОС остается мало, обычно ставят около 25% (нужен перезапуск)', { sb: b('sb'), mem: b('mem'), lim: a.lim ? t(', лимит контейнера') : '' })
+    default:
+      return ''
+  }
+}
+
+function DbLoadBlock({ load, advice, name, t }: {
+  load: DbLoad | null | undefined
+  advice: DbAdvice[]
+  name: string
+  t: (s: string, v?: Record<string, string | number>) => string
+}) {
   const facts: string[] = []
   const hints: string[] = []
+  const tips = advice.map((a) => adviceText(a, t)).filter(Boolean)
+  // без блока нагрузки (не PostgreSQL 10+ или helper не дал) - только советы
+  const ld: DbLoad = load ?? { win: -1, pss: '', qtext: 0, cut: false, top: [] }
   if (ld.win > 0) {
     if (ld.temp_b) facts.push(t('временные файлы {s} в час', { s: fmtBytes(ld.temp_b) }))
     if (ld.rd) facts.push(t('чтение мимо shared_buffers {s} в час', { s: fmtBytes(ld.rd) }))
@@ -201,16 +249,9 @@ function DbLoadBlock({ ld, name, t }: { ld: DbLoad; name: string; t: (s: string,
       const fpi = ld.wal_rec && ld.fpi != null ? Math.round((ld.fpi * 100) / ld.wal_rec) : null
       facts.push(t('WAL {s} в час', { s: fmtBytes(ld.wal_b) }) + (fpi != null ? `, ${t('полные копии страниц: {p}% записей', { p: fpi })}` : ''))
     }
-    if (ld.ck_t != null && ld.ck_r != null) facts.push(t('чекпоинты: {a} по времени, {b} по объему WAL', { a: ld.ck_t, b: ld.ck_r }))
+    if (ld.ck_t != null && ld.ck_r != null) facts.push(t('чекпоинты: {a} по времени, {b} внеплановых', { a: ld.ck_t, b: ld.ck_r }))
     if (ld.wbf) facts.push(t('буфер WAL переполнялся {n} раз за час', { n: fmtCount(ld.wbf) }))
     if (ld.xact != null) facts.push(t('{n} транзакций в секунду', { n: (ld.xact / 3600).toFixed(ld.xact < 36000 ? 1 : 0) }))
-    if ((ld.temp_b ?? 0) >= LOAD_TEMP_HINT)
-      hints.push(t('Запросы пишут временные файлы {s} в час: сортировки и хеши не помещаются в work_mem, это запись на диск и его износ. Какие именно - видно по временным файлам у запросов ниже', { s: fmtBytes(ld.temp_b ?? 0) }))
-    // от трех в час: единичный по запросу дают CHECKPOINT, pg_basebackup, CREATE DATABASE
-    if ((ld.ck_r ?? 0) >= 3 && (ld.ck_r ?? 0) >= (ld.ck_t ?? 0))
-      hints.push(t('Чекпоинты чаще идут по объему WAL, чем по времени: max_wal_size мал для такой записи, а после каждого чекпоинта страницы снова пишутся в WAL целиком'))
-    if ((ld.wbf ?? 0) >= LOAD_WBF_HINT)
-      hints.push(t('Буфер WAL переполнялся {n} раз за час: запросы ждали записи WAL на диск, стоит увеличить wal_buffers (нужен перезапуск)', { n: fmtCount(ld.wbf ?? 0) }))
   }
   if (ld.pss === 'off')
     hints.push(t('Самые долгие запросы покажет pg_stat_statements: добавьте его в shared_preload_libraries (нужен перезапуск PostgreSQL) и выполните CREATE EXTENSION pg_stat_statements'))
@@ -225,7 +266,7 @@ function DbLoadBlock({ ld, name, t }: { ld: DbLoad; name: string; t: (s: string,
   return (
     <div className="svc-db-load">
       <div className="svc-db-load-head">
-        <span className="svc-db-load-title">{t('Что грузит базу')}</span>
+        <span className="svc-db-load-title">{load ? t('Что грузит базу') : t('Настройки PostgreSQL')}</span>
         {name && <span className="mono muted small">{name}</span>}
         {ld.win > 0 && (
           <span className="muted small">
@@ -233,7 +274,7 @@ function DbLoadBlock({ ld, name, t }: { ld: DbLoad; name: string; t: (s: string,
           </span>
         )}
       </div>
-      {ld.win <= 0 && ld.pss !== 'off' && ld.pss !== 'noext' && (
+      {ld.win === 0 && ld.pss !== 'off' && ld.pss !== 'noext' && (
         <div className="muted small">{t('Собираю данные: первая картина через 15 минут, за полный час - через час')}</div>
       )}
       {facts.length > 0 && <div className="svc-db-load-facts small">{facts.map((f) => <span key={f}>{f}</span>)}</div>}
@@ -264,6 +305,8 @@ function DbLoadBlock({ ld, name, t }: { ld: DbLoad; name: string; t: (s: string,
         </div>
       )}
       {hints.map((h) => <div key={h} className="net-note">{h}</div>)}
+      {tips.length > 0 && <div className="svc-db-load-sub">{t('Что поправить в настройках')}</div>}
+      {tips.map((h) => <div key={h} className="net-note">{h}</div>)}
     </div>
   )
 }
@@ -345,8 +388,8 @@ function DbInventory({ db, t, health = [] }: {
           </div>
         ))}
       </div>
-      {health.filter((h) => h.load).map((h) => (
-        <DbLoadBlock key={'l' + h.container} ld={h.load as DbLoad} name={health.length > 1 ? h.container : ''} t={t} />
+      {health.filter((h) => h.load || (h.advice ?? []).length > 0).map((h) => (
+        <DbLoadBlock key={'l' + h.container} load={h.load} advice={h.advice ?? []} name={health.length > 1 ? h.container : ''} t={t} />
       ))}
     </div>
   )

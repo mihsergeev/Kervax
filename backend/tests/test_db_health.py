@@ -89,7 +89,7 @@ def test_alert_home_and_view():
 
 def test_helper_writes_health():
     src = (Path(__file__).resolve().parents[2] / "agent" / "dbstat-setup.sh").read_text(encoding="utf-8")
-    assert "KERVAX_SETUP_VERSION=0.8" in src and "health_pg()" in src and "health_mysql()" in src
+    assert "KERVAX_SETUP_VERSION=0.9" in src and "health_pg()" in src and "health_mysql()" in src
     # 0.7: без роли postgres - под пользователем контейнера в явную базу, а не в базу с его именем
     assert 'psql -d "${d:-postgres}" -Atqc "$q" ${u:+-U "$u"}' in src
     assert "backend_xmin is not null" in src and "idle_xmin" in src
@@ -171,3 +171,72 @@ def test_load_view_old_versions_and_first_run():
     assert db_health.view(_rep(_pg()), NOW)[0]["load"] is None
     # нагрузка - не проблема: ни строк, ни алерта
     assert db_health.problems(_rep(_pg(load={"win": 3600, "pss": "on", "temp_b": 10**13, "ms_all": 10**9})), NOW) == []
+
+
+G = 1 << 30
+M = 1 << 20
+
+
+def _cfg(**kw):
+    c = {"v": 180000, "sb": 32 * G, "wb": 32 * M, "mws": 64 * G, "wm": 40 * M, "mwm": 2 * G, "ecs": 90 * G, "ckt": 1800,
+         "cct": 0.9, "mc": 1000, "walc": "lz4", "hp": "try", "hps": "off", "hpn": 17119, "rpc": 1.1, "mem": 125 * G,
+         "mem_lim": False, "hpt": 0, "hpsz": 2 * M, "pt": 2_600_000_000, "stop_to": -1, "stop_sig": "SIGINT"}
+    c.update(kw)
+    return c
+
+
+def test_helper_reports_settings():
+    """0.9: настройки и то, чего из базы не видно: память, huge pages ядра, таймаут остановки docker"""
+    src = (Path(__file__).resolve().parents[2] / "agent" / "dbstat-setup.sh").read_text(encoding="utf-8")
+    assert "cfg_pg()" in src and 'cf=$(cfg_pg "$c")' in src and "pg_size_bytes(current_setting('shared_buffers'))" in src
+    assert "current_setting('huge_pages_status', true)" in src and "/^HugePages_Total:/" in src
+    assert "{{.Config.StopTimeout}}" in src and "{{.HostConfig.Memory}}" in src
+
+
+def test_advice_for_a_busy_feed_database():
+    """Как было на одной ноде: 32 ГБ буферов без huge pages, буфер WAL переполняется, временные файлы
+    терабайтами, docker ждет при остановке 10 секунд"""
+    lv = {"win": 3600, "wal_b": 40 * G, "wal_rec": 277_000_000, "fpi": 2_900_000, "ck_t": 2, "ck_r": 0, "wbf": 150_000,
+          "temp_b": 2000 * G}
+    adv = db_health.advice({"container": "postgresql", "cfg": _cfg()}, lv, ssd=True, db_size=300 * G)
+    by = {a["k"]: a for a in adv}
+    assert list(by) == ["hugepages", "wal_buffers", "stop_timeout", "temp"]
+    assert by["hugepages"]["need"] == 17119 and by["hugepages"]["have"] == 0
+    assert by["wal_buffers"] == {"k": "wal_buffers", "cur": 32 * M, "n": 150_000}
+    assert by["stop_timeout"]["to"] == 10 and by["temp"]["mc"] == 1000
+    # после правок советов нет: huge pages взяты, wal_buffers 128 МБ, контейнеру дали 10 минут
+    done = _cfg(hps="on", hpt=17200, wb=128 * M, stop_to=600)
+    assert [a["k"] for a in db_health.advice({"container": "postgresql", "cfg": done}, lv, ssd=True, db_size=300 * G)] == ["temp"]
+
+
+def test_advice_for_defaults_on_a_big_machine():
+    lv = {"win": 3600, "wal_b": 8 * G, "wal_rec": 1000, "fpi": 10, "ck_t": 4, "ck_r": 6, "wbf": 0, "temp_b": 0}
+    cfg = _cfg(sb=128 * M, mem=64 * G, ecs=4 * G, rpc=4, walc="pglz", v=160000, mws=G, ckt=300, stop_to=30,
+               stop_sig="SIGTERM", hps="", hpn=0)
+    by = {a["k"]: a for a in db_health.advice({"container": "pg", "cfg": cfg}, lv, ssd=True, db_size=50 * G)}
+    assert list(by) == ["max_wal_size", "wal_compression", "stop_timeout", "random_page_cost", "effective_cache_size",
+                        "shared_buffers_low"]
+    # 8 ГБ WAL в час, цикл 5 минут, чекпоинт по объему на max_wal_size / 1.9: хватит 2 ГБ (не меньше двойного)
+    assert by["max_wal_size"]["rec"] == 2 * G and by["stop_timeout"]["sig"] == "SIGTERM"
+    # несколько инстансов на машине - проценты от памяти не советуем; на HDD и маленькой базе - random_page_cost
+    keys = [a["k"] for a in db_health.advice({"container": "pg", "cfg": cfg}, lv, pg_count=2, ssd=False, db_size=50 * G)]
+    assert "effective_cache_size" not in keys and "shared_buffers_low" not in keys and "random_page_cost" not in keys
+    # PostgreSQL до 15: lz4 нет, pglz не трогаем; на хосте (не в docker) таймаута остановки нет
+    keys = [a["k"] for a in db_health.advice({"container": "", "cfg": _cfg(v=140000, walc="on", hps="", hpt=17200)}, lv)]
+    assert "wal_compression" not in keys and "stop_timeout" not in keys and "hugepages" not in keys
+    # внеплановые чекпоинты при 48 МБ WAL в час - не от объема WAL, max_wal_size ни при чем
+    small = dict(lv, wal_b=48 * M, ck_t=4, ck_r=8)
+    assert "max_wal_size" not in [a["k"] for a in db_health.advice({"container": "pg", "cfg": cfg}, small)]
+    assert db_health.advice({"container": "pg"}, lv) == []
+
+
+def test_advice_in_view_uses_disks_and_db_sizes():
+    item = _pg(container="pg", cfg=_cfg(sb=128 * M, mem=64 * G, ecs=4 * G, rpc=4, stop_to=600, hps="", hpn=0))
+    rep = _rep(item)
+    rep["db_stats"] = [{"engine": "pg", "container": "pg", "dbs": [{"name": "shop", "size": 40 * G}]}]
+    rep["extras"]["disk-health"] = {"disks": [{"dev": "nvme0n1", "rota": 0}, {"dev": "nvme1n1", "rota": 0}]}
+    keys = [a["k"] for a in db_health.view(rep, NOW)[0]["advice"]]
+    assert keys == ["random_page_cost", "effective_cache_size", "shared_buffers_low"]
+    rep["extras"]["disk-health"]["disks"][1]["rota"] = 1  # есть HDD - про random_page_cost молчим
+    assert "random_page_cost" not in [a["k"] for a in db_health.view(rep, NOW)[0]["advice"]]
+    assert db_health.view(_rep(_my()), NOW)[0]["advice"] == []

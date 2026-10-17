@@ -29,9 +29,14 @@
 # and, with pg_stat_statements, the statements that took the most time. Their texts are the
 # normalized ones PostgreSQL itself keeps (constants replaced by $1, $2...), cut to 300 characters;
 # a text that mentions a password, a secret or a token is not sent at all.
+#
+# Since 0.9 PostgreSQL also reports the settings that decide how it uses memory, WAL and the disk,
+# with what the panel cannot see from inside the database: memory of the machine or the container
+# limit, huge pages reserved by the kernel, page tables, how long docker waits before killing the
+# container on stop. The panel compares them with the load and gives advice; nothing is changed here.
 set -euo pipefail
 
-KERVAX_SETUP_VERSION=0.8  # MAJOR.MINOR; compared component-wise
+KERVAX_SETUP_VERSION=0.9  # MAJOR.MINOR; compared component-wise
 KERVAX_SETUP_ALWAYS=1     # safe on any node: without a database it collects an empty file
 
 HELPER_DIR=/lib65/kervax
@@ -158,7 +163,7 @@ pg_oldest() { # container state-condition
 }
 
 health_pg() {
-  local c="$1" rec r role n lag st xa xi lw xid dead db t dn ln va ld
+  local c="$1" rec r role n lag st xa xi lw xid dead db t dn ln va ld cf
   rec=$(pg_q "$c" "select pg_is_in_recovery()" | head -1)
   case "$rec" in t|f) ;; *) return 0 ;; esac
   if [ "$rec" = t ]; then
@@ -192,7 +197,8 @@ health_pg() {
   # statements are left out (a node can hold dozens of instances)
   case "$ld" in *',"top":['*) [ $((LOAD_BYTES + ${#ld})) -gt "$LOAD_BUDGET" ] && ld="${ld%%,\"top\":*},\"top\":[],\"cut\":1}" ;; esac
   LOAD_BYTES=$((LOAD_BYTES + ${#ld}))
-  HEALTH="$HEALTH${HEALTH:+,}{\"engine\":\"pg\",\"container\":\"$(esc "$c")\",\"role\":\"$role\",\"replicas\":$n,\"lag\":$lag,\"receiver\":\"$(esc "$st")\",\"xact\":$(num "${xa%%|*}"),\"xact_db\":\"$(esc "$(printf '%s' "$xa" | cut -d'|' -f2)")\",\"xact_app\":\"$(esc "$(printf '%s' "$xa" | cut -d'|' -f3)")\",\"idle_xact\":$(num "${xi%%|*}"),\"idle_db\":\"$(esc "$(printf '%s' "$xi" | cut -d'|' -f2)")\",\"idle_app\":\"$(esc "$(printf '%s' "$xi" | cut -d'|' -f3)")\",\"idle_xmin\":$(num "${xm%%|*}"),\"idle_xmin_db\":\"$(esc "$(printf '%s' "$xm" | cut -d'|' -f2)")\",\"idle_xmin_app\":\"$(esc "$(printf '%s' "$xm" | cut -d'|' -f3)")\",\"lock_waits\":$(num "${lw%%|*}"),\"lock_wait\":$(num "${lw#*|}"),\"xid\":$(num "${xid%%|*}"),\"xid_db\":\"$(esc "${xid#*|}")\",\"dead\":[$dead]${ld:+,\"load\":$ld}}"
+  cf=$(cfg_pg "$c")
+  HEALTH="$HEALTH${HEALTH:+,}{\"engine\":\"pg\",\"container\":\"$(esc "$c")\",\"role\":\"$role\",\"replicas\":$n,\"lag\":$lag,\"receiver\":\"$(esc "$st")\",\"xact\":$(num "${xa%%|*}"),\"xact_db\":\"$(esc "$(printf '%s' "$xa" | cut -d'|' -f2)")\",\"xact_app\":\"$(esc "$(printf '%s' "$xa" | cut -d'|' -f3)")\",\"idle_xact\":$(num "${xi%%|*}"),\"idle_db\":\"$(esc "$(printf '%s' "$xi" | cut -d'|' -f2)")\",\"idle_app\":\"$(esc "$(printf '%s' "$xi" | cut -d'|' -f3)")\",\"idle_xmin\":$(num "${xm%%|*}"),\"idle_xmin_db\":\"$(esc "$(printf '%s' "$xm" | cut -d'|' -f2)")\",\"idle_xmin_app\":\"$(esc "$(printf '%s' "$xm" | cut -d'|' -f3)")\",\"lock_waits\":$(num "${lw%%|*}"),\"lock_wait\":$(num "${lw#*|}"),\"xid\":$(num "${xid%%|*}"),\"xid_db\":\"$(esc "${xid#*|}")\",\"dead\":[$dead]${ld:+,\"load\":$ld}${cf:+,\"cfg\":$cf}}"
 }
 
 # ── What loads PostgreSQL (0.8) ────────────────────────────────────────────────
@@ -352,6 +358,30 @@ load_pg() { # container -> a JSON object on stdout, nothing when the engine does
   printf '{"win":%s,"pss":"%s","qtext":%s,"temp_b":%s,"temp_f":%s,"xact":%s,"rd":%s,"wal_rec":%s,"fpi":%s,"wal_b":%s,"wbf":%s,"ck_t":%s,"ck_r":%s,"ms_all":%s,"top":[%s]}' \
     "$win" "$pss" "$qtext" "$(num "$tb")" "$(num "$tf")" "$(num "$xa")" "$(num "$rd")" "$(num "$wr")" "$(num "$fp")" \
     "$(num "$wb")" "$(num "$wf")" "$(num "$kt")" "$(num "$kr")" "$msall" "$top"
+}
+
+# ── PostgreSQL settings against the machine (0.9) ──────────────────────────────
+# Sizes come as bytes (pg_size_bytes), so the panel does not parse units. Huge pages: what the
+# engine needs (shared_memory_size_in_huge_pages, PG15+), whether it got them (huge_pages_status,
+# PG17+) and what the kernel holds. A container stop timeout of -1 means docker's default, 10 seconds.
+flt() { case "${1:-}" in ''|*[!0-9.]*|.) echo 0 ;; *) echo "$1" ;; esac; }
+
+cfg_pg() { # container -> a JSON object, nothing when the engine does not answer
+  local c="$1" r sb wb mws wm mwm ecs ckt mc walc hp hps hpn rpc cct vn mem hpt hpsz pt lim="0" sto="-1" sig=""
+  r=$(pg_q "$c" "select concat_ws('|', pg_size_bytes(current_setting('shared_buffers')), pg_size_bytes(current_setting('wal_buffers')), pg_size_bytes(current_setting('max_wal_size')), pg_size_bytes(current_setting('work_mem')), pg_size_bytes(current_setting('maintenance_work_mem')), pg_size_bytes(current_setting('effective_cache_size')), extract(epoch from current_setting('checkpoint_timeout')::interval)::int, current_setting('max_connections'), current_setting('wal_compression'), current_setting('huge_pages'), coalesce(current_setting('huge_pages_status', true), ''), coalesce(current_setting('shared_memory_size_in_huge_pages', true), ''), current_setting('random_page_cost'), current_setting('checkpoint_completion_target'), current_setting('server_version_num'))" | head -1)
+  IFS='|' read -r sb wb mws wm mwm ecs ckt mc walc hp hps hpn rpc cct vn <<< "$r"
+  [ "$(num "${sb:-}")" -gt 0 ] || return 0
+  IFS='|' read -r mem hpt hpsz pt < <(awk '/^MemTotal:/ {m = $2} /^HugePages_Total:/ {h = $2} /^Hugepagesize:/ {s = $2}
+    /^PageTables:/ {p = $2} END {printf "%.0f|%.0f|%.0f|%.0f\n", m * 1024, h, s * 1024, p * 1024}' /proc/meminfo)
+  if [ -n "$c" ]; then
+    IFS='|' read -r sto sig lim < <(docker inspect -f '{{if .Config.StopTimeout}}{{.Config.StopTimeout}}{{else}}-1{{end}}|{{.Config.StopSignal}}|{{.HostConfig.Memory}}' "$c" 2>/dev/null)
+  fi
+  [ "$(num "${lim:-0}")" -gt 0 ] && mem=$lim
+  printf '{"v":%s,"sb":%s,"wb":%s,"mws":%s,"wm":%s,"mwm":%s,"ecs":%s,"ckt":%s,"cct":%s,"mc":%s,"walc":"%s","hp":"%s","hps":"%s","hpn":%s,"rpc":%s,"mem":%s,"mem_lim":%s,"hpt":%s,"hpsz":%s,"pt":%s,"stop_to":%s,"stop_sig":"%s"}' \
+    "$(num "${vn:-}")" "$(num "$sb")" "$(num "${wb:-}")" "$(num "${mws:-}")" "$(num "${wm:-}")" "$(num "${mwm:-}")" "$(num "${ecs:-}")" \
+    "$(num "${ckt:-}")" "$(flt "${cct:-}")" "$(num "${mc:-}")" "$(esc "${walc:-}")" "$(esc "${hp:-}")" "$(esc "${hps:-}")" "$(num "${hpn:-}")" \
+    "$(flt "${rpc:-}")" "$(num "${mem:-}")" "$( [ "$(num "${lim:-0}")" -gt 0 ] && echo true || echo false)" "$(num "${hpt:-}")" "$(num "${hpsz:-}")" "$(num "${pt:-}")" \
+    "$(num "${sto:--1}")" "$(esc "${sig:-}")"
 }
 
 # ── MySQL / MariaDB ────────────────────────────────────────────────────────────
