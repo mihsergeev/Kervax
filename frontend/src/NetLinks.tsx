@@ -39,7 +39,7 @@ function decParts(n: number): [string, string] {
   }
   return [v >= 100 || i === 0 ? v.toFixed(0) : v.toFixed(1).replace(/\.0$/, ''), u[i]]
 }
-function fmtDec(n: number): string {
+export function fmtDec(n: number): string {
   return decParts(n).join(' ')
 }
 

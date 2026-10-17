@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app import settings_store
 from app import timeline as timeline_mod
 from app import traffic as traffic_mod
+from app import usage as usage_mod
 from app.config import Settings
 from app.models import CheckSample, ServerMetric
 
@@ -37,6 +38,7 @@ FIXED = [
     ("alerts", ALERTS_KEEP, ["alert_events"]),
     ("timeline", timeline_mod.KEEP, ["server_events"]),
     ("traffic", traffic_mod.KEEP, ["server_traffic"]),
+    ("usage", usage_mod.KEEP, ["server_usage"]),
     ("commands", COMMANDS_KEEP, ["docker_commands", "kube_commands", "backup_commands"]),
     ("web_lines", WEB_LINES_KEEP, []),
     ("domain_probes", DOMAIN_PROBES_KEEP, ["domain_probes"]),

@@ -1185,6 +1185,8 @@ export type ServerProblem = {
 // Пишущий на диск по io.stat его cgroup: записано и прочитано за s секунд (около часа, у недавно
 // запущенного меньше)
 export type DiskWriter = { kind: 'container' | 'pod' | 'unit'; name: string; w: number; r: number; s: number }
+// кто качает трафик (агент 2.34): принято и отдано за окно s секунд
+export type NetUser = { kind: 'container' | 'pod'; name: string; rx: number; tx: number; s: number }
 export type DbHealth = {
   engine: string
   container: string
@@ -1478,6 +1480,7 @@ export type ServerReport = {
   cpu_groups?: CpuGroup[] // кто ест CPU группами с владельцем (агент 2.21+)
   disk_writers?: DiskWriter[] // кто пишет на диск за последний час (агент 2.33+)
   disk_writers_v1?: boolean // cgroup v1: отложенная запись в счетчики не попадает
+  net_users?: NetUser[] // кто качает трафик за последний час (агент 2.34+)
   conntrack_count?: number
   conntrack_max?: number
   sock_used?: number
@@ -2311,6 +2314,18 @@ export type TrafficOut = {
   since: string | null
 }
 export const getTraffic = (id: number) => api<TrafficOut>(`/api/servers/${id}/traffic`)
+// кто качает трафик и кто пишет на диск по часам (app/usage.py): у net в паре [принято, отдано],
+// у disk [записано, прочитано]; дни недели - в часовом поясе браузера
+export type UsageName = {
+  name: string
+  kind: string
+  d24: [number, number]
+  week: [number, number]
+  days: [number, number][]
+}
+export type UsageOut = { metric: 'net' | 'disk'; days: string[]; names: UsageName[]; since: string | null }
+export const getUsage = (id: number, metric: 'net' | 'disk') =>
+  api<UsageOut>(`/api/servers/${id}/usage?metric=${metric}&tz=${new Date().getTimezoneOffset()}`)
 export type OomEvent = { ts: string; victim: string; count: number }
 export function serverOomEvents(id: number, limit = 50): Promise<OomEvent[]> {
   return api<OomEvent[]>(`/api/servers/${id}/oom-events?limit=${limit}`)

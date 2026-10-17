@@ -41,6 +41,7 @@ const FIXED: Record<string, string> = {
   alerts: 'История алертов',
   timeline: 'Хронология серверов',
   traffic: 'Трафик по дням',
+  usage: 'Кто качает трафик и пишет на диск, по часам',
   commands: 'Команды Docker, Kubernetes и бэкапа',
   web_lines: 'Строки ошибок 5xx: адреса клиентов, запросы',
   domain_probes: 'Проверки домена при добавлении сайта',

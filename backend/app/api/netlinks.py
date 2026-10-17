@@ -6,6 +6,8 @@
 
 Трафик: сутки по настоящим сетевым картам, сводка за расчетный период и лимит тарифа
 (app/traffic.py). Лимит меняется обычным PATCH сервера.
+
+Кто качает трафик и кто пишет на диск - по часам за неделю (app/usage.py).
 """
 from datetime import date, datetime, timedelta, timezone
 
@@ -13,7 +15,7 @@ from fastapi import APIRouter, HTTPException, Query, status
 from pydantic import BaseModel, Field
 from sqlalchemy import delete as sa_delete, select
 
-from app import audit, netlinks, traffic as traffic_mod
+from app import audit, netlinks, traffic as traffic_mod, usage as usage_mod
 from app.api.servers import _get_or_404
 from app.deps import CurrentUser, SessionDep, group_allowed
 from app.models import LinkSample, Server, ServerLink, ServerTraffic
@@ -207,3 +209,14 @@ async def server_traffic(server_id: int, user: CurrentUser, session: SessionDep)
         "agent_ok": _ver(server.agent_version) >= LINK_AGENT,
         "since": (server.traffic_ctr or {}).get("since") if isinstance(server.traffic_ctr, dict) else None,
     }
+
+
+@router.get("/{server_id}/usage")
+async def server_usage(
+    server_id: int, user: CurrentUser, session: SessionDep,
+    metric: str = Query("net", pattern="^(net|disk)$"),
+    tz: int = Query(0, ge=-14 * 60, le=14 * 60),
+) -> dict:
+    """Кто качает трафик (net) или пишет на диск (disk): сутки, неделя и дни недели по каждому."""
+    server = await _get_or_404(server_id, session, user)
+    return await usage_mod.view(session, server.id, metric, datetime.now(timezone.utc), tz)
