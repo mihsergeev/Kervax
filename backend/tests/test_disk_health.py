@@ -1,5 +1,6 @@
 """Здоровье физических дисков: блок helper'а diskhealth-setup и алерт "Диск: поломка"."""
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 from sqlalchemy import select
 
@@ -195,3 +196,21 @@ async def test_disk_health_alert_lifecycle(tmp_path, monkeypatch):
     await tick(fixed)
     assert len(sent) == 4 and sent[3].startswith("✅") and "диски снова в порядке" in sent[3]
     await engine.dispose()
+
+
+def test_virtual_disks_of_a_vm_are_listed_and_quiet():
+    # helper 0.2 на ВМ перечисляет виртуальные диски без SMART: проблем по ним не бывает, а
+    # "пропавшим" отсоединенный облачный том не становится (на ВМ helper не помнит диски)
+    vd = _disk("sda", "", model="Virtual disk", type="spi", rota=1, err="virtual", health="",
+               temp=None, wear=None, spare=None, spare_thr=None, media=None, crit="", poh=None)
+    block = {"v": 1, "ts": 1000, "virt": "vmware", "container": False, "smart": False, "raid": [],
+             "disks": [vd, dict(vd, dev="sdb", ok=False)], "missing": [], "io": {"count": 0, "last": []}}
+    assert disk_health_problems(block) == []
+    src = (Path(__file__).resolve().parents[2] / "agent" / "diskhealth-setup.sh").read_text(encoding="utf-8")
+    assert "KERVAX_SETUP_VERSION=0.2" in src and "\r" not in src
+    body = src[src.index("elif ! $container; then"):src.index("EOF_VLSBLK\nfi")]
+    assert 'add_disk "$name" "$model" "$serial" "$tran" "$size" "$rota" true virtual' in body
+    assert "SEEN_NOW" not in body and "PRESENT" not in body and "smartctl" not in body
+    # разбор lsblk один на железо и ВМ
+    assert src.count("lsblk -d -n -b -P") == 1 and src.count("$(lsblk_disks)") == 2
+
