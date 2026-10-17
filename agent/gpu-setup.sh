@@ -1,0 +1,229 @@
+#!/usr/bin/env bash
+# Kervax: NVIDIA GPUs. A root helper asks nvidia-smi for load, memory, temperature, power, clocks,
+# ECC and throttling of every GPU and for the processes on them (with their container, pod or
+# systemd unit), reads Xid errors of the driver from the kernel log and lists the GPUs on the PCI
+# bus with their bound driver, so the panel sees a GPU the driver lost. It writes
+# /var/lib/kervax/report.d/gpu.json every minute. The agent hands report.d to the panel as is.
+#
+# Read only: nothing is installed and no GPU setting is changed. Without nvidia-smi (driver not
+# installed) only the PCI bus and the kernel are reported.
+set -euo pipefail
+
+KERVAX_SETUP_VERSION=0.1  # MAJOR.MINOR; compared component-wise
+KERVAX_SETUP_WHEN="command -v nvidia-smi >/dev/null 2>&1 || grep -qsx 0x10de /sys/bus/pci/devices/*/vendor"
+
+HELPER_DIR=/lib65/kervax
+HELPER="$HELPER_DIR/kervax-gpu"
+STATE_DIR=/var/lib/kervax
+OUT="$STATE_DIR/report.d/gpu.json"
+
+if [ "$(id -u)" != 0 ]; then echo "Root required." >&2; exit 1; fi
+
+# The parent /var/lib/kervax is set to 0755 EXPLICITLY (under umask 077 the unprivileged agent could not enter).
+install -d -m 0755 "$HELPER_DIR" "$STATE_DIR" "$STATE_DIR/versions" "$STATE_DIR/report.d"
+
+# Written next to the old one and swapped in with mv: bash reads a running script as it goes.
+cat > "$HELPER.new" <<'HELPER_EOF'
+#!/usr/bin/env bash
+# NVIDIA GPUs -> /var/lib/kervax/report.d/gpu.json. Read only.
+set -u
+export LC_ALL=C
+OUT=/var/lib/kervax/report.d/gpu.json
+STATE=/var/lib/kervax/gpu
+TMP="$OUT.tmp.$$"
+now=$(date +%s)
+install -d -m 0700 "$STATE"
+
+# JSON string body: control characters dropped, backslash and quote escaped
+esc() { printf '%s' "$1" | tr -d '\000-\037' | sed 's/\\/\\\\/g; s/"/\\"/g'; }
+
+# -- GPUs on the PCI bus: VGA (0x0300) and 3D controllers (0x0302) of NVIDIA and the bound driver:
+# nvidia, vfio-pci (given to a VM), nouveau, or none (the driver could not take the card) --
+PCI=""
+for d in /sys/bus/pci/devices/*; do
+  [ "$(cat "$d/vendor" 2>/dev/null)" = 0x10de ] || continue
+  case "$(cat "$d/class" 2>/dev/null)" in 0x0300*|0x0302*) ;; *) continue ;; esac
+  drv=""
+  [ -L "$d/driver" ] && drv=$(basename "$(readlink "$d/driver")")
+  dev=$(cat "$d/device" 2>/dev/null || true)
+  PCI="$PCI${PCI:+,}{\"bus\":\"$(esc "${d##*/}")\",\"dev\":\"$(esc "${dev#0x}")\",\"drv\":\"$(esc "$drv")\"}"
+done
+
+kernel=$(uname -r)
+mod=false
+[ -d /sys/module/nvidia ] && mod=true
+# the module for the running kernel is on disk: after a kernel update without DKMS it is not
+mod_built=false
+if find "/lib/modules/$kernel" \( -name 'nvidia.ko' -o -name 'nvidia.ko.*' \) -print -quit 2>/dev/null | grep -q .; then
+  mod_built=true
+fi
+
+smi=false; ok=false; err=""; driver=""; cuda=""
+GPUS=""; PROCS=""
+if command -v nvidia-smi >/dev/null 2>&1; then
+  smi=true
+  F=index,pci.bus_id,name,uuid,utilization.gpu,utilization.memory,memory.used,memory.total,temperature.gpu
+  F=$F,power.draw,power.limit,clocks.sm,clocks.max.sm,pstate,fan.speed,persistence_mode
+  F=$F,ecc.errors.uncorrected.volatile.total,ecc.errors.corrected.volatile.total,driver_version
+  if timeout 20 nvidia-smi --query-gpu="$F" --format=csv,noheader,nounits > "$STATE/q" 2> "$STATE/q.err"; then
+    ok=true
+  else
+    err=$(cat "$STATE/q" "$STATE/q.err" 2>/dev/null | grep -v '^[[:space:]]*$' | head -1 | cut -c1-300)
+    [ -n "$err" ] || err="nvidia-smi exited with an error"
+  fi
+fi
+
+if $ok; then
+  # throttle reasons: clocks_event_reasons since driver 535, clocks_throttle_reasons before
+  : > "$STATE/thr"
+  for p in clocks_event_reasons clocks_throttle_reasons; do
+    if timeout 20 nvidia-smi --query-gpu="index,$p.hw_thermal_slowdown,$p.sw_thermal_slowdown,$p.hw_power_brake_slowdown,$p.sw_power_cap" \
+        --format=csv,noheader > "$STATE/thr" 2>/dev/null; then
+      break
+    fi
+    : > "$STATE/thr"
+  done
+  # temperature limits, pages and rows of memory waiting for a reset; old drivers do not know
+  # ROW_REMAPPER - then without it
+  timeout 20 nvidia-smi -q -d TEMPERATURE,PAGE_RETIREMENT,ROW_REMAPPER > "$STATE/x" 2>/dev/null \
+    || timeout 20 nvidia-smi -q -d TEMPERATURE,PAGE_RETIREMENT > "$STATE/x" 2>/dev/null \
+    || timeout 20 nvidia-smi -q -d TEMPERATURE > "$STATE/x" 2>/dev/null || : > "$STATE/x"
+  cuda=$(awk -F': *' '/^CUDA Version/ {print $2; exit}' "$STATE/x")
+  awk '
+    function val(s) { sub(/^[^:]*: */, "", s); gsub(/[^0-9.]/, "", s); return s }
+    function yes(s) { sub(/^[^:]*: */, "", s); return s }
+    function out() { printf "%s|%s|%s|%s|%s|%s|%s\n", tolower(bus), slow, shut, maxop, ret, rmp, rf }
+    /^GPU [0-9A-Fa-f]+:/ { if (bus != "") out(); bus = $2; slow = shut = maxop = ret = rmp = rf = sec = ""; next }
+    /^    [A-Za-z][^:]*$/ { sec = $0; sub(/^ +/, "", sec); sub(/ +$/, "", sec); next }
+    /GPU Slowdown Temp/ { slow = val($0) }
+    /GPU Shutdown Temp/ { shut = val($0) }
+    /GPU Max Operating Temp/ { maxop = val($0) }
+    /Pending Page (Blacklist|Retirement)/ { ret = yes($0) }
+    sec == "Remapped Rows" && /^ +Pending +:/ { rmp = yes($0) }
+    /Remapping Failure Occurred/ { rf = yes($0) }
+    END { if (bus != "") out() }' "$STATE/x" > "$STATE/xp"
+  GPUS=$(awk -v thrf="$STATE/thr" -v xpf="$STATE/xp" '
+    function trim(s) { gsub(/^[ \t]+|[ \t\r]+$/, "", s); return s }
+    function num(s) { s = trim(s); return (s ~ /^-?[0-9]+(\.[0-9]+)?$/) ? s : "null" }
+    function str(s) { s = trim(s); gsub(/[\001-\037]/, "", s); gsub(/\\/, "\\\\", s); gsub(/"/, "\\\"", s); return "\"" s "\"" }
+    function act(s) { return (trim(s) == "Active") ? "true" : "false" }
+    function yn(s) { return (trim(s) == "Yes") ? "true" : "false" }
+    BEGIN {
+      while ((getline l < thrf) > 0) { split(l, a, ","); thr[trim(a[1])] = "{\"hw\":" act(a[2]) ",\"sw\":" act(a[3]) ",\"brake\":" act(a[4]) ",\"pcap\":" act(a[5]) "}" }
+      while ((getline l < xpf) > 0) { split(l, a, "|"); x[a[1]] = l }
+    }
+    {
+      n = split($0, f, ",")
+      if (n < 19) next
+      i = trim(f[1]); bus = tolower(trim(f[2]))
+      split(x[bus], q, "|")
+      printf "%s{\"i\":%s,\"bus\":%s,\"name\":%s,\"uuid\":%s,\"util\":%s,\"mutil\":%s,\"mem\":%s,\"memt\":%s,\"temp\":%s,\"pw\":%s,\"pwl\":%s,\"clk\":%s,\"clkm\":%s,\"ps\":%s,\"fan\":%s,\"pm\":%s,\"ecc_u\":%s,\"ecc_c\":%s,\"slow\":%s,\"shut\":%s,\"maxop\":%s,\"thr\":%s,\"retire\":%s,\"remap\":%s,\"remap_fail\":%s}",
+        (c++ ? "," : ""), num(i), str(f[2]), str(f[3]), str(f[4]), num(f[5]), num(f[6]), num(f[7]), num(f[8]), num(f[9]),
+        num(f[10]), num(f[11]), num(f[12]), num(f[13]), str(f[14]), num(f[15]), str(f[16]), num(f[17]), num(f[18]),
+        num(q[2]), num(q[3]), num(q[4]), (i in thr ? thr[i] : "null"), yn(q[5]), yn(q[6]), yn(q[7])
+    }' "$STATE/q")
+  driver=$(head -1 "$STATE/q" | awk -F',' '{gsub(/^[ \t]+|[ \t\r]+$/, "", $19); print $19}')
+
+  # -- processes on the GPUs and whose they are: container, pod, systemd unit or user --
+  declare -A DNAME
+  owner_of() {
+    kind=""; owner=""
+    local cg id uid d
+    cg=$(cat "/proc/$1/cgroup" 2>/dev/null) || return 0
+    uid=$(printf '%s' "$cg" | grep -oE 'pod[0-9a-f]{8}[-_][0-9a-f]{4}[-_][0-9a-f]{4}[-_][0-9a-f]{4}[-_][0-9a-f]{12}' | tail -1)
+    if [ -n "$uid" ]; then
+      uid=$(printf '%s' "${uid#pod}" | tr _ -)
+      kind=pod; owner="pod ${uid:0:8}"
+      # the kubelet keeps logs in /var/log/pods/<namespace>_<pod>_<uid>: the name without the API
+      for d in /var/log/pods/*_"$uid"; do
+        [ -d "$d" ] || continue
+        d=${d##*/}; d=${d%_"$uid"}
+        owner="${d%%_*}/${d#*_}"
+      done
+      return 0
+    fi
+    id=$(printf '%s' "$cg" | grep -oE 'docker[-/][0-9a-f]{64}' | tail -1)
+    if [ -n "$id" ]; then
+      id=${id#docker?}
+      kind=container; owner=${id:0:12}
+      if [ -z "${DNAME[$id]+x}" ]; then
+        DNAME[$id]=$(timeout 5 docker inspect --format '{{.Name}}' "$id" 2>/dev/null | sed 's#^/##' || true)
+      fi
+      [ -n "${DNAME[$id]}" ] && owner=${DNAME[$id]}
+      return 0
+    fi
+    owner=$(printf '%s' "$cg" | grep -oE '[^/]+\.service' | tail -1)
+    if [ -n "$owner" ]; then kind=unit; return 0; fi
+    if printf '%s' "$cg" | grep -q 'user\.slice'; then
+      kind=user; owner=$(stat -c %U "/proc/$1" 2>/dev/null || true)
+    fi
+  }
+  timeout 20 nvidia-smi --query-compute-apps=gpu_uuid,pid,used_memory,process_name --format=csv,noheader,nounits \
+    > "$STATE/p" 2>/dev/null || : > "$STATE/p"
+  while IFS=',' read -r uuid pid mem pname; do
+    uuid=$(printf '%s' "$uuid" | tr -d ' '); pid=$(printf '%s' "$pid" | tr -d ' '); mem=$(printf '%s' "$mem" | tr -d ' ')
+    case "$pid" in ''|*[!0-9]*) continue ;; esac
+    case "$mem" in ''|*[!0-9]*) mem=null ;; esac
+    comm=$(cat "/proc/$pid/comm" 2>/dev/null || true)
+    [ -n "$comm" ] || comm=$(printf '%s' "$pname" | sed 's/^ *//; s#.*/##')
+    owner_of "$pid"
+    PROCS="$PROCS${PROCS:+,}{\"gpu\":\"$(esc "$uuid")\",\"pid\":$pid,\"mem\":$mem,\"name\":\"$(esc "$comm")\",\"kind\":\"$kind\",\"owner\":\"$(esc "$owner")\"}"
+  done < "$STATE/p"
+fi
+
+# -- Xid: errors the driver writes to the kernel log, the last day --
+XID=""
+NVRM=""
+if command -v journalctl >/dev/null 2>&1; then
+  journalctl -k --since "-24 h" -q -o short-unix --no-pager 2>/dev/null | grep -F 'NVRM: Xid' | tail -20 > "$STATE/xid" || true
+  while IFS= read -r line; do
+    ts=${line%%.*}
+    case "$ts" in ''|*[!0-9]*) continue ;; esac
+    msg=${line#*NVRM: Xid }
+    bus=$(printf '%s' "$msg" | sed -n 's/^(PCI:\([0-9A-Fa-f:.]*\)).*/\1/p')
+    code=$(printf '%s' "$msg" | sed -n 's/^([^)]*): *\([0-9][0-9]*\).*/\1/p')
+    [ -n "$code" ] || continue
+    text=$(printf '%s' "$msg" | sed 's/^([^)]*): *[0-9]*,* *//' | cut -c1-200)
+    XID="$XID${XID:+,}{\"ts\":$ts,\"bus\":\"$(esc "$bus")\",\"code\":$code,\"text\":\"$(esc "$text")\"}"
+  done < "$STATE/xid"
+  # the driver does not answer: its last words in this boot (API mismatch, failed to initialize)
+  if [ -n "$err" ]; then
+    NVRM=$(journalctl -k -b -q -o cat --no-pager 2>/dev/null | grep -E 'NVRM:|nvidia:|nvidia-' | grep -vF 'NVRM: Xid' | tail -1 | cut -c1-300)
+  fi
+fi
+
+printf '{"v":1,"ts":%s,"smi":%s,"ok":%s,"err":"%s","driver":"%s","cuda":"%s","kernel":"%s","mod":%s,"mod_built":%s,"nvrm":"%s","pci":[%s],"gpus":[%s],"procs":[%s],"xid":[%s]}\n' \
+  "$now" "$smi" "$ok" "$(esc "$err")" "$(esc "$driver")" "$(esc "$cuda")" "$(esc "$kernel")" "$mod" "$mod_built" \
+  "$(esc "$NVRM")" "$PCI" "$GPUS" "$PROCS" "$XID" > "$TMP"
+mv -f "$TMP" "$OUT"
+chmod 0644 "$OUT"
+HELPER_EOF
+chmod 0755 "$HELPER.new" && mv -f "$HELPER.new" "$HELPER"
+
+cat > /etc/systemd/system/kervax-gpu.service <<EOF
+[Unit]
+Description=Kervax: NVIDIA GPUs (read only)
+[Service]
+Type=oneshot
+ExecStart=$HELPER
+Nice=10
+TimeoutStartSec=3min
+EOF
+cat > /etc/systemd/system/kervax-gpu.timer <<'EOF'
+[Unit]
+Description=Kervax: check the NVIDIA GPUs every minute
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=1min
+AccuracySec=5s
+[Install]
+WantedBy=timers.target
+EOF
+
+systemctl daemon-reload
+systemctl enable --now kervax-gpu.timer >/dev/null 2>&1 || true
+systemctl start --no-block kervax-gpu.service >/dev/null 2>&1 || true
+
+echo "$KERVAX_SETUP_VERSION" > "$STATE_DIR/versions/gpu-setup.ver"
+chmod 0644 "$STATE_DIR/versions/gpu-setup.ver"
+echo "✓ gpu-setup: NVIDIA GPUs, processes and Xid errors -> $OUT (every minute)."

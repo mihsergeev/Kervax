@@ -18,6 +18,7 @@ from app import backup_verify
 from app import disk_wear
 from app import request_watch
 from app import db_health
+from app import gpu as gpu_mod
 from app import mem_trend
 from app import restarts as srv_restarts
 from app import access_audit
@@ -246,6 +247,9 @@ def _out(
     o.access = access_audit.view(server, now)
     o.access_advice = access_audit.advice(server, now)
     o.db_health = db_health.view(server.last_report or {}, now)
+    o.gpu = gpu_mod.view(server.last_report or {}, now)
+    o.gpu_sum = gpu_mod.summary(server.last_report or {}, now)
+    o.llm = gpu_mod.llm_view(server.last_report or {}, (server.alert_state or {}).get("llm_base")) or None
     o.web_config = web_config.view(server.last_report or {}, now)
     o.web_certs = web_certs.view(server.last_report or {}, now)
     o.proxy_outdated = docker_exposure.outdated(server.last_report or {}, now.timestamp())
@@ -514,6 +518,7 @@ _SETUP_LABEL = {
     "agent-watchdog": "Вотчдог агента",
     "dockerproxy-setup": "Доступ к Docker (прокси)",
     "changes-setup": "Изменения на сервере",
+    "gpu-setup": "GPU NVIDIA",
 }
 
 
@@ -1549,6 +1554,8 @@ def _bin_metrics(rows: list[ServerMetric], hours: float) -> list[ServerMetricOut
                 web_5xx=avg([x.web_5xx for x in grp]),
                 web_top=avg_parts(grp, "web_top", "k", ("r", "e")),
                 web_codes=avg_parts(grp, "web_codes", "c", ("n",)),
+                gpu=avg_named(grp, "gpu", "g", ("u", "m", "t", "p"), 1),
+                llm=avg_named(grp, "llm", "k", ("run", "wait", "kv", "gen", "req", "ttft", "tpot", "e2e"), 4),
                 disks=disks,
             )
         )
@@ -2868,6 +2875,8 @@ async def agent_report(
                 web_5xx=web_5xx_total(body.extras, now, body.clock_unix),
                 web_top=web_top,
                 web_codes=web_codes,
+                gpu=gpu_mod.metric_gpu(body.extras, now, body.clock_unix),
+                llm=gpu_mod.metric_llm(body.llm),
                 ts=now,
             )
         )

@@ -48,6 +48,7 @@ import {
   type CpuGroup,
   type Server,
   type ServerEnroll,
+  type GpuSum,
   type ServerMetric,
   type ServerReport,
   type ServerVulns,
@@ -55,7 +56,7 @@ import {
 } from './api'
 import { StackedAreaChart, type Series } from './charts/StackedAreaChart'
 import { OnboardBlock } from './OnboardBlock'
-import { diskHealth, diskUsage, fmtSetupVersion, shortList, sinceShort, unitsBlock, srvIssues, type SrvIssue, webLogLabel, webRate, webSeriesName, webUnparsed } from './serverUtils'
+import { diskHealth, diskUsage, fmtSetupVersion, gpuSecLine, shortList, sinceShort, unitsBlock, srvIssues, type SrvIssue, webLogLabel, webRate, webSeriesName, webUnparsed } from './serverUtils'
 import { OsIcon } from './osIcon'
 import { CountryFlag } from './CountryFlag'
 import { currentLang, useI18n } from './i18n'
@@ -91,6 +92,7 @@ import { JournalCard, JournalModal, journalBlocker } from './UnitJournal'
 import { LinksCard, NetTile, TrafficCard, type Tone } from './NetLinks'
 import { DiskWritersBlock, NetUsersCard } from './Usage'
 import { SoftwareCard } from './Software'
+import { GpuCard, GpuChip } from './Gpu'
 import { KnownServerList } from './KnownDialog'
 import { MaintBanner, MaintChip } from './MaintModal'
 
@@ -118,6 +120,10 @@ type MetricKey =
   | 'web'
   | 'web5xx'
   | 'sockets'
+  | 'gpuutil'
+  | 'gpumem'
+  | 'gputemp'
+  | 'gpupower'
 
 // приглушённая палитра (Datadog-стиль) для overlay-графиков (ядра/интерфейсы/диски).
 // Десатурированные тона: не мутнеют при наложении, различимы на 8+ линиях.
@@ -476,6 +482,22 @@ function buildMetric(
       ],
     }
   }
+  if (key === 'gpuutil' || key === 'gpumem' || key === 'gputemp' || key === 'gpupower') {
+    // по линии на карту, цвет по номеру: GPU 0 на всех графиках одного цвета
+    const f = key === 'gpuutil' ? 'u' : key === 'gpumem' ? 'm' : key === 'gputemp' ? 't' : 'p'
+    const temp = key === 'gputemp'
+    const names = [...new Set(M.flatMap((m) => (m.gpu ?? []).map((x) => x.g)))].sort((a, b) => Number(a) - Number(b))
+    const what = key === 'gpuutil' ? t('загрузка') : key === 'gpumem' ? t('память') : temp ? t('температура') : t('питание, % лимита')
+    return {
+      key, ts, mode: 'overlay', yMax: temp ? undefined : 100, yNice: temp,
+      title: `GPU · ${what}`, fmtY: temp ? fmtTempC : pctY, fmtV: temp ? fmtTempC : pctV,
+      series: names.map((n) => ({
+        name: `GPU ${n}`,
+        color: CORE_COLORS[Number(n) % CORE_COLORS.length],
+        values: M.map((m) => m.gpu?.find((x) => x.g === n)?.[f] ?? null),
+      })),
+    }
+  }
   if (key === 'conntrack')
     return {
       key, ts, mode: 'overlay', yNice: true, fmtY: fmtNum, fmtV: fmtNum,
@@ -773,6 +795,7 @@ const DETAIL_SECTIONS: SecDef[] = [
   { id: 'mem', label: 'Память', group: 'Ресурсы' },
   { id: 'disk', label: 'Диск', group: 'Ресурсы' },
   { id: 'net', label: 'Сеть', group: 'Ресурсы' },
+  { id: 'gpu', label: 'GPU', group: 'Ресурсы' },
   { id: 'ports', label: 'Порты', group: 'Безопасность' },
   { id: 'access', label: 'SSH и доступы', group: 'Безопасность' },
   { id: 'updates', label: 'Обновления', group: 'Безопасность' },
@@ -789,7 +812,7 @@ const DETAIL_SECTIONS: SecDef[] = [
 ]
 const SEC_IDS = new Set(DETAIL_SECTIONS.map((x) => x.id))
 // разделы с графиками: у них переключатель периода
-const CHART_SECS = new Set(['cpu', 'mem', 'disk', 'net', 'web'])
+const CHART_SECS = new Set(['cpu', 'mem', 'disk', 'net', 'gpu', 'web'])
 // карта сервера на сводке: ресурсы там плитками, здесь остальное, у чего есть состояние
 const AREA_SECS = ['ports', 'access', 'updates', 'vulns', 'units', 'proc', 'changes', 'web', 'deps', 'alerts']
 // куда ведут проблемы, которые разбираются в другом разделе панели
@@ -808,6 +831,7 @@ const SEC_OF_CARD: Record<string, string> = {
   exposure: 'ports', conn: 'ports', ssh: 'access', osupd: 'updates', software: 'updates',
   unitloop: 'units', noboot: 'units', pressure: 'proc', web5xx: 'web',
   clock: 'overview', dns: 'overview',
+  gpuutil: 'gpu', gpumem: 'gpu', gputemp: 'gpu', gpupower: 'gpu',
 }
 // раздел, к которому ведет ссылка ?sec=: сам раздел или тот, где лежит карточка
 function secOfLink(sec?: string | null): string | null {
@@ -874,6 +898,7 @@ function serverSecInfo(c: {
   const v = c.vulns
   ok.vulns = !v ? '' : !v.release ? t('сверка пока только для Ubuntu') : !v.feed_ts ? t('база уязвимостей еще не скачана') : t('важных нет')
   ok.units = unitsBlock(r) ? t('упавших служб нет') : t('нет данных')
+  ok.gpu = gpuSecLine(s, t)
   const top = r.top_cpu?.[0]
   ok.proc = top ? t('больше всех CPU: {name}, {p}', { name: top.comm, p: `${top.cpu.toFixed(1)}%` }) : ''
   const last = s.changes?.log[0]
@@ -2485,8 +2510,9 @@ function WebNow({ server: s }: { server: Server }) {
 // Плитки сводки: CPU, память, худший раздел диска и сеть, с линией за выбранный период.
 // Нажатие ведет в раздел. Замечание раздела (поломка диска, утечка памяти) - строкой в плитке
 // и ее цветом
-function SrvTiles({ r, M, info, onGo }: {
+function SrvTiles({ r, M, info, onGo, gpu }: {
   r: ServerReport
+  gpu?: GpuSum | null
   M: ServerMetric[]
   info: Record<string, SecInfo>
   onGo: (id: string) => void
@@ -2529,6 +2555,14 @@ function SrvTiles({ r, M, info, onGo }: {
       {tile('net', t('Сеть'), `↓ ${fmtRate(r.net_rx)}`,
         `↑ ${fmtRate(r.net_tx)}${(r.swap_total ?? 0) > 0 ? ` · swap ${fmtBytes(r.swap_used)}` : ''}`, null,
         <TileSpark vals={M.map((m) => m.net_rx)} color="#57a894" />)}
+      {gpu &&
+        tile('gpu', 'GPU', gpu.util != null ? `${gpu.util}%` : '—',
+          gpu.mem != null ? `${gpu.n} x ${gpu.models.join(', ')} · ${gpu.mem} / ${gpu.memt} ${t('ГБ')}` : `${gpu.n} x NVIDIA`, gpu.util,
+          <TileSpark
+            vals={M.map((m) => (m.gpu?.length ? m.gpu.reduce((a, x) => a + (x.u ?? 0), 0) / m.gpu.length : null))}
+            max={100}
+            color="#73bf69"
+          />)}
     </div>
   )
 }
@@ -4772,6 +4806,9 @@ function ServerRow({
           {s.last_report?.backup_server?.present && (
             <span className="type-chip" title={t('Сервер бэкапов (rest-server)')}>🗄 {t('бэкап-сервер')}</span>
           )}
+          {s.gpu_sum && (
+            <GpuChip sum={s.gpu_sum} bad={issues.some((i) => i.kind === 'gpu' || i.kind === 'gpu_heat')} t={t} />
+          )}
           {muteItems.length > 0 && <MuteChip items={muteItems} t={t} />}
           {!s.online && <span className="type-chip off">{t('оффлайн')}</span>}
         </div>
@@ -5896,6 +5933,7 @@ function ServerDetail({
   const shown = (id: string): boolean => {
     switch (id) {
       case 'web': return hasWeb
+      case 'gpu': return !!s.gpu
       case 'access': return !!(s.ssh || s.access?.accounts.length)
       case 'updates': return !!(r.os_upd || s.os_advice?.length || s.sw_advice?.length || r.docker?.containers?.length)
       case 'vulns':
@@ -5954,7 +5992,7 @@ function ServerDetail({
         }))}
       />
       <DayBlock day={day} onMore={() => go('timeline')} />
-      <SrvTiles r={r} M={M} info={info} onGo={go} />
+      <SrvTiles r={r} M={M} info={info} onGo={go} gpu={s.gpu_sum} />
       <OvAreas
         cap={t('Сервер по областям')}
         items={AREA_SECS.filter((id) => secs.some((x) => x.id === id)).map((id) => ({
@@ -6388,6 +6426,27 @@ function ServerDetail({
               </div>,
             )}
           </div>
+          </div>
+        )}
+
+        {active === 'gpu' && (
+          <div className="srv-sec">
+            <div className="net-cards">
+              <GpuCard
+                server={s}
+                rows={issues
+                  .filter((i) => !i.section && secOfLink(i.sec) === 'gpu')
+                  .map((i) => ({ tone: i.tone, text: i.text, since: i.since }))}
+              />
+            </div>
+            {(s.gpu?.gpus?.length ?? 0) > 0 && (
+              <div className="chart-grid">
+                {chartCard('gpuutil')}
+                {chartCard('gpumem')}
+                {chartCard('gputemp')}
+                {chartCard('gpupower')}
+              </div>
+            )}
           </div>
         )}
 

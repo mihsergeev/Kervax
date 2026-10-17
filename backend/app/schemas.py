@@ -1427,6 +1427,11 @@ class ServerOut(BaseModel):
     access_advice: dict | None = None
     # здоровье баз по движкам: роль, отставание, транзакции, проблемы (db_health.view)
     db_health: list[dict] | None = None
+    # GPU NVIDIA: карты, процессы, Xid, драйвер (gpu.view) и плашка списка (gpu.summary)
+    gpu: dict | None = None
+    gpu_sum: dict | None = None
+    # LLM-сервисы с обычными задержками (gpu.llm_view)
+    llm: list[dict] | None = None
     # проверка конфигов веб-серверов: [{server, where, ok, err}] (web_config.view)
     web_config: list[dict] | None = None
     # сертификаты nginx со сроком в днях: [{where, file, label, days}] (web_certs.view)
@@ -1553,6 +1558,8 @@ class ServerMetricOut(BaseModel):
     web_5xx: float | None = None  # из них ответов 5xx в минуту
     web_top: list[dict] | None = None  # [{"k","r","e"}] самые нагруженные логи
     web_codes: list[dict] | None = None  # [{"c","n"}] ответы 5xx по кодам
+    gpu: list[dict] | None = None  # [{"g","u","m","t","p"}] по картам: загрузка, память, температура, питание
+    llm: list[dict] | None = None  # [{"k","run","wait","kv","gen","req","ttft","tpot","e2e"}] по LLM-сервисам
 
 
 class WebErrorPath(BaseModel):
@@ -1666,6 +1673,10 @@ class AgentReportIn(BaseModel):
     disk_writers_v1: bool = False
     # кто качает трафик за последний час (агент 2.34): [{kind, name, rx, tx, s}]
     net_users: list[dict] = Field(default_factory=list, max_length=50)
+    # видеокарты NVIDIA на шине PCI (агент 2.36): [{bus, dev, drv}]
+    gpu_pci: list[dict] = Field(default_factory=list, max_length=32)
+    # LLM-сервисы (агент 2.36): [{engine, kind, name, model, port, ok, running, waiting, kv, ttft...}]
+    llm: list[dict] = Field(default_factory=list, max_length=32)
     conntrack_count: float = 0.0
     conntrack_max: float = 0.0
     sock_used: float = 0.0

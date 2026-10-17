@@ -25,6 +25,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"net/netip"
@@ -43,7 +44,7 @@ import (
 	"time"
 )
 
-const version = "2.35"
+const version = "2.36"
 
 // Публичный ключ для проверки подписи релизов агента (Ed25519, base64).
 // ПУСТО по умолчанию → самообновление ВЫКЛЮЧЕНО (агент никогда не заменяет себя).
@@ -190,6 +191,10 @@ type report struct {
 	DiskWritersV1 bool       `json:"disk_writers_v1,omitempty"` // cgroup v1: отложенная запись в счетчики не попадает
 	// кто качает трафик за последний час: контейнеры и поды по счетчикам их сетевого пространства
 	NetUsers []netUser `json:"net_users,omitempty"`
+	// видеокарты NVIDIA на шине PCI (2.36): по ним панель просит helper gpu-setup и видит потерянную карту
+	GPUPCI []gpuPCI `json:"gpu_pci,omitempty"`
+	// LLM-сервисы (vLLM, SGLang, TEI) и их метрики за последние минуты (2.36)
+	LLM []llmInfo `json:"llm,omitempty"`
 	// таблица conntrack + сокеты (мгновенные значения)
 	ConntrackCount float64 `json:"conntrack_count"`
 	ConntrackMax   float64 `json:"conntrack_max"`
@@ -3695,6 +3700,8 @@ func collect(prev sample) (report, sample) {
 	r.CPUGroups = cpuGroups(prev, cur, cn, pn)
 	r.DiskWriters, r.DiskWritersV1 = diskWriters("/sys/fs/cgroup", cn, pn, time.Now())
 	r.NetUsers = netUsers("/sys/fs/cgroup", "/proc", cn, pn, time.Now())
+	r.GPUPCI = gpuOnPCI("/sys/bus/pci/devices", time.Now())
+	r.LLM = collectLLM("/proc", cn, pn, time.Now())
 	r.Services = collectServices(dk, r.Kube)
 	r.WebServices = collectWebServices(r.Kube)
 	r.DBStats = collectDBStats()
@@ -8499,4 +8506,744 @@ func splitHostPort(s string) (string, int) {
 		host = ""
 	}
 	return host, port
+}
+
+// --- GPU и LLM (2.36) ---------------------------------------------------------------------------
+// Видеокарты NVIDIA на шине PCI. Драйвер, загрузку, процессы и ошибки Xid смотрит helper gpu-setup
+// (журнал ядра читает только root), агент лишь говорит, что карты есть: по этому панель понимает,
+// что серверу нужен helper, и видит карту, которую драйвер потерял.
+type gpuPCI struct {
+	Bus string `json:"bus"`           // адрес на шине, 0000:41:00.0
+	Dev string `json:"dev"`           // id устройства, 20b5
+	Drv string `json:"drv,omitempty"` // привязанный драйвер: nvidia, vfio-pci (отдана в ВМ), nouveau; пусто - никакого
+}
+
+func sysStr(path string) string {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(b))
+}
+
+var gpuPCIState struct {
+	last time.Time
+	list []gpuPCI
+}
+
+// gpuOnPCI - видеокарты и вычислительные карты NVIDIA (класс 0x0300 VGA и 0x0302 3D-контроллер):
+// звуковая функция той же карты и NVSwitch в счет не идут. Шина меняется редко - раз в минуту.
+func gpuOnPCI(root string, now time.Time) []gpuPCI {
+	if !gpuPCIState.last.IsZero() && now.Sub(gpuPCIState.last) < time.Minute {
+		return gpuPCIState.list
+	}
+	gpuPCIState.last = now
+	ents, err := os.ReadDir(root)
+	if err != nil {
+		gpuPCIState.list = nil
+		return nil
+	}
+	var out []gpuPCI
+	for _, e := range ents {
+		d := root + "/" + e.Name()
+		if sysStr(d+"/vendor") != "0x10de" {
+			continue
+		}
+		if cls := sysStr(d + "/class"); !strings.HasPrefix(cls, "0x0300") && !strings.HasPrefix(cls, "0x0302") {
+			continue
+		}
+		g := gpuPCI{Bus: e.Name(), Dev: strings.TrimPrefix(sysStr(d+"/device"), "0x")}
+		if l, err := os.Readlink(d + "/driver"); err == nil {
+			g.Drv = filepath.Base(l)
+		}
+		out = append(out, g)
+	}
+	gpuPCIState.list = out
+	return out
+}
+
+// LLM-сервисы: vLLM, SGLang и TEI отдают метрики Prometheus без пароля (/metrics). Агент находит их
+// по командной строке процесса, читает /metrics раз в llmEvery и сам считает за последние
+// llmWindow: запросы и токены в секунду, перцентили задержек по приросту бакетов гистограмм (как
+// histogram_quantile в Prometheus). Панели уходят готовые числа, а не сырые гистограммы.
+const (
+	llmEvery  = 30 * time.Second
+	llmWindow = 5 * time.Minute
+	llmMinWin = 50 * time.Second // окно короче - скорости и перцентили не считаем, только очередь
+)
+
+type llmInfo struct {
+	Engine    string    `json:"engine"`         // vllm | sglang | tei
+	Kind      string    `json:"kind,omitempty"` // container | pod | unit; пусто - просто процесс
+	Name      string    `json:"name"`           // имя контейнера, ns/имя пода, юнит или имя процесса
+	Model     string    `json:"model,omitempty"`
+	Port      int       `json:"port"`
+	Up        int64     `json:"up"`                   // сколько живет процесс, секунд: модель грузится минутами
+	OK        bool      `json:"ok"`                   // /metrics ответил
+	Err       string    `json:"err,omitempty"`        // почему не ответил: refused, timeout, http 401, local, noaddr
+	NoMetrics bool      `json:"no_metrics,omitempty"` // SGLang без --enable-metrics: метрик нет вовсе
+	Win       int       `json:"win,omitempty"`        // за сколько секунд скорости и перцентили
+	Running   *float64  `json:"running,omitempty"`
+	Waiting   *float64  `json:"waiting,omitempty"`
+	KV        *float64  `json:"kv,omitempty"`         // заполнение KV-кэша, %
+	ReqS      *float64  `json:"req_s,omitempty"`      // завершено запросов в секунду
+	PromptTPS *float64  `json:"prompt_tps,omitempty"` // токенов промпта в секунду
+	GenTPS    *float64  `json:"gen_tps,omitempty"`    // сгенерировано токенов в секунду
+	Preempt   *float64  `json:"preempt,omitempty"`    // вытеснено запросов за окно (не хватило KV-кэша)
+	Errors    *float64  `json:"errors,omitempty"`     // ошибок за окно: ответы 5xx у vLLM, отказы у TEI
+	Aborted   *float64  `json:"aborted,omitempty"`    // отменено за окно
+	TTFT      []float64 `json:"ttft,omitempty"`       // p50, p95, p99 до первого токена, секунды
+	TPOT      []float64 `json:"tpot,omitempty"`       // на выходной токен
+	E2E       []float64 `json:"e2e,omitempty"`        // весь запрос
+}
+
+type llmProc struct {
+	engine, host, model string
+	port, pid           int
+	noMetrics           bool
+}
+
+// llmArg - значение флага командной строки: "--port 8000" и "--port=8000"
+func llmArg(args []string, names ...string) string {
+	for i, a := range args {
+		for _, n := range names {
+			if a == n && i+1 < len(args) {
+				return args[i+1]
+			}
+			if strings.HasPrefix(a, n+"=") {
+				return a[len(n)+1:]
+			}
+		}
+	}
+	return ""
+}
+
+func llmHas(args []string, name string) bool {
+	for _, a := range args {
+		if a == name || strings.HasPrefix(a, name+"=") {
+			return true
+		}
+	}
+	return false
+}
+
+// llmEngine - LLM-сервис по командной строке и порт его /metrics. Модуль python ищется только
+// после -m: "grep vllm.entrypoints" сервисом не считается.
+func llmEngine(args []string) (llmProc, bool) {
+	var p llmProc
+	if len(args) == 0 {
+		return p, false
+	}
+	mod := func(m string) bool {
+		for i := 1; i < len(args); i++ {
+			if args[i-1] == "-m" && args[i] == m {
+				return true
+			}
+		}
+		return false
+	}
+	serve := -1 // vllm serve <модель>
+	for i := 0; i+1 < len(args) && i < 3; i++ {
+		if filepath.Base(args[i]) == "vllm" && args[i+1] == "serve" {
+			serve = i + 1
+			break
+		}
+	}
+	switch {
+	case serve >= 0 || mod("vllm.entrypoints.openai.api_server") || mod("vllm.entrypoints.api_server"):
+		p.engine, p.port = "vllm", 8000
+		p.model = llmArg(args, "--served-model-name", "--model")
+		if p.model == "" && serve >= 0 && serve+1 < len(args) && !strings.HasPrefix(args[serve+1], "-") {
+			p.model = args[serve+1]
+		}
+	case mod("sglang.launch_server"):
+		p.engine, p.port = "sglang", 30000
+		p.model = llmArg(args, "--served-model-name", "--model-path", "--model")
+		p.noMetrics = !llmHas(args, "--enable-metrics")
+	case filepath.Base(args[0]) == "text-embeddings-router":
+		// метрики TEI на своем порту (--prometheus-port, по умолчанию 9000) на всех адресах
+		p.engine, p.port = "tei", 9000
+		p.model = llmArg(args, "--model-id")
+		if n, err := strconv.Atoi(llmArg(args, "--prometheus-port")); err == nil && n > 0 && n < 65536 {
+			p.port = n
+		}
+		return p, true
+	default:
+		return p, false
+	}
+	if n, err := strconv.Atoi(llmArg(args, "--port")); err == nil && n > 0 && n < 65536 {
+		p.port = n
+	}
+	p.host = llmArg(args, "--host")
+	return p, true
+}
+
+var llmMarks = [][]byte{[]byte("vllm"), []byte("sglang"), []byte("text-embeddings-router")}
+
+// llmScan - процессы LLM-сервисов: командные строки всех процессов, разбираются только те, где
+// есть имя движка
+func llmScan(proc string) []llmProc {
+	ents, err := os.ReadDir(proc)
+	if err != nil {
+		return nil
+	}
+	var out []llmProc
+	for _, e := range ents {
+		pid, err := strconv.Atoi(e.Name())
+		if err != nil {
+			continue
+		}
+		b, err := os.ReadFile(proc + "/" + e.Name() + "/cmdline")
+		if err != nil || len(b) == 0 {
+			continue
+		}
+		hit := false
+		for _, m := range llmMarks {
+			if bytes.Contains(b, m) {
+				hit = true
+				break
+			}
+		}
+		if !hit {
+			continue
+		}
+		if p, ok := llmEngine(strings.Split(strings.TrimRight(string(b), "\x00"), "\x00")); ok {
+			p.pid = pid
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// netnsIP - адрес сетевого пространства процесса (контейнера, пода) из его fib_trie: первый
+// локальный /32, кроме 127.0.0.0/8. Так адрес находится без доступа к Docker и Kubernetes.
+func netnsIP(path string) string {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	last := ""
+	for _, ln := range strings.Split(string(b), "\n") {
+		s := strings.TrimSpace(ln)
+		if a, ok := strings.CutPrefix(s, "|-- "); ok {
+			last = a
+			continue
+		}
+		if strings.Contains(s, "/32 host LOCAL") && !strings.HasPrefix(last, "127.") && net.ParseIP(last) != nil {
+			return last
+		}
+	}
+	return ""
+}
+
+// llmAddr - куда стучаться за /metrics: процесс в сети хоста - на 127.0.0.1, в контейнере или поде -
+// на адрес его сетевого пространства. Вторым значением - почему некуда.
+func llmAddr(proc string, p llmProc, self string) (string, string) {
+	h := strings.Trim(p.host, "[]")
+	wild := h == "" || h == "0.0.0.0" || h == "::"
+	local := h == "localhost" || h == "::1" || strings.HasPrefix(h, "127.")
+	if !wild && !local {
+		return h, ""
+	}
+	pd := proc + "/" + strconv.Itoa(p.pid)
+	if ino := fileIno(pd + "/net/dev"); ino != "" && ino == self {
+		return "127.0.0.1", ""
+	}
+	if local {
+		return "", "local" // слушает только localhost внутри своего контейнера
+	}
+	if ip := netnsIP(pd + "/net/fib_trie"); ip != "" {
+		return ip, ""
+	}
+	return "", "noaddr"
+}
+
+// procAge - сколько живет процесс, секунд (starttime из stat, поле 22)
+func procAge(proc string, pid int, up float64) int64 {
+	b, err := os.ReadFile(proc + "/" + strconv.Itoa(pid) + "/stat")
+	if err != nil || up <= 0 {
+		return 0
+	}
+	s := string(b)
+	i := strings.LastIndexByte(s, ')')
+	if i < 0 {
+		return 0
+	}
+	f := strings.Fields(s[i+1:])
+	if len(f) < 20 {
+		return 0
+	}
+	st, err := strconv.ParseFloat(f[19], 64)
+	if err != nil {
+		return 0
+	}
+	if a := up - st/clkTck; a > 0 {
+		return int64(a)
+	}
+	return 0
+}
+
+func llmOwner(proc string, pid int, conts, pods map[string]string) (string, string) {
+	kind, id := procOwner(procCgroup(pid))
+	switch kind {
+	case "container":
+		if n := conts[id]; n != "" {
+			return kind, n
+		}
+		if len(id) > 12 {
+			id = id[:12]
+		}
+		return kind, id
+	case "pod":
+		if n := pods[id]; n != "" {
+			return kind, n
+		}
+		if len(id) > 8 {
+			id = id[:8]
+		}
+		return kind, "pod " + id
+	case "unit":
+		return kind, id
+	}
+	return "", sysStr(proc + "/" + strconv.Itoa(pid) + "/comm")
+}
+
+type promSeries struct {
+	labels string
+	v      float64
+}
+
+type promSet map[string][]promSeries
+
+// promParse - серии метрик с нужными префиксами из текстового формата Prometheus: имя -> серии
+func promParse(body []byte, prefixes ...string) promSet {
+	out := promSet{}
+	for _, ln := range strings.Split(string(body), "\n") {
+		if ln == "" || ln[0] == '#' {
+			continue
+		}
+		want := false
+		for _, p := range prefixes {
+			if strings.HasPrefix(ln, p) {
+				want = true
+				break
+			}
+		}
+		if !want {
+			continue
+		}
+		var name, labels, rest string
+		if i := strings.IndexByte(ln, '{'); i >= 0 {
+			j := strings.LastIndexByte(ln, '}')
+			if j < i {
+				continue
+			}
+			name, labels, rest = ln[:i], ln[i+1:j], ln[j+1:]
+		} else {
+			sp := strings.IndexAny(ln, " \t")
+			if sp < 0 {
+				continue
+			}
+			name, rest = ln[:sp], ln[sp:]
+		}
+		f := strings.Fields(rest)
+		if len(f) == 0 {
+			continue
+		}
+		v, err := strconv.ParseFloat(f[0], 64)
+		if err != nil || v != v {
+			continue
+		}
+		out[name] = append(out[name], promSeries{labels, v})
+	}
+	return out
+}
+
+// promLabel - значение метки из строки меток серии
+func promLabel(labels, key string) string {
+	k := key + `="`
+	for i := 0; i < len(labels); {
+		j := strings.Index(labels[i:], k)
+		if j < 0 {
+			return ""
+		}
+		j += i
+		if j == 0 || labels[j-1] == ',' || labels[j-1] == ' ' {
+			rest := labels[j+len(k):]
+			if e := strings.IndexByte(rest, '"'); e >= 0 {
+				return rest[:e]
+			}
+			return ""
+		}
+		i = j + len(k)
+	}
+	return ""
+}
+
+// sum - сумма по сериям первой из имеющихся метрик (имена меняются от версии к версии движка)
+func (m promSet) sum(names ...string) (float64, bool) {
+	for _, n := range names {
+		if ss, ok := m[n]; ok {
+			t := 0.0
+			for _, s := range ss {
+				t += s.v
+			}
+			return t, true
+		}
+	}
+	return 0, false
+}
+
+func (m promSet) max(names ...string) (float64, bool) {
+	for _, n := range names {
+		if ss, ok := m[n]; ok && len(ss) > 0 {
+			t := ss[0].v
+			for _, s := range ss[1:] {
+				t = max(t, s.v)
+			}
+			return t, true
+		}
+	}
+	return 0, false
+}
+
+// sumWhere - сумма серий метрики с меткой key=val
+func (m promSet) sumWhere(name, key, val string) (float64, bool) {
+	ss, ok := m[name]
+	if !ok {
+		return 0, false
+	}
+	t := 0.0
+	for _, s := range ss {
+		if promLabel(s.labels, key) == val {
+			t += s.v
+		}
+	}
+	return t, true
+}
+
+// label - метка первой серии метрики (имя модели)
+func (m promSet) label(name, key string) string {
+	for _, s := range m[name] {
+		if v := promLabel(s.labels, key); v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+// llmHist - гистограмма, сложенная по всем сериям: верхние границы бакетов по возрастанию
+// (последняя +Inf) и накопленные счетчики
+type llmHist struct {
+	le  []float64
+	cnt []float64
+}
+
+func (m promSet) hist(names ...string) *llmHist {
+	for _, n := range names {
+		ss, ok := m[n+"_bucket"]
+		if !ok {
+			continue
+		}
+		acc := map[float64]float64{}
+		for _, s := range ss {
+			le, err := strconv.ParseFloat(promLabel(s.labels, "le"), 64)
+			if err != nil {
+				continue
+			}
+			acc[le] += s.v
+		}
+		if len(acc) < 2 {
+			continue
+		}
+		h := &llmHist{}
+		for le := range acc {
+			h.le = append(h.le, le)
+		}
+		sort.Float64s(h.le)
+		for _, le := range h.le {
+			h.cnt = append(h.cnt, acc[le])
+		}
+		return h
+	}
+	return nil
+}
+
+func round2(x float64) float64 { return float64(int64(x*100+0.5)) / 100 }
+func round4(x float64) float64 { return float64(int64(x*10000+0.5)) / 10000 }
+
+// histQuantiles - p50, p95, p99 по приросту гистограммы между двумя замерами: линейно внутри
+// бакета, выше последней конечной границы - она сама. nil - запросов за окно не было, бакеты
+// сменились или счетчик сброшен.
+func histQuantiles(a, b *llmHist) []float64 {
+	if a == nil || b == nil || len(a.le) != len(b.le) || len(b.le) < 2 {
+		return nil
+	}
+	d := make([]float64, len(b.le))
+	for i := range b.le {
+		if a.le[i] != b.le[i] {
+			return nil
+		}
+		d[i] = b.cnt[i] - a.cnt[i]
+		if d[i] < 0 {
+			return nil
+		}
+		if i > 0 && d[i] < d[i-1] {
+			d[i] = d[i-1] // серии читались не в один момент
+		}
+	}
+	total := d[len(d)-1]
+	if total <= 0 {
+		return nil
+	}
+	q := func(p float64) float64 {
+		rank := p * total
+		lo, below := 0.0, 0.0
+		for i, le := range b.le {
+			if d[i] >= rank {
+				if math.IsInf(le, 1) || d[i] == below {
+					if math.IsInf(le, 1) {
+						return lo
+					}
+					return le
+				}
+				return lo + (le-lo)*(rank-below)/(d[i]-below)
+			}
+			lo, below = le, d[i]
+		}
+		return lo
+	}
+	return []float64{round4(q(0.5)), round4(q(0.95)), round4(q(0.99))}
+}
+
+// llmSnap - накопительные счетчики и гистограммы одного замера
+type llmSnap struct {
+	at   time.Time
+	ctr  map[string]float64
+	hist map[string]*llmHist
+}
+
+type llmGauge struct {
+	running, waiting, kv *float64
+	model                string
+}
+
+func fptr(v float64) *float64 { return &v }
+
+// llmRead - что берется из метрик движка: мгновенные значения и накопительные счетчики
+func llmRead(engine string, m promSet) (llmGauge, llmSnap) {
+	var g llmGauge
+	s := llmSnap{ctr: map[string]float64{}, hist: map[string]*llmHist{}}
+	gauge := func(dst **float64, names ...string) {
+		if v, ok := m.sum(names...); ok {
+			*dst = fptr(v)
+		}
+	}
+	ctr := func(k string, names ...string) {
+		if v, ok := m.sum(names...); ok {
+			s.ctr[k] = v
+		}
+	}
+	switch engine {
+	case "vllm":
+		gauge(&g.running, "vllm:num_requests_running")
+		gauge(&g.waiting, "vllm:num_requests_waiting")
+		if v, ok := m.max("vllm:kv_cache_usage_perc", "vllm:gpu_cache_usage_perc"); ok {
+			g.kv = fptr(round1(v * 100))
+		}
+		g.model = m.label("vllm:num_requests_running", "model_name")
+		ctr("prompt", "vllm:prompt_tokens_total")
+		ctr("gen", "vllm:generation_tokens_total")
+		ctr("req", "vllm:request_success_total", "vllm:e2e_request_latency_seconds_count")
+		ctr("preempt", "vllm:num_preemptions_total")
+		if v, ok := m.sumWhere("vllm:request_success_total", "finished_reason", "abort"); ok {
+			s.ctr["abort"] = v
+		}
+		if v, ok := m.sumWhere("http_requests_total", "status", "5xx"); ok {
+			s.ctr["err"] = v
+		}
+		s.hist["ttft"] = m.hist("vllm:time_to_first_token_seconds")
+		s.hist["tpot"] = m.hist("vllm:inter_token_latency_seconds", "vllm:time_per_output_token_seconds",
+			"vllm:request_time_per_output_token_seconds")
+		s.hist["e2e"] = m.hist("vllm:e2e_request_latency_seconds")
+	case "sglang":
+		gauge(&g.running, "sglang:num_running_reqs")
+		gauge(&g.waiting, "sglang:num_queue_reqs")
+		if v, ok := m.max("sglang:token_usage"); ok {
+			g.kv = fptr(round1(v * 100))
+		}
+		g.model = m.label("sglang:num_running_reqs", "model_name")
+		ctr("prompt", "sglang:prompt_tokens_total")
+		ctr("gen", "sglang:generation_tokens_total")
+		ctr("req", "sglang:e2e_request_latency_seconds_count", "sglang:num_requests_total")
+		s.hist["ttft"] = m.hist("sglang:time_to_first_token_seconds")
+		s.hist["tpot"] = m.hist("sglang:inter_token_latency_seconds", "sglang:time_per_output_token_seconds",
+			"sglang:request_time_per_output_token_seconds")
+		s.hist["e2e"] = m.hist("sglang:e2e_request_latency_seconds")
+	case "tei":
+		gauge(&g.waiting, "te_queue_size")
+		ctr("req", "te_request_success", "te_request_success_total")
+		ctr("err", "te_request_failure", "te_request_failure_total")
+		ctr("prompt", "te_request_input_length_sum")
+		s.hist["e2e"] = m.hist("te_request_duration", "te_embed_duration")
+	}
+	return g, s
+}
+
+// llmReset - счетчик меньше прошлого: процесс перезапустился, окно заново
+func llmReset(prev, cur llmSnap) bool {
+	for k, v := range cur.ctr {
+		if p, ok := prev.ctr[k]; ok && v < p {
+			return true
+		}
+	}
+	return false
+}
+
+// llmCompute - заполняет сервис по свежему /metrics и истории замеров, возвращает историю
+func llmCompute(inf *llmInfo, body []byte, hist []llmSnap, now time.Time) []llmSnap {
+	g, s := llmRead(inf.Engine, promParse(body, "vllm:", "sglang:", "te_", "http_requests_total"))
+	s.at = now
+	inf.OK = true
+	inf.Running, inf.Waiting, inf.KV = g.running, g.waiting, g.kv
+	if g.model != "" {
+		inf.Model = truncRunes(g.model, 120)
+	}
+	if n := len(hist); n > 0 && llmReset(hist[n-1], s) {
+		hist = nil
+	}
+	hist = append(hist, s)
+	for len(hist) > 1 && now.Sub(hist[1].at) >= llmWindow {
+		hist = hist[1:]
+	}
+	base := hist[0]
+	w := now.Sub(base.at)
+	if w < llmMinWin {
+		return hist
+	}
+	sec := w.Seconds()
+	inf.Win = int(sec)
+	diff := func(k string) (float64, bool) {
+		a, ok1 := base.ctr[k]
+		b, ok2 := s.ctr[k]
+		return b - a, ok1 && ok2
+	}
+	if d, ok := diff("req"); ok {
+		inf.ReqS = fptr(round2(d / sec))
+	}
+	if d, ok := diff("prompt"); ok {
+		inf.PromptTPS = fptr(round1(d / sec))
+	}
+	if d, ok := diff("gen"); ok {
+		inf.GenTPS = fptr(round1(d / sec))
+	}
+	if d, ok := diff("preempt"); ok {
+		inf.Preempt = fptr(d)
+	}
+	if d, ok := diff("err"); ok {
+		inf.Errors = fptr(d)
+	}
+	if d, ok := diff("abort"); ok {
+		inf.Aborted = fptr(d)
+	}
+	inf.TTFT = histQuantiles(base.hist["ttft"], s.hist["ttft"])
+	inf.TPOT = histQuantiles(base.hist["tpot"], s.hist["tpot"])
+	inf.E2E = histQuantiles(base.hist["e2e"], s.hist["e2e"])
+	return hist
+}
+
+// без прокси из окружения агента: адреса локальные
+var llmHTTP = &http.Client{Timeout: 3 * time.Second, Transport: &http.Transport{Proxy: nil, DisableKeepAlives: true}}
+
+func llmFetch(u string) ([]byte, string) {
+	resp, err := llmHTTP.Get(u)
+	if err != nil {
+		s := strings.ToLower(err.Error())
+		switch {
+		case strings.Contains(s, "refused"):
+			return nil, "refused"
+		case strings.Contains(s, "timeout") || strings.Contains(s, "deadline"):
+			return nil, "timeout"
+		}
+		return nil, "net"
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, "http " + strconv.Itoa(resp.StatusCode)
+	}
+	b, err := io.ReadAll(io.LimitReader(resp.Body, 16<<20))
+	if err != nil {
+		return nil, "read"
+	}
+	return b, ""
+}
+
+var llmState = struct {
+	sync.Mutex
+	last  time.Time
+	out   []llmInfo
+	snaps map[string][]llmSnap
+}{snaps: map[string][]llmSnap{}}
+
+// collectLLM - LLM-сервисы ноды. Один сервис - несколько процессов с той же командной строкой
+// (воркеры): ключ - движок, сетевое пространство и порт, берется старший процесс.
+func collectLLM(proc string, conts, pods map[string]string, now time.Time) []llmInfo {
+	llmState.Lock()
+	defer llmState.Unlock()
+	if !llmState.last.IsZero() && now.Sub(llmState.last) < llmEvery {
+		return llmState.out
+	}
+	llmState.last = now
+	self := fileIno(proc + "/self/net/dev")
+	up := procUptime()
+	by := map[string]llmProc{}
+	for _, p := range llmScan(proc) {
+		key := p.engine + "|" + fileIno(proc+"/"+strconv.Itoa(p.pid)+"/net/dev") + "|" + strconv.Itoa(p.port)
+		if q, ok := by[key]; !ok || p.pid < q.pid {
+			by[key] = p
+		}
+	}
+	keys := make([]string, 0, len(by))
+	for k := range by {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	out := make([]llmInfo, len(keys))
+	bodies := make([][]byte, len(keys))
+	var wg sync.WaitGroup
+	for i, k := range keys {
+		p := by[k]
+		out[i] = llmInfo{Engine: p.engine, Port: p.port, Model: truncRunes(p.model, 120),
+			Up: procAge(proc, p.pid, up), NoMetrics: p.noMetrics}
+		out[i].Kind, out[i].Name = llmOwner(proc, p.pid, conts, pods)
+		if p.noMetrics {
+			continue
+		}
+		host, why := llmAddr(proc, p, self)
+		if host == "" {
+			out[i].Err = why
+			continue
+		}
+		wg.Add(1)
+		go func(i int, u string) {
+			defer wg.Done()
+			bodies[i], out[i].Err = llmFetch(u)
+		}(i, "http://"+net.JoinHostPort(host, strconv.Itoa(p.port))+"/metrics")
+	}
+	wg.Wait()
+	seen := map[string]bool{}
+	for i, k := range keys {
+		seen[k] = true
+		if bodies[i] != nil {
+			llmState.snaps[k] = llmCompute(&out[i], bodies[i], llmState.snaps[k], now)
+		}
+	}
+	for k := range llmState.snaps {
+		if !seen[k] {
+			delete(llmState.snaps, k)
+		}
+	}
+	sort.SliceStable(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	llmState.out = out
+	return out
 }

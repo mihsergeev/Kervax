@@ -7036,3 +7036,61 @@ button.ghost.lc-del { color: var(--down); border-color: color-mix(in srgb, var(-
   .al-flow-row { grid-template-columns: minmax(0, 1fr); gap: 0.3rem; }
   .al-flow-ar { display: none; }
 }
+/* GPU: плашка в списке серверов - средняя загрузка карт полосой, красная при поломке */
+.gpu-chip { display: inline-flex; align-items: center; gap: 0.3rem; font-size: 0.68rem; font-weight: 600; letter-spacing: 0.03em; padding: 0.05rem 0.4rem; border-radius: 6px; border: 1px solid rgba(118, 185, 0, 0.45); color: #6f9d2a; background: rgba(118, 185, 0, 0.08); flex-shrink: 0; font-variant-numeric: tabular-nums; }
+.gpu-chip-bar { display: inline-block; width: 26px; height: 5px; border-radius: 3px; background: var(--border); position: relative; overflow: hidden; }
+.gpu-chip-bar > span { position: absolute; left: 0; top: 0; bottom: 0; background: currentColor; }
+.gpu-chip-bad { border-color: rgba(239, 68, 68, 0.5); color: var(--down); background: rgba(239, 68, 68, 0.08); }
+/* GPU: таблица карт и процессов на subgrid, полосы загрузки и памяти */
+.gpu-bar { display: block; position: relative; height: 7px; min-width: 40px; border-radius: 4px; background: var(--border); overflow: hidden; }
+.gpu-bar > span { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 4px; background: var(--up); }
+.gpu-bar > span.warn { background: var(--degraded); }
+.gpu-bar > span.bad { background: var(--down); }
+.gpu-tbl, .gpu-ptbl { display: grid; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; font-size: 0.86rem; }
+.gpu-tbl { grid-template-columns: max-content minmax(70px, 1fr) minmax(120px, 1.2fr) repeat(4, max-content); }
+.gpu-ptbl { grid-template-columns: max-content minmax(0, 1fr) max-content max-content; }
+.gpu-tr { display: grid; grid-column: 1 / -1; grid-template-columns: subgrid; gap: 0.3rem 0.8rem; align-items: center; padding: 0.35rem 0.7rem; border-top: 1px solid color-mix(in srgb, var(--border) 60%, transparent); }
+.gpu-tr:first-child { border-top: 0; }
+.gpu-th { color: var(--text-muted); font-size: 0.74rem; text-transform: uppercase; letter-spacing: 0.03em; }
+.gpu-tr .num { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.gpu-cell { display: grid; grid-template-columns: minmax(30px, 1fr) auto; gap: 0.5rem; align-items: center; min-width: 0; white-space: nowrap; }
+@media (max-width: 1100px) {
+  .gpu-tbl { grid-template-columns: max-content minmax(70px, 1fr) minmax(120px, 1.2fr) repeat(2, max-content); }
+  .gpu-m2 { display: none; }
+}
+.gpu-proc { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.gpu-err { white-space: pre-wrap; word-break: break-word; }
+.gpu-xid { display: flex; flex-direction: column; gap: 0.25rem; }
+.gpu-xid-row { display: grid; grid-template-columns: 9px max-content max-content minmax(0, 1fr); gap: 0.6rem; align-items: baseline; font-size: 0.86rem; }
+.gpu-xid-row .lk-dot { align-self: center; }
+@media (max-width: 640px) {
+  .gpu-tbl { grid-template-columns: max-content minmax(0, 1fr) minmax(0, 1.4fr) max-content; }
+  .gpu-m, .gpu-m2 { display: none; }
+  /* на телефоне число над полосой: рядом им не хватает места */
+  .gpu-cell { grid-template-columns: minmax(0, 1fr); gap: 0.2rem; }
+  .gpu-cell > .num { order: -1; text-align: left; }
+  .gpu-cell .gpu-bar { min-width: 0; }
+  .gpu-xid-row { grid-template-columns: 9px max-content minmax(0, 1fr); }
+  .gpu-xid-row > span:nth-child(3) { display: none; }
+}
+/* LLM-сервисы: шапка, плитки, задержки p50/p95/p99 с мини-графиком p95 за час */
+.llm { display: flex; flex-direction: column; gap: 0.55rem; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 0.6rem 0.75rem; }
+.llm-h { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
+.llm-model { overflow-wrap: anywhere; }
+.llm-kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 0.5rem; }
+.llm-kpi { border: 1px solid var(--border); border-radius: 6px; padding: 0.4rem 0.55rem; background: var(--bg-card); display: flex; flex-direction: column; gap: 0.15rem; }
+.llm-l { color: var(--text-muted); font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.03em; }
+.llm-v { font-size: 1.2rem; font-weight: 600; font-variant-numeric: tabular-nums; }
+.llm-s { color: var(--text-muted); font-size: 0.78rem; }
+.llm-lat { display: grid; grid-template-columns: max-content repeat(3, max-content) minmax(80px, 1fr); gap: 0.25rem 1rem; align-items: center; font-size: 0.86rem; }
+.llm-lr { display: contents; }
+.llm-lh { color: var(--text-muted); font-size: 0.72rem; text-transform: uppercase; }
+.llm-lat .num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.llm-spark { display: block; width: 100%; height: 22px; }
+.llm-spark polyline { fill: none; stroke: #5794f2; stroke-width: 1.5; vector-effect: non-scaling-stroke; }
+.llm-spark-base { stroke: var(--text-muted); stroke-width: 1; stroke-dasharray: 3 3; vector-effect: non-scaling-stroke; opacity: 0.6; }
+@media (max-width: 640px) {
+  .llm-kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .llm-lat { grid-template-columns: minmax(0, 1fr) repeat(3, max-content); }
+  .llm-sp { display: none; }
+}

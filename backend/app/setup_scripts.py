@@ -11,6 +11,7 @@ from __future__ import annotations
 import os
 import re
 
+from app import gpu as gpu_mod
 from app.config import get_settings
 
 
@@ -73,6 +74,9 @@ def setup_needed(name: str, rep: dict) -> bool:
     # на ноде без баз инвентарь пустой, флагать нечего
     if name == "dbstat-setup":
         return bool(rep.get("db_engines") or rep.get("db_stats"))
+    # gpu-setup - где на шине есть карта NVIDIA (агент 2.36) или helper уже стоит
+    if name == "gpu-setup":
+        return gpu_mod.has_gpu(rep)
     # dockerproxy-setup - там, где агенту уже дан доступ к Docker через наш прокси: helper его
     # укрепляет. Включать доступ там, где его не давали, - решение человека, не helper'а
     if name == "dockerproxy-setup":
@@ -105,6 +109,7 @@ _HELPER_LABEL = {
     "units-setup": "упавшие юниты systemd",
     "dockerproxy-setup": "защита доступа к Docker",
     "changes-setup": "изменения на сервере",
+    "gpu-setup": "GPU NVIDIA",
 }
 
 
