@@ -1863,6 +1863,8 @@ export type Server = {
   exposure?: Exposure | null
   // что сделать с ОС: конец поддержки, перезагрузка, обновления безопасности (level 2 - уже дыра)
   os_advice?: { kind: string; level: number; text: string }[]
+  // версии без поддержки (app/software.py): строка на продукт, 2 - без поддержки, 1 - скоро
+  sw_advice?: { key: string; level: number; name: string; what: string; text: string }[] | null
   // изменения на сервере (helper changes-setup): лента между снимками, отметка "это мы"
   changes?: ServerChanges | null
   // недельная проверка восстановления бэкапа (helper backup-setup 0.34)
@@ -2314,6 +2316,29 @@ export type TrafficOut = {
   since: string | null
 }
 export const getTraffic = (id: number) => api<TrafficOut>(`/api/servers/${id}/traffic`)
+// версии ПО сервера и сроки поддержки (app/software.py)
+export type SoftwareItem = {
+  key: string
+  p: string
+  name: string
+  cycle: string
+  ver: string
+  eol: string | boolean
+  state: 'eol' | 'soon' | 'ok'
+  left: number | null
+  text: string
+  where: { kind: 'container' | 'host'; name: string; src: string; ver: string }[]
+}
+export type SoftwareOut = {
+  items: SoftwareItem[]
+  unknown: { name: string; image: string; p: string; pname: string }[]
+  old: { name: string; image: string; built: number; age_days: number }[]
+  built: string | null
+  source: string | null
+  agent_ok: boolean
+  pkgs: boolean
+}
+export const getSoftware = (id: number) => api<SoftwareOut>(`/api/servers/${id}/software`)
 // кто качает трафик и кто пишет на диск по часам (app/usage.py): у net в паре [принято, отдано],
 // у disk [записано, прочитано]; дни недели - в часовом поясе браузера
 export type UsageName = {

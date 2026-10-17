@@ -36,6 +36,7 @@ from app import netlinks
 from app import traffic as traffic_mod
 from app import usage as usage_mod
 from app import audit, backup_growth, custom_backups, docker_exposure, geoip, kube_coverage, manual_probe, open_ports, os_support
+from app import software as software_mod
 from app.collector import (
     _backup_problem_repos, alert_since, backup_cadence, backup_rotation_items, backup_unmonitored,
     bsrv_extra, bsrv_restic_old, clock_skew_window, cron_job_issues, disk_analyze_ok, prune_problems, repo_reason, docker_since,
@@ -233,6 +234,7 @@ def _out(
     o.docker_risk = docker_risk.view(server)
     o.exposure = open_ports.view(server)
     o.os_advice = os_support.advice(server.last_report or {}, now)
+    o.sw_advice = software_mod.advice(server.last_report or {}, server.sw_host, now)
     o.changes = srv_changes.view(server)
     o.backup_verify = backup_verify.view(server.last_report or {}, now)
     o.restarts_day = srv_restarts.view(server, now) or None
@@ -1271,6 +1273,19 @@ async def server_packages(server_id: int, user: CurrentUser, session: SessionDep
     """Установленные пакеты сервера (агент 2.28), с фильтром по имени и версии."""
     await _get_or_404(server_id, session, user)
     return await packages_mod.list_for(session, server_id, q)
+
+
+@router.get("/{server_id}/software")
+async def server_software(server_id: int, user: CurrentUser, session: SessionDep) -> dict:
+    """Версии ПО сервера и сроки их поддержки (app/software.py): все найденные, образы без версии
+    в теге и образы, которые больше года не пересобирались."""
+    s = await _get_or_404(server_id, session, user)
+    inv = software_mod.inventory(s.last_report or {}, s.sw_host, datetime.now(timezone.utc))
+    for g in inv["items"]:
+        g["text"] = software_mod.item_text(g) if g["state"] != "ok" else ""
+    tbl = software_mod.table()
+    return inv | {"built": tbl.get("built"), "source": tbl.get("source"),
+                  "agent_ok": _ver_key(s.agent_version) >= (2, 35), "pkgs": s.sw_host is not None}
 
 
 @router.get("/{server_id}/vulns")

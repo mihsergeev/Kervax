@@ -1388,6 +1388,28 @@ const EN: Record<string, string> = {
   'История по дням копится с {d}.': 'The daily history is collected since {d}.',
   // кто качает трафик
   'Кто качает трафик': 'Who uses the traffic',
+  // версии ПО
+  'Версии ПО': 'Software versions',
+  'сроки поддержки по endoflife.date на {d}': 'support dates from endoflife.date as of {d}',
+  'кончилась {d}': 'ended {d}',
+  'кончилась': 'ended',
+  'срок не объявлен': 'no end date yet',
+  'до {d}, через {n} дн.': 'until {d}, in {n} days',
+  'хост: {list}': 'host: {list}',
+  '{n} г. назад': '{n} years ago',
+  '{n} дн. назад': '{n} days ago',
+  'Версия не видна, в теге образа ее нет: {list}.': 'The version is not visible, the image tag has none: {list}.',
+  'В окружении образа версии тоже нет.': 'The image environment has no version either.',
+  'Агент 2.35 и новее берет версию из окружения образа: обновите агент.':
+    'Agent 2.35 and newer takes the version from the image environment: update the agent.',
+  'Образы старше года: {n}': 'Images older than a year: {n}',
+  'собран {d}': 'built {d}',
+  'Версии берутся из инвентаря баз, окружения и тега образа, на хосте - из пакетов сторонних репозиториев (pgdg, sury, nodesource, nginx.org, MariaDB, MySQL, Redis). Пакеты дистрибутива дистрибутив чинит, пока жива ОС, их срок - поддержка ОС.':
+    'Versions come from the database inventory, the image environment and tag, on the host from packages of third-party repositories (pgdg, sury, nodesource, nginx.org, MariaDB, MySQL, Redis). Distribution packages are fixed by the distribution while the OS is supported, their end date is the OS support.',
+  'ПО без поддержки - обновите': 'software out of support - upgrade',
+  'скоро кончится поддержка ПО - запланируйте обновление': 'software support ends soon - plan an upgrade',
+  '{name}: без поддержки {list}': '{name}: out of support {list}',
+  '{name}: скоро кончится поддержка {list}': '{name}: support ends soon for {list}',
   'по исходящему, как считает хостер': 'by outgoing, as the hoster counts',
   'по всему трафику, как считает хостер': 'by all traffic, as the hoster counts',
   'сейчас тихо': 'quiet now',

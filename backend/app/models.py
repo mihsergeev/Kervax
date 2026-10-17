@@ -736,6 +736,8 @@ class Server(Base):
     traffic_cycle_day: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
     # когда топы "кто качает трафик" и "кто пишет на диск" в последний раз легли в server_usage
     usage_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # пакеты сторонних репозиториев (app/software.py): [{p, v, pkg}], раз в час из server_packages
+    sw_host: Mapped[list | None] = mapped_column(JSON, nullable=True)
     # подключение нового сервера (app/onboard.py): пока не закрыто, алертом уходят только
     # офлайн и критичный диск, остальное копится в карточке. Кто и когда закрыл; "авто" - само
     # через ONBOARD_MAX. Открывает подключение только заведение сервера в панели (create_server

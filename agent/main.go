@@ -43,7 +43,7 @@ import (
 	"time"
 )
 
-const version = "2.34"
+const version = "2.35"
 
 // Публичный ключ для проверки подписи релизов агента (Ed25519, base64).
 // ПУСТО по умолчанию → самообновление ВЫКЛЮЧЕНО (агент никогда не заменяет себя).
@@ -656,10 +656,15 @@ type dockerContainer struct {
 	Exit     *int   `json:"exit,omitempty"`      // State.ExitCode; у работающего нет
 	MaxRetry int    `json:"max_retry,omitempty"` // on-failure:N - сколько раз докер его перезапустит
 	OOM      bool   `json:"oom,omitempty"`       // остановленный убит OOM-киллером
-	// Только у внешних прокси (edgeProxyImage): версия из метки образа и дата его сборки. По
-	// тегу возраст не понять: traefik:latest на одной ноде оказался сборкой 2021 года.
+	// Версия из метки образа и дата его сборки (до 2.35 - только у внешних прокси). По тегу
+	// возраст не понять: traefik:latest на одной ноде оказался сборкой 2021 года.
 	ImgVer     string `json:"img_ver,omitempty"`     // org.opencontainers.image.version
 	ImgCreated int64  `json:"img_created,omitempty"` // сборка образа, unix-секунды
+	// Версии из окружения образа (2.35): официальные образы пишут их в ENV (PHP_VERSION,
+	// NGINX_VERSION, у bitnami - BITNAMI_APP_NAME и APP_VERSION), и их наследуют образы
+	// приложений, собранные поверх. По ним панель видит PHP 7.4 в образе shop-app:prod и версию
+	// nginx:latest. Только ключи из imageVerKeys: в остальном окружении контейнера пароли.
+	Ver map[string]string `json:"ver,omitempty"`
 	// опубликованные порты (docker -p): какой контейнер стоит за портом, открытым на хосте
 	Ports []dockerPort `json:"ports,omitempty"`
 	// Ключи от хоста: --privileged, опасные --cap-add, --pid=host и какие bind-монтирования только
@@ -4515,27 +4520,6 @@ func hostCapsOf(add []string) []string {
 	return out
 }
 
-// edgeProxyImage - образ внешнего прокси (как image_kind в панели): caddy, caddy-docker-proxy,
-// traefik, nginx-proxy. Только для них агент шлет версию и дату сборки образа: такой прокси
-// смотрит в интернет, и старая сборка - это непочиненные дыры.
-func edgeProxyImage(image string) bool {
-	name := strings.ToLower(image)
-	if i := strings.Index(name, "@"); i >= 0 {
-		name = name[:i]
-	}
-	if i := strings.LastIndex(name, "/"); i >= 0 {
-		name = name[i+1:]
-	}
-	if i := strings.Index(name, ":"); i >= 0 {
-		name = name[:i]
-	}
-	switch name {
-	case "caddy", "caddy-docker-proxy", "traefik", "nginx-proxy", "docker-gen":
-		return true
-	}
-	return false
-}
-
 // Даты сборки образов меняются, только когда образ обновили, а список образов на сборочных
 // нодах большой: спрашиваем его раз в полчаса. Ошибку (старый прокси агента отвечает на
 // /images/json 403) тоже помним полчаса, чтобы не сыпать отказами в его лог каждый отчет.
@@ -4546,12 +4530,12 @@ var imageList struct {
 	created map[string]int64
 }
 
-// imageBuildDates проставляет внешним прокси дату сборки их образа (ImgCreated). Остальным
-// контейнерам она не нужна, и без прокси на ноде список образов не запрашивается вовсе.
+// imageBuildDates проставляет контейнерам дату сборки их образа (ImgCreated): по ней панель
+// видит прокси и образы приложений, которые годами не пересобирались.
 func imageBuildDates(cl *http.Client, cs []dockerContainer, now time.Time) {
 	need := false
 	for i := range cs {
-		if edgeProxyImage(cs[i].Image) && cs[i].imageID != "" {
+		if cs[i].imageID != "" {
 			need = true
 			break
 		}
@@ -4573,10 +4557,41 @@ func imageBuildDates(cl *http.Client, cs []dockerContainer, now time.Time) {
 		}
 	}
 	for i := range cs {
-		if edgeProxyImage(cs[i].Image) {
-			cs[i].ImgCreated = imageList.created[cs[i].imageID]
-		}
+		cs[i].ImgCreated = imageList.created[cs[i].imageID]
 	}
+}
+
+// imageVerKeys - переменные окружения образа, в которых только версия
+var imageVerKeys = map[string]bool{
+	"PHP_VERSION": true, "NODE_VERSION": true, "PYTHON_VERSION": true, "RUBY_VERSION": true, "JAVA_VERSION": true,
+	"PG_MAJOR": true, "PG_VERSION": true, "MYSQL_MAJOR": true, "MYSQL_VERSION": true, "MARIADB_VERSION": true,
+	"REDIS_VERSION": true, "VALKEY_VERSION": true, "MONGO_VERSION": true, "RABBITMQ_VERSION": true,
+	"NGINX_VERSION": true, "HAPROXY_VERSION": true, "CADDY_VERSION": true,
+	"BITNAMI_APP_NAME": true, "APP_VERSION": true,
+}
+
+// imageVersions - версии из окружения контейнера: только ключи imageVerKeys и только значения,
+// похожие на версию (цифры, буквы, . + - _ ~, не длиннее 40)
+func imageVersions(env []string) map[string]string {
+	var out map[string]string
+	for _, kv := range env {
+		k, v, ok := strings.Cut(kv, "=")
+		if !ok || !imageVerKeys[k] {
+			continue
+		}
+		v = strings.TrimSpace(v)
+		bad := strings.IndexFunc(v, func(r rune) bool {
+			return !(r >= '0' && r <= '9' || r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || strings.ContainsRune(".+-_~", r))
+		})
+		if v == "" || len(v) > 40 || bad >= 0 {
+			continue
+		}
+		if out == nil {
+			out = map[string]string{}
+		}
+		out[k] = v
+	}
+	return out
 }
 
 // containerMem - память контейнера по его cgroup, как в docker stats: использование без
@@ -4665,17 +4680,20 @@ func dockerInspect(cl *http.Client, id string, dc *dockerContainer) {
 		NetworkSettings struct {
 			Networks map[string]struct{ IPAddress string }
 		}
-		// метки контейнера включают метки образа: в них версия, которую пишут в образ при сборке
+		// метки и окружение контейнера включают метки и ENV образа: в них версия, которую пишут
+		// в образ при сборке
 		Config struct {
 			Labels map[string]string
+			Env    []string
 		}
 	}
 	if err := dockerGet(cl, "/containers/"+url.PathEscape(id)+"/json", &ins); err != nil {
 		return
 	}
-	if edgeProxyImage(dc.Image) {
-		dc.ImgVer = strings.TrimSpace(ins.Config.Labels["org.opencontainers.image.version"])
+	if v := strings.TrimSpace(ins.Config.Labels["org.opencontainers.image.version"]); len(v) <= 64 {
+		dc.ImgVer = v
 	}
+	dc.Ver = imageVersions(ins.Config.Env)
 	dc.Restarts = ins.RestartCount
 	dc.Policy = ins.HostConfig.RestartPolicy.Name
 	dc.MaxRetry = ins.HostConfig.RestartPolicy.MaximumRetryCount

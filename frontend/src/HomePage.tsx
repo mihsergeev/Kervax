@@ -339,6 +339,8 @@ function grpLabel(grp: string, t: T): string {
     'bs-restic': t('на сервере бэкапов старый restic - обновите'),
     'bs-setup': t('бэкап-сервер без статистики - запустите backupserver-setup'),
     dockrisk: t('у контейнеров ключи от хоста - взлом приложения в них даст root на сервере'),
+    'sw-eol': t('ПО без поддержки - обновите'),
+    'sw-soon': t('скоро кончится поддержка ПО - запланируйте обновление'),
   }
   return fixed[grp] ?? grp
 }
@@ -452,6 +454,17 @@ function actionItems(servers: Server[], avail: string, relProblem: string, t: T)
       items.push({ key: `os-${x.kind}-${s.id}`, icon: x.level >= 2 ? '⛔' : '🧰', section: 'servers', id: s.id,
         name: s.name, cc: s.country, sec: 'osupd', grp: `os-${x.kind}`, detail: x.text,
         text: `${s.name}: ${x.text}` })
+    }
+    // версии без поддержки - список дел, а не авария: на сервер одна строка ("без поддержки
+    // PostgreSQL 12, PHP 7.3 и 7.4"), такие серверы сворачиваются в один пункт, где и что - в карточке
+    for (const lvl of [2, 1]) {
+      const sw = (s.sw_advice ?? []).filter((x) => (x.level >= 2 ? 2 : 1) === lvl)
+      if (!sw.length) continue
+      const list = sw.map((x) => x.what).join(', ')
+      items.push({ key: `sw-${lvl}-${s.id}`, icon: lvl >= 2 ? '⛔' : '🧰', section: 'servers', id: s.id,
+        name: s.name, cc: s.country, sec: 'software', grp: lvl >= 2 ? 'sw-eol' : 'sw-soon', detail: list,
+        text: lvl >= 2 ? t('{name}: без поддержки {list}', { name: s.name, list })
+          : t('{name}: скоро кончится поддержка {list}', { name: s.name, list }) })
     }
     // Чужой сервер по внешнему адресу сюда не идет: это шлюз исходящего NAT, а внешний адрес панель
     // берет из запроса агента, поправить нечего. Совет "поправьте внешний адрес" был невыполним
