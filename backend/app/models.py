@@ -883,6 +883,10 @@ class ServerMetric(Base):
     # Без неё график запросов - одна линия, и по ней не видно, какой сайт вырос.
     web_top: Mapped[list | None] = mapped_column(JSON, nullable=True)
     web_codes: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    # GPU по картам [{"g", "u", "m", "t", "p"}] и LLM-сервисы [{"k", "run", "wait", "kv", "gen", "req",
+    # "ttft", "tpot", "e2e"}] (app/gpu.py): графики раздела GPU и блока LLM
+    gpu: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    llm: Mapped[list | None] = mapped_column(JSON, nullable=True)
 
 
 class WebErrorSample(Base):

@@ -29,6 +29,7 @@ from app import retention as retention_mod
 from app import db_health
 from app import access_audit
 from app import docker_risk
+from app import gpu as gpu_mod
 from app import listen_watch
 from app import podnames
 from app import mem_trend
@@ -277,6 +278,7 @@ _SRV_ICON = {
     "backup_restore": "🛟💾", "docker_restarts": "🔄🐳", "kube_restarts": "🔄☸️",
     "mem_leak": "📈🧠", "ssh_risk": "🔐", "access_risk": "🗝", "db_health": "🛢",
     "web_config": "🧾", "web_cert": "🔏", "listen_gone": "🔌", "disk_slow": "🐢",
+    "gpu": "🎛", "gpu_heat": "🌡", "llm": "💬",
 }
 
 # Куда ведёт ссылка алерта (deep-link ?server=id&sec=…). Целимся в КОНКРЕТНУЮ метрику,
@@ -295,7 +297,7 @@ _SRV_SECTION = {
     "exposed": "exposure", "port_new": "exposure", "pressure": "pressure", "net_health": "nethealth",
     "link": "links", "traffic": "traffic",
     "access_change": "changes", "mem_leak": "memleak", "ssh_risk": "ssh", "access_risk": "access",
-    "listen_gone": "exposure", "disk_slow": "disklat",
+    "listen_gone": "exposure", "disk_slow": "disklat", "gpu": "gpu", "gpu_heat": "gpu",
 }
 
 
@@ -318,7 +320,8 @@ _BACKUP_SEC = {"backup_failed": "runs", "backup_stale": "runs", "backup_growth":
 _BSRV_SEC = {"backup_repo": "repos", "backup_lock": "repos", "backup_unmonitored": "repos", "backup_check": "repos",
              "backup_prune": "cleanup", "backup_rotation": "cleanup"}
 # раздел карточки сервисов ноды по алерту и по проблеме
-_SVC_SEC = {"queue": "queues", "db_conn": "db", "db_health": "db", "web_config": "web", "web_cert": "certs"}
+_SVC_SEC = {"queue": "queues", "db_conn": "db", "db_health": "db", "web_config": "web", "web_cert": "certs",
+            "llm": "llm"}
 _KUBE_TAB = {"kube_expiry": "expiry", "flux_down": "flux", "flux_stale": "flux", "kube_pod": "pods",
              "kube_cron": "cron", "kube_node": "nodes", "kube_job": "cron", "kube_restarts": "pods"}
 
@@ -344,6 +347,7 @@ _ALERT_SECTION = {
     "db_health": "services",
     "web_config": "services",
     "web_cert": "services",
+    "llm": "services",
 }
 
 
@@ -1607,6 +1611,9 @@ _SRV_LABEL = {
     "traffic": "трафик",
     "kube_node": "ноды kubernetes",
     "backup_restore": "проверка восстановления",
+    "gpu": "GPU",
+    "gpu_heat": "перегрев GPU",
+    "llm": "LLM-сервисы",
 }
 
 # Единицы пороговых метрик. Нужны отбою: голое «снова в норме» не отвечает на
@@ -1664,6 +1671,12 @@ def _recovery_detail(key: str, st: dict, ctx: dict) -> str:
         return "ошибок 5xx нет уже час, доля ниже порога"
     if key == "disk_health":
         return "диски снова в порядке: RAID собран, неисправных и пропавших дисков нет"
+    if key == "gpu":
+        return "GPU снова в порядке: драйвер отвечает, все карты на месте, свежих ошибок Xid нет"
+    if key == "gpu_heat":
+        return "GPU остыли, замедления из-за температуры нет"
+    if key == "llm":
+        return "LLM-сервисы снова в норме: отвечают, очереди нет, задержки обычные"
     if key == "disk_forecast":
         return "диски больше не грозят заполниться в ближайшие дни: рост замедлился или место освободили"
     if key == "units":
@@ -3573,6 +3586,17 @@ def server_problems(s: Server, now: datetime, pod_names: dict[str, str] | None =
     dl, dtext = disk_slow(rep)
     if dl and _held_long(s, state, "disk_slow", now):
         add("disk_slow", dl, dtext, "disklat", "disk_slow", state.get("disk_slow_since"))
+    # GPU (helper gpu-setup): драйвер, пропавшая карта, Xid и сбойная память - сразу, перегрев -
+    # как у алерта, когда держится дольше выдержки
+    for lv, txt, _k, g_since in gpu_mod.problems(rep, now):
+        add("gpu", lv, txt, "gpu", "gpu", g_since)
+    hl, htext = gpu_mod.heat(rep, now)
+    if hl and _held_long(s, state, "gpu_heat", now):
+        add("gpu_heat", hl, htext, "gpu", "gpu_heat", state.get("gpu_heat_since"))
+    # LLM-сервисы (агент 2.36): ведут в "Сервисы" ноды; как и алерт - то, что держится дольше выдержки
+    if gpu_mod.llm_list(rep) and _held_long(s, state, "llm", now):
+        for lv, txt, _k in gpu_mod.llm_problems(rep, state.get("llm_base")):
+            add("llm", lv, txt, "llm", "llm", state.get("llm_since"), section="services")
     # Сертификат nginx истекает: ведет в "Сервисы" ноды
     for lv, txt, _key in web_certs.problems(rep, now):
         add("web_cert", lv, txt, "certs", "web_cert", section="services")
@@ -3649,7 +3673,7 @@ _SIGNALS = {6: "ABRT", 9: "KILL", 11: "SEGV", 15: "TERM"}
 # который не укладывался во время на нодах с большим журналом, прислал алерт с каждой такой
 # ноды, и каждые 10 минут снова. kervax-agent и kervax-dumps (дампы баз для бэкапа) не тут.
 _OWN_HELPER_UNIT = re.compile(
-    r"kervax-(changes|db-stats|disk-health|disk-usage|kube-expiry|kube-flux|units|web-rate|web-sites"
+    r"kervax-(changes|db-stats|disk-health|disk-usage|gpu|kube-expiry|kube-flux|units|web-rate|web-sites"
     r"|[a-z]+-req)\.service")
 
 # Задание по таймеру, которое падает на каждом запуске, между падениями несколько минут
@@ -5149,6 +5173,20 @@ def _server_conditions(s: Server, now: datetime,
     if online and rep.get("disk_devs"):
         dl, dtext = disk_slow(rep)
         sustain_lvl("disk_slow", dl, {"detail": dtext}, cool_s=_CALM_S)
+    # GPU (helper gpu-setup): драйвер, пропавшая карта, Xid - без выдержки, как у дисков: сами не
+    # починятся; sig - что именно, новая беда при том же уровне дает свой алерт. Перегрев - с выдержкой
+    if online and gpu_mod.block(rep) is not None:
+        gp = gpu_mod.problems(rep, now)
+        out["gpu"] = (max((p[0] for p in gp), default=0),
+                      {"detail": "; ".join(p[1] for p in gp[:3]), "sig": [p[2] for p in gp]})
+        hl, htext = gpu_mod.heat(rep, now)
+        sustain_lvl("gpu_heat", hl, {"detail": htext}, cool_s=_CALM_S)
+    # LLM-сервисы (агент 2.36): молчание /metrics, очередь при полном KV-кэше, задержки в разы выше
+    # обычного - когда держится дольше выдержки
+    if online and gpu_mod.llm_list(rep):
+        lp = gpu_mod.llm_problems(rep, state.get("llm_base"))
+        sustain_lvl("llm", max((p[0] for p in lp), default=0), {"detail": "; ".join(p[1] for p in lp[:3])},
+                    cool_s=_CALM_S)
     # Сертификат nginx истекает или истек (helper webserver-setup 0.24)
     if online and web_certs.block(rep, now) is not None:
         wce = web_certs.problems(rep, now)
@@ -5521,7 +5559,7 @@ async def evaluate_servers(
                 continue
             prev = int(st.get(key, 0))
             if key in ("disk_health", "units", "docker_restarts", "kube_restarts", "mem_leak", "db_health",
-                       "web_config", "web_cert", "listen_gone", "docker_risk", "access_risk", "link"):
+                       "web_config", "web_cert", "listen_gone", "docker_risk", "access_risk", "link", "gpu"):
                 # Тот же уровень, но сломалось НОВОЕ (второй диск при уже развалившемся
                 # RAID, второй упавший юнит): молчать нельзя, хотя уровень не вырос. Что
                 # сломано - ключи в sig.
@@ -5860,6 +5898,11 @@ async def evaluate_servers(
             mstate = mem_trend.update(st.get("mem_trend"), s.last_report or {}, now)
             if mstate != (st.get("mem_trend") or {}):
                 apply(s.id, "mem_trend", mstate)
+            # обычные задержки LLM-сервисов: от них алерт "задержки выросли в разы" (gpu.base_update)
+            if gpu_mod.llm_list(s.last_report or {}) or st.get("llm_base"):
+                bstate = gpu_mod.base_update(st.get("llm_base"), s.last_report or {}, now)
+                if bstate != (st.get("llm_base") or {}):
+                    apply(s.id, "llm_base", bstate)
 
         # Очереди RabbitMQ: алертим те, что переросли свой порог. Состояние — на
         # КАЖДУЮ очередь: очередей десятки, и одна разбухшая не должна глушить

@@ -14,6 +14,7 @@ import {
   type Server,
   type ServiceInfo,
 } from './api'
+import { LlmSection } from './Gpu'
 import { currentLang, useI18n } from './i18n'
 import { useAuth } from './auth'
 import { useUrlCard, useUrlParam } from './deeplink'
@@ -122,6 +123,7 @@ type SvcItem = {
   sites?: string[] // домены/сайты веб-сервиса (из k8s Ingress или nginx -T)
   web?: boolean // это веб-сервер/прокси — если доменов нет, объясняем почему
   db?: DBStat[] // инвентарь СУБД: ВСЕ инстансы этого движка на ноде (хелпер dbstat-setup)
+  llm?: boolean // LLM-сервис (vLLM, SGLang, TEI): метрики в s.llm, свой раздел
 }
 type SrvServices = { server: Server; items: SvcItem[] }
 
@@ -613,6 +615,8 @@ function buildByServer(
         inKube: pods.length > 0,
       })
     }
+    // LLM-сервисы (агент 2.36): свой раздел, по строке на сервис
+    for (const x of s.llm ?? []) items.push({ kind: x.engine_name, where: x.where, llm: true })
     // веб-серверы/прокси (nginx/envoy/…): их не бэкапят, поэтому идут отдельным источником
     for (const w of s.last_report?.web_services ?? []) {
       if (seen.has(w.kind)) continue
@@ -622,7 +626,7 @@ function buildByServer(
     const stats = s.last_report?.db_stats ?? []
     if (stats.length)
       for (const it of items) {
-        if (it.web) continue
+        if (it.web || it.llm) continue
         const m = matchDbStats(it.kind, stats)
         if (m.length) it.db = m
       }
@@ -772,11 +776,12 @@ const SVC_SECTIONS: SecDef[] = [
   { id: 'certs', label: 'Сертификаты', group: 'Веб' },
   { id: 'db', label: 'Базы и хранилища', group: 'Данные' },
   { id: 'queues', label: 'Очереди', group: 'Данные' },
+  { id: 'llm', label: 'LLM', group: 'Модели' },
 ]
 const SVC_SEC_IDS = new Set(SVC_SECTIONS.map((x) => x.id))
 // раздел карточки по виду проблемы, если бэкенд его не назвал (старый бэкенд в кэше вкладки)
 const SVC_SEC_OF_KIND: Record<string, string> = {
-  queue: 'queues', web_cert: 'certs', web_config: 'web', db_health: 'db', db_conn: 'db',
+  queue: 'queues', web_cert: 'certs', web_config: 'web', db_health: 'db', db_conn: 'db', llm: 'llm',
 }
 
 function ServerServicesModal({ srv, onClose, onChanged, initialSec, sites }: {
@@ -811,7 +816,9 @@ function ServerServicesModal({ srv, onClose, onChanged, initialSec, sites }: {
   const rate = webRate(s.last_report)
   // СУБД сверху, под ними прочее, что держит данные (Grafana, Prometheus, etcd): их тоже находит аудит
   const isDb = (it: SvcItem) => Object.values(DB_ENGINE_LABEL).includes(it.kind)
-  const dbItems = srv.items.filter((it) => !it.web && !it.svc).sort((a, b) => Number(isDb(b)) - Number(isDb(a)))
+  const dbItems = srv.items.filter((it) => !it.web && !it.svc && !it.llm).sort((a, b) => Number(isDb(b)) - Number(isDb(a)))
+  const llm = s.llm ?? []
+  const llmBad = llm.filter((x) => !x.ok && !x.no_metrics).length
   const dbs = dbItems.flatMap((it) => it.db ?? [])
   const dbRows = dbs.flatMap((d) => (d.engine === 'redis' ? [] : d.dbs ?? []))
   const rabbit = srv.items.filter((it) => it.svc?.kind === 'rabbitmq')
@@ -827,6 +834,7 @@ function ServerServicesModal({ srv, onClose, onChanged, initialSec, sites }: {
     certs: certs.length > 0,
     db: dbItems.length > 0,
     queues: rabbit.length > 0,
+    llm: llm.length > 0,
   }
   const secs = SVC_SECTIONS.filter((x) => shown[x.id])
   const cur = secs.find((x) => x.id === active) ?? secs[0]
@@ -852,6 +860,11 @@ function ServerServicesModal({ srv, onClose, onChanged, initialSec, sites }: {
       [...new Set(dbItems.map((it) => it.kind))].join(', '),
       dbRows.length > 0 && t('баз: {n}', { n: dbRows.length }),
       dbRows.length > 0 && fmtBytes(dbRows.reduce((a, r) => a + r.size, 0)),
+    ),
+    llm: subOf(
+      [...new Set(llm.map((x) => x.engine_name))].join(', '),
+      llm.some((x) => x.gen_tps != null) && t('{n} ток/с', { n: rpmText(llm.reduce((a, x) => a + (x.gen_tps ?? 0), 0)) }),
+      llm.some((x) => x.waiting != null) && t('в очереди {n}', { n: rpmText(llm.reduce((a, x) => a + (x.waiting ?? 0), 0)) }),
     ),
     queues: t('очередей: {n}, сообщений: {m}', {
       n: rabbit.reduce((n, it) => n + (it.svc?.total ?? 0), 0),
@@ -976,6 +989,21 @@ function ServerServicesModal({ srv, onClose, onChanged, initialSec, sites }: {
                       />
                     </button>
                   )}
+                  {llm.length > 0 && (
+                    <button className="srv-tile-btn" onClick={() => go('llm')} title={t('к разделу')}>
+                      <NetTile
+                        label={tileLabel('llm', 'LLM')}
+                        value={String(llm.length)}
+                        sub={llmBad
+                          ? t('не отвечают: {n}', { n: llmBad })
+                          : subOf(
+                              llm.some((x) => x.gen_tps != null) && t('{n} ток/с', { n: rpmText(llm.reduce((a, x) => a + (x.gen_tps ?? 0), 0)) }),
+                              llm.some((x) => x.running != null) && t('в работе {n}', { n: rpmText(llm.reduce((a, x) => a + (x.running ?? 0), 0)) }),
+                            ) || undefined}
+                        tone={tileTone('llm', llmBad ? 'bad' : 'ok')}
+                      />
+                    </button>
+                  )}
                   {rabbit.length > 0 && (
                     <button className="srv-tile-btn" onClick={() => go('queues')} title={t('к разделу')}>
                       <NetTile
@@ -994,6 +1022,10 @@ function ServerServicesModal({ srv, onClose, onChanged, initialSec, sites }: {
                 />
               </div>
             )}
+
+            {cur.id === 'llm' && <LlmSection server={s} rows={items.llm?.map((x) => ({
+              tone: x.level >= 2 ? ('t-down' as const) : ('t-degraded' as const), text: x.text, since: x.since,
+            })) ?? []} />}
 
             {cur.id === 'web' && (
               <div className="net-cards">
@@ -1317,7 +1349,7 @@ export function ServicesPage({ onUnauthorized, openServerId, openSec, onConsumed
   const offNames = all.filter((r) => !r.server.online).map((r) => r.server.name)
   const kindsAll = new Set(all.flatMap((r) => r.items.map((i) => i.kind)))
   const svcAll = all.flatMap((r) => r.items.map((it) => ({ it, s: r.server })))
-  const dbItems = svcAll.filter(({ it }) => !it.web && !it.svc)
+  const dbItems = svcAll.filter(({ it }) => !it.web && !it.svc && !it.llm)
   const dbBad = live.filter((r) => (r.server.db_health ?? []).some((h) => h.problems.some((p) => p.level >= 2))).map((r) => r.server.name)
   const dbWarn = live.filter((r) => (r.server.db_health ?? []).some((h) => h.problems.some((p) => p.level < 2))).map((r) => r.server.name)
   const webItems = svcAll.filter(({ it }) => it.web)

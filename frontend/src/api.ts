@@ -1865,6 +1865,10 @@ export type Server = {
   os_advice?: { kind: string; level: number; text: string }[]
   // версии без поддержки (app/software.py): строка на продукт, 2 - без поддержки, 1 - скоро
   sw_advice?: { key: string; level: number; name: string; what: string; text: string }[] | null
+  // GPU NVIDIA (helper gpu-setup): карточка раздела и плашка списка; LLM-сервисы (агент 2.36)
+  gpu?: GpuView | null
+  gpu_sum?: GpuSum | null
+  llm?: LlmSvc[] | null
   // изменения на сервере (helper changes-setup): лента между снимками, отметка "это мы"
   changes?: ServerChanges | null
   // недельная проверка восстановления бэкапа (helper backup-setup 0.34)
@@ -2161,6 +2165,51 @@ export type ServerMetric = {
   // разбивка для стека: самые нагруженные логи минуты и ответы 5xx по кодам (с 1.4.62)
   web_top?: { k: string; r: number; e: number }[] | null
   web_codes?: { c: string; n: number }[] | null
+  // GPU по картам (загрузка, память и питание в %, температура) и LLM-сервисы (задержки - p95, с)
+  gpu?: { g: string; u: number | null; m: number | null; t: number | null; p: number | null }[] | null
+  llm?: {
+    k: string; run: number | null; wait: number | null; kv: number | null; gen: number | null; req: number | null
+    ttft: number | null; tpot: number | null; e2e: number | null
+  }[] | null
+}
+
+// GPU NVIDIA (app/gpu.py view): карты, процессы, ошибки Xid за сутки, драйвер и карты на шине PCI
+export type GpuCardRow = {
+  i: number | null; bus: string; name: string; util: number | null; mutil: number | null
+  mem: number | null; memt: number | null; temp: number | null; pw: number | null; pwl: number | null
+  clk: number | null; clkm: number | null; ps: string; fan: number | null; pm: string
+  ecc_u: number | null; ecc_c: number | null; slow: number | null; maxop: number | null
+  thermal: boolean; pcap: boolean; brake: boolean; remap: boolean; remap_fail: boolean
+}
+export type GpuView = {
+  helper: boolean
+  age?: number
+  stale?: boolean
+  smi?: boolean
+  ok?: boolean
+  err?: string
+  cause?: string
+  driver?: string
+  cuda?: string
+  kernel?: string
+  pci: { bus: string; drv: string; lost?: boolean }[]
+  gpus?: GpuCardRow[]
+  procs?: { gpu: number | null; pid: number | null; name: string; kind: string; owner: string; mem: number | null }[]
+  xid?: { ts: number; bus: string; code: number; text: string; gpu: number | null; hw: boolean; desc: string }[]
+}
+// плашка списка серверов (gpu.summary): память в ГиБ
+export type GpuSum = {
+  n: number; models: string[]; util: number | null; mem: number | null; memt: number | null; helper: boolean; ok: boolean
+}
+// LLM-сервис (gpu.llm_view): за последние 5 минут, задержки [p50, p95, p99] в секундах
+export type LlmSvc = {
+  key: string; label: string; engine: string; engine_name: string; kind: string; name: string; where: string
+  model?: string | null; port: number; up?: number | null; ok: boolean; err: string
+  no_metrics?: boolean | null; win?: number | null
+  running?: number | null; waiting?: number | null; kv?: number | null; req_s?: number | null
+  prompt_tps?: number | null; gen_tps?: number | null; preempt?: number | null; errors?: number | null
+  aborted?: number | null; ttft?: number[] | null; tpot?: number[] | null; e2e?: number[] | null
+  base_ttft?: number | null; base_tpot?: number | null
 }
 export type ServerForm = {
   name: string

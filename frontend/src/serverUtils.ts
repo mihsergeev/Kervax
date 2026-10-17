@@ -338,3 +338,15 @@ export function knownMeta(k: KnownIssue, t: (k: string, p?: Record<string, strin
   if (k.until) parts.push(t('до {d}', { d: new Date(k.until).toLocaleDateString() }))
   return parts.filter(Boolean).join(', ')
 }
+
+// GPU: строка раздела на карте сервера, когда замечаний нет
+export function gpuSecLine(s: Server, t: (k: string, p?: Record<string, string | number>) => string): string {
+  const sum = s.gpu_sum
+  if (!sum) return ''
+  if (!sum.helper) return t('карт на шине: {n}, нет helper gpu-setup', { n: sum.n })
+  return [
+    `${sum.n} x ${sum.models.join(', ')}`,
+    sum.util != null ? t('загрузка {p}%', { p: sum.util }) : '',
+    sum.mem != null ? t('память {a} из {b} ГБ', { a: sum.mem, b: sum.memt ?? 0 }) : '',
+  ].filter(Boolean).join(', ')
+}
