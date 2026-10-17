@@ -19,7 +19,9 @@ set -euo pipefail
 # 0.24: the certificates nginx serves (ssl_certificate on the host and in nginx containers):
 #       expiry date and names -> report.d/web-certs.json, plus whether certbot renews them.
 #       Public sites are watched by monitors, sites behind an allowlist are not
-KERVAX_SETUP_VERSION=0.24  # MAJOR.MINOR; compared component-wise
+# 0.25: certbot installed from snap renews through snap.certbot.renew.timer: it counts as the
+#       timer (and a failed snap.certbot.renew.service as failed), not as renewal not set up
+KERVAX_SETUP_VERSION=0.25  # MAJOR.MINOR; compared component-wise
 KERVAX_SETUP_ALWAYS=1     # safe on any node: the refresh is a no-op without a web server
 
 HELPER_DIR=/lib65/kervax
@@ -458,10 +460,13 @@ collect_certs() {
     done < <(docker exec "$c" nginx -T 2>/dev/null | cert_paths)
   done < <(docker ps --format '{{.Names}} {{.Image}}' 2>/dev/null | awk '/nginx/{print $1}' | sort -u)
 }
-# who renews Let's Encrypt certificates: the certbot timer, a cron line, or nobody
+# who renews Let's Encrypt certificates: the certbot timer, a cron line, or nobody.
+# certbot from snap renews with its own snap.certbot.renew.timer / .service
 cert_renew() {
   systemctl is-failed --quiet certbot.service 2>/dev/null && { echo failed; return; }
+  systemctl is-failed --quiet snap.certbot.renew.service 2>/dev/null && { echo failed; return; }
   systemctl is-active --quiet certbot.timer 2>/dev/null && { echo timer; return; }
+  systemctl is-active --quiet snap.certbot.renew.timer 2>/dev/null && { echo timer; return; }
   grep -qsE 'certbot|acme\.sh|letsencrypt' /etc/crontab /etc/cron.d/* /var/spool/cron/crontabs/* 2>/dev/null \
     && { echo cron; return; }
   echo none

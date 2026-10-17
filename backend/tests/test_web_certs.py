@@ -60,5 +60,35 @@ def test_alert_home_and_view():
 
 def test_helper_collects_certs():
     src = (Path(__file__).resolve().parents[2] / "agent" / "webserver-setup.sh").read_text(encoding="utf-8")
-    assert "KERVAX_SETUP_VERSION=0.24" in src and "collect_certs" in src and "report.d/web-certs.json" in src
+    assert "KERVAX_SETUP_VERSION=0.25" in src and "collect_certs" in src and "report.d/web-certs.json" in src
     assert "cert_renew" in src and "\r" not in src
+
+
+def test_helper_renew_sees_snap_certbot():
+    """certbot из snap продлевает через snap.certbot.renew.timer - это таймер, а не "продление не
+    настроено" (helper 0.25)"""
+    import re
+    import shutil
+    import subprocess
+
+    import pytest
+
+    src = (Path(__file__).resolve().parents[2] / "agent" / "webserver-setup.sh").read_text(encoding="utf-8")
+    fn = re.search(r"^cert_renew\(\) \{\n.*?^\}\n", src, re.S | re.M).group(0)
+    assert "snap.certbot.renew.timer" in fn and "snap.certbot.renew.service" in fn
+    bash = shutil.which("bash")
+    if not bash:
+        pytest.skip("нет bash")
+
+    def renew(units):
+        # systemctl отвечает "да" только для перечисленных "is-failed unit"/"is-active unit", cron пуст
+        stub = ("systemctl() { case \" %s \" in *\" $1:$3 \"*) return 0;; esac; return 1; }\n"
+                "grep() { return 1; }\n" % " ".join(units))
+        out = subprocess.run([bash, "-c", stub + fn + "cert_renew"], capture_output=True, text=True, timeout=30)
+        return out.stdout.strip()
+
+    assert renew([]) == "none"
+    assert renew(["is-active:certbot.timer"]) == "timer"
+    assert renew(["is-active:snap.certbot.renew.timer"]) == "timer"
+    assert renew(["is-active:snap.certbot.renew.timer", "is-failed:snap.certbot.renew.service"]) == "failed"
+    assert renew(["is-active:certbot.timer", "is-failed:certbot.service"]) == "failed"
