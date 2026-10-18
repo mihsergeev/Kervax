@@ -42,10 +42,11 @@ def test_spike_rules():
     # в 20 раз больше обычного и от тысячи - проблема
     assert le.spike(_src("container a", 4000, 4000 + 23 * 100)) == 2
     assert le.spike(_src("container a", 900, 900 + 23 * 10)) == 1
-    # истории меньше 4 часов: обычного не знаем, нужно 2000
+    # истории меньше 4 часов: обычного не знаем, нужно 20000 - постоянный поток ошибок без истории
+    # не отличить от всплеска (ZooKeeper, который всегда сыпет BindException)
     assert le.base(_src("container a", 1500, 1500, span=3 * 3600)) is None
-    assert le.spike(_src("container a", 1500, 1500, span=3 * 3600)) == 0
-    assert le.spike(_src("container a", 2500, 2500, span=3 * 3600)) == 1
+    assert le.spike(_src("container a", 2054, 2054, span=3 * 3600)) == 0
+    assert le.spike(_src("container a", 25000, 25000, span=3 * 3600)) == 1
     # после ушедшего алерта отбой при половине порогов
     assert le.spike(_src("container a", 150, 150 + 23 * 10)) == 0
     assert le.spike(_src("container a", 150, 150 + 23 * 10), held=True) == 1
@@ -78,8 +79,8 @@ def test_problems_text_mute_and_home():
 
 
 def test_no_history_says_so():
-    s = _srv(_rep([_src("container a", 2500, 2500, span=1800)]))
-    assert le.problems(s, NOW)[0]["why"] == "2 500 строк с ошибками за час, обычного еще не знаем: истории меньше 4 часов"
+    s = _srv(_rep([_src("container a", 25000, 25000, span=1800)]))
+    assert le.problems(s, NOW)[0]["why"] == "25 000 строк с ошибками за час, обычного еще не знаем: истории меньше 4 часов"
     assert le.why(_src("container a", 300, 300)) == "300 строк с ошибками за час, обычно их почти нет"
 
 
@@ -114,7 +115,9 @@ def test_alert_condition():
 
 def test_helper_script():
     src = (Path(__file__).resolve().parents[2] / "agent" / "logerr-setup.sh").read_text(encoding="utf-8")
-    assert "KERVAX_SETUP_VERSION=0.1" in src and "KERVAX_SETUP_ALWAYS=1" in src and "\r" not in src
+    assert "KERVAX_SETUP_VERSION=0.2" in src and "KERVAX_SETUP_ALWAYS=1" in src and "\r" not in src
+    # 0.2: строка стека (ClickHouse "3. DB::Exception... @ 0x", Java "at ...(", PHP "#3 ", "Caused by:") - не ошибка
+    assert "if (l ~ RE && msg(l) !~ FR) { errs++; last = l }" in src and "@ 0x[0-9a-fA-F]+" in src
     # обратный слэш в строке лога удваивается так, что mawk его не теряет: иначе отчет не JSON
     assert '_jn = split(s, _jp, "\\\\")' in src
     # смещения и размеры больше 2 ГиБ: mawk пишет 7.1983e+09 в строке и режет %d на 2^31

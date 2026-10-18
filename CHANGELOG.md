@@ -4,6 +4,19 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.4.274] - 2026-10-19
+
+### Fixed
+- Всплеск ошибок в логах: пока истории меньше 4 часов, нужно не 2000, а 20 000 строк за час. В первые
+  часы после раскатки helper'а пришел алерт на ZooKeeper, который давно и постоянно пишет
+  BindException: без истории постоянный поток не отличить от всплеска. 20 000 за час, пять строк в
+  секунду, - уже авария, даже если так было всегда.
+- Счет ошибок в логах (helper logerr-setup 0.2): строка стека - не отдельная ошибка. "3.
+  DB::Exception::Exception<>(...) @ 0x..." у ClickHouse, "at ...(Bar.java:12)" у Java и Node, "#3
+  /app/x.php(12): ..." у PHP, "Caused by:" и "... 12 more" не считаются: одно исключение с тридцатью
+  строками стека шло за тридцать ошибок, и под ClickHouse добирал порог несколькими десятками
+  исключений. Сама строка ошибки, с которой начинается стек, считается, как раньше.
+
 ## [1.4.273] - 2026-10-19
 
 ### Fixed

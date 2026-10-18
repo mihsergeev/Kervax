@@ -83,7 +83,7 @@ async def test_old_copy_keys_in_an_open_alert_are_not_news(tmp_path, monkeypatch
 
 def _logs(t, *names):
     return {"extras": {"logerr": {"v": 1, "ts": int(t.timestamp()), "logs": 9, "read": 1000, "skipped": 0,
-                                  "sources": [{"where": f"container {n}", "container": "", "h1": 5000, "d1": 5000,
+                                  "sources": [{"where": f"container {n}", "container": "", "h1": 25000, "d1": 25000,
                                                "lines1": 9000, "span": 1800, "last_ts": int(t.timestamp()) - 60,
                                                "last": "ERROR boom"} for n in names]}}}
 
