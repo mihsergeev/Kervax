@@ -2217,6 +2217,7 @@ export type GpuCardRow = {
   clk: number | null; clkm: number | null; ps: string; fan: number | null; pm: string
   ecc_u: number | null; ecc_c: number | null; slow: number | null; maxop: number | null
   thermal: boolean; pcap: boolean; brake: boolean; remap: boolean; remap_fail: boolean
+  frozen?: number // показания не меняются столько секунд (0 - живые)
 }
 export type GpuView = {
   helper: boolean
@@ -2237,6 +2238,7 @@ export type GpuView = {
 // плашка списка серверов (gpu.summary): память в ГиБ
 export type GpuSum = {
   n: number; models: string[]; util: number | null; mem: number | null; memt: number | null; helper: boolean; ok: boolean
+  frozen?: number // сколько карт с застывшими показаниями
 }
 // LLM-сервис (gpu.llm_view): за последние 5 минут, задержки [p50, p95, p99] в секундах
 export type LlmSvc = {
@@ -2248,6 +2250,7 @@ export type LlmSvc = {
   aborted?: number | null; ttft?: number[] | null; tpot?: number[] | null; e2e?: number[] | null
   base_ttft?: number | null; base_tpot?: number | null
   locked?: boolean // /metrics просит ключ: так настроено, не авария
+  pub_port?: number | null // проброшенный порт контейнера на хосте
 }
 export type ServerForm = {
   name: string

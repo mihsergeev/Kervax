@@ -7049,6 +7049,8 @@ button.ghost.lc-del { color: var(--down); border-color: color-mix(in srgb, var(-
 .gpu-tbl, .gpu-ptbl { display: grid; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; font-size: 0.86rem; }
 .gpu-tbl { grid-template-columns: max-content minmax(70px, 1fr) minmax(120px, 1.2fr) repeat(4, max-content); }
 .gpu-ptbl { grid-template-columns: max-content minmax(0, 1fr) max-content max-content; }
+/* застывшие показания nvidia-smi: строка блеклая, числам не верить */
+.gpu-tr-frozen > * { opacity: 0.45; }
 .gpu-tr { display: grid; grid-column: 1 / -1; grid-template-columns: subgrid; gap: 0.3rem 0.8rem; align-items: center; padding: 0.35rem 0.7rem; border-top: 1px solid color-mix(in srgb, var(--border) 60%, transparent); }
 .gpu-tr:first-child { border-top: 0; }
 .gpu-th { color: var(--text-muted); font-size: 0.74rem; text-transform: uppercase; letter-spacing: 0.03em; }
