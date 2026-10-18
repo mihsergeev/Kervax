@@ -27,10 +27,15 @@
 # file. It goes to redis-cli on stdin (REDISCLI_AUTH), never on a command line, and does not leave
 # the node. A Redis whose password the helper does not know is listed as such, without queues.
 #
+# 0.2: under systemd PATH has no /bin, and an alpine Redis image keeps its shell only there:
+# "nsenter: failed to execute sh", and such a Redis looked down for half an hour. The shell is
+# called by its full path now, PATH is set explicitly, and a Redis that did not answer is tried
+# again in 5 minutes.
+#
 # Only queue names and numbers leave the node: no job contents, no other keys.
 set -euo pipefail
 
-KERVAX_SETUP_VERSION=0.1  # MAJOR.MINOR; compared component-wise
+KERVAX_SETUP_VERSION=0.2  # MAJOR.MINOR; compared component-wise
 KERVAX_SETUP_WHEN="pgrep -x redis-server >/dev/null 2>&1 || pgrep -x valkey-server >/dev/null 2>&1"
 
 HELPER_DIR=/lib65/kervax
@@ -51,11 +56,13 @@ cat > "$HELPER.new" <<'HELPER_EOF'
 # SCAN, TYPE, EXISTS, SMEMBERS, HGET, LLEN, ZCARD, SCARD.
 set -u
 export LC_ALL=C
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 OUT=${KERVAX_QUEUES_OUT:-/var/lib/kervax/report.d/queues.json}
 CACHE=${KERVAX_QUEUES_CACHE:-/var/lib/kervax/queues.cache}
 TO=5            # seconds for one redis-cli call
 SCAN_TO=60      # and for the SCAN of one database
 FIND_EVERY=1800 # look for queues anew every 30 minutes
+RETRY_DOWN=300  # and try a Redis that did not answer again in 5 minutes
 MAX_Q=60        # queues per broker in the report, the deepest first
 MAX_DB=16
 MAX_KEYS=1000000  # a database with more keys is not scanned for queues
@@ -158,13 +165,13 @@ listen_of() { # pid
 
 # redis-cli of the instance itself, inside its namespaces; P CLI TGT PW are set per instance
 rcli() {
-  printf '%s\n' "$PW" | timeout "${T:-$TO}" nsenter -t "$P" -n -m sh -c \
+  printf '%s\n' "$PW" | timeout "${T:-$TO}" nsenter -t "$P" -n -m /bin/sh -c \
     'read -r REDISCLI_AUTH; [ -n "$REDISCLI_AUTH" ] && export REDISCLI_AUTH; c=$1; shift; exec "$c" "$@"' \
     sh "$CLI" $TGT "$@" 2>/dev/null
 }
 # commands from stdin, one reply per line
 rbatch() {
-  { printf '%s\n' "$PW"; cat; } | timeout "$TO" nsenter -t "$P" -n -m sh -c \
+  { printf '%s\n' "$PW"; cat; } | timeout "$TO" nsenter -t "$P" -n -m /bin/sh -c \
     'read -r REDISCLI_AUTH; [ -n "$REDISCLI_AUTH" ] && export REDISCLI_AUTH; c=$1; shift; exec "$c" "$@"' \
     sh "$CLI" $TGT -n "$1" 2>/dev/null
 }
@@ -251,7 +258,8 @@ while IFS=$'\t' read -r P W TGT CLI SPEC; do
   INST="$W|$TGT"
   last=$(awk -F'\t' -v i="$INST" '$1 == "D" && $2 == i { print $3 "\t" $4; exit }' "$CACHE" 2>/dev/null)
   when=${last%%$'\t'*}; status=${last#*$'\t'}
-  if [ -n "$last" ] && [ $((NOW - ${when:-0})) -lt $FIND_EVERY ]; then
+  every=$FIND_EVERY; [ "$status" = down ] && every=$RETRY_DOWN
+  if [ -n "$last" ] && [ $((NOW - ${when:-0})) -lt $every ]; then
     awk -F'\t' -v i="$INST" '($1 == "D" || $1 == "Q") && $2 == i' "$CACHE" >> "$TMPD/cache"
     [ "$status" = auth ] && printf '%s\n' "$W" >> "$TMPD/skip"
     continue

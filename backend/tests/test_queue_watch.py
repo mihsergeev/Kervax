@@ -189,7 +189,7 @@ def test_snooze_accepts_a_queue_key():
 def test_helper_script():
     from pathlib import Path
     src = (Path(__file__).resolve().parents[2] / "agent" / "queues-setup.sh").read_text(encoding="utf-8")
-    assert "KERVAX_SETUP_VERSION=0.1" in src and 'KERVAX_SETUP_WHEN="' in src
+    assert "KERVAX_SETUP_VERSION=0.2" in src and "/bin/sh -c" in src and 'KERVAX_SETUP_WHEN="' in src
     assert "REDISCLI_AUTH" in src and "\r" not in src
     # пароль только через stdin, не в командной строке
     assert "redis-cli -a" not in src and "--pass" not in src and "--requirepass \"$" not in src
