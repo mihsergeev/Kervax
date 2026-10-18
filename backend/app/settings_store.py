@@ -184,6 +184,8 @@ SERVER_ALERT_KINDS: dict[str, tuple[str, str]] = {
     # Воркер под supervisor или pm2 не запускается (FATAL, errored, BACKOFF дольше трех минут),
     # завершился с ошибкой или падает и поднимается (helper workers-setup)
     "workers": ("Воркер упал или падает и поднимается", "{detail}"),
+    # копии крона копятся или одна висит в разы дольше обычного (helper cron-setup)
+    "cron_stuck": ("Крон наслаивается или висит", "{detail}"),
     "web_5xx": ("Веб: пошли ошибки 5xx",
                 "{value}% запросов за 15 минут закончились ошибкой 5xx ({errs} из {total}){where}"),
     "kube_pod": ("Kubernetes: под не поднимается",

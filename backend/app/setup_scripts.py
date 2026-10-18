@@ -120,6 +120,7 @@ _HELPER_LABEL = {
     "gpu-setup": "GPU NVIDIA",
     "queues-setup": "очереди задач",
     "workers-setup": "воркеры supervisor и pm2",
+    "cron-setup": "кроны на хосте и в контейнерах",
 }
 
 

@@ -1922,6 +1922,8 @@ export type Server = {
   workers?: WorkerDaemon[] | null
   // демоны, которых helper не смог спросить: где и почему словами
   workers_skipped?: { where: string; why: string }[] | null
+  // кроны хоста и контейнеров (helper cron-setup): задачи, идущие копии, беда и мьют
+  cron?: CronInfo | null
   // заглушенные очереди: насовсем или до срока
   queue_mutes?: Record<string, { perm?: boolean; until?: string }> | null
   // изменения на сервере (helper changes-setup): лента между снимками, отметка "это мы"
@@ -2115,6 +2117,37 @@ export type WorkerProg = {
   mute?: { perm?: boolean; until?: string }
 }
 export type WorkerDaemon = { kind: string; label: string; where: string; source: string; ts: number; progs: WorkerProg[] }
+// Задача cron (cron_watch.view): где (словами), расписание, последний запуск (unix), запусков за сутки
+// (-1 - журнала нет), n - идет копий сейчас, run - самые старые (возраст и CPU в секундах), usual -
+// обычная длительность (секунды, 1 - меньше минуты, 0 - неизвестна), lost - вывод доходит до cron, а
+// почты нет, order - stderr ушел в cron из-за 2>&1 перед перенаправлением в файл; level/why - беда,
+// mute - заглушена по ключу cron:<key>
+export type CronJob = {
+  where: string
+  kind: string
+  user: string
+  sched: string
+  src: string
+  cmd: string
+  last: number
+  runs: number
+  n: number
+  run: { pid: number; age: number; cpu: number; procs: number }[]
+  usual: number
+  key: string
+  lost?: 'err' | 'out' | 'both'
+  order?: boolean
+  level?: number
+  why?: string
+  mute?: { perm?: boolean; until?: string }
+}
+export type CronInfo = {
+  ts: number
+  journal: boolean
+  disc24: number // сколько раз за сутки cron хоста выбросил вывод (нет почты)
+  daemons: { where: string; kind: string; mta: boolean; jobs: number }[]
+  jobs: CronJob[]
+}
 export type ServiceInfo = {
   kind: string // rabbitmq | celery | sidekiq | rq | bullmq | laravel | yii | symfony | oban ... (queue_watch.SYSTEM_LABEL)
   source?: string // «под ns/name» / «контейнер X»; у очередей в Redis - «контейнер X, Celery, db 1» (часть ключа)
