@@ -1436,10 +1436,12 @@ class ServerOut(BaseModel):
     llm: list[dict] | None = None
     # очереди, которые растут и не разбираются: {ключ очереди: {"age", "d0", "muted"}} (queue_watch.view)
     queue_watch: dict | None = None
-    # очереди в Redis (helper queues-setup): брокеры как у RabbitMQ, с подписью "where"
+    # очереди от helper'а queues-setup (Redis, таблицы баз): брокеры как у RabbitMQ, с подписью "where"
     queue_brokers: list[dict] | None = None
     # экземпляры Redis, пароль которых helper не нашел
     queue_skipped: list[str] | None = None
+    # базы, куда helper не вошел, и слишком большие таблицы очередей: [{why, where, rows}] (queue_watch.db_skipped)
+    queue_db_skipped: list[dict] | None = None
     # заглушенные очереди: {ключ: {"perm": true} | {"until": iso}} (queue_watch.mute_view)
     queue_mutes: dict | None = None
     # проверка конфигов веб-серверов: [{server, where, ok, err}] (web_config.view)

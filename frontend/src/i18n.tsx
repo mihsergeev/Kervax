@@ -1453,6 +1453,12 @@ const EN: Record<string, string> = {
   'С проблемами: {n}': 'With problems: {n}',
   'Очереди в этих Redis не видны: helper не нашел пароль ({list}). Он берет REDIS_PASSWORD или --requirepass из настроек контейнера либо requirepass из redis.conf.':
     'Queues in these Redis instances are not visible: the helper did not find the password ({list}). It takes REDIS_PASSWORD or --requirepass from the container settings or requirepass from redis.conf.',
+  'Таблицы очередей в этих базах не проверены: helper не смог войти ({list}). PostgreSQL он открывает через сокет под пользователем сервера или по POSTGRES_PASSWORD из настроек контейнера, MySQL - через debian.cnf или по MYSQL_ROOT_PASSWORD.':
+    'Queue tables in these databases were not checked: the helper could not get in ({list}). It opens PostgreSQL over the socket as the server\'s own user or with POSTGRES_PASSWORD from the container settings, MySQL with debian.cnf or MYSQL_ROOT_PASSWORD.',
+  'Не считаются каждую минуту: в таблице очередей больше миллиона строк, выполненные задачи из нее не удаляются ({list}).':
+    'Not counted every minute: the queue table has more than a million rows, finished jobs are not deleted from it ({list}).',
+  '{w}: {n} строк': '{w}: {n} rows',
+  'Задач нет: все разобраны.': 'No jobs: all are done.',
   'Без порога панель сама алертит очередь, которая полчаса растет и не разбирается или осталась без потребителей. Очереди мертвых писем (dlq) не судятся.':
     'Without a threshold the panel alerts on its own when a queue grows for half an hour and is not consumed or is left without consumers. Dead letter queues (dlq) are not judged.',
   'очередь': 'queue',
