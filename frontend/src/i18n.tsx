@@ -2106,6 +2106,8 @@ const EN: Record<string, string> = {
     'A server with this name already exists ({state}). The panel tells nodes apart by name.',
   'Этот адрес уже у сервера {name}. Если это та же нода, второй раз её заводить не нужно.':
     'This address already belongs to {name}. If it is the same node, there is no need to add it again.',
+  'Тот же внешний адрес у {names}. Для серверов за одним NAT или пробросом портов это нормально.':
+    'Same external address as {names}. That is normal for servers behind one NAT or port forwarding.',
   'на связи': 'online',
   'запросов в минуту: {n}': 'requests per minute: {n}',
   'ошибок 5xx в минуту': '5xx errors per minute',
