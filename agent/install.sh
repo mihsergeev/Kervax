@@ -115,6 +115,12 @@ if [ "$(id -u)" != "0" ]; then
   exit 1
 fi
 
+# The umask is set here and does not come from whoever runs the script: sudo combines its
+# own 022 with the caller's umask, so for a user with umask 077 every directory below was
+# created 0700. /opt/kervax-agent then let nobody but root in, and the agent (user kervax)
+# died at start with "Permission denied" (status=203/EXEC).
+umask 022
+
 case "$(uname -m)" in
   x86_64 | amd64) ARCH=amd64 ;;
   aarch64 | arm64) ARCH=arm64 ;;
@@ -140,6 +146,9 @@ BIN_DIR=/opt/kervax-agent/bin
 BIN=$BIN_DIR/kervax-agent
 LEGACY_BIN_DIR=/opt/kervax/bin
 mkdir -p "$BIN_DIR"
+# chmod too: mkdir -p leaves an existing directory as it is, and a reinstall has to fix
+# the one an earlier run left at 0700.
+chmod 0755 /opt/kervax-agent "$BIN_DIR"
 # to a temp file plus mv: atomic, and it does not trip over "Text file busy" when
 # another agent instance on the server already runs this binary.
 # --connect-timeout: if the panel is behind a firewall this fails fast and clearly
@@ -187,6 +196,7 @@ token=$TOKEN
 EOF
 chown kervax "$CONF" 2>/dev/null || true
 chmod 0600 "$CONF"
+umask 022
 
 # single unit (default)
 cat > /etc/systemd/system/kervax-agent.service <<'EOF'
@@ -253,7 +263,15 @@ systemctl daemon-reload
 systemctl enable "$UNIT" >/dev/null 2>&1 || true
 # restart (not just --now): reinstalling over a running agent has to restart the
 # process, otherwise it keeps running the old binary and unit.
-systemctl restart "$UNIT"
+if ! systemctl restart "$UNIT"; then
+  # set -e used to end the script right here with nothing but systemd's own message
+  echo "✗ $UNIT did not start. The end of its log:" >&2
+  journalctl -u "$UNIT" -n 5 --no-pager >&2 2>/dev/null || true
+  if findmnt -no OPTIONS -T "$BIN_DIR" 2>/dev/null | grep -qw noexec; then
+    echo "  $BIN_DIR is on a noexec mount: nothing can be executed from there." >&2
+  fi
+  exit 1
+fi
 echo "✓ $UNIT installed and started. Logs: journalctl -u $UNIT -f"
 
 # Docker access for the agent WITHOUT granting it root. A tiny socket-proxy (wollomatic)

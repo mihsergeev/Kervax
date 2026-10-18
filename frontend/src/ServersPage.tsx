@@ -4846,13 +4846,15 @@ export function EnrollModal({
   const [agentIp, setAgentIp] = useState(initial?.ip ?? '')
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState<string | null>(null)
-  // Дубль видно до нажатия: имя занято - создавать нельзя (панель различает ноды по имени),
-  // адрес совпал - только предупреждение, за одним внешним адресом законно живет несколько нод
+  // Дубль видно до нажатия: имя занято - создавать нельзя (панель различает ноды по имени).
+  // Адрес настоящий дубль, только если он стоит на самой ноде (local_ip). Совпал внешний адрес -
+  // это серверы за одним NAT или edge с пробросом портов, их законно много, и пугать нечем
   const nameDup = servers.find((s) => s.name.trim().toLowerCase() === name.trim().toLowerCase())
   const ip = agentIp.trim()
-  const ipDup = ip
-    ? servers.find((s) => [s.agent_ip, s.external_ip, s.local_ip].some((x) => (x || '').trim() === ip))
-    : undefined
+  const ipDup = ip ? servers.find((s) => (s.local_ip || '').trim() === ip) : undefined
+  const ipShared = ip && !ipDup
+    ? servers.filter((s) => [s.agent_ip, s.external_ip].some((x) => (x || '').trim() === ip))
+    : []
 
   async function submit() {
     setBusy(true)
@@ -4917,6 +4919,13 @@ export function EnrollModal({
             <span className="field-hint t-degraded small">
               {t('Этот адрес уже у сервера {name}. Если это та же нода, второй раз её заводить не нужно.', {
                 name: ipDup.name,
+              })}
+            </span>
+          )}
+          {ipShared.length > 0 && !nameDup && (
+            <span className="field-hint muted small">
+              {t('Тот же внешний адрес у {names}. Для серверов за одним NAT или пробросом портов это нормально.', {
+                names: ipShared.map((s) => s.name).join(', '),
               })}
             </span>
           )}

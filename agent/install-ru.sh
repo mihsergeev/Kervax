@@ -115,6 +115,12 @@ if [ "$(id -u)" != "0" ]; then
   exit 1
 fi
 
+# umask задается здесь, а не берется у того, кто запускает: sudo складывает свой 022 с
+# umask вызвавшего, и у пользователя с umask 077 все каталоги ниже создавались 0700.
+# В /opt/kervax-agent тогда не мог зайти никто, кроме root, и агент (пользователь kervax)
+# падал на старте с "Permission denied" (status=203/EXEC).
+umask 022
+
 case "$(uname -m)" in
   x86_64 | amd64) ARCH=amd64 ;;
   aarch64 | arm64) ARCH=arm64 ;;
@@ -140,6 +146,9 @@ BIN_DIR=/opt/kervax-agent/bin
 BIN=$BIN_DIR/kervax-agent
 LEGACY_BIN_DIR=/opt/kervax/bin
 mkdir -p "$BIN_DIR"
+# и chmod: mkdir -p существующий каталог не трогает, а переустановка должна починить тот,
+# что прошлый запуск оставил с 0700.
+chmod 0755 /opt/kervax-agent "$BIN_DIR"
 # во временный файл + mv: атомарно и не спотыкается о «Text file busy»,
 # когда на сервере уже крутится другой инстанс агента с этим бинарём
 # --connect-timeout: если панель закрыта фаерволом — быстрое понятное падение,
@@ -187,6 +196,7 @@ token=$TOKEN
 EOF
 chown kervax "$CONF" 2>/dev/null || true
 chmod 0600 "$CONF"
+umask 022
 
 # одиночный юнит (по умолчанию)
 cat > /etc/systemd/system/kervax-agent.service <<'EOF'
@@ -252,7 +262,15 @@ systemctl daemon-reload
 systemctl enable "$UNIT" >/dev/null 2>&1 || true
 # restart (а не just --now): при переустановке поверх работающего агента надо
 # перезапустить процесс, иначе он продолжит крутить старый бинарь/юнит.
-systemctl restart "$UNIT"
+if ! systemctl restart "$UNIT"; then
+  # раньше set -e обрывал скрипт прямо здесь, и оставалось только сообщение systemd
+  echo "✗ $UNIT не запустился. Конец его журнала:" >&2
+  journalctl -u "$UNIT" -n 5 --no-pager >&2 2>/dev/null || true
+  if findmnt -no OPTIONS -T "$BIN_DIR" 2>/dev/null | grep -qw noexec; then
+    echo "  $BIN_DIR на разделе с noexec: запускать оттуда ничего нельзя." >&2
+  fi
+  exit 1
+fi
 echo "✓ $UNIT установлен и запущен. Логи: journalctl -u $UNIT -f"
 
 # Доступ к Docker для агента БЕЗ выдачи ему root. Крошечный socket-proxy (wollomatic)
