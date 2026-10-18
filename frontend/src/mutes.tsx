@@ -43,6 +43,7 @@ export const SRV_ALERT_KINDS: { k: string; label: string }[] = [
   { k: 'gpu', label: 'GPU: драйвер, пропала карта, ошибки Xid' },
   { k: 'gpu_heat', label: 'GPU: перегрев' },
   { k: 'llm', label: 'LLM: не отвечает, очередь, задержки' },
+  { k: 'queue_stuck', label: 'Очередь растет и не разбирается' },
   { k: 'cpu_spin', label: 'CPU: процессы в пустом цикле' },
   { k: 'backup_growth', label: 'Бэкап: резкий прирост' },
   { k: 'docker_sock', label: 'Docker: внешний прокси с docker-сокетом' },
@@ -77,6 +78,8 @@ export const RESTARTS_DAY_MIN = 5
 export const LEAK_MUTE = 'leak:'
 // Один пропавший порт: listen:<порт>
 export const LISTEN_MUTE = 'listen:'
+// Одна очередь, которая растет и не разбирается: qstuck:<источник>|<vhost>/<имя> (ключ порога очереди)
+export const QSTUCK_MUTE = 'qstuck:'
 // Один контейнер с ключами от хоста, которому они нужны намеренно: dockrisk:<имя>
 export const DOCKRISK_MUTE = 'dockrisk:'
 // Контейнер или юнит, которому не нужно подниматься после перезагрузки: noboot:<имя>
@@ -95,6 +98,10 @@ export function muteKindLabel(k: string, t: TFn): string | null {
   if (k.startsWith(ACCESS_MUTE)) return `${t('учетка нужна')}: ${k.slice(ACCESS_MUTE.length)}`
   if (k.startsWith(DOCKRISK_MUTE)) return `${t('ключи от хоста по назначению')}: ${k.slice(DOCKRISK_MUTE.length)}`
   if (k.startsWith(LISTEN_MUTE)) return `${t('пропавший порт')}: ${k.slice(LISTEN_MUTE.length)}`
+  if (k.startsWith(QSTUCK_MUTE)) {
+    const [src, q] = k.slice(QSTUCK_MUTE.length).split('|')
+    return `${t('очередь')}: ${(q ?? '').replace(/^\/\//, '').replace(/^[^/]*\//, '')}${src ? ` (${src})` : ''}`
+  }
   if (k.startsWith(LEAK_MUTE)) return `${t('рост памяти')}: ${k.slice(LEAK_MUTE.length).replace(/^(docker|pod|proc):/, '')}`
   if (k.startsWith(RESTARTS_MUTE)) {
     const key = k.slice(RESTARTS_MUTE.length)

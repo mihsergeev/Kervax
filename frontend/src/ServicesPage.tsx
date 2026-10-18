@@ -150,6 +150,12 @@ function qDepth(q: { ready: number; unacked?: number }): number {
   return (q.ready || 0) + (q.unacked || 0)
 }
 
+// сколько очередь растет и не разбирается: 40 мин, 2 ч 10 мин
+function qAge(sec: number, t: (s: string, v?: Record<string, string | number>) => string): string {
+  if (sec >= 3600) return t('{h} ч {m} мин', { h: Math.floor(sec / 3600), m: Math.floor((sec % 3600) / 60) })
+  return t('{n} мин', { n: Math.max(1, Math.floor(sec / 60)) })
+}
+
 // Инвентарь СУБД → карточке сервиса. Матчим по имени контейнера (оно есть и в «где»
 // у находки аудита, и в инвентаре), а движки на хосте (container пустой) — по названию.
 const DB_ENGINE_LABEL: Record<string, string> = {
@@ -839,8 +845,10 @@ function QueueList({ server, svc, busy, save }: {
         ) : (
           queues.map((x) => {
             const d = qDepth(x)
-            const tone = d >= QUEUE_HOT ? 't-down' : d > 0 ? 't-degraded' : 't-up'
             const key = queueKey(svc.source || '', x)
+            // растет и не разбирается (queue_watch на бэкенде): красная, даже если еще неглубокая
+            const stuck = server.queue_watch?.[key]
+            const tone = (stuck && !stuck.muted) || d >= QUEUE_HOT ? 't-down' : d > 0 ? 't-degraded' : 't-up'
             const eff = thrOf(key)
             return (
               <div key={(x.vhost || '') + '/' + x.name} className={`loc-res docker-row ${tone}`}>
@@ -849,6 +857,16 @@ function QueueList({ server, svc, busy, save }: {
                   <div className="docker-c-name mono">{x.name}</div>
                   {x.vhost && x.vhost !== '/' && (
                     <div className="docker-c-img mono muted small">vhost: {x.vhost}</div>
+                  )}
+                  {stuck && (
+                    <div className={`docker-c-img small${stuck.muted ? ' muted' : ' q-stuck'}`}>
+                      {t('растет {a} и не разбирается, было {n}', { a: qAge(stuck.age, t), n: rpmText(stuck.d0) })}
+                      {stuck.muted ? ` · ${t('заглушено')}` : ''}
+                      {x.consumers === 0 ? ` · ${t('нет потребителей')}` : ''}
+                    </div>
+                  )}
+                  {!stuck && x.consumers === 0 && d > 0 && (
+                    <div className="docker-c-img muted small">{t('нет потребителей')}</div>
                   )}
                 </div>
                 <div className="queue-nums mono">
@@ -901,7 +919,7 @@ const SVC_SECTIONS: SecDef[] = [
 const SVC_SEC_IDS = new Set(SVC_SECTIONS.map((x) => x.id))
 // раздел карточки по виду проблемы, если бэкенд его не назвал (старый бэкенд в кэше вкладки)
 const SVC_SEC_OF_KIND: Record<string, string> = {
-  queue: 'queues', web_cert: 'certs', web_config: 'web', db_health: 'db', db_conn: 'db', llm: 'llm',
+  queue: 'queues', queue_stuck: 'queues', web_cert: 'certs', web_config: 'web', db_health: 'db', db_conn: 'db', llm: 'llm',
 }
 
 function ServerServicesModal({ srv, onClose, onChanged, initialSec, sites }: {
@@ -1287,6 +1305,9 @@ function ServerServicesModal({ srv, onClose, onChanged, initialSec, sites }: {
                   <span className="muted small">
                     {t('сообщений и больше — сразу во всех очередях ниже. У любой очереди значение можно поправить или стереть.')}
                   </span>
+                </div>
+                <div className="muted small">
+                  {t('Без порога панель сама алертит очередь, которая полчаса растет и не разбирается или осталась без потребителей. Очереди мертвых писем (dlq) не судятся.')}
                 </div>
                 {rabbit.map((it, i) => (
                   <QueueList key={(it.svc?.source ?? '') + i} server={s} svc={it.svc!} busy={busy} save={save} />

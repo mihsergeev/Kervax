@@ -1906,6 +1906,8 @@ export type Server = {
   gpu?: GpuView | null
   gpu_sum?: GpuSum | null
   llm?: LlmSvc[] | null
+  // очереди, которые растут и не разбираются: {ключ очереди: {age, d0, muted}} (queue_watch.view)
+  queue_watch?: Record<string, { age: number; d0: number; muted: boolean }> | null
   // изменения на сервере (helper changes-setup): лента между снимками, отметка "это мы"
   changes?: ServerChanges | null
   // недельная проверка восстановления бэкапа (helper backup-setup 0.34)
@@ -2062,6 +2064,7 @@ export type QueueStat = {
   vhost?: string
   ready: number
   unacked?: number
+  consumers?: number // потребителей у очереди (агент 2.38)
 }
 export type ServiceInfo = {
   kind: string // rabbitmq

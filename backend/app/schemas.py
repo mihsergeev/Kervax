@@ -1432,6 +1432,8 @@ class ServerOut(BaseModel):
     gpu_sum: dict | None = None
     # LLM-сервисы с обычными задержками (gpu.llm_view)
     llm: list[dict] | None = None
+    # очереди, которые растут и не разбираются: {ключ очереди: {"age", "d0", "muted"}} (queue_watch.view)
+    queue_watch: dict | None = None
     # проверка конфигов веб-серверов: [{server, where, ok, err}] (web_config.view)
     web_config: list[dict] | None = None
     # сертификаты nginx со сроком в днях: [{where, file, label, days}] (web_certs.view)
