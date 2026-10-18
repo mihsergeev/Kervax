@@ -1526,8 +1526,8 @@ const EN: Record<string, string> = {
   'не алертить о всплеске в этом логе:': 'no alerts on a spike in this log:',
   'Не алертить о всплеске ошибок в этом логе: на день, неделю или постоянно': 'No alerts on a spike of errors in this log: for a day, a week or for good',
   'Логов пропущено за последнюю минуту: {n} (за минуту прочитано больше 64 МБ).': 'Logs skipped in the last minute: {n} (over 64 MB read in a minute).',
-  'Строки с ошибками в логах контейнеров и подов: ERROR, FATAL, Exception, трейсбеки, [error] nginx, level=error. Алерт только на всплеск: за час от 200 строк и в пять раз больше обычного часа этого же лога; пока истории меньше 4 часов - от 2000. Лог, где ошибки есть всегда, не алертит.':
-    'Error lines in container and pod logs: ERROR, FATAL, Exception, tracebacks, nginx [error], level=error. An alert only on a spike: 200 lines or more in an hour and five times the usual hour of the same log; until there are 4 hours of history, 2000 or more. A log that always carries errors does not alert.',
+  'Строки с ошибками в логах контейнеров и подов: ERROR, FATAL, Exception, трейсбеки, [error] nginx, level=error. Алерт только на всплеск: за час от 200 строк и в пять раз больше обычного часа этого же лога; пока истории меньше 4 часов - от 20 000. Лог, где ошибки есть всегда, не алертит, строки стека за ошибки не считаются.':
+    'Error lines in container and pod logs: ERROR, FATAL, Exception, tracebacks, nginx [error], level=error. An alert only on a spike: 200 lines or more in an hour and five times the usual hour of the same log; until there are 4 hours of history, 20 000 or more. A log that always carries errors does not alert, stack frames do not count as errors.',
   'крон': 'cron',
   'ошибки уходят в cron и выбрасываются: 2>&1 стоит перед перенаправлением в файл, а не после': 'errors go to cron and are thrown away: 2>&1 comes before the redirection to a file, not after it',
   'ошибки (stderr) уходят в cron и выбрасываются: почты нет': 'errors (stderr) go to cron and are thrown away: there is no mail',

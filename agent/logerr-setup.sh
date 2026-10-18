@@ -15,9 +15,14 @@
 # after password=, token= and the like masked. A log is read from where it ended the previous run;
 # a new log starts from its end, a truncated or rotated one from its beginning. More than CAP new
 # bytes in a minute: the last CAP are read and the count is scaled. Read only.
+#
+# 0.2: a stack frame is not an error line of its own: "3. DB::Exception::Exception<>(...) @ 0x..."
+# of ClickHouse, "at org.foo.Bar(Bar.java:12)" of Java and Node, "#3 /app/x.php(12): ..." of PHP,
+# "Caused by:" and "... 12 more". One exception with thirty frames counted as thirty errors, and a
+# ClickHouse pod reached the "no usual hour yet" threshold with a few dozen of them.
 set -euo pipefail
 
-KERVAX_SETUP_VERSION=0.1  # MAJOR.MINOR; compared component-wise
+KERVAX_SETUP_VERSION=0.2  # MAJOR.MINOR; compared component-wise
 KERVAX_SETUP_ALWAYS=1     # safe on any node: without Docker and pods it writes an empty report
 
 HELPER_DIR=/lib65/kervax
@@ -102,6 +107,8 @@ function msg(l,   q, s) {
 awk -F'\t' -v OFS='\t' -v now="$NOW" -v cap="$CAP" -v budget="$BUDGET" -v ns="$TMPD/state" -v jout="$TMPD/rows" "$AWKFN"'
   BEGIN {
     RE = "ERROR|FATAL|CRITICAL|PANIC|Traceback \\(most recent|Exception|\\[(error|crit|alert|emerg)\\]|level=(error|fatal|panic|crit)|level[\\\\]?\"?: ?[\\\\]?\"(error|fatal|panic|crit)|PHP (Fatal|Parse) error|Uncaught "
+    # a frame of a stack trace, the error itself is the line before it
+    FR = "^[ \t]*([0-9]+\\. .* @ 0x[0-9a-fA-F]+|at .*[(:]|#[0-9]+ |Caused by: |\\.\\.\\. [0-9]+ (more|common frames))"
     nowb = int(now / 600); used = 0
   }
   t == "state" {
@@ -125,7 +132,7 @@ awk -F'\t' -v OFS='\t' -v now="$NOW" -v cap="$CAP" -v budget="$BUDGET" -v ns="$T
     # sizes past 2 GiB: mawk turns a big integer into 7.1983e+09 in a string and %d cuts it at 2^31
     cmd = "tail -c +" sprintf("%.0f", from + 1) " \047" f "\047 2>/dev/null | head -c " sprintf("%.0f", rd)
     errs = 0; lines = 0; last = ""
-    while ((cmd | getline l) > 0) { lines++; if (l ~ RE) { errs++; last = l } }
+    while ((cmd | getline l) > 0) { lines++; if (l ~ RE && msg(l) !~ FR) { errs++; last = l } }
     close(cmd); used += rd
     if (rd < n) { errs = int(errs * n / rd + 0.5); lines = int(lines * n / rd + 0.5) }
     ne[k] += errs; nl[k] += lines
