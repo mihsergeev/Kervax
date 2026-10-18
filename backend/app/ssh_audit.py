@@ -67,11 +67,12 @@ def internet_open(srv: Server, ssh: dict, now: datetime) -> bool | None:
         return None
     ports = {int(p) for p in ssh.get("ports") or [] if str(p).isdigit()}
     alien = open_ports.foreign(srv)  # там отвечает другой сервер
-    rows = [x for x in ex.get("ports") or [] if isinstance(x, dict) and x.get("port") in ports
+    rows = [x for x in open_ports.marked_rows(srv, ex.get("ports") or []) if x.get("port") in ports
             and x.get("ip") not in alien]
     if not rows:
         return None
-    return any(x.get("state") == "open" for x in rows)
+    # открыт только белому списку с адресом проверки - для интернета закрыт
+    return any(x.get("state") == "open" and not x.get("allow") for x in rows)
 
 
 def brute_from_internet(ssh: dict) -> bool:

@@ -3645,9 +3645,11 @@ def server_problems(s: Server, now: datetime, pod_names: dict[str, str] | None =
     ex = open_ports.exposed(s, now)
     if ex:
         add("exposed", open_ports.exposed_level(ex), open_ports.exposure_text(ex, 3), "exposure", "exposed")
+    # новый порт в интернет - красное: открытый только белому списку с адресом проверки сюда уже
+    # не попадает (open_ports.only_allowlist), остальное открыто всем
     fresh = open_ports.new_ports(s, now)
     if fresh:
-        add("port_new", 1, "в интернет открылся новый порт: " + open_ports.new_text(fresh), "exposure", "port_new",
+        add("port_new", 2, "в интернет открылся новый порт: " + open_ports.new_text(fresh), "exposure", "port_new",
             open_ports.new_since(s))
     out.sort(key=lambda p: -p["level"])
     return out
@@ -5394,6 +5396,8 @@ async def evaluate_servers(
                 ico = _DISK_ICON.get(int(ctx.get("level") or 0), "") + "📈"
             if key == "units":
                 ico = _DISK_ICON.get(int(ctx.get("level") or 0), "") + "⚙️"
+            if key == "port_new":
+                ico = "🔴🚪"  # порт открыт всем: открытый только белому списку сюда не доходит
             if key == "kube_expiry" and ctx.get("expired"):
                 ico = "⛔"  # срок не «скоро», а уже вышел — это поломка, а не напоминание
             return _server_alert_text(

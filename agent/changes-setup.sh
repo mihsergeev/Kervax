@@ -32,11 +32,18 @@
 # unit now takes SIGPIPE back, every journalctl has a timeout, and the first fill reads the sshd
 # log newest first: cut short, it still covers everything back to the oldest login it reached.
 #
+# 0.7: whom the host firewall lets in on which TCP port: the ACCEPT rules of iptables (ufw lives
+# there too) or, without them, of nftables, as "family source ports", separately for the node itself
+# and for the published ports of containers, plus whether the rest is refused. The panel checks the
+# node's ports from outside through one address; when a neighbour put that address into an allow
+# list (it also runs the monitors), a port closed to the internet looked open and "a new port is
+# open to the internet" went out for SSH that nobody else could reach.
+#
 # Only fingerprints, names and hashes leave the node: no key material, no crontab or sudoers
 # contents, no password hashes (only "set", "locked" or "empty"). The helper changes nothing.
 set -euo pipefail
 
-KERVAX_SETUP_VERSION=0.6  # MAJOR.MINOR; compared component-wise
+KERVAX_SETUP_VERSION=0.7  # MAJOR.MINOR; compared component-wise
 KERVAX_SETUP_ALWAYS=1     # safe on any node: it only reads files and systemctl
 
 HELPER_DIR=/lib65/kervax
@@ -219,6 +226,120 @@ listen_procs() {
     }' | tr -d '\000-\037'
 }
 
+# Whom the host firewall lets in (0.7). "in" - ACCEPT rules for TCP on the way to the node itself,
+# "fwd" - on the way through it into containers (DOCKER-USER, ufw-docker), as "family source ports":
+# ["4 198.51.100.7/32 2221", "46 * 22", "4 * 80,443", "4 192.0.2.0/24 *"], "*" for any source and
+# for all ports, family 4, 6 or 46. Whether a chain counts is decided by where the jumps from INPUT
+# and FORWARD lead, not by its name. Rules for loopback and the inner interfaces of docker,
+# kubernetes and VPNs, for established connections and in outgoing chains are skipped: they do not
+# let the internet in. A jump to ufw's rate limit is an allow, the body of that chain is not (it
+# would read as "everything for everybody"). Docker's own per-port allows (chain DOCKER) are not
+# listed: what decides is DOCKER-USER before them. "idrop"/"fdrop" - families where a plain
+# "drop the rest" stands on the way in or in DOCKER-USER: the default is to refuse even with the
+# policy ACCEPT
+fw_info() {
+  local src="" rules="" ipt=""
+  if command -v iptables-save >/dev/null 2>&1; then
+    ipt=$({ timeout 10 iptables-save -t filter 2>/dev/null | sed 's/^/4 /'
+              timeout 10 ip6tables-save -t filter 2>/dev/null | sed 's/^/6 /'; } | awk '
+      $2 ~ /^:/ { if ($2 == ":INPUT") print "policy" $1 " " $3; next }
+      $2 != "-A" { next }
+      {
+        n++; fam[n] = $1; ch[n] = $3; line = $0; sub(/^[46] -A [^ ]+/, "", line); body[n] = line " "
+        tgt[n] = ""
+        if (match(line, / -[jg] [^ ]+/)) { tgt[n] = substr(line, RSTART + 4, RLENGTH - 4); edge[$1, $3, tgt[n]] = 1 }
+      }
+      END {
+        for (f = 4; f <= 6; f += 2) { rin[f, "INPUT"] = 1; rfw[f, "FORWARD"] = 1; rdu[f, "DOCKER-USER"] = 1 }
+        do {
+          more = 0
+          for (k in edge) {
+            split(k, e, SUBSEP)
+            if (rin[e[1], e[2]] && !rin[e[1], e[3]]) { rin[e[1], e[3]] = 1; more = 1 }
+            if (rfw[e[1], e[2]] && !rfw[e[1], e[3]]) { rfw[e[1], e[3]] = 1; more = 1 }
+            if (rdu[e[1], e[2]] && !rdu[e[1], e[3]]) { rdu[e[1], e[3]] = 1; more = 1 }
+          }
+        } while (more)
+        for (i = 1; i <= n; i++) {
+          f = fam[i]; c = ch[i]; t = tgt[i]; line = body[i]
+          if (t == "DROP" || t == "REJECT") {
+            # "drop the rest": nothing but the interface, tcp and a comment around the drop
+            pure = line
+            gsub(/ -m comment --comment ("[^"]*"|[^ ]+)/, "", pure)
+            gsub(/ -p tcp| -m tcp| --reject-with [^ ]+| -j (DROP|REJECT)/, "", pure)
+            if (match(pure, / -i [^ ]+/) && substr(pure, RSTART + 4, RLENGTH - 4) !~ /^(lo|docker|br-|cni|cali|flannel|veth|vxlan|kube|tailscale|wg|tun|virbr|lxc|podman|nebula|zt)/) sub(/ -i [^ ]+/, "", pure)
+            if (pure ~ /^ *$/ && c !~ /^(cali|KUBE|CILIUM|cilium|FLANNEL|flannel|DOCKER$|DOCKER-ISOLATION)|limit/) {
+              if (rin[f, c]) idrop[f] = 1
+              if (rdu[f, c]) fdrop[f] = 1
+            }
+            continue
+          }
+          if (c ~ /[Oo][Uu][Tt][Pp][Uu][Tt]|skip-to-policy|limit-accept|logging|reject|track/) continue
+          if (t != "ACCEPT" && t !~ /^ufw6?-user-limit-accept$/) continue
+          if (line ~ / -p (udp|icmp|ipv6-icmp|icmpv6|58|1|17) /) continue
+          if (line ~ /--ctstate|--state |-m (conntrack|state) /) continue
+          gsub(/ ! -[io] [^ ]+/, "", line)
+          if (line ~ / -i (lo|docker|br-|cni|cali|flannel|veth|vxlan|kube|tailscale|wg|tun|virbr|lxc|podman|nebula|zt)/) continue
+          if (line ~ / -o lo / || line ~ / -d (224\.|ff0)/) continue
+          # kubernetes plumbing (marks, traffic from the node itself) and forwarding out of an
+          # interface without a port (outbound, into the pod bridge): not a door from the internet
+          if (line ~ /--src-type LOCAL| -m mark | -m physdev /) continue
+          if (line ~ / -o [^ ]+/ && line !~ / --dports? /) continue
+          s = "*"
+          if (match(line, / -s [^ ]+/)) { s = substr(line, RSTART + 4, RLENGTH - 4); if (s == "0.0.0.0/0" || s == "::/0") s = "*" }
+          p = "*"
+          if (match(line, / --dports [0-9,:]+/)) p = substr(line, RSTART + 9, RLENGTH - 9)
+          else if (match(line, / --dport [0-9:]+/)) p = substr(line, RSTART + 8, RLENGTH - 8)
+          if (rin[f, c]) print "in " f " " s " " p
+          if (rfw[f, c] && c != "DOCKER") print "fwd " f " " s " " p
+        }
+        for (f in idrop) print "idrop " f
+        for (f in fdrop) print "fdrop " f
+      }' | sort -u)
+    printf '%s\n' "$ipt" | grep -q '^in \|^policy[46] DROP' && { src=iptables; rules=$ipt; }
+  fi
+  if [ -z "$src" ] && command -v nft >/dev/null 2>&1; then
+    rules=$(timeout 10 nft list ruleset 2>/dev/null | awk '
+      /^table / { nat = ($0 ~ / nat /); tf = ($2 == "ip") ? "4" : ($2 == "ip6") ? "6" : ($2 == "inet") ? "46" : ""; next }
+      /^[ \t]*chain / { ch = $2; hook = ""; next }
+      /hook / { hook = $0; sub(/.*hook /, "", hook); sub(/ .*/, "", hook)
+                if (hook == "input" && / policy drop/) { if (tf ~ /4/) print "policy4 DROP"; if (tf ~ /6/) print "policy6 DROP" }
+                next }
+      tf == "" || nat || hook ~ /output|postrouting|prerouting|forward/ { next }
+      ch ~ /^DOCKER(-ISOLATION.*)?$|[Oo][Uu][Tt][Pp][Uu][Tt]|[Ff][Ww][Dd]|[Ff][Oo][Rr][Ww][Aa][Rr][Dd]|skip-to-policy|limit-accept|logging|reject|track/ { next }
+      / accept/ {
+        line = $0
+        if (line ~ /ct state|iifname "?(lo|docker|br-|cni|cali|flannel|veth|vxlan|kube|tailscale|wg|tun|virbr|lxc|podman)/) next
+        if (line ~ /oifname "?lo"?( |$)/) next
+        if (line ~ /udp |icmp/) next
+        f = tf; s = "*"
+        if (match(line, /ip6? saddr (\{[^}]*\}|[^ ]+)/)) {
+          s = substr(line, RSTART, RLENGTH); f = (s ~ /^ip6/) ? "6" : "4"; sub(/ip6? saddr /, "", s); gsub(/[{} ]/, "", s)
+        }
+        p = "*"
+        if (match(line, /tcp dport (\{[^}]*\}|[0-9-]+)/)) { p = substr(line, RSTART + 10, RLENGTH - 10); gsub(/[{} ]/, "", p); gsub(/-/, ":", p) }
+        else if (line ~ /udp dport|sport/) next
+        k = split(s, ss, ",")
+        for (i = 1; i <= k; i++) print "in " f " " ss[i] " " p
+      }' | sort -u)
+    printf '%s\n' "$rules" | grep -q '^in \|^policy' && src=nft
+  fi
+  # iptables without a single allow and with the policy ACCEPT: everything is open, say so
+  [ -z "$src" ] && printf '%s\n' "$ipt" | grep -q '^policy' && { src=iptables; rules=$ipt; }
+  [ -n "$src" ] || { printf 'null'; return 0; }
+  printf '%s\n' "$rules" | awk -v src="$src" '
+    /^policy4 / { p4 = $2; next }
+    /^policy6 / { p6 = $2; next }
+    /^idrop / { idrop = idrop $2; next }
+    /^fdrop / { fdrop = fdrop $2; next }
+    NF == 4 && $2 ~ /^[46]+$/ && $3 ~ /^[*0-9A-Fa-f.:\/]+$/ && $4 ~ /^[*0-9,:]+$/ {
+      e = "\"" $2 " " $3 " " $4 "\""
+      if ($1 == "in" && ni < 500) a = a (ni++ ? "," : "") e
+      if ($1 == "fwd" && nf < 500) w = w (nf++ ? "," : "") e
+    }
+    END { printf "{\"src\":\"%s\",\"p4\":\"%s\",\"p6\":\"%s\",\"idrop\":\"%s\",\"fdrop\":\"%s\",\"in\":[%s],\"fwd\":[%s]}", src, p4, p6, idrop, fdrop, a, w }'
+}
+
 # How SSH lets people in. sshd -T -C evaluates the config for a given connection: an address from
 # the documentation range stands for "somebody on the internet", so Match blocks that open
 # passwords to the office network do not count. Failed and password logins - the last 10 minutes
@@ -263,8 +384,8 @@ ssh=$(ssh_info)
 lastseen_update "$now"
 seen_since=$(sed -n 's/^#since //p' "$LASTSEEN" 2>/dev/null | head -1)
 case "$seen_since" in ''|*[!0-9]*) seen_since=0 ;; esac
-json=$(printf '{"v":1,"ts":%s,"keys":[%s],"users":[%s],"sudo":%s,"cron":%s,"units":[%s],"listen":{%s},"ssh":%s,"seen_since":%s}' \
-  "$now" "$(keys)" "$(users)" "$(sudo_info)" "$(cron_info)" "$(units)" "$(listen_procs)" "${ssh:-null}" "$seen_since")
+json=$(printf '{"v":1,"ts":%s,"keys":[%s],"users":[%s],"sudo":%s,"cron":%s,"units":[%s],"listen":{%s},"ssh":%s,"seen_since":%s,"fw":%s}' \
+  "$now" "$(keys)" "$(users)" "$(sudo_info)" "$(cron_info)" "$(units)" "$(listen_procs)" "${ssh:-null}" "$seen_since" "$(fw_info)")
 tmp=$(mktemp "${OUT}.XXXXXX")
 printf '%s\n' "$json" > "$tmp"
 chmod 0644 "$tmp"
@@ -301,4 +422,4 @@ systemctl start --no-block kervax-changes.service >/dev/null 2>&1 || true
 
 echo "$KERVAX_SETUP_VERSION" > "$STATE_DIR/versions/changes-setup.ver"
 chmod 0644 "$STATE_DIR/versions/changes-setup.ver"
-echo "changes-setup: SSH keys and login settings, users, sudo, crontabs, enabled units, listening processes -> $OUT (every 10 minutes)."
+echo "changes-setup: SSH keys and login settings, users, sudo, crontabs, enabled units, listening processes, firewall allows -> $OUT (every 10 minutes)."

@@ -121,7 +121,7 @@ def test_exposed_and_new_rows_on_home():
     rows = {p["kind"]: p for p in collector.server_problems(s, NOW)}
     assert rows["exposed"]["level"] == 2 and rows["exposed"]["sec"] == "exposure"
     assert rows["exposed"]["text"] == "открыто в интернет: Redis 6379 на 203.0.113.5"
-    assert rows["port_new"]["level"] == 1
+    assert rows["port_new"]["level"] == 2  # открыт всем - красное
     assert rows["port_new"]["text"] == "в интернет открылся новый порт: Redis 6379 на 203.0.113.5"
     lvl, ctx = collector._server_conditions(s, NOW)["exposed"]
     assert lvl == 2 and ctx["detail"] == "открыто в интернет: Redis 6379 на 203.0.113.5"
@@ -389,7 +389,7 @@ async def test_port_new_alert_once_per_check(tmp_path, monkeypatch):
                                         ["203.0.113.5"], "Казахстан, Алматы", now)
         await s.commit()
     await collector.evaluate_servers(factory, cfg, now + timedelta(seconds=30))
-    news = [m for m in sent if m.startswith("🚪")]
+    news = [m for m in sent if m.startswith("🔴🚪")]
     assert len(news) == 1 and "в интернет открылся новый порт: Redis 6379 на 203.0.113.5" in news[0], sent
     # опасный сервис - еще и состояние (без выдержки: проверка раз в 6 часов)
     assert any(m.startswith("🔓") and "открыто в интернет: Redis 6379" in m for m in sent), sent
@@ -504,3 +504,115 @@ async def test_cloudflare_only_and_bypass(monkeypatch):
     srv.exposure = await open_ports.scan_server(srv, "socks5://127.0.0.1:1080", "Казахстан, Алматы", NOW)
     assert srv.exposure["cf"]["n"] == 0
     assert all("cf" not in x for x in open_ports.view(srv)["ports"])
+
+
+# ---- белый список с адресом проверки (changes-setup 0.7) ----
+
+FW = {"src": "iptables", "p4": "DROP", "p6": "DROP", "idrop": "46", "fdrop": "4",
+      "in": ["4 198.51.100.20/32 2221", "4 198.51.100.20/32 64100", "46 * 80", "4 192.0.2.0/24 *"],
+      "fwd": ["4 198.51.100.20/32 8000", "4 * 9000"]}
+VIA = ["198.51.100.20"]
+
+
+def _fw_rep(fw=None):
+    return {"ips": ["203.0.113.5"],
+            "listen": [{"p": "tcp", "ip": "0.0.0.0", "port": 2221, "u": "root"},
+                       {"p": "tcp", "ip": "0.0.0.0", "port": 80, "u": "www-data"},
+                       {"p": "tcp", "ip": "0.0.0.0", "port": 5432, "u": "postgres"}],
+            "docker": {"containers": [{"name": "rest", "image": "restic/rest-server", "ports": [
+                {"ip": "0.0.0.0", "pub": 64100, "priv": 8000, "proto": "tcp"},
+                {"ip": "0.0.0.0", "pub": 9001, "priv": 9000, "proto": "tcp"}]}]},
+            "kube": {"nodeports": [{"ns": "web", "name": "shop", "type": "NodePort", "port": 80, "node_port": 30080,
+                                    "proto": "TCP"}]},
+            "extras": {"changes": {"v": 1, "ts": 1, "listen": {"2221": "sshd"}, "fw": FW if fw is None else fw}}}
+
+
+def test_only_allowlist_with_the_check_address():
+    s = _srv(_fw_rep())
+
+    def ok(port, ip="203.0.113.5", via=VIA, srv=s):
+        return open_ports.only_allowlist(srv, ip, port, via)
+
+    assert ok(2221)  # SSH пускают только по белому списку, а в нем адрес проверки
+    assert ok(64100)  # контейнер: правило ufw-docker на порт контейнера 8000
+    assert not ok(80)  # открыт всем
+    assert not ok(9001)  # контейнер, а порт 9000 открыт всем
+    assert not ok(5432)  # правила для адреса проверки нет, а порт открыт: правила не все - считаем открытым
+    assert not ok(30080)  # порт Kubernetes: правила kube-proxy не разбираем
+    assert not ok(2221, via=["198.51.100.99"])  # проверка шла с другого адреса - ей правда открыто
+    assert not ok(2221, via=[])  # адреса проверки не знаем (проверка до 1.4.263)
+    assert not ok(2221, ip="2001:db8::5")  # IPv6: правило для v4-адреса проверки не про него
+    assert ok(5432, via=["192.0.2.7"])  # адрес проверки в разрешенной сети - тоже белый список
+    # политика ACCEPT и никакого "отбросить остальное" - открыто всем, что бы ни разрешали отдельно
+    acc = _srv(_fw_rep(dict(FW, p4="ACCEPT", idrop="", fdrop="")))
+    assert not ok(2221, srv=acc) and not ok(64100, srv=acc)
+    # ACCEPT, но в конце INPUT "-j DROP" - отказ по умолчанию
+    assert ok(2221, srv=_srv(_fw_rep(dict(FW, p4="ACCEPT", idrop="4"))))
+    # сеть шире /8 - не белый список
+    assert not ok(2221, srv=_srv(_fw_rep(dict(FW, **{"in": ["4 0.0.0.0/1 *", "4 198.51.100.20/32 2221"]}))))
+    # helper старше 0.7 - не знаем, значит открыто
+    old = _fw_rep()
+    del old["extras"]["changes"]["fw"]
+    assert not ok(2221, srv=_srv(old))
+    assert open_ports._covers("1000:2000", 1500) and open_ports._covers("8000:", 9000)
+    assert open_ports._covers("22,80,443", 80) and not open_ports._covers("80,443", 8080)
+
+
+def test_allowlisted_port_is_not_new_nor_exposed():
+    """Сервер бэкапов: адрес проверки (он же адрес мониторов) стоял в белом списке ufw, и про SSH
+    на 2221 пришло "в интернет открылся новый порт", хотя снаружи до него не достучаться"""
+    s = _srv(_fw_rep())
+    first = open_ports.merge({}, [_row(80)], ["203.0.113.5"], "Казахстан, Алматы", NOW - timedelta(hours=6),
+                             via_ips=VIA)
+    rows = open_ports.mark_allow(s, [_row(80), _row(2221), _row(5432, risk=True)], VIA)
+    ex = open_ports.merge(first, rows, ["203.0.113.5"], "Казахстан, Алматы", NOW, via_ips=VIA)
+    assert [x["port"] for x in ex["new"]] == [5432] and "203.0.113.5|2221" not in ex["seen"]
+    s.exposure = ex
+    probs = {p["kind"]: p for p in collector.server_problems(s, NOW)}
+    assert probs["port_new"]["level"] == 2
+    assert probs["port_new"]["text"] == "в интернет открылся новый порт: PostgreSQL 5432 (процесс пользователя postgres) на 203.0.113.5"
+    v = open_ports.view(s)
+    assert [x["port"] for x in v["ports"] if x.get("allow")] == [2221] and v["via_ips"] == VIA
+    # опасный порт только белому списку - не "открыто в интернет"
+    s.last_report["extras"]["changes"]["fw"] = dict(FW, **{"in": FW["in"] + ["4 198.51.100.20/32 5432"]})
+    assert open_ports.exposed(s, NOW) == [] and open_ports.new_ports(s, NOW) == []
+    # потом SSH открыли всем: на следующей проверке он новый порт
+    s.last_report["extras"]["changes"]["fw"] = dict(FW, **{"in": FW["in"] + ["4 * 2221"]})
+    rows = open_ports.mark_allow(s, [_row(80), _row(2221), _row(5432, risk=True)], VIA)
+    ex2 = open_ports.merge(ex, rows, ["203.0.113.5"], "Казахстан, Алматы", NOW + timedelta(hours=6), via_ips=VIA)
+    assert [x["port"] for x in ex2["new"]] == [2221]
+
+
+def test_old_news_about_an_allowlisted_port_goes_away():
+    """Новость, записанная до 1.4.263, держится до следующего прироста: после перепроверки с
+    адресами проверки она про порт, открытый только белому списку, и не показывается"""
+    ex = {"ts": NOW.isoformat(), "via": "Казахстан, Алматы", "own": False, "ips": ["203.0.113.5"],
+          "ports": [_row(2221, name="SSH")], "new": [_row(2221, name="SSH")],
+          "new_ts": (NOW - timedelta(hours=2)).isoformat(), "seen": {}, "rules": open_ports.RULES}
+    s = _srv(_fw_rep(), ex)
+    assert [x["port"] for x in open_ports.new_ports(s, NOW)] == [2221]  # адреса проверки еще неизвестны
+    s.exposure = dict(ex, via_ips=VIA)
+    assert open_ports.new_ports(s, NOW) == [] and "port_new" not in {p["kind"] for p in collector.server_problems(s, NOW)}
+    assert open_ports.view(s)["new"] == []
+
+
+async def test_scan_remembers_the_check_address(monkeypatch):
+    """Проверка через прокси запоминает его адреса; хост прокси по имени резолвится"""
+    async def fake_probe(ip, port, proxy):
+        return "open"
+
+    async def fake_resolve(name):
+        return ["198.51.100.20"] if name == "proxy.example.com" else []
+
+    async def no_banner(ip, port, proxy):
+        return ""
+
+    monkeypatch.setattr(open_ports, "probe", fake_probe)
+    monkeypatch.setattr(open_ports, "_resolve", fake_resolve)
+    monkeypatch.setattr(open_ports, "ssh_banner", no_banner)
+    s = _srv(_fw_rep())
+    ex = await open_ports.scan_server(s, "http://u:p@proxy.example.com:3128", "Казахстан, Алматы", NOW)
+    assert ex["via_ips"] == VIA
+    assert {x["port"] for x in ex["ports"] if x.get("allow")} == {2221, 64100}
+    assert await open_ports.proxy_ips("socks5://198.51.100.30:1080") == ["198.51.100.30"]
+    assert await open_ports.proxy_ips(None) == []

@@ -1620,6 +1620,13 @@ const EN: Record<string, string> = {
   'не проверить: {n}': 'cannot check: {n}',
   'только через Cloudflare: {n}': 'Cloudflare only: {n}',
   'только через Cloudflare': 'Cloudflare only',
+  'только белому списку: {n}': 'allow list only: {n}',
+  'только белому списку': 'allow list only',
+  'адрес проверки: {ips}': 'checked from: {ips}',
+  'Снаружи закрыт: проверка видит его открытым только потому, что ее адрес {ips} в белом списке файрвола ноды.':
+    'Closed from outside: the check sees it open only because its address {ips} is in the allow list of the node firewall.',
+  'Адрес проверки {ips} стоит в белом списке файрвола ноды (его добавляют под мониторинг). Порты {ports} файрвол пускает только по белому списку: проверке они открыты, а интернету нет. Они в колонке "Закрыто снаружи", алертов по ним нет. Чтобы проверка видела то же, что и интернет, добавьте в "Локациях" прокси в другой сети.':
+    'The check address {ips} is in the allow list of the node firewall (it is added there for monitoring). The firewall lets ports {ports} in by allow list only: they are open to the check but not to the internet. They are in the "Closed from outside" column, with no alerts. For the check to see what the internet sees, add a proxy in another network in "Locations".',
   'в обход Cloudflare': 'bypasses Cloudflare',
   'Сайты ноды идут через Cloudflare, а порт открыт и напрямую: защиту Cloudflare можно обойти по адресу ноды.':
     'Sites on this node go through Cloudflare, but the port is open directly too: Cloudflare protection can be bypassed via the node address.',

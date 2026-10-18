@@ -26,6 +26,14 @@ listen его не видно: шлюз Envoy с сайтами на 80 и 443 �
 Через Cloudflare: если домены сайтов ноды смотрят в адреса Cloudflare, а 80 или 443 напрямую
 закрыт, порт открыт только для Cloudflare (белый список его адресов в файрволе или
 NetworkPolicy). Открыт напрямую - Cloudflare можно обойти, это видно отметкой в строке.
+
+Белый список с адресом проверки: прокси, через который смотрим, бывает и адресом мониторов, и его
+добавляют в белые списки файрвола нод. Тогда порт, закрытый для интернета, проверке открыт: на
+сервере бэкапов так пришел "в интернет открылся новый порт" про SSH, до которого снаружи не
+достучаться. helper changes-setup 0.7 присылает, кого файрвол пускает и на какие порты (отдельно на
+саму ноду и в контейнеры), панель запоминает адреса своей проверки (via_ips). Порт, открытый
+проверке только по белому списку с ее адресом, не считается открытым в интернет: ни нового
+порта, ни алерта, в таблице - "только белому списку".
 """
 from __future__ import annotations
 
@@ -509,11 +517,21 @@ async def cf_sites(srv: Server) -> dict:
     return {"sites": cf[:10], "n": len(cf), "checked": len(look), "total": len(names)}
 
 
+async def proxy_ips(proxy: str | None) -> list[str]:
+    """С каких адресов идет проверка: адреса хоста прокси (с них же он и выходит наружу). Без
+    прокси - пусто: свой внешний адрес панель не знает, а по проверке с нее и так нет алертов."""
+    host = urlsplit(proxy or "").hostname
+    if not host:
+        return []
+    return [host] if _is_ip(host) else await _resolve(host)
+
+
 async def scan_server(srv: Server, proxy: str | None, via: str, now: datetime) -> dict:
     """Проверить порты ноды снаружи; результат - для servers.exposure. У открытых портов SSH
     заодно читаем баннер: по нему видно, та ли нода отвечает по этому адресу."""
     ips, ports = targets(srv)
     prev = _ex(srv)
+    via_ips = await proxy_ips(proxy)
     sem = asyncio.Semaphore(_PARALLEL)
 
     async def one(ip: str, port: int) -> dict:
@@ -530,26 +548,31 @@ async def scan_server(srv: Server, proxy: str | None, via: str, now: datetime) -
             if b:
                 banners[f"{x['ip']}:{x['port']}"] = b
     cf = await cf_sites(srv) if any(p in CF_PORTS for p in ports) else None
-    return merge(prev, rows, ips, via, now, own=proxy is None, banners=banners, cf=cf)
+    mark_allow(srv, rows, via_ips)
+    return merge(prev, rows, ips, via, now, own=proxy is None, banners=banners, cf=cf, via_ips=via_ips)
 
 
 def merge(prev: dict, rows: list[dict], ips: list[str], via: str, now: datetime, own: bool = False,
-          banners: dict | None = None, cf: dict | None = None) -> dict:
+          banners: dict | None = None, cf: dict | None = None, via_ips: list[str] | None = None) -> dict:
     """Итог проверки с учетом прошлых. Новый порт - тот, что открыт сейчас и не был открыт ни
     в одной проверке за месяц (seen): иначе прокси, упавший на одну проверку, на следующей
     выдал бы все порты ноды за новые. Первая проверка и первая после смены правил (RULES)
-    задают точку отсчета."""
+    задают точку отсчета. Открытый только белому списку с адресом проверки (allow) в seen не
+    идет и из него уходит: когда его откроют всем, он придет новым портом."""
     seen = dict(prev.get("seen") or {}) if isinstance(prev.get("seen"), dict) else None
     if seen is not None and int(prev.get("rules") or 1) < RULES:
         seen = None
-    opened = [x for x in rows if x["state"] == "open"]
+    opened = [x for x in rows if x["state"] == "open" and not x.get("allow")]
     new = [x for x in opened if f"{x['ip']}|{x['port']}" not in seen] if seen is not None else []
     seen = {k: v for k, v in (prev.get("seen") or {}).items() if _age_ok(v, now)} \
         if isinstance(prev.get("seen"), dict) else {}
+    for x in rows:
+        if x["state"] == "open" and x.get("allow"):
+            seen.pop(f"{x['ip']}|{x['port']}", None)
     for x in opened:
         seen[f"{x['ip']}|{x['port']}"] = now.isoformat()
     out = {"ts": now.isoformat(), "via": via, "own": own, "ips": ips, "ports": rows, "seen": seen,
-           "banners": banners or {}, "rules": RULES}
+           "banners": banners or {}, "rules": RULES, "via_ips": list(via_ips or [])}
     if cf is not None:
         out["cf"] = cf
     if new:
@@ -601,15 +624,122 @@ def _relabel(srv: Server, rows: list) -> list[dict]:
     return out
 
 
+# ---- белый список с адресом проверки (helper changes-setup 0.7) ----
+
+def _fw(srv: Server) -> dict:
+    fw = (((srv.last_report or {}).get("extras") or {}).get("changes") or {}).get("fw")
+    return fw if isinstance(fw, dict) else {}
+
+
+def _covers(spec: str, port: int) -> bool:
+    """Покрывает ли список портов правила ("*", "80,443", "1000:2000", "8000:") порт."""
+    for part in str(spec or "").split(","):
+        if part == "*":
+            return True
+        lo, sep, hi = part.partition(":")
+        try:
+            a = int(lo) if lo else 0
+            b = (int(hi) if hi else 65535) if sep else a
+        except ValueError:
+            continue
+        if a <= port <= b:
+            return True
+    return False
+
+
+def _fw_rules(items, fam: int) -> list[tuple]:
+    """Правила файрвола семейства fam: (сеть источника или None - "кто угодно", порты). Сеть шире
+    /8 (/16 у IPv6) - тоже "кто угодно": это не белый список."""
+    out = []
+    for it in items if isinstance(items, list) else []:
+        parts = str(it).split()
+        if len(parts) != 3 or str(fam) not in parts[0]:
+            continue
+        if parts[1] == "*":
+            out.append((None, parts[2]))
+            continue
+        try:
+            net = ipaddress.ip_network(parts[1], strict=False)
+        except ValueError:
+            continue
+        out.append((None if net.prefixlen < (8 if net.version == 4 else 16) else net, parts[2]))
+    return out
+
+
+def _port_path(srv: Server, port: int) -> tuple[str, int] | None:
+    """Каким путем снаружи идут на порт: ("in", порт) - на саму ноду, ("fwd", порт в контейнере) -
+    опубликованный порт Docker (DNAT, мимо INPUT, правила смотрят порт контейнера), None - порт
+    Kubernetes: kube-proxy заворачивает его своими правилами, судить не беремся."""
+    rep = srv.last_report or {}
+    for c in ((rep.get("docker") or {}).get("containers") or []):
+        for p in (c.get("ports") or []) if isinstance(c, dict) else []:
+            if isinstance(p, dict) and p.get("pub") == port and (p.get("proto") or "tcp") == "tcp":
+                return ("fwd", int(p.get("priv") or 0)) if p.get("priv") else None
+    for n in ((rep.get("kube") or {}).get("nodeports") or []):
+        if isinstance(n, dict) and port in (n.get("node_port"), n.get("port") if n.get("type") == "LoadBalancer" else None):
+            return None
+    return "in", port
+
+
+def only_allowlist(srv: Server, ip: str, port: int, via_ips: list[str]) -> bool:
+    """Порт виден проверке только потому, что ее адрес в белом списке файрвола ноды: остальным
+    по умолчанию отказ (политика DROP или "отбросить остальное"), правила "всем" на этот порт
+    нет, а правило для сети с адресом проверки есть. Чего не знаем (helper старше 0.7, nftables
+    для контейнеров, порты Kubernetes) - считаем открытым: лучше лишний алерт, чем пропущенная дыра."""
+    fw = _fw(srv)
+    if not fw or not via_ips:
+        return False
+    try:
+        fam = ipaddress.ip_address(ip).version
+    except ValueError:
+        return False
+    vias = []
+    for v in via_ips:
+        try:
+            a = ipaddress.ip_address(v)
+        except ValueError:
+            continue
+        if a.version == fam:
+            vias.append(a)
+    path = _port_path(srv, port)
+    if not vias or path is None:
+        return False
+    kind, p = path
+    if kind == "in":
+        if str(fw.get(f"p{fam}") or "").upper() not in ("DROP", "REJECT") and str(fam) not in str(fw.get("idrop") or ""):
+            return False
+        rules = _fw_rules(fw.get("in"), fam)
+    else:
+        if str(fam) not in str(fw.get("fdrop") or ""):
+            return False
+        rules = _fw_rules(fw.get("fwd"), fam)
+    hit = [net for net, spec in rules if _covers(spec, p)]
+    return None not in hit and any(v in net for net in hit for v in vias)
+
+
+def mark_allow(srv: Server, rows: list[dict], via_ips: list[str] | None) -> list[dict]:
+    """Отметить открытые проверке только по белому списку (allow) по свежему отчету helper'а."""
+    for x in rows:
+        x.pop("allow", None)
+        if x.get("state") == "open" and only_allowlist(srv, str(x.get("ip") or ""), int(x.get("port") or 0), via_ips or []):
+            x["allow"] = True
+    return rows
+
+
+def marked_rows(srv: Server, rows: list) -> list[dict]:
+    """Строки проверки с подписями и отметкой "только белому списку" по свежему отчету."""
+    return mark_allow(srv, _relabel(srv, rows), _ex(srv).get("via_ips"))
+
+
 def view(srv: Server) -> dict | None:
     """Итог проверки для карточки: без seen (служебная история) и с отметкой намеренных портов."""
     ex = _ex(srv)
     if not ex:
         return None
     out = {k: v for k, v in ex.items() if k != "seen"}
-    out["ports"] = _relabel(srv, ex.get("ports") or [])
+    out["ports"] = marked_rows(srv, ex.get("ports") or [])
     if ex.get("new"):
-        out["new"] = _relabel(srv, ex["new"])
+        out["new"] = [x for x in marked_rows(srv, ex["new"]) if not x.get("allow")]
     out["own"] = from_panel(srv)
     _mark_cf(out)
     out["foreign"] = list(foreign(srv).values())
@@ -636,9 +766,9 @@ def exposed(srv: Server, now: datetime) -> list[dict]:
         return []
     muted = muted_ports(srv)
     alien = foreign(srv)  # адрес ведет на другой сервер: его порты не про эту ноду
-    return [x for x in _relabel(srv, ex.get("ports") or [])
-            if x.get("state") == "open" and (x.get("risk") or x.get("svc")) and str(x.get("port")) not in muted
-            and x.get("ip") not in alien]
+    return [x for x in marked_rows(srv, ex.get("ports") or [])
+            if x.get("state") == "open" and not x.get("allow") and (x.get("risk") or x.get("svc"))
+            and str(x.get("port")) not in muted and x.get("ip") not in alien]
 
 
 def exposed_level(rows: list[dict]) -> int:
@@ -689,8 +819,8 @@ def new_ports(srv: Server, now: datetime, hours: int = 24) -> list[dict]:
         return []
     muted = muted_ports(srv)
     alien = foreign(srv)
-    return [x for x in _relabel(srv, ex.get("new") or []) if str(x.get("port")) not in muted
-            and x.get("ip") not in alien]
+    return [x for x in marked_rows(srv, ex.get("new") or []) if str(x.get("port")) not in muted
+            and x.get("ip") not in alien and not x.get("allow")]
 
 
 def new_since(srv: Server) -> str | None:
@@ -722,8 +852,10 @@ async def _scan_due(session_factory: async_sessionmaker[AsyncSession], now: date
             if now - seen > timedelta(minutes=10):
                 continue
             last = scanned_at(srv)
-            # правила выбора портов поменялись - проверяем сразу, не дожидаясь 6 часов
-            if last is None or now - last >= SCAN_EVERY or int(_ex(srv).get("rules") or 1) < RULES:
+            # правила выбора портов поменялись или проверка не знает своих адресов (до 1.4.263) -
+            # проверяем сразу, не дожидаясь 6 часов
+            ex = _ex(srv)
+            if last is None or now - last >= SCAN_EVERY or int(ex.get("rules") or 1) < RULES or "via_ips" not in ex:
                 due.append((last or datetime.min.replace(tzinfo=timezone.utc), srv.id))
         due.sort()
         n = 0

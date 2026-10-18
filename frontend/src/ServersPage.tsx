@@ -3119,6 +3119,8 @@ type PortGroup = {
   other: ExposedPort['state']
   // сайты ноды идут через Cloudflare: only - напрямую порт закрыт, also - открыт и в обход него
   cf?: 'only' | 'also'
+  // проверке открыт только по белому списку с ее адресом: для интернета закрыт
+  allow?: boolean
 }
 
 // замок для колонок "открыто" и "закрыто"; облако - порт, открытый только для Cloudflare
@@ -3233,7 +3235,8 @@ function OpenPorts({ server: s, onChanged }: { server: Server; onChanged: () => 
   const by = new Map<number, PortGroup>()
   for (const x of ex?.ports ?? []) {
     const g = by.get(x.port) ?? { port: x.port, name: x.name, what: x.what, risk: x.risk, svc: !!x.svc, open: [], other: x.state }
-    if (x.state === 'open') g.open.push(x.ip)
+    if (x.state === 'open' && x.allow) g.allow = true
+    else if (x.state === 'open') g.open.push(x.ip)
     else if (g.other !== 'filtered' && g.other !== 'closed') g.other = x.state
     if (x.cf === 'also' || (x.cf === 'only' && !g.cf)) g.cf = x.cf
     by.set(x.port, g)
@@ -3243,11 +3246,13 @@ function OpenPorts({ server: s, onChanged }: { server: Server; onChanged: () => 
   const rank = (g: PortGroup) => (!g.open.length ? 3 : flagged(g) && g.risk ? 0 : flagged(g) && g.svc ? 1 : 2)
   const groups = [...by.values()].sort((a, b) => rank(a) - rank(b) || a.port - b.port)
   const opened = groups.filter((g) => g.open.length)
-  // закрытое: сначала то, что открыто только для Cloudflare
+  // закрытое: сначала то, что открыто только для Cloudflare, потом только белому списку
   const closed = groups
-    .filter((g) => !g.open.length && g.other !== 'unknown')
-    .sort((a, b) => Number(b.cf === 'only') - Number(a.cf === 'only'))
-  const unknown = groups.filter((g) => !g.open.length && g.other === 'unknown')
+    .filter((g) => !g.open.length && (g.other !== 'unknown' || g.allow))
+    .sort((a, b) => Number(b.cf === 'only') - Number(a.cf === 'only') || Number(!!b.allow) - Number(!!a.allow))
+  const unknown = groups.filter((g) => !g.open.length && g.other === 'unknown' && !g.allow)
+  const allowed = closed.filter((g) => g.allow)
+  const viaIps = (ex?.via_ips ?? []).join(', ')
   const fresh = new Set((ex?.new ?? []).map((x) => x.port))
   const dangerous = opened.filter((g) => flagged(g) && g.risk).length
   const service = opened.filter((g) => flagged(g) && !g.risk && g.svc).length
@@ -3296,6 +3301,7 @@ function OpenPorts({ server: s, onChanged }: { server: Server; onChanged: () => 
   const cfMore = (ex?.cf?.n ?? 0) - cfSites.length
   const closedSub = [
     cfOnly.length ? t('только через Cloudflare: {n}', { n: cfOnly.length }) : '',
+    allowed.length ? t('только белому списку: {n}', { n: allowed.length }) : '',
     unknown.length ? t('не проверить: {n}', { n: unknown.length }) : '',
   ].filter(Boolean)
   const openRow = (g: PortGroup) => {
@@ -3348,6 +3354,14 @@ function OpenPorts({ server: s, onChanged }: { server: Server; onChanged: () => 
       <div className="exp-what">
         <span>{g.name || g.what || t('процесс не известен')}</span>
         {g.cf === 'only' && <> <span className="exp-tag exp-tag-cf">{t('только через Cloudflare')}</span></>}
+        {g.allow && (
+          <>
+            {' '}
+            <span className="exp-tag exp-tag-allow" title={t('Снаружи закрыт: проверка видит его открытым только потому, что ее адрес {ips} в белом списке файрвола ноды.', { ips: viaIps })}>
+              {t('только белому списку')}
+            </span>
+          </>
+        )}
       </div>
     </div>
   )
@@ -3370,6 +3384,7 @@ function OpenPorts({ server: s, onChanged }: { server: Server; onChanged: () => 
                 via: t(ex.via),
               })
           : t('Внешней проверки еще не было: панель проверяет раз в 6 часов.')}
+        {ex && !own && viaIps && <> · {t('адрес проверки: {ips}', { ips: viaIps })}</>}
         {ex && ex.ips.length > 0 && <> · {t('адреса ноды: {ips}', { ips: ex.ips.join(', ') })}</>}
         {opened.length > 0 && quietIps.length > 0 && <> · {t('на {ips} ничего не открыто', { ips: quietIps.join(', ') })}</>}
         {err && <span className="t-down"> {err}</span>}
@@ -3381,6 +3396,11 @@ function OpenPorts({ server: s, onChanged }: { server: Server; onChanged: () => 
             : t('По адресу {ip} отвечает другой сервер: там {o}, а у этой ноды {n}. Порты по этому адресу не про эту ноду, поэтому алертов по ним нет.', { ip: f.ip, o: f.outside, n: f.node })}
         </div>
       ))}
+      {ex && !own && allowed.length > 0 && (
+        <div className="net-note">
+          {t('Адрес проверки {ips} стоит в белом списке файрвола ноды (его добавляют под мониторинг). Порты {ports} файрвол пускает только по белому списку: проверке они открыты, а интернету нет. Они в колонке "Закрыто снаружи", алертов по ним нет. Чтобы проверка видела то же, что и интернет, добавьте в "Локациях" прокси в другой сети.', { ips: viaIps, ports: allowed.map((g) => g.port).join(', ') })}
+        </div>
+      )}
       {ex && own && opened.length > 0 && (
         <div className="net-note">
           {t('Панель смотрела со своего адреса, а файрвол ноды часто пускает панель по белому списку. Тогда здесь "открыт" и то, что для остальных закрыто, поэтому по этой проверке нет ни красного, ни алертов. Чтобы видеть, что открыто для всех, добавьте в "Локациях" прокси в другой сети.')}
