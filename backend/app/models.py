@@ -919,6 +919,9 @@ class WebErrorSample(Base):
     # заходя на сервер. Значения секретов в query (token=, key=...) helper маскирует еще
     # на ноде. Храним неделю, дальше строка обнуляется - остаются числа.
     lines: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    # Почему 502/504 (helper 0.26): до какого upstream nginx не достучался и как, в минуту -
+    # [{"u": "172.18.0.5:8000", "k": "refused", "n": 44, "c": "app-1"}], см. app/web_upstream.py
+    ups: Mapped[list | None] = mapped_column(JSON, nullable=True)
 
 
 class LocationSample(Base):

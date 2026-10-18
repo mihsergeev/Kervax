@@ -2823,6 +2823,9 @@ export type WebErrorRow = {
   hosts?: { h: string; n: number }[] // по доменам, если лог общий и в формате есть $host (helper 0.21)
   lines: string[] // последние строки с 5xx (хелпер 0.19), секреты замаскированы на ноде
   lines_n: number // сколько строк сохранено за окно
+  // почему 502/504 (helper 0.26): до какого upstream nginx не достучался и как, за окно;
+  // c - контейнер docker по адресу или upstream ingress-nginx
+  ups?: { u: string; k: string; n: number; c?: string }[]
   gone?: boolean // лога больше нет в отчете: ошибки за окно - история (сайты разнесли по логам)
 }
 // Все строки с 5xx одного лога за окно - для .txt
