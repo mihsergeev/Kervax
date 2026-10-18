@@ -1457,6 +1457,10 @@ const EN: Record<string, string> = {
   'за {n} мин': 'in {n} min',
   'загрузка {p}%': 'load {p}%',
   'замедление с {n}°C': 'slowdown from {n}°C',
+  '/metrics закрыт ключом ({e}). Чтобы панель видела запросы и ошибки, в конфиге LiteLLM: require_auth_for_metrics_endpoint: false.':
+    '/metrics requires a key ({e}). For the panel to see requests and errors, set require_auth_for_metrics_endpoint: false in the LiteLLM config.',
+  '/metrics закрыт ключом ({e}): без ключа панель метрики не читает.':
+    '/metrics requires a key ({e}): the panel does not read metrics with a key.',
   'запр/с': 'req/s',
   'карт на шине: {n}, нет helper gpu-setup': 'cards on the bus: {n}, no gpu-setup helper',
   'не отвечают: {n}': 'not answering: {n}',

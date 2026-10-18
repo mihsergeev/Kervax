@@ -29,6 +29,9 @@ func TestLLMEngine(t *testing.T) {
 		{"python3 -m sglang.launch_server --model-path m/x", "sglang", 30000, "m/x", "", true},
 		{"text-embeddings-router --model-id BAAI/bge-m3 --port 80", "tei", 9000, "BAAI/bge-m3", "", false},
 		{"/usr/local/bin/text-embeddings-router --model-id x --prometheus-port 9100", "tei", 9100, "x", "", false},
+		{"/app/.venv/bin/python3 /app/.venv/bin/litellm --config /etc/litellm/config.yaml --port 4001", "litellm", 4001, "", "", false},
+		{"litellm --config /app/config.yaml", "litellm", 4000, "", "", false},
+		{"python3 -m litellm --host 127.0.0.1 --model ollama/x", "litellm", 4000, "ollama/x", "127.0.0.1", false},
 	}
 	for _, c := range cases {
 		p, ok := llmEngine(strings.Fields(c.cmd))
@@ -36,7 +39,18 @@ func TestLLMEngine(t *testing.T) {
 			t.Errorf("%q: %+v %v", c.cmd, p, ok)
 		}
 	}
-	for _, cmd := range []string{"grep vllm.entrypoints.openai.api_server", "tail -f /var/log/vllm.log", "pip install sglang", "bash"} {
+	// TEI 1.9 отдает /metrics на порту API: он запасной
+	if p, _ := llmEngine(strings.Fields("text-embeddings-router --model-id x --port 8000")); !reflect.DeepEqual(p.alt, []int{8000}) {
+		t.Errorf("%+v", p)
+	}
+	if p, _ := llmEngine(strings.Fields("text-embeddings-router --model-id x")); !reflect.DeepEqual(p.alt, []int{80, 3000}) {
+		t.Errorf("%+v", p)
+	}
+	if p, _ := llmEngine(strings.Fields("vllm serve m --port 8000")); p.alt != nil {
+		t.Errorf("%+v", p)
+	}
+	for _, cmd := range []string{"grep vllm.entrypoints.openai.api_server", "tail -f /var/log/vllm.log", "pip install sglang", "bash",
+		"pip install litellm", "python3 /srv/litellm_sync.py", "tail -f /var/log/litellm.log"} {
 		if p, ok := llmEngine(strings.Fields(cmd)); ok {
 			t.Errorf("%q is not a service: %+v", cmd, p)
 		}
@@ -267,5 +281,105 @@ func TestCollectLLM(t *testing.T) {
 		if x.Engine == "vllm" && (x.OK || x.Err != "refused") {
 			t.Fatalf("%+v", x)
 		}
+	}
+}
+
+// TEI 1.9 не открывает порт Prometheus: метрики берутся с порта API, в отчете тот порт, что ответил
+func TestCollectLLMTEIMetricsOnAPIPort(t *testing.T) {
+	llmState.Lock()
+	llmState.last, llmState.out, llmState.snaps = time.Time{}, nil, map[string][]llmSnap{}
+	llmState.Unlock()
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, "te_queue_size 2\nte_request_success{method=\"single\"} 7\n")
+	}))
+	defer api.Close()
+	closed := httptest.NewServer(http.NotFoundHandler())
+	cu, _ := url.Parse(closed.URL)
+	closed.Close() // порт Prometheus никто не слушает
+	au, _ := url.Parse(api.URL)
+
+	proc := t.TempDir()
+	ioWrite(t, proc+"/self/net/dev", netDev([3]string{"eth0", "1", "1"}))
+	ioWrite(t, proc+"/31/cmdline", "text-embeddings-router\x00--model-id\x00BAAI/bge-m3\x00--prometheus-port\x00"+cu.Port()+"\x00--port\x00"+au.Port()+"\x00")
+	ioWrite(t, proc+"/31/stat", "31 (text-embeddings) S"+strings.Repeat(" 0", 18)+" 1000 0 0")
+	if err := os.Symlink("../self/net", proc+"/31/net"); err != nil {
+		t.Fatal(err)
+	}
+	oldCg, oldUp := procCgroup, procUptime
+	procCgroup = func(pid int) string { return "" }
+	procUptime = func() float64 { return 1010 }
+	defer func() { procCgroup, procUptime = oldCg, oldUp }()
+
+	out := collectLLM(proc, nil, nil, time.Unix(1_800_000_000, 0))
+	if len(out) != 1 || !out[0].OK || out[0].Err != "" || out[0].Port != atoiT(t, au.Port()) || *out[0].Waiting != 2 {
+		t.Fatalf("%+v", out)
+	}
+}
+
+func atoiT(t *testing.T, s string) int {
+	n := 0
+	if _, err := fmt.Sscan(s, &n); err != nil {
+		t.Fatal(err)
+	}
+	return n
+}
+
+// LiteLLM: в работе без своего запроса к /metrics, ошибки - только ответы 5xx, задержек нет
+func TestLLMReadLiteLLM(t *testing.T) {
+	body := "# HELP litellm_in_flight_requests x\nlitellm_in_flight_requests 3.0\n" +
+		"litellm_proxy_total_requests_metric_total{requested_model=\"a\",route=\"/v1/chat/completions\",status_code=\"200\"} 90\n" +
+		"litellm_proxy_total_requests_metric_total{requested_model=\"a\",route=\"/v1/chat/completions\",status_code=\"400\"} 4\n" +
+		"litellm_proxy_total_requests_metric_total{requested_model=\"b\",route=\"/v1/embeddings\",status_code=\"503\"} 2\n" +
+		"litellm_proxy_total_requests_metric_total{requested_model=\"b\",route=\"/v1/embeddings\",status_code=\"500\"} 1\n" +
+		"litellm_proxy_total_requests_metric_created{requested_model=\"b\"} 1.7e9\n" +
+		"litellm_input_tokens_metric_total{requested_model=\"a\"} 1000\nlitellm_output_tokens_metric_total{requested_model=\"a\"} 50\n" +
+		"litellm_llm_api_latency_metric_bucket{le=\"0.5\"} 3\nlitellm_llm_api_latency_metric_bucket{le=\"+Inf\"} 9\n"
+	inf := llmInfo{Engine: "litellm"}
+	llmCompute(&inf, []byte(body), nil, time.Unix(1_800_000_000, 0))
+	if !inf.OK || inf.Running == nil || *inf.Running != 2 {
+		t.Fatalf("%+v", inf)
+	}
+	g, s := llmRead("litellm", promParse([]byte(body), "litellm_in_flight_requests", "litellm_proxy_total_requests_metric_total",
+		"litellm_input_tokens_metric_total", "litellm_output_tokens_metric_total"))
+	if s.ctr["req"] != 97 || s.ctr["err"] != 3 || s.ctr["prompt"] != 1000 || s.ctr["gen"] != 50 || len(s.hist) != 0 || g.waiting != nil {
+		t.Fatalf("%+v %+v", g, s)
+	}
+	// простой: в работе только сам запрос метрик
+	g, _ = llmRead("litellm", promParse([]byte("litellm_in_flight_requests 1\n"), "litellm_in_flight_requests"))
+	if *g.running != 0 {
+		t.Fatal(*g.running)
+	}
+}
+
+// LiteLLM в поде: стучимся сразу на /metrics/, без редиректа
+func TestCollectLLMLiteLLMPath(t *testing.T) {
+	llmState.Lock()
+	llmState.last, llmState.out, llmState.snaps = time.Time{}, nil, map[string][]llmSnap{}
+	llmState.Unlock()
+	var paths []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.URL.Path)
+		if r.URL.Path != "/metrics/" {
+			http.Redirect(w, r, "/metrics/", http.StatusTemporaryRedirect)
+			return
+		}
+		fmt.Fprint(w, "litellm_in_flight_requests 1\n")
+	}))
+	defer srv.Close()
+	u, _ := url.Parse(srv.URL)
+	proc := t.TempDir()
+	ioWrite(t, proc+"/self/net/dev", netDev([3]string{"eth0", "1", "1"}))
+	ioWrite(t, proc+"/40/cmdline", "/app/.venv/bin/python3\x00/app/.venv/bin/litellm\x00--config\x00/etc/litellm/config.yaml\x00--port\x00"+u.Port()+"\x00")
+	ioWrite(t, proc+"/40/stat", "40 (python3) S"+strings.Repeat(" 0", 18)+" 1000 0 0")
+	if err := os.Symlink("../self/net", proc+"/40/net"); err != nil {
+		t.Fatal(err)
+	}
+	oldCg, oldUp := procCgroup, procUptime
+	procCgroup = func(pid int) string { return "" }
+	procUptime = func() float64 { return 1010 }
+	defer func() { procCgroup, procUptime = oldCg, oldUp }()
+	out := collectLLM(proc, nil, nil, time.Unix(1_800_000_000, 0))
+	if len(out) != 1 || out[0].Engine != "litellm" || !out[0].OK || !reflect.DeepEqual(paths, []string{"/metrics/"}) {
+		t.Fatalf("%+v %v", out, paths)
 	}
 }
