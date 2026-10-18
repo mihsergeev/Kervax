@@ -20,6 +20,7 @@ import {
   type WorkerDaemon,
   type CronJob,
   type LogErrSource,
+  type FpmPool,
   type WorkerProg,
 } from './api'
 import { LlmSection } from './Gpu'
@@ -31,7 +32,7 @@ import { fmtRel } from './ServersPage'
 import { CardNav, FreshChip, markMuted, OvAreas, OvRows, secInfoOf, type OvRow, type SecDef, type SecInfo, type SecItem } from './cardLayout'
 import { AdoptSitesModal, adoptable } from './AdoptSitesModal'
 import { EngineIcon } from './engineIcon'
-import { CRON_MUTE, LOGERR_MUTE, QFAIL_MUTE, QSTUCK_MUTE, WORKER_MUTE } from './mutes'
+import { CRON_MUTE, FPM_MUTE, LOGERR_MUTE, QFAIL_MUTE, QSTUCK_MUTE, WORKER_MUTE } from './mutes'
 import { OsIcon } from './osIcon'
 import { CountryFlag } from './CountryFlag'
 import { byteUnits } from './units'
@@ -781,7 +782,7 @@ function buildByServer(
     for (const d of s.workers ?? []) items.push({ kind: d.label, where: d.where, workers: true })
     // кроны (helper cron-setup): cron есть почти на каждой ноде, в список нод он ее не добавляет,
     // но окно сервисов по ссылке из алерта открывается и у ноды без других сервисов
-    const hasCron = (s.cron?.jobs ?? []).length > 0 || (s.log_errors?.sources ?? []).length > 0
+    const hasCron = (s.cron?.jobs ?? []).length > 0 || (s.log_errors?.sources ?? []).length > 0 || (s.fpm?.pools ?? []).length > 0
     // веб-серверы/прокси (nginx/envoy/…): их не бэкапят, поэтому идут отдельным источником
     for (const w of s.last_report?.web_services ?? []) {
       if (seen.has(w.kind)) continue
@@ -1499,11 +1500,140 @@ function LogErrList({ server, sources, onChanged, onlySpikes }: {
   )
 }
 
+// Пулы PHP-FPM (helper fpm-setup): беда наверху, у пула - воркеры из предела, соединения и очередь
+// сейчас, упоры, медленные и убитые запросы за час и сутки, последний пример. 🔕 - не алертить по пулу
+function FpmList({ server, pools, onChanged, onlyProblems }: {
+  server: Server
+  pools: FpmPool[]
+  onChanged: () => void
+  onlyProblems: boolean
+}) {
+  const { t } = useI18n()
+  const { isViewer } = useAuth()
+  const [picking, setPicking] = useState<string | null>(null)
+  const [mBusy, setMBusy] = useState(false)
+  const mute = async (key: string, hours: number) => {
+    const kind = FPM_MUTE + key
+    setMBusy(true)
+    try {
+      if (hours < 0) {
+        await updateServer(server.id, { alert_mutes: [...new Set([...(server.alert_mutes ?? []), kind])] })
+      } else if (hours === 0) {
+        if ((server.alert_mutes ?? []).includes(kind))
+          await updateServer(server.id, { alert_mutes: (server.alert_mutes ?? []).filter((x) => x !== kind) })
+        if (server.alert_snoozes?.[kind]) await snoozeServerAlert(server.id, kind, 0)
+      } else await snoozeServerAlert(server.id, kind, hours)
+      setPicking(null)
+      onChanged()
+    } catch {
+      /* кнопка остается, можно повторить */
+    } finally {
+      setMBusy(false)
+    }
+  }
+  const fmt = (ts: string) =>
+    new Date(ts).toLocaleString([], { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })
+  const rank = (x: FpmPool) => (x.mute ? 3 : x.level ? 2 - x.level : 2)
+  const rows = pools
+    .filter((x) => !onlyProblems || (x.level && !x.mute))
+    .map((x, i) => ({ x, i }))
+    .sort((a, b) => rank(a.x) - rank(b.x) || a.i - b.i)
+    .map(({ x }) => x)
+  const dh = (h: number, d: number) => t('за час {n}, за сутки {m}', { n: rpmText(h), m: rpmText(d) })
+  return (
+    <div className="chart-card net-card net-card-wide">
+      <div className="loc-results docker-clist">
+        {rows.map((x) => {
+          const busy = x.reached_d > 0 || x.sat > 0
+          const tone = x.mute ? 't-up' : x.level ? (x.level >= 2 ? 't-down' : 't-degraded') : busy || x.tout_d > 0 ? 't-soon' : 't-up'
+          const ex = x.tout_last || x.slow_last
+          const exTs = x.tout_last ? x.tout_ts : x.slow_ts
+          return (
+            <div key={x.key} className={`loc-res docker-row ${tone}${x.mute ? ' q-muted' : ''}`}>
+              <span className={`lk-dot${x.mute ? '' : DOT[tone]}`} />
+              <div className="docker-c-main">
+                <div className="docker-c-name mono">{x.label}</div>
+                <div className="docker-c-img muted small">
+                  {subOf(
+                    x.listen,
+                    `pm = ${x.pm}`,
+                    x.max > 0 && t('воркеров {n} из {m}', { n: x.children, m: x.max }),
+                    x.conns > 0 && t('соединений сейчас: {n}', { n: x.conns }),
+                    x.queue > 0 && t('в очереди: {n}', { n: x.queue }),
+                  )}
+                </div>
+                {(busy || x.tout_d > 0 || x.slow_d > 0) && (
+                  <div className="docker-c-img muted small">
+                    {subOf(
+                      x.sat > 0 && t('запросы ждали {n} мин за час', { n: x.sat }),
+                      x.reached_d > 0 && `${t('упоры в pm.max_children')}: ${dh(x.reached, x.reached_d)}`,
+                      x.tout_d > 0 && `${t('убито по таймауту')}: ${dh(x.tout, x.tout_d)}`,
+                      x.slow_d > 0 && `${t('медленных')}${x.slowlog > 0 ? ` (${t('от {n} с', { n: x.slowlog })})` : ''}: ${dh(x.slow, x.slow_d)}`,
+                    )}
+                  </div>
+                )}
+                {x.why && <div className={`docker-c-img small${x.mute ? ' muted' : ' q-stuck'}`}>{x.why}</div>}
+                {x.max === 5 && busy && (
+                  <div className="docker-c-img muted small">{t('pm.max_children = 5 - значение по умолчанию: пул никто не настраивал')}</div>
+                )}
+                {ex && (
+                  <div className="docker-c-img w-log mono muted small" title={ex}>
+                    {exTs > 0 && <span>{fmtRel(new Date(exTs * 1000).toISOString())}: </span>}
+                    {ex}
+                  </div>
+                )}
+                {x.mute && (
+                  <div className="small">
+                    <span className="snooze-active-chip snooze-perm">
+                      🔇 {x.mute.perm ? t('не алертит, постоянно') : t('не алертит {t}', { t: t('до {t}', { t: fmt(x.mute.until!) }) })}
+                      {!isViewer && (
+                        <button className="chip-x" disabled={mBusy} title={t('Снять')} onClick={() => mute(x.key, 0)}>
+                          ✕
+                        </button>
+                      )}
+                    </span>
+                  </div>
+                )}
+                {!x.mute && picking === x.key && (
+                  <div className="small q-mute-pick">
+                    <span className="muted">🔕 {t('не алертить об этом пуле:')}</span>
+                    {[
+                      { h: 24, l: t('1 день') },
+                      { h: 24 * 7, l: t('1 неделя') },
+                      { h: -1, l: t('постоянно') },
+                    ].map(({ h, l }) => (
+                      <button key={h} className="ghost small" disabled={mBusy} onClick={() => mute(x.key, h)}>
+                        {l}
+                      </button>
+                    ))}
+                    <button className="ghost small" disabled={mBusy} onClick={() => setPicking(null)}>
+                      {t('Отмена')}
+                    </button>
+                  </div>
+                )}
+              </div>
+              {!isViewer && !x.mute ? (
+                <button className="ghost small q-mute-btn" disabled={mBusy} title={t('Не алертить о пуле PHP-FPM: на день, неделю или постоянно')}
+                  onClick={() => setPicking(picking === x.key ? null : x.key)}>
+                  🔕
+                </button>
+              ) : (
+                <span className="q-mute-btn" />
+              )}
+            </div>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
 const SVC_SECTIONS: SecDef[] = [
   { id: 'overview', label: 'Сводка', group: '' },
   { id: 'web', label: 'Веб-серверы', group: 'Веб' },
   { id: 'sites', label: 'Сайты', group: 'Веб' },
   { id: 'certs', label: 'Сертификаты', group: 'Веб' },
+  { id: 'fpm', label: 'PHP-FPM', group: 'Веб' },
   { id: 'db', label: 'Базы и хранилища', group: 'Данные' },
   { id: 'queues', label: 'Очереди', group: 'Данные' },
   { id: 'workers', label: 'Воркеры', group: 'Процессы' },
@@ -1514,7 +1644,7 @@ const SVC_SECTIONS: SecDef[] = [
 const SVC_SEC_IDS = new Set(SVC_SECTIONS.map((x) => x.id))
 // раздел карточки по виду проблемы, если бэкенд его не назвал (старый бэкенд в кэше вкладки)
 const SVC_SEC_OF_KIND: Record<string, string> = {
-  queue: 'queues', queue_stuck: 'queues', workers: 'workers', cron_stuck: 'cron', log_errors: 'logs', web_cert: 'certs', web_config: 'web', db_health: 'db', db_conn: 'db', llm: 'llm',
+  queue: 'queues', queue_stuck: 'queues', workers: 'workers', cron_stuck: 'cron', log_errors: 'logs', fpm: 'fpm', web_cert: 'certs', web_config: 'web', db_health: 'db', db_conn: 'db', llm: 'llm',
 }
 
 function ServerServicesModal({ srv, onClose, onChanged, initialSec, sites }: {
@@ -1584,6 +1714,11 @@ function ServerServicesModal({ srv, onClose, onChanged, initialSec, sites }: {
   const lSrc = lErr?.sources ?? []
   const [lOnly, setLOnly] = useState(false)
   const lSpikeN = lSrc.filter((x) => x.level && !x.mute).length
+  // пулы PHP-FPM: беда наверху, фильтр "с проблемами"
+  const fpm = s.fpm
+  const fPools = fpm?.pools ?? []
+  const [fOnly, setFOnly] = useState(false)
+  const fProbN = fPools.filter((x) => x.level && !x.mute).length
   const dbNoAuth = (s.queue_db_skipped ?? []).filter((x) => x.why === 'auth')
   const dbBig = (s.queue_db_skipped ?? []).filter((x) => x.why === 'big')
   const qHot = qAll.filter((x) => qDepth(x) >= QUEUE_HOT).length
@@ -1612,6 +1747,7 @@ function ServerServicesModal({ srv, onClose, onChanged, initialSec, sites }: {
     workers: wDaemons.length > 0 || (s.workers_skipped ?? []).length > 0,
     cron: cJobs.length > 0,
     logs: lSrc.length > 0,
+    fpm: fPools.length > 0,
     llm: llm.length > 0,
   }
   const secs = SVC_SECTIONS.filter((x) => shown[x.id])
@@ -1652,6 +1788,10 @@ function ServerServicesModal({ srv, onClose, onChanged, initialSec, sites }: {
     cron: subOf(
       t('задач: {n}', { n: cJobs.length }),
       cRunN > 0 && t('идут сейчас: {n}', { n: cRunN }),
+    ),
+    fpm: subOf(
+      t('пулов: {n}', { n: fPools.length }),
+      t('воркеров {n} из {m}', { n: fPools.reduce((a, x) => a + x.children, 0), m: fPools.reduce((a, x) => a + x.max, 0) }),
     ),
     logs: subOf(
       t('логов с ошибками: {n}', { n: lSrc.length }),
@@ -1959,6 +2099,27 @@ function ServerServicesModal({ srv, onClose, onChanged, initialSec, sites }: {
                 {wShown.map((d) => (
                   <WorkerList key={d.source} server={s} d={d} onChanged={onChanged} onlyProblems={wOnly} />
                 ))}
+              </div>
+            )}
+            {cur.id === 'fpm' && fpm && (
+              <div className="srv-sec">
+                <div className="muted small">
+                  {t('Пулы PHP-FPM: сколько воркеров занято и сколько запросов ждет, упоры в pm.max_children, медленные и убитые по таймауту запросы из лога FPM. Алерт, когда пул не справляется подолгу: запросы ждали воркера от 15 минут из часа, пул упирался в предел от 60 раз за час или по таймауту убито от 20 запросов за час.')}
+                </div>
+                {fpm.skipped.length > 0 && (
+                  <div className="muted small">{t('Конфиг не найден: {w}', { w: fpm.skipped.map((x) => x.where).join(', ') })}</div>
+                )}
+                {fProbN > 0 && (
+                  <div className="win-switch q-filter">
+                    <button className={`win-btn${!fOnly ? ' win-btn-active' : ''}`} onClick={() => setFOnly(false)}>
+                      {t('Все пулы')}
+                    </button>
+                    <button className={`win-btn${fOnly ? ' win-btn-active' : ''}`} onClick={() => setFOnly(true)}>
+                      {t('С проблемами: {n}', { n: fProbN })}
+                    </button>
+                  </div>
+                )}
+                <FpmList server={s} pools={fPools} onChanged={onChanged} onlyProblems={fOnly} />
               </div>
             )}
             {cur.id === 'logs' && lErr && (

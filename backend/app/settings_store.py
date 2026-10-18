@@ -188,6 +188,8 @@ SERVER_ALERT_KINDS: dict[str, tuple[str, str]] = {
     "cron_stuck": ("Крон наслаивается или висит", "{detail}"),
     # строк с ошибками в логе контейнера за час в разы больше обычного (helper logerr-setup)
     "log_errors": ("Всплеск ошибок в логах", "{detail}"),
+    # пул PHP-FPM подолгу упирается в pm.max_children или рвет запросы по таймауту (helper fpm-setup)
+    "fpm": ("PHP-FPM не справляется", "{detail}"),
     "web_5xx": ("Веб: пошли ошибки 5xx",
                 "{value}% запросов за 15 минут закончились ошибкой 5xx ({errs} из {total}){where}"),
     "kube_pod": ("Kubernetes: под не поднимается",

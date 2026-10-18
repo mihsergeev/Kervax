@@ -1926,6 +1926,8 @@ export type Server = {
   cron?: CronInfo | null
   // ошибки в логах контейнеров и подов (helper logerr-setup): счет за час и сутки, обычный час, всплеск
   log_errors?: LogErrInfo | null
+  // пулы PHP-FPM (helper fpm-setup): воркеры, очередь, упоры в pm.max_children, медленные и убитые запросы
+  fpm?: FpmInfo | null
   // заглушенные очереди: насовсем или до срока
   queue_mutes?: Record<string, { perm?: boolean; until?: string }> | null
   // изменения на сервере (helper changes-setup): лента между снимками, отметка "это мы"
@@ -2159,6 +2161,40 @@ export type LogErrSource = {
   why?: string
   mute?: { perm?: boolean; until?: string }
 }
+// Пул PHP-FPM (fpm_pools.view): конфиг (listen, pm, max = pm.max_children, slowlog/terminate в
+// секундах), сейчас - воркеров, соединений (обслуживаемые и ждущие), в очереди; sat - минут за час,
+// когда запросы ждали воркера; reached/slow/tout - упоры в предел, медленные и убитые по таймауту
+// за час, *_d - за сутки, *_last - последний пример; level/why - беда, mute - заглушен fpm:<key>
+export type FpmPool = {
+  key: string
+  label: string
+  pool: string
+  listen: string
+  pm: string
+  max: number
+  children: number
+  conns: number
+  queue: number
+  sat: number
+  span: number
+  reached: number
+  reached_d: number
+  slow: number
+  slow_d: number
+  tout: number
+  tout_d: number
+  slowlog: number
+  terminate: number
+  status: number
+  slow_last: string
+  slow_ts: number
+  tout_last: string
+  tout_ts: number
+  level?: number
+  why?: string
+  mute?: { perm?: boolean; until?: string }
+}
+export type FpmInfo = { ts: number; pools: FpmPool[]; skipped: { where: string; why: string }[] }
 export type LogErrInfo = { ts: number; logs: number; skipped: number; sources: LogErrSource[] }
 export type CronInfo = {
   ts: number

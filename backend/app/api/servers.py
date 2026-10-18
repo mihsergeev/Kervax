@@ -23,6 +23,7 @@ from app import queue_watch
 from app import workers as workers_mod
 from app import cron_watch
 from app import log_errors
+from app import fpm_pools
 from app import mem_trend
 from app import restarts as srv_restarts
 from app import access_audit
@@ -264,6 +265,7 @@ def _out(
     o.workers_skipped = workers_mod.skipped(server.last_report or {}) or None
     o.cron = cron_watch.view(server, now)
     o.log_errors = log_errors.view(server, now)
+    o.fpm = fpm_pools.view(server, now)
     o.web_config = web_config.view(server.last_report or {}, now)
     o.web_certs = web_certs.view(server.last_report or {}, now)
     o.proxy_outdated = docker_exposure.outdated(server.last_report or {}, now.timestamp())
@@ -537,6 +539,7 @@ _SETUP_LABEL = {
     "workers-setup": "Воркеры supervisor и pm2",
     "cron-setup": "Кроны на хосте и в контейнерах",
     "logerr-setup": "Ошибки в логах контейнеров",
+    "fpm-setup": "Пулы PHP-FPM",
 }
 
 

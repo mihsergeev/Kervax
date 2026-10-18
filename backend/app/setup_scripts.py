@@ -122,6 +122,7 @@ _HELPER_LABEL = {
     "workers-setup": "воркеры supervisor и pm2",
     "cron-setup": "кроны на хосте и в контейнерах",
     "logerr-setup": "ошибки в логах контейнеров",
+    "fpm-setup": "пулы PHP-FPM",
 }
 
 
