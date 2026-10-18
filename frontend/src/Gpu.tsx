@@ -22,8 +22,11 @@ function upText(sec: number | null | undefined, t: TFn): string {
   return t('{n} мин', { n: Math.max(1, Math.floor(sec / 60)) })
 }
 
-function hhmm(ts: number): string {
-  return new Date(ts * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+// время Xid: за сутки - часы и минуты, старше (ждет сброса GPU) - еще и дата
+function xidTime(ts: number, old?: boolean): string {
+  const d = new Date(ts * 1000)
+  const hm = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+  return old ? `${d.toLocaleDateString([], { day: '2-digit', month: '2-digit' })} ${hm}` : hm
 }
 
 const KIND: Record<string, string> = { container: 'контейнер', pod: 'под', unit: 'юнит', user: 'пользователь' }
@@ -89,8 +92,10 @@ export function GpuCard({ server: s, rows }: { server: Server; rows: OvRow[] }) 
   if (g.driver) pills.push({ text: `${t('драйвер')} ${g.driver}` })
   if (g.cuda) pills.push({ text: `CUDA ${g.cuda}` })
   if (g.ok) pills.push({ text: t('видно GPU {a} из {b} на шине PCI', { a: seen, b: Math.max(onBus, seen) }), lv: onBus > seen ? 'bad' : undefined })
-  const xidHw = xid.filter((x) => x.hw).length
-  pills.push({ text: t('Xid за сутки: {n}', { n: xid.length }), lv: xidHw ? 'bad' : xid.length ? 'warn' : undefined })
+  const xidDay = xid.filter((x) => !x.old)
+  const xidHeld = [...new Set(xid.filter((x) => x.held).map((x) => x.code))]
+  pills.push({ text: t('Xid за сутки: {n}', { n: xidDay.length }), lv: xidDay.some((x) => x.hw) ? 'bad' : xidDay.length ? 'warn' : undefined })
+  if (xidHeld.length) pills.push({ text: t('ждет сброса GPU: Xid {list}', { list: xidHeld.join(', ') }), lv: 'bad' })
   if (pm.length === 1) pills.push({ text: `persistence mode ${pm[0] === 'Enabled' ? t('вкл') : t('выкл')}` })
   const vm = pci.filter((p) => p.drv === 'vfio-pci')
   return (
@@ -198,15 +203,22 @@ export function GpuCard({ server: s, rows }: { server: Server; rows: OvRow[] }) 
       )}
       {xid.length > 0 && (
         <div className="gpu-xid">
-          <div className="muted small">{t('Ошибки драйвера (Xid) за сутки')}</div>
+          <div className="muted small">
+            {xidDay.length < xid.length ? t('Ошибки драйвера (Xid) за сутки и те, после которых GPU ждет сброса') : t('Ошибки драйвера (Xid) за сутки')}
+          </div>
           {xid.map((x, n) => (
             <div key={n} className="gpu-xid-row">
               <span className={`lk-dot ${x.hw ? 'lk-dot-bad' : 'lk-dot-warn'}`} />
-              <span className="mono">{hhmm(x.ts)}</span>
+              <span className="mono">{xidTime(x.ts, x.old)}</span>
               <span className="mono">{x.gpu != null ? `GPU ${x.gpu}` : x.bus}</span>
               <span>
                 Xid {x.code}
                 {x.desc ? ` - ${x.desc}` : ''}
+                {x.held && (
+                  <span className="type-chip off" title={t('держится до перезагрузки сервера или драйвера NVIDIA')}>
+                    {t('ждет сброса')}
+                  </span>
+                )}
                 <span className="muted small"> {x.text}</span>
               </span>
             </div>

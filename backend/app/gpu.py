@@ -2,7 +2,8 @@
 
 Helper раз в минуту отдает extras["gpu"]: что видит nvidia-smi (загрузка, память, температура,
 питание, частоты, ECC, причины замедления, процессы с их контейнером, подом или юнитом), ошибки
-Xid драйвера из журнала ядра за сутки и карты NVIDIA на шине PCI с привязанным драйвером. Агент
+Xid драйвера из журнала ядра за сутки (helper 0.3 - и более старые с загрузки драйвера, по одной на
+карту и код) и карты NVIDIA на шине PCI с привязанным драйвером. Агент
 2.36 сам отдает карты на шине (gpu_pci, по ним панель просит helper) и метрики vLLM, SGLang и TEI
 за последние 5 минут (llm): очередь, KV-кэш, запросы и токены в секунду, перцентили задержек.
 
@@ -12,10 +13,12 @@ LLM-сервис не отвечает, стоит очередь при пол�
 """
 from __future__ import annotations
 
+import re
 from datetime import datetime, timezone
 
 STALE = 600  # блок helper'а старше 10 минут: nvidia-smi завис или таймер не идет
 XID_HOLD = 3600  # ошибка Xid держится проблемой час: за это время ее разберут или она повторится
+DAY = 86400
 HEAT_MARGIN = 5  # предупреждение за 5 градусов до замедления, если карта не говорит свой предел
 FROZEN_S = 3600  # показания nvidia-smi не меняются час (helper 0.2): им нельзя верить
 LLM_BOOT = 900  # модель грузится минутами: молчание /metrics первые 15 минут процесса - не авария
@@ -52,6 +55,10 @@ XID_APP = {
     69: "ошибка графического движка",
 }
 XID_WARN = {92, 94}  # карта работает дальше - предупреждение
+# После этих Xid карта ждет сброса: проблема держится до перезагрузки сервера или драйвера, а не час
+# (Xid 62 месяц назад - карта так и висит). 63 и 64 тут нет: сбойную память, которая ждет сброса,
+# helper видит сам (remap/retire), и это проходит после сброса
+XID_RESET = {48, 61, 62, 74, 79, 95, 119, 120, 140, 154}
 ENGINE = {"vllm": "vLLM", "sglang": "SGLang", "tei": "TEI", "litellm": "LiteLLM"}
 # /metrics просит ключ: так настроено, а не сломалось (у LiteLLM require_auth_for_metrics_endpoint)
 LOCKED = ("http 401", "http 403")
@@ -186,6 +193,19 @@ def _xids(b: dict, now: datetime, hold: float | None = None) -> list[dict]:
     return sorted(seen.values(), key=lambda x: -x["ts"])
 
 
+def _load(b: dict) -> float:
+    """Когда загружен драйвер (helper 0.3): ошибки до этого ушли вместе со старым драйвером"""
+    return _f(b.get("nv_load")) or 0.0
+
+
+def _waits_reset(x: dict, b: dict) -> bool:
+    """Карта после этой ошибки ждет сброса: драйвер с тех пор не перезагружали. Xid 154 говорит сам,
+    что нужно: "... to 0x0 (None)" - восстанавливать больше нечего"""
+    if x["code"] not in XID_RESET or x["ts"] < _load(b):
+        return False
+    return not (x["code"] == 154 and re.search(r"\bto 0x0\b", x["text"]))
+
+
 def problems(rep: dict, now: datetime) -> list[tuple[int, str, str, str | None]]:
     """(уровень, текст, ключ, с какого момента) для алерта "gpu": драйвер, пропавшая карта, Xid,
     сбойная память. Без helper'а судить не о чем: его отсутствие флагает "Требует действий"."""
@@ -230,8 +250,10 @@ def problems(rep: dict, now: datetime) -> list[tuple[int, str, str, str | None]]
         eu = _i(g.get("ecc_u"))
         if eu:
             out.append((1, f"GPU {i}: неисправимых ошибок ECC с загрузки драйвера - {eu}", f"gpu:ecc:{i}", None))
-    for x in _xids(b, now, XID_HOLD):
-        if x["code"] not in XID_HW or bus_key(x["bus"]) in lost:
+    for x in xids:
+        if x["code"] not in XID_HW or bus_key(x["bus"]) in lost or x["ts"] < _load(b):
+            continue
+        if now.timestamp() - x["ts"] > XID_HOLD and not _waits_reset(x, b):
             continue
         gi = seen.get(bus_key(x["bus"]))
         who = f"GPU {gi}" if gi is not None else f"GPU {x['bus']}"
@@ -304,7 +326,8 @@ def summary(rep: dict, now: datetime) -> dict | None:
 
 
 def view(rep: dict, now: datetime) -> dict | None:
-    """Блок карточки: карты, процессы, Xid за сутки, карты на шине и драйвер"""
+    """Блок карточки: карты, процессы, Xid за сутки и те, после которых карта ждет сброса, карты на
+    шине и драйвер"""
     b = block(rep)
     pci = pci_list(rep)
     if b is None and not pci:
@@ -337,9 +360,12 @@ def view(rep: dict, now: datetime) -> dict | None:
     procs.sort(key=lambda p: (-(p["mem"] or 0), p["gpu"] if p["gpu"] is not None else 99))
     xid = []
     for x in _xids(b, now):
-        c = x["code"]
-        xid.append({**x, "gpu": seen.get(bus_key(x["bus"])), "hw": c in XID_HW,
-                    "desc": XID_HW.get(c) or XID_APP.get(c) or ""})
+        c, held, old = x["code"], _waits_reset(x, b), now.timestamp() - x["ts"] > DAY
+        if old and not held:
+            continue
+        # hw - красная точка: аппаратная ошибка, после которой драйвер не перезагружали
+        xid.append({**x, "gpu": seen.get(bus_key(x["bus"])), "hw": c in XID_HW and x["ts"] >= _load(b),
+                    "held": held, "old": old, "desc": XID_HW.get(c) or XID_APP.get(c) or ""})
     ok = bool(b.get("ok"))
     return {
         "helper": True, "age": round(age(b, now, rep)), "stale": age(b, now, rep) > STALE,
