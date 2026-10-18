@@ -4439,6 +4439,8 @@ textarea:focus {
   flex: 1;
 }
 
+/* очередь растет и не разбирается: строка под именем */
+.docker-c-img.q-stuck { color: var(--down); }
 /* раздел «Сервисы»: строка с числами очереди справа */
 .queue-nums {
   display: flex;

@@ -19,6 +19,7 @@ from app import disk_wear
 from app import request_watch
 from app import db_health
 from app import gpu as gpu_mod
+from app import queue_watch
 from app import mem_trend
 from app import restarts as srv_restarts
 from app import access_audit
@@ -250,6 +251,7 @@ def _out(
     o.gpu = gpu_mod.view(server.last_report or {}, now)
     o.gpu_sum = gpu_mod.summary(server.last_report or {}, now)
     o.llm = gpu_mod.llm_view(server.last_report or {}, (server.alert_state or {}).get("llm_base")) or None
+    o.queue_watch = queue_watch.view(server, now) or None
     o.web_config = web_config.view(server.last_report or {}, now)
     o.web_certs = web_certs.view(server.last_report or {}, now)
     o.proxy_outdated = docker_exposure.outdated(server.last_report or {}, now.timestamp())

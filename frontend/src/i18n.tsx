@@ -1442,6 +1442,14 @@ const EN: Record<string, string> = {
   'Отданы в виртуальные машины (vfio-pci): {list}': 'Given to virtual machines (vfio-pci): {list}',
   'Очередь': 'Queue',
   'Ошибки драйвера (Xid) за сутки': 'Driver errors (Xid) in a day',
+  // очереди, которые растут и не разбираются (ServicesPage, mutes)
+  'Очередь растет и не разбирается': 'Queue grows and is not consumed',
+  'растет {a} и не разбирается, было {n}': 'growing for {a} and not consumed, was {n}',
+  'нет потребителей': 'no consumers',
+  'Без порога панель сама алертит очередь, которая полчаса растет и не разбирается или осталась без потребителей. Очереди мертвых писем (dlq) не судятся.':
+    'Without a threshold the panel alerts on its own when a queue grows for half an hour and is not consumed or is left without consumers. Dead letter queues (dlq) are not judged.',
+  'очередь': 'queue',
+  'заглушено': 'muted',
   'Ошибки драйвера (Xid) за сутки и те, после которых GPU ждет сброса': 'Driver errors (Xid) in a day and those after which the GPU waits for a reset',
   'ждет сброса GPU: Xid {list}': 'GPU waits for a reset: Xid {list}',
   'ждет сброса': 'waits for a reset',

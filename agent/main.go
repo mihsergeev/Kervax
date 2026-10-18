@@ -44,7 +44,7 @@ import (
 	"time"
 )
 
-const version = "2.37"
+const version = "2.38"
 
 // Публичный ключ для проверки подписи релизов агента (Ed25519, base64).
 // ПУСТО по умолчанию → самообновление ВЫКЛЮЧЕНО (агент никогда не заменяет себя).
@@ -491,6 +491,9 @@ type queueStat struct {
 	VHost   string `json:"vhost,omitempty"`
 	Ready   int64  `json:"ready"`
 	Unacked int64  `json:"unacked,omitempty"`
+	// потребителей у очереди (2.38): 0 - воркер умер, очередь никто не разбирает. Указатель:
+	// ноль надо отдать, а не потерять в omitempty; нет метрики (старый RabbitMQ) - поля нет
+	Consumers *int64 `json:"consumers,omitempty"`
 }
 
 type serviceInfo struct {
@@ -505,14 +508,14 @@ type serviceInfo struct {
 const maxQueuesReported = 40
 
 var reQueueMetric = regexp.MustCompile(
-	`^rabbitmq_detailed_queue_messages_(ready|unacked)\{([^}]*)\}\s+([0-9.e+]+)`)
+	`^rabbitmq_detailed_queue_(messages_ready|messages_unacked|consumers)\{([^}]*)\}\s+([0-9.e+]+)`)
 
 // rabbitQueues — очереди инстанса RabbitMQ через prometheus-плагин (порт 15692).
 // Именно он, а не management API: /metrics отдаётся БЕЗ авторизации, т.е. панели не нужны
 // ни пароли, ни kubectl exec. Если плагин не включён — просто вернём пусто.
 func rabbitQueues(ip string) ([]queueStat, int) {
 	cl := &http.Client{Timeout: 4 * time.Second}
-	url := "http://" + ip + ":15692/metrics/detailed?family=queue_coarse_metrics"
+	url := "http://" + ip + ":15692/metrics/detailed?family=queue_coarse_metrics&family=queue_consumer_count"
 	resp, err := cl.Get(url)
 	if err != nil {
 		return nil, 0
@@ -555,10 +558,14 @@ func rabbitQueues(ip string) ([]queueStat, int) {
 			q = &queueStat{Name: queue, VHost: vhost}
 			idx[key] = q
 		}
-		if m[1] == "ready" {
+		switch m[1] {
+		case "messages_ready":
 			q.Ready = int64(val)
-		} else {
+		case "messages_unacked":
 			q.Unacked = int64(val)
+		default:
+			n := int64(val)
+			q.Consumers = &n
 		}
 	}
 	all := make([]queueStat, 0, len(idx))

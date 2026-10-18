@@ -30,6 +30,7 @@ from app import db_health
 from app import access_audit
 from app import docker_risk
 from app import gpu as gpu_mod
+from app import queue_watch
 from app import listen_watch
 from app import podnames
 from app import mem_trend
@@ -278,7 +279,7 @@ _SRV_ICON = {
     "backup_restore": "🛟💾", "docker_restarts": "🔄🐳", "kube_restarts": "🔄☸️",
     "mem_leak": "📈🧠", "ssh_risk": "🔐", "access_risk": "🗝", "db_health": "🛢",
     "web_config": "🧾", "web_cert": "🔏", "listen_gone": "🔌", "disk_slow": "🐢",
-    "gpu": "🎛", "gpu_heat": "🌡", "llm": "💬",
+    "gpu": "🎛", "gpu_heat": "🌡", "llm": "💬", "queue_stuck": "⏳",
 }
 
 # Куда ведёт ссылка алерта (deep-link ?server=id&sec=…). Целимся в КОНКРЕТНУЮ метрику,
@@ -320,7 +321,7 @@ _BACKUP_SEC = {"backup_failed": "runs", "backup_stale": "runs", "backup_growth":
 _BSRV_SEC = {"backup_repo": "repos", "backup_lock": "repos", "backup_unmonitored": "repos", "backup_check": "repos",
              "backup_prune": "cleanup", "backup_rotation": "cleanup"}
 # раздел карточки сервисов ноды по алерту и по проблеме
-_SVC_SEC = {"queue": "queues", "db_conn": "db", "db_health": "db", "web_config": "web", "web_cert": "certs",
+_SVC_SEC = {"queue": "queues", "queue_stuck": "queues", "db_conn": "db", "db_health": "db", "web_config": "web", "web_cert": "certs",
             "llm": "llm"}
 _KUBE_TAB = {"kube_expiry": "expiry", "flux_down": "flux", "flux_stale": "flux", "kube_pod": "pods",
              "kube_cron": "cron", "kube_node": "nodes", "kube_job": "cron", "kube_restarts": "pods"}
@@ -331,6 +332,7 @@ _ALERT_SECTION = {
     "docker_sock": "docker",
     "docker_risk": "docker",
     "queue": "services",
+    "queue_stuck": "services",
     "backup_repo": "backups",
     "backup_rotation": "backups",
     "backup_lock": "backups",
@@ -1614,6 +1616,7 @@ _SRV_LABEL = {
     "gpu": "GPU",
     "gpu_heat": "перегрев GPU",
     "llm": "LLM-сервисы",
+    "queue_stuck": "очереди",
 }
 
 # Единицы пороговых метрик. Нужны отбою: голое «снова в норме» не отвечает на
@@ -1677,6 +1680,8 @@ def _recovery_detail(key: str, st: dict, ctx: dict) -> str:
         return "GPU остыли, замедления из-за температуры нет"
     if key == "llm":
         return "LLM-сервисы снова в норме: отвечают, очереди нет, задержки обычные"
+    if key == "queue_stuck":
+        return "очереди снова разбираются"
     if key == "disk_forecast":
         return "диски больше не грозят заполниться в ближайшие дни: рост замедлился или место освободили"
     if key == "units":
@@ -3508,6 +3513,10 @@ def server_problems(s: Server, now: datetime, pod_names: dict[str, str] | None =
     if hot:
         add("queue", 2, "переполнены очереди RabbitMQ: " + ", ".join(hot[:3])
             + (f" и еще {len(hot) - 3}" if len(hot) > 3 else ""), "queues", "queue", section="services")
+    # Очередь растет и не разбирается (ход - в alert_state qwatch, ведет цикл алертов)
+    for x in queue_watch.problems(s, now):
+        add("queue_stuck", x["level"], x["text"], "queues", queue_watch.MUTE_PREFIX + x["key"], x["since"],
+            section="services")
     # Сроки кластера: ближайший в пределах дальнего порога. За последний порог и истекший - проблема
     wd = kube_warn_days(s) if getattr(s, "kube_expiry_warn_days", None) else []
     soon = kube_expiry_soon(rep, wd, now) if wd else None
@@ -3717,6 +3726,9 @@ def _sig_all_quiet(s: Server, key: str, sig: set[str], now: datetime) -> bool:
     if key in ("docker_restarts", "kube_restarts"):
         muted = srv_restarts.muted_keys(s)
         return all(podnames.muted(muted, k) for k in sig)
+    if key == "queue_stuck":
+        muted = set(s.alert_mutes or [])
+        return all(queue_watch.MUTE_PREFIX + k in muted for k in sig)
     return False
 
 
@@ -5225,6 +5237,14 @@ def _server_conditions(s: Server, now: datetime,
         ar = access_audit.problems(s)
         out["access_risk"] = (max((lv for lv, _t in ar), default=0),
                               {"detail": "; ".join(t for _l, t in ar), "sig": sorted(t for _l, t in ar)})
+    # Очередь растет и не разбирается: полчаса роста уже в самом правиле, выдержка не нужна.
+    # sig - какие очереди, вторая застрявшая дает свой алерт
+    if online and isinstance((s.alert_state or {}).get("qwatch"), dict):
+        qs = queue_watch.problems(s, now)
+        out["queue_stuck"] = (max((x["level"] for x in qs), default=0),
+                              {"detail": "; ".join(x["text"] for x in qs[:3])
+                                         + (f"; и еще {len(qs) - 3}" if len(qs) > 3 else ""),
+                               "sig": [x["key"] for x in qs]})
     # Утечка памяти: дно растет суток подряд (история - в alert_state mem_trend, ведет цикл алертов)
     if online and isinstance((s.alert_state or {}).get("mem_trend"), dict):
         ml = mem_trend.problems(s, now)
@@ -5571,7 +5591,8 @@ async def evaluate_servers(
                 continue
             prev = int(st.get(key, 0))
             if key in ("disk_health", "units", "docker_restarts", "kube_restarts", "mem_leak", "db_health",
-                       "web_config", "web_cert", "listen_gone", "docker_risk", "access_risk", "link", "gpu"):
+                       "web_config", "web_cert", "listen_gone", "docker_risk", "access_risk", "link", "gpu",
+                       "queue_stuck"):
                 # Тот же уровень, но сломалось НОВОЕ (второй диск при уже развалившемся
                 # RAID, второй упавший юнит): молчать нельзя, хотя уровень не вырос. Что
                 # сломано - ключи в sig.
@@ -5910,6 +5931,11 @@ async def evaluate_servers(
             mstate = mem_trend.update(st.get("mem_trend"), s.last_report or {}, now)
             if mstate != (st.get("mem_trend") or {}):
                 apply(s.id, "mem_trend", mstate)
+            # ход очередей: растет и не разбирается (queue_watch)
+            if queue_watch.queues(s.last_report or {}) or st.get("qwatch"):
+                qw = queue_watch.update(st.get("qwatch"), s.last_report or {}, now)
+                if qw != (st.get("qwatch") or {}):
+                    apply(s.id, "qwatch", qw)
             # обычные задержки LLM-сервисов: от них алерт "задержки выросли в разы" (gpu.base_update)
             if gpu_mod.llm_list(s.last_report or {}) or st.get("llm_base"):
                 bstate = gpu_mod.base_update(st.get("llm_base"), s.last_report or {}, now)
