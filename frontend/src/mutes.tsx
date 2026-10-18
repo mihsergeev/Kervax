@@ -44,6 +44,7 @@ export const SRV_ALERT_KINDS: { k: string; label: string }[] = [
   { k: 'gpu_heat', label: 'GPU: перегрев' },
   { k: 'llm', label: 'LLM: не отвечает, очередь, задержки' },
   { k: 'queue_stuck', label: 'Очередь растет и не разбирается' },
+  { k: 'queue_failed', label: 'Всплеск упавших задач' },
   { k: 'workers', label: 'Воркер упал или падает и поднимается' },
   { k: 'cpu_spin', label: 'CPU: процессы в пустом цикле' },
   { k: 'backup_growth', label: 'Бэкап: резкий прирост' },
@@ -81,6 +82,8 @@ export const LEAK_MUTE = 'leak:'
 export const LISTEN_MUTE = 'listen:'
 // Одна очередь, которая растет и не разбирается: qstuck:<источник>|<vhost>/<имя> (ключ порога очереди)
 export const QSTUCK_MUTE = 'qstuck:'
+// Всплеск упавших задач одного брокера очередей: qfail:<источник брокера>
+export const QFAIL_MUTE = 'qfail:'
 // Один воркер под supervisor или pm2: worker:<демон, где>|<программа>
 export const WORKER_MUTE = 'worker:'
 // Один контейнер с ключами от хоста, которому они нужны намеренно: dockrisk:<имя>
@@ -105,6 +108,7 @@ export function muteKindLabel(k: string, t: TFn): string | null {
     const [src, q] = k.slice(QSTUCK_MUTE.length).split('|')
     return `${t('очередь')}: ${(q ?? '').replace(/^\/\//, '').replace(/^[^/]*\//, '')}${src ? ` (${src})` : ''}`
   }
+  if (k.startsWith(QFAIL_MUTE)) return `${t('упавшие задачи')}: ${k.slice(QFAIL_MUTE.length)}`
   if (k.startsWith(WORKER_MUTE)) {
     const [src, name] = k.slice(WORKER_MUTE.length).split('|')
     return `${t('воркер')}: ${name ?? ''}${src ? ` (${src})` : ''}`

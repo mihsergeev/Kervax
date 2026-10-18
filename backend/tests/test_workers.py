@@ -98,12 +98,14 @@ def test_own_unit_does_not_alert():
 
 def test_helper_script():
     src = (Path(__file__).resolve().parents[2] / "agent" / "workers-setup.sh").read_text(encoding="utf-8")
-    assert "KERVAX_SETUP_VERSION=0.1" in src and "KERVAX_SETUP_ALWAYS=1" in src and "\r" not in src
+    assert "KERVAX_SETUP_VERSION=0.2" in src and "KERVAX_SETUP_ALWAYS=1" in src and "\r" not in src
     # pm2 спрашиваем по rpc.sock, не командой pm2: она запускает новый демон, если не нашла старый
     assert "getMonitorData" in src and "pm2 jlist" in src and "rpc.sock" in src
     assert "getAllProcessInfo" in src and "/bin/sh -c" not in src
     # пароли из строк лога маскируются
     assert src.count("***") >= 2
+    # 0.2: обратный слэш в логе (App\Jobs\Mail) удваивается так, что mawk его не теряет: иначе отчет не JSON
+    assert '_jn = split(s, _jp, "\\\\")' in src and "KERVAX_SETUP_VERSION=0.2" in src
 
 
 def test_alert_condition():

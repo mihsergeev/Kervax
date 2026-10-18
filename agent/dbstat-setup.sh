@@ -41,9 +41,14 @@
 # helper did not get before: in Kubernetes pods (containerd, k0s, k3s, cri-o) and on a host where root
 # needs a password (through /etc/mysql/debian.cnf or /root/.my.cnf). Replica status was read with \G,
 # which newer clients print without field names: a replica would have read as stopped.
+#
+# 0.12: a backslash in a name or a line (App\Jobs\Mail, a regex in a query) made the report invalid
+# JSON on Debian and Ubuntu, whose awk is mawk: there gsub(/\\/, "\\\\") puts back one backslash,
+# not two, and the agent drops a block that is not valid JSON - silently, the whole of it. Backslashes
+# are doubled by splitting the string now, the same in every awk.
 set -euo pipefail
 
-KERVAX_SETUP_VERSION=0.11  # MAJOR.MINOR; compared component-wise
+KERVAX_SETUP_VERSION=0.12  # MAJOR.MINOR; compared component-wise
 KERVAX_SETUP_ALWAYS=1     # safe on any node: without a database it collects an empty file
 
 HELPER_DIR=/lib65/kervax
@@ -356,7 +361,7 @@ load_pg() { # container -> a JSON object on stdout, nothing when the engine does
       cat "$dir/texts.new" "$dir/texts" | awk -F'|' 'NF >= 5 && !seen[$1 FS $2 FS $3]++' | head -n 200 > "$dir/texts.tmp" && mv -f "$dir/texts.tmp" "$dir/texts"
       rm -f "$dir/texts.new"
     fi
-    top=$(awk -F'|' 'function j(s) { gsub(/\\/, "\\\\", s); gsub(/"/, "\\\"", s); return s }
+    top=$(awk -F'|' 'function j(s,   _jp, _jn, _ji) { _jn = split(s, _jp, "\\"); s = _jp[1]; for (_ji = 2; _ji <= _jn; _ji++) s = s "\\\\" _jp[_ji]; gsub(/"/, "\\\"", s); return s }
       FILENAME == ARGV[1] { k = $1 FS $2 FS $3; db[k] = $4; q = $0; for (i = 0; i < 4; i++) q = substr(q, index(q, "|") + 1); tx[k] = q; next }
       { k = $2 FS $3 FS $4
         printf "%s{\"id\":\"%s\",\"db\":\"%s\",\"q\":\"%s\",\"calls\":%.0f,\"ms\":%.0f,\"temp\":%.0f,\"rd\":%.0f}", (n++ ? "," : ""), j($2), j(db[k]), j(tx[k]), $5, $6, $7, $8 }' "$dir/texts" "$dir/top" | tr -d '\000-\037')
@@ -642,7 +647,7 @@ load_my() { # container name status innodb_metrics -> a JSON object on stdout
       # texts of the top only; one that mentions a password or a secret is not sent at all
       my_q "$c" "select concat_ws('|', digest, case when lower(digest_text) regexp 'passw|secret|token|identified|aes_encrypt|des_encrypt' then '' else left(digest_text, $QTEXT_MAX) end) from performance_schema.events_statements_summary_by_digest where digest in ($miss)" > "$dir/texts"
     fi
-    top=$(awk -F'|' 'function j(s) { gsub(/\\/, "\\\\", s); gsub(/"/, "\\\"", s); return s }
+    top=$(awk -F'|' 'function j(s,   _jp, _jn, _ji) { _jn = split(s, _jp, "\\"); s = _jp[1]; for (_ji = 2; _ji <= _jn; _ji++) s = s "\\\\" _jp[_ji]; gsub(/"/, "\\\"", s); return s }
       FILENAME == ARGV[1] { d = $1; q = substr($0, length($1) + 2); if (!(d in tx)) tx[d] = q; next }
       { printf "%s{\"id\":\"%s\",\"db\":\"%s\",\"q\":\"%s\",\"calls\":%.0f,\"ms\":%.0f,\"rows\":%.0f,\"tmp\":%.0f,\"noidx\":%.0f}", (n++ ? "," : ""), j($3), j($2), j(tx[$3]), $4, $5, $6, $7, $8 }' "$dir/texts" "$dir/top" 2>/dev/null | tr -d '\000-\037')
   fi
@@ -690,7 +695,7 @@ cfg_my() { # container -> a JSON object, nothing when the engine does not answer
   [ "$(mval "$vars" log_bin)" = ON ] && bl=$(my_q "$c" "SHOW BINARY LOGS" | awk -F'\t' '$2 ~ /^[0-9]+$/ { s += $2 } END { printf "%.0f", s }')
   printf '%s\n' "$vars" | awk -F'\t' -v mem="$(num "$mem")" -v lim="$( [ "$(num "${lim:-0}")" -gt 0 ] && echo true || echo false)" \
       -v sto="$(num "${sto:--1}")" -v bl="$(num "$bl")" -v rt="$rt" '
-    function j(s) { gsub(/\\/, "\\\\", s); gsub(/"/, "\\\"", s); return s }
+    function j(s,   _jp, _jn, _ji) { _jn = split(s, _jp, "\\"); s = _jp[1]; for (_ji = 2; _ji <= _jn; _ji++) s = s "\\\\" _jp[_ji]; gsub(/"/, "\\\"", s); return s }
     NF >= 2 { printf "%s\"%s\":\"%s\"", (n++ ? "," : "{"), j(tolower($1)), j($2) }
     END { printf "%s\"mem\":%s,\"mem_lim\":%s,\"stop_to\":%s,\"binlog_b\":%s,\"rt\":\"%s\"}", (n ? "," : "{"), mem, lim, sto, bl, rt }'
 }

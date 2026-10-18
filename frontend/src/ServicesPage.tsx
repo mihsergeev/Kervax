@@ -15,6 +15,7 @@ import {
   type MyLoad,
   type QueueStat,
   type Server,
+  type QueueFailed,
   type ServiceInfo,
   type WorkerDaemon,
   type WorkerProg,
@@ -28,7 +29,7 @@ import { fmtRel } from './ServersPage'
 import { CardNav, FreshChip, markMuted, OvAreas, OvRows, secInfoOf, type OvRow, type SecDef, type SecInfo, type SecItem } from './cardLayout'
 import { AdoptSitesModal, adoptable } from './AdoptSitesModal'
 import { EngineIcon } from './engineIcon'
-import { QSTUCK_MUTE, WORKER_MUTE } from './mutes'
+import { QFAIL_MUTE, QSTUCK_MUTE, WORKER_MUTE } from './mutes'
 import { OsIcon } from './osIcon'
 import { CountryFlag } from './CountryFlag'
 import { byteUnits } from './units'
@@ -807,6 +808,77 @@ function hotQueues(items: SvcItem[]): number {
 }
 
 // Очереди RabbitMQ одного инстанса - прямо в разделе "Очереди" карточки ноды. Раньше это была
+// Упавшие задачи брокера (queues-setup 0.4): за час и сутки, что падало чаще, последняя ошибка;
+// всплеск - красным, его можно не алертить (qfail:<источник>) на день, неделю или постоянно
+function FailedJobs({ server, svc, f, busy, picking, onPick, mute, fmt }: {
+  server: Server
+  svc: ServiceInfo
+  f: QueueFailed
+  busy: boolean
+  picking: boolean
+  onPick: (v: boolean) => void
+  mute: (kind: string, hours: number) => void
+  fmt: (ts: string) => string
+}) {
+  const { t } = useI18n()
+  const { isViewer } = useAuth()
+  const key = QFAIL_MUTE + (svc.source || '')
+  const fm = server.queue_fail_mutes?.[svc.source || '']
+  const top = f.top.filter((x) => x.job || x.q)
+  const name = (x: { q: string; job: string }) =>
+    x.job ? (x.q ? t('{job} в очереди {q}', { job: x.job, q: x.q }) : x.job) : t('очередь {q}', { q: x.q })
+  return (
+    <div className={`q-failed${f.spike && !fm ? ' q-failed-spike' : ''}`}>
+      <div className="q-failed-head small">
+        <span className={f.spike && !fm ? 'q-stuck' : f.h1 > 0 ? '' : 'muted'}>
+          {subOf(
+            t('упало за час: {n}', { n: rpmText(f.h1) }),
+            f.span >= 86400 ? t('за сутки: {n}', { n: rpmText(f.d1) }) : t('за {p}: {n}', { p: qAge(f.span, t), n: rpmText(f.d1) }),
+            f.spike && (f.base != null ? t('всплеск, обычно около {n} в час', { n: rpmText(Math.round(f.base)) }) : t('всплеск')),
+          )}
+        </span>
+        {!isViewer && !fm && (f.h1 > 0 || f.spike) && (
+          <button className="ghost small q-mute-btn" disabled={busy} title={t('Не алертить о всплеске упавших задач этого брокера: на день, неделю или постоянно')}
+            onClick={() => onPick(!picking)}>
+            🔕
+          </button>
+        )}
+      </div>
+      {top.length > 0 && f.h1 > 0 && (
+        <div className="small muted">{t('чаще всего: {list}', { list: top.map((x) => `${name(x)} - ${x.n}`).join(', ') })}</div>
+      )}
+      {f.err && f.h1 > 0 && (
+        <div className="docker-c-img w-log mono muted small" title={f.err}>
+          ↳ {f.err_job && !f.err.includes(f.err_job) ? `${f.err_job}: ` : ''}{f.err}
+        </div>
+      )}
+      {fm && (
+        <div className="small">
+          <span className="snooze-active-chip snooze-perm">
+            🔇 {fm.perm ? t('не алертит, постоянно') : t('не алертит {t}', { t: t('до {t}', { t: fmt(fm.until!) }) })}
+            {!isViewer && (
+              <button className="chip-x" disabled={busy} title={t('Снять')} onClick={() => mute(key, 0)}>✕</button>
+            )}
+          </span>
+        </div>
+      )}
+      {!fm && picking && (
+        <div className="small q-mute-pick">
+          <span className="muted">🔕 {t('не алертить о всплеске упавших:')}</span>
+          {[
+            { h: 24, l: t('1 день') },
+            { h: 24 * 7, l: t('1 неделя') },
+            { h: -1, l: t('постоянно') },
+          ].map(({ h, l }) => (
+            <button key={h} className="ghost small" disabled={busy} onClick={() => mute(key, h)}>{l}</button>
+          ))}
+          <button className="ghost small" disabled={busy} onClick={() => onPick(false)}>{t('Отмена')}</button>
+        </div>
+      )}
+    </div>
+  )
+}
+
 // вторая модалка поверх карточки
 function QueueList({ server, svc, busy, save, onChanged, onlyProblems }: {
   server: Server
@@ -822,8 +894,7 @@ function QueueList({ server, svc, busy, save, onChanged, onlyProblems }: {
   // выключить алерт по очереди: какую очередь сейчас выбирают и идет ли запрос
   const [picking, setPicking] = useState<string | null>(null)
   const [mBusy, setMBusy] = useState(false)
-  const mute = async (key: string, hours: number) => {
-    const kind = QSTUCK_MUTE + key
+  const mute = async (kind: string, hours: number) => {
     setMBusy(true)
     try {
       if (hours < 0) {
@@ -886,30 +957,39 @@ function QueueList({ server, svc, busy, save, onChanged, onlyProblems }: {
   const withMsgs = all.filter((x) => qDepth(x) > 0).length
   const hotN = all.filter((x) => qDepth(x) >= QUEUE_HOT).length
   const msgsAll = all.reduce((a, x) => a + qDepth(x), 0)
+  // таблица failed_jobs Laravel - не очередь: только упавшие задачи
+  const failOnly = svc.kind === 'laravel_failed'
+  const now = Date.now() / 1000
   return (
     <div className="chart-card net-card net-card-wide">
       <div className="net-head">
         <div className="hs-svc-title">
           <span className="svc-ico"><EngineIcon name={QUEUE_ENGINE_ICON[svc.engine ?? ''] ?? 'RabbitMQ'} /></span>
           {svc.label || 'RabbitMQ'}
-          <span className="net-n">{svc.total ?? all.length}</span>
+          {!failOnly && <span className="net-n">{svc.total ?? all.length}</span>}
         </div>
       </div>
       {(svc.where || svc.source) && <div className="net-sub mono">{svc.where || svc.source}</div>}
-      <div className="small muted">
-        {subOf(
-          t('с сообщениями: {n}', { n: withMsgs }),
-          t('сообщений: {m}', { m: rpmText(msgsAll) }),
-          hotN > 0 && t('переполнены: {n} (от {m} сообщений)', { n: hotN, m: QUEUE_HOT }),
-        )}
-      </div>
-      {all.length > 8 && (
+      {!failOnly && (
+        <div className="small muted">
+          {subOf(
+            t('с сообщениями: {n}', { n: withMsgs }),
+            t('сообщений: {m}', { m: rpmText(msgsAll) }),
+            hotN > 0 && t('переполнены: {n} (от {m} сообщений)', { n: hotN, m: QUEUE_HOT }),
+          )}
+        </div>
+      )}
+      {svc.failed && (
+        <FailedJobs server={server} svc={svc} f={svc.failed} busy={mBusy} picking={picking === 'qfail'}
+          onPick={(v) => setPicking(v ? 'qfail' : null)} mute={mute} fmt={fmt} />
+      )}
+      {!failOnly && all.length > 8 && (
         <div className="modal-toolbar">
           <input className="checks-search modal-search" placeholder={t('Фильтр: имя очереди…')}
             value={q} onChange={(e) => setQ(e.target.value)} />
         </div>
       )}
-      <div className="loc-results docker-clist">
+      {!failOnly && <div className="loc-results docker-clist">
         {queues.length === 0 ? (
           // в таблице очередей пусто - все задачи разобраны (выполненные система удаляет)
           <div className="muted small">{all.length === 0 ? t('Задач нет: все разобраны.') : t('Ничего не найдено.')}</div>
@@ -932,20 +1012,27 @@ function QueueList({ server, svc, busy, save, onChanged, onlyProblems }: {
                   )}
                   {stuck && (
                     <div className={`docker-c-img small${stuck.muted ? ' muted' : ' q-stuck'}`}>
-                      {t('растет {a} и не разбирается, было {n}', { a: qAge(stuck.age, t), n: rpmText(stuck.d0) })}
+                      {stuck.stall
+                        ? t('стоит: самая старая задача ждет {a}', { a: qAge(stuck.wait ?? stuck.age, t) })
+                        : t('растет {a} и не разбирается, было {n}', { a: qAge(stuck.age, t), n: rpmText(stuck.d0) })}
                       {stuck.muted ? ` · ${t('заглушено')}` : ''}
                       {x.consumers === 0 ? ` · ${t('нет потребителей')}` : ''}
                     </div>
                   )}
-                  {!stuck && x.consumers === 0 && d > 0 && (
-                    <div className="docker-c-img muted small">{t('нет потребителей')}</div>
+                  {((!stuck && x.consumers === 0 && d > 0) || (!stuck?.stall && x.oldest && x.ready > 0)) && (
+                    <div className="docker-c-img muted small">
+                      {subOf(
+                        !stuck && x.consumers === 0 && d > 0 && t('нет потребителей'),
+                        !stuck?.stall && x.oldest && x.ready > 0 && t('самая старая ждет {a}', { a: qAge(Math.max(0, now - x.oldest), t) }),
+                      )}
+                    </div>
                   )}
                   {qm && (
                     <div className="small">
                       <span className="snooze-active-chip snooze-perm">
                         🔇 {qm.perm ? t('не алертит, постоянно') : t('не алертит {t}', { t: t('до {t}', { t: fmt(qm.until!) }) })}
                         {!isViewer && (
-                          <button className="chip-x" disabled={mBusy} title={t('Снять')} onClick={() => mute(key, 0)}>
+                          <button className="chip-x" disabled={mBusy} title={t('Снять')} onClick={() => mute(QSTUCK_MUTE + key, 0)}>
                             ✕
                           </button>
                         )}
@@ -960,7 +1047,7 @@ function QueueList({ server, svc, busy, save, onChanged, onlyProblems }: {
                         { h: 24 * 7, l: t('1 неделя') },
                         { h: -1, l: t('постоянно') },
                       ].map(({ h, l }) => (
-                        <button key={h} className="ghost small" disabled={mBusy} onClick={() => mute(key, h)}>
+                        <button key={h} className="ghost small" disabled={mBusy} onClick={() => mute(QSTUCK_MUTE + key, h)}>
                           {l}
                         </button>
                       ))}
@@ -1002,8 +1089,8 @@ function QueueList({ server, svc, busy, save, onChanged, onlyProblems }: {
             )
           })
         )}
-      </div>
-      {(svc.total ?? 0) > all.length && (
+      </div>}
+      {!failOnly && (svc.total ?? 0) > all.length && (
         <div className="net-foot">
           {t('Показаны {n} самых глубоких из {m} — остальные пустые.', { n: all.length, m: svc.total ?? 0 })}
         </div>
@@ -1230,7 +1317,10 @@ function ServerServicesModal({ srv, onClose, onChanged, initialSec, sites }: {
   const qHot = qAll.filter((x) => qDepth(x) >= QUEUE_HOT).length
   // брокеры с бедой - наверх; фильтр "с проблемами" прячет остальное
   const [qOnly, setQOnly] = useState(false)
-  const qProbs = (it: SvcItem) => (it.svc?.queues ?? []).map((x) => queueRank(s, it.svc!, x)).filter((r) => r != null) as number[]
+  const qProbs = (it: SvcItem) => [
+    ...(it.svc?.failed?.spike && !s.queue_fail_mutes?.[it.svc.source || ''] ? [0] : []),
+    ...((it.svc?.queues ?? []).map((x) => queueRank(s, it.svc!, x)).filter((r) => r != null) as number[]),
+  ]
   const qProbN = rabbit.reduce((n, it) => n + qProbs(it).length, 0)
   const brokers = rabbit
     .map((it, i) => ({ it, i, p: qProbs(it) }))
@@ -1613,7 +1703,7 @@ function ServerServicesModal({ srv, onClose, onChanged, initialSec, sites }: {
                   </span>
                 </div>
                 <div className="muted small">
-                  {t('Без порога панель сама алертит очередь от сотни сообщений, которая полчаса растет и не разбирается или осталась без потребителей. Очереди мертвых писем (dlq) не судятся.')}
+                  {t('Без порога панель сама алертит очередь от сотни сообщений, которая полчаса растет и не разбирается, стоит больше часа или осталась без потребителей. Упавшие задачи алертят только всплеском: от сотни за час и в пять раз больше обычного. Очереди мертвых писем (dlq) не судятся.')}
                 </div>
                 {(s.queue_skipped ?? []).length > 0 && (
                   <div className="muted small">

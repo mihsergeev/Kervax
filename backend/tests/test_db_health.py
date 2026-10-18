@@ -89,7 +89,7 @@ def test_alert_home_and_view():
 
 def test_helper_writes_health():
     src = (Path(__file__).resolve().parents[2] / "agent" / "dbstat-setup.sh").read_text(encoding="utf-8")
-    assert "KERVAX_SETUP_VERSION=0.11" in src and "health_pg()" in src and "health_mysql()" in src
+    assert "KERVAX_SETUP_VERSION=0.12" in src and "health_pg()" in src and "health_mysql()" in src
     # 0.7: без роли postgres - под пользователем контейнера в явную базу, а не в базу с его именем
     assert 'psql -d "${d:-postgres}" -Atqc "$q" ${u:+-U "$u"}' in src
     assert "backend_xmin is not null" in src and "idle_xmin" in src

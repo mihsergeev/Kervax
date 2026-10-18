@@ -257,6 +257,7 @@ def _out(
     o.queue_skipped = queue_watch.redis_skipped(server.last_report or {}) or None
     o.queue_db_skipped = queue_watch.db_skipped(server.last_report or {}) or None
     o.queue_mutes = queue_watch.mute_view(server, now) or None
+    o.queue_fail_mutes = queue_watch.mute_view(server, now, queue_watch.FAIL_PREFIX) or None
     o.workers = workers_mod.view(server, now)
     o.workers_skipped = workers_mod.skipped(server.last_report or {}) or None
     o.web_config = web_config.view(server.last_report or {}, now)

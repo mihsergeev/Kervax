@@ -17,9 +17,14 @@
 # restarted in the last 15 minutes and hour - counted here between runs by its start time. For
 # a program that is down or was started within 15 minutes, the last line of its log (stderr,
 # else stdout), with values after password=, token= and the like masked. Read only.
+#
+# 0.2: a backslash in a name or a line (App\Jobs\Mail, a regex in a query) made the report invalid
+# JSON on Debian and Ubuntu, whose awk is mawk: there gsub(/\\/, "\\\\") puts back one backslash,
+# not two, and the agent drops a block that is not valid JSON - silently, the whole of it. Backslashes
+# are doubled by splitting the string now, the same in every awk.
 set -euo pipefail
 
-KERVAX_SETUP_VERSION=0.1  # MAJOR.MINOR; compared component-wise
+KERVAX_SETUP_VERSION=0.2  # MAJOR.MINOR; compared component-wise
 KERVAX_SETUP_ALWAYS=1     # safe on any node: without supervisord or pm2 it runs one ps and exits
 
 HELPER_DIR=/lib65/kervax
@@ -304,7 +309,7 @@ mv -f "$TMPD/cache" "$CACHE" 2>/dev/null || : > "$CACHE"
 
 # -- the report: a daemon per id, its programs in the order it gave them --
 json=$(awk -F'\t' '
-  function e(s) { gsub(/[[:cntrl:]]/, "", s); gsub(/\\/, "\\\\", s); gsub(/"/, "\\\"", s); return s }
+  function e(s,   _jp, _jn, _ji) { gsub(/[[:cntrl:]]/, "", s); _jn = split(s, _jp, "\\"); s = _jp[1]; for (_ji = 2; _ji <= _jn; _ji++) s = s "\\\\" _jp[_ji]; gsub(/"/, "\\\"", s); return s }
   function n(v) { return (v ~ /^-?[0-9]+$/) ? v + 0 : "null" }
   function flush() { if (g == "") return
     b = b (nb++ ? "," : "") sprintf("{\"kind\":\"%s\",\"where\":\"%s\",\"progs\":[%s]}", gk, e(gw), ps) }
@@ -314,7 +319,7 @@ json=$(awk -F'\t' '
       e($4), e($5), $12, up, n($8), n($9), $13, $14, $10 != "" ? ",\"desc\":\"" e($10) "\"" : "", $11 != "" ? ",\"log\":\"" e($11) "\"" : "") }
   END { flush(); printf "%s", b }' "$TMPD/rows2")
 skip=$(sort -u "$TMPD/skip" | head -50 | awk -F'\t' '
-  function e(s) { gsub(/[[:cntrl:]]/, "", s); gsub(/\\/, "\\\\", s); gsub(/"/, "\\\"", s); return s }
+  function e(s,   _jp, _jn, _ji) { gsub(/[[:cntrl:]]/, "", s); _jn = split(s, _jp, "\\"); s = _jp[1]; for (_ji = 2; _ji <= _jn; _ji++) s = s "\\\\" _jp[_ji]; gsub(/"/, "\\\"", s); return s }
   { printf "%s{\"where\":\"%s\",\"kind\":\"%s\",\"why\":\"%s\"}", (NR > 1 ? "," : ""), e($1), $2, e($3) }')
 mkdir -p "${OUT%/*}"
 printf '{"v":1,"ts":%s,"daemons":[%s],"skipped":[%s]}\n' "$NOW" "$json" "$skip" > "$OUT.tmp.$$"
