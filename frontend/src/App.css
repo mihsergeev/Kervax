@@ -1026,6 +1026,8 @@ input:focus {
 .exp-li-closed > .exp-cf, .exp-cf { color: #f38020; }
 .exp-tag-cf { color: #f38020; background: rgba(243, 128, 32, 0.12); border: 1px solid rgba(243, 128, 32, 0.35); }
 :root[data-theme='light'] .exp-tag-cf { color: #b45309; }
+/* открыт только белому списку с адресом проверки: для интернета закрыт */
+.exp-tag-allow { color: var(--text-muted); border: 1px solid var(--border); }
 /* сайты через Cloudflare: плашка под колонками, домены чипами по общей части */
 .exp-cf-box { display: flex; flex-direction: column; gap: 0.4rem; padding: 0.5rem 0.7rem; border-radius: 8px; font-size: 0.86rem;
   border: 1px solid color-mix(in srgb, #f38020 32%, var(--border)); background: color-mix(in srgb, #f38020 4%, transparent); }

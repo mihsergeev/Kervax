@@ -125,7 +125,7 @@ def test_second_root_and_empty_password_alert():
 
 def test_helpers_report_the_new_fields():
     ch = (AGENT / "changes-setup.sh").read_text(encoding="utf-8")
-    assert "KERVAX_SETUP_VERSION=0.6" in ch and '"seen_since":%s' in ch and '\\"pw\\":' in ch and '"nopasswd":[%s]' in ch
+    assert "KERVAX_SETUP_VERSION=0.7" in ch and '"seen_since":%s' in ch and '\\"pw\\":' in ch and '"nopasswd":[%s]' in ch
     un = (AGENT / "units-setup.sh").read_text(encoding="utf-8")
     assert "KERVAX_SETUP_VERSION=0.4" in un and '"noboot":[%s]' in un
     for f in ("changes-setup.sh", "units-setup.sh"):

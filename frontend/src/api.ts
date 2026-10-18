@@ -1449,6 +1449,8 @@ export type ExposedPort = {
   svc?: boolean // служебный порт (Kubernetes, агент, экспортер): снаружи тоже должен быть закрыт
   // 80 и 443 при сайтах ноды за Cloudflare: only - напрямую закрыт, also - открыт и в обход него
   cf?: 'only' | 'also'
+  // открыт проверке только потому, что ее адрес в белом списке файрвола ноды: для интернета закрыт
+  allow?: boolean
 }
 export type Exposure = {
   ts: string
@@ -1461,6 +1463,7 @@ export type Exposure = {
   new?: ExposedPort[] // открылись с прошлых проверок
   new_ts?: string
   muted?: string[] // порты, отмеченные как открытые намеренно
+  via_ips?: string[] // с каких адресов шла проверка (адреса прокси), с 1.4.263
   // сайты ноды, чьи домены смотрят в Cloudflare: первые 10, всего n из проверенных checked
   cf?: { sites: string[]; n: number; checked: number; total: number }
 }

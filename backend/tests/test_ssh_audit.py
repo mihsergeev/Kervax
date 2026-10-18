@@ -79,7 +79,7 @@ def test_alert_on_root_password_and_unguarded_brute_force():
 
 def test_helper_reports_ssh():
     src = (Path(__file__).resolve().parents[2] / "agent" / "changes-setup.sh").read_text(encoding="utf-8")
-    assert "KERVAX_SETUP_VERSION=0.6" in src and "ssh_info()" in src and "addr=203.0.113.1" in src
+    assert "KERVAX_SETUP_VERSION=0.7" in src and "ssh_info()" in src and "fw_info()" in src and "addr=203.0.113.1" in src
     assert "sshd -V" in src and '"fail_top":[%s]' in src and '"logins":[%s]' in src
     assert "\r" not in src
 
@@ -128,3 +128,13 @@ def test_brute_force_from_the_internet_proves_ssh_is_open():
     assert ssh_audit.problems(lan, NOW) == [] and ssh_audit.advice(lan, NOW) == []
     few = _srv(ssh=_ssh(guard="", fail=5, fail_top=top, banner="OpenSSH_9.6p1"), exposure=ex)
     assert ssh_audit.problems(few, NOW) == []
+
+
+def test_ssh_open_only_to_the_check_address_is_closed():
+    """Порт SSH открыт проверке только потому, что ее адрес в белом списке файрвола (changes-setup
+    0.7): для интернета он закрыт"""
+    s = _srv(exposure=dict(_ex(), via_ips=["198.51.100.20"]))
+    assert ssh_audit.internet_open(s, ssh_audit.block(s.last_report), NOW) is True
+    s.last_report["extras"]["changes"]["fw"] = {"src": "iptables", "p4": "DROP", "p6": "DROP", "idrop": "",
+                                               "fdrop": "", "in": ["4 198.51.100.20/32 2221"], "fwd": []}
+    assert ssh_audit.internet_open(s, ssh_audit.block(s.last_report), NOW) is False
