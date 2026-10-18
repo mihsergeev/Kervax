@@ -9,7 +9,7 @@
 # installed) only the PCI bus and the kernel are reported.
 set -euo pipefail
 
-KERVAX_SETUP_VERSION=0.2  # MAJOR.MINOR; compared component-wise
+KERVAX_SETUP_VERSION=0.3  # MAJOR.MINOR; compared component-wise
 KERVAX_SETUP_WHEN="command -v nvidia-smi >/dev/null 2>&1 || grep -qsx 0x10de /sys/bus/pci/devices/*/vendor"
 
 HELPER_DIR=/lib65/kervax
@@ -89,15 +89,28 @@ if $ok; then
     || timeout 20 nvidia-smi -q -d TEMPERATURE,PAGE_RETIREMENT > "$STATE/x" 2>/dev/null \
     || timeout 20 nvidia-smi -q -d TEMPERATURE > "$STATE/x" 2>/dev/null || : > "$STATE/x"
   cuda=$(awk -F': *' '/^CUDA Version/ {print $2; exit}' "$STATE/x")
+  # New drivers on data center GPUs (H100, H200) give no absolute limits, only T.Limit: the margin
+  # in degrees to the thermal limit and the margins at which the GPU slows down, shuts down and
+  # stops being within its operating range. Then the limit is current + margin - its margin
   awk '
     function val(s) { sub(/^[^:]*: */, "", s); gsub(/[^0-9.]/, "", s); return s }
+    function sval(s) { sub(/^[^:]*: */, "", s); return (s ~ /^-?[0-9]+(\.[0-9]+)? *C/) ? s + 0 : "" }
     function yes(s) { sub(/^[^:]*: */, "", s); return s }
-    function out() { printf "%s|%s|%s|%s|%s|%s|%s\n", tolower(bus), slow, shut, maxop, ret, rmp, rf }
-    /^GPU [0-9A-Fa-f]+:/ { if (bus != "") out(); bus = $2; slow = shut = maxop = ret = rmp = rf = sec = ""; next }
+    function lim(a, d) { return (a == "" && cur != "" && tl != "" && d != "") ? cur + tl - d : a }
+    function out() {
+      slow = lim(slow, tls); shut = lim(shut, tlx); maxop = lim(maxop, tlm)
+      printf "%s|%s|%s|%s|%s|%s|%s\n", tolower(bus), slow, shut, maxop, ret, rmp, rf
+    }
+    /^GPU [0-9A-Fa-f]+:/ { if (bus != "") out(); bus = $2; slow = shut = maxop = ret = rmp = rf = sec = cur = tl = tls = tlx = tlm = ""; next }
     /^    [A-Za-z][^:]*$/ { sec = $0; sub(/^ +/, "", sec); sub(/ +$/, "", sec); next }
     /GPU Slowdown Temp/ { slow = val($0) }
     /GPU Shutdown Temp/ { shut = val($0) }
     /GPU Max Operating Temp/ { maxop = val($0) }
+    /GPU Current Temp/ { cur = sval($0) }
+    /GPU T\.Limit Temp/ { tl = sval($0) }
+    /GPU Slowdown T\.Limit Temp/ { tls = sval($0) }
+    /GPU Shutdown T\.Limit Temp/ { tlx = sval($0) }
+    /GPU Max Operating T\.Limit Temp/ { tlm = sval($0) }
     /Pending Page (Blacklist|Retirement)/ { ret = yes($0) }
     sec == "Remapped Rows" && /^ +Pending +:/ { rmp = yes($0) }
     /Remapping Failure Occurred/ { rf = yes($0) }
@@ -187,30 +200,69 @@ if $ok; then
   done < "$STATE/p"
 fi
 
-# -- Xid: errors the driver writes to the kernel log, the last day --
+# -- Xid: errors the driver writes to the kernel log. Those of the last day go as they are (20 at
+# most); from earlier in this boot the last one of every GPU and code after the driver was loaded:
+# an error after which the GPU waits for a reset (Xid 62, 79, 119...) holds until a reboot or a
+# reload of the driver, however old it is. They are kept in $STATE/xidb too, should the journal
+# rotate. nv_load - when the driver was loaded, errors before it are gone with the old driver --
 XID=""
 NVRM=""
+NVLOAD=0
 if command -v journalctl >/dev/null 2>&1; then
-  journalctl -k --since "-24 h" -q -o short-unix --no-pager 2>/dev/null | grep -F 'NVRM: Xid' | tail -20 > "$STATE/xid" || true
-  while IFS= read -r line; do
-    ts=${line%%.*}
-    case "$ts" in ''|*[!0-9]*) continue ;; esac
-    msg=${line#*NVRM: Xid }
-    bus=$(printf '%s' "$msg" | sed -n 's/^(PCI:\([0-9A-Fa-f:.]*\)).*/\1/p')
-    code=$(printf '%s' "$msg" | sed -n 's/^([^)]*): *\([0-9][0-9]*\).*/\1/p')
-    [ -n "$code" ] || continue
-    text=$(printf '%s' "$msg" | sed 's/^([^)]*): *[0-9]*,* *//' | cut -c1-200)
-    XID="$XID${XID:+,}{\"ts\":$ts,\"bus\":\"$(esc "$bus")\",\"code\":$code,\"text\":\"$(esc "$text")\"}"
-  done < "$STATE/xid"
+  boot=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null || true)
+  journalctl -k -b -q -o short-unix --no-pager 2>/dev/null | grep -E 'NVRM: (Xid|loading NVIDIA)' > "$STATE/xid" || true
+  touch "$STATE/xidb"
+  XID=$(awk -v now="$now" -v boot="$boot" -v old="$STATE/xidb" -v nb="$STATE/xidb.new" '
+    function str(s) { gsub(/[\001-\037]/, "", s); gsub(/\\/, "\\\\", s); gsub(/"/, "\\\"", s); return "\"" s "\"" }
+    function put(t, bus, code, text,   k) {
+      k = bus "|" code
+      if (!(k in last) || t >= last[k]) { last[k] = t; txt[k] = text }
+    }
+    function js(t, bus, code, text) { return "{\"ts\":" t ",\"bus\":" str(bus) ",\"code\":" code ",\"text\":" str(text) "}" }
+    BEGIN {
+      load = 0
+      if ((getline l < old) > 0 && split(l, h, " ") >= 3 && h[1] == "boot" && h[2] == boot) {
+        load = h[3] + 0
+        while ((getline l < old) > 0) {
+          if (split(l, a, "|") >= 4) put(a[1] + 0, a[2], a[3], substr(l, length(a[1] a[2] a[3]) + 4))
+        }
+      }
+    }
+    {
+      t = int($1)
+      if (index($0, "NVRM: loading NVIDIA")) { if (t > load) load = t; next }
+      m = substr($0, index($0, "NVRM: Xid ") + 10)
+      bus = ""
+      if (match(m, /^\(PCI:[0-9A-Fa-f:.]+\)/)) bus = substr(m, 6, RLENGTH - 6)
+      sub(/^\([^)]*\): */, "", m)
+      if (!match(m, /^[0-9]+/)) next
+      code = substr(m, 1, RLENGTH)
+      text = substr(m, RLENGTH + 1); sub(/^,? */, "", text); text = substr(text, 1, 200); gsub(/\|/, "/", text)
+      put(t, bus, code, text)
+      if (t >= now - 86400) { n++; rt[n % 20] = t; rb[n % 20] = bus; rc[n % 20] = code; rx[n % 20] = text }
+    }
+    END {
+      print "boot " boot " " load > nb
+      for (k in last) {
+        if (last[k] < load) continue
+        print last[k] "|" k "|" txt[k] > nb
+        if (last[k] < now - 86400 && held++ < 32) { split(k, a, "|"); o = o (o != "" ? "," : "") js(last[k], a[1], a[2], txt[k]) }
+      }
+      for (i = (n > 20 ? n - 19 : 1); i <= n; i++) { j = i % 20; o = o (o != "" ? "," : "") js(rt[j], rb[j], rc[j], rx[j]) }
+      printf "%s", o
+    }' "$STATE/xid")
+  mv -f "$STATE/xidb.new" "$STATE/xidb" 2>/dev/null || true
+  NVLOAD=$(awk 'NR == 1 { print $3 + 0 }' "$STATE/xidb")
+  case "$NVLOAD" in ''|*[!0-9]*) NVLOAD=0 ;; esac
   # the driver does not answer: its last words in this boot (API mismatch, failed to initialize)
   if [ -n "$err" ]; then
     NVRM=$(journalctl -k -b -q -o cat --no-pager 2>/dev/null | grep -E 'NVRM:|nvidia:|nvidia-' | grep -vF 'NVRM: Xid' | tail -1 | cut -c1-300)
   fi
 fi
 
-printf '{"v":1,"ts":%s,"smi":%s,"ok":%s,"err":"%s","driver":"%s","cuda":"%s","kernel":"%s","mod":%s,"mod_built":%s,"nvrm":"%s","pci":[%s],"gpus":[%s],"procs":[%s],"xid":[%s]}\n' \
+printf '{"v":1,"ts":%s,"smi":%s,"ok":%s,"err":"%s","driver":"%s","cuda":"%s","kernel":"%s","mod":%s,"mod_built":%s,"nvrm":"%s","pci":[%s],"gpus":[%s],"procs":[%s],"xid":[%s],"nv_load":%s}\n' \
   "$now" "$smi" "$ok" "$(esc "$err")" "$(esc "$driver")" "$(esc "$cuda")" "$(esc "$kernel")" "$mod" "$mod_built" \
-  "$(esc "$NVRM")" "$PCI" "$GPUS" "$PROCS" "$XID" > "$TMP"
+  "$(esc "$NVRM")" "$PCI" "$GPUS" "$PROCS" "$XID" "$NVLOAD" > "$TMP"
 mv -f "$TMP" "$OUT"
 chmod 0644 "$OUT"
 HELPER_EOF

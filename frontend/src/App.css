@@ -7065,6 +7065,7 @@ button.ghost.lc-del { color: var(--down); border-color: color-mix(in srgb, var(-
 .gpu-xid { display: flex; flex-direction: column; gap: 0.25rem; }
 .gpu-xid-row { display: grid; grid-template-columns: 9px max-content max-content minmax(0, 1fr); gap: 0.6rem; align-items: baseline; font-size: 0.86rem; }
 .gpu-xid-row .lk-dot { align-self: center; }
+.gpu-xid-row .type-chip { margin-left: 0.4rem; }
 @media (max-width: 640px) {
   .gpu-tbl { grid-template-columns: max-content minmax(0, 1fr) minmax(0, 1.4fr) max-content; }
   .gpu-m, .gpu-m2 { display: none; }

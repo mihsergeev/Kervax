@@ -2233,7 +2233,7 @@ export type GpuView = {
   pci: { bus: string; drv: string; lost?: boolean }[]
   gpus?: GpuCardRow[]
   procs?: { gpu: number | null; pid: number | null; name: string; kind: string; owner: string; mem: number | null }[]
-  xid?: { ts: number; bus: string; code: number; text: string; gpu: number | null; hw: boolean; desc: string }[]
+  xid?: { ts: number; bus: string; code: number; text: string; gpu: number | null; hw: boolean; held?: boolean; old?: boolean; desc: string }[]
 }
 // плашка списка серверов (gpu.summary): память в ГиБ
 export type GpuSum = {

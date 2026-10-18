@@ -83,14 +83,43 @@ def test_lost_gpu_and_vm_passthrough():
 
 
 def test_xid_hardware_alerts_app_errors_do_not():
+    # Xid 79 до перезагрузки драйвера ушел вместе со старым драйвером
     b = _block(xid=[{"ts": TS - 120, "bus": "0000:41:00", "code": 48, "text": "An uncorrectable double bit error"},
                     {"ts": TS - 60, "bus": "0000:81:00", "code": 13, "text": "Graphics Exception"},
-                    {"ts": TS - 7200, "bus": "0000:81:00", "code": 79, "text": "old"}])
+                    {"ts": TS - 7200, "bus": "0000:81:00", "code": 79, "text": "old"}], nv_load=TS - 3600)
     probs = gpu.problems(_rep(b), NOW)
     assert [(p[0], p[1]) for p in probs] == [(2, "GPU 0: ошибка Xid 48 - двойная ошибка ECC памяти: нужен сброс GPU или перезагрузка")]
     assert probs[0][2] == f"gpu:xid:41:00:48:{TS - 120}" and probs[0][3].startswith("2026-10-18T11:58")
     v = gpu.view(_rep(b), NOW)
-    assert [(x["code"], x["gpu"], x["hw"]) for x in v["xid"]] == [(13, 1, False), (48, 0, True), (79, 1, True)]
+    assert [(x["code"], x["gpu"], x["hw"], x["held"]) for x in v["xid"]] == [
+        (13, 1, False, False), (48, 0, True, True), (79, 1, False, False)]
+
+
+def test_xid_waiting_for_reset_holds_until_driver_reload():
+    old = TS - 35 * 86400
+    b = _block(xid=[{"ts": old, "bus": "0000:41:00", "code": 62, "text": "pid='<unknown>', name=<unknown>, 2a5d1c9c"},
+                    {"ts": old + 60, "bus": "0000:41:00", "code": 13, "text": "Graphics Exception"},
+                    {"ts": TS - 7200, "bus": "0000:81:00", "code": 92, "text": "High single-bit ECC error rate"},
+                    {"ts": TS - 3 * 86400, "bus": "0000:81:00", "code": 154,
+                     "text": "GPU recovery action changed from 0x1 (GPU Reset Required) to 0x0 (None)"}],
+               nv_load=TS - 60 * 86400)
+    probs = gpu.problems(_rep(b), NOW)
+    # 62 месяц назад держится, 92 только час, 154 сказал "восстанавливать нечего", 13 - ошибка приложения
+    assert [(p[0], p[1], p[2]) for p in probs] == [
+        (2, "GPU 0: ошибка Xid 62 - внутренняя ошибка микрокода: нужен сброс GPU", f"gpu:xid:41:00:62:{old}")]
+    assert probs[0][3].startswith("2026-09-13")
+    v = gpu.view(_rep(b), NOW)
+    assert [(x["code"], x["held"], x["hw"], x["old"]) for x in v["xid"]] == [(92, False, True, False), (62, True, True, True)]
+    # Xid 154 с "нужен сброс" держится
+    b["xid"][3]["text"] = "GPU recovery action changed from 0x0 (None) to 0x1 (GPU Reset Required)"
+    assert {p[2] for p in gpu.problems(_rep(b), NOW)} == {f"gpu:xid:41:00:62:{old}", f"gpu:xid:81:00:154:{TS - 3 * 86400}"}
+    # драйвер перезагрузили - карта сброшена, старой ошибки нет ни в проблемах, ни в карточке
+    b["nv_load"] = TS - 86400
+    assert gpu.problems(_rep(b), NOW) == []
+    assert [x["code"] for x in gpu.view(_rep(b), NOW)["xid"]] == [92]
+    # helper 0.2 без nv_load: держится, пока ошибка в его окне за сутки
+    b2 = _block(xid=[{"ts": TS - 7200, "bus": "0000:41:00", "code": 119, "text": "Timeout after 6s of waiting for RPC"}])
+    assert [p[2] for p in gpu.problems(_rep(b2), NOW)] == [f"gpu:xid:41:00:119:{TS - 7200}"]
 
 
 def test_memory_waiting_for_reset_and_stale_block():
