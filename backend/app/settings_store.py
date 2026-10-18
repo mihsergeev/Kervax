@@ -186,6 +186,8 @@ SERVER_ALERT_KINDS: dict[str, tuple[str, str]] = {
     "workers": ("Воркер упал или падает и поднимается", "{detail}"),
     # копии крона копятся или одна висит в разы дольше обычного (helper cron-setup)
     "cron_stuck": ("Крон наслаивается или висит", "{detail}"),
+    # строк с ошибками в логе контейнера за час в разы больше обычного (helper logerr-setup)
+    "log_errors": ("Всплеск ошибок в логах", "{detail}"),
     "web_5xx": ("Веб: пошли ошибки 5xx",
                 "{value}% запросов за 15 минут закончились ошибкой 5xx ({errs} из {total}){where}"),
     "kube_pod": ("Kubernetes: под не поднимается",

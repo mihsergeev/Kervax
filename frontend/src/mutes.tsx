@@ -47,6 +47,7 @@ export const SRV_ALERT_KINDS: { k: string; label: string }[] = [
   { k: 'queue_failed', label: 'Всплеск упавших задач' },
   { k: 'workers', label: 'Воркер упал или падает и поднимается' },
   { k: 'cron_stuck', label: 'Крон наслаивается или висит' },
+  { k: 'log_errors', label: 'Всплеск ошибок в логах' },
   { k: 'cpu_spin', label: 'CPU: процессы в пустом цикле' },
   { k: 'backup_growth', label: 'Бэкап: резкий прирост' },
   { k: 'docker_sock', label: 'Docker: внешний прокси с docker-сокетом' },
@@ -89,6 +90,8 @@ export const QFAIL_MUTE = 'qfail:'
 export const WORKER_MUTE = 'worker:'
 // Одна задача cron: cron:<где>|<команда>
 export const CRON_MUTE = 'cron:'
+// Всплеск ошибок в одном логе контейнера или пода: logerr:<где>|<контейнер пода>
+export const LOGERR_MUTE = 'logerr:'
 // Один контейнер с ключами от хоста, которому они нужны намеренно: dockrisk:<имя>
 export const DOCKRISK_MUTE = 'dockrisk:'
 // Контейнер или юнит, которому не нужно подниматься после перезагрузки: noboot:<имя>
@@ -120,6 +123,10 @@ export function muteKindLabel(k: string, t: TFn): string | null {
     const key = k.slice(CRON_MUTE.length)
     const i = key.indexOf('|')
     return `${t('крон')}: ${i < 0 ? key : `${key.slice(i + 1)} (${key.slice(0, i)})`}`
+  }
+  if (k.startsWith(LOGERR_MUTE)) {
+    const [w, c] = k.slice(LOGERR_MUTE.length).split('|')
+    return `${t('ошибки в логе')}: ${w}${c ? ` (${c})` : ''}`
   }
   if (k.startsWith(LEAK_MUTE)) return `${t('рост памяти')}: ${k.slice(LEAK_MUTE.length).replace(/^(docker|pod|proc):/, '')}`
   if (k.startsWith(RESTARTS_MUTE)) {
