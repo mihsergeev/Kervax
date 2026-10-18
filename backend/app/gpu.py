@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 STALE = 600  # блок helper'а старше 10 минут: nvidia-smi завис или таймер не идет
 XID_HOLD = 3600  # ошибка Xid держится проблемой час: за это время ее разберут или она повторится
 HEAT_MARGIN = 5  # предупреждение за 5 градусов до замедления, если карта не говорит свой предел
+FROZEN_S = 3600  # показания nvidia-smi не меняются час (helper 0.2): им нельзя верить
 LLM_BOOT = 900  # модель грузится минутами: молчание /metrics первые 15 минут процесса - не авария
 QUEUE_MIN = 5  # очередь меньше - обычная пачка запросов
 KV_FULL = 95.0
@@ -121,6 +122,12 @@ def _gpus(b: dict) -> list[dict]:
     return [g for g in (b.get("gpus") or []) if isinstance(g, dict)]
 
 
+def frozen(g: dict) -> int:
+    """Сколько секунд показания карты не меняются ни на сотую ватта (0 - живые или не знаем)"""
+    s = _i(g.get("frz")) or 0
+    return s if s >= FROZEN_S else 0
+
+
 def _gpu_of_bus(b: dict) -> dict[str, int]:
     return {bus_key(g.get("bus") or ""): _i(g.get("i")) or 0 for g in _gpus(b)}
 
@@ -215,6 +222,11 @@ def problems(rep: dict, now: datetime) -> list[tuple[int, str, str, str | None]]
         elif g.get("remap") or g.get("retire"):
             out.append((1, f"GPU {i}: сбойная память ждет исключения - нужен сброс GPU или перезагрузка",
                         f"gpu:remap:{i}", None))
+        fz = frozen(g)
+        if fz:
+            out.append((1, f"GPU {i}: показания nvidia-smi не меняются {_dur(fz)} - загрузка, питание и "
+                           "температура застыли, перегрев по ним не увидеть", f"gpu:frozen:{i}",
+                        datetime.fromtimestamp(now.timestamp() - fz, timezone.utc).isoformat()))
         eu = _i(g.get("ecc_u"))
         if eu:
             out.append((1, f"GPU {i}: неисправимых ошибок ECC с загрузки драйвера - {eu}", f"gpu:ecc:{i}", None))
@@ -238,6 +250,8 @@ def heat(rep: dict, now: datetime) -> tuple[int, str]:
         return 0, ""
     worst = (0, "", -1.0)
     for g in _gpus(b):
+        if frozen(g):
+            continue
         t = _f(g.get("temp"))
         if t is None:
             continue
@@ -274,7 +288,7 @@ def summary(rep: dict, now: datetime) -> dict | None:
         m = short_model(g.get("name") or "")
         if m and m not in models:
             models.append(m)
-    util = [u for u in (_f(g.get("util")) for g in gs) if u is not None]
+    util = [u for u in (_f(g.get("util")) for g in gs if not frozen(g)) if u is not None]
     mem = sum(_f(g.get("mem")) or 0 for g in gs)
     memt = sum(_f(g.get("memt")) or 0 for g in gs)
     return {
@@ -285,6 +299,7 @@ def summary(rep: dict, now: datetime) -> dict | None:
         "memt": round(memt / 1024, 1) if gs else None,
         "helper": b is not None,
         "ok": bool(b and b.get("ok")),
+        "frozen": sum(1 for g in gs if frozen(g)),
     }
 
 
@@ -311,6 +326,7 @@ def view(rep: dict, now: datetime) -> dict | None:
             "slow": _f(g.get("slow")), "maxop": _f(g.get("maxop")),
             "thermal": bool(thr.get("hw") or thr.get("sw")), "pcap": bool(thr.get("pcap")), "brake": bool(thr.get("brake")),
             "remap": bool(g.get("remap") or g.get("retire")), "remap_fail": bool(g.get("remap_fail")),
+            "frozen": frozen(g),
         })
     procs = []
     for p in b.get("procs") or []:
@@ -444,6 +460,20 @@ def llm_problems(rep: dict, base: dict | None) -> list[tuple[int, str, str]]:
     return out
 
 
+def pub_port(rep: dict, x: dict) -> int | None:
+    """Порт на хосте, если сервис в контейнере docker и его порт проброшен: агент стучится во
+    внутренний (у трех TEI он один - 8000), а люди и прокси знают проброшенный"""
+    if x.get("kind") != "container":
+        return None
+    for c in ((rep.get("docker") or {}).get("containers") or []):
+        if not isinstance(c, dict) or c.get("name") != x.get("name"):
+            continue
+        for p in c.get("ports") or []:
+            if isinstance(p, dict) and p.get("priv") == x.get("port") and _i(p.get("pub")):
+                return _i(p.get("pub"))
+    return None
+
+
 def llm_view(rep: dict, base: dict | None) -> list[dict]:
     out = []
     for x in llm_list(rep):
@@ -454,6 +484,7 @@ def llm_view(rep: dict, base: dict | None) -> list[dict]:
             "key": llm_key(x), "label": llm_label(x), "engine_name": ENGINE.get(str(x.get("engine")), str(x.get("engine"))),
             "where": llm_where(x), "err": err_text(str(x.get("err") or "")) if x.get("err") else "",
             "locked": not x.get("ok") and str(x.get("err") or "") in LOCKED,
+            "pub_port": pub_port(rep, x),
             "base_ttft": baseline(base, x, "ttft"), "base_tpot": baseline(base, x, "tpot"),
         })
     return out
@@ -468,6 +499,8 @@ def metric_gpu(extras: dict | None, now: datetime, clock: int = 0) -> list[dict]
         return None
     out = []
     for g in _gpus(b):
+        if frozen(g):
+            continue  # застывшие показания на графике - ровная ложная линия, честнее пропуск
         memt, pwl = _f(g.get("memt")), _f(g.get("pwl"))
         mem, pw = _f(g.get("mem")), _f(g.get("pw"))
         out.append({

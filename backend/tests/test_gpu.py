@@ -114,7 +114,8 @@ def test_heat_levels():
 
 def test_summary_and_view():
     s = gpu.summary(_rep(), NOW)
-    assert s == {"n": 2, "models": ["A100 80GB PCIe"], "util": 50, "mem": 75.8, "memt": 160.0, "helper": True, "ok": True}
+    assert s == {"n": 2, "models": ["A100 80GB PCIe"], "util": 50, "mem": 75.8, "memt": 160.0, "helper": True, "ok": True,
+                 "frozen": 0}
     # без helper'а - по шине из отчета агента
     s = gpu.summary({"gpu_pci": [{"bus": "0000:41:00.0", "dev": "20b5", "drv": "nvidia"}]}, NOW)
     assert s["n"] == 1 and not s["helper"] and s["util"] is None
@@ -193,6 +194,13 @@ def test_llm_baseline_and_slow_ttft():
     one = gpu.base_update(None, {"llm": [_llm()]}, NOW)
     assert gpu.base_update(one, {"llm": [_llm()]}, NOW + timedelta(seconds=20)) == one
     v = gpu.llm_view({"llm": [slow]}, st)[0]
+    assert v["pub_port"] is None
+    # контейнер с пробросом: в карточке порт хоста, агент ходит во внутренний
+    dock = {"containers": [{"name": "tei-b", "ports": [{"ip": "0.0.0.0", "pub": 8002, "priv": 8000, "proto": "tcp"}]},
+                           {"name": "vllm-qwen", "ports": [{"ip": "0.0.0.0", "pub": 9001, "priv": 9000, "proto": "tcp"}]}]}
+    vs = gpu.llm_view({"llm": [_llm(), _llm(engine="tei", name="tei-b"), _llm(kind="pod", name="tei-b")],
+                       "docker": dock}, None)
+    assert [x["pub_port"] for x in vs] == [None, 8002, None]
     assert v["base_ttft"] == 0.84 and v["where"] == "контейнер vllm-qwen" and v["engine_name"] == "vLLM"
 
 
@@ -226,3 +234,22 @@ async def test_report_api(client, auth_headers):
     assert srv["llm"][0]["label"] == "vLLM vllm-qwen" and srv["last_report"]["gpu_pci"][0]["bus"] == "0000:41:00.0"
     m = (await client.get(f"/api/servers/{sid}/metrics?hours=1", headers=auth_headers)).json()
     assert m[-1]["gpu"][0]["g"] == "0" and m[-1]["llm"][0]["k"] == "vLLM vllm-qwen"
+
+
+def test_frozen_readings():
+    """helper 0.2: показания карты не меняются час - строка проблемы, без загрузки в плашке,
+    без точки на графике и без перегрева по застывшей температуре"""
+    b = _block()
+    b["gpus"][0] = _g(0, "00000000:41:00.0", U0, frz=7300, temp=95, slow=89)
+    rep = _rep(b)
+    probs = gpu.problems(rep, NOW)
+    assert [(p[0], p[2]) for p in probs] == [(1, "gpu:frozen:0")]
+    assert probs[0][1].startswith("GPU 0: показания nvidia-smi не меняются 2 ч")
+    assert gpu.heat(rep, NOW) == (0, "")
+    s = gpu.summary(rep, NOW)
+    assert s["util"] == 12 and s["frozen"] == 1
+    assert [x["frozen"] for x in gpu.view(rep, NOW)["gpus"]] == [7300, 0]
+    assert [p["g"] for p in gpu.metric_gpu(rep["extras"], NOW, TS)] == ["1"]
+    # меньше часа - еще не повод
+    b["gpus"][0]["frz"] = 3000
+    assert gpu.problems(_rep(b), NOW) == []

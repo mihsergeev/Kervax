@@ -34,6 +34,7 @@ export function GpuChip({ sum, bad, t }: { sum: GpuSum; bad: boolean; t: TFn }) 
     `${sum.n} x ${sum.models.join(', ') || 'NVIDIA'}`,
     sum.mem != null ? t('память {a} из {b} ГБ', { a: sum.mem, b: sum.memt ?? 0 }) : '',
     !sum.helper ? t('нет helper gpu-setup: загрузка не видна') : !sum.ok ? t('драйвер NVIDIA не отвечает') : '',
+    sum.frozen ? t('показания nvidia-smi застыли') : '',
   ].filter(Boolean).join(', ')
   return (
     <span className={`gpu-chip${bad || (sum.helper && !sum.ok) ? ' gpu-chip-bad' : ''}`} title={tip}>
@@ -136,7 +137,8 @@ export function GpuCard({ server: s, rows }: { server: Server; rows: OvRow[] }) 
             const hot = x.thermal || (x.temp != null && x.slow != null && x.temp >= x.slow)
             const warm = !hot && x.temp != null && x.slow != null && x.temp >= (x.maxop && x.maxop < x.slow ? x.maxop : x.slow - 5)
             return (
-              <div key={x.i ?? x.bus} className="gpu-tr">
+              <div key={x.i ?? x.bus} className={`gpu-tr${x.frozen ? ' gpu-tr-frozen' : ''}`}
+                title={x.frozen ? t('показания nvidia-smi застыли: им нельзя верить') : undefined}>
                 <span title={x.name}>
                   <b>GPU {x.i}</b>
                 </span>
@@ -249,6 +251,12 @@ function LlmBlock({ x, hist, t }: { x: LlmSvc; hist: ServerMetric[]; t: TFn }) {
     { k: 'e2e', name: t('E2E, весь запрос'), v: x.e2e },
   ]
   const latRows = lat.filter((l) => l.v?.length)
+  // у TEI счетчика отказов нет, пока не было ни одного: тогда и строки нет, а не голое "за 5 мин"
+  const rsFacts = [
+    x.errors != null ? t('ошибок {n}', { n: num(x.errors) }) : '',
+    x.aborted ? t('отменено {n}', { n: num(x.aborted) }) : '',
+    x.preempt ? t('вытеснено {n}', { n: num(x.preempt) }) : '',
+  ].filter(Boolean).join(', ')
   return (
     <div className="llm">
       <div className="llm-h">
@@ -256,7 +264,10 @@ function LlmBlock({ x, hist, t }: { x: LlmSvc; hist: ServerMetric[]; t: TFn }) {
         <b>{x.engine_name}</b>
         {x.model && <span className="mono llm-model">{x.model}</span>}
         <span className="muted small">
-          {t(KIND[x.kind] ?? 'процесс')} {x.name} · :{x.port}
+          {t(KIND[x.kind] ?? 'процесс')} {x.name} ·{' '}
+          {x.pub_port && x.pub_port !== x.port
+            ? <span title={t('внутри контейнера :{p}', { p: x.port })}>:{x.pub_port}</span>
+            : `:${x.port}`}
           {x.up ? ` · ${t('работает {d}', { d: upText(x.up, t) })}` : ''}
         </span>
       </div>
@@ -309,13 +320,11 @@ function LlmBlock({ x, hist, t }: { x: LlmSvc; hist: ServerMetric[]; t: TFn }) {
             <div className="llm-kpi">
               <div className="llm-l">{t('Пропускная')}</div>
               <div className="llm-v">{x.req_s < 10 ? x.req_s.toFixed(2) : num(x.req_s)} <span className="muted small">{t('запр/с')}</span></div>
-              <div className={`llm-s${(x.errors ?? 0) > 0 ? ' t-degraded' : ''}`}>
-                {[
-                  x.errors != null ? t('ошибок {n}', { n: num(x.errors) }) : '',
-                  x.aborted ? t('отменено {n}', { n: num(x.aborted) }) : '',
-                  x.preempt ? t('вытеснено {n}', { n: num(x.preempt) }) : '',
-                ].filter(Boolean).join(', ')}{x.win ? ` ${t('за {n} мин', { n: Math.round(x.win / 60) })}` : ''}
-              </div>
+              {rsFacts && (
+                <div className={`llm-s${(x.errors ?? 0) > 0 ? ' t-degraded' : ''}`}>
+                  {rsFacts}{x.win ? ` ${t('за {n} мин', { n: Math.round(x.win / 60) })}` : ''}
+                </div>
+              )}
             </div>
           )}
         </div>

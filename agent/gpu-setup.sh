@@ -9,7 +9,7 @@
 # installed) only the PCI bus and the kernel are reported.
 set -euo pipefail
 
-KERVAX_SETUP_VERSION=0.1  # MAJOR.MINOR; compared component-wise
+KERVAX_SETUP_VERSION=0.2  # MAJOR.MINOR; compared component-wise
 KERVAX_SETUP_WHEN="command -v nvidia-smi >/dev/null 2>&1 || grep -qsx 0x10de /sys/bus/pci/devices/*/vendor"
 
 HELPER_DIR=/lib65/kervax
@@ -102,7 +102,21 @@ if $ok; then
     sec == "Remapped Rows" && /^ +Pending +:/ { rmp = yes($0) }
     /Remapping Failure Occurred/ { rf = yes($0) }
     END { if (bus != "") out() }' "$STATE/x" > "$STATE/xp"
-  GPUS=$(awk -v thrf="$STATE/thr" -v xpf="$STATE/xp" '
+  # frozen readings: load, power to a hundredth of a watt, temperature and clock the same run after
+  # run. A live GPU never holds its power that still, even idle; an H200 NVL in a VM (driver 595)
+  # kept every nvidia-smi value for hours while vLLM was serving. Not judged without a power reading
+  # or when it comes in whole watts (x.00): an idle card could hold that for long
+  touch "$STATE/frz"
+  awk -v now="$now" -v old="$STATE/frz" '
+    function trim(s) { gsub(/^[ \t]+|[ \t\r]+$/, "", s); return s }
+    BEGIN { while ((getline l < old) > 0) { split(l, a, "|"); sig[a[1]] = a[2]; since[a[1]] = a[3] } }
+    {
+      n = split($0, f, ","); if (n < 19) next
+      bus = tolower(trim(f[2])); pw = trim(f[10])
+      s = trim(f[5]) "/" trim(f[6]) "/" pw "/" trim(f[9]) "/" trim(f[12])
+      print bus "|" s "|" ((bus in sig && sig[bus] == s && pw ~ /^[0-9]+\.[0-9]*[1-9]/) ? since[bus] : now)
+    }' "$STATE/q" > "$STATE/frz.new" && mv -f "$STATE/frz.new" "$STATE/frz"
+  GPUS=$(awk -v thrf="$STATE/thr" -v xpf="$STATE/xp" -v frf="$STATE/frz" -v now="$now" '
     function trim(s) { gsub(/^[ \t]+|[ \t\r]+$/, "", s); return s }
     function num(s) { s = trim(s); return (s ~ /^-?[0-9]+(\.[0-9]+)?$/) ? s : "null" }
     function str(s) { s = trim(s); gsub(/[\001-\037]/, "", s); gsub(/\\/, "\\\\", s); gsub(/"/, "\\\"", s); return "\"" s "\"" }
@@ -111,16 +125,18 @@ if $ok; then
     BEGIN {
       while ((getline l < thrf) > 0) { split(l, a, ","); thr[trim(a[1])] = "{\"hw\":" act(a[2]) ",\"sw\":" act(a[3]) ",\"brake\":" act(a[4]) ",\"pcap\":" act(a[5]) "}" }
       while ((getline l < xpf) > 0) { split(l, a, "|"); x[a[1]] = l }
+      while ((getline l < frf) > 0) { split(l, a, "|"); frz[a[1]] = now - a[3] }
     }
     {
       n = split($0, f, ",")
       if (n < 19) next
       i = trim(f[1]); bus = tolower(trim(f[2]))
       split(x[bus], q, "|")
-      printf "%s{\"i\":%s,\"bus\":%s,\"name\":%s,\"uuid\":%s,\"util\":%s,\"mutil\":%s,\"mem\":%s,\"memt\":%s,\"temp\":%s,\"pw\":%s,\"pwl\":%s,\"clk\":%s,\"clkm\":%s,\"ps\":%s,\"fan\":%s,\"pm\":%s,\"ecc_u\":%s,\"ecc_c\":%s,\"slow\":%s,\"shut\":%s,\"maxop\":%s,\"thr\":%s,\"retire\":%s,\"remap\":%s,\"remap_fail\":%s}",
+      printf "%s{\"i\":%s,\"bus\":%s,\"name\":%s,\"uuid\":%s,\"util\":%s,\"mutil\":%s,\"mem\":%s,\"memt\":%s,\"temp\":%s,\"pw\":%s,\"pwl\":%s,\"clk\":%s,\"clkm\":%s,\"ps\":%s,\"fan\":%s,\"pm\":%s,\"ecc_u\":%s,\"ecc_c\":%s,\"slow\":%s,\"shut\":%s,\"maxop\":%s,\"thr\":%s,\"retire\":%s,\"remap\":%s,\"remap_fail\":%s,\"frz\":%s}",
         (c++ ? "," : ""), num(i), str(f[2]), str(f[3]), str(f[4]), num(f[5]), num(f[6]), num(f[7]), num(f[8]), num(f[9]),
         num(f[10]), num(f[11]), num(f[12]), num(f[13]), str(f[14]), num(f[15]), str(f[16]), num(f[17]), num(f[18]),
-        num(q[2]), num(q[3]), num(q[4]), (i in thr ? thr[i] : "null"), yn(q[5]), yn(q[6]), yn(q[7])
+        num(q[2]), num(q[3]), num(q[4]), (i in thr ? thr[i] : "null"), yn(q[5]), yn(q[6]), yn(q[7]),
+        (bus in frz ? frz[bus] : 0)
     }' "$STATE/q")
   driver=$(head -1 "$STATE/q" | awk -F',' '{gsub(/^[ \t]+|[ \t\r]+$/, "", $19); print $19}')
 
