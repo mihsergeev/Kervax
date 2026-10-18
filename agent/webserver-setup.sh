@@ -21,7 +21,13 @@ set -euo pipefail
 #       Public sites are watched by monitors, sites behind an allowlist are not
 # 0.25: certbot installed from snap renews through snap.certbot.renew.timer: it counts as the
 #       timer (and a failed snap.certbot.renew.service as failed), not as renewal not set up
-KERVAX_SETUP_VERSION=0.25  # MAJOR.MINOR; compared component-wise
+# 0.26: why nginx answers 502/504: the error log lines about the upstream (refused, timed out,
+#       no live upstreams, socket queue full, no socket file, reset, prematurely closed...) are
+#       counted per upstream address and kind -> "up" of the log in web-rate.json. A docker
+#       address becomes the container name, a pod address the ingress upstream name. The
+#       error log of the host nginx goes to the map as a 5th column and is read once a minute
+#       too, split between the sites by its "server:" field
+KERVAX_SETUP_VERSION=0.26  # MAJOR.MINOR; compared component-wise
 KERVAX_SETUP_ALWAYS=1     # safe on any node: the refresh is a no-op without a web server
 
 HELPER_DIR=/lib65/kervax
@@ -149,7 +155,10 @@ collect_traefik() {
 # унаследованный с уровня http) и server_name. Вложенные location со своим логом не
 # трогаем - считаем виртуальный хост целиком.
 extract_logs() {
-  awk '
+  awk -v edef="${1:-}" '
+    # Пятая колонка (0.26) - error-лог этого server-блока (свой или унаследованный, без него -
+    # путь по умолчанию из nginx -V): из него счетчик берет, почему nginx отвечал 502/504.
+    # Только файл: stderr, syslog: и memory: не читаем.
     # Четвертая колонка - формат лога, если в нем есть домен ($host, $http_host,
     # $server_name): по нему счетчик разложит общий лог по сайтам. Формат с табуляцией не
     # берем - он сломал бы колонки карты. Третья колонка (имя для показа) тут пустая.
@@ -159,7 +168,8 @@ extract_logs() {
     }
     # лог печатаем и без доменов: общий access.log ловит всё, что не разложено по
     # виртуальным хостам, и его поток тоже надо видеть
-    function flush() { if (slog!="") print slog "\t" names "\t\t" hostfmt(fmtdef[sfmt]) }
+    function flush() { if (slog!="") print slog "\t" names "\t\t" hostfmt(fmtdef[sfmt]) "\t" selog }
+    function elogof(   p) { p=$2; sub(/;$/,"",p); return (p ~ /^\//) ? p : "" }
     # формат у access_log: третье слово, если это не параметр (buffer=, if=...); по умолчанию combined
     function fmtname(   f) { f=$3; sub(/;$/,"",f); if (f=="" || f ~ /=/) f="combined"; return f }
     # log_format идет на несколько строк до ";" вне кавычек: собираем содержимое кавычек.
@@ -178,14 +188,15 @@ extract_logs() {
         else if (c == ";") { fmtdef[lf_name] = lf_fmt; lf_on = 0; return }
       }
     }
-    BEGIN { fmtdef["combined"] = "$remote_addr - $remote_user [$time_local] \"$request\" $status $body_bytes_sent \"$http_referer\" \"$http_user_agent\"" }
+    BEGIN { fmtdef["combined"] = "$remote_addr - $remote_user [$time_local] \"$request\" $status $body_bytes_sent \"$http_referer\" \"$http_user_agent\""; hel = edef }
     lf_on { lf_feed($0); next }
     !insrv && $1=="log_format" {
       lf_name=$2; lf_fmt=""; lf_q=""; lf_on=1; x=$0
       sub(/^[[:space:]]*log_format[[:space:]]+[^[:space:]]+/, "", x); lf_feed(x); next
     }
-    /^[[:space:]]*server[[:space:]]*\{/ && !insrv { insrv=1; depth=1; names=""; slog=hlog; sfmt=hfmt; next }
+    /^[[:space:]]*server[[:space:]]*\{/ && !insrv { insrv=1; depth=1; names=""; slog=hlog; sfmt=hfmt; selog=hel; next }
     !insrv && $1=="access_log" { p=$2; sub(/;$/,"",p); if (p!="off") { hlog=p; hfmt=fmtname() } next }
+    !insrv && $1=="error_log" { hel=elogof(); next }
     insrv {
       o=gsub(/\{/,"{"); c=gsub(/\}/,"}"); depth += o-c
       if ($1=="server_name") {
@@ -203,6 +214,7 @@ extract_logs() {
           if (g !~ /^[A-Za-z0-9.*_-]+$/) continue;
           names = names (names==""?"":" ") g }
       } else if ($1=="access_log" && depth==1) { p=$2; sub(/;$/,"",p); slog=(p=="off"?"":p); sfmt=fmtname() }
+      else if ($1=="error_log" && depth==1) selog=elogof()
       if (depth<=0) { flush(); insrv=0 }
     }
   '
@@ -215,13 +227,14 @@ extract_logs() {
 # переменной падает синтаксической ошибкой. Карта уезжала пустой, а с ней молчал счётчик.
 merge_logs() {
   awk -F'\t' '
-    { lg=$1; if (!(lg in seen_log)) { seen_log[lg]=1; a[lg]=""; nm[lg]=$3; fm[lg]=$4 }
+    { lg=$1; if (!(lg in seen_log)) { seen_log[lg]=1; a[lg]=""; nm[lg]=$3; fm[lg]=$4; er[lg]=$5 }
       if (nm[lg]=="" && $3!="") nm[lg]=$3
       if (fm[lg]=="" && $4!="") fm[lg]=$4
+      if (er[lg]=="" && $5!="") er[lg]=$5
       n=split($2, w, " ")
       for (i=1;i<=n;i++) if (w[i]!="" && !((lg SUBSEP w[i]) in seen)) {
         seen[lg SUBSEP w[i]]=1; a[lg]=a[lg] (a[lg]==""?"":" ") w[i] } }
-    END { for (k in a) printf "%s\t%s\t%s\t%s\n", k, a[k], nm[k], fm[k] }'
+    END { for (k in a) printf "%s\t%s\t%s\t%s\t%s\n", k, a[k], nm[k], fm[k], er[k] }'
 }
 
 # Путь лога внутри контейнера -> путь на хосте по его bind-mount'ам.
@@ -257,7 +270,10 @@ container_logs() {
   docker exec "$c" nginx -T 2>/dev/null | extract_logs | while IFS= read -r line; do
     # колонки разбираем руками: read с IFS=таб склеивает пустые поля, и формат вставал бы
     # на место пустых доменов
-    lg=${line%%"$T"*}; rest=${line#*"$T"}; names=${rest%%"$T"*}; hf=${rest##*"$T"}
+    # (0.26: extract_logs печатает пятую колонку - error-лог; у контейнера она не нужна, его
+    # stderr и так лежит в json-логе докера, поэтому формат берем именно четвертой колонкой)
+    lg=${line%%"$T"*}; rest=${line#*"$T"}; names=${rest%%"$T"*}
+    hf=${rest#*"$T"}; hf=${hf#*"$T"}; hf=${hf%%"$T"*}
     [ "$hf" = "$rest" ] && hf=""
     # Обычный файл - берём его путь, иначе это поток: в образе nginx access.log ведёт в
     # /dev/stdout, а оттуда в pipe, и readlink -f отвечает то /dev/..., то /proc/...,
@@ -327,7 +343,8 @@ pod_log_by_id() {
 # кода. Ещё он брал 0.log пода, хотя после рестарта контейнер пишет уже в 1.log.
 # Процесс и симлинк kubelet дают ровно текущий лог настоящего nginx.
 collect_logs() {
-  command -v nginx >/dev/null 2>&1 && nginx -T 2>/dev/null | extract_logs
+  command -v nginx >/dev/null 2>&1 \
+    && nginx -T 2>/dev/null | extract_logs "$(nginx -V 2>&1 | grep -o -- '--error-log-path=[^ ]*' | cut -d= -f2)"
   have_docker=0
   command -v docker >/dev/null 2>&1 && have_docker=1
   nginx_container_ids | while read -r id pid; do
@@ -538,6 +555,75 @@ SOON=0
 esc() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g' | tr -d '\000-\037'; }
 sites_json() { tr ' ' '\n' | awk 'BEGIN{printf "["} {gsub(/[\\"]/,""); if($0=="")next; printf "%s\"%s\"", (n++?",":""), $0} END{printf "]"}'; }
 
+# Почему nginx отвечал 502/504 (0.26): строки его error-лога про upstream -> вид отказа и
+# адрес. Общие функции счетчика access-логов (там строки ошибок идут в тот же поток контейнера)
+# и разбора error-лога хостового nginx. Вид - по тексту nginx и errno в скобках:
+#   refused - (111) порт закрыт, сервис не запущен или перезапускается
+#   busy    - (11) на unix-сокет: очередь соединений полна (php-fpm listen.backlog)
+#   nofile  - (2) сокета нет: сервис не запущен
+#   perm    - (13) нет прав на сокет
+#   ctimeout/timeout - не дождался соединения / ответа (proxy_connect_timeout, proxy_read_timeout)
+#   nolive  - все серверы группы upstream помечены упавшими
+#   unreach - (101, 112, 113) сеть или хост недоступны
+#   closed/reset - закрыл или сбросил соединение, не ответив до конца
+#   bighdr, resolve, ssl, bad - заголовок больше буфера, имя не резолвится, TLS к бэкенду,
+#   ответ не по протоколу; other - прочее "while ... upstream"
+# Не про upstream: "FastCGI sent in stderr" (это вывод PHP, а не отказ связи) и все, что
+# "while sending to client" (клиент ушел сам). Уровни ниже error (warn, info) не берем.
+UPFN='
+    function up_kind(l) {
+      if (l !~ /\[(error|crit|alert)\]/) return ""
+      if (l ~ /FastCGI sent in stderr|while sending to client/) return ""
+      if (l ~ /no live upstreams/) return "nolive"
+      if (l ~ /could not be resolved/) return "resolve"
+      if (l !~ /upstream/) return ""
+      if (l ~ /upstream timed out|\(110: /) return (l ~ /while connecting to upstream/) ? "ctimeout" : "timeout"
+      if (l ~ /\(111: /) return "refused"
+      if (l ~ /\(11: /) return "busy"
+      if (l ~ /\(2: /) return "nofile"
+      if (l ~ /\(13: /) return "perm"
+      if (l ~ /\((101|112|113): /) return "unreach"
+      if (l ~ /prematurely closed/) return "closed"
+      if (l ~ /\((104|32): /) return "reset"
+      if (l ~ /too big header/) return "bighdr"
+      if (l ~ /SSL/) return "ssl"
+      if (l ~ /upstream sent/) return "bad"
+      if (l ~ /while [a-z ]*upstream/) return "other"
+      return ""
+    }
+    # адрес без схемы и пути: 172.18.0.5:8000, unix:/run/php/php8.3-fpm.sock, имя группы
+    # upstream у "no live upstreams"; в json-логе докера кавычка экранирована
+    function up_addr(l,   a) {
+      if (match(l, /upstream: \\?"[a-z0-9]+:\/\/[^"\\]*/)) {
+        a = substr(l, RSTART, RLENGTH); sub(/^upstream: \\?"[a-z0-9]+:\/\//, "", a)
+        if (a ~ /^unix:/) sub(/:[^:]*$/, "", a)
+        else sub(/\/.*$/, "", a)
+      } else if (match(l, /[*][0-9]+ [^ ]+ could not be resolved/)) {
+        a = substr(l, RSTART, RLENGTH); sub(/^[*][0-9]+ /, "", a); sub(/ could not be resolved$/, "", a)
+      } else if (match(l, /connect\(\) to [^ ]+ failed/)) {
+        a = substr(l, RSTART + 13, RLENGTH - 20)
+      } else a = "?"
+      gsub(/[^A-Za-z0-9._:\/@\[\]-]/, "", a)
+      return (a == "") ? "?" : substr(a, 1, 120)
+    }
+    function up_take(l,   k) { k = up_kind(l); if (k != "") un[up_addr(l) SUBSEP k]++ }
+    # пять самых частых "адрес + вид" в минуту; c - имя upstream у ingress-nginx (из его
+    # access-строк с 5xx: там [ns-svc-port] стоит перед адресом пода)
+    function up_out(el, kk,   t, best, bn, x, k, sp, v) {
+      printf "["; k = 0
+      for (t = 0; t < 5; t++) {
+        best = ""; bn = 0
+        for (x in un) if (un[x] > bn) { best = x; bn = un[x] }
+        if (best == "") break
+        split(best, sp, SUBSEP)
+        v = bn * 60 * kk / el; if (v < 1) v = 1
+        printf "%s{\"u\":\"%s\",\"k\":\"%s\",\"n\":%.0f%s}", (k++ ? "," : ""), sp[1], sp[2], v, \
+          ((sp[1] in ing) ? ",\"c\":\"" ing[sp[1]] "\"" : "")
+        delete un[best] }
+      printf "]\n"
+    }
+'
+
 # Строки -> «всего 5xx 4xx нераспознано». Код ответа ищем четырьмя способами, потому что
 # формат лога у всех свой: после кавычки с запросом (combined, в том числе внутри
 # docker-json, где кавычка экранирована), перед ней (так пишет loki-gateway: `204 "POST
@@ -546,9 +632,10 @@ sites_json() { tr ' ' '\n' | awk 'BEGIN{printf "["} {gsub(/[\\"]/,""); if($0==""
 # одинаково.
 # $1 - формат лога с доменом (пусто - не делим), $2 - секунд с прошлого счета, $3 - во сколько
 # раз домножать (большой прирост считается выборкой). Пятая строка вывода - домены:
-# [{"h":"site","rpm":N,"e5":N}] в минуту, по убыванию ошибок, потом запросов.
+# [{"h":"site","rpm":N,"e5":N}] в минуту, по убыванию ошибок, потом запросов. Шестая (0.26) -
+# почему 502/504: [{"u":"адрес","k":"вид","n":N}] в минуту, см. UPFN.
 count_codes() {
-  awk -v fmt="${1:-}" -v el="${2:-60}" -v kk="${3:-1}" '
+  awk -v fmt="${1:-}" -v el="${2:-60}" -v kk="${3:-1}" "$UPFN"'
     # План формата: L[0] V[1] L[1] V[2] ... V[N] L[N] - кусок текста, переменная, кусок.
     # Домен в строке - текст между L[i-1] и L[i] для его переменной. Только index/substr:
     # у mawk нет захвата групп в match.
@@ -621,8 +708,9 @@ count_codes() {
     }
     # Строки error-лога nginx («2026/09/26 09:25:31 [error] 29#29: ... request: "GET
     # /.env"») идут в тот же поток контейнера, но это не запросы: у них нет кода, и
-    # они раздували и «всего», и «без кода». Пропускаем их совсем.
-    /[0-9][0-9][0-9][0-9]\/[0-9][0-9]\/[0-9][0-9] [0-9][0-9]:[0-9][0-9]:[0-9][0-9] \[(emerg|alert|crit|error|warn|notice|info|debug)\]/ { next }
+    # они раздували и «всего», и «без кода». В счет запросов не идут; с 0.26 из них берем,
+    # почему nginx не достучался до upstream.
+    /[0-9][0-9][0-9][0-9]\/[0-9][0-9]\/[0-9][0-9] [0-9][0-9]:[0-9][0-9]:[0-9][0-9] \[(emerg|alert|crit|error|warn|notice|info|debug)\]/ { up_take($0); next }
     { s=""
       if (match($0, /\\?"[ \t]+[1-5][0-9][0-9]([ \t]|$)/)) { s=substr($0,RSTART,RLENGTH); gsub(/[^0-9]/,"",s) }
       else if (match($0, /[ \t][1-5][0-9][0-9][ \t]+\\?"[A-Z]+ /)) { s=substr($0,RSTART+1,3) }
@@ -659,6 +747,10 @@ count_codes() {
       if (c>=500) {
         e5++; c5[s]++
         sl[nl % 5] = $0; nl++  # последние пять строк с 5xx - для панели
+        # ingress-nginx: "[ns-svc-port] [альтернативный] адрес_пода" - имя для адреса из error-строки
+        if (match($0, /\[[A-Za-z0-9_.-]+\] \[[^]]*\] [0-9.]+:[0-9]+/)) {
+          q = substr($0, RSTART, RLENGTH); ad = q; sub(/^.*\] /, "", ad)
+          ing[ad] = substr(q, 2, index(q, "]") - 2) }
         # Путь запроса с ошибкой: «МЕТОД /путь» ищем где угодно в строке - так он
         # находится во всех форматах. Query отрезаем (там бывают токены), номера и
         # длинные hex-идентификаторы сворачиваем, чтобы /user/123 и /user/456 были одним
@@ -704,7 +796,87 @@ count_codes() {
         if (best=="") break
         printf "%s{\"h\":\"%s\",\"rpm\":%.0f,\"e5\":%.0f}", (k++?",":""), best, hn[best]*60*kk/el, be*60*kk/el
         delete hn[best] }
-      printf "]\n" }'
+      printf "]\n"
+      up_out(el, kk) }'
+}
+
+# Error-лог хостового nginx (0.26): только строки про upstream, и только сайтов этого
+# access-лога (поле "server:" строки). Строки сайтов, которых нет ни у одного access-лога с этим
+# error-логом (server_name _, regexp), берет первый из них - иначе они пропали бы.
+# $1 - домены этого лога, $2 - 1, если он первый, $3 - все домены этого error-лога,
+# $4 - секунд с прошлого чтения, $5 - множитель (кусок больше ECAP считается выборкой)
+up_errlog() {
+  awk -v names="$1" -v first="$2" -v all="$3" -v el="$4" -v kk="$5" "$UPFN"'
+    BEGIN { n = split(names, w, " "); for (i = 1; i <= n; i++) mine[w[i]] = 1
+            n = split(all, w, " "); for (i = 1; i <= n; i++) known[w[i]] = 1 }
+    { sv = ""; if (match($0, /, server: [^,]*/)) sv = substr($0, RSTART + 10, RLENGTH - 10)
+      if ((sv in mine) || (first && !(sv in known))) up_take($0) }
+    END { if (el < 1) el = 60; up_out(el, kk) }'
+}
+
+# Новый кусок каждого error-лога из карты - один раз за запуск, сколько бы access-логов его ни
+# делили, и до разбора access-логов: иначе лог, пропущенный в этот раз (первый запуск,
+# ротация), не записал бы и точку отсчета error-лога. Из куска оставляем только строки про
+# upstream - дальше его читают по разу на каждый access-лог.
+ECAP=$((16 * 1024 * 1024))
+declare -A EL_FILE=() EL_EL=() EL_K=() EL_FIRST=() EL_ALL=()
+ETMP=""
+errlog_chunk() {  # $1 - путь error-лога
+  local f="$1" ino size prev pino psize pts el delta k chunk
+  [ -f "$f" ] || return 0
+  ino=$(stat -c %i "$f" 2>/dev/null) || return 0
+  size=$(stat -c %s "$f" 2>/dev/null) || return 0
+  prev=$(awk -F"$TAB" -v p="err:$f" '$1==p{print $2, $3, $4; exit}' "$STATE" 2>/dev/null)
+  # shellcheck disable=SC2086
+  set -- $prev
+  pino="${1:-}"; psize="${2:-0}"; pts="${3:-0}"
+  if ! { [ -n "$pino" ] && [ "$pino" = "$ino" ] && [ "$size" -ge "$psize" ]; }; then
+    printf '%s\t%s\t%s\t%s\n' "err:$f" "$ino" "$size" "$now" >> "$NEW"
+    return 0
+  fi
+  el=$((now - pts))
+  if [ "$el" -lt 20 ]; then
+    printf '%s\t%s\t%s\t%s\n' "err:$f" "$pino" "$psize" "$pts" >> "$NEW"
+    return 0
+  fi
+  printf '%s\t%s\t%s\t%s\n' "err:$f" "$ino" "$size" "$now" >> "$NEW"
+  delta=$((size - psize))
+  [ "$delta" -gt 0 ] || return 0
+  [ -n "$ETMP" ] || ETMP=$(mktemp -d /var/lib/kervax/web-err.XXXXXX) || return 0
+  chunk="$ETMP/${#EL_FILE[@]}"
+  k=1
+  if [ "$delta" -le "$ECAP" ]; then
+    tail -c "+$((psize + 1))" "$f" 2>/dev/null
+  else
+    k=$((delta / ECAP + 1))
+    tail -c "$ECAP" "$f" 2>/dev/null
+  fi | grep -aE '\[(error|crit|alert)\].*(upstream|could not be resolved)' > "$chunk" 2>/dev/null
+  EL_FILE[$f]=$chunk; EL_EL[$f]=$el; EL_K[$f]=$k
+}
+
+# Адрес контейнера docker -> его имя: "kervax-backend-1:8000" понятнее, чем "172.18.0.5:8000".
+# Один вызов докера за запуск и только если есть что называть.
+IPMAP=""
+IPMAP_DONE=0
+ipmap_load() {
+  IPMAP_DONE=1
+  command -v docker >/dev/null 2>&1 || return 0
+  # shellcheck disable=SC2046
+  IPMAP=$(docker ps -q 2>/dev/null | xargs -r docker inspect \
+          -f '{{.Name}}{{range .NetworkSettings.Networks}} {{.IPAddress}}{{end}}' 2>/dev/null | sed 's#^/##')
+}
+up_names() {  # $1 - JSON из up_out; имя контейнера кладем в "c", если там еще нет имени
+  [ -n "$IPMAP" ] || { printf '%s' "$1"; return; }
+  printf '%s' "$1" | awk -v m="$IPMAP" '
+    BEGIN { n = split(m, L, "\n")
+            for (i = 1; i <= n; i++) { k = split(L[i], f, " "); for (j = 2; j <= k; j++) if (f[j] != "") nm[f[j]] = f[1] } }
+    { out = ""; s = $0
+      while (match(s, /"u":"[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+[:"]/)) {
+        ip = substr(s, RSTART + 5, RLENGTH - 6)
+        rest = substr(s, RSTART + RLENGTH); seg = substr(rest, 1, index(rest, "}"))
+        out = out substr(s, 1, RSTART - 1) (((ip in nm) && seg !~ /"c":/) ? "\"c\":\"" nm[ip] "\"," : "") substr(s, RSTART, RLENGTH)
+        s = rest }
+      printf "%s", out s }'
 }
 
 caddy_get() {  # PID путь: запрос к admin-эндпоинту Caddy из сетевого пространства процесса
@@ -761,6 +933,16 @@ caddy_delta() {
 }
 
 if [ -s "$MAP" ]; then
+  # error-логи (пятая колонка, 0.26): первый access-лог каждого и все домены, что его делят
+  ELIST=$(awk -F"$TAB" '$5 ~ /^\// { if (!($5 in f)) { f[$5] = $1; o[++n] = $5 } u[$5] = u[$5] " " $2 }
+                         END { for (i = 1; i <= n; i++) print o[i] "\t" f[o[i]] "\t" u[o[i]] }' "$MAP")
+  if [ -n "$ELIST" ]; then
+    while IFS= read -r eline; do
+      ef=${eline%%"$TAB"*}; erest=${eline#*"$TAB"}
+      EL_FIRST[$ef]=${erest%%"$TAB"*}; EL_ALL[$ef]=${erest#*"$TAB"}
+      errlog_chunk "$ef"
+    done <<< "$ELIST"
+  fi
   # Колонки режем руками: read с IFS=TAB схлопывает подряд идущие табы (таб для
   # оболочки - пробельный разделитель), и у логов подов, где вторая колонка пустая,
   # имя уезжало в домены.
@@ -778,9 +960,10 @@ if [ -s "$MAP" ]; then
     names=${rest%%"$TAB"*}
     name=${rest#*"$TAB"}
     [ "$name" = "$rest" ] && name=""
-    # четвертая колонка (0.21) - формат лога с доменом
-    fmt=""
+    # четвертая колонка (0.21) - формат лога с доменом, пятая (0.26) - error-лог
+    fmt=""; elog=""
     case "$name" in *"$TAB"*) fmt=${name#*"$TAB"}; name=${name%%"$TAB"*} ;; esac
+    case "$fmt" in *"$TAB"*) elog=${fmt#*"$TAB"}; fmt=${fmt%%"$TAB"*} ;; esac
     [ -n "$lg" ] || continue
     case "$lg" in
       caddy:*)
@@ -859,6 +1042,15 @@ if [ -s "$MAP" ]; then
     p5=$(printf '%s\n' "$out" | sed -n 3p); [ -n "$p5" ] || p5="[]"
     l5=$(printf '%s\n' "$out" | sed -n 4p); [ -n "$l5" ] || l5="[]"
     hosts=$(printf '%s\n' "$out" | sed -n 5p); [ -n "$hosts" ] || hosts="[]"
+    up=$(printf '%s\n' "$out" | sed -n 6p); [ -n "$up" ] || up="[]"
+    # хостовый nginx: почему 502/504 - из его error-лога, своя доля строк по полю "server:"
+    if [ -n "$elog" ] && [ -n "${EL_FILE[$elog]+x}" ]; then
+      fl=0; [ "${EL_FIRST[$elog]:-}" = "$lg" ] && fl=1
+      ue=$(up_errlog "$names" "$fl" "${EL_ALL[$elog]:-}" "${EL_EL[$elog]}" "${EL_K[$elog]}" < "${EL_FILE[$elog]}")
+      [ -n "$ue" ] && [ "$ue" != "[]" ] && up=$ue
+    fi
+    case "$up" in *\"u\":\"[0-9]*) [ "$IPMAP_DONE" = 1 ] || ipmap_load; up=$(up_names "$up") ;; esac
+    uj=""; [ "$up" != "[]" ] && uj=",\"up\":$up"
     # shellcheck disable=SC2086
     set -- $counts
     lines=${1:-0}; e5=${2:-0}; e4=${3:-0}; un=${4:-0}
@@ -870,12 +1062,13 @@ if [ -s "$MAP" ]; then
     T5=$((T5 + r5))
     # домены - только у логов, которые делятся (формат с $host): иначе блок рос бы зря
     hj=""; [ -n "$fmt" ] && hj=",\"hosts\":$hosts"
-    ITEMS="$ITEMS${ITEMS:+,}{\"log\":\"$(esc "$lg")\",\"name\":\"$(esc "$name")\",\"rpm\":$rpm,\"e5\":$r5,\"e4\":$r4,\"un\":$ru,\"c5\":$c5,\"p5\":$p5,\"l5\":$l5$hj,\"sites\":$(printf '%s' "$names" | sites_json)}"
+    ITEMS="$ITEMS${ITEMS:+,}{\"log\":\"$(esc "$lg")\",\"name\":\"$(esc "$name")\",\"rpm\":$rpm,\"e5\":$r5,\"e4\":$r4,\"un\":$ru,\"c5\":$c5,\"p5\":$p5,\"l5\":$l5$hj$uj,\"sites\":$(printf '%s' "$names" | sites_json)}"
   done < "$MAP"
 fi
 
 mv -f "$NEW" "$STATE"
 chmod 0600 "$STATE"
+[ -z "$ETMP" ] || rm -rf "$ETMP"
 # Лог из карты пропал (под перевыкатили, контейнер пересоздали без имени) - пересобираем
 # карту сейчас, а не через 15 минут. В фоне и не чаще раза в 5 минут: на ноде с полусотней
 # контейнеров сборка занимает минуту, а пропавший навсегда лог иначе дёргал бы её каждый раз.

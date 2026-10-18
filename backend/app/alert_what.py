@@ -184,10 +184,14 @@ def _web5xx(body: str, extra: list[str]) -> list[tuple[str, str]] | None:
     pct = re.match(r"^([\d.]+)% запросов", body)
     site = re.search(r"Больше всего: ([^\s(]+)", body)
     path = re.search(r"Чаще всего падает: (\S+)", body)
+    # "Почему: app-1:8000 не принимает соединения - 44, ..." (helper 0.26): первая причина без
+    # числа; адрес с точками, поэтому до ", ", ". Заглавной" или конца
+    why = re.search(r"Почему: (.+?)(?: - \d+)?(?:, |\. (?=[А-ЯA-Z])|\.?$)", body)
     if not pct:
         return None
     what = f"ошибки 5xx на {site.group(1)}" if site else "ошибки 5xx"
-    return [(what, f"{pct.group(1)}% запросов" + (f", чаще {path.group(1)}" if path else ""))]
+    return [(what, f"{pct.group(1)}% запросов" + (f", чаще {path.group(1)}" if path else "")
+             + (f", {why.group(1)}" if why else ""))]
 
 
 def _exposed(body: str, extra: list[str]) -> list[tuple[str, str]] | None:

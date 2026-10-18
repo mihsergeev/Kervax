@@ -31,6 +31,7 @@ from app import docker_risk
 from app import reboot_survive
 from app import ssh_audit
 from app import web_certs
+from app import web_upstream
 from app import web_config
 from app import changes as srv_changes
 from app import known
@@ -1644,6 +1645,7 @@ async def _store_web_errors(session, server: Server, body, now: datetime) -> Non
             log=str(x.get("log") or "")[:512], label=web_log_label(x)[:255],
             e5=int(x.get("e5") or 0), rpm=int(x.get("rpm") or 0),
             codes=codes, paths=paths, lines=lines, hosts=hosts,
+            ups=web_upstream.clean(x.get("up")),
         ))
 
 
@@ -1670,6 +1672,7 @@ async def server_web_errors(
     acc: dict[str, dict] = {}
     seen: dict[str, set] = {}
     lines: dict[str, list[str]] = {}
+    ups: dict[str, dict] = {}  # почему 502/504 (helper 0.26): {(адрес, вид): ...} по логу
     for r in rows:
         # Сводим по доменам, а не по ключу лога: см. web_label_key - иначе один и тот же
         # контейнер после обновления хелпера показывался двумя строками.
@@ -1677,6 +1680,7 @@ async def server_web_errors(
         a = acc.setdefault(k, {"log": r.log, "label": r.label, "errors": 0, "minutes": 0,
                                "peak": 0, "first_ts": r.ts, "last_ts": r.ts,
                                "codes": {}, "paths": {}, "hosts": {}})
+        web_upstream.add(ups.setdefault(k, {}), r.ups)
         a["errors"] += int(r.e5 or 0)
         seen.setdefault(k, set()).add(r.ts)
         a["minutes"] = len(seen[k])
@@ -1701,6 +1705,7 @@ async def server_web_errors(
         out.append(WebErrorOut(**{**a, "key": k, "paths": [{"p": p, "n": n} for p, n in top],
                                   "hosts": [{"h": h, "n": n} for h, n in hosts],
                                   "lines": got[-5:], "lines_n": len(got),
+                                  "ups": web_upstream.top(ups.get(k) or {}),
                                   "gone": live is not None and k not in live}))
     return out
 

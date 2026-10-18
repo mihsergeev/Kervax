@@ -60,7 +60,7 @@ def test_alert_home_and_view():
 
 def test_helper_collects_certs():
     src = (Path(__file__).resolve().parents[2] / "agent" / "webserver-setup.sh").read_text(encoding="utf-8")
-    assert "KERVAX_SETUP_VERSION=0.25" in src and "collect_certs" in src and "report.d/web-certs.json" in src
+    assert "KERVAX_SETUP_VERSION=0.26" in src and "collect_certs" in src and "report.d/web-certs.json" in src
     assert "cert_renew" in src and "\r" not in src
 
 

@@ -1186,6 +1186,32 @@ function OomEventList({
   )
 }
 
+// Почему nginx отвечал 502/504 (helper 0.26): вид отказа upstream -> текст после его имени.
+// Те же тексты, что в алерте (backend/app/web_upstream.py)
+const UP_KIND: Record<string, string> = {
+  refused: 'не принимает соединения',
+  busy: 'не успевает принимать соединения: очередь сокета полна',
+  nofile: 'не запущен: сокета нет',
+  perm: 'не пускает: нет прав на сокет',
+  ctimeout: 'не принял соединение вовремя',
+  timeout: 'не ответил вовремя',
+  nolive: 'без живых серверов',
+  unreach: 'недоступен по сети',
+  closed: 'закрыл соединение, не ответив',
+  reset: 'сбросил соединение',
+  bighdr: 'прислал заголовок больше буфера',
+  resolve: 'не резолвится',
+  ssl: 'не прошел TLS',
+  bad: 'ответил не по протоколу',
+  other: 'ошибка связи',
+}
+// имя upstream: контейнер с портом вместо его адреса, если имя известно
+function upWho(x: { u: string; c?: string }): string {
+  if (!x.c) return x.u
+  if (/^\d+\.\d+\.\d+\.\d+(:\d+)?$/.test(x.u)) return x.c + (x.u.includes(':') ? x.u.slice(x.u.indexOf(':')) : '')
+  return `${x.c} (${x.u})`
+}
+
 // Ошибки 5xx по логам за сутки: куда ведёт ссылка из алерта. Где (домены, под или
 // контейнер), сколько и в пике, какими кодами и на каких путях. Коды и пути присылает
 // helper с 0.12; у старого - только числа.
@@ -1343,6 +1369,14 @@ function WebErrorList({
               <div className="web-err-line small">
                 <span className="muted">{t('коды')}: </span>
                 <span className="mono">{codes.map(([c, n]) => `${c} - ${n}`).join(', ')}</span>
+              </div>
+            )}
+            {(r.ups?.length ?? 0) > 0 && (
+              <div className="web-err-line small">
+                <span className="muted">{t('почему')}: </span>
+                <span className="mono">
+                  {(r.ups ?? []).slice(0, 4).map((x) => `${upWho(x)} ${t(UP_KIND[x.k] ?? UP_KIND.other)} (${x.n})`).join(', ')}
+                </span>
               </div>
             )}
             {r.paths.length > 0 && (
