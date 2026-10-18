@@ -1479,8 +1479,8 @@ const EN: Record<string, string> = {
   'Не видны программы этих демонов: {list}.': 'Programs of these daemons are not visible: {list}.',
   'Воркер упал или падает и поднимается': 'A worker is down or keeps crashing',
   'Программы под supervisor и pm2. Алерт, когда воркер не запускается (supervisor или pm2 перестал его поднимать, или три минуты не может запуститься), завершился с ошибкой или падает и поднимается: три перезапуска за 15 минут. Остановленные руками не судятся.': 'Programs under supervisor and pm2. An alert when a worker does not start (supervisor or pm2 gave up on it, or it cannot start for three minutes), exited with an error or keeps crashing: three restarts in 15 minutes. Programs stopped by hand are not judged.',
-  'Без порога панель сама алертит очередь, которая полчаса растет и не разбирается или осталась без потребителей. Очереди мертвых писем (dlq) не судятся.':
-    'Without a threshold the panel alerts on its own when a queue grows for half an hour and is not consumed or is left without consumers. Dead letter queues (dlq) are not judged.',
+  'Без порога панель сама алертит очередь от сотни сообщений, которая полчаса растет и не разбирается или осталась без потребителей. Очереди мертвых писем (dlq) не судятся.':
+    'Without a threshold the panel alerts on its own when a queue of a hundred messages or more grows for half an hour and is not consumed or is left without consumers. Dead letter queues (dlq) are not judged.',
   'очередь': 'queue',
   'заглушено': 'muted',
   'Ошибки драйвера (Xid) за сутки и те, после которых GPU ждет сброса': 'Driver errors (Xid) in a day and those after which the GPU waits for a reset',
