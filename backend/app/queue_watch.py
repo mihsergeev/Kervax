@@ -19,7 +19,10 @@ amq.*) не судим: первые копятся по замыслу, вто�
 
 Очереди в Redis (Celery, Sidekiq, RQ, BullMQ, Laravel, Yii) присылает helper queues-setup: extras
 "queues", брокер на каждую связку экземпляр Redis + система + база + префикс. Судятся так же, ключ -
-по источнику "контейнер redis, Celery, db 1". Заглушить очередь можно насовсем (alert_mutes
+по источнику "контейнер redis, Celery, db 1". С queues-setup 0.3 там же очереди в таблицах баз
+(engine "pg" или "mysql"): Yii, Laravel, Symfony Messenger, Delayed Job, Solid Queue, GoodJob, Que,
+Oban, River, pg-boss, Hangfire - брокер на таблицу, ключ "на хосте, Yii, база app" (и таблица, если
+она названа не так, как у системы по умолчанию). Заглушить очередь можно насовсем (alert_mutes
 "qstuck:<ключ>") или на время (alert_snoozes с тем же ключом): и алерт хода, и порог глубины. Состояние - в
 alert_state["qwatch"]: {ключ очереди: {"t0", "d0", "p", "nd", "last", "seen"}}, ключ как у порога
 (collector.queue_key). Ведет цикл алертов, пока нода на связи; провал в отчетах дольше GAP_S
@@ -61,7 +64,14 @@ def skipped(name: str) -> bool:
 
 
 SYSTEM_LABEL = {"celery": "Celery", "sidekiq": "Sidekiq", "rq": "RQ", "bullmq": "BullMQ",
-                "laravel": "Laravel", "yii": "Yii"}
+                "laravel": "Laravel", "yii": "Yii", "symfony": "Symfony Messenger", "delayed_job": "Delayed Job",
+                "solid_queue": "Solid Queue", "good_job": "GoodJob", "que": "Que", "oban": "Oban",
+                "river": "River", "pgboss": "pg-boss", "hangfire": "Hangfire"}
+ENGINE_LABEL = {"redis": "Redis", "pg": "PostgreSQL", "mysql": "MySQL"}
+# таблица системы по умолчанию: ее в подписи не называем
+DEFAULT_TABLE = {"yii": "queue", "laravel": "jobs", "symfony": "messenger_messages", "delayed_job": "delayed_jobs",
+                 "solid_queue": "solid_queue_ready_executions", "good_job": "good_jobs", "que": "que_jobs",
+                 "oban": "oban_jobs", "river": "river_job", "pgboss": "pgboss.job", "hangfire": "hangfire.jobqueue"}
 
 
 def where_text(w: str) -> str:
@@ -74,10 +84,17 @@ def where_text(w: str) -> str:
     return "на хосте" if w in ("", "host") else w
 
 
-def redis_brokers(rep: dict) -> list[dict]:
-    """Очереди в Redis от helper'а queues-setup, в виде брокеров как у RabbitMQ: {"kind" (система),
-    "label", "engine": "redis", "source" (часть ключа и подпись в алерте), "where" (подпись в
-    карточке), "ns", "db", "queues", "total"}"""
+def _table_note(system: str, table: str) -> str:
+    """Таблица в подписи, если она названа не как у системы по умолчанию (префикс, своя схема)"""
+    d = DEFAULT_TABLE.get(system, "")
+    t = table.lower()
+    return "" if not t or t in (d, d.split(".")[-1]) else table
+
+
+def helper_brokers(rep: dict) -> list[dict]:
+    """Очереди от helper'а queues-setup (в Redis и в таблицах баз), в виде брокеров как у RabbitMQ:
+    {"kind" (система), "label", "engine" ("redis", "pg", "mysql"), "source" (часть ключа и подпись в
+    алерте), "where" (подпись в карточке), "ns", "db", "queues", "total"}"""
     block = ((rep or {}).get("extras") or {}).get("queues")
     out = []
     for b in (block or {}).get("brokers") or [] if isinstance(block, dict) else []:
@@ -85,29 +102,58 @@ def redis_brokers(rep: dict) -> list[dict]:
             continue
         system = str(b["system"])
         label = SYSTEM_LABEL.get(system, system)
-        ns, db = str(b.get("ns") or ""), int(b.get("db") or 0)
+        engine = str(b.get("engine") or "redis")
         wt = where_text(str(b.get("where") or ""))
-        src = f"{wt}, {label}" + (f" {ns}" if ns else "") + (f", db {db}" if db else "")
         qs = [dict(q, vhost="/") for q in b.get("queues") or [] if isinstance(q, dict) and q.get("name")]
-        out.append({"kind": system, "label": label, "engine": "redis", "source": src,
-                    "where": "Redis, " + wt + (f", db {db}" if db else "") + (f", префикс {ns}" if ns else ""),
+        if engine == "redis":
+            ns, db = str(b.get("ns") or ""), int(b.get("db") or 0)
+            src = f"{wt}, {label}" + (f" {ns}" if ns else "") + (f", db {db}" if db else "")
+            where = "Redis, " + wt + (f", db {db}" if db else "") + (f", префикс {ns}" if ns else "")
+        else:
+            base, tb = str(b.get("base") or ""), _table_note(system, str(b.get("table") or ""))
+            ns, db = "", 0
+            tail = (f", база {base}" if base else "") + (f", таблица {tb}" if tb else "")
+            src = f"{wt}, {label}{tail}"
+            where = f"{ENGINE_LABEL.get(engine, engine)}, {wt}{tail}"
+        out.append({"kind": system, "label": label, "engine": engine, "source": src, "where": where,
                     "ns": ns, "db": db, "queues": qs, "total": int(b.get("total") or len(qs))})
     return out
 
 
+def _skipped(rep: dict) -> list[dict]:
+    block = ((rep or {}).get("extras") or {}).get("queues")
+    return [x for x in (block or {}).get("skipped") or [] if isinstance(x, dict)] if isinstance(block, dict) else []
+
+
 def redis_skipped(rep: dict) -> list[str]:
     """Экземпляры Redis, пароль которых helper не нашел: очереди в них не видны"""
-    block = ((rep or {}).get("extras") or {}).get("queues")
-    return [where_text(str(x.get("where") or "")) for x in (block or {}).get("skipped") or []
-            if isinstance(x, dict)] if isinstance(block, dict) else []
+    return [where_text(str(x.get("where") or "")) for x in _skipped(rep) if (x.get("engine") or "redis") == "redis"]
+
+
+def db_skipped(rep: dict) -> list[dict]:
+    """Базы, куда helper не вошел (why "auth"), и таблицы очередей, которые он не считает каждую
+    минуту: больше миллиона строк, выполненные задачи не удаляются (why "big"): {"why", "where", "rows"}"""
+    out = []
+    for x in _skipped(rep):
+        engine = str(x.get("engine") or "redis")
+        if engine == "redis":
+            continue
+        where = f"{ENGINE_LABEL.get(engine, engine)}, {where_text(str(x.get('where') or ''))}"
+        if x.get("why") == "big":
+            system = str(x.get("system") or "")
+            where += f", {SYSTEM_LABEL.get(system, system)}, база {x.get('base') or ''}, таблица {x.get('table') or ''}"
+            out.append({"why": "big", "where": where, "rows": int(x.get("rows") or 0)})
+        else:
+            out.append({"why": "auth", "where": where})
+    return out
 
 
 def brokers(rep: dict) -> list[dict]:
-    """Все брокеры ноды: RabbitMQ (агент) и очереди в Redis (helper): {"kind", "source", "queues"}"""
+    """Все брокеры ноды: RabbitMQ (агент) и очереди от helper'а (Redis, таблицы баз): {"kind", "source", "queues"}"""
     out = [{"kind": "rabbitmq", "source": str(svc.get("source") or ""), "queues": svc.get("queues") or []}
            for svc in (rep or {}).get("services") or []
            if isinstance(svc, dict) and svc.get("kind") == "rabbitmq"]
-    return out + redis_brokers(rep)
+    return out + helper_brokers(rep)
 
 
 def queues(rep: dict) -> list[dict]:
@@ -231,7 +277,7 @@ def mute_view(s: Server, now: datetime) -> dict[str, dict]:
     return out
 
 
-def redis_view(s: Server) -> list[dict]:
-    """Брокеры в Redis для карточки (без служебных полей)"""
+def helper_view(s: Server) -> list[dict]:
+    """Брокеры от helper'а (Redis, таблицы баз) для карточки (без служебных полей)"""
     return [{k: b[k] for k in ("kind", "label", "engine", "source", "where", "queues", "total")}
-            for b in redis_brokers(s.last_report or {})]
+            for b in helper_brokers(s.last_report or {})]

@@ -132,6 +132,8 @@ type SvcItem = {
 type SrvServices = { server: Server; items: SvcItem[] }
 
 const QUEUE_HOT = 100 // очередь глубже — подсвечиваем: обычно отставший консьюмер
+// иконка брокера очередей по тому, где они лежат (helper queues-setup); без engine - RabbitMQ
+const QUEUE_ENGINE_ICON: Record<string, string> = { redis: 'Redis', pg: 'PostgreSQL', mysql: 'MySQL/MariaDB' }
 // точка строки очереди по тону
 const DOT: Record<string, string> = { 't-up': ' lk-dot-ok', 't-down': ' lk-dot-bad', 't-degraded': ' lk-dot-warn', 't-soon': '' }
 // подпись плитки из частей: пустые выкидываем
@@ -742,7 +744,8 @@ function buildByServer(
       seen.add(kind)
       items.push({ kind, where: svc.source || '', svc })
     }
-    // очереди в Redis (helper queues-setup): Celery, Sidekiq, RQ, BullMQ, Laravel, Yii
+    // очереди от helper'а queues-setup: в Redis (Celery, Sidekiq, RQ, BullMQ, Laravel, Yii) и в таблицах
+    // баз (Yii, Laravel, Symfony, Delayed Job, Solid Queue, GoodJob, Que, Oban, River, pg-boss, Hangfire)
     for (const svc of s.queue_brokers ?? []) items.push({ kind: svc.label || svc.kind, where: svc.where || '', svc })
     // Аудит покрытия — единственное место, где перечислены СУБД ноды (в services[]
     // их нет), поэтому для ОБНАРУЖЕНИЯ он нужен. Но берём из него только «что и где»:
@@ -882,7 +885,7 @@ function QueueList({ server, svc, busy, save, onChanged, onlyProblems }: {
     <div className="chart-card net-card net-card-wide">
       <div className="net-head">
         <div className="hs-svc-title">
-          <span className="svc-ico"><EngineIcon name={svc.engine === 'redis' ? 'Redis' : 'RabbitMQ'} /></span>
+          <span className="svc-ico"><EngineIcon name={QUEUE_ENGINE_ICON[svc.engine ?? ''] ?? 'RabbitMQ'} /></span>
           {svc.label || 'RabbitMQ'}
           <span className="net-n">{svc.total ?? all.length}</span>
         </div>
@@ -903,7 +906,8 @@ function QueueList({ server, svc, busy, save, onChanged, onlyProblems }: {
       )}
       <div className="loc-results docker-clist">
         {queues.length === 0 ? (
-          <div className="muted small">{t('Ничего не найдено.')}</div>
+          // в таблице очередей пусто - все задачи разобраны (выполненные система удаляет)
+          <div className="muted small">{all.length === 0 ? t('Задач нет: все разобраны.') : t('Ничего не найдено.')}</div>
         ) : (
           queues.map((x) => {
             const d = qDepth(x)
@@ -1059,9 +1063,11 @@ function ServerServicesModal({ srv, onClose, onChanged, initialSec, sites }: {
   const llmBad = llm.filter((x) => !x.ok && !x.no_metrics).length
   const dbs = dbItems.flatMap((it) => it.db ?? [])
   const dbRows = dbs.flatMap((d) => (d.engine === 'redis' ? [] : d.dbs ?? []))
-  // брокеры очередей: RabbitMQ (агент) и очереди в Redis (helper queues-setup)
+  // брокеры очередей: RabbitMQ (агент), очереди в Redis и в таблицах баз (helper queues-setup)
   const rabbit = srv.items.filter((it) => !!it.svc)
   const qAll = rabbit.flatMap((it) => it.svc?.queues ?? [])
+  const dbNoAuth = (s.queue_db_skipped ?? []).filter((x) => x.why === 'auth')
+  const dbBig = (s.queue_db_skipped ?? []).filter((x) => x.why === 'big')
   const qHot = qAll.filter((x) => qDepth(x) >= QUEUE_HOT).length
   // брокеры с бедой - наверх; фильтр "с проблемами" прячет остальное
   const [qOnly, setQOnly] = useState(false)
@@ -1422,6 +1428,16 @@ function ServerServicesModal({ srv, onClose, onChanged, initialSec, sites }: {
                 {(s.queue_skipped ?? []).length > 0 && (
                   <div className="muted small">
                     {t('Очереди в этих Redis не видны: helper не нашел пароль ({list}). Он берет REDIS_PASSWORD или --requirepass из настроек контейнера либо requirepass из redis.conf.', { list: (s.queue_skipped ?? []).join(', ') })}
+                  </div>
+                )}
+                {dbNoAuth.length > 0 && (
+                  <div className="muted small">
+                    {t('Таблицы очередей в этих базах не проверены: helper не смог войти ({list}). PostgreSQL он открывает через сокет под пользователем сервера или по POSTGRES_PASSWORD из настроек контейнера, MySQL - через debian.cnf или по MYSQL_ROOT_PASSWORD.', { list: dbNoAuth.map((x) => x.where).join('; ') })}
+                  </div>
+                )}
+                {dbBig.length > 0 && (
+                  <div className="muted small">
+                    {t('Не считаются каждую минуту: в таблице очередей больше миллиона строк, выполненные задачи из нее не удаляются ({list}).', { list: dbBig.map((x) => t('{w}: {n} строк', { w: x.where, n: rpmText(x.rows ?? 0) })).join('; ') })}
                   </div>
                 )}
                 {qProbN > 0 && (rabbit.length > 1 || qAll.length > 8) && (

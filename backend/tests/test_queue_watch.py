@@ -129,7 +129,7 @@ def _redis_rep(depth):
 
 def test_redis_queues_are_brokers_too():
     rep = _redis_rep(7)
-    bs = qw.redis_brokers(rep)
+    bs = qw.helper_brokers(rep)
     assert [b["source"] for b in bs] == ["под default/redis-0, Celery, db 1", "контейнер app-redis, BullMQ bull:"]
     assert bs[0]["where"] == "Redis, под default/redis-0, db 1"
     assert bs[1]["where"] == "Redis, контейнер app-redis, префикс bull:"
@@ -177,7 +177,50 @@ def test_queues_helper_is_needed_where_redis_is():
     from app import setup_scripts
     assert setup_scripts.setup_needed("queues-setup", {"db_engines": ["PostgreSQL", "Redis"]})
     assert setup_scripts.setup_needed("queues-setup", {"extras": {"queues": {"brokers": []}}})
-    assert not setup_scripts.setup_needed("queues-setup", {"db_engines": ["PostgreSQL"]})
+    # 0.3: очереди бывают и в таблицах баз
+    assert setup_scripts.setup_needed("queues-setup", {"db_engines": ["PostgreSQL"]})
+    assert setup_scripts.setup_needed("queues-setup", {"db_engines": ["MySQL/MariaDB"]})
+    assert not setup_scripts.setup_needed("queues-setup", {"db_engines": ["ClickHouse"]})
+    assert not setup_scripts.setup_needed("queues-setup", {"db_engines": []})
+
+
+def _table_rep(ready):
+    return {"mem_total": 8 * 2**30, "mem_used": 2**30, "clock_unix": int(NOW.timestamp()),
+            "extras": {"queues": {"v": 1, "ts": 1, "brokers": [
+                {"system": "yii", "engine": "pg", "where": "host", "base": "app", "table": "queue", "total": 1,
+                 "queues": [{"name": "default", "ready": ready, "unacked": 2}]},
+                {"system": "laravel", "engine": "mysql", "where": "container shop-db", "base": "shop",
+                 "table": "tbl_jobs", "total": 0, "queues": []},
+                {"system": "hangfire", "engine": "pg", "where": "pod jobs/pg-0", "base": "app",
+                 "table": "hangfire.jobqueue", "total": 1, "queues": [{"name": "critical", "ready": 1}]}],
+                "skipped": [{"where": "container cache", "why": "auth"},
+                            {"where": "container legacy-db", "why": "auth", "engine": "mysql"},
+                            {"where": "host", "why": "big", "engine": "pg", "base": "crm", "table": "queue",
+                             "system": "yii", "rows": 3200000}]}}}
+
+
+def test_queue_tables_are_brokers_too():
+    rep = _table_rep(5)
+    bs = qw.helper_brokers(rep)
+    assert [b["engine"] for b in bs] == ["pg", "mysql", "pg"]
+    # таблица по умолчанию в подписи не названа, своя - названа
+    assert [b["source"] for b in bs] == ["на хосте, Yii, база app", "контейнер shop-db, Laravel, база shop, таблица tbl_jobs",
+                                         "под jobs/pg-0, Hangfire, база app"]
+    assert bs[0]["where"] == "PostgreSQL, на хосте, база app"
+    assert bs[1]["where"] == "MySQL, контейнер shop-db, база shop, таблица tbl_jobs" and bs[1]["queues"] == []
+    q = {x["name"]: x for x in qw.queues(rep)}
+    assert q["default"]["key"] == "на хосте, Yii, база app|//default" and q["default"]["depth"] == 7
+    # пропуски Redis и баз раздельно
+    assert qw.redis_skipped(rep) == ["контейнер cache"]
+    assert qw.db_skipped(rep) == [{"why": "auth", "where": "MySQL, контейнер legacy-db"},
+                                  {"why": "big", "where": "PostgreSQL, на хосте, Yii, база crm, таблица queue", "rows": 3200000}]
+    # судятся как остальные: растет 40 минут и не разбирается
+    st: dict = {}
+    for i in range(41):
+        st = qw.update(st, _table_rep(5 * i), NOW - timedelta(minutes=40 - i))
+    p = qw.problems(_srv(state={"qwatch": st}, rep=_table_rep(200)), NOW)
+    assert [x["name"] for x in p] == ["default"]
+    assert p[0]["text"].startswith("очередь default (на хосте, Yii, база app) растет 40 мин")
 
 
 def test_snooze_accepts_a_queue_key():
@@ -189,7 +232,12 @@ def test_snooze_accepts_a_queue_key():
 def test_helper_script():
     from pathlib import Path
     src = (Path(__file__).resolve().parents[2] / "agent" / "queues-setup.sh").read_text(encoding="utf-8")
-    assert "KERVAX_SETUP_VERSION=0.2" in src and "/bin/sh -c" in src and 'KERVAX_SETUP_WHEN="' in src
+    assert "KERVAX_SETUP_VERSION=0.3" in src and "/bin/sh -c" in src and 'KERVAX_SETUP_WHEN="' in src
+    assert "pgrep -x postgres" in src and "pgrep -x mysqld" in src
     assert "REDISCLI_AUTH" in src and "\r" not in src
-    # пароль только через stdin, не в командной строке
+    # пароль только через stdin или окружение, не в командной строке
     assert "redis-cli -a" not in src and "--pass" not in src and "--requirepass \"$" not in src
+    assert 'PGPASSWORD="$pw"' in src and 'MYSQL_PWD="$pw"' in src and "-p$" not in src
+    # в базе только чтение и короткие запросы
+    assert "default_transaction_read_only=on" in src and "statement_timeout=5000" in src
+    assert "set session transaction read only" in src and "max_execution_time" in src

@@ -1914,6 +1914,8 @@ export type Server = {
   // очереди в Redis (helper queues-setup) и экземпляры Redis без известного пароля
   queue_brokers?: ServiceInfo[] | null
   queue_skipped?: string[] | null
+  // базы, куда helper очередей не вошел (auth), и таблицы очередей больше миллиона строк (big)
+  queue_db_skipped?: { why: string; where: string; rows?: number }[] | null
   // заглушенные очереди: насовсем или до срока
   queue_mutes?: Record<string, { perm?: boolean; until?: string }> | null
   // изменения на сервере (helper changes-setup): лента между снимками, отметка "это мы"
@@ -2075,13 +2077,13 @@ export type QueueStat = {
   consumers?: number // потребителей у очереди (агент 2.38)
 }
 export type ServiceInfo = {
-  kind: string // rabbitmq | celery | sidekiq | rq | bullmq | laravel | yii
+  kind: string // rabbitmq | celery | sidekiq | rq | bullmq | laravel | yii | symfony | oban ... (queue_watch.SYSTEM_LABEL)
   source?: string // «под ns/name» / «контейнер X»; у очередей в Redis - «контейнер X, Celery, db 1» (часть ключа)
   queues?: QueueStat[] // прислана только верхушка по глубине
   total?: number // всего очередей у инстанса
-  label?: string // Celery, Sidekiq... (очереди в Redis)
-  engine?: string // redis
-  where?: string // подпись в карточке: «Redis, контейнер X, db 1»
+  label?: string // Celery, Sidekiq... (очереди от helper'а queues-setup)
+  engine?: string // redis | pg | mysql
+  where?: string // подпись в карточке: «Redis, контейнер X, db 1», «PostgreSQL, на хосте, база app»
 }
 export type DBStat = {
   engine: string // pg | mysql | clickhouse | redis
