@@ -32,6 +32,7 @@ from app import docker_risk
 from app import gpu as gpu_mod
 from app import queue_watch
 from app import workers as workers_mod
+from app import cron_watch
 from app import listen_watch
 from app import podnames
 from app import mem_trend
@@ -281,6 +282,7 @@ _SRV_ICON = {
     "mem_leak": "📈🧠", "ssh_risk": "🔐", "access_risk": "🗝", "db_health": "🛢",
     "web_config": "🧾", "web_cert": "🔏", "listen_gone": "🔌", "disk_slow": "🐢",
     "gpu": "🎛", "gpu_heat": "🌡", "llm": "💬", "queue_stuck": "⏳", "queue_failed": "🧨", "workers": "👷",
+    "cron_stuck": "⏲",
 }
 
 # Куда ведёт ссылка алерта (deep-link ?server=id&sec=…). Целимся в КОНКРЕТНУЮ метрику,
@@ -322,7 +324,7 @@ _BACKUP_SEC = {"backup_failed": "runs", "backup_stale": "runs", "backup_growth":
 _BSRV_SEC = {"backup_repo": "repos", "backup_lock": "repos", "backup_unmonitored": "repos", "backup_check": "repos",
              "backup_prune": "cleanup", "backup_rotation": "cleanup"}
 # раздел карточки сервисов ноды по алерту и по проблеме
-_SVC_SEC = {"queue": "queues", "queue_stuck": "queues", "queue_failed": "queues", "workers": "workers", "db_conn": "db", "db_health": "db", "web_config": "web", "web_cert": "certs",
+_SVC_SEC = {"queue": "queues", "queue_stuck": "queues", "queue_failed": "queues", "workers": "workers", "cron_stuck": "cron", "db_conn": "db", "db_health": "db", "web_config": "web", "web_cert": "certs",
             "llm": "llm"}
 _KUBE_TAB = {"kube_expiry": "expiry", "flux_down": "flux", "flux_stale": "flux", "kube_pod": "pods",
              "kube_cron": "cron", "kube_node": "nodes", "kube_job": "cron", "kube_restarts": "pods"}
@@ -336,6 +338,7 @@ _ALERT_SECTION = {
     "queue_stuck": "services",
     "queue_failed": "services",
     "workers": "services",
+    "cron_stuck": "services",
     "backup_repo": "backups",
     "backup_rotation": "backups",
     "backup_lock": "backups",
@@ -1690,6 +1693,8 @@ def _recovery_detail(key: str, st: dict, ctx: dict) -> str:
         return "задачи больше не падают пачками: за час упало меньше половины порога"
     if key == "workers":
         return "воркеры снова работают"
+    if key == "cron_stuck":
+        return "кроны больше не наслаиваются и не висят"
     if key == "disk_forecast":
         return "диски больше не грозят заполниться в ближайшие дни: рост замедлился или место освободили"
     if key == "units":
@@ -3534,6 +3539,10 @@ def server_problems(s: Server, now: datetime, pod_names: dict[str, str] | None =
     for x in workers_mod.problems(s, now):
         add("workers", x["level"], x["text"], "workers", workers_mod.MUTE_PREFIX + x["key"], x["since"],
             section="services")
+    # Кроны (helper cron-setup): копии наслаиваются или одна висит в разы дольше обычного
+    for x in cron_watch.problems(s, now):
+        add("cron_stuck", x["level"], x["text"], "cron", cron_watch.MUTE_PREFIX + x["key"], x["since"],
+            section="services")
     # Сроки кластера: ближайший в пределах дальнего порога. За последний порог и истекший - проблема
     wd = kube_warn_days(s) if getattr(s, "kube_expiry_warn_days", None) else []
     soon = kube_expiry_soon(rep, wd, now) if wd else None
@@ -3701,7 +3710,7 @@ _SIGNALS = {6: "ABRT", 9: "KILL", 11: "SEGV", 15: "TERM"}
 # который не укладывался во время на нодах с большим журналом, прислал алерт с каждой такой
 # ноды, и каждые 10 минут снова. kervax-agent и kervax-dumps (дампы баз для бэкапа) не тут.
 _OWN_HELPER_UNIT = re.compile(
-    r"kervax-(changes|db-stats|disk-health|disk-usage|gpu|kube-expiry|kube-flux|queues|units|web-rate|web-sites|workers"
+    r"kervax-(changes|cron|db-stats|disk-health|disk-usage|gpu|kube-expiry|kube-flux|queues|units|web-rate|web-sites|workers"
     r"|[a-z]+-req)\.service")
 
 # Задание по таймеру, которое падает на каждом запуске, между падениями несколько минут
@@ -3752,6 +3761,8 @@ def _sig_all_quiet(s: Server, key: str, sig: set[str], now: datetime) -> bool:
         return all(k in queue_watch.failed_muted(s, now) for k in sig)
     if key == "workers":
         return all(k in workers_mod.muted_keys(s, now) for k in sig)
+    if key == "cron_stuck":
+        return all(k in cron_watch.muted_keys(s, now) for k in sig)
     return False
 
 
@@ -5283,6 +5294,14 @@ def _server_conditions(s: Server, now: datetime,
                           {"detail": "\n".join(x["text"] for x in wp[:3])
                                      + (f"\nи еще {len(wp) - 3}" if len(wp) > 3 else ""),
                            "sig": [x["key"] for x in wp]})
+    # Кроны: выдержка уже в правилах (вторая копия идет 15 минут, висит - не раньше часа). sig -
+    # какие задачи: вторая наслоившаяся дает свой алерт
+    if online and cron_watch.block(rep) is not None:
+        cp = cron_watch.problems(s, now)
+        out["cron_stuck"] = (max((x["level"] for x in cp), default=0),
+                             {"detail": "\n".join(x["text"] for x in cp[:3])
+                                        + (f"\nи еще {len(cp) - 3}" if len(cp) > 3 else ""),
+                              "sig": [x["key"] for x in cp]})
     # Утечка памяти: дно растет суток подряд (история - в alert_state mem_trend, ведет цикл алертов)
     if online and isinstance((s.alert_state or {}).get("mem_trend"), dict):
         ml = mem_trend.problems(s, now)
@@ -5632,7 +5651,7 @@ async def evaluate_servers(
             prev = int(st.get(key, 0))
             if key in ("disk_health", "units", "docker_restarts", "kube_restarts", "mem_leak", "db_health",
                        "web_config", "web_cert", "listen_gone", "docker_risk", "access_risk", "link", "gpu",
-                       "queue_stuck", "queue_failed", "workers"):
+                       "queue_stuck", "queue_failed", "workers", "cron_stuck"):
                 # Тот же уровень, но сломалось НОВОЕ (второй диск при уже развалившемся
                 # RAID, второй упавший юнит): молчать нельзя, хотя уровень не вырос. Что
                 # сломано - ключи в sig.

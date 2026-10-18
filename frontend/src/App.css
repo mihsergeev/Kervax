@@ -4445,6 +4445,10 @@ textarea:focus {
 .docker-c-img.q-stuck { color: var(--down); white-space: normal; }
 /* строка лога упавшего воркера: переносится, не больше трех строк, целиком в подсказке */
 .docker-c-img.w-log { white-space: normal; overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; }
+/* команда крона: длинная, переносится, не больше двух строк, целиком в подсказке */
+.docker-c-name.cron-cmd { white-space: normal; overflow-wrap: anywhere; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; font-weight: 500; }
+/* stderr ушел в cron из-за порядка 2>&1 - ошибка в самой строке крона */
+.docker-c-img.cron-lost { color: var(--degraded); white-space: normal; }
 /* заглушенная очередь (не алертить): блеклая, кнопка "не алертить" и выбор срока в строке */
 .docker-row.q-muted { border-left-color: var(--border); opacity: 0.65; }
 .q-mute-btn { width: 34px; flex-shrink: 0; padding: 2px 0; text-align: center; }

@@ -18,6 +18,7 @@ import {
   type QueueFailed,
   type ServiceInfo,
   type WorkerDaemon,
+  type CronJob,
   type WorkerProg,
 } from './api'
 import { LlmSection } from './Gpu'
@@ -29,7 +30,7 @@ import { fmtRel } from './ServersPage'
 import { CardNav, FreshChip, markMuted, OvAreas, OvRows, secInfoOf, type OvRow, type SecDef, type SecInfo, type SecItem } from './cardLayout'
 import { AdoptSitesModal, adoptable } from './AdoptSitesModal'
 import { EngineIcon } from './engineIcon'
-import { QFAIL_MUTE, QSTUCK_MUTE, WORKER_MUTE } from './mutes'
+import { CRON_MUTE, QFAIL_MUTE, QSTUCK_MUTE, WORKER_MUTE } from './mutes'
 import { OsIcon } from './osIcon'
 import { CountryFlag } from './CountryFlag'
 import { byteUnits } from './units'
@@ -132,6 +133,7 @@ type SvcItem = {
   db?: DBStat[] // инвентарь СУБД: ВСЕ инстансы этого движка на ноде (хелпер dbstat-setup)
   llm?: boolean // LLM-сервис (vLLM, SGLang, TEI): метрики в s.llm, свой раздел
   workers?: boolean // демон воркеров (supervisor, pm2): программы в s.workers, свой раздел
+  cron?: boolean // кроны (helper cron-setup): задачи в s.cron, свой раздел; ноду в список не добавляет
 }
 type SrvServices = { server: Server; items: SvcItem[] }
 
@@ -776,6 +778,9 @@ function buildByServer(
     for (const x of s.llm ?? []) items.push({ kind: x.engine_name, where: x.where, llm: true })
     // демоны воркеров (helper workers-setup): supervisor и pm2, свой раздел
     for (const d of s.workers ?? []) items.push({ kind: d.label, where: d.where, workers: true })
+    // кроны (helper cron-setup): cron есть почти на каждой ноде, в список нод он ее не добавляет,
+    // но окно сервисов по ссылке из алерта открывается и у ноды без других сервисов
+    const hasCron = (s.cron?.jobs ?? []).length > 0
     // веб-серверы/прокси (nginx/envoy/…): их не бэкапят, поэтому идут отдельным источником
     for (const w of s.last_report?.web_services ?? []) {
       if (seen.has(w.kind)) continue
@@ -785,12 +790,12 @@ function buildByServer(
     const stats = s.last_report?.db_stats ?? []
     if (stats.length)
       for (const it of items) {
-        if (it.web || it.llm || it.workers) continue
+        if (it.web || it.llm || it.workers || it.cron) continue
         const m = matchDbStats(it.kind, stats)
         if (m.length) it.db = m
       }
     items.sort((a, b) => a.kind.localeCompare(b.kind))
-    if (items.length) out.push({ server: s, items })
+    if (items.length || hasCron) out.push({ server: s, items })
   }
   return out.sort((a, b) => a.server.name.localeCompare(b.server.name))
 }
@@ -1244,6 +1249,146 @@ function WorkerList({ server, d, onChanged, onlyProblems }: {
   )
 }
 
+// Задачи cron одного демона (хост, контейнер, под; helper cron-setup): с бедой и идущие наверху.
+// У задачи расписание, последний запуск, запусков за сутки, обычная длительность и идущие копии;
+// вывод, который доходит до cron без почты на сервере, выбрасывается. 🔕 - не алертить по задаче
+function CronList({ server, where, kind, jobs, onChanged, filter }: {
+  server: Server
+  where: string
+  kind: string
+  jobs: CronJob[]
+  onChanged: () => void
+  filter: 'all' | 'run' | 'bad'
+}) {
+  const { t } = useI18n()
+  const { isViewer } = useAuth()
+  const [picking, setPicking] = useState<string | null>(null)
+  const [mBusy, setMBusy] = useState(false)
+  const mute = async (key: string, hours: number) => {
+    const kind = CRON_MUTE + key
+    setMBusy(true)
+    try {
+      if (hours < 0) {
+        await updateServer(server.id, { alert_mutes: [...new Set([...(server.alert_mutes ?? []), kind])] })
+      } else if (hours === 0) {
+        if ((server.alert_mutes ?? []).includes(kind))
+          await updateServer(server.id, { alert_mutes: (server.alert_mutes ?? []).filter((x) => x !== kind) })
+        if (server.alert_snoozes?.[kind]) await snoozeServerAlert(server.id, kind, 0)
+      } else await snoozeServerAlert(server.id, kind, hours)
+      setPicking(null)
+      onChanged()
+    } catch {
+      /* кнопка остается, можно повторить */
+    } finally {
+      setMBusy(false)
+    }
+  }
+  const fmt = (ts: string) =>
+    new Date(ts).toLocaleString([], { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })
+  const rank = (j: CronJob) => (j.mute ? 4 : j.level ? 2 - j.level : j.n > 0 ? 2 : 3)
+  const rows = jobs
+    .filter((j) => filter === 'all' || (filter === 'run' ? j.n > 0 : !!j.level && !j.mute))
+    .map((j, i) => ({ j, i }))
+    .sort((a, b) => rank(a.j) - rank(b.j) || a.i - b.i)
+    .map(({ j }) => j)
+  if (!rows.length) return null
+  const runN = jobs.filter((j) => j.n > 0).length
+  const badN = jobs.filter((j) => j.level && !j.mute).length
+  const lost = (j: CronJob) =>
+    j.order
+      ? t('ошибки уходят в cron и выбрасываются: 2>&1 стоит перед перенаправлением в файл, а не после')
+      : j.lost === 'err'
+        ? t('ошибки (stderr) уходят в cron и выбрасываются: почты нет')
+        : t('вывод уходит в cron и выбрасывается: почты нет')
+  return (
+    <div className="chart-card net-card net-card-wide">
+      <div className="net-head">
+        <div className="hs-svc-title">
+          {kind}
+          <span className="net-n">{jobs.length}</span>
+        </div>
+      </div>
+      <div className="net-sub mono">{where}</div>
+      {(runN > 0 || badN > 0) && (
+        <div className="small muted">
+          {subOf(runN > 0 && t('идут сейчас: {n}', { n: runN }), badN > 0 && t('в беде: {n}', { n: badN }))}
+        </div>
+      )}
+      <div className="loc-results docker-clist">
+        {rows.map((j) => {
+          const tone = j.mute ? 't-up' : j.level ? (j.level >= 2 ? 't-down' : 't-degraded') : j.n > 0 ? 't-up' : 't-soon'
+          const oldest = j.run[0]?.age ?? 0
+          const cpu = j.run.reduce((a, r) => a + r.cpu, 0)
+          return (
+            <div key={j.key} className={`loc-res docker-row ${tone}${j.mute ? ' q-muted' : ''}`}>
+              <span className={`lk-dot${j.mute ? '' : DOT[tone]}`} />
+              <div className="docker-c-main">
+                <div className="docker-c-name mono cron-cmd" title={j.src ? `${j.src}\n${j.cmd}` : j.cmd}>{j.cmd}</div>
+                <div className="docker-c-img muted small">
+                  {subOf(
+                    j.sched,
+                    j.user && j.user !== 'root' && t('от {u}', { u: j.user }),
+                    j.last > 0 && t('запуск {t}', { t: fmtRel(new Date(j.last * 1000).toISOString()) }),
+                    j.runs > 0 && t('за сутки: {n}', { n: j.runs }),
+                    j.usual === 1 ? t('обычно меньше минуты') : j.usual > 0 && t('обычно до {a}', { a: wAge(j.usual, t) }),
+                  )}
+                </div>
+                {j.n > 0 && !j.why && (
+                  <div className="docker-c-img small">
+                    {j.n > 1
+                      ? t('идут {n} копий, самая старая {a}', { n: j.n, a: wAge(oldest, t) })
+                      : t('идет {a}', { a: wAge(oldest, t) })}
+                    {cpu >= 60 && <span className="muted"> · {t('процессор {a}', { a: wAge(cpu, t) })}</span>}
+                  </div>
+                )}
+                {j.why && <div className={`docker-c-img small${j.mute ? ' muted' : ' q-stuck'}`}>{j.why}</div>}
+                {j.lost && <div className={`docker-c-img small${j.order ? ' cron-lost' : ' muted'}`}>{lost(j)}</div>}
+                {j.mute && (
+                  <div className="small">
+                    <span className="snooze-active-chip snooze-perm">
+                      🔇 {j.mute.perm ? t('не алертит, постоянно') : t('не алертит {t}', { t: t('до {t}', { t: fmt(j.mute.until!) }) })}
+                      {!isViewer && (
+                        <button className="chip-x" disabled={mBusy} title={t('Снять')} onClick={() => mute(j.key, 0)}>
+                          ✕
+                        </button>
+                      )}
+                    </span>
+                  </div>
+                )}
+                {!j.mute && picking === j.key && (
+                  <div className="small q-mute-pick">
+                    <span className="muted">🔕 {t('не алертить по этой задаче:')}</span>
+                    {[
+                      { h: 24, l: t('1 день') },
+                      { h: 24 * 7, l: t('1 неделя') },
+                      { h: -1, l: t('постоянно') },
+                    ].map(({ h, l }) => (
+                      <button key={h} className="ghost small" disabled={mBusy} onClick={() => mute(j.key, h)}>
+                        {l}
+                      </button>
+                    ))}
+                    <button className="ghost small" disabled={mBusy} onClick={() => setPicking(null)}>
+                      {t('Отмена')}
+                    </button>
+                  </div>
+                )}
+              </div>
+              {!isViewer && !j.mute ? (
+                <button className="ghost small q-mute-btn" disabled={mBusy} title={t('Не алертить по этой задаче: на день, неделю или постоянно')}
+                  onClick={() => setPicking(picking === j.key ? null : j.key)}>
+                  🔕
+                </button>
+              ) : (
+                <span className="q-mute-btn" />
+              )}
+            </div>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
 const SVC_SECTIONS: SecDef[] = [
   { id: 'overview', label: 'Сводка', group: '' },
   { id: 'web', label: 'Веб-серверы', group: 'Веб' },
@@ -1252,12 +1397,13 @@ const SVC_SECTIONS: SecDef[] = [
   { id: 'db', label: 'Базы и хранилища', group: 'Данные' },
   { id: 'queues', label: 'Очереди', group: 'Данные' },
   { id: 'workers', label: 'Воркеры', group: 'Данные' },
+  { id: 'cron', label: 'Кроны', group: 'Данные' },
   { id: 'llm', label: 'LLM', group: 'Модели' },
 ]
 const SVC_SEC_IDS = new Set(SVC_SECTIONS.map((x) => x.id))
 // раздел карточки по виду проблемы, если бэкенд его не назвал (старый бэкенд в кэше вкладки)
 const SVC_SEC_OF_KIND: Record<string, string> = {
-  queue: 'queues', queue_stuck: 'queues', workers: 'workers', web_cert: 'certs', web_config: 'web', db_health: 'db', db_conn: 'db', llm: 'llm',
+  queue: 'queues', queue_stuck: 'queues', workers: 'workers', cron_stuck: 'cron', web_cert: 'certs', web_config: 'web', db_health: 'db', db_conn: 'db', llm: 'llm',
 }
 
 function ServerServicesModal({ srv, onClose, onChanged, initialSec, sites }: {
@@ -1292,7 +1438,7 @@ function ServerServicesModal({ srv, onClose, onChanged, initialSec, sites }: {
   const rate = webRate(s.last_report)
   // СУБД сверху, под ними прочее, что держит данные (Grafana, Prometheus, etcd): их тоже находит аудит
   const isDb = (it: SvcItem) => Object.values(DB_ENGINE_LABEL).includes(it.kind)
-  const dbItems = srv.items.filter((it) => !it.web && !it.svc && !it.llm && !it.workers).sort((a, b) => Number(isDb(b)) - Number(isDb(a)))
+  const dbItems = srv.items.filter((it) => !it.web && !it.svc && !it.llm && !it.workers && !it.cron).sort((a, b) => Number(isDb(b)) - Number(isDb(a)))
   const llm = s.llm ?? []
   const llmBad = llm.filter((x) => !x.ok && !x.no_metrics).length
   const dbs = dbItems.flatMap((it) => it.db ?? [])
@@ -1312,6 +1458,16 @@ function ServerServicesModal({ srv, onClose, onChanged, initialSec, sites }: {
     .filter(({ r }) => !wOnly || r < 9)
     .sort((a, b) => a.r - b.r || a.i - b.i)
     .map(({ d }) => d)
+  // кроны: задачи по демонам (хост, контейнеры), фильтр "идут сейчас" и "с проблемами"
+  const cron = s.cron
+  const cJobs = cron?.jobs ?? []
+  const [cFilter, setCFilter] = useState<'all' | 'run' | 'bad'>('all')
+  const cRunN = cJobs.filter((j) => j.n > 0).length
+  const cProbN = cJobs.filter((j) => j.level && !j.mute).length
+  const cWhere = [...new Set(cJobs.map((j) => j.where))]
+  const cRank = (w: string) => Math.min(9, ...cJobs.filter((j) => j.where === w).map((j) => (j.mute ? 9 : j.level ? 3 - j.level : j.n > 0 ? 5 : 9)))
+  const cGroups = cWhere.map((w, i) => ({ w, i, r: cRank(w) })).sort((a, b) => a.r - b.r || a.i - b.i).map(({ w }) => w)
+  const cNoMta = (cron?.daemons ?? []).filter((d) => !d.mta && d.jobs > 0 && d.kind !== 'supercronic').map((d) => d.where)
   const dbNoAuth = (s.queue_db_skipped ?? []).filter((x) => x.why === 'auth')
   const dbBig = (s.queue_db_skipped ?? []).filter((x) => x.why === 'big')
   const qHot = qAll.filter((x) => qDepth(x) >= QUEUE_HOT).length
@@ -1338,6 +1494,7 @@ function ServerServicesModal({ srv, onClose, onChanged, initialSec, sites }: {
     db: dbItems.length > 0,
     queues: rabbit.length > 0,
     workers: wDaemons.length > 0 || (s.workers_skipped ?? []).length > 0,
+    cron: cJobs.length > 0,
     llm: llm.length > 0,
   }
   const secs = SVC_SECTIONS.filter((x) => shown[x.id])
@@ -1374,6 +1531,10 @@ function ServerServicesModal({ srv, onClose, onChanged, initialSec, sites }: {
       [...new Set(wDaemons.map((d) => d.label))].join(', '),
       t('программ: {n}', { n: wProgs.length }),
       wStopped > 0 && t('остановлены руками: {n}', { n: wStopped }),
+    ),
+    cron: subOf(
+      t('задач: {n}', { n: cJobs.length }),
+      cRunN > 0 && t('идут сейчас: {n}', { n: cRunN }),
     ),
     queues: t('очередей: {n}, сообщений: {m}', {
       n: rabbit.reduce((n, it) => n + (it.svc?.total ?? 0), 0),
@@ -1679,6 +1840,41 @@ function ServerServicesModal({ srv, onClose, onChanged, initialSec, sites }: {
                 ))}
               </div>
             )}
+            {cur.id === 'cron' && cron && (
+              <div className="srv-sec">
+                <div className="muted small">
+                  {t('Задачи cron на хосте и в контейнерах. Алерт, когда задача наслаивается (новая копия запустилась, пока старая не кончилась, и обе идут дольше 15 минут) или висит в разы дольше обычного: обычное - самая долгая из прошлых копий, без истории - 6 часов. Копии с детьми и их процессор видны в строке.')}
+                </div>
+                {cNoMta.length > 0 && (
+                  <div className="muted small">
+                    {cron.disc24 > 0
+                      ? t('Почты нет ({w}): что задачи выводят, cron выбрасывает, за сутки {n} раз. Перенаправьте вывод в лог: >> /var/log/x.log 2>&1.', { w: cNoMta.join(', '), n: cron.disc24 })
+                      : t('Почты нет ({w}): что задачи выводят, cron выбрасывает. Перенаправьте вывод в лог: >> /var/log/x.log 2>&1.', { w: cNoMta.join(', ') })}
+                  </div>
+                )}
+                {(cRunN > 0 || cProbN > 0) && (
+                  <div className="win-switch q-filter">
+                    <button className={`win-btn${cFilter === 'all' ? ' win-btn-active' : ''}`} onClick={() => setCFilter('all')}>
+                      {t('Все задачи')}
+                    </button>
+                    {cRunN > 0 && (
+                      <button className={`win-btn${cFilter === 'run' ? ' win-btn-active' : ''}`} onClick={() => setCFilter('run')}>
+                        {t('Идут сейчас: {n}', { n: cRunN })}
+                      </button>
+                    )}
+                    {cProbN > 0 && (
+                      <button className={`win-btn${cFilter === 'bad' ? ' win-btn-active' : ''}`} onClick={() => setCFilter('bad')}>
+                        {t('С проблемами: {n}', { n: cProbN })}
+                      </button>
+                    )}
+                  </div>
+                )}
+                {cGroups.map((w) => {
+                  const js = cJobs.filter((j) => j.where === w)
+                  return <CronList key={w} server={s} where={w} kind={js[0]?.kind || 'cron'} jobs={js} onChanged={onChanged} filter={cFilter} />
+                })}
+              </div>
+            )}
             {cur.id === 'queues' && (
               <div className="srv-sec">
                 {/* Порог общий для всех очередей ноды; у отдельной очереди его можно
@@ -1883,7 +2079,9 @@ export function ServicesPage({ onUnauthorized, openServerId, openSec, onConsumed
   }, [load, loadHosts])
 
   if (!servers) return <p className="muted">{t('загрузка…')}</p>
-  const all = buildByServer(servers, t)
+  // ноды только с кроном - для окна по ссылке, в списке нод их нет
+  const withCron = buildByServer(servers, t)
+  const all = withCron.filter((r) => r.items.length > 0)
   // Ищем и по ноде, и по СЕРВИСУ: на этой странице чаще спрашивают «где у меня redis»,
   // а не «что на ноде X» — поиск только по именам нод отвечал бы на другой вопрос.
   const q = query.trim().toLowerCase()
@@ -1895,7 +2093,7 @@ export function ServicesPage({ onUnauthorized, openServerId, openSec, onConsumed
           .includes(q),
       )
     : all
-  const open = all.find((r) => r.server.id === openId)
+  const open = withCron.find((r) => r.server.id === openId)
   const groups: { key: string; label: string; items: SrvServices[] }[] =
     groupBy === 'none'
       ? [{ key: 'all', label: '', items: rows }]
@@ -1917,7 +2115,7 @@ export function ServicesPage({ onUnauthorized, openServerId, openSec, onConsumed
   const offNames = all.filter((r) => !r.server.online).map((r) => r.server.name)
   const kindsAll = new Set(all.flatMap((r) => r.items.map((i) => i.kind)))
   const svcAll = all.flatMap((r) => r.items.map((it) => ({ it, s: r.server })))
-  const dbItems = svcAll.filter(({ it }) => !it.web && !it.svc && !it.llm && !it.workers)
+  const dbItems = svcAll.filter(({ it }) => !it.web && !it.svc && !it.llm && !it.workers && !it.cron)
   const dbBad = live.filter((r) => (r.server.db_health ?? []).some((h) => h.problems.some((p) => p.level >= 2))).map((r) => r.server.name)
   const dbWarn = live.filter((r) => (r.server.db_health ?? []).some((h) => h.problems.some((p) => p.level < 2))).map((r) => r.server.name)
   const webItems = svcAll.filter(({ it }) => it.web)

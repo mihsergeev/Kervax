@@ -381,10 +381,11 @@ class AlertSnoozeIn(BaseModel):
     # unit:<юнит> - один упавший юнит systemd, остальные алертят;
     # qstuck:<ключ очереди> - одна очередь (ход и порог глубины);
     # qfail:<источник брокера> - упавшие задачи одного брокера очередей;
-    # worker:<ключ воркера> - один воркер под supervisor или pm2
+    # worker:<ключ воркера> - один воркер под supervisor или pm2;
+    # cron:<где>|<команда> - одна задача cron
     kind: str = Field(min_length=1, max_length=480,
                       pattern=r"^(?:[a-z_]+(?:@[1-3])?|web_5xx:[^\x00-\x1f]{1,220}|unit:[A-Za-z0-9@._:\\-]{1,200}"
-                              r"|qstuck:[^\x00-\x1f]{1,470}|qfail:[^\x00-\x1f]{1,470}|worker:[^\x00-\x1f]{1,470})$")
+                              r"|qstuck:[^\x00-\x1f]{1,470}|qfail:[^\x00-\x1f]{1,470}|worker:[^\x00-\x1f]{1,470}|cron:[^\x00-\x1f]{1,470})$")
     hours: float = Field(ge=0, le=24 * 30)
 
 
@@ -1454,6 +1455,8 @@ class ServerOut(BaseModel):
     workers: list[dict] | None = None
     # демоны, которых helper workers-setup не смог спросить: [{where, why}]
     workers_skipped: list[dict] | None = None
+    # кроны хоста и контейнеров (helper cron-setup): задачи, копии, беда и мьют (cron_watch.view)
+    cron: dict | None = None
     # проверка конфигов веб-серверов: [{server, where, ok, err}] (web_config.view)
     web_config: list[dict] | None = None
     # сертификаты nginx со сроком в днях: [{where, file, label, days}] (web_certs.view)
