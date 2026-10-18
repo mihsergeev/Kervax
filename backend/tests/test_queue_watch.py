@@ -113,3 +113,83 @@ def test_alert_condition_and_home():
     muted = _srv({"qwatch": st}, _rep(mail=2000), mutes=[rows[0]["mute"]])
     assert collector._sig_all_quiet(muted, "queue_stuck", {f"{SRC}|//mail"}, NOW)
     assert collector._server_conditions(muted, NOW)["queue_stuck"][0] == 0
+
+
+# ---- очереди в Redis (helper queues-setup) ----
+
+def _redis_rep(depth):
+    return {"mem_total": 8 * 2**30, "mem_used": 2**30, "clock_unix": int(NOW.timestamp()),
+            "extras": {"queues": {"v": 1, "ts": 1, "skipped": [{"where": "container cache", "why": "auth"}],
+                                  "brokers": [
+                {"system": "celery", "where": "pod default/redis-0", "db": 1, "ns": "", "total": 1,
+                 "queues": [{"name": "document_indexing", "ready": depth}]},
+                {"system": "bullmq", "where": "container app-redis", "db": 0, "ns": "bull:", "total": 1,
+                 "queues": [{"name": "email", "ready": 3, "unacked": 1}]}]}}}
+
+
+def test_redis_queues_are_brokers_too():
+    rep = _redis_rep(7)
+    bs = qw.redis_brokers(rep)
+    assert [b["source"] for b in bs] == ["под default/redis-0, Celery, db 1", "контейнер app-redis, BullMQ bull:"]
+    assert bs[0]["where"] == "Redis, под default/redis-0, db 1"
+    assert bs[1]["where"] == "Redis, контейнер app-redis, префикс bull:"
+    q = {x["name"]: x for x in qw.queues(rep)}
+    assert q["document_indexing"]["key"] == "под default/redis-0, Celery, db 1|//document_indexing"
+    assert q["document_indexing"]["kind"] == "celery" and q["email"]["depth"] == 4
+    assert qw.redis_skipped(rep) == ["контейнер cache"]
+    # растет полчаса и не разбирается - как у RabbitMQ
+    st: dict = {}
+    for i in range(41):
+        st = qw.update(st, _redis_rep(5 * i), NOW - timedelta(minutes=40 - i))
+    s = _srv(state={"qwatch": st}, rep=_redis_rep(200))
+    p = qw.problems(s, NOW)
+    assert [x["name"] for x in p] == ["document_indexing"]
+    assert p[0]["text"] == ("очередь document_indexing (под default/redis-0, Celery, db 1) растет 40 мин и не "
+                            "разбирается: 0 -> 200 сообщений")
+
+
+def test_mute_a_queue_for_a_while():
+    st: dict = {}
+    for i in range(41):
+        st = qw.update(st, _redis_rep(5 * i), NOW - timedelta(minutes=40 - i))
+    key = "под default/redis-0, Celery, db 1|//document_indexing"
+    s = _srv(state={"qwatch": st}, rep=_redis_rep(200))
+    s.alert_snoozes = {qw.MUTE_PREFIX + key: (NOW + timedelta(days=1)).isoformat()}
+    assert qw.problems(s, NOW) == [] and qw.view(s, NOW)[key]["muted"] is True
+    assert qw.mute_view(s, NOW) == {key: {"until": (NOW + timedelta(days=1)).isoformat()}}
+    # срок вышел - снова алертит
+    s.alert_snoozes = {qw.MUTE_PREFIX + key: (NOW - timedelta(minutes=1)).isoformat()}
+    assert [x["name"] for x in qw.problems(s, NOW)] == ["document_indexing"]
+    # насовсем
+    s.alert_snoozes = {}
+    s.alert_mutes = [qw.MUTE_PREFIX + key]
+    assert qw.muted_keys(s, NOW) == {key}
+    # порог глубины у заглушенной очереди тоже молчит
+    s.queue_alert_depth = 100
+    kinds = {p["kind"] for p in collector.server_problems(s, NOW)}
+    assert "queue" not in kinds and "queue_stuck" not in kinds
+    s.alert_mutes = []
+    rows = {p["kind"]: p for p in collector.server_problems(s, NOW)}
+    assert rows["queue"]["text"] == "переполнены очереди: document_indexing (200)"
+
+
+def test_queues_helper_is_needed_where_redis_is():
+    from app import setup_scripts
+    assert setup_scripts.setup_needed("queues-setup", {"db_engines": ["PostgreSQL", "Redis"]})
+    assert setup_scripts.setup_needed("queues-setup", {"extras": {"queues": {"brokers": []}}})
+    assert not setup_scripts.setup_needed("queues-setup", {"db_engines": ["PostgreSQL"]})
+
+
+def test_snooze_accepts_a_queue_key():
+    from app.schemas import AlertSnoozeIn
+    k = "qstuck:под default/redis-0, Celery, db 1|//document_indexing"
+    assert AlertSnoozeIn(kind=k, hours=24).kind == k
+
+
+def test_helper_script():
+    from pathlib import Path
+    src = (Path(__file__).resolve().parents[2] / "agent" / "queues-setup.sh").read_text(encoding="utf-8")
+    assert "KERVAX_SETUP_VERSION=0.1" in src and 'KERVAX_SETUP_WHEN="' in src
+    assert "REDISCLI_AUTH" in src and "\r" not in src
+    # пароль только через stdin, не в командной строке
+    assert "redis-cli -a" not in src and "--pass" not in src and "--requirepass \"$" not in src

@@ -4,6 +4,7 @@ import {
   ApiError,
   knownHosts,
   listServers,
+  snoozeServerAlert,
   updateServer,
   type DBStat,
   type DbAdvice,
@@ -12,6 +13,7 @@ import {
   type RdHealth,
   type DbLoad,
   type MyLoad,
+  type QueueStat,
   type Server,
   type ServiceInfo,
 } from './api'
@@ -24,6 +26,7 @@ import { fmtRel } from './ServersPage'
 import { CardNav, FreshChip, markMuted, OvAreas, OvRows, secInfoOf, type OvRow, type SecDef, type SecInfo, type SecItem } from './cardLayout'
 import { AdoptSitesModal, adoptable } from './AdoptSitesModal'
 import { EngineIcon } from './engineIcon'
+import { QSTUCK_MUTE } from './mutes'
 import { OsIcon } from './osIcon'
 import { CountryFlag } from './CountryFlag'
 import { byteUnits } from './units'
@@ -148,6 +151,25 @@ function queueKey(source: string, q: { name: string; vhost?: string }): string {
 
 function qDepth(q: { ready: number; unacked?: number }): number {
   return (q.ready || 0) + (q.unacked || 0)
+}
+
+// порог очереди: свое значение важнее общего по ноде; 0 = не алертить
+function queueThr(s: Server, key: string): number {
+  const over = s.queue_alert_over ?? {}
+  return key in over ? over[key] : (s.queue_alert_depth ?? 0)
+}
+
+// Беда очереди для сортировки и фильтра: 0 - растет и не разбирается, 1 - выше своего порога,
+// 2 - глубокая или без потребителей, null - в порядке. Заглушенная (не следить) - не беда
+function queueRank(s: Server, svc: ServiceInfo, q: QueueStat): number | null {
+  const key = queueKey(svc.source || '', q)
+  if (s.queue_mutes?.[key]) return null
+  const d = qDepth(q)
+  if (s.queue_watch?.[key]) return 0
+  const thr = queueThr(s, key)
+  if (thr > 0 && d >= thr) return 1
+  if (d >= QUEUE_HOT || (q.consumers === 0 && d > 0)) return 2
+  return null
 }
 
 // сколько очередь растет и не разбирается: 40 мин, 2 ч 10 мин
@@ -720,6 +742,8 @@ function buildByServer(
       seen.add(kind)
       items.push({ kind, where: svc.source || '', svc })
     }
+    // очереди в Redis (helper queues-setup): Celery, Sidekiq, RQ, BullMQ, Laravel, Yii
+    for (const svc of s.queue_brokers ?? []) items.push({ kind: svc.label || svc.kind, where: svc.where || '', svc })
     // Аудит покрытия — единственное место, где перечислены СУБД ноды (в services[]
     // их нет), поэтому для ОБНАРУЖЕНИЯ он нужен. Но берём из него только «что и где»:
     // сам текст находки — совет про бэкап, и ему место в разделе «Бэкапы».
@@ -776,14 +800,41 @@ function hotQueues(items: SvcItem[]): number {
 
 // Очереди RabbitMQ одного инстанса - прямо в разделе "Очереди" карточки ноды. Раньше это была
 // вторая модалка поверх карточки
-function QueueList({ server, svc, busy, save }: {
+function QueueList({ server, svc, busy, save, onChanged, onlyProblems }: {
   server: Server
   svc: ServiceInfo
   busy: boolean
   save: (body: Parameters<typeof updateServer>[1]) => void
+  onChanged: () => void
+  onlyProblems: boolean
 }) {
   const { t } = useI18n()
+  const { isViewer } = useAuth()
   const [q, setQ] = useState('')
+  // выключить алерт по очереди: какую очередь сейчас выбирают и идет ли запрос
+  const [picking, setPicking] = useState<string | null>(null)
+  const [mBusy, setMBusy] = useState(false)
+  const mute = async (key: string, hours: number) => {
+    const kind = QSTUCK_MUTE + key
+    setMBusy(true)
+    try {
+      if (hours < 0) {
+        await updateServer(server.id, { alert_mutes: [...new Set([...(server.alert_mutes ?? []), kind])] })
+      } else if (hours === 0) {
+        if ((server.alert_mutes ?? []).includes(kind))
+          await updateServer(server.id, { alert_mutes: (server.alert_mutes ?? []).filter((x) => x !== kind) })
+        if (server.alert_snoozes?.[kind]) await snoozeServerAlert(server.id, kind, 0)
+      } else await snoozeServerAlert(server.id, kind, hours)
+      setPicking(null)
+      onChanged()
+    } catch {
+      /* кнопка остается, можно повторить */
+    } finally {
+      setMBusy(false)
+    }
+  }
+  const fmt = (ts: string) =>
+    new Date(ts).toLocaleString([], { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })
   // порог общий по ноде и переопределения по конкретным очередям — оба живут на сервере
   const depth = server.queue_alert_depth ?? 0
   const over = server.queue_alert_over ?? {}
@@ -812,7 +863,18 @@ function QueueList({ server, svc, busy, save }: {
   }
   const ql = q.trim().toLowerCase()
   const all = svc.queues ?? []
-  const queues = all.filter((x) => !ql || x.name.toLowerCase().includes(ql))
+  // с бедой - наверх (растет и не разбирается, выше порога, глубокая), заглушенные - вниз,
+  // остальные в порядке агента (самые глубокие первыми)
+  const order = (x: QueueStat) => {
+    const r = queueRank(server, svc, x)
+    return r ?? (server.queue_mutes?.[queueKey(svc.source || '', x)] ? 4 : 3)
+  }
+  const queues = all
+    .filter((x) => !ql || x.name.toLowerCase().includes(ql))
+    .filter((x) => !onlyProblems || queueRank(server, svc, x) != null)
+    .map((x, i) => ({ x, i, o: order(x) }))
+    .sort((a, b) => a.o - b.o || a.i - b.i)
+    .map(({ x }) => x)
   const withMsgs = all.filter((x) => qDepth(x) > 0).length
   const hotN = all.filter((x) => qDepth(x) >= QUEUE_HOT).length
   const msgsAll = all.reduce((a, x) => a + qDepth(x), 0)
@@ -820,12 +882,12 @@ function QueueList({ server, svc, busy, save }: {
     <div className="chart-card net-card net-card-wide">
       <div className="net-head">
         <div className="hs-svc-title">
-          <span className="svc-ico"><EngineIcon name="RabbitMQ" /></span>
-          RabbitMQ
+          <span className="svc-ico"><EngineIcon name={svc.engine === 'redis' ? 'Redis' : 'RabbitMQ'} /></span>
+          {svc.label || 'RabbitMQ'}
           <span className="net-n">{svc.total ?? all.length}</span>
         </div>
       </div>
-      {svc.source && <div className="net-sub mono">{svc.source}</div>}
+      {(svc.where || svc.source) && <div className="net-sub mono">{svc.where || svc.source}</div>}
       <div className="small muted">
         {subOf(
           t('с сообщениями: {n}', { n: withMsgs }),
@@ -848,11 +910,12 @@ function QueueList({ server, svc, busy, save }: {
             const key = queueKey(svc.source || '', x)
             // растет и не разбирается (queue_watch на бэкенде): красная, даже если еще неглубокая
             const stuck = server.queue_watch?.[key]
-            const tone = (stuck && !stuck.muted) || d >= QUEUE_HOT ? 't-down' : d > 0 ? 't-degraded' : 't-up'
+            const qm = server.queue_mutes?.[key]
+            const tone = qm ? 't-up' : stuck || d >= QUEUE_HOT ? 't-down' : d > 0 ? 't-degraded' : 't-up'
             const eff = thrOf(key)
             return (
-              <div key={(x.vhost || '') + '/' + x.name} className={`loc-res docker-row ${tone}`}>
-                <span className={`lk-dot${DOT[tone]}`} />
+              <div key={(x.vhost || '') + '/' + x.name} className={`loc-res docker-row ${tone}${qm ? ' q-muted' : ''}`}>
+                <span className={`lk-dot${qm ? '' : DOT[tone]}`} />
                 <div className="docker-c-main">
                   <div className="docker-c-name mono">{x.name}</div>
                   {x.vhost && x.vhost !== '/' && (
@@ -868,6 +931,35 @@ function QueueList({ server, svc, busy, save }: {
                   {!stuck && x.consumers === 0 && d > 0 && (
                     <div className="docker-c-img muted small">{t('нет потребителей')}</div>
                   )}
+                  {qm && (
+                    <div className="small">
+                      <span className="snooze-active-chip snooze-perm">
+                        🔇 {qm.perm ? t('не алертит, постоянно') : t('не алертит {t}', { t: t('до {t}', { t: fmt(qm.until!) }) })}
+                        {!isViewer && (
+                          <button className="chip-x" disabled={mBusy} title={t('Снять')} onClick={() => mute(key, 0)}>
+                            ✕
+                          </button>
+                        )}
+                      </span>
+                    </div>
+                  )}
+                  {!qm && picking === key && (
+                    <div className="small q-mute-pick">
+                      <span className="muted">🔕 {t('не алертить по этой очереди:')}</span>
+                      {[
+                        { h: 24, l: t('1 день') },
+                        { h: 24 * 7, l: t('1 неделя') },
+                        { h: -1, l: t('постоянно') },
+                      ].map(({ h, l }) => (
+                        <button key={h} className="ghost small" disabled={mBusy} onClick={() => mute(key, h)}>
+                          {l}
+                        </button>
+                      ))}
+                      <button className="ghost small" disabled={mBusy} onClick={() => setPicking(null)}>
+                        {t('Отмена')}
+                      </button>
+                    </div>
+                  )}
                 </div>
                 <div className="queue-nums mono">
                   <span title={t('в очереди, ждут доставки')}>{x.ready}</span>
@@ -875,12 +967,20 @@ function QueueList({ server, svc, busy, save }: {
                     <span className="muted" title={t('взяты консьюмером, ещё не подтверждены')}>+{x.unacked}</span>
                   )}
                 </div>
+                {!isViewer && !qm ? (
+                  <button className="ghost small q-mute-btn" disabled={mBusy} title={t('Не алертить по этой очереди: на день, неделю или постоянно')}
+                    onClick={() => setPicking(picking === key ? null : key)}>
+                    🔕
+                  </button>
+                ) : (
+                  <span className="q-mute-btn" />
+                )}
                 <input
                   className={`mono queue-thr-cell${eff > 0 ? ' queue-alert-on' : ''}`}
                   type="number"
                   min={0}
                   disabled={busy}
-                  placeholder={t('выкл')}
+                  placeholder={t('порог')}
                   value={draftOf(key)}
                   title={t('Порог этой очереди: с этого числа сообщений алертим. Пусто или 0 — не алертить.')}
                   onChange={(e) => setDrafts((dd) => ({ ...dd, [key]: e.target.value }))}
@@ -959,9 +1059,19 @@ function ServerServicesModal({ srv, onClose, onChanged, initialSec, sites }: {
   const llmBad = llm.filter((x) => !x.ok && !x.no_metrics).length
   const dbs = dbItems.flatMap((it) => it.db ?? [])
   const dbRows = dbs.flatMap((d) => (d.engine === 'redis' ? [] : d.dbs ?? []))
-  const rabbit = srv.items.filter((it) => it.svc?.kind === 'rabbitmq')
+  // брокеры очередей: RabbitMQ (агент) и очереди в Redis (helper queues-setup)
+  const rabbit = srv.items.filter((it) => !!it.svc)
   const qAll = rabbit.flatMap((it) => it.svc?.queues ?? [])
   const qHot = qAll.filter((x) => qDepth(x) >= QUEUE_HOT).length
+  // брокеры с бедой - наверх; фильтр "с проблемами" прячет остальное
+  const [qOnly, setQOnly] = useState(false)
+  const qProbs = (it: SvcItem) => (it.svc?.queues ?? []).map((x) => queueRank(s, it.svc!, x)).filter((r) => r != null) as number[]
+  const qProbN = rabbit.reduce((n, it) => n + qProbs(it).length, 0)
+  const brokers = rabbit
+    .map((it, i) => ({ it, i, p: qProbs(it) }))
+    .filter(({ p }) => !qOnly || p.length > 0)
+    .sort((a, b) => (a.p.length ? Math.min(...a.p) : 9) - (b.p.length ? Math.min(...b.p) : 9) || b.p.length - a.p.length || a.i - b.i)
+    .map(({ it }) => it)
   const certs = (s.web_certs ?? []).slice().sort((a, b) => a.days - b.days)
   const cfg = s.web_config ?? []
 
@@ -1309,8 +1419,24 @@ function ServerServicesModal({ srv, onClose, onChanged, initialSec, sites }: {
                 <div className="muted small">
                   {t('Без порога панель сама алертит очередь, которая полчаса растет и не разбирается или осталась без потребителей. Очереди мертвых писем (dlq) не судятся.')}
                 </div>
-                {rabbit.map((it, i) => (
-                  <QueueList key={(it.svc?.source ?? '') + i} server={s} svc={it.svc!} busy={busy} save={save} />
+                {(s.queue_skipped ?? []).length > 0 && (
+                  <div className="muted small">
+                    {t('Очереди в этих Redis не видны: helper не нашел пароль ({list}). Он берет REDIS_PASSWORD или --requirepass из настроек контейнера либо requirepass из redis.conf.', { list: (s.queue_skipped ?? []).join(', ') })}
+                  </div>
+                )}
+                {qProbN > 0 && (rabbit.length > 1 || qAll.length > 8) && (
+                  <div className="win-switch q-filter">
+                    <button className={`win-btn${!qOnly ? ' win-btn-active' : ''}`} onClick={() => setQOnly(false)}>
+                      {t('Все очереди')}
+                    </button>
+                    <button className={`win-btn${qOnly ? ' win-btn-active' : ''}`} onClick={() => setQOnly(true)}>
+                      {t('С проблемами: {n}', { n: qProbN })}
+                    </button>
+                  </div>
+                )}
+                {brokers.map((it) => (
+                  <QueueList key={(it.svc?.source ?? '') + (it.svc?.kind ?? '')} server={s} svc={it.svc!} busy={busy} save={save}
+                    onChanged={onChanged} onlyProblems={qOnly} />
                 ))}
               </div>
             )}
@@ -1341,7 +1467,7 @@ function HostRow({ srv, showGroup, onOpen }: { srv: SrvServices; showGroup?: boo
           {s.name}
           {showGroup && s.group_name && <span className="type-chip group-chip">{s.group_name}</span>}
           {hot > 0 && (
-            <span className="type-chip off" title={t('переполненные очереди RabbitMQ')}>📨 {hot}</span>
+            <span className="type-chip off" title={t('переполненные очереди')}>📨 {hot}</span>
           )}
           {cfg > 0 && (
             <span className="type-chip off" title={t('конфиг веб-сервера не проходит проверку')}>🧾 {cfg}</span>
@@ -1505,7 +1631,7 @@ export function ServicesPage({ onUnauthorized, openServerId, openSec, onConsumed
   // сертификаты ближе месяца - видно; алертный порог (неделя, день) - цветом плитки. Срок не
   // устаревает, поэтому по всем нодам
   const certs = all.flatMap((r) => (r.server.web_certs ?? []).filter((c) => c.days <= EXPIRY_SHOW_DAYS))
-  const rabbit = svcAll.filter(({ it, s }) => it.svc?.kind === 'rabbitmq' && s.online)
+  const rabbit = svcAll.filter(({ it, s }) => !!it.svc && s.online)
   const qAll = rabbit.flatMap(({ it }) => it.svc?.queues ?? [])
   const qHot = qAll.filter((x) => qDepth(x) >= QUEUE_HOT)
 
@@ -1564,7 +1690,7 @@ export function ServicesPage({ onUnauthorized, openServerId, openSec, onConsumed
           />
           {rabbit.length > 0 && (
             <NetTile
-              label={t('Очереди RabbitMQ')}
+              label={t('Очереди')}
               value={String(rabbit.reduce((n, { it }) => n + (it.svc?.total ?? 0), 0))}
               sub={subOf(
                 t('сообщений: {m}', { m: rpmText(qAll.reduce((a, x) => a + qDepth(x), 0)) }),

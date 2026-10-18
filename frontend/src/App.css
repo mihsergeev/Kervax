@@ -4443,6 +4443,11 @@ textarea:focus {
 
 /* очередь растет и не разбирается: строка под именем */
 .docker-c-img.q-stuck { color: var(--down); }
+/* заглушенная очередь (не алертить): блеклая, кнопка "не алертить" и выбор срока в строке */
+.docker-row.q-muted { border-left-color: var(--border); opacity: 0.65; }
+.q-mute-btn { width: 34px; flex-shrink: 0; padding: 2px 0; text-align: center; }
+.q-mute-pick { display: flex; flex-wrap: wrap; align-items: center; gap: 0.3rem; margin-top: 0.25rem; }
+.q-filter { margin: 0.2rem 0; }
 /* раздел «Сервисы»: строка с числами очереди справа */
 .queue-nums {
   display: flex;

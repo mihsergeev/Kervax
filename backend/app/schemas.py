@@ -378,9 +378,11 @@ class AlertSnoozeIn(BaseModel):
 
     # "disk" или "disk@2" - тип, опционально с макс. заглушаемым уровнем (см. _muted);
     # web_5xx:<ключ лога> - 5xx одного лога (домена), остальные логи ноды алертят;
-    # unit:<юнит> - один упавший юнит systemd, остальные алертят
-    kind: str = Field(min_length=1, max_length=240,
-                      pattern=r"^(?:[a-z_]+(?:@[1-3])?|web_5xx:[^\x00-\x1f]{1,220}|unit:[A-Za-z0-9@._:\\-]{1,200})$")
+    # unit:<юнит> - один упавший юнит systemd, остальные алертят;
+    # qstuck:<ключ очереди> - одна очередь (ход и порог глубины)
+    kind: str = Field(min_length=1, max_length=480,
+                      pattern=r"^(?:[a-z_]+(?:@[1-3])?|web_5xx:[^\x00-\x1f]{1,220}|unit:[A-Za-z0-9@._:\\-]{1,200}"
+                              r"|qstuck:[^\x00-\x1f]{1,470})$")
     hours: float = Field(ge=0, le=24 * 30)
 
 
@@ -1434,6 +1436,12 @@ class ServerOut(BaseModel):
     llm: list[dict] | None = None
     # очереди, которые растут и не разбираются: {ключ очереди: {"age", "d0", "muted"}} (queue_watch.view)
     queue_watch: dict | None = None
+    # очереди в Redis (helper queues-setup): брокеры как у RabbitMQ, с подписью "where"
+    queue_brokers: list[dict] | None = None
+    # экземпляры Redis, пароль которых helper не нашел
+    queue_skipped: list[str] | None = None
+    # заглушенные очереди: {ключ: {"perm": true} | {"until": iso}} (queue_watch.mute_view)
+    queue_mutes: dict | None = None
     # проверка конфигов веб-серверов: [{server, where, ok, err}] (web_config.view)
     web_config: list[dict] | None = None
     # сертификаты nginx со сроком в днях: [{where, file, label, days}] (web_certs.view)

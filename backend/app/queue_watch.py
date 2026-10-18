@@ -15,7 +15,12 @@
 - или у нее нет ни одного потребителя (агент 2.38), и она STUCK_S не уменьшилась и выросла хотя бы
   на SLOW_GROW: воркер умер, ждать три часа незачем.
 Очереди мертвых писем (dlq, dead, failed) и служебные очереди Celery и RabbitMQ (pidbox, celeryev,
-amq.*) не судим: первые копятся по замыслу, вторые живут сами по себе. Состояние - в
+amq.*) не судим: первые копятся по замыслу, вторые живут сами по себе.
+
+Очереди в Redis (Celery, Sidekiq, RQ, BullMQ, Laravel, Yii) присылает helper queues-setup: extras
+"queues", брокер на каждую связку экземпляр Redis + система + база + префикс. Судятся так же, ключ -
+по источнику "контейнер redis, Celery, db 1". Заглушить очередь можно насовсем (alert_mutes
+"qstuck:<ключ>") или на время (alert_snoozes с тем же ключом): и алерт хода, и порог глубины. Состояние - в
 alert_state["qwatch"]: {ключ очереди: {"t0", "d0", "p", "nd", "last", "seen"}}, ключ как у порога
 (collector.queue_key). Ведет цикл алертов, пока нода на связи; провал в отчетах дольше GAP_S
 начинает ход заново: что было с очередью, пока нода молчала, неизвестно.
@@ -55,21 +60,84 @@ def skipped(name: str) -> bool:
     return bool(_SKIP.search(name or ""))
 
 
+SYSTEM_LABEL = {"celery": "Celery", "sidekiq": "Sidekiq", "rq": "RQ", "bullmq": "BullMQ",
+                "laravel": "Laravel", "yii": "Yii"}
+
+
+def where_text(w: str) -> str:
+    """'container redis-1' -> 'контейнер redis-1', 'pod ns/redis-0' -> 'под ns/redis-0'"""
+    w = str(w or "")
+    if w.startswith("container "):
+        return "контейнер " + w[len("container "):]
+    if w.startswith("pod "):
+        return "под " + w[len("pod "):]
+    return "на хосте" if w in ("", "host") else w
+
+
+def redis_brokers(rep: dict) -> list[dict]:
+    """Очереди в Redis от helper'а queues-setup, в виде брокеров как у RabbitMQ: {"kind" (система),
+    "label", "engine": "redis", "source" (часть ключа и подпись в алерте), "where" (подпись в
+    карточке), "ns", "db", "queues", "total"}"""
+    block = ((rep or {}).get("extras") or {}).get("queues")
+    out = []
+    for b in (block or {}).get("brokers") or [] if isinstance(block, dict) else []:
+        if not isinstance(b, dict) or not b.get("system"):
+            continue
+        system = str(b["system"])
+        label = SYSTEM_LABEL.get(system, system)
+        ns, db = str(b.get("ns") or ""), int(b.get("db") or 0)
+        wt = where_text(str(b.get("where") or ""))
+        src = f"{wt}, {label}" + (f" {ns}" if ns else "") + (f", db {db}" if db else "")
+        qs = [dict(q, vhost="/") for q in b.get("queues") or [] if isinstance(q, dict) and q.get("name")]
+        out.append({"kind": system, "label": label, "engine": "redis", "source": src,
+                    "where": "Redis, " + wt + (f", db {db}" if db else "") + (f", префикс {ns}" if ns else ""),
+                    "ns": ns, "db": db, "queues": qs, "total": int(b.get("total") or len(qs))})
+    return out
+
+
+def redis_skipped(rep: dict) -> list[str]:
+    """Экземпляры Redis, пароль которых helper не нашел: очереди в них не видны"""
+    block = ((rep or {}).get("extras") or {}).get("queues")
+    return [where_text(str(x.get("where") or "")) for x in (block or {}).get("skipped") or []
+            if isinstance(x, dict)] if isinstance(block, dict) else []
+
+
+def brokers(rep: dict) -> list[dict]:
+    """Все брокеры ноды: RabbitMQ (агент) и очереди в Redis (helper): {"kind", "source", "queues"}"""
+    out = [{"kind": "rabbitmq", "source": str(svc.get("source") or ""), "queues": svc.get("queues") or []}
+           for svc in (rep or {}).get("services") or []
+           if isinstance(svc, dict) and svc.get("kind") == "rabbitmq"]
+    return out + redis_brokers(rep)
+
+
 def queues(rep: dict) -> list[dict]:
     """Очереди ноды: {"key", "name", "vhost", "source", "kind", "depth", "consumers"}"""
     out = []
-    for svc in (rep or {}).get("services") or []:
-        if not isinstance(svc, dict) or svc.get("kind") != "rabbitmq":
-            continue
-        src = str(svc.get("source") or "")
-        for q in svc.get("queues") or []:
+    for b in brokers(rep):
+        src = b["source"]
+        for q in b["queues"]:
             if not isinstance(q, dict) or not q.get("name"):
                 continue
             c = q.get("consumers")
             out.append({"key": _key(src, q), "name": str(q["name"]), "vhost": str(q.get("vhost") or "/"),
-                        "source": src, "kind": "rabbitmq", "depth": depth(q),
+                        "source": src, "kind": b["kind"], "depth": depth(q),
                         "consumers": int(c) if isinstance(c, (int, float)) else None})
     return out
+
+
+def muted_keys(s: Server, now: datetime) -> set[str]:
+    """Очереди, по которым сейчас не алертим: насовсем (alert_mutes) или на время (alert_snoozes)"""
+    keys = {m[len(MUTE_PREFIX):] for m in (s.alert_mutes or []) if m.startswith(MUTE_PREFIX)}
+    for k, until in (getattr(s, "alert_snoozes", None) or {}).items():
+        if not str(k).startswith(MUTE_PREFIX):
+            continue
+        try:
+            u = datetime.fromisoformat(str(until))
+        except ValueError:
+            continue
+        if (u if u.tzinfo else u.replace(tzinfo=timezone.utc)) > now:
+            keys.add(k[len(MUTE_PREFIX):])
+    return keys
 
 
 def step(e: dict | None, d: int, ts: int) -> dict:
@@ -142,11 +210,28 @@ def problems(s: Server, now: datetime) -> list[dict]:
     """Очереди, которые растут и не разбираются: {"key", "name", "source", "age", "d0", "depth",
     "consumers", "level", "text", "since"}, без заглушенных. Без потребителей (агент 2.38) - так и
     сказано."""
-    muted = {m[len(MUTE_PREFIX):] for m in (s.alert_mutes or []) if m.startswith(MUTE_PREFIX)}
+    muted = muted_keys(s, now)
     return [x for x in _stuck_all(s, now) if x["key"] not in muted]
 
 
 def view(s: Server, now: datetime) -> dict[str, dict]:
     """Для строк очередей в карточке: {ключ: {"age", "d0", "muted"}} у тех, что растут и не разбираются"""
-    muted = {m[len(MUTE_PREFIX):] for m in (s.alert_mutes or []) if m.startswith(MUTE_PREFIX)}
+    muted = muted_keys(s, now)
     return {x["key"]: {"age": x["age"], "d0": x["d0"], "muted": x["key"] in muted} for x in _stuck_all(s, now)}
+
+
+def mute_view(s: Server, now: datetime) -> dict[str, dict]:
+    """Заглушенные очереди для карточки: {ключ: {"perm": True} | {"until": iso}}"""
+    out: dict[str, dict] = {m[len(MUTE_PREFIX):]: {"perm": True} for m in (s.alert_mutes or [])
+                            if m.startswith(MUTE_PREFIX)}
+    for k, until in (getattr(s, "alert_snoozes", None) or {}).items():
+        key = str(k)[len(MUTE_PREFIX):]
+        if str(k).startswith(MUTE_PREFIX) and key not in out and key in muted_keys(s, now):
+            out[key] = {"until": str(until)}
+    return out
+
+
+def redis_view(s: Server) -> list[dict]:
+    """Брокеры в Redis для карточки (без служебных полей)"""
+    return [{k: b[k] for k in ("kind", "label", "engine", "source", "where", "queues", "total")}
+            for b in redis_brokers(s.last_report or {})]
