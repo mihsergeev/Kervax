@@ -2247,6 +2247,7 @@ export type LlmSvc = {
   prompt_tps?: number | null; gen_tps?: number | null; preempt?: number | null; errors?: number | null
   aborted?: number | null; ttft?: number[] | null; tpot?: number[] | null; e2e?: number[] | null
   base_ttft?: number | null; base_tpot?: number | null
+  locked?: boolean // /metrics просит ключ: так настроено, не авария
 }
 export type ServerForm = {
   name: string

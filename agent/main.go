@@ -44,7 +44,7 @@ import (
 	"time"
 )
 
-const version = "2.36"
+const version = "2.37"
 
 // Публичный ключ для проверки подписи релизов агента (Ed25519, base64).
 // ПУСТО по умолчанию → самообновление ВЫКЛЮЧЕНО (агент никогда не заменяет себя).
@@ -8562,7 +8562,7 @@ func gpuOnPCI(root string, now time.Time) []gpuPCI {
 	return out
 }
 
-// LLM-сервисы: vLLM, SGLang и TEI отдают метрики Prometheus без пароля (/metrics). Агент находит их
+// LLM-сервисы: vLLM, SGLang, TEI и прокси LiteLLM отдают метрики Prometheus без пароля (/metrics). Агент находит их
 // по командной строке процесса, читает /metrics раз в llmEvery и сам считает за последние
 // llmWindow: запросы и токены в секунду, перцентили задержек по приросту бакетов гистограмм (как
 // histogram_quantile в Prometheus). Панели уходят готовые числа, а не сырые гистограммы.
@@ -8573,7 +8573,7 @@ const (
 )
 
 type llmInfo struct {
-	Engine    string    `json:"engine"`         // vllm | sglang | tei
+	Engine    string    `json:"engine"`         // vllm | sglang | tei | litellm
 	Kind      string    `json:"kind,omitempty"` // container | pod | unit; пусто - просто процесс
 	Name      string    `json:"name"`           // имя контейнера, ns/имя пода, юнит или имя процесса
 	Model     string    `json:"model,omitempty"`
@@ -8590,7 +8590,7 @@ type llmInfo struct {
 	PromptTPS *float64  `json:"prompt_tps,omitempty"` // токенов промпта в секунду
 	GenTPS    *float64  `json:"gen_tps,omitempty"`    // сгенерировано токенов в секунду
 	Preempt   *float64  `json:"preempt,omitempty"`    // вытеснено запросов за окно (не хватило KV-кэша)
-	Errors    *float64  `json:"errors,omitempty"`     // ошибок за окно: ответы 5xx у vLLM, отказы у TEI
+	Errors    *float64  `json:"errors,omitempty"`     // ошибок за окно: ответы 5xx у vLLM и LiteLLM, отказы у TEI
 	Aborted   *float64  `json:"aborted,omitempty"`    // отменено за окно
 	TTFT      []float64 `json:"ttft,omitempty"`       // p50, p95, p99 до первого токена, секунды
 	TPOT      []float64 `json:"tpot,omitempty"`       // на выходной токен
@@ -8600,6 +8600,7 @@ type llmInfo struct {
 type llmProc struct {
 	engine, host, model string
 	port, pid           int
+	alt                 []int // куда еще стучаться за /metrics, если port молчит
 	noMetrics           bool
 }
 
@@ -8661,13 +8662,24 @@ func llmEngine(args []string) (llmProc, bool) {
 		p.model = llmArg(args, "--served-model-name", "--model-path", "--model")
 		p.noMetrics = !llmHas(args, "--enable-metrics")
 	case filepath.Base(args[0]) == "text-embeddings-router":
-		// метрики TEI на своем порту (--prometheus-port, по умолчанию 9000) на всех адресах
+		// метрики TEI на своем порту (--prometheus-port, по умолчанию 9000) на всех адресах. TEI 1.9
+		// отдельного порта не открывает, /metrics у него на порту API: --port, без него 80 (так
+		// задает образ TEI) или 3000 (умолчание самого TEI)
 		p.engine, p.port = "tei", 9000
 		p.model = llmArg(args, "--model-id")
 		if n, err := strconv.Atoi(llmArg(args, "--prometheus-port")); err == nil && n > 0 && n < 65536 {
 			p.port = n
 		}
+		p.alt = []int{80, 3000}
+		if n, err := strconv.Atoi(llmArg(args, "--port")); err == nil && n > 0 && n < 65536 {
+			p.alt = []int{n}
+		}
 		return p, true
+	case filepath.Base(args[0]) == "litellm" || mod("litellm") ||
+		len(args) > 1 && strings.HasPrefix(filepath.Base(args[0]), "python") && filepath.Base(args[1]) == "litellm":
+		// прокси LiteLLM: метрики есть, только если в его конфиге callbacks: ["prometheus"]
+		p.engine, p.port = "litellm", 4000
+		p.model = llmArg(args, "--model")
 	default:
 		return p, false
 	}
@@ -8678,7 +8690,7 @@ func llmEngine(args []string) (llmProc, bool) {
 	return p, true
 }
 
-var llmMarks = [][]byte{[]byte("vllm"), []byte("sglang"), []byte("text-embeddings-router")}
+var llmMarks = [][]byte{[]byte("vllm"), []byte("sglang"), []byte("text-embeddings-router"), []byte("litellm")}
 
 // llmScan - процессы LLM-сервисов: командные строки всех процессов, разбираются только те, где
 // есть имя движка
@@ -9086,6 +9098,24 @@ func llmRead(engine string, m promSet) (llmGauge, llmSnap) {
 		ctr("err", "te_request_failure", "te_request_failure_total")
 		ctr("prompt", "te_request_input_length_sum")
 		s.hist["e2e"] = m.hist("te_request_duration", "te_embed_duration")
+	case "litellm":
+		// задержки не считаются: за прокси и чат, и эмбеддинги, их общий p95 ничего не говорит,
+		// а сами модели агент видит на их нодах. Свой запрос к /metrics в in-flight тоже есть
+		if v, ok := m.sum("litellm_in_flight_requests"); ok {
+			g.running = fptr(max(v-1, 0))
+		}
+		ctr("req", "litellm_proxy_total_requests_metric_total")
+		ctr("prompt", "litellm_input_tokens_metric_total")
+		ctr("gen", "litellm_output_tokens_metric_total")
+		if ss, ok := m["litellm_proxy_total_requests_metric_total"]; ok {
+			t := 0.0
+			for _, x := range ss {
+				if strings.HasPrefix(promLabel(x.labels, "status_code"), "5") {
+					t += x.v
+				}
+			}
+			s.ctr["err"] = t
+		}
 	}
 	return g, s
 }
@@ -9102,7 +9132,10 @@ func llmReset(prev, cur llmSnap) bool {
 
 // llmCompute - заполняет сервис по свежему /metrics и истории замеров, возвращает историю
 func llmCompute(inf *llmInfo, body []byte, hist []llmSnap, now time.Time) []llmSnap {
-	g, s := llmRead(inf.Engine, promParse(body, "vllm:", "sglang:", "te_", "http_requests_total"))
+	// у LiteLLM /metrics на мегабайты (метки по ключам и клиентам): берутся только нужные имена
+	g, s := llmRead(inf.Engine, promParse(body, "vllm:", "sglang:", "te_", "http_requests_total",
+		"litellm_in_flight_requests", "litellm_proxy_total_requests_metric_total",
+		"litellm_input_tokens_metric_total", "litellm_output_tokens_metric_total"))
 	s.at = now
 	inf.OK = true
 	inf.Running, inf.Waiting, inf.KV = g.running, g.waiting, g.kv
@@ -9224,11 +9257,22 @@ func collectLLM(proc string, conts, pods map[string]string, now time.Time) []llm
 			out[i].Err = why
 			continue
 		}
+		// LiteLLM отвечает на /metrics редиректом на /metrics/
+		path := "/metrics"
+		if p.engine == "litellm" {
+			path = "/metrics/"
+		}
 		wg.Add(1)
-		go func(i int, u string) {
+		go func(i int, ports []int) {
 			defer wg.Done()
-			bodies[i], out[i].Err = llmFetch(u)
-		}(i, "http://"+net.JoinHostPort(host, strconv.Itoa(p.port))+"/metrics")
+			for _, port := range ports {
+				bodies[i], out[i].Err = llmFetch("http://" + net.JoinHostPort(host, strconv.Itoa(port)) + path)
+				if bodies[i] != nil {
+					out[i].Port = port
+					return
+				}
+			}
+		}(i, append([]int{p.port}, p.alt...))
 	}
 	wg.Wait()
 	seen := map[string]bool{}

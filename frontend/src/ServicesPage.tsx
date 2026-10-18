@@ -1333,12 +1333,17 @@ function HostRow({ srv, showGroup, onOpen }: { srv: SrvServices; showGroup?: boo
           )}
         </div>
         <div className="svc-row-icons">
-          {srv.items.map((it, i) => (
-            <span key={it.kind + '-' + i} className="svc-chip"
-              title={it.where ? `${it.kind} · ${it.where}` : it.kind}>
-              <span className="svc-ico"><EngineIcon name={it.kind} /></span> {it.kind}
-            </span>
-          ))}
+          {/* одинаковые сервисы на ноде (два LiteLLM, три TEI) - один чип со счетчиком, где - в подсказке */}
+          {[...new Set(srv.items.map((it) => it.kind))].map((kind) => {
+            const xs = srv.items.filter((it) => it.kind === kind)
+            const where = xs.map((x) => x.where).filter(Boolean).join('\n')
+            return (
+              <span key={kind} className="svc-chip" title={where ? `${kind}\n${where}` : kind}>
+                <span className="svc-ico"><EngineIcon name={kind} /></span> {kind}
+                {xs.length > 1 && <span className="muted"> ({xs.length})</span>}
+              </span>
+            )
+          })}
         </div>
       </div>
       <div className={`hs-host-count mono ${tone}`}>

@@ -51,7 +51,9 @@ XID_APP = {
     69: "ошибка графического движка",
 }
 XID_WARN = {92, 94}  # карта работает дальше - предупреждение
-ENGINE = {"vllm": "vLLM", "sglang": "SGLang", "tei": "TEI"}
+ENGINE = {"vllm": "vLLM", "sglang": "SGLang", "tei": "TEI", "litellm": "LiteLLM"}
+# /metrics просит ключ: так настроено, а не сломалось (у LiteLLM require_auth_for_metrics_endpoint)
+LOCKED = ("http 401", "http 403")
 _KIND = {"container": "контейнер", "pod": "под", "unit": "юнит"}
 _ERR = {
     "refused": "порт закрыт",
@@ -419,8 +421,9 @@ def llm_problems(rep: dict, base: dict | None) -> list[tuple[int, str, str]]:
             continue
         if not x.get("ok"):
             err = str(x.get("err") or "")
-            # local и noaddr - агенту некуда стучаться, сервис тут ни при чем: это видно в карточке
-            if err in ("local", "noaddr") or (_f(x.get("up")) or 0) < LLM_BOOT:
+            # local и noaddr - агенту некуда стучаться, ключ на /metrics - так настроено, сервис тут
+            # ни при чем: это видно в карточке
+            if err in ("local", "noaddr", *LOCKED) or (_f(x.get("up")) or 0) < LLM_BOOT:
                 continue
             out.append((2, f"{label}: не отвечает на /metrics ({err_text(err)}), процесс работает {_dur(_f(x.get('up')) or 0)}",
                         f"llm:down:{k}"))
@@ -450,6 +453,7 @@ def llm_view(rep: dict, base: dict | None) -> list[dict]:
                                      "errors", "aborted", "ttft", "tpot", "e2e")},
             "key": llm_key(x), "label": llm_label(x), "engine_name": ENGINE.get(str(x.get("engine")), str(x.get("engine"))),
             "where": llm_where(x), "err": err_text(str(x.get("err") or "")) if x.get("err") else "",
+            "locked": not x.get("ok") and str(x.get("err") or "") in LOCKED,
             "base_ttft": baseline(base, x, "ttft"), "base_tpot": baseline(base, x, "tpot"),
         })
     return out

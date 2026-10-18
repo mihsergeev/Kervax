@@ -162,6 +162,14 @@ def test_llm_problems():
     # модель еще грузится, агенту некуда стучаться, метрики не включены - не авария
     assert gpu.llm_problems({"llm": [_llm(ok=False, err="refused", up=300), _llm(ok=False, err="local", name="b"),
                                      _llm(engine="sglang", ok=False, no_metrics=True, name="c")]}, None) == []
+    # /metrics закрыт ключом - так настроено: в карточке подсказка, алерта нет
+    locked = _llm(engine="litellm", name="litellm", ok=False, err="http 401", port=4000)
+    assert gpu.llm_problems({"llm": [locked]}, None) == []
+    v = gpu.llm_view({"llm": [locked]}, None)[0]
+    assert v["locked"] and v["engine_name"] == "LiteLLM" and v["label"] == "LiteLLM litellm"
+    assert gpu.llm_view({"llm": [_llm()]}, None)[0]["locked"] is False
+    assert gpu.llm_problems({"llm": [_llm(engine="litellm", ok=False, err="refused", name="litellm")]}, None)[0][1] \
+        .startswith("LiteLLM litellm: не отвечает на /metrics (порт закрыт)")
     q = gpu.llm_problems({"llm": [_llm(waiting=18, running=12, kv=97, preempt=4)]}, None)
     assert [p[2].split(":")[1] for p in q] == ["queue", "kv"]
     assert q[1][1] == "vLLM vllm-qwen: KV-кэш заполнен на 97%, за 5 минут вытеснено 4 запроса"

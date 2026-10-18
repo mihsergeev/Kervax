@@ -241,7 +241,7 @@ function Spark({ vals, base }: { vals: (number | null)[]; base?: number | null }
 
 function LlmBlock({ x, hist, t }: { x: LlmSvc; hist: ServerMetric[]; t: TFn }) {
   const series = (m: 'ttft' | 'tpot' | 'e2e') => hist.map((h) => h.llm?.find((l) => l.k === x.label)?.[m] ?? null)
-  const bad = !x.ok && !x.no_metrics
+  const bad = !x.ok && !x.no_metrics && !x.locked
   const warn = (x.waiting ?? 0) >= 5 || (x.kv ?? 0) >= 95
   const lat: { k: 'ttft' | 'tpot' | 'e2e'; name: string; v?: number[] | null; base?: number | null }[] = [
     { k: 'ttft', name: t('TTFT, до первого токена'), v: x.ttft, base: x.base_ttft },
@@ -264,13 +264,22 @@ function LlmBlock({ x, hist, t }: { x: LlmSvc; hist: ServerMetric[]; t: TFn }) {
         <div className="muted small">{t('Метрики выключены: SGLang надо запускать с --enable-metrics, тогда здесь будут очередь, KV-кэш и задержки.')}</div>
       )}
       {bad && <div className="t-down small">{t('/metrics не отвечает: {e}', { e: x.err || t('ошибка') })}</div>}
+      {x.locked && (
+        <div className="muted small">
+          {x.engine === 'litellm'
+            ? t('/metrics закрыт ключом ({e}). Чтобы панель видела запросы и ошибки, в конфиге LiteLLM: require_auth_for_metrics_endpoint: false.', { e: x.err })
+            : t('/metrics закрыт ключом ({e}): без ключа панель метрики не читает.', { e: x.err })}
+        </div>
+      )}
       {x.ok && (
         <div className="llm-kpis">
           {x.running != null ? (
             <div className="llm-kpi">
               <div className="llm-l">{t('Запросы')}</div>
               <div className="llm-v">{num(x.running)} <span className="muted small">{t('в работе')}</span></div>
-              <div className={`llm-s${(x.waiting ?? 0) >= 5 ? ' t-degraded' : ''}`}>{t('в очереди {n}', { n: num(x.waiting ?? 0) })}</div>
+              {x.waiting != null && (
+                <div className={`llm-s${x.waiting >= 5 ? ' t-degraded' : ''}`}>{t('в очереди {n}', { n: num(x.waiting) })}</div>
+              )}
             </div>
           ) : x.waiting != null ? (
             <div className="llm-kpi">
@@ -334,7 +343,7 @@ function LlmBlock({ x, hist, t }: { x: LlmSvc; hist: ServerMetric[]; t: TFn }) {
           })}
         </div>
       )}
-      {x.ok && !latRows.length && x.win != null && x.win > 0 && (
+      {x.ok && !latRows.length && x.win != null && x.win > 0 && x.engine !== 'litellm' && (
         <div className="muted small">{t('Запросов за {n} мин не было: задержки не посчитать.', { n: Math.round(x.win / 60) })}</div>
       )}
     </div>
