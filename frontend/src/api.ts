@@ -1924,6 +1924,8 @@ export type Server = {
   workers_skipped?: { where: string; why: string }[] | null
   // кроны хоста и контейнеров (helper cron-setup): задачи, идущие копии, беда и мьют
   cron?: CronInfo | null
+  // ошибки в логах контейнеров и подов (helper logerr-setup): счет за час и сутки, обычный час, всплеск
+  log_errors?: LogErrInfo | null
   // заглушенные очереди: насовсем или до срока
   queue_mutes?: Record<string, { perm?: boolean; until?: string }> | null
   // изменения на сервере (helper changes-setup): лента между снимками, отметка "это мы"
@@ -2141,6 +2143,23 @@ export type CronJob = {
   why?: string
   mute?: { perm?: boolean; until?: string }
 }
+// Лог контейнера или пода с ошибками за сутки (log_errors.view): h1/d1 - строк с ошибками за час и
+// сутки, lines1 - всех строк за час, base - обычный час (null - истории меньше 4 часов), last -
+// последняя строка с ошибкой; level/why - всплеск, mute - заглушен по ключу logerr:<key>
+export type LogErrSource = {
+  key: string
+  label: string
+  h1: number
+  d1: number
+  lines1: number
+  base: number | null
+  last: string
+  last_ts: number
+  level?: number
+  why?: string
+  mute?: { perm?: boolean; until?: string }
+}
+export type LogErrInfo = { ts: number; logs: number; skipped: number; sources: LogErrSource[] }
 export type CronInfo = {
   ts: number
   journal: boolean

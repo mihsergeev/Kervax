@@ -46,9 +46,15 @@
 # JSON on Debian and Ubuntu, whose awk is mawk: there gsub(/\\/, "\\\\") puts back one backslash,
 # not two, and the agent drops a block that is not valid JSON - silently, the whole of it. Backslashes
 # are doubled by splitting the string now, the same in every awk.
+#
+# 0.13: in a PostgreSQL container whose superuser is named by POSTGRES_USER there is no role
+# "postgres", and every query was tried as it first: each run left a score of
+# "FATAL: role "postgres" does not exist" lines in the database log, every 15 minutes, on every
+# such container. The POSTGRES_USER role is tried first now, and the other way only when the first
+# could not connect at all, not after a query that failed.
 set -euo pipefail
 
-KERVAX_SETUP_VERSION=0.12  # MAJOR.MINOR; compared component-wise
+KERVAX_SETUP_VERSION=0.13  # MAJOR.MINOR; compared component-wise
 KERVAX_SETUP_ALWAYS=1     # safe on any node: without a database it collects an empty file
 
 HELPER_DIR=/lib65/kervax
@@ -130,8 +136,17 @@ pg_q() { # container query
   if [ -n "$c" ]; then
     u=$(docker exec "$c" printenv POSTGRES_USER 2>/dev/null || true)
     d=$(docker exec "$c" printenv POSTGRES_DB 2>/dev/null || true)
-    timeout $TO docker exec -u postgres "$c" psql -Atqc "$q" 2>/dev/null \
-      || timeout $TO docker exec "$c" psql -d "${d:-postgres}" -Atqc "$q" ${u:+-U "$u"} 2>/dev/null
+    # the superuser named by POSTGRES_USER first: such an image has no role "postgres", and asking
+    # as it left "FATAL: role "postgres" does not exist" in the database log, a score of lines
+    # every 15 minutes (0.13). The other way only when the first could not connect (psql exits 2,
+    # docker exec 125-127): a query that failed, asked again as another role, adds that line too
+    if [ -n "$u" ] && [ "$u" != postgres ]; then
+      timeout $TO docker exec "$c" psql -d "${d:-postgres}" -U "$u" -Atqc "$q" 2>/dev/null
+      case $? in 2|12[5-7]) timeout $TO docker exec -u postgres "$c" psql -Atqc "$q" 2>/dev/null ;; esac
+    else
+      timeout $TO docker exec -u postgres "$c" psql -Atqc "$q" 2>/dev/null
+      case $? in 2|12[5-7]) timeout $TO docker exec "$c" psql -d "${d:-postgres}" -Atqc "$q" ${u:+-U "$u"} 2>/dev/null ;; esac
+    fi
   else
     timeout $TO su -s /bin/sh postgres -c "psql -Atqc \"$q\"" 2>/dev/null
   fi
@@ -162,8 +177,13 @@ pg_q_db() { # container db query
   local c="$1" db="$2" q="$3" u
   if [ -n "$c" ]; then
     u=$(docker exec "$c" printenv POSTGRES_USER 2>/dev/null || true)
-    timeout $TO docker exec -u postgres "$c" psql -d "$db" -Atqc "$q" 2>/dev/null \
-      || timeout $TO docker exec "$c" psql -d "$db" -Atqc "$q" ${u:+-U "$u"} 2>/dev/null
+    if [ -n "$u" ] && [ "$u" != postgres ]; then
+      timeout $TO docker exec "$c" psql -d "$db" -U "$u" -Atqc "$q" 2>/dev/null
+      case $? in 2|12[5-7]) timeout $TO docker exec -u postgres "$c" psql -d "$db" -Atqc "$q" 2>/dev/null ;; esac
+    else
+      timeout $TO docker exec -u postgres "$c" psql -d "$db" -Atqc "$q" 2>/dev/null
+      case $? in 2|12[5-7]) timeout $TO docker exec "$c" psql -d "$db" -Atqc "$q" ${u:+-U "$u"} 2>/dev/null ;; esac
+    fi
   elif have runuser; then
     timeout $TO runuser -u postgres -- psql -d "$db" -Atqc "$q" 2>/dev/null
   fi

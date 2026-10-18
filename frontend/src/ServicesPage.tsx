@@ -19,6 +19,7 @@ import {
   type ServiceInfo,
   type WorkerDaemon,
   type CronJob,
+  type LogErrSource,
   type WorkerProg,
 } from './api'
 import { LlmSection } from './Gpu'
@@ -30,7 +31,7 @@ import { fmtRel } from './ServersPage'
 import { CardNav, FreshChip, markMuted, OvAreas, OvRows, secInfoOf, type OvRow, type SecDef, type SecInfo, type SecItem } from './cardLayout'
 import { AdoptSitesModal, adoptable } from './AdoptSitesModal'
 import { EngineIcon } from './engineIcon'
-import { CRON_MUTE, QFAIL_MUTE, QSTUCK_MUTE, WORKER_MUTE } from './mutes'
+import { CRON_MUTE, LOGERR_MUTE, QFAIL_MUTE, QSTUCK_MUTE, WORKER_MUTE } from './mutes'
 import { OsIcon } from './osIcon'
 import { CountryFlag } from './CountryFlag'
 import { byteUnits } from './units'
@@ -780,7 +781,7 @@ function buildByServer(
     for (const d of s.workers ?? []) items.push({ kind: d.label, where: d.where, workers: true })
     // кроны (helper cron-setup): cron есть почти на каждой ноде, в список нод он ее не добавляет,
     // но окно сервисов по ссылке из алерта открывается и у ноды без других сервисов
-    const hasCron = (s.cron?.jobs ?? []).length > 0
+    const hasCron = (s.cron?.jobs ?? []).length > 0 || (s.log_errors?.sources ?? []).length > 0
     // веб-серверы/прокси (nginx/envoy/…): их не бэкапят, поэтому идут отдельным источником
     for (const w of s.last_report?.web_services ?? []) {
       if (seen.has(w.kind)) continue
@@ -1389,6 +1390,115 @@ function CronList({ server, where, kind, jobs, onChanged, filter }: {
   )
 }
 
+// Логи контейнеров и подов с ошибками за сутки (helper logerr-setup): всплеск наверху, у лога - за час
+// из скольких строк, за сутки, обычный час и последняя строка с ошибкой. 🔕 - не алертить по логу
+function LogErrList({ server, sources, onChanged, onlySpikes }: {
+  server: Server
+  sources: LogErrSource[]
+  onChanged: () => void
+  onlySpikes: boolean
+}) {
+  const { t } = useI18n()
+  const { isViewer } = useAuth()
+  const [picking, setPicking] = useState<string | null>(null)
+  const [mBusy, setMBusy] = useState(false)
+  const mute = async (key: string, hours: number) => {
+    const kind = LOGERR_MUTE + key
+    setMBusy(true)
+    try {
+      if (hours < 0) {
+        await updateServer(server.id, { alert_mutes: [...new Set([...(server.alert_mutes ?? []), kind])] })
+      } else if (hours === 0) {
+        if ((server.alert_mutes ?? []).includes(kind))
+          await updateServer(server.id, { alert_mutes: (server.alert_mutes ?? []).filter((x) => x !== kind) })
+        if (server.alert_snoozes?.[kind]) await snoozeServerAlert(server.id, kind, 0)
+      } else await snoozeServerAlert(server.id, kind, hours)
+      setPicking(null)
+      onChanged()
+    } catch {
+      /* кнопка остается, можно повторить */
+    } finally {
+      setMBusy(false)
+    }
+  }
+  const fmt = (ts: string) =>
+    new Date(ts).toLocaleString([], { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })
+  const rank = (x: LogErrSource) => (x.mute ? 3 : x.level ? 2 - x.level : 2)
+  const rows = sources
+    .filter((x) => !onlySpikes || (x.level && !x.mute))
+    .map((x, i) => ({ x, i }))
+    .sort((a, b) => rank(a.x) - rank(b.x) || a.i - b.i)
+    .map(({ x }) => x)
+  return (
+    <div className="chart-card net-card net-card-wide">
+      <div className="loc-results docker-clist">
+        {rows.map((x) => {
+          const tone = x.mute ? 't-up' : x.level ? (x.level >= 2 ? 't-down' : 't-degraded') : 't-soon'
+          return (
+            <div key={x.key} className={`loc-res docker-row ${tone}${x.mute ? ' q-muted' : ''}`}>
+              <span className={`lk-dot${x.mute ? '' : DOT[tone]}`} />
+              <div className="docker-c-main">
+                <div className="docker-c-name mono">{x.label}</div>
+                <div className="docker-c-img muted small">
+                  {subOf(
+                    t('за час: {n}', { n: rpmText(x.h1) }) + (x.lines1 > 0 ? ' ' + t('из {m} строк', { m: rpmText(x.lines1) }) : ''),
+                    t('за сутки: {n}', { n: rpmText(x.d1) }),
+                    x.base != null && (x.base >= 1 ? t('обычно около {n} в час', { n: rpmText(Math.round(x.base)) }) : t('обычно почти нет')),
+                  )}
+                </div>
+                {x.why && <div className={`docker-c-img small${x.mute ? ' muted' : ' q-stuck'}`}>{x.why}</div>}
+                {x.last && (
+                  <div className="docker-c-img w-log mono muted small" title={x.last}>
+                    {x.last_ts > 0 && <span>{fmtRel(new Date(x.last_ts * 1000).toISOString())}: </span>}
+                    {x.last}
+                  </div>
+                )}
+                {x.mute && (
+                  <div className="small">
+                    <span className="snooze-active-chip snooze-perm">
+                      🔇 {x.mute.perm ? t('не алертит, постоянно') : t('не алертит {t}', { t: t('до {t}', { t: fmt(x.mute.until!) }) })}
+                      {!isViewer && (
+                        <button className="chip-x" disabled={mBusy} title={t('Снять')} onClick={() => mute(x.key, 0)}>
+                          ✕
+                        </button>
+                      )}
+                    </span>
+                  </div>
+                )}
+                {!x.mute && picking === x.key && (
+                  <div className="small q-mute-pick">
+                    <span className="muted">🔕 {t('не алертить о всплеске в этом логе:')}</span>
+                    {[
+                      { h: 24, l: t('1 день') },
+                      { h: 24 * 7, l: t('1 неделя') },
+                      { h: -1, l: t('постоянно') },
+                    ].map(({ h, l }) => (
+                      <button key={h} className="ghost small" disabled={mBusy} onClick={() => mute(x.key, h)}>
+                        {l}
+                      </button>
+                    ))}
+                    <button className="ghost small" disabled={mBusy} onClick={() => setPicking(null)}>
+                      {t('Отмена')}
+                    </button>
+                  </div>
+                )}
+              </div>
+              {!isViewer && !x.mute ? (
+                <button className="ghost small q-mute-btn" disabled={mBusy} title={t('Не алертить о всплеске ошибок в этом логе: на день, неделю или постоянно')}
+                  onClick={() => setPicking(picking === x.key ? null : x.key)}>
+                  🔕
+                </button>
+              ) : (
+                <span className="q-mute-btn" />
+              )}
+            </div>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
 const SVC_SECTIONS: SecDef[] = [
   { id: 'overview', label: 'Сводка', group: '' },
   { id: 'web', label: 'Веб-серверы', group: 'Веб' },
@@ -1396,14 +1506,15 @@ const SVC_SECTIONS: SecDef[] = [
   { id: 'certs', label: 'Сертификаты', group: 'Веб' },
   { id: 'db', label: 'Базы и хранилища', group: 'Данные' },
   { id: 'queues', label: 'Очереди', group: 'Данные' },
-  { id: 'workers', label: 'Воркеры', group: 'Данные' },
-  { id: 'cron', label: 'Кроны', group: 'Данные' },
+  { id: 'workers', label: 'Воркеры', group: 'Процессы' },
+  { id: 'cron', label: 'Кроны', group: 'Процессы' },
+  { id: 'logs', label: 'Ошибки в логах', group: 'Процессы' },
   { id: 'llm', label: 'LLM', group: 'Модели' },
 ]
 const SVC_SEC_IDS = new Set(SVC_SECTIONS.map((x) => x.id))
 // раздел карточки по виду проблемы, если бэкенд его не назвал (старый бэкенд в кэше вкладки)
 const SVC_SEC_OF_KIND: Record<string, string> = {
-  queue: 'queues', queue_stuck: 'queues', workers: 'workers', cron_stuck: 'cron', web_cert: 'certs', web_config: 'web', db_health: 'db', db_conn: 'db', llm: 'llm',
+  queue: 'queues', queue_stuck: 'queues', workers: 'workers', cron_stuck: 'cron', log_errors: 'logs', web_cert: 'certs', web_config: 'web', db_health: 'db', db_conn: 'db', llm: 'llm',
 }
 
 function ServerServicesModal({ srv, onClose, onChanged, initialSec, sites }: {
@@ -1468,6 +1579,11 @@ function ServerServicesModal({ srv, onClose, onChanged, initialSec, sites }: {
   const cRank = (w: string) => Math.min(9, ...cJobs.filter((j) => j.where === w).map((j) => (j.mute ? 9 : j.level ? 3 - j.level : j.n > 0 ? 5 : 9)))
   const cGroups = cWhere.map((w, i) => ({ w, i, r: cRank(w) })).sort((a, b) => a.r - b.r || a.i - b.i).map(({ w }) => w)
   const cNoMta = (cron?.daemons ?? []).filter((d) => !d.mta && d.jobs > 0 && d.kind !== 'supercronic').map((d) => d.where)
+  // ошибки в логах: всплески наверху, фильтр "со всплеском"
+  const lErr = s.log_errors
+  const lSrc = lErr?.sources ?? []
+  const [lOnly, setLOnly] = useState(false)
+  const lSpikeN = lSrc.filter((x) => x.level && !x.mute).length
   const dbNoAuth = (s.queue_db_skipped ?? []).filter((x) => x.why === 'auth')
   const dbBig = (s.queue_db_skipped ?? []).filter((x) => x.why === 'big')
   const qHot = qAll.filter((x) => qDepth(x) >= QUEUE_HOT).length
@@ -1495,6 +1611,7 @@ function ServerServicesModal({ srv, onClose, onChanged, initialSec, sites }: {
     queues: rabbit.length > 0,
     workers: wDaemons.length > 0 || (s.workers_skipped ?? []).length > 0,
     cron: cJobs.length > 0,
+    logs: lSrc.length > 0,
     llm: llm.length > 0,
   }
   const secs = SVC_SECTIONS.filter((x) => shown[x.id])
@@ -1535,6 +1652,10 @@ function ServerServicesModal({ srv, onClose, onChanged, initialSec, sites }: {
     cron: subOf(
       t('задач: {n}', { n: cJobs.length }),
       cRunN > 0 && t('идут сейчас: {n}', { n: cRunN }),
+    ),
+    logs: subOf(
+      t('логов с ошибками: {n}', { n: lSrc.length }),
+      t('за час: {n}', { n: rpmText(lSrc.reduce((a, x) => a + x.h1, 0)) }),
     ),
     queues: t('очередей: {n}, сообщений: {m}', {
       n: rabbit.reduce((n, it) => n + (it.svc?.total ?? 0), 0),
@@ -1838,6 +1959,27 @@ function ServerServicesModal({ srv, onClose, onChanged, initialSec, sites }: {
                 {wShown.map((d) => (
                   <WorkerList key={d.source} server={s} d={d} onChanged={onChanged} onlyProblems={wOnly} />
                 ))}
+              </div>
+            )}
+            {cur.id === 'logs' && lErr && (
+              <div className="srv-sec">
+                <div className="muted small">
+                  {t('Строки с ошибками в логах контейнеров и подов: ERROR, FATAL, Exception, трейсбеки, [error] nginx, level=error. Алерт только на всплеск: за час от 200 строк и в пять раз больше обычного часа этого же лога; пока истории меньше 4 часов - от 2000. Лог, где ошибки есть всегда, не алертит.')}
+                </div>
+                {lErr.skipped > 0 && (
+                  <div className="muted small">{t('Логов пропущено за последнюю минуту: {n} (за минуту прочитано больше 64 МБ).', { n: lErr.skipped })}</div>
+                )}
+                {lSpikeN > 0 && (
+                  <div className="win-switch q-filter">
+                    <button className={`win-btn${!lOnly ? ' win-btn-active' : ''}`} onClick={() => setLOnly(false)}>
+                      {t('Все логи')}
+                    </button>
+                    <button className={`win-btn${lOnly ? ' win-btn-active' : ''}`} onClick={() => setLOnly(true)}>
+                      {t('Со всплеском: {n}', { n: lSpikeN })}
+                    </button>
+                  </div>
+                )}
+                <LogErrList server={s} sources={lSrc} onChanged={onChanged} onlySpikes={lOnly} />
               </div>
             )}
             {cur.id === 'cron' && cron && (

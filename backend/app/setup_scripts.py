@@ -121,6 +121,7 @@ _HELPER_LABEL = {
     "queues-setup": "очереди задач",
     "workers-setup": "воркеры supervisor и pm2",
     "cron-setup": "кроны на хосте и в контейнерах",
+    "logerr-setup": "ошибки в логах контейнеров",
 }
 
 
