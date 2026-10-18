@@ -1,7 +1,9 @@
 """Здоровье баз (helper dbstat-setup 0.5): репликация, долгие транзакции, блокировки, wraparound,
 таблицы, которые давно не вакуумились. Блок extras["db-health"], helper обновляет его раз в
 15 минут. С 0.8 у PostgreSQL еще и "что грузит базу" за последний час (load_view), с 0.9 настройки
-и советы по ним (advice), с 0.10 здоровье ClickHouse и Redis (_ch_problems, _rd_problems).
+и советы по ним (advice), с 0.10 здоровье ClickHouse и Redis (_ch_problems, _rd_problems), с 0.11 у MySQL
+и MariaDB нагрузка, настройки и советы (my_load_view, my_advice), очередь очистки InnoDB и простаивающая
+транзакция (_my_problems).
 
 Почему это отдельно от инвентаря: база может быть жива и отвечать, а реплика уже час не
 получает WAL, незакрытая транзакция держит блокировки и не дает VACUUM чистить, а возраст XID
@@ -23,7 +25,7 @@ VAC_DAYS = 7
 # Дамп держит одну транзакцию от начала до конца, это его природа: ночной pg_dump большой базы
 # шел четыре часа и давал алерт "транзакция идет 1 ч". Про дамп скажем, только если он идет
 # больше 12 часов - тогда он, скорее всего, завис.
-_DUMP_APPS = ("pg_dump", "pg_dumpall", "pg_basebackup")
+_DUMP_APPS = ("pg_dump", "pg_dumpall", "pg_basebackup", "mysqldump")
 DUMP_XACT_WARN = 12 * 3600
 STALE = 3600  # блок старше часа - helper не работает, не судим по старому
 # ClickHouse: куски в одной партиции. С parts_to_delay_insert вставки замедляются, с
@@ -34,6 +36,9 @@ CH_QUEUE_WARN = 3600  # задача репликации висит час с �
 RD_MEM_WARN = 0.9  # Redis с noeviction: от 90% maxmemory - предупреждение, от 98% запись отклоняется
 RD_MEM_CRIT = 0.98
 RD_LINK_DOWN = 120  # реплика без связи с основной 2 минуты
+# Очередь очистки InnoDB (history list length): старые версии строк, которые нельзя удалить, пока жива
+# транзакция старше них. Обычно тысячи; с миллиона каждый запрос пробирается через версии, растут undo
+HIST_WARN = 1_000_000
 _ENG = {"pg": "PostgreSQL", "mysql": "MySQL", "clickhouse": "ClickHouse", "redis": "Redis"}
 
 
@@ -149,6 +154,50 @@ def _rd_problems(x: dict, name: str, k: str) -> list[tuple[int, str, str]]:
     return out
 
 
+def _my_problems(x: dict, name: str, k: str) -> list[tuple[int, str, str]]:
+    """MySQL/MariaDB (dbstat-setup 0.11). Долгая транзакция, простаивающая транзакция и очередь очистки
+    чаще всего одна беда: транзакцию забыли закрыть, и из-за нее растет очередь. Про нее одна строка"""
+    out: list[tuple[int, str, str]] = []
+    xa, idle, sleep, hist = _int(x.get("xact")), _int(x.get("idle_xact")), _int(x.get("idle_sleep")), _int(x.get("hist"))
+    who = _who(str(x.get("xact_db") or ""), str(x.get("xact_app") or ""))
+    dump = str(x.get("xact_app") or "").startswith(_DUMP_APPS) and xa < DUMP_XACT_WARN
+    tail = f"; очередь очистки InnoDB уже {hist / 1e6:.1f} млн версий строк" if hist >= HIST_WARN else ""
+    told = False
+    # Транзакция открыта, а соединение ничего не делает (Sleep): приложение забыло COMMIT или держит в пуле
+    # соединение с начатой транзакцией. Держит свои блокировки строк и не дает InnoDB удалять старые версии
+    if sleep >= IDLE_WARN:
+        iw = _who(str(x.get("idle_db") or ""), str(x.get("idle_app") or ""))
+        out.append((2 if idle >= XACT_CRIT else 1,
+                    f"{name}: транзакция открыта {_dur(idle)} и простаивает {_dur(sleep)}" + (f" ({iw})" if iw else "")
+                    + ": держит блокировки строк и не дает InnoDB удалять старые версии" + tail, k + ":idle"))
+        told = True
+    # самая старая - другая, работающая (идет дольше простаивающей) - про нее своя строка
+    if xa >= XACT_WARN and not dump and not (told and idle >= xa - 60):
+        out.append((2 if xa >= XACT_CRIT else 1, f"{name}: транзакция идет {_dur(xa)}" + (f" ({who})" if who else "")
+                    + ("" if told else tail), k + ":xact"))
+        told = True
+    if hist >= HIST_WARN and not told:
+        txt = (f"{name}: очередь очистки InnoDB {hist / 1e6:.1f} млн версий строк - старые версии не удаляются, "
+               "запросы пробираются через них и замедляются")
+        if xa >= 600:
+            txt += f"; самая долгая транзакция идет {_dur(xa)}" + (f" ({who})" if who else "") + " - держит, скорее всего, она"
+        out.append((1, txt, k + ":hist"))
+    lw, lwt = _int(x.get("lock_waits")), _int(x.get("lock_wait"))
+    if lw and lwt >= LOCK_WARN:
+        txt = f"{name}: ждут блокировку {lw} запр., дольше всех {_dur(lwt)}"
+        if 60 <= sleep < IDLE_WARN:
+            txt += f", а транзакция простаивает {_dur(sleep)} - держит, скорее всего, она"
+        out.append((1, txt, k + ":lock"))
+    # Отказы по max_connections: приложение получает "Too many connections", это видно только в его логе
+    ld = x.get("load") if isinstance(x.get("load"), dict) else {}
+    win, rf = _int(ld.get("win")), _int(ld.get("connection_errors_max_connections"))
+    if win > 0 and rf > 0:
+        mc = (x.get("cfg") or {}).get("max_connections") if isinstance(x.get("cfg"), dict) else None
+        out.append((1, f"{name}: за {_mins(win)} отказано в подключении: {rf} - упор в max_connections"
+                       + (f" ({mc})" if mc else ""), k + ":conn"))
+    return out
+
+
 def problems(rep: dict, now: datetime) -> list[tuple[int, str, str]]:
     """(уровень, текст, ключ): ключ - что именно сломалось, чтобы новая беда дала свой алерт"""
     items = block(rep, now)
@@ -164,6 +213,11 @@ def problems(rep: dict, now: datetime) -> list[tuple[int, str, str]]:
         if x.get("engine") == "redis":
             out.extend(_rd_problems(x, name, k))
             continue
+        if x.get("engine") == "mysql":
+            # MariaDB - так и называем: версия есть в настройках (0.11)
+            cf = x.get("cfg") if isinstance(x.get("cfg"), dict) else {}
+            if "mariadb" in str(cf.get("version") or "").lower():
+                name = f"MariaDB {where}" if where else "MariaDB на хосте"
         lag = _int(x.get("lag"))
         if x.get("role") == "replica":
             if x.get("engine") == "pg" and str(x.get("receiver") or "") != "streaming":
@@ -177,6 +231,9 @@ def problems(rep: dict, now: datetime) -> list[tuple[int, str, str]]:
                 out.append((2 if lag >= LAG_CRIT else 1, f"{name}: реплика отстает на {_dur(lag)}", k + ":lag"))
         elif lag >= LAG_WARN:
             out.append((2 if lag >= LAG_CRIT else 1, f"{name}: реплика отстает от основной на {_dur(lag)}", k + ":lag"))
+        if x.get("engine") == "mysql":
+            out.extend(_my_problems(x, name, k))
+            continue
         xa = _int(x.get("xact"))
         if xa >= XACT_WARN and not (str(x.get("xact_app") or "").startswith(_DUMP_APPS) and xa < DUMP_XACT_WARN):
             who = _who(str(x.get("xact_db") or ""), str(x.get("xact_app") or ""))
@@ -300,9 +357,9 @@ def _ssd(rep: dict) -> bool | None:
     return all(r == 0 for r in rota)
 
 
-def _db_size(rep: dict, container: str) -> int:
+def _db_size(rep: dict, container: str, engine: str = "pg") -> int:
     for d in (rep or {}).get("db_stats") or []:
-        if isinstance(d, dict) and d.get("engine") == "pg" and (d.get("container") or "") == container:
+        if isinstance(d, dict) and d.get("engine") == engine and (d.get("container") or "") == container:
             return sum(_int(x.get("size")) for x in d.get("dbs") or [] if isinstance(x, dict))
     return 0
 
@@ -369,6 +426,132 @@ def advice(x: dict, lv: dict | None, *, pg_count: int = 1, ssd: bool | None = No
     return out
 
 
+# Что грузит MySQL/MariaDB (dbstat-setup 0.11): разница счетчиков SHOW GLOBAL STATUS со снимком примерно
+# часовой давности и самые долгие запросы из performance_schema. Тоже без алертов, кроме отказов в
+# подключении (они в _my_problems)
+_MY_KEYS = {"q": ("questions",), "sel": ("com_select",), "wr": ("com_insert", "com_update", "com_delete", "com_replace"),
+            "slow": ("slow_queries",), "tmp": ("created_tmp_tables",), "tmp_disk": ("created_tmp_disk_tables",),
+            "req": ("innodb_buffer_pool_read_requests",), "data_w": ("innodb_data_written",),
+            "redo": ("innodb_os_log_written",), "log_waits": ("innodb_log_waits",),
+            "lock_waits": ("innodb_row_lock_waits",), "lock_ms": ("innodb_row_lock_time",),
+            "deadlocks": ("innodb_deadlocks", "im_deadlocks"), "aborted": ("aborted_connects",),
+            "refused": ("connection_errors_max_connections",), "full_join": ("select_full_join",),
+            "sort_merge": ("sort_merge_passes",)}
+
+
+def my_load_view(x: dict) -> dict | None:
+    """Счетчики MySQL в пересчете на час (None - эта версия их не считает), чтения с диска в байтах и
+    доля попаданий в буфер, самые долгие запросы с долей во времени всех запросов"""
+    ld = x.get("load")
+    if not isinstance(ld, dict):
+        return None
+    win = _int(ld.get("win"))
+    out: dict = {"win": max(win, 0), "ps": str(ld.get("ps") or ""), "cut": bool(ld.get("cut")), "top": [],
+                 "run": _int(ld.get("run")), "max_used": _int(ld.get("max_used"))}
+    if win <= 0:
+        return out
+    k = 3600 / win
+    for key, src in _MY_KEYS.items():
+        # дедлоки: у MariaDB счетчик статуса, у MySQL - innodb_metrics; что есть, то и берем
+        vals = [_int(ld.get(f)) for f in src if f in ld]
+        if key == "deadlocks":
+            vals = vals[:1]
+        out[key] = round(sum(vals) * k) if vals else None
+    page = _int(ld.get("page")) or 16384
+    reads = _int(ld.get("innodb_buffer_pool_reads")) if "innodb_buffer_pool_reads" in ld else None
+    out["rd"] = round(reads * page * k) if reads is not None else None
+    req = _int(ld.get("innodb_buffer_pool_read_requests"))
+    out["hit"] = round(100 - reads * 100 / req, 2) if reads is not None and req >= 1000 else None
+    ms_all = max(_int(ld.get("ms_all")), 0)
+    out["ms_all"] = round(ms_all * k)
+    top: dict[tuple[str, str], dict] = {}
+    for q in ld.get("top") or []:
+        if not isinstance(q, dict):
+            continue
+        txt = str(q.get("q") or "")
+        key2 = (str(q.get("db") or ""), txt or "#" + str(q.get("id") or ""))
+        r = top.setdefault(key2, {"db": key2[0], "q": txt, "calls": 0, "ms": 0, "rows": 0, "tmp": 0, "noidx": 0})
+        for f in ("calls", "ms", "rows", "tmp", "noidx"):
+            r[f] += max(_int(q.get(f)), 0)
+    rows = sorted(top.values(), key=lambda r: -r["ms"])
+    for r in rows:
+        r["share"] = round(r["ms"] * 100 / ms_all) if ms_all else 0
+        r["avg_ms"] = round(r["ms"] / r["calls"], 1) if r["calls"] else 0
+        r["rows_call"] = round(r["rows"] / r["calls"]) if r["calls"] else 0
+        for f in ("calls", "ms", "rows", "tmp", "noidx"):
+            r[f] = round(r[f] * k)
+    out["top"] = rows
+    return out
+
+
+# Советы по настройкам MySQL/MariaDB: те же правила, что у PostgreSQL - только то, что прямо следует из
+# цифр, текст рисует фронт по ключу k
+REDO_ADVICE = GIB  # redo в час, с которого есть о чем говорить
+LOG_WAITS_ADVICE = 100
+TMP_DISK_ADVICE = 1000  # временных таблиц на диске в час
+
+
+def _my_ver(v: str) -> tuple[bool, tuple[int, int, int]]:
+    """("10.11.6-MariaDB-log") -> (MariaDB?, (10, 11, 6))"""
+    nums = []
+    for part in str(v or "").split("-")[0].split(".")[:3]:
+        try:
+            nums.append(int(part))
+        except ValueError:
+            nums.append(0)
+    while len(nums) < 3:
+        nums.append(0)
+    return "mariadb" in str(v or "").lower(), (nums[0], nums[1], nums[2])
+
+
+def my_advice(x: dict, lv: dict | None, *, my_count: int = 1, db_size: int = 0) -> list[dict]:
+    cf = x.get("cfg")
+    if not isinstance(cf, dict):
+        return []
+    out: list[dict] = []
+    maria, ver = _my_ver(str(cf.get("version") or ""))
+    bp, mem, lim = _int(cf.get("innodb_buffer_pool_size")), _int(cf.get("mem")), bool(cf.get("mem_lim"))
+    load = lv if isinstance(lv, dict) and lv.get("win") else {}
+    # Буфер InnoDB. Мал: данных намного больше буфера, и InnoDB заметно читает с диска. Только когда
+    # MySQL на машине один - иначе неизвестно, какая доля памяти его
+    rd, hit = load.get("rd") or 0, load.get("hit")
+    if my_count == 1 and mem >= 4 * GIB and bp and db_size >= 2 * bp and bp < mem * 0.4 and             (rd >= GIB or (hit is not None and hit < 99 and (load.get("req") or 0) >= 1_000_000)):
+        out.append({"k": "my_bp_low", "bp": bp, "mem": mem, "lim": lim, "data": db_size, "rd": rd})
+    elif bp and mem and bp > mem * 0.8:
+        out.append({"k": "my_bp_high", "bp": bp, "mem": mem, "lim": lim})
+    # Redo. Когда журнал переписывается по кругу чаще раза в полчаса, InnoDB приходится сбрасывать
+    # страницы раньше времени (агрессивный flush), запись на диск растет. Обычно журнала хватает на час
+    redo = load.get("redo") or 0
+    if "innodb_redo_log_capacity" in cf:
+        cap, var, online = _int(cf.get("innodb_redo_log_capacity")), "innodb_redo_log_capacity", True
+    elif maria and ver >= (10, 5, 0):
+        cap, var, online = _int(cf.get("innodb_log_file_size")), "innodb_log_file_size", ver >= (10, 11, 0)
+    else:
+        cap = _int(cf.get("innodb_log_file_size")) * max(_int(cf.get("innodb_log_files_in_group")), 1)
+        var, online = "innodb_log_file_size", False
+    if redo >= REDO_ADVICE and cap and cap < redo / 2:
+        out.append({"k": "my_redo", "cur": cap, "rec": _pow2_gib(redo), "redo": redo, "var": var, "online": online})
+    lw = load.get("log_waits") or 0
+    lb = _int(cf.get("innodb_log_buffer_size"))
+    if lw >= LOG_WAITS_ADVICE and 0 < lb < 64 * MIB:
+        out.append({"k": "my_log_buffer", "cur": lb, "n": lw, "online": not maria and ver >= (8, 0, 0)})
+    td, ta = load.get("tmp_disk") or 0, load.get("tmp") or 0
+    if td >= TMP_DISK_ADVICE and td >= ta * 0.1:
+        out.append({"k": "my_tmp", "n": td, "all": ta, "tts": _int(cf.get("tmp_table_size")),
+                    "mhts": _int(cf.get("max_heap_table_size"))})
+    # Бинлоги без срока хранения копятся, пока не кончится диск
+    exp_s = _int(cf.get("binlog_expire_logs_seconds"))
+    exp_d = _flt(cf.get("expire_logs_days"))
+    if cf.get("log_bin") == "ON" and not exp_s and not exp_d and _int(cf.get("binlog_b")) >= GIB:
+        out.append({"k": "my_binlog", "b": _int(cf.get("binlog_b"))})
+    # docker ждет 10 секунд: InnoDB не успевает сбросить грязные страницы большого буфера, и после
+    # docker stop или перезагрузки база восстанавливается по redo как после аварии
+    sto = _int(cf.get("stop_to"))
+    if cf.get("rt") == "docker" and bp >= STOP_MIN_SB and sto < STOP_OK:
+        out.append({"k": "my_stop_timeout", "to": 10 if sto < 0 else sto, "bp": bp})
+    return out
+
+
 def view(rep: dict, now: datetime) -> list[dict] | None:
     """Для раздела "Сервисы": по движку роль, отставание, самая долгая транзакция и проблемы"""
     items = block(rep, now)
@@ -376,17 +559,25 @@ def view(rep: dict, now: datetime) -> list[dict] | None:
         return None
     probs = problems(rep, now)
     pg_count = sum(1 for x in items if x.get("engine") == "pg")
+    my_count = sum(1 for x in items if x.get("engine") == "mysql")
     ssd = _ssd(rep)
     out = []
     for x in items:
         k = f"{x.get('engine')}:{x.get('container') or ''}"
         mine = [{"level": lv, "text": t} for lv, t, key in probs if key.startswith(k + ":")]
-        lv = load_view(x)
-        adv = advice(x, lv, pg_count=pg_count, ssd=ssd, db_size=_db_size(rep, str(x.get("container") or ""))) \
-            if x.get("engine") == "pg" else []
+        cont = str(x.get("container") or "")
+        if x.get("engine") == "mysql":
+            lv = my_load_view(x)
+            adv = my_advice(x, lv, my_count=my_count, db_size=_db_size(rep, cont, "mysql"))
+        else:
+            lv = load_view(x)
+            adv = advice(x, lv, pg_count=pg_count, ssd=ssd, db_size=_db_size(rep, cont)) if x.get("engine") == "pg" else []
         o = {"engine": x.get("engine"), "container": x.get("container") or "", "role": x.get("role") or "",
              "replicas": _int(x.get("replicas")), "lag": _int(x.get("lag")), "xact": _int(x.get("xact")),
              "xid": _int(x.get("xid")), "problems": mine, "load": lv, "advice": adv}
+        # у MySQL свои счетчики - отдельным полем, "load" остается за PostgreSQL
+        if x.get("engine") == "mysql":
+            o["load"], o["my"] = None, lv
         # ClickHouse и Redis - факты для карточки как есть: куски, мутации, реплики, вставки, запросы;
         # память, снимок, вытеснение, тяжелые команды
         if x.get("engine") == "clickhouse":

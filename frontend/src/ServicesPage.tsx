@@ -11,6 +11,7 @@ import {
   type DbHealth,
   type RdHealth,
   type DbLoad,
+  type MyLoad,
   type Server,
   type ServiceInfo,
 } from './api'
@@ -230,6 +231,23 @@ function adviceText(a: DbAdvice, t: (s: string, v?: Record<string, string | numb
       return t('shared_buffers {sb} при {mem} памяти{lim}, а база намного больше буферов: обычно ставят около 25% памяти (нужен перезапуск)', { sb: b('sb'), mem: b('mem'), lim: a.lim ? t(' (лимит контейнера)') : '' })
     case 'shared_buffers_high':
       return t('shared_buffers {sb}, а это больше половины памяти ({mem}{lim}): остальному серверу и кэшу ОС остается мало, обычно ставят около 25% (нужен перезапуск)', { sb: b('sb'), mem: b('mem'), lim: a.lim ? t(', лимит контейнера') : '' })
+    // MySQL/MariaDB (dbstat-setup 0.11)
+    case 'my_bp_low':
+      return t('innodb_buffer_pool_size {bp} при {mem} памяти{lim}, а данных {data}: InnoDB читает с диска {rd} в час. Если машина только под базу, обычно ставят 50-70% памяти. Меняется без перезапуска (SET GLOBAL innodb_buffer_pool_size), значение надо записать и в конфиг', { bp: b('bp'), mem: b('mem'), lim: a.lim ? t(' (лимит контейнера)') : '', data: b('data'), rd: b('rd') })
+    case 'my_bp_high':
+      return t('innodb_buffer_pool_size {bp}, а это больше 80% памяти ({mem}{lim}): подключениям, временным таблицам и самому серверу остается мало, на пике процесс убьет OOM', { bp: b('bp'), mem: b('mem'), lim: a.lim ? t(', лимит контейнера') : '' })
+    case 'my_redo':
+      return t('Redo пишется {redo} в час, а журнал {cur} ({v}): он переписывается по кругу чаще раза в полчаса, и InnoDB приходится сбрасывать страницы на диск раньше времени. Обычно журнала хватает на час записи, примерно {rec}', { redo: b('redo'), cur: b('cur'), v: String(a.var), rec: b('rec') })
+        + ', ' + (a.online ? t('меняется без перезапуска') : t('нужен перезапуск'))
+    case 'my_log_buffer':
+      return t('Запись ждала свободного места в буфере redo {n} раз за час: innodb_log_buffer_size {cur} мал, обычно ставят 64 МБ', { n: fmtCount(n('n')), cur: b('cur') })
+        + ' (' + (a.online ? t('без перезапуска') : t('нужен перезапуск')) + ')'
+    case 'my_tmp':
+      return t('Временных таблиц на диске {n} в час из {all}: они не помещаются в память, а работает меньший из лимитов tmp_table_size {tts} и max_heap_table_size {mhts}. Поднимать осторожно, лимит действует на каждую таблицу каждого запроса. Обычно дешевле поправить запросы с временными таблицами на диске', { n: fmtCount(n('n')), all: fmtCount(n('all')), tts: b('tts'), mhts: b('mhts') })
+    case 'my_binlog':
+      return t('Бинлоги занимают {b} и не удаляются: binlog_expire_logs_seconds и expire_logs_days равны 0. Поставьте срок, например binlog_expire_logs_seconds = 604800 (7 дней), перезапуск не нужен. Реплика, если она есть, должна успевать забирать их за этот срок', { b: b('b') })
+    case 'my_stop_timeout':
+      return t('Docker при остановке ждет MySQL {to} с, потом убивает: с буфером {bp} InnoDB может не успеть сбросить страницы, и после docker stop или перезагрузки сервера база восстанавливается по redo как после аварии. В compose stop_grace_period: 5m (контейнер пересоздается), для ручной остановки docker stop -t 600', { to: n('to'), bp: b('bp') })
     default:
       return ''
   }
@@ -301,6 +319,86 @@ function DbLoadBlock({ load, advice, name, t }: {
                     ? t('{s} с в среднем', { s: (q.avg_ms / 1000).toFixed(q.avg_ms >= 10000 ? 0 : 1) })
                     : t('{ms} мс в среднем', { ms: q.avg_ms >= 10 ? Math.round(q.avg_ms) : q.avg_ms }),
                   q.temp > 0 ? t('временные файлы {s}', { s: fmtBytes(q.temp) }) : '',
+                  multiDb && q.db ? t('база {db}', { db: q.db }) : '',
+                ].filter(Boolean).join(' · ')}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+      {hints.map((h) => <div key={h} className="net-note">{h}</div>)}
+      {tips.length > 0 && <div className="svc-db-load-sub">{t('Что поправить в настройках')}</div>}
+      {tips.map((h) => <div key={h} className="net-note">{h}</div>)}
+    </div>
+  )
+}
+
+// Что грузит MySQL/MariaDB за последний час (dbstat-setup 0.11): тот же разбор, что у PostgreSQL, на
+// счетчиках SHOW GLOBAL STATUS и запросах performance_schema. Отказы по max_connections здесь не
+// повторяем: они строкой проблемы в той же карточке
+function MyLoadBlock({ load, advice, name, t }: {
+  load: MyLoad | null | undefined
+  advice: DbAdvice[]
+  name: string
+  t: TFn
+}) {
+  const [open, setOpen] = useState<number | null>(null)
+  const ld: MyLoad = load ?? { win: -1, ps: '', cut: false, run: 0, max_used: 0, top: [] }
+  const tips = advice.map((a) => adviceText(a, t)).filter(Boolean)
+  const facts: string[] = []
+  const hints: string[] = []
+  const perSec = (v: number) => (v / 3600).toFixed(v < 36000 ? 1 : 0)
+  if (ld.win > 0) {
+    if (ld.q != null)
+      facts.push(t('{n} запросов в секунду', { n: perSec(ld.q) }) + (ld.wr
+        ? `, ${ld.wr >= 360 ? t('изменений {n} в секунду', { n: perSec(ld.wr) }) : t('изменений {n} в час', { n: fmtCount(ld.wr) })}`
+        : ''))
+    if (ld.slow) facts.push(t('медленных запросов за час: {n}', { n: fmtCount(ld.slow) }))
+    if (ld.rd)
+      facts.push(t('чтение с диска мимо буфера InnoDB {s} в час', { s: fmtBytes(ld.rd) }) + (ld.hit != null ? `, ${t('попаданий в буфер {p}%', { p: ld.hit })}` : ''))
+    if (ld.redo) facts.push(t('redo {s} в час', { s: fmtBytes(ld.redo) }))
+    if (ld.tmp_disk) facts.push(t('временных таблиц на диске {n} в час из {m}', { n: fmtCount(ld.tmp_disk), m: fmtCount(ld.tmp ?? 0) }))
+    if (ld.lock_waits) facts.push(t('ожиданий блокировок строк {n} в час, всего {d}', { n: fmtCount(ld.lock_waits), d: durMs(ld.lock_ms ?? 0, t) }))
+    if (ld.deadlocks) facts.push(t('дедлоков за час: {n}', { n: fmtCount(ld.deadlocks) }))
+    if ((ld.aborted ?? 0) >= 10) facts.push(t('неудачных подключений {n} в час: неверный пароль или обрыв при входе', { n: fmtCount(ld.aborted ?? 0) }))
+  }
+  if (ld.ps === 'off')
+    hints.push(t('Самые долгие запросы покажет performance_schema: в MariaDB он по умолчанию выключен. Включается строкой performance_schema = ON в разделе [mysqld], нужен перезапуск'))
+  if (ld.cut) hints.push(t('Запросы не показаны: на сервере много инстансов, и отчет не вместил бы все'))
+  const quiet = (ld.ms_all ?? 0) < LOAD_QUIET_MS
+  const multiDb = new Set(ld.top.map((q) => q.db).filter(Boolean)).size > 1
+  return (
+    <div className="svc-db-load">
+      <div className="svc-db-load-head">
+        <span className="svc-db-load-title">{load ? t('Что грузит базу') : t('Настройки MySQL')}</span>
+        {name && <span className="mono muted small">{name}</span>}
+        {ld.win > 0 && (
+          <span className="muted small">
+            {ld.win >= 3000 ? t('за последний час') : t('за {n} мин, в пересчете на час', { n: Math.max(1, Math.round(ld.win / 60)) })}
+          </span>
+        )}
+      </div>
+      {ld.win === 0 && <div className="muted small">{t('Собираю данные: первая картина через 15 минут, за полный час - через час')}</div>}
+      {facts.length > 0 && <div className="svc-db-load-facts small">{facts.map((f) => <span key={f}>{f}</span>)}</div>}
+      {ld.win > 0 && ld.ps === 'on' && !ld.cut && quiet && (
+        <div className="muted small">{t('Запросы заняли {s} с за час - база почти не нагружена', { s: Math.round((ld.ms_all ?? 0) / 1000) })}</div>
+      )}
+      {ld.win > 0 && !quiet && ld.top.length > 0 && (
+        <div className="svc-db-load-top">
+          {ld.top.map((q, i) => (
+            <div key={i} className="svc-db-load-q">
+              <div className={q.q ? `mono svc-db-load-text${open === i ? ' open' : ''}` : 'muted small'} title={q.q || undefined}
+                onClick={() => q.q && setOpen(open === i ? null : i)}>
+                {q.q || t('текст скрыт: в нем пароль или секрет')}
+              </div>
+              <div className="muted small">
+                {[
+                  t('{p}% времени запросов', { p: q.share }),
+                  t('{n} вызовов', { n: fmtCount(q.calls) }),
+                  t('{d} в среднем', { d: durMs(q.avg_ms, t) }),
+                  q.rows_call >= 1000 ? t('просматривает {n} строк за вызов', { n: fmtCount(q.rows_call) }) : '',
+                  q.noidx > 0 ? t('без индекса') : '',
+                  q.tmp > 0 ? t('временных таблиц на диске {n}', { n: fmtCount(q.tmp) }) : '',
                   multiDb && q.db ? t('база {db}', { db: q.db }) : '',
                 ].filter(Boolean).join(' · ')}
               </div>
@@ -535,8 +633,11 @@ function DbInventory({ db, t, health = [] }: {
           </div>
         ))}
       </div>
-      {health.filter((h) => h.load || (h.advice ?? []).length > 0).map((h) => (
+      {health.filter((h) => h.engine !== 'mysql' && (h.load || (h.advice ?? []).length > 0)).map((h) => (
         <DbLoadBlock key={'l' + h.container} load={h.load} advice={h.advice ?? []} name={health.length > 1 ? h.container : ''} t={t} />
+      ))}
+      {health.filter((h) => h.engine === 'mysql' && (h.my || (h.advice ?? []).length > 0)).map((h) => (
+        <MyLoadBlock key={'m' + h.container} load={h.my} advice={h.advice ?? []} name={health.length > 1 ? h.container || t('на хосте') : ''} t={t} />
       ))}
       {health.some((h) => h.ch) && <EngineList items={health.filter((h) => h.ch)} kind="ch" t={t} />}
       {health.some((h) => h.rd) && <EngineList items={health.filter((h) => h.rd)} kind="rd" t={t} />}
@@ -560,6 +661,18 @@ function noSitesHint(
   return t('домены не заданы — обычно это апстрим за прокси')
 }
 
+// версия helper'а меньше нужной: "0.9" < "0.11" по частям, а не строкой
+function setupLt(v: string, target: string): boolean {
+  const a = v.split('.').map(Number)
+  const b = target.split('.').map(Number)
+  for (let i = 0; i < Math.max(a.length, b.length); i++) {
+    const x = a[i] ?? 0
+    const y = b[i] ?? 0
+    if (x !== y) return x < y
+  }
+  return false
+}
+
 // СУБД без инвентаря: объясняем, чего не хватает, чтобы увидеть базы и размеры.
 // Про бэкап здесь не пишем — это страница про сервисы.
 function noDbHint(
@@ -570,12 +683,19 @@ function noDbHint(
 ): string | null {
   // инвентарь снимает только dbstat-setup и только для этих движков
   if (!Object.values(DB_ENGINE_LABEL).includes(kind)) return null
+  const ver = server.last_report?.setup_versions?.['dbstat-setup']
+  // MySQL в подах helper видит с 0.11 (заходит в под своей ноды), остальные движки - только на хосте и в docker
   if (inKube) {
-    return t('инвентарь снимается с хостовых и docker-баз — до баз в кластере хелпер не дотягивается')
+    if (kind !== DB_ENGINE_LABEL.mysql)
+      return t('инвентарь снимается с хостовых и docker-баз — до баз в кластере хелпер не дотягивается')
+    if (ver && setupLt(String(ver), '0.11')) return t('MySQL в подах helper видит с версии 0.11: обновите dbstat-setup')
+    if (ver) return t('под на другой ноде (helper видит поды только своей ноды) или база не ответила')
   }
-  if (!server.last_report?.setup_versions?.['dbstat-setup']) {
+  if (!ver) {
     return t('базы и размеры не собраны: на ноде нет хелпера dbstat-setup')
   }
+  if (kind === DB_ENGINE_LABEL.mysql)
+    return t('база не ответила: helper входит как root через сокет, /etc/mysql/debian.cnf или /root/.my.cnf')
   return t('база не ответила на опрос инвентаря')
 }
 

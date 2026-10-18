@@ -34,9 +34,16 @@
 # with what the panel cannot see from inside the database: memory of the machine or the container
 # limit, huge pages reserved by the kernel, page tables, how long docker waits before killing the
 # container on stop. The panel compares them with the load and gives advice; nothing is changed here.
+#
+# Since 0.11 MySQL and MariaDB get the same: what loads them over about the last hour (status counters
+# and, with performance_schema, the statements that took the most time), the settings against the
+# machine, the purge backlog and whose transaction is the oldest. They are also reached where the
+# helper did not get before: in Kubernetes pods (containerd, k0s, k3s, cri-o) and on a host where root
+# needs a password (through /etc/mysql/debian.cnf or /root/.my.cnf). Replica status was read with \G,
+# which newer clients print without field names: a replica would have read as stopped.
 set -euo pipefail
 
-KERVAX_SETUP_VERSION=0.10  # MAJOR.MINOR; compared component-wise
+KERVAX_SETUP_VERSION=0.11  # MAJOR.MINOR; compared component-wise
 KERVAX_SETUP_ALWAYS=1     # safe on any node: without a database it collects an empty file
 
 HELPER_DIR=/lib65/kervax
@@ -385,66 +392,151 @@ cfg_pg() { # container -> a JSON object, nothing when the engine does not answer
 }
 
 # ── MySQL / MariaDB ────────────────────────────────────────────────────────────
-# The password is read from the container's environment INSIDE it (MYSQL_PWD) and never
-# passed as an argument — otherwise it would show up in `ps` on the host.
-my_q() { # container query
-  # The client is chosen by what actually exists. mariadb:11 no longer ships a `mysql`
-  # command — only `mariadb` — and the query failed silently into /dev/null: the engine
-  # appeared in the report while not a single database, size or login did. From outside it
-  # looked like "the inventory is empty for some reason", with no hint that the client was
-  # simply not found.
-  local c="$1" q="$2"
-  if [ -n "$c" ]; then
-    # MYSQL_PWD is passed as a command PREFIX rather than a separate assignment: without
-    # export the variable would stay in the shell and never reach the client — "using
-    # password: NO" despite a password being set.
-    timeout $TO docker exec "$c" sh -c 'if command -v mysql >/dev/null 2>&1; then CLI=mysql; else CLI=mariadb; fi
-      MYSQL_PWD="${MYSQL_ROOT_PASSWORD:-${MARIADB_ROOT_PASSWORD:-}}" exec "$CLI" -u root -N -B -e "'"$q"'"' 2>/dev/null
-  elif have mysql; then
-    timeout $TO mysql -N -B -e "$q" 2>/dev/null
-  else
-    timeout $TO mariadb -N -B -e "$q" 2>/dev/null
-  fi
+# Where an instance lives decides how it is queried:
+#   ""        - on the host: the client as root over the socket, else with the options file
+#               /etc/mysql/debian.cnf (Debian/Ubuntu maintenance user) or /root/.my.cnf
+#   a name    - a docker container: docker exec, the password from the container's own environment
+#   pid:<pid> - a container of another runtime (Kubernetes pods under containerd, k0s, k3s, cri-o):
+#               docker does not see it, the host has no client. The client from the container's own
+#               image runs inside its mount, network and PID namespaces (nsenter) under the uid of the
+#               server process, so it has no capabilities and cannot reach anything the database
+#               itself cannot. The password comes from the container's settings kept by the runtime
+#               (config.json): the official images remove it from the server process environment.
+# The password is never an argument (it would show up in `ps`): MYSQL_PWD in the environment.
+MYAUTH_SET=""
+MYAUTH=""
+my_host() { # flags query
+  local b=mysql
+  have mysql || b=mariadb
+  timeout $TO "$b" ${MYAUTH:+"--defaults-file=$MYAUTH"} $1 -e "$2" 2>/dev/null
 }
+# once per run: the options files first, then socket authentication as root (MariaDB packages). A
+# MySQL 8 package from Ubuntu has root with a password and no socket login: there the inventory stayed
+# empty while debian.cnf would have let it in. A refused login counts in Aborted_connects, so the one
+# that works comes first and the helper does not add to the counter it reports
+my_host_auth() {
+  [ -n "$MYAUTH_SET" ] && return 0
+  MYAUTH_SET=1
+  local f v
+  for f in /etc/mysql/debian.cnf /root/.my.cnf ""; do
+    [ -z "$f" ] || [ -r "$f" ] || continue
+    MYAUTH="$f"
+    v=$(my_host "-N -B" "select version()" | head -1)
+    case "$v" in [0-9]*) return 0 ;; esac
+  done
+  MYAUTH=""
+}
+# the root password of a container of another runtime, from its config.json; *_FILE is read inside it
+my_pod_pw() { # pid
+  local id f
+  id=$(grep -o '[0-9a-f]\{64\}' "/proc/$1/cgroup" 2>/dev/null | tail -1)
+  [ -n "$id" ] || return 0
+  for f in /run/containerd/io.containerd.runtime.v2.task/*/"$id"/config.json \
+           /run/*/containerd/io.containerd.runtime.v2.task/*/"$id"/config.json \
+           /run/docker/containerd/daemon/io.containerd.runtime.v2.task/*/"$id"/config.json \
+           /run/containers/storage/overlay-containers/"$id"/userdata/config.json; do
+    [ -r "$f" ] || continue
+    if have python3; then
+      python3 -c 'import json, sys
+e = (json.load(open(sys.argv[1])).get("process") or {}).get("env") or []
+d = dict(x.split("=", 1) for x in e if "=" in x)
+p = d.get("MARIADB_ROOT_PASSWORD") or d.get("MYSQL_ROOT_PASSWORD") or ""
+fp = d.get("MARIADB_ROOT_PASSWORD_FILE") or d.get("MYSQL_ROOT_PASSWORD_FILE") or ""
+if not p and fp.startswith("/"):
+    try:
+        p = open("/proc/" + sys.argv[2] + "/root" + fp).read().strip()
+    except OSError:
+        pass
+sys.stdout.write(p)' "$f" "$1" 2>/dev/null
+    else
+      # without python only a value with no JSON escapes: a wrong password is worse than none
+      grep -o '"\(MARIADB\|MYSQL\)_ROOT_PASSWORD=[^"\\]*"' "$f" | head -1 | sed 's/^"[A-Z_]*=//; s/"$//'
+    fi
+    return 0
+  done
+}
+# a readable name: namespace/pod from the runtime's annotations, a docker container by its name, else
+# the HOSTNAME of the container
+my_pod_name() { # pid
+  local id f ns pod
+  id=$(grep -o '[0-9a-f]\{64\}' "/proc/$1/cgroup" 2>/dev/null | tail -1)
+  if [ -n "$id" ] && have docker; then
+    pod=$(docker inspect -f '{{.Name}}' "$id" 2>/dev/null | sed 's#^/##')
+    [ -n "$pod" ] && { printf '%s' "$pod"; return 0; }
+  fi
+  for f in /run/containerd/io.containerd.runtime.v2.task/*/"$id"/config.json \
+           /run/*/containerd/io.containerd.runtime.v2.task/*/"$id"/config.json \
+           /run/docker/containerd/daemon/io.containerd.runtime.v2.task/*/"$id"/config.json \
+           /run/containers/storage/overlay-containers/"$id"/userdata/config.json; do
+    [ -n "$id" ] && [ -r "$f" ] || continue
+    ns=$(grep -o '"io.kubernetes.\(cri.sandbox-namespace\|pod.namespace\)":"[^"]*"' "$f" | head -1 | sed 's/.*:"//; s/"$//')
+    pod=$(grep -o '"io.kubernetes.\(cri.sandbox-name\|pod.name\)":"[^"]*"' "$f" | head -1 | sed 's/.*:"//; s/"$//')
+    break
+  done
+  [ -n "${pod:-}" ] || pod=$(tr '\0' '\n' < "/proc/$1/environ" 2>/dev/null | sed -n 's/^HOSTNAME=//p' | head -1)
+  if [ -n "${pod:-}" ]; then printf '%s%s' "${ns:+$ns/}" "$pod"; else printf 'pid %s' "$1"; fi
+}
+my_run() { # container flags query; flags "-N -B" (values only) or "-B" (with the header line)
+  local c="$1" fl="$2" q="$3" p u g
+  case "$c" in
+    pid:*)
+      p=${c#pid:}
+      u=$(awk '/^Uid:/ {print $2}' "/proc/$p/status" 2>/dev/null); g=$(awk '/^Gid:/ {print $2}' "/proc/$p/status" 2>/dev/null)
+      case "$u" in ''|0) u=65534; g=65534 ;; esac
+      MYSQL_PWD="$(my_pod_pw "$p")" timeout $TO nsenter -t "$p" -m -n -p -S "$u" -G "${g:-$u}" -- \
+        sh -c 'if command -v mysql >/dev/null 2>&1; then exec mysql "$@"; else exec mariadb "$@"; fi' sh -u root $fl -e "$q" 2>/dev/null
+      ;;
+    "")
+      my_host_auth
+      my_host "$fl" "$q"
+      ;;
+    *)
+      # The client is chosen by what actually exists. mariadb:11 no longer ships a `mysql` command,
+      # only `mariadb`, and the query failed silently into /dev/null: the engine appeared in the
+      # report while not a single database, size or login did. MYSQL_PWD is a command PREFIX: a
+      # separate assignment without export would never reach the client ("using password: NO")
+      timeout $TO docker exec "$c" sh -c 'if command -v mysql >/dev/null 2>&1; then CLI=mysql; else CLI=mariadb; fi
+        PW="${MYSQL_ROOT_PASSWORD:-${MARIADB_ROOT_PASSWORD:-}}"
+        F="${MARIADB_ROOT_PASSWORD_FILE:-${MYSQL_ROOT_PASSWORD_FILE:-}}"
+        [ -z "$PW" ] && [ -n "$F" ] && PW=$(cat "$F" 2>/dev/null)
+        MYSQL_PWD="$PW" exec "$CLI" -u root "$@"' sh $fl -e "$q" 2>/dev/null
+      ;;
+  esac
+}
+my_q() { my_run "$1" "-N -B" "$2"; }
+# the name an instance is shown under: a pod by its name, the rest by the container
+my_name() { case "$1" in pid:*) my_pod_name "${1#pid:}" ;; *) printf '%s' "$1" ;; esac; }
+
 collect_mysql() {
-  local c="$1" v d u cu cm
+  local c="$1" n v d u cu cm
   v=$(my_q "$c" "select version()" | head -1)
   # a version starts with a digit; anything else is docker's own error printed to stdout (a
   # postgres-exporter matches the image pattern but has no psql: "OCI runtime exec failed")
   case "$v" in [0-9]*) ;; *) return 0 ;; esac
+  n=$(my_name "$c")
   d=$(my_q "$c" "select table_schema, ifnull(sum(data_length+index_length),0) from information_schema.tables where table_schema not in ('information_schema','performance_schema','sys') group by table_schema order by 2 desc" \
       | awk -F'\t' '{print $1"|"$2}' | dbs_json)
   u=$(my_q "$c" "select distinct user from mysql.user order by user" | list_json)
-  # the same ceiling on the MySQL/MariaDB side: threads currently connected vs max_connections
-  cu=$(my_q "$c" "select variable_value from performance_schema.global_status where variable_name='Threads_connected'" | head -1)
-  [ -z "$cu" ] && cu=$(my_q "$c" "show status like 'Threads_connected'" | awk '{print $2}' | head -1)
+  # the same ceiling on the MySQL/MariaDB side: threads currently connected vs max_connections.
+  # SHOW STATUS works with performance_schema off (MariaDB's default), its tables are empty then
+  cu=$(my_q "$c" "show global status like 'Threads_connected'" | awk '{print $2}' | head -1)
   cm=$(my_q "$c" "select @@max_connections" | head -1)
-  add_entry mysql "$c" "$v" "$d" "$u" "$cu" "$cm"
-  health_mysql "$c"
+  add_entry mysql "$n" "$v" "$d" "$u" "$cu" "$cm"
+  health_mysql "$c" "$n"
 }
 
-# like my_q, but with the header line: SHOW ... STATUS is read by column names. Vertical output
-# (\G) is no good here - with -N newer clients drop the field names there too
-my_q_hdr() { # container query
-  local c="$1" q="$2"
-  if [ -n "$c" ]; then
-    timeout $TO docker exec "$c" sh -c 'if command -v mysql >/dev/null 2>&1; then CLI=mysql; else CLI=mariadb; fi
-      MYSQL_PWD="${MYSQL_ROOT_PASSWORD:-${MARIADB_ROOT_PASSWORD:-}}" exec "$CLI" -u root -B -e "'"$q"'"' 2>/dev/null
-  elif have mysql; then
-    timeout $TO mysql -B -e "$q" 2>/dev/null
-  else
-    timeout $TO mariadb -B -e "$q" 2>/dev/null
-  fi
-}
-# a column of a one-row result with a header, by a name pattern: Seconds_Behind_Source -> 12
-mcol() { printf '%s
-' "$1" | awk -F'	' -v k="$2" 'NR == 1 { for (i = 1; i <= NF; i++) if ($i ~ k) c = i; next }
+# a column of a one-row result with a header, by a name pattern: Seconds_Behind_Source -> 12.
+# Vertical output (\G) is no good here: with -N newer clients drop the field names there too, and
+# until 0.11 a replica would have read as "IO and SQL threads stopped"
+mcol() { printf '%s\n' "$1" | awk -F'\t' -v k="$2" 'NR == 1 { for (i = 1; i <= NF; i++) if ($i ~ k) c = i; next }
   NR == 2 && c { print $c; exit }'; }
+# a value from "name<TAB>value" lines by its lower-case name
+mval() { printf '%s\n' "$1" | awk -F'\t' -v k="$2" 'tolower($1) == k { print $2; exit }'; }
 
 health_mysql() {
-  local c="$1" rs role io sq lag err xa lw
-  rs=$(my_q "$c" "SHOW REPLICA STATUS\\G")
-  [ -z "$rs" ] && rs=$(my_q "$c" "SHOW SLAVE STATUS\\G")
+  local c="$1" n="$2" rs role io sq lag err nt xa xi lw st im hist ld cf
+  rs=$(my_run "$c" -B "SHOW REPLICA STATUS")
+  [ -z "$rs" ] && rs=$(my_run "$c" -B "SHOW SLAVE STATUS")
   if [ -n "$rs" ]; then
     role=replica
     io=$(mcol "$rs" '^(Replica|Slave)_IO_Running$'); sq=$(mcol "$rs" '^(Replica|Slave)_SQL_Running$')
@@ -453,9 +545,154 @@ health_mysql() {
   else
     role=primary; io=""; sq=""; lag=0; err=""
   fi
-  xa=$(my_q "$c" "select count(*), coalesce(max(timestampdiff(second, trx_started, now())),0) from information_schema.innodb_trx" | head -1)
+  nt=$(my_q "$c" "select count(*) from information_schema.innodb_trx" | head -1)
+  # the oldest transaction and whose it is. A dump with --single-transaction holds one for its whole
+  # run: its statements carry SQL_NO_CACHE, and the panel then waits 12 hours instead of one
+  xa=$(my_q "$c" "select timestampdiff(second, t.trx_started, now()), ifnull(p.db, ''), if(p.info like '%SQL_NO_CACHE%', 'mysqldump', ifnull(p.user, '')) from information_schema.innodb_trx t left join information_schema.processlist p on p.id = t.trx_mysql_thread_id order by t.trx_started limit 1" | head -1)
+  # an open transaction whose connection does nothing (Sleep): it holds its row locks and keeps
+  # InnoDB from purging old row versions in the whole server, the MySQL side of "idle in transaction"
+  xi=$(my_q "$c" "select timestampdiff(second, t.trx_started, now()), p.time, ifnull(p.db, ''), ifnull(p.user, '') from information_schema.innodb_trx t join information_schema.processlist p on p.id = t.trx_mysql_thread_id where p.command = 'Sleep' order by t.trx_started limit 1" | head -1)
   lw=$(my_q "$c" "select count(*), coalesce(max(timestampdiff(second, trx_wait_started, now())),0) from information_schema.innodb_trx where trx_state='LOCK WAIT'" | head -1)
-  HEALTH="$HEALTH${HEALTH:+,}{\"engine\":\"mysql\",\"container\":\"$(esc "$c")\",\"role\":\"$role\",\"io\":\"$(esc "$io")\",\"sql\":\"$(esc "$sq")\",\"lag\":$(num "$lag"),\"err\":\"$(esc "$(printf '%s' "$err" | cut -c1-200)")\",\"trx\":$(num "$(printf '%s' "$xa" | cut -f1)"),\"xact\":$(num "$(printf '%s' "$xa" | cut -f2)"),\"lock_waits\":$(num "$(printf '%s' "$lw" | cut -f1)"),\"lock_wait\":$(num "$(printf '%s' "$lw" | cut -f2)")}"
+  # the purge backlog (history list length): MariaDB has it as a status variable, MySQL in innodb_metrics
+  st=$(my_q "$c" "SHOW GLOBAL STATUS")
+  im=$(my_q "$c" "select name, count from information_schema.innodb_metrics where name in ('trx_rseg_history_len', 'lock_deadlocks') and status = 'enabled'")
+  hist=$(mval "$st" innodb_history_list_length); [ -n "$hist" ] || hist=$(mval "$im" trx_rseg_history_len)
+  ld=$(load_my "$c" "$n" "$st" "$im")
+  case "$ld" in *',"top":['*) [ $((LOAD_BYTES + ${#ld})) -gt "$LOAD_BUDGET" ] && ld="${ld%%,\"top\":*},\"top\":[],\"cut\":1}" ;; esac
+  LOAD_BYTES=$((LOAD_BYTES + ${#ld}))
+  cf=$(cfg_my "$c")
+  HEALTH="$HEALTH${HEALTH:+,}{\"engine\":\"mysql\",\"container\":\"$(esc "$n")\",\"role\":\"$role\",\"io\":\"$(esc "$io")\",\"sql\":\"$(esc "$sq")\",\"lag\":$(num "$lag"),\"err\":\"$(esc "$(printf '%s' "$err" | cut -c1-200)")\",\"trx\":$(num "$nt"),\"xact\":$(num "$(printf '%s' "$xa" | cut -f1)"),\"xact_db\":\"$(esc "$(printf '%s' "$xa" | cut -f2)")\",\"xact_app\":\"$(esc "$(printf '%s' "$xa" | cut -f3)")\",\"idle_xact\":$(num "$(printf '%s' "$xi" | cut -f1)"),\"idle_sleep\":$(num "$(printf '%s' "$xi" | cut -f2)"),\"idle_db\":\"$(esc "$(printf '%s' "$xi" | cut -f3)")\",\"idle_app\":\"$(esc "$(printf '%s' "$xi" | cut -f4)")\",\"lock_waits\":$(num "$(printf '%s' "$lw" | cut -f1)"),\"lock_wait\":$(num "$(printf '%s' "$lw" | cut -f2)"),\"hist\":$(num "${hist:--1}")${ld:+,\"load\":$ld}${cf:+,\"cfg\":$cf}}"
+}
+
+# ── What loads MySQL / MariaDB (0.11) ──────────────────────────────────────────
+# The same approach as for PostgreSQL: a snapshot of the status counters every run, the difference
+# with the newest one at least LOAD_BASE old. Statements come from performance_schema digests (texts
+# normalized by the server: constants are "?"), when performance_schema is on - MySQL's default,
+# MariaDB keeps it off. This helper's own statements (SHOW, information_schema, performance_schema,
+# version()) are left out: on an idle server they would top the list
+MY_CTR="uptime questions com_select com_insert com_update com_delete com_replace slow_queries created_tmp_tables created_tmp_disk_tables innodb_buffer_pool_reads innodb_buffer_pool_read_requests innodb_data_written innodb_os_log_written innodb_log_waits innodb_row_lock_waits innodb_row_lock_time innodb_deadlocks aborted_connects connection_errors_max_connections select_full_join sort_merge_passes bytes_sent bytes_received"
+load_my() { # container name status innodb_metrics -> a JSON object on stdout
+  local c="$1" n="$2" st="$3" im="$4" dir now ps snap ts age base="" fb="" win=0 reset line top msall pg miss
+  dir="$LOAD_DIR/my-$(printf '%s' "${n:-host}" | tr -c 'A-Za-z0-9_.-' '_')"
+  install -d -m 0700 "$LOAD_DIR" "$dir" 2>/dev/null || return 0
+  [ -n "$(mval "$st" uptime)" ] || return 0
+  now=$(date +%s)
+  ps=off; [ "$(my_q "$c" "select @@performance_schema" | head -1)" = 1 ] && ps=on
+  pg=$(num "$(mval "$st" innodb_page_size)"); [ "$pg" -gt 0 ] || pg=16384
+  snap="$dir/$now.snap"
+  {
+    printf '%s\n' "$st" | awk -F'\t' -v keep="$MY_CTR" 'BEGIN { n = split(keep, a, " "); for (i = 1; i <= n; i++) w[a[i]] = 1 }
+      { k = tolower($1) } (k in w) && $2 ~ /^[0-9]+$/ { print "C|" k "|" $2 }'
+    printf '%s\n' "$im" | awk -F'\t' '$1 == "lock_deadlocks" && $2 ~ /^[0-9]+$/ { print "C|im_deadlocks|" $2 }'
+    if [ "$ps" = on ]; then
+      echo "P|1"
+      my_q "$c" "select concat_ws('|', 'Q', ifnull(schema_name, ''), digest, count_star, round(sum_timer_wait / 1000000000), sum_rows_examined, sum_created_tmp_disk_tables, sum_no_index_used + sum_no_good_index_used) from performance_schema.events_statements_summary_by_digest where digest is not null and count_star > 0 and digest_text not like 'SHOW %' and digest_text not like '%information_schema%' and digest_text not like '%performance_schema%' and digest_text not like 'SELECT @@%' and digest_text not like concat('SELECT ', char(96), 'version', char(96), '%') and digest_text not like concat('%', char(96), 'mysql', char(96), ' . ', char(96), 'user', char(96), '%')"
+    fi
+  } > "$snap.tmp" && mv -f "$snap.tmp" "$snap"
+  for ts in $(ls "$dir" | sed -n 's/^\([0-9][0-9]*\)\.snap$/\1/p' | sort -n); do
+    age=$((now - ts))
+    [ "$age" -gt 0 ] || continue
+    [ -n "$fb" ] || fb=$ts
+    [ "$age" -ge "$LOAD_BASE" ] && base=$ts
+  done
+  [ -n "$base" ] || base=$fb
+  for ts in $(ls "$dir" | sed -n 's/^\([0-9][0-9]*\)\.snap$/\1/p'); do
+    [ $((now - ts)) -gt "$LOAD_KEEP" ] && [ "$ts" != "$base" ] && rm -f "$dir/$ts.snap"
+  done
+  if [ -z "$base" ]; then
+    printf '{"win":0,"ps":"%s"}' "$ps"
+    return 0
+  fi
+  win=$((now - base))
+  # differences. A counter below its base (a restart, FLUSH STATUS) - no window this time. A digest
+  # missing from the base, or with fewer calls (the table was truncated or the row evicted), counts
+  # from zero inside the window
+  awk -F'|' '
+    FILENAME == ARGV[1] { if ($1 == "C") b[$2] = $3
+                else if ($1 == "P") havep = 1
+                else if ($1 == "Q") { k = $2 FS $3; pc[k] = $4; pm[k] = $5; pr[k] = $6; pt[k] = $7; pn[k] = $8 }
+                next }
+    $1 == "C" { if (!($2 in b)) next
+                d = $3 - b[$2]; if (d < 0) reset = 1
+                printf "D|%s|%.0f\n", $2, d; next }
+    $1 == "Q" && havep { k = $2 FS $3
+                if ((k in pc) && $4 >= pc[k]) { dc = $4 - pc[k]; dm = $5 - pm[k]; dr = $6 - pr[k]; dt = $7 - pt[k]; dn = $8 - pn[k] }
+                else { dc = $4; dm = $5; dr = $6; dt = $7; dn = $8 }
+                if (dc <= 0) next
+                all += dm
+                if (dm > 0) printf "Q|%s|%.0f|%.0f|%.0f|%.0f|%.0f\n", k, dc, dm, dr, dt, dn }
+    END { printf "S|%.0f|%d\n", all, reset }' "$dir/$base.snap" "$snap" > "$dir/delta"
+  reset=$(sed -n 's/^S|[0-9]*|//p' "$dir/delta")
+  msall=$(num "$(sed -n 's/^S|\([0-9]*\)|.*/\1/p' "$dir/delta")")
+  if [ "$reset" = 1 ]; then
+    rm -f "$dir/delta"
+    printf '{"win":0,"ps":"%s"}' "$ps"
+    return 0
+  fi
+  # "D|name|diff" -> "name":diff; a counter this version does not have stays out (the panel: unknown)
+  line=$(awk -F'|' '$1 == "D" { printf ",\"%s\":%.0f", $2, $3 }' "$dir/delta")
+  top=""
+  if [ "$ps" = on ]; then
+    # the top: TOP_TIME by time, plus up to TOP_TEMP more by temporary tables on disk
+    { grep '^Q|' "$dir/delta" | sort -t'|' -k5,5nr | head -n "$TOP_TIME"
+      grep '^Q|' "$dir/delta" | awk -F'|' '$7 > 0' | sort -t'|' -k7,7nr | head -n $((TOP_TIME + TOP_TEMP))
+    } | awk -F'|' '!seen[$2 FS $3]++' | head -n $((TOP_TIME + TOP_TEMP)) > "$dir/top"
+    miss=$(awk -F'|' '{ printf "%s'\''%s'\''", (n++ ? "," : ""), $3 }' "$dir/top" | tr -cd "0-9a-f,'")
+    if [ -n "$miss" ]; then
+      # texts of the top only; one that mentions a password or a secret is not sent at all
+      my_q "$c" "select concat_ws('|', digest, case when lower(digest_text) regexp 'passw|secret|token|identified|aes_encrypt|des_encrypt' then '' else left(digest_text, $QTEXT_MAX) end) from performance_schema.events_statements_summary_by_digest where digest in ($miss)" > "$dir/texts"
+    fi
+    top=$(awk -F'|' 'function j(s) { gsub(/\\/, "\\\\", s); gsub(/"/, "\\\"", s); return s }
+      FILENAME == ARGV[1] { d = $1; q = substr($0, length($1) + 2); if (!(d in tx)) tx[d] = q; next }
+      { printf "%s{\"id\":\"%s\",\"db\":\"%s\",\"q\":\"%s\",\"calls\":%.0f,\"ms\":%.0f,\"rows\":%.0f,\"tmp\":%.0f,\"noidx\":%.0f}", (n++ ? "," : ""), j($3), j($2), j(tx[$3]), $4, $5, $6, $7, $8 }' "$dir/texts" "$dir/top" 2>/dev/null | tr -d '\000-\037')
+  fi
+  rm -f "$dir/delta" "$dir/top" "$dir/texts"
+  printf '{"win":%s,"ps":"%s"%s,"page":%s,"run":%s,"max_used":%s,"ms_all":%s,"top":[%s]}' "$win" "$ps" "$line" "$pg" \
+    "$(num "$(mval "$st" threads_running)")" "$(num "$(mval "$st" max_used_connections)")" "$msall" "$top"
+}
+
+# ── MySQL / MariaDB settings against the machine (0.11) ────────────────────────
+# SHOW VARIABLES WHERE ... IN returns only what this version has (innodb_redo_log_capacity is MySQL
+# 8.0.30+, innodb_log_files_in_group is gone there): a select of a missing variable would fail whole.
+# Memory: the container limit when there is one (docker, or the cgroup of a pod), else the machine.
+# Binary logs: their total size, they fill the disk when nothing expires them
+my_cg_limit() { # pid -> the memory limit of its cgroup or its parent (a pod), 0 - none
+  local p="$1" cg v best=0 d
+  cg=$(sed -n 's/^0:://p' "/proc/$p/cgroup" 2>/dev/null | head -1)
+  if [ -n "$cg" ] && [ -d "/sys/fs/cgroup$cg" ]; then
+    for d in "/sys/fs/cgroup$cg" "/sys/fs/cgroup${cg%/*}"; do
+      v=$(cat "$d/memory.max" 2>/dev/null)
+      case "$v" in ''|max|*[!0-9]*) continue ;; esac
+      { [ "$best" = 0 ] || [ "$v" -lt "$best" ]; } && best=$v
+    done
+  else
+    cg=$(awk -F: '$2 ~ /(^|,)memory(,|$)/ {print $3; exit}' "/proc/$p/cgroup" 2>/dev/null)
+    v=$(cat "/sys/fs/cgroup/memory$cg/memory.limit_in_bytes" 2>/dev/null)
+    case "$v" in ''|*[!0-9]*) ;; *) [ "$v" -lt 4611686018427387904 ] && best=$v ;; esac
+  fi
+  echo "$best"
+}
+cfg_my() { # container -> a JSON object, nothing when the engine does not answer
+  local c="$1" vars mem lim=0 sto="-1" bl p rt=docker
+  vars=$(my_q "$c" "SHOW GLOBAL VARIABLES WHERE Variable_name IN ('version', 'innodb_buffer_pool_size', 'innodb_log_file_size', 'innodb_log_files_in_group', 'innodb_redo_log_capacity', 'innodb_log_buffer_size', 'innodb_flush_log_at_trx_commit', 'sync_binlog', 'log_bin', 'max_connections', 'tmp_table_size', 'max_heap_table_size', 'performance_schema', 'slow_query_log', 'binlog_expire_logs_seconds', 'expire_logs_days', 'innodb_flush_method')")
+  [ -n "$(mval "$vars" innodb_buffer_pool_size)" ] || return 0
+  mem=$(awk '/^MemTotal:/ {printf "%.0f", $2 * 1024}' /proc/meminfo)
+  case "$c" in
+    pid:*) rt=pod; lim=$(my_cg_limit "${c#pid:}") ;;
+    "") rt=host ;;
+    *)
+      IFS='|' read -r sto lim p < <(docker inspect -f '{{if .Config.StopTimeout}}{{.Config.StopTimeout}}{{else}}-1{{end}}|{{.HostConfig.Memory}}|{{.State.Pid}}' "$c" 2>/dev/null)
+      [ "$(num "${lim:-0}")" -gt 0 ] || lim=$(my_cg_limit "${p:-0}")
+      ;;
+  esac
+  [ "$(num "${lim:-0}")" -gt 0 ] && mem=$lim
+  bl=0
+  [ "$(mval "$vars" log_bin)" = ON ] && bl=$(my_q "$c" "SHOW BINARY LOGS" | awk -F'\t' '$2 ~ /^[0-9]+$/ { s += $2 } END { printf "%.0f", s }')
+  printf '%s\n' "$vars" | awk -F'\t' -v mem="$(num "$mem")" -v lim="$( [ "$(num "${lim:-0}")" -gt 0 ] && echo true || echo false)" \
+      -v sto="$(num "${sto:--1}")" -v bl="$(num "$bl")" -v rt="$rt" '
+    function j(s) { gsub(/\\/, "\\\\", s); gsub(/"/, "\\\"", s); return s }
+    NF >= 2 { printf "%s\"%s\":\"%s\"", (n++ ? "," : "{"), j(tolower($1)), j($2) }
+    END { printf "%s\"mem\":%s,\"mem_lim\":%s,\"stop_to\":%s,\"binlog_b\":%s,\"rt\":\"%s\"}", (n ? "," : "{"), mem, lim, sto, bl, rt }'
 }
 
 # ── ClickHouse ─────────────────────────────────────────────────────────────────
@@ -646,6 +883,7 @@ health_redis() {
 }
 
 # -- sweep: containers by image plus host processes --------------------------------
+MY_NS=""  # mount namespaces of the MySQL containers docker already went through
 if have docker; then
   docker ps --format '{{.Names}}|{{.Image}}' 2>/dev/null | while IFS='|' read -r name img; do
     echo "$name|$img"
@@ -654,7 +892,8 @@ if have docker; then
     [ -n "$name" ] || continue
     case "$(printf '%s' "$img" | tr 'A-Z' 'a-z')" in
       *postgres*|*timescale*|*pgvector*) collect_pg "$name" ;;
-      *mariadb*|*mysql*|*percona*)       collect_mysql "$name" ;;
+      *mariadb*|*mysql*|*percona*)       collect_mysql "$name"
+                                         MY_NS="$MY_NS $(readlink "/proc/$(docker inspect -f '{{.State.Pid}}' "$name" 2>/dev/null)/ns/mnt" 2>/dev/null)" ;;
       *clickhouse*)                      collect_ch "$name" ;;
       *redis*|*valkey*)                  collect_redis "$name" ;;
     esac
@@ -663,10 +902,24 @@ if have docker; then
 fi
 # host engines (not in docker) - only if one is actually listening locally
 pgrep -x postgres        >/dev/null 2>&1 && have psql             && collect_pg ""
-pgrep -x mysqld          >/dev/null 2>&1 && { have mysql || have mariadb; } && collect_mysql ""
-pgrep -x mariadbd        >/dev/null 2>&1 && { have mysql || have mariadb; } && collect_mysql ""
+# MySQL/MariaDB by the server process: one in the host's own mount namespace is a host engine, one in
+# a container docker did not go through (a Kubernetes pod, an image named otherwise) is reached inside
+# its namespaces. Pods on other nodes are not visible from here
+HOSTMNT=$(readlink /proc/1/ns/mnt)
+MYHOST=""
+for p in $(pgrep -x mysqld; pgrep -x mariadbd); do
+  pns=$(readlink "/proc/$p/ns/mnt" 2>/dev/null) || continue
+  if [ "$pns" = "$HOSTMNT" ]; then MYHOST=1; continue; fi
+  case " $MY_NS " in *" $pns "*) continue ;; esac
+  MY_NS="$MY_NS $pns"
+  have nsenter && collect_mysql "pid:$p"
+done
+[ -n "$MYHOST" ] && { have mysql || have mariadb; } && collect_mysql ""
 pgrep -x redis-server    >/dev/null 2>&1 && have redis-cli        && collect_redis ""
 pgrep -x clickhouse-serv >/dev/null 2>&1 && have clickhouse-client && collect_ch ""
+
+# snapshots of instances that are gone (a pod got a new name, a container was removed)
+find "$LOAD_DIR" -mindepth 1 -maxdepth 1 -mtime +2 -exec rm -rf {} + 2>/dev/null
 
 printf '{"ts":%s,"items":[%s]}\n' "$(date +%s)" "$ENTRIES" > "$TMP"
 mv -f "$TMP" "$OUT"

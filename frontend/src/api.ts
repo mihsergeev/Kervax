@@ -1197,6 +1197,7 @@ export type DbHealth = {
   xid: number
   problems: { level: number; text: string }[]
   load?: DbLoad | null // что грузит PostgreSQL за последний час (dbstat-setup 0.8)
+  my?: MyLoad | null // что грузит MySQL/MariaDB за последний час (dbstat-setup 0.11)
   advice?: DbAdvice[] // советы по настройкам (dbstat-setup 0.9), текст по ключу k рисует фронт
   ch?: ChHealth // ClickHouse (dbstat-setup 0.10)
   rd?: RdHealth // Redis (dbstat-setup 0.10)
@@ -1261,6 +1262,42 @@ export type DbLoad = {
   ck_r?: number | null
   ms_all?: number
   top: DbLoadQuery[]
+}
+// MySQL/MariaDB за последний час (db_health.my_load_view): счетчики SHOW GLOBAL STATUS в пересчете на
+// час (null - эта версия их не считает), чтения с диска в байтах и доля попаданий в буфер InnoDB, запросы
+// из performance_schema (ps - включен ли он)
+export type MyLoad = {
+  win: number
+  ps: string
+  cut: boolean
+  run: number
+  max_used: number
+  q?: number | null
+  sel?: number | null
+  wr?: number | null
+  slow?: number | null
+  tmp?: number | null
+  tmp_disk?: number | null
+  req?: number | null
+  data_w?: number | null
+  redo?: number | null
+  log_waits?: number | null
+  lock_waits?: number | null
+  lock_ms?: number | null
+  deadlocks?: number | null
+  aborted?: number | null
+  refused?: number | null
+  full_join?: number | null
+  sort_merge?: number | null
+  rd?: number | null
+  hit?: number | null
+  ms_all?: number
+  top: MyLoadQuery[]
+}
+// запрос из performance_schema: в пересчете на час; rows - просмотрено строк, noidx - вызовов без индекса
+export type MyLoadQuery = {
+  db: string; q: string; calls: number; ms: number; rows: number; tmp: number; noidx: number
+  share: number; avg_ms: number; rows_call: number
 }
 export type MemLeak = {
   key: string

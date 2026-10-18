@@ -3604,7 +3604,7 @@ def server_problems(s: Server, now: datetime, pod_names: dict[str, str] | None =
     for lv, txt, _key in web_config.problems(rep, now):
         add("web_config", lv, txt, "web", "web_config", section="services")
     # Здоровье баз: ведет в "Сервисы" ноды, где инвентарь СУБД
-    for lv, txt, _key in db_health.problems(rep, now):
+    for lv, txt, _key in db_health_problems(s, rep, now):
         add("db_health", lv, txt, "db", "db_health", section="services")
     # SSH: root по паролю на открытом порту, перебор паролей без fail2ban
     for lv, txt in ssh_audit.problems(s, now):
@@ -4501,6 +4501,18 @@ def _fallback_rule(key: str) -> dict:
     }
 
 
+def db_health_problems(s: Server, rep: dict, now: datetime) -> list[tuple[int, str, str]]:
+    """Проблемы баз; отказы в подключении (MySQL, dbstat-setup 0.11) у экземпляра, по которому уже горит
+    алерт коннектов, не повторяем: та же беда, строка "занято N из M" о ней уже говорит"""
+    dh = db_health.problems(rep, now)
+    thr = getattr(s, "db_conn_alert_percent", 0) or 0
+    worst = db_conn_worst(rep) if thr else None
+    if worst is None or worst[0] < thr:
+        return dh
+    drop = f"{worst[1].get('engine')}:{worst[1].get('container') or ''}:conn"
+    return [p for p in dh if p[2] != drop]
+
+
 def db_conn_worst(rep: dict) -> tuple[float, dict] | None:
     """Самый нагруженный по коннектам движок ноды: (процент занятых, блок СУБД) или None."""
     worst = None
@@ -5201,7 +5213,7 @@ def _server_conditions(s: Server, now: datetime,
     # Здоровье баз (helper dbstat-setup 0.5): реплика, долгие транзакции, блокировки, wraparound,
     # VACUUM. sig - что именно, чтобы новая беда при том же уровне дала свой алерт
     if online and db_health.block(rep, now) is not None:
-        dh = db_health.problems(rep, now)
+        dh = db_health_problems(s, rep, now)
         out["db_health"] = (max((lv for lv, _t, _k in dh), default=0),
                             {"detail": "; ".join(t for _l, t, _k in dh[:3]), "sig": [k for _l, _t, k in dh]})
     # SSH (helper changes-setup 0.3): root по паролю на открытом порту, перебор без защиты
