@@ -98,14 +98,17 @@ def test_own_unit_does_not_alert():
 
 def test_helper_script():
     src = (Path(__file__).resolve().parents[2] / "agent" / "workers-setup.sh").read_text(encoding="utf-8")
-    assert "KERVAX_SETUP_VERSION=0.2" in src and "KERVAX_SETUP_ALWAYS=1" in src and "\r" not in src
+    assert "KERVAX_SETUP_VERSION=0.3" in src and "KERVAX_SETUP_ALWAYS=1" in src and "\r" not in src
+    # 0.3: выход с кодом 0 после минуты работы - плановый перезапуск, не падение; старые времена сброшены
+    assert 'if ($9 == "0" && $6 - cs[k] >= 60) pt = pt' in src and '\\"p60\\":%d' in src
+    assert 'rt = cv >= 3 ? hour(crt[k]) : ""' in src
     # pm2 спрашиваем по rpc.sock, не командой pm2: она запускает новый демон, если не нашла старый
     assert "getMonitorData" in src and "pm2 jlist" in src and "rpc.sock" in src
     assert "getAllProcessInfo" in src and "/bin/sh -c" not in src
     # пароли из строк лога маскируются
     assert src.count("***") >= 2
     # 0.2: обратный слэш в логе (App\Jobs\Mail) удваивается так, что mawk его не теряет: иначе отчет не JSON
-    assert '_jn = split(s, _jp, "\\\\")' in src and "KERVAX_SETUP_VERSION=0.2" in src
+    assert '_jn = split(s, _jp, "\\\\")' in src
 
 
 def test_alert_condition():
@@ -114,3 +117,43 @@ def test_alert_condition():
     assert lv == 2 and ctx["sig"] == ["Supervisor, контейнер app-workers-1|mailer", "PM2, на хосте|api"]
     assert ctx["detail"].startswith("воркер mailer (Supervisor, контейнер app-workers-1) не запускается")
     assert collector._server_conditions(_srv(_rep()), NOW)["workers"][0] == 0
+
+
+def _copies(*bad, n=15, **kw):
+    return [_prog(f"listen:listen_{i:02d}", r15=5 if f"{i:02d}" in bad else 0, **kw) for i in range(n)]
+
+
+def test_copies_of_a_program_are_one_trouble():
+    """Слушатель очереди в пятнадцати копиях: падают по очереди - одна беда с ключом программы"""
+    s = _srv(_rep(_copies("00", "03", "07") + [_prog("grp:mailer", "FATAL"), _prog("one:one_00", r15=4)]))
+    p = wk.problems(s, NOW)
+    assert [x["key"] for x in p] == ["Supervisor, контейнер app-workers-1|grp:mailer",
+                                     "Supervisor, контейнер app-workers-1|listen",
+                                     "Supervisor, контейнер app-workers-1|one:one_00"]
+    assert p[1]["text"] == ("воркер listen (Supervisor, контейнер app-workers-1) падает и поднимается: 5 перезапусков "
+                            "за 15 минут - так 3 копии из 15")
+    # одна копия в беде - имя копии, ключ все равно программы: sig не скачет
+    one = wk.problems(_srv(_rep(_copies("04"))), NOW)
+    assert one[0]["key"] == "Supervisor, контейнер app-workers-1|listen" and "воркер listen:listen_04 (" in one[0]["text"]
+    assert wk.program_key("Supervisor, контейнер app-workers-1|listen:listen_04") == "Supervisor, контейнер app-workers-1|listen"
+    assert wk.program_key("PM2, на хосте|api:3") == "PM2, на хосте|api"
+    assert wk.program_key("Supervisor, контейнер app-workers-1|grp:mailer") == "Supervisor, контейнер app-workers-1|grp:mailer"
+
+
+def test_copies_mute_by_program_and_old_copy_mutes():
+    s = _srv(_rep(_copies("00", "03")), mutes=["worker:Supervisor, контейнер app-workers-1|listen"])
+    assert wk.problems(s, NOW) == []
+    v = wk.view(s, NOW)
+    row = v[0]["progs"][0]
+    assert row["mkey"] == "Supervisor, контейнер app-workers-1|listen" and row["mute"] == {"perm": True}
+    # мьюты по копиям до 1.4.273: глушат, когда заглушена каждая копия в беде
+    old = ["worker:Supervisor, контейнер app-workers-1|listen:listen_00", "worker:Supervisor, контейнер app-workers-1|listen:listen_03"]
+    assert wk.problems(_srv(_rep(_copies("00", "03")), mutes=old), NOW) == []
+    assert len(wk.problems(_srv(_rep(_copies("00", "05")), mutes=old), NOW)) == 1
+
+
+def test_planned_restarts_are_not_trouble():
+    # helper 0.3: выходы с кодом 0 после минуты работы - в p60, в r15 их нет
+    s = _srv(_rep([_prog("listen:listen_00", p60=8), _prog("listen:listen_01", p60=6)]))
+    assert wk.problems(s, NOW) == []
+    assert [x["p60"] for x in wk.view(s, NOW)[0]["progs"]] == [8, 6]
