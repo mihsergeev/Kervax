@@ -104,7 +104,7 @@ def test_db_connections_and_rabbitmq_queues():
         (2, "services", "pg: занято 95 из 100 подключений (95%)")]
     got = _probs(s, now, "queue")
     assert [(p["level"], p["section"], p["text"]) for p in got] == [
-        (2, "services", "переполнены очереди RabbitMQ: jobs (5010)")]
+        (2, "services", "переполнены очереди: jobs (5010)")]
     # порог 0 - не сторожим
     s.db_conn_alert_percent, s.queue_alert_depth = 0, 0
     assert _probs(s, now, "db_conn") == [] and _probs(s, now, "queue") == []

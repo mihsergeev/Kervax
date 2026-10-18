@@ -154,7 +154,7 @@ const RULE_KIND_LABELS: Record<string, string> = {
   'clock@1': 'Время сервера - только предупреждения',
   'clock@2': 'Время сервера - предупр. и проблемы',
   db_conn: 'Коннекты СУБД',
-  queue: 'RabbitMQ: очереди',
+  queue: 'Очереди: выше порога',
   kube_expiry: 'Kubernetes: сроки',
   kube_cron: 'Kubernetes: CronJob',
   kube_node: 'Kubernetes: ноды',

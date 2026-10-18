@@ -1446,6 +1446,13 @@ const EN: Record<string, string> = {
   'Очередь растет и не разбирается': 'Queue grows and is not consumed',
   'растет {a} и не разбирается, было {n}': 'growing for {a} and not consumed, was {n}',
   'нет потребителей': 'no consumers',
+  'порог': 'threshold',
+  'не алертить по этой очереди:': 'no alerts for this queue:',
+  'Не алертить по этой очереди: на день, неделю или постоянно': 'No alerts for this queue: for a day, a week or for good',
+  'Все очереди': 'All queues',
+  'С проблемами: {n}': 'With problems: {n}',
+  'Очереди в этих Redis не видны: helper не нашел пароль ({list}). Он берет REDIS_PASSWORD или --requirepass из настроек контейнера либо requirepass из redis.conf.':
+    'Queues in these Redis instances are not visible: the helper did not find the password ({list}). It takes REDIS_PASSWORD or --requirepass from the container settings or requirepass from redis.conf.',
   'Без порога панель сама алертит очередь, которая полчаса растет и не разбирается или осталась без потребителей. Очереди мертвых писем (dlq) не судятся.':
     'Without a threshold the panel alerts on its own when a queue grows for half an hour and is not consumed or is left without consumers. Dead letter queues (dlq) are not judged.',
   'очередь': 'queue',
@@ -1817,6 +1824,9 @@ const EN: Record<string, string> = {
   'переполнены: {list}': 'overflowing: {list}',
   'Ноды': 'Nodes',
   'переполненные очереди RabbitMQ': 'overflowing RabbitMQ queues',
+  'переполненные очереди': 'overflowing queues',
+  'Очереди: выше порога': 'Queues: above the threshold',
+  'Очередь выше порога': 'Queue above the threshold',
   'конфиг веб-сервера не проходит проверку': 'web server config fails the check',
   'Сервисов': 'Services',
   'Сайтов': 'Sites',

@@ -77,6 +77,12 @@ def setup_needed(name: str, rep: dict) -> bool:
     # gpu-setup - где на шине есть карта NVIDIA (агент 2.36) или helper уже стоит
     if name == "gpu-setup":
         return gpu_mod.has_gpu(rep)
+    # queues-setup - где есть Redis (агент видит его и в подах) или helper уже присылает очереди
+    if name == "queues-setup":
+        eng = " ".join(str(e) for e in rep.get("db_engines") or []).lower()
+        return ("redis" in eng or "valkey" in eng
+                or any((d or {}).get("engine") == "redis" for d in rep.get("db_stats") or [] if isinstance(d, dict))
+                or bool((rep.get("extras") or {}).get("queues")))
     # dockerproxy-setup - там, где агенту уже дан доступ к Docker через наш прокси: helper его
     # укрепляет. Включать доступ там, где его не давали, - решение человека, не helper'а
     if name == "dockerproxy-setup":
@@ -110,6 +116,7 @@ _HELPER_LABEL = {
     "dockerproxy-setup": "защита доступа к Docker",
     "changes-setup": "изменения на сервере",
     "gpu-setup": "GPU NVIDIA",
+    "queues-setup": "очереди в Redis",
 }
 
 

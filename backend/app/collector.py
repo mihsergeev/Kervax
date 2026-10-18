@@ -3501,17 +3501,19 @@ def server_problems(s: Server, now: datetime, pod_names: dict[str, str] | None =
     w5 = web_5xx_now(s, web_err, now)
     if w5 is not None and w5[0] and w5[2]:
         add("web_5xx", 2, f"ошибки 5xx: {w5[1] / w5[2] * 100:.1f}% запросов за 15 минут", "web", "web_5xx")
-    # Очереди RabbitMQ выше своего порога, как у алерта queue
+    # Очереди выше своего порога (RabbitMQ и Redis), как у алерта queue; заглушенные не в счет
     hot = []
-    for svc in rep.get("services") or []:
-        if not isinstance(svc, dict) or svc.get("kind") != "rabbitmq":
-            continue
-        for q in svc.get("queues") or []:
-            thr = queue_threshold(s, queue_key(svc.get("source") or "", q))
-            if thr > 0 and queue_depth(q) >= thr:
+    qmuted = queue_watch.muted_keys(s, now)
+    for b in queue_watch.brokers(rep):
+        for q in b["queues"]:
+            if not isinstance(q, dict):
+                continue
+            key = queue_key(b["source"], q)
+            thr = queue_threshold(s, key)
+            if thr > 0 and queue_depth(q) >= thr and key not in qmuted:
                 hot.append(f"{q.get('name') or '?'} ({queue_depth(q)})")
     if hot:
-        add("queue", 2, "переполнены очереди RabbitMQ: " + ", ".join(hot[:3])
+        add("queue", 2, "переполнены очереди: " + ", ".join(hot[:3])
             + (f" и еще {len(hot) - 3}" if len(hot) > 3 else ""), "queues", "queue", section="services")
     # Очередь растет и не разбирается (ход - в alert_state qwatch, ведет цикл алертов)
     for x in queue_watch.problems(s, now):
@@ -3684,7 +3686,7 @@ _SIGNALS = {6: "ABRT", 9: "KILL", 11: "SEGV", 15: "TERM"}
 # который не укладывался во время на нодах с большим журналом, прислал алерт с каждой такой
 # ноды, и каждые 10 минут снова. kervax-agent и kervax-dumps (дампы баз для бэкапа) не тут.
 _OWN_HELPER_UNIT = re.compile(
-    r"kervax-(changes|db-stats|disk-health|disk-usage|gpu|kube-expiry|kube-flux|units|web-rate|web-sites"
+    r"kervax-(changes|db-stats|disk-health|disk-usage|gpu|kube-expiry|kube-flux|queues|units|web-rate|web-sites"
     r"|[a-z]+-req)\.service")
 
 # Задание по таймеру, которое падает на каждом запуске, между падениями несколько минут
@@ -5953,15 +5955,18 @@ async def evaluate_servers(
         if online_now and qr and qr["enabled"] and "queue" not in mutes and _rule_scope_ok(qr, s):
             qstate = dict(st.get("queues") or {})
             seen_q: set[str] = set()
-            for svc in (s.last_report or {}).get("services") or []:
-                if svc.get("kind") != "rabbitmq":
-                    continue
-                src = svc.get("source") or ""
-                for q in svc.get("queues") or []:
+            qmuted = queue_watch.muted_keys(s, now)
+            for b in queue_watch.brokers(s.last_report or {}):
+                src = b["source"]
+                for q in b["queues"]:
+                    if not isinstance(q, dict):
+                        continue
                     key = queue_key(src, q)
                     seen_q.add(key)
                     thr = queue_threshold(s, key)
-                    if thr <= 0:  # порога нет — очередь не сторожим
+                    # порога нет — очередь не сторожим; заглушенная (насовсем или на время) молчит,
+                    # состояние держим: после мьюта переполненная не придет второй раз
+                    if thr <= 0 or key in qmuted:
                         continue
                     depth = queue_depth(q)
                     was = bool(qstate.get(key))
