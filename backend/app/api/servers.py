@@ -20,6 +20,7 @@ from app import request_watch
 from app import db_health
 from app import gpu as gpu_mod
 from app import queue_watch
+from app import workers as workers_mod
 from app import mem_trend
 from app import restarts as srv_restarts
 from app import access_audit
@@ -256,6 +257,8 @@ def _out(
     o.queue_skipped = queue_watch.redis_skipped(server.last_report or {}) or None
     o.queue_db_skipped = queue_watch.db_skipped(server.last_report or {}) or None
     o.queue_mutes = queue_watch.mute_view(server, now) or None
+    o.workers = workers_mod.view(server, now)
+    o.workers_skipped = workers_mod.skipped(server.last_report or {}) or None
     o.web_config = web_config.view(server.last_report or {}, now)
     o.web_certs = web_certs.view(server.last_report or {}, now)
     o.proxy_outdated = docker_exposure.outdated(server.last_report or {}, now.timestamp())
@@ -526,6 +529,7 @@ _SETUP_LABEL = {
     "changes-setup": "Изменения на сервере",
     "gpu-setup": "GPU NVIDIA",
     "queues-setup": "Очереди задач в Redis и таблицах баз",
+    "workers-setup": "Воркеры supervisor и pm2",
 }
 
 

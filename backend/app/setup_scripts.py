@@ -119,6 +119,7 @@ _HELPER_LABEL = {
     "changes-setup": "изменения на сервере",
     "gpu-setup": "GPU NVIDIA",
     "queues-setup": "очереди задач",
+    "workers-setup": "воркеры supervisor и pm2",
 }
 
 

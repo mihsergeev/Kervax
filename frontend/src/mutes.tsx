@@ -44,6 +44,7 @@ export const SRV_ALERT_KINDS: { k: string; label: string }[] = [
   { k: 'gpu_heat', label: 'GPU: перегрев' },
   { k: 'llm', label: 'LLM: не отвечает, очередь, задержки' },
   { k: 'queue_stuck', label: 'Очередь растет и не разбирается' },
+  { k: 'workers', label: 'Воркер упал или падает и поднимается' },
   { k: 'cpu_spin', label: 'CPU: процессы в пустом цикле' },
   { k: 'backup_growth', label: 'Бэкап: резкий прирост' },
   { k: 'docker_sock', label: 'Docker: внешний прокси с docker-сокетом' },
@@ -80,6 +81,8 @@ export const LEAK_MUTE = 'leak:'
 export const LISTEN_MUTE = 'listen:'
 // Одна очередь, которая растет и не разбирается: qstuck:<источник>|<vhost>/<имя> (ключ порога очереди)
 export const QSTUCK_MUTE = 'qstuck:'
+// Один воркер под supervisor или pm2: worker:<демон, где>|<программа>
+export const WORKER_MUTE = 'worker:'
 // Один контейнер с ключами от хоста, которому они нужны намеренно: dockrisk:<имя>
 export const DOCKRISK_MUTE = 'dockrisk:'
 // Контейнер или юнит, которому не нужно подниматься после перезагрузки: noboot:<имя>
@@ -101,6 +104,10 @@ export function muteKindLabel(k: string, t: TFn): string | null {
   if (k.startsWith(QSTUCK_MUTE)) {
     const [src, q] = k.slice(QSTUCK_MUTE.length).split('|')
     return `${t('очередь')}: ${(q ?? '').replace(/^\/\//, '').replace(/^[^/]*\//, '')}${src ? ` (${src})` : ''}`
+  }
+  if (k.startsWith(WORKER_MUTE)) {
+    const [src, name] = k.slice(WORKER_MUTE.length).split('|')
+    return `${t('воркер')}: ${name ?? ''}${src ? ` (${src})` : ''}`
   }
   if (k.startsWith(LEAK_MUTE)) return `${t('рост памяти')}: ${k.slice(LEAK_MUTE.length).replace(/^(docker|pod|proc):/, '')}`
   if (k.startsWith(RESTARTS_MUTE)) {

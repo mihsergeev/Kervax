@@ -16,6 +16,8 @@ import {
   type QueueStat,
   type Server,
   type ServiceInfo,
+  type WorkerDaemon,
+  type WorkerProg,
 } from './api'
 import { LlmSection } from './Gpu'
 import { currentLang, useI18n } from './i18n'
@@ -26,7 +28,7 @@ import { fmtRel } from './ServersPage'
 import { CardNav, FreshChip, markMuted, OvAreas, OvRows, secInfoOf, type OvRow, type SecDef, type SecInfo, type SecItem } from './cardLayout'
 import { AdoptSitesModal, adoptable } from './AdoptSitesModal'
 import { EngineIcon } from './engineIcon'
-import { QSTUCK_MUTE } from './mutes'
+import { QSTUCK_MUTE, WORKER_MUTE } from './mutes'
 import { OsIcon } from './osIcon'
 import { CountryFlag } from './CountryFlag'
 import { byteUnits } from './units'
@@ -128,6 +130,7 @@ type SvcItem = {
   web?: boolean // это веб-сервер/прокси — если доменов нет, объясняем почему
   db?: DBStat[] // инвентарь СУБД: ВСЕ инстансы этого движка на ноде (хелпер dbstat-setup)
   llm?: boolean // LLM-сервис (vLLM, SGLang, TEI): метрики в s.llm, свой раздел
+  workers?: boolean // демон воркеров (supervisor, pm2): программы в s.workers, свой раздел
 }
 type SrvServices = { server: Server; items: SvcItem[] }
 
@@ -770,6 +773,8 @@ function buildByServer(
     }
     // LLM-сервисы (агент 2.36): свой раздел, по строке на сервис
     for (const x of s.llm ?? []) items.push({ kind: x.engine_name, where: x.where, llm: true })
+    // демоны воркеров (helper workers-setup): supervisor и pm2, свой раздел
+    for (const d of s.workers ?? []) items.push({ kind: d.label, where: d.where, workers: true })
     // веб-серверы/прокси (nginx/envoy/…): их не бэкапят, поэтому идут отдельным источником
     for (const w of s.last_report?.web_services ?? []) {
       if (seen.has(w.kind)) continue
@@ -779,7 +784,7 @@ function buildByServer(
     const stats = s.last_report?.db_stats ?? []
     if (stats.length)
       for (const it of items) {
-        if (it.web || it.llm) continue
+        if (it.web || it.llm || it.workers) continue
         const m = matchDbStats(it.kind, stats)
         if (m.length) it.db = m
       }
@@ -1011,6 +1016,147 @@ function QueueList({ server, svc, busy, save, onChanged, onlyProblems }: {
 // Раньше шла карточка на каждый сервис вперемешку (nginx с сайтами и сертификатами, базы,
 // RabbitMQ), а очереди открывались второй модалкой. Теперь веб, сайты, сертификаты, базы и
 // очереди - своими разделами, на сводке проблемы из "Что сломано", плитки и карта.
+// Состояние программы словами: supervisor (RUNNING, FATAL...) и pm2 (online, errored...)
+const WORKER_STATE: Record<string, string> = {
+  RUNNING: 'работает', STARTING: 'запускается', BACKOFF: 'не может запуститься', STOPPING: 'останавливается',
+  STOPPED: 'остановлен', EXITED: 'завершился', FATAL: 'не запускается', UNKNOWN: 'неизвестно',
+  online: 'работает', launching: 'запускается', stopping: 'останавливается', stopped: 'остановлен',
+  errored: 'не запускается', 'one-launch-status': 'отработал',
+}
+// остановленные руками: не беда, но и не работают
+const WORKER_IDLE = new Set(['STOPPED', 'stopped'])
+const WORKER_OK = new Set(['RUNNING', 'online'])
+
+function wAge(sec: number, t: (s: string, v?: Record<string, string | number>) => string): string {
+  if (sec >= 86400) return t('{d} дн {h} ч', { d: Math.floor(sec / 86400), h: Math.floor((sec % 86400) / 3600) })
+  return qAge(sec, t)
+}
+
+// Программы одного демона supervisor или pm2 (helper workers-setup): с бедой наверху, у упавшей -
+// последняя строка лога; 🔕 - не алертить по воркеру на день, неделю или постоянно
+function WorkerList({ server, d, onChanged, onlyProblems }: {
+  server: Server
+  d: WorkerDaemon
+  onChanged: () => void
+  onlyProblems: boolean
+}) {
+  const { t } = useI18n()
+  const { isViewer } = useAuth()
+  const [picking, setPicking] = useState<string | null>(null)
+  const [mBusy, setMBusy] = useState(false)
+  const mute = async (key: string, hours: number) => {
+    const kind = WORKER_MUTE + key
+    setMBusy(true)
+    try {
+      if (hours < 0) {
+        await updateServer(server.id, { alert_mutes: [...new Set([...(server.alert_mutes ?? []), kind])] })
+      } else if (hours === 0) {
+        if ((server.alert_mutes ?? []).includes(kind))
+          await updateServer(server.id, { alert_mutes: (server.alert_mutes ?? []).filter((x) => x !== kind) })
+        if (server.alert_snoozes?.[kind]) await snoozeServerAlert(server.id, kind, 0)
+      } else await snoozeServerAlert(server.id, kind, hours)
+      setPicking(null)
+      onChanged()
+    } catch {
+      /* кнопка остается, можно повторить */
+    } finally {
+      setMBusy(false)
+    }
+  }
+  const fmt = (ts: string) =>
+    new Date(ts).toLocaleString([], { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })
+  const rank = (p: WorkerProg) => (p.mute ? 4 : p.level ? 2 - p.level : WORKER_IDLE.has(p.state) ? 3 : 2)
+  const progs = d.progs
+    .filter((p) => !onlyProblems || (p.level && !p.mute))
+    .map((p, i) => ({ p, i }))
+    .sort((a, b) => rank(a.p) - rank(b.p) || a.i - b.i)
+    .map(({ p }) => p)
+  const okN = d.progs.filter((p) => WORKER_OK.has(p.state)).length
+  const badN = d.progs.filter((p) => p.level && !p.mute).length
+  return (
+    <div className="chart-card net-card net-card-wide">
+      <div className="net-head">
+        <div className="hs-svc-title">
+          {d.label}
+          <span className="net-n">{d.progs.length}</span>
+        </div>
+      </div>
+      <div className="net-sub mono">{d.where}</div>
+      <div className="small muted">
+        {subOf(
+          t('работают: {n}', { n: okN }),
+          badN > 0 && t('в беде: {n}', { n: badN }),
+        )}
+      </div>
+      <div className="loc-results docker-clist">
+        {progs.map((p) => {
+          const tone = p.mute ? 't-up' : p.level ? (p.level >= 2 ? 't-down' : 't-degraded') : WORKER_IDLE.has(p.state) ? 't-soon' : 't-up'
+          return (
+            <div key={p.key} className={`loc-res docker-row ${tone}${p.mute ? ' q-muted' : ''}`}>
+              <span className={`lk-dot${p.mute ? '' : DOT[tone]}`} />
+              <div className="docker-c-main">
+                <div className="docker-c-name mono">{p.name}</div>
+                <div className="docker-c-img muted small">
+                  {subOf(
+                    // состояние словами - только когда его не сказали причина беды или время работы
+                    !p.why && !(WORKER_OK.has(p.state) && p.up > 0) && t(WORKER_STATE[p.state] ?? p.state),
+                    WORKER_OK.has(p.state) && p.up > 0 && t('работает {a}', { a: wAge(p.up, t) }),
+                    p.exit != null && p.exit !== 0 && !WORKER_OK.has(p.state) && !p.why && t('код {n}', { n: p.exit }),
+                    p.r60 > 0 && t('перезапусков за час: {n}', { n: p.r60 }),
+                  )}
+                </div>
+                {p.why && (
+                  <div className={`docker-c-img small${p.mute ? ' muted' : ' q-stuck'}`}>{p.why}</div>
+                )}
+                {p.log && (p.level || !WORKER_OK.has(p.state)) && (
+                  <div className="docker-c-img w-log mono muted small" title={p.log}>{p.log}</div>
+                )}
+                {p.mute && (
+                  <div className="small">
+                    <span className="snooze-active-chip snooze-perm">
+                      🔇 {p.mute.perm ? t('не алертит, постоянно') : t('не алертит {t}', { t: t('до {t}', { t: fmt(p.mute.until!) }) })}
+                      {!isViewer && (
+                        <button className="chip-x" disabled={mBusy} title={t('Снять')} onClick={() => mute(p.key, 0)}>
+                          ✕
+                        </button>
+                      )}
+                    </span>
+                  </div>
+                )}
+                {!p.mute && picking === p.key && (
+                  <div className="small q-mute-pick">
+                    <span className="muted">🔕 {t('не алертить по этому воркеру:')}</span>
+                    {[
+                      { h: 24, l: t('1 день') },
+                      { h: 24 * 7, l: t('1 неделя') },
+                      { h: -1, l: t('постоянно') },
+                    ].map(({ h, l }) => (
+                      <button key={h} className="ghost small" disabled={mBusy} onClick={() => mute(p.key, h)}>
+                        {l}
+                      </button>
+                    ))}
+                    <button className="ghost small" disabled={mBusy} onClick={() => setPicking(null)}>
+                      {t('Отмена')}
+                    </button>
+                  </div>
+                )}
+              </div>
+              {!isViewer && !p.mute ? (
+                <button className="ghost small q-mute-btn" disabled={mBusy} title={t('Не алертить по этому воркеру: на день, неделю или постоянно')}
+                  onClick={() => setPicking(picking === p.key ? null : p.key)}>
+                  🔕
+                </button>
+              ) : (
+                <span className="q-mute-btn" />
+              )}
+            </div>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
 const SVC_SECTIONS: SecDef[] = [
   { id: 'overview', label: 'Сводка', group: '' },
   { id: 'web', label: 'Веб-серверы', group: 'Веб' },
@@ -1018,12 +1164,13 @@ const SVC_SECTIONS: SecDef[] = [
   { id: 'certs', label: 'Сертификаты', group: 'Веб' },
   { id: 'db', label: 'Базы и хранилища', group: 'Данные' },
   { id: 'queues', label: 'Очереди', group: 'Данные' },
+  { id: 'workers', label: 'Воркеры', group: 'Данные' },
   { id: 'llm', label: 'LLM', group: 'Модели' },
 ]
 const SVC_SEC_IDS = new Set(SVC_SECTIONS.map((x) => x.id))
 // раздел карточки по виду проблемы, если бэкенд его не назвал (старый бэкенд в кэше вкладки)
 const SVC_SEC_OF_KIND: Record<string, string> = {
-  queue: 'queues', queue_stuck: 'queues', web_cert: 'certs', web_config: 'web', db_health: 'db', db_conn: 'db', llm: 'llm',
+  queue: 'queues', queue_stuck: 'queues', workers: 'workers', web_cert: 'certs', web_config: 'web', db_health: 'db', db_conn: 'db', llm: 'llm',
 }
 
 function ServerServicesModal({ srv, onClose, onChanged, initialSec, sites }: {
@@ -1058,7 +1205,7 @@ function ServerServicesModal({ srv, onClose, onChanged, initialSec, sites }: {
   const rate = webRate(s.last_report)
   // СУБД сверху, под ними прочее, что держит данные (Grafana, Prometheus, etcd): их тоже находит аудит
   const isDb = (it: SvcItem) => Object.values(DB_ENGINE_LABEL).includes(it.kind)
-  const dbItems = srv.items.filter((it) => !it.web && !it.svc && !it.llm).sort((a, b) => Number(isDb(b)) - Number(isDb(a)))
+  const dbItems = srv.items.filter((it) => !it.web && !it.svc && !it.llm && !it.workers).sort((a, b) => Number(isDb(b)) - Number(isDb(a)))
   const llm = s.llm ?? []
   const llmBad = llm.filter((x) => !x.ok && !x.no_metrics).length
   const dbs = dbItems.flatMap((it) => it.db ?? [])
@@ -1066,6 +1213,18 @@ function ServerServicesModal({ srv, onClose, onChanged, initialSec, sites }: {
   // брокеры очередей: RabbitMQ (агент), очереди в Redis и в таблицах баз (helper queues-setup)
   const rabbit = srv.items.filter((it) => !!it.svc)
   const qAll = rabbit.flatMap((it) => it.svc?.queues ?? [])
+  // воркеры под supervisor и pm2: демоны с бедой наверху, фильтр "с проблемами"
+  const wDaemons = s.workers ?? []
+  const wProgs = wDaemons.flatMap((d) => d.progs)
+  const wStopped = wProgs.filter((p) => WORKER_IDLE.has(p.state)).length
+  const [wOnly, setWOnly] = useState(false)
+  const wProbN = wProgs.filter((p) => p.level && !p.mute).length
+  const wRank = (d: WorkerDaemon) => Math.min(9, ...d.progs.map((p) => (p.mute ? 9 : p.level ? 3 - p.level : 9)))
+  const wShown = wDaemons
+    .map((d, i) => ({ d, i, r: wRank(d) }))
+    .filter(({ r }) => !wOnly || r < 9)
+    .sort((a, b) => a.r - b.r || a.i - b.i)
+    .map(({ d }) => d)
   const dbNoAuth = (s.queue_db_skipped ?? []).filter((x) => x.why === 'auth')
   const dbBig = (s.queue_db_skipped ?? []).filter((x) => x.why === 'big')
   const qHot = qAll.filter((x) => qDepth(x) >= QUEUE_HOT).length
@@ -1088,6 +1247,7 @@ function ServerServicesModal({ srv, onClose, onChanged, initialSec, sites }: {
     certs: certs.length > 0,
     db: dbItems.length > 0,
     queues: rabbit.length > 0,
+    workers: wDaemons.length > 0 || (s.workers_skipped ?? []).length > 0,
     llm: llm.length > 0,
   }
   const secs = SVC_SECTIONS.filter((x) => shown[x.id])
@@ -1119,6 +1279,11 @@ function ServerServicesModal({ srv, onClose, onChanged, initialSec, sites }: {
       [...new Set(llm.map((x) => x.engine_name))].join(', '),
       llm.some((x) => x.gen_tps != null) && t('{n} ток/с', { n: rpmText(llm.reduce((a, x) => a + (x.gen_tps ?? 0), 0)) }),
       llm.some((x) => x.waiting != null) && t('в очереди {n}', { n: rpmText(llm.reduce((a, x) => a + (x.waiting ?? 0), 0)) }),
+    ),
+    workers: subOf(
+      [...new Set(wDaemons.map((d) => d.label))].join(', '),
+      t('программ: {n}', { n: wProgs.length }),
+      wStopped > 0 && t('остановлены руками: {n}', { n: wStopped }),
     ),
     queues: t('очередей: {n}, сообщений: {m}', {
       n: rabbit.reduce((n, it) => n + (it.svc?.total ?? 0), 0),
@@ -1399,6 +1564,31 @@ function ServerServicesModal({ srv, onClose, onChanged, initialSec, sites }: {
               </div>
             )}
 
+            {cur.id === 'workers' && (
+              <div className="srv-sec">
+                <div className="muted small">
+                  {t('Программы под supervisor и pm2. Алерт, когда воркер не запускается (supervisor или pm2 перестал его поднимать, или три минуты не может запуститься), завершился с ошибкой или падает и поднимается: три перезапуска за 15 минут. Остановленные руками не судятся.')}
+                </div>
+                {(s.workers_skipped ?? []).length > 0 && (
+                  <div className="muted small">
+                    {t('Не видны программы этих демонов: {list}.', { list: (s.workers_skipped ?? []).map((x) => `${x.where} - ${x.why}`).join('; ') })}
+                  </div>
+                )}
+                {wProbN > 0 && wDaemons.length > 1 && (
+                  <div className="win-switch q-filter">
+                    <button className={`win-btn${!wOnly ? ' win-btn-active' : ''}`} onClick={() => setWOnly(false)}>
+                      {t('Все воркеры')}
+                    </button>
+                    <button className={`win-btn${wOnly ? ' win-btn-active' : ''}`} onClick={() => setWOnly(true)}>
+                      {t('С проблемами: {n}', { n: wProbN })}
+                    </button>
+                  </div>
+                )}
+                {wShown.map((d) => (
+                  <WorkerList key={d.source} server={s} d={d} onChanged={onChanged} onlyProblems={wOnly} />
+                ))}
+              </div>
+            )}
             {cur.id === 'queues' && (
               <div className="srv-sec">
                 {/* Порог общий для всех очередей ноды; у отдельной очереди его можно
@@ -1637,7 +1827,7 @@ export function ServicesPage({ onUnauthorized, openServerId, openSec, onConsumed
   const offNames = all.filter((r) => !r.server.online).map((r) => r.server.name)
   const kindsAll = new Set(all.flatMap((r) => r.items.map((i) => i.kind)))
   const svcAll = all.flatMap((r) => r.items.map((it) => ({ it, s: r.server })))
-  const dbItems = svcAll.filter(({ it }) => !it.web && !it.svc && !it.llm)
+  const dbItems = svcAll.filter(({ it }) => !it.web && !it.svc && !it.llm && !it.workers)
   const dbBad = live.filter((r) => (r.server.db_health ?? []).some((h) => h.problems.some((p) => p.level >= 2))).map((r) => r.server.name)
   const dbWarn = live.filter((r) => (r.server.db_health ?? []).some((h) => h.problems.some((p) => p.level < 2))).map((r) => r.server.name)
   const webItems = svcAll.filter(({ it }) => it.web)
