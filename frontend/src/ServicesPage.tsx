@@ -1196,7 +1196,8 @@ function WorkerList({ server, d, onChanged, onlyProblems }: {
                     !p.why && !(WORKER_OK.has(p.state) && p.up > 0) && t(WORKER_STATE[p.state] ?? p.state),
                     WORKER_OK.has(p.state) && p.up > 0 && t('работает {a}', { a: wAge(p.up, t) }),
                     p.exit != null && p.exit !== 0 && !WORKER_OK.has(p.state) && !p.why && t('код {n}', { n: p.exit }),
-                    p.r60 > 0 && t('перезапусков за час: {n}', { n: p.r60 }),
+                    p.r60 > 0 && t('падений за час: {n}', { n: p.r60 }),
+                    (p.p60 ?? 0) > 0 && t('плановых перезапусков за час: {n}', { n: p.p60 ?? 0 }),
                   )}
                 </div>
                 {p.why && (
@@ -1210,7 +1211,7 @@ function WorkerList({ server, d, onChanged, onlyProblems }: {
                     <span className="snooze-active-chip snooze-perm">
                       🔇 {p.mute.perm ? t('не алертит, постоянно') : t('не алертит {t}', { t: t('до {t}', { t: fmt(p.mute.until!) }) })}
                       {!isViewer && (
-                        <button className="chip-x" disabled={mBusy} title={t('Снять')} onClick={() => mute(p.key, 0)}>
+                        <button className="chip-x" disabled={mBusy} title={t('Снять')} onClick={() => mute(p.mkey ?? p.key, 0)}>
                           ✕
                         </button>
                       )}
@@ -1225,7 +1226,7 @@ function WorkerList({ server, d, onChanged, onlyProblems }: {
                       { h: 24 * 7, l: t('1 неделя') },
                       { h: -1, l: t('постоянно') },
                     ].map(({ h, l }) => (
-                      <button key={h} className="ghost small" disabled={mBusy} onClick={() => mute(p.key, h)}>
+                      <button key={h} className="ghost small" disabled={mBusy} onClick={() => mute(p.mkey ?? p.key, h)}>
                         {l}
                       </button>
                     ))}

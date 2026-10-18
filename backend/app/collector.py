@@ -58,6 +58,7 @@ from app import netlinks
 from app import traffic as traffic_mod
 from app import usage as usage_mod
 from app import disk_forecast as dfc
+from app import tg_buttons
 from app.setup_scripts import current_setup_versions, gaps
 from app.config import Settings, get_settings
 from app.models import (
@@ -3397,13 +3398,30 @@ def _held_long(s: Server, state: dict, key: str, now: datetime) -> bool:
     return since is not None and (now - since).total_seconds() >= hold
 
 
+def _routine_tail(state: dict, key: str, now: datetime) -> str:
+    """Хвост к беде, которую цикл алертов узнал как распорядок (alert_state "<вид>_quiet")"""
+    try:
+        q = float(state.get(f"{key}_quiet") or 0)
+    except (TypeError, ValueError):
+        return ""
+    usual = str(state.get(f"{key}_usual") or "")
+    return f" (так каждый день в {usual}, алерт не шлем)" if q > now.timestamp() and usual else ""
+
+
+_IO_BUSY = 20  # диск занят меньше - не он причина, называть его нечестно
+
+
 def io_cause(rep: dict) -> str:
-    """Хвост к давлению на диск: какой диск занят и с какой задержкой."""
+    """Хвост к давлению на диск: какой диск занят и с какой задержкой. Процессы ждут, а локальные
+    диски свободны (ждут сетевую файловую систему или хранилище гипервизора) - так и сказать: строка
+    "sda занят на 0%" показывала не туда"""
     devs = [d for d in rep.get("disk_devs") or [] if isinstance(d, dict) and d.get("util") is not None]
     if not devs:
         return ""
     d = max(devs, key=lambda x: float(x.get("util") or 0))
     aw = float(d.get("await") or 0)
+    if float(d["util"]) < _IO_BUSY:
+        return f" - при этом локальные диски почти свободны (самый занятый {d.get('dev') or '?'} на {float(d['util']):.0f}%)"
     return f" - {d.get('dev') or '?'} занят на {float(d['util']):.0f}%" + (f", задержка {aw:.0f} мс" if aw else "")
 
 
@@ -3611,8 +3629,8 @@ def server_problems(s: Server, now: datetime, pod_names: dict[str, str] | None =
     # Сервер задыхается: как и у алерта, только то, что держится дольше выдержки
     pr = pressure_problems(rep)
     if pr and _held_long(s, state, "pressure", now):
-        add("pressure", pr[0][0], "; ".join(t for _l, _r, t in pr[:3]), "pressure", "pressure",
-            state.get("pressure_since"))
+        add("pressure", pr[0][0], "; ".join(t for _l, _r, t in pr[:3]) + _routine_tail(state, "pressure", now),
+            "pressure", "pressure", state.get("pressure_since"))
     nets = net_problems(rep)
     if nets and _held_long(s, state, "net_health", now):
         add("net_health", nets[0][0], "; ".join(t for _l, _r, t in nets[:3]),
@@ -3634,7 +3652,8 @@ def server_problems(s: Server, now: datetime, pod_names: dict[str, str] | None =
     # Диск тормозит: как и у алерта, только то, что держится дольше выдержки
     dl, dtext = disk_slow(rep)
     if dl and _held_long(s, state, "disk_slow", now):
-        add("disk_slow", dl, dtext, "disklat", "disk_slow", state.get("disk_slow_since"))
+        add("disk_slow", dl, dtext + _routine_tail(state, "disk_slow", now), "disklat", "disk_slow",
+            state.get("disk_slow_since"))
     # GPU (helper gpu-setup): драйвер, пропавшая карта, Xid и сбойная память - сразу, перегрев -
     # как у алерта, когда держится дольше выдержки
     for lv, txt, _k, g_since in gpu_mod.problems(rep, now):
@@ -3757,6 +3776,58 @@ def backup_units(s: Server, rep: dict) -> set[str]:
 # та же история, отдельного сообщения нет (см. цикл алертов)
 _SIG_STORY = frozenset({"docker_restarts", "kube_restarts", "db_health"})
 _SIG_STORY_S = 3600
+
+# Распорядок: давление, тормозящий диск или CPU каждый день в одно и то же время (плановый бэкап,
+# проверка репозитория) - не новость. На сервере бэкапов "диск не успевает" приходил каждый день в
+# 13:13 и отбивался к 15:00. Эпизод, который начался в то же время (плюс-минус _ROUTINE_SLACK) в
+# каждый из _ROUTINE_DAYS прошлых дней и каждый раз прошел сам не дольше чем за _ROUTINE_MAX, не
+# алертит, и отбоя у него нет. Держится на _ROUTINE_OVER дольше обычного конца - алерт с пометкой.
+# История эпизодов - alert_state "<вид>_hist" ([начало, конец] в unix, за _ROUTINE_KEEP)
+_ROUTINE_KINDS = frozenset({"pressure", "disk_slow", "cpu"})
+_ROUTINE_DAYS = 2
+_ROUTINE_SLACK = 45 * 60
+_ROUTINE_MAX = 6 * 3600
+_ROUTINE_OVER = 3600
+_ROUTINE_KEEP = 8 * 86400
+
+
+def _hist_pairs(hist: object) -> list[tuple[float, float | None]]:
+    out = []
+    for x in hist if isinstance(hist, list) else []:
+        try:
+            out.append((float(x[0]), None if x[1] is None else float(x[1])))
+        except (TypeError, ValueError, IndexError):
+            continue
+    return out
+
+
+def routine_start(hist: object, now_ts: float) -> list:
+    """История с новым эпизодом, без старше _ROUTINE_KEEP"""
+    keep = [[a, b] for a, b in _hist_pairs(hist) if a > now_ts - _ROUTINE_KEEP]
+    return (keep + [[now_ts, None]])[-40:]
+
+
+def routine_end(hist: object, now_ts: float) -> list:
+    """История, где у последнего эпизода есть конец"""
+    h = [[a, b] for a, b in _hist_pairs(hist)]
+    if h and h[-1][1] is None:
+        h[-1][1] = now_ts
+    return h
+
+
+def routine_of(hist: object, now_ts: float) -> tuple[float, float] | None:
+    """Обычные начало и конец такого эпизода сегодня (unix), если он был в это же время в каждый из
+    _ROUTINE_DAYS прошлых дней и проходил сам; иначе None"""
+    pairs = _hist_pairs(hist)
+    spans = []
+    for d in range(1, _ROUTINE_DAYS + 1):
+        t = now_ts - d * 86400
+        hit = [(a, b) for a, b in pairs if b is not None and abs(a - t) <= _ROUTINE_SLACK and 0 < b - a <= _ROUTINE_MAX]
+        if not hit:
+            return None
+        a, b = min(hit, key=lambda x: abs(x[0] - t))
+        spans.append((a + d * 86400, b + d * 86400))
+    return min(a for a, _ in spans), max(b for _, b in spans)
 
 
 def _sig_all_quiet(s: Server, key: str, sig: set[str], now: datetime) -> bool:
@@ -5688,39 +5759,89 @@ async def evaluate_servers(
                 # RAID, второй упавший юнит): молчать нельзя, хотя уровень не вырос. Что
                 # сломано - ключи в sig.
                 sk = f"{key}_sig"
+                tk = f"{key}_told"
                 old_sig = set(st.get(sk) or [])
                 new_sig = set(ctx.get("sig") or [])
                 if key == "kube_restarts":
                     # sig был по подам, стал по ворклоадам: та же беда под новым ключом не новость
                     old_sig = {podnames.pod_key(x) for x in old_sig}
+                # О чем уже сказали, пока алерт открыт: sig не только сейчас, но и все, что в нем
+                # было. Пятнадцать копий воркера уходили из беды и возвращались по очереди, и каждое
+                # возвращение было "новым": десять сообщений за полтора часа об одном и том же
+                told = set(st.get(tk) or []) | old_sig if prev else set()
+                if key == "workers":
+                    # до 1.4.273 копии программы были отдельными ключами: о программе уже сказано
+                    told |= {workers_mod.program_key(x) for x in told}
                 if prev and not level and old_sig and _sig_all_quiet(s, key, old_sig, now):
                     # объявленное теперь заглушено (или это свой helper, по которому алерта
                     # больше нет): ничего не стихло, отбой был бы неправдой
                     rec_apply.append((s.id, sk, []))
+                    rec_apply.append((s.id, tk, []))
                     rec_apply.append((s.id, key, 0))
                     continue
                 if level == prev:
-                    if level and new_sig - old_sig:
+                    if level and new_sig - told:
                         said = _parse_iso(str(st.get(f"{key}_said") or ""))
                         if key in _SIG_STORY and said is not None and (now - said).total_seconds() < _SIG_STORY_S:
                             # Перезапуски считаются за сутки: еще один деплоймент перешел порог
                             # через минуту после сообщения - та же история (на одной ноде
                             # два сообщения подряд), он виден в "Что сломано"
                             apply(s.id, sk, sorted(new_sig))
+                            apply(s.id, tk, sorted(told | new_sig))
                         else:
                             fires.append(srv_fire(s, key, rule, ctx))
                             fire_apply.append((s.id, sk, sorted(new_sig)))
+                            fire_apply.append((s.id, tk, sorted(told | new_sig)))
                             fire_apply.append((s.id, f"{key}_said", now.isoformat()))
                     elif new_sig != old_sig:
                         apply(s.id, sk, sorted(new_sig))
+                        if level and not st.get(tk):
+                            apply(s.id, tk, sorted(told))
                     continue
                 if level > prev:
                     fire_apply.append((s.id, sk, sorted(new_sig)))
+                    fire_apply.append((s.id, tk, sorted(told | new_sig)))
                     fire_apply.append((s.id, f"{key}_said", now.isoformat()))
                 elif level:
                     apply(s.id, sk, sorted(new_sig))
+                    apply(s.id, tk, sorted(told | new_sig))
                 else:
                     rec_apply.append((s.id, sk, []))
+                    rec_apply.append((s.id, tk, []))
+            if key in _ROUTINE_KINDS:
+                # Распорядок (см. _ROUTINE_KINDS): тот же эпизод в то же время каждый день не алертит.
+                # До проверки "уровень тот же": придержанный эпизод, который затянулся, - новость
+                now_ts = now.timestamp()
+                quiet = st.get(f"{key}_quiet")
+                hist = st.get(f"{key}_hist") or []
+                if level and not prev:
+                    hist = routine_start(hist, now_ts)
+                    apply(s.id, f"{key}_hist", hist)
+                    r = routine_of(hist[:-1], now_ts)
+                    if r:
+                        ptz = cfg.get("tz") or "Europe/Moscow"
+                        usual = "-".join(tg_buttons.hhmm(datetime.fromtimestamp(x, timezone.utc), ptz, now) for x in r)
+                        apply(s.id, key, level)
+                        apply(s.id, f"{key}_quiet", r[1] + _ROUTINE_OVER)
+                        apply(s.id, f"{key}_usual", usual)
+                        continue
+                elif level and quiet:
+                    if now_ts < float(quiet):
+                        if level != prev:
+                            apply(s.id, key, level)
+                        continue
+                    # держится дольше обычного: теперь это новость
+                    apply(s.id, f"{key}_quiet", None)
+                    usual = str(st.get(f"{key}_usual") or "")
+                    ctx["_note"] = (f"обычно так бывает в {usual} и проходит само, сегодня держится дольше" if usual
+                                    else "держится дольше обычного")
+                    prev = 0
+                elif not level and prev:
+                    apply(s.id, f"{key}_hist", routine_end(hist, now_ts))
+                    if quiet:
+                        apply(s.id, key, 0)
+                        apply(s.id, f"{key}_quiet", None)
+                        continue
             if level == prev:
                 continue
             # Гаситель «мигания» — только для НОВЫХ обрывов. Восстановление после уже
@@ -5767,6 +5888,9 @@ async def evaluate_servers(
                     except Exception:
                         log.warning("не собрал, где ошибки 5xx на %s", s.name, exc_info=True)
                 fmsg = srv_fire(s, key, rule, ctx)
+                if ctx.get("_note"):
+                    fmsg = alerts.Msg(fmsg + "\n↳ " + html.escape(str(ctx["_note"])), fmsg.section, fmsg.group,
+                                      fmsg.kind, fmsg.target, fmsg.recovery, fmsg.ref)
                 if key == "offline" and (tail := deps_tail(s.id)):
                     # что молчит и лежит из-за него: их собственные алерты придержаны
                     fmsg = alerts.Msg(fmsg + tail, fmsg.section, fmsg.group, fmsg.kind, fmsg.target,

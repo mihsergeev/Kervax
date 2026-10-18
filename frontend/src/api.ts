@@ -2113,8 +2113,12 @@ export type WorkerProg = {
   since: number
   r15: number
   r60: number
+  // плановых перезапусков за час: вышел с кодом 0, проработав минуту и больше (helper 0.3)
+  p60?: number
   exit: number | null
   key: string
+  // ключ мьюта: у копии программы (numprocs, кластер pm2) - программа целиком
+  mkey?: string
   log?: string
   level?: number
   why?: string

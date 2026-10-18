@@ -22,9 +22,16 @@
 # JSON on Debian and Ubuntu, whose awk is mawk: there gsub(/\\/, "\\\\") puts back one backslash,
 # not two, and the agent drops a block that is not valid JSON - silently, the whole of it. Backslashes
 # are doubled by splitting the string now, the same in every awk.
+#
+# 0.3: a restart after a clean exit (code 0) of a run that lasted a minute or more is a planned
+# one and is counted apart (p60): a queue listener that handles a batch and exits, a max-jobs or
+# memory limit. Fifteen such listeners recycling every few minutes were reported as "goes down
+# and up" every few minutes. A restart after any other exit, or after a run shorter than a
+# minute, is still counted as a crash (r15, r60). Restart times kept by 0.2 counted both and are
+# dropped on the first run.
 set -euo pipefail
 
-KERVAX_SETUP_VERSION=0.2  # MAJOR.MINOR; compared component-wise
+KERVAX_SETUP_VERSION=0.3  # MAJOR.MINOR; compared component-wise
 KERVAX_SETUP_ALWAYS=1     # safe on any node: without supervisord or pm2 it runs one ps and exits
 
 HELPER_DIR=/lib65/kervax
@@ -295,16 +302,26 @@ done <<< "$DAEMONS"
 
 # -- restarts and since when: the previous run's start time and state of each program (cache) --
 # rows: id where kind name state start now pid exit desc log
-# cache: S id|name start state since restart-times(comma)
+# cache: V 3 | S id|name start state since crash-restart-times(comma) planned-restart-times(comma)
 awk -F'\t' -v OFS='\t' -v now="$NOW" -v cf="$CACHE" -v nc="$TMPD/cache" '
-  BEGIN { while ((getline l < cf) > 0) { split(l, c, "\t"); if (c[1] == "S") { cs[c[2]] = c[3]; cst[c[2]] = c[4]; csi[c[2]] = c[5]; crt[c[2]] = c[6] } } }
-  { k = $1 "|" $4; rt = ""; n15 = 0; n60 = 0
-    m = split(crt[k], t, ","); for (i = 1; i <= m; i++) if (t[i] != "" && now - t[i] <= 3600) rt = rt (rt == "" ? "" : ",") t[i]
-    if ((k in cs) && cs[k] != $6 && $6 > 0) rt = rt (rt == "" ? "" : ",") now
+  function hour(list,   m, x, i, r) { r = ""; m = split(list, x, ",")
+    for (i = 1; i <= m; i++) if (x[i] != "" && now - x[i] <= 3600) r = r (r == "" ? "" : ",") x[i]
+    return r }
+  BEGIN { while ((getline l < cf) > 0) { split(l, c, "\t"); if (c[1] == "V") cv = c[2] + 0
+            else if (c[1] == "S") { cs[c[2]] = c[3]; cst[c[2]] = c[4]; csi[c[2]] = c[5]; crt[c[2]] = c[6]; cpt[c[2]] = c[7] } }
+          print "V", 3 > nc }
+  { k = $1 "|" $4; n15 = 0; n60 = 0
+    # times kept before 0.3 counted planned restarts as crashes too: dropped
+    rt = cv >= 3 ? hour(crt[k]) : ""; pt = cv >= 3 ? hour(cpt[k]) : ""
+    if ((k in cs) && cs[k] != $6 && $6 > 0) {
+      # exited with code 0 after a minute or more of work: a planned recycle, not a crash
+      if ($9 == "0" && $6 - cs[k] >= 60) pt = pt (pt == "" ? "" : ",") now
+      else rt = rt (rt == "" ? "" : ",") now }
     m = split(rt, t, ","); for (i = 1; i <= m; i++) { n60++; if (now - t[i] <= 900) n15++ }
+    p60 = split(pt, t, ",")
     since = ((k in cst) && cst[k] == $5) ? csi[k] : now
-    print "S", k, $6, $5, since, rt > nc
-    print $0, since, n15, n60 }' "$TMPD/rows" > "$TMPD/rows2"
+    print "S", k, $6, $5, since, rt, pt > nc
+    print $0, since, n15, n60, p60 }' "$TMPD/rows" > "$TMPD/rows2"
 mv -f "$TMPD/cache" "$CACHE" 2>/dev/null || : > "$CACHE"
 
 # -- the report: a daemon per id, its programs in the order it gave them --
@@ -315,8 +332,8 @@ json=$(awk -F'\t' '
     b = b (nb++ ? "," : "") sprintf("{\"kind\":\"%s\",\"where\":\"%s\",\"progs\":[%s]}", gk, e(gw), ps) }
   { if ($1 != g) { flush(); g = $1; gw = $2; gk = $3; ps = ""; np = 0 }
     up = ($5 == "RUNNING" || $5 == "online") && $6 > 0 ? $7 - $6 : 0
-    ps = ps (np++ ? "," : "") sprintf("{\"name\":\"%s\",\"state\":\"%s\",\"since\":%d,\"up\":%d,\"pid\":%s,\"exit\":%s,\"r15\":%d,\"r60\":%d%s%s}",
-      e($4), e($5), $12, up, n($8), n($9), $13, $14, $10 != "" ? ",\"desc\":\"" e($10) "\"" : "", $11 != "" ? ",\"log\":\"" e($11) "\"" : "") }
+    ps = ps (np++ ? "," : "") sprintf("{\"name\":\"%s\",\"state\":\"%s\",\"since\":%d,\"up\":%d,\"pid\":%s,\"exit\":%s,\"r15\":%d,\"r60\":%d,\"p60\":%d%s%s}",
+      e($4), e($5), $12, up, n($8), n($9), $13, $14, $15, $10 != "" ? ",\"desc\":\"" e($10) "\"" : "", $11 != "" ? ",\"log\":\"" e($11) "\"" : "") }
   END { flush(); printf "%s", b }' "$TMPD/rows2")
 skip=$(sort -u "$TMPD/skip" | head -50 | awk -F'\t' '
   function e(s,   _jp, _jn, _ji) { gsub(/[[:cntrl:]]/, "", s); _jn = split(s, _jp, "\\"); s = _jp[1]; for (_ji = 2; _ji <= _jn; _ji++) s = s "\\\\" _jp[_ji]; gsub(/"/, "\\\"", s); return s }
