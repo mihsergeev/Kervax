@@ -4442,7 +4442,9 @@ textarea:focus {
 }
 
 /* очередь растет и не разбирается: строка под именем */
-.docker-c-img.q-stuck { color: var(--down); }
+.docker-c-img.q-stuck { color: var(--down); white-space: normal; }
+/* строка лога упавшего воркера: переносится, не больше трех строк, целиком в подсказке */
+.docker-c-img.w-log { white-space: normal; overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; }
 /* заглушенная очередь (не алертить): блеклая, кнопка "не алертить" и выбор срока в строке */
 .docker-row.q-muted { border-left-color: var(--border); opacity: 0.65; }
 .q-mute-btn { width: 34px; flex-shrink: 0; padding: 2px 0; text-align: center; }

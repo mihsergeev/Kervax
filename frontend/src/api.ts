@@ -1916,6 +1916,10 @@ export type Server = {
   queue_skipped?: string[] | null
   // базы, куда helper очередей не вошел (auth), и таблицы очередей больше миллиона строк (big)
   queue_db_skipped?: { why: string; where: string; rows?: number }[] | null
+  // воркеры под supervisor и pm2 (helper workers-setup): демоны с программами
+  workers?: WorkerDaemon[] | null
+  // демоны, которых helper не смог спросить: где и почему словами
+  workers_skipped?: { where: string; why: string }[] | null
   // заглушенные очереди: насовсем или до срока
   queue_mutes?: Record<string, { perm?: boolean; until?: string }> | null
   // изменения на сервере (helper changes-setup): лента между снимками, отметка "это мы"
@@ -2076,6 +2080,24 @@ export type QueueStat = {
   unacked?: number
   consumers?: number // потребителей у очереди (агент 2.38)
 }
+// Программа под supervisor или pm2: состояние как у демона (RUNNING, FATAL, BACKOFF, EXITED, STOPPED;
+// online, errored, stopped), up - секунд работает, r15/r60 - перезапусков за 15 минут и за час,
+// level/why - беда (workers.trouble на бэкенде), mute - заглушена по ключу worker:<key>
+export type WorkerProg = {
+  name: string
+  state: string
+  up: number
+  since: number
+  r15: number
+  r60: number
+  exit: number | null
+  key: string
+  log?: string
+  level?: number
+  why?: string
+  mute?: { perm?: boolean; until?: string }
+}
+export type WorkerDaemon = { kind: string; label: string; where: string; source: string; ts: number; progs: WorkerProg[] }
 export type ServiceInfo = {
   kind: string // rabbitmq | celery | sidekiq | rq | bullmq | laravel | yii | symfony | oban ... (queue_watch.SYSTEM_LABEL)
   source?: string // «под ns/name» / «контейнер X»; у очередей в Redis - «контейнер X, Celery, db 1» (часть ключа)
