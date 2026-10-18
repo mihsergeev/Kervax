@@ -53,20 +53,29 @@ def test_saw_queue_is_alive():
 
 
 def test_dead_worker_of_a_rare_queue():
-    # пара писем в час, три часа ни одного не забрали
-    rare = [i // 30 for i in range(181)]
+    # пара писем в час, три часа ни одного не забрали, а в очереди и так больше сотни
+    rare = [100 + i // 30 for i in range(181)]
     assert _run(rare)[1] == 180 * 60
     # хоть одно забрали - не мертвый
     taken = rare[:100] + [rare[100] - 1] + rare[101:]
     assert _run(taken)[1] == 0
     # стоит и не растет - не судим (очередь никто не пишет)
-    assert _run([7] * 200)[1] == 0
+    assert _run([107] * 200)[1] == 0
     # без потребителей (агент 2.38) хватает получаса
-    st, _a = _run([i // 5 for i in range(41)])
+    st, _a = _run([100 + i // 5 for i in range(41)])
     e = st[f"{SRC}|//mail"]
-    assert qw.stuck(e, 8, int(NOW.timestamp())) == 0
-    assert qw.stuck(e, 8, int(NOW.timestamp()), consumers=0) == 2400
-    assert qw.stuck(e, 8, int(NOW.timestamp()), consumers=2) == 0
+    assert qw.stuck(e, 108, int(NOW.timestamp())) == 0
+    assert qw.stuck(e, 108, int(NOW.timestamp()), consumers=0) == 2400
+    assert qw.stuck(e, 108, int(NOW.timestamp()), consumers=2) == 0
+
+
+def test_a_dozen_messages_is_not_an_alert():
+    # потребитель есть, но забирает пачкой раз в несколько часов: 0 -> 16 за четыре часа. Алерт
+    # будил человека, а через две минуты воркер все разбирал и приходил отбой
+    assert _run([i // 15 for i in range(241)])[1] == 0
+    # и без потребителей десяток сообщений - не повод
+    st, _a = _run([i // 5 for i in range(41)])
+    assert qw.stuck(st[f"{SRC}|//mail"], 8, int(NOW.timestamp()), consumers=0) == 0
 
 
 def test_gap_in_reports_starts_over():
