@@ -4,6 +4,15 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.4.265] - 2026-10-18
+
+### Fixed
+- Helper queues-setup 0.2: Redis в alpine-образе выглядел недоступным. Под systemd в PATH нет /bin, а
+  у alpine оболочка только там: "nsenter: failed to execute sh", и очереди такого Redis не находились
+  полчаса, до следующего поиска. При ручном запуске через sudo все работало. Оболочка теперь
+  вызывается по полному пути, PATH задан явно, а Redis, который не ответил, проверяется снова через 5
+  минут.
+
 ## [1.4.264] - 2026-10-18
 
 ### Added
