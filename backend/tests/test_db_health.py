@@ -89,7 +89,7 @@ def test_alert_home_and_view():
 
 def test_helper_writes_health():
     src = (Path(__file__).resolve().parents[2] / "agent" / "dbstat-setup.sh").read_text(encoding="utf-8")
-    assert "KERVAX_SETUP_VERSION=0.10" in src and "health_pg()" in src and "health_mysql()" in src
+    assert "KERVAX_SETUP_VERSION=0.11" in src and "health_pg()" in src and "health_mysql()" in src
     # 0.7: без роли postgres - под пользователем контейнера в явную базу, а не в базу с его именем
     assert 'psql -d "${d:-postgres}" -Atqc "$q" ${u:+-U "$u"}' in src
     assert "backend_xmin is not null" in src and "idle_xmin" in src
@@ -140,7 +140,8 @@ def test_helper_collects_load():
     # тексты с паролями и секретами не уходят
     assert "~* '(passw|secret|token|identified|pgp_sym|encrypt)' then ''" in src
     # пустой первый файл: FNR == NR ловил строки второго файла как первого, топ выходил пустым
-    assert "FNR == NR" not in src and src.count("FILENAME == ARGV[1]") == 4  # четвертый - команды Redis (0.10)
+    # четвертый - команды Redis (0.10), пятый и шестой - нагрузка и запросы MySQL (0.11)
+    assert "FNR == NR" not in src and src.count("FILENAME == ARGV[1]") == 6
     # отчет больше 256 КБ агент выбрасывает целиком - бюджет на топы
     assert "LOAD_BUDGET=131072" in src and '\\"cut\\":1}' in src
 
@@ -343,3 +344,125 @@ def test_view_passes_clickhouse_and_redis_facts():
     lvl, ctx = collector._server_conditions(s, NOW)["db_health"]
     assert lvl == 2 and "Redis cache: не может сохранить снимок" in ctx["detail"]
 
+
+
+# ── MySQL / MariaDB (dbstat-setup 0.11) ────────────────────────────────────────
+def test_helper_reaches_mysql_in_pods_and_behind_a_password():
+    src = (Path(__file__).resolve().parents[2] / "agent" / "dbstat-setup.sh").read_text(encoding="utf-8")
+    # под: клиент из образа внутри его пространств, от uid сервера, пароль из config.json среды
+    assert 'nsenter -t "$p" -m -n -p -S "$u"' in src and "io.containerd.runtime.v2.task" in src
+    assert 'MYSQL_PWD="$(my_pod_pw "$p")"' in src and "MARIADB_ROOT_PASSWORD_FILE" in src
+    # хост: файлы с учеткой раньше сокета - отказ root по сокету копит Aborted_connects
+    assert 'for f in /etc/mysql/debian.cnf /root/.my.cnf ""; do' in src
+    # реплика по именам полей, без \G
+    assert 'my_run "$c" -B "SHOW REPLICA STATUS"' in src and "STATUS\\G" not in src
+    # нагрузка, запросы без своих, настройки
+    assert "load_my()" in src and "events_statements_summary_by_digest" in src and "cfg_my()" in src
+    assert "not like 'SHOW %'" in src and "lower(digest_text) regexp 'passw|secret" in src
+    assert 'find "$LOAD_DIR" -mindepth 1 -maxdepth 1 -mtime +2' in src
+
+
+def test_mysql_purge_backlog_idle_transaction_refused_connections():
+    x = _my(role="primary", xact=7200, xact_db="shop", xact_app="app", hist=3_400_000,
+            idle_xact=7200, idle_sleep=5400, idle_db="shop", idle_app="app",
+            load={"win": 1800, "connection_errors_max_connections": 12}, cfg={"max_connections": "151"})
+    # одна беда - одна строка: простаивающая транзакция и есть самая старая, очередь из-за нее
+    assert [t for _l, t, _k in db_health.problems(_rep(x), NOW)] == [
+        "MySQL на хосте: транзакция открыта 2 ч 0 мин и простаивает 1 ч 30 мин (база shop, app): держит блокировки "
+        "строк и не дает InnoDB удалять старые версии; очередь очистки InnoDB уже 3.4 млн версий строк",
+        "MySQL на хосте: за 30 мин отказано в подключении: 12 - упор в max_connections (151)",
+    ]
+    # работающая долгая транзакция и очередь - тоже одна строка
+    busy = _my(role="primary", xact=7200, xact_db="shop", xact_app="app", hist=3_400_000)
+    assert [t for _l, t, _k in db_health.problems(_rep(busy), NOW)] == [
+        "MySQL на хосте: транзакция идет 2 ч 0 мин (база shop, app); очередь очистки InnoDB уже 3.4 млн версий строк"]
+    # очередь без долгой транзакции - своя строка; MariaDB называется по версии
+    q = _my(role="primary", container="db", xact=900, xact_app="app", hist=1_200_000, cfg={"version": "11.4.8-MariaDB"})
+    assert [t for _l, t, _k in db_health.problems(_rep(q), NOW)] == [
+        "MariaDB db: очередь очистки InnoDB 1.2 млн версий строк - старые версии не удаляются, запросы пробираются "
+        "через них и замедляются; самая долгая транзакция идет 15 мин (app) - держит, скорее всего, она"]
+    # дамп с --single-transaction держит транзакцию по природе: до 12 часов молчим
+    dump = _my(role="primary", xact=4 * 3600, xact_app="mysqldump")
+    assert db_health.problems(_rep(dump), NOW) == []
+    # тихий сервер - тишина
+    assert db_health.problems(_rep(_my(role="primary", hist=120, load={"win": 3600})), NOW) == []
+
+
+def _myload(**kw):
+    ld = {"win": 1800, "ps": "on", "questions": 90_000, "com_select": 60_000, "com_insert": 5000, "com_update": 2000,
+          "com_delete": 500, "slow_queries": 3, "created_tmp_tables": 4000, "created_tmp_disk_tables": 900,
+          "innodb_buffer_pool_reads": 40_000, "innodb_buffer_pool_read_requests": 2_000_000,
+          "innodb_os_log_written": 3 * (1 << 30), "innodb_log_waits": 80, "innodb_row_lock_waits": 10,
+          "innodb_row_lock_time": 5000, "im_deadlocks": 1, "aborted_connects": 40,
+          "connection_errors_max_connections": 0, "page": 16384, "run": 3, "max_used": 40, "ms_all": 600_000,
+          "top": [{"id": "a1", "db": "shop", "q": "SELECT * FROM `orders` WHERE `note` LIKE ?", "calls": 100,
+                   "ms": 400_000, "rows": 5_000_000, "tmp": 0, "noidx": 100},
+                  {"id": "b2", "db": "shop", "q": "", "calls": 10, "ms": 50_000, "rows": 10, "tmp": 5, "noidx": 0}]}
+    ld.update(kw)
+    return ld
+
+
+def test_mysql_load_view_per_hour():
+    v = db_health.my_load_view(_my(load=_myload()))
+    assert v["win"] == 1800 and v["ps"] == "on" and v["q"] == 180_000 and v["wr"] == 15_000
+    assert v["rd"] == 40_000 * 16384 * 2 and v["hit"] == 98.0 and v["redo"] == 6 * (1 << 30)
+    assert v["deadlocks"] == 2 and v["tmp_disk"] == 1800 and v["refused"] == 0 and v["max_used"] == 40
+    assert [(r["calls"], r["ms"], r["share"], r["rows_call"], r["noidx"]) for r in v["top"]] == [
+        (200, 800_000, 67, 50_000, 200), (20, 100_000, 8, 1, 0)]
+    # счетчика нет в этой версии - None, а не 0; первый прогон - без окна
+    assert db_health.my_load_view(_my(load={"win": 600, "questions": 10}))["redo"] is None
+    first = db_health.my_load_view(_my(load={"win": 0, "ps": "off"}))
+    assert first["win"] == 0 and first["ps"] == "off" and "q" not in first
+
+
+def _mycfg(**kw):
+    c = {"version": "8.0.36", "innodb_buffer_pool_size": str(128 << 20), "innodb_redo_log_capacity": str(100 << 20),
+         "innodb_log_buffer_size": str(16 << 20), "tmp_table_size": str(16 << 20),
+         "max_heap_table_size": str(16 << 20), "log_bin": "ON", "binlog_expire_logs_seconds": "2592000",
+         "expire_logs_days": "0", "mem": 32 << 30, "mem_lim": False, "stop_to": -1, "binlog_b": 0, "rt": "host"}
+    c.update(kw)
+    return c
+
+
+def test_mysql_advice():
+    x = _my(role="primary", cfg=_mycfg())
+    lv = db_health.my_load_view(_my(load=_myload()))
+    ks = {a["k"]: a for a in db_health.my_advice(x, lv, db_size=20 << 30)}
+    # буфер по умолчанию при 20 ГБ данных и чтениях с диска; redo 6 ГБ в час на 100 МБ журнала
+    assert ks["my_bp_low"]["bp"] == 128 << 20 and ks["my_bp_low"]["rd"] == lv["rd"]
+    assert ks["my_redo"]["rec"] == 8 << 30 and ks["my_redo"]["var"] == "innodb_redo_log_capacity" and ks["my_redo"]["online"]
+    assert ks["my_log_buffer"]["n"] == 160 and ks["my_tmp"]["n"] == 1800
+    assert "my_binlog" not in ks and "my_stop_timeout" not in ks
+    # бинлоги без срока, docker с 10 секундами на остановку, буфер больше памяти контейнера
+    y = _my(role="primary", container="db", cfg=_mycfg(version="10.6.18-MariaDB", innodb_buffer_pool_size=str(6 << 30),
+                                                       mem=6 << 30, mem_lim=True, binlog_expire_logs_seconds="0",
+                                                       expire_logs_days="0.000000", binlog_b=40 << 30, rt="docker",
+                                                       innodb_log_file_size=str(96 << 20)))
+    del y["cfg"]["innodb_redo_log_capacity"]  # у MariaDB его нет
+    ky = {a["k"]: a for a in db_health.my_advice(y, lv, db_size=1 << 30)}
+    assert ky["my_bp_high"]["lim"] is True and ky["my_binlog"]["b"] == 40 << 30 and ky["my_stop_timeout"]["to"] == 10
+    assert ky["my_redo"]["var"] == "innodb_log_file_size" and ky["my_redo"]["online"] is False
+    # несколько MySQL на машине - про долю памяти не советуем; под - без совета про docker
+    assert "my_bp_low" not in {a["k"] for a in db_health.my_advice(x, lv, my_count=2, db_size=20 << 30)}
+    pod = _my(container="default/db-0", cfg=_mycfg(innodb_buffer_pool_size=str(4 << 30), rt="pod"))
+    assert "my_stop_timeout" not in {a["k"] for a in db_health.my_advice(pod, lv)}
+
+
+def test_mysql_in_view():
+    st = {"engine": "mysql", "container": "default/db-0", "dbs": [{"name": "shop", "size": 20 << 30}]}
+    rep = _rep(_my(role="primary", container="default/db-0", load=_myload(), cfg=_mycfg()))
+    rep["db_stats"] = [st]
+    v = db_health.view(rep, NOW)[0]
+    assert v["load"] is None and v["my"]["q"] == 180_000 and {a["k"] for a in v["advice"]} >= {"my_bp_low", "my_redo"}
+
+
+def test_mysql_refused_connections_not_twice_with_the_conn_alert():
+    x = _my(role="primary", container="wp", load={"win": 3600, "connection_errors_max_connections": 37},
+            cfg={"max_connections": "151"})
+    rep = _rep(x)
+    rep["db_stats"] = [{"engine": "mysql", "container": "wp", "conn_used": 150, "conn_max": 151}]
+    s = _srv(rep)
+    assert [k for _l, _t, k in collector.db_health_problems(s, rep, NOW)] == ["mysql:wp:conn"]
+    # алерт коннектов включен и горит по этому экземпляру - строка "занято 150 из 151" уже говорит о том же
+    s.db_conn_alert_percent = 80
+    assert collector.db_health_problems(s, rep, NOW) == []
