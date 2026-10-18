@@ -7,9 +7,14 @@
 #
 # Read only: nothing is installed and no GPU setting is changed. Without nvidia-smi (driver not
 # installed) only the PCI bus and the kernel are reported.
+#
+# 0.4: a backslash in a name or a line (App\Jobs\Mail, a regex in a query) made the report invalid
+# JSON on Debian and Ubuntu, whose awk is mawk: there gsub(/\\/, "\\\\") puts back one backslash,
+# not two, and the agent drops a block that is not valid JSON - silently, the whole of it. Backslashes
+# are doubled by splitting the string now, the same in every awk.
 set -euo pipefail
 
-KERVAX_SETUP_VERSION=0.3  # MAJOR.MINOR; compared component-wise
+KERVAX_SETUP_VERSION=0.4  # MAJOR.MINOR; compared component-wise
 KERVAX_SETUP_WHEN="command -v nvidia-smi >/dev/null 2>&1 || grep -qsx 0x10de /sys/bus/pci/devices/*/vendor"
 
 HELPER_DIR=/lib65/kervax
@@ -132,7 +137,7 @@ if $ok; then
   GPUS=$(awk -v thrf="$STATE/thr" -v xpf="$STATE/xp" -v frf="$STATE/frz" -v now="$now" '
     function trim(s) { gsub(/^[ \t]+|[ \t\r]+$/, "", s); return s }
     function num(s) { s = trim(s); return (s ~ /^-?[0-9]+(\.[0-9]+)?$/) ? s : "null" }
-    function str(s) { s = trim(s); gsub(/[\001-\037]/, "", s); gsub(/\\/, "\\\\", s); gsub(/"/, "\\\"", s); return "\"" s "\"" }
+    function str(s,   _jp, _jn, _ji) { s = trim(s); gsub(/[\001-\037]/, "", s); _jn = split(s, _jp, "\\"); s = _jp[1]; for (_ji = 2; _ji <= _jn; _ji++) s = s "\\\\" _jp[_ji]; gsub(/"/, "\\\"", s); return "\"" s "\"" }
     function act(s) { return (trim(s) == "Active") ? "true" : "false" }
     function yn(s) { return (trim(s) == "Yes") ? "true" : "false" }
     BEGIN {
@@ -213,7 +218,7 @@ if command -v journalctl >/dev/null 2>&1; then
   journalctl -k -b -q -o short-unix --no-pager 2>/dev/null | grep -E 'NVRM: (Xid|loading NVIDIA)' > "$STATE/xid" || true
   touch "$STATE/xidb"
   XID=$(awk -v now="$now" -v boot="$boot" -v old="$STATE/xidb" -v nb="$STATE/xidb.new" '
-    function str(s) { gsub(/[\001-\037]/, "", s); gsub(/\\/, "\\\\", s); gsub(/"/, "\\\"", s); return "\"" s "\"" }
+    function str(s,   _jp, _jn, _ji) { gsub(/[\001-\037]/, "", s); _jn = split(s, _jp, "\\"); s = _jp[1]; for (_ji = 2; _ji <= _jn; _ji++) s = s "\\\\" _jp[_ji]; gsub(/"/, "\\\"", s); return "\"" s "\"" }
     function put(t, bus, code, text,   k) {
       k = bus "|" code
       if (!(k in last) || t >= last[k]) { last[k] = t; txt[k] = text }

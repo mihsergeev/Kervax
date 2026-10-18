@@ -4450,6 +4450,10 @@ textarea:focus {
 .q-mute-btn { width: 34px; flex-shrink: 0; padding: 2px 0; text-align: center; }
 .q-mute-pick { display: flex; flex-wrap: wrap; align-items: center; gap: 0.3rem; margin-top: 0.25rem; }
 .q-filter { margin: 0.2rem 0; }
+/* упавшие задачи брокера: полоска под шапкой, при всплеске - красная */
+.q-failed { margin: 0.35rem 0 0.4rem; padding: 0.3rem 0.5rem; border-left: 3px solid var(--border); background: var(--bg); border-radius: 4px; }
+.q-failed-spike { border-left-color: var(--down); }
+.q-failed-head { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; }
 /* раздел «Сервисы»: строка с числами очереди справа */
 .queue-nums {
   display: flex;

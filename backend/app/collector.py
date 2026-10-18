@@ -280,7 +280,7 @@ _SRV_ICON = {
     "backup_restore": "🛟💾", "docker_restarts": "🔄🐳", "kube_restarts": "🔄☸️",
     "mem_leak": "📈🧠", "ssh_risk": "🔐", "access_risk": "🗝", "db_health": "🛢",
     "web_config": "🧾", "web_cert": "🔏", "listen_gone": "🔌", "disk_slow": "🐢",
-    "gpu": "🎛", "gpu_heat": "🌡", "llm": "💬", "queue_stuck": "⏳", "workers": "👷",
+    "gpu": "🎛", "gpu_heat": "🌡", "llm": "💬", "queue_stuck": "⏳", "queue_failed": "🧨", "workers": "👷",
 }
 
 # Куда ведёт ссылка алерта (deep-link ?server=id&sec=…). Целимся в КОНКРЕТНУЮ метрику,
@@ -322,7 +322,7 @@ _BACKUP_SEC = {"backup_failed": "runs", "backup_stale": "runs", "backup_growth":
 _BSRV_SEC = {"backup_repo": "repos", "backup_lock": "repos", "backup_unmonitored": "repos", "backup_check": "repos",
              "backup_prune": "cleanup", "backup_rotation": "cleanup"}
 # раздел карточки сервисов ноды по алерту и по проблеме
-_SVC_SEC = {"queue": "queues", "queue_stuck": "queues", "workers": "workers", "db_conn": "db", "db_health": "db", "web_config": "web", "web_cert": "certs",
+_SVC_SEC = {"queue": "queues", "queue_stuck": "queues", "queue_failed": "queues", "workers": "workers", "db_conn": "db", "db_health": "db", "web_config": "web", "web_cert": "certs",
             "llm": "llm"}
 _KUBE_TAB = {"kube_expiry": "expiry", "flux_down": "flux", "flux_stale": "flux", "kube_pod": "pods",
              "kube_cron": "cron", "kube_node": "nodes", "kube_job": "cron", "kube_restarts": "pods"}
@@ -334,6 +334,7 @@ _ALERT_SECTION = {
     "docker_risk": "docker",
     "queue": "services",
     "queue_stuck": "services",
+    "queue_failed": "services",
     "workers": "services",
     "backup_repo": "backups",
     "backup_rotation": "backups",
@@ -1619,6 +1620,7 @@ _SRV_LABEL = {
     "gpu_heat": "перегрев GPU",
     "llm": "LLM-сервисы",
     "queue_stuck": "очереди",
+    "queue_failed": "упавшие задачи",
 }
 
 # Единицы пороговых метрик. Нужны отбою: голое «снова в норме» не отвечает на
@@ -1684,6 +1686,8 @@ def _recovery_detail(key: str, st: dict, ctx: dict) -> str:
         return "LLM-сервисы снова в норме: отвечают, очереди нет, задержки обычные"
     if key == "queue_stuck":
         return "очереди снова разбираются"
+    if key == "queue_failed":
+        return "задачи больше не падают пачками: за час упало меньше половины порога"
     if key == "workers":
         return "воркеры снова работают"
     if key == "disk_forecast":
@@ -3523,6 +3527,9 @@ def server_problems(s: Server, now: datetime, pod_names: dict[str, str] | None =
     for x in queue_watch.problems(s, now):
         add("queue_stuck", x["level"], x["text"], "queues", queue_watch.MUTE_PREFIX + x["key"], x["since"],
             section="services")
+    # Всплеск упавших задач (helper queues-setup 0.4): за час в разы больше обычного
+    for x in queue_watch.failed_problems(s, now):
+        add("queue_failed", x["level"], x["text"], "queues", queue_watch.FAIL_PREFIX + x["key"], section="services")
     # Воркеры под supervisor и pm2 (helper workers-setup): не запускается, падает и поднимается
     for x in workers_mod.problems(s, now):
         add("workers", x["level"], x["text"], "workers", workers_mod.MUTE_PREFIX + x["key"], x["since"],
@@ -3741,6 +3748,8 @@ def _sig_all_quiet(s: Server, key: str, sig: set[str], now: datetime) -> bool:
     if key == "queue_stuck":
         muted = set(s.alert_mutes or [])
         return all(queue_watch.MUTE_PREFIX + k in muted for k in sig)
+    if key == "queue_failed":
+        return all(k in queue_watch.failed_muted(s, now) for k in sig)
     if key == "workers":
         return all(k in workers_mod.muted_keys(s, now) for k in sig)
     return False
@@ -5259,6 +5268,13 @@ def _server_conditions(s: Server, now: datetime,
                               {"detail": "; ".join(x["text"] for x in qs[:3])
                                          + (f"; и еще {len(qs) - 3}" if len(qs) > 3 else ""),
                                "sig": [x["key"] for x in qs]})
+    # Всплеск упавших задач: окно в час уже в правиле, выдержка не нужна. sig - какие брокеры
+    if online and queue_watch.helper_brokers(rep):
+        fp = queue_watch.failed_problems(s, now)
+        out["queue_failed"] = (max((x["level"] for x in fp), default=0),
+                               {"detail": "\n".join(x["text"] for x in fp[:3])
+                                          + (f"\nи еще {len(fp) - 3}" if len(fp) > 3 else ""),
+                                "sig": [x["key"] for x in fp]})
     # Воркеры под supervisor и pm2: выдержка уже в правилах (BACKOFF три минуты, три перезапуска
     # за 15 минут), FATAL - сразу. sig - какие воркеры, второй упавший дает свой алерт
     if online and workers_mod.block(rep) is not None:
@@ -5616,7 +5632,7 @@ async def evaluate_servers(
             prev = int(st.get(key, 0))
             if key in ("disk_health", "units", "docker_restarts", "kube_restarts", "mem_leak", "db_health",
                        "web_config", "web_cert", "listen_gone", "docker_risk", "access_risk", "link", "gpu",
-                       "queue_stuck", "workers"):
+                       "queue_stuck", "queue_failed", "workers"):
                 # Тот же уровень, но сломалось НОВОЕ (второй диск при уже развалившемся
                 # RAID, второй упавший юнит): молчать нельзя, хотя уровень не вырос. Что
                 # сломано - ключи в sig.

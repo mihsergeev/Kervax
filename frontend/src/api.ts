@@ -1910,12 +1910,14 @@ export type Server = {
   gpu_sum?: GpuSum | null
   llm?: LlmSvc[] | null
   // очереди, которые растут и не разбираются: {ключ очереди: {age, d0, muted}} (queue_watch.view)
-  queue_watch?: Record<string, { age: number; d0: number; muted: boolean }> | null
+  queue_watch?: Record<string, { age: number; d0: number; muted: boolean; stall?: boolean; wait?: number }> | null
   // очереди в Redis (helper queues-setup) и экземпляры Redis без известного пароля
   queue_brokers?: ServiceInfo[] | null
   queue_skipped?: string[] | null
   // базы, куда helper очередей не вошел (auth), и таблицы очередей больше миллиона строк (big)
   queue_db_skipped?: { why: string; where: string; rows?: number }[] | null
+  // заглушенный всплеск упавших задач: {источник брокера: {perm} | {until}} (ключ мьюта qfail:<источник>)
+  queue_fail_mutes?: Record<string, { perm?: boolean; until?: string }> | null
   // воркеры под supervisor и pm2 (helper workers-setup): демоны с программами
   workers?: WorkerDaemon[] | null
   // демоны, которых helper не смог спросить: где и почему словами
@@ -2079,6 +2081,21 @@ export type QueueStat = {
   ready: number
   unacked?: number
   consumers?: number // потребителей у очереди (агент 2.38)
+  oldest?: number // когда стала готовой самая старая задача, unix-секунды (queues-setup 0.4)
+}
+// Упавшие задачи брокера (queues-setup 0.4): за час и сутки, span - за какое окно известно (у Laravel и
+// Symfony счет по id, история копится с установки), top - чаще падали (среди последней сотни), err -
+// первая строка последней ошибки; base - обычный час, spike - всплеск сейчас (queue_watch.helper_view)
+export type QueueFailed = {
+  h1: number
+  d1: number
+  span: number
+  top: { q: string; job: string; n: number }[]
+  err?: string
+  err_q?: string
+  err_job?: string
+  base?: number | null
+  spike?: boolean
 }
 // Программа под supervisor или pm2: состояние как у демона (RUNNING, FATAL, BACKOFF, EXITED, STOPPED;
 // online, errored, stopped), up - секунд работает, r15/r60 - перезапусков за 15 минут и за час,
@@ -2106,6 +2123,7 @@ export type ServiceInfo = {
   label?: string // Celery, Sidekiq... (очереди от helper'а queues-setup)
   engine?: string // redis | pg | mysql
   where?: string // подпись в карточке: «Redis, контейнер X, db 1», «PostgreSQL, на хосте, база app»
+  failed?: QueueFailed // упавшие задачи; у laravel_failed (таблица failed_jobs) очередей нет, только они
 }
 export type DBStat = {
   engine: string // pg | mysql | clickhouse | redis

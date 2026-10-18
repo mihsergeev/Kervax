@@ -380,10 +380,11 @@ class AlertSnoozeIn(BaseModel):
     # web_5xx:<ключ лога> - 5xx одного лога (домена), остальные логи ноды алертят;
     # unit:<юнит> - один упавший юнит systemd, остальные алертят;
     # qstuck:<ключ очереди> - одна очередь (ход и порог глубины);
+    # qfail:<источник брокера> - упавшие задачи одного брокера очередей;
     # worker:<ключ воркера> - один воркер под supervisor или pm2
     kind: str = Field(min_length=1, max_length=480,
                       pattern=r"^(?:[a-z_]+(?:@[1-3])?|web_5xx:[^\x00-\x1f]{1,220}|unit:[A-Za-z0-9@._:\\-]{1,200}"
-                              r"|qstuck:[^\x00-\x1f]{1,470}|worker:[^\x00-\x1f]{1,470})$")
+                              r"|qstuck:[^\x00-\x1f]{1,470}|qfail:[^\x00-\x1f]{1,470}|worker:[^\x00-\x1f]{1,470})$")
     hours: float = Field(ge=0, le=24 * 30)
 
 
@@ -1435,9 +1436,11 @@ class ServerOut(BaseModel):
     gpu_sum: dict | None = None
     # LLM-сервисы с обычными задержками (gpu.llm_view)
     llm: list[dict] | None = None
-    # очереди, которые растут и не разбираются: {ключ очереди: {"age", "d0", "muted"}} (queue_watch.view)
+    # очереди, которые растут и не разбираются или стоят: {ключ очереди: {"age", "d0", "muted", "stall",
+    # "wait"}} (queue_watch.view)
     queue_watch: dict | None = None
-    # очереди от helper'а queues-setup (Redis, таблицы баз): брокеры как у RabbitMQ, с подписью "where"
+    # очереди от helper'а queues-setup (Redis, таблицы баз): брокеры как у RabbitMQ, с подписью "where" и
+    # упавшими задачами "failed" (queue_watch.helper_view)
     queue_brokers: list[dict] | None = None
     # экземпляры Redis, пароль которых helper не нашел
     queue_skipped: list[str] | None = None
@@ -1445,6 +1448,8 @@ class ServerOut(BaseModel):
     queue_db_skipped: list[dict] | None = None
     # заглушенные очереди: {ключ: {"perm": true} | {"until": iso}} (queue_watch.mute_view)
     queue_mutes: dict | None = None
+    # заглушенный всплеск упавших задач брокеров: {источник брокера: {"perm": true} | {"until": iso}}
+    queue_fail_mutes: dict | None = None
     # воркеры под supervisor и pm2: демоны с программами, беда и мьют у каждой (workers.view)
     workers: list[dict] | None = None
     # демоны, которых helper workers-setup не смог спросить: [{where, why}]

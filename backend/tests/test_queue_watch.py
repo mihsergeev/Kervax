@@ -98,7 +98,7 @@ def test_problems_text_skip_and_mute():
     ps = qw.problems(s, NOW)
     assert [p["text"] for p in ps] == [f"очередь mail ({SRC}) растет 40 мин и не разбирается: 0 -> 2 000 сообщений"]
     assert ps[0]["since"].startswith("2026-10-18T11:20")
-    assert qw.view(s, NOW) == {f"{SRC}|//mail": {"age": 2400, "d0": 0, "muted": False}}
+    assert qw.view(s, NOW) == {f"{SRC}|//mail": {"age": 2400, "d0": 0, "muted": False, "stall": False, "wait": 0}}
     # без потребителей (агент 2.38) - так и сказано
     rep["services"][0]["queues"][0]["consumers"] = 0
     assert "нет ни одного потребителя" in qw.problems(_srv({"qwatch": st}, rep), NOW)[0]["text"]
@@ -241,7 +241,7 @@ def test_snooze_accepts_a_queue_key():
 def test_helper_script():
     from pathlib import Path
     src = (Path(__file__).resolve().parents[2] / "agent" / "queues-setup.sh").read_text(encoding="utf-8")
-    assert "KERVAX_SETUP_VERSION=0.3" in src and "/bin/sh -c" in src and 'KERVAX_SETUP_WHEN="' in src
+    assert "KERVAX_SETUP_VERSION=0.4" in src and "/bin/sh -c" in src and 'KERVAX_SETUP_WHEN="' in src
     assert "pgrep -x postgres" in src and "pgrep -x mysqld" in src
     assert "REDISCLI_AUTH" in src and "\r" not in src
     # пароль только через stdin или окружение, не в командной строке
@@ -250,3 +250,127 @@ def test_helper_script():
     # в базе только чтение и короткие запросы
     assert "default_transaction_read_only=on" in src and "statement_timeout=5000" in src
     assert "set session transaction read only" in src and "max_execution_time" in src
+    # 0.4: самая старая задача и упавшие; обратный слэш в JSON удваивается так, что mawk его не теряет
+    assert "enqueued_at" in src and "ZREVRANGEBYSCORE" in src and "failed_jobs" in src and "FAIL_EVERY=270" in src
+    assert '_jn = split(s, _jp, "\\\\")' in src and 'gsub(/\\\\/, "\\\\\\\\", s)' not in src
+    # mysql без --raw удваивает обратные слэши сам
+    assert "-N -B -r --force" in src
+    # секреты в строке ошибки прячутся
+    assert "function mask(" in src and '"***"' in src
+
+
+# ---- 0.4: очередь стоит (самая старая задача), гистерезис, упавшие задачи ----
+
+def _old_rep(depth, oldest):
+    return {"mem_total": 8 * 2**30, "mem_used": 2**30, "clock_unix": int(NOW.timestamp()),
+            "extras": {"queues": {"v": 1, "ts": 1, "brokers": [
+                {"system": "sidekiq", "where": "container app-redis", "db": 0, "ns": "", "total": 1,
+                 "queues": [{"name": "mailers", "ready": depth, "oldest": oldest}]}]}}}
+
+
+def test_a_queue_that_stands_still():
+    key = "контейнер app-redis, Sidekiq|//mailers"
+    t0 = int((NOW - timedelta(hours=2)).timestamp())
+    # 300 задач никто не берет: глубина не меняется, самая старая та же - правила роста молчат
+    st: dict = {}
+    for i in range(41):
+        st = qw.update(st, _old_rep(300, t0), NOW - timedelta(minutes=40 - i))
+    e = st[key]
+    assert e["oc"] == t0 and e["ocs"] == int((NOW - timedelta(minutes=40)).timestamp())
+    assert qw.stuck(e, 300, int(NOW.timestamp())) == 0
+    assert qw.stalled(e, 300, int(NOW.timestamp())) == 7200
+    p = qw.problems(_srv(state={"qwatch": st}, rep=_old_rep(300, t0)), NOW)
+    assert p[0]["text"] == ("очередь mailers (контейнер app-redis, Sidekiq) стоит: самая старая задача ждет 2 ч 0 мин, "
+                            "в очереди 300") and p[0]["stall"] is True
+    assert qw.view(_srv(state={"qwatch": st}, rep=_old_rep(300, t0)), NOW)[key]["wait"] == 7200
+    # очередь движется: самая старая каждый раз другая (воркер забирает по одной, кладут новые)
+    st = {}
+    for i in range(41):
+        st = qw.update(st, _old_rep(300, t0 + 60 * i), NOW - timedelta(minutes=40 - i))
+    assert qw.stalled(st[key], 300, int(NOW.timestamp())) == 0
+    # десяток задач - не повод, даже если стоят
+    st = {}
+    for i in range(41):
+        st = qw.update(st, _old_rep(12, t0), NOW - timedelta(minutes=40 - i))
+    assert qw.stalled(st[key], 12, int(NOW.timestamp())) == 0
+    # ждет меньше часа - рано
+    t1 = int((NOW - timedelta(minutes=50)).timestamp())
+    st = {}
+    for i in range(41):
+        st = qw.update(st, _old_rep(300, t1), NOW - timedelta(minutes=40 - i))
+    assert qw.stalled(st[key], 300, int(NOW.timestamp())) == 0
+
+
+def test_hysteresis_of_the_minimum_depth():
+    st, _a = _run([5 * i for i in range(41)])
+    e = st[f"{SRC}|//mail"]
+    ts = int(NOW.timestamp())
+    # алерт ушел при 200; в очереди 90 - еще не отбой (без алерта такая очередь не судится), 40 - отбой
+    assert qw.stuck(e, 90, ts) == 0 and qw.stuck(e, 90, ts, held=True) == 2400
+    assert qw.stuck(e, 40, ts, held=True) == 0
+    # held берется из того, о чем алерт уже ушел (queue_stuck_sig)
+    s = _srv({"qwatch": st, "queue_stuck_sig": [f"{SRC}|//mail"]}, _rep(mail=90))
+    assert [p["name"] for p in qw.problems(s, NOW)] == ["mail"]
+    assert qw.problems(_srv({"qwatch": st}, _rep(mail=90)), NOW) == []
+
+
+def _fail_rep(h1, d1, span=86400, system="sidekiq", **kw):
+    b = {"system": system, "where": "container app-redis", "db": 0, "ns": "", "total": 1,
+         "queues": [{"name": "default", "ready": 0}],
+         "failed": {"h1": h1, "d1": d1, "span": span,
+                    "top": [{"q": "mailers", "job": "MailerJob", "n": 40}, {"q": "default", "job": "", "n": 2}],
+                    "err": "Net::SMTPAuthenticationError: 535 password=***", "err_q": "mailers", "err_job": "MailerJob"}}
+    b.update(kw)
+    return {"mem_total": 8 * 2**30, "mem_used": 2**30, "clock_unix": int(NOW.timestamp()),
+            "extras": {"queues": {"v": 1, "ts": 1, "brokers": [b]}}}
+
+
+def test_spike_of_failed_jobs():
+    # обычно ~2 в час, за последний час 300 - всплеск
+    f = qw.helper_brokers(_fail_rep(300, 346))[0]["failed"]
+    assert qw.spike(f) and round(qw._base(f)) == 2
+    # много, но так всегда (около 200 в час) - не всплеск
+    assert not qw.spike(qw.helper_brokers(_fail_rep(300, 300 + 23 * 200))[0]["failed"])
+    # мало - не алерт, даже если обычно ноль
+    assert not qw.spike(qw.helper_brokers(_fail_rep(60, 60))[0]["failed"])
+    # истории меньше четырех часов: обычного не знаем, нужно 500
+    assert not qw.spike(qw.helper_brokers(_fail_rep(300, 300, span=3600))[0]["failed"])
+    assert qw.spike(qw.helper_brokers(_fail_rep(600, 600, span=3600))[0]["failed"])
+    # алерт ушел - отбой, когда за час меньше половины порога
+    f = qw.helper_brokers(_fail_rep(70, 116))[0]["failed"]
+    assert not qw.spike(f) and qw.spike(f, held=True)
+    s = _srv(rep=_fail_rep(300, 346))
+    p = qw.failed_problems(s, NOW)
+    assert p[0]["key"] == "контейнер app-redis, Sidekiq"
+    assert p[0]["text"] == ("всплеск упавших задач (контейнер app-redis, Sidekiq): 300 за час, обычно около 2 в час; "
+                            "чаще всего MailerJob в очереди mailers\n↳ Net::SMTPAuthenticationError: 535 password=***")
+    v = qw.helper_view(s)[0]["failed"]
+    assert v["spike"] is True and v["h1"] == 300 and v["top"][0]["job"] == "MailerJob"
+    # мьют брокера: насовсем и на время
+    s.alert_mutes = [qw.FAIL_PREFIX + "контейнер app-redis, Sidekiq"]
+    assert qw.failed_problems(s, NOW) == []
+    assert qw.mute_view(s, NOW, qw.FAIL_PREFIX) == {"контейнер app-redis, Sidekiq": {"perm": True}}
+    s.alert_mutes = []
+    s.alert_snoozes = {qw.FAIL_PREFIX + "контейнер app-redis, Sidekiq": (NOW + timedelta(days=1)).isoformat()}
+    assert qw.failed_problems(s, NOW) == []
+
+
+def test_failed_jobs_alert_and_home():
+    s = _srv(rep=_fail_rep(300, 346))
+    lv, ctx = collector._server_conditions(s, NOW)["queue_failed"]
+    assert lv == 2 and ctx["sig"] == ["контейнер app-redis, Sidekiq"] and ctx["detail"].startswith("всплеск упавших задач")
+    rows = [r for r in collector.server_problems(s, NOW) if r["kind"] == "queue_failed"]
+    assert len(rows) == 1 and rows[0]["sec"] == "queues" and rows[0]["mute"] == "qfail:контейнер app-redis, Sidekiq"
+    # заглушили после алерта - отбой не шлем
+    s.alert_mutes = [rows[0]["mute"]]
+    assert collector._sig_all_quiet(s, "queue_failed", {"контейнер app-redis, Sidekiq"}, NOW)
+    assert collector._server_conditions(_srv(rep=_fail_rep(3, 20)), NOW)["queue_failed"][0] == 0
+    from app.schemas import AlertSnoozeIn
+    assert AlertSnoozeIn(kind="qfail:контейнер app-redis, Sidekiq", hours=24).kind.startswith("qfail:")
+
+
+def test_laravel_failed_jobs_is_a_broker_of_its_own():
+    rep = _fail_rep(5, 9, span=4000, system="laravel_failed", engine="pg", base="app", table="failed_jobs", queues=[], total=0)
+    b = qw.helper_brokers(rep)[0]
+    assert b["label"] == "Laravel failed_jobs" and b["source"] == "контейнер app-redis, Laravel failed_jobs, база app"
+    assert b["queues"] == [] and b["failed"]["span"] == 4000 and qw.queues(rep) == []
