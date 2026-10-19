@@ -41,6 +41,7 @@ HUNG_MIN = 3600  # висит: не раньше часа
 HUNG_NOBASE = 6 * 3600  # истории нет - только совсем долгое
 DONE_MIN = 3  # законченных копий, чтобы считать задачу короткой
 MAX_AGE = 600  # блок старше 10 минут - helper встал, судить не по чему
+BOGUS_S = 400 * 86400  # копия или длительность дольше - мусор ps, а не задача
 KIND_LABEL = {"cron": "cron", "busybox": "busybox crond", "supercronic": "supercronic"}
 
 
@@ -55,15 +56,35 @@ def block(rep: dict) -> dict | None:
     return b
 
 
+def _sane_age(r: dict, limit: float) -> dict:
+    """Копия старше аптайма ноды не бывает: это etimes ps из procps-ng 4.0.4 у процесса, который
+    родился, пока ps читал /proc (4123168608, "висит 47721 сут"). Такая копия только что началась."""
+    try:
+        age = int(r.get("age") or 0)
+    except (TypeError, ValueError):
+        age = 0
+    return {**r, "age": 0} if age > limit else r
+
+
 def jobs(rep: dict) -> list[dict]:
     """Задачи: как в отчете плюс "source" (где, словами) и "key" (для мьюта)"""
     out = []
+    up = float((rep or {}).get("uptime_seconds") or 0)
+    limit = up + 900 if up > 0 else BOGUS_S
     for j in (block(rep) or {}).get("jobs") or []:
         if not isinstance(j, dict) or not j.get("cmd"):
             continue
         src = where_text(str(j.get("where") or ""))
-        out.append({**j, "source": src, "key": f"{src}|{j['cmd']}",
-                    "run": [r for r in j.get("run") or [] if isinstance(r, dict)]})
+        row = {**j, "source": src, "key": f"{src}|{j['cmd']}",
+               "run": [_sane_age(r, limit) for r in j.get("run") or [] if isinstance(r, dict)]}
+        # тот же мусор, запомненный helper'ом 0.1 как длительность законченной копии: "обычно до
+        # 47721 сут" и предел "висит" в 130 лет на месяц, пока запись не выйдет из кэша
+        try:
+            if int(j.get("max") or 0) > BOGUS_S:
+                row["max"] = 0
+        except (TypeError, ValueError):
+            row["max"] = 0
+        out.append(row)
     return out
 
 

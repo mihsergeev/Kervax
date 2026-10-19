@@ -18,9 +18,14 @@
 #
 # Passwords in command lines (password=, token=, mysql -p..., user:pass@ in URLs, curl -u, Bearer)
 # are masked before anything is written. Read only: nothing is run inside containers.
+#
+# 0.2: ps of procps-ng 4.0.4 (Ubuntu 26.04) prints etimes 4123168608 for a process born while
+# it reads /proc: the CRON fork of a minute job that just started looked 130 years old, the
+# panel said the job hangs, and that age stayed in the cache as the job's usual duration. An
+# etimes past the uptime is a copy that just started; such durations are dropped from the cache.
 set -euo pipefail
 
-KERVAX_SETUP_VERSION=0.1  # MAJOR.MINOR; compared component-wise
+KERVAX_SETUP_VERSION=0.2  # MAJOR.MINOR; compared component-wise
 KERVAX_SETUP_ALWAYS=1     # safe on any node: without a cron daemon it runs one ps and exits
 
 HELPER_DIR=/lib65/kervax
@@ -58,7 +63,9 @@ trap 'rm -rf "$TMPD"' EXIT
 # not one (Debian cron forks "CRON" per job, cronie "crond", busybox and supercronic start the
 # shell directly); a job is the shell under it with all its children --
 ps -e -o pid=,ppid=,etimes=,time=,args= > "$TMPD/ps" 2>/dev/null
-awk -v OFS='\t' '
+# read after ps: no process it listed can be older than this
+UP=$(cut -d. -f1 /proc/uptime 2>/dev/null || echo 0)
+awk -v OFS='\t' -v up="${UP:-0}" '
   function cl(a) { return a ~ /^([^ ]*\/)?(cron|crond|CRON|CROND|supercronic)( |$)/ || a ~ /^([^ ]*\/)?busybox crond( |$)/ }
   function walk(p,   n, k, i) { sum += cpu[p]; cnt++; n = split(kids[p], k, " "); for (i = 1; i <= n; i++) walk(k[i]) }
   function job(m, j, age,   c) {
@@ -67,7 +74,7 @@ awk -v OFS='\t' '
     sub(/^([^ ]*\/)?(ba|da|a)?sh -c /, "", c)
     sum = 0; cnt = 0; walk(j)
     print "J", m, j, age, sum, cnt, c }
-  { p = $1; pp[p] = $2; et[p] = $3; t = $4; a = $0; sub(/^ *[0-9]+ +[0-9]+ +[0-9]+ +[^ ]+ +/, "", a); args[p] = a
+  { p = $1; pp[p] = $2; et[p] = (up > 0 && $3 + 0 > up + 5) ? 0 : $3; t = $4; a = $0; sub(/^ *[0-9]+ +[0-9]+ +[0-9]+ +[^ ]+ +/, "", a); args[p] = a
     d = 0; i = index(t, "-"); if (i) { d = substr(t, 1, i - 1); t = substr(t, i + 1) }
     n = split(t, tt, ":"); s = 0; for (i = 1; i <= n; i++) s = s * 60 + tt[i]; cpu[p] = s + d * 86400
     kids[$2] = kids[$2] " " p; iscl[p] = cl(a); ord[++np] = p }
@@ -298,7 +305,10 @@ awk -F'\t' -v OFS='\t' -v now="$NOW" -v jran="$JRAN" -v maxrun="$MAX_RUN" -v nc=
     if ($1 == "C") { cts = $2; ccur = $3 }
     else if ($1 == "L") { last[$2] = $3; bk[$2] = $4; lk[$2] = 1 }
     else if ($1 == "X") xb = $2
-    else if ($1 == "D") { dur[$2] = $4; dseen[$2] = $3 }
+    else if ($1 == "D") {
+      # a duration past 400 days is the etimes of procps 4.0.4 for a process just born (0.1 kept it)
+      n = split($4, da, ","); d = ""; for (m = 1; m <= n; m++) if (da[m] + 0 <= 34560000) d = d (d == "" ? "" : ",") da[m]
+      if (d != "") { dur[$2] = d; dseen[$2] = $3 } }
     else if ($1 == "R") { pr[$2 SUBSEP $3] = $4 SUBSEP $5; npr++; prk[npr] = $2 SUBSEP $3 }
     next }
   t == "rows" && $1 == "M" { mk[$2] = $3; mw[$2] = $4; mmta[$2] = $5; nm++; mo[nm] = $2; next }

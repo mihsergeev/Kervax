@@ -4,6 +4,19 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.4.284] - 2026-10-19
+
+helper cron-setup 0.2 (ставит плейбук helper'ов).
+
+### Fixed
+- Ложный алерт "крон висит 47721 сут 20 ч" у минутной задачи с отбоем через минуту. ps из
+  procps-ng 4.0.4 (Ubuntu 26.04) печатает etimes 4123168608 у процесса, который родился, пока ps
+  читал /proc: CRON только что запущенной копии выглядел 130-летним. Та же цифра оседала в кэше
+  helper'а как длительность законченной копии, и месяц задача показывала "обычно до 47721 сут", а
+  предел "висит" у нее был в 130 лет. Панель считает копию старше аптайма ноды только что
+  начавшейся и не верит длительностям дольше 400 дней; cron-setup 0.2 сверяет etimes с
+  /proc/uptime и выбрасывает такие длительности из кэша.
+
 ## [1.4.283] - 2026-10-19
 
 helper logerr-setup 0.4 (ставит плейбук helper'ов).

@@ -72,6 +72,26 @@ def test_hung():
     assert t == (1, "наслаивается: идут 2 копии, самая старая 2 ч 0 мин, обычно меньше минуты")
 
 
+def test_bogus_ps_age_is_not_a_hang():
+    """ps из procps-ng 4.0.4 печатает etimes 4123168608 у процесса, который родился, пока ps читал
+    /proc: минутный крон "висел 47721 сут", и та же цифра оседала в кэше как обычная длительность."""
+    bogus = 4123168608
+    rep = _rep([_job("/lib65/kervax/kervax-backup-helper refresh", [bogus], max=20, done=10)])
+    rep["uptime_seconds"] = 576468
+    assert cw.problems(_srv(rep), NOW) == []
+    j = cw.jobs(rep)[0]
+    assert j["run"][0]["age"] == 0
+    # длительность из кэша helper'а 0.1: "обычно до 47721 сут" и предел в 130 лет - выбрасываем
+    rep = _rep([_job("refresh", [3700], max=bogus, done=10)])
+    rep["uptime_seconds"] = 576468
+    j = cw.jobs(rep)[0]
+    assert j["max"] == 0 and cw.usual(j) == (cw.HUNG_MIN, 1)
+    assert cw.trouble(j) == (1, "висит 1 ч 1 мин, обычно меньше минуты")
+    # без аптайма в отчете - только явный мусор, настоящая долгая копия остается
+    rep = _rep([_job("long", [10 * 86400], max=3600, done=4)])
+    assert cw.jobs(rep)[0]["run"][0]["age"] == 10 * 86400
+
+
 def test_problems_text_mute_and_home():
     rep = _rep([_job("/lib65/scripts/sync.sh"), _job("php /app/yii cron/min5", [3600, 3540, 3480, 3420, 3360],
                                                    where="container app-cron-1", sched="*/5 * * * *")])
@@ -141,7 +161,9 @@ def test_alert_condition():
 
 def test_helper_script():
     src = (Path(__file__).resolve().parents[2] / "agent" / "cron-setup.sh").read_text(encoding="utf-8")
-    assert "KERVAX_SETUP_VERSION=0.1" in src and "KERVAX_SETUP_ALWAYS=1" in src and "\r" not in src
+    assert "KERVAX_SETUP_VERSION=0.2" in src and "KERVAX_SETUP_ALWAYS=1" in src and "\r" not in src
+    # 0.2: etimes дольше аптайма (procps-ng 4.0.4) - копия только что началась; мусор из кэша выбрасывается
+    assert 'UP=$(cut -d. -f1 /proc/uptime' in src and "$3 + 0 > up + 5) ? 0 : $3" in src and "34560000" in src
     # обратный слэш в команде удваивается так, что mawk его не теряет: иначе отчет не JSON
     assert '_jn = split(s, _jp, "\\\\")' in src
     # пароли в командах маскируются: password=, mysql -p, user:pass@ в адресе, curl -u, Bearer
