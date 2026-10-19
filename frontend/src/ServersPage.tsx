@@ -63,7 +63,7 @@ import { CountryFlag } from './CountryFlag'
 import { currentLang, useI18n } from './i18n'
 import { useUrlCard, useUrlParam } from './deeplink'
 import { CardNav, FreshChip, OvAreas, OvRows, secInfoOf, type SecDef, type SecInfo, type SecItem } from './cardLayout'
-import { fmtBytes, rateUnits, timeUnits } from './units'
+import { fmtBytes, fmtDur, rateUnits, timeUnits } from './units'
 import {
   MuteChip,
   MutesBanner,
@@ -3117,6 +3117,23 @@ function PressureCard({ server: s }: { server: Server }) {
   const pc = (v: number) => `${v.toFixed(v > 0 && v < 10 ? 1 : 0)}%`
   const fdPct = r?.fds && r.fds.max > 0 ? (r.fds.used / r.fds.max) * 100 : null
   const ds = r?.dstate
+  // красное - только зависшие (агент 2.40, как их видит ядро) и рост счетчика hung_task. Число в D
+  // под тяжелым чтением держится сутками, но процессы в нем каждую секунду другие
+  const stuck = ds?.stuck ?? []
+  const hungNew = ds?.hung_new ?? 0
+  const dsSub = !ds
+    ? ''
+    : stuck.length
+      ? stuck.slice(0, 3).map((x) => `${x.comm} (PID ${x.pid}) ${fmtDur(x.sec)}`).join(', ') +
+        (stuck.length > 3 ? `, ${t('и еще {n}', { n: stuck.length - 3 })}` : '')
+      : hungNew
+        ? t('ядро видит зависшие задачи: {n} за 10 мин', { n: hungNew })
+        : [
+            (ds.top ?? []).map((x) => `${x.c} (${x.n})`).join(', '),
+            ds.stuck && ds.n > 0 ? t('сменяются, зависших нет') : '',
+          ]
+            .filter(Boolean)
+            .join(' · ') || t('ждут диск или сеть')
   return (
     <div className="chart-card net-card net-card-wide" id="mcard-pressure">
       <div className="net-head">
@@ -3150,8 +3167,9 @@ function PressureCard({ server: s }: { server: Server }) {
           <NetTile
             label={t('В D-state')}
             value={String(ds.n)}
-            sub={(ds.top?.length ?? 0) > 0 ? ds.top!.map((x) => `${x.c} (${x.n})`).join(', ') : t('ждут диск или сеть')}
-            tone={ds.n >= 5 ? 'bad' : undefined}
+            sub={dsSub}
+            tone={stuck.length || hungNew ? 'bad' : undefined}
+            title={stuck.map((x) => `${x.comm} PID ${x.pid}${x.wchan ? `, wchan ${x.wchan}` : ''}`).join('\n') || undefined}
           />
         )}
         {r?.fds && fdPct != null && (
@@ -3165,7 +3183,7 @@ function PressureCard({ server: s }: { server: Server }) {
       </div>
       {psi && (
         <div className="net-foot">
-          {t('Процент - доля времени за минуту, когда хоть один процесс ждал ресурс, "все стоят" - когда ждали все сразу. D-state - процессы, которые ждут диск или сеть и не прерываются.')}
+          {t('Процент - доля времени за минуту, когда хоть один процесс ждал ресурс. "Все стоят" ядро считает по каждому CPU отдельно (его процессы ждут ресурс, и выполнять на нем нечего), поэтому на многоядерном сервере это не значит, что стоял весь сервер. D-state - процессы, которые ждут диск или сеть и не прерываются, зависший - тот, что не просыпается дольше 2 минут.')}
         </div>
       )}
     </div>
