@@ -84,6 +84,7 @@ from app.models import (
     ProbeRequest,
     RequestStat,
     Server,
+    ServerEvent,
     ServerMetric,
     ServerTraffic,
     ServerUsage,
@@ -4380,13 +4381,72 @@ def probe_only(paths: list | None) -> bool:
     return bool(items) and all(_PROBE_PATH.search(str(x["p"])) for x in items)
 
 
+# Выкладка. Пока docker пересоздает контейнер, nginx перед ним отдает 502: имя не
+# резолвится, порт еще не слушают, старый контейнер рвет соединения. Это секунды, и чинить
+# после них нечего. Живой случай 19.10.2026: две выкладки панели за восемь минут дали три
+# минуты с ошибками (одна пачка в 15 секунд легла на две минуты helper'а), и
+# _WEB_ERR_MIN_MINUTES не спас - ушел алерт "1.6% запросов закончились ошибкой". Минута не
+# считается сбоем, если ее 5xx почти все - отказы связи с контейнером, который выкатили в
+# эти минуты: в хронологии сервера новый образ, "перезапущен или пересоздан", новый или
+# удаленный контейнер. Упал и поднялся сам (crash) - не выкладка, такие минуты считаются,
+# а падения подряд ловят docker_loop и docker_restarts.
+_RESTART_KINDS = frozenset({"refused", "resolve", "reset", "closed", "nofile", "unreach", "ctimeout", "nolive"})
+_DEPLOY_KINDS = ("image", "restart", "new", "gone")
+_DEPLOY_NEAR = timedelta(minutes=3)
+_DEPLOY_SHARE = 0.8
+# адрес контейнера в сети docker: после пересоздания его уже нет в docker ps, и helper не
+# может назвать контейнер по адресу
+_DOCKER_IP = re.compile(r"(10|172\.(1[6-9]|2\d|3[01])|192\.168)(\.\d{1,3}){2,3}(:\d+)?")
+
+
+def _upstream_is(it: dict, obj: str) -> bool:
+    """Upstream из error-лога - этот контейнер? По имени, которое дал helper, или по имени из
+    конфига nginx: backend - это и backend, и kervax-backend-1 (compose: проект-сервис-номер).
+    Адрес сети docker без имени - контейнер, которого уже нет, считаем выкаченным."""
+    c = str(it.get("c") or "")
+    if c:
+        return c == obj
+    u = str(it.get("u") or "")
+    if _DOCKER_IP.fullmatch(u):
+        return True
+    host = u.split(":", 1)[0]
+    return bool(host) and (host == obj or re.fullmatch(rf".+[-_]{re.escape(host)}[-_]\d+", obj) is not None)
+
+
+def restart_blip(ups, e5, ts: datetime, deploys: list[tuple[datetime, str]] | None) -> bool:
+    """5xx минуты - это выкладка: не меньше 80% из них - отказы связи с контейнером, который
+    выкатили в пределах трех минут от нее (deploys - события хронологии: время, контейнер)."""
+    if not deploys or not isinstance(ups, list) or not e5:
+        return False
+    near = [obj for t, obj in deploys if obj and abs(t - _aware(ts)) <= _DEPLOY_NEAR]
+    if not near:
+        return False
+    n = sum(int(it.get("n") or 0) for it in ups
+            if isinstance(it, dict) and it.get("k") in _RESTART_KINDS and any(_upstream_is(it, o) for o in near))
+    return n >= _DEPLOY_SHARE * int(e5)
+
+
+async def web_deploys(session: AsyncSession, since: datetime,
+                      server_id: int | None = None) -> dict[int, list[tuple[datetime, str]]]:
+    """Выкладки контейнеров с since минус три минуты: {server_id: [(время, контейнер)]}."""
+    q = select(ServerEvent.server_id, ServerEvent.ts, ServerEvent.obj).where(
+        ServerEvent.ts >= since - _DEPLOY_NEAR, ServerEvent.cat == "deploy", ServerEvent.kind.in_(_DEPLOY_KINDS))
+    if server_id is not None:
+        q = q.where(ServerEvent.server_id == server_id)
+    out: dict[int, list[tuple[datetime, str]]] = {}
+    for sid, ts, obj in await session.execute(q):
+        out.setdefault(sid, []).append((_aware(ts), obj or ""))
+    return out
+
+
 async def web_error_window(session: AsyncSession,
                            now: datetime) -> dict[int, tuple[float, float, int, dict, float]]:
     """{server_id: (запросов, ошибок 5xx, минут с данными, {ключ лога: {минута: ошибок}},
-    ошибок на пробах сканеров)} за последние 15 минут. Два запроса на тик, а не по запросу
-    на ноду. Разбивка по логам - чтобы вычесть заглушенные и посчитать минуты с ошибками
-    без них. Минуты, где ошибки только на пробах (probe_only), в разбивку не попадают, их
-    ошибки идут отдельной суммой: ее вычитают из общего числа так же, как заглушенные."""
+    ошибок не в счет)} за последние 15 минут. Три запроса на тик, а не по запросу на ноду.
+    Разбивка по логам - чтобы вычесть заглушенные и посчитать минуты с ошибками без них.
+    Минуты, где ошибки только на пробах (probe_only) или от выкладки (restart_blip), в
+    разбивку не попадают, их ошибки идут отдельной суммой: ее вычитают из общего числа так
+    же, как заглушенные."""
     since = now - _WEB_ERR_WINDOW
     rows = await session.execute(
         select(ServerMetric.server_id, func.sum(ServerMetric.web_rpm),
@@ -4394,17 +4454,19 @@ async def web_error_window(session: AsyncSession,
         .where(ServerMetric.ts >= since, ServerMetric.web_5xx.is_not(None))
         .group_by(ServerMetric.server_id)
     )
+    deploys = await web_deploys(session, since)
     # Минуты с ошибками - по минутам helper'а (src_ts), а не по точкам истории: одна и та
     # же минута helper'а может попасть в две точки подряд.
     per: dict[int, dict[str, dict[int, int]]] = {}
     probes: dict[int, dict[tuple[str, int], int]] = {}
-    for sid, label, log, src, e5, paths in await session.execute(
+    for sid, label, log, src, e5, paths, ups, ts in await session.execute(
         select(WebErrorSample.server_id, WebErrorSample.label, WebErrorSample.log,
-               WebErrorSample.src_ts, WebErrorSample.e5, WebErrorSample.paths)
+               WebErrorSample.src_ts, WebErrorSample.e5, WebErrorSample.paths, WebErrorSample.ups,
+               WebErrorSample.ts)
         .where(WebErrorSample.ts >= since, WebErrorSample.e5 > 0)
     ):
         key = web_label_key(label or log)
-        if probe_only(paths):
+        if probe_only(paths) or restart_blip(ups, e5, ts, deploys.get(sid)):
             probes.setdefault(sid, {})[(key, int(src))] = int(e5 or 0)
             continue
         per.setdefault(sid, {}).setdefault(key, {})[int(src)] = int(e5 or 0)
@@ -4556,6 +4618,7 @@ async def web_error_where(session: AsyncSession, server_id: int, now: datetime,
         select(WebErrorSample).where(WebErrorSample.server_id == server_id,
                                      WebErrorSample.ts >= now - _WEB_ERR_WINDOW)
     ))
+    deploys = (await web_deploys(session, now - _WEB_ERR_WINDOW, server_id)).get(server_id)
     by_log: dict[str, list] = {}
     codes: dict[str, int] = {}
     paths: dict[str, int] = {}
@@ -4566,6 +4629,8 @@ async def web_error_where(session: AsyncSession, server_id: int, now: datetime,
             continue  # заглушенный лог: про него не пишем, даже если он и шумит
         if probe_only(r.paths):
             continue  # минута, где 500 только сканерам: в алерт она не входит
+        if restart_blip(getattr(r, "ups", None), r.e5, r.ts, deploys):
+            continue  # секунды выкладки контейнера: тоже не сбой
         acc = by_log.setdefault(web_label_key(r.label or r.log), [r.label, 0])
         acc[0] = r.label or acc[0]  # подпись - самая свежая
         acc[1] += int(r.e5 or 0)
@@ -4837,7 +4902,7 @@ def web_5xx_now(s: Server, web_err: tuple[float, float, int, dict, float] | None
     muted = web_muted_keys(s, now)
     if muted:
         errs = max(0.0, errs - sum(sum(m.values()) for k, m in per_log.items() if k in muted))
-    # ответы сканерам на /.env, /@fs/ и подобное: сайт от них не сломан
+    # ответы сканерам на /.env, /@fs/ и подобное и секунды выкладки контейнера: сайт не сломан
     errs = max(0.0, errs - probe_errs)
     err_minutes = len({src for k, m in per_log.items() if k not in muted for src in m})
     return web_error_level(total, errs, points, thr5, err_minutes), errs, total, thr5
