@@ -3464,7 +3464,7 @@ def server_problems(s: Server, now: datetime, pod_names: dict[str, str] | None =
         ref = float(rep.get("clock_unix") or 0) or now.timestamp()
         muted = units_muted(s, now)
         for u in ub.get("units") or []:
-            if not isinstance(u, dict) or not u.get("unit") or u["unit"] in muted:
+            if not isinstance(u, dict) or not u.get("unit") or u["unit"] in muted or benign_unit(str(u["unit"])):
                 continue
             if ref - float(u.get("since") or 0) < _UNIT_MIN_AGE:
                 continue
@@ -3764,6 +3764,20 @@ def own_helper_unit(name: str) -> bool:
     return bool(_OWN_HELPER_UNIT.fullmatch(name))
 
 
+# Служебные таймеры дистрибутива, упавший прогон которых ни на что не влияет и никто на него не
+# реагирует: метаданные прошивок fwupd (на виртуалке и за закрытым CDN падает всегда), новости для
+# motd, кэш ESM. fwupd-refresh приходил алертом "упал юнит" с ноды, откуда не открывается
+# cdn.fwupd.org. Не алертят и в "Что сломано" не попадают; в разделе юнитов видны как есть.
+_BENIGN_UNITS = frozenset({
+    "fwupd-refresh.service", "motd-news.service", "apt-news.service", "esm-cache.service",
+    "update-notifier-download.service", "update-notifier-motd.service",
+})
+
+
+def benign_unit(name: str) -> bool:
+    return name in _BENIGN_UNITS
+
+
 # Юниты бэкапа: про упавший прогон уже говорят алерты бэкапа ("последний бэкап завершился с
 # ошибкой", свои бэкапы ноды), второй алерт по тому же прогону не нужен. Основной сервис - тот
 # же список, по которому его ищет агент.
@@ -3842,7 +3856,7 @@ def _sig_all_quiet(s: Server, key: str, sig: set[str], now: datetime) -> bool:
     helper): уровень упал не потому, что стихло, и отбой слать нельзя."""
     if key == "units":
         muted = units_muted(s, now)
-        return all(own_helper_unit(u) or u in muted for u in sig)
+        return all(own_helper_unit(u) or benign_unit(u) or u in muted for u in sig)
     if key in ("docker_restarts", "kube_restarts"):
         muted = srv_restarts.muted_keys(s)
         return all(podnames.muted(muted, k) for k in sig)
@@ -3876,7 +3890,7 @@ def units_hold(s: Server, bad: list[dict], now: datetime, muted: set[str]) -> di
     prev = st.get("units_hold") if isinstance(st.get("units_hold"), dict) else {}
     out: dict[str, list] = {u["unit"]: [None, unit_level(u)] for u in bad}
     for name in sorted(set(st.get("units_sig") or []) - out.keys()):
-        if name in muted or own_helper_unit(name):
+        if name in muted or own_helper_unit(name) or benign_unit(name):
             continue
         p = prev.get(name)
         p = p if isinstance(p, list) and len(p) == 2 else [None, 1]
@@ -5128,7 +5142,7 @@ def _server_conditions(s: Server, now: datetime,
         covered = backup_units(s, rep)
         bad = [u for u in ub.get("units") or []
                if isinstance(u, dict) and u.get("unit") and u["unit"] not in muted_u
-               and not own_helper_unit(str(u["unit"])) and u["unit"] not in covered
+               and not own_helper_unit(str(u["unit"])) and not benign_unit(str(u["unit"])) and u["unit"] not in covered
                and ref - float(u.get("since") or 0) >= _UNIT_MIN_AGE]
         hold = units_hold(s, bad, now, muted_u)
         u_lvl = max((h[1] for h in hold.values()), default=0)

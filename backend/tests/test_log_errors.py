@@ -184,7 +184,10 @@ def test_spike_must_hold():
     assert le.spike(_src("container a", 400, 400 + 23 * 10, hb=[0, 0, 100, 100, 100, 100])) == 1
     # три корзины из шести - еще нет
     assert le.spike(_src("container a", 400, 400 + 23 * 10, hb=[0, 0, 0, 130, 130, 140])) == 0
-    # объявленный алерт держится без выдержки, отбой по половине порогов
-    assert le.spike(burst, held=True) == 1
+    # объявленный алерт держится, пока выше половины порога хотя бы три корзины: две минутные
+    # выкладки панели за час его больше не продлевают
+    assert le.spike(burst, held=True) == 0
+    assert le.spike(_src("container a", 318, 318 + 23 * 69, hb=[0, 189, 0, 0, 129, 0]), held=True) == 0
+    assert le.spike(_src("container a", 180, 180 + 23 * 10, hb=[0, 0, 0, 60, 60, 60]), held=True) == 1
     # helper до 0.3 корзин не шлет - по часу, как раньше
     assert le.spike(_src("container a", 400, 400 + 23 * 10)) == 1

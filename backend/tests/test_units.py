@@ -393,3 +393,40 @@ async def test_backup_unit_and_new_server_stay_quiet(tmp_path, monkeypatch):
     await collector.evaluate_servers(factory, cfg, now)
     assert len(sent) == 1 and "certbot.service" in sent[0]
     await engine.dispose()
+
+
+async def test_benign_distro_timers_do_not_alert(tmp_path, monkeypatch):
+    """fwupd-refresh на ноде, откуда не открывается cdn.fwupd.org, падает на каждом прогоне, и
+    никто на это не реагирует: ни алерта, ни строки в "Что сломано"; алерт, объявленный по нему
+    раньше, гасится без отбоя."""
+    from app import collector
+    from app.config import Settings
+    from app.db import Base, create_engine_and_factory
+    from app.models import Server
+
+    engine, factory = create_engine_and_factory(f"sqlite+aiosqlite:///{(tmp_path / 'b.db').as_posix()}")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    now = datetime.now(timezone.utc)
+    fw = dict(CERTBOT, unit="fwupd-refresh.service", result="exit-code", status=1)
+    ts = int(now.timestamp())
+    rep = {"clock_unix": ts, "uptime_seconds": 100000,
+           "extras": {"units": {"v": 1, "ts": ts - 30, "units": [dict(fw, since=ts - 600)], "fix": True}}}
+    async with factory() as s:
+        s.add(Server(name="node", token_hash="x", enabled=True, backup_not_required=True, last_seen=now,
+                     cpu_alert_percent=0, mem_alert_percent=0, last_report=rep,
+                     alert_state={"units": 1, "units_sig": ["fwupd-refresh.service"], "units_hold": {}}))
+        await s.commit()
+    sent: list[str] = []
+
+    async def fake_send(cfg, text, parse_mode=None):
+        sent.append(text)
+        return []
+
+    monkeypatch.setattr("app.alerts.send_alert", fake_send)
+    await collector.evaluate_servers(factory, Settings(alert_webhook="http://hook"), now)
+    async with factory() as s:
+        srv = (await s.execute(select(Server))).scalars().one()
+    assert sent == [] and int(srv.alert_state.get("units", 0)) == 0
+    assert not any(p["kind"] == "units" for p in collector.server_problems(srv, now))
+    await engine.dispose()

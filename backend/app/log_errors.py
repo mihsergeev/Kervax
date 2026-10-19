@@ -49,6 +49,10 @@ LOG_HOT_MIN = 1000
 BASE_SPAN = 4 * 3600  # обычный час считаем, когда истории хотя бы столько
 MAX_AGE = 600  # блок старше 10 минут - helper встал, судить не по чему
 SUSTAIN = 4  # из шести 10-минутных корзин последнего часа выше порога - всплеск держится
+# Объявленный алерт держится, пока выше половины порога хотя бы столько корзин. Без этого его
+# держал любой час с ошибками: две минутные выкладки панели за час (по 150 строк connection refused
+# в ее caddy) продлевали алерт, поднятый еще по старому правилу, снова и снова
+SUSTAIN_HELD = 3
 
 
 def block(rep: dict) -> dict | None:
@@ -115,21 +119,23 @@ def spike(src: dict, held: bool = False) -> int:
             return 0
     elif h1 < LOG_X * b * k:
         return 0
-    if not held and not _sustained(src, b):
+    if not _sustained(src, b, held):
         return 0
     if b is None:
         return 1
     return 2 if h1 >= LOG_HOT * b and h1 >= LOG_HOT_MIN else 1
 
 
-def _sustained(src: dict, b: float | None) -> bool:
-    """Держится ли всплеск: из корзин последнего часа выше порога хотя бы SUSTAIN. Helper до 0.3
-    корзин не шлет - судим по часу, как раньше"""
+def _sustained(src: dict, b: float | None, held: bool = False) -> bool:
+    """Держится ли всплеск: из корзин последнего часа выше порога хотя бы SUSTAIN, у объявленного -
+    выше половины порога хотя бы SUSTAIN_HELD. Helper до 0.3 корзин не шлет - судим по часу, как
+    раньше"""
     hb = src.get("hb")
     if not isinstance(hb, list) or not hb:
         return True
-    need = max(LOG_MIN, LOG_NOBASE if b is None else LOG_X * b) / 6
-    return sum(1 for v in hb if isinstance(v, (int, float)) and v >= need) >= SUSTAIN
+    need = max(LOG_MIN, LOG_NOBASE if b is None else LOG_X * b) * (0.5 if held else 1) / 6
+    hot = sum(1 for v in hb if isinstance(v, (int, float)) and v >= need)
+    return hot >= (SUSTAIN_HELD if held else SUSTAIN)
 
 
 def _n(v: int | float) -> str:
