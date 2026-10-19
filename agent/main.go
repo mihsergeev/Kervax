@@ -44,7 +44,7 @@ import (
 	"time"
 )
 
-const version = "2.40"
+const version = "2.41"
 
 // Публичный ключ для проверки подписи релизов агента (Ed25519, base64).
 // ПУСТО по умолчанию → самообновление ВЫКЛЮЧЕНО (агент никогда не заменяет себя).
@@ -685,9 +685,22 @@ type dockerContainer struct {
 	Caps    []string `json:"caps,omitempty"` // только из hostCaps, без префикса CAP_
 	PidHost bool     `json:"pid_host,omitempty"`
 	RO      []string `json:"ro,omitempty"`
+	// Откуда запущен (метки compose) и тома на запись: по ним панель пишет шаги "как исправить"
+	// с готовыми путями (cd в папку проекта, имя сервиса, что копировать перед обновлением), без
+	// поиска по меткам на самой ноде. Пустой объект - контейнер запущен не из compose
+	Compose *dockerCompose `json:"compose,omitempty"`
+	Vols    []string       `json:"vols,omitempty"` // каталоги named volumes на запись
 	imageID string   // id образа: по нему дата сборки из /images/json
 	ip      string   // IP контейнера для скрейпа метрик; в отчёт НЕ уходит (строчная)
 	id      string   // id контейнера: по нему процесс находит свой контейнер (cpu_groups)
+}
+
+// метки com.docker.compose.* контейнера; files - через запятую, как в метке
+type dockerCompose struct {
+	Project string `json:"project,omitempty"`
+	Service string `json:"service,omitempty"`
+	Dir     string `json:"dir,omitempty"`
+	Files   string `json:"files,omitempty"`
 }
 
 // пропускная способность одного сетевого интерфейса, байт/сек + ошибки/дропы, пакетов/сек
@@ -4718,6 +4731,15 @@ func dockerInspect(cl *http.Client, id string, dc *dockerContainer) {
 		dc.ImgVer = v
 	}
 	dc.Ver = imageVersions(ins.Config.Env)
+	lab := func(k string) string {
+		v := strings.TrimSpace(ins.Config.Labels["com.docker.compose."+k])
+		if len(v) > 512 {
+			return ""
+		}
+		return v
+	}
+	dc.Compose = &dockerCompose{Project: lab("project"), Service: lab("service"),
+		Dir: lab("project.working_dir"), Files: lab("project.config_files")}
 	dc.Restarts = ins.RestartCount
 	dc.Policy = ins.HostConfig.RestartPolicy.Name
 	dc.MaxRetry = ins.HostConfig.RestartPolicy.MaximumRetryCount
@@ -4739,14 +4761,17 @@ func dockerInspect(cl *http.Client, id string, dc *dockerContainer) {
 		dc.OOM = ins.State.OOMKilled
 	}
 	// bind-mount'ы = хост-пути, которые кто-то ОСОЗНАННО прокинул в контейнер, т.е. почти
-	// наверняка данные. Панель сверит их с покрытием бэкапа. Named volumes не шлём: они
-	// лежат в /var/lib/docker/volumes и попадают в бэкап по умолчанию.
+	// наверняка данные. Панель сверит их с покрытием бэкапа. Named volumes в binds не идут: они
+	// лежат в /var/lib/docker/volumes и попадают в бэкап по умолчанию; их каталоги на запись -
+	// отдельно в vols, это что копировать перед обновлением образа.
 	for _, m := range ins.Mounts {
 		if m.Type == "bind" && strings.HasPrefix(m.Source, "/") {
 			dc.Binds = append(dc.Binds, m.Source)
 			if !m.RW {
 				dc.RO = append(dc.RO, m.Source)
 			}
+		} else if m.Type == "volume" && m.RW && strings.HasPrefix(m.Source, "/") {
+			dc.Vols = append(dc.Vols, m.Source)
 		}
 	}
 	dc.Priv = ins.HostConfig.Privileged

@@ -4430,6 +4430,10 @@ textarea:focus {
 .fix-done button {
   flex: 0 0 auto;
 }
+.osupd-num {
+  margin-right: 0.35rem;
+  color: var(--text);
+}
 .osupd-alt {
   font-size: 0.78rem;
   color: var(--text-muted);
