@@ -13,8 +13,17 @@
 # и панель сразу открывается по https. Для постоянной установки лучше свой домен:
 #   ... | sudo sh -s -- --domain kervax.example.com
 #
+# Сервер в локальной сети (ВМ для стенда, домашняя сеть) Let's Encrypt не видит, а
+# домашний роутер часто вообще не резолвит <приватный-IP>.sslip.io (защита от DNS
+# rebinding). Для этого случая:
+#   ... | sudo sh -s -- --local-ca
+# Панель открывается по https://<IP-в-локалке>, сертификат от внутреннего CA caddy,
+# а команда установки агента в панели везет с собой корень этого CA.
+#
 # Ключевые опции:
 #   --domain <имя>       домен вместо <IP>.sslip.io
+#   --local-ca           локальная сеть: внутренний CA caddy вместо Let's Encrypt,
+#                        адрес в локалке вместо sslip.io (docs/install.ru.md)
 #   --allow-ips "A B"    пускать к панели только с этих адресов (см. ниже)
 #   --build              собирать образы из исходников вместо готовых из GHCR
 #   --dir <путь>         каталог установки (по умолчанию /opt/kervax)
@@ -26,6 +35,7 @@ set -eu
 DOMAIN=""
 ALLOW_IPS=""
 BUILD=0
+LOCAL_CA=0
 DIR=/opt/kervax
 REPO=https://github.com/mihsergeev/Kervax.git
 
@@ -34,8 +44,9 @@ while [ $# -gt 0 ]; do
         --domain) DOMAIN="$2"; shift 2 ;;
         --allow-ips) ALLOW_IPS="$2"; shift 2 ;;
         --build) BUILD=1; shift ;;
+        --local-ca) LOCAL_CA=1; shift ;;
         --dir) DIR="$2"; shift 2 ;;
-        -h|--help) sed -n '2,28p' "$0"; exit 0 ;;
+        -h|--help) sed -n '2,32p' "$0"; exit 0 ;;
         *) echo "неизвестный аргумент: $1" >&2; exit 2 ;;
     esac
 done
@@ -81,7 +92,24 @@ fi
 docker compose version >/dev/null 2>&1 || die "нужен Docker Compose v2 (плагин compose)"
 
 # ── 3. Домен ─────────────────────────────────────────────────────────────────
-if [ -z "$DOMAIN" ]; then
+# Повторный запуск (обновление: quickstart без аргументов) оставляет то, что выбрал первый.
+# Иначе панель, поставленная с --local-ca, переключалась обратно на Let's Encrypt и на
+# <публичный-IP>.sslip.io, и адрес, по которому ее все открывают, переставал отвечать.
+if [ -f "$DIR/.env" ]; then
+    grep -q '^COMPOSE_FILE=.*compose\.localca\.yml' "$DIR/.env" && LOCAL_CA=1
+    [ -n "$DOMAIN" ] || DOMAIN=$(grep '^KERVAX_DOMAIN=' "$DIR/.env" | cut -d= -f2-)
+fi
+if [ -z "$DOMAIN" ] && [ "$LOCAL_CA" = "1" ]; then
+    # Адрес панели - сам IP в локалке: нет имени, значит нечего прописывать в /etc/hosts
+    # на каждой машине и нечего блокировать роутеру. Внутренний CA caddy выдает
+    # сертификат и на IP-адрес.
+    IP=$(ip -4 route get 1.1.1.1 2>/dev/null | sed -n 's/.* src \([0-9.]*\).*/\1/p' | head -1)
+    [ -n "$IP" ] || IP=$(hostname -I 2>/dev/null | awk '{print $1}')
+    [ -n "$IP" ] || die "не смог определить адрес в локальной сети, задайте --domain"
+    DOMAIN="$IP"
+    say "Локальная сеть, адрес панели - IP: $DOMAIN"
+    echo "  (сертификат от внутреннего CA caddy, подробности в конце вывода)"
+elif [ -z "$DOMAIN" ]; then
     IP=$(curl -fsS --max-time 10 https://api.ipify.org 2>/dev/null || true)
     [ -n "$IP" ] || IP=$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{print $7; exit}')
     [ -n "$IP" ] || die "не смог определить внешний IP — задайте --domain"
@@ -90,6 +118,10 @@ if [ -z "$DOMAIN" ]; then
     echo "  (sslip.io резолвится в $IP — Let's Encrypt выдаст на это имя сертификат)"
 else
     say "Домен: $DOMAIN"
+    if [ "$LOCAL_CA" = "1" ]; then
+        echo "  (внутренний CA caddy. Имя должно резолвиться в панель на каждой машине"
+        echo "  с агентом и на вашем компьютере: локальный DNS или /etc/hosts, см. docs/install.ru.md)"
+    fi
 fi
 
 # ── 4. Caddy ─────────────────────────────────────────────────────────────────
@@ -194,6 +226,7 @@ if [ "$BUILD" = "1" ]; then
 else
     COMPOSE_LIST="compose.yml:compose.ghcr.yml:compose.caddy.yml"
 fi
+[ "$LOCAL_CA" = "1" ] && COMPOSE_LIST="$COMPOSE_LIST:compose.localca.yml"
 FILES=$(printf -- '-f %s ' $(echo "$COMPOSE_LIST" | tr ':' ' '))
 
 if [ -f .env ]; then
@@ -277,11 +310,44 @@ done
 
 # Публичный адрес проверяем, только когда панель открыта всем: иначе запрос с
 # сервера обречён (см. выше). Это заодно проверка сертификата.
+CADDY_CT=$(docker ps --format '{{.Names}} {{.Image}}' | grep caddy-docker-proxy | head -1 | cut -d' ' -f1)
+
+# Локальная сеть: корень внутреннего CA caddy кладем в data/panel-ca.crt. Панель вставляет
+# его в команду установки агента (install.sh --ca-file доверяет ему на ноде), а проверка https
+# ниже проверяет панель этим корнем, а не пропускает проверку. caddy создает CA, когда грузит
+# сайт с `tls internal`, через несколько секунд после появления контейнера панели. Читаем
+# через docker: caddy может быть чужим, и его данные не в /srv/caddy.
+CA_FILE="$DIR/data/panel-ca.crt"
+CURL_CA=""
+if [ "$LOCAL_CA" = "1" ]; then
+    say "Беру корень внутреннего CA caddy"
+    i=0
+    root=""
+    while [ $i -lt 30 ] && [ -n "$CADDY_CT" ]; do
+        # </dev/null: см. заметку про docker compose exec выше
+        root=$(docker exec "$CADDY_CT" cat /data/caddy/pki/authorities/local/root.crt </dev/null 2>/dev/null || true)
+        case "$root" in *"BEGIN CERTIFICATE"*) break ;; esac
+        root=""
+        i=$((i + 1))
+        sleep 2
+    done
+    if [ -n "$root" ]; then
+        mkdir -p "$DIR/data"
+        printf '%s\n' "$root" > "$CA_FILE.tmp" && chmod 644 "$CA_FILE.tmp" && mv -f "$CA_FILE.tmp" "$CA_FILE"
+        CURL_CA="--cacert $CA_FILE"
+        # имя проверяем на этом же сервере: записи в DNS у него может и не быть
+        case "$DOMAIN" in *[!0-9.]*) CURL_CA="$CURL_CA --resolve $DOMAIN:443:127.0.0.1" ;; esac
+        echo "  $CA_FILE"
+    else
+        echo "  caddy его еще не создал: docker logs ${CADDY_CT:-<контейнер caddy>} --tail=50"
+    fi
+fi
+
 code=""
 if [ -z "$ALLOW_IPS" ]; then
     i=0
     while [ $i -lt 30 ]; do
-        code=$(curl -s -o /dev/null -w '%{http_code}' "https://$DOMAIN/api/health" --max-time 5 || true)
+        code=$(curl -s -o /dev/null -w '%{http_code}' $CURL_CA "https://$DOMAIN/api/health" --max-time 5 || true)
         [ "$code" = "200" ] && break
         i=$((i + 1))
         sleep 2
@@ -292,9 +358,8 @@ fi
 # 168 часов. Переустановка панели с удалением каталога caddy выбрасывает уже
 # выданный сертификат и просит новый — на шестой раз выпуск запрещён, и панель
 # молчит без единого объяснения. Сказать об этом прямо дешевле, чем гадать.
-CADDY_CT=$(docker ps --format '{{.Names}} {{.Image}}' | grep caddy-docker-proxy | head -1 | cut -d' ' -f1)
 RATE_LIMITED=0
-if [ -n "$CADDY_CT" ] && docker logs "$CADDY_CT" --since 10m 2>&1 | grep -q rateLimited; then
+if [ "$LOCAL_CA" != "1" ] && [ -n "$CADDY_CT" ] && docker logs "$CADDY_CT" --since 10m 2>&1 | grep -q rateLimited; then
     RATE_LIMITED=1
 fi
 
@@ -325,7 +390,31 @@ fi
 printf '  Логин:   \033[1madmin\033[0m\n'
 printf '  Пароль:  \033[1m%s\033[0m\n' "$ADMIN_PW"
 printf '  Он же лежит в %s/.env\n' "$DIR"
-if [ -z "$ALLOW_IPS" ]; then
+if [ "$LOCAL_CA" = "1" ]; then
+    printf '\n  Сертификат выдал внутренний CA caddy, ему пока никто не доверяет.\n'
+    if [ -f "$CA_FILE" ]; then
+        FP=$(openssl x509 -in "$CA_FILE" -noout -fingerprint -sha256 2>/dev/null | cut -d= -f2)
+        printf '  Его корень: %s\n' "$CA_FILE"
+        [ -n "$FP" ] && printf '  SHA-256:    %s\n' "$FP"
+        printf '  Агенты: руками ничего не нужно. Команда установки в панели везет этот\n'
+        printf '  корень, и install.sh добавляет его в системное хранилище ноды.\n'
+        printf '  Браузер: импортируйте корень как доверенный центр, панель отдает его по\n'
+        printf '    https://%s/api/agent/ca.crt (или скопируйте файл выше).\n' "$DOMAIN"
+        printf '  Любая другая машина с Debian/Ubuntu (curl, скрипты):\n'
+        printf '    cp panel-ca.crt /usr/local/share/ca-certificates/kervax-panel.crt && update-ca-certificates\n'
+    fi
+    case "$DOMAIN" in
+        *[!0-9.]*)
+            printf '  Имя %s должно резолвиться на каждой машине с агентом и на вашем\n' "$DOMAIN"
+            printf '  компьютере: локальный DNS или строка в /etc/hosts (см. docs/install.ru.md).\n' ;;
+    esac
+fi
+if [ -z "$ALLOW_IPS" ] && [ "$LOCAL_CA" = "1" ]; then
+    printf '\n\033[33m  ВНИМАНИЕ: к панели пускают всю локальную сеть, ее защищает только\n'
+    printf '  пароль. Ограничьте доступ:\n'
+    printf '    KERVAX_ALLOW_IPS="ваш.ip" в %s/.env, затем\n' "$DIR"
+    printf '    docker compose %s up -d frontend\033[0m\n' "$FILES"
+elif [ -z "$ALLOW_IPS" ]; then
     printf '\n\033[33m  ВНИМАНИЕ: панель открыта всему интернету (список разрешённых\n'
     printf '  адресов пуст) — её защищает только пароль. Ограничьте доступ:\n'
     printf '    KERVAX_ALLOW_IPS="ваш.ip" в %s/.env, затем\n' "$DIR"

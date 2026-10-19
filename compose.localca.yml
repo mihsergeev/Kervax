@@ -1,0 +1,21 @@
+# Overlay for a panel in a local network, on top of compose.caddy.yml
+# (quickstart --local-ca writes it into COMPOSE_FILE).
+#
+# Let's Encrypt cannot reach a private address, so the certificate comes from caddy's
+# own internal CA instead. Both labels sit on the panel's container and touch nothing
+# else on a shared caddy: `tls internal` is set for this one site, and default_sni only
+# answers clients that send no name at all.
+#   caddy.tls            internal CA for this site (other sites keep Let's Encrypt)
+#   caddy_99.default_sni a panel opened by bare IP (https://192.168.1.10) sends no SNI,
+#                        and caddy then has no certificate to offer: the handshake ends
+#                        with "tlsv1 alert internal error". A label without a site
+#                        address is a global option in caddy-docker-proxy.
+#
+# The root of that CA lives in caddy's data (/data/caddy/pki/authorities/local/root.crt
+# inside the caddy container). quickstart copies it to data/panel-ca.crt, and the panel
+# then puts it into the agent install command: install.sh --ca-file trusts it on the node.
+services:
+  frontend:
+    labels:
+      caddy.tls: internal
+      caddy_99.default_sni: ${KERVAX_DOMAIN}

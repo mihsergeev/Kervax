@@ -4,6 +4,31 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.4.288] - 2026-10-19
+
+Панель в локальной сети ставится одной командой, установщик агента (панель раздает его сама).
+
+### Added
+- `quickstart.sh --local-ca` (и `quickstart-ru.sh`): панель в локальной сети. На ВМ в домашней
+  или офисной сети quickstart ставил панель, но https не поднимался: Let's Encrypt не достает до
+  приватного адреса, а имя `<приватный-IP>.sslip.io` за роутером с защитой от DNS rebinding
+  (OpenWrt, все на dnsmasq) не резолвится вовсе, и агенты не ставились. С `--local-ca` адрес
+  панели - сам IP в локалке (`https://192.168.1.10`, без DNS и `/etc/hosts`), сертификат выдает
+  внутренний CA caddy. Он включается метками на контейнере панели (оверлей
+  `compose.localca.yml`: `tls internal` для сайта панели и `default_sni`, без него панель по IP
+  отвечала `tlsv1 alert internal error`), без лишнего контейнера, и остальные сайты общего caddy
+  остаются на Let's Encrypt. Корень CA quickstart кладет в `data/panel-ca.crt` и печатает его
+  отпечаток, проверка https в конце идет этим корнем. Повторный запуск (обновление) режим помнит.
+  Можно и `--local-ca --domain <имя>`, тогда имя должно резолвиться на машинах с агентом.
+- Команда установки агента везет корень CA панели, если в `data/panel-ca.crt` он есть (внутренний
+  CA caddy или свой корпоративный): `curl --cacert` проверяет им панель, `install.sh --ca-file`
+  кладет его в системное хранилище ноды (Debian/Ubuntu/Alpine, RHEL/Fedora, SUSE) и проверяет
+  https уже через него, как будет ходить агент. Проверка сертификата нигде не отключается.
+  `--uninstall` корень снимает (с инстансом - только корень этого инстанса). Сам корень панель
+  отдает по `/api/agent/ca.crt`, чтобы импортировать в браузер.
+- docs/install.md и install.ru.md: раздел про локальную сеть, DNS rebinding и `/etc/hosts`, три
+  строки в "Если что-то пошло не так".
+
 ## [1.4.287] - 2026-10-19
 
 ### Fixed
