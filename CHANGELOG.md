@@ -4,6 +4,16 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.4.300] - 2026-10-20
+
+### Changed
+- Docker, "Доступ к хосту": вместо общей строки "уберите privileged" готовые шаги под ноду - копия
+  compose, правка только в блоке своего сервиса, проверка config, up -d этих сервисов и откат.
+  privileged меняется на privileged: false (у VPN-образов сразу на нужные cap_add и devices), у
+  CI-агентов сначала проверка, нужен ли docker внутри; docker-сокет уходит за прокси только на
+  чтение; контейнеры одного проекта - одним блоком. Пути из меток compose (агент 2.41), у старого
+  агента одна команда покажет, где compose.
+
 ## [1.4.299] - 2026-10-20
 
 ### Changed

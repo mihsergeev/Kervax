@@ -1351,7 +1351,7 @@ class ServerOut(BaseModel):
     # внешние прокси (caddy-docker-proxy, traefik) с docker-сокетом: [{"name", "image", "kind"}]
     docker_exposed: list[dict] = Field(default_factory=list)
     # контейнеры с ключами от хоста сверх положенного (docker_risk.view):
-    # [{"name", "image", "flags", "caps", "text", "muted"}]
+    # [{"name", "image", "flags", "caps", "text", "muted", "fix"?}], fix - шаги, общие у контейнеров проекта
     docker_risk: list[dict] = Field(default_factory=list)
     # внешние прокси со сборкой образа старше года (docker_exposure.outdated):
     # [{"name", "image", "kind", "version", "built", "age_days"}]
