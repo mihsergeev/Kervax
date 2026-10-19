@@ -4,6 +4,20 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.4.296] - 2026-10-20
+
+### Fixed
+- Причина отказа "включить дамп" всегда видна под кнопкой: что упало и что сделать на сервере, с
+  готовой командой. Раньше у MySQL 8 на хосте после "дампы НЕ включены:" стоял прочерк.
+- Helper backup-setup 0.38: MySQL/MariaDB на хосте входит через /etc/mysql/debian.cnf,
+  /root/.my.cnf, потом root через сокет (как инвентарь СУБД), дамп снимается тем же входом. MySQL 8
+  из Ubuntu не пускает root без пароля, и включить дамп там было нельзя.
+- Helper backup-setup 0.38: проверки дампа больше не выбрасывают ошибку. Проверка идет до записи на
+  ноде: неудачная попытка ничего не оставляет, рабочий дамп при неудачной смене настроек остается
+  как был. В mariadb:11 проверка через mariadb-dump, Redis без PONG - отказ с ответом базы.
+- Если helper на ноде старше 0.38 и причина пришла пустой, панель пишет, какая версия стоит и как
+  обновить.
+
 ## [1.4.295] - 2026-10-20
 
 ### Changed

@@ -43,6 +43,7 @@ from app import netlinks
 from app import traffic as traffic_mod
 from app import usage as usage_mod
 from app import audit, backup_growth, custom_backups, docker_exposure, geoip, kube_coverage, manual_probe, open_ports, os_support
+from app import dump_reason
 from app import software as software_mod
 from app.collector import (
     _backup_problem_repos, alert_since, backup_cadence, backup_rotation_items, backup_unmonitored,
@@ -3312,7 +3313,11 @@ async def agent_backup_result(
     if c is None or c.server_id != server.id:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Команда не найдена")
     c.ok = body.ok
-    c.result = (body.output or "")[-100_000:]
+    # отказ дампа без причины (helper до 0.38) - панель дописывает, что известно; payload с
+    # движком еще не стерт
+    out = dump_reason.fill_dump_reason(c.action, body.ok, body.output or "", c.payload,
+                                       (server.last_report or {}).get("setup_versions"))
+    c.result = out[-100_000:]
     c.status = "done" if body.ok else "error"
     c.done_at = datetime.now(timezone.utc)
     if c.action != "disk_fix":  # у disk_fix секретов нет, а название действия нужно уведомлению

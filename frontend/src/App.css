@@ -4702,6 +4702,8 @@ textarea:focus {
   align-items: flex-start;
   gap: 0.4rem;
   line-height: 1.4;
+  /* в причине бывает команда с длинным адресом панели: на телефоне она переносится */
+  overflow-wrap: anywhere;
 }
 .coverage-op-x {
   margin-left: auto;
