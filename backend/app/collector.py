@@ -3750,7 +3750,7 @@ _SIGNALS = {6: "ABRT", 9: "KILL", 11: "SEGV", 15: "TERM"}
 # который не укладывался во время на нодах с большим журналом, прислал алерт с каждой такой
 # ноды, и каждые 10 минут снова. kervax-agent и kervax-dumps (дампы баз для бэкапа) не тут.
 _OWN_HELPER_UNIT = re.compile(
-    r"kervax-(changes|cron|db-stats|disk-health|disk-usage|fpm|gpu|kube-expiry|kube-flux|logerr|queues|units|web-rate|web-sites|workers"
+    r"kervax-(changes|cron|db-stats|disk-health|disk-usage|fpm|gpu|kube-expiry|kube-flux|logerr|queues|sockfix|units|web-rate|web-sites|workers"
     r"|[a-z]+-req)\.service")
 
 # Задание по таймеру, которое падает на каждом запуске, между падениями несколько минут

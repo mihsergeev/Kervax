@@ -3539,8 +3539,43 @@ const EN: Record<string, string> = {
   'Прокси docker-сокета на этой ноде пускает только чтение, поэтому перезапуск, стоп и старт дают 403. Замените его этой командой: просмотр плюс перезапуск, стоп и старт, без exec, создания контейнеров и образов, слушает только 127.0.0.1 хоста.':
     'The docker socket proxy on this node allows reading only, so restart, stop and start get 403. Replace it with this command: viewing plus restart, stop and start, no exec, no creating containers or images, listening on 127.0.0.1 of the host only.',
   'Доступ к Docker (прокси)': 'Docker access (proxy)',
-  '{list}: docker-сокет смонтирован целиком. Прокси смотрит в интернет, а сокет - это root на хосте: одна дыра в прокси, и чужой получает весь сервер. Пусть прокси читает докер через прокси сокета только на чтение (список контейнеров, сети, события), а сам сокет из его volumes уберите. Что добавить в compose:':
-    '{list}: the whole docker socket is mounted. The proxy faces the internet, and the socket is root on the host: one hole in the proxy and a stranger owns the server. Let the proxy read docker through a read-only socket proxy (container list, networks, events) and drop the socket from its volumes. What to add to the compose:',
+  '{list}: docker-сокет смонтирован целиком. Прокси смотрит в интернет, а сокет - это root на хосте: одна дыра в прокси, и чужой получает весь сервер. Лечится так: прокси читает докер через прокси сокета только на чтение (список контейнеров, сети, события), а сам сокет из его volumes уходит.':
+    '{list}: the whole docker socket is mounted. The proxy faces the internet, and the socket is root on the host: one hole in the proxy and a stranger owns the server. The cure: the proxy reads docker through a read-only socket proxy (container list, networks, events), and the socket leaves its volumes.',
+  'Исправленный compose для {name} уже готов: helper собрал его на сервере из {file} и проверил через docker compose config. Что меняется:':
+    'A fixed compose file for {name} is ready: the helper built it on the server from {file} and checked it with docker compose config. What changes:',
+  '1. Применить - от root на сервере, прокси пересоздастся за пару секунд:':
+    '1. Apply it as root on the server, the proxy is recreated in a couple of seconds:',
+  '2. Проверить: оба контейнера работают, blocked в логе docker-api - 0, сайты открываются. Этот пункт уйдет сам со следующим отчетом агента.':
+    '2. Check: both containers run, blocked in the docker-api log is 0, the sites open. This item goes away by itself with the next agent report.',
+  'Если что-то не так - вернуть как было:': 'If something is wrong, roll back:',
+  'Для {name} готового файла нет: {why}{detail}. Поправьте compose руками:':
+    'No ready file for {name}: {why}{detail}. Edit the compose by hand:',
+  'Готовый исправленный compose под эту ноду соберет helper sockfix-setup: поставьте его плейбуком хелперов, и здесь появятся разница с нынешним файлом и команды. Пока - руками:':
+    'The sockfix-setup helper builds a fixed compose file for this node: install it with the helpers playbook, and the diff against the current file and the commands show up here. Until then, by hand:',
+  'в {file} у сервиса {svc} уберите из volumes строку с docker.sock;': 'in {file}, remove the docker.sock line from the volumes of the {svc} service;',
+  'в compose-файле прокси уберите из volumes строку с docker.sock;': 'in the compose file of the proxy, remove the docker.sock line from its volumes;',
+  'добавьте ему environment и networks из примера ниже, остальное в сервисе не трогайте;':
+    'add the environment and networks from the example below to it, leave the rest of the service as is;',
+  'добавьте сервис docker-api и сеть docker-api из примера;': 'add the docker-api service and the docker-api network from the example;',
+  'docker compose up -d в каталоге проекта.': 'run docker compose up -d in the project directory.',
+  'файл размечен необычно (табы или сбитые отступы)': 'the file has an unusual layout (tabs or broken indentation)',
+  'файл старого формата compose v1, без services:': 'the file is in the old compose v1 format, without services:',
+  'в файле якоря YAML (&, *, <<), такую разметку надежно не поправить': 'the file uses YAML anchors (&, *, <<), such a layout cannot be edited reliably',
+  'нужный ключ записан в одну строку ([...] или {...})': 'a key it needs is written inline ([...] or {...})',
+  'сервиса нет в файле, из которого его запустили': 'the service is not in the file it was started from',
+  'сервис docker-api в файле уже есть': 'the file already has a docker-api service',
+  'у сервиса extends': 'the service uses extends',
+  'у сервиса network_mode': 'the service uses network_mode',
+  'сокет монтируется не из этого файла': 'the socket is not mounted from this file',
+  'смонтирован весь /run или /var/run, а не один сокет': 'all of /run or /var/run is mounted, not just the socket',
+  'DOCKER_HOST уже задан': 'DOCKER_HOST is already set',
+  'сам правлю только caddy-docker-proxy, у traefik и nginx-proxy настройка другая':
+    'only caddy-docker-proxy is edited automatically, traefik and nginx-proxy are set up differently',
+  'контейнер запущен не через docker compose': 'the container was not started by docker compose',
+  'контейнер запущен из нескольких compose-файлов': 'the container was started from several compose files',
+  'нужен docker compose v2': 'docker compose v2 is needed',
+  'на хосте нет docker-сокета': 'there is no docker socket on the host',
+  'docker compose не принял исправленный файл': 'docker compose did not accept the fixed file',
   'Проверка после замены: в логе docker-api нет строк blocked request, сайты отвечают как раньше. Ноды с этой проблемой плагин инвентаря ansible собирает в группу kervax_docker_sock.':
     'Check after the change: no blocked request lines in the docker-api log, the sites answer as before. The ansible inventory plugin puts the nodes with this problem into the kervax_docker_sock group.',
   'прокси смотрит в интернет и держит docker-сокет: взлом прокси даст root на хосте':

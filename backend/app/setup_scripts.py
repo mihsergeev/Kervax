@@ -90,6 +90,11 @@ def setup_needed(name: str, rep: dict) -> bool:
     if name == "dockerproxy-setup":
         cs = (rep.get("docker") or {}).get("containers") or []
         return any(str(c.get("name") or "").startswith("kervax-docker-proxy") for c in cs)
+    # sockfix-setup - где внешний прокси держит docker-сокет (helper готовит compose без него) или
+    # helper уже присылает отчет: после исправления он остается и следит, чтобы сокет не вернулся
+    if name == "sockfix-setup":
+        from app import docker_exposure
+        return bool(docker_exposure.exposed(rep)) or "sockfix" in (rep.get("extras") or {})
     # backup-setup — транспорт панели для дампов, нужен и без файлового бэкапа;
     # timesync-setup, agent-watchdog, diskusage-setup, diskhealth-setup и units-setup
     # ansible ставит всюду (диск забивается и ломается где угодно, а на VM здоровье дисков смотрит хотя бы
@@ -123,6 +128,7 @@ _HELPER_LABEL = {
     "cron-setup": "кроны на хосте и в контейнерах",
     "logerr-setup": "ошибки в логах контейнеров",
     "fpm-setup": "пулы PHP-FPM",
+    "sockfix-setup": "compose прокси без docker-сокета",
 }
 
 

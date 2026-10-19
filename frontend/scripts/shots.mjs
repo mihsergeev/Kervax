@@ -40,6 +40,8 @@ const SHOTS = [
   { name: 'disk-health', url: '?server=3&sec=disk', h: 2000, cards: ['mcard-diskhealth', 'mcard-diskwrite'] },
   { name: 'security-ports', url: '?server=2&sec=ports', h: 1000 },
   { name: 'security-access', url: '?server=2&sec=access', h: 1100 },
+  // прокси с docker-сокетом: helper уже собрал compose без него, разница и команды
+  { name: 'sockfix', url: '?docker=8&sec=host', h: 1240 },
   { name: 'web', url: '?server=1&sec=web', h: 1250 },
   { name: 'gpu', url: '?server=9&sec=gpu', h: 1250 },
   { name: 'llm', url: '?services=9&sec=llm', h: 1000 },

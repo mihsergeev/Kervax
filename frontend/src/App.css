@@ -584,6 +584,43 @@ input:focus {
   word-break: break-all;
   overflow-x: auto;
 }
+/* готовый compose без docker-сокета: разница с нынешним файлом и шаги */
+.sock-fix {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+  margin-top: 0.6rem;
+}
+.sock-diff {
+  margin: 0;
+  padding: 0.5rem 0;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 0.78rem;
+  overflow-x: auto;
+}
+.sock-diff > div {
+  padding: 0 0.6rem;
+  white-space: pre;
+}
+.sock-diff .sd-add {
+  color: var(--up);
+  background: color-mix(in srgb, var(--up) 10%, transparent);
+}
+.sock-diff .sd-del {
+  color: var(--down);
+  background: color-mix(in srgb, var(--down) 10%, transparent);
+}
+.sock-diff .sd-hunk,
+.sock-diff .sd-file {
+  opacity: 0.6;
+}
+.sock-steps {
+  margin: 0;
+  padding-left: 1.3rem;
+  font-size: 0.85rem;
+}
 .agent-advice-cmd button {
   flex-shrink: 0;
   align-self: flex-start;

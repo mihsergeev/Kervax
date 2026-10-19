@@ -125,37 +125,131 @@ ${SOCK_PROXY_SVC('traefik', true)}`,
 ${SOCK_PROXY_SVC('nginx-proxy', true)}`,
 }
 
-function SockWarning({ items }: { items: { name: string; image: string; kind: string }[] }) {
+// Почему helper не подготовил файл сам: код из sockfix-setup -> слова
+const SOCK_WHY: Record<string, string> = {
+  layout: 'файл размечен необычно (табы или сбитые отступы)',
+  v1: 'файл старого формата compose v1, без services:',
+  anchors: 'в файле якоря YAML (&, *, <<), такую разметку надежно не поправить',
+  inline: 'нужный ключ записан в одну строку ([...] или {...})',
+  nosvc: 'сервиса нет в файле, из которого его запустили',
+  dupsvc: 'сервис docker-api в файле уже есть',
+  extends: 'у сервиса extends',
+  networkmode: 'у сервиса network_mode',
+  elsewhere: 'сокет монтируется не из этого файла',
+  rundir: 'смонтирован весь /run или /var/run, а не один сокет',
+  dockerhost: 'DOCKER_HOST уже задан',
+  kind: 'сам правлю только caddy-docker-proxy, у traefik и nginx-proxy настройка другая',
+  nocompose: 'контейнер запущен не через docker compose',
+  multi: 'контейнер запущен из нескольких compose-файлов',
+  composev1: 'нужен docker compose v2',
+  nosock: 'на хосте нет docker-сокета',
+  validate: 'docker compose не принял исправленный файл',
+  unexpected: 'не вышло',
+}
+
+function CmdBlock({ text, id, copied, onCopy }: { text: string; id: string; copied: string; onCopy: (id: string, text: string) => void }) {
+  const { t } = useI18n()
+  return (
+    <div className="agent-advice-cmd">
+      <pre>{text}</pre>
+      <button className="ghost" onClick={() => onCopy(id, text)}>
+        {copied === id ? t('Скопировано') : t('Копировать')}
+      </button>
+    </div>
+  )
+}
+
+// Разница исправленного файла с нынешним: добавленное зеленым, убранное красным
+function SockDiff({ diff }: { diff: string }) {
+  return (
+    <pre className="sock-diff">
+      {diff.split('\n').map((l, i) => {
+        const c = l.startsWith('+++') || l.startsWith('---') ? 'sd-file' : l.startsWith('@@') ? 'sd-hunk'
+          : l.startsWith('+') ? 'sd-add' : l.startsWith('-') ? 'sd-del' : ''
+        return <div key={i} className={c}>{l || ' '}</div>
+      })}
+    </pre>
+  )
+}
+
+type Exposed = NonNullable<Server['docker_exposed']>[number]
+
+function SockWarning({ items }: { items: Exposed[] }) {
   const { t } = useI18n()
   const [copied, setCopied] = useState('')
-  const kinds = [...new Set(items.map((i) => i.kind))].filter((k) => SOCK_FIX[k])
+  const copy = (id: string, text: string) => {
+    navigator.clipboard?.writeText(text)
+    setCopied(id)
+    window.setTimeout(() => setCopied(''), 1500)
+  }
+  const ready = items.filter((i) => i.fix?.ok)
+  const manual = items.filter((i) => !i.fix?.ok)
+  // снипет руками: с настоящим gid сокета и именем сервиса, если helper их прислал
+  const snippet = (i: Exposed) => {
+    let s = SOCK_FIX[i.kind] ?? ''
+    if (i.fix?.gid != null) s = s.replace('"65534:GID"   # GID: stat -c %g /var/run/docker.sock', `"65534:${i.fix.gid}"`)
+    const svc = i.fix?.service
+    if (svc && i.kind === 'caddy') s = s.replace('\n  caddy:\n', `\n  ${svc}:\n`).replace('-allowfrom=caddy   # the service name of caddy', `-allowfrom=${svc}`)
+    if (i.fix?.nets?.length && i.kind === 'caddy') {
+      const nets = i.fix.nets.filter((n) => n !== 'docker-api')
+      s = s.replace('CADDY_INGRESS_NETWORKS=caddy   # your ingress network', `CADDY_INGRESS_NETWORKS=${nets.join(',')}`)
+        .replace('networks: [caddy, docker-api]   # plus the networks it has now', `networks: [${[...nets, 'docker-api'].join(', ')}]`)
+    }
+    return s
+  }
   return (
     <div className="chart-card net-card net-card-wide">
       <div className="net-head">
         <div className="chart-cap">{t('Прокси держит docker-сокет')}</div>
       </div>
       <div className="net-prob">
-        {t('{list}: docker-сокет смонтирован целиком. Прокси смотрит в интернет, а сокет - это root на хосте: одна дыра в прокси, и чужой получает весь сервер. Пусть прокси читает докер через прокси сокета только на чтение (список контейнеров, сети, события), а сам сокет из его volumes уберите. Что добавить в compose:',
+        {t('{list}: docker-сокет смонтирован целиком. Прокси смотрит в интернет, а сокет - это root на хосте: одна дыра в прокси, и чужой получает весь сервер. Лечится так: прокси читает докер через прокси сокета только на чтение (список контейнеров, сети, события), а сам сокет из его volumes уходит.',
           { list: items.map((i) => `${i.name} (${i.kind})`).join(', ') })}
       </div>
-      {kinds.map((k) => (
-        <div key={k} className="agent-advice-cmd">
-          <pre>{SOCK_FIX[k]}</pre>
-          <button
-            className="ghost"
-            onClick={() => {
-              navigator.clipboard?.writeText(SOCK_FIX[k])
-              setCopied(k)
-              window.setTimeout(() => setCopied(''), 1500)
-            }}
-          >
-            {copied === k ? t('Скопировано') : t('Копировать')}
-          </button>
+      {ready.map((i) => {
+        const fx = i.fix!
+        return (
+          <div key={i.name} className="sock-fix">
+            <div className="net-sub">
+              {t('Исправленный compose для {name} уже готов: helper собрал его на сервере из {file} и проверил через docker compose config. Что меняется:',
+                { name: i.name, file: fx.file ?? '' })}
+            </div>
+            <SockDiff diff={fx.diff ?? ''} />
+            <div className="net-sub">{t('1. Применить - от root на сервере, прокси пересоздастся за пару секунд:')}</div>
+            <CmdBlock text={fx.apply ?? ''} id={`${i.name}:apply`} copied={copied} onCopy={copy} />
+            <div className="net-sub">{t('2. Проверить: оба контейнера работают, blocked в логе docker-api - 0, сайты открываются. Этот пункт уйдет сам со следующим отчетом агента.')}</div>
+            <CmdBlock text={fx.check ?? ''} id={`${i.name}:check`} copied={copied} onCopy={copy} />
+            <div className="net-sub">{t('Если что-то не так - вернуть как было:')}</div>
+            <CmdBlock text={fx.rollback ?? ''} id={`${i.name}:rollback`} copied={copied} onCopy={copy} />
+          </div>
+        )
+      })}
+      {manual.map((i) => (
+        <div key={i.name} className="sock-fix">
+          <div className="net-sub">
+            {i.fix
+              ? t('Для {name} готового файла нет: {why}{detail}. Поправьте compose руками:', {
+                  name: i.name, why: t(SOCK_WHY[i.fix.why ?? ''] ?? 'не вышло'),
+                  detail: i.fix.why_detail ? ` (${i.fix.why_detail})` : '',
+                })
+              : t('Готовый исправленный compose под эту ноду соберет helper sockfix-setup: поставьте его плейбуком хелперов, и здесь появятся разница с нынешним файлом и команды. Пока - руками:')}
+          </div>
+          <ol className="sock-steps">
+            <li>{i.fix?.file
+              ? t('в {file} у сервиса {svc} уберите из volumes строку с docker.sock;', { file: i.fix.file, svc: i.fix.service ?? i.kind })
+              : t('в compose-файле прокси уберите из volumes строку с docker.sock;')}</li>
+            <li>{t('добавьте ему environment и networks из примера ниже, остальное в сервисе не трогайте;')}</li>
+            <li>{t('добавьте сервис docker-api и сеть docker-api из примера;')}</li>
+            <li>{t('docker compose up -d в каталоге проекта.')}</li>
+          </ol>
+          {SOCK_FIX[i.kind] && <CmdBlock text={snippet(i)} id={`${i.name}:snippet`} copied={copied} onCopy={copy} />}
         </div>
       ))}
-      <div className="net-foot">
-        {t('Проверка после замены: в логе docker-api нет строк blocked request, сайты отвечают как раньше. Ноды с этой проблемой плагин инвентаря ansible собирает в группу kervax_docker_sock.')}
-      </div>
+      {manual.length > 0 && (
+        <div className="net-foot">
+          {t('Проверка после замены: в логе docker-api нет строк blocked request, сайты отвечают как раньше. Ноды с этой проблемой плагин инвентаря ansible собирает в группу kervax_docker_sock.')}
+        </div>
+      )}
     </div>
   )
 }
