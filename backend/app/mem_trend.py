@@ -11,6 +11,11 @@
 остальными: прогрев кэша после старта тоже поднимает дно, но затухает (300, 120, 50, 20 МБ),
 и такой ряд отсекается отношением шагов. Базы с буферным пулом (MySQL, ClickHouse, MongoDB)
 законно растут до своего лимита - их не судим.
+
+Рост сам по себе не беда: Prometheus, набравший 125 МБ за четыре дня на ноде с гигабайтами
+свободной памяти, будил алертом в три ночи. Беда - когда при таком росте (всех растущих вместе)
+свободной памяти сервера хватит меньше чем на WARN_DAYS суток, меньше чем на CRIT_DAYS - проблема.
+Остальное растущее видно в карточке, но не алертит и в "Что сломано" не попадает.
 """
 from __future__ import annotations
 
@@ -26,6 +31,8 @@ MIN_GROWTH_MB = 100  # и не меньше 100 МБ
 MIN_STEP = 0.01  # каждый суточный шаг - не меньше 1% от начала
 MIN_STEP_MB = 5
 STEP_RATIO = 4  # самый большой шаг не больше чем в 4 раза больше самого маленького
+WARN_DAYS = 7  # свободной памяти при таком росте хватит меньше чем на неделю - предупреждение
+CRIT_DAYS = 3  # меньше чем на трое суток - проблема
 MUTE_PREFIX = "leak:"
 _POD_OWNERS = frozenset({"Deployment", "StatefulSet", "ReplicaSet", "DaemonSet"})
 # буферный пул растет до лимита и держится: это не утечка
@@ -122,10 +129,11 @@ def _fmt(b: float) -> str:
 
 
 def problems(s: Server, now: datetime) -> list[dict]:
-    """Что течет: {"key", "kind" (docker|pod|proc), "name", "rate", "eta_days", "level", "text"}.
-    Процессы - только если не течет ни один контейнер и под: процесс в контейнере видно и в
-    топе процессов, а сказать про это надо один раз. Свободной памяти хватит меньше чем на трое
-    суток - проблема, иначе предупреждение."""
+    """Что растет: {"key", "kind" (docker|pod|proc), "name", "rate", "eta_days", "level", "text"}.
+    Процессы - только если не растет ни один контейнер и под: процесс в контейнере видно и в
+    топе процессов, а сказать про это надо один раз. eta_days - на сколько суток хватит свободной
+    памяти сервера, если все растущее будет расти так же; уровень по нему (WARN_DAYS, CRIT_DAYS),
+    0 - растет, но памяти хватает: не беда."""
     st = (s.alert_state or {}).get("mem_trend")
     if not isinstance(st, dict):
         return []
@@ -142,7 +150,6 @@ def problems(s: Server, now: datetime) -> list[dict]:
         if lk is None:
             continue
         kind, _, name = key.partition(":")
-        eta = round(free / lk["rate"], 1) if free and lk["rate"] > 0 else None
         what = {"docker": "контейнера", "pod": "пода"}.get(kind, "процесса")
         label = name
         if kind == "proc":
@@ -150,10 +157,16 @@ def problems(s: Server, now: datetime) -> list[dict]:
             label = f"{comm} (пользователь {user})"
         text = (f"память {what} {label} растет {LEAK_DAYS} суток подряд: {_fmt(lk['first'])} -> "
                 f"{_fmt(lk['last'])}, +{_fmt(lk['rate'])} в сутки")
-        if eta is not None and eta < 30:
-            text += f", свободной памяти хватит примерно на {eta:g} сут"
-        out.append({"key": key, "kind": kind, "name": name, "rate": lk["rate"], "eta_days": eta,
-                    "series": lk["series"], "level": 2 if eta is not None and eta <= 3 else 1, "text": text})
+        out.append({"key": key, "kind": kind, "name": name, "rate": lk["rate"], "series": lk["series"],
+                    "text": text})
     if any(x["kind"] != "proc" for x in out):
         out = [x for x in out if x["kind"] != "proc"]
+    # память у растущих общая: на сколько ее хватит, считаем по их суммарному росту
+    total = sum(x["rate"] for x in out)
+    eta = round(free / total, 1) if free and total > 0 else None
+    for x in out:
+        x["eta_days"] = eta
+        x["level"] = 0 if eta is None or eta >= WARN_DAYS else 2 if eta < CRIT_DAYS else 1
+        if x["level"]:
+            x["text"] += f", свободной памяти сервера ({_fmt(free)}) при таком росте хватит примерно на {eta:g} сут"
     return out

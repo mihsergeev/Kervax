@@ -3687,6 +3687,8 @@ def server_problems(s: Server, now: datetime, pod_names: dict[str, str] | None =
         add("access_risk", lv, txt, "access", "access_risk")
     # Утечка памяти: контейнер ведет в "Докер", под - в "Кубер", процесс - в "Память" карточки
     for x in mem_trend.problems(s, now):
+        if not x["level"]:
+            continue  # растет, но памяти сервера хватит надолго: видно в карточке, не беда
         mute = mem_trend.MUTE_PREFIX + x["key"]
         if x["kind"] == "docker":
             add("mem_leak", x["level"], x["text"], "containers", mute, section="docker")
@@ -3857,6 +3859,12 @@ def _sig_all_quiet(s: Server, key: str, sig: set[str], now: datetime) -> bool:
         return all(k in log_errors.muted_keys(s, now) for k in sig)
     if key == "fpm":
         return all(k in fpm_pools.muted_keys(s, now) for k in sig)
+    if key == "mem_leak":
+        # растет как росло, но памяти теперь хватает (или правило 1.4.278: раньше алертил любой
+        # рост): "память больше не растет" было бы неправдой
+        muted = {m[len(mem_trend.MUTE_PREFIX):] for m in (s.alert_mutes or []) if m.startswith(mem_trend.MUTE_PREFIX)}
+        growing = {x["key"] for x in mem_trend.problems(s, now)}
+        return all(k in growing or podnames.muted(muted, k) for k in sig)
     return False
 
 
@@ -5418,7 +5426,7 @@ def _server_conditions(s: Server, now: datetime,
                        "sig": [x["key"] for x in fp]})
     # Утечка памяти: дно растет суток подряд (история - в alert_state mem_trend, ведет цикл алертов)
     if online and isinstance((s.alert_state or {}).get("mem_trend"), dict):
-        ml = mem_trend.problems(s, now)
+        ml = [x for x in mem_trend.problems(s, now) if x["level"]]
         out["mem_leak"] = (max((x["level"] for x in ml), default=0),
                            {"detail": "; ".join(x["text"] for x in ml[:3]), "sig": [x["key"] for x in ml]})
     # Проверка восстановления: итог недельной проверки держится до следующей, выдержка не нужна
@@ -5776,6 +5784,9 @@ async def evaluate_servers(
                 if key == "kube_restarts":
                     # sig был по подам, стал по ворклоадам: та же беда под новым ключом не новость
                     old_sig = {podnames.pod_key(x) for x in old_sig}
+                if key == "log_errors":
+                    # то же с логами подов (1.4.278): копии ворклоада - один лог
+                    old_sig = {log_errors.norm_key(x) for x in old_sig}
                 # О чем уже сказали, пока алерт открыт: sig не только сейчас, но и все, что в нем
                 # было. Пятнадцать копий воркера уходили из беды и возвращались по очереди, и каждое
                 # возвращение было "новым": десять сообщений за полтора часа об одном и том же
@@ -5783,6 +5794,8 @@ async def evaluate_servers(
                 if key == "workers":
                     # до 1.4.273 копии программы были отдельными ключами: о программе уже сказано
                     told |= {workers_mod.program_key(x) for x in told}
+                if key == "log_errors":
+                    told |= {log_errors.norm_key(x) for x in told}
                 if prev and not level and old_sig and _sig_all_quiet(s, key, old_sig, now):
                     # объявленное теперь заглушено (или это свой helper, по которому алерта
                     # больше нет): ничего не стихло, отбой был бы неправдой

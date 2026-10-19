@@ -2452,7 +2452,8 @@ const DB_IMAGE = /(postgres|mysql|mariadb|mongo|redis|valkey|keydb|clickhouse|el
 // by - чем меряем: память (раздел "Память") или CPU (раздел "CPU", агент 2.21+). Перезапуск
 // один и тот же: тот, кто съел ресурс, обычно и чинится перезапуском.
 // Что течет памятью: дно (минимум за сутки) растет 4 суток подряд. Ряд минимумов показан целиком:
-// по нему видно, что это ровный рост, а не разовый всплеск
+// по нему видно, что это ровный рост, а не разовый всплеск. Уровень 0 - растет, но свободной памяти
+// сервера хватит больше чем на неделю: серым, без алерта
 function MemLeaks({ server: s }: { server: Server }) {
   const { t } = useI18n()
   const items = s.mem_leaks ?? []
@@ -2464,7 +2465,7 @@ function MemLeaks({ server: s }: { server: Server }) {
         <div className="chart-cap">{t('Растет память')}</div>
       </div>
       <div className="net-sub">
-        {t('Минимум памяти за сутки растет 4 суток подряд. Пила сборщика мусора и всплески минимум не двигают, а утечка поднимает его каждый день.')}
+        {t('Минимум памяти за сутки растет 4 суток подряд. Пила сборщика мусора и всплески минимум не двигают, а утечка поднимает его каждый день. Алерт - только если при таком росте свободной памяти сервера не хватит на неделю.')}
       </div>
       <div className="loc-results">
         {items.map((x) => {
@@ -2472,15 +2473,17 @@ function MemLeaks({ server: s }: { server: Server }) {
           const bad = x.level >= 2
           return (
             <div key={x.key} className="loc-res ml-row">
-              <span className={`lk-dot lk-dot-${bad ? 'bad' : 'warn'}`} />
+              <span className={`lk-dot lk-dot-${bad ? 'bad' : x.level ? 'warn' : 'info'}`} />
               <div className="ml-main">
                 <span className="acc-tag">{kindName[x.kind]}</span> <b>{x.kind === 'proc' ? `${comm} (${user})` : x.name}</b>
                 <div className="muted small">{x.series.map((v) => fmtBytes(v)).join(', ')}</div>
               </div>
               <div className="ml-rate">
-                <span className={bad ? 't-down' : 't-degraded'}>+{fmtBytes(x.rate)} {t('в сутки')}</span>
-                {x.eta_days != null && x.eta_days < 30 && (
-                  <div className="muted small">{t('памяти хватит на {d} сут', { d: x.eta_days })}</div>
+                <span className={bad ? 't-down' : x.level ? 't-degraded' : ''}>+{fmtBytes(x.rate)} {t('в сутки')}</span>
+                {x.eta_days != null && (
+                  <div className="muted small">
+                    {x.eta_days < 30 ? t('памяти хватит на {d} сут', { d: x.eta_days }) : t('памяти хватит больше чем на месяц')}
+                  </div>
                 )}
               </div>
             </div>
