@@ -992,7 +992,6 @@ const EN: Record<string, string> = {
   'не отдали доступы: {n}': 'no credentials from: {n}',
   'источник: {s}': 'source: {s}',
   // --- сводка заглушённого на странице серверов ---
-  'Заглушено ({n})': 'Muted ({n})',
   'бессрочно': 'no expiry',
   'ещё {d}': '{d} left',
   '{n} мин': '{n} min',
@@ -5469,6 +5468,18 @@ const EN: Record<string, string> = {
     '{name}: onboarding is open, check what was found and close it in the server card',
   'закрыл подключение сервера':
     'closed server onboarding',
+  // --- плитка и панель "Заглушено" (MutesPanel.tsx) ---
+  'Заглушено': 'Muted',
+  'бессрочно {n}': 'no expiry {n}',
+  'истекут за сутки {n}': 'expire within a day {n}',
+  'Бессрочно {n}': 'No expiry {n}',
+  'Со сроком {n}': 'With expiry {n}',
+  'Сервер или что заглушено': 'Server or what is muted',
+  'Снять заглушку': 'Unmute',
+  'заглушка снята': 'unmuted',
+  'открыть карточку': 'open card',
+  'снять может оператор или админ': 'an operator or admin can unmute',
+  'пунктов покрытия: {n}': 'coverage items: {n}',
 }
 
 type Ctx = {
