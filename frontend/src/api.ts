@@ -1925,7 +1925,8 @@ export type Server = {
   // что открыто в интернет: внешняя проверка портов раз в 6 часов
   exposure?: Exposure | null
   // что сделать с ОС: конец поддержки, перезагрузка, обновления безопасности (level 2 - уже дыра)
-  os_advice?: { kind: string; level: number; text: string }[]
+  // key - ключ решения "так и должно быть" в alert_mutes (osupd:<kind>), muted - решение принято
+  os_advice?: { kind: string; level: number; text: string; key: string; muted?: boolean }[]
   // версии без поддержки (app/software.py): строка на продукт, 2 - без поддержки, 1 - скоро
   sw_advice?: { key: string; level: number; name: string; what: string; text: string }[] | null
   // GPU NVIDIA (helper gpu-setup): карточка раздела и плашка списка; LLM-сервисы (агент 2.36)

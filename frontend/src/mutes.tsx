@@ -101,16 +101,25 @@ export const DOCKRISK_MUTE = 'dockrisk:'
 export const NOBOOT_MUTE = 'noboot:'
 // Учетка, которая нужна, хотя в нее давно не входят: access:<пользователь>
 export const ACCESS_MUTE = 'access:'
+// ОС, которую сейчас не обновить или не перезагрузить: osupd:<вид совета> (eol, reboot, security, apt)
+export const OSUPD_MUTE = 'osupd:'
 // Решения "так и должно быть": учетка нужна, порт открыт намеренно, ключи от хоста по назначению,
-// не нужен после перезагрузки. Хранятся в alert_mutes, но это не заглушенный алерт: в "Заглушено"
-// и чипе "бессрочно" их нет, видны и снимаются там, где поставлены (раздел карточки, "вернуть")
-const DECISIONS = [ACCESS_MUTE, EXPOSED_MUTE, DOCKRISK_MUTE, NOBOOT_MUTE]
+// не нужен после перезагрузки, ОС не обновить. Хранятся в alert_mutes, но это не заглушенный алерт: в
+// "Заглушено" и чипе "бессрочно" их нет, видны и снимаются там, где поставлены (раздел карточки, "вернуть")
+const DECISIONS = [ACCESS_MUTE, EXPOSED_MUTE, DOCKRISK_MUTE, NOBOOT_MUTE, OSUPD_MUTE]
 export const isDecision = (k: string) => DECISIONS.some((p) => k.startsWith(p))
+// Кнопка и подпись решения по совету об ОС: что именно нельзя
+export function osDecisionLabel(kind: string, t: TFn): string {
+  if (kind === 'eol') return t('обновить ОС нельзя')
+  if (kind === 'reboot') return t('перезагружать нельзя')
+  return t('обновлять нельзя')
+}
 export function muteKindLabel(k: string, t: TFn): string | null {
   if (k === 'noboot') return t('Не переживет перезагрузку')
   if (k === 'access_audit') return t('Доступы: заброшенные учетки и слабые ключи')
   if (k.startsWith(NOBOOT_MUTE)) return `${t('не нужен после перезагрузки')}: ${k.slice(NOBOOT_MUTE.length)}`
   if (k.startsWith(ACCESS_MUTE)) return `${t('учетка нужна')}: ${k.slice(ACCESS_MUTE.length)}`
+  if (k.startsWith(OSUPD_MUTE)) return `${t('Обновления ОС')}: ${osDecisionLabel(k.slice(OSUPD_MUTE.length), t)}`
   if (k.startsWith(DOCKRISK_MUTE)) return `${t('ключи от хоста по назначению')}: ${k.slice(DOCKRISK_MUTE.length)}`
   if (k.startsWith(LISTEN_MUTE)) return `${t('пропавший порт')}: ${k.slice(LISTEN_MUTE.length)}`
   if (k.startsWith(QSTUCK_MUTE)) {

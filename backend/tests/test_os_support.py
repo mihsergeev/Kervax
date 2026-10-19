@@ -26,14 +26,28 @@ def test_eol_by_pretty_name():
 
 
 def test_eol_advice():
-    assert os_support.advice({"os": "Ubuntu 20.04.6 LTS"}, NOW) == [{"kind": "eol", "level": 2, "text": (
-        "обычная поддержка Ubuntu 20.04 кончилась 31.05.2025: обновления безопасности только по подписке Ubuntu Pro")}]
-    assert os_support.advice({"os": "Debian GNU/Linux 11 (bullseye)"}, NOW) == [{"kind": "eol", "level": 2, "text": (
-        "поддержка Debian 11 кончилась 31.08.2026: обновлений безопасности больше нет")}]
+    assert os_support.advice({"os": "Ubuntu 20.04.6 LTS"}, NOW) == [{
+        "kind": "eol", "level": 2, "key": "osupd:eol", "muted": False, "text": (
+            "обычная поддержка Ubuntu 20.04 кончилась 31.05.2025: исправления безопасности дальше только в Ubuntu Pro "
+            "(ESM до 30.04.2030, pro attach) или после переезда на новую LTS")}]
+    assert os_support.advice({"os": "Debian GNU/Linux 11 (bullseye)"}, NOW) == [{
+        "kind": "eol", "level": 2, "key": "osupd:eol", "muted": False,
+        "text": "поддержка Debian 11 кончилась 31.08.2026: обновлений безопасности больше нет"}]
+    # ESM тоже кончился - Ubuntu Pro уже не спасет
+    assert [a["text"] for a in os_support.advice({"os": "Ubuntu 16.04.7 LTS"}, NOW)] == [
+        "поддержка Ubuntu 16.04 кончилась 30.04.2021, ESM тоже (30.04.2026): обновлений безопасности больше нет"]
     # за полгода предупреждаем, раньше молчим
     soon = os_support.advice({"os": "Ubuntu 22.04.4 LTS"}, datetime(2027, 1, 1, tzinfo=timezone.utc))
-    assert soon == [{"kind": "eol", "level": 1, "text": "поддержка Ubuntu 22.04 кончится 01.06.2027, через 151 день"}]
+    assert [(a["level"], a["text"]) for a in soon] == [(1, "поддержка Ubuntu 22.04 кончится 01.06.2027, через 151 день")]
     assert os_support.advice({"os": "Ubuntu 24.04.1 LTS"}, NOW) == []
+
+
+def test_decision_mutes_only_its_kind():
+    rep = {"os": "Ubuntu 20.04.6 LTS", "os_upd": _upd(reboot=True, reboot_ts=T - 30 * DAY, security=4, unatt="off")}
+    got = os_support.advice(rep, NOW, ["osupd:eol", "osupd:reboot", "dockrisk:x"])
+    assert [(a["key"], a["muted"]) for a in got] == [
+        ("osupd:eol", True), ("osupd:reboot", True), ("osupd:security", False)]
+    assert all(not a["muted"] for a in os_support.advice(rep, NOW, None))
 
 
 def test_healthy_updates_say_nothing():

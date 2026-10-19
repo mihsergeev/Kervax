@@ -4333,6 +4333,31 @@ textarea:focus {
 .loc-res-off {
   opacity: 0.55;
 }
+/* совет по ОС: текст, решение и кнопка в одну строку, на телефоне кнопка уходит вниз */
+.osupd-adv {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.3rem 0.6rem;
+}
+.osupd-adv-text {
+  flex: 1 1 16rem;
+  min-width: 0;
+}
+.osupd-adv .row-act {
+  flex: 0 0 auto;
+}
+.osupd-adv-off {
+  font-size: 0.85rem;
+  color: var(--text-muted);
+  border: 1px dashed var(--border);
+  border-radius: 6px;
+  padding: 0.35rem 0.6rem;
+}
+.osupd-adv-why {
+  font-size: 0.78rem;
+  white-space: nowrap;
+}
 /* строки-локации как кнопки-переключатели графика */
 .loc-res-btn {
   width: 100%;

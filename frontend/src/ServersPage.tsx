@@ -72,6 +72,7 @@ import {
   EXPOSED_MUTE,
   NOBOOT_MUTE,
   ACCESS_MUTE,
+  osDecisionLabel,
   muteKindLabel,
   SRV_ALERT_KINDS,
   collectMutes,
@@ -861,7 +862,7 @@ function serverSecInfo(c: {
     if (i.section || i.kind === 'offline') continue
     add(secOfLink(i.sec) ?? 'overview', i.tone === 't-down' ? 2 : 1, i.text, i.since)
   }
-  for (const a of s.os_advice ?? []) add('updates', a.level, a.text)
+  for (const a of s.os_advice ?? []) if (!a.muted) add('updates', a.level, a.text)
   for (const a of s.sw_advice ?? []) add('updates', a.level, a.text)
   const nb = s.noboot_advice?.units ?? []
   if (nb.length) add('units', 1, t('после перезагрузки не запустятся {list}: работают, но не включены', { list: shortList(nb, t) }))
@@ -2895,11 +2896,24 @@ const PSI_ROWS: { k: string; label: string; some: number; full: number }[] = [
 
 // Обновления ОС (агент 2.26): что стоит, что ждет установки, когда перезагружаться. Сверху -
 // что сделать (os_advice считает бэкенд: конец поддержки, перезагрузка, безопасность, apt).
-function OsUpdates({ server: s }: { server: Server }) {
+// Обновить ОС можно не всегда (старый сервер, софт не встанет на новую версию): тогда у пункта
+// решение "обновить ОС нельзя" и т.п., он гаснет здесь и уходит из "Требует действий"
+function OsUpdates({ server: s, onChanged }: { server: Server; onChanged: () => void }) {
   const { t } = useI18n()
+  const { isViewer } = useAuth()
+  const { busy, toggle } = useMuteToggle(s, onChanged)
+  const [busyAll, setBusyAll] = useState(false)
   const u = s.last_report?.os_upd
   const adv = s.os_advice ?? []
   if (!u && !adv.length) return null
+  const live = adv.filter((a) => !a.muted)
+  const keepAll = () => {
+    setBusyAll(true)
+    updateServer(s.id, { alert_mutes: [...new Set([...(s.alert_mutes ?? []), ...live.map((a) => a.key)])] })
+      .then(onChanged)
+      .catch(() => {})
+      .finally(() => setBusyAll(false))
+  }
   const day = (ts?: number) => (ts ? new Date(ts * 1000).toLocaleDateString() : '')
   const unatt = u?.unatt === 'on' ? t('включены') : u?.unatt === 'off' ? t('выключены') : u?.unatt === 'none' ? t('не установлены') : ''
   return (
@@ -2907,9 +2921,22 @@ function OsUpdates({ server: s }: { server: Server }) {
       <div className="chart-card net-card net-card-wide" id="mcard-osupd">
         <div className="net-head">
           <div className="chart-cap">{t('Обновления ОС')}</div>
+          {!isViewer && live.length > 1 && (
+            <button className="ghost small row-act" disabled={busyAll} onClick={keepAll}>
+              {t('все так и оставить')}
+            </button>
+          )}
         </div>
         {adv.map((a) => (
-          <div key={a.kind} className={a.level >= 2 ? 'net-prob' : 'net-note'}>{a.text}</div>
+          <div key={a.kind} className={`osupd-adv ${a.muted ? 'osupd-adv-off' : a.level >= 2 ? 'net-prob' : 'net-note'}`}>
+            <span className="osupd-adv-text">{a.text}</span>
+            {a.muted && <span className="osupd-adv-why">{osDecisionLabel(a.kind, t)}</span>}
+            {!isViewer && a.key && (
+              <button className="ghost small row-act" disabled={busy === a.key || busyAll} onClick={() => toggle(a.key, !a.muted)}>
+                {a.muted ? t('вернуть') : osDecisionLabel(a.kind, t)}
+              </button>
+            )}
+          </div>
         ))}
         {u && (
           <div className="net-tiles net-tiles-text">
@@ -6539,7 +6566,7 @@ function ServerDetail({
 
         {active === 'updates' && (
           <div className="srv-sec">
-            <OsUpdates server={s} />
+            <OsUpdates server={s} onChanged={onChanged} />
             <SoftwareCard server={s} />
           </div>
         )}

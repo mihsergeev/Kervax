@@ -449,8 +449,9 @@ function actionItems(servers: Server[], avail: string, relProblem: string, t: T)
         grp: 'dbdump', detail: db, text: t('{name}: {db} — нужен отдельный дамп', { name: s.name, db }) })
     }
     // ОС: конец поддержки, перезагрузка, обновления безопасности - по пункту на вид совета:
-    // десяток нод с отложенной перезагрузкой сворачивается в одну строку "нужна перезагрузка"
-    for (const x of s.os_advice ?? []) {
+    // десяток нод с отложенной перезагрузкой сворачивается в одну строку "нужна перезагрузка".
+    // Принятое в карточке ("обновить ОС нельзя") сюда не идет: это решение, а не дело
+    for (const x of (s.os_advice ?? []).filter((x) => !x.muted)) {
       items.push({ key: `os-${x.kind}-${s.id}`, icon: x.level >= 2 ? '⛔' : '🧰', section: 'servers', id: s.id,
         name: s.name, cc: s.country, sec: 'osupd', grp: `os-${x.kind}`, detail: x.text,
         text: `${s.name}: ${x.text}` })
