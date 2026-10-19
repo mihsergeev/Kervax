@@ -61,6 +61,20 @@ const PROBE_SEC: Record<string, number> = { k8s: 4, redis: 6, ch: 6, rabbitmq: 8
 // «k8s.<namespace>.<sts|deploy|ds>.<имя>». Дамп снимает helper на ноде через kubectl exec,
 // сам под он находит заново при каждом запуске. Человеку показываем «namespace/имя».
 const isKube = (inst?: string) => !!inst && inst.startsWith('k8s.')
+const MUTED_HIDDEN_KEY = 'kervax_cov_muted_hidden'
+// значок заглушенной находки: у базы - значок движка, у тома кластера - kubernetes,
+// у каталога или диска - папка (цилиндр базы на пути вводил бы в заблуждение)
+function MutedIcon({ x }: { x: BackupAudit }) {
+  if (x.kind.startsWith('kube_vol')) return <EngineIcon name="kubernetes" />
+  if (x.kind === 'mount' || x.kind === 'bind') {
+    return (
+      <svg className="engine-ico" viewBox="0 0 24 24" width={15} height={15} aria-hidden="true" focusable="false">
+        <path fill="currentColor" d="M3 5.5A1.5 1.5 0 0 1 4.5 4h4.6l2 2.2h8.4A1.5 1.5 0 0 1 21 7.7v10.8a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 18.5z" />
+      </svg>
+    )
+  }
+  return <EngineIcon name={x.subject} />
+}
 function instLabel(inst: string): string {
   if (!isKube(inst)) return inst
   const [, ns, , ...name] = inst.split('.')
@@ -86,7 +100,16 @@ export function CoverageAudit({ server: s, canManage, onChanged, onSchedule, bar
   } | null>(null)
   const [cfgFor, setCfgFor] = useState<string | null>(null)
   const [muteBusy, setMuteBusy] = useState<string | null>(null)
-  const [showMuted, setShowMuted] = useState(false)
+  // заглушенное видно по умолчанию: человек должен помнить, что именно выключил.
+  // "скрыть" запоминаем в браузере, доступ к localStorage бывает закрыт
+  const [mutedHidden, setMutedHidden] = useState(() => {
+    try { return localStorage.getItem(MUTED_HIDDEN_KEY) === '1' } catch { return false }
+  })
+  const toggleMutedHidden = () => {
+    const next = !mutedHidden
+    setMutedHidden(next)
+    try { localStorage.setItem(MUTED_HIDDEN_KEY, next ? '1' : '0') } catch { /* не запомним - не беда */ }
+  }
   const [showDbRisks, setShowDbRisks] = useState(false)
   const [dumpMsg, setDumpMsg] = useState<{ ok: boolean; text: string } | null>(null)
   // Дамп нужен и БЕЗ файлового бэкапа: локальная копия на самой ноде, из которой можно
@@ -355,6 +378,45 @@ export function CoverageAudit({ server: s, canManage, onChanged, onSchedule, bar
   const hiddenDb = dbSelfManaged && dbRisks.length > 0 && !showDbRisks
   const anyDump = okItems.some((x) => !!findDump(x.dump_engine, x.instance))
   const showCols = risks.length > 0 || okItems.length > 0 || (dbSelfManaged && dbRisks.length > 0)
+  // Заглушенное - карточками как "Бэкапится", но серым: видно, что выключено и почему, и
+  // не спорит с проблемами. Встает под более короткую колонку, чтобы рядом не зияла дыра;
+  // если там не помещается (строки заглушенного ниже карточек базы, отсюда 1.5) - на всю
+  // ширину под колонками, и тогда список сам раскладывается в две колонки
+  const isPath = (x: BackupAudit) => x.kind === 'mount' || x.kind === 'bind' || x.kind === 'kube_vol'
+  const leftRows = Math.max(1, left.length) + (dbSelfManaged && dbRisks.length > 0 ? 1 : 0)
+  const rightRows = Math.max(1, okItems.length)
+  const mutedPlace = !showCols || mutedItems.length > Math.abs(leftRows - rightRows) * 1.5 + 3
+    ? 'wide' : leftRows <= rightRows ? 'left' : 'right'
+  const mutedBlock = mutedItems.length > 0 && (
+    <div className="cov-col cov-col-mute">
+      <div className="cov-col-h">
+        {t('Заглушено')} <span className="cov-n">{mutedItems.length}</span>
+        <span className="cov-col-sub">{t('не бэкапится намеренно, в проблемы не идет')}</span>
+        <button className="linklike cov-col-toggle" onClick={toggleMutedHidden}>
+          {mutedHidden ? t('показать') : t('скрыть')}
+        </button>
+      </div>
+      {!mutedHidden && <div className="cov-mute-list">{mutedItems.map((x, i) => (
+        <div key={x.key || i} className="cov-li cov-li-mute">
+          <span className="cov-ico"><MutedIcon x={x} /></span>
+          <div className="cov-nm">
+            <b className={isPath(x) ? 'mono' : undefined}>{x.subject}</b>
+            {x.instance && <span className="type-chip mono">{instLabel(x.instance)}</span>}
+          </div>
+          <span className="cov-act">
+            {canManage && x.key && (
+              <button className="ghost cov-unmute" disabled={muteBusy !== null}
+                title={t('Вернуть в проблемы: панель снова будет напоминать, что это не в бэкапе')}
+                onClick={() => muteFinding(x.key!, false)}>
+                {muteBusy === x.key ? '...' : <><span className="cov-unmute-ico">🔔</span> {t('вернуть')}</>}
+              </button>
+            )}
+          </span>
+          <div className="cov-ln" title={x.detail}>{x.note || x.detail}</div>
+        </div>
+      ))}</div>}
+    </div>
+  )
   return (
     <div className="chart-card net-card net-card-wide coverage-audit cov-card">
       {!bare && (
@@ -405,52 +467,59 @@ export function CoverageAudit({ server: s, canManage, onChanged, onSchedule, bar
       )}
       {showCols && (
         <div className="cov-cols">
-          <div className={`cov-col cov-col-q${left.length ? '' : ' cov-col-calm'}`}>
-            <div className="cov-col-h">
-              {t('Под вопросом')} <span className="cov-n">{left.length}</span>
-              {left.length > 0 && <span className="cov-col-sub">{t('нужен дамп: файловый снапшот живой базы может не восстановиться')}</span>}
-            </div>
-            {/* при «бэкаплю все базы сам» находки-СУБД свёрнуты — счётчик и кнопка */}
-            {dbSelfManaged && dbRisks.length > 0 && (
-              <button className="ghost repo-cleanup-toggle" onClick={() => setShowDbRisks(!showDbRisks)}>
-                {showDbRisks
-                  ? t('свернуть базы (бэкаплю сам)')
-                  : t('🛢 базы, которые бэкаплю сам: {n} — показать', { n: dbRisks.length })}
-              </button>
-            )}
-            {left.map((x, i) => row(x, 'q', i))}
-            {!left.length && !hiddenDb && <div className="cov-empty">✓ {t('все базы бэкапятся')}</div>}
-          </div>
-          <div className="cov-col cov-col-ok">
-            <div className="cov-col-h">
-              {t('Бэкапится')} <span className="cov-n">{okItems.length}</span>
-              {anyDump && (
-                <span className="cov-col-sub">
-                  {dumpsAreLocalOnly
-                    ? t('дампы снимаются ночью и лежат только на ноде')
-                    : bk?.schedule
-                      ? t('дамп снимается перед бэкапом в {time}', { time: bk.schedule })
-                      : t('дамп снимается перед каждым бэкапом')}
-                  {!dumpsAreLocalOnly && (hasSchedule || onSchedule) && (
-                    <>
-                      {' · '}
-                      <button className="linklike" onClick={() => {
-                        if (onSchedule) return onSchedule()
-                        document.getElementById('backup-manage-schedule')
-                          ?.scrollIntoView({ behavior: 'smooth', block: 'center' })
-                      }}>
-                        {t('поменять время')}
-                      </button>
-                    </>
-                  )}
-                </span>
+          <div className="cov-stack">
+            <div className={`cov-col cov-col-q${left.length ? '' : ' cov-col-calm'}`}>
+              <div className="cov-col-h">
+                {t('Под вопросом')} <span className="cov-n">{left.length}</span>
+                {left.length > 0 && <span className="cov-col-sub">{t('нужен дамп: файловый снапшот живой базы может не восстановиться')}</span>}
+              </div>
+              {/* при «бэкаплю все базы сам» находки-СУБД свёрнуты — счётчик и кнопка */}
+              {dbSelfManaged && dbRisks.length > 0 && (
+                <button className="ghost repo-cleanup-toggle" onClick={() => setShowDbRisks(!showDbRisks)}>
+                  {showDbRisks
+                    ? t('свернуть базы (бэкаплю сам)')
+                    : t('🛢 базы, которые бэкаплю сам: {n} — показать', { n: dbRisks.length })}
+                </button>
               )}
+              {left.map((x, i) => row(x, 'q', i))}
+              {!left.length && !hiddenDb && <div className="cov-empty">✓ {t('все базы бэкапятся')}</div>}
             </div>
-            {okItems.map((x, i) => row(x, 'ok', i))}
-            {!okItems.length && <div className="cov-empty muted">{t('пока ни одной базы')}</div>}
+            {mutedPlace === 'left' && mutedBlock}
+          </div>
+          <div className="cov-stack">
+            <div className="cov-col cov-col-ok">
+              <div className="cov-col-h">
+                {t('Бэкапится')} <span className="cov-n">{okItems.length}</span>
+                {anyDump && (
+                  <span className="cov-col-sub">
+                    {dumpsAreLocalOnly
+                      ? t('дампы снимаются ночью и лежат только на ноде')
+                      : bk?.schedule
+                        ? t('дамп снимается перед бэкапом в {time}', { time: bk.schedule })
+                        : t('дамп снимается перед каждым бэкапом')}
+                    {!dumpsAreLocalOnly && (hasSchedule || onSchedule) && (
+                      <>
+                        {' · '}
+                        <button className="linklike" onClick={() => {
+                          if (onSchedule) return onSchedule()
+                          document.getElementById('backup-manage-schedule')
+                            ?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+                        }}>
+                          {t('поменять время')}
+                        </button>
+                      </>
+                    )}
+                  </span>
+                )}
+              </div>
+              {okItems.map((x, i) => row(x, 'ok', i))}
+              {!okItems.length && <div className="cov-empty muted">{t('пока ни одной базы')}</div>}
+            </div>
+            {mutedPlace === 'right' && mutedBlock}
           </div>
         </div>
       )}
+      {mutedPlace === 'wide' && mutedBlock}
       {/* итог, если карточка, у которой шла команда, пропала из списков (например,
           контейнер удалили, пока ждали отчёт) — иначе ответ сервера просто исчез бы */}
       {op?.msg && (op.progress.phase === 'done' || op.progress.phase === 'error') &&
@@ -470,26 +539,6 @@ export function CoverageAudit({ server: s, canManage, onChanged, onSchedule, bar
               ?
             </span>
           </label>
-        )}
-        {mutedItems.length > 0 && (
-          <div className="coverage-muted">
-            <button className="ghost repo-cleanup-toggle" onClick={() => setShowMuted(!showMuted)}>
-              {showMuted ? t('скрыть') : t('🔕 приглушено вручную: {n}', { n: mutedItems.length })}
-            </button>
-            {showMuted && mutedItems.map((x, i) => (
-              <div key={x.key || i} className="coverage-item">
-                <span className="mono muted">{x.subject}</span>
-                <span className="muted small"> — {x.note || x.detail}</span>
-                {canManage && x.key && (
-                  <button className="ghost icon-btn coverage-mute" disabled={muteBusy !== null}
-                    title={t('Вернуть в проблемы')}
-                    onClick={() => muteFinding(x.key!, false)}>
-                    {muteBusy === x.key ? '…' : '🔔'}
-                  </button>
-                )}
-              </div>
-            ))}
-          </div>
         )}
         {/* proc_full=false → на ноде hidepid, агент не видит чужие процессы: нативно
             установленные СУБД других юзеров могут не попасть в детект (контейнерные и

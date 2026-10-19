@@ -2434,53 +2434,79 @@ select:focus {
   color: var(--text-muted);
   cursor: help;
 }
+/* на телефоне чип в строке сервера короче: "заглушено · 3", срок в подсказке */
+@media (max-width: 560px) {
+  .mute-chip-when { display: none; }
+  /* а если и так не влезает, чип уходит на следующую строку, а не режется краем */
+  .check-name:has(> .mute-chip) { flex-wrap: wrap; row-gap: 0.25rem; }
+}
 /* плитка "Заглушено" на "Серверах": под подписью где именно и сколько само не истечет */
 /* числа в ряду на одной высоте: кнопка центрирует содержимое, и у плитки с подписью число уезжало вверх */
 .stat-tiles > .stat-tile { min-width: 0; display: flex; flex-direction: column; justify-content: flex-start; }
 .stat-num.t-muted { color: var(--text-muted); }
-.stat-sub { margin-top: 0.2rem; font-size: 0.74rem; color: var(--text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.stat-sub { margin-top: 0.2rem; font-size: 0.74rem; font-weight: 400; color: var(--text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .stat-tile-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-/* панель "Заглушено" справа поверх страницы (MutesPanel.tsx): "Серверы" и "Бэкапы" */
+/* панель "Заглушено" справа поверх страницы (MutesPanel.tsx): "Серверы" и "Бэкапы". Вид как у
+   "Что сломано" на главной: плоские строки без линеек, подсветка строки под курсором, счетчики
+   пилюлями, группы серверов разделены линией. Срок приглушенный и без цвета: заглушенное - не
+   беда, оранжевым тут нечего выделять */
 .mt-drawer-back { position: fixed; inset: 0; z-index: 30; background: rgba(0, 0, 0, 0.35); }
 .card.mt-drawer {
-  position: absolute; top: 0; right: 0; bottom: 0; width: min(36rem, 100vw);
-  display: flex; flex-direction: column; gap: 0.5rem; padding: 0.9rem 1rem;
+  position: absolute; top: 0; right: 0; bottom: 0; width: min(34rem, 100vw);
+  display: flex; flex-direction: column; gap: 0.45rem; padding: 0.75rem 0.9rem;
   border-radius: 0; border-width: 0 0 0 1px; box-shadow: -8px 0 24px rgba(0, 0, 0, 0.25);
 }
-.mt-head { display: flex; align-items: center; gap: 0.6rem; }
-.mt-title { margin: 0; font-size: 1rem; font-weight: 600; }
-.mt-title-n { margin-left: 0.15rem; color: var(--text-muted); font-weight: 500; }
-button.ghost.mt-close { margin-left: auto; padding: 0.15rem 0.6rem; line-height: 1.4; }
-.mt-totals { display: flex; flex-wrap: wrap; gap: 0.2rem 0.9rem; }
-.mt-perm { color: var(--degraded); }
-.mt-tools { display: flex; align-items: center; flex-wrap: wrap; gap: 0.5rem; }
-.checks-search.mt-search { min-width: 0; flex: 1 1 12rem; padding-top: 0.35rem; padding-bottom: 0.35rem; font-size: 0.85rem; }
-.mt-drawer-body { flex: 1 1 auto; min-height: 0; overflow-y: auto; scrollbar-width: thin; border-top: 1px solid var(--border); }
+.mt-head { display: flex; align-items: center; gap: 0.5rem; }
+.mt-title { display: flex; align-items: center; gap: 0.45rem; margin: 0; font-size: 0.95rem; font-weight: 600; }
+button.ghost.icon-btn.mt-close { margin-left: auto; padding: 0.3rem 0.5rem; min-width: 1.9rem; font-size: 0.85rem; }
+.mt-totals { display: flex; flex-wrap: wrap; gap: 0.1rem 0; font-size: 0.78rem; }
+.mt-totals > span + span::before { content: '\00b7'; margin: 0 0.4rem; }
+.mt-tools { display: flex; align-items: center; flex-wrap: wrap; gap: 0.4rem; }
+.checks-search.mt-search {
+  min-width: 0; flex: 1 1 11rem; padding: 0.3rem 0.6rem 0.3rem 1.9rem;
+  background-position: 0.6rem center; background-size: 13px; border-color: var(--border); border-radius: 7px; font-size: 0.82rem;
+}
+.checks-search.mt-search:focus { border-color: var(--accent); box-shadow: none; }
+.win-switch.mt-switch { padding: 0.1rem; border-radius: 8px; }
+.mt-switch .win-btn { padding: 0.2rem 0.55rem; font-size: 0.76rem; font-weight: 500; border-radius: 6px; }
+.mt-drawer-body { flex: 1 1 auto; min-height: 0; overflow-y: auto; scrollbar-width: thin; }
 .sec-tbl.mt-tbl { font-size: 0.82rem; }
 /* по верху, а не по базовой линии: у кнопки-подписи базовая линия - последняя строка, и срок
    длинного пункта съезжал вниз */
-.sec-tbl.mt-tbl td { padding: 0.25rem 0.5rem; vertical-align: top; line-height: 1.4; }
-.sec-tbl.mt-tbl tr.mt-grp td { padding-top: 0.6rem; }
-.mt-grp-n { margin-left: 0.45rem; }
-.linklike.mt-srv { font-weight: 600; text-decoration: none; }
-.mt-what { width: 100%; overflow-wrap: anywhere; }
-button.mt-what-btn, button.mt-what-btn:hover {
+.sec-tbl.mt-tbl td { padding: 0.3rem 0.45rem; border-bottom: 0; vertical-align: top; line-height: 1.4; }
+.sec-tbl.mt-tbl tr:hover td { background: color-mix(in srgb, var(--text) 6%, transparent); }
+.sec-tbl.mt-tbl tr:hover td:first-child { border-radius: 6px 0 0 6px; }
+.sec-tbl.mt-tbl tr:hover td:last-child { border-radius: 0 6px 6px 0; }
+.sec-tbl.mt-tbl tr.mt-grp:hover td { background: none; }
+.sec-tbl.mt-tbl tr.mt-grp td { padding: 0.6rem 0.45rem 0.15rem; }
+.sec-tbl.mt-tbl tr.mt-grp:not(:first-child) td { border-top: 1px solid var(--border); }
+.mt-grp .net-n { margin-left: 0.4rem; }
+button.mt-srv, button.mt-what-btn {
   padding: 0; border: 0; border-radius: 3px; background: none; box-shadow: none;
-  color: var(--text); font: inherit; font-weight: 400; text-align: left; cursor: pointer; overflow-wrap: anywhere;
+  color: var(--text); font: inherit; text-align: left; cursor: pointer; overflow-wrap: anywhere;
 }
-button.mt-what-btn:hover { color: var(--accent); text-decoration: underline; }
-button.mt-what-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
-.mt-when-c { white-space: nowrap; }
-.mt-until { display: block; font-size: 0.72rem; color: var(--text-muted); }
+button.mt-srv { font-size: 0.85rem; font-weight: 600; }
+button.mt-what-btn { font-weight: 400; }
+button.mt-srv:hover, button.mt-what-btn:hover { background: none; color: var(--accent); }
+button.mt-srv:focus-visible, button.mt-what-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.mt-what { width: 100%; overflow-wrap: anywhere; }
+.mt-when-c { white-space: nowrap; font-size: 0.78rem; color: var(--text-muted); }
+.mt-until::before { content: ' \00b7  '; }
 .mt-x-c { width: 1%; white-space: nowrap; text-align: right; }
-button.ghost.mt-x { padding: 0 0.4rem; font-size: 0.78rem; line-height: 1.6; border-color: transparent; }
-button.ghost.mt-x:hover:not(:disabled) { color: var(--down); border-color: var(--border); }
-button.ghost.mt-undo { padding: 0.05rem 0.5rem; font-size: 0.78rem; }
+button.ghost.mt-x {
+  padding: 0 0.3rem; font-size: 0.75rem; line-height: 1.5; border-color: transparent; background: none;
+  box-shadow: none; color: var(--text-muted); opacity: 0.7;
+}
+button.ghost.mt-x:hover:not(:disabled) { color: var(--down); border-color: transparent; background: none; opacity: 1; }
+button.ghost.mt-undo { padding: 0 0.45rem; font-size: 0.75rem; line-height: 1.5; }
 tr.mt-off button.mt-what-btn { color: var(--text-muted); text-decoration: line-through; }
 @media (max-width: 560px) {
   /* на телефоне панель во всю ширину, плитка "Заглушено" одна в ряду: подпись с серверами не режется */
-  .card.mt-drawer { width: 100vw; border-width: 0; padding: 0.75rem 0.8rem; }
-  .sec-tbl.mt-tbl td { padding: 0.25rem 0.3rem; }
+  .card.mt-drawer { width: 100vw; border-width: 0; padding: 0.65rem 0.7rem; }
+  .sec-tbl.mt-tbl td { padding: 0.28rem 0.3rem; }
+  /* срок в две строки: "до ..." под "еще ...", иначе колонка срока отнимает полстроки у подписи */
+  .mt-until { display: block; }
+  .mt-until::before { content: none; }
   .stat-tile.stat-tile-wide { grid-column: 1 / -1; }
 }
 /* позитивный индикатор: все агенты на подписанной версии */
@@ -5791,7 +5817,6 @@ button.adopt-mark {
 }
 .coverage-mute:hover { opacity: 1; }
 .coverage-item { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
-.coverage-muted { margin-top: 6px; opacity: 0.75; }
 /* "Покрытие" в две колонки, как карточка портов: слева "Под вопросом" (оранжевая, без
    подкраски, когда пусто), справа "Бэкапится" (зеленая). В строке значок, имя, экземпляр,
    метка, кнопки и одна строка состояния; длинные объяснения - в "как это работает" */
@@ -5824,12 +5849,33 @@ button.adopt-mark {
 .cov-tag-bad { color: var(--down); background: rgba(239, 68, 68, 0.1); border-color: rgba(239, 68, 68, 0.4); }
 .cov-tag-wait { color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); border-color: color-mix(in srgb, var(--accent) 38%, transparent); }
 .cov-empty { color: var(--up); font-size: 0.86rem; padding: 0.3rem 0; }
+/* колонка-стопка: под короткой колонкой встает "Заглушено", чтобы рядом не было пустоты */
+.cov-stack { display: flex; flex-direction: column; gap: 0.6rem; min-width: 0; }
+/* "Заглушено": те же карточки, что "Бэкапится", но серые - выключено намеренно, не проблема */
+.cov-col-mute { background: color-mix(in srgb, var(--text-muted) 4%, transparent); }
+.cov-col-mute .cov-col-h { color: var(--text-muted); }
+.cov-col-h .cov-col-toggle { margin-left: auto; font-size: 0.76rem; font-weight: 400; color: var(--text-muted); }
+.cov-li-mute { padding: 0.35rem 0; }
+.cov-li-mute .cov-ico { color: var(--text-muted); filter: grayscale(1); opacity: 0.55; }
+.cov-li-mute .cov-nm { color: var(--text-muted); font-size: 0.86rem; }
+.cov-li-mute .cov-nm b { font-weight: 600; overflow-wrap: anywhere; }
+.cov-li-mute .cov-nm b.mono { font-weight: 500; font-size: 0.82rem; }
+.cov-li-mute .type-chip { opacity: 0.7; }
+.cov-li-mute .cov-ln { opacity: 0.8; }
+.cov-unmute { padding: 0.05rem 0.5rem; font-size: 0.76rem; color: var(--text-muted); white-space: nowrap; }
+.cov-unmute:hover:not(:disabled) { color: var(--text); }
+.cov-unmute-ico { filter: grayscale(1); opacity: 0.6; }
+.cov-unmute:hover:not(:disabled) .cov-unmute-ico { filter: none; opacity: 1; }
+/* на всю ширину список заглушенного - в две колонки, чтобы десяток пунктов не тянулся простыней */
+@container (min-width: 720px) {
+  .cov-mute-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: 1.4rem; }
+  .cov-mute-list .cov-li:nth-last-child(2):nth-child(odd) { border-bottom: 0; }
+}
 .cov-gaps { border: 1px solid rgba(239, 68, 68, 0.4); background: rgba(239, 68, 68, 0.05); border-radius: 8px; padding: 0.45rem 0.7rem;
   display: flex; flex-direction: column; gap: 0.25rem; font-size: 0.85rem; }
 .cov-gaps-h { color: var(--down); font-weight: 600; }
 .cov-gap { display: flex; flex-wrap: wrap; align-items: center; gap: 0.2rem 0.5rem; overflow-wrap: anywhere; }
 .cov-foot { display: flex; flex-direction: column; gap: 0.35rem; }
-.cov-foot .coverage-muted { margin-top: 0; }
 /* в подвале покрытия подпись длинная: на телефоне переносится, а не уезжает за край окна */
 .cov-foot .nobackup-check { white-space: normal; flex-shrink: 1; }
 .cov-q { display: inline-flex; width: 16px; height: 16px; border-radius: 50%; border: 1px solid var(--border-strong); font-size: 0.68rem;
@@ -5839,6 +5885,11 @@ button.adopt-mark {
 /* модалка бэкапа ~760px: колонки там рядом, как в прототипе; друг под друга - уже на телефоне */
 @container (max-width: 600px) {
   .cov-cols { grid-template-columns: minmax(0, 1fr); }
+  /* в одну колонку заглушенное всегда последним, где бы оно ни стояло на широком */
+  .cov-stack { display: contents; }
+  .cov-col-q { order: 1; }
+  .cov-col-ok { order: 2; }
+  .cov-col-mute { order: 3; }
 }
 /* узкая колонка: кнопки под строкой состояния, имя не сжимается до переносов по буквам */
 @container (max-width: 300px) {

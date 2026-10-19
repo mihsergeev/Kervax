@@ -2326,8 +2326,8 @@ const EN: Record<string, string> = {
     'The panel never deletes backups (this is protection against compromise) — run as root on the backup server:',
 
   'Не бэкапить это — убрать из проблем': 'Do not back this up — clear from issues',
-  'Вернуть в проблемы': 'Move back to issues',
-  '🔕 приглушено вручную: {n}': '🔕 muted manually: {n}',
+  'не бэкапится намеренно, в проблемы не идет': 'not backed up on purpose, not counted as an issue',
+  'Вернуть в проблемы: панель снова будет напоминать, что это не в бэкапе': 'Move back to issues: the panel will remind again that this is not backed up',
 
   'Настраиваю и снимаю пробный дамп — подождите, на большой базе это может занять до минуты…':
     'Setting up and taking a test dump — please wait, on a large database this can take up to a minute…',

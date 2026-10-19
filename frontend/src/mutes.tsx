@@ -374,7 +374,7 @@ function muteWhen(items: MuteItem[], t: TFn): string {
   return u ? t('ещё {d}', { d: muteLeft(u, t) }) : ''
 }
 
-// Чип в строке списка
+// Чип в строке списка: словом, без эмодзи, как остальные чипы строки
 export function MuteChip({ items, t }: { items: MuteItem[]; t: TFn }) {
   const perm = items.some((i) => !i.until)
   return (
@@ -382,7 +382,8 @@ export function MuteChip({ items, t }: { items: MuteItem[]; t: TFn }) {
       className={`type-chip mute-chip${perm ? ' mute-chip-perm' : ''}`}
       title={items.map((i) => muteText(i, t)).join('\n')}
     >
-      🔕 {muteWhen(items, t)}
+      {t('заглушено')}
+      <span className="mute-chip-when"> {muteWhen(items, t)}</span>
       {items.length > 1 && ` · ${items.length}`}
     </span>
   )
