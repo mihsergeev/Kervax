@@ -1972,11 +1972,12 @@ const EN: Record<string, string> = {
     'The percentage is the share of the last minute when at least one process waited for the resource, "all stalled" is when all of them waited at once. D-state processes wait for disk or network and cannot be interrupted.',
   // утечка памяти
   'Растет память': 'Memory keeps growing',
-  'Минимум памяти за сутки растет 4 суток подряд. Пила сборщика мусора и всплески минимум не двигают, а утечка поднимает его каждый день.':
-    'The daily memory minimum has grown 4 days in a row. Garbage collector sawtooth and spikes do not move the minimum, a leak raises it every day.',
+  'Минимум памяти за сутки растет 4 суток подряд. Пила сборщика мусора и всплески минимум не двигают, а утечка поднимает его каждый день. Алерт - только если при таком росте свободной памяти сервера не хватит на неделю.':
+    'The daily memory minimum has grown 4 days in a row. Garbage collector sawtooth and spikes do not move the minimum, a leak raises it every day. Alerts only if at this rate the free memory of the server lasts less than a week.',
   'процесс': 'process',
   'в сутки': 'a day',
   'памяти хватит на {d} сут': 'memory lasts {d} days',
+  'памяти хватит больше чем на месяц': 'memory lasts more than a month',
   'Память: растет день за днем': 'Memory: grows day after day',
   'рост памяти': 'memory growth',
   // часто перезапускается

@@ -10,9 +10,12 @@ NOW = datetime(2026, 10, 19, 12, 0, tzinfo=timezone.utc)
 TS = int(NOW.timestamp())
 
 
-def _src(where, h1, d1, span=86400, container="", last="ERROR boom", lines1=None):
-    return {"where": where, "container": container, "h1": h1, "d1": d1, "lines1": lines1 if lines1 is not None else h1 * 3,
-            "span": span, "last_ts": TS - 60, "last": last}
+def _src(where, h1, d1, span=86400, container="", last="ERROR boom", lines1=None, hb=None, last_ts=TS - 60):
+    x = {"where": where, "container": container, "h1": h1, "d1": d1, "lines1": lines1 if lines1 is not None else h1 * 3,
+         "span": span, "last_ts": last_ts, "last": last}
+    if hb is not None:
+        x["hb"] = hb
+    return x
 
 
 def _rep(sources=None, ts=TS):
@@ -72,7 +75,8 @@ def test_problems_text_mute_and_home():
     v = le.view(s, NOW)
     a, b = v["sources"]
     assert a["mute"] == {"until": (NOW + timedelta(days=1)).isoformat()} and a["level"] == 2 and a["base"] == 30
-    assert b["label"] == "под shop/web-0 (php)" and b["key"] == "под shop/web-0|php" and "level" not in b
+    # под стейтфулсета - по ворклоаду: после пересоздания у пода то же имя, но у реплик разные
+    assert b["label"] == "под shop/web (php)" and b["key"] == "под shop/web|php" and "level" not in b
     # срок снуза вышел - снова в беде
     s.alert_snoozes = {"logerr:контейнер shop-php|": (NOW - timedelta(minutes=1)).isoformat()}
     assert len(le.problems(s, NOW)) == 1
@@ -115,9 +119,15 @@ def test_alert_condition():
 
 def test_helper_script():
     src = (Path(__file__).resolve().parents[2] / "agent" / "logerr-setup.sh").read_text(encoding="utf-8")
-    assert "KERVAX_SETUP_VERSION=0.2" in src and "KERVAX_SETUP_ALWAYS=1" in src and "\r" not in src
+    assert "KERVAX_SETUP_VERSION=0.3" in src and "KERVAX_SETUP_ALWAYS=1" in src and "\r" not in src
     # 0.2: строка стека (ClickHouse "3. DB::Exception... @ 0x", Java "at ...(", PHP "#3 ", "Caused by:") - не ошибка
-    assert "if (l ~ RE && msg(l) !~ FR) { errs++; last = l }" in src and "@ 0x[0-9a-fA-F]+" in src
+    # 0.3: строка nginx, которую вызвал клиент (limit_req, deny, 404, TLS клиента, ушел) - тоже
+    assert "if (l ~ RE) { m = msg(l); if (m !~ FR && m !~ NG) { errs++; last = l } }" in src and "@ 0x[0-9a-fA-F]+" in src
+    for s in ("limiting (requests|connections)", "access forbidden by rule", "failed \\\\(2: No such file or directory",
+              "while SSL handshaking, client", "while sending to client", "Primary script unknown"):
+        assert s in src, s
+    # корзины последнего часа для выдержки всплеска
+    assert '\\"hb\\":%s' in src and "hbs(e1)" in src
     # обратный слэш в строке лога удваивается так, что mawk его не теряет: иначе отчет не JSON
     assert '_jn = split(s, _jp, "\\\\")' in src
     # смещения и размеры больше 2 ГиБ: mawk пишет 7.1983e+09 в строке и режет %d на 2^31
@@ -135,3 +145,46 @@ def test_dbstat_asks_as_postgres_user_first():
     assert "KERVAX_SETUP_VERSION=0.13" in src
     assert src.count('if [ -n "$u" ] && [ "$u" != postgres ]; then') == 2
     assert src.count("case $? in 2|12[5-7])") == 4
+
+
+def test_replicas_of_a_workload_are_one_log():
+    """Три реплики ingress-nginx давали три сообщения подряд, по одному на каждую, перешедшую порог."""
+    pods = ["ingress-nginx-controller-5c67cd68dd-xwm58", "ingress-nginx-controller-5c67cd68dd-djg5j",
+            "ingress-nginx-controller-5c67cd68dd-jgxpb"]
+    rep = _rep([_src(f"pod default/{p}", 400, 400 + 23 * 10, container="controller", last=f"err {i}",
+                     last_ts=TS - 60 + i, hb=[0, 0, 100, 100, 100, 100]) for i, p in enumerate(pods)])
+    s = _srv(rep)
+    p = le.problems(s, NOW)
+    assert [x["key"] for x in p] == ["под default/ingress-nginx-controller|controller"]
+    assert p[0]["text"] == ("ошибки в логе: 3 пода default/ingress-nginx-controller (controller), 1 200 строк с ошибками"
+                            " за час, обычно около 30 в час\n↳ err 2")
+    # старый мьют на отдельный под глушит весь ворклоад
+    s.alert_mutes = ["logerr:под default/ingress-nginx-controller-5c67cd68dd-xwm58|controller"]
+    assert le.problems(s, NOW) == []
+    # алерт, ушедший по старому ключу пода, держит ворклоад на половине порогов
+    held = _srv(_rep([_src(f"pod default/{pods[0]}", 120, 120 + 23 * 10, container="controller")]),
+                state={"log_errors_sig": [f"под default/{pods[1]}|controller"]})
+    assert [x["level"] for x in le.problems(held, NOW)] == [1]
+
+
+def test_new_replica_without_history_is_not_a_spike():
+    # после выкатки: у старой копии обычный час 10, у новой истории нет - ее нынешний час и есть обычный
+    rep = _rep([_src("pod shop/api-6b8b56c769-f4k8m", 300, 300 + 23 * 10),
+                _src("pod shop/api-789cd65bb8-nkftn", 900, 900, span=1800)])
+    assert le.problems(_srv(rep), NOW) == []
+    v = le.view(_srv(rep), NOW)["sources"]
+    assert [(x["key"], x["h1"], x["base"]) for x in v] == [("под shop/api|", 1200, 910)]
+
+
+def test_spike_must_hold():
+    """Бот уперся в limit_req на пять минут: час ошибок выше порога, но держался всплеск одну корзину."""
+    burst = _src("container a", 400, 400 + 23 * 10, hb=[0, 0, 0, 0, 0, 400])
+    assert le.spike(burst) == 0
+    # держится 40 минут из часа - беда
+    assert le.spike(_src("container a", 400, 400 + 23 * 10, hb=[0, 0, 100, 100, 100, 100])) == 1
+    # три корзины из шести - еще нет
+    assert le.spike(_src("container a", 400, 400 + 23 * 10, hb=[0, 0, 0, 130, 130, 140])) == 0
+    # объявленный алерт держится без выдержки, отбой по половине порогов
+    assert le.spike(burst, held=True) == 1
+    # helper до 0.3 корзин не шлет - по часу, как раньше
+    assert le.spike(_src("container a", 400, 400 + 23 * 10)) == 1

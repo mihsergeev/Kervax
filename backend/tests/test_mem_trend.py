@@ -71,14 +71,27 @@ def _state(**series):
     return {"mem_trend": {k: _hist(v) for k, v in series.items()}}
 
 
-def test_problems_alert_and_home_rows():
+def test_growth_with_plenty_of_memory_is_not_a_problem():
+    """Prometheus +31 МБ в сутки на ноде с гигабайтами свободной памяти будил алертом в три ночи:
+    рост виден в карточке, но беда - только если при таком росте памяти не хватит на неделю."""
     s = _srv(_state(**{"docker:worker": [500, 700, 900, 1100, 1300], "proc:java@app": [500, 700, 900, 1100, 1300]}))
     ps = mem_trend.problems(s, NOW)
     # процесс в контейнере виден и в топе процессов: говорим один раз, про контейнер
     assert [x["key"] for x in ps] == ["docker:worker"]
-    # свободной памяти хватит на 41 сутки: дальше месяца срок не пишем
+    # 8 ГБ свободно, +200 МБ в сутки: хватит на 41 сутки
     assert ps[0]["text"] == "память контейнера worker растет 4 суток подряд: 500 МБ -> 1.3 ГБ, +200 МБ в сутки"
-    assert ps[0]["level"] == 1 and ps[0]["eta_days"] == 41
+    assert ps[0]["level"] == 0 and ps[0]["eta_days"] == 41
+    assert collector._server_conditions(s, NOW)["mem_leak"][0] == 0
+    assert [p for p in collector.server_problems(s, NOW) if p["kind"] == "mem_leak"] == []
+
+
+def test_problems_alert_and_home_rows():
+    # свободно 1 ГБ, +200 МБ в сутки: на 5 суток - предупреждение
+    s = _srv(_state(**{"docker:worker": [500, 700, 900, 1100, 1300]}), rep=_rep(mem_used=15 * 2**30))
+    ps = mem_trend.problems(s, NOW)
+    assert ps[0]["level"] == 1 and ps[0]["eta_days"] == 5.1
+    assert ps[0]["text"] == ("память контейнера worker растет 4 суток подряд: 500 МБ -> 1.3 ГБ, +200 МБ в сутки, "
+                             "свободной памяти сервера (1.0 ГБ) при таком росте хватит примерно на 5.1 сут")
     lvl, ctx = collector._server_conditions(s, NOW)["mem_leak"]
     assert lvl == 1 and ctx["sig"] == ["docker:worker"]
     rows = [(p["level"], p.get("section"), p["mute"]) for p in collector.server_problems(s, NOW)
@@ -96,6 +109,26 @@ def test_problems_alert_and_home_rows():
     assert mem_trend.problems(_srv(_state(**{"docker:worker": [500, 700, 900, 1100, 1300]}),
                                    mutes=["leak:docker:worker"]), NOW) == []
     assert collector._recovery_detail("mem_leak", {}, {}) == "память больше не растет день за днем"
+
+
+def test_memory_is_shared_by_everything_that_grows():
+    # свободно 2 ГБ: одному контейнеру с +200 МБ в сутки хватило бы на 10 суток, двоим - на 5
+    two = _state(**{"docker:worker": [500, 700, 900, 1100, 1300], "docker:api": [500, 700, 900, 1100, 1300]})
+    ps = mem_trend.problems(_srv(two, rep=_rep(mem_used=14 * 2**30)), NOW)
+    assert [(x["key"], x["level"], x["eta_days"]) for x in ps] == [("docker:api", 1, 5.1), ("docker:worker", 1, 5.1)]
+    one = _state(**{"docker:worker": [500, 700, 900, 1100, 1300]})
+    assert mem_trend.problems(_srv(one, rep=_rep(mem_used=14 * 2**30)), NOW)[0]["level"] == 0
+
+
+def test_no_false_recovery_when_still_growing():
+    """Алерт ушел по старому правилу (любой рост), а теперь памяти хватает: растет как росло, и
+    "память больше не растет" было бы неправдой - отбой молча."""
+    st = _state(**{"docker:worker": [500, 700, 900, 1100, 1300]})
+    s = _srv(st)
+    assert collector._sig_all_quiet(s, "mem_leak", {"docker:worker"}, NOW)
+    # перестал расти - это настоящий отбой
+    calm = _state(**{"docker:worker": [500, 700, 700, 700, 700]})
+    assert not collector._sig_all_quiet(_srv(calm), "mem_leak", {"docker:worker"}, NOW)
 
 
 def test_pod_mute_survives_a_deploy():

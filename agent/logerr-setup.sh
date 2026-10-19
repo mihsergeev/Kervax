@@ -20,9 +20,17 @@
 # of ClickHouse, "at org.foo.Bar(Bar.java:12)" of Java and Node, "#3 /app/x.php(12): ..." of PHP,
 # "Caused by:" and "... 12 more". One exception with thirty frames counted as thirty errors, and a
 # ClickHouse pod reached the "no usual hour yet" threshold with a few dozen of them.
+#
+# 0.3: nginx lines the client causes are not errors of the server: limit_req and limit_conn
+# rejections, deny rules, a missing file (404), a directory without an index, a body over
+# client_max_body_size, basic auth failures, a client TLS handshake that failed, "while sending to
+# client" (the client left) and "Primary script unknown" (404 through PHP-FPM). nginx logs them at
+# [error], and one bot hitting a rate limit made ingress-nginx look like it was failing. The report
+# also carries the error count of each 10-minute bucket of the last hour ("hb", oldest first, the
+# last one still filling): the panel alerts only on a spike that holds, not on a five-minute burst.
 set -euo pipefail
 
-KERVAX_SETUP_VERSION=0.2  # MAJOR.MINOR; compared component-wise
+KERVAX_SETUP_VERSION=0.3  # MAJOR.MINOR; compared component-wise
 KERVAX_SETUP_ALWAYS=1     # safe on any node: without Docker and pods it writes an empty report
 
 HELPER_DIR=/lib65/kervax
@@ -109,6 +117,9 @@ awk -F'\t' -v OFS='\t' -v now="$NOW" -v cap="$CAP" -v budget="$BUDGET" -v ns="$T
     RE = "ERROR|FATAL|CRITICAL|PANIC|Traceback \\(most recent|Exception|\\[(error|crit|alert|emerg)\\]|level=(error|fatal|panic|crit)|level[\\\\]?\"?: ?[\\\\]?\"(error|fatal|panic|crit)|PHP (Fatal|Parse) error|Uncaught "
     # a frame of a stack trace, the error itself is the line before it
     FR = "^[ \t]*([0-9]+\\. .* @ 0x[0-9a-fA-F]+|at .*[(:]|#[0-9]+ |Caused by: |\\.\\.\\. [0-9]+ (more|common frames))"
+    # an nginx [error] the client caused: rate limit, deny, 404, no index, big body, basic auth, client
+    # TLS, the client left, a php script that does not exist
+    NG = "\\[(error|crit)\\] [0-9]+#[0-9]+: (\\*[0-9]+ )?(limiting (requests|connections)|access forbidden by rule|open\\(\\) \".*\" failed \\(2: No such file or directory\\)|\".*\" is not found \\(2: No such file or directory\\)|directory index of \".*\" is forbidden|client intended to send too large|no user/password was provided for basic authentication|user \".*\" was not found in|user \".*\": password mismatch|SSL_do_handshake\\(\\) failed .* while SSL handshaking, client|.* while sending to client|.*Primary script unknown)"
     nowb = int(now / 600); used = 0
   }
   t == "state" {
@@ -132,7 +143,7 @@ awk -F'\t' -v OFS='\t' -v now="$NOW" -v cap="$CAP" -v budget="$BUDGET" -v ns="$T
     # sizes past 2 GiB: mawk turns a big integer into 7.1983e+09 in a string and %d cuts it at 2^31
     cmd = "tail -c +" sprintf("%.0f", from + 1) " \047" f "\047 2>/dev/null | head -c " sprintf("%.0f", rd)
     errs = 0; lines = 0; last = ""
-    while ((cmd | getline l) > 0) { lines++; if (l ~ RE && msg(l) !~ FR) { errs++; last = l } }
+    while ((cmd | getline l) > 0) { lines++; if (l ~ RE) { m = msg(l); if (m !~ FR && m !~ NG) { errs++; last = l } } }
     close(cmd); used += rd
     if (rd < n) { errs = int(errs * n / rd + 0.5); lines = int(lines * n / rd + 0.5) }
     ne[k] += errs; nl[k] += lines
@@ -147,6 +158,11 @@ awk -F'\t' -v OFS='\t' -v now="$NOW" -v cap="$CAP" -v budget="$BUDGET" -v ns="$T
   function sum(bs, from,   a, n, i, p, s) { s = 0; n = split(bs, a, ",")
     for (i = 1; i <= n; i++) { p = index(a[i], ":"); if (p && substr(a[i], 1, p - 1) + 0 > from) s += substr(a[i], p + 1) }
     return s }
+  # the six buckets of the last hour, oldest first: "[0,0,12,340,410,95]"
+  function hbs(bs,   a, n, i, p, b, c, res) { n = split(bs, a, ",")
+    for (i = 1; i <= n; i++) { p = index(a[i], ":"); if (p) c[substr(a[i], 1, p - 1) + 0] = substr(a[i], p + 1) + 0 }
+    res = ""; for (b = nowb - 5; b <= nowb; b++) res = res (res == "" ? "" : ",") sprintf("%.0f", c[b] + 0)
+    return "[" res "]" }
   END {
     for (f in nf) printf "O\t%s\t%s\t%.0f\n", f, no[f], nf[f] > ns
     for (k in seen) {
@@ -157,8 +173,8 @@ awk -F'\t' -v OFS='\t' -v now="$NOW" -v cap="$CAP" -v budget="$BUDGET" -v ns="$T
       d1 = sum(e1, nowb - 144); if (d1 <= 0) continue
       h1 = sum(e1, nowb - 6); hl = sum(l1, nowb - 6)
       span = now - first[k]; if (span > 86400) span = 86400
-      printf "%09d\t%09d\t{\"where\":\"%s\",\"container\":\"%s\",\"h1\":%d,\"d1\":%d,\"lines1\":%d,\"span\":%d,\"last_ts\":%d,\"last\":\"%s\"}\n",
-        999999999 - h1, 999999999 - d1, e(kw[k]), e(kc[k]), h1, d1, hl, span, lts[k] + 0, e(lsm[k]) > jout
+      printf "%09d\t%09d\t{\"where\":\"%s\",\"container\":\"%s\",\"h1\":%d,\"d1\":%d,\"lines1\":%d,\"span\":%d,\"hb\":%s,\"last_ts\":%d,\"last\":\"%s\"}\n",
+        999999999 - h1, 999999999 - d1, e(kw[k]), e(kc[k]), h1, d1, hl, span, hbs(e1), lts[k] + 0, e(lsm[k]) > jout
     }
     printf "%d\t%.0f\n", skipped + 0, used
   }' t=state "$STATE" t=src "$TMPD/src" t=stat "$TMPD/stat" > "$TMPD/head" || exit 0
