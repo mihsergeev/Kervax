@@ -28,13 +28,14 @@ from app.setup_scripts import current_setup_versions
 router = APIRouter(prefix="/ansible", tags=["ansible"])
 
 
-def _issues(rep: dict, now: datetime) -> list[str]:
+def _issues(rep: dict, now: datetime, mutes: list[str] | None = None) -> list[str]:
     """Что на ноде чинится плейбуком или командой, кроме helper'ов: группы kervax_docker_sock,
-    kervax_proxy_old, kervax_restic_old."""
+    kervax_proxy_old, kervax_restic_old. Старый прокси, который решили оставить как есть
+    (mutes), в группу не идет: плейбук его не тронет."""
     out = []
     if docker_exposure.exposed(rep):
         out.append("docker_sock")
-    if docker_exposure.outdated(rep, now.timestamp()):
+    if docker_exposure.old_live(rep, now.timestamp(), mutes):
         out.append("proxy_old")
     if bsrv_restic_old(rep):
         out.append("restic_old")
@@ -50,7 +51,7 @@ def node_of(s: Server, cur: dict[str, str], now: datetime) -> AnsibleNodeOut | N
         return None
     advice = _helper_advice(s, cur)
     online = _is_online(s, now)
-    issues = _issues(rep, now) if online else []
+    issues = _issues(rep, now, s.alert_mutes) if online else []
     restic = bsrv_restic_old(rep) if "restic_old" in issues else ""
     return AnsibleNodeOut(
         id=s.id, name=s.name, hostname=str(rep.get("hostname") or ""),
@@ -61,7 +62,7 @@ def node_of(s: Server, cur: dict[str, str], now: datetime) -> AnsibleNodeOut | N
         watchdog_off=((rep.get("caps") or {}).get("watchdog") is False),
         issues=issues,
         sock=docker_exposure.exposed(rep) if "docker_sock" in issues else [],
-        proxy_old=docker_exposure.outdated(rep, now.timestamp()) if "proxy_old" in issues else [],
+        proxy_old=docker_exposure.old_live(rep, now.timestamp(), s.alert_mutes) if "proxy_old" in issues else [],
         restic=restic,
         restic_target=str(bsrv_extra(rep).get("restic_target") or "") if restic else "",
     )

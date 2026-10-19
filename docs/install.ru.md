@@ -150,7 +150,7 @@ sudo mkdir -p /srv/caddy && cd /srv/caddy
 ```yaml
 services:
   caddy:
-    image: lucaslorentz/caddy-docker-proxy:2.10-alpine
+    image: lucaslorentz/caddy-docker-proxy:2.13.1-alpine
     restart: unless-stopped
     ports: ["80:80", "443:443"]
     environment:

@@ -17,9 +17,18 @@ Accepted пишутся для любого входа) и берет больш
 - заброшенная учетка с доступом (есть ключи или пароль при включенном входе по паролю) и слабые
   ключи (DSA, RSA короче 2048 бит) - пункт в "Требует действий".
 Точечный мут - "access:<пользователь>", весь пункт - "access_audit".
+
+uid 0 пускает PermitRootLogin: no - никак, prohibit-password - только по ключу. Без этого root с
+паролем на ноде с PermitRootLogin no считался доступной заброшенной учеткой.
+
+У заброшенной учетки - шаги "как отключить" (fix): после них панель доступа не видит (пароль
+заблокирован, файлы ключей переименованы), и пункт уходит сам. Срок учетки (usermod -e 1) helper
+не передает, он для надежности: SSH не пустит и по ключу из другого места. root срок не ставят:
+истекшая root ломает ее cron и su (PAM account), только passwd -l.
 """
 from __future__ import annotations
 
+import shlex
 from datetime import datetime, timedelta
 
 from app import changes as srv_changes
@@ -61,6 +70,8 @@ def accounts(srv: Server, now: datetime) -> tuple[list[dict], int] | None:
     since = int(snap.get("seen_since") or 0)
     ssh = ssh_audit.block(srv.last_report or {})
     pass_login = bool(ssh and ssh_audit.password_login(ssh))
+    root_key = not ssh or str(ssh.get("root") or "") != "no"
+    root_pass = bool(ssh and ssh_audit.root_password(ssh))
     keys: dict[str, list[dict]] = {}
     for k in snap.get("keys") or []:
         if isinstance(k, dict) and k.get("u"):
@@ -76,7 +87,10 @@ def accounts(srv: Server, now: datetime) -> tuple[list[dict], int] | None:
         ks = keys.get(name, [])
         pw = str(u.get("pw") or "")
         last = int(u.get("last") or 0)
-        access = bool(ks) or (pw == "P" and pass_login)
+        if str(u.get("uid")) == "0":
+            access = (bool(ks) and root_key) or (pw == "P" and root_pass)
+        else:
+            access = bool(ks) or (pw == "P" and pass_login)
         unused = last < ts - STALE.total_seconds() and (
             look >= STALE.total_seconds()
             or (look >= SHORT_LOOK.total_seconds() and last < ts - OLD_TERMINAL.total_seconds()))
@@ -118,10 +132,66 @@ def advice(srv: Server, now: datetime) -> dict | None:
     return {"stale": stale, "weak": weak} if stale or weak else None
 
 
+def _key_files(snap: dict) -> dict[str, list[str]]:
+    out: dict[str, list[str]] = {}
+    for k in snap.get("keys") or []:
+        if isinstance(k, dict) and k.get("u") and k.get("f") and str(k["f"]) not in out.get(str(k["u"]), []):
+            out.setdefault(str(k["u"]), []).append(str(k["f"]))
+    return out
+
+
+def disable_fix(a: dict, files: list[str], root_pass: bool, alone: bool) -> list[dict]:
+    """Как отключить заброшенную учетку a (из accounts): [{"id", "arg", "cmd"?, "alt"?}]. files - ее
+    файлы ключей, root_pass - пускает ли SSH root по паролю, alone - больше входить некем."""
+    name = a["name"]
+    if alone:
+        return [{"id": "acc_alone", "arg": name}]
+    if not ssh_audit.NAME_OK.match(name):
+        return []
+    # ключи переименовываются, а не удаляются: вернуть - mv обратно
+    hide = "\n".join(f"sudo mv {shlex.quote(f)} {shlex.quote(f + '.disabled')}" for f in files)
+    back = "\n".join(f"sudo mv {shlex.quote(f + '.disabled')} {shlex.quote(f)}" for f in files)
+    lock = a["pw"] == "P"
+    steps = []
+    if a["uid"] == 0:
+        # пароль root для консоли не трогаем, если по SSH паролем root и так не пускают
+        lock = lock and root_pass
+        if lock:
+            steps.append({"id": "acc_root_lock", "arg": name, "cmd": f"sudo passwd -l {name}"})
+        undo = [f"sudo passwd -u {name}"] if lock else []
+    else:
+        steps.append({"id": "acc_check", "arg": name, "cmd": (
+            f"ps -u {name} -o pid,lstart,args\nsudo crontab -l -u {name}\nls /var/lib/systemd/linger/\n"
+            f"grep -rlxF 'User={name}' /etc/systemd/system /lib/systemd/system")})
+        # -L только у заданного пароля: у заблокированного -U потом не снимется
+        steps.append({"id": "acc_lock", "arg": name, "cmd": f"sudo usermod {'-L ' if lock else ''}-e 1 {name}"})
+        undo = [f"sudo usermod {'-U ' if lock else ''}-e '' {name}"]
+    if files:
+        steps.append({"id": "acc_keys", "arg": name, "cmd": hide})
+        undo.append(back)
+    if undo:
+        steps.append({"id": "acc_undo", "arg": name, "cmd": "\n".join(undo)})
+    if a["uid"] != 0:
+        steps.append({"id": "acc_delete", "alt": True, "arg": name, "cmd": f"sudo userdel {name}"})
+    return steps
+
+
 def view(srv: Server, now: datetime) -> dict | None:
-    """Для карточки: учетки, с какого момента видны входы, заглушенные."""
+    """Для карточки: учетки, с какого момента видны входы, заглушенные; у заброшенных - fix."""
     acc = accounts(srv, now)
     if acc is None:
         return None
     mutes = set(srv.alert_mutes or [])
-    return {"accounts": [{**a, "muted": MUTE_PREFIX + a["name"] in mutes} for a in acc[0]], "seen_since": acc[1]}
+    files = _key_files(srv_changes.snapshot(srv.last_report or {}) or {})
+    ssh = ssh_audit.block(srv.last_report or {})
+    root_pass = bool(ssh and ssh_audit.root_password(ssh))
+    cut = now.timestamp() - STALE.total_seconds()
+    rows = []
+    for a in acc[0]:
+        row = {**a, "muted": MUTE_PREFIX + a["name"] in mutes}
+        if a["stale"] and not row["muted"]:
+            # последнюю учетку, через которую входят, отключать нельзя: не войдет никто
+            alone = not any(b["access"] and b["name"] != a["name"] and b["last"] >= cut for b in acc[0])
+            row["fix"] = disable_fix(a, files.get(a["name"], []), root_pass, alone)
+        rows.append(row)
+    return {"accounts": rows, "seen_since": acc[1]}

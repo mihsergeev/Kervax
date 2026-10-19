@@ -17,6 +17,7 @@ import { useI18n } from './i18n'
 import { DOCKRISK_MUTE, NOBOOT_MUTE, RESTARTS_DAY_MIN } from './mutes'
 import { OsIcon } from './osIcon'
 import { CountryFlag } from './CountryFlag'
+import { FixSteps } from './FixSteps'
 import { dockRiskText, proxyBuilt, shortList, srvIssues, srvMuted } from './serverUtils'
 import { fmtRel } from './ServersPage'
 import { CardNav, FreshChip, markMuted, OvAreas, OvRows, secInfoOf, type OvRow, type SecDef, type SecInfo, type SecItem } from './cardLayout'
@@ -254,38 +255,134 @@ function SockWarning({ items }: { items: Exposed[] }) {
   )
 }
 
-// Внешний прокси на образе старше года: на что обновлять. Подсказки - из обновлений 06.10.2026
-// (traefik 2.5.5 -> 2.11.57, caddy 2.4.5 -> caddy-docker-proxy 2.13.1): что меняется по умолчанию
-// и чего не поймает сравнение ответов сайтов.
+// Внешний прокси на образе старше года: на что обновлять и готовые команды под ноду (бэкенд
+// docker_exposure.upgrade: где compose-файл и строка image - от helper'а sockfix-setup 0.2). Подсказки -
+// из обновлений 06.10.2026 (traefik 2.5.5 -> 2.11.57, caddy 2.4.5 -> caddy-docker-proxy 2.13.1): что
+// меняется по умолчанию и чего не поймает сравнение ответов сайтов. Не обновлять - решение "оставить
+// как есть" (proxyold:<контейнер>): пункт уходит из "Требует действий" и группы ansible. Шаги рисует
+// общий FixSteps, как у ОС, SSH и версий ПО.
 type ProxyOld = NonNullable<Server['proxy_outdated']>[number]
+type UpStep = NonNullable<ProxyOld['fix']>['steps'][number]
 
 const PROXY_HINT: Record<string, string> = {
-  cdp: 'caddy-docker-proxy: закрепленная версия, как в роли caddy-proxy - lucaslorentz/caddy-docker-proxy:2.13.1. С caddy 2.5 бэкенд получает заголовки Via и X-Forwarded-Host, а X-Forwarded-For от клиента отбрасывается: остается только реальный IP.',
-  caddy: 'caddy: последний caddy:2.',
+  cdp: 'caddy-docker-proxy: закрепленная версия, как в роли caddy-proxy - 2.13.1, внутри caddy 2.11. Метки контейнеров читаются как раньше, сертификаты в /data остаются. С caddy 2.11 к HTTPS-апстриму ({{upstreams https ...}}) уходит Host апстрима, а не сайта: если бэкенду нужен исходный, добавьте header_up Host {hostport}.',
+  pre25: 'Образ старше caddy 2.5: бэкенд начнет получать заголовки Via и X-Forwarded-Host, а X-Forwarded-For от клиента отбрасывается - остается только реальный IP.',
+  caddy: 'caddy: ветка 2.11, патчи в ней приезжают с pull. С 2.11 к HTTPS-апстриму уходит Host апстрима (вернуть - header_up Host {hostport}), а конфиг проверяется строже: если caddy не стартует, строка с ошибкой будет в логе, тогда откат.',
   traefik: 'traefik: последний патч своей ветки, для v2 это traefik:v2.11 (не latest: это уже v3, метки пришлось бы переписать). В 2.11 на чтение запроса вместе с телом по умолчанию 60 с: если на сайтах есть загрузки дольше минуты, верните --entryPoints.<имя>.transport.respondingTimeouts.readTimeout=0.',
   'nginx-proxy': 'nginx-proxy: последний тег nginxproxy/nginx-proxy (и docker-gen, если он запущен отдельно).',
 }
+// caddy 2.5 вышел в конце апреля 2022: собранное раньше - caddy 2.4 и старше
+const CADDY25 = Date.UTC(2022, 4, 1) / 1000
 
-const proxyHintKey = (p: ProxyOld) => (p.image.includes('caddy-docker-proxy') ? 'cdp' : p.kind)
+const proxyHints = (p: ProxyOld) =>
+  [p.image.includes('caddy-docker-proxy') ? 'cdp' : p.kind, ...(p.kind === 'caddy' && p.built < CADDY25 ? ['pre25'] : [])]
+    .filter((k) => PROXY_HINT[k])
 
-function ProxyOldWarning({ items }: { items: ProxyOld[] }) {
+// Почему helper не нашел образ в compose: коды сверх SOCK_WHY
+const IMG_WHY: Record<string, string> = {
+  var: 'образ задан переменной (${...})',
+  noimage: 'у сервиса в compose нет image',
+}
+
+// Шаг обновления словами: команды собирает бэкенд под ноду, тексты здесь по id
+function upgradeText(st: UpStep, p: ProxyOld, t: (k: string, p?: Record<string, string | number>) => string): string {
+  const tgt = p.fix?.target || t('свежий тег')
+  switch (st.id) {
+    case 'codes': return t('До обновления - коды ответов доменов этого прокси через него самого, мимо DNS и CDN. Запишутся в файл, после обновления сверим:')
+    case 'apply': return t('Обновить - от root на сервере: копия compose рядом (.bak-kervax-image), новый тег в {at}, скачать образ и пересоздать только этот сервис. Сайты пропадут на несколько секунд, сертификаты и данные в томах остаются:', { at: st.arg ?? '' })
+    case 'apply_same': return t('Тег уже {target}, образ просто давно не скачивали: прежний остается под тегом kervax-old для отката, скачать свежий и пересоздать только этот сервис:', { target: tgt })
+    case 'build': return t('Образ собирается из Dockerfile (build:): поднимите в нем FROM до свежего тега ({target}) и пересоберите, --pull скачает свежую базу:', { target: tgt })
+    case 'custom': return t('Образ {image} - своя сборка, не из репозитория апстрима (задан в {at}): тег не поменять, пересоберите его на свежем базовом образе.', { image: p.image, at: st.arg ?? '' })
+    case 'check': return t('Проверить: сервис работает, в логе нет ошибок конфига, коды доменов те же (в конце OK). Пункт уйдет сам в течение получаса: даты сборки образов агент перечитывает раз в 30 минут.')
+    case 'rollback': return t('Если что-то не так - вернуть прежний compose, старый образ остался на диске:')
+    case 'rollback_same': return t('Если что-то не так - вернуть прежний образ:')
+    case 'find': return t('Готовые команды под эту ноду соберет helper sockfix-setup 0.2: он найдет compose-файл и строку с образом, поставьте его плейбуком хелперов. Пока - руками. Где compose прокси (каталог, файлы, проект, сервис):')
+    case 'manual': return st.cmd
+      ? t('В compose-файле у сервиса поменяйте image на {target}, потом скачать образ и пересоздать только этот сервис:', { target: tgt })
+      : t('В этом compose-файле у сервиса поменяйте image на {target}, потом в каталоге проекта docker compose pull и docker compose up -d --no-deps только для этого сервиса.', { target: tgt })
+    case 'run': return t('Контейнер запущен не через docker compose: скачайте свежий образ и пересоздайте контейнер той же командой docker run, но с ним.')
+    default: return st.id
+  }
+}
+
+function ProxyOldWarning({ server: s, items, canAct, onChanged }: { server: Server; items: ProxyOld[]; canAct: boolean; onChanged: () => void }) {
   const { t } = useI18n()
-  const keys = [...new Set(items.map(proxyHintKey))].filter((k) => PROXY_HINT[k])
+  const [busy, setBusy] = useState('')
+  const live = items.filter((p) => !p.muted)
+  const muted = items.filter((p) => p.muted)
+  const toggle = (key: string, on: boolean) => {
+    const cur = s.alert_mutes ?? []
+    setBusy(key)
+    updateServer(s.id, { alert_mutes: on ? [...new Set([...cur, key])] : cur.filter((m) => m !== key) })
+      .then(onChanged)
+      .catch(() => {})
+      .finally(() => setBusy(''))
+  }
   return (
     <div className="chart-card net-card net-card-wide">
       <div className="net-head">
         <div className="chart-cap">{t('Старый образ прокси')}</div>
       </div>
-      <div className="net-note">
-        {t('{list}: образ собран больше года назад. Прокси смотрит в интернет, а за год в нем закрывают не одну дыру.',
-          { list: items.map((p) => `${p.name} (${proxyBuilt(p)})`).join(', ') })}
-      </div>
-      {keys.map((k) => (
-        <div key={k} className="small">{t(PROXY_HINT[k])}</div>
-      ))}
-      <div className="net-foot">
-        {t('Обновлять лучше через стенд рядом: новый образ на других портах, сравнить ответы всех доменов, потом переключить, а старый тег держать для отката. Ноды с этой проблемой плагин инвентаря ansible собирает в группу kervax_proxy_old, caddy по роли обновляет caddy_harden.yml.')}
-      </div>
+      {live.length > 0 && (
+        <div className="net-note">
+          {t('{list}: образ собран больше года назад. Прокси смотрит в интернет, а за год в нем закрывают не одну дыру.',
+            { list: live.map((p) => `${p.name} (${proxyBuilt(p)})`).join(', ') })}
+        </div>
+      )}
+      {live.map((p) => {
+        const fx = p.fix
+        const why = fx?.why && fx.why !== 'nohelper' ? fx.why : ''
+        // шаги по порядку с номерами, откат - без номера: он только если что-то не так
+        const steps = fx?.steps ?? []
+        const num = new Map<UpStep, string>()
+        let n = 0
+        for (const st of steps) num.set(st, st.id.startsWith('rollback') ? '' : `${++n}. `)
+        return (
+          <div key={p.name} className="sock-fix">
+            <div className="loc-res hs-warn-row">
+              <span className="lk-dot lk-dot-bad" />
+              <div className="hs-warn-main">
+                <span className="mono">{p.name}</span> <span className="muted small">({p.image})</span>
+                <div className="small">
+                  {fx?.target ? t('обновить на {target}', { target: fx.target }) : t('своя сборка: только пересобрать')}
+                </div>
+              </div>
+              {canAct && (
+                <button className="ghost small" disabled={busy === p.key} onClick={() => toggle(p.key, true)}
+                  title={t('Не обновлять: убрать из "Требует действий" и группы ansible kervax_proxy_old')}>
+                  {t('оставить как есть')}
+                </button>
+              )}
+            </div>
+            {proxyHints(p).map((k) => (
+              <div key={k} className="small">{t(PROXY_HINT[k])}</div>
+            ))}
+            {why && (
+              <div className="net-sub">
+                {t('Готовых команд нет: {why}.', { why: t(IMG_WHY[why] ?? SOCK_WHY[why] ?? 'не вышло') })}
+              </div>
+            )}
+            {steps.length > 0 && <FixSteps steps={steps} text={(st) => (num.get(st) ?? '') + upgradeText(st, p, t)} />}
+          </div>
+        )
+      })}
+      {muted.length > 0 && (
+        <div className="net-foot hs-muted-list">
+          <div>
+            {t('Оставлены как есть: {list}', { list: muted.map((p) => `${p.name} (${proxyBuilt(p)})`).join(', ') })}
+            {canAct && muted.map((p) => (
+              <button key={p.name} className="ghost small" disabled={busy === p.key} onClick={() => toggle(p.key, false)}>
+                {t('вернуть {name}', { name: p.name })}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+      {live.length > 0 && (
+        <div className="net-foot">
+          {t('Для сайтов с важным трафиком безопаснее стенд рядом: новый образ на других портах, сравнить ответы всех доменов, потом переключить. Ноды с этой проблемой плагин инвентаря ansible собирает в группу kervax_proxy_old, caddy из роли caddy-proxy обновляет caddy_harden.yml.')}
+        </div>
+      )}
     </div>
   )
 }
@@ -796,6 +893,8 @@ function DockerHostModal({
   const cpuSum = used.reduce((n, c) => n + (c.cpu ?? 0), 0)
   const exposed = s.docker_exposed ?? []
   const outdated = s.proxy_outdated ?? []
+  // старый образ, который решили оставить как есть, - не замечание: приглушен в разделе с "вернуть"
+  const oldLive = outdated.filter((p) => !p.muted)
   const proxies = cs.filter((c) => PROXY_IMAGE.test(c.image))
   // Пустой noboot с бэкенда значит "все поднимутся", а не "нет данных": бэкенд отдает его, только
   // когда есть что показать. Нет данных - когда агент не прислал restart policy ни у одного
@@ -854,11 +953,11 @@ function DockerHostModal({
         count: risk.length,
         text: t('ключи от хоста у {list}', { list: shortList(risk.map((x) => `${x.name} (${dockRiskText(x, t)})`), t, 3) }),
       })
-    if (outdated.length)
+    if (oldLive.length)
       add('proxy', {
         level: 1,
-        count: outdated.length,
-        text: t('образ собран больше года назад: {list}', { list: outdated.map((p) => `${p.name} (${proxyBuilt(p)})`).join(', ') }),
+        count: oldLive.length,
+        text: t('образ собран больше года назад: {list}', { list: oldLive.map((p) => `${p.name} (${proxyBuilt(p)})`).join(', ') }),
       })
     const nb = s.noboot_advice?.docker ?? []
     if (nb.length)
@@ -874,9 +973,13 @@ function DockerHostModal({
           .filter(Boolean).join(', ')
       : t('Контейнеров нет'),
     host: s.docker_risk ? t('ключей от хоста ни у кого нет') : t('нет данных'),
-    proxy: proxies.length
-      ? t('{list}, образ моложе года', { list: shortList(proxies.map((c) => c.name), t, 3) })
-      : '',
+    proxy: oldLive.length
+      ? ''
+      : outdated.length
+        ? t('{list}: старый образ оставлен как есть', { list: shortList(outdated.map((p) => p.name), t, 3) })
+        : proxies.length
+          ? t('{list}, образ моложе года', { list: shortList(proxies.map((c) => c.name), t, 3) })
+          : '',
     boot: policyKnown ? t('все контейнеры поднимутся после перезагрузки') : t('нет данных'),
   }
   const info: Record<string, SecInfo> = {}
@@ -1068,7 +1171,7 @@ function DockerHostModal({
               {cur.id === 'proxy' && (
                 <div className="srv-sec">
                   {outdated.length > 0 ? (
-                    <ProxyOldWarning items={outdated} />
+                    <ProxyOldWarning server={s} items={outdated} canAct={canAct} onChanged={onChanged} />
                   ) : (
                     <div className="srv-empty">
                       {t('Внешний прокси {list}: образ собран меньше года назад.', { list: proxies.map((c) => `${c.name} (${c.image})`).join(', ') })}
@@ -1158,9 +1261,9 @@ function HostRow({
               🔑 {(s.docker_risk ?? []).filter((x) => !x.muted).map((x) => x.name).join(', ')}
             </span>
           )}
-          {(s.proxy_outdated?.length ?? 0) > 0 && (
+          {(s.proxy_outdated ?? []).some((p) => !p.muted) && (
             <span className="type-chip off" title={t('образ внешнего прокси собран больше года назад')}>
-              🧓 {(s.proxy_outdated ?? []).map((p) => proxyBuilt(p)).join(', ')}
+              🧓 {(s.proxy_outdated ?? []).filter((p) => !p.muted).map((p) => proxyBuilt(p)).join(', ')}
             </span>
           )}
         </div>
@@ -1338,13 +1441,13 @@ export function DockerPage({
   const sockHosts = live.filter(({ s }) => (s.docker_exposed?.length ?? 0) > 0)
   const riskHosts = live.filter(({ s }) => (s.docker_risk ?? []).some((x) => !x.muted))
   const nobootHosts = live.filter(({ s }) => (s.noboot?.docker ?? []).some((x) => !x.muted))
-  const oldHosts = live.filter(({ s }) => (s.proxy_outdated?.length ?? 0) > 0)
+  const oldHosts = live.filter(({ s }) => (s.proxy_outdated ?? []).some((p) => !p.muted))
   const attn = live.filter(
     ({ s }) =>
       (s.docker_exposed?.length ?? 0) > 0 ||
       (s.docker_risk ?? []).some((x) => !x.muted) ||
       (s.noboot?.docker ?? []).some((x) => !x.muted) ||
-      (s.proxy_outdated?.length ?? 0) > 0,
+      (s.proxy_outdated ?? []).some((p) => !p.muted),
   ).length
   // нажатая плитка: подпись чипа над списком и что сказать, если под нее ничего не попало
   const filterLabel: Record<DFilter, string> = {

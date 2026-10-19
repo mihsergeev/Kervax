@@ -52,9 +52,15 @@
 # "FATAL: role "postgres" does not exist" lines in the database log, every 15 minutes, on every
 # such container. The POSTGRES_USER role is tried first now, and the other way only when the first
 # could not connect at all, not after a query that failed.
+#
+# 0.14: what the panel needs to give ready commands for switching pg_stat_statements on: the current
+# shared_preload_libraries and where it is set (a -c in the container command is not overridden by
+# ALTER SYSTEM), the role the helper got in as, the compose project of the container, the systemd unit
+# of a host instance. And whether the hour-old snapshot already had statements: for an hour after
+# pg_stat_statements was switched on the top stayed empty, and that read as "the database is idle".
 set -euo pipefail
 
-KERVAX_SETUP_VERSION=0.13  # MAJOR.MINOR; compared component-wise
+KERVAX_SETUP_VERSION=0.14  # MAJOR.MINOR; compared component-wise
 KERVAX_SETUP_ALWAYS=1     # safe on any node: without a database it collects an empty file
 
 HELPER_DIR=/lib65/kervax
@@ -261,7 +267,7 @@ nums() { printf '%s' "$1" | grep -Eq '^-?[0-9]+(\|-?[0-9]+)*$'; }
 
 load_pg() { # container -> a JSON object on stdout, nothing when the engine does not answer
   local c="$1" dir now vn bs cnt wal ck pre pss=off db="" at tcol topq="" snap ts age base="" fb="" win=0
-  local qtext miss line reset tb tf xa rd wr fp wb wf kt kr msall top
+  local qtext miss line reset pb tb tf xa rd wr fp wb wf kt kr msall top
   dir="$LOAD_DIR/$(printf '%s' "${c:-host}" | tr -c 'A-Za-z0-9_.-' '_')"
   install -d -m 0700 "$LOAD_DIR" "$dir" 2>/dev/null || return 0
   now=$(date +%s)
@@ -353,9 +359,11 @@ load_pg() { # container -> a JSON object on stdout, nothing when the engine does
                 if (dc <= 0) next
                 all += dm
                 if (dm > 0) printf "Q|%s|%.0f|%.0f|%.0f|%.0f\n", k, dc, dm, dt * bs, dr * bs }
-    END { printf "S|%.0f|%d\n", all, reset }' "$dir/$base.snap" "$snap" > "$dir/delta"
+    END { printf "S|%.0f|%d|%d\n", all, reset, havep }' "$dir/$base.snap" "$snap" > "$dir/delta"
   line=$(sed -n 's/^D|//p' "$dir/delta")
-  reset=$(sed -n 's/^S|[0-9]*|//p' "$dir/delta")
+  reset=$(sed -n 's/^S|[0-9]*|\([0-9]*\)|.*/\1/p' "$dir/delta")
+  # the base had statements: right after pg_stat_statements was switched on it has none (0.14)
+  pb=$(num "$(sed -n 's/^S|[0-9]*|[0-9]*|\([0-9]*\)$/\1/p' "$dir/delta")")
   msall=$(num "$(sed -n 's/^S|\([0-9]*\)|.*/\1/p' "$dir/delta")")
   if [ "$reset" = 1 ] || [ -z "$line" ]; then
     rm -f "$dir/delta"
@@ -387,9 +395,9 @@ load_pg() { # container -> a JSON object on stdout, nothing when the engine does
         printf "%s{\"id\":\"%s\",\"db\":\"%s\",\"q\":\"%s\",\"calls\":%.0f,\"ms\":%.0f,\"temp\":%.0f,\"rd\":%.0f}", (n++ ? "," : ""), j($2), j(db[k]), j(tx[k]), $5, $6, $7, $8 }' "$dir/texts" "$dir/top" | tr -d '\000-\037')
   fi
   rm -f "$dir/delta" "$dir/top"
-  printf '{"win":%s,"pss":"%s","qtext":%s,"temp_b":%s,"temp_f":%s,"xact":%s,"rd":%s,"wal_rec":%s,"fpi":%s,"wal_b":%s,"wbf":%s,"ck_t":%s,"ck_r":%s,"ms_all":%s,"top":[%s]}' \
+  printf '{"win":%s,"pss":"%s","qtext":%s,"temp_b":%s,"temp_f":%s,"xact":%s,"rd":%s,"wal_rec":%s,"fpi":%s,"wal_b":%s,"wbf":%s,"ck_t":%s,"ck_r":%s,"ms_all":%s,"pbase":%s,"top":[%s]}' \
     "$win" "$pss" "$qtext" "$(num "$tb")" "$(num "$tf")" "$(num "$xa")" "$(num "$rd")" "$(num "$wr")" "$(num "$fp")" \
-    "$(num "$wb")" "$(num "$wf")" "$(num "$kt")" "$(num "$kr")" "$msall" "$top"
+    "$(num "$wb")" "$(num "$wf")" "$(num "$kt")" "$(num "$kr")" "$msall" "$pb" "$top"
 }
 
 # ── PostgreSQL settings against the machine (0.9) ──────────────────────────────
@@ -400,20 +408,31 @@ flt() { case "${1:-}" in ''|*[!0-9.]*|.) echo 0 ;; *) echo "$1" ;; esac; }
 
 cfg_pg() { # container -> a JSON object, nothing when the engine does not answer
   local c="$1" r sb wb mws wm mwm ecs ckt mc walc hp hps hpn rpc cct vn mem hpt hpsz pt lim="0" sto="-1" sig=""
+  local role="" su="" src="" spl="" cp="" cs="" cfs="" cdir="" unit="" pid
   r=$(pg_q "$c" "select concat_ws('|', pg_size_bytes(current_setting('shared_buffers')), pg_size_bytes(current_setting('wal_buffers')), pg_size_bytes(current_setting('max_wal_size')), pg_size_bytes(current_setting('work_mem')), pg_size_bytes(current_setting('maintenance_work_mem')), pg_size_bytes(current_setting('effective_cache_size')), extract(epoch from current_setting('checkpoint_timeout')::interval)::int, current_setting('max_connections'), current_setting('wal_compression'), current_setting('huge_pages'), coalesce(current_setting('huge_pages_status', true), ''), coalesce(current_setting('shared_memory_size_in_huge_pages', true), ''), current_setting('random_page_cost'), current_setting('checkpoint_completion_target'), current_setting('server_version_num'))" | head -1)
   IFS='|' read -r sb wb mws wm mwm ecs ckt mc walc hp hps hpn rpc cct vn <<< "$r"
   [ "$(num "${sb:-}")" -gt 0 ] || return 0
   IFS='|' read -r mem hpt hpsz pt < <(awk '/^MemTotal:/ {m = $2} /^HugePages_Total:/ {h = $2} /^Hugepagesize:/ {s = $2}
     /^PageTables:/ {p = $2} END {printf "%.0f|%.0f|%.0f|%.0f\n", m * 1024, h, s * 1024, p * 1024}' /proc/meminfo)
+  # 0.14: for the commands that switch pg_stat_statements on. The current list and where it is set: a
+  # "command line" value (-c in the container command) is not overridden by ALTER SYSTEM. A query of
+  # its own: shared_preload_libraries is readable by superusers only, and an error must not cost the
+  # settings above. pg_settings hides the row from others, then the source is empty (= unknown)
+  IFS='|' read -r role su src spl < <(pg_q "$c" "select concat_ws('|', current_user, current_setting('is_superuser'), coalesce((select source from pg_settings where name = 'shared_preload_libraries'), ''), coalesce((select setting from pg_settings where name = 'shared_preload_libraries'), ''))" | head -1)
   if [ -n "$c" ]; then
-    IFS='|' read -r sto sig lim < <(docker inspect -f '{{if .Config.StopTimeout}}{{.Config.StopTimeout}}{{else}}-1{{end}}|{{.Config.StopSignal}}|{{.HostConfig.Memory}}' "$c" 2>/dev/null)
+    IFS='|' read -r sto sig lim cp cs cfs cdir < <(docker inspect -f '{{if .Config.StopTimeout}}{{.Config.StopTimeout}}{{else}}-1{{end}}|{{.Config.StopSignal}}|{{.HostConfig.Memory}}|{{index .Config.Labels "com.docker.compose.project"}}|{{index .Config.Labels "com.docker.compose.service"}}|{{index .Config.Labels "com.docker.compose.project.config_files"}}|{{index .Config.Labels "com.docker.compose.project.working_dir"}}' "$c" 2>/dev/null)
+  else
+    # the systemd unit of a host instance (postgresql@16-main on Debian and Ubuntu): the postmaster's cgroup
+    pid=$(num "$(head -1 "$(pg_q "" "show data_directory" | head -1)/postmaster.pid" 2>/dev/null)")
+    [ "$pid" -gt 0 ] && unit=$(sed -n 's#.*/\([^/]*\.service\)$#\1#p' "/proc/$pid/cgroup" 2>/dev/null | head -1)
   fi
   [ "$(num "${lim:-0}")" -gt 0 ] && mem=$lim
-  printf '{"v":%s,"sb":%s,"wb":%s,"mws":%s,"wm":%s,"mwm":%s,"ecs":%s,"ckt":%s,"cct":%s,"mc":%s,"walc":"%s","hp":"%s","hps":"%s","hpn":%s,"rpc":%s,"mem":%s,"mem_lim":%s,"hpt":%s,"hpsz":%s,"pt":%s,"stop_to":%s,"stop_sig":"%s"}' \
+  printf '{"v":%s,"sb":%s,"wb":%s,"mws":%s,"wm":%s,"mwm":%s,"ecs":%s,"ckt":%s,"cct":%s,"mc":%s,"walc":"%s","hp":"%s","hps":"%s","hpn":%s,"rpc":%s,"mem":%s,"mem_lim":%s,"hpt":%s,"hpsz":%s,"pt":%s,"stop_to":%s,"stop_sig":"%s","role":"%s","su":"%s","spl_src":"%s","spl":"%s","cproj":"%s","csvc":"%s","cfiles":"%s","cdir":"%s","unit":"%s"}' \
     "$(num "${vn:-}")" "$(num "$sb")" "$(num "${wb:-}")" "$(num "${mws:-}")" "$(num "${wm:-}")" "$(num "${mwm:-}")" "$(num "${ecs:-}")" \
     "$(num "${ckt:-}")" "$(flt "${cct:-}")" "$(num "${mc:-}")" "$(esc "${walc:-}")" "$(esc "${hp:-}")" "$(esc "${hps:-}")" "$(num "${hpn:-}")" \
     "$(flt "${rpc:-}")" "$(num "${mem:-}")" "$( [ "$(num "${lim:-0}")" -gt 0 ] && echo true || echo false)" "$(num "${hpt:-}")" "$(num "${hpsz:-}")" "$(num "${pt:-}")" \
-    "$(num "${sto:--1}")" "$(esc "${sig:-}")"
+    "$(num "${sto:--1}")" "$(esc "${sig:-}")" "$(esc "${role:-}")" "$(esc "${su:-}")" "$(esc "${src:-}")" "$(esc "${spl:-}")" \
+    "$(esc "${cp:-}")" "$(esc "${cs:-}")" "$(esc "${cfs:-}")" "$(esc "${cdir:-}")" "$(esc "${unit:-}")"
 }
 
 # ── MySQL / MariaDB ────────────────────────────────────────────────────────────

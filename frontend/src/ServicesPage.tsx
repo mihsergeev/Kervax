@@ -13,6 +13,7 @@ import {
   type RdHealth,
   type DbLoad,
   type MyLoad,
+  type OsFixStep,
   type QueueStat,
   type Server,
   type QueueFailed,
@@ -29,6 +30,7 @@ import { useAuth } from './auth'
 import { useUrlCard, useUrlParam } from './deeplink'
 import { shortList, srvIssues, srvMuted, webRate } from './serverUtils'
 import { fmtRel } from './ServersPage'
+import { FixSteps } from './FixSteps'
 import { CardNav, FreshChip, markMuted, OvAreas, OvRows, secInfoOf, type OvRow, type SecDef, type SecInfo, type SecItem } from './cardLayout'
 import { AdoptSitesModal, adoptable } from './AdoptSitesModal'
 import { EngineIcon } from './engineIcon'
@@ -291,14 +293,64 @@ function adviceText(a: DbAdvice, t: (s: string, v?: Record<string, string | numb
   }
 }
 
-function DbLoadBlock({ load, advice, name, t }: {
+// Шаг включения pg_stat_statements словами: команды под экземпляр собирает бэкенд (db_health.pgss_fix),
+// тексты здесь по id, как у шагов обновлений ОС
+function pgssFixText(st: OsFixStep, t: TFn): string {
+  const a = st.arg ?? ''
+  switch (st.id) {
+    case 'pgss_look':
+      return a === 'docker'
+        ? t('Сначала посмотреть, что уже загружено и откуда задано. source = command line - параметр в command контейнера, ALTER SYSTEM его не перебьет, тогда путь через compose ниже. Вторая строка - команда контейнера, каталог compose, проект и сервис.')
+        : t('Сначала посмотреть, что уже загружено и откуда задано. source = command line - параметр в команде запуска сервиса, ALTER SYSTEM его не перебьет.')
+    case 'pgss_create':
+      return t('Создать расширение в базе {db}: панель ищет его там первым, а статистика в нем общая на весь сервер, одной базы достаточно. Работает и до перезапуска и заодно проверяет, что расширение есть в сборке: при ошибке is not available дальше не идти, без него PostgreSQL после перезапуска не запустится (на RHEL оно в пакете postgresql-contrib).', { db: a })
+    case 'pgss_alter':
+      return a
+        ? t('Дописать pg_stat_statements к shared_preload_libraries, сейчас там {cur}. ALTER SYSTEM пишет в postgresql.auto.conf в каталоге данных, база работает дальше, значение вступит в силу после перезапуска. Каждая библиотека в своих кавычках: строку через запятую PostgreSQL принял бы за одну библиотеку и не запустился бы.', { cur: a })
+        : t('Добавить pg_stat_statements в shared_preload_libraries, сейчас там пусто. ALTER SYSTEM пишет в postgresql.auto.conf в каталоге данных, база работает дальше, значение вступит в силу после перезапуска.')
+    case 'pgss_alter_hand':
+      return t('Если source не command line: добавить в shared_preload_libraries. Если в setting уже что-то есть, перечислите все через запятую, каждую в своих кавычках: {ok}. Одной строкой {bad} нельзя: PostgreSQL примет ее за одну библиотеку и не запустится.', { ok: "= 'timescaledb', 'pg_stat_statements'", bad: "'timescaledb,pg_stat_statements'" })
+    case 'pgss_restart':
+      return t('Перезапустить контейнер, чтобы библиотека загрузилась: база недоступна несколько секунд, приложения теряют соединения и должны переподключиться, лучше в тихое время. -t 120 дает базе спокойно завершиться, обычно это секунды.')
+    case 'pgss_restart_host':
+      return a
+        ? t('Перезапустить PostgreSQL ({unit}), чтобы библиотека загрузилась: база недоступна несколько секунд, приложения теряют соединения и должны переподключиться, лучше в тихое время.', { unit: a })
+        : t('Перезапустить PostgreSQL, чтобы библиотека загрузилась: база недоступна несколько секунд, приложения теряют соединения и должны переподключиться. На Debian и Ubuntu postgresql перезапускает все кластеры, один - postgresql@<версия>-<кластер> (systemctl list-units postgresql*), на RHEL юнит бывает postgresql-<версия>.')
+    case 'pgss_compose':
+      return t('Параметр задан в command сервиса {svc} в compose, и ALTER SYSTEM его не перебьет: правится compose. Копия файла рядом (.bak-kervax), sed дописывает pg_stat_statements к shared_preload_libraries, diff показывает измененные строки. Должна поменяться одна, у {svc}: если поменялись и чужие или diff пустой (значение задано иначе, через переменную), верните копию и поправьте руками.', { svc: a })
+    case 'pgss_compose_grep':
+      return t('Параметр задан в command сервиса в compose, и ALTER SYSTEM его не перебьет: правится compose. Найдите строку и поставьте shared_preload_libraries={v}, файл перед правкой скопируйте.', { v: a })
+    case 'pgss_compose_up':
+      return t('Пересоздать контейнер с новой командой: данные в томе остаются, база недоступна несколько секунд, приложения теряют соединения и должны переподключиться. --no-deps не трогает остальные сервисы проекта.')
+    case 'pgss_compose_hand':
+      return t('Если source = command line: вместо ALTER SYSTEM и перезапуска правится compose. В файле из второй строки первого шага у этого сервиса в command дописать ,pg_stat_statements к shared_preload_libraries=, файл перед правкой скопировать и пересоздать контейнер (каталог, проект и сервис оттуда же):')
+    case 'pgss_cmdline':
+      return t('Параметр задан в команде запуска, и ALTER SYSTEM его не перебьет. Поставьте там shared_preload_libraries={v}: контейнер не из compose пересоздается с новой командой (данные в томе остаются), у сервиса на хосте команда в юните или в pg_ctl.conf. Текущая команда:', { v: a })
+    case 'pgss_check':
+      return t('Проверить: в списке есть pg_stat_statements, а запрос отвечает числом, а не ошибкой.')
+    case 'pgss_undo':
+      return a
+        ? t('Удалить расширение, вернуть прежний список ({cur}) и перезапустить.', { cur: a })
+        : t('Удалить расширение, вернуть shared_preload_libraries как было (пусто) и перезапустить.')
+    case 'pgss_undo_compose':
+      return t('Удалить расширение, вернуть compose из копии и пересоздать контейнер.')
+    case 'pgss_undo_hand':
+      return t('Удалить расширение, вернуть shared_preload_libraries и перезапустить. Если в setting было что-то еще, вместо RESET верните прежний список: {ex}. Если меняли compose, верните файл и пересоздайте контейнер.', { ex: "ALTER SYSTEM SET shared_preload_libraries = 'timescaledb'" })
+    default:
+      return st.id
+  }
+}
+
+function DbLoadBlock({ load, advice, fix, name, t }: {
   load: DbLoad | null | undefined
   advice: DbAdvice[]
+  fix: OsFixStep[]
   name: string
   t: (s: string, v?: Record<string, string | number>) => string
 }) {
   const facts: string[] = []
   const hints: string[] = []
+  const [fixOpen, setFixOpen] = useState(false)
   const tips = advice.map((a) => adviceText(a, t)).filter(Boolean)
   // без блока нагрузки (не PostgreSQL 10+ или helper не дал) - только советы
   const ld: DbLoad = load ?? { win: -1, pss: '', qtext: 0, cut: false, top: [] }
@@ -313,10 +365,12 @@ function DbLoadBlock({ load, advice, name, t }: {
     if (ld.wbf) facts.push(t('буфер WAL переполнялся {n} раз за час', { n: fmtCount(ld.wbf) }))
     if (ld.xact != null) facts.push(t('{n} транзакций в секунду', { n: (ld.xact / 3600).toFixed(ld.xact < 36000 ? 1 : 0) }))
   }
-  if (ld.pss === 'off')
-    hints.push(t('Самые долгие запросы покажет pg_stat_statements: добавьте его в shared_preload_libraries (нужен перезапуск PostgreSQL) и выполните CREATE EXTENSION pg_stat_statements'))
-  if (ld.pss === 'noext')
-    hints.push(t('pg_stat_statements загружен, но расширение не создано ни в одной базе: выполните CREATE EXTENSION pg_stat_statements, перезапуск не нужен. Панель увидит его в течение часа'))
+  // плашка с готовыми командами под этот экземпляр, как у пунктов обновлений ОС
+  const pssHint = ld.pss === 'off'
+    ? t('Самые долгие запросы покажет pg_stat_statements: добавьте его в shared_preload_libraries (нужен перезапуск PostgreSQL) и выполните CREATE EXTENSION pg_stat_statements')
+    : ld.pss === 'noext'
+      ? t('pg_stat_statements загружен, но расширение не создано ни в одной базе: выполните CREATE EXTENSION pg_stat_statements, перезапуск не нужен. Панель увидит его в течение часа')
+      : ''
   if (ld.qtext > 1024 ** 3)
     hints.push(t('Тексты запросов pg_stat_statements занимают {s}: так бывает, когда один запрос приходит с разным числом значений (многострочный INSERT, длинный IN), и каждый вариант хранится отдельно со своим текстом. Они вытесняют из статистики другие запросы, а каждое чтение текстов поднимает файл в память целиком, поэтому новые тексты панель читает раз в 6 часов', { s: fmtBytes(ld.qtext) }))
   if (ld.cut) hints.push(t('Запросы не показаны: на сервере много инстансов, и отчет не вместил бы все'))
@@ -338,7 +392,10 @@ function DbLoadBlock({ load, advice, name, t }: {
         <div className="muted small">{t('Собираю данные: первая картина через 15 минут, за полный час - через час')}</div>
       )}
       {facts.length > 0 && <div className="svc-db-load-facts small">{facts.map((f) => <span key={f}>{f}</span>)}</div>}
-      {ld.win > 0 && ld.pss === 'on' && !ld.cut && quiet && (
+      {ld.win > 0 && ld.pss === 'on' && !ld.cut && ld.pbase === 0 && (
+        <div className="muted small">{t('Самые долгие запросы появятся примерно через час после включения pg_stat_statements: панель сравнивает их со снимком часовой давности')}</div>
+      )}
+      {ld.win > 0 && ld.pss === 'on' && !ld.cut && ld.pbase !== 0 && quiet && (
         <div className="muted small">{t('Запросы заняли {s} с за час - база почти не нагружена', { s: Math.round((ld.ms_all ?? 0) / 1000) })}</div>
       )}
       {ld.win > 0 && !quiet && ld.top.length > 0 && (
@@ -362,6 +419,23 @@ function DbLoadBlock({ load, advice, name, t }: {
               </div>
             </div>
           ))}
+        </div>
+      )}
+      {pssHint && (
+        <div>
+          <div className="osupd-adv net-note">
+            <span className="osupd-adv-text">{pssHint}</span>
+            {fix.length > 0 && (
+              <button className="ghost small row-act" onClick={() => setFixOpen(!fixOpen)}>
+                {fixOpen ? t('скрыть') : t('как включить')}
+              </button>
+            )}
+          </div>
+          {fixOpen && fix.length > 0 && (
+            <FixSteps steps={fix} text={(st) => pgssFixText(st, t)} foot={ld.pss === 'noext'
+              ? t('Панель увидит расширение в течение часа, самые долгие запросы - еще примерно через час: она сравнивает со снимком часовой давности.')
+              : t('Плашка уйдет при следующем сборе, до 15 минут. Самые долгие запросы появятся примерно через час: панель сравнивает со снимком часовой давности.')} />
+          )}
         </div>
       )}
       {hints.map((h) => <div key={h} className="net-note">{h}</div>)}
@@ -672,7 +746,7 @@ function DbInventory({ db, t, health = [] }: {
         ))}
       </div>
       {health.filter((h) => h.engine !== 'mysql' && (h.load || (h.advice ?? []).length > 0)).map((h) => (
-        <DbLoadBlock key={'l' + h.container} load={h.load} advice={h.advice ?? []} name={health.length > 1 ? h.container : ''} t={t} />
+        <DbLoadBlock key={'l' + h.container} load={h.load} advice={h.advice ?? []} fix={h.pgss_fix ?? []} name={health.length > 1 ? h.container : ''} t={t} />
       ))}
       {health.filter((h) => h.engine === 'mysql' && (h.my || (h.advice ?? []).length > 0)).map((h) => (
         <MyLoadBlock key={'m' + h.container} load={h.my} advice={h.advice ?? []} name={health.length > 1 ? h.container || t('на хосте') : ''} t={t} />
