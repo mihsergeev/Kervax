@@ -14,8 +14,17 @@
 # permanent installation prefer your own domain:
 #   ... | sudo sh -s -- --domain kervax.example.com
 #
+# A server in a local network (a lab VM, a home LAN) is out of Let's Encrypt's reach,
+# and a home router often refuses to resolve <private-IP>.sslip.io at all (DNS
+# rebinding protection). For that case:
+#   ... | sudo sh -s -- --local-ca
+# The panel opens at https://<LAN-IP>, its certificate comes from caddy's internal CA,
+# and the agent install command in the panel carries that CA's root.
+#
 # Main options:
 #   --domain <name>      domain instead of <IP>.sslip.io
+#   --local-ca           local network: caddy's internal CA instead of Let's Encrypt,
+#                        the LAN address instead of sslip.io (docs/install.md)
 #   --allow-ips "A B"    let only these addresses reach the panel (see below)
 #   --build              build images from source instead of pulling from GHCR
 #   --dir <path>         install directory (default /opt/kervax)
@@ -26,6 +35,7 @@ set -eu
 DOMAIN=""
 ALLOW_IPS=""
 BUILD=0
+LOCAL_CA=0
 DIR=/opt/kervax
 REPO=https://github.com/mihsergeev/Kervax.git
 
@@ -34,8 +44,9 @@ while [ $# -gt 0 ]; do
         --domain) DOMAIN="$2"; shift 2 ;;
         --allow-ips) ALLOW_IPS="$2"; shift 2 ;;
         --build) BUILD=1; shift ;;
+        --local-ca) LOCAL_CA=1; shift ;;
         --dir) DIR="$2"; shift 2 ;;
-        -h|--help) sed -n '2,23p' "$0"; exit 0 ;;
+        -h|--help) sed -n '2,32p' "$0"; exit 0 ;;
         *) echo "unknown argument: $1" >&2; exit 2 ;;
     esac
 done
@@ -81,7 +92,24 @@ fi
 docker compose version >/dev/null 2>&1 || die "Docker Compose v2 is required (the compose plugin)"
 
 # ── 3. Domain ────────────────────────────────────────────────────────────────
-if [ -z "$DOMAIN" ]; then
+# A repeated run (an upgrade: quickstart without arguments) keeps what the first one
+# chose. Otherwise a panel installed with --local-ca was switched back to Let's Encrypt
+# and to <public-IP>.sslip.io, and the address everyone uses stopped answering.
+if [ -f "$DIR/.env" ]; then
+    grep -q '^COMPOSE_FILE=.*compose\.localca\.yml' "$DIR/.env" && LOCAL_CA=1
+    [ -n "$DOMAIN" ] || DOMAIN=$(grep '^KERVAX_DOMAIN=' "$DIR/.env" | cut -d= -f2-)
+fi
+if [ -z "$DOMAIN" ] && [ "$LOCAL_CA" = "1" ]; then
+    # The panel is addressed by its LAN IP itself: no DNS name means nothing to put into
+    # /etc/hosts on every machine, and nothing for a router to block. caddy's internal
+    # CA issues certificates for an IP address.
+    IP=$(ip -4 route get 1.1.1.1 2>/dev/null | sed -n 's/.* src \([0-9.]*\).*/\1/p' | head -1)
+    [ -n "$IP" ] || IP=$(hostname -I 2>/dev/null | awk '{print $1}')
+    [ -n "$IP" ] || die "could not determine the LAN address, pass --domain"
+    DOMAIN="$IP"
+    say "Local network, the panel is addressed by IP: $DOMAIN"
+    echo "  (the certificate comes from caddy's internal CA, see the end of the output)"
+elif [ -z "$DOMAIN" ]; then
     IP=$(curl -fsS --max-time 10 https://api.ipify.org 2>/dev/null || true)
     [ -n "$IP" ] || IP=$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{print $7; exit}')
     [ -n "$IP" ] || die "could not determine the public IP — pass --domain"
@@ -90,6 +118,10 @@ if [ -z "$DOMAIN" ]; then
     echo "  (sslip.io resolves to $IP — Let's Encrypt will issue a certificate for that name)"
 else
     say "Domain: $DOMAIN"
+    if [ "$LOCAL_CA" = "1" ]; then
+        echo "  (caddy's internal CA. Every agent machine and your computer must resolve"
+        echo "  this name to the panel: local DNS or /etc/hosts, see docs/install.md)"
+    fi
 fi
 
 # ── 4. Caddy ─────────────────────────────────────────────────────────────────
@@ -195,6 +227,7 @@ if [ "$BUILD" = "1" ]; then
 else
     COMPOSE_LIST="compose.yml:compose.ghcr.yml:compose.caddy.yml"
 fi
+[ "$LOCAL_CA" = "1" ] && COMPOSE_LIST="$COMPOSE_LIST:compose.localca.yml"
 FILES=$(printf -- '-f %s ' $(echo "$COMPOSE_LIST" | tr ':' ' '))
 
 if [ -f .env ]; then
@@ -279,11 +312,45 @@ done
 
 # The public address is only checked when the panel is open to everyone: otherwise a
 # request from the server is doomed (see above). It doubles as a certificate check.
+CADDY_CT=$(docker ps --format '{{.Names}} {{.Image}}' | grep caddy-docker-proxy | head -1 | cut -d' ' -f1)
+
+# Local network: the root of caddy's internal CA goes to data/panel-ca.crt. The panel
+# puts it into the agent install command (install.sh --ca-file trusts it on the node),
+# and the https check below verifies the panel with it instead of skipping the check.
+# caddy creates the CA when it loads a site with `tls internal`, a few seconds after the
+# panel's container appears. Read through docker: caddy may be someone else's, with its
+# data not in /srv/caddy.
+CA_FILE="$DIR/data/panel-ca.crt"
+CURL_CA=""
+if [ "$LOCAL_CA" = "1" ]; then
+    say "Taking the root of caddy's internal CA"
+    i=0
+    root=""
+    while [ $i -lt 30 ] && [ -n "$CADDY_CT" ]; do
+        # </dev/null: see the note on docker compose exec above
+        root=$(docker exec "$CADDY_CT" cat /data/caddy/pki/authorities/local/root.crt </dev/null 2>/dev/null || true)
+        case "$root" in *"BEGIN CERTIFICATE"*) break ;; esac
+        root=""
+        i=$((i + 1))
+        sleep 2
+    done
+    if [ -n "$root" ]; then
+        mkdir -p "$DIR/data"
+        printf '%s\n' "$root" > "$CA_FILE.tmp" && chmod 644 "$CA_FILE.tmp" && mv -f "$CA_FILE.tmp" "$CA_FILE"
+        CURL_CA="--cacert $CA_FILE"
+        # a name is checked against this server itself: it may well have no DNS record
+        case "$DOMAIN" in *[!0-9.]*) CURL_CA="$CURL_CA --resolve $DOMAIN:443:127.0.0.1" ;; esac
+        echo "  $CA_FILE"
+    else
+        echo "  caddy has not created it yet: docker logs ${CADDY_CT:-<caddy container>} --tail=50"
+    fi
+fi
+
 code=""
 if [ -z "$ALLOW_IPS" ]; then
     i=0
     while [ $i -lt 30 ]; do
-        code=$(curl -s -o /dev/null -w '%{http_code}' "https://$DOMAIN/api/health" --max-time 5 || true)
+        code=$(curl -s -o /dev/null -w '%{http_code}' $CURL_CA "https://$DOMAIN/api/health" --max-time 5 || true)
         [ "$code" = "200" ] && break
         i=$((i + 1))
         sleep 2
@@ -295,9 +362,8 @@ fi
 # certificate already issued and asks for a new one — on the sixth attempt issuance is
 # refused and the panel goes quiet without a word of explanation. Saying so outright
 # is cheaper than guessing.
-CADDY_CT=$(docker ps --format '{{.Names}} {{.Image}}' | grep caddy-docker-proxy | head -1 | cut -d' ' -f1)
 RATE_LIMITED=0
-if [ -n "$CADDY_CT" ] && docker logs "$CADDY_CT" --since 10m 2>&1 | grep -q rateLimited; then
+if [ "$LOCAL_CA" != "1" ] && [ -n "$CADDY_CT" ] && docker logs "$CADDY_CT" --since 10m 2>&1 | grep -q rateLimited; then
     RATE_LIMITED=1
 fi
 
@@ -328,7 +394,31 @@ fi
 printf '  Login:     \033[1madmin\033[0m\n'
 printf '  Password:  \033[1m%s\033[0m\n' "$ADMIN_PW"
 printf '  It is also stored in %s/.env\n' "$DIR"
-if [ -z "$ALLOW_IPS" ]; then
+if [ "$LOCAL_CA" = "1" ]; then
+    printf '\n  The certificate is issued by caddy'"'"'s internal CA, which nobody trusts yet.\n'
+    if [ -f "$CA_FILE" ]; then
+        FP=$(openssl x509 -in "$CA_FILE" -noout -fingerprint -sha256 2>/dev/null | cut -d= -f2)
+        printf '  Its root: %s\n' "$CA_FILE"
+        [ -n "$FP" ] && printf '  SHA-256:  %s\n' "$FP"
+        printf '  Agents: nothing to do by hand. The install command in the panel carries\n'
+        printf '  this root, and install.sh adds it to the system trust store of the node.\n'
+        printf '  Browser: import the root as a trusted authority, it is served at\n'
+        printf '    https://%s/api/agent/ca.crt (or copy the file above).\n' "$DOMAIN"
+        printf '  Any other Debian/Ubuntu machine (curl, scripts):\n'
+        printf '    cp panel-ca.crt /usr/local/share/ca-certificates/kervax-panel.crt && update-ca-certificates\n'
+    fi
+    case "$DOMAIN" in
+        *[!0-9.]*)
+            printf '  The name %s must resolve on every agent machine and on your computer:\n' "$DOMAIN"
+            printf '  local DNS or a line in /etc/hosts (see docs/install.md).\n' ;;
+    esac
+fi
+if [ -z "$ALLOW_IPS" ] && [ "$LOCAL_CA" = "1" ]; then
+    printf '\n\033[33m  WARNING: the whole local network reaches the panel, only the password\n'
+    printf '  protects it. Restrict access with:\n'
+    printf '    KERVAX_ALLOW_IPS="your.ip" in %s/.env, then\n' "$DIR"
+    printf '    docker compose %s up -d frontend\033[0m\n' "$FILES"
+elif [ -z "$ALLOW_IPS" ]; then
     printf '\n\033[33m  WARNING: the panel is open to the whole internet (the allow-list is\n'
     printf '  empty) — only the password protects it. Restrict access with:\n'
     printf '    KERVAX_ALLOW_IPS="your.ip" in %s/.env, then\n' "$DIR"

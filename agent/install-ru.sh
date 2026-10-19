@@ -13,6 +13,11 @@
 #   install.sh --uninstall            всё: сервис, хелперы, бинарь, конфиги, юзер
 #   install.sh --uninstall panel2     только этот инстанс
 #
+# У панели с сертификатом не от публичного CA (quickstart --local-ca: внутренний CA caddy
+# в локальной сети) команда идет с --ca-file <корень.pem>: корень добавляется в системное
+# хранилище, и агент, helper'ы и curl проверяют панель им. Проверка сертификата не
+# отключается никогда.
+#
 # Это русская версия установщика: отличается только языком сообщений.
 # Английская — agent/install.sh, её же раздаёт панель по /api/agent/install.sh.
 set -eu
@@ -21,9 +26,13 @@ set -eu
 # По умолчанию (авто-режим) install.sh включает ВСЁ применимое на ноде: bounded-доступ
 # к Docker (socket-proxy), read-only Kubernetes (узкий SA), статистику сервера бэкапов,
 # управление restic-бэкапом. Каждый шаг самодетектируется. Флаг --no-auto — только агент.
-URL=""; TOKEN=""; INSTANCE=""; WANT_DOCKER=0; NO_AUTO=0; UNINSTALL=0
+# --ca-file <путь>: корень, которым подписан сертификат панели (см. шаг доверия ниже)
+URL=""; TOKEN=""; INSTANCE=""; WANT_DOCKER=0; NO_AUTO=0; UNINSTALL=0; CA_FILE=""; WANT_CA=0
 for a in "$@"; do
+  if [ "$WANT_CA" = 1 ]; then CA_FILE="$a"; WANT_CA=0; continue; fi
   case "$a" in
+    --ca-file) WANT_CA=1 ;;
+    --ca-file=*) CA_FILE="${a#--ca-file=}" ;;
     --docker) WANT_DOCKER=1 ;;
     --no-auto) NO_AUTO=1 ;;
     --uninstall) UNINSTALL=1 ;;
@@ -89,6 +98,23 @@ if [ "$UNINSTALL" = 1 ]; then
   [ -z "$INSTANCE" ] && { systemctl reset-failed 'kervax-*' >/dev/null 2>&1 || true; }
 
   rm -f $CONFS
+  # CA панели, добавленный через --ca-file (только наш: kervax-panel*.crt), и пересборка хранилища
+  if [ -n "$INSTANCE" ]; then CA_GLOB="kervax-panel-$INSTANCE.crt"; else CA_GLOB="kervax-panel*.crt"; fi
+  CA_GONE=0
+  for d in /usr/local/share/ca-certificates /etc/pki/ca-trust/source/anchors /etc/pki/trust/anchors; do
+    for f in $d/$CA_GLOB; do
+      [ -e "$f" ] || continue
+      rm -f "$f"; CA_GONE=1
+    done
+  done
+  if [ "$CA_GONE" = 1 ]; then
+    if command -v update-ca-trust >/dev/null 2>&1 && [ -d /etc/pki/ca-trust/source/anchors ]; then
+      update-ca-trust extract >/dev/null 2>&1 || true
+    else
+      update-ca-certificates --fresh >/dev/null 2>&1 || update-ca-certificates >/dev/null 2>&1 || true
+    fi
+    echo "✓ CA панели больше не в доверенных на этой ноде."
+  fi
   if [ -z "$INSTANCE" ]; then
     # только свой прокси (и его копию от обновления хелпера): другие socket-proxy
     # контейнеры на ноде чужие и остаются
@@ -131,7 +157,7 @@ if [ "$UNINSTALL" = 1 ]; then
 fi
 
 if [ -z "$URL" ] || [ -z "$TOKEN" ]; then
-  echo "Использование: install.sh <url_панели> <токен> [инстанс] [--no-auto]" >&2
+  echo "Использование: install.sh [--ca-file <корень.pem>] <url_панели> <токен> [инстанс] [--no-auto]" >&2
   echo "               install.sh --uninstall [инстанс]" >&2
   exit 1
 fi
@@ -160,6 +186,45 @@ esac
 # непривилегированный системный юзер
 id kervax >/dev/null 2>&1 || useradd --system --no-create-home --shell /usr/sbin/nologin kervax 2>/dev/null || \
   adduser --system --no-create-home --shell /usr/sbin/nologin kervax 2>/dev/null || true
+
+# -- CA панели. Команда из панели передает --ca-file, когда ее сертификат от CA, которого
+#    нода не знает (внутренний CA caddy в локальной сети): без него первое же скачивание
+#    падает на проверке сертификата, а за ним и агент. Корень кладем в системное хранилище,
+#    а не в конфиг агента: это хранилище читает Go-агент, и его же helper'ы со своим curl к
+#    панели. В имени файла инстанс, поэтому корень второй панели не заменяет первый, а
+#    --uninstall снимает ровно эти файлы. --
+CA_NAME="kervax-panel${INSTANCE:+-$INSTANCE}.crt"
+if [ -n "$CA_FILE" ]; then
+  grep -q -- '-----BEGIN CERTIFICATE-----' "$CA_FILE" 2>/dev/null || {
+    echo "✗ --ca-file $CA_FILE - не сертификат в PEM." >&2; exit 1; }
+  if command -v update-ca-certificates >/dev/null 2>&1 && [ -d /usr/local/share/ca-certificates ]; then
+    CA_DST=/usr/local/share/ca-certificates/$CA_NAME            # Debian, Ubuntu, Alpine
+    CA_UPDATE="update-ca-certificates"
+  elif command -v update-ca-trust >/dev/null 2>&1 && [ -d /etc/pki/ca-trust/source/anchors ]; then
+    CA_DST=/etc/pki/ca-trust/source/anchors/$CA_NAME             # RHEL, Fedora, Alma, Rocky
+    CA_UPDATE="update-ca-trust extract"
+  elif command -v update-ca-certificates >/dev/null 2>&1 && [ -d /etc/pki/trust/anchors ]; then
+    CA_DST=/etc/pki/trust/anchors/$CA_NAME                       # openSUSE, SLES
+    CA_UPDATE="update-ca-certificates"
+  else
+    echo "✗ Не нашел системного хранилища, куда добавить CA панели (поставьте ca-certificates)." >&2
+    exit 1
+  fi
+  cp "$CA_FILE" "$CA_DST"
+  chmod 0644 "$CA_DST"
+  $CA_UPDATE >/dev/null 2>&1 || { echo "✗ $CA_UPDATE не отработал." >&2; exit 1; }
+  # проверяем БЕЗ --cacert, через системное хранилище: ровно так ходит агент.
+  # /api/agent/*, а не /api/health: белый список адресов панели там не действует.
+  if ! curl -fsS --connect-timeout 15 -o /dev/null "${URL%/}/api/agent/install.sh" 2>/tmp/kervax-ca-check.err; then
+    echo "✗ CA панели лежит в $CA_DST, но https к панели все равно не проходит:" >&2
+    cat /tmp/kervax-ca-check.err >&2
+    echo "  Сертификат должен быть выписан ровно на хост из $URL (IP или имя)." >&2
+    rm -f /tmp/kervax-ca-check.err
+    exit 1
+  fi
+  rm -f /tmp/kervax-ca-check.err
+  echo "✓ CA панели в доверенных: $CA_DST"
+fi
 
 echo "→ Скачиваю агент ($ARCH)..."
 # Каталог агента — /opt/kervax-agent, НЕ /opt/kervax. Панель по умолчанию

@@ -13,6 +13,11 @@
 #   install.sh --uninstall            everything: service, helpers, binary, configs, user
 #   install.sh --uninstall panel2     only that instance
 #
+# A panel whose certificate is not from a public CA (quickstart --local-ca: caddy's
+# internal CA in a local network) shows the command with --ca-file <root.pem>: the
+# root is added to the system trust store, and the agent, the helpers and curl then
+# verify the panel with it. Certificate checks are never switched off.
+#
 # Russian version of this installer: agent/install-ru.sh
 set -eu
 
@@ -21,9 +26,13 @@ set -eu
 # Docker access (socket-proxy), read-only Kubernetes (a narrow SA), backup server
 # statistics, restic backup control. Each step self-detects. --no-auto installs the
 # agent only.
-URL=""; TOKEN=""; INSTANCE=""; WANT_DOCKER=0; NO_AUTO=0; UNINSTALL=0
+# --ca-file <path>: the root that signed the panel's certificate (see the trust step below)
+URL=""; TOKEN=""; INSTANCE=""; WANT_DOCKER=0; NO_AUTO=0; UNINSTALL=0; CA_FILE=""; WANT_CA=0
 for a in "$@"; do
+  if [ "$WANT_CA" = 1 ]; then CA_FILE="$a"; WANT_CA=0; continue; fi
   case "$a" in
+    --ca-file) WANT_CA=1 ;;
+    --ca-file=*) CA_FILE="${a#--ca-file=}" ;;
     --docker) WANT_DOCKER=1 ;;
     --no-auto) NO_AUTO=1 ;;
     --uninstall) UNINSTALL=1 ;;
@@ -89,6 +98,23 @@ if [ "$UNINSTALL" = 1 ]; then
   [ -z "$INSTANCE" ] && { systemctl reset-failed 'kervax-*' >/dev/null 2>&1 || true; }
 
   rm -f $CONFS
+  # the panel CA added by --ca-file (only ours: kervax-panel*.crt), then the store is rebuilt
+  if [ -n "$INSTANCE" ]; then CA_GLOB="kervax-panel-$INSTANCE.crt"; else CA_GLOB="kervax-panel*.crt"; fi
+  CA_GONE=0
+  for d in /usr/local/share/ca-certificates /etc/pki/ca-trust/source/anchors /etc/pki/trust/anchors; do
+    for f in $d/$CA_GLOB; do
+      [ -e "$f" ] || continue
+      rm -f "$f"; CA_GONE=1
+    done
+  done
+  if [ "$CA_GONE" = 1 ]; then
+    if command -v update-ca-trust >/dev/null 2>&1 && [ -d /etc/pki/ca-trust/source/anchors ]; then
+      update-ca-trust extract >/dev/null 2>&1 || true
+    else
+      update-ca-certificates --fresh >/dev/null 2>&1 || update-ca-certificates >/dev/null 2>&1 || true
+    fi
+    echo "✓ The panel CA is no longer trusted on this node."
+  fi
   if [ -z "$INSTANCE" ]; then
     # only our own proxy (and its copy from a helper update): other socket-proxy containers
     # on the node belong to someone else and stay
@@ -131,7 +157,7 @@ if [ "$UNINSTALL" = 1 ]; then
 fi
 
 if [ -z "$URL" ] || [ -z "$TOKEN" ]; then
-  echo "Usage: install.sh <panel_url> <token> [instance] [--no-auto]" >&2
+  echo "Usage: install.sh [--ca-file <root.pem>] <panel_url> <token> [instance] [--no-auto]" >&2
   echo "       install.sh --uninstall [instance]" >&2
   exit 1
 fi
@@ -160,6 +186,46 @@ esac
 # unprivileged system user
 id kervax >/dev/null 2>&1 || useradd --system --no-create-home --shell /usr/sbin/nologin kervax 2>/dev/null || \
   adduser --system --no-create-home --shell /usr/sbin/nologin kervax 2>/dev/null || true
+
+# -- Panel CA. The panel command passes --ca-file when its certificate comes from a CA
+#    the node does not know (caddy's internal CA in a local network): without it the
+#    very first download fails certificate verification, and so would the agent. The
+#    root goes into the system trust store rather than into the agent config: the Go
+#    agent reads that store, and so do the helpers and their curl to the panel. The
+#    file name carries the instance, so a second panel's root does not replace the
+#    first one, and --uninstall removes exactly these files. --
+CA_NAME="kervax-panel${INSTANCE:+-$INSTANCE}.crt"
+if [ -n "$CA_FILE" ]; then
+  grep -q -- '-----BEGIN CERTIFICATE-----' "$CA_FILE" 2>/dev/null || {
+    echo "✗ --ca-file $CA_FILE is not a PEM certificate." >&2; exit 1; }
+  if command -v update-ca-certificates >/dev/null 2>&1 && [ -d /usr/local/share/ca-certificates ]; then
+    CA_DST=/usr/local/share/ca-certificates/$CA_NAME            # Debian, Ubuntu, Alpine
+    CA_UPDATE="update-ca-certificates"
+  elif command -v update-ca-trust >/dev/null 2>&1 && [ -d /etc/pki/ca-trust/source/anchors ]; then
+    CA_DST=/etc/pki/ca-trust/source/anchors/$CA_NAME             # RHEL, Fedora, Alma, Rocky
+    CA_UPDATE="update-ca-trust extract"
+  elif command -v update-ca-certificates >/dev/null 2>&1 && [ -d /etc/pki/trust/anchors ]; then
+    CA_DST=/etc/pki/trust/anchors/$CA_NAME                       # openSUSE, SLES
+    CA_UPDATE="update-ca-certificates"
+  else
+    echo "✗ No system trust store found to add the panel CA to (install ca-certificates)." >&2
+    exit 1
+  fi
+  cp "$CA_FILE" "$CA_DST"
+  chmod 0644 "$CA_DST"
+  $CA_UPDATE >/dev/null 2>&1 || { echo "✗ $CA_UPDATE failed." >&2; exit 1; }
+  # checked WITHOUT --cacert, through the system store: exactly how the agent connects.
+  # /api/agent/* and not /api/health: the panel's IP allow-list does not apply there.
+  if ! curl -fsS --connect-timeout 15 -o /dev/null "${URL%/}/api/agent/install.sh" 2>/tmp/kervax-ca-check.err; then
+    echo "✗ The panel CA is in $CA_DST, but https to the panel still fails:" >&2
+    cat /tmp/kervax-ca-check.err >&2
+    echo "  The certificate has to be issued for the exact host in $URL (an IP or a name)." >&2
+    rm -f /tmp/kervax-ca-check.err
+    exit 1
+  fi
+  rm -f /tmp/kervax-ca-check.err
+  echo "✓ The panel CA is trusted: $CA_DST"
+fi
 
 echo "→ Downloading the agent ($ARCH)..."
 # The agent directory is /opt/kervax-agent, NOT /opt/kervax. The panel installs into

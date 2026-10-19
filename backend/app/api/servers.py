@@ -346,13 +346,51 @@ async def _write_agent_allowlist(session) -> None:
     os.replace(tmp, path)
 
 
+_PEM_CERT = re.compile(
+    r"-----BEGIN CERTIFICATE-----\s+[A-Za-z0-9+/=\s]+?-----END CERTIFICATE-----")
+# куда агент кладет корень на время установки (install.sh потом копирует его в хранилище ОС)
+PANEL_CA_TMP = "/tmp/kervax-panel-ca.crt"
+
+
+def panel_ca_pem() -> str:
+    """Корень, которым подписан сертификат панели, если он не из публичного CA: data/panel-ca.crt.
+
+    Панель в локальной сети (quickstart --local-ca) получает сертификат от внутреннего CA caddy:
+    Let's Encrypt до приватного адреса не достучится. Агенту этот CA неизвестен, и первая же
+    curl команды установки падала на проверке сертификата. Файл кладет quickstart (корень caddy),
+    или сам админ (корпоративный CA). Пусто - сертификат публичный, ничего не нужно."""
+    path = os.path.join(get_settings().data_dir, "panel-ca.crt")
+    try:
+        with open(path, encoding="ascii") as f:
+            body = f.read(65536)
+    except (OSError, UnicodeDecodeError):
+        return ""
+    certs = _PEM_CERT.findall(body)
+    if not certs:
+        log.warning("%s без сертификата в PEM - команда установки идет без корня", path)
+        return ""
+    return "\n".join(certs) + "\n"
+
+
 def _install_cmd(token: str) -> str:
     base = get_settings().panel_url.rstrip("/") or "https://ПАНЕЛЬ"
     # --connect-timeout: закрытая фаерволом панель даёт быстрый явный отказ,
     # а не многоминутное зависание пайпа
+    ca = panel_ca_pem()
+    if not ca:
+        return (
+            f"curl -fsSL --connect-timeout 15 {base}/api/agent/install.sh"
+            f" | sh -s -- {base} {token}"
+        )
+    # Корень едет в самой команде: скачать его с панели нечем, https к ней без корня и не
+    # проверить, а отключать проверку (-k) нельзя. curl проверяет панель этим корнем, install.sh
+    # доверяет ему в ОС (агент и helper'ы ходят в панель системным хранилищем). --ca-file стоит
+    # ДО адреса: третий позиционный аргумент (имя инстанса) UI дописывает в самый конец.
+    b64 = base64.b64encode(ca.encode("ascii")).decode("ascii")
     return (
-        f"curl -fsSL --connect-timeout 15 {base}/api/agent/install.sh"
-        f" | sh -s -- {base} {token}"
+        f"echo {b64} | base64 -d > {PANEL_CA_TMP} && "
+        f"curl -fsSL --connect-timeout 15 --cacert {PANEL_CA_TMP} {base}/api/agent/install.sh"
+        f" | sh -s -- --ca-file {PANEL_CA_TMP} {base} {token}"
     )
 
 
@@ -2624,6 +2662,18 @@ async def install_script() -> PlainTextResponse:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "install.sh не найден")
     with open(path, encoding="utf-8") as f:
         return PlainTextResponse(f.read(), media_type="text/x-shellscript")
+
+
+@agent_router.get("/ca.crt")
+async def panel_ca() -> PlainTextResponse:
+    """Корень CA панели (data/panel-ca.crt), если сертификат у нее не публичный: импортировать
+    в браузер или в хранилище ОС на машине без команды установки. Сертификат открытый, путь
+    под /api/agent, его белый список caddy пропускает."""
+    pem = panel_ca_pem()
+    if not pem:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "panel CA is not set (data/panel-ca.crt)")
+    return PlainTextResponse(pem, media_type="application/x-pem-file",
+                             headers={"Content-Disposition": 'attachment; filename="kervax-panel-ca.crt"'})
 
 
 @agent_router.get("/install-ru.sh")

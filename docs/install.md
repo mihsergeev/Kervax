@@ -61,6 +61,65 @@ No magic — every step can be done by hand (see the next section):
 6. starts the panel from prebuilt images (`--build` builds from source instead);
 7. waits for `https://<domain>/api/health` and prints the credentials.
 
+
+### In a local network: `--local-ca`
+
+A lab VM or a server in a home or office LAN is out of Let's Encrypt's reach: it
+cannot connect back to a private address, so no certificate is issued. The default
+name does not help either. `192.168.1.10.sslip.io` resolves to a private address,
+and a home router with DNS rebinding protection (OpenWrt and anything else on
+dnsmasq, many ISP routers) drops exactly such answers: the name does not resolve
+at all. The panel comes up, https does not, and agents cannot be installed.
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/mihsergeev/Kervax/main/ops/quickstart.sh | sudo sh -s -- --local-ca
+```
+
+What changes:
+
+- the panel is addressed by the server's LAN IP: `https://192.168.1.10`. No DNS
+  name means nothing to resolve, nothing for the router to block and no
+  `/etc/hosts` to edit;
+- the certificate comes from caddy's own internal CA. It is set for the panel's
+  site only (the `compose.localca.yml` overlay puts `tls internal` on the panel's
+  container), so other sites on a shared caddy keep Let's Encrypt;
+- the CA root is copied to `/opt/kervax/data/panel-ca.crt`, and the script prints
+  its SHA-256 fingerprint;
+- **agents need no manual step.** The install command in the panel carries the
+  root and passes it with `--ca-file`; `install.sh` adds it to the node's system
+  trust store, and the agent, the helpers and `curl` verify the panel with it.
+  Certificate checks are never switched off. `install.sh --uninstall` removes the
+  root again;
+- a repeated run (an upgrade) keeps the mode, `--local-ca` is not needed again.
+
+Your browser does not know this CA yet. Either accept the warning once, or import
+the root as a trusted authority: it is served at `https://<panel>/api/agent/ca.crt`
+(compare the fingerprint with the one quickstart printed). Any other Linux machine
+that should talk to the panel:
+
+```bash
+sudo cp panel-ca.crt /usr/local/share/ca-certificates/kervax-panel.crt && sudo update-ca-certificates
+```
+
+On RHEL and Fedora the place is `/etc/pki/ca-trust/source/anchors/` and the command
+`update-ca-trust`.
+
+**A name instead of an IP.** `--local-ca --domain kervax.lan` works as well, but
+then the name must resolve to the panel on every agent machine and on your
+computer: a record in your local DNS, or a line in `/etc/hosts` on each of them:
+
+```
+192.168.1.10  kervax.lan
+```
+
+A `<private-IP>.sslip.io` name only works where the router lets such answers
+through. With OpenWrt that is the "Rebind protection" switch or a
+`rebind_domain` exception for `sslip.io`; usually the IP is simpler.
+
+**Your own CA.** If the panel's certificate is signed by a corporate CA, put its
+root (PEM) into `data/panel-ca.crt`: the install command in the panel picks it up
+the same way.
+
 ---
 
 ## By hand
@@ -246,6 +305,11 @@ no scrape targets to declare.
 The agent only connects **outwards**, over HTTPS, to the panel. It opens no port,
 runs no shell, and the panel stores nothing but a SHA-256 of its token.
 
+A panel installed with `--local-ca` shows a longer command: it starts with the CA
+root (`echo ... | base64 -d > /tmp/kervax-panel-ca.crt`) and passes it to
+`install.sh` with `--ca-file`. Run it as is, see
+[In a local network](#in-a-local-network---local-ca).
+
 ## Your first site
 
 **"Add monitor"**: type an address (`example.com`,
@@ -361,6 +425,9 @@ lifts.
 | The build dies without a clear error | out of memory | use the prebuilt images (`compose.ghcr.yml`) |
 | The agent installed but the node is missing | the node cannot reach the panel | on the node: `systemctl status kervax-agent`, `journalctl -u kervax-agent -n 30` |
 | The install command reads `https://ПАНЕЛЬ` | `KERVAX_PANEL_URL` is not set | set it in `.env`, then `docker compose up -d backend` |
+| Panel in a LAN: Caddy logs `no valid A records found for 192.168.1.10.sslip.io` or `Timeout during connect` | Let's Encrypt cannot reach a private address; a router with DNS rebinding protection does not resolve `<private-IP>.sslip.io` | reinstall with `--local-ca`, see [In a local network](#in-a-local-network---local-ca) |
+| `curl: (60) SSL certificate problem` on a node, or the agent log says `x509: certificate signed by unknown authority` | the panel's certificate comes from its internal CA, and the node does not trust it | run the install command from the panel again (it carries the root), or add `data/panel-ca.crt` to the node's trust store |
+| `https://192.168.1.10` fails with `tlsv1 alert internal error` | a panel opened by IP sends no SNI, and Caddy has no certificate for it | the `compose.localca.yml` overlay must be in `COMPOSE_FILE` (it sets `default_sni`) |
 
 Full logs:
 
