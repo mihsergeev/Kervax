@@ -17,6 +17,7 @@ from sqlalchemy import delete as sa_delete, func, select, update as sa_update
 from app import backup_verify
 from app import disk_wear
 from app import request_watch
+from app import panel_errors
 from app import db_health
 from app import gpu as gpu_mod
 from app import queue_watch
@@ -1843,7 +1844,7 @@ async def docker_command(
     await _get_or_404(server_id, session, user)
     c = DockerCommand(
         server_id=server_id, container=body.container, action=body.action,
-        tail=body.tail, since=body.since,
+        tail=body.tail, since=body.since, created_by=user.username,
     )
     session.add(c)
     await session.commit()
@@ -1856,14 +1857,17 @@ async def docker_command(
 
 @router.get("/{server_id}/docker/command/{cmd_id}", response_model=DockerCommandOut)
 async def docker_command_status(
-    server_id: int, cmd_id: int, user: CurrentUser, session: SessionDep
+    server_id: int, cmd_id: int, user: CurrentUser, session: SessionDep, request: Request
 ) -> DockerCommandOut:
     """Статус/результат команды — панель поллит после постановки."""
     c = await session.get(DockerCommand, cmd_id)
     if c is None or c.server_id != server_id:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Команда не найдена")
+    was = c.status
     out = _docker_cmd_out(c, datetime.now(timezone.utc))
     await session.commit()  # зафиксировать возможный таймаут-переход
+    if was != "error" and c.status == "error":  # агент не ответил: человек ждал зря
+        panel_errors.command_failed(request.app.state.session_factory, "docker", c)
     return out
 
 
@@ -1937,7 +1941,7 @@ async def kube_command(
     await _get_or_404(server_id, session, user)
     c = KubeCommand(
         server_id=server_id, ns=body.ns, kind=body.kind, name=body.name,
-        action=body.action, tail=body.tail, since=body.since,
+        action=body.action, tail=body.tail, since=body.since, created_by=user.username,
     )
     session.add(c)
     await session.commit()
@@ -1951,13 +1955,16 @@ async def kube_command(
 
 @router.get("/{server_id}/kube/command/{cmd_id}", response_model=KubeCommandOut)
 async def kube_command_status(
-    server_id: int, cmd_id: int, user: CurrentUser, session: SessionDep
+    server_id: int, cmd_id: int, user: CurrentUser, session: SessionDep, request: Request
 ) -> KubeCommandOut:
     c = await session.get(KubeCommand, cmd_id)
     if c is None or c.server_id != server_id:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Команда не найдена")
+    was = c.status
     out = _kube_cmd_out(c, datetime.now(timezone.utc))
     await session.commit()
+    if was != "error" and c.status == "error":  # агент не ответил: человек ждал зря
+        panel_errors.command_failed(request.app.state.session_factory, "kube", c)
     return out
 
 
@@ -2053,7 +2060,7 @@ async def backup_command(
             payload["dump_minfree"] = body.dump_minfree
     c = BackupCommand(
         server_id=server_id, action=body.action, mode=body.mode,
-        paths=body.paths, schedule=body.schedule, payload=payload,
+        paths=body.paths, schedule=body.schedule, payload=payload, created_by=user.username,
     )
     session.add(c)
     await session.commit()
@@ -2072,13 +2079,16 @@ async def backup_command(
 
 @router.get("/{server_id}/backup/command/{cmd_id}", response_model=BackupCommandOut)
 async def backup_command_status(
-    server_id: int, cmd_id: int, user: CurrentUser, session: SessionDep
+    server_id: int, cmd_id: int, user: CurrentUser, session: SessionDep, request: Request
 ) -> BackupCommandOut:
     c = await session.get(BackupCommand, cmd_id)
     if c is None or c.server_id != server_id:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Команда не найдена")
+    was = c.status
     out = _backup_cmd_out(c, datetime.now(timezone.utc))
     await session.commit()
+    if was != "error" and c.status == "error":  # агент не ответил: человек ждал зря
+        panel_errors.command_failed(request.app.state.session_factory, "backup", c)
     return out
 
 
@@ -2257,9 +2267,10 @@ _setup_tasks: set = set()
 _SECRET_OUT_RE = re.compile(r"REPOPASS_B64=\S+")
 
 
-def _job_runner(session_factory, job_id: int):
+def _job_runner(session_factory, job_id: int, user: str = "", what: str = ""):
     """Общая машинерия фоновых job'ов настройки: список шагов + save/step.
-    Короткие сессии на каждую операцию (долгая сессия отваливается на провижининге)."""
+    Короткие сессии на каждую операцию (долгая сессия отваливается на провижининге).
+    user и what - кто запустил и что: неудача идет в журнал ошибок панели."""
     steps: list[dict] = []
 
     async def save(status_=None, message=None):
@@ -2273,6 +2284,15 @@ def _job_runner(session_factory, job_id: int):
             if message is not None:
                 job.message = message
             await s.commit()
+            srv_id = job.server_id
+        if status_ == "error" and user:
+            await panel_errors.record(
+                session_factory, kind="command", action=f"backup {what or 'setup'}",
+                message=message or "настройка не удалась", username=user, section="backups",
+                server_id=srv_id, detail="\n".join(
+                    f"{'ok' if x.get('ok') else 'FAIL'} {x.get('step')}: {x.get('detail') or ''}" for x in steps),
+                extra={"job_id": job_id},
+            )
 
     async def step(label, sid, action, payload, timeout=110):
         cid = await _bcmd_create(session_factory, sid, action, payload)
@@ -2291,7 +2311,7 @@ async def _orchestrate_deploy_server(session_factory, job_id: int, params: dict)
     """Поднять rest-server на ноде с нуля (helper ставит docker/restic/htpasswd из штатных
     реп дистрибутива и запускает контейнер с --append-only --private-repos) + опц. TLS-фронт.
     Секретов на этом этапе нет: репозитории и пароли появятся позже, при настройке клиентов."""
-    _steps, save, step = _job_runner(session_factory, job_id)
+    _steps, save, step = _job_runner(session_factory, job_id, params.get("_user", ""), "deploy_server")
     try:
         # долгий шаг: apt update/install + docker pull образа
         ok, out = await step("deploy-server", params["node_id"], "deploy_server",
@@ -2319,7 +2339,7 @@ async def _orchestrate_enable_tls(session_factory, job_id: int, params: dict) ->
     """Поднять self-signed TLS-фронт (caddy :64101) на УЖЕ работающем HTTP rest-server —
     миграция существующего сервера на HTTPS. HTTP :64100 НЕ трогаем (старые клиенты живут).
     После этого клиентов переводим на https отдельно (пере-энролл с TLS → repo-URL + --cacert)."""
-    _steps, save, step = _job_runner(session_factory, job_id)
+    _steps, save, step = _job_runner(session_factory, job_id, params.get("_user", ""), "enable_tls")
     try:
         ok, out = await step("tls-front", params["node_id"], "deploy_tls_front",
                              {"san_ip": params["node_ip"], "san_dns": params["node_hostname"]}, 300)
@@ -2339,7 +2359,7 @@ async def _orchestrate_enable_tls(session_factory, job_id: int, params: dict) ->
 async def _orchestrate_setup(session_factory, job_id: int, params: dict) -> None:
     """Фоновая оркестрация: короткие сессии на каждую операцию, обновляет job.steps/status.
     Провижининг долгий (caddy pull, restic install) → фронт поллит статус."""
-    steps, save, step = _job_runner(session_factory, job_id)
+    steps, save, step = _job_runner(session_factory, job_id, params.get("_user", ""), "setup")
 
     try:
         name = params["name"]
@@ -2441,6 +2461,7 @@ async def backup_setup(
         "mode": body.mode, "schedule": body.schedule, "paths": paths, "tls": body.tls,
         "retention": {"keep_last": body.keep_last, "keep_daily": body.keep_daily,
                       "keep_weekly": body.keep_weekly, "keep_monthly": body.keep_monthly},
+        "_user": user.username,
     }
     task = asyncio.create_task(_orchestrate_setup(request.app.state.session_factory, job.id, params))
     _setup_tasks.add(task)
@@ -2479,7 +2500,7 @@ async def backup_server_deploy(
     )
     params = {
         "node_id": node.id, "node_ip": node_ip, "node_hostname": node.hostname or "",
-        "port": body.port, "tls": body.tls,
+        "port": body.port, "tls": body.tls, "_user": user.username,
     }
     task = asyncio.create_task(
         _orchestrate_deploy_server(request.app.state.session_factory, job.id, params)
@@ -2513,7 +2534,8 @@ async def backup_server_enable_tls(
     await audit.record(
         session, user.username, "backup_server_enable_tls", node.name, f"srv={server_id}"
     )
-    params = {"node_id": node.id, "node_ip": node_ip, "node_hostname": node.hostname or ""}
+    params = {"node_id": node.id, "node_ip": node_ip, "node_hostname": node.hostname or "",
+              "_user": user.username}
     task = asyncio.create_task(
         _orchestrate_enable_tls(request.app.state.session_factory, job.id, params)
     )
@@ -3250,6 +3272,7 @@ async def agent_site_probe_result(
 async def agent_docker_result(
     body: DockerResultIn,
     session: SessionDep,
+    request: Request,
     authorization: str = Header(default=""),
 ) -> dict:
     """Агент постит результат docker-команды (по своему токену). Логи кап 128КБ."""
@@ -3267,6 +3290,8 @@ async def agent_docker_result(
     c.status = "done" if body.ok else "error"
     c.done_at = datetime.now(timezone.utc)
     await session.commit()
+    if not body.ok:
+        panel_errors.command_failed(request.app.state.session_factory, "docker", c, server_name=server.name or "")
     return {"ok": True}
 
 
@@ -3274,6 +3299,7 @@ async def agent_docker_result(
 async def agent_kube_result(
     body: KubeResultIn,
     session: SessionDep,
+    request: Request,
     authorization: str = Header(default=""),
 ) -> dict:
     """Агент постит результат kube-команды (по своему токену)."""
@@ -3291,6 +3317,8 @@ async def agent_kube_result(
     c.status = "done" if body.ok else "error"
     c.done_at = datetime.now(timezone.utc)
     await session.commit()
+    if not body.ok:
+        panel_errors.command_failed(request.app.state.session_factory, "kube", c, server_name=server.name or "")
     return {"ok": True}
 
 
@@ -3320,6 +3348,9 @@ async def agent_backup_result(
     c.result = out[-100_000:]
     c.status = "done" if body.ok else "error"
     c.done_at = datetime.now(timezone.utc)
+    if not body.ok:
+        # параметры команды - в журнал до того, как payload сотрется (маска секретов внутри)
+        panel_errors.command_failed(request.app.state.session_factory, "backup", c, server_name=server.name or "")
     if c.action != "disk_fix":  # у disk_fix секретов нет, а название действия нужно уведомлению
         c.payload = None  # секреты (repopass/hpass) в БД не задерживаем - стираем сразу
     await session.commit()

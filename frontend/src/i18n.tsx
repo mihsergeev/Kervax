@@ -5542,6 +5542,139 @@ const EN: Record<string, string> = {
     'The backup helper on the server did not pick up the command. Check on the server: {cmd}. If the helper is not installed, install it: {setup}',
   'На сервере нет helper backup-setup, через него панель включает дампы. Поставьте: {cmd}':
     'The backup-setup helper is not on the server, the panel enables dumps through it. Install it: {cmd}',
+  // --- журнал ошибок панели (ProblemModal, PanelErrorsModal, ErrorBoundary) ---
+  'Панель сама записывает, на что люди натыкаются: падения бэкенда, неудачные действия, команды агенту, которые не прошли, и ошибки интерфейса. Одинаковые складываются в одну строку со счетчиком. Хранится {d} дней, не больше {n} записей. В Telegram это не уходит.':
+    'The panel records what people run into on its own: backend crashes, failed actions, agent commands that did not go through and interface errors. Identical ones fold into one row with a counter. Kept for {d} days, at most {n} records. None of this goes to Telegram.',
+  'Сообщений людей':
+    'Reports from people',
+  'Сообщения людей':
+    'Reports from people',
+  'неразобранных':
+    'not reviewed',
+  'Неразобрано':
+    'Not reviewed',
+  'записей всех видов':
+    'records of all kinds',
+  'ошибок появилось или повторилось':
+    'errors appeared or repeated',
+  'Разобрано':
+    'Reviewed',
+  'за время хранения':
+    'over the retention period',
+  'Свежее':
+    'Latest',
+  'Неразобранных ошибок нет.':
+    'No errors to review.',
+  'Отмеченное как разобранное. Если ошибка повторится, она вернется в неразобранное с пометкой.':
+    'Marked as reviewed. If an error happens again, it comes back to the review list with a mark.',
+  'Пусто.':
+    'Empty.',
+  'Показаны последние {n}: сузьте период или поиск.':
+    'Showing the latest {n}: narrow the period or the search.',
+  'Ошибки панели':
+    'Panel errors',
+  'Поиск: текст, кто, сервер, адрес':
+    'Search: text, who, server, address',
+  'Все показанные разобраны':
+    'Mark all shown as reviewed',
+  'сколько раз':
+    'how many times',
+  'снова после разбора':
+    'again after review',
+  'кто':
+    'who',
+  'где':
+    'where',
+  'впервые':
+    'first',
+  'разобрал {who}':
+    'reviewed by {who}',
+  'Ошибки этого человека за 15 минут до сообщения':
+    'This person\'s errors in the 15 minutes before the report',
+  'Неудачные запросы вкладки':
+    'Failed requests from the tab',
+  'Параметры команды':
+    'Command parameters',
+  'Скрыть подробности':
+    'Hide details',
+  'Подробности':
+    'Details',
+  'Вернуть в неразобранное':
+    'Back to review',
+  'Бэкенд':
+    'Backend',
+  'Действия':
+    'Actions',
+  'Команды агенту':
+    'Agent commands',
+  'Интерфейс':
+    'Interface',
+  'сообщение':
+    'report',
+  'бэкенд':
+    'backend',
+  'действие':
+    'action',
+  'команда':
+    'command',
+  'интерфейс':
+    'interface',
+  'Что люди написали через кнопку Сообщить о проблеме, с их ошибками за 15 минут до сообщения.':
+    'What people wrote with the Report an issue button, with their errors from the 15 minutes before.',
+  'Необработанные исключения бэкенда (500): маршрут, кто и короткий traceback кода панели.':
+    'Unhandled backend exceptions (500): route, who and a short traceback of the panel code.',
+  'Изменяющие запросы, на которые панель ответила отказом. Протухший вход (401), неверный пароль и не прошедшие проверку формы (422) сюда не пишутся.':
+    'Changing requests the panel refused. An expired session (401), a wrong password and forms that failed validation (422) are not recorded here.',
+  'Команды агенту и helper-скриптам, которые запустил человек и которые не прошли: вывод helper-скрипта и параметры команды.':
+    'Agent and helper commands started by a person that failed: the helper output and the command parameters.',
+  'Ошибки в браузере: исключения, необработанные промисы и упавшие при отрисовке экраны.':
+    'Errors in the browser: exceptions, unhandled promises and screens that crashed while rendering.',
+  'Неразобранное':
+    'To review',
+  'Разобранное':
+    'Reviewed',
+  'Отправлено, спасибо. Сообщение у админа в окне "Ошибки панели".':
+    'Sent, thank you. The admin sees it in the "Panel errors" window.',
+  'Приложено ошибок: {n}, неудачных запросов: {m}.':
+    'Errors attached: {n}, failed requests: {m}.',
+  'Ошибок за последние 15 минут не было: админ увидит только ваш текст и адрес страницы.':
+    'There were no errors in the last 15 minutes: the admin sees only your text and the page address.',
+  'Пара слов: что делали и что пошло не так. Адрес страницы, раздел, версия панели и ваши ошибки за последние 15 минут приложатся сами, скриншот не нужен.':
+    'A few words: what you did and what went wrong. The page address, section, panel version and your errors from the last 15 minutes are attached automatically, no screenshot needed.',
+  'например: в карточке бэкапа нажал "включить дамп", а под строкой красная ошибка без причины':
+    'for example: in the backup card I clicked "enable dump" and got a red error with no reason',
+  'Приложится':
+    'Attached',
+  'Страница':
+    'Page',
+  'Раздел':
+    'Section',
+  'Версия':
+    'Version',
+  'Неудачные запросы':
+    'Failed requests',
+  'за 15 минут не было':
+    'none in 15 minutes',
+  'Ошибки, которые панель записала сама, добавятся при отправке.':
+    'Errors the panel recorded on its own are added when you send.',
+  'Отправить':
+    'Send',
+  'Главная':
+    'Home',
+  'Этот экран сломался':
+    'This screen crashed',
+  'Ошибка уже записана в журнал ошибок панели. Можно перейти в другой раздел, перезагрузить страницу или добавить пару слов о том, что делали.':
+    'The error is already in the panel error log. You can go to another section, reload the page or add a few words about what you were doing.',
+  'Перезагрузить страницу':
+    'Reload the page',
+  'Неразобранных ошибок панели: {n}':
+    'Panel errors to review: {n}',
+  'Ошибки панели и сообщения о проблемах':
+    'Panel errors and issue reports',
+  'отметил ошибки панели разобранными':
+    'marked panel errors as reviewed',
+  'вернул ошибки панели в неразобранные':
+    'returned panel errors to review',
 }
 
 type Ctx = {

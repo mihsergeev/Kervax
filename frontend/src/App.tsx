@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import { ApiError, getToken, me, setToken, type Role } from './api'
+import { ApiError, getPanelErrorCount, getToken, me, setToken, type Role } from './api'
 import { AuthProvider } from './auth'
 import { useI18n, type Lang } from './i18n'
 import { useUrlSection } from './deeplink'
@@ -26,6 +26,10 @@ import { KuberPage } from './KuberPage'
 import { ServicesPage } from './ServicesPage'
 import { BackupsPage } from './BackupsPage'
 import { UsersModal } from './UsersModal'
+import { ErrorBoundary } from './ErrorBoundary'
+import { ProblemModal } from './ProblemModal'
+import { PanelErrorsModal } from './PanelErrorsModal'
+import { setUiSection } from './errorLog'
 
 type Modal =
   | 'account'
@@ -42,6 +46,8 @@ type Modal =
   | 'search'
   | 'depmap'
   | 'vulns'
+  | 'problem'
+  | 'errors'
   | null
 export type Section = 'home' | 'sites' | 'servers' | 'docker' | 'kuber' | 'services' | 'backups'
 const SECTIONS: Section[] = ['home', 'sites', 'servers', 'docker', 'kuber', 'services', 'backups']
@@ -180,6 +186,10 @@ export default function App() {
   )
   // адрес показывает раздел и открытую карточку, чтобы ссылку можно было отдать другому
   useUrlSection(section)
+  // раздел - в журнал ошибок панели вместе с неудачным запросом (errorLog.ts)
+  useEffect(() => {
+    setUiSection(authed ? section : authed === false ? 'login' : '')
+  }, [authed, section])
   // раздел виден, если список не задан (значит все) или он в списке
   const canSee = useCallback(
     (sec: Section) => sections.length === 0 || sections.includes(sec),
@@ -212,6 +222,20 @@ export default function App() {
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
   }, [authed])
+  // неразобранные ошибки панели: админу числом у шестеренки, без алертов
+  const [errOpen, setErrOpen] = useState(0)
+  const errCount = authed && role === 'admin' ? errOpen : 0
+  const loadErrCount = useCallback(() => {
+    getPanelErrorCount()
+      .then((c) => setErrOpen(c.open))
+      .catch(() => undefined)
+  }, [])
+  useEffect(() => {
+    if (!authed || role !== 'admin') return
+    loadErrCount()
+    const id = window.setInterval(loadErrCount, 5 * 60_000)
+    return () => window.clearInterval(id)
+  }, [authed, role, loadErrCount])
   const [theme, setThemeState] = useState<'dark' | 'light'>(
     () => (localStorage.getItem('kervax_theme') as 'dark' | 'light') || 'dark',
   )
@@ -364,6 +388,11 @@ export default function App() {
               aria-label={t('Меню')}
             >
               <span className="menu-gear">⚙</span>
+              {errCount > 0 && (
+                <span className="pe-gear-n" title={t('Неразобранных ошибок панели: {n}', { n: errCount })}>
+                  {errCount > 99 ? '99+' : errCount}
+                </span>
+              )}
             </button>
             {menuOpen && (
               <>
@@ -436,6 +465,16 @@ export default function App() {
                       >
                         {t('Пользователи')}
                       </button>
+                      <button
+                        className="menu-item pe-menu-item"
+                        onClick={() => {
+                          setModal('errors')
+                          setMenuOpen(false)
+                        }}
+                      >
+                        {t('Ошибки панели')}
+                        {errCount > 0 && <span className="pe-menu-n">{errCount}</span>}
+                      </button>
                       <div className="menu-divider" />
                     </>
                   )}
@@ -502,6 +541,15 @@ export default function App() {
                   >
                     {t('О панели Kervax')}
                   </button>
+                  <button
+                    className="menu-item"
+                    onClick={() => {
+                      setModal('problem')
+                      setMenuOpen(false)
+                    }}
+                  >
+                    {t('Сообщить о проблеме')}
+                  </button>
                   <div className="menu-divider" />
                   <button className="menu-item menu-item-danger" onClick={logout}>
                     {t('Выйти')}
@@ -516,7 +564,8 @@ export default function App() {
       {authed === null ? (
         <p className="muted">{t('загрузка…')}</p>
       ) : authed ? (
-        section === 'home' ? (
+        <ErrorBoundary resetKey={section} onReport={() => setModal('problem')}>
+        {section === 'home' ? (
           <HomePage onNavigate={setSection} onOpen={openTarget} onUnauthorized={logout} />
         ) : section === 'sites' ? (
           <ChecksPage
@@ -583,7 +632,8 @@ export default function App() {
             onConsumed={() => setOpenServerId(null)}
             onOpen={openTarget}
           />
-        )
+        )}
+        </ErrorBoundary>
       ) : (
         <LoginPage onLogin={loadMe} />
       )}
@@ -683,6 +733,21 @@ export default function App() {
       )}
       {modal === 'users' && (
         <UsersModal onClose={() => setModal(null)} onUnauthorized={logout} />
+      )}
+      {modal === 'problem' && <ProblemModal onClose={() => setModal(null)} onUnauthorized={logout} />}
+      {modal === 'errors' && (
+        <PanelErrorsModal
+          onClose={() => {
+            setModal(null)
+            loadErrCount()
+          }}
+          onUnauthorized={logout}
+          onChanged={loadErrCount}
+          onOpenServer={(id) => {
+            setModal(null)
+            openTarget('servers', id)
+          }}
+        />
       )}
     </div>
     </AuthProvider>

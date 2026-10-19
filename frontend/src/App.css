@@ -7267,3 +7267,60 @@ button.ghost.lc-del { color: var(--down); border-color: color-mix(in srgb, var(-
   .llm-lat { grid-template-columns: minmax(0, 1fr) repeat(3, max-content); }
   .llm-sp { display: none; }
 }
+
+/* журнал ошибок панели: число неразобранного у шестеренки, окно "Сообщить о проблеме" (ProblemModal),
+   окно "Ошибки панели" (PanelErrorsModal) и упавший экран (ErrorBoundary). Префикс pe- */
+.menu-wrap .icon-btn { position: relative; }
+.pe-gear-n {
+  position: absolute; top: -0.35rem; right: -0.45rem; min-width: 1.05rem; height: 1.05rem; padding: 0 0.25rem;
+  border-radius: 999px; background: var(--hover); color: var(--text-muted); border: 1px solid var(--border);
+  font-size: 0.62rem; font-weight: 700; line-height: 0.95rem; text-align: center;
+}
+.pe-menu-item { display: flex; align-items: center; gap: 0.5rem; }
+.pe-menu-n { margin-left: auto; font-size: 0.72rem; font-weight: 700; color: var(--text-muted); }
+.pe-problem { width: min(620px, calc(100vw - 2rem)); }
+.pe-problem .al-head { padding-bottom: 0; }
+.pe-text { min-height: 7rem; font: inherit; font-size: 0.9rem; }
+.pe-attach { display: flex; flex-direction: column; gap: 0.4rem; padding: 0.6rem 0.8rem; border: 1px solid var(--border); border-radius: 10px; }
+.pe-attach .rt-cap { margin: 0; }
+.pe-attach p { margin: 0; }
+.pe-kv { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 0.3rem 0.9rem; font-size: 0.84rem; }
+.pe-kv > span { min-width: 0; overflow-wrap: anywhere; }
+.pe-log { display: block; overflow-wrap: anywhere; }
+.pe-acts { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 0.6rem; }
+.pe-sent { margin: 0; font-weight: 600; color: var(--up); }
+.pe-list { display: flex; flex-direction: column; gap: 0.5rem; }
+.pe-row { display: flex; flex-direction: column; gap: 0.3rem; padding: 0.6rem 0.8rem; border: 1px solid var(--border); border-left: 3px solid var(--border-strong, var(--border)); border-radius: 9px; background: var(--bg); }
+.pe-row.pe-server { border-left-color: var(--down); }
+.pe-row.pe-command, .pe-row.pe-api { border-left-color: var(--degraded); }
+.pe-row.pe-report { border-left-color: var(--accent); }
+.pe-row.pe-done { opacity: 0.72; }
+.pe-head { display: flex; align-items: baseline; flex-wrap: wrap; gap: 0.35rem 0.6rem; }
+.pe-act { font-size: 0.82rem; font-weight: 600; overflow-wrap: anywhere; }
+.pe-who-main { font-weight: 650; }
+.pe-count { font-size: 0.74rem; font-weight: 700; padding: 0 0.35rem; border-radius: 6px; background: var(--hover); }
+.pe-again { font-size: 0.74rem; font-weight: 600; color: var(--degraded); }
+.pe-when { margin-left: auto; white-space: nowrap; }
+.pe-msg { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 0.88rem; }
+.pe-meta { display: flex; flex-wrap: wrap; gap: 0.2rem 0.9rem; }
+.pe-meta a { overflow-wrap: anywhere; }
+.pe-chip-server { color: var(--down); }
+.pe-chip-command, .pe-chip-api { color: var(--degraded); }
+.pe-chip-report { color: var(--accent); }
+.pe-att { display: flex; flex-direction: column; gap: 0.25rem; padding-left: 0.6rem; border-left: 2px solid var(--border); }
+.pe-att-row { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.2rem 0.5rem; overflow-wrap: anywhere; }
+.pe-more { display: flex; flex-direction: column; gap: 0.3rem; }
+.pe-pre {
+  margin: 0; padding: 0.5rem 0.7rem; max-height: 22rem; overflow: auto; border-radius: 8px; border: 1px solid var(--border);
+  background: var(--bg-card); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.76rem;
+  line-height: 1.45; white-space: pre-wrap; overflow-wrap: anywhere;
+}
+.pe-acts-row { display: flex; flex-wrap: wrap; gap: 0.4rem; }
+.pe-crash { max-width: 46rem; margin: 2rem auto; display: flex; flex-direction: column; gap: 0.7rem; }
+.pe-crash h3 { margin: 0; }
+.pe-crash p { margin: 0; }
+@media (max-width: 600px) {
+  .pe-when { margin-left: 0; }
+  .pe-kv { grid-template-columns: minmax(0, 1fr); gap: 0.1rem; }
+  .pe-kv > .muted { margin-top: 0.3rem; }
+}

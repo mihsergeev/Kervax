@@ -116,6 +116,8 @@ export const ACT: Record<string, string> = {
   vault_reset: 'стер сейф бэкапов',
   ansible_token_issue: 'выпустил токен ansible',
   ansible_token_revoke: 'отключил доступ ansible',
+  panel_errors_resolve: 'отметил ошибки панели разобранными',
+  panel_errors_reopen: 'вернул ошибки панели в неразобранные',
 }
 
 // Действия с сервером пишутся семейством (docker_restart, kube_logs, backup_run_now): новое

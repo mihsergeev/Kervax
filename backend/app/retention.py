@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app import settings_store
 from app import timeline as timeline_mod
 from app import traffic as traffic_mod
+from app import panel_errors as panel_errors_mod
 from app import usage as usage_mod
 from app.config import Settings
 from app.models import CheckSample, ServerMetric
@@ -44,6 +45,7 @@ FIXED = [
     ("domain_probes", DOMAIN_PROBES_KEEP, ["domain_probes"]),
     ("probes", PROBES_KEEP, ["probe_requests"]),
     ("panel_requests", REQUESTS_KEEP, ["request_stats"]),
+    ("panel_errors", panel_errors_mod.KEEP, ["panel_errors"]),
 ]
 # примерный размер строки с индексами, байт (по продам) - только для оценки в SQLite
 _ROW = {"server_metrics": 1400, "check_samples": 150, "location_samples": 150, "check_ip_samples": 220,
