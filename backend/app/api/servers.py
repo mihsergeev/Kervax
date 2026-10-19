@@ -240,7 +240,7 @@ def _out(
     o.docker_exposed = docker_exposure.view(server.last_report or {})
     o.docker_risk = docker_risk.view(server)
     o.exposure = open_ports.view(server)
-    o.os_advice = os_support.advice(server.last_report or {}, now)
+    o.os_advice = os_support.advice(server.last_report or {}, now, server.alert_mutes)
     o.sw_advice = software_mod.advice(server.last_report or {}, server.sw_host, now)
     o.changes = srv_changes.view(server)
     o.backup_verify = backup_verify.view(server.last_report or {}, now)

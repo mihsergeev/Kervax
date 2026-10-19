@@ -1294,6 +1294,11 @@ const EN: Record<string, string> = {
   'слабых: {n}': 'weak: {n}',
   'учетка': 'account',
   'учетка нужна': 'account needed',
+  // решения по обновлениям ОС
+  'обновить ОС нельзя': 'cannot upgrade the OS',
+  'перезагружать нельзя': 'cannot reboot',
+  'обновлять нельзя': 'cannot update',
+  'все так и оставить': 'leave all as is',
   // контейнеры с ключами от хоста
   '{name}: у контейнеров ключи от хоста: {list} - взлом приложения в них даст root на сервере':
     '{name}: containers hold the keys to the host: {list} - breaking into the app inside gives root on the server',

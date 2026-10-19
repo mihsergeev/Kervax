@@ -7,11 +7,18 @@
 
 Это не алерты: ни одно из этого не горит, но каждое со временем превращается в дыру. Поэтому
 пункты идут в "Требует действий" на главной и в блок "Обновления ОС" карточки сервера.
+
+Обновить ОС можно не всегда: старый сервер бэкапов, железо под софт, который на новой версии не
+встанет. Тогда это решение человека "так и должно быть" (alert_mutes "osupd:<вид>"): пункт уходит
+из "Требует действий", а в карточке виден приглушенным с кнопкой "вернуть". Не заглушенный алерт -
+в "Заглушено" его нет, как и других решений.
 """
 from __future__ import annotations
 
 import re
 from datetime import date, datetime, timezone
+
+MUTE_PREFIX = "osupd:"
 
 # Конец поддержки: у Ubuntu LTS - обычной (дальше обновления безопасности только по подписке
 # Ubuntu Pro), у Debian - вместе с LTS (Debian LTS бесплатный), у RHEL-семейства - полной.
@@ -41,6 +48,9 @@ _EOL: list[tuple[str, str, date, bool]] = [
     (r"^(AlmaLinux|Rocky Linux|Red Hat Enterprise Linux)[^0-9]*9\.", "EL 9", date(2032, 5, 31), False),
 ]
 _EOL_RX = [(re.compile(rx), name, d, paid) for rx, name, d, paid in _EOL]
+# Ubuntu Pro (ESM): до какого числа после обычной поддержки выходят исправления безопасности
+_ESM = {"Ubuntu 16.04": date(2026, 4, 30), "Ubuntu 18.04": date(2028, 4, 30), "Ubuntu 20.04": date(2030, 4, 30),
+        "Ubuntu 22.04": date(2032, 4, 30), "Ubuntu 24.04": date(2034, 4, 30), "Ubuntu 26.04": date(2036, 4, 30)}
 EOL_WARN_DAYS = 180  # за полгода - пора планировать переезд
 REBOOT_AFTER_DAYS = 7  # перезагрузку после обновления ядра откладывают на ночь-другую, не на месяц
 UNATT_STALE_DAYS = 3
@@ -67,8 +77,18 @@ def eol_of(os_name: str) -> tuple[str, date, bool] | None:
     return None
 
 
-def advice(rep: dict, now: datetime) -> list[dict]:
-    """Что сделать с ОС ноды: [{"kind", "level", "text"}], уровень 2 - уже дыра, 1 - пора."""
+def advice(rep: dict, now: datetime, mutes: list[str] | None = None) -> list[dict]:
+    """Что сделать с ОС ноды: [{"kind", "level", "text", "key", "muted"}], уровень 2 - уже дыра, 1 -
+    пора; muted - человек решил, что так и должно быть (ключ key в alert_mutes)."""
+    out = _advice(rep, now)
+    got = set(mutes or [])
+    for x in out:
+        x["key"] = MUTE_PREFIX + x["kind"]
+        x["muted"] = x["key"] in got
+    return out
+
+
+def _advice(rep: dict, now: datetime) -> list[dict]:
     out: list[dict] = []
     today = now.astimezone(timezone.utc).date()
     eol = eol_of(str(rep.get("os") or ""))
@@ -76,10 +96,16 @@ def advice(rep: dict, now: datetime) -> list[dict]:
         name, end, paid = eol
         left = (end - today).days
         when = end.strftime("%d.%m.%Y")
-        if left < 0:
+        esm = _ESM.get(name)
+        if left < 0 and paid and esm and esm >= today:
+            # что делать, если переезд невозможен: ESM в Ubuntu Pro (pro attach <токен>)
             out.append({"kind": "eol", "level": 2, "text": (
-                f"обычная поддержка {name} кончилась {when}: обновления безопасности только по подписке Ubuntu Pro"
-                if paid else f"поддержка {name} кончилась {when}: обновлений безопасности больше нет")})
+                f"обычная поддержка {name} кончилась {when}: исправления безопасности дальше только в Ubuntu Pro "
+                f"(ESM до {esm.strftime('%d.%m.%Y')}, pro attach) или после переезда на новую LTS")})
+        elif left < 0:
+            out.append({"kind": "eol", "level": 2, "text": (
+                f"поддержка {name} кончилась {when}, ESM тоже ({esm.strftime('%d.%m.%Y')}): обновлений безопасности больше нет"
+                if paid and esm else f"поддержка {name} кончилась {when}: обновлений безопасности больше нет")})
         elif left <= EOL_WARN_DAYS:
             out.append({"kind": "eol", "level": 1, "text": f"поддержка {name} кончится {when}, через {_days(left)}"})
     u = rep.get("os_upd") if isinstance(rep.get("os_upd"), dict) else None
