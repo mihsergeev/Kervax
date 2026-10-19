@@ -1884,6 +1884,10 @@ export type BackupServerRepoExtra = {
   recent?: number[] // времена последних снапшотов (helper 0.28), по ним бэкенд считает ритм
   groups?: { ts: number; groups: BackupGroup[] } | null // группы снапшотов, если их больше одной
   prune_err?: string // ошибка последнего неудачного прогона чистки (helper 0.30)
+  prune_off?: number // 1 - чистку выключили: строка cron.d закомментирована (helper 0.34)
+  prune_off_ts?: number // с какого времени (mtime cron.d)
+  prune_off_why?: string // почему, из шапки # kervax-prune-off
+  prune_hand_off?: number // 1 - чистка идет, а в crontab root ее строка закомментирована руками
 }
 // группа снапшотов так, как её видит forget: хост и теги (prune-скрипт, раз в сутки)
 // Шаг "как исправить" (рисует FixSteps): on - дата к тексту шага, alt - другой путь вместо шагов выше,
@@ -1926,6 +1930,20 @@ export type BsrvCleanup = {
   rotation: BsrvCleanupRot[]
   prune: { repo: string; kind: string; why: string; fix: OsFixStep[] }[] // своя чистка не работает
   groups: Record<string, Record<string, { forget?: OsFixStep[]; merge?: OsFixStep[] }>> // repo -> старая группа -> шаги
+  // чистку выключили руками (helper 0.34): live - бэкапы при этом идут, since - с какого времени,
+  // why - причина из шапки cron.d. Решение, а не поломка: в ротацию и алерты не идет
+  off?: BsrvCleanupOff[]
+  // чистка идет, хотя ее строку в crontab root закомментировали руками (включил helper до 0.34)
+  hand?: { repo: string; fix: OsFixStep[] }[]
+}
+export type BsrvCleanupOff = {
+  repo: string
+  live: boolean
+  since: number
+  why: string
+  last: number // последний бэкап
+  snaps: number
+  fix: OsFixStep[] // как включить
 }
 export type BackupServerExtra = {
   v: number
@@ -2491,6 +2509,9 @@ export type LlmSvc = {
   prompt_tps?: number | null; gen_tps?: number | null; preempt?: number | null; errors?: number | null
   aborted?: number | null; ttft?: number[] | null; tpot?: number[] | null; e2e?: number[] | null
   base_ttft?: number | null; base_tpot?: number | null
+  // всплески задержек за сутки (llm_lat.recent), свежие первыми; req - [меньше, больше] запросов за 5 мин
+  lat_recent?: { m: 'ttft' | 'tpot'; from: string; to: string; peak: number; at: string; base: number
+    req: [number, number] | null; wait: number; load: boolean }[]
   locked?: boolean // /metrics просит ключ: так настроено, не авария
   pub_port?: number | null // проброшенный порт контейнера на хосте
 }

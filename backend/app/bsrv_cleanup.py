@@ -17,9 +17,11 @@ import re
 from datetime import datetime
 
 from app.collector import (
+    _BACKUP_REPO_STALE_SECONDS,
     archived_repo,
     bsrv_extra,
     old_groups,
+    prune_off,
     prune_problems,
     renamed_to,
     repo_groups,
@@ -38,6 +40,7 @@ _NAME = re.compile(r"^[A-Za-z0-9._-]+$")
 ADOPT_VER = (0, 25)   # adopt-legacy: перенос со старого скрипта, блоки на удаленные репозитории
 GROUP_VER = (0, 28)   # forget-group: удалить старую группу снапшотов
 MERGE_VER = (0, 33)   # merge-group: склеить переименованный сервер с прежним именем
+OFF_VER = (0, 34)     # prune-off / prune-on; adopt-legacy переносит и "чистка выключена"
 
 
 def _ver(rep: dict) -> tuple[int, ...]:
@@ -65,21 +68,31 @@ def _run(names: list[str]) -> str:
                      for n in names)
 
 
-def adopt_fix(names: list[str], ver: tuple[int, ...]) -> list[dict]:
+def adopt_fix(names: list[str], ver: tuple[int, ...], scheduled: bool = True) -> list[dict]:
     """Перевести репозитории со старого скрипта на чистку панели (adopt-legacy): у каждого свой
     prune-скрипт с той же политикой и паролем из его блока, cron на ночь, блок в старом скрипте
-    закомментирован, копия файла рядом. Снапшоты удаляет только первая чистка."""
+    закомментирован, копия файла рядом. Снапшоты удаляет только первая чистка.
+
+    scheduled=False - старый скрипт не запускается (его строку в cron закомментировали). helper 0.34
+    переносит и это: чистка у перенесенных остается выключенной, включает ее отдельный шаг
+    prune-on. Старый helper включил бы ее сам при переносе, поэтому сначала обновить его."""
     names = _ok(names)
     if not names:
         return []
     if ver < ADOPT_VER:
         return [_update(ADOPT_VER)]
+    if not scheduled and ver < OFF_VER:
+        return [_update(OFF_VER)]
     ns = " ".join(names)
-    return [
+    steps = [
         {"id": "adopt_dry", "cmd": f"{HELPER} adopt-legacy {ns}"},
-        {"id": "adopt_apply", "cmd": f"{HELPER} adopt-legacy --apply {ns}"},
+        {"id": "adopt_apply" if scheduled else "adopt_apply_off", "cmd": f"{HELPER} adopt-legacy --apply {ns}"},
         {"id": "adopt_check", "cmd": "cat " + " ".join(f"/etc/cron.d/kervax-prune-{n}" for n in names)
          + f"\nsudo grep -c '^# kervax-moved RESTIC_REPOSITORY=' {LEGACY}"},
+    ]
+    if not scheduled:
+        steps.append({"id": "adopt_on", "cmd": "\n".join(f"{HELPER} prune-on {n}" for n in names)})
+    return steps + [
         {"id": "adopt_run", "cmd": _run(names)},
         {"id": "adopt_undo", "undo": True, "cmd": _restore() + "\nsudo rm -f " + " ".join(
             f"/etc/cron.d/kervax-prune-{n} {PRUNE_DIR}/restic-prune-{n}.sh {ENV_DIR}/{n}.env" for n in names)},
@@ -171,6 +184,29 @@ def prune_fix(repo: str, kind: str) -> list[dict]:
     return []
 
 
+def off_fix(repo: str, r: dict) -> list[dict]:
+    """Чистку репозитория выключили (prune-off, закомментированная строка cron): как включить.
+    Сначала что удалит первая чистка (без удаления), потом prune-on, проверка, откат prune-off."""
+    if not _NAME.match(repo):
+        return []
+    return [{**script_fix(repo, r)[1], "id": "off_dry"},
+            {"id": "off_on", "cmd": f"{HELPER} prune-on {repo}"},
+            {"id": "off_check", "cmd": f"cat /etc/cron.d/kervax-prune-{repo}"},
+            {"id": "off_undo", "undo": True, "cmd": f"{HELPER} prune-off {repo}"}]
+
+
+def hand_fix(repo: str) -> list[dict]:
+    """Чистка идет, а в crontab root ее строка закомментирована руками: так ее выключали раньше, и
+    helper до 0.34 включил ее обратно сам. Решить: выключить (prune-off) или оставить (prune-on
+    запоминает, что включили осознанно, и пункт уходит)."""
+    if not _NAME.match(repo):
+        return []
+    return [{"id": "hand_look", "cmd": f"sudo crontab -l -u root | grep -n 'restic-prune-{repo}.sh'\n"
+                                       f"cat /etc/cron.d/kervax-prune-{repo}"},
+            {"id": "hand_off", "cmd": f"{HELPER} prune-off {repo}"},
+            {"id": "hand_keep", "alt": True, "cmd": f"{HELPER} prune-on {repo}"}]
+
+
 def view(s, now: datetime) -> dict | None:
     """Чистка сервера бэкапов для карточки: {legacy, dead, rotation, prune, groups}, None - это не
     сервер бэкапов.
@@ -179,7 +215,8 @@ def view(s, now: datetime) -> dict | None:
     переноса на чистку панели; dead - его блоки на удаленные репозитории; rotation - где старье не
     вычищается, одна строка на репозиторий со всеми причинами и тем, отчего так (cause); prune -
     где не работает своя чистка; groups - шаги по старым группам снапшотов: repo -> host ->
-    {forget, merge}."""
+    {forget, merge}; off - где чистку выключили (live - бэкапы при этом идут); hand - где чистка
+    идет, хотя ее строку в crontab root закомментировали руками."""
     rep = s.last_report or {}
     bs = rep.get("backup_server") or {}
     if not bs.get("present"):
@@ -194,7 +231,7 @@ def view(s, now: datetime) -> dict | None:
     scheduled = bool(leg and leg.get("where"))
     stats = {str(r.get("name") or ""): r for r in bs.get("repos") or [] if isinstance(r, dict)}
     reasons = rotation_reasons(s, now)
-    out: dict = {"legacy": None, "dead": None, "rotation": [], "prune": [], "groups": {}}
+    out: dict = {"legacy": None, "dead": None, "rotation": [], "prune": [], "groups": {}, "off": [], "hand": []}
     if leg:
         script = str(leg.get("script") or LEGACY)
         on = sorted(n for n, o in obs.items() if isinstance(o, dict) and o.get("cleaner") == "legacy")
@@ -207,7 +244,7 @@ def view(s, now: datetime) -> dict | None:
                 "repos": [{"name": n, "why": reasons.get(n, []), "snaps": int((stats.get(n) or {}).get("snapshots") or 0)}
                           for n in live],
                 "archived": len(on) - len(live),
-                "fix": adopt_fix(live, ver),
+                "fix": adopt_fix(live, ver, scheduled),
             }
         missing = _ok(list(leg.get("missing") or []))
         if missing:
@@ -219,7 +256,7 @@ def view(s, now: datetime) -> dict | None:
         if olds:
             cause, fix = "old_group", []  # шаги - у каждой группы (groups)
         elif cleaner == "legacy":
-            cause, fix = ("legacy" if scheduled else "legacy_off"), adopt_fix([name], ver)
+            cause, fix = ("legacy" if scheduled else "legacy_off"), adopt_fix([name], ver, scheduled)
         elif cleaner == "script":
             cause, fix = "script", script_fix(name, stats.get(name) or {})
         elif cleaner == "":
@@ -236,6 +273,23 @@ def view(s, now: datetime) -> dict | None:
             fx = group_fix(name, host, renamed_to(groups, g), ver)
             if fx:
                 out["groups"].setdefault(name, {})[host] = fx
+    # чистку выключили (helper 0.34): решение, а не поломка, в ротацию и алерты не идет. Бэкапы туда
+    # идут (live) - репозиторий растет без чистки, это отдельный пункт с шагами включить; архив или
+    # бэкапов давно нет - просто строка "выключена", чистить там нечего
+    for name in sorted(n for n in obs if prune_off(ext, n)):
+        if not _NAME.match(name):
+            continue
+        o = obs[name]
+        st = stats.get(name) or {}
+        last = int(st.get("last_activity") or 0)
+        live = not archived_repo(arch, name) and last > 0 and nowts - last <= _BACKUP_REPO_STALE_SECONDS
+        out["off"].append({"repo": name, "live": live, "since": int(o.get("prune_off_ts") or 0),
+                           "why": str(o.get("prune_off_why") or "")[:200], "last": last,
+                           "snaps": int(st.get("snapshots") or 0), "fix": off_fix(name, st)})
+    # чистка идет, хотя ее строку в crontab выключили руками: вопрос, а не поломка
+    for name in sorted(n for n, o in obs.items() if isinstance(o, dict) and int(o.get("prune_hand_off") or 0) == 1):
+        if _NAME.match(name):
+            out["hand"].append({"repo": name, "fix": hand_fix(name)})
     # те же репозитории, что bsrv_prune и алерт backup_prune
     for name, (kind, why) in sorted(prune_problems(bs, ext, now, set(s.backup_repo_mutes or []), arch).items()):
         out["prune"].append({"repo": name, "kind": kind, "why": why, "fix": prune_fix(name, kind)})

@@ -7374,6 +7374,7 @@ button.ghost.lc-del { color: var(--down); border-color: color-mix(in srgb, var(-
 .llm-v { font-size: 1.2rem; font-weight: 600; font-variant-numeric: tabular-nums; }
 .llm-s { color: var(--text-muted); font-size: 0.78rem; }
 .llm-lat { display: grid; grid-template-columns: max-content repeat(3, max-content) minmax(80px, 1fr); gap: 0.25rem 1rem; align-items: center; font-size: 0.86rem; }
+.llm-spikes { margin-top: 0.4rem; display: grid; gap: 0.15rem; overflow-wrap: anywhere; }
 .llm-lr { display: contents; }
 .llm-lh { color: var(--text-muted); font-size: 0.72rem; text-transform: uppercase; }
 .llm-lat .num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }

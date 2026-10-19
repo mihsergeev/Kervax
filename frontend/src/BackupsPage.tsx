@@ -43,7 +43,7 @@ import { useI18n, currentLang, tr } from './i18n'
 import { MuteChip, collectMutes, muteRows, mutesTileSub } from './mutes'
 import { MutesPanel } from './MutesPanel'
 import { VaultPanel } from './VaultPanel'
-import { DeadBlocks, LegacyPlaque, RowFix, bsrvFixText, rotationAction, rotationLines } from './BsrvCleanup'
+import { DeadBlocks, LegacyPlaque, OffRows, RowFix, bsrvFixText, offLines, rotationAction, rotationLines } from './BsrvCleanup'
 import { FixSteps } from './FixSteps'
 import { CountryFlag } from './CountryFlag'
 import { byteUnits, fmtDur } from './units'
@@ -1358,7 +1358,9 @@ function RotationInfo({ r, x, legacy, prune, t }: {
   // дни с бэкапами, а не календарные, и у редко бэкапящегося клиента старый снапшот законен.
   // Так же считает rotation_stale_repos на бэкенде.
   const policyMax = (r.keep_last ?? 0) + (r.keep_daily ?? 0) + (r.keep_weekly ?? 0) + (r.keep_monthly ?? 0)
-  const stale = !!(oldest && limit && ageDays > limit && r.snapshots > policyMax)
+  // чистку выключили руками (helper 0.34): старье - следствие решения, не поломка
+  const off = (x?.prune_off ?? 0) === 1
+  const stale = !off && !!(oldest && limit && ageDays > limit && r.snapshots > policyMax)
   // чистка что-то удаляет: тогда переживший политику снапшот почти наверняка другой группы
   const alive = removed > 0 || !!(x?.removed_ts && now - x.removed_ts < 3 * 86400)
   // без метрик чистки helper сам видит, когда из репозитория пропадали снапшоты
@@ -1402,6 +1404,11 @@ function RotationInfo({ r, x, legacy, prune, t }: {
           {(x.check_parts ?? 0) > 0 && ` (${t('данные {p}/{n}', { p: x.check_part ?? 0, n: x.check_parts ?? 0 })})`}
         </span>
       ) : null}
+      {off && (
+        <span className="muted" title={[x?.prune_off_why, t('Включить: вкладка "Чистка", или на сервере бэкапов kervax-backupserver-helper prune-on {name}', { name: r.name })].filter(Boolean).join('\n')}>
+          {t('чистка выключена вручную')}
+        </span>
+      )}
       {ts > 0 && (
         <span className={prune ? 't-down' : ''} title={!prune && r.rotation_ok === 0 ? t('последний прогон завершился ошибкой') : undefined}>
           {t('чистка')}: {fmtAgo(ts)}
@@ -2190,6 +2197,8 @@ function BackupServerModal({ server: s, info, servers, canAct, initialSec, onCha
     // по строке на то, что делать: перевести на чистку панели, удалить старые группы и т.п.
     if (rot.length && !smuted.has('backup_rotation'))
       for (const x of rotationLines(s, t)) add('cleanup', { level: 1, count: x.n, text: x.text })
+    // чистку выключили, а бэкапы идут; чистка идет, хотя ее выключали в crontab (helper 0.34)
+    for (const x of offLines(s, t)) add('cleanup', { level: 1, count: x.n, text: x.text })
     if (s.bsrv_restic_old)
       add('server', { level: 1, text: t('на сервере бэкапов старый restic {v} - обновите', { v: s.bsrv_restic_old }) })
     if (!every.length)
@@ -2477,7 +2486,10 @@ function BackupServerModal({ server: s, info, servers, canAct, initialSec, onCha
                     ))}
                   </div>
                 )}
-                {!pruneNames.length && !rotRows.length && !cl?.legacy && !cl?.dead && (
+                {/* чистка выключена вручную: спокойно, если чистить нечего (архив, бэкапов нет),
+                    пунктом с шагами включить, если бэкапы идут */}
+                <OffRows off={cl?.off ?? []} hand={cl?.hand ?? []} fmtAgo={fmtAgo} />
+                {!pruneNames.length && !rotRows.length && !cl?.legacy && !cl?.dead && !cl?.off?.length && !cl?.hand?.length && (
                   <div className="srv-empty">{ok.cleanup}</div>
                 )}
                 {canAct && <BulkCleanup server={s} all={all} muted={muted} />}

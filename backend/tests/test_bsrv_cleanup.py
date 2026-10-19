@@ -10,7 +10,7 @@ POL = {"keep_daily": 7, "keep_weekly": 4, "keep_monthly": 6}
 MISSING = ["web-old-1", "web-old-2", "db-old-1"]
 
 
-def _server(now: datetime, helper="0.33", where="", archive=None, missing=None, mutes=None):
+def _server(now: datetime, helper="0.34", where="", archive=None, missing=None, mutes=None):
     ts = int(now.timestamp())
     repos = [
         # чистил старый скрипт, а его сняли с cron: снапшоты копятся с лета
@@ -80,12 +80,20 @@ def test_legacy_not_scheduled_lists_live_repos_and_moves_them():
     assert [r["name"] for r in leg["repos"]] == ["repo-a"] and leg["archived"] == 1 and not leg["scheduled"]
     assert len(leg["repos"][0]["why"]) == 2 and leg["repos"][0]["snaps"] == 126
     fx = leg["fix"]
-    assert _ids(fx) == ["adopt_dry", "adopt_apply", "adopt_check", "adopt_run", "adopt_undo"]
+    # старый скрипт не запускался: перенос оставляет чистку выключенной (helper 0.34), включить -
+    # отдельный шаг prune-on
+    assert _ids(fx) == ["adopt_dry", "adopt_apply_off", "adopt_check", "adopt_on", "adopt_run", "adopt_undo"]
     assert fx[0]["cmd"] == "sudo /lib65/kervax/kervax-backupserver-helper adopt-legacy repo-a"
     assert fx[1]["cmd"].endswith("adopt-legacy --apply repo-a")
     assert "/etc/cron.d/kervax-prune-repo-a" in fx[2]["cmd"]
-    assert "restic-prune-repo-a.sh" in fx[3]["cmd"]
-    assert fx[4].get("undo") and "kervax-bak-" in fx[4]["cmd"] and "/app/rest-server/system/envs/repo-a.env" in fx[4]["cmd"]
+    assert fx[3]["cmd"] == "sudo /lib65/kervax/kervax-backupserver-helper prune-on repo-a"
+    assert "restic-prune-repo-a.sh" in fx[4]["cmd"]
+    assert fx[5].get("undo") and "kervax-bak-" in fx[5]["cmd"] and "/app/rest-server/system/envs/repo-a.env" in fx[5]["cmd"]
+    # helper до 0.34 при переносе включил бы чистку сам: сначала обновить его
+    assert bsrv_cleanup.view(_server(now, helper="0.33"), now)["legacy"]["fix"] == [{"id": "helper_update", "arg": "0.34"}]
+    # запущенный старый скрипт: перенос как раньше, без шага включения
+    fx = bsrv_cleanup.view(_server(now, where="crontab root", helper="0.33"), now)["legacy"]["fix"]
+    assert _ids(fx) == ["adopt_dry", "adopt_apply", "adopt_check", "adopt_run", "adopt_undo"]
     # в "Чистке" тот же репозиторий: старый скрипт не запускается, шаги те же
     rot = {x["repo"]: x for x in v["rotation"]}
     assert rot["repo-a"]["cause"] == "legacy_off" and _ids(rot["repo-a"]["fix"])[0] == "adopt_dry"
@@ -183,3 +191,112 @@ def test_not_a_backup_server():
     s = SimpleNamespace(last_report={"backup_server": {"present": False}}, alert_state={}, backup_repo_mutes=[],
                         backup_repo_archive={})
     assert bsrv_cleanup.view(s, now) is None
+
+
+def _off(now: datetime):
+    """repo-e и repo-f: чистку выключили руками (helper 0.34). В repo-e бэкапы идут, repo-f заморожен,
+    снапшоты старше политики. repo-g: чистка идет, хотя в crontab ее строка закомментирована руками."""
+    ts = int(now.timestamp())
+    s = _server(now)
+    s.last_report["backup_server"]["repos"] += [
+        dict(POL, name="repo-e", snapshots=60, oldest_snapshot=ts - 300 * DAY, last_activity=ts - 5 * 3600,
+             rotation_ts=ts - 20 * DAY, rotation_ok=1, rotation_removed=0),
+        dict(POL, name="repo-f", snapshots=13, oldest_snapshot=ts - 240 * DAY, last_activity=ts - 104 * DAY,
+             rotation_ts=ts - 9 * DAY, rotation_ok=1, rotation_removed=0),
+        dict(POL, name="repo-g", snapshots=12, oldest_snapshot=ts - 90 * DAY, last_activity=ts - 6 * 3600,
+             rotation_ts=ts - 5 * 3600, rotation_ok=1, rotation_removed=1),
+    ]
+    obs = s.last_report["extras"]["backup-server"]["repos"]
+    obs["repo-e"] = {"cleaner": "script", "removed_ts": 0, "seen_since": ts - 60 * DAY, "prune_off": 1,
+                     "prune_off_ts": ts - 20 * DAY, "prune_off_why": "turned off by hand 2026-01-01 with prune-off"}
+    obs["repo-f"] = {"cleaner": "script", "removed_ts": 0, "seen_since": ts - 60 * DAY, "prune_off": 1,
+                     "prune_off_ts": ts - 9 * DAY, "prune_off_why": "its cron line was commented out by hand"}
+    obs["repo-g"] = {"cleaner": "script", "removed_ts": ts - 5 * 3600, "seen_since": ts - 60 * DAY,
+                     "prune_off": 0, "prune_hand_off": 1}
+    return s
+
+
+def test_cleanup_turned_off_by_hand_is_not_an_alert():
+    """Чистку выключили руками: это решение, а не встающая ротация. Ни в backup_rotation, ни в
+    "чистка не работает" (не запускается N дней) такой репозиторий не идет."""
+    now = datetime.now(timezone.utc)
+    s = _off(now)
+    rep, ext = s.last_report, collector.bsrv_extra(s.last_report)
+    assert collector.prune_off(ext, "repo-e") and not collector.prune_off(ext, "repo-g")
+    assert not collector.prune_off({}, "repo-e")
+    why = collector.rotation_reasons(s, now)
+    assert "repo-e" not in why and "repo-f" not in why
+    pr = collector.prune_problems(rep["backup_server"], ext, now)
+    assert "repo-e" not in pr and "repo-f" not in pr
+    # без отметки helper'а тот же repo-e - встающая ротация и чистка, которая не запускается
+    del rep["extras"]["backup-server"]["repos"]["repo-e"]["prune_off"]
+    assert "repo-e" in collector.rotation_reasons(s, now)
+    assert collector.prune_problems(rep["backup_server"], collector.bsrv_extra(rep), now)["repo-e"][0] == "idle"
+
+
+def test_cleanup_off_rows_and_steps():
+    """Во вкладке: выключенная с идущими бэкапами - пункт с шагами включить (пробный forget, prune-on,
+    проверка, откат prune-off); замороженная - спокойная строка; чистка, которую helper включил сам
+    вопреки crontab, - вопрос выключить или оставить."""
+    now = datetime.now(timezone.utc)
+    v = bsrv_cleanup.view(_off(now), now)
+    off = {x["repo"]: x for x in v["off"]}
+    assert set(off) == {"repo-e", "repo-f"}
+    assert off["repo-e"]["live"] and not off["repo-f"]["live"]
+    assert off["repo-f"]["why"] == "its cron line was commented out by hand" and off["repo-f"]["snaps"] == 13
+    fx = off["repo-e"]["fix"]
+    assert _ids(fx) == ["off_dry", "off_on", "off_check", "off_undo"]
+    assert "forget --dry-run --no-lock" in fx[0]["cmd"] and "repo-e.env" in fx[0]["cmd"]
+    assert fx[1]["cmd"] == "sudo /lib65/kervax/kervax-backupserver-helper prune-on repo-e"
+    assert fx[3]["undo"] and fx[3]["cmd"].endswith("prune-off repo-e")
+    assert [x["repo"] for x in v["hand"]] == ["repo-g"]
+    hx = v["hand"][0]["fix"]
+    assert _ids(hx) == ["hand_look", "hand_off", "hand_keep"] and hx[2]["alt"]
+    assert hx[1]["cmd"].endswith("prune-off repo-g") and hx[2]["cmd"].endswith("prune-on repo-g")
+    assert "restic-prune-repo-g.sh" in hx[0]["cmd"]
+    # в архиве выключенная - тоже спокойная строка
+    s = _off(now)
+    s.backup_repo_archive["repo-e"] = {"note": "заморожен"}
+    assert not {x["repo"]: x for x in bsrv_cleanup.view(s, now)["off"]}["repo-e"]["live"]
+
+
+def test_helper_turns_cleanup_off_and_keeps_it_off():
+    """helper 0.34: prune-off / prune-on, regen-prune и adopt-legacy сохраняют выключенное состояние."""
+    from pathlib import Path
+    src = (Path(__file__).resolve().parents[2] / "agent" / "backupserver-setup.sh").read_text(encoding="utf-8")
+    assert "KERVAX_SETUP_VERSION=0.34" in src and "\r" not in src
+    assert 'prune-off)        shift; cmd_prune_switch off "$@" ;;' in src
+    assert 'prune-on)         shift; cmd_prune_switch on "$@" ;;' in src
+    regen = src[src.index("cmd_regen_prune() {"):]
+    regen = regen[:regen.index("\n}\n")]
+    assert 'write_prune_script "$name" "$kl" "$kd" "$kw" "$km" keep' in regen
+    # новая выдача - чистка включена, повторная у существующего репозитория - как было
+    prov = src[src.index("cmd_provision_client() {"):]
+    assert 'pstate=keep' in prov[:prov.index("\n}\n")]
+    adopt = src[src.index("cmd_adopt_legacy() {"):]
+    adopt = adopt[:adopt.index("\n}\n")]
+    assert "legacy_schedule" in adopt and "pstate=off" in adopt
+    stats = src[src.index("cmd_stats() {"):]
+    stats = stats[:stats.index("\n}\n")]
+    for k in ('prune_off', 'prune_off_ts', 'prune_off_why', 'prune_hand_off'):
+        assert f'\\"{k}\\":' in stats, k
+
+
+def test_helper_scenario_in_a_shell():
+    """Сценарий tests/sh/bsrv_prune_off.sh: настоящий helper в отдельном каталоге с поддельными
+    crontab, restic и docker. Нужен Linux и root (helper меняет владельца файлов), иначе пропуск;
+    на Windows его гоняют в WSL: wsl -u root -- bash tests/sh/bsrv_prune_off.sh <корень репо>."""
+    import os
+    import shutil
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    import pytest
+
+    if sys.platform != "linux" or os.geteuid() != 0 or not shutil.which("python3"):
+        pytest.skip("нужен Linux, root и python3")
+    root = Path(__file__).resolve().parents[2]
+    r = subprocess.run(["bash", str(Path(__file__).parent / "sh" / "bsrv_prune_off.sh"), str(root)],
+                       capture_output=True, text=True, timeout=300)
+    assert r.returncode == 0 and r.stdout.strip().endswith("PASS"), r.stdout + r.stderr

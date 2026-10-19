@@ -4,6 +4,16 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.4.302] - 2026-10-20
+
+### Fixed
+- LLM: разовый всплеск задержек больше не алерт. Всплески за сутки видны в разделе LLM (когда, до
+  скольких, сколько запросов, была ли очередь), в Telegram и в "Что сломано" - только если задержка
+  в разы выше обычного держится около получаса при 30+ запросах за 5 минут.
+- Сервер бэкапов: чистку, выключенную руками (закомментированная строка cron), helper больше не
+  включает при обновлении и переносе со старого скрипта. Команды prune-off / prune-on, во вкладке
+  "Чистка" выключенная чистка видна честно, без алерта ротации (backupserver-setup 0.34).
+
 ## [1.4.301] - 2026-10-20
 
 ### Fixed

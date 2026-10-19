@@ -75,7 +75,13 @@ fi
 #       this data gets SIGHUP (re-read now) and provisioning waits until both ports accept the user
 # 0.33: merge-group hands an old group over to the new name of a renamed server (restic rewrite
 #       --new-host --forget), after that the usual policy rotates its history
-KERVAX_SETUP_VERSION=0.33  # MAJOR.MINOR; compared component-wise (0.13 > 0.2!)
+# 0.34: a cleanup turned off by hand stays off. regen-prune wrote an active cron.d entry for every
+#       prune script, also where the root crontab line had been commented out to freeze the
+#       repository, and the next night removed snapshots from it. Now the state is kept as it is
+#       (no cron.d and no active cron line = off), an off cleanup has its cron.d line commented
+#       out under "# kervax-prune-off", prune-off / prune-on switch it explicitly, adopt-legacy
+#       leaves the cleanup off when the shared script did not run, and stats report the state
+KERVAX_SETUP_VERSION=0.34  # MAJOR.MINOR; compared component-wise (0.13 > 0.2!)
 # Which nodes need this helper at all. Read by the ansible playbook on the
 # CONTROL machine and evaluated as a shell condition ON THE NODE, so a new
 # helper lands where it belongs without anyone editing the playbook.
@@ -281,6 +287,49 @@ prune_last_error() {
       else if (ok == "0") print (err != "" ? err : fat)
     }' | tr -cd '[:print:]' | cut -c1-200 || true
 }
+# ------- is the cleanup of a repository on or off -------
+# The cleanup runs from /etc/cron.d/kervax-prune-<name>. Turned off, the file stays with its line
+# commented out under a "# kervax-prune-off" header, so everything that rewrites the script
+# (regen-prune, an update, re-provisioning, adopt-legacy) sees the decision and keeps it. A line
+# commented out by hand in that file counts the same. A repository whose script has no cron.d file
+# yet (made by the ansible role or by hand) is on only if some active cron line runs its script:
+# a line commented out in the root crontab ("#DISABLED 0 3 * * * .../restic-prune-<name>.sh")
+# is a cleanup somebody turned off, and the panel must not turn it back on.
+CRON_D=/etc/cron.d
+prune_cron() { printf '%s/kervax-prune-%s' "$CRON_D" "$1"; }
+# Every cron line outside our own cron.d file: the root crontab, /etc/crontab, other cron.d files
+other_cron_lines() {
+  # stats read them once per run for every repository (OTHER_CRON_CACHE)
+  if [ -n "${OTHER_CRON_CACHE+x}" ]; then printf '%s\n' "$OTHER_CRON_CACHE"; return 0; fi
+  { crontab -l -u root 2>/dev/null || true; cat /etc/crontab 2>/dev/null || true
+    local f; for f in "$CRON_D"/*; do
+      [ -f "$f" ] || continue
+      case "${f##*/}" in kervax-prune-*) continue ;; esac
+      cat "$f" 2>/dev/null || true
+    done; } 2>/dev/null
+}
+# The lines that start this exact script (a substring would catch restic-prune-<name>-dev.sh too)
+runs_script() { grep -E "(^|[[:space:]])$(printf '%s' "$1" | sed 's/[.[\*^$]/\\&/g')([[:space:];|&<>]|\$)" || true; }
+# on | off for the repository, as cron would run it now
+prune_state() {
+  local ps="$PRUNE_DIR/restic-prune-$1.sh" cf; cf="$(prune_cron "$1")"
+  if [ -f "$cf" ]; then
+    [ -n "$(grep -vE '^[[:space:]]*(#|$)' "$cf" 2>/dev/null | runs_script "$ps")" ] && echo on || echo off
+    return 0
+  fi
+  [ -n "$(other_cron_lines | grep -vE '^[[:space:]]*(#|$)' | runs_script "$ps")" ] && echo on || echo off
+}
+# A line commented out by hand that ran the script (not one we commented out, "# kervax-..."):
+# the sign somebody turned this cleanup off, also where an older helper turned it back on.
+prune_hand_off() {
+  local ps="$PRUNE_DIR/restic-prune-$1.sh"
+  [ -n "$(other_cron_lines | grep -E '^[[:space:]]*#' | grep -vE '^[[:space:]]*# kervax-' | runs_script "$ps")" ]
+}
+# Why the cleanup is off, from the header of its cron.d file
+prune_off_reason() {
+  sed -n 's/^# kervax-prune-off: //p' "$(prune_cron "$1")" 2>/dev/null | head -n1 | cut -c1-200 || true
+}
+
 # client name validation (it is also the repository and htpasswd user name): hostname-safe characters only
 valid_name() { case "$1" in ''|*[!A-Za-z0-9._-]*) return 1 ;; *) return 0 ;; esac; }
 valid_ip()   { [[ "$1" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] || [[ "$1" =~ ^[0-9A-Fa-f:]+$ ]]; }
@@ -298,7 +347,9 @@ cmd_stats() {
   [ -n "$ver" ] || { [ -f "$COMPOSE" ] && ver="$(grep -oE 'rest-server:[A-Za-z0-9._-]+' "$COMPOSE" | head -1 | cut -d: -f2)"; }
   local repos_json="" extra_json="" repo name snaps last locked lock_ts valid size prune kl kd kw km
   local oldest cleaner ids sf removed_ts seen_since chk_ts chk_ok chk_part chk_parts recent grp perr pmt now_ts legacy_list="" lcount=0
+  local poff poff_ts poff_why phand OTHER_CRON_CACHE
   now_ts="$(date +%s)"
+  OTHER_CRON_CACHE="$(other_cron_lines)"
   install -d -m 0700 "$SNAP_STATE" 2>/dev/null || true
   # repositories the monolith has a block for (the same exact line keep_of_legacy looks for)
   if [ -f "$LEGACY_PRUNE" ]; then
@@ -336,9 +387,19 @@ cmd_stats() {
     fi
     size="$(du -sb "$repo" 2>/dev/null | cut -f1 || true)"; [ -z "$size" ] && size=0
     prune="$PRUNE_DIR/restic-prune-$name.sh"
-    cleaner=""
+    cleaner=""; poff=0; poff_ts=0; poff_why=""; phand=0
     if [ -f "$prune" ]; then
       cleaner=script
+      # turned off (0.34): since when and why, from the cron.d file. A cleanup that is on while a
+      # hand-commented crontab line says it was turned off (an older helper turned it back on)
+      # is reported too, unless prune-on confirmed it
+      if [ "$(prune_state "$name")" = off ]; then
+        poff=1; poff_why="$(prune_off_reason "$name")"
+        poff_ts="$(stat -c %Y "$(prune_cron "$name")" 2>/dev/null || echo 0)"
+      elif ! grep -q '^# kervax-prune-on' "$(prune_cron "$name")" 2>/dev/null && prune_hand_off "$name"; then
+        phand=1
+      fi
+      [[ "$poff_ts" =~ ^[0-9]+$ ]] || poff_ts=0
       kl=$(keep_of keep-last "$prune"); kd=$(keep_of keep-daily "$prune")
       kw=$(keep_of keep-weekly "$prune"); km=$(keep_of keep-monthly "$prune")
     else
@@ -396,7 +457,7 @@ cmd_stats() {
       case "$grp" in '{"ts": '*'}') ;; *) grp=null ;; esac
     fi
     repos_json="${repos_json:+$repos_json,}{\"name\":\"$(json_escape "$name")\",\"valid\":$valid,\"snapshots\":$snaps,\"last_activity\":$last,\"oldest_snapshot\":$oldest,\"locked\":$locked,\"lock_ts\":$lock_ts,\"size_bytes\":$size,\"keep_last\":${kl:-0},\"keep_daily\":${kd:-0},\"keep_weekly\":${kw:-0},\"keep_monthly\":${km:-0}}"
-    extra_json="${extra_json:+$extra_json,}\"$(json_escape "$name")\":{\"cleaner\":\"$cleaner\",\"removed_ts\":$removed_ts,\"seen_since\":$seen_since,\"check_ts\":$chk_ts,\"check_ok\":$chk_ok,\"check_part\":$chk_part,\"check_parts\":$chk_parts,\"recent\":[$recent],\"groups\":$grp,\"prune_err\":\"$(json_escape "$perr")\",\"prune_mtime\":$pmt}"
+    extra_json="${extra_json:+$extra_json,}\"$(json_escape "$name")\":{\"cleaner\":\"$cleaner\",\"removed_ts\":$removed_ts,\"seen_since\":$seen_since,\"check_ts\":$chk_ts,\"check_ok\":$chk_ok,\"check_part\":$chk_part,\"check_parts\":$chk_parts,\"recent\":[$recent],\"groups\":$grp,\"prune_err\":\"$(json_escape "$perr")\",\"prune_mtime\":$pmt,\"prune_off\":$poff,\"prune_off_ts\":$poff_ts,\"prune_off_why\":\"$(json_escape "$poff_why")\",\"prune_hand_off\":$phand}"
   done
   # watch state of repositories that are gone
   for sf in "$SNAP_STATE"/*.ids; do
@@ -455,7 +516,7 @@ refresh_stats() { cmd_stats > "$STATE_DIR/backupserver.json.tmp" 2>/dev/null && 
 
 # ------- client provisioning: htpasswd + init + ufw + prune (transport agnostic) -------
 install_prune() {
-  local name="$1" kl="$2" kd="$3" kw="$4" km="$5" repopass="$6"
+  local name="$1" kl="$2" kd="$3" kw="$4" km="$5" repopass="$6" state="${7:-on}"
   install -d -m 0755 "$PRUNE_DIR" "$ENV_DIR" "$LOG_DIR" "$METRICS_DIR" "$NE_METRICS_DIR"
   # per-client env (repo is a local path; the password is needed for forget/prune on the server)
   umask 077
@@ -471,7 +532,7 @@ set +a
 ENVEOF
   chown root:root "$ENV_DIR/$name.env"; chmod 0600 "$ENV_DIR/$name.env"
   umask 022
-  write_prune_script "$name" "$kl" "$kd" "$kw" "$km"
+  write_prune_script "$name" "$kl" "$kd" "$kw" "$km" "$state"
 }
 
 # The hour of the repository's cleanup: 12 hours away from when its client backs up. prune holds
@@ -494,7 +555,7 @@ prune_hour() {
 # Generates ONLY the script and its cron entry, never the env: that holds the repository
 # password, and on regeneration there is nowhere to take it from (nor any need).
 write_prune_script() {
-  local name="$1" kl="$2" kd="$3" kw="$4" km="$5"
+  local name="$1" kl="$2" kd="$3" kw="$4" km="$5" state="${6:-keep}" why="${7:-}"
   install -d -m 0755 "$PRUNE_DIR" "$LOG_DIR" "$METRICS_DIR" "$NE_METRICS_DIR"
   # per-client prune script: retention lives in the KEEP=(...) line, which the panel reads via keep_of.
   local ps="$PRUNE_DIR/restic-prune-$name.sh"
@@ -716,14 +777,62 @@ ts_end=$(date +%s)
 PRUNE_BODY
   } > "$ps"
   chmod 0755 "$ps"; chown root:root "$ps"
-  # cron: prune once a day, as far as possible from the client's backup (see prune_hour). The
-  # minute comes from the name, not at random: a random one moved on every helper update, and
-  # an update in the same hour could put it on a minute already gone, skipping that day.
-  local h m; h="$(prune_hour "$name")"; m=$(( $(printf '%s' "$name" | cksum | cut -d' ' -f1) % 60 ))
-  cat > "/etc/cron.d/kervax-prune-$name" <<CRONEOF
-$m $h * * * root $ps >/dev/null 2>&1
-CRONEOF
-  chmod 0644 "/etc/cron.d/kervax-prune-$name"
+  write_prune_cron "$name" "$state" "$why"
+}
+
+# The cron.d file of a repository's cleanup. state: on (the panel set it up or prune-on turned it
+# on), auto (it ran before the panel took the script over), off (with the reason in the header).
+# keep - whatever the file or the other cron lines say now: a rewrite never changes the decision.
+write_prune_cron() {
+  local name="$1" state="${2:-keep}" why="${3:-}" ps="$PRUNE_DIR/restic-prune-$1.sh" cf h m line
+  cf="$(prune_cron "$name")"
+  if [ "$state" = keep ]; then
+    if [ "$(prune_state "$name")" = off ]; then
+      state=off; [ -n "$why" ] || why="$(prune_off_reason "$name")"
+      if [ -z "$why" ]; then
+        if [ -f "$cf" ]; then why="its cron.d line was commented out by hand"
+        elif prune_hand_off "$name"; then why="its cron line was commented out by hand"
+        else why="nothing ran this script when the panel took it over"; fi
+      fi
+    elif grep -q '^# kervax-prune-on' "$cf" 2>/dev/null; then state=on
+    else state=auto; fi
+  fi
+  # once a day, as far as possible from the client's backup (see prune_hour). The minute comes
+  # from the name, not at random: a random one moved on every helper update, and an update in
+  # the same hour could put it on a minute already gone, skipping that day.
+  h="$(prune_hour "$name")"; m=$(( $(printf '%s' "$name" | cksum | cut -d' ' -f1) % 60 ))
+  line="$m $h * * * root $ps >/dev/null 2>&1"
+  case "$state" in
+    off) printf '# kervax-prune-off: %s\n# to turn it on: %s prune-on %s\n# %s\n' \
+           "${why:-turned off}" "$HELPER_PATH" "$name" "$line" > "$cf.tmp" ;;
+    on)  printf '# kervax-prune-on: to turn it off: %s prune-off %s\n%s\n' "$HELPER_PATH" "$name" "$line" > "$cf.tmp" ;;
+    *)   printf '%s\n' "$line" > "$cf.tmp" ;;
+  esac
+  chmod 0644 "$cf.tmp" && mv -f "$cf.tmp" "$cf"
+}
+HELPER_PATH=/lib65/kervax/kervax-backupserver-helper
+
+# prune-off / prune-on <name>: turn the nightly cleanup of a repository off or on. Off, the cron.d
+# file keeps its line commented out under "# kervax-prune-off", and regen-prune, updates and
+# re-provisioning leave it so. The script, env, log and snapshots are not touched.
+cmd_prune_switch() {
+  local to="$1" name="${2:-}" cf
+  valid_name "$name" || { echo "bad repository name" >&2; return 2; }
+  [ -f "$PRUNE_DIR/restic-prune-$name.sh" ] || { echo "$name has no prune script of its own ($PRUNE_DIR/restic-prune-$name.sh)" >&2; return 2; }
+  cf="$(prune_cron "$name")"
+  if [ "$to" = off ]; then
+    write_prune_cron "$name" off "turned off by hand $(date +%F) with prune-off"
+    # an active root crontab line for the same script would keep running it
+    cmd_dedup_cron >/dev/null || true
+    echo "$name: cleanup is off, $cf has its line commented out; snapshots are no longer removed"
+    if pgrep -f "restic-prune-$name.sh" >/dev/null 2>&1; then
+      echo "$name: a cleanup started before is still running, it finishes by itself"
+    fi
+  else
+    write_prune_cron "$name" on
+    echo "$name: cleanup is on, $(grep -vE '^[[:space:]]*(#|$)' "$cf" | awk '{ printf "%02d:%02d", $2, $1 }') every night ($cf)"
+  fi
+  refresh_stats || true
 }
 
 # Regenerates the scripts of already provisioned clients from the current template. Retention
@@ -731,7 +840,7 @@ CRONEOF
 # env is left alone. The previous script is kept next to it with a .bak-<date> suffix, so there
 # is something to return to if the new template turns out worse.
 cmd_regen_prune() {
-  local n=0 f name kl kd kw km
+  local n=0 off="" f name kl kd kw km
   [ -d "$PRUNE_DIR" ] || { echo "no prune scripts ($PRUNE_DIR)"; return 0; }
   for f in "$PRUNE_DIR"/restic-prune-*.sh; do
     [ -f "$f" ] || continue
@@ -744,10 +853,12 @@ cmd_regen_prune() {
     # silently. keep-last is often 0 here - the scripts of an older generation did not pass the
     # flag at all - and that is fine: the script body prunes as long as ANY keep-* is set.
     cp -f "$f" "$f.bak-$(date +%Y%m%d-%H%M%S)" 2>/dev/null || true
-    write_prune_script "$name" "$kl" "$kd" "$kw" "$km"
+    # the cron.d entry keeps its state: a cleanup turned off stays off (0.34)
+    write_prune_script "$name" "$kl" "$kd" "$kw" "$km" keep
+    [ "$(prune_state "$name")" = off ] && off="$off $name"
     n=$((n+1))
   done
-  echo "prune scripts regenerated: $n"
+  echo "prune scripts regenerated: $n${off:+, cleanup left off:$off}"
 }
 
 # ------- moving repositories off the legacy shared script (/etc/systemd-rest.conf) -------
@@ -840,7 +951,7 @@ PY
 }
 
 # The repository's own env (password from its block) and prune script with the same retention.
-legacy_apply() {  # name start end kl kd kw km
+legacy_apply() {  # name start end kl kd kw km state [why]
   local pw
   pw="$( legacy_env "$1" "$2" "$3" && printf '%s' "$RESTIC_PASSWORD" )" || return 1
   install -d -m 0755 "$PRUNE_DIR" "$ENV_DIR"
@@ -853,7 +964,7 @@ legacy_apply() {  # name start end kl kd kw km
   } > "$ENV_DIR/$1.env"
   umask 022
   chown root:root "$ENV_DIR/$1.env"; chmod 0600 "$ENV_DIR/$1.env"
-  write_prune_script "$1" "$4" "$5" "$6" "$7"
+  write_prune_script "$1" "$4" "$5" "$6" "$7" "$8" "${9:-}"
 }
 
 # Comments out line ranges of the monolith ("start:end:tag ..."). A copy of the file is kept,
@@ -878,7 +989,7 @@ legacy_comment_out() {
 }
 
 cmd_adopt_legacy() {  # [--apply] [name...]   no names = every repository of the monolith
-  local apply=0 names=() a n r start end kl kd kw km ranges="" moved=0 dropped=0
+  local apply=0 names=() a n r start end kl kd kw km ranges="" moved=0 dropped=0 pstate=on pwhy=""
   for a in "$@"; do
     case "$a" in
       --apply) apply=1 ;;
@@ -891,6 +1002,14 @@ cmd_adopt_legacy() {  # [--apply] [name...]   no names = every repository of the
   fi
   [ ${#names[@]} -gt 0 ] || { echo "$LEGACY_PRUNE has no repository blocks left"; return 0; }
   [ "$apply" = 1 ] || echo "dry run, nothing is changed (add --apply to move)"
+  # The move carries the state over: when nothing runs the monolith (its cron line was commented
+  # out by hand), the moved repositories keep their cleanup off, otherwise the move itself would
+  # start removing snapshots that were frozen on purpose.
+  legacy_schedule
+  if [ -z "$L_WHERE" ]; then
+    pstate=off; pwhy="moved off $LEGACY_PRUNE $(date +%F), which did not run (its cron line is commented out)"
+    echo "$LEGACY_PRUNE does not run: the moved repositories keep their cleanup off (prune-on <name> turns it on)"
+  fi
   for n in "${names[@]}"; do
     r="$(legacy_block_lines "$n")"
     [ -n "$r" ] || { echo "$n: no block in $LEGACY_PRUNE"; continue; }
@@ -910,9 +1029,13 @@ cmd_adopt_legacy() {  # [--apply] [name...]   no names = every repository of the
     fi
     legacy_dry "$n" "$start" "$end" "$kl" "$kd" "$kw" "$km" || continue
     if [ "$apply" = 1 ]; then
-      if legacy_apply "$n" "$start" "$end" "$kl" "$kd" "$kw" "$km"; then
+      if legacy_apply "$n" "$start" "$end" "$kl" "$kd" "$kw" "$km" "$pstate" "$pwhy"; then
         ranges="$ranges $start:$end:moved"; moved=$((moved + 1))
-        echo "  moved: $PRUNE_DIR/restic-prune-$n.sh, $(cut -d' ' -f1-2 "/etc/cron.d/kervax-prune-$n" | awk '{ printf "%02d:%02d", $2, $1 }') every night"
+        if [ "$pstate" = off ]; then
+          echo "  moved: $PRUNE_DIR/restic-prune-$n.sh, cleanup off as before ($(prune_cron "$n"))"
+        else
+          echo "  moved: $PRUNE_DIR/restic-prune-$n.sh, $(grep -vE '^[[:space:]]*(#|$)' "$(prune_cron "$n")" | awk '{ printf "%02d:%02d", $2, $1 }') every night"
+        fi
       else
         echo "  $n: could not move - left as is"
       fi
@@ -1141,8 +1264,11 @@ cmd_provision_client() {
     [ -f "$(tls_dir)/cert.pem" ] && ufw allow proto tcp from "$client_ip" to any port "$TLS_PORT" >/dev/null 2>&1 || true
   fi
   # 4) prune env, script and cron with retention (for an existing repository with the same,
-  # CORRECT password: this also repairs an env that a previous re-provisioning corrupted)
-  install_prune "$name" "$kl" "$kd" "$kw" "$km" "$repopass"
+  # CORRECT password: this also repairs an env that a previous re-provisioning corrupted). A new
+  # repository gets its cleanup on; an existing one whose cleanup was turned off keeps it off.
+  local pstate=on
+  [ "$existing" -eq 1 ] && [ -f "$PRUNE_DIR/restic-prune-$name.sh" ] && pstate=keep
+  install_prune "$name" "$kl" "$kd" "$kw" "$km" "$repopass" "$pstate"
   refresh_stats
   if [ "$existing" -eq 1 ]; then
     # the panel does not know the password of an existing repository - return it, otherwise the client cannot be set up
@@ -1309,8 +1435,14 @@ cmd_dedup_cron() {
       n="${s##*/restic-prune-}"; n="${n%.sh}"
       if [ ! -f "$s" ]; then
         line="# kervax-gone (no such script): $line"; changed=$((changed + 1))
-      elif grep -qF "$s" "/etc/cron.d/kervax-prune-$n" 2>/dev/null; then
-        line="# kervax-moved to /etc/cron.d/kervax-prune-$n: $line"; changed=$((changed + 1))
+      elif grep -qF "$s" "$(prune_cron "$n")" 2>/dev/null; then
+        # the cron.d file owns the schedule now, also when it keeps the cleanup off
+        if [ "$(prune_state "$n")" = off ]; then
+          line="# kervax-prune-off, see $(prune_cron "$n"): $line"
+        else
+          line="# kervax-moved to $(prune_cron "$n"): $line"
+        fi
+        changed=$((changed + 1))
       fi
     fi
     new="$new$line"$'\n'
@@ -1481,12 +1613,14 @@ case "${1:-}" in
   forget-group)     shift; cmd_forget_group "$@" ;;
   merge-group)      shift; cmd_merge_group "$@" ;;
   dedup-cron)       cmd_dedup_cron ;;
+  prune-off)        shift; cmd_prune_switch off "$@" ;;
+  prune-on)         shift; cmd_prune_switch on "$@" ;;
   provision-client) shift; cmd_provision_client "$@" ;;
   deploy-tls-front) shift; cmd_deploy_tls_front "$@" ;;
   get-cert)         cmd_get_cert ;;
   get-client-creds) shift; cmd_get_client_creds "$@" ;;
   process-spool)    cmd_process_spool ;;
-  *) echo "usage: $0 {stats|regen-prune|adopt-legacy [--apply] [name...]|deploy-server [port]|update-image|restic-update|forget-group <repo> <host> [--apply]|merge-group <repo> <old-host> <new-host> [--apply]|dedup-cron|provision-client <name> <hpass> <repopass> <ip> [kl kd kw km]|deploy-tls-front <ip> [dns]|get-cert|get-client-creds <name>|process-spool}" >&2; exit 2 ;;
+  *) echo "usage: $0 {stats|regen-prune|adopt-legacy [--apply] [name...]|deploy-server [port]|update-image|restic-update|forget-group <repo> <host> [--apply]|merge-group <repo> <old-host> <new-host> [--apply]|dedup-cron|prune-off <repo>|prune-on <repo>|provision-client <name> <hpass> <repopass> <ip> [kl kd kw km]|deploy-tls-front <ip> [dns]|get-cert|get-client-creds <name>|process-spool}" >&2; exit 2 ;;
 esac
 HELPER_EOF
 chmod 0755 "$HELPER.new" && mv -f "$HELPER.new" "$HELPER"
@@ -1548,8 +1682,8 @@ systemctl enable --now kervax-bsrv-req.path >/dev/null 2>&1 || true
 
 # The scripts of already provisioned clients are copies of the previous template: they are
 # refreshed right away, otherwise fixes (rotation metrics, --group-by) would reach new clients
-# only.
-"$HELPER" regen-prune 2>/dev/null || true
+# only. Each keeps its state: a cleanup turned off stays off (0.34), and the output names them.
+"$HELPER" regen-prune 2>/dev/null | sed 's/^/backupserver-setup: /' || true
 # ...and the cleanups the ansible role scheduled in root's crontab are not run a second time
 "$HELPER" dedup-cron 2>&1 | sed 's/^/backupserver-setup: /' || true
 

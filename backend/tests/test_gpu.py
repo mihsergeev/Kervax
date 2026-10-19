@@ -2,7 +2,7 @@
 обычные задержки и точки для графиков."""
 from datetime import datetime, timedelta, timezone
 
-from app import collector, gpu
+from app import collector, gpu, llm_lat
 from app.models import Server
 from app.setup_scripts import setup_needed
 
@@ -176,7 +176,7 @@ def test_setup_needed():
 
 
 def _llm(**kw):
-    x = {"engine": "vllm", "kind": "container", "name": "vllm-qwen", "model": "Qwen/Qwen2.5-72B", "port": 8000,
+    x = {"engine": "vllm", "kind": "container", "name": "vllm-qwen", "model": "model-a", "port": 8000,
          "up": 86400, "ok": True, "win": 300, "running": 12, "waiting": 0, "kv": 62.0, "req_s": 2.4,
          "prompt_tps": 9200, "gen_tps": 1840, "ttft": [0.31, 0.84, 1.9], "tpot": [0.028, 0.041, 0.055],
          "e2e": [7.9, 21.4, 38]}
@@ -215,8 +215,8 @@ def test_llm_baseline_and_slow_ttft():
     x = _llm()
     assert gpu.baseline(st, x, "ttft") == 0.84 and gpu.baseline(st, x, "tpot") == 0.041
     slow = _llm(ttft=[2.5, 6.2, 9.8])
-    [(lvl, txt, key)] = gpu.llm_problems({"llm": [slow]}, st)
-    assert lvl == 1 and txt == "vLLM vllm-qwen: задержка до первого токена p95 6.2 с, обычно 840 мс"
+    # одна минута медленно - всплеск для раздела LLM, не алерт (llm_lat)
+    assert gpu.llm_problems({"llm": [slow]}, st) == []
     # меньше 6 часов истории - обычного еще нет
     assert gpu.baseline(gpu.base_update(None, {"llm": [_llm()]}, NOW), x, "ttft") is None
     # раз в минуту, не чаще
@@ -282,3 +282,87 @@ def test_frozen_readings():
     # меньше часа - еще не повод
     b["gpus"][0]["frz"] = 3000
     assert gpu.problems(_rep(b), NOW) == []
+
+
+def _base():
+    """Обычные задержки за 8 часов: TTFT 840 мс, TPOT 41 мс"""
+    st, t = None, NOW - timedelta(hours=8)
+    for h in range(8):
+        for m in range(0, 60, 10):
+            st = gpu.base_update(st, {"llm": [_llm()]}, t + timedelta(hours=h, minutes=m))
+    return st
+
+
+def _run(lat, base, x, start, minutes):
+    for i in range(minutes):
+        lat = llm_lat.update(lat, {"llm": [x]}, base, start + timedelta(minutes=i))
+    return lat, start + timedelta(minutes=minutes - 1)
+
+
+def test_llm_night_spike_not_alerted():
+    """Ночью три запроса с длинным промптом: p95 TTFT в разы выше обычного полчаса - в разделе
+    LLM видно когда и сколько запросов, в Telegram и "Что сломано" ничего"""
+    base = _base()
+    night = _llm(running=1, waiting=0, kv=3.0, req_s=0.01, ttft=[1.1, 2.6, 2.6])
+    start = NOW - timedelta(minutes=29)
+    lat, end = _run(None, base, night, start, 30)
+    assert gpu.llm_problems({"llm": [night]}, base, lat, end) == []
+    [ev] = gpu.llm_view({"llm": [night]}, base, lat, end)[0]["lat_recent"]
+    assert ev["m"] == "ttft" and ev["peak"] == 2.6 and ev["base"] == 0.84 and ev["req"] == [3, 3]
+    assert ev["from"] == start.isoformat() and ev["to"] == end.isoformat() and ev["load"] is False
+    held = {"llm_base": base, "llm_lat": lat, "llm_since": (end - timedelta(minutes=20)).isoformat()}
+    srv = _srv(held, rep=_rep(llm=[night]))
+    assert collector._server_conditions(srv, end)["llm"][0] == 0
+    assert not [r for r in collector.server_problems(srv, end) if r["kind"] == "llm"]
+
+
+def test_llm_sustained_slow_under_load():
+    """Под нагрузкой (60 запросов за 5 минут) TTFT втрое выше обычного держится - алерт после HOLD"""
+    base = _base()
+    busy = _llm(req_s=0.2, ttft=[2.5, 6.2, 9.8])
+    lat, end = _run(None, base, busy, NOW - timedelta(minutes=16), 10)
+    assert gpu.llm_problems({"llm": [busy]}, base, lat, end) == []
+    lat, end = _run(lat, base, busy, end + timedelta(minutes=1), 6)
+    [(lvl, txt, key)] = gpu.llm_problems({"llm": [busy]}, base, lat, end)
+    assert lvl == 1 and key == "llm:ttft:vllm|container|vllm-qwen|8000"
+    assert txt == ("vLLM vllm-qwen: задержка до первого токена p95 6.2 с, обычно 840 мс, "
+                   "держится 15 мин при 60 запросах за 5 минут")
+    [ev] = gpu.llm_view({"llm": [busy]}, base, lat, end)[0]["lat_recent"]
+    assert ev["load"] is True and ev["req"] == [60, 60]
+    # и в "Что сломано", и в алерте - после общей выдержки
+    held = {"llm_base": base, "llm_lat": lat, "llm_since": (end - timedelta(minutes=20)).isoformat()}
+    srv = _srv(held, rep=_rep(llm=[busy]))
+    assert collector._server_conditions(srv, end)["llm"][0] == 1
+    assert [r["kind"] for r in collector.server_problems(srv, end)].count("llm") == 1
+    # задержка вернулась к обычной - серия кончилась, алерта нет
+    lat = llm_lat.update(lat, {"llm": [_llm(req_s=0.2)]}, base, end + timedelta(minutes=1))
+    assert gpu.llm_problems({"llm": [busy]}, base, lat, end + timedelta(minutes=1)) == []
+
+
+def test_llm_load_gap_resets_series():
+    """Нагрузка просела посреди серии: отсчет заново, разовые куски по 10 минут не алерт"""
+    base = _base()
+    busy, idle = _llm(req_s=0.2, ttft=[2.5, 6.2, 9.8]), _llm(req_s=0.02, ttft=[2.5, 6.2, 9.8])
+    lat, end = _run(None, base, busy, NOW, 10)
+    lat, end = _run(lat, base, idle, end + timedelta(minutes=1), 2)
+    lat, end = _run(lat, base, busy, end + timedelta(minutes=1), 10)
+    assert gpu.llm_problems({"llm": [busy]}, base, lat, end) == []
+    # всплеск один: пропусков не было, нагрузка 6..60 запросов
+    [ev] = llm_lat.recent(lat, busy, end)
+    assert ev["req"] == [6, 60] and ev["load"] is False
+
+
+def test_llm_spikes_kept_for_a_day():
+    base = _base()
+    night = _llm(req_s=0.01, ttft=[1.1, 2.6, 2.6])
+    lat, end = _run(None, base, night, NOW, 3)
+    # задержка снова обычная 5 минут - следующий всплеск отдельный
+    lat, end = _run(lat, base, _llm(req_s=0.01), end + timedelta(minutes=1), 5)
+    lat, end = _run(lat, base, _llm(req_s=0.01, ttft=[1.1, 3.1, 3.1]), end + timedelta(minutes=1), 2)
+    evs = llm_lat.recent(lat, night, end)
+    assert [e["peak"] for e in evs] == [3.1, 2.6]
+    # через сутки первый ушел, второй еще виден
+    later = NOW + timedelta(hours=24, minutes=5)
+    assert [e["peak"] for e in llm_lat.recent(lat, night, later)] == [3.1]
+    # раз в минуту, не чаще
+    assert llm_lat.update(lat, {"llm": [night]}, base, end + timedelta(seconds=20)) == lat

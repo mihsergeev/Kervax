@@ -1543,6 +1543,13 @@ const EN: Record<string, string> = {
   'ГБ': 'GB',
   'Генерация': 'Generation',
   'Запросов за {n} мин не было: задержки не посчитать.': 'No requests in {n} min: no latencies to compute.',
+  'Задержки выше обычного за сутки': 'Latency above usual in the last 24 h',
+  'p95 до первого токена до {v}, обычно {b}': 'p95 time to first token up to {v}, usually {b}',
+  'p95 на токен до {v}, обычно {b}': 'p95 per token up to {v}, usually {b}',
+  'запросов за 5 мин {n}': '{n} requests per 5 min',
+  'в очереди до {n}': 'up to {n} queued',
+  'очереди не было': 'no queue',
+  'держалось под нагрузкой': 'held under load',
   'Запросы': 'Requests',
   'МГц': 'MHz',
   'Метрики выключены: SGLang надо запускать с --enable-metrics, тогда здесь будут очередь, KV-кэш и задержки.': 'Metrics are off: run SGLang with --enable-metrics to see the queue, KV cache and latencies here.',
@@ -5800,6 +5807,41 @@ const EN: Record<string, string> = {
     'The script runs every day, checks each of these blocks and sends an error, and real errors drown in that noise. The blocks should go.',
   'Скрипт сейчас не запускается, и ошибок они не шлют. Если его снова запустят, придет ошибка по каждому, поэтому блоки лучше убрать.':
     'The script does not run now, so they send no errors. If it is started again, an error comes for each of them, so the blocks are better removed.',
+  // чистка выключена вручную (helper backupserver-setup 0.34)
+  'Перенести: у репозитория появится свой prune-скрипт с той же политикой и паролем из блока. Старый скрипт не запускался, поэтому чистка останется выключенной, как была: строка в /etc/cron.d/kervax-prune-<имя> закомментирована с меткой # kervax-prune-off. Блок в старом скрипте закомментируется, копия файла - /etc/systemd-rest.conf.kervax-bak-<время>. На этом шаге ничего не удаляется.':
+    'Move it: the repository gets its own prune script with the same policy and the password from the block. The old script did not run, so the cleanup stays off as it was: the line in /etc/cron.d/kervax-prune-<name> is commented out under # kervax-prune-off. The block in the old script is commented out, a copy of the file is /etc/systemd-rest.conf.kervax-bak-<time>. Nothing is removed at this step.',
+  'Включить чистку, если она нужна. Старый скрипт эти репозитории не чистил, и первая чистка удалит все сверх политики. Репозиторий заморожен намеренно - пропустите этот и следующий шаг, чистка останется выключенной.':
+    'Turn the cleanup on if it is needed. The old script did not clean these repositories, and the first cleanup removes everything beyond the policy. If the repository is frozen on purpose, skip this step and the next one, the cleanup stays off.',
+  'Что удалит первая чистка, без удаления и без блокировки репозитория.':
+    'What the first cleanup would remove, without removing and without locking the repository.',
+  'Включить чистку: строка в /etc/cron.d/kervax-prune-<имя> раскомментируется, чистка пойдет раз в сутки через 12 часов после бэкапа клиента. Первая же удалит снапшоты сверх политики, это необратимо.':
+    'Turn the cleanup on: the line in /etc/cron.d/kervax-prune-<name> is uncommented and the cleanup runs daily 12 hours after the client\'s backup. The very first run removes snapshots beyond the policy, and that cannot be undone.',
+  'Проверить: в файле строка с временем без # в начале. Через минуту пункт уйдет.':
+    'Check: the file has a line with the time and no # in front. In a minute the item goes away.',
+  'Выключить обратно, пока чистка не прошла.':
+    'Turn it off again before the cleanup has run.',
+  'Посмотреть: в crontab root строка этой чистки закомментирована руками, а в /etc/cron.d/kervax-prune-<имя> она идет. Ее включил helper до 0.34, когда перегенерировал скрипты.':
+    'Look: in the root crontab the line of this cleanup is commented out by hand, while in /etc/cron.d/kervax-prune-<name> it runs. A helper older than 0.34 turned it on when it regenerated the scripts.',
+  'Выключить, как было: строка в cron.d закомментируется с меткой # kervax-prune-off, обновления helper\'а ее больше не включат. Снапшоты, которые чистка уже удалила, не вернуть.':
+    'Turn it off as it was: the cron.d line is commented out under # kervax-prune-off and helper updates no longer turn it on. Snapshots the cleanup already removed do not come back.',
+  'Если чистка нужна: подтвердить, что она включена намеренно (метка # kervax-prune-on), пункт уйдет.':
+    'If the cleanup is needed: confirm it is on on purpose (the # kervax-prune-on mark), and the item goes away.',
+  'чистка выключена вручную, а бэкапы идут - {list}':
+    'cleanup turned off by hand while backups keep coming - {list}',
+  'чистка идет, хотя в crontab ее выключили руками - {list}':
+    'cleanup runs although it was turned off by hand in crontab - {list}',
+  'выключена {ago}':
+    'off since {ago}',
+  'чистка идет, хотя в crontab root ее строка закомментирована руками':
+    'the cleanup runs although its line in the root crontab is commented out by hand',
+  'Ее включил helper до 0.34. Что сделать: выключить, как было, или подтвердить, что она нужна.':
+    'A helper older than 0.34 turned it on. What to do: turn it off as it was, or confirm it is needed.',
+  'чистка выключена вручную, а бэкапы идут: снапшотов {n}, растет без чистки':
+    'cleanup turned off by hand while backups keep coming: {n} snapshots, growing without a cleanup',
+  'чистка выключена вручную':
+    'cleanup turned off by hand',
+  'Включить: вкладка "Чистка", или на сервере бэкапов kervax-backupserver-helper prune-on {name}':
+    'To turn it on: the "Cleanup" tab, or kervax-backupserver-helper prune-on {name} on the backup server',
 }
 
 type Ctx = {

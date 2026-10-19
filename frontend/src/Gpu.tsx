@@ -253,6 +253,44 @@ function Spark({ vals, base }: { vals: (number | null)[]; base?: number | null }
   )
 }
 
+// время всплеска: сегодня - часы и минуты, раньше - еще и дата
+function hm(iso: string): string {
+  const d = new Date(iso)
+  const s = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+  return d.toDateString() === new Date().toDateString() ? s : `${d.toLocaleDateString([], { day: '2-digit', month: '2-digit' })} ${s}`
+}
+
+// Всплески задержек за сутки (app/llm_lat.py): алерт уходит только при устойчивой деградации под
+// нагрузкой, а здесь видно и разовые - когда, до скольких и сколько было запросов. Иначе по ссылке
+// из алерта приходишь в пустое окно: агент считает за 5 минут, запросы уже кончились
+function LlmSpikes({ x, t }: { x: LlmSvc; t: TFn }) {
+  const evs = (x.lat_recent ?? []).slice(0, 3)
+  if (!evs.length) return null
+  return (
+    <div className="llm-spikes small">
+      <div className="muted">{t('Задержки выше обычного за сутки')}</div>
+      {evs.map((e) => {
+        const from = hm(e.from)
+        const to = hm(e.to)
+        const req = e.req ? (e.req[0] === e.req[1] ? String(e.req[0]) : `${e.req[0]}-${e.req[1]}`) : ''
+        const facts = [
+          req ? t('запросов за 5 мин {n}', { n: req }) : '',
+          e.wait ? t('в очереди до {n}', { n: num(e.wait) }) : t('очереди не было'),
+          e.load ? t('держалось под нагрузкой') : '',
+        ].filter(Boolean).join(', ')
+        return (
+          <div key={`${e.m}${e.from}`} className={e.load ? 't-degraded' : undefined}>
+            {from === to ? from : `${from}-${to}`}{' '}
+            {t(e.m === 'ttft' ? 'p95 до первого токена до {v}, обычно {b}' : 'p95 на токен до {v}, обычно {b}',
+              { v: sec(e.peak, t), b: sec(e.base, t) })}
+            {facts && <span className="muted">{` · ${facts}`}</span>}
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
 function LlmBlock({ x, hist, t }: { x: LlmSvc; hist: ServerMetric[]; t: TFn }) {
   const series = (m: 'ttft' | 'tpot' | 'e2e') => hist.map((h) => h.llm?.find((l) => l.k === x.label)?.[m] ?? null)
   const bad = !x.ok && !x.no_metrics && !x.locked
@@ -367,6 +405,7 @@ function LlmBlock({ x, hist, t }: { x: LlmSvc; hist: ServerMetric[]; t: TFn }) {
       {x.ok && !latRows.length && x.win != null && x.win > 0 && x.engine !== 'litellm' && (
         <div className="muted small">{t('Запросов за {n} мин не было: задержки не посчитать.', { n: Math.round(x.win / 60) })}</div>
       )}
+      {x.ok && <LlmSpikes x={x} t={t} />}
     </div>
   )
 }
