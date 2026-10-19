@@ -1378,14 +1378,54 @@ const EN: Record<string, string> = {
   'по назначению': 'by design',
   'По назначению: {list}': 'By design: {list}',
   'вернуть {name}': 'bring back {name}',
-  'privileged: уберите privileged: true и дайте только нужные capabilities (cap_add) и устройства (devices).':
-    'privileged: remove privileged: true and grant only the capabilities (cap_add) and devices (devices) it needs.',
-  'capabilities: уберите из cap_add SYS_ADMIN, SYS_MODULE, SYS_PTRACE и подобные, если приложение работает без них.':
-    'capabilities: drop SYS_ADMIN, SYS_MODULE, SYS_PTRACE and the like from cap_add if the app works without them.',
-  'docker-сокет: если приложению нужен список контейнеров или события, пусть ходит через прокси сокета только на чтение (wollomatic/socket-proxy во внутренней сети), а сам сокет уберите из volumes.':
-    'docker socket: if the app needs the container list or events, let it go through a read-only socket proxy (wollomatic/socket-proxy on an internal network) and remove the socket itself from volumes.',
-  'корень хоста: смонтируйте только нужный каталог и, если писать туда не нужно, с :ro.':
-    'host root: mount only the directory it needs, and with :ro if it does not have to write there.',
+  // как исправить ключи от хоста (docker_risk.fixes)
+  'Как исправить: {names}': 'How to fix: {names}',
+  'Это CI-агент: privileged ему нужен только для docker внутри сборок. Сколько образов у docker внутри агента - 0 или ошибка значит, что сборки docker не запускают и privileged можно убрать:':
+    'This is a CI agent: it needs privileged only for docker inside builds. How many images the docker inside the agent has - 0 or an error means builds do not run docker and privileged can go:',
+  'Копия compose рядом:': 'A copy of the compose file next to it:',
+  'В {file} у сервиса {svc} privileged: true заменить на privileged: false, diff покажет замену:':
+    'In {file}, service {svc}: replace privileged: true with privileged: false, diff shows the change:',
+  'Строку {env} тоже можно убрать: без privileged docker внутри все равно не поднимется.':
+    'The {env} line can go too: without privileged the docker inside will not start anyway.',
+  'В {file} у сервиса {svc} privileged: true заменить на то, что ему нужно по назначению ({need}), diff покажет замену:':
+    'In {file}, service {svc}: replace privileged: true with what it actually needs ({need}), diff shows the change:',
+  'В {file} у сервиса {svc} убрать docker-сокет из volumes, diff покажет строку:':
+    'In {file}, service {svc}: remove the docker socket from volumes, diff shows the line:',
+  'Дописать в {file} руками: сервису DOCKER_HOST и сеть docker-api, рядом сервис docker-api - прокси сокета только на чтение (видит контейнеры и события, запускать и останавливать не дает). GID - число из stat -c %g /var/run/docker.sock:':
+    'Add to {file} by hand: DOCKER_HOST and the docker-api network for the service, and a docker-api service next to it - a read-only socket proxy (sees containers and events, cannot start or stop them). GID is the number from stat -c %g /var/run/docker.sock:',
+  'В {file} у сервиса {svc} убрать из cap_add {caps}. Строки с ними:':
+    'In {file}, service {svc}: remove {caps} from cap_add. The lines with them:',
+  'В {file} у сервиса {svc} {paths} смонтирован на запись: оставьте только нужный подкаталог или допишите :ro, если писать не нужно. Строки с ними:':
+    'In {file}, service {svc}: {paths} is mounted writable - keep only the subdirectory it needs or add :ro if it does not write there. The lines with them:',
+  'Проверить файл и пересоздать только эти сервисы, потом статус и лог. Пункт уйдет сам со следующим отчетом агента.':
+    'Check the file and recreate only these services, then the status and the log. The item goes away by itself with the next agent report.',
+  'Если в логе Operation not permitted - не хватает одного права: добавьте только его в cap_add (или устройство в devices), а не privileged обратно.':
+    'If the log says Operation not permitted, one right is missing: add just that to cap_add (or the device to devices), not privileged back.',
+  'Если docker-api пишет в лог blocked - приложению нужен еще путь API: допишите его в -allowGET.':
+    'If docker-api logs blocked, the app needs one more API path: add it to -allowGET.',
+  'Если что-то не так - вернуть прежний compose и пересоздать сервисы:':
+    'If something is wrong - bring back the previous compose file and recreate the services:',
+  'Если docker в сборках нужен - privileged тут по назначению, нажмите "по назначению". Безопаснее держать такие агенты на отдельной ВМ без прода или запускать их через sysbox (runtime: sysbox-runc): docker внутри без privileged.':
+    'If builds do need docker, privileged is by design here: press "by design". Safer is to keep such agents on a separate VM with no production on it, or run them with sysbox (runtime: sysbox-runc): docker inside without privileged.',
+  'Если приложение само запускает или останавливает контейнеры (CI, деплой, управление) - прокси только на чтение ему не подойдет, сокет тут по назначению: нажмите "по назначению".':
+    'If the app starts or stops containers itself (CI, deploys, management), a read-only proxy will not do and the socket is by design: press "by design".',
+  'Контейнер запущен не из compose: пересоздайте его той же командой docker run, но без {what}.':
+    'The container is not from compose: recreate it with the same docker run command, but without {what}.',
+  'docker-сокета в -v': 'the docker socket in -v',
+  '{paths} на запись в -v': '{paths} writable in -v',
+  'Агент не присылает, откуда запущен контейнер: после обновления агента здесь будут готовые команды. Где его compose (папка, файлы, сервис):':
+    'The agent does not report where the container was started from: after an agent update there will be ready commands here. Where its compose is (directory, files, service):',
+  'Сделайте копию файла и в блоке сервиса замените privileged: true на {need}.':
+    'Make a copy of the file and in the service block replace privileged: true with {need}.',
+  'Сделайте копию файла и в блоке сервиса замените privileged: true на privileged: false.':
+    'Make a copy of the file and in the service block replace privileged: true with privileged: false.',
+  'Уберите docker-сокет из volumes сервиса. Если приложению нужен список контейнеров или события - дайте ему прокси сокета только на чтение (wollomatic/socket-proxy во внутренней сети, DOCKER_HOST=tcp://docker-api:2375).':
+    'Remove the docker socket from the service volumes. If the app needs the container list or events, give it a read-only socket proxy (wollomatic/socket-proxy on an internal network, DOCKER_HOST=tcp://docker-api:2375).',
+  'Уберите из cap_add сервиса {caps}.': 'Remove {caps} from the service cap_add.',
+  'Вместо {paths} смонтируйте только нужный подкаталог или допишите :ro, если писать не нужно.':
+    'Instead of {paths}, mount only the subdirectory it needs or add :ro if it does not write there.',
+  'Потом в папке проекта sudo docker compose up -d <сервис> и лог. Откат - вернуть копию файла и тот же up -d.':
+    'Then in the project directory sudo docker compose up -d <service> and check the log. To roll back, restore the copy and run the same up -d.',
   // пропавший порт, диск тормозит
   'Сервер: пропал порт': 'Server: port gone',
   'пропавший порт': 'gone port',

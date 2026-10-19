@@ -9,6 +9,7 @@ import {
   type DockerCommand,
   type DockerContainer,
   type DockerInfo,
+  type RiskStep,
   type Server,
 } from './api'
 import { useAuth } from './auth'
@@ -387,13 +388,43 @@ function ProxyOldWarning({ server: s, items, canAct, onChanged }: { server: Serv
   )
 }
 
-// Контейнеры с ключами от хоста сверх положенного по назначению: что это значит, как поправить и
+// Контейнеры с ключами от хоста сверх положенного по назначению: что это значит, готовые шаги и
 // кнопка "по назначению" (точечный мут dockrisk:<имя>), если так задумано.
-const RISK_FIX: Record<string, string> = {
-  priv: 'privileged: уберите privileged: true и дайте только нужные capabilities (cap_add) и устройства (devices).',
-  caps: 'capabilities: уберите из cap_add SYS_ADMIN, SYS_MODULE, SYS_PTRACE и подобные, если приложение работает без них.',
-  sock: 'docker-сокет: если приложению нужен список контейнеров или события, пусть ходит через прокси сокета только на чтение (wollomatic/socket-proxy во внутренней сети), а сам сокет уберите из volumes.',
-  host: 'корень хоста: смонтируйте только нужный каталог и, если писать туда не нужно, с :ro.',
+
+// Шаг словами: команды собирает бэкенд под ноду (docker_risk.fixes), тексты здесь по id
+function riskFixText(st: RiskStep, a: Record<string, string>, t: (k: string, p?: Record<string, string | number>) => string): string {
+  const fl = (a.flags ?? '').split(',')
+  const need = [a.cap_add && `cap_add: [${a.cap_add}]`, a.devices && `devices: [${a.devices}]`].filter(Boolean).join(', ')
+  switch (st.id) {
+    case 'ci_check': return t('Это CI-агент: privileged ему нужен только для docker внутри сборок. Сколько образов у docker внутри агента - 0 или ошибка значит, что сборки docker не запускают и privileged можно убрать:')
+    case 'bak': return t('Копия compose рядом:')
+    case 'priv_off': return t('В {file} у сервиса {svc} privileged: true заменить на privileged: false, diff покажет замену:', a)
+      + (a.dind_env ? ' ' + t('Строку {env} тоже можно убрать: без privileged docker внутри все равно не поднимется.', { env: a.dind_env }) : '')
+    case 'priv_set': return t('В {file} у сервиса {svc} privileged: true заменить на то, что ему нужно по назначению ({need}), diff покажет замену:', { ...a, need })
+    case 'sock_rm': return t('В {file} у сервиса {svc} убрать docker-сокет из volumes, diff покажет строку:', a)
+    case 'sock_add': return t('Дописать в {file} руками: сервису DOCKER_HOST и сеть docker-api, рядом сервис docker-api - прокси сокета только на чтение (видит контейнеры и события, запускать и останавливать не дает). GID - число из stat -c %g /var/run/docker.sock:', a)
+    case 'caps_edit': return t('В {file} у сервиса {svc} убрать из cap_add {caps}. Строки с ними:', a)
+    case 'host_edit': return t('В {file} у сервиса {svc} {paths} смонтирован на запись: оставьте только нужный подкаталог или допишите :ro, если писать не нужно. Строки с ними:', a)
+    case 'up': return t('Проверить файл и пересоздать только эти сервисы, потом статус и лог. Пункт уйдет сам со следующим отчетом агента.')
+      + (fl.includes('priv') ? ' ' + t('Если в логе Operation not permitted - не хватает одного права: добавьте только его в cap_add (или устройство в devices), а не privileged обратно.') : '')
+      + (fl.includes('sock') ? ' ' + t('Если docker-api пишет в лог blocked - приложению нужен еще путь API: допишите его в -allowGET.') : '')
+    case 'undo': return t('Если что-то не так - вернуть прежний compose и пересоздать сервисы:')
+    case 'alt_ci': return t('Если docker в сборках нужен - privileged тут по назначению, нажмите "по назначению". Безопаснее держать такие агенты на отдельной ВМ без прода или запускать их через sysbox (runtime: sysbox-runc): docker внутри без privileged.')
+    case 'alt_sock': return t('Если приложение само запускает или останавливает контейнеры (CI, деплой, управление) - прокси только на чтение ему не подойдет, сокет тут по назначению: нажмите "по назначению".')
+    case 'run': return t('Контейнер запущен не из compose: пересоздайте его той же командой docker run, но без {what}.', {
+      what: fl.map((f) => f === 'priv' ? '--privileged' : f === 'sock' ? t('docker-сокета в -v')
+        : f === 'caps' ? `--cap-add ${a.caps ?? ''}` : t('{paths} на запись в -v', a)).join(', '),
+    })
+    case 'find': return t('Агент не присылает, откуда запущен контейнер: после обновления агента здесь будут готовые команды. Где его compose (папка, файлы, сервис):')
+    case 'hand_priv': return need
+      ? t('Сделайте копию файла и в блоке сервиса замените privileged: true на {need}.', { need })
+      : t('Сделайте копию файла и в блоке сервиса замените privileged: true на privileged: false.')
+    case 'hand_sock': return t('Уберите docker-сокет из volumes сервиса. Если приложению нужен список контейнеров или события - дайте ему прокси сокета только на чтение (wollomatic/socket-proxy во внутренней сети, DOCKER_HOST=tcp://docker-api:2375).')
+    case 'hand_caps': return t('Уберите из cap_add сервиса {caps}.', a)
+    case 'hand_host': return t('Вместо {paths} смонтируйте только нужный подкаталог или допишите :ro, если писать не нужно.', a)
+    case 'hand_up': return t('Потом в папке проекта sudo docker compose up -d <сервис> и лог. Откат - вернуть копию файла и тот же up -d.')
+    default: return st.id
+  }
 }
 
 function RiskWarning({ server: s, canAct, onChanged }: { server: Server; canAct: boolean; onChanged: () => void }) {
@@ -402,7 +433,8 @@ function RiskWarning({ server: s, canAct, onChanged }: { server: Server; canAct:
   const items = s.docker_risk ?? []
   const live = items.filter((x) => !x.muted)
   const muted = items.filter((x) => x.muted)
-  const flags = [...new Set(live.flatMap((x) => x.flags))].filter((f) => RISK_FIX[f])
+  // блок шагов общий у контейнеров одного проекта: показать один раз
+  const blocks = [...new Map(live.flatMap((x) => (x.fix ? [[x.fix.key, x.fix] as const] : []))).values()]
   const toggle = (name: string, on: boolean) => {
     const key = DOCKRISK_MUTE + name
     const cur = s.alert_mutes ?? []
@@ -439,13 +471,17 @@ function RiskWarning({ server: s, canAct, onChanged }: { server: Server; canAct:
               </div>
             ))}
           </div>
-          {flags.length > 0 && (
-            <div className="net-foot">
-              {flags.map((f) => (
-                <div key={f}>{t(RISK_FIX[f])}</div>
-              ))}
-            </div>
-          )}
+          {blocks.map((b) => {
+            // номера по порядку, откат и "или" без номера: они не по порядку
+            let n = 0
+            const num = new Map(b.steps.map((st) => [st, st.undo || st.alt ? '' : `${++n}. `]))
+            return (
+              <div key={b.key} className="sock-fix">
+                <div className="small">{t('Как исправить: {names}', { names: b.names.join(', ') })}</div>
+                <FixSteps steps={b.steps} text={(st) => (num.get(st) ?? '') + riskFixText(st, b.args, t)} />
+              </div>
+            )
+          })}
         </>
       )}
       {muted.length > 0 && (

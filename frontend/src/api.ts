@@ -2550,7 +2550,11 @@ export interface DockerRisk {
   caps: string[]
   text: string
   muted: boolean
+  fix?: RiskFix // у незаглушенных: шаги, общие у контейнеров одного проекта
 }
+// как исправить (docker_risk.fixes): тексты шагов во фронте по id, args - подстановки
+export type RiskStep = { id: string; cmd?: string; alt?: boolean; undo?: boolean }
+export type RiskFix = { key: string; names: string[]; args: Record<string, string>; steps: RiskStep[] }
 
 export function updateServer(
   id: number,
