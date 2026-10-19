@@ -44,7 +44,7 @@ import { MuteChip, MutesBanner, collectMutes } from './mutes'
 import { VaultPanel } from './VaultPanel'
 import { CountryFlag } from './CountryFlag'
 import { byteUnits, fmtDur } from './units'
-import { NetTile, type Tone } from './NetLinks'
+import { NetTile, TileFilterChip, useTileFilter, type Tone } from './NetLinks'
 
 async function runAndWait(
   serverId: number,
@@ -1094,12 +1094,14 @@ function HostRow({
   backup: b,
   showGroup,
   dest,
+  hint,
   onOpen,
 }: {
   server: Server
   backup: BackupInfo
   showGroup?: boolean
   dest?: string
+  hint?: string | null // что из нажатой плитки нашлось у клиента
   onOpen: () => void
 }) {
   const { t } = useI18n()
@@ -1134,6 +1136,7 @@ function HostRow({
           {b.duration_sec ? <span title={t('длительность')}>⏱ {fmtDur(b.duration_sec)}</span> : null}
           <span className={tm.tone} title={t('systemd-таймер бэкапа')}>{tm.icon} {tm.text}</span>
         </div>
+        {hint && <div className="hs-host-hit">{hint}</div>}
       </div>
       {/* куда бэкапится — справа, отдельной колонкой: это «адрес назначения», а не
           свойство самой ноды, и глазами удобнее сверять по одной вертикали */}
@@ -2998,6 +3001,18 @@ function BackupSetupModal({ server: s, backupServers, onClose, onDone }: {
 }
 
 type BHost = { s: Server; d: BackupInfo }
+type BFilter = 'clients' | 'nobackup' | 'servers' | 'verify'
+
+// Плитка "Восстановление проверено X из N": под нее попадают клиенты без пройденной проверки,
+// N - X строк. Строка под именем - что с проверкой (тексты бэкенда и так начинаются с того, что
+// не так); null - проверка пройдена
+function verifyHit(s: Server, t: (k: string, p?: Record<string, string | number>) => string): string | null {
+  const v = s.backup_verify
+  if (!v) return t('восстановление не проверялось')
+  if (v.level < 1) return null
+  if (v.problems.length) return v.problems.join('; ')
+  return v.level >= 2 ? t('восстановление не прошло') : t('восстановление с замечаниями')
+}
 
 export function BackupsPage({
   onUnauthorized,
@@ -3056,6 +3071,7 @@ export function BackupsPage({
   useUrlCard('backup', openId)
   useUrlCard('backupsrv', openSrvId)
   const [query, setQuery] = useState('')
+  const { tile, setTile, tileProps } = useTileFilter<BFilter>()
   const [searchRo, setSearchRo] = useState(true) // см. поле поиска ниже
   const [groupBy, setGroupBy] = useState<'none' | 'group'>(
     () => (localStorage.getItem('kervax_backup_groupby') as 'none' | 'group') || 'group',
@@ -3138,19 +3154,35 @@ export function BackupsPage({
   // читалось как «ничего не бэкапится», хотя ноды просто не подходили под запрос.
   const match = (s: Server) =>
     !q || [s.name, s.group_name].join(' ').toLowerCase().includes(q)
-  const hosts = allHosts
+  // Нажатая плитка оставляет свой блок страницы, тот, что она считает: клиентов, бэкап-серверы,
+  // ноды без бэкапа (вместе со своим бэкапом и "не требуется" - их числа в той же плитке) или
+  // клиентов без пройденной проверки восстановления. Поиск действует поверх
+  const showSec = (sec: BFilter) => !tile || tile === sec || (sec === 'clients' && tile === 'verify')
+  const hosts = (showSec('clients') ? allHosts : [])
     .filter(({ s }) => match(s))
+    .map((h) => ({ ...h, hint: tile === 'verify' ? verifyHit(h.s, t) : null }))
+    .filter((h) => tile !== 'verify' || h.hint)
     .sort((a, b) => a.s.name.localeCompare(b.s.name))
-  const srvHostsView = srvHosts.filter(({ s }) => match(s))
-  const ownOnlyView = ownOnly.filter(match)
-  const noBackupReqView = noBackupReq.filter(match)
-  const noBackupOptView = noBackupOpt.filter(match)
+  const srvHostsView = showSec('servers') ? srvHosts.filter(({ s }) => match(s)) : []
+  const ownOnlyView = showSec('nobackup') ? ownOnly.filter(match) : []
+  const noBackupReqView = showSec('nobackup') ? noBackupReq.filter(match) : []
+  const noBackupOptView = showSec('nobackup') ? noBackupOpt.filter(match) : []
+  const nothing = hosts.length + srvHostsView.length + ownOnlyView.length + noBackupReqView.length + noBackupOptView.length === 0
+  // нажатая плитка: подпись чипа над списком и что сказать, если под нее ничего не попало
+  const filterLabel: Record<BFilter, string> = {
+    clients: t('клиенты'), nobackup: t('без бэкапа'), servers: t('бэкап-серверы'),
+    verify: t('без пройденной проверки восстановления'),
+  }
+  const filterEmpty: Record<BFilter, string> = {
+    clients: t('Клиентов с бэкапом нет.'), nobackup: t('Бэкап есть у всех нод.'), servers: t('Бэкап-серверов нет.'),
+    verify: t('Восстановление проверено у всех клиентов.'),
+  }
 
-  const groups: { key: string; label: string; items: BHost[] }[] =
+  const groups: { key: string; label: string; items: typeof hosts }[] =
     groupBy === 'none'
       ? [{ key: 'all', label: '', items: hosts }]
       : (() => {
-          const map = new Map<string, BHost[]>()
+          const map = new Map<string, typeof hosts>()
           for (const h of hosts) {
             const k = h.s.group_name?.trim() || ''
             if (!map.has(k)) map.set(k, [])
@@ -3207,6 +3239,7 @@ export function BackupsPage({
               ownBadN > 0 && t('свой бэкап с проблемой: {n}', { n: ownBadN }),
             ) || (allHosts.length ? t('все свежие') : undefined)}
             tone={failedN || staleN ? 'bad' : ownBadN ? 'warn' : allHosts.length ? 'ok' : undefined}
+            {...tileProps('clients')}
           />
           <NetTile
             label={t('Без бэкапа')}
@@ -3217,6 +3250,7 @@ export function BackupsPage({
               noBackupOpt.length > 0 && t('не требуется: {n}', { n: noBackupOpt.length }),
             ) || t('у всех нод есть')}
             tone={noBackupReq.length || ownOnlyBadN ? 'bad' : 'ok'}
+            {...tileProps('nobackup')}
           />
           {srvHosts.length > 0 && (
             <NetTile
@@ -3229,6 +3263,7 @@ export function BackupsPage({
                 pctMax >= 0 && t('диск до {p}%', { p: pctMax }),
               )}
               tone={repoBadN || srvDownN || pctMax >= 90 ? 'bad' : pctMax >= 80 ? 'warn' : 'ok'}
+              {...tileProps('servers')}
             />
           )}
           {verified.length > 0 && (
@@ -3241,6 +3276,7 @@ export function BackupsPage({
                 verWarnN > 0 && t('с замечаниями: {n}', { n: verWarnN }),
               ) || undefined}
               tone={verBadN ? 'bad' : verWarnN ? 'warn' : verified.length === allHosts.length ? 'ok' : undefined}
+              {...tileProps('verify')}
             />
           )}
         </div>
@@ -3270,6 +3306,7 @@ export function BackupsPage({
           )}
         </div>
       )}
+      {tile && <TileFilterChip label={filterLabel[tile]} onClear={() => setTile(null)} />}
       {err && <p className="form-error">{err}</p>}
       {servers && allHosts.length === 0 && srvHosts.length === 0 && noBackupAll.length === 0 && ownOnly.length === 0 && (
         <div className="card muted">
@@ -3342,12 +3379,12 @@ export function BackupsPage({
           srvHostsView.length + noBackupReqView.length + noBackupOptView.length + ownOnlyView.length > 0 && (
           <div className="chart-cap hs-sect">{t('Клиенты (что бэкапится)')}</div>
         )}
-        {servers && allHosts.length > 0 && hosts.length === 0 && (
+        {servers && (tile ? nothing : allHosts.length > 0 && hosts.length === 0) && (
           <div className="chart-card net-card net-card-wide muted">
             <div>
               {q
                 ? t('По запросу «{q}» ничего нет — это фильтр, а не отсутствие бэкапов.', { q: query.trim() })
-                : t('Ничего не найдено.')}
+                : tile ? filterEmpty[tile] : t('Ничего не найдено.')}
               {q && (
                 <button className="ghost search-clear" onClick={() => setQuery('')}>
                   {t('Сбросить')}
@@ -3365,13 +3402,14 @@ export function BackupsPage({
               </div>
             </div>
             <div className="loc-results">
-              {g.items.map(({ s, d }) => (
+              {g.items.map(({ s, d, hint }) => (
                 <HostRow
                   key={s.id}
                   server={s}
                   backup={d}
                   showGroup={groupBy !== 'group'}
                   dest={backupDestName(d.repo_dest, servers ?? [], s)}
+                  hint={hint}
                   onOpen={() => setOpenId(s.id)}
                 />
               ))}
@@ -3387,11 +3425,14 @@ export function BackupsPage({
                 {t('Бэкап не требуется')}
                 <span className="net-n">{noBackupOptView.length}</span>
               </div>
-              <button className="ghost small" onClick={() => setShowOptOut(!showOptOut)}>
-                {showOptOut ? t('скрыть') : t('показать')}
-              </button>
+              {/* нажата плитка "Без бэкапа": ее "не требуется" видно сразу */}
+              {tile !== 'nobackup' && (
+                <button className="ghost small" onClick={() => setShowOptOut(!showOptOut)}>
+                  {showOptOut ? t('скрыть') : t('показать')}
+                </button>
+              )}
             </div>
-            {showOptOut && (
+            {(showOptOut || tile === 'nobackup') && (
               <div className="loc-results">
                 {noBackupOptView.map((s) => (
                   <NoBackupRow key={s.id} server={s} canAct={!isViewer}

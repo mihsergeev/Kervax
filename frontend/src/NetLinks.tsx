@@ -60,6 +60,8 @@ function ms(v: number | null | undefined, t: TFn): string {
 }
 
 // Плитка с крупным числом: метрика сети, трафик. tone красит число, bad - еще и рамку.
+// С onClick плитка - кнопка-фильтр списка под сводкой (active - нажата): наведение как у
+// плиток-ссылок карточек (srv-tile-btn), нажатая - в рамке акцента, как stat-tile на "Серверах"
 export function NetTile({
   label,
   value,
@@ -68,6 +70,8 @@ export function NetTile({
   tone,
   title,
   children,
+  onClick,
+  active,
 }: {
   label: ReactNode
   value: string
@@ -76,9 +80,11 @@ export function NetTile({
   tone?: Tone
   title?: string
   children?: ReactNode
+  onClick?: () => void
+  active?: boolean
 }) {
-  return (
-    <div className={`net-tile${tone ? ` net-tile-${tone}` : ''}`} title={title}>
+  const tile = (
+    <div className={`net-tile${tone ? ` net-tile-${tone}` : ''}`} title={onClick ? undefined : title}>
       <div className="net-tile-label">{label}</div>
       <div className="net-tile-value">
         {value}
@@ -86,6 +92,43 @@ export function NetTile({
       </div>
       {sub && <div className="net-tile-sub">{sub}</div>}
       {children}
+    </div>
+  )
+  if (!onClick) return tile
+  return (
+    <button type="button" className="srv-tile-btn" onClick={onClick} aria-pressed={!!active} title={title}>
+      {tile}
+    </button>
+  )
+}
+
+// Плитки сводки раздела как фильтр списка под ними (Docker, Кубер, Сервисы, Бэкапы), так же,
+// как на "Серверах" и "Сайтах": нажатая плитка отбирает строки, повторное нажатие снимает
+// фильтр. tileProps(null) - плитка "все": нажата, пока фильтра нет, и снимает его
+// eslint-disable-next-line react-refresh/only-export-components
+export function useTileFilter<F extends string>() {
+  const { t } = useI18n()
+  const [tile, setTile] = useState<F | null>(null)
+  const tileProps = (f: F | null) => ({
+    active: tile === f,
+    title: f == null ? t('показать все') : tile === f ? t('снять фильтр') : t('показать в списке'),
+    onClick: () => setTile((cur) => (f == null || cur === f ? null : f)),
+  })
+  return { tile, setTile, tileProps }
+}
+
+// Чип над списком: какой фильтр плиток стоит, нажатие снимает
+export function TileFilterChip({ label, onClear }: { label: string; onClear: () => void }) {
+  const { t } = useI18n()
+  return (
+    <div className="tile-filter-row">
+      <button type="button" className="ghost tile-filter-chip" onClick={onClear} title={t('снять фильтр')}
+        aria-label={t('снять фильтр: {f}', { f: label })}>
+        {t('фильтр: {f}', { f: label })}
+        <svg viewBox="0 0 10 10" width="9" height="9" aria-hidden>
+          <path d="M1.5 1.5l7 7M8.5 1.5l-7 7" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+        </svg>
+      </button>
     </div>
   )
 }

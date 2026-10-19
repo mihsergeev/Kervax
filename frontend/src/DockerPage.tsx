@@ -20,7 +20,7 @@ import { CountryFlag } from './CountryFlag'
 import { dockRiskText, proxyBuilt, shortList, srvIssues, srvMuted } from './serverUtils'
 import { fmtRel } from './ServersPage'
 import { CardNav, FreshChip, markMuted, OvAreas, OvRows, secInfoOf, type OvRow, type SecDef, type SecInfo, type SecItem } from './cardLayout'
-import { NetTile } from './NetLinks'
+import { NetTile, TileFilterChip, useTileFilter } from './NetLinks'
 import { fmtBytes } from './units'
 
 // Вкладка «Docker»: КОМПАКТНЫЙ список хостов с докером; клик по хосту → модалка
@@ -1115,11 +1115,13 @@ function HostRow({
   server: s,
   docker,
   showGroup,
+  hint,
   onOpen,
 }: {
   server: Server
   docker: DockerInfo
   showGroup?: boolean
+  hint?: string | null // что из нажатой плитки нашлось на хосте
   onOpen: () => void
 }) {
   const { t } = useI18n()
@@ -1166,6 +1168,7 @@ function HostRow({
           Docker {docker.version || '—'}
           {docker.compose ? ` · compose ${docker.compose}` : ''}
         </div>
+        {hint && <div className="hs-host-hit">{hint}</div>}
       </div>
       <div className="hs-host-count mono">
         {docker.access ? (
@@ -1181,6 +1184,45 @@ function HostRow({
 }
 
 type DHost = { s: Server; d: DockerInfo }
+type DFilter = 'stopped' | 'alerts' | 'attn'
+
+// Что из нажатой плитки нашлось на хосте - строка под его именем; null - хост под плитку не
+// подходит. Условия те же, что у чисел в плитках (только хосты на связи), поэтому имена по
+// строкам сходятся с числами плитки
+function dockerHit(f: DFilter, { s, d }: DHost, t: (k: string, p?: Record<string, string | number>) => string): string | null {
+  if (!s.online) return null
+  const cs = d.containers ?? []
+  const list = (xs: string[]) => ({ list: shortList(xs, t, 8) })
+  if (f === 'stopped') {
+    const xs = cs.filter((c) => c.state !== 'running').map((c) => c.name)
+    return xs.length ? t('остановлены: {list}', list(xs)) : null
+  }
+  if (f === 'alerts') {
+    const al = Object.entries(s.docker_alerts ?? {})
+    const down = al.filter(([, v]) => v === 'down').map(([k]) => k)
+    const loop = al.filter(([, v]) => v !== 'down').map(([k]) => k)
+    const unh = cs.filter((c) => c.health === 'unhealthy').map((c) => c.name)
+    const flap = Object.entries(s.restarts_day ?? {})
+      .filter(([k, v]) => k.startsWith('docker:') && v >= RESTARTS_DAY_MIN)
+      .map(([k]) => k.slice('docker:'.length))
+    return subOf(
+      down.length > 0 && t('упали: {list}', list(down)),
+      loop.length > 0 && t('по кругу: {list}', list(loop)),
+      unh.length > 0 && t('unhealthy: {list}', list(unh)),
+      flap.length > 0 && t('часто перезапускаются: {list}', list(flap)),
+    ) || null
+  }
+  const risk = (s.docker_risk ?? []).filter((x) => !x.muted).map((x) => x.name)
+  const noboot = (s.noboot?.docker ?? []).filter((x) => !x.muted).map((x) => x.name)
+  const sock = (s.docker_exposed ?? []).map((x) => x.name)
+  const old = (s.proxy_outdated ?? []).map((x) => x.name)
+  return subOf(
+    sock.length > 0 && t('docker-сокет у прокси: {list}', list(sock)),
+    risk.length > 0 && t('ключи от хоста: {list}', list(risk)),
+    noboot.length > 0 && t('без restart policy: {list}', list(noboot)),
+    old.length > 0 && t('старый прокси: {list}', list(old)),
+  ) || null
+}
 
 export function DockerPage({
   onUnauthorized,
@@ -1211,6 +1253,7 @@ export function DockerPage({
   }, [openHostId, openSec, onConsumed])
   useUrlCard('docker', openId)
   const [query, setQuery] = useState('')
+  const { tile, setTile, tileProps } = useTileFilter<DFilter>()
   const [groupBy, setGroupBy] = useState<'none' | 'group'>(
     () => (localStorage.getItem('kervax_docker_groupby') as 'none' | 'group') || 'group',
   )
@@ -1255,13 +1298,15 @@ export function DockerPage({
         .toLowerCase()
       return hay.includes(q)
     })
+    .map((h) => ({ ...h, hint: tile ? dockerHit(tile, h, t) : null }))
+    .filter((h) => !tile || h.hint)
     .sort((a, b) => a.s.name.localeCompare(b.s.name))
 
-  const groups: { key: string; label: string; items: DHost[] }[] =
+  const groups: { key: string; label: string; items: typeof hosts }[] =
     groupBy === 'none'
       ? [{ key: 'all', label: '', items: hosts }]
       : (() => {
-          const map = new Map<string, DHost[]>()
+          const map = new Map<string, typeof hosts>()
           for (const h of hosts) {
             const k = h.s.group_name?.trim() || ''
             if (!map.has(k)) map.set(k, [])
@@ -1301,6 +1346,13 @@ export function DockerPage({
       (s.noboot?.docker ?? []).some((x) => !x.muted) ||
       (s.proxy_outdated?.length ?? 0) > 0,
   ).length
+  // нажатая плитка: подпись чипа над списком и что сказать, если под нее ничего не попало
+  const filterLabel: Record<DFilter, string> = {
+    stopped: t('остановленные контейнеры'), alerts: t('аварии'), attn: t('хосты с замечаниями'),
+  }
+  const filterEmpty: Record<DFilter, string> = {
+    stopped: t('Все контейнеры запущены.'), alerts: t('Аварий нет.'), attn: t('Замечаний нет.'),
+  }
 
   return (
     <div>
@@ -1337,6 +1389,7 @@ export function DockerPage({
               offHosts.length > 0 && t('не на связи: {list}', { list: names(offHosts) }),
             ) || t('все на связи')}
             tone={noAccHosts.length || offHosts.length ? 'warn' : 'ok'}
+            {...tileProps(null)}
           />
           {live.some(({ d }) => d.access) && <>
           <NetTile
@@ -1345,6 +1398,7 @@ export function DockerPage({
             unit={t('из {n}', { n: cAll.length })}
             sub={cAll.length > totalRunning ? t('остановлено: {n}', { n: cAll.length - totalRunning }) : t('все запущены')}
             tone={cAll.length > totalRunning ? undefined : 'ok'}
+            {...tileProps('stopped')}
           />
           <NetTile
             label={t('Аварии')}
@@ -1356,6 +1410,7 @@ export function DockerPage({
               flappy > 0 && t('часто перезапускаются: {n}', { n: flappy }),
             ) || t('нет')}
             tone={alerts.length ? 'bad' : unhealthy || flappy ? 'warn' : 'ok'}
+            {...tileProps('alerts')}
           />
           <NetTile
             label={t('Хосты с замечаниями')}
@@ -1367,6 +1422,7 @@ export function DockerPage({
               oldHosts.length > 0 && t('старый прокси: {list}', { list: names(oldHosts) }),
             ) || t('все в порядке')}
             tone={attn ? 'warn' : 'ok'}
+            {...tileProps('attn')}
           />
           </>}
         </div>
@@ -1386,6 +1442,7 @@ export function DockerPage({
           )}
         </div>
       )}
+      {tile && <TileFilterChip label={filterLabel[tile]} onClear={() => setTile(null)} />}
       {err && <p className="form-error">{err}</p>}
       {servers && allHosts.length === 0 && (
         <div className="card muted">
@@ -1393,7 +1450,7 @@ export function DockerPage({
         </div>
       )}
       {servers && allHosts.length > 0 && hosts.length === 0 && (
-        <div className="card muted">{t('Ничего не найдено.')}</div>
+        <div className="card muted">{tile && !q ? filterEmpty[tile] : t('Ничего не найдено.')}</div>
       )}
       {hosts.length > 0 && (
         <div className="net-cards hs-groups">
@@ -1406,12 +1463,13 @@ export function DockerPage({
                 </div>
               </div>
               <div className="loc-results">
-                {g.items.map(({ s, d }) => (
+                {g.items.map(({ s, d, hint }) => (
                   <HostRow
                     key={s.id}
                     server={s}
                     docker={d}
                     showGroup={groupBy !== 'group'}
+                    hint={hint}
                     onOpen={() => setOpenId(s.id)}
                   />
                 ))}

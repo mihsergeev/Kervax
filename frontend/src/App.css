@@ -1144,6 +1144,16 @@ button.srv-tile-btn { display: block; min-width: 0; padding: 0; margin: 0; backg
 button.srv-tile-btn:hover { background: none; }
 button.srv-tile-btn .net-tile { height: 100%; transition: border-color 0.12s ease, background 0.12s ease; }
 button.srv-tile-btn:hover .net-tile { border-color: var(--border-strong); background: var(--card-hover); }
+/* плитка-фильтр сводки раздела (NetTile с onClick): нажатая - в рамке акцента, как stat-tile-active */
+button.srv-tile-btn[aria-pressed='true'] .net-tile { border-color: var(--accent); background: var(--card-hover); }
+button.srv-tile-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+/* чип активного фильтра плиток над списком (TileFilterChip) */
+.tile-filter-row { display: flex; margin: -0.35rem 0 0.75rem; }
+button.ghost.tile-filter-chip { display: inline-flex; align-items: center; gap: 0.45rem; max-width: 100%; padding: 0.25rem 0.65rem; border-radius: 999px; font-size: 0.8rem; text-align: left; overflow-wrap: anywhere; color: var(--text); border-color: color-mix(in srgb, var(--accent) 55%, var(--border)); background: color-mix(in srgb, var(--accent) 10%, transparent); }
+button.ghost.tile-filter-chip:hover { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 18%, transparent); }
+.tile-filter-chip svg { flex-shrink: 0; opacity: 0.75; }
+/* что из нажатой плитки нашлось на хосте: строка под именем в отфильтрованном списке */
+.hs-host-hit { font-size: 0.8rem; line-height: 1.35; color: var(--text); overflow-wrap: anywhere; }
 .now-card { padding-top: 0.75rem; }
 .loc-res.ml-row { gap: 0.7rem; }
 .ml-main { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }

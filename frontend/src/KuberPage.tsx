@@ -29,7 +29,7 @@ import { fmtBytes } from './units'
 import { shortList, sinceShort, srvIssues, srvMuted } from './serverUtils'
 import { EnrollModal, fmtRel, InstallModal } from './ServersPage'
 import { CardNav, FreshChip, markMuted, OvAreas, OvRows, secInfoOf, type OvRow, type SecDef, type SecInfo, type SecItem } from './cardLayout'
-import { NetTile } from './NetLinks'
+import { NetTile, TileFilterChip, useTileFilter } from './NetLinks'
 
 // Вкладка «Кубер»: КОМПАКТНЫЙ список хостов с кластером; клик по хосту → модалка
 // с нодами, воркоадами и подами (статусы, рестарты, логи, управление). Агент читает
@@ -1281,11 +1281,13 @@ function HostRow({
   server: s,
   kube,
   showGroup,
+  hint,
   onOpen,
 }: {
   server: Server
   kube: KubeInfo
   showGroup?: boolean
+  hint?: string | null // что из нажатой плитки нашлось в кластере
   onOpen: () => void
 }) {
   const { t } = useI18n()
@@ -1335,6 +1337,7 @@ function HostRow({
           {kube.flavor || 'k8s'} {kube.version || '—'}
           {kube.access ? ` · ${t('ноды {r}/{n}', { r: nodesReady, n: nodes.length })}` : ''}
         </div>
+        {hint && <div className="hs-host-hit">{hint}</div>}
       </div>
       <div className="hs-host-count mono">
         {kube.access ? (
@@ -1350,6 +1353,51 @@ function HostRow({
 }
 
 type KHost = { s: Server; d: KubeInfo }
+type KFilter = 'nodes' | 'pods' | 'attn'
+
+// Что из нажатой плитки нашлось в кластере - строка под его именем; null - кластер под плитку
+// не подходит. Условия те же, что у чисел в плитках: кластеры на связи, ноды и поды - только
+// при доступе к API, поэтому имена по строкам сходятся с числами плитки
+function kubeHit(f: KFilter, { s, d }: KHost, t: (k: string, p?: Record<string, string | number>) => string): string | null {
+  if (!s.online) return null
+  const list = (xs: string[]) => ({ list: shortList(xs, t, 8) })
+  if (f === 'nodes') {
+    const nodes = d.access ? d.nodes ?? [] : []
+    const down = nodes.filter((n) => !n.ready).map((n) => n.name)
+    const press = nodes
+      .filter((n) => n.ready && (n.pressure ?? []).length > 0)
+      .map((n) => `${n.name} (${(n.pressure ?? []).join(', ')})`)
+    const unmon = (s.kube_unmonitored ?? []).map((n) => n.name)
+    return subOf(
+      down.length > 0 && t('не готовы: {list}', list(down)),
+      press.length > 0 && t('под давлением: {list}', list(press)),
+      unmon.length > 0 && t('без агента: {list}', list(unmon)),
+    ) || null
+  }
+  if (f === 'pods') {
+    const active = (d.access ? d.pods ?? [] : []).filter((p) => !podFinished(p))
+    const bad = active.filter((p) => podTone(p) === 't-down').map((p) => p.name)
+    const slow = active
+      .filter((p) => !(p.phase === 'Running' && p.ready) && podTone(p) !== 't-down')
+      .map((p) => p.name)
+    return subOf(
+      bad.length > 0 && t('падают: {list}', list(bad)),
+      slow.length > 0 && t('не готовы: {list}', list(slow)),
+    ) || null
+  }
+  const exp = s.last_report?.kube_expiry ?? []
+  const what = (e: KubeExpiry) => `${t(EXPIRY_KIND[e.kind] ?? e.kind)} ${e.where}`
+  const flux = (s.last_report?.flux ?? []).filter((x) => !x.ready && !FLUX_TRANSIENT.has(x.reason ?? '')).map((x) => x.where)
+  const expired = exp.filter((e) => daysLeft(e.expires) < 0).map(what)
+  const soon = exp.filter((e) => daysLeft(e.expires) >= 0 && daysLeft(e.expires) <= expiryHorizon(s)).map(what)
+  const jobs = [...new Set([...Object.keys(s.kube_cron_issues ?? {}), ...(d.failed_jobs ?? []).map((j) => `${j.ns}/${j.name}`)])]
+  return subOf(
+    flux.length > 0 && t('Flux встал: {list}', list(flux)),
+    expired.length > 0 && t('сроки истекли: {list}', list(expired)),
+    soon.length > 0 && t('сроки скоро: {list}', list(soon)),
+    jobs.length > 0 && t('задания упали: {list}', list(jobs)),
+  ) || null
+}
 
 export function KuberPage({
   onUnauthorized,
@@ -1381,6 +1429,7 @@ export function KuberPage({
   }, [openHostId, openTab, onConsumed])
   useUrlCard('kube', openId)
   const [query, setQuery] = useState('')
+  const { tile, setTile, tileProps } = useTileFilter<KFilter>()
   // нода кластера без агента, которую заводят в панели, и команда установки после этого
   const [addNode, setAddNode] = useState<{ name: string; group: string; ip: string } | null>(null)
   const [enroll, setEnroll] = useState<ServerEnroll | null>(null)
@@ -1429,13 +1478,15 @@ export function KuberPage({
         .toLowerCase()
       return hay.includes(q)
     })
+    .map((h) => ({ ...h, hint: tile ? kubeHit(tile, h, t) : null }))
+    .filter((h) => !tile || h.hint)
     .sort((a, b) => a.s.name.localeCompare(b.s.name))
 
-  const groups: { key: string; label: string; items: KHost[] }[] =
+  const groups: { key: string; label: string; items: typeof hosts }[] =
     groupBy === 'none'
       ? [{ key: 'all', label: '', items: hosts }]
       : (() => {
-          const map = new Map<string, KHost[]>()
+          const map = new Map<string, typeof hosts>()
           for (const h of hosts) {
             const k = h.s.group_name?.trim() || ''
             if (!map.has(k)) map.set(k, [])
@@ -1473,6 +1524,13 @@ export function KuberPage({
     (s.last_report?.kube_expiry ?? []).some((e) => daysLeft(e.expires) <= expiryHorizon(s)) ||
     Object.keys(s.kube_cron_issues ?? {}).length > 0 ||
     (s.last_report?.kube?.failed_jobs ?? []).length > 0).length
+  // нажатая плитка: подпись чипа над списком и что сказать, если под нее ничего не попало
+  const filterLabel: Record<KFilter, string> = {
+    nodes: t('ноды не готовы или с замечаниями'), pods: t('поды не работают'), attn: t('кластеры с замечаниями'),
+  }
+  const filterEmpty: Record<KFilter, string> = {
+    nodes: t('Все ноды готовы.'), pods: t('Все поды работают.'), attn: t('Замечаний нет.'),
+  }
 
   return (
     <div>
@@ -1509,6 +1567,7 @@ export function KuberPage({
               offHosts.length > 0 && t('не на связи: {list}', { list: names(offHosts) }),
             ) || t('все на связи')}
             tone={noAccHosts.length || offHosts.length ? 'warn' : 'ok'}
+            {...tileProps(null)}
           />
           {live.some(({ d }) => d.access) && <>
           <NetTile
@@ -1520,6 +1579,7 @@ export function KuberPage({
               nUnmon > 0 && t('без агента: {n}', { n: nUnmon }),
             ) || t('все готовы')}
             tone={nReady < nAll.length ? 'bad' : nPress || nUnmon ? 'warn' : 'ok'}
+            {...tileProps('nodes')}
           />
           <NetTile
             label={t('Поды работают')}
@@ -1530,6 +1590,7 @@ export function KuberPage({
               pAct - pRun - pBad > 0 && t('не готовы: {n}', { n: pAct - pRun - pBad }),
             ) || t('все работают')}
             tone={pBad ? 'bad' : pRun < pAct ? 'warn' : 'ok'}
+            {...tileProps('pods')}
           />
           </>}
           {live.length > 0 && <>
@@ -1543,6 +1604,7 @@ export function KuberPage({
               cronHosts.length > 0 && t('задания упали: {list}', { list: names(cronHosts) }),
             ) || t('все в порядке')}
             tone={fluxHosts.length || expiredHosts.length ? 'bad' : attn ? 'warn' : 'ok'}
+            {...tileProps('attn')}
           />
           </>}
         </div>
@@ -1562,6 +1624,7 @@ export function KuberPage({
           )}
         </div>
       )}
+      {tile && <TileFilterChip label={filterLabel[tile]} onClear={() => setTile(null)} />}
       {err && <p className="form-error">{err}</p>}
       {servers && allHosts.length === 0 && (
         <div className="card muted">
@@ -1569,7 +1632,7 @@ export function KuberPage({
         </div>
       )}
       {servers && allHosts.length > 0 && hosts.length === 0 && (
-        <div className="card muted">{t('Ничего не найдено.')}</div>
+        <div className="card muted">{tile && !q ? filterEmpty[tile] : t('Ничего не найдено.')}</div>
       )}
       {hosts.length > 0 && (
         <div className="net-cards hs-groups">
@@ -1582,12 +1645,13 @@ export function KuberPage({
                 </div>
               </div>
               <div className="loc-results">
-                {g.items.map(({ s, d }) => (
+                {g.items.map(({ s, d, hint }) => (
                   <HostRow
                     key={s.id}
                     server={s}
                     kube={d}
                     showGroup={groupBy !== 'group'}
+                    hint={hint}
                     onOpen={() => setOpenId(s.id)}
                   />
                 ))}
