@@ -4,6 +4,15 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.4.301] - 2026-10-20
+
+### Fixed
+- В "Что сломано" и в списке серверов CPU, RAM, температура CPU и дисков, conntrack, коннекты СУБД
+  и троттлинг мигали на минуту от одного всплеска в последнем отчете. Теперь они видны, только пока
+  висит алерт: с его выдержкой и гистерезисом, а значение показывается текущее.
+- Отбой алерта о троттлинге приходит после 15 минут без перегрева, а не после первой спокойной
+  минуты.
+
 ## [1.4.300] - 2026-10-20
 
 ### Changed

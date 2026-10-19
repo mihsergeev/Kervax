@@ -98,10 +98,16 @@ def test_db_connections_and_rabbitmq_queues():
            "services": [{"kind": "rabbitmq", "source": "rmq", "queues": [
                {"name": "jobs", "vhost": "/", "ready": 5000, "unacked": 10},
                {"name": "mail", "vhost": "/", "ready": 3, "unacked": 0}]}]}
-    s = _srv(now, rep, db_conn_alert_percent=90, queue_alert_depth=1000)
+    # выше порога, но выдержка алерта только идет: всплеск коннектов на главной не виден
+    s = _srv(now, rep, {"db_conn": 0, "db_conn_since": now.isoformat()}, db_conn_alert_percent=90,
+             queue_alert_depth=1000)
+    assert _probs(s, now, "db_conn") == []
+    # алерт висит - строка с текущим значением и началом превышения
+    since = (now - timedelta(minutes=30)).isoformat()
+    s = _srv(now, rep, {"db_conn": 1, "db_conn_since": since}, db_conn_alert_percent=90, queue_alert_depth=1000)
     got = _probs(s, now, "db_conn")
-    assert [(p["level"], p["section"], p["text"]) for p in got] == [
-        (2, "services", "pg: занято 95 из 100 подключений (95%)")]
+    assert [(p["level"], p["section"], p["text"], p["since"]) for p in got] == [
+        (2, "services", "pg: занято 95 из 100 подключений (95%)", since)]
     got = _probs(s, now, "queue")
     assert [(p["level"], p["section"], p["text"]) for p in got] == [
         (2, "services", "переполнены очереди: jobs (5010)")]
@@ -252,3 +258,51 @@ async def test_report_keeps_agent_226_fields(client, auth_headers):
     lr = srv["last_report"]
     for k in ("listen", "ips", "psi", "dstate", "fds", "tcp", "os_upd"):
         assert lr[k] == rep[k], k
+
+
+def test_throttle_only_when_sustained():
+    """Всплеск счетчика троттлинга на одном отчете на главную не идет: строка есть, только пока
+    висит алерт (горячо несколько интервалов подряд, держится до затишья)."""
+    now = datetime.now(timezone.utc)
+    # последний отчет со всплеском, алерта нет - это шум, "Что сломано" молчит
+    s = _srv(now, {"cpu_throttle": 578, "cpu_temp": 58}, {"throttle": 0, "throttle_streak": 0})
+    assert _probs(s, now, "throttle") == []
+    # устойчивый: строка есть и в последнем отчете без троттлинга (идет выдержка отбоя)
+    frm = (now - timedelta(minutes=7)).isoformat()
+    s = _srv(now, {"cpu_throttle": 0, "cpu_temp": 83}, {"throttle": 1, "throttle_from": frm})
+    p = _probs(s, now, "throttle")
+    assert len(p) == 1 and p[0]["level"] == 1 and p[0]["mute"] == "throttle" and p[0]["since"] == frm
+    # агент перестал отдавать счетчик (VM, датчиков нет) - не показываем
+    s = _srv(now, {"cpu_throttle": None}, {"throttle": 1})
+    assert _probs(s, now, "throttle") == []
+
+
+def test_metrics_follow_the_alert_not_the_last_report():
+    """CPU, RAM, температуры и conntrack на главной - по уровню алерта, а не по последнему отчету:
+    минутный всплеск выше порога строку не зажигает, висящий алерт виден и тогда, когда значение
+    уже под порогом, но еще выше линии снятия (гистерезис), до самого отбоя."""
+    now = datetime.now(timezone.utc)
+    rep = {"cpu_percent": 97, "mem_total": 100, "mem_used": 95, "cpu_temp": 91,
+           "conntrack_max": 1000, "conntrack_count": 950, "disk_devs": [{"dev": "sda", "temp": 70}]}
+    kw = dict(cpu_alert_percent=90, mem_alert_percent=90, temp_alert_c=85,
+              conntrack_alert_percent=90, disk_temp_alert_c=60)
+    kinds = ("cpu", "mem", "temp", "conntrack", "disktemp")
+    # всплеск: выдержка алерта только пошла, уровень 0 - на главной ничего
+    started = (now - timedelta(minutes=1)).isoformat()
+    s = _srv(now, rep, {**{k: 0 for k in kinds}, **{f"{k}_since": started for k in kinds}}, **kw)
+    assert all(_probs(s, now, k) == [] for k in kinds)
+    # алерт висит: строка с текущим значением, с начала превышения, глушится колокольчиком по виду
+    since = (now - timedelta(minutes=40)).isoformat()
+    frm = (now - timedelta(minutes=25)).isoformat()
+    state = {**{k: 1 for k in kinds}, **{f"{k}_since": since for k in kinds}, **{f"{k}_from": frm for k in kinds}}
+    s = _srv(now, rep, state, **kw)
+    texts = {k: _probs(s, now, k) for k in kinds}
+    assert [p["text"] for k in kinds for p in texts[k]] == ["CPU 97%", "RAM 95%", "CPU 91°C", "conntrack 95%", "диск 70°C"]
+    assert all(p["level"] == 2 and p["mute"] == k and p["sec"] == k and p["since"] == since
+               for k in kinds for p in texts[k])
+    # CPU опустился до 85%: ниже порога, но алерт еще не снят - строка остается
+    s = _srv(now, {**rep, "cpu_percent": 85}, state, **kw)
+    assert [p["text"] for p in _probs(s, now, "cpu")] == ["CPU 85%"]
+    # порог выключили - строки нет, даже если в состоянии остался уровень
+    s = _srv(now, rep, state, **{**kw, "cpu_alert_percent": 0})
+    assert _probs(s, now, "cpu") == []

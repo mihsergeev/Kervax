@@ -151,12 +151,6 @@ function srvIssuesRaw(
     return [{ tone: 't-down', text: why ? `${t('оффлайн')} - ${why}` : t('оффлайн'), mute: 'offline', kind: 'offline', since: s.last_seen }]
   }
   const out: SrvIssue[] = []
-  const cpu = srvCpuPct(s)
-  if (cpu != null && s.cpu_alert_percent && cpu >= s.cpu_alert_percent)
-    out.push({ tone: 't-down', text: `CPU ${cpu}%`, sec: 'cpu', mute: 'cpu', kind: 'cpu' })
-  const ram = srvRamPct(s)
-  if (ram != null && s.mem_alert_percent && ram >= s.mem_alert_percent)
-    out.push({ tone: 't-down', text: `RAM ${ram}%`, sec: 'mem', mute: 'mem', kind: 'mem' })
   const disk = srvDiskPct(s)
   if (disk != null) {
     if (s.disk_crit_percent && disk >= s.disk_crit_percent)
@@ -166,27 +160,8 @@ function srvIssuesRaw(
     else if (s.disk_warn_percent && disk >= s.disk_warn_percent)
       out.push({ tone: 't-degraded', text: `${t('Диск')} ${disk}%`, sec: 'diskfill', mute: 'disk@1', kind: 'disk' })
   }
-  const r = s.last_report
-  // температура CPU (на VM датчика нет → cpu_temp = null)
-  if (r?.cpu_temp != null && s.temp_alert_c && r.cpu_temp >= s.temp_alert_c)
-    out.push({ tone: 't-down', text: `CPU ${Math.round(r.cpu_temp)}°C`, sec: 'temp', kind: 'temp' })
-  // троттлинг CPU
-  if (r?.cpu_throttle != null && r.cpu_throttle > 0)
-    out.push({ tone: 't-degraded', text: t('троттлинг'), sec: 'throttle', kind: 'throttle' })
-  // conntrack близок к пределу
-  const ctmax = r?.conntrack_max ?? 0
-  if (ctmax > 0 && s.conntrack_alert_percent) {
-    const fill = Math.round(((r?.conntrack_count ?? 0) / ctmax) * 100)
-    if (fill >= s.conntrack_alert_percent)
-      out.push({ tone: 't-down', text: `conntrack ${fill}%`, sec: 'conntrack', kind: 'conntrack' })
-  }
-  // температура диска (макс по устройствам с датчиком)
-  if (s.disk_temp_alert_c && r?.disk_devs?.length) {
-    const temps = r.disk_devs.map((d) => d.temp).filter((x): x is number => x != null)
-    if (temps.length && Math.max(...temps) >= s.disk_temp_alert_c)
-      out.push({ tone: 't-down', text: `${t('Диск')} ${Math.round(Math.max(...temps))}°C`, sec: 'disktemp', kind: 'disktemp' })
-  }
-  // остальное, о чем шлют алерты (поломки дисков, прогноз, inode, юниты, часы, DNS, коннекты СУБД,
+  // остальное, о чем шлют алерты (CPU, RAM, температуры, conntrack и троттлинг - по уровню алерта,
+  // с его выдержкой, а не по последнему отчету; поломки дисков, прогноз, inode, юниты, часы, DNS, коннекты СУБД,
   // 5xx, очереди, сроки и Flux, дампы и проверки бэкапов), приходит с бэкенда готовым: уровни те
   // же, что у алертов, считать их здесь второй раз незачем
   for (const p of s.problems ?? [])

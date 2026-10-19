@@ -668,8 +668,9 @@ async def test_agent_ip_allowlist_file(client: httpx.AsyncClient, auth_headers):
 
 async def test_throttle_alerts_only_when_sustained_and_hot(tmp_path, monkeypatch):
     """Троттлинг: одиночные/холодные спайки счётчика — молчим (шум); алерт только
-    когда процессор горячий И тормозит ≥3 интервала подряд (недоохлаждение)."""
-    from datetime import datetime, timezone
+    когда процессор горячий И тормозит ≥3 интервала подряд (недоохлаждение). Отбой - после
+    15 минут без горячего троттлинга, нулевой интервал посреди перегрева пары не дает."""
+    from datetime import datetime, timedelta, timezone
 
     from sqlalchemy import select
 
@@ -704,15 +705,23 @@ async def test_throttle_alerts_only_when_sustained_and_hot(tmp_path, monkeypatch
     monkeypatch.setattr("app.alerts.send_alert", fake_send)
     settings = Settings(alert_webhook="http://hook")
 
+    clock = [now]
+
     async def tick(throttle, temp):
+        clock[0] += timedelta(minutes=1)
         async with factory() as s:
-            (await s.scalar(select(Server))).last_report = rep(throttle, temp)
+            srv = await s.scalar(select(Server))
+            srv.last_report, srv.last_seen = rep(throttle, temp), clock[0]
             await s.commit()
-        await collector.evaluate_servers(factory, settings, now)
+        await collector.evaluate_servers(factory, settings, clock[0])
 
     # холодный спайк (49°C) — не тепловой, молчим даже много раз подряд
     for _ in range(4):
         await tick(1016, 49)
+    assert sent == []
+    # вечер на k8s-a: редкие всплески счетчика при 48-61°C между минутами по 80°C без троттлинга
+    for thr, t in [(34, 61), (0, 79), (578, 58), (0, 84), (170, 48), (0, 80), (34, 59)]:
+        await tick(thr, t)
     assert sent == []
 
     # горячий, но одиночный (сосед — 0) → стрик не набирается → молчим
@@ -730,9 +739,22 @@ async def test_throttle_alerts_only_when_sustained_and_hot(tmp_path, monkeypatch
     sent.clear()
     await tick(90, 98)
     assert sent == []
-    # остыл/перестал → recovery
+    # счетчик рывками: минута без троттлинга посреди перегрева и снова горячо - та же история,
+    # ни "снова в норме", ни нового алерта
+    await tick(0, 82)
+    await tick(0, 81)
+    await tick(75, 96)
+    await tick(0, 83)
+    assert sent == []
+    # остыл: отбой одним сообщением, но только после 15 минут без горячего троттлинга
+    for _ in range(14):
+        await tick(0, 55)
+    assert sent == []
     await tick(0, 55)
     assert len(sent) == 1 and "снова в норме" in sent[0]
+    sent.clear()
+    await tick(0, 55)
+    assert sent == []
     await engine.dispose()
 
 
