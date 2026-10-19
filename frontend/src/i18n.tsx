@@ -2351,8 +2351,11 @@ const EN: Record<string, string> = {
   '↓ загрузка / ↑ выгрузка': '↓ in / ↑ out',
   '↓ загрузка': '↓ in',
   '↑ выгрузка': '↑ out',
-  'загрузка': 'swap in',
-  'выгрузка': 'swap out',
+  // одно слово на четыре смысла: загрузка GPU и диска - utilization, у swap и ответа свои ключи
+  'загрузка': 'utilization',
+  'из swap': 'swap in',
+  'в swap': 'swap out',
+  'загрузка ответа': 'download',
   'буфер записи': 'write buffer',
   'ожидают записи': 'awaiting write',
   'запись на диск': 'writeback',

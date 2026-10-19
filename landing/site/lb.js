@@ -30,7 +30,7 @@
       cmd = cmd.replace(/^\$\s*/, '');
       navigator.clipboard.writeText(cmd).then(function () {
         var was = btn.textContent;
-        btn.textContent = 'скопировано';
+        btn.textContent = document.documentElement.lang === 'ru' ? 'скопировано' : 'copied';
         setTimeout(function () { btn.textContent = was; }, 1600);
       });
     });
