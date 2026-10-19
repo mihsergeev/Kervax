@@ -44,7 +44,7 @@ import (
 	"time"
 )
 
-const version = "2.38"
+const version = "2.39"
 
 // Публичный ключ для проверки подписи релизов агента (Ed25519, base64).
 // ПУСТО по умолчанию → самообновление ВЫКЛЮЧЕНО (агент никогда не заменяет себя).
@@ -7188,7 +7188,30 @@ type osUpdates struct {
 	AptTs      int64    `json:"apt_ts,omitempty"`   // последнее успешное apt update
 	Unatt      string   `json:"unatt,omitempty"`    // on, off или none (unattended-upgrades нет)
 	UnattTs    int64    `json:"unatt_ts,omitempty"` // последний прогон автообновлений
+	Esm        bool     `json:"esm,omitempty"`      // Ubuntu Pro: подключен ESM Infra (его репозиторий в apt)
 	Ts         int64    `json:"ts"`
+}
+
+// esmInfra - подключен ли ESM Infra Ubuntu Pro: pro attach кладет его репозиторий в
+// sources.list.d (на 24.04 - deb822 .sources), pro disable убирает. Без подписки файла нет.
+func esmInfra() bool {
+	return esmInfraIn("/etc/apt/sources.list.d/ubuntu-esm-infra.list", "/etc/apt/sources.list.d/ubuntu-esm-infra.sources")
+}
+
+func esmInfraIn(paths ...string) bool {
+	for _, p := range paths {
+		b, err := os.ReadFile(p)
+		if err != nil {
+			continue
+		}
+		for _, l := range strings.Split(string(b), "\n") {
+			l = strings.TrimSpace(l)
+			if l != "" && !strings.HasPrefix(l, "#") && strings.Contains(l, "esm.ubuntu.com") {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 const maxListen = 150
@@ -7648,10 +7671,17 @@ func collectOSUpdates(now time.Time) *osUpdates {
 			u.Updates, u.Security, u.UpdTs = upd, sec, now.Unix()
 		}
 	}
-	u.AptTs = mtime("/var/lib/apt/periodic/update-success-stamp")
-	if u.AptTs == 0 {
-		u.AptTs = mtime("/var/lib/apt/lists")
+	// Последний apt update - самая свежая из отметок: update-success-stamp ставит хук
+	// update-notifier на любой apt update, update-stamp - ежедневный прогон apt.systemd.daily,
+	// каталог списков меняется, когда что-то скачалось. Раньше брали только первую: без хука
+	// (на сервере нет update-notifier-common) ежедневные apt update не было видно, а у
+	// дистрибутива без поддержки списки больше не меняются, и "не обновлялся" висело вечно
+	for _, p := range []string{"/var/lib/apt/periodic/update-success-stamp", "/var/lib/apt/periodic/update-stamp", "/var/lib/apt/lists"} {
+		if t := mtime(p); t > u.AptTs {
+			u.AptTs = t
+		}
 	}
+	u.Esm = esmInfra()
 	u.UnattTs = mtime("/var/lib/apt/periodic/unattended-upgrades-stamp")
 	if _, err := os.Stat("/usr/bin/unattended-upgrade"); err != nil {
 		u.Unatt = "none"

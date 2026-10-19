@@ -46,6 +46,7 @@ import {
   type ProcStat,
   type WebErrorRow,
   type CpuGroup,
+  type OsFixStep,
   type Server,
   type ServerEnroll,
   type GpuSum,
@@ -2894,8 +2895,58 @@ const PSI_ROWS: { k: string; label: string; some: number; full: number }[] = [
   { k: 'io', label: 'Диск', some: 80, full: 50 },
 ]
 
+// Шаг исправления пункта об ОС словами: команды собирает бэкенд под ноду, тексты здесь по id
+function osFixText(st: OsFixStep, t: (k: string, p?: Record<string, string | number>) => string): string {
+  switch (st.id) {
+    case 'apt_update': return t('Обновить список пакетов: ничего не ставит, только узнает, что вышло.')
+    case 'apt_daily': return t('Чтобы список обновлялся сам каждый день (без автоустановки):')
+    case 'unatt_install': return t('Поставить автообновления. unattended-upgrades ставит только исправления безопасности из репозитория дистрибутива: сторонние репозитории (docker и прочие) не трогает, конфиги оставляет как есть, ничего не удаляет и сам не перезагружает.')
+    case 'unatt_enable': return t('Включить их: каждый день свежий список пакетов и исправления безопасности.')
+    case 'unatt_run': return t('Поставить исправления безопасности сейчас, не дожидаясь ночного прогона. Лог - в /var/log/unattended-upgrades/.')
+    case 'unatt_check': return t('Автообновления включены, но не запускались: проверить таймеры apt и последний лог.')
+    case 'noboot_docker': return t('Сначала: эти контейнеры без restart policy, после перезагрузки docker их не поднимет.')
+    case 'noboot_units': return t('Сначала: эти сервисы работают, но не включены, после перезагрузки их не будет.')
+    case 'reboot': return t('Перезагрузить, когда есть доступ к консоли сервера: несколько минут сервер недоступен. Старое ядро остается в меню GRUB (Advanced options), если новое не загрузится.')
+    case 'pro_attach': return t('Ubuntu Pro: исправления безопасности до {date}. Токен - на ubuntu.com/pro, для личного использования бесплатно до 5 машин, для компании нужна подписка. Подключение панель видит с агента 2.39.', { date: st.arg ?? '' })
+    case 'pro_run': return t('Поставить исправления из ESM.')
+    case 'release_upgrade': return t('Переезд на следующую версию: по одной за раз, с перезагрузкой. Заранее бэкап и доступ к консоли.')
+    case 'debian_upgrade': return t('Переезд на Debian {n} по release notes: sources.list на новое кодовое имя, apt full-upgrade и перезагрузка. Заранее бэкап и доступ к консоли.', { n: st.arg ?? '' })
+    case 'el_upgrade': return t('Переезд на следующую версию: RHEL, AlmaLinux и Rocky - через leapp, CentOS - переустановкой на AlmaLinux или Rocky.')
+    default: return st.id
+  }
+}
+
+function OsFix({ steps }: { steps: OsFixStep[] }) {
+  const { t } = useI18n()
+  const [copied, setCopied] = useState(-1)
+  return (
+    <div className="osupd-fix">
+      {steps.map((st, i) => (
+        <div key={st.id + i} className="osupd-step">
+          {st.alt && <div className="osupd-alt">{t('или')}</div>}
+          <div className="muted small">{osFixText(st, t)}</div>
+          {st.cmd && (
+            <div className="agent-advice-cmd">
+              <pre>{st.cmd}</pre>
+              <button className="ghost" onClick={() => {
+                navigator.clipboard?.writeText(st.cmd ?? '')
+                setCopied(i)
+                window.setTimeout(() => setCopied(-1), 1500)
+              }}>
+                {copied === i ? t('Скопировано') : t('Копировать')}
+              </button>
+            </div>
+          )}
+        </div>
+      ))}
+      <div className="muted small">{t('После этих шагов пункт уйдет сам в течение часа: агент пересчитывает обновления раз в час.')}</div>
+    </div>
+  )
+}
+
 // Обновления ОС (агент 2.26): что стоит, что ждет установки, когда перезагружаться. Сверху -
-// что сделать (os_advice считает бэкенд: конец поддержки, перезагрузка, безопасность, apt).
+// что сделать (os_advice считает бэкенд: конец поддержки, перезагрузка, безопасность, apt), у
+// каждого пункта "как исправить" - готовые команды под эту ноду.
 // Обновить ОС можно не всегда (старый сервер, софт не встанет на новую версию): тогда у пункта
 // решение "обновить ОС нельзя" и т.п., он гаснет здесь и уходит из "Требует действий"
 function OsUpdates({ server: s, onChanged }: { server: Server; onChanged: () => void }) {
@@ -2903,6 +2954,7 @@ function OsUpdates({ server: s, onChanged }: { server: Server; onChanged: () => 
   const { isViewer } = useAuth()
   const { busy, toggle } = useMuteToggle(s, onChanged)
   const [busyAll, setBusyAll] = useState(false)
+  const [open, setOpen] = useState('')
   const u = s.last_report?.os_upd
   const adv = s.os_advice ?? []
   if (!u && !adv.length) return null
@@ -2928,14 +2980,22 @@ function OsUpdates({ server: s, onChanged }: { server: Server; onChanged: () => 
           )}
         </div>
         {adv.map((a) => (
-          <div key={a.kind} className={`osupd-adv ${a.muted ? 'osupd-adv-off' : a.level >= 2 ? 'net-prob' : 'net-note'}`}>
-            <span className="osupd-adv-text">{a.text}</span>
-            {a.muted && <span className="osupd-adv-why">{osDecisionLabel(a.kind, t)}</span>}
-            {!isViewer && a.key && (
-              <button className="ghost small row-act" disabled={busy === a.key || busyAll} onClick={() => toggle(a.key, !a.muted)}>
-                {a.muted ? t('вернуть') : osDecisionLabel(a.kind, t)}
-              </button>
-            )}
+          <div key={a.kind}>
+            <div className={`osupd-adv ${a.muted ? 'osupd-adv-off' : a.level >= 2 ? 'net-prob' : 'net-note'}`}>
+              <span className="osupd-adv-text">{a.text}</span>
+              {a.muted && <span className="osupd-adv-why">{osDecisionLabel(a.kind, t)}</span>}
+              {(a.fix?.length ?? 0) > 0 && (
+                <button className="ghost small row-act" onClick={() => setOpen(open === a.kind ? '' : a.kind)}>
+                  {open === a.kind ? t('скрыть') : t('как исправить')}
+                </button>
+              )}
+              {!isViewer && a.key && (
+                <button className="ghost small row-act" disabled={busy === a.key || busyAll} onClick={() => toggle(a.key, !a.muted)}>
+                  {a.muted ? t('вернуть') : osDecisionLabel(a.kind, t)}
+                </button>
+              )}
+            </div>
+            {open === a.kind && a.fix && <OsFix steps={a.fix} />}
           </div>
         ))}
         {u && (

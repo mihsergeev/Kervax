@@ -1310,6 +1310,29 @@ const EN: Record<string, string> = {
   'перезагружать нельзя': 'cannot reboot',
   'обновлять нельзя': 'cannot update',
   'все так и оставить': 'leave all as is',
+  'как исправить': 'how to fix',
+  'или': 'or',
+  'Обновить список пакетов: ничего не ставит, только узнает, что вышло.': 'Refresh the package lists: installs nothing, only learns what is out.',
+  'Чтобы список обновлялся сам каждый день (без автоустановки):': 'To refresh the lists by itself every day (without installing anything):',
+  'Поставить автообновления. unattended-upgrades ставит только исправления безопасности из репозитория дистрибутива: сторонние репозитории (docker и прочие) не трогает, конфиги оставляет как есть, ничего не удаляет и сам не перезагружает.':
+    'Install automatic updates. unattended-upgrades installs only security fixes from the distribution repository: it leaves third-party repositories (docker and others) alone, keeps config files as they are, removes nothing and never reboots by itself.',
+  'Включить их: каждый день свежий список пакетов и исправления безопасности.': 'Turn them on: fresh package lists and security fixes every day.',
+  'Поставить исправления безопасности сейчас, не дожидаясь ночного прогона. Лог - в /var/log/unattended-upgrades/.':
+    'Install the security fixes now, without waiting for the nightly run. The log is in /var/log/unattended-upgrades/.',
+  'Автообновления включены, но не запускались: проверить таймеры apt и последний лог.': 'Automatic updates are on but have not run: check the apt timers and the last log.',
+  'Сначала: эти контейнеры без restart policy, после перезагрузки docker их не поднимет.': 'First: these containers have no restart policy, docker will not start them after a reboot.',
+  'Сначала: эти сервисы работают, но не включены, после перезагрузки их не будет.': 'First: these services run but are not enabled, they will be gone after a reboot.',
+  'Перезагрузить, когда есть доступ к консоли сервера: несколько минут сервер недоступен. Старое ядро остается в меню GRUB (Advanced options), если новое не загрузится.':
+    'Reboot when you have access to the server console: the server is down for a few minutes. The old kernel stays in the GRUB menu (Advanced options) in case the new one does not boot.',
+  'Ubuntu Pro: исправления безопасности до {date}. Токен - на ubuntu.com/pro, для личного использования бесплатно до 5 машин, для компании нужна подписка. Подключение панель видит с агента 2.39.':
+    'Ubuntu Pro: security fixes until {date}. The token is at ubuntu.com/pro, free for personal use on up to 5 machines, a company needs a subscription. The panel sees it from agent 2.39.',
+  'Поставить исправления из ESM.': 'Install the fixes from ESM.',
+  'Переезд на следующую версию: по одной за раз, с перезагрузкой. Заранее бэкап и доступ к консоли.': 'Move to the next release: one at a time, with a reboot. Make a backup and have console access first.',
+  'Переезд на Debian {n} по release notes: sources.list на новое кодовое имя, apt full-upgrade и перезагрузка. Заранее бэкап и доступ к консоли.':
+    'Move to Debian {n} following the release notes: sources.list to the new codename, apt full-upgrade and a reboot. Make a backup and have console access first.',
+  'Переезд на следующую версию: RHEL, AlmaLinux и Rocky - через leapp, CentOS - переустановкой на AlmaLinux или Rocky.':
+    'Move to the next release: RHEL, AlmaLinux and Rocky with leapp, CentOS by reinstalling onto AlmaLinux or Rocky.',
+  'После этих шагов пункт уйдет сам в течение часа: агент пересчитывает обновления раз в час.': 'After these steps the item goes away by itself within an hour: the agent recounts updates every hour.',
   // контейнеры с ключами от хоста
   '{name}: у контейнеров ключи от хоста: {list} - взлом приложения в них даст root на сервере':
     '{name}: containers hold the keys to the host: {list} - breaking into the app inside gives root on the server',

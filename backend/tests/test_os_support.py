@@ -25,12 +25,16 @@ def test_eol_by_pretty_name():
     assert os_support.eol_of("") is None
 
 
+def _nofix(xs):
+    return [{k: v for k, v in x.items() if k != "fix"} for x in xs]
+
+
 def test_eol_advice():
-    assert os_support.advice({"os": "Ubuntu 20.04.6 LTS"}, NOW) == [{
+    assert _nofix(os_support.advice({"os": "Ubuntu 20.04.6 LTS"}, NOW)) == [{
         "kind": "eol", "level": 2, "key": "osupd:eol", "muted": False, "text": (
             "обычная поддержка Ubuntu 20.04 кончилась 31.05.2025: исправления безопасности дальше только в Ubuntu Pro "
             "(ESM до 30.04.2030, pro attach) или после переезда на новую LTS")}]
-    assert os_support.advice({"os": "Debian GNU/Linux 11 (bullseye)"}, NOW) == [{
+    assert _nofix(os_support.advice({"os": "Debian GNU/Linux 11 (bullseye)"}, NOW)) == [{
         "kind": "eol", "level": 2, "key": "osupd:eol", "muted": False,
         "text": "поддержка Debian 11 кончилась 31.08.2026: обновлений безопасности больше нет"}]
     # ESM тоже кончился - Ubuntu Pro уже не спасет
@@ -40,6 +44,53 @@ def test_eol_advice():
     soon = os_support.advice({"os": "Ubuntu 22.04.4 LTS"}, datetime(2027, 1, 1, tzinfo=timezone.utc))
     assert [(a["level"], a["text"]) for a in soon] == [(1, "поддержка Ubuntu 22.04 кончится 01.06.2027, через 151 день")]
     assert os_support.advice({"os": "Ubuntu 24.04.1 LTS"}, NOW) == []
+
+
+def test_fix_steps_per_item():
+    """У каждого пункта команды под ноду, после которых он уходит сам."""
+    rep = {"os": "Ubuntu 20.04.4 LTS", "os_upd": _upd(security=183, unatt="none", apt_ts=T - 362 * DAY, reboot=True,
+                                                     reboot_ts=T - 1586 * DAY, reboot_pkgs=["dbus"]),
+           "docker": {"access": True, "containers": [
+               {"name": "cadvisor", "image": "x", "state": "running", "policy": "no", "status": "Up 2 years"},
+               {"name": "rest-server", "image": "y", "state": "running", "policy": "always", "status": "Up 2 months"}]}}
+    fix = {a["kind"]: a["fix"] for a in os_support.advice(rep, NOW)}
+    assert [s["id"] for s in fix["security"]] == ["apt_update", "unatt_install", "unatt_enable", "unatt_run"]
+    assert fix["security"][-1]["cmd"] == "sudo unattended-upgrade -v"
+    # агент ищет Unattended-Upgrade в начале строки: включение двумя строками
+    assert fix["security"][2]["cmd"].splitlines()[1].startswith("echo 'APT::Periodic::Unattended-Upgrade \"1\";'")
+    assert [s["id"] for s in fix["apt"]] == ["apt_update", "apt_daily"] and "tee -a" in fix["apt"][1]["cmd"]
+    # до перезагрузки - то, что после нее не поднимется
+    assert fix["reboot"] == [{"id": "noboot_docker", "cmd": "sudo docker update --restart unless-stopped cadvisor"},
+                             {"id": "reboot", "cmd": "sudo reboot"}]
+    # Ubuntu после обычной поддержки: Pro или переезд
+    assert [(s["id"], s.get("alt", False)) for s in fix["eol"]] == [
+        ("pro_attach", False), ("unatt_install", False), ("pro_run", False), ("release_upgrade", True)]
+    assert fix["eol"][0]["arg"] == "30.04.2030"
+    # заглушенный контейнер в шаги не идет; автообновления выключены, а не отсутствуют - без установки
+    rep2 = dict(rep, os_upd=dict(rep["os_upd"], unatt="off"))
+    fix2 = {a["kind"]: a["fix"] for a in os_support.advice(rep2, NOW, ["noboot:cadvisor"])}
+    assert fix2["reboot"] == [{"id": "reboot", "cmd": "sudo reboot"}]
+    assert [s["id"] for s in fix2["security"]] == ["apt_update", "unatt_enable", "unatt_run"]
+    # включены, но не запускаются - проверить таймеры
+    rep3 = dict(rep, os_upd=dict(rep["os_upd"], unatt="on", unatt_ts=T - 9 * DAY))
+    assert [s["id"] for s in {a["kind"]: a["fix"] for a in os_support.advice(rep3, NOW)}["security"]] == [
+        "unatt_check", "unatt_run"]
+    assert os_support.advice({"os": "Debian GNU/Linux 11 (bullseye)"}, NOW)[0]["fix"] == [{"id": "debian_upgrade", "arg": "12"}]
+    assert os_support.advice({"os": "CentOS Linux 7 (Core)"}, NOW)[0]["fix"] == [{"id": "el_upgrade"}]
+    soon = os_support.advice({"os": "Ubuntu 22.04.4 LTS"}, datetime(2027, 1, 1, tzinfo=timezone.utc))
+    assert soon[0]["fix"] == [{"id": "release_upgrade", "cmd": "sudo do-release-upgrade", "alt": False}]
+
+
+def test_ubuntu_pro_attached_moves_the_end_to_esm():
+    """Агент 2.39 видит репозиторий ESM: конец поддержки - конец ESM, раньше чем за полгода молчим."""
+    rep = {"os": "Ubuntu 20.04.6 LTS", "os_upd": _upd(esm=True)}
+    assert os_support.advice(rep, NOW) == []
+    late = [a for a in os_support.advice(rep, datetime(2029, 12, 1, tzinfo=timezone.utc)) if a["kind"] == "eol"]
+    assert [(a["level"], a["text"]) for a in late] == [
+        (1, "исправления Ubuntu Pro (ESM) для Ubuntu 20.04 кончатся 30.04.2030, через 150 дней")]
+    assert late[0]["fix"] == [{"id": "release_upgrade", "cmd": "sudo do-release-upgrade", "alt": False}]
+    # ESM кончился - как без подписки
+    assert os_support.advice({"os": "Ubuntu 16.04.7 LTS", "os_upd": _upd(esm=True)}, NOW)[0]["level"] == 2
 
 
 def test_decision_mutes_only_its_kind():

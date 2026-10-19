@@ -4360,6 +4360,38 @@ textarea:focus {
   border-radius: 6px;
   padding: 0.35rem 0.6rem;
 }
+.osupd-fix {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin: 0.4rem 0 0.2rem;
+  padding: 0.6rem 0.7rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+.osupd-step .agent-advice-cmd {
+  margin-top: 0.3rem;
+}
+.osupd-step .agent-advice-cmd pre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+/* на телефоне команда во всю ширину, кнопка под ней: рядом с кнопкой строка рвалась по буквам */
+@media (max-width: 600px) {
+  .osupd-step .agent-advice-cmd {
+    flex-direction: column;
+  }
+  .osupd-step .agent-advice-cmd button {
+    align-self: flex-end;
+  }
+}
+.osupd-alt {
+  font-size: 0.78rem;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin: 0.2rem 0;
+}
 .osupd-adv-why {
   font-size: 0.78rem;
   white-space: nowrap;

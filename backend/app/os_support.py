@@ -8,6 +8,10 @@
 Это не алерты: ни одно из этого не горит, но каждое со временем превращается в дыру. Поэтому
 пункты идут в "Требует действий" на главной и в блок "Обновления ОС" карточки сервера.
 
+У каждого пункта готовые шаги (fix): команды под эту ноду, после которых пункт уходит сам. Тексты
+шагов - во фронте по id, здесь команды: они зависят от ноды (автообновления, контейнеры и сервисы,
+которые не переживут перезагрузку, есть ли у дистрибутива платное продление).
+
 Обновить ОС можно не всегда: старый сервер бэкапов, железо под софт, который на новой версии не
 встанет. Тогда это решение человека "так и должно быть" (alert_mutes "osupd:<вид>"): пункт уходит
 из "Требует действий", а в карточке виден приглушенным с кнопкой "вернуть". Не заглушенный алерт -
@@ -17,6 +21,8 @@ from __future__ import annotations
 
 import re
 from datetime import date, datetime, timezone
+
+from app import reboot_survive
 
 MUTE_PREFIX = "osupd:"
 
@@ -78,26 +84,96 @@ def eol_of(os_name: str) -> tuple[str, date, bool] | None:
 
 
 def advice(rep: dict, now: datetime, mutes: list[str] | None = None) -> list[dict]:
-    """Что сделать с ОС ноды: [{"kind", "level", "text", "key", "muted"}], уровень 2 - уже дыра, 1 -
-    пора; muted - человек решил, что так и должно быть (ключ key в alert_mutes)."""
+    """Что сделать с ОС ноды: [{"kind", "level", "text", "key", "muted", "fix"}], уровень 2 - уже
+    дыра, 1 - пора; muted - человек решил, что так и должно быть (ключ key в alert_mutes); fix -
+    шаги [{"id", "cmd"?, "arg"?, "alt"?}], alt - другой путь вместо шагов выше."""
     out = _advice(rep, now)
     got = set(mutes or [])
     for x in out:
         x["key"] = MUTE_PREFIX + x["kind"]
         x["muted"] = x["key"] in got
+        x["fix"] = _fix(x["kind"], rep, now, got)
     return out
+
+
+APT_UPDATE = "sudo apt update"
+UNATT_INSTALL = "sudo apt install -y unattended-upgrades"
+# две строки, а не одна: агент ищет Unattended-Upgrade в начале строки; повторный запуск дает тот же файл
+UNATT_ENABLE = ("echo 'APT::Periodic::Update-Package-Lists \"1\";' | sudo tee /etc/apt/apt.conf.d/20auto-upgrades\n"
+                "echo 'APT::Periodic::Unattended-Upgrade \"1\";' | sudo tee -a /etc/apt/apt.conf.d/20auto-upgrades")
+APT_DAILY = "echo 'APT::Periodic::Update-Package-Lists \"1\";' | sudo tee -a /etc/apt/apt.conf.d/20auto-upgrades"
+UNATT_RUN = "sudo unattended-upgrade -v"
+UNATT_CHECK = ("systemctl list-timers apt-daily.timer apt-daily-upgrade.timer\n"
+               "sudo tail -n 30 /var/log/unattended-upgrades/unattended-upgrades.log")
+
+
+def _fix(kind: str, rep: dict, now: datetime, mutes: set[str]) -> list[dict]:
+    """Шаги для пункта kind: что выполнить на ноде, чтобы пункт ушел."""
+    u = rep.get("os_upd") if isinstance(rep.get("os_upd"), dict) else {}
+    unatt = str(u.get("unatt") or "")
+    if kind == "apt":
+        steps = [{"id": "apt_update", "cmd": APT_UPDATE}]
+        if unatt != "on":
+            # только список пакетов каждый день, без автоустановки; -a: не затирает включенное шагом
+            # про безопасность
+            steps.append({"id": "apt_daily", "cmd": APT_DAILY})
+        return steps
+    if kind == "security":
+        if unatt == "on":
+            return [{"id": "unatt_check", "cmd": UNATT_CHECK}, {"id": "unatt_run", "cmd": UNATT_RUN}]
+        steps = [{"id": "apt_update", "cmd": APT_UPDATE}]
+        if unatt != "off":
+            steps.append({"id": "unatt_install", "cmd": UNATT_INSTALL})
+        return steps + [{"id": "unatt_enable", "cmd": UNATT_ENABLE}, {"id": "unatt_run", "cmd": UNATT_RUN}]
+    if kind == "reboot":
+        steps = []
+        if reboot_survive.MUTE_ALL not in mutes:
+            dc = [c["name"] for c in reboot_survive.containers(rep) if reboot_survive.MUTE_PREFIX + c["name"] not in mutes]
+            un = [x["unit"] for x in reboot_survive.units(rep, now) if reboot_survive.MUTE_PREFIX + x["unit"] not in mutes]
+            if dc:
+                steps.append({"id": "noboot_docker", "cmd": "sudo docker update --restart unless-stopped " + " ".join(dc)})
+            if un:
+                steps.append({"id": "noboot_units", "cmd": "sudo systemctl enable " + " ".join(un)})
+        return steps + [{"id": "reboot", "cmd": "sudo reboot"}]
+    if kind == "eol":
+        os_name = str(rep.get("os") or "")
+        eol = eol_of(os_name)
+        name = eol[0] if eol else ""
+        today = now.astimezone(timezone.utc).date()
+        esm = _ESM.get(name)
+        if os_name.startswith("Ubuntu"):
+            steps = []
+            if eol and eol[2] and esm and esm >= today and not u.get("esm") and eol[1] < today:
+                steps.append({"id": "pro_attach", "cmd": "sudo pro attach <token>", "arg": esm.strftime("%d.%m.%Y")})
+                if unatt == "none":
+                    steps.append({"id": "unatt_install", "cmd": UNATT_INSTALL})
+                steps.append({"id": "pro_run", "cmd": APT_UPDATE + "\n" + UNATT_RUN})
+            steps.append({"id": "release_upgrade", "cmd": "sudo do-release-upgrade", "alt": bool(steps)})
+            return steps
+        m = re.match(r"Debian (\d+)$", name)
+        if m:
+            return [{"id": "debian_upgrade", "arg": str(int(m.group(1)) + 1)}]
+        return [{"id": "el_upgrade"}]
+    return []
 
 
 def _advice(rep: dict, now: datetime) -> list[dict]:
     out: list[dict] = []
     today = now.astimezone(timezone.utc).date()
     eol = eol_of(str(rep.get("os") or ""))
+    u = rep.get("os_upd") if isinstance(rep.get("os_upd"), dict) else None
     if eol:
         name, end, paid = eol
         left = (end - today).days
         when = end.strftime("%d.%m.%Y")
         esm = _ESM.get(name)
-        if left < 0 and paid and esm and esm >= today:
+        if paid and esm and esm >= today and (u or {}).get("esm"):
+            # Ubuntu Pro подключен (агент 2.39 видит репозиторий ESM): срок - конец ESM
+            left_e = (esm - today).days
+            if left_e <= EOL_WARN_DAYS:
+                out.append({"kind": "eol", "level": 1, "text": (
+                    f"исправления Ubuntu Pro (ESM) для {name} кончатся {esm.strftime('%d.%m.%Y')}, через {_days(left_e)}")})
+        elif left < 0 and paid and esm and esm >= today:
             # что делать, если переезд невозможен: ESM в Ubuntu Pro (pro attach <токен>)
             out.append({"kind": "eol", "level": 2, "text": (
                 f"обычная поддержка {name} кончилась {when}: исправления безопасности дальше только в Ubuntu Pro "
@@ -108,7 +184,6 @@ def _advice(rep: dict, now: datetime) -> list[dict]:
                 if paid and esm else f"поддержка {name} кончилась {when}: обновлений безопасности больше нет")})
         elif left <= EOL_WARN_DAYS:
             out.append({"kind": "eol", "level": 1, "text": f"поддержка {name} кончится {when}, через {_days(left)}"})
-    u = rep.get("os_upd") if isinstance(rep.get("os_upd"), dict) else None
     if not u:
         return out
     ts_now = now.timestamp()
