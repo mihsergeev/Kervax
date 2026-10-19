@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { backupCommand, backupCommandStatus, updateServer, type BackupAudit, type BackupCommand, type DumpStat, type Server, backupAuditMute } from './api'
 import { CommandProgress, nextPhase, type CmdProgressState } from './CommandProgress'
-import { helperText } from './helperText'
+import { dumpFailText, helperText } from './helperText'
 import { useI18n } from './i18n'
 import { EngineIcon } from './engineIcon'
 import { NetTile } from './NetLinks'
@@ -172,7 +172,7 @@ export function CoverageAudit({ server: s, canManage, onChanged, onSchedule, bar
         : { action, engine, container } as const
       const res = await runAndWait(s.id, body, (st) => { if (st === 'running') phase('running') })
       if (res.status === 'error') {
-        phase('error', { ok: false, text: helperText(res.result, t) || t('не удалось') })
+        phase('error', { ok: false, text: dumpFailText(res.result, t) })
       } else if (res.status === 'done') {
         // Команда отработала, но карточка перерисуется, только когда новое состояние
         // приедет отчётом сервера (до ~15 с). До того кнопка «включить» висела бы как ни
@@ -184,7 +184,7 @@ export function CoverageAudit({ server: s, canManage, onChanged, onSchedule, bar
         onChanged()
       }
     } catch (e) {
-      phase('error', { ok: false, text: e instanceof Error ? e.message : t('ошибка') })
+      phase('error', { ok: false, text: (e instanceof Error && e.message) || t('ошибка') })
     } finally {
       setDumpBusy(null)
     }

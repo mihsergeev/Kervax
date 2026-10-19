@@ -91,7 +91,13 @@ AGENT_USER=kervax
 #       if nothing in its name says so, and the job gets its schedule. Before, a copy job that runs
 #       twice a week showed the time of the copied snapshot as its last success and no schedule,
 #       and the panel called it stale
-KERVAX_SETUP_VERSION=0.37  # MAJOR.MINOR; compared component-wise (0.13 > 0.2!)
+# 0.38: a failed dump probe always says why. Most checks sent their error to /dev/null, and the
+#       panel showed "the probe failed" with an empty reason. MySQL/MariaDB on the host logs in the
+#       way dbstat-setup does: /etc/mysql/debian.cnf, /root/.my.cnf, then root over the socket.
+#       MySQL 8 from Ubuntu refuses root without a password, so enabling the dump there always
+#       failed (db-a). The probe runs before anything is written: a failed try leaves no dump
+#       directory and no drop-in, and a working dump keeps its settings when a change fails
+KERVAX_SETUP_VERSION=0.38  # MAJOR.MINOR; compared component-wise (0.13 > 0.2!)
 KERVAX_SETUP_ALWAYS=1  # safe on any node: installs only its own helper and spool and does not
                        # touch the backup configuration until the panel sends a command
 install -d -m 0755 "$HELPER_DIR" "$STATE_DIR" /var/lib/kervax/versions
@@ -161,7 +167,8 @@ json_escape() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
 # A file snapshot of a live database may fail to restore, so a proper dump is placed next to it.
 # Passwords are NOT needed and NOT stored: containers are entered with `docker exec` as a
 # service user, native engines with `sudo -u <user>`, always over a local socket with peer
-# authentication.
+# authentication. MySQL on the host reads the options file the node already has
+# (/etc/mysql/debian.cnf or /root/.my.cnf): only its path goes into the dump script.
 DUMP_DIR_BASE=/backup
 # paths are written LITERALLY: this is the helper body inside a quoted heredoc, so installer
 # variables (HELPER_DIR and friends) are not substituted here and do not exist at runtime
@@ -516,8 +523,47 @@ ch_schema() {
     }'
 }
 
+# MySQL/MariaDB on the host: which client dumps and how it logs in. A MySQL 8 package from Ubuntu
+# gives root a password and no socket login, so a plain mysqldump as root is refused ("Access
+# denied for user 'root'@'localhost' (using password: NO)"), while the maintenance user from
+# /etc/mysql/debian.cnf gets in. Up to 0.37 the helper tried root only and threw the error away,
+# and the panel said "the probe failed" with an empty reason (db-a, October 2026). The order is the
+# one dbstat-setup uses: the options files first, then root over the socket (MariaDB packages).
+# MY_BIN and MY_DEF are what let the probe in; the generated dump script uses the same.
+MY_BIN=""
+MY_DEF=""
+MY_CNFS=(/etc/mysql/debian.cnf /root/.my.cnf)
+my_host_dump_bin() {
+  local b order="mysqldump mariadb-dump"
+  # MariaDB 11 packages may come without the mysqldump name, and with it the client warns that the
+  # name is deprecated
+  command -v mariadbd >/dev/null 2>&1 && order="mariadb-dump mysqldump"
+  for b in $order; do command -v "$b" >/dev/null 2>&1 && { echo "$b"; return 0; }; done
+  return 1
+}
+my_host_probe() {
+  local bin f e errs=""
+  bin="$(my_host_dump_bin)" || {
+    echo "no mysqldump or mariadb-dump on the host: the MySQL/MariaDB client is not installed" >&2; return 1; }
+  for f in "${MY_CNFS[@]}" ""; do
+    [ -z "$f" ] || [ -r "$f" ] || continue
+    # --defaults-file has to be the first option. --single-transaction: no table locks on a live
+    # server, and the same privileges the real dump needs
+    if e="$("$bin" ${f:+"--defaults-file=$f"} --no-data --all-databases --single-transaction 2>&1 >/dev/null)"; then
+      MY_BIN="$bin"; MY_DEF="$f"; return 0
+    fi
+    e="$(printf '%s\n' "$e" | sed '/^[[:space:]]*$/d' | tail -n 2 | tr '\n' ' ' | sed 's/ *$//')"
+    errs="${errs:+$errs; }${f:-root over the socket} - ${e:-no error text}"
+  done
+  echo "MySQL did not let the helper in: $errs" >&2
+  return 1
+}
+
+# Every failed check says why: its error goes to the caller (cmd_dump_setup hands it to the
+# panel). Up to 0.37 most branches sent stderr to /dev/null with the output, and the panel showed
+# an empty reason.
 dump_probe() {
-  local engine="$1" container="${2:-}"
+  local engine="$1" container="${2:-}" r
   if kube_target_ok "$container"; then
     kube_enter "$container" "$engine" || return 1
     case "$engine" in
@@ -536,22 +582,25 @@ dump_probe() {
       if [ -n "$container" ]; then
         local pgu; pgu=$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$container" 2>/dev/null | sed -n 's/^POSTGRES_USER=//p' | head -1)
         [ -n "$pgu" ] || pgu=postgres
+        # the first try is quiet: an image without the postgres user (bitnami) is not an error
         docker exec -u postgres "$container" pg_dumpall -U "$pgu" --schema-only >/dev/null 2>&1 \
-          || docker exec "$container" pg_dumpall -U "$pgu" --schema-only >/dev/null 2>&1
-      else sudo -u postgres pg_dumpall --schema-only >/dev/null 2>&1; fi ;;
+          || docker exec "$container" pg_dumpall -U "$pgu" --schema-only >/dev/null
+      else sudo -u postgres pg_dumpall --schema-only >/dev/null; fi ;;
     mysql)
+      # mariadb:11 has no mysqldump name, the generated script already prefers mariadb-dump
       if [ -n "$container" ]; then
-        docker exec "$container" sh -c 'MYSQL_PWD="${MYSQL_ROOT_PASSWORD:-${MARIADB_ROOT_PASSWORD:-}}" mysqldump -u root --no-data --all-databases' >/dev/null 2>&1
-      else mysqldump --no-data --all-databases >/dev/null 2>&1; fi ;;
+        docker exec "$container" sh -c 'MYSQL_PWD="${MYSQL_ROOT_PASSWORD:-${MARIADB_ROOT_PASSWORD:-}}"; export MYSQL_PWD; if command -v mariadb-dump >/dev/null 2>&1; then mariadb-dump -u root --no-data --all-databases; else mysqldump -u root --no-data --all-databases; fi' >/dev/null
+      else my_host_probe; fi ;;
     ch)
       if [ -n "$container" ]; then ch_schema docker exec "$container" >/dev/null
       else ch_schema >/dev/null; fi ;;
     redis)
-      if [ -n "$container" ]; then docker exec "$container" redis-cli ping >/dev/null 2>&1
-      else redis-cli ping >/dev/null 2>&1; fi ;;
+      if [ -n "$container" ]; then r="$(docker exec "$container" redis-cli ping 2>&1)"
+      else r="$(redis-cli ping 2>&1)"; fi
+      [ "$r" = PONG ] || { echo "redis did not answer PONG: $(printf '%s' "$r" | tr '\n' ' ' | cut -c1-200)" >&2; return 1; } ;;
     rabbitmq)
-      if [ -n "$container" ]; then docker exec "$container" rabbitmqctl list_vhosts >/dev/null 2>&1
-      else rabbitmqctl list_vhosts >/dev/null 2>&1; fi ;;
+      if [ -n "$container" ]; then docker exec "$container" rabbitmqctl list_vhosts >/dev/null
+      else rabbitmqctl list_vhosts >/dev/null; fi ;;
     k8s) return 0 ;;
     neo4j)
       # The dump is taken with the database STOPPED (see the generator), so we probe not the
@@ -559,10 +608,12 @@ dump_probe() {
       # host.
       if [ -n "$container" ]; then
         local img; img=$(docker inspect -f '{{.Config.Image}}' "$container" 2>/dev/null)
-        [ -n "$img" ] || return 1
-        docker run --rm --entrypoint neo4j-admin "$img" --version >/dev/null 2>&1
-      else command -v neo4j-admin >/dev/null 2>&1; fi ;;
-    grafana) [ -n "$(grafana_db_path)" ] && grafana_dumper >/dev/null ;;
+        [ -n "$img" ] || { echo "docker does not know the container $container" >&2; return 1; }
+        docker run --rm --entrypoint neo4j-admin "$img" --version >/dev/null
+      else command -v neo4j-admin >/dev/null 2>&1 || { echo "no neo4j-admin on the host" >&2; return 1; }; fi ;;
+    grafana)
+      [ -n "$(grafana_db_path)" ] || { echo "grafana.db not found on the host or in volumes" >&2; return 1; }
+      grafana_dumper >/dev/null || { echo "neither sqlite3 nor python3 with sqlite3 on the host" >&2; return 1; } ;;
   esac
 }
 
@@ -724,6 +775,23 @@ cmd_dump_setup() {
     out="$dir_base/$engine/$container"
   fi
   local skipf="$DUMPS_D/$slot.skip"   # marker: "the last run was skipped for lack of space"
+  # A FAST availability probe instead of a full trial dump (see dump_probe). It catches silent
+  # failures (role, password, access) in seconds without pulling data. The full dump runs on the
+  # backup schedule. This used to run the whole dump: minutes on a large database, the panel
+  # timed out and showed an "error" while the dump was still running.
+  # The probe goes FIRST (0.38): a dump that cannot log in leaves nothing behind (before, every
+  # failed try left the dump directory and a drop-in on the backup service), changing the
+  # settings of a working dump keeps it as it was when the probe fails, and the host MySQL dump is
+  # generated with the login the probe found.
+  local perr="/tmp/kv-dump.$$" prc=0
+  dump_probe "$engine" "$container" >"$perr" 2>&1 || prc=$?
+  if [ "$prc" -ne 0 ]; then
+    local err; err="$(tr '\n' ' ' <"$perr" | sed 's/  */ /g; s/^ //; s/ $//' | tail -c 1000)"; rm -f "$perr"
+    # never an empty reason: the panel has nothing to show then
+    [ -n "$err" ] || err="the check of $slot exited with code $prc and printed nothing"
+    echo "the dump probe failed, dumps were NOT enabled: $err" >&2; return 2
+  fi
+  rm -f "$perr"
   install -d -m 0700 "$dir_base" "$dir_base/$engine" "$out"
   write_run_dumps
   local f="$DUMPS_D/$slot.sh"
@@ -797,7 +865,9 @@ done
            my_sh="'MYSQL_PWD=\"\${MYSQL_ROOT_PASSWORD:-\${MARIADB_ROOT_PASSWORD:-}}\"; export MYSQL_PWD; if command -v mariadb-dump >/dev/null 2>&1; then exec mariadb-dump -u root --all-databases --single-transaction --quick; else exec mysqldump -u root --all-databases --single-transaction --quick; fi'"
            printf 'if [ -n "$KT" ]; then KEX sh -c %s | $GZ > "$F"\n' "$my_sh"
            printf 'elif [ -n "$CONT" ]; then docker exec "$CONT" sh -c %s | $GZ > "$F"\n' "$my_sh"
-           printf 'else mysqldump --all-databases --single-transaction --quick | $GZ > "$F"; fi\n' ;;
+           # on the host: the client and the options file the probe got in with (my_host_probe)
+           printf 'else MYBIN=%q; MYDEF=%q\n' "${MY_BIN:-mysqldump}" "$MY_DEF"
+           printf '%s\n' '  "$MYBIN" ${MYDEF:+"--defaults-file=$MYDEF"} --all-databases --single-transaction --quick | $GZ > "$F"; fi' ;;
       redis) printf 'F="$OUT/redis-$TS.rdb"\n'
            # --rdb performs a full sync into a file; from a container we extract it with
            # docker cp because redis-cli writes a FILE (streaming to stdout is not supported
@@ -906,16 +976,6 @@ fi
   # dir is configurable, so it can no longer be derived from a fixed DUMP_DIR_BASE.
   printf 'dir=%s\nkeep=%s\nminfree=%s\n' "$out" "$keep" "$minfree" > "$DUMPS_D/$slot.meta"
   chmod 0644 "$DUMPS_D/$slot.meta"
-  # A FAST availability probe instead of a full trial dump (see dump_probe). It catches silent
-  # failures (role, password, access) in seconds without pulling data. The full dump runs on the
-  # backup schedule. This used to run the whole dump: minutes on a large database, the panel
-  # timed out and showed an "error" while the dump was still running.
-  if ! dump_probe "$engine" "$container" >/tmp/kv-dump.$$ 2>&1; then
-    local err; err="$(tr '\n' ' ' </tmp/kv-dump.$$ | tail -c 300)"; rm -f /tmp/kv-dump.$$
-    rm -f "$f" "$DUMPS_D/$slot.meta"   # a dump known not to work is not left enabled
-    echo "the dump probe failed, dumps were NOT enabled: $err" >&2; return 2
-  fi
-  rm -f /tmp/kv-dump.$$
   local trial_note=" - the first dump will be taken with the next scheduled backup"
   systemctl cat "$PROV_SERVICE" >/dev/null 2>&1 || trial_note=" - the first dump will be taken on the next timer run"
   # A dump is useless if restic does not pick it up. In include mode the dump directory has to

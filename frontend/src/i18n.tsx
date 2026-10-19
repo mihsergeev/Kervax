@@ -3998,8 +3998,8 @@ const EN: Record<string, string> = {
     'The first dump will be taken with the next scheduled backup.',
   'Первый дамп снимется при ближайшем запуске таймера.':
     'The first dump will be taken on the next timer run.',
-  'Пробный дамп не прошёл — дампы НЕ включены: {err}':
-    'The trial dump failed — dumps were NOT enabled: {err}',
+  'Пробный дамп не прошел - дампы НЕ включены: {err}':
+    'The trial dump failed - dumps were NOT enabled: {err}',
   'Дампы {engine} выключены, локальные файлы удалены (история осталась в restic).':
     '{engine} dumps disabled, local files removed (the history stays in restic).',
   'Дампы {engine} и так не были включены.': '{engine} dumps were not enabled anyway.',
@@ -5507,6 +5507,41 @@ const EN: Record<string, string> = {
   'открыть карточку': 'open card',
   'снять может оператор или админ': 'an operator or admin can unmute',
   'пунктов покрытия: {n}': 'coverage items: {n}',
+  // причина отказа дампа (helperText.ts, backup-setup 0.38)
+  'helper на сервере не сообщил причину. Обновите helper backup-setup и нажмите еще раз: {cmd}':
+    'the helper on the server gave no reason. Update the backup-setup helper and try again: {cmd}',
+  'helper backup-setup{ver} не сообщил причину. Запустите ту же проверку на сервере, причина будет в выводе: {cmd}':
+    'the backup-setup{ver} helper gave no reason. Run the same check on the server, the reason will be in its output: {cmd}',
+  'helper backup-setup{ver} на сервере не передает ошибку проверки, так было до {since}.':
+    'the backup-setup{ver} helper on the server does not pass on the error of the check, helpers before {since} lose it.',
+  'Обновите helper и нажмите еще раз: {cmd}':
+    'Update the helper and try again: {cmd}',
+  'Частая причина у MySQL 8 на хосте: root без пароля не пускают, а новый helper входит через /etc/mysql/debian.cnf или /root/.my.cnf.':
+    'A common cause with MySQL 8 on the host: root is not let in without a password, while the new helper logs in through /etc/mysql/debian.cnf or /root/.my.cnf.',
+  'MySQL не пустил helper ({err}). Дампу нужен вход: положите в /root/.my.cnf пароль root или пользователя с правами SELECT, SHOW VIEW, TRIGGER, LOCK TABLES, EVENT, PROCESS и нажмите еще раз: {cmd}':
+    'MySQL did not let the helper in ({err}). The dump needs a login: put the password of root, or of a user with SELECT, SHOW VIEW, TRIGGER, LOCK TABLES, EVENT, PROCESS, into /root/.my.cnf and try again: {cmd}',
+  'root через сокет':
+    'root over the socket',
+  'На сервере нет mysqldump и mariadb-dump: не установлен клиент MySQL. Поставьте его (для MariaDB - mariadb-client) и нажмите еще раз: {cmd}':
+    'There is no mysqldump or mariadb-dump on the server: the MySQL client is not installed. Install it (mariadb-client for MariaDB) and try again: {cmd}',
+  'Проверка {engine} завершилась с кодом {rc} и ничего не написала. Запустите ее на сервере, причина будет в выводе: {cmd}':
+    'The {engine} check exited with code {rc} and printed nothing. Run it on the server, the reason will be in its output: {cmd}',
+  'Docker на сервере не знает контейнер {name}: его удалили или переименовали.':
+    'Docker on the server does not know the container {name}: it was removed or renamed.',
+  'На сервере нет neo4j-admin.':
+    'There is no neo4j-admin on the server.',
+  'grafana.db не найден ни на хосте, ни в томах.':
+    'grafana.db was not found on the host or in volumes.',
+  'На сервере нет ни sqlite3, ни python3 с модулем sqlite3. Поставьте sqlite3 и нажмите еще раз: {cmd}':
+    'There is neither sqlite3 nor python3 with the sqlite3 module on the server. Install sqlite3 and try again: {cmd}',
+  'Сервер ответил отказом без текста. Обновите helper backup-setup и нажмите еще раз: {cmd}':
+    'The server refused with no text. Update the backup-setup helper and try again: {cmd}',
+  'Агент на сервере не ответил вовремя: команда не дошла до сервера или helper бэкапа завис. Проверьте на сервере: {cmd}':
+    'The agent on the server did not answer in time: the command did not reach the server or the backup helper hung. Check on the server: {cmd}',
+  'Helper бэкапа на сервере не взял команду. Проверьте на сервере: {cmd}. Если helper не стоит, поставьте: {setup}':
+    'The backup helper on the server did not pick up the command. Check on the server: {cmd}. If the helper is not installed, install it: {setup}',
+  'На сервере нет helper backup-setup, через него панель включает дампы. Поставьте: {cmd}':
+    'The backup-setup helper is not on the server, the panel enables dumps through it. Install it: {cmd}',
 }
 
 type Ctx = {
