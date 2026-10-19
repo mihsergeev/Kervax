@@ -28,9 +28,12 @@
 # [error], and one bot hitting a rate limit made ingress-nginx look like it was failing. The report
 # also carries the error count of each 10-minute bucket of the last hour ("hb", oldest first, the
 # last one still filling): the panel alerts only on a spike that holds, not on a five-minute burst.
+#
+# 0.4: the report is valid UTF-8. The example line is cut by bytes and once ended in half a
+# Cyrillic letter; the panel rejected every report of that node with 400 and it looked down.
 set -euo pipefail
 
-KERVAX_SETUP_VERSION=0.3  # MAJOR.MINOR; compared component-wise
+KERVAX_SETUP_VERSION=0.4  # MAJOR.MINOR; compared component-wise
 KERVAX_SETUP_ALWAYS=1     # safe on any node: without Docker and pods it writes an empty report
 
 HELPER_DIR=/lib65/kervax
@@ -185,6 +188,13 @@ NSRC=$(wc -l < "$TMPD/stat")
 ROWS=$( { [ -f "$TMPD/rows" ] && sort "$TMPD/rows"; } | head -$MAX_SRC | cut -f3 | awk '{ printf "%s%s", (NR > 1 ? "," : ""), $0 }')
 mkdir -p "${OUT%/*}"
 printf '{"v":1,"ts":%s,"logs":%s,"read":%s,"skipped":%s,"sources":[%s]}\n' "$NOW" "${NSRC:-0}" "${USED:-0}" "${SKIP:-0}" "$ROWS" > "$OUT.tmp.$$"
+# substr counts bytes (LC_ALL=C, mawk): an example line cut at 300 could end in half a letter,
+# and that one broken byte made the panel reject the whole report of the node. iconv -c drops
+# what is not UTF-8; without iconv the file goes as it is.
+if command -v iconv >/dev/null 2>&1; then
+  iconv -f UTF-8 -t UTF-8 -c "$OUT.tmp.$$" > "$OUT.tmp.$$.u" 2>/dev/null || :
+  if [ -s "$OUT.tmp.$$.u" ]; then mv -f "$OUT.tmp.$$.u" "$OUT.tmp.$$"; else rm -f "$OUT.tmp.$$.u"; fi
+fi
 chmod 0644 "$OUT.tmp.$$"
 mv -f "$OUT.tmp.$$" "$OUT"
 HELPER_EOF

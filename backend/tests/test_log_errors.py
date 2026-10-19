@@ -119,7 +119,7 @@ def test_alert_condition():
 
 def test_helper_script():
     src = (Path(__file__).resolve().parents[2] / "agent" / "logerr-setup.sh").read_text(encoding="utf-8")
-    assert "KERVAX_SETUP_VERSION=0.3" in src and "KERVAX_SETUP_ALWAYS=1" in src and "\r" not in src
+    assert "KERVAX_SETUP_VERSION=0.4" in src and "KERVAX_SETUP_ALWAYS=1" in src and "\r" not in src
     # 0.2: строка стека (ClickHouse "3. DB::Exception... @ 0x", Java "at ...(", PHP "#3 ", "Caused by:") - не ошибка
     # 0.3: строка nginx, которую вызвал клиент (limit_req, deny, 404, TLS клиента, ушел) - тоже
     assert "if (l ~ RE) { m = msg(l); if (m !~ FR && m !~ NG) { errs++; last = l } }" in src and "@ 0x[0-9a-fA-F]+" in src

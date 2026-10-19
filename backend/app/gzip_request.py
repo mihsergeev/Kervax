@@ -47,6 +47,15 @@ class GzipRequestMiddleware:
         except (OSError, EOFError):
             # битое/недосжатое тело — пусть валидатор ответит 422, а не 500
             body = raw
+        else:
+            # Агент кладет файлы helper'ов в отчет как есть, и один битый байт UTF-8 (helper обрезал
+            # пример строки лога посреди русской буквы) ронял разбор всего тела: FastAPI отвечал 400,
+            # отчет терялся целиком, и живая нода выглядела недоступной. Битые байты - в U+FFFD,
+            # остальной отчет доходит
+            try:
+                body.decode("utf-8")
+            except UnicodeDecodeError:
+                body = body.decode("utf-8", "replace").encode("utf-8")
         if len(body) > _MAX_DECOMPRESSED:
             body = b""
 
