@@ -4,6 +4,24 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.4.286] - 2026-10-19
+
+Установщик агента (панель раздает его сама, на нодах ничего обновлять не нужно).
+
+### Fixed
+- `install.sh --uninstall` снимал агента не до конца: юниты helper'ов он снимал по своему списку,
+  а список отстал от helper'ов. После снятия на ноде оставались таймеры, path- и service-юниты
+  kervax-changes, cron, disk-health, disk-usage, du-req, fpm, logerr, sockfix, units, units-req,
+  web-rate, workers, они продолжали запускаться впустую, а еще /etc/cron.d/kervax-backup и
+  /var/lib/kervax со спулами запросов. Теперь uninstall снимает все юниты по маске kervax-* (сначала
+  таймеры и path-юниты, потом сервисы), удаляет их файлы, drop-in'ы и ссылки включения, делает
+  daemon-reload и reset-failed, удаляет cron helper'ов, /var/lib/kervax, локи в /run и sudoers
+  kervax-*. Из контейнеров снимается только свой kervax-docker-proxy (и его копия от обновления),
+  чужие socket-proxy на ноде остаются. Ночная чистка репозиториев на сервере бэкапов
+  (/etc/cron.d/kervax-prune-*) остается вместе с restic, который она запускает, uninstall пишет,
+  что осталось и как снять. Тест сверяет каждый юнит, cron и каталог, которые пишут *-setup.sh, с
+  тем, что снимает uninstall, так что новый helper вне маски не пройдет. То же в install-ru.sh.
+
 ## [1.4.285] - 2026-10-19
 
 Агент 2.39 (раскатка из карточки сервера, как обычно).
