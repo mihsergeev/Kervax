@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import type { BsrvCleanup, BsrvCleanupLegacy, BsrvCleanupRot, OsFixStep, Server } from './api'
+import type { BsrvCleanup, BsrvCleanupLegacy, BsrvCleanupOff, BsrvCleanupRot, OsFixStep, Server } from './api'
 import { FixSteps } from './FixSteps'
 import { useI18n } from './i18n'
 import { shortList } from './serverUtils'
@@ -16,6 +16,8 @@ export function bsrvFixText(st: OsFixStep, t: TFn): string {
   switch (st.id) {
     case 'adopt_dry': return t('Пробный прогон, ничего не меняет: по каждому репозиторию helper покажет, сколько снапшотов удалит первая чистка (группы по хосту и тегам, как в чистке панели). Проверьте, что уходят только лишние старые снапшоты. Если restic не ответил, пароль в блоке не подходит, и такой репозиторий helper не перенесет.')
     case 'adopt_apply': return t('Перенести: у репозитория появится свой prune-скрипт с той же политикой и паролем из блока, чистка раз в сутки через 12 часов после бэкапа клиента, раз в неделю проверка целостности. Блок в старом скрипте закомментируется, копия файла - /etc/systemd-rest.conf.kervax-bak-<время>. На этом шаге ничего не удаляется.')
+    case 'adopt_apply_off': return t('Перенести: у репозитория появится свой prune-скрипт с той же политикой и паролем из блока. Старый скрипт не запускался, поэтому чистка останется выключенной, как была: строка в /etc/cron.d/kervax-prune-<имя> закомментирована с меткой # kervax-prune-off. Блок в старом скрипте закомментируется, копия файла - /etc/systemd-rest.conf.kervax-bak-<время>. На этом шаге ничего не удаляется.')
+    case 'adopt_on': return t('Включить чистку, если она нужна. Старый скрипт эти репозитории не чистил, и первая чистка удалит все сверх политики. Репозиторий заморожен намеренно - пропустите этот и следующий шаг, чистка останется выключенной.')
     case 'adopt_check': return t('Проверить: в cron есть время чистки, строк # kervax-moved в старом скрипте стало больше. Через минуту панель покажет у репозитория свою чистку.')
     case 'adopt_run': return t('Первая чистка пройдет сама во время из cron. Чтобы не ждать, запустите ее сейчас, но не во время бэкапа клиента: она удалит снапшоты сверх политики, это необратимо. В строке итога - сколько снапшотов было и стало.')
     case 'adopt_undo': return t('Пока чистка не прошла: вернуть старый скрипт из копии и убрать перенос. Снапшоты, которые чистка уже удалила, откат не вернет.')
@@ -38,6 +40,13 @@ export function bsrvFixText(st: OsFixStep, t: TFn): string {
     case 'prune_cron': return t('Есть ли запись в cron и запускал ли ее cron.')
     case 'prune_run': return t('Запустить чистку и посмотреть итог: в строке done должно быть success=1. Чистка удаляет снапшоты сверх политики, это необратимо.')
     case 'none_setup': return t('Чистки у репозитория на сервере нет: ни своего prune-скрипта, ни блока в старом скрипте. Ее заводит панель, когда бэкап клиента настраивают через нее. Клиента больше нет или бэкап разовый - уберите репозиторий в архив (раздел "Репозитории").')
+    case 'off_dry': return t('Что удалит первая чистка, без удаления и без блокировки репозитория.')
+    case 'off_on': return t('Включить чистку: строка в /etc/cron.d/kervax-prune-<имя> раскомментируется, чистка пойдет раз в сутки через 12 часов после бэкапа клиента. Первая же удалит снапшоты сверх политики, это необратимо.')
+    case 'off_check': return t('Проверить: в файле строка с временем без # в начале. Через минуту пункт уйдет.')
+    case 'off_undo': return t('Выключить обратно, пока чистка не прошла.')
+    case 'hand_look': return t('Посмотреть: в crontab root строка этой чистки закомментирована руками, а в /etc/cron.d/kervax-prune-<имя> она идет. Ее включил helper до 0.34, когда перегенерировал скрипты.')
+    case 'hand_off': return t('Выключить, как было: строка в cron.d закомментируется с меткой # kervax-prune-off, обновления helper\'а ее больше не включат. Снапшоты, которые чистка уже удалила, не вернуть.')
+    case 'hand_keep': return t('Если чистка нужна: подтвердить, что она включена намеренно (метка # kervax-prune-on), пункт уйдет.')
     case 'helper_update': return t('Нужен helper backupserver-setup {v} или новее: обновите helper\'ы на этом сервере (главная, "Требует действий").', { v: st.arg ?? '' })
     default: return st.id
   }
@@ -79,6 +88,20 @@ export function rotationLines(s: Server, t: TFn): { key: string; text: string; n
         list: shortList(other.map((x) => (x.reasons.length ? `${x.repo} (${x.reasons.join(', ')})` : x.repo)), t, 3),
       }),
     })
+  return out
+}
+
+// Чистка выключена руками, а бэкапы идут, и чистка идет, хотя ее выключали в crontab: строки для "Что
+// сломано" и раздела. Выключенная в архиве или без бэкапов - не пункт, просто строка во вкладке.
+export function offLines(s: Server, t: TFn): { key: string; text: string; n: number }[] {
+  const cl = s.bsrv_cleanup
+  const out: { key: string; text: string; n: number }[] = []
+  const live = (cl?.off ?? []).filter((x) => x.live)
+  if (live.length)
+    out.push({ key: 'off', n: live.length, text: t('чистка выключена вручную, а бэкапы идут - {list}', { list: shortList(live.map((x) => x.repo), t, 4) }) })
+  const hand = cl?.hand ?? []
+  if (hand.length)
+    out.push({ key: 'hand', n: hand.length, text: t('чистка идет, хотя в crontab ее выключили руками - {list}', { list: shortList(hand.map((x) => x.repo), t, 4) }) })
   return out
 }
 
@@ -180,14 +203,64 @@ export function DeadBlocks({ dead }: { dead: NonNullable<BsrvCleanup['dead']> })
 }
 
 // Шаги одной строки (репозиторий, где старье не уходит, или неработающая чистка): кнопка и FixSteps
-export function RowFix({ steps }: { steps: OsFixStep[] }) {
+export function RowFix({ steps, label }: { steps: OsFixStep[]; label?: string }) {
   const { t } = useI18n()
   const [open, setOpen] = useState(false)
   if (!steps.length) return null
   return (
     <>
-      <div className="bsrv-clean-rowfix"><FixToggle open={open} onClick={() => setOpen(!open)} /></div>
+      <div className="bsrv-clean-rowfix"><FixToggle open={open} onClick={() => setOpen(!open)} label={label} /></div>
       {open && <FixSteps steps={steps} text={(st) => bsrvFixText(st, t)} />}
     </>
+  )
+}
+
+// Чистка выключена (helper 0.34) и чистка, которую helper включил сам, хотя ее выключали в crontab.
+// Выключенная - решение, а не поломка: в архиве или без бэкапов это спокойная строка, а если бэкапы
+// идут, репозиторий растет без чистки, и это пункт с шагами включить.
+export function OffRows({ off, hand, fmtAgo }: {
+  off: BsrvCleanupOff[]
+  hand: { repo: string; fix: OsFixStep[] }[]
+  fmtAgo: (ts: number) => string
+}) {
+  const { t } = useI18n()
+  if (!off.length && !hand.length) return null
+  const since = (x: BsrvCleanupOff) => [
+    x.since ? t('выключена {ago}', { ago: fmtAgo(x.since) }) : '',
+    x.why,
+  ].filter(Boolean).join(', ')
+  return (
+    <div className="loc-results docker-clist">
+      {hand.map((x) => (
+        <div key={`h-${x.repo}`} className="loc-res docker-row repo-row repo-row-col t-degraded">
+          <div className="repo-row-main">
+            <span className="lk-dot lk-dot-warn" />
+            <div className="docker-c-main">
+              <div className="docker-c-name mono">{x.repo}</div>
+              <div className="docker-c-img small repo-rot-why">{t('чистка идет, хотя в crontab root ее строка закомментирована руками')}</div>
+              <div className="muted small">{t('Ее включил helper до 0.34. Что сделать: выключить, как было, или подтвердить, что она нужна.')}</div>
+            </div>
+          </div>
+          <RowFix steps={x.fix} />
+        </div>
+      ))}
+      {off.map((x) => (
+        <div key={`o-${x.repo}`} className={`loc-res docker-row repo-row repo-row-col ${x.live ? 't-degraded' : ''}`}>
+          <div className="repo-row-main">
+            <span className={`lk-dot ${x.live ? 'lk-dot-warn' : 'lk-dot-info'}`} />
+            <div className="docker-c-main">
+              <div className="docker-c-name mono">{x.repo}</div>
+              <div className={`docker-c-img small ${x.live ? 'repo-rot-why' : 'muted'}`}>
+                {x.live
+                  ? t('чистка выключена вручную, а бэкапы идут: снапшотов {n}, растет без чистки', { n: x.snaps })
+                  : t('чистка выключена вручную')}
+              </div>
+              {since(x) && <div className="muted small">{since(x)}</div>}
+            </div>
+          </div>
+          <RowFix steps={x.fix} label={t('как включить')} />
+        </div>
+      ))}
+    </div>
   )
 }

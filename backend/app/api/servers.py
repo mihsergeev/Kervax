@@ -257,7 +257,8 @@ def _out(
     o.db_health = db_health.view(server.last_report or {}, now)
     o.gpu = gpu_mod.view(server.last_report or {}, now)
     o.gpu_sum = gpu_mod.summary(server.last_report or {}, now)
-    o.llm = gpu_mod.llm_view(server.last_report or {}, (server.alert_state or {}).get("llm_base")) or None
+    o.llm = gpu_mod.llm_view(server.last_report or {}, (server.alert_state or {}).get("llm_base"),
+                             (server.alert_state or {}).get("llm_lat"), now) or None
     o.queue_watch = queue_watch.view(server, now) or None
     o.queue_brokers = queue_watch.helper_view(server) or None
     o.queue_skipped = queue_watch.redis_skipped(server.last_report or {}) or None

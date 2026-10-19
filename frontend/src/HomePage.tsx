@@ -24,7 +24,7 @@ import {
 import type { Section } from './App'
 import { backupAlive, backupWindowNote, dbAuditNames, knownText, dockRiskText, fmtSetupVersion, knownActive, proxyBuilt, shortList, sinceShort, srvIssues, srvKnown, knownMeta } from './serverUtils'
 import { KnownDialog } from './KnownDialog'
-import { rotationLines } from './BsrvCleanup'
+import { offLines, rotationLines } from './BsrvCleanup'
 import { MaintChip, MaintHome } from './MaintModal'
 import { useI18n } from './i18n'
 import { expiryText, registrableDomain } from './checkUtils'
@@ -661,6 +661,13 @@ function backupProblems(servers: Server[], t: T): ProbItem[] {
             key: `bs-rot-${s.id}-${x.key}`, id: s.id, name: s.name, cc: s.country, down: false, srv: true, sec: 'cleanup',
             text: `${s.name}: ${x.text}`,
           })
+      // чистку выключили, а бэкапы идут; чистка идет, хотя ее выключали в crontab (helper 0.34).
+      // Не алерт: это решение человека, но его видно, пока не решено
+      for (const x of offLines(s, t))
+        out.push({
+          key: `bs-off-${s.id}-${x.key}`, id: s.id, name: s.name, cc: s.country, down: false, srv: true, sec: 'cleanup',
+          text: `${s.name}: ${x.text}`,
+        })
     }
   }
   return out

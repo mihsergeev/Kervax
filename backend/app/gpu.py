@@ -9,7 +9,8 @@ Xid драйвера из журнала ядра за сутки (helper 0.3 - 
 
 Что алертит: драйвер не отвечает (после обновления ядра без пересборки модуля - классика), карта
 пропала с шины, ошибки Xid, после которых карте нужен сброс или замена, перегрев с замедлением,
-LLM-сервис не отвечает, стоит очередь при полном KV-кэше, задержки выросли в разы против обычного.
+LLM-сервис не отвечает, стоит очередь при полном KV-кэше, задержки в разы выше обычного держатся под
+нагрузкой (llm_lat: всплеск на паре запросов - не алерт, он виден в разделе LLM).
 """
 from __future__ import annotations
 
@@ -454,8 +455,13 @@ def _sec(v: float) -> str:
     return f"{round(v * 1000)} мс" if v < 1 else f"{v:.1f} с"
 
 
-def llm_problems(rep: dict, base: dict | None) -> list[tuple[int, str, str]]:
-    """(уровень, текст, ключ) по LLM-сервисам; выдержку добавляют вызывающие"""
+def llm_problems(rep: dict, base: dict | None, lat: dict | None = None,
+                 now: datetime | None = None) -> list[tuple[int, str, str]]:
+    """(уровень, текст, ключ) по LLM-сервисам; выдержку добавляют вызывающие. Задержки - только
+    устойчивые под нагрузкой (llm_lat, состояние alert_state["llm_lat"]): всплеск на паре
+    запросов виден в разделе LLM, но не алерт"""
+    from . import llm_lat  # llm_lat сам берет помощники отсюда
+
     out: list[tuple[int, str, str]] = []
     for x in llm_list(rep):
         label, k = llm_label(x), llm_key(x)
@@ -478,10 +484,7 @@ def llm_problems(rep: dict, base: dict | None) -> list[tuple[int, str, str]]:
         if kv is not None and kv >= KV_FULL and (pre > 0 or wait > 0):
             why = f"за 5 минут вытеснено {_req(pre)}" if pre > 0 else f"ждут {round(wait)}"
             out.append((1, f"{label}: KV-кэш заполнен на {round(kv)}%, {why}", f"llm:kv:{k}"))
-        for m, lo, mult, name in (("ttft", TTFT_MIN, TTFT_X, "до первого токена"), ("tpot", TPOT_MIN, TPOT_X, "на токен")):
-            v, b = _p95(x, m), baseline(base, x, m)
-            if v is not None and b and v >= lo and v >= b * mult:
-                out.append((1, f"{label}: задержка {name} p95 {_sec(v)}, обычно {_sec(b)}", f"llm:{m}:{k}"))
+    out += llm_lat.problems(rep, base, lat, now or datetime.now(timezone.utc))
     out.sort(key=lambda p: -p[0])
     return out
 
@@ -500,7 +503,10 @@ def pub_port(rep: dict, x: dict) -> int | None:
     return None
 
 
-def llm_view(rep: dict, base: dict | None) -> list[dict]:
+def llm_view(rep: dict, base: dict | None, lat: dict | None = None, now: datetime | None = None) -> list[dict]:
+    from . import llm_lat
+
+    now = now or datetime.now(timezone.utc)
     out = []
     for x in llm_list(rep):
         out.append({
@@ -512,6 +518,7 @@ def llm_view(rep: dict, base: dict | None) -> list[dict]:
             "locked": not x.get("ok") and str(x.get("err") or "") in LOCKED,
             "pub_port": pub_port(rep, x),
             "base_ttft": baseline(base, x, "ttft"), "base_tpot": baseline(base, x, "tpot"),
+            "lat_recent": llm_lat.recent(lat, x, now),
         })
     return out
 

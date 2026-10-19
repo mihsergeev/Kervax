@@ -31,6 +31,7 @@ from app import db_health
 from app import access_audit
 from app import docker_risk
 from app import gpu as gpu_mod
+from app import llm_lat
 from app import queue_watch
 from app import workers as workers_mod
 from app import cron_watch
@@ -2451,6 +2452,15 @@ def bsrv_extra(rep: dict) -> dict:
     return block
 
 
+def prune_off(extra: dict | None, name: str) -> bool:
+    """Чистку репозитория выключили (helper 0.34): строка в /etc/cron.d/kervax-prune-<имя>
+    закомментирована, с меткой # kervax-prune-off или руками, либо скрипт ничего не запускает.
+    Это решение, а не поломка: такой репозиторий не идет ни в ротацию, ни в "чистка не работает",
+    его видно во вкладке "Чистка" как выключенный."""
+    o = ((extra or {}).get("repos") or {}).get(name)
+    return isinstance(o, dict) and int(o.get("prune_off") or 0) == 1
+
+
 def _ver_tuple(v: str) -> tuple[int, ...]:
     return tuple(int(x) for x in re.findall(r"\d+", v or "")[:3])
 
@@ -2555,7 +2565,7 @@ def rotation_overflow(
     observed = (extra or {}).get("repos") or {}
     for r in bsrv.get("repos") or []:
         name = r.get("name") or ""
-        if archived_repo(archive, name):
+        if archived_repo(archive, name) or prune_off(extra, name):
             continue
         snaps, _oldest = _live_view(r, extra, archive, now.timestamp())
         limit = rotation_policy_max(r)
@@ -2604,7 +2614,7 @@ def rotation_stale_repos(
     out: list[str] = []
     observed = (extra or {}).get("repos") or {}
     for r in bsrv.get("repos") or []:
-        if archived_repo(archive, r.get("name") or ""):
+        if archived_repo(archive, r.get("name") or "") or prune_off(extra, r.get("name") or ""):
             continue
         snaps, oldest = _live_view(r, extra, archive, now.timestamp())
         limit = rotation_max_age_days(r)
@@ -2685,7 +2695,7 @@ def prune_problems(
     obs = (extra or {}).get("repos") or {}
     for r in bs.get("repos") or []:
         name = r.get("name") or ""
-        if not name or name in (muted or set()) or archived_repo(archive, name):
+        if not name or name in (muted or set()) or archived_repo(archive, name) or prune_off(extra, name):
             continue
         o = obs.get(name) if isinstance(obs.get(name), dict) else {}
         ts = int(r.get("rotation_ts") or 0)
@@ -3810,7 +3820,7 @@ def server_problems(s: Server, now: datetime, pod_names: dict[str, str] | None =
         add("gpu_heat", hl, htext, "gpu", "gpu_heat", state.get("gpu_heat_since"))
     # LLM-сервисы (агент 2.36): ведут в "Сервисы" ноды; как и алерт - то, что держится дольше выдержки
     if gpu_mod.llm_list(rep) and _held_long(s, state, "llm", now):
-        for lv, txt, _k in gpu_mod.llm_problems(rep, state.get("llm_base")):
+        for lv, txt, _k in gpu_mod.llm_problems(rep, state.get("llm_base"), state.get("llm_lat"), now):
             add("llm", lv, txt, "llm", "llm", state.get("llm_since"), section="services")
     # Сертификат nginx истекает: ведет в "Сервисы" ноды
     for lv, txt, _key in web_certs.problems(rep, now):
@@ -5581,7 +5591,7 @@ def _server_conditions(s: Server, now: datetime,
     # LLM-сервисы (агент 2.36): молчание /metrics, очередь при полном KV-кэше, задержки в разы выше
     # обычного - когда держится дольше выдержки
     if online and gpu_mod.llm_list(rep):
-        lp = gpu_mod.llm_problems(rep, state.get("llm_base"))
+        lp = gpu_mod.llm_problems(rep, state.get("llm_base"), state.get("llm_lat"), now)
         sustain_lvl("llm", max((p[0] for p in lp), default=0), {"detail": "; ".join(p[1] for p in lp[:3])},
                     cool_s=_CALM_S)
     # Сертификат nginx истекает или истек (helper webserver-setup 0.24)
@@ -6414,6 +6424,10 @@ async def evaluate_servers(
                 bstate = gpu_mod.base_update(st.get("llm_base"), s.last_report or {}, now)
                 if bstate != (st.get("llm_base") or {}):
                     apply(s.id, "llm_base", bstate)
+                # всплески задержек: в разделе LLM, алерт - только устойчиво под нагрузкой (llm_lat)
+                lat = llm_lat.update(st.get("llm_lat"), s.last_report or {}, bstate, now)
+                if lat != (st.get("llm_lat") or {}):
+                    apply(s.id, "llm_lat", lat)
 
         # Очереди RabbitMQ: алертим те, что переросли свой порог. Состояние — на
         # КАЖДУЮ очередь: очередей десятки, и одна разбухшая не должна глушить

@@ -535,7 +535,7 @@ def test_merge_group_renames_an_old_group_by_hand():
     --forget), только старую в живую, без --apply ничего не меняет."""
     from pathlib import Path
     src = (Path(__file__).resolve().parents[2] / "agent" / "backupserver-setup.sh").read_text(encoding="utf-8")
-    assert "KERVAX_SETUP_VERSION=0.33" in src
+    assert "KERVAX_SETUP_VERSION=0.3" in src  # merge-group есть с 0.33
     fn = src[src.index("cmd_merge_group() {"):]
     fn = fn[:fn.index("\n}\n")]
     assert 'rewrite $rl --host "$host" --new-host "$to" --forget' in fn
