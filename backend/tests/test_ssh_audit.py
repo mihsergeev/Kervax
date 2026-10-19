@@ -45,9 +45,10 @@ def test_password_paths():
 
 def test_advice_only_when_open_to_the_internet():
     s = _srv()
-    assert ssh_audit.advice(s, NOW) == [{"kind": "ssh_password", "level": 1, "text":
-                                         "SSH пускает по паролю, а порт 2221 открыт в интернет: оставьте вход по ключам "
-                                         "(PasswordAuthentication no)"}]
+    a = ssh_audit.advice(s, NOW)
+    assert [{k: x[k] for k in ("kind", "level", "text", "key", "muted")} for x in a] == [
+        {"kind": "ssh_password", "level": 1, "text": "SSH пускает по паролю, а порт 2221 открыт в интернет: оставьте "
+         "вход по ключам (PasswordAuthentication no)", "key": "ssh:ssh_password", "muted": False}]
     assert ssh_audit.problems(s, NOW) == []  # пароль с fail2ban и без перебора - не авария
     # за белым списком, проверка с панели или давняя - не судим
     assert ssh_audit.advice(_srv(exposure=_ex(state="filtered")), NOW) == []
@@ -138,3 +139,74 @@ def test_ssh_open_only_to_the_check_address_is_closed():
     s.last_report["extras"]["changes"]["fw"] = {"src": "iptables", "p4": "DROP", "p6": "DROP", "idrop": "",
                                                "fdrop": "", "in": ["4 198.51.100.20/32 2221"], "fwd": []}
     assert ssh_audit.internet_open(s, ssh_audit.block(s.last_report), NOW) is False
+
+
+def _people(ssh, users, keys=(), os_name="Ubuntu 24.04.4 LTS", pw_seen=None, mutes=None):
+    """Нода с учетками (changes-setup 0.5): users - (имя, uid, пароль, последний вход), keys - имена"""
+    s = _srv(ssh=ssh)
+    ch = s.last_report["extras"]["changes"]
+    ch.update(ts=int(NOW.timestamp()), seen_since=int((NOW - timedelta(days=400)).timestamp()),
+              users=[{"n": n, "uid": uid, "sh": "/bin/bash", "pw": pw, "last": int(last.timestamp()) if last else 0}
+                     for n, uid, pw, last in users],
+              keys=[{"u": u, "t": "ED25519", "b": 256, "fp": f"SHA256:{u}", "c": "", "f": f"/home/{u}/.ssh/authorized_keys"}
+                    for u in keys])
+    s.last_report["os"] = os_name
+    s.changes = {"ssh_pw": pw_seen or {}}
+    s.alert_mutes = mutes or []
+    return s
+
+
+def test_password_fix_names_who_would_be_locked_out():
+    """Перед выключением паролей - кому добавить ключ: пароль без ключей и входили, или входили по
+    паролю при ключе. Дальше файл 00-... (раньше 50-cloud-init.conf), проверка, reload ssh, откат"""
+    users = [("deploy", 1000, "P", NOW - timedelta(days=1)),     # пароль, ключей нет, входит
+             ("ops", 1001, "P", NOW - timedelta(hours=2)),        # ключ есть, но входил по паролю
+             ("ci", 1002, "L", NOW - timedelta(days=1)),          # только ключ
+             ("old", 1003, "P", NOW - timedelta(days=200)),       # давно никто не входит
+             ("root", 0, "P", None)]                              # root по паролю и так не пускают
+    s = _people(_ssh(guard=""), users, keys=["ops", "ci"], pw_seen={"ops": (NOW - timedelta(hours=2)).isoformat()})
+    fix = ssh_audit.advice(s, NOW)[0]["fix"]
+    assert [(x["id"], x.get("arg"), x.get("alt", False)) for x in fix] == [
+        ("ssh_key_add", "deploy", False), ("ssh_key_check", "ops", False), ("ssh_dropin", None, False),
+        ("ssh_check", None, False), ("ssh_reload", None, False), ("ssh_undo", None, False),
+        ("ssh_match", None, True), ("ssh_guard", "2221", True)]
+    st = {x["id"]: x for x in fix}
+    assert st["ssh_key_add"]["on"] == "11.10.2026" and st["ssh_key_add"]["cmd"] == (
+        "sudo mkdir -p -m 700 ~deploy/.ssh\n"
+        "echo '<public-key>' | sudo tee -a ~deploy/.ssh/authorized_keys\n"
+        "sudo chown -R deploy: ~deploy/.ssh")
+    assert st["ssh_dropin"]["cmd"] == "echo 'PasswordAuthentication no' | sudo tee /etc/ssh/sshd_config.d/00-no-password.conf"
+    assert st["ssh_reload"]["cmd"] == "sudo systemctl reload ssh"
+    assert st["ssh_undo"]["cmd"] == "sudo rm /etc/ssh/sshd_config.d/00-no-password.conf\nsudo systemctl reload ssh"
+    assert st["ssh_match"]["cmd"].splitlines() == [
+        "echo 'PasswordAuthentication no' | sudo tee /etc/ssh/sshd_config.d/00-no-password.conf",
+        "echo 'Match Address <cidr>' | sudo tee -a /etc/ssh/sshd_config.d/00-no-password.conf",
+        "echo '    PasswordAuthentication yes' | sudo tee -a /etc/ssh/sshd_config.d/00-no-password.conf"]
+    assert "port = 2221" in st["ssh_guard"]["cmd"] and "backend = systemd" in st["ssh_guard"]["cmd"]
+    # root, которого пускают по паролю, без ключа - тоже не войдет
+    rootpw = _people(_ssh(root="yes"), [("root", 0, "P", NOW - timedelta(days=3))])
+    assert [x["arg"] for x in ssh_audit.advice(rootpw, NOW)[0]["fix"] if x["id"] == "ssh_key_add"] == ["root"]
+
+
+def test_password_fix_on_other_systems():
+    # пароль через PAM (keyboard-interactive) выключается вместе с PasswordAuthentication
+    s = _people(_ssh(kbd="yes"), [])
+    st = {x["id"]: x for x in ssh_audit.advice(s, NOW)[0]["fix"]}
+    assert st["ssh_dropin"]["cmd"].splitlines()[1] == (
+        "echo 'KbdInteractiveAuthentication no' | sudo tee -a /etc/ssh/sshd_config.d/00-no-password.conf")
+    assert "ssh_guard" not in st  # fail2ban уже стоит
+    # OpenSSH 7.4 без Include: строка первой в sshd_config, сервис sshd, fail2ban без команды apt
+    old = _people(_ssh(guard="", banner="OpenSSH_7.4"), [], os_name="CentOS Linux 7 (Core)")
+    st = {x["id"]: x for x in ssh_audit.advice(old, NOW)[0]["fix"]}
+    assert "ssh_dropin" not in st and st["ssh_conf"]["cmd"] == (
+        "sudo cp -an /etc/ssh/sshd_config /etc/ssh/sshd_config.bak-nopass\n"
+        "sudo sed -i '1i PasswordAuthentication no' /etc/ssh/sshd_config")
+    assert st["ssh_reload"]["cmd"] == "sudo systemctl reload sshd"
+    assert st["ssh_undo"]["cmd"].startswith("sudo cp -a /etc/ssh/sshd_config.bak-nopass /etc/ssh/sshd_config")
+    assert "cmd" not in st["ssh_guard"]
+
+
+def test_password_login_can_be_kept_by_decision():
+    s = _people(_ssh(), [], mutes=["ssh:ssh_password"])
+    a = ssh_audit.advice(s, NOW)[0]
+    assert a["muted"] is True and a["fix"]  # пункт остается в карточке, решение снимается "вернуть"

@@ -1,5 +1,6 @@
 """Ошибки в логах контейнеров и подов (log_errors, helper logerr-setup): всплеск против обычного часа,
 мьют, "Что сломано", алерт, раздел."""
+import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -142,7 +143,8 @@ def test_dbstat_asks_as_postgres_user_first():
     # 0.13: в контейнере, где суперпользователь задан POSTGRES_USER, роли postgres нет: вход под ней
     # оставлял в логе базы десятки FATAL каждые 15 минут
     src = (Path(__file__).resolve().parents[2] / "agent" / "dbstat-setup.sh").read_text(encoding="utf-8")
-    assert "KERVAX_SETUP_VERSION=0.13" in src
+    ver = re.search(r"^KERVAX_SETUP_VERSION=(\d+)\.(\d+)", src, re.M)
+    assert ver and (int(ver[1]), int(ver[2])) >= (0, 13)
     assert src.count('if [ -n "$u" ] && [ "$u" != postgres ]; then') == 2
     assert src.count("case $? in 2|12[5-7])") == 4
 

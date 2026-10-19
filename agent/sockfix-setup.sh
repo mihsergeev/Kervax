@@ -17,11 +17,15 @@
 # secret values masked, and the panel shows it with the commands to apply it and to roll back.
 # Nothing is applied here: a person runs the command. A file it cannot edit safely (YAML anchors,
 # keys written inline, several compose files, all of /var/run mounted, traefik) gets a reason.
+# 0.2: for every internet-facing proxy, socket or not (plain caddy too), it also says where the
+# compose file pins its image: the file, the line and the value as written. When the image is
+# older than a year, the panel builds the commands that move it to a fresh tag; this file still
+# edits nothing for that.
 # Writes /var/lib/kervax/report.d/sockfix.json; the agent hands report.d to the panel as is.
 set -euo pipefail
 
-KERVAX_SETUP_VERSION=0.1  # MAJOR.MINOR; compared component-wise
-KERVAX_SETUP_WHEN="command -v docker >/dev/null 2>&1 && docker ps 2>/dev/null | grep -q -e caddy-docker-proxy -e traefik -e nginx-proxy -e docker-gen"
+KERVAX_SETUP_VERSION=0.2  # MAJOR.MINOR; compared component-wise
+KERVAX_SETUP_WHEN="command -v docker >/dev/null 2>&1 && docker ps 2>/dev/null | grep -q -e caddy -e traefik -e nginx-proxy -e docker-gen"
 
 HELPER_DIR=/lib65/kervax
 HELPER="$HELPER_DIR/kervax-sockfix"
@@ -38,7 +42,8 @@ install -d -m 0700 "$STATE_DIR/sockfix"
 cat > "$HELPER.new" <<'HELPER_EOF'
 #!/usr/bin/env bash
 # Internet-facing proxies holding the docker socket -> a fixed compose file in
-# /var/lib/kervax/sockfix and /var/lib/kervax/report.d/sockfix.json. Changes nothing that runs.
+# /var/lib/kervax/sockfix and /var/lib/kervax/report.d/sockfix.json, plus where the compose file
+# of every such proxy pins its image. Changes nothing that runs.
 set -u
 export LC_ALL=C
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
@@ -306,9 +311,9 @@ def run(cmd, timeout):
     return subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, timeout=timeout)
 
 
-def compose_version():
+def compose_version(cmd=("docker", "compose")):
     try:
-        r = run(["docker", "compose", "version", "--short"], 20)
+        r = run(list(cmd) + ["version", "--short"], 20)
         return r.stdout.strip().lstrip("v") if r.returncode == 0 else ""
     except Exception:
         return ""
@@ -401,12 +406,100 @@ def one(c, cv, made):
     return it
 
 
+# Where the image of an internet-facing proxy is pinned, socket or not: plain caddy as well. When
+# the image is older than a year, the panel builds the commands for a fresh tag from this.
+IMG_EDGE = dict(EDGE, caddy="caddy")
+
+
+def img_kind(image):
+    base = (image or "").lower().split("@", 1)[0].rsplit("/", 1)[-1].split(":", 1)[0]
+    return IMG_EDGE.get(base)
+
+
+def image_at(text, svc):
+    """the image of the service in one compose file: (line, value as written, built here), line 0 -
+    no image key; None - the service is not in this file"""
+    lines = text.splitlines(True)
+    top = block(lines, 0, len(lines), 0)
+    if "services" not in top:
+        raise Bail("v1")
+    s0, s1 = top["services"]
+    first = first_sig(lines, s0 + 1, s1)
+    if rest(lines[s0]) or first is None:
+        raise Bail("inline", "services")
+    svcs = block(lines, s0 + 1, s1, ind(lines[first]))
+    if svc not in svcs:
+        return None
+    a0, a1 = svcs[svc]
+    bfirst = first_sig(lines, a0 + 1, a1)
+    if rest(lines[a0]) or bfirst is None:
+        raise Bail("inline", svc)
+    if any(re.match(r"^\s*<<\s*:", lines[i]) for i in range(a0 + 1, a1)):
+        raise Bail("anchors")
+    keys = block(lines, a0 + 1, a1, ind(lines[bfirst]))
+    if "extends" in keys:
+        raise Bail("extends")
+    if "image" not in keys:
+        return 0, "", "build" in keys
+    i = keys["image"][0]
+    ref = rest(lines[i]).strip("\"'")
+    if "$" in ref:
+        raise Bail("var")
+    if not ref or ref.startswith("*"):
+        raise Bail("anchors")
+    return i + 1, ref, "build" in keys
+
+
+def edge(c):
+    cfg = c.get("Config") or {}
+    lab = cfg.get("Labels") or {}
+    it = {
+        "container": (c.get("Name") or "").lstrip("/"),
+        "kind": img_kind(cfg.get("Image")),
+        "image": cfg.get("Image") or "",
+        "project": lab.get("com.docker.compose.project", ""),
+        "service": lab.get("com.docker.compose.service", ""),
+        "dir": lab.get("com.docker.compose.project.working_dir", ""),
+        "files": [f for f in lab.get("com.docker.compose.project.config_files", "").split(",") if f],
+        "ok": False,
+    }
+    try:
+        if not it["project"] or not it["service"] or not it["files"]:
+            raise Bail("nocompose")
+        at, build = None, False
+        for f in it["files"]:
+            p = f if os.path.isabs(f) else os.path.join(it["dir"], f)
+            with open(p, encoding="utf-8") as fh:
+                got = image_at(fh.read(), it["service"])
+            if got is None:
+                continue
+            build = build or got[2]
+            if got[0]:
+                at = (p, got[0], got[1])  # a later file overrides an earlier one, as in compose
+        if at is None and not build:
+            raise Bail("noimage")
+        if at:
+            it["file"], it["line"], it["ref"] = at
+        it["build"] = build
+        it["ok"] = True
+    except Bail as e:
+        it["why"] = e.code
+        if e.detail:
+            it["why_detail"] = e.detail
+    except Exception as e:  # anything unexpected is a reason, not a crash
+        it["why"], it["why_detail"] = "unexpected", (str(e)[:200] or type(e).__name__)
+    return it
+
+
 def main(path):
     with open(path, encoding="utf-8") as fh:
         conts = json.load(fh) or []
     pick = [c for c in conts if kind_of((c.get("Config") or {}).get("Image"))
             and any(m.get("Source") in SOCKS for m in c.get("Mounts") or [])]
-    cv = compose_version() if pick else ""
+    edges = [c for c in conts if img_kind((c.get("Config") or {}).get("Image"))]
+    cv = compose_version() if pick or edges else ""
+    # the panel writes the commands for whichever compose is there: v2 or the old docker-compose
+    cv1 = compose_version(("docker-compose",)) if edges and not cv else ""
     os.makedirs(OUT_DIR, mode=0o700, exist_ok=True)
     made = set()
     res = [one(c, cv, made) for c in pick]
@@ -414,7 +507,8 @@ def main(path):
     for f in os.listdir(OUT_DIR):
         if f not in made:
             os.remove(os.path.join(OUT_DIR, f))
-    print(json.dumps({"v": 1, "ts": int(time.time()), "items": res}))
+    print(json.dumps({"v": 1, "ts": int(time.time()), "items": res, "edges": [edge(c) for c in edges],
+                      "compose": cv, "compose1": cv1}))
 
 
 main(sys.argv[1])

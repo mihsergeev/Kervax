@@ -89,7 +89,7 @@ def test_alert_home_and_view():
 
 def test_helper_writes_health():
     src = (Path(__file__).resolve().parents[2] / "agent" / "dbstat-setup.sh").read_text(encoding="utf-8")
-    assert "KERVAX_SETUP_VERSION=0.13" in src and "health_pg()" in src and "health_mysql()" in src
+    assert "KERVAX_SETUP_VERSION=0.14" in src and "health_pg()" in src and "health_mysql()" in src
     # 0.7: без роли postgres - под пользователем контейнера в явную базу, а не в базу с его именем
     assert 'psql -d "${d:-postgres}" -Atqc "$q" ${u:+-U "$u"}' in src
     assert "backend_xmin is not null" in src and "idle_xmin" in src
@@ -246,6 +246,133 @@ def test_advice_in_view_uses_disks_and_db_sizes():
     rep["extras"]["disk-health"]["disks"].append({"dev": "nvme0n1", "rota": 0})
     assert db_health._ssd(rep) is True
     assert db_health.view(_rep(_my()), NOW)[0]["advice"] == []
+
+
+# -- Как включить pg_stat_statements (dbstat-setup 0.14) ---------------------------
+def test_helper_reports_how_to_enable_pgss():
+    src = (Path(__file__).resolve().parents[2] / "agent" / "dbstat-setup.sh").read_text(encoding="utf-8")
+    # откуда задан список: -c в команде контейнера ALTER SYSTEM не перебивает; отдельный запрос, а не в
+    # общей строке настроек - не суперпользователю параметр не виден, и ошибка стоила бы всех настроек
+    assert "coalesce((select source from pg_settings where name = 'shared_preload_libraries'), '')" in src
+    assert "current_user, current_setting('is_superuser')" in src
+    assert '{{index .Config.Labels "com.docker.compose.project.working_dir"}}' in src
+    # юнит хостового экземпляра - по cgroup postmaster'а
+    assert '/postmaster.pid" 2>/dev/null)")' in src and "/proc/$pid/cgroup" in src
+    # был ли в снимке часовой давности список запросов
+    assert 'printf "S|%.0f|%d|%d\\n", all, reset, havep' in src and '"pbase":%s' in src
+
+
+def _pgss(pss="off", container="app-db-1", **cf):
+    return _pg(container=container, load={"win": 3600, "pss": pss, "qtext": 0}, cfg=_cfg(**cf))
+
+
+def _inv(container="app-db-1", dbs=("app", "postgres"), users=("app",)):
+    return [{"engine": "pg", "container": container, "dbs": [{"name": d, "size": 1} for d in dbs], "users": list(users)}]
+
+
+def _fix(item, inv=None):
+    rep = _rep(item)
+    rep["db_stats"] = inv if inv is not None else _inv(item.get("container") or "")
+    return db_health.view(rep, NOW)[0]["pgss_fix"]
+
+
+def test_pgss_alter_appends_to_the_current_list():
+    """Список дописывается, а не затирается, и каждая библиотека - своей строкой: 'a,b' одной строкой
+    PostgreSQL принял бы за одну библиотеку с запятой в имени и не запустился бы"""
+    fix = _fix(_pgss(role="app", su="on", spl_src="configuration file", spl="timescaledb, pg_cron"))
+    assert [s["id"] for s in fix] == ["pgss_create", "pgss_alter", "pgss_restart", "pgss_check", "pgss_undo"]
+    psql = "sudo docker exec app-db-1 psql -U app -d postgres"
+    # расширение первым: работает и без загруженной библиотеки и проверяет, что она есть в сборке
+    assert fix[0] == {"id": "pgss_create", "arg": "postgres", "cmd": f'{psql} -c "CREATE EXTENSION IF NOT EXISTS pg_stat_statements"'}
+    assert fix[1]["cmd"] == f"{psql} -c \"ALTER SYSTEM SET shared_preload_libraries = 'timescaledb', 'pg_cron', 'pg_stat_statements'\""
+    assert fix[1]["arg"] == "timescaledb, pg_cron"
+    assert fix[2]["cmd"] == "sudo docker restart -t 120 app-db-1"
+    assert fix[3]["cmd"] == f'{psql} -c "SHOW shared_preload_libraries" -c "SELECT count(*) FROM pg_stat_statements"'
+    # откат - прежний список, а не RESET: он мог быть задан тем же ALTER SYSTEM
+    assert fix[4]["undo"] and fix[4]["cmd"] == (
+        f"{psql} -c \"DROP EXTENSION IF EXISTS pg_stat_statements\" -c \"ALTER SYSTEM SET shared_preload_libraries = 'timescaledb', 'pg_cron'\"\n"
+        "sudo docker restart -t 120 app-db-1")
+    # пустой список: откат - RESET; роль postgres - системным пользователем postgres, как ходит helper
+    fix = _fix(_pgss(role="postgres", su="on", spl_src="default", spl=""))
+    assert fix[1]["cmd"] == "sudo docker exec -u postgres app-db-1 psql -d postgres -c \"ALTER SYSTEM SET shared_preload_libraries = 'pg_stat_statements'\""
+    assert fix[4]["cmd"].endswith('-c "ALTER SYSTEM RESET shared_preload_libraries"\nsudo docker restart -t 120 app-db-1')
+
+
+def test_pgss_in_container_command_edits_compose():
+    """-c shared_preload_libraries в command: ALTER SYSTEM его не перебьет, правится compose с копией"""
+    cf = dict(role="app", su="on", spl_src="command line", spl="timescaledb", cproj="app", csvc="db",
+              cfiles="/srv/app/compose.yml", cdir="/srv/app")
+    fix = _fix(_pgss(**cf))
+    assert [s["id"] for s in fix] == ["pgss_create", "pgss_compose", "pgss_compose_up", "pgss_check", "pgss_undo_compose"]
+    up = "sudo docker compose -p app -f compose.yml up -d --no-deps -t 120 db"
+    assert fix[1]["arg"] == "db" and fix[1]["cmd"].split("\n") == [
+        "cd /srv/app", "sudo cp -p compose.yml compose.yml.bak-kervax",
+        "sudo sed -i -E 's/(shared_preload_libraries=[^A-Za-z0-9_]?timescaledb)([^A-Za-z0-9_,]|$)/\\1,pg_stat_statements\\2/' compose.yml",
+        "diff compose.yml.bak-kervax compose.yml"]
+    assert fix[2]["cmd"] == f"cd /srv/app\n{up}"
+    assert fix[4]["cmd"].split("\n")[1:] == ["cd /srv/app", "sudo cp -p compose.yml.bak-kervax compose.yml", up]
+    assert "ALTER SYSTEM" not in " ".join(s["cmd"] for s in fix)
+    # несколько файлов (или имя, которое в sed не подставить) - найти строку и поправить руками
+    fix = _fix(_pgss(**{**cf, "cfiles": "/srv/app/compose.yml,/srv/app/compose.prod.yml"}))
+    assert fix[1] == {"id": "pgss_compose_grep", "arg": "timescaledb,pg_stat_statements",
+                      "cmd": "cd /srv/app\ngrep -n shared_preload_libraries compose.yml compose.prod.yml"}
+    assert fix[2]["cmd"].endswith("-f compose.yml -f compose.prod.yml up -d --no-deps -t 120 db")
+    # не из compose: только показать команду контейнера, пересоздать его панель не подскажет
+    fix = _fix(_pgss(**{**cf, "cproj": "", "cfiles": "", "cdir": "", "csvc": ""}))
+    assert [s["id"] for s in fix] == ["pgss_create", "pgss_cmdline", "pgss_check"]
+    assert fix[1] == {"id": "pgss_cmdline", "arg": "timescaledb,pg_stat_statements",
+                      "cmd": "sudo docker inspect -f '{{json .Config.Cmd}}' app-db-1"}
+
+
+def test_pgss_on_the_host():
+    inv = _inv(container="", dbs=("shop",), users=("postgres", "shop"))
+    item = _pgss(container="", role="postgres", su="on", spl_src="configuration file", spl="", unit="postgresql@16-main.service")
+    fix = _fix(item, inv)
+    # от postgres через runuser: sudo -u postgres просит пароль, если sudo разрешен только как root;
+    # базы postgres нет - в самой большой, ее helper проверяет первой
+    assert fix[0]["cmd"] == 'sudo runuser -u postgres -- psql -d shop -c "CREATE EXTENSION IF NOT EXISTS pg_stat_statements"'
+    assert fix[2] == {"id": "pgss_restart_host", "arg": "postgresql@16-main.service",
+                      "cmd": "sudo systemctl restart postgresql@16-main.service"}
+    item["cfg"]["unit"] = ""
+    assert _fix(item, inv)[2]["cmd"] == "sudo systemctl restart postgresql"
+
+
+def test_pgss_without_helper_data_looks_first():
+    """helper до 0.14 не говорит, что уже в списке и откуда он: первым шагом посмотреть, затем руками"""
+    item = _pg(container="app-db-1", load={"win": 3600, "pss": "off", "qtext": 0}, cfg={"sb": 1})
+    fix = _fix(item)
+    assert [s["id"] for s in fix] == ["pgss_look", "pgss_create", "pgss_alter_hand", "pgss_restart",
+                                      "pgss_compose_hand", "pgss_check", "pgss_undo_hand"]
+    # helper входил под единственной ролью с правом входа
+    assert fix[0]["cmd"].split("\n") == [
+        "sudo docker exec app-db-1 psql -U app -d postgres -c \"SELECT setting, source FROM pg_settings WHERE name = 'shared_preload_libraries'\"",
+        "sudo docker inspect -f '{{json .Config.Cmd}} {{index .Config.Labels \"com.docker.compose.project.working_dir\"}} "
+        "{{index .Config.Labels \"com.docker.compose.project\"}} {{index .Config.Labels \"com.docker.compose.service\"}}' app-db-1"]
+    assert fix[4]["alt"] and fix[6]["undo"]
+    # ролей несколько и postgres среди них нет - как helper, под POSTGRES_USER контейнера
+    fix = _fix(item, _inv(users=("admin", "app")))
+    assert fix[1]["cmd"].startswith('sudo docker exec app-db-1 psql -U "$(sudo docker exec app-db-1 printenv POSTGRES_USER)" -d postgres ')
+    # не суперпользователь или имя, которое не подставить - тоже руками
+    assert _fix(_pgss(role="app", su="off", spl_src="default", spl=""))[0]["id"] == "pgss_look"
+    assert _fix(_pgss(role="app", su="on", spl_src="default", spl='"$libdir/x"'))[0]["id"] == "pgss_look"
+
+
+def test_pgss_loaded_without_extension_and_enabled():
+    assert [s["id"] for s in _fix(_pgss("noext", role="app", su="on", spl_src="default", spl="pg_stat_statements"))] == [
+        "pgss_create", "pgss_check"]
+    assert _fix(_pgss("on")) == [] and _fix(_pg(container="app-db-1")) == []
+    assert "pgss_fix" not in db_health.view(_rep(_my()), NOW)[0]
+    # это подсказка в карточке, а не поломка: ни строки проблемы, ни "Что сломано"
+    rep = _rep(_pgss(role="app", su="on", spl_src="default", spl=""))
+    assert db_health.problems(rep, NOW) == []
+    assert [p for p in collector.server_problems(_srv(rep), NOW) if p["kind"] == "db_health"] == []
+
+
+def test_load_view_says_when_the_base_had_no_statements():
+    """Сразу после включения в снимке часовой давности запросов нет: топ пуст час, и это не простой базы"""
+    v = db_health.view(_rep(_pg(load={"win": 3100, "pss": "on", "qtext": 0, "ms_all": 0, "pbase": 0})), NOW)[0]["load"]
+    assert v["pbase"] == 0
+    assert "pbase" not in db_health.view(_rep(_pg(load={"win": 3100, "pss": "on", "qtext": 0})), NOW)[0]["load"]
 
 
 def _ch(**kw):

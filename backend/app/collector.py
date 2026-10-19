@@ -7000,7 +7000,7 @@ async def _track_uncovered(session_factory, now: datetime) -> None:
     async with session_factory() as session:
         changed = False
         for srv in await session.scalars(select(Server).where(Server.enabled.is_(True))):
-            keys = {k for k, _ in gaps(srv.last_report or {}, cur)} if seen_online(srv, now) else set()
+            keys = {k for k, _ in gaps(srv.last_report or {}, cur, srv.alert_mutes)} if seen_online(srv, now) else set()
             state = dict(srv.alert_state or {})
             fresh = _uncov_since(state, keys, now)
             if fresh != (state.get("uncov") or {}):
@@ -7056,7 +7056,7 @@ async def _daily_uncovered(session_factory, settings: Settings) -> None:
         since = (srv.alert_state or {}).get("uncov") or {}
         g = [
             (k, txt)
-            for k, txt in gaps(srv.last_report or {}, cur)
+            for k, txt in gaps(srv.last_report or {}, cur, srv.alert_mutes)
             if k in since
             and (now - (_parse_iso(since[k]) or now)).total_seconds() >= _UNCOVERED_SUSTAIN
         ]

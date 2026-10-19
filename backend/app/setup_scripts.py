@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 import re
+import time
 
 from app import gpu as gpu_mod
 from app.config import get_settings
@@ -49,8 +50,8 @@ def current_setup_versions() -> dict[str, str]:
     return out
 
 
-def setup_needed(name: str, rep: dict) -> bool:
-    """Нужен ли helper этой ноде.
+def setup_needed(name: str, rep: dict, mutes: list[str] | None = None) -> bool:
+    """Нужен ли helper этой ноде; mutes - решения человека по ноде (alert_mutes сервера).
 
     Незнакомое имя (helper добавили, а условие сюда не дописали) считаем нужным
     всюду: лучше лишний пункт в «Требует действий», который сразу видно и легко
@@ -90,11 +91,15 @@ def setup_needed(name: str, rep: dict) -> bool:
     if name == "dockerproxy-setup":
         cs = (rep.get("docker") or {}).get("containers") or []
         return any(str(c.get("name") or "").startswith("kervax-docker-proxy") for c in cs)
-    # sockfix-setup - где внешний прокси держит docker-сокет (helper готовит compose без него) или
-    # helper уже присылает отчет: после исправления он остается и следит, чтобы сокет не вернулся
+    # sockfix-setup - где внешний прокси держит docker-сокет (helper готовит compose без него), где
+    # его образ старше года (helper говорит, где в compose образ, панель пишет команды обновления;
+    # решение "оставить как есть" не в счет) или helper уже присылает отчет: после исправления он
+    # остается и следит, чтобы сокет не вернулся
     if name == "sockfix-setup":
         from app import docker_exposure
-        return bool(docker_exposure.exposed(rep)) or "sockfix" in (rep.get("extras") or {})
+        ref = float(rep.get("clock_unix") or 0) or time.time()
+        return (bool(docker_exposure.exposed(rep)) or bool(docker_exposure.old_live(rep, ref, mutes))
+                or "sockfix" in (rep.get("extras") or {}))
     # backup-setup — транспорт панели для дампов, нужен и без файлового бэкапа;
     # timesync-setup, agent-watchdog, diskusage-setup, diskhealth-setup и units-setup
     # ansible ставит всюду (диск забивается и ломается где угодно, а на VM здоровье дисков смотрит хотя бы
@@ -128,11 +133,11 @@ _HELPER_LABEL = {
     "cron-setup": "кроны на хосте и в контейнерах",
     "logerr-setup": "ошибки в логах контейнеров",
     "fpm-setup": "пулы PHP-FPM",
-    "sockfix-setup": "compose прокси без docker-сокета",
+    "sockfix-setup": "compose внешнего прокси: сокет и образ",
 }
 
 
-def gaps(rep: dict, cur: dict[str, str]) -> list[tuple[str, str]]:
+def gaps(rep: dict, cur: dict[str, str], mutes: list[str] | None = None) -> list[tuple[str, str]]:
     """Что на ноде появилось, а покрытия под это нет: (ключ, человеческая строка).
 
     Только ПЕРВАЯ установка и доступы. Устаревшая версия helper'а сюда НЕ попадает:
@@ -156,7 +161,7 @@ def gaps(rep: dict, cur: dict[str, str]) -> list[tuple[str, str]]:
         out.append(("kube", _MISSING_LABEL["kube"]))
     sv = rep.get("setup_versions") or {}
     for name in sorted(cur):
-        if not setup_needed(name, rep) or sv.get(name) is not None:
+        if not setup_needed(name, rep, mutes) or sv.get(name) is not None:
             continue
         if name == "kube-setup" and ("kube", _MISSING_LABEL["kube"]) in out:
             continue  # про кластер уже сказано строкой выше — не дублируем

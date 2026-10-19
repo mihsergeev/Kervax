@@ -123,6 +123,73 @@ def test_second_root_and_empty_password_alert():
     assert collector._server_conditions(_srv(_snap([_u("root", uid=0)])), NOW)["access_risk"][0] == 0
 
 
+def _root_snap(permit, keys=(), ssh_pass="yes"):
+    rep = _snap([_u("root", uid=0, pw="P"), _u("ops", pw="L", last=TS - DAY)], [_k("ops"), *keys], ssh_pass=ssh_pass)
+    rep["extras"]["changes"]["ssh"].update(root=permit, rootpass=ssh_pass, rootkbd="no")
+    return rep
+
+
+def test_root_access_follows_permit_root_login():
+    """root с паролем при PermitRootLogin no или prohibit-password по паролю не войдет: это не доступ"""
+    def root(rep):
+        return {a["name"]: a for a in access_audit.accounts(_srv(rep), NOW)[0]}["root"]
+    assert root(_root_snap("no"))["access"] is False
+    assert root(_root_snap("prohibit-password"))["access"] is False
+    assert root(_root_snap("yes"))["access"] and root(_root_snap("yes"))["stale"]
+    rk = {**_k("root"), "f": "/root/.ssh/authorized_keys"}
+    assert root(_root_snap("prohibit-password", [rk]))["access"] is True  # по ключу пускают
+    assert root(_root_snap("no", [rk]))["access"] is False
+
+
+def _fix(rep, name, mutes=None):
+    return {a["name"]: a for a in access_audit.view(_srv(rep, mutes), NOW)["accounts"]}[name].get("fix")
+
+
+def test_disable_stale_root():
+    """root: только passwd -l (срок учетки ломает cron root и su), ключи переименовать, вернуть - обратно"""
+    rk = {**_k("root"), "f": "/root/.ssh/authorized_keys"}
+    fix = _fix(_root_snap("yes", [rk]), "root")
+    assert [(x["id"], x.get("cmd")) for x in fix] == [
+        ("acc_root_lock", "sudo passwd -l root"),
+        ("acc_keys", "sudo mv /root/.ssh/authorized_keys /root/.ssh/authorized_keys.disabled"),
+        ("acc_undo", "sudo passwd -u root\nsudo mv /root/.ssh/authorized_keys.disabled /root/.ssh/authorized_keys")]
+    assert not any("usermod" in (x.get("cmd") or "") for x in fix)
+    # пускают только по ключу: пароль root (вход в консоль) не трогаем
+    assert [x["id"] for x in _fix(_root_snap("prohibit-password", [rk]), "root")] == ["acc_keys", "acc_undo"]
+    # после этих команд доступа нет - и пункт уходит сам
+    gone = _root_snap("yes", ssh_pass="yes")
+    gone["extras"]["changes"]["users"][0]["pw"] = "L"
+    assert _fix(gone, "root") is None and access_audit.advice(_srv(gone), NOW) is None
+
+
+def test_disable_stale_account():
+    users = [_u("ops", last=TS - DAY), _u("olduser", pw="P", last=TS - 400 * DAY), _u("svc", last=TS - 100 * DAY)]
+    keys = [_k("ops"), _k("olduser"), {**_k("olduser"), "fp": "SHA256:x", "f": "/home/olduser/.ssh/authorized_keys2"},
+            {**_k("svc"), "f": "/srv/svc home/.ssh/authorized_keys"}]
+    rep = _snap(users, keys)
+    fix = _fix(rep, "olduser")
+    assert [(x["id"], x.get("alt", False)) for x in fix] == [
+        ("acc_check", False), ("acc_lock", False), ("acc_keys", False), ("acc_undo", False), ("acc_delete", True)]
+    st = {x["id"]: x["cmd"] for x in fix}
+    assert st["acc_check"].splitlines() == [
+        "ps -u olduser -o pid,lstart,args", "sudo crontab -l -u olduser", "ls /var/lib/systemd/linger/",
+        "grep -rlxF 'User=olduser' /etc/systemd/system /lib/systemd/system"]
+    assert st["acc_lock"] == "sudo usermod -L -e 1 olduser"
+    assert st["acc_keys"].splitlines() == [
+        "sudo mv /home/olduser/.ssh/authorized_keys /home/olduser/.ssh/authorized_keys.disabled",
+        "sudo mv /home/olduser/.ssh/authorized_keys2 /home/olduser/.ssh/authorized_keys2.disabled"]
+    assert st["acc_undo"].splitlines()[0] == "sudo usermod -U -e '' olduser"
+    assert st["acc_delete"] == "sudo userdel olduser"
+    # пароль и так заблокирован: без -L, иначе возврат через -U не сработает; путь с пробелом - в кавычках
+    st = {x["id"]: x["cmd"] for x in _fix(rep, "svc")}
+    assert st["acc_lock"] == "sudo usermod -e 1 svc" and st["acc_undo"].splitlines()[0] == "sudo usermod -e '' svc"
+    assert st["acc_keys"] == "sudo mv '/srv/svc home/.ssh/authorized_keys' '/srv/svc home/.ssh/authorized_keys.disabled'"
+    # учетка нужна - команд нет; входят только через нее - отключать нельзя
+    assert _fix(rep, "olduser", mutes=["access:olduser"]) is None and _fix(rep, "ops") is None
+    alone = _snap([_u("olduser", pw="P", last=TS - 400 * DAY)], [_k("olduser")])
+    assert _fix(alone, "olduser") == [{"id": "acc_alone", "arg": "olduser"}]
+
+
 def test_helpers_report_the_new_fields():
     ch = (AGENT / "changes-setup.sh").read_text(encoding="utf-8")
     assert "KERVAX_SETUP_VERSION=0.7" in ch and '"seen_since":%s' in ch and '\\"pw\\":' in ch and '"nopasswd":[%s]' in ch

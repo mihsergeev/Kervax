@@ -1275,8 +1275,45 @@ const EN: Record<string, string> = {
   '{name}: слабые SSH-ключи у {list} - замените на ed25519': '{name}: weak SSH keys for {list} - replace them with ed25519',
   '{name}: учетки с доступом, в которые давно не входят: {list} - проверьте, нужны ли они':
     '{name}: accounts with access that nobody has used for a long time: {list} - check whether they are still needed',
-  'Входы по журналу sshd видны с {d}. Ненужную учетку заблокируйте (usermod -L -e 1 <имя>) или уберите ее ключи.':
-    'Logins from the sshd log are known since {d}. Lock an account that is not needed (usermod -L -e 1 <name>) or remove its keys.',
+  'Входы по журналу sshd видны с {d}. Как отключить заброшенную учетку - кнопка в ее строке, root - только passwd -l root, без срока учетки.':
+    'Logins from the sshd log are known since {d}. How to disable an unused account - the button in its row; root only with passwd -l root, without an account expiry.',
+  'как отключить': 'how to disable',
+  'После этого учетка уйдет из заброшенных в течение 10 минут: helper changes-setup снимает учетки раз в 10 минут.':
+    'After this the account leaves the unused list within 10 minutes: the changes-setup helper takes the accounts every 10 minutes.',
+  'Через другие учетки за 90 дней никто не входил: если отключить {arg}, на сервер может стать некому войти. Сначала проверьте вход другой учеткой с sudo или через консоль.':
+    'Nobody has logged in through other accounts for 90 days: with {arg} disabled there may be no way into the server. First check a login with another sudo account or through the console.',
+  'Сначала убедиться, что от {arg} ничего не работает: процессы, ее crontab, lingering (пользовательские юниты после выхода) и сервисы с User={arg}. Пусто и no crontab - ничего нет.':
+    'First make sure nothing runs as {arg}: processes, its crontab, lingering (user units after logout) and services with User={arg}. Empty output and no crontab mean nothing.',
+  'Отключить: пароль заблокирован, срок учетки в прошлом - SSH не пустит ни по паролю, ни по ключу, cron и su для нее тоже перестанут работать. Обратимо.':
+    'Disable: the password is locked and the account expiry is in the past - SSH lets it in neither with a password nor with a key, cron and su stop working for it too. Reversible.',
+  'Заблокировать пароль {arg}: sudo и cron root продолжат работать. Срок учетки root не ставят (usermod -e): истекшая root ломает cron и su. Если в консоль сервера входите root по паролю, после блокировки не войдете - держите учетку с sudo.':
+    'Lock the {arg} password: sudo and root cron keep working. Root gets no account expiry (usermod -e): an expired root breaks cron and su. If you log in to the server console as root with a password, you will not after locking - keep an account with sudo.',
+  'Убрать ключи: панель считает доступом любой ключ в authorized_keys. Файл переименовывается, а не удаляется.':
+    'Remove the keys: the panel counts any key in authorized_keys as access. The file is renamed, not deleted.',
+  'Вернуть, если учетка понадобится:': 'Bring it back if the account is needed:',
+  'Удалить совсем - необратимо: учетка пропадет, домашний каталог останется без хозяина (userdel -r удалит и его со всеми файлами). Лучше сначала поживите с отключенной.':
+    'Delete for good - irreversible: the account is gone, the home directory stays without an owner (userdel -r deletes it too, with all files). Better live with it disabled first.',
+  // SSH: как выключить вход по паролю, решение "вход по паролю нужен"
+  'вход по паролю нужен': 'password login needed',
+  'После выключения паролей пункт уйдет сам в течение 10 минут: helper changes-setup снимает настройки SSH раз в 10 минут.':
+    'Once passwords are off the item goes away by itself within 10 minutes: the changes-setup helper reads the SSH settings every 10 minutes.',
+  'Сначала ключ для {arg}: пароль задан, SSH-ключей нет, последний вход {on}. После выключения паролей эта учетка не войдет. Вставьте свой публичный ключ (строку ssh-ed25519 ...) вместо <public-key> и проверьте вход по ключу в новом окне.':
+    'First a key for {arg}: it has a password and no SSH keys, last login {on}. Once passwords are off, this account cannot log in. Put your public key (the ssh-ed25519 ... line) in place of <public-key> and check a key login in a new window.',
+  '{arg} входила по паролю {on}, хотя ключ есть: проверьте вход по ключу в новом окне или добавьте нужный ключ.':
+    '{arg} logged in with a password on {on} although it has a key: check a key login in a new window or add the right key.',
+  'Выключить вход по паролю отдельным файлом. В sshd побеждает первое значение, Include sshd_config.d/*.conf стоит в начале sshd_config, а файлы читаются по алфавиту: 00- раньше 50-cloud-init.conf, где cloud-init на Ubuntu включает пароль.':
+    'Turn password login off with a separate file. In sshd the first value wins, Include sshd_config.d/*.conf sits at the top of sshd_config, and the files are read in alphabetical order: 00- comes before 50-cloud-init.conf, where cloud-init on Ubuntu turns passwords on.',
+  'У этой версии OpenSSH нет sshd_config.d: строка встает первой в sshd_config, а первое значение и побеждает. Копия - sshd_config.bak-nopass.':
+    'This OpenSSH version has no sshd_config.d: the line goes first in sshd_config, and the first value wins. The copy is sshd_config.bak-nopass.',
+  'Проверить, пока ничего не применено: sshd -t молчит, если конфиг в порядке, ниже должно быть no. Если yes - значение задано раньше или в sshd_config нет Include, найти где: sudo grep -rn PasswordAuthentication /etc/ssh/':
+    'Check before applying anything: sshd -t prints nothing when the config is fine, below it should say no. If it says yes, the value is set earlier or sshd_config has no Include, find where: sudo grep -rn PasswordAuthentication /etc/ssh/',
+  'Применить: открытые сессии не рвутся (на Ubuntu с ssh.socket тоже). Это окно не закрывайте, пока в новом окне не войдете по ключу: если не пускает, отсюда же откат.':
+    'Apply: open sessions stay (with ssh.socket on Ubuntu too). Do not close this window until you have logged in with a key in a new one: if it does not let you in, roll back from here.',
+  'Откат, если что-то не так:': 'Roll back if something is wrong:',
+  'Если пароль нужен: только из своих сетей, из интернета - по ключу. Вместо <cidr> - ваши адреса или сети через запятую (192.0.2.10,198.51.100.0/24), иначе пароль выключится везде. Этот файл вместо файла выше, дальше та же проверка и reload, а для своего адреса sudo sshd -T -C user=root,host=x,addr=<адрес> | grep -i passwordauth должно дать yes. Пункт уйдет сам: панель смотрит, пускает ли SSH по паролю из интернета.':
+    'If passwords are needed: only from your own networks, by key from the internet. Replace <cidr> with your addresses or networks, comma separated (192.0.2.10,198.51.100.0/24), or passwords go off everywhere. This file instead of the one above, then the same check and reload, and for your own address sudo sshd -T -C user=root,host=x,addr=<address> | grep -i passwordauth should say yes. The item goes away by itself: the panel looks at whether SSH accepts passwords from the internet.',
+  'Если пароль нужен отовсюду: защита от перебора. fail2ban банит адрес после нескольких неудачных входов, здесь порт {arg} и журнал через systemd (на RHEL и похожих пакет из EPEL). Пункт при этом не уйдет, уйдет только приписка про перебор: пароль оставить - решение "вход по паролю нужен".':
+    'If passwords are needed from anywhere: brute force protection. fail2ban bans an address after a few failed logins, here on port {arg} with the systemd journal (on RHEL and similar the package is in EPEL). The item stays, only the note about brute force goes: keeping passwords is the decision "password login needed".',
   'Доступы': 'Access',
   'Доступ: второй root или пустой пароль': 'Access: a second root or an empty password',
   'Доступы: заброшенные учетки и слабые ключи': 'Access: unused accounts and weak keys',
@@ -1665,6 +1702,116 @@ const EN: Record<string, string> = {
   'скоро кончится поддержка ПО - запланируйте обновление': 'software support ends soon - plan an upgrade',
   '{name}: без поддержки {list}': '{name}: out of support {list}',
   '{name}: скоро кончится поддержка {list}': '{name}: support ends soon for {list}',
+  // версии ПО: как исправить и решения
+  'Все шаги - в одном окне терминала: эта команда находит compose-проект контейнера {c} (проект, сервис, каталог, файлы) и тома на запись с их объемом, остальные берут это отсюда. Пустой project - контейнер запущен не из compose, тогда тег меняется там, откуда его запускают. Для отката в новом окне - сначала снова она.':
+    'Run all steps in one terminal window: this command finds the compose project of container {c} (project, service, directory, files) and its writable volumes with their size, the other commands take them from here. An empty project means the container was not started by compose, then change the tag where it is started from. To roll back in a new window, run it again first.',
+  'Скачать {new} заранее, пока работает старая версия: тег ветки {to} - ее последний выпуск. Нет такого тега - pull скажет not found и ничего не поменяется, тогда точную версию взять на странице образа.':
+    'Pull {new} in advance while the old version keeps running: the {to} branch tag is its latest release. If there is no such tag, pull says not found and nothing changes, then take the exact version from the image page.',
+  'Копия для отката: compose-файлы с .env и тома на запись одним архивом в /var/backups/kervax-upgrade/{c}, контейнер на это время остановлен (места - как объем томов из первой команды), прежний образ - под тегом kervax-old. Большие данные, которые новая версия не трогает (загрузки, статика), можно не копировать: уберите их путь из M.':
+    'A copy for rollback: compose files with .env and writable volumes in one archive in /var/backups/kervax-upgrade/{c}, the container is stopped meanwhile (space as large as the volumes from the first command), the previous image is kept under the kervax-old tag. Large data the new version does not touch (uploads, static files) can be skipped: remove its path from M.',
+  'Поменять тег в compose-файле ({image} на {new}) и пересоздать только этот сервис. Строки image с этим же образом у других сервисов файла тоже поменяются. Если образ задан переменной (.env), grep ничего не найдет и up не запустится: тег меняется там.':
+    'Change the tag in the compose file ({image} to {new}) and recreate only this service. Image lines with the same image in other services of the file change too. If the image comes from a variable (.env), grep finds nothing and up does not run: change the tag there.',
+  'Проверить: контейнер работает, образ новый, в логе нет ошибок. Пункт уйдет сам со следующим отчетом агента, около минуты.':
+    'Check: the container runs, the image is new, the log has no errors. The item goes away by itself with the next agent report, in about a minute.',
+  'Откат: тома и compose-файлы из последней копии (у тега без версии - еще и прежний образ под своим именем). То, что успела записать новая версия, остается рядом с суффиксом .kervax-new: удалить руками, когда откат проверен.':
+    'Rollback: volumes and compose files from the latest copy (for a tag without a version also the previous image under its name). What the new version managed to write stays next to them with the .kervax-new suffix: delete it by hand once the rollback is checked.',
+  'Тег {image} без версии: образ просто давно не скачивали. Скачать свежий и пересоздать только этот сервис. Версия не поменялась - автор образа еще не пересобрал его на новой базе.':
+    'The {image} tag has no version: the image just has not been pulled for a long time. Pull a fresh one and recreate only this service. If the version stays the same, the image author has not rebuilt it on a new base yet.',
+  'Версия {name} пришла из базового образа ({env}): найти FROM в Dockerfile проекта и поменять на {name} {to}. Если там тег без версии (nginx:alpine), хватит пересборки.':
+    'The {name} version comes from the base image ({env}): find FROM in the project Dockerfile and change it to {name} {to}. If the tag there has no version (nginx:alpine), a rebuild is enough.',
+  'Пересобрать образ со свежей базой (--pull) и пересоздать только этот сервис. У сервиса нет build: в compose - его образ скачается заново; версия не поменялась - образ собирают не здесь, обновить его там, где собирают.':
+    'Rebuild the image with a fresh base (--pull) and recreate only this service. If the service has no build: in compose, its image is pulled again; if the version stays the same, the image is built elsewhere: update it where it is built.',
+  'Образ {image} собирают не на этой ноде, версия {name} пришла из его базового образа ({env}). Поменять FROM в Dockerfile проекта на {name} {to} (тег там без версии - просто пересобрать) и выкатить как обычно, чужой образ - обновить до версии на поддерживаемой базе. Пункт уйдет, когда на ноде заработает новая сборка.':
+    'The {image} image is not built on this node, the {name} version comes from its base image ({env}). Change FROM in the project Dockerfile to {name} {to} (if the tag there has no version, just rebuild) and deploy as usual, for a third-party image update to a version on a supported base. The item goes away once the new build runs on the node.',
+  'Контейнер работает на образе без имени: имя уже перевешено на другую сборку. Пересоздать контейнер (docker compose up -d с именем сервиса) - он пойдет на ней; версия {name} не поменялась - пересобрать образ на поддерживаемой базе.':
+    'The container runs on an image without a name: the name already points to another build. Recreate the container (docker compose up -d with the service name) and it runs on that build; if the {name} version stays the same, rebuild the image on a supported base.',
+  '{name} {from} на {to} - смена основной версии: до обновления прочитать заметки о переходе (upgrade guide, breaking changes), что перестанет работать.':
+    '{name} {from} to {to} is a major version change: before the upgrade read the migration notes (upgrade guide, breaking changes) for what stops working.',
+  'Grafana при первом запуске переводит свою базу (grafana.db в /var/lib/grafana) на новую схему, и старая версия с ней может не запуститься: без копии откат невозможен. Сторонние плагины проверить на совместимость с {to}.':
+    'On the first start Grafana moves its database (grafana.db in /var/lib/grafana) to a new schema, and the old version may not start with it: without a copy there is no rollback. Check third-party plugins for compatibility with {to}.',
+  'Traefik 3 читает часть настроек иначе, чем 2 (синтаксис правил, часть меток и middlewares): до переезда - руководство по миграции с v2 на v3, в нем совместимый режим core.defaultRuleSyntax: v2.':
+    'Traefik 3 reads some settings differently from 2 (rule syntax, some labels and middlewares): before the move read the v2 to v3 migration guide, it has a compatibility mode core.defaultRuleSyntax: v2.',
+  'Это среда выполнения приложения: проверить приложение и его зависимости на {name} {to}, лучше сначала на стенде.':
+    'This is the application runtime: check the application and its dependencies on {name} {to}, better on a staging server first.',
+  'Новый Redis сам читает старые dump.rdb и AOF, а старый новый формат уже не прочитает: откат только из копии. С 7.4 Redis не под BSD (RSAL и SSPL, с 8.0 еще AGPL), совместимая замена с теми же данными - Valkey.':
+    'A new Redis reads old dump.rdb and AOF files by itself, but the old one cannot read the new format: rollback only from a copy. Since 7.4 Redis is not BSD licensed (RSAL and SSPL, AGPL added in 8.0), a compatible replacement with the same data is Valkey.',
+  'Новый Valkey сам читает старые RDB и AOF, а старый новый формат уже не прочитает: откат только из копии.':
+    'A new Valkey reads old RDB and AOF files by itself, but the old one cannot read the new format: rollback only from a copy.',
+  'Это базовый образ ОС: если контейнер ставит пакеты при запуске, на {name} {to} их имена и версии могут быть другими.':
+    'This is an OS base image: if the container installs packages on start, their names and versions on {name} {to} may differ.',
+  'В таблице сроков нет поддерживаемой версии {name} новее {from}: выбрать по сайту вендора.':
+    'The support table has no supported {name} version newer than {from}: pick one on the vendor site.',
+  'Дамп всех баз (pg_dumpall), пока база работает: по нему данные переезжают в новую версию. Пустой файл - дамп не получился (суперпользователь другой - поменять -U).':
+    'A dump of all databases (pg_dumpall) while the database runs: the data moves to the new version with it. An empty file means the dump failed (another superuser: change -U).',
+  'Копия каталога данных для отката при остановленной базе: минуты, по объему из первой команды, места нужно столько же. База запускается сразу после копии.':
+    'A copy of the data directory for rollback with the database stopped: minutes, depending on the size from the first command, it needs as much free space. The database starts again right after the copy.',
+  'Команды смены тега тут нет намеренно: после копии - тег {to} в compose руками, docker compose up -d с именем сервиса и лог до конца перевода данных.':
+    'There is no tag change command here on purpose: after the copy set the {to} tag in compose by hand, run docker compose up -d with the service name and watch the log until the data conversion ends.',
+  'PostgreSQL {to} не читает файлы {from}: тег в compose просто так не менять, база не запустится. Путь: рядом новый сервис {name} {to} с новым пустым каталогом данных, в него дамп (gunzip -c дамп | docker exec -i новый psql -U пользователь -d postgres), проверка, переключение приложения, старый контейнер с данными - до конца проверки. На больших базах быстрее pg_upgrade (образ tianon/postgres-upgrade). Расширения (PostGIS, TimescaleDB, pgvector) нужны в новом образе той же версии.':
+    'PostgreSQL {to} does not read {from} files: do not just change the tag in compose, the database will not start. The way: a new {name} {to} service next to it with a new empty data directory, load the dump into it (gunzip -c dump | docker exec -i new psql -U user -d postgres), check, switch the application, keep the old container with its data until the check is done. On large databases pg_upgrade is faster (the tianon/postgres-upgrade image). Extensions (PostGIS, TimescaleDB, pgvector) must be in the new image in the same version.',
+  'MySQL обновляется на месте, но по одной LTS за раз (5.7, 8.0, 8.4): при первом запуске новая версия переводит данные, обратно - только из копии. Совместимость заранее проверяет MySQL Shell: util.checkForServerUpgrade().':
+    'MySQL upgrades in place, but one LTS at a time (5.7, 8.0, 8.4): on the first start the new version converts the data, going back only from a copy. MySQL Shell checks compatibility in advance: util.checkForServerUpgrade().',
+  'MariaDB обновляется на месте, после первого запуска новой версии нужен mariadb-upgrade (официальный образ делает его сам при MARIADB_AUTO_UPGRADE=1). Через несколько LTS лучше по одной. Обратно - только из копии.':
+    'MariaDB upgrades in place, after the first start of the new version it needs mariadb-upgrade (the official image runs it by itself with MARIADB_AUTO_UPGRADE=1). Across several LTS releases better one at a time. Going back only from a copy.',
+  'MongoDB - по одной основной версии за раз (5.0, 6.0, 7.0, 8.0), перед каждым шагом setFeatureCompatibilityVersion на текущую, через версию не запустится. Обратно - только из копии.':
+    'MongoDB goes one major version at a time (5.0, 6.0, 7.0, 8.0), before each step set setFeatureCompatibilityVersion to the current one, skipping a version will not start. Going back only from a copy.',
+  'Elasticsearch - через последний минорный выпуск своей основной версии (7.17, 8.19), что мешает переезду, покажет Upgrade Assistant в Kibana; индексы, созданные две основные версии назад, переиндексировать. Обратно - только из снапшота.':
+    'Elasticsearch goes through the last minor release of its major version (7.17, 8.19), the Upgrade Assistant in Kibana shows what blocks the move; indices created two major versions ago must be reindexed. Going back only from a snapshot.',
+  'ClickHouse обновляется на месте, лучше на LTS (выпуски X.3 и X.8); перед этим прочитать Backward Incompatible Changes в changelog всех версий между. Обратно - только из копии, если новая успела переписать данные.':
+    'ClickHouse upgrades in place, better to an LTS (X.3 and X.8 releases); before that read Backward Incompatible Changes in the changelog of all versions in between. Going back only from a copy if the new version has rewritten the data.',
+  'RabbitMQ - через промежуточные версии по таблице upgrade path (с 3.8 до 3.13 по одной, дальше 4.x), перед каждым шагом включить все feature flags (rabbitmqctl enable_feature_flag all), очереди лучше разобрать. Обратно - только из копии.':
+    'RabbitMQ goes through intermediate versions by the upgrade path table (3.8 to 3.13 one at a time, then 4.x), before each step enable all feature flags (rabbitmqctl enable_feature_flag all), better drain the queues. Going back only from a copy.',
+  'ZooKeeper обновляется на месте по одному узлу; с 3.4 на 3.5 и новее без снапшота нужен snapshot.trust.empty=true. Обратно - из копии.':
+    'ZooKeeper upgrades in place one node at a time; from 3.4 to 3.5 and newer without a snapshot it needs snapshot.trust.empty=true. Going back from a copy.',
+  'Поставить PHP {to} рядом с {from} со всеми расширениями, которые есть у {from} (каких нет для {to}, пропускает). Старая версия продолжает работать.':
+    'Install PHP {to} next to {from} with all extensions {from} has (the ones missing for {to} are skipped). The old version keeps running.',
+  'Перенести на {to}: пулы из /etc/php/{from}/fpm/pool.d/ в /etc/php/{to}/fpm/pool.d/ (в listen сокет php{to}-fpm.sock, если он там), свои настройки из php.ini, у сайтов fastcgi_pass (nginx) или SetHandler (apache) - на новый сокет, CLI - update-alternatives --set php /usr/bin/php{to}. Откат до удаления старой - вернуть сайтам старый сокет.':
+    'Move to {to}: pools from /etc/php/{from}/fpm/pool.d/ to /etc/php/{to}/fpm/pool.d/ (the php{to}-fpm.sock socket in listen, if it is set there), your settings from php.ini, sites with fastcgi_pass (nginx) or SetHandler (apache) to the new socket, CLI with update-alternatives --set php /usr/bin/php{to}. Rollback before removing the old one: point the sites back to the old socket.',
+  'Проверить версию и конфиг FPM, потом перезагрузить веб-сервер и открыть сайты.':
+    'Check the version and the FPM config, then reload the web server and open the sites.',
+  'Когда сайты и кроны на {to}: удалить {from} (apt покажет список и спросит, конфиги в /etc/php/{from} останутся). Пункт уйдет в течение часа.':
+    'When sites and cron jobs run on {to}: remove {from} (apt shows the list and asks, configs in /etc/php/{from} stay). The item goes away within an hour.',
+  'Перевести репозиторий NodeSource на {to} и обновить nodejs (npm в том же пакете).':
+    'Switch the NodeSource repository to {to} and upgrade nodejs (npm is in the same package).',
+  'Проверить версию, перезапустить приложения на Node (systemd, pm2), модули с нативной частью пересобрать (npm rebuild в каталоге приложения). Пункт уйдет в течение часа.':
+    'Check the version, restart Node applications (systemd, pm2), rebuild modules with native parts (npm rebuild in the application directory). The item goes away within an hour.',
+  'Откат: репозиторий обратно на {from} и прежняя версия пакета.':
+    'Rollback: the repository back to {from} and the previous package version.',
+  'Копия конфигов в /var/backups/kervax-upgrade.':
+    'A copy of the configs in /var/backups/kervax-upgrade.',
+  'Репозиторий nginx.org отдает текущую версию своей ветки (stable или mainline). Версия осталась старой - в /etc/apt/sources.list.d/ старое кодовое имя дистрибутива или пакет зафиксирован (apt-mark showhold).':
+    'The nginx.org repository serves the current version of its branch (stable or mainline). If the version stays old, /etc/apt/sources.list.d/ has an old distribution codename or the package is held (apt-mark showhold).',
+  'Проверить версию, конфиг и что служба работает. Пункт уйдет в течение часа.':
+    'Check the version, the config and that the service runs. The item goes away within an hour.',
+  'Откат: прежняя версия пакета (конфиги - из копии, если их меняли).':
+    'Rollback: the previous package version (configs from the copy if they were changed).',
+  'Ветку HAProxy задает репозиторий (PPA vbernat/haproxy-X.Y или backports): перевести его на {to}, apt update и apt install haproxy.':
+    'The HAProxy branch is set by the repository (PPA vbernat/haproxy-X.Y or backports): switch it to {to}, apt update and apt install haproxy.',
+  'Проверить конфиг и что служба работает. Пункт уйдет в течение часа.':
+    'Check the config and that the service runs. The item goes away within an hour.',
+  'Дамп всех баз кластера {from}/main, пока он работает.':
+    'A dump of all databases of the {from}/main cluster while it runs.',
+  'Переезд штатными средствами Debian: sudo apt install postgresql-{to}, пустой кластер {to} main, который создала установка, убрать (pg_dropcluster {to} main --stop, только сверившись в pg_lsclusters, что он новый и пустой), потом pg_upgradecluster {from} main - старый кластер остается остановленным, к нему можно вернуться. Расширения нужны для {to}. Когда все проверено - pg_dropcluster {from} main и apt remove postgresql-{from}, пункт уйдет в течение часа.':
+    'The move with the standard Debian tools: sudo apt install postgresql-{to}, remove the empty {to} main cluster the install created (pg_dropcluster {to} main --stop, only after checking in pg_lsclusters that it is new and empty), then pg_upgradecluster {from} main: the old cluster stays stopped and you can go back to it. Extensions are needed for {to}. When everything is checked, pg_dropcluster {from} main and apt remove postgresql-{from}, the item goes away within an hour.',
+  'Дамп всех баз (root входит по сокету; если по паролю - добавить -p).':
+    'A dump of all databases (root logs in via the socket; if it uses a password, add -p).',
+  'Выгрузить определения (очереди, обменники, пользователи), сообщения в них не попадают.':
+    'Export the definitions (queues, exchanges, users), messages are not included.',
+  'Копия каталога данных при остановленной службе (systemctl stop, tar, systemctl start) или штатный дамп.':
+    'A copy of the data directory with the service stopped (systemctl stop, tar, systemctl start) or a standard dump.',
+  'Пакеты {name} - из репозитория вендора: перевести его на {to} по инструкции вендора, apt update и обновить пакеты, затем проверить службу и логи. Пункт уйдет в течение часа.':
+    '{name} packages come from the vendor repository: switch it to {to} by the vendor instructions, apt update and upgrade the packages, then check the service and logs. The item goes away within an hour.',
+  'Пакеты не из apt: обновить {name} до {to} средствами дистрибутива (dnf, для PHP - модули remi) по инструкции вендора, перед этим копия данных и конфигов.':
+    'Packages not from apt: upgrade {name} to {to} with the distribution tools (dnf, remi modules for PHP) by the vendor instructions, before that a copy of the data and configs.',
+  'Новая версия: {name} {to}': 'New version: {name} {to}',
+  'подойдет и {list}': '{list} also fit',
+  'То же у {list}: команды те же, в первой строке подставьте имя контейнера.': 'The same on {list}: the commands are the same, put the container name in the first line.',
+  'Пункт уходит сам, когда этой версии на ноде не останется: у контейнеров - со следующим отчетом агента, у пакетов хоста - в течение часа.': 'The item goes away by itself once this version is gone from the node: for containers with the next agent report, for host packages within an hour.',
+  'контейнер {c}': 'container {c}',
+  'на хосте: {list}': 'on the host: {list}',
+  'обновить нельзя': 'cannot upgrade',
+  'отложено до конца поддержки': 'postponed until support ends',
+  'отложить до конца поддержки': 'postpone until support ends',
   'по исходящему, как считает хостер': 'by outgoing, as the hoster counts',
   'по всему трафику, как считает хостер': 'by all traffic, as the hoster counts',
   'сейчас тихо': 'quiet now',
@@ -1722,6 +1869,51 @@ const EN: Record<string, string> = {
   'Запросы не показаны: на сервере много инстансов, и отчет не вместил бы все': 'Queries are not shown: the server has many instances, and the report would not fit them all',
   'Собираю данные: первая картина через 15 минут, за полный час - через час': 'Collecting data: the first picture in 15 minutes, a full hour in an hour',
   'Запросы заняли {s} с за час - база почти не нагружена': 'Queries took {s} s in an hour - the database is almost idle',
+  // как включить pg_stat_statements (db_health.pgss_fix)
+  'откат': 'rollback',
+  'как включить': 'how to enable',
+  'Самые долгие запросы появятся примерно через час после включения pg_stat_statements: панель сравнивает их со снимком часовой давности':
+    'The slowest queries show up about an hour after pg_stat_statements was enabled: the panel compares them with an hour-old snapshot',
+  'Панель увидит расширение в течение часа, самые долгие запросы - еще примерно через час: она сравнивает со снимком часовой давности.':
+    'The panel picks up the extension within an hour, the slowest queries about an hour later: it compares with an hour-old snapshot.',
+  'Плашка уйдет при следующем сборе, до 15 минут. Самые долгие запросы появятся примерно через час: панель сравнивает со снимком часовой давности.':
+    'The notice goes away with the next collection, within 15 minutes. The slowest queries show up in about an hour: the panel compares with an hour-old snapshot.',
+  'Сначала посмотреть, что уже загружено и откуда задано. source = command line - параметр в command контейнера, ALTER SYSTEM его не перебьет, тогда путь через compose ниже. Вторая строка - команда контейнера, каталог compose, проект и сервис.':
+    'First see what is loaded already and where it is set. source = command line means the parameter is in the container command, ALTER SYSTEM does not override it, then take the compose way below. The second line is the container command, the compose directory, project and service.',
+  'Сначала посмотреть, что уже загружено и откуда задано. source = command line - параметр в команде запуска сервиса, ALTER SYSTEM его не перебьет.':
+    'First see what is loaded already and where it is set. source = command line means the parameter is in the service start command, ALTER SYSTEM does not override it.',
+  'Создать расширение в базе {db}: панель ищет его там первым, а статистика в нем общая на весь сервер, одной базы достаточно. Работает и до перезапуска и заодно проверяет, что расширение есть в сборке: при ошибке is not available дальше не идти, без него PostgreSQL после перезапуска не запустится (на RHEL оно в пакете postgresql-contrib).':
+    'Create the extension in the {db} database: the panel looks there first, and its statistics cover the whole server, one database is enough. It works before the restart too and checks that the build has the extension: on an "is not available" error stop here, without it PostgreSQL will not start after the restart (on RHEL it is in the postgresql-contrib package).',
+  'Дописать pg_stat_statements к shared_preload_libraries, сейчас там {cur}. ALTER SYSTEM пишет в postgresql.auto.conf в каталоге данных, база работает дальше, значение вступит в силу после перезапуска. Каждая библиотека в своих кавычках: строку через запятую PostgreSQL принял бы за одну библиотеку и не запустился бы.':
+    'Add pg_stat_statements to shared_preload_libraries, now it holds {cur}. ALTER SYSTEM writes to postgresql.auto.conf in the data directory, the database keeps running, the value takes effect after a restart. Every library in its own quotes: PostgreSQL would take one comma-separated string for a single library and would not start.',
+  'Добавить pg_stat_statements в shared_preload_libraries, сейчас там пусто. ALTER SYSTEM пишет в postgresql.auto.conf в каталоге данных, база работает дальше, значение вступит в силу после перезапуска.':
+    'Add pg_stat_statements to shared_preload_libraries, now it is empty. ALTER SYSTEM writes to postgresql.auto.conf in the data directory, the database keeps running, the value takes effect after a restart.',
+  'Если source не command line: добавить в shared_preload_libraries. Если в setting уже что-то есть, перечислите все через запятую, каждую в своих кавычках: {ok}. Одной строкой {bad} нельзя: PostgreSQL примет ее за одну библиотеку и не запустится.':
+    'If source is not command line: add it to shared_preload_libraries. If setting holds something already, list them all separated by commas, each in its own quotes: {ok}. A single string {bad} will not do: PostgreSQL takes it for one library and does not start.',
+  'Перезапустить контейнер, чтобы библиотека загрузилась: база недоступна несколько секунд, приложения теряют соединения и должны переподключиться, лучше в тихое время. -t 120 дает базе спокойно завершиться, обычно это секунды.':
+    'Restart the container so the library loads: the database is down for a few seconds, applications lose their connections and have to reconnect, better at a quiet time. -t 120 lets the database shut down cleanly, it usually takes seconds.',
+  'Перезапустить PostgreSQL ({unit}), чтобы библиотека загрузилась: база недоступна несколько секунд, приложения теряют соединения и должны переподключиться, лучше в тихое время.':
+    'Restart PostgreSQL ({unit}) so the library loads: the database is down for a few seconds, applications lose their connections and have to reconnect, better at a quiet time.',
+  'Перезапустить PostgreSQL, чтобы библиотека загрузилась: база недоступна несколько секунд, приложения теряют соединения и должны переподключиться. На Debian и Ubuntu postgresql перезапускает все кластеры, один - postgresql@<версия>-<кластер> (systemctl list-units postgresql*), на RHEL юнит бывает postgresql-<версия>.':
+    'Restart PostgreSQL so the library loads: the database is down for a few seconds, applications lose their connections and have to reconnect. On Debian and Ubuntu postgresql restarts every cluster, a single one is postgresql@<version>-<cluster> (systemctl list-units postgresql*), on RHEL the unit may be postgresql-<version>.',
+  'Параметр задан в command сервиса {svc} в compose, и ALTER SYSTEM его не перебьет: правится compose. Копия файла рядом (.bak-kervax), sed дописывает pg_stat_statements к shared_preload_libraries, diff показывает измененные строки. Должна поменяться одна, у {svc}: если поменялись и чужие или diff пустой (значение задано иначе, через переменную), верните копию и поправьте руками.':
+    'The parameter is set in the command of the {svc} service in compose, and ALTER SYSTEM does not override it: compose is edited. A copy of the file next to it (.bak-kervax), sed adds pg_stat_statements to shared_preload_libraries, diff shows the changed lines. Exactly one must change, in {svc}: if others changed too or diff is empty (the value is set another way, through a variable), restore the copy and edit by hand.',
+  'Параметр задан в command сервиса в compose, и ALTER SYSTEM его не перебьет: правится compose. Найдите строку и поставьте shared_preload_libraries={v}, файл перед правкой скопируйте.':
+    'The parameter is set in the service command in compose, and ALTER SYSTEM does not override it: compose is edited. Find the line and set shared_preload_libraries={v}, copy the file before editing.',
+  'Пересоздать контейнер с новой командой: данные в томе остаются, база недоступна несколько секунд, приложения теряют соединения и должны переподключиться. --no-deps не трогает остальные сервисы проекта.':
+    'Recreate the container with the new command: the data stays in the volume, the database is down for a few seconds, applications lose their connections and have to reconnect. --no-deps leaves the other services of the project alone.',
+  'Если source = command line: вместо ALTER SYSTEM и перезапуска правится compose. В файле из второй строки первого шага у этого сервиса в command дописать ,pg_stat_statements к shared_preload_libraries=, файл перед правкой скопировать и пересоздать контейнер (каталог, проект и сервис оттуда же):':
+    'If source = command line: compose is edited instead of ALTER SYSTEM and a restart. In the file from the second line of the first step add ,pg_stat_statements to shared_preload_libraries= in the command of this service, copy the file before editing and recreate the container (the directory, project and service come from there too):',
+  'Параметр задан в команде запуска, и ALTER SYSTEM его не перебьет. Поставьте там shared_preload_libraries={v}: контейнер не из compose пересоздается с новой командой (данные в томе остаются), у сервиса на хосте команда в юните или в pg_ctl.conf. Текущая команда:':
+    'The parameter is set in the start command, and ALTER SYSTEM does not override it. Set shared_preload_libraries={v} there: a container not from compose is recreated with the new command (the data stays in the volume), a host service has the command in its unit or in pg_ctl.conf. The current command:',
+  'Проверить: в списке есть pg_stat_statements, а запрос отвечает числом, а не ошибкой.':
+    'Check: pg_stat_statements is in the list, and the query answers with a number, not an error.',
+  'Удалить расширение, вернуть прежний список ({cur}) и перезапустить.': 'Drop the extension, put the previous list back ({cur}) and restart.',
+  'Удалить расширение, вернуть shared_preload_libraries как было (пусто) и перезапустить.':
+    'Drop the extension, put shared_preload_libraries back as it was (empty) and restart.',
+  'Удалить расширение, вернуть compose из копии и пересоздать контейнер.': 'Drop the extension, restore compose from the copy and recreate the container.',
+  'Удалить расширение, вернуть shared_preload_libraries и перезапустить. Если в setting было что-то еще, вместо RESET верните прежний список: {ex}. Если меняли compose, верните файл и пересоздайте контейнер.':
+    'Drop the extension, put shared_preload_libraries back and restart. If setting held something else, put the previous list back instead of RESET: {ex}. If compose was edited, restore the file and recreate the container.',
   'текст скрыт: в нем пароль или секрет': 'text hidden: it contains a password or a secret',
   'текст еще не прочитан': 'text not read yet',
   '{p}% времени запросов': '{p}% of query time',
@@ -3676,15 +3868,53 @@ const EN: Record<string, string> = {
   'образ внешнего прокси собран больше года назад': 'the internet-facing proxy image was built more than a year ago',
   '{list}: образ собран больше года назад. Прокси смотрит в интернет, а за год в нем закрывают не одну дыру.':
     '{list}: the image was built more than a year ago. The proxy faces the internet, and a year brings more than one security fix.',
-  'caddy-docker-proxy: закрепленная версия, как в роли caddy-proxy - lucaslorentz/caddy-docker-proxy:2.13.1. С caddy 2.5 бэкенд получает заголовки Via и X-Forwarded-Host, а X-Forwarded-For от клиента отбрасывается: остается только реальный IP.':
-    'caddy-docker-proxy: a pinned version, as in the caddy-proxy role - lucaslorentz/caddy-docker-proxy:2.13.1. Since caddy 2.5 the backend gets the Via and X-Forwarded-Host headers, and an X-Forwarded-For sent by the client is dropped: only the real IP stays.',
-  'caddy: последний caddy:2.': 'caddy: the latest caddy:2.',
+  'caddy-docker-proxy: закрепленная версия, как в роли caddy-proxy - 2.13.1, внутри caddy 2.11. Метки контейнеров читаются как раньше, сертификаты в /data остаются. С caddy 2.11 к HTTPS-апстриму ({{upstreams https ...}}) уходит Host апстрима, а не сайта: если бэкенду нужен исходный, добавьте header_up Host {hostport}.':
+    'caddy-docker-proxy: a pinned version, as in the caddy-proxy role - 2.13.1, with caddy 2.11 inside. Container labels are read as before, the certificates in /data stay. Since caddy 2.11 an HTTPS upstream ({{upstreams https ...}}) gets the Host of the upstream, not of the site: if the backend needs the original one, add header_up Host {hostport}.',
+  'Образ старше caddy 2.5: бэкенд начнет получать заголовки Via и X-Forwarded-Host, а X-Forwarded-For от клиента отбрасывается - остается только реальный IP.':
+    'The image predates caddy 2.5: the backend starts getting the Via and X-Forwarded-Host headers, and an X-Forwarded-For sent by the client is dropped - only the real IP stays.',
+  'caddy: ветка 2.11, патчи в ней приезжают с pull. С 2.11 к HTTPS-апстриму уходит Host апстрима (вернуть - header_up Host {hostport}), а конфиг проверяется строже: если caddy не стартует, строка с ошибкой будет в логе, тогда откат.':
+    'caddy: the 2.11 branch, its patches arrive with a pull. Since 2.11 an HTTPS upstream gets the Host of the upstream (to keep the old one - header_up Host {hostport}), and the config is checked more strictly: if caddy does not start, the log has the line with the error, then roll back.',
   'traefik: последний патч своей ветки, для v2 это traefik:v2.11 (не latest: это уже v3, метки пришлось бы переписать). В 2.11 на чтение запроса вместе с телом по умолчанию 60 с: если на сайтах есть загрузки дольше минуты, верните --entryPoints.<имя>.transport.respondingTimeouts.readTimeout=0.':
     'traefik: the latest patch of its branch, for v2 that is traefik:v2.11 (not latest: that is v3, the labels would need rewriting). In 2.11 reading a request with its body is limited to 60 s by default: if the sites take uploads longer than a minute, set --entryPoints.<name>.transport.respondingTimeouts.readTimeout=0 back.',
   'nginx-proxy: последний тег nginxproxy/nginx-proxy (и docker-gen, если он запущен отдельно).':
     'nginx-proxy: the latest nginxproxy/nginx-proxy tag (and docker-gen if it runs separately).',
-  'Обновлять лучше через стенд рядом: новый образ на других портах, сравнить ответы всех доменов, потом переключить, а старый тег держать для отката. Ноды с этой проблемой плагин инвентаря ansible собирает в группу kervax_proxy_old, caddy по роли обновляет caddy_harden.yml.':
-    'Better update through a stand next to it: the new image on other ports, compare the answers of all domains, then switch, keeping the old tag for a rollback. The ansible inventory plugin puts the nodes with this problem into the kervax_proxy_old group; caddy from the role is updated by caddy_harden.yml.',
+  'Для сайтов с важным трафиком безопаснее стенд рядом: новый образ на других портах, сравнить ответы всех доменов, потом переключить. Ноды с этой проблемой плагин инвентаря ansible собирает в группу kervax_proxy_old, caddy из роли caddy-proxy обновляет caddy_harden.yml.':
+    'For sites with important traffic a stand next to it is safer: the new image on other ports, compare the answers of all domains, then switch. The ansible inventory plugin puts the nodes with this problem into the kervax_proxy_old group; caddy from the caddy-proxy role is updated by caddy_harden.yml.',
+  'образ задан переменной (${...})': 'the image comes from a variable (${...})',
+  'у сервиса в compose нет image': 'the service has no image in compose',
+  'свежий тег': 'a fresh tag',
+  'До обновления - коды ответов доменов этого прокси через него самого, мимо DNS и CDN. Запишутся в файл, после обновления сверим:':
+    'Before the update - the response codes of the domains of this proxy through the proxy itself, past DNS and CDN. They go to a file to compare after the update:',
+  'Обновить - от root на сервере: копия compose рядом (.bak-kervax-image), новый тег в {at}, скачать образ и пересоздать только этот сервис. Сайты пропадут на несколько секунд, сертификаты и данные в томах остаются:':
+    'Update - as root on the server: a copy of the compose file next to it (.bak-kervax-image), the new tag in {at}, pull the image and recreate only this service. The sites go away for a few seconds, the certificates and the data in volumes stay:',
+  'Тег уже {target}, образ просто давно не скачивали: прежний остается под тегом kervax-old для отката, скачать свежий и пересоздать только этот сервис:':
+    'The tag is already {target}, the image just was not pulled for a long time: the previous one stays under the kervax-old tag for a rollback, pull a fresh one and recreate only this service:',
+  'Образ собирается из Dockerfile (build:): поднимите в нем FROM до свежего тега ({target}) и пересоберите, --pull скачает свежую базу:':
+    'The image is built from a Dockerfile (build:): raise its FROM to a fresh tag ({target}) and rebuild, --pull fetches a fresh base:',
+  'Образ {image} - своя сборка, не из репозитория апстрима (задан в {at}): тег не поменять, пересоберите его на свежем базовом образе.':
+    'The {image} image is a custom build, not from the upstream repository (set in {at}): the tag cannot be swapped, rebuild it on a fresh base image.',
+  'Проверить: сервис работает, в логе нет ошибок конфига, коды доменов те же (в конце OK). Пункт уйдет сам в течение получаса: даты сборки образов агент перечитывает раз в 30 минут.':
+    'Check: the service runs, the log has no config errors, the domain codes are the same (OK at the end). The item goes away by itself within half an hour: the agent rereads image build dates every 30 minutes.',
+  'Если что-то не так - вернуть прежний compose, старый образ остался на диске:':
+    'If something is wrong - bring back the previous compose file, the old image is still on disk:',
+  'Если что-то не так - вернуть прежний образ:': 'If something is wrong - bring back the previous image:',
+  'Готовые команды под эту ноду соберет helper sockfix-setup 0.2: он найдет compose-файл и строку с образом, поставьте его плейбуком хелперов. Пока - руками. Где compose прокси (каталог, файлы, проект, сервис):':
+    'The sockfix-setup 0.2 helper builds ready commands for this node: it finds the compose file and the image line, install it with the helpers playbook. Until then, by hand. Where the compose file of the proxy is (directory, files, project, service):',
+  'В compose-файле у сервиса поменяйте image на {target}, потом скачать образ и пересоздать только этот сервис:':
+    'In the compose file set the image of the service to {target}, then pull the image and recreate only this service:',
+  'В этом compose-файле у сервиса поменяйте image на {target}, потом в каталоге проекта docker compose pull и docker compose up -d --no-deps только для этого сервиса.':
+    'In that compose file set the image of the service to {target}, then in the project directory run docker compose pull and docker compose up -d --no-deps for this service only.',
+  'Контейнер запущен не через docker compose: скачайте свежий образ и пересоздайте контейнер той же командой docker run, но с ним.':
+    'The container was not started by docker compose: pull a fresh image and recreate the container with the same docker run command, but with that image.',
+  'обновить на {target}': 'update to {target}',
+  'своя сборка: только пересобрать': 'custom build: rebuild only',
+  'Не обновлять: убрать из "Требует действий" и группы ansible kervax_proxy_old':
+    'Do not update: remove from "Action needed" and from the kervax_proxy_old ansible group',
+  'оставить как есть': 'keep as is',
+  'Готовых команд нет: {why}.': 'No ready commands: {why}.',
+  'Оставлены как есть: {list}': 'Kept as is: {list}',
+  '{list}: старый образ оставлен как есть': '{list}: the old image is kept as is',
+  'старый образ прокси оставлен': 'old proxy image kept',
   'лог больше не пишется': 'log no longer written',
   'этого лога в отчете больше нет: сайты разнесли по своим логам или контейнер удалили, ошибки ниже - история':
     'this log is no longer in the report: the sites got their own logs or the container was removed, the errors below are history',

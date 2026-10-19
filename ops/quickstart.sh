@@ -159,7 +159,7 @@ else
     cat > /srv/caddy/compose.yml <<'YML'
 services:
   caddy:
-    image: lucaslorentz/caddy-docker-proxy:2.10-alpine
+    image: lucaslorentz/caddy-docker-proxy:2.13.1-alpine
     restart: unless-stopped
     ports: __PORTS__
     environment:

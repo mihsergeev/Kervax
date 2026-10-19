@@ -241,7 +241,7 @@ def _out(
     o.docker_risk = docker_risk.view(server)
     o.exposure = open_ports.view(server)
     o.os_advice = os_support.advice(server.last_report or {}, now, server.alert_mutes)
-    o.sw_advice = software_mod.advice(server.last_report or {}, server.sw_host, now)
+    o.sw_advice = software_mod.advice(server.last_report or {}, server.sw_host, now, server.alert_mutes)
     o.changes = srv_changes.view(server)
     o.backup_verify = backup_verify.view(server.last_report or {}, now)
     o.restarts_day = srv_restarts.view(server, now) or None
@@ -269,7 +269,8 @@ def _out(
     o.fpm = fpm_pools.view(server, now)
     o.web_config = web_config.view(server.last_report or {}, now)
     o.web_certs = web_certs.view(server.last_report or {}, now)
-    o.proxy_outdated = docker_exposure.outdated(server.last_report or {}, now.timestamp())
+    # старые образы прокси с решением "оставить как есть" и шагами обновления под ноду
+    o.proxy_outdated = docker_exposure.old_view(server.last_report or {}, now.timestamp(), server.alert_mutes)
     o.disk_analyze = disk_analyze_ok(server.last_report or {})
     o.fresh = _fresh_node(server, now)
     # недоступен: что ответил сервер панели в момент алерта (app/liveness.py)
@@ -579,7 +580,7 @@ _SETUP_LABEL = {
     "cron-setup": "Кроны на хосте и в контейнерах",
     "logerr-setup": "Ошибки в логах контейнеров",
     "fpm-setup": "Пулы PHP-FPM",
-    "sockfix-setup": "Compose прокси без docker-сокета",
+    "sockfix-setup": "Compose внешнего прокси: сокет и образ",
 }
 
 
@@ -624,7 +625,7 @@ def _helper_advice(server: Server, cur: dict[str, str]) -> list[HelperAdvice]:
     out: list[HelperAdvice] = []
     # идём по тому, что панель РЕАЛЬНО раздаёт (cur), а не по списку в коде
     for name, c in sorted(cur.items()):
-        if not _setup_needed(name, rep):
+        if not _setup_needed(name, rep, server.alert_mutes):
             continue
         inst = sv.get(name)  # None = helper до версионирования
         # агенты < 1.63 слали версии числами — приводим к строке, чтобы не спорить о типах
@@ -1344,11 +1345,15 @@ async def server_packages(server_id: int, user: CurrentUser, session: SessionDep
 @router.get("/{server_id}/software")
 async def server_software(server_id: int, user: CurrentUser, session: SessionDep) -> dict:
     """Версии ПО сервера и сроки их поддержки (app/software.py): все найденные, образы без версии
-    в теге и образы, которые больше года не пересобирались."""
+    в теге и образы, которые больше года не пересобирались; у кончившихся и скорых - как исправить
+    (fix) и решение человека (mkey, muted)."""
     s = await _get_or_404(server_id, session, user)
-    inv = software_mod.inventory(s.last_report or {}, s.sw_host, datetime.now(timezone.utc))
+    now = datetime.now(timezone.utc)
+    inv = software_mod.inventory(s.last_report or {}, s.sw_host, now, s.alert_mutes)
     for g in inv["items"]:
         g["text"] = software_mod.item_text(g) if g["state"] != "ok" else ""
+        if g["state"] != "ok":
+            g["fix"] = software_mod.fix(g, s.last_report or {}, now)
     tbl = software_mod.table()
     return inv | {"built": tbl.get("built"), "source": tbl.get("source"),
                   "agent_ok": _ver_key(s.agent_version) >= (2, 35), "pkgs": s.sw_host is not None}

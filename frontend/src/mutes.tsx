@@ -103,10 +103,18 @@ export const NOBOOT_MUTE = 'noboot:'
 export const ACCESS_MUTE = 'access:'
 // ОС, которую сейчас не обновить или не перезагрузить: osupd:<вид совета> (eol, reboot, security, apt)
 export const OSUPD_MUTE = 'osupd:'
+// Версия ПО, которую сейчас не обновить: swver:<состояние>:<продукт>-<цикл>. У "скоро" - отложить до
+// конца поддержки: когда она кончится, у пункта другое состояние, и он вернется сам
+export const SWVER_MUTE = 'swver:'
+// SSH пускает по паролю, и так нужно: ssh:<вид совета> (ssh_password)
+export const SSH_MUTE = 'ssh:'
+// Старый образ внешнего прокси, который решили не обновлять: proxyold:<контейнер>
+export const PROXYOLD_MUTE = 'proxyold:'
 // Решения "так и должно быть": учетка нужна, порт открыт намеренно, ключи от хоста по назначению,
-// не нужен после перезагрузки, ОС не обновить. Хранятся в alert_mutes, но это не заглушенный алерт: в
-// "Заглушено" и чипе "бессрочно" их нет, видны и снимаются там, где поставлены (раздел карточки, "вернуть")
-const DECISIONS = [ACCESS_MUTE, EXPOSED_MUTE, DOCKRISK_MUTE, NOBOOT_MUTE, OSUPD_MUTE]
+// не нужен после перезагрузки, ОС или ПО не обновить, вход по паролю нужен, старый прокси оставить.
+// Хранятся в alert_mutes, но это не заглушенный алерт: в "Заглушено" и чипе "бессрочно" их нет, видны
+// и снимаются там, где поставлены (раздел карточки, "вернуть")
+const DECISIONS = [ACCESS_MUTE, EXPOSED_MUTE, DOCKRISK_MUTE, NOBOOT_MUTE, OSUPD_MUTE, SWVER_MUTE, SSH_MUTE, PROXYOLD_MUTE]
 export const isDecision = (k: string) => DECISIONS.some((p) => k.startsWith(p))
 // Кнопка и подпись решения по совету об ОС: что именно нельзя
 export function osDecisionLabel(kind: string, t: TFn): string {
@@ -114,13 +122,24 @@ export function osDecisionLabel(kind: string, t: TFn): string {
   if (kind === 'reboot') return t('перезагружать нельзя')
   return t('обновлять нельзя')
 }
+// Кнопка (done=false) и подпись (done=true) решения по версии ПО
+export function swDecisionLabel(state: string, done: boolean, t: TFn): string {
+  if (state === 'soon') return done ? t('отложено до конца поддержки') : t('отложить до конца поддержки')
+  return t('обновить нельзя')
+}
 export function muteKindLabel(k: string, t: TFn): string | null {
   if (k === 'noboot') return t('Не переживет перезагрузку')
   if (k === 'access_audit') return t('Доступы: заброшенные учетки и слабые ключи')
   if (k.startsWith(NOBOOT_MUTE)) return `${t('не нужен после перезагрузки')}: ${k.slice(NOBOOT_MUTE.length)}`
   if (k.startsWith(ACCESS_MUTE)) return `${t('учетка нужна')}: ${k.slice(ACCESS_MUTE.length)}`
   if (k.startsWith(OSUPD_MUTE)) return `${t('Обновления ОС')}: ${osDecisionLabel(k.slice(OSUPD_MUTE.length), t)}`
+  if (k.startsWith(SWVER_MUTE)) {
+    const [st, what] = k.slice(SWVER_MUTE.length).split(':')
+    return `${t('Версии ПО')}: ${what ?? ''} (${swDecisionLabel(st, true, t)})`
+  }
+  if (k.startsWith(SSH_MUTE)) return `SSH: ${t('вход по паролю нужен')}`
   if (k.startsWith(DOCKRISK_MUTE)) return `${t('ключи от хоста по назначению')}: ${k.slice(DOCKRISK_MUTE.length)}`
+  if (k.startsWith(PROXYOLD_MUTE)) return `${t('старый образ прокси оставлен')}: ${k.slice(PROXYOLD_MUTE.length)}`
   if (k.startsWith(LISTEN_MUTE)) return `${t('пропавший порт')}: ${k.slice(LISTEN_MUTE.length)}`
   if (k.startsWith(QSTUCK_MUTE)) {
     const [src, q] = k.slice(QSTUCK_MUTE.length).split('|')

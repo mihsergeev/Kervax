@@ -1226,17 +1226,31 @@ button.ghost.tile-filter-chip:hover { border-color: var(--accent); background: c
 .ub-nums { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
 .ub-more { margin: 0.35rem 0 0; align-self: flex-start; }
 /* версии ПО: точка, продукт и цикл, где стоит, срок */
-.sw-list { display: grid; grid-template-columns: auto max-content minmax(0, 1fr) max-content; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 0.1rem 0; }
+.sw-list { display: grid; grid-template-columns: auto max-content minmax(0, 1fr) max-content max-content; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 0.1rem 0; }
 .sw-row { display: grid; grid-column: 1 / -1; grid-template-columns: subgrid; gap: 0.3rem 0.7rem; align-items: center; padding: 0.3rem 0.7rem; border-top: 1px solid color-mix(in srgb, var(--border) 60%, transparent); }
 .sw-row:first-child { border-top: 0; }
 .sw-name { font-weight: 600; white-space: nowrap; }
 .sw-where { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sw-term { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.sw-act { display: flex; flex-wrap: wrap; justify-content: flex-end; align-items: center; gap: 0.3rem 0.5rem; }
+.sw-act:empty { display: none; }
+.sw-act .row-act { margin: 0; }
+.sw-row-off .sw-name, .sw-row-off .sw-where { opacity: 0.55; }
+/* как исправить: во всю ширину списка под строкой */
+.sw-fix { grid-column: 1 / -1; display: flex; flex-direction: column; gap: 0.5rem; padding: 0.2rem 0.7rem 0.6rem; }
+.sw-fix-way { display: flex; flex-direction: column; gap: 0.3rem; }
+.sw-fix-way .osupd-fix { margin: 0; }
 .sw-old { display: flex; flex-direction: column; gap: 0.35rem; }
 .sw-old > button { align-self: flex-start; margin: 0; }
 @media (max-width: 600px) {
   .sw-list { grid-template-columns: auto minmax(0, 1fr) max-content; }
-  .sw-where { grid-column: 2 / -1; white-space: normal; }
+  /* срок в первой строке справа, где и кнопки - строками ниже: без явных мест срок уезжал в
+     колонку точки и раздувал ее */
+  .sw-row > .lk-dot { grid-column: 1; grid-row: 1; }
+  .sw-name { grid-column: 2; grid-row: 1; }
+  .sw-term { grid-column: 3; grid-row: 1; }
+  .sw-where { grid-column: 2 / -1; grid-row: 2; white-space: normal; }
+  .sw-act { grid-column: 1 / -1; grid-row: 3; justify-content: flex-start; }
 }
 @media (max-width: 600px) {
   .ub-list { grid-template-columns: minmax(0, 1fr) auto; }

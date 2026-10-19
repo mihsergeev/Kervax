@@ -386,7 +386,8 @@ function actionItems(servers: Server[], avail: string, relProblem: string, t: T)
     }
     // Внешний прокси на старом образе: смотрит в интернет, а за год в caddy и traefik закрывают
     // не одну дыру. Ведем в Docker ноды: там написано, на что и как обновить.
-    const old = s.proxy_outdated ?? []
+    // старый образ, который решили оставить как есть ("оставить как есть" в карточке Docker), - не дело
+    const old = (s.proxy_outdated ?? []).filter((p) => !p.muted)
     if (old.length > 0) {
       const list = old.map((p) => `${p.name} (${proxyBuilt(p)})`).join(', ')
       items.push({ key: `d-old-${s.id}`, icon: '🧓', section: 'docker', id: s.id, name: s.name, cc: s.country, sec: 'proxy',
@@ -500,8 +501,8 @@ function actionItems(servers: Server[], avail: string, relProblem: string, t: T)
       items.push({ key: `access-w-${s.id}`, icon: '🗝', section: 'servers', id: s.id, name: s.name, cc: s.country,
         sec: 'access', grp: 'access-w', detail: shortList(ac.weak, t), text: t('{name}: слабые SSH-ключи у {list} - замените на ed25519',
           { name: s.name, list: shortList(ac.weak, t) }) })
-    // SSH пускает по паролю, а порт открыт в интернет
-    for (const a of s.ssh_advice ?? []) {
+    // SSH пускает по паролю, а порт открыт в интернет; "вход по паролю нужен" - решение, сюда не идет
+    for (const a of (s.ssh_advice ?? []).filter((a) => !a.muted)) {
       items.push({ key: `ssh-${s.id}`, icon: a.level >= 2 ? '⛔' : '🔐', section: 'servers', id: s.id,
         name: s.name, cc: s.country, sec: 'ssh', grp: `ssh-${a.kind}`, detail: a.text, text: `${s.name}: ${a.text}` })
     }

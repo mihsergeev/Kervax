@@ -13,15 +13,31 @@
 - вход по паролю включен, порт открыт, идет перебор, а fail2ban/sshguard/crowdsec нет -
   предупреждение и алерт: подбирают прямо сейчас и никто не банит;
 - просто вход по паролю на открытый SSH - пункт в "Требует действий": оставить ключи.
+
+У пункта готовые шаги (fix), как у советов по ОС: команды под ноду, после которых пункт уходит сам
+со следующим снимком helper'а. Сначала - кому добавить ключ: учетка с паролем без ключей, в которую
+входят, после выключения паролей не войдет. Пароль выключается отдельным файлом 00-...: в sshd
+побеждает первое значение, Include sshd_config.d/*.conf стоит в начале sshd_config, файлы идут по
+алфавиту, а cloud-init на Ubuntu кладет 50-cloud-init.conf с PasswordAuthentication yes. OpenSSH
+старше 8.2 Include не знает - строка встает первой в sshd_config. Если пароль нужен - решение
+"вход по паролю нужен" (alert_mutes "ssh:<вид>"), как решения по ОС: пункт уходит из "Требует
+действий", в карточке приглушен с кнопкой "вернуть".
 """
 from __future__ import annotations
 
-from datetime import datetime
+import re
+from datetime import datetime, timezone
 
 from app import open_ports
 from app.models import Server
 
 BRUTE_MIN = 30  # неудачных входов за 10 минут: это уже перебор, а не опечатка
+MUTE_PREFIX = "ssh:"
+DROPIN = "/etc/ssh/sshd_config.d/00-no-password.conf"
+CONF = "/etc/ssh/sshd_config"
+CONF_BAK = CONF + ".bak-nopass"
+# имя учетки, которое можно вставить в команду как есть (с ~имя тоже)
+NAME_OK = re.compile(r"^[A-Za-z_][A-Za-z0-9._-]*\$?$")
 
 
 def block(rep: dict) -> dict | None:
@@ -114,7 +130,8 @@ def problems(srv: Server, now: datetime) -> list[tuple[int, str]]:
 
 
 def advice(srv: Server, now: datetime) -> list[dict]:
-    """Пункт "Требует действий": вход по паролю на SSH, открытом в интернет."""
+    """Пункт "Требует действий": вход по паролю на SSH, открытом в интернет. key - решение "вход по
+    паролю нужен" в alert_mutes (muted), fix - шаги [{"id", "cmd"?, "arg"?, "on"?, "alt"?}]."""
     ssh = block(srv.last_report or {})
     if ssh is None or not password_login(ssh) or not reachable(srv, ssh, now):
         return []
@@ -122,7 +139,101 @@ def advice(srv: Server, now: datetime) -> list[dict]:
             f"(PasswordAuthentication no)")
     if not ssh.get("guard"):
         text += ", от перебора не защищает ни fail2ban, ни sshguard"
-    return [{"kind": "ssh_password", "level": 2 if root_password(ssh) else 1, "text": text}]
+    key = MUTE_PREFIX + "ssh_password"
+    return [{"kind": "ssh_password", "level": 2 if root_password(ssh) else 1, "text": text, "key": key,
+             "muted": key in (srv.alert_mutes or []), "fix": password_fix(srv, ssh, now)}]
+
+
+def _day(v) -> str:
+    """unix-секунды или ISO-время -> 18.10.2026"""
+    d = datetime.fromtimestamp(v, timezone.utc) if isinstance(v, (int, float)) else datetime.fromisoformat(str(v))
+    return d.strftime("%d.%m.%Y")
+
+
+def _add_key(name: str) -> str | None:
+    if not NAME_OK.match(name):
+        return None
+    # от root и chown: sudo -u другой учетки бывает запрещен и спрашивает пароль
+    return (f"sudo mkdir -p -m 700 ~{name}/.ssh\n"
+            f"echo '<public-key>' | sudo tee -a ~{name}/.ssh/authorized_keys\n"
+            f"sudo chown -R {name}: ~{name}/.ssh")
+
+
+def need_key(srv: Server, ssh: dict, now: datetime) -> list[dict]:
+    """Кто не войдет, когда выключат пароли: пароль задан, ключей нет, а входили за 90 дней (как -
+    helper не говорит, но без ключа это пароль), или входили по паролю (changes.ssh_pw), хотя ключ
+    есть. root - только если его вообще пускают по паролю."""
+    from app import access_audit  # access_audit берет отсюда password_login: на уровне модуля - цикл
+    acc = access_audit.accounts(srv, now)
+    if acc is None:
+        return []
+    ch = srv.changes if isinstance(getattr(srv, "changes", None), dict) else {}
+    pw_seen = ch.get("ssh_pw") if isinstance(ch.get("ssh_pw"), dict) else {}
+    cut = now.timestamp() - access_audit.STALE.total_seconds()
+    out = []
+    for a in acc[0]:
+        if a["pw"] != "P" or (a["uid"] == 0 and not root_password(ssh)):
+            continue
+        name = a["name"]
+        if a["keys"] == 0 and a["last"] >= cut:
+            step = {"id": "ssh_key_add", "arg": name, "on": _day(a["last"])}
+        elif pw_seen.get(name):
+            step = {"id": "ssh_key_check", "arg": name, "on": _day(pw_seen[name])}
+        else:
+            continue
+        cmd = _add_key(name)
+        out.append(dict(step, cmd=cmd) if cmd else step)
+    return out
+
+
+def _tee(path: str, lines: list[str]) -> str:
+    # построчно, как включение автообновлений: первая строка tee, остальные tee -a
+    return "\n".join(f"echo '{x}' | sudo tee {'-a ' if i else ''}{path}" for i, x in enumerate(lines))
+
+
+def password_fix(srv: Server, ssh: dict, now: datetime) -> list[dict]:
+    """Шаги, после которых вход по паролю из интернета выключен и пункт уходит сам."""
+    rep = srv.last_report or {}
+    debian = bool(re.match(r"(Ubuntu|Debian)\b", str(rep.get("os") or "")))
+    # Debian и Ubuntu: сервис ssh (на Ubuntu 22.10+ его поднимает ssh.socket, reload перечитывает
+    # конфиг так же), у остальных sshd
+    reload = f"sudo systemctl reload {'ssh' if debian else 'sshd'}"
+    off = ["PasswordAuthentication no"]
+    if str(ssh.get("kbd") or "") == "yes" and str(ssh.get("pam") or "") == "yes":
+        off.append("KbdInteractiveAuthentication no")  # пароль через PAM
+    lan = ["Match Address <cidr>", "    PasswordAuthentication yes"]
+    m = re.match(r"OpenSSH_(\d+)\.(\d+)", str(ssh.get("banner") or ""))
+    steps = need_key(srv, ssh, now)
+    if m and (int(m.group(1)), int(m.group(2))) < (8, 2):
+        # Include появился в 8.2: строка встает первой в sshd_config, Match - в конец
+        first = f"sudo cp -an {CONF} {CONF_BAK}\n" + "\n".join(f"sudo sed -i '1i {x}' {CONF}" for x in reversed(off))
+        steps.append({"id": "ssh_conf", "cmd": first})
+        undo = f"sudo cp -a {CONF_BAK} {CONF}\n{reload}"
+        match = (f"sudo cp -an {CONF} {CONF_BAK}\nsudo sed -i '1i PasswordAuthentication no' {CONF}\n"
+                 + "\n".join(f"echo '{x}' | sudo tee -a {CONF}" for x in lan))
+    else:
+        steps.append({"id": "ssh_dropin", "cmd": _tee(DROPIN, off)})
+        undo = f"sudo rm {DROPIN}\n{reload}"
+        match = _tee(DROPIN, ["PasswordAuthentication no"] + lan)
+    steps += [
+        {"id": "ssh_check", "cmd": "sudo sshd -t && sudo sshd -T | grep -Ei '^(passwordauthentication|kbdinteractiveauthentication) '"},
+        {"id": "ssh_reload", "cmd": reload},
+        {"id": "ssh_undo", "cmd": undo},
+        {"id": "ssh_match", "alt": True, "cmd": match},
+    ]
+    if not ssh.get("guard"):
+        # fail2ban по умолчанию банит порт 22, а SSH бывает на другом; журнал - через systemd: на
+        # свежих Ubuntu нет /var/log/auth.log
+        ports = _ports(ssh).replace(" ", "") or "ssh"
+        guard = {"id": "ssh_guard", "alt": True, "arg": ports}
+        if debian:
+            guard["cmd"] = ("sudo apt install -y fail2ban python3-systemd\n"
+                            f"printf '[sshd]\\nenabled = true\\nport = {ports}\\nbackend = systemd\\n'"
+                            " | sudo tee /etc/fail2ban/jail.d/sshd-port.local\n"
+                            "sudo systemctl enable fail2ban && sudo systemctl restart fail2ban\n"
+                            "sudo fail2ban-client status sshd")
+        steps.append(guard)
+    return steps
 
 
 def view(srv: Server, now: datetime) -> dict | None:

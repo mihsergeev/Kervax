@@ -179,8 +179,50 @@ def test_helper_needed_where_a_proxy_holds_the_socket():
     assert setup_scripts.setup_needed("sockfix-setup", {**clean, "extras": {"sockfix": {"v": 1}}})
 
 
+def test_image_line_of_the_service():
+    """0.2: где compose задает образ прокси - строка и значение как написано, для команд обновления"""
+    at = SF["image_at"]
+    assert at(PLAIN, "caddy") == (3, "lucaslorentz/caddy-docker-proxy:2.12.0", False)
+    # закомментированная строка выше и кавычки не мешают, сервиса нет в файле - None
+    text = 'services:\n  caddy:\n#    image: lucaslorentz/caddy-docker-proxy:ci-alpine\n    image: "caddy:2.6-alpine"\n    build: .\n'
+    assert at(text, "caddy") == (4, "caddy:2.6-alpine", True)
+    assert at(text, "web") is None
+    assert at("services:\n  caddy:\n    build: ./caddy\n", "caddy") == (0, "", True)
+    for bad, code in [("    image: caddy:${CADDY_TAG}\n", "var"), ("    <<: *base\n", "anchors"),
+                      ("    extends: base\n", "extends")]:
+        with pytest.raises(SF["Bail"]) as e:
+            at("services:\n  caddy:\n" + bad, "caddy")
+        assert e.value.code == code
+
+
+def _cont(name, image, files, d, svc="caddy"):
+    return {"Name": "/" + name, "Config": {"Image": image, "Labels": {
+        "com.docker.compose.project": "edge", "com.docker.compose.service": svc,
+        "com.docker.compose.project.working_dir": d, "com.docker.compose.project.config_files": ",".join(files)}}}
+
+
+def test_edge_item_and_override_file(tmp_path):
+    base = tmp_path / "docker-compose.yml"
+    base.write_text(PLAIN, encoding="utf-8")
+    it = SF["edge"](_cont("edge-caddy-1", "lucaslorentz/caddy-docker-proxy:2.12.0", [str(base)], str(tmp_path)))
+    assert it["ok"] and it["file"] == str(base) and it["line"] == 3 and it["build"] is False
+    assert it["ref"] == "lucaslorentz/caddy-docker-proxy:2.12.0" and it["kind"] == "caddy"
+    # образ задан во втором файле - правим его: в compose побеждает последний
+    over = tmp_path / "override.yml"
+    over.write_text("services:\n  caddy:\n    image: caddy:2.7\n", encoding="utf-8")
+    it = SF["edge"](_cont("edge-caddy-1", "caddy:2.7", [str(base), str(over)], str(tmp_path)))
+    assert it["ok"] and it["file"] == str(over) and it["line"] == 3 and it["ref"] == "caddy:2.7"
+    # запущен руками, docker run - не из compose
+    it = SF["edge"]({"Name": "/caddy", "Config": {"Image": "caddy:2", "Labels": {}}})
+    assert not it["ok"] and it["why"] == "nocompose"
+    # обычный caddy тоже внешний прокси, socket-proxy - нет
+    assert SF["img_kind"]("caddy:2.6") == "caddy" and SF["img_kind"]("wollomatic/socket-proxy:1") is None
+
+
 def test_helper_script():
-    assert "KERVAX_SETUP_VERSION=0.1" in SRC and "KERVAX_SETUP_WHEN=" in SRC and "\r" not in SRC
+    assert "KERVAX_SETUP_VERSION=0.2" in SRC and "KERVAX_SETUP_WHEN=" in SRC and "\r" not in SRC
+    # 0.2 ставится и туда, где обычный caddy без меток docker: его образ тоже смотрит в интернет
+    assert "grep -q -e caddy -e traefik" in SRC
     # ничего не применяет: только копия файла 0600 в своем каталоге и отчет
     assert "0o600" in SRC and "install -d -m 0700" in SRC and " up -d" not in SRC.split("HELPER_EOF")[1]
     # проверка docker compose config и запасной путь для старого compose без --format

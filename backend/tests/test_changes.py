@@ -172,3 +172,5 @@ def test_password_login_from_a_new_address():
     t2 = t1 + timedelta(minutes=10)
     st = apply_snapshot(st, snap(t2, ("password", "ops", "203.0.113.66")), t2)
     assert len(st["log"]) == 1  # с этого адреса уже входил
+    # кто последний раз входил по паролю: по ключу не в счет
+    assert st["ssh_pw"] == {"ops": t2.isoformat()}

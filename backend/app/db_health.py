@@ -11,6 +11,9 @@
 """
 from __future__ import annotations
 
+import posixpath
+import re
+import shlex
 from datetime import datetime
 
 LAG_WARN = 300  # реплика отстает на 5 минут - предупреждение
@@ -297,6 +300,9 @@ def load_view(x: dict) -> dict | None:
     for key in _LOAD_KEYS:
         v = _int(ld.get(key))
         out[key] = round(v * k) if v >= 0 else None
+    # 0 - в снимке часовой давности запросов еще не было: pg_stat_statements только что включили
+    if "pbase" in ld:
+        out["pbase"] = _int(ld.get("pbase"))
     ms_all = max(_int(ld.get("ms_all")), 0)
     out["ms_all"] = round(ms_all * k)
     # Одинаковый текст в одной базе - один запрос: PostgreSQL заводит отдельную запись на каждую роль
@@ -424,6 +430,144 @@ def advice(x: dict, lv: dict | None, *, pg_count: int = 1, ssd: bool | None = No
         elif sb > mem * 0.5:
             out.append({"k": "shared_buffers_high", "sb": sb, "mem": mem, "lim": bool(cf.get("mem_lim"))})
     return out
+
+
+# Как включить pg_stat_statements (dbstat-setup 0.14): шаги под этот экземпляр, после которых плашка в
+# "Что грузит базу" уходит сама. Как у пунктов обновлений ОС: тексты шагов во фронте по id, здесь
+# команды. Расширение helper ищет по базам начиная с postgres, а статистика в нем общая на весь
+# сервер - одной базы достаточно. shared_preload_libraries из команды контейнера (-c в command compose)
+# ALTER SYSTEM не перебивает, тогда правится compose. Список дописывается к текущему, каждая библиотека
+# своей строкой в кавычках: 'a,b' одной строкой PostgreSQL примет за одну библиотеку с запятой в имени
+# и не запустится. CREATE EXTENSION - первым: оно работает и без загруженной библиотеки и заодно
+# проверяет, что она есть в сборке (иначе после перезапуска база не поднимется)
+PGSS = "pg_stat_statements"
+_SPL = "shared_preload_libraries"
+_LIB_RX = re.compile(r"^[A-Za-z0-9_.-]+$")
+_SPL_RAW_RX = re.compile(r'^[A-Za-z0-9_.," -]+$')
+RESTART_WAIT = 120  # docker restart -t: дать базе дописать чекпоинт, обычно это секунды
+
+
+def _libs(spl: str) -> list[str] | None:
+    """Значение shared_preload_libraries -> библиотеки; None - имя, которое в команду не подставить
+    ($libdir/..., кавычки внутри)"""
+    out: list[str] = []
+    for p in spl.split(","):
+        p = p.strip()
+        if len(p) > 1 and p[0] == p[-1] == '"':
+            p = p[1:-1]
+        if not p:
+            continue
+        if not _LIB_RX.match(p):
+            return None
+        out.append(p)
+    return out
+
+
+def _spl_sql(libs: list[str]) -> str:
+    if not libs:
+        return f"ALTER SYSTEM RESET {_SPL}"
+    return f"ALTER SYSTEM SET {_SPL} = " + ", ".join(f"'{x}'" for x in libs)
+
+
+def _psql(c: str, role: str, db: str, *sql: str) -> str:
+    """psql тем же путем, каким в базу ходит helper: в контейнере под ролью, под которой он вошел (роль
+    postgres - системным пользователем postgres), на хосте - от postgres через runuser: sudo -u postgres
+    просит пароль, если sudo разрешен только как root"""
+    args = f"-d {shlex.quote(db)} " + " ".join(f'-c "{s}"' for s in sql)
+    if not c:
+        return f"sudo runuser -u postgres -- psql {args}"
+    qc = shlex.quote(c)
+    if role == "postgres":
+        return f"sudo docker exec -u postgres {qc} psql {args}"
+    if role:
+        return f"sudo docker exec {qc} psql -U {shlex.quote(role)} {args}"
+    return f'sudo docker exec {qc} psql -U "$(sudo docker exec {qc} printenv POSTGRES_USER)" {args}'
+
+
+def _compose(cf: dict) -> tuple[str, list[str], str] | None:
+    """(cd в каталог проекта, файлы относительно него, docker compose ... up) по меткам контейнера"""
+    d, proj, svc = str(cf.get("cdir") or ""), str(cf.get("cproj") or ""), str(cf.get("csvc") or "")
+    files = [f for f in str(cf.get("cfiles") or "").split(",") if f]
+    if not (d and proj and svc and files):
+        return None
+    q = shlex.quote
+    names = [posixpath.basename(f) if posixpath.dirname(f) == d.rstrip("/") else f for f in files]
+    up = (f"sudo docker compose -p {q(proj)} " + " ".join(f"-f {q(n)}" for n in names)
+          + f" up -d --no-deps -t {RESTART_WAIT} {q(svc)}")
+    return f"cd {q(d)}", names, up
+
+
+def pgss_fix(x: dict, rep: dict) -> list[dict]:
+    """Шаги [{"id", "cmd"?, "arg"?, "alt"?, "undo"?}], чтобы включить pg_stat_statements; [] - включен.
+    Без данных helper'а 0.14 (откуда задан список и что в нем) первым шагом - посмотреть самому"""
+    ld = x.get("load") if isinstance(x.get("load"), dict) else {}
+    pss = str(ld.get("pss") or "")
+    if x.get("engine") != "pg" or pss not in ("off", "noext"):
+        return []
+    cf = x.get("cfg") if isinstance(x.get("cfg"), dict) else {}
+    c = str(x.get("container") or "")
+    inv = next((d for d in (rep or {}).get("db_stats") or [] if isinstance(d, dict) and d.get("engine") == "pg"
+                and (d.get("container") or "") == c), {})
+    names = [str(d.get("name") or "") for d in inv.get("dbs") or [] if isinstance(d, dict)]
+    db = "postgres" if "postgres" in names or not names else names[0]
+    role = str(cf.get("role") or "")
+    if not role:
+        # helper до 0.14: вошел он под postgres или под единственной ролью с правом входа
+        users = [str(u) for u in inv.get("users") or []]
+        role = "postgres" if "postgres" in users else users[0] if len(users) == 1 else ""
+
+    def sql(*s: str) -> str:
+        return _psql(c, role, db, *s)
+
+    create = {"id": "pgss_create", "arg": db, "cmd": sql(f"CREATE EXTENSION IF NOT EXISTS {PGSS}")}
+    check = {"id": "pgss_check", "cmd": sql(f"SHOW {_SPL}", f"SELECT count(*) FROM {PGSS}")}
+    if pss == "noext":
+        return [create, check]
+    q = shlex.quote
+    unit = str(cf.get("unit") or "")
+    restart = ({"id": "pgss_restart", "cmd": f"sudo docker restart -t {RESTART_WAIT} {q(c)}"} if c else
+               {"id": "pgss_restart_host", "arg": unit, "cmd": f"sudo systemctl restart {q(unit or 'postgresql')}"})
+    drop = sql(f"DROP EXTENSION IF EXISTS {PGSS}")
+    spl, src = str(cf.get("spl") or ""), str(cf.get("spl_src") or "")
+    libs = _libs(spl) if src and cf.get("su") == "on" else None
+    if libs is None:
+        # не знаем, что уже загружено и откуда: посмотреть, дописать руками
+        look = sql(f"SELECT setting, source FROM pg_settings WHERE name = '{_SPL}'")
+        if c:
+            look += ("\nsudo docker inspect -f '{{json .Config.Cmd}} {{index .Config.Labels \"com.docker.compose.project.working_dir\"}} "
+                     "{{index .Config.Labels \"com.docker.compose.project\"}} {{index .Config.Labels \"com.docker.compose.service\"}}' " + q(c))
+        steps = [{"id": "pgss_look", "arg": "docker" if c else "", "cmd": look}, create,
+                 {"id": "pgss_alter_hand", "cmd": sql(_spl_sql([PGSS]))}, restart]
+        if c:
+            steps.append({"id": "pgss_compose_hand", "alt": True, "cmd": "cd <working_dir>\nsudo docker compose -p <project> "
+                          f"up -d --no-deps -t {RESTART_WAIT} <service>"})
+        return steps + [check, {"id": "pgss_undo_hand", "undo": True,
+                                "cmd": sql(f"DROP EXTENSION IF EXISTS {PGSS}", _spl_sql([])) + "\n" + restart["cmd"]}]
+    new = [*libs, PGSS] if PGSS not in libs else libs
+    if src != "command line":
+        return [create, {"id": "pgss_alter", "arg": ", ".join(libs), "cmd": sql(_spl_sql(new))}, restart, check,
+                {"id": "pgss_undo", "undo": True, "arg": ", ".join(libs),
+                 "cmd": sql(f"DROP EXTENSION IF EXISTS {PGSS}", _spl_sql(libs)) + "\n" + restart["cmd"]}]
+    # задан в команде запуска: ALTER SYSTEM его не перебьет
+    cmp = _compose(cf) if c else None
+    if cmp is None:
+        look = (f"sudo docker inspect -f '{{{{json .Config.Cmd}}}}' {q(c)}" if c else f"systemctl cat {q(unit or 'postgresql')}")
+        return [create, {"id": "pgss_cmdline", "arg": ",".join(new), "cmd": look}, *([] if c else [restart]), check]
+    cd, files, up = cmp
+    svc = str(cf.get("csvc") or "")
+    if len(files) == 1 and libs and _SPL_RAW_RX.match(spl):
+        f, bak = q(files[0]), q(files[0] + ".bak-kervax")
+        rx = spl.replace(".", "\\.")
+        edit = {"id": "pgss_compose", "arg": svc, "cmd": "\n".join([
+            cd, f"sudo cp -p {f} {bak}",
+            f"sudo sed -i -E 's/({_SPL}=[^A-Za-z0-9_]?{rx})([^A-Za-z0-9_,]|$)/\\1,{PGSS}\\2/' {f}", f"diff {bak} {f}"])}
+        undo = "\n".join([drop, cd, f"sudo cp -p {bak} {f}", up])
+    else:
+        edit = {"id": "pgss_compose_grep", "arg": ",".join(new),
+                "cmd": "\n".join([cd, f"grep -n {_SPL} " + " ".join(q(n) for n in files)])}
+        undo = "\n".join([drop, cd, up])
+    return [create, edit, {"id": "pgss_compose_up", "cmd": "\n".join([cd, up])}, check,
+            {"id": "pgss_undo_compose", "undo": True, "cmd": undo}]
 
 
 # Что грузит MySQL/MariaDB (dbstat-setup 0.11): разница счетчиков SHOW GLOBAL STATUS со снимком примерно
@@ -578,6 +722,8 @@ def view(rep: dict, now: datetime) -> list[dict] | None:
         # у MySQL свои счетчики - отдельным полем, "load" остается за PostgreSQL
         if x.get("engine") == "mysql":
             o["load"], o["my"] = None, lv
+        elif x.get("engine") == "pg":
+            o["pgss_fix"] = pgss_fix(x, rep)
         # ClickHouse и Redis - факты для карточки как есть: куски, мутации, реплики, вставки, запросы;
         # память, снимок, вытеснение, тяжелые команды
         if x.get("engine") == "clickhouse":

@@ -94,6 +94,7 @@ import { JournalCard, JournalModal, journalBlocker } from './UnitJournal'
 import { LinksCard, NetTile, TrafficCard, type Tone } from './NetLinks'
 import { DiskWritersBlock, NetUsersCard } from './Usage'
 import { SoftwareCard } from './Software'
+import { FixSteps } from './FixSteps'
 import { GpuCard, GpuChip } from './Gpu'
 import { KnownServerList } from './KnownDialog'
 import { MaintBanner, MaintChip } from './MaintModal'
@@ -868,7 +869,7 @@ function serverSecInfo(c: {
   const nb = s.noboot_advice?.units ?? []
   if (nb.length) add('units', 1, t('после перезагрузки не запустятся {list}: работают, но не включены', { list: shortList(nb, t) }))
   // как в карточке SSH: при проблеме совет не повторяем
-  if (!issues.some((i) => i.kind === 'ssh_risk')) for (const a of s.ssh_advice ?? []) add('access', a.level, a.text)
+  if (!issues.some((i) => i.kind === 'ssh_risk')) for (const a of s.ssh_advice ?? []) if (!a.muted) add('access', a.level, a.text)
   const ac = s.access_advice
   if (ac?.stale.length) add('access', 1, t('учетки с доступом, в которые давно не входят: {list}', { list: shortList(ac.stale, t) }))
   if (ac?.weak.length) add('access', 1, t('слабые SSH-ключи у {list}', { list: shortList(ac.weak, t) }))
@@ -2916,31 +2917,14 @@ function osFixText(st: OsFixStep, t: (k: string, p?: Record<string, string | num
   }
 }
 
+// Шаги "как исправить" у советов по ОС: разметка и "Копировать" - общий FixSteps, здесь тексты по
+// id и когда пункт уйдет сам. SSH и доступы (accessFixText), pg_stat_statements в "Что грузит базу"
+// (ServicesPage) зовут FixSteps со своими текстами
 function OsFix({ steps }: { steps: OsFixStep[] }) {
   const { t } = useI18n()
-  const [copied, setCopied] = useState(-1)
   return (
-    <div className="osupd-fix">
-      {steps.map((st, i) => (
-        <div key={st.id + i} className="osupd-step">
-          {st.alt && <div className="osupd-alt">{t('или')}</div>}
-          <div className="muted small">{osFixText(st, t)}</div>
-          {st.cmd && (
-            <div className="agent-advice-cmd">
-              <pre>{st.cmd}</pre>
-              <button className="ghost" onClick={() => {
-                navigator.clipboard?.writeText(st.cmd ?? '')
-                setCopied(i)
-                window.setTimeout(() => setCopied(-1), 1500)
-              }}>
-                {copied === i ? t('Скопировано') : t('Копировать')}
-              </button>
-            </div>
-          )}
-        </div>
-      ))}
-      <div className="muted small">{t('После этих шагов пункт уйдет сам в течение часа: агент пересчитывает обновления раз в час.')}</div>
-    </div>
+    <FixSteps steps={steps} text={(st) => osFixText(st, t)}
+      foot={t('После этих шагов пункт уйдет сам в течение часа: агент пересчитывает обновления раз в час.')} />
   )
 }
 
@@ -3698,12 +3682,40 @@ function useMuteToggle(s: Server, onChanged: () => void) {
   return { busy, toggle }
 }
 
+// Шаг "как исправить" у SSH (выключить пароль) и "как отключить" у заброшенной учетки: команды под
+// ноду собирает бэкенд (ssh_audit, access_audit), тексты здесь по id
+function accessFixText(st: OsFixStep, t: (k: string, p?: Record<string, string | number>) => string): string {
+  const p = { arg: st.arg ?? '', on: st.on ?? '' }
+  switch (st.id) {
+    case 'ssh_key_add': return t('Сначала ключ для {arg}: пароль задан, SSH-ключей нет, последний вход {on}. После выключения паролей эта учетка не войдет. Вставьте свой публичный ключ (строку ssh-ed25519 ...) вместо <public-key> и проверьте вход по ключу в новом окне.', p)
+    case 'ssh_key_check': return t('{arg} входила по паролю {on}, хотя ключ есть: проверьте вход по ключу в новом окне или добавьте нужный ключ.', p)
+    case 'ssh_dropin': return t('Выключить вход по паролю отдельным файлом. В sshd побеждает первое значение, Include sshd_config.d/*.conf стоит в начале sshd_config, а файлы читаются по алфавиту: 00- раньше 50-cloud-init.conf, где cloud-init на Ubuntu включает пароль.')
+    case 'ssh_conf': return t('У этой версии OpenSSH нет sshd_config.d: строка встает первой в sshd_config, а первое значение и побеждает. Копия - sshd_config.bak-nopass.')
+    case 'ssh_check': return t('Проверить, пока ничего не применено: sshd -t молчит, если конфиг в порядке, ниже должно быть no. Если yes - значение задано раньше или в sshd_config нет Include, найти где: sudo grep -rn PasswordAuthentication /etc/ssh/')
+    case 'ssh_reload': return t('Применить: открытые сессии не рвутся (на Ubuntu с ssh.socket тоже). Это окно не закрывайте, пока в новом окне не войдете по ключу: если не пускает, отсюда же откат.')
+    case 'ssh_undo': return t('Откат, если что-то не так:')
+    case 'ssh_match': return t('Если пароль нужен: только из своих сетей, из интернета - по ключу. Вместо <cidr> - ваши адреса или сети через запятую (192.0.2.10,198.51.100.0/24), иначе пароль выключится везде. Этот файл вместо файла выше, дальше та же проверка и reload, а для своего адреса sudo sshd -T -C user=root,host=x,addr=<адрес> | grep -i passwordauth должно дать yes. Пункт уйдет сам: панель смотрит, пускает ли SSH по паролю из интернета.')
+    case 'ssh_guard': return t('Если пароль нужен отовсюду: защита от перебора. fail2ban банит адрес после нескольких неудачных входов, здесь порт {arg} и журнал через systemd (на RHEL и похожих пакет из EPEL). Пункт при этом не уйдет, уйдет только приписка про перебор: пароль оставить - решение "вход по паролю нужен".', p)
+    case 'acc_alone': return t('Через другие учетки за 90 дней никто не входил: если отключить {arg}, на сервер может стать некому войти. Сначала проверьте вход другой учеткой с sudo или через консоль.', p)
+    case 'acc_check': return t('Сначала убедиться, что от {arg} ничего не работает: процессы, ее crontab, lingering (пользовательские юниты после выхода) и сервисы с User={arg}. Пусто и no crontab - ничего нет.', p)
+    case 'acc_lock': return t('Отключить: пароль заблокирован, срок учетки в прошлом - SSH не пустит ни по паролю, ни по ключу, cron и su для нее тоже перестанут работать. Обратимо.')
+    case 'acc_root_lock': return t('Заблокировать пароль {arg}: sudo и cron root продолжат работать. Срок учетки root не ставят (usermod -e): истекшая root ломает cron и su. Если в консоль сервера входите root по паролю, после блокировки не войдете - держите учетку с sudo.', p)
+    case 'acc_keys': return t('Убрать ключи: панель считает доступом любой ключ в authorized_keys. Файл переименовывается, а не удаляется.')
+    case 'acc_undo': return t('Вернуть, если учетка понадобится:')
+    case 'acc_delete': return t('Удалить совсем - необратимо: учетка пропадет, домашний каталог останется без хозяина (userdel -r удалит и его со всеми файлами). Лучше сначала поживите с отключенной.')
+    default: return st.id
+  }
+}
+
 // Доступы (helper changes-setup 0.5): кто может войти, чем, с sudo ли без пароля и когда входил.
 // Последний вход - по журналу sshd, не только по lastlog: ansible и CI ходят без терминала.
+// У заброшенной учетки рядом с "учетка нужна" - "как отключить": команды, после которых доступа
+// панель не видит и пункт уходит сам
 function AccessCard({ server: s, onChanged }: { server: Server; onChanged: () => void }) {
   const { t } = useI18n()
   const { isViewer } = useAuth()
   const { busy, toggle } = useMuteToggle(s, onChanged)
+  const [open, setOpen] = useState('')
   const v = s.access
   if (!v || v.accounts.length === 0) return null
   const probs = (s.problems ?? []).filter((p) => p.kind === 'access_risk')
@@ -3716,6 +3728,8 @@ function AccessCard({ server: s, onChanged }: { server: Server; onChanged: () =>
   const rows = [...v.accounts].sort((a, b) => rank[tone(a)] - rank[tone(b)])
   const stale = v.accounts.filter((a) => a.stale && !a.muted).length
   const nopw = v.accounts.filter((a) => a.nopasswd).length
+  // шаги открытой учетки - под списком, в тексте шагов ее имя
+  const openFix = v.accounts.find((a) => a.name === open && a.stale && !a.muted)?.fix ?? []
   return (
     <div className="chart-card net-card" id="mcard-access">
       <div className="net-head">
@@ -3741,6 +3755,7 @@ function AccessCard({ server: s, onChanged }: { server: Server; onChanged: () =>
       <div className="loc-results">
         {rows.map((a) => {
           const tn = tone(a)
+          const fix = a.stale && !a.muted ? (a.fix ?? []) : []
           return (
             <div key={a.name} className="loc-res acc-row">
               <span className={`lk-dot${tn ? ` lk-dot-${tn}` : ''}`} />
@@ -3761,6 +3776,11 @@ function AccessCard({ server: s, onChanged }: { server: Server; onChanged: () =>
               <div className={`acc-last ${a.stale && !a.muted ? 't-degraded' : 'muted'}`}>
                 {a.last ? t('вход {d}', { d: new Date(a.last * 1000).toLocaleDateString() }) : t('не входили')}
               </div>
+              {fix.length > 0 && (
+                <button className="ghost small row-act acc-act" onClick={() => setOpen(open === a.name ? '' : a.name)}>
+                  {open === a.name ? t('скрыть') : t('как отключить')}
+                </button>
+              )}
               {a.stale && !isViewer && (
                 <button className="ghost small row-act acc-act" disabled={busy === ACCESS_MUTE + a.name}
                   onClick={() => toggle(ACCESS_MUTE + a.name, !a.muted)}>
@@ -3771,8 +3791,12 @@ function AccessCard({ server: s, onChanged }: { server: Server; onChanged: () =>
           )
         })}
       </div>
+      {openFix.length > 0 && (
+        <FixSteps steps={openFix} text={(st) => accessFixText(st, t)}
+          foot={t('После этого учетка уйдет из заброшенных в течение 10 минут: helper changes-setup снимает учетки раз в 10 минут.')} />
+      )}
       <div className="net-foot">
-        {t('Входы по журналу sshd видны с {d}. Ненужную учетку заблокируйте (usermod -L -e 1 <имя>) или уберите ее ключи.', {
+        {t('Входы по журналу sshd видны с {d}. Как отключить заброшенную учетку - кнопка в ее строке, root - только passwd -l root, без срока учетки.', {
           d: v.seen_since ? new Date(v.seen_since * 1000).toLocaleDateString() : '-',
         })}
       </div>
@@ -3837,13 +3861,18 @@ function NoBootUnits({ server: s, onChanged }: { server: Server; onChanged: () =
 }
 
 // SSH: как пускает соединение из интернета (helper changes-setup 0.3). Судим только порт, открытый
-// снаружи по внешней проверке: SSH за белым списком с паролем - не дыра
-function SshLogin({ server: s }: { server: Server }) {
+// снаружи по внешней проверке: SSH за белым списком с паролем - не дыра. Совет виден и рядом с
+// проблемой: у него "как исправить" (готовые команды, сначала - кому добавить ключ) и решение "вход
+// по паролю нужен" - принятый совет уходит из "Требует действий", здесь приглушен с "вернуть"
+function SshLogin({ server: s, onChanged }: { server: Server; onChanged: () => void }) {
   const { t } = useI18n()
+  const { isViewer } = useAuth()
+  const { busy, toggle } = useMuteToggle(s, onChanged)
+  const [open, setOpen] = useState('')
   const v = s.ssh
   if (!v) return null
   const probs = (s.problems ?? []).filter((p) => p.kind === 'ssh_risk')
-  const notes = probs.length > 0 ? probs : (s.ssh_advice ?? [])
+  const adv = s.ssh_advice ?? []
   const openText = v.open === true ? t('открыт в интернет') : v.open === false ? t('закрыт снаружи') : t('снаружи не проверялся')
   const rootText = v.root === 'yes' ? (v.root_password ? t('по паролю') : t('по ключу')) : v.root === 'no' ? t('запрещен') : t('только по ключу')
   const top = v.fail_top ?? []
@@ -3852,8 +3881,30 @@ function SshLogin({ server: s }: { server: Server }) {
       <div className="net-head">
         <div className="chart-cap">SSH</div>
       </div>
-      {notes.map((p) => (
+      {probs.map((p) => (
         <div key={p.text} className={p.level >= 2 ? 'net-prob' : 'net-note'}>{p.text}</div>
+      ))}
+      {adv.map((a) => (
+        <div key={a.kind}>
+          <div className={`osupd-adv ${a.muted ? 'osupd-adv-off' : a.level >= 2 ? 'net-prob' : 'net-note'}`}>
+            <span className="osupd-adv-text">{a.text}</span>
+            {a.muted && <span className="osupd-adv-why">{t('вход по паролю нужен')}</span>}
+            {(a.fix?.length ?? 0) > 0 && !a.muted && (
+              <button className="ghost small row-act" onClick={() => setOpen(open === a.kind ? '' : a.kind)}>
+                {open === a.kind ? t('скрыть') : t('как исправить')}
+              </button>
+            )}
+            {!isViewer && a.key && (
+              <button className="ghost small row-act" disabled={busy === a.key} onClick={() => toggle(a.key!, !a.muted)}>
+                {a.muted ? t('вернуть') : t('вход по паролю нужен')}
+              </button>
+            )}
+          </div>
+          {open === a.kind && !a.muted && a.fix && (
+            <FixSteps steps={a.fix} text={(st) => accessFixText(st, t)}
+              foot={t('После выключения паролей пункт уйдет сам в течение 10 минут: helper changes-setup снимает настройки SSH раз в 10 минут.')} />
+          )}
+        </div>
       ))}
       <div className="net-tiles net-tiles-text">
         <NetTile label={t('Порт')} value={v.ports.join(', ')} sub={openText} />
@@ -6636,7 +6687,7 @@ function ServerDetail({
         {active === 'access' && (
           <div className="srv-sec">
             <div className="net-cards">
-              <SshLogin server={s} />
+              <SshLogin server={s} onChanged={onChanged} />
               <AccessCard server={s} onChanged={onChanged} />
             </div>
           </div>
@@ -6645,7 +6696,7 @@ function ServerDetail({
         {active === 'updates' && (
           <div className="srv-sec">
             <OsUpdates server={s} onChanged={onChanged} />
-            <SoftwareCard server={s} />
+            <SoftwareCard server={s} onChanged={onChanged} />
           </div>
         )}
 

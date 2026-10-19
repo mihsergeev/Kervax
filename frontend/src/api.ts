@@ -1201,6 +1201,7 @@ export type DbHealth = {
   load?: DbLoad | null // что грузит PostgreSQL за последний час (dbstat-setup 0.8)
   my?: MyLoad | null // что грузит MySQL/MariaDB за последний час (dbstat-setup 0.11)
   advice?: DbAdvice[] // советы по настройкам (dbstat-setup 0.9), текст по ключу k рисует фронт
+  pgss_fix?: OsFixStep[] // как включить pg_stat_statements: команды под экземпляр (db_health.pgss_fix)
   ch?: ChHealth // ClickHouse (dbstat-setup 0.10)
   rd?: RdHealth // Redis (dbstat-setup 0.10)
 }
@@ -1263,6 +1264,7 @@ export type DbLoad = {
   ck_t?: number | null
   ck_r?: number | null
   ms_all?: number
+  pbase?: number // 0 - в снимке часовой давности запросов еще не было (только что включили, dbstat-setup 0.14)
   top: DbLoadQuery[]
 }
 // MySQL/MariaDB за последний час (db_health.my_load_view): счетчики SHOW GLOBAL STATUS в пересчете на
@@ -1320,6 +1322,15 @@ export interface SockFix {
   apply?: string
   check?: string
   rollback?: string
+}
+
+// Как обновить старый образ внешнего прокси (docker_exposure.upgrade): target - на что, "" - своя
+// сборка; why - почему готовых команд нет (nohelper - нет helper'а sockfix-setup 0.2, иначе код
+// helper'а); steps - тексты во фронте по id, команды под ноду, arg - файл:строка или образ
+export interface ProxyUpgrade {
+  target: string
+  why?: string
+  steps: { id: string; cmd?: string; arg?: string }[]
 }
 
 export type MemLeak = {
@@ -1863,7 +1874,9 @@ export type BackupServerRepoExtra = {
   prune_err?: string // ошибка последнего неудачного прогона чистки (helper 0.30)
 }
 // группа снапшотов так, как её видит forget: хост и теги (prune-скрипт, раз в сутки)
-export type OsFixStep = { id: string; cmd?: string; arg?: string; alt?: boolean }
+// Шаг "как исправить" (рисует FixSteps): on - дата к тексту шага, alt - другой путь вместо шагов выше,
+// undo - откат (под чертой "откат", выполнять не по порядку)
+export type OsFixStep = { id: string; cmd?: string; arg?: string; on?: string; alt?: boolean; undo?: boolean }
 
 export type BackupGroup = {
   host: string
@@ -1980,7 +1993,8 @@ export type Server = {
     fail: number; accepted_password: number; open: boolean | null
     fail_top?: { ip: string; n: number }[] // откуда перебор, больше всех сверху
   } | null
-  ssh_advice?: { kind: string; level: number; text: string }[] | null
+  // вход по паролю на открытом SSH: key - решение "вход по паролю нужен" (muted), fix - как выключить
+  ssh_advice?: { kind: string; level: number; text: string; key?: string; muted?: boolean; fix?: OsFixStep[] }[] | null
   // не переживет перезагрузку: контейнеры без restart policy, юниты без enable
   noboot?: NoBoot | null
   noboot_advice?: { docker: string[]; units: string[] } | null
@@ -1994,8 +2008,12 @@ export type Server = {
   web_config?: { server: string; where: string; ok: boolean; err: string }[] | null
   // сертификаты nginx (helper webserver-setup 0.24): сколько дней до конца срока
   web_certs?: { where: string; file: string; label: string; days: number }[] | null
-  // внешние прокси со сборкой образа старше года (built - unix-секунды)
-  proxy_outdated?: { name: string; image: string; kind: string; version: string; built: number; age_days: number }[]
+  // внешние прокси со сборкой образа старше года (built - unix-секунды); key - решение "оставить как
+  // есть" в alert_mutes (proxyold:<контейнер>), muted - решение принято, fix - как обновить
+  proxy_outdated?: {
+    name: string; image: string; kind: string; version: string; built: number; age_days: number
+    key: string; muted?: boolean; fix?: ProxyUpgrade
+  }[]
   // нода умеет разобрать раздел по запросу (агент 2.24 + diskusage-setup 0.6)
   disk_analyze?: boolean
   // только что поставлена: установщик еще ставит helper'ы и прокси Docker
@@ -2480,6 +2498,7 @@ export interface AccessAccount {
   access: boolean
   stale: boolean
   muted: boolean
+  fix?: OsFixStep[] // у заброшенной: как отключить
 }
 
 // контейнер с ключами от хоста: flags - priv, caps, sock, host (docker_risk.view)
@@ -2601,6 +2620,20 @@ export type SoftwareItem = {
   left: number | null
   text: string
   where: { kind: 'container' | 'host'; name: string; src: string; ver: string }[]
+  // у кончившихся и скорых: ключ решения в alert_mutes и как исправить
+  mkey?: string
+  muted?: boolean
+  fix?: SwFixBlock[]
+}
+// способ уйти с версии (software.fix): шаги для первого места, остальные места с тем же образом -
+// others; args - подстановки в тексты шагов (продукт, from, to, контейнер, образ, пакеты)
+export type SwFixBlock = {
+  name: string
+  kind: 'container' | 'host'
+  mode: string
+  others: string[]
+  args: Record<string, string>
+  steps: { id: string; cmd?: string }[]
 }
 export type SoftwareOut = {
   items: SoftwareItem[]

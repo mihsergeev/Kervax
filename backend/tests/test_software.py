@@ -1,5 +1,6 @@
 """Версии без поддержки (app/software.py): что стоит в контейнерах и на хосте и когда у этого
 кончается поддержка по снимку endoflife.date."""
+import re
 from datetime import date, datetime, timezone
 
 from sqlalchemy import select
@@ -19,9 +20,13 @@ TBL = {"built": "2026-10-18", "source": "endoflife.date", "products": {
     "mariadb": {"name": "MariaDB", "cycles": [["10.6", "2026-07-06"], ["11.4", "2029-05-29"]]},
     "rabbitmq": {"name": "RabbitMQ", "cycles": [["3.8", "2022-07-31"]]},
     "traefik": {"name": "Traefik", "cycles": [["2.11", "2026-09-07"]]},
-    "nodejs": {"name": "Node.js", "cycles": [["18", "2025-04-30"]]},
+    "nodejs": {"name": "Node.js", "cycles": [["24", "2028-04-30"], ["18", "2025-04-30"]]},
     "eclipse-temurin": {"name": "Java", "cycles": [["8", "2030-12-31"], ["17", "2027-10-31"]]},
     "debian": {"name": "Debian", "cycles": [["10", "2024-06-30"]]},
+    "clickhouse": {"name": "ClickHouse", "cycles": [["26.8", "2027-08-27"], ["25.8", "2026-08-28"]]},
+    "grafana": {"name": "Grafana", "cycles": [["13.2", "2027-05-18"], ["13.1", "2027-03-20"], ["12.4", "2027-05-24"],
+                                              ["11.6", "2026-05-01"]]},
+    "alpine-linux": {"name": "Alpine", "cycles": [["3.24", "2028-06-01"], ["3.20", "2026-04-01"]]},
 }}
 
 
@@ -84,6 +89,9 @@ def test_container_versions(monkeypatch):
     # метка версии - только если это цикл продукта, у traefik тега версии часто нет
     assert cv(_c("edge", "traefik:latest", img_ver="v2.11.20"), {}) == ({"traefik": ("2.11.20", "label")}, None)
     assert cv(_c("edge", "traefik:latest", img_ver="build-77"), {}) == ({}, "traefik")
+    # метка от базового образа (Ubuntu 22.04) старше всех циклов, но это не версия продукта: верим тегу
+    assert cv(_c("ch", "clickhouse/clickhouse-server:25.8.4.13", img_ver="22.04"), {}) == (
+        {"clickhouse": ("25.8.4.13", "tag")}, None)
     # кодовое имя дистрибутива и Java
     assert cv(_c("old", "debian:buster-slim"), {}) == ({"debian": ("10", "tag")}, None)
     assert cv(_c("j", "eclipse-temurin:17-jre", ver={"JAVA_VERSION": "jdk-17.0.11+9"}), {}) == (
@@ -97,11 +105,11 @@ def test_host_packages(monkeypatch):
              ["nginx", "1.27.4-1~jammy"], ["nodejs", "18.20.4-1nodesource1"],
              ["mariadb-server", "1:10.6.16+maria~ubu2204"], ["redis-server", "5:6.0.16-1ubuntu1"], ["openssl", "3.0.2"]]
     assert software.host_versions(items) == [
-        {"p": "mariadb", "v": "10.6.16", "pkg": "mariadb-server"},
-        {"p": "nginx", "v": "1.27.4", "pkg": "nginx"},
-        {"p": "nodejs", "v": "18.20.4", "pkg": "nodejs"},
-        {"p": "php", "v": "7.4.33", "pkg": "php7.4-fpm, php7.4-cli"},
-        {"p": "postgresql", "v": "12.22", "pkg": "postgresql-12"},
+        {"p": "mariadb", "v": "10.6.16", "pkg": "mariadb-server", "full": "1:10.6.16+maria~ubu2204"},
+        {"p": "nginx", "v": "1.27.4", "pkg": "nginx", "full": "1.27.4-1~jammy"},
+        {"p": "nodejs", "v": "18.20.4", "pkg": "nodejs", "full": "18.20.4-1nodesource1"},
+        {"p": "php", "v": "7.4.33", "pkg": "php7.4-fpm, php7.4-cli", "full": "7.4.33-1+ubuntu20.04.1+deb.sury.org+1"},
+        {"p": "postgresql", "v": "12.22", "pkg": "postgresql-12", "full": "12.22-1.pgdg20.04+1"},
     ]
     assert software.host_versions(None) == [] and software.host_versions([["x"], "y"]) == []
 
@@ -161,7 +169,7 @@ async def test_refresh_and_api(tmp_path, client, auth_headers, monkeypatch):
     await software.refresh(factory, NOW)
     async with factory() as s:
         got = {r.id: r.sw_host for r in await s.scalars(select(Server))}
-    assert got == {1: [{"p": "php", "v": "7.4.33", "pkg": "php7.4-fpm"}], 2: None}
+    assert got == {1: [{"p": "php", "v": "7.4.33", "pkg": "php7.4-fpm", "full": "7.4.33-1+deb.sury.org+1"}], 2: None}
     await engine.dispose()
     software._last_run = None
 
@@ -177,3 +185,190 @@ async def test_refresh_and_api(tmp_path, client, auth_headers, monkeypatch):
     assert sw["agent_ok"] and sw["built"] == "2026-10-18" and not sw["pkgs"]
     assert [(g["key"], g["text"].split(":")[0]) for g in sw["items"]] == [
         ("nginx-1.27", "nginx 1.27 без поддержки с 24.06.2025"), ("postgresql-12", "PostgreSQL 12 без поддержки с 21.11.2024")]
+    # у пункта - как исправить и ключ решения; решение убирает его из Требует действий, в карточке он остается
+    assert [(g["mkey"], g["muted"], g["fix"][0]["mode"]) for g in sw["items"]] == [
+        ("swver:eol:nginx-1.27", False, "pull"), ("swver:eol:postgresql-12", False, "db")]
+    r = await client.patch(f"/api/servers/{sid}", json={"alert_mutes": ["swver:eol:nginx-1.27"]}, headers=auth_headers)
+    assert [a["key"] for a in r.json()["sw_advice"]] == ["postgresql-eol"]
+    sw = (await client.get(f"/api/servers/{sid}/software", headers=auth_headers)).json()
+    assert [(g["key"], g["muted"]) for g in sw["items"]] == [("nginx-1.27", True), ("postgresql-12", False)]
+
+
+def test_decisions(monkeypatch):
+    _tbl(monkeypatch)
+    rep = _rep(_c("mon", "grafana/grafana:13.1.0"), _c("db", "postgres:12"))
+    mutes = ["swver:soon:grafana-13.1"]
+    inv = software.inventory(rep, None, NOW, mutes)
+    assert [(g["key"], g["mkey"], g["muted"]) for g in inv["items"]] == [
+        ("postgresql-12", "swver:eol:postgresql-12", False), ("grafana-13.1", "swver:soon:grafana-13.1", True)]
+    assert [a["key"] for a in software.advice(rep, None, NOW, mutes)] == ["postgresql-eol"]
+    # отложено до конца поддержки: когда она кончилась, пункт снова виден, решение нужно новое
+    later = datetime(2027, 4, 1, tzinfo=timezone.utc)
+    assert [a["key"] for a in software.advice(rep, None, later, mutes)] == ["grafana-eol", "postgresql-eol"]
+
+
+def test_target_and_tag(monkeypatch):
+    _tbl(monkeypatch)
+    d = NOW.date()
+    # своя основная версия, если в ней есть поддерживаемая (Grafana 13.1 -> 13.2, не 12.4)
+    assert software.target("grafana", "13.1", d) == ("13.2", [])
+    # иначе самая новая поддерживаемая; кончающаяся меньше чем через полгода (13.1, PostgreSQL 14) не в счет
+    assert software.target("grafana", "11.6", d) == ("13.2", ["12.4"])
+    assert software.target("postgresql", "12", d) == ("18", [])
+    assert software.target("nginx", "1.27", d) == ("1.30", [])
+    assert software.target("traefik", "2.11", d) == (None, [])
+    monkeypatch.setattr(software, "table", lambda: {"products": {"x": {"cycles": [["2", "2027-01-01"], ["1", True]]}}})
+    assert software.target("x", "1", d) == ("2", [])  # поддерживаемой дольше полугода нет - хотя бы живая
+    nt = software.new_tag
+    assert nt("grafana", "13.1.0", "13.2") == "13.2" and nt("postgresql", "16-alpine", "18") == "18-alpine"
+    assert nt("traefik", "v2.11.57", "3.7") == "v3.7" and nt("debian", "bullseye-slim", "12") == "bookworm-slim"
+    assert nt("ubuntu", "focal", "26.04") == "26.04"
+    assert nt("nginx", "latest", "1.30") is None and nt("nginx", "", "1.30") is None
+    assert software._retag("docker.io/library/nginx:1.27-alpine@sha256:ab", "1.30-alpine") == "docker.io/library/nginx:1.30-alpine"
+    assert software._retag("registry.example.com:5000/web", "2") == "registry.example.com:5000/web:2"
+
+
+def _item(rep, key, host=None):
+    return next(g for g in software.inventory(rep, host, NOW)["items"] if g["key"] == key)
+
+
+def _ids(b):
+    return [s["id"] for s in b["steps"]]
+
+
+def _cmds(blocks) -> str:
+    return "\n".join(s.get("cmd", "") for b in blocks for s in b["steps"])
+
+
+def _sed(cmd: str, text: str) -> str:
+    """sed -E из команды на Python: что именно поменяется в compose-файле."""
+    pat, rep = re.search(r'sed -i -E "s#(.*?)#(.*?)#" ', cmd).groups()
+    pat, rep = (x.replace('\\"', '"').replace("\\$", "$").replace("[[:space:]]", "[ \t]") for x in (pat, rep))
+    return re.sub(pat, rep, text, flags=re.M)
+
+
+def test_fix_image(monkeypatch):
+    _tbl(monkeypatch)
+    rep = _rep(_c("mon-grafana", "grafana/grafana:13.1.0", binds=["/srv/mon/data"]))
+    [b] = software.fix(_item(rep, "grafana-13.1"), rep, NOW)
+    assert (b["name"], b["kind"], b["mode"], b["others"]) == ("mon-grafana", "container", "image", [])
+    assert {k: b["args"][k] for k in ("name", "from", "to", "c", "new")} == {
+        "name": "Grafana", "from": "13.1", "to": "13.2", "c": "mon-grafana", "new": "grafana/grafana:13.2"}
+    assert _ids(b) == ["hint_grafana", "c_prep", "img_pull", "c_backup", "img_apply", "c_check", "c_rollback"]
+    cmd = {s["id"]: s.get("cmd", "") for s in b["steps"]}
+    # compose-проект и тома находит первая команда по меткам контейнера, агент их не присылает
+    assert cmd["c_prep"].startswith("C=mon-grafana\n")
+    assert '{{index .Config.Labels "com.docker.compose.project.config_files"}}' in cmd["c_prep"]
+    assert "{{range .Mounts}}{{if .RW}}" in cmd["c_prep"] and "B=/var/backups/kervax-upgrade/$C" in cmd["c_prep"]
+    # новый образ - заранее; копия при остановленном контейнере, старый образ под своим тегом
+    assert cmd["img_pull"] == "sudo docker pull grafana/grafana:13.2"
+    assert 'sudo docker stop -t 60 "$C" && sudo tar -czpf "$B/$T.tgz"' in cmd["c_backup"]
+    assert '"$D/.env"' in cmd["c_backup"] and '"kervax-old:$C"' in cmd["c_backup"]
+    # только строка image со старым образом, up - этого сервиса и только если замена нашлась
+    yml = ("services:\n  grafana:\n    image: grafana/grafana:13.1.0\n  render:\n"
+           "    image: \"grafana/grafana:13.1.0-ubuntu\"\n    labels: [grafana/grafana:13.1.0]\n")
+    assert _sed(cmd["img_apply"], yml) == yml.replace("image: grafana/grafana:13.1.0\n", "image: grafana/grafana:13.2\n")
+    assert _sed(cmd["img_apply"], "    image: 'grafana/grafana:13.1.0'\n") == "    image: 'grafana/grafana:13.2'\n"
+    assert cmd["img_apply"].endswith(
+        "sudo grep -nF grafana/grafana:13.2 $(echo \"$F\" | tr , ' ') && sudo docker compose -p \"$P\" $A up -d --no-deps \"$S\"")
+    # откат: данные новой версии в сторону, архив на место, старый compose-файл с ним
+    assert '"$m.kervax-new"' in cmd["c_rollback"] and 'tar -C / -xzpf "$X"' in cmd["c_rollback"]
+    assert "kervax-old" not in cmd["c_rollback"]
+    # смена основной версии - предупреждение
+    rep = _rep(_c("edge", "traefik:v2.11.57"))
+    monkeypatch.setattr(software, "table", lambda: TBL | {"products": TBL["products"] | {
+        "traefik": {"name": "Traefik", "cycles": [["3.7", False], ["2.11", "2026-09-07"]]}}})
+    [b] = software.fix(_item(rep, "traefik-2.11"), rep, NOW)
+    assert _ids(b)[:3] == ["major", "hint_traefik", "c_prep"] and b["args"]["new"] == "traefik:v3.7"
+
+
+def test_fix_db_without_upgrade_commands(monkeypatch):
+    _tbl(monkeypatch)
+    rep = _rep(_c("db-1", "postgres:12"), _c("db-2", "postgres:12"), _c("my", "mariadb:10.6"),
+               _c("q", "rabbitmq:3.8.5-management"), db=[("pg", "db-1", "12.22")])
+    [b] = software.fix(_item(rep, "postgresql-12"), rep, NOW)
+    assert (b["mode"], b["name"], b["others"], b["args"]["to"]) == ("db", "db-1", ["db-2"], "18")
+    assert _ids(b) == ["c_prep", "db_dump_pg", "db_copy", "path_postgresql"]
+    assert "pg_dumpall -U \"${POSTGRES_USER:-postgres}\"" in _cmds([b]) and 'docker stop -t 120 "$C"' in _cmds([b])
+    for key in ("postgresql-12", "mariadb-10.6", "rabbitmq-3.8"):
+        blocks = software.fix(_item(rep, key), rep, NOW)
+        cmds = _cmds(blocks)
+        # базу командой не обновляем: ни нового образа, ни правки compose, ни пересоздания
+        assert not re.search(r"docker pull|sed -i|up -d|compose -p|build", cmds), key
+    [b] = software.fix(_item(rep, "mariadb-10.6"), rep, NOW)
+    assert _ids(b) == ["c_prep", "db_copy", "path_mariadb", "db_inplace"]
+
+
+def test_fix_app_images(monkeypatch):
+    _tbl(monkeypatch)
+    v = {"NGINX_VERSION": "1.27.4"}
+    rep = _rep(_c("web", "nginx:latest", ver=v), _c("web-2", "nginx:latest", ver=v), _c("app-a", "app-a-web", ver=v),
+               _c("api", "registry.example.com/shop/api:prod", ver=v), _c("stale", "sha256:0123abcd", ver=v),
+               _c("gw", "nginx:1.27-alpine"))
+    blocks = software.fix(_item(rep, "nginx-1.27"), rep, NOW)
+    # контейнеры с одним образом - один способ, способов не больше FIX_MAX
+    assert [(b["name"], b["mode"], b["others"]) for b in blocks] == [
+        ("web", "pull", ["web-2"]), ("app-a", "rebuild", []), ("api", "ci", []), ("stale", "dangling", [])]
+    pull, rebuild, ci, dangling = blocks
+    assert _ids(pull) == ["c_prep", "c_backup", "pull_apply", "c_check", "c_rollback"]
+    # тег без версии: откат - прежний образ под старым именем
+    assert 'sudo docker tag "kervax-old:$C" nginx:latest && sudo docker compose' in _cmds([pull])
+    assert _ids(rebuild) == ["c_prep", "rb_from", "c_backup", "rb_build", "c_check", "c_rollback"]
+    assert 'build --pull "$S"' in _cmds([rebuild]) and "'^FROM'" in _cmds([rebuild])
+    # собран не здесь - только слова, откуда версия
+    assert _ids(ci) == ["c_ci"] and ci["args"]["env"] == "NGINX_VERSION=1.27.4" and _cmds([ci]).strip() == ""
+    assert _ids(dangling) == ["c_dangling"]
+    rep = _rep(_c("gw", "nginx:1.27-alpine"))
+    [b] = software.fix(_item(rep, "nginx-1.27"), rep, NOW)
+    assert b["mode"] == "image" and b["args"]["new"] == "nginx:1.30-alpine"
+
+
+def test_fix_host(monkeypatch):
+    _tbl(monkeypatch)
+    host = [{"p": "php", "v": "7.4.33", "pkg": "php7.4-fpm, php7.4-cli", "full": "7.4.33-1+deb.sury.org+1"},
+            {"p": "nodejs", "v": "18.20.4", "pkg": "nodejs", "full": "18.20.4-1nodesource1"},
+            {"p": "nginx", "v": "1.27.4", "pkg": "nginx", "full": "1.27.4-1~jammy"},
+            {"p": "postgresql", "v": "12.22", "pkg": "postgresql-12", "full": "12.22-1.pgdg22.04+1"},
+            {"p": "mariadb", "v": "10.6.16", "pkg": "mariadb-server", "full": "1:10.6.16+maria~ubu2204"}]
+    rep = {"os": "Ubuntu 22.04.5 LTS"}
+
+    def one(key):
+        [b] = software.fix(_item(rep, key, host), rep, NOW)
+        assert b["kind"] == "host"
+        return b, {s["id"]: s.get("cmd", "") for s in b["steps"]}
+
+    b, cmd = one("php-7.4")
+    assert _ids(b) == ["h_php_install", "h_php_switch", "h_php_check", "h_php_remove"] and b["args"]["to"] == "8.4"
+    # рядом со старой, с теми же расширениями (каких нет для новой - пропускает)
+    assert "'php7.4-*'" in cmd["h_php_install"] and "sed 's/^php7\\.4-/php8.4-/'" in cmd["h_php_install"]
+    assert cmd["h_php_install"].endswith("xargs -r sudo apt install -y")
+    assert "sudo php-fpm8.4 -t" in cmd["h_php_check"] and cmd["h_php_remove"].startswith("sudo apt-get remove $(dpkg-query")
+    b, cmd = one("nodejs-18")
+    assert "s#node_[0-9]*\\.x#node_24.x#g" in cmd["h_node_repo"]
+    assert cmd["h_node_rollback"].endswith("--allow-downgrades nodejs=18.20.4-1nodesource1")
+    b, cmd = one("nginx-1.27")
+    assert _ids(b) == ["h_etc_backup", "h_nginx_upgrade", "h_nginx_check", "h_apt_rollback"]
+    assert cmd["h_apt_rollback"] == "sudo apt install -y --allow-downgrades nginx='1.27.4-1~jammy'"
+    # базы на хосте: дамп своего кластера и путь словами, без команд переезда
+    b, cmd = one("postgresql-12")
+    assert _ids(b) == ["h_pg_dump", "h_pg_path"] and "pg_dumpall --cluster 12/main" in cmd["h_pg_dump"]
+    b, cmd = one("mariadb-10.6")
+    assert _ids(b) == ["h_my_dump", "path_mariadb", "h_repo"]
+    assert not re.search(r"pg_upgradecluster|pg_dropcluster|apt install -y (postgresql|mariadb)", _cmds(
+        software.fix(_item(rep, "postgresql-12", host), rep, NOW) + software.fix(_item(rep, "mariadb-10.6", host), rep, NOW)))
+    # не apt - только слова
+    rep = {"os": "AlmaLinux 9.4 (Seafoam Ocelot)"}
+    assert [(_ids(b), _cmds([b]).strip()) for b in software.fix(_item(rep, "postgresql-12", host), rep, NOW)] == [
+        (["h_rpm", "path_postgresql"], "")]
+
+
+def test_fix_commands_are_neutral(monkeypatch):
+    """Команды одни для обоих языков панели: без кириллицы."""
+    _tbl(monkeypatch)
+    host = [{"p": "php", "v": "7.4.33", "pkg": "php7.4-fpm", "full": "7.4.33-1+deb.sury.org+1"},
+            {"p": "postgresql", "v": "12.22", "pkg": "postgresql-12", "full": ""}]
+    rep = _rep(_c("mon", "grafana/grafana:13.1.0"), _c("db", "postgres:12"), _c("web", "nginx:latest", ver={"NGINX_VERSION": "1.27.4"}))
+    rep["os"] = "Debian GNU/Linux 12 (bookworm)"
+    for g in software.inventory(rep, host, NOW)["items"]:
+        if g["state"] != "ok":
+            assert not re.search("[а-яА-Я]", _cmds(software.fix(g, rep, NOW))), g["key"]
