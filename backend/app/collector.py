@@ -4693,8 +4693,8 @@ async def web_error_where(session: AsyncSession, server_id: int, now: datetime,
 
 
 def web_where_text(where: dict) -> str:
-    """"Больше всего: nginx (anketa.shop.example, mobile.shop.example +2) - 41. Коды: 502 - 30, 504 - 11. Чаще всего
-    падает: /api/v1/anketa - 38.» Каждый кусок - только если данные есть: коды и пути
+    """"Больше всего: nginx (form.shop.example, mobile.shop.example +2) - 41. Коды: 502 - 30, 504 - 11. Чаще всего
+    падает: /api/v1/form - 38.» Каждый кусок - только если данные есть: коды и пути
     шлёт helper с 0.12."""
     out = []
     logs = [x for x in where.get("logs") or [] if x[1] > 0]

@@ -408,7 +408,7 @@ async def test_5xx_bursts_within_an_hour_are_one_story(tmp_path, monkeypatch):
                 if errors:  # ошибки размазаны по всем минутам окна, как у пачек web-a
                     s.add(WebErrorSample(server_id=1, ts=ts, src_ts=int(ts.timestamp()),
                                          e5=max(1, errors // 15), rpm=30,
-                                         log="/var/log/nginx/access.log", label="anketa.shop.example"))
+                                         log="/var/log/nginx/access.log", label="form.shop.example"))
             await s.commit()
         await collector.evaluate_servers(factory, settings, now)
         return list(sent)
@@ -432,8 +432,8 @@ async def test_error_minutes_are_stored_once_and_shown_per_log(client, auth_head
     token, sid = r.json()["token"], r.json()["server"]["id"]
     block = {"ts": int(time.time()), "rpm": 500, "e5": 44, "logs": [
         {"log": "/var/log/nginx/access.log", "rpm": 450, "e5": 44,
-         "sites": ["anketa.shop.example", "mobile-app-prod.shop.example", "mobile.shop.example"],
-         "c5": {"502": 30, "504": 14}, "p5": [{"p": "/api/v{n}/anketa", "n": 38}]},
+         "sites": ["form.shop.example", "mobile-app-prod.shop.example", "mobile.shop.example"],
+         "c5": {"502": 30, "504": 14}, "p5": [{"p": "/api/v{n}/form", "n": 38}]},
         {"log": "/var/log/nginx/other.log", "rpm": 50, "e5": 0, "sites": ["ok.shop.example"]},
     ]}
     report = {"hostname": "h", "os": "U", "agent_version": "2.10", "cpu_percent": 5,
@@ -447,10 +447,10 @@ async def test_error_minutes_are_stored_once_and_shown_per_log(client, auth_head
     rows = r.json()
     assert len(rows) == 1  # лог без ошибок в историю не попадает
     row = rows[0]
-    assert row["label"] == "anketa.shop.example, mobile-app-prod.shop.example +1"
+    assert row["label"] == "form.shop.example, mobile-app-prod.shop.example +1"
     assert row["errors"] == 44 and row["minutes"] == 1  # не 132: повторы отсечены
     assert row["codes"] == {"502": 30, "504": 14}
-    assert row["paths"] == [{"p": "/api/v{n}/anketa", "n": 38}]
+    assert row["paths"] == [{"p": "/api/v{n}/form", "n": 38}]
 
 
 def test_log_label_names_container_and_merges_old_records():
@@ -738,24 +738,24 @@ def test_chart_bands_merge_pods_of_one_deployment_and_same_apps():
     logs = [
         {"log": "/var/log/pods/a/0.log", "name": "default/ingress-nginx-controller-5c67cd68dd-djg5j", "rpm": 300},
         {"log": "/var/log/pods/b/0.log", "name": "default/ingress-nginx-controller-5c67cd68dd-xwm58", "rpm": 200},
-        {"log": "docker:x47reo0hm6t0s5gwq1fziepm-082822316403", "name": "anketa", "rpm": 7},
-        {"log": "docker:x47reo0hm6t0s5gwq1fziepm-093000000000", "name": "anketa", "rpm": 3},
+        {"log": "docker:x47reo0hm6t0s5gwq1fziepm-082822316403", "name": "form", "rpm": 7},
+        {"log": "docker:x47reo0hm6t0s5gwq1fziepm-093000000000", "name": "form", "rpm": 3},
     ]
     block = {"ts": int(now.timestamp()), "rpm": 510, "e5": 0, "logs": logs}
     tops, _ = collector.web_breakdown({"web-rate": block}, now)
     assert tops == [{"k": "default/ingress-nginx-controller", "r": 500, "e": 0},
-                    {"k": "anketa", "r": 10, "e": 0}]
+                    {"k": "form", "r": 10, "e": 0}]
 
 
 def test_ingress_pod_label_has_its_hosts_and_a_stable_key():
     """corp-ai-dev: у логов ingress-nginx в панели было только имя пода, хотя
     хосты Ingress лежат в его nginx.conf. Helper 0.18 их читает; в подписи - контроллер и
     домены, ключ (для сведения строк и глушения) - только контроллер."""
-    hosts = ["corpassist-dev.corp.example", "engassist-dev.corp.example",
-             "engassist-dev-mon.corp.example", "engassist-dev-portainer.corp.example"]
+    hosts = ["chat-dev.corp.example", "docs-dev.corp.example",
+             "docs-dev-mon.corp.example", "docs-dev-portainer.corp.example"]
     label = collector.web_log_label(
         {"name": "default/ingress-nginx-controller-6c657c6487-5r2sn", "sites": hosts})
-    assert label == "default/ingress-nginx-controller (corpassist-dev.corp.example, engassist-dev.corp.example +2)"
+    assert label == "default/ingress-nginx-controller (chat-dev.corp.example, docs-dev.corp.example +2)"
     assert collector.web_label_key(label) == "default/ingress-nginx-controller"
     # старые записи (имя пода без доменов) сводятся в ту же строку
     assert collector.web_label_key("default/ingress-nginx-controller-6c657c6487-865hj") == \
@@ -774,7 +774,7 @@ async def test_error_lines_are_kept_and_downloadable(client, auth_headers):
     for i in range(2):  # две минуты с ошибками
         block = {"ts": int(time.time()) - 60 + i, "rpm": 100, "e5": 3, "logs": [
             {"log": "/var/log/nginx/access.log", "rpm": 100, "e5": 3,
-             "sites": ["anketa.shop.example"], "c5": {"500": 3},
+             "sites": ["form.shop.example"], "c5": {"500": 3},
              "l5": [line.replace("chat_id=1", f"chat_id={i}{j}") for j in range(3)]}]}
         report = {"hostname": "h", "os": "U", "agent_version": "2.10", "cpu_percent": 5,
                   "mem_used": 1, "mem_total": 2, "extras": {"web-rate": block}}

@@ -87,24 +87,24 @@ async def test_run_http_https_fallback_to_http(monkeypatch):
 
     monkeypatch.setattr("app.checks.httpx.AsyncClient", FakeClient)
     check = types.SimpleNamespace(
-        target="play-win.casino", timeout_ms=3000, degraded_ms=2000,
+        target="casino.example", timeout_ms=3000, degraded_ms=2000,
         method="GET", keyword_up="", keyword_down="", expected_status="200-399",
     )
     outcome = await checks_exec._run_http(check)
     # HTTPS не поднялся, отвечает только HTTP → это degraded (а не «всё ок»)
     assert outcome.status == "degraded"
     assert "HTTPS" in outcome.message
-    assert calls == ["https://play-win.casino", "http://play-win.casino"]
+    assert calls == ["https://casino.example", "http://casino.example"]
 
     # но если схему указали явно (http://) — фолбэка нет, это осознанный http → up
     calls.clear()
     check_http = types.SimpleNamespace(
-        target="http://play-win.casino", timeout_ms=3000, degraded_ms=2000,
+        target="http://casino.example", timeout_ms=3000, degraded_ms=2000,
         method="GET", keyword_up="", keyword_down="", expected_status="200-399",
     )
     outcome = await checks_exec._run_http(check_http)
     assert outcome.status == "up"
-    assert calls == ["http://play-win.casino"]
+    assert calls == ["http://casino.example"]
 
 
 async def test_run_http_basic_auth_passed(monkeypatch):

@@ -373,7 +373,7 @@ async def test_recovery_from_full_outage_is_silent(tmp_path, monkeypatch):
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     async with factory() as s:
-        s.add(Check(name="cake.ru", type="http", target="https://cake.ru",
+        s.add(Check(name="site.example", type="http", target="https://site.example",
                     enabled=True, check_locations=True, last_status="down",
                     consecutive_fails=5))
         s.add(Location(name="Россия, Санкт-Петербург", url="", enabled=True))

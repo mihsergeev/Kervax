@@ -387,7 +387,7 @@ async def test_domain_alert_collapses_by_registrable_domain(tmp_path, monkeypatc
     engine, factory = create_engine_and_factory(f"sqlite+aiosqlite:///{db}")
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
-    subs = ["gitlab", "y", "mmbot", "msg", "env"]
+    subs = ["gitlab", "y", "bot", "msg", "env"]
     ids: list[int] = []
     async with factory() as s:
         for sub in subs:

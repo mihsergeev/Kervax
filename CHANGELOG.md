@@ -4,6 +4,13 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.4.292] - 2026-10-19
+
+### Changed
+- В тестах, комментариях и прошлых записях CHANGELOG вместо поддоменов и доменов, взятых из живых
+  случаев, нейтральные: form.shop.example, chat-dev.corp.example, docs-dev.corp.example,
+  casino.example, site.example. Поведение панели и агента не меняется.
+
 ## [1.4.291] - 2026-10-19
 
 "Как исправить" у старого образа прокси, входа по паролю SSH, давно не входивших учеток, конца
@@ -3697,7 +3704,7 @@ logerr-setup 0.3 (ставит плейбук helper'ов).
   называлась только именем пода, хотя хосты Ingress лежат в nginx.conf контроллера.
   Helper читает конфиг nginx внутри контейнера через /proc/<pid>/root (в контейнер ничего
   не запускает): у ingress-nginx это все хосты его Ingress. Подпись - контроллер и домены:
-  "default/ingress-nginx-controller (corpassist-dev.corp.example, engassist-dev.corp.example
+  "default/ingress-nginx-controller (chat-dev.corp.example, docs-dev.corp.example
   +2)", реплики контроллера - одна полоса графика.
 
 ### Fixed
@@ -3727,7 +3734,7 @@ logerr-setup 0.3 (ставит плейбук helper'ов).
   контейнер <id приложения>-<время деплоя>, например
   s12dfgno3a84p74gufgmnaca-093440651095: в панели это ни о чем не говорило и менялось с
   каждым деплоем, а вместе с именем - полоса графика и заглушенный лог. Теперь подпись
-  берется из метки coolify.resourceName: viola, anketa, routes.
+  берется из метки coolify.resourceName: viola, form, routes.
 - Полосы графика запросов складываются по подписи: поды одного деплоймента - одна полоса,
   два контейнера одного приложения - тоже. Имя пода меняется с каждым выкатом, и полоса
   менялась вместе с ним.
@@ -3881,11 +3888,11 @@ logerr-setup 0.3 (ставит плейбук helper'ов).
 
 ### Changed
 - Алерт по ошибкам 5xx стал понятным. Было "ошибки 5xx: 9.07% за 15 минут (41 из 452) -
-  сверху anketa.shop.example 26/мин", и что такое "сверху", было непонятно, а в первом
+  сверху form.shop.example 26/мин", и что такое "сверху", было непонятно, а в первом
   сообщении этой части не было вовсе - ошибки кончились за минуту до отправки. Теперь:
   "9.07% запросов за 15 минут закончились ошибкой 5xx (41 из 452). Больше всего:
-  anketa.shop.example, mobile-app-prod.shop.example и ещё 1 - 41. Коды: 502 - 30, 504 - 11.
-  Чаще всего падает: /api/v{n}/anketa - 38". Где именно, панель берет из минут с
+  form.shop.example, mobile-app-prod.shop.example и ещё 1 - 41. Коды: 502 - 30, 504 - 11.
+  Чаще всего падает: /api/v{n}/form - 38". Где именно, панель берет из минут с
   ошибками за все окно, а не из последнего отчета. В алертах по CPU и RAM "сверху"
   тоже заменено: "больше всего CPU у php-fpm 73%".
 - Пачки ошибок больше не спамят. У ноды ошибки шли волнами, 15 минут есть, 15 нет, и за

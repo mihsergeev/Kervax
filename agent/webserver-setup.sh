@@ -263,7 +263,7 @@ container_logs() {
   # Coolify называет контейнеры <id приложения>-<время деплоя>
   # (x47reo0hm6t0s5gwq1fziepm-082822316403): в панели такое ни о чем не говорит и меняется
   # с каждым деплоем, а с ним строка графика и заглушенный лог. Имя приложения Coolify
-  # кладет в метку coolify.resourceName - показываем его (anketa, viola).
+  # кладет в метку coolify.resourceName - показываем его (form, viola).
   label=$(docker inspect --format '{{index .Config.Labels "coolify.resourceName"}}' "$c" 2>/dev/null)
   case "$label" in ""|"<no value>") label=$cname ;; esac
   T=$(printf '\t')

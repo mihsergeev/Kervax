@@ -158,7 +158,7 @@ async def test_web_errors_mark_a_log_that_is_gone(client, auth_headers):
     token, sid = r.json()["token"], r.json()["server"]["id"]
     ah = {"Authorization": f"Bearer {token}"}
     shared = {"log": "/var/log/nginx/access.log", "rpm": 50, "e5": 5, "c5": {"500": 5},
-              "sites": ["anketa.shop.example", "mobile.shop.example"]}
+              "sites": ["form.shop.example", "mobile.shop.example"]}
     own = {"log": "/var/log/nginx/mobile.shop.example.access.log", "rpm": 40, "e5": 3, "c5": {"500": 3},
            "sites": ["mobile.shop.example"]}
     base = {"hostname": "mob", "os": "U", "agent_version": "2.22", "cpu_percent": 5, "mem_used": 1, "mem_total": 2}

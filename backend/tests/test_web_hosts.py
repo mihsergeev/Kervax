@@ -6,10 +6,10 @@ from datetime import datetime, timezone
 from app import collector
 
 SHARED = {"log": "/var/log/nginx/access.log", "rpm": 100, "e5": 12,
-          "sites": ["anketa.shop.example", "mobile.shop.example", "mobile-web.shop.example"],
+          "sites": ["form.shop.example", "mobile.shop.example", "mobile-web.shop.example"],
           "c5": {"500": 12}, "p5": [{"p": "/route/approved", "n": 10}],
           "hosts": [{"h": "mobile.shop.example", "rpm": 70, "e5": 11},
-                    {"h": "anketa.shop.example", "rpm": 25, "e5": 1},
+                    {"h": "form.shop.example", "rpm": 25, "e5": 1},
                     {"h": "-", "rpm": 5, "e5": 0}]}
 
 
@@ -18,9 +18,9 @@ def test_chart_bands_split_shared_log_by_domain():
     block = {"ts": int(now.timestamp()), "rpm": 100, "e5": 12, "logs": [SHARED]}
     tops, _ = collector.web_breakdown({"web-rate": block}, now)
     by = {x["k"]: (x["r"], x["e"]) for x in tops}
-    assert by["mobile.shop.example"] == (70, 11) and by["anketa.shop.example"] == (25, 1)
+    assert by["mobile.shop.example"] == (70, 11) and by["form.shop.example"] == (25, 1)
     # неразобранное (домен не вытащился) остается под подписью лога, а не теряется
-    rest = [k for k in by if k not in ("mobile.shop.example", "anketa.shop.example")]
+    rest = [k for k in by if k not in ("mobile.shop.example", "form.shop.example")]
     assert len(rest) == 1 and by[rest[0]] == (5, 0)
     # лог без разбивки - как раньше, одной полосой
     plain = {k: v for k, v in SHARED.items() if k != "hosts"}
@@ -29,9 +29,9 @@ def test_chart_bands_split_shared_log_by_domain():
 
 
 def test_where_text_names_domains():
-    txt = collector.web_where_text({"logs": [["nginx (anketa.shop.example +2)", 12]], "codes": {"500": 12},
-                                    "paths": {}, "hosts": {"mobile.shop.example": 11, "anketa.shop.example": 1}})
-    assert "По доменам: mobile.shop.example - 11, anketa.shop.example - 1" in txt
+    txt = collector.web_where_text({"logs": [["nginx (form.shop.example +2)", 12]], "codes": {"500": 12},
+                                    "paths": {}, "hosts": {"mobile.shop.example": 11, "form.shop.example": 1}})
+    assert "По доменам: mobile.shop.example - 11, form.shop.example - 1" in txt
 
 
 async def test_errors_page_shows_domains(client, auth_headers):
@@ -45,7 +45,7 @@ async def test_errors_page_shows_domains(client, auth_headers):
     rows = (await client.get(f"/api/servers/{sid}/web-errors?hours=1", headers=auth_headers)).json()
     assert len(rows) == 1
     # домены без ошибок и неразобранное в сводку ошибок не идут
-    assert rows[0]["hosts"] == [{"h": "mobile.shop.example", "n": 11}, {"h": "anketa.shop.example", "n": 1}]
+    assert rows[0]["hosts"] == [{"h": "mobile.shop.example", "n": 11}, {"h": "form.shop.example", "n": 1}]
 
 
 async def test_unparsed_domain_is_not_a_domain(client, auth_headers):
