@@ -2661,7 +2661,8 @@ function CpuNow({ server: s }: { server: Server }) {
             label={t('Тепловой троттлинг')}
             value={String(Math.round(r.cpu_throttle))}
             sub={t('за последний отчет')}
-            tone={r.cpu_throttle > 0 ? 'warn' : 'ok'}
+            // желтым - только устойчивый (алерт панели), одиночный всплеск счетчика это норма
+            tone={s.alert_since?.throttle ? 'warn' : r.cpu_throttle > 0 ? undefined : 'ok'}
           />
         )}
       </div>

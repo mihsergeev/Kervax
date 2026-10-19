@@ -1776,6 +1776,10 @@ def _recovery_detail(key: str, st: dict, ctx: dict) -> str:
 # таких интервалов подряд, чтобы отправить алерт.
 _THROTTLE_TEMP_FLOOR = 80.0  # °C: ниже — «холодный» троттлинг из счётчика = шум
 _THROTTLE_MIN_STREAK = 3  # интервалов подряд с реальным троттлингом до алерта
+# Отбой троттлинга - только после стольких секунд без горячего троттлинга. Под нагрузкой
+# счетчик ядра растет рывками: интервал с нулем посреди перегрева давал "снова в норме", а
+# следующие три горячих - новый алерт. Заход внутри выдержки - та же история, без сообщения.
+_THROTTLE_CALM_S = 900
 # Дебаунс «мгновенных» метрик (CPU/RAM/темп/conntrack/темп диска): алертим, только
 # если превышение ДЕРЖИТСЯ дольше alert_sustain_seconds (по умолч. 15 мин). Считаем
 # ПО ВРЕМЕНИ (а не по тикам) — устойчиво к частоте отчётов/тиков: запоминаем момент
@@ -3539,8 +3543,8 @@ def io_cause(rep: dict) -> str:
 def server_problems(s: Server, now: datetime, pod_names: dict[str, str] | None = None,
                     web_err: tuple[float, float, int, dict, float] | None = None) -> list[dict]:
     """Что сломано на сервере коротко, для сводки "Что сломано" на главной и значков в списке
-    серверов: все, о чем шлют алерты, кроме того, что главная считает сама (CPU, RAM, диск,
-    температуры, conntrack, Docker, поды, бэкапы клиентов и репозитории). Уровни те же, что у
+    серверов: все, о чем шлют алерты, кроме того, что главная считает сама (заполнение диска,
+    Docker, поды, бэкапы клиентов и репозитории). Уровни те же, что у
     алертов: 2-3 - проблема, 1 - предупреждение. Выдержки алерта здесь нет там, где она гасит
     только повторы сообщений: главная показывает, что сейчас. Прогноз виден с того же срока, что
     и алерт (_FORECAST_WARN_H, пять суток). У молчащей ноды пусто, про нее говорит "оффлайн".
@@ -3613,6 +3617,33 @@ def server_problems(s: Server, now: datetime, pod_names: dict[str, str] | None =
         lvl = 3 if crit and ipct >= crit else 2 if prob and ipct >= prob else 1 if warn and ipct >= warn else 0
         if lvl:
             add("inode", lvl, f"inode {wi.get('mount') or '?'} {ipct}%", "diskfill", f"inode@{lvl}" if lvl < 3 else "inode")
+    # CPU, RAM, температуры, conntrack и троттлинг - по уровню алерта (его выдержка, гистерезис и
+    # отбой после затишья), а не по последнему отчету: минутный всплеск, о котором алерта не будет,
+    # зажигал строку на главной, и через минуту она пропадала. Значение в тексте - текущее.
+    alerted = {k for k in ("cpu", "mem", "temp", "conntrack", "disktemp", "throttle")
+               if int(state.get(k, 0) or 0) >= 1}
+    early = alert_since(s) if alerted else {}
+
+    def metric(kind: str, level: int, text: str) -> None:
+        if kind in alerted:
+            add(kind, level, text, kind, kind, early.get(kind))
+
+    cpu = rep.get("cpu_percent")
+    if getattr(s, "cpu_alert_percent", 0) and cpu is not None:
+        metric("cpu", 2, f"CPU {round(cpu)}%")
+    if getattr(s, "mem_alert_percent", 0) and rep.get("mem_total"):
+        metric("mem", 2, f"RAM {round((rep.get('mem_used') or 0) / rep['mem_total'] * 100)}%")
+    temp = rep.get("cpu_temp")
+    if getattr(s, "temp_alert_c", 0) and temp is not None:
+        metric("temp", 2, f"CPU {round(temp)}°C")
+    ctmax = rep.get("conntrack_max") or 0
+    if getattr(s, "conntrack_alert_percent", 0) and ctmax > 0:
+        metric("conntrack", 2, f"conntrack {round((rep.get('conntrack_count') or 0) / ctmax * 100)}%")
+    dtemps = [d["temp"] for d in rep.get("disk_devs") or [] if isinstance(d, dict) and d.get("temp") is not None]
+    if getattr(s, "disk_temp_alert_c", 0) and dtemps:
+        metric("disktemp", 2, f"диск {round(max(dtemps))}°C")
+    if rep.get("cpu_throttle") is not None:
+        metric("throttle", 1, "троттлинг CPU от перегрева")
     # Часы: пороги алерта (5 с, 30 с, 5 минут) без его выдержки. Сдвиг уже очищен от дороги
     # отчета (clock_skew_window), а сами часы за минуту не уходят и не возвращаются.
     skew = rep.get("clock_skew_sec")
@@ -3639,10 +3670,11 @@ def server_problems(s: Server, now: datetime, pod_names: dict[str, str] | None =
         elif dead:
             add("dns", 1, "DNS: резолверы " + ", ".join(f"{x['addr']} {_dns_answer(x)}" for x, _ in dead),
                 "", "dns@1", min(since for _, since in dead), sub="resolver")
-    # Коннекты СУБД: порог алерта без его выдержки, как CPU и RAM на главной
+    # Коннекты СУБД: по уровню алерта, как CPU и RAM - всплеск коннектов на один отчет у пулеров
+    # обычное дело, строка мигала; значение текущее, начало - с начала превышения
     conn_thr = getattr(s, "db_conn_alert_percent", 0) or 0
-    worst = db_conn_worst(rep) if conn_thr else None
-    if worst is not None and worst[0] >= conn_thr:
+    worst = db_conn_worst(rep) if conn_thr and int(state.get("db_conn", 0) or 0) >= 1 else None
+    if worst is not None:
         pct, db = worst
         add("db_conn", 2, f"{db.get('container') or db.get('engine') or 'СУБД'}: занято "
             f"{db.get('conn_used') or 0} из {db.get('conn_max') or 0} подключений ({round(pct)}%)",
@@ -5144,10 +5176,20 @@ def _server_conditions(s: Server, now: datetime,
         # не алерт. Гейт по t° отсекает «холодный» троттлинг, стрик — одиночные пики.
         tnow = rep.get("cpu_temp")
         real = thr > 0 and (tnow is None or tnow >= _THROTTLE_TEMP_FLOOR)
-        prev_streak = int((s.alert_state or {}).get("throttle_streak", 0))
+        prev_streak = int(state.get("throttle_streak", 0))
         streak = prev_streak + 1 if real else 0
-        lvl = 1 if streak >= _THROTTLE_MIN_STREAK else 0
-        out["throttle"] = (lvl, {"value": round(thr), "streak": streak})
+        alerted = int(state.get("throttle", 0) or 0) >= 1
+        cool = None
+        if streak >= _THROTTLE_MIN_STREAK or (alerted and real):
+            lvl = 1
+        elif alerted:
+            # объявленный троттлинг снимаем после _THROTTLE_CALM_S спокойствия ("_cool" - с какого момента)
+            started = _parse_iso(str(state.get("throttle_cool") or "")) or now
+            calm = (now - started).total_seconds() >= _THROTTLE_CALM_S
+            lvl, cool = (0, None) if calm else (1, started.isoformat())
+        else:
+            lvl = 0
+        out["throttle"] = (lvl, {"value": round(thr), "streak": streak, "cool": cool})
     ctmax = rep.get("conntrack_max") or 0
     if s.conntrack_alert_percent and ctmax > 0:  # только если conntrack есть
         fill = (rep.get("conntrack_count") or 0) / ctmax * 100
