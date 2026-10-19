@@ -240,7 +240,7 @@ def test_rotation_age_trusts_the_policy_when_it_can_keep_everything():
                   rotation_removed=-1)
     bsrv = {"repos": [sparse, orphan]}
     out = collector.rotation_stale_repos(bsrv, now)
-    assert out == ["vpn-c (859 дн. > 231)"], out
+    assert out == ["vpn-c (старейшему снапшоту 859 дн. при политике до 231)"], out
     # чистка при этом идет: подсказываем, что это старая группа, а не вставшая ротация
     extra = {"repos": {"vpn-c": {"cleaner": "legacy", "removed_ts": ts - 3600,
                                          "seen_since": ts - 86400}}}
@@ -345,7 +345,7 @@ def test_home_page_rotation_matches_the_alert():
         ]}},
         alert_state={}, backup_repo_mutes=["zaglushen"],
     )
-    assert collector.backup_rotation_items(s, now) == ["vpn-c (859 дн. > 231)"]
+    assert collector.backup_rotation_items(s, now) == ["vpn-c (старейшему снапшоту 859 дн. при политике до 231)"]
 
 
 def test_failed_integrity_checks():

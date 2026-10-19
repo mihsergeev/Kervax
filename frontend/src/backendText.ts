@@ -17,6 +17,7 @@ const PHRASES: Rule[] = [
   [/(?<!\d)1 snapshots/g, '1 snapshot'],
   [/, похоже на старую группу: менялись хост или пути/g, ', looks like an old group: the host or paths changed'],
   [/(\d+) снапшотов при политике (\d+), удалений нет/g, '$1 snapshots with a policy of $2, nothing removed'],
+  [/старейшему снапшоту (\d+) дн\. при политике до (\d+)/g, 'the oldest snapshot is $1 d old with a policy of up to $2'],
   // порты и доступы
   [/в интернет открылся новый порт: /g, 'new port open to the internet: '],
   [/служебное открыто в интернет: /g, 'service ports open to the internet: '],
@@ -164,7 +165,7 @@ export function trBackend(s: string): string {
 
 // Поля ответов API, где лежат такие тексты. Ключи и идентификаторы (mute, key, kind) не трогаем:
 // по ним панель шлет запросы обратно
-const FIELDS = new Set(['text', 'detail', 'what', 'hint', 'note', 'bsrv_rotation'])
+const FIELDS = new Set(['text', 'detail', 'what', 'hint', 'note', 'bsrv_rotation', 'reasons', 'why'])
 
 export function trBody<T>(x: T, field = ''): T {
   if (typeof x === 'string') return (FIELDS.has(field) ? trBackend(x) : x) as T

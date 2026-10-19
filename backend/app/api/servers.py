@@ -43,7 +43,7 @@ from app import packages as packages_mod
 from app import netlinks
 from app import traffic as traffic_mod
 from app import usage as usage_mod
-from app import audit, backup_growth, custom_backups, docker_exposure, geoip, kube_coverage, manual_probe, open_ports, os_support
+from app import audit, backup_growth, bsrv_cleanup, custom_backups, docker_exposure, geoip, kube_coverage, manual_probe, open_ports, os_support
 from app import dump_reason
 from app import software as software_mod
 from app.collector import (
@@ -288,6 +288,8 @@ def _out(
     o.docker_since = docker_since(server)
     o.backup_growth = backup_growth.jump(server, now)
     o.bsrv_rotation = backup_rotation_items(server, now)
+    # вкладка "Чистка": что не так с чисткой и готовые шаги под этот сервер и репозитории
+    o.bsrv_cleanup = bsrv_cleanup.view(server, now)
     o.bsrv_restic_old = bsrv_restic_old(server.last_report or {})
     o.wear_forecast = disk_wear.card(disk_health_block(server.last_report or {}), server.disk_wear)
     o.bsrv_cadence = _cadences(server.last_report or {})
