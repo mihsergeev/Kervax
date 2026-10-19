@@ -16,8 +16,10 @@ SessionDep = Annotated[AsyncSession, Depends(get_session)]
 
 # изменяющие HTTP-методы (viewer'у запрещены)
 _WRITE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
-# self-service своей учётки (пароль/2FA) — можно и viewer'у; вход не аутентифицирован
-_SELF_SERVICE_PREFIX = "/api/auth/"
+# self-service своей учетки (пароль/2FA) - можно и viewer'у; вход не аутентифицирован.
+# Ошибку интерфейса и "сообщить о проблеме" шлет любая учетка: это запись в журнал ошибок
+# панели, а не изменение объектов
+_SELF_SERVICE_PREFIX = ("/api/auth/", "/api/panel-errors/front", "/api/panel-errors/report")
 
 
 async def get_current_user(

@@ -136,6 +136,41 @@ class AuditLog(Base):
     detail: Mapped[str] = mapped_column(Text, default="")
 
 
+class PanelError(Base):
+    """Журнал ошибок самой панели (app/panel_errors.py): необработанные исключения бэкенда,
+    неуспешные изменяющие запросы, провалившиеся команды агенту, которые запустил человек,
+    ошибки интерфейса и сообщения "сообщить о проблеме". Одинаковая ошибка - одна строка со
+    счетчиком (fp - отпечаток без чисел и id), разобранная и повторившаяся снова - заново
+    неразобранная. Тела запросов и вывод команд хранятся обрезанными, секреты замаскированы."""
+
+    __tablename__ = "panel_errors"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    fp: Mapped[str] = mapped_column(String(40), index=True)
+    # server - исключение бэкенда, api - отказ на изменяющий запрос, command - команда агенту,
+    # front - ошибка интерфейса, report - сообщение человека
+    kind: Mapped[str] = mapped_column(String(16), index=True)
+    first_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    last_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
+    count: Mapped[int] = mapped_column(Integer, default=1)
+    username: Mapped[str] = mapped_column(String(64), default="", index=True)
+    page: Mapped[str] = mapped_column(String(300), default="")
+    section: Mapped[str] = mapped_column(String(32), default="")
+    server_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    server_name: Mapped[str] = mapped_column(String(200), default="")
+    action: Mapped[str] = mapped_column(String(200), default="")
+    status: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    message: Mapped[str] = mapped_column(Text, default="")
+    detail: Mapped[str] = mapped_column(Text, default="")
+    version: Mapped[str] = mapped_column(String(32), default="")
+    extra: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    resolved: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    resolved_by: Mapped[str] = mapped_column(String(64), default="")
+    # разобрали, а оно повторилось
+    reopened: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
 class AppSetting(Base):
     """Настройки панели (key-value), редактируемые из UI. Значение — строка/JSON."""
 
@@ -980,6 +1015,9 @@ class DockerCommand(Base):
         DateTime(timezone=True), server_default=func.now(), index=True
     )
     done_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # кто поставил команду из панели (пусто - планировщик): провал такой команды идет в журнал
+    # ошибок панели (app/panel_errors.py)
+    created_by: Mapped[str] = mapped_column(String(64), default="", server_default="")
 
 
 class KubeCommand(Base):
@@ -1005,6 +1043,9 @@ class KubeCommand(Base):
         DateTime(timezone=True), server_default=func.now(), index=True
     )
     done_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # кто поставил команду из панели (пусто - планировщик): провал такой команды идет в журнал
+    # ошибок панели (app/panel_errors.py)
+    created_by: Mapped[str] = mapped_column(String(64), default="", server_default="")
 
 
 class BackupCommand(Base):
@@ -1030,6 +1071,9 @@ class BackupCommand(Base):
         DateTime(timezone=True), server_default=func.now(), index=True
     )
     done_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # кто поставил команду из панели (пусто - планировщик): провал такой команды идет в журнал
+    # ошибок панели (app/panel_errors.py)
+    created_by: Mapped[str] = mapped_column(String(64), default="", server_default="")
     # "auto" - команду поставил планировщик (авто-очистка диска): результат уходит
     # уведомлением в каналы алертов
     origin: Mapped[str] = mapped_column(String(16), default="", server_default="")

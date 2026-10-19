@@ -20,6 +20,7 @@ from app.api import (
     login_guard,
     maintenance,
     netlinks as netlinks_api,
+    panel_errors as panel_errors_api,
     panel_requests,
     report,
     search,
@@ -34,6 +35,7 @@ from app.collector import collector_loop
 from app.config import get_settings
 from app.db import create_engine_and_factory
 from app.gzip_request import GzipRequestMiddleware
+from app.panel_errors import PanelErrorMiddleware
 from app.request_watch import RequestWatchMiddleware
 
 _WEAK_SECRETS = {"", "changeme", "dev-insecure-change-me"}
@@ -99,12 +101,17 @@ def create_app() -> FastAPI:
     app.add_middleware(GzipRequestMiddleware)
     # счетчик левых запросов к API: отказы и всплески по адресам (app/request_watch.py)
     app.add_middleware(RequestWatchMiddleware)
+    # журнал ошибок самой панели: исключения бэкенда и неудачные действия людей (app/panel_errors.py).
+    # Снаружи остальных: видит и то, что упало в них
+    app.add_middleware(PanelErrorMiddleware)
 
     app.include_router(health.router, prefix="/api")
     app.include_router(auth.router, prefix="/api")
     app.include_router(users_api.router, prefix="/api")
     app.include_router(login_guard.router, prefix="/api")
     app.include_router(panel_requests.router, prefix="/api")
+    # ошибки интерфейса и "сообщить о проблеме" - любая учетка, просмотр - админ
+    app.include_router(panel_errors_api.router, prefix="/api")
     app.include_router(audit.router, prefix="/api")
     app.include_router(checks.router, prefix="/api")
     app.include_router(alerts.router, prefix="/api")

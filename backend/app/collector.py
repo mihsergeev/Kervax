@@ -23,6 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app import alerts, audit, backup, backup_growth, checks as checks_exec, custom_backups, docker_exposure, flaky, heartbeat, settings_store
 from app import backup_verify
 from app import request_watch
+from app import panel_errors
 from app import inside_probe
 from app import job_logs
 from app import retention as retention_mod
@@ -6672,17 +6673,23 @@ async def _expire_commands(session_factory: async_sessionmaker[AsyncSession]) ->
     now = datetime.now(timezone.utc)
     cutoff = now - timedelta(seconds=_CMD_STUCK_SECONDS)
     fix_cutoff = now - timedelta(seconds=_FIX_STUCK_SECONDS)
+    stuck = (BackupCommand.status.in_(("pending", "running")),
+             or_(and_(BackupCommand.action != "disk_fix", BackupCommand.created_at < cutoff),
+                 and_(BackupCommand.action == "disk_fix", BackupCommand.created_at < fix_cutoff)))
     async with session_factory() as session:
+        # поставленные человеком - в журнал ошибок панели: кнопка "ничего не сделала"
+        mine = list(await session.scalars(select(BackupCommand).where(*stuck, BackupCommand.created_by != "")))
         res = await session.execute(
             update(BackupCommand)
-            .where(BackupCommand.status.in_(("pending", "running")),
-                   or_(and_(BackupCommand.action != "disk_fix", BackupCommand.created_at < cutoff),
-                       and_(BackupCommand.action == "disk_fix", BackupCommand.created_at < fix_cutoff)))
+            .where(*stuck)
             .values(status="error", ok=False, result="агент не ответил — команда не доехала")
         )
         if res.rowcount:
             log.info("закрыто зависших backup-команд: %d", res.rowcount)
         await session.commit()
+    for c in mine:
+        c.result = "агент не ответил - команда не доехала"
+        await panel_errors.command_failed(session_factory, "backup", c, soon=False)
 
 
 # --- авто-очистка диска (галочка сервера, по умолчанию выключена) ---
@@ -6939,6 +6946,8 @@ async def _prune(
         await session.execute(
             delete(RequestStat).where(RequestStat.minute < now - retention_mod.REQUESTS_KEEP)
         )
+        # журнал ошибок панели: месяц и не больше panel_errors.MAX_ROWS строк
+        await panel_errors.prune(session, now)
         # разовые проверки доменов из мастера живут часы; неделя — с большим запасом
         await session.execute(
             delete(DomainProbe).where(DomainProbe.started_at < now - retention_mod.DOMAIN_PROBES_KEEP)

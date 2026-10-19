@@ -1,5 +1,6 @@
 import { currentLang, tr } from './i18n'
 import { trBody } from './backendText'
+import { noteApiFailure, uiHeaders } from './errorLog'
 
 // Должна совпадать с MIN_PASSWORD_LEN в backend/app/security.py: интерфейс не
 // даёт ввести короче, бэкенд не принимает. Расхождение ловит ops/selfcheck.py —
@@ -30,20 +31,31 @@ export class ApiError extends Error {
 }
 
 export async function api<T>(path: string, options: RequestInit = {}): Promise<T> {
+  // страница и раздел: если запрос не удастся, бэкенд запишет в журнал ошибок, где это было
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
+    ...uiHeaders(),
     ...(options.headers as Record<string, string> | undefined),
   }
   const token = getToken()
   if (token) headers['Authorization'] = `Bearer ${token}`
+  const method = (options.method || 'GET').toUpperCase()
 
-  const res = await fetch(path, { ...options, headers })
+  let res: Response
+  try {
+    res = await fetch(path, { ...options, headers })
+  } catch (e) {
+    noteApiFailure(method, path, 0, e instanceof Error ? e.message : String(e))
+    throw e
+  }
   if (res.status === 204) return undefined as T
 
   const body = await res.json().catch(() => null)
   if (!res.ok) {
     const detail =
       typeof body?.detail === 'string' ? body.detail : tr('Ошибка HTTP {code}', { code: res.status })
+    // последние неудачные запросы уходят вместе с "Сообщить о проблеме"
+    noteApiFailure(method, path, res.status, typeof body?.detail === 'string' ? body.detail : JSON.stringify(body?.detail ?? ''))
     throw new ApiError(detail, res.status)
   }
   // тексты проблем бэкенд пишет по-русски: английской панели переводим то, что умеем
@@ -3350,4 +3362,63 @@ export type DepMapCheck = {
 export type DepMap = { servers: DepMapServer[]; checks: DepMapCheck[] }
 export function getDepMap(): Promise<DepMap> {
   return api<DepMap>('/api/depmap')
+}
+
+// --- журнал ошибок панели (backend app/panel_errors.py) ---
+export type PanelErrorKind = 'server' | 'api' | 'command' | 'front' | 'report'
+export type PanelErrorBrief = {
+  id: number
+  kind: PanelErrorKind
+  last_at: string
+  count: number
+  action: string
+  status: number | null
+  message: string
+  server_name: string
+  page: string
+}
+export type PanelErrorRow = PanelErrorBrief & {
+  first_at: string
+  username: string
+  section: string
+  server_id: number | null
+  detail: string
+  version: string
+  extra: {
+    errors?: PanelErrorBrief[]
+    client_log?: { ts: string; method: string; path: string; status: number; detail: string }[]
+    params?: Record<string, unknown>
+    cmd_id?: number
+    job_id?: number
+  }
+  resolved: boolean
+  resolved_at: string | null
+  resolved_by: string
+  reopened: boolean
+}
+export type PanelErrorsOut = {
+  items: PanelErrorRow[]
+  more: boolean
+  counts: { open: number; by_kind: Partial<Record<PanelErrorKind, number>>; day: number; resolved: number }
+  keep_days: number
+  max_rows: number
+}
+export type PanelErrorsQuery = { state: 'open' | 'resolved' | 'all'; kind: string; q: string; days: number }
+export function getPanelErrors(p: PanelErrorsQuery): Promise<PanelErrorsOut> {
+  const qs = new URLSearchParams({ state: p.state, kind: p.kind, q: p.q, days: String(p.days) })
+  return api<PanelErrorsOut>(`/api/panel-errors?${qs}`)
+}
+export function getPanelErrorCount(): Promise<{ open: number; reports: number }> {
+  return api<{ open: number; reports: number }>('/api/panel-errors/count')
+}
+export function resolvePanelErrors(ids: number[], resolved: boolean): Promise<{ ok: boolean; changed: number }> {
+  return api('/api/panel-errors/resolve', { method: 'POST', body: JSON.stringify({ ids, resolved }) })
+}
+export function sendProblemReport(body: {
+  text: string
+  page: string
+  section: string
+  client_log: { ts: string; method: string; path: string; status: number; detail: string }[]
+}): Promise<{ id: number; attached: number; client_log: number }> {
+  return api('/api/panel-errors/report', { method: 'POST', body: JSON.stringify(body) })
 }
