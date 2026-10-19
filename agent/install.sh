@@ -66,31 +66,61 @@ if [ "$UNINSTALL" = 1 ]; then
   for u in $UNITS; do
     systemctl disable --now "$u" >/dev/null 2>&1 || true
   done
-  # helper units and timers (panel requests, inventory, dumps, domains)
+  # helper units, timers and path units - by the kervax-* mask, not by a list: the list
+  # here lagged behind the helpers, and after --uninstall a dozen timers kept firing for
+  # nothing (changes, cron, disk-*, fpm, logerr, units, web-rate, workers...).
+  # Timers and path units go first, otherwise they start their service again mid-removal.
   if [ -z "$INSTANCE" ]; then
-    # .path as well: helpers catch panel requests with a path unit, and without this
-    # kervax-*-req.path files were left behind in /etc/systemd/system
-    for u in kervax-backup-req kervax-bsrv-req kervax-tsync-req \
-             kervax-db-stats kervax-dumps kervax-web-sites; do
-      for kind in timer path service; do
-        systemctl disable --now "$u.$kind" >/dev/null 2>&1 || true
-        rm -f "/etc/systemd/system/$u.$kind"
+    KUNITS=$({
+      systemctl list-unit-files --no-legend --plain 'kervax-*' 2>/dev/null
+      systemctl list-units --all --no-legend --plain 'kervax-*' 2>/dev/null
+      ls /etc/systemd/system 2>/dev/null
+    } | awk '{ for (i = 1; i <= NF; i++) if ($i ~ /^kervax-[A-Za-z0-9@_.-]*\.(timer|path|socket|service)$/) { print $i; break } }' | sort -u)
+    for kind in timer path socket service; do
+      for u in $KUNITS; do
+        case "$u" in *."$kind") systemctl disable --now "$u" >/dev/null 2>&1 || true ;; esac
       done
     done
-    rm -f /etc/systemd/system/kervax-agent.service /etc/systemd/system/kervax-agent@.service
-    # unit drop-ins (spool, watchdog) live in a directory next to it — otherwise it stays
-    rm -rf /etc/systemd/system/kervax-agent.service.d /etc/systemd/system/kervax-agent@.service.d
+    # unit files, drop-ins (spool, watchdog) and enable links left by a failed disable
+    rm -rf /etc/systemd/system/kervax-*
+    find /etc/systemd/system -name 'kervax-*' \( -type l -o -type f \) -delete 2>/dev/null || true
   fi
   systemctl daemon-reload >/dev/null 2>&1 || true
+  [ -z "$INSTANCE" ] && { systemctl reset-failed 'kervax-*' >/dev/null 2>&1 || true; }
 
   rm -f $CONFS
   if [ -z "$INSTANCE" ]; then
-    command -v docker >/dev/null 2>&1 && docker rm -f kervax-docker-proxy >/dev/null 2>&1 || true
-    rm -rf /opt/kervax-agent /opt/kervax/bin /lib65/kervax /etc/kervax
+    # only our own proxy (and its copy from a helper update): other socket-proxy containers
+    # on the node belong to someone else and stay
+    command -v docker >/dev/null 2>&1 && docker rm -f kervax-docker-proxy kervax-docker-proxy-old >/dev/null 2>&1 || true
+    # cron of the helpers (backup client/server statistics). kervax-prune-* is not ours to
+    # remove: it is the nightly cleanup of client repositories on the backup server, moved
+    # there from the root crontab, and without it the repositories grow without limit
+    KEEP_PRUNE=""
+    for f in /etc/cron.d/kervax-*; do
+      [ -e "$f" ] || continue
+      case "$f" in
+        /etc/cron.d/kervax-prune-*) KEEP_PRUNE="$KEEP_PRUNE $f" ;;
+        *) rm -f "$f" ;;
+      esac
+    done
+    # the prune scripts may run our restic from /lib65/kervax - it stays with them
+    if [ -n "$KEEP_PRUNE" ] && [ -d /lib65/kervax ]; then
+      find /lib65/kervax -mindepth 1 -maxdepth 1 ! -name restic -exec rm -rf {} + 2>/dev/null || true
+    else
+      rm -rf /lib65/kervax
+    fi
+    # state and panel request spools (*-req/*-res), reports, caches, locks
+    rm -rf /opt/kervax-agent /opt/kervax/bin /etc/kervax /var/lib/kervax /run/kervax-*
     rmdir /opt/kervax /lib65 2>/dev/null || true   # only if empty (the panel directory survives)
-    rm -f /etc/sudoers.d/kervax-backup /etc/sudoers.d/kervax-backupserver
+    rm -f /etc/sudoers.d/kervax-*
     id kervax >/dev/null 2>&1 && { userdel kervax >/dev/null 2>&1 || deluser kervax >/dev/null 2>&1 || true; }
-    echo "✓ Agent removed: service, helper units, binary, configs, sudoers, user kervax."
+    echo "✓ Agent removed: service, helper units and timers, cron, state, binary, configs, sudoers, user kervax."
+    if [ -n "$KEEP_PRUNE" ]; then
+      echo "  The nightly cleanup of backup repositories stays (it is not monitoring):"
+      for f in $KEEP_PRUNE; do echo "    $f"; done
+      echo "    remove it only together with the backup server itself: rm -f /etc/cron.d/kervax-prune-* /lib65/kervax/restic"
+    fi
     echo "  The Kubernetes account (if it was enabled) stays in the cluster:"
     echo "    kubectl -n kervax delete serviceaccount kervax    # if you want it gone"
     echo "  Delete the server in the panel separately — that revokes its token."
