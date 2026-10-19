@@ -14,7 +14,7 @@ import pytest
 from app import alert_what, collector, web_upstream
 from app.config import Settings
 from app.db import Base, create_engine_and_factory
-from app.models import Server, ServerMetric, WebErrorSample
+from app.models import Server, ServerEvent, ServerMetric, WebErrorSample
 
 SRC = (Path(__file__).resolve().parents[2] / "agent" / "webserver-setup.sh").read_text(encoding="utf-8")
 
@@ -106,6 +106,99 @@ async def test_5xx_alert_says_why(tmp_path, monkeypatch):
     assert len(sent) == 1, sent
     assert "Почему: app-backend-1:8000 не принимает соединения - 600" in sent[0]
     await engine.dispose()
+
+
+async def _deploy_case(tmp_path, name, events, ups_of=None):
+    """Фронт панели 19.10.2026: две выкладки за восемь минут, пачки 502 к backend легли на три
+    минуты helper'а. Остальные минуты окна - без ошибок."""
+    engine, factory = await _panel(tmp_path, name)
+    now = datetime.now(timezone.utc)
+    async with factory() as s:
+        s.add(Server(name="web-a", token_hash="x", enabled=True, backup_not_required=True,
+                     last_seen=now, last_report={"cpu_percent": 20}, cpu_alert_percent=0,
+                     mem_alert_percent=0, disk_alert_percent=0, web_5xx_alert_percent=0.05))
+        await s.commit()
+        for m in range(15):
+            s.add(ServerMetric(server_id=1, ts=now - timedelta(minutes=m), cpu_percent=20, web_rpm=1000,
+                               web_5xx={9: 2, 2: 6, 1: 252}.get(m, 0)))
+        default = {
+            9: [{"u": "172.21.0.3:8000", "k": "refused", "n": 1}, {"u": "172.21.0.3:8000", "k": "reset", "n": 1}],
+            2: [{"u": "backend", "k": "resolve", "n": 4}, {"u": "172.21.0.3:8000", "k": "reset", "n": 2}],
+            1: [{"u": "backend", "k": "resolve", "n": 210},
+                {"u": "172.21.0.3:8000", "k": "refused", "n": 43, "c": "app-backend-1"}],
+        }
+        for m, e5 in ((9, 2), (2, 6), (1, 252)):
+            s.add(WebErrorSample(server_id=1, ts=now - timedelta(minutes=m), src_ts=1000 - m, e5=e5, rpm=1000,
+                                 log="docker:app-frontend-1", label="app-frontend-1", codes={"502": e5},
+                                 ups=(ups_of or default)[m]))
+        for m, cat, kind, obj in events:
+            s.add(ServerEvent(server_id=1, ts=now - timedelta(minutes=m), cat=cat, kind=kind, obj=obj,
+                              text=f"{obj}: {kind}"))
+        await s.commit()
+    return engine, factory, now
+
+
+async def _sent(factory, now, monkeypatch) -> list[str]:
+    sent: list[str] = []
+
+    async def fake_send(cfg, text, parse_mode=None):
+        sent.append(text)
+        return []
+
+    monkeypatch.setattr("app.alerts.send_alert", fake_send)
+    await collector.evaluate_servers(factory, Settings(alert_webhook="http://hook"), now)
+    return sent
+
+
+DEPLOYS = [(10, "deploy", "image", "app-frontend-1"), (9, "deploy", "restart", "app-backend-1"),
+           (2, "deploy", "restart", "app-backend-1")]
+
+
+async def test_deploy_restart_is_not_a_5xx_alert(tmp_path, monkeypatch):
+    """Отказы связи с контейнером, который в эти минуты выкатили, - секунды выкладки, не сбой."""
+    engine, factory, now = await _deploy_case(tmp_path, "deploy.db", DEPLOYS)
+    assert [x for x in await _sent(factory, now, monkeypatch) if "5xx" in x] == []
+    async with factory() as s:
+        w = (await collector.web_error_window(s, now))[1]
+        assert w[4] == 260 and w[3] == {}
+    await engine.dispose()
+
+
+async def test_same_errors_without_deploy_still_alert(tmp_path, monkeypatch):
+    """Без выкладки в хронологии те же 502 - алерт, как раньше. Упал сам (crash) - не выкладка."""
+    engine, factory, now = await _deploy_case(tmp_path, "nodeploy.db",
+                                              [(9, "crash", "crash", "app-backend-1"), (2, "crash", "crash", "app-backend-1")])
+    sent = [x for x in await _sent(factory, now, monkeypatch) if "5xx" in x]
+    assert len(sent) == 1 and "Почему: backend не резолвится - 214" in sent[0], sent
+    await engine.dispose()
+
+
+async def test_deploy_of_another_container_does_not_excuse(tmp_path, monkeypatch):
+    """Выкатили один контейнер, а 502 - потому что лежит другой: это сбой."""
+    ups = {m: [{"u": "172.21.0.9:9000", "k": "refused", "n": e5, "c": "app-worker-1"}]
+           for m, e5 in ((9, 2), (2, 6), (1, 252))}
+    engine, factory, now = await _deploy_case(tmp_path, "other.db", DEPLOYS, ups)
+    assert len([x for x in await _sent(factory, now, monkeypatch) if "5xx" in x]) == 1
+    await engine.dispose()
+
+
+def test_restart_blip_rules():
+    now = datetime.now(timezone.utc)
+    dep = [(now - timedelta(minutes=1), "kervax-backend-1")]
+    resolve = [{"u": "backend", "k": "resolve", "n": 9}]
+    assert collector.restart_blip(resolve, 10, now, dep)
+    # имя сервиса совпадает только целиком: backend - не kervax-backend-api-1
+    assert not collector.restart_blip(resolve, 10, now, [(now, "kervax-backend-api-1")])
+    # выкладка давно - минута считается
+    assert not collector.restart_blip(resolve, 10, now, [(now - timedelta(minutes=5), "kervax-backend-1")])
+    # медленный ответ - не выкладка, даже рядом с ней
+    assert not collector.restart_blip([{"u": "backend:8000", "k": "timeout", "n": 9}], 10, now, dep)
+    # отказов меньше 80% ошибок минуты: остальное - ответы самого приложения
+    assert not collector.restart_blip(resolve, 20, now, dep)
+    # внешний адрес без имени - не контейнер
+    assert not collector.restart_blip([{"u": "203.0.113.5:443", "k": "refused", "n": 9}], 10, now, dep)
+    assert collector.restart_blip([{"u": "192.168.16.4:8080", "k": "refused", "n": 9}], 10, now, dep)
+    assert not collector.restart_blip(resolve, 10, now, None) and not collector.restart_blip(None, 10, now, dep)
 
 
 def test_broken_summary_says_why():
