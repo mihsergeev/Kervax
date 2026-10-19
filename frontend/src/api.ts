@@ -1301,6 +1301,27 @@ export type MyLoadQuery = {
   db: string; q: string; calls: number; ms: number; rows: number; tmp: number; noidx: number
   share: number; avg_ms: number; rows_call: number
 }
+// Готовый compose без docker-сокета от helper'а sockfix-setup (docker_exposure.fixes): у готового -
+// разница и команды, у неготового - код причины (why) и подробность
+export interface SockFix {
+  ok: boolean
+  why?: string
+  why_detail?: string
+  file?: string
+  dir?: string
+  project?: string
+  service?: string
+  fixed?: string
+  diff?: string
+  gid?: number
+  nets?: string[]
+  sock?: string
+  compose?: string
+  apply?: string
+  check?: string
+  rollback?: string
+}
+
 export type MemLeak = {
   key: string
   kind: 'docker' | 'pod' | 'proc'
@@ -1897,7 +1918,7 @@ export type Server = {
   // а история есть только на бэкенде
   docker_alerts?: Record<string, string>
   // внешние прокси (caddy-docker-proxy, traefik) с docker-сокетом: взлом прокси - root на хосте
-  docker_exposed?: { name: string; image: string; kind: string }[]
+  docker_exposed?: { name: string; image: string; kind: string; fix?: SockFix }[]
   // контейнеры с ключами от хоста сверх положенного по назначению: privileged, опасные
   // capabilities, docker-сокет, корень хоста на запись; muted - заглушен точечно
   docker_risk?: DockerRisk[]

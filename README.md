@@ -50,11 +50,17 @@ prints the panel address with the admin password. Without a domain it runs on `<
 - **End of life.** OS releases and software versions (PostgreSQL, MySQL, Redis, nginx, PHP, Node.js,
   Python and more) against endoflife.date, shipped offline.
 - **Containers.** Privileged containers, host keys and the Docker socket mounted inside, ports
-  published past the host firewall, outdated reverse proxy images.
+  published past the host firewall, outdated reverse proxy images. A reverse proxy holding the
+  Docker socket gets a ready fix: a helper edits a copy of its compose file on the node (secrets
+  never leave it), checks it with `docker compose config`, and the panel shows the diff with the
+  commands to apply and roll back.
 - **Web servers.** Certificates served by nginx, `nginx -t` every 15 minutes: a broken config is
   reported before the next reload takes the sites down.
 - **The panel itself.** Login throttling with an allowlist, alert on rejected and flooding API
   requests, TOTP, audit log of every action.
+
+<a href="docs/img/sockfix.png"><img src="docs/img/sockfix.png" alt="Ready fix for a proxy holding the Docker socket"></a>
+<sub>A proxy holds the Docker socket: the fixed compose file is already built on the node</sub>
 
 <table>
 <tr>

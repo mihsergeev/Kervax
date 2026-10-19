@@ -328,6 +328,43 @@ OLD = {"openssl": "3.0.13-0ubuntu3.4", "libssl3t64": "3.0.13-0ubuntu3.4",
        "git": "1:2.43.0-1ubuntu7.2", "sudo": "1.9.15p5-3ubuntu5.24.04.1"}
 NEW = {"openssl": "3.0.13-0ubuntu3.10", "libssl3t64": "3.0.13-0ubuntu3.10",
        "git": "1:2.43.0-1ubuntu7.3+esm1", "sudo": "1.9.15p5-3ubuntu5.24.04.2"}
+# что helper sockfix-setup меняет в compose прокси (так он пишет разницу в отчет)
+SOCKFIX_DIFF = r"""--- docker-compose.yml
++++ docker-compose.yml (fixed)
+@@ -8,10 +8,32 @@
+     environment:
+       - CADDY_INGRESS_NETWORKS=caddy
++      - DOCKER_HOST=tcp://docker-api:2375
+     networks:
+       - caddy
++      - docker-api
+     volumes:
+-      - /var/run/docker.sock:/var/run/docker.sock
+       - ./data:/data
++  docker-api:
++    # read-only docker API for caddy: the proxy facing the internet no longer holds the socket
++    image: wollomatic/socket-proxy:1.13.1
++    restart: unless-stopped
++    user: "65534:989"   # gid of /var/run/docker.sock
++    read_only: true
++    mem_limit: 64M
++    cap_drop: [ALL]
++    security_opt: ["no-new-privileges:true"]
++    volumes:
++      - /var/run/docker.sock:/var/run/docker.sock:ro
++    networks: [docker-api]
++    command:
++      - -listenip=0.0.0.0
++      - -allowfrom=caddy
++      - -watchdoginterval=600
++      - -stoponwatchdog
++      - -allowHEAD=/_ping
++      - -allowGET=/(v[0-9]+\.[0-9]+/)?(_ping|version|info|events|containers/json|networks(/[a-zA-Z0-9][a-zA-Z0-9_.-]*)?)
+ networks:
+   caddy:
+     external: true
++  docker-api:
++    internal: true"""
 # какие пакеты на какой ноде не обновлены, и ядро
 VULN_NODES = {
     "web-01": ({"openssl", "libssl3t64"}, "6.8.0-149-generic"),
@@ -578,6 +615,19 @@ def services(rep: dict, name: str, role: str) -> None:
                   "PHP Fatal error:  Uncaught PDOException: SQLSTATE[HY000] [2002] Connection refused in "
                   "/app/vendor/doctrine/dbal/src/Driver/PDO/Connection.php:33"),
             _lsrc("container app-01-worker-1", 40, 40 * 24, "WARNING: queue orders: consumer cancelled by broker")]}
+    if role == "ci":
+        # внешний прокси держит docker-сокет, helper sockfix-setup уже собрал compose без него
+        rep["docker"]["containers"].append(
+            {"name": "caddy-caddy-1", "image": "lucaslorentz/caddy-docker-proxy:2.12.0", "state": "running",
+             "status": "Up 40 days", "policy": "always", "restarts": 0,
+             "binds": ["/var/run/docker.sock", "/srv/caddy/data"], "cpu": 0.4, "mem": 52_000_000,
+             "img_ver": "2.12.0", "img_created": T - 200 * DAY})
+        ex["sockfix"] = {"v": 1, "ts": T - 120, "items": [{
+            "container": "caddy-caddy-1", "kind": "caddy", "project": "caddy", "service": "caddy",
+            "dir": "/srv/caddy", "files": ["/srv/caddy/docker-compose.yml"], "nets": ["caddy"],
+            "sock": "/var/run/docker.sock", "compose": "2.40.3", "ok": True, "gid": 989,
+            "file": "/srv/caddy/docker-compose.yml", "fixed": "/var/lib/kervax/sockfix/caddy.yml",
+            "diff": SOCKFIX_DIFF}]}
     if role == "gpu":
         rep["llm"] = [
             {"engine": "vllm", "kind": "container", "name": "llm-vllm-1", "model": "Qwen/Qwen3-32B", "port": 8000,

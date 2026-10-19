@@ -237,7 +237,7 @@ def _out(
     # оказаться внутренним. local_ip не смотрим — он приватный и страны не имеет.
     o.country = geoip.country_of(server.external_ip) or geoip.country_of(server.agent_ip)
     o.docker_alerts = _docker_alerts(server)
-    o.docker_exposed = docker_exposure.exposed(server.last_report or {})
+    o.docker_exposed = docker_exposure.view(server.last_report or {})
     o.docker_risk = docker_risk.view(server)
     o.exposure = open_ports.view(server)
     o.os_advice = os_support.advice(server.last_report or {}, now)
@@ -541,6 +541,7 @@ _SETUP_LABEL = {
     "cron-setup": "Кроны на хосте и в контейнерах",
     "logerr-setup": "Ошибки в логах контейнеров",
     "fpm-setup": "Пулы PHP-FPM",
+    "sockfix-setup": "Compose прокси без docker-сокета",
 }
 
 

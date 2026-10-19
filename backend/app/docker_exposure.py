@@ -10,7 +10,18 @@
 Наши собственные прокси сокета (kervax-docker-proxy, docker-api у caddy) держат сокет по
 делу и в интернет не смотрят - их не трогаем, как и сборщиков метрик и логов (cadvisor,
 promtail): они не принимают запросы снаружи.
+
+Что именно поправить, говорит helper sockfix-setup: на самой ноде он правит копию compose-файла,
+из которого запущен caddy-docker-proxy, и проверяет ее docker compose config (extras "sockfix").
+Панель показывает разницу и команды: применить, проверить, вернуть. Сама ничего не применяет: у
+агента к Docker только чтение и перезапуск, и правка прокси панелью сделала бы взлом панели root
+на всех серверах - ровно ту дыру, которую закрываем.
 """
+from __future__ import annotations
+
+import os
+import shlex
+import time
 
 _SOCK = frozenset({"/var/run/docker.sock", "/run/docker.sock", "/var/run", "/run"})
 
@@ -30,6 +41,52 @@ def image_kind(image: str) -> str | None:
     base = name.rsplit("/", 1)[-1]
     base = base.split(":", 1)[0]
     return _EDGE.get(base)
+
+
+FIX_MAX_AGE = 3600  # helper пишет раз в 10 минут; старше часа - встал, его файл мог устареть
+_FIX_KEYS = ("ok", "why", "why_detail", "file", "dir", "project", "service", "fixed", "diff", "gid", "nets", "sock",
+             "compose")
+
+
+def fixes(rep: dict) -> dict[str, dict]:
+    """Готовые исправления helper'а sockfix-setup по имени контейнера; у готового (ok) - команды
+    "apply", "check", "rollback"."""
+    b = ((rep or {}).get("extras") or {}).get("sockfix")
+    if not isinstance(b, dict) or b.get("v") != 1:
+        return {}
+    ref = float((rep or {}).get("clock_unix") or 0) or time.time()
+    if ref - float(b.get("ts") or 0) > FIX_MAX_AGE:
+        return {}
+    out: dict[str, dict] = {}
+    for it in b.get("items") or []:
+        if not isinstance(it, dict) or not it.get("container"):
+            continue
+        fx = {k: it[k] for k in _FIX_KEYS if it.get(k) not in (None, "", [])}
+        fx["ok"] = bool(it.get("ok") and it.get("fixed") and it.get("file") and it.get("dir") and it.get("project"))
+        if fx["ok"]:
+            fx.update(commands(fx))
+        out[str(it["container"])] = fx
+    return out
+
+
+def commands(fx: dict) -> dict[str, str]:
+    """Применить готовый файл, проверить, вернуть как было. Файл проекта - по имени, если лежит в его
+    каталоге, иначе полным путем; проект - явно (-p), как его запустили."""
+    d, f, proj = str(fx["dir"]), str(fx["file"]), str(fx["project"])
+    name = os.path.basename(f) if os.path.dirname(f) == d.rstrip("/") else f
+    q = shlex.quote
+    up = f"docker compose -p {q(proj)} -f {q(name)} up -d"
+    return {
+        "apply": "\n".join([f"cd {q(d)}", f"cp {q(name)} {q(name + '.bak-kervax')}", f"cp {q(str(fx['fixed']))} {q(name)}", up]),
+        "check": "\n".join([f"docker compose -p {q(proj)} ps", f"docker compose -p {q(proj)} logs --since 10m docker-api | grep -c blocked"]),
+        "rollback": "\n".join([f"cd {q(d)}", f"cp {q(name + '.bak-kervax')} {q(name)}", up + " --remove-orphans"]),
+    }
+
+
+def view(rep: dict) -> list[dict]:
+    """Для карточки: прокси с сокетом и готовое исправление ("fix"), если helper его прислал"""
+    fx = fixes(rep)
+    return [{**x, "fix": fx[x["name"]]} if x["name"] in fx else x for x in exposed(rep)]
 
 
 def exposed(rep: dict) -> list[dict]:
