@@ -4,6 +4,17 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.4.283] - 2026-10-19
+
+helper logerr-setup 0.4 (ставит плейбук helper'ов).
+
+### Fixed
+- Живая нода выглядела недоступной: панель отвечала 400 на каждый ее отчет. helper ошибок в
+  логах обрезает пример строки по байтам (mawk, LC_ALL=C) и оборвал его посреди русской буквы,
+  агент кладет файлы helper'ов в отчет как есть, а один битый байт UTF-8 ронял разбор всего
+  тела. Теперь панель заменяет битые байты на U+FFFD и принимает отчет, а logerr-setup 0.4
+  пропускает свой отчет через iconv -c перед выдачей.
+
 ## [1.4.282] - 2026-10-19
 
 helper backupserver-setup 0.33 (ставит плейбук helper'ов).
