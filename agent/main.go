@@ -44,7 +44,7 @@ import (
 	"time"
 )
 
-const version = "2.39"
+const version = "2.40"
 
 // Публичный ключ для проверки подписи релизов агента (Ed25519, base64).
 // ПУСТО по умолчанию → самообновление ВЫКЛЮЧЕНО (агент никогда не заменяет себя).
@@ -2457,26 +2457,32 @@ func readProcs() map[int]procSample {
 		if err != nil {
 			continue // процесс завершился между ReadDir и чтением
 		}
-		s := string(b)
-		op := strings.IndexByte(s, '(')
-		cl := strings.LastIndexByte(s, ')')
-		if op < 0 || cl < 0 || cl < op || cl+2 >= len(s) {
-			continue
+		if p, ok := parseProcStat(string(b), ps); ok {
+			m[pid] = p
 		}
-		comm := s[op+1 : cl]
-		tail := strings.Fields(s[cl+2:]) // поля начиная с state (поле 3)
-		if len(tail) < 22 {
-			continue
-		}
-		state := tail[0]                                   // поле 3
-		utime, _ := strconv.ParseUint(tail[11], 10, 64)    // поле 14
-		stime, _ := strconv.ParseUint(tail[12], 10, 64)    // поле 15
-		threads, _ := strconv.Atoi(tail[17])               // поле 20 (num_threads)
-		rssPages, _ := strconv.ParseUint(tail[21], 10, 64) // поле 24 (страницы)
-		start, _ := strconv.ParseUint(tail[19], 10, 64)    // поле 22 (starttime)
-		m[pid] = procSample{ticks: utime + stime, rss: rssPages * ps, comm: comm, threads: threads, state: state, start: start}
 	}
 	return m
+}
+
+// parseProcStat - одна строка /proc/<pid>/stat; page - размер страницы (rss там в страницах)
+func parseProcStat(s string, page uint64) (procSample, bool) {
+	op := strings.IndexByte(s, '(')
+	cl := strings.LastIndexByte(s, ')')
+	if op < 0 || cl < 0 || cl < op || cl+2 >= len(s) {
+		return procSample{}, false
+	}
+	comm := s[op+1 : cl]
+	tail := strings.Fields(s[cl+2:]) // поля начиная с state (поле 3)
+	if len(tail) < 22 {
+		return procSample{}, false
+	}
+	state := tail[0]                                   // поле 3
+	utime, _ := strconv.ParseUint(tail[11], 10, 64)    // поле 14
+	stime, _ := strconv.ParseUint(tail[12], 10, 64)    // поле 15
+	threads, _ := strconv.Atoi(tail[17])               // поле 20 (num_threads)
+	rssPages, _ := strconv.ParseUint(tail[21], 10, 64) // поле 24 (страницы)
+	start, _ := strconv.ParseUint(tail[19], 10, 64)    // поле 22 (starttime)
+	return procSample{ticks: utime + stime, rss: rssPages * page, comm: comm, threads: threads, state: state, start: start}, true
 }
 
 // приватная память процесса ≈ RSS − общая (RssShmem). Для postgres/redis это
@@ -3721,6 +3727,10 @@ func collect(prev sample) (report, sample) {
 	// порты, адреса и обновления ОС - из фоновых замеров
 	r.PSI = readPSI()
 	r.DState = dstate(cur.procs)
+	r.DState.Stuck = dTrack.stuck(cur.procs, readProcFile, cur.at)
+	if n, ok := readHungCount(); ok {
+		r.DState.Hung, r.DState.HungNew = &n, dTrack.hungGrowth(n, cur.at)
+	}
 	r.Fds = readFds()
 	r.TCP = tcpRate(cur.tcp, prev.tcp, cur.at.Sub(prev.at).Seconds())
 	if r.TCP != nil {
@@ -7129,15 +7139,29 @@ type dockerPort struct {
 }
 
 // dstateInfo - процессы в состоянии D: ждут диск или сеть и не прерываются (подвисший NFS,
-// умирающий диск, перегруженное хранилище). Несколько минут подряд - сервер встал на I/O.
+// умирающий диск, перегруженное хранилище). Число - снимок одного отчета: под тяжелым чтением в
+// D все время кто-то есть, но каждый на миллисекунды. Зависшие (2.40) - отдельно, в Stuck.
 type dstateInfo struct {
 	N   int          `json:"n"`
 	Top []dstateProc `json:"top,omitempty"`
+	// 2.40: зависшие, как их видит ядро (hung_task): тот же процесс в D отчет за отчетом и ни
+	// одного переключения контекста дольше dstateHungAfter. Пустой список - считали, зависших нет
+	Stuck []dstateStuck `json:"stuck"`
+	// /proc/sys/kernel/hung_task_detect_count (нет файла - nil) и на сколько он вырос за hungWindow
+	Hung    *uint64 `json:"hung,omitempty"`
+	HungNew uint64  `json:"hung_new,omitempty"`
 }
 
 type dstateProc struct {
 	Comm string `json:"c"`
 	N    int    `json:"n"`
+}
+
+type dstateStuck struct {
+	PID   int    `json:"pid"`
+	Comm  string `json:"comm"`
+	Wchan string `json:"wchan,omitempty"` // где спит в ядре; чужой процесс без ptrace ядро не показывает
+	Sec   int64  `json:"sec"`             // сколько висит без переключений
 }
 
 // fdInfo - открытые файлы системы против предела ядра (fs.file-max)
@@ -7410,7 +7434,7 @@ func dstate(procs map[int]procSample) *dstateInfo {
 			by[p.comm]++
 		}
 	}
-	d := &dstateInfo{N: n}
+	d := &dstateInfo{N: n, Stuck: []dstateStuck{}}
 	for c, k := range by {
 		d.Top = append(d.Top, dstateProc{Comm: c, N: k})
 	}
@@ -7424,6 +7448,129 @@ func dstate(procs map[int]procSample) *dstateInfo {
 		d.Top = d.Top[:5]
 	}
 	return d
+}
+
+// Зависший процесс (2.40) - как его видит ядро (hung_task): в D дольше hung_task_timeout_secs
+// (по умолчанию 120 с) и за это время ни разу не переключался. Массовый D под тяжелым чтением -
+// другое: процессы на миллисекунды ждут страницу с диска и просыпаются, счетчик переключений растет.
+const (
+	dstateHungAfter = 120 * time.Second
+	dstateStuckMax  = 10
+	// за сколько смотреть рост hung_task_detect_count: ядро прибавляет его на каждой проверке
+	// (раз в hung_task_timeout_secs), пока задача висит
+	hungWindow = 10 * time.Minute
+)
+
+// dstateSeen - процесс в D, каким его видел прошлый отчет
+type dstateSeen struct {
+	start uint64    // starttime: тот же pid у нового процесса - другой процесс
+	sw    uint64    // voluntary + nonvoluntary переключения контекста
+	since time.Time // с какого отчета в D без переключений
+}
+
+type hungSample struct {
+	at time.Time
+	n  uint64
+}
+
+// dstateTracker - отсчет зависших между отчетами, в памяти агента. Зовет его только цикл
+// отчетов (collect), поэтому без блокировок
+type dstateTracker struct {
+	seen map[int]dstateSeen
+	hung []hungSample
+}
+
+var dTrack dstateTracker
+
+// ctxtSwitches - сумма voluntary_ctxt_switches и nonvoluntary_ctxt_switches из /proc/<pid>/status
+func ctxtSwitches(status string) (uint64, bool) {
+	var sum uint64
+	got := 0
+	for _, line := range strings.Split(status, "\n") {
+		k, v, ok := strings.Cut(line, ":")
+		if !ok || (k != "voluntary_ctxt_switches" && k != "nonvoluntary_ctxt_switches") {
+			continue
+		}
+		n, err := strconv.ParseUint(strings.TrimSpace(v), 10, 64)
+		if err != nil {
+			return 0, false
+		}
+		sum += n
+		got++
+	}
+	return sum, got == 2
+}
+
+// stuck - зависшие среди процессов снимка: тот же pid и starttime в D, что и в прошлом отчете, и
+// переключений не прибавилось. status читаем только у процессов в D - их единицы. read отдает
+// /proc/<pid>/<name>, в тестах - подставные тексты
+func (t *dstateTracker) stuck(procs map[int]procSample, read func(pid int, name string) string, now time.Time) []dstateStuck {
+	seen := map[int]dstateSeen{}
+	out := []dstateStuck{}
+	for pid, p := range procs {
+		if p.state != "D" {
+			continue
+		}
+		sw, ok := ctxtSwitches(read(pid, "status"))
+		if !ok || sw == 0 {
+			continue // процесс ушел, или только что создан и ни разу не спал: ядро такие не судит
+		}
+		cur := dstateSeen{start: p.start, sw: sw, since: now}
+		if was, ok := t.seen[pid]; ok && was.start == p.start && was.sw == sw {
+			cur.since = was.since
+		}
+		seen[pid] = cur
+		if d := now.Sub(cur.since); d >= dstateHungAfter {
+			w := strings.TrimSpace(read(pid, "wchan"))
+			if w == "0" {
+				w = "" // процесс другого пользователя: без ptrace ядро вместо символа пишет 0
+			}
+			out = append(out, dstateStuck{PID: pid, Comm: p.comm, Wchan: w, Sec: int64(d / time.Second)})
+		}
+	}
+	t.seen = seen
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Sec != out[j].Sec {
+			return out[i].Sec > out[j].Sec
+		}
+		return out[i].PID < out[j].PID
+	})
+	if len(out) > dstateStuckMax {
+		out = out[:dstateStuckMax]
+	}
+	return out
+}
+
+// hungGrowth - на сколько вырос счетчик hung_task за последние hungWindow. Первый замер после
+// запуска агента - точка отсчета: насчитанное ядром до него уже не новость
+func (t *dstateTracker) hungGrowth(n uint64, now time.Time) uint64 {
+	if k := len(t.hung); k > 0 && n < t.hung[k-1].n {
+		t.hung = nil // счетчик сбросили
+	}
+	t.hung = append(t.hung, hungSample{at: now, n: n})
+	// база - последний замер не моложе окна, а если агент работает меньше окна - самый первый
+	for len(t.hung) > 1 && now.Sub(t.hung[1].at) >= hungWindow {
+		t.hung = t.hung[1:]
+	}
+	return n - t.hung[0].n
+}
+
+func readProcFile(pid int, name string) string {
+	b, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/" + name)
+	if err != nil {
+		return ""
+	}
+	return string(b)
+}
+
+// readHungCount - сколько раз ядро находило зависшие задачи с загрузки (новые ядра)
+func readHungCount() (uint64, bool) {
+	b, err := os.ReadFile("/proc/sys/kernel/hung_task_detect_count")
+	if err != nil {
+		return 0, false
+	}
+	n, err := strconv.ParseUint(strings.TrimSpace(string(b)), 10, 64)
+	return n, err == nil
 }
 
 // readFds - /proc/sys/fs/file-nr: "выделено свободно предел"

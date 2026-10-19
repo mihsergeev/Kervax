@@ -3196,10 +3196,59 @@ _PSI_MEM_FULL = 10.0
 _PSI_MEM_SOME = 40.0
 _PSI_IO_FULL = 50.0
 _PSI_IO_SOME = 80.0
-# Процессов в D-state (ждут диск или сеть и не прерываются) столько подряд: подвисший NFS,
-# умирающий диск. Один-два бывают и на здоровом сервере
-_DSTATE_MIN = 5
+# Зависшие процессы (агент 2.40, dstate.stuck) - как их видит ядро (hung_task): тот же процесс в D
+# отчет за отчетом и ни одного переключения контекста дольше двух минут. Само число процессов в D
+# не беда: под тяжелым чтением в D каждую секунду другие процессы на миллисекунды, на базе их было
+# 2-23 сутками, а не висел ни один (алерт держался три дня). Число остается в карточке справкой и
+# у старых агентов тоже не алертит. hung_new - на сколько за 10 минут вырос hung_task_detect_count
+# ядра: он растет на каждой проверке, пока задача висит.
 _FDS_WARN, _FDS_PROB = 80.0, 90.0
+
+
+def _stuck_dur(sec: int) -> str:
+    if sec >= 3600:
+        return f"{sec // 3600} ч {sec % 3600 // 60} мин"
+    return f"{max(sec // 60, 1)} мин"
+
+
+def dstate_stuck(rep: dict) -> tuple[list[dict], int]:
+    """Зависшие процессы (дольше всех первыми) и рост счетчика hung_task ядра за 10 минут."""
+    ds = rep.get("dstate") if isinstance(rep.get("dstate"), dict) else {}
+    raw = ds.get("stuck")
+    stuck = [x for x in raw if isinstance(x, dict)] if isinstance(raw, list) else []
+    stuck.sort(key=lambda x: -_int(x.get("sec")))
+    return stuck, max(_int(ds.get("hung_new")), 0)
+
+
+def _stuck_text(stuck: list[dict], hung: int) -> str:
+    """"завис postgres (PID 4242) в ожидании диска или сети 7 мин, wchan ..." или перечень."""
+    def who(x: dict) -> tuple[str, int, str, str]:
+        return (str(x.get("comm") or "?"), _int(x.get("pid")), str(x.get("wchan") or ""),
+                _stuck_dur(_int(x.get("sec"))))
+
+    if len(stuck) == 1:
+        c, pid, w, d = who(stuck[0])
+        return f"завис {c} (PID {pid}) в ожидании диска или сети {d}" + (f", wchan {w}" if w else "")
+    if stuck:
+        n = len(stuck)
+        items = [f"{c} (PID {pid}{f', wchan {w}' if w else ''}) {d}" for c, pid, w, d in map(who, stuck[:3])]
+        return (f"зависли в ожидании диска или сети {n} {_plural(n, 'процесс', 'процесса', 'процессов')}: "
+                + ", ".join(items) + (f" и еще {n - 3}" if n > 3 else ""))
+    return f"ядро видит зависшие задачи: hung_task сработал {hung} {_plural(hung, 'раз', 'раза', 'раз')} за 10 мин"
+
+
+def pressure_hint(rep: dict) -> str:
+    """Вторая строка алерта про зависшие: что это значит и куда смотреть."""
+    stuck, hung = dstate_stuck(rep)
+    if stuck:
+        who = "процесс дольше 2 мин в D и ни разу не проснулся" if len(stuck) == 1 else \
+            "процессы дольше 2 мин в D и ни разу не проснулись"
+        return (f"{who}: так висят на умирающем диске, подвисшем NFS или хранилище. "
+                f"На чем висит: sudo cat /proc/{_int(stuck[0].get('pid'))}/stack и dmesg")
+    if hung:
+        return ("ядро видит задачу в D дольше hung_task_timeout_secs: процесс и стек в dmesg "
+                "(blocked for more than)")
+    return ""
 
 
 def pressure_problems(rep: dict) -> list[tuple[int, str, str]]:
@@ -3224,13 +3273,9 @@ def pressure_problems(rep: dict) -> list[tuple[int, str, str]]:
         out.append((2, "io", f"диск не успевает: все процессы разом ждут диск {io_f:.0f}% времени"))
     elif io_s >= _PSI_IO_SOME:
         out.append((1, "io", f"диск не успевает: процессы ждут диск {io_s:.0f}% времени"))
-    ds = rep.get("dstate") if isinstance(rep.get("dstate"), dict) else {}
-    n = _int(ds.get("n"))
-    if n >= _DSTATE_MIN:
-        top = ", ".join(f"{t.get('c') or '?'} ({_int(t.get('n'))})" for t in (ds.get("top") or [])[:3]
-                        if isinstance(t, dict))
-        out.append((2, "dstate", f"зависли в ожидании диска или сети {n} процессов (D-state)"
-                    + (f": {top}" if top else "")))
+    stuck, hung = dstate_stuck(rep)
+    if stuck or hung:
+        out.append((2, "dstate", _stuck_text(stuck, hung)))
     fd = rep.get("fds") if isinstance(rep.get("fds"), dict) else {}
     used, lim = _int(fd.get("used")), _int(fd.get("max"))
     if lim > 0:
@@ -5414,7 +5459,8 @@ def _server_conditions(s: Server, now: datetime,
     if online and any(rep.get(k) for k in ("psi", "dstate", "fds")):
         pr = pressure_problems(rep)
         sustain_lvl("pressure", pr[0][0] if pr else 0, cool_s=_CALM_S, ctx={"detail": "; ".join(t for _l, _r, t in pr[:3]),
-                                                        "res": pr[0][1] if pr else "", "cause": ""})
+                                                        "res": pr[0][1] if pr else "", "cause": "",
+                                                        "hint": pressure_hint(rep)})
     # Сеть ноды: потери TCP, очередь accept, conntrack, ошибки и дропы интерфейсов
     if online and (rep.get("tcp") or rep.get("net_ifaces")):
         nets = net_problems(rep)
@@ -6012,6 +6058,9 @@ async def evaluate_servers(
                         ctx["cause"] = await cause_for(s, "mem")
                     elif ctx.get("res") == "io":
                         ctx["cause"] = io_cause(s.last_report or {})
+                    if ctx.get("hint"):
+                        # зависший процесс: что это значит и куда смотреть - второй строкой
+                        ctx["cause"] = (ctx.get("cause") or "") + "\n↳ " + ctx["hint"]
                 if key == "dns":
                     ctx["details"] = (ctx.get("details") or "") + dns_others_hint(s.id, dns_slow_by)
                 if key == "disk":

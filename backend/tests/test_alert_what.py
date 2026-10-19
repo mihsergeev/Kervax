@@ -55,6 +55,18 @@ def test_pressure_and_ports():
     assert items("pressure", t) == [("диск sda не успевает", "ждут диск 57% времени")]
     t = "🫁 web-a — зависли в ожидании диска или сети 9 процессов (D-state): postgres (7), gzip (1), systemd (1)"
     assert items("pressure", t) == [("процессы зависли в D-state", "postgres, gzip, systemd")]
+    # агент 2.40: зависшие поименно
+    t = ("🫁 db-a — завис postgres (PID 4242) в ожидании диска или сети 18 мин, wchan folio_wait_bit_common\n"
+         "↳ процесс дольше 2 мин в D и ни разу не проснулся")
+    assert items("pressure", t) == [("завис postgres", "18 мин, wchan folio_wait_bit_common")]
+    t = ("🫁 db-a — диск не успевает: все процессы разом ждут диск 61% времени; зависли в ожидании диска или "
+         "сети 4 процесса: postgres (PID 1) 1 ч 1 мин, jbd2/sda1-8 (PID 2, wchan jbd2_journal_commit_transaction) "
+         "6 мин, nfsd (PID 3) 3 мин и еще 1 - sda занят на 99%, задержка 180 мс")
+    assert items("pressure", t) == [("диск не успевает", "ждут диск 61% времени"), ("завис postgres", "1 ч 1 мин"),
+                                    ("завис jbd2/sda1-8", "6 мин, wchan jbd2_journal_commit_transaction"),
+                                    ("завис nfsd", "3 мин")]
+    t = "🫁 db-a — ядро видит зависшие задачи: hung_task сработал 2 раза за 10 мин"
+    assert items("pressure", t) == [("ядро видит зависшие задачи", "hung_task сработал 2 раза за 10 мин")]
     t = "🔓 web-a — открыто в интернет: etcd 2380 (процесс пользователя etcd) на 203.0.113.5; kubelet 10250 на 203.0.113.5"
     assert items("exposed", t) == [("открыт в интернет etcd 2380", "процесс пользователя etcd"),
                                    ("открыт в интернет kubelet 10250", "")]

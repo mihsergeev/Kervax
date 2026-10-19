@@ -164,10 +164,27 @@ def _pct(body: str) -> list[tuple[str, str]] | None:
     return [(f"{name} выше порога", note)]
 
 
+_STUCK_ONE = re.compile(r"^завис (.+?) \(PID \d+\) в ожидании диска или сети (.+?)(?:, wchan (\S+))?(?: - .*)?$")
+_STUCK_ITEM = re.compile(r"^(.+?) \(PID \d+(?:, wchan (\S+))?\) (.+)$")
+
+
 def _pressure(body: str, extra: list[str]) -> list[tuple[str, str]] | None:
     out = []
     for item in _split(body, "; "):
         head, _, tail = item.partition(": ")
+        # зависшие (агент 2.40): "завис postgres (PID 4242) в ожидании диска или сети 7 мин, wchan x"
+        # или перечень "зависли в ожидании диска или сети 3 процесса: postgres (PID 1) 9 мин, ..."
+        one = _STUCK_ONE.match(item)
+        if one:
+            out.append((f"завис {one.group(1)}", one.group(2) + (f", wchan {one.group(3)}" if one.group(3) else "")))
+            continue
+        if head.startswith("зависли в ожидании диска или сети ") and "D-state" not in head:
+            # хвост " - sda занят ..." (причина давления на диск) и " и еще N" - не процессы
+            for p in _split(re.sub(r" и еще \d+$", "", tail.split(" - ")[0]))[:3]:
+                m = _STUCK_ITEM.match(p)
+                if m:
+                    out.append((f"завис {m.group(1)}", m.group(3) + (f", wchan {m.group(2)}" if m.group(2) else "")))
+            continue
         if "D-state" in head:
             procs = [re.sub(r"\s*\(\d+\)$", "", x) for x in _split(tail)]
             out.append(("процессы зависли в D-state", ", ".join(procs[:3])))

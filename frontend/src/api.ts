@@ -1576,7 +1576,15 @@ export type ServerReport = {
   // давление на ресурсы (агент 2.26): PSI в % времени - mem_some_60, io_full_10 и т.п.;
   // процессы в D-state; открытые файлы против fs.file-max
   psi?: Record<string, number>
-  dstate?: { n: number; top?: { c: string; n: number }[] }
+  // stuck (агент 2.40) - зависшие, как их видит ядро (hung_task): нет поля - агент старый и не
+  // считает; hung - hung_task_detect_count ядра, hung_new - его рост за 10 минут
+  dstate?: {
+    n: number
+    top?: { c: string; n: number }[]
+    stuck?: { pid: number; comm: string; wchan?: string; sec: number }[]
+    hung?: number
+    hung_new?: number
+  }
   fds?: { used: number; max: number }
   // TCP за секунду (агент 2.26): отправлено сегментов, из них повторно, переполнения очереди
   // accept и выброшенные из нее, новые соединения, выброшенные conntrack, входящие с ошибкой

@@ -1846,6 +1846,8 @@ const EN: Record<string, string> = {
   'за 10 с {p}': '10 s {p}',
   'В D-state': 'In D-state',
   'ждут диск или сеть': 'waiting for disk or network',
+  'сменяются, зависших нет': 'they keep changing, none stuck',
+  'ядро видит зависшие задачи: {n} за 10 мин': 'the kernel sees hung tasks: {n} in 10 min',
   'Файловые дескрипторы': 'File descriptors',
   '{u} из {m}': '{u} of {m}',
   // CPU и память: плитки "сейчас"
@@ -2047,8 +2049,8 @@ const EN: Record<string, string> = {
   'порт {p}': 'port {p}',
   'без TLS': 'no TLS',
   'для чистки и проверки': 'for prune and check',
-  'Процент - доля времени за минуту, когда хоть один процесс ждал ресурс, "все стоят" - когда ждали все сразу. D-state - процессы, которые ждут диск или сеть и не прерываются.':
-    'The percentage is the share of the last minute when at least one process waited for the resource, "all stalled" is when all of them waited at once. D-state processes wait for disk or network and cannot be interrupted.',
+  'Процент - доля времени за минуту, когда хоть один процесс ждал ресурс. "Все стоят" ядро считает по каждому CPU отдельно (его процессы ждут ресурс, и выполнять на нем нечего), поэтому на многоядерном сервере это не значит, что стоял весь сервер. D-state - процессы, которые ждут диск или сеть и не прерываются, зависший - тот, что не просыпается дольше 2 минут.':
+    'The percentage is the share of the last minute when at least one process waited for the resource. The kernel counts "all stalled" per CPU (its processes wait for the resource and there is nothing else to run on it), so on a multi-core server it does not mean the whole server stood still. D-state processes wait for disk or network and cannot be interrupted, a stuck one has not woken up for more than 2 minutes.',
   // утечка памяти
   'Растет память': 'Memory keeps growing',
   'Минимум памяти за сутки растет 4 суток подряд. Пила сборщика мусора и всплески минимум не двигают, а утечка поднимает его каждый день. Алерт - только если при таком росте свободной памяти сервера не хватит на неделю.':
