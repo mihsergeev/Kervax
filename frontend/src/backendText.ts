@@ -35,6 +35,7 @@ const PHRASES: Rule[] = [
   [/root может войти по SSH паролем, а порт (.+?) открыт в интернет/g,
     'root can log in over SSH with a password and port $1 is open to the internet'],
   // обновления ОС
+  [/исправления Ubuntu Pro \(ESM\) для (.+?) кончатся (\S+), через /g, 'Ubuntu Pro (ESM) fixes for $1 end on $2, in '],
   [/обычная поддержка (.+?) кончилась (\S+): исправления безопасности дальше только в Ubuntu Pro \(ESM до (\S+), pro attach\) или после переезда на новую LTS/g,
     'standard support for $1 ended on $2: security fixes now come only with Ubuntu Pro (ESM until $3, pro attach) or after moving to a newer LTS'],
   [/поддержка (.+?) кончилась (\S+), ESM тоже \((\S+)\): обновлений безопасности больше нет/g,

@@ -1855,6 +1855,8 @@ export type BackupServerRepoExtra = {
   prune_err?: string // ошибка последнего неудачного прогона чистки (helper 0.30)
 }
 // группа снапшотов так, как её видит forget: хост и теги (prune-скрипт, раз в сутки)
+export type OsFixStep = { id: string; cmd?: string; arg?: string; alt?: boolean }
+
 export type BackupGroup = {
   host: string
   tags: string[]
@@ -1926,7 +1928,8 @@ export type Server = {
   exposure?: Exposure | null
   // что сделать с ОС: конец поддержки, перезагрузка, обновления безопасности (level 2 - уже дыра)
   // key - ключ решения "так и должно быть" в alert_mutes (osupd:<kind>), muted - решение принято
-  os_advice?: { kind: string; level: number; text: string; key: string; muted?: boolean }[]
+  // fix - шаги на ноде, после которых пункт уходит: id текста, команда, arg для текста, alt - другой путь
+  os_advice?: { kind: string; level: number; text: string; key: string; muted?: boolean; fix?: OsFixStep[] }[]
   // версии без поддержки (app/software.py): строка на продукт, 2 - без поддержки, 1 - скоро
   sw_advice?: { key: string; level: number; name: string; what: string; text: string }[] | null
   // GPU NVIDIA (helper gpu-setup): карточка раздела и плашка списка; LLM-сервисы (агент 2.36)
