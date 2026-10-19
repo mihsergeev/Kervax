@@ -940,7 +940,7 @@ function KubeHostModal({
           </span>
           {kube.access && (
             <>
-              <span className="srv-meta-item"><span className="srv-meta-k">namespace</span> {kube.namespaces ?? 0}</span>
+              <span className="srv-meta-item"><span className="srv-meta-k">{t('namespace')}</span> {kube.namespaces ?? 0}</span>
               <span className="srv-meta-item"><span className="srv-meta-k">{t('нод')}</span> {nodes.length}</span>
               <span className="srv-meta-item"><span className="srv-meta-k">{t('подов')}</span> {podsActive}</span>
             </>

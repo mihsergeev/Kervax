@@ -2537,6 +2537,8 @@ const EN: Record<string, string> = {
   'ресурсов: {n}, все в Ready': 'resources: {n}, all Ready',
   'без лимита памяти {a}, без проб {b}': 'no memory limit {a}, no probes {b}',
   'у всех подов есть лимиты и пробы': 'all pods have limits and probes',
+  // подпись перед числом, как нод/подов: по-русски так и пишется, по-английски множественное
+  'namespace': 'namespaces',
   'нод': 'nodes',
   'подов': 'pods',
   'новое': 'new',

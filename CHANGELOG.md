@@ -4,6 +4,15 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.4.277] - 2026-10-19
+
+### Fixed
+- В английской панели в шапке кластера Kubernetes было "namespace 7": подпись не переводилась. Теперь
+  "namespaces 7", как "nodes" и "pods" рядом.
+
+### Docs
+- docs/make-shots.py переснимает отдельные кадры: SHOTS_ONLY=kube,home, остальные файлы не трогаются.
+
 ## [1.4.276] - 2026-10-19
 
 ### Changed

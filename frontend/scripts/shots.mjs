@@ -12,6 +12,7 @@
 //
 // Системный Chrome, без скачивания браузеров: PW_CHROME=<путь к chrome.exe>.
 // SHOTS_LANG=en|ru снимает один язык (данные в базе тоже языковые).
+// SHOTS_ONLY=kube,home переснимает только эти кадры, остальные файлы не трогает.
 import { chromium } from 'playwright-core'
 import { mkdir } from 'node:fs/promises'
 import path from 'node:path'
@@ -23,6 +24,7 @@ const OUT = process.env.SHOTS_OUT ||
   path.join(import.meta.dirname, '..', '..', 'docs', 'img')
 const CHROME = process.env.PW_CHROME ||
   'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe'
+const ONLY = (process.env.SHOTS_ONLY || '').split(',').map((s) => s.trim()).filter(Boolean)
 
 // nav — подпись пункта меню (кликаем по ней), url — прямая ссылка на деталь.
 // h — ПОТОЛОК высоты кадра: реальная считается по нижней границе содержимого,
@@ -71,7 +73,7 @@ const run = async () => {
     const dir = lang === 'en' ? OUT : path.join(OUT, 'ru')
     await mkdir(dir, { recursive: true })
 
-    for (const shot of SHOTS) {
+    for (const shot of SHOTS.filter((s) => !ONLY.length || ONLY.includes(s.name))) {
       const ctx = await browser.newContext({
         viewport: { width: 1440, height: shot.h },
         deviceScaleFactor: 2,
