@@ -13,11 +13,11 @@ const fmtUntil = (u: string) =>
   new Date(u).toLocaleString([], { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })
 
 function When({ r, t }: { r: MuteRow; t: TFn }) {
-  if (!r.until) return <span className="mt-perm">{t('бессрочно')}</span>
+  if (!r.until) return <span className="muted">{t('бессрочно')}</span>
   return (
     <>
       <span>{t('ещё {d}', { d: muteLeft(r.until, t) })}</span>
-      <span className="mt-until">{t('до {t}', { t: fmtUntil(r.until) })}</span>
+      <span className="muted mt-until">{t('до {t}', { t: fmtUntil(r.until) })}</span>
     </>
   )
 }
@@ -133,18 +133,19 @@ export function MutesPanel({
       >
         <div className="mt-head">
           <h3 id={titleId} className="mt-title">
-            🔕 {t('Заглушено')} <span className="mt-title-n">{rows.length}</span>
+            {t('Заглушено')}
+            <span className="net-n">{rows.length}</span>
           </h3>
-          <button className="ghost mt-close" onClick={close} title={t('Закрыть')} aria-label={t('Закрыть')}>
+          <button className="ghost icon-btn mt-close" onClick={close} title={t('Закрыть')} aria-label={t('Закрыть')}>
             ✕
           </button>
         </div>
         {rows.length + lifted.length > 0 && (
-          <div className="mt-totals small">
-            <span className="muted">{t('на серверах: {n}', { n: nSrv })}</span>
-            {perm > 0 && <span className="mt-perm">{t('бессрочно {n}', { n: perm })}</span>}
-            {soon > 0 && <span className="muted">{t('истекут за сутки {n}', { n: soon })}</span>}
-            {!canEdit && <span className="muted">{t('снять может оператор или админ')}</span>}
+          <div className="mt-totals small muted">
+            <span>{t('на серверах: {n}', { n: nSrv })}</span>
+            {perm > 0 && <span>{t('бессрочно {n}', { n: perm })}</span>}
+            {soon > 0 && <span>{t('истекут за сутки {n}', { n: soon })}</span>}
+            {!canEdit && <span>{t('снять может оператор или админ')}</span>}
           </div>
         )}
         {err && <div className="small t-down">{err}</div>}
@@ -162,7 +163,7 @@ export function MutesPanel({
             />
             {/* отбор есть, только когда есть из чего выбирать: у бэкапов все бессрочные */}
             {perm > 0 && timed > 0 && (
-              <div className="win-switch" role="group" aria-label={t('Срок')}>
+              <div className="win-switch mt-switch" role="group" aria-label={t('Срок')}>
                 {(
                   [
                     ['all', t('Все')],
@@ -195,10 +196,10 @@ export function MutesPanel({
                   <Fragment key={g.sid}>
                     <tr className="mt-grp">
                       <td colSpan={3}>
-                        <button className="linklike mt-srv" onClick={() => onOpen(g.sid)} title={t('открыть карточку')}>
+                        <button className="mt-srv" onClick={() => onOpen(g.sid)} title={t('открыть карточку')}>
                           {g.server}
                         </button>
-                        <span className="muted small mt-grp-n">{g.items.length}</span>
+                        <span className="net-n">{g.items.length}</span>
                       </td>
                     </tr>
                     {g.items.map((r) => {

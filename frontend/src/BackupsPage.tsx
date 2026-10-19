@@ -3293,7 +3293,7 @@ export function BackupsPage({
           {/* как "Бэкап-серверы": нет заглушенного - нет и плитки, здесь это редкость */}
           {mutes.length > 0 && (
             <NetTile
-              label={`🔕 ${t('Заглушено')}`}
+              label={t('Заглушено')}
               value={String(mutes.length)}
               sub={subOf(
                 mutesSub.where,

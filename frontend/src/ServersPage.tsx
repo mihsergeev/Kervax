@@ -4687,7 +4687,7 @@ export function ServersPage({ onUnauthorized, openServerId, openServerSec, onCon
           <SrvTile
             num={mutes.length}
             tone="muted"
-            label={`🔕 ${t('Заглушено')}`}
+            label={t('Заглушено')}
             sub={[mutesSub.where, mutesSub.when]}
             title={mutesSub.all}
             active={mutesOpen}
