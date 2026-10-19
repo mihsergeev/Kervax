@@ -5,7 +5,15 @@
 // этом можно было, только открыв карточку сервера. Поэтому заглушённое видно в
 // списке, причём КАЖДОЕ на своей странице: серверные пороги — в «Серверах»,
 // репозитории и покрытие бэкапа — в «Бэкапах» (иначе одна сводка мешала бы всё).
-import type { Server } from './api'
+import {
+  backupAuditMute,
+  backupRepoMute,
+  snoozeServer,
+  snoozeServerAlert,
+  updateServer,
+  type Server,
+} from './api'
+import { shortList } from './serverUtils'
 
 export type TFn = (s: string, params?: Record<string, string | number>) => string
 
@@ -13,6 +21,8 @@ export type MuteItem = {
   label: string
   until: string | null // null → бессрочно (само не истечёт — за такими и следим)
   group: MuteGroup
+  // что снимать: ключ в alert_mutes или alert_snoozes, имя репо, ключ покрытия; '' - снуз всего сервера
+  key: string
 }
 
 export type MuteGroup = 'alert' | 'repo' | 'audit'
@@ -245,18 +255,84 @@ export function collectMutes(
   const out: MuteItem[] = []
   if (groups.includes('alert')) {
     if (s.snooze_until && new Date(s.snooze_until).getTime() > now)
-      out.push({ label: t('Весь сервер'), until: s.snooze_until, group: 'alert' })
+      out.push({ label: t('Весь сервер'), until: s.snooze_until, group: 'alert', key: '' })
     for (const [k, u] of Object.entries(s.alert_snoozes ?? {}))
-      if (new Date(u).getTime() > now) out.push({ label: label(k), until: u, group: 'alert' })
-    for (const k of s.alert_mutes ?? []) if (!isDecision(k)) out.push({ label: label(k), until: null, group: 'alert' })
+      if (new Date(u).getTime() > now) out.push({ label: label(k), until: u, group: 'alert', key: k })
+    for (const k of s.alert_mutes ?? [])
+      if (!isDecision(k)) out.push({ label: label(k), until: null, group: 'alert', key: k })
   }
   if (groups.includes('repo'))
     for (const r of s.backup_repo_mutes ?? [])
-      out.push({ label: t('репо {n}', { n: r }), until: null, group: 'repo' })
+      out.push({ label: t('репо {n}', { n: r }), until: null, group: 'repo', key: r })
   if (groups.includes('audit'))
     for (const a of s.backup_audit_mutes ?? [])
-      out.push({ label: t('покрытие {n}', { n: a }), until: null, group: 'audit' })
+      out.push({ label: t('покрытие {n}', { n: a }), until: null, group: 'audit', key: a })
   return out
+}
+
+// Пункт общего списка заглушенного (панель "Заглушено"): мьют и его сервер
+export type MuteRow = MuteItem & { sid: number; server: string }
+
+export function muteRows(servers: Server[], t: TFn, groups: MuteGroup[]): MuteRow[] {
+  return servers.flatMap((s) => collectMutes(s, t, groups).map((i) => ({ ...i, sid: s.id, server: s.name })))
+}
+
+// Порядок внутри сервера: бессрочные первыми (сами не истекут), дальше то, что истечет раньше
+export function permFirst(a: MuteItem, b: MuteItem): number {
+  if (!a.until !== !b.until) return a.until ? 1 : -1
+  return a.until && b.until ? Date.parse(a.until) - Date.parse(b.until) : a.label.localeCompare(b.label)
+}
+
+// Истечет в ближайшие сутки
+export const muteSoon = (i: MuteItem, now = Date.now()) => !!i.until && Date.parse(i.until) - now < 86400_000
+
+// Снять заглушку из списка теми же ручками, что в карточке: бессрочную - из alert_mutes, со
+// сроком - снузом на 0 часов, репо и покрытие бэкапа - своими. s - свежее состояние сервера:
+// alert_mutes сохраняется целиком
+export function liftMute(s: Server, i: MuteItem): Promise<Server> {
+  if (i.group === 'repo') return backupRepoMute(s.id, i.key, false)
+  if (i.group === 'audit') return backupAuditMute(s.id, i.key, false)
+  if (i.key === '') return snoozeServer(s.id, 0)
+  if (i.until) return snoozeServerAlert(s.id, i.key, 0)
+  return updateServer(s.id, { alert_mutes: (s.alert_mutes ?? []).filter((k) => k !== i.key) })
+}
+
+// Вернуть только что снятое ("вернуть" в панели): снуз - на оставшееся до прежнего срока время,
+// истекший к этому моменту не возвращается (он бы уже и так кончился)
+export async function restoreMute(s: Server, i: MuteItem): Promise<Server> {
+  if (i.group === 'repo') return backupRepoMute(s.id, i.key, true)
+  if (i.group === 'audit') return backupAuditMute(s.id, i.key, true)
+  if (!i.until) return updateServer(s.id, { alert_mutes: [...new Set([...(s.alert_mutes ?? []), i.key])] })
+  const hours = Math.min(24 * 30, (Date.parse(i.until) - Date.now()) / 3600_000)
+  if (hours <= 0) return s
+  return i.key === '' ? snoozeServer(s.id, hours) : snoozeServerAlert(s.id, i.key, hours)
+}
+
+// Серверы со своими мьютами: больше всего заглушено - первым, дальше по имени
+export function mutesByServer(rows: MuteRow[]): { sid: number; server: string; items: MuteRow[] }[] {
+  const m = new Map<number, { sid: number; server: string; items: MuteRow[] }>()
+  for (const r of rows) {
+    if (!m.has(r.sid)) m.set(r.sid, { sid: r.sid, server: r.server, items: [] })
+    m.get(r.sid)!.items.push(r)
+  }
+  const out = [...m.values()]
+  for (const g of out) g.items.sort(permFirst)
+  return out.sort((a, b) => b.items.length - a.items.length || a.server.localeCompare(b.server))
+}
+
+// Подпись плитки: на каких серверах (первые два по числу мьютов) и сколько само не истечет
+export function mutesTileSub(rows: MuteRow[], t: TFn): { where: string; when: string; all: string } {
+  if (!rows.length) return { where: t('ничего не заглушено'), when: '', all: '' }
+  const names = mutesByServer(rows).map((g) => g.server)
+  const perm = rows.filter((r) => !r.until).length
+  const soon = rows.filter((r) => muteSoon(r)).length
+  const when = [
+    perm > 0 ? t('бессрочно {n}', { n: perm }) : '',
+    soon > 0 ? t('истекут за сутки {n}', { n: soon }) : '',
+  ]
+    .filter(Boolean)
+    .join(', ')
+  return { where: shortList(names, t, 2), when, all: names.join(', ') }
 }
 
 // «на сколько ещё»: минуты → часы → дни, без ложной точности
@@ -309,40 +385,5 @@ export function MuteChip({ items, t }: { items: MuteItem[]; t: TFn }) {
       🔕 {muteWhen(items, t)}
       {items.length > 1 && ` · ${items.length}`}
     </span>
-  )
-}
-
-// Сводка над списком: клик открывает карточку, снимают мьют уже там
-export function MutesBanner({
-  entries,
-  t,
-  onOpen,
-}: {
-  entries: { id: number; name: string; items: MuteItem[] }[]
-  t: TFn
-  onOpen: (id: number) => void
-}) {
-  if (entries.length === 0) return null
-  const total = entries.reduce((a, x) => a + x.items.length, 0)
-  return (
-    <div className="mutes-banner">
-      <span className="mutes-banner-head">🔕 {t('Заглушено ({n})', { n: total })}</span>
-      {entries.map(({ id, name, items }) => (
-        <button
-          key={id}
-          className="mute-sum-chip"
-          title={items.map((i) => muteText(i, t)).join('\n')}
-          onClick={() => onOpen(id)}
-        >
-          <b>{name}</b>
-          <span className="mute-sum-what">{muteBrief(items, t)}</span>
-          <span
-            className={`mute-sum-when${items.some((i) => !i.until) ? ' mute-sum-perm' : ''}`}
-          >
-            {muteWhen(items, t)}
-          </span>
-        </button>
-      ))}
-    </div>
   )
 }

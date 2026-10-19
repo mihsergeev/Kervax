@@ -2426,66 +2426,62 @@ select:focus {
   display: block;
   margin-top: 0.2rem;
 }
-/* сводка мьютов в подвале: отделяем от контента, чтобы читалась как справка */
-.mutes-banner-footer {
-  margin: 1.25rem 0 0;
-}
-/* сводка заглушённого: не алерт (заглушили осознанно), но и не фон — иначе мьют
-   теряется. Отсюда нейтральная рамка и приглушённый тон, а срок — акцентом. */
-.mutes-banner {
-  display: flex;
-  align-items: center;
-  gap: 0.45rem;
-  flex-wrap: wrap;
-  margin-bottom: 0.9rem;
-  padding: 0.5rem 0.7rem;
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  background: var(--bg-card);
-}
-.mutes-banner-head {
-  font-size: 0.85rem;
-  color: var(--text-muted);
-  margin-right: 0.15rem;
-}
-.mute-sum-chip {
-  display: inline-flex;
-  align-items: baseline;
-  gap: 0.4rem;
-  padding: 0.2rem 0.55rem;
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  background: transparent;
-  color: var(--text);
-  font-size: 0.8rem;
-  cursor: pointer;
-}
-.mute-sum-chip:hover {
-  border-color: var(--accent);
-}
-/* на телефоне чип не шире строки: длинное "перезапуски пода: ..." режется многоточием, а не
-   распирает страницу */
-.mute-sum-chip { max-width: 100%; min-width: 0; }
-.mute-sum-chip > b, .mute-sum-when { flex-shrink: 0; white-space: nowrap; }
-.mute-sum-what {
-  color: var(--text-muted);
-  max-width: 22rem;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.mute-sum-when {
-  color: var(--text-muted);
-}
 /* бессрочное выделяем: у временного снуза срок истечёт сам, у этого — нет */
-.mute-sum-perm,
 .type-chip.mute-chip-perm {
   color: var(--degraded);
 }
 .type-chip.mute-chip {
   color: var(--text-muted);
   cursor: help;
+}
+/* плитка "Заглушено" на "Серверах": под подписью где именно и сколько само не истечет */
+/* числа в ряду на одной высоте: кнопка центрирует содержимое, и у плитки с подписью число уезжало вверх */
+.stat-tiles > .stat-tile { min-width: 0; display: flex; flex-direction: column; justify-content: flex-start; }
+.stat-num.t-muted { color: var(--text-muted); }
+.stat-sub { margin-top: 0.2rem; font-size: 0.74rem; color: var(--text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.stat-tile-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+/* панель "Заглушено" справа поверх страницы (MutesPanel.tsx): "Серверы" и "Бэкапы" */
+.mt-drawer-back { position: fixed; inset: 0; z-index: 30; background: rgba(0, 0, 0, 0.35); }
+.card.mt-drawer {
+  position: absolute; top: 0; right: 0; bottom: 0; width: min(36rem, 100vw);
+  display: flex; flex-direction: column; gap: 0.5rem; padding: 0.9rem 1rem;
+  border-radius: 0; border-width: 0 0 0 1px; box-shadow: -8px 0 24px rgba(0, 0, 0, 0.25);
+}
+.mt-head { display: flex; align-items: center; gap: 0.6rem; }
+.mt-title { margin: 0; font-size: 1rem; font-weight: 600; }
+.mt-title-n { margin-left: 0.15rem; color: var(--text-muted); font-weight: 500; }
+button.ghost.mt-close { margin-left: auto; padding: 0.15rem 0.6rem; line-height: 1.4; }
+.mt-totals { display: flex; flex-wrap: wrap; gap: 0.2rem 0.9rem; }
+.mt-perm { color: var(--degraded); }
+.mt-tools { display: flex; align-items: center; flex-wrap: wrap; gap: 0.5rem; }
+.checks-search.mt-search { min-width: 0; flex: 1 1 12rem; padding-top: 0.35rem; padding-bottom: 0.35rem; font-size: 0.85rem; }
+.mt-drawer-body { flex: 1 1 auto; min-height: 0; overflow-y: auto; scrollbar-width: thin; border-top: 1px solid var(--border); }
+.sec-tbl.mt-tbl { font-size: 0.82rem; }
+/* по верху, а не по базовой линии: у кнопки-подписи базовая линия - последняя строка, и срок
+   длинного пункта съезжал вниз */
+.sec-tbl.mt-tbl td { padding: 0.25rem 0.5rem; vertical-align: top; line-height: 1.4; }
+.sec-tbl.mt-tbl tr.mt-grp td { padding-top: 0.6rem; }
+.mt-grp-n { margin-left: 0.45rem; }
+.linklike.mt-srv { font-weight: 600; text-decoration: none; }
+.mt-what { width: 100%; overflow-wrap: anywhere; }
+button.mt-what-btn, button.mt-what-btn:hover {
+  padding: 0; border: 0; border-radius: 3px; background: none; box-shadow: none;
+  color: var(--text); font: inherit; font-weight: 400; text-align: left; cursor: pointer; overflow-wrap: anywhere;
+}
+button.mt-what-btn:hover { color: var(--accent); text-decoration: underline; }
+button.mt-what-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.mt-when-c { white-space: nowrap; }
+.mt-until { display: block; font-size: 0.72rem; color: var(--text-muted); }
+.mt-x-c { width: 1%; white-space: nowrap; text-align: right; }
+button.ghost.mt-x { padding: 0 0.4rem; font-size: 0.78rem; line-height: 1.6; border-color: transparent; }
+button.ghost.mt-x:hover:not(:disabled) { color: var(--down); border-color: var(--border); }
+button.ghost.mt-undo { padding: 0.05rem 0.5rem; font-size: 0.78rem; }
+tr.mt-off button.mt-what-btn { color: var(--text-muted); text-decoration: line-through; }
+@media (max-width: 560px) {
+  /* на телефоне панель во всю ширину, плитка "Заглушено" одна в ряду: подпись с серверами не режется */
+  .card.mt-drawer { width: 100vw; border-width: 0; padding: 0.75rem 0.8rem; }
+  .sec-tbl.mt-tbl td { padding: 0.25rem 0.3rem; }
+  .stat-tile.stat-tile-wide { grid-column: 1 / -1; }
 }
 /* позитивный индикатор: все агенты на подписанной версии */
 .agent-update-ok {

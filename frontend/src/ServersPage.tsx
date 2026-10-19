@@ -66,7 +66,6 @@ import { CardNav, FreshChip, OvAreas, OvRows, secInfoOf, type SecDef, type SecIn
 import { fmtBytes, fmtDur, rateUnits, timeUnits } from './units'
 import {
   MuteChip,
-  MutesBanner,
   SNOOZE_KINDS,
   UNIT_MUTE,
   WEB_MUTE,
@@ -79,9 +78,12 @@ import {
   collectMutes,
   isDecision,
   muteBrief,
+  muteRows,
+  mutesTileSub,
   muteText,
   type MuteItem,
 } from './mutes'
+import { MutesPanel } from './MutesPanel'
 import { useAuth } from './auth'
 import { AlertHistoryModal } from './AlertHistoryModal'
 import type { Section } from './App'
@@ -4322,22 +4324,39 @@ function SrvTile({
   num,
   label,
   tone,
+  sub,
+  title,
   active,
+  expands,
   onClick,
 }: {
   num: number
   label: string
-  tone?: 'up' | 'down' | 'degraded'
+  tone?: 'up' | 'down' | 'degraded' | 'muted'
+  // строки под подписью: что именно и где (плитка "Заглушено")
+  sub?: string[]
+  title?: string
   active: boolean
+  // плитка открывает панель, а не фильтрует список
+  expands?: boolean
   onClick: () => void
 }) {
   return (
     <button
-      className={`stat-tile stat-tile-btn${active ? ' stat-tile-active' : ''}`}
+      className={`stat-tile stat-tile-btn${sub ? ' stat-tile-wide' : ''}${active ? ' stat-tile-active' : ''}`}
       onClick={onClick}
+      title={title || undefined}
+      aria-pressed={expands ? undefined : active}
+      aria-expanded={expands ? active : undefined}
+      aria-haspopup={expands ? 'dialog' : undefined}
     >
       <div className={`stat-num${tone ? ` t-${tone}` : ''}`}>{num}</div>
       <div className="stat-lbl">{label}</div>
+      {sub?.filter(Boolean).map((x) => (
+        <div key={x} className="stat-sub">
+          {x}
+        </div>
+      ))}
     </button>
   )
 }
@@ -4449,11 +4468,12 @@ export function ServersPage({ onUnauthorized, openServerId, openServerSec, onCon
   const behind = (servers ?? []).filter(
     (s) => s.online && s.agent_version && avail && s.agent_version !== avail,
   )
-  // серверы с заглушёнными проверками — сводкой над списком, чтобы мьют было видно
-  // не открывая карточку (иначе бессрочный мьют теряется молча)
-  const muted = (servers ?? [])
-    .map((s) => ({ s, items: collectMutes(s, t, ['alert']) }))
-    .filter((x) => x.items.length > 0)
+  // заглушенное (пороги и алерты серверов) - плиткой "Заглушено" рядом с остальными, весь
+  // список в панели справа: мьют видно, не открывая карточку (иначе бессрочный теряется молча).
+  // Мьюты репозиториев и покрытия бэкапа живут на своей странице "Бэкапы"
+  const mutes = muteRows(servers ?? [], t, ['alert'])
+  const mutesSub = mutesTileSub(mutes, t)
+  const [mutesOpen, setMutesOpen] = useState(false)
   async function rollout(serverIds?: number[]) {
     if (!avail) return
     setUpdBusy(true)
@@ -4629,6 +4649,16 @@ export function ServersPage({ onUnauthorized, openServerId, openServerSec, onCon
             active={filter === 'offline'}
             onClick={() => setFilter((f) => (f === 'offline' ? 'all' : 'offline'))}
           />
+          <SrvTile
+            num={mutes.length}
+            tone="muted"
+            label={`🔕 ${t('Заглушено')}`}
+            sub={[mutesSub.where, mutesSub.when]}
+            title={mutesSub.all}
+            active={mutesOpen}
+            expands
+            onClick={() => setMutesOpen(true)}
+          />
         </div>
       )}
 
@@ -4678,13 +4708,22 @@ export function ServersPage({ onUnauthorized, openServerId, openServerSec, onCon
           </div>
         </div>
       )}
-      {/* заглушённое (пороги сервера) — сводкой: клик открывает карточку, там и снимают.
-          Мьюты репозиториев и покрытия бэкапа живут на своей странице «Бэкапы». */}
-      <MutesBanner
-        entries={muted.map(({ s, items }) => ({ id: s.id, name: s.name, items }))}
-        t={t}
-        onOpen={(id) => setDetailId(id)}
-      />
+      {mutesOpen && (
+        <MutesPanel
+          rows={mutes}
+          servers={servers ?? []}
+          canEdit={!isViewer}
+          onOpen={(id) => {
+            // в карточку на раздел "Алерты": там те же заглушки и их настройка
+            setMutesOpen(false)
+            setDetailSec('alerts')
+            setDetailId(id)
+          }}
+          onChanged={(u) => setServers((prev) => (prev ?? []).map((x) => (x.id === u.id ? u : x)))}
+          onUnauthorized={onUnauthorized}
+          onClose={() => setMutesOpen(false)}
+        />
+      )}
 
       {/* позитивный индикатор: все агенты на актуальной ПОДПИСАННОЙ версии */}
       {avail && behind.length === 0 && (servers?.some((s) => s.agent_version) ?? false) && (

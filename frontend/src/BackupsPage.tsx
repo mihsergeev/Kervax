@@ -40,7 +40,8 @@ import { bulkCleanupScript, safeRepoName } from './bulkCleanupScript'
 import { useAuth } from './auth'
 import { useUrlCard, useUrlParam } from './deeplink'
 import { useI18n, currentLang, tr } from './i18n'
-import { MuteChip, MutesBanner, collectMutes } from './mutes'
+import { MuteChip, collectMutes, muteRows, mutesTileSub } from './mutes'
+import { MutesPanel } from './MutesPanel'
 import { VaultPanel } from './VaultPanel'
 import { CountryFlag } from './CountryFlag'
 import { byteUnits, fmtDur } from './units'
@@ -3113,10 +3114,12 @@ export function BackupsPage({
     // своим живым бэкапом на другой сервер - тоже клиент: иначе его бэкап нигде не виден, а
     // ссылка ?backup=id из алерта уводила в окно сервера
     .filter((x): x is BHost => backupAlive(x.d))
-  // заглушённое по бэкапам: репозитории (у бэкап-серверов) и пункты покрытия (у клиентов)
-  const backupMuted = (servers ?? [])
-    .map((s) => ({ s, items: collectMutes(s, t, ['repo', 'audit']) }))
-    .filter((x) => x.items.length > 0)
+  // заглушенное по бэкапам: репозитории (у бэкап-серверов) и пункты покрытия (у клиентов) -
+  // плиткой "Заглушено" в ряду плиток, список в панели справа (общая с "Серверами")
+  const mutes = muteRows(servers ?? [], t, ['repo', 'audit'])
+  const mutesSub = mutesTileSub(mutes, t)
+  const nRepo = mutes.filter((r) => r.group === 'repo').length
+  const [mutesOpen, setMutesOpen] = useState(false)
   // сервера БЕЗ живого бэкапа (по умолчанию бэкап нужен → алерт). Бэкап-серверы и
   // живые клиенты сюда не попадают; мёртвый/осиротевший бэкап — попадает (можно настроить заново).
   const noPanelBackup = (servers ?? []).filter(
@@ -3277,6 +3280,21 @@ export function BackupsPage({
               ) || undefined}
               tone={verBadN ? 'bad' : verWarnN ? 'warn' : verified.length === allHosts.length ? 'ok' : undefined}
               {...tileProps('verify')}
+            />
+          )}
+          {/* как "Бэкап-серверы": нет заглушенного - нет и плитки, здесь это редкость */}
+          {mutes.length > 0 && (
+            <NetTile
+              label={`🔕 ${t('Заглушено')}`}
+              value={String(mutes.length)}
+              sub={subOf(
+                mutesSub.where,
+                nRepo > 0 && t('репозиториев: {n}', { n: nRepo }),
+                mutes.length > nRepo && t('пунктов покрытия: {n}', { n: mutes.length - nRepo }),
+              )}
+              title={mutes.map((r) => `${r.server}: ${r.label}`).join('\n')}
+              active={mutesOpen}
+              onClick={() => setMutesOpen(true)}
             />
           )}
         </div>
@@ -3448,19 +3466,23 @@ export function BackupsPage({
       {/* Сейф доступов — в подвале, рядом со справочными блоками: это не ежедневная
           работа, а страховка на день восстановления. Виден только админам. */}
       {!isViewer && <VaultPanel servers={servers ?? []} />}
-      {/* Заглушённое ПО БЭКАПАМ — в подвале: это осознанно снятые напоминания
-          (репозитории и пункты покрытия), справка, а не работа. Наверху они отжимали
-          вниз то, ради чего страницу и открывают. Клик открывает нужную модалку:
-          у бэкап-сервера свою, у клиента — свою. */}
-      <MutesBanner
-        entries={backupMuted.map(({ s, items }) => ({ id: s.id, name: s.name, items }))}
-        t={t}
-        onOpen={(id) => {
-          const s = (servers ?? []).find((x) => x.id === id)
-          if (s?.last_report?.backup_server?.present) setOpenSrvId(id)
-          else setOpenId(id)
-        }}
-      />
+      {mutesOpen && (
+        <MutesPanel
+          rows={mutes}
+          servers={servers ?? []}
+          canEdit={!isViewer}
+          onOpen={(id) => {
+            // у бэкап-сервера (репозитории) свое окно, у клиента (покрытие) - свое
+            setMutesOpen(false)
+            const s = (servers ?? []).find((x) => x.id === id)
+            if (s?.last_report?.backup_server?.present) setOpenSrvId(id)
+            else setOpenId(id)
+          }}
+          onChanged={(u) => setServers((prev) => (prev ?? []).map((x) => (x.id === u.id ? u : x)))}
+          onUnauthorized={onUnauthorized}
+          onClose={() => setMutesOpen(false)}
+        />
+      )}
       {open && (
         <BackupModal
           key={open.s.id}
