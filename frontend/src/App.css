@@ -4380,6 +4380,73 @@ textarea:focus {
   border-radius: 6px;
   padding: 0.35rem 0.6rem;
 }
+/* вкладка "Чистка" сервера бэкапов: плашка (шапка с "как исправить"), под ней список и что сделать */
+.bsrv-clean {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  margin-bottom: 0.6rem;
+}
+.bsrv-clean-info {
+  font-size: 0.85rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.35rem 0.6rem;
+}
+.bsrv-clean-body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  margin-left: 0.35rem;
+  padding: 0.1rem 0 0.1rem 0.7rem;
+  border-left: 2px solid var(--border);
+}
+.bsrv-clean-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+.bsrv-clean-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.2rem 0.6rem;
+  font-size: 0.85rem;
+}
+.bsrv-clean-row .lk-dot {
+  align-self: center;
+}
+.bsrv-clean-name {
+  font-weight: 600;
+}
+/* имена в колонки: 18 репозиториев абзацем через запятую читались как одна строка */
+.bsrv-clean-chips {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(12rem, 1fr));
+  gap: 0.15rem 1rem;
+  font-size: 0.82rem;
+}
+.bsrv-clean-chips > span {
+  overflow-wrap: anywhere;
+}
+@media (max-width: 600px) {
+  .bsrv-clean-chips {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+/* команда в шагах - обычным цветом, даже внутри желтой или красной строки репозитория */
+.osupd-fix .agent-advice-cmd pre {
+  color: var(--text);
+}
+.bsrv-clean-do {
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+.bsrv-clean-rowfix {
+  display: flex;
+  justify-content: flex-start;
+  margin-top: 0.3rem;
+}
 .osupd-fix {
   display: flex;
   flex-direction: column;

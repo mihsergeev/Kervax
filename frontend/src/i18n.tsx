@@ -147,10 +147,6 @@ const EN: Record<string, string> = {
   'висячий лок {n} ч': 'stale lock {n} h',
   'Лок не обновлялся больше 30 минут: процесс, который его взял, умер. Чистка и клиенты обычно снимают такие локи сами, если лок продержится сутки, придет алерт.':
     'The lock has not been refreshed for over 30 minutes: the process that took it is gone. Cleanup and clients usually remove such locks themselves, if it lasts a day an alert follows.',
-  'Старый скрипт {script} чистит репозиториев: {n}, расписание {when} ({where})':
-    'The old script {script} cleans {n} repositories, schedule {when} ({where})',
-  'Старый скрипт {script} описывает репозиториев: {n}, но не запланирован ни в cron, ни в systemd, их никто не чистит':
-    'The old script {script} lists {n} repositories, but it is not scheduled in cron or systemd, so nobody cleans them',
   'У репозитория нет своего prune-скрипта: политика показана из старого общего конфига, но сервер по ней ничего не удаляет. Старое убирает только сам клиент, если у него это настроено.':
     'This repository has no prune script of its own: the retention shown comes from an old shared config the server never runs. Anything old is removed only by the client itself, if it is set up to.',
   'политика хранения не задана, судить не о чем': 'no retention policy, nothing to judge by',
@@ -1077,9 +1073,6 @@ const EN: Record<string, string> = {
   'restic check нашел ошибки, вывод в логе prune-скрипта на бэкап-сервере': 'restic check found errors, the output is in the prune script log on the backup server',
   'недельная проверка целостности (restic check)': 'weekly integrity check (restic check)',
   '{name}: залочен больше суток, чистка не идет - {list}': '{name}: locked for over a day, cleanup is not running - {list}',
-  '{name}: старые снапшоты не вычищаются - {list}': '{name}: old snapshots are not removed - {list}',
-  'В нем еще блоки на удаленные репозитории ({n}): {list}. Скрипт каждый день проверяет их и шлет ошибку по каждому, в этом шуме тонут настоящие. Эти блоки стоит убрать из скрипта.':
-    'It also has blocks for repositories that are gone ({n}): {list}. The script checks them every day and sends an error for each, and real errors drown in that noise. These blocks should be removed from the script.',
   'Клиента этого репозитория нет в панели. Панель следит за ним по ритму бэкапов: опоздавший бэкап видно через интервал и еще четверть его, ежедневный через 30 часов. Агент на самой ноде сказал бы сразу, как бэкап упал.':
     'The client of this repository is not in the panel. The panel watches it by the backup rhythm: a late backup shows after its interval plus a quarter of it, a daily one after 30 hours. An agent on the node itself would tell right when the backup failed.',
   'Бэкап-сервер: ротация встала': 'Backup server: rotation stalled',
@@ -2758,7 +2751,6 @@ const EN: Record<string, string> = {
   'репозиториев с проблемой: {n} ({list})': 'repositories with a problem: {n} ({list})',
   'репозиториев: {n}, {sz}': 'repositories: {n}, {sz}',
   'репозиториев: {n}, все в порядке': 'repositories: {n}, all fine',
-  'старые снапшоты не вычищаются: {list}': 'old snapshots are not being removed: {list}',
   'статистики репозиториев нет: включите ее (backupserver-setup)': 'no repository stats: enable them (backupserver-setup)',
   'чистка и проверка идут у всех': 'cleanup and checks run for all',
   'чистка не работает: {list}': 'cleanup is broken: {list}',
@@ -5675,6 +5667,99 @@ const EN: Record<string, string> = {
     'marked panel errors as reviewed',
   'вернул ошибки панели в неразобранные':
     'returned panel errors to review',
+  // вкладка "Чистка" сервера бэкапов (BsrvCleanup.tsx)
+  'Пробный прогон, ничего не меняет: по каждому репозиторию helper покажет, сколько снапшотов удалит первая чистка (группы по хосту и тегам, как в чистке панели). Проверьте, что уходят только лишние старые снапшоты. Если restic не ответил, пароль в блоке не подходит, и такой репозиторий helper не перенесет.':
+    'Dry run, changes nothing: for each repository the helper shows how many snapshots the first cleanup removes (grouped by host and tags, as the panel cleanup does). Check that only extra old snapshots go. If restic did not answer, the password in the block is wrong and the helper will not move that repository.',
+  'Перенести: у репозитория появится свой prune-скрипт с той же политикой и паролем из блока, чистка раз в сутки через 12 часов после бэкапа клиента, раз в неделю проверка целостности. Блок в старом скрипте закомментируется, копия файла - /etc/systemd-rest.conf.kervax-bak-<время>. На этом шаге ничего не удаляется.':
+    'Move it: the repository gets its own prune script with the same policy and the password from the block, a daily cleanup 12 hours after the client\'s backup and a weekly integrity check. The block in the old script is commented out, a copy of the file is /etc/systemd-rest.conf.kervax-bak-<time>. Nothing is removed at this step.',
+  'Проверить: в cron есть время чистки, строк # kervax-moved в старом скрипте стало больше. Через минуту панель покажет у репозитория свою чистку.':
+    'Check: cron has the cleanup time and the old script has more # kervax-moved lines. In a minute the panel shows the repository with its own cleanup.',
+  'Первая чистка пройдет сама во время из cron. Чтобы не ждать, запустите ее сейчас, но не во время бэкапа клиента: она удалит снапшоты сверх политики, это необратимо. В строке итога - сколько снапшотов было и стало.':
+    'The first cleanup runs by itself at the cron time. To not wait, run it now, but not during the client\'s backup: it removes snapshots beyond the policy, and that cannot be undone. The result line shows how many snapshots there were and are.',
+  'Пока чистка не прошла: вернуть старый скрипт из копии и убрать перенос. Снапшоты, которые чистка уже удалила, откат не вернет.':
+    'Before the cleanup has run: restore the old script from the copy and remove the move. Snapshots the cleanup already removed do not come back.',
+  'Пробный прогон, ничего не меняет: по каждому имени helper скажет, что репозитория нет и его блок будет закомментирован.':
+    'Dry run, changes nothing: for each name the helper says the repository is gone and its block will be commented out.',
+  'Закомментировать эти блоки (приставка # kervax-gone). Копия файла - /etc/systemd-rest.conf.kervax-bak-<время>. Если после правки файл не разбирается (sh -n), helper оставит его как был. Бэкапы и репозитории это не трогает.':
+    'Comment out these blocks (prefix # kervax-gone). A copy of the file is /etc/systemd-rest.conf.kervax-bak-<time>. If the edited file does not parse (sh -n), the helper leaves it as it was. Backups and repositories are not touched.',
+  'Проверить: файл разбирается (OK), закомментированных блоков не меньше {n}.':
+    'Check: the file parses (OK) and at least {n} blocks are commented out.',
+  'Вернуть старый скрипт из копии.':
+    'Restore the old script from the copy.',
+  'Сначала без --apply: покажет, сколько снапшотов группы и за какие даты удалится. Ничего не меняет. Группу, в которую бэкапились последнюю неделю, команда удалять откажется.':
+    'First without --apply: shows how many snapshots of the group and from which dates would go. Changes nothing. The command refuses to remove a group that got a backup within the last week.',
+  'Удалить снапшоты группы. Это необратимо: восстановиться из них будет нельзя. Место вернет ночная чистка.':
+    'Remove the group\'s snapshots. This cannot be undone: there is no restoring from them afterwards. The nightly cleanup gives the space back.',
+  'Проверить: команда ответит, что снапшотов этой группы нет (no snapshots of host). Пункт уйдет после ночной чистки, она перепишет список групп.':
+    'Check: the command answers that the group has no snapshots (no snapshots of host). The item goes away after the nightly cleanup rewrites the group list.',
+  'Если группу надо хранить: кнопка "в архив" выше. На сервере ничего не меняется, пункт уходит.':
+    'If the group must be kept: the "archive" button above. Nothing changes on the server, the item goes away.',
+  'Сначала без --apply: покажет обе группы. Ничего не меняет.':
+    'First without --apply: shows both groups. Changes nothing.',
+  'Отдать снапшоты прежнего имени серверу {to}: данные не копируются, меняются только записи снапшотов. Дальше их чистит общая политика, лишние уйдут ночной чисткой, и это уже необратимо.':
+    'Hand the old name\'s snapshots over to {to}: no data is copied, only the snapshot records change. From then on the common policy cleans them, the extra ones go with the nightly cleanup, and that cannot be undone.',
+  'Что делала чистка в последних прогонах: сколько снапшотов было и стало, ошибки restic.':
+    'What the cleanup did in its last runs: snapshots before and after, restic errors.',
+  'Что удалит политика сейчас, без удаления и без блокировки репозитория. Если remove 0, а снапшотов больше политики, они в разных группах (хост, теги), и снапшоты старой группы держатся.':
+    'What the policy would remove now, without removing and without locking the repository. If it says remove 0 while there are more snapshots than the policy keeps, they are in different groups (host, tags) and the old group\'s snapshots stay.',
+  'Запустить чистку сейчас: она удалит снапшоты сверх политики, это необратимо.':
+    'Run the cleanup now: it removes snapshots beyond the policy, and that cannot be undone.',
+  'Что ответил restic в последнем прогоне чистки.':
+    'What restic answered in the last cleanup run.',
+  'Пароль для чистки лежит в env на сервере (строка RESTIC_PASSWORD). Правильный - у клиента в /etc/systemd-resta.conf или в панели, в данных восстановления его бэкапа.':
+    'The cleanup takes the password from the env file on the server (the RESTIC_PASSWORD line). The right one is on the client in /etc/systemd-resta.conf or in the panel, in the recovery data of its backup.',
+  'Политика хранения в скрипте пустая (все keep-* = 0), и чистка пропускается, чтобы не удалить все. Задайте ее в строке KEEP=(...), например --keep-daily 7 --keep-weekly 4 --keep-monthly 6.':
+    'The retention policy in the script is empty (every keep-* is 0), so the cleanup is skipped to avoid removing everything. Set it in the KEEP=(...) line, for example --keep-daily 7 --keep-weekly 4 --keep-monthly 6.',
+  'Есть ли запись в cron и запускал ли ее cron.':
+    'Whether cron has the entry and whether cron ran it.',
+  'Запустить чистку и посмотреть итог: в строке done должно быть success=1. Чистка удаляет снапшоты сверх политики, это необратимо.':
+    'Run the cleanup and look at the result: the done line should say success=1. The cleanup removes snapshots beyond the policy, and that cannot be undone.',
+  'Чистки у репозитория на сервере нет: ни своего prune-скрипта, ни блока в старом скрипте. Ее заводит панель, когда бэкап клиента настраивают через нее. Клиента больше нет или бэкап разовый - уберите репозиторий в архив (раздел "Репозитории").':
+    'The repository has no cleanup on the server: neither its own prune script nor a block in the old script. The panel sets it up when the client\'s backup is configured through the panel. If the client is gone or the backup was a one-off, move the repository to the archive (the "Repositories" section).',
+  'Нужен helper backupserver-setup {v} или новее: обновите helper\'ы на этом сервере (главная, "Требует действий").':
+    'This needs helper backupserver-setup {v} or newer: update the helpers on this server (home page, "Needs action").',
+  'старые снапшоты не вычищаются - {list}':
+    'old snapshots are not removed - {list}',
+  'старые снапшоты не вычищаются, перевести на чистку панели - {list}':
+    'old snapshots are not removed, move to the panel cleanup - {list}',
+  'старые снапшоты не вычищаются, удалить старые группы или в архив - {list}':
+    'old snapshots are not removed, remove old groups or archive them - {list}',
+  'старые снапшоты не вычищаются, у репозитория нет чистки - {list}':
+    'old snapshots are not removed, the repository has no cleanup - {list}',
+  'старые снапшоты не вычищаются, разобрать в Чистке - {list}':
+    'old snapshots are not removed, see the Cleanup section - {list}',
+  'Что сделать: перевести репозиторий на чистку панели.':
+    'What to do: move the repository to the panel cleanup.',
+  'Что сделать: удалить старую группу или, если ее надо хранить, убрать в архив.':
+    'What to do: remove the old group or, if it must be kept, archive it.',
+  'Что сделать: посмотреть, что делает чистка и что удалит политика.':
+    'What to do: look at what the cleanup does and what the policy would remove.',
+  'Что сделать: завести чистку или убрать репозиторий в архив.':
+    'What to do: set up a cleanup or move the repository to the archive.',
+  'Что сделать: обновить helper backupserver-setup, по старому не видно, кто чистит репозиторий.':
+    'What to do: update helper backupserver-setup, the old one does not tell who cleans the repository.',
+  'Старый скрипт чистки не запускается: эти репозитории никто не чистит':
+    'The old cleanup script does not run: nobody cleans these repositories',
+  'Старый скрипт {script} чистит репозиториев: {n}, в {when} ({where})':
+    'The old script {script} cleans {n} repositories at {when} ({where})',
+  '{script} не запланирован ни в cron, ни в systemd.':
+    '{script} is not scheduled in cron or systemd.',
+  'Последний прогон {ago}.':
+    'Last run {ago}.',
+  'Еще на нем репозиториев в архиве: {n}, их чистить не нужно.':
+    'It also has {n} archived repositories, they need no cleanup.',
+  'Что сделать: перевести их на чистку панели. У каждого будет свой prune-скрипт с той же политикой и паролем, чистка раз в сутки и проверка целостности раз в неделю.':
+    'What to do: move them to the panel cleanup. Each gets its own prune script with the same policy and password, a daily cleanup and a weekly integrity check.',
+  'Можно перевести их на чистку панели: она снимает висячие локи, пишет метрики, раз в неделю проверяет целостность и не держит вечно старые группы снапшотов.':
+    'They can move to the panel cleanup: it removes stale locks, writes metrics, checks integrity weekly and does not keep old snapshot groups forever.',
+  'В {script} блоки на удаленные репозитории: {n}':
+    '{script} has blocks for repositories that are gone: {n}',
+  'как убрать':
+    'how to remove',
+  'Скрипт запускается каждый день, проверяет каждый такой блок и шлет ошибку, в этом шуме тонут настоящие. Блоки стоит убрать.':
+    'The script runs every day, checks each of these blocks and sends an error, and real errors drown in that noise. The blocks should go.',
+  'Скрипт сейчас не запускается, и ошибок они не шлют. Если его снова запустят, придет ошибка по каждому, поэтому блоки лучше убрать.':
+    'The script does not run now, so they send no errors. If it is started again, an error comes for each of them, so the blocks are better removed.',
 }
 
 type Ctx = {

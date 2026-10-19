@@ -24,6 +24,7 @@ import {
 import type { Section } from './App'
 import { backupAlive, backupWindowNote, dbAuditNames, knownText, dockRiskText, fmtSetupVersion, knownActive, proxyBuilt, shortList, sinceShort, srvIssues, srvKnown, knownMeta } from './serverUtils'
 import { KnownDialog } from './KnownDialog'
+import { rotationLines } from './BsrvCleanup'
 import { MaintChip, MaintHome } from './MaintModal'
 import { useI18n } from './i18n'
 import { expiryText, registrableDomain } from './checkUtils'
@@ -651,13 +652,15 @@ function backupProblems(servers: Server[], t: T): ProbItem[] {
             name: s.name, list: pruneNames.slice(0, 3).join(', ') + (pruneNames.length > 3 ? ', ...' : ''),
           }),
         })
-      // ротация встала: считает бэкенд теми же правилами, что и алерт backup_rotation
-      const rot = s.bsrv_rotation ?? []
-      if (rot.length > 0 && !smuted.has('backup_rotation'))
-        out.push({
-          key: `bs-rot-${s.id}`, id: s.id, name: s.name, cc: s.country, down: false, srv: true, sec: 'cleanup',
-          text: t('{name}: старые снапшоты не вычищаются - {list}', { name: s.name, list: rot.join(', ') }),
-        })
+      // ротация встала: считает бэкенд теми же правилами, что и алерт backup_rotation. По строке на
+      // то, что делать (перевести на чистку панели, удалить старые группы...), строка ведет на
+      // вкладку "Чистка" карточки, где шаги с командами
+      if ((s.bsrv_rotation ?? []).length > 0 && !smuted.has('backup_rotation'))
+        for (const x of rotationLines(s, t))
+          out.push({
+            key: `bs-rot-${s.id}-${x.key}`, id: s.id, name: s.name, cc: s.country, down: false, srv: true, sec: 'cleanup',
+            text: `${s.name}: ${x.text}`,
+          })
     }
   }
   return out

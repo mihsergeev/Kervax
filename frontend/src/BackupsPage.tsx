@@ -43,6 +43,8 @@ import { useI18n, currentLang, tr } from './i18n'
 import { MuteChip, collectMutes, muteRows, mutesTileSub } from './mutes'
 import { MutesPanel } from './MutesPanel'
 import { VaultPanel } from './VaultPanel'
+import { DeadBlocks, LegacyPlaque, RowFix, bsrvFixText, rotationAction, rotationLines } from './BsrvCleanup'
+import { FixSteps } from './FixSteps'
 import { CountryFlag } from './CountryFlag'
 import { byteUnits, fmtDur } from './units'
 import { NetTile, TileFilterChip, useTileFilter, type Tone } from './NetLinks'
@@ -1827,6 +1829,9 @@ function RepoGroups({ server: s, repo, ext, canAct, onChanged }: {
       {old.map((x) => {
         const entry: BackupArchiveEntry | undefined = arch[`${repo}|${x.host}`]
         const to = renamedTo(groups, x)
+        // шаги под эту группу собирает бэкенд (app/bsrv_cleanup.py): пробный прогон, применение,
+        // проверка; без них - одна команда, как раньше
+        const fx = s.bsrv_cleanup?.groups?.[repo]?.[x.host]
         const helper = 'sudo /lib65/kervax/kervax-backupserver-helper'
         const cmd = `${helper} forget-group ${repo} ${x.host}`
         const mergeCmd = `${helper} merge-group ${repo} ${x.host} ${to}`
@@ -1865,7 +1870,10 @@ function RepoGroups({ server: s, repo, ext, canAct, onChanged }: {
               <ArchiveForm server={s} repo={repo} host={x.host} onCancel={() => setArchiving('')}
                 onDone={() => { setArchiving(''); onChanged() }} />
             )}
-            {showCmd === `merge:${x.host}` && (
+            {showCmd === `merge:${x.host}` && fx?.merge && (
+              <FixSteps steps={fx.merge} text={(st) => bsrvFixText(st, t)} />
+            )}
+            {showCmd === `merge:${x.host}` && !fx?.merge && (
               <div className="repo-cleanup">
                 {canMerge ? (
                   <>
@@ -1884,7 +1892,10 @@ function RepoGroups({ server: s, repo, ext, canAct, onChanged }: {
                 )}
               </div>
             )}
-            {showCmd === `forget:${x.host}` && (
+            {showCmd === `forget:${x.host}` && fx?.forget && (
+              <FixSteps steps={fx.forget} text={(st) => bsrvFixText(st, t)} />
+            )}
+            {showCmd === `forget:${x.host}` && !fx?.forget && (
               <div className="repo-cleanup">
                 <div className="muted">
                   {t('На бэкап-сервере. Без --apply команда только покажет, что удалится, с --apply удалит снапшоты группы, место вернет ночная чистка. Группу, в которую бэкапились последнюю неделю, команда удалять откажется.')}
@@ -2106,10 +2117,13 @@ function BackupServerModal({ server: s, info, servers, canAct, initialSec, onCha
     .filter((x) => x.g > 0)
     .sort((a, b) => b.g - a.g)
   const growTotal = growers.reduce((a, x) => a + x.g, 0)
-  // старый общий скрипт чистки: сколько живых репозиториев на нем и запущен ли он вообще
   const ext = bsrvExtra(s)
-  const legacy = ext?.legacy
-  const legacyN = Object.values(ext?.repos ?? {}).filter((x) => x.cleaner === 'legacy').length
+  // вкладка "Чистка": пункты с причинами и шагами считает бэкенд (app/bsrv_cleanup.py)
+  const cl = s.bsrv_cleanup ?? null
+  // репозитории, где старье не уходит, кроме тех, что уже в плашке старого скрипта: там та же беда
+  // (скрипт не запущен) с теми же шагами, второй строкой они только путали
+  const rotRows = (cl?.rotation ?? []).filter((x) =>
+    !(x.cause === 'legacy_off' && cl?.legacy?.repos.some((r) => r.name === x.repo)))
   const repos = all
     .filter((r) => !ql || r.name.toLowerCase().includes(ql))
     .filter((r) => !onlyUnmon || unmon.has(r.name))
@@ -2173,8 +2187,9 @@ function BackupServerModal({ server: s, info, servers, canAct, initialSec, onCha
       add(BSRV_SEC_IDS.has(i.sec ?? '') ? i.sec! : 'repos', { level: i.tone === 't-down' ? 2 : 1, text: i.text, since: i.since })
     if (pruneNames.length && !smuted.has('backup_prune'))
       add('cleanup', { level: 2, count: pruneNames.length, text: t('чистка не работает: {list}', { list: shortList(pruneNames, t, 3) }) })
+    // по строке на то, что делать: перевести на чистку панели, удалить старые группы и т.п.
     if (rot.length && !smuted.has('backup_rotation'))
-      add('cleanup', { level: 1, count: rot.length, text: t('старые снапшоты не вычищаются: {list}', { list: shortList(rot, t, 3) }) })
+      for (const x of rotationLines(s, t)) add('cleanup', { level: 1, count: x.n, text: x.text })
     if (s.bsrv_restic_old)
       add('server', { level: 1, text: t('на сервере бэкапов старый restic {v} - обновите', { v: s.bsrv_restic_old }) })
     if (!every.length)
@@ -2220,7 +2235,7 @@ function BackupServerModal({ server: s, info, servers, canAct, initialSec, onCha
       ...(pruneNames.length && smuted.has('backup_prune')
         ? [{ sec: 'cleanup', text: t('чистка не работает: {list}', { list: shortList(pruneNames, t, 3) }) }] : []),
       ...(rot.length && smuted.has('backup_rotation')
-        ? [{ sec: 'cleanup', text: t('старые снапшоты не вычищаются: {list}', { list: shortList(rot, t, 3) }) }] : []),
+        ? rotationLines(s, t).map((x) => ({ sec: 'cleanup', text: x.text })) : []),
     ], t)
   }
 
@@ -2414,62 +2429,55 @@ function BackupServerModal({ server: s, info, servers, canAct, initialSec, onCha
 
             {cur.id === 'cleanup' && (
               <div className="srv-sec">
-                {legacy && legacyN > 0 && (
-                  <div className={!legacy.where ? 'net-prob' : (legacy.missing?.length ?? 0) > 0 ? 'net-note' : 'net-foot'}>
-                    {legacy.where
-                      ? t('Старый скрипт {script} чистит репозиториев: {n}, расписание {when} ({where})', {
-                        script: legacy.script, n: legacyN, when: cronTime(legacy.schedule), where: legacy.where,
-                      }) + (legacy.log_ts ? `, ${t('последний прогон {ago}', { ago: fmtAgo(legacy.log_ts) })}` : '')
-                      : t('Старый скрипт {script} описывает репозиториев: {n}, но не запланирован ни в cron, ни в systemd, их никто не чистит', {
-                        script: legacy.script, n: legacyN,
-                      })}
-                    {(legacy.missing?.length ?? 0) > 0 && (
-                      <div>
-                        {t('В нем еще блоки на удаленные репозитории ({n}): {list}. Скрипт каждый день проверяет их и шлет ошибку по каждому, в этом шуме тонут настоящие. Эти блоки стоит убрать из скрипта.', {
-                          n: legacy.missing?.length ?? 0, list: (legacy.missing ?? []).join(', '),
-                        })}
-                      </div>
-                    )}
-                  </div>
+                {/* У каждого пункта короткая шапка, что не так, список и "как исправить" с командами
+                    под этот сервер (FixSteps). Старый скрипт - только с живыми репозиториями: архив
+                    чистить не нужно, он идет числом */}
+                {cl?.legacy && (
+                  <LegacyPlaque leg={cl.legacy} when={cronTime(cl.legacy.schedule)}
+                    last={cl.legacy.log_ts ? fmtAgo(cl.legacy.log_ts) : ''} />
                 )}
+                {cl?.dead && <DeadBlocks dead={cl.dead} />}
                 {/* где не работает чистка - один список с причинами; в списке репозиториев
                     причина строкой под самим репозиторием */}
                 {pruneNames.length > 0 && (
                   <div className="loc-results docker-clist">
                     {pruneNames.map((n) => (
-                      <div key={n} className="loc-res docker-row t-down">
-                        <span className="lk-dot lk-dot-bad" />
-                        <div className="docker-c-main">
-                          <div className="docker-c-name mono">{n}</div>
-                          <div className="docker-c-img small t-down">{ctx.prune[n]}</div>
+                      <div key={n} className="loc-res docker-row repo-row repo-row-col t-down">
+                        <div className="repo-row-main">
+                          <span className="lk-dot lk-dot-bad" />
+                          <div className="docker-c-main">
+                            <div className="docker-c-name mono">{n}</div>
+                            <div className="docker-c-img small t-down">{ctx.prune[n]}</div>
+                          </div>
                         </div>
+                        <RowFix steps={cl?.prune.find((x) => x.repo === n)?.fix ?? []} />
                       </div>
                     ))}
                   </div>
                 )}
-                {/* у каждого репозитория причина и тут же что с ней сделать: склеить с прежним
-                    именем, в архив, удалить (раньше была одна строка, а кнопки только в разделе репозиториев) */}
-                {rot.length > 0 && (
+                {/* один репозиторий - одна строка со всеми причинами, под ней что сделать и шаги;
+                    у старой группы - склеить с прежним именем, в архив, удалить */}
+                {rotRows.length > 0 && (
                   <div className="loc-results docker-clist">
-                    {rot.map((x) => {
-                      const name = x.split(' (')[0]
-                      const why = x.slice(name.length).replace(/^ \(/, '').replace(/\)$/, '')
-                      return (
-                        <div key={x} className="loc-res docker-row repo-row repo-row-col t-degraded">
-                          <div className="repo-row-main">
-                            <span className="lk-dot lk-dot-warn" />
-                            <div className="docker-c-main">
-                              <div className="docker-c-name mono">{name}</div>
-                              <div className="docker-c-img small repo-rot-why">{why ? `${t('старые снапшоты не вычищаются')}: ${why}` : t('старые снапшоты не вычищаются')}</div>
+                    {rotRows.map((x) => (
+                      <div key={x.repo} className="loc-res docker-row repo-row repo-row-col t-degraded">
+                        <div className="repo-row-main">
+                          <span className="lk-dot lk-dot-warn" />
+                          <div className="docker-c-main">
+                            <div className="docker-c-name mono">{x.repo}</div>
+                            <div className="docker-c-img small repo-rot-why">
+                              {x.reasons.length ? `${t('старые снапшоты не вычищаются')}: ${x.reasons.join(', ')}` : t('старые снапшоты не вычищаются')}
                             </div>
+                            <div className="muted small">{rotationAction(x.cause, t)}</div>
                           </div>
-                          <RepoGroups server={s} repo={name} ext={ext} canAct={canAct} onChanged={onChanged} />
                         </div>
-                      )
-                    })}
+                        <RowFix steps={x.fix} />
+                        <RepoGroups server={s} repo={x.repo} ext={ext} canAct={canAct} onChanged={onChanged} />
+                      </div>
+                    ))}
                   </div>
                 )}
-                {!pruneNames.length && !rot.length && !(legacy && legacyN > 0) && (
+                {!pruneNames.length && !rotRows.length && !cl?.legacy && !cl?.dead && (
                   <div className="srv-empty">{ok.cleanup}</div>
                 )}
                 {canAct && <BulkCleanup server={s} all={all} muted={muted} />}

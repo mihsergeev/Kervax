@@ -1899,6 +1899,34 @@ export type BackupGroup = {
   last: number
 }
 export type BackupArchiveEntry = { note: string; ts: string; by: string }
+// Вкладка "Чистка" сервера бэкапов (бэкенд app/bsrv_cleanup.py): что не так с чисткой и у каждого
+// пункта шаги fix - команды под этот сервер и репозитории, тексты во фронте по id (BsrvCleanup.tsx)
+export type BsrvCleanupLegacy = {
+  script: string
+  where: string // где запланирован старый скрипт; пусто - нигде, репозитории на нем никто не чистит
+  schedule: string
+  log_ts: number
+  scheduled: boolean
+  repos: { name: string; why: string[]; snaps: number }[] // живые, не в архиве; why - почему старье не уходит
+  archived: number // сколько еще на нем репозиториев из архива
+  fix: OsFixStep[] // перевести на чистку панели (adopt-legacy)
+}
+export type BsrvCleanupRot = {
+  repo: string
+  reasons: string[] // все причины одного репозитория
+  // отчего: старый скрипт (запущен / не запущен), старая группа, своя чистка ничего не удаляет,
+  // чистки нет, helper старый
+  cause: 'legacy' | 'legacy_off' | 'old_group' | 'script' | 'none' | 'unknown'
+  hosts: string[] // у old_group: хосты старых групп
+  fix: OsFixStep[]
+}
+export type BsrvCleanup = {
+  legacy: BsrvCleanupLegacy | null
+  dead: { script: string; scheduled: boolean; repos: string[]; fix: OsFixStep[] } | null // блоки на удаленные репозитории
+  rotation: BsrvCleanupRot[]
+  prune: { repo: string; kind: string; why: string; fix: OsFixStep[] }[] // своя чистка не работает
+  groups: Record<string, Record<string, { forget?: OsFixStep[]; merge?: OsFixStep[] }>> // repo -> старая группа -> шаги
+}
 export type BackupServerExtra = {
   v: number
   ts: number
@@ -2099,6 +2127,7 @@ export type Server = {
   kube_unmonitored?: KubeNodeRef[] // ноды кластера без агента панели (считает бэкенд)
   bsrv_unmonitored?: string[] // репозитории бэкап-сервера, чьих клиентов нет в панели (считает бэкенд)
   bsrv_rotation?: string[] // что сейчас сказал бы алерт "ротация встала" (считает бэкенд)
+  bsrv_cleanup?: BsrvCleanup | null // вкладка "Чистка": пункты с причинами и шагами (считает бэкенд)
   bsrv_restic_old?: string // restic сервера бэкапов старше целевой версии (считает бэкенд)
   bsrv_repo_reasons?: Record<string, string> // репозиторий -> почему он сейчас в алерте backup_repo
   bsrv_cadence?: Record<string, number> // обычный интервал бэкапов репозитория, секунды

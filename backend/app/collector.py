@@ -2627,8 +2627,28 @@ def rotation_stale_repos(
                 hint = ", похоже на старую группу: менялись хост или пути"
             else:
                 hint = ""
-            out.append(f"{name or '?'} ({int(age)} дн. > {limit}{hint})")
+            out.append(f"{name or '?'} (старейшему снапшоту {int(age)} дн. при политике до {limit}{hint})")
     return sorted(out)
+
+
+def group_rotation(items: list[str]) -> dict[str, list[str]]:
+    """Строки rotation_stale_repos и rotation_overflow ("repo-a (причина)") по репозиториям:
+    имя -> причины, по имени."""
+    by: dict[str, list[str]] = {}
+    for x in items:
+        name = x.split(" (")[0]
+        why = x[len(name) + 2:-1] if x.endswith(")") and len(x) > len(name) + 2 else ""
+        got = by.setdefault(name, [])
+        if why and why not in got:
+            got.append(why)
+    return dict(sorted(by.items()))
+
+
+def merge_rotation(items: list[str]) -> list[str]:
+    """Одна строка на репозиторий: "repo-a (причина 1, причина 2)". Старье пережило политику и
+    ротация ничего не удаляет - обычно одна и та же беда (чистку никто не запускает), а в "Чистке",
+    на главной и в алерте она шла двумя строками про один репозиторий."""
+    return [f"{n} ({', '.join(w)})" if w else n for n, w in group_rotation(items).items()]
 
 
 # Чистка репозитория (prune-скрипт helper'а) не работает: нет ни ротации, ни недельной проверки
@@ -2746,18 +2766,25 @@ def old_group_text(old: list[dict], groups: list[dict]) -> str:
     return text
 
 
-def backup_rotation_items(s: Server, now: datetime) -> list[str]:
-    """Что сейчас сказал бы алерт backup_rotation: старье пережило политику или ротация ничего
-    не удаляет. Для "Что сломано" на главной; заглушенные репозитории не в счет, как в алерте."""
+def rotation_reasons(s: Server, now: datetime) -> dict[str, list[str]]:
+    """Что сейчас сказал бы алерт backup_rotation, по репозиториям: имя -> причины (старье
+    пережило политику, ротация ничего не удаляет). Заглушенные репозитории не в счет, как в алерте."""
     rep = s.last_report or {}
     bs = rep.get("backup_server") or {}
     if not bs.get("present"):
-        return []
+        return {}
     ext = bsrv_extra(rep)
     arch = getattr(s, "backup_repo_archive", None) or {}
     over, _seen = rotation_overflow(bs, dict((s.alert_state or {}).get("rotation_over") or {}), now, ext, arch)
     muted = set(s.backup_repo_mutes or [])
-    return [x for x in rotation_stale_repos(bs, now, ext, arch) + over if x.split(" (")[0] not in muted]
+    return group_rotation([x for x in rotation_stale_repos(bs, now, ext, arch) + over
+                           if x.split(" (")[0] not in muted])
+
+
+def backup_rotation_items(s: Server, now: datetime) -> list[str]:
+    """То же одной строкой на репозиторий ("repo-a (причина 1, причина 2)"): для "Что сломано" на
+    главной и замечаний карточки."""
+    return [f"{n} ({', '.join(w)})" if w else n for n, w in rotation_reasons(s, now).items()]
 
 
 def rotation_alive(r: dict, observed: dict | None, now: datetime) -> bool:
@@ -6398,8 +6425,9 @@ async def evaluate_servers(
                 bsrv_rot, dict(st.get("rotation_over") or {}), now, rot_ext, rot_arch)
             if seen_over != (st.get("rotation_over") or {}):
                 apply(s.id, "rotation_over", seen_over)
-            stale = [x for x in rotation_stale_repos(bsrv_rot, now, rot_ext, rot_arch) + over
-                     if x.split(" (")[0] not in set(s.backup_repo_mutes or [])]
+            # одна строка на репозиторий: старье и "удалений нет" у него обычно одна беда
+            stale = merge_rotation([x for x in rotation_stale_repos(bsrv_rot, now, rot_ext, rot_arch) + over
+                                    if x.split(" (")[0] not in set(s.backup_repo_mutes or [])])
             was_stale = bool(st.get("rotation_stale"))
             if stale and not was_stale:
                 shown = ", ".join(stale[:6]) + (f" и ещё {len(stale) - 6}" if len(stale) > 6 else "")
