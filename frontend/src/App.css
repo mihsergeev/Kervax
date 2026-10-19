@@ -658,6 +658,12 @@ input:focus {
   border-radius: 4px;
 }
 /* адрес и загрузка ноды на телефоне переносятся, а не режутся многоточием */
+/* причина в разделе чистки длинная: переносим, а не режем троеточием */
+.docker-c-img.repo-rot-why {
+  white-space: normal;
+  overflow: visible;
+  overflow-wrap: anywhere;
+}
 .docker-c-img.kube-node-line {
   white-space: normal;
   overflow: visible;

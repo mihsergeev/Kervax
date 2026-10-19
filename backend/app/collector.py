@@ -2618,9 +2618,10 @@ def rotation_stale_repos(
             name = r.get("name") or ""
             old = old_groups(extra, archive, name, now.timestamp())
             if old:
-                g = old[0]
-                hint = f", старая группа {g.get('host') or '?'}: {int(g.get('n') or 0)} снапшотов"
-            elif rotation_alive(r, observed.get(name), now):
+                # причина словами вместо "233 дн. > 231": чья это история и что ее держит
+                out.append(f"{name or '?'} ({old_group_text(old, repo_groups(extra, name, now.timestamp()))})")
+                continue
+            if rotation_alive(r, observed.get(name), now):
                 hint = ", похоже на старую группу: менялись хост или пути"
             else:
                 hint = ""
@@ -2706,6 +2707,41 @@ def old_groups(extra: dict | None, archive: dict | None, name: str, now_ts: floa
     return [g for g in groups
             if int(g.get("last") or 0) < newest and now_ts - int(g.get("last") or 0) > _OLD_GROUP_SECONDS
             and (g.get("host") or "") not in hosts]
+
+
+# Переименование, а не ушедший сервер: самая свежая группа началась не позже чем через неделю
+# после последнего снапшота старой, с теми же путями и тегами (репозиторий у клиента свой)
+_RENAME_GAP = 7 * 86400
+
+
+def renamed_to(groups: list[dict], g: dict) -> str:
+    """Под каким именем бэкапится сервер, если старая группа g - его прежнее имя; иначе пусто."""
+    if not groups:
+        return ""
+    cur = max(groups, key=lambda x: int(x.get("last") or 0))
+    if (cur.get("host") or "") in ("", g.get("host") or ""):
+        return ""
+    gap = int(cur.get("first") or 0) - int(g.get("last") or 0)
+    same = (sorted(cur.get("paths") or []) == sorted(g.get("paths") or [])
+            and sorted(cur.get("tags") or []) == sorted(g.get("tags") or []))
+    return str(cur.get("host")) if same and abs(gap) <= _RENAME_GAP else ""
+
+
+def old_group_text(old: list[dict], groups: list[dict]) -> str:
+    """Чье старье держится, по первой старой группе: "сервер переименовали из X: 15 снапшотов под
+    старым именем, по 19.07.2026" или "группа X больше не бэкапится: 15 снапшотов, по 19.07.2026"."""
+    g = old[0]
+    host = g.get("host") or "?"
+    n = int(g.get("n") or 0)
+    last = datetime.fromtimestamp(int(g.get("last") or 0), timezone.utc).strftime("%d.%m.%Y")
+    snaps = f"{n} {_plural(n, 'снапшот', 'снапшота', 'снапшотов')}"
+    if renamed_to(groups, g):
+        text = f"сервер переименовали из {host}: {snaps} под старым именем, по {last}"
+    else:
+        text = f"группа {host} больше не бэкапится: {snaps}, по {last}"
+    if len(old) > 1:
+        text += f", и еще старых групп: {len(old) - 1}"
+    return text
 
 
 def backup_rotation_items(s: Server, now: datetime) -> list[str]:

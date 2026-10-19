@@ -8,6 +8,15 @@ type Rule = [RegExp, string]
 
 // Длинные фразы раньше коротких: "открыто в интернет" входит в "служебное открыто в интернет"
 const PHRASES: Rule[] = [
+  // чистка бэкап-сервера (collector.rotation_stale_repos, rotation_overflow)
+  [/сервер переименовали из (\S+): (\d+) (?:снапшот|снапшота|снапшотов) под старым именем, по (\S+)/g,
+    'the server was renamed from $1: $2 snapshots under the old name, up to $3'],
+  [/группа (\S+) больше не бэкапится: (\d+) (?:снапшот|снапшота|снапшотов), по (\S+)/g,
+    'group $1 no longer backs up: $2 snapshots, up to $3'],
+  [/, и еще старых групп: (\d+)/g, ', $1 more old groups'],
+  [/(?<!\d)1 snapshots/g, '1 snapshot'],
+  [/, похоже на старую группу: менялись хост или пути/g, ', looks like an old group: the host or paths changed'],
+  [/(\d+) снапшотов при политике (\d+), удалений нет/g, '$1 snapshots with a policy of $2, nothing removed'],
   // порты и доступы
   [/в интернет открылся новый порт: /g, 'new port open to the internet: '],
   [/служебное открыто в интернет: /g, 'service ports open to the internet: '],
@@ -142,7 +151,7 @@ export function trBackend(s: string): string {
 
 // Поля ответов API, где лежат такие тексты. Ключи и идентификаторы (mute, key, kind) не трогаем:
 // по ним панель шлет запросы обратно
-const FIELDS = new Set(['text', 'detail', 'what', 'hint', 'note'])
+const FIELDS = new Set(['text', 'detail', 'what', 'hint', 'note', 'bsrv_rotation'])
 
 export function trBody<T>(x: T, field = ''): T {
   if (typeof x === 'string') return (FIELDS.has(field) ? trBackend(x) : x) as T
