@@ -1702,109 +1702,111 @@ const EN: Record<string, string> = {
   '{name}: без поддержки {list}': '{name}: out of support {list}',
   '{name}: скоро кончится поддержка {list}': '{name}: support ends soon for {list}',
   // версии ПО: как исправить и решения
-  'Все шаги - в одном окне терминала: эта команда находит compose-проект контейнера {c} (проект, сервис, каталог, файлы) и тома на запись с их объемом, остальные берут это отсюда. Пустой project - контейнер запущен не из compose, тогда тег меняется там, откуда его запускают. Для отката в новом окне - сначала снова она.':
-    'Run all steps in one terminal window: this command finds the compose project of container {c} (project, service, directory, files) and its writable volumes with their size, the other commands take them from here. An empty project means the container was not started by compose, then change the tag where it is started from. To roll back in a new window, run it again first.',
-  'Скачать {new} заранее, пока работает старая версия: тег ветки {to} - ее последний выпуск. Нет такого тега - pull скажет not found и ничего не поменяется, тогда точную версию взять на странице образа.':
-    'Pull {new} in advance while the old version keeps running: the {to} branch tag is its latest release. If there is no such tag, pull says not found and nothing changes, then take the exact version from the image page.',
-  'Копия для отката: compose-файлы с .env и тома на запись одним архивом в /var/backups/kervax-upgrade/{c}, контейнер на это время остановлен (места - как объем томов из первой команды), прежний образ - под тегом kervax-old. Большие данные, которые новая версия не трогает (загрузки, статика), можно не копировать: уберите их путь из M.':
-    'A copy for rollback: compose files with .env and writable volumes in one archive in /var/backups/kervax-upgrade/{c}, the container is stopped meanwhile (space as large as the volumes from the first command), the previous image is kept under the kervax-old tag. Large data the new version does not touch (uploads, static files) can be skipped: remove its path from M.',
-  'Поменять тег в compose-файле ({image} на {new}) и пересоздать только этот сервис. Строки image с этим же образом у других сервисов файла тоже поменяются. Если образ задан переменной (.env), grep ничего не найдет и up не запустится: тег меняется там.':
-    'Change the tag in the compose file ({image} to {new}) and recreate only this service. Image lines with the same image in other services of the file change too. If the image comes from a variable (.env), grep finds nothing and up does not run: change the tag there.',
-  'Проверить: контейнер работает, образ новый, в логе нет ошибок. Пункт уйдет сам со следующим отчетом агента, около минуты.':
-    'Check: the container runs, the image is new, the log has no errors. The item goes away by itself with the next agent report, in about a minute.',
-  'Откат: тома и compose-файлы из последней копии (у тега без версии - еще и прежний образ под своим именем). То, что успела записать новая версия, остается рядом с суффиксом .kervax-new: удалить руками, когда откат проверен.':
-    'Rollback: volumes and compose files from the latest copy (for a tag without a version also the previous image under its name). What the new version managed to write stays next to them with the .kervax-new suffix: delete it by hand once the rollback is checked.',
-  'Тег {image} без версии: образ просто давно не скачивали. Скачать свежий и пересоздать только этот сервис. Версия не поменялась - автор образа еще не пересобрал его на новой базе.':
-    'The {image} tag has no version: the image just has not been pulled for a long time. Pull a fresh one and recreate only this service. If the version stays the same, the image author has not rebuilt it on a new base yet.',
-  'Версия {name} пришла из базового образа ({env}): найти FROM в Dockerfile проекта и поменять на {name} {to}. Если там тег без версии (nginx:alpine), хватит пересборки.':
-    'The {name} version comes from the base image ({env}): find FROM in the project Dockerfile and change it to {name} {to}. If the tag there has no version (nginx:alpine), a rebuild is enough.',
-  'Пересобрать образ со свежей базой (--pull) и пересоздать только этот сервис. У сервиса нет build: в compose - его образ скачается заново; версия не поменялась - образ собирают не здесь, обновить его там, где собирают.':
-    'Rebuild the image with a fresh base (--pull) and recreate only this service. If the service has no build: in compose, its image is pulled again; if the version stays the same, the image is built elsewhere: update it where it is built.',
-  'Образ {image} собирают не на этой ноде, версия {name} пришла из его базового образа ({env}). Поменять FROM в Dockerfile проекта на {name} {to} (тег там без версии - просто пересобрать) и выкатить как обычно, чужой образ - обновить до версии на поддерживаемой базе. Пункт уйдет, когда на ноде заработает новая сборка.':
-    'The {image} image is not built on this node, the {name} version comes from its base image ({env}). Change FROM in the project Dockerfile to {name} {to} (if the tag there has no version, just rebuild) and deploy as usual, for a third-party image update to a version on a supported base. The item goes away once the new build runs on the node.',
-  'Контейнер работает на образе без имени: имя уже перевешено на другую сборку. Пересоздать контейнер (docker compose up -d с именем сервиса) - он пойдет на ней; версия {name} не поменялась - пересобрать образ на поддерживаемой базе.':
-    'The container runs on an image without a name: the name already points to another build. Recreate the container (docker compose up -d with the service name) and it runs on that build; if the {name} version stays the same, rebuild the image on a supported base.',
-  '{name} {from} на {to} - смена основной версии: до обновления прочитать заметки о переходе (upgrade guide, breaking changes), что перестанет работать.':
-    '{name} {from} to {to} is a major version change: before the upgrade read the migration notes (upgrade guide, breaking changes) for what stops working.',
-  'Grafana при первом запуске переводит свою базу (grafana.db в /var/lib/grafana) на новую схему, и старая версия с ней может не запуститься: без копии откат невозможен. Сторонние плагины проверить на совместимость с {to}.':
-    'On the first start Grafana moves its database (grafana.db in /var/lib/grafana) to a new schema, and the old version may not start with it: without a copy there is no rollback. Check third-party plugins for compatibility with {to}.',
-  'Traefik 3 читает часть настроек иначе, чем 2 (синтаксис правил, часть меток и middlewares): до переезда - руководство по миграции с v2 на v3, в нем совместимый режим core.defaultRuleSyntax: v2.':
-    'Traefik 3 reads some settings differently from 2 (rule syntax, some labels and middlewares): before the move read the v2 to v3 migration guide, it has a compatibility mode core.defaultRuleSyntax: v2.',
-  'Это среда выполнения приложения: проверить приложение и его зависимости на {name} {to}, лучше сначала на стенде.':
-    'This is the application runtime: check the application and its dependencies on {name} {to}, better on a staging server first.',
-  'Новый Redis сам читает старые dump.rdb и AOF, а старый новый формат уже не прочитает: откат только из копии. С 7.4 Redis не под BSD (RSAL и SSPL, с 8.0 еще AGPL), совместимая замена с теми же данными - Valkey.':
-    'A new Redis reads old dump.rdb and AOF files by itself, but the old one cannot read the new format: rollback only from a copy. Since 7.4 Redis is not BSD licensed (RSAL and SSPL, AGPL added in 8.0), a compatible replacement with the same data is Valkey.',
-  'Новый Valkey сам читает старые RDB и AOF, а старый новый формат уже не прочитает: откат только из копии.':
-    'A new Valkey reads old RDB and AOF files by itself, but the old one cannot read the new format: rollback only from a copy.',
-  'Это базовый образ ОС: если контейнер ставит пакеты при запуске, на {name} {to} их имена и версии могут быть другими.':
-    'This is an OS base image: if the container installs packages on start, their names and versions on {name} {to} may differ.',
-  'В таблице сроков нет поддерживаемой версии {name} новее {from}: выбрать по сайту вендора.':
+  '{name} {from} и {to} - разные основные версии: код под {from} скорее всего сразу не заведется, сначала проверить на копии.':
+    '{name} {from} and {to} are different major versions: code written for {from} most likely will not run right away, test it on a copy first.',
+  'Код приложения сначала проверить на {name} {to}, лучше на копии.': 'Test the application code on {name} {to} first, preferably on a copy.',
+  '{name} {to} - новая основная версия: сначала прочитать, что в ней поменялось (upgrade guide).':
+    '{name} {to} is a new major version: read what changed in it first (upgrade guide).',
+  'Grafana при запуске переводит свою базу на новую схему: обратно только из копии данных.':
+    'Grafana migrates its database to the new schema on start: going back is possible only from the data copy.',
+  'В Traefik 3 часть правил и меток пишется иначе: сначала руководство по миграции с v2.':
+    'In Traefik 3 some rules and labels are written differently: read the v2 migration guide first.',
+  'Новый Redis читает старые данные, обратно только из копии. С 7.4 лицензия не BSD, замена на тех же данных - Valkey.':
+    'The new Redis reads the old data, going back only from a copy. Since 7.4 the license is not BSD, a drop-in replacement on the same data is Valkey.',
+  'Новый Valkey читает старые данные, обратно только из копии.': 'The new Valkey reads the old data, going back only from a copy.',
+  'Это базовый образ ОС: пакеты, которые ставятся при запуске, в {name} {to} могут называться иначе.':
+    'This is an OS base image: packages installed at start may have other names in {name} {to}.',
+  'Поддерживаемой версии {name} новее {from} в таблице сроков нет: выбрать по сайту вендора.':
     'The support table has no supported {name} version newer than {from}: pick one on the vendor site.',
-  'Дамп всех баз (pg_dumpall), пока база работает: по нему данные переезжают в новую версию. Пустой файл - дамп не получился (суперпользователь другой - поменять -U).':
-    'A dump of all databases (pg_dumpall) while the database runs: the data moves to the new version with it. An empty file means the dump failed (another superuser: change -U).',
-  'Копия каталога данных для отката при остановленной базе: минуты, по объему из первой команды, места нужно столько же. База запускается сразу после копии.':
-    'A copy of the data directory for rollback with the database stopped: minutes, depending on the size from the first command, it needs as much free space. The database starts again right after the copy.',
-  'Команды смены тега тут нет намеренно: после копии - тег {to} в compose руками, docker compose up -d с именем сервиса и лог до конца перевода данных.':
-    'There is no tag change command here on purpose: after the copy set the {to} tag in compose by hand, run docker compose up -d with the service name and watch the log until the data conversion ends.',
-  'PostgreSQL {to} не читает файлы {from}: тег в compose просто так не менять, база не запустится. Путь: рядом новый сервис {name} {to} с новым пустым каталогом данных, в него дамп (gunzip -c дамп | docker exec -i новый psql -U пользователь -d postgres), проверка, переключение приложения, старый контейнер с данными - до конца проверки. На больших базах быстрее pg_upgrade (образ tianon/postgres-upgrade). Расширения (PostGIS, TimescaleDB, pgvector) нужны в новом образе той же версии.':
-    'PostgreSQL {to} does not read {from} files: do not just change the tag in compose, the database will not start. The way: a new {name} {to} service next to it with a new empty data directory, load the dump into it (gunzip -c dump | docker exec -i new psql -U user -d postgres), check, switch the application, keep the old container with its data until the check is done. On large databases pg_upgrade is faster (the tianon/postgres-upgrade image). Extensions (PostGIS, TimescaleDB, pgvector) must be in the new image in the same version.',
-  'MySQL обновляется на месте, но по одной LTS за раз (5.7, 8.0, 8.4): при первом запуске новая версия переводит данные, обратно - только из копии. Совместимость заранее проверяет MySQL Shell: util.checkForServerUpgrade().':
-    'MySQL upgrades in place, but one LTS at a time (5.7, 8.0, 8.4): on the first start the new version converts the data, going back only from a copy. MySQL Shell checks compatibility in advance: util.checkForServerUpgrade().',
-  'MariaDB обновляется на месте, после первого запуска новой версии нужен mariadb-upgrade (официальный образ делает его сам при MARIADB_AUTO_UPGRADE=1). Через несколько LTS лучше по одной. Обратно - только из копии.':
-    'MariaDB upgrades in place, after the first start of the new version it needs mariadb-upgrade (the official image runs it by itself with MARIADB_AUTO_UPGRADE=1). Across several LTS releases better one at a time. Going back only from a copy.',
-  'MongoDB - по одной основной версии за раз (5.0, 6.0, 7.0, 8.0), перед каждым шагом setFeatureCompatibilityVersion на текущую, через версию не запустится. Обратно - только из копии.':
-    'MongoDB goes one major version at a time (5.0, 6.0, 7.0, 8.0), before each step set setFeatureCompatibilityVersion to the current one, skipping a version will not start. Going back only from a copy.',
-  'Elasticsearch - через последний минорный выпуск своей основной версии (7.17, 8.19), что мешает переезду, покажет Upgrade Assistant в Kibana; индексы, созданные две основные версии назад, переиндексировать. Обратно - только из снапшота.':
-    'Elasticsearch goes through the last minor release of its major version (7.17, 8.19), the Upgrade Assistant in Kibana shows what blocks the move; indices created two major versions ago must be reindexed. Going back only from a snapshot.',
-  'ClickHouse обновляется на месте, лучше на LTS (выпуски X.3 и X.8); перед этим прочитать Backward Incompatible Changes в changelog всех версий между. Обратно - только из копии, если новая успела переписать данные.':
-    'ClickHouse upgrades in place, better to an LTS (X.3 and X.8 releases); before that read Backward Incompatible Changes in the changelog of all versions in between. Going back only from a copy if the new version has rewritten the data.',
-  'RabbitMQ - через промежуточные версии по таблице upgrade path (с 3.8 до 3.13 по одной, дальше 4.x), перед каждым шагом включить все feature flags (rabbitmqctl enable_feature_flag all), очереди лучше разобрать. Обратно - только из копии.':
-    'RabbitMQ goes through intermediate versions by the upgrade path table (3.8 to 3.13 one at a time, then 4.x), before each step enable all feature flags (rabbitmqctl enable_feature_flag all), better drain the queues. Going back only from a copy.',
-  'ZooKeeper обновляется на месте по одному узлу; с 3.4 на 3.5 и новее без снапшота нужен snapshot.trust.empty=true. Обратно - из копии.':
-    'ZooKeeper upgrades in place one node at a time; from 3.4 to 3.5 and newer without a snapshot it needs snapshot.trust.empty=true. Going back from a copy.',
-  'Поставить PHP {to} рядом с {from} со всеми расширениями, которые есть у {from} (каких нет для {to}, пропускает). Старая версия продолжает работать.':
-    'Install PHP {to} next to {from} with all extensions {from} has (the ones missing for {to} are skipped). The old version keeps running.',
-  'Перенести на {to}: пулы из /etc/php/{from}/fpm/pool.d/ в /etc/php/{to}/fpm/pool.d/ (в listen сокет php{to}-fpm.sock, если он там), свои настройки из php.ini, у сайтов fastcgi_pass (nginx) или SetHandler (apache) - на новый сокет, CLI - update-alternatives --set php /usr/bin/php{to}. Откат до удаления старой - вернуть сайтам старый сокет.':
-    'Move to {to}: pools from /etc/php/{from}/fpm/pool.d/ to /etc/php/{to}/fpm/pool.d/ (the php{to}-fpm.sock socket in listen, if it is set there), your settings from php.ini, sites with fastcgi_pass (nginx) or SetHandler (apache) to the new socket, CLI with update-alternatives --set php /usr/bin/php{to}. Rollback before removing the old one: point the sites back to the old socket.',
-  'Проверить версию и конфиг FPM, потом перезагрузить веб-сервер и открыть сайты.':
-    'Check the version and the FPM config, then reload the web server and open the sites.',
-  'Когда сайты и кроны на {to}: удалить {from} (apt покажет список и спросит, конфиги в /etc/php/{from} останутся). Пункт уйдет в течение часа.':
-    'When sites and cron jobs run on {to}: remove {from} (apt shows the list and asks, configs in /etc/php/{from} stay). The item goes away within an hour.',
-  'Перевести репозиторий NodeSource на {to} и обновить nodejs (npm в том же пакете).':
-    'Switch the NodeSource repository to {to} and upgrade nodejs (npm is in the same package).',
-  'Проверить версию, перезапустить приложения на Node (systemd, pm2), модули с нативной частью пересобрать (npm rebuild в каталоге приложения). Пункт уйдет в течение часа.':
-    'Check the version, restart Node applications (systemd, pm2), rebuild modules with native parts (npm rebuild in the application directory). The item goes away within an hour.',
-  'Откат: репозиторий обратно на {from} и прежняя версия пакета.':
-    'Rollback: the repository back to {from} and the previous package version.',
-  'Копия конфигов в /var/backups/kervax-upgrade.':
-    'A copy of the configs in /var/backups/kervax-upgrade.',
-  'Репозиторий nginx.org отдает текущую версию своей ветки (stable или mainline). Версия осталась старой - в /etc/apt/sources.list.d/ старое кодовое имя дистрибутива или пакет зафиксирован (apt-mark showhold).':
-    'The nginx.org repository serves the current version of its branch (stable or mainline). If the version stays old, /etc/apt/sources.list.d/ has an old distribution codename or the package is held (apt-mark showhold).',
-  'Проверить версию, конфиг и что служба работает. Пункт уйдет в течение часа.':
-    'Check the version, the config and that the service runs. The item goes away within an hour.',
-  'Откат: прежняя версия пакета (конфиги - из копии, если их меняли).':
-    'Rollback: the previous package version (configs from the copy if they were changed).',
+  'Узнать папку, compose-файл и сервис контейнера {c}, дальше все в этом же окне. Пусто - контейнер запущен не из compose.':
+    'Find the directory, compose file and service of container {c}, then do everything in the same window. Empty means the container was not started by compose.',
+  'Копия compose-файла для отката.': 'A copy of the compose file for rollback.',
+  'Копия данных контейнера для отката, на это время он остановлен.': 'A copy of the container data for rollback, the container is stopped meanwhile.',
+  'Поменять образ на {new}. grep покажет строки image: если там старый образ (в кавычках или из .env), поправить руками.':
+    'Change the image to {new}. grep shows the image: lines, if the old image is still there (in quotes or from .env), fix it by hand.',
+  'Перезапустить и проверить: в ps - Up, в логе нет ошибок. Нет такого тега - up скажет not found, старый контейнер продолжит работать.':
+    'Restart and check: ps shows Up, the log has no errors. If there is no such tag, up says not found and the old container keeps running.',
+  'Вернуть прежний compose-файл и перезапустить.': 'Put back the previous compose file and restart.',
+  'Вернуть прежний compose-файл и данные из копии, перезапустить.': 'Put back the previous compose file and the data from the copy, restart.',
+  'Вернуть прежний образ и данные из копии, перезапустить.': 'Put back the previous image and the data from the copy, restart.',
+  'Контейнер не нужен - остановить и убрать проект. Данные в папках и томах остаются на диске.':
+    'The container is not needed: stop and remove the project. Data in directories and volumes stays on disk.',
+  'Контейнер не нужен - убрать только его, остальные сервисы проекта работают. Данные остаются на диске. Сервис убрать и из compose-файла, иначе он вернется при следующем up.':
+    'The container is not needed: remove only it, the other services of the project keep running. Data stays on disk. Remove the service from the compose file too, or it comes back with the next up.',
+  'Контейнер не нужен - остановить и удалить. Данные в папках и томах остаются на диске.':
+    'The container is not needed: stop and delete it. Data in directories and volumes stays on disk.',
+  'Скачать новый образ.': 'Pull the new image.',
+  'Контейнер {c} запущен не из compose: пересоздать его тем же docker run, что и раньше, но с новым образом.':
+    'Container {c} was not started by compose: recreate it with the same docker run as before, but with the new image.',
+  'Контейнер {c} запущен не из compose, образ собран на этой ноде ({env}): поменять FROM в Dockerfile на {name} {to}, пересобрать и пересоздать контейнер тем же docker run.':
+    'Container {c} was not started by compose and its image was built on this node ({env}): change FROM in the Dockerfile to {name} {to}, rebuild and recreate the container with the same docker run.',
+  'Сохранить текущий образ под тегом kervax-old, для отката.': 'Keep the current image under the kervax-old tag, for rollback.',
+  'Скачать свежий образ, перезапустить и проверить ps и лог. Версия не поменялась - автор образа его еще не пересобрал.':
+    'Pull a fresh image, restart and check ps and the log. If the version stays the same, the image author has not rebuilt it yet.',
+  'Вернуть прежний образ и перезапустить.': 'Put back the previous image and restart.',
+  'Версия пришла из базового образа ({env}): найти FROM в Dockerfile и поменять на {name} {to}.':
+    'The version comes from the base image ({env}): find FROM in the Dockerfile and change it to {name} {to}.',
+  'Пересобрать со свежей базой, перезапустить и проверить ps и лог.': 'Rebuild with a fresh base, restart and check ps and the log.',
+  'Вернуть прежний FROM и пересобрать так же.': 'Put back the previous FROM and rebuild the same way.',
+  'Образ {image} собирают не здесь ({env}): поменять FROM на {name} {to} там, где его собирают, и выкатить как обычно.':
+    'Image {image} is not built here ({env}): change FROM to {name} {to} where it is built and roll it out as usual.',
+  'Имя образа уже перевешено на другую сборку: пересоздать контейнер (docker compose up -d). Версия не поменялась - пересобрать образ на {name} {to}.':
+    'The image name already points to another build: recreate the container (docker compose up -d). If the version stays the same, rebuild the image on {name} {to}.',
+  'Дамп всех баз, база при этом работает. Пустой файл - дамп не вышел, проверить пользователя в -U.':
+    'Dump all databases while the database keeps running. An empty file means the dump failed, check the user in -U.',
+  'Копия данных для отката, база на это время остановлена.': 'A copy of the data for rollback, the database is stopped meanwhile.',
+  'Команды смены тега нет намеренно: после копии поменять тег на {to} в compose руками, up -d и смотреть лог до конца перевода данных.':
+    'There is no tag change command on purpose: after the copy change the tag to {to} in compose by hand, run up -d and watch the log until the data conversion ends.',
+  'PostgreSQL {to} не прочитает данные {from}: тег просто так не менять. Путь: рядом новый контейнер {to} с пустой папкой данных, в него дамп, проверка, переключение приложения. Расширения нужны и в новом образе.':
+    'PostgreSQL {to} cannot read {from} data: do not just change the tag. The path: a new {to} container next to it with an empty data directory, the dump into it, a check, switching the application. Extensions are needed in the new image too.',
+  'MySQL обновляется на месте, но по одной LTS за раз (5.7, 8.0, 8.4), совместимость проверит MySQL Shell: util.checkForServerUpgrade(). Обратно только из копии.':
+    'MySQL upgrades in place, but one LTS at a time (5.7, 8.0, 8.4), MySQL Shell checks compatibility: util.checkForServerUpgrade(). Going back only from a copy.',
+  'MariaDB обновляется на месте, после запуска нужен mariadb-upgrade (образ делает его сам при MARIADB_AUTO_UPGRADE=1). Обратно только из копии.':
+    'MariaDB upgrades in place, after the start mariadb-upgrade is needed (the image runs it itself with MARIADB_AUTO_UPGRADE=1). Going back only from a copy.',
+  'MongoDB - по одной основной версии за раз (5.0, 6.0, 7.0, 8.0), перед каждой setFeatureCompatibilityVersion. Обратно только из копии.':
+    'MongoDB goes one major version at a time (5.0, 6.0, 7.0, 8.0), setFeatureCompatibilityVersion before each. Going back only from a copy.',
+  'Elasticsearch - через последний выпуск своей основной версии (7.17, 8.19), что мешает, покажет Upgrade Assistant. Обратно только из снапшота.':
+    'Elasticsearch goes through the last release of its major version (7.17, 8.19), Upgrade Assistant shows what blocks it. Going back only from a snapshot.',
+  'ClickHouse обновляется на месте, лучше на LTS (X.3, X.8), сначала прочитать Backward Incompatible Changes в changelog. Обратно только из копии.':
+    'ClickHouse upgrades in place, preferably to an LTS (X.3, X.8), read Backward Incompatible Changes in the changelog first. Going back only from a copy.',
+  'RabbitMQ - через промежуточные версии по upgrade path, перед каждой rabbitmqctl enable_feature_flag all. Обратно только из копии.':
+    'RabbitMQ goes through intermediate versions by the upgrade path, rabbitmqctl enable_feature_flag all before each. Going back only from a copy.',
+  'ZooKeeper обновляется на месте по одному узлу, с 3.4 без снапшота нужен snapshot.trust.empty=true.':
+    'ZooKeeper upgrades in place one node at a time, from 3.4 without a snapshot snapshot.trust.empty=true is needed.',
+  'Поставить PHP {to} рядом с {from} с теми же расширениями, старый продолжает работать. Какого-то пакета нет - убрать его из списка в /tmp и повторить последнюю строку.':
+    'Install PHP {to} next to {from} with the same extensions, the old one keeps running. If some package does not exist, remove it from the list in /tmp and repeat the last line.',
+  'Перевести сайты на {to}: пулы из /etc/php/{from}/fpm/pool.d/ в /etc/php/{to}/fpm/pool.d/, у сайтов сокет php{to}-fpm.sock, CLI - update-alternatives --set php /usr/bin/php{to}.':
+    'Move the sites to {to}: pools from /etc/php/{from}/fpm/pool.d/ to /etc/php/{to}/fpm/pool.d/, the php{to}-fpm.sock socket for the sites, CLI with update-alternatives --set php /usr/bin/php{to}.',
+  'Проверить версию и конфиг FPM, перезагрузить веб-сервер и открыть сайты.': 'Check the version and the FPM config, reload the web server and open the sites.',
+  'Когда сайты и кроны на {to} - удалить {from} (apt спросит, конфиги останутся).': 'When the sites and crons are on {to}, remove {from} (apt asks first, configs stay).',
+  'Перевести репозиторий NodeSource на {to} и обновить nodejs.': 'Switch the NodeSource repository to {to} and upgrade nodejs.',
+  'Проверить версию, перезапустить приложения, нативные модули пересобрать (npm rebuild).':
+    'Check the version, restart the applications, rebuild native modules (npm rebuild).',
+  'Вернуть репозиторий на {from} и прежнюю версию.': 'Switch the repository back to {from} and the previous version.',
+  'Копия конфигов.': 'A copy of the configs.',
+  'Обновить nginx из репозитория nginx.org. Версия не поменялась - в sources.list.d старое имя дистрибутива или пакет зафиксирован (apt-mark showhold).':
+    'Upgrade nginx from the nginx.org repository. If the version stays the same, sources.list.d has an old distribution name or the package is held (apt-mark showhold).',
+  'Проверить версию, конфиг и что служба работает.': 'Check the version, the config and that the service runs.',
+  'Вернуть прежнюю версию пакета.': 'Put back the previous package version.',
   'Ветку HAProxy задает репозиторий (PPA vbernat/haproxy-X.Y или backports): перевести его на {to}, apt update и apt install haproxy.':
-    'The HAProxy branch is set by the repository (PPA vbernat/haproxy-X.Y or backports): switch it to {to}, apt update and apt install haproxy.',
-  'Проверить конфиг и что служба работает. Пункт уйдет в течение часа.':
-    'Check the config and that the service runs. The item goes away within an hour.',
-  'Дамп всех баз кластера {from}/main, пока он работает.':
-    'A dump of all databases of the {from}/main cluster while it runs.',
-  'Переезд штатными средствами Debian: sudo apt install postgresql-{to}, пустой кластер {to} main, который создала установка, убрать (pg_dropcluster {to} main --stop, только сверившись в pg_lsclusters, что он новый и пустой), потом pg_upgradecluster {from} main - старый кластер остается остановленным, к нему можно вернуться. Расширения нужны для {to}. Когда все проверено - pg_dropcluster {from} main и apt remove postgresql-{from}, пункт уйдет в течение часа.':
-    'The move with the standard Debian tools: sudo apt install postgresql-{to}, remove the empty {to} main cluster the install created (pg_dropcluster {to} main --stop, only after checking in pg_lsclusters that it is new and empty), then pg_upgradecluster {from} main: the old cluster stays stopped and you can go back to it. Extensions are needed for {to}. When everything is checked, pg_dropcluster {from} main and apt remove postgresql-{from}, the item goes away within an hour.',
-  'Дамп всех баз (root входит по сокету; если по паролю - добавить -p).':
-    'A dump of all databases (root logs in via the socket; if it uses a password, add -p).',
-  'Выгрузить определения (очереди, обменники, пользователи), сообщения в них не попадают.':
-    'Export the definitions (queues, exchanges, users), messages are not included.',
-  'Копия каталога данных при остановленной службе (systemctl stop, tar, systemctl start) или штатный дамп.':
-    'A copy of the data directory with the service stopped (systemctl stop, tar, systemctl start) or a standard dump.',
-  'Пакеты {name} - из репозитория вендора: перевести его на {to} по инструкции вендора, apt update и обновить пакеты, затем проверить службу и логи. Пункт уйдет в течение часа.':
-    '{name} packages come from the vendor repository: switch it to {to} by the vendor instructions, apt update and upgrade the packages, then check the service and logs. The item goes away within an hour.',
-  'Пакеты не из apt: обновить {name} до {to} средствами дистрибутива (dnf, для PHP - модули remi) по инструкции вендора, перед этим копия данных и конфигов.':
-    'Packages not from apt: upgrade {name} to {to} with the distribution tools (dnf, remi modules for PHP) by the vendor instructions, before that a copy of the data and configs.',
+    'The HAProxy branch comes from the repository (PPA vbernat/haproxy-X.Y or backports): switch it to {to}, apt update and apt install haproxy.',
+  'Проверить конфиг и что служба работает.': 'Check the config and that the service runs.',
+  'Дамп всех баз кластера {from}, он при этом работает.': 'Dump all databases of the {from} cluster while it keeps running.',
+  'Переезд штатно: apt install postgresql-{to}, пустой кластер {to} main убрать (pg_dropcluster {to} main --stop), затем pg_upgradecluster {from} main. Старый остается остановленным, к нему можно вернуться.':
+    'The standard move: apt install postgresql-{to}, remove the empty {to} main cluster (pg_dropcluster {to} main --stop), then pg_upgradecluster {from} main. The old one stays stopped, you can go back to it.',
+  'Дамп всех баз (если root входит по паролю - добавить -p).': 'Dump all databases (if root logs in with a password, add -p).',
+  'Выгрузить очереди, обменники и пользователей, без сообщений.': 'Export queues, exchanges and users, without messages.',
+  'Копия папки данных при остановленной службе или штатный дамп.': 'A copy of the data directory with the service stopped, or a regular dump.',
+  'Перевести репозиторий вендора {name} на {to} по его инструкции, apt update, обновить пакеты и проверить службу.':
+    'Switch the {name} vendor repository to {to} by its guide, apt update, upgrade the packages and check the service.',
+  'Пакеты не из apt: обновить {name} до {to} через dnf по инструкции вендора, перед этим копия данных и конфигов.':
+    'Packages are not from apt: upgrade {name} to {to} with dnf by the vendor guide, copy the data and configs first.',
   'Новая версия: {name} {to}': 'New version: {name} {to}',
   'подойдет и {list}': '{list} also fit',
-  'То же у {list}: команды те же, в первой строке подставьте имя контейнера.': 'The same on {list}: the commands are the same, put the container name in the first line.',
+  'Тот же образ у {list}: шаги те же, в их папке compose.': 'Same image in {list}: the same steps, in their compose directory.',
+  'образ {image}': 'image {image}',
+  'сервис {svc}': 'service {svc}',
+  'не из compose': 'not from compose',
   'Пункт уходит сам, когда этой версии на ноде не останется: у контейнеров - со следующим отчетом агента, у пакетов хоста - в течение часа.': 'The item goes away by itself once this version is gone from the node: for containers with the next agent report, for host packages within an hour.',
   'контейнер {c}': 'container {c}',
   'на хосте: {list}': 'on the host: {list}',

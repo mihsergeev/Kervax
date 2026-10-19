@@ -2619,21 +2619,23 @@ export type SoftwareItem = {
   state: 'eol' | 'soon' | 'ok'
   left: number | null
   text: string
-  where: { kind: 'container' | 'host'; name: string; src: string; ver: string }[]
+  // у контейнера еще образ и папка compose (пусто - агент ее не прислал или не из compose)
+  where: { kind: 'container' | 'host'; name: string; src: string; ver: string; image?: string; dir?: string }[]
   // у кончившихся и скорых: ключ решения в alert_mutes и как исправить
   mkey?: string
   muted?: boolean
   fix?: SwFixBlock[]
 }
 // способ уйти с версии (software.fix): шаги для первого места, остальные места с тем же образом -
-// others; args - подстановки в тексты шагов (продукт, from, to, контейнер, образ, пакеты)
+// others; args - подстановки в тексты шагов и шапку (продукт, from, to, контейнер, образ, папка
+// compose dir, files, svc, compose: yes/no/unknown, пакеты)
 export type SwFixBlock = {
   name: string
   kind: 'container' | 'host'
   mode: string
   others: string[]
   args: Record<string, string>
-  steps: { id: string; cmd?: string }[]
+  steps: { id: string; cmd?: string; alt?: boolean; undo?: boolean }[]
 }
 export type SoftwareOut = {
   items: SoftwareItem[]

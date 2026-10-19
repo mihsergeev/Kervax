@@ -4,33 +4,46 @@ import { useI18n } from './i18n'
 // Готовые шаги "как исправить": текст словами и команда с кнопкой "Копировать". Команды собирает
 // бэкенд под ноду, тексты - у вызывающего по id шага (обновления ОС, версии ПО, SSH и доступы,
 // старый образ прокси, pg_stat_statements). alt - другой путь вместо шагов выше (черта "или"),
-// undo - откат, выполнять не по порядку, а только если что-то не так (черта "откат")
+// undo - откат, выполнять не по порядку, а только если что-то не так (черта "откат").
+// numbered - номера у шагов с командой по порядку; заметки без команды, откат и "или" без номера
 export type FixStep = { id: string; cmd?: string; alt?: boolean; undo?: boolean }
 
-export function FixSteps<S extends FixStep>({ steps, text, foot }: { steps: S[]; text: (st: S) => string; foot?: string }) {
+export function FixSteps<S extends FixStep>({ steps, text, foot, numbered }: {
+  steps: S[]
+  text: (st: S) => string
+  foot?: string
+  numbered?: boolean
+}) {
   const { t } = useI18n()
   const [copied, setCopied] = useState(-1)
+  let n = 0
   return (
     <div className="osupd-fix">
-      {steps.map((st, i) => (
-        <div key={st.id + i} className="osupd-step">
-          {st.alt && <div className="osupd-alt">{t('или')}</div>}
-          {st.undo && <div className="osupd-alt">{t('откат')}</div>}
-          <div className="muted small">{text(st)}</div>
-          {st.cmd && (
-            <div className="agent-advice-cmd">
-              <pre>{st.cmd}</pre>
-              <button className="ghost" onClick={() => {
-                navigator.clipboard?.writeText(st.cmd ?? '')
-                setCopied(i)
-                window.setTimeout(() => setCopied(-1), 1500)
-              }}>
-                {copied === i ? t('Скопировано') : t('Копировать')}
-              </button>
+      {steps.map((st, i) => {
+        const num = numbered && st.cmd && !st.alt && !st.undo ? ++n : 0
+        return (
+          <div key={st.id + i} className="osupd-step">
+            {st.alt && <div className="osupd-alt">{t('или')}</div>}
+            {st.undo && <div className="osupd-alt">{t('откат')}</div>}
+            <div className="muted small">
+              {num > 0 && <b className="osupd-num">{num}.</b>}
+              {text(st)}
             </div>
-          )}
-        </div>
-      ))}
+            {st.cmd && (
+              <div className="agent-advice-cmd">
+                <pre>{st.cmd}</pre>
+                <button className="ghost" onClick={() => {
+                  navigator.clipboard?.writeText(st.cmd ?? '')
+                  setCopied(i)
+                  window.setTimeout(() => setCopied(-1), 1500)
+                }}>
+                  {copied === i ? t('Скопировано') : t('Копировать')}
+                </button>
+              </div>
+            )}
+          </div>
+        )
+      })}
       {foot && <div className="muted small">{foot}</div>}
     </div>
   )

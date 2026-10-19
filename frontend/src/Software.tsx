@@ -11,74 +11,97 @@ import { swDecisionLabel } from './mutes'
 // здесь не повторяются: они на сводке и на главной, а здесь то же самое видно по списку.
 // У кончившихся и скорых - как исправить (команды под ноду собирает бэкенд, тексты шагов здесь по
 // id) и решение: "обновить нельзя" или "отложить до конца поддержки" (swver: в alert_mutes), такой
-// пункт уходит с главной и из счетчика раздела, а здесь приглушен с кнопкой "вернуть"
+// пункт уходит с главной и из счетчика раздела, а здесь приглушен с кнопкой "вернуть". У способа
+// шапка - что это за ПО (контейнер, образ, папка compose и сервис), шаги нумерованы, после них откат
+// и другой путь "контейнер не нужен"
 
 type TFn = (k: string, p?: Record<string, string | number>) => string
 const WHERE_MAX = 6
 
-// Шаг исправления словами; a - подстановки способа (продукт, from, to, контейнер, образ, пакеты)
+// Шаг исправления одной фразой: что он делает; команды под ноду - с бэкенда.
+// a - подстановки способа (продукт, from, to, контейнер, образ, папка compose, сервис, пакеты)
 function swFixText(id: string, a: Record<string, string>, t: TFn): string {
   const p = { ...a, env: a.env || a.image || '' }
   switch (id) {
-    case 'c_prep': return t('Все шаги - в одном окне терминала: эта команда находит compose-проект контейнера {c} (проект, сервис, каталог, файлы) и тома на запись с их объемом, остальные берут это отсюда. Пустой project - контейнер запущен не из compose, тогда тег меняется там, откуда его запускают. Для отката в новом окне - сначала снова она.', p)
-    case 'img_pull': return t('Скачать {new} заранее, пока работает старая версия: тег ветки {to} - ее последний выпуск. Нет такого тега - pull скажет not found и ничего не поменяется, тогда точную версию взять на странице образа.', p)
-    case 'c_backup': return t('Копия для отката: compose-файлы с .env и тома на запись одним архивом в /var/backups/kervax-upgrade/{c}, контейнер на это время остановлен (места - как объем томов из первой команды), прежний образ - под тегом kervax-old. Большие данные, которые новая версия не трогает (загрузки, статика), можно не копировать: уберите их путь из M.', p)
-    case 'img_apply': return t('Поменять тег в compose-файле ({image} на {new}) и пересоздать только этот сервис. Строки image с этим же образом у других сервисов файла тоже поменяются. Если образ задан переменной (.env), grep ничего не найдет и up не запустится: тег меняется там.', p)
-    case 'c_check': return t('Проверить: контейнер работает, образ новый, в логе нет ошибок. Пункт уйдет сам со следующим отчетом агента, около минуты.', p)
-    case 'c_rollback': return t('Откат: тома и compose-файлы из последней копии (у тега без версии - еще и прежний образ под своим именем). То, что успела записать новая версия, остается рядом с суффиксом .kervax-new: удалить руками, когда откат проверен.', p)
-    case 'pull_apply': return t('Тег {image} без версии: образ просто давно не скачивали. Скачать свежий и пересоздать только этот сервис. Версия не поменялась - автор образа еще не пересобрал его на новой базе.', p)
-    case 'rb_from': return t('Версия {name} пришла из базового образа ({env}): найти FROM в Dockerfile проекта и поменять на {name} {to}. Если там тег без версии (nginx:alpine), хватит пересборки.', p)
-    case 'rb_build': return t('Пересобрать образ со свежей базой (--pull) и пересоздать только этот сервис. У сервиса нет build: в compose - его образ скачается заново; версия не поменялась - образ собирают не здесь, обновить его там, где собирают.', p)
-    case 'c_ci': return t('Образ {image} собирают не на этой ноде, версия {name} пришла из его базового образа ({env}). Поменять FROM в Dockerfile проекта на {name} {to} (тег там без версии - просто пересобрать) и выкатить как обычно, чужой образ - обновить до версии на поддерживаемой базе. Пункт уйдет, когда на ноде заработает новая сборка.', p)
-    case 'c_dangling': return t('Контейнер работает на образе без имени: имя уже перевешено на другую сборку. Пересоздать контейнер (docker compose up -d с именем сервиса) - он пойдет на ней; версия {name} не поменялась - пересобрать образ на поддерживаемой базе.', p)
-    case 'major': return t('{name} {from} на {to} - смена основной версии: до обновления прочитать заметки о переходе (upgrade guide, breaking changes), что перестанет работать.', p)
-    case 'hint_grafana': return t('Grafana при первом запуске переводит свою базу (grafana.db в /var/lib/grafana) на новую схему, и старая версия с ней может не запуститься: без копии откат невозможен. Сторонние плагины проверить на совместимость с {to}.', p)
-    case 'hint_traefik': return t('Traefik 3 читает часть настроек иначе, чем 2 (синтаксис правил, часть меток и middlewares): до переезда - руководство по миграции с v2 на v3, в нем совместимый режим core.defaultRuleSyntax: v2.', p)
-    case 'hint_runtime': return t('Это среда выполнения приложения: проверить приложение и его зависимости на {name} {to}, лучше сначала на стенде.', p)
-    case 'hint_redis': return t('Новый Redis сам читает старые dump.rdb и AOF, а старый новый формат уже не прочитает: откат только из копии. С 7.4 Redis не под BSD (RSAL и SSPL, с 8.0 еще AGPL), совместимая замена с теми же данными - Valkey.', p)
-    case 'hint_valkey': return t('Новый Valkey сам читает старые RDB и AOF, а старый новый формат уже не прочитает: откат только из копии.', p)
-    case 'hint_os': return t('Это базовый образ ОС: если контейнер ставит пакеты при запуске, на {name} {to} их имена и версии могут быть другими.', p)
-    case 'no_target': return t('В таблице сроков нет поддерживаемой версии {name} новее {from}: выбрать по сайту вендора.', p)
-    case 'db_dump_pg': return t('Дамп всех баз (pg_dumpall), пока база работает: по нему данные переезжают в новую версию. Пустой файл - дамп не получился (суперпользователь другой - поменять -U).', p)
-    case 'db_copy': return t('Копия каталога данных для отката при остановленной базе: минуты, по объему из первой команды, места нужно столько же. База запускается сразу после копии.', p)
-    case 'db_inplace': return t('Команды смены тега тут нет намеренно: после копии - тег {to} в compose руками, docker compose up -d с именем сервиса и лог до конца перевода данных.', p)
-    case 'path_postgresql': return t('PostgreSQL {to} не читает файлы {from}: тег в compose просто так не менять, база не запустится. Путь: рядом новый сервис {name} {to} с новым пустым каталогом данных, в него дамп (gunzip -c дамп | docker exec -i новый psql -U пользователь -d postgres), проверка, переключение приложения, старый контейнер с данными - до конца проверки. На больших базах быстрее pg_upgrade (образ tianon/postgres-upgrade). Расширения (PostGIS, TimescaleDB, pgvector) нужны в новом образе той же версии.', p)
-    case 'path_mysql': return t('MySQL обновляется на месте, но по одной LTS за раз (5.7, 8.0, 8.4): при первом запуске новая версия переводит данные, обратно - только из копии. Совместимость заранее проверяет MySQL Shell: util.checkForServerUpgrade().', p)
-    case 'path_mariadb': return t('MariaDB обновляется на месте, после первого запуска новой версии нужен mariadb-upgrade (официальный образ делает его сам при MARIADB_AUTO_UPGRADE=1). Через несколько LTS лучше по одной. Обратно - только из копии.', p)
-    case 'path_mongodb': return t('MongoDB - по одной основной версии за раз (5.0, 6.0, 7.0, 8.0), перед каждым шагом setFeatureCompatibilityVersion на текущую, через версию не запустится. Обратно - только из копии.', p)
-    case 'path_elasticsearch': return t('Elasticsearch - через последний минорный выпуск своей основной версии (7.17, 8.19), что мешает переезду, покажет Upgrade Assistant в Kibana; индексы, созданные две основные версии назад, переиндексировать. Обратно - только из снапшота.', p)
-    case 'path_clickhouse': return t('ClickHouse обновляется на месте, лучше на LTS (выпуски X.3 и X.8); перед этим прочитать Backward Incompatible Changes в changelog всех версий между. Обратно - только из копии, если новая успела переписать данные.', p)
-    case 'path_rabbitmq': return t('RabbitMQ - через промежуточные версии по таблице upgrade path (с 3.8 до 3.13 по одной, дальше 4.x), перед каждым шагом включить все feature flags (rabbitmqctl enable_feature_flag all), очереди лучше разобрать. Обратно - только из копии.', p)
-    case 'path_zookeeper': return t('ZooKeeper обновляется на месте по одному узлу; с 3.4 на 3.5 и новее без снапшота нужен snapshot.trust.empty=true. Обратно - из копии.', p)
-    case 'h_php_install': return t('Поставить PHP {to} рядом с {from} со всеми расширениями, которые есть у {from} (каких нет для {to}, пропускает). Старая версия продолжает работать.', p)
-    case 'h_php_switch': return t('Перенести на {to}: пулы из /etc/php/{from}/fpm/pool.d/ в /etc/php/{to}/fpm/pool.d/ (в listen сокет php{to}-fpm.sock, если он там), свои настройки из php.ini, у сайтов fastcgi_pass (nginx) или SetHandler (apache) - на новый сокет, CLI - update-alternatives --set php /usr/bin/php{to}. Откат до удаления старой - вернуть сайтам старый сокет.', p)
-    case 'h_php_check': return t('Проверить версию и конфиг FPM, потом перезагрузить веб-сервер и открыть сайты.', p)
-    case 'h_php_remove': return t('Когда сайты и кроны на {to}: удалить {from} (apt покажет список и спросит, конфиги в /etc/php/{from} останутся). Пункт уйдет в течение часа.', p)
-    case 'h_node_repo': return t('Перевести репозиторий NodeSource на {to} и обновить nodejs (npm в том же пакете).', p)
-    case 'h_node_check': return t('Проверить версию, перезапустить приложения на Node (systemd, pm2), модули с нативной частью пересобрать (npm rebuild в каталоге приложения). Пункт уйдет в течение часа.', p)
-    case 'h_node_rollback': return t('Откат: репозиторий обратно на {from} и прежняя версия пакета.', p)
-    case 'h_etc_backup': return t('Копия конфигов в /var/backups/kervax-upgrade.', p)
-    case 'h_nginx_upgrade': return t('Репозиторий nginx.org отдает текущую версию своей ветки (stable или mainline). Версия осталась старой - в /etc/apt/sources.list.d/ старое кодовое имя дистрибутива или пакет зафиксирован (apt-mark showhold).', p)
-    case 'h_nginx_check': return t('Проверить версию, конфиг и что служба работает. Пункт уйдет в течение часа.', p)
-    case 'h_apt_rollback': return t('Откат: прежняя версия пакета (конфиги - из копии, если их меняли).', p)
+    case 'runtime_major': return t('{name} {from} и {to} - разные основные версии: код под {from} скорее всего сразу не заведется, сначала проверить на копии.', p)
+    case 'hint_runtime': return t('Код приложения сначала проверить на {name} {to}, лучше на копии.', p)
+    case 'major': return t('{name} {to} - новая основная версия: сначала прочитать, что в ней поменялось (upgrade guide).', p)
+    case 'hint_grafana': return t('Grafana при запуске переводит свою базу на новую схему: обратно только из копии данных.', p)
+    case 'hint_traefik': return t('В Traefik 3 часть правил и меток пишется иначе: сначала руководство по миграции с v2.', p)
+    case 'hint_redis': return t('Новый Redis читает старые данные, обратно только из копии. С 7.4 лицензия не BSD, замена на тех же данных - Valkey.', p)
+    case 'hint_valkey': return t('Новый Valkey читает старые данные, обратно только из копии.', p)
+    case 'hint_os': return t('Это базовый образ ОС: пакеты, которые ставятся при запуске, в {name} {to} могут называться иначе.', p)
+    case 'no_target': return t('Поддерживаемой версии {name} новее {from} в таблице сроков нет: выбрать по сайту вендора.', p)
+    case 'c_find': return t('Узнать папку, compose-файл и сервис контейнера {c}, дальше все в этом же окне. Пусто - контейнер запущен не из compose.', p)
+    case 'c_bak': return t('Копия compose-файла для отката.', p)
+    case 'c_data': return t('Копия данных контейнера для отката, на это время он остановлен.', p)
+    case 'img_set': return t('Поменять образ на {new}. grep покажет строки image: если там старый образ (в кавычках или из .env), поправить руками.', p)
+    case 'c_up': return t('Перезапустить и проверить: в ps - Up, в логе нет ошибок. Нет такого тега - up скажет not found, старый контейнер продолжит работать.', p)
+    case 'c_undo': return t('Вернуть прежний compose-файл и перезапустить.', p)
+    case 'c_undo_data': return t('Вернуть прежний compose-файл и данные из копии, перезапустить.', p)
+    case 'c_down': return t('Контейнер не нужен - остановить и убрать проект. Данные в папках и томах остаются на диске.', p)
+    case 'c_rm': return t('Контейнер не нужен - убрать только его, остальные сервисы проекта работают. Данные остаются на диске. Сервис убрать и из compose-файла, иначе он вернется при следующем up.', p)
+    case 'run_down': return t('Контейнер не нужен - остановить и удалить. Данные в папках и томах остаются на диске.', p)
+    case 'run_pull': return t('Скачать новый образ.', p)
+    case 'run_recreate': return t('Контейнер {c} запущен не из compose: пересоздать его тем же docker run, что и раньше, но с новым образом.', p)
+    case 'run_rebuild': return t('Контейнер {c} запущен не из compose, образ собран на этой ноде ({env}): поменять FROM в Dockerfile на {name} {to}, пересобрать и пересоздать контейнер тем же docker run.', p)
+    case 'pull_keep': return t('Сохранить текущий образ под тегом kervax-old, для отката.', p)
+    case 'pull_up': return t('Скачать свежий образ, перезапустить и проверить ps и лог. Версия не поменялась - автор образа его еще не пересобрал.', p)
+    case 'pull_undo': return t('Вернуть прежний образ и перезапустить.', p)
+    case 'pull_undo_data': return t('Вернуть прежний образ и данные из копии, перезапустить.', p)
+    case 'rb_from': return t('Версия пришла из базового образа ({env}): найти FROM в Dockerfile и поменять на {name} {to}.', p)
+    case 'rb_build': return t('Пересобрать со свежей базой, перезапустить и проверить ps и лог.', p)
+    case 'rb_undo': return t('Вернуть прежний FROM и пересобрать так же.', p)
+    case 'c_ci': return t('Образ {image} собирают не здесь ({env}): поменять FROM на {name} {to} там, где его собирают, и выкатить как обычно.', p)
+    case 'c_dangling': return t('Имя образа уже перевешено на другую сборку: пересоздать контейнер (docker compose up -d). Версия не поменялась - пересобрать образ на {name} {to}.', p)
+    case 'db_dump_pg': return t('Дамп всех баз, база при этом работает. Пустой файл - дамп не вышел, проверить пользователя в -U.', p)
+    case 'db_copy': return t('Копия данных для отката, база на это время остановлена.', p)
+    case 'db_inplace': return t('Команды смены тега нет намеренно: после копии поменять тег на {to} в compose руками, up -d и смотреть лог до конца перевода данных.', p)
+    case 'path_postgresql': return t('PostgreSQL {to} не прочитает данные {from}: тег просто так не менять. Путь: рядом новый контейнер {to} с пустой папкой данных, в него дамп, проверка, переключение приложения. Расширения нужны и в новом образе.', p)
+    case 'path_mysql': return t('MySQL обновляется на месте, но по одной LTS за раз (5.7, 8.0, 8.4), совместимость проверит MySQL Shell: util.checkForServerUpgrade(). Обратно только из копии.', p)
+    case 'path_mariadb': return t('MariaDB обновляется на месте, после запуска нужен mariadb-upgrade (образ делает его сам при MARIADB_AUTO_UPGRADE=1). Обратно только из копии.', p)
+    case 'path_mongodb': return t('MongoDB - по одной основной версии за раз (5.0, 6.0, 7.0, 8.0), перед каждой setFeatureCompatibilityVersion. Обратно только из копии.', p)
+    case 'path_elasticsearch': return t('Elasticsearch - через последний выпуск своей основной версии (7.17, 8.19), что мешает, покажет Upgrade Assistant. Обратно только из снапшота.', p)
+    case 'path_clickhouse': return t('ClickHouse обновляется на месте, лучше на LTS (X.3, X.8), сначала прочитать Backward Incompatible Changes в changelog. Обратно только из копии.', p)
+    case 'path_rabbitmq': return t('RabbitMQ - через промежуточные версии по upgrade path, перед каждой rabbitmqctl enable_feature_flag all. Обратно только из копии.', p)
+    case 'path_zookeeper': return t('ZooKeeper обновляется на месте по одному узлу, с 3.4 без снапшота нужен snapshot.trust.empty=true.', p)
+    case 'h_php_install': return t('Поставить PHP {to} рядом с {from} с теми же расширениями, старый продолжает работать. Какого-то пакета нет - убрать его из списка в /tmp и повторить последнюю строку.', p)
+    case 'h_php_switch': return t('Перевести сайты на {to}: пулы из /etc/php/{from}/fpm/pool.d/ в /etc/php/{to}/fpm/pool.d/, у сайтов сокет php{to}-fpm.sock, CLI - update-alternatives --set php /usr/bin/php{to}.', p)
+    case 'h_php_check': return t('Проверить версию и конфиг FPM, перезагрузить веб-сервер и открыть сайты.', p)
+    case 'h_php_remove': return t('Когда сайты и кроны на {to} - удалить {from} (apt спросит, конфиги останутся).', p)
+    case 'h_node_repo': return t('Перевести репозиторий NodeSource на {to} и обновить nodejs.', p)
+    case 'h_node_check': return t('Проверить версию, перезапустить приложения, нативные модули пересобрать (npm rebuild).', p)
+    case 'h_node_rollback': return t('Вернуть репозиторий на {from} и прежнюю версию.', p)
+    case 'h_etc_backup': return t('Копия конфигов.', p)
+    case 'h_nginx_upgrade': return t('Обновить nginx из репозитория nginx.org. Версия не поменялась - в sources.list.d старое имя дистрибутива или пакет зафиксирован (apt-mark showhold).', p)
+    case 'h_nginx_check': return t('Проверить версию, конфиг и что служба работает.', p)
+    case 'h_apt_rollback': return t('Вернуть прежнюю версию пакета.', p)
     case 'h_haproxy': return t('Ветку HAProxy задает репозиторий (PPA vbernat/haproxy-X.Y или backports): перевести его на {to}, apt update и apt install haproxy.', p)
-    case 'h_haproxy_check': return t('Проверить конфиг и что служба работает. Пункт уйдет в течение часа.', p)
-    case 'h_pg_dump': return t('Дамп всех баз кластера {from}/main, пока он работает.', p)
-    case 'h_pg_path': return t('Переезд штатными средствами Debian: sudo apt install postgresql-{to}, пустой кластер {to} main, который создала установка, убрать (pg_dropcluster {to} main --stop, только сверившись в pg_lsclusters, что он новый и пустой), потом pg_upgradecluster {from} main - старый кластер остается остановленным, к нему можно вернуться. Расширения нужны для {to}. Когда все проверено - pg_dropcluster {from} main и apt remove postgresql-{from}, пункт уйдет в течение часа.', p)
-    case 'h_my_dump': return t('Дамп всех баз (root входит по сокету; если по паролю - добавить -p).', p)
-    case 'h_rabbit_defs': return t('Выгрузить определения (очереди, обменники, пользователи), сообщения в них не попадают.', p)
-    case 'h_db_copy': return t('Копия каталога данных при остановленной службе (systemctl stop, tar, systemctl start) или штатный дамп.', p)
-    case 'h_repo': return t('Пакеты {name} - из репозитория вендора: перевести его на {to} по инструкции вендора, apt update и обновить пакеты, затем проверить службу и логи. Пункт уйдет в течение часа.', p)
-    case 'h_rpm': return t('Пакеты не из apt: обновить {name} до {to} средствами дистрибутива (dnf, для PHP - модули remi) по инструкции вендора, перед этим копия данных и конфигов.', p)
+    case 'h_haproxy_check': return t('Проверить конфиг и что служба работает.', p)
+    case 'h_pg_dump': return t('Дамп всех баз кластера {from}, он при этом работает.', p)
+    case 'h_pg_path': return t('Переезд штатно: apt install postgresql-{to}, пустой кластер {to} main убрать (pg_dropcluster {to} main --stop), затем pg_upgradecluster {from} main. Старый остается остановленным, к нему можно вернуться.', p)
+    case 'h_my_dump': return t('Дамп всех баз (если root входит по паролю - добавить -p).', p)
+    case 'h_rabbit_defs': return t('Выгрузить очереди, обменники и пользователей, без сообщений.', p)
+    case 'h_db_copy': return t('Копия папки данных при остановленной службе или штатный дамп.', p)
+    case 'h_repo': return t('Перевести репозиторий вендора {name} на {to} по его инструкции, apt update, обновить пакеты и проверить службу.', p)
+    case 'h_rpm': return t('Пакеты не из apt: обновить {name} до {to} через dnf по инструкции вендора, перед этим копия данных и конфигов.', p)
     default: return id
   }
+}
+
+// что это за ПО: контейнер, образ, откуда запущен - чтобы сразу было понятно, о чем шаги
+function wayHead(b: SwFixBlock, t: TFn): string {
+  if (b.kind === 'host') return t('на хосте: {list}', { list: b.name })
+  const a = b.args
+  const parts = [t('контейнер {c}', { c: b.name }), t('образ {image}', { image: a.image ?? '' })]
+  if (a.dir) parts.push(`${a.dir}/${a.files || ''}`, t('сервис {svc}', { svc: a.svc ?? '' }))
+  else if (a.compose === 'no') parts.push(t('не из compose'))
+  return parts.join(' · ')
 }
 
 function SwFix({ g, t }: { g: SoftwareItem; t: TFn }) {
   const blocks = g.fix ?? []
   const a = blocks[0]?.args ?? {}
-  const many = blocks.length > 1
-  const head = (b: SwFixBlock) => (b.kind === 'host' ? t('на хосте: {list}', { list: b.name }) : t('контейнер {c}', { c: b.name }))
   return (
     <div className="sw-fix">
       {a.to && (
@@ -89,20 +112,18 @@ function SwFix({ g, t }: { g: SoftwareItem; t: TFn }) {
       )}
       {blocks.map((b) => (
         <div key={b.kind + b.name} className="sw-fix-way">
-          {(many || b.others.length > 0) && (
-            <div className="small">
-              <b>{head(b)}</b>
-              {b.others.length > 0 && (
-                <span className="muted">
-                  {' '}
-                  {t('То же у {list}: команды те же, в первой строке подставьте имя контейнера.', {
-                    list: b.others.slice(0, WHERE_MAX).join(', ') + (b.others.length > WHERE_MAX ? ` ${t('и еще {n}', { n: b.others.length - WHERE_MAX })}` : ''),
-                  })}
-                </span>
-              )}
-            </div>
-          )}
-          <FixSteps steps={b.steps} text={(st) => swFixText(st.id, b.args, t)} />
+          <div className="small">
+            <b>{wayHead(b, t)}</b>
+            {b.others.length > 0 && (
+              <span className="muted">
+                {' '}
+                {t('Тот же образ у {list}: шаги те же, в их папке compose.', {
+                  list: b.others.slice(0, WHERE_MAX).join(', ') + (b.others.length > WHERE_MAX ? ` ${t('и еще {n}', { n: b.others.length - WHERE_MAX })}` : ''),
+                })}
+              </span>
+            )}
+          </div>
+          <FixSteps numbered steps={b.steps} text={(st) => swFixText(st.id, b.args, t)} />
         </div>
       ))}
       <div className="muted small">
@@ -126,10 +147,13 @@ function term(g: SoftwareItem, t: TFn): string {
 }
 
 function whereText(g: SoftwareItem, t: TFn): string {
-  const cont = [...new Set(g.where.filter((w) => w.kind === 'container').map((w) => w.name))].sort()
+  const cw = g.where.filter((w) => w.kind === 'container')
+  const cont = [...new Set(cw.map((w) => w.name))].sort()
   const host = g.where.filter((w) => w.kind === 'host').map((w) => w.name)
   const parts: string[] = []
-  if (cont.length)
+  // один контейнер - сразу и образ с папкой compose: видно, что это за PHP
+  if (cont.length === 1) parts.push([cont[0], cw[0].image, cw[0].dir].filter(Boolean).join(' · '))
+  else if (cont.length)
     parts.push(
       cont.slice(0, WHERE_MAX).join(', ') + (cont.length > WHERE_MAX ? ` ${t('и еще {n}', { n: cont.length - WHERE_MAX })}` : ''),
     )
@@ -195,7 +219,7 @@ export function SoftwareCard({ server: s, onChanged }: { server: Server; onChang
                     <span className="sw-name">
                       {g.name} <span className="mono">{g.cycle}</span>
                     </span>
-                    <span className="sw-where muted small" title={g.where.map((w) => `${w.name} ${w.ver}`).join('\n')}>
+                    <span className="sw-where muted small" title={g.where.map((w) => [w.name, w.ver, w.image, w.dir].filter(Boolean).join(' ')).join('\n')}>
                       {whereText(g, t)}
                     </span>
                     <span className={`sw-term small ${muted ? 'muted' : g.state === 'eol' ? 't-down' : g.state === 'soon' ? 't-degraded' : 'muted'}`}>

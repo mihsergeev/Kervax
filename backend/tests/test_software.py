@@ -241,83 +241,192 @@ def _cmds(blocks) -> str:
 
 
 def _sed(cmd: str, text: str) -> str:
-    """sed -E из команды на Python: что именно поменяется в compose-файле."""
-    pat, rep = re.search(r'sed -i -E "s#(.*?)#(.*?)#" ', cmd).groups()
-    pat, rep = (x.replace('\\"', '"').replace("\\$", "$").replace("[[:space:]]", "[ \t]") for x in (pat, rep))
+    """sed из команды на Python: что именно поменяется в compose-файле (базовый регэксп sed, в нем
+    из спецсимволов только точка, звездочка и $)."""
+    pat, rep = re.search(r"sed -i 's#(.*?)#(.*?)#' ", cmd).groups()
     return re.sub(pat, rep, text, flags=re.M)
 
 
-def test_fix_image(monkeypatch):
+def _cmd(b) -> dict:
+    return {s["id"]: s.get("cmd", "") for s in b["steps"]}
+
+
+def _compose(d="/app/site", svc="web-a", proj=None, files=None):
+    return {"project": proj if proj is not None else d.rsplit("/", 1)[-1], "service": svc, "dir": d,
+            "files": files if files is not None else f"{d}/docker-compose.yml"}
+
+
+def test_fix_php_in_compose(monkeypatch):
+    """Главный случай: PHP 5.6 в контейнере из compose - короткие шаги с готовой папкой, файлом и сервисом."""
     _tbl(monkeypatch)
-    rep = _rep(_c("mon-grafana", "grafana/grafana:13.1.0", binds=["/srv/mon/data"]))
+    rep = _rep(_c("web-a", "yiisoftware/yii2-php:5.6-fpm", ver={"PHP_VERSION": "5.6.40"}, binds=["/app/site/files"],
+                  compose=_compose()))
+    monkeypatch.setattr(software, "table", lambda: TBL | {"products": TBL["products"] | {
+        "php": {"name": "PHP", "cycles": [["8.4", "2028-12-31"], ["7.4", "2022-11-28"], ["5.6", "2018-12-31"]]}}})
+    g = _item(rep, "php-5.6")
+    # в строке карточки видно, что это за PHP: образ и папка compose
+    assert g["where"] == [{"kind": "container", "name": "web-a", "src": "env", "ver": "5.6.40",
+                           "image": "yiisoftware/yii2-php:5.6-fpm", "dir": "/app/site"}]
+    [b] = software.fix(g, rep, NOW)
+    assert b["mode"] == "image" and {k: b["args"][k] for k in ("new", "dir", "files", "svc", "compose")} == {
+        "new": "yiisoftware/yii2-php:8.4-fpm", "dir": "/app/site", "files": "docker-compose.yml", "svc": "web-a",
+        "compose": "yes"}
+    # смена основной версии среды выполнения - одна заметка, без отдельного major
+    assert _ids(b) == ["runtime_major", "c_bak", "img_set", "c_up", "c_undo", "c_down"]
+    assert [(s["id"], s.get("undo", False), s.get("alt", False)) for s in b["steps"][-2:]] == [
+        ("c_undo", True, False), ("c_down", False, True)]
+    cmd = _cmd(b)
+    assert cmd == {
+        "runtime_major": "",
+        "c_bak": "cd /app/site\nsudo cp docker-compose.yml docker-compose.yml.bak",
+        "img_set": "cd /app/site\n"
+                   "sudo sed -i 's#image: yiisoftware/yii2-php:5.6-fpm *$#image: yiisoftware/yii2-php:8.4-fpm#' docker-compose.yml\n"
+                   "grep -n 'image:' docker-compose.yml",
+        "c_up": "cd /app/site\nsudo docker compose up -d web-a\nsudo docker compose ps web-a\n"
+                "sudo docker compose logs --tail 20 web-a",
+        "c_undo": "cd /app/site\nsudo cp docker-compose.yml.bak docker-compose.yml\nsudo docker compose up -d web-a",
+        # один контейнер в проекте: не нужен - down всего проекта
+        "c_down": "cd /app/site\nsudo docker compose down",
+    }
+    # без магии на ноде: ни inspect, ни переменных, ни read
+    assert not re.search(r"inspect|IFS|\$[A-Z]\b|read -r", "\n".join(cmd.values()))
+    # меняется только строка image с этим образом: другой тег, метка и комментарий не задеваются
+    yml = ("services:\n  web-a:\n    image: yiisoftware/yii2-php:5.6-fpm\n  cron:\n"
+           "    image: yiisoftware/yii2-php:5.6-fpm-min\n    labels: [yiisoftware/yii2-php:5.6-fpm]\n")
+    assert _sed(cmd["img_set"], yml) == yml.replace("image: yiisoftware/yii2-php:5.6-fpm\n",
+                                                    "image: yiisoftware/yii2-php:8.4-fpm\n")
+    assert _sed(cmd["img_set"], "    image: yiisoftware/yii2-php:5.6-fpm  \n") == "    image: yiisoftware/yii2-php:8.4-fpm\n"
+
+
+def test_fix_compose_flags_and_rm(monkeypatch):
+    """-p и -f - только когда без них compose проект в папке не найдет; в проекте не один контейнер -
+    "не нужен" убирает только этот сервис."""
+    _tbl(monkeypatch)
+    co = software.compose_of
+    assert co(_c("x", "nginx:1.27"), {}) is None  # агент меток не присылает
+    assert co(_c("x", "nginx:1.27", compose={}), {}) == {}  # docker run
+    cm = co(_c("x", "nginx:1.27", compose=_compose(files="/app/site/docker-compose.yml,/app/site/docker-compose.override.yml")), {})
+    assert cm["flags"] == "" and cm["files"] == ["docker-compose.yml", "docker-compose.override.yml"]
+    cm = co(_c("x", "nginx:1.27", compose=_compose(proj="shop", files="/app/site/compose.prod.yml,/srv/common.yml")), {})
+    assert cm["flags"] == "-p shop -f compose.prod.yml -f /srv/common.yml"
+    # имя проекта по папке compose берет сам, как его normalize
+    assert co(_c("x", "nginx:1.27", compose=_compose(d="/app/My.Site", proj="mysite")), {})["flags"] == ""
+    rep = _rep(_c("gw", "nginx:1.27-alpine", compose=_compose(svc="gw", proj="edge", d="/app/edge")),
+               _c("edge-app-1", "app-a-web", compose=_compose(svc="app", proj="edge", d="/app/edge")))
+    [b] = software.fix(_item(rep, "nginx-1.27"), rep, NOW)
+    cmd = _cmd(b)
+    assert cmd["c_rm"] == "cd /app/edge\nsudo docker compose rm -s -f gw" and "c_down" not in cmd
+    assert cmd["c_up"].startswith("cd /app/edge\nsudo docker compose up -d gw\n")
+    rep = _rep(_c("gw", "nginx:1.27-alpine", compose=_compose(svc="gw", proj="shop", files="/app/site/compose.prod.yml")))
+    [b] = software.fix(_item(rep, "nginx-1.27"), rep, NOW)
+    cmd = _cmd(b)
+    assert "sudo docker compose -p shop -f compose.prod.yml up -d gw" in cmd["c_up"]
+    assert cmd["c_bak"] == "cd /app/site\nsudo cp compose.prod.yml compose.prod.yml.bak"
+    assert cmd["c_down"] == "cd /app/site\nsudo docker compose -p shop -f compose.prod.yml down"
+
+
+def test_fix_old_agent_and_docker_run(monkeypatch):
+    _tbl(monkeypatch)
+    # агент без меток compose: первая команда находит папку, файл и сервис, остальные берут их оттуда
+    rep = _rep(_c("web-a", "nginx:1.27-alpine"))
+    [b] = software.fix(_item(rep, "nginx-1.27"), rep, NOW)
+    assert b["args"]["compose"] == "unknown" and _ids(b) == ["c_find", "c_bak", "img_set", "c_up", "c_undo", "c_rm"]
+    cmd = _cmd(b)
+    assert cmd["c_find"].split("\n") == [
+        "D=$(sudo docker inspect -f '{{index .Config.Labels \"com.docker.compose.project.working_dir\"}}' web-a)",
+        "F=$(sudo docker inspect -f '{{index .Config.Labels \"com.docker.compose.project.config_files\"}}' web-a)",
+        "S=$(sudo docker inspect -f '{{index .Config.Labels \"com.docker.compose.service\"}}' web-a)",
+        'echo "dir=$D file=$F service=$S"']
+    assert cmd["c_bak"] == 'cd "$D"\nsudo cp "$F" "$F.bak"'
+    assert cmd["c_up"].startswith('cd "$D"\nsudo docker compose up -d "$S"')
+    # в проекте могут быть и другие сервисы: убрать только этот
+    assert cmd["c_rm"] == 'cd "$D"\nsudo docker compose rm -s -f "$S"'
+    # не из compose: скачать образ, пересоздать тем же docker run; не нужен - stop и rm
+    rep = _rep(_c("web-a", "nginx:1.27-alpine", compose={}))
+    [b] = software.fix(_item(rep, "nginx-1.27"), rep, NOW)
+    assert b["args"]["compose"] == "no" and _ids(b) == ["run_pull", "run_recreate", "run_down"]
+    assert _cmd(b)["run_pull"] == "sudo docker pull nginx:1.30-alpine"
+    assert _cmd(b)["run_down"] == "sudo docker stop web-a\nsudo docker rm web-a"
+
+
+def test_fix_image_with_data(monkeypatch):
+    _tbl(monkeypatch)
+    # Grafana переписывает свою базу: копия томов на запись (bind и named volume) до замены, откат - из нее
+    rep = _rep(_c("mon-grafana", "grafana/grafana:13.1.0", binds=["/srv/mon/data", "/srv/mon/prov", "/var/run/docker.sock"],
+                  ro=["/srv/mon/prov"], vols=["/var/lib/docker/volumes/mon_plugins/_data"],
+                  compose=_compose(d="/srv/mon", svc="grafana")))
     [b] = software.fix(_item(rep, "grafana-13.1"), rep, NOW)
-    assert (b["name"], b["kind"], b["mode"], b["others"]) == ("mon-grafana", "container", "image", [])
-    assert {k: b["args"][k] for k in ("name", "from", "to", "c", "new")} == {
-        "name": "Grafana", "from": "13.1", "to": "13.2", "c": "mon-grafana", "new": "grafana/grafana:13.2"}
-    assert _ids(b) == ["hint_grafana", "c_prep", "img_pull", "c_backup", "img_apply", "c_check", "c_rollback"]
-    cmd = {s["id"]: s.get("cmd", "") for s in b["steps"]}
-    # compose-проект и тома находит первая команда по меткам контейнера, агент их не присылает
-    assert cmd["c_prep"].startswith("C=mon-grafana\n")
-    assert '{{index .Config.Labels "com.docker.compose.project.config_files"}}' in cmd["c_prep"]
-    assert "{{range .Mounts}}{{if .RW}}" in cmd["c_prep"] and "B=/var/backups/kervax-upgrade/$C" in cmd["c_prep"]
-    # новый образ - заранее; копия при остановленном контейнере, старый образ под своим тегом
-    assert cmd["img_pull"] == "sudo docker pull grafana/grafana:13.2"
-    assert 'sudo docker stop -t 60 "$C" && sudo tar -czpf "$B/$T.tgz"' in cmd["c_backup"]
-    assert '"$D/.env"' in cmd["c_backup"] and '"kervax-old:$C"' in cmd["c_backup"]
-    # только строка image со старым образом, up - этого сервиса и только если замена нашлась
-    yml = ("services:\n  grafana:\n    image: grafana/grafana:13.1.0\n  render:\n"
-           "    image: \"grafana/grafana:13.1.0-ubuntu\"\n    labels: [grafana/grafana:13.1.0]\n")
-    assert _sed(cmd["img_apply"], yml) == yml.replace("image: grafana/grafana:13.1.0\n", "image: grafana/grafana:13.2\n")
-    assert _sed(cmd["img_apply"], "    image: 'grafana/grafana:13.1.0'\n") == "    image: 'grafana/grafana:13.2'\n"
-    assert cmd["img_apply"].endswith(
-        "sudo grep -nF grafana/grafana:13.2 $(echo \"$F\" | tr , ' ') && sudo docker compose -p \"$P\" $A up -d --no-deps \"$S\"")
-    # откат: данные новой версии в сторону, архив на место, старый compose-файл с ним
-    assert '"$m.kervax-new"' in cmd["c_rollback"] and 'tar -C / -xzpf "$X"' in cmd["c_rollback"]
-    assert "kervax-old" not in cmd["c_rollback"]
-    # смена основной версии - предупреждение
-    rep = _rep(_c("edge", "traefik:v2.11.57"))
+    assert b["args"]["new"] == "grafana/grafana:13.2"
+    assert _ids(b) == ["hint_grafana", "c_data", "c_bak", "img_set", "c_up", "c_undo_data", "c_down"]
+    cmd = _cmd(b)
+    assert cmd["c_data"].split("\n") == [
+        "sudo mkdir -p -m 700 /var/backups/kervax-upgrade", "sudo docker stop mon-grafana",
+        "sudo tar -czpf /var/backups/kervax-upgrade/mon-grafana.tgz /srv/mon/data /var/lib/docker/volumes/mon_plugins/_data",
+        "sudo docker start mon-grafana"]
+    assert cmd["c_undo_data"].split("\n") == [
+        "cd /srv/mon", "sudo cp docker-compose.yml.bak docker-compose.yml", "sudo docker compose stop grafana",
+        "sudo tar -xzpf /var/backups/kervax-upgrade/mon-grafana.tgz -C /", "sudo docker compose up -d grafana"]
+    # старый агент: какие каталоги копировать, находит docker inspect на ноде
+    rep = _rep(_c("mon-grafana", "grafana/grafana:13.1.0"))
+    [b] = software.fix(_item(rep, "grafana-13.1"), rep, NOW)
+    assert "$(sudo docker inspect -f '{{range .Mounts}}{{if .RW}}{{.Source}} {{end}}{{end}}' mon-grafana)" in _cmd(b)["c_data"]
+    # смена основной версии - заметка; у Traefik подсказка про переход 2 на 3
+    rep = _rep(_c("edge", "traefik:v2.11.57", compose=_compose(d="/app/edge", svc="traefik")))
     monkeypatch.setattr(software, "table", lambda: TBL | {"products": TBL["products"] | {
         "traefik": {"name": "Traefik", "cycles": [["3.7", False], ["2.11", "2026-09-07"]]}}})
     [b] = software.fix(_item(rep, "traefik-2.11"), rep, NOW)
-    assert _ids(b)[:3] == ["major", "hint_traefik", "c_prep"] and b["args"]["new"] == "traefik:v3.7"
+    assert _ids(b)[:3] == ["major", "hint_traefik", "c_bak"] and b["args"]["new"] == "traefik:v3.7"
 
 
 def test_fix_db_without_upgrade_commands(monkeypatch):
     _tbl(monkeypatch)
-    rep = _rep(_c("db-1", "postgres:12"), _c("db-2", "postgres:12"), _c("my", "mariadb:10.6"),
-               _c("q", "rabbitmq:3.8.5-management"), db=[("pg", "db-1", "12.22")])
+    rep = _rep(_c("db-1", "postgres:12", binds=["/app/site/pg"], compose=_compose(svc="db")), _c("db-2", "postgres:12"),
+               _c("my", "mariadb:10.6"), _c("q", "rabbitmq:3.8.5-management"), db=[("pg", "db-1", "12.22")])
     [b] = software.fix(_item(rep, "postgresql-12"), rep, NOW)
     assert (b["mode"], b["name"], b["others"], b["args"]["to"]) == ("db", "db-1", ["db-2"], "18")
-    assert _ids(b) == ["c_prep", "db_dump_pg", "db_copy", "path_postgresql"]
-    assert "pg_dumpall -U \"${POSTGRES_USER:-postgres}\"" in _cmds([b]) and 'docker stop -t 120 "$C"' in _cmds([b])
+    assert _ids(b) == ["db_dump_pg", "db_copy", "path_postgresql"]
+    cmd = _cmd(b)
+    assert cmd["db_dump_pg"].split("\n")[1] == (
+        "sudo docker exec db-1 sh -c 'pg_dumpall -U \"${POSTGRES_USER:-postgres}\"' | gzip"
+        " | sudo tee /var/backups/kervax-upgrade/db-1.sql.gz >/dev/null")
+    assert cmd["db_copy"].split("\n")[1:4] == [
+        "sudo docker stop -t 120 db-1", "sudo tar -czpf /var/backups/kervax-upgrade/db-1.tgz /app/site/pg",
+        "sudo docker start db-1"]
     for key in ("postgresql-12", "mariadb-10.6", "rabbitmq-3.8"):
-        blocks = software.fix(_item(rep, key), rep, NOW)
-        cmds = _cmds(blocks)
-        # базу командой не обновляем: ни нового образа, ни правки compose, ни пересоздания
-        assert not re.search(r"docker pull|sed -i|up -d|compose -p|build", cmds), key
+        cmds = _cmds(software.fix(_item(rep, key), rep, NOW))
+        # базу командой не обновляем: ни нового образа, ни правки compose, ни пересоздания, ни down
+        assert not re.search(r"docker pull|sed -i|up -d|compose|build|docker rm", cmds), key
     [b] = software.fix(_item(rep, "mariadb-10.6"), rep, NOW)
-    assert _ids(b) == ["c_prep", "db_copy", "path_mariadb", "db_inplace"]
+    assert _ids(b) == ["db_copy", "path_mariadb", "db_inplace"]
+    # новый агент, а томов нет: копировать нечего
+    rep = _rep(_c("my", "mariadb:10.6", compose=_compose(svc="db")))
+    assert _ids(software.fix(_item(rep, "mariadb-10.6"), rep, NOW)[0]) == ["path_mariadb", "db_inplace"]
 
 
 def test_fix_app_images(monkeypatch):
     _tbl(monkeypatch)
     v = {"NGINX_VERSION": "1.27.4"}
-    rep = _rep(_c("web", "nginx:latest", ver=v), _c("web-2", "nginx:latest", ver=v), _c("app-a", "app-a-web", ver=v),
-               _c("api", "registry.example.com/shop/api:prod", ver=v), _c("stale", "sha256:0123abcd", ver=v),
-               _c("gw", "nginx:1.27-alpine"))
+    cp = _compose(svc="web")
+    rep = _rep(_c("web", "nginx:latest", ver=v, compose=cp), _c("web-2", "nginx:latest", ver=v, compose=cp),
+               _c("app-a", "app-a-web", ver=v, compose=_compose(svc="app")),
+               _c("api", "registry.example.com/shop/api:prod", ver=v, compose=_compose(svc="api")),
+               _c("stale", "sha256:0123abcd", ver=v, compose=_compose(svc="old")), _c("gw", "nginx:1.27-alpine"))
     blocks = software.fix(_item(rep, "nginx-1.27"), rep, NOW)
     # контейнеры с одним образом - один способ, способов не больше FIX_MAX
     assert [(b["name"], b["mode"], b["others"]) for b in blocks] == [
         ("web", "pull", ["web-2"]), ("app-a", "rebuild", []), ("api", "ci", []), ("stale", "dangling", [])]
     pull, rebuild, ci, dangling = blocks
-    assert _ids(pull) == ["c_prep", "c_backup", "pull_apply", "c_check", "c_rollback"]
-    # тег без версии: откат - прежний образ под старым именем
-    assert 'sudo docker tag "kervax-old:$C" nginx:latest && sudo docker compose' in _cmds([pull])
-    assert _ids(rebuild) == ["c_prep", "rb_from", "c_backup", "rb_build", "c_check", "c_rollback"]
-    assert 'build --pull "$S"' in _cmds([rebuild]) and "'^FROM'" in _cmds([rebuild])
-    # собран не здесь - только слова, откуда версия
-    assert _ids(ci) == ["c_ci"] and ci["args"]["env"] == "NGINX_VERSION=1.27.4" and _cmds([ci]).strip() == ""
-    assert _ids(dangling) == ["c_dangling"]
+    # тег без версии: прежний образ под тегом kervax-old, откат - он же под старым именем
+    assert _ids(pull) == ["pull_keep", "pull_up", "pull_undo", "c_rm"]
+    assert _cmd(pull)["pull_keep"] == "sudo docker tag nginx:latest nginx:kervax-old"
+    assert _cmd(pull)["pull_up"].split("\n")[:3] == ["cd /app/site", "sudo docker compose pull web", "sudo docker compose up -d web"]
+    assert _cmd(pull)["pull_undo"].startswith("sudo docker tag nginx:kervax-old nginx:latest\ncd /app/site\n")
+    assert _ids(rebuild) == ["rb_from", "rb_build", "rb_undo", "c_rm"]
+    assert _cmd(rebuild)["rb_from"] == "cd /app/site\nsudo grep -rn --include='Dockerfile*' '^FROM' ."
+    assert "sudo docker compose build --pull app" in _cmd(rebuild)["rb_build"]
+    # собран не здесь - слова, откуда версия, и другой путь: не нужен
+    assert _ids(ci) == ["c_ci", "c_rm"] and ci["args"]["env"] == "NGINX_VERSION=1.27.4"
+    assert _ids(dangling) == ["c_dangling", "c_rm"]
     rep = _rep(_c("gw", "nginx:1.27-alpine"))
     [b] = software.fix(_item(rep, "nginx-1.27"), rep, NOW)
     assert b["mode"] == "image" and b["args"]["new"] == "nginx:1.30-alpine"
@@ -335,25 +444,32 @@ def test_fix_host(monkeypatch):
     def one(key):
         [b] = software.fix(_item(rep, key, host), rep, NOW)
         assert b["kind"] == "host"
-        return b, {s["id"]: s.get("cmd", "") for s in b["steps"]}
+        return b, _cmd(b)
 
     b, cmd = one("php-7.4")
-    assert _ids(b) == ["h_php_install", "h_php_switch", "h_php_check", "h_php_remove"] and b["args"]["to"] == "8.4"
-    # рядом со старой, с теми же расширениями (каких нет для новой - пропускает)
-    assert "'php7.4-*'" in cmd["h_php_install"] and "sed 's/^php7\\.4-/php8.4-/'" in cmd["h_php_install"]
-    assert cmd["h_php_install"].endswith("xargs -r sudo apt install -y")
-    assert "sudo php-fpm8.4 -t" in cmd["h_php_check"] and cmd["h_php_remove"].startswith("sudo apt-get remove $(dpkg-query")
+    assert _ids(b) == ["runtime_major", "h_php_install", "h_php_switch", "h_php_check", "h_php_remove"]
+    assert b["args"]["to"] == "8.4"
+    # рядом со старой, с теми же расширениями: список в файле, его видно и можно поправить
+    lst = "dpkg-query -W -f='${db:Status-Abbrev} ${Package}\\n' 'php7.4-*' | awk '/^ii/ {print $2}'"
+    assert cmd["h_php_install"].split("\n") == [
+        "sudo apt update", lst + " | sed 's/^php7.4-/php8.4-/' > /tmp/php8.4.txt", "cat /tmp/php8.4.txt",
+        "sudo apt install -y $(cat /tmp/php8.4.txt)"]
+    assert cmd["h_php_check"].split("\n") == ["php8.4 -v | head -1", "sudo php-fpm8.4 -t", "systemctl is-active php8.4-fpm"]
+    assert cmd["h_php_remove"] == f"sudo apt remove $({lst})"
     b, cmd = one("nodejs-18")
+    assert _ids(b) == ["runtime_major", "h_node_repo", "h_node_check", "h_node_rollback"]
     assert "s#node_[0-9]*\\.x#node_24.x#g" in cmd["h_node_repo"]
     assert cmd["h_node_rollback"].endswith("--allow-downgrades nodejs=18.20.4-1nodesource1")
     b, cmd = one("nginx-1.27")
     assert _ids(b) == ["h_etc_backup", "h_nginx_upgrade", "h_nginx_check", "h_apt_rollback"]
+    assert b["steps"][-1].get("undo") is True
     assert cmd["h_apt_rollback"] == "sudo apt install -y --allow-downgrades nginx='1.27.4-1~jammy'"
+    assert cmd["h_nginx_check"] == "nginx -v\nsudo nginx -t\nsystemctl is-active nginx"
     # базы на хосте: дамп своего кластера и путь словами, без команд переезда
     b, cmd = one("postgresql-12")
     assert _ids(b) == ["h_pg_dump", "h_pg_path"] and "pg_dumpall --cluster 12/main" in cmd["h_pg_dump"]
     b, cmd = one("mariadb-10.6")
-    assert _ids(b) == ["h_my_dump", "path_mariadb", "h_repo"]
+    assert _ids(b) == ["h_my_dump", "path_mariadb", "h_repo"] and "sudo mariadb-dump --all-databases" in cmd["h_my_dump"]
     assert not re.search(r"pg_upgradecluster|pg_dropcluster|apt install -y (postgresql|mariadb)", _cmds(
         software.fix(_item(rep, "postgresql-12", host), rep, NOW) + software.fix(_item(rep, "mariadb-10.6", host), rep, NOW)))
     # не apt - только слова
@@ -367,7 +483,8 @@ def test_fix_commands_are_neutral(monkeypatch):
     _tbl(monkeypatch)
     host = [{"p": "php", "v": "7.4.33", "pkg": "php7.4-fpm", "full": "7.4.33-1+deb.sury.org+1"},
             {"p": "postgresql", "v": "12.22", "pkg": "postgresql-12", "full": ""}]
-    rep = _rep(_c("mon", "grafana/grafana:13.1.0"), _c("db", "postgres:12"), _c("web", "nginx:latest", ver={"NGINX_VERSION": "1.27.4"}))
+    rep = _rep(_c("mon", "grafana/grafana:13.1.0"), _c("db", "postgres:12"), _c("web", "nginx:latest", ver={"NGINX_VERSION": "1.27.4"}),
+               _c("old", "php:7.4-fpm", compose=_compose()))
     rep["os"] = "Debian GNU/Linux 12 (bookworm)"
     for g in software.inventory(rep, host, NOW)["items"]:
         if g["state"] != "ok":

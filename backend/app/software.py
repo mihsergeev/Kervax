@@ -15,11 +15,12 @@
 (latest) и образы, которые больше года не пересобирались, - только в карточке.
 
 У пункта в карточке готовые шаги (fix): команды под эту ноду, после которых этой версии на ноде не
-остается и пункт уходит сам. Тексты шагов - во фронте по id, здесь команды. Compose-проект
-контейнера (каталог, файлы, сервис) и его тома агент не присылает - их находит первая команда по
-меткам контейнера на самой ноде. Базы командой не обновляем: новая версия переводит данные на
-свой формат, а PostgreSQL нового major старые файлы не читает вовсе, - только копия, дамп и путь
-словами.
+остается и пункт уходит сам. Тексты шагов - во фронте по id (одна фраза), здесь команды - одна-две
+простые строки на шаг. Папку, compose-файлы и сервис контейнера агент 2.41 присылает из меток
+compose, и они стоят в командах готовыми; у старого агента их находит первая команда на самой ноде.
+Кроме обновления у контейнера всегда есть другой путь: он не нужен - убрать (down или rm). Базы
+командой не обновляем: новая версия переводит данные на свой формат, а PostgreSQL нового major
+старые файлы не читает вовсе, - только копия, дамп и путь словами.
 
 Обновить можно не всегда: тогда решение человека (alert_mutes "swver:<состояние>:<продукт>-<цикл>"),
 как у ОС. Состояние в ключе: "отложить до конца поддержки" у пункта "скоро" не прячет его, когда
@@ -273,7 +274,8 @@ def mute_key(g: dict) -> str:
 
 def inventory(rep: dict, sw_host, now: datetime, mutes: list[str] | None = None) -> dict:
     """Все версии сервера по продукту и циклу: {"items": [...], "unknown": [...], "old": [...]}.
-    items: {"key", "p", "name", "cycle", "ver", "eol", "state", "left", "where": [{"kind", "name", "src"}]},
+    items: {"key", "p", "name", "cycle", "ver", "eol", "state", "left",
+    "where": [{"kind", "name", "src", "ver", "image"?, "dir"?}]},
     у кончившихся и скорых еще "mkey" и "muted" - решение человека (ключ в alert_mutes)."""
     today = now.astimezone(timezone.utc).date()
     dbs = {str(d.get("container") or ""): (str(d.get("engine") or ""), str(d.get("version") or ""))
@@ -298,8 +300,11 @@ def inventory(rep: dict, sw_host, now: datetime, mutes: list[str] | None = None)
         if not isinstance(c, dict) or c.get("state") != "running":
             continue
         vers, missing = container_versions(c, dbs)
+        cp = c.get("compose") if isinstance(c.get("compose"), dict) else {}
         for p, (v, src) in vers.items():
-            add(p, v, {"kind": "container", "name": str(c.get("name") or ""), "src": src, "ver": v})
+            # образ и папка compose - чтобы в карточке было видно, что это за контейнер
+            add(p, v, {"kind": "container", "name": str(c.get("name") or ""), "src": src, "ver": v,
+                       "image": str(c.get("image") or ""), "dir": str(cp.get("dir") or "")})
         if missing:
             unknown.append({"name": str(c.get("name") or ""), "image": str(c.get("image") or ""),
                             "p": missing, "pname": product_name(missing)})
@@ -392,48 +397,19 @@ def advice(rep: dict, sw_host, now: datetime, mutes: list[str] | None = None) ->
 # Redis и Valkey не здесь: новая версия сама читает старые RDB и AOF
 _STATEFUL = frozenset({"postgresql", "mysql", "mariadb", "mongodb", "elasticsearch", "clickhouse", "rabbitmq",
                        "zookeeper"})
+# новая версия при первом запуске переписывает свои данные: перед ней копия томов, откат - из нее
+_DATAFUL = frozenset({"grafana", "redis", "valkey"})
+# среды выполнения: обновляется не сервис, а то, на чем работает код приложения
+_RUNTIME = frozenset({"php", "nodejs", "python", "ruby", "eclipse-temurin"})
 _HINT = {"grafana": "hint_grafana", "traefik": "hint_traefik", "redis": "hint_redis", "valkey": "hint_valkey",
-         "php": "hint_runtime", "nodejs": "hint_runtime", "python": "hint_runtime", "ruby": "hint_runtime",
-         "eclipse-temurin": "hint_runtime", "alpine-linux": "hint_os", "debian": "hint_os", "ubuntu": "hint_os",
-         "centos": "hint_os"}
+         "alpine-linux": "hint_os", "debian": "hint_os", "ubuntu": "hint_os", "centos": "hint_os"}
 _TAG_VER = re.compile(r"^(v?)(\d+(?:\.\d+)*)(.*)$")
 _BAK = "/var/backups/kervax-upgrade"
-
-# Первая команда у контейнера: compose-проект по меткам (агент их не присылает) и тома на запись -
-# что копировать для отката. Остальные команды берут C, P, S, F, A, M, B отсюда, в том же окне
-_PREP = "\n".join([
-    "C={c}",
-    "IFS='|' read -r P S D F < <(sudo docker inspect -f '{{{{index .Config.Labels \"com.docker.compose.project\"}}}}|"
-    "{{{{index .Config.Labels \"com.docker.compose.service\"}}}}|"
-    "{{{{index .Config.Labels \"com.docker.compose.project.working_dir\"}}}}|"
-    "{{{{index .Config.Labels \"com.docker.compose.project.config_files\"}}}}' \"$C\")",
-    "A=$(echo \"$F\" | sed 's/^/-f /; s/,/ -f /g')",
-    "M=$(sudo docker inspect -f '{{{{range .Mounts}}}}{{{{if .RW}}}}{{{{println .Source}}}}{{{{end}}}}{{{{end}}}}' \"$C\""
-    " | grep -vE '^/(proc|sys|dev|run|var/run)(/|$)')",
-    "B=" + _BAK + "/$C",
-    "echo \"project=$P service=$S dir=$D files=$F\"; [ -n \"$M\" ] && sudo du -sh $M",
-])
-_UP = 'sudo docker compose -p "$P" $A up -d --no-deps "$S"'
-_CHECK = "\n".join([
-    "sudo docker inspect -f '{{.Config.Image}} {{.State.Status}}{{if .State.Health}} {{.State.Health.Status}}{{end}}"
-    " {{.State.StartedAt}}' \"$C\"",
-    'sudo docker logs --since 10m "$C" 2>&1 | tail -n 30',
-])
-# compose-файлы с .env и тома одним архивом при остановленном контейнере: что новая версия перепишет
-# при первом запуске, старая уже может не прочитать
-_COPY = ('sudo docker stop -t {t} "$C" && sudo tar -czpf "$B/$T.tgz" --numeric-owner $(echo "$F" | tr , \' \')'
-         ' $(sudo test -f "$D/.env" && echo "$D/.env") $M; sudo docker start "$C"')
-_PG_DUMP = "\n".join([
-    'T=$(date +%F-%H%M); sudo install -d -m 700 "$B"',
-    'sudo docker exec "$C" sh -c \'pg_dumpall -U "${POSTGRES_USER:-postgres}"\' | gzip | sudo tee "$B/$T.sql.gz" >/dev/null',
-    'sudo ls -lh "$B"',
-])
-# только строка "image: <старый образ>": другие сервисы с похожим тегом не задеваются, а образ из
-# переменной (.env) не найдется - grep это покажет, и up не запустится
-_SED_IMG = (r'''for f in $(echo "$F" | tr , ' '); do sudo sed -i -E "s#^([[:space:]]*image:[[:space:]]*[\"']?)'''
-            r'''{old}([\"']?[[:space:]]*)\$#\1{new}\2#" "$f"; done''')
-_DPKG_LS = r'''dpkg-query -W -f='${{db:Status-Abbrev}}|${{Package}}\n' 'php{v}-*' 2>/dev/null | awk -F'|' '$1 ~ /^ii/ {{print $2}}' '''
-_NODE_REPO = r"""grep -rl 'deb.nodesource.com/node_' /etc/apt/sources.list.d/ | xargs -r sudo sed -i 's#node_[0-9]*\.x#node_{v}.x#g'"""
+_MKDIR = f"sudo mkdir -p -m 700 {_BAK}"
+# файлы, которые compose находит в папке сам: с ними -f в командах не нужен
+_DEFAULT_FILES = ("compose.yaml", "compose.yml", "docker-compose.yaml", "docker-compose.yml")
+_SYS_PATH = re.compile(r"^/(proc|sys|dev|run|var/run)(/|$)")
+_LABEL = "{{index .Config.Labels \"com.docker.compose.%s\"}}"
 
 
 def target(p: str, cycle: str, today: date) -> tuple[str | None, list[str]]:
@@ -498,56 +474,162 @@ def _env_of(p: str, c: dict) -> str:
     return ""
 
 
-def _rollback(image: str | None) -> str:
-    """Откат: тома и compose-файлы из последнего архива (то, что успела записать новая версия,
-    остается рядом с суффиксом .kervax-new), у тега без версии - еще и прежний образ под старым именем."""
-    retag = f' && sudo docker tag "kervax-old:$C" {shlex.quote(image)}' if image else ""
-    return "\n".join([
-        'X=$(sudo sh -c "ls -t $B/*.tgz" | head -1); echo "backup: $X"',
-        '[ -n "$X" ] && sudo docker stop -t 60 "$C" && ( set -e; for m in $M; do sudo mv -T "$m" "$m.kervax-new"; done;'
-        ' sudo tar -C / -xzpf "$X" --numeric-owner )' + retag + " && " + _UP,
-    ])
+def _project_name(d: str) -> str:
+    """Имя проекта, которое compose берет по папке сам (как его normalize: маленькие буквы, цифры, - и _)."""
+    return re.sub(r"[^a-z0-9_-]", "", d.rstrip("/").rsplit("/", 1)[-1].lower()).lstrip("_-")
 
 
-def _container_steps(p: str, mode: str, c: dict, a: dict) -> list[dict]:
+def compose_of(c: dict, rep: dict) -> dict | None:
+    """Откуда запущен контейнер, по меткам compose из отчета (агент 2.41): {"dir", "files", "service",
+    "project", "flags", "alone"}. files - имена относительно папки; flags - -p и -f, только если без них
+    compose в этой папке проект не найдет; alone - в проекте один этот контейнер (тогда "не нужен" -
+    это down всего проекта). {} - контейнер запущен не из compose (docker run), None - агент меток не
+    присылает (старый): тогда их находит первая команда на ноде."""
+    cp = c.get("compose")
+    if not isinstance(cp, dict):
+        return None
+    d, svc, proj = (str(cp.get(k) or "").strip() for k in ("dir", "service", "project"))
+    files = [f.strip() for f in str(cp.get("files") or "").split(",") if f.strip()]
+    if not (d.startswith("/") and svc and files):
+        return {}
+    d = d.rstrip("/") or "/"
+    names = [f[len(d) + 1:] if f.startswith(d + "/") else f for f in files]
+    first = names[0]
+    plain = first in _DEFAULT_FILES and (len(names) == 1 or (
+        len(names) == 2 and names[1] == first.rsplit(".", 1)[0] + ".override." + first.rsplit(".", 1)[1]))
+    flags = ([f"-p {shlex.quote(proj)}"] if proj and proj != _project_name(d) else []) + (
+        [] if plain else [f"-f {shlex.quote(n)}" for n in names])
+    dk = rep.get("docker") if isinstance(rep.get("docker"), dict) else {}
+    same = [x for x in dk.get("containers") or [] if isinstance(x, dict) and isinstance(x.get("compose"), dict)
+            and str(x["compose"].get("project") or "") == proj and str(x["compose"].get("dir") or "").rstrip("/") == d]
+    return {"dir": d, "files": names, "service": svc, "project": proj, "flags": " ".join(flags),
+            "alone": len(same) <= 1}
+
+
+def _data_paths(c: dict) -> str | None:
+    """Что копировать перед обновлением: bind-монтирования на запись и named volumes (агент 2.41,
+    vols). None - агент старый и named volumes не присылает: каталоги найдет docker inspect на ноде."""
+    if "compose" not in c:
+        return None
+    ro = set(c.get("ro") or [])
+    paths = [b for b in c.get("binds") or [] if b not in ro and not _SYS_PATH.match(b)] + list(c.get("vols") or [])
+    return " ".join(shlex.quote(x) for x in dict.fromkeys(paths))
+
+
+class _Where:
+    """Как в командах назвать папку, compose-файлы и сервис: готовыми значениями из меток или,
+    если агент их не прислал, переменными $D, $F и $S из первой команды (c_find)."""
+
+    def __init__(self, cm: dict | None):
+        q = shlex.quote
+        self.find = cm is None
+        if cm is None:
+            self.cd, self.svc, self.files = 'cd "$D"', '"$S"', [('"$F"', '"$F.bak"')]
+            self.dc, self.alone = "sudo docker compose", False
+        else:
+            self.cd, self.svc = f"cd {q(cm['dir'])}", q(cm["service"])
+            self.files = [(q(n), q(n + ".bak")) for n in cm["files"]]
+            self.dc, self.alone = " ".join(x for x in ("sudo docker compose", cm["flags"]) if x), cm["alone"]
+
+    def names(self) -> str:
+        return " ".join(f for f, _b in self.files)
+
+    def up_check(self) -> list[str]:
+        return [f"{self.dc} up -d {self.svc}", f"{self.dc} ps {self.svc}", f"{self.dc} logs --tail 20 {self.svc}"]
+
+
+def _find_cmd(name: str) -> str:
+    n = shlex.quote(name)
+    return "\n".join([f"{v}=$(sudo docker inspect -f '{_LABEL % k}' {n})" for v, k in
+                      (("D", "project.working_dir"), ("F", "project.config_files"), ("S", "service"))]
+                     + ['echo "dir=$D file=$F service=$S"'])
+
+
+def _container_steps(p: str, mode: str, c: dict, a: dict, rep: dict) -> list[dict]:
+    """Шаги для контейнера: что сделать, одной фразой во фронте, и одна-две простые команды с готовыми
+    путями. Порядок: заметка про смену версии, копия, замена, перезапуск с проверкой; откат (undo) и
+    другой путь "контейнер не нужен" (alt)."""
     if not a["to"]:
         return [{"id": "no_target"}]
-    image = str(c.get("image") or "")
-    prep = {"id": "c_prep", "cmd": _PREP.format(c=shlex.quote(str(c.get("name") or "")))}
-    stamp = 'T=$(date +%F-%H%M); sudo install -d -m 700 "$B"'
+    q = shlex.quote
+    name = str(c.get("name") or "")
+    cn = q(name)
+    data = _data_paths(c)
+    if data is None:
+        data = f"$(sudo docker inspect -f '{{{{range .Mounts}}}}{{{{if .RW}}}}{{{{.Source}}}} {{{{end}}}}{{{{end}}}}' {cn})"
+    tgz = q(f"{_BAK}/{name}.tgz")
     if mode == "db":
-        steps = [prep] + ([{"id": "db_dump_pg", "cmd": _PG_DUMP}] if p == "postgresql" else [])
-        steps.append({"id": "db_copy", "cmd": "\n".join([stamp, _COPY.format(t=120), 'sudo ls -lh "$B"'])})
+        steps = []
+        if p == "postgresql":
+            dump = q(f"{_BAK}/{name}.sql.gz")
+            steps.append({"id": "db_dump_pg", "cmd": "\n".join([
+                _MKDIR, f"sudo docker exec {cn} sh -c 'pg_dumpall -U \"${{POSTGRES_USER:-postgres}}\"' | gzip"
+                        f" | sudo tee {dump} >/dev/null", f"sudo ls -lh {_BAK}"])})
+        if data:
+            steps.append({"id": "db_copy", "cmd": "\n".join([
+                _MKDIR, f"sudo docker stop -t 120 {cn}", f"sudo tar -czpf {tgz} {data}", f"sudo docker start {cn}",
+                f"sudo ls -lh {_BAK}"])})
         return steps + [{"id": "path_" + p}] + ([] if p == "postgresql" else [{"id": "db_inplace"}])
+
+    cm = compose_of(c, rep)
+    w = _Where(cm) if cm != {} else None
+    if w is None:
+        down = {"id": "run_down", "alt": True, "cmd": f"sudo docker stop {cn}\nsudo docker rm {cn}"}
+    elif w.alone:
+        down = {"id": "c_down", "alt": True, "cmd": f"{w.cd}\n{w.dc} down"}
+    else:
+        down = {"id": "c_rm", "alt": True, "cmd": f"{w.cd}\n{w.dc} rm -s -f {w.svc}"}
+    find = [{"id": "c_find", "cmd": _find_cmd(name)}] if w is not None and w.find else []
     if mode == "dangling":
-        return [{"id": "c_dangling"}]
+        return [{"id": "c_dangling"}, down]
     major = _num(a["to"])[:1] != _num(a["from"])[:1]
-    pre = [{"id": "major"}] if major else []
-    # у Traefik подсказка - про переход 2 на 3, внутри основной версии она ни к чему
-    pre += [{"id": _HINT[p]}] if p in _HINT and (major or p != "traefik") else []
+    if p in _RUNTIME:
+        notes = [{"id": "runtime_major" if major else "hint_runtime"}]
+    else:
+        notes = [{"id": "major"}] if major else []
+        # у Traefik подсказка - про переход 2 на 3, внутри основной версии она ни к чему
+        notes += [{"id": _HINT[p]}] if p in _HINT and (major or p != "traefik") else []
     if mode == "ci":
-        return pre + [{"id": "c_ci"}]
-    backup = {"id": "c_backup", "cmd": "\n".join([
-        stamp, "sudo docker tag \"$(sudo docker inspect -f '{{.Image}}' \"$C\")\" \"kervax-old:$C\"",
-        _COPY.format(t=60), 'sudo ls -lh "$B"'])}
-    check = {"id": "c_check", "cmd": _CHECK}
+        return notes + [{"id": "c_ci"}, down]
+    image = str(c.get("image") or "")
+    if w is None:
+        # docker run: команды запуска панель не знает, пересоздать тем же docker run с новым образом
+        pull = a.get("new") if mode == "image" else image
+        if mode == "rebuild":
+            return notes + [{"id": "run_rebuild"}, down]
+        return notes + [{"id": "run_pull", "cmd": f"sudo docker pull {q(pull)}"}, {"id": "run_recreate"}, down]
+    copy, restore = [], []
+    if p in _DATAFUL and data:
+        copy = [{"id": "c_data", "cmd": "\n".join([
+            _MKDIR, f"sudo docker stop {cn}", f"sudo tar -czpf {tgz} {data}", f"sudo docker start {cn}"])}]
+        restore = [f"{w.dc} stop {w.svc}", f"sudo tar -xzpf {tgz} -C /"]
     if mode == "image":
-        old, new = image, a["new"]
-        pat = re.sub(r"([.\[\]()*+?{}|^$\\])", r"\\\1", old)
-        apply = "\n".join([_SED_IMG.format(old=pat, new=new),
-                           f"sudo grep -nF {shlex.quote(new)} $(echo \"$F\" | tr , ' ') && {_UP}"])
-        return pre + [prep] + [{"id": "img_pull", "cmd": f"sudo docker pull {shlex.quote(new)}"}, backup,
-                               {"id": "img_apply", "cmd": apply}, check, {"id": "c_rollback", "cmd": _rollback(None)}]
+        new = a["new"]
+        sed = q(f"s#image: {image} *$#image: {new}#")
+        return notes + find + copy + [
+            {"id": "c_bak", "cmd": "\n".join([w.cd] + [f"sudo cp {f} {b}" for f, b in w.files])},
+            {"id": "img_set", "cmd": "\n".join([w.cd, f"sudo sed -i {sed} {w.names()}", f"grep -n 'image:' {w.names()}"])},
+            {"id": "c_up", "cmd": "\n".join([w.cd] + w.up_check())},
+            {"id": "c_undo_data" if restore else "c_undo", "undo": True, "cmd": "\n".join(
+                [w.cd] + [f"sudo cp {b} {f}" for f, b in w.files] + restore + [f"{w.dc} up -d {w.svc}"])},
+            down]
     if mode == "pull":
-        apply = f'sudo docker compose -p "$P" $A pull "$S" && {_UP}'
-        return pre + [prep] + [backup, {"id": "pull_apply", "cmd": apply}, check,
-                               {"id": "c_rollback", "cmd": _rollback(image)}]
-    find = "sudo grep -rn --include='Dockerfile*' --include='*.Dockerfile' '^FROM' \"$D\""
-    # сервис без build: в compose не собрать, его образ можно только скачать заново (pull пропускает собираемые)
-    build = (f'sudo docker compose -p "$P" $A pull --ignore-buildable "$S"; '
-             f'sudo docker compose -p "$P" $A build --pull "$S" && {_UP}')
-    return pre + [prep] + [{"id": "rb_from", "cmd": find}, backup, {"id": "rb_build", "cmd": build}, check,
-                           {"id": "c_rollback", "cmd": _rollback(image)}]
+        old = q(_retag(image, "kervax-old"))
+        return notes + find + copy + [
+            {"id": "pull_keep", "cmd": f"sudo docker tag {q(image)} {old}"},
+            {"id": "pull_up", "cmd": "\n".join([w.cd, f"{w.dc} pull {w.svc}"] + w.up_check())},
+            {"id": "pull_undo_data" if restore else "pull_undo", "undo": True, "cmd": "\n".join(
+                [f"sudo docker tag {old} {q(image)}", w.cd] + restore + [f"{w.dc} up -d {w.svc}"])},
+            down]
+    return notes + find + copy + [
+        {"id": "rb_from", "cmd": f"{w.cd}\nsudo grep -rn --include='Dockerfile*' '^FROM' ."},
+        {"id": "rb_build", "cmd": "\n".join([w.cd, f"{w.dc} build --pull {w.svc}"] + w.up_check())},
+        {"id": "rb_undo", "undo": True},
+        down]
+
+
+def _php_list(v: str) -> str:
+    return f"dpkg-query -W -f='${{db:Status-Abbrev}} ${{Package}}\\n' 'php{v}-*' | awk '/^ii/ {{print $2}}'"
 
 
 def _host_steps(p: str, w: dict, rep: dict, a: dict) -> list[dict]:
@@ -559,46 +641,48 @@ def _host_steps(p: str, w: dict, rep: dict, a: dict) -> list[dict]:
     if not re.match(r"(Ubuntu|Debian)\b", str(rep.get("os") or "")):
         return [{"id": "h_rpm"}] + path
     old, new, full = a["from"], a["to"], str(w.get("full") or "")
-    mk = f"sudo install -d -m 700 {_BAK}"
+    stamp = "$(date +%F-%H%M)"
+    note = [{"id": "runtime_major" if _num(new)[:1] != _num(old)[:1] else "hint_runtime"}] if p in _RUNTIME else []
     if p == "php":
-        steps = [{"id": "h_php_install", "cmd": "\n".join([
-            "sudo apt update",
-            _DPKG_LS.format(v=old) + f"| sed 's/^php{re.escape(old)}-/php{new}-/' | while read -r p; do apt-cache show"
-            ' "$p" >/dev/null 2>&1 && echo "$p"; done | xargs -r sudo apt install -y'])},
-            {"id": "h_php_switch"}]
+        lst = f"/tmp/php{new}.txt"
+        steps = note + [{"id": "h_php_install", "cmd": "\n".join([
+                     "sudo apt update", f"{_php_list(old)} | sed 's/^php{old}-/php{new}-/' > {lst}", f"cat {lst}",
+                     f"sudo apt install -y $(cat {lst})"])},
+                 {"id": "h_php_switch"}]
         chk = [f"php{new} -v | head -1"]
         if "-fpm" in str(w.get("name") or ""):
-            chk.append(f"sudo php-fpm{new} -t && systemctl is-active php{new}-fpm")
+            chk += [f"sudo php-fpm{new} -t", f"systemctl is-active php{new}-fpm"]
         return steps + [{"id": "h_php_check", "cmd": "\n".join(chk)},
-                        {"id": "h_php_remove", "cmd": "sudo apt-get remove $(" + _DPKG_LS.format(v=old).strip() + ")"}]
+                        {"id": "h_php_remove", "cmd": f"sudo apt remove $({_php_list(old)})"}]
     if p == "nodejs":
+        repo = "grep -rl 'deb.nodesource.com/node_' /etc/apt/sources.list.d/ | xargs -r sudo sed -i 's#node_[0-9]*\\.x#node_{v}.x#g'"
         back = f"nodejs={shlex.quote(full)}" if full else "\"nodejs=$(apt-cache madison nodejs | awk 'NR==1{print $3}')\""
-        return [{"id": "h_node_repo", "cmd": "\n".join([_NODE_REPO.format(v=new), "sudo apt update && sudo apt install -y nodejs"])},
-                {"id": "h_node_check", "cmd": "node -v && npm -v"},
-                {"id": "h_node_rollback", "cmd": "\n".join([
-                    _NODE_REPO.format(v=old), f"sudo apt update && sudo apt install -y --allow-downgrades {back}"])}]
+        return note + [{"id": "h_node_repo", "cmd": "\n".join([repo.format(v=new), "sudo apt update", "sudo apt install -y nodejs"])},
+                {"id": "h_node_check", "cmd": "node -v\nnpm -v"},
+                {"id": "h_node_rollback", "undo": True, "cmd": "\n".join([
+                    repo.format(v=old), "sudo apt update", f"sudo apt install -y --allow-downgrades {back}"])}]
     if p in ("nginx", "haproxy"):
-        etc = f"{mk} && sudo tar -czpf {_BAK}/{p}-etc-$(date +%F-%H%M).tgz /etc/{p}"
+        etc = {"id": "h_etc_backup", "cmd": f"{_MKDIR}\nsudo tar -czpf {_BAK}/{p}-etc-{stamp}.tgz /etc/{p}"}
         if p == "haproxy":
-            return [{"id": "h_etc_backup", "cmd": etc}, {"id": "h_haproxy"},
-                    {"id": "h_haproxy_check", "cmd": "sudo haproxy -c -f /etc/haproxy/haproxy.cfg && systemctl is-active haproxy"}]
-        steps = [{"id": "h_etc_backup", "cmd": etc},
-                 {"id": "h_nginx_upgrade", "cmd": "sudo apt update && sudo apt install --only-upgrade -y nginx"},
-                 {"id": "h_nginx_check", "cmd": "nginx -v && sudo nginx -t && systemctl is-active nginx"}]
-        return steps + ([{"id": "h_apt_rollback", "cmd": f"sudo apt install -y --allow-downgrades nginx={shlex.quote(full)}"}]
-                        if full else [])
+            return [etc, {"id": "h_haproxy"},
+                    {"id": "h_haproxy_check", "cmd": "sudo haproxy -c -f /etc/haproxy/haproxy.cfg\nsystemctl is-active haproxy"}]
+        steps = [etc, {"id": "h_nginx_upgrade", "cmd": "sudo apt update\nsudo apt install --only-upgrade -y nginx"},
+                 {"id": "h_nginx_check", "cmd": "nginx -v\nsudo nginx -t\nsystemctl is-active nginx"}]
+        return steps + ([{"id": "h_apt_rollback", "undo": True,
+                          "cmd": f"sudo apt install -y --allow-downgrades nginx={shlex.quote(full)}"}] if full else [])
     if p == "postgresql":
-        dump = (f"{mk} && (cd / && sudo -u postgres pg_dumpall --cluster {old}/main) | gzip"
-                f" | sudo tee {_BAK}/pg-{old}-$(date +%F-%H%M).sql.gz >/dev/null && sudo ls -lh {_BAK}")
-        return [{"id": "h_pg_dump", "cmd": dump}, {"id": "h_pg_path", "cmd": "pg_lsclusters"}]
+        dump = (f"(cd / && sudo -u postgres pg_dumpall --cluster {old}/main) | gzip"
+                f" | sudo tee {_BAK}/pg-{old}-{stamp}.sql.gz >/dev/null")
+        return [{"id": "h_pg_dump", "cmd": "\n".join([_MKDIR, dump, f"sudo ls -lh {_BAK}"])},
+                {"id": "h_pg_path", "cmd": "pg_lsclusters"}]
     if p in ("mysql", "mariadb"):
-        dump = (f"{mk} && sudo sh -c '$(command -v mariadb-dump || command -v mysqldump) --all-databases"
-                f" --single-transaction --routines --events' | gzip | sudo tee {_BAK}/mysql-$(date +%F-%H%M).sql.gz"
-                f" >/dev/null && sudo ls -lh {_BAK}")
-        return [{"id": "h_my_dump", "cmd": dump}] + path + [{"id": "h_repo"}]
+        tool = "mariadb-dump" if p == "mariadb" and _num(old) >= (10, 5) else "mysqldump"
+        dump = (f"sudo {tool} --all-databases --single-transaction --routines --events | gzip"
+                f" | sudo tee {_BAK}/{p}-{stamp}.sql.gz >/dev/null")
+        return [{"id": "h_my_dump", "cmd": "\n".join([_MKDIR, dump, f"sudo ls -lh {_BAK}"])}] + path + [{"id": "h_repo"}]
     if p == "rabbitmq":
-        defs = f"{mk} && sudo rabbitmqctl export_definitions {_BAK}/rabbitmq-defs-$(date +%F-%H%M).json"
-        return [{"id": "h_rabbit_defs", "cmd": defs}] + path + [{"id": "h_repo"}]
+        defs = f"sudo rabbitmqctl export_definitions {_BAK}/rabbitmq-defs-{stamp}.json"
+        return [{"id": "h_rabbit_defs", "cmd": f"{_MKDIR}\n{defs}"}] + path + [{"id": "h_repo"}]
     if path:
         return [{"id": "h_db_copy"}] + path + [{"id": "h_repo"}]
     return [{"id": "h_repo"}]
@@ -607,13 +691,15 @@ def _host_steps(p: str, w: dict, rep: dict, a: dict) -> list[dict]:
 def fix(g: dict, rep: dict, now: datetime) -> list[dict]:
     """Как уйти с цикла g (элемент inventory) на поддерживаемый: способы [{"name", "kind", "mode",
     "others", "args", "steps"}]. Контейнеры с одним образом - один способ: команды для первого, имена
-    остальных в others. args - для текстов шагов: продукт, с какой версии, на какую (to), что еще
-    подойдет (more), контейнер, образ сейчас и новый, откуда версия (env), пакеты хоста. steps -
-    [{"id", "cmd"?}], как у ОС."""
+    остальных в others. args - для текстов шагов и шапки способа: продукт, с какой версии, на какую
+    (to), что еще подойдет (more), контейнер, образ сейчас и новый, откуда версия (env), compose-папка,
+    файлы и сервис (dir, files, svc; пусто - не знаем или не из compose), пакеты хоста. steps -
+    [{"id", "cmd"?, "alt"?, "undo"?}], как у ОС."""
     today = now.astimezone(timezone.utc).date()
     to, more = target(g["p"], g["cycle"], today)
     base = {"name": g["name"], "from": g["cycle"], "to": to or "", "more": ", ".join(more)}
-    dk = (rep or {}).get("docker") if isinstance((rep or {}).get("docker"), dict) else {}
+    rep = rep or {}
+    dk = rep.get("docker") if isinstance(rep.get("docker"), dict) else {}
     conts = {str(c.get("name") or ""): c for c in dk.get("containers") or [] if isinstance(c, dict)}
     blocks: dict[tuple, dict] = {}
     for w in g["where"]:
@@ -625,15 +711,18 @@ def fix(g: dict, rep: dict, now: datetime) -> list[dict]:
             if k in blocks:
                 blocks[k]["others"].append(w["name"])
                 continue
-            a = base | {"c": w["name"], "image": image, "env": _env_of(g["p"], c)}
+            cm = compose_of(c, rep)
+            a = base | {"c": w["name"], "image": image, "env": _env_of(g["p"], c),
+                        "dir": (cm or {}).get("dir", ""), "files": ", ".join((cm or {}).get("files", [])),
+                        "svc": (cm or {}).get("service", ""), "compose": "unknown" if cm is None else "yes" if cm else "no"}
             if mode == "image" and to:
                 a["new"] = _retag(image, new_tag(g["p"], split_image(image)[2], to) or to)
             blocks[k] = {"name": w["name"], "kind": "container", "mode": mode, "others": [], "args": a,
-                         "steps": _container_steps(g["p"], mode, c, a)}
+                         "steps": _container_steps(g["p"], mode, c, a, rep)}
         else:
             a = base | {"pkg": w["name"], "full": str(w.get("full") or "")}
             blocks[("h", w["name"])] = {"name": w["name"], "kind": "host", "mode": "host", "others": [], "args": a,
-                                       "steps": _host_steps(g["p"], w, rep or {}, a)}
+                                       "steps": _host_steps(g["p"], w, rep, a)}
     return list(blocks.values())[:FIX_MAX]
 
 
