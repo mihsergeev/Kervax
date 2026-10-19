@@ -29,13 +29,26 @@ const CHROME = process.env.PW_CHROME ||
 // иначе половина кадров либо обрывается на полуслове, либо тянет пустой хвост.
 // Потолок нужен там, где страница длинная и снимать её целиком незачем.
 const SHOTS = [
-  { name: 'home', h: 1100 },   // главная — корень, отдельного пункта меню у неё нет
-  { name: 'servers', nav: { ru: 'Серверы', en: 'Servers' }, h: 1100 },
-  { name: 'server-detail', url: '?server=1', h: 830 },
+  { name: 'home', h: 1300 },   // главная - корень, отдельного пункта меню у нее нет
+  { name: 'servers', nav: { ru: 'Серверы', en: 'Servers' }, h: 1000 },
+  // карточка сервера: сводка с картой разделов, диски, безопасность, веб, GPU
+  { name: 'server', url: '?server=2', h: 1150 },
+  { name: 'disks', url: '?server=3&sec=disk', h: 1500 },
+  // крупный план: только эти карточки раздела (окно высокое, чтобы они влезли без прокрутки)
+  { name: 'disk-health', url: '?server=3&sec=disk', h: 2000, cards: ['mcard-diskhealth', 'mcard-diskwrite'] },
+  { name: 'security-ports', url: '?server=2&sec=ports', h: 1000 },
+  { name: 'security-access', url: '?server=2&sec=access', h: 1100 },
+  { name: 'web', url: '?server=1&sec=web', h: 1250 },
+  { name: 'gpu', url: '?server=9&sec=gpu', h: 1250 },
+  { name: 'llm', url: '?services=9&sec=llm', h: 1000 },
+  // окна из меню
+  { name: 'vulns', menu: { ru: 'Уязвимости', en: 'Vulnerabilities' }, h: 1000 },
+  { name: 'alerts', menu: { ru: 'История алертов', en: 'Alert history' }, h: 1000 },
+  { name: 'services', url: '?services=3&sec=db', h: 1100 },
+  { name: 'services-app', url: '?services=5', h: 1000 },
+  { name: 'kube', url: '?kube=6&sec=expiry', h: 1100 },
   { name: 'sites', nav: { ru: 'Сайты', en: 'Sites' }, h: 1180 },
   { name: 'site-detail', url: '?check=1', h: 1098 },
-  // карточку ноды раскрываем: сложены в ней как раз домены, ради которых раздел и нужен
-  { name: 'services', nav: { ru: 'Сервисы', en: 'Services' }, h: 800, open: 'web-01' },
   { name: 'backups', nav: { ru: 'Бэкапы', en: 'Backups' }, h: 1000 },
 ]
 
@@ -86,6 +99,13 @@ const run = async () => {
         await page.getByRole('button', { name: shot.nav[lang], exact: true }).first().click()
         await page.waitForTimeout(900)
       }
+      if (shot.menu) {
+        // окно из меню в шапке: сначала само меню, потом пункт
+        await page.getByRole('button', { name: lang === 'ru' ? 'Меню' : 'Menu', exact: true }).first().click()
+        await page.waitForTimeout(300)
+        await page.getByRole('button', { name: shot.menu[lang], exact: true }).first().click()
+        await page.waitForTimeout(1200)
+      }
       if (shot.open) {
         // раскрыть карточку ноды; вёрстка карточек меняется чаще всего,
         // поэтому промах здесь не должен ронять всю съёмку
@@ -108,11 +128,20 @@ const run = async () => {
         }
         return Math.ceil(max)
       })
+      let clip = { x: 0, y: 0, width: 1440, height: Math.min(bottom + 28, shot.h) }
+      if (shot.cards) {
+        // общий прямоугольник карточек плюс поле вокруг
+        const r = await page.evaluate((ids) => {
+          const rs = ids.map((id) => document.getElementById(id)?.getBoundingClientRect()).filter(Boolean)
+          if (!rs.length) return null
+          const x = Math.min(...rs.map((b) => b.left)), y = Math.min(...rs.map((b) => b.top))
+          return { x, y, w: Math.max(...rs.map((b) => b.right)) - x, h: Math.max(...rs.map((b) => b.bottom)) - y }
+        }, shot.cards)
+        if (r) clip = { x: Math.max(0, r.x - 6), y: Math.max(0, r.y - 6), width: r.w + 12, height: r.h + 12 }
+        else console.log(`  (нет карточек: ${shot.cards.join(', ')})`)
+      }
       const file = path.join(dir, `${shot.name}.png`)
-      await page.screenshot({
-        path: file,
-        clip: { x: 0, y: 0, width: 1440, height: Math.min(bottom + 28, shot.h) },
-      })
+      await page.screenshot({ path: file, clip })
       console.log(`  ${lang}/${shot.name}.png`)
       await ctx.close()
     }

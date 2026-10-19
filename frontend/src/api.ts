@@ -1,4 +1,5 @@
-import { tr } from './i18n'
+import { currentLang, tr } from './i18n'
+import { trBody } from './backendText'
 
 // Должна совпадать с MIN_PASSWORD_LEN в backend/app/security.py: интерфейс не
 // даёт ввести короче, бэкенд не принимает. Расхождение ловит ops/selfcheck.py —
@@ -45,7 +46,8 @@ export async function api<T>(path: string, options: RequestInit = {}): Promise<T
       typeof body?.detail === 'string' ? body.detail : tr('Ошибка HTTP {code}', { code: res.status })
     throw new ApiError(detail, res.status)
   }
-  return body as T
+  // тексты проблем бэкенд пишет по-русски: английской панели переводим то, что умеем
+  return (currentLang() === 'en' ? trBody(body) : body) as T
 }
 
 // status: ok | degraded, db: ok | down — при недоступной базе бэкенд отвечает 503

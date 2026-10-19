@@ -3,10 +3,10 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Kervax — enterprise-grade monitoring that works out of the box</title>
-<meta name="description" content="Self-hosted monitoring panel: sites, servers, containers, databases and backups in one place. One command and the panel is running, with dashboards filled in and alerts wired. Open source, AGPL-3.0.">
-<meta property="og:title" content="Kervax — monitoring that works out of the box">
-<meta property="og:description" content="Sites, servers, Docker, Kubernetes, databases and backups in one panel. One command to install, one per node. Open source, self-hosted.">
+<title>Kervax - self-hosted infrastructure monitoring and security audit</title>
+<meta name="description" content="Self-hosted monitoring with a built-in security audit: sites, servers, Docker, Kubernetes, databases, queues, GPUs and backups in one panel. External port scan, SSH, CVEs, SSD wear. One command to install. Open source, AGPL-3.0.">
+<meta property="og:title" content="Kervax - self-hosted monitoring and security audit">
+<meta property="og:description" content="Sites, servers, containers, databases, queues, GPUs and backups in one panel. External port scan, SSH, CVEs, SSD wear forecast. One command to install. Open source.">
 <meta property="og:type" content="website">
 <meta property="og:url" content="https://kervax.ru/en/">
 <meta property="og:image" content="https://kervax.ru/shots/en/home.webp">
@@ -14,7 +14,7 @@
 <link rel="icon" type="image/svg+xml" href="/favicon.svg?v=2">
 <link rel="alternate icon" type="image/png" sizes="32x32" href="/favicon-32.png?v=2">
 <link rel="apple-touch-icon" sizes="180x180" href="/favicon-180.png?v=2">
-<link rel="stylesheet" href="/style.css?v=2">
+<link rel="stylesheet" href="/style.css?v=3">
 </head>
 <body>
 
@@ -22,10 +22,10 @@
   <div class="wrap">
     <a class="brand" href="/en/"><img src="/mark.svg" alt="">Kervax</a>
     <nav>
-      <a class="hide-sm" href="#features">Features</a>
-      <a class="hide-sm" href="#box">Out of the box</a>
-      <a class="hide-sm" href="#ui">Interface</a>
       <a class="hide-sm" href="#security">Security</a>
+      <a class="hide-sm" href="#hardware">Disks</a>
+      <a class="hide-sm" href="#services">Services</a>
+      <a class="hide-sm" href="#alerts">Alerts</a>
       <a href="#install">Install</a>
       <span class="sep hide-sm"></span>
       <a href="https://github.com/mihsergeev/Kervax">GitHub</a>
@@ -38,83 +38,274 @@
   <div class="wrap hero-inner">
     <img class="hero-logo" src="/logo.svg" alt="Kervax">
     <p class="eyebrow">Open source · AGPL-3.0 · self-hosted</p>
-    <h1>Enterprise-grade monitoring, out of the box</h1>
+    <h1>Infrastructure monitoring and security audit</h1>
     <p class="lead">
-      Sites, servers, containers, databases and backups — in one panel. The
-      install runs as a single command: the agent detects what runs on each
-      machine, dashboards fill in from the first check, and alerts go to Telegram
-      or a webhook.
+      Sites, servers, Docker, Kubernetes, databases, queues, GPUs and backups in one panel.
+      One command to install, one per node. The agent discovers services on its own,
+      dashboards and alerts work from the first minute.
     </p>
     <div class="cta">
-      <a class="btn" href="#install">Install in a minute</a>
-      <a class="btn btn-ghost" href="https://github.com/mihsergeev/Kervax">View on GitHub</a>
+      <a class="btn" href="#install">Install</a>
+      <a class="btn btn-ghost" href="https://github.com/mihsergeev/Kervax">GitHub</a>
     </div>
     <div class="chips">
       <span class="chip">Docker Compose</span>
-      <span class="chip">2 GB of RAM is enough</span>
-      <span class="chip">Linux agent</span>
+      <span class="chip">PostgreSQL</span>
+      <span class="chip">Go agent, amd64 and arm64</span>
       <span class="chip">Telegram and webhook</span>
       <span class="chip">EN / RU</span>
+    </div>
+    <div class="stats">
+      <div class="stat"><b>80</b><span>alert types with sustain windows and hysteresis</span></div>
+      <div class="stat"><b>0</b><span>inbound ports on nodes: the agent only connects out</span></div>
+      <div class="stat"><b>1</b><span>command for the panel, one per node, no exporters or configs</span></div>
+      <div class="stat"><b>2 GB</b><span>of RAM is enough for the panel, data in your PostgreSQL</span></div>
     </div>
   </div>
 
   <div class="wrap hero-shot">
     <a class="frame" href="/shots/en/home@2x.webp" data-lb>
-      <div class="frame-bar"><i></i><i></i><i></i><span>kervax.example.com</span><em>enlarge</em></div>
-      <img src="/shots/en/home.webp" alt="Kervax home screen" width="1440" height="1016" loading="eager"></a>
+      <div class="frame-bar"><i></i><i></i><i></i><span>kervax.example.com</span><em>zoom</em></div>
+      <img src="/shots/en/home.webp" alt="Home: what is broken and what needs action" width="1440" height="1300" loading="eager"></a>
   </div>
 </div>
 
-<section id="features">
+<section id="security" class="alt">
   <div class="wrap">
-    <p class="eyebrow-s">Features</p>
-    <h2>All infrastructure on one screen</h2>
-    <p class="sub">
-      External checks, host metrics and backup state usually live in separate
-      systems. Here they share one database and one timeline: a failing monitor
-      and the machine behind it are two clicks apart.
-    </p>
+    <p class="eyebrow-s">Security</p>
+    <h2>A security audit on every server</h2>
+    <p class="sub">No separate scanner or security agent: the same nodes, the same panel, the same alerts.</p>
 
-    <div class="cards">
-      <div class="card">
-        <h3>Sites</h3>
-        <p>Response code, a keyword in the body, response time, TLS certificate and
-        domain expiry. Sites are additionally checked through proxies in other
-        networks: if a site answers you but not them, the panel reports that as a
-        separate state rather than a plain "up".</p>
+    <div class="feat">
+      <div class="feat-text">
+        <div class="tags"><span class="tag red">external scan</span><span class="tag">alert on new ports</span></div>
+        <h3>What is open to the internet</h3>
+        <ul class="facts">
+          <li><b>External scan</b> of every node, matched with what listens inside: process and container for each port.</li>
+          <li><b>Allowlists respected</b>: a port open only to your own addresses is not reported as exposed.</li>
+          <li><b>Cloudflare-only</b>: verifies that an origin answers nobody but Cloudflare.</li>
+          <li><b>A new port</b> on the internet raises an alert. An intended one is marked once.</li>
+          <li>Kubernetes LoadBalancer services are scanned the same way.</li>
+        </ul>
       </div>
-      <div class="card">
-        <h3>Servers</h3>
-        <p>A static binary reports CPU per core, memory, disks per mount, network,
-        temperature, throttling, OOM kills and top processes by load. The
-        connection is outbound only: no port is opened on the node.</p>
+      <a class="frame" href="/shots/en/security-ports@2x.webp" data-lb>
+        <div class="frame-bar"><i></i><i></i><i></i><span>/servers/web-02 · ports</span><em>zoom</em></div>
+        <img src="/shots/en/security-ports.webp" alt="Ports open to the internet" width="1440" height="1000" loading="lazy"></a>
+    </div>
+
+    <div class="feat rev">
+      <div class="feat-text">
+        <div class="tags"><span class="tag">SSH</span><span class="tag">accounts</span><span class="tag">sudo</span></div>
+        <h3>SSH and access</h3>
+        <ul class="facts">
+          <li><b>SSH</b>: password and root login, brute force in progress, fail2ban or sshguard protection, version banner.</li>
+          <li><b>Accounts and keys</b>: who can log in, with which keys, who has sudo and NOPASSWD, weak keys, accounts nobody uses.</li>
+          <li><b>Changes</b>: a new key, user or sudo rule, a password login from a new address - alert with a "this is us" button.</li>
+          <li><b>Timeline</b> of 90 days: ports, containers, users, sudoers, cron jobs.</li>
+        </ul>
       </div>
-      <div class="card">
-        <h3>What runs on the machine</h3>
-        <p>Docker containers, Kubernetes nodes and pods, web servers with the domains
-        they serve, databases with their sizes, RabbitMQ queues. The agent detects
-        all of it; discovered domains are offered for monitoring.</p>
+      <a class="frame" href="/shots/en/security-access@2x.webp" data-lb>
+        <div class="frame-bar"><i></i><i></i><i></i><span>/servers/web-02 · access</span><em>zoom</em></div>
+        <img src="/shots/en/security-access.webp" alt="SSH, accounts and keys" width="1440" height="1100" loading="lazy"></a>
+    </div>
+
+    <div class="feat">
+      <div class="feat-text">
+        <div class="tags"><span class="tag red">CISA KEV</span><span class="tag">Ubuntu OVAL</span><span class="tag">endoflife.date</span></div>
+        <h3>Vulnerabilities and end-of-life versions</h3>
+        <ul class="facts">
+          <li><b>Packages</b> are matched against the Canonical OVAL feed: critical and already exploited in the wild (CISA KEV) only.</li>
+          <li><b>The kernel</b> is checked by its running version, not the installed one: you see who needs a reboot.</li>
+          <li><b>End-of-life versions</b>: OS, PostgreSQL, MySQL, Redis, nginx, PHP, Node.js, Python and more, from an endoflife.date snapshot shipped with the panel.</li>
+          <li><b>OS updates</b>: pending security updates, automatic updates turned off, a reboot that keeps being postponed.</li>
+          <li><b>Containers</b> that are privileged or carry host keys or the Docker socket, ports published past the firewall.</li>
+        </ul>
       </div>
-      <div class="card">
-        <h3>Backups</h3>
-        <p>restic state per node: time of the last snapshot, its result, whether the
-        run fit the configured window. A backup server and its clients can be
-        provisioned from the panel. Restore credentials live in a vault encrypted
-        in the browser — the server only ever holds ciphertext.</p>
+      <a class="frame" href="/shots/en/vulns@2x.webp" data-lb>
+        <div class="frame-bar"><i></i><i></i><i></i><span>vulnerabilities</span><em>zoom</em></div>
+        <img src="/shots/en/vulns.webp" alt="Vulnerabilities across the fleet" width="1440" height="1000" loading="lazy"></a>
+    </div>
+
+    <div class="pair">
+      <figure>
+        <a class="frame" href="/shots/en/server@2x.webp" data-lb>
+          <div class="frame-bar"><i></i><i></i><i></i><span>/servers/web-02</span><em>zoom</em></div>
+          <img src="/shots/en/server.webp" alt="Server card: findings by area" width="1440" height="1150" loading="lazy"></a>
+        <figcaption>Server card: findings mapped by area, the last 24 hours of changes on top.</figcaption>
+      </figure>
+      <figure>
+        <a class="frame" href="/shots/en/web@2x.webp" data-lb>
+          <div class="frame-bar"><i></i><i></i><i></i><span>/servers/web-01 · web</span><em>zoom</em></div>
+          <img src="/shots/en/web.webp" alt="5xx errors and their reason" width="1440" height="1250" loading="lazy"></a>
+        <figcaption>Web: 5xx by site and path, and for 502/504 which upstream failed and why.</figcaption>
+      </figure>
+    </div>
+  </div>
+</section>
+
+<section id="hardware">
+  <div class="wrap">
+    <p class="eyebrow-s">Disks and hardware</p>
+    <h2>Failures show up before they happen</h2>
+    <p class="sub">Forecasts from history, not thresholds on the current value.</p>
+
+    <div class="feat">
+      <div class="feat-text">
+        <div class="tags"><span class="tag">SMART</span><span class="tag">RAID</span><span class="tag">NVMe</span></div>
+        <h3>Disk wear and health</h3>
+        <ul class="facts">
+          <li><b>SSD wear forecast</b>: measured rate, the dates of 90% and 100% at the current write rate, alert 60 days ahead.</li>
+          <li><b>Who writes to disk</b>: units, containers and pods, per hour, day and week.</li>
+          <li><b>Health</b>: degraded RAID, SMART failures, growing reallocated and pending sectors, disks that disappeared, kernel I/O errors.</li>
+          <li>Disks of virtual machines: RAID and I/O errors are watched even without SMART.</li>
+        </ul>
       </div>
-      <div class="card">
+      <a class="frame" href="/shots/en/disk-health@2x.webp" data-lb>
+        <div class="frame-bar"><i></i><i></i><i></i><span>/servers/db-01 · disk health</span><em>zoom</em></div>
+        <img src="/shots/en/disk-health.webp" alt="SSD wear and who writes to disk" width="1095" height="589" loading="lazy"></a>
+    </div>
+
+    <div class="feat rev">
+      <div class="feat-text">
+        <div class="tags"><span class="tag">forecast</span><span class="tag">inodes</span><span class="tag">cleanup</span></div>
+        <h3>Disk fill and space</h3>
+        <ul class="facts">
+          <li><b>Fill forecast</b> from daily minima rather than spikes; inodes separately.</li>
+          <li><b>Where the space went</b>: a tree of the largest directories, journal, Docker images and build cache, oversized logs, forgotten dumps.</li>
+          <li><b>Safe items are freed with a click</b>, the rest comes with a ready command. Optional auto-cleanup at the threshold.</li>
+        </ul>
+      </div>
+      <a class="frame" href="/shots/en/disks@2x.webp" data-lb>
+        <div class="frame-bar"><i></i><i></i><i></i><span>/servers/db-01 · disk</span><em>zoom</em></div>
+        <img src="/shots/en/disks.webp" alt="Fill forecast and where the space went" width="1440" height="1500" loading="lazy"></a>
+    </div>
+
+    <div class="feat">
+      <div class="feat-text">
+        <div class="tags"><span class="tag">cgroups</span><span class="tag">PSI</span><span class="tag">NVIDIA</span></div>
+        <h3>CPU, memory, network, GPU</h3>
+        <ul class="facts">
+          <li><b>CPU and memory per container and pod</b>, leaks by steady growth, OOM kills, pressure (PSI).</li>
+          <li><b>Services</b>: failed units with the end of their journal, restart loops, units that will not start after reboot.</li>
+          <li><b>Network</b>: TCP checks between servers, traffic per container, tariff limit, DNS resolvers, clock drift.</li>
+          <li><b>GPU</b>: utilization, memory, temperature, power, processes per card, Xid errors that need a reset, frozen readings.</li>
+        </ul>
+      </div>
+      <a class="frame" href="/shots/en/gpu@2x.webp" data-lb>
+        <div class="frame-bar"><i></i><i></i><i></i><span>/servers/gpu-01 · GPU</span><em>zoom</em></div>
+        <img src="/shots/en/gpu.webp" alt="GPU: utilization, memory, processes" width="1440" height="1250" loading="lazy"></a>
+    </div>
+
+    <div class="pair">
+      <figure>
+        <a class="frame" href="/shots/en/llm@2x.webp" data-lb>
+          <div class="frame-bar"><i></i><i></i><i></i><span>/services/gpu-01 · LLM</span><em>zoom</em></div>
+          <img src="/shots/en/llm.webp" alt="LLM serving" width="1440" height="1000" loading="lazy"></a>
+        <figcaption>LLM: vLLM, SGLang, TEI, LiteLLM - queue, KV cache, TTFT and TPOT percentiles.</figcaption>
+      </figure>
+      <figure>
+        <a class="frame" href="/shots/en/sites@2x.webp" data-lb>
+          <div class="frame-bar"><i></i><i></i><i></i><span>/sites</span><em>zoom</em></div>
+          <img src="/shots/en/sites.webp" alt="Site monitors" width="1440" height="1180" loading="lazy"></a>
+        <figcaption>Sites: HTTP, TCP, DNS, push, checks from several networks, TLS and domain expiry.</figcaption>
+      </figure>
+    </div>
+  </div>
+</section>
+
+<section id="services">
+  <div class="wrap">
+    <p class="eyebrow-s">Services</p>
+    <h2>Discovered automatically, traced to the cause</h2>
+    <p class="sub">The agent detects what runs on the machine. Nothing to configure per service.</p>
+
+    <div class="feat">
+      <div class="feat-text">
+        <div class="tags"><span class="tag">PostgreSQL</span><span class="tag">MySQL</span><span class="tag">ClickHouse</span><span class="tag">Redis</span></div>
+        <h3>Databases</h3>
+        <ul class="facts">
+          <li><b>Inventory</b>: databases and sizes, logins, connections, replication and lag.</li>
+          <li><b>What loads the database</b>: top queries by share of time, temporary files, WAL, reads past the buffers.</li>
+          <li><b>Problems</b>: long transactions, lock waits, tables never vacuumed, Redis near maxmemory.</li>
+          <li><b>Configuration advice</b> with this server's numbers and whether a restart is needed.</li>
+        </ul>
+      </div>
+      <a class="frame" href="/shots/en/services@2x.webp" data-lb>
+        <div class="frame-bar"><i></i><i></i><i></i><span>/services/db-01 · databases</span><em>zoom</em></div>
+        <img src="/shots/en/services.webp" alt="PostgreSQL: load and advice" width="1440" height="1100" loading="lazy"></a>
+    </div>
+
+    <div class="feat rev">
+      <div class="feat-text">
+        <div class="tags"><span class="tag">RabbitMQ</span><span class="tag">supervisor</span><span class="tag">pm2</span><span class="tag">cron</span></div>
+        <h3>Queues, workers, cron</h3>
+        <ul class="facts">
+          <li><b>Queues</b>: RabbitMQ, Redis, job tables. Alert when a queue grows and nobody drains it.</li>
+          <li><b>Workers</b> under supervisor and pm2: crashes apart from planned restarts.</li>
+          <li><b>Cron jobs</b> that overlap, hang or discard output. <b>PHP-FPM</b> pools stuck at pm.max_children.</li>
+          <li><b>Logs</b>: error spikes in container and pod logs against the usual hour.</li>
+        </ul>
+      </div>
+      <a class="frame" href="/shots/en/services-app@2x.webp" data-lb>
+        <div class="frame-bar"><i></i><i></i><i></i><span>/services/app-01</span><em>zoom</em></div>
+        <img src="/shots/en/services-app.webp" alt="Queues, workers and cron jobs" width="1440" height="1000" loading="lazy"></a>
+    </div>
+
+    <div class="feat">
+      <div class="feat-text">
+        <div class="tags"><span class="tag">pods</span><span class="tag">CronJob</span><span class="tag">Flux</span></div>
+        <h3>Kubernetes</h3>
+        <ul class="facts">
+          <li><b>Pods</b>: restarts, CrashLoopBackOff, the scheduler's reason, pods without limits or probes.</li>
+          <li><b>A failed Job</b> arrives in the alert together with the end of its log.</li>
+          <li><b>Expiry</b>: control-plane and kubelet certificates, kubeconfigs, TLS secrets, Flux Git credentials.</li>
+          <li><b>Flux delivery</b> that stopped while everything already running keeps running.</li>
+          <li>Dates are computed on the node: keys and tokens never reach the panel.</li>
+        </ul>
+      </div>
+      <a class="frame" href="/shots/en/kube@2x.webp" data-lb>
+        <div class="frame-bar"><i></i><i></i><i></i><span>/kube · expiry</span><em>zoom</em></div>
+        <img src="/shots/en/kube.webp" alt="Kubernetes: certificate and token expiry" width="1440" height="1100" loading="lazy"></a>
+    </div>
+  </div>
+</section>
+
+<section id="alerts">
+  <div class="wrap">
+    <p class="eyebrow-s">Backups and alerts</p>
+    <h2>Wakes you only for what needs a reaction</h2>
+
+    <div class="feat">
+      <div class="feat-text">
+        <div class="tags"><span class="tag">Telegram</span><span class="tag">webhook</span><span class="tag">escalation</span></div>
         <h3>Alerts</h3>
-        <p>Telegram and webhooks, with your own text per alert type. A threshold
-        fires only after it holds for a set time, so single spikes do not create
-        incidents. Snooze, per-type muting and routing by roles and groups are
-        supported.</p>
+        <ul class="facts">
+          <li><b>One message per problem</b>, and one when the same failure hits several servers.</li>
+          <li><b>Daily routine</b> at the same hour every day is recognized and not alerted.</li>
+          <li><b>Telegram buttons</b>: mute, ack, "this is us". Escalation when nobody acks.</li>
+          <li><b>Chats per group</b>, maintenance windows with a check afterwards, dependency map.</li>
+          <li><b>History</b> with a noise ranking and a period report.</li>
+        </ul>
       </div>
-      <div class="card">
-        <h3>Self-checks</h3>
-        <p>An outdated agent or helper, an unreachable probe location, clock drift on
-        a node, a backup outside its window — all of it collects in "Action
-        needed", together with the command that resolves it.</p>
+      <a class="frame" href="/shots/en/alerts@2x.webp" data-lb>
+        <div class="frame-bar"><i></i><i></i><i></i><span>alert history</span><em>zoom</em></div>
+        <img src="/shots/en/alerts.webp" alt="Alert history and noise" width="1440" height="1000" loading="lazy"></a>
+    </div>
+
+    <div class="feat rev">
+      <div class="feat-text">
+        <div class="tags"><span class="tag">restic</span><span class="tag">rest-server</span></div>
+        <h3>Backups</h3>
+        <ul class="facts">
+          <li><b>restic on every node</b>: last snapshot, result, night window, growth per run.</li>
+          <li><b>Test restore</b>, stale locks, rotation that silently stopped.</li>
+          <li><b>Deployed from the panel</b>: backup server, clients, database dumps.</li>
+          <li><b>Credential vault</b> encrypted in the browser: the panel stores only ciphertext.</li>
+        </ul>
       </div>
+      <a class="frame" href="/shots/en/backups@2x.webp" data-lb>
+        <div class="frame-bar"><i></i><i></i><i></i><span>/backups</span><em>zoom</em></div>
+        <img src="/shots/en/backups.webp" alt="Backups" width="1440" height="1000" loading="lazy"></a>
     </div>
   </div>
 </section>
@@ -122,102 +313,81 @@
 <section id="box">
   <div class="wrap">
     <p class="eyebrow-s">Out of the box</p>
-    <h2>Ready to use without assembling a stack</h2>
-    <p class="sub">
-      A conventional monitoring stack has to be assembled: an exporter per
-      concern, a scrape config, rules, alert routes and a dashboard per entity.
-      Kervax provides the same data already wired together.
-    </p>
+    <h2>Instead of a ten-component stack</h2>
 
     <table class="cmp">
       <thead>
-        <tr><th>Task</th><th>Kervax</th><th>Classic stack</th></tr>
+        <tr><th>Task</th><th>Kervax</th><th>Typical stack</th></tr>
       </thead>
       <tbody>
         <tr><td>Metrics from a new server</td>
-            <td class="yes"><b>one command on the node</b>, data in seconds</td>
-            <td class="old">node_exporter, a scrape target, reload, import a dashboard</td></tr>
-        <tr><td>Checking a site from outside</td>
-            <td class="yes"><b>the monitor address</b> — scheme, certificate and domain are detected</td>
-            <td class="old">blackbox_exporter, a job with relabeling, a rule, a panel</td></tr>
-        <tr><td>Certificate and domain expiry</td>
-            <td class="yes"><b>counted automatically</b>, reminders at 14 / 7 / 1 days</td>
-            <td class="old">a probe and a PromQL rule; for domains, your own exporter</td></tr>
-        <tr><td>Uptime over 30 days</td>
-            <td class="yes"><b>shown on the monitor card</b></td>
-            <td class="old">a recording rule and a PromQL query</td></tr>
-        <tr><td>Incidents</td>
-            <td class="yes"><b>opened and closed automatically</b>, with history</td>
-            <td class="old">routes, grouping, inhibition and silences in config files</td></tr>
+            <td class="yes"><b>one command</b> on the node</td>
+            <td class="old">node_exporter, scrape target, config reload, dashboard</td></tr>
+        <tr><td>A site from outside</td>
+            <td class="yes"><b>the address</b>, the rest is detected</td>
+            <td class="old">blackbox_exporter, relabeling, rule, panel</td></tr>
+        <tr><td>TLS and domain expiry</td>
+            <td class="yes"><b>automatic</b>, 14 / 7 / 1 days ahead</td>
+            <td class="old">probe and PromQL, a custom exporter for domains</td></tr>
+        <tr><td>Ports open to the internet</td>
+            <td class="yes"><b>external scan</b>, alert on new</td>
+            <td class="old">a separate scanner</td></tr>
+        <tr><td>CVEs and EOL software</td>
+            <td class="yes"><b>per node</b></td>
+            <td class="old">separate tooling</td></tr>
+        <tr><td>SSD wear, SMART, RAID</td>
+            <td class="yes"><b>with a forecast</b></td>
+            <td class="old">smartctl_exporter and rules</td></tr>
         <tr><td>Containers, pods, databases, queues</td>
-            <td class="yes"><b>detected by the agent</b></td>
-            <td class="old">cAdvisor, kube-state-metrics, postgres_exporter, rabbitmq_exporter…</td></tr>
-        <tr><td>Backup state</td>
-            <td class="yes"><b>restic status</b> per node, right in the panel</td>
-            <td class="old">handled separately</td></tr>
-        <tr><td>Who sees what</td>
+            <td class="yes"><b>discovered by the agent</b></td>
+            <td class="old">cAdvisor, kube-state-metrics, an exporter per database</td></tr>
+        <tr><td>Backups</td>
+            <td class="yes"><b>restic status</b> and test restore</td>
+            <td class="old">not covered</td></tr>
+        <tr><td>Incidents and routing</td>
+            <td class="yes"><b>built in</b></td>
+            <td class="old">Alertmanager configuration</td></tr>
+        <tr><td>Access control</td>
             <td class="yes"><b>roles and groups</b>, enforced in the API</td>
-            <td class="old">Grafana orgs and separate access to the store</td></tr>
-        <tr><td>Dashboards</td>
-            <td class="yes"><b>filled in at first sign-in</b></td>
-            <td class="old">build or import them</td></tr>
+            <td class="old">Grafana orgs and Prometheus access</td></tr>
       </tbody>
     </table>
 
     <p class="note">
-      Prometheus remains the better choice for application metrics and ad-hoc
-      PromQL queries, and runs alongside without conflict. Kervax covers the
-      infrastructure layer: host, site, certificate, container, backup.
+      Prometheus remains the tool for application metrics and PromQL, and runs side by side.
+      Kervax covers the infrastructure: host, site, certificate, container, database, backup and their security.
     </p>
   </div>
 </section>
 
-<section id="ui">
+<section id="model">
   <div class="wrap">
-    <p class="eyebrow-s">Interface</p>
-    <h2>What it looks like</h2>
-    <p class="sub">
-      Taken from a running panel on demo data; the interface looks the same after
-      an install.
-    </p>
+    <p class="eyebrow-s">Architecture</p>
+    <h2>Security model</h2>
 
-    <div class="gallery">
-      <figure>
-        <a class="frame" href="/shots/en/servers@2x.webp" data-lb>
-          <div class="frame-bar"><i></i><i></i><i></i><span>/servers</span><em>enlarge</em></div>
-          <img src="/shots/en/servers.webp" alt="Server fleet" width="1440" height="940" loading="lazy"></a>
-        <figcaption>Server list: load, disks, groups, agent state.</figcaption>
-      </figure>
-      <figure>
-        <a class="frame" href="/shots/en/server-detail@2x.webp" data-lb>
-          <div class="frame-bar"><i></i><i></i><i></i><span>/servers/web-01</span><em>enlarge</em></div>
-          <img src="/shots/en/server-detail.webp" alt="Server metrics" width="1440" height="830" loading="lazy"></a>
-        <figcaption>Server card: CPU per core, memory, disks, network, temperature.</figcaption>
-      </figure>
-      <figure>
-        <a class="frame" href="/shots/en/sites@2x.webp" data-lb>
-          <div class="frame-bar"><i></i><i></i><i></i><span>/sites</span><em>enlarge</em></div>
-          <img src="/shots/en/sites.webp" alt="Site monitors" width="1440" height="1180" loading="lazy"></a>
-        <figcaption>Site monitors: availability, certificates, domains, checks from several locations.</figcaption>
-      </figure>
-      <figure>
-        <a class="frame" href="/shots/en/backups@2x.webp" data-lb>
-          <div class="frame-bar"><i></i><i></i><i></i><span>/backups</span><em>enlarge</em></div>
-          <img src="/shots/en/backups.webp" alt="Backups" width="1440" height="1000" loading="lazy"></a>
-        <figcaption>Backups: last snapshot time, repositories, schedule, credential vault.</figcaption>
-      </figure>
-    </div>
+    <ul class="sec-list">
+      <li><b>The agent only connects out.</b> It listens on no port, runs no arbitrary commands, works as a
+      separate user in a systemd sandbox. The panel stores a SHA-256 of the token, not the token.</li>
+      <li><b>Permissions are enforced in the API.</b> An account limited to a group cannot reach another
+      group's object even with a direct request. A script probes the live panel with temporary accounts of each role.</li>
+      <li><b>No root.</b> Backend as uid 10001, unprivileged nginx frontend, containers with
+      <code>no-new-privileges</code>.</li>
+      <li><b>Protected sign-in.</b> TOTP, address blocking after failed logins with an allowlist, alert on
+      bogus API requests, audit log. The panel refuses to start with a weak secret.</li>
+      <li><b>Agent updates are signed with an offline key.</b> Even a compromised panel cannot push its own
+      binary to the nodes.</li>
+      <li><b>You install the root helpers</b> with your own Ansible or by hand. The panel never distributes them.</li>
+    </ul>
   </div>
 </section>
 
 <section id="install">
   <div class="wrap">
     <p class="eyebrow-s">Install</p>
-    <h2>Install with one command</h2>
+    <h2>One command</h2>
     <p class="sub">
-      Runs on a clean Linux server. The command installs Docker, brings up Caddy
-      with a Let's Encrypt certificate, generates the secrets and prints the panel
-      address with the admin password.
+      On a clean Linux server: installs Docker, starts Caddy with a Let's Encrypt certificate,
+      generates secrets, prints the panel address and the admin password.
     </p>
 
     <div class="cmd">
@@ -227,52 +397,23 @@
 
     <div class="steps">
       <div class="step">
-        <b>Your own domain is optional</b>
-        <p>Without one the panel comes up on <code>&lt;server-ip&gt;.sslip.io</code> —
-        with a real certificate, on https from the start.</p>
+        <b>No domain required</b>
+        <p>Without a domain the panel runs on <code>&lt;server-ip&gt;.sslip.io</code> with a Let's Encrypt certificate.</p>
       </div>
       <div class="step">
-        <b>Adding a server</b>
-        <p>"Add server" produces a ready command. After it runs on the node, metrics
-        appear in the panel within seconds.</p>
+        <b>A server</b>
+        <p>"Add server" gives a command for the node. Metrics appear within seconds.</p>
       </div>
       <div class="step">
-        <b>Adding a site</b>
-        <p>An address is enough: scheme, certificate, domain and history are filled in
-        from the first check.</p>
+        <b>A site</b>
+        <p>The address of the monitor. Scheme, certificate, domain and history fill in from the first check.</p>
       </div>
     </div>
 
     <p class="note">
-      Your own domain, an IP allow-list, an existing nginx in front and a
-      step-by-step walkthrough are covered in the
+      Own domain, allowlist, behind an existing nginx, upgrades:
       <a href="https://github.com/mihsergeev/Kervax/blob/main/docs/install.md">installation guide</a>.
     </p>
-  </div>
-</section>
-
-<section id="security">
-  <div class="wrap">
-    <p class="eyebrow-s">Security</p>
-    <h2>How access is handled</h2>
-
-    <ul class="sec-list">
-      <li><b>The agent uses outbound connections only.</b> It listens on no port and
-      runs no arbitrary shell commands; the panel stores a SHA-256 of its token
-      rather than the token itself.</li>
-      <li><b>Permissions are enforced in the API.</b> An account limited to a group
-      will not receive another group's object even when its id is requested
-      directly.</li>
-      <li><b>Components run without root.</b> The backend runs under its own user,
-      the frontend on an unprivileged image, and containers start with
-      <code>no-new-privileges</code>.</li>
-      <li><b>Sign-in is protected.</b> JWT with a TOTP second factor, login attempt
-      limits and an audit log. Passwords are at least 12 characters; with a weak or
-      default secret the panel refuses to start.</li>
-      <li><b>Agent updates are verified by signature.</b> The private key is kept
-      off the server, so even a panel with full access cannot push a foreign binary
-      to the nodes.</li>
-    </ul>
   </div>
 </section>
 
@@ -282,13 +423,14 @@
     <nav>
       <a href="https://github.com/mihsergeev/Kervax">GitHub</a>
       <a href="https://github.com/mihsergeev/Kervax/blob/main/docs/install.md">Install</a>
-      <a href="https://github.com/mihsergeev/Kervax/blob/main/docs/why.md">Why</a>
+      <a href="https://github.com/mihsergeev/Kervax/blob/main/docs/security.en.md">Security</a>
+      <a href="https://github.com/mihsergeev/Kervax/blob/main/CHANGELOG.md">Changelog</a>
       <a href="/">Русский</a>
     </nav>
   </div>
 </footer>
 
 <div class="lb" id="lb"><img src="" alt=""></div>
-<script src="/lb.js?v=1"></script>
+<script src="/lb.js?v=2"></script>
 </body>
 </html>

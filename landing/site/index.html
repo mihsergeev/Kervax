@@ -3,10 +3,10 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Kervax — мониторинг сайтов и серверов, который работает из коробки</title>
-<meta name="description" content="Self-hosted панель мониторинга корпоративного уровня: сайты, серверы, контейнеры, базы и бэкапы в одном месте. Одна команда — и панель работает с готовыми дашбордами и алертами. Open source, AGPL-3.0.">
-<meta property="og:title" content="Kervax — мониторинг сайтов и серверов из коробки">
-<meta property="og:description" content="Сайты, серверы, Docker, Kubernetes, базы и бэкапы в одной панели. Одна команда на установку, одна на каждую ноду. Open source, self-hosted.">
+<title>Kervax - мониторинг и аудит безопасности инфраструктуры, self-hosted</title>
+<meta name="description" content="Self-hosted мониторинг со встроенным аудитом безопасности: сайты, серверы, Docker, Kubernetes, базы, очереди, GPU и бэкапы в одной панели. Порты снаружи, SSH, CVE, износ SSD. Одна команда на установку. Open source, AGPL-3.0.">
+<meta property="og:title" content="Kervax - мониторинг и аудит безопасности, self-hosted">
+<meta property="og:description" content="Сайты, серверы, контейнеры, базы, очереди, GPU и бэкапы в одной панели. Проверка портов снаружи, SSH, CVE, износ SSD. Одна команда на установку. Open source.">
 <meta property="og:type" content="website">
 <meta property="og:url" content="https://kervax.ru/">
 <meta property="og:image" content="https://kervax.ru/shots/ru/home.webp">
@@ -14,7 +14,7 @@
 <link rel="icon" type="image/svg+xml" href="/favicon.svg?v=2">
 <link rel="alternate icon" type="image/png" sizes="32x32" href="/favicon-32.png?v=2">
 <link rel="apple-touch-icon" sizes="180x180" href="/favicon-180.png?v=2">
-<link rel="stylesheet" href="/style.css?v=2">
+<link rel="stylesheet" href="/style.css?v=3">
 </head>
 <body>
 
@@ -22,10 +22,10 @@
   <div class="wrap">
     <a class="brand" href="/"><img src="/mark.svg" alt="">Kervax</a>
     <nav>
-      <a class="hide-sm" href="#features">Возможности</a>
-      <a class="hide-sm" href="#box">Из коробки</a>
-      <a class="hide-sm" href="#ui">Интерфейс</a>
       <a class="hide-sm" href="#security">Безопасность</a>
+      <a class="hide-sm" href="#hardware">Диски</a>
+      <a class="hide-sm" href="#services">Сервисы</a>
+      <a class="hide-sm" href="#alerts">Алерты</a>
       <a href="#install">Установка</a>
       <span class="sep hide-sm"></span>
       <a href="https://github.com/mihsergeev/Kervax">GitHub</a>
@@ -38,83 +38,274 @@
   <div class="wrap hero-inner">
     <img class="hero-logo" src="/logo.svg" alt="Kervax">
     <p class="eyebrow">Open source · AGPL-3.0 · self-hosted</p>
-    <h1>Мониторинг корпоративного уровня — из коробки</h1>
+    <h1>Мониторинг и аудит безопасности инфраструктуры</h1>
     <p class="lead">
-      Сайты, серверы, контейнеры, базы данных и бэкапы — в одной панели.
-      Установка выполняется одной командой: агент сам определяет, что работает на
-      машине, дашборды заполняются с первой проверки, алерты уходят в Telegram
-      или webhook.
+      Сайты, серверы, Docker, Kubernetes, базы, очереди, GPU и бэкапы в одной панели.
+      Одна команда на установку, одна на каждую ноду. Агент сам находит сервисы,
+      дашборды и алерты работают с первой минуты.
     </p>
     <div class="cta">
-      <a class="btn" href="#install">Установить за минуту</a>
-      <a class="btn btn-ghost" href="https://github.com/mihsergeev/Kervax">Смотреть на GitHub</a>
+      <a class="btn" href="#install">Установить</a>
+      <a class="btn btn-ghost" href="https://github.com/mihsergeev/Kervax">GitHub</a>
     </div>
     <div class="chips">
       <span class="chip">Docker Compose</span>
-      <span class="chip">хватает 2 ГБ памяти</span>
-      <span class="chip">агент для Linux</span>
+      <span class="chip">PostgreSQL</span>
+      <span class="chip">агент на Go, amd64 и arm64</span>
       <span class="chip">Telegram и webhook</span>
       <span class="chip">RU / EN</span>
+    </div>
+    <div class="stats">
+      <div class="stat"><b>80</b><span>видов алертов с выдержкой и гистерезисом</span></div>
+      <div class="stat"><b>0</b><span>входящих портов на нодах: агент только подключается наружу</span></div>
+      <div class="stat"><b>1</b><span>команда на панель и одна на ноду, без экспортеров и конфигов</span></div>
+      <div class="stat"><b>2 ГБ</b><span>памяти достаточно панели, данные в вашем PostgreSQL</span></div>
     </div>
   </div>
 
   <div class="wrap hero-shot">
     <a class="frame" href="/shots/ru/home@2x.webp" data-lb>
       <div class="frame-bar"><i></i><i></i><i></i><span>kervax.example.com</span><em>увеличить</em></div>
-      <img src="/shots/ru/home.webp" alt="Главный экран панели Kervax" width="1440" height="1031" loading="eager"></a>
+      <img src="/shots/ru/home.webp" alt="Главная: что сломано и что требует действий" width="1440" height="1300" loading="eager"></a>
   </div>
 </div>
 
-<section id="features">
+<section id="security" class="alt">
   <div class="wrap">
-    <p class="eyebrow-s">Возможности</p>
-    <h2>Вся инфраструктура на одном экране</h2>
-    <p class="sub">
-      Внешние проверки, метрики хостов и состояние бэкапов обычно разнесены по
-      разным системам. Здесь они в одной базе и на одной шкале времени: от
-      упавшего монитора до метрик машины за ним — два клика.
-    </p>
+    <p class="eyebrow-s">Безопасность</p>
+    <h2>Аудит безопасности на каждом сервере</h2>
+    <p class="sub">Без отдельного сканера и агента безопасности: те же ноды, та же панель, те же алерты.</p>
 
-    <div class="cards">
-      <div class="card">
-        <h3>Сайты</h3>
-        <p>Код ответа, ключевое слово в теле, время отклика, срок TLS-сертификата и
-        регистрации домена. Дополнительно сайт проверяется через прокси в других
-        сетях: если он отвечает вам, но недоступен оттуда, панель показывает это
-        отдельным состоянием, а не общим «работает».</p>
+    <div class="feat">
+      <div class="feat-text">
+        <div class="tags"><span class="tag red">порты снаружи</span><span class="tag">алерт на новый порт</span></div>
+        <h3>Что открыто в интернет</h3>
+        <ul class="facts">
+          <li><b>Скан снаружи</b> каждой ноды, сверка с тем, что слушает внутри: процесс и контейнер у каждого порта.</li>
+          <li><b>Белый список учитывается</b>: порт, открытый только своим адресам, открытым не считается.</li>
+          <li><b>Только Cloudflare</b>: проверяется, что origin не отвечает никому, кроме него.</li>
+          <li><b>Новый порт</b> в интернете - алерт. Порт, открытый намеренно, отмечается один раз.</li>
+          <li>Порты сервисов LoadBalancer в Kubernetes проверяются так же.</li>
+        </ul>
       </div>
-      <div class="card">
-        <h3>Серверы</h3>
-        <p>Статический бинарь передаёт загрузку CPU по ядрам, память, разделы дисков,
-        сеть, температуру, троттлинг, OOM и процессы по нагрузке. Соединение
-        только исходящее: на ноде не открывается ни один порт.</p>
+      <a class="frame" href="/shots/ru/security-ports@2x.webp" data-lb>
+        <div class="frame-bar"><i></i><i></i><i></i><span>/servers/web-02 · порты</span><em>увеличить</em></div>
+        <img src="/shots/ru/security-ports.webp" alt="Порты, открытые в интернет" width="1440" height="1000" loading="lazy"></a>
+    </div>
+
+    <div class="feat rev">
+      <div class="feat-text">
+        <div class="tags"><span class="tag">SSH</span><span class="tag">учетки</span><span class="tag">sudo</span></div>
+        <h3>SSH и доступы</h3>
+        <ul class="facts">
+          <li><b>SSH</b>: вход по паролю и под root, идущий перебор паролей, защита fail2ban или sshguard, версия в баннере.</li>
+          <li><b>Учетки и ключи</b>: кто может войти, с какими ключами, у кого sudo и NOPASSWD, слабые ключи, учетки, в которые давно не входят.</li>
+          <li><b>Изменения</b>: новый ключ, пользователь, правило sudo, вход по паролю с нового адреса - алерт с кнопкой "это мы".</li>
+          <li><b>Хронология</b> за 90 дней: порты, контейнеры, пользователи, sudoers, кроны.</li>
+        </ul>
       </div>
-      <div class="card">
-        <h3>Что работает на машине</h3>
-        <p>Контейнеры Docker, узлы и поды Kubernetes, веб-серверы с их доменами, СУБД
-        с размерами баз, очереди RabbitMQ. Агент определяет всё это сам; найденные
-        домены панель предлагает добавить в мониторинг.</p>
+      <a class="frame" href="/shots/ru/security-access@2x.webp" data-lb>
+        <div class="frame-bar"><i></i><i></i><i></i><span>/servers/web-02 · доступы</span><em>увеличить</em></div>
+        <img src="/shots/ru/security-access.webp" alt="SSH, учетки и ключи" width="1440" height="1100" loading="lazy"></a>
+    </div>
+
+    <div class="feat">
+      <div class="feat-text">
+        <div class="tags"><span class="tag red">CISA KEV</span><span class="tag">Ubuntu OVAL</span><span class="tag">endoflife.date</span></div>
+        <h3>Уязвимости и версии без поддержки</h3>
+        <ul class="facts">
+          <li><b>Пакеты</b> сверяются с базой OVAL от Canonical: только критичные и уже эксплуатируемые в атаках (CISA KEV).</li>
+          <li><b>Ядро</b> - по запущенной версии, а не по установленной: видно, кому нужна перезагрузка.</li>
+          <li><b>Версии без поддержки</b>: ОС, PostgreSQL, MySQL, Redis, nginx, PHP, Node.js, Python и другие, снимок endoflife.date внутри панели.</li>
+          <li><b>Обновления ОС</b>: невыкаченные обновления безопасности, выключенные автообновления, перезагрузка, которую откладывают.</li>
+          <li><b>Контейнеры</b> с привилегиями, ключами хоста или сокетом Docker внутри, порты в обход фаервола.</li>
+        </ul>
       </div>
-      <div class="card">
-        <h3>Бэкапы</h3>
-        <p>Состояние restic по каждой ноде: время последнего снимка, результат,
-        попадание в заданное окно. Бэкап-сервер и клиентов можно развернуть из
-        панели. Доступы для восстановления хранятся в сейфе, который шифруется в
-        браузере — сервер получает только шифротекст.</p>
+      <a class="frame" href="/shots/ru/vulns@2x.webp" data-lb>
+        <div class="frame-bar"><i></i><i></i><i></i><span>уязвимости</span><em>увеличить</em></div>
+        <img src="/shots/ru/vulns.webp" alt="Уязвимости по всем серверам" width="1440" height="1000" loading="lazy"></a>
+    </div>
+
+    <div class="pair">
+      <figure>
+        <a class="frame" href="/shots/ru/server@2x.webp" data-lb>
+          <div class="frame-bar"><i></i><i></i><i></i><span>/servers/web-02</span><em>увеличить</em></div>
+          <img src="/shots/ru/server.webp" alt="Карточка сервера: замечания по разделам" width="1440" height="1150" loading="lazy"></a>
+        <figcaption>Карточка сервера: замечания разложены по разделам, изменения за сутки сверху.</figcaption>
+      </figure>
+      <figure>
+        <a class="frame" href="/shots/ru/web@2x.webp" data-lb>
+          <div class="frame-bar"><i></i><i></i><i></i><span>/servers/web-01 · веб</span><em>увеличить</em></div>
+          <img src="/shots/ru/web.webp" alt="Ошибки 5xx и их причина" width="1440" height="1250" loading="lazy"></a>
+        <figcaption>Веб: 5xx по сайтам и путям, для 502/504 - какой upstream не ответил и почему.</figcaption>
+      </figure>
+    </div>
+  </div>
+</section>
+
+<section id="hardware">
+  <div class="wrap">
+    <p class="eyebrow-s">Диски и железо</p>
+    <h2>Поломка видна до того, как случилась</h2>
+    <p class="sub">Прогнозы по истории, а не пороги по текущему значению.</p>
+
+    <div class="feat">
+      <div class="feat-text">
+        <div class="tags"><span class="tag">SMART</span><span class="tag">RAID</span><span class="tag">NVMe</span></div>
+        <h3>Износ и здоровье дисков</h3>
+        <ul class="facts">
+          <li><b>Прогноз износа SSD</b>: скорость по замерам, дата 90% и 100% при текущей записи, алерт за 60 дней.</li>
+          <li><b>Кто пишет на диск</b>: юниты, контейнеры и поды, за час, сутки и неделю.</li>
+          <li><b>Здоровье</b>: деградировавший RAID, отказ по SMART, растущие переназначенные и нечитаемые сектора, пропавшие диски, ошибки в журнале ядра.</li>
+          <li>Диски виртуальных машин: RAID и ошибки ввода-вывода видны и без SMART.</li>
+        </ul>
       </div>
-      <div class="card">
+      <a class="frame" href="/shots/ru/disk-health@2x.webp" data-lb>
+        <div class="frame-bar"><i></i><i></i><i></i><span>/servers/db-01 · здоровье дисков</span><em>увеличить</em></div>
+        <img src="/shots/ru/disk-health.webp" alt="Износ SSD и кто пишет на диск" width="1095" height="621" loading="lazy"></a>
+    </div>
+
+    <div class="feat rev">
+      <div class="feat-text">
+        <div class="tags"><span class="tag">прогноз</span><span class="tag">inode</span><span class="tag">очистка</span></div>
+        <h3>Заполнение и место</h3>
+        <ul class="facts">
+          <li><b>Прогноз заполнения</b> по суточным минимумам, а не по всплескам; inode отдельно.</li>
+          <li><b>На что ушло место</b>: дерево крупнейших каталогов, журнал, образы и кэш сборки Docker, большие логи, забытые дампы.</li>
+          <li><b>Безопасное чистится кнопкой</b>, для остального готовая команда. Автоочистка по порогу - по желанию.</li>
+        </ul>
+      </div>
+      <a class="frame" href="/shots/ru/disks@2x.webp" data-lb>
+        <div class="frame-bar"><i></i><i></i><i></i><span>/servers/db-01 · диск</span><em>увеличить</em></div>
+        <img src="/shots/ru/disks.webp" alt="Прогноз заполнения и на что ушло место" width="1440" height="1500" loading="lazy"></a>
+    </div>
+
+    <div class="feat">
+      <div class="feat-text">
+        <div class="tags"><span class="tag">cgroups</span><span class="tag">PSI</span><span class="tag">NVIDIA</span></div>
+        <h3>CPU, память, сеть, GPU</h3>
+        <ul class="facts">
+          <li><b>CPU и память по контейнерам и подам</b>, утечки по устойчивому росту, OOM, давление (PSI).</li>
+          <li><b>Службы</b>: упавшие юниты с концом журнала, циклы перезапусков, юниты, которые не запустятся после перезагрузки.</li>
+          <li><b>Сеть</b>: TCP-проверки между серверами, трафик по контейнерам, лимит тарифа, DNS-резолверы, сдвиг часов.</li>
+          <li><b>GPU</b>: загрузка, память, температура, питание, процессы по картам, Xid с требованием сброса, застывшие показания.</li>
+        </ul>
+      </div>
+      <a class="frame" href="/shots/ru/gpu@2x.webp" data-lb>
+        <div class="frame-bar"><i></i><i></i><i></i><span>/servers/gpu-01 · GPU</span><em>увеличить</em></div>
+        <img src="/shots/ru/gpu.webp" alt="GPU: загрузка, память, процессы" width="1440" height="1250" loading="lazy"></a>
+    </div>
+
+    <div class="pair">
+      <figure>
+        <a class="frame" href="/shots/ru/llm@2x.webp" data-lb>
+          <div class="frame-bar"><i></i><i></i><i></i><span>/services/gpu-01 · LLM</span><em>увеличить</em></div>
+          <img src="/shots/ru/llm.webp" alt="LLM-сервисы" width="1440" height="1000" loading="lazy"></a>
+        <figcaption>LLM: vLLM, SGLang, TEI, LiteLLM - очередь, KV-кэш, TTFT и TPOT по перцентилям.</figcaption>
+      </figure>
+      <figure>
+        <a class="frame" href="/shots/ru/sites@2x.webp" data-lb>
+          <div class="frame-bar"><i></i><i></i><i></i><span>/sites</span><em>увеличить</em></div>
+          <img src="/shots/ru/sites.webp" alt="Мониторы сайтов" width="1440" height="1180" loading="lazy"></a>
+        <figcaption>Сайты: HTTP, TCP, DNS, push, проверка из нескольких сетей, сроки TLS и доменов.</figcaption>
+      </figure>
+    </div>
+  </div>
+</section>
+
+<section id="services">
+  <div class="wrap">
+    <p class="eyebrow-s">Сервисы</p>
+    <h2>Находит сам, разбирает до причины</h2>
+    <p class="sub">Агент определяет, что работает на машине. Настраивать каждый сервис не нужно.</p>
+
+    <div class="feat">
+      <div class="feat-text">
+        <div class="tags"><span class="tag">PostgreSQL</span><span class="tag">MySQL</span><span class="tag">ClickHouse</span><span class="tag">Redis</span></div>
+        <h3>Базы</h3>
+        <ul class="facts">
+          <li><b>Инвентарь</b>: базы и размеры, логины, подключения, репликация и отставание.</li>
+          <li><b>Что грузит базу</b>: топ запросов по доле времени, временные файлы, WAL, чтение мимо буферов.</li>
+          <li><b>Проблемы</b>: долгие транзакции, блокировки, таблицы без VACUUM, Redis у предела maxmemory.</li>
+          <li><b>Советы по настройкам</b> с цифрами этого сервера и пометкой, нужен ли перезапуск.</li>
+        </ul>
+      </div>
+      <a class="frame" href="/shots/ru/services@2x.webp" data-lb>
+        <div class="frame-bar"><i></i><i></i><i></i><span>/services/db-01 · базы</span><em>увеличить</em></div>
+        <img src="/shots/ru/services.webp" alt="PostgreSQL: нагрузка и советы" width="1440" height="1100" loading="lazy"></a>
+    </div>
+
+    <div class="feat rev">
+      <div class="feat-text">
+        <div class="tags"><span class="tag">RabbitMQ</span><span class="tag">supervisor</span><span class="tag">pm2</span><span class="tag">cron</span></div>
+        <h3>Очереди, воркеры, кроны</h3>
+        <ul class="facts">
+          <li><b>Очереди</b>: RabbitMQ, Redis, таблицы задач. Алерт, когда очередь растет, а разбирать некому.</li>
+          <li><b>Воркеры</b> supervisor и pm2: падения отдельно от плановых перезапусков.</li>
+          <li><b>Кроны</b>, которые наслаиваются, висят или выбрасывают вывод. <b>PHP-FPM</b>, упертый в pm.max_children.</li>
+          <li><b>Логи</b>: всплеск ошибок в логах контейнеров и подов против обычного часа.</li>
+        </ul>
+      </div>
+      <a class="frame" href="/shots/ru/services-app@2x.webp" data-lb>
+        <div class="frame-bar"><i></i><i></i><i></i><span>/services/app-01</span><em>увеличить</em></div>
+        <img src="/shots/ru/services-app.webp" alt="Очереди, воркеры и кроны" width="1440" height="1000" loading="lazy"></a>
+    </div>
+
+    <div class="feat">
+      <div class="feat-text">
+        <div class="tags"><span class="tag">поды</span><span class="tag">CronJob</span><span class="tag">Flux</span></div>
+        <h3>Kubernetes</h3>
+        <ul class="facts">
+          <li><b>Поды</b>: перезапуски, CrashLoopBackOff, причина от планировщика, поды без лимитов и проб.</li>
+          <li><b>Упавший Job</b> приходит в алерте сразу с концом лога.</li>
+          <li><b>Сроки</b>: сертификаты control plane и kubelet, kubeconfig, TLS-секреты, доступы Flux к Git.</li>
+          <li><b>Доставка Flux</b>, которая встала, хотя все работающее продолжает работать.</li>
+          <li>Сроки считаются на ноде: ключи и токены в панель не уходят.</li>
+        </ul>
+      </div>
+      <a class="frame" href="/shots/ru/kube@2x.webp" data-lb>
+        <div class="frame-bar"><i></i><i></i><i></i><span>/kube · сроки</span><em>увеличить</em></div>
+        <img src="/shots/ru/kube.webp" alt="Kubernetes: сроки сертификатов и токенов" width="1440" height="1100" loading="lazy"></a>
+    </div>
+  </div>
+</section>
+
+<section id="alerts">
+  <div class="wrap">
+    <p class="eyebrow-s">Бэкапы и алерты</p>
+    <h2>Будит только то, на что надо реагировать</h2>
+
+    <div class="feat">
+      <div class="feat-text">
+        <div class="tags"><span class="tag">Telegram</span><span class="tag">webhook</span><span class="tag">эскалация</span></div>
         <h3>Алерты</h3>
-        <p>Telegram и webhook, свой текст для каждого типа. Порог срабатывает только
-        после заданного времени удержания, поэтому одиночные всплески не создают
-        инцидентов. Есть снуз, заглушение по типам и адресация по ролям и
-        группам.</p>
+        <ul class="facts">
+          <li><b>Одна беда - одно сообщение</b>, один сбой на нескольких серверах - тоже одно.</li>
+          <li><b>Плановая нагрузка</b> в одно и то же время каждый день распознается и не алертит.</li>
+          <li><b>Кнопки в Telegram</b>: заглушить, взял, "это мы". Эскалация, если никто не взял.</li>
+          <li><b>Чаты по группам</b>, окна обслуживания со сверкой, карта зависимостей.</li>
+          <li><b>История</b> с рейтингом шума и отчет за период.</li>
+        </ul>
       </div>
-      <div class="card">
-        <h3>Самоконтроль</h3>
-        <p>Устаревший агент или helper, недоступная точка проверки, расхождение часов
-        с нодой, бэкап вне окна — всё это собирается в раздел «Требует действий»
-        вместе с командой, которая устраняет проблему.</p>
+      <a class="frame" href="/shots/ru/alerts@2x.webp" data-lb>
+        <div class="frame-bar"><i></i><i></i><i></i><span>история алертов</span><em>увеличить</em></div>
+        <img src="/shots/ru/alerts.webp" alt="История алертов и шум" width="1440" height="1000" loading="lazy"></a>
+    </div>
+
+    <div class="feat rev">
+      <div class="feat-text">
+        <div class="tags"><span class="tag">restic</span><span class="tag">rest-server</span></div>
+        <h3>Бэкапы</h3>
+        <ul class="facts">
+          <li><b>restic на каждой ноде</b>: последний снимок, результат, ночное окно, прирост за прогон.</li>
+          <li><b>Пробное восстановление</b>, висячие локи, тихо вставшая ротация.</li>
+          <li><b>Разворачивается из панели</b>: сервер бэкапов, клиенты, дампы баз.</li>
+          <li><b>Сейф доступов</b> шифруется в браузере: панель хранит только шифротекст.</li>
+        </ul>
       </div>
+      <a class="frame" href="/shots/ru/backups@2x.webp" data-lb>
+        <div class="frame-bar"><i></i><i></i><i></i><span>/backups</span><em>увеличить</em></div>
+        <img src="/shots/ru/backups.webp" alt="Бэкапы" width="1440" height="1000" loading="lazy"></a>
     </div>
   </div>
 </section>
@@ -122,102 +313,81 @@
 <section id="box">
   <div class="wrap">
     <p class="eyebrow-s">Из коробки</p>
-    <h2>Готово к работе без сборки стека</h2>
-    <p class="sub">
-      Обычный стек мониторинга нужно собрать: экспортер под каждую задачу,
-      scrape-конфиг, правила, маршруты алертов и дашборд под каждую сущность.
-      Kervax отдаёт те же данные уже связанными между собой.
-    </p>
+    <h2>Вместо стека из десяти компонентов</h2>
 
     <table class="cmp">
       <thead>
-        <tr><th>Задача</th><th>Kervax</th><th>Классический стек</th></tr>
+        <tr><th>Задача</th><th>Kervax</th><th>Обычный стек</th></tr>
       </thead>
       <tbody>
         <tr><td>Метрики нового сервера</td>
-            <td class="yes"><b>одна команда на ноде</b>, данные через секунды</td>
-            <td class="old">node_exporter, цель в scrape-конфиге, перечитывание конфигурации, импорт дашборда</td></tr>
-        <tr><td>Проверка сайта снаружи</td>
-            <td class="yes"><b>адрес монитора</b> — схема, сертификат и домен определяются автоматически</td>
-            <td class="old">blackbox_exporter, job с relabeling, правило, отдельная панель</td></tr>
-        <tr><td>Срок сертификата и домена</td>
-            <td class="yes"><b>считается автоматически</b>, напоминания за 14 / 7 / 1 день</td>
-            <td class="old">проба, PromQL-правило; для домена — свой экспортер</td></tr>
-        <tr><td>Аптайм за 30 дней</td>
-            <td class="yes"><b>цифра на карточке</b> монитора</td>
-            <td class="old">recording rule и запрос на PromQL</td></tr>
-        <tr><td>Инциденты</td>
-            <td class="yes"><b>открываются и закрываются автоматически</b>, с историей</td>
-            <td class="old">маршруты, группировка, подавления и silence в конфигах</td></tr>
-        <tr><td>Контейнеры, поды, СУБД, очереди</td>
-            <td class="yes"><b>определяются агентом</b></td>
-            <td class="old">cAdvisor, kube-state-metrics, postgres_exporter, rabbitmq_exporter…</td></tr>
-        <tr><td>Состояние бэкапов</td>
-            <td class="yes"><b>статус restic</b> по каждой ноде, прямо в панели</td>
-            <td class="old">решается отдельно</td></tr>
-        <tr><td>Кто что видит</td>
-            <td class="yes"><b>роли и группы</b>, проверяются в API</td>
-            <td class="old">организации в Grafana и отдельный доступ к хранилищу</td></tr>
-        <tr><td>Дашборды</td>
-            <td class="yes"><b>заполнены при первом входе</b></td>
-            <td class="old">собрать или импортировать</td></tr>
+            <td class="yes"><b>одна команда</b> на ноде</td>
+            <td class="old">node_exporter, scrape-цель, перезагрузка конфига, дашборд</td></tr>
+        <tr><td>Сайт снаружи</td>
+            <td class="yes"><b>адрес</b>, остальное определяется само</td>
+            <td class="old">blackbox_exporter, relabeling, правило, панель</td></tr>
+        <tr><td>Сроки TLS и домена</td>
+            <td class="yes"><b>сами</b>, за 14 / 7 / 1 день</td>
+            <td class="old">проба и PromQL, для домена свой экспортер</td></tr>
+        <tr><td>Порты в интернет</td>
+            <td class="yes"><b>проверка снаружи</b>, алерт на новый</td>
+            <td class="old">отдельный сканер</td></tr>
+        <tr><td>CVE и ПО без поддержки</td>
+            <td class="yes"><b>по каждой ноде</b></td>
+            <td class="old">отдельные инструменты</td></tr>
+        <tr><td>Износ SSD, SMART, RAID</td>
+            <td class="yes"><b>с прогнозом</b></td>
+            <td class="old">smartctl_exporter и правила</td></tr>
+        <tr><td>Контейнеры, поды, базы, очереди</td>
+            <td class="yes"><b>находит агент</b></td>
+            <td class="old">cAdvisor, kube-state-metrics, экспортер на каждую СУБД</td></tr>
+        <tr><td>Бэкапы</td>
+            <td class="yes"><b>статус restic</b> и пробное восстановление</td>
+            <td class="old">не покрыто</td></tr>
+        <tr><td>Инциденты и маршруты</td>
+            <td class="yes"><b>встроены</b></td>
+            <td class="old">конфигурация Alertmanager</td></tr>
+        <tr><td>Права доступа</td>
+            <td class="yes"><b>роли и группы</b>, проверка в API</td>
+            <td class="old">организации Grafana и доступ к Prometheus</td></tr>
       </tbody>
     </table>
 
     <p class="note">
-      Prometheus остаётся лучшим выбором для прикладных метрик и произвольных
-      запросов на PromQL и работает рядом без конфликтов. Kervax закрывает
-      инфраструктурный слой: хост, сайт, сертификат, контейнер, бэкап.
+      Prometheus остается инструментом для прикладных метрик и PromQL и работает рядом.
+      Kervax закрывает инфраструктуру: хост, сайт, сертификат, контейнер, базу, бэкап и их безопасность.
     </p>
   </div>
 </section>
 
-<section id="ui">
+<section id="model">
   <div class="wrap">
-    <p class="eyebrow-s">Интерфейс</p>
-    <h2>Как это выглядит</h2>
-    <p class="sub">
-      Скриншоты сняты с работающей панели на демонстрационных данных: интерфейс
-      после установки выглядит так же.
-    </p>
+    <p class="eyebrow-s">Архитектура</p>
+    <h2>Модель безопасности</h2>
 
-    <div class="gallery">
-      <figure>
-        <a class="frame" href="/shots/ru/servers@2x.webp" data-lb>
-          <div class="frame-bar"><i></i><i></i><i></i><span>/servers</span><em>увеличить</em></div>
-          <img src="/shots/ru/servers.webp" alt="Парк серверов" width="1440" height="940" loading="lazy"></a>
-        <figcaption>Список серверов: загрузка, диски, группы, состояние агента.</figcaption>
-      </figure>
-      <figure>
-        <a class="frame" href="/shots/ru/server-detail@2x.webp" data-lb>
-          <div class="frame-bar"><i></i><i></i><i></i><span>/servers/web-01</span><em>увеличить</em></div>
-          <img src="/shots/ru/server-detail.webp" alt="Метрики сервера" width="1440" height="830" loading="lazy"></a>
-        <figcaption>Карточка сервера: CPU по ядрам, память, диски, сеть, температура.</figcaption>
-      </figure>
-      <figure>
-        <a class="frame" href="/shots/ru/sites@2x.webp" data-lb>
-          <div class="frame-bar"><i></i><i></i><i></i><span>/sites</span><em>увеличить</em></div>
-          <img src="/shots/ru/sites.webp" alt="Мониторы сайтов" width="1440" height="1180" loading="lazy"></a>
-        <figcaption>Мониторы сайтов: доступность, сертификаты, домены, проверка из нескольких точек.</figcaption>
-      </figure>
-      <figure>
-        <a class="frame" href="/shots/ru/backups@2x.webp" data-lb>
-          <div class="frame-bar"><i></i><i></i><i></i><span>/backups</span><em>увеличить</em></div>
-          <img src="/shots/ru/backups.webp" alt="Бэкапы" width="1440" height="1000" loading="lazy"></a>
-        <figcaption>Бэкапы: время последнего снимка, репозитории, расписание, сейф доступов.</figcaption>
-      </figure>
-    </div>
+    <ul class="sec-list">
+      <li><b>Агент только подключается наружу.</b> Не слушает портов, не выполняет произвольных команд,
+      работает под отдельным пользователем в песочнице systemd. Панель хранит SHA-256 токена, а не токен.</li>
+      <li><b>Права проверяются в API.</b> Учетка, ограниченная группой, не получит чужой объект даже по
+      прямому запросу. Живую панель проверяет скрипт с временными учетками каждой роли.</li>
+      <li><b>Без root.</b> Бэкенд под uid 10001, фронт на непривилегированном nginx, контейнеры с
+      <code>no-new-privileges</code>.</li>
+      <li><b>Вход защищен.</b> TOTP, блокировка адреса после неудачных входов с белым списком, алерт на
+      левые запросы к API, журнал действий. Со слабым секретом панель не запускается.</li>
+      <li><b>Обновления агента подписаны офлайн-ключом.</b> Даже взломанная панель не выкатит на ноды
+      свой бинарь.</li>
+      <li><b>Root-helper'ы ставите вы</b> своим Ansible или руками. Панель их не рассылает.</li>
+    </ul>
   </div>
 </section>
 
 <section id="install">
   <div class="wrap">
     <p class="eyebrow-s">Установка</p>
-    <h2>Установка одной командой</h2>
+    <h2>Одна команда</h2>
     <p class="sub">
-      Выполняется на чистом сервере с Linux. Команда устанавливает Docker,
-      поднимает Caddy с сертификатом Let's Encrypt, генерирует секреты и выводит
-      адрес панели с паролем администратора.
+      На чистом Linux-сервере: ставит Docker, поднимает Caddy с сертификатом Let's Encrypt,
+      генерирует секреты, выводит адрес панели и пароль администратора.
     </p>
 
     <div class="cmd">
@@ -227,52 +397,23 @@
 
     <div class="steps">
       <div class="step">
-        <b>Свой домен по желанию</b>
-        <p>Без своего домена панель работает на <code>&lt;IP-сервера&gt;.sslip.io</code>
-        с обычным сертификатом Let's Encrypt по https.</p>
+        <b>Домен не обязателен</b>
+        <p>Без своего домена панель работает на <code>&lt;IP-сервера&gt;.sslip.io</code> с сертификатом Let's Encrypt.</p>
       </div>
       <div class="step">
-        <b>Сервер под наблюдение</b>
-        <p>Кнопка «Добавить сервер» выдаёт готовую команду. После её выполнения на
-        ноде метрики появляются в панели в течение нескольких секунд.</p>
+        <b>Сервер</b>
+        <p>"Добавить сервер" выдает команду для ноды. Метрики появляются через несколько секунд.</p>
       </div>
       <div class="step">
-        <b>Сайт под наблюдение</b>
-        <p>Достаточно указать адрес: схема, сертификат, домен и история заполняются с
-        первой проверки.</p>
+        <b>Сайт</b>
+        <p>Адрес монитора. Схема, сертификат, домен и история заполняются с первой проверки.</p>
       </div>
     </div>
 
     <p class="note">
-      Свой домен, ограничение доступа по IP, работа за существующим nginx и
-      установка по шагам описаны в
-      <a href="https://github.com/mihsergeev/Kervax/blob/main/docs/install.ru.md">подробной инструкции</a>.
+      Свой домен, белый список, работа за существующим nginx, обновление:
+      <a href="https://github.com/mihsergeev/Kervax/blob/main/docs/install.ru.md">инструкция по установке</a>.
     </p>
-  </div>
-</section>
-
-<section id="security">
-  <div class="wrap">
-    <p class="eyebrow-s">Безопасность</p>
-    <h2>Как устроен доступ</h2>
-
-    <ul class="sec-list">
-      <li><b>Агент работает только на исходящих соединениях.</b> Он не слушает
-      портов и не выполняет произвольных команд оболочки; панель хранит не токен,
-      а его SHA-256.</li>
-      <li><b>Права проверяются на стороне API.</b> Учётная запись, ограниченная
-      группой, не получит чужой объект даже при прямом запросе по
-      идентификатору.</li>
-      <li><b>Компоненты работают без root.</b> Бэкенд — под отдельным
-      пользователем, фронтенд — на непривилегированном образе, контейнеры
-      запускаются с <code>no-new-privileges</code>.</li>
-      <li><b>Вход защищён.</b> JWT и второй фактор TOTP, ограничение числа попыток,
-      журнал действий. Минимальная длина пароля — 12 символов; со слабым или
-      дефолтным секретом панель не запускается.</li>
-      <li><b>Обновление агентов проверяется по подписи.</b> Приватный ключ хранится
-      вне сервера, поэтому даже панель с полным доступом не сможет выкатить на
-      ноды посторонний бинарь.</li>
-    </ul>
   </div>
 </section>
 
@@ -282,13 +423,14 @@
     <nav>
       <a href="https://github.com/mihsergeev/Kervax">GitHub</a>
       <a href="https://github.com/mihsergeev/Kervax/blob/main/docs/install.ru.md">Установка</a>
-      <a href="https://github.com/mihsergeev/Kervax/blob/main/docs/why.ru.md">Зачем это</a>
+      <a href="https://github.com/mihsergeev/Kervax/blob/main/docs/security.md">Безопасность</a>
+      <a href="https://github.com/mihsergeev/Kervax/blob/main/CHANGELOG.md">Изменения</a>
       <a href="/en/">English</a>
     </nav>
   </div>
 </footer>
 
 <div class="lb" id="lb"><img src="" alt=""></div>
-<script src="/lb.js?v=1"></script>
+<script src="/lb.js?v=2"></script>
 </body>
 </html>

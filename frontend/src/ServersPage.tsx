@@ -6328,8 +6328,8 @@ function ServerDetail({
               chartCard(
                 'swap',
                 <div className="loc-results chart-stats">
-                  <StatRow color="#57a894" name={t('загрузка')} value={fmtRate(r.swap_in)} />
-                  <StatRow color="#cf9b52" name={t('выгрузка')} value={fmtRate(r.swap_out)} />
+                  <StatRow color="#57a894" name={t('из swap')} value={fmtRate(r.swap_in)} />
+                  <StatRow color="#cf9b52" name={t('в swap')} value={fmtRate(r.swap_out)} />
                 </div>,
               )}
             {chartCard(

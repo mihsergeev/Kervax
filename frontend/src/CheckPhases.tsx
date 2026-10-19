@@ -14,7 +14,7 @@ const PHASES: { k: PhaseKey; label: string; color: string }[] = [
   { k: 'connect', label: 'подключение', color: '#06b6d4' },
   { k: 'tls', label: 'TLS', color: '#f59e0b' },
   { k: 'wait', label: 'ожидание ответа', color: '#4b74ff' },
-  { k: 'body', label: 'загрузка', color: '#94a3b8' },
+  { k: 'body', label: 'загрузка ответа', color: '#94a3b8' },
 ]
 
 function fmtMs(ms: number, t: TFn): string {
@@ -34,7 +34,7 @@ export function phaseSeries(points: CheckSample[] | null, t: TFn): Series[] | nu
     { name: 'TLS', color: PHASES[2].color, values: pts.map((p) => v(p, p.ph_tls)) },
     { name: t('ожидание ответа'), color: PHASES[3].color, values: pts.map((p) => v(p, p.ph_wait)) },
     {
-      name: t('загрузка'),
+      name: t('загрузка ответа'),
       color: PHASES[4].color,
       values: pts.map((p) =>
         has(p) && p.latency_ms != null
