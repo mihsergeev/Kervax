@@ -36,7 +36,7 @@ import { CRON_MUTE, FPM_MUTE, LOGERR_MUTE, QFAIL_MUTE, QSTUCK_MUTE, WORKER_MUTE 
 import { OsIcon } from './osIcon'
 import { CountryFlag } from './CountryFlag'
 import { byteUnits } from './units'
-import { NetTile } from './NetLinks'
+import { NetTile, TileFilterChip, useTileFilter } from './NetLinks'
 import { EXPIRY_SHOW_DAYS, EXPIRY_WARN_DAYS, expiryTone } from './checkUtils'
 
 // Список сайтов веб-сервиса: превью + раскрытие в скроллящийся список с фильтром (у
@@ -2244,11 +2244,54 @@ function ServerServicesModal({ srv, onClose, onChanged, initialSec, sites }: {
   )
 }
 
+// плитки сводки как фильтр: какие сервисы ноды попадают под плитку. Эти же условия считают
+// числа плиток, поэтому чипы отобранных строк в сумме дают число плитки
+type SFilter = 'db' | 'web' | 'queues'
+const isDbItem = (it: SvcItem) => !it.web && !it.svc && !it.llm && !it.workers && !it.cron
+const SVC_OF: Record<SFilter, (it: SvcItem) => boolean> = {
+  db: isDbItem,
+  web: (it) => !!it.web,
+  queues: (it) => !!it.svc,
+}
+
+// что из нажатой плитки нашлось на ноде сверх чипов сервисов: очереди и сайты
+function svcHit(f: SFilter, r: SrvServices, ctx: SitesCtx, t: TFn): string | null {
+  const list = (xs: string[]) => ({ list: shortList(xs, t, 8) })
+  if (f === 'queues') {
+    const svc = r.items.filter(SVC_OF.queues)
+    const hot = svc.flatMap((it) => it.svc?.queues ?? []).filter((x) => qDepth(x) >= QUEUE_HOT).map((x) => x.name)
+    return subOf(
+      t('очередей: {n}', { n: svc.reduce((n, it) => n + (it.svc?.total ?? 0), 0) }),
+      hot.length > 0 && t('переполнены: {list}', list(hot)),
+    )
+  }
+  if (f === 'web') {
+    const s = r.server
+    const miss = missingSites([...new Set(r.items.flatMap((it) => it.sites ?? []))], ctx)
+    const cfg = (s.web_config ?? []).filter((c) => !c.ok).map((c) => c.where || c.server)
+    const certs = (s.web_certs ?? []).filter((c) => c.days <= EXPIRY_SHOW_DAYS).map((c) => c.label)
+    return subOf(
+      t('сайтов: {n}', { n: r.items.filter(SVC_OF.web).reduce((n, it) => n + (it.sites?.length ?? 0), 0) }),
+      ctx.hosts != null && miss > 0 && t('без монитора: {n}', { n: miss }),
+      cfg.length > 0 && s.online && t('конфиг с ошибкой: {list}', list(cfg)),
+      certs.length > 0 && t('сертификаты истекают: {list}', list(certs)),
+    )
+  }
+  return null
+}
+
 // Строка ноды: иконки ее сервисов (сразу видно, что где крутится) и чипы бед - переполненные
 // очереди, конфиг веб-сервера с ошибкой, проблемы баз. Справа число сервисов, цвет по худшему
-function HostRow({ srv, showGroup, onOpen }: { srv: SrvServices; showGroup?: boolean; onOpen: () => void }) {
+function HostRow({ srv, showGroup, only, hint, onOpen }: {
+  srv: SrvServices
+  showGroup?: boolean
+  only?: (it: SvcItem) => boolean // нажата плитка: чипы и счетчик - только ее сервисы
+  hint?: string | null
+  onOpen: () => void
+}) {
   const { t } = useI18n()
   const s = srv.server
+  const items = only ? srv.items.filter(only) : srv.items
   const hot = hotQueues(srv.items)
   const cfg = (s.web_config ?? []).filter((c) => !c.ok).length
   const dbp = (s.db_health ?? []).flatMap((h) => h.problems)
@@ -2277,8 +2320,8 @@ function HostRow({ srv, showGroup, onOpen }: { srv: SrvServices; showGroup?: boo
         </div>
         <div className="svc-row-icons">
           {/* одинаковые сервисы на ноде (два LiteLLM, три TEI) - один чип со счетчиком, где - в подсказке */}
-          {[...new Set(srv.items.map((it) => it.kind))].map((kind) => {
-            const xs = srv.items.filter((it) => it.kind === kind)
+          {[...new Set(items.map((it) => it.kind))].map((kind) => {
+            const xs = items.filter((it) => it.kind === kind)
             const where = xs.map((x) => x.where).filter(Boolean).join('\n')
             return (
               <span key={kind} className="svc-chip" title={where ? `${kind}\n${where}` : kind}>
@@ -2288,9 +2331,10 @@ function HostRow({ srv, showGroup, onOpen }: { srv: SrvServices; showGroup?: boo
             )
           })}
         </div>
+        {hint && <div className="hs-host-hit">{hint}</div>}
       </div>
       <div className={`hs-host-count mono ${tone}`}>
-        {srv.items.length}<span className="muted"> {t('серв.')}</span>
+        {items.length}<span className="muted"> {t('серв.')}</span>
       </div>
     </button>
   )
@@ -2326,6 +2370,7 @@ export function ServicesPage({ onUnauthorized, openServerId, openSec, onConsumed
   // раздел из ссылки - до первого открытия карточки этой ноды
   const [linkSec, setLinkSec] = useState<{ id: number | null; sec: string | null }>({ id: null, sec: null })
   const [query, setQuery] = useState('')
+  const { tile, setTile, tileProps } = useTileFilter<SFilter>()
   const [searchRo, setSearchRo] = useState(true) // защита от автозаполнения, см. «Бэкапы»
   const [groupBy, setGroupBy] = useState<'none' | 'group'>(
     () => (localStorage.getItem('kervax_services_groupby') as 'none' | 'group') || 'group',
@@ -2389,7 +2434,8 @@ export function ServicesPage({ onUnauthorized, openServerId, openSec, onConsumed
   // Ищем и по ноде, и по СЕРВИСУ: на этой странице чаще спрашивают «где у меня redis»,
   // а не «что на ноде X» — поиск только по именам нод отвечал бы на другой вопрос.
   const q = query.trim().toLowerCase()
-  const rows = q
+  // нажатая плитка оставляет ноды с ее сервисами (очереди - как в плитке, только на связи)
+  const rows = (q
     ? all.filter(({ server, items }) =>
         [server.name, server.group_name, ...items.map((i) => i.kind)]
           .join(' ')
@@ -2397,6 +2443,7 @@ export function ServicesPage({ onUnauthorized, openServerId, openSec, onConsumed
           .includes(q),
       )
     : all
+  ).filter((r) => !tile || ((tile !== 'queues' || r.server.online) && r.items.some(SVC_OF[tile])))
   const open = withCron.find((r) => r.server.id === openId)
   const groups: { key: string; label: string; items: SrvServices[] }[] =
     groupBy === 'none'
@@ -2419,7 +2466,7 @@ export function ServicesPage({ onUnauthorized, openServerId, openSec, onConsumed
   const offNames = all.filter((r) => !r.server.online).map((r) => r.server.name)
   const kindsAll = new Set(all.flatMap((r) => r.items.map((i) => i.kind)))
   const svcAll = all.flatMap((r) => r.items.map((it) => ({ it, s: r.server })))
-  const dbItems = svcAll.filter(({ it }) => !it.web && !it.svc && !it.llm && !it.workers && !it.cron)
+  const dbItems = svcAll.filter(({ it }) => isDbItem(it))
   const dbBad = live.filter((r) => (r.server.db_health ?? []).some((h) => h.problems.some((p) => p.level >= 2))).map((r) => r.server.name)
   const dbWarn = live.filter((r) => (r.server.db_health ?? []).some((h) => h.problems.some((p) => p.level < 2))).map((r) => r.server.name)
   const webItems = svcAll.filter(({ it }) => it.web)
@@ -2432,6 +2479,11 @@ export function ServicesPage({ onUnauthorized, openServerId, openSec, onConsumed
   const rabbit = svcAll.filter(({ it, s }) => !!it.svc && s.online)
   const qAll = rabbit.flatMap(({ it }) => it.svc?.queues ?? [])
   const qHot = qAll.filter((x) => qDepth(x) >= QUEUE_HOT)
+  // нажатая плитка: подпись чипа над списком и что сказать, если под нее ничего не попало
+  const filterLabel: Record<SFilter, string> = { db: t('базы данных'), web: t('веб-серверы'), queues: t('очереди') }
+  const filterEmpty: Record<SFilter, string> = {
+    db: t('Баз данных не найдено.'), web: t('Веб-серверов не найдено.'), queues: t('Очередей нет.'),
+  }
 
   return (
     <div>
@@ -2465,6 +2517,7 @@ export function ServicesPage({ onUnauthorized, openServerId, openSec, onConsumed
               offNames.length > 0 && t('не на связи: {list}', { list: names(offNames) }),
             )}
             tone={offNames.length ? 'warn' : undefined}
+            {...tileProps(null)}
           />
           <NetTile
             label={t('Базы данных')}
@@ -2474,6 +2527,7 @@ export function ServicesPage({ onUnauthorized, openServerId, openSec, onConsumed
               dbWarn.length > 0 && t('предупреждения: {list}', { list: names(dbWarn) }),
             ) || t('все в порядке') : t('свежих данных нет')}
             tone={!live.length ? undefined : dbBad.length ? 'bad' : dbWarn.length ? 'warn' : 'ok'}
+            {...tileProps('db')}
           />
           <NetTile
             label={t('Веб-серверы')}
@@ -2485,6 +2539,7 @@ export function ServicesPage({ onUnauthorized, openServerId, openSec, onConsumed
               certs.length > 0 && t('сертификаты истекают: {list}', { list: names(certs.map((c) => c.label)) }),
             )}
             tone={cfgBad.length || certs.some((c) => c.days <= 1) ? 'bad' : certs.some((c) => c.days <= 7) ? 'warn' : 'ok'}
+            {...tileProps('web')}
           />
           {rabbit.length > 0 && (
             <NetTile
@@ -2495,6 +2550,7 @@ export function ServicesPage({ onUnauthorized, openServerId, openSec, onConsumed
                 qHot.length > 0 && t('переполнены: {list}', { list: names(qHot.map((x) => x.name)) }),
               )}
               tone={qHot.length ? 'warn' : 'ok'}
+              {...tileProps('queues')}
             />
           )}
         </div>
@@ -2519,14 +2575,17 @@ export function ServicesPage({ onUnauthorized, openServerId, openSec, onConsumed
           )}
         </div>
       )}
+      {tile && <TileFilterChip label={filterLabel[tile]} onClear={() => setTile(null)} />}
       {all.length === 0 ? (
         <div className="card muted">
           {t('Сервисы не обнаружены. Панель находит их по контейнерам, подам и процессам — обновите агенты.')}
         </div>
       ) : rows.length === 0 ? (
         <div className="card muted">
-          {t('По запросу «{q}» ничего нет.', { q: query.trim() })}
-          <button className="ghost search-clear" onClick={() => setQuery('')}>{t('Сбросить')}</button>
+          {tile && !q ? filterEmpty[tile] : <>
+            {t('По запросу «{q}» ничего нет.', { q: query.trim() })}
+            <button className="ghost search-clear" onClick={() => setQuery('')}>{t('Сбросить')}</button>
+          </>}
         </div>
       ) : (
         <div className="net-cards hs-groups">
@@ -2540,7 +2599,8 @@ export function ServicesPage({ onUnauthorized, openServerId, openSec, onConsumed
               </div>
               <div className="loc-results">
                 {g.items.map((r) => (
-                  <HostRow key={r.server.id} srv={r} showGroup={groupBy !== 'group'} onOpen={() => setOpenId(r.server.id)} />
+                  <HostRow key={r.server.id} srv={r} showGroup={groupBy !== 'group'} onOpen={() => setOpenId(r.server.id)}
+                    only={tile ? SVC_OF[tile] : undefined} hint={tile ? svcHit(tile, r, sitesCtx, t) : null} />
                 ))}
               </div>
             </div>
