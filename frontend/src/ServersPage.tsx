@@ -96,7 +96,7 @@ import { JournalCard, JournalModal, journalBlocker } from './UnitJournal'
 import { LinksCard, NetTile, TrafficCard, type Tone } from './NetLinks'
 import { DiskWritersBlock, NetUsersCard } from './Usage'
 import { SoftwareCard } from './Software'
-import { FixSteps } from './FixSteps'
+import { FixSteps, useFixDone } from './FixSteps'
 import { GpuCard, GpuChip } from './Gpu'
 import { KnownServerList } from './KnownDialog'
 import { MaintBanner, MaintChip } from './MaintModal'
@@ -2943,7 +2943,21 @@ function OsUpdates({ server: s, onChanged }: { server: Server; onChanged: () => 
   const [open, setOpen] = useState('')
   const u = s.last_report?.os_upd
   const adv = s.os_advice ?? []
-  if (!u && !adv.length) return null
+  // пункт ушел, пока был на экране: что изменилось - по свежему отчету агента
+  const fixed = useFixDone(s.online ? s.os_advice : null, (a) => a.kind, (a) => {
+    switch (a.kind) {
+      case 'reboot': return u?.kernel
+        ? t('Сервер перезагружен, работает ядро {k}, замечание закрыто', { k: u.kernel })
+        : t('Сервер перезагружен, замечание закрыто')
+      case 'security': return u?.unatt === 'on'
+        ? t('Обновления безопасности установлены, автообновления включены, замечание закрыто')
+        : t('Обновления безопасности установлены, замечание закрыто')
+      case 'apt': return t('Список пакетов обновлен, замечание закрыто')
+      case 'eol': return s.os ? t('ОС обновлена: {os}, замечание закрыто', { os: s.os }) : t('ОС обновлена, замечание закрыто')
+      default: return t('Исправлено: {text}', { text: a.text })
+    }
+  }, { live: (a) => !a.muted })
+  if (!u && !adv.length && !fixed.done.length) return null
   const live = adv.filter((a) => !a.muted)
   const keepAll = () => {
     setBusyAll(true)
@@ -2965,6 +2979,7 @@ function OsUpdates({ server: s, onChanged }: { server: Server; onChanged: () => 
             </button>
           )}
         </div>
+        {fixed.bars}
         {adv.map((a) => (
           <div key={a.kind}>
             <div className={`osupd-adv ${a.muted ? 'osupd-adv-off' : a.level >= 2 ? 'net-prob' : 'net-note'}`}>
@@ -3719,6 +3734,15 @@ function AccessCard({ server: s, onChanged }: { server: Server; onChanged: () =>
   const { busy, toggle } = useMuteToggle(s, onChanged)
   const [open, setOpen] = useState('')
   const v = s.access
+  // заброшенная учетка ушла из заброшенных, пока была на экране: что с ней теперь
+  const fixed = useFixDone(v && s.online ? v.accounts.filter((a) => a.stale) : null, (a) => a.name, (a) => {
+    const now = v?.accounts.find((x) => x.name === a.name)
+    return !now
+      ? t('Учетка {name} удалена, замечание закрыто', { name: a.name })
+      : !now.access
+        ? t('Учетка {name} отключена, войти по ней больше нельзя, замечание закрыто', { name: a.name })
+        : t('Учетка {name} больше не в заброшенных: по ней входили, замечание закрыто', { name: a.name })
+  }, { live: (a) => !a.muted })
   if (!v || v.accounts.length === 0) return null
   const probs = (s.problems ?? []).filter((p) => p.kind === 'access_risk')
   const pw: Record<string, string> = { P: t('задан'), L: t('заблокирован'), NP: t('пустой') }
@@ -3737,6 +3761,7 @@ function AccessCard({ server: s, onChanged }: { server: Server; onChanged: () =>
       <div className="net-head">
         <div className="chart-cap">{t('Доступы')}</div>
       </div>
+      {fixed.bars}
       {probs.map((p) => (
         <div key={p.text} className="net-prob">{p.text}</div>
       ))}
@@ -3813,7 +3838,9 @@ function NoBootUnits({ server: s, onChanged }: { server: Server; onChanged: () =
   const { busy, toggle } = useMuteToggle(s, onChanged)
   const [copied, setCopied] = useState(false)
   const units = s.noboot?.units ?? []
-  if (units.length === 0) return null
+  const fixed = useFixDone(s.online ? s.noboot?.units : null, (u) => u.unit, (u) =>
+    t('{unit} включен, поднимется после перезагрузки, замечание закрыто', { unit: u.unit }), { live: (u) => !u.muted })
+  if (units.length === 0 && !fixed.done.length) return null
   const live = units.filter((u) => !u.muted)
   const cmd = `systemctl enable ${live.map((u) => u.unit).join(' ')}`
   return (
@@ -3821,6 +3848,8 @@ function NoBootUnits({ server: s, onChanged }: { server: Server; onChanged: () =
       <div className="net-head">
         <div className="chart-cap">{t('Не запустятся после перезагрузки')}</div>
       </div>
+      {fixed.bars}
+      {units.length > 0 && <>
       <div className="net-sub">
         {t('Работают, но не включены: их запустили systemctl start без enable, и после ребута их не будет.')}
       </div>
@@ -3843,6 +3872,7 @@ function NoBootUnits({ server: s, onChanged }: { server: Server; onChanged: () =
           </div>
         ))}
       </div>
+      </>}
       {live.length > 0 && (
         <div className="agent-advice-cmd">
           <pre>{cmd}</pre>
@@ -3872,6 +3902,10 @@ function SshLogin({ server: s, onChanged }: { server: Server; onChanged: () => v
   const { busy, toggle } = useMuteToggle(s, onChanged)
   const [open, setOpen] = useState('')
   const v = s.ssh
+  const fixed = useFixDone(v && s.online ? s.ssh_advice : null, (a) => a.kind, (a) =>
+    a.kind === 'ssh_password' && v && !v.password
+      ? t('Вход по паролю выключен, только ключи, замечание закрыто')
+      : t('Исправлено: {text}', { text: a.text }), { live: (a) => !a.muted })
   if (!v) return null
   const probs = (s.problems ?? []).filter((p) => p.kind === 'ssh_risk')
   const adv = s.ssh_advice ?? []
@@ -3883,6 +3917,7 @@ function SshLogin({ server: s, onChanged }: { server: Server; onChanged: () => v
       <div className="net-head">
         <div className="chart-cap">SSH</div>
       </div>
+      {fixed.bars}
       {probs.map((p) => (
         <div key={p.text} className={p.level >= 2 ? 'net-prob' : 'net-note'}>{p.text}</div>
       ))}

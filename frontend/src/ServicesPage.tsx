@@ -30,7 +30,7 @@ import { useAuth } from './auth'
 import { useUrlCard, useUrlParam } from './deeplink'
 import { shortList, srvIssues, srvMuted, webRate } from './serverUtils'
 import { fmtRel } from './ServersPage'
-import { FixSteps } from './FixSteps'
+import { FixSteps, useFixDone } from './FixSteps'
 import { CardNav, FreshChip, markMuted, OvAreas, OvRows, secInfoOf, type OvRow, type SecDef, type SecInfo, type SecItem } from './cardLayout'
 import { AdoptSitesModal, adoptable } from './AdoptSitesModal'
 import { EngineIcon } from './engineIcon'
@@ -371,6 +371,10 @@ function DbLoadBlock({ load, advice, fix, name, t }: {
     : ld.pss === 'noext'
       ? t('pg_stat_statements загружен, но расширение не создано ни в одной базе: выполните CREATE EXTENSION pg_stat_statements, перезапуск не нужен. Панель увидит его в течение часа')
       : ''
+  // плашка ушла, пока была на экране: расширение включили
+  const pssDone = useFixDone(load ? (pssHint ? ['pgss'] : []) : null, (x) => x, () => name
+    ? t('pg_stat_statements включен в {name}, замечание закрыто', { name })
+    : t('pg_stat_statements включен, замечание закрыто'))
   if (ld.qtext > 1024 ** 3)
     hints.push(t('Тексты запросов pg_stat_statements занимают {s}: так бывает, когда один запрос приходит с разным числом значений (многострочный INSERT, длинный IN), и каждый вариант хранится отдельно со своим текстом. Они вытесняют из статистики другие запросы, а каждое чтение текстов поднимает файл в память целиком, поэтому новые тексты панель читает раз в 6 часов', { s: fmtBytes(ld.qtext) }))
   if (ld.cut) hints.push(t('Запросы не показаны: на сервере много инстансов, и отчет не вместил бы все'))
@@ -421,6 +425,7 @@ function DbLoadBlock({ load, advice, fix, name, t }: {
           ))}
         </div>
       )}
+      {pssDone.bars}
       {pssHint && (
         <div>
           <div className="osupd-adv net-note">
