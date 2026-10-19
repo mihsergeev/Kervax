@@ -73,7 +73,9 @@ fi
 #       re-reads htpasswd by itself at most every 30 seconds, the first time 30 seconds after
 #       its start, and provisioning waited only for the HTTP one. Now every rest-server over
 #       this data gets SIGHUP (re-read now) and provisioning waits until both ports accept the user
-KERVAX_SETUP_VERSION=0.32  # MAJOR.MINOR; compared component-wise (0.13 > 0.2!)
+# 0.33: merge-group hands an old group over to the new name of a renamed server (restic rewrite
+#       --new-host --forget), after that the usual policy rotates its history
+KERVAX_SETUP_VERSION=0.33  # MAJOR.MINOR; compared component-wise (0.13 > 0.2!)
 # Which nodes need this helper at all. Read by the ansible playbook on the
 # CONTROL machine and evaluated as a shell condition ON THE NODE, so a new
 # helper lands where it belongs without anyone editing the playbook.
@@ -1334,7 +1336,7 @@ cmd_forget_group() {
   env="$ENV_DIR/$repo.env"
   [ -f "$env" ] || { echo "no $env: the repository has no prune script of its own, nothing to take the password from" >&2; return 2; }
   command -v python3 >/dev/null 2>&1 || { echo "python3 is needed" >&2; return 2; }
-  bin="$(sed -n 's/^BIN=//p' "$PRUNE_DIR/restic-prune-$repo.sh" 2>/dev/null | head -n1)"
+  bin="$(sed -n 's/^BIN=//p' "$PRUNE_DIR/restic-prune-$repo.sh" 2>/dev/null | head -n1 || true)"
   [ -x "$bin" ] || bin="$RESTIC_BIN"
   (
     set -a; . "$env"; set +a
@@ -1369,6 +1371,69 @@ for t, i in rows:
     "$bin" forget $rl $(tail -n +2 <<<"$info" | grep -E '^[0-9a-f]{64}$') || { echo "restic forget failed" >&2; exit 2; }
     rm -f "$GROUPS_DIR/$repo.json"  # the next prune writes it anew
     echo "removed $n snapshots of $host from $repo; the space comes back with the next nightly prune"
+  )
+}
+
+# cmd_merge_group hands the snapshots of an old group over to the name the server backs up under
+# now: the server was renamed. forget groups by host, so the history under the old name is never
+# rotated; after the merge it is one group again and the usual policy decides what stays.
+# restic rewrite --new-host writes new snapshot records over the same data (nothing is copied)
+# and --forget drops the old records. Only an old group into a live one: the old host has no
+# snapshot from the last 7 days, the new one has snapshots. Without --apply it only says what
+# would happen.
+cmd_merge_group() {
+  local repo="${1:-}" host="${2:-}" to="${3:-}" apply="${4:-}" env bin
+  valid_name "$repo" || { echo "bad repository name" >&2; return 2; }
+  valid_name "$host" || { echo "bad old host name" >&2; return 2; }
+  valid_name "$to" || { echo "bad new host name" >&2; return 2; }
+  [ "$host" != "$to" ] || { echo "the old and the new host are the same" >&2; return 2; }
+  env="$ENV_DIR/$repo.env"
+  [ -f "$env" ] || { echo "no $env: the repository has no prune script of its own, nothing to take the password from" >&2; return 2; }
+  command -v python3 >/dev/null 2>&1 || { echo "python3 is needed" >&2; return 2; }
+  bin="$(sed -n 's/^BIN=//p' "$PRUNE_DIR/restic-prune-$repo.sh" 2>/dev/null | head -n1 || true)"
+  [ -x "$bin" ] || bin="$RESTIC_BIN"
+  (
+    set -a; . "$env"; set +a
+    rw="$("$bin" rewrite --help 2>&1 || true)"
+    case "$rw" in
+      *--new-host*) ;;
+      *) echo "this restic cannot rename snapshots (rewrite --new-host is in 0.17+), run: $0 restic-update" >&2; exit 2 ;;
+    esac
+    span() {
+      python3 -c '
+import json, re, sys
+from datetime import datetime
+def unix(t):
+    t = re.sub(r"\.\d+", "", t or "").replace("Z", "+00:00")
+    try:
+        return int(datetime.fromisoformat(t).timestamp())
+    except ValueError:
+        return 0
+ts = sorted(unix(s.get("time")) for s in json.load(sys.stdin) or [])
+print(len(ts), ts[0] if ts else 0, ts[-1] if ts else 0)
+'
+    }
+    old="$("$bin" snapshots --host "$host" --json 2>&1)" || { echo "restic snapshots failed: $old" >&2; exit 2; }
+    new="$("$bin" snapshots --host "$to" --json 2>&1)" || { echo "restic snapshots failed: $new" >&2; exit 2; }
+    read -r n first last <<<"$(printf '%s' "$old" | span)" || { echo "could not read the snapshot list" >&2; exit 2; }
+    read -r n2 first2 last2 <<<"$(printf '%s' "$new" | span)" || { echo "could not read the snapshot list" >&2; exit 2; }
+    if [ "${n:-0}" -eq 0 ]; then echo "no snapshots of host $host in $repo"; exit 0; fi
+    if [ $(( $(date +%s) - last )) -lt $(( 7 * 86400 )) ]; then
+      echo "host $host backed up into $repo $(( ($(date +%s) - last) / 3600 )) h ago: the group is alive, nothing changed" >&2
+      exit 2
+    fi
+    [ "${n2:-0}" -gt 0 ] || { echo "no snapshots of host $to in $repo: nothing to merge into" >&2; exit 2; }
+    echo "group $host in $repo: $n snapshots, $(date -d "@$first" +%F) .. $(date -d "@$last" +%F)"
+    echo "joins $to: $n2 snapshots, $(date -d "@$first2" +%F) .. $(date -d "@$last2" +%F)"
+    if [ "$apply" != "--apply" ]; then
+      echo "dry run, nothing changed. To merge: $0 merge-group $repo $host $to --apply"
+      exit 0
+    fi
+    rl=""; case "$rw" in *--retry-lock*) rl="--retry-lock 20m" ;; esac
+    # shellcheck disable=SC2086
+    "$bin" rewrite $rl --host "$host" --new-host "$to" --forget || { echo "restic rewrite failed" >&2; exit 2; }
+    rm -f "$GROUPS_DIR/$repo.json"  # the next prune writes it anew
+    echo "the $n snapshots of $host now belong to $to: the nightly cleanup applies the policy to them and gives the space back"
   )
 }
 
@@ -1414,13 +1479,14 @@ case "${1:-}" in
   update-image)     cmd_update_image ;;
   restic-update)    cmd_restic_update ;;
   forget-group)     shift; cmd_forget_group "$@" ;;
+  merge-group)      shift; cmd_merge_group "$@" ;;
   dedup-cron)       cmd_dedup_cron ;;
   provision-client) shift; cmd_provision_client "$@" ;;
   deploy-tls-front) shift; cmd_deploy_tls_front "$@" ;;
   get-cert)         cmd_get_cert ;;
   get-client-creds) shift; cmd_get_client_creds "$@" ;;
   process-spool)    cmd_process_spool ;;
-  *) echo "usage: $0 {stats|regen-prune|adopt-legacy [--apply] [name...]|deploy-server [port]|update-image|restic-update|forget-group <repo> <host> [--apply]|dedup-cron|provision-client <name> <hpass> <repopass> <ip> [kl kd kw km]|deploy-tls-front <ip> [dns]|get-cert|get-client-creds <name>|process-spool}" >&2; exit 2 ;;
+  *) echo "usage: $0 {stats|regen-prune|adopt-legacy [--apply] [name...]|deploy-server [port]|update-image|restic-update|forget-group <repo> <host> [--apply]|merge-group <repo> <old-host> <new-host> [--apply]|dedup-cron|provision-client <name> <hpass> <repopass> <ip> [kl kd kw km]|deploy-tls-front <ip> [dns]|get-cert|get-client-creds <name>|process-spool}" >&2; exit 2 ;;
 esac
 HELPER_EOF
 chmod 0755 "$HELPER.new" && mv -f "$HELPER.new" "$HELPER"

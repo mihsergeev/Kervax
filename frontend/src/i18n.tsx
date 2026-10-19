@@ -1047,6 +1047,17 @@ const EN: Record<string, string> = {
   'в архив': 'archive',
   'группа {host} в архиве': 'group {host} archived',
   'старая группа {host}': 'old group {host}',
+  'прежнее имя сервера {host}': 'former server name {host}',
+  'пути': 'paths',
+  'склеить с {host}': 'merge into {host}',
+  'старые снапшоты не вычищаются': 'old snapshots are not being removed',
+  'Отдать эти снапшоты новому имени: дальше их чистит общая политика': 'Hand these snapshots over to the new name: from then on the usual policy cleans them',
+  'Чистка restic идет по группам (хост и теги) и последние снапшоты каждой группы держит всегда: группа, в которую больше не бэкапятся, сама не уйдет.':
+    'restic cleans up group by group (host and tags) and always keeps the last snapshots of each group: a group nothing backs up into anymore never goes away by itself.',
+  'На бэкап-сервере. Снапшоты прежнего имени получат имя {to}, и дальше их чистит общая политика: лишние уйдут ночной чисткой, остальные останутся, пока нужны политике. Данные не копируются. Без --apply команда только покажет, что сделает.':
+    'On the backup server. The snapshots of the former name get the name {to} and the usual policy cleans them from then on: the extra ones go with the nightly cleanup, the rest stay while the policy needs them. No data is copied. Without --apply the command only shows what it would do.',
+  'Склейку helper backupserver-setup умеет с версии {v}, здесь {cur}: обновите helper на этом сервере.':
+    'The backupserver-setup helper can merge from version {v}, this server has {cur}: update the helper here.',
   'Хранить группу как есть и не считать её встающей ротацией': 'Keep the group as is and do not count it as a stalled rotation',
   'как удалить': 'how to remove',
   'вернуть': 'restore',

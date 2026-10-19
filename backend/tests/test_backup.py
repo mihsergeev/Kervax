@@ -490,13 +490,58 @@ def test_archive_is_not_a_problem_and_old_groups_are_named():
     assert collector.backup_unmonitored({"repos": [renamed]}, set(), set(), now) == ["vpn-a"]
     assert collector.backup_unmonitored({"repos": [renamed]}, set(), set(), now, {"vpn-a": {}}) == []
     stale = collector.rotation_stale_repos(bs, now, extra)
-    assert stale == ["vpn-a (860 дн. > 231, старая группа vpn-a: 12 снапшотов)"], stale
+    assert stale == ["vpn-a (группа vpn-a больше не бэкапится: 12 снапшотов, по 04.06.2024)"], stale
     assert collector.rotation_stale_repos(bs, now, extra, {"vpn-a|vpn-a": {}}) == []
     assert collector.rotation_stale_repos(bs, now, extra, {"vpn-a": {}}) == []
     assert [g["host"] for g in collector.old_groups(extra, None, "vpn-a", ts)] == ["vpn-a"]
     # группы старше трех суток (prune-скрипт не запускается) - не судим по ним
     stale_groups = {"repos": {"vpn-a": {"groups": dict(extra["repos"]["vpn-a"]["groups"], ts=ts - 5 * d)}}}
     assert collector.old_groups(stale_groups, None, "vpn-a", ts) == []
+
+
+def test_renamed_server_is_named_as_rename():
+    """Сервер переименовали: старая группа кончилась 19.07, с 20.07 те же пути бэкапятся под новым
+    именем. forget группирует по хосту, и старая история не уйдет никогда - говорим, что это
+    переименование, а не просто "233 дн. > 231"."""
+    from datetime import datetime, timezone
+
+    from app import collector
+
+    now = datetime(2026, 10, 19, 12, tzinfo=timezone.utc)
+    ts = now.timestamp()
+    d = 86400
+    jul19 = datetime(2026, 7, 19, 3, tzinfo=timezone.utc).timestamp()
+    repo = {"name": "vpn-c", "valid": True, "snapshots": 30, "last_activity": ts - 3600, "oldest_snapshot": ts - 233 * d,
+            "rotation_removed": 0, "keep_daily": 7, "keep_weekly": 4, "keep_monthly": 6}
+    cur = {"host": "vpn-c", "tags": [], "paths": ["/"], "n": 14, "first": jul19 + d, "last": ts - 3600}
+    old = {"host": "vpn-old", "tags": [], "paths": ["/"], "n": 15, "first": ts - 233 * d, "last": jul19}
+    extra = {"repos": {"vpn-c": {"groups": {"ts": ts - 3600, "groups": [cur, old]}}}}
+    assert collector.rotation_stale_repos({"repos": [repo]}, now, extra) == [
+        "vpn-c (сервер переименовали из vpn-old: 15 снапшотов под старым именем, по 19.07.2026)"]
+    assert collector.renamed_to([cur, old], old) == "vpn-c"
+    # другие пути или перерыв больше недели - не переименование
+    assert collector.renamed_to([dict(cur, paths=["/srv"]), old], old) == ""
+    assert collector.renamed_to([dict(cur, first=jul19 + 9 * d), old], old) == ""
+    assert collector.renamed_to([dict(cur, tags=["db"]), old], old) == ""
+    # несколько старых групп: первая словами, остальные числом
+    older = dict(old, host="vpn-older", n=1, last=jul19 - 30 * d)
+    assert collector.old_group_text([old, older], [cur, old, older]) == (
+        "сервер переименовали из vpn-old: 15 снапшотов под старым именем, по 19.07.2026, и еще старых групп: 1")
+    assert collector.old_group_text([older], [cur, older]).startswith("группа vpn-older больше не бэкапится: 1 снапшот, по ")
+
+
+def test_merge_group_renames_an_old_group_by_hand():
+    """helper 0.33: merge-group отдает старую группу новому имени (restic rewrite --new-host
+    --forget), только старую в живую, без --apply ничего не меняет."""
+    from pathlib import Path
+    src = (Path(__file__).resolve().parents[2] / "agent" / "backupserver-setup.sh").read_text(encoding="utf-8")
+    assert "KERVAX_SETUP_VERSION=0.33" in src
+    fn = src[src.index("cmd_merge_group() {"):]
+    fn = fn[:fn.index("\n}\n")]
+    assert 'rewrite $rl --host "$host" --new-host "$to" --forget' in fn
+    assert fn.index('"$apply" != "--apply"') < fn.index("rewrite $rl")
+    assert "7 * 86400" in fn and "nothing to merge into" in fn and 'rm -f "$GROUPS_DIR/$repo.json"' in fn
+    assert 'merge-group)      shift; cmd_merge_group "$@" ;;' in src
 
 
 async def test_archive_endpoint_and_late_reasons_in_the_server_list(client, auth_headers):
@@ -720,7 +765,7 @@ def test_new_client_user_reaches_every_rest_server():
     клиента ждала только HTTP. Теперь SIGHUP всем rest-server над данными и ожидание обоих портов."""
     from pathlib import Path
     src = (Path(__file__).resolve().parents[2] / "agent" / "backupserver-setup.sh").read_text(encoding="utf-8")
-    assert "KERVAX_SETUP_VERSION=0.32" in src and b"\r" not in src.encode()
+    assert b"\r" not in src.encode()
     body = src[src.index("cmd_provision_client() {"):]
     hp, sig, tls = body.index("htpasswd -bB"), body.index("rest_reload_htpasswd"), body.index('"https://127.0.0.1:$TLS_PORT/$name/config"')
     assert hp < sig < tls < body.index("$RESTIC_BIN\" init")

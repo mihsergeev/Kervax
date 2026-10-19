@@ -1751,15 +1751,39 @@ function ArchiveForm({ server: s, repo, host, onCancel, onDone }: {
   )
 }
 
+// Склейку переименованного сервера с его прежним именем (merge-group) helper умеет с 0.33
+const MERGE_HELPER = '0.33'
+
+function verAtLeast(a: string | undefined | null, b: string): boolean {
+  if (!a) return false
+  const pa = a.split('.').map((x) => parseInt(x, 10) || 0)
+  const pb = b.split('.').map((x) => parseInt(x, 10) || 0)
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    if ((pa[i] ?? 0) !== (pb[i] ?? 0)) return (pa[i] ?? 0) > (pb[i] ?? 0)
+  }
+  return true
+}
+
+// Под каким именем сервер бэкапится теперь, если старая группа - его прежнее имя (как renamed_to
+// на бэкенде): самая свежая группа началась не позже недели после конца старой, пути и теги те же
+function renamedTo(groups: BackupGroup[], g: BackupGroup): string {
+  const cur = groups.reduce((a, b) => (b.last > a.last ? b : a))
+  if (!cur.host || cur.host === g.host) return ''
+  const same = (a: string[], b: string[]) => [...a].sort().join('\n') === [...b].sort().join('\n')
+  return same(cur.paths, g.paths) && same(cur.tags, g.tags) && Math.abs(cur.first - g.last) <= 7 * 86400 ? cur.host : ''
+}
+
 // Группы снапшотов репозитория (хост и теги, как их видит forget) от helper'а 0.28. Старая
 // группа - хост, который больше не бэкапится сюда: переименовали, сервера нет, разовый бэкап.
-// Политика держит её последние снапшоты вечно. Её можно убрать в архив (хранить как есть) или
-// удалить командой на сервере: удаление только руками и только старой группы.
+// Политика держит её последние снапшоты вечно. Переименованный сервер можно склеить с прежним
+// именем (дальше историю чистит общая политика), старую группу - убрать в архив (хранить как
+// есть) или удалить. Склейка и удаление - командой на сервере, руками и только старой группы.
 function RepoGroups({ server: s, repo, ext, canAct, onChanged }: {
   server: Server; repo: string; ext: BackupServerExtra | null; canAct: boolean; onChanged: () => void
 }) {
   const { t } = useI18n()
   const [archiving, setArchiving] = useState('')
+  // какая команда раскрыта: "merge:<хост>" или "forget:<хост>"
   const [showCmd, setShowCmd] = useState('')
   const [copied, setCopied] = useState('')
   const [busy, setBusy] = useState(false)
@@ -1785,26 +1809,45 @@ function RepoGroups({ server: s, repo, ext, canAct, onChanged }: {
     setCopied(key)
     window.setTimeout(() => setCopied(''), 1500)
   }
+  const toggleCmd = (key: string) => setShowCmd(showCmd === key ? '' : key)
+  const helperVer = s.last_report?.setup_versions?.['backupserver-setup']
+  const canMerge = verAtLeast(helperVer == null ? '' : String(helperVer), MERGE_HELPER)
+  const live = old.filter((x) => !arch[`${repo}|${x.host}`])
   return (
     <div className="repo-groups small">
+      {live.length > 0 && (
+        <div className="muted">
+          {t('Чистка restic идет по группам (хост и теги) и последние снапшоты каждой группы держит всегда: группа, в которую больше не бэкапятся, сама не уйдет.')}
+        </div>
+      )}
       {old.map((x) => {
         const entry: BackupArchiveEntry | undefined = arch[`${repo}|${x.host}`]
-        const cmd = `sudo /lib65/kervax/kervax-backupserver-helper forget-group ${repo} ${x.host}`
+        const to = renamedTo(groups, x)
+        const helper = 'sudo /lib65/kervax/kervax-backupserver-helper'
+        const cmd = `${helper} forget-group ${repo} ${x.host}`
+        const mergeCmd = `${helper} merge-group ${repo} ${x.host} ${to}`
         return (
           <div key={x.host + x.tags.join(',')} className="repo-group">
             <div className="repo-group-line">
               <span className={entry ? 'muted' : 't-degraded'}>
-                {entry ? t('группа {host} в архиве', { host: x.host }) : t('старая группа {host}', { host: x.host })}
+                {entry ? t('группа {host} в архиве', { host: x.host })
+                  : to ? t('прежнее имя сервера {host}', { host: x.host }) : t('старая группа {host}', { host: x.host })}
                 {`: ${t('снапшотов: {n}', { n: x.n })}, ${fmtDay(x.first)} - ${fmtDay(x.last)}`}
                 {entry?.note ? ` (${entry.note})` : ''}
               </span>
               {canAct && !entry && (
                 <>
+                  {to && (
+                    <button className="ghost small-btn" onClick={() => toggleCmd(`merge:${x.host}`)}
+                      title={t('Отдать эти снапшоты новому имени: дальше их чистит общая политика')}>
+                      {t('склеить с {host}', { host: to })}
+                    </button>
+                  )}
                   <button className="ghost small-btn" onClick={() => setArchiving(archiving === x.host ? '' : x.host)}
                     title={t('Хранить группу как есть и не считать её встающей ротацией')}>
                     🗄 {t('в архив')}
                   </button>
-                  <button className="ghost small-btn" onClick={() => setShowCmd(showCmd === x.host ? '' : x.host)}>
+                  <button className="ghost small-btn" onClick={() => toggleCmd(`forget:${x.host}`)}>
                     {t('как удалить')}
                   </button>
                 </>
@@ -1813,12 +1856,31 @@ function RepoGroups({ server: s, repo, ext, canAct, onChanged }: {
                 <button className="ghost small-btn" disabled={busy} onClick={() => unarchive(x.host)}>{t('вернуть')}</button>
               )}
             </div>
-            {!entry && x.paths.length > 0 && <div className="muted mono">{x.paths.join(' ')}</div>}
+            {!entry && x.paths.length > 0 && <div className="muted">{t('пути')}: <span className="mono">{x.paths.join(' ')}</span></div>}
             {archiving === x.host && (
               <ArchiveForm server={s} repo={repo} host={x.host} onCancel={() => setArchiving('')}
                 onDone={() => { setArchiving(''); onChanged() }} />
             )}
-            {showCmd === x.host && (
+            {showCmd === `merge:${x.host}` && (
+              <div className="repo-cleanup">
+                {canMerge ? (
+                  <>
+                    <div className="muted">
+                      {t('На бэкап-сервере. Снапшоты прежнего имени получат имя {to}, и дальше их чистит общая политика: лишние уйдут ночной чисткой, остальные останутся, пока нужны политике. Данные не копируются. Без --apply команда только покажет, что сделает.', { to })}
+                    </div>
+                    <div className="agent-advice-cmd">
+                      <pre>{mergeCmd}</pre>
+                      <button className="ghost" onClick={() => copy(`m:${x.host}`, mergeCmd)}>{copied === `m:${x.host}` ? t('Скопировано') : t('Копировать')}</button>
+                    </div>
+                  </>
+                ) : (
+                  <div className="muted">
+                    {t('Склейку helper backupserver-setup умеет с версии {v}, здесь {cur}: обновите helper на этом сервере.', { v: MERGE_HELPER, cur: helperVer == null ? '?' : String(helperVer) })}
+                  </div>
+                )}
+              </div>
+            )}
+            {showCmd === `forget:${x.host}` && (
               <div className="repo-cleanup">
                 <div className="muted">
                   {t('На бэкап-сервере. Без --apply команда только покажет, что удалится, с --apply удалит снапшоты группы, место вернет ночная чистка. Группу, в которую бэкапились последнюю неделю, команда удалять откажется.')}
@@ -2381,8 +2443,27 @@ function BackupServerModal({ server: s, info, servers, canAct, initialSec, onCha
                     ))}
                   </div>
                 )}
+                {/* у каждого репозитория причина и тут же что с ней сделать: склеить с прежним
+                    именем, в архив, удалить (раньше была одна строка, а кнопки только в разделе репозиториев) */}
                 {rot.length > 0 && (
-                  <div className="net-note">{t('старые снапшоты не вычищаются: {list}', { list: rot.join(', ') })}</div>
+                  <div className="loc-results docker-clist">
+                    {rot.map((x) => {
+                      const name = x.split(' (')[0]
+                      const why = x.slice(name.length).replace(/^ \(/, '').replace(/\)$/, '')
+                      return (
+                        <div key={x} className="loc-res docker-row repo-row repo-row-col t-degraded">
+                          <div className="repo-row-main">
+                            <span className="lk-dot lk-dot-warn" />
+                            <div className="docker-c-main">
+                              <div className="docker-c-name mono">{name}</div>
+                              <div className="docker-c-img small repo-rot-why">{why ? `${t('старые снапшоты не вычищаются')}: ${why}` : t('старые снапшоты не вычищаются')}</div>
+                            </div>
+                          </div>
+                          <RepoGroups server={s} repo={name} ext={ext} canAct={canAct} onChanged={onChanged} />
+                        </div>
+                      )
+                    })}
+                  </div>
                 )}
                 {!pruneNames.length && !rot.length && !(legacy && legacyN > 0) && (
                   <div className="srv-empty">{ok.cleanup}</div>
