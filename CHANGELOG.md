@@ -4,6 +4,15 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.4.294] - 2026-10-20
+
+### Changed
+- Если замечание с шагами исправления (старый прокси, docker-сокет, ключи от хоста, restart policy,
+  обновления ОС, SSH, заброшенные учетки, юниты без enable, версии ПО без поддержки,
+  pg_stat_statements) исправили, пока раздел открыт, раздел больше не пустеет сразу: на месте
+  замечания зеленый бар, что изменилось (например образ прокси обновлен до 2.13.1), и кнопка
+  "закрыть". Пустой раздел показывается после "закрыть" или ухода из раздела.
+
 ## [1.4.293] - 2026-10-20
 
 ### Changed

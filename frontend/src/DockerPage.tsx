@@ -17,7 +17,7 @@ import { useI18n } from './i18n'
 import { DOCKRISK_MUTE, NOBOOT_MUTE, RESTARTS_DAY_MIN } from './mutes'
 import { OsIcon } from './osIcon'
 import { CountryFlag } from './CountryFlag'
-import { FixSteps } from './FixSteps'
+import { FixSteps, useFixDone } from './FixSteps'
 import { dockRiskText, proxyBuilt, shortList, srvIssues, srvMuted } from './serverUtils'
 import { fmtRel } from './ServersPage'
 import { CardNav, FreshChip, markMuted, OvAreas, OvRows, secInfoOf, type OvRow, type SecDef, type SecInfo, type SecItem } from './cardLayout'
@@ -914,6 +914,27 @@ function DockerHostModal({
   const cur = secs.find((x) => x.id === active) ?? secs[0]
   useUrlParam('sec', cur.id === 'overview' ? null : cur.id)
 
+  // Исправили замечание, пока раздел открыт: зеленый бар на его месте, что изменилось - по
+  // свежему списку контейнеров; пустое состояние раздела - после "закрыть" (useFixDone)
+  const watch = s.online && docker.access
+  const byName = new Map(cs.map((c) => [c.name, c]))
+  const goneText = (name: string, then: (c: DockerContainer) => string) => {
+    const c = byName.get(name)
+    return c ? then(c) : t('{name}: контейнера больше нет, замечание закрыто', { name })
+  }
+  const proxyDone = useFixDone(watch ? outdated : null, (p) => p.key, (p) => goneText(p.name, (c) => c.image !== p.image
+    ? t('{name}: образ обновлен до {image}, замечание закрыто', { name: p.name, image: c.image })
+    : t('{name}: образ {image} скачан заново, свежая сборка, замечание закрыто', { name: p.name, image: c.image })),
+  { live: (p) => !p.muted, on: cur.id === 'proxy' })
+  const sockDone = useFixDone(watch ? exposed : null, (e) => e.name, (e) => goneText(e.name, () =>
+    t('{name}: docker-сокет больше не смонтирован, замечание закрыто', { name: e.name })), { on: cur.id === 'host' })
+  const riskDone = useFixDone(watch ? s.docker_risk : null, (x) => x.name, (x) => goneText(x.name, () =>
+    t('{name}: ключей от хоста больше нет (было: {what}), замечание закрыто', { name: x.name, what: dockRiskText(x, t) })),
+  { live: (x) => !x.muted, on: cur.id === 'host' })
+  const bootDone = useFixDone(watch ? s.noboot?.docker : null, (x) => x.name, (x) => goneText(x.name, (c) =>
+    t('{name}: restart {policy}, поднимется после перезагрузки, замечание закрыто', { name: x.name, policy: c.policy || '-' })),
+  { live: (x) => !x.muted, on: cur.id === 'boot' })
+
   // Замечания по разделам. Проблемы те же, что в "Что сломано" на главной: упавшие и крутящиеся
   // по кругу (docker_alerts), docker-сокет у прокси, утечки и частые перезапуски с бэкенда.
   // Ключи от хоста, старый прокси и restart policy - советы из "Требует действий"
@@ -1156,9 +1177,11 @@ function DockerHostModal({
 
               {cur.id === 'host' && (
                 <div className="srv-sec">
+                  {sockDone.bars}
+                  {riskDone.bars}
                   {exposed.length > 0 && <SockWarning items={exposed} />}
                   {(s.docker_risk?.length ?? 0) > 0 && <RiskWarning server={s} canAct={canAct} onChanged={onChanged} />}
-                  {!exposed.length && !(s.docker_risk?.length ?? 0) && (
+                  {!exposed.length && !(s.docker_risk?.length ?? 0) && !sockDone.done.length && !riskDone.done.length && (
                     <div className="srv-empty">
                       {s.docker_risk
                         ? t('Ни у одного контейнера нет ключей от хоста: ни docker-сокета, ни privileged, ни опасных capabilities, ни корня хоста на запись.')
@@ -1170,9 +1193,10 @@ function DockerHostModal({
 
               {cur.id === 'proxy' && (
                 <div className="srv-sec">
+                  {proxyDone.bars}
                   {outdated.length > 0 ? (
                     <ProxyOldWarning server={s} items={outdated} canAct={canAct} onChanged={onChanged} />
-                  ) : (
+                  ) : !proxyDone.done.length && (
                     <div className="srv-empty">
                       {t('Внешний прокси {list}: образ собран меньше года назад.', { list: proxies.map((c) => `${c.name} (${c.image})`).join(', ') })}
                     </div>
@@ -1182,9 +1206,10 @@ function DockerHostModal({
 
               {cur.id === 'boot' && (
                 <div className="srv-sec">
+                  {bootDone.bars}
                   {(s.noboot?.docker.length ?? 0) > 0 ? (
                     <NoBootWarning server={s} canAct={canAct} onChanged={onChanged} />
-                  ) : (
+                  ) : !bootDone.done.length && (
                     <div className="srv-empty">
                       {policyKnown
                         ? t('У всех контейнеров restart policy always или unless-stopped: после перезагрузки докер поднимет их сам.')

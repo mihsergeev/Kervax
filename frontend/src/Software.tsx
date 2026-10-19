@@ -1,7 +1,7 @@
 import { Fragment, useCallback, useEffect, useState } from 'react'
 import { getSoftware, updateServer, type Server, type SoftwareItem, type SoftwareOut, type SwFixBlock } from './api'
 import { useAuth } from './auth'
-import { FixSteps } from './FixSteps'
+import { FixSteps, useFixDone } from './FixSteps'
 import { useI18n } from './i18n'
 import { swDecisionLabel } from './mutes'
 
@@ -165,7 +165,15 @@ export function SoftwareCard({ server: s, onChanged }: { server: Server; onChang
     const h = window.setInterval(load, 10 * 60_000)
     return () => window.clearInterval(h)
   }, [load])
-  if (!data || (!data.items.length && !data.unknown.length && !data.old.length)) return null
+  // версия без поддержки ушла, пока была на экране: на что обновили - по свежему списку
+  const fixed = useFixDone(data ? data.items.filter((g) => g.state === 'eol' || g.state === 'soon') : null, (g) => g.key, (g) => {
+    if (data?.items.some((x) => x.key === g.key)) return t('{name} {cycle}: поддержка продлена, замечание закрыто', { name: g.name, cycle: g.cycle })
+    const now = data?.items.filter((x) => x.name === g.name).map((x) => x.cycle) ?? []
+    return now.length
+      ? t('{name} обновлен с {from} до {to}, замечание закрыто', { name: g.name, from: g.cycle, to: now.join(', ') })
+      : t('{name} {cycle} на ноде больше нет, замечание закрыто', { name: g.name, cycle: g.cycle })
+  }, { live: (g) => !(g.mkey && mutes.includes(g.mkey)) })
+  if (!data || (!data.items.length && !data.unknown.length && !data.old.length && !fixed.done.length)) return null
   return (
     <div className="net-cards">
       <div className="chart-card net-card net-card-wide" id="mcard-software">
@@ -175,6 +183,7 @@ export function SoftwareCard({ server: s, onChanged }: { server: Server; onChang
             <span className="muted small">{t('сроки поддержки по endoflife.date на {d}', { d: ddmmyyyy(data.built) })}</span>
           )}
         </div>
+        {fixed.bars}
         {data.items.length > 0 && (
           <div className="sw-list">
             {data.items.map((g) => {
