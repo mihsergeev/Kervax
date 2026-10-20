@@ -15,6 +15,7 @@ from fastapi.responses import FileResponse, PlainTextResponse
 from sqlalchemy import delete as sa_delete, func, select, update as sa_update
 
 from app import backup_verify
+from app import relay as relay_mod
 from app import disk_wear
 from app import request_watch
 from app import panel_errors
@@ -240,6 +241,7 @@ def _out(
     o.helper_advice = _helper_advice(
         server, cur_versions if cur_versions is not None else _current_setup_versions()
     )
+    o.relay = relay_mod.view(server, now)
     o.helper_rollout = helper_rollout(server, o.helper_advice)
     o.backup_audit = _backup_coverage(server)
     o.custom_backups = custom_backups.views(server, now)
@@ -597,6 +599,7 @@ _SETUP_LABEL = {
     "logerr-setup": "Ошибки в логах контейнеров",
     "fpm-setup": "Пулы PHP-FPM",
     "sockfix-setup": "Compose внешнего прокси: сокет и образ",
+    "relay-setup": "Ретранслятор для агентов",
 }
 
 
@@ -641,7 +644,7 @@ def _helper_advice(server: Server, cur: dict[str, str]) -> list[HelperAdvice]:
     out: list[HelperAdvice] = []
     # идём по тому, что панель РЕАЛЬНО раздаёт (cur), а не по списку в коде
     for name, c in sorted(cur.items()):
-        if not _setup_needed(name, rep, server.alert_mutes):
+        if not _setup_needed(name, rep, server.alert_mutes, relay=server.relay_enabled):
             continue
         inst = sv.get(name)  # None = helper до версионирования
         # агенты < 1.63 слали версии числами — приводим к строке, чтобы не спорить о типах
@@ -1501,6 +1504,8 @@ async def delete_server(
     # кто стоял за этим сервером или зависел от него вручную - теперь ни за кем, а мониторы
     # снова ищут родителя сами
     await session.execute(sa_update(Server).where(Server.parent_id == server_id).values(parent_id=None))
+    # ходившие через ретранслятор на этом сервере - больше ни через какой
+    await session.execute(sa_update(Server).where(Server.relay_via_id == server_id).values(relay_via_id=None))
     await session.execute(
         sa_update(Check).where(Check.parent_server_id == server_id)
         .values(parent_server_id=None, parent_mode="auto"))

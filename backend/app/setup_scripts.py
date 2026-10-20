@@ -50,12 +50,17 @@ def current_setup_versions() -> dict[str, str]:
     return out
 
 
-def setup_needed(name: str, rep: dict, mutes: list[str] | None = None) -> bool:
-    """Нужен ли helper этой ноде; mutes - решения человека по ноде (alert_mutes сервера).
+def setup_needed(name: str, rep: dict, mutes: list[str] | None = None, relay: bool = False) -> bool:
+    """Нужен ли helper этой ноде; mutes - решения человека по ноде (alert_mutes сервера),
+    relay - на сервере включен ретранслятор для агентов (app/relay.py).
 
     Незнакомое имя (helper добавили, а условие сюда не дописали) считаем нужным
     всюду: лучше лишний пункт в «Требует действий», который сразу видно и легко
     уточнить, чем невыкаченный helper, о котором панель молчит месяцами."""
+    # relay-setup - только где в настройках сервера включен ретранслятор: helper держит прокси
+    # и открывает порт, это решение человека, а не свойство ноды
+    if name == "relay-setup":
+        return relay
     if name == "backupserver-setup":
         bsrv = rep.get("backup_server") or {}
         return bool(bsrv.get("present") and bsrv.get("repos"))
@@ -134,10 +139,12 @@ _HELPER_LABEL = {
     "logerr-setup": "ошибки в логах контейнеров",
     "fpm-setup": "пулы PHP-FPM",
     "sockfix-setup": "compose внешнего прокси: сокет и образ",
+    "relay-setup": "ретранслятор для агентов",
 }
 
 
-def gaps(rep: dict, cur: dict[str, str], mutes: list[str] | None = None) -> list[tuple[str, str]]:
+def gaps(rep: dict, cur: dict[str, str], mutes: list[str] | None = None,
+         relay: bool = False) -> list[tuple[str, str]]:
     """Что на ноде появилось, а покрытия под это нет: (ключ, человеческая строка).
 
     Только ПЕРВАЯ установка и доступы. Устаревшая версия helper'а сюда НЕ попадает:
@@ -161,7 +168,7 @@ def gaps(rep: dict, cur: dict[str, str], mutes: list[str] | None = None) -> list
         out.append(("kube", _MISSING_LABEL["kube"]))
     sv = rep.get("setup_versions") or {}
     for name in sorted(cur):
-        if not setup_needed(name, rep, mutes) or sv.get(name) is not None:
+        if not setup_needed(name, rep, mutes, relay) or sv.get(name) is not None:
             continue
         if name == "kube-setup" and ("kube", _MISSING_LABEL["kube"]) in out:
             continue  # про кластер уже сказано строкой выше — не дублируем

@@ -2203,6 +2203,12 @@ export type Server = {
   offline_after_seconds: number
   alert_sustain_seconds: number // сколько держать превышение до алерта, сек
   parent_id?: number | null // за каким сервером стоит (шлюз, VPN): пока тот молчит, про этот не пишем
+  // ретранслятор для агентов на этом сервере (app/relay.py) и через какой ходит агент этого сервера
+  relay_enabled?: boolean
+  relay_port?: number // 0 - по умолчанию
+  relay?: RelayView | null
+  relay_via_id?: number | null
+  created_at?: string | null
   // лимит трафика тарифа (app/traffic.py): ГБ (0 - нет), что считает хостер, день начала периода
   traffic_limit_gb?: number
   traffic_count?: 'out' | 'both'
@@ -2999,6 +3005,27 @@ export function snoozeServerAlert(
     method: 'POST',
     body: JSON.stringify({ kind, hours }),
   })
+}
+// Ретранслятор для агентов: state - off нет, no_helper (helper не поставлен), waiting (еще не
+// спрашивал панель), ok, error (error - что сказал helper), stale (давно молчит)
+export type RelayView = {
+  state: 'no_helper' | 'waiting' | 'ok' | 'error' | 'stale'
+  port: number
+  clients: number
+  firewall: string // ufw | firewalld | none | ''
+  error: string
+  conns: number
+  denied: number
+  seen_at: string | null
+  helper: string
+}
+export function setRelay(id: number, body: { enabled: boolean; port?: number }): Promise<Server> {
+  return api<Server>(`/api/servers/${id}/relay`, { method: 'PUT', body: JSON.stringify(body) })
+}
+// путь агента в панель для команды установки: proxy - адрес прокси с логином (ретранслятор, локация)
+export type InstallVia = { mode: 'direct' | 'relay' | 'location' | 'custom'; relay_id?: number; location_id?: number; ip?: string }
+export function installVia(id: number, body: InstallVia): Promise<{ proxy: string; ip: string }> {
+  return api<{ proxy: string; ip: string }>(`/api/servers/${id}/install-via`, { method: 'POST', body: JSON.stringify(body) })
 }
 export function rotateServerToken(id: number): Promise<ServerEnroll> {
   return api<ServerEnroll>(`/api/servers/${id}/rotate`, { method: 'POST' })

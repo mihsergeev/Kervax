@@ -1211,6 +1211,32 @@ class ServerUpdate(BaseModel):
     _kube_days = field_validator("kube_expiry_warn_days")(_clean_warn_days)
 
 
+class RelayUpdate(BaseModel):
+    """Галочка "Ретранслятор для агентов" в настройках сервера (app/relay.py)."""
+    enabled: bool
+    port: int | None = Field(default=None, ge=0, le=65535)  # None - не менять, 0 - по умолчанию
+
+    @field_validator("port")
+    @classmethod
+    def _port(cls, v: int | None) -> int | None:
+        if v is not None and 0 < v < 1024:
+            raise ValueError("порт ретранслятора - от 1024 до 65535")
+        return v
+
+
+class InstallViaIn(BaseModel):
+    """Как агент этого сервера пойдет в панель: окно команды установки."""
+    mode: str = Field(pattern=r"^(direct|relay|location|custom)$")
+    relay_id: int | None = None
+    location_id: int | None = None
+    ip: str = Field(default="", max_length=64)  # внешний IP сервера: страна, проверки, фаервол ретранслятора
+
+
+class InstallViaOut(BaseModel):
+    proxy: str = ""  # для команды установки; пусто - напрямую или свой прокси (его знает только браузер)
+    ip: str = ""
+
+
 class BackupAudit(BaseModel):
     """Находка аудита покрытия бэкапа: что на ноде рискует не восстановиться."""
 
@@ -1402,6 +1428,13 @@ class ServerOut(BaseModel):
     first_report_at: datetime | None = None
     # за каким сервером стоит (шлюз, VPN): пока тот молчит, "недоступен" про этот не шлем
     parent_id: int | None = None
+    # ретранслятор для агентов на этом сервере (app/relay.py, без логина и пароля) и через
+    # какой ретранслятор ходит агент этого сервера
+    relay_enabled: bool = False
+    relay_port: int = 0
+    relay: dict | None = None
+    relay_via_id: int | None = None
+    created_at: datetime | None = None
     online: bool = False  # вычисляется (last_seen в пределах offline_after)
     cpu_alert_percent: int
     mem_alert_percent: int

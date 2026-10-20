@@ -1,4 +1,5 @@
-import { isProxyUrl, withProxy } from './installProxy'
+import { withProxy } from './installProxy'
+import { InstallPath, type InstallMode } from './InstallPath'
 import { type ReactNode, useCallback, useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import {
@@ -20,6 +21,8 @@ import {
   kubeCommandStatus,
   listServers,
   rotateServerToken,
+  setRelay,
+  type RelayView,
   serverMetrics,
   serverOom,
   serverOomEvents,
@@ -5542,12 +5545,21 @@ export function EnrollModal({
   )
 }
 
-export function InstallModal({ enroll, onClose, title }: { enroll: ServerEnroll; onClose: () => void; title?: string }) {
+export function InstallModal({
+  enroll,
+  onClose,
+  title,
+  mode,
+}: {
+  enroll: ServerEnroll
+  onClose: () => void
+  title?: string
+  mode?: InstallMode // с чего открыть выбор пути (подсказка "агент не достает до панели")
+}) {
   const { t } = useI18n()
   const [copied, setCopied] = useState(false)
-  // прокси до панели: дописывается в команду здесь же, на панель не уходит (см. installProxy)
+  // путь до панели (InstallPath): прокси ретранслятора, локации или свой - в команду
   const [proxy, setProxy] = useState('')
-  const proxyBad = proxy.trim() !== '' && !isProxyUrl(proxy)
   const cmd = withProxy(enroll.install_cmd, proxy)
   // живая проверка: поллим сервер, пока агент не пришлёт первый отчёт
   const [connected, setConnected] = useState<Server | null>(null)
@@ -5606,30 +5618,14 @@ export function InstallModal({ enroll, onClose, title }: { enroll: ServerEnroll;
             {t('«main» — произвольное имя, оно лишь отличает панели между собой. Агенты будут работать рядом, каждый со своей панелью.')}
           </p>
         </details>
-        <details className="install-alt" open={proxy !== '' || undefined}>
-          <summary className="muted small">{t('Сервер не достает до панели напрямую?')}</summary>
-          <p className="muted small install-alt-hint">
-            {t('Если адрес сервера режут на пути к панели, агент может ходить в нее через прокси. Он попадет в команду выше и в конфиг агента на сервере, панель его не хранит.')}
-          </p>
-          <label className="field">
-            <span>{t('Прокси')}</span>
-            <input
-              value={proxy}
-              onChange={(e) => {
-                setProxy(e.target.value)
-                setCopied(false)
-              }}
-              placeholder="http://user:password@proxy.example.com:3128"
-              autoComplete="off"
-              spellCheck={false}
-            />
-            <span className={`field-hint small ${proxyBad ? 'form-error' : 'muted'}`}>
-              {proxyBad
-                ? t('Нужен вида http://логин:пароль@хост:порт (подходят и https://, socks5://), без пробелов и кавычек.')
-                : t('Панель увидит адрес прокси, а не сервера: укажите внешний IP сервера в его настройках (IP сервера), по нему страна и проверки снаружи. IP прокси должен быть разрешен в фаерволе панели.')}
-            </span>
-          </label>
-        </details>
+        <InstallPath
+          server={enroll.server}
+          initial={mode}
+          onProxy={(p) => {
+            setProxy(p)
+            setCopied(false)
+          }}
+        />
         <p className="muted small install-fw-note">
           {t('⏱ Файрвол панели открывается для IP новой ноды в течение ~2 мин. Если команда упала по таймауту (curl: timed out) — подождите минуту и повторите её же.')}
         </p>
@@ -5664,6 +5660,36 @@ export function InstallModal({ enroll, onClose, title }: { enroll: ServerEnroll;
   )
 }
 
+const RELAY_DEFAULT_PORT = 8790
+
+// Сервер заведен, а агент так и не вышел на связь за 10 минут: скорее всего не достает до панели
+function agentLate(s: Server): boolean {
+  if (s.last_seen || !s.created_at) return false
+  return Date.now() - new Date(s.created_at).getTime() > 10 * 60_000
+}
+
+// Как дела у ретранслятора: что сказал helper relay-setup и когда
+function RelayStatus({ relay }: { relay: RelayView }) {
+  const { t } = useI18n()
+  const fw = relay.firewall === 'none' ? t('без фаервола: адреса проверяет сам прокси') : relay.firewall
+  const line =
+    relay.state === 'ok'
+      ? t('Работает: порт {port}, серверов {n}, фаервол {fw}, соединений {c}', {
+          port: relay.port,
+          n: relay.clients,
+          fw: fw || '?',
+          c: relay.conns,
+        })
+      : relay.state === 'no_helper'
+        ? t('Helper relay-setup еще не поставлен: он в "Требует действий", ставится плейбуком kervax_helpers.yml.')
+        : relay.state === 'waiting'
+          ? t('Helper поставлен, ждем его первого обращения к панели (раз в минуту).')
+          : relay.state === 'stale'
+            ? t('Helper давно не обращался к панели: сервер не на связи или не достает до нее.')
+            : t('Ошибка ретранслятора: {err}', { err: relay.error })
+  return <p className={`small ${relay.state === 'ok' ? 'muted' : 'form-error'}`}>📡 {line}</p>
+}
+
 type ServerEditForm = {
   name: string
   group_name: string
@@ -5683,6 +5709,8 @@ type ServerEditForm = {
   alert_mutes: string[]
   offline_after_seconds: number
   alert_sustain_min: number // «жарит дольше N минут» → алерт (хранится в сек)
+  relay_enabled: boolean // ретранслятор для агентов (app/relay.py), сохраняется отдельно (setRelay)
+  relay_port: number // 0 - по умолчанию
 }
 
 // типы серверных алертов, которые можно точечно заглушить для сервера (метки = SERVER_ALERT_KINDS)
@@ -5896,6 +5924,7 @@ function ServerEditCard({
   err,
   groups,
   isVm,
+  relay,
   onSubmit,
   onCancel,
   onDelete,
@@ -5906,6 +5935,7 @@ function ServerEditCard({
   err: string | null
   groups: string[]
   isVm?: boolean
+  relay?: RelayView | null
   onSubmit: () => void
   onCancel: () => void
   onDelete: () => void
@@ -6138,6 +6168,32 @@ function ServerEditCard({
           })}
         </div>
       </div>
+      {/* ретранслятор: прокси до панели для агентов, чей адрес режут на пути к ней */}
+      <label className="checkbox">
+        <input
+          type="checkbox"
+          checked={form.relay_enabled}
+          onChange={(e) => set({ relay_enabled: e.target.checked })}
+        />
+        <span>📡 {t('Ретранслятор для агентов')}</span>
+      </label>
+      <p className="muted small">
+        {t('Сервер станет прокси до панели для агентов, чей адрес режут на пути к ней. Пускает только до панели, только с адресов серверов, выбравших его в окне команды установки, и только с логином. Ставит helper relay-setup (появится в "Требует действий"), нужен python3. Включить можно, только если сервер сам ходит в панель напрямую.')}
+      </p>
+      {form.relay_enabled && (
+        <label className="field">
+          <span>{t('Порт ретранслятора')}</span>
+          <input
+            type="number"
+            min={1024}
+            max={65535}
+            value={form.relay_port || ''}
+            placeholder={String(RELAY_DEFAULT_PORT)}
+            onChange={(e) => set({ relay_port: num(e.target.value) })}
+          />
+        </label>
+      )}
+      {form.relay_enabled && relay && <RelayStatus relay={relay} />}
       <div className="modal-actions edit-actions">
         <button className="ghost" onClick={onCancel} disabled={busy}>
           {t('Отмена')}
@@ -6290,7 +6346,9 @@ function ServerDetail({
   const [histOpen, setHistOpen] = useState(false)
   // команда установки заново (чек-лист подключения): новый токен, старая команда не сработает
   const [enroll, setEnroll] = useState<ServerEnroll | null>(null)
-  const reissue = async () => {
+  const [enrollMode, setEnrollMode] = useState<InstallMode | undefined>(undefined)
+  const reissue = async (mode?: InstallMode) => {
+    setEnrollMode(mode)
     try {
       setEnroll(await rotateServerToken(s.id))
     } catch (e) {
@@ -6463,6 +6521,8 @@ function ServerDetail({
       alert_mutes: s.alert_mutes ?? [],
       offline_after_seconds: s.offline_after_seconds,
       alert_sustain_min: Math.round((s.alert_sustain_seconds ?? 900) / 60),
+      relay_enabled: !!s.relay_enabled,
+      relay_port: s.relay_port ?? 0,
     })
     setSaveErr(null)
     setEditing(true)
@@ -6493,6 +6553,16 @@ function ServerDetail({
         offline_after_seconds: form.offline_after_seconds,
         alert_sustain_seconds: Math.max(0, Math.round(form.alert_sustain_min * 60)),
       })
+      // ретранслятор отдельно: панель проверяет, что сервер сам достает до нее, и может отказать
+      if (form.relay_enabled !== !!s.relay_enabled || (form.relay_enabled && form.relay_port !== (s.relay_port ?? 0)))
+        try {
+          await setRelay(s.id, { enabled: form.relay_enabled, port: form.relay_port || 0 })
+        } catch (e) {
+          if (e instanceof ApiError && e.status === 401) return onUnauthorized()
+          onChanged() // остальное уже сохранено
+          setSaveErr(e instanceof Error ? t(e.message) : t('Ошибка'))
+          return
+        }
       onChanged()
       setEditing(false)
     } catch (e) {
@@ -6606,7 +6676,7 @@ function ServerDetail({
   const overview = (
     <div className="srv-sec">
       <OnboardBlock server={s} t={t} canManage={!isViewer} onChanged={onChanged} onOpenSection={onOpenSection}
-        onInstall={isViewer ? undefined : reissue} />
+        onInstall={isViewer ? undefined : () => reissue()} />
       {!isViewer && (s.agent_fix_command || (s.helper_advice?.length ?? 0) > 0) && (
         <ServerFixBanner titles={s.agent_advice} command={s.agent_fix_command} helpers={s.helper_advice || []} t={t} />
       )}
@@ -6805,6 +6875,7 @@ function ServerDetail({
               err={saveErr}
               groups={groups}
               isVm={r.is_vm === true}
+              relay={s.relay}
               onSubmit={submitEdit}
               onCancel={() => setEditing(false)}
               onDelete={del}
@@ -6818,9 +6889,15 @@ function ServerDetail({
               {t('Агент ещё не выходил на связь. Установите и запустите kervax-agent на ноде — метрики появятся здесь. Изменить или удалить сервер — кнопка ✎.')}
             </p>
             {/* команда показывается один раз при добавлении; потеряли - новая с новым токеном */}
+            {!isViewer && !s.first_report_at && agentLate(s) && (
+              <div className="install-late">
+                <span>{t('Агент не достает до панели? Поставьте его через ретранслятор или локацию.')}</span>
+                <button className="small-btn" onClick={() => reissue('relay')}>{t('Выбрать путь')}</button>
+              </div>
+            )}
             {!isViewer && !s.first_report_at && (
               <>
-                <button className="small-btn" onClick={reissue}>{t('Команда установки')}</button>
+                <button className="small-btn" onClick={() => reissue()}>{t('Команда установки')}</button>
                 <p className="muted small">{t('Панель выпустит новый токен: прежняя команда перестанет работать.')}</p>
               </>
             )}
@@ -7340,7 +7417,7 @@ function ServerDetail({
       <AlertHistoryModal initialTarget={s.name} onClose={() => setHistOpen(false)} onUnauthorized={onUnauthorized} />
     )}
     {enroll && (
-      <InstallModal enroll={enroll} title={t('Команда установки')} onClose={() => { setEnroll(null); onChanged() }} />
+      <InstallModal enroll={enroll} title={t('Команда установки')} mode={enrollMode} onClose={() => { setEnroll(null); onChanged() }} />
     )}
     </>
   )

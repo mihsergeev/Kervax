@@ -334,8 +334,8 @@ async def test_timer_job_failing_every_run_does_not_flap(tmp_path, monkeypatch):
 
 
 def test_every_kervax_unit_is_either_own_helper_or_alerting():
-    """Новый helper со своим юнитом: решить, алертит ли его падение (kervax-agent и дампы баз
-    для бэкапа - да, снимки для отчета и обработчики кнопок - нет)."""
+    """Новый helper со своим юнитом: решить, алертит ли его падение (kervax-agent, дампы баз
+    для бэкапа и ретранслятор для агентов - да, снимки для отчета и обработчики кнопок - нет)."""
     import re
     from pathlib import Path
 
@@ -344,7 +344,7 @@ def test_every_kervax_unit_is_either_own_helper_or_alerting():
     names = set()
     for f in agent.glob("*.sh"):
         names |= set(re.findall(r"kervax-[a-z0-9-]+\.service", f.read_text(encoding="utf-8")))
-    alerting = {"kervax-agent.service", "kervax-dumps.service"}
+    alerting = {"kervax-agent.service", "kervax-dumps.service", "kervax-relay.service"}
     assert names - alerting and all(own_helper_unit(n) for n in names - alerting), sorted(names)
     assert not any(own_helper_unit(n) for n in alerting)
 
