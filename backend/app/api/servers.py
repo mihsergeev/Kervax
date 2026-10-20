@@ -1815,7 +1815,8 @@ async def server_oom(server_id: int, user: CurrentUser, session: SessionDep) -> 
     eps = oom_mod.episodes(recs)
     conts = oom_mod.containers_of(rep)
     failed = oom_mod.units_failed_now(rep)
-    return {"episodes": [oom_mod.episode_view(e, conts, failed) for e in reversed(eps)],
+    mutes = oom_mod.mutes_now(server, datetime.now(timezone.utc))
+    return {"episodes": [oom_mod.episode_view(e, conts, failed, mutes) for e in reversed(eps)],
             "helper": oom_mod.block(rep) is not None}
 
 

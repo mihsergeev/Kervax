@@ -28,6 +28,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models import OomKill, Server
 
 EXTRA_KEY = "oom"
+# мьют по виновнику: "oom:<ключ виновника>" (culprit)
+MUTE_PREFIX = "oom:"
 # убийства с промежутком до минуты - один эпизод (на OOM ядро убивает несколько процессов подряд)
 GAP = 60
 KEEP_DAYS = 30
@@ -467,9 +469,78 @@ def containers_of(rep: dict) -> dict[str, str]:
     return out
 
 
+# -- мьют --
+# OOM, который повторяется, пока не починят виновника, глушится по нему: alert_mutes "oom:<виновник>"
+# насовсем или alert_snoozes с тем же ключом на время, OOM из-за других служб продолжают приходить.
+# Виновник - кто занимал память, а не кого убили: ядро убивает самый крупный процесс, и в эпизоде
+# из-за php-fpm (x32 по 200мб) первым убитым был mysqld на 525мб. "oom" целиком глушит все OOM сервера.
+# Заглушенный эпизод учитывается молча: когда мьют кончится, о старом не придет.
+
+def _owner_key(o: dict, containers: dict[str, str] | None = None) -> str:
+    k, n = o.get("kind"), o.get("name") or ""
+    if not n or k == "user":
+        return ""
+    if k == "service":
+        return "svc:" + n
+    if k == "container":
+        return "ct:" + ((containers or {}).get(n) or n)
+    if k == "pod":
+        return "pod:" + n
+    return "cg:" + n
+
+
+def culprit(e: dict, containers: dict[str, str] | None = None) -> str:
+    """Ключ виновника эпизода (без "oom:"), "" - не понять. Лимит cgroup - сама cgroup. Нехватка на
+    сервере - кто больше всех занимал память по таблице ядра, со службой (контейнером) по убитому
+    процессу с тем же именем и uid: python x12 5.7гб (php7.4-fpm) -> svc:php7.4-fpm.service. Такого
+    процесса среди убитых нет - служба крупнейшего убитого, нет и ее - имя процесса из таблицы."""
+    if e.get("kind") == "memcg":
+        k = next((k for k in e["kills"] if k["kind"] == "memcg"), None)
+        if k is not None:
+            return _owner_key(owner(k.get("oom_memcg") or k.get("memcg") or "", k.get("user") or "", k.get("uid")),
+                              containers)
+    loud = [k for k in e["kills"] if kill_owner(k)["kind"] != "user"]
+    top = next((t for t in e.get("top") or [] if (t.get("anon") or 0) >= 10 * 1024), None)
+    if top is not None:
+        k = next((k for k in loud if k.get("name") == top["name"] and k.get("uid") == top.get("uid")), None)
+        if k is not None and _owner_key(kill_owner(k), containers):
+            return _owner_key(kill_owner(k), containers)
+    big = max(loud, key=lambda k: k.get("anon") or 0) if loud else None
+    key = _owner_key(kill_owner(big), containers) if big is not None else ""
+    if key:
+        return key
+    name = ((top or {}).get("name") or (big or {}).get("name") or "").strip("()")
+    return "proc:" + name if name else ""
+
+
+def mutes_now(s: Server, now: datetime) -> set[str]:
+    """Заглушенное у сервера сейчас: насовсем и снузы, которые не кончились."""
+    out = set(s.alert_mutes or [])
+    for k, until in (getattr(s, "alert_snoozes", None) or {}).items():
+        try:
+            u = datetime.fromisoformat(str(until))
+        except ValueError:
+            continue
+        if (u if u.tzinfo else u.replace(tzinfo=timezone.utc)) > now:
+            out.add(str(k))
+    return out
+
+
+def episode_muted(e: dict, mutes: set[str], failed_now: set[str], containers: dict[str, str] | None = None) -> bool:
+    """Заглушен ли эпизод. Мьют виновника не глушит эпизод, после которого служба легла и не
+    поднялась: это уже не повтор известного, а лежащая служба, и алерта "упал юнит" по ней нет."""
+    if "oom" in mutes:
+        return True
+    key = culprit(e, containers)
+    if not key or MUTE_PREFIX + key not in mutes:
+        return False
+    return not any(down for _u, down in failed_units(e, failed_now))
+
+
 # -- для карточки --
 
-def episode_view(e: dict, containers: dict[str, str] | None = None, failed_now: set[str] | None = None) -> dict:
+def episode_view(e: dict, containers: dict[str, str] | None = None, failed_now: set[str] | None = None,
+                 mutes: set[str] | None = None) -> dict:
     kills = []
     for k in e["kills"]:
         o = kill_owner(k)
@@ -486,6 +557,9 @@ def episode_view(e: dict, containers: dict[str, str] | None = None, failed_now: 
         "level": level(e, failed_now or set()), "kills": kills, "top": e.get("top") or [],
         "mem": e.get("mem") or {}, "by": e.get("by") or [], "units": e.get("units") or {},
         "text": kills_text(e, containers),
+        # кто занимал память (ключ мьюта без "oom:"): по нему глушат повторы
+        "culprit": culprit(e, containers),
+        "muted": episode_muted(e, mutes or set(), failed_now or set(), containers),
     }
 
 
@@ -505,21 +579,26 @@ def view(s: Server, now: datetime) -> dict | None:
     if not week and not links:
         return None
     last = week[-1] if week else None
+    conts = containers_of(rep)
     return {
         "n7": len(week), "last_at": last["start"] if last else None,
-        "last_text": kills_text(last, containers_of(rep)) if last else "",
+        "last_text": kills_text(last, conts) if last else "",
         "units": links,
+        # виновник последнего эпизода: кнопка "не алертить" предлагает глушить по нему
+        "culprit": culprit(last, conts) if last else "",
     }
 
 
 # -- алерт --
 
-def alert_step(s: Server, st: dict, rep: dict, now: datetime, tz) -> tuple[tuple[int, str] | None, dict, dict]:
+def alert_step(s: Server, st: dict, rep: dict, now: datetime, tz,
+               mutes: set[str] | None = None) -> tuple[tuple[int, str] | None, dict, dict]:
     """Что делать с алертом OOM на этом тике: (уровень и текст или None, что записать в состояние
-    после доставки, что записать сразу). Состояние:
+    после доставки, что записать сразу; "oom_ep" в первом - эпизод для ссылки, в состояние не идет). Состояние:
     oom_end - конец последнего учтенного эпизода, oom_seen - учтенный счетчик ядра, oom_sent и
     oom_sent_lvl - когда и с каким уровнем ушло сообщение, oom_held - эпизоды, отложенные до
-    конца часа после сообщения, oom_wait - когда вырос счетчик, а эпизода в журнале еще нет."""
+    конца часа после сообщения, oom_wait - когда вырос счетчик, а эпизода в журнале еще нет.
+    mutes - заглушенное у сервера сейчас (mutes_now): заглушенные эпизоды учитываются молча."""
     now_ts = now.timestamp()
     ref = _f(rep.get("clock_unix")) or now_ts
     total = int(s.oom_total or 0)
@@ -539,26 +618,37 @@ def alert_step(s: Server, st: dict, rep: dict, now: datetime, tz) -> tuple[tuple
     held = [str(x) for x in (st.get("oom_held") or [])]
     week = len([e for e in eps if e["start"] >= ref - 7 * 86400])
     recent = bool(sent) and now_ts - sent < REPEAT_S
+    mutes = mutes or set()
     fresh = [e for e in eps if e["end"] > done]
     ready = [e for e in fresh if ref - e["end"] >= SETTLE]
     if ready:
-        lvl = max(level(e, failed) for e in ready)
         upd = {"oom_end": max(e["end"] for e in ready), "oom_seen": max(seen, total), "oom_wait": None}
+        ready = [e for e in ready if not episode_muted(e, mutes, failed, conts)]
+        if not ready:
+            return None, {}, {**now_apply, **upd}
+        lvl = max(level(e, failed) for e in ready)
         if recent and lvl <= sent_lvl:
             return None, {}, {**now_apply, **upd, "oom_held": held + [e["id"] for e in ready]}
         text = episode_text(ready[-1], tz, failed, week, conts, more=len(held) + len(ready) - 1)
-        return (lvl, text), {**upd, "oom_held": [], "oom_sent": now_ts, "oom_sent_lvl": lvl}, now_apply
+        return (lvl, text), {**upd, "oom_held": [], "oom_sent": now_ts, "oom_sent_lvl": lvl,
+                             "oom_ep": ready[-1]["id"]}, now_apply
     if held and not recent:
-        # час после сообщения прошел, а отложенное не сказано: одно сообщение про все
+        # час после сообщения прошел, а отложенное не сказано: одно сообщение про все (что не
+        # заглушили, пока оно ждало)
         by_id = {e["id"]: e for e in eps}
+        held = [i for i in held if not ("oom" in mutes or (i in by_id and episode_muted(by_id[i], mutes, failed, conts)))]
+        if not held:
+            return None, {}, {**now_apply, "oom_held": []}
         last = next((by_id[i] for i in reversed(held) if i in by_id), None)
         if last is not None:
             lvl = level(last, failed)
             text = episode_text(last, tz, failed, week, conts, more=len(held) - 1)
+            link = {"oom_ep": last["id"]}
         else:
             lvl = 1
             text = f"нехватка памяти (OOM) повторялась: с прошлого сообщения еще {len(held)} раз"
-        return (lvl, text), {"oom_held": [], "oom_sent": now_ts, "oom_sent_lvl": lvl}, now_apply
+            link = {}
+        return (lvl, text), {"oom_held": [], "oom_sent": now_ts, "oom_sent_lvl": lvl, **link}, now_apply
     if total > seen and not fresh:
         wait = _f(st.get("oom_wait"))
         if any(e["end"] >= (wait or now_ts) - 600 for e in eps):
@@ -570,6 +660,8 @@ def alert_step(s: Server, st: dict, rep: dict, now: datetime, tz) -> tuple[tuple
             return None, {}, now_apply
         # helper'а нет (или журнал молчит): по счетчику, без подробностей
         upd = {"oom_seen": total, "oom_wait": None}
+        if "oom" in mutes:
+            return None, {}, {**now_apply, **upd}
         if recent:
             return None, {}, {**now_apply, **upd, "oom_held": held + [f"c{total}"]}
         victim = (s.oom_victim or "").strip()
@@ -578,20 +670,25 @@ def alert_step(s: Server, st: dict, rep: dict, now: datetime, tz) -> tuple[tuple
     return None, {}, now_apply
 
 
-def problem(s: Server, now: datetime) -> tuple[int, str] | None:
-    """Для "Что сломано": OOM за сутки - сколько раз, когда последний и кого убили."""
-    if "oom" in (s.alert_mutes or []):
+def problem(s: Server, now: datetime) -> tuple[int, str, str] | None:
+    """Для "Что сломано": OOM за сутки без заглушенных - сколько раз, когда последний и кого убили,
+    и ключ мьюта по виновнику последнего ("oom", если виновника не понять)."""
+    mutes = mutes_now(s, now)
+    if "oom" in mutes:
         return None
     rep = s.last_report or {}
     b = block(rep, now.timestamp())
     if b is None:
         return None
-    day = [e for e in episodes(records(b)) if e["start"] >= now.timestamp() - 86400]
+    failed, conts = units_failed_now(rep), containers_of(rep)
+    day = [e for e in episodes(records(b)) if e["start"] >= now.timestamp() - 86400
+           and not episode_muted(e, mutes, failed, conts)]
     if not day:
         return None
-    failed = units_failed_now(rep)
     lvl = max(level(e, failed) for e in day)
     ago = max(0.0, now.timestamp() - day[-1]["start"])
     when = f"{int(ago // 3600)} ч назад" if ago >= 3600 else f"{max(1, int(ago // 60))} мин назад"
     n = f"{len(day)} раз за сутки, последний" if len(day) > 1 else "была"
-    return lvl, f"нехватка памяти (OOM): {n} {when}, убиты {kills_text(day[-1], containers_of(rep))}"
+    key = culprit(day[-1], conts)
+    return (lvl, f"нехватка памяти (OOM): {n} {when}, убиты {kills_text(day[-1], conts)}",
+            MUTE_PREFIX + key if key else "oom")

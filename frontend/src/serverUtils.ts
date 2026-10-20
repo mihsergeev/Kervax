@@ -120,9 +120,11 @@ export function sinceShort(iso: string | null | undefined, t: (k: string, p?: Re
 // приглушённое колокольчиком РЕАЛЬНО уходило с главной (иначе «жму — ничего не происходит»).
 function srvIssueMuted(i: SrvIssue, mutes: Set<string>): boolean {
   if (!i.mute) return false
-  const at = i.mute.indexOf('@')
-  const base = at >= 0 ? i.mute.slice(0, at) : i.mute
-  const level = at >= 0 ? parseInt(i.mute.slice(at + 1), 10) : 3
+  if (mutes.has(i.mute)) return true
+  // уровень только у вида без хвоста (disk@1): в unit:openvpn@srv.service "@" - часть имени
+  const lv = /^([a-z_]+)@(\d)$/.exec(i.mute)
+  const base = lv ? lv[1] : i.mute
+  const level = lv ? parseInt(lv[2], 10) : 3
   if (mutes.has(base)) return true
   for (const m of mutes) {
     if (!m.startsWith(base + '@')) continue
@@ -185,11 +187,19 @@ export function srvKnownOf(s: Server, i: SrvIssue): KnownIssue | null {
 }
 
 // Проблемы сервера без приглушенных и без известных: известные показываются отдельно (srvKnown)
+// Заглушенное у сервера сейчас: насовсем и на время (снуз 🔕 с главной на час, день, неделю)
+function srvMutesNow(s: Server): Set<string> {
+  const out = new Set(s.alert_mutes ?? [])
+  const now = Date.now()
+  for (const [k, u] of Object.entries(s.alert_snoozes ?? {})) if (Date.parse(u) > now) out.add(k)
+  return out
+}
+
 export function srvIssues(
   s: Server,
   t: (k: string, p?: Record<string, string | number>) => string,
 ): SrvIssue[] {
-  const mutes = new Set(s.alert_mutes ?? [])
+  const mutes = srvMutesNow(s)
   return srvIssuesRaw(s, t).filter((i) => !srvIssueMuted(i, mutes) && !srvKnownOf(s, i))
 }
 
@@ -199,7 +209,7 @@ export function srvMuted(
   s: Server,
   t: (k: string, p?: Record<string, string | number>) => string,
 ): SrvIssue[] {
-  const mutes = new Set(s.alert_mutes ?? [])
+  const mutes = srvMutesNow(s)
   return srvIssuesRaw(s, t).filter((i) => srvIssueMuted(i, mutes))
 }
 
@@ -208,7 +218,7 @@ export function srvKnown(
   s: Server,
   t: (k: string, p?: Record<string, string | number>) => string,
 ): (SrvIssue & { known: KnownIssue })[] {
-  const mutes = new Set(s.alert_mutes ?? [])
+  const mutes = srvMutesNow(s)
   return srvIssuesRaw(s, t).flatMap((i) => {
     const k = srvKnownOf(s, i)
     return k && !srvIssueMuted(i, mutes) ? [{ ...i, known: k }] : []

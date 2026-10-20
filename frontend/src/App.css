@@ -1880,6 +1880,19 @@ button.ghost.tile-filter-chip:hover { border-color: var(--accent); background: c
   font: inherit;
 }
 .oom-ep-head:hover .oom-ep-text { color: var(--text); }
+.oom-ep-muted .oom-ep-text { color: var(--text-muted); }
+@media (max-width: 600px) {
+  /* кого убили - под временем: рядом с ним текст сжимался в столбик по слогам */
+  .oom-ep-head { flex-wrap: wrap; row-gap: 0.1rem; }
+  .oom-ep-when { min-width: 0; }
+  .oom-ep-text { flex: 1 1 100%; padding-left: 1rem; }
+  .oom-ep-body { padding-left: 0.4rem; }
+}
+/* не алертить об OOM: чипы заглушенного и выбор - по виновнику или любой, на какой срок */
+.oom-mute { display: flex; flex-wrap: wrap; align-items: center; gap: 0.3rem; margin: 0.1rem 0 0.35rem; }
+.oom-mute-pick { display: flex; flex-wrap: wrap; align-items: center; gap: 0.3rem; }
+.oom-mute-scope { display: inline-flex; gap: 0.2rem; margin-right: 0.3rem; }
+.oom-mute-scope .active { border-color: var(--accent); color: var(--text); background: color-mix(in srgb, var(--accent) 14%, transparent); }
 .oom-ep-when { flex-shrink: 0; min-width: 6.6rem; }
 .oom-ep-kind { flex-shrink: 0; }
 .oom-ep-text { overflow-wrap: anywhere; color: color-mix(in srgb, var(--text) 85%, var(--text-muted)); }
@@ -6053,6 +6066,13 @@ button.adopt-mark {
 /* быстрый мут на строке предупреждения главной: неяркая иконка справа */
 .quick-mute { margin-left: auto; cursor: pointer; opacity: 0.5; padding: 0 4px; }
 .quick-mute:hover { opacity: 1; }
+/* 🔕 открыл выбор срока: на час, день, неделю или постоянно, прямо в строке */
+.home-mute-pick { margin-left: auto; display: inline-flex; flex-wrap: wrap; align-items: center; gap: 0.25rem; font-size: 0.8rem; cursor: default; }
+.home-mute-opt { cursor: pointer; padding: 0.05rem 0.4rem; border: 1px solid var(--border); border-radius: 4px; }
+.home-mute-opt:hover { border-color: var(--accent); color: var(--text); }
+@media (max-width: 600px) {
+  .home-mute-pick { margin-left: 0; }
+}
 
 /* строка restic с кнопкой обновления */
 .restic-row { display: inline-flex; align-items: center; gap: 10px; flex-wrap: wrap; }

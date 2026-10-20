@@ -412,3 +412,119 @@ async def test_units_alert_user_manager_by_cgroup(tmp_path, monkeypatch):
         texts = [p["text"] for p in collector.server_problems(srv, now)]
     assert not any("user@1001" in t or "nginx.service" in t for t in texts), texts
     await engine.dispose()
+
+
+def test_culprit_is_who_held_memory():
+    """Виновник - кто занимал память, а не первый убитый: в первом эпизоде ядро сначала убило mysqld
+    (самый крупный процесс), а память съели воркеры php-fpm; во втором память у python из той же
+    службы. Оба эпизода - один виновник, и мьют по нему глушит оба. Лимит cgroup - сама cgroup."""
+    now = 1_900_000_000.0
+    first, last = oom.episodes(oom.records(_block(now)))
+    assert first["kills"][0]["name"] == "mysqld"
+    assert oom.culprit(first) == oom.culprit(last) == "svc:php7.4-fpm.service"
+    memcg = next(e for e in oom.episodes(oom.records(_helper_json(JOURNAL + EXTRA, 1792492100))) if e["kind"] == "memcg")
+    assert oom.culprit(memcg) == "cg:run-r1a2b3c.scope"
+    # только сессия пользователя и без таблицы: по имени процесса
+    e = {"kind": "global", "top": [], "kills": [{"kind": "global", "name": "java", "anon": 900000, "uid": 0,
+                                                 "memcg": "/", "user": ""}]}
+    assert oom.culprit(e) == "proc:java"
+
+
+def _muted_server(rep: dict, mutes=(), snoozes=None, **kw):
+    s = _server(rep, **kw)
+    s.alert_mutes, s.alert_snoozes = list(mutes), snoozes or {}
+    return s
+
+
+def test_alert_step_mute_by_culprit():
+    """Заглушенный виновник: эпизод учтен молча (после мьюта о нем не придет), OOM из-за другой
+    службы приходит; служба после OOM лежит - приходит и с мьютом; "oom" глушит все."""
+    now = datetime.fromtimestamp(1_900_000_000, timezone.utc)
+    b = _block(now.timestamp())
+    rep = {"clock_unix": now.timestamp(), "extras": {"oom": b}}
+    st = {"oom_end": 0.0}
+    key = "oom:svc:php7.4-fpm.service"
+    fire, _d, upd = oom.alert_step(_muted_server(rep, total=3), st, rep, now, timezone.utc, {key})
+    assert fire is None and upd["oom_end"] == max(e["end"] for e in oom.episodes(oom.records(b)))
+    # мьют кончился: учтенное не приходит
+    st.update(upd)
+    fire, _d, _u = oom.alert_step(_muted_server(rep, total=3), st, rep, now + timedelta(minutes=5), timezone.utc, set())
+    assert fire is None
+    # чужой виновник заглушен - алерт идет, и ссылка ведет на эпизод
+    fire, done, _ = oom.alert_step(_muted_server(rep, total=3), {"oom_end": 0.0}, rep, now, timezone.utc,
+                                   {"oom:svc:mysql.service"})
+    assert fire is not None and done["oom_ep"] == oom.episodes(oom.records(b))[-1]["id"]
+    # php7.4-fpm лежит после OOM: мьют виновника не глушит
+    units = {"v": 1, "ts": now.timestamp() - 30, "units": [{"unit": "php7.4-fpm.service", "result": "oom-kill",
+                                                            "since": now.timestamp() - 300}]}
+    rep_down = {**rep, "extras": {"oom": b, "units": units}}
+    fire, _d, _u = oom.alert_step(_muted_server(rep_down, total=3), {"oom_end": 0.0}, rep_down, now, timezone.utc, {key})
+    assert fire is not None and fire[0] == 2
+    fire, _d, upd = oom.alert_step(_muted_server(rep_down, total=3), {"oom_end": 0.0}, rep_down, now, timezone.utc,
+                                   {"oom"})
+    assert fire is None and upd["oom_end"] > 0
+    # без helper'а виновника не знать: глушит только "oom", счетчик учтен
+    bare = {"clock_unix": now.timestamp()}
+    fire, _d, upd = oom.alert_step(_muted_server(bare, total=2), {"oom_seen": 0}, bare, now, timezone.utc, {"oom"})
+    assert fire is None and upd["oom_seen"] == 2
+    assert oom.alert_step(_muted_server(bare, total=2), {"oom_seen": 0}, bare, now, timezone.utc, {key})[0] is not None
+
+
+def test_problem_mute_and_snooze():
+    """В "Что сломано" заглушенного нет (насовсем и на время), у пункта ключ мьюта по виновнику."""
+    now = datetime.fromtimestamp(1_900_000_000, timezone.utc)
+    rep = {"clock_unix": now.timestamp(), "extras": {"oom": _block(now.timestamp())}}
+    p = oom.problem(_muted_server(rep), now)
+    assert p is not None and p[2] == "oom:svc:php7.4-fpm.service"
+    assert oom.problem(_muted_server(rep, mutes=[p[2]]), now) is None
+    soon = (now + timedelta(hours=1)).isoformat()
+    assert oom.problem(_muted_server(rep, snoozes={p[2]: soon}), now) is None
+    assert oom.problem(_muted_server(rep, snoozes={"oom": soon}), now) is None
+    # снуз кончился - снова видно
+    assert oom.problem(_muted_server(rep, snoozes={p[2]: (now - timedelta(minutes=1)).isoformat()}), now) is not None
+    view = oom.episode_view(oom.episodes(oom.records(rep["extras"]["oom"]))[-1], mutes={p[2]})
+    assert view["culprit"] == "svc:php7.4-fpm.service" and view["muted"] is True
+
+
+async def test_oom_mute_api_and_alert_link(tmp_path, monkeypatch, client, auth_headers):
+    """Снуз по виновнику принимается API, эпизоды отдаются с пометкой; ссылка алерта ведет на эпизод."""
+    r = await client.post("/api/servers", json={"name": "web-b"}, headers=auth_headers)
+    sid, token = r.json()["server"]["id"], r.json()["token"]
+    now = datetime.now(timezone.utc).timestamp()
+    base = {"hostname": "web-b", "uptime_seconds": 5000, "clock_unix": int(now), "extras": {"oom": _block(now)}}
+    assert (await client.post("/api/agent/report", json={**base, "oom_total": 3},
+                              headers={"Authorization": f"Bearer {token}"})).status_code == 200
+    r = await client.post(f"/api/servers/{sid}/snooze-alert", json={"kind": "oom:svc:php7.4-fpm.service", "hours": 24},
+                          headers=auth_headers)
+    assert r.status_code == 200 and "oom:svc:php7.4-fpm.service" in r.json()["alert_snoozes"]
+    eps = (await client.get(f"/api/servers/{sid}/oom", headers=auth_headers)).json()["episodes"]
+    assert all(e["muted"] and e["culprit"] == "svc:php7.4-fpm.service" for e in eps)
+
+    from app import collector
+    from app.config import Settings
+    from app.db import Base, create_engine_and_factory
+    from app.models import Server
+
+    engine, factory = create_engine_and_factory(f"sqlite+aiosqlite:///{(tmp_path / 'l.db').as_posix()}")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    nd = datetime.now(timezone.utc)
+    rep = {"clock_unix": int(nd.timestamp()), "uptime_seconds": 100000, "extras": {"oom": _block(nd.timestamp())}}
+    async with factory() as s:
+        s.add(Server(name="node", token_hash="x", enabled=True, backup_not_required=True, last_seen=nd,
+                     cpu_alert_percent=0, mem_alert_percent=0, last_report=rep, oom_total=3,
+                     alert_state={"oom_end": 0.0}))
+        await s.commit()
+    sent: list[str] = []
+
+    async def fake_send(cfg, text, parse_mode=None):
+        sent.append(text)
+        return []
+
+    monkeypatch.setattr("app.alerts.send_alert", fake_send)
+    await collector.evaluate_servers(factory, Settings(alert_webhook="http://hook", panel_url="https://kervax.test"), nd)
+    ep = oom.episodes(oom.records(rep["extras"]["oom"]))[-1]["id"]
+    assert len(sent) == 1 and f"sec=oom&amp;oom={ep}" in sent[0], sent
+    async with factory() as s:
+        assert "oom_ep" not in (await s.execute(select(Server))).scalars().one().alert_state
+    await engine.dispose()

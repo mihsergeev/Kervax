@@ -2823,6 +2823,8 @@ export type OomSummary = {
   last_at: number | null
   last_text: string
   units: Record<string, OomUnitLink>
+  // виновник последнего эпизода (ключ мьюта без "oom:", см. OOM_MUTE): кнопка глушит по нему
+  culprit?: string
 }
 export type OomKill = {
   ts: number
@@ -2853,6 +2855,8 @@ export type OomEpisode = {
   by: string[]
   units: Record<string, string[]>
   text: string
+  culprit?: string // кто занимал память: svc:<служба> | ct:<контейнер> | pod:<uid> | cg:<cgroup> | proc:<процесс>
+  muted?: boolean // не алертит: заглушен весь OOM или виновник
 }
 export function serverOom(id: number): Promise<{ episodes: OomEpisode[]; helper: boolean }> {
   return api(`/api/servers/${id}/oom`)

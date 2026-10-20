@@ -81,6 +81,8 @@ import {
   ACCESS_MUTE,
   osDecisionLabel,
   muteKindLabel,
+  OOM_MUTE,
+  oomCulpritLabel,
   SRV_ALERT_KINDS,
   collectMutes,
   isDecision,
@@ -1190,6 +1192,100 @@ function oomKillsLine(e: OomEpisode, t: TFn): string {
 
 const OOM_KIND: Record<string, string> = { global: 'весь сервер', memcg: 'лимит cgroup', oomd: 'systemd-oomd' }
 
+// Не алертить об OOM, пока не починят: по виновнику (кто занимал память, OOM из-за других служб
+// приходят) или любой OOM сервера, на час, день, неделю или постоянно. Заглушенное - чипами со сроком
+function OomMute({ server: s, culprit, onChanged }: { server: Server; culprit: string; onChanged: () => void }) {
+  const { t } = useI18n()
+  const { isViewer } = useAuth()
+  const [picking, setPicking] = useState(false)
+  const [scope, setScope] = useState<'culprit' | 'all'>('culprit')
+  const [busy, setBusy] = useState(false)
+  const now = Date.now()
+  const isOom = (k: string) => k === 'oom' || k.startsWith(OOM_MUTE)
+  const perm = (s.alert_mutes ?? []).filter(isOom)
+  const active: { key: string; until: string | null }[] = [
+    ...perm.map((key) => ({ key, until: null })),
+    ...Object.entries(s.alert_snoozes ?? {})
+      .filter(([k, u]) => isOom(k) && new Date(u).getTime() > now && !perm.includes(k))
+      .map(([key, until]) => ({ key, until })),
+  ]
+  const fmt = (ts: string) =>
+    new Date(ts).toLocaleString([], { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })
+  const label = (k: string) =>
+    k === 'oom' ? t('любой OOM') : t('OOM из-за {n}', { n: oomCulpritLabel(k.slice(OOM_MUTE.length), t) })
+  const mute = async (kind: string, hours: number) => {
+    setBusy(true)
+    try {
+      if (hours < 0) {
+        await updateServer(s.id, { alert_mutes: [...new Set([...(s.alert_mutes ?? []), kind])] })
+        if (s.alert_snoozes?.[kind]) await snoozeServerAlert(s.id, kind, 0)
+      } else if (hours === 0) {
+        if ((s.alert_mutes ?? []).includes(kind))
+          await updateServer(s.id, { alert_mutes: (s.alert_mutes ?? []).filter((x) => x !== kind) })
+        if (s.alert_snoozes?.[kind]) await snoozeServerAlert(s.id, kind, 0)
+      } else await snoozeServerAlert(s.id, kind, hours)
+      setPicking(false)
+      onChanged()
+    } catch {
+      /* кнопка остается, можно повторить */
+    } finally {
+      setBusy(false)
+    }
+  }
+  const ck = culprit ? OOM_MUTE + culprit : ''
+  // все уже заглушено: любой OOM или виновник последнего (другой виновник - снова кнопка)
+  const free = !active.some((a) => a.key === 'oom' || a.key === ck)
+  const kind = scope === 'all' || !ck ? 'oom' : ck
+  if (!active.length && isViewer) return null
+  return (
+    <div className="oom-mute small">
+      {active.map((a) => (
+        <span key={a.key} className="snooze-active-chip snooze-perm">
+          🔇 {label(a.key)}: {a.until ? t('не алертит {t}', { t: t('до {t}', { t: fmt(a.until) }) }) : t('не алертит, постоянно')}
+          {!isViewer && (
+            <button className="chip-x" disabled={busy} title={t('Снять')} onClick={() => mute(a.key, 0)}>
+              ✕
+            </button>
+          )}
+        </span>
+      ))}
+      {free && !isViewer && (picking ? (
+        <span className="oom-mute-pick">
+          <span className="muted">🔕 {t('не алертить:')}</span>
+          {ck && (
+            <span className="oom-mute-scope">
+              <button className={`ghost small${scope === 'culprit' ? ' active' : ''}`} onClick={() => setScope('culprit')}
+                title={t('OOM из-за других служб будут приходить')}>
+                {t('из-за {n}', { n: oomCulpritLabel(culprit, t) })}
+              </button>
+              <button className={`ghost small${scope === 'all' ? ' active' : ''}`} onClick={() => setScope('all')}>
+                {t('любой OOM')}
+              </button>
+            </span>
+          )}
+          {[
+            { h: 1, l: t('1 час') },
+            { h: 24, l: t('1 день') },
+            { h: 24 * 7, l: t('1 неделя') },
+            { h: -1, l: t('постоянно') },
+          ].map(({ h, l }) => (
+            <button key={h} className="ghost small" disabled={busy} onClick={() => mute(kind, h)}>
+              {l}
+            </button>
+          ))}
+          <button className="ghost small" disabled={busy} onClick={() => setPicking(false)}>
+            {t('Отмена')}
+          </button>
+        </span>
+      ) : (
+        <button className="ghost small" onClick={() => setPicking(true)}>
+          🔕 {ck ? t('не алертить об OOM из-за {n}', { n: oomCulpritLabel(culprit, t) }) : t('не алертить об OOM')}
+        </button>
+      ))}
+    </div>
+  )
+}
+
 // Нехватка памяти (OOM) за 30 дней - эпизоды из журнала ядра (helper units-setup 0.5): когда,
 // что за OOM и кого убили; по клику кто занимал память, Mem-Info и задетые юниты. Без helper'а -
 // прежний список "кого убило" по счетчику агента
@@ -1198,11 +1294,13 @@ function OomBlock({
   eps,
   open,
   onOpen,
+  onChanged,
 }: {
   server: Server
   eps: OomEpisode[] | null
   open: string | null
   onOpen: (id: string | null) => void
+  onChanged: () => void
 }) {
   const { t } = useI18n()
   const [legacy, setLegacy] = useState<OomEvent[] | null>(null)
@@ -1230,6 +1328,7 @@ function OomBlock({
         <div className="chart-cap">{t('Нехватка памяти (OOM)')}</div>
         {eps.length > 0 && <span className="muted small">{t('за 30 дней: {n}', { n: eps.length })}</span>}
       </div>
+      {eps.length > 0 && <OomMute server={s} culprit={s.oom?.culprit || eps[0].culprit || ''} onChanged={onChanged} />}
       {!eps.length && legacy && (
         <>
           <div className="muted small du-note">
@@ -1252,12 +1351,15 @@ function OomBlock({
         const isOpen = open === e.id
         const sw = e.mem.swap_total
         return (
-          <div key={e.id} className="oom-ep" id={`oom-ep-${e.id}`}>
+          <div key={e.id} className={`oom-ep${e.muted ? ' oom-ep-muted' : ''}`} id={`oom-ep-${e.id}`}>
             <button className="oom-ep-head" onClick={() => onOpen(isOpen ? null : e.id)} aria-expanded={isOpen}>
-              <span className={`lk-dot lk-dot-${e.level >= 2 ? 'bad' : 'warn'}`} />
+              <span className={`lk-dot lk-dot-${e.muted ? 'idle' : e.level >= 2 ? 'bad' : 'warn'}`} />
               <span className="mono small oom-ep-when">{when(e.start)}</span>
               <span className="muted small oom-ep-kind">{t(OOM_KIND[e.kind] ?? e.kind)}</span>
-              <span className="oom-ep-text">{oomKillsLine(e, t)}</span>
+              <span className="oom-ep-text">
+                {oomKillsLine(e, t)}
+                {e.muted && <span className="muted small"> · 🔇 {t('не алертит')}</span>}
+              </span>
             </button>
             {isOpen && (
               <div className="oom-ep-body">
@@ -1332,6 +1434,12 @@ function OomBlock({
                 {e.by.length > 0 && (
                   <div className="muted small">
                     {t('Память не досталась (это не виновники): {list}', { list: e.by.join(', ') })}
+                  </div>
+                )}
+                {e.culprit && (
+                  <div className="small">
+                    <span className="muted">{t('Память занимал:')} </span>
+                    {oomCulpritLabel(e.culprit, t)}
                   </div>
                 )}
                 <pre className="unit-log mono">{e.kills.map((k) => k.line).filter(Boolean).join('\n')}</pre>
@@ -6317,6 +6425,12 @@ function ServerChartModal({
   )
 }
 
+// Эпизод OOM из ссылки алерта (?server=id&sec=oom&oom=<эпизод>): адрес снят при запуске, пока
+// список серверов грузится, панель успевает переписать строку без него. Берется один раз:
+// первая открытая карточка его забывает
+let linkOom = new URLSearchParams(window.location.search).get('oom')
+const takeLinkOom = (): string | null => linkOom ?? new URLSearchParams(window.location.search).get('oom')
+
 function ServerDetail({
   server: s,
   servers,
@@ -6388,7 +6502,14 @@ function ServerDetail({
   const [active, setActive] = useState<string>(() => secOfLink(initialSection) ?? 'overview')
   useUrlParam('sec', active === 'overview' ? null : active)
   const [oomEps, setOomEps] = useState<OomEpisode[] | null>(null)
-  const [oomOpen, setOomOpen] = useState<string | null>(() => new URLSearchParams(window.location.search).get('oom'))
+  const oomMuteSig = JSON.stringify([
+    (s.alert_mutes ?? []).filter((k) => k === 'oom' || k.startsWith(OOM_MUTE)),
+    Object.entries(s.alert_snoozes ?? {}).filter(([k]) => k === 'oom' || k.startsWith(OOM_MUTE)),
+  ])
+  const [oomOpen, setOomOpen] = useState<string | null>(() => takeLinkOom())
+  useEffect(() => {
+    linkOom = null
+  }, [])
   useUrlParam('oom', active === 'mem' ? oomOpen : null)
   useEffect(() => {
     if (active !== 'mem') return
@@ -6403,7 +6524,8 @@ function ServerDetail({
       alive = false
       window.clearInterval(id)
     }
-  }, [s.id, active])
+    // мьют OOM поставили или сняли: эпизоды заново, их пометка "не алертит" считается на бэкенде
+  }, [s.id, active, oomMuteSig])
   const layoutRef = useRef<HTMLDivElement>(null)
   // Другой раздел: показываем его с начала. Если страница уже прокручена ниже меню (длинный
   // раздел графиков), подкручиваем к началу разделов, иначе новый раздел открылся бы с середины
@@ -7012,7 +7134,7 @@ function ServerDetail({
             )}
           </div>
           <div className="net-cards">
-            <OomBlock server={s} eps={oomEps} open={oomOpen} onOpen={setOomOpen} />
+            <OomBlock server={s} eps={oomEps} open={oomOpen} onOpen={setOomOpen} onChanged={onChanged} />
             <MemLeaks server={s} />
             <MemContainers server={s} onChanged={onChanged} />
             <MemPods server={s} onChanged={onChanged} />
