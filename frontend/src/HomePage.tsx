@@ -9,6 +9,7 @@ import {
   listServers,
   localProbeSuggestions,
   podFinished,
+  snoozeServerAlert,
   updateServer,
   type Check,
   type ChecksOverview,
@@ -23,6 +24,7 @@ import {
 import type { Section } from './App'
 import { backupAlive, backupWindowNote, dbAuditNames, knownText, dockRiskText, knownActive, proxyBuilt, shortList, sinceShort, srvIssues, srvKnown, knownMeta } from './serverUtils'
 import { KnownDialog } from './KnownDialog'
+import { LEAK_MUTE, LISTEN_MUTE, RESTARTS_MUTE, isDecision } from './mutes'
 import { offLines, rotationLines } from './BsrvCleanup'
 import { MaintChip, MaintHome } from './MaintModal'
 import { useI18n } from './i18n'
@@ -41,7 +43,7 @@ const BROKEN_LIMIT = 12
 // иконка проблемы по ее виду - чтобы список читался, не вчитываясь
 const ISSUE_ICON: Record<string, string> = {
   offline: '🔥', cpu: '🧮', mem: '🧠', disk: '🗄', temp: '🌡', throttle: '🥵', conntrack: '🔗',
-  disktemp: '🌡', disk_health: '💽', disk_forecast: '📈', inode: '🗂', units: '⚙️', cpu_spin: '🌀',
+  disktemp: '🌡', disk_health: '💽', disk_forecast: '📈', inode: '🗂', units: '⚙️', oom: '🧠', cpu_spin: '🌀',
   docker: '🐳', kuber: '☸️', backups: '💾', docker_sock: '🔓',
   clock: '🕐', dns: '🌐', db_conn: '🔌', web_5xx: '🌐', queue: '🐇', kube_expiry: '⏳', flux_down: '☸️',
   flux_stale: '☸️', backup_dump: '🛢', backup_dump_space: '🛢', backup_cron: '🛢', backup_check: '🩺',
@@ -81,6 +83,10 @@ function earliest(list: (string | null | undefined)[]): string | null {
 
 // с какого срока до 90% износа диска звать запланировать замену (полгода)
 const WEAR_PLAN_MS = 183 * 86400 * 1000
+
+// Снуз на время понимают не все ключи: рост памяти, перезапуски и пропавший порт бэкенд берет только
+// из alert_mutes, решения "так и должно быть" - не мьют вовсе
+const snoozable = (k: string) => !isDecision(k) && ![LEAK_MUTE, RESTARTS_MUTE, LISTEN_MUTE].some((p) => k.startsWith(p))
 
 const K_BAD_POD = ['CrashLoopBackOff', 'ImagePullBackOff', 'ErrImagePull', 'Error', 'OOMKilled', 'CreateContainerError']
 
@@ -749,6 +755,14 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
     const next = [...new Set([...(s.alert_mutes ?? []), ...keys])]
     updateServer(id, { alert_mutes: next }).then(load).catch(() => {})
   }, [servers, load])
+  // 🔕 с выбором срока: на час, день, неделю (снуз) или постоянно. Ключи без снуза (рост памяти,
+  // перезапуски, пропавший порт - их бэкенд читает только из alert_mutes) глушатся сразу постоянно
+  const [mutePick, setMutePick] = useState<string | null>(null)
+  const muteFor = (id: number, key: string, hours: number) => {
+    setMutePick(null)
+    if (hours < 0) return quickMute(id, [key])
+    snoozeServerAlert(id, key, hours).then(load).catch(() => {})
+  }
 
   useEffect(() => {
     load()
@@ -967,9 +981,29 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
           📌
         </span>
       )}
-      {it.mute && (
-        <span className="quick-mute" title={t('Приглушить')}
-          onClick={(e) => { e.stopPropagation(); quickMute(it.id, [it.mute!]) }}>
+      {it.mute && mutePick === it.key && (
+        <span className="home-mute-pick" onClick={(e) => e.stopPropagation()}>
+          <span className="muted">{t('не алертить:')}</span>
+          {[
+            { h: 1, l: t('1 час') },
+            { h: 24, l: t('1 день') },
+            { h: 24 * 7, l: t('1 неделя') },
+            { h: -1, l: t('постоянно') },
+          ].map(({ h, l }) => (
+            <span key={h} className="home-mute-opt" role="button" onClick={() => muteFor(it.id, it.mute!, h)}>
+              {l}
+            </span>
+          ))}
+          <span className="home-mute-opt muted" role="button" onClick={() => setMutePick(null)}>✕</span>
+        </span>
+      )}
+      {it.mute && mutePick !== it.key && (
+        <span className="quick-mute" title={t('Не алертить')}
+          onClick={(e) => {
+            e.stopPropagation()
+            if (snoozable(it.mute!)) setMutePick(it.key)
+            else quickMute(it.id, [it.mute!])
+          }}>
           🔕
         </span>
       )}

@@ -3628,7 +3628,7 @@ def server_problems(s: Server, now: datetime, pod_names: dict[str, str] | None =
             add("units", unit_level(u), f"{u['unit']}: {why}", "units", f"unit:{u['unit']}", u_since)
     oom_p = oom_mod.problem(s, now)
     if oom_p is not None:
-        add("oom", oom_p[0], oom_p[1], "oom", "oom")
+        add("oom", oom_p[0], oom_p[1], "oom", oom_p[2])
     # Юниты в цикле перезапусков: приросты счетчика ведет цикл алертов (alert_state unit_loops)
     rs = units_restarting(rep)
     loops = state.get("unit_loops") if isinstance(state.get("unit_loops"), dict) else {}
@@ -5910,7 +5910,10 @@ async def evaluate_servers(
     def srv_fire(s: Server, key: str, rule: dict, ctx: dict) -> alerts.Msg:
         """Текст срабатывания: дефолт → богатый формат (иконка + имя-ссылкой + суть),
         кастомный шаблон пользователя → рендерим как есть + строка со ссылкой."""
+        # url_tail - сразу к событию в разделе (OOM: &oom=<эпизод>)
+        tail = ctx.pop("url_tail", "")
         url = srv_url(s, key)
+        url += tail if url else ""
         default = settings_store.SERVER_ALERT_KINDS[key][1]
         if rule["text"] == default or rule["text"] in settings_store.LEGACY_SERVER_DEFAULTS:
             # у диска три уровня — ведущая иконка должна их различать
@@ -6409,12 +6412,15 @@ async def evaluate_servers(
         # какие юниты упали; без helper'а - по росту счетчика ядра (oom_total копится в
         # ingest'е). Событие, отбоя нет; повторы за час - одним сообщением (app/oom.py)
         om = rules.get("oom")
-        o_fire, o_done, o_now = oom_mod.alert_step(s, st, s.last_report or {}, now, tg_buttons.zone(cfg.get("tz") or "Europe/Moscow"))
+        # заглушенное (весь OOM или виновник, app/oom.py) учитывается молча: после мьюта старое не придет
+        o_fire, o_done, o_now = oom_mod.alert_step(s, st, s.last_report or {}, now,
+                                                   tg_buttons.zone(cfg.get("tz") or "Europe/Moscow"), mutes)
         for k, v in o_now.items():
             apply(s.id, k, v)
-        # заглушено - состояние стоит: после снуза несказанное придет
+        o_ep = o_done.pop("oom_ep", None)
         if o_fire is not None and "oom" not in mutes and om and om["enabled"] and _rule_scope_ok(om, s):
-            fires.append(srv_fire(s, "oom", om, {"detail": o_fire[1], "level": o_fire[0], "value": 1, "victim": ""}))
+            fires.append(srv_fire(s, "oom", om, {"detail": o_fire[1], "level": o_fire[0], "value": 1, "victim": "",
+                                                 "url_tail": f"&oom={o_ep}" if o_ep else ""}))
             for k, v in o_done.items():
                 fire_apply.append((s.id, k, v))
 

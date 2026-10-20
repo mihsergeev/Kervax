@@ -105,6 +105,18 @@ export const CRON_MUTE = 'cron:'
 export const LOGERR_MUTE = 'logerr:'
 // Один пул PHP-FPM: fpm:<где>|<пул>
 export const FPM_MUTE = 'fpm:'
+// OOM из-за одного виновника (кто занимал память): oom:svc:<служба> | oom:ct:<контейнер> | oom:pod:<uid> |
+// oom:cg:<cgroup> | oom:proc:<процесс>; OOM из-за других приходят. "oom" целиком - все OOM сервера
+export const OOM_MUTE = 'oom:'
+export function oomCulpritLabel(key: string, t: TFn): string {
+  const i = key.indexOf(':')
+  const kind = key.slice(0, i)
+  const name = key.slice(i + 1)
+  if (kind === 'ct') return t('контейнер {n}', { n: name })
+  if (kind === 'pod') return t('под {n}', { n: name.slice(0, 8) })
+  if (kind === 'proc') return t('процесс {n}', { n: name })
+  return name
+}
 // Один контейнер с ключами от хоста, которому они нужны намеренно: dockrisk:<имя>
 export const DOCKRISK_MUTE = 'dockrisk:'
 // Контейнер или юнит, которому не нужно подниматься после перезагрузки: noboot:<имя>
@@ -169,6 +181,7 @@ export function muteKindLabel(k: string, t: TFn): string | null {
     const [w, c] = k.slice(LOGERR_MUTE.length).split('|')
     return `${t('ошибки в логе')}: ${w}${c ? ` (${c})` : ''}`
   }
+  if (k.startsWith(OOM_MUTE)) return `${t('OOM из-за')}: ${oomCulpritLabel(k.slice(OOM_MUTE.length), t)}`
   if (k.startsWith(FPM_MUTE)) {
     const [w, p] = k.slice(FPM_MUTE.length).split('|')
     return `${t('пул PHP-FPM')}: ${p ?? ''} (${w})`

@@ -618,7 +618,7 @@ async def test_server_alert_mute(tmp_path, monkeypatch):
 
 async def test_server_alert_snooze_per_type(tmp_path, monkeypatch):
     """Точечный снуз ОДНОГО типа глушит только его: OOM заглушён, но offline
-    (сервер замолчал) продолжает алертить."""
+    (сервер замолчал) продолжает алертить. Заглушенный OOM после снуза не приходит."""
     from datetime import datetime, timedelta, timezone
 
     from app import collector
@@ -656,12 +656,18 @@ async def test_server_alert_snooze_per_type(tmp_path, monkeypatch):
     assert len(sent) == 1
     assert "OOM" not in sent[0] and "недоступен" in sent[0]
 
-    # снуз истёк → oom тоже прорывается
+    # снуз истёк: OOM, бывший под снузом, учтен молча и не приходит, новый - приходит
     async with factory() as s:
         srv = await s.scalar(__import__("sqlalchemy").select(Server))
         srv.alert_snoozes = {"oom": (now - timedelta(hours=1)).isoformat()}
         await s.commit()
     sent.clear()
+    await collector.evaluate_servers(factory, settings, now)
+    assert not any("OOM" in m for m in sent)
+    async with factory() as s:
+        srv = await s.scalar(__import__("sqlalchemy").select(Server))
+        srv.oom_total = 2
+        await s.commit()
     await collector.evaluate_servers(factory, settings, now)
     assert any("OOM" in m for m in sent)
     await engine.dispose()
