@@ -3240,6 +3240,14 @@ _PSI_MEM_FULL = 10.0
 _PSI_MEM_SOME = 40.0
 _PSI_IO_FULL = 50.0
 _PSI_IO_SOME = 80.0
+# Сервер бэкапов (backup_server.present): диск грузит его работа - prune и check репозиториев
+# restic, прием бэкапов. На двух HDD в RAID1 prune одного репозитория 17 минут читал дерево
+# снапшотов, процессы ждали диск 55-60% времени, и алерт приходил каждый день в одно время, а отбой
+# через два часа. Бэкапы при этом проходят, зависших нет, делать нечего. Давление только по диску
+# на таком сервере алертит, если держится дольше _BSRV_IO_HOLD_S: столько не идет ни один prune,
+# значит что-то не так (prune крутится без конца, диск умирает). Зависшие в D, память и дескрипторы -
+# как у всех
+_BSRV_IO_HOLD_S = 6 * 3600
 # Зависшие процессы (агент 2.40, dstate.stuck) - как их видит ядро (hung_task): тот же процесс в D
 # отчет за отчетом и ни одного переключения контекста дольше двух минут. Само число процессов в D
 # не беда: под тяжелым чтением в D каждую секунду другие процессы на миллисекунды, на базе их было
@@ -3329,6 +3337,20 @@ def pressure_problems(rep: dict) -> list[tuple[int, str, str]]:
                         f"файловые дескрипторы заняты на {pct:.0f}% ({used} из {lim})"))
     out.sort(key=lambda x: -x[0])
     return out
+
+
+def pressure_hold_s(rep: dict, pr: list[tuple[int, str, str]]) -> float | None:
+    """Своя выдержка алерта о давлении: на сервере бэкапов, когда ждут только диск (см.
+    _BSRV_IO_HOLD_S). None - общая выдержка сервера."""
+    if pr and all(r == "io" for _l, r, _t in pr) and (rep.get("backup_server") or {}).get("present"):
+        return _BSRV_IO_HOLD_S
+    return None
+
+
+def bsrv_io_note(hold_s: float | None) -> str:
+    """Пояснение к давлению на сервере бэкапов, которое все-таки дошло до алерта"""
+    return (f"на сервере бэкапов так бывает во время prune и check, но не дольше {hold_s // 3600:.0f} ч"
+            if hold_s else "")
 
 
 # Ноды кластера (агент 2.26 отдает условия): kubelet под давлением уже выселяет поды или не
@@ -3517,11 +3539,12 @@ def disk_slow(rep: dict) -> tuple[int, str]:
             f"диск {dev} тормозит: задержка {round(aw)} мс, загружен на {round(util)}%")
 
 
-def _held_long(s: Server, state: dict, key: str, now: datetime) -> bool:
-    """Держится ли "<вид>_since" дольше выдержки алерта: главная показывает то же, что алертит."""
+def _held_long(s: Server, state: dict, key: str, now: datetime, hold_s: float | None = None) -> bool:
+    """Держится ли "<вид>_since" дольше выдержки алерта: главная показывает то же, что алертит.
+    hold_s - своя выдержка вида вместо общей."""
     since = _parse_iso(state.get(f"{key}_since") or "")
     ss = getattr(s, "alert_sustain_seconds", None)
-    hold = _SUSTAIN_DEFAULT if ss is None else max(int(ss), 0)
+    hold = (_SUSTAIN_DEFAULT if ss is None else max(int(ss), 0)) if hold_s is None else hold_s
     return since is not None and (now - since).total_seconds() >= hold
 
 
@@ -3796,8 +3819,10 @@ def server_problems(s: Server, now: datetime, pod_names: dict[str, str] | None =
                 section="backups", srv=True)
     # Сервер задыхается: как и у алерта, только то, что держится дольше выдержки
     pr = pressure_problems(rep)
-    if pr and _held_long(s, state, "pressure", now):
-        add("pressure", pr[0][0], "; ".join(t for _l, _r, t in pr[:3]) + _routine_tail(state, "pressure", now),
+    pr_hold = pressure_hold_s(rep, pr)
+    if pr and _held_long(s, state, "pressure", now, pr_hold):
+        add("pressure", pr[0][0], "; ".join(t for _l, _r, t in pr[:3])
+            + (f" ({bsrv_io_note(pr_hold)})" if pr_hold else "") + _routine_tail(state, "pressure", now),
             "pressure", "pressure", state.get("pressure_since"))
     nets = net_problems(rep)
     if nets and _held_long(s, state, "net_health", now):
@@ -5132,17 +5157,18 @@ def _server_conditions(s: Server, now: datetime,
             ctx["cool"] = cool
         out[key] = (lvl, ctx)
 
-    def sustain_lvl(key: str, lvl: int, ctx: dict, cool_s: float | None = None) -> None:
+    def sustain_lvl(key: str, lvl: int, ctx: dict, cool_s: float | None = None,
+                    hold_s: float | None = None) -> None:
         """Как sustain, но с уровнем: худшая причина сейчас, если беда держится дольше выдержки.
         cool_s - отбой ушедшего алерта только после стольких секунд спокойствия: заходы внутри
-        этого времени - одна история, уровень держится прежний."""
+        этого времени - одна история, уровень держится прежний. hold_s - своя выдержка срабатывания."""
         alerted = int(state.get(key, 0) or 0) if cool_s is not None else 0
         cool = None
         if lvl and online:
             since = state.get(f"{key}_since") or now.isoformat()
             started = _parse_iso(since)
             held = (now - started).total_seconds() if started else 0.0
-            lvl = lvl if held >= sustain_s else 0
+            lvl = lvl if held >= (sustain_s if hold_s is None else hold_s) else 0
             if alerted and not lvl:
                 lvl = alerted  # снова пошло внутри истории: уровень тот же, без нового сообщения
         elif online and alerted:
@@ -5571,9 +5597,12 @@ def _server_conditions(s: Server, now: datetime,
     # Сервер задыхается (агент 2.26): уровень - худшая из причин, выдержка - как у CPU и RAM
     if online and any(rep.get(k) for k in ("psi", "dstate", "fds")):
         pr = pressure_problems(rep)
-        sustain_lvl("pressure", pr[0][0] if pr else 0, cool_s=_CALM_S, ctx={"detail": "; ".join(t for _l, _r, t in pr[:3]),
-                                                        "res": pr[0][1] if pr else "", "cause": "",
-                                                        "hint": pressure_hint(rep)})
+        pr_hold = pressure_hold_s(rep, pr)
+        pctx = {"detail": "; ".join(t for _l, _r, t in pr[:3]), "res": pr[0][1] if pr else "", "cause": "",
+                "hint": pressure_hint(rep)}
+        if pr_hold:
+            pctx["_note"] = bsrv_io_note(pr_hold)
+        sustain_lvl("pressure", pr[0][0] if pr else 0, cool_s=_CALM_S, ctx=pctx, hold_s=pr_hold)
     # Сеть ноды: потери TCP, очередь accept, conntrack, ошибки и дропы интерфейсов
     if online and (rep.get("tcp") or rep.get("net_ifaces")):
         nets = net_problems(rep)
