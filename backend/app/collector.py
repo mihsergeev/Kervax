@@ -4007,6 +4007,23 @@ def routine_of(hist: object, now_ts: float) -> tuple[float, float] | None:
     return min(a for a, _ in spans), max(b for _, b in spans)
 
 
+def _news_first(ctx: dict, fresh: set[str]) -> dict:
+    """Сообщение о новом при открытом алерте (еще один лог, второй упавший воркер): сначала новое, о
+    сказанном раньше - одной строкой. Перечень шел по порядку вида, и первой строкой каждый раз стояло
+    уже объявленное: пять сообщений за 40 минут начинались одинаково и выглядели повтором без отбоя, а
+    новое было ниже или вовсе пряталось в "и еще N". ctx["parts"] - (ключ из sig, текст) по порядку"""
+    parts = ctx.get("parts") or []
+    new = [t for k, t in parts if k in fresh]
+    old = len(parts) - len(new)
+    if not new or not old:
+        return ctx
+    sep = ctx.get("sep") or "; "
+    more = len(new) - 3 if len(new) > 3 else 0
+    tail = (f"и еще {more + old}, о {old} из них уже сообщали" if more
+            else f"и еще {old}, о них уже сообщали")
+    return {**ctx, "detail": sep.join(new[:3]) + sep + tail}
+
+
 def _sig_all_quiet(s: Server, key: str, sig: set[str], now: datetime) -> bool:
     """Все, о чем сказал алерт, теперь заглушено человеком или не алертит по замыслу (свой
     helper): уровень упал не потому, что стихло, и отбой слать нельзя."""
@@ -5561,7 +5578,8 @@ def _server_conditions(s: Server, now: datetime,
         if int(state.get("link", 0) or 0):
             sig |= set(state.get("link_sig") or [])
         sustain_lvl("link", lk[0][0] if lk else 0, {"detail": "; ".join(t for _l, _i, t in lk[:4]),
-                                                    "sig": sorted(sig)}, cool_s=_CALM_S)
+                                                    "sig": sorted(sig),
+                                                    "parts": [(str(i), t) for _l, i, t in lk]}, cool_s=_CALM_S)
     # Трафик против лимита тарифа (app/traffic.py): прогноз ходит у границы, поэтому отбой только
     # после полусуток спокойствия
     tl, tt = traffic_mod.problem(getattr(s, "traffic_sum", None), now)
@@ -5574,12 +5592,14 @@ def _server_conditions(s: Server, now: datetime,
         for kind, key in (("docker", "docker_restarts"), ("pod", "kube_restarts")):
             items = [x for x in rp if x["kind"] == kind]
             out[key] = (1 if items else 0, {"detail": "; ".join(x["text"] for x in items[:4]),
-                                            "sig": [x["key"] for x in items]})
+                                            "sig": [x["key"] for x in items],
+                                            "parts": [(x["key"], x["text"]) for x in items]})
     # Пропал порт, который слушался неделями (история - alert_state listen_hist, ведет цикл алертов)
     if online and isinstance((s.alert_state or {}).get("listen_hist"), dict):
         lg = listen_watch.problems(s, now)
         out["listen_gone"] = (1 if lg else 0, {"detail": "; ".join(x["text"] for x in lg[:3]),
-                                               "sig": [x["key"] for x in lg]})
+                                               "sig": [x["key"] for x in lg],
+                                               "parts": [(x["key"], x["text"]) for x in lg]})
     # Диск тормозит: задержка выше порога держится дольше выдержки
     if online and rep.get("disk_devs"):
         dl, dtext = disk_slow(rep)
@@ -5589,7 +5609,8 @@ def _server_conditions(s: Server, now: datetime,
     if online and gpu_mod.block(rep) is not None:
         gp = gpu_mod.problems(rep, now)
         out["gpu"] = (max((p[0] for p in gp), default=0),
-                      {"detail": "; ".join(p[1] for p in gp[:3]), "sig": [p[2] for p in gp]})
+                      {"detail": "; ".join(p[1] for p in gp[:3]), "sig": [p[2] for p in gp],
+                       "parts": [(p[2], p[1]) for p in gp]})
         hl, htext = gpu_mod.heat(rep, now)
         sustain_lvl("gpu_heat", hl, {"detail": htext}, cool_s=_CALM_S)
     # LLM-сервисы (агент 2.36): молчание /metrics, очередь при полном KV-кэше, задержки в разы выше
@@ -5602,19 +5623,22 @@ def _server_conditions(s: Server, now: datetime,
     if online and web_certs.block(rep, now) is not None:
         wce = web_certs.problems(rep, now)
         out["web_cert"] = (max((lv for lv, _t, _k in wce), default=0),
-                           {"detail": "; ".join(t for _l, t, _k in wce[:3]), "sig": [k for _l, _t, k in wce]})
+                           {"detail": "; ".join(t for _l, t, _k in wce[:3]), "sig": [k for _l, _t, k in wce],
+                            "parts": [(k, t) for _l, t, k in wce]})
     # Конфиг веб-сервера не проходит проверку (helper webserver-setup 0.23): сайты упадут при
     # следующем reload. sig - какой именно, чтобы второй сломанный конфиг дал свой алерт
     if online and web_config.block(rep, now) is not None:
         wc = web_config.problems(rep, now)
         out["web_config"] = (max((lv for lv, _t, _k in wc), default=0),
-                             {"detail": "; ".join(t for _l, t, _k in wc[:3]), "sig": [k for _l, _t, k in wc]})
+                             {"detail": "; ".join(t for _l, t, _k in wc[:3]), "sig": [k for _l, _t, k in wc],
+                              "parts": [(k, t) for _l, t, k in wc]})
     # Здоровье баз (helper dbstat-setup 0.5): реплика, долгие транзакции, блокировки, wraparound,
     # VACUUM. sig - что именно, чтобы новая беда при том же уровне дала свой алерт
     if online and db_health.block(rep, now) is not None:
         dh = db_health_problems(s, rep, now)
         out["db_health"] = (max((lv for lv, _t, _k in dh), default=0),
-                            {"detail": "; ".join(t for _l, t, _k in dh[:3]), "sig": [k for _l, _t, k in dh]})
+                            {"detail": "; ".join(t for _l, t, _k in dh[:3]), "sig": [k for _l, _t, k in dh],
+                             "parts": [(k, t) for _l, t, k in dh]})
     # SSH (helper changes-setup 0.3): root по паролю на открытом порту, перебор без защиты
     if online and ssh_audit.block(rep) is not None:
         sp = ssh_audit.problems(s, now)
@@ -5623,7 +5647,8 @@ def _server_conditions(s: Server, now: datetime,
     if online and srv_changes.snapshot(rep) is not None:
         ar = access_audit.problems(s)
         out["access_risk"] = (max((lv for lv, _t in ar), default=0),
-                              {"detail": "; ".join(t for _l, t in ar), "sig": sorted(t for _l, t in ar)})
+                              {"detail": "; ".join(t for _l, t in ar), "sig": sorted(t for _l, t in ar),
+                               "parts": [(t, t) for _l, t in ar]})
     # Очередь растет и не разбирается: полчаса роста уже в самом правиле, выдержка не нужна.
     # sig - какие очереди, вторая застрявшая дает свой алерт
     if online and isinstance((s.alert_state or {}).get("qwatch"), dict):
@@ -5631,14 +5656,14 @@ def _server_conditions(s: Server, now: datetime,
         out["queue_stuck"] = (max((x["level"] for x in qs), default=0),
                               {"detail": "; ".join(x["text"] for x in qs[:3])
                                          + (f"; и еще {len(qs) - 3}" if len(qs) > 3 else ""),
-                               "sig": [x["key"] for x in qs]})
+                               "sig": [x["key"] for x in qs], "parts": [(x["key"], x["text"]) for x in qs]})
     # Всплеск упавших задач: окно в час уже в правиле, выдержка не нужна. sig - какие брокеры
     if online and queue_watch.helper_brokers(rep):
         fp = queue_watch.failed_problems(s, now)
         out["queue_failed"] = (max((x["level"] for x in fp), default=0),
                                {"detail": "\n".join(x["text"] for x in fp[:3])
                                           + (f"\nи еще {len(fp) - 3}" if len(fp) > 3 else ""),
-                                "sig": [x["key"] for x in fp]})
+                                "sig": [x["key"] for x in fp], "parts": [(x["key"], x["text"]) for x in fp], "sep": "\n"})
     # Воркеры под supervisor и pm2: выдержка уже в правилах (BACKOFF три минуты, три перезапуска
     # за 15 минут), FATAL - сразу. sig - какие воркеры, второй упавший дает свой алерт
     if online and workers_mod.block(rep) is not None:
@@ -5646,7 +5671,7 @@ def _server_conditions(s: Server, now: datetime,
         out["workers"] = (max((x["level"] for x in wp), default=0),
                           {"detail": "\n".join(x["text"] for x in wp[:3])
                                      + (f"\nи еще {len(wp) - 3}" if len(wp) > 3 else ""),
-                           "sig": [x["key"] for x in wp]})
+                           "sig": [x["key"] for x in wp], "parts": [(x["key"], x["text"]) for x in wp], "sep": "\n"})
     # Кроны: выдержка уже в правилах (вторая копия идет 15 минут, висит - не раньше часа). sig -
     # какие задачи: вторая наслоившаяся дает свой алерт
     if online and cron_watch.block(rep) is not None:
@@ -5654,6 +5679,7 @@ def _server_conditions(s: Server, now: datetime,
         out["cron_stuck"] = (max((x["level"] for x in cp), default=0),
                              {"detail": "\n".join(x["text"] for x in cp[:3])
                                         + (f"\nи еще {len(cp) - 3}" if len(cp) > 3 else ""),
+                              "parts": [(x["key"], x["text"]) for x in cp], "sep": "\n",
                               "sig": [x["key"] for x in cp]})
     # Авария в логах (в разы выше обычного час подряд, log_errors.problems): выдержка уже в правиле,
     # всплески короче видны только в разделе. sig - какие логи
@@ -5662,19 +5688,20 @@ def _server_conditions(s: Server, now: datetime,
         out["log_errors"] = (max((x["level"] for x in lp), default=0),
                              {"detail": "\n".join(x["text"] for x in lp[:3])
                                         + (f"\nи еще {len(lp) - 3}" if len(lp) > 3 else ""),
-                              "sig": [x["key"] for x in lp]})
+                              "sig": [x["key"] for x in lp], "parts": [(x["key"], x["text"]) for x in lp], "sep": "\n"})
     # PHP-FPM: окно в час уже в правиле (минуты очереди, счет за час), выдержка не нужна. sig - какие пулы
     if online and fpm_pools.block(rep) is not None:
         fp = fpm_pools.problems(s, now)
         out["fpm"] = (max((x["level"] for x in fp), default=0),
                       {"detail": "\n".join(x["text"] for x in fp[:3])
                                  + (f"\nи еще {len(fp) - 3}" if len(fp) > 3 else ""),
-                       "sig": [x["key"] for x in fp]})
+                       "sig": [x["key"] for x in fp], "parts": [(x["key"], x["text"]) for x in fp], "sep": "\n"})
     # Утечка памяти: дно растет суток подряд (история - в alert_state mem_trend, ведет цикл алертов)
     if online and isinstance((s.alert_state or {}).get("mem_trend"), dict):
         ml = [x for x in mem_trend.problems(s, now) if x["level"]]
         out["mem_leak"] = (max((x["level"] for x in ml), default=0),
-                           {"detail": "; ".join(x["text"] for x in ml[:3]), "sig": [x["key"] for x in ml]})
+                           {"detail": "; ".join(x["text"] for x in ml[:3]), "sig": [x["key"] for x in ml],
+                            "parts": [(x["key"], x["text"]) for x in ml]})
     # Проверка восстановления: итог недельной проверки держится до следующей, выдержка не нужна
     if online and backup_verify.block(rep) is not None:
         bv = backup_verify.problems(rep, now)
@@ -6046,15 +6073,21 @@ async def evaluate_servers(
                     told |= {workers_mod.program_key(x) for x in told}
                 if key == "log_errors":
                     told |= {log_errors.norm_key(x) for x in told}
+                fresh = new_sig - told
+                # самый высокий уровень, о котором сказали, пока алерт открыт (у открытых раньше -
+                # нынешний)
+                lvk = f"{key}_told_lvl"
+                told_lvl = int(st.get(lvk) or prev) if prev else 0
                 if prev and not level and old_sig and _sig_all_quiet(s, key, old_sig, now):
                     # объявленное теперь заглушено (или это свой helper, по которому алерта
                     # больше нет): ничего не стихло, отбой был бы неправдой
                     rec_apply.append((s.id, sk, []))
                     rec_apply.append((s.id, tk, []))
+                    rec_apply.append((s.id, lvk, None))
                     rec_apply.append((s.id, key, 0))
                     continue
                 if level == prev:
-                    if level and new_sig - told:
+                    if level and fresh:
                         said = _parse_iso(str(st.get(f"{key}_said") or ""))
                         if key in _SIG_STORY and said is not None and (now - said).total_seconds() < _SIG_STORY_S:
                             # Перезапуски считаются за сутки: еще один деплоймент перешел порог
@@ -6063,25 +6096,37 @@ async def evaluate_servers(
                             apply(s.id, sk, sorted(new_sig))
                             apply(s.id, tk, sorted(told | new_sig))
                         else:
-                            fires.append(srv_fire(s, key, rule, ctx))
+                            fires.append(srv_fire(s, key, rule, _news_first(ctx, fresh)))
                             fire_apply.append((s.id, sk, sorted(new_sig)))
                             fire_apply.append((s.id, tk, sorted(told | new_sig)))
                             fire_apply.append((s.id, f"{key}_said", now.isoformat()))
+                            fire_apply.append((s.id, lvk, max(told_lvl, level)))
                     elif new_sig != old_sig:
                         apply(s.id, sk, sorted(new_sig))
                         if level and not st.get(tk):
                             apply(s.id, tk, sorted(told))
                     continue
+                if level > prev and prev and level <= told_lvl and not fresh:
+                    # то же самое снова поднялось до уровня, о котором уже сказали (2 -> 1 молча, снова
+                    # 2): одна беда - одно сообщение, повтор без отбоя был бы тем же текстом
+                    apply(s.id, key, level)
+                    apply(s.id, sk, sorted(new_sig))
+                    apply(s.id, tk, sorted(told | new_sig))
+                    continue
                 if level > prev:
+                    if prev:
+                        ctx = _news_first(ctx, fresh)
                     fire_apply.append((s.id, sk, sorted(new_sig)))
                     fire_apply.append((s.id, tk, sorted(told | new_sig)))
                     fire_apply.append((s.id, f"{key}_said", now.isoformat()))
+                    fire_apply.append((s.id, lvk, level))
                 elif level:
                     apply(s.id, sk, sorted(new_sig))
                     apply(s.id, tk, sorted(told | new_sig))
                 else:
                     rec_apply.append((s.id, sk, []))
                     rec_apply.append((s.id, tk, []))
+                    rec_apply.append((s.id, lvk, None))
             if key in _ROUTINE_KINDS:
                 # Распорядок (см. _ROUTINE_KINDS): тот же эпизод в то же время каждый день не алертит.
                 # До проверки "уровень тот же": придержанный эпизод, который затянулся, - новость
@@ -6639,7 +6684,9 @@ async def evaluate_servers(
                 n = len(probs)
                 # с причиной у каждого: по голому списку имен было не понять, что делать
                 byname = {r.get("name"): r for r in bsrv.get("repos") or []}
-                items = [f"{p} ({repo_reason(byname.get(p) or {}, now, repo_ext, panel_names)})" for p in probs]
+                # новый проблемный при открытом алерте - первым: в списке по алфавиту его было не найти
+                order = sorted(probs, key=lambda p: p not in new_names) if prev_active else probs
+                items = [f"{p} ({repo_reason(byname.get(p) or {}, now, repo_ext, panel_names)})" for p in order]
                 lst = ", ".join(items[:8]) + (f" и еще {n - 8}" if n > 8 else "")
                 shown = f"{n} шт.: {lst}"
                 fires.append(srv_fire(s, "backup_repo", rr, {"repos": shown}))
