@@ -41,6 +41,9 @@ _FLAP_MAX = 4
 _FLAP_WINDOW = timedelta(hours=24)
 # падения одного контейнера в пределах этого окна сливаются в одно событие со счетом
 _CRASH_MERGE = timedelta(minutes=30)
+# контейнер, застрявший в "created" (compose ждет, пока поднимется зависимость), дольше этого -
+# остановлен, а не пересоздается
+_CREATED_MAX = timedelta(minutes=15)
 # отчет старше - нода молчит, сравнивать нечего
 _STALE = timedelta(minutes=5)
 _TRACK_EVERY = timedelta(minutes=1)
@@ -119,6 +122,8 @@ def snapshot(row, rep: dict) -> dict:
         "ts": _iso(row.last_seen), "c": c, "p": p, "boot": _iso(row.rebooted_at),
         # плановая перезагрузка: почему ее ждали (os_support.planned_reboot)
         "bw": os_support.planned_reboot(rep, row.rebooted_at) if row.rebooted_at else "",
+        # агент считает обновления раз в час и первые полминуты после старта ветку не шлет
+        "ou": isinstance(rep.get("os_upd"), dict),
         "k": str(upd.get("kernel") or ""), "kn": str(upd.get("kernel_new") or ""),
         "os": str(row.os or rep.get("os") or ""), "dk": str(rep.get("docker_v") or ""),
         "ag": str(row.agent_version or ""),
@@ -166,10 +171,19 @@ def _confirm(prev: dict, cur: dict, pend: dict, key: str, ts: str) -> tuple[list
     return added, gone, out
 
 
+# поля снимка из ветки os_upd
+_OS_UPD = ("k", "kn", "upd", "upd_ts", "rb_ts", "rb_pkgs", "ua", "pkh")
+
+
 def diff(prev: dict | None, cur: dict, pend: dict) -> tuple[list[dict], dict]:
     """События между снимками и новый подтвержденный снимок. Первый снимок - точка отсчета."""
     if not prev:
         return [], cur
+    if not cur.get("ou", True):
+        # обновлений в отчете нет (агент только что запустился): держим прошлое. Иначе на каждом
+        # рестарте агента ядро и перезагрузка "пропадали" и следующий отчет писал их заново:
+        # на одной ноде за неделю 15 одинаковых "нужна перезагрузка"
+        cur.update({k: prev.get(k) for k in _OS_UPD if k in prev})
     ts = cur["ts"]
     ev: list[dict] = []
     out = dict(cur)
@@ -177,6 +191,7 @@ def diff(prev: dict | None, cur: dict, pend: dict) -> tuple[list[dict], dict]:
     pc, cc = prev.get("c"), cur.get("c")
     if isinstance(pc, dict) and isinstance(cc, dict):
         added, gone, conf = _confirm(pc, cc, pend, "c", ts)
+        stopping = dict(pend.get("cstop") or {})
         for name, at in added:
             ev.append(_ev(at, "deploy", "new", name, f"новый контейнер {name} ({cc[name]['i']})"))
         for name, at in gone:
@@ -186,7 +201,8 @@ def diff(prev: dict | None, cur: dict, pend: dict) -> tuple[list[dict], dict]:
             conf[name] = n
             restarted = o.get("u") is not None and n.get("u") is not None and n["u"] + 60 < o["u"]
             crashed = (n.get("r") or 0) > (o.get("r") or 0)
-            if o.get("i") and n.get("i") and o["i"] != n["i"]:
+            new_image = bool(o.get("i") and n.get("i") and o["i"] != n["i"])
+            if new_image:
                 ev.append(_ev(ts, "deploy", "image", name, f"{name}: образ {o['i']} -> {n['i']}"))
             elif crashed:
                 d = (n.get("r") or 0) - (o.get("r") or 0)
@@ -195,9 +211,21 @@ def diff(prev: dict | None, cur: dict, pend: dict) -> tuple[list[dict], dict]:
                 ev.append(_ev(ts, "deploy", "restart", name, f"{name}: перезапущен или пересоздан"))
             was, now_run = o.get("s") == "running", n.get("s") == "running"
             if was and not now_run and n.get("s") != "restarting":
-                ev.append(_ev(ts, "state", "stop", name, f"{name}: остановлен ({n.get('s') or '?'})"))
+                # остановку подтверждает второй отчет: при пересоздании и docker compose restart
+                # контейнер на отчет-другой стоит exited или created, и без этого вместо одного
+                # "перезапущен" было "остановлен", "запущен" и "перезапущен". Пока ждем - снимок
+                # прежний, и поднявшийся контейнер виден по сброшенному аптайму
+                at = stopping.get(name)
+                if at is None or (n.get("s") == "created" and not _older(at, ts, _CREATED_MAX)):
+                    stopping.setdefault(name, ts)
+                    # новый образ уже сказан - "перезапущен" к нему не добавляем
+                    conf[name] = dict(n, s=o.get("s"), u=None if new_image else o.get("u"))
+                    continue
+                ev.append(_ev(at, "state", "stop", name, f"{name}: остановлен ({n.get('s') or '?'})"))
             elif not was and now_run and o.get("s") != "restarting" and not restarted:
                 ev.append(_ev(ts, "state", "start", name, f"{name}: запущен"))
+            stopping.pop(name, None)
+        pend["cstop"] = {k: v for k, v in stopping.items() if k in cc}
         out["c"] = conf
     elif cc is None:
         out["c"] = pc  # агент не прислал контейнеры: держим прошлое, не "все удалены"
@@ -238,7 +266,19 @@ def diff(prev: dict | None, cur: dict, pend: dict) -> tuple[list[dict], dict]:
         a, b = prev.get(key) or "", cur.get(key) or ""
         if a and b and a != b:
             ev.append(_ev(ts, "system", kind, "", f"{label}: {a} -> {b}"))
-    if cur.get("kn") and cur["kn"] != (prev.get("kn") or ""):
+    # "новое ядро" и "нужна перезагрузка" - по разу до следующей перезагрузки: что уже сказано,
+    # помним в pend. Флаг может мигнуть (отчет без обновлений, apt переписал reboot-required
+    # следующим прогоном) - это то же самое ожидание, а не новое
+    said = pend.get("said")
+    if not isinstance(said, dict):
+        said = {"boot": prev.get("boot") or "", "kn": prev.get("kn") or "", "rb": prev.get("rb_ts") or 0}
+    if cur.get("boot") and cur["boot"] != said.get("boot"):
+        said = {"boot": cur["boot"]}
+    # без свежих обновлений в отчете не решаем: после перезагрузки первый отчет агента приходит
+    # без них, со старыми ядром и флагом
+    fresh = cur.get("ou", True)
+    if fresh and cur.get("kn") and cur["kn"] != said.get("kn"):
+        said["kn"] = cur["kn"]
         ev.append(_ev(_iso(cur.get("upd_ts")) or ts, "system", "kernel_new", "",
                       f"установлено ядро {cur['kn']}, заработает после перезагрузки"))
     a, b = prev.get("upd"), cur.get("upd")
@@ -250,11 +290,21 @@ def diff(prev: dict | None, cur: dict, pend: dict) -> tuple[list[dict], dict]:
         at = ua if (prev.get("upd_ts") or 0) < ua <= (cur.get("upd_ts") or 0) else cur.get("upd_ts")
         ev.append(_ev(_iso(at) or ts, "system", "packages", "",
                       f"обновлены пакеты: ждали обновления {a}, осталось {b}"))
-    if cur.get("rb_ts") and cur["rb_ts"] != prev.get("rb_ts"):
+    if fresh and cur.get("rb_ts") and not said.get("rb"):
+        said["rb"] = cur["rb_ts"]
         pk = cur.get("rb_pkgs") or []
         ev.append(_ev(_iso(cur["rb_ts"]), "system", "reboot_req", "",
                       "после обновления нужна перезагрузка" + (f": {', '.join(pk)}" if pk else "")))
+    pend["said"] = said
     return ev, out
+
+
+def _older(a: str, b: str, gap: timedelta) -> bool:
+    """Отметка a раньше b больше чем на gap."""
+    try:
+        return datetime.fromisoformat(b) - datetime.fromisoformat(a) > gap
+    except ValueError:
+        return True
 
 
 # --- запись ----------------------------------------------------------------------------------

@@ -57,9 +57,13 @@ def test_diff_containers_and_debounce():
     assert kinds == ["close", "crash", "new"]  # порт 80 пропал второй раз подряд, job подтвердился
     crash = next(e for e in ev if e["kind"] == "crash")
     assert crash["n"] == 2
+    # остановка - со второго отчета подряд, со временем первого
     ev, snap = timeline.diff(snap, _snap("t7", {"db": _c("postgres:17", None, r=2, s="exited"),
                                                 "job": _c("app:1")}, {}), pend)
-    assert [(e["kind"], e["cat"]) for e in ev] == [("stop", "state")]
+    assert ev == []
+    ev, snap = timeline.diff(snap, _snap("t7b", {"db": _c("postgres:17", None, r=2, s="exited"),
+                                                 "job": _c("app:1")}, {}), pend)
+    assert [(e["kind"], e["cat"], e["ts"]) for e in ev] == [("stop", "state", "t7")]
 
     # агент не прислал контейнеры - не "все удалены"
     ev, snap = timeline.diff(snap, _snap("t8", None, {}), pend)
@@ -312,3 +316,120 @@ def test_udp_sessions_and_flapping_ports_stay_out():
     for m in (60 * 26, 60 * 26 + 1):
         ev, snap = timeline.diff(snap, _snap(at(m), {}, dict(base, **{"123/udp": "", "5353/udp": "avahi-daemon"})), pend)
     assert [(e["kind"], e["obj"]) for e in ev] == [("open", "5353/udp")], ev
+
+
+def _at(m):
+    return (datetime(2026, 10, 14, 12, 0, tzinfo=timezone.utc) + timedelta(minutes=m)).isoformat()
+
+
+def test_recreate_is_one_restart():
+    """Выкладка через compose: контейнер на отчет стоит created или exited. Раньше это давало
+    "остановлен", "запущен" и "перезапущен" на одну выкладку."""
+    pend: dict = {}
+    _, snap = timeline.diff(None, _snap(_at(0), {"app": _c(up=7200), "cron": _c(up=7200)}, {}), pend)
+    got = []
+    for m, app, cron in ((1, _c(up=None, s="created"), _c(up=None, s="exited")),
+                         (2, _c(up=5), _c(up=20))):
+        ev, snap = timeline.diff(snap, _snap(_at(m), {"app": app, "cron": cron}, {}), pend)
+        got += [(e["kind"], e["obj"]) for e in ev]
+    assert sorted(got) == [("restart", "app"), ("restart", "cron")], got
+    assert pend["cstop"] == {}
+
+    # новый образ в отчете, где контейнер еще created: только "образ", без "перезапущен"
+    ev, snap = timeline.diff(snap, _snap(_at(3), {"app": _c("app:2", None, s="created"), "cron": _c(up=80)}, {}), pend)
+    assert [e["kind"] for e in ev] == ["image"]
+    ev, snap = timeline.diff(snap, _snap(_at(4), {"app": _c("app:2", 10), "cron": _c(up=140)}, {}), pend)
+    assert ev == []
+
+    # created дольше 15 минут - остановлен, со временем, когда заметили
+    for m in (5, 10, 19):
+        ev, snap = timeline.diff(snap, _snap(_at(m), {"app": _c("app:2", None, s="created"),
+                                                      "cron": _c(up=600)}, {}), pend)
+        assert ev == []
+    ev, snap = timeline.diff(snap, _snap(_at(21), {"app": _c("app:2", None, s="created"), "cron": _c(up=900)}, {}), pend)
+    assert [(e["kind"], e["ts"]) for e in ev] == [("stop", _at(5))]
+    ev, snap = timeline.diff(snap, _snap(_at(22), {"app": _c("app:2", 5), "cron": _c(up=960)}, {}), pend)
+    assert [e["kind"] for e in ev] == ["start"]
+
+
+def test_kernel_and_reboot_once_per_boot():
+    """На одной ноде за неделю 15 одинаковых "нужна перезагрузка" и "установлено ядро": каждый
+    рестарт агента давал отчет без обновлений ОС, и следующий писал оба заново."""
+    pend: dict = {}
+    boot1 = "2026-10-01T00:00:00+00:00"
+    upd = dict(boot=boot1, k="6.8.0-140", upd=0, upd_ts=1000)
+    _, snap = timeline.diff(None, _snap(_at(0), {}, {}, **upd), pend)
+    pending = dict(upd, kn="6.8.0-147", rb_ts=2000, rb_pkgs=["linux-image-6.8.0-147-generic"], upd_ts=2100)
+    ev, snap = timeline.diff(snap, _snap(_at(1), {}, {}, **pending), pend)
+    assert sorted(e["kind"] for e in ev) == ["kernel_new", "reboot_req"]
+
+    got = []
+    # рестарт агента: обновлений в отчете нет, потом снова есть
+    for m in range(2, 6):
+        ev, snap = timeline.diff(snap, _snap(_at(m), {}, {}, boot=boot1, ou=False), pend)
+        got += ev
+        ev, snap = timeline.diff(snap, _snap(_at(m) + "x", {}, {}, **pending), pend)
+        got += ev
+    # apt следующим прогоном переписал reboot-required: то же ожидание
+    ev, snap = timeline.diff(snap, _snap(_at(7), {}, {}, **dict(pending, rb_ts=9000, upd_ts=9100)), pend)
+    got += ev
+    assert got == [], got
+    assert snap["kn"] == "6.8.0-147" and snap["rb_ts"] == 9000
+
+    # еще более новое ядро, пока ждем перезагрузку, - это новость
+    ev, snap = timeline.diff(snap, _snap(_at(8), {}, {}, **dict(pending, kn="6.8.0-148", rb_ts=9000)), pend)
+    assert [e["kind"] for e in ev] == ["kernel_new"] and "148" in ev[0]["text"]
+
+    # перезагрузка: первый отчет агента без обновлений - ничего не повторяем
+    boot2 = "2026-10-15T03:00:00+00:00"
+    ev, snap = timeline.diff(snap, _snap(_at(9), {}, {}, boot=boot2, ou=False), pend)
+    assert [e["kind"] for e in ev] == ["reboot"]
+    ev, snap = timeline.diff(snap, _snap(_at(10), {}, {}, boot=boot2, k="6.8.0-148", upd=0, upd_ts=9500), pend)
+    assert [e["kind"] for e in ev] == ["kernel"]
+    # следующее обновление после перезагрузки - снова по разу
+    ev, snap = timeline.diff(snap, _snap(_at(11), {}, {}, boot=boot2, k="6.8.0-148", upd=0, upd_ts=9900,
+                                         kn="6.8.0-150", rb_ts=9800), pend)
+    assert sorted(e["kind"] for e in ev) == ["kernel_new", "reboot_req"]
+
+
+def test_state_without_said_starts_from_snapshot():
+    """Снимки, сохраненные до отметки "что уже сказано": ожидание из прошлого снимка не повторяем."""
+    prev = _snap(_at(0), {}, {}, boot="2026-10-01T00:00:00+00:00", kn="6.8.0-147", rb_ts=2000)
+    ev, _ = timeline.diff(prev, _snap(_at(1), {}, {}, boot="2026-10-01T00:00:00+00:00", kn="6.8.0-147",
+                                      rb_ts=2500), {})
+    assert ev == []
+
+
+def _migration():
+    import importlib.util
+    from pathlib import Path
+    p = Path(__file__).resolve().parents[1] / "alembic" / "versions" / "0126_timeline_dups.py"
+    spec = importlib.util.spec_from_file_location("m0126", p)
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    return m
+
+
+def test_migration_drops_repeats_only():
+    import sqlalchemy as sa
+    from alembic.migration import MigrationContext
+    from alembic.operations import Operations
+
+    eng = sa.create_engine("sqlite://")
+    rb = "после обновления нужна перезагрузка: libc6"
+    kn = "установлено ядро 6.8.0-147, заработает после перезагрузки"
+    rows = [(1, 1, "kernel_new", kn), (2, 1, "reboot_req", rb), (3, 1, "agent", "агент Kervax: 2.27 -> 2.28"),
+            (4, 1, "kernel_new", kn), (5, 1, "reboot_req", rb),
+            (6, 1, "reboot_req", "после обновления нужна перезагрузка: libc6, openssl"),
+            (7, 2, "kernel_new", kn),  # другой сервер
+            (8, 1, "reboot", "плановая перезагрузка"),
+            (9, 1, "kernel_new", kn), (10, 1, "reboot_req", rb), (11, 1, "kernel_new", kn)]
+    with eng.begin() as conn:
+        conn.execute(sa.text("CREATE TABLE server_events (id INTEGER PRIMARY KEY, server_id INTEGER, kind TEXT, text TEXT)"))
+        for r in rows:
+            conn.execute(sa.text("INSERT INTO server_events VALUES (:a, :b, :c, :d)"), dict(zip("abcd", r)))
+        with Operations.context(MigrationContext.configure(conn)):
+            _migration().upgrade()
+        left = [r[0] for r in conn.execute(sa.text("SELECT id FROM server_events ORDER BY id"))]
+    # после перезагрузки то же ядро ждет снова - это новость, один раз
+    assert left == [1, 2, 3, 6, 7, 8, 9, 10], left
