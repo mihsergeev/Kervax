@@ -2793,8 +2793,9 @@ const EN: Record<string, string> = {
   'Не алертить о перезапусках': 'Do not alert about restarts',
   'Снова алертить': 'Alert again',
   'Снова алертить о пачках': 'Alert about bursts again',
-  'Пачек за сутки: {n}. Поды разных ворклоадов перезапускались разом: так бывает, когда подвисает нода или kube-api - пробы не отвечают вовремя, контроллеры теряют лидерство (leader election lost) и выходят. Чинить ноду, а не поды: нагрузка, память, диск под etcd.':
-    'Bursts in a day: {n}. Pods of different workloads restarted at once: this happens when the node or kube-api stalls - probes time out, controllers lose leadership (leader election lost) and exit. Fix the node, not the pods: load, memory, the disk under etcd.',
+  'Пачек за сутки: {n}. Поды разных ворклоадов перезапускались разом, и это подвисание ноды: в эти минуты на ней было давление или поды упали по таймауту пробы и kube-api (leader election lost). Чинить ноду, а не поды: нагрузка, память, диск под etcd. Плановый выход с кодом 0 и заглушенные поды в пачки не идут.':
+    'Bursts in a day: {n}. Pods of different workloads restarted at once, and the node stalled: it was under pressure in those minutes, or the pods failed on probe and kube-api timeouts (leader election lost). Fix the node, not the pods: load, memory, the disk under etcd. Planned exits with code 0 and muted pods do not count.',
+  'ждали: CPU {c}%, память {m}%, диск {d}%': 'waited: CPU {c}%, memory {m}%, disk {d}%',
   'Перезапуски вместе с подами других ворклоадов: беда ноды или kube-api, в счет пода не идут':
     'Restarts together with pods of other workloads: a node or kube-api problem, not counted against the pod',
   'Поды, которые перезапускались за сутки: когда и как кончился прошлый запуск. В Telegram - OOMKilled от 3 раз за сутки, падения и убийства по пробе от 5 раз (не считая пачек), пачки от {n} за сутки; выход с кодом 0 - плановый, только здесь.':

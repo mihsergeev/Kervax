@@ -41,6 +41,9 @@ def test_cause_text():
                            "pmsg": 'Get "http://10.0.0.5:8081/healthz": context deadline exceeded'}) == (
         "probe", 'убит по liveness-пробе (Get "http://10.0.0.5:8081/healthz": context deadline exceeded)')
     assert restarts.cause({"c": "app", "r": "Completed", "x": 0}) == ("exit0", "сам вышел с кодом 0")
+    # с нулем выходят и после потери lease: это не плановый выход
+    assert restarts.cause({"c": "app", "r": "Completed", "x": 0, "log": 'error unable to start provider {"error": "leader election lost"}'}) == (
+        "crash", 'exit 0: error unable to start provider {"error": "leader election lost"}')
     assert restarts.cause({"c": "app", "r": "Error", "x": 1, "log": 'ERROR setup problem running manager {"error": "leader election lost"}'}) == (
         "crash", 'exit 1: ERROR setup problem running manager {"error": "leader election lost"}')
     assert restarts.cause({"c": "app", "r": "Error", "x": 137}) == ("crash", "exit 137 (SIGKILL)")
@@ -96,7 +99,7 @@ def test_bursts_are_one_line_about_the_node():
     assert [x["key"] for x in pr] == ["bursts"]
     assert pr[0]["text"] == (
         "поды перезапускаются пачками: 3 раза за сутки по 3 разом, последний 30 мин назад (app-a, app-b, app-c) - "
-        "похоже, подвисает нода k8s-a: пробы и запросы к kube-api не успевают, смотрите нагрузку и память ноды")
+        "подвисает нода k8s-a: пробы и запросы к kube-api не дождались ответа, смотрите, что грузит ноду")
     kv = restarts.kube_view(_srv(pods, rs), NOW)
     assert len(kv["bursts"]) == 3 and kv["bursts"][-1]["pods"] == [
         "default/app-a-6b8b56c769-f4k8m", "default/app-b-5d88689b5d-rg5d7", "default/app-c-649ccd4dfd-zz4k8"]
@@ -114,6 +117,72 @@ def test_bursts_are_one_line_about_the_node():
     rows = [(p["level"], p.get("sec"), p["mute"]) for p in collector.server_problems(_srv(pods, rs), NOW)
             if p["kind"] == "kube_restarts"]
     assert rows == [(1, "restarts", "restarts:bursts")]
+
+
+def test_workers_of_one_app_exiting_together_are_not_a_burst():
+    """Воркеры одного приложения работают по 20 минут и выходят сами с кодом 0 в одну и ту же
+    минуту: 57 "пачек" за сутки на ноде, где давления нет. Это не подвисание и не беда вовсе."""
+    names = [("app-a-6f678d8d6d-jxrpd", "app-a"), ("app-b-649b7b9b57-z2gcf", "app-b"),
+             ("app-c-74fc666fc6-b6rn5", "app-c"), ("app-d-6c4b7b84cc-8lswh", "app-d")]
+    pods = [_pod(n, c, {"c": "app", "r": "Completed", "x": 0}) for n, c in names]
+    rs = {f"pod:default/{n}": _ev(*range(5, 1400, 20)) for n, _c in names}
+    s = _srv(pods, rs)
+    assert restarts.problems(s, NOW) == []
+    kv = restarts.kube_view(s, NOW)
+    assert kv["bursts"] == [] and {p["kind"] for p in kv["pods"]} == {"exit0"}
+    # те же поды заглушены руками - тоже не пачка, даже если причина неизвестна (старый агент)
+    pods_old = [_pod(n, c) for n, c in names]
+    muted = [f"restarts:pod:default/{c}" for _n, c in names]
+    assert restarts.problems(_srv(pods_old, rs, mutes=muted), NOW) == []
+
+
+def test_apps_failing_together_without_node_stall_count_per_pod():
+    """Три деплоймента падают в одни минуты с ошибкой приложения (общая база), а нода в порядке:
+    не "подвисает нода", а каждый под своей строкой со своей причиной."""
+    pods = [_pod(f"app-{x}-6b8b56c769-f4k8m", f"app-{x}", {"c": "app", "r": "Error", "x": 1,
+                                                          "log": "SQLSTATE[08006] connection to db refused"})
+            for x in "abc"]
+    rs = {f"pod:default/app-{x}-6b8b56c769-f4k8m": _ev(10, 130, 250, 370, 490) for x in "abc"}
+    rs[restarts.PSI_KEY] = [[(NOW - timedelta(minutes=m)).isoformat(), {"c": 3, "ms": 0, "mf": 0, "is": 1, "if": 0}]
+                            for m in (10, 130, 250, 370, 490)]
+    pr = restarts.problems(_srv(pods, rs), NOW)
+    assert [x["key"] for x in pr] == ["pod:default/app-a", "pod:default/app-b", "pod:default/app-c"]
+    assert pr[0]["text"].endswith(": exit 1: SQLSTATE[08006] connection to db refused")
+    assert restarts.kube_view(_srv(pods, rs), NOW)["bursts"] == []
+
+
+def test_node_stall_confirmed_by_pressure():
+    """Причина у подов неизвестна (агент старше 2.43), но в минуты пачек на ноде было давление"""
+    pods = [_pod(f"app-{x}-6b8b56c769-f4k8m", f"app-{x}") for x in "abc"]
+    rs = {f"pod:default/app-{x}-6b8b56c769-f4k8m": _ev(10, 130, 250) for x in "abc"}
+    calm = {"c": 2, "ms": 0, "mf": 0, "is": 0, "if": 0}
+    rs[restarts.PSI_KEY] = [[(NOW - timedelta(minutes=m)).isoformat(), calm] for m in (10, 130, 250)]
+    assert restarts.problems(_srv(pods, rs), NOW) == []  # давления нет - и пачки нет, и по подам мало
+    rs[restarts.PSI_KEY][1][1] = {"c": 40, "ms": 12, "mf": 7.6, "is": 13, "if": 5.8}
+    rs[restarts.PSI_KEY][2][1] = {"c": 30, "ms": 2, "mf": 0, "is": 1, "if": 0}
+    rs[restarts.PSI_KEY][0][1] = {"c": 26, "ms": 0, "mf": 0, "is": 0, "if": 0}
+    pr = restarts.problems(_srv(pods, rs), NOW)
+    assert [x["key"] for x in pr] == ["bursts"]
+    assert pr[0]["text"] == (
+        "поды перезапускаются пачками: 3 раза за сутки по 3 разом, последний 10 мин назад (app-a, app-b, app-c) - "
+        "подвисает нода k8s-a: в эти минуты процессы ждали CPU 40%, память 12%, диск 13% времени, "
+        "смотрите, что грузит ноду")
+    assert restarts.kube_view(_srv(pods, rs), NOW)["bursts"][-1]["psi"]["c"] == 26
+
+
+def test_update_keeps_node_pressure_of_restart_minutes():
+    rep = {"psi": {"cpu_some_60": 41.2, "mem_full_60": 7.64, "mem_some_60": 11.8, "io_some_60": 13.2, "io_full_60": 5.8},
+           "kube": {"pods": [_pod("app-a-6b8b56c769-f4k8m", "app-a")]}}
+    st = restarts.update(None, dict(rep, kube={"pods": [dict(rep["kube"]["pods"][0], restarts=3)]}), NOW)
+    assert restarts.PSI_KEY not in st  # первая точка - не перезапуск
+    t1 = NOW + timedelta(minutes=1)
+    st = restarts.update(st, dict(rep, kube={"pods": [dict(rep["kube"]["pods"][0], restarts=3)]}), t1)
+    assert restarts.PSI_KEY not in st  # перезапусков не было - давление не пишем
+    t2 = NOW + timedelta(minutes=2)
+    st = restarts.update(st, dict(rep, kube={"pods": [dict(rep["kube"]["pods"][0], restarts=4)]}), t2)
+    assert st[restarts.PSI_KEY] == [[t2.isoformat(), {"c": 41.2, "ms": 11.8, "mf": 7.6, "is": 13.2, "if": 5.8}]]
+    # служебный ключ не ломает подсчет для разделов
+    assert restarts.view(_srv([], st), t2) == {"pod:default/app-a-6b8b56c769-f4k8m": 1}
 
 
 async def test_alert_has_the_cause_and_leads_to_restarts(tmp_path, monkeypatch):

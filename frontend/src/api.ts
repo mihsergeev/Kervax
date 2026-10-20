@@ -1511,7 +1511,8 @@ export type KubeRestartPod = {
 }
 export type KubeRestarts = {
   pods: KubeRestartPod[]
-  bursts: { t: string; pods: string[] }[]
+  // только подтвержденные подвисания ноды; psi - давление на ноде в эти минуты, % времени
+  bursts: { t: string; pods: string[]; psi?: { c: number; ms: number; mf: number; is: number; if: number } | null }[]
   burst_min: number
 }
 export type KubeFailedJob = { ns: string; name: string; ts?: number; reason?: string }
