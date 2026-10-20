@@ -8,13 +8,44 @@ import { useI18n } from './i18n'
 // numbered - номера у шагов с командой по порядку; заметки без команды, откат и "или" без номера
 export type FixStep = { id: string; cmd?: string; alt?: boolean; undo?: boolean }
 
-export function FixSteps<S extends FixStep>({ steps, text, foot, numbered }: {
+// Команды сами говорят, вышло или нет: последняя строка вроде echo "образ заменен" || echo "НЕ
+// ЗАМЕНЕНО: ...", sed, не нашедший строку, иначе молчит (бэкенд: compose_cmd.verdict). Фразы
+// пишет бэкенд по-русски, английская панель показывает и копирует их по-английски. Новую фразу
+// бэкенда - сюда и в словарь, тест backend/tests/test_fix_verdicts.py сверяет список
+const ECHO = [
+  'образ заменен',
+  'НЕ ЗАМЕНЕНО: строка image другая, поправьте ее руками',
+  'контейнер на новом образе',
+  'НЕ ОБНОВЛЕН: контейнер на прежнем образе, смотрите вывод выше',
+  'контейнер на свежем образе',
+  'ОБРАЗ ТОТ ЖЕ: автор образа его еще не пересобрал',
+  'репозиторий переведен',
+  'НЕ ЗАМЕНЕНО: репозитория NodeSource в sources.list.d нет, поправьте руками',
+  'nodejs новой версии',
+  'НЕ ОБНОВЛЕН: nodejs прежней версии',
+  'файл изменен',
+  'НЕ ИЗМЕНЕНО: нужной строки в блоке сервиса нет, поправьте руками',
+  'privileged снят',
+  'НЕ СНЯТ: контейнер все еще privileged',
+  'docker-сокета у контейнера нет',
+  'НЕ УБРАН: docker-сокет все еще у контейнера',
+  'pg_stat_statements добавлен',
+  'НЕ ДОБАВЛЕНО: строка shared_preload_libraries другая, поправьте руками',
+].sort((a, b) => b.length - a.length)
+
+function cmdText(cmd: string, lang: string, t: (s: string) => string): string {
+  return lang === 'en' ? ECHO.reduce((c, s) => c.split(`${s}"`).join(`${t(s)}"`), cmd) : cmd
+}
+
+export function FixSteps<S extends FixStep>({ steps, text, foot, numbered, onCopy }: {
   steps: S[]
   text: (st: S) => string
   foot?: string
   numbered?: boolean
+  // скопировали команду шага: вызывающий может ждать, что ее сейчас выполнят
+  onCopy?: (st: S) => void
 }) {
-  const { t } = useI18n()
+  const { t, lang } = useI18n()
   const [copied, setCopied] = useState(-1)
   let n = 0
   return (
@@ -31,9 +62,10 @@ export function FixSteps<S extends FixStep>({ steps, text, foot, numbered }: {
             </div>
             {st.cmd && (
               <div className="agent-advice-cmd">
-                <pre>{st.cmd}</pre>
+                <pre>{cmdText(st.cmd, lang, t)}</pre>
                 <button className="ghost" onClick={() => {
-                  navigator.clipboard?.writeText(st.cmd ?? '')
+                  navigator.clipboard?.writeText(cmdText(st.cmd ?? '', lang, t))
+                  onCopy?.(st)
                   setCopied(i)
                   window.setTimeout(() => setCopied(-1), 1500)
                 }}>

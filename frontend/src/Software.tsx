@@ -35,8 +35,8 @@ function swFixText(id: string, a: Record<string, string>, t: TFn): string {
     case 'c_find': return t('Узнать папку, compose-файл и сервис контейнера {c}, дальше все в этом же окне. Пусто - контейнер запущен не из compose.', p)
     case 'c_bak': return t('Копия compose-файла для отката.', p)
     case 'c_data': return t('Копия данных контейнера для отката, на это время он остановлен.', p)
-    case 'img_set': return t('Поменять образ на {new}. grep покажет строки image: если там старый образ (в кавычках или из .env), поправить руками.', p)
-    case 'c_up': return t('Перезапустить и проверить: в ps - Up, в логе нет ошибок. Нет такого тега - up скажет not found, старый контейнер продолжит работать.', p)
+    case 'img_set': return t('Поменять образ на {new}. Последняя строка скажет, вышло ли: НЕ ЗАМЕНЕНО - строка image в compose другая (образ из переменной или .env), ее поправить руками, grep выше показывает все строки image.', p)
+    case 'c_up': return t('Перезапустить и проверить: в логе нет ошибок, а последняя строка скажет, на новом ли образе контейнер (Up в ps этого не говорит). НЕ ОБНОВЛЕН - образ в compose не заменен или такого тега нет (up скажет not found), прежний контейнер продолжит работать.', p)
     case 'c_undo': return t('Вернуть прежний compose-файл и перезапустить.', p)
     case 'c_undo_data': return t('Вернуть прежний compose-файл и данные из копии, перезапустить.', p)
     case 'c_down': return t('Контейнер не нужен - остановить и убрать проект. Данные в папках и томах остаются на диске.', p)
@@ -69,8 +69,8 @@ function swFixText(id: string, a: Record<string, string>, t: TFn): string {
     case 'h_php_switch': return t('Перевести сайты на {to}: пулы из /etc/php/{from}/fpm/pool.d/ в /etc/php/{to}/fpm/pool.d/, у сайтов сокет php{to}-fpm.sock, CLI - update-alternatives --set php /usr/bin/php{to}.', p)
     case 'h_php_check': return t('Проверить версию и конфиг FPM, перезагрузить веб-сервер и открыть сайты.', p)
     case 'h_php_remove': return t('Когда сайты и кроны на {to} - удалить {from} (apt спросит, конфиги останутся).', p)
-    case 'h_node_repo': return t('Перевести репозиторий NodeSource на {to} и обновить nodejs.', p)
-    case 'h_node_check': return t('Проверить версию, перезапустить приложения, нативные модули пересобрать (npm rebuild).', p)
+    case 'h_node_repo': return t('Перевести репозиторий NodeSource на {to} и обновить nodejs. Строка после правки скажет, нашелся ли репозиторий.', p)
+    case 'h_node_check': return t('Проверить версию (последняя строка скажет, новая ли), перезапустить приложения, нативные модули пересобрать (npm rebuild).', p)
     case 'h_node_rollback': return t('Вернуть репозиторий на {from} и прежнюю версию.', p)
     case 'h_etc_backup': return t('Копия конфигов.', p)
     case 'h_nginx_upgrade': return t('Обновить nginx из репозитория nginx.org. Версия не поменялась - в sources.list.d старое имя дистрибутива или пакет зафиксирован (apt-mark showhold).', p)
@@ -99,9 +99,69 @@ function wayHead(b: SwFixBlock, t: TFn): string {
   return parts.join(' · ')
 }
 
-function SwFix({ g, t }: { g: SoftwareItem; t: TFn }) {
+// шаг, после которого на ноде должна быть новая версия: скопировали его - ждем отчет агента
+const RESTART = new Set(['c_up', 'pull_up', 'rb_build'])
+// столько после копирования дать на то, чтобы команду вставили и она отработала
+const RUN_GRACE = 30_000
+
+function hms(iso: string): string {
+  return new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+}
+
+// Что на ноде сейчас и когда панель это узнала: после шагов пункт уходит сам с отчетом агента, а
+// без этой строки было непонятно, ждать или что-то не так. Отчеты идут раз в every секунд, пока
+// шаги открыты, карточка перечитывает их так же часто. Скопировали перезапуск, а свежий отчет
+// показывает прежнюю версию - прямо сказать, что обновление не прошло и где смотреть
+function SwNow({ g, b, data, ran, checking, onCheck, t }: {
+  g: SoftwareItem
+  b: SwFixBlock
+  data: SoftwareOut
+  ran: number
+  checking: boolean
+  onCheck: () => void
+  t: TFn
+}) {
+  const a = b.args
+  const at = data.report_at
+  const p = { c: b.name, image: a.image ?? '', status: a.status ?? '', name: g.name, from: g.cycle, n: data.every ?? 15 }
+  const fresh = !!at && ran > 0 && new Date(at).getTime() > ran + RUN_GRACE
+  let after = ''
+  if (ran > 0 && !fresh) after = t('Ждем отчет агента после перезапуска, панель проверяет каждые {n} с.', p)
+  else if (fresh && b.mode === 'image')
+    after = t('Отчет агента в {time}: {c} все еще на {image}. Если перезапуск уже выполнен, образ не заменен: смотрите, что сказали последние строки замены образа и перезапуска.', { ...p, time: hms(at) })
+  else if (fresh && b.mode === 'pull')
+    after = t('Отчет агента в {time}: в {c} все еще {name} {from}. Если перезапуск уже выполнен, автор образа его еще не пересобрал.', { ...p, time: hms(at) })
+  else if (fresh)
+    after = t('Отчет агента в {time}: в {c} все еще {name} {from}. Если шаги уже выполнены, смотрите вывод последней команды.', { ...p, time: hms(at) })
+  return (
+    <div className="sw-now small">
+      <div>
+        <span className="muted">
+          {p.status ? t('Сейчас на ноде: {c} на {image}, {status}.', p) : t('Сейчас на ноде: {c} на {image}.', p)}{' '}
+          {at
+            ? t('Отчет агента в {time}, они идут раз в {n} с, пока шаги открыты, панель перечитывает их сама.', { ...p, time: hms(at) })
+            : t('Отчетов агента еще не было.')}
+        </span>{' '}
+        <button className="ghost small" disabled={checking} onClick={onCheck}>
+          {checking ? t('проверяю...') : t('Проверить сейчас')}
+        </button>
+      </div>
+      {after && <div className={fresh ? 't-degraded' : 'muted'}>{after}</div>}
+    </div>
+  )
+}
+
+function SwFix({ g, data, checking, onCheck, t }: {
+  g: SoftwareItem
+  data: SoftwareOut
+  checking: boolean
+  onCheck: () => void
+  t: TFn
+}) {
   const blocks = g.fix ?? []
   const a = blocks[0]?.args ?? {}
+  // когда скопировали команду перезапуска, по способу
+  const [ran, setRan] = useState<Record<string, number>>({})
   return (
     <div className="sw-fix">
       {a.to && (
@@ -123,11 +183,17 @@ function SwFix({ g, t }: { g: SoftwareItem; t: TFn }) {
               </span>
             )}
           </div>
-          <FixSteps numbered steps={b.steps} text={(st) => swFixText(st.id, b.args, t)} />
+          <FixSteps numbered steps={b.steps} text={(st) => swFixText(st.id, b.args, t)}
+            onCopy={(st) => RESTART.has(st.id) && setRan({ ...ran, [b.kind + b.name]: Date.now() })} />
+          {b.kind === 'container' && (
+            <SwNow g={g} b={b} data={data} ran={ran[b.kind + b.name] ?? 0} checking={checking} onCheck={onCheck} t={t} />
+          )}
         </div>
       ))}
       <div className="muted small">
-        {t('Пункт уходит сам, когда этой версии на ноде не останется: у контейнеров - со следующим отчетом агента, у пакетов хоста - в течение часа.')}
+        {blocks.some((b) => b.kind === 'host')
+          ? t('Пункт уходит сам, когда этой версии на ноде не останется: у контейнеров - со следующим отчетом агента, у пакетов хоста - в течение часа.')
+          : t('Пункт уходит сам, когда этой версии на ноде не останется, со следующим отчетом агента.')}
       </div>
     </div>
   )
@@ -181,14 +247,22 @@ export function SoftwareCard({ server: s, onChanged }: { server: Server; onChang
       .catch(() => {})
       .finally(() => setBusy(''))
   }
-  const load = useCallback(() => {
-    getSoftware(s.id).then(setData).catch(() => {})
-  }, [s.id])
+  const [checking, setChecking] = useState(false)
+  const load = useCallback(() => getSoftware(s.id).then(setData).catch(() => {}), [s.id])
+  // открыты шаги - перечитывать с каждым отчетом агента: после перезапуска видно сразу, ушла ли
+  // версия; иначе хватает раза в 10 минут
+  const every = open ? Math.max(data?.every ?? 15, 10) * 1000 : 10 * 60_000
   useEffect(() => {
     load()
-    const h = window.setInterval(load, 10 * 60_000)
-    return () => window.clearInterval(h)
   }, [load])
+  useEffect(() => {
+    const h = window.setInterval(load, every)
+    return () => window.clearInterval(h)
+  }, [load, every])
+  const checkNow = () => {
+    setChecking(true)
+    load().finally(() => setChecking(false))
+  }
   // версия без поддержки ушла, пока была на экране: на что обновили - по свежему списку
   const fixed = useFixDone(data ? data.items.filter((g) => g.state === 'eol' || g.state === 'soon') : null, (g) => g.key, (g) => {
     if (data?.items.some((x) => x.key === g.key)) return t('{name} {cycle}: поддержка продлена, замечание закрыто', { name: g.name, cycle: g.cycle })
@@ -239,7 +313,7 @@ export function SoftwareCard({ server: s, onChanged }: { server: Server; onChang
                       )}
                     </span>
                   </div>
-                  {open === g.key && !muted && <SwFix g={g} t={t} />}
+                  {open === g.key && !muted && <SwFix g={g} data={data} checking={checking} onCheck={checkNow} t={t} />}
                 </Fragment>
               )
             })}

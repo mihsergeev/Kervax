@@ -308,7 +308,9 @@ def test_pgss_in_container_command_edits_compose():
     assert fix[1]["arg"] == "db" and fix[1]["cmd"].split("\n") == [
         "cd /srv/app", "sudo cp -p compose.yml compose.yml.bak-kervax",
         "sudo sed -i -E 's/(shared_preload_libraries=[^A-Za-z0-9_]?timescaledb)([^A-Za-z0-9_,]|$)/\\1,pg_stat_statements\\2/' compose.yml",
-        "diff compose.yml.bak-kervax compose.yml"]
+        "diff compose.yml.bak-kervax compose.yml",
+        "grep -qE 'shared_preload_libraries=[^[:space:]]*pg_stat_statements' compose.yml"
+        ' && echo "pg_stat_statements добавлен" || echo "НЕ ДОБАВЛЕНО: строка shared_preload_libraries другая, поправьте руками"']
     assert fix[2]["cmd"] == f"cd /srv/app\n{up}"
     assert fix[4]["cmd"].split("\n")[1:] == ["cd /srv/app", "sudo cp -p compose.yml.bak-kervax compose.yml", up]
     assert "ALTER SYSTEM" not in " ".join(s["cmd"] for s in fix)

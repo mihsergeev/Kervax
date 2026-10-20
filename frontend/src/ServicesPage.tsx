@@ -317,7 +317,7 @@ function pgssFixText(st: OsFixStep, t: TFn): string {
         ? t('Перезапустить PostgreSQL ({unit}), чтобы библиотека загрузилась: база недоступна несколько секунд, приложения теряют соединения и должны переподключиться, лучше в тихое время.', { unit: a })
         : t('Перезапустить PostgreSQL, чтобы библиотека загрузилась: база недоступна несколько секунд, приложения теряют соединения и должны переподключиться. На Debian и Ubuntu postgresql перезапускает все кластеры, один - postgresql@<версия>-<кластер> (systemctl list-units postgresql*), на RHEL юнит бывает postgresql-<версия>.')
     case 'pgss_compose':
-      return t('Параметр задан в command сервиса {svc} в compose, и ALTER SYSTEM его не перебьет: правится compose. Копия файла рядом (.bak-kervax), sed дописывает pg_stat_statements к shared_preload_libraries, diff показывает измененные строки. Должна поменяться одна, у {svc}: если поменялись и чужие или diff пустой (значение задано иначе, через переменную), верните копию и поправьте руками.', { svc: a })
+      return t('Параметр задан в command сервиса {svc} в compose, и ALTER SYSTEM его не перебьет: правится compose. Копия файла рядом (.bak-kervax), sed дописывает pg_stat_statements к shared_preload_libraries, diff показывает измененные строки. Должна поменяться одна, у {svc}: если поменялись и чужие или последняя строка - НЕ ДОБАВЛЕНО (значение задано иначе, через переменную), верните копию и поправьте руками.', { svc: a })
     case 'pgss_compose_grep':
       return t('Параметр задан в command сервиса в compose, и ALTER SYSTEM его не перебьет: правится compose. Найдите строку и поставьте shared_preload_libraries={v}, файл перед правкой скопируйте.', { v: a })
     case 'pgss_compose_up':

@@ -59,11 +59,34 @@ class Cmd:
     def diff(self, suffix: str) -> list[str]:
         return [f"diff {f}{suffix} {f}" for f in self.files]
 
+    def changed(self, edit: list[str], bad: str) -> list[str]:
+        """Правка файлов с проверкой: изменилось ли хоть что-то. sed, не нашедший строку, молчит, и
+        дальше перезапускали прежний файл: здесь последняя строка громко скажет, что правки нет."""
+        cat = f"sudo cat {' '.join(self.files)} | md5sum"
+        return [f"H=$({cat})"] + edit + [verdict(f'[ "$({cat})" != "$H" ]', "файл изменен", bad)]
+
     def sed_in(self, svc: str, until: str, expr: str) -> str:
         """sed только в блоке сервиса: от строки "  svc:" до первой строки с until после нее.
         Так правка не заденет такую же строку у соседнего сервиса."""
         start = "^ *" + re.sub(r"[.]", r"\\.", svc) + ":"
         return f"sudo sed -i {shlex.quote(f'/{start}/,/{until}/ {expr}')} {' '.join(self.files)}"
+
+
+def ere(s: str) -> str:
+    """Строка буквально в регулярке grep -E / sed -E."""
+    return re.sub(r"([.\[\]()*+?{}|^$\\])", r"\\\1", s)
+
+
+def verdict(test: str, ok: str, bad: str) -> str:
+    """Последняя строка команды: проверить результат и сказать словами, вышло или нет. test - команда,
+    которой важен только код выхода. Фразы без переменных: английская панель переводит их прямо в
+    тексте команды (frontend/src/FixSteps.tsx, ECHO), новую фразу дописать и туда."""
+    return f'{test} && echo "{ok}" || echo "{bad}"'
+
+
+def image_is(name: str, image: str) -> str:
+    """Контейнер name сейчас на образе image (как он записан в compose)."""
+    return f"sudo docker inspect -f '{{{{.Config.Image}}}}' {shlex.quote(name)} | grep -qxF -- {shlex.quote(image)}"
 
 
 def find_cmd(names: list[str]) -> str:

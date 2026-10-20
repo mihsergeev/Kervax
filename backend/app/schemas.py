@@ -1420,6 +1420,8 @@ class ServerOut(BaseModel):
     restarts_day: dict[str, int] | None = None
     # что течет памятью: [{key, kind, name, rate, eta_days, series, level, text}] (mem_trend.problems)
     mem_leaks: list[dict] | None = None
+    # OOM (app/oom.py): эпизодов за 7 дней, последний, юниты, убитые OOM ({юнит: {ep, line, quiet}})
+    oom: dict | None = None
     # SSH (helper changes-setup 0.3): настройки входа, перебор, открыт ли порт (ssh_audit.view)
     ssh: dict | None = None
     # что сделать с SSH: вход по паролю на открытом порту (ssh_audit.advice) - в "Требует действий"
@@ -1691,6 +1693,9 @@ class AgentReportIn(BaseModel):
     cpu_temp: float | None = None
     cpu_throttle: float | None = None
     oom_kill: float | None = None
+    # агент 2.42: сам счетчик ядра (/proc/vmstat oom_kill), рост считает панель от прошлого
+    # отчета - убийства не теряются, когда агент перезапустился посреди OOM
+    oom_total: int | None = None
     oom_victim: str = Field(default="", max_length=200)
     mem_cached: int = 0
     mem_free: int = 0

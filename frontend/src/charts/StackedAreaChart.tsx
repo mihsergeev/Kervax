@@ -24,7 +24,11 @@ type Props = {
   // клик по полотну (нажал-отпустил на месте) → раскрыть график. Отдельно от onZoom:
   // протяжка остаётся выделением диапазона, кликом её не подменяем
   onExpand?: () => void
+  // отметки событий по времени (OOM на графике памяти): вертикальная линия и подпись сверху
+  marks?: ChartMark[]
 }
+
+export type ChartMark = { t: number; label: string; title: string; tone?: 'bad' | 'warn' }
 
 const W = 640
 const PAD_L = 52
@@ -64,6 +68,7 @@ export function StackedAreaChart({
   height = 150,
   onZoom,
   onExpand,
+  marks,
 }: Props) {
   const H = height
   const ref = useRef<SVGSVGElement>(null)
@@ -162,6 +167,9 @@ export function StackedAreaChart({
     // по ВРЕМЕНИ, а не по индексу точки
     x: PAD_L + ((tk.t - tMin) / Math.max(1, tMax - tMin)) * plotW,
   }))
+  const mk = (marks ?? [])
+    .filter((m) => m.t >= tMin && m.t <= tMax)
+    .map((m) => ({ ...m, x: PAD_L + ((m.t - tMin) / Math.max(1, tMax - tMin)) * plotW }))
   const fmt = fmtY ?? ((v: number) => Math.round(v).toString())
   const fmtVal = fmtV ?? fmt
   // Шаг мельче единицы, а формат округляет до целых - подписи слиплись бы в "0 0 1 1".
@@ -309,6 +317,17 @@ export function StackedAreaChart({
               vectorEffect="non-scaling-stroke"
             />
           ))}
+          {mk.map((m) => (
+            <line
+              key={`m${m.t}`}
+              x1={m.x}
+              y1={PAD_T}
+              x2={m.x}
+              y2={PAD_T + plotH}
+              className={`sac-mark sac-mark-${m.tone ?? 'bad'}`}
+              vectorEffect="non-scaling-stroke"
+            />
+          ))}
           {drag && Math.abs(drag.b - drag.a) > 1 && (
             <rect
               x={Math.min(drag.a, drag.b)}
@@ -342,6 +361,16 @@ export function StackedAreaChart({
         {xt.map((tk) => (
           <span key={tk.t} className="sac-xtick" style={{ left: `${(tk.x / W) * 100}%` }}>
             {tk.label}
+          </span>
+        ))}
+        {mk.map((m) => (
+          <span
+            key={`mf${m.t}`}
+            className={`sac-mark-flag sac-mark-${m.tone ?? 'bad'}`}
+            style={{ left: `${(m.x / W) * 100}%` }}
+            title={m.title}
+          >
+            {m.label}
           </span>
         ))}
         {hi != null && (

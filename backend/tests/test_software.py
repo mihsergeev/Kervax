@@ -1,8 +1,12 @@
 """Версии без поддержки (app/software.py): что стоит в контейнерах и на хосте и когда у этого
 кончается поддержка по снимку endoflife.date."""
 import re
+import shlex
+import shutil
+import subprocess
 from datetime import date, datetime, timezone
 
+import pytest
 from sqlalchemy import select
 
 from app import software
@@ -183,6 +187,8 @@ async def test_refresh_and_api(tmp_path, client, auth_headers, monkeypatch):
     assert [a["key"] for a in srv["sw_advice"]] == ["nginx-eol", "postgresql-eol"]
     sw = (await client.get(f"/api/servers/{sid}/software", headers=auth_headers)).json()
     assert sw["agent_ok"] and sw["built"] == "2026-10-18" and not sw["pkgs"]
+    # когда был отчет (с поясом: без него браузер читал время как местное) и как часто они идут
+    assert sw["every"] == 15 and datetime.fromisoformat(sw["report_at"]).tzinfo is not None
     assert [(g["key"], g["text"].split(":")[0]) for g in sw["items"]] == [
         ("nginx-1.27", "nginx 1.27 без поддержки с 24.06.2025"), ("postgresql-12", "PostgreSQL 12 без поддержки с 21.11.2024")]
     # у пункта - как исправить и ключ решения; решение убирает его из Требует действий, в карточке он остается
@@ -240,11 +246,55 @@ def _cmds(blocks) -> str:
     return "\n".join(s.get("cmd", "") for b in blocks for s in b["steps"])
 
 
+def _posix(rx: str) -> str:
+    """Классы POSIX из sed/grep -E в регэксп Python."""
+    return rx.replace("[:alnum:]", "0-9A-Za-z").replace("[:space:]", r"\s")
+
+
+def _sed_expr(cmd: str) -> str:
+    line = next(x for x in cmd.split("\n") if x.startswith("sudo sed -i -E "))
+    return shlex.split(line)[4]
+
+
 def _sed(cmd: str, text: str) -> str:
-    """sed из команды на Python: что именно поменяется в compose-файле (базовый регэксп sed, в нем
-    из спецсимволов только точка, звездочка и $)."""
-    pat, rep = re.search(r"sed -i 's#(.*?)#(.*?)#' ", cmd).groups()
-    return re.sub(pat, rep, text, flags=re.M)
+    """sed -E из команды на Python: что именно поменяется в compose-файле. Каждая строка отдельно, как
+    у sed (иначе \\s в Python съел бы и перевод строки)."""
+    _s, pat, rep, _e = _sed_expr(cmd).split("|")
+    return "".join(re.sub(_posix(pat), rep, x) + "\n" for x in text.split("\n")[:-1])
+
+
+def _grep(cmd: str, text: str) -> bool:
+    """Проверка из последней строки шага: grep -qE по строкам файла."""
+    rx = shlex.split(re.search(r"grep -qE ('[^']*')", cmd).group(1))[0]
+    return any(re.search(_posix(rx), x) for x in text.split("\n"))
+
+
+# строка из настоящего compose, на которой шаблон " *$" молча ничего не менял
+GRAFANA_YML = """services:
+  grafana:
+    #image: grafana/grafana:10.2.3
+    # image: grafana/grafana:12.3.1
+    image: grafana/grafana:12.3.1 # https://hub.docker.com/r/grafana/grafana/tags
+"""
+# варианты строки image и что из них получается: (было, стало); стало None - строка не меняется
+IMAGE_LINES = [
+    ("    image: grafana/grafana:12.3.1 # https://hub.docker.com/r/grafana/grafana/tags",
+     "    image: grafana/grafana:12.4 # https://hub.docker.com/r/grafana/grafana/tags"),
+    ('    image: "grafana/grafana:12.3.1"', '    image: "grafana/grafana:12.4"'),
+    ("    image: 'grafana/grafana:12.3.1'   # pinned", "    image: 'grafana/grafana:12.4'   # pinned"),
+    ("    image:   grafana/grafana:12.3.1   ", "    image:   grafana/grafana:12.4   "),
+    ("    image: grafana/grafana:12.3.1", "    image: grafana/grafana:12.4"),
+    ("      image: grafana/grafana:12.3.1", "      image: grafana/grafana:12.4"),
+    ("\timage: grafana/grafana:12.3.1", "\timage: grafana/grafana:12.4"),
+    ("    #image: grafana/grafana:12.3.1", None),
+    ("    # image: grafana/grafana:12.3.1", None),
+    ("#image: grafana/grafana:10.2.3", None),
+    ("    image: grafana/grafana:12.3.10", None),
+    ("    image: grafana/grafana:12.3.1-ubuntu", None),
+    ("    image: ${GRAFANA_IMAGE:-grafana/grafana:12.3.1}", None),
+    ("    image: grafana/grafana:12.3.1@sha256:0123abcd", None),
+    ("    labels: [grafana/grafana:12.3.1]", None),
+]
 
 
 def _cmd(b) -> dict:
@@ -280,22 +330,89 @@ def test_fix_php_in_compose(monkeypatch):
         "runtime_major": "",
         "c_bak": "cd /app/site\nsudo cp docker-compose.yml docker-compose.yml.bak",
         "img_set": "cd /app/site\n"
-                   "sudo sed -i 's#image: yiisoftware/yii2-php:5.6-fpm *$#image: yiisoftware/yii2-php:8.4-fpm#' docker-compose.yml\n"
-                   "grep -n 'image:' docker-compose.yml",
+                   "sudo sed -i -E 's|^([[:space:]]*image:[[:space:]]*[^[:alnum:][:space:]#]?)yiisoftware/yii2-php:5\\.6-fpm"
+                   "([^[:alnum:]._@-].*)?$|\\1yiisoftware/yii2-php:8.4-fpm\\2|' docker-compose.yml\n"
+                   "grep -n 'image:' docker-compose.yml\n"
+                   "grep -qE '^([[:space:]]*image:[[:space:]]*[^[:alnum:][:space:]#]?)yiisoftware/yii2-php:8\\.4-fpm"
+                   "([^[:alnum:]._@-]|$)' docker-compose.yml"
+                   ' && echo "образ заменен" || echo "НЕ ЗАМЕНЕНО: строка image другая, поправьте ее руками"',
+        # не просто Up: контейнер на том образе, на который меняли
         "c_up": "cd /app/site\nsudo docker compose up -d web-a\nsudo docker compose ps web-a\n"
-                "sudo docker compose logs --tail 20 web-a",
+                "sudo docker compose logs --tail 20 web-a\n"
+                "sudo docker inspect -f '{{.Config.Image}}' web-a | grep -qxF -- yiisoftware/yii2-php:8.4-fpm"
+                ' && echo "контейнер на новом образе" || echo "НЕ ОБНОВЛЕН: контейнер на прежнем образе, смотрите вывод выше"',
         "c_undo": "cd /app/site\nsudo cp docker-compose.yml.bak docker-compose.yml\nsudo docker compose up -d web-a",
         # один контейнер в проекте: не нужен - down всего проекта
         "c_down": "cd /app/site\nsudo docker compose down",
     }
     # без магии на ноде: ни inspect, ни переменных, ни read
-    assert not re.search(r"inspect|IFS|\$[A-Z]\b|read -r", "\n".join(cmd.values()))
+    # inspect - только в проверке, на новом ли образе контейнер
+    assert not re.search(r"IFS|\$[A-Z]\b|read -r", "\n".join(cmd.values()))
+    assert [x for x in "\n".join(cmd.values()).split("\n") if "inspect" in x] == [cmd["c_up"].split("\n")[-1]]
     # меняется только строка image с этим образом: другой тег, метка и комментарий не задеваются
     yml = ("services:\n  web-a:\n    image: yiisoftware/yii2-php:5.6-fpm\n  cron:\n"
            "    image: yiisoftware/yii2-php:5.6-fpm-min\n    labels: [yiisoftware/yii2-php:5.6-fpm]\n")
     assert _sed(cmd["img_set"], yml) == yml.replace("image: yiisoftware/yii2-php:5.6-fpm\n",
                                                     "image: yiisoftware/yii2-php:8.4-fpm\n")
-    assert _sed(cmd["img_set"], "    image: yiisoftware/yii2-php:5.6-fpm  \n") == "    image: yiisoftware/yii2-php:8.4-fpm\n"
+    assert _sed(cmd["img_set"], "    image: yiisoftware/yii2-php:5.6-fpm  \n") == "    image: yiisoftware/yii2-php:8.4-fpm  \n"
+
+
+def _grafana(monkeypatch):
+    _tbl(monkeypatch)
+    rep = _rep(_c("web-a", "grafana/grafana:12.3.1", compose=_compose(d="/app/stack", svc="grafana")))
+    monkeypatch.setattr(software, "table", lambda: TBL | {"products": TBL["products"] | {
+        "grafana": {"name": "Grafana", "cycles": [["13.2", "2027-05-18"], ["12.4", "2027-05-24"], ["12.3", "2026-08-19"]]}}})
+    [b] = software.fix(_item(rep, "grafana-12.3"), rep, NOW)
+    assert b["args"]["new"] == "grafana/grafana:12.4"
+    return _cmd(b)
+
+
+def test_image_line_variants(monkeypatch):
+    """Замена образа на типичных строках: комментарий после тега, кавычки, пробелы, отступ. Не трогает
+    закомментированные строки, другой тег с тем же началом и образ из переменной; проверка в конце
+    шага говорит "НЕ ЗАМЕНЕНО", когда строка осталась прежней."""
+    cmd = _grafana(monkeypatch)
+    for before, after in IMAGE_LINES:
+        got = _sed(cmd["img_set"], before + "\n")
+        assert got == (after if after is not None else before) + "\n", before
+        assert _grep(cmd["img_set"], got) is (after is not None), before
+    out = _sed(cmd["img_set"], GRAFANA_YML)
+    assert out == GRAFANA_YML.replace("image: grafana/grafana:12.3.1 #", "image: grafana/grafana:12.4 #")
+    assert "    #image: grafana/grafana:10.2.3\n    # image: grafana/grafana:12.3.1\n" in out
+    assert cmd["img_set"].endswith('&& echo "образ заменен" || echo "НЕ ЗАМЕНЕНО: строка image другая, поправьте ее руками"')
+    assert cmd["c_up"].split("\n")[-1].startswith(
+        "sudo docker inspect -f '{{.Config.Image}}' web-a | grep -qxF -- grafana/grafana:12.4 && ")
+
+
+def _gnu_sed() -> str | None:
+    sed = shutil.which("sed")
+    if not sed:
+        return None
+    try:
+        out = subprocess.run([sed, "--version"], capture_output=True, text=True, timeout=10).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return sed if "GNU" in out else None
+
+
+def test_image_line_variants_real_sed(monkeypatch, tmp_path):
+    """То же на настоящем GNU sed и grep: регэксп POSIX ведет себя не совсем как в Python."""
+    sed, grep = _gnu_sed(), shutil.which("grep")
+    if not (sed and grep):
+        pytest.skip("нет GNU sed")
+    cmd = _grafana(monkeypatch)
+    rx = shlex.split(re.search(r"grep -qE ('[^']*')", cmd["img_set"]).group(1))[0]
+    f = tmp_path / "docker-compose.yml"
+    for before, after in IMAGE_LINES + [(GRAFANA_YML.rstrip("\n"), GRAFANA_YML.rstrip("\n").replace(
+            "image: grafana/grafana:12.3.1 #", "image: grafana/grafana:12.4 #"))]:
+        f.write_bytes((before + "\n").encode())
+        # выражение и шаблон - файлом: sed и grep из Git для Windows сами разбирают \ в аргументах
+        (tmp_path / "expr.sed").write_bytes(_sed_expr(cmd["img_set"]).encode() + b"\n")
+        subprocess.run([sed, "-i", "-E", "-f", str(tmp_path / "expr.sed"), str(f)], check=True, timeout=10)
+        assert f.read_bytes().decode() == (after if after is not None else before) + "\n", before
+        (tmp_path / "rx.txt").write_bytes(rx.encode() + b"\n")
+        found = subprocess.run([grep, "-qE", "-f", str(tmp_path / "rx.txt"), str(f)], timeout=10).returncode == 0
+        assert found is (after is not None), before
 
 
 def test_fix_compose_flags_and_rm(monkeypatch):
@@ -459,6 +576,11 @@ def test_fix_host(monkeypatch):
     b, cmd = one("nodejs-18")
     assert _ids(b) == ["runtime_major", "h_node_repo", "h_node_check", "h_node_rollback"]
     assert "s#node_[0-9]*\\.x#node_24.x#g" in cmd["h_node_repo"]
+    # нет файла репозитория - sed молчит, а apt ставит прежний: строка после правки скажет
+    assert cmd["h_node_repo"].split("\n")[1] == (
+        "grep -rqs 'deb.nodesource.com/node_24\\.x' /etc/apt/sources.list.d/ && echo \"репозиторий переведен\""
+        " || echo \"НЕ ЗАМЕНЕНО: репозитория NodeSource в sources.list.d нет, поправьте руками\"")
+    assert cmd["h_node_check"].split("\n")[-1].startswith("node -v | grep -q '^v24\\.' && ")
     assert cmd["h_node_rollback"].endswith("--allow-downgrades nodejs=18.20.4-1nodesource1")
     b, cmd = one("nginx-1.27")
     assert _ids(b) == ["h_etc_backup", "h_nginx_upgrade", "h_nginx_check", "h_apt_rollback"]
@@ -479,7 +601,8 @@ def test_fix_host(monkeypatch):
 
 
 def test_fix_commands_are_neutral(monkeypatch):
-    """Команды одни для обоих языков панели: без кириллицы."""
+    """Команды одни для обоих языков панели: кириллица только во фразах проверок echo "...", их
+    английская панель переводит сама (test_fix_verdicts)."""
     _tbl(monkeypatch)
     host = [{"p": "php", "v": "7.4.33", "pkg": "php7.4-fpm", "full": "7.4.33-1+deb.sury.org+1"},
             {"p": "postgresql", "v": "12.22", "pkg": "postgresql-12", "full": ""}]
@@ -488,4 +611,5 @@ def test_fix_commands_are_neutral(monkeypatch):
     rep["os"] = "Debian GNU/Linux 12 (bookworm)"
     for g in software.inventory(rep, host, NOW)["items"]:
         if g["state"] != "ok":
-            assert not re.search("[а-яА-Я]", _cmds(software.fix(g, rep, NOW))), g["key"]
+            cmds = re.sub(r'echo "[^"]*"', "", _cmds(software.fix(g, rep, NOW)))
+            assert not re.search("[а-яА-Я]", cmds), g["key"]

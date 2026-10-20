@@ -1383,22 +1383,22 @@ const EN: Record<string, string> = {
   'Это CI-агент: privileged ему нужен только для docker внутри сборок. Сколько образов у docker внутри агента - 0 или ошибка значит, что сборки docker не запускают и privileged можно убрать:':
     'This is a CI agent: it needs privileged only for docker inside builds. How many images the docker inside the agent has - 0 or an error means builds do not run docker and privileged can go:',
   'Копия compose рядом:': 'A copy of the compose file next to it:',
-  'В {file} у сервиса {svc} privileged: true заменить на privileged: false, diff покажет замену:':
-    'In {file}, service {svc}: replace privileged: true with privileged: false, diff shows the change:',
+  'В {file} у сервиса {svc} privileged: true заменить на privileged: false, diff покажет замену, последняя строка - вышло ли:':
+    'In {file}, service {svc}: replace privileged: true with privileged: false, diff shows the change, the last line says whether it worked:',
   'Строку {env} тоже можно убрать: без privileged docker внутри все равно не поднимется.':
     'The {env} line can go too: without privileged the docker inside will not start anyway.',
-  'В {file} у сервиса {svc} privileged: true заменить на то, что ему нужно по назначению ({need}), diff покажет замену:':
-    'In {file}, service {svc}: replace privileged: true with what it actually needs ({need}), diff shows the change:',
-  'В {file} у сервиса {svc} убрать docker-сокет из volumes, diff покажет строку:':
-    'In {file}, service {svc}: remove the docker socket from volumes, diff shows the line:',
+  'В {file} у сервиса {svc} privileged: true заменить на то, что ему нужно по назначению ({need}), diff покажет замену, последняя строка - вышло ли:':
+    'In {file}, service {svc}: replace privileged: true with what it actually needs ({need}), diff shows the change, the last line says whether it worked:',
+  'В {file} у сервиса {svc} убрать docker-сокет из volumes, diff покажет строку, последняя строка - вышло ли:':
+    'In {file}, service {svc}: remove the docker socket from volumes, diff shows the line, the last line says whether it worked:',
   'Дописать в {file} руками: сервису DOCKER_HOST и сеть docker-api, рядом сервис docker-api - прокси сокета только на чтение (видит контейнеры и события, запускать и останавливать не дает). GID - число из stat -c %g /var/run/docker.sock:':
     'Add to {file} by hand: DOCKER_HOST and the docker-api network for the service, and a docker-api service next to it - a read-only socket proxy (sees containers and events, cannot start or stop them). GID is the number from stat -c %g /var/run/docker.sock:',
   'В {file} у сервиса {svc} убрать из cap_add {caps}. Строки с ними:':
     'In {file}, service {svc}: remove {caps} from cap_add. The lines with them:',
   'В {file} у сервиса {svc} {paths} смонтирован на запись: оставьте только нужный подкаталог или допишите :ro, если писать не нужно. Строки с ними:':
     'In {file}, service {svc}: {paths} is mounted writable - keep only the subdirectory it needs or add :ro if it does not write there. The lines with them:',
-  'Проверить файл и пересоздать только эти сервисы, потом статус и лог. Пункт уйдет сам со следующим отчетом агента.':
-    'Check the file and recreate only these services, then the status and the log. The item goes away by itself with the next agent report.',
+  'Проверить файл и пересоздать только эти сервисы, потом статус и лог. Последние строки скажут по каждому контейнеру, ушел ли ключ на деле. Пункт уйдет сам со следующим отчетом агента.':
+    'Check the file and recreate only these services, then the status and the log. The last lines say for each container whether the key is really gone. The item goes away by itself with the next agent report.',
   'Если в логе Operation not permitted - не хватает одного права: добавьте только его в cap_add (или устройство в devices), а не privileged обратно.':
     'If the log says Operation not permitted, one right is missing: add just that to cap_add (or the device to devices), not privileged back.',
   'Если docker-api пишет в лог blocked - приложению нужен еще путь API: допишите его в -allowGET.':
@@ -1766,10 +1766,10 @@ const EN: Record<string, string> = {
     'Find the directory, compose file and service of container {c}, then do everything in the same window. Empty means the container was not started by compose.',
   'Копия compose-файла для отката.': 'A copy of the compose file for rollback.',
   'Копия данных контейнера для отката, на это время он остановлен.': 'A copy of the container data for rollback, the container is stopped meanwhile.',
-  'Поменять образ на {new}. grep покажет строки image: если там старый образ (в кавычках или из .env), поправить руками.':
-    'Change the image to {new}. grep shows the image: lines, if the old image is still there (in quotes or from .env), fix it by hand.',
-  'Перезапустить и проверить: в ps - Up, в логе нет ошибок. Нет такого тега - up скажет not found, старый контейнер продолжит работать.':
-    'Restart and check: ps shows Up, the log has no errors. If there is no such tag, up says not found and the old container keeps running.',
+  'Поменять образ на {new}. Последняя строка скажет, вышло ли: НЕ ЗАМЕНЕНО - строка image в compose другая (образ из переменной или .env), ее поправить руками, grep выше показывает все строки image.':
+    'Change the image to {new}. The last line says whether it worked: NOT REPLACED means the image line in compose looks different (image from a variable or .env), fix it by hand, grep above shows all image lines.',
+  'Перезапустить и проверить: в логе нет ошибок, а последняя строка скажет, на новом ли образе контейнер (Up в ps этого не говорит). НЕ ОБНОВЛЕН - образ в compose не заменен или такого тега нет (up скажет not found), прежний контейнер продолжит работать.':
+    'Restart and check: the log has no errors, and the last line says whether the container runs the new image (Up in ps does not tell that). NOT UPDATED means the image in compose was not replaced or there is no such tag (up says not found), the old container keeps running.',
   'Вернуть прежний compose-файл и перезапустить.': 'Put back the previous compose file and restart.',
   'Вернуть прежний compose-файл и данные из копии, перезапустить.': 'Put back the previous compose file and the data from the copy, restart.',
   'Вернуть прежний образ и данные из копии, перезапустить.': 'Put back the previous image and the data from the copy, restart.',
@@ -1823,9 +1823,9 @@ const EN: Record<string, string> = {
     'Move the sites to {to}: pools from /etc/php/{from}/fpm/pool.d/ to /etc/php/{to}/fpm/pool.d/, the php{to}-fpm.sock socket for the sites, CLI with update-alternatives --set php /usr/bin/php{to}.',
   'Проверить версию и конфиг FPM, перезагрузить веб-сервер и открыть сайты.': 'Check the version and the FPM config, reload the web server and open the sites.',
   'Когда сайты и кроны на {to} - удалить {from} (apt спросит, конфиги останутся).': 'When the sites and crons are on {to}, remove {from} (apt asks first, configs stay).',
-  'Перевести репозиторий NodeSource на {to} и обновить nodejs.': 'Switch the NodeSource repository to {to} and upgrade nodejs.',
-  'Проверить версию, перезапустить приложения, нативные модули пересобрать (npm rebuild).':
-    'Check the version, restart the applications, rebuild native modules (npm rebuild).',
+  'Перевести репозиторий NodeSource на {to} и обновить nodejs. Строка после правки скажет, нашелся ли репозиторий.': 'Switch the NodeSource repository to {to} and upgrade nodejs. The line after the edit says whether the repository was found.',
+  'Проверить версию (последняя строка скажет, новая ли), перезапустить приложения, нативные модули пересобрать (npm rebuild).':
+    'Check the version (the last line says whether it is the new one), restart the applications, rebuild native modules (npm rebuild).',
   'Вернуть репозиторий на {from} и прежнюю версию.': 'Switch the repository back to {from} and the previous version.',
   'Копия конфигов.': 'A copy of the configs.',
   'Обновить nginx из репозитория nginx.org. Версия не поменялась - в sources.list.d старое имя дистрибутива или пакет зафиксирован (apt-mark showhold).':
@@ -1966,8 +1966,8 @@ const EN: Record<string, string> = {
     'Restart PostgreSQL ({unit}) so the library loads: the database is down for a few seconds, applications lose their connections and have to reconnect, better at a quiet time.',
   'Перезапустить PostgreSQL, чтобы библиотека загрузилась: база недоступна несколько секунд, приложения теряют соединения и должны переподключиться. На Debian и Ubuntu postgresql перезапускает все кластеры, один - postgresql@<версия>-<кластер> (systemctl list-units postgresql*), на RHEL юнит бывает postgresql-<версия>.':
     'Restart PostgreSQL so the library loads: the database is down for a few seconds, applications lose their connections and have to reconnect. On Debian and Ubuntu postgresql restarts every cluster, a single one is postgresql@<version>-<cluster> (systemctl list-units postgresql*), on RHEL the unit may be postgresql-<version>.',
-  'Параметр задан в command сервиса {svc} в compose, и ALTER SYSTEM его не перебьет: правится compose. Копия файла рядом (.bak-kervax), sed дописывает pg_stat_statements к shared_preload_libraries, diff показывает измененные строки. Должна поменяться одна, у {svc}: если поменялись и чужие или diff пустой (значение задано иначе, через переменную), верните копию и поправьте руками.':
-    'The parameter is set in the command of the {svc} service in compose, and ALTER SYSTEM does not override it: compose is edited. A copy of the file next to it (.bak-kervax), sed adds pg_stat_statements to shared_preload_libraries, diff shows the changed lines. Exactly one must change, in {svc}: if others changed too or diff is empty (the value is set another way, through a variable), restore the copy and edit by hand.',
+  'Параметр задан в command сервиса {svc} в compose, и ALTER SYSTEM его не перебьет: правится compose. Копия файла рядом (.bak-kervax), sed дописывает pg_stat_statements к shared_preload_libraries, diff показывает измененные строки. Должна поменяться одна, у {svc}: если поменялись и чужие или последняя строка - НЕ ДОБАВЛЕНО (значение задано иначе, через переменную), верните копию и поправьте руками.':
+    'The parameter is set in the command of the {svc} service in compose, and ALTER SYSTEM does not override it: compose is edited. A copy of the file next to it (.bak-kervax), sed adds pg_stat_statements to shared_preload_libraries, diff shows the changed lines. Exactly one must change, in {svc}: if others changed too or the last line says NOT ADDED (the value is set another way, through a variable), restore the copy and edit by hand.',
   'Параметр задан в command сервиса в compose, и ALTER SYSTEM его не перебьет: правится compose. Найдите строку и поставьте shared_preload_libraries={v}, файл перед правкой скопируйте.':
     'The parameter is set in the service command in compose, and ALTER SYSTEM does not override it: compose is edited. Find the line and set shared_preload_libraries={v}, copy the file before editing.',
   'Пересоздать контейнер с новой командой: данные в томе остаются, база недоступна несколько секунд, приложения теряют соединения и должны переподключиться. --no-deps не трогает остальные сервисы проекта.':
@@ -2549,6 +2549,34 @@ const EN: Record<string, string> = {
   'последние киллы': 'recent kills',
   'процесс неизвестен': 'process unknown',
   'OOM-killer': 'OOM killer',
+  'контейнер {n}': 'container {n}',
+  'под {n}': 'pod {n}',
+  'сессия {n}': 'session {n}',
+  'весь сервер': 'whole server',
+  'лимит cgroup': 'cgroup limit',
+  'systemd-oomd': 'systemd-oomd',
+  'Нехватка памяти (OOM)': 'Out of memory (OOM)',
+  'за 30 дней: {n}': 'last 30 days: {n}',
+  'Кто занимал память и какие службы задело, видно с helper units-setup 0.5. Пока только счетчик агента:': 'Who held the memory and which services were hit shows with helper units-setup 0.5. For now only the agent counter:',
+  'Убиты': 'Killed',
+  'Процесс': 'Process',
+  'Чей': 'Owner',
+  'Больше всего памяти перед убийством': 'Most memory before the kill',
+  'лимит cgroup {v}': 'cgroup limit {v}',
+  'RAM {v}': 'RAM {v}',
+  'занято процессами {v}': 'used by processes {v}',
+  'кэш файлов {v}': 'file cache {v}',
+  'общая память {v}': 'shared memory {v}',
+  'swap нет': 'no swap',
+  'swap занят {u} из {m}': 'swap used {u} of {m}',
+  'Задело юниты:': 'Units hit:',
+  'убит процесс': 'a process killed',
+  'Память не досталась (это не виновники): {list}': 'Did not get memory (not the culprits): {list}',
+  'OOM за 7 дней': 'OOM in 7 days',
+  'последний {d}': 'last {d}',
+  'убит OOM killer': 'killed by the OOM killer',
+  'эпизод OOM': 'OOM episode',
+  'Менеджер сессии пользователя, а не служба: поднимется сам при следующем входе, в упавшие не считается': 'The user session manager, not a service: it comes back on the next login and is not counted as failed',
   'IP-адреса домена': 'Domain IP addresses',
   'Время ответа · IP {ip}': 'Response time · IP {ip}',
   'Показать время ответа этого IP': 'Show this IP’s response time',
@@ -3981,16 +4009,16 @@ const EN: Record<string, string> = {
   'свежий тег': 'a fresh tag',
   'До обновления - коды ответов доменов этого прокси через него самого, мимо DNS и CDN. Запишутся в файл, после обновления сверим:':
     'Before the update - the response codes of the domains of this proxy through the proxy itself, past DNS and CDN. They go to a file to compare after the update:',
-  'Обновить - от root на сервере: копия compose рядом (.bak-kervax-image), новый тег в {at}, скачать образ и пересоздать только этот сервис. Сайты пропадут на несколько секунд, сертификаты и данные в томах остаются:':
-    'Update - as root on the server: a copy of the compose file next to it (.bak-kervax-image), the new tag in {at}, pull the image and recreate only this service. The sites go away for a few seconds, the certificates and the data in volumes stay:',
+  'Обновить - от root на сервере: копия compose рядом (.bak-kervax-image), новый тег в {at} (строка после правки скажет, вышло ли), скачать образ и пересоздать только этот сервис. Сайты пропадут на несколько секунд, сертификаты и данные в томах остаются:':
+    'Update - as root on the server: a copy of the compose file next to it (.bak-kervax-image), the new tag in {at} (the line after the edit says whether it worked), pull the image and recreate only this service. The sites go away for a few seconds, the certificates and the data in volumes stay:',
   'Тег уже {target}, образ просто давно не скачивали: прежний остается под тегом kervax-old для отката, скачать свежий и пересоздать только этот сервис:':
     'The tag is already {target}, the image just was not pulled for a long time: the previous one stays under the kervax-old tag for a rollback, pull a fresh one and recreate only this service:',
   'Образ собирается из Dockerfile (build:): поднимите в нем FROM до свежего тега ({target}) и пересоберите, --pull скачает свежую базу:':
     'The image is built from a Dockerfile (build:): raise its FROM to a fresh tag ({target}) and rebuild, --pull fetches a fresh base:',
   'Образ {image} - своя сборка, не из репозитория апстрима (задан в {at}): тег не поменять, пересоберите его на свежем базовом образе.':
     'The {image} image is a custom build, not from the upstream repository (set in {at}): the tag cannot be swapped, rebuild it on a fresh base image.',
-  'Проверить: сервис работает, в логе нет ошибок конфига, коды доменов те же (в конце OK). Пункт уйдет сам в течение получаса: даты сборки образов агент перечитывает раз в 30 минут.':
-    'Check: the service runs, the log has no config errors, the domain codes are the same (OK at the end). The item goes away by itself within half an hour: the agent rereads image build dates every 30 minutes.',
+  'Проверить: сервис работает, в логе нет ошибок конфига, коды доменов те же (OK), а если тег меняли - последняя строка скажет, на новом ли образе контейнер. Пункт уйдет сам в течение получаса: даты сборки образов агент перечитывает раз в 30 минут.':
+    'Check: the service runs, the log has no config errors, the domain codes are the same (OK), and if the tag was changed, the last line says whether the container runs the new image. The item goes away by itself within half an hour: the agent rereads image build dates every 30 minutes.',
   'Если что-то не так - вернуть прежний compose, старый образ остался на диске:':
     'If something is wrong - bring back the previous compose file, the old image is still on disk:',
   'Если что-то не так - вернуть прежний образ:': 'If something is wrong - bring back the previous image:',
@@ -5873,6 +5901,60 @@ const EN: Record<string, string> = {
     'cleanup turned off by hand',
   'Включить: вкладка "Чистка", или на сервере бэкапов kervax-backupserver-helper prune-on {name}':
     'To turn it on: the "Cleanup" tab, or kervax-backupserver-helper prune-on {name} on the backup server',
+  'образ заменен':
+    'image replaced',
+  'НЕ ЗАМЕНЕНО: строка image другая, поправьте ее руками':
+    'NOT REPLACED: the image line is different, fix it by hand',
+  'контейнер на новом образе':
+    'the container runs the new image',
+  'НЕ ОБНОВЛЕН: контейнер на прежнем образе, смотрите вывод выше':
+    'NOT UPDATED: the container runs the old image, see the output above',
+  'контейнер на свежем образе':
+    'the container runs the fresh image',
+  'ОБРАЗ ТОТ ЖЕ: автор образа его еще не пересобрал':
+    'SAME IMAGE: its author has not rebuilt it yet',
+  'репозиторий переведен':
+    'repository switched',
+  'НЕ ЗАМЕНЕНО: репозитория NodeSource в sources.list.d нет, поправьте руками':
+    'NOT REPLACED: no NodeSource repository in sources.list.d, fix it by hand',
+  'nodejs новой версии':
+    'nodejs is the new version',
+  'НЕ ОБНОВЛЕН: nodejs прежней версии':
+    'NOT UPDATED: nodejs is the old version',
+  'файл изменен':
+    'file changed',
+  'НЕ ИЗМЕНЕНО: нужной строки в блоке сервиса нет, поправьте руками':
+    'NOT CHANGED: the service block has no such line, fix it by hand',
+  'privileged снят':
+    'privileged removed',
+  'НЕ СНЯТ: контейнер все еще privileged':
+    'NOT REMOVED: the container is still privileged',
+  'docker-сокета у контейнера нет':
+    'the container has no docker socket',
+  'НЕ УБРАН: docker-сокет все еще у контейнера':
+    'NOT REMOVED: the container still has the docker socket',
+  'pg_stat_statements добавлен':
+    'pg_stat_statements added',
+  'НЕ ДОБАВЛЕНО: строка shared_preload_libraries другая, поправьте руками':
+    'NOT ADDED: the shared_preload_libraries line is different, fix it by hand',
+  'Ждем отчет агента после перезапуска, панель проверяет каждые {n} с.':
+    'Waiting for the agent report after the restart, the panel checks every {n} s.',
+  'Отчет агента в {time}: {c} все еще на {image}. Если перезапуск уже выполнен, образ не заменен: смотрите, что сказали последние строки замены образа и перезапуска.':
+    'Agent report at {time}: {c} still runs {image}. If the restart is already done, the image was not replaced: see what the last lines of the image change and the restart said.',
+  'Отчет агента в {time}: в {c} все еще {name} {from}. Если перезапуск уже выполнен, автор образа его еще не пересобрал.':
+    'Agent report at {time}: {c} still has {name} {from}. If the restart is already done, the image author has not rebuilt it yet.',
+  'Отчет агента в {time}: в {c} все еще {name} {from}. Если шаги уже выполнены, смотрите вывод последней команды.':
+    'Agent report at {time}: {c} still has {name} {from}. If the steps are already done, see the output of the last command.',
+  'Сейчас на ноде: {c} на {image}, {status}.':
+    'On the node now: {c} runs {image}, {status}.',
+  'Сейчас на ноде: {c} на {image}.':
+    'On the node now: {c} runs {image}.',
+  'Отчет агента в {time}, они идут раз в {n} с, пока шаги открыты, панель перечитывает их сама.':
+    'Agent report at {time}, reports come every {n} s, while the steps are open the panel rereads them by itself.',
+  'Отчетов агента еще не было.':
+    'No agent reports yet.',
+  'Пункт уходит сам, когда этой версии на ноде не останется, со следующим отчетом агента.':
+    'The item goes away by itself with the next agent report once this version is gone from the node.',
 }
 
 type Ctx = {
