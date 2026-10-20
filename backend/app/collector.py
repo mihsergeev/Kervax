@@ -22,6 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app import alerts, audit, backup, backup_growth, checks as checks_exec, custom_backups, docker_exposure, flaky, heartbeat, settings_store
 from app import backup_verify
+from app import os_support
 from app import request_watch
 from app import panel_errors
 from app import inside_probe
@@ -3957,6 +3958,9 @@ _SIG_STORY_S = 3600
 # алертит, и отбоя у него нет. Держится на _ROUTINE_OVER дольше обычного конца - алерт с пометкой.
 # История эпизодов - alert_state "<вид>_hist" ([начало, конец] в unix, за _ROUTINE_KEEP)
 _ROUTINE_KINDS = frozenset({"pressure", "disk_slow", "cpu"})
+# Алерты без отбоя в телеграм: событие уже прошло, делать по "снова обычно" нечего. Прирост бэкапа -
+# один прогон добавил в разы больше обычного; следующий обычный прогон закрывает алерт молча
+_SILENT_RECOVERY = frozenset({"backup_growth"})
 _ROUTINE_DAYS = 2
 _ROUTINE_SLACK = 45 * 60
 _ROUTINE_MAX = 6 * 3600
@@ -5651,7 +5655,8 @@ def _server_conditions(s: Server, now: datetime,
                              {"detail": "\n".join(x["text"] for x in cp[:3])
                                         + (f"\nи еще {len(cp) - 3}" if len(cp) > 3 else ""),
                               "sig": [x["key"] for x in cp]})
-    # Всплеск ошибок в логах: окно в час уже в правиле, выдержка не нужна. sig - какие логи
+    # Авария в логах (в разы выше обычного час подряд, log_errors.problems): выдержка уже в правиле,
+    # всплески короче видны только в разделе. sig - какие логи
     if online and log_errors.block(rep) is not None:
         lp = log_errors.problems(s, now)
         out["log_errors"] = (max((x["level"] for x in lp), default=0),
@@ -5864,7 +5869,11 @@ async def evaluate_servers(
         if s.snooze_until is not None and _aware(s.snooze_until) > now:
             continue
         if s.id in maint_srv:
-            continue  # идет окно обслуживания: то же, что снуз, после окна оставшееся сработает
+            # идет окно обслуживания: то же, что снуз, после окна оставшееся сработает. Кроме
+            # перезагрузки: в окне она плановая, после окна "перезагружен" было бы ложной тревогой
+            if s.rebooted_at is not None and st.get("reboot_at") != _aware(s.rebooted_at).isoformat():
+                apply(s.id, "reboot_at", _aware(s.rebooted_at).isoformat())
+            continue
         # Только что добавленный сервер: первые минуты ставятся helper'ы, и первые отчеты
         # неполные (у сервера бэкапов "чистка не работает" ушла через минуту после добавления и
         # через минуту отбилась). Состояние не трогаем: что останется, придет после тишины.
@@ -6194,6 +6203,9 @@ async def evaluate_servers(
                 if key in _FLAP_METRIC_KINDS and st.get(f"flap_{key}_muted"):
                     apply(s.id, key, 0)  # серия заглушена: про мигание уже сказано
                     continue
+                if key in _SILENT_RECOVERY:
+                    apply(s.id, key, 0)
+                    continue
                 detail = (
                     "снова доступен"
                     if key == "offline"
@@ -6208,13 +6220,17 @@ async def evaluate_servers(
                     rec_apply.append((s.id, "offline_probe", None))
             else:  # де-эскалация (crit→problem): без алерта, просто снижаем уровень
                 apply(s.id, key, level)
-        # перезагрузка (аптайм сброшен) — одноразовый алерт на новый rebooted_at
+        # перезагрузка (аптайм сброшен) — одноразовый алерт на новый rebooted_at. Плановая (после
+        # обновлений ее ждали, os_support.planned_reboot) - только в хронологии
         rb = rules.get("reboot")
         if s.rebooted_at is not None and "reboot" not in mutes and rb and rb["enabled"] and _rule_scope_ok(rb, s):
             stamp = _aware(s.rebooted_at).isoformat()
             if st.get("reboot_at") != stamp:
-                fires.append(srv_fire(s, "reboot", rb, {}))
-                fire_apply.append((s.id, "reboot_at", stamp))
+                if os_support.planned_reboot(s.last_report or {}, s.rebooted_at):
+                    apply(s.id, "reboot_at", stamp)
+                else:
+                    fires.append(srv_fire(s, "reboot", rb, {}))
+                    fire_apply.append((s.id, "reboot_at", stamp))
         # Новый порт открылся в интернет - событие на каждую проверку, нашедшую новые (new_ts).
         # Заглушенный или выключенный алерт отметку тоже двигает: иначе после снятия мьюта
         # пришла бы старая новость
@@ -6428,6 +6444,11 @@ async def evaluate_servers(
                 lat = llm_lat.update(st.get("llm_lat"), s.last_report or {}, bstate, now)
                 if lat != (st.get("llm_lat") or {}):
                     apply(s.id, "llm_lat", lat)
+            # всплески ошибок в логах за сутки и сколько держится авария (log_errors.update)
+            if log_errors.block(s.last_report or {}) is not None or st.get("logerr_ev"):
+                lev = log_errors.update(st.get("logerr_ev"), s.last_report or {}, now)
+                if lev != (st.get("logerr_ev") or {}):
+                    apply(s.id, "logerr_ev", lev)
 
         # Очереди RabbitMQ: алертим те, что переросли свой порог. Состояние — на
         # КАЖДУЮ очередь: очередей десятки, и одна разбухшая не должна глушить

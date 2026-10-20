@@ -90,6 +90,12 @@ async def test_growth_alert_lifecycle(tmp_path, monkeypatch):
     assert len(msgs) == 1 and "💾📈" in msgs[0] and "192 ГБ" in msgs[0], sent
     await tick([20] * 14 + [192])
     assert len([m for m in sent if "бэкап добавил" in m]) == 1
+    # следующий прогон обычный: алерт закрывается молча, "снова обычный" в телеграм не идет
     await tick([20] * 13 + [192, 21])
-    assert any(m.startswith("✅") and "прирост бэкапа снова обычный" in m for m in sent), sent
+    assert not [m for m in sent if m.startswith("✅")], sent
+    async with factory() as s:
+        assert not (await s.execute(select(Server))).scalars().one().alert_state.get("backup_growth")
+    # и новый скачок снова алертит
+    await tick([20] * 12 + [192, 21, 250])
+    assert len([m for m in sent if "бэкап добавил" in m]) == 2, sent
     await engine.dispose()

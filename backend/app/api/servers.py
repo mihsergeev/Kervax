@@ -3008,10 +3008,14 @@ async def agent_report(
         server.external_ip = ext
     server.agent_version = body.agent_version[:32]
     # детект перезагрузки: аптайм упал (с запасом 60с на дрожание) → отметка времени,
-    # по которой collector пошлёт разовый алерт «сервер перезагружен».
-    prev_up = (server.last_report or {}).get("uptime_seconds") or 0
+    # по которой collector пошлёт разовый алерт «сервер перезагружен». Ждали ли ее (обновления
+    # просили перезагрузку) - видно только по прошлому отчету: причина живет в отчете дальше
+    prev_rep = server.last_report or {}
+    prev_up = prev_rep.get("uptime_seconds") or 0
+    boot = prev_rep.get("boot") if isinstance(prev_rep.get("boot"), dict) else None
     if prev_up and body.uptime_seconds and body.uptime_seconds < prev_up - 60:
         server.rebooted_at = now
+        boot = {"at": now.isoformat(), "why": os_support.reboot_why(prev_rep)}
     # OOM-киллы копим КУМУЛЯТИВНО тут (в ingest'е видим каждый отчёт), а не в
     # collector'е по last_report — дельта живёт лишь один тик и терялась при поллинге.
     oom_delta = round(body.oom_kill or 0)
@@ -3024,6 +3028,8 @@ async def agent_report(
         session.add(OomEvent(server_id=server.id, ts=now, victim=victim, count=oom_delta))
     await _store_web_errors(session, server, body, now)
     report_dict = body.model_dump()
+    if boot:
+        report_dict["boot"] = boot
     # журнал установок - разовый, в хронологию; в last_report ему жить незачем
     report_dict.pop("pkg_ev", None)
     # связи живут в своих таблицах (app/netlinks.py)

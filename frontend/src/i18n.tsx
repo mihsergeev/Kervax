@@ -1638,6 +1638,10 @@ const EN: Record<string, string> = {
   'логов с ошибками: {n}': 'logs with errors: {n}',
   'обычно около {n} в час': 'usually about {n} an hour',
   'обычно почти нет': 'usually almost none',
+  'в Telegram не уходит: всплеск, а не авария (алерт - когда в 20 раз выше обычного держится 2 часа)':
+    'Not sent to Telegram: a spike, not an outage (alerts when 20x above usual for 2 hours)',
+  'всплески за сутки:': 'spikes in 24 h:',
+  '{when} до {n} в час': '{when} up to {n}/h',
   'не алертить о всплеске в этом логе:': 'no alerts on a spike in this log:',
   'Не алертить о всплеске ошибок в этом логе: на день, неделю или постоянно': 'No alerts on a spike of errors in this log: for a day, a week or for good',
   'Логов пропущено за последнюю минуту: {n} (за минуту прочитано больше 64 МБ).': 'Logs skipped in the last minute: {n} (over 64 MB read in a minute).',

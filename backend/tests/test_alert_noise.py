@@ -83,9 +83,16 @@ async def test_old_copy_keys_in_an_open_alert_are_not_news(tmp_path, monkeypatch
 
 def _logs(t, *names):
     return {"extras": {"logerr": {"v": 1, "ts": int(t.timestamp()), "logs": 9, "read": 1000, "skipped": 0,
-                                  "sources": [{"where": f"container {n}", "container": "", "h1": 25000, "d1": 25000,
-                                               "lines1": 9000, "span": 1800, "last_ts": int(t.timestamp()) - 60,
+                                  "sources": [{"where": f"container {n}", "container": "", "h1": 4000,
+                                               "d1": 4000 + 23 * 100, "lines1": 9000, "span": 86400,
+                                               "hb": [700] * 6, "last_ts": int(t.timestamp()) - 60,
                                                "last": "ERROR boom"} for n in names]}}}
+
+
+def _hot(t):
+    """Авария в логах a и b держится час (log_errors.update): иначе это всплеск, он не алертит"""
+    since = (t - timedelta(minutes=121)).isoformat()
+    return {"logerr_ev": {f"контейнер {n}|": {"hot": since, "ev": []} for n in ("a", "b")}}
 
 
 async def test_what_was_told_and_came_back_is_not_news(tmp_path, monkeypatch):
@@ -95,16 +102,16 @@ async def test_what_was_told_and_came_back_is_not_news(tmp_path, monkeypatch):
     counts = []
     for i, names in enumerate(steps):
         t = t0 + timedelta(minutes=2 * i)
-        await _tick(factory, cfg, t, _logs(t, *names))
+        await _tick(factory, cfg, t, _logs(t, *names), state=_hot(t))
         counts.append(len(sent))
     # a - алерт, b - новое, дальше b уходит и возвращается: молчим
     assert counts == [1, 2, 2, 2, 2, 2]
     # отбой, и после него b - снова новость
     t = t0 + timedelta(minutes=20)
-    await _tick(factory, cfg, t, _logs(t))
+    await _tick(factory, cfg, t, _logs(t), state=_hot(t))
     assert len(sent) == 3 and "✅" in sent[2]
     t = t0 + timedelta(minutes=22)
-    await _tick(factory, cfg, t, _logs(t, "b"))
+    await _tick(factory, cfg, t, _logs(t, "b"), state=_hot(t))
     assert len(sent) == 4
     await engine.dispose()
 

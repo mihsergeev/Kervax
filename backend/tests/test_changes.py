@@ -174,3 +174,86 @@ def test_password_login_from_a_new_address():
     assert len(st["log"]) == 1  # с этого адреса уже входил
     # кто последний раз входил по паролю: по ключу не в счет
     assert st["ssh_pw"] == {"ops": t2.isoformat()}
+
+
+def test_key_known_in_the_fleet_goes_to_the_feed_only():
+    """Наш деплой разносит свой ключ по серверам: 9 из 13 сообщений "добавлен SSH-ключ" за две недели
+    были нашими. Ключ, который парк уже видел, - событие в ленте с пометкой, без алерта и без строки
+    на главной; незнакомый - алерт, как раньше."""
+    other = {"snap": _snap(T - 3600, keys=[KEY_B]), "log": []}
+    assert changes.known_fps([other, None, {"log": [{"kind": "key", "act": "add", "ts": "x",
+                                                     "text": "добавлен SSH-ключ пользователю ci: ED25519 SHA256:cccc (ci)"}]}]) \
+        == {"SHA256:bbbb", "SHA256:cccc"}
+    known = changes.known_fps([other])
+    st = changes.apply_snapshot(changes.apply_snapshot(None, _snap(T - 600), NOW, known),
+                                _snap(T - 60, keys=[KEY_A, KEY_B]), NOW, known)
+    assert [(e["text"], e["alert"], e.get("known")) for e in st["log"]] == [
+        ("добавлен SSH-ключ пользователю deploy: RSA SHA256:bbbb", False, True)]
+    assert "alert_ts" not in st
+    s = _srv_row(st)
+    assert not [p for p in collector.server_problems(s, NOW) if p["kind"] == "access_change"]
+    # в ленте карточки и хронологии - с пометкой; снятие парой находится как раньше
+    assert changes.view(s)["log"][0]["text"] == ("добавлен SSH-ключ пользователю deploy: RSA SHA256:bbbb"
+                                                 " (ключ уже был на серверах парка)")
+    # незнакомый ключ рядом с новым пользователем: алертит ключ и пользователь, знакомого в алерте нет
+    key_c = {"u": "deploy", "t": "ED25519", "fp": "SHA256:cccc", "c": "", "f": "/home/deploy/.ssh/authorized_keys"}
+    st = changes.apply_snapshot(st, _snap(T, keys=[KEY_A, KEY_B, key_c],
+                                          users=[{"n": "root", "uid": 0, "sh": "/bin/bash"},
+                                                 {"n": "deploy", "uid": 1001, "sh": "/bin/bash"}]), NOW, known)
+    assert changes.events_text(changes.alert_events(_srv_row(st), None)) == (
+        "добавлен SSH-ключ пользователю deploy: ED25519 SHA256:cccc; новый пользователь deploy (uid 1001, /bin/bash)")
+
+
+async def test_fleet_key_is_silent_unknown_key_alerts(tmp_path, monkeypatch):
+    from app.config import Settings
+    from app.db import Base, create_engine_and_factory
+
+    engine, factory = create_engine_and_factory(f"sqlite+aiosqlite:///{(tmp_path / 'k.db').as_posix()}")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    now = datetime.now(timezone.utc)
+    t0 = int(now.timestamp())
+    key_x = {"u": "deploy", "t": "ED25519", "fp": "SHA256:xxxx", "c": "", "f": "/home/deploy/.ssh/authorized_keys"}
+
+    def row(name, keys):
+        return Server(name=name, token_hash=name, enabled=True, backup_not_required=True, last_seen=now,
+                      cpu_alert_percent=0, mem_alert_percent=0,
+                      last_report={"uptime_seconds": 100000, "extras": {"changes": _snap(t0 - 600, keys=keys)}})
+
+    async with factory() as s:
+        s.add_all([row("web-a", [KEY_A, KEY_B]), row("web-b", [KEY_A]), row("web-c", [KEY_A])])
+        await s.commit()
+    sent: list[str] = []
+
+    async def fake_send(cfg, text, parse_mode=None):
+        sent.append(text)
+        return []
+
+    monkeypatch.setattr("app.alerts.send_alert", fake_send)
+    monkeypatch.setattr(changes, "_last_track", None)
+    cfg = Settings(alert_webhook="http://hook")
+    await changes.track(factory, now)
+    async with factory() as s:
+        for srv in (await s.execute(select(Server))).scalars():
+            # web-b: ключ, который лежит на web-a; web-c: ключ, которого парк не видел
+            keys = {"web-a": [KEY_A, KEY_B], "web-b": [KEY_A, KEY_B], "web-c": [KEY_A, key_x]}[srv.name]
+            srv.last_report = {"uptime_seconds": 100000, "extras": {"changes": _snap(t0, keys=keys)}}
+        await s.commit()
+    monkeypatch.setattr(changes, "_last_track", None)
+    await changes.track(factory, now + timedelta(minutes=2))
+    await collector.evaluate_servers(factory, cfg, now + timedelta(minutes=2))
+    keys = [m for m in sent if m.startswith("🔑")]
+    assert len(keys) == 1 and "web-c" in keys[0] and "SHA256:xxxx" in keys[0], sent
+    async with factory() as s:
+        b = (await s.execute(select(Server).where(Server.name == "web-b"))).scalar_one()
+        assert [(e["alert"], e.get("known")) for e in b.changes["log"]] == [(False, True)]
+    # тот же незнакомый ключ на следующем сервере - уже знакомый
+    async with factory() as s:
+        a = (await s.execute(select(Server).where(Server.name == "web-a"))).scalar_one()
+        a.last_report = {"uptime_seconds": 100000, "extras": {"changes": _snap(t0 + 600, keys=[KEY_A, KEY_B, key_x])}}
+        await s.commit()
+    monkeypatch.setattr(changes, "_last_track", None)
+    await changes.track(factory, now + timedelta(minutes=12))
+    await collector.evaluate_servers(factory, cfg, now + timedelta(minutes=12))
+    assert len([m for m in sent if m.startswith("🔑")]) == 1, sent
+    await engine.dispose()
