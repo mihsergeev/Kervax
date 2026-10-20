@@ -941,27 +941,6 @@ input:focus {
 .clock-fix { margin: 0.4rem 0 0.7rem; }
 .dns-problem { margin: 0.4rem 0 0.7rem; display: flex; flex-direction: column; gap: 0.2rem; }
 
-/* "На что ушло место": дерево каталогов с полосками и находки с командами */
-.du-block { margin-top: 0.9rem; }
-.du-age { text-transform: none; letter-spacing: normal; font-weight: normal; }
-.du-fs { margin-top: 0.5rem; padding-top: 0.5rem; border-top: 1px solid var(--border); }
-.du-fs-head { display: flex; align-items: baseline; gap: 0.6rem; flex-wrap: wrap; margin-bottom: 0.35rem; }
-.du-fs-pct { font-weight: 600; }
-.du-tree { display: flex; flex-direction: column; gap: 0.12rem; margin-bottom: 0.4rem; }
-.du-row {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 7rem 4.8rem;
-  gap: 0.6rem;
-  align-items: center;
-  font-size: 0.82rem;
-}
-.du-path { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.du-bar { height: 6px; border-radius: 3px; background: var(--border); overflow: hidden; }
-.du-bar > span { display: block; height: 100%; background: var(--accent); }
-.du-size { text-align: right; }
-.du-more { align-self: flex-start; margin-top: 0.2rem; }
-.du-sub { font-weight: 600; font-size: 0.86rem; margin: 0.55rem 0 0.3rem; }
-.du-item { padding: 0.4rem 0; border-top: 1px dashed var(--border); }
 /* упавшие юниты systemd */
 .unit-row { padding: 0.45rem 0; border-top: 1px dashed var(--border); }
 .unit-row:first-of-type { border-top: 0; }
@@ -1102,24 +1081,7 @@ input:focus {
 .acc-tag-bad { color: var(--down); border-color: rgba(239, 68, 68, 0.45); }
 .acc-last { flex: 0 0 auto; font-size: 0.85rem; white-space: nowrap; font-variant-numeric: tabular-nums; }
 .acc-act { flex: 0 0 auto; }
-/* "Диск": разделы строками с полоской заполнения */
-.loc-res.ds-row { flex-direction: column; align-items: stretch; gap: 0.3rem; }
-.ds-main { display: flex; align-items: center; gap: 0.7rem; min-width: 0; }
-.ds-mount { flex: 0 0 11rem; min-width: 0; font-weight: 600; overflow-wrap: anywhere; }
-.ds-bar { flex: 1 1 auto; min-width: 60px; height: 6px; background: var(--border); border-radius: 3px; overflow: hidden; }
-.ds-bar span { display: block; height: 100%; background: var(--up); border-radius: 3px; }
-.ds-bar span.warn { background: var(--degraded); }
-.ds-bar span.bad { background: var(--down); }
-.ds-pct { flex: 0 0 3rem; text-align: right; font-weight: 600; font-variant-numeric: tabular-nums; }
-.ds-size { flex: 0 0 auto; min-width: 10rem; font-size: 0.82rem; text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
-.ds-extra { padding-left: calc(9px + 0.7rem); display: flex; flex-direction: column; gap: 0.15rem; }
-.ds-extra:empty { display: none; }
-.ds-act { flex: 0 0 auto; min-width: 5.8rem; max-width: 16rem; display: flex; justify-content: flex-end; text-align: right; }
-.ds-act .du-analyze { margin: 0; }
-.ds-act .du-fix-btn { background: transparent; color: var(--text); border: 1px solid var(--border-strong); box-shadow: none; padding: 0.1rem 0.55rem; font-size: 0.78rem; }
-.ds-act .du-fix-btn:hover:not(:disabled) { background: var(--card-hover); }
 .net-card .du-note, .net-card .dh-note, .net-card .dh-io { margin: 0; }
-.net-card > .du-fs { margin-top: 0; }
 /* "Процессы": юниты рамками-строками, журнал узкой карточкой, изменения как панель логов */
 .net-cards > .net-card-narrow { flex: 0 1 300px; }
 .net-card .unit-row, .net-card .unit-row:first-of-type { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 0.5rem 0.7rem; }
@@ -1273,17 +1235,6 @@ button.ghost.tile-filter-chip:hover { border-color: var(--accent); background: c
   .exp-state, .exp-act { grid-column: 3; justify-self: start; }
   .loc-res.acc-row { display: grid; grid-template-columns: 9px minmax(0, 1fr); column-gap: 0.55rem; row-gap: 0.25rem; }
   .acc-last, .acc-act { grid-column: 2; justify-self: start; }
-  /* раздел: точка | имя | процент, полоска и размер строками ниже */
-  .ds-main { display: grid; grid-template-columns: 9px minmax(0, 1fr) auto; column-gap: 0.55rem; row-gap: 0.3rem; }
-  .ds-mount { grid-column: 2; }
-  .ds-bar { grid-column: 2 / -1; grid-row: 2; }
-  .ds-size { grid-column: 2 / -1; grid-row: 3; text-align: left; min-width: 0; white-space: normal; }
-  .ds-extra { padding-left: calc(9px + 0.55rem); }
-  .ds-act { grid-column: 2 / -1; grid-row: 4; justify-self: start; }
-  .ds-act:empty { display: none; }
-  /* находки: имя не сжимается в столбик, размер и кнопка переносятся строкой ниже */
-  .du-item .du-item-head { flex-wrap: wrap; row-gap: 0.3rem; }
-  .du-item-head .du-item-name { flex: 1 1 55%; }
   /* изменения: время над текстом */
   .ch-row { grid-template-columns: minmax(0, 1fr); gap: 0.1rem; }
   .loc-res.ml-row { flex-wrap: wrap; }
@@ -1294,21 +1245,6 @@ button.ghost.tile-filter-chip:hover { border-color: var(--accent); background: c
 @media (max-width: 640px) {
   .exp-table td:last-child { white-space: normal; }
 }
-.du-item-head { display: flex; align-items: center; gap: 0.5rem; }
-.du-item-name { flex: 1; min-width: 0; overflow-wrap: anywhere; }
-.du-item-size { flex-shrink: 0; }
-.du-item-hint { margin: 0.15rem 0 0.3rem; }
-.du-lvl {
-  flex-shrink: 0;
-  font-size: 0.7rem;
-  line-height: 1.5;
-  padding: 0 0.45rem;
-  border-radius: 999px;
-  border: 1px solid currentColor;
-}
-.du-lvl-safe { color: var(--up); }
-.du-lvl-careful { color: var(--degraded); }
-.du-lvl-manual { color: var(--text-muted); }
 .du-note { margin: 0.2rem 0 0.4rem; }
 .mc-row .loc-res-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .mc-row .loc-res-metric { min-width: 4.5rem; text-align: right; }
@@ -1387,10 +1323,6 @@ button.ghost.tile-filter-chip:hover { border-color: var(--accent); background: c
 }
 .du-fix-actions { display: flex; gap: 0.5rem; }
 .du-fix-line { display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap; margin: 0.3rem 0 0.2rem; }
-@media (max-width: 600px) {
-  .du-row { grid-template-columns: minmax(0, 1fr) 4.8rem; }
-  .du-bar { display: none; }
-}
 .clock-fix-fallback { margin-top: 0.5rem; }
 .clock-sync-row { display: flex; align-items: center; gap: 0.4rem; margin: 0.4rem 0; }
 .clock-manual { margin-top: 0.4rem; }
@@ -7615,4 +7547,88 @@ button.ghost.lc-del { color: var(--down); border-color: color-mix(in srgb, var(-
   .imp-bar-btn {
     width: 100%;
   }
+}
+
+/* "Место на дисках": строка раздела, дерево каталогов и находки строками (DiskSpaceCard) */
+.dk-card { display: flex; flex-direction: column; gap: 0.55rem; }
+.dk-head-r { display: flex; gap: 0.8rem; align-items: baseline; }
+.dk-part { display: flex; flex-direction: column; gap: 0.45rem; padding-top: 0.55rem; border-top: 1px solid var(--border); }
+.dk-card > .net-head + .dk-part, .dk-card > .net-head + .muted + .dk-part { border-top: 0; padding-top: 0; }
+.dk-line {
+  display: grid;
+  grid-template-columns: 9px minmax(4rem, max-content) 3.2rem minmax(80px, 1fr) auto;
+  grid-template-areas: 'dot mount pct bar nums' '. fc fc fc fc';
+  column-gap: 0.7rem;
+  row-gap: 0.15rem;
+  align-items: center;
+}
+.dk-line .lk-dot { grid-area: dot; }
+.dk-mount { grid-area: mount; font-weight: 600; overflow-wrap: anywhere; }
+.dk-pct { grid-area: pct; font-weight: 700; font-size: 1.05rem; text-align: right; font-variant-numeric: tabular-nums; }
+.dk-bar { grid-area: bar; position: relative; height: 8px; background: var(--border); border-radius: 2px; overflow: hidden; }
+.dk-bar > span { position: absolute; left: 0; top: 0; bottom: 0; }
+.dk-fill-ok { background: var(--up); }
+.dk-fill-warn { background: var(--degraded); }
+.dk-fill-bad { background: var(--down); }
+.dk-nums { grid-area: nums; font-size: 0.84rem; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.dk-sep { color: var(--text-muted); margin: 0 0.35rem; }
+.dk-fc { grid-area: fc; font-size: 0.82rem; }
+.dk-t-warn { color: var(--degraded); }
+.dk-t-bad { color: var(--down); }
+.dk-analyze-q { margin-left: 0.7rem; display: inline-block; }
+.dk-analyze-q .du-analyze, .dk-na .du-analyze { margin: 0; display: inline-block; }
+.dk-analyze-q .du-fix-btn, .dk-na .du-fix-btn { background: transparent; color: var(--text); border: 1px solid var(--border-strong); box-shadow: none; padding: 0.08rem 0.55rem; font-size: 0.78rem; }
+.dk-analyze-q .du-fix-btn:hover:not(:disabled), .dk-na .du-fix-btn:hover:not(:disabled) { background: var(--card-hover); }
+.dk-na { display: flex; align-items: center; flex-wrap: wrap; gap: 0.3rem 0.6rem; padding-left: calc(9px + 0.7rem); }
+.dk-body { display: grid; grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.2fr); gap: 0.4rem 1.4rem; padding-left: calc(9px + 0.7rem); }
+.dk-body-one { grid-template-columns: minmax(0, 1fr); }
+.dk-wide { grid-column: 1 / -1; }
+.dk-col { min-width: 0; display: flex; flex-direction: column; }
+.dk-sub { font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-muted); margin-bottom: 0.25rem; }
+.dk-sub .muted { text-transform: none; letter-spacing: 0; }
+.dk-col > .dk-tree + .dk-sub { margin-top: 0.6rem; }
+.dk-btn { background: var(--accent); color: #fff; border: 0; border-radius: 5px; padding: 0.22rem 0.7rem; font-size: 0.82rem; white-space: nowrap; }
+.dk-btn-sm { padding: 0.08rem 0.5rem; font-size: 0.76rem; }
+.dk-link { background: none; border: 0; padding: 0; color: var(--accent); font-size: 0.8rem; white-space: nowrap; box-shadow: none; cursor: pointer; }
+.dk-link:hover:not(:disabled) { background: none; text-decoration: underline; }
+.dk-more { align-self: flex-start; margin-top: 0.25rem; }
+.dk-tree { display: flex; flex-direction: column; }
+.dk-tree-row { display: grid; grid-template-columns: minmax(0, 1fr) 70px 4.4rem; gap: 0.6rem; align-items: center; font-size: 0.84rem; padding: 0.06rem 0; }
+.dk-tree-path { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dk-tree-bar { height: 6px; background: var(--border); border-radius: 2px; overflow: hidden; }
+.dk-tree-bar > span { display: block; height: 100%; background: var(--accent); }
+.dk-tree-size { text-align: right; font-variant-numeric: tabular-nums; }
+.dk-finds { display: flex; flex-direction: column; }
+.dk-find { border-top: 1px solid var(--border); }
+.dk-find:first-child { border-top: 0; }
+.dk-find-open { background: var(--hover); }
+.dk-find-main { display: grid; grid-template-columns: 5.6rem minmax(0, 1fr) 4.6rem 5.6rem; align-items: center; gap: 0.6rem; padding: 0.28rem 0.2rem; cursor: pointer; font-size: 0.86rem; }
+.dk-find-main:hover { background: var(--hover); }
+.dk-lv { font-size: 0.72rem; border-radius: 3px; padding: 0 0.35rem; white-space: nowrap; border: 1px solid; justify-self: start; }
+.dk-lv-safe { color: var(--up); border-color: rgba(34, 197, 94, 0.4); }
+.dk-lv-careful { color: var(--degraded); border-color: rgba(245, 158, 11, 0.4); }
+.dk-lv-manual { color: var(--text-muted); border-color: var(--border-strong); }
+.dk-find-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dk-find-sub { font-size: 0.78rem; }
+.dk-find-size { text-align: right; font-variant-numeric: tabular-nums; }
+.dk-find-act { text-align: right; }
+.dk-find-more { display: flex; flex-direction: column; gap: 0.3rem; padding: 0.1rem 0.2rem 0.45rem 6.2rem; }
+.dk-find-more .du-fix { margin: 0; }
+.dk-cmd { display: flex; align-items: flex-start; gap: 0.6rem; background: var(--bg); border: 1px solid var(--border); border-radius: 5px; padding: 0.3rem 0.55rem; }
+.dk-cmd code { flex: 1; min-width: 0; font-family: ui-monospace, Consolas, monospace; font-size: 0.78rem; white-space: pre-wrap; overflow-wrap: anywhere; }
+.dk-safe { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 0.4rem 0.8rem; margin-top: 0.35rem; padding: 0.4rem 0.6rem; border-radius: 6px; border: 1px solid rgba(34, 197, 94, 0.35); background: rgba(34, 197, 94, 0.06); font-size: 0.86rem; }
+.dk-safe-txt { min-width: 0; flex: 1 1 16rem; }
+.dk-safe-act { display: flex; gap: 0.8rem; align-items: center; }
+.dk-safe > .dk-wide { flex: 1 1 100%; }
+@media (max-width: 760px) {
+  .dk-line { grid-template-columns: 9px minmax(0, 1fr) auto; grid-template-areas: 'dot mount pct' '. bar bar' '. nums nums' '. fc fc'; }
+  .dk-nums { white-space: normal; }
+  .dk-body { grid-template-columns: minmax(0, 1fr); padding-left: 0; gap: 0.8rem; }
+  .dk-na { padding-left: 0; }
+  .dk-find-main { grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: 'name size' 'lv act'; row-gap: 0.2rem; }
+  .dk-find-main > .dk-lv { grid-area: lv; }
+  .dk-find-main > .dk-find-name { grid-area: name; white-space: normal; }
+  .dk-find-main > .dk-find-size { grid-area: size; }
+  .dk-find-main > .dk-find-act { grid-area: act; }
+  .dk-find-more { padding-left: 0.2rem; }
 }
