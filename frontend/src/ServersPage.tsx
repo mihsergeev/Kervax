@@ -3264,6 +3264,11 @@ function PressureCard({ server: s }: { server: Server }) {
   const psi = r?.psi
   if (!psi && !r?.dstate && !r?.fds) return null
   const prob = (s.problems ?? []).find((p) => p.kind === 'pressure')
+  // Сервер бэкапов: ждут только диск - его работа (prune и check репозиториев, прием бэкапов), алерт
+  // только через 6 ч (_BSRV_IO_HOLD_S в collector). Плитка красная, строки беды нет: сказать почему
+  const io = PSI_ROWS.find((x) => x.k === 'io')!
+  const ioHot = !!psi && ((psi.io_some_60 ?? 0) >= io.some || (psi.io_full_60 ?? 0) >= io.full)
+  const bsrvBusy = !prob && ioHot && !!r?.backup_server?.present
   const pc = (v: number) => `${v.toFixed(v > 0 && v < 10 ? 1 : 0)}%`
   const fdPct = r?.fds && r.fds.max > 0 ? (r.fds.used / r.fds.max) * 100 : null
   const ds = r?.dstate
@@ -3290,6 +3295,11 @@ function PressureCard({ server: s }: { server: Server }) {
         <div className="chart-cap">{t('Давление на ресурсы')}</div>
       </div>
       {prob && <div className="net-prob">{prob.text}</div>}
+      {bsrvBusy && (
+        <div className="net-note">
+          {t('Сервер бэкапов: диск грузят prune и check репозиториев и прием бэкапов, это его обычная работа, алерт не шлем. Придет, если так продержится дольше 6 ч или процесс зависнет в ожидании диска.')}
+        </div>
+      )}
       <div className="net-tiles">
         {psi &&
           PSI_ROWS.map((x) => {

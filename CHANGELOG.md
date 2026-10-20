@@ -4,6 +4,15 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.4.308] - 2026-10-20
+
+### Changed
+- Сервер бэкапов: давление только на диск во время prune и check больше не алертит каждый день.
+  Алерт приходит, только если давление держится дольше 6 ч подряд, со строкой пояснения.
+  Зависшие в D-state, память и дескрипторы на нем алертят с обычной выдержкой, обычные серверы
+  как раньше. На главной строки нет до тех же 6 ч, в карточке в разделе Процессы желтая плашка,
+  почему алерт не шлем.
+
 ## [1.4.307] - 2026-10-20
 
 ### Added

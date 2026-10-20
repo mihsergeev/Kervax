@@ -72,6 +72,7 @@ const PHRASES: Rule[] = [
   [/не хватает памяти: процессы ждут память ([\d.]+)% времени/g, 'out of memory: processes wait for memory $1% of the time'],
   [/диск не успевает: все процессы разом ждут диск ([\d.]+)% времени/g, 'disk cannot keep up: all processes wait for disk $1% of the time'],
   [/диск не успевает: процессы ждут диск ([\d.]+)% времени/g, 'disk cannot keep up: processes wait for disk $1% of the time'],
+  [/на сервере бэкапов так бывает во время prune и check, но не дольше (\d+) ч/g, 'on a backup server this happens during prune and check, but not for longer than $1 h'],
   [/файловые дескрипторы заняты на (\d+)% \((\d+) из (\d+)\)/g, 'file descriptors $1% used ($2 of $3)'],
   [/зависли в ожидании диска или сети (\d+) (?:процесса|процессов): /g, '$1 processes stuck waiting for disk or network: '],
   [/завис (.+?) \(PID (\d+)\) в ожидании диска или сети /g, '$1 (PID $2) stuck waiting for disk or network for '],

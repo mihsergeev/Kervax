@@ -276,3 +276,63 @@ async def test_old_count_alert_closes_with_one_recovery(tmp_path, monkeypatch):
         await tick(5, old(8 if i % 2 else 2))
     assert len(sent) == 1 and sent[0].startswith("✅") and "сервер снова дышит" in sent[0], sent
     await engine.dispose()
+
+
+# Сервер бэкапов: давление только по диску - его работа (prune и check репозиториев, прием бэкапов).
+# На двух HDD каждый день 17 минут ждал диск 55-60% времени во время prune одного
+# репозитория: алерт в 16:13 и отбой в 18:00, делать нечего. Алертит, только если держится дольше 6 ч
+BSRV = {"present": True}
+BUSY = dict(CALM, psi=dict(CALM["psi"], io_some_60=63.0, io_full_60=57.0), backup_server=BSRV)
+
+
+def test_backup_server_io_hold():
+    pr = collector.pressure_problems(BUSY)
+    assert collector.pressure_hold_s(BUSY, pr) == 6 * 3600
+    # обычный сервер, зависший процесс или память - общая выдержка
+    assert collector.pressure_hold_s(dict(BUSY, backup_server={}), pr) is None
+    stuck = dict(BUSY, dstate=_ds(6, [dict(PG, sec=430)]))
+    assert collector.pressure_hold_s(stuck, collector.pressure_problems(stuck)) is None
+    mem = dict(BUSY, psi=dict(BUSY["psi"], mem_full_60=22.0))
+    assert collector.pressure_hold_s(mem, collector.pressure_problems(mem)) is None
+    assert collector.pressure_hold_s(CALM, []) is None
+
+    s = _srv(BUSY, {"pressure_since": (NOW - timedelta(minutes=40)).isoformat()})
+    assert collector._server_conditions(s, NOW)["pressure"][0] == 0
+    assert not [p for p in collector.server_problems(s, NOW) if p["kind"] == "pressure"]
+    s.alert_state = {"pressure_since": (NOW - timedelta(hours=6, minutes=1)).isoformat()}
+    lvl, ctx = collector._server_conditions(s, NOW)["pressure"]
+    assert lvl == 2 and ctx["_note"] == "на сервере бэкапов так бывает во время prune и check, но не дольше 6 ч"
+    rows = [p for p in collector.server_problems(s, NOW) if p["kind"] == "pressure"]
+    assert [p["text"] for p in rows] == ["диск не успевает: все процессы разом ждут диск 57% времени "
+                                         "(на сервере бэкапов так бывает во время prune и check, но не дольше 6 ч)"]
+    # обычный сервер с тем же давлением - как раньше, через 15 минут
+    s = _srv(dict(BUSY, backup_server={}), {"pressure_since": (NOW - timedelta(minutes=16)).isoformat()})
+    assert collector._server_conditions(s, NOW)["pressure"][0] == 2
+
+
+async def test_backup_server_prune_no_alert(tmp_path, monkeypatch):
+    tick, sent, engine = await _life(tmp_path, monkeypatch, CALM)
+    for _ in range(5):  # prune: 20 минут давления, потом тихо
+        await tick(5, BUSY)
+    for _ in range(20):
+        await tick(5, dict(CALM, backup_server=BSRV))
+    assert [m for m in sent if "🫁" in m or "дышит" in m] == []
+    # затянулось на 6 ч - алерт с пояснением
+    for _ in range(74):
+        await tick(5, BUSY)
+    got = [m for m in sent if m.startswith("🫁 ")]
+    assert len(got) == 1 and got[0].endswith(
+        "\n↳ на сервере бэкапов так бывает во время prune и check, но не дольше 6 ч"), sent
+    await engine.dispose()
+
+
+async def test_backup_server_stuck_still_alerts(tmp_path, monkeypatch):
+    # тот же prune, но процесс завис в D: общая выдержка
+    rep = lambda sec: dict(BUSY, dstate=_ds(6, [dict(PG, sec=sec)]))  # noqa: E731
+    tick, sent, engine = await _life(tmp_path, monkeypatch, rep(130))
+    await tick(0)
+    for i in range(4):
+        await tick(5, rep(430 + i * 300))
+    got = [m for m in sent if m.startswith("🫁 ")]
+    assert len(got) == 1 and "завис postgres" in got[0], sent
+    await engine.dispose()
