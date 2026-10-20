@@ -342,6 +342,12 @@ def mem_text(e: dict) -> str:
     return ", ".join(parts)
 
 
+def cg_units(memcg: str) -> set[str]:
+    """Юниты systemd, внутри которых лежит cgroup: у /user.slice/user-1001.slice/user@1001.service/init.scope
+    это user@1001.service и init.scope. Владелец такой cgroup - "сессия idv", а упал юнит user@1001.service."""
+    return {p for p in (memcg or "").split("/") if p.endswith((".service", ".scope"))}
+
+
 def quiet_unit(name: str) -> bool:
     """Менеджер сессии пользователя: убит OOM - не служба упала, он поднимется при следующем входе."""
     return bool(_QUIET_UNIT.fullmatch(name or ""))
@@ -419,17 +425,32 @@ def unit_link(u: dict, eps: list[dict]) -> dict | None:
     def near(e: dict) -> bool:
         return not since or e["start"] - 600 <= since <= e["end"] + 600
 
+    def mine(k: dict) -> bool:
+        # убит процесс из cgroup юнита или вложенной в него: systemd + sd-pam из
+        # user@1001.service/init.scope, процесс сессии из session-5.scope
+        return name in cg_units(k.get("memcg") or "")
+
     ep = next((e for e in reversed(eps) if name in (e.get("units") or {}) and near(e)), None)
     if ep is None:
-        ep = next((e for e in reversed(eps) if near(e) and any(
-            kill_owner(k).get("name") == name for k in e["kills"])), None)
+        ep = next((e for e in reversed(eps) if near(e) and any(mine(k) for k in e["kills"])), None)
     if ep is None and not (by_log or by_res):
         return None
     line = ""
     if ep is not None:
-        k = next((k for k in ep["kills"] if kill_owner(k).get("name") == name), None)
+        k = next((k for k in ep["kills"] if mine(k)), None)
         line = (k or ep["kills"][0]).get("line") or ""
     return {"ep": ep["id"] if ep else None, "line": line}
+
+
+def unit_pending(u: dict, b: dict | None, ref: float) -> bool:
+    """Юнит убит сигналом KILL, а helper еще не прочитал журнал ядра за окно вокруг падения: OOM это
+    или нет, станет ясно на ближайших минутах, и алерт "упал юнит" до этого уходить не должен - иначе
+    рядом с алертом OOM придет второй про тот же случай. Без блока helper'а ждать нечего, дольше
+    BLOCK_MAX_AGE после падения не ждем."""
+    if b is None or u.get("result") != "signal" or _i(u.get("status")) != 9:
+        return False
+    since = _f(u.get("since"))
+    return since > 0 and _f(b.get("ts")) < since + UNIT_WINDOW and ref - since < BLOCK_MAX_AGE
 
 
 def units_failed_now(rep: dict) -> set[str]:

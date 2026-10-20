@@ -335,3 +335,80 @@ async def test_report_stores_kills_and_api(client, auth_headers):
     eps = r.json()["episodes"]
     assert [len(e["kills"]) for e in eps] == [3, 2] and eps[0]["kills"][-1]["owner"] == "php7.4-fpm.service"
     assert eps[1]["level"] == 2 and eps[0]["mem"]["ram"] == 8388068
+
+
+def test_unit_link_by_cgroup_and_pending():
+    """Случай с прода 20.10: systemd отметил OOM у user-1001.slice (helper слайсы не берет), а не у
+    user@1001.service, в логе юнита строки про OOM нет. Убиты systemd + sd-pam из
+    user@1001.service/init.scope - юнит все равно привязан к эпизоду; session-N.scope - так же."""
+    now = 1_900_000_000.0
+    b = _block(now)
+    b["units"] = [u for u in b["units"] if not u["unit"].startswith("user@")]
+    eps = oom.episodes(oom.records(b))
+    user = {"unit": "user@1001.service", "result": "signal", "status": 9, "since": now - 300,
+            "log": ["Startup finished in 144ms."]}
+    lk = oom.unit_link(user, eps)
+    assert lk is not None and lk["ep"] == eps[-1]["id"] and "Killed process 424301 (systemd)" in lk["line"]
+    assert oom.cg_units("/user.slice/user-1001.slice/user@1001.service/init.scope") == {"user@1001.service", "init.scope"}
+    sess = copy.deepcopy(b)
+    for k in sess["kills"]:
+        if "user@1001" in (k.get("memcg") or ""):
+            k["memcg"] = "/user.slice/user-1001.slice/session-7.scope"
+    eps2 = oom.episodes(oom.records(sess))
+    assert oom.unit_link({"unit": "session-7.scope", "result": "signal", "status": 9, "since": now - 300}, eps2) is not None
+    assert oom.unit_link(user, eps2) is None
+    # убит KILL, helper еще не дочитал журнал за окно вокруг падения - ждем; дочитал - решено
+    fresh = {"unit": "nginx.service", "result": "signal", "status": 9, "since": now - 130}
+    assert oom.unit_pending(fresh, {"ts": now - 20}, now)
+    assert not oom.unit_pending(fresh, {"ts": fresh["since"] + oom.UNIT_WINDOW}, now)
+    assert not oom.unit_pending(fresh, None, now)  # helper'а нет - ждать нечего
+    assert not oom.unit_pending(dict(fresh, status=15), {"ts": now - 20}, now)
+    assert not oom.unit_pending(dict(fresh, since=now - 700), {"ts": now - 20}, now)
+
+
+async def test_units_alert_user_manager_by_cgroup(tmp_path, monkeypatch):
+    """Через collector, как на проде 20.10: отметки OOM у user@1001.service нет, лог юнита - чужие
+    строки менеджера сессии. Одно сообщение OOM, без "упал user@1001.service". Пока helper не
+    дочитал журнал за окно вокруг падения, "упал юнит" тоже не уходит."""
+    from app import collector
+    from app.config import Settings
+    from app.db import Base, create_engine_and_factory
+    from app.models import Server
+
+    engine, factory = create_engine_and_factory(f"sqlite+aiosqlite:///{(tmp_path / 'o.db').as_posix()}")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    now = datetime.now(timezone.utc)
+    b = _block(now.timestamp())
+    b["units"] = [u for u in b["units"] if not u["unit"].startswith("user@")]
+    user = {"unit": "user@1001.service", "type": "notify-reload", "result": "signal", "status": 9,
+            "since": now.timestamp() - 300, "restarts": 0, "log": [
+                "Reached target default.target - Main User Target.", "Startup finished in 144ms.",
+                "launchpadlib-cache-clean.service - Clean up old files in the Launchpadlib cache was skipped "
+                "because of an unmet condition check (ConditionPathExists=/home/idv/.launchpadlib/api.launchpad.net/cache)."]}
+    # убит KILL только что, журнал ядра helper прочитал раньше падения: OOM или нет, еще не ясно
+    nginx = {"unit": "nginx.service", "type": "forking", "result": "signal", "status": 9,
+             "since": now.timestamp() - 150, "restarts": 0, "log": []}
+    rep = {"clock_unix": int(now.timestamp()), "uptime_seconds": 100000,
+           "extras": {"oom": dict(b, ts=now.timestamp() - 160),
+                      "units": {"v": 1, "ts": now.timestamp() - 30, "units": [user, nginx], "fix": True}}}
+    async with factory() as s:
+        s.add(Server(name="node", token_hash="x", enabled=True, backup_not_required=True, last_seen=now,
+                     cpu_alert_percent=0, mem_alert_percent=0, last_report=rep, oom_total=3,
+                     alert_state={"oom_end": 0.0}))
+        await s.commit()
+    sent: list[str] = []
+
+    async def fake_send(cfg, text, parse_mode=None):
+        sent.append(text)
+        return []
+
+    monkeypatch.setattr("app.alerts.send_alert", fake_send)
+    await collector.evaluate_servers(factory, Settings(alert_webhook="http://hook"), now)
+    assert len(sent) == 1 and "нехватка памяти (OOM)" in sent[0], sent
+    assert "user@1001" not in sent[0] and "launchpadlib" not in sent[0]
+    async with factory() as s:
+        srv = (await s.execute(select(Server))).scalars().one()
+        texts = [p["text"] for p in collector.server_problems(srv, now)]
+    assert not any("user@1001" in t or "nginx.service" in t for t in texts), texts
+    await engine.dispose()
