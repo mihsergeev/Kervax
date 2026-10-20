@@ -1481,6 +1481,38 @@ export type KubePod = {
   nolim?: boolean
   noprobe?: boolean
   msg?: string
+  last?: KubeLast // агент 2.43, только у подов с перезапусками
+}
+// Как кончился прошлый запуск контейнера пода, что перезапускался последним (Last State)
+export type KubeLast = {
+  c: string // контейнер
+  r?: string // OOMKilled / Error / Completed
+  x: number // exit code
+  t?: number // finishedAt, unix
+  lim?: string // лимит памяти контейнера
+  probe?: string // liveness / startup: kubelet убил по пробе
+  pmsg?: string // что ответила проба
+  log?: string // строка из конца лога прошлого запуска
+  msg?: string // terminated.message
+}
+// Раздел "Перезапуски" кластера (backend restarts.kube_view)
+export type KubeRestartPod = {
+  ns: string
+  name: string
+  n: number // за сутки
+  solo: number // из них не в пачках
+  times: string[] // когда, по возрастанию
+  kind: '' | 'oom' | 'probe' | 'exit0' | 'crash'
+  why: string // причина прошлого завершения текстом
+  last?: KubeLast | null
+  alert: boolean // повод для алерта
+  muted: boolean
+  mute: string // ключ мьюта: restarts:pod:<ns>/<ворклоад>
+}
+export type KubeRestarts = {
+  pods: KubeRestartPod[]
+  bursts: { t: string; pods: string[] }[]
+  burst_min: number
 }
 export type KubeFailedJob = { ns: string; name: string; ts?: number; reason?: string }
 // Ссылки на креды СУБД-пода (без значений паролей).
@@ -2080,6 +2112,8 @@ export type Server = {
   backup_verify?: { ts: string | null; files_ok: number; dumps_ok: string[]; level: number; problems: string[] } | null
   // перезапусков за сутки: "docker:<имя>" | "pod:<ns>/<имя>" -> n (5 и больше - предупреждение)
   restarts_day?: Record<string, number> | null
+  // раздел "Перезапуски" кластера: поды с перезапусками за сутки, причина, пачки
+  kube_restarts?: KubeRestarts | null
   // что течет памятью: дно (минимум за сутки) растет 4 суток подряд; series - эти минимумы, байты
   mem_leaks?: MemLeak[] | null
   // OOM (backend app/oom.py): эпизодов за 7 дней, последний, юниты, убитые OOM
@@ -2855,7 +2889,7 @@ export function kubeCommand(
   ns: string,
   kind: 'deployment' | 'statefulset' | 'daemonset' | 'pod',
   name: string,
-  action: 'rollout_restart' | 'delete_pod' | 'logs',
+  action: 'rollout_restart' | 'delete_pod' | 'logs' | 'logs_prev',
   opts: { tail?: number; since?: number } = {},
 ): Promise<KubeCommand> {
   return api<KubeCommand>(`/api/servers/${serverId}/kube/command`, {

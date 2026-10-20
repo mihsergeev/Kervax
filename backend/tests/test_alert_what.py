@@ -19,6 +19,16 @@ def test_pod_restarts_drop_replicaset_hash():
     assert [w for w, _ in items("kube_restarts", t)] == ["перезапускается под shop/worker", "перезапускается под shop/cron-sync"]
 
 
+def test_pod_restart_bursts_and_causes():
+    t = ("🔄☸️ k8s-a — поды перезапускаются пачками: 3 раза за сутки по 3 разом, последний 0 мин назад (app-a, app-b) - "
+         "похоже, подвисает нода k8s-a: пробы и запросы к kube-api не успевают, смотрите нагрузку и память ноды\n"
+         "под default/app-c-649ccd4dfd-zz4k8 перезапускался 3 раза за сутки, последний 2 мин назад: OOMKilled при лимите 128Mi\n"
+         "поды default/app-d (2 шт.) перезапускались 10 раз за сутки, последний 5 мин назад: exit 1: fatal")
+    assert items("kube_restarts", t) == [("поды перезапускаются пачками", "3 раз за сутки"),
+                                         ("перезапускается под default/app-c", "3 раз за сутки: OOMKilled при лимите 128Mi"),
+                                         ("перезапускаются поды default/app-d", "10 раз за сутки: exit 1: fatal")]
+
+
 def test_objects_with_reasons_become_rows():
     t = ("💾 backup-a — репозитории требуют внимания: 2 шт.: web-a (нет новых бэкапов 6 дн), "
          "web-b (бэкап опоздал: обычно раз в сутки, последний 30 ч назад)")

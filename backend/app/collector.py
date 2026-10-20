@@ -336,7 +336,7 @@ _BSRV_SEC = {"backup_repo": "repos", "backup_lock": "repos", "backup_unmonitored
 _SVC_SEC = {"queue": "queues", "queue_stuck": "queues", "queue_failed": "queues", "workers": "workers", "cron_stuck": "cron", "log_errors": "logs", "fpm": "fpm", "db_conn": "db", "db_health": "db", "web_config": "web", "web_cert": "certs",
             "llm": "llm"}
 _KUBE_TAB = {"kube_expiry": "expiry", "flux_down": "flux", "flux_stale": "flux", "kube_pod": "pods",
-             "kube_cron": "cron", "kube_node": "nodes", "kube_job": "cron", "kube_restarts": "pods"}
+             "kube_cron": "cron", "kube_node": "nodes", "kube_job": "cron", "kube_restarts": "restarts"}
 
 _ALERT_SECTION = {
     "docker_loop": "docker",
@@ -3889,7 +3889,7 @@ def server_problems(s: Server, now: datetime, pod_names: dict[str, str] | None =
         if x["kind"] == "docker":
             add("docker_restarts", 1, x["text"], "containers", srv_restarts.MUTE_PREFIX + x["key"], section="docker")
         else:
-            add("kube_restarts", 1, x["text"], "pods", srv_restarts.MUTE_PREFIX + x["key"], section="kuber")
+            add("kube_restarts", 1, x["text"], "restarts", srv_restarts.MUTE_PREFIX + x["key"], section="kuber")
     # Изменился доступ: держится сутки, пока не отметили "это мы"
     acc = srv_changes.unacked_alerts(s, now)
     if acc:
@@ -5632,8 +5632,10 @@ def _server_conditions(s: Server, now: datetime,
         rp = srv_restarts.problems(s, now)
         for kind, key in (("docker", "docker_restarts"), ("pod", "kube_restarts")):
             items = [x for x in rp if x["kind"] == kind]
-            out[key] = (1 if items else 0, {"detail": "; ".join(x["text"] for x in items[:4]),
-                                            "sig": [x["key"] for x in items],
+            # у подов в строке причина, она длинная: каждый под своей строкой
+            sep = "\n" if kind == "pod" else "; "
+            out[key] = (1 if items else 0, {"detail": sep.join(x["text"] for x in items[:4]),
+                                            "sig": [x["key"] for x in items], "sep": sep,
                                             "parts": [(x["key"], x["text"]) for x in items]})
     # Пропал порт, который слушался неделями (история - alert_state listen_hist, ведет цикл алертов)
     if online and isinstance((s.alert_state or {}).get("listen_hist"), dict):
