@@ -163,10 +163,12 @@ async def test_metric_walking_around_threshold_goes_quiet(tmp_path, monkeypatch)
     assert len(third) == 1 and "ходит вокруг порога" in third[0]
     assert await tick(150, 40) == []
     assert await tick(180, 95) == []
-    # окно кончилось, метрика в норме - короткий отбой, и снова можно алертить
-    lift = await tick(60 * 7, 40)
+    # 6 часов от первого захода прошло, но последний был 4 часа назад: серия еще идет
+    assert await tick(60 * 7, 40) == []
+    # 6 часов без заходов, метрика в норме - короткий отбой, и снова можно алертить
+    lift = await tick(60 * 9 + 10, 40)
     assert len(lift) == 1 and "CPU снова в норме" in lift[0]
-    assert any("CPU 95%" in x for x in await tick(60 * 7 + 30, 95))
+    assert any("CPU 95%" in x for x in await tick(60 * 9 + 40, 95))
     await engine.dispose()
 
 
@@ -857,7 +859,7 @@ async def test_disk_alert_says_where_the_space_went(tmp_path, monkeypatch):
         s.add(Server(name="node", token_hash="x", enabled=True, backup_not_required=True,
                      last_seen=now, cpu_alert_percent=0, mem_alert_percent=0,
                      disk_warn_percent=85, disk_alert_percent=90, disk_crit_percent=95,
-                     last_report=rep))
+                     last_report=rep, alert_state={"disk_since": (now - timedelta(minutes=40)).isoformat()}))
         await s.commit()
     sent: list[str] = []
 

@@ -72,6 +72,7 @@ const PHRASES: Rule[] = [
   [/, смотрите, что грузит ноду/g, ', check what loads the node'],
   [/память (\d+)%/g, 'memory $1%'],
   [/диск (\d+)%/g, 'disk $1%'],
+  [/^Диск (\d+)%/g, 'Disk $1%'],
   [/поды (\S+) \((\d+) шт\.\) перезапускались (\d+) раза? за сутки/g, 'pods $1 ($2) restarted $3 times a day'],
   [/под (\S+) перезапускался (\d+) раза? за сутки/g, 'pod $1 restarted $2 times a day'],
   [/контейнер (\S+) перезапускался (\d+) раза? за сутки/g, 'container $1 restarted $2 times a day'],

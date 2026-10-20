@@ -90,7 +90,7 @@ async def test_server_offline_and_recovery_alert(tmp_path, monkeypatch):
 
 
 async def test_server_disk_level_escalation(tmp_path, monkeypatch):
-    from datetime import datetime, timezone
+    from datetime import datetime, timedelta, timezone
 
     from sqlalchemy import select
 
@@ -114,6 +114,8 @@ async def test_server_disk_level_escalation(tmp_path, monkeypatch):
             cpu_alert_percent=0, mem_alert_percent=0,
             disk_warn_percent=85, disk_alert_percent=90, disk_crit_percent=95,
             last_report=rep(87),
+            # выше порога дольше выдержки (app/fill_alert.py)
+            alert_state={"disk_since": (now - timedelta(hours=1)).isoformat()},
         ))
         await s.commit()
 
@@ -126,10 +128,12 @@ async def test_server_disk_level_escalation(tmp_path, monkeypatch):
     monkeypatch.setattr("app.alerts.send_alert", fake_send)
     settings = Settings(alert_webhook="http://hook")
 
-    async def set_disk(used):
+    async def set_disk(used, at=None):
         async with factory() as s:
             srv = await s.scalar(select(Server))
             srv.last_report = rep(used)
+            if at is not None:
+                srv.last_seen = at
             await s.commit()
 
     # 87% → предупреждение. Уровень читается по ведущей иконке, не по слову
@@ -149,10 +153,20 @@ async def test_server_disk_level_escalation(tmp_path, monkeypatch):
     await set_disk(97)
     await collector.evaluate_servers(factory, settings, now)
     assert len(sent) == 1 and sent[0].startswith("🚨") and "97%" in sent[0]
-    # 80% → восстановление: видно, С КАКОГО значения вернулись (последнее объявленное)
+    # обратно до 92% - уровень не снижается, сообщений нет: беда та же
     sent.clear()
+    await set_disk(92)
+    await collector.evaluate_servers(factory, settings, now)
+    await set_disk(97)
+    await collector.evaluate_servers(factory, settings, now)
+    assert sent == []
+    # 80% → восстановление после получаса ниже линии отбоя: видно, С КАКОГО значения вернулись
     await set_disk(80)
     await collector.evaluate_servers(factory, settings, now)
+    assert sent == []
+    later = now + timedelta(minutes=31)
+    await set_disk(80, later)
+    await collector.evaluate_servers(factory, settings, later)
     assert len(sent) == 1 and "снова в норме" in sent[0]
     assert "80%" in sent[0] and "было 97%" in sent[0]
     await engine.dispose()

@@ -184,6 +184,12 @@ async def test_server_quiet_in_window_and_alerts_after(tmp_path, monkeypatch):
         (await s.get(Server, 1)).last_seen = later
         await s.commit()
     await collector.evaluate_servers(factory, settings, later)
+    assert sent == []  # окно как снуз: выдержка диска пошла с конца окна
+    later += timedelta(minutes=31)
+    async with factory() as s:
+        (await s.get(Server, 1)).last_seen = later
+        await s.commit()
+    await collector.evaluate_servers(factory, settings, later)
     assert len(sent) == 1 and "92%" in sent[0]
     await engine.dispose()
 

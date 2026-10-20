@@ -1,6 +1,6 @@
 """Сводка "Что сломано": collector.server_problems - короткие тексты новых проверок с теми же
 уровнями, что у алертов."""
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from app.collector import server_problems
 from app.models import Server
@@ -37,7 +37,9 @@ def test_problems_from_all_new_checks():
         # дальше пяти суток, с которых приходит и алерт: в "Что сломано" не попадает
         {"mount": "/srv", "kind": "space", "pct": 78.0, "rate": 3.0, "eta_h": 176.0},
         {"mount": "/data", "kind": "space", "pct": 50.0, "rate": 1.0, "eta_h": 400.0}]}
-    s = _server(rep, now, disk_forecast=fc, alert_mutes=["unit:muted.service"])
+    # inode выше порога дольше выдержки алерта (app/fill_alert.py)
+    s = _server(rep, now, disk_forecast=fc, alert_mutes=["unit:muted.service"],
+                alert_state={"inode_since": (now - timedelta(hours=1)).isoformat()})
     probs = server_problems(s, now)
     texts = {(p["kind"], p["level"], p["text"]) for p in probs}
     assert ("disk_health", 3, "RAID md42, md43 (raid1): работает 1 из 2 дисков") in texts

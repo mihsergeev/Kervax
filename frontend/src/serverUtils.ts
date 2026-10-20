@@ -85,12 +85,6 @@ export function srvRamPct(s: Server): number | null {
   const r = s.last_report
   return r?.mem_total ? Math.round(((r.mem_used ?? 0) / r.mem_total) * 100) : null
 }
-export function srvDiskPct(s: Server): number | null {
-  const d = s.last_report?.disks
-  return d?.length
-    ? Math.max(...d.filter((x) => x.total).map((x) => Math.round((x.used / x.total) * 100)))
-    : null
-}
 
 // sec — раздел детали сервера (msec-<sec>), куда ведёт клик по 🔥. Те же имена,
 // что в диплинках алертов (_SRV_SECTION в коллекторе), чтобы поведение совпадало.
@@ -153,17 +147,8 @@ function srvIssuesRaw(
     return [{ tone: 't-down', text: why ? `${t('оффлайн')} - ${why}` : t('оффлайн'), mute: 'offline', kind: 'offline', since: s.last_seen }]
   }
   const out: SrvIssue[] = []
-  const disk = srvDiskPct(s)
-  if (disk != null) {
-    if (s.disk_crit_percent && disk >= s.disk_crit_percent)
-      out.push({ tone: 't-down', text: `${t('Диск')} ${disk}% 🚨`, sec: 'diskfill', mute: 'disk', kind: 'disk' })
-    else if (s.disk_alert_percent && disk >= s.disk_alert_percent)
-      out.push({ tone: 't-down', text: `${t('Диск')} ${disk}%`, sec: 'diskfill', mute: 'disk@2', kind: 'disk' })
-    else if (s.disk_warn_percent && disk >= s.disk_warn_percent)
-      out.push({ tone: 't-degraded', text: `${t('Диск')} ${disk}%`, sec: 'diskfill', mute: 'disk@1', kind: 'disk' })
-  }
-  // остальное, о чем шлют алерты (CPU, RAM, температуры, conntrack и троттлинг - по уровню алерта,
-  // с его выдержкой, а не по последнему отчету; поломки дисков, прогноз, inode, юниты, часы, DNS, коннекты СУБД,
+  // все, о чем шлют алерты (место и inode, CPU, RAM, температуры, conntrack и троттлинг - по уровню
+  // алерта, с его выдержкой, а не по последнему отчету; поломки дисков, прогноз, юниты, часы, DNS, коннекты СУБД,
   // 5xx, очереди, сроки и Flux, дампы и проверки бэкапов), приходит с бэкенда готовым: уровни те
   // же, что у алертов, считать их здесь второй раз незачем
   for (const p of s.problems ?? [])

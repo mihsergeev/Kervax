@@ -72,9 +72,10 @@ async def test_onboarding_holds_what_was_there_and_turns_it_known(tmp_path, monk
     engine, factory = await _panel(tmp_path)
     now = datetime.now(timezone.utc)
     async with factory() as s:
-        # web-a на подключении, web-b обычный: у обоих диск 86% и свежая перезагрузка
-        s.add(_srv("web-a", now, onboard_done_at=None, alert_state={"onboard": 1}, rebooted_at=now))
-        s.add(_srv("web-b", now, rebooted_at=now))
+        # web-a на подключении, web-b обычный: у обоих диск 86% (дольше выдержки) и свежая перезагрузка
+        held = (now - timedelta(minutes=40)).isoformat()
+        s.add(_srv("web-a", now, onboard_done_at=None, alert_state={"onboard": 1, "disk_since": held}, rebooted_at=now))
+        s.add(_srv("web-b", now, rebooted_at=now, alert_state={"disk_since": held}))
         await s.commit()
     sent = _sender(monkeypatch)
     settings = Settings(alert_webhook="http://hook")
