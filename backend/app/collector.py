@@ -51,6 +51,7 @@ from app import onboard as onboard_mod
 from app import liveness
 from app import disk_wear
 from app import disk_mute
+from app import fill_alert
 from app import software as software_mod
 from app import parents as parents_mod
 from app import maint
@@ -2945,6 +2946,20 @@ def disk_cause(rep: dict, forecast: dict | None = None, mount: str | None = None
     return " - " + "; ".join(parts) if parts else ""
 
 
+def _with_fast(fast: dict | None, cause: str) -> str:
+    """Быстрое заполнение - первым в хвосте алерта: из-за него алерт пришел без выдержки."""
+    ft = fill_alert.fast_text(fast)
+    if not ft:
+        return cause
+    return f" - {ft}" + (f"; {cause[3:]}" if cause.startswith(" - ") else cause)
+
+
+def _fill_low(s: Server) -> float | None:
+    """Нижний из включенных порогов диска: от него считается выдержка и линия отбоя."""
+    on = [x for x in (s.disk_warn_percent, s.disk_alert_percent, s.disk_crit_percent) if x]
+    return float(min(on)) if on else None
+
+
 def _fmt_files(n: float) -> str:
     return f"{n / 1e6:.1f} млн" if n >= 1e6 else f"{n / 1e3:.0f} тыс." if n >= 1e3 else str(int(n))
 
@@ -3701,14 +3716,34 @@ def server_problems(s: Server, now: datetime, pod_names: dict[str, str] | None =
                 else f"{i['mount']} заполнится")
         add("disk_forecast", 2 if eta <= _FORECAST_CRIT_H else 1,
             f"{what} {dfc.eta_text(eta)}", "diskfill", "disk_forecast")
+    # Место и inode - с выдержкой алерта (app/fill_alert.py): двухминутный скачок на распаковке
+    # образа, о котором алерта не будет, зажигал строку на главной. Объявленный держится до отбоя.
+    # Выдержку судим по "<вид>_since", а не по уровню алерта: тот у заглушенного не растет, а
+    # заглушенное тоже должно быть видно (в "Заглушено")
+    crit, prob, warn = s.disk_crit_percent, s.disk_alert_percent, s.disk_warn_percent
+
+    def fill_lvl(key: str, value: float) -> int:
+        raw = 3 if crit and value >= crit else 2 if prob and value >= prob else 1 if warn and value >= warn else 0
+        told = int(state.get(key, 0) or 0)
+        if told:
+            return max(told, raw)
+        return raw if raw >= fill_alert.CRIT or (raw and _held_long(s, state, key, now, fill_alert.HOLD_S)) else 0
+
+    dsk = [d for d in rep.get("disks") or [] if isinstance(d, dict) and d.get("total")]
+    if dsk:
+        dpct = max(d["used"] / d["total"] * 100 for d in dsk)
+        lvl = fill_lvl("disk", dpct)
+        if lvl:
+            add("disk", lvl, f"Диск {round(dpct)}%" + (" 🚨" if lvl >= 3 else ""), "diskfill",
+                "disk" if lvl >= 3 else f"disk@{lvl}")
     ino = [d for d in rep.get("disks") or [] if isinstance(d, dict) and d.get("inodes")]
     if ino:
         wi = max(ino, key=lambda d: (d.get("inodes_used") or 0) / d["inodes"])
-        ipct = round((wi.get("inodes_used") or 0) / wi["inodes"] * 100)
-        crit, prob, warn = s.disk_crit_percent, s.disk_alert_percent, s.disk_warn_percent
-        lvl = 3 if crit and ipct >= crit else 2 if prob and ipct >= prob else 1 if warn and ipct >= warn else 0
+        ipct = (wi.get("inodes_used") or 0) / wi["inodes"] * 100
+        lvl = fill_lvl("inode", ipct)
         if lvl:
-            add("inode", lvl, f"inode {wi.get('mount') or '?'} {ipct}%", "diskfill", f"inode@{lvl}" if lvl < 3 else "inode")
+            add("inode", lvl, f"inode {wi.get('mount') or '?'} {round(ipct)}%", "diskfill",
+                f"inode@{lvl}" if lvl < 3 else "inode")
     # CPU, RAM, температуры, conntrack и троттлинг - по уровню алерта (его выдержка, гистерезис и
     # отбой после затишья), а не по последнему отчету: минутный всплеск, о котором алерта не будет,
     # зажигал строку на главной, и через минуту она пропадала. Значение в тексте - текущее.
@@ -4400,7 +4435,8 @@ def groups_text(groups: list[dict], pod_names: dict[str, str] | None = None) -> 
 # Что из alert_state отдать как "с какого момента проблема": "<вид>_from" ставит цикл алертов
 # для любого вида, а у пороговых метрик точнее "<вид>_since" - начало превышения, а не алерта.
 _SINCE_KEYS = ("cpu", "mem", "temp", "conntrack", "disktemp", "db_conn", "web_5xx", "clock",
-               "backup_missing", "dns", "pressure", "net_health", "kube_node", "link", "traffic")
+               "backup_missing", "dns", "pressure", "net_health", "kube_node", "link", "traffic",
+               "disk", "inode")
 
 
 def alert_since(s: Server) -> dict[str, str]:
@@ -4566,7 +4602,7 @@ def cause_text(rep: dict, kind: str, base: dict[str, float], now: datetime | Non
 # то выше порога, то ниже, и на каждый заход прилетала пара «сработало - отбой».
 # После _FLAP_METRIC_LIMIT заходов за окно шлём одно сообщение и замолкаем.
 # Эскалации (диск warn -> crit) не считаем: там растёт проблема, а не мигает метрика.
-_FLAP_METRIC_KINDS = frozenset({"cpu", "mem", "disk", "temp", "conntrack", "db_conn", "disktemp",
+_FLAP_METRIC_KINDS = frozenset({"cpu", "mem", "disk", "inode", "temp", "conntrack", "db_conn", "disktemp",
                                 "web_5xx"})
 _FLAP_METRIC_WINDOW = 6 * 3600
 
@@ -4588,6 +4624,9 @@ _FLUX_STALE_HOLD = 2 * 3600
 # том, что сервер просто загружен.
 _HYST = 10
 _FLAP_METRIC_LIMIT = 3
+# Диску и inode хватает второго захода: с выдержкой и отбоем по полчаса (app/fill_alert.py) один
+# заход - это уже час, второй за 6 ч - не случайность, а временные файлы, которые приходят и уходят
+_FLAP_METRIC_LIMIT_OF = {"disk": 2, "inode": 2}
 
 
 
@@ -4682,6 +4721,45 @@ async def web_deploys(session: AsyncSession, since: datetime,
     out: dict[int, list[tuple[datetime, str]]] = {}
     for sid, ts, obj in await session.execute(q):
         out.setdefault(sid, []).append((_aware(ts), obj or ""))
+    return out
+
+
+def _fill_now(rep: dict) -> tuple[float, float]:
+    """Худший раздел по месту и по inode в отчете, %."""
+    ds = [d for d in rep.get("disks") or [] if isinstance(d, dict)]
+    sp = max((d["used"] / d["total"] * 100 for d in ds if d.get("total")), default=0.0)
+    ino = max(((d.get("inodes_used") or 0) / d["inodes"] * 100 for d in ds if d.get("inodes")), default=0.0)
+    return sp, ino
+
+
+async def fill_history(session: AsyncSession, servers: list[Server],
+                       now: datetime) -> dict[int, dict[str, list[tuple[float, float]]]]:
+    """{server_id: {"disk"|"inode": [(unix, %)]}} худшего раздела за окно быстрого заполнения -
+    только для серверов, у которых что-то уже выше нижнего порога: остальным выдержка не грозит.
+    Один запрос на тик по истории метрик (ServerMetric.disks пишется с каждым отчетом)."""
+    ids = []
+    for s in servers:
+        low = _fill_low(s)
+        if low is not None and max(_fill_now(s.last_report or {})) >= low:
+            ids.append(s.id)
+    out: dict[int, dict[str, list[tuple[float, float]]]] = {}
+    if not ids:
+        return out
+    rows = await session.execute(
+        select(ServerMetric.server_id, ServerMetric.ts, ServerMetric.disks)
+        .where(ServerMetric.server_id.in_(ids),
+               ServerMetric.ts >= now - timedelta(seconds=fill_alert.FAST_WINDOW_S))
+        .order_by(ServerMetric.ts))
+    for sid, ts, disks in rows.all():
+        ds = [d for d in disks or [] if isinstance(d, dict)]
+        t = _aware(ts).timestamp()
+        h = out.setdefault(sid, {"disk": [], "inode": []})
+        sp = [float(d["pct"]) for d in ds if d.get("pct") is not None]
+        ip = [float(d["ipct"]) for d in ds if d.get("ipct") is not None]
+        if sp:
+            h["disk"].append((t, max(sp)))
+        if ip:
+            h["inode"].append((t, max(ip)))
     return out
 
 
@@ -4950,12 +5028,40 @@ def _flapping(s: Server, st: dict, now: datetime, apply, note: list, url: str = 
 
 
 
+async def _fill_swing(session_factory, s: Server, st: dict, key: str,
+                      now: datetime) -> tuple[float, float] | None:
+    """От и до скольких ходило заполнение худшего раздела с начала серии заходов - для текста
+    "диск скачет 61-88%". Только при заходе, который может стать сообщением про мигание."""
+    if st.get(f"flap_{key}_muted"):
+        return None
+    first = _parse_iso(st.get(f"flap_{key}_since") or "")
+    if first is None or (now - first).total_seconds() > _FLAP_METRIC_WINDOW:
+        return None
+    try:
+        async with session_factory() as ses:
+            rows = (await ses.execute(select(ServerMetric.disks).where(
+                ServerMetric.server_id == s.id, ServerMetric.ts >= first - timedelta(hours=1)))).scalars().all()
+    except Exception:
+        log.warning("не собрал размах заполнения %s", s.name, exc_info=True)
+        return None
+    f = "pct" if key == "disk" else "ipct"
+    vals = [max(v) for v in ([float(d[f]) for d in ds or [] if isinstance(d, dict) and d.get(f) is not None]
+                             for ds in rows) if v]
+    return (min(vals), max(vals)) if vals else None
+
+
 def _flap_metric(s: Server, st: dict, now: datetime, apply, note: list, url: str,
-                 key: str, title: str) -> bool:
+                 key: str, title: str, swing: tuple[float, float] | None = None) -> bool:
     """True, если про это срабатывание писать НЕ нужно: метрика ходит вокруг порога.
     Устроено как гаситель мигания у обрывов связи, но окно длиннее: с выдержкой в
-    15 минут один и тот же порог чаще раза в пару часов не пересечь."""
+    15 минут один и тот же порог чаще раза в пару часов не пересечь. Пока серия заглушена,
+    каждый заход отодвигает ее конец ("_last"): отбой мигания - после окна без заходов, иначе
+    метрика, которая скачет весь день, раз в 6 ч получала "снова в норме" и новую серию.
+    swing - от и до сколько ходило значение за окно (для диска: "скачет 61-88%")."""
     pre = f"flap_{key}"
+    if st.get(f"{pre}_muted"):
+        apply(s.id, f"{pre}_last", now.isoformat())
+        return True
     first = _parse_iso(st.get(f"{pre}_since") or "") or now
     cnt = int(st.get(f"{pre}_count", 0))
     if (now - first).total_seconds() > _FLAP_METRIC_WINDOW:  # окно истекло - считаем заново
@@ -4963,16 +5069,20 @@ def _flap_metric(s: Server, st: dict, now: datetime, apply, note: list, url: str
     cnt += 1
     apply(s.id, f"{pre}_since", first.isoformat())
     apply(s.id, f"{pre}_count", cnt)
-    if cnt < _FLAP_METRIC_LIMIT:
+    apply(s.id, f"{pre}_last", now.isoformat())
+    if cnt < _FLAP_METRIC_LIMIT_OF.get(key, _FLAP_METRIC_LIMIT):
         return False
-    if not st.get(f"{pre}_muted"):
-        apply(s.id, f"{pre}_muted", 1)
-        note.append(_server_alert_text(
-            key, s.name,
-            f"{title} ходит вокруг порога: {cnt} срабатывания за "
-            f"{_FLAP_METRIC_WINDOW // 3600} ч - дальше молчу, пока не устаканится",
-            url, group=s.group_name or "",
-        ))
+    apply(s.id, f"{pre}_muted", 1)
+    if key in ("disk", "inode"):
+        what = "диск" if key == "disk" else "inode"
+        rng = f" {round(swing[0])}-{round(swing[1])}%" if swing and round(swing[1]) > round(swing[0]) else ""
+        text = (f"{what} скачет{rng}: {cnt}-й заход за порог за {_FLAP_METRIC_WINDOW // 3600} ч\n"
+                "↳ похоже на временные файлы (сборки, образы, дампы). Дальше молчу, пока не успокоится, "
+                "критичное или быстрое заполнение придет сразу")
+    else:
+        text = (f"{title} ходит вокруг порога: {cnt} срабатывания за "
+                f"{_FLAP_METRIC_WINDOW // 3600} ч - дальше молчу, пока не устаканится")
+    note.append(_server_alert_text(key, s.name, text, url, group=s.group_name or ""))
     return True
 
 
@@ -5176,9 +5286,12 @@ def dump_issues(rep: dict, now: datetime) -> tuple[list[str], str, list[str], in
 
 def _server_conditions(s: Server, now: datetime,
                        web_err: tuple[float, float, int, dict, float] | None = None,
-                       pod_names: dict[str, str] | None = None) -> dict[str, tuple[int, dict]]:
+                       pod_names: dict[str, str] | None = None,
+                       fill_hist: dict[str, list[tuple[float, float]]] | None = None) -> dict[str, tuple[int, dict]]:
     """Пороги сервера: ключ → (уровень, контекст для шаблона текста). Уровень 0 =
-    норма; для диска 1=предупреждение(≥warn), 2=проблема(≥alert), 3=критично(≥crit)."""
+    норма; для диска 1=предупреждение(≥warn), 2=проблема(≥alert), 3=критично(≥crit).
+    fill_hist - заполнение худшего раздела за последние минуты ({"disk"|"inode": [(unix, %)]},
+    fill_history): по нему видно быстрое заполнение, которое алертит без выдержки."""
     out: dict[str, tuple[int, dict]] = {}
     state = s.alert_state or {}
     seen = s.last_seen is not None
@@ -5278,16 +5391,24 @@ def _server_conditions(s: Server, now: datetime,
             default=(0.0, None), key=lambda x: x[0],
         )
         crit, prob, warn = s.disk_crit_percent, s.disk_alert_percent, s.disk_warn_percent
-        if crit and worst >= crit:
-            lvl, sev, thr = 3, "критично", crit
-        elif prob and worst >= prob:
-            lvl, sev, thr = 2, "проблема", prob
-        elif warn and worst >= warn:
-            lvl, sev, thr = 1, "предупреждение", warn
-        else:
-            lvl, sev, thr = 0, "", 0
-        out["disk"] = (lvl, {"value": round(worst), "threshold": thr,
-                             "severity": sev, "level": lvl, "cause": "", "mount": worst_mount})
+        low = _fill_low(s)
+
+        def fill(key: str, value: float, ctx: dict) -> None:
+            """Уровень по порогам сейчас -> уровень алерта: выдержка, гистерезис отбоя, критичное и
+            быстрое заполнение без выдержки (app/fill_alert.py). Пока алерт висит, уровень не
+            снижается, поэтому порог в тексте - по уровню алерта, а не по текущему значению."""
+            raw = 3 if crit and value >= crit else 2 if prob and value >= prob else 1 if warn and value >= warn else 0
+            lvl, extra = fill_alert.step(state, key, value, raw, low, now, (fill_hist or {}).get(key))
+            thr = {3: crit, 2: prob, 1: warn}.get(lvl) or 0
+            # raw - что на диске прямо сейчас: известным проблемам и закрытию подключения нужна
+            # сама беда, а не алерт с выдержкой, иначе в выдержке отметка решила бы, что беда ушла
+            ctx.update(threshold=thr, level=lvl, since=extra["since"], cool=extra["cool"], fast=extra["fast"],
+                       raw=raw)
+            if key == "disk":
+                ctx["severity"] = {3: "критично", 2: "проблема", 1: "предупреждение"}.get(lvl, "")
+            out[key] = (lvl, ctx)
+
+        fill("disk", worst, {"value": round(worst), "cause": "", "mount": worst_mount})
         # Inode кончаются отдельно от места: миллионы мелких файлов (сессии PHP, кэш) забивают
         # ФС, когда df показывает свободные гигабайты, и ничего нового не создать. Пороги те
         # же, что у места. Считают агенты 2.15+, у btrfs inode нет вовсе.
@@ -5295,16 +5416,7 @@ def _server_conditions(s: Server, now: datetime,
         if ino:
             wi = max(ino, key=lambda d: (d.get("inodes_used") or 0) / d["inodes"])
             ipct = (wi.get("inodes_used") or 0) / wi["inodes"] * 100
-            if crit and ipct >= crit:
-                ilvl, ithr = 3, crit
-            elif prob and ipct >= prob:
-                ilvl, ithr = 2, prob
-            elif warn and ipct >= warn:
-                ilvl, ithr = 1, warn
-            else:
-                ilvl, ithr = 0, 0
-            out["inode"] = (ilvl, {"value": round(ipct), "threshold": ithr, "level": ilvl,
-                                   "mount": wi.get("mount") or "?", "cause": ""})
+            fill("inode", ipct, {"value": round(ipct), "mount": wi.get("mount") or "?", "cause": ""})
     temp = rep.get("cpu_temp")
     if s.temp_alert_c and temp is not None:
         sustain("temp", temp >= s.temp_alert_c,
@@ -5868,6 +5980,7 @@ async def evaluate_servers(
         muted = await settings_store.get_muted(session)
         rules = await settings_store.get_server_alert_rules(session)
         web_err = await web_error_window(session, now)
+        fill_hist = await fill_history(session, servers, now)
         windows = list(await session.scalars(select(MaintenanceWindow)))
         # лежащие мониторы - чтобы назвать их в сообщении про сервер, от которого они зависят
         down_checks = [SimpleNamespace(id=i, name=n, target=t, type=ty, probe_local=pl, probe_server_id=ps,
@@ -6068,18 +6181,19 @@ async def evaluate_servers(
         for fk in _FLAP_METRIC_KINDS:
             if not st.get(f"flap_{fk}_muted"):
                 continue
-            fs = _parse_iso(st.get(f"flap_{fk}_since") or "")
+            fs = _parse_iso(st.get(f"flap_{fk}_last") or st.get(f"flap_{fk}_since") or "")
             if fs is not None and (now - fs).total_seconds() <= _FLAP_METRIC_WINDOW:
                 continue
             apply(s.id, f"flap_{fk}_muted", 0)
             apply(s.id, f"flap_{fk}_count", 0)
+            apply(s.id, f"flap_{fk}_last", None)
             if int(st.get(fk, 0)) == 0:
                 recoveries.append(_server_alert_text(
                     fk, s.name,
                     f"{settings_store.SERVER_ALERT_KINDS[fk][0]} снова в норме",
                     srv_url(s, fk), recovery=True, group=s.group_name or "",
                 ))
-        conds = _server_conditions(s, now, web_err.get(s.id), pod_names)
+        conds = _server_conditions(s, now, web_err.get(s.id), pod_names, fill_hist.get(s.id))
         # Нода молчит: про ее CPU, память и диски ничего не известно. Все, кроме самого
         # "недоступен", замирает как было: ни срабатываний, ни отбоев, ни сброса выдержек.
         # Иначе пороговые условия на молчащей ноде падали в ноль, и объявленный CPU получал
@@ -6145,7 +6259,7 @@ async def evaluate_servers(
                 known_now[kk] = ent
                 continue
             k_lvl, k_ctx = conds.get(kk, (0, {}))
-            new_k, what = known_mod.step(ent, k_lvl, k_ctx.get("sig"), now)
+            new_k, what = known_mod.step(ent, int(k_ctx["raw"]) if "raw" in k_ctx else k_lvl, k_ctx.get("sig"), now)
             if new_k != ent:
                 known_upd.append((s.id, kk, ent.get("at"), new_k, what))
             if new_k is None:
@@ -6166,6 +6280,7 @@ async def evaluate_servers(
         if not onb and st.get("onboard") and talking:
             made = []
             for key, (level, k_ctx) in conds.items():
+                level = int(k_ctx["raw"]) if "raw" in k_ctx else level
                 if key == "offline" or level <= 0 or int(st.get(key, 0)) or key in known_now:
                     continue
                 rule = rules.get(key) or _fallback_rule(key)
@@ -6329,9 +6444,12 @@ async def evaluate_servers(
                 # Метрика ходит вокруг порога - одно сообщение на серию. Считаем
                 # только заходы с нуля: эскалация (диск warn→crit) это растущая
                 # проблема, про неё молчать нельзя.
-                if prev == 0 and key in _FLAP_METRIC_KINDS and _flap_metric(
+                # Критичное и быстрое заполнение диска - авария, ее не глушит и серия мигания
+                urgent = key in ("disk", "inode") and (level >= fill_alert.CRIT or bool(ctx.get("fast")))
+                if prev == 0 and key in _FLAP_METRIC_KINDS and not urgent and _flap_metric(
                     s, st, now, apply, fires, srv_url(s, key), key,
                     settings_store.SERVER_ALERT_KINDS[key][0],
+                    await _fill_swing(session_factory, s, st, key, now) if key in ("disk", "inode") else None,
                 ):
                     fire_apply.append((s.id, key, level))
                     continue
@@ -6350,9 +6468,11 @@ async def evaluate_servers(
                     ctx["details"] = (ctx.get("details") or "") + dns_others_hint(s.id, dns_slow_by)
                 if key == "disk":
                     # на что ушло место - из разбора helper'а diskusage-setup, без запросов
-                    ctx["cause"] = disk_cause(s.last_report or {}, s.disk_forecast, ctx.get("mount"), now)
+                    ctx["cause"] = _with_fast(ctx.get("fast"), disk_cause(
+                        s.last_report or {}, s.disk_forecast, ctx.get("mount"), now))
                 if key == "inode":
-                    ctx["cause"] = inode_cause(s.last_report or {}, s.disk_forecast, ctx.get("mount"), now)
+                    ctx["cause"] = _with_fast(ctx.get("fast"), inode_cause(
+                        s.last_report or {}, s.disk_forecast, ctx.get("mount"), now))
                 if key == "web_5xx":
                     try:
                         async with session_factory() as ses:

@@ -323,7 +323,10 @@ async def test_inode_alert_with_cause_and_disk_eta(tmp_path, monkeypatch):
     fc = {"ts": int(now0.timestamp()), "items": [
         {"mount": "/", "kind": "inode", "pct": 93.0, "rate": 2.0, "eta_h": 84.0},
         {"mount": "/", "kind": "space", "pct": 91.0, "rate": 1.0, "eta_h": 96.0}]}
-    engine, factory, now = await _setup(tmp_path, "ino", last_report=rep, disk_forecast=fc)
+    # выше порога уже дольше выдержки (app/fill_alert.py)
+    held = (now0 - timedelta(minutes=40)).isoformat()
+    engine, factory, now = await _setup(tmp_path, "ino", last_report=rep, disk_forecast=fc,
+                                        alert_state={"disk_since": held, "inode_since": held})
     sent = _capture(monkeypatch)
     await collector.evaluate_servers(factory, Settings(alert_webhook="http://hook"), now)
     ino = next(m for m in sent if "inode на /" in m)

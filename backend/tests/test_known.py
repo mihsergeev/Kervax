@@ -140,6 +140,8 @@ async def test_server_known_silences_until_worse_then_closes(tmp_path, monkeypat
             disk_warn_percent=85, disk_alert_percent=90, disk_crit_percent=95,
             alert_sustain_seconds=0, offline_after_seconds=120,
             known_issues={"disk": _entry(at=now.isoformat())},
+            # выше порога давно: выдержка диска (app/fill_alert.py) уже прошла
+            alert_state={"disk_since": (now - timedelta(hours=1)).isoformat()},
         ))
         await s.commit()
     sent: list[str] = []
@@ -168,16 +170,21 @@ async def test_server_known_silences_until_worse_then_closes(tmp_path, monkeypat
     assert len(sent) == 1 and "92%" in sent[0]
     async with factory() as s:
         assert (await s.get(Server, 1)).known_issues["disk"]["worse"] is True
-    # ушла совсем: отбой (алерт же уходил), отметка ждет 10 минут и закрывается
+    # ушла совсем: отметка ждет 10 минут и закрывается, отбой (алерт же уходил) - после
+    # получаса ниже линии отбоя
     await tick(now + timedelta(minutes=2), last_report=_disk(40))
-    assert len(sent) == 2
+    assert len(sent) == 1
     await tick(now + timedelta(minutes=13))
     async with factory() as s:
         assert (await s.get(Server, 1)).known_issues is None
         log = list(await s.scalars(select(AuditLog).where(AuditLog.action == "known_closed")))
         assert log and log[0].username == "авто"
-    # та же беда снова - уже обычный алерт
-    await tick(now + timedelta(minutes=14), last_report=_disk(86))
+    await tick(now + timedelta(minutes=33))
+    assert len(sent) == 2 and "снова в норме" in sent[1]
+    # та же беда снова - уже обычный алерт, с выдержкой
+    await tick(now + timedelta(minutes=34), last_report=_disk(86))
+    assert len(sent) == 2
+    await tick(now + timedelta(minutes=65))
     assert len(sent) == 3
     await engine.dispose()
 
@@ -192,6 +199,7 @@ async def test_server_known_expired_and_reminder(tmp_path, monkeypatch):
             disk_warn_percent=85, disk_alert_percent=90, disk_crit_percent=95,
             alert_sustain_seconds=0, offline_after_seconds=120,
             known_issues={"disk": _entry(at=(now - timedelta(days=8)).isoformat(), level=1)},
+            alert_state={"disk_since": (now - timedelta(days=8)).isoformat()},
         ))
         await s.commit()
     sent: list[str] = []
