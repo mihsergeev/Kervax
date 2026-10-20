@@ -15,13 +15,12 @@ from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, HTTPException, Request, status
 from sqlalchemy import func, select
 
-from app import audit, impersonate, ratelimit
-from app.api.auth import _client_key, _record_failure
+from app import audit, impersonate
+from app.api.auth import _client_key
 from app.config import get_settings
 from app.deps import AdminUser, SessionDep
 from app.models import AuditLog, Check, Impersonation, Server, User
 from app.schemas import (
-    ImpersonateIn,
     ImpersonateOut,
     UserCardOut,
     UserCreate,
@@ -30,7 +29,7 @@ from app.schemas import (
     UsersOverview,
     UserUpdate,
 )
-from app.security import create_impersonation_token, hash_password, verify_password
+from app.security import create_impersonation_token, hash_password
 
 router = APIRouter(prefix="/users", tags=["users"])
 
@@ -239,17 +238,13 @@ async def _close_open(session, admin: str, why: str, now: datetime) -> None:
 
 @router.post("/{user_id}/impersonate", response_model=ImpersonateOut)
 async def impersonate_start(
-    user_id: int, body: ImpersonateIn, request: Request, admin: AdminUser, session: SessionDep
+    user_id: int, request: Request, admin: AdminUser, session: SessionDep
 ) -> ImpersonateOut:
-    """Войти под учеткой, чтобы увидеть панель ее глазами. Пароль и 2FA пользователя не нужны,
-    нужен свой пароль админа (step-up). Только просмотр, на час."""
+    """Войти под учеткой, чтобы увидеть панель ее глазами. Ни пароль и 2FA пользователя, ни свой
+    пароль еще раз не нужны: админ и так может все, а здесь он получает меньше, чем у него есть, -
+    только просмотр на час. Начало и конец в журнале действий."""
     settings = get_settings()
     key = _client_key(request)
-    if not verify_password(body.password, admin.password_hash):
-        guard = await ratelimit.load(session)
-        await _record_failure(
-            session, settings, key, admin.username, "impersonate_pw_fail", guard, guard.allowed(key) is not None)
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Неверный пароль")
     user = await session.get(User, user_id)
     if user is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Учётка не найдена")

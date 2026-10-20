@@ -2056,8 +2056,40 @@ button.ghost.tile-filter-chip:hover { border-color: var(--accent); background: c
 /* окно "Окна обслуживания" (MaintModal): поля окна в разделе и в новом окне */
 .mw-fields { display: flex; flex-direction: column; gap: 0.6rem; }
 
-/* окно "Пользователи" (UsersModal): имя с ролью в таблице, роль и пароль узкими полями */
-.us-name { display: inline-flex; align-items: center; flex-wrap: wrap; gap: 0.4rem; }
+/* окно "Пользователи" (UsersModal): список учеток в сводке как строки "Что сломано" - плоские, без
+   линеек, подсветка под курсором; имя жирным цветом текста (синим при наведении, без подчеркивания),
+   роль чипом в той же строке, доступ двумя серыми строками, последний вход серым. "войти как" -
+   маленькая вторичная кнопка, видна под курсором (на сенсорном экране всегда) */
+.us-list { display: flex; flex-direction: column; margin-top: 0.2rem; }
+.us-row {
+  display: grid; grid-template-columns: 11rem minmax(0, 1fr) 6rem 5.6rem;
+  align-items: center; gap: 0.15rem 0.9rem; padding: 0.4rem 0.5rem; border-radius: 6px; font-size: 0.85rem;
+}
+.us-row:hover { background: color-mix(in srgb, var(--text) 6%, transparent); }
+.us-row-who { display: flex; align-items: center; gap: 0.4rem; min-width: 0; }
+button.us-row-name {
+  padding: 0; border: 0; border-radius: 3px; background: none; box-shadow: none; min-width: 0;
+  color: var(--text); font: inherit; font-weight: 600; text-align: left; cursor: pointer;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+button.us-row-name:hover { background: none; color: var(--accent); }
+button.us-row-name:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.us-row-me { font-size: 0.74rem; color: var(--text-muted); }
+.us-row-acc { min-width: 0; font-size: 0.78rem; line-height: 1.45; color: var(--text-muted); overflow-wrap: anywhere; }
+.us-row-last { font-size: 0.78rem; color: var(--text-muted); white-space: nowrap; }
+.us-row-act { text-align: right; }
+button.ghost.us-imp { padding: 0.1rem 0.5rem; font-size: 0.75rem; line-height: 1.5; opacity: 0; transition: opacity 0.12s; }
+.us-row:hover button.ghost.us-imp, .us-row:focus-within button.ghost.us-imp { opacity: 1; }
+@media (hover: none) { button.ghost.us-imp { opacity: 1; } }
+@media (max-width: 600px) {
+  /* телефон: имя и вход в строку, доступ под ними на всю ширину */
+  .us-row { grid-template-columns: minmax(0, 1fr) auto; padding: 0.45rem 0.35rem; }
+  .us-row-acc { grid-column: 1 / -1; grid-row: 2; }
+  .us-row-last { grid-column: 2; grid-row: 1; text-align: right; }
+  .us-row-act { grid-column: 1 / -1; grid-row: 3; text-align: left; }
+  .us-row-act:empty { display: none; }
+  button.ghost.us-imp { opacity: 1; margin-top: 0.2rem; }
+}
 .us-role { max-width: 16rem; }
 .us-form { flex-wrap: wrap; }
 .us-form .field { flex: 1 1 12rem; min-width: 0; }
@@ -7574,10 +7606,6 @@ button.ghost.lc-del { color: var(--down); border-color: color-mix(in srgb, var(-
 }
 .imp-bar-btn:hover {
   filter: brightness(1.08);
-}
-.us-imp-cell {
-  text-align: right;
-  white-space: nowrap;
 }
 @media (max-width: 600px) {
   .imp-bar {

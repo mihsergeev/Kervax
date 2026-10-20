@@ -72,11 +72,6 @@ class MeOut(UserOut):
     imp_expires: datetime | None = None
 
 
-class ImpersonateIn(BaseModel):
-    # step-up: свой пароль админа еще раз, токена мало
-    password: str = Field(min_length=1, max_length=256)
-
-
 class ImpersonateOut(BaseModel):
     access_token: str
     imp_id: int

@@ -5089,8 +5089,6 @@ const EN: Record<string, string> = {
     'Last login',
   'Правит в разрешенных разделах, учетки и настройки панели ему не видны.':
     'Edits in the allowed sections; accounts and panel settings are hidden.',
-  'Роль задает, что можно менять, разделы - какие вкладки видны, группы - какие серверы и мониторы вообще доступны. Пусто в разделах или группах - без ограничений.':
-    'The role sets what can be changed, sections set which tabs are visible, groups set which servers and monitors are available at all. Empty sections or groups mean no limits.',
   'С 2FA':
     'With 2FA',
   'Создана':
@@ -5115,8 +5113,6 @@ const EN: Record<string, string> = {
     'Accounts',
   'админ':
     'admin',
-  'админов {a} · правка {e} · просмотр {v}':
-    'admins {a} · edit {e} · view {v}',
   'блокировка входа':
     'login lockout',
   'весь журнал учетки':
@@ -5961,25 +5957,22 @@ const EN: Record<string, string> = {
   'Только просмотр, изменения отклоняются. Вошел {admin}, осталось {n} мин.':
     'View only, changes are rejected. Signed in by {admin}, {n} min left.',
   'Вернуться к себе': 'Back to my account',
-  'Войти как {user}?': 'Sign in as {user}?',
-  'Панель откроется так, как ее видит {user}: только разделы, группы и кнопки этой учетки ({scope}).':
-    'The panel opens the way {user} sees it: only their sections, groups and buttons ({scope}).',
-  'Только просмотр: изменения будут отклоняться. Вход на час, вернуться к себе можно в любой момент кнопкой на плашке сверху. Начало и конец попадут в журнал действий.':
-    'View only: changes will be rejected. The sign-in lasts an hour, you can go back to your account any time with the button on the bar at the top. Start and end go to the action log.',
-  'Ваш пароль': 'Your password',
-  'Войти как {user}': 'Sign in as {user}',
   'от имени {user}': 'as {user}',
-  'Посмотреть панель глазами этой учетки, без ее пароля': 'See the panel as this account does, without its password',
   'войти как': 'sign in as',
-  'Войти как': 'Sign in as',
-  'посмотреть панель так, как ее видит эта учетка: только просмотр, на час':
-    'see the panel the way this account does: view only, for an hour',
-  'Это ваша учетка.': 'This is your account.',
-  'Под администратором войти нельзя: у него те же права, что у вас.':
-    'You cannot sign in as an admin: they have the same rights as you.',
   'вошел под учеткой': 'signed in as the account',
   'вышел из-под учетки': 'left the account',
   'неверный пароль при входе под учеткой': 'wrong password when signing in as an account',
+  // окно Пользователи: список учеток
+  'Роль - что можно менять, разделы - какие вкладки видны, группы - какие серверы и сайты доступны. "Все" - без ограничений.':
+    'Role is what can be changed, sections are which tabs are visible, groups are which servers and sites are available. "All" means no limits.',
+  'правка {e} · просмотр {v}': 'edit {e} · view {v}',
+  '{n} из {m}': '{n} of {m}',
+  'вы': 'you',
+  'группы: все': 'groups: all',
+  'разделы: {s}': 'sections: {s}',
+  'серверы: {s} · сайты: {c}': 'servers: {s} · sites: {c}',
+  'открыть учетку': 'open the account',
+  'Посмотреть панель глазами этой учетки: только просмотр, на час': 'See the panel as this account does: view only, for an hour',
 }
 
 type Ctx = {
