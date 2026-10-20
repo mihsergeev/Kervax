@@ -5,7 +5,7 @@
 import { Fragment, useCallback, useEffect, useId, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react'
 import { ApiError, type Server } from './api'
 import { useI18n } from './i18n'
-import { liftMute, muteLeft, mutesByServer, muteSoon, restoreMute, type MuteRow, type TFn } from './mutes'
+import { liftMute, muteAutoNote, muteLeft, mutesByServer, muteSoon, restoreMute, type MuteRow, type TFn } from './mutes'
 
 const rowId = (r: MuteRow) => `${r.sid}|${r.group}|${r.until ? 's' : 'p'}|${r.key}`
 
@@ -13,7 +13,7 @@ const fmtUntil = (u: string) =>
   new Date(u).toLocaleString([], { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })
 
 function When({ r, t }: { r: MuteRow; t: TFn }) {
-  if (!r.until) return <span className="muted">{t('бессрочно')}</span>
+  if (!r.until) return <span className="muted">{(r.group === 'alert' && muteAutoNote(r.key, t)) || t('бессрочно')}</span>
   return (
     <>
       <span>{t('ещё {d}', { d: muteLeft(r.until, t) })}</span>

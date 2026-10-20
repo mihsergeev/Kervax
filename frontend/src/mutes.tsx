@@ -149,6 +149,11 @@ export function swDecisionLabel(state: string, done: boolean, t: TFn): string {
   if (state === 'soon') return done ? t('отложено до конца поддержки') : t('отложить до конца поддержки')
   return t('обновить нельзя')
 }
+// Бессрочный мьют, который снимет сама панель: поломка диска - после замены диска и сборки массива
+// (app/disk_mute.py). Подпись вместо "бессрочно", иначе он выглядит забытым навсегда
+export function muteAutoNote(k: string, t: TFn): string | null {
+  return k === 'disk_health' ? t('снимется сам после замены диска и сборки массива') : null
+}
 export function muteKindLabel(k: string, t: TFn): string | null {
   if (k === 'noboot') return t('Не переживет перезагрузку')
   if (k === 'access_audit') return t('Доступы: заброшенные учетки и слабые ключи')
@@ -359,7 +364,7 @@ export function muteLeft(until: string, t: TFn): string {
 
 // Строка «что и насколько» — для подсказки
 export function muteText(i: MuteItem, t: TFn): string {
-  return `${i.label} — ${i.until ? t('ещё {d}', { d: muteLeft(i.until, t) }) : t('бессрочно')}`
+  return `${i.label} — ${i.until ? t('ещё {d}', { d: muteLeft(i.until, t) }) : (i.group === 'alert' && muteAutoNote(i.key, t)) || t('бессрочно')}`
 }
 
 // Короткая подпись для сводки. Типы алертов перечисляем поимённо (их единицы), а репо

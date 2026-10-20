@@ -46,6 +46,7 @@ export const ACT: Record<string, string> = {
   known_set: 'отметил известную проблему',
   known_drop: 'снял известную проблему',
   known_closed: 'известная проблема прошла',
+  mute_lifted: 'мьют снят сам',
   known_expired: 'истек срок известной проблемы',
   onboard_done: 'закрыл подключение сервера',
   agent_update: 'обновление агента',
