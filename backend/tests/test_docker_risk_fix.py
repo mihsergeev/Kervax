@@ -40,17 +40,24 @@ def test_ci_agents_of_one_project_get_one_block():
     assert _cmd(b, "ci_check").splitlines()[0] == "sudo docker exec ci-agent-1-1 docker images -q | wc -l"
     assert _cmd(b, "bak") == "cd /srv/ci\nsudo cp docker-compose.yml docker-compose.yml.bak-kervax-host"
     # sed только в блоке своего сервиса: от "  agent-1:" до первой строки privileged после него
+    # правка сама говорит, изменилось ли что-то в файле: sed без совпадения молчит
     assert _cmd(b, "priv_off").splitlines() == [
         "cd /srv/ci",
+        "H=$(sudo cat docker-compose.yml | md5sum)",
         "sudo sed -i '/^ *agent-1:/,/privileged:/ s/privileged: *true/privileged: false/' docker-compose.yml",
         "sudo sed -i '/^ *agent-2:/,/privileged:/ s/privileged: *true/privileged: false/' docker-compose.yml",
         "sudo sed -i '/^ *agent-3:/,/privileged:/ s/privileged: *true/privileged: false/' docker-compose.yml",
-        "diff docker-compose.yml.bak-kervax-host docker-compose.yml"]
+        "diff docker-compose.yml.bak-kervax-host docker-compose.yml",
+        '[ "$(sudo cat docker-compose.yml | md5sum)" != "$H" ] && echo "файл изменен" || echo "НЕ ИЗМЕНЕНО: нужной строки в блоке сервиса нет, поправьте руками"']
+    # после пересоздания - по каждому контейнеру, снят ли privileged на деле
+    priv = "sudo docker inspect -f '{{{{.HostConfig.Privileged}}}}' ci-agent-{0}-1 | grep -qx false"
     assert _cmd(b, "up").splitlines() == [
         "cd /srv/ci",
         "sudo docker compose config -q && sudo docker compose up -d agent-1 agent-2 agent-3",
         "sudo docker compose ps agent-1 agent-2 agent-3",
-        "sudo docker compose logs --tail 20 agent-1 agent-2 agent-3"]
+        "sudo docker compose logs --tail 20 agent-1 agent-2 agent-3"] + [
+        priv.format(i) + f' && echo "ci-agent-{i}-1: privileged снят" || echo "ci-agent-{i}-1: НЕ СНЯТ: контейнер все еще privileged"'
+        for i in (1, 2, 3)]
     undo = next(s for s in b["steps"] if s["id"] == "undo")
     assert undo["undo"] and undo["cmd"].splitlines()[1:] == [
         "sudo cp docker-compose.yml.bak-kervax-host docker-compose.yml",
@@ -72,10 +79,10 @@ def test_privileged_replaced_by_what_the_image_needs():
     vpn, tun = _blocks(rep)
     assert _ids(vpn) == ["bak", "priv_set", "up", "undo"]
     assert vpn["args"]["cap_add"] == "NET_ADMIN, SYS_MODULE" and "devices" not in vpn["args"]
-    assert _cmd(vpn, "priv_set").splitlines()[1] == (
+    assert _cmd(vpn, "priv_set").splitlines()[2] == (
         r"sudo sed -i '/^ *vpn:/,/privileged:/ s#^\( *\)privileged: *true#\1cap_add: [NET_ADMIN, SYS_MODULE]#' "
         "docker-compose.yml")
-    assert _cmd(tun, "priv_set").splitlines()[1] == (
+    assert _cmd(tun, "priv_set").splitlines()[2] == (
         r"sudo sed -i '/^ *tun:/,/privileged:/ s#^\( *\)privileged: *true#\1cap_add: [NET_ADMIN]\n\1devices: "
         r"[/dev/net/tun]#' docker-compose.yml")
 
@@ -84,7 +91,7 @@ def test_socket_goes_through_read_only_proxy():
     rep = _rep(_c("web-a", "shop/web:1", binds=["/var/run/docker.sock", "/srv/web"], compose=_cm("web", d="/srv/web")))
     [b] = _blocks(rep)
     assert _ids(b) == ["bak", "sock_rm", "sock_add", "up", "undo", "alt_sock"]
-    assert _cmd(b, "sock_rm").splitlines()[1] == (
+    assert _cmd(b, "sock_rm").splitlines()[2] == (
         r"sudo sed -i '/^ *web:/,/docker\.sock/ {/docker\.sock/d}' docker-compose.yml")
     add = _cmd(b, "sock_add")
     assert "      - -allowfrom=web" in add.splitlines() and "image: wollomatic/socket-proxy:1.13.1" in add
@@ -103,7 +110,7 @@ def test_run_dir_socket_caps_and_host_root():
     assert b["args"]["caps"] == "SYS_ADMIN, SYS_PTRACE" and b["args"]["paths"] == "/"
     assert _cmd(b, "bak").splitlines()[1:] == ["sudo cp stack.yml stack.yml.bak-kervax-host",
                                                "sudo cp stack.prod.yml stack.prod.yml.bak-kervax-host"]
-    assert _cmd(b, "sock_rm").splitlines()[1] == (
+    assert _cmd(b, "sock_rm").splitlines()[2] == (
         r"sudo sed -i '/^ *tool:/,/\/run:/ {/\/run:/d}' stack.yml stack.prod.yml")
     assert _cmd(b, "caps_edit").splitlines()[1] == "grep -nE 'SYS_ADMIN|SYS_PTRACE' stack.yml stack.prod.yml"
     assert _cmd(b, "host_edit").splitlines()[1] == "grep -nE -- '- *\"?(/):' stack.yml stack.prod.yml"

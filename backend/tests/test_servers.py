@@ -797,8 +797,9 @@ async def test_throttle_alerts_only_when_sustained_and_hot(tmp_path, monkeypatch
 
 async def test_oom_kill_one_shot_alert(tmp_path, monkeypatch):
     """OOM (кумулятивный oom_total) → одноразовый алерт с числом и жертвой; повторный
-    тик без роста счётчика не дублирует (high-water mark oom_seen); рост → снова."""
-    from datetime import datetime, timezone
+    тик без роста счётчика не дублирует (high-water mark oom_seen); рост в тот же час - одним
+    сообщением через час."""
+    from datetime import datetime, timedelta, timezone
 
     from sqlalchemy import select
 
@@ -837,12 +838,15 @@ async def test_oom_kill_one_shot_alert(tmp_path, monkeypatch):
     sent.clear()
     await collector.evaluate_servers(factory, settings, now)
     assert sent == []
-    # oom_total вырос (3→4) → снова алерт (дельта 1)
+    # oom_total вырос (3→4) в тот же час: повтор не шлется сразу, через час - одно сообщение
     async with factory() as s:
         (await s.scalar(select(Server))).oom_total = 4
         await s.commit()
     await collector.evaluate_servers(factory, settings, now)
-    assert len(sent) == 1 and "1" in sent[0]
+    assert sent == []
+    await collector.evaluate_servers(factory, settings, now + timedelta(minutes=61))
+    oom_msgs = [m for m in sent if "OOM" in m]  # сервер к этому времени еще и молчит - это отдельно
+    assert len(oom_msgs) == 1 and "повторялась: с прошлого сообщения еще 1 раз" in oom_msgs[0]
     await engine.dispose()
 
 

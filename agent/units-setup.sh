@@ -15,9 +15,15 @@
 # Since 0.4 the panel can also read the journal through the same spool: of one unit, of the
 # whole system or of the kernel, for a period, up to 1000 lines, at a minimum priority. Read
 # only: journalctl with fixed arguments, the unit name checked like for restart.
+#
+# Since 0.5 it also reads the OOM killer from the journal: what the kernel killed for memory
+# (whole server or a cgroup limit), who held the memory (the task table the kernel prints before
+# every kill), which units lost a process, and what systemd-oomd killed. The agent runs as an
+# unprivileged user and cannot read the kernel journal. Read by cursor, written to
+# /var/lib/kervax/report.d/oom.json (the last 7 days).
 set -euo pipefail
 
-KERVAX_SETUP_VERSION=0.4  # MAJOR.MINOR; compared component-wise
+KERVAX_SETUP_VERSION=0.5  # MAJOR.MINOR; compared component-wise
 KERVAX_SETUP_ALWAYS=1     # safe on any node: it only reads systemctl and the journal
 
 HELPER_DIR=/lib65/kervax
@@ -240,8 +246,196 @@ process_spool() {
   return 0
 }
 
+# -- OOM killer (0.5) --
+# Kernel lines and systemd's notes about them, by journal cursor. The kernel prints a block per
+# kill: "X invoked oom-killer", Mem-Info, the task table, "oom-kill:..." with the cgroup of the
+# victim and "Out of memory: Killed process ...". Each kill becomes one line of $OOM_DIR/kills.tsv,
+# the panel groups kills into episodes. "invoked" names the task that did not get a page, not the
+# one that ate the memory: who held it is the task table, summed by name and uid (rss_anon, the
+# shared memory of postgres would count once per process otherwise).
+OOM_DIR=/var/lib/kervax/oom
+OOM_OUT=/var/lib/kervax/report.d/oom.json
+OOM_KEEP=$((7 * 86400))
+OOM_MAX=60
+# "A process of this unit has been killed by the OOM killer" (systemd SD_MESSAGE_UNIT_OUT_OF_MEMORY)
+OOM_MSGID=fe6faa94e7774663a0da52717891d8ef
+
+OOM_AWK=$(cat <<'OOM_AWK_EOF'
+# input: journalctl -o short-unix; pg = page size in kB
+function san(s) { gsub(/[^ -~]/, "?", s); gsub(/["\\|;]/, " ", s); return s }
+function num(s) { return (s ~ /^-?[0-9]+$/) ? s : "" }
+function after(s, key,   v) {
+  if (!match(s, key "-?[0-9]+")) return ""
+  return substr(s, RSTART + length(key), RLENGTH - length(key))
+}
+function block() { tb = 0; mi = 0; tn = 0; split("", tk); split("", tp); split("", tc); split("", M); split("", KV)
+  swf = ""; swt = ""; ram = ""; lim = ""; cu = 0; ca = 0; cn = 0 }
+function addrow(name, uid, pages,   k) {
+  k = name SUBSEP uid
+  if (!(k in tp)) tk[++tn] = k
+  tp[k] += pages; tc[k]++
+}
+function top(   out, i, j, best, bk, used, k, parts) {
+  out = ""; split("", used)
+  for (j = 1; j <= 6; j++) {
+    best = 0; bk = ""
+    for (i = 1; i <= tn; i++) { k = tk[i]; if (!(k in used) && tp[k] > best) { best = tp[k]; bk = k } }
+    if (bk == "") break
+    used[bk] = 1; split(bk, parts, SUBSEP)
+    out = out (out == "" ? "" : ";") parts[1] "|" parts[2] "|" tc[bk] "|" sprintf("%.0f", best * pg)
+  }
+  return out
+}
+function pgkb(x) { return (x == "") ? "" : sprintf("%.0f", x * pg) }
+function emit(ts, pid, name, uid, anon, file, shm, adj, kind, cons, memcg, omemcg, line,   a, f) {
+  a = (("active_anon" in M) || ("inactive_anon" in M)) ? pgkb(M["active_anon"] + M["inactive_anon"]) : ""
+  f = (("active_file" in M) || ("inactive_file" in M)) ? pgkb(M["active_file"] + M["inactive_file"]) : ""
+  print "K\t" ts "\t" num(pid) "\t" san(name) "\t" num(uid) "\t" num(anon) "\t" num(file) "\t" num(shm) "\t" num(adj) \
+    "\t" kind "\t" san(cons) "\t" san(memcg) "\t" san(omemcg) "\t" san(inv) "\t" a "\t" f "\t" pgkb(M["shmem"]) \
+    "\t" num(swf) "\t" num(swt) "\t" pgkb(ram) "\t" num(lim) "\t" top() "\t" san(substr(line, 1, 220))
+}
+BEGIN { block(); inv = "" }
+/^-- cursor: / { print "C\t" substr($0, 12); next }
+{
+  if ($0 ~ /^[ \t]/) { msg = $0; sub(/^[ \t]+/, "", msg) }
+  else {
+    if ($1 !~ /^[0-9]+(\.[0-9]+)?$/ || NF < 3) next
+    ts = $1; id = $3; p = index($0, " " id " ")
+    msg = (p > 0) ? substr($0, p + length(id) + 2) : ""
+  }
+}
+id == "kernel:" && msg ~ / invoked oom-killer: / { block(); inv = substr(msg, 1, index(msg, " invoked oom-killer") - 1); next }
+id == "kernel:" && msg == "Mem-Info:" { mi = 1; next }
+id == "kernel:" && mi == 1 {
+  if (msg ~ /^Node /) { mi = 2; next }
+  n = split(msg, W, " ")
+  for (i = 1; i <= n; i++) if (W[i] ~ /^[a-z_]+:[0-9]+$/) { q = index(W[i], ":"); M[substr(W[i], 1, q - 1)] = substr(W[i], q + 1) }
+  next
+}
+id == "kernel:" && msg ~ /^Free swap *= *[0-9]+/ { swf = msg; sub(/^[^=]*= */, "", swf); sub(/[^0-9].*$/, "", swf); next }
+id == "kernel:" && msg ~ /^Total swap *= *[0-9]+/ { swt = msg; sub(/^[^=]*= */, "", swt); sub(/[^0-9].*$/, "", swt); next }
+id == "kernel:" && msg ~ /^[0-9]+ pages RAM$/ { ram = msg; sub(/ .*/, "", ram); next }
+id == "kernel:" && msg ~ /^memory: usage [0-9]+kB, limit [0-9]+kB/ { lim = after(msg, "limit "); next }
+id == "kernel:" && msg ~ /^Tasks state / { tb = 1; next }
+id == "kernel:" && tb && msg ~ /^\[ *pid *\]/ {
+  h = msg; sub(/^\[ *pid *\] */, "", h); n = split(h, H, " "); cu = 0; ca = 0; cr = 0; cn = 0
+  for (i = 1; i <= n; i++) { if (H[i] == "uid") cu = i; if (H[i] == "rss_anon") ca = i; if (H[i] == "rss") cr = i; if (H[i] == "name") cn = i }
+  if (!ca) ca = cr
+  next
+}
+id == "kernel:" && tb && msg ~ /^\[ *[0-9]+\] / {
+  r = msg; sub(/^\[ *[0-9]+\] +/, "", r); n = split(r, F, " ")
+  if (cu && ca && cn && n >= cn && F[ca] ~ /^[0-9]+$/) {
+    nm = F[cn]; for (i = cn + 1; i <= n; i++) nm = nm " " F[i]
+    addrow(san(nm), F[cu], F[ca] + 0)
+  }
+  next
+}
+id == "kernel:" && msg ~ /^oom-kill:/ {
+  tb = 0; split("", KV); n = split(substr(msg, 10), P, ",")
+  for (i = 1; i <= n; i++) { q = index(P[i], "="); if (q) KV[substr(P[i], 1, q - 1)] = substr(P[i], q + 1); else KV[P[i]] = 1 }
+  next
+}
+id == "kernel:" && match(msg, /Killed process [0-9]+ \(/) {
+  pre = substr(msg, 1, RSTART - 1); t = substr(msg, RSTART + 15)
+  pid = t; sub(/ .*/, "", pid); t = substr(t, length(pid) + 3)
+  e = index(t, ") total-vm:")
+  if (!e) { e = length(t); while (e > 0 && substr(t, e, 1) != ")") e-- }
+  nm = (e > 1) ? substr(t, 1, e - 1) : ""
+  kind = (pre ~ /cgroup/ || KV["constraint"] == "CONSTRAINT_MEMCG") ? "memcg" : "global"
+  mine = (KV["pid"] == pid)
+  emit(ts, pid, nm, after(msg, "UID:"), after(msg, "anon-rss:"), after(msg, "file-rss:"), after(msg, "shmem-rss:"),
+       after(msg, "oom_score_adj:"), kind, mine ? KV["constraint"] : "", mine ? KV["task_memcg"] : "",
+       mine ? KV["oom_memcg"] : "", msg)
+  block(); inv = ""
+  next
+}
+id ~ /^systemd-oomd(\[[0-9]+\])?:$/ && msg ~ /^Killed \// {
+  cg = substr(msg, 8); sub(/ .*/, "", cg); inv = ""; block()
+  emit(ts, "", "", "", "", "", "", "", "oomd", (msg ~ /swap/) ? "swap" : "pressure", cg, "", msg)
+  next
+}
+id ~ /^systemd(\[[0-9]+\])?:$/ && (msg ~ /: A process of this unit has been killed by the OOM killer/ || msg ~ /: Failed with result 'oom-kill'/) {
+  u = substr(msg, 1, index(msg, ": ") - 1)
+  if (u ~ /\.(service|scope)$/) print "U\t" ts "\t" san(u) "\t" ((msg ~ /Failed with/) ? "failed" : "oom")
+  next
+}
+OOM_AWK_EOF
+)
+
+# oom.json for the panel: kills and unit notes of the last 7 days, uid with the user name
+OOM_JSON=$(cat <<'OOM_JSON_EOF'
+function n(x) { return (x ~ /^-?[0-9]+(\.[0-9]+)?$/) ? x : "null" }
+function q(x) { return "\"" x "\"" }
+function usr(u) { return (u in un) ? ",\"user\":" q(un[u]) : "" }
+FNR == NR { if (split($0, pw, ":") >= 3 && pw[1] !~ /["\\]/) un[pw[3]] = pw[1]; next }
+$1 == "K" && $2 + 0 >= cut { k[++nk] = $0; next }
+$1 == "U" && $2 + 0 >= cut { u[++nu] = $0; next }
+END {
+  printf "{\"v\":1,\"ts\":%s,\"from\":%s,\"kills\":[", now, n(from)
+  for (i = (nk > max ? nk - max + 1 : 1); i <= nk; i++) {
+    split(k[i], f, "\t")
+    tops = ""; nt = split(f[22], tt, ";")
+    for (j = 1; j <= nt; j++) {
+      if (split(tt[j], e, "|") != 4) continue
+      tops = tops (tops == "" ? "" : ",") "{\"name\":" q(e[1]) ",\"uid\":" n(e[2]) usr(e[2]) ",\"n\":" n(e[3]) ",\"anon\":" n(e[4]) "}"
+    }
+    printf "%s{\"ts\":%s,\"pid\":%s,\"name\":%s,\"uid\":%s%s,\"anon\":%s,\"file\":%s,\"shmem\":%s,\"adj\":%s,\"kind\":%s,\"constraint\":%s,\"memcg\":%s,\"oom_memcg\":%s,\"by\":%s,\"mem\":{\"anon\":%s,\"file\":%s,\"shmem\":%s,\"swap_free\":%s,\"swap_total\":%s,\"ram\":%s,\"limit\":%s},\"top\":[%s],\"line\":%s}", \
+      (i > (nk > max ? nk - max + 1 : 1) ? "," : ""), n(f[2]), n(f[3]), q(f[4]), n(f[5]), usr(f[5]), n(f[6]), n(f[7]), n(f[8]), n(f[9]), \
+      q(f[10]), q(f[11]), q(f[12]), q(f[13]), q(f[14]), n(f[15]), n(f[16]), n(f[17]), n(f[18]), n(f[19]), n(f[20]), n(f[21]), tops, q(f[23])
+  }
+  printf "],\"units\":["
+  for (i = (nu > 100 ? nu - 99 : 1); i <= nu; i++) {
+    split(u[i], f, "\t")
+    printf "%s{\"ts\":%s,\"unit\":%s,\"what\":%s}", (i > (nu > 100 ? nu - 99 : 1) ? "," : ""), n(f[2]), q(f[3]), q(f[4])
+  }
+  printf "]}\n"
+}
+OOM_JSON_EOF
+)
+
+oom_scan() {
+  command -v journalctl >/dev/null 2>&1 || return 0
+  local now cur from raw rc pg
+  now=$(date +%s)
+  install -d -m 0700 "$OOM_DIR"
+  [ -f "$OOM_DIR/kills.tsv" ] || : > "$OOM_DIR/kills.tsv"
+  cur=$(cat "$OOM_DIR/cursor" 2>/dev/null || true)
+  from=$(cat "$OOM_DIR/from" 2>/dev/null || true)
+  pg=$(( $(getconf PAGESIZE 2>/dev/null || echo 4096) / 1024 ))
+  [ "$pg" -ge 1 ] || pg=4
+  raw=$(mktemp)
+  set -- _TRANSPORT=kernel + MESSAGE_ID=$OOM_MSGID + UNIT_RESULT=oom-kill + SYSLOG_IDENTIFIER=systemd-oomd
+  if [ -n "$cur" ]; then
+    timeout 60 journalctl "$@" --after-cursor="$cur" -o short-unix -q --no-pager --show-cursor > "$raw" 2>/dev/null; rc=$?
+  else
+    # the first read: a week back. A kernel log too big to read in a minute is skipped: from now on
+    timeout 60 journalctl "$@" --since "-7 days" -o short-unix -q --no-pager --show-cursor > "$raw" 2>/dev/null; rc=$?
+    from=$((now - OOM_KEEP))
+    if [ "$rc" -eq 124 ]; then
+      timeout 20 journalctl "$@" -n 1 -o short-unix -q --no-pager --show-cursor > "$raw" 2>/dev/null
+      rc=0; from=$now; : > "$OOM_DIR/kills.tsv"
+    fi
+    echo "$from" > "$OOM_DIR/from"
+  fi
+  if [ "$rc" -ne 124 ]; then
+    awk -v pg="$pg" "$OOM_AWK" "$raw" > "$raw.p" 2>/dev/null || : > "$raw.p"
+    grep -v '^C	' "$raw.p" >> "$OOM_DIR/kills.tsv"
+    cur=$(sed -n 's/^C	//p' "$raw.p" | tail -1)
+    [ -n "$cur" ] && printf '%s\n' "$cur" > "$OOM_DIR/cursor"
+    # a week, at most 400 lines
+    awk -F'\t' -v cut=$((now - OOM_KEEP - 86400)) '$2 + 0 >= cut' "$OOM_DIR/kills.tsv" | tail -400 > "$raw.k"
+    mv -f "$raw.k" "$OOM_DIR/kills.tsv"
+  fi
+  rm -f "$raw" "$raw.p" "$raw.k"
+  awk -F'\t' -v now="$now" -v from="${from:-$now}" -v cut=$((now - OOM_KEEP)) -v max="$OOM_MAX" "$OOM_JSON" \
+    /etc/passwd "$OOM_DIR/kills.tsv" > "$OOM_OUT.tmp.$$" 2>/dev/null && mv -f "$OOM_OUT.tmp.$$" "$OOM_OUT"
+  rm -f "$OOM_OUT.tmp.$$"
+  chmod 0644 "$OOM_OUT" 2>/dev/null || true
+}
+
 case "${1:-scan}" in
-  scan) scan ;;
+  scan) scan; oom_scan ;;
   process-spool) process_spool ;;
   *) echo "usage: $0 [scan|process-spool]" >&2; exit 2 ;;
 esac
@@ -257,7 +451,7 @@ Description=Kervax: failed systemd units (read only)
 Type=oneshot
 ExecStart=$HELPER scan
 Nice=10
-TimeoutStartSec=2min
+TimeoutStartSec=3min
 EOF
 cat > /etc/systemd/system/kervax-units.timer <<'EOF'
 [Unit]

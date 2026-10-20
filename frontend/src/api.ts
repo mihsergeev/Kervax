@@ -2044,6 +2044,8 @@ export type Server = {
   restarts_day?: Record<string, number> | null
   // что течет памятью: дно (минимум за сутки) растет 4 суток подряд; series - эти минимумы, байты
   mem_leaks?: MemLeak[] | null
+  // OOM (backend app/oom.py): эпизодов за 7 дней, последний, юниты, убитые OOM
+  oom?: OomSummary | null
   // SSH (helper changes-setup 0.3): как пускает соединение из интернета; open - порт открыт снаружи
   // по внешней проверке (null - не знаем)
   ssh?: {
@@ -2715,6 +2717,9 @@ export type SoftwareOut = {
   source: string | null
   agent_ok: boolean
   pkgs: boolean
+  // последний отчет агента и как часто они идут, секунды
+  report_at?: string | null
+  every?: number
 }
 export const getSoftware = (id: number) => api<SoftwareOut>(`/api/servers/${id}/software`)
 // кто качает трафик и кто пишет на диск по часам (app/usage.py): у net в паре [принято, отдано],
@@ -2730,6 +2735,48 @@ export type UsageOut = { metric: 'net' | 'disk'; days: string[]; names: UsageNam
 export const getUsage = (id: number, metric: 'net' | 'disk') =>
   api<UsageOut>(`/api/servers/${id}/usage?metric=${metric}&tz=${new Date().getTimezoneOffset()}`)
 export type OomEvent = { ts: string; victim: string; count: number }
+
+// Эпизоды OOM из журнала ядра (helper units-setup 0.5): убийства с промежутком до минуты
+export type OomUnitLink = { ep: string | null; line: string; quiet: boolean }
+export type OomSummary = {
+  n7: number
+  last_at: number | null
+  last_text: string
+  units: Record<string, OomUnitLink>
+}
+export type OomKill = {
+  ts: number
+  pid: number | null
+  name: string
+  uid: number | null
+  user: string
+  anon: number | null // кБ
+  adj: number | null
+  kind: 'global' | 'memcg' | 'oomd'
+  owner: string
+  owner_kind: string
+  memcg: string
+  line: string
+}
+export type OomTop = { name: string; uid: number | null; user: string; n: number; anon: number }
+export type OomEpisode = {
+  id: string
+  start: number
+  end: number
+  kind: 'global' | 'memcg' | 'oomd'
+  level: number
+  kills: OomKill[]
+  top: OomTop[]
+  // кБ; ram - вся память сервера, limit - лимит cgroup
+  mem: { anon?: number | null; file?: number | null; shmem?: number | null; swap_free?: number | null;
+    swap_total?: number | null; ram?: number | null; limit?: number | null }
+  by: string[]
+  units: Record<string, string[]>
+  text: string
+}
+export function serverOom(id: number): Promise<{ episodes: OomEpisode[]; helper: boolean }> {
+  return api(`/api/servers/${id}/oom`)
+}
 export function serverOomEvents(id: number, limit = 50): Promise<OomEvent[]> {
   return api<OomEvent[]>(`/api/servers/${id}/oom-events?limit=${limit}`)
 }

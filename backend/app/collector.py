@@ -42,6 +42,7 @@ from app import web_upstream
 from app import listen_watch
 from app import podnames
 from app import mem_trend
+from app import oom as oom_mod
 from app import restarts as srv_restarts
 from app import ssh_audit
 from app import known as known_mod
@@ -3588,13 +3589,22 @@ def server_problems(s: Server, now: datetime, pod_names: dict[str, str] | None =
     if ub is not None:
         ref = float(rep.get("clock_unix") or 0) or now.timestamp()
         muted = units_muted(s, now)
+        oom_eps = oom_mod.episodes(oom_mod.records(oom_mod.block(rep, now.timestamp())))
         for u in ub.get("units") or []:
             if not isinstance(u, dict) or not u.get("unit") or u["unit"] in muted or benign_unit(str(u["unit"])):
                 continue
             if ref - float(u.get("since") or 0) < _UNIT_MIN_AGE:
                 continue
+            # убит OOM: про это пункт OOM, менеджер сессии пользователя не служба вовсе
+            oom_lk = oom_mod.unit_link(u, oom_eps)
+            if oom_lk is not None and oom_mod.quiet_unit(str(u["unit"])):
+                continue
             u_since = datetime.fromtimestamp(float(u["since"]), timezone.utc).isoformat() if u.get("since") else None
-            add("units", unit_level(u), f"{u['unit']}: {unit_why(u)}", "units", f"unit:{u['unit']}", u_since)
+            why = "убит OOM killer" if oom_lk is not None else unit_why(u)
+            add("units", unit_level(u), f"{u['unit']}: {why}", "units", f"unit:{u['unit']}", u_since)
+    oom_p = oom_mod.problem(s, now)
+    if oom_p is not None:
+        add("oom", oom_p[0], oom_p[1], "oom", "oom")
     # Юниты в цикле перезапусков: приросты счетчика ведет цикл алертов (alert_state unit_loops)
     rs = units_restarting(rep)
     loops = state.get("unit_loops") if isinstance(state.get("unit_loops"), dict) else {}
@@ -5387,10 +5397,12 @@ def _server_conditions(s: Server, now: datetime,
         ref = float(rep.get("clock_unix") or 0) or now.timestamp()
         muted_u = units_muted(s, now)
         covered = backup_units(s, rep)
+        # убитые OOM - в алерте OOM (app/oom.py), отдельного сообщения по юниту нет
+        oom_eps = oom_mod.episodes(oom_mod.records(oom_mod.block(rep, now.timestamp())))
         bad = [u for u in ub.get("units") or []
                if isinstance(u, dict) and u.get("unit") and u["unit"] not in muted_u
                and not own_helper_unit(str(u["unit"])) and not benign_unit(str(u["unit"])) and u["unit"] not in covered
-               and ref - float(u.get("since") or 0) >= _UNIT_MIN_AGE]
+               and ref - float(u.get("since") or 0) >= _UNIT_MIN_AGE and oom_mod.unit_link(u, oom_eps) is None]
         hold = units_hold(s, bad, now, muted_u)
         u_lvl = max((h[1] for h in hold.values()), default=0)
         out["units"] = (u_lvl, {
@@ -5846,6 +5858,8 @@ async def evaluate_servers(
                 ico = _DISK_ICON.get(int(ctx.get("level") or 0), "") + "📈"
             if key == "units":
                 ico = _DISK_ICON.get(int(ctx.get("level") or 0), "") + "⚙️"
+            if key == "oom":
+                ico = _DISK_ICON.get(int(ctx.get("level") or 0), "") + "🧠"
             if key == "port_new":
                 ico = "🔴🚪"  # порт открыт всем: открытый только белому списку сюда не доходит
             if key == "kube_expiry" and ctx.get("expired"):
@@ -6328,18 +6342,18 @@ async def evaluate_servers(
                     apply(s.id, "kube_jobs_seen", keys)
             elif sorted(seen) != keys:
                 apply(s.id, "kube_jobs_seen", keys)  # старые ушли из списка
-        # OOM-kill — алерт по КУМУЛЯТИВНОМУ счётчику (oom_total копится в ingest'е).
-        # High-water mark oom_seen в alert_state: любой рост → алерт (не теряем килл,
-        # даже если поллинг не совпал с отчётом). Событие, не состояние → без recovery.
-        oom_total = s.oom_total or 0
-        oom_seen = int(st.get("oom_seen", 0))
+        # OOM: эпизод из журнала ядра (helper units-setup 0.5) - кого убили, кто съел память,
+        # какие юниты упали; без helper'а - по росту счетчика ядра (oom_total копится в
+        # ingest'е). Событие, отбоя нет; повторы за час - одним сообщением (app/oom.py)
         om = rules.get("oom")
-        if (oom_total > oom_seen and "oom" not in mutes and om and om["enabled"]
-                and _rule_scope_ok(om, s)):
-            victim = (s.oom_victim or "").strip()
-            ctx = {"value": oom_total - oom_seen, "victim": f" · {victim}" if victim else ""}
-            fires.append(srv_fire(s, "oom", om, ctx))
-            fire_apply.append((s.id, "oom_seen", oom_total))
+        o_fire, o_done, o_now = oom_mod.alert_step(s, st, s.last_report or {}, now, tg_buttons.zone(cfg.get("tz") or "Europe/Moscow"))
+        for k, v in o_now.items():
+            apply(s.id, k, v)
+        # заглушено - состояние стоит: после снуза несказанное придет
+        if o_fire is not None and "oom" not in mutes and om and om["enabled"] and _rule_scope_ok(om, s):
+            fires.append(srv_fire(s, "oom", om, {"detail": o_fire[1], "level": o_fire[0], "value": 1, "victim": ""}))
+            for k, v in o_done.items():
+                fire_apply.append((s.id, k, v))
 
         # Docker-контейнеры: crash-loop (RestartCount растёт) и «упал» (не running при
         # наличии restart-policy, держится ≥ sustain). Многоинстансно — своё состояние
@@ -7079,6 +7093,7 @@ async def _prune(
             .values(lines=None)
         )
         await session.execute(delete(OomEvent).where(OomEvent.ts < srv_cutoff))
+        await oom_mod.prune(session, now)
         await session.execute(delete(LinkSample).where(LinkSample.ts < srv_cutoff))
         await session.execute(delete(ServerTraffic).where(ServerTraffic.day < (now - traffic_mod.KEEP).date()))
         await session.execute(delete(ServerUsage).where(

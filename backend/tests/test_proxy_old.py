@@ -74,9 +74,17 @@ def test_ready_commands_for_this_node():
         "cd /app/caddy-proxy\n"
         "cp docker-compose.yml docker-compose.yml.bak-kervax-image\n"
         "sed -i '5s|lucaslorentz/caddy-docker-proxy:alpine|lucaslorentz/caddy-docker-proxy:2.13.1-alpine|' docker-compose.yml\n"
+        # строка после правки и вывод, вышло ли: sed, не нашедший тег в этой строке, молчит
+        "sed -n 5p docker-compose.yml\n"
+        "sed -n 5p docker-compose.yml | grep -qF -- lucaslorentz/caddy-docker-proxy:2.13.1-alpine"
+        ' && echo "образ заменен" || echo "НЕ ЗАМЕНЕНО: строка image другая, поправьте ее руками"\n'
         "docker compose -p caddy-proxy -f docker-compose.yml pull caddy\n"
         "docker compose -p caddy-proxy -f docker-compose.yml up -d --no-deps caddy")
-    assert st["check"]["cmd"].endswith(loop + " | diff /tmp/kervax-codes-caddy-proxy-caddy-1.txt - && echo OK")
+    assert st["check"]["cmd"].split("\n")[-2] == loop + " | diff /tmp/kervax-codes-caddy-proxy-caddy-1.txt - && echo OK"
+    # и последней строкой - на новом ли образе прокси, а не только Up
+    assert st["check"]["cmd"].split("\n")[-1] == (
+        "docker inspect -f '{{.Config.Image}}' caddy-proxy-caddy-1 | grep -qxF -- lucaslorentz/caddy-docker-proxy:2.13.1-alpine"
+        ' && echo "контейнер на новом образе" || echo "НЕ ОБНОВЛЕН: контейнер на прежнем образе, смотрите вывод выше"')
     assert "docker compose -p caddy-proxy -f docker-compose.yml ps caddy" in st["check"]["cmd"]
     assert st["rollback"]["cmd"] == (
         "cd /app/caddy-proxy\ncp docker-compose.yml.bak-kervax-image docker-compose.yml\n"

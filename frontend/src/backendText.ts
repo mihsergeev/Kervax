@@ -55,6 +55,18 @@ const PHRASES: Rule[] = [
   [/автообновления не запускались/g, 'automatic updates have not run'],
   [/список пакетов не обновлялся (.+?): о новых обновлениях нода не знает/g,
     'package lists not refreshed for $1: the node does not know about new updates'],
+  // OOM (app/oom.py): пункт "Что сломано" и юнит, убитый OOM
+  [/нехватка памяти \(OOM\): (\d+) раз за сутки, последний (\d+) мин назад, убиты /g, 'out of memory (OOM): $1 times in a day, the last $2 min ago, killed '],
+  [/нехватка памяти \(OOM\): (\d+) раз за сутки, последний (\d+) ч назад, убиты /g, 'out of memory (OOM): $1 times in a day, the last $2 h ago, killed '],
+  [/нехватка памяти \(OOM\): была (\d+) мин назад, убиты /g, 'out of memory (OOM) $1 min ago, killed '],
+  [/нехватка памяти \(OOM\): была (\d+) ч назад, убиты /g, 'out of memory (OOM) $1 h ago, killed '],
+  [/: убит OOM killer/g, ': killed by the OOM killer'],
+  [/\(сессия ([^)]+)\)/g, '(session $1)'],
+  [/\(контейнер ([^)]+)\)/g, '(container $1)'],
+  [/\(под ([^)]+)\)/g, '(pod $1)'],
+  [/(\d)гб(?![а-яё])/g, '$1 GB'],
+  [/(\d)мб(?![а-яё])/g, '$1 MB'],
+  [/(\d)кб(?![а-яё])/g, '$1 KB'],
   // давление на ресурсы и зависшие процессы (collector.pressure_problems)
   [/не хватает памяти: все процессы разом стоят ([\d.]+)% времени/g, 'out of memory: all processes stalled $1% of the time'],
   [/не хватает памяти: процессы ждут память ([\d.]+)% времени/g, 'out of memory: processes wait for memory $1% of the time'],

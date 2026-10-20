@@ -254,10 +254,12 @@ def sock_snippet(svcs: list[str]) -> str:
     ])
 
 
-def _compose_steps(fl: list[str], c0: dict, image: str, svcs: list[str], cm: compose_cmd.Cmd) -> list[dict]:
-    """Копия compose, правка в блоке каждого сервиса, пересоздать, откат."""
+def _compose_steps(fl: list[str], c0: dict, image: str, names: list[str], svcs: list[str], cm: compose_cmd.Cmd) -> list[dict]:
+    """Копия compose, правка в блоке каждого сервиса, пересоздать, откат. Правка и перезапуск сами
+    говорят, вышло ли: sed, не нашедший строку, молчит, а up -d тогда пересоздает прежнее."""
     q = shlex.quote
     files = " ".join(cm.files)
+    hand = "НЕ ИЗМЕНЕНО: нужной строки в блоке сервиса нет, поправьте руками"
     steps: list[dict] = [{"id": "bak", "cmd": "\n".join([cm.cd] + cm.backup(BAK))}]
     if PRIV in fl:
         cap_add, devices = needs(image)
@@ -267,12 +269,13 @@ def _compose_steps(fl: list[str], c0: dict, image: str, svcs: list[str], cm: com
             sid, expr = "priv_set", r"s#^\( *\)privileged: *true#\1" + rep + "#"
         else:
             sid, expr = "priv_off", "s/privileged: *true/privileged: false/"
-        steps.append({"id": sid, "cmd": "\n".join([cm.cd] + [cm.sed_in(s, "privileged:", expr) for s in svcs] + cm.diff(BAK))})
+        steps.append({"id": sid, "cmd": "\n".join([cm.cd] + cm.changed(
+            [cm.sed_in(s, "privileged:", expr) for s in svcs] + cm.diff(BAK), hand))})
+    sock = _sock_bind(c0) if SOCK in fl else ""
     if SOCK in fl:
-        sock = _sock_bind(c0)
         pat = _re(sock.rsplit("/", 1)[-1] if sock.endswith(_SOCK_FILES) else sock + ":")
-        steps.append({"id": "sock_rm", "cmd": "\n".join(
-            [cm.cd] + [cm.sed_in(s, pat, "{/%s/d}" % pat) for s in svcs] + cm.diff(BAK))})
+        steps.append({"id": "sock_rm", "cmd": "\n".join([cm.cd] + cm.changed(
+            [cm.sed_in(s, pat, "{/%s/d}" % pat) for s in svcs] + cm.diff(BAK), hand))})
         steps.append({"id": "sock_add", "cmd": sock_snippet(svcs)})
     if CAPS in fl:
         caps = [str(x) for x in c0.get("caps") or []]
@@ -283,8 +286,18 @@ def _compose_steps(fl: list[str], c0: dict, image: str, svcs: list[str], cm: com
         steps.append({"id": "host_edit", "cmd": "\n".join([cm.cd, f"grep -nE -- {q(pat)} {files}"])})
     ups = " ".join(q(s) for s in (["docker-api"] if SOCK in fl else []) + svcs)
     only = " ".join(q(s) for s in svcs)
+    # не просто Up: у пересозданного контейнера ключа больше нет (по docker inspect)
+    after = []
+    for n in names:
+        if PRIV in fl:
+            after.append(compose_cmd.verdict(f"sudo docker inspect -f '{{{{.HostConfig.Privileged}}}}' {q(n)} | grep -qx false",
+                                             f"{n}: privileged снят", f"{n}: НЕ СНЯТ: контейнер все еще privileged"))
+        if sock:
+            after.append(compose_cmd.verdict(
+                f"! sudo docker inspect -f '{{{{range .Mounts}}}}{{{{println .Source}}}}{{{{end}}}}' {q(n)} | grep -qxF -- {q(sock)}",
+                f"{n}: docker-сокета у контейнера нет", f"{n}: НЕ УБРАН: docker-сокет все еще у контейнера"))
     steps.append({"id": "up", "cmd": "\n".join([
-        cm.cd, f"{cm.dc} config -q && {cm.dc} up -d {ups}", f"{cm.dc} ps {ups}", f"{cm.dc} logs --tail 20 {only}"])})
+        cm.cd, f"{cm.dc} config -q && {cm.dc} up -d {ups}", f"{cm.dc} ps {ups}", f"{cm.dc} logs --tail 20 {only}"] + after)})
     orphans = " --remove-orphans" if SOCK in fl else ""
     steps.append({"id": "undo", "undo": True, "cmd": "\n".join([cm.cd] + cm.restore(BAK) + [f"{cm.dc} up -d{orphans} {only}"])})
     return steps
@@ -318,7 +331,7 @@ def _block(items: list[dict], cs: dict[str, dict], w: dict | None) -> dict:
     else:
         svcs = [str(cs[n]["compose"]["service"]) for n in names]
         args.update({"file": ", ".join(w["files"]), "dir": w["dir"], "svc": ", ".join(svcs)})
-        steps += _compose_steps(fl, c0, image, svcs, compose_cmd.Cmd(w))
+        steps += _compose_steps(fl, c0, image, names, svcs, compose_cmd.Cmd(w))
     if ci:
         steps.append({"id": "alt_ci", "alt": True})
     elif SOCK in fl:

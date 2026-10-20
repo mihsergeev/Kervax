@@ -45,6 +45,7 @@ from app import traffic as traffic_mod
 from app import usage as usage_mod
 from app import audit, backup_growth, bsrv_cleanup, custom_backups, docker_exposure, geoip, kube_coverage, manual_probe, open_ports, os_support
 from app import dump_reason
+from app import oom as oom_mod
 from app import software as software_mod
 from app.collector import (
     _backup_problem_repos, alert_since, backup_cadence, backup_rotation_items, backup_unmonitored,
@@ -256,6 +257,7 @@ def _out(
     o.backup_verify = backup_verify.view(server.last_report or {}, now)
     o.restarts_day = srv_restarts.view(server, now) or None
     o.mem_leaks = mem_trend.problems(server, now) or None
+    o.oom = oom_mod.view(server, now)
     o.ssh = ssh_audit.view(server, now)
     o.ssh_advice = ssh_audit.advice(server, now) or None
     o.noboot = reboot_survive.view(server, now)
@@ -1369,8 +1371,11 @@ async def server_software(server_id: int, user: CurrentUser, session: SessionDep
         if g["state"] != "ok":
             g["fix"] = software_mod.fix(g, s.last_report or {}, now)
     tbl = software_mod.table()
+    # когда был отчет и как часто они идут: после шагов "как исправить" видно, свежие ли это данные
     return inv | {"built": tbl.get("built"), "source": tbl.get("source"),
-                  "agent_ok": _ver_key(s.agent_version) >= (2, 35), "pkgs": s.sw_host is not None}
+                  "agent_ok": _ver_key(s.agent_version) >= (2, 35), "pkgs": s.sw_host is not None,
+                  "report_at": _aware_dt(s.last_seen).isoformat() if s.last_seen else None,
+                  "every": get_settings().server_report_interval}
 
 
 @router.get("/{server_id}/vulns")
@@ -1790,6 +1795,22 @@ async def server_web_error_lines(
         if r.lines and web_label_key(r.label or r.log) == key:
             out.extend(x for x in r.lines if isinstance(x, str))
     return out[-5000:]
+
+
+@router.get("/{server_id}/oom")
+async def server_oom(server_id: int, user: CurrentUser, session: SessionDep) -> dict:
+    """Эпизоды OOM за 30 дней (новые первыми): кого убили, кто занимал память, Mem-Info, какие
+    юниты задело. Из записанного в базу и свежего блока helper'а (если отчет еще не записан)."""
+    server = await _get_or_404(server_id, session, user)
+    recs = await oom_mod.load(session, server_id)
+    rep = server.last_report or {}
+    have = {oom_mod.rec_key(r) for r in recs}
+    recs += [r for r in oom_mod.records(oom_mod.block(rep)) if oom_mod.rec_key(r) not in have]
+    eps = oom_mod.episodes(recs)
+    conts = oom_mod.containers_of(rep)
+    failed = oom_mod.units_failed_now(rep)
+    return {"episodes": [oom_mod.episode_view(e, conts, failed) for e in reversed(eps)],
+            "helper": oom_mod.block(rep) is not None}
 
 
 @router.get("/{server_id}/oom-events", response_model=list[OomEventOut])
@@ -2934,6 +2955,7 @@ async def agent_report(
     ]
     disk_pct = max((d["pct"] for d in disks_pct), default=None)
     tot = body.mem_total or 0
+    oom_delta, oom_pend = oom_mod.counter_step(server.last_report or {}, body)
     # В историю пишем не каждый отчёт: агент шлёт их часто (нужно для «онлайн» и
     # порогов), а графику достаточно точки раз в минуту. Оперативные значения
     # живут в last_report и обновляются каждым отчётом — эта экономия видна
@@ -2970,7 +2992,7 @@ async def agent_report(
                 cpu_freq=round(body.cpu_freq) if body.cpu_freq else None,
                 cpu_temp=round(body.cpu_temp, 1) if body.cpu_temp is not None else None,
                 cpu_throttle=body.cpu_throttle,
-                oom_kill=body.oom_kill,
+                oom_kill=float(oom_pend) if body.oom_kill is not None or body.oom_total is not None else None,
                 mem_cache=round(body.mem_cached / tot * 100, 1) if tot else None,
                 mem_free=round(body.mem_free / tot * 100, 1) if tot else None,
                 swap_in=round(body.swap_in),
@@ -3018,7 +3040,7 @@ async def agent_report(
         boot = {"at": now.isoformat(), "why": os_support.reboot_why(prev_rep)}
     # OOM-киллы копим КУМУЛЯТИВНО тут (в ingest'е видим каждый отчёт), а не в
     # collector'е по last_report — дельта живёт лишь один тик и терялась при поллинге.
-    oom_delta = round(body.oom_kill or 0)
+    # Сколько их, считает oom_mod.counter_step по счетчику ядра (агент 2.42)
     if oom_delta > 0:
         server.oom_total = (server.oom_total or 0) + oom_delta
         victim = (getattr(body, "oom_victim", "") or "")[:200]
@@ -3028,6 +3050,9 @@ async def agent_report(
         session.add(OomEvent(server_id=server.id, ts=now, victim=victim, count=oom_delta))
     await _store_web_errors(session, server, body, now)
     report_dict = body.model_dump()
+    # убийства, которые еще не попали в точку графика (точка пишется раз в минуту)
+    report_dict["oom_pend"] = 0 if write_metric else oom_pend
+    await oom_mod.store(session, server, body.extras, now)
     if boot:
         report_dict["boot"] = boot
     # журнал установок - разовый, в хронологию; в last_report ему жить незачем

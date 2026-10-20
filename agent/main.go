@@ -44,7 +44,7 @@ import (
 	"time"
 )
 
-const version = "2.41"
+const version = "2.42"
 
 // Публичный ключ для проверки подписи релизов агента (Ed25519, base64).
 // ПУСТО по умолчанию → самообновление ВЫКЛЮЧЕНО (агент никогда не заменяет себя).
@@ -168,6 +168,9 @@ type report struct {
 	CPUThrottle *float64  `json:"cpu_throttle"` // тепловых троттлингов за интервал
 	OOMKill     *float64  `json:"oom_kill"`     // OOM-киллов за интервал (нехватка памяти)
 	OOMVictim   string    `json:"oom_victim"`   // имя последнего OOM-убитого процесса (kmsg)
+	// 2.42: сам счетчик ядра. Дельта за интервал терялась: на OOM цикл агента висит, вотчдог
+	// его перезапускает, и убийство попадает между двумя процессами. Рост считает панель
+	OOMTotal *uint64 `json:"oom_total,omitempty"`
 	// память, байты (панель считает %): used=total-avail, cache=buffers+cached, free
 	MemCached uint64 `json:"mem_cached"`
 	MemFree   uint64 `json:"mem_free"`
@@ -3670,6 +3673,11 @@ func collect(prev sample) (report, sample) {
 	// OOM-киллы — дельта накопительного счётчика за интервал (счётчик сбрасывается
 	// при ребуте → берём дельту только если не «уехал» вниз); nil если счётчика нет
 	var oomKill *float64
+	var oomTotal *uint64
+	if cur.oomOK {
+		v := cur.oom
+		oomTotal = &v
+	}
 	oomVictim := ""
 	if cur.oomOK && prev.oomOK {
 		d := 0.0
@@ -3699,7 +3707,7 @@ func collect(prev sample) (report, sample) {
 		CPUCores: runtime.NumCPU(),
 		CPUUser:  cUser, CPUSystem: cSys, CPUIowait: cIo, CPUIrq: cIrq,
 		CPUCoresPct: corePct, CPUFreqMHz: freq, CPUTemp: temp, CPUThrottle: throttle,
-		OOMKill: oomKill, OOMVictim: oomVictim,
+		OOMKill: oomKill, OOMVictim: oomVictim, OOMTotal: oomTotal,
 		MemCached: mi["Buffers"] + mi["Cached"], MemFree: mi["MemFree"],
 		SwapIn: swapIn, SwapOut: swapOut,
 		MemSlab: mi["Slab"], MemDirty: mi["Dirty"], MemWriteback: mi["Writeback"],

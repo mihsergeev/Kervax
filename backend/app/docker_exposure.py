@@ -24,6 +24,8 @@ import re
 import shlex
 import time
 
+from app.compose_cmd import verdict
+
 _SOCK = frozenset({"/var/run/docker.sock", "/run/docker.sock", "/var/run", "/run"})
 
 # имя образа без реестра, пространства и тега -> что за прокси
@@ -318,13 +320,18 @@ def upgrade(p: dict, rep: dict, eds: dict[str, dict] | None = None) -> dict:
     check = {"id": "check", "cmd": "\n".join(
         [cd, f"{dc} ps {q(svc)}", f"docker logs --since 5m {q(p['name'])} 2>&1 | tail -n 20"]
         + ([f"{loop} | diff {saved} - && echo OK"] if loop else []))}
+    # где тег меняют в файле (sed или руками): проверка заодно скажет, на новом ли образе прокси, а не
+    # только Up - sed, не нашедший строку, молчит, и up -d поднимал прежний образ
+    on_new = {**check, "cmd": check["cmd"] + "\n" + verdict(
+        f"docker inspect -f '{{{{.Config.Image}}}}' {q(p['name'])} | grep -qxF -- {q(tgt)}",
+        "контейнер на новом образе", "НЕ ОБНОВЛЕН: контейнер на прежнем образе, смотрите вывод выше")} if tgt else check
     if not ed.get("ok"):
         # helper не прислал, где образ (не стоит, старый, не разобрал файл): что знаем - руками
         out["why"] = str(ed.get("why") or "nohelper")
         if out["why"] == "nocompose":
             steps.append({"id": "run", "cmd": f"docker pull {q(tgt)}" if tgt else None, "arg": tgt})
         elif proj and svc and d and names:
-            steps += [{"id": "manual", "arg": tgt, "cmd": "\n".join([cd] + pull_up)}, check]
+            steps += [{"id": "manual", "arg": tgt, "cmd": "\n".join([cd] + pull_up)}, on_new]
         else:
             labels = " ".join("{{index .Config.Labels \"com.docker.compose.%s\"}}" % k
                               for k in ("project.working_dir", "project.config_files", "project", "service"))
@@ -349,8 +356,11 @@ def upgrade(p: dict, rep: dict, eds: dict[str, dict] | None = None) -> dict:
         # образом и закомментированные строки не трогает; точки и прочее в старом теге - буквально
         bak = f + ".bak-kervax-image"
         sed = "%ss|%s|%s|" % (ed.get("line"), _SED_META.sub(r"\\\g<0>", ref), tgt)
-        apply = [cd, f"cp {q(f)} {q(bak)}", f"sed -i {q(sed)} {q(f)}"] + pull_up
-        steps += [{"id": "apply", "arg": at, "cmd": "\n".join(apply)}, check, {"id": "rollback", "cmd": "\n".join([cd, f"cp {q(bak)} {q(f)}", pull_up[1]])}]
+        line = f"sed -n {q(str(ed.get('line')) + 'p')} {q(f)}"
+        apply = [cd, f"cp {q(f)} {q(bak)}", f"sed -i {q(sed)} {q(f)}", line,
+                 verdict(f"{line} | grep -qF -- {q(tgt)}", "образ заменен",
+                         "НЕ ЗАМЕНЕНО: строка image другая, поправьте ее руками")] + pull_up
+        steps += [{"id": "apply", "arg": at, "cmd": "\n".join(apply)}, on_new, {"id": "rollback", "cmd": "\n".join([cd, f"cp {q(bak)} {q(f)}", pull_up[1]])}]
     return out
 
 

@@ -16,6 +16,8 @@ import re
 import shlex
 from datetime import datetime
 
+from app.compose_cmd import verdict
+
 LAG_WARN = 300  # реплика отстает на 5 минут - предупреждение
 LAG_CRIT = 1800  # на полчаса - проблема
 XACT_WARN = 3600  # транзакция идет час
@@ -560,7 +562,10 @@ def pgss_fix(x: dict, rep: dict) -> list[dict]:
         rx = spl.replace(".", "\\.")
         edit = {"id": "pgss_compose", "arg": svc, "cmd": "\n".join([
             cd, f"sudo cp -p {f} {bak}",
-            f"sudo sed -i -E 's/({_SPL}=[^A-Za-z0-9_]?{rx})([^A-Za-z0-9_,]|$)/\\1,{PGSS}\\2/' {f}", f"diff {bak} {f}"])}
+            f"sudo sed -i -E 's/({_SPL}=[^A-Za-z0-9_]?{rx})([^A-Za-z0-9_,]|$)/\\1,{PGSS}\\2/' {f}", f"diff {bak} {f}",
+            # sed, не нашедший строку, молчит: без этой строки перезапускали бы с прежним списком
+            verdict(f"grep -qE '{_SPL}=[^[:space:]]*{PGSS}' {f}", "pg_stat_statements добавлен",
+                    "НЕ ДОБАВЛЕНО: строка shared_preload_libraries другая, поправьте руками")])}
         undo = "\n".join([drop, cd, f"sudo cp -p {bak} {f}", up])
     else:
         edit = {"id": "pgss_compose_grep", "arg": ",".join(new),

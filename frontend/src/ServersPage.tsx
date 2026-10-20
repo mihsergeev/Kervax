@@ -20,6 +20,7 @@ import {
   listServers,
   rotateServerToken,
   serverMetrics,
+  serverOom,
   serverOomEvents,
   serverWebErrors,
   serverWebErrorLines,
@@ -42,7 +43,9 @@ import {
   type DiskUsageItem,
   type DiskWear,
   type HelperAdvice,
+  type OomEpisode,
   type OomEvent,
+  type OomSummary,
   type ProcStat,
   type WebErrorRow,
   type CpuGroup,
@@ -55,7 +58,7 @@ import {
   type ServerVulns,
   type TimelineResult,
 } from './api'
-import { StackedAreaChart, type Series } from './charts/StackedAreaChart'
+import { StackedAreaChart, type ChartMark, type Series } from './charts/StackedAreaChart'
 import { OnboardBlock } from './OnboardBlock'
 import { diskHealth, diskUsage, fmtSetupVersion, gpuSecLine, shortList, sinceShort, unitsBlock, srvIssues, type SrvIssue, webLogLabel, webRate, webSeriesName, webUnparsed } from './serverUtils'
 import { OsIcon } from './osIcon'
@@ -1145,49 +1148,187 @@ function procTone(kind: 'cpu' | 'mem', cpu: number, rss: number, total: number):
   return ''
 }
 
-// Список OOM-событий «когда · кого убило» — рендерится ПОД графиком OOM-киллов
-// (как extra в chartCard). Пусто → ничего не показываем. Новые сверху.
-function OomEventList({
-  serverId,
-  t,
+// Чей процесс: служба, контейнер, под, сессия пользователя (owner_kind из app/oom.py)
+function oomOwner(k: { owner: string; owner_kind: string }, t: TFn): string {
+  if (k.owner_kind === 'container') return t('контейнер {n}', { n: k.owner })
+  if (k.owner_kind === 'pod') return t('под {n}', { n: k.owner.slice(0, 8) })
+  if (k.owner_kind === 'user') return t('сессия {n}', { n: k.owner })
+  if (k.owner_kind === 'host') return t('весь сервер')
+  return k.owner
+}
+
+// Кого убили одной строкой: крупное с размером, по владельцу
+function oomKillsLine(e: OomEpisode, t: TFn): string {
+  const by = new Map<string, { names: string[]; anon: number; who: string; kind: string }>()
+  for (const k of e.kills) {
+    const key = `${k.owner_kind}:${k.owner}`
+    const g = by.get(key) ?? { names: [], anon: 0, who: oomOwner(k, t), kind: k.owner_kind }
+    const nm = k.name.replace(/^\((.*)\)$/, '$1') || (k.kind === 'oomd' ? 'cgroup' : '?')
+    if (!g.names.includes(nm)) g.names.push(nm)
+    g.anon += k.anon ?? 0
+    by.set(key, g)
+  }
+  return [...by.values()]
+    .sort((a, b) => b.anon - a.anon)
+    .map((g) => {
+      const size = g.kind !== 'user' && g.anon >= 10240 ? ` ${fmtBytes(g.anon * 1024)}` : ''
+      return `${g.names.join(' + ')}${size}${g.who ? ` (${g.who})` : ''}`
+    })
+    .join(', ')
+}
+
+const OOM_KIND: Record<string, string> = { global: 'весь сервер', memcg: 'лимит cgroup', oomd: 'systemd-oomd' }
+
+// Нехватка памяти (OOM) за 30 дней - эпизоды из журнала ядра (helper units-setup 0.5): когда,
+// что за OOM и кого убили; по клику кто занимал память, Mem-Info и задетые юниты. Без helper'а -
+// прежний список "кого убило" по счетчику агента
+function OomBlock({
+  server: s,
+  eps,
+  open,
+  onOpen,
 }: {
-  serverId: number
-  t: (s: string, vars?: Record<string, string | number>) => string
+  server: Server
+  eps: OomEpisode[] | null
+  open: string | null
+  onOpen: (id: string | null) => void
 }) {
-  const [events, setEvents] = useState<OomEvent[] | null>(null)
+  const { t } = useI18n()
+  const [legacy, setLegacy] = useState<OomEvent[] | null>(null)
+  const none = eps != null && eps.length === 0
   useEffect(() => {
+    if (!none) return
     let alive = true
-    serverOomEvents(serverId, 50)
-      .then((e) => alive && setEvents(e))
-      .catch(() => alive && setEvents([]))
+    serverOomEvents(s.id, 50)
+      .then((e) => alive && setLegacy(e))
+      .catch(() => alive && setLegacy([]))
     return () => {
       alive = false
     }
-  }, [serverId])
-  if (!events || events.length === 0) return null
-  const fmt = (ts: string) =>
-    new Date(ts).toLocaleString([], {
-      day: '2-digit',
-      month: '2-digit',
-      hour: '2-digit',
-      minute: '2-digit',
-    })
+  }, [s.id, none])
+  useEffect(() => {
+    if (open) document.getElementById(`oom-ep-${open}`)?.scrollIntoView({ block: 'center' })
+  }, [open, eps])
+  if (eps == null || (!eps.length && !legacy?.length)) return null
+  const when = (ts: number) =>
+    new Date(ts * 1000).toLocaleString([], { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })
+  const kb = (v?: number | null) => (v == null ? '—' : fmtBytes(v * 1024))
   return (
-    <div className="oom-log">
-      <div className="oom-log-cap muted small">{t('последние киллы')}</div>
-      <div className="oom-log-list">
-        {events.map((e, i) => (
-          <div key={i} className="oom-log-row">
-            <span className="oom-log-victim mono">
-              {e.victim || t('процесс неизвестен')}
-            </span>
-            <span className="oom-log-when muted small mono">
-              {fmt(e.ts)}
-              {e.count > 1 ? ` · ×${e.count}` : ''}
-            </span>
-          </div>
-        ))}
+    <div className="chart-card net-card net-card-wide" id="mcard-oom">
+      <div className="net-head">
+        <div className="chart-cap">{t('Нехватка памяти (OOM)')}</div>
+        {eps.length > 0 && <span className="muted small">{t('за 30 дней: {n}', { n: eps.length })}</span>}
       </div>
+      {!eps.length && legacy && (
+        <>
+          <div className="muted small du-note">
+            {t('Кто занимал память и какие службы задело, видно с helper units-setup 0.5. Пока только счетчик агента:')}
+          </div>
+          <div className="oom-log-list">
+            {legacy.map((e, i) => (
+              <div key={i} className="oom-log-row">
+                <span className="oom-log-victim mono">{e.victim || t('процесс неизвестен')}</span>
+                <span className="oom-log-when muted small mono">
+                  {when(new Date(e.ts).getTime() / 1000)}
+                  {e.count > 1 ? ` · x${e.count}` : ''}
+                </span>
+              </div>
+            ))}
+          </div>
+        </>
+      )}
+      {eps.map((e) => {
+        const isOpen = open === e.id
+        const sw = e.mem.swap_total
+        return (
+          <div key={e.id} className="oom-ep" id={`oom-ep-${e.id}`}>
+            <button className="oom-ep-head" onClick={() => onOpen(isOpen ? null : e.id)} aria-expanded={isOpen}>
+              <span className={`lk-dot lk-dot-${e.level >= 2 ? 'bad' : 'warn'}`} />
+              <span className="mono small oom-ep-when">{when(e.start)}</span>
+              <span className="muted small oom-ep-kind">{t(OOM_KIND[e.kind] ?? e.kind)}</span>
+              <span className="oom-ep-text">{oomKillsLine(e, t)}</span>
+            </button>
+            {isOpen && (
+              <div className="oom-ep-body">
+                <div>
+                  <div className="oom-ep-sub">{t('Убиты')}</div>
+                  <table className="oom-tbl">
+                    <thead>
+                      <tr>
+                        <th>{t('Процесс')}</th>
+                        <th>pid</th>
+                        <th>{t('Чей')}</th>
+                        <th className="num">{t('Память')}</th>
+                        <th className="num">oom_score_adj</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {e.kills.map((k, i) => (
+                        <tr key={i}>
+                          <td className="mono">{k.name || (k.kind === 'oomd' ? k.memcg : '?')}</td>
+                          <td className="mono">{k.pid ?? '—'}</td>
+                          <td>
+                            {oomOwner(k, t)}
+                            {k.owner_kind !== 'user' && (k.user || k.uid != null) ? (
+                              <span className="muted"> · {k.user || `uid ${k.uid}`}</span>
+                            ) : null}
+                          </td>
+                          <td className="num mono">{kb(k.anon)}</td>
+                          <td className="num mono">{k.adj ?? '—'}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+                {e.top.length > 0 && (
+                  <div>
+                    <div className="oom-ep-sub">{t('Больше всего памяти перед убийством')}</div>
+                    <table className="oom-tbl">
+                      <tbody>
+                        {e.top.map((x, i) => (
+                          <tr key={i}>
+                            <td className="mono">
+                              {x.name}
+                              {x.n > 1 ? ` x${x.n}` : ''}
+                            </td>
+                            <td className="muted">{x.user || (x.uid != null ? `uid ${x.uid}` : '')}</td>
+                            <td className="num mono">{kb(x.anon)}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+                <div className="oom-mem">
+                  {e.kind === 'memcg' && e.mem.limit != null && <span>{t('лимит cgroup {v}', { v: kb(e.mem.limit) })}</span>}
+                  {e.mem.ram != null && <span>{t('RAM {v}', { v: kb(e.mem.ram) })}</span>}
+                  {e.mem.anon != null && <span>{t('занято процессами {v}', { v: kb(e.mem.anon) })}</span>}
+                  {e.mem.file != null && <span>{t('кэш файлов {v}', { v: kb(e.mem.file) })}</span>}
+                  {e.mem.shmem != null && e.mem.shmem > 0 && <span>{t('общая память {v}', { v: kb(e.mem.shmem) })}</span>}
+                  {sw === 0 && <span>{t('swap нет')}</span>}
+                  {sw != null && sw > 0 && (
+                    <span>{t('swap занят {u} из {m}', { u: kb(sw - (e.mem.swap_free ?? 0)), m: kb(sw) })}</span>
+                  )}
+                </div>
+                {Object.keys(e.units).length > 0 && (
+                  <div className="small">
+                    <span className="muted">{t('Задело юниты:')} </span>
+                    {Object.entries(e.units)
+                      .map(([u, what]) => `${u} (${what.includes('failed') ? t('упал') : t('убит процесс')})`)
+                      .join(', ')}
+                  </div>
+                )}
+                {e.by.length > 0 && (
+                  <div className="muted small">
+                    {t('Память не досталась (это не виновники): {list}', { list: e.by.join(', ') })}
+                  </div>
+                )}
+                <pre className="unit-log mono">{e.kills.map((k) => k.line).filter(Boolean).join('\n')}</pre>
+              </div>
+            )}
+          </div>
+        )
+      })}
     </div>
   )
 }
@@ -2553,9 +2694,10 @@ function WebNow({ server: s }: { server: Server }) {
 // Плитки сводки: CPU, память, худший раздел диска и сеть, с линией за выбранный период.
 // Нажатие ведет в раздел. Замечание раздела (поломка диска, утечка памяти) - строкой в плитке
 // и ее цветом
-function SrvTiles({ r, M, info, onGo, gpu }: {
+function SrvTiles({ r, M, info, onGo, gpu, oom }: {
   r: ServerReport
   gpu?: GpuSum | null
+  oom?: OomSummary | null
   M: ServerMetric[]
   info: Record<string, SecInfo>
   onGo: (id: string) => void
@@ -2592,6 +2734,11 @@ function SrvTiles({ r, M, info, onGo, gpu }: {
         <TileSpark vals={M.map((m) => m.cpu_percent)} max={100} color="#5a8fc7" />)}
       {tile('mem', t('Память'), mem != null ? `${mem}%` : '—', `${fmtBytes(r.mem_used)} / ${fmtBytes(r.mem_total)}`, mem,
         <TileSpark vals={M.map((m) => m.mem_percent)} max={100} color="#4fa79a" />)}
+      {oom && oom.n7 > 0 && (
+        <button key="oom" className="srv-tile-btn" onClick={() => onGo('mem')} title={t('к разделу')}>
+          <NetTile label={t('OOM за 7 дней')} value={String(oom.n7)} sub={oom.last_text} tone="bad" />
+        </button>
+      )}
       {worst &&
         tile('disk', t('Диск'), `${dp}%`, `${worst.mount}${ds.length > 1 ? ` · ${ds.length} ${t('разд.')}` : ''}`, dp,
           <TileSpark vals={M.map((m) => m.disk_percent)} max={100} color="#cf9b52" />)}
@@ -2711,12 +2858,12 @@ function MemNow({ server: s }: { server: Server }) {
             sub={t('загрузка {a} · выгрузка {b}', { a: fmtRate(r.swap_in), b: fmtRate(r.swap_out) })}
           />
         )}
-        {r.oom_kill != null && (
+        {s.oom != null && (
           <NetTile
-            label={t('OOM-киллы')}
-            value={String(Math.round(r.oom_kill))}
-            sub={t('за последний отчет')}
-            tone={r.oom_kill > 0 ? 'bad' : 'ok'}
+            label={t('OOM за 7 дней')}
+            value={String(s.oom.n7)}
+            sub={s.oom.n7 > 0 && s.oom.last_at ? t('последний {d}', { d: new Date(s.oom.last_at * 1000).toLocaleString([], { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) }) : undefined}
+            tone={s.oom.n7 > 0 ? 'bad' : 'ok'}
           />
         )}
       </div>
@@ -3976,7 +4123,7 @@ function SshLogin({ server: s, onChanged }: { server: Server; onChanged: () => v
   )
 }
 
-function FailedUnits({ server: s, onChanged }: { server: Server; onChanged: () => void }) {
+function FailedUnits({ server: s, onChanged, onOom }: { server: Server; onChanged: () => void; onOom?: (ep: string) => void }) {
   const { t } = useI18n()
   const { isViewer } = useAuth()
   const [st, setSt] = useState<Record<string, { busy?: boolean; ok?: boolean; msg?: string; log?: string[] }>>({})
@@ -4051,7 +4198,10 @@ function FailedUnits({ server: s, onChanged }: { server: Server; onChanged: () =
   }
   const fmt = (ts: string) =>
     new Date(ts).toLocaleString([], { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })
-  const muted = (u: FailedUnit) => ((s.alert_mutes ?? []).includes(UNIT_MUTE + u.unit) ? 1 : 0)
+  // убит OOM (app/oom.py): причина и ссылка на эпизод, строка ядра в логе. Менеджер сессии
+  // пользователя (user@N.service) - не служба: серым и в конце
+  const oomOf = (u: FailedUnit) => s.oom?.units?.[u.unit]
+  const muted = (u: FailedUnit) => ((s.alert_mutes ?? []).includes(UNIT_MUTE + u.unit) || oomOf(u)?.quiet ? 1 : 0)
   const copy = (text: string, key: string) => {
     void navigator.clipboard?.writeText(text).then(() => {
       setCopied(key)
@@ -4076,16 +4226,30 @@ function FailedUnits({ server: s, onChanged }: { server: Server; onChanged: () =
           const snoozed = !!until && new Date(until).getTime() > Date.now()
           const us = st[u.unit]
           const hint = unitHint(u, ub.units, t)
+          const ol = oomOf(u)
+          const log = ol?.line ? [`kernel: ${ol.line}`, ...u.log] : u.log
           return (
-            <div key={u.unit} className={`unit-row${perm || snoozed ? ' unit-muted' : ''}`}>
+            <div key={u.unit} className={`unit-row${perm || snoozed || ol?.quiet ? ' unit-muted' : ''}`}>
               <div className="unit-head">
-                <span className={`lk-dot lk-dot-${unitLevel(u) === 2 ? 'bad' : 'warn'}`} />
+                <span className={`lk-dot lk-dot-${ol?.quiet ? 'idle' : unitLevel(u) === 2 ? 'bad' : 'warn'}`} />
                 <span className="mono unit-name">{u.unit}</span>
-                <span className={unitLevel(u) === 2 ? 't-down' : 't-degraded'}>{unitWhy(u, t)}</span>
+                <span className={ol?.quiet ? 'muted' : unitLevel(u) === 2 ? 't-down' : 't-degraded'}>
+                  {ol ? t('убит OOM killer') : unitWhy(u, t)}
+                </span>
                 <span className="muted small">{ago(u)}</span>
+                {ol?.ep && onOom && (
+                  <button className="oom-link small" onClick={() => onOom(ol.ep!)}>
+                    {t('эпизод OOM')}
+                  </button>
+                )}
               </div>
+              {ol?.quiet && (
+                <div className="muted small unit-desc">
+                  {t('Менеджер сессии пользователя, а не служба: поднимется сам при следующем входе, в упавшие не считается')}
+                </div>
+              )}
               {u.desc && u.desc !== u.unit && <div className="muted small unit-desc">{u.desc}</div>}
-              {u.log.length > 0 && <pre className="unit-log mono">{u.log.join('\n')}</pre>}
+              {log.length > 0 && <pre className="unit-log mono">{log.join('\n')}</pre>}
               {hint && (
                 <div className="small unit-hint">
                   {hint.text}
@@ -5980,6 +6144,23 @@ function ServerDetail({
   // на раздел можно поделиться
   const [active, setActive] = useState<string>(() => secOfLink(initialSection) ?? 'overview')
   useUrlParam('sec', active === 'overview' ? null : active)
+  const [oomEps, setOomEps] = useState<OomEpisode[] | null>(null)
+  const [oomOpen, setOomOpen] = useState<string | null>(() => new URLSearchParams(window.location.search).get('oom'))
+  useUrlParam('oom', active === 'mem' ? oomOpen : null)
+  useEffect(() => {
+    if (active !== 'mem') return
+    let alive = true
+    const run = () =>
+      serverOom(s.id)
+        .then((v) => { if (alive) setOomEps(v.episodes) })
+        .catch(() => {})
+    run()
+    const id = window.setInterval(run, 60000)
+    return () => {
+      alive = false
+      window.clearInterval(id)
+    }
+  }, [s.id, active])
   const layoutRef = useRef<HTMLDivElement>(null)
   // Другой раздел: показываем его с начала. Если страница уже прокручена ниже меню (длинный
   // раздел графиков), подкручиваем к началу разделов, иначе новый раздел открылся бы с середины
@@ -6174,7 +6355,7 @@ function ServerDetail({
   ).sort((a, b) => b[1] - a[1])
 
   // Секция графика: кликабельная карточка → полноэкранный график этой метрики.
-  const chartCard = (key: MetricKey, extra?: React.ReactNode) => {
+  const chartCard = (key: MetricKey, extra?: React.ReactNode, marks?: ChartMark[]) => {
     const mc = padToNow(buildMetric(key, M, t), Date.now())
     return (
       // якорь на КАРТОЧКУ: ссылка из алерта должна вести к самой метрике, а не к
@@ -6199,6 +6380,7 @@ function ServerDetail({
             fmtTime={fmtT}
             height={key === 'net' ? 200 : 180}
             onExpand={() => setZoomKey(key)}
+            marks={marks}
           />
         ) : (
           <div className="chart-empty">—</div>
@@ -6275,7 +6457,7 @@ function ServerDetail({
         }))}
       />
       <DayBlock day={day} onMore={() => go('timeline')} />
-      <SrvTiles r={r} M={M} info={info} onGo={go} gpu={s.gpu_sum} />
+      <SrvTiles r={r} M={M} info={info} onGo={go} gpu={s.gpu_sum} oom={s.oom} />
       <OvAreas
         cap={t('Сервер по областям')}
         items={AREA_SECS.filter((id) => secs.some((x) => x.id === id)).map((id) => ({
@@ -6543,6 +6725,12 @@ function ServerDetail({
                   )}
                 </div>
               ) : undefined,
+              (oomEps ?? []).map((e) => ({
+                t: e.start * 1000,
+                label: 'OOM',
+                title: `${new Date(e.start * 1000).toLocaleString()} · ${oomKillsLine(e, t)}`,
+                tone: e.level >= 2 ? 'bad' : 'warn',
+              })),
             )}
             {(r.swap_total ?? 0) > 0 &&
               chartCard(
@@ -6560,11 +6748,9 @@ function ServerDetail({
                 <StatRow color="#8a7fb8" name={t('ядро (slab)')} value={fmtBytes(r.mem_slab)} />
               </div>,
             )}
-            {r.oom_kill != null
-              ? chartCard('oom', <OomEventList serverId={s.id} t={t} />)
-              : null}
           </div>
           <div className="net-cards">
+            <OomBlock server={s} eps={oomEps} open={oomOpen} onOpen={setOomOpen} />
             <MemLeaks server={s} />
             <MemContainers server={s} onChanged={onChanged} />
             <MemPods server={s} onChanged={onChanged} />
@@ -6773,7 +6959,7 @@ function ServerDetail({
           <div className="srv-sec">
             <div className="net-cards">
               <LoopingUnits server={s} onChanged={onChanged} />
-              <FailedUnits server={s} onChanged={onChanged} />
+              <FailedUnits server={s} onChanged={onChanged} onOom={(ep) => { setOomOpen(ep); go('mem') }} />
               <NoBootUnits server={s} onChanged={onChanged} />
             </div>
             {!ub?.units.length && info.units.level === 0 && (

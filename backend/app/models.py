@@ -1114,6 +1114,26 @@ class OomEvent(Base):
     count: Mapped[int] = mapped_column(Integer, default=1)
 
 
+class OomKill(Base):
+    """Убийства OOM killer из журнала ядра (helper units-setup 0.5, report.d/oom.json): одна
+    строка на убитый процесс, на убийство systemd-oomd или на отметку systemd "в юните убит
+    процесс" (kind=unit). Эпизоды панель собирает из строк при чтении (app/oom.py). Helper
+    держит неделю, тут - 30 дней. key - время из журнала и pid или юнит, повтор не пишется."""
+
+    __tablename__ = "oom_kills"
+    __table_args__ = (
+        UniqueConstraint("server_id", "key", name="uq_oom_kills_key"),
+        Index("ix_oom_kills_lookup", "server_id", "ts"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    server_id: Mapped[int] = mapped_column(Integer)
+    ts: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    key: Mapped[str] = mapped_column(String(120))
+    kind: Mapped[str] = mapped_column(String(10))  # global / memcg / oomd / unit
+    data: Mapped[dict] = mapped_column(JSON, default=dict)
+
+
 class BackupVaultItem(Base):
     """Сейф доступов к бэкапам: ОДИН зашифрованный блоб на репозиторий.
 

@@ -37,6 +37,8 @@ from pathlib import Path
 
 from sqlalchemy import select
 
+from app.compose_cmd import ere, image_is, verdict
+
 WARN_DAYS = 180  # как у ОС: за полгода пора планировать переезд
 OLD_IMAGE_DAYS = 365
 WHERE_MAX = 4
@@ -410,6 +412,12 @@ _MKDIR = f"sudo mkdir -p -m 700 {_BAK}"
 _DEFAULT_FILES = ("compose.yaml", "compose.yml", "docker-compose.yaml", "docker-compose.yml")
 _SYS_PATH = re.compile(r"^/(proc|sys|dev|run|var/run)(/|$)")
 _LABEL = "{{index .Config.Labels \"com.docker.compose.%s\"}}"
+# строка image: в compose вокруг образа: отступ (пробелы или таб), необязательная кавычка, после
+# образа - кавычка, пробелы, комментарий или конец строки. Закомментированные "#image: ..." не
+# подходят, как и 12.3.10 или 12.3.1-ubuntu вместо 12.3.1. Шаблон с " *$" молча не находил строку с
+# комментарием после тега, и дальше перезапускался прежний образ
+_IMG_PRE = r"^([[:space:]]*image:[[:space:]]*[^[:alnum:][:space:]#]?)"
+_IMG_POST = r"([^[:alnum:]._@-].*)?$"
 
 
 def target(p: str, cycle: str, today: date) -> tuple[str | None, list[str]]:
@@ -534,8 +542,10 @@ class _Where:
     def names(self) -> str:
         return " ".join(f for f, _b in self.files)
 
-    def up_check(self) -> list[str]:
-        return [f"{self.dc} up -d {self.svc}", f"{self.dc} ps {self.svc}", f"{self.dc} logs --tail 20 {self.svc}"]
+    def up_check(self, then: str = "") -> list[str]:
+        """Перезапуск, ps, лог и then - строка-проверка, что контейнер на том, на что меняли."""
+        return [f"{self.dc} up -d {self.svc}", f"{self.dc} ps {self.svc}", f"{self.dc} logs --tail 20 {self.svc}"] + (
+            [then] if then else [])
 
 
 def _find_cmd(name: str) -> str:
@@ -605,11 +615,15 @@ def _container_steps(p: str, mode: str, c: dict, a: dict, rep: dict) -> list[dic
         restore = [f"{w.dc} stop {w.svc}", f"sudo tar -xzpf {tgz} -C /"]
     if mode == "image":
         new = a["new"]
-        sed = q(f"s#image: {image} *$#image: {new}#")
+        sed = q(f"s|{_IMG_PRE}{ere(image)}{_IMG_POST}|\\1{new}\\2|")
+        has_new = f"grep -qE {q(_IMG_PRE + ere(new) + '([^[:alnum:]._@-]|$)')} {w.names()}"
         return notes + find + copy + [
             {"id": "c_bak", "cmd": "\n".join([w.cd] + [f"sudo cp {f} {b}" for f, b in w.files])},
-            {"id": "img_set", "cmd": "\n".join([w.cd, f"sudo sed -i {sed} {w.names()}", f"grep -n 'image:' {w.names()}"])},
-            {"id": "c_up", "cmd": "\n".join([w.cd] + w.up_check())},
+            {"id": "img_set", "cmd": "\n".join([
+                w.cd, f"sudo sed -i -E {sed} {w.names()}", f"grep -n 'image:' {w.names()}",
+                verdict(has_new, "образ заменен", "НЕ ЗАМЕНЕНО: строка image другая, поправьте ее руками")])},
+            {"id": "c_up", "cmd": "\n".join([w.cd] + w.up_check(verdict(
+                image_is(name, new), "контейнер на новом образе", "НЕ ОБНОВЛЕН: контейнер на прежнем образе, смотрите вывод выше")))},
             {"id": "c_undo_data" if restore else "c_undo", "undo": True, "cmd": "\n".join(
                 [w.cd] + [f"sudo cp {b} {f}" for f, b in w.files] + restore + [f"{w.dc} up -d {w.svc}"])},
             down]
@@ -617,7 +631,9 @@ def _container_steps(p: str, mode: str, c: dict, a: dict, rep: dict) -> list[dic
         old = q(_retag(image, "kervax-old"))
         return notes + find + copy + [
             {"id": "pull_keep", "cmd": f"sudo docker tag {q(image)} {old}"},
-            {"id": "pull_up", "cmd": "\n".join([w.cd, f"{w.dc} pull {w.svc}"] + w.up_check())},
+            {"id": "pull_up", "cmd": "\n".join([w.cd, f"{w.dc} pull {w.svc}"] + w.up_check(verdict(
+                f"[ \"$(sudo docker inspect -f '{{{{.Image}}}}' {cn})\" != \"$(sudo docker image inspect -f '{{{{.Id}}}}' {old})\" ]",
+                "контейнер на свежем образе", "ОБРАЗ ТОТ ЖЕ: автор образа его еще не пересобрал")))},
             {"id": "pull_undo_data" if restore else "pull_undo", "undo": True, "cmd": "\n".join(
                 [f"sudo docker tag {old} {q(image)}", w.cd] + restore + [f"{w.dc} up -d {w.svc}"])},
             down]
@@ -657,8 +673,13 @@ def _host_steps(p: str, w: dict, rep: dict, a: dict) -> list[dict]:
     if p == "nodejs":
         repo = "grep -rl 'deb.nodesource.com/node_' /etc/apt/sources.list.d/ | xargs -r sudo sed -i 's#node_[0-9]*\\.x#node_{v}.x#g'"
         back = f"nodejs={shlex.quote(full)}" if full else "\"nodejs=$(apt-cache madison nodejs | awk 'NR==1{print $3}')\""
-        return note + [{"id": "h_node_repo", "cmd": "\n".join([repo.format(v=new), "sudo apt update", "sudo apt install -y nodejs"])},
-                {"id": "h_node_check", "cmd": "node -v\nnpm -v"},
+        on = "grep -rqs 'deb.nodesource.com/node_{v}\\.x' /etc/apt/sources.list.d/"
+        return note + [{"id": "h_node_repo", "cmd": "\n".join([
+                    repo.format(v=new), verdict(on.format(v=new), "репозиторий переведен",
+                                                "НЕ ЗАМЕНЕНО: репозитория NodeSource в sources.list.d нет, поправьте руками"),
+                    "sudo apt update", "sudo apt install -y nodejs"])},
+                {"id": "h_node_check", "cmd": "\n".join(["node -v", "npm -v", verdict(
+                    f"node -v | grep -q '^v{new}\\.'", "nodejs новой версии", "НЕ ОБНОВЛЕН: nodejs прежней версии")])},
                 {"id": "h_node_rollback", "undo": True, "cmd": "\n".join([
                     repo.format(v=old), "sudo apt update", f"sudo apt install -y --allow-downgrades {back}"])}]
     if p in ("nginx", "haproxy"):
@@ -714,7 +735,8 @@ def fix(g: dict, rep: dict, now: datetime) -> list[dict]:
             cm = compose_of(c, rep)
             a = base | {"c": w["name"], "image": image, "env": _env_of(g["p"], c),
                         "dir": (cm or {}).get("dir", ""), "files": ", ".join((cm or {}).get("files", [])),
-                        "svc": (cm or {}).get("service", ""), "compose": "unknown" if cm is None else "yes" if cm else "no"}
+                        "svc": (cm or {}).get("service", ""), "compose": "unknown" if cm is None else "yes" if cm else "no",
+                        "status": str(c.get("status") or "")}
             if mode == "image" and to:
                 a["new"] = _retag(image, new_tag(g["p"], split_image(image)[2], to) or to)
             blocks[k] = {"name": w["name"], "kind": "container", "mode": mode, "others": [], "args": a,
