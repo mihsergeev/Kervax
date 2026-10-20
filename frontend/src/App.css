@@ -1200,11 +1200,37 @@ button.ghost.tile-filter-chip:hover { border-color: var(--accent); background: c
 .sw-act .row-act { margin: 0; }
 .sw-row-off .sw-name, .sw-row-off .sw-where { opacity: 0.55; }
 /* как исправить: во всю ширину списка под строкой */
-.sw-fix { grid-column: 1 / -1; display: flex; flex-direction: column; gap: 0.5rem; padding: 0.2rem 0.7rem 0.6rem; }
-.sw-fix-way { display: flex; flex-direction: column; gap: 0.3rem; }
-.sw-fix-way .osupd-fix { margin: 0; }
-.sw-now { display: flex; flex-direction: column; gap: 0.2rem; }
-.sw-now button { margin-left: 0.3rem; }
+/* шаги версии ПО: фраза "что сделать", строки контейнеров с раскрытием, подвал одной строкой */
+.sw-fix { grid-column: 1 / -1; display: flex; flex-direction: column; gap: 0.5rem; padding: 0.2rem 0.7rem 0.7rem 1.75rem; font-size: 0.88rem; }
+.sw-fix-what { overflow-wrap: anywhere; }
+.sw-fix-note { border-left: 3px solid var(--degraded); padding: 0.1rem 0 0.1rem 0.55rem; }
+.sw-img { font-size: 0.82rem; }
+.sw-fix-rows { display: grid; grid-template-columns: 1rem max-content max-content minmax(0, 1fr) max-content; column-gap: 0.7rem; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+.sw-fix-row { all: unset; box-sizing: border-box; cursor: pointer; display: grid; grid-column: 1 / -1; grid-template-columns: subgrid; align-items: center; padding: 0.4rem 0.7rem; border-top: 1px solid var(--border); }
+.sw-fix-row:first-child { border-top: 0; }
+.sw-fix-row:hover { background: var(--hover); }
+.sw-fix-row:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.sw-fix-row.on { background: color-mix(in srgb, var(--accent) 8%, transparent); }
+.sw-caret { color: var(--text-muted); font-size: 0.8rem; }
+.sw-fix-name { font-weight: 600; white-space: nowrap; }
+.sw-fix-img, .sw-fix-dir { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sw-fix-act { color: var(--accent); white-space: nowrap; text-align: right; }
+.sw-fix-detail { grid-column: 1 / -1; display: flex; flex-direction: column; gap: 0.5rem; padding: 0.5rem 0.8rem 0.7rem 2.4rem; border-top: 1px dashed var(--border); background: color-mix(in srgb, var(--accent) 4%, transparent); }
+.sw-facts { display: flex; flex-wrap: wrap; align-items: center; gap: 0.3rem 0.5rem; overflow-wrap: anywhere; }
+.sw-facts .mono { font-size: 0.78rem; }
+button.ghost.sw-copy { margin: 0; padding: 0.1rem 0.45rem; }
+.sw-steps { display: flex; flex-direction: column; gap: 0.45rem; }
+.sw-step-txt { overflow-wrap: anywhere; }
+.sw-num { margin-right: 0.35rem; }
+.sw-step .agent-advice-cmd { margin-top: 0.25rem; }
+.sw-cmd pre { color: var(--text); white-space: pre-wrap; overflow-wrap: anywhere; word-break: normal; }
+.sw-extra { display: flex; flex-wrap: wrap; gap: 0.35rem 0.6rem; align-items: flex-start; }
+.sw-extra > .sw-tog:has(.sw-tog-body) { flex-basis: 100%; }
+.sw-tog { display: flex; flex-direction: column; gap: 0.35rem; }
+button.ghost.sw-tog-btn { align-self: flex-start; margin: 0; padding: 0.15rem 0.5rem; }
+.sw-tog-body { padding: 0.1rem 0 0.2rem 0.9rem; border-left: 2px solid var(--border); display: flex; flex-direction: column; gap: 0.45rem; }
+.sw-fix-foot { display: flex; flex-wrap: wrap; align-items: center; gap: 0.2rem 0.5rem; }
+.sw-fix-foot button.ghost { margin: 0; padding: 0.1rem 0.45rem; font-size: 0.78rem; }
 .sw-old { display: flex; flex-direction: column; gap: 0.35rem; }
 .sw-old > button { align-self: flex-start; margin: 0; }
 @media (max-width: 600px) {
@@ -1216,6 +1242,15 @@ button.ghost.tile-filter-chip:hover { border-color: var(--accent); background: c
   .sw-term { grid-column: 3; grid-row: 1; }
   .sw-where { grid-column: 2 / -1; grid-row: 2; white-space: normal; }
   .sw-act { grid-column: 1 / -1; grid-row: 3; justify-content: flex-start; }
+  .sw-fix { padding-left: 0.7rem; }
+  .sw-fix-rows { display: flex; flex-direction: column; }
+  .sw-fix-row { grid-template-columns: 1rem minmax(0, 1fr) max-content; column-gap: 0.6rem; row-gap: 0.1rem; }
+  .sw-fix-img { grid-column: 2 / -1; grid-row: 2; }
+  .sw-fix-dir { grid-column: 2 / -1; grid-row: 3; white-space: normal; }
+  .sw-fix-dir:empty { display: none; }
+  .sw-fix-detail { padding-left: 0.8rem; }
+  .sw-cmd { flex-direction: column; }
+  .sw-cmd button.ghost { align-self: flex-end; }
 }
 @media (max-width: 600px) {
   .ub-list { grid-template-columns: minmax(0, 1fr) auto; }

@@ -1,7 +1,7 @@
-import { Fragment, useCallback, useEffect, useState } from 'react'
+import { Fragment, useCallback, useEffect, useState, type ReactNode } from 'react'
 import { getSoftware, updateServer, type Server, type SoftwareItem, type SoftwareOut, type SwFixBlock } from './api'
 import { useAuth } from './auth'
-import { FixSteps, useFixDone } from './FixSteps'
+import { FixCmd, useFixDone } from './FixSteps'
 import { useI18n } from './i18n'
 import { swDecisionLabel } from './mutes'
 
@@ -11,9 +11,9 @@ import { swDecisionLabel } from './mutes'
 // здесь не повторяются: они на сводке и на главной, а здесь то же самое видно по списку.
 // У кончившихся и скорых - как исправить (команды под ноду собирает бэкенд, тексты шагов здесь по
 // id) и решение: "обновить нельзя" или "отложить до конца поддержки" (swver: в alert_mutes), такой
-// пункт уходит с главной и из счетчика раздела, а здесь приглушен с кнопкой "вернуть". У способа
-// шапка - что это за ПО (контейнер, образ, папка compose и сервис), шаги нумерованы, после них откат
-// и другой путь "контейнер не нужен"
+// пункт уходит с главной и из счетчика раздела, а здесь приглушен с кнопкой "вернуть". Шаги - фраза
+// "что сделать" и строка на контейнер с раскрытием (SwFix), одинаковое для нескольких контейнеров
+// говорится один раз
 
 type TFn = (k: string, p?: Record<string, string | number>) => string
 const WHERE_MAX = 6
@@ -89,14 +89,193 @@ function swFixText(id: string, a: Record<string, string>, t: TFn): string {
   }
 }
 
-// что это за ПО: контейнер, образ, откуда запущен - чтобы сразу было понятно, о чем шаги
-function wayHead(b: SwFixBlock, t: TFn): string {
-  if (b.kind === 'host') return t('на хосте: {list}', { list: b.name })
+// registry.example.com/team/shop/frontend:master-29072cda -> …/frontend:master-29072cda: хост реестра и
+// путь до последней части в строку не нужны, длинный тег режется. Полный образ - в подсказке и в командах
+function shortImage(image: string): string {
+  if (image.startsWith('sha256:')) return image.slice(0, 19) + '…'
+  const at = image.split('@')[0]
+  const slash = at.lastIndexOf('/')
+  const colon = at.lastIndexOf(':')
+  const tag = colon > slash ? at.slice(colon + 1) : ''
+  const segs = (colon > slash ? at.slice(0, colon) : at).split('/')
+  const reg = segs.length > 1 && (/[.:]/.test(segs[0]) || segs[0] === 'localhost')
+  const name = reg || segs.length > 2 ? `…/${segs[segs.length - 1]}` : segs.join('/')
+  const tg = tag.length > 16 ? tag.slice(0, 14) + '…' : tag
+  return tg ? `${name}:${tg}` : name
+}
+
+function Img({ image }: { image: string }) {
+  const s = shortImage(image)
+  return <span className="mono sw-img" title={s === image ? undefined : image}>{s}</span>
+}
+
+// Up 2 hours -> работает 2 ч
+function upText(status: string, t: TFn): string {
+  const m = /^Up (\d+|About an?|Less than a) (second|minute|hour|day|week|month|year)s?/.exec(status)
+  if (!m) return status
+  const u = ({ second: t('с'), minute: t('мин'), hour: t('ч'), day: t('дн'), week: t('нед'), month: t('мес'), year: t('г') } as Record<string, string>)[m[2]] ?? ''
+  return t('работает {n} {u}', { n: /^\d+$/.test(m[1]) ? m[1] : '1', u })
+}
+
+// шаг без команды, который только предупреждает: один раз над строками, а не номером среди шагов
+const NOTE = new Set(['runtime_major', 'hint_runtime', 'major', 'hint_grafana', 'hint_traefik', 'hint_redis', 'hint_valkey', 'hint_os'])
+
+// Шаг одной строкой - что он делает; полный текст swFixText в подсказке. Нет короткого - полный
+function shortText(id: string, a: Record<string, string>, t: TFn): string {
+  const p = { ...a, newShort: shortImage(a.new ?? '') }
+  switch (id) {
+    case 'runtime_major': return t('{name} {from} и {to} - разные основные версии: код сначала проверить на копии', p)
+    case 'hint_runtime': return t('Код приложения сначала проверить на {name} {to}', p)
+    case 'major': return t('{name} {to} - новая основная версия: сначала прочитать upgrade guide', p)
+    case 'hint_grafana': return t('Grafana переведет свою базу на новую схему, обратно только из копии', p)
+    case 'c_rm': return t('Убрать только этот сервис, остальные в проекте работают. Убрать его и из compose-файла, иначе вернется при следующем up', p)
+    case 'c_down': return t('Остановить и убрать проект, данные остаются на диске', p)
+    case 'run_down': return t('Остановить и удалить, данные остаются на диске', p)
+    case 'c_bak': return t('Копия compose-файла', p)
+    case 'c_data': return t('Копия данных, контейнер на это время остановится', p)
+    case 'img_set': return t('Поменять образ на {newShort}', p)
+    case 'c_up': return t('Перезапустить и проверить', p)
+    case 'c_undo': return t('Вернуть прежний compose-файл и перезапустить', p)
+    case 'c_undo_data': return t('Вернуть прежний compose-файл и данные, перезапустить', p)
+    case 'rb_from': return t('Найти FROM в Dockerfile и поменять на {name} {to}', p)
+    case 'rb_build': return t('Пересобрать и перезапустить', p)
+    case 'rb_undo': return t('Вернуть прежний FROM и пересобрать', p)
+    case 'pull_keep': return t('Сохранить текущий образ для отката', p)
+    case 'pull_up': return t('Скачать свежий образ и перезапустить', p)
+    case 'h_node_repo': return t('Перевести репозиторий NodeSource на {to} и обновить nodejs', p)
+    case 'h_node_check': return t('Проверить версию, перезапустить приложения', p)
+    case 'h_node_rollback': return t('Вернуть репозиторий на {from} и прежнюю версию', p)
+    default: return swFixText(id, a, t)
+  }
+}
+
+// что значит плохой исход: последняя строка команды говорит это сама (FixSteps, ECHO)
+function ifFail(id: string, t: TFn): string {
+  switch (id) {
+    case 'img_set': return t('НЕ ЗАМЕНЕНО в конце - строка image в compose другая (переменная, .env), поправить руками')
+    case 'c_up': return t('НЕ ОБНОВЛЕН - образ в compose не заменен или такого тега нет, прежний контейнер работает')
+    case 'pull_up': return t('ОБРАЗ ТОТ ЖЕ - автор образа его еще не пересобрал')
+    case 'h_node_repo': return t('НЕ ЗАМЕНЕНО - репозитория NodeSource нет, поправить руками')
+    case 'h_node_check': return t('НЕ ОБНОВЛЕН - nodejs прежней версии; нативные модули пересобрать (npm rebuild)')
+    case 'rb_build': return t('ошибки в логе - откат ниже')
+    default: return ''
+  }
+}
+
+// главное действие строки контейнера, по способу
+function mainAction(b: SwFixBlock, t: TFn): string {
   const a = b.args
-  const parts = [t('контейнер {c}', { c: b.name }), t('образ {image}', { image: a.image ?? '' })]
-  if (a.dir) parts.push(`${a.dir}/${a.files || ''}`, t('сервис {svc}', { svc: a.svc ?? '' }))
-  else if (a.compose === 'no') parts.push(t('не из compose'))
-  return parts.join(' · ')
+  if (!a.to) return t('выбрать версию')
+  if ((b.mode === 'image' || b.mode === 'pull') && a.compose === 'no') return t('пересоздать с новым образом')
+  switch (b.mode) {
+    case 'ci': return t('обновить FROM в сборке')
+    case 'rebuild': return t('пересобрать здесь')
+    case 'image': return t('сменить тег на {tag}', { tag: (a.new ?? '').split(':').pop() ?? '' })
+    case 'pull': return t('скачать свежий образ')
+    case 'db': return t('переезд через копию')
+    case 'dangling': return t('пересоздать контейнер')
+    case 'host': return t('обновить пакет {pkg}', { pkg: a.pkg ?? b.name })
+    default: return ''
+  }
+}
+
+const lowerFirst = (s: string) => s.charAt(0).toLowerCase() + s.slice(1)
+
+const split = (b: SwFixBlock) => ({
+  notes: b.steps.filter((s) => NOTE.has(s.id)),
+  acts: b.steps.filter((s) => !s.alt && !s.undo && !NOTE.has(s.id)),
+  undo: b.steps.filter((s) => s.undo),
+  alt: b.steps.filter((s) => s.alt),
+})
+
+// Ответ одной фразой: что сделать и где (в сборке или на ноде). Способы одного вида - одна фраза
+// на все контейнеры: у образов из CI шаг один и тот же, раньше он повторялся у каждого
+function headline(g: SoftwareItem, t: TFn): string[] {
+  const by = new Map<string, SwFixBlock[]>()
+  for (const b of g.fix ?? []) by.set(b.mode, [...(by.get(b.mode) ?? []), b])
+  const out: string[] = []
+  for (const [mode, bs] of by) {
+    const a = bs[0].args
+    const { acts } = split(bs[0])
+    const cmds = acts.some((s) => s.cmd)
+    const p = { name: g.name, to: a.to ?? '', names: bs.map((b) => b.name).join(', '), pkg: a.pkg ?? bs[0].name,
+      tag: (a.new ?? '').split(':').pop() ?? '' }
+    if (!a.to || (!cmds && acts.length === 1 && mode !== 'ci')) out.push(lowerFirst(acts.length ? swFixText(acts[0].id, a, t) : ''))
+    else if (mode === 'ci') out.push(bs.length > 1
+      ? t('поменять FROM на {name} {to} в сборке образов {names} и выкатить. Образы собирают не здесь, на ноде делать ничего не надо', p)
+      : t('поменять FROM на {name} {to} в сборке образа {names} и выкатить. Образ собирают не здесь, на ноде делать ничего не надо', p))
+    else if (mode === 'rebuild') out.push(t('образ собирается на этой ноде: поменять FROM в Dockerfile на {name} {to} и пересобрать, команды ниже', p))
+    // не из compose: команды запуска панель не знает, пересоздать тем же docker run
+    else if ((mode === 'image' || mode === 'pull') && a.compose === 'no') out.push(t('скачать образ с {name} {to} и пересоздать {names} тем же docker run, команда ниже', p))
+    else if (mode === 'image') out.push(t('сменить тег образа на {tag}: копия, замена строки в compose и перезапуск, команды ниже', p))
+    else if (mode === 'pull') out.push(t('скачать свежий образ и перезапустить {names}, команды ниже', p))
+    else if (mode === 'db') out.push(t('перейти на {name} {to} через копию данных, путь и команды ниже', p))
+    else if (mode === 'host') out.push(cmds
+      ? t('перевести пакет {pkg} на {name} {to}, команды ниже', p)
+      : t('перевести {pkg} на {name} {to}, как - ниже', p))
+    else out.push(lowerFirst(shortText(acts[0]?.id ?? '', a, t)))
+  }
+  return out.filter(Boolean)
+}
+
+// строка списка: контейнер способа и контейнеры с тем же образом (others, шаги у них те же)
+type Row = { name: string; b: SwFixBlock; main: boolean; image: string; dir: string; svc: string; ver: string; status: string }
+
+function rowsOf(g: SoftwareItem): Row[] {
+  const out: Row[] = []
+  for (const b of g.fix ?? [])
+    for (const n of [b.name, ...b.others]) {
+      const w = g.where.find((x) => x.name === n)
+      const main = n === b.name
+      out.push({ name: n, b, main, image: b.args.image ?? '', dir: w?.dir || (main ? b.args.dir ?? '' : ''),
+        svc: main ? b.args.svc ?? '' : '', ver: w?.ver ?? '', status: main ? b.args.status ?? '' : '' })
+    }
+  return out
+}
+
+function CopyBtn({ text, t }: { text: string; t: TFn }) {
+  const [ok, setOk] = useState(false)
+  return (
+    <button className="ghost small sw-copy" onClick={() => {
+      navigator.clipboard?.writeText(text)
+      setOk(true)
+      window.setTimeout(() => setOk(false), 1500)
+    }}>{ok ? t('Скопировано') : t('Копировать')}</button>
+  )
+}
+
+function Toggle({ label, children }: { label: string; children: ReactNode }) {
+  const [o, setO] = useState(false)
+  return (
+    <div className="sw-tog">
+      <button className="ghost small sw-tog-btn" onClick={() => setO(!o)}>{o ? '▾' : '▸'} {label}</button>
+      {o && <div className="sw-tog-body">{children}</div>}
+    </div>
+  )
+}
+
+type Step = SwFixBlock['steps'][number]
+
+// шаги одной строкой с номером, командой и тем, что значит плохой исход
+function Steps({ steps, a, t, onCopy }: { steps: Step[]; a: Record<string, string>; t: TFn; onCopy?: (st: Step) => void }) {
+  let n = 0
+  return (
+    <div className="sw-steps">
+      {steps.map((st, i) => {
+        const fail = st.cmd ? ifFail(st.id, t) : ''
+        return (
+          <div key={st.id + i} className="sw-step">
+            <div className="sw-step-txt" title={swFixText(st.id, a, t)}>
+              {steps.length > 1 && <b className="sw-num">{++n}.</b>}
+              {shortText(st.id, a, t)}
+            </div>
+            {st.cmd && <FixCmd cmd={st.cmd} className="sw-cmd" onCopy={() => onCopy?.(st)} />}
+            {fail && <div className="muted small">{fail}</div>}
+          </div>
+        )
+      })}
+    </div>
+  )
 }
 
 // шаг, после которого на ноде должна быть новая версия: скопировали его - ждем отчет агента
@@ -108,49 +287,31 @@ function hms(iso: string): string {
   return new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
 }
 
-// Что на ноде сейчас и когда панель это узнала: после шагов пункт уходит сам с отчетом агента, а
-// без этой строки было непонятно, ждать или что-то не так. Отчеты идут раз в every секунд, пока
-// шаги открыты, карточка перечитывает их так же часто. Скопировали перезапуск, а свежий отчет
-// показывает прежнюю версию - прямо сказать, что обновление не прошло и где смотреть
-function SwNow({ g, b, data, ran, checking, onCheck, t }: {
-  g: SoftwareItem
-  b: SwFixBlock
-  data: SoftwareOut
-  ran: number
-  checking: boolean
-  onCheck: () => void
-  t: TFn
-}) {
+// Скопировали перезапуск: ждем отчет агента, а свежий отчет с прежней версией - прямо сказать, что
+// обновление не прошло и где смотреть. Без копирования строки нет: время отчета - в подвале
+function SwWait({ g, b, data, ran, t }: { g: SoftwareItem; b: SwFixBlock; data: SoftwareOut; ran: number; t: TFn }) {
+  if (!ran) return null
   const a = b.args
   const at = data.report_at
-  const p = { c: b.name, image: a.image ?? '', status: a.status ?? '', name: g.name, from: g.cycle, n: data.every ?? 15 }
-  const fresh = !!at && ran > 0 && new Date(at).getTime() > ran + RUN_GRACE
-  let after = ''
-  if (ran > 0 && !fresh) after = t('Ждем отчет агента после перезапуска, панель проверяет каждые {n} с.', p)
-  else if (fresh && b.mode === 'image')
-    after = t('Отчет агента в {time}: {c} все еще на {image}. Если перезапуск уже выполнен, образ не заменен: смотрите, что сказали последние строки замены образа и перезапуска.', { ...p, time: hms(at) })
-  else if (fresh && b.mode === 'pull')
-    after = t('Отчет агента в {time}: в {c} все еще {name} {from}. Если перезапуск уже выполнен, автор образа его еще не пересобрал.', { ...p, time: hms(at) })
-  else if (fresh)
-    after = t('Отчет агента в {time}: в {c} все еще {name} {from}. Если шаги уже выполнены, смотрите вывод последней команды.', { ...p, time: hms(at) })
+  const p = { c: b.name, image: a.image ?? '', name: g.name, from: g.cycle, n: data.every ?? 15 }
+  const fresh = !!at && new Date(at).getTime() > ran + RUN_GRACE
+  if (!fresh) return <div className="muted small">{t('Ждем отчет агента после перезапуска, панель проверяет каждые {n} с.', p)}</div>
+  const time = hms(at ?? '')
   return (
-    <div className="sw-now small">
-      <div>
-        <span className="muted">
-          {p.status ? t('Сейчас на ноде: {c} на {image}, {status}.', p) : t('Сейчас на ноде: {c} на {image}.', p)}{' '}
-          {at
-            ? t('Отчет агента в {time}, они идут раз в {n} с, пока шаги открыты, панель перечитывает их сама.', { ...p, time: hms(at) })
-            : t('Отчетов агента еще не было.')}
-        </span>{' '}
-        <button className="ghost small" disabled={checking} onClick={onCheck}>
-          {checking ? t('проверяю...') : t('Проверить сейчас')}
-        </button>
-      </div>
-      {after && <div className={fresh ? 't-degraded' : 'muted'}>{after}</div>}
+    <div className="t-degraded small">
+      {b.mode === 'image'
+        ? t('Отчет агента в {time}: {c} все еще на {image}. Если перезапуск уже выполнен, образ не заменен: смотрите, что сказали последние строки замены образа и перезапуска.', { ...p, time })
+        : b.mode === 'pull'
+          ? t('Отчет агента в {time}: в {c} все еще {name} {from}. Если перезапуск уже выполнен, автор образа его еще не пересобрал.', { ...p, time })
+          : t('Отчет агента в {time}: в {c} все еще {name} {from}. Если шаги уже выполнены, смотрите вывод последней команды.', { ...p, time })}
     </div>
   )
 }
 
+// Шаги "как исправить": сверху одной фразой что сделать и где, ниже строка на контейнер (или пакет)
+// с главным действием, по клику - версия, полный образ, шаги с командами, свернутые откат и "не
+// нужен". Один контейнер раскрыт сразу. Время отчета и "пункт уйдет сам" - одной строкой внизу,
+// что панель перечитывает с каждым отчетом агента - в подсказке
 function SwFix({ g, data, checking, onCheck, t }: {
   g: SoftwareItem
   data: SoftwareOut
@@ -158,42 +319,84 @@ function SwFix({ g, data, checking, onCheck, t }: {
   onCheck: () => void
   t: TFn
 }) {
+  const rows = rowsOf(g)
   const blocks = g.fix ?? []
-  const a = blocks[0]?.args ?? {}
+  const [open, setOpen] = useState(rows.length === 1 ? rows[0].name : '')
   // когда скопировали команду перезапуска, по способу
   const [ran, setRan] = useState<Record<string, number>>({})
+  const more = blocks[0]?.args.more
+  const notes = [...new Map(blocks.flatMap((b) => split(b).notes.map((s) => [s.id, { s, a: b.args }] as const))).values()]
+  const host = blocks.some((b) => b.kind === 'host')
   return (
     <div className="sw-fix">
-      {a.to && (
-        <div className="muted small">
-          {t('Новая версия: {name} {to}', { name: g.name, to: a.to })}
-          {a.more ? `, ${t('подойдет и {list}', { list: a.more })}` : ''}
-        </div>
-      )}
-      {blocks.map((b) => (
-        <div key={b.kind + b.name} className="sw-fix-way">
-          <div className="small">
-            <b>{wayHead(b, t)}</b>
-            {b.others.length > 0 && (
-              <span className="muted">
-                {' '}
-                {t('Тот же образ у {list}: шаги те же, в их папке compose.', {
-                  list: b.others.slice(0, WHERE_MAX).join(', ') + (b.others.length > WHERE_MAX ? ` ${t('и еще {n}', { n: b.others.length - WHERE_MAX })}` : ''),
-                })}
-              </span>
-            )}
-          </div>
-          <FixSteps numbered steps={b.steps} text={(st) => swFixText(st.id, b.args, t)}
-            onCopy={(st) => RESTART.has(st.id) && setRan({ ...ran, [b.kind + b.name]: Date.now() })} />
-          {b.kind === 'container' && (
-            <SwNow g={g} b={b} data={data} ran={ran[b.kind + b.name] ?? 0} checking={checking} onCheck={onCheck} t={t} />
-          )}
+      {headline(g, t).map((h, i) => (
+        <div key={i} className="sw-fix-what">
+          <b>{t('Что сделать:')}</b> {h}
+          {i === 0 && more && <span className="muted"> · {t('подойдет и {list}', { list: more })}</span>}
         </div>
       ))}
-      <div className="muted small">
-        {blocks.some((b) => b.kind === 'host')
-          ? t('Пункт уходит сам, когда этой версии на ноде не останется: у контейнеров - со следующим отчетом агента, у пакетов хоста - в течение часа.')
-          : t('Пункт уходит сам, когда этой версии на ноде не останется, со следующим отчетом агента.')}
+      {notes.length > 0 && (
+        <div className="sw-fix-note small">
+          {notes.map(({ s, a }) => <div key={s.id} title={swFixText(s.id, a, t)}>{shortText(s.id, a, t)}</div>)}
+        </div>
+      )}
+      <div className="sw-fix-rows">
+        {rows.map((r) => {
+          const on = open === r.name
+          const isHost = r.b.kind === 'host'
+          const { acts } = split(r.b)
+          // одна заметка без команды уже сказана фразой сверху
+          const showActs = acts.some((s) => s.cmd) || acts.length > 1
+          const { undo, alt } = split(r.b)
+          return (
+            <Fragment key={r.b.kind + r.name}>
+              <button className={`sw-fix-row${on ? ' on' : ''}`} aria-expanded={on} onClick={() => setOpen(on ? '' : r.name)}>
+                <span className="sw-caret">{on ? '▾' : '▸'}</span>
+                <span className="sw-fix-name">{isHost ? t('пакет {p}', { p: r.name }) : r.name}</span>
+                <span className="sw-fix-img">{isHost ? <span className="mono">{r.b.args.full}</span> : <Img image={r.image} />}</span>
+                <span className="sw-fix-dir muted small">{[r.dir, r.svc].filter(Boolean).join(' · ')}</span>
+                <span className="sw-fix-act small">{r.main ? mainAction(r.b, t) : t('как у {c}', { c: r.b.name })}</span>
+              </button>
+              {on && (
+                <div className="sw-fix-detail">
+                  {!isHost && (
+                    <div className="sw-facts muted small">
+                      <span>
+                        {[r.ver && (r.main && r.b.args.env
+                          ? t('версия {v} из {k}', { v: r.ver, k: r.b.args.env.split('=')[0] })
+                          : t('версия {v}', { v: r.ver })), r.status && upText(r.status, t)].filter(Boolean).join(' · ')}
+                      </span>
+                      {r.image !== shortImage(r.image) && <><span className="mono">{r.image}</span><CopyBtn text={r.image} t={t} /></>}
+                    </div>
+                  )}
+                  {!r.main && <div className="muted small">{t('Образ тот же, что у {c}: шаги те же, в папке {d}.', { c: r.b.name, d: r.dir || '?' })}</div>}
+                  {r.main && showActs && (
+                    <Steps steps={acts} a={r.b.args} t={t}
+                      onCopy={(st) => RESTART.has(st.id) && setRan({ ...ran, [r.b.kind + r.b.name]: Date.now() })} />
+                  )}
+                  {r.main && r.b.kind === 'container' && <SwWait g={g} b={r.b} data={data} ran={ran[r.b.kind + r.b.name] ?? 0} t={t} />}
+                  {r.main && (undo.length > 0 || alt.length > 0) && (
+                    <div className="sw-extra">
+                      {undo.length > 0 && <Toggle label={t('откат, если что-то не так')}><Steps steps={undo} a={r.b.args} t={t} /></Toggle>}
+                      {alt.length > 0 && (
+                        <Toggle label={isHost ? t('пакет не нужен') : t('контейнер не нужен')}><Steps steps={alt} a={r.b.args} t={t} /></Toggle>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
+            </Fragment>
+          )
+        })}
+      </div>
+      <div className="sw-fix-foot muted small"
+        title={t('Пока шаги открыты, агент присылает отчет раз в {n} с, панель перечитывает их сама', { n: data.every ?? 15 })}>
+        <span>
+          {data.report_at ? t('проверено в {time}', { time: hms(data.report_at) }) : t('отчетов еще не было')}
+          {' · '}
+          {host ? t('пункт уйдет сам в течение часа после обновления') : t('пункт уйдет сам со следующим отчетом после обновления')}
+        </span>
+        <button className="ghost small" disabled={checking} onClick={onCheck}>{checking ? t('проверяю...') : t('проверить сейчас')}</button>
       </div>
     </div>
   )
@@ -218,7 +421,7 @@ function whereText(g: SoftwareItem, t: TFn): string {
   const host = g.where.filter((w) => w.kind === 'host').map((w) => w.name)
   const parts: string[] = []
   // один контейнер - сразу и образ с папкой compose: видно, что это за PHP
-  if (cont.length === 1) parts.push([cont[0], cw[0].image, cw[0].dir].filter(Boolean).join(' · '))
+  if (cont.length === 1) parts.push([cont[0], cw[0].image && shortImage(cw[0].image), cw[0].dir].filter(Boolean).join(' · '))
   else if (cont.length)
     parts.push(
       cont.slice(0, WHERE_MAX).join(', ') + (cont.length > WHERE_MAX ? ` ${t('и еще {n}', { n: cont.length - WHERE_MAX })}` : ''),

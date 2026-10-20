@@ -37,6 +37,28 @@ function cmdText(cmd: string, lang: string, t: (s: string) => string): string {
   return lang === 'en' ? ECHO.reduce((c, s) => c.split(`${s}"`).join(`${t(s)}"`), cmd) : cmd
 }
 
+// Команда шага с кнопкой "Копировать": английская панель показывает и копирует фразы проверки
+// по-английски (cmdText). Шаги версий ПО рисуют ее сами, без рамки FixSteps
+export function FixCmd({ cmd, onCopy, className = '' }: { cmd: string; onCopy?: () => void; className?: string }) {
+  const { t, lang } = useI18n()
+  const [copied, setCopied] = useState(false)
+  const text = cmdText(cmd, lang, t)
+  return (
+    <div className={`agent-advice-cmd ${className}`.trim()}>
+      <pre>{text}</pre>
+      <button className="ghost" onClick={(e) => {
+        e.stopPropagation()
+        navigator.clipboard?.writeText(text)
+        onCopy?.()
+        setCopied(true)
+        window.setTimeout(() => setCopied(false), 1500)
+      }}>
+        {copied ? t('Скопировано') : t('Копировать')}
+      </button>
+    </div>
+  )
+}
+
 export function FixSteps<S extends FixStep>({ steps, text, foot, numbered, onCopy }: {
   steps: S[]
   text: (st: S) => string
@@ -45,8 +67,7 @@ export function FixSteps<S extends FixStep>({ steps, text, foot, numbered, onCop
   // скопировали команду шага: вызывающий может ждать, что ее сейчас выполнят
   onCopy?: (st: S) => void
 }) {
-  const { t, lang } = useI18n()
-  const [copied, setCopied] = useState(-1)
+  const { t } = useI18n()
   let n = 0
   return (
     <div className="osupd-fix">
@@ -60,19 +81,7 @@ export function FixSteps<S extends FixStep>({ steps, text, foot, numbered, onCop
               {num > 0 && <b className="osupd-num">{num}.</b>}
               {text(st)}
             </div>
-            {st.cmd && (
-              <div className="agent-advice-cmd">
-                <pre>{cmdText(st.cmd, lang, t)}</pre>
-                <button className="ghost" onClick={() => {
-                  navigator.clipboard?.writeText(cmdText(st.cmd ?? '', lang, t))
-                  onCopy?.(st)
-                  setCopied(i)
-                  window.setTimeout(() => setCopied(-1), 1500)
-                }}>
-                  {copied === i ? t('Скопировано') : t('Копировать')}
-                </button>
-              </div>
-            )}
+            {st.cmd && <FixCmd cmd={st.cmd} onCopy={() => onCopy?.(st)} />}
           </div>
         )
       })}
