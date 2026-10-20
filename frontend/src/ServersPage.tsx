@@ -80,6 +80,7 @@ import {
   NOBOOT_MUTE,
   ACCESS_MUTE,
   osDecisionLabel,
+  muteAutoNote,
   muteKindLabel,
   OOM_MUTE,
   oomCulpritLabel,
@@ -5905,7 +5906,7 @@ function SnoozeBar({
         <div className="snooze-active-list">
           {mutes.map((k) => (
             <span key={'m' + k} className="snooze-active-chip snooze-perm">
-              🔇 {t(labelOf(k))} · {t('постоянно')}
+              🔇 {t(labelOf(k))} · {muteAutoNote(k, t) ?? t('постоянно')}
               <button className="chip-x" disabled={busy} title={t('Снять')}
                 onClick={() => onUnmute(k)}>
                 ✕

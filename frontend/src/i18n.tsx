@@ -1031,6 +1031,8 @@ const EN: Record<string, string> = {
   'источник: {s}': 'source: {s}',
   // --- сводка заглушённого на странице серверов ---
   'бессрочно': 'no expiry',
+  'снимется сам после замены диска и сборки массива': 'lifts itself once the disk is replaced and the array is rebuilt',
+  'мьют снят сам': 'mute lifted automatically',
   'ещё {d}': '{d} left',
   '{n} мин': '{n} min',
   '{n} ч': '{n} h',

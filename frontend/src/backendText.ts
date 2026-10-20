@@ -18,6 +18,9 @@ const PHRASES: Rule[] = [
   [/, похоже на старую группу: менялись хост или пути/g, ', looks like an old group: the host or paths changed'],
   [/(\d+) снапшотов при политике (\d+), удалений нет/g, '$1 snapshots with a policy of $2, nothing removed'],
   [/старейшему снапшоту (\d+) дн\. при политике до (\d+)/g, 'the oldest snapshot is $1 d old with a policy of up to $2'],
+  // мьют поломки диска снят сам (app/disk_mute.py)
+  [/мьют снят: диски? (.+?) заменены?, массив собран/g, 'mute lifted: disk $1 replaced, array rebuilt'],
+  [/мьют снят: диск заменен, массив собран/g, 'mute lifted: disk replaced, array rebuilt'],
   // порты и доступы
   [/в интернет открылся новый порт: /g, 'new port open to the internet: '],
   [/служебное открыто в интернет: /g, 'service ports open to the internet: '],

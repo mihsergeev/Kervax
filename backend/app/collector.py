@@ -49,6 +49,7 @@ from app import known as known_mod
 from app import onboard as onboard_mod
 from app import liveness
 from app import disk_wear
+from app import disk_mute
 from app import software as software_mod
 from app import parents as parents_mod
 from app import maint
@@ -5957,6 +5958,8 @@ async def evaluate_servers(
     known_add: list[tuple[int, str, dict]] = []
     # сервер закрыл подключение сам (вышел ONBOARD_MAX): sid -> что стало известным
     onboard_closed: dict[int, list[str]] = {}
+    # мьют поломки диска снят сам, диск заменили и массив собрался: (sid, текст)
+    mute_lift: list[tuple[int, str]] = []
     # где в очередях начинается каждый сервер: у серверов на подключении после цикла
     # отправляется только офлайн и критичный диск (onboard_mod.split)
     marks: list[tuple[int | None, int, int, int, int]] = []
@@ -6062,6 +6065,28 @@ async def evaluate_servers(
                 apply(s.id, f"{k}_from", now.isoformat())
             elif _lvl <= 0 and frm:
                 apply(s.id, f"{k}_from", None)
+        # Бессрочный мьют поломки диска держится, пока диск не заменят (app/disk_mute.py). Снят -
+        # в этом же тике алерт идет как без мьюта: состояние с нуля, все, что осталось сломанным
+        # кроме замененного диска, придет новым алертом, а отбоя про давнее не будет
+        dm_on = disk_mute.KEY in (s.alert_mutes or [])
+        if dm_on or st.get(disk_mute.STATE):
+            dm_ctx = conds.get(disk_mute.KEY, (0, {}))[1]
+            dm_anc, dm_gone = disk_mute.step(
+                st.get(disk_mute.STATE), dm_on, disk_health_block(s.last_report or {}) if talking else None,
+                st.get(f"{disk_mute.KEY}_sig"), dm_ctx.get("sig"), now, io_held=bool(dm_ctx.get("since")))
+            if dm_gone:
+                dm_anc = None
+                dm_txt = disk_mute.lift_text(dm_gone)
+                dm_snz = _parse_iso((s.alert_snoozes or {}).get(disk_mute.KEY) or "")
+                if dm_snz is None or dm_snz <= now:  # временный снуз того же вида дослуживает свой срок
+                    mutes.discard(disk_mute.KEY)
+                mute_lift.append((s.id, dm_txt))
+                recoveries.append(_server_alert_text(disk_mute.KEY, s.name, dm_txt, srv_url(s, disk_mute.KEY),
+                                                     recovery=True, group=s.group_name or ""))
+                for dk, dv in (("", 0), ("_sig", []), ("_told", []), ("_told_lvl", None)):
+                    apply(s.id, disk_mute.KEY + dk, dv)
+            if dm_anc != st.get(disk_mute.STATE):
+                apply(s.id, disk_mute.STATE, dm_anc)
         # Известные проблемы (app/known.py): снимок того, что отметили, закрытие, когда ушла
         # сама или вышел срок, и напоминание раз в неделю, что она все еще висит
         known_now: dict[str, dict] = {}
@@ -6810,7 +6835,7 @@ async def evaluate_servers(
         for sid, key, value in rec_apply:
             apply(sid, key, value)
 
-    if changed_ids or known_upd or known_add or onboard_closed:
+    if changed_ids or known_upd or known_add or onboard_closed or mute_lift:
         async with session_factory() as session:
             for sid in changed_ids:
                 row = await session.get(Server, sid)
@@ -6841,6 +6866,12 @@ async def evaluate_servers(
                     row.onboard_done_at, row.onboard_by = now, "авто"
                     session.add(AuditLog(username="авто", action="onboard_done", target=row.name[:255],
                                          detail=", ".join(made)))
+            for sid, txt in mute_lift:
+                row = await session.get(Server, sid)
+                if row is not None and disk_mute.KEY in (row.alert_mutes or []):
+                    # сняли руками раньше нас - в журнал писать нечего
+                    row.alert_mutes = [m for m in row.alert_mutes if m != disk_mute.KEY]
+                    session.add(AuditLog(username="авто", action="mute_lifted", target=row.name[:255], detail=txt))
             await session.commit()
 
 
