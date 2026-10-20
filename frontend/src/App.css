@@ -7532,3 +7532,59 @@ button.ghost.lc-del { color: var(--down); border-color: color-mix(in srgb, var(-
   .upd-row .home-attention-txt + button { margin-left: 2.2rem; }
   .upd-all { width: 100%; }
 }
+
+/* ---------- вход админа под чужой учеткой (ImpersonationBar) ----------
+   Над шапкой и поверх окон (z-index выше .modal-backdrop): под кем сейчас, видно всегда,
+   и вернуться к себе можно из любого открытого окна. */
+.imp-bar {
+  position: sticky;
+  top: 0;
+  z-index: 11;
+  display: flex;
+  align-items: center;
+  gap: 0.8rem;
+  margin: 0 0 0.9rem;
+  padding: 0.55rem 0.8rem;
+  border: 1px solid var(--degraded);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--degraded) 22%, var(--bg-card));
+  color: var(--text);
+  font-size: 0.9rem;
+  line-height: 1.35;
+}
+.imp-bar-text {
+  flex: 1;
+  min-width: 0;
+}
+.imp-bar-scope {
+  color: var(--text-muted);
+}
+.imp-bar-note {
+  display: block;
+  color: var(--text-muted);
+  font-size: 0.82rem;
+}
+.imp-bar-btn {
+  flex: none;
+  background: var(--degraded);
+  border-color: var(--degraded);
+  color: #1b1300;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.imp-bar-btn:hover {
+  filter: brightness(1.08);
+}
+.us-imp-cell {
+  text-align: right;
+  white-space: nowrap;
+}
+@media (max-width: 600px) {
+  .imp-bar {
+    flex-wrap: wrap;
+    gap: 0.5rem;
+  }
+  .imp-bar-btn {
+    width: 100%;
+  }
+}

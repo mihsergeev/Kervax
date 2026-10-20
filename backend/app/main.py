@@ -34,6 +34,7 @@ from app.bootstrap import ensure_admin, ensure_default_location
 from app.collector import collector_loop
 from app.config import get_settings
 from app.db import create_engine_and_factory
+from app import impersonate
 from app.gzip_request import GzipRequestMiddleware
 from app.panel_errors import PanelErrorMiddleware
 from app.request_watch import RequestWatchMiddleware
@@ -97,6 +98,8 @@ def create_app() -> FastAPI:
     app.state.engine = engine
     app.state.session_factory = session_factory
 
+    # пометка "админ вошел под чужой учеткой" живет на запрос, сбрасываем ее в начале каждого
+    app.add_middleware(impersonate.ResetMiddleware)
     # агент 1.90+ шлёт отчёт сжатым — см. gzip_request (обход DPI по счётчику байт)
     app.add_middleware(GzipRequestMiddleware)
     # счетчик левых запросов к API: отказы и всплески по адресам (app/request_watch.py)

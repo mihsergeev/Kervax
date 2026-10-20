@@ -134,6 +134,25 @@ class AuditLog(Base):
     action: Mapped[str] = mapped_column(String(48))
     target: Mapped[str] = mapped_column(String(255), default="")
     detail: Mapped[str] = mapped_column(Text, default="")
+    # от чьего имени: админ вошел под учеткой as_user (app/impersonate.py) - username тогда сам
+    # админ, а здесь учетка, глазами которой он смотрел. Пусто = действовал от себя
+    as_user: Mapped[str] = mapped_column(String(64), default="")
+
+
+class Impersonation(Base):
+    """Вход админа под чужой учеткой (как в GitLab): посмотреть панель глазами пользователя без
+    его пароля. Токен такого входа ссылается на строку здесь, поэтому его можно отозвать до срока
+    ("Вернуться к себе"), а срок проверяет и подпись токена, и сама строка."""
+
+    __tablename__ = "impersonations"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    admin: Mapped[str] = mapped_column(String(64))
+    target: Mapped[str] = mapped_column(String(64))
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    ip: Mapped[str] = mapped_column(String(64), default="")
 
 
 class PanelError(Base):

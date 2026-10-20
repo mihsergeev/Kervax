@@ -21,6 +21,43 @@ export function setToken(token: string | null) {
   }
 }
 
+// Вход админа под чужой учеткой (backend/app/impersonate.py): токен админа на это время лежит
+// отдельно, а в TOKEN_KEY - токен входа, поэтому все запросы идут с правами пользователя.
+// "Вернуться к себе" возвращает токен админа на место - без повторного входа
+export const IMP_ADMIN_KEY = 'kervax_admin_token'
+const IMP_ID_KEY = 'kervax_imp_id'
+
+export function impersonating(): boolean {
+  return !!localStorage.getItem(IMP_ADMIN_KEY)
+}
+
+export type ImpersonateOut = { access_token: string; imp_id: number; username: string; expires_at: string }
+
+export async function startImpersonation(userId: number, password: string): Promise<ImpersonateOut> {
+  const out = await api<ImpersonateOut>(`/api/users/${userId}/impersonate`, {
+    method: 'POST',
+    body: JSON.stringify({ password }),
+  })
+  const own = getToken()
+  if (own) localStorage.setItem(IMP_ADMIN_KEY, own)
+  localStorage.setItem(IMP_ID_KEY, String(out.imp_id))
+  setToken(out.access_token)
+  return out
+}
+
+// Вернуться к себе: токен админа на место, вход закрывается на сервере (его токен перестает
+// действовать сразу). Закрытие - уже с токеном админа: токен входа к этому времени мог истечь
+export async function stopImpersonation(): Promise<void> {
+  const own = localStorage.getItem(IMP_ADMIN_KEY)
+  const id = localStorage.getItem(IMP_ID_KEY)
+  localStorage.removeItem(IMP_ADMIN_KEY)
+  localStorage.removeItem(IMP_ID_KEY)
+  setToken(own)
+  if (own && id) {
+    await api(`/api/users/impersonation/${id}/stop`, { method: 'POST' }).catch(() => undefined)
+  }
+}
+
 export class ApiError extends Error {
   status: number
 
@@ -79,6 +116,9 @@ export type UserOut = {
   // видимые группы; у серверов и у сайтов свои наборы имён, поэтому списки раздельные
   server_groups?: string[] | null
   site_groups?: string[] | null
+  // админ вошел под этой учеткой: кто и до какого времени (плашка сверху)
+  impersonator?: string | null
+  imp_expires?: string | null
 }
 
 export function me(): Promise<UserOut> {
@@ -121,7 +161,8 @@ export function listAccessGroups(): Promise<AccessGroups> {
   return api<AccessGroups>('/api/users/groups')
 }
 // Окно "Пользователи": учетки с последним входом и действиями из журнала, сам журнал
-export type AuditEntry = { id: number; ts: string; username: string; action: string; target: string; detail: string }
+// as_user - админ действовал, войдя под этой учеткой (пусто - от себя)
+export type AuditEntry = { id: number; ts: string; username: string; action: string; target: string; detail: string; as_user?: string }
 export type UserCard = PanelUser & {
   tg_linked: boolean
   last_login: string | null

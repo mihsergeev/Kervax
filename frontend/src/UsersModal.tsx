@@ -9,6 +9,7 @@ import {
   listAccessGroups,
   resetUserPassword,
   saveLoginGuard,
+  startImpersonation,
   unbanLogin,
   updateUser,
   MIN_PASSWORD_LEN,
@@ -20,7 +21,7 @@ import {
   type UserCard,
   type UsersOverview,
 } from './api'
-import { ROLE_LABEL, ROLE_SHORT, ROLE_WHAT, SECTION_LABEL, SECTIONS } from './access'
+import { ROLE_LABEL, ROLE_SHORT, ROLE_WHAT, SECTIONS, scopeText } from './access'
 import { actLabel } from './auditActs'
 import { useAuth } from './auth'
 import { CardNav, type SecDef } from './cardLayout'
@@ -44,7 +45,7 @@ type T = (s: string, p?: Record<string, string | number>) => string
 
 // действия журнала по-человечески; чего здесь нет - показываем как записано
 const LOGIN_ACTS = new Set(['login_ok', 'login_fail', 'login_2fa_fail', 'login_blocked', 'login_lockout'])
-const FAIL_ACTS = new Set(['login_fail', 'login_2fa_fail', 'login_blocked', 'login_lockout'])
+const FAIL_ACTS = new Set(['login_fail', 'login_2fa_fail', 'login_blocked', 'login_lockout', 'impersonate_pw_fail'])
 
 type Draft = { id: number; role: Role; sections: string[]; server_groups: string[]; site_groups: string[] }
 const draftOf = (u: UserCard): Draft => ({
@@ -106,18 +107,64 @@ function PickList({
   )
 }
 
-const scopeText = (u: UserCard, t: T) =>
-  u.role === 'admin'
-    ? t('все разделы и группы')
-    : [
-        (u.sections?.length ?? 0) === 0
-          ? t('все разделы')
-          : (u.sections ?? []).map((x) => t(SECTION_LABEL[x] ?? x)).join(', '),
-        (u.server_groups?.length ?? 0) === 0
-          ? t('все серверы')
-          : t('серверы: {g}', { g: (u.server_groups ?? []).join(', ') }),
-        (u.site_groups?.length ?? 0) === 0 ? t('все сайты') : t('сайты: {g}', { g: (u.site_groups ?? []).join(', ') }),
-      ].join(' · ')
+// Под кем можно войти: не под собой и не под админом (у него те же права, смотреть нечего).
+// Сервер проверяет то же самое, здесь - чтобы не показывать кнопку, которая даст отказ
+const canImpersonate = (u: UserCard, me: string) => u.username !== me && u.role !== 'admin'
+
+/** Подтверждение входа под чужой учеткой: что будет и свой пароль админа еще раз (step-up). */
+function ImpersonateDialog({ user, onClose, t }: { user: UserCard; onClose: () => void; t: T }) {
+  const [pw, setPw] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [err, setErr] = useState<string | null>(null)
+  const go = async () => {
+    setBusy(true)
+    setErr(null)
+    try {
+      await startImpersonation(user.id, pw)
+      // страница заново: все загруженное с правами админа должно уйти из памяти
+      window.location.assign(window.location.pathname)
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : t('Ошибка'))
+      setBusy(false)
+    }
+  }
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <form
+        className="card known-dialog"
+        onClick={(e) => e.stopPropagation()}
+        onSubmit={(e) => {
+          e.preventDefault()
+          if (pw && !busy) go()
+        }}
+      >
+        <h3>{t('Войти как {user}?', { user: user.username })}</h3>
+        <p className="small">
+          {t('Панель откроется так, как ее видит {user}: только разделы, группы и кнопки этой учетки ({scope}).', {
+            user: user.username,
+            scope: scopeText(user, t),
+          })}
+        </p>
+        <p className="muted small">
+          {t('Только просмотр: изменения будут отклоняться. Вход на час, вернуться к себе можно в любой момент кнопкой на плашке сверху. Начало и конец попадут в журнал действий.')}
+        </p>
+        <label className="field">
+          <span>{t('Ваш пароль')}</span>
+          <input type="password" value={pw} onChange={(e) => setPw(e.target.value)} autoComplete="current-password" autoFocus />
+        </label>
+        {err && <p className="form-error">{err}</p>}
+        <div className="note-bar-actions">
+          <button type="submit" disabled={busy || !pw}>
+            {busy ? t('…') : t('Войти как {user}', { user: user.username })}
+          </button>
+          <button type="button" className="ghost" disabled={busy} onClick={onClose}>
+            {t('Отмена')}
+          </button>
+        </div>
+      </form>
+    </div>
+  )
+}
 
 export function UsersModal({ onClose, onUnauthorized }: Props) {
   const { t } = useI18n()
@@ -138,6 +185,8 @@ export function UsersModal({ onClose, onUnauthorized }: Props) {
   const [nRole, setNRole] = useState<Role>('viewer')
   // сброс пароля в карточке учетки
   const [pw, setPw] = useState('')
+  // вход под чужой учеткой: чье подтверждение открыто
+  const [impFor, setImpFor] = useState<UserCard | null>(null)
   // журнал: чей и какие записи
   const [logWho, setLogWho] = useState('')
   const [logKind, setLogKind] = useState<'all' | 'changes' | 'logins'>('all')
@@ -289,8 +338,14 @@ export function UsersModal({ onClose, onUnauthorized }: Props) {
         {rows.map((a) => (
           <tr key={a.id}>
             <td className="nowrap">{whenShort(a.ts)}</td>
-            {who && <td className="nowrap">{a.username || '-'}</td>}
+            {who && (
+              <td className="nowrap">
+                {a.username || '-'}
+                {a.as_user && <span className="muted small"> {t('от имени {user}', { user: a.as_user })}</span>}
+              </td>
+            )}
             <td className={FAIL_ACTS.has(a.action) ? 't-degraded' : ''}>
+              {!who && a.as_user && <span className="muted small">{t('от имени {user}', { user: a.as_user })}: </span>}
               {actText(a)}
               {a.detail && <span className="muted small"> · {a.detail}</span>}
             </td>
@@ -406,6 +461,7 @@ export function UsersModal({ onClose, onUnauthorized }: Props) {
                           <th>{t('Учетка')}</th>
                           <th className="hide-m">{t('Доступ')}</th>
                           <th>{t('Последний вход')}</th>
+                          <th />
                         </tr>
                       </thead>
                       <tbody>
@@ -420,6 +476,17 @@ export function UsersModal({ onClose, onUnauthorized }: Props) {
                             <td className="hide-m muted small">{scopeText(u, t)}</td>
                             <td className="small">
                               {u.last_login ? ago(u.last_login) : <span className="muted">{t('не входил')}</span>}
+                            </td>
+                            <td className="us-imp-cell">
+                              {canImpersonate(u, meName) && (
+                                <button
+                                  className="ghost small"
+                                  onClick={() => setImpFor(u)}
+                                  title={t('Посмотреть панель глазами этой учетки, без ее пароля')}
+                                >
+                                  {t('войти как')}
+                                </button>
+                              )}
                             </td>
                           </tr>
                         ))}
@@ -531,6 +598,22 @@ export function UsersModal({ onClose, onUnauthorized }: Props) {
                         <p className="muted small">{t('В журнале записей нет.')}</p>
                       )
                     })()}
+
+                    <div className="srv-nav-grp rt-cap">{t('Войти как')}</div>
+                    {canImpersonate(curUser, meName) ? (
+                      <div className="ans-acts">
+                        <button className="ghost" disabled={busy} onClick={() => setImpFor(curUser)}>
+                          {t('Войти как {user}', { user: curUser.username })}
+                        </button>
+                        <span className="muted small">{t('посмотреть панель так, как ее видит эта учетка: только просмотр, на час')}</span>
+                      </div>
+                    ) : (
+                      <p className="muted small">
+                        {curUser.username === meName
+                          ? t('Это ваша учетка.')
+                          : t('Под администратором войти нельзя: у него те же права, что у вас.')}
+                      </p>
+                    )}
 
                     <div className="srv-nav-grp rt-cap">{t('Удаление')}</div>
                     {(() => {
@@ -673,6 +756,7 @@ export function UsersModal({ onClose, onUnauthorized }: Props) {
           </span>
         </div>
       </div>
+      {impFor && <ImpersonateDialog user={impFor} onClose={() => setImpFor(null)} t={t} />}
     </div>
   )
 }

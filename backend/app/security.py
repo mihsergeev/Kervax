@@ -47,6 +47,25 @@ def create_access_token(
     return jwt.encode(payload, secret, algorithm="HS256")
 
 
+def create_impersonation_token(
+    username: str, token_version: int, admin: str, admin_version: int, imp_id: int,
+    secret: str, expires: datetime,
+) -> str:
+    """Токен входа админа под учеткой username (app/impersonate.py): sub - пользователь, чьими
+    правами отвечает сервер, imp - админ, imp_id - строка impersonations (ее закрытие отзывает
+    токен до срока). Версии обеих учеток: смена пароля любой из них гасит такой вход."""
+    payload = {
+        "sub": username,
+        "ver": token_version,
+        "imp": admin,
+        "imp_ver": admin_version,
+        "imp_id": imp_id,
+        "iat": datetime.now(timezone.utc),
+        "exp": expires,
+    }
+    return jwt.encode(payload, secret, algorithm="HS256")
+
+
 def decode_access_token(token: str, secret: str) -> dict | None:
     """Возвращает payload (sub/ver/…) при валидной подписи и сроке, иначе None."""
     try:

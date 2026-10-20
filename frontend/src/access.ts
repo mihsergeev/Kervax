@@ -27,3 +27,20 @@ export const ROLE_WHAT: Record<string, string> = {
   editor: 'Правит в разрешенных разделах, учетки и настройки панели ему не видны.',
   viewer: 'Только смотрит, ничего не меняет.',
 }
+
+type T = (s: string, p?: Record<string, string | number>) => string
+type Scoped = { role: string; sections?: string[] | null; server_groups?: string[] | null; site_groups?: string[] | null }
+
+// Что видно учетке одной строкой: окно "Пользователи" и плашка входа под чужой учеткой
+export const scopeText = (u: Scoped, t: T) =>
+  u.role === 'admin'
+    ? t('все разделы и группы')
+    : [
+        (u.sections?.length ?? 0) === 0
+          ? t('все разделы')
+          : (u.sections ?? []).map((x) => t(SECTION_LABEL[x] ?? x)).join(', '),
+        (u.server_groups?.length ?? 0) === 0
+          ? t('все серверы')
+          : t('серверы: {g}', { g: (u.server_groups ?? []).join(', ') }),
+        (u.site_groups?.length ?? 0) === 0 ? t('все сайты') : t('сайты: {g}', { g: (u.site_groups ?? []).join(', ') }),
+      ].join(' · ')

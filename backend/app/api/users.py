@@ -12,13 +12,17 @@
 
 from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, HTTPException, Request, status
 from sqlalchemy import func, select
 
-from app import audit
+from app import audit, impersonate, ratelimit
+from app.api.auth import _client_key, _record_failure
+from app.config import get_settings
 from app.deps import AdminUser, SessionDep
-from app.models import AuditLog, Check, Server, User
+from app.models import AuditLog, Check, Impersonation, Server, User
 from app.schemas import (
+    ImpersonateIn,
+    ImpersonateOut,
     UserCardOut,
     UserCreate,
     UserListItem,
@@ -26,7 +30,7 @@ from app.schemas import (
     UsersOverview,
     UserUpdate,
 )
-from app.security import hash_password
+from app.security import create_impersonation_token, hash_password, verify_password
 
 router = APIRouter(prefix="/users", tags=["users"])
 
@@ -216,3 +220,75 @@ async def delete_user(
     await session.delete(user)
     await session.commit()
     await audit.record(session, admin.username, "user_delete", name)
+
+
+# --- вход под чужой учеткой (app/impersonate.py) ------------------------------------------------
+
+
+async def _close_open(session, admin: str, why: str, now: datetime) -> None:
+    """Закрывает незакрытые входы админа под чужими учетками (новый вход заменяет прежний)."""
+    rows = list(await session.scalars(select(Impersonation).where(
+        Impersonation.admin == admin, Impersonation.ended_at.is_(None))))
+    for r in rows:
+        r.ended_at = now
+    await session.commit()
+    for r in rows:
+        await audit.record(
+            session, admin, "impersonate_stop", r.target, why if _aware(r.expires_at) > now else "истек срок")
+
+
+@router.post("/{user_id}/impersonate", response_model=ImpersonateOut)
+async def impersonate_start(
+    user_id: int, body: ImpersonateIn, request: Request, admin: AdminUser, session: SessionDep
+) -> ImpersonateOut:
+    """Войти под учеткой, чтобы увидеть панель ее глазами. Пароль и 2FA пользователя не нужны,
+    нужен свой пароль админа (step-up). Только просмотр, на час."""
+    settings = get_settings()
+    key = _client_key(request)
+    if not verify_password(body.password, admin.password_hash):
+        guard = await ratelimit.load(session)
+        await _record_failure(
+            session, settings, key, admin.username, "impersonate_pw_fail", guard, guard.allowed(key) is not None)
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Неверный пароль")
+    user = await session.get(User, user_id)
+    if user is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Учётка не найдена")
+    if user.id == admin.id:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Под своей учеткой вы и так")
+    if user.role == "admin":
+        # у админа те же права, что у вас: смотреть нечего, а действовать от его имени незачем
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST, "Под другим администратором войти нельзя: у него те же права, что у вас")
+    now = datetime.now(timezone.utc)
+    await _close_open(session, admin.username, "начат новый вход", now)
+    expires = now + timedelta(minutes=impersonate.IMP_TTL_MINUTES)
+    row = Impersonation(admin=admin.username, target=user.username, expires_at=expires, ip=key[:64])
+    session.add(row)
+    await session.commit()
+    await session.refresh(row)
+    token = create_impersonation_token(
+        user.username, user.token_version, admin.username, admin.token_version, row.id,
+        settings.jwt_secret, expires,
+    )
+    await audit.record(
+        session, admin.username, "impersonate_start", user.username,
+        f"только просмотр, на {impersonate.IMP_TTL_MINUTES} мин, IP {key}")
+    return ImpersonateOut(access_token=token, imp_id=row.id, username=user.username, expires_at=expires)
+
+
+@router.post("/impersonation/{imp_id}/stop", status_code=status.HTTP_204_NO_CONTENT)
+async def impersonate_stop(imp_id: int, admin: AdminUser, session: SessionDep) -> None:
+    """"Вернуться к себе": браузер снова ходит с токеном админа и закрывает вход - токен входа
+    под чужой учеткой перестает действовать сразу. Зовется и после истечения срока, тогда в
+    журнале причина "истек срок"."""
+    row = await session.get(Impersonation, imp_id)
+    if row is None or row.admin != admin.username:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Вход не найден")
+    if row.ended_at is not None:
+        return
+    now = datetime.now(timezone.utc)
+    expired = _aware(row.expires_at) <= now
+    row.ended_at = _aware(row.expires_at) if expired else now
+    await session.commit()
+    await audit.record(
+        session, admin.username, "impersonate_stop", row.target, "истек срок" if expired else "вернулся к себе")

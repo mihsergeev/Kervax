@@ -6,6 +6,7 @@ from datetime import timezone
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app import impersonate
 from app.models import AuditLog, Server
 from app.schemas import AuditEntryOut
 
@@ -21,7 +22,14 @@ async def record(
     target: str = "",
     detail: str = "",
 ) -> None:
-    """Пишет запись в журнал (best-effort, не должно ронять основную операцию)."""
+    """Пишет запись в журнал (best-effort, не должно ронять основную операцию).
+
+    Во время входа админа под чужой учеткой (app/impersonate.py) запись от имени пользователя
+    уходит на самого админа с пометкой as_user: действовал он, а не пользователь."""
+    as_user = ""
+    a = impersonate.acting()
+    if a is not None and username == a.target:
+        username, as_user = a.admin, a.target
     try:
         session.add(
             AuditLog(
@@ -29,6 +37,7 @@ async def record(
                 action=action,
                 target=str(target)[:255],
                 detail=str(detail)[:2000],
+                as_user=as_user,
             )
         )
         await session.commit()
