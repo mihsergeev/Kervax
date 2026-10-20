@@ -2658,9 +2658,36 @@ const EN: Record<string, string> = {
   'Обновить сначала одну ноду (canary), потом остальные':
     'Update one node first (canary), then the rest',
   'Canary — 1 ноду': 'Canary — 1 node',
-  'Обновить агент до {v} на всех отстающих нодах ({n})?':
-    'Update agent to {v} on all {n} behind nodes?',
   'Обновить все ({n})': 'Update all ({n})',
+  // "Обновить все" на главной и у баннера "Серверов" (FleetUpdate.tsx)
+  'Обновить все': 'Update all',
+  'обновить': 'update',
+  'canary - 1 нода': 'canary - 1 node',
+  'Будет обновлено': 'Will be updated',
+  'агент {a} -> {b}: нод - {n} ({list})': 'agent {a} -> {b}: {n} nodes ({list})',
+  'не на связи: {list} - цель им поставится, обновятся, когда вернутся':
+    'offline: {list} - the target is set, they update when back online',
+  'helper "{helper}" {a} -> {b}: нод - {n} ({list})': 'helper "{helper}" {a} -> {b}: {n} nodes ({list})',
+  'helper "{helper}" {b} поставить: нод - {n} ({list})': 'install helper "{helper}" {b}: {n} nodes ({list})',
+  'настройка юнита агента: нод - {n} ({list})': 'agent unit settings: {n} nodes ({list})',
+  'Агент обновится через панель. helper\'ы работают под root, панель их не запускает: команда ниже скопируется при запуске, выполните ее в репозитории ansible.':
+    'The panel updates the agent. Helpers run as root and the panel does not run them: the command below is copied on start, run it in your ansible repository.',
+  'helper\'ы работают под root, панель их не запускает: команда ниже скопируется, выполните ее в репозитории ansible.':
+    'Helpers run as root and the panel does not run them: the command below gets copied, run it in your ansible repository.',
+  'Запустить обновление': 'Start update',
+  'Обновление helper\'ов': 'Helper update',
+  'Готово: агент {v} на всех нодах ({n})': 'Done: agent {v} on all nodes ({n})',
+  'Агент {v}: обновились {done} из {n}': 'Agent {v}: {done} of {n} updated',
+  'Агент {v}: обновились {done} из {n}, остальные не обновятся сами':
+    'Agent {v}: {done} of {n} updated, the rest will not update on their own',
+  'helper\'ы: везде актуальные': 'helpers: up to date everywhere',
+  'helper\'ы: ждут прогона ansible на нодах - {n} ({list})': 'helpers: waiting for the ansible run on {n} nodes ({list})',
+  'агент отклонил обновление: {err}': 'the agent rejected the update: {err}',
+  'сервер выключен в панели - обновление ему не ставится': 'the server is disabled in the panel - no update is set for it',
+  'раскатку на этой ноде отменили': 'the rollout was cancelled on this node',
+  'не на связи - обновится сам, когда агент вернется': 'offline - updates on its own when the agent is back',
+  'за 15 минут не обновился - на ноде: journalctl -u kervax-agent -n 50; если агент очень старый и сам не обновляется, переустановите его командой из карточки':
+    'not updated in 15 minutes - on the node: journalctl -u kervax-agent -n 50; if the agent is very old and does not self-update, reinstall it with the command from the server card',
   'Обновить агент этой ноды (проверит подпись и хеш)':
     'Update this node’s agent (verifies signature and hash)',
   'Отменить обновление': 'Cancel update',

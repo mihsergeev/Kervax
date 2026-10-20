@@ -1482,6 +1482,9 @@ class ServerOut(BaseModel):
     agent_fix_command: str | None = None
     # идёт докачка обновления агента (медленный канал) - не отказ, чинить нечего
     agent_update_note: str | None = None
+    # агент отверг обновление (подпись, место, сеть): причина его словами, иначе None.
+    # Главная показывает ее у ноды, которая не обновилась после "Обновить все"
+    agent_update_error: str | None = None
     # устаревшие setup-скрипты (helper'ы) на ноде → переустановить на детали сервера
     helper_advice: list[HelperAdvice] = []
     # Прогон kervax_helpers.yml ноде что-то поменяет: устарел helper или не включен
