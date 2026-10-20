@@ -394,6 +394,43 @@ async def test_agent_managed_update(client, auth_headers, monkeypatch):
     assert r.json()["target_agent_version"] == ""
 
 
+async def test_agent_update_only_own_groups(client, auth_headers, monkeypatch):
+    """Редактор группы обновляет агент только на своих серверах: "Обновить все" с главной
+    шлет id видимых ему, но и прямой запрос без списка не должен задеть чужие группы."""
+    monkeypatch.setattr("app.api.servers._available_agent_version", lambda: "1.6")
+    ids = {}
+    for name, grp in (("web-a", "web"), ("db-a", "db")):
+        r = await client.post("/api/servers", json={"name": name, "group_name": grp}, headers=auth_headers)
+        ids[name] = r.json()["server"]["id"]
+        ah = {"Authorization": f"Bearer {r.json()['token']}"}
+        await client.post("/api/agent/report", json={"agent_version": "1.5", "mem_used": 1, "mem_total": 2,
+                                                     "disks": [{"mount": "/", "used": 1, "total": 2}],
+                                                     "update_error": "подпись манифеста не сошлась"}, headers=ah)
+    r = await client.post("/api/users", headers=auth_headers, json={
+        "username": "webeditor", "password": "webeditor-pass-2026", "role": "editor", "server_groups": ["web"]})
+    assert r.status_code in (200, 201), r.text
+    login = await client.post("/api/auth/login", json={"username": "webeditor", "password": "webeditor-pass-2026"})
+    eh = {"Authorization": f"Bearer {login.json()['access_token']}"}
+
+    r = await client.post("/api/servers/agent-update", json={"version": "1.6", "server_ids": None}, headers=eh)
+    assert r.status_code == 200 and [s["name"] for s in r.json()] == ["web-a"]
+    # отказ агента виден у ноды отдельным полем, а не только строкой в советах
+    assert r.json()[0]["agent_update_error"] == "подпись манифеста не сошлась"
+    r = await client.post("/api/servers/agent-update", json={"version": "1.6", "server_ids": [ids["db-a"]]}, headers=eh)
+    assert r.json() == []
+    tgt = {s["name"]: s["target_agent_version"]
+           for s in (await client.get("/api/servers", headers=auth_headers)).json()}
+    assert tgt == {"web-a": "1.6", "db-a": ""}
+
+    # снять раскатку редактор тоже может только у своих
+    await client.post("/api/servers/agent-update", json={"version": "1.6", "server_ids": None}, headers=auth_headers)
+    r = await client.post("/api/servers/agent-update/cancel", json={"server_ids": None}, headers=eh)
+    assert [s["name"] for s in r.json()] == ["web-a"]
+    tgt = {s["name"]: s["target_agent_version"]
+           for s in (await client.get("/api/servers", headers=auth_headers)).json()}
+    assert tgt == {"web-a": "", "db-a": "1.6"}
+
+
 async def test_server_temp_throttle_conditions():
     from datetime import datetime, timedelta, timezone
 
@@ -1675,7 +1712,7 @@ def test_slow_agent_download_is_progress_not_a_rejection():
     попытка идёт дальше. Живой случай 23.09.2026: три РФ-ноды за DPI набирали 5.8 МБ
     несколькими попытками по 10 минут, и панель показывала три пункта «обновление
     агента отклонено» в «Требует действий» - звала чинить то, что чинится само."""
-    from app.api.servers import _agent_advice, agent_update_note
+    from app.api.servers import _agent_advice, agent_update_error, agent_update_note
     from app.models import Server
 
     slow = ("2.10: скачивание бинаря: не уложились в 10m0s, "
@@ -1683,6 +1720,7 @@ def test_slow_agent_download_is_progress_not_a_rejection():
     srv = Server(name="web-a", token_hash="x", enabled=True,
                  last_report={"update_error": slow})
     assert agent_update_note(srv.last_report) == "докачивается 59% (3.4 из 5.8 МБ)"
+    assert agent_update_error(srv.last_report) == ""
     advice, _ = _agent_advice(srv)
     assert advice == []  # в «Требует действий» такое не попадает
 
@@ -1690,6 +1728,7 @@ def test_slow_agent_download_is_progress_not_a_rejection():
     bad = Server(name="node", token_hash="x", enabled=True,
                  last_report={"update_error": "подпись манифеста не сошлась"})
     assert agent_update_note(bad.last_report) == ""
+    assert agent_update_error(bad.last_report) == "подпись манифеста не сошлась"
     advice, _ = _agent_advice(bad)
     assert advice == ["обновление агента отклонено — подпись манифеста не сошлась"]
 

@@ -99,6 +99,7 @@ import { SoftwareCard } from './Software'
 import { FixSteps, useFixDone } from './FixSteps'
 import { GpuCard, GpuChip } from './Gpu'
 import { KnownServerList } from './KnownDialog'
+import { agentBehind, RolloutProgress, UpdateConfirm, useAgentRollout } from './FleetUpdate'
 import { MaintBanner, MaintChip } from './MaintModal'
 
 type MetricKey =
@@ -4493,37 +4494,25 @@ export function ServersPage({ onUnauthorized, openServerId, openServerSec, onCon
 
   // доступная (подписанная) версия агента для управляемого обновления
   const [avail, setAvail] = useState('')
-  const [updBusy, setUpdBusy] = useState(false)
+  // "Обновить все": подтверждение и прогресс - общий код с главной (FleetUpdate.tsx)
+  const [updPlan, setUpdPlan] = useState(false)
+  const agentRun = useAgentRollout(servers ?? [], avail, setServers, onUnauthorized)
   useEffect(() => {
     getAgentRelease()
       .then((r) => setAvail(r.version))
       .catch(() => setAvail(''))
   }, [])
 
-  // серверы, которые онлайн, отчитались о версии и отстают от доступной
-  const behind = (servers ?? []).filter(
-    (s) => s.online && s.agent_version && avail && s.agent_version !== avail,
-  )
+  // серверы, которые онлайн, отчитались о версии и отстают от доступной; цель ставится
+  // и тем, что не на связи (agentBehind): обновятся, когда вернутся
+  const lagging = agentBehind(servers ?? [], avail)
+  const behind = lagging.filter((s) => s.online)
   // заглушенное (пороги и алерты серверов) - плиткой "Заглушено" рядом с остальными, весь
   // список в панели справа: мьют видно, не открывая карточку (иначе бессрочный теряется молча).
   // Мьюты репозиториев и покрытия бэкапа живут на своей странице "Бэкапы"
   const mutes = muteRows(servers ?? [], t, ['alert'])
   const mutesSub = mutesTileSub(mutes, t)
   const [mutesOpen, setMutesOpen] = useState(false)
-  async function rollout(serverIds?: number[]) {
-    if (!avail) return
-    setUpdBusy(true)
-    try {
-      const upd = await agentUpdate(avail, serverIds)
-      setServers(upd)
-    } catch (e) {
-      if (e instanceof ApiError && e.status === 401) return onUnauthorized()
-      setErr(e instanceof Error ? e.message : t('Ошибка'))
-    } finally {
-      setUpdBusy(false)
-    }
-  }
-
   const online = servers?.filter((s) => s.online).length ?? 0
   const total = servers?.length ?? 0
   // «проблемные» = оффлайн ИЛИ превышен порог (CPU/RAM/диск/темп/троттлинг/conntrack)
@@ -4719,30 +4708,27 @@ export function ServersPage({ onUnauthorized, openServerId, openServerSec, onCon
           <div className="aub-actions">
             <button
               className="ghost"
-              disabled={updBusy}
-              onClick={() => rollout([behind[0].id])}
+              disabled={agentRun.busy}
+              onClick={() => agentRun.start([behind[0].id])}
               title={t('Обновить сначала одну ноду (canary), потом остальные')}
             >
               {t('Canary — 1 ноду')}
             </button>
-            <button
-              disabled={updBusy}
-              onClick={() => {
-                if (
-                  window.confirm(
-                    t('Обновить агент до {v} на всех отстающих нодах ({n})?', {
-                      v: avail,
-                      n: behind.length,
-                    }),
-                  )
-                )
-                  rollout(behind.map((s) => s.id))
-              }}
-            >
-              {updBusy ? t('…') : t('Обновить все ({n})', { n: behind.length })}
+            <button disabled={agentRun.busy || updPlan} onClick={() => setUpdPlan(true)}>
+              {t('Обновить все ({n})', { n: behind.length })}
             </button>
           </div>
         </div>
+      )}
+      {!isViewer && updPlan && behind.length > 0 && (
+        <UpdateConfirm scope={{ agent: true, hosts: [], helpers: [] }} servers={servers ?? []} avail={avail}
+          via={false} busy={agentRun.busy} onCancel={() => setUpdPlan(false)}
+          onGo={async () => { if (await agentRun.start(lagging.map((s) => s.id))) setUpdPlan(false) }} />
+      )}
+      {agentRun.err && <div className="upd-err">{agentRun.err}</div>}
+      {agentRun.run && (
+        <RolloutProgress run={agentRun.run} servers={servers ?? []} onClose={agentRun.close}
+          onOpen={(id) => setDetailId(id)} />
       )}
       {mutesOpen && (
         <MutesPanel

@@ -7443,3 +7443,41 @@ button.ghost.lc-del { color: var(--down); border-color: color-mix(in srgb, var(-
   .pe-kv { grid-template-columns: minmax(0, 1fr); gap: 0.1rem; }
   .pe-kv > .muted { margin-top: 0.3rem; }
 }
+
+/* ---------- "Обновить все": блок "Обновления" на главной и баннер "Серверов" (FleetUpdate.tsx) ---------- */
+.upd-head { display: flex; align-items: center; justify-content: space-between; gap: 0.6rem; flex-wrap: wrap; }
+.upd-head .net-head { flex: 1; }
+.upd-all { padding: 0.3rem 0.9rem; font-size: 0.85rem; }
+/* строку не кликают целиком: действия - кнопки справа, переход - стрелка */
+.home-attention-row.upd-row { cursor: default; gap: 0.5rem; }
+.home-attention-row.upd-row:hover { background: transparent; }
+.upd-row > button { flex-shrink: 0; }
+.upd-row .upd-canary { font-size: 0.78rem; color: var(--text-muted); }
+.upd-row .upd-open { padding: 0.1rem 0.5rem; }
+.upd-plan, .upd-run {
+  margin-top: 0.6rem;
+  padding: 0.6rem 0.75rem;
+  border: 1px solid color-mix(in srgb, #3b82f6 35%, var(--border));
+  border-radius: 8px;
+  background: var(--bg-card);
+  font-size: 0.88rem;
+}
+.upd-plan-head { font-weight: 600; margin-bottom: 0.3rem; }
+.upd-plan-list { margin: 0 0 0.4rem; padding-left: 1.1rem; }
+.upd-plan-list li { margin: 0.15rem 0; overflow-wrap: anywhere; }
+.upd-plan .ansible-hint { margin: 0.4rem 0 0; }
+.upd-plan-btns { display: flex; gap: 0.5rem; margin-top: 0.6rem; flex-wrap: wrap; }
+.upd-err { margin-top: 0.4rem; color: var(--down); font-size: 0.85rem; }
+.upd-run-head { display: flex; align-items: center; gap: 0.5rem; }
+.upd-run-txt { flex: 1; min-width: 0; font-weight: 600; }
+.upd-run-list { display: flex; flex-direction: column; gap: 0.2rem; margin-top: 0.4rem; padding-left: 1.2rem; }
+.upd-run-row { overflow-wrap: anywhere; }
+.upd-run-row.bad b { color: var(--degraded); }
+.upd-run > .upd-run-row { margin-top: 0.35rem; padding-left: 1.2rem; }
+@media (max-width: 600px) {
+  .home-attention-row.upd-row { flex-wrap: wrap; }
+  .home-attention-row.upd-row .home-attention-txt { flex: 1 1 calc(100% - 3rem); }
+  /* кнопки строки уходят под текст и встают вровень с ним, а не под точку */
+  .upd-row .home-attention-txt + button { margin-left: 2.2rem; }
+  .upd-all { width: 100%; }
+}
