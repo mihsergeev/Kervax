@@ -1,3 +1,4 @@
+import { isProxyUrl, withProxy } from './installProxy'
 import { type ReactNode, useCallback, useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import {
@@ -1071,6 +1072,8 @@ function ServerAddr({ s, t }: { s: Server; t: (str: string) => string }) {
   const ext = s.external_ip
   const loc = s.local_ip
   const showLoc = loc && loc !== ext
+  // агент за прокси: адрес соединения - это прокси, внешний IP тогда задан руками
+  const proxy = s.last_report?.proxy
   return (
     <span className="srv-addr">
       {!ext && !showLoc ? (
@@ -1087,6 +1090,11 @@ function ServerAddr({ s, t }: { s: Server; t: (str: string) => string }) {
             <span className="srv-addr-part" title={t('локальный IP (внутренняя сеть)')}>
               <AddrIcon kind="loc" />
               {loc}
+            </span>
+          )}
+          {proxy && (
+            <span className="srv-addr-part" title={t('агент ходит в панель через прокси')}>
+              ↪ {proxy}
             </span>
           )}
         </>
@@ -5537,6 +5545,10 @@ export function EnrollModal({
 export function InstallModal({ enroll, onClose, title }: { enroll: ServerEnroll; onClose: () => void; title?: string }) {
   const { t } = useI18n()
   const [copied, setCopied] = useState(false)
+  // прокси до панели: дописывается в команду здесь же, на панель не уходит (см. installProxy)
+  const [proxy, setProxy] = useState('')
+  const proxyBad = proxy.trim() !== '' && !isProxyUrl(proxy)
+  const cmd = withProxy(enroll.install_cmd, proxy)
   // живая проверка: поллим сервер, пока агент не пришлёт первый отчёт
   const [connected, setConnected] = useState<Server | null>(null)
   useEffect(() => {
@@ -5564,7 +5576,7 @@ export function InstallModal({ enroll, onClose, title }: { enroll: ServerEnroll;
         <p className="muted small">
           {t('Выполните команду на сервере (под root). Токен показывается один раз.')}
         </p>
-        <pre className="install-cmd">{enroll.install_cmd}</pre>
+        <pre className="install-cmd">{cmd}</pre>
         <p className="muted small">
           {t('Агент сам включит всё применимое на ноде — Docker (read-only proxy), Kubernetes (узкий SA), доступ к бэкапам — вручную доделывать ничего не нужно. Отключить авто-настройку: добавить --no-auto.')}
         </p>
@@ -5576,14 +5588,14 @@ export function InstallModal({ enroll, onClose, title }: { enroll: ServerEnroll;
             {t('Допишите третий аргумент — любое имя этого инстанса — в самый конец команды, через пробел после токена:')}
           </p>
           <pre className="install-cmd">
-            {enroll.install_cmd}
+            {cmd}
             <span className="install-cmd-add"> main</span>
           </pre>
           <div className="modal-actions install-alt-actions">
             <button
               className="ghost"
               onClick={() => {
-                navigator.clipboard?.writeText(`${enroll.install_cmd} main`)
+                navigator.clipboard?.writeText(`${cmd} main`)
                 setCopied(true)
               }}
             >
@@ -5593,6 +5605,30 @@ export function InstallModal({ enroll, onClose, title }: { enroll: ServerEnroll;
           <p className="muted small">
             {t('«main» — произвольное имя, оно лишь отличает панели между собой. Агенты будут работать рядом, каждый со своей панелью.')}
           </p>
+        </details>
+        <details className="install-alt" open={proxy !== '' || undefined}>
+          <summary className="muted small">{t('Сервер не достает до панели напрямую?')}</summary>
+          <p className="muted small install-alt-hint">
+            {t('Если адрес сервера режут на пути к панели, агент может ходить в нее через прокси. Он попадет в команду выше и в конфиг агента на сервере, панель его не хранит.')}
+          </p>
+          <label className="field">
+            <span>{t('Прокси')}</span>
+            <input
+              value={proxy}
+              onChange={(e) => {
+                setProxy(e.target.value)
+                setCopied(false)
+              }}
+              placeholder="http://user:password@proxy.example.com:3128"
+              autoComplete="off"
+              spellCheck={false}
+            />
+            <span className={`field-hint small ${proxyBad ? 'form-error' : 'muted'}`}>
+              {proxyBad
+                ? t('Нужен вида http://логин:пароль@хост:порт (подходят и https://, socks5://), без пробелов и кавычек.')
+                : t('Панель увидит адрес прокси, а не сервера: укажите внешний IP сервера в его настройках (IP сервера), по нему страна и проверки снаружи. IP прокси должен быть разрешен в фаерволе панели.')}
+            </span>
+          </label>
         </details>
         <p className="muted small install-fw-note">
           {t('⏱ Файрвол панели открывается для IP новой ноды в течение ~2 мин. Если команда упала по таймауту (curl: timed out) — подождите минуту и повторите её же.')}
@@ -5615,7 +5651,7 @@ export function InstallModal({ enroll, onClose, title }: { enroll: ServerEnroll;
           <button
             className={connected ? 'ghost' : ''}
             onClick={() => {
-              navigator.clipboard?.writeText(enroll.install_cmd)
+              navigator.clipboard?.writeText(cmd)
               setCopied(true)
             }}
           >

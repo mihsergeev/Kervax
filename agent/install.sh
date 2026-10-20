@@ -18,6 +18,11 @@
 # root is added to the system trust store, and the agent, the helpers and curl then
 # verify the panel with it. Certificate checks are never switched off.
 #
+# A node whose address is cut off on the way to the panel (its IP is on a block list
+# of the panel's provider) installs through a proxy: --proxy http://user:pass@host:port
+# (also https:// or socks5://). The installer downloads through it, and the agent gets
+# proxy= in its config and sends everything to the panel through it as well.
+#
 # Russian version of this installer: agent/install-ru.sh
 set -eu
 
@@ -27,12 +32,17 @@ set -eu
 # statistics, restic backup control. Each step self-detects. --no-auto installs the
 # agent only.
 # --ca-file <path>: the root that signed the panel's certificate (see the trust step below)
+# --proxy <url>: proxy to the panel for this installer and the agent (see the header)
 URL=""; TOKEN=""; INSTANCE=""; WANT_DOCKER=0; NO_AUTO=0; UNINSTALL=0; CA_FILE=""; WANT_CA=0
+PROXY=""; WANT_PROXY=0
 for a in "$@"; do
   if [ "$WANT_CA" = 1 ]; then CA_FILE="$a"; WANT_CA=0; continue; fi
+  if [ "$WANT_PROXY" = 1 ]; then PROXY="$a"; WANT_PROXY=0; continue; fi
   case "$a" in
     --ca-file) WANT_CA=1 ;;
     --ca-file=*) CA_FILE="${a#--ca-file=}" ;;
+    --proxy) WANT_PROXY=1 ;;
+    --proxy=*) PROXY="${a#--proxy=}" ;;
     --docker) WANT_DOCKER=1 ;;
     --no-auto) NO_AUTO=1 ;;
     --uninstall) UNINSTALL=1 ;;
@@ -157,7 +167,7 @@ if [ "$UNINSTALL" = 1 ]; then
 fi
 
 if [ -z "$URL" ] || [ -z "$TOKEN" ]; then
-  echo "Usage: install.sh [--ca-file <root.pem>] <panel_url> <token> [instance] [--no-auto]" >&2
+  echo "Usage: install.sh [--ca-file <root.pem>] [--proxy <url>] <panel_url> <token> [instance] [--no-auto]" >&2
   echo "       install.sh --uninstall [instance]" >&2
   exit 1
 fi
@@ -165,6 +175,22 @@ if [ -n "$INSTANCE" ] && ! printf '%s' "$INSTANCE" | grep -Eq '^[A-Za-z0-9_-]+$'
   echo "Instance name may contain only letters, digits, hyphen and underscore." >&2
   exit 1
 fi
+
+case "$PROXY" in
+  *[[:space:]]*) PROXY_OK=0 ;;
+  "" | http://?* | https://?* | socks5://?*) PROXY_OK=1 ;;
+  *) PROXY_OK=0 ;;
+esac
+if [ "$PROXY_OK" = 0 ]; then
+  echo "--proxy must look like http://user:pass@host:port (https:// and socks5:// work too)." >&2
+  exit 1
+fi
+# Every request to the panel goes through pcurl: with --proxy it adds the proxy, and
+# only to these requests. Helpers piped from the panel run without it (their own
+# downloads, the local Kubernetes API) and are not affected.
+pcurl() {
+  if [ -n "$PROXY" ]; then curl --proxy "$PROXY" "$@"; else curl "$@"; fi
+}
 
 if [ "$(id -u)" != "0" ]; then
   echo "Root required (sudo)." >&2
@@ -216,7 +242,7 @@ if [ -n "$CA_FILE" ]; then
   $CA_UPDATE >/dev/null 2>&1 || { echo "✗ $CA_UPDATE failed." >&2; exit 1; }
   # checked WITHOUT --cacert, through the system store: exactly how the agent connects.
   # /api/agent/* and not /api/health: the panel's IP allow-list does not apply there.
-  if ! curl -fsS --connect-timeout 15 -o /dev/null "${URL%/}/api/agent/install.sh" 2>/tmp/kervax-ca-check.err; then
+  if ! pcurl -fsS --connect-timeout 15 -o /dev/null "${URL%/}/api/agent/install.sh" 2>/tmp/kervax-ca-check.err; then
     echo "✗ The panel CA is in $CA_DST, but https to the panel still fails:" >&2
     cat /tmp/kervax-ca-check.err >&2
     echo "  The certificate has to be issued for the exact host in $URL (an IP or a name)." >&2
@@ -257,10 +283,11 @@ chmod 0755 /opt/kervax-agent "$BIN_DIR"
 # refused to start, and the installer blamed the panel's firewall. Only where curl knows it.
 RETRY_ALL=""
 { curl --help all; curl --help; } 2>/dev/null | grep -q -- '--retry-all-errors' && RETRY_ALL="--retry-all-errors"
-curl -fsSL --connect-timeout 15 --retry 5 --retry-delay 3 $RETRY_ALL \
+pcurl -fsSL --connect-timeout 15 --retry 5 --retry-delay 3 $RETRY_ALL \
      -C - "${URL%/}/api/agent/download/$ARCH" -o "$BIN.new" || {
   echo "✗ The panel is unreachable from this server. If it sits behind a firewall," >&2
   echo "  add the server IP in its settings, wait about 2 minutes and retry." >&2
+  [ -n "$PROXY" ] && echo "  The download went through the proxy: check that it is reachable and lets this server in." >&2
   exit 1
 }
 chmod 0755 "$BIN.new"
@@ -290,6 +317,7 @@ cat > "$CONF" <<EOF
 url=$URL
 token=$TOKEN
 EOF
+[ -n "$PROXY" ] && printf 'proxy=%s\n' "$PROXY" >> "$CONF"
 chown kervax "$CONF" 2>/dev/null || true
 chmod 0600 "$CONF"
 umask 022
@@ -405,7 +433,7 @@ run_remote_setup() {
   # a shared route serving ANY helper from the directory. This used to be
   # /api/agent/$1.sh - only kube/backup/backupserver have personal URLs, so on a fresh
   # node webserver-setup silently got a 404 and was never installed.
-  curl -fsSL --connect-timeout 15 "${URL%/}/api/agent/setup/$1.sh" | bash \
+  pcurl -fsSL --connect-timeout 15 "${URL%/}/api/agent/setup/$1.sh" | bash \
     || echo "· $1: could not run it (skipping)." >&2
 }
 
@@ -421,7 +449,7 @@ run_remote_setup() {
 # bash. (The ansible playbook is a different matter: it reads the same conditions from
 # the repository, not over the network.)
 install_applicable_setups() {
-  idx=$(curl -fsSL --connect-timeout 15 "${URL%/}/api/agent/setup/index" 2>/dev/null) || {
+  idx=$(pcurl -fsSL --connect-timeout 15 "${URL%/}/api/agent/setup/index" 2>/dev/null) || {
     echo "· the helper index is unavailable - skipping the helpers." >&2; return; }
   # split BETWEEN entries, not on every '{': a condition may contain braces of its
   # own, and splitting on them tore an entry in half - the helper after it vanished

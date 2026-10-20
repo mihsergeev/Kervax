@@ -44,7 +44,7 @@ import (
 	"time"
 )
 
-const version = "2.43"
+const version = "2.44"
 
 // Публичный ключ для проверки подписи релизов агента (Ed25519, base64).
 // ПУСТО по умолчанию → самообновление ВЫКЛЮЧЕНО (агент никогда не заменяет себя).
@@ -68,6 +68,9 @@ const minDiskBytes = 2 << 30 // 2 ГиБ
 
 // host:port панели — цель UDP-«дозвона» для выбора адреса-источника (локального IP)
 var dialTarget string
+
+// agentProxy - хост:порт прокси до панели (без логина и пароля), "" - напрямую
+var agentProxy string
 
 // dialTargetFromURL — host:port из URL панели (порт по схеме, если не задан).
 func lastUpdateErrorText() string {
@@ -128,6 +131,7 @@ type report struct {
 	IsVM         bool          `json:"is_vm"`     // виртуалка ли (hypervisor-флаг/DMI)
 	Virt         string        `json:"virt"`      // тип гипервизора: Hyper-V/KVM/VMware/… ('' = железо)
 	LocalIP      string        `json:"local_ip"`
+	Proxy        string        `json:"proxy,omitempty"` // хост:порт прокси до панели, без логина: адрес соединения тогда не адрес ноды
 	Uptime       int64         `json:"uptime_seconds"`
 	CPUPercent   float64       `json:"cpu_percent"`
 	MemUsed      uint64        `json:"mem_used"`
@@ -1093,7 +1097,7 @@ func httpGetChunked(u string, size int, ver string) ([]byte, error) {
 			defer f.Close()
 		}
 	}
-	client := &http.Client{Timeout: 60 * time.Second, Transport: panelTransport(false)}
+	client := panelClient(60 * time.Second)
 	// ceiling - выше этого кусок до конца попытки не растет: половина того, что не прошло.
 	// Без потолка кусок после каждой удачи рос обратно, и каждый второй снова замерзал.
 	chunk, ceiling, fails, attempts := dlChunkMax, dlChunkMax, 0, 0
@@ -1222,7 +1226,7 @@ func downloadBinary(base, ver string, art artifact) ([]byte, error) {
 
 // headSize - размер файла по HEAD (Content-Length); не 200 - ошибка.
 func headSize(u string) (int, error) {
-	client := &http.Client{Timeout: 30 * time.Second, Transport: panelTransport(false)}
+	client := panelClient(30 * time.Second)
 	req, err := http.NewRequest("HEAD", u, nil)
 	if err != nil {
 		return 0, err
@@ -1257,7 +1261,7 @@ func gunzipLimited(gz []byte, size int) ([]byte, error) {
 
 // httpGetLimited — GET с таймаутом и лимитом тела (враждебная панель не заольёт память).
 func httpGetLimited(u string, max int64) ([]byte, error) {
-	client := &http.Client{Timeout: 60 * time.Second}
+	client := panelClient(60 * time.Second)
 	resp, err := client.Get(u)
 	if err != nil {
 		return nil, err
@@ -3715,7 +3719,7 @@ func collect(prev sample) (report, sample) {
 	memUsed := memTotal - mi["MemAvailable"]
 	dk := collectDocker() // один раз: нужен и для Docker, и для детекта бэкап-сервера
 	r := report{
-		Hostname: host, OS: osName(), AgentVersion: version, LocalIP: localIP(),
+		Hostname: host, OS: osName(), AgentVersion: version, LocalIP: localIP(), Proxy: agentProxy,
 		CPUModel: hostCPUModel, IsVM: hostIsVM, Virt: hostVirt,
 		Uptime: uptime(), CPUPercent: cpuBusy,
 		MemUsed: memUsed, MemTotal: memTotal,
@@ -4963,7 +4967,7 @@ func runManualSiteProbe(panelURL, token string, p siteProbe) {
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := (&http.Client{Timeout: 15 * time.Second}).Do(req)
+	resp, err := panelClient(15 * time.Second).Do(req)
 	if err != nil {
 		// не страшно: панель переотдаст задание отчётом, если ответ так и не дошёл
 		fmt.Fprintf(os.Stderr, "kervax-agent: ответ на ручную проверку не отправлен: %v\n", err)
@@ -4981,7 +4985,7 @@ func postDockerResult(panelURL, token string, id int, ok bool, output string) {
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := (&http.Client{Timeout: 15 * time.Second}).Do(req)
+	resp, err := panelClient(15 * time.Second).Do(req)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "kervax-agent: docker-result не отправлен: %v\n", err)
 		return
@@ -6178,7 +6182,7 @@ func postKubeResult(panelURL, token string, id int, ok bool, output string) {
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := (&http.Client{Timeout: 15 * time.Second}).Do(req)
+	resp, err := panelClient(15 * time.Second).Do(req)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "kervax-agent: kube-result не отправлен: %v\n", err)
 		return
@@ -7111,7 +7115,7 @@ func postBackupResult(panelURL, token string, id int, ok bool, output string) {
 		req.Header.Set("Content-Encoding", "gzip")
 	}
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := (&http.Client{Timeout: 15 * time.Second}).Do(req)
+	resp, err := panelClient(15 * time.Second).Do(req)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "kervax-agent: backup-result не отправлен: %v\n", err)
 		return
@@ -7146,6 +7150,8 @@ func readConfig(path string) (url, token string) {
 			if h := strings.TrimSpace(v); h != "" {
 				dockerHost = h
 			}
+		case "proxy": // прокси до панели (см. panelProxy)
+			panelProxyRaw = strings.TrimSpace(v)
 		case "kube_config": // путь к kube.json выделенного SA
 			if h := strings.TrimSpace(v); h != "" {
 				kubeConfigPath = h
@@ -7228,8 +7234,63 @@ var (
 	reportClient    = &http.Client{Timeout: 15 * time.Second, Transport: reportTransport}
 )
 
+// Прокси до панели. Нужен ноде, чей адрес режут на пути к панели (IP в списке блокировок
+// у провайдера панели): напрямую соединение встает, а ответ панели не доходит. Задается
+// proxy= в конфиге (http://логин:пароль@хост:порт, https:// или socks5://), иначе берется
+// HTTPS_PROXY/NO_PROXY окружения. Через него идет ВСЕ, что агент шлет в панель: отчеты,
+// команды, результаты, манифест и OTA. Логин и пароль не печатаются нигде: в лог и в отчет
+// попадает только хост:порт (proxyLabel).
+var (
+	panelProxyRaw string   // строка proxy= из конфига как есть
+	panelProxyURL *url.URL // разобранная; nil - прокси из окружения или без него
+)
+
+func panelProxy(req *http.Request) (*url.URL, error) {
+	if panelProxyURL != nil {
+		return panelProxyURL, nil
+	}
+	return http.ProxyFromEnvironment(req)
+}
+
+// parseProxy проверяет proxy= из конфига. Текст ошибки без самой строки: в ней пароль,
+// а ошибка уходит в журнал (url.Parse цитирует вход целиком).
+func parseProxy(raw string) (*url.URL, error) {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return nil, fmt.Errorf("proxy= не разобрать как URL (нужно http://логин:пароль@хост:порт)")
+	}
+	switch u.Scheme {
+	case "http", "https", "socks5":
+	default:
+		return nil, fmt.Errorf("proxy=: схема %q не поддерживается (http, https, socks5)", u.Scheme)
+	}
+	if u.Hostname() == "" || (u.Path != "" && u.Path != "/") || u.RawQuery != "" {
+		return nil, fmt.Errorf("proxy= должен быть вида %s://хост:порт", u.Scheme)
+	}
+	return u, nil
+}
+
+// proxyLabel - через что агент ходит в панель, без логина и пароля: "хост:порт" или "".
+func proxyLabel(panelURL string) string {
+	req, err := http.NewRequest("GET", panelURL, nil)
+	if err != nil {
+		return ""
+	}
+	u, err := panelProxy(req)
+	if err != nil || u == nil {
+		return ""
+	}
+	return u.Host
+}
+
+// panelClient - короткий запрос в панель тем же путем, что и отчет (прокси, без keep-alive)
+func panelClient(timeout time.Duration) *http.Client {
+	return &http.Client{Timeout: timeout, Transport: panelTransport(false)}
+}
+
 func panelTransport(keepAlive bool) *http.Transport {
 	return &http.Transport{
+		Proxy:                 panelProxy,
 		ForceAttemptHTTP2:     false,
 		DisableKeepAlives:     !keepAlive,
 		TLSHandshakeTimeout:   10 * time.Second,
@@ -7265,10 +7326,23 @@ func main() {
 		fmt.Fprintln(os.Stderr, "kervax-agent: в конфиге нужны url= и token=")
 		os.Exit(1)
 	}
+	if panelProxyRaw != "" {
+		pu, err := parseProxy(panelProxyRaw)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "kervax-agent:", err)
+			os.Exit(1)
+		}
+		panelProxyURL = pu
+	}
+	agentProxy = proxyLabel(url)
 	dialTarget = dialTargetFromURL(url)
 	hostCPUModel = cpuModel()
 	hostIsVM, hostVirt = detectVirt()
-	fmt.Printf("kervax-agent %s → %s\n", version, url)
+	if agentProxy != "" {
+		fmt.Printf("kervax-agent %s → %s через прокси %s\n", version, url, agentProxy)
+	} else {
+		fmt.Printf("kervax-agent %s → %s\n", version, url)
+	}
 	cleanStaleParts()
 
 	interval := 15 * time.Second
