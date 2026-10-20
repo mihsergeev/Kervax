@@ -1,7 +1,7 @@
 {
   "name": "kervax-frontend",
   "private": true,
-  "version": "1.4.319",
+  "version": "1.4.320",
   "type": "module",
   "scripts": {
     "dev": "vite",
