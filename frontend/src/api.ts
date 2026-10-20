@@ -33,11 +33,8 @@ export function impersonating(): boolean {
 
 export type ImpersonateOut = { access_token: string; imp_id: number; username: string; expires_at: string }
 
-export async function startImpersonation(userId: number, password: string): Promise<ImpersonateOut> {
-  const out = await api<ImpersonateOut>(`/api/users/${userId}/impersonate`, {
-    method: 'POST',
-    body: JSON.stringify({ password }),
-  })
+export async function startImpersonation(userId: number): Promise<ImpersonateOut> {
+  const out = await api<ImpersonateOut>(`/api/users/${userId}/impersonate`, { method: 'POST' })
   const own = getToken()
   if (own) localStorage.setItem(IMP_ADMIN_KEY, own)
   localStorage.setItem(IMP_ID_KEY, String(out.imp_id))

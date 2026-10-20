@@ -21,7 +21,7 @@ import {
   type UserCard,
   type UsersOverview,
 } from './api'
-import { ROLE_LABEL, ROLE_SHORT, ROLE_WHAT, SECTIONS, scopeText } from './access'
+import { ROLE_LABEL, ROLE_SHORT, ROLE_WHAT, SECTION_LABEL, SECTIONS } from './access'
 import { actLabel } from './auditActs'
 import { useAuth } from './auth'
 import { CardNav, type SecDef } from './cardLayout'
@@ -111,59 +111,17 @@ function PickList({
 // Сервер проверяет то же самое, здесь - чтобы не показывать кнопку, которая даст отказ
 const canImpersonate = (u: UserCard, me: string) => u.username !== me && u.role !== 'admin'
 
-/** Подтверждение входа под чужой учеткой: что будет и свой пароль админа еще раз (step-up). */
-function ImpersonateDialog({ user, onClose, t }: { user: UserCard; onClose: () => void; t: T }) {
-  const [pw, setPw] = useState('')
-  const [busy, setBusy] = useState(false)
-  const [err, setErr] = useState<string | null>(null)
-  const go = async () => {
-    setBusy(true)
-    setErr(null)
-    try {
-      await startImpersonation(user.id, pw)
-      // страница заново: все загруженное с правами админа должно уйти из памяти
-      window.location.assign(window.location.pathname)
-    } catch (e) {
-      setErr(e instanceof Error ? e.message : t('Ошибка'))
-      setBusy(false)
-    }
-  }
-  return (
-    <div className="modal-backdrop" onClick={onClose}>
-      <form
-        className="card known-dialog"
-        onClick={(e) => e.stopPropagation()}
-        onSubmit={(e) => {
-          e.preventDefault()
-          if (pw && !busy) go()
-        }}
-      >
-        <h3>{t('Войти как {user}?', { user: user.username })}</h3>
-        <p className="small">
-          {t('Панель откроется так, как ее видит {user}: только разделы, группы и кнопки этой учетки ({scope}).', {
-            user: user.username,
-            scope: scopeText(user, t),
-          })}
-        </p>
-        <p className="muted small">
-          {t('Только просмотр: изменения будут отклоняться. Вход на час, вернуться к себе можно в любой момент кнопкой на плашке сверху. Начало и конец попадут в журнал действий.')}
-        </p>
-        <label className="field">
-          <span>{t('Ваш пароль')}</span>
-          <input type="password" value={pw} onChange={(e) => setPw(e.target.value)} autoComplete="current-password" autoFocus />
-        </label>
-        {err && <p className="form-error">{err}</p>}
-        <div className="note-bar-actions">
-          <button type="submit" disabled={busy || !pw}>
-            {busy ? t('…') : t('Войти как {user}', { user: user.username })}
-          </button>
-          <button type="button" className="ghost" disabled={busy} onClick={onClose}>
-            {t('Отмена')}
-          </button>
-        </div>
-      </form>
-    </div>
-  )
+// Доступ учетки двумя короткими строками: какие разделы и какие группы ("все" - без ограничений).
+// Одной строкой через точки длинный доступ читался как каша
+function accessLines(u: UserCard, t: T): string[] {
+  if (u.role === 'admin') return [t('все разделы и группы')]
+  const list = (xs?: string[] | null) => ((xs?.length ?? 0) === 0 ? t('все') : (xs ?? []).join(', '))
+  const secs = (u.sections?.length ?? 0) === 0 ? t('все') : (u.sections ?? []).map((x) => t(SECTION_LABEL[x] ?? x)).join(', ')
+  const groups =
+    (u.server_groups?.length ?? 0) === 0 && (u.site_groups?.length ?? 0) === 0
+      ? t('группы: все')
+      : t('серверы: {s} · сайты: {c}', { s: list(u.server_groups), c: list(u.site_groups) })
+  return [t('разделы: {s}', { s: secs }), groups]
 }
 
 export function UsersModal({ onClose, onUnauthorized }: Props) {
@@ -185,8 +143,6 @@ export function UsersModal({ onClose, onUnauthorized }: Props) {
   const [nRole, setNRole] = useState<Role>('viewer')
   // сброс пароля в карточке учетки
   const [pw, setPw] = useState('')
-  // вход под чужой учеткой: чье подтверждение открыто
-  const [impFor, setImpFor] = useState<UserCard | null>(null)
   // журнал: чей и какие записи
   const [logWho, setLogWho] = useState('')
   const [logKind, setLogKind] = useState<'all' | 'changes' | 'logins'>('all')
@@ -295,6 +251,23 @@ export function UsersModal({ onClose, onUnauthorized }: Props) {
       setPw('')
       return t('Пароль обновлен, прежние входы этой учетки сброшены.')
     })
+  // войти под учеткой сразу, без пароля и подтверждения: только просмотр на час, вернуться можно
+  // кнопкой на плашке. Страница заново - все загруженное с правами админа должно уйти из памяти
+  const impersonate = (u: UserCard) =>
+    act(async () => {
+      await startImpersonation(u.id)
+      window.location.assign(window.location.pathname)
+    })
+  const impBtn = (u: UserCard, cls: string) => (
+    <button
+      className={`ghost small ${cls}`}
+      disabled={busy}
+      onClick={() => impersonate(u)}
+      title={t('Посмотреть панель глазами этой учетки: только просмотр, на час')}
+    >
+      {t('войти как')}
+    </button>
+  )
   const remove = (u: UserCard) => {
     if (!window.confirm(t('Удалить учётку «{name}»?', { name: u.username }))) return
     act(async () => {
@@ -318,7 +291,7 @@ export function UsersModal({ onClose, onUnauthorized }: Props) {
   const admins = users.filter((u) => u.role === 'admin')
   const with2fa = users.filter((u) => u.totp_enabled).length
   const nameBtn = (u: UserCard) => (
-    <button className="linklike" onClick={() => go(`u${u.id}`)}>
+    <button className="us-row-name" onClick={() => go(`u${u.id}`)} title={t('открыть учетку')}>
       {u.username}
     </button>
   )
@@ -397,6 +370,7 @@ export function UsersModal({ onClose, onUnauthorized }: Props) {
                 {curUser ? curUser.username : t(cur.label)} {curUser && roleChip(curUser.role)}
                 {curUser?.totp_enabled && <span className="type-chip">2FA</span>}
               </h4>
+              {curUser && canImpersonate(curUser, meName) && impBtn(curUser, 'srv-head-btn')}
             </div>
             {!ov ? (
               err ? <p className="form-error">{err}</p> : <p className="muted small">{t('загрузка…')}</p>
@@ -405,19 +379,18 @@ export function UsersModal({ onClose, onUnauthorized }: Props) {
                 {cur.id === 'over' && (
                   <>
                     <p className="muted small al-lead">
-                      {t('Роль задает, что можно менять, разделы - какие вкладки видны, группы - какие серверы и мониторы вообще доступны. Пусто в разделах или группах - без ограничений.')}
+                      {t('Роль - что можно менять, разделы - какие вкладки видны, группы - какие серверы и сайты доступны. "Все" - без ограничений.')}
                     </p>
                     <div className="net-tiles srv-tiles">
                       <NetTile
                         label={t('Учеток')}
                         value={String(users.length)}
-                        sub={t('админов {a} · правка {e} · просмотр {v}', {
-                          a: admins.length,
+                        sub={t('правка {e} · просмотр {v}', {
                           e: users.filter((u) => u.role === 'editor').length,
                           v: users.filter((u) => u.role === 'viewer').length,
                         })}
                       />
-                      <NetTile label={t('С 2FA')} value={`${with2fa} / ${users.length}`} sub={t('включает сам пользователь')} />
+                      <NetTile label={t('С 2FA')} value={t('{n} из {m}', { n: with2fa, m: users.length })} sub={t('включает сам пользователь')} />
                       <button className="srv-tile-btn" onClick={() => go('guard')} title={t('к защите входа')}>
                         <NetTile
                           label={t('Неудачных входов за сутки')}
@@ -455,43 +428,27 @@ export function UsersModal({ onClose, onUnauthorized }: Props) {
                         </button>
                       )}
                     </div>
-                    <table className="sec-tbl">
-                      <thead>
-                        <tr>
-                          <th>{t('Учетка')}</th>
-                          <th className="hide-m">{t('Доступ')}</th>
-                          <th>{t('Последний вход')}</th>
-                          <th />
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {users.map((u) => (
-                          <tr key={u.id}>
-                            <td>
-                              <span className="us-name">
-                                {nameBtn(u)} {roleChip(u.role)}
-                                {u.totp_enabled && <span className="type-chip">2FA</span>}
-                              </span>
-                            </td>
-                            <td className="hide-m muted small">{scopeText(u, t)}</td>
-                            <td className="small">
-                              {u.last_login ? ago(u.last_login) : <span className="muted">{t('не входил')}</span>}
-                            </td>
-                            <td className="us-imp-cell">
-                              {canImpersonate(u, meName) && (
-                                <button
-                                  className="ghost small"
-                                  onClick={() => setImpFor(u)}
-                                  title={t('Посмотреть панель глазами этой учетки, без ее пароля')}
-                                >
-                                  {t('войти как')}
-                                </button>
-                              )}
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
+                    <div className="us-list">
+                      {users.map((u) => (
+                        <div key={u.id} className="us-row">
+                          <div className="us-row-who">
+                            {nameBtn(u)}
+                            {roleChip(u.role)}
+                            {u.totp_enabled && <span className="type-chip">2FA</span>}
+                            {u.username === meName && <span className="us-row-me">{t('вы')}</span>}
+                          </div>
+                          <div className="us-row-acc">
+                            {accessLines(u, t).map((x) => (
+                              <div key={x}>{x}</div>
+                            ))}
+                          </div>
+                          <div className="us-row-last">
+                            {u.last_login ? ago(u.last_login) : t('не входил')}
+                          </div>
+                          <div className="us-row-act">{canImpersonate(u, meName) && impBtn(u, 'us-imp')}</div>
+                        </div>
+                      ))}
+                    </div>
                   </>
                 )}
 
@@ -598,22 +555,6 @@ export function UsersModal({ onClose, onUnauthorized }: Props) {
                         <p className="muted small">{t('В журнале записей нет.')}</p>
                       )
                     })()}
-
-                    <div className="srv-nav-grp rt-cap">{t('Войти как')}</div>
-                    {canImpersonate(curUser, meName) ? (
-                      <div className="ans-acts">
-                        <button className="ghost" disabled={busy} onClick={() => setImpFor(curUser)}>
-                          {t('Войти как {user}', { user: curUser.username })}
-                        </button>
-                        <span className="muted small">{t('посмотреть панель так, как ее видит эта учетка: только просмотр, на час')}</span>
-                      </div>
-                    ) : (
-                      <p className="muted small">
-                        {curUser.username === meName
-                          ? t('Это ваша учетка.')
-                          : t('Под администратором войти нельзя: у него те же права, что у вас.')}
-                      </p>
-                    )}
 
                     <div className="srv-nav-grp rt-cap">{t('Удаление')}</div>
                     {(() => {
@@ -756,7 +697,6 @@ export function UsersModal({ onClose, onUnauthorized }: Props) {
           </span>
         </div>
       </div>
-      {impFor && <ImpersonateDialog user={impFor} onClose={() => setImpFor(null)} t={t} />}
     </div>
   )
 }

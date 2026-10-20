@@ -1,5 +1,5 @@
 """Вход админа под чужой учеткой (app/impersonate.py): права ровно как у пользователя, только
-просмотр, свой пароль админа перед входом, срок, "Вернуться к себе" и журнал действий."""
+просмотр, без паролей, срок, "Вернуться к себе" и журнал действий."""
 
 from datetime import datetime, timedelta, timezone
 
@@ -8,9 +8,6 @@ from sqlalchemy import select
 
 from app import audit, impersonate
 from app.models import AuditLog, Check, Impersonation, PanelError, Server
-
-ADMIN_PW = "testpass-2026"
-
 
 def _h(token: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
@@ -38,8 +35,9 @@ async def _mk(client, auth_headers, username, role, **scope) -> int:
     return r.json()["id"]
 
 
-async def _start(client, auth_headers, uid, password=ADMIN_PW) -> httpx.Response:
-    return await client.post(f"/api/users/{uid}/impersonate", headers=auth_headers, json={"password": password})
+async def _start(client, auth_headers, uid) -> httpx.Response:
+    # ни пароля пользователя, ни своего пароля еще раз: тела у запроса нет
+    return await client.post(f"/api/users/{uid}/impersonate", headers=auth_headers)
 
 
 async def _audit(client, action: str) -> list[AuditLog]:
@@ -90,7 +88,7 @@ async def test_only_viewing_nothing_can_be_changed(client, auth_headers):
         ("DELETE", "/api/auth/telegram", None),
         ("POST", "/api/users", {"username": "zz", "password": "zzzzzzzz-zzzz", "role": "viewer"}),
         ("PATCH", f"/api/users/{uid}", {"role": "admin"}),
-        ("POST", f"/api/users/{uid}/impersonate", {"password": ADMIN_PW}),
+        ("POST", f"/api/users/{uid}/impersonate", None),
         ("POST", "/api/settings/ansible", None),
     ]
     for method, path, body in attempts:
@@ -119,12 +117,8 @@ async def test_who_can_start_and_under_whom(client, auth_headers):
     editor = await _mk(client, auth_headers, "someeditor", "editor")
     me_id = (await client.get("/api/auth/me", headers=auth_headers)).json()["id"]
 
-    # свой пароль админа обязателен (step-up), неверный пишется в журнал как неудачный вход
-    r = await _start(client, auth_headers, uid, password="wrong-password-1")
-    assert r.status_code == 400
-    fails = await _audit(client, "impersonate_pw_fail")
-    assert [(x.username, x.action) for x in fails] == [("admin", "impersonate_pw_fail")]
-    assert not await _audit(client, "impersonate_start")
+    # пароль не спрашивается: хватает токена админа
+    assert (await _start(client, auth_headers, uid)).status_code == 200
 
     # ни под собой, ни под другим админом
     assert (await _start(client, auth_headers, me_id)).status_code == 400
@@ -135,8 +129,9 @@ async def test_who_can_start_and_under_whom(client, auth_headers):
     # не-админ начать не может
     login = await client.post("/api/auth/login", json={"username": "someeditor", "password": "someeditor-pass-2026"})
     eh = _h(login.json()["access_token"])
-    r = await client.post(f"/api/users/{uid}/impersonate", headers=eh, json={"password": "someeditor-pass-2026"})
+    r = await client.post(f"/api/users/{uid}/impersonate", headers=eh)
     assert r.status_code == 403
+    assert [x.target for x in await _audit(client, "impersonate_start")] == ["plainview"]
     assert editor
 
 
