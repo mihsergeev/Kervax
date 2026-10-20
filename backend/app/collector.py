@@ -3937,9 +3937,10 @@ _SIGNALS = {6: "ABRT", 9: "KILL", 11: "SEGV", 15: "TERM"}
 # Свои helper'ы панели: снимки для отчета по таймеру и обработчики кнопок (*-req). Упавший
 # helper - ошибка Kervax, а не сервера: в "Что сломано" он виден, алерта нет. changes-setup 0.5,
 # который не укладывался во время на нодах с большим журналом, прислал алерт с каждой такой
-# ноды, и каждые 10 минут снова. kervax-agent и kervax-dumps (дампы баз для бэкапа) не тут.
+# ноды, и каждые 10 минут снова. kervax-agent, kervax-dumps (дампы баз для бэкапа) и kervax-relay
+# (ретранслятор, через него ходят агенты других серверов) не тут: их падение - повод для алерта.
 _OWN_HELPER_UNIT = re.compile(
-    r"kervax-(changes|cron|db-stats|disk-health|disk-usage|fpm|gpu|kube-expiry|kube-flux|logerr|queues|sockfix|units|web-rate|web-sites|workers"
+    r"kervax-(changes|cron|db-stats|disk-health|disk-usage|fpm|gpu|kube-expiry|kube-flux|logerr|queues|relay-sync|sockfix|units|web-rate|web-sites|workers"
     r"|[a-z]+-req)\.service")
 
 # Задание по таймеру, которое падает на каждом запуске, между падениями несколько минут
@@ -7238,7 +7239,7 @@ async def _track_uncovered(session_factory, now: datetime) -> None:
     async with session_factory() as session:
         changed = False
         for srv in await session.scalars(select(Server).where(Server.enabled.is_(True))):
-            keys = {k for k, _ in gaps(srv.last_report or {}, cur, srv.alert_mutes)} if seen_online(srv, now) else set()
+            keys = {k for k, _ in gaps(srv.last_report or {}, cur, srv.alert_mutes, srv.relay_enabled)} if seen_online(srv, now) else set()
             state = dict(srv.alert_state or {})
             fresh = _uncov_since(state, keys, now)
             if fresh != (state.get("uncov") or {}):
@@ -7294,7 +7295,7 @@ async def _daily_uncovered(session_factory, settings: Settings) -> None:
         since = (srv.alert_state or {}).get("uncov") or {}
         g = [
             (k, txt)
-            for k, txt in gaps(srv.last_report or {}, cur, srv.alert_mutes)
+            for k, txt in gaps(srv.last_report or {}, cur, srv.alert_mutes, srv.relay_enabled)
             if k in since
             and (now - (_parse_iso(since[k]) or now)).total_seconds() >= _UNCOVERED_SUSTAIN
         ]

@@ -311,17 +311,30 @@ root (`echo ... | base64 -d > /tmp/kervax-panel-ca.crt`) and passes it to
 [In a local network](#in-a-local-network---local-ca).
 
 If the server cannot reach the panel directly (for example, its address is blocked
-somewhere on the way to the panel), open **"Server cannot reach the panel directly?"**
-in the same window and enter a proxy: `http://user:password@host:port` (`https://` and
-`socks5://` work too). The command then downloads through it and passes `--proxy` to
-`install.sh`, which writes `proxy=` into the agent config. Reports, commands and
-updates all go through the proxy. The panel does not store the proxy or its
-password: they live only in the command and in the config on the server. For the
-agent itself, `HTTPS_PROXY` in its environment works as well.
+somewhere on the way to the panel), choose how the agent goes there in the same window:
 
-Behind a proxy the panel sees the proxy address, not the server's. Set the server's
-external IP in its settings ("Server IP"): the country and the outside checks use it.
-The proxy address has to be allowed in the panel firewall, if it has one.
+* **Through a relay** - another server of yours that reaches the panel. Switch on
+  **"Relay for agents"** in that server's settings: the `relay-setup` helper shows up in
+  "Action needed" and the `kervax_helpers.yml` playbook installs it. It is a small HTTP
+  CONNECT proxy (python3, nothing to install) that lets through only to the panel, only
+  from the servers that chose it here, and only with the login the panel issued. When a
+  firewall (ufw or firewalld) is active, the helper opens the port for exactly those
+  addresses. Choosing the relay in this window adds the server to its list right away.
+  Switching the relay off removes the proxy, its firewall rules and the helper.
+* **Through a location** - the proxy of one of the locations (the Locations window).
+* **Own proxy** - `http://user:password@host:port` (`https://` and `socks5://` work too).
+  The panel never sees it: the browser puts it into the command.
+
+The login and password go into the command by themselves: it downloads through the proxy
+and passes `--proxy` to `install.sh`, which writes `proxy=` into the agent config. Reports,
+commands and updates all go through the proxy (agent 2.44+). For the agent itself,
+`HTTPS_PROXY` in its environment works as well.
+
+Behind a proxy the panel sees the proxy address, not the server's. Enter the server's
+external IP in the same window: the country and the outside checks use it, and a relay
+lets in only known addresses. The proxy address has to be allowed in the panel firewall,
+if it has one. A server whose agent has not reported for 10 minutes after it was added
+gets a hint in its card with a button that opens this window.
 
 ## Your first site
 

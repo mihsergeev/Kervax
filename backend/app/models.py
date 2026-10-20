@@ -803,6 +803,18 @@ class Server(Base):
     liveness_base: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     # история износа SSD и прогноз до 90% и 100% (app/disk_wear.py), по серийникам дисков
     disk_wear: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    # Ретранслятор для агентов (app/relay.py): на этом сервере helper relay-setup держит прокси,
+    # через который в панель ходят агенты, чей адрес режут на пути к ней. Логин и пароль прокси -
+    # секрет, как у локаций: наружу только админу и в команду установки
+    relay_enabled: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
+    relay_port: Mapped[int] = mapped_column(Integer, default=0, server_default="0")  # 0 - по умолчанию
+    relay_user: Mapped[str] = mapped_column(String(64), default="", server_default="")
+    relay_password: Mapped[str] = mapped_column(String(128), default="", server_default="")
+    # что helper сообщил последним (слушает ли, фаервол, ошибка) и когда
+    relay_state: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    relay_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # через какой ретранслятор ходит агент ЭТОГО сервера: его адрес в списке пропускаемых
+    relay_via_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()

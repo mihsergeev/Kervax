@@ -2415,6 +2415,34 @@ select:focus {
 .install-alt-actions {
   margin: 0 0 0.2rem;
 }
+/* путь агента в панель (InstallPath): напрямую / ретранслятор / локация / свой прокси */
+.install-path {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.5rem 0.7rem;
+  margin: 0.2rem 0 0.4rem;
+}
+.install-path-modes {
+  flex-wrap: wrap;
+  margin: 0.35rem 0;
+}
+.install-path .field {
+  margin-top: 0.4rem;
+}
+/* агент давно не выходит на связь: подсказка с выбором пути */
+.install-late {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  margin: 0.4rem 0 0.6rem;
+  padding: 0.45rem 0.7rem;
+  border: 1px solid color-mix(in srgb, var(--degraded) 45%, transparent);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--degraded) 8%, transparent);
+  font-size: 0.9rem;
+}
 
 @media (max-width: 720px) {
   .srv-meters {

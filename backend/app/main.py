@@ -22,6 +22,7 @@ from app.api import (
     netlinks as netlinks_api,
     panel_errors as panel_errors_api,
     panel_requests,
+    relay as relay_api,
     report,
     search,
     servers,
@@ -126,10 +127,12 @@ def create_app() -> FastAPI:
     app.include_router(vulns_api.router, prefix="/api")
     app.include_router(locations.router, prefix="/api")
     app.include_router(maintenance.router, prefix="/api")
+    app.include_router(relay_api.router, prefix="/api")
     app.include_router(servers.router, prefix="/api")
     # связь между серверами и трафик за месяц (карточки сервера)
     app.include_router(netlinks_api.router, prefix="/api")
     app.include_router(servers.agent_router, prefix="/api")
+    app.include_router(relay_api.agent_router, prefix="/api")
     app.include_router(settings_api.router, prefix="/api")
     app.include_router(ansible_api.router, prefix="/api")
     app.include_router(backup_api.router, prefix="/api")
