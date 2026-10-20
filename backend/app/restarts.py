@@ -7,7 +7,8 @@
 """
 from __future__ import annotations
 
-from datetime import datetime
+import re
+from datetime import datetime, timedelta
 
 from app import podnames
 from app.models import Server
@@ -67,7 +68,38 @@ def update(state: dict | None, rep: dict, now: datetime) -> dict:
     for k, v in old.items():
         if k not in new and ((k.startswith("docker:") and not has_docker) or (k.startswith("pod:") and not has_pods)):
             new[k] = v
+    # давление на ноде в те минуты, когда перезапускались поды: им пачка подтверждается как
+    # подвисание ноды (bursts), а не общая беда одного приложения или плановый выход
+    psi = _psi_snap(rep)
+    keep = [x for x in old.get(PSI_KEY) or [] if isinstance(x, list) and len(x) == 2
+            and (t := _ts(x[0])) is not None and (now - t).total_seconds() <= WINDOW]
+    stamp = now.isoformat()
+    moved = any(k.startswith("pod:") and v.get("ev") and v["ev"][-1][0] == stamp for k, v in new.items())
+    if psi and moved:
+        keep.append([now.isoformat(), psi])
+    if keep:
+        new[PSI_KEY] = keep[-_KEEP:]
     return new
+
+
+PSI_KEY = "_psi"  # в alert_state["restarts"]: [[время, {c, mf, ms, if, is}]] - не объект
+# Подвисание ноды по PSI за минуту: процессы ждут CPU, память или диск заметную долю времени.
+# Пороги ниже алерта pressure: там давление держится, а здесь хватает минуты, в которую все упало
+_PSI_STALL = {"c": 25.0, "ms": 10.0, "mf": 3.0, "is": 10.0, "if": 3.0}
+
+
+def _psi_snap(rep: dict) -> dict | None:
+    psi = (rep or {}).get("psi")
+    if not isinstance(psi, dict):
+        return None
+    out = {}
+    for k, src in (("c", "cpu_some_60"), ("ms", "mem_some_60"), ("mf", "mem_full_60"),
+                   ("is", "io_some_60"), ("if", "io_full_60")):
+        try:
+            out[k] = round(float(psi.get(src) or 0), 1)
+        except (TypeError, ValueError):
+            out[k] = 0.0
+    return out
 
 
 def count(cs: dict | None, now: datetime) -> tuple[int, datetime | None]:
@@ -102,12 +134,22 @@ def muted_keys(s: Server) -> set[str]:
 # подвисает сама нода или kube-api: пробы не отвечают вовремя, контроллеры теряют лидерство
 # ("leader election lost") и выходят, и все это разом. Чинить надо ноду, а не поды, поэтому такие
 # перезапуски не идут в счет пода, а пачки - одной строкой про ноду.
+# Но разом выходят и воркеры одного приложения: на двух нодах три деплоймента yii работали по
+# 20 минут и выходили сами с кодом 0, в одну и ту же минуту, и это давало 57 "пачек" за сутки.
+# Поэтому в пачке не считаются поды с плановым выходом (exit0) и заглушенные, а подвисание ноды
+# нужно подтвердить: давлением на ноде в ту минуту (PSI из отчета, _psi) или причинами самих подов
+# (таймаут пробы, потерянный lease kube-api). Без подтверждения перезапуски считаются по подам.
 BURST_PODS = 3  # ворклоадов в одной пачке
 BURST_GAP = 120  # секунд от первого перезапуска пачки: отчеты идут раз в минуту
 BURST_MIN = 3  # пачек за сутки до алерта: одна-две (перезагрузка ноды, разовый затык) - не беда
 MIN_OOM = 3  # OOMKilled за сутки: лимит мал или течет память, понятно, что делать
 BURSTS_KEY = "bursts"  # ключ строки про пачки: мьют restarts:bursts
 _SIG = {9: "SIGKILL", 15: "SIGTERM", 6: "SIGABRT", 11: "SIGSEGV"}
+
+
+# признаки того, что под упал из-за подвисшей ноды или kube-api, а не по своей причине
+_NODE_SIGNS = re.compile(r"leader ?election|lease|context deadline exceeded|Client\.Timeout|awaiting headers|"
+                         r"request canceled|i/o timeout|TLS handshake timeout", re.I)
 
 
 def cause(last: dict | None) -> tuple[str, str]:
@@ -123,11 +165,13 @@ def cause(last: dict | None) -> tuple[str, str]:
     if probe:
         pm = str(last.get("pmsg") or "")
         return "probe", f"убит по {probe}-пробе" + (f" ({_short(pm, 100)})" if pm else "")
-    if x == 0 and r in ("Completed", ""):
+    line = str(last.get("msg") or last.get("log") or "")
+    # выход с кодом 0 - плановый, если перед ним не потерян lease: envoy-gateway после "leader
+    # election lost" выходит именно с нулем
+    if x == 0 and r in ("Completed", "") and not _NODE_SIGNS.search(line):
         return "exit0", "сам вышел с кодом 0"
     sig = _SIG.get(x - 128) if x > 128 else None
-    head = f"exit {x}" + (f" ({sig})" if sig else f" ({r})" if r and r != "Error" else "")
-    line = str(last.get("msg") or last.get("log") or "")
+    head = f"exit {x}" + (f" ({sig})" if sig else f" ({r})" if r and r not in ("Error", "Completed") else "")
     return "crash", head + (f": {_short(line, 140)}" if line else "")
 
 
@@ -153,20 +197,56 @@ def _events(cs: dict | None, now: datetime) -> list[tuple[datetime, int]]:
     return out
 
 
-def bursts(rs: dict, ctrl: dict[str, str], now: datetime) -> list[dict]:
-    """Пачки перезапусков подов за сутки: {"t" (последний в пачке), "pods" (ключи), "wl" (ворклоады)}"""
-    evs = sorted((t, k) for k, cs in rs.items() if k.startswith("pod:") for t, _n in _events(cs, now))
+
+
+
+def _node_sign(last: dict | None) -> bool | None:
+    """True - под упал так, как падают при подвисшей ноде (проба не дождалась ответа, потерян
+    lease), False - своя причина (OOM, ошибка приложения), None - причина неизвестна"""
+    ck, _t = cause(last)
+    if not ck:
+        return None
+    if ck == "probe":
+        return bool(_NODE_SIGNS.search(str((last or {}).get("pmsg") or ""))) or not (last or {}).get("pmsg")
+    if ck == "crash":
+        return bool(_NODE_SIGNS.search(f"{(last or {}).get('msg') or ''} {(last or {}).get('log') or ''}"))
+    return False
+
+
+def _stall(snap: object) -> bool:
+    return isinstance(snap, dict) and any(float(snap.get(k) or 0) >= v for k, v in _PSI_STALL.items())
+
+
+def bursts(rs: dict, ctrl: dict[str, str], now: datetime, skip: set[str] | None = None,
+           pods: dict[str, dict] | None = None) -> list[dict]:
+    """Пачки перезапусков подов за сутки: {"t" (последний в пачке), "pods" (ключи), "wl" (ворклоады),
+    "node" (подвисание ноды подтверждено), "psi" (самое сильное давление в эти минуты)}. skip - поды,
+    которые в пачки не идут (плановый выход, заглушенные)."""
+    skip = skip or set()
+    evs = sorted((t, k) for k, cs in rs.items() if k.startswith("pod:") and k not in skip
+                 for t, _n in _events(cs, now))
     groups: list[list[tuple[datetime, str]]] = []
     for t, k in evs:
         if groups and (t - groups[-1][0][0]).total_seconds() <= BURST_GAP:
             groups[-1].append((t, k))
         else:
             groups.append([(t, k)])
+    psi = [(t, x[1]) for x in rs.get(PSI_KEY) or [] if isinstance(x, list) and len(x) == 2
+           and (t := _ts(x[0])) is not None]
     out = []
     for g in groups:
         wl = {podnames.pod_key(k, ctrl.get(k, "")) for _t, k in g}
-        if len(wl) >= BURST_PODS:
-            out.append({"t": g[-1][0], "pods": sorted({k for _t, k in g}), "wl": wl, "ev": {(k, t) for t, k in g}})
+        if len(wl) < BURST_PODS:
+            continue
+        t0, t1 = g[0][0], g[-1][0]
+        snaps = [x for t, x in psi if (t0 - timedelta(seconds=90)) <= t <= (t1 + timedelta(seconds=90))]
+        stall = [x for x in snaps if _stall(x)]
+        keys = sorted({k for _t, k in g})
+        signs = [v for v in (_node_sign((pods or {}).get(k, {}).get("last")) for k in keys) if v is not None]
+        node = bool(stall) or (len(signs) >= 2 and sum(signs) * 2 >= len(signs))
+        top = max(stall or snaps, key=lambda x: max(float(x.get(k) or 0) for k in _PSI_STALL), default=None)
+        out.append({"t": t1, "pods": keys, "wl": wl, "ev": {(k, t) for t, k in g}, "node": node,
+                    "psi": top if stall else None})
     return out
 
 
@@ -177,8 +257,12 @@ def _pod_rows(s: Server, now: datetime) -> tuple[list[dict], list[dict]]:
     rs = st.get("restarts") if isinstance(st.get("restarts"), dict) else {}
     ctrl = podnames.ctrls(s.last_report)
     pods = _pods(s.last_report)
-    bl = bursts(rs, ctrl, now)
-    in_burst = set().union(*(b["ev"] for b in bl)) if bl else set()
+    muted = muted_keys(s)
+    skip = {k for k in rs if k.startswith("pod:") and (
+        cause((pods.get(k) or {}).get("last"))[0] == "exit0" or podnames.muted(muted, k, ctrl.get(k, "")))}
+    bl = bursts(rs, ctrl, now, skip, pods)
+    # в счет пода не идут только перезапуски из пачек, где подтверждено подвисание ноды
+    in_burst = set().union(*(b["ev"] for b in bl if b["node"])) if bl else set()
     rows = []
     for key in sorted(rs):
         if not key.startswith("pod:"):
@@ -208,9 +292,19 @@ def _burst_text(bl: list[dict], rows: list[dict], now: datetime) -> str:
     by_key = {r["key"]: r for r in rows}
     nodes = {str((by_key.get(k) or {}).get("pod", {}).get("node") or "") for b in bl for k in b["pods"]} - {""}
     where = f"подвисает нода {next(iter(nodes))}" if len(nodes) == 1 else "подвисает kube-api или etcd"
+    snaps = [b["psi"] for b in bl if b.get("psi")]
+    if snaps:
+        # самое сильное давление в минуты пачек: чего не хватало ноде
+        peak = {k: max(float(x.get(k) or 0) for x in snaps) for k in _PSI_STALL}
+        parts = [f"{what} {peak[some]:.0f}%" for some, full, what in (("c", "", "CPU"), ("ms", "mf", "память"),
+                                                                     ("is", "if", "диск"))
+                 if peak[some] >= _PSI_STALL[some] or (full and peak[full] >= _PSI_STALL[full])]
+        why = f"в эти минуты процессы ждали {', '.join(parts) or 'ресурсы'} времени"
+    else:
+        why = "пробы и запросы к kube-api не дождались ответа"
     return (f"поды перезапускаются пачками: {len(bl)} {_times(len(bl))} за сутки по {size} разом"
-            f"{_ago(max(b['t'] for b in bl), now)} ({', '.join(names[:3])}{more}) - похоже, {where}: "
-            "пробы и запросы к kube-api не успевают, смотрите нагрузку и память ноды")
+            f"{_ago(max(b['t'] for b in bl), now)} ({', '.join(names[:3])}{more}) - {where}: {why}, "
+            "смотрите, что грузит ноду")
 
 
 def problems(s: Server, now: datetime) -> list[dict]:
@@ -239,9 +333,10 @@ def problems(s: Server, now: datetime) -> list[dict]:
             groups.setdefault(podnames.pod_key(r["key"], r["ctrl"]), []).append(
                 (r["key"][4:], r["n"], r["last"], r["cause"]))
     out = []
-    if len(bl) >= BURST_MIN and BURSTS_KEY not in muted:
-        out.append({"key": BURSTS_KEY, "kind": "pod", "name": BURSTS_KEY, "n": len(bl),
-                    "text": _burst_text(bl, rows, now)})
+    nb = [b for b in bl if b["node"]]
+    if len(nb) >= BURST_MIN and BURSTS_KEY not in muted:
+        out.append({"key": BURSTS_KEY, "kind": "pod", "name": BURSTS_KEY, "n": len(nb),
+                    "text": _burst_text(nb, rows, now)})
     for gk, items in groups.items():
         kind, _, gname = gk.partition(":")
         total = sum(n for _name, n, _last, _c in items)
@@ -261,6 +356,8 @@ def view(s: Server, now: datetime) -> dict[str, int]:
     rs = (s.alert_state or {}).get("restarts")
     out = {}
     for key, cs in (rs if isinstance(rs, dict) else {}).items():
+        if key == PSI_KEY:
+            continue
         n, _last = count(cs, now)
         if n:
             out[key] = n
@@ -283,6 +380,8 @@ def kube_view(s: Server, now: datetime) -> dict | None:
     } for r in sorted(rows, key=lambda r: (not r["alert"], -r["n"], r["key"]))]
     return {
         "pods": pods,
-        "bursts": [{"t": b["t"].isoformat(), "pods": [k[4:] for k in b["pods"]]} for b in bl[-20:]],
+        # только подтвержденные подвисания ноды: одновременный выход воркеров одного приложения - не пачка
+        "bursts": [{"t": b["t"].isoformat(), "pods": [k[4:] for k in b["pods"]], "psi": b["psi"]}
+                   for b in [b for b in bl if b["node"]][-20:]],
         "burst_min": BURST_MIN,
     }

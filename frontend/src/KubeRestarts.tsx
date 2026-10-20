@@ -189,12 +189,17 @@ export function KubeRestartsSec({
       {bursts.length > 0 && (
         <div className={burstsHot && !burstsMuted ? 'net-prob' : 'net-note'}>
           <div>
-            {t('Пачек за сутки: {n}. Поды разных ворклоадов перезапускались разом: так бывает, когда подвисает нода или kube-api - пробы не отвечают вовремя, контроллеры теряют лидерство (leader election lost) и выходят. Чинить ноду, а не поды: нагрузка, память, диск под etcd.', { n: bursts.length })}
+            {t('Пачек за сутки: {n}. Поды разных ворклоадов перезапускались разом, и это подвисание ноды: в эти минуты на ней было давление или поды упали по таймауту пробы и kube-api (leader election lost). Чинить ноду, а не поды: нагрузка, память, диск под etcd. Плановый выход с кодом 0 и заглушенные поды в пачки не идут.', { n: bursts.length })}
           </div>
           <div className="mono small kube-bursts">
             {bursts.slice(0, 8).map((b) => (
               <div key={b.t}>
                 {hhmm(new Date(b.t))} - {shortList(b.pods.map((x) => x.split('/')[1] ?? x), t, 4)}
+                {b.psi && ` (${t('ждали: CPU {c}%, память {m}%, диск {d}%', {
+                  c: Math.round(b.psi.c),
+                  m: Math.round(Math.max(b.psi.ms, b.psi.mf)),
+                  d: Math.round(Math.max(b.psi.is, b.psi.if)),
+                })})`}
               </div>
             ))}
           </div>
