@@ -2629,6 +2629,14 @@ const EN: Record<string, string> = {
   'у домена один адрес': 'the domain has one address',
   'Показать': 'Show',
   'IP сервера (опционально)': 'Server IP (optional)',
+  'Сервер не достает до панели напрямую?': 'Server cannot reach the panel directly?',
+  'Если адрес сервера режут на пути к панели, агент может ходить в нее через прокси. Он попадет в команду выше и в конфиг агента на сервере, панель его не хранит.':
+    'If the server address is blocked on the way to the panel, the agent can reach it through a proxy. The proxy goes into the command above and the agent config on the server; the panel does not store it.',
+  'Нужен вида http://логин:пароль@хост:порт (подходят и https://, socks5://), без пробелов и кавычек.':
+    'Use the form http://user:password@host:port (https:// and socks5:// work too), no spaces or quotes.',
+  'Панель увидит адрес прокси, а не сервера: укажите внешний IP сервера в его настройках (IP сервера), по нему страна и проверки снаружи. IP прокси должен быть разрешен в фаерволе панели.':
+    'The panel will see the proxy address, not the server: set the server external IP in its settings (Server IP), it is used for the country and outside checks. The proxy IP must be allowed in the panel firewall.',
+  'агент ходит в панель через прокси': 'the agent reaches the panel through a proxy',
   'На сервере уже стоит агент другой панели?': 'Already running an agent for another panel on this server?',
   'Допишите третий аргумент — любое имя этого инстанса — в самый конец команды, через пробел после токена:':
     'Append a third argument — any name for this instance — at the very end of the command, separated by a space after the token:',

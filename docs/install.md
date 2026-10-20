@@ -310,6 +310,19 @@ root (`echo ... | base64 -d > /tmp/kervax-panel-ca.crt`) and passes it to
 `install.sh` with `--ca-file`. Run it as is, see
 [In a local network](#in-a-local-network---local-ca).
 
+If the server cannot reach the panel directly (for example, its address is blocked
+somewhere on the way to the panel), open **"Server cannot reach the panel directly?"**
+in the same window and enter a proxy: `http://user:password@host:port` (`https://` and
+`socks5://` work too). The command then downloads through it and passes `--proxy` to
+`install.sh`, which writes `proxy=` into the agent config. Reports, commands and
+updates all go through the proxy. The panel does not store the proxy or its
+password: they live only in the command and in the config on the server. For the
+agent itself, `HTTPS_PROXY` in its environment works as well.
+
+Behind a proxy the panel sees the proxy address, not the server's. Set the server's
+external IP in its settings ("Server IP"): the country and the outside checks use it.
+The proxy address has to be allowed in the panel firewall, if it has one.
+
 ## Your first site
 
 **"Add monitor"**: type an address (`example.com`,

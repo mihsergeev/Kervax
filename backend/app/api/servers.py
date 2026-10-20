@@ -3027,6 +3027,11 @@ async def agent_report(
     if body.local_ip:
         server.local_ip = body.local_ip[:64]
     ext = _client_ip(x_forwarded_for, x_real_ip)
+    if body.proxy:
+        # Агент ходит через прокси: панель видит адрес прокси, а не ноды. По нему считались бы
+        # страна и проверки снаружи, и у всех нод за одним прокси он был бы один. Адрес ноды
+        # тогда только тот, что задан руками ("IP сервера"); не задан - прежний не трогаем.
+        ext = (server.agent_ip or "").strip()
     if ext:
         server.external_ip = ext
     server.agent_version = body.agent_version[:32]

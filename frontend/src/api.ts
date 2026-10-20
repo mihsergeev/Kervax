@@ -1598,6 +1598,7 @@ export type ServerChanges = {
 
 export type ServerReport = {
   hostname?: string
+  proxy?: string // хост:порт прокси, через который агент ходит в панель (агент 2.44+)
   os?: string
   agent_version?: string
   cpu_model?: string

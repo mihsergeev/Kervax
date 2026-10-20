@@ -1672,6 +1672,8 @@ class AgentReportIn(BaseModel):
     is_vm: bool = False
     virt: str = Field(default="", max_length=64)
     local_ip: str = Field(default="", max_length=64)
+    # агент 2.44+ за прокси: хост:порт прокси (без логина), адрес соединения - это прокси
+    proxy: str = Field(default="", max_length=255)
     uptime_seconds: int = 0
     cpu_percent: float = 0.0
     mem_used: int = 0
