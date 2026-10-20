@@ -44,7 +44,7 @@ import (
 	"time"
 )
 
-const version = "2.42"
+const version = "2.43"
 
 // Публичный ключ для проверки подписи релизов агента (Ed25519, base64).
 // ПУСТО по умолчанию → самообновление ВЫКЛЮЧЕНО (агент никогда не заменяет себя).
@@ -467,9 +467,29 @@ type kubePod struct {
 	// начало metadata.uid (8 символов): агент воркера без доступа к kube-api знает свои поды
 	// только по uid из cgroup ("pod 56279ecf"), и по этому полю панель находит их имена
 	U    string `json:"u,omitempty"`
+	// Только у подов с перезапусками: как кончился прошлый запуск контейнера, который
+	// перезапускался последним (kubectl describe: Last State). По нему панель пишет причину
+	// в алерте и в разделе "Перезапуски": OOMKilled при лимите, убит по пробе, exit 1 и строка лога
+	Last *kubeLast `json:"last,omitempty"`
 	ip   string // podIP: нужен агенту для скрейпа метрик, в отчёт НЕ уходит (строчная = не сериализуется)
 	uid  string // metadata.uid: по нему под находится в cgroup ноды
 	ctrl string // контроллер; в отчет - только у подов этой ноды (Ctrl)
+}
+
+// kubeLast - прошлое завершение контейнера пода (lastState.terminated). Probe/PMsg - из событий
+// пода (kubelet убил по liveness или startup пробе и что она ответила), Log - строка из конца лога
+// прошлого запуска (ошибка, с которой процесс вышел). События живут час, лог прошлого запуска -
+// до следующего перезапуска, поэтому их агент берет один раз на каждое новое завершение.
+type kubeLast struct {
+	C     string `json:"c"`
+	R     string `json:"r,omitempty"` // OOMKilled / Error / Completed
+	X     int    `json:"x"`           // exit code
+	T     int64  `json:"t,omitempty"` // finishedAt, unix
+	Lim   string `json:"lim,omitempty"`
+	Probe string `json:"probe,omitempty"` // liveness / startup
+	PMsg  string `json:"pmsg,omitempty"`
+	Log   string `json:"log,omitempty"`
+	Msg   string `json:"msg,omitempty"` // terminated.message (terminationMessagePath)
 }
 
 // kubeCred — как СУБД-под получает логин/пароль. Панель воспроизведёт это в CronJob-дампе
@@ -819,7 +839,7 @@ type kubeCommand struct {
 	NS     string `json:"ns"`
 	Kind   string `json:"kind"` // deployment/statefulset/daemonset/pod
 	Name   string `json:"name"`
-	Action string `json:"action"` // rollout_restart / delete_pod / logs
+	Action string `json:"action"` // rollout_restart / delete_pod / logs / logs_prev (лог прошлого запуска)
 	Tail   int    `json:"tail"`
 	Since  int    `json:"since"`
 }
@@ -5469,6 +5489,7 @@ func kubePods(cl *http.Client, kc *kubeConf) []kubePod {
 			Spec struct {
 				NodeName   string
 				Containers []struct {
+					Name      string
 					Image     string
 					Resources struct {
 						Limits map[string]string `json:"limits"`
@@ -5498,9 +5519,13 @@ func kubePods(cl *http.Client, kc *kubeConf) []kubePod {
 				PodIP             string
 				Conditions        []struct{ Type, Status, Reason, Message string }
 				ContainerStatuses []struct {
+					Name         string
 					Ready        bool
 					RestartCount int
 					State        map[string]struct{ Reason string }
+					LastState    struct {
+						Terminated *kubeTerm `json:"terminated"`
+					} `json:"lastState"`
 				}
 			}
 		}
@@ -5508,6 +5533,8 @@ func kubePods(cl *http.Client, kc *kubeConf) []kubePod {
 	if kubeGet(cl, kc, "/api/v1/pods", &d) != nil {
 		return nil
 	}
+	defer kubeLastRotate()
+	lookups := 0 // событий и логов прошлого запуска за один отчет - не больше kubeLastLookups
 	mem := podMem("/sys/fs/cgroup")
 	cpu := podCPU("/sys/fs/cgroup")
 	now := time.Now()
@@ -5590,6 +5617,7 @@ func kubePods(cl *http.Client, kc *kubeConf) []kubePod {
 			}
 		}
 		ready := len(p.Status.ContainerStatuses) > 0
+		var lastT time.Time
 		for _, cs := range p.Status.ContainerStatuses {
 			kp.Restarts += cs.RestartCount
 			if !cs.Ready {
@@ -5600,6 +5628,25 @@ func kubePods(cl *http.Client, kc *kubeConf) []kubePod {
 					kp.Reason = st.Reason
 				}
 			}
+			// прошлое завершение того контейнера, что перезапускался последним
+			if t := cs.LastState.Terminated; cs.RestartCount > 0 && t != nil {
+				ft, _ := time.Parse(time.RFC3339, t.FinishedAt)
+				if kp.Last == nil || ft.After(lastT) {
+					lastT = ft
+					kp.Last = &kubeLast{C: cs.Name, R: t.Reason, X: t.ExitCode, Msg: cleanLogLine(t.Message)}
+					if !ft.IsZero() {
+						kp.Last.T = ft.Unix()
+					}
+				}
+			}
+		}
+		if kp.Last != nil {
+			for _, c := range p.Spec.Containers {
+				if c.Name == kp.Last.C {
+					kp.Last.Lim = c.Resources.Limits["memory"]
+				}
+			}
+			kubeLastExtra(cl, kc, &kp, now, &lookups)
 		}
 		kp.Ready = ready && p.Status.Phase == "Running"
 		out = append(out, kp)
@@ -5608,6 +5655,180 @@ func kubePods(cl *http.Client, kc *kubeConf) []kubePod {
 		out = kubeCapPods(out, kubePodCap)
 	}
 	return out
+}
+
+type kubeTerm struct {
+	Reason     string `json:"reason"`
+	ExitCode   int    `json:"exitCode"`
+	FinishedAt string `json:"finishedAt"`
+	Message    string `json:"message"`
+}
+
+// kubeLastLookups - сколько новых завершений агент разбирает за один отчет (события + лог
+// прошлого запуска, два запроса к kube-api на каждое): кластер, где разом перезапустилось
+// полсотни подов, не должен надолго занять агента. Остальные - в следующих отчетах
+const kubeLastLookups = 6
+
+// Уже разобранные завершения: ключ uid/контейнер/finishedAt -> что нашли. kubeLastNew собирается
+// текущим отчетом и в конце его становится kubeLastSeen, поэтому ушедшие поды забываются.
+var (
+	kubeLastMu   sync.Mutex
+	kubeLastSeen = map[string]kubeLast{}
+	kubeLastNew  = map[string]kubeLast{}
+)
+
+type kubeEvent struct {
+	Reason, Message, LastTimestamp, EventTime string
+}
+
+// kubeLastExtra дополняет прошлое завершение событиями пода (убит по пробе) и строкой из конца лога
+// прошлого запуска. Только для свежих завершений (события в кластере живут час) и один раз на
+// каждое: дальше берется из kubeLastSeen.
+func kubeLastExtra(cl *http.Client, kc *kubeConf, kp *kubePod, now time.Time, lookups *int) {
+	l := kp.Last
+	key := kp.uid + "/" + l.C + "/" + strconv.FormatInt(l.T, 10)
+	kubeLastMu.Lock()
+	got, ok := kubeLastSeen[key]
+	kubeLastMu.Unlock()
+	if !ok {
+		if l.T == 0 || now.Sub(time.Unix(l.T, 0)) > time.Hour || *lookups >= kubeLastLookups {
+			return
+		}
+		*lookups++
+		got = kubeLast{}
+		got.Probe, got.PMsg = kubeProbeKill(cl, kc, kp.NS, kp.Name, l.C, time.Unix(l.T, 0))
+		if l.R != "OOMKilled" {
+			got.Log = kubePrevLogLine(cl, kc, kp.NS, kp.Name, l.C)
+		}
+	}
+	kubeLastMu.Lock()
+	kubeLastNew[key] = got
+	kubeLastMu.Unlock()
+	l.Probe, l.PMsg, l.Log = got.Probe, got.PMsg, got.Log
+}
+
+// kubeLastRotate - конец разбора подов: завершения подов, которых больше нет, забываем
+func kubeLastRotate() {
+	kubeLastMu.Lock()
+	kubeLastSeen, kubeLastNew = kubeLastNew, map[string]kubeLast{}
+	kubeLastMu.Unlock()
+}
+
+// kubeProbeKill: kubelet убил контейнер по пробе ("Container frr failed liveness probe, will be
+// restarted") незадолго до завершения - какая проба и что она ответила последней.
+func kubeProbeKill(cl *http.Client, kc *kubeConf, ns, pod, c string, fin time.Time) (string, string) {
+	var ev struct {
+		Items []kubeEvent
+	}
+	path := fmt.Sprintf("/api/v1/namespaces/%s/events?fieldSelector=%s", url.PathEscape(ns),
+		url.QueryEscape("involvedObject.name="+pod))
+	if kubeGet(cl, kc, path, &ev) != nil {
+		return "", ""
+	}
+	return probeKillOf(ev.Items, c, fin)
+}
+
+// probeKillOf - разбор событий пода для kubeProbeKill (отдельно, чтобы проверить тестом)
+func probeKillOf(items []kubeEvent, c string, fin time.Time) (string, string) {
+	at := func(e kubeEvent) time.Time {
+		t, err := time.Parse(time.RFC3339, e.LastTimestamp)
+		if err != nil {
+			t, _ = time.Parse(time.RFC3339Nano, e.EventTime)
+		}
+		return t
+	}
+	probe := ""
+	for _, e := range items {
+		if e.Reason != "Killing" || !strings.HasPrefix(e.Message, "Container "+c+" failed ") {
+			continue
+		}
+		t := at(e)
+		// между приказом и выходом - не дольше срока на остановку (обычно 30 с, бывает больше)
+		if !t.IsZero() && (t.Before(fin.Add(-10*time.Minute)) || t.After(fin.Add(5*time.Second))) {
+			continue
+		}
+		for _, k := range []string{"liveness", "startup"} {
+			if strings.Contains(e.Message, "failed "+k+" probe") {
+				probe = k
+			}
+		}
+	}
+	if probe == "" {
+		return "", ""
+	}
+	pre := strings.ToUpper(probe[:1]) + probe[1:] + " probe failed: "
+	msg, mt := "", time.Time{}
+	for _, e := range items {
+		if e.Reason != "Unhealthy" || !strings.HasPrefix(e.Message, pre) {
+			continue
+		}
+		if t := at(e); msg == "" || t.After(mt) {
+			msg, mt = strings.TrimSpace(strings.TrimPrefix(e.Message, pre)), t
+		}
+	}
+	return probe, truncRunes(msg, 160)
+}
+
+// kubePrevLogLine - строка из конца лога прошлого запуска, с которой процесс вышел
+func kubePrevLogLine(cl *http.Client, kc *kubeConf, ns, pod, c string) string {
+	path := fmt.Sprintf("/api/v1/namespaces/%s/pods/%s/log?previous=true&tailLines=40&container=%s",
+		url.PathEscape(ns), url.PathEscape(pod), url.QueryEscape(c))
+	req, err := http.NewRequest("GET", strings.TrimRight(kc.Server, "/")+path, nil)
+	if err != nil {
+		return ""
+	}
+	req.Header.Set("Authorization", "Bearer "+kc.Token)
+	resp, err := cl.Do(req)
+	if err != nil {
+		return ""
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return ""
+	}
+	b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
+	return prevLogLine(string(b))
+}
+
+var (
+	logErrLike   = regexp.MustCompile(`(?i)error|fatal|panic|exception|failed|lost|killed|refused|denied|timeout|timed out|oom|traceback|cannot|unable`)
+	logStackLike = regexp.MustCompile(`^(\s|at |goroutine |\S+\.go:\d+|File "|\.\.\. \d+ more|Caused by)`)
+)
+
+// prevLogLine - последняя строка, похожая на ошибку (строки стека пропускаем: путь к panic.go
+// в стеке Go - не причина), иначе просто последняя
+func prevLogLine(s string) string {
+	var last string
+	lines := strings.Split(s, "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		ln := strings.TrimRight(lines[i], "\r")
+		if strings.TrimSpace(ln) == "" {
+			continue
+		}
+		if last == "" {
+			last = ln
+		}
+		if logStackLike.MatchString(ln) {
+			continue
+		}
+		if logErrLike.MatchString(ln) {
+			return cleanLogLine(ln)
+		}
+	}
+	return cleanLogLine(last)
+}
+
+func cleanLogLine(s string) string {
+	s = strings.Map(func(r rune) rune {
+		if r == '\t' {
+			return ' '
+		}
+		if r < 32 {
+			return -1
+		}
+		return r
+	}, s)
+	return truncRunes(strings.TrimSpace(s), 200)
 }
 
 // kubeMetrics - использование подов (ns/имя) и нод по metrics.k8s.io, как kubectl top. Права на
@@ -5830,7 +6051,7 @@ func runKubeCommand(panelURL, token string, cmd kubeCommand) {
 	case "delete_pod":
 		ok, output = kubeWrite(cl, kc, "DELETE",
 			fmt.Sprintf("/api/v1/namespaces/%s/pods/%s", url.PathEscape(cmd.NS), url.PathEscape(cmd.Name)), "", "")
-	case "logs":
+	case "logs", "logs_prev":
 		ok, output = kubePodLogs(cl, kc, cmd)
 	default:
 		output = "неизвестное действие"
@@ -5864,8 +6085,58 @@ func kubeWrite(cl *http.Client, kc *kubeConf, method, path, body, ctype string) 
 	return false, fmt.Sprintf("kube %d: %s", resp.StatusCode, strings.TrimSpace(string(b)))
 }
 
+// kubeLogContainer - чей лог читать. У пода из нескольких контейнеров kube-api без имени отвечает
+// 400 "a container name must be specified": берем как kubectl (аннотация default-container, иначе
+// первый), а для лога прошлого запуска - тот контейнер, что перезапускался последним.
+func kubeLogContainer(cl *http.Client, kc *kubeConf, ns, name string, prev bool) string {
+	var p struct {
+		Metadata struct {
+			Annotations map[string]string
+		}
+		Spec struct {
+			Containers []struct{ Name string }
+		}
+		Status struct {
+			ContainerStatuses []struct {
+				Name      string
+				LastState struct {
+					Terminated *kubeTerm `json:"terminated"`
+				} `json:"lastState"`
+			}
+		}
+	}
+	if kubeGet(cl, kc, fmt.Sprintf("/api/v1/namespaces/%s/pods/%s", url.PathEscape(ns), url.PathEscape(name)), &p) != nil {
+		return ""
+	}
+	if prev {
+		best, bt := "", ""
+		for _, cs := range p.Status.ContainerStatuses {
+			if t := cs.LastState.Terminated; t != nil && (best == "" || t.FinishedAt > bt) {
+				best, bt = cs.Name, t.FinishedAt
+			}
+		}
+		if best != "" {
+			return best
+		}
+	}
+	if len(p.Spec.Containers) < 2 {
+		return ""
+	}
+	if d := p.Metadata.Annotations["kubectl.kubernetes.io/default-container"]; d != "" {
+		return d
+	}
+	return p.Spec.Containers[0].Name
+}
+
 func kubePodLogs(cl *http.Client, kc *kubeConf, cmd kubeCommand) (bool, string) {
 	q := "timestamps=true"
+	prev := cmd.Action == "logs_prev"
+	if prev {
+		q += "&previous=true"
+	}
+	if c := kubeLogContainer(cl, kc, cmd.NS, cmd.Name, prev); c != "" {
+		q += "&container=" + url.QueryEscape(c)
+	}
 	if cmd.Since > 0 {
 		q += fmt.Sprintf("&sinceSeconds=%d", cmd.Since)
 	} else {

@@ -1436,6 +1436,9 @@ class ServerOut(BaseModel):
     backup_verify: dict | None = None
     # перезапусков за сутки: {"docker:<имя>" | "pod:<ns>/<имя>": n} (restarts.view)
     restarts_day: dict[str, int] | None = None
+    # раздел "Перезапуски" кластера (restarts.kube_view): поды с перезапусками за сутки, причина
+    # прошлого завершения, пачки
+    kube_restarts: dict | None = None
     # что течет памятью: [{key, kind, name, rate, eta_days, series, level, text}] (mem_trend.problems)
     mem_leaks: list[dict] | None = None
     # OOM (app/oom.py): эпизодов за 7 дней, последний, юниты, убитые OOM ({юнит: {ep, line, quiet}})
@@ -1855,12 +1858,13 @@ _K8S_NAME = r"^[a-z0-9]([-a-z0-9.]{0,251}[a-z0-9])?$"
 
 class KubeCommandIn(BaseModel):
     """Панель → очередь: управляющее действие над ресурсом кластера сервера.
-    Только белый список действий: rollout_restart (deploy/sts/ds), delete_pod, logs."""
+    Только белый список действий: rollout_restart (deploy/sts/ds), delete_pod, logs и logs_prev
+    (лог прошлого запуска, kubectl logs --previous; агент 2.43+)."""
 
     ns: str = Field(min_length=1, max_length=253, pattern=_K8S_NAME)
     kind: str = Field(default="pod", pattern="^(deployment|statefulset|daemonset|pod)$")
     name: str = Field(min_length=1, max_length=253, pattern=_K8S_NAME)
-    action: str = Field(pattern="^(rollout_restart|delete_pod|logs)$")
+    action: str = Field(pattern="^(rollout_restart|delete_pod|logs|logs_prev)$")
     tail: int = Field(default=400, ge=1, le=20000)
     since: int = Field(default=0, ge=0, le=30 * 86400)
 

@@ -189,8 +189,10 @@ async def test_another_deployment_within_the_hour_is_the_same_story(tmp_path, mo
             srv = (await s.execute(select(Server))).scalars().one()
             srv.last_seen, srv.last_report = t, {"uptime_seconds": 100000, **_dev_rep(*pods)}
             st = dict(srv.alert_state or {}) if state is None else state
-            st["restarts"] = {f"pod:shop/{n}": {"rc": 5, "ev": [[(t - timedelta(minutes=5 + i)).isoformat(), 1] for i in range(5)]}
-                              for n, _c in hot}
+            # у каждого деплоймента свои минуты: три разом в одну минуту - уже пачка (restarts.bursts)
+            st["restarts"] = {f"pod:shop/{n}": {"rc": 5, "ev": [[(t - timedelta(minutes=5 + 20 * i + 3 * j)).isoformat(), 1]
+                                                                 for i in range(5)]}
+                              for j, (n, _c) in enumerate(hot)}
             srv.alert_state = st
             if mutes is not None:
                 srv.alert_mutes = mutes

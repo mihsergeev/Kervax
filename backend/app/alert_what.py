@@ -131,9 +131,23 @@ def _units(body: str, extra: list[str]) -> list[tuple[str, str]] | None:
 
 
 def _restarts(body: str, extra: list[str]) -> list[tuple[str, str]] | None:
-    out = [(f"перезапускается под {_obj(p)}", f"{n} раз за сутки")
-           for p, n in re.findall(r"под (\S+) перезапускался (\d+) раз", body)]
+    # с агента 2.43 поды идут каждый своей строкой и с причиной прошлого завершения после двоеточия;
+    # пачки (restarts.bursts) - беда в ноде или kube-api, а не в подах
+    out = []
+    for line in [body, *extra]:
+        for item in _split(line, "; "):
+            b = re.match(r"поды перезапускаются пачками: (\d+) раз", item)
+            if b:
+                out.append(("поды перезапускаются пачками", f"{b.group(1)} раз за сутки"))
+                continue
+            m = _RESTART.match(item)
+            if m:
+                what = "перезапускается под" if m.group(1) == "под" else "перезапускаются поды"
+                out.append((f"{what} {_obj(m.group(2))}", f"{m.group(3)} раз за сутки" + (f": {m.group(4)}" if m.group(4) else "")))
     return out or None
+
+
+_RESTART = re.compile(r"(под|поды) (\S+)(?: \(\d+ шт\.\))? перезапускал(?:ся|ись) (\d+) раз\S* за сутки(?:, последний [^:]+)?(?:: (.+))?$")
 
 
 def _access(body: str, extra: list[str]) -> list[tuple[str, str]] | None:

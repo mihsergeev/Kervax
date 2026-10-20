@@ -176,6 +176,7 @@ export function muteKindLabel(k: string, t: TFn): string | null {
   if (k.startsWith(LEAK_MUTE)) return `${t('рост памяти')}: ${k.slice(LEAK_MUTE.length).replace(/^(docker|pod|proc):/, '')}`
   if (k.startsWith(RESTARTS_MUTE)) {
     const key = k.slice(RESTARTS_MUTE.length)
+    if (key === 'bursts') return t('поды перезапускаются пачками')
     return key.startsWith('pod:')
       ? `${t('перезапуски пода')}: ${key.slice(4)}`
       : `${t('перезапуски контейнера')}: ${key.replace(/^docker:/, '')}`

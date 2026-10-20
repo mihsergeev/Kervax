@@ -256,6 +256,7 @@ def _out(
     o.changes = srv_changes.view(server)
     o.backup_verify = backup_verify.view(server.last_report or {}, now)
     o.restarts_day = srv_restarts.view(server, now) or None
+    o.kube_restarts = srv_restarts.kube_view(server, now)
     o.mem_leaks = mem_trend.problems(server, now) or None
     o.oom = oom_mod.view(server, now)
     o.ssh = ssh_audit.view(server, now)

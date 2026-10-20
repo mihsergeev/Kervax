@@ -30,6 +30,7 @@ import { shortList, sinceShort, srvIssues, srvMuted } from './serverUtils'
 import { EnrollModal, fmtRel, InstallModal } from './ServersPage'
 import { CardNav, FreshChip, markMuted, OvAreas, OvRows, secInfoOf, type OvRow, type SecDef, type SecInfo, type SecItem } from './cardLayout'
 import { NetTile, TileFilterChip, useTileFilter } from './NetLinks'
+import { KubeRestartsSec } from './KubeRestarts'
 
 // Вкладка «Кубер»: КОМПАКТНЫЙ список хостов с кластером; клик по хосту → модалка
 // с нодами, воркоадами и подами (статусы, рестарты, логи, управление). Агент читает
@@ -100,7 +101,7 @@ function podCounts(pods: KubePod[]): { running: number; active: number } {
   return { running, active: active.length }
 }
 
-type KAction = 'rollout_restart' | 'delete_pod' | 'logs'
+type KAction = 'rollout_restart' | 'delete_pod' | 'logs' | 'logs_prev'
 
 async function runAndWait(
   serverId: number,
@@ -336,10 +337,12 @@ type LogRange = 'tail' | 'hour' | 'day'
 function PodLogsModal({
   server,
   pod,
+  prev = false,
   onClose,
 }: {
   server: Server
   pod: KubePod
+  prev?: boolean // лог прошлого запуска (kubectl logs --previous): почему упал
   onClose: () => void
 }) {
   const { t } = useI18n()
@@ -354,7 +357,7 @@ function PodLogsModal({
       setRange(r)
       const opts = r === 'tail' ? { tail: 400 } : { since: r === 'hour' ? 3600 : 86400 }
       try {
-        const res = await runAndWait(server.id, pod.ns, 'pod', pod.name, 'logs', opts)
+        const res = await runAndWait(server.id, pod.ns, 'pod', pod.name, prev ? 'logs_prev' : 'logs', opts)
         if (res.status === 'done') setLogs(res.result ?? '')
         else setErr(res.result || t('не удалось получить логи'))
       } catch {
@@ -363,7 +366,7 @@ function PodLogsModal({
         setLoading(false)
       }
     },
-    [server.id, pod.ns, pod.name, t],
+    [server.id, pod.ns, pod.name, prev, t],
   )
   useEffect(() => {
     load('tail')
@@ -374,7 +377,7 @@ function PodLogsModal({
     const a = document.createElement('a')
     const stamp = new Date().toISOString().slice(0, 16).replace(/[:T]/g, '-')
     a.href = url
-    a.download = `${pod.name}_${stamp}.txt`
+    a.download = `${pod.name}${prev ? '_previous' : ''}_${stamp}.txt`
     a.click()
     URL.revokeObjectURL(url)
   }
@@ -391,7 +394,7 @@ function PodLogsModal({
       <div className="card modal logs-modal" onClick={(e) => e.stopPropagation()}>
         <div className="clients-head">
           <h3 className="mono">
-            {pod.name} <span className="muted small">· {pod.ns} · <CountryFlag code={server.country} /> {server.name}</span>
+            {pod.name} <span className="muted small">· {pod.ns}{prev ? ` · ${t('прошлый запуск')}` : ''} · <CountryFlag code={server.country} /> {server.name}</span>
           </h3>
           <button className="ghost" onClick={onClose}>
             {t('Закрыть')}
@@ -604,6 +607,7 @@ function PodRow({
 const KUBE_SECTIONS: SecDef[] = [
   { id: 'overview', label: 'Сводка', group: '' },
   { id: 'pods', label: 'Поды', group: 'Нагрузка' },
+  { id: 'restarts', label: 'Перезапуски', group: 'Нагрузка' },
   { id: 'finished', label: 'Завершенные', group: 'Нагрузка' },
   { id: 'workloads', label: 'Ворклоады', group: 'Нагрузка' },
   { id: 'cron', label: 'CronJob', group: 'Нагрузка' },
@@ -634,6 +638,8 @@ function KubeHostModal({
 }) {
   const { t } = useI18n()
   const [logsPod, setLogsPod] = useState<KubePod | null>(null)
+  // лог прошлого запуска пода из раздела "Перезапуски"
+  const [prevPod, setPrevPod] = useState<KubePod | null>(null)
   const [muteOpen, setMuteOpen] = useState(false)
   const [jobMuting, setJobMuting] = useState(false)
   const [jobBusy, setJobBusy] = useState(false)
@@ -718,6 +724,8 @@ function KubeHostModal({
   const shown: Record<string, boolean> = {
     overview: true,
     pods: kube.access,
+    // поды, которые перезапускались за сутки: сюда ведет алерт о частых перезапусках
+    restarts: kube.access && (s.kube_restarts?.pods.length ?? 0) > 0,
     finished: kube.access && doneCount > 0,
     workloads: kube.access,
     cron: kube.access && (cronjobs.length > 0 || failedJobs.length > 0),
@@ -794,6 +802,7 @@ function KubeHostModal({
   // коротко, что в разделе, когда замечаний нет
   const ok: Record<string, string> = {
     pods: podsActive ? t('работают {a} из {b}', { a: podsRunning, b: podsActive }) : t('Подов нет'),
+    restarts: t('перезапускались за сутки: {n}', { n: s.kube_restarts?.pods.length ?? 0 }),
     finished: t('завершенных подов: {n}, упали {m}', { n: doneCount, m: doneFailed }),
     workloads: workloads.length
       ? t('в полном составе {a} из {b}', { a: workloads.length - wlPartial.length, b: workloads.length })
@@ -880,7 +889,11 @@ function KubeHostModal({
               />
             </button>
           )}
-          <button className="srv-tile-btn" onClick={() => { go('pods'); setSort('restarts') }} title={t('к разделу')}>
+          <button
+            className="srv-tile-btn"
+            onClick={() => (shown.restarts ? go('restarts') : (go('pods'), setSort('restarts')))}
+            title={t('к разделу')}
+          >
             <NetTile
               label={t('Перезапусков за сутки')}
               value={String(days.reduce((n, x) => n + x.n, 0))}
@@ -1012,6 +1025,17 @@ function KubeHostModal({
                         ))}
                 </div>
               </div>
+            )}
+
+            {cur.id === 'restarts' && s.kube_restarts && (
+              <KubeRestartsSec
+                server={s}
+                data={s.kube_restarts}
+                flavor={kube.flavor}
+                canAct={canAct}
+                onPrevLogs={(p) => setPrevPod({ ns: p.ns, name: p.name, phase: '', ready: false, restarts: p.n })}
+                onChanged={onChanged}
+              />
             )}
 
             {cur.id === 'workloads' && (
@@ -1270,6 +1294,7 @@ function KubeHostModal({
         </div>
       </div>
       {logsPod && <PodLogsModal server={s} pod={logsPod} onClose={() => setLogsPod(null)} />}
+      {prevPod && <PodLogsModal server={s} pod={prevPod} prev onClose={() => setPrevPod(null)} />}
     </div>,
     document.body,
   )
