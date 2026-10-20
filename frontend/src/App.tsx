@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useState } from 'react'
-import { ApiError, getPanelErrorCount, getToken, me, setToken, type Role } from './api'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { ApiError, IMP_ADMIN_KEY, getPanelErrorCount, getToken, impersonating, me, setToken, stopImpersonation, type Role } from './api'
 import { AuthProvider } from './auth'
 import { useI18n, type Lang } from './i18n'
 import { useUrlSection } from './deeplink'
@@ -27,6 +27,7 @@ import { ServicesPage } from './ServicesPage'
 import { BackupsPage } from './BackupsPage'
 import { UsersModal } from './UsersModal'
 import { ErrorBoundary } from './ErrorBoundary'
+import { ImpersonationBar } from './ImpersonationBar'
 import { ProblemModal } from './ProblemModal'
 import { PanelErrorsModal } from './PanelErrorsModal'
 import { setUiSection } from './errorLog'
@@ -77,6 +78,8 @@ export default function App() {
   // разделы, разрешённые учётке; пустой список = все (см. backend/app/deps.py)
   const [sections, setSections] = useState<string[]>([])
   const [username, setUsername] = useState('')
+  // админ вошел под этой учеткой: кто, до какого времени и что ей видно (плашка сверху)
+  const [imp, setImp] = useState<{ by: string; expires: string; serverGroups: string[]; siteGroups: string[] } | null>(null)
   // диплинк из алерта/главной: ?check=<id> → «Сайты» и деталь монитора,
   // ?server=<id> → «Серверы», ?docker/?kube/?backup=<id> → соответствующий раздел с
   // раскрытой карточкой этого хоста. Состояния мутабельны — с главной открываем сразу
@@ -241,19 +244,54 @@ export default function App() {
   )
 
 
+  // Вернуться к себе: токен админа на место и страница заново - в памяти страниц не должно
+  // остаться ничего, загруженного с правами пользователя. Протухший токен входа роняет в 401
+  // сразу несколько запросов: второй вызов не должен принять админа за вышедшего и стереть его токен
+  const leaving = useRef(false)
+  const returnToSelf = useCallback(() => {
+    if (leaving.current) return
+    leaving.current = true
+    stopImpersonation().finally(() => window.location.assign(window.location.pathname))
+  }, [])
+
   const loadMe = useCallback(() => {
     me()
       .then((u) => {
         setRole(u.role)
         setSections(u.sections ?? [])
         setUsername(u.username)
+        setImp(
+          u.impersonator && u.imp_expires
+            ? { by: u.impersonator, expires: u.imp_expires, serverGroups: u.server_groups ?? [], siteGroups: u.site_groups ?? [] }
+            : null,
+        )
         setAuthed(true)
       })
       .catch((err) => {
+        // вход под чужой учеткой истек или закрыт в другой вкладке - обратно к себе
+        if (err instanceof ApiError && err.status === 401 && (impersonating() || leaving.current)) return returnToSelf()
         if (err instanceof ApiError && err.status === 401) setToken(null)
         setAuthed(false)
       })
+  }, [returnToSelf])
+
+  // токен общий для всех вкладок: вошли под чужой учеткой или вернулись к себе в одной - другие
+  // перезагружаются, иначе показывали бы админа, а спрашивали бы с правами пользователя
+  useEffect(() => {
+    const onStorage = (e: StorageEvent) => {
+      if (e.key === IMP_ADMIN_KEY) window.location.assign(window.location.pathname)
+    }
+    window.addEventListener('storage', onStorage)
+    return () => window.removeEventListener('storage', onStorage)
   }, [])
+
+  // по истечении срока входа под чужой учеткой - сразу к себе, не дожидаясь отказа сервера
+  useEffect(() => {
+    if (!imp) return
+    const ms = new Date(imp.expires).getTime() - Date.now()
+    const id = window.setTimeout(returnToSelf, Math.max(ms, 0) + 1000)
+    return () => window.clearTimeout(id)
+  }, [imp, returnToSelf])
 
   useEffect(() => {
     if (getToken()) loadMe()
@@ -261,11 +299,13 @@ export default function App() {
   }, [loadMe])
 
   const logout = useCallback(() => {
+    // выход под чужой учеткой (и ее протухший токен) закрывает только этот вход
+    if (impersonating() || leaving.current) return returnToSelf()
     setToken(null)
     setAuthed(false)
     setMenuOpen(false)
     setModal(null)
-  }, [])
+  }, [returnToSelf])
 
   const toggleTheme = () => {
     const next = theme === 'dark' ? 'light' : 'dark'
@@ -287,6 +327,18 @@ export default function App() {
       }}
     >
     <div className="app">
+      {authed && imp && (
+        <ImpersonationBar
+          username={username}
+          role={role}
+          sections={sections}
+          serverGroups={imp.serverGroups}
+          siteGroups={imp.siteGroups}
+          by={imp.by}
+          expires={imp.expires}
+          onReturn={returnToSelf}
+        />
+      )}
       <div className="header">
         {authed && (
           <button
@@ -552,7 +604,7 @@ export default function App() {
                   </button>
                   <div className="menu-divider" />
                   <button className="menu-item menu-item-danger" onClick={logout}>
-                    {t('Выйти')}
+                    {imp ? t('Вернуться к себе') : t('Выйти')}
                   </button>
                 </div>
               </>

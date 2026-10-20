@@ -63,6 +63,27 @@ class UserOut(BaseModel):
     site_groups: list[str] | None = None
 
 
+class MeOut(UserOut):
+    """/auth/me: во время входа админа под этой учеткой - кто вошел и до какого времени
+    (плашка "Вы вошли как ..." и кнопка "Вернуться к себе")."""
+
+    impersonator: str | None = None
+    imp_id: int | None = None
+    imp_expires: datetime | None = None
+
+
+class ImpersonateIn(BaseModel):
+    # step-up: свой пароль админа еще раз, токена мало
+    password: str = Field(min_length=1, max_length=256)
+
+
+class ImpersonateOut(BaseModel):
+    access_token: str
+    imp_id: int
+    username: str
+    expires_at: datetime
+
+
 class UserCreate(BaseModel):
     username: str = Field(min_length=1, max_length=64)
     password: str = Field(min_length=MIN_PASSWORD_LEN, max_length=128)
@@ -145,6 +166,8 @@ class AuditEntryOut(BaseModel):
     action: str
     target: str
     detail: str
+    # админ действовал под этой учеткой (вход под чужой учеткой), пусто - от себя
+    as_user: str = ""
 
 
 # --- мониторы сайтов/сервисов ---

@@ -1,3 +1,4 @@
+from datetime import datetime, timezone
 from typing import Annotated
 
 from fastapi import Depends, HTTPException, Request, status
@@ -5,9 +6,10 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app import impersonate
 from app.config import get_settings
 from app.db import get_session
-from app.models import User
+from app.models import Impersonation, User
 from app.security import decode_access_token
 
 bearer_scheme = HTTPBearer(auto_error=False)
@@ -43,6 +45,15 @@ async def get_current_user(
     # токен, выпущенный до смены пароля (иная version), больше не действителен
     if payload.get("ver", 0) != user.token_version:
         raise unauthorized
+    impersonate.set_acting(None)
+    if payload.get("imp") is not None:
+        await _check_impersonation(payload, user, session, unauthorized)
+        # режим "посмотреть, как видит": любые изменения запрещены, включая свою учетку
+        # пользователя (пароль, 2FA, Telegram) - см. app/impersonate.py
+        if request.method in _WRITE_METHODS and not request.url.path.startswith(impersonate.ALLOWED_WRITES):
+            raise HTTPException(
+                status.HTTP_403_FORBIDDEN, impersonate.READ_ONLY.format(user=user.username)
+            )
     # роль «наблюдатель»: любой изменяющий запрос запрещён (кроме своей учётки).
     # Проверка здесь ловит ВСЕ аутентифицированные эндпоинты разом — ни один
     # изменяющий маршрут её не обойдёт, т.к. все они зависят от CurrentUser.
@@ -63,6 +74,28 @@ async def get_current_user(
             status.HTTP_403_FORBIDDEN, "Раздел недоступен для этой учётной записи"
         )
     return user
+
+
+async def _check_impersonation(payload: dict, user: User, session: AsyncSession, unauthorized) -> None:
+    """Токен входа под чужой учеткой действует, пока: админ все еще админ и не менял пароль,
+    пользователь не стал админом, а сеанс не закрыт ("Вернуться к себе") и не истек."""
+    admin = await session.scalar(select(User).where(User.username == payload["imp"]))
+    row = await session.get(Impersonation, payload.get("imp_id") or 0)
+    if (
+        admin is None
+        or admin.role != "admin"
+        or payload.get("imp_ver", 0) != admin.token_version
+        or user.role == "admin"
+        or row is None
+        or row.ended_at is not None
+        or row.admin != admin.username
+        or row.target != user.username
+    ):
+        raise unauthorized
+    expires = row.expires_at if row.expires_at.tzinfo else row.expires_at.replace(tzinfo=timezone.utc)
+    if expires <= datetime.now(timezone.utc):
+        raise unauthorized
+    impersonate.set_acting(impersonate.Acting(row.id, admin.username, user.username, expires))
 
 
 # Какие разделы панели открывает тот или иной путь API. Ключ — префикс пути, значение —

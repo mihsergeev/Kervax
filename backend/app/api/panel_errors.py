@@ -8,7 +8,7 @@ from fastapi import APIRouter, HTTPException, Request, status
 from pydantic import BaseModel, Field
 from sqlalchemy import func, or_, select, update
 
-from app import audit
+from app import audit, impersonate
 from app import panel_errors as pe
 from app.deps import AdminUser, CurrentUser, SessionDep
 from app.models import PanelError
@@ -86,7 +86,9 @@ def _first_frame(stack: str) -> str:
 
 @router.post("/front")
 async def front_error(body: FrontErrorIn, user: CurrentUser, request: Request) -> dict:
-    if not _hit(_front_hits, user.username, 60.0, FRONT_PER_MIN):
+    # во время входа админа под чужой учеткой - "админ как пользователь" (app/impersonate.py)
+    who = impersonate.label(user.username)
+    if not _hit(_front_hits, who, 60.0, FRONT_PER_MIN):
         return {"ok": True, "recorded": False}
     kind = body.kind if body.kind in ("error", "rejection", "render") else "error"
     detail = body.stack
@@ -94,7 +96,7 @@ async def front_error(body: FrontErrorIn, user: CurrentUser, request: Request) -
         detail = (detail + "\n\n" if detail else "") + "компонент:" + body.component
     rid = await pe.record(
         request.app.state.session_factory, kind="front", action=f"interface {kind}",
-        message=body.message or "(без текста)", detail=detail, username=user.username,
+        message=body.message or "(без текста)", detail=detail, username=who,
         page=body.page, section=body.section, fp_extra=_first_frame(body.stack),
     )
     return {"ok": True, "recorded": rid is not None}
@@ -102,14 +104,15 @@ async def front_error(body: FrontErrorIn, user: CurrentUser, request: Request) -
 
 @router.post("/report")
 async def report(body: ReportIn, user: CurrentUser, session: SessionDep, request: Request) -> dict:
-    if not _hit(_report_hits, user.username, 3600.0, REPORTS_PER_HOUR):
+    who = impersonate.label(user.username)
+    if not _hit(_report_hits, who, 3600.0, REPORTS_PER_HOUR):
         raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "Слишком много сообщений за час, попробуйте позже")
-    recent = await pe.recent_for(session, user.username)
+    recent = await pe.recent_for(session, who)
     attached = [pe.short_out(r) for r in recent]
     client = [pe.mask_obj(x.model_dump()) for x in body.client_log[-20:]]
     rid = await pe.record(
         request.app.state.session_factory, kind="report", action="report",
-        message=body.text.strip(), username=user.username, page=body.page, section=body.section,
+        message=body.text.strip(), username=who, page=body.page, section=body.section,
         extra={"errors": attached, "client_log": client}, dedupe=False,
     )
     if rid is None:

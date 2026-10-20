@@ -7,12 +7,13 @@ import httpx
 from fastapi import APIRouter, HTTPException, Request, status
 from sqlalchemy import and_, func, or_, select
 
-from app import alerts, audit, client_ip, ratelimit, settings_store, totp
+from app import alerts, audit, client_ip, impersonate, ratelimit, settings_store, totp
 from app.config import get_settings
 from app.deps import CurrentUser, SessionDep
 from app.models import AuditLog, LoginBan, User
 from app.schemas import (
     LoginRequest,
+    MeOut,
     PasswordChangeRequest,
     TelegramLinkOut,
     TelegramOut,
@@ -21,7 +22,6 @@ from app.schemas import (
     TwoFASetupOut,
     TwoFAStatusOut,
     TwoFAVerifyRequest,
-    UserOut,
 )
 from app.security import create_access_token, hash_password, verify_password
 
@@ -160,9 +160,13 @@ async def change_password(
     return TokenResponse(access_token=token)
 
 
-@router.get("/me", response_model=UserOut)
-async def me(user: CurrentUser) -> User:
-    return user
+@router.get("/me", response_model=MeOut)
+async def me(user: CurrentUser) -> MeOut:
+    out = MeOut.model_validate(user)
+    a = impersonate.acting()
+    if a is not None:
+        out = out.model_copy(update={"impersonator": a.admin, "imp_id": a.imp_id, "imp_expires": a.expires_at})
+    return out
 
 
 # входы под учеткой: удачные, неудачные (пароль, код 2FA) и блокировки после перебора

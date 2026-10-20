@@ -41,6 +41,7 @@ from typing import Any
 from sqlalchemy import delete, func, select
 
 from app.config import get_settings
+from app.impersonate import READ_ONLY, who_of
 from app.models import PanelError, Server
 
 log = logging.getLogger(__name__)
@@ -59,6 +60,9 @@ SKIP = frozenset({"/api/health"})
 # ожидаемые отказы: протухший вход и форма, не прошедшая проверку
 NOISY_CODES = frozenset({401, 422})
 QUIET_PREFIX = ("/api/auth/", "/api/panel-errors")
+
+# начало ответа на изменение во время входа под чужой учеткой (impersonate.READ_ONLY)
+_IMP_READ_ONLY = READ_ONLY.split("{")[0].encode()
 
 _MSG_MAX = 2000
 _DETAIL_MAX = 8000
@@ -336,7 +340,8 @@ def who_from_scope(scope) -> str:
         payload = decode_access_token(auth[7:].strip(), get_settings().jwt_secret)
     except Exception:  # noqa: BLE001
         return ""
-    return str((payload or {}).get("sub") or "")[:64]
+    # вход админа под чужой учеткой: "админ как пользователь", ошибку поймал админ
+    return who_of(payload)
 
 
 def _route(scope, path: str) -> str:
@@ -422,6 +427,10 @@ class PanelErrorMiddleware:
             self._note(scope, path, method, 500, req, b"", exc)
             raise
         kind = should_record(method, path, code)
+        # отказ в изменении, пока админ смотрит панель глазами пользователя (app/impersonate.py), -
+        # ожидаемый, как и протухший вход: не ошибка панели
+        if kind == "api" and code == 403 and _IMP_READ_ONLY in resp:
+            kind = None
         if kind:
             self._note(scope, path, method, code, req, bytes(resp), None)
 

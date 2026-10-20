@@ -5955,6 +5955,30 @@ const EN: Record<string, string> = {
     'No agent reports yet.',
   'Пункт уходит сам, когда этой версии на ноде не останется, со следующим отчетом агента.':
     'The item goes away by itself with the next agent report once this version is gone from the node.',
+
+  // --- вход админа под чужой учеткой (ImpersonationBar, UsersModal) ---
+  'Только просмотр, изменения отклоняются. Вошел {admin}, осталось {n} мин.':
+    'View only, changes are rejected. Signed in by {admin}, {n} min left.',
+  'Вернуться к себе': 'Back to my account',
+  'Войти как {user}?': 'Sign in as {user}?',
+  'Панель откроется так, как ее видит {user}: только разделы, группы и кнопки этой учетки ({scope}).':
+    'The panel opens the way {user} sees it: only their sections, groups and buttons ({scope}).',
+  'Только просмотр: изменения будут отклоняться. Вход на час, вернуться к себе можно в любой момент кнопкой на плашке сверху. Начало и конец попадут в журнал действий.':
+    'View only: changes will be rejected. The sign-in lasts an hour, you can go back to your account any time with the button on the bar at the top. Start and end go to the action log.',
+  'Ваш пароль': 'Your password',
+  'Войти как {user}': 'Sign in as {user}',
+  'от имени {user}': 'as {user}',
+  'Посмотреть панель глазами этой учетки, без ее пароля': 'See the panel as this account does, without its password',
+  'войти как': 'sign in as',
+  'Войти как': 'Sign in as',
+  'посмотреть панель так, как ее видит эта учетка: только просмотр, на час':
+    'see the panel the way this account does: view only, for an hour',
+  'Это ваша учетка.': 'This is your account.',
+  'Под администратором войти нельзя: у него те же права, что у вас.':
+    'You cannot sign in as an admin: they have the same rights as you.',
+  'вошел под учеткой': 'signed in as the account',
+  'вышел из-под учетки': 'left the account',
+  'неверный пароль при входе под учеткой': 'wrong password when signing in as an account',
 }
 
 type Ctx = {
