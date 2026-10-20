@@ -32,7 +32,7 @@ from app.api import (
     vulns as vulns_api,
 )
 from app.bootstrap import ensure_admin, ensure_default_location
-from app.collector import collector_loop
+from app.collector import collector_loop, pause_watch
 from app.config import get_settings
 from app.db import create_engine_and_factory
 from app import impersonate
@@ -76,14 +76,13 @@ def create_app() -> FastAPI:
         # Планировщик крутим здесь только в одиночном режиме. При масштабировании
         # (несколько веб-воркеров) его выносят в отдельный процесс app.scheduler_run,
         # а веб-воркеры ставят KERVAX_RUN_SCHEDULER=0 — иначе он запустится N раз.
-        task = (
-            asyncio.create_task(collector_loop(session_factory, settings))
-            if settings.run_scheduler
-            else None
+        # Иначе воркер сам следит за паузами: после заморозки машины "на связи" в списке
+        # серверов судим с той же льготой, что и планировщик (collector.awaiting_after_pause).
+        task = asyncio.create_task(
+            collector_loop(session_factory, settings) if settings.run_scheduler else pause_watch()
         )
         yield
-        if task is not None:
-            task.cancel()
+        task.cancel()
         await engine.dispose()
 
     # доки/схему API отдаём только в debug — в проде не раскрываем поверхность API

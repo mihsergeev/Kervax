@@ -11,6 +11,7 @@ import logging
 import random
 import re
 import statistics
+import time
 from collections import Counter
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -134,13 +135,52 @@ def _parse_iso(v: object) -> datetime | None:
 # Момент старта процесса. Пока панель лежала (деплой, рестарт контейнера), агенты
 # получали 502 и last_seen не обновлялся — после подъёма ВСЕ ноды выглядят молчащими.
 # Слать за это «недоступен» нельзя: сервера-то работали, лежала панель.
+# После заморозки процесса или машины (часы прыгнули вперед, тиков не было) метка
+# сдвигается на момент пробуждения: см. note_pause.
 _PANEL_STARTED = datetime.now(timezone.utc)
 # сколько после старта не судить об оффлайне: агент шлёт раз в ~15с, берём с запасом
 _START_GRACE_SECONDS = 180
+# Как часто процесс сверяет часы и какой провал между сверками считать паузой: обычная
+# задержка цикла событий - секунды, а минута без единого пробуждения - это заморозка
+# (машину ставили на паузу, процесс висел), и агентов в это время никто не слушал.
+_PAUSE_POLL_SECONDS = 10.0
+_PAUSE_GAP_SECONDS = 60.0
 
 
 def panel_just_started(now: datetime) -> bool:
     return (now - _PANEL_STARTED).total_seconds() < _START_GRACE_SECONDS
+
+
+def note_pause(now: datetime, gap: float) -> None:
+    """Процесс проспал gap секунд: льготу считаем заново с момента пробуждения."""
+    global _PANEL_STARTED
+    if now > _PANEL_STARTED:
+        _PANEL_STARTED = now
+    log.warning("панель не работала %d с: оффлайн и молчание агентов не судим %d с",
+                int(gap), _START_GRACE_SECONDS)
+
+
+async def pause_watch() -> None:
+    """Сверяет часы раз в _PAUSE_POLL_SECONDS; провал больше _PAUSE_GAP_SECONDS - пауза."""
+    prev = time.time()
+    while True:
+        await asyncio.sleep(_PAUSE_POLL_SECONDS)
+        cur = time.time()
+        if cur - prev > _PAUSE_POLL_SECONDS + _PAUSE_GAP_SECONDS:
+            note_pause(datetime.now(timezone.utc), cur - prev)
+        prev = cur
+
+
+def awaiting_after_pause(s: Server, now: datetime) -> bool:
+    """Сервер молчит только потому, что панель лежала: льгота идет, после подъема панели он
+    еще не отчитался, а до паузы недоступным не был (алерт "недоступен" по нему не висел).
+    Такой сервер не показываем оффлайном: его отчет просто еще в пути. Не пришел за льготу -
+    дальше обычный оффлайн с алертом."""
+    if s.last_seen is None or not panel_just_started(now):
+        return False
+    if int((s.alert_state or {}).get("offline", 0) or 0):
+        return False
+    return _aware(s.last_seen) < _PANEL_STARTED
 
 
 def seen_online(s: Server, now: datetime) -> bool:
@@ -890,6 +930,12 @@ async def run_due_checks(
         # и обнулить суточный аптайм, а через минуту зеленел сам: человек видел ровно
         # ту картину, ради которой мониторинг и заводят, и она была ложной.
         warming = {c.id for c in local if probes.get(c.id) is None and _probe_warming_up(c, now)}
+        # То же после паузы панели: агент не мог прислать результат, пока ее не было, и
+        # "агент не присылает результат 52 мин" открывало инциденты по всем таким сайтам
+        # и съедало им аптайм. Ждем свежий результат льготу; не пришел - тогда уже down.
+        if panel_just_started(now):
+            warming |= {c.id for c in local
+                        if checks_exec.probe_from_before(probes.get(c.id), _PANEL_STARTED)}
         if warming:
             due = [c for c in due if c.id not in warming]
             local = [c for c in local if c.id not in warming]
@@ -7375,6 +7421,7 @@ async def collector_loop(
     hb_task = asyncio.create_task(heartbeat.heartbeat_loop(session_factory, settings))
     # кнопки под алертами и команды боту: своя задача, long polling держит запрос до 25 с
     tg_task = asyncio.create_task(tg_bot.poll_loop(session_factory, settings))
+    pause_task = asyncio.create_task(pause_watch())
     last_prune: datetime | None = None
     # Стадии изолированы друг от друга. Была одна try на весь тик, и NameError в
     # серверных алертах уносил с собой прунинг и автобэкап панели — при этом наружу
@@ -7455,3 +7502,4 @@ async def collector_loop(
     finally:
         hb_task.cancel()
         tg_task.cancel()
+        pause_task.cancel()

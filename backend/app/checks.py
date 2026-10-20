@@ -646,6 +646,14 @@ def _target_port(check) -> int:
         return 443
 
 
+def probe_from_before(probe, since: datetime) -> bool:
+    """Результат агента прислан раньше since (до паузы панели) - свежего после нее еще нет."""
+    if probe is None:
+        return False
+    ts = probe.ts if probe.ts.tzinfo else probe.ts.replace(tzinfo=timezone.utc)
+    return ts < since
+
+
 def outcome_from_agent(check, probe, now, degraded_ms: int) -> CheckOutcome:
     """Вердикт по результату, присланному агентом с самого сервера."""
     if probe is None:
