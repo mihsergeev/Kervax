@@ -86,17 +86,23 @@ def test_growth_with_plenty_of_memory_is_not_a_problem():
 
 
 def test_problems_alert_and_home_rows():
-    # свободно 1 ГБ, +200 МБ в сутки: на 5 суток - предупреждение
+    # свободно 1 ГБ, +200 МБ в сутки: на 5 суток - за неделю никто не встает ночью, видно в карточке
     s = _srv(_state(**{"docker:worker": [500, 700, 900, 1100, 1300]}), rep=_rep(mem_used=15 * 2**30))
     ps = mem_trend.problems(s, NOW)
-    assert ps[0]["level"] == 1 and ps[0]["eta_days"] == 5.1
+    assert ps[0]["level"] == 0 and ps[0]["eta_days"] == 5.1
+    assert collector._server_conditions(s, NOW)["mem_leak"][0] == 0
+    assert [p for p in collector.server_problems(s, NOW) if p["kind"] == "mem_leak"] == []
+    # меньше чем на трое суток - алерт и "Что сломано"
+    s = _srv(_state(**{"docker:worker": [500, 700, 900, 1100, 1300]}), rep=_rep(mem_used=16 * 2**30 - 500 * MB))
+    ps = mem_trend.problems(s, NOW)
+    assert ps[0]["level"] == 2 and ps[0]["eta_days"] == 2.5
     assert ps[0]["text"] == ("память контейнера worker растет 4 суток подряд: 500 МБ -> 1.3 ГБ, +200 МБ в сутки, "
-                             "свободной памяти сервера (1.0 ГБ) при таком росте хватит примерно на 5.1 сут")
+                             "свободной памяти сервера (500 МБ) при таком росте хватит примерно на 2.5 сут")
     lvl, ctx = collector._server_conditions(s, NOW)["mem_leak"]
-    assert lvl == 1 and ctx["sig"] == ["docker:worker"]
+    assert lvl == 2 and ctx["sig"] == ["docker:worker"]
     rows = [(p["level"], p.get("section"), p["mute"]) for p in collector.server_problems(s, NOW)
             if p["kind"] == "mem_leak"]
-    assert rows == [(1, "docker", "leak:docker:worker")]
+    assert rows == [(2, "docker", "leak:docker:worker")]
     # без контейнера - про процесс; памяти на сутки с небольшим - уже проблема
     tight = _rep(mem_used=16 * 2**30 - 300 * MB)
     s2 = _srv(_state(**{"proc:java@app": [500, 700, 900, 1100, 1300]}), rep=tight)
@@ -112,12 +118,12 @@ def test_problems_alert_and_home_rows():
 
 
 def test_memory_is_shared_by_everything_that_grows():
-    # свободно 2 ГБ: одному контейнеру с +200 МБ в сутки хватило бы на 10 суток, двоим - на 5
+    # свободно 1 ГБ: одному контейнеру с +200 МБ в сутки хватило бы на 5 суток, двоим - на 2.6
     two = _state(**{"docker:worker": [500, 700, 900, 1100, 1300], "docker:api": [500, 700, 900, 1100, 1300]})
-    ps = mem_trend.problems(_srv(two, rep=_rep(mem_used=14 * 2**30)), NOW)
-    assert [(x["key"], x["level"], x["eta_days"]) for x in ps] == [("docker:api", 1, 5.1), ("docker:worker", 1, 5.1)]
+    ps = mem_trend.problems(_srv(two, rep=_rep(mem_used=15 * 2**30)), NOW)
+    assert [(x["key"], x["level"], x["eta_days"]) for x in ps] == [("docker:api", 2, 2.6), ("docker:worker", 2, 2.6)]
     one = _state(**{"docker:worker": [500, 700, 900, 1100, 1300]})
-    assert mem_trend.problems(_srv(one, rep=_rep(mem_used=14 * 2**30)), NOW)[0]["level"] == 0
+    assert mem_trend.problems(_srv(one, rep=_rep(mem_used=15 * 2**30)), NOW)[0]["level"] == 0
 
 
 def test_no_false_recovery_when_still_growing():

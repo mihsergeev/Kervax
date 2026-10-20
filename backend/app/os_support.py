@@ -221,3 +221,36 @@ def _advice(rep: dict, now: datetime) -> list[dict]:
         out.append({"kind": "apt", "level": 1,
                     "text": f"список пакетов не обновлялся {_days(ad)}: о новых обновлениях нода не знает"})
     return out
+
+
+# Перезагрузка, которую ждали. Алерт "перезагружен" нужен на неожиданную: сбой, питание, reset у
+# хостера. После обновлений ее ждали: агент до перезагрузки показывал reboot-required (apt,
+# unattended-upgrades с Automatic-Reboot) или ядро в /boot новее работающего. Аптайм сбрасывается в
+# приеме отчета, там же и видно, что было в прошлом отчете: причина ложится в отчет ("boot": {"at",
+# "why"}) и переходит из отчета в отчет, пока не будет новой перезагрузки.
+
+def reboot_why(prev: dict) -> str:
+    """Почему перезагрузку ждали, по отчету до нее; "" - не ждали"""
+    u = (prev or {}).get("os_upd")
+    if not isinstance(u, dict):
+        return ""
+    if u.get("reboot"):
+        pkgs = [str(p) for p in u.get("reboot_pkgs") or []][:3]
+        return "после обновления ее ждали" + (f" ({', '.join(pkgs)})" if pkgs else "")
+    if u.get("kernel_new"):
+        return f"ждало новое ядро {u['kernel_new']}"
+    return ""
+
+
+def planned_reboot(rep: dict, rebooted_at: datetime | None) -> str:
+    """Причина плановой перезагрузки rebooted_at из отчета; "" - неожиданная или не знаем"""
+    b = (rep or {}).get("boot")
+    if rebooted_at is None or not isinstance(b, dict) or not b.get("why"):
+        return ""
+    try:
+        at = datetime.fromisoformat(str(b.get("at") or ""))
+    except ValueError:
+        return ""
+    t = rebooted_at if rebooted_at.tzinfo else rebooted_at.replace(tzinfo=timezone.utc)
+    at = at if at.tzinfo else at.replace(tzinfo=timezone.utc)
+    return str(b["why"]) if abs((at - t).total_seconds()) < 2 else ""

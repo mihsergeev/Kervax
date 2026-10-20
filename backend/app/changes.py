@@ -6,7 +6,9 @@ helper changes-setup раз в 10 минут снимает отпечатки S
 пишет ленту изменений в servers.changes.
 
 Алертят изменения доступа: новый SSH-ключ, новый пользователь с shell (или uid 0), кто-то
-добавлен в sudo, изменились sudoers. Если это сделали свои - отметка "это мы" в карточке
+добавлен в sudo, изменились sudoers. Ключ, который уже встречался на любом сервере парка (лежит в
+снимке или был добавлен раньше), не алертит: это наш же деплой разносит свой ключ, событие только в
+ленте и хронологии с пометкой. Алертит незнакомый ключ, которого парк еще не видел. Если это сделали свои - отметка "это мы" в карточке
 убирает строку с главной. Кроны и юниты меняют деплои и пакеты постоянно, они идут только в
 ленту. Первый снимок - точка отсчета.
 """
@@ -63,6 +65,7 @@ def diff(old: dict, new: dict) -> list[dict]:
     for (u, fp), k in nk.items():
         if (u, fp) not in ok:
             add("key", "add", f"добавлен SSH-ключ пользователю {u}: {_key_text(k)}", True)
+            ev[-1]["fp"] = fp
     for (u, fp), k in ok.items():
         if (u, fp) not in nk:
             add("key", "del", f"удален SSH-ключ пользователя {u}: {_key_text(k)}", False)
@@ -148,6 +151,8 @@ def annotate(log: list[dict]) -> list[dict]:
         elif act == "add" and subj in removed:
             removed.discard(subj)  # еще раньше могли добавить и снять снова - то отдельная пара
             e = dict(e, text=f"{e['text']} ({note})")
+        if isinstance(e, dict) and e.get("known"):
+            e = dict(e, text=e["text"] + KNOWN_NOTE)
         out.append(e)
     return out
 
@@ -183,8 +188,41 @@ def ssh_login_events(state: dict, snap: dict, stamp: str) -> list[dict]:
     return ev
 
 
-def apply_snapshot(state: dict | None, snap: dict, now: datetime) -> dict:
-    """Новый servers.changes: снимок, лента с новыми событиями, отметка последнего алертного."""
+_ADD_KEY = re.compile(r"^добавлен SSH-ключ пользователю \S+: \S+ (\S+)")
+KNOWN_NOTE = " (ключ уже был на серверах парка)"
+
+
+def event_fp(e: dict) -> str:
+    """Отпечаток добавленного ключа из события ленты: в старых записях только в тексте"""
+    if e.get("kind") != "key" or e.get("act") != "add":
+        return ""
+    if e.get("fp"):
+        return str(e["fp"])
+    m = _ADD_KEY.match(str(e.get("text") or ""))
+    return m.group(1) if m else ""
+
+
+def known_fps(states) -> set[str]:
+    """Ключи, которые парк уже видел: лежат в снимке любого сервера или были добавлены по ленте
+    (даже если потом их сняли). states - servers.changes всех серверов"""
+    out: set[str] = set()
+    for st in states:
+        if not isinstance(st, dict):
+            continue
+        snap = st.get("snap") if isinstance(st.get("snap"), dict) else {}
+        out.update(fp for _u, fp in _keys(snap))
+        out.update(fp for e in st.get("log") or [] if isinstance(e, dict) and (fp := event_fp(e)))
+    return out
+
+
+def text_of(e: dict) -> str:
+    """Текст события для ленты и хронологии: знакомый ключ с пометкой"""
+    return str(e.get("text") or "") + (KNOWN_NOTE if e.get("known") else "")
+
+
+def apply_snapshot(state: dict | None, snap: dict, now: datetime, known: set[str] | None = None) -> dict:
+    """Новый servers.changes: снимок, лента с новыми событиями, отметка последнего алертного.
+    known - ключи, которые парк уже видел (known_fps): их добавление в ленту без алерта."""
     st = dict(state or {})
     prev = st.get("snap") if isinstance(st.get("snap"), dict) else None
     if prev is not None and prev.get("ts") == snap.get("ts"):
@@ -194,6 +232,9 @@ def apply_snapshot(state: dict | None, snap: dict, now: datetime) -> dict:
     logins = ssh_login_events(st, snap, stamp) if (snap.get("ssh") or {}).get("logins") is not None else []
     if prev is not None or logins:
         events = [dict(e, ts=stamp) for e in (diff(prev, snap) if prev is not None else []) + logins]
+        for e in events:
+            if known and e.get("alert") and event_fp(e) in known:
+                e["alert"], e["known"] = False, True
         if events:
             logv = (events + logv)
             if any(e["alert"] for e in events):
@@ -242,21 +283,28 @@ _TRACK_EVERY = timedelta(minutes=1)
 
 
 async def track(session_factory: async_sessionmaker[AsyncSession], now: datetime) -> int:
-    """Свежие снимки helper'а - в ленту. Сравнивает только тех, у кого снимок новее сохраненного."""
+    """Свежие снимки helper'а - в ленту. Сравнивает только тех, у кого снимок новее сохраненного.
+    Ключи, которые парк уже видел, собираются по всем серверам (и выключенным) до разбора; ключ из
+    только что разобранного снимка для следующих серверов уже знакомый."""
     global _last_track
     if _last_track is not None and now - _last_track < _TRACK_EVERY:
         return 0
     _last_track = now
     n = 0
     async with session_factory() as s:
-        for srv in await s.scalars(select(Server).where(Server.enabled.is_(True))):
+        servers = list(await s.scalars(select(Server)))
+        known = known_fps(srv.changes for srv in servers)
+        for srv in servers:
+            if not srv.enabled:
+                continue
             snap = snapshot(srv.last_report or {})
             if snap is None:
                 continue
             cur = srv.changes if isinstance(srv.changes, dict) else {}
             if (cur.get("snap") or {}).get("ts") == snap.get("ts"):
                 continue
-            srv.changes = apply_snapshot(cur, snap, now)
+            srv.changes = apply_snapshot(cur, snap, now, known)
+            known.update(fp for _u, fp in _keys(snap))
             n += 1
         if n:
             await s.commit()

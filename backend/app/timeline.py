@@ -24,6 +24,8 @@ from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import delete, or_, select, update
 
+from app import changes as srv_changes
+from app import os_support
 from app.models import Server, ServerEvent, ServerPackages, TimelineState
 
 log = logging.getLogger("kervax.timeline")
@@ -58,6 +60,7 @@ _PARTS = {
     "os_upd": ("os_upd",),
     "os": ("os",),
     "pkgs": ("pkgs",),
+    "boot": ("boot",),
 }
 
 
@@ -114,6 +117,8 @@ def snapshot(row, rep: dict) -> dict:
     upd = rep.get("os_upd") if isinstance(rep.get("os_upd"), dict) else {}
     return {
         "ts": _iso(row.last_seen), "c": c, "p": p, "boot": _iso(row.rebooted_at),
+        # плановая перезагрузка: почему ее ждали (os_support.planned_reboot)
+        "bw": os_support.planned_reboot(rep, row.rebooted_at) if row.rebooted_at else "",
         "k": str(upd.get("kernel") or ""), "kn": str(upd.get("kernel_new") or ""),
         "os": str(row.os or rep.get("os") or ""), "dk": str(rep.get("docker_v") or ""),
         "ag": str(row.agent_version or ""),
@@ -226,7 +231,8 @@ def diff(prev: dict | None, cur: dict, pend: dict) -> tuple[list[dict], dict]:
         out["p"] = pp
 
     if prev.get("boot") and cur.get("boot") and cur["boot"] != prev["boot"]:
-        ev.append(_ev(cur["boot"], "system", "reboot", "", "перезагрузка"))
+        ev.append(_ev(cur["boot"], "system", "reboot", "",
+                      f"плановая перезагрузка: {cur['bw']}" if cur.get("bw") else "перезагрузка"))
     for key, kind, label in (("k", "kernel", "ядро"), ("os", "os", "ОС"), ("dk", "docker", "Docker"),
                              ("ag", "agent", "агент Kervax")):
         a, b = prev.get(key) or "", cur.get(key) or ""
@@ -435,7 +441,7 @@ async def view(session, srv, user, since: datetime, until: datetime, tz: str) ->
         if isinstance(e, dict) and lo <= str(e.get("ts") or "") <= hi:
             kind = str(e.get("kind") or "")
             out.append({"ts": str(e["ts"]), "cat": "access" if kind in _ACCESS_KINDS else "config",
-                        "kind": kind, "text": str(e.get("text") or ""), "alert": bool(e.get("alert"))})
+                        "kind": kind, "text": srv_changes.text_of(e), "alert": bool(e.get("alert"))})
     for a in await session.scalars(
         select(AlertEvent).where(AlertEvent.target == srv.name, AlertEvent.section != "sites",
                                  AlertEvent.ts >= since, AlertEvent.ts <= until)

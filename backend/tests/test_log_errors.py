@@ -34,6 +34,15 @@ def _srv(rep=None, mutes=None, state=None):
                   web_5xx_alert_percent=0, kube_expiry_warn_days=[])
 
 
+HOT = [700, 700, 700, 700, 700, 700]  # корзины helper'а 0.3+: весь час в разы выше обычного
+
+
+def _hot(*keys, minutes=121):
+    """Авария в этих логах держится столько минут (как ее ведет log_errors.update)"""
+    since = (NOW - timedelta(minutes=minutes)).isoformat()
+    return {"logerr_ev": {k: {"hot": since, "ev": []} for k in keys}}
+
+
 def test_spike_rules():
     # мелочь не шлем: меньше 200 за час, даже если обычно ноль
     assert le.spike(_src("container a", 150, 150)) == 0
@@ -58,13 +67,14 @@ def test_spike_rules():
 
 
 def test_problems_text_mute_and_home():
-    rep = _rep([_src("container shop-php", 1240, 1240 + 23 * 30, last="PHP Fatal error: Uncaught PDOException password=***"),
+    rep = _rep([_src("container shop-php", 1240, 1240 + 23 * 30, last="PHP Fatal error: Uncaught PDOException password=***",
+                     hb=[200] * 6),
                 _src("pod shop/web-0", 40, 400, container="php")])
-    s = _srv(rep)
+    s = _srv(rep, state=_hot("контейнер shop-php|"))
     p = le.problems(s, NOW)
     assert [x["key"] for x in p] == ["контейнер shop-php|"]
-    assert p[0]["text"] == ("ошибки в логе: контейнер shop-php, 1 240 строк с ошибками за час, обычно около 30 в час\n"
-                            "↳ PHP Fatal error: Uncaught PDOException password=***")
+    assert p[0]["text"] == ("ошибки в логе: контейнер shop-php, 1 240 строк с ошибками за час, обычно около 30 в час, "
+                            "держится 2 ч 1 мин\n↳ PHP Fatal error: Uncaught PDOException password=***")
     rows = [x for x in collector.server_problems(s, NOW) if x["kind"] == "log_errors"]
     assert [r["level"] for r in rows] == [2] and rows[0]["mute"] == "logerr:контейнер shop-php|"
     # заглушить один лог: насовсем и на время
@@ -84,8 +94,12 @@ def test_problems_text_mute_and_home():
 
 
 def test_no_history_says_so():
-    s = _srv(_rep([_src("container a", 25000, 25000, span=1800)]))
-    assert le.problems(s, NOW)[0]["why"] == "25 000 строк с ошибками за час, обычного еще не знаем: истории меньше 4 часов"
+    s = _srv(_rep([_src("container a", 25000, 25000, span=1800, hb=[5000] * 6)]), state=_hot("контейнер a|"))
+    # обычного не знаем - аварию от постоянного потока не отличить: только в разделе
+    assert le.problems(s, NOW) == []
+    [row] = le.view(s, NOW)["sources"]
+    assert row["why"] == "25 000 строк с ошибками за час, обычного еще не знаем: истории меньше 4 часов"
+    assert row["tg"] is False
     assert le.why(_src("container a", 300, 300)) == "300 строк с ошибками за час, обычно их почти нет"
 
 
@@ -111,9 +125,10 @@ def test_own_unit_does_not_alert():
 
 
 def test_alert_condition():
-    rep = _rep([_src("container a", 4000, 4000 + 23 * 100), _src("container b", 300, 300 + 23 * 10)])
-    lv, ctx = collector._server_conditions(_srv(rep), NOW)["log_errors"]
-    assert lv == 2 and ctx["sig"] == ["контейнер a|", "контейнер b|"]
+    rep = _rep([_src("container a", 4000, 4000 + 23 * 100, hb=HOT), _src("container b", 300, 300 + 23 * 10, hb=[60] * 6)])
+    lv, ctx = collector._server_conditions(_srv(rep, state=_hot("контейнер a|", "контейнер b|")), NOW)["log_errors"]
+    # b - всплеск, до аварии далеко: только в разделе
+    assert lv == 2 and ctx["sig"] == ["контейнер a|"]
     assert ctx["detail"].startswith("ошибки в логе: контейнер a, 4 000 строк с ошибками за час")
     assert collector._server_conditions(_srv(_rep()), NOW)["log_errors"][0] == 0
 
@@ -154,12 +169,12 @@ def test_replicas_of_a_workload_are_one_log():
     pods = ["ingress-nginx-controller-5c67cd68dd-xwm58", "ingress-nginx-controller-5c67cd68dd-djg5j",
             "ingress-nginx-controller-5c67cd68dd-jgxpb"]
     rep = _rep([_src(f"pod default/{p}", 400, 400 + 23 * 10, container="controller", last=f"err {i}",
-                     last_ts=TS - 60 + i, hb=[0, 0, 100, 100, 100, 100]) for i, p in enumerate(pods)])
-    s = _srv(rep)
+                     last_ts=TS - 60 + i, hb=[100] * 6) for i, p in enumerate(pods)])
+    s = _srv(rep, state=_hot("под default/ingress-nginx-controller|controller"))
     p = le.problems(s, NOW)
     assert [x["key"] for x in p] == ["под default/ingress-nginx-controller|controller"]
     assert p[0]["text"] == ("ошибки в логе: 3 пода default/ingress-nginx-controller (controller), 1 200 строк с ошибками"
-                            " за час, обычно около 30 в час\n↳ err 2")
+                            " за час, обычно около 30 в час, держится 2 ч 1 мин\n↳ err 2")
     # старый мьют на отдельный под глушит весь ворклоад
     s.alert_mutes = ["logerr:под default/ingress-nginx-controller-5c67cd68dd-xwm58|controller"]
     assert le.problems(s, NOW) == []
@@ -193,3 +208,64 @@ def test_spike_must_hold():
     assert le.spike(_src("container a", 180, 180 + 23 * 10, hb=[0, 0, 0, 60, 60, 60]), held=True) == 1
     # helper до 0.3 корзин не шлет - по часу, как раньше
     assert le.spike(_src("container a", 400, 400 + 23 * 10)) == 1
+
+
+def _run(st, rep, start, minutes):
+    for i in range(minutes):
+        st = le.update(st, rep, start + timedelta(minutes=i))
+    return st
+
+
+def test_spike_is_shown_not_alerted():
+    """Сканер перебирает /.env полтора часа: 280 строк за час при обычных 15 - всплеск, в Telegram и
+    "Что сломано" его нет, в разделе видно когда и сколько"""
+    x = _src("container web-a-nginx", 280, 280 + 23 * 15, hb=[50] * 6)
+    rep = _rep([x])
+    start = NOW - timedelta(minutes=90)
+    st = _run(None, rep, start, 91)
+    s = _srv(rep, state={"logerr_ev": st})
+    assert le.problems(s, NOW) == []
+    assert collector._server_conditions(s, NOW)["log_errors"][0] == 0
+    assert not [r for r in collector.server_problems(s, NOW) if r["kind"] == "log_errors"]
+    [row] = le.view(s, NOW)["sources"]
+    assert row["level"] == 1 and row["tg"] is False
+    assert row["spikes"] == [{"from": start.isoformat(), "to": NOW.isoformat(), "peak": 280, "base": 15.0, "lvl": 1}]
+
+
+def test_hot_must_hold_two_hours():
+    """В 20 раз выше обычного: полтора часа - всплеск, 2 часа подряд - авария, алерт"""
+    rep = _rep([_src("container a", 4000, 4000 + 23 * 100, hb=HOT)])
+    st = _run(None, rep, NOW - timedelta(minutes=90), 91)
+    assert le.problems(_srv(rep, state={"logerr_ev": st}), NOW) == []
+    st = _run(None, rep, NOW - timedelta(minutes=120), 121)
+    [p] = le.problems(_srv(rep, state={"logerr_ev": st}), NOW)
+    assert p["level"] == 2 and "держится 2 ч" in p["text"]
+    # ошибки на минуту ушли ниже аварии - отсчет заново
+    calm = _rep([_src("container a", 4000, 4000 + 23 * 1000, hb=HOT)])
+    st = le.update(st, calm, NOW + timedelta(minutes=1))
+    st = le.update(st, rep, NOW + timedelta(minutes=2))
+    assert le.problems(_srv(rep, state={"logerr_ev": st}), NOW + timedelta(minutes=2)) == []
+    # всплеск при этом один: пропуск в минуту его не рвет
+    assert len(st["контейнер a|"]["ev"]) == 1
+
+
+def test_old_helper_never_alerts():
+    """helper до 0.3: корзин нет, сканеры с 403 он считает ошибками - только в разделе"""
+    rep = _rep([_src("container a", 4000, 4000 + 23 * 100)])
+    st = _run(None, rep, NOW - timedelta(hours=2), 121)
+    s = _srv(rep, state={"logerr_ev": st})
+    assert le.problems(s, NOW) == [] and le.view(s, NOW)["sources"][0]["level"] == 2
+
+
+def test_spikes_kept_for_a_day():
+    rep = _rep([_src("container a", 300, 300 + 23 * 10, hb=[60] * 6)])
+    quiet = _rep([_src("container a", 3, 300, hb=[0] * 6)])
+    st = _run(None, rep, NOW, 5)
+    st = _run(st, quiet, NOW + timedelta(minutes=5), 20)
+    st = _run(st, rep, NOW + timedelta(minutes=25), 5)
+    assert [e["from"] for e in st["контейнер a|"]["ev"]] == [NOW.isoformat(), (NOW + timedelta(minutes=25)).isoformat()]
+    later = NOW + timedelta(hours=24, minutes=10)
+    st = le.update(st, quiet, later)
+    assert [e["from"] for e in st["контейнер a|"]["ev"]] == [(NOW + timedelta(minutes=25)).isoformat()]
+    # лог пропал из отчета, всплески старше суток - запись не нужна
+    assert le.update(st, _rep([]), later + timedelta(hours=1)) == {}

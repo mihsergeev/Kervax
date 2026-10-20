@@ -25,6 +25,13 @@ h1 и d1 - строк с ошибками за последний час и су
 ingress-nginx давали три сообщения подряд, по одному на каждую, перешедшую порог. Обычный час
 копии без истории (новый под после выкатки) - ее нынешний час: всплеском она не считается.
 
+В Telegram и "Что сломано" - только авария, а не всплеск: в LOG_HOT раз больше обычного и от
+LOG_HOT_MIN держится TG_HOLD подряд, по корзинам helper'а 0.3+ (у старого не отличить пять минут бота
+от часа ошибок, и сканеры с их 403 он считает ошибками). Остальные всплески - сканеры, бот уперся в
+limit_req, upstream моргнул на выкладке, сертификат не продлился с первой попытки - реагировать на
+них не надо: они видны в разделе "Ошибки в логах" с историей за сутки (alert_state["logerr_ev"]):
+когда, до скольких строк за час и сколько обычно.
+
 Заглушить лог можно насовсем (alert_mutes "logerr:<ключ>") или на время (alert_snoozes с тем же
 ключом); ключ - "<где>|<контейнер пода>", например "контейнер shop-php|", у подов - по
 ворклоаду: "под shop/web|php". Старые мьюты на отдельный под глушат его ворклоад.
@@ -53,6 +60,10 @@ SUSTAIN = 4  # из шести 10-минутных корзин последне
 # держал любой час с ошибками: две минутные выкладки панели за час (по 150 строк connection refused
 # в ее caddy) продлевали алерт, поднятый еще по старому правилу, снова и снова
 SUSTAIN_HELD = 3
+TG_HOLD = 2 * 3600  # авария держится 2 часа - в Telegram; короче - всплеск, он в разделе
+EV_GAP = 900  # пропуск до 15 минут не разрывает всплеск
+EV_KEEP = 86400  # история всплесков в разделе - сутки
+EV_MAX = 5  # всплесков на лог
 
 
 def block(rep: dict) -> dict | None:
@@ -211,8 +222,70 @@ def sources(rep: dict) -> list[dict]:
     return out
 
 
+def _ts(v) -> datetime | None:
+    try:
+        return datetime.fromisoformat(str(v)) if v else None
+    except ValueError:
+        return None
+
+
+def _hot(x: dict) -> bool:
+    """Авария, а не всплеск: в LOG_HOT раз больше обычного и держится по корзинам helper'а 0.3+"""
+    return spike(x) == 2 and isinstance(x.get("hb"), list) and bool(x.get("hb")) and base(x) is not None
+
+
+def update(st: dict | None, rep: dict, now: datetime) -> dict:
+    """Раз в минуту: всплески каждого лога за сутки и с какого момента держится авария.
+    {ключ: {"t": минута, "hot": начало аварии, "ev": [{"from", "to", "peak", "base", "lvl"}]}}"""
+    st = {k: v for k, v in (st or {}).items() if isinstance(v, dict)}
+    minute = int(now.timestamp() // 60)
+    if block(rep) is None:
+        return st
+    seen = set()
+    for x in sources(rep):
+        k = key(x)
+        seen.add(k)
+        e = st.get(k) or {}
+        if e.get("t") == minute:
+            continue
+        evs = [dict(v) for v in (e.get("ev") or []) if isinstance(v, dict)]
+        hot = e.get("hot") if _hot(x) else None
+        lvl = spike(x)
+        if lvl:
+            hot = hot or (now.isoformat() if _hot(x) else None)
+            h1, b = int(x.get("h1") or 0), base(x)
+            last = evs[-1] if evs else None
+            end = _ts(last.get("to")) if last else None
+            if last is None or end is None or (now - end).total_seconds() > EV_GAP:
+                last = {"from": now.isoformat(), "peak": h1, "base": None if b is None else round(b, 1), "lvl": lvl}
+                evs.append(last)
+            last["to"] = now.isoformat()
+            last["peak"] = max(int(last.get("peak") or 0), h1)
+            last["lvl"] = max(int(last.get("lvl") or 0), lvl)
+        evs = [v for v in evs if (now - (_ts(v.get("to")) or now)).total_seconds() <= EV_KEEP][-EV_MAX:]
+        st[k] = {"t": minute, "hot": hot, "ev": evs}
+    for k in [k for k in st if k not in seen]:
+        # лог пропал из отчета: ошибок за сутки нет, авария кончилась
+        evs = [v for v in st[k].get("ev") or [] if isinstance(v, dict)
+               and (now - (_ts(v.get("to")) or now)).total_seconds() <= EV_KEEP]
+        st[k] = {**st[k], "hot": None, "ev": evs}
+    return {k: v for k, v in st.items() if v.get("ev") or v.get("hot")}
+
+
+def _hot_for(s: Server, k: str, now: datetime) -> float:
+    """Сколько секунд держится авария в логе (по update)"""
+    since = _ts((((s.alert_state or {}).get("logerr_ev") or {}).get(k) or {}).get("hot"))
+    return (now - since).total_seconds() if since else 0.0
+
+
+def _dur(sec: float) -> str:
+    m = int(sec // 60)
+    return f"{m} мин" if m < 60 else f"{m // 60} ч {m % 60} мин" if m % 60 else f"{m // 60} ч"
+
+
 def problems(s: Server, now: datetime) -> list[dict]:
-    """Логи со всплеском, без заглушенных: {"key", "label", "level", "why", "text"}"""
+    """Логи с аварией, без заглушенных: {"key", "label", "level", "why", "text"}. Объявленная держится
+    до половины порогов, новая - только когда в LOG_HOT раз больше обычного держится TG_HOLD"""
     held, muted = _held(s), _muted(s, now)
     out = []
     for x in sources(s.last_report or {}):
@@ -220,7 +293,12 @@ def problems(s: Server, now: datetime) -> list[dict]:
         lvl = spike(x, k in held)
         if not lvl or k in muted:
             continue
+        hold = _hot_for(s, k, now)
+        if k not in held and (not _hot(x) or hold < TG_HOLD):
+            continue  # всплеск, а не авария: виден в разделе
         w = why(x)
+        if hold >= TG_HOLD:
+            w += f", держится {_dur(hold)}"
         text = f"ошибки в логе: {label(x)}, {w}"
         last = str(x.get("last") or "").strip()
         if last:
@@ -237,6 +315,8 @@ def view(s: Server, now: datetime) -> dict | None:
     if b is None:
         return None
     held, muted = _held(s), _muted(s, now)
+    alerting = {x["key"] for x in problems(s, now)}
+    ev = (s.alert_state or {}).get("logerr_ev") or {}
     perm = {m[len(MUTE_PREFIX):] for m in (s.alert_mutes or []) if m.startswith(MUTE_PREFIX)}
     snz = {str(k)[len(MUTE_PREFIX):]: str(v) for k, v in (getattr(s, "alert_snoozes", None) or {}).items()
            if str(k).startswith(MUTE_PREFIX)}
@@ -250,6 +330,10 @@ def view(s: Server, now: datetime) -> dict | None:
         lvl = spike(x, k in held)
         if lvl:
             row["level"], row["why"] = lvl, why(x)
+            row["tg"] = k in alerting  # иначе всплеск: в Telegram не уходит
+        evs = (ev.get(k) or {}).get("ev") or []
+        if evs:
+            row["spikes"] = [{f: v.get(f) for f in ("from", "to", "peak", "base", "lvl")} for v in evs[::-1]]
         if k in perm:
             row["mute"] = {"perm": True}
         elif k in muted and k in snz:

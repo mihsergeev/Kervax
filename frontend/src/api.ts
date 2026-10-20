@@ -2276,6 +2276,9 @@ export type LogErrSource = {
   last_ts: number
   level?: number
   why?: string
+  tg?: boolean // всплеск дошел до аварии и уходит в Telegram; false - только здесь
+  // всплески за сутки (log_errors.update), свежие первыми: peak - строк с ошибками за час, base - обычно
+  spikes?: { from: string; to: string; peak: number; base: number | null; lvl: number }[]
   mute?: { perm?: boolean; until?: string }
 }
 // Пул PHP-FPM (fpm_pools.view): конфиг (listen, pm, max = pm.max_children, slowlog/terminate в

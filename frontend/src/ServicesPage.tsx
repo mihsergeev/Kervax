@@ -1473,6 +1473,13 @@ function CronList({ server, where, kind, jobs, onChanged, filter }: {
 
 // Логи контейнеров и подов с ошибками за сутки (helper logerr-setup): всплеск наверху, у лога - за час
 // из скольких строк, за сутки, обычный час и последняя строка с ошибкой. 🔕 - не алертить по логу
+// время всплеска в логе: сегодня - часы и минуты, раньше - еще и дата
+function hm(iso: string): string {
+  const d = new Date(iso)
+  const s = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+  return d.toDateString() === new Date().toDateString() ? s : `${d.toLocaleDateString([], { day: '2-digit', month: '2-digit' })} ${s}`
+}
+
 function LogErrList({ server, sources, onChanged, onlySpikes }: {
   server: Server
   sources: LogErrSource[]
@@ -1528,6 +1535,21 @@ function LogErrList({ server, sources, onChanged, onlySpikes }: {
                   )}
                 </div>
                 {x.why && <div className={`docker-c-img small${x.mute ? ' muted' : ' q-stuck'}`}>{x.why}</div>}
+                {x.level && !x.tg && !x.mute ? (
+                  <div className="docker-c-img muted small">
+                    {t('в Telegram не уходит: всплеск, а не авария (алерт - когда в 20 раз выше обычного держится 2 часа)')}
+                  </div>
+                ) : null}
+                {(x.spikes ?? []).length > 0 && (
+                  <div className="docker-c-img muted small">
+                    {t('всплески за сутки:')}{' '}
+                    {x.spikes!.slice(0, 3).map((e) => {
+                      const a = hm(e.from)
+                      const b = hm(e.to)
+                      return t('{when} до {n} в час', { when: a === b ? a : `${a}-${b}`, n: rpmText(e.peak) })
+                    }).join(', ')}
+                  </div>
+                )}
                 {x.last && (
                   <div className="docker-c-img w-log mono muted small" title={x.last}>
                     {x.last_ts > 0 && <span>{fmtRel(new Date(x.last_ts * 1000).toISOString())}: </span>}
