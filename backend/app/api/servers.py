@@ -49,7 +49,7 @@ from app import dump_reason
 from app import oom as oom_mod
 from app import software as software_mod
 from app.collector import (
-    _backup_problem_repos, alert_since, backup_cadence, backup_rotation_items, backup_unmonitored,
+    _backup_problem_repos, alert_since, awaiting_after_pause, backup_cadence, backup_rotation_items, backup_unmonitored,
     bsrv_extra, bsrv_restic_old, clock_skew_window, cron_job_issues, disk_analyze_ok, prune_problems, repo_reason, docker_since,
     backup_run_start, dump_local_stale, needed_pod_names, panel_server_names, pod_uid_names,
     disk_health_block, send_alerts_soon, send_autofix_note, server_problems, web_5xx_total, web_breakdown,
@@ -133,6 +133,9 @@ _IFACE_TOTALS = ("rx_total", "tx_total", "phys")
 def _is_online(server: Server, now: datetime) -> bool:
     if server.last_seen is None:
         return False
+    # панель только что поднялась после простоя: отчет этого сервера еще в пути, а не пропал
+    if awaiting_after_pause(server, now):
+        return True
     last = server.last_seen
     if last.tzinfo is None:
         last = last.replace(tzinfo=timezone.utc)

@@ -47,6 +47,10 @@ REPEAT_S = 3600
 # прочитал journald, а он под нехваткой памяти отстает (на одном сервере строка ядра пришла через
 # 76 секунд после отметки systemd)
 UNIT_WINDOW = 180
+# Сообщение ушло позже конца эпизода больше чем на столько - в тексте пометка "с опозданием": иначе
+# придержанный на час повтор или OOM, пока панель лежала, читались как свежая беда. Обычный путь
+# (журнал раз в минуту + SETTLE) - пара минут.
+LATE_S = 600
 
 # Процессы, убийство которых - авария, а не мелочь: базы, докер, веб-серверы, брокеры. Убитый
 # воркер php-fpm поднимется сам, убитый mysqld - это лежащая база.
@@ -379,8 +383,19 @@ def hhmm(ts: float, tz) -> str:
     return datetime.fromtimestamp(ts, timezone.utc).astimezone(tz).strftime("%H:%M")
 
 
+def late_text(e: dict, now_ts: float | None, held: bool = False) -> str:
+    """Пометка для эпизода, о котором сообщаем поздно: "с опозданием на 1 ч 47 мин" и почему, если
+    знаем. Не поздно (или время не дали) - пусто."""
+    if now_ts is None or now_ts - e["end"] < LATE_S:
+        return ""
+    m = int((now_ts - e["end"]) // 60)
+    lag = f"{m // 60} ч {m % 60} мин" if m >= 60 else f"{m} мин"
+    why = ": повторы в течение часа после прошлого сообщения собираются в одно" if held else ""
+    return f"с опозданием на {lag}{why}"
+
+
 def episode_text(e: dict, tz, failed_now: set[str], n7: int, containers: dict[str, str] | None = None,
-                 more: int = 0) -> str:
+                 more: int = 0, late: str = "") -> str:
     """Текст алерта по эпизоду, строки:
     нехватка памяти (OOM), 12:22
     убиты: python 554мб (php7.4-fpm.service, uid web), systemd + sd-pam (сессия web)
@@ -398,6 +413,8 @@ def episode_text(e: dict, tz, failed_now: set[str], n7: int, containers: dict[st
         head = f"нехватка памяти (OOM), {at}"
     if more:
         head += f", с прошлого сообщения еще {more} раз"
+    if late:
+        head += f" - {late}"
     lines = [head, "убиты: " + kills_text(e, containers)]
     fu = failed_units(e, failed_now)
     if fu:
@@ -629,7 +646,8 @@ def alert_step(s: Server, st: dict, rep: dict, now: datetime, tz,
         lvl = max(level(e, failed) for e in ready)
         if recent and lvl <= sent_lvl:
             return None, {}, {**now_apply, **upd, "oom_held": held + [e["id"] for e in ready]}
-        text = episode_text(ready[-1], tz, failed, week, conts, more=len(held) + len(ready) - 1)
+        text = episode_text(ready[-1], tz, failed, week, conts, more=len(held) + len(ready) - 1,
+                            late=late_text(ready[-1], now_ts))
         return (lvl, text), {**upd, "oom_held": [], "oom_sent": now_ts, "oom_sent_lvl": lvl,
                              "oom_ep": ready[-1]["id"]}, now_apply
     if held and not recent:
@@ -642,7 +660,8 @@ def alert_step(s: Server, st: dict, rep: dict, now: datetime, tz,
         last = next((by_id[i] for i in reversed(held) if i in by_id), None)
         if last is not None:
             lvl = level(last, failed)
-            text = episode_text(last, tz, failed, week, conts, more=len(held) - 1)
+            text = episode_text(last, tz, failed, week, conts, more=len(held) - 1,
+                                late=late_text(last, now_ts, held=True))
             link = {"oom_ep": last["id"]}
         else:
             lvl = 1
