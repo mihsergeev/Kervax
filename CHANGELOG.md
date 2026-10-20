@@ -4,6 +4,16 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.4.313] - 2026-10-20
+
+### Fixed
+- OOM: юнит, процесс которого убит в его cgroup или вложенной (user@N.service/init.scope,
+  session-N.scope), идет в алерт OOM, а не отдельным "упал юнит". На одном сервере рядом с OOM
+  приходил "упал user@1001.service: убит сигналом KILL".
+- Юнит, убитый KILL, ждет, пока helper дочитает журнал ядра за окно вокруг падения: "упал юнит"
+  больше не обгоняет алерт OOM.
+- Строка лога под упавшим юнитом без строк про другие юниты и рутины systemd, лучше без строки.
+
 ## [1.4.312] - 2026-10-20
 
 ### Changed

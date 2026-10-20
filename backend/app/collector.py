@@ -3612,11 +3612,12 @@ def server_problems(s: Server, now: datetime, pod_names: dict[str, str] | None =
     if ub is not None:
         ref = float(rep.get("clock_unix") or 0) or now.timestamp()
         muted = units_muted(s, now)
-        oom_eps = oom_mod.episodes(oom_mod.records(oom_mod.block(rep, now.timestamp())))
+        oom_b = oom_mod.block(rep, now.timestamp())
+        oom_eps = oom_mod.episodes(oom_mod.records(oom_b))
         for u in ub.get("units") or []:
             if not isinstance(u, dict) or not u.get("unit") or u["unit"] in muted or benign_unit(str(u["unit"])):
                 continue
-            if ref - float(u.get("since") or 0) < _UNIT_MIN_AGE:
+            if ref - float(u.get("since") or 0) < _UNIT_MIN_AGE or oom_mod.unit_pending(u, oom_b, ref):
                 continue
             # убит OOM: про это пункт OOM, менеджер сессии пользователя не служба вовсе
             oom_lk = oom_mod.unit_link(u, oom_eps)
@@ -4200,6 +4201,32 @@ def unit_why(u: dict) -> str:
     return _UNIT_RESULT.get(res) or res or "упал"
 
 
+# Строки в логе юнита, которые о причине не говорят: журнал user@N.service - это и сообщения
+# менеджера сессии про его собственные юниты ("launchpadlib-cache-clean.service - ... was skipped
+# because of an unmet condition check"), такая строка под "упал user@1001.service" - мусор
+_UNIT_LOG_NOISE = re.compile(
+    r"^(Reached target|Startup finished|Listening on|Created slice|Removed slice|Closed |Started |Stopped "
+    r"|Starting |Stopping |Finished |Queued start job|Condition check resulted)"
+    r"|was skipped because|unmet condition check")
+_UNIT_LOG_OTHER = re.compile(
+    r"^([\w@.:\\-]+\.(?:service|socket|timer|target|mount|automount|swap|path|scope|slice))(?::| - |\s)")
+
+
+def unit_log_line(u: dict) -> str:
+    """Последняя строка лога юнита, которая что-то говорит о нем самом. Строки про другие юниты и
+    рутину systemd пропускаем: лучше без строки, чем с чужой."""
+    name = str(u.get("unit") or "")
+    for x in reversed(u.get("log") or []):
+        line = str(x or "").strip()
+        if not line or _UNIT_LOG_NOISE.search(line):
+            continue
+        m = _UNIT_LOG_OTHER.match(line)
+        if m and m.group(1) != name:
+            continue
+        return line
+    return ""
+
+
 def units_text(units: list[dict], ref: float, limit: int = 4) -> str:
     """Один юнит: "упал certbot.service: код 1, 3 ч назад" и строка лога ниже. Несколько -
     списком, строка лога - у самого серьезного."""
@@ -4217,7 +4244,7 @@ def units_text(units: list[dict], ref: float, limit: int = 4) -> str:
         shown = ", ".join(f"{u['unit']} ({unit_why(u)})" for u in units[:limit])
         more = f" и еще {len(units) - limit}" if len(units) > limit else ""
         txt = f"упали юниты: {shown}{more}"
-    line = next((str(x) for x in reversed(units[0].get("log") or []) if x), "")
+    line = unit_log_line(units[0])
     if line:
         txt += f"\n↳ {units[0]['unit'] + ': ' if len(units) > 1 else ''}{line[:200]}"
     return txt
@@ -5423,12 +5450,16 @@ def _server_conditions(s: Server, now: datetime,
         ref = float(rep.get("clock_unix") or 0) or now.timestamp()
         muted_u = units_muted(s, now)
         covered = backup_units(s, rep)
-        # убитые OOM - в алерте OOM (app/oom.py), отдельного сообщения по юниту нет
-        oom_eps = oom_mod.episodes(oom_mod.records(oom_mod.block(rep, now.timestamp())))
+        # убитые OOM - в алерте OOM (app/oom.py), отдельного сообщения по юниту нет. Убитый KILL
+        # ждет, пока helper дочитает журнал ядра за окно вокруг падения: строки ядра под нехваткой
+        # приходят позже отметок systemd, и без ожидания "упал юнит" обгонял бы привязку к OOM
+        oom_b = oom_mod.block(rep, now.timestamp())
+        oom_eps = oom_mod.episodes(oom_mod.records(oom_b))
         bad = [u for u in ub.get("units") or []
                if isinstance(u, dict) and u.get("unit") and u["unit"] not in muted_u
                and not own_helper_unit(str(u["unit"])) and not benign_unit(str(u["unit"])) and u["unit"] not in covered
-               and ref - float(u.get("since") or 0) >= _UNIT_MIN_AGE and oom_mod.unit_link(u, oom_eps) is None]
+               and ref - float(u.get("since") or 0) >= _UNIT_MIN_AGE and oom_mod.unit_link(u, oom_eps) is None
+               and not oom_mod.unit_pending(u, oom_b, ref)]
         hold = units_hold(s, bad, now, muted_u)
         u_lvl = max((h[1] for h in hold.values()), default=0)
         out["units"] = (u_lvl, {

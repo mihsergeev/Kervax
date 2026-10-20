@@ -4,7 +4,7 @@ from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select
 
-from app.collector import unit_level, unit_why, units_text
+from app.collector import unit_level, unit_log_line, unit_why, units_text
 
 CERTBOT = {"unit": "certbot.service", "desc": "Certbot", "type": "oneshot", "result": "exit-code",
            "status": 1, "since": 0, "restarts": 0, "log": [
@@ -32,6 +32,22 @@ def test_texts():
     # серьезный (лежащий демон) первым, строка лога - его
     assert both == ("упали юниты: nginx.service (убит сигналом KILL), certbot.service (код 1)\n"
                     "↳ nginx.service: worker process exited on signal 9")
+
+
+def test_log_line_skips_other_units():
+    """Журнал user@N.service - это и сообщения менеджера сессии про свои юниты: под "упал
+    user@1001.service" приходила строка про launchpadlib-cache-clean.service. Чужие строки и рутину
+    systemd не берем, лучше без строки."""
+    user = {"unit": "user@1001.service", "type": "notify-reload", "result": "signal", "status": 9, "since": 0,
+            "log": ["Reached target basic.target - Basic System.", "Startup finished in 144ms.",
+                    "launchpadlib-cache-clean.service - Clean up old files in the Launchpadlib cache was skipped "
+                    "because of an unmet condition check (ConditionPathExists=/home/idv/.launchpadlib/api.launchpad.net/cache)."]}
+    assert unit_log_line(user) == ""
+    assert units_text([user], 200) == "упал user@1001.service: убит сигналом KILL"
+    own = dict(user, log=["user@1001.service: A process of this unit has been killed by the OOM killer.",
+                          "dbus.socket: Failed to listen", "Listening on dbus.socket - D-Bus User Message Bus Socket."])
+    assert unit_log_line(own) == "user@1001.service: A process of this unit has been killed by the OOM killer."
+    assert unit_log_line(CERTBOT) == "1 renew failure(s), 0 parse failure(s)"
 
 
 async def test_units_alert_lifecycle(tmp_path, monkeypatch):
