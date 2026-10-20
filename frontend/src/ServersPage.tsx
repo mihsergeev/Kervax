@@ -1634,7 +1634,8 @@ function duHint(it: DiskUsageItem, t: TFn): string {
 }
 
 // Самые большие каталоги раздела деревом: родитель - ближайший каталог списка, который
-// является началом пути; дети по убыванию размера, полоска - доля от занятого.
+// является началом пути; дети по убыванию размера. Полоска узкая и стоит рядом с размером,
+// цвет - по смыслу каталога (docker, кубер, журнал, логи, базы, временные, система).
 // Число файлов коротко: 4.1 млн, 700 тыс.
 function fmtFiles(n: number, t: TFn): string {
   if (n >= 1e6) return t('{n} млн', { n: (n / 1e6).toFixed(1) })
@@ -1642,20 +1643,22 @@ function fmtFiles(n: number, t: TFn): string {
   return String(n)
 }
 
+const DU_COLORS: [RegExp, string][] = [
+  [/^\/var\/lib\/(docker|containerd)(\/|$)/, '#4b74ff'],
+  [/^\/var\/lib\/(k0s|kubelet|rancher|k3s)(\/|$)/, '#8a7fb8'],
+  [/^\/var\/log\/journal(\/|$)/, '#cf9b52'],
+  [/^\/var\/log(\/|$)/, '#e0b85a'],
+  [/^\/var\/lib\/(postgresql|mysql|clickhouse|redis|mongodb)(\/|$)/, '#57a894'],
+  [/^\/(var\/)?tmp(\/|$)/, '#c77b95'],
+  [/^\/(usr|boot|lib|snap|var\/cache)(\/|$)/, '#6b7489'],
+]
+const duColor = (p: string) => DU_COLORS.find(([re]) => re.test(p))?.[1]
+
 function DuTree({ fs, t, files = false }: { fs: DiskUsageFs; t: TFn; files?: boolean }) {
   const [all, setAll] = useState(false)
   const state = files ? fs.itop_state : fs.top_state
-  if (!files && fs.top_state === 'none') return null
   if (files && state === 'failed')
     return <div className="muted small">{t('Посчитать файлы не вышло: du на ноде не знает --inodes.')}</div>
-  if (!files && fs.top_state === 'skipped')
-    return (
-      <div className="muted small">
-        {t('Раздел слишком большой для полного обхода ({n} млн файлов), смотрите находки ниже.', {
-          n: (fs.inodes / 1e6).toFixed(1),
-        })}
-      </div>
-    )
   const top: DiskUsageDir[] = (files ? (fs.itop ?? []).map((x) => ({ path: x.path, bytes: x.files })) : [...fs.top]).sort(
     (a, b) => b.bytes - a.bytes,
   )
@@ -1678,27 +1681,28 @@ function DuTree({ fs, t, files = false }: { fs: DiskUsageFs; t: TFn; files?: boo
     }
   }
   walk('', 0)
-  const shown = all ? rows : rows.slice(0, 12)
+  const LIMIT = 8
+  const shown = all ? rows : rows.slice(0, LIMIT)
   const base = (files ? fs.iused : fs.used) || 1
   return (
-    <div className="du-tree">
+    <div className="dk-tree">
       {shown.map(({ d, depth, parent }) => (
-        <div key={d.path} className="du-row" style={{ paddingLeft: `${depth * 14}px` }} title={d.path}>
-          <span className="mono du-path">{parent ? d.path.slice(parent.length).replace(/^\//, '') : d.path}</span>
-          <span className="du-bar">
-            <span style={{ width: `${Math.min(100, (d.bytes / base) * 100)}%` }} />
+        <div key={d.path} className="dk-tree-row" title={d.path}>
+          <span className="dk-tree-path mono" style={{ paddingLeft: `${depth * 12}px` }}>
+            {parent ? d.path.slice(parent.replace(/\/$/, '').length) : d.path}
           </span>
-          <span className="mono du-size">{files ? fmtFiles(d.bytes, t) : fmtBytes(d.bytes)}</span>
+          <span className="dk-tree-bar">
+            <span style={{ width: `${Math.min(100, (d.bytes / base) * 100)}%`, background: files ? undefined : duColor(d.path) }} />
+          </span>
+          <span className="dk-tree-size mono">{files ? fmtFiles(d.bytes, t) : fmtBytes(d.bytes)}</span>
         </div>
       ))}
-      {rows.length > 12 && (
-        <button className="ghost small du-more" onClick={() => setAll(!all)}>
-          {all ? t('свернуть') : `${t('показать все')} (${rows.length})`}
+      {rows.length > LIMIT && (
+        <button className="dk-link dk-more" onClick={() => setAll(!all)}>
+          {all ? t('свернуть') : t('показать все ({n})', { n: rows.length })}
         </button>
       )}
-      {state === 'partial' && (
-        <div className="muted small">{t('Обход не успел целиком, показано то, что посчитано.')}</div>
-      )}
+      {state === 'partial' && <div className="muted small">{t('Обход не успел целиком, показано то, что посчитано.')}</div>}
       {!rows.length && state === 'ok' && (
         <div className="muted small">{files ? t('Каталогов с массой файлов нет.') : t('Крупных каталогов нет.')}</div>
       )}
@@ -2163,109 +2167,6 @@ function DiskHealthBlock({ r, wear }: { r: ServerReport; wear?: DiskWear[] }) {
   )
 }
 
-// Диски: место и inode по разделам, прогноз заполнения. Плитки сверху - самый заполненный
-// раздел, ближайшее заполнение и самый загруженный диск; разделы строками с полоской
-function DiskSpaceCard({ server: s, r, onChanged }: { server: Server; r: ServerReport; onChanged: () => void }) {
-  const { t } = useI18n()
-  const { isViewer } = useAuth()
-  const disks = r.disks ?? []
-  if (!disks.length) return null
-  const fc = diskForecast(s, r)
-  const analyzed = new Set((diskUsage(r)?.fs ?? []).map((f) => f.mount))
-  const rows = disks.map((d) => {
-    const p = pct(d.used, d.total) ?? 0
-    // inode с агента 2.15; точка красится по худшему из места и inode
-    const ip = d.inodes ? Math.round(((d.inodes_used ?? 0) / d.inodes) * 100) : null
-    return { d, p, ip, fc: fc.filter((i) => i.mount === d.mount) }
-  })
-  const level = (p: number) => (p >= 90 ? 'bad' : p >= 75 ? 'warn' : 'ok')
-  const top = rows.reduce((a, b) => (b.p > a.p ? b : a))
-  const soon = fc.length ? fc.reduce((a, b) => (b.eta_h < a.eta_h ? b : a)) : null
-  const devs = r.disk_devs ?? []
-  const busy = devs.length ? devs.reduce((a, b) => (b.util > a.util ? b : a)) : null
-  // место под "Разобрать" держим во всех строках, чтобы полоски кончались ровно
-  const actCol = !!s.disk_analyze && !isViewer && rows.some(({ d }) => !analyzed.has(d.mount))
-  const grow = (i: DiskForecastItem) => t('растет на ~{r}% в сутки', { r: i.rate < 10 ? +i.rate.toFixed(1) : Math.round(i.rate) })
-  return (
-    <div className="chart-card net-card net-card-wide" id="mcard-diskfill">
-      <div className="net-head">
-        <div className="chart-cap">{t('Диски')}</div>
-      </div>
-      <div className="net-tiles">
-        <NetTile
-          label={t('Заполнено больше всего')}
-          value={`${top.p}%`}
-          sub={`${top.d.mount} · ${t('свободно {n}', { n: fmtBytes(Math.max(0, top.d.total - top.d.used)) })}`}
-          tone={level(top.p)}
-        />
-        <NetTile
-          label={t('Прогноз заполнения')}
-          value={
-            !soon
-              ? t('не грозит')
-              : soon.eta_h < 1
-                ? t('меньше часа')
-                : soon.eta_h < 48
-                  ? t('через {n} ч', { n: Math.round(soon.eta_h) })
-                  : t('через {n} дн', { n: Math.round(soon.eta_h / 24) })
-          }
-          sub={soon ? `${soon.kind === 'inode' ? 'inode ' : ''}${soon.mount} · ${grow(soon)}` : t('в ближайший месяц')}
-          tone={!soon ? 'ok' : soon.eta_h <= 24 ? 'bad' : soon.eta_h <= 5 * 24 ? 'warn' : undefined}
-        />
-        {busy && (
-          <NetTile
-            label={t('Самый загруженный диск')}
-            value={`${busy.util}%`}
-            sub={`${busy.dev} · ${t('ответ {v}', { v: fmtMs(busy.await) })}`}
-            tone={busy.util >= 90 ? 'warn' : undefined}
-          />
-        )}
-      </div>
-      <div className="loc-results">
-        {rows.map(({ d, p, ip, fc: items }) => {
-          const lv = level(Math.max(p, ip ?? 0))
-          // кнопка "Разобрать" - в конце строки; без нее (старый агент) подсказка уходит вниз
-          const analyze = !analyzed.has(d.mount) && (
-            <DiskAnalyze server={s} mount={d.mount} forecast={items.length > 0} onChanged={onChanged} />
-          )
-          return (
-            <div key={d.mount} className="loc-res ds-row">
-              <div className="ds-main">
-                <span className={`lk-dot lk-dot-${lv}`} />
-                <span className="ds-mount mono">{d.mount}</span>
-                <div className="ds-bar">
-                  <span className={level(p)} style={{ width: `${Math.min(p, 100)}%` }} />
-                </div>
-                <span className={`ds-pct${level(p) !== 'ok' ? ` net-tone-${level(p)}` : ''}`}>{p}%</span>
-                <span className="ds-size muted">
-                  {fmtBytes(d.used)} / {fmtBytes(d.total)}
-                  {ip != null && (
-                    <>
-                      {' · '}
-                      <span className={ip >= 75 ? toneOf(ip) : ''}>inode {ip}%</span>
-                    </>
-                  )}
-                </span>
-                {actCol && <span className="ds-act">{analyze}</span>}
-              </div>
-              <div className="ds-extra small">
-                {items.map((i) => (
-                  <div key={i.kind} className={i.eta_h <= 24 ? 't-down' : i.eta_h <= 5 * 24 ? 't-degraded' : ''}>
-                    {(i.kind === 'inode' ? t('inode кончатся {when}', { when: etaText(i.eta_h, t) }) : t('заполнится {when}', { when: etaText(i.eta_h, t) })) +
-                      ' ' +
-                      t('(растет на ~{r}% в сутки)', { r: i.rate < 10 ? +i.rate.toFixed(1) : Math.round(i.rate) })}
-                  </div>
-                ))}
-                {!s.disk_analyze && analyze}
-              </div>
-            </div>
-          )
-        })}
-      </div>
-    </div>
-  )
-}
-
 // Действия "Освободить": тот же каталог знают агент и helper diskusage-setup; какие из них
 // разрешены на ноде, helper сообщает сам (du.fix.allow из /etc/kervax/fix.conf).
 const DU_FIXABLE = new Set([
@@ -2345,52 +2246,97 @@ function DiskAnalyze({ server: s, mount, forecast, onChanged }: {
   )
 }
 
-// "На что ушло место" (helper diskusage-setup): дерево самых больших каталогов раздела и
-// находки с готовыми командами. Безопасные находки и лог контейнера освобождаются кнопкой:
-// сначала нода сама считает, что удалится (preview), человек подтверждает, потом run.
-function DiskUsageBlock({ server: s, onChanged }: { server: Server; onChanged: () => void }) {
+// Место на дисках: один блок вместо плиток "Диски" и отдельного "На что ушло место". На раздел одна
+// строка: процент как у алерта (занято/всего), свободно для обычных процессов и резерв root отдельно -
+// df считает резерв занятым и показывает больше процентов. Под разобранным разделом (helper
+// diskusage-setup) слева дерево каталогов, справа находки строками; пояснение и команда - по клику
+// на строку. Безопасные находки и лог контейнера освобождаются кнопкой: нода сначала считает, что
+// удалится (preview), человек подтверждает, потом run. "Освободить безопасное" - все безопасные
+// подряд по одному подтверждению, без preview каждой: они того же уровня, что у автоочистки.
+
+// длинные хэши docker в командах коротко, полная команда - в подсказке и при копировании
+const shortCmd = (c: string) => c.replace(/\b([0-9a-f]{12})[0-9a-f]{52}\b/g, '$1...')
+
+// короткое название для строки находки, путь или уточнение - серым рядом
+function duShort(it: DiskUsageItem, t: TFn): { name: string; sub: string } {
+  switch (it.id) {
+    case 'big-log': return { name: it.path.split('/').pop() || it.path, sub: it.path }
+    case 'container-log': return { name: t('лог контейнера {n}', { n: it.name ?? '?' }), sub: 'docker' }
+    case 'docker-images': return { name: t('образы без контейнеров'), sub: 'docker' }
+    case 'docker-dangling': return { name: t('образы без тега'), sub: 'docker' }
+    case 'docker-volumes': return { name: t('тома без контейнеров'), sub: it.count ? t('docker, {n} шт.', { n: it.count }) : 'docker' }
+    case 'docker-build-cache': return { name: t('кэш сборки'), sub: 'docker' }
+    case 'docker-containers': return { name: t('остановленные контейнеры'), sub: 'docker' }
+    case 'journal': return { name: t('журнал systemd'), sub: t('останется 200 МБ') }
+    case 'rotated-logs': return { name: t('старые ротированные логи'), sub: t('{n} файлов, /var/log', { n: it.count ?? 0 }) }
+    case 'apt-cache': return { name: t('кэш apt'), sub: '/var/cache/apt' }
+    case 'dnf-cache': return { name: t('кэш dnf/yum'), sub: '' }
+    case 'tmp-dir':
+    case 'vartmp-dir': return { name: it.path, sub: it.fresh ? t('есть свежие файлы') : t('{n} старых файлов', { n: it.count ?? 0 }) }
+    case 'deleted-open':
+      return { name: t('удаленные, но открытые файлы'), sub: (it.procs ?? []).map((p) => `${p.comm} ${p.pid}`).join(', ') }
+    default: return { name: duLabel(it, t), sub: '' }
+  }
+}
+
+const duSize = (it: DiskUsageItem) => it.free || it.bytes
+const duKey = (it: DiskUsageItem) => `${it.mount}|${it.id}|${it.path}|${it.name ?? ''}`
+const dkLevel = (p: number) => (p >= 90 ? 'bad' : p >= 75 ? 'warn' : 'ok')
+
+function DkCopy({ text }: { text: string }) {
   const { t } = useI18n()
-  const { isAdmin } = useAuth()
-  const [copied, setCopied] = useState<string | null>(null)
+  const [ok, setOk] = useState(false)
+  return (
+    <button
+      className="dk-link"
+      onClick={() => {
+        navigator.clipboard?.writeText(text)
+        setOk(true)
+        window.setTimeout(() => setOk(false), 1500)
+      }}
+    >
+      {ok ? t('скопировано') : t('копировать')}
+    </button>
+  )
+}
+
+function DkCmd({ cmd }: { cmd: string }) {
+  return (
+    <div className="dk-cmd">
+      <code title={cmd}>{shortCmd(cmd)}</code>
+      <DkCopy text={cmd} />
+    </div>
+  )
+}
+
+type DkBulk =
+  | { phase: 'confirm' }
+  | { phase: 'run'; i: number; n: number; name: string; freed: number; errs: string[] }
+  | { phase: 'done'; freed: number; errs: string[] }
+
+function DiskSpaceCard({ server: s, r, onChanged }: { server: Server; r: ServerReport; onChanged: () => void }) {
+  const { t } = useI18n()
+  const { isAdmin, isViewer } = useAuth()
   const [fix, setFix] = useState<Record<string, DuFixState>>({})
-  const r = s.last_report ?? {}
+  const [bulk, setBulk] = useState<Record<string, DkBulk>>({})
+  const [open, setOpen] = useState<string | null>(null)
+  const [more, setMore] = useState<Record<string, boolean>>({})
+  const [cmds, setCmds] = useState<string | null>(null)
+  const disks = r.disks ?? []
+  if (!disks.length) return null
   const du = diskUsage(r)
-  const done = Object.values(fix).flatMap((x) => (x.phase === 'done' ? [x.data.bytes] : []))
-  if (!du) {
-    // Освободили - раздел ушел ниже 75%, helper убрал разбор. Без итога блок просто
-    // исчезал вместе с "Освобождено", и казалось, что все сломалось.
-    if (!done.length) return null
-    return (
-      <div className="chart-card net-card net-card-wide du-block" id="mcard-du">
-        <div className="net-head">
-          <div className="chart-cap">{t('На что ушло место')}</div>
-        </div>
-        <div className="du-fix-line small">
-          <span className="t-up">{t('Освобождено {n}', { n: fmtBytes(done.reduce((a, b) => a + b, 0)) })}</span>
-          <span className="muted">
-            {t('Раздел больше не заполнен ({d}), разбор места скрыт: он появляется от 75%.', {
-              d: (r.disks ?? []).map((d) => `${d.mount} ${pct(d.used, d.total)}%`).join(', '),
-            })}
-          </span>
-        </div>
-      </div>
-    )
-  }
-  const age = Math.max(0, Math.round(((r.clock_unix || Date.now() / 1000) - du.ts) / 60))
+  const fcAll = diskForecast(s, r)
+  const fcFresh = !!s.disk_forecast?.ts && !!r.clock_unix && r.clock_unix - s.disk_forecast.ts <= 7200
+  const age = du ? Math.max(0, Math.round(((r.clock_unix || Date.now() / 1000) - du.ts) / 60)) : null
   const autoThr = s.disk_warn_percent || s.disk_alert_percent || s.disk_crit_percent || 85
-  const copy = (txt: string, id: string) => {
-    navigator.clipboard?.writeText(txt)
-    setCopied(id)
-    window.setTimeout(() => setCopied(null), 1500)
-  }
-  const allow = new Set(du.fix?.allow ?? [])
+  const allow = new Set(du?.fix?.allow ?? [])
   const agentOk = verAtLeast(s.agent_version, DU_FIX_AGENT)
   const canFix = (it: DiskUsageItem) =>
     isAdmin && agentOk && DU_FIXABLE.has(it.id) && allow.has(it.id) && (it.id !== 'container-log' || !!it.name)
   // почему кнопок нет, хотя находки для них есть
-  const fixNote = !(isAdmin && du.items.some((i) => DU_FIXABLE.has(i.id)))
+  const fixNote = !(isAdmin && du?.items.some((i) => DU_FIXABLE.has(i.id)))
     ? ''
-    : !du.fix
+    : !du?.fix
       ? t('Кнопки "Освободить" появятся после обновления helper diskusage-setup до 0.3 (ansible kervax_helpers.yml).')
       : !agentOk
         ? t('Кнопки "Освободить" появятся после обновления агента до {v}.', { v: DU_FIX_AGENT })
@@ -2400,6 +2346,13 @@ function DiskUsageBlock({ server: s, onChanged }: { server: Server; onChanged: (
       const next = { ...cur }
       if (st) next[key] = st
       else delete next[key]
+      return next
+    })
+  const setB = (mount: string, st: DkBulk | null) =>
+    setBulk((cur) => {
+      const next = { ...cur }
+      if (st) next[mount] = st
+      else delete next[mount]
       return next
     })
   const command = async (it: DiskUsageItem, mode: 'preview' | 'run', maxMs: number) => {
@@ -2427,11 +2380,10 @@ function DiskUsageBlock({ server: s, onChanged }: { server: Server; onChanged: (
   // самый частый отказ helper'а переводим: остальное он пишет коротко и по-английски
   const fixError = (e: unknown) => {
     const m = e instanceof Error ? e.message : String(e)
-    return m.includes('is not allowed on this node')
-      ? t('На этой ноде действие выключено: его нет в /etc/kervax/fix.conf.')
-      : m
+    return m.includes('is not allowed on this node') ? t('На этой ноде действие выключено: его нет в /etc/kervax/fix.conf.') : m
   }
   const preview = async (key: string, it: DiskUsageItem) => {
+    setOpen(key)
     set(key, { phase: 'preview' })
     try {
       set(key, { phase: 'confirm', data: await command(it, 'preview', 150_000) })
@@ -2449,144 +2401,331 @@ function DiskUsageBlock({ server: s, onChanged }: { server: Server; onChanged: (
       set(key, { phase: 'error', msg: fixError(e) })
     }
   }
+  const runAll = async (mount: string, list: DiskUsageItem[]) => {
+    let freed = 0
+    const errs: string[] = []
+    for (let i = 0; i < list.length; i++) {
+      const it = list[i]
+      setB(mount, { phase: 'run', i: i + 1, n: list.length, name: duShort(it, t).name, freed, errs })
+      try {
+        freed += (await command(it, 'run', 16 * 60_000)).bytes
+      } catch (e) {
+        errs.push(`${duShort(it, t).name}: ${fixError(e)}`)
+      }
+    }
+    setB(mount, { phase: 'done', freed, errs })
+    window.setTimeout(onChanged, 20_000)
+  }
+  // освобождено по разделу: после очистки раздел уходит ниже 75%, helper убирает разбор, и без
+  // итога блок пропадал вместе с "Освобождено" - казалось, что все сломалось
+  const freedOn = (mount: string) =>
+    Object.entries(fix).reduce((a, [k, x]) => a + (k.startsWith(mount + '|') && x.phase === 'done' ? x.data.bytes : 0), 0) +
+    (bulk[mount]?.phase === 'done' ? (bulk[mount] as { freed: number }).freed : 0)
+  const devs = r.disk_devs ?? []
   return (
-    <div className="chart-card net-card net-card-wide du-block" id="mcard-du">
+    <div className="chart-card net-card net-card-wide dk-card" id="mcard-diskfill">
       <div className="net-head">
-        <div className="chart-cap">{t('На что ушло место')}</div>
-        <span className="muted small">{t('замер {n} мин назад', { n: age })}</span>
+        <div className="chart-cap">{t('Место на дисках')}</div>
+        <span className="dk-head-r muted small">
+          {age != null && <span>{t('замер {n} мин назад', { n: age })}</span>}
+          {du && s.disk_autofix ? (
+            <span title={t('Автоочистка включена: от {p}% панель сама освобождает безопасное.', { p: autoThr })}>
+              {t('автоочистка от {p}%', { p: autoThr })}
+            </span>
+          ) : (
+            du && isAdmin && <span title={t('включается в настройках сервера')}>{t('автоочистка выкл')}</span>
+          )}
+        </span>
       </div>
-      {fixNote && <div className="muted small du-note">{fixNote}</div>}
-      {s.disk_autofix ? (
-        <div className="muted small du-note">
-          🧹 {t('Автоочистка включена: от {p}% панель сама освобождает безопасное.', { p: autoThr })}
-        </div>
-      ) : (
-        isAdmin && (
-          <div className="muted small du-note">{t('Автоочистка выключена, включается в настройках сервера.')}</div>
-        )
-      )}
-      {du.fs.map((fs) => {
-        const items = du.items
-          .filter((i) => i.mount === fs.mount)
-          .sort((a, b) => (b.free || b.bytes) - (a.free || a.bytes))
-        const safe = items.filter((i) => i.level === 'safe').reduce((sum, i) => sum + i.free, 0)
+      {fixNote && <div className="muted small">{fixNote}</div>}
+      {disks.map((d) => {
+        const p = d.total ? Math.round((d.used / d.total) * 100) : 0
+        const avail = d.avail ?? Math.max(0, d.total - d.used)
+        // резерв root (ext4 ~5%): обычным процессам недоступен, df считает его занятым
+        const reserve = Math.max(0, d.total - d.used - avail)
+        const ip = d.inodes ? Math.round(((d.inodes_used ?? 0) / d.inodes) * 100) : null
+        const fc = fcAll.filter((i) => i.mount === d.mount)
+        const fsp = fc.find((i) => i.kind === 'space')
+        const fino = fc.find((i) => i.kind === 'inode')
+        const fs = du?.fs.find((f) => f.mount === d.mount) ?? null
+        const items = (du?.items ?? []).filter((i) => i.mount === d.mount).sort((a, b) => duSize(b) - duSize(a))
+        const safeItems = items.filter((i) => i.level === 'safe')
+        const safe = safeItems.reduce((a, i) => a + i.free, 0)
+        const bulkList = safeItems.filter(canFix)
+        const lv = dkLevel(Math.max(p, ip ?? 0))
+        const tone = (h: number) => (h <= 24 ? 'dk-t-bad' : h <= 5 * 24 ? 'dk-t-warn' : '')
+        const rate = (x: number) => (x < 10 ? +x.toFixed(1) : Math.round(x))
+        const freed = freedOn(d.mount)
+        // раздел без разбора: заметная строка, если он уже заполнен или растет и есть что нажать или
+        // что сказать (прогноз), иначе только кнопка в конце строки
+        const loud = !fs && (fc.length > 0 || (p >= 50 && !!s.disk_analyze && !isViewer))
+        const quietAnalyze = !fs && !loud && !!s.disk_analyze && !isViewer
+        const tree = fs && fs.top_state !== 'skipped' && fs.top_state !== 'none' && fs.top.length > 0
+        const b = bulk[d.mount]
+        const showAll = more[d.mount]
+        const LIMIT = 6
+        const shown = showAll ? items : items.slice(0, LIMIT)
+        const rest = items.slice(LIMIT)
+        const safeCmds = safeItems.filter((i) => i.fix).map((i) => `sudo ${i.fix}`)
         return (
-          <div key={fs.mount} className="du-fs">
-            <div className="du-fs-head">
-              <span className="mono">{fs.mount}</span>
-              <span className="du-fs-pct">{fs.pct}%</span>
-              <span className="muted small">
-                {t('занято {u} из {s}, свободно {a}', {
-                  u: fmtBytes(fs.used),
-                  s: fmtBytes(fs.size),
-                  a: fmtBytes(fs.avail),
-                })}
+          <div key={d.mount} className="dk-part">
+            <div className="dk-line">
+              <span className={`lk-dot lk-dot-${lv}`} />
+              <span className="dk-mount mono">{d.mount}</span>
+              <span className={`dk-pct dk-t-${dkLevel(p)}`}>{p}%</span>
+              <span className="dk-bar">
+                <span className={`dk-fill-${dkLevel(p)}`} style={{ width: `${Math.min(100, p)}%` }} />
               </span>
-            </div>
-            <DuTree fs={fs} t={t} />
-            {(fs.ipct ?? 0) >= 75 && (
-              <div className="du-items">
-                <div className="du-sub">
-                  {t('Где больше всего файлов')}
-                  <span className="muted small">
-                    {' '}
-                    ·{' '}
-                    {t('inode заняты на {p}%: {u} из {n}', {
-                      p: fs.ipct ?? 0,
-                      u: fmtFiles(fs.iused ?? 0, t),
-                      n: fmtFiles(fs.itotal ?? 0, t),
-                    })}
+              <span className="dk-nums">
+                {t('{u} из {s}', { u: fmtBytes(d.used), s: fmtBytes(d.total) })}
+                <span className="dk-sep">·</span>
+                <span
+                  title={
+                    reserve > d.total * 0.01
+                      ? t('еще {r} - резерв root, обычным процессам он недоступен; df поэтому показывает больше процентов', { r: fmtBytes(reserve) })
+                      : undefined
+                  }
+                >
+                  {t('свободно {a}', { a: fmtBytes(avail) })}
+                  {reserve > d.total * 0.01 && <span className="muted"> {t('+{r} резерв', { r: fmtBytes(reserve) })}</span>}
+                </span>
+                {ip != null && ip >= 50 && (
+                  <>
+                    <span className="dk-sep">·</span>
+                    <span className={ip >= 75 ? 'dk-t-warn' : ''}>inode {ip}%</span>
+                  </>
+                )}
+                {quietAnalyze && (
+                  <span className="dk-analyze-q">
+                    <DiskAnalyze server={s} mount={d.mount} forecast={false} onChanged={onChanged} />
                   </span>
-                </div>
-                <DuTree fs={fs} t={t} files />
+                )}
+              </span>
+              {(fsp || fino || fcFresh) && (
+                <span className="dk-fc">
+                  {fsp && (
+                    <span className={tone(fsp.eta_h)}>
+                      {t('заполнится {w}, +{r}%/сут', { w: etaText(fsp.eta_h, t), r: rate(fsp.rate) })}
+                    </span>
+                  )}
+                  {fino && (
+                    <span className={tone(fino.eta_h)}>
+                      {fsp && ', '}
+                      {t('inode кончатся {w}', { w: etaText(fino.eta_h, t) })}
+                    </span>
+                  )}
+                  {!fsp && !fino && <span className="muted">{t('не растет')}</span>}
+                </span>
+              )}
+            </div>
+            {loud && (
+              <div className="dk-na muted small">
+                <span>{t('Не разбирался: разбор места включается сам от 75%.')}</span>
+                <DiskAnalyze server={s} mount={d.mount} forecast={fc.length > 0} onChanged={onChanged} />
               </div>
             )}
-            {items.length > 0 && (
-              <div className="du-items">
-                <div className="du-sub">
-                  {t('Что можно освободить')}
-                  {safe > 0 && <span className="muted small"> · {t('без риска ~{n}', { n: fmtBytes(safe) })}</span>}
-                </div>
-                {items.map((it) => {
-                  const key = `${fs.mount}|${it.id}|${it.path}`
-                  const cmd = it.fix ? `sudo ${it.fix}` : ''
-                  const hint = duHint(it, t)
-                  const st = fix[key]
-                  return (
-                    <div key={key} className="du-item">
-                      <div className="du-item-head">
-                        <span className={`du-lvl du-lvl-${it.level}`}>{duLevel(it.level, t)}</span>
-                        <span className="du-item-name">{duLabel(it, t)}</span>
-                        <span className="du-item-size mono">{fmtBytes(it.free || it.bytes)}</span>
-                        {canFix(it) && !st && (
-                          <button className="du-fix-btn" onClick={() => preview(key, it)}>
-                            {it.id === 'container-log' ? t('Обнулить') : t('Освободить')}
+            {!fs && freed > 0 && (
+              <div className="dk-na small">
+                <span className="t-up">{t('Освобождено {n}', { n: fmtBytes(freed) })}</span>
+                <span className="muted">{t('Раздел больше не заполнен, разбор места скрыт: он появляется от 75%.')}</span>
+              </div>
+            )}
+            {fs && (
+              <div className={`dk-body${tree || (fs.ipct ?? 0) >= 75 ? '' : ' dk-body-one'}`}>
+                {fs.top_state === 'skipped' && (
+                  <div className="muted small dk-wide">
+                    {t('Каталоги не считались: в разделе {n} млн файлов, полный обход слишком долгий. Ниже то, что нашлось по известным местам.', {
+                      n: (fs.inodes / 1e6).toFixed(1),
+                    })}
+                  </div>
+                )}
+                {(tree || (fs.ipct ?? 0) >= 75) && (
+                  <div className="dk-col">
+                    {tree && (
+                      <>
+                        <div className="dk-sub">{t('Куда ушло')}</div>
+                        <DuTree fs={fs} t={t} />
+                      </>
+                    )}
+                    {(fs.ipct ?? 0) >= 75 && (
+                      <>
+                        <div className="dk-sub">
+                          {t('Где больше всего файлов')}
+                          <span className="muted">
+                            {' '}
+                            · {t('inode заняты на {p}%: {u} из {n}', { p: fs.ipct ?? 0, u: fmtFiles(fs.iused ?? 0, t), n: fmtFiles(fs.itotal ?? 0, t) })}
+                          </span>
+                        </div>
+                        <DuTree fs={fs} t={t} files />
+                      </>
+                    )}
+                  </div>
+                )}
+                <div className="dk-col">
+                  <div className="dk-sub">
+                    {t('Что можно освободить')}
+                    {items.length > 0 && <span className="muted"> · {fmtBytes(items.reduce((a, i) => a + duSize(i), 0))}</span>}
+                  </div>
+                  {!items.length && (
+                    <div className="muted small">
+                      {t('Мусора по известным местам нет (логи, журнал, docker, временные, кэши). Место занимают данные выше.')}
+                    </div>
+                  )}
+                  <div className="dk-finds">
+                    {shown.map((it) => {
+                      const key = duKey(it)
+                      const l = duShort(it, t)
+                      const st = fix[key]
+                      const isOpen = open === key
+                      const hint = duHint(it, t)
+                      const toggle = () => setOpen(isOpen ? null : key)
+                      return (
+                        <div key={key} className={`dk-find${isOpen || st ? ' dk-find-open' : ''}`}>
+                          <div className="dk-find-main" onClick={toggle}>
+                            <span className={`dk-lv dk-lv-${it.level}`}>{duLevel(it.level, t)}</span>
+                            <span className="dk-find-name" title={duLabel(it, t)}>
+                              {l.name}
+                              {l.sub && <span className="dk-find-sub muted"> {l.sub}</span>}
+                            </span>
+                            <span className="dk-find-size mono">{fmtBytes(duSize(it))}</span>
+                            <span className="dk-find-act" onClick={(e) => e.stopPropagation()}>
+                              {canFix(it) && !st ? (
+                                <button className="dk-btn dk-btn-sm" onClick={() => preview(key, it)}>
+                                  {it.id === 'container-log' ? t('Обнулить') : t('Освободить')}
+                                </button>
+                              ) : !st && (it.fix || hint) ? (
+                                <button className="dk-link" onClick={toggle}>
+                                  {isOpen ? t('скрыть') : it.fix ? t('как') : t('что это')}
+                                </button>
+                              ) : null}
+                            </span>
+                          </div>
+                          {(isOpen || st) && (
+                            <div className="dk-find-more">
+                              {hint && <div className="muted small">{hint}</div>}
+                              {st?.phase === 'preview' && <div className="muted small">{t('Нода считает, что удалится...')}</div>}
+                              {st?.phase === 'confirm' && (
+                                <div className="du-fix">
+                                  <div>
+                                    {st.data.bytes > 0 ? t('Освободится ~{n}', { n: fmtBytes(st.data.bytes) }) : t('Освобождать нечего.')}
+                                    {st.data.count > 0 && <span className="muted"> · {t('файлов: {n}', { n: st.data.count })}</span>}
+                                  </div>
+                                  {st.data.sample.length > 0 && (
+                                    <pre className="du-fix-sample mono">
+                                      {st.data.sample.join('\n') + (st.data.count > st.data.sample.length ? '\n...' : '')}
+                                    </pre>
+                                  )}
+                                  <div className="du-fix-actions">
+                                    {st.data.bytes > 0 && <button onClick={() => run(key, it, st.data)}>{t('Выполнить')}</button>}
+                                    <button className="ghost" onClick={() => set(key, null)}>{t('Отмена')}</button>
+                                  </div>
+                                </div>
+                              )}
+                              {st?.phase === 'run' && (
+                                <div className="muted small">
+                                  {it.id.startsWith('docker-') ? t('Выполняю, docker может чистить несколько минут...') : t('Выполняю...')}
+                                </div>
+                              )}
+                              {st?.phase === 'done' && (
+                                <div className="du-fix-line small">
+                                  <span className="t-up">{t('Освобождено {n}', { n: fmtBytes(st.data.bytes) })}</span>
+                                  <span className="muted">{t('цифры обновятся со следующим отчетом')}</span>
+                                  <button className="ghost small" onClick={() => set(key, null)}>{t('закрыть')}</button>
+                                </div>
+                              )}
+                              {st?.phase === 'error' && (
+                                <div className="du-fix-line small">
+                                  <span className="form-error">{st.msg}</span>
+                                  <button className="ghost small" onClick={() => set(key, null)}>{t('закрыть')}</button>
+                                </div>
+                              )}
+                              {it.fix && (!st || st.phase === 'error') && <DkCmd cmd={`sudo ${it.fix}`} />}
+                            </div>
+                          )}
+                        </div>
+                      )
+                    })}
+                  </div>
+                  {rest.length > 0 && (
+                    <button className="dk-link dk-more" onClick={() => setMore({ ...more, [d.mount]: !showAll })}>
+                      {showAll ? t('свернуть') : t('еще {n} на {s}', { n: rest.length, s: fmtBytes(rest.reduce((a, i) => a + duSize(i), 0)) })}
+                    </button>
+                  )}
+                  {safe > 0 && (
+                    <div className="dk-safe">
+                      <div className="dk-safe-txt">
+                        <b>{t('Без риска освободится {n}', { n: fmtBytes(safe) })}</b>
+                        <span className="muted">
+                          {' '}
+                          · {t('{p}% станет {a}%', { p, a: Math.round(((d.used - safe) / (d.total || 1)) * 100) })} ·{' '}
+                          {safeItems.map((i) => duShort(i, t).name).join(', ')}
+                        </span>
+                      </div>
+                      <div className="dk-safe-act">
+                        {bulkList.length > 0 && !b && (
+                          <button className="dk-btn" onClick={() => setB(d.mount, { phase: 'confirm' })}>{t('Освободить безопасное')}</button>
+                        )}
+                        {safeCmds.length > 0 && (
+                          <button className="dk-link" onClick={() => setCmds(cmds === d.mount ? null : d.mount)}>
+                            {cmds === d.mount ? t('скрыть команды') : t('команды')}
                           </button>
                         )}
                       </div>
-                      {hint && <div className="muted small du-item-hint">{hint}</div>}
-                      {st?.phase === 'preview' && (
-                        <div className="du-fix-line muted small">{t('Нода считает, что удалится...')}</div>
-                      )}
-                      {st?.phase === 'confirm' && (
-                        <div className="du-fix">
+                      {b?.phase === 'confirm' && (
+                        <div className="du-fix dk-wide">
                           <div>
-                            {st.data.bytes > 0
-                              ? t('Освободится ~{n}', { n: fmtBytes(st.data.bytes) })
-                              : t('Освобождать нечего.')}
-                            {st.data.count > 0 && (
-                              <span className="muted"> · {t('файлов: {n}', { n: st.data.count })}</span>
-                            )}
+                            {t('Освободится ~{n}', { n: fmtBytes(bulkList.reduce((a, i) => a + i.free, 0)) })}
+                            <span className="muted">
+                              {': '}
+                              {bulkList.map((i) => `${duShort(i, t).name} ${fmtBytes(i.free)}`).join(', ')}
+                            </span>
                           </div>
-                          {st.data.sample.length > 0 && (
-                            <pre className="du-fix-sample mono">
-                              {st.data.sample.join('\n') + (st.data.count > st.data.sample.length ? '\n...' : '')}
-                            </pre>
-                          )}
                           <div className="du-fix-actions">
-                            {st.data.bytes > 0 && (
-                              <button onClick={() => run(key, it, st.data)}>{t('Выполнить')}</button>
-                            )}
-                            <button className="ghost" onClick={() => set(key, null)}>{t('Отмена')}</button>
+                            <button onClick={() => runAll(d.mount, bulkList)}>{t('Выполнить')}</button>
+                            <button className="ghost" onClick={() => setB(d.mount, null)}>{t('Отмена')}</button>
                           </div>
                         </div>
                       )}
-                      {st?.phase === 'run' && (
-                        <div className="du-fix-line muted small">
-                          {it.id.startsWith('docker-')
-                            ? t('Выполняю, docker может чистить несколько минут...')
-                            : t('Выполняю...')}
+                      {b?.phase === 'run' && (
+                        <div className="muted small dk-wide">
+                          {t('Выполняю {i} из {n}: {name}...', { i: b.i, n: b.n, name: b.name })}
                         </div>
                       )}
-                      {st?.phase === 'done' && (
-                        <div className="du-fix-line small">
-                          <span className="t-up">{t('Освобождено {n}', { n: fmtBytes(st.data.bytes) })}</span>
+                      {b?.phase === 'done' && (
+                        <div className="du-fix-line small dk-wide">
+                          <span className="t-up">{t('Освобождено {n}', { n: fmtBytes(b.freed) })}</span>
                           <span className="muted">{t('цифры обновятся со следующим отчетом')}</span>
-                          <button className="ghost small" onClick={() => set(key, null)}>{t('закрыть')}</button>
+                          {b.errs.map((e) => (
+                            <span key={e} className="form-error">{e}</span>
+                          ))}
+                          <button className="ghost small" onClick={() => setB(d.mount, null)}>{t('закрыть')}</button>
                         </div>
                       )}
-                      {st?.phase === 'error' && (
-                        <div className="du-fix-line small">
-                          <span className="form-error">{st.msg}</span>
-                          <button className="ghost small" onClick={() => set(key, null)}>{t('закрыть')}</button>
-                        </div>
-                      )}
-                      {cmd && (!st || st.phase === 'error') && (
-                        <div className="agent-advice-cmd">
-                          <pre>{cmd}</pre>
-                          <button className="ghost" onClick={() => copy(cmd, key)}>
-                            {copied === key ? t('Скопировано') : t('Копировать')}
-                          </button>
+                      {cmds === d.mount && (
+                        <div className="dk-cmd dk-wide">
+                          <code title={safeCmds.join('\n')}>{safeCmds.map(shortCmd).join('\n')}</code>
+                          <DkCopy text={safeCmds.join('\n')} />
                         </div>
                       )}
                     </div>
-                  )
-                })}
+                  )}
+                </div>
               </div>
             )}
           </div>
         )
       })}
+      {devs.length > 0 && (
+        <div className="muted small">
+          {t('Нагрузка дисков')}:{' '}
+          {devs.map((x, i) => (
+            <span key={x.dev} className={x.util >= 90 ? 'dk-t-warn' : ''}>
+              {i > 0 && ', '}
+              <span className="mono">{x.dev}</span> {Math.round(x.util)}% {t('ответ {v}', { v: fmtMs(x.await) })}
+            </span>
+          ))}
+        </div>
+      )}
     </div>
   )
 }
@@ -6772,7 +6911,6 @@ function ServerDetail({
           <div className="srv-sec">
           <div className="net-cards">
             <DiskSpaceCard server={s} r={r} onChanged={onChanged} />
-            <DiskUsageBlock server={s} onChanged={onChanged} />
             <DiskHealthBlock r={r} wear={s.wear_forecast} />
             <DiskWritersBlock server={s} r={r} />
           </div>
