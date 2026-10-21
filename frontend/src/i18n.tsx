@@ -585,8 +585,6 @@ const EN: Record<string, string> = {
   'Требует внимания': 'Needs attention',
   'Требует действий': 'Action needed',
   'Обновления': 'Updates',
-  'helper «{helper}» не установлен ({b}): нод - {n} ({list})': 'helper "{helper}" is not installed ({b}): {n} nodes ({list})',
-  'helper «{helper}» устарел ({a} → {b}): нод - {n} ({list})': 'helper "{helper}" is outdated ({a} → {b}): {n} nodes ({list})',
   '…и ещё {n}': '…and {n} more',
   '{name}: бэкап-сервер — включите статистику (backupserver-setup)':
     '{name}: backup server — enable stats (backupserver-setup)',
@@ -601,7 +599,6 @@ const EN: Record<string, string> = {
   'Подов': 'Pods',
   'Клиентов': 'Clients',
   'Серверов': 'Servers',
-  'Доступно обновление агента {v}: отстаёт нод — {n}': 'Agent update {v} available: {n} node(s) behind',
   '{what}: нод без настройки — {n}': '{what}: {n} node(s) not configured',
   '{name}: Docker без доступа — включите read-only proxy': '{name}: Docker without access — enable the read-only proxy',
   '{name}: не работает контейнер {list}': '{name}: container {list} is down',
@@ -785,10 +782,6 @@ const EN: Record<string, string> = {
     'The panel will install docker/restic/htpasswd from the distro repos and start rest-server in append-only + private-repos mode. Client repositories are created later, separately. Up to ~2 min.',
   'репозиторий уже был — подключились к нему, история сохранена':
     'repository already existed — reconnected to it, history preserved',
-  '{name}: helper «{helper}» устарел ({a} → {b}) — переустановите':
-    '{name}: helper "{helper}" is outdated ({a} → {b}) — reinstall it',
-  '{name}: helper «{helper}» не установлен ({b}) — поставьте':
-    '{name}: helper "{helper}" is not installed ({b}) — install it',
   'Требуется ручное действие на сервере. Выполните от root:':
     'Manual action required on the server. Run as root:',
   'Агенту не хватает прав из systemd-юнита:':
@@ -913,8 +906,6 @@ const EN: Record<string, string> = {
     'Overflow guard off: the dump always runs.',
 
   '🧩 обновить сразу на {n} нодах': '🧩 update on {n} nodes at once',
-  'Запускать из своего репозитория ansible. Сначала можно вхолостую: добавьте --check --diff. Панель ничего не выполняет — только называет хосты.':
-    'Run it from your own ansible repo. Try a dry run first: add --check --diff. The panel executes nothing — it only names the hosts.',
 
   'постоянно': 'permanently',
   'Файлового бэкапа на ноде нет: дампы лягут локально (ежедневно, свой таймер) — восстановиться с самой ноды можно, копии за её пределами не будет.':
@@ -2740,10 +2731,6 @@ const EN: Record<string, string> = {
   'Отключить': 'Turn off',
   'Выпустить новый токен': 'Issue a new token',
   'Выпустить токен': 'Issue a token',
-  'Одна команда на все панели: группу kervax_outdated плагин инвентаря собирает, спрашивая сами панели.':
-    'One command for all panels: the inventory plugin builds the kervax_outdated group by asking the panels themselves.',
-  'Чтобы на всех панелях была одна команда без списка хостов, включите доступ для ansible: меню настроек -> Ansible.':
-    'To get one command for all panels without a host list, turn on ansible access: settings menu -> Ansible.',
   'За сутки ответов 5xx не было.': 'No 5xx responses in the last 24 hours.',
   'Ответы 5xx за сутки по логам веб-сервера': '5xx responses in the last 24 hours, by web server log',
   '{n} ошибок за {m} мин, пик {p}/мин': '{n} errors over {m} min, peak {p}/min',
@@ -2784,35 +2771,38 @@ const EN: Record<string, string> = {
   'Скопировано ✓': 'Copied ✓',
   'аптайм': 'uptime',
   'агент': 'agent',
-  'Доступна версия агента {v}. Отстают: {n}.':
-    'Agent version {v} is available. Behind: {n}.',
   'Обновить сначала одну ноду (canary), потом остальные':
     'Update one node first (canary), then the rest',
-  'Canary — 1 ноду': 'Canary — 1 node',
-  'Обновить все ({n})': 'Update all ({n})',
   // "Обновить все" на главной и у баннера "Серверов" (FleetUpdate.tsx)
   'Обновить все': 'Update all',
-  'обновить': 'update',
-  'canary - 1 нода': 'canary - 1 node',
-  'Будет обновлено': 'Will be updated',
-  'агент {a} -> {b}: нод - {n} ({list})': 'agent {a} -> {b}: {n} nodes ({list})',
-  'не на связи: {list} - цель им поставится, обновятся, когда вернутся':
-    'offline: {list} - the target is set, they update when back online',
-  'helper "{helper}" {a} -> {b}: нод - {n} ({list})': 'helper "{helper}" {a} -> {b}: {n} nodes ({list})',
-  'helper "{helper}" {b} поставить: нод - {n} ({list})': 'install helper "{helper}" {b}: {n} nodes ({list})',
-  'настройка юнита агента: нод - {n} ({list})': 'agent unit settings: {n} nodes ({list})',
-  'Агент обновится через панель. helper\'ы работают под root, панель их не запускает: команда ниже скопируется при запуске, выполните ее в репозитории ansible.':
-    'The panel updates the agent. Helpers run as root and the panel does not run them: the command below is copied on start, run it in your ansible repository.',
-  'helper\'ы работают под root, панель их не запускает: команда ниже скопируется, выполните ее в репозитории ansible.':
-    'Helpers run as root and the panel does not run them: the command below gets copied, run it in your ansible repository.',
-  'Запустить обновление': 'Start update',
-  'Обновление helper\'ов': 'Helper update',
-  'Готово: агент {v} на всех нодах ({n})': 'Done: agent {v} on all nodes ({n})',
-  'Агент {v}: обновились {done} из {n}': 'Agent {v}: {done} of {n} updated',
-  'Агент {v}: обновились {done} из {n}, остальные не обновятся сами':
+  'ноды': 'nodes',
+  'ноду': 'node',
+  'ноде': 'node',
+  'нодах': 'nodes',
+  'Агент {v}: отстают нод - {n}': 'Agent {v}: {n} node(s) behind',
+  'Обновить {n} {nodes}': 'Update {n} {nodes}',
+  'Точно? {n} {nodes}': 'Sure? {n} {nodes}',
+  'Агент {v} на всех нодах: {n}': 'Agent {v} on all nodes: {n}',
+  'Агент {v}: обновились {done} из {n}, остальные сами не обновятся':
     'Agent {v}: {done} of {n} updated, the rest will not update on their own',
-  'helper\'ы: везде актуальные': 'helpers: up to date everywhere',
-  'helper\'ы: ждут прогона ansible на нодах - {n} ({list})': 'helpers: waiting for the ansible run on {n} nodes ({list})',
+  'Повторить: {n}': 'Retry: {n}',
+  'качают: {list}': 'downloading: {list}',
+  'Снять обновление с тех, кто еще не обновился': 'Cancel the update on nodes that have not updated yet',
+  'стоп': 'stop',
+  '{helper} не стоит': '{helper} not installed',
+  'helper\'ы: обновить на {n} {nodes}': 'helpers: update on {n} {nodes}',
+  'helper\'ы обновлены на всех нодах: {n}': 'helpers updated on all nodes: {n}',
+  'копировать еще раз': 'copy again',
+  'helper\'ы: команда скопирована, запустите ее в репозитории ansible':
+    'helpers: the command is copied, run it in your ansible repository',
+  'helper\'ы: обновились {done} из {n}': 'helpers: {done} of {n} updated',
+  'прогона так и не было, ждут: {list}': 'no run yet, waiting: {list}',
+  'после прогона все еще старые: {list} - смотрите вывод плейбука':
+    'still outdated after the run: {list} - check the playbook output',
+  'Точно? агент на {a} + helper\'ы на {h}': 'Sure? agent on {a} + helpers on {h}',
+  'запустил обновление helper\'ов': 'started a helper update',
+  'canary - 1 нода': 'canary - 1 node',
+  'Агент {v}: обновились {done} из {n}': 'Agent {v}: {done} of {n} updated',
   'агент отклонил обновление: {err}': 'the agent rejected the update: {err}',
   'сервер выключен в панели - обновление ему не ставится': 'the server is disabled in the panel - no update is set for it',
   'раскатку на этой ноде отменили': 'the rollout was cancelled on this node',

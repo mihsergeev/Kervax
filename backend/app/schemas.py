@@ -2078,10 +2078,38 @@ class AgentReleaseOut(BaseModel):
 class AgentUpdateReq(BaseModel):
     version: str = Field(min_length=1, max_length=32)
     server_ids: list[int] | None = None  # None = все включённые (иначе canary/подмножество)
+    # запомнить запуск на панели: прогресс в "Обновлениях" переживает перезагрузку страницы
+    track: bool = False
 
 
 class AgentUpdateCancel(BaseModel):
     server_ids: list[int] | None = None  # None = снять со всех
+    # "стоп" в "Обновлениях": эти ноды уходят и из хода раскатки
+    untrack: bool = False
+
+
+class HelperRolloutReq(BaseModel):
+    """Команду ansible скопировали: ждем прогона на этих хостах."""
+
+    hosts: list[str] = Field(max_length=5000)
+
+
+class AgentRunOut(BaseModel):
+    v: str
+    ids: list[int]
+    at: datetime
+
+
+class HelperRunOut(BaseModel):
+    hosts: list[str]
+    at: datetime
+
+
+class FleetRolloutOut(BaseModel):
+    """Ход обновления парка (fleet_rollout.py): части нет - ничего не запускали или прошли сутки."""
+
+    agent: AgentRunOut | None = None
+    helpers: HelperRunOut | None = None
 
 
 class LocationResultOut(BaseModel):

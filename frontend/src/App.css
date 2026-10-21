@@ -2511,12 +2511,6 @@ select:focus {
   border-radius: 10px;
   background: color-mix(in srgb, var(--accent) 10%, transparent);
 }
-/* прогресс докачки агента: отдельной строкой под текстом баннера, иначе он встаёт
-   в ту же строку и баннер расползается на медленных нодах */
-.aub-progress {
-  display: block;
-  margin-top: 0.2rem;
-}
 /* бессрочное выделяем: у временного снуза срок истечёт сам, у этого — нет */
 .type-chip.mute-chip-perm {
   color: var(--degraded);
@@ -2605,15 +2599,6 @@ tr.mt-off button.mt-what-btn { color: var(--text-muted); text-decoration: line-t
   margin-bottom: 0.9rem;
   font-size: 0.85rem;
   color: var(--up);
-}
-.aub-text {
-  font-size: 0.9rem;
-  color: var(--text);
-}
-.aub-actions {
-  display: flex;
-  gap: 0.5rem;
-  flex-shrink: 0;
 }
 .agent-upd-btn {
   margin-left: 0.4rem;
@@ -7544,42 +7529,63 @@ button.ghost.lc-del { color: var(--down); border-color: color-mix(in srgb, var(-
   .pe-kv > .muted { margin-top: 0.3rem; }
 }
 
-/* ---------- "Обновить все": блок "Обновления" на главной и баннер "Серверов" (FleetUpdate.tsx) ---------- */
+/* ---------- "Обновления" на главной и баннер "Серверов" (FleetUpdate.tsx) ---------- */
 .upd-head { display: flex; align-items: center; justify-content: space-between; gap: 0.6rem; flex-wrap: wrap; }
 .upd-head .net-head { flex: 1; }
-.upd-all { padding: 0.3rem 0.9rem; font-size: 0.85rem; }
 /* строку не кликают целиком: действия - кнопки справа, переход - стрелка */
 .home-attention-row.upd-row { cursor: default; gap: 0.5rem; }
 .home-attention-row.upd-row:hover { background: transparent; }
 .upd-row > button { flex-shrink: 0; }
-.upd-row .upd-canary { font-size: 0.78rem; color: var(--text-muted); }
 .upd-row .upd-open { padding: 0.1rem 0.5rem; }
-.upd-plan, .upd-run {
-  margin-top: 0.6rem;
-  padding: 0.6rem 0.75rem;
-  border: 1px solid color-mix(in srgb, #3b82f6 35%, var(--border));
-  border-radius: 8px;
-  background: var(--bg-card);
-  font-size: 0.88rem;
+.upd-row.upd-ok { background: color-mix(in srgb, var(--up) 9%, transparent); }
+.upd-row.upd-ok .home-attention-txt { color: var(--up); }
+.upd-row.upd-fail { background: color-mix(in srgb, var(--degraded) 6%, transparent); align-items: flex-start; }
+.upd-row.upd-fail > .lk-dot { margin-top: 0.45rem; }
+/* кнопка с подтверждением на месте: "Точно?" желтая, полоска внизу - сколько ждет второго клика */
+.upd-go { position: relative; overflow: hidden; }
+.upd-head .upd-go { padding: 0.3rem 0.9rem; font-size: 0.85rem; }
+button.upd-go.upd-sure, button.upd-go.upd-sure:hover {
+  background: var(--degraded);
+  border-color: var(--degraded);
+  color: #1a1205;
+  font-weight: 700;
 }
-.upd-plan-head { font-weight: 600; margin-bottom: 0.3rem; }
-.upd-plan-list { margin: 0 0 0.4rem; padding-left: 1.1rem; }
-.upd-plan-list li { margin: 0.15rem 0; overflow-wrap: anywhere; }
-.upd-plan .ansible-hint { margin: 0.4rem 0 0; }
-.upd-plan-btns { display: flex; gap: 0.5rem; margin-top: 0.6rem; flex-wrap: wrap; }
+.upd-sure-tm {
+  position: absolute; left: 0; bottom: 0; height: 3px; width: 100%;
+  background: rgba(0, 0, 0, 0.35);
+  animation: upd-shrink linear forwards;
+}
+.upd-fade {
+  display: block; height: 2px; margin-top: 0.25rem; border-radius: 2px;
+  background: color-mix(in srgb, var(--up) 60%, transparent);
+  animation: upd-shrink linear forwards;
+}
+@keyframes upd-shrink { from { width: 100%; } to { width: 0; } }
+.upd-bar {
+  display: inline-block; vertical-align: middle; width: 130px; height: 6px; margin: 0 0.5rem 0.15rem;
+  border-radius: 3px; overflow: hidden; background: var(--border);
+}
+.upd-bar > i { display: block; height: 100%; border-radius: 3px; background: #3b82f6; transition: width 0.4s; }
+.upd-issues { display: flex; flex-direction: column; gap: 0.15rem; margin-top: 0.3rem; font-size: 0.86rem; }
+.upd-issue { overflow-wrap: anywhere; }
+.upd-issue b { color: var(--degraded); font-weight: 600; }
+.upd-issue .linklike { padding: 0; }
+.upd-notes { display: block; margin-top: 0.15rem; }
+.upd-cmd {
+  display: block; width: fit-content; max-width: 100%; margin-top: 0.3rem; padding: 0.15rem 0.5rem;
+  border: 1px solid var(--border); border-radius: 6px; background: var(--bg);
+  font-size: 0.8rem; overflow-wrap: anywhere;
+}
 .upd-err { margin-top: 0.4rem; color: var(--down); font-size: 0.85rem; }
-.upd-run-head { display: flex; align-items: center; gap: 0.5rem; }
-.upd-run-txt { flex: 1; min-width: 0; font-weight: 600; }
-.upd-run-list { display: flex; flex-direction: column; gap: 0.2rem; margin-top: 0.4rem; padding-left: 1.2rem; }
-.upd-run-row { overflow-wrap: anywhere; }
-.upd-run-row.bad b { color: var(--degraded); }
-.upd-run > .upd-run-row { margin-top: 0.35rem; padding-left: 1.2rem; }
+/* баннер "Серверов": та же строка агента, что на главной */
+.agent-update-banner.upd-banner { display: block; padding: 0.35rem 0.6rem; }
 @media (max-width: 600px) {
   .home-attention-row.upd-row { flex-wrap: wrap; }
   .home-attention-row.upd-row .home-attention-txt { flex: 1 1 calc(100% - 3rem); }
   /* кнопки строки уходят под текст и встают вровень с ним, а не под точку */
   .upd-row .home-attention-txt + button { margin-left: 2.2rem; }
-  .upd-all { width: 100%; }
+  .upd-head .upd-go { width: 100%; }
+  .upd-bar { width: 90px; }
 }
 
 /* ---------- вход админа под чужой учеткой (ImpersonationBar) ----------

@@ -1,20 +1,30 @@
-import { useCallback, useEffect, useState } from 'react'
-import { ApiError, agentUpdate, getAnsibleAccess, type Server } from './api'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import {
+  ApiError, agentUpdate, agentUpdateCancel, closeFleetRollout, getAnsibleAccess, getFleetRollout, startHelperRollout,
+  type FleetRollout, type Server,
+} from './api'
 import { useAuth } from './auth'
 import { useI18n } from './i18n'
 import { fmtSetupVersion, shortList } from './serverUtils'
 
-// Обновление парка одной кнопкой: агент - OTA через панель (/api/servers/agent-update),
-// helper'ы - командой ansible. Панель helper'ы сама не ставит: это root-скрипты, и раздача их
-// панелью значила бы, что взлом панели дает root на всем парке (см. kervax_helpers.yml).
-// Один код на главную ("Обновления") и баннер на "Серверах": подтверждение, прогресс и итог.
+// Обновление парка из блока "Обновления" главной и баннера "Серверов": агент - OTA через
+// панель (/api/servers/agent-update), helper'ы - командой ansible. Панель helper'ы сама не ставит:
+// это root-скрипты, и раздача их панелью значила бы, что взлом панели дает root на всем парке
+// (см. kervax_helpers.yml). Кнопка в строке: первый клик - та же кнопка спрашивает "Точно?",
+// второй клик в ту же точку запускает; прогресс в строке, по успеху строка уходит сама.
+// Ход раскатки хранится на панели (fleet_rollout.py): переживает перезагрузку страницы.
 
 type T = (k: string, p?: Record<string, string | number>) => string
 
 // за столько нода без движения считается застрявшей: агент спрашивает панель каждые
 // полминуты, бинарь качается за минуту, на РФ-нодах за DPI докачка видна в agent_update_note
 const STUCK_MS = 15 * 60 * 1000
-const RUN_KEY = 'kx-agent-run'
+// прогон ansible руками: за полчаса его или не запускали, или он упал на части хостов
+const HELPER_STUCK_MS = 30 * 60 * 1000
+// "Точно?" ждет второго клика столько, потом кнопка возвращается
+const CONFIRM_MS = 4000
+// зеленая строка "готово" висит столько и уходит сама
+const DONE_MS = 3000
 
 // агент отстает от подписанной версии; выключенным сервером панель цель не ставит
 export function agentBehind(servers: Server[], avail: string): Server[] {
@@ -23,7 +33,7 @@ export function agentBehind(servers: Server[], avail: string): Server[] {
 
 export type HelperGroup = { key: string; name: string; fresh: boolean; a: string; b: string; nodes: Server[] }
 
-// helper -> ноды, где его ставить или обновлять (одной строкой на helper и пару версий)
+// helper -> ноды, где его ставить или обновлять (по одной группе на helper и пару версий)
 export function helperGroups(servers: Server[]): HelperGroup[] {
   const by = new Map<string, HelperGroup>()
   for (const s of servers) {
@@ -42,213 +52,291 @@ export function helperGroups(servers: Server[]): HelperGroup[] {
   return [...by.values()]
 }
 
+const hostOf = (s: Server) => s.hostname || s.name
+
 // хосты, где прогон kervax_helpers.yml что-то поменяет (helper или настройка юнита агента)
 export function rolloutHosts(servers: Server[]): string[] {
   return [...new Set(servers.filter((s) => s.online && s.helper_rollout).map(hostOf))].sort()
 }
 
-const hostOf = (s: Server) => s.hostname || s.name
-
-// Что обновлять: все, только агент (строка агента и баннер "Серверов") или helper'ы
-// на заданных хостах (строка helper'а)
-export type UpdScope = { agent: boolean; hosts: string[]; helpers: HelperGroup[] }
-
-// ids - кому поставлена цель агента, hosts - где ждем прогона ansible для helper'ов
-export type Run = { ids: number[]; hosts: string[]; v: string; at: number }
-
-function loadRun(): Run | null {
-  try {
-    const r = JSON.parse(sessionStorage.getItem(RUN_KEY) || 'null')
-    return r && Array.isArray(r.ids) && Array.isArray(r.hosts) && typeof r.v === 'string' ? r : null
-  } catch {
-    return null
-  }
+// "обновить 1 ноду, 2 ноды, 5 нод" - кнопка с числом читается без "нод - 12"
+function nodesAcc(n: number, t: T): string {
+  const d = n % 10, dd = n % 100
+  if (d === 1 && dd !== 11) return t('ноду')
+  if (d >= 2 && d <= 4 && (dd < 12 || dd > 14)) return t('ноды')
+  return t('нод')
 }
 
-function saveRun(r: Run | null) {
-  try {
-    if (r) sessionStorage.setItem(RUN_KEY, JSON.stringify(r))
-    else sessionStorage.removeItem(RUN_KEY)
-  } catch {
-    /* без хранилища прогресс просто не переживет переход между страницами */
-  }
-}
+// "на 1 ноде, на 4 нодах"
+const nodesLoc = (n: number, t: T) => (n % 10 === 1 && n % 100 !== 11 ? t('ноде') : t('нодах'))
 
-// Раскатка агента: запуск и прогресс по данным серверов. Запуск помнится на вкладку браузера,
-// чтобы прогресс был виден и после перехода между главной и "Серверами"
-export function useAgentRollout(
-  servers: Server[], avail: string, onServers: (s: Server[]) => void, onUnauthorized: () => void,
+// Ход раскатки: читается с панели вместе с серверами, запуск и закрытие - тоже через панель.
+// canWrite=false (просмотр) - строки видно, закрыть "готово" можно только у себя на странице
+export function useFleetRollout(
+  servers: Server[], avail: string, onServers: (s: Server[]) => void, onUnauthorized: () => void, canWrite: boolean,
 ) {
   const { t } = useI18n()
-  const [run, setRun] = useState<Run | null>(loadRun)
+  const [data, setData] = useState<FleetRollout | null>(null)
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState('')
+  // закрытое у себя: у просмотра на панель не пишем, а строке "готово" все равно пора уйти
+  const [hidden, setHidden] = useState<string[]>([])
   // минутный тик: "застряла" наступает по времени, а не по новым данным
   const [, setTick] = useState(0)
+
+  const fail = useCallback((e: unknown) => {
+    if (e instanceof ApiError && e.status === 401) onUnauthorized()
+    else setErr(e instanceof Error ? e.message : t('Ошибка'))
+  }, [onUnauthorized, t])
+
+  // страница перечитывает серверы по таймеру - вместе с ними и ход раскатки
+  const unauth = useRef(onUnauthorized)
+  useEffect(() => { unauth.current = onUnauthorized }, [onUnauthorized])
   useEffect(() => {
-    if (!run) return
+    let live = true
+    getFleetRollout()
+      .then((d) => { if (live) setData(d) })
+      .catch((e) => { if (e instanceof ApiError && e.status === 401) unauth.current() })
+    return () => { live = false }
+  }, [servers])
+
+  const running = !!(data?.agent || data?.helpers)
+  useEffect(() => {
+    if (!running) return
     const id = window.setInterval(() => setTick((x) => x + 1), 60000)
     return () => window.clearInterval(id)
-  }, [run])
+  }, [running])
 
-  const start = useCallback(async (ids: number[], hosts: string[] = []) => {
-    if (!ids.length && !hosts.length) return false
+  const call = useCallback(async (f: () => Promise<void>) => {
     setBusy(true)
     setErr('')
     try {
-      if (ids.length) {
-        if (!avail) return false
-        const upd = await agentUpdate(avail, ids)
-        // ответ - только затронутые серверы: подменяем их в общем списке
-        const by = new Map(upd.map((s) => [s.id, s]))
-        onServers(servers.map((s) => by.get(s.id) ?? s))
-      }
-      const r = { ids, hosts, v: avail, at: Date.now() }
-      saveRun(r)
-      setRun(r)
+      await f()
       return true
     } catch (e) {
-      if (e instanceof ApiError && e.status === 401) onUnauthorized()
-      else setErr(e instanceof Error ? e.message : t('Ошибка'))
+      fail(e)
       return false
     } finally {
       setBusy(false)
     }
-  }, [avail, servers, onServers, onUnauthorized, t])
+  }, [fail])
 
-  const close = useCallback(() => {
-    saveRun(null)
-    setRun(null)
-  }, [])
+  // ответ - только затронутые серверы: подменяем их в общем списке
+  const merge = useCallback((upd: Server[]) => {
+    const by = new Map(upd.map((s) => [s.id, s]))
+    onServers(servers.map((s) => by.get(s.id) ?? s))
+  }, [servers, onServers])
 
-  return { run: run && run.v === avail ? run : null, busy, err, start, close }
+  const startAgent = useCallback((ids: number[]) => call(async () => {
+    if (!ids.length || !avail) return
+    merge(await agentUpdate(avail, ids, true))
+    setData(await getFleetRollout())
+  }), [call, merge, avail])
+
+  // "стоп": цель снимается с еще не обновившихся, строка возвращается к "отстают"
+  const stopAgent = useCallback((ids: number[]) => call(async () => {
+    if (ids.length) merge(await agentUpdateCancel(ids, true))
+    setData(await closeFleetRollout('agent'))
+  }), [call, merge])
+
+  const startHelpers = useCallback((hosts: string[]) => call(async () => {
+    if (hosts.length) setData(await startHelperRollout(hosts))
+  }), [call])
+
+  const close = useCallback((part: 'agent' | 'helpers') => {
+    const p = data?.[part]
+    if (!p) return
+    setHidden((h) => [...h, `${part}|${p.at}`])
+    if (canWrite) closeFleetRollout(part).then(setData).catch(() => {})
+  }, [data, canWrite])
+
+  const agent = data?.agent && data.agent.v === avail && !hidden.includes(`agent|${data.agent.at}`) ? data.agent : null
+  const helpers = data?.helpers && !hidden.includes(`helpers|${data.helpers.at}`) ? data.helpers : null
+  return { agent, helpers, busy, err, startAgent, stopAgent, startHelpers, close }
 }
+
+export type Fleet = ReturnType<typeof useFleetRollout>
+
+// Кнопка с подтверждением на месте: первый клик - она же "Точно? ...", второй клик в ту же
+// точку - запуск; через 4 секунды без второго клика возвращается как была
+export function ConfirmButton({ label, sure, onGo, disabled, big }: {
+  label: string; sure: string; onGo: () => void; disabled?: boolean; big?: boolean
+}) {
+  const [armed, setArmed] = useState(false)
+  useEffect(() => {
+    if (!armed) return
+    const id = window.setTimeout(() => setArmed(false), CONFIRM_MS)
+    return () => window.clearTimeout(id)
+  }, [armed])
+  return (
+    <button
+      className={`upd-go${big ? '' : ' small'}${armed ? ' upd-sure' : big ? '' : ' ghost'}`}
+      disabled={disabled}
+      onClick={() => {
+        if (!armed) return setArmed(true)
+        setArmed(false)
+        onGo()
+      }}
+    >
+      {armed ? sure : label}
+      {armed && <span className="upd-sure-tm" style={{ animationDuration: `${CONFIRM_MS}ms` }} />}
+    </button>
+  )
+}
+
+const Bar = ({ n, of }: { n: number; of: number }) => (
+  <span className="upd-bar"><i style={{ width: `${of ? Math.round((n / of) * 100) : 0}%` }} /></span>
+)
 
 type NodeState = { s: Server; st: 'done' | 'wait' | 'note' | 'bad'; why: string }
 
 // Где нода сейчас и что делать, если не обновилась: конкретно по ноде, без общих слов
-function nodeState(s: Server, run: Run, t: T): NodeState {
-  if (s.agent_version === run.v) return { s, st: 'done', why: '' }
+function nodeState(s: Server, v: string, at: number, t: T): NodeState {
+  if (s.agent_version === v) return { s, st: 'done', why: '' }
   if (s.agent_update_error)
     return { s, st: 'bad', why: t('агент отклонил обновление: {err}', { err: s.agent_update_error }) }
   if (!s.enabled) return { s, st: 'bad', why: t('сервер выключен в панели - обновление ему не ставится') }
-  if (s.target_agent_version !== run.v) return { s, st: 'bad', why: t('раскатку на этой ноде отменили') }
+  if (s.target_agent_version !== v) return { s, st: 'bad', why: t('раскатку на этой ноде отменили') }
   if (!s.online) return { s, st: 'note', why: t('не на связи - обновится сам, когда агент вернется') }
   if (s.agent_update_note) return { s, st: 'note', why: s.agent_update_note }
-  if (Date.now() - run.at > STUCK_MS)
+  if (Date.now() - at > STUCK_MS)
     return { s, st: 'bad', why: t('за 15 минут не обновился - на ноде: journalctl -u kervax-agent -n 50; если агент очень старый и сам не обновляется, переустановите его командой из карточки') }
   return { s, st: 'wait', why: '' }
 }
 
-// Подтверждение перед запуском: что именно и где обновится
-export function UpdateConfirm({ scope, servers, avail, via, busy, onGo, onCancel }: {
-  scope: UpdScope; servers: Server[]; avail: string; via: boolean; busy: boolean
-  onGo: () => void; onCancel: () => void
-}) {
-  const { t } = useI18n()
-  const lag = scope.agent ? agentBehind(servers, avail) : []
-  const on = lag.filter((s) => s.online)
-  // без единой ноды на связи агентом обновлять некого: строки агента нет
-  const behind = on.length ? lag : []
-  const off = behind.filter((s) => !s.online)
-  const from = [...new Set(on.map((s) => s.agent_version))].sort().join(', ')
+function NodeIssues({ rows, onOpenNode }: { rows: NodeState[]; onOpenNode?: (id: number) => void }) {
+  if (!rows.length) return null
   return (
-    <div className="upd-plan">
-      <div className="upd-plan-head">{t('Будет обновлено')}</div>
-      <ul className="upd-plan-list">
-        {behind.length > 0 && (
-          <li>
-            {t('агент {a} -> {b}: нод - {n} ({list})', {
-              a: from, b: avail, n: on.length, list: shortList(on.map((s) => s.name), t, 6),
-            })}
-            {off.length > 0 && (
-              <div className="muted small">
-                {t('не на связи: {list} - цель им поставится, обновятся, когда вернутся', { list: shortList(off.map((s) => s.name), t, 6) })}
-              </div>
-            )}
-          </li>
-        )}
-        {scope.helpers.map((g) => (
-          <li key={g.key}>
-            {g.fresh
-              ? t('helper "{helper}" {b} поставить: нод - {n} ({list})', { helper: g.name, b: g.b, n: g.nodes.length, list: shortList(g.nodes.map((s) => s.name), t, 6) })
-              : t('helper "{helper}" {a} -> {b}: нод - {n} ({list})', { helper: g.name, a: g.a, b: g.b, n: g.nodes.length, list: shortList(g.nodes.map((s) => s.name), t, 6) })}
-          </li>
-        ))}
-        {scope.helpers.length === 0 && scope.hosts.length > 0 && (
-          <li>{t('настройка юнита агента: нод - {n} ({list})', { n: scope.hosts.length, list: shortList(scope.hosts, t, 6) })}</li>
-        )}
-      </ul>
-      {scope.hosts.length > 0 && (
-        <>
-          <div className="muted small">
-            {behind.length > 0
-              ? t('Агент обновится через панель. helper\'ы работают под root, панель их не запускает: команда ниже скопируется при запуске, выполните ее в репозитории ansible.')
-              : t('helper\'ы работают под root, панель их не запускает: команда ниже скопируется, выполните ее в репозитории ansible.')}
-          </div>
-          <AnsibleCmd hosts={scope.hosts} via={via} />
-        </>
-      )}
-      <div className="upd-plan-btns">
-        <button disabled={busy} onClick={onGo}>
-          {busy ? t('…') : behind.length > 0 ? t('Запустить обновление') : t('Скопировать команду')}
-        </button>
-        <button className="ghost" disabled={busy} onClick={onCancel}>{t('Отмена')}</button>
-      </div>
+    <div className="upd-issues">
+      {rows.map((r) => (
+        <div key={r.s.id} className={`upd-issue${r.st === 'bad' ? ' bad' : ''}`}>
+          {onOpenNode ? (
+            <button className="linklike" onClick={() => onOpenNode(r.s.id)}><b>{r.s.name}</b></button>
+          ) : <b>{r.s.name}</b>}
+          <span className="muted"> - {r.why}</span>
+        </div>
+      ))}
     </div>
   )
 }
 
-// Прогресс и итог раскатки агента прямо в блоке: сколько обновилось, где застряло и почему
-export function RolloutProgress({ run, servers, onClose, onOpen }: {
-  run: Run; servers: Server[]; onClose: () => void; onOpen?: (id: number) => void
+const OpenBtn = ({ onOpen }: { onOpen?: () => void }) => {
+  const { t } = useI18n()
+  return onOpen ? <button className="ghost small upd-open" title={t('Открыть')} onClick={onOpen}>→</button> : null
+}
+
+// Строка агента: отстают -> "Точно?" -> обновились N из M -> готово (уходит сама) или
+// по нодам, что не так, с "повторить" и "скрыть". canary - кнопка "сначала одна нода" (баннер "Серверов")
+export function AgentUpdRow({ servers, avail, fleet, canUpd, canary, onOpen, onOpenNode }: {
+  servers: Server[]; avail: string; fleet: Fleet; canUpd: boolean; canary?: boolean
+  onOpen?: () => void; onOpenNode?: (id: number) => void
 }) {
   const { t } = useI18n()
-  // helper'ы: из хостов запуска те, где прогон ansible все еще что-то поменяет
-  const pending = new Set(rolloutHosts(servers))
-  const helperLeft = run.hosts.length ? run.hosts.filter((h) => pending.has(h)) : null
-  const rows = run.ids
-    .map((id) => servers.find((s) => s.id === id))
-    .filter((s): s is Server => !!s)
-    .map((s) => nodeState(s, run, t))
-  const done = rows.filter((r) => r.st === 'done').length
+  const run = fleet.agent
+  const at = run ? Date.parse(run.at) : 0
+  const rows = run
+    ? run.ids.map((id) => servers.find((s) => s.id === id)).filter((s): s is Server => !!s)
+      .map((s) => nodeState(s, run.v, at, t))
+    : []
   const open = rows.filter((r) => r.st !== 'done')
-  const over = open.every((r) => r.st === 'bad')
-  const issues = open.filter((r) => r.why)
-  return (
-    <div className="upd-run">
-      <div className="upd-run-head">
-        <span className={`lk-dot ${over && issues.length ? 'lk-dot-warn' : over ? 'lk-dot-ok' : 'lk-dot-info'}`} />
-        <span className="upd-run-txt">
-          {rows.length === 0
-            ? t('Обновление helper\'ов')
-            : open.length === 0
-            ? t('Готово: агент {v} на всех нодах ({n})', { v: run.v, n: rows.length })
-            : over
-              ? t('Агент {v}: обновились {done} из {n}, остальные не обновятся сами', { v: run.v, done, n: rows.length })
-              : t('Агент {v}: обновились {done} из {n}', { v: run.v, done, n: rows.length })}
+  const finished = rows.length > 0 && open.length === 0
+  const { close } = fleet
+  useEffect(() => {
+    if (!finished) return
+    const id = window.setTimeout(() => close('agent'), DONE_MS)
+    return () => window.clearTimeout(id)
+  }, [finished, close])
+
+  if (!rows.length) {
+    // цель ставим только нодам на связи: не на связи в ход раскатки не идут, иначе строка
+    // висела бы "обновились 11 из 12" до их возвращения; вернутся - встанут сюда же отстающими
+    const on = agentBehind(servers, avail).filter((s) => s.online)
+    if (!on.length) return null
+    const from = [...new Set(on.map((s) => s.agent_version))].sort().join(', ')
+    const notes = on.filter((s) => s.agent_update_note)
+    const n = on.length
+    return (
+      <div className="home-attention-row upd-row">
+        <span className="lk-dot lk-dot-info" />
+        <span className="home-attention-ico">⬆</span>
+        <span className="home-attention-txt">
+          {t('Агент {v}: отстают нод - {n}', { v: avail, n })}{' '}
+          <span className="muted small">({from}: {shortList(on.map((s) => s.name), t, 3)})</span>
+          {/* медленный канал (РФ-ноды за DPI): цель уже стоит, идет докачка */}
+          {notes.length > 0 && (
+            <span className="muted small upd-notes">{notes.map((s) => `${s.name}: ${s.agent_update_note}`).join(' · ')}</span>
+          )}
         </span>
-        <button className="ghost small" onClick={onClose}>{t('скрыть')}</button>
+        {canUpd && canary && n > 1 && (
+          <button className="ghost small" disabled={fleet.busy} onClick={() => fleet.startAgent([on[0].id])}
+            title={t('Обновить сначала одну ноду (canary), потом остальные')}>
+            {t('canary - 1 нода')}
+          </button>
+        )}
+        {canUpd && (
+          <ConfirmButton disabled={fleet.busy}
+            label={t('Обновить {n} {nodes}', { n, nodes: nodesAcc(n, t) })}
+            sure={t('Точно? {n} {nodes}', { n, nodes: nodesAcc(n, t) })}
+            onGo={() => fleet.startAgent(on.map((s) => s.id))} />
+        )}
+        <OpenBtn onOpen={onOpen} />
       </div>
-      {issues.length > 0 && (
-        <div className="upd-run-list">
-          {issues.map((r) => (
-            <div key={r.s.id} className={`upd-run-row${r.st === 'bad' ? ' bad' : ''}`}>
-              {onOpen ? (
-                <button className="linklike" onClick={() => onOpen(r.s.id)}><b>{r.s.name}</b></button>
-              ) : <b>{r.s.name}</b>}
-              <span className="muted"> - {r.why}</span>
-            </div>
-          ))}
-        </div>
+    )
+  }
+
+  const done = rows.length - open.length
+  if (finished) {
+    return (
+      <div className="home-attention-row upd-row upd-ok">
+        <span className="lk-dot lk-dot-ok" />
+        <span className="home-attention-ico">✓</span>
+        <span className="home-attention-txt">
+          {t('Агент {v} на всех нодах: {n}', { v: run!.v, n: rows.length })}
+          <span className="upd-fade" style={{ animationDuration: `${DONE_MS}ms` }} />
+        </span>
+      </div>
+    )
+  }
+  const bad = open.filter((r) => r.st === 'bad')
+  // все, что осталось, само уже не обновится: строка ждет решения человека
+  if (open.every((r) => r.st === 'bad')) {
+    return (
+      <div className="home-attention-row upd-row upd-fail">
+        <span className="lk-dot lk-dot-warn" />
+        <span className="home-attention-ico">⬆</span>
+        <span className="home-attention-txt">
+          {t('Агент {v}: обновились {done} из {n}, остальные сами не обновятся', { v: run!.v, done, n: rows.length })}
+          <NodeIssues rows={bad} onOpenNode={onOpenNode} />
+        </span>
+        {canUpd && (
+          <button className="ghost small" disabled={fleet.busy}
+            onClick={() => fleet.startAgent(bad.filter((r) => r.s.enabled).map((r) => r.s.id))}>
+            {t('Повторить: {n}', { n: bad.length })}
+          </button>
+        )}
+        <button className="ghost small" onClick={() => close('agent')}>{t('скрыть')}</button>
+        <OpenBtn onOpen={onOpen} />
+      </div>
+    )
+  }
+  const going = open.filter((r) => r.st === 'wait').map((r) => r.s.name)
+  return (
+    <div className="home-attention-row upd-row">
+      <span className="lk-dot lk-dot-info" />
+      <span className="home-attention-ico">⬆</span>
+      <span className="home-attention-txt">
+        {t('Агент {v}: обновились {done} из {n}', { v: run!.v, done, n: rows.length })}
+        <Bar n={done} of={rows.length} />
+        {going.length > 0 && <span className="muted small upd-notes">{t('качают: {list}', { list: shortList(going, t, 3) })}</span>}
+        <NodeIssues rows={open.filter((r) => r.why)} onOpenNode={onOpenNode} />
+      </span>
+      {canUpd && (
+        <button className="ghost small" disabled={fleet.busy} title={t('Снять обновление с тех, кто еще не обновился')}
+          onClick={() => fleet.stopAgent(open.map((r) => r.s.id))}>
+          {t('стоп')}
+        </button>
       )}
-      {helperLeft != null && (
-        <div className="upd-run-row muted small">
-          {helperLeft.length === 0
-            ? t('helper\'ы: везде актуальные')
-            : t('helper\'ы: ждут прогона ansible на нодах - {n} ({list})', { n: helperLeft.length, list: shortList(helperLeft, t, 6) })}
-        </div>
-      )}
+      <OpenBtn onOpen={onOpen} />
     </div>
   )
 }
@@ -271,28 +359,138 @@ export function useViaPanels(): boolean {
   return via
 }
 
-export function AnsibleCmd({ hosts, via }: { hosts: string[]; via: boolean }) {
+const copy = (s: string) => {
+  try { navigator.clipboard?.writeText(s)?.catch(() => {}) } catch { /* без буфера команда видна в строке */ }
+}
+
+// Запуск helper'ов: копируем команду и ждем прогона (одна и та же команда в строке и в "Обновить все")
+export function startHelpers(fleet: Fleet, hosts: string[], via: boolean) {
+  copy(ansibleCmd(hosts, via))
+  return fleet.startHelpers(hosts)
+}
+
+// Строка helper'ов: одна на все helper'ы, потому что их чинит одна команда ansible.
+// Скопировали команду -> ждем, пока хосты перестанут требовать прогона -> готово (уходит сама)
+export function HelperUpdRow({ servers, fleet, canUpd, via, onOpen }: {
+  servers: Server[]; fleet: Fleet; canUpd: boolean; via: boolean; onOpen?: () => void
+}) {
   const { t } = useI18n()
-  const { isAdmin } = useAuth()
   const [copied, setCopied] = useState(false)
-  const cmd = ansibleCmd(hosts, via)
+  const pending = rolloutHosts(servers)
+  const run = fleet.helpers
+  const left = run ? run.hosts.filter((h) => pending.includes(h)) : []
+  const finished = !!run && left.length === 0
+  const { close } = fleet
+  useEffect(() => {
+    if (!finished) return
+    const id = window.setTimeout(() => close('helpers'), DONE_MS)
+    return () => window.clearTimeout(id)
+  }, [finished, close])
+
+  if (!run) {
+    if (!pending.length) return null
+    const n = pending.length
+    // что именно поменяет прогон: helper'ы с версиями, плюс настройка юнита агента (watchdog)
+    const what = helperGroups(servers).map((g) => g.fresh
+      ? t('{helper} не стоит', { helper: g.name })
+      : `${g.name} ${g.a} -> ${g.b}`)
+    // настройка systemd-юнита агента (нет watchdog и т.п.) - тем же плейбуком; отказ
+    // самообновления агента ansible не чинит, он отдельной строкой
+    for (const s of servers) {
+      if (!s.online || !pending.includes(hostOf(s))) continue
+      for (const a of s.agent_advice || [])
+        if (!(s.agent_update_error && a.endsWith(s.agent_update_error)) && !what.includes(a)) what.push(a)
+    }
+    return (
+      <div className="home-attention-row upd-row">
+        <span className="lk-dot lk-dot-info" />
+        <span className="home-attention-ico">🧩</span>
+        <span className="home-attention-txt">
+          {t('helper\'ы: обновить на {n} {nodes}', { n, nodes: nodesLoc(n, t) })}{' '}
+          <span className="muted small">({[what.join(', '), shortList(pending, t, 3)].filter(Boolean).join('; ')})</span>
+        </span>
+        {canUpd && (
+          <button className="ghost small" disabled={fleet.busy} onClick={() => startHelpers(fleet, pending, via)}>
+            {t('Скопировать команду')}
+          </button>
+        )}
+        <OpenBtn onOpen={onOpen} />
+      </div>
+    )
+  }
+
+  const n = run.hosts.length
+  const done = n - left.length
+  if (finished) {
+    return (
+      <div className="home-attention-row upd-row upd-ok">
+        <span className="lk-dot lk-dot-ok" />
+        <span className="home-attention-ico">✓</span>
+        <span className="home-attention-txt">
+          {t('helper\'ы обновлены на всех нодах: {n}', { n })}
+          <span className="upd-fade" style={{ animationDuration: `${DONE_MS}ms` }} />
+        </span>
+      </div>
+    )
+  }
+  const cmd = ansibleCmd(run.hosts, via)
+  const again = (
+    <button className="ghost small" onClick={() => {
+      copy(cmd)
+      setCopied(true)
+      window.setTimeout(() => setCopied(false), 1500)
+    }}>{copied ? t('Скопировано') : t('копировать еще раз')}</button>
+  )
+  // за полчаса прогон или не запускали, или он не дошел до части хостов
+  const stuck = Date.now() - Date.parse(run.at) > HELPER_STUCK_MS
   return (
-    <div className="ansible-hint">
-      <div className="agent-advice-cmd">
-        <pre>{cmd}</pre>
-        <button className="ghost" onClick={() => {
-          navigator.clipboard?.writeText(cmd)
-          setCopied(true); window.setTimeout(() => setCopied(false), 1500)
-        }}>{copied ? t('Скопировано') : t('Копировать')}</button>
-      </div>
-      <div className="muted small">
-        {t('Запускать из своего репозитория ansible. Сначала можно вхолостую: добавьте --check --diff. Панель ничего не выполняет — только называет хосты.')}
-      </div>
-      <div className="muted small">
-        {via
-          ? t('Одна команда на все панели: группу kervax_outdated плагин инвентаря собирает, спрашивая сами панели.')
-          : isAdmin && t('Чтобы на всех панелях была одна команда без списка хостов, включите доступ для ansible: меню настроек -> Ansible.')}
-      </div>
+    <div className={`home-attention-row upd-row${stuck ? ' upd-fail' : ''}`}>
+      <span className={`lk-dot ${stuck ? 'lk-dot-warn' : 'lk-dot-info'}`} />
+      <span className="home-attention-ico">🧩</span>
+      <span className="home-attention-txt">
+        {done === 0 && !stuck ? (
+          t('helper\'ы: команда скопирована, запустите ее в репозитории ansible')
+        ) : (
+          <>
+            {t('helper\'ы: обновились {done} из {n}', { done, n })}
+            <Bar n={done} of={n} />
+          </>
+        )}
+        {stuck && (
+          <div className="upd-issues muted">
+            {done === 0
+              ? t('прогона так и не было, ждут: {list}', { list: shortList(left, t, 6) })
+              : t('после прогона все еще старые: {list} - смотрите вывод плейбука', { list: shortList(left, t, 6) })}
+          </div>
+        )}
+        {/* команда нужна, пока прогона нет; пошел - видно прогресс, копия - кнопкой */}
+        {(done === 0 || stuck) && <code className="upd-cmd">{cmd}</code>}
+      </span>
+      {canUpd && again}
+      {(stuck || !canUpd) && <button className="ghost small" onClick={() => close('helpers')}>{t('скрыть')}</button>}
+      <OpenBtn onOpen={onOpen} />
     </div>
+  )
+}
+
+// "Обновить все" в шапке блока: нужна, только когда обновить можно и агент, и helper'ы -
+// с одной строкой хватает ее кнопки. Тот же второй клик в ту же точку
+export function UpdateAllButton({ servers, avail, fleet, via }: {
+  servers: Server[]; avail: string; fleet: Fleet; via: boolean
+}) {
+  const { t } = useI18n()
+  if (fleet.agent || fleet.helpers) return null
+  const on = agentBehind(servers, avail).filter((s) => s.online)
+  const hosts = rolloutHosts(servers)
+  if (!on.length || !hosts.length) return null
+  return (
+    <ConfirmButton big disabled={fleet.busy}
+      label={t('Обновить все')}
+      sure={t('Точно? агент на {a} + helper\'ы на {h}', { a: on.length, h: hosts.length })}
+      onGo={async () => {
+        // по очереди: обе части пишутся в одну запись на панели
+        await startHelpers(fleet, hosts, via)
+        await fleet.startAgent(on.map((s) => s.id))
+      }} />
   )
 }

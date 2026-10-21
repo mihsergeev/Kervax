@@ -445,6 +445,85 @@ async def test_agent_update_only_own_groups(client, auth_headers, monkeypatch):
     assert tgt == {"web-a": "", "db-a": "1.6"}
 
 
+async def test_fleet_rollout_kept_on_panel(client, auth_headers, monkeypatch):
+    """Ход "Обновить" из блока "Обновления" хранится на панели: после перезагрузки страницы
+    видно, какие ноды в раскатке и когда начали; повтор на части нод не сбрасывает остальные;
+    "стоп" и "скрыть" убирают из хода только ноды своей учетки."""
+    monkeypatch.setattr("app.api.servers._available_agent_version", lambda: "1.6")
+    ids = {}
+    for name, grp in (("web-a", "web"), ("web-b", "web"), ("db-a", "db")):
+        r = await client.post("/api/servers", json={"name": name, "group_name": grp}, headers=auth_headers)
+        ids[name] = r.json()["server"]["id"]
+        ah = {"Authorization": f"Bearer {r.json()['token']}"}
+        await client.post("/api/agent/report", json={"agent_version": "1.5", "mem_used": 1, "mem_total": 2,
+                                                     "disks": [{"mount": "/", "used": 1, "total": 2}]}, headers=ah)
+    r = await client.get("/api/servers/fleet-rollout", headers=auth_headers)
+    assert r.json() == {"agent": None, "helpers": None}
+
+    # без track (кнопка у одной ноды в карточке) ход раскатки не заводится
+    await client.post("/api/servers/agent-update", json={"version": "1.6", "server_ids": [ids["web-a"]]},
+                      headers=auth_headers)
+    assert (await client.get("/api/servers/fleet-rollout", headers=auth_headers)).json()["agent"] is None
+
+    all_ids = sorted(ids.values())
+    r = await client.post("/api/servers/agent-update",
+                          json={"version": "1.6", "server_ids": all_ids, "track": True}, headers=auth_headers)
+    assert r.status_code == 200
+    run = (await client.get("/api/servers/fleet-rollout", headers=auth_headers)).json()["agent"]
+    assert run["v"] == "1.6" and run["ids"] == all_ids and run["at"]
+    # повтор на одной ноде добавляет к той же раскатке, а не начинает новую
+    await client.post("/api/servers/agent-update",
+                      json={"version": "1.6", "server_ids": [ids["db-a"]], "track": True}, headers=auth_headers)
+    assert (await client.get("/api/servers/fleet-rollout", headers=auth_headers)).json()["agent"]["ids"] == all_ids
+
+    # helper'ы: панель только запоминает хосты, чужие и выдуманные отбрасывает
+    r = await client.post("/api/servers/fleet-rollout/helpers", json={"hosts": ["web-a", "db-a", "nope"]},
+                          headers=auth_headers)
+    assert r.json()["helpers"]["hosts"] == ["db-a", "web-a"]
+
+    r = await client.post("/api/users", headers=auth_headers, json={
+        "username": "webed", "password": "webed-pass-2026", "role": "editor", "server_groups": ["web"]})
+    assert r.status_code in (200, 201), r.text
+    login = await client.post("/api/auth/login", json={"username": "webed", "password": "webed-pass-2026"})
+    eh = {"Authorization": f"Bearer {login.json()['access_token']}"}
+    # редактор группы видит в ходе раскатки только свои ноды
+    r = (await client.get("/api/servers/fleet-rollout", headers=eh)).json()
+    assert r["agent"]["ids"] == sorted([ids["web-a"], ids["web-b"]]) and r["helpers"]["hosts"] == ["web-a"]
+    # "стоп" редактора снимает цель и убирает из хода только его ноды
+    r = await client.post("/api/servers/agent-update/cancel", json={"server_ids": None, "untrack": True},
+                          headers=eh)
+    assert sorted(s["name"] for s in r.json()) == ["web-a", "web-b"]
+    assert (await client.get("/api/servers/fleet-rollout", headers=auth_headers)).json()["agent"]["ids"] == [ids["db-a"]]
+    # "скрыть" helper'ов редактором: чужой хост остается
+    r = await client.delete("/api/servers/fleet-rollout/helpers", headers=eh)
+    assert r.json()["helpers"] is None
+    assert (await client.get("/api/servers/fleet-rollout", headers=auth_headers)).json()["helpers"]["hosts"] == ["db-a"]
+
+    # строка ушла: части больше нет; цель агента при этом не снимается
+    await client.delete("/api/servers/fleet-rollout/agent", headers=auth_headers)
+    await client.delete("/api/servers/fleet-rollout/helpers", headers=auth_headers)
+    assert (await client.get("/api/servers/fleet-rollout", headers=auth_headers)).json() == {"agent": None, "helpers": None}
+    tgt = {s["name"]: s["target_agent_version"]
+           for s in (await client.get("/api/servers", headers=auth_headers)).json()}
+    assert tgt["db-a"] == "1.6"
+    assert (await client.delete("/api/servers/fleet-rollout/other", headers=auth_headers)).status_code == 404
+
+
+async def test_fleet_rollout_expires(client, auth_headers):
+    """Запуск старше суток не показывается: отстающие ноды и так видны строкой "Обновлений"."""
+    import json
+    import time
+
+    from app import fleet_rollout, settings_store
+
+    async with client._transport.app.state.session_factory() as session:
+        await settings_store.set_raw(session, fleet_rollout.KEY, json.dumps({
+            "agent": {"v": "1.6", "ids": [1], "at": time.time() - 25 * 3600},
+            "helpers": {"hosts": ["x"], "at": "битое"}}))
+    r = await client.get("/api/servers/fleet-rollout", headers=auth_headers)
+    assert r.json() == {"agent": None, "helpers": None}
+
+
 async def test_server_temp_throttle_conditions():
     from datetime import datetime, timedelta, timezone
 
