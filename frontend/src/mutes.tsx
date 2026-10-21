@@ -48,6 +48,7 @@ export const SRV_ALERT_KINDS: { k: string; label: string }[] = [
   { k: 'db_health', label: 'СУБД: реплика, транзакции, запись, VACUUM' },
   { k: 'web_config', label: 'Веб-сервер: конфиг не проходит проверку' },
   { k: 'web_cert', label: 'Веб-сервер: сертификат истекает' },
+  { k: 'webfiles', label: 'Признаки взлома: новые php в файлах сайтов' },
   { k: 'listen_gone', label: 'Сервер: пропал порт' },
   { k: 'disk_slow', label: 'Диск тормозит' },
   { k: 'gpu', label: 'GPU: драйвер, пропала карта, ошибки Xid' },

@@ -48,7 +48,7 @@ const ISSUE_ICON: Record<string, string> = {
   clock: '🕐', dns: '🌐', db_conn: '🔌', web_5xx: '🌐', queue: '🐇', kube_expiry: '⏳', flux_down: '☸️',
   flux_stale: '☸️', backup_dump: '🛢', backup_dump_space: '🛢', backup_cron: '🛢', backup_check: '🩺',
   unit_loop: '🔁', kube_cron: '⏰', exposed: '🔓', port_new: '🚪', pressure: '🫁', net_health: '📶', link: '🔗', traffic: '📊', kube_node: '☸️', kube_job: '💥', access_change: '🔑', backup_restore: '🛟', docker_restarts: '🔄', kube_restarts: '🔄', mem_leak: '📈', ssh_risk: '🔐', db_health: '🛢', web_config: '🧾', web_cert: '🔏', listen_gone: '🔌', disk_slow: '🐢', gpu: '🎛', gpu_heat: '🌡', llm: '💬', queue_stuck: '⏳', queue_failed: '🧨', workers: '👷', cron_stuck: '⏲', log_errors: '📜', fpm: '🐘', access_risk: '🗝',
-  tamper: '🕵️',
+  tamper: '🕵️', webfiles: '🕵️',
 }
 
 type T = (k: string, p?: Record<string, string | number>) => string

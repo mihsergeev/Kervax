@@ -769,6 +769,9 @@ class Server(Base):
     # "Проблемах" раздела "Бэкапы", а не в "Без бэкапа" (app/backup_state.py). Снимается удачной
     # настройкой или "удалить настройку"
     backup_setup_err: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    # файлы сайтов (app/webfiles.py, helper webfiles-setup): веб-корни, новые php и правки вне
+    # выкладки, последний прогон helper'а и корни без своего монитора
+    webfiles: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     # «дампы СУБД настроены отдельно» — снимает пункт аудита с главной
     db_dumps_ok: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
     # приглушённые находки аудита покрытия — ключи вида "db:RabbitMQ", "kube_vol:/mnt/x".

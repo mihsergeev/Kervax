@@ -7,7 +7,7 @@ import { fmtBytes } from './units'
 // времени и кнопка принять в базу. Сильные признаки красным, слабые желтым; "Разобрались" -
 // все текущее как норма. Признаки, у которых причина ушла, пропадают сами.
 
-const ICON: Record<string, string> = { empty: '📄', bot: '🤖', title: '📝', dom: '🌐', old: '🧩' }
+const ICON: Record<string, string> = { empty: '📄', bot: '🤖', php: '🐘', title: '📝', dom: '🌐', edit: '✏️', old: '🧩' }
 
 type T = (k: string, p?: Record<string, string | number>) => string
 
@@ -28,6 +28,14 @@ function signText(s: TamperSign, t: T): [string, string] {
       title: s.title ?? '', size: size(s.size), human: size(s.human),
     })]
   if (s.key === 'dom') return [t('Новый внешний домен {d}', { d: s.domain ?? '' }), whereOf(s.src ?? '', t)]
+  if (s.key === 'php' || s.key === 'edit') {
+    const files = s.files ?? []
+    const more = (s.n ?? files.length) - files.length
+    return [s.key === 'php' ? t('Новые php в веб-корне') : t('Код изменен вне выкладки'), subOf(
+      files.join(', ') + (more > 0 ? ' ' + t('и еще {n}', { n: more }) : ''),
+      s.where ? t('на {where}', { where: s.where }) : '',
+    )]
+  }
   if (s.eol) return [t('{what} без поддержки', { what: s.what ?? '' }), t('ветка больше не получает исправлений')]
   return [t('{what} с дырой', { what: s.what ?? '' }), s.fix ? t('исправлено в {v}', { v: s.fix }) : '']
 }
@@ -43,7 +51,7 @@ function whereOf(src: string, t: T): string {
 }
 
 function actOf(key: string, t: T): string {
-  if (key === 'dom') return t('это наше')
+  if (key === 'dom' || key === 'php' || key === 'edit') return t('это наше')
   if (key === 'bot') return t('это норм')
   if (key === 'old') return t('отложить 7 дн')
   return t('новая норма')

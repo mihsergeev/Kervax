@@ -53,10 +53,11 @@ _TIMEOUT = 20.0
 
 _BOT_UA = "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)"
 
-STRONG = frozenset({"empty", "bot"})
+STRONG = frozenset({"empty", "bot", "php"})
 # порядок в строках и алертах: сильные сначала
-ORDER = ("empty", "bot", "title", "dom", "old")
-ICON = {"empty": "📄", "bot": "🤖", "title": "📝", "dom": "🌐", "old": "🧩"}
+# php и edit - файлы на сервере (app/webfiles.py): их кладет и снимает стадия "файлы сайтов"
+ORDER = ("empty", "bot", "php", "title", "dom", "edit", "old")
+ICON = {"empty": "📄", "bot": "🤖", "php": "🐘", "title": "📝", "dom": "🌐", "edit": "✏️", "old": "🧩"}
 
 # адреса из документации и пространств имен: встречаются в любом js, к загрузке не относятся
 _DOC_HOSTS = frozenset({
@@ -374,6 +375,12 @@ def phrase(key: str, s: dict) -> str:
     if key == "old":
         it = (s.get("items") or [{}])[0]
         return f"{it.get('what', '')} " + ("без поддержки" if it.get("eol") else "с дырой")
+    if key in ("php", "edit"):
+        from app import tg_fmt
+        names = [f["p"].rsplit("/", 1)[-1] for f in s.get("files") or []]
+        if key == "php":
+            return f"новые php ({tg_fmt.names(names, 2)})"
+        return f"правка {names[0]} вне выкладки" if len(names) == 1 else "правки вне выкладки: " + tg_fmt.names(names, 2)
     return key
 
 
@@ -426,6 +433,9 @@ def _detail(key: str, s: dict) -> str:
         it = (s.get("items") or [{}])[0]
         if it.get("fix"):
             return f"{it['what']} с дырой, исправлено в {it['fix']}"
+    if key == "php":
+        from app import tg_fmt
+        return "новые php: " + tg_fmt.names([f["p"].rsplit("/", 1)[-1] for f in s.get("files") or []])
     return phrase(key, s)
 
 
@@ -453,6 +463,12 @@ def view(state: dict | None) -> dict | None:
         if k == "old":
             for it in s.get("items") or []:
                 rows.append({"key": "old", "arg": "", "strong": False, "since": s.get("since"), **it})
+            continue
+        if k in ("php", "edit"):
+            files = s.get("files") or []
+            rows.append({"key": k, "arg": "", "strong": k in STRONG, "since": s.get("since"),
+                         "files": [f.get("p", "") for f in files[:10]], "n": len(files),
+                         "where": ", ".join(dict.fromkeys(f.get("where", "") for f in files if f.get("where")))})
             continue
         rows.append({"key": k, "arg": "", "strong": k in STRONG, "since": s.get("since"),
                      **{x: s[x] for x in ("size", "was", "title", "human") if x in s}})
@@ -503,6 +519,10 @@ def accept(state: dict, key: str, arg: str, now: datetime) -> dict:
         elif k == "old":
             st.setdefault("post", {})["old"] = _iso(now + POSTPONE)
             signs.pop("old", None)
+        elif k in ("php", "edit"):
+            # файлы на сервере: в servers.webfiles их снимает API (webfiles.accept), иначе
+            # стадия "файлы сайтов" положила бы признак обратно
+            signs.pop(k, None)
     return st
 
 

@@ -2146,6 +2146,8 @@ export type Server = {
   web_config?: { server: string; where: string; ok: boolean; err: string }[] | null
   // сертификаты nginx (helper webserver-setup 0.24): сколько дней до конца срока
   web_certs?: { where: string; file: string; label: string; days: number }[] | null
+  // файлы сайтов (backend app/webfiles.py): веб-корни, новые php и правки вне выкладки
+  webfiles?: { roots: WebRoot[]; ts?: number | null } | null
   // внешние прокси со сборкой образа старше года (built - unix-секунды); key - решение "оставить как
   // есть" в alert_mutes (proxyold:<контейнер>), muted - решение принято, fix - как обновить
   proxy_outdated?: {
@@ -2697,6 +2699,23 @@ export function updateServer(
 }
 export function deleteServer(id: number): Promise<void> {
   return api<void>(`/api/servers/${id}`, { method: 'DELETE' })
+}
+// Веб-корень ноды: признаки - файлы с моментом появления; site - признаки идут и в карточку сайта
+export interface WebRoot {
+  key: string
+  where: string
+  path: string
+  domains: string[]
+  files: number
+  big: boolean
+  deploy?: { at: string; n: number } | null
+  php: { p: string; since: string }[]
+  edit: { p: string; since: string }[]
+  site: boolean
+}
+// новые php и правки в корне - свои: root пусто - все корни, key пусто - оба признака
+export function acceptWebfiles(id: number, root = '', key = ''): Promise<Server> {
+  return api<Server>(`/api/servers/${id}/webfiles-accept`, { method: 'POST', body: JSON.stringify({ root, key }) })
 }
 // Изменения доступа сделали свои: строка уходит с главной
 export function ackChanges(id: number): Promise<Server> {
@@ -3419,7 +3438,7 @@ export function deleteMaint(id: number): Promise<void> {
 // DNS-монитор: принять текущий ответ как правильный и сразу перепроверить
 // Признак взлома одной строкой карточки: key - вид, arg - домен для "это наше"
 export interface TamperSign {
-  key: 'empty' | 'title' | 'bot' | 'dom' | 'old'
+  key: 'empty' | 'title' | 'bot' | 'dom' | 'old' | 'php' | 'edit'
   arg: string
   strong: boolean
   since?: string | null
@@ -3432,6 +3451,10 @@ export interface TamperSign {
   what?: string
   fix?: string
   eol?: boolean
+  // php и edit - файлы на сервере (app/webfiles.py): первые 10, сколько всего и где
+  files?: string[]
+  n?: number
+  where?: string
 }
 export interface TamperView {
   level: 'none' | 'one' | 'hack'

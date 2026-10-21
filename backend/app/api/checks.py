@@ -1102,7 +1102,7 @@ async def dns_accept(
                     run_latency_ms=outcome.latency_ms, run_at=now, run_source="panel")
 
 
-_TAMPER_KEYS = frozenset({"empty", "title", "bot", "dom", "old", "all"})
+_TAMPER_KEYS = frozenset({"empty", "title", "bot", "dom", "old", "php", "edit", "all"})
 
 
 @router.post("/{check_id}/tamper-accept")
@@ -1115,6 +1115,17 @@ async def tamper_accept(check_id: int, body: dict, user: CurrentUser, session: S
     if key not in _TAMPER_KEYS or not check.tamper_state:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Принимать нечего")
     from app import tamper as tamper_mod
+    from app import webfiles as webfiles_mod
+    # новые php и правки - файлы на сервере: снимаем их там, иначе стадия "файлы сайтов" вернет признак
+    signs = check.tamper_state.get("signs") or {}
+    for k in (("php", "edit") if key == "all" else (key,) if key in ("php", "edit") else ()):
+        by: dict[tuple[int, str], list[str]] = {}
+        for f in (signs.get(k) or {}).get("files") or []:
+            by.setdefault((int(f.get("sid") or 0), str(f.get("root") or "")), []).append(str(f.get("p") or ""))
+        for (sid, root), paths in by.items():
+            srv = await session.get(Server, sid)
+            if srv is not None:
+                srv.webfiles = webfiles_mod.accept(srv.webfiles, root, k, paths)
     check.tamper_state = tamper_mod.accept(check.tamper_state, key, arg, datetime.now(timezone.utc))
     await session.commit()
     await audit.record(session, user.username, "tamper_accept", check.name, f"{key} {arg}".strip()[:500])
