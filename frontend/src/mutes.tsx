@@ -108,14 +108,15 @@ export const FPM_MUTE = 'fpm:'
 // OOM из-за одного виновника (кто занимал память): oom:svc:<служба> | oom:ct:<контейнер> | oom:pod:<uid> |
 // oom:cg:<cgroup> | oom:proc:<процесс>; OOM из-за других приходят. "oom" целиком - все OOM сервера
 export const OOM_MUTE = 'oom:'
-export function oomCulpritLabel(key: string, t: TFn): string {
+// gen - после "из-за": из-за контейнера web, из-за процесса java
+export function oomCulpritLabel(key: string, t: TFn, gen = false): string {
   const i = key.indexOf(':')
   const kind = key.slice(0, i)
   const name = key.slice(i + 1)
-  if (kind === 'ct') return t('контейнер {n}', { n: name })
+  if (kind === 'ct') return t(gen ? 'контейнера {n}' : 'контейнер {n}', { n: name })
   // до 1.5.2 под глушили по uid, теперь по ворклоаду
-  if (kind === 'pod') return t('под {n}', { n: /^[0-9a-f]{8}-[0-9a-f]{4}-/.test(name) ? name.slice(0, 8) : name })
-  if (kind === 'proc') return t('процесс {n}', { n: name })
+  if (kind === 'pod') return t(gen ? 'пода {n}' : 'под {n}', { n: /^[0-9a-f]{8}-[0-9a-f]{4}-/.test(name) ? name.slice(0, 8) : name })
+  if (kind === 'proc') return t(gen ? 'процесса {n}' : 'процесс {n}', { n: name })
   return name
 }
 // Один контейнер с ключами от хоста, которому они нужны намеренно: dockrisk:<имя>

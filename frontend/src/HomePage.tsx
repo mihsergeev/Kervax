@@ -738,7 +738,7 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
   // перезапуски, пропавший порт - их бэкенд читает только из alert_mutes) глушатся сразу постоянно
   const [mutePick, setMutePick] = useState<string | null>(null)
   const oomMuteText = (k: string) =>
-    k.startsWith(OOM_MUTE) ? t('не алертить об OOM из-за {n}', { n: oomCulpritLabel(k.slice(OOM_MUTE.length), t) }) : null
+    k.startsWith(OOM_MUTE) ? t('не алертить об OOM из-за {n}', { n: oomCulpritLabel(k.slice(OOM_MUTE.length), t, true) }) : null
   const muteFor = (id: number, key: string, hours: number) => {
     setMutePick(null)
     if (hours < 0) return quickMute(id, [key])

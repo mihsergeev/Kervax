@@ -1214,7 +1214,7 @@ function OomMute({ server: s, culprit, onChanged }: { server: Server; culprit: s
   const fmt = (ts: string) =>
     new Date(ts).toLocaleString([], { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })
   const label = (k: string) =>
-    k === 'oom' ? t('любой OOM') : t('OOM из-за {n}', { n: oomCulpritLabel(k.slice(OOM_MUTE.length), t) })
+    k === 'oom' ? t('любой OOM') : t('OOM из-за {n}', { n: oomCulpritLabel(k.slice(OOM_MUTE.length), t, true) })
   const mute = async (kind: string, hours: number) => {
     setBusy(true)
     try {
@@ -1258,7 +1258,7 @@ function OomMute({ server: s, culprit, onChanged }: { server: Server; culprit: s
             <span className="oom-mute-scope">
               <button className={`ghost small${scope === 'culprit' ? ' active' : ''}`} onClick={() => setScope('culprit')}
                 title={t('OOM из-за других служб будут приходить')}>
-                {t('из-за {n}', { n: oomCulpritLabel(culprit, t) })}
+                {t('из-за {n}', { n: oomCulpritLabel(culprit, t, true) })}
               </button>
               <button className={`ghost small${scope === 'all' ? ' active' : ''}`} onClick={() => setScope('all')}>
                 {t('любой OOM')}
@@ -1281,7 +1281,7 @@ function OomMute({ server: s, culprit, onChanged }: { server: Server; culprit: s
         </span>
       ) : (
         <button className="ghost small" onClick={() => setPicking(true)}>
-          🔕 {ck ? t('не алертить об OOM из-за {n}', { n: oomCulpritLabel(culprit, t) }) : t('не алертить об OOM')}
+          🔕 {ck ? t('не алертить об OOM из-за {n}', { n: oomCulpritLabel(culprit, t, true) }) : t('не алертить об OOM')}
         </button>
       ))}
     </div>

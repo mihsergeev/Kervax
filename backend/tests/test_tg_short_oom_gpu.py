@@ -72,7 +72,7 @@ def test_oom_in_pod_limit_names_the_pod():
     rep = _oom_rep(POD_BLOCK)
     s = SimpleNamespace(oom_total=2, oom_victim="", last_report=rep, alert_mutes=[])
     fire, done, _ = oom.alert_step(s, {"oom_end": 0.0}, rep, NOW, timezone.utc, set(), pod_names=names)
-    assert len(fire) == 2 and fire[1].startswith("кончилась память в лимите под wordpress-mariadb")
+    assert len(fire) == 2 and fire[1].startswith("кончилась память в лимите пода wordpress-mariadb")
     assert done["oom_short"] == ("Кончилась память (OOM)", ["Убит: mariadbd", "Под: wordpress-mariadb (лимит 1гб)"])
     assert oom.tg_short(done["oom_short"]) == done["oom_short"] and oom.tg_short(None) is None
 

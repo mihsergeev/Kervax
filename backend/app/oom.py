@@ -258,15 +258,16 @@ def pod_text(uid: str, names: dict[str, str] | None) -> str:
     return pod_name(uid, names) or (f"{uid[:8]} ({UNKNOWN})" if uid else "?")
 
 
-def owner_text(o: dict, containers: dict[str, str] | None = None) -> str:
-    """containers - карта names_of: контейнеры по id и поды по "pod:<начало uid>"."""
+def owner_text(o: dict, containers: dict[str, str] | None = None, gen: bool = False) -> str:
+    """containers - карта names_of: контейнеры по id и поды по "pod:<начало uid>". gen - в
+    родительном падеже: в лимите контейнера web, сессии web."""
     k, n = o.get("kind"), o.get("name") or ""
     if k == "container":
-        return "контейнер " + ct_text(n, containers)
+        return ("контейнера " if gen else "контейнер ") + ct_text(n, containers)
     if k == "pod":
-        return "под " + pod_text(n, containers)
+        return ("пода " if gen else "под ") + pod_text(n, containers)
     if k == "user":
-        return "сессия " + n
+        return ("сессии " if gen else "сессия ") + n
     return n
 
 
@@ -326,9 +327,11 @@ def _user_of(k: dict) -> str:
     return k.get("user") or (str(k["uid"]) if k.get("uid") is not None else "")
 
 
-def kills_text(e: dict, containers: dict[str, str] | None = None) -> str:
+def kills_text(e: dict, containers: dict[str, str] | None = None, culprit: str = "") -> str:
     """python 554мб (php7.4-fpm.service, uid web), systemd + sd-pam (сессия web): по владельцу,
-    крупное с размером. Процессы сессии пользователя - мелочь, их только по имени."""
+    крупное с размером. Процессы сессии пользователя - мелочь, их только по имени. culprit - ключ
+    виновника, уже названного в тексте ("из-за контейнера web"): все убитые оттуда же - без
+    пометки, где они, иначе повтор."""
     groups: dict[str, list[dict]] = {}
     order: list[str] = []
     for k in e["kills"]:
@@ -340,6 +343,7 @@ def kills_text(e: dict, containers: dict[str, str] | None = None) -> str:
         groups[key].append(k)
     # крупное первым: ради него и убивали
     order.sort(key=lambda key: -sum(k.get("anon") or 0 for k in groups[key]))
+    same = bool(culprit) and all(_owner_key(kill_owner(groups[key][0]), containers) == culprit for key in order)
     parts = []
     for key in order:
         ks = groups[key]
@@ -353,7 +357,7 @@ def kills_text(e: dict, containers: dict[str, str] | None = None) -> str:
         what = " + ".join(names)
         if o["kind"] != "user" and anon >= 10 * 1024:
             what += " " + size_kb(anon)
-        where = owner_text(o, containers)
+        where = "" if same else owner_text(o, containers)
         u = _user_of(ks[0])
         if u and o["kind"] in ("service", "scope", "other", "host"):
             where = f"{where}, uid {u}" if where else f"uid {u}"
@@ -452,10 +456,12 @@ def episode_text(e: dict, tz, failed_now: set[str], n7: int, containers: dict[st
     RAM 8гб, swap нет
     за 7 дней OOM 13 раз"""
     at = hhmm(e["start"], tz)
+    skip = ""
     if e["kind"] == "memcg":
         k = next((k for k in e["kills"] if k["kind"] == "memcg"), e["kills"][0])
         o = owner(k.get("oom_memcg") or k.get("memcg") or "", k.get("user") or "", k.get("uid"))
-        head = f"кончилась память в лимите {owner_text(o, containers) or 'cgroup'} (OOM), {at}"
+        head = f"кончилась память в лимите {owner_text(o, containers, gen=True) or 'cgroup'} (OOM), {at}"
+        skip = _owner_key(o, containers)
     elif e["kind"] == "oomd":
         head = f"systemd-oomd убил процессы из-за нехватки памяти, {at}"
     else:
@@ -464,7 +470,7 @@ def episode_text(e: dict, tz, failed_now: set[str], n7: int, containers: dict[st
         head += f", с прошлого сообщения еще {more} раз"
     if late:
         head += f" - {late}"
-    lines = [head, "убиты: " + kills_text(e, containers)]
+    lines = [head, "убиты: " + kills_text(e, containers, skip)]
     fu = failed_units(e, failed_now)
     if fu:
         lines.append("упали: " + ", ".join(f"{u} ({'не поднялась' if down else 'поднялась'})" for u, down in fu))
@@ -743,14 +749,17 @@ def culprit(e: dict, containers: dict[str, str] | None = None) -> str:
     return "proc:" + name if name else ""
 
 
-def culprit_text(key: str) -> str:
-    """Виновник для текста, как в чипе мьюта карточки: php7.4-fpm.service, контейнер web, процесс java."""
+def culprit_text(key: str, gen: bool = False) -> str:
+    """Виновник для текста, как в чипе мьюта карточки: php7.4-fpm.service, контейнер web, процесс java.
+    gen - в родительном падеже, после "из-за": из-за контейнера web, из-за процесса java."""
     kind, _, name = key.partition(":")
     if not name:
         return ""
     if kind == "pod" and _UID.match(name):
         name = name[:8]
-    return {"ct": "контейнер " + name, "pod": "под " + name, "proc": "процесс " + name}.get(kind, name)
+    words = ({"ct": "контейнера", "pod": "пода", "proc": "процесса"} if gen
+             else {"ct": "контейнер", "pod": "под", "proc": "процесс"})
+    return f"{words[kind]} {name}" if kind in words else name
 
 
 def mutes_now(s: Server, now: datetime) -> set[str]:
@@ -964,6 +973,6 @@ def problem(s: Server, now: datetime, pod_names: dict[str, str] | None = None) -
     when = f"{int(ago // 3600)} ч назад" if ago >= 3600 else f"{max(1, int(ago // 60))} мин назад"
     n = f"{len(day)} раз за сутки, последний" if len(day) > 1 else "была"
     key = culprit(day[-1], conts)
-    who = f" из-за {culprit_text(key)}" if key else ""
-    return (lvl, f"нехватка памяти (OOM){who}: {n} {when}, убиты {kills_text(day[-1], conts)}",
+    who = f" из-за {culprit_text(key, gen=True)}" if key else ""
+    return (lvl, f"нехватка памяти (OOM){who}: {n} {when}, убиты {kills_text(day[-1], conts, key)}",
             MUTE_PREFIX + key if key else "oom")
