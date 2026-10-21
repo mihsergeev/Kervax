@@ -287,10 +287,10 @@ async def test_alert_rich_default_format(tmp_path, monkeypatch):
     assert len(sent) == 1
     text, pm = sent[0]
     assert pm == "HTML"
-    # в чат коротко: адрес ссылкой в монитор панели, что случилось и причина
-    assert text.startswith('🔴🌐 <a href="https://panel.example.com/?check=')
-    assert ('>api.example.com/health</a> <a href="https://api.example.com/health">🔗</a>\n'
-            "<b>Не отвечает</b>\ntimeout of 48000ms exceeded") in text
+    # в чат коротко: адрес ссылкой на сайт, "монитор" ссылкой в панель, что случилось и причина
+    assert text.startswith('🔴🌐 <a href="https://api.example.com/health">api.example.com/health</a>'
+                           ' · <a href="https://panel.example.com/?check=')
+    assert ">монитор</a>\n<b>Не отвечает</b>\ntimeout of 48000ms exceeded" in text
     # полный текст (история, панель): адрес - ссылка на сам сайт, отдельная ссылка "монитор" - на панель
     full = full_text(text)
     assert 'href="https://api.example.com/health"' in full  # открыть сайт
@@ -335,10 +335,10 @@ async def test_alert_strips_token_and_dedupes_name(tmp_path, monkeypatch):
     # токен нигде: ни в тексте, ни в href ссылки на сайт (query отброшен)
     assert "SECRET123" not in text and "access-token" not in text
     assert "SECRET123" not in full and "access-token" not in full
-    # в чат отбой одной строкой: адрес без query ссылкой в монитор панели, 🔗 - на сайт без query
-    assert text == (f'✅ <a href="https://panel.example.com/?check={cid}">'
-                    "shop.example.com/registration/get-active</a> "
-                    '<a href="https://shop.example.com/registration/get-active">🔗</a>: снова отвечает')
+    # в чат отбой одной строкой: адрес без query ссылкой на сайт, в конце "монитор" - в панель
+    assert text == ('✅ <a href="https://shop.example.com/registration/get-active">'
+                    "shop.example.com/registration/get-active</a>: снова отвечает"
+                    f' · <a href="https://panel.example.com/?check={cid}">монитор</a>')
     # полный текст: ссылка "открыть сайт" - на адрес без query, "монитор" - на панель
     assert 'href="https://shop.example.com/registration/get-active"' in full
     assert '<a href="https://panel.example.com/?check=' in full and ">монитор</a>" in full
