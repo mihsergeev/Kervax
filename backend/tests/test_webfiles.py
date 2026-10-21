@@ -99,7 +99,9 @@ def test_site_signs_count_with_page_signs():
 
 def test_helper_needed_and_written_right():
     assert setup_scripts.setup_needed("webfiles-setup", {"web_services": [{"kind": "nginx"}]})
-    assert setup_scripts.setup_needed("webfiles-setup", {"extras": {"fpm": {"v": 1}}})
+    assert setup_scripts.setup_needed("webfiles-setup", {"extras": {"fpm": {"v": 1, "pools": [{"pool": "www"}]}}})
+    # fpm-setup стоит всюду: без PHP его пустой блок не повод, на ноде условие скрипта ложно
+    assert not setup_scripts.setup_needed("webfiles-setup", {"extras": {"fpm": {"v": 1, "pools": [], "skipped": []}}})
     assert not setup_scripts.setup_needed("webfiles-setup", {"web_services": [{"kind": "Traefik"}]})
     src = (Path(__file__).resolve().parents[2] / "agent" / "webfiles-setup.sh").read_text(encoding="utf-8")
     assert "\r" not in src and "KERVAX_SETUP_VERSION=0.1" in src and "report.d/webfiles.json" in src

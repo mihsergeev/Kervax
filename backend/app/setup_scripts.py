@@ -78,11 +78,16 @@ def setup_needed(name: str, rep: dict, mutes: list[str] | None = None, relay: bo
         return bool(rep.get("web_services")) or bool((rep.get("extras") or {}).get("web-rate"))
     # webfiles-setup - где сайты на самом сервере: nginx или Apache (в том числе в контейнерах),
     # пулы PHP-FPM от fpm-setup или helper уже присылает файлы. Только прокси (Traefik, Envoy,
-    # ingress) - не повод: кода сайтов на такой ноде нет
+    # ingress) - не повод: кода сайтов на такой ноде нет. Блок fpm сам по себе тоже не повод:
+    # fpm-setup стоит всюду и без PHP шлет пустой {"pools":[]} - по нему панель флагала helper
+    # на серверах бэкапов, а условие в скрипте (pgrep nginx/php) на ноде ложно, и плейбук молча
+    # ничего не ставил
     if name == "webfiles-setup":
         kinds = {str((w or {}).get("kind") or "") for w in rep.get("web_services") or [] if isinstance(w, dict)}
         ex = rep.get("extras") or {}
-        return bool(kinds & {"nginx", "Apache"}) or bool(ex.get("fpm")) or bool(ex.get("webfiles"))
+        fpm = ex.get("fpm") if isinstance(ex.get("fpm"), dict) else {}
+        return (bool(kinds & {"nginx", "Apache"}) or bool(fpm.get("pools") or fpm.get("skipped"))
+                or bool(ex.get("webfiles")))
     # dbstat-setup — только там, где СУБД реально есть (скан процессов агента);
     # на ноде без баз инвентарь пустой, флагать нечего
     if name == "dbstat-setup":
