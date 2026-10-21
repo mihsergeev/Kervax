@@ -2846,7 +2846,8 @@ export type OomKill = {
   anon: number | null // кБ
   adj: number | null
   kind: 'global' | 'memcg' | 'oomd'
-  owner: string
+  owner: string // контейнер и под по имени (под без хеша); не знаем имени - короткий id и owner_unknown
+  owner_unknown?: boolean
   owner_kind: string
   memcg: string
   line: string
@@ -2866,7 +2867,7 @@ export type OomEpisode = {
   by: string[]
   units: Record<string, string[]>
   text: string
-  culprit?: string // кто занимал память: svc:<служба> | ct:<контейнер> | pod:<uid> | cg:<cgroup> | proc:<процесс>
+  culprit?: string // кто занимал память: svc:<служба> | ct:<контейнер> | pod:<под без хеша или uid> | cg:<cgroup> | proc:<процесс>
   muted?: boolean // не алертит: заглушен весь OOM или виновник
 }
 export function serverOom(id: number): Promise<{ episodes: OomEpisode[]; helper: boolean }> {

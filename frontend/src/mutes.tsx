@@ -113,7 +113,8 @@ export function oomCulpritLabel(key: string, t: TFn): string {
   const kind = key.slice(0, i)
   const name = key.slice(i + 1)
   if (kind === 'ct') return t('контейнер {n}', { n: name })
-  if (kind === 'pod') return t('под {n}', { n: name.slice(0, 8) })
+  // до 1.5.2 под глушили по uid, теперь по ворклоаду
+  if (kind === 'pod') return t('под {n}', { n: /^[0-9a-f]{8}-[0-9a-f]{4}-/.test(name) ? name.slice(0, 8) : name })
   if (kind === 'proc') return t('процесс {n}', { n: name })
   return name
 }

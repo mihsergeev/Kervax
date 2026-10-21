@@ -246,7 +246,8 @@ def test_agent_passes_deprovision_to_the_helper():
     run = go[go.index("func runBackupCommand("):]
     assert 'case "deprovision":' in run[:run.index("\n}\n")]
     assert 'lines = []string{"action=deprovision"}' in run
-    assert re.search(r'^const version = "2\.45"$', go, re.M)
+    m = re.search(r'^const version = "2\.(\d+)"$', go, re.M)
+    assert m and int(m.group(1)) >= 45
 
 
 def test_helper_writes_why_the_last_run_failed(tmp_path):

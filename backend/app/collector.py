@@ -3709,7 +3709,7 @@ def server_problems(s: Server, now: datetime, pod_names: dict[str, str] | None =
             u_since = datetime.fromtimestamp(float(u["since"]), timezone.utc).isoformat() if u.get("since") else None
             why = "убит OOM killer" if oom_lk is not None else unit_why(u)
             add("units", unit_level(u), f"{u['unit']}: {why}", "units", f"unit:{u['unit']}", u_since)
-    oom_p = oom_mod.problem(s, now)
+    oom_p = oom_mod.problem(s, now, pod_names)
     if oom_p is not None:
         add("oom", oom_p[0], oom_p[1], "oom", oom_p[2])
     # Юниты в цикле перезапусков: приросты счетчика ведет цикл алертов (alert_state unit_loops)

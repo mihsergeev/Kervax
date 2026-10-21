@@ -2584,6 +2584,7 @@ const EN: Record<string, string> = {
   'OOM-killer': 'OOM killer',
   'контейнер {n}': 'container {n}',
   'под {n}': 'pod {n}',
+  'имя неизвестно': 'name unknown',
   'сессия {n}': 'session {n}',
   'весь сервер': 'whole server',
   'лимит cgroup': 'cgroup limit',

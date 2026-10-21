@@ -268,7 +268,7 @@ def _out(
     o.restarts_day = srv_restarts.view(server, now) or None
     o.kube_restarts = srv_restarts.kube_view(server, now)
     o.mem_leaks = mem_trend.problems(server, now) or None
-    o.oom = oom_mod.view(server, now)
+    o.oom = oom_mod.view(server, now, pod_names)
     o.ssh = ssh_audit.view(server, now)
     o.ssh_advice = ssh_audit.advice(server, now) or None
     o.noboot = reboot_survive.view(server, now)
@@ -1872,7 +1872,11 @@ async def server_oom(server_id: int, user: CurrentUser, session: SessionDep) -> 
     have = {oom_mod.rec_key(r) for r in recs}
     recs += [r for r in oom_mod.records(oom_mod.block(rep)) if oom_mod.rec_key(r) not in have]
     eps = oom_mod.episodes(recs)
-    conts = oom_mod.containers_of(rep)
+    # поды по имени: нужны отчеты нод с kube-api, их читаем только если OOM был в поде
+    pods = None
+    if any("kubepods" in str(r.get("memcg") or "") for r in recs):
+        pods = pod_uid_names(list(await session.scalars(select(Server))))
+    conts = oom_mod.names_of(rep, pods, recs)
     failed = oom_mod.units_failed_now(rep)
     mutes = oom_mod.mutes_now(server, datetime.now(timezone.utc))
     return {"episodes": [oom_mod.episode_view(e, conts, failed, mutes) for e in reversed(eps)],
@@ -3141,7 +3145,11 @@ async def agent_report(
     report_dict = body.model_dump()
     # убийства, которые еще не попали в точку графика (точка пишется раз в минуту)
     report_dict["oom_pend"] = 0 if write_metric else oom_pend
-    await oom_mod.store(session, server, body.extras, now)
+    # имена контейнеров по id переносятся из отчета в отчет: OOM называет контейнер по cgroup с id,
+    # а после OOM его часто пересоздают с новым (app/oom.py)
+    report_dict[oom_mod.CT_SEEN_KEY] = oom_mod.remember_containers(prev_rep.get(oom_mod.CT_SEEN_KEY), report_dict,
+                                                                   now.timestamp())
+    await oom_mod.store(session, server, body.extras, now, report_dict)
     if boot:
         report_dict["boot"] = boot
     # журнал установок - разовый, в хронологию; в last_report ему жить незачем

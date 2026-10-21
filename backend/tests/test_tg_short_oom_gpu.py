@@ -66,13 +66,13 @@ def test_oom_in_pod_limit_names_the_pod():
     names = {"e551fc7f": "default/wordpress-mariadb-7d9f8b6c5d-x2k4q"}
     assert _clean(*oom.episode_short(e, timezone.utc, set(), {}, names)) == (
         "Кончилась память (OOM)", ["Убит: mariadbd", "Под: wordpress-mariadb (лимит 1гб)"])
-    # имени нет (воркер без kube-api) - начало uid, как раньше
-    assert oom.episode_short(e, timezone.utc, set())[1][1] == "Под: e551fc7f (лимит 1гб)"
+    # имени нет (воркер без kube-api) - начало uid с пометкой, чтобы uid не читался как имя
+    assert oom.episode_short(e, timezone.utc, set())[1][1] == "Под: e551fc7f (имя неизвестно, лимит 1гб)"
     # через alert_step: короткий текст в "oom_short", сам алерт не изменился
     rep = _oom_rep(POD_BLOCK)
     s = SimpleNamespace(oom_total=2, oom_victim="", last_report=rep, alert_mutes=[])
     fire, done, _ = oom.alert_step(s, {"oom_end": 0.0}, rep, NOW, timezone.utc, set(), pod_names=names)
-    assert len(fire) == 2 and fire[1].startswith("кончилась память в лимите под e551fc7f")
+    assert len(fire) == 2 and fire[1].startswith("кончилась память в лимите под wordpress-mariadb")
     assert done["oom_short"] == ("Кончилась память (OOM)", ["Убит: mariadbd", "Под: wordpress-mariadb (лимит 1гб)"])
     assert oom.tg_short(done["oom_short"]) == done["oom_short"] and oom.tg_short(None) is None
 
