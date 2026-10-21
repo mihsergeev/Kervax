@@ -1,4 +1,4 @@
-"""Признаки взлома в файлах сайтов (helper webfiles-setup 0.1, блок extras["webfiles"]).
+"""Признаки взлома в файлах сайтов (helper webfiles-setup 0.2, блок extras["webfiles"]).
 
 Helper сам находит веб-корни (рабочие каталоги php/Apache, root из конфигов nginx и Apache,
 /var/www/*, в контейнерах и подах через /proc/<pid>/root) и раз в 10 минут присылает разницу
@@ -8,7 +8,15 @@ Helper сам находит веб-корни (рабочие каталоги 
   новый php вне выкладки - тоже. Сильный признак;
 - код изменен вне выкладки: правка или новый js/.htaccess, когда за прогон в корне поменялось
   меньше 10 файлов. Слабый признак.
-Выкладка - 10 и больше файлов за прогон: серая строка "выкладка", не признак.
+Выкладка - 10 и больше файлов за прогон или 5 и больше записанных в одну секунду (скрипт:
+выкладка, старт контейнера): серая строка "выкладка", не признак.
+
+Генерируемое в работе - не код: кэши и скомпилированные шаблоны не в счет совсем, ассеты, которые
+приложение публикует само (Yii web/assets/<хеш>, Magento pub/static), - кроме php. В контейнере
+helper 0.2 смотрит только верхний слой overlay (записанное в живом контейнере), ключ корня - по
+контейнеру, первые 10 минут после старта только снимает список. Поды одного ворклоада - одна
+строка и одна проблема ("backend", подов: 5), вложенные корни одного пода (/app и /app/admin) не
+дублируют признаки.
 
 Признаки копятся в servers.webfiles, пока их не примут кнопкой ("это наше") или файл не пропадет.
 Корень с доменами из конфига (или единственный сайт сервера) привязан к монитору: признаки идут
@@ -25,18 +33,27 @@ from urllib.parse import urlparse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app import tg_fmt
+from app import podnames, tg_fmt
 
 log = logging.getLogger("kervax.webfiles")
 
 STALE = 3 * 3600   # блок старше - helper не работает
 MASS = 10          # столько файлов за прогон в одном корне - выкладка
+BATCH = 5          # столько файлов с одним временем записи - их записал скрипт, не человек
 GONE_ROOT = timedelta(days=7)
+GONE_CT = timedelta(hours=2)  # корень контейнера, которого нет в списке, - контейнер пересоздан
+RULES = 2          # версия правил: старые признаки один раз проходят через новые
 MAX_FILES = 50     # файлов в одном признаке
 _PHP = (".php", ".phtml", ".phar", ".pht", ".php3", ".php4", ".php5", ".php7", ".php8")
 _UPLOADS = frozenset({"uploads", "upload", "files", "media", "images", "img", "pictures", "userfiles",
                       "tmp", "temp"})
 STRONG = frozenset({"php"})
+# кэши и скомпилированные шаблоны (там бывает и php) - целиком; ассеты - кроме php
+_CACHE_SEGS = frozenset({".git", "node_modules", "cache", ".cache", "managed_cache", "stack_cache", "templates_c",
+                         "runtime"})
+_CACHE_PATHS = ("/storage/framework/", "/var/cache/", "/bootstrap/cache/", "/files/php/twig/",
+                "/var/view_preprocessed/")
+_ASSET_PATHS = ("/web/assets/", "/public/assets/", "/pub/static/", "/web/cpresources/")
 
 
 def block(rep: dict, now: datetime) -> dict | None:
@@ -53,6 +70,19 @@ def block(rep: dict, now: datetime) -> dict | None:
 
 def is_php(p: str) -> bool:
     return p.lower().endswith(_PHP)
+
+
+def generated(p: str) -> bool:
+    """Файл пишет само приложение в работе: кэш, скомпилированный шаблон, опубликованный ассет."""
+    # с учетом регистра, как find в helper'е: app/Cache/Repository.php - код, а не кэш
+    full = "/" + p
+    if any(seg in _CACHE_SEGS for seg in full.split("/")[1:-1]) or any(c in full for c in _CACHE_PATHS):
+        return True
+    return not is_php(p) and any(a in full for a in _ASSET_PATHS)
+
+
+def in_container(r: dict) -> bool:
+    return (r.get("where") or "") not in ("", "host")
 
 
 def in_uploads(p: str) -> bool:
@@ -82,6 +112,8 @@ def _rows(lst) -> list[tuple[str, int, int]]:
 def process(state: dict | None, b: dict, now: datetime) -> dict:
     """Новое состояние сервера по блоку helper'а: каждый прогон берем один раз (по ts)."""
     st = json.loads(json.dumps(state or {}))
+    # новое состояние сразу по текущим правилам, старое (без "r") один раз проходит через _rules2
+    st.setdefault("r", 1 if st.get("roots") else RULES)
     roots: dict = st.setdefault("roots", {})
     seen = float(st.get("seen") or 0)
     for r in b.get("roots") or []:
@@ -90,7 +122,8 @@ def process(state: dict | None, b: dict, now: datetime) -> dict:
         cur = roots.setdefault(str(r["key"]), {})
         cur.update(where=str(r.get("where") or ""), path=str(r.get("path") or ""),
                    domains=[str(d).lower() for d in r.get("domains") or []][:20],
-                   files=int(r.get("files") or 0), big=bool(r.get("big")), at=now.isoformat())
+                   files=int(r.get("files") or 0), big=bool(r.get("big")), layer=bool(r.get("layer")),
+                   at=now.isoformat())
     runs = sorted((x for x in b.get("runs") or [] if isinstance(x, dict)), key=lambda x: float(x.get("ts") or 0))
     for run in runs:
         ts = float(run.get("ts") or 0)
@@ -101,6 +134,10 @@ def process(state: dict | None, b: dict, now: datetime) -> dict:
             if not isinstance(d, dict) or not d.get("key") or d.get("first"):
                 continue
             _apply(roots.setdefault(str(d["key"]), {}), d, ts)
+    if int(st["r"]) < RULES:
+        _rules2(roots)
+        st["r"] = RULES
+    _nested(roots)
     for k in [k for k, r in roots.items() if _old(r, now)]:
         roots.pop(k)
     st["seen"] = seen
@@ -109,15 +146,52 @@ def process(state: dict | None, b: dict, now: datetime) -> dict:
 
 def _old(r: dict, now: datetime) -> bool:
     try:
-        return now - datetime.fromisoformat(r.get("at") or "") > GONE_ROOT
+        return now - datetime.fromisoformat(r.get("at") or "") > (GONE_CT if in_container(r) else GONE_ROOT)
     except ValueError:
         return True
 
 
+def _rules2(roots: dict) -> None:
+    """Признаки, набранные по правилам helper 0.1: сгенерированное уходит, правки в контейнерах -
+    тоже: 0.1 сравнивал новый под со списком старого (ключ корня переходил к нему) и считал
+    правкой то, что под пишет при старте."""
+    for r in roots.values():
+        if in_container(r):
+            r.pop("edit", None)
+        for k in ("php", "edit"):
+            for p in [p for p in r.get(k) or {} if generated(p)]:
+                r[k].pop(p)
+            if k in r and not r[k]:
+                r.pop(k)
+
+
+def _nested(roots: dict) -> None:
+    """Вложенные корни одного пода (/app у php-fpm и /app/admin у nginx рядом) видят одни и те же
+    файлы: признак остается у вложенного - у него домен сайта."""
+    for a in roots.values():
+        for b in roots.values():
+            pa, pb = a.get("path") or "", b.get("path") or ""
+            if a is b or a.get("where") != b.get("where") or not pb.startswith(pa.rstrip("/") + "/"):
+                continue
+            rel = pb[len(pa.rstrip("/")) + 1:].rstrip("/") + "/"
+            for k in ("php", "edit"):
+                dup = [p for p in a.get(k) or {} if p.startswith(rel) and p[len(rel):] in (b.get(k) or {})]
+                for p in dup:
+                    a[k].pop(p)
+                if k in a and not a[k]:
+                    a.pop(k)
+
+
 def _apply(root: dict, d: dict, ts: float) -> None:
-    new, changed, gone = _rows(d.get("new")), _rows(d.get("changed")), d.get("gone") or []
+    new = [x for x in _rows(d.get("new")) if not generated(x[0])]
+    changed = [x for x in _rows(d.get("changed")) if not generated(x[0])]
+    gone = d.get("gone") or []
     total = int(d.get("n_new") or len(new)) + int(d.get("n_changed") or len(changed))
-    deploy = total >= MASS
+    same: dict[int, int] = {}
+    for _p, t, _s in new + changed:
+        if t > 0:
+            same[t] = same.get(t, 0) + 1
+    deploy = total >= MASS or max(same.values(), default=0) >= BATCH
     if deploy:
         root["deploy"] = {"at": _iso(ts), "n": total}
     since = _iso(ts)
@@ -153,8 +227,9 @@ def _add(root: dict, key: str, p: str, since: str, size: int) -> None:
 def accept(state: dict | None, root: str = "", key: str = "", paths: list[str] | None = None) -> dict:
     """"Это наше": признаки корня (или всех) снимаются, файлы считаются своими."""
     st = json.loads(json.dumps(state or {}))
+    want = set(root.split(",")) if root else set()
     for rk, r in (st.get("roots") or {}).items():
-        if root and rk != root:
+        if want and rk not in want:
             continue
         for k in ("php", "edit"):
             if key and k != key or k not in r:
@@ -199,9 +274,35 @@ def owners(root: dict, sid: int, checks: list[tuple[int, str, set[int]]]) -> lis
     return mine if len(mine) == 1 else []
 
 
+def workload(root: dict) -> str:
+    """Где корень: пусто - на хосте, иначе контейнер или ворклоад пода без хеша (helper 0.2 пишет
+    под с неймспейсом "tech1/backend-7fc48994cb-7kqmt" -> "tech1/backend")."""
+    if not in_container(root):
+        return ""
+    ns, _sep, name = (root.get("where") or "").rpartition("/")
+    return podnames.label(ns, name)
+
+
 def where(srv_name: str, root: dict) -> str:
-    w = root.get("where") or ""
-    return srv_name if w in ("", "host") else f"{srv_name}, {w}"
+    w = workload(root)
+    return f"{srv_name}, {w}" if w else srv_name
+
+
+def groups(roots: dict) -> list[tuple[str, str, list[tuple[str, dict]]]]:
+    """(ворклоад, путь, корни): поды одного ворклоада с одним путем - одна строка."""
+    out: dict[tuple[str, str], list[tuple[str, dict]]] = {}
+    for rk, r in roots.items():
+        out.setdefault((workload(r), r.get("path") or ""), []).append((rk, r))
+    return [(w, p, sorted(items)) for (w, p), items in sorted(out.items(), key=lambda x: (x[0][0] != "", x[0][1], x[0][0]))]
+
+
+def _merged(items: list[tuple[str, dict]], k: str) -> dict[str, dict]:
+    out: dict[str, dict] = {}
+    for _rk, r in items:
+        for p, v in (r.get(k) or {}).items():
+            if p not in out or v.get("since", "") < out[p].get("since", ""):
+                out[p] = v
+    return out
 
 
 def mirror(servers: list[tuple[int, str, dict]], checks: list[tuple[int, str, set[int]]]):
@@ -237,20 +338,22 @@ def problems(state: dict | None) -> list[tuple[int, str, str]]:
     правка - желтым. Привязанные к монитору - в его "Признаках взлома"."""
     out = []
     loose = set((state or {}).get("loose") or [])
-    for rk, r in ((state or {}).get("roots") or {}).items():
-        if rk not in loose:
+    for w, path, items in groups((state or {}).get("roots") or {}):
+        items = [(rk, r) for rk, r in items if rk in loose]
+        if not items:
             continue
-        w = r.get("where") or ""
-        at = "" if w in ("", "host") else f" ({w})"
-        php, edit = sorted(r.get("php") or {}), sorted(r.get("edit") or {})
+        # ключ - ворклоад, а не под: новый под того же деплоймента не дает нового алерта
+        gk = f"{w}:{path}" if w else items[0][0]
+        at = f" ({w})" if w else ""
+        php, edit = sorted(_merged(items, "php")), sorted(_merged(items, "edit"))
         if php:
-            text = f"похоже на взлом: новые php в {r.get('path', '')}{at}: " + tg_fmt.names([_base(p) for p in php])
+            text = f"похоже на взлом: новые php в {path}{at}: " + tg_fmt.names([_base(p) for p in php])
             if edit:
                 text += ", правки вне выкладки: " + tg_fmt.names([_base(p) for p in edit], 2)
-            out.append((2, text, f"php:{rk}:" + ",".join(php)))
+            out.append((2, text, f"php:{gk}:" + ",".join(php)))
         elif edit:
-            out.append((1, f"код изменен вне выкладки в {r.get('path', '')}{at}: "
-                           + tg_fmt.names([_base(p) for p in edit]), f"edit:{rk}:" + ",".join(edit)))
+            out.append((1, f"код изменен вне выкладки в {path}{at}: "
+                           + tg_fmt.names([_base(p) for p in edit]), f"edit:{gk}:" + ",".join(edit)))
     return out
 
 
@@ -262,13 +365,20 @@ def view(state: dict | None, rep: dict, now: datetime) -> dict | None:
     if b is None and not roots:
         return None
     out = []
-    for rk, r in sorted(roots.items(), key=lambda x: (x[1].get("where") != "host", x[1].get("path", ""))):
+    for w, path, items in groups(roots):
+        rs = [r for _rk, r in items]
+        deploys = [r["deploy"] for r in rs if r.get("deploy")]
         out.append({
-            "key": rk, "where": r.get("where", ""), "path": r.get("path", ""), "domains": r.get("domains") or [],
-            "files": r.get("files", 0), "big": bool(r.get("big")), "deploy": r.get("deploy"),
-            "php": [{"p": p, **v} for p, v in sorted((r.get("php") or {}).items())],
-            "edit": [{"p": p, **v} for p, v in sorted((r.get("edit") or {}).items())],
-            "site": rk not in loose,
+            # key - корни через запятую: "это наше" снимает признаки со всех подов строки
+            "key": ",".join(rk for rk, _r in items), "where": w or "host", "path": path,
+            "pods": len(items) if w else 0,
+            "domains": list(dict.fromkeys(d for r in rs for d in r.get("domains") or []))[:20],
+            "files": max(r.get("files", 0) for r in rs), "big": any(r.get("big") for r in rs),
+            "layer": all(r.get("layer") for r in rs),
+            "deploy": max(deploys, key=lambda x: x.get("at", "")) if deploys else None,
+            "php": [{"p": p, **v} for p, v in sorted(_merged(items, "php").items())],
+            "edit": [{"p": p, **v} for p, v in sorted(_merged(items, "edit").items())],
+            "site": any(rk not in loose for rk, _r in items),
         })
     return {"roots": out, "ts": (b or {}).get("ts")}
 

@@ -67,8 +67,11 @@ export function WebFiles({ s, onChanged }: { s: Server; onChanged: () => void })
             <span className="muted small">
               {[
                 r.where && r.where !== 'host' ? r.where : t('на хосте'),
+                (r.pods ?? 0) > 1 ? t('подов: {n}', { n: r.pods ?? 0 }) : '',
                 r.domains.length ? r.domains.slice(0, 3).join(', ') : '',
-                r.big ? t('файлов кода больше {n}, список неполный', { n: r.files }) : t('файлов кода: {n}', { n: r.files }),
+                r.layer
+                  ? t('записано в контейнере файлов кода: {n}', { n: r.files })
+                  : r.big ? t('файлов кода больше {n}, список неполный', { n: r.files }) : t('файлов кода: {n}', { n: r.files }),
                 r.deploy ? t('выкладка {t}: {n} файлов', { t: fmtDateTime(r.deploy.at), n: r.deploy.n }) : '',
                 r.site && (r.php.length || r.edit.length) ? t('признаки и в карточке сайта') : '',
               ].filter(Boolean).join(' · ')}

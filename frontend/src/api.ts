@@ -2708,6 +2708,9 @@ export interface WebRoot {
   domains: string[]
   files: number
   big: boolean
+  // pods - сколько подов ворклоада в строке (0 - хост), layer - список только верхнего слоя контейнера
+  pods?: number
+  layer?: boolean
   deploy?: { at: string; n: number } | null
   php: { p: string; since: string }[]
   edit: { p: string; since: string }[]
