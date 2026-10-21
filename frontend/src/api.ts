@@ -1714,7 +1714,9 @@ export type ServerReport = {
 export type BackupRun = {
   ts: number; add: number; st: number; proc: number; files: number; fnew: number; fchg: number; dur: number
 }
-export type BackupRuns = { v: number; ts: number; unit?: string; runs: BackupRun[] }
+// fail - почему упал последний прогон, строка ошибки restic из журнала (helper backup-setup 0.39)
+export type BackupRuns = { v: number; ts: number; unit?: string; runs: BackupRun[]; fail?: { ts: number; msg: string } }
+export type BackupState = { state: 'ok' | 'partial' | 'none'; reason: string; since: string | null; traces: string }
 // Разбор места (helper diskusage-setup): есть, пока раздел заполняется (от 75%). Helper
 // ничего не удаляет, у находок - команда для человека.
 export type DiskUsageDir = { path: string; bytes: number }
@@ -2237,6 +2239,10 @@ export type Server = {
   docker_since?: Record<string, string> // с какого момента лежит каждый упавший контейнер
   // последний прогон бэкапа добавил в разы больше обычного (считает бэкенд)
   backup_growth?: { level: number; text: string; st: number; usual: number; ts: number } | null
+  // настроен ли бэкап - одно правило бэкенда для главной, "Бэкапов" и формы настройки
+  // (app/backup_state.py): ok - бэкап есть (reason - почему упал прогон), partial - настройка из
+  // панели упала на полпути, none - бэкапа нет; traces - что осталось от старого бэкапа
+  backup_state?: BackupState | null
   pod_names?: Record<string, string> // начало uid пода -> ns/имя (для "pod <uid8>" в cpu_groups)
 }
 
@@ -2392,6 +2398,11 @@ export type FpmPool = {
   slow_ts: number
   tout_last: string
   tout_ts: number
+  crash: number // воркеров упало с SIGSEGV и т.п. за час (у строки kern - php по журналу ядра)
+  crash_d: number
+  crash_last: string
+  crash_ts: number
+  kern?: boolean // не пул, а падения php по журналу ядра ноды
   level?: number
   why?: string
   mute?: { perm?: boolean; until?: string }
@@ -2937,6 +2948,8 @@ export function backupCommand(
     // журнал юнита, всей системы (_all) или ядра (_kernel): helper units-setup 0.4, агент 2.29
     | { action: 'unit_journal'; unit: string; since_min: number; lines: number; prio: 'info' | 'warning' | 'err' }
     | { action: 'dump_remove'; engine: string; container: string }
+    // "Удалить настройку" упавшей настройки бэкапа (агент 2.45, helper backup-setup 0.39)
+    | { action: 'deprovision' }
     | {
         action: 'dump_setup'
         engine: string
@@ -2972,6 +2985,7 @@ export type BackupSetupBody = {
   keep_weekly: number
   keep_monthly: number
   tls: boolean
+  reinstall?: boolean // на ноде уже есть бэкап: переписать его настройку поверх
 }
 export function backupSetup(serverId: number, body: BackupSetupBody): Promise<BackupSetupJob> {
   return api<BackupSetupJob>(`/api/servers/${serverId}/backup/setup`, {

@@ -22,7 +22,7 @@ from sqlalchemy import and_, delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app import alerts, audit, backup, backup_growth, checks as checks_exec, custom_backups, docker_exposure, flaky, heartbeat, settings_store
-from app import backup_verify
+from app import backup_state, backup_verify
 from app import os_support
 from app import request_watch
 from app import panel_errors
@@ -1757,7 +1757,7 @@ def _recovery_detail(key: str, st: dict, ctx: dict) -> str:
     if key == "log_errors":
         return "ошибок в логах снова обычно: за час меньше половины порога"
     if key == "fpm":
-        return "пулы PHP-FPM снова справляются: запросы не ждут воркеров и не убиваются по таймауту"
+        return "PHP-FPM снова в норме: запросы не ждут воркеров и не убиваются по таймауту, воркеры не падают"
     if key == "disk_forecast":
         return "диски больше не грозят заполниться в ближайшие дни: рост замедлился или место освободили"
     if key == "units":
@@ -5269,10 +5269,10 @@ def dump_issues(rep: dict, now: datetime) -> tuple[list[str], str, list[str], in
     пропущенные из-за места, % свободного). Упал сам бэкап - дампы не судим, это backup_failed."""
     bk = rep.get("backup") or {}
     from_systemd = bk.get("ts_source") == "systemd"
-    if bk.get("metric_present") or from_systemd:
-        failed = ((bk.get("service_result") or "").strip() not in ("", "success") if from_systemd
-                  else bk.get("success") == 0)
-        if failed:
+    # метрика без restic и таймера - следы старого бэкапа: дампы тогда сверяем по часам, как без
+    # файлового бэкапа (одно правило с разделом "Бэкапы", app/backup_state.py)
+    if backup_state.backup_alive(bk) and (bk.get("metric_present") or from_systemd):
+        if backup_state.backup_failed(bk):
             return [], "", [], 0
         skipped, free = _dump_skipped(bk)
         return _dump_problems(bk), _DUMP_REASON_BACKUP, skipped, free
@@ -5705,7 +5705,8 @@ def _server_conditions(s: Server, now: datetime,
         out["backup_missing"] = (0, {})
     elif online:
         # свой файловый бэкап ноды (restic/borg/rsync, настроенный без панели) — тоже бэкап
-        ok = (bool(bk.get("configured")) or bool(getattr(s, "backup_not_required", False))
+        # живой бэкап - то же правило, что у раздела "Бэкапы" и формы настройки (app/backup_state.py)
+        ok = (backup_state.backup_alive(bk) or bool(getattr(s, "backup_not_required", False))
               or custom_backups.has_file_backup(s, now))
         if ok:
             out["backup_missing"] = (0, {})
@@ -5725,19 +5726,31 @@ def _server_conditions(s: Server, now: datetime,
             # только ПЕРВОЕ срабатывание.
             already = int(state.get("backup_missing", 0) or 0) >= 1
             lvl = 1 if already or (held >= _BACKUP_MISSING_GRACE and age >= _BACKUP_MISSING_GRACE) else 0
-            out["backup_missing"] = (lvl, {"since": since})
+            # упавшая настройка из панели - причиной: иначе "не настроен" читалось как "никто не
+            # пробовал"
+            err = backup_state.setup_error(s)
+            why = f". Настройка из панели не прошла: {err.get('msg') or 'без причины'}" if err else ""
+            out["backup_missing"] = (lvl, {"since": since, "why": why})
     # Метрика restic — основной источник. Ноды со старой ансибл-раскладкой её не пишут:
     # там агент (1.49+) берёт время прогона из systemd (ts_source=systemd), а успех — из
     # Result юнита. Иначе полностью рабочий бэкап был бы для алертов невидим: протух —
     # никто не узнает.
+    # Метрика без restic и таймера (следы снесенного бэкапа) - не бэкап: она годами говорила
+    # "упал", хотя бэкапа нет, а раздел "Бэкапы" считал ноду "без бэкапа" (app/backup_state.py).
+    # Висящий по ней алерт закроется: условие придет с нулем
     from_systemd = bk.get("ts_source") == "systemd"
-    if online and (bk.get("metric_present") or from_systemd):
-        if from_systemd:
-            res = (bk.get("service_result") or "").strip()
-            # пустой Result бывает пока сервис ни разу не отработал — это не «упал»
-            out["backup_failed"] = (1 if res not in ("", "success") else 0, {})
-        else:
-            out["backup_failed"] = (1 if bk.get("success") == 0 else 0, {})
+    if online and not backup_state.backup_alive(bk):
+        # бэкапа нет (или остались следы): висящие "упал" и "не свежий" закрываем явным нулем,
+        # пропуск ключа оставил бы их висеть вечно
+        if state.get("backup_failed"):
+            out["backup_failed"] = (0, {"why": ""})
+        if state.get("backup_stale"):
+            out["backup_stale"] = (0, {"days": 0})
+    if online and backup_state.backup_alive(bk) and (bk.get("metric_present") or from_systemd):
+        # пустой Result бывает пока сервис ни разу не отработал — это не «упал»
+        reason = backup_state.fail_reason(rep)
+        out["backup_failed"] = (1 if backup_state.backup_failed(bk) else 0,
+                                {"why": f": {reason}" if reason else ""})
         last_ts = bk.get("last_backup_ts") or 0
         if last_ts:
             age = now.timestamp() - last_ts

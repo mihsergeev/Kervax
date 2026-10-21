@@ -1647,15 +1647,15 @@ function FpmList({ server, pools, onChanged, onlyProblems }: {
       <div className="loc-results docker-clist">
         {rows.map((x) => {
           const busy = x.reached_d > 0 || x.sat > 0
-          const tone = x.mute ? 't-up' : x.level ? (x.level >= 2 ? 't-down' : 't-degraded') : busy || x.tout_d > 0 ? 't-soon' : 't-up'
-          const ex = x.tout_last || x.slow_last
-          const exTs = x.tout_last ? x.tout_ts : x.slow_ts
+          const tone = x.mute ? 't-up' : x.level ? (x.level >= 2 ? 't-down' : 't-degraded') : busy || x.tout_d > 0 || x.crash_d > 0 ? 't-soon' : 't-up'
+          const ex = (x.crash_d > 0 && x.crash_last) || x.tout_last || x.slow_last
+          const exTs = x.crash_d > 0 && x.crash_last ? x.crash_ts : x.tout_last ? x.tout_ts : x.slow_ts
           return (
             <div key={x.key} className={`loc-res docker-row ${tone}${x.mute ? ' q-muted' : ''}`}>
               <span className={`lk-dot${x.mute ? '' : DOT[tone]}`} />
               <div className="docker-c-main">
                 <div className="docker-c-name mono">{x.label}</div>
-                <div className="docker-c-img muted small">
+                {!x.kern && <div className="docker-c-img muted small">
                   {subOf(
                     x.listen,
                     `pm = ${x.pm}`,
@@ -1663,10 +1663,11 @@ function FpmList({ server, pools, onChanged, onlyProblems }: {
                     x.conns > 0 && t('соединений сейчас: {n}', { n: x.conns }),
                     x.queue > 0 && t('в очереди: {n}', { n: x.queue }),
                   )}
-                </div>
-                {(busy || x.tout_d > 0 || x.slow_d > 0) && (
+                </div>}
+                {(busy || x.tout_d > 0 || x.slow_d > 0 || x.crash_d > 0) && (
                   <div className="docker-c-img muted small">
                     {subOf(
+                      x.crash_d > 0 && `${t('падения (SIGSEGV и др.)')}: ${dh(x.crash, x.crash_d)}`,
                       x.sat > 0 && t('запросы ждали {n} мин за час', { n: x.sat }),
                       x.reached_d > 0 && `${t('упоры в pm.max_children')}: ${dh(x.reached, x.reached_d)}`,
                       x.tout_d > 0 && `${t('убито по таймауту')}: ${dh(x.tout, x.tout_d)}`,
@@ -2206,7 +2207,7 @@ function ServerServicesModal({ srv, onClose, onChanged, initialSec, sites }: {
             {cur.id === 'fpm' && fpm && (
               <div className="srv-sec">
                 <div className="muted small">
-                  {t('Пулы PHP-FPM: сколько воркеров занято и сколько запросов ждет, упоры в pm.max_children, медленные и убитые по таймауту запросы из лога FPM. Алерт, когда пул не справляется подолгу: запросы ждали воркера от 15 минут из часа, пул упирался в предел от 60 раз за час или по таймауту убито от 20 запросов за час.')}
+                  {t('Пулы PHP-FPM: сколько воркеров занято и сколько запросов ждет, упоры в pm.max_children, медленные и убитые по таймауту запросы и падения воркеров из лога FPM, падения php по журналу ядра. Алерт, когда пул не справляется подолгу: запросы ждали воркера от 15 минут из часа, пул упирался в предел от 60 раз за час, по таймауту убито от 20 запросов за час или воркеры упали от 3 раз за час.')}
                 </div>
                 {fpm.skipped.length > 0 && (
                   <div className="muted small">{t('Конфиг не найден: {w}', { w: fpm.skipped.map((x) => x.where).join(', ') })}</div>

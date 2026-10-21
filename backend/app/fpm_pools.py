@@ -11,14 +11,21 @@ TCP-сокета - ждущие. Лог FPM читается по смещени
 slow", "execution timed out", по пулам, в 10-минутных корзинах за сутки. extras "fpm" -
 {"v": 1, "ts", "pools": [{"where", "pool", "listen", "pm", "max", "children", "conns", "queue",
 "sat", "span", "reached", "reached_d", "slow", "slow_d", "tout", "tout_d", "slowlog",
-"terminate", "status", "slow_last", "slow_ts", "tout_last", "tout_ts"}], "skipped"}. sat -
-минут за последний час, когда запросы ждали свободного воркера; reached/slow/tout - за час,
-*_d - за сутки.
+"terminate", "status", "slow_last", "slow_ts", "tout_last", "tout_ts", "crash", "crash_d",
+"crash_last", "crash_ts"}], "skipped", "kern": {"n", "n_d", "last", "ts"}}. sat - минут за последний
+час, когда запросы ждали свободного воркера; reached/slow/tout/crash - за час, *_d - за сутки.
+
+Падения (helper 0.2): воркер, убитый сигналом сбоя ("child N exited on signal 11 (SIGSEGV)", еще 4,
+6, 7, 8) - по логу FPM у пула; php-процессы, убитые segfault или general protection, - по журналу
+ядра ноды (kern), он видит и поды, у которых лог FPM не нашелся. Воркеры, падающие подряд, - так
+выглядят попытки взлома через ошибки памяти PHP (php2shell, октябрь 2026) или битое расширение.
 
 Беда - когда пул не справляется подолгу, а не всплеск на минуту: запросы ждали не меньше SAT_MIN
 минут из часа, или пул упирался в предел не меньше REACHED_MIN раз за час, или по таймауту убито
-не меньше TOUT_MIN запросов за час. Проблема - от SAT_HOT минут или TOUT_HOT убитых. Медленные
-запросы только показываются. После ушедшего алерта отбой при половине порогов.
+не меньше TOUT_MIN запросов за час, или воркеры упали не меньше CRASH_MIN раз за час. Проблема - от
+SAT_HOT минут, TOUT_HOT убитых или CRASH_HOT падений. Медленные запросы только показываются. После
+ушедшего алерта отбой при половине порогов. Падения по журналу ядра - отдельной строкой "ядро|php"
+с теми же порогами, если их не объясняет уже упавший пул.
 
 Заглушить пул можно насовсем (alert_mutes "fpm:<ключ>") или на время (alert_snoozes с тем же
 ключом); ключ - "<где>|<пул>", например "контейнер shop-php|www".
@@ -36,7 +43,13 @@ SAT_HOT = 45
 REACHED_MIN = 60  # раз за час пул уперся в pm.max_children
 TOUT_MIN = 20  # запросов за час убито по request_terminate_timeout
 TOUT_HOT = 100
+CRASH_MIN = 3  # воркеров за час упало с SIGSEGV и т.п.: одно падение в день бывает от расширения
+CRASH_HOT = 10
 MAX_AGE = 600  # блок старше 10 минут - helper встал, судить не по чему
+KERN_KEY = "ядро|php"
+KERN_LABEL = "PHP на ноде (журнал ядра)"
+CRASH_HINT = ("так выглядят попытки взлома через ошибки памяти PHP (php2shell) или битое расширение:"
+              " обновить PHP, смотреть POST-запросы в эти минуты")
 
 
 def block(rep: dict) -> dict | None:
@@ -77,12 +90,16 @@ def level(p: dict, held: bool = False) -> int:
     """0 - справляется, 1 - предупреждение, 2 - проблема. held - алерт уже ушел, отбой при
     половине порогов"""
     k = 0.5 if held else 1
-    sat, tout = _i(p, "sat"), _i(p, "tout")
-    if sat >= SAT_HOT or tout >= TOUT_HOT:
+    sat, tout, crash = _i(p, "sat"), _i(p, "tout"), _i(p, "crash")
+    if sat >= SAT_HOT or tout >= TOUT_HOT or crash >= CRASH_HOT:
         return 2
-    if sat >= SAT_MIN * k or _i(p, "reached") >= REACHED_MIN * k or tout >= TOUT_MIN * k:
+    if sat >= SAT_MIN * k or _i(p, "reached") >= REACHED_MIN * k or tout >= TOUT_MIN * k or crash >= CRASH_MIN * k:
         return 1
     return 0
+
+
+def _crashing(p: dict, held: bool = False) -> bool:
+    return _i(p, "crash") >= CRASH_MIN * (0.5 if held else 1)
 
 
 def why(p: dict, held: bool = False) -> str:
@@ -97,7 +114,18 @@ def why(p: dict, held: bool = False) -> str:
     n, tt = _i(p, "tout"), _i(p, "terminate")
     if n >= TOUT_MIN * k:
         parts.append(f"запросов, убитых по таймауту{f' {tt} с' if tt else ''}, за час: {n}")
+    if _crashing(p, held):
+        parts.append(f"воркеры падают: {_i(p, 'crash')} за час")
     return ", ".join(parts)
+
+
+def kern(rep: dict) -> dict | None:
+    """Падения php по журналу ядра ноды строкой как у пула: {"crash", "crash_d", "crash_last", "crash_ts"}"""
+    k = (block(rep) or {}).get("kern")
+    if not isinstance(k, dict):
+        return None
+    return {"crash": _i(k, "n"), "crash_d": _i(k, "n_d"), "crash_last": str(k.get("last") or "")[:300],
+            "crash_ts": _i(k, "ts")}
 
 
 def _muted(s: Server, now: datetime) -> set[str]:
@@ -129,25 +157,37 @@ def pools(rep: dict) -> list[dict]:
 def problems(s: Server, now: datetime) -> list[dict]:
     """Пулы, которые не справляются, без заглушенных: {"key", "label", "level", "why", "text"}"""
     held, muted = _held(s), _muted(s, now)
-    out = []
+    out, crash = [], False
     for x in pools(s.last_report or {}):
         k = key(x)
         h = k in held
         lvl = level(x, h)
+        crash = crash or _crashing(x, h)
         if not lvl or k in muted:
             continue
         w = why(x, h)
         text = f"PHP-FPM {label(x)}: {w}"
-        ex = str(x.get("tout_last") or x.get("slow_last") or "").strip()
+        ex = CRASH_HINT if _crashing(x, h) else str(x.get("tout_last") or x.get("slow_last") or "").strip()
         if ex:
             text += f"\n↳ {ex[:200]}"
         out.append({"key": k, "label": label(x), "level": lvl, "why": w, "text": text})
+    # журнал ядра: падения, которые не объясняет пул (лог FPM не нашелся, падает не FPM)
+    kx = kern(s.last_report or {})
+    h = KERN_KEY in held
+    if kx and not crash and KERN_KEY not in muted and level(kx, h):
+        w = _kern_why(kx)
+        out.append({"key": KERN_KEY, "label": KERN_LABEL, "level": level(kx, h), "why": w,
+                    "text": f"{w}\n↳ {CRASH_HINT}"})
     out.sort(key=lambda x: (-x["level"], x["key"]))
     return out
 
 
+def _kern_why(kx: dict) -> str:
+    return f"PHP на ноде падает: {kx['crash']} за час по журналу ядра (segfault)"
+
+
 _INT = ("max", "children", "conns", "queue", "sat", "span", "reached", "reached_d", "slow", "slow_d", "tout",
-        "tout_d", "slowlog", "terminate", "status", "slow_ts", "tout_ts")
+        "tout_d", "crash", "crash_d", "slowlog", "terminate", "status", "slow_ts", "tout_ts", "crash_ts")
 
 
 def view(s: Server, now: datetime) -> dict | None:
@@ -165,16 +205,29 @@ def view(s: Server, now: datetime) -> dict | None:
         k = key(x)
         row = {"key": k, "label": label(x), "pool": str(x.get("pool") or ""), "listen": str(x.get("listen") or ""),
                "pm": str(x.get("pm") or ""), "slow_last": str(x.get("slow_last") or "")[:300],
-               "tout_last": str(x.get("tout_last") or "")[:300]}
+               "tout_last": str(x.get("tout_last") or "")[:300], "crash_last": str(x.get("crash_last") or "")[:300]}
         row.update({f: _i(x, f) for f in _INT})
         lvl = level(x, k in held)
         if lvl:
             row["level"], row["why"] = lvl, why(x, k in held)
+        rows.append(row)
+    # падения по журналу ядра - строкой в конце, когда за сутки были
+    kx = kern(s.last_report or {})
+    if kx and kx["crash_d"] > 0:
+        row = {"key": KERN_KEY, "label": KERN_LABEL, "kern": True, "pool": "", "listen": "", "pm": "",
+               "slow_last": "", "tout_last": ""}
+        row.update({f: _i(kx, f) for f in _INT})
+        row["crash_last"] = kx["crash_last"]
+        lvl = level(kx, KERN_KEY in held)
+        if lvl:
+            row["level"], row["why"] = lvl, _kern_why(kx)
+        rows.append(row)
+    for row in rows:
+        k = row["key"]
         if k in perm:
             row["mute"] = {"perm": True}
         elif k in muted and k in snz:
             row["mute"] = {"until": snz[k]}
-        rows.append(row)
     sk = [{"where": where_text(str(x.get("where") or "")), "why": str(x.get("why") or "")}
           for x in b.get("skipped") or [] if isinstance(x, dict)]
     return {"ts": int(b.get("ts") or 0), "pools": rows, "skipped": sk}

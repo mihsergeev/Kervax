@@ -7200,6 +7200,8 @@ button.tl-tile-off .net-tile-value {
 .net-cards > .hs-optout { opacity: 0.8; margin-top: 0.6rem; }
 .loc-res.hs-nb { flex-wrap: wrap; }
 .hs-nb .nobackup-actions { flex-wrap: wrap; max-width: 100%; margin-left: auto; }
+/* строка ноды, на которую привела ссылка с главной */
+.loc-res.hs-focus { outline: 2px solid var(--accent, #3b82f6); outline-offset: 2px; border-radius: 6px; }
 .hs-tile-act { margin-top: 0.35rem; display: flex; flex-wrap: wrap; align-items: center; gap: 0.3rem; font-size: 0.72rem; }
 .hs-tile-act .restic-update-btn { padding: 3px 9px; font-size: 0.75rem; white-space: normal; max-width: 100%; text-align: left; }
 /* мета репозитория переносится, а не обрезается краем строки (на телефоне резалась на полуслове) */

@@ -10,11 +10,15 @@
 # the pool's port or socket are requests being served plus requests waiting, the queue of the
 # listening TCP socket is the waiting ones. No status page is needed. The FPM log (the container
 # log, or error_log on the host) is read by offset for "reached pm.max_children", "executing too
-# slow" and "execution timed out", per pool, in 10-minute buckets for a day.
+# slow", "execution timed out" and workers killed by a crash signal ("child N exited on signal 11
+# (SIGSEGV)", also 4, 6, 7, 8), per pool, in 10-minute buckets for a day. The kernel journal is
+# read by cursor for php processes killed by a segfault or a general protection fault: the kernel
+# logs them for every container and pod of the node, also where the FPM log is not found. Workers
+# crashing in a row is how an attempt on a memory bug of PHP looks (php2shell, October 2026).
 # Writes /var/lib/kervax/report.d/fpm.json; the agent hands report.d to the panel as is. Read only.
 set -euo pipefail
 
-KERVAX_SETUP_VERSION=0.1  # MAJOR.MINOR; compared component-wise
+KERVAX_SETUP_VERSION=0.2 # MAJOR.MINOR; compared component-wise
 KERVAX_SETUP_ALWAYS=1     # safe on any node: without php-fpm it runs one ps and exits
 
 HELPER_DIR=/lib65/kervax
@@ -32,7 +36,7 @@ install -d -m 0755 "$HELPER_DIR" "$STATE_DIR" "$STATE_DIR/versions" "$STATE_DIR/
 cat > "$HELPER.new" <<'HELPER_EOF'
 #!/usr/bin/env bash
 # PHP-FPM pools -> /var/lib/kervax/report.d/fpm.json. Read only: ps, the FPM config files,
-# /proc/PID/net of each master, the new bytes of its log.
+# /proc/PID/net of each master, the new bytes of its log, the new lines of the kernel journal.
 set -u
 export LC_ALL=C
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
@@ -216,17 +220,48 @@ function msg(l,   q, s) {
   return s }
 '
 
+# -- the kernel journal since the last run: php processes killed by a fault (the kernel prints
+# "php-fpm[PID]: segfault at" and "traps: php-fpm[PID] general protection fault" for any container
+# or pod). Rows: N count | E ts example | C cursor; no cursor - since the last run, or the last
+# 5 minutes on the first one --
+: > "$TMPD/kern"
+if command -v journalctl >/dev/null 2>&1; then
+  kc=$(awk -F'\t' '$1 == "KC" { print $2; exit }' "$STATE")
+  kt=$(awk -F'\t' '$1 == "KT" { print $2 + 0; exit }' "$STATE")
+  case "$kc" in *[!A-Za-z0-9=\;]*) kc="" ;; esac
+  if [ -n "$kc" ]; then set -- "--after-cursor=$kc"
+  elif [ "${kt:-0}" -gt $((NOW - 3600)) ]; then set -- "--since=@$kt"
+  else set -- --since=-5min; fi
+  timeout 30 journalctl -k -q --no-pager -o short-unix --show-cursor "$@" > "$TMPD/kj" 2>/dev/null
+  js=$?
+  awk -v OFS='\t' '
+    /^-- cursor: / { c = substr($0, 12); next }
+    { s = $0; ts = $1 + 0; sub(/^[0-9.]+ +[^ ]+ +kernel: +/, "", s); sub(/^traps: +/, "", s) }
+    s ~ /^(php|lsphp)[A-Za-z0-9._-]*\[[0-9]+\]:? +(segfault at|general protection|trap )/ { n++; last = substr(s, 1, 300); lts = int(ts) }
+    END { print "N", n + 0; if (n) print "E", lts, last; if (c != "") print "C", c }' "$TMPD/kj" > "$TMPD/kern" 2>/dev/null || : > "$TMPD/kern"
+  # nothing new prints no cursor: keep the old one; a cursor the journal no longer has is an error
+  # and is dropped, the next run reads since this one
+  grep -q '^C' "$TMPD/kern" || { [ "$js" = 0 ] && [ -n "$kc" ] && printf 'C\t%s\n' "$kc" >> "$TMPD/kern"; }
+fi
+
 # -- together: pools, children, connections, log counts and history. State rows:
 # O file inode offset | F key first-seen | S key saturated-minutes | B key reached slow timeout
-# (per 10-minute bucket "b:n,b:n") | X key kind ts example --
-awk -F'\t' -v OFS='\t' -v now="$NOW" -v cap="$CAP" -v budget="$BUDGET" -v ns="$TMPD/state" -v jout="$TMPD/rows" "$AWKFN"'
+# crash (per 10-minute bucket "b:n,b:n") | X key kind ts example | KB kernel crashes per bucket |
+# KX ts example | KC journal cursor | KT time of the run --
+awk -F'\t' -v OFS='\t' -v now="$NOW" -v cap="$CAP" -v budget="$BUDGET" -v ns="$TMPD/state" -v jout="$TMPD/rows" -v kout="$TMPD/kern.json" "$AWKFN"'
   BEGIN { nowm = int(now / 60); nowb = int(now / 600) }
   t == "state" {
     if ($1 == "O") { ino[$2] = $3; off[$2] = $4 }
     else if ($1 == "F") first[$2] = $3
     else if ($1 == "S") sat[$2] = $3
-    else if ($1 == "B") { br[$2] = $3; bs[$2] = $4; bt[$2] = $5 }
+    else if ($1 == "B") { br[$2] = $3; bs[$2] = $4; bt[$2] = $5; bc[$2] = $6 }
     else if ($1 == "X") { xts[$2 SUBSEP $3] = $4; xtx[$2 SUBSEP $3] = $5 }
+    else if ($1 == "KB") kb = $2
+    else if ($1 == "KX") { kxt = $2 + 0; kxx = $3 }
+    next }
+  t == "kern" {
+    kread = 1
+    if ($1 == "N") kn = $2 + 0; else if ($1 == "E") { kxt = $2 + 0; kxx = $3 } else if ($1 == "C") kcur = $2
     next }
   t == "kids" { kid[$1 SUBSEP $2] = $3; next }
   t == "pools" && $1 == "P" {
@@ -248,7 +283,7 @@ awk -F'\t' -v OFS='\t' -v now="$NOW" -v cap="$CAP" -v budget="$BUDGET" -v ns="$T
     if (used >= budget) { nf[f] = o; next }  # read next time
     rd = n > cap ? cap : n; from = size - rd
     cmd = "tail -c +" sprintf("%.0f", from + 1) " \047" ff "\047 2>/dev/null | head -c " sprintf("%.0f", rd) \
-      " | grep -aF -e \047reached pm.max_children\047 -e \047executing too slow\047 -e \047execution timed out\047"
+      " | grep -aF -e \047reached pm.max_children\047 -e \047executing too slow\047 -e \047execution timed out\047 -e \047exited on signal\047"
     while ((cmd | getline l) > 0) {
       s = msg(l)
       if (!match(s, /\[pool [^]]+\]/)) continue
@@ -259,6 +294,11 @@ awk -F'\t' -v OFS='\t' -v now="$NOW" -v cap="$CAP" -v budget="$BUDGET" -v ns="$T
         if (kind == "slow") nsl[k]++; else nto[k]++
         x = s; if (match(x, /script \047/)) x = substr(x, RSTART); sub(/, (logging|terminating)$/, "", x)
         xts[k SUBSEP kind] = now; xtx[k SUBSEP kind] = mask(x)
+      } else if (match(s, /exited on signal (4|6|7|8|11) /)) {
+        # a crash, not a kill: 9 and 15 are the terminate timeout, OOM and reloads
+        ncr[k]++
+        x = s; if (match(x, /child [0-9]+ exited/)) x = substr(x, RSTART)
+        xts[k SUBSEP "crash"] = now; xtx[k SUBSEP "crash"] = mask(x)
       }
     }
     close(cmd); used += rd
@@ -291,31 +331,40 @@ awk -F'\t' -v OFS='\t' -v now="$NOW" -v cap="$CAP" -v budget="$BUDGET" -v ns="$T
       for (j = 1; j <= n; j++) if (a[j] + 0 > nowm - 60) { s = s (s == "" ? "" : ",") a[j]; if (a[j] + 0 == nowm) had = 1 }
       if (satn > 0 && !had) s = s (s == "" ? "" : ",") nowm
       sm = (s == "" ? 0 : split(s, a, ","))
-      r = merge(br[k], nr[k]); sl = merge(bs[k], nsl[k]); to = merge(bt[k], nto[k])
+      r = merge(br[k], nr[k]); sl = merge(bs[k], nsl[k]); to = merge(bt[k], nto[k]); cr = merge(bc[k], ncr[k])
       printf "F\t%s\t%d\n", k, first[k] > ns
       if (s != "") printf "S\t%s\t%s\n", k, s > ns
-      if (r != "" || sl != "" || to != "") printf "B\t%s\t%s\t%s\t%s\n", k, r, sl, to > ns
+      if (r != "" || sl != "" || to != "" || cr != "") printf "B\t%s\t%s\t%s\t%s\t%s\n", k, r, sl, to, cr > ns
       ex = ""
       for (kind in kk) delete kk[kind]
-      kk["slow"] = 1; kk["tout"] = 1
+      kk["slow"] = 1; kk["tout"] = 1; kk["crash"] = 1
       for (kind in kk) if ((k SUBSEP kind) in xts && xts[k SUBSEP kind] > now - 86400) {
         printf "X\t%s\t%s\t%d\t%s\n", k, kind, xts[k SUBSEP kind], xtx[k SUBSEP kind] > ns
         ex = ex sprintf(",\"%s_last\":\"%s\",\"%s_ts\":%d", kind, e(xtx[k SUBSEP kind]), kind, xts[k SUBSEP kind]) }
       span = now - first[k]; if (span > 86400) span = 86400
-      rows = rows (rows == "" ? "" : ",") sprintf("{\"where\":\"%s\",\"pool\":\"%s\",\"listen\":\"%s\",\"pm\":\"%s\",\"max\":%d,\"children\":%d,\"conns\":%d,\"queue\":%d,\"sat\":%d,\"span\":%d,\"reached\":%d,\"reached_d\":%d,\"slow\":%d,\"slow_d\":%d,\"tout\":%d,\"tout_d\":%d,\"slowlog\":%d,\"terminate\":%d,\"status\":%d%s}",
+      rows = rows (rows == "" ? "" : ",") sprintf("{\"where\":\"%s\",\"pool\":\"%s\",\"listen\":\"%s\",\"pm\":\"%s\",\"max\":%d,\"children\":%d,\"conns\":%d,\"queue\":%d,\"sat\":%d,\"span\":%d,\"reached\":%d,\"reached_d\":%d,\"slow\":%d,\"slow_d\":%d,\"tout\":%d,\"tout_d\":%d,\"crash\":%d,\"crash_d\":%d,\"slowlog\":%d,\"terminate\":%d,\"status\":%d%s}",
         e(pw[k]), e(pn[k]), e(pl[k]), e(ppm[k]), pmx[k], ch, ce1, cq1, sm, span,
         sum(r, nowb - 6), sum(r, nowb - 144), sum(sl, nowb - 6), sum(sl, nowb - 144), sum(to, nowb - 6), sum(to, nowb - 144),
-        psl[k], ptt[k], pst[k], ex)
+        sum(cr, nowb - 6), sum(cr, nowb - 144), psl[k], ptt[k], pst[k], ex)
     }
     printf "%s", rows > jout
-  }' t=state "$STATE" t=kids "$TMPD/kids" t=pools "$TMPD/pools" t=conn "$TMPD/conn" t=lstat "$TMPD/lstat" || exit 0
+    if (kread) {
+      kbs = merge(kb, kn); if (kxt <= now - 86400) kxx = ""
+      if (kbs != "") printf "KB\t%s\n", kbs > ns
+      if (kxx != "") printf "KX\t%d\t%s\n", kxt, kxx > ns
+      if (kcur != "") printf "KC\t%s\n", kcur > ns
+      printf "KT\t%d\n", now > ns
+      printf ",\"kern\":{\"n\":%d,\"n_d\":%d,\"last\":\"%s\",\"ts\":%d}", sum(kbs, nowb - 6), sum(kbs, nowb - 144),
+        e(kxx), (kxx == "" ? 0 : kxt) > kout
+    }
+  }' t=state "$STATE" t=kids "$TMPD/kids" t=pools "$TMPD/pools" t=conn "$TMPD/conn" t=lstat "$TMPD/lstat" t=kern "$TMPD/kern" || exit 0
 mv -f "$TMPD/state" "$STATE" 2>/dev/null || : > "$STATE"
 
 skip=$(sort -u "$TMPD/skip" | head -50 | awk -F'\t' '
   function e(s,   _jp, _jn, _ji) { gsub(/[[:cntrl:]]/, "", s); _jn = split(s, _jp, "\\"); s = _jp[1]; for (_ji = 2; _ji <= _jn; _ji++) s = s "\\\\" _jp[_ji]; gsub(/"/, "\\\"", s); return s }
   { printf "%s{\"where\":\"%s\",\"why\":\"%s\"}", (NR > 1 ? "," : ""), e($1), e($2) }')
 mkdir -p "${OUT%/*}"
-printf '{"v":1,"ts":%s,"pools":[%s],"skipped":[%s]}\n' "$NOW" "$(cat "$TMPD/rows" 2>/dev/null)" "$skip" > "$OUT.tmp.$$"
+printf '{"v":1,"ts":%s,"pools":[%s],"skipped":[%s]%s}\n' "$NOW" "$(cat "$TMPD/rows" 2>/dev/null)" "$skip" "$(cat "$TMPD/kern.json" 2>/dev/null)" > "$OUT.tmp.$$"
 chmod 0644 "$OUT.tmp.$$"
 mv -f "$OUT.tmp.$$" "$OUT"
 HELPER_EOF

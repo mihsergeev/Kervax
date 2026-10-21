@@ -97,7 +97,13 @@ AGENT_USER=kervax
 #       MySQL 8 from Ubuntu refuses root without a password, so enabling the dump there always
 #       failed (db-a). The probe runs before anything is written: a failed try leaves no dump
 #       directory and no drop-in, and a working dump keeps its settings when a change fails
-KERVAX_SETUP_VERSION=0.38  # MAJOR.MINOR; compared component-wise (0.13 > 0.2!)
+# 0.39: "remove the setup" (deprovision) takes off the client what the panel's "set up backup"
+#       put there - units, the env file with the password, the script, the panel's restic and its
+#       cache, the metrics - so a half-finished setup can be cleared instead of left behind. The
+#       repository on the backup server is not touched. A failed backup run says why: the restic
+#       error from the journal of that run goes into report.d/backup-runs.json (fail), and the
+#       panel shows it next to "the backup failed" instead of the bare fact
+KERVAX_SETUP_VERSION=0.39  # MAJOR.MINOR; compared component-wise (0.13 > 0.2!)
 KERVAX_SETUP_ALWAYS=1  # safe on any node: installs only its own helper and spool and does not
                        # touch the backup configuration until the panel sends a command
 install -d -m 0755 "$HELPER_DIR" "$STATE_DIR" /var/lib/kervax/versions
@@ -1383,6 +1389,35 @@ UNIT
   echo "OK provisioned ($mode, $sched)"
 }
 
+# cmd_deprovision takes off the client exactly what cmd_provision puts there (the panel's "remove
+# the setup" button for a half-finished setup or the traces of an old backup). The repository on
+# the backup server stays as it is. Enabled dumps are kept: the refresh moves them to their own
+# timer once the backup service is gone. The panel refuses this for a working backup.
+cmd_deprovision() {
+  local f removed=""
+  systemctl disable --now "$PROV_TIMER" >/dev/null 2>&1 || true
+  systemctl stop "$PROV_SERVICE" >/dev/null 2>&1 || true
+  for f in "/etc/systemd/system/$PROV_TIMER" "/etc/systemd/system/$PROV_SERVICE"; do
+    [ -e "$f" ] && { rm -f "$f"; removed="$removed $(basename "$f")"; }
+  done
+  [ -d "/etc/systemd/system/$PROV_SERVICE.d" ] && { rm -rf "/etc/systemd/system/$PROV_SERVICE.d"; removed="$removed $PROV_SERVICE.d"; }
+  systemctl daemon-reload
+  systemctl reset-failed "$PROV_SERVICE" >/dev/null 2>&1 || true
+  for f in "$PROV_ENV" "$PROV_SCRIPT"; do
+    [ -e "$f" ] && { rm -f "$f"; removed="$removed $f"; }
+  done
+  [ -d "$RESTIC_BIN_DIR" ] && { rm -rf "$RESTIC_BIN_DIR"; removed="$removed $RESTIC_BIN_DIR"; }
+  [ -d "$PROV_HOME" ] && { rm -rf "$PROV_HOME"; removed="$removed $PROV_HOME"; }
+  # metrics of this layout: ours and rk.prom of the ansible role it replaced. Only files that are
+  # really restic backup metrics - other exporters' files in the same directory stay
+  for f in "$PROV_METRICS_DIR/$PROV_METRICS_FILE" "$PROV_METRICS_DIR/rk.prom"; do
+    [ -f "$f" ] && grep -q '^restic_last_backup_' "$f" 2>/dev/null && { rm -f "$f"; removed="$removed $f"; }
+  done
+  rm -f "$RUNS_JSON" "$RUNS_JSON.inv"
+  refresh_config
+  echo "OK the backup setup is removed from the node:${removed:- nothing was there} (the repository on the backup server is kept)"
+}
+
 # cmd_adopt migrates an OLD (ansible) backup layout under the panel. It reads the URL and
 # password, the excludes/mode and the schedule from the existing systemd units and switches them
 # to the panel runner (which writes restic-backup.prom, so the panel sees metrics and can manage
@@ -1493,6 +1528,7 @@ cmd_process_spool() {
       get_creds)    if out="$(cmd_get_creds 2>&1)"; then ok=true; fi ;;
       dump_setup)   if out="$(cmd_dump_setup "$engine" "$container" 2>&1)"; then ok=true; fi ;;
       dump_remove)  if out="$(cmd_dump_remove "$engine" "$container" 2>&1)"; then ok=true; fi ;;
+      deprovision)  if out="$(cmd_deprovision 2>&1)"; then ok=true; fi ;;
       *) out="unknown action" ;;
     esac
     printf 'ok=%s\noutput=%s\n' "$ok" "$(printf '%s' "$out" | tr '\n' ' ')" > "$RES_DIR/$id.res.tmp"
@@ -2187,7 +2223,8 @@ RUNS_DAYS=45    # how far back the journal is read for the history
 # A run is recorded at its "processed N files, X in M:SS" line, with the "Files:" and "Added to the
 # repository" lines that come before it. mawk-safe: no gawk extensions, big numbers through %.0f.
 backup_runs_parse() {
-  awk -v now="$(date +%s)" -v unit="$1" -v max="$RUNS_MAX" '
+  # the failure goes through the environment: awk -v would eat the backslashes of its JSON escapes
+  KV_FAIL="${2:-}" awk -v now="$(date +%s)" -v unit="$1" -v max="$RUNS_MAX" '
     function bytes(v, u,   m) {
       m = 1
       if (u == "KiB") m = 1024
@@ -2221,10 +2258,26 @@ backup_runs_parse() {
       have = 0; fnew = 0; fchg = 0; next
     }
     END {
-      printf "{\"v\":1,\"ts\":%s,\"unit\":\"%s\",\"runs\":[", now, unit
+      printf "{\"v\":1,\"ts\":%s,\"unit\":\"%s\",%s\"runs\":[", now, unit, (ENVIRON["KV_FAIL"] != "" ? "\"fail\":" ENVIRON["KV_FAIL"] "," : "")
       for (i = (n > max ? n - max + 1 : 1); i <= n; i++) printf "%s%s", (k++ ? "," : ""), R[i]
       print "]}"
     }'
+}
+
+# Why the last run of the backup service failed: {"ts":<end>,"msg":"<restic error>"} or nothing.
+# The first restic error line of that run (Fatal: ... / unable to ...), credentials in a repository
+# URL masked, control characters dropped - it goes to the panel as is.
+backup_last_fail() {
+  local svc="$1" inv end msg
+  [ "$(systemctl show -p Result --value "$svc" 2>/dev/null)" = success ] && return 0
+  inv="$(systemctl show -p InvocationID --value "$svc" 2>/dev/null)"
+  [ -n "$inv" ] || return 0
+  msg="$(journalctl -u "$svc" _SYSTEMD_INVOCATION_ID="$inv" -o cat -q --no-pager 2>/dev/null \
+    | grep -a -E '^Fatal: |unable to |[Ee]rror: |wrong password|connection refused|no such host|certificate' \
+    | head -n 2 | tr '\n\t' '  ' | tr -d '\000-\037' | sed -E 's#//[^/@ ]*@#//***@#g; s/ +$//' | cut -c1-300)"
+  [ -n "$msg" ] || msg="the backup service ended with $(systemctl show -p Result --value "$svc" 2>/dev/null)"
+  end="$(date -d "$(systemctl show -p ExecMainExitTimestamp --value "$svc" 2>/dev/null)" +%s 2>/dev/null || date +%s)"
+  printf '{"ts":%s,"msg":"%s"}' "$end" "$(json_escape "$msg")"
 }
 
 cmd_backup_runs() {
@@ -2234,7 +2287,7 @@ cmd_backup_runs() {
   svc="${timer%.timer}.service"
   journalctl -u "$svc" --since "-${RUNS_DAYS} days" -o short-unix -q --no-pager 2>/dev/null \
     | grep -a -E ': (Files: |Added to the repository: |processed [0-9]+ files, )' \
-    | backup_runs_parse "$svc"
+    | backup_runs_parse "$svc" "$(backup_last_fail "$svc")"
 }
 
 # Rebuilt once per finished run of the backup service (its InvocationID changes), not every minute:
@@ -2474,9 +2527,10 @@ case "${1:-}" in
   get-creds)     cmd_get_creds ;;
   dump-setup)    shift; cmd_dump_setup "$@" ;;
   dump-remove)   shift; cmd_dump_remove "$@" ;;
+  deprovision)   cmd_deprovision ;;
   dump-status)   cmd_dump_status ;;
   process-spool) cmd_process_spool ;;
-  *) echo "usage: $0 {get-config|custom-scan|backup-runs|set-paths <mode> <path...>|set-schedule <HH:MM>|run-now|provision <url> <repopass> <mode> <HH:MM> <delay> <ver> <cacert_b64|-> <path...>|dump-setup <engine> [container]|dump-remove <engine>|dump-status|process-spool}" >&2; exit 2 ;;
+  *) echo "usage: $0 {get-config|custom-scan|backup-runs|set-paths <mode> <path...>|set-schedule <HH:MM>|run-now|provision <url> <repopass> <mode> <HH:MM> <delay> <ver> <cacert_b64|-> <path...>|dump-setup <engine> [container]|dump-remove <engine>|deprovision|dump-status|process-spool}" >&2; exit 2 ;;
 esac
 HELPER_EOF
 chmod 0755 "$HELPER.new" && mv -f "$HELPER.new" "$HELPER"

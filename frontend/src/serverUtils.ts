@@ -269,7 +269,8 @@ export function hasOwnFileBackup(s: Server): boolean {
 export function backupWindowNote(s: Server): string | null {
   if (s.backup_anytime) return null
   const b = s.last_report?.backup
-  if (!b) return null
+  // метрика без restic и таймера - следы старого бэкапа, ее время к окну отношения не имеет
+  if (!b || !backupAlive(b)) return null
   const deadline = s.backup_deadline_hour ?? 8
   const started = b.started_ts ?? 0
   const ended = b.last_backup_ts ?? 0
