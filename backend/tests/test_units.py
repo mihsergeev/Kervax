@@ -119,10 +119,9 @@ async def test_units_alert_lifecycle(tmp_path, monkeypatch):
     await tick([CERTBOT])
     assert len(sent) == 4 and sent[3] == "✅ node: упавших юнитов нет"
     await engine.dispose()
-    # в чате первым - то, из-за чего сообщение: новый и худший nginx, а не уже объявленный certbot.
-    # Сейчас приходит "certbot.service (код 1), nginx.service (убит сигналом KILL)"
-    assert sent[1].split("\n")[1:] == ["<b>Упали юниты</b>",
-                                       "nginx.service (убит сигналом KILL), certbot.service (код 1)"], sent[1]
+    # в чате только то, из-за чего сообщение: новый nginx. Об уже объявленном certbot сказали в
+    # первом сообщении, повтор в каждом следующем мешал понять, что нового
+    assert sent[1].split("\n")[1:] == ["<b>Упал nginx.service</b>", "убит сигналом KILL"], sent[1]
 
 
 async def test_unit_fix_command(client, auth_headers):
