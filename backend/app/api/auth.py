@@ -7,7 +7,7 @@ import httpx
 from fastapi import APIRouter, HTTPException, Request, status
 from sqlalchemy import and_, func, or_, select
 
-from app import alerts, audit, client_ip, impersonate, ratelimit, settings_store, totp
+from app import alerts, audit, client_ip, impersonate, ratelimit, settings_store, tg_fmt, totp
 from app.config import get_settings
 from app.deps import CurrentUser, SessionDep
 from app.models import AuditLog, LoginBan, User
@@ -59,16 +59,15 @@ async def _lockout_alert(session, settings, ban: LoginBan) -> None:
         b.alerted = True
     await session.commit()
     minutes = round((ban.until - ban.created_at).total_seconds() / 60)
-    text = f"🚨 Kervax: {ban.failures} неудачных входов за 15 минут с адреса {ban.key}"
-    if ban.logins:
-        text += f" (логины: {ban.logins})"
-    text += f" - адрес заблокирован {ban_words(minutes)}."
+    # Коротко (формат A, app/tg_fmt.py): кто подбирает и что с ним сделали. Сколько попыток,
+    # кого еще заблокировали за сутки, белый список - в окне Пользователи, раздел Защита входа
+    lines = ["🚨🔐 Kervax", "Подбирают пароль к панели", f"{ban.key} заблокирован {ban_words(minutes)}"]
     keys = list(dict.fromkeys(b.key for b in quiet if b.key != ban.key))
     if keys:
-        text += f"\nЗа сутки заблокированы еще: {', '.join(keys[:5])}"
-        text += f" и еще {len(keys) - 5}." if len(keys) > 5 else "."
-    text += "\nБелый список и разблокировка - в окне Пользователи, раздел Защита входа."
-    await alerts.security_alert(session, settings, text)
+        lines.append(f"За сутки еще: {tg_fmt.names(keys)}")
+    elif ban.logins:
+        lines.append(f"Логины: {ban.logins}")
+    await alerts.security_alert(session, settings, "\n".join(lines))
 
 
 async def _record_failure(
@@ -150,8 +149,7 @@ async def change_password(
     settings = get_settings()
     await alerts.security_alert(
         session, settings,
-        f"🔑 Kervax: пароль администратора «{user.username}» изменён "
-        f"(IP {_client_key(request)}).",
+        f"⚠️🔑 Kervax\nСменили пароль {user.username}\nС адреса {_client_key(request)}",
     )
     token = create_access_token(
         user.username, settings.jwt_secret, settings.jwt_ttl_minutes,

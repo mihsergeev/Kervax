@@ -145,7 +145,12 @@ def test_merge_storm_same_failure_only():
     assert len(out) == 2 and out[0] == other
     m = out[1]
     assert m.recovery and m.target == "web-a, web-b, web-c, web-d" and len(m.parts) == 4
-    assert str(m).startswith("✅ <b>4 сервера</b> — упавших юнитов больше нет\n↳ ")
+    # отбой пачкой: одна строка и серверы ссылками
+    assert str(m).startswith('✅ <b>4 сервера</b>: упавших юнитов больше нет\n<a href="https://kx/web-a">web-a</a>, ')
+    assert "↳" not in m and "—" not in m
     many = [srv("units", f"web-{i}", "упал x.service", sid=i) for i in range(35)]
     m = alerts.merge_storm(many)[0]
-    assert "<b>35 серверов</b>" in m and m.endswith("и еще 5") and m.ref.startswith("srv:0,1,2")
+    # в чат - что случилось и первые серверы, остальные числом; в полном тексте - список длиннее
+    assert str(m).startswith("⚠️⚙️ <b>35 серверов</b>\n<b>Упал x.service</b>\n")
+    assert m.endswith("и еще 29") and m.ref.startswith("srv:0,1,2")
+    assert alerts.full_text(m).count('<a href="https://kx/web-') == 30

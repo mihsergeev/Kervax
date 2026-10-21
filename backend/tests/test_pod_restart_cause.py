@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import select
 
 from app import collector, restarts
+from app.alerts import full_text
 from app.models import Server
 
 NOW = datetime(2026, 10, 20, 12, 0, tzinfo=timezone.utc)
@@ -212,14 +213,16 @@ async def test_alert_has_the_cause_and_leads_to_restarts(tmp_path, monkeypatch):
 
     monkeypatch.setattr("app.alerts.send_alert", fake_send)
     await collector.evaluate_servers(factory, Settings(alert_webhook="http://hook", panel_url="https://kervax.test"), now)
-    hits = [m for m in sent if m.startswith("🔄☸️")]
+    hits = [m for m in sent if getattr(m, "kind", "") == "kube_restarts"]
     assert len(hits) == 1, sent
     msg = hits[0]
     assert "ktab=restarts" in msg
-    # каждый под своей строкой и с причиной
+    # в истории каждый под своей строкой и с причиной
     assert ("под default/app-a-6b8b56c769-f4k8m перезапускался 3 раза за сутки, последний 2 мин назад: "
             "OOMKilled при лимите 256Mi\nпод default/app-b-5d88689b5d-rg5d7 перезапускался 5 раз за сутки, "
-            "последний 7 мин назад: exit 1: fatal: db is gone") in msg
+            "последний 7 мин назад: exit 1: fatal: db is gone") in full_text(msg)
+    # в чате: под по ворклоаду без хеша и причина по-человечески, второй - именем
+    assert msg.split("\n")[1:] == ["<b>Поды перезапускаются</b>", "app-a: OOM при лимите 256мб", "Еще: app-b"], msg
     async with factory() as s:
         srv = (await s.execute(select(Server))).scalars().one()
         assert srv.alert_state["kube_restarts_sig"] == ["pod:default/app-a", "pod:default/app-b"]
@@ -307,7 +310,7 @@ async def test_recovery_waits_half_an_hour(tmp_path, monkeypatch):
     assert len(await tick(21, False)) == 1
     assert len(await tick(50, False)) == 1          # 29 минут без перезапусков
     msgs = await tick(52, False)
-    assert len(msgs) == 2 and "поды восстановлены" in msgs[1]
+    assert len(msgs) == 2 and "частых перезапусков нет" in msgs[1]
     async with factory() as s:
         srv = (await s.execute(select(Server))).scalars().one()
         assert not srv.alert_state.get("kube_restarts") and not srv.alert_state.get("kube_restarts_hold")

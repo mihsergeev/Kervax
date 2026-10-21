@@ -7,6 +7,7 @@ import httpx
 from sqlalchemy import select, update
 
 from app import request_watch as rw
+from app.alerts import full_text
 from app.config import Settings
 from app.models import RequestStat, Server
 
@@ -118,9 +119,13 @@ async def test_alert_names_the_server_and_explains_then_recovers(client: httpx.A
     settings = Settings(alert_webhook="http://hook")
     await rw.check(f, settings, now)
     assert len(sent) == 1 and sent[0].kind == "bogus_requests" and not sent[0].recovery
+    # в чат - кто шлет и куда чаще всего, сколько и что делать - в полном тексте (история, панель)
     text = str(sent[0])
-    assert "с сервера web-a (203.0.113.5)" in text and "75 отказов за 10 минут (401 - 75)" in text
-    assert "агент шлет неверный токен" in text and "—" not in text
+    assert "<b>Левые запросы в панель</b>" in text and "с сервера web-a (203.0.113.5)" in text
+    assert "/api/agent/commands" in text and "75 отказов" not in text and "—" not in text
+    full = full_text(sent[0])
+    assert "с сервера web-a (203.0.113.5)" in full and "75 отказов за 10 минут (401 - 75)" in full
+    assert "агент шлет неверный токен" in full and "—" not in full
     # второй тик - без повтора
     await rw.check(f, settings, now + timedelta(minutes=1))
     assert len(sent) == 1
@@ -160,8 +165,11 @@ async def test_flood_from_unknown_address_and_nat_threshold(client: httpx.AsyncC
     await rw.check(f, Settings(alert_webhook="http://hook"), now)
     assert len(sent) == 1
     text = str(sent[0])
-    assert "с адреса 198.51.100.20 (не сервер панели)" in text
-    assert "700 запросов за 10 минут, обычно около 150" in text and "несколько его копий" in text
+    assert "<b>Левые запросы в панель</b>" in text and "с адреса 198.51.100.20 (не сервер панели)" in text
+    assert "обычно около" not in text
+    full = full_text(sent[0])
+    assert "с адреса 198.51.100.20 (не сервер панели)" in full
+    assert "700 запросов за 10 минут, обычно около 150" in full and "несколько его копий" in full
 
 
 async def test_muted_server_gets_no_alert(client: httpx.AsyncClient, monkeypatch):

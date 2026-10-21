@@ -28,7 +28,7 @@ from __future__ import annotations
 import re
 import shlex
 
-from app import compose_cmd, docker_exposure
+from app import compose_cmd, docker_exposure, tg_fmt
 from app.models import Server
 
 MUTE_PREFIX = "dockrisk:"
@@ -152,9 +152,12 @@ def view(srv: Server, fix: bool = False) -> list[dict]:
         ok = allowed(name, str(c.get("image") or ""))
         fl = [f for f in flags(c, new) if f not in ok and not (f == SOCK and name in edge)]
         if fl:
+            # svc - сервис compose (агент 2.41): короче имени контейнера, по нему алерт в чате
+            cp = c.get("compose") if isinstance(c.get("compose"), dict) else {}
             out.append({"name": name, "image": str(c.get("image") or ""), "flags": fl,
                         "caps": [str(x) for x in c.get("caps") or []] if CAPS in fl else [],
-                        "text": describe(c, fl), "muted": MUTE_PREFIX + name in mutes})
+                        "text": describe(c, fl), "muted": MUTE_PREFIX + name in mutes,
+                        "svc": str(cp.get("service") or "")})
             cs[name] = c
     if fix:
         live = [x for x in out if not x["muted"]]
@@ -179,6 +182,46 @@ def text(items: list[dict]) -> str:
     names = ", ".join(f"{i['name']} ({i['text']})" for i in items[:3])
     more = f" и еще {len(items) - 3}" if len(items) > 3 else ""
     return f"у контейнеров ключи от хоста: {names}{more} - взлом приложения в них даст root на сервере"
+
+
+_NUM_TAIL = re.compile(r"^(.*?)[-_](\d+)$")
+
+
+def _series(labels: list[str]) -> list[str]:
+    """Имена, которые отличаются только номером в конце, - одной записью:
+    teamcity-agent-1, teamcity-agent-2 -> "teamcity-agent 1, 2". Порядок - по первому из группы."""
+    groups: dict[str, list[str]] = {}
+    for lb in labels:
+        m = _NUM_TAIL.match(lb)
+        groups.setdefault(m.group(1) if m else lb, []).append(lb)
+    out = []
+    for base, lbs in groups.items():
+        if len(lbs) > 1:
+            nums = sorted({_NUM_TAIL.match(x).group(2) for x in lbs}, key=int)
+            out.append(f"{base} {', '.join(nums)}")
+        else:
+            out.append(lbs[0])
+    return out
+
+
+def tg_short(items: list[dict]) -> tuple[str, list[str]] | None:
+    """Алерт docker_risk (вход - advice()): "Контейнеры с root на хосте", "teamcity-agent 1, 2, 3
+    (privileged)". Имя - сервис compose, если он есть и не повторяется, иначе имя контейнера;
+    контейнеры с одними ключами - одной записью."""
+    if not items:
+        return None
+    svcs = [i.get("svc") or "" for i in items]
+    label = {id(i): (s if s and svcs.count(s) == 1 else i["name"]) for i, s in zip(items, svcs)}
+    by: dict[str, list[str]] = {}
+    for i in items:
+        by.setdefault(i.get("text") or "", []).append(label[id(i)])
+    groups = list(by.items())
+    fact = ", ".join(tg_fmt.names(_series(lbs)) + (f" ({t})" if t else "") for t, lbs in groups[:2])
+    rest = sum(len(lbs) for _t, lbs in groups[2:])
+    if rest:
+        fact += f" и еще {rest}"
+    what = "Контейнер с root на хосте" if len(items) == 1 else "Контейнеры с root на хосте"
+    return what, [fact]
 
 
 # CI-агенты: privileged у них ради docker внутри сборок (DinD), а сборкам он нужен не всегда

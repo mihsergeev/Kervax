@@ -164,5 +164,9 @@ async def test_lifted_by_collector(tmp_path, monkeypatch):
 
     # мьюта больше нет: новая поломка видна
     await tick(_block(NEW, active=2))
-    assert len(sent) == 2 and "RAID md1" in sent[1]
+    from app.alerts import full_text
+
+    assert len(sent) == 2 and "RAID md1" in full_text(sent[1])
+    # и в чате названо, что сломалось
+    assert "<b></b>" not in sent[1] and "RAID md1" in sent[1], sent[1]
     await engine.dispose()

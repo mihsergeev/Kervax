@@ -117,9 +117,12 @@ async def test_pressure_alert_lifecycle(tmp_path, monkeypatch):
     await tick(10)
     assert sent == []
     await tick(6)
-    assert len(sent) == 1 and sent[0].startswith("🫁 "), sent
-    assert "не хватает памяти: все процессы разом стоят 22% времени" in sent[0]
-    assert "java" in sent[0]  # кто ест память
+    from app.alerts import full_text
+
+    assert len(sent) == 1 and sent[0].startswith("🔴🫁 "), sent
+    assert "<b>Серверу не хватает памяти</b>" in sent[0]
+    assert "Ест: java (6гб)" in sent[0]  # кто ест память
+    assert "не хватает памяти: все процессы разом стоят 22% времени" in full_text(sent[0])
     # отбой только после часа спокойствия: ночной дамп давал три пары "сработало - отбой" за два часа
     await tick(1, CALM)
     await tick(30)
@@ -128,7 +131,7 @@ async def test_pressure_alert_lifecycle(tmp_path, monkeypatch):
     await tick(50)
     assert len(sent) == 1, sent
     await tick(15)
-    assert len(sent) == 2 and sent[1].startswith("✅") and "сервер снова дышит" in sent[1], sent
+    assert len(sent) == 2 and sent[1].startswith("✅") and "сервер больше не задыхается" in sent[1], sent
     await engine.dispose()
 
 
@@ -251,16 +254,24 @@ async def test_stuck_alert_names_process(tmp_path, monkeypatch):
     await tick(5, dict(CALM, dstate=_ds(5, [dict(PG, sec=730)])))
     assert sent == []  # выдержка, как у всего давления
     await tick(6, dict(CALM, dstate=_ds(6, [dict(PG, sec=1090)])))
-    assert len(sent) == 1 and sent[0].startswith("🫁 "), sent
-    head, hint = sent[0].split("\n")
+    from app.alerts import full_text
+
+    assert len(sent) == 1 and sent[0].startswith("🔴🫁 "), sent
+    # в чате - что случилось и кто завис, без PID, wchan и подсказки
+    assert "<b>Процессы зависли</b>" in sent[0]
+    assert "postgres" in sent[0], "не назван зависший процесс"
+    assert "PID" not in sent[0] and "wchan" not in sent[0] and "/proc/" not in sent[0]
+    # полный текст в истории - как раньше
+    head, hint = full_text(sent[0]).split("\n")
     assert "db-a" in head and head.endswith(
         " — завис postgres (PID 4242) в ожидании диска или сети 18 мин, wchan folio_wait_bit_common")
     assert hint.startswith("↳ процесс дольше 2 мин в D") and "/proc/4242/stack" in hint
-    assert alert_what.items("pressure", sent[0]) == [("завис postgres", "18 мин, wchan folio_wait_bit_common")]
+    assert alert_what.items("pressure", full_text(sent[0])) == [
+        ("завис postgres", "18 мин, wchan folio_wait_bit_common")]
     # отпустило: отбой после часа спокойствия, одним сообщением
     for _ in range(14):
         await tick(5, dict(CALM, dstate=_ds(6)))
-    assert len(sent) == 2 and sent[1].startswith("✅") and "зависших нет" in sent[1], sent
+    assert len(sent) == 2 and sent[1].startswith("✅") and "сервер больше не задыхается" in sent[1], sent
     await engine.dispose()
 
 
@@ -274,7 +285,7 @@ async def test_old_count_alert_closes_with_one_recovery(tmp_path, monkeypatch):
     assert sent == []
     for i in range(20):  # и еще почти два часа: отбой один раз, без новых срабатываний
         await tick(5, old(8 if i % 2 else 2))
-    assert len(sent) == 1 and sent[0].startswith("✅") and "сервер снова дышит" in sent[0], sent
+    assert len(sent) == 1 and sent[0].startswith("✅") and "сервер больше не задыхается" in sent[0], sent
     await engine.dispose()
 
 
@@ -320,8 +331,13 @@ async def test_backup_server_prune_no_alert(tmp_path, monkeypatch):
     # затянулось на 6 ч - алерт с пояснением
     for _ in range(74):
         await tick(5, BUSY)
-    got = [m for m in sent if m.startswith("🫁 ")]
-    assert len(got) == 1 and got[0].endswith(
+    from app.alerts import full_text
+
+    got = [m for m in sent if m.startswith("🔴🫁 ")]
+    assert len(got) == 1 and "<b>Сервер ждет диск</b>" in got[0], sent
+    # пояснение про сервер бэкапов - подробность для истории, в чат не идет
+    assert "prune" not in got[0]
+    assert full_text(got[0]).endswith(
         "\n↳ на сервере бэкапов так бывает во время prune и check, но не дольше 6 ч"), sent
     await engine.dispose()
 
@@ -333,6 +349,8 @@ async def test_backup_server_stuck_still_alerts(tmp_path, monkeypatch):
     await tick(0)
     for i in range(4):
         await tick(5, rep(430 + i * 300))
-    got = [m for m in sent if m.startswith("🫁 ")]
-    assert len(got) == 1 and "завис postgres" in got[0], sent
+    from app.alerts import full_text
+
+    got = [m for m in sent if m.startswith("🔴🫁 ")]
+    assert len(got) == 1 and "завис postgres" in full_text(got[0]), sent
     await engine.dispose()

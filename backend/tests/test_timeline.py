@@ -2,7 +2,7 @@
 этим" в алертах."""
 from datetime import datetime, timedelta, timezone
 
-from app import collector, timeline
+from app import alerts, collector, timeline
 from app.config import Settings
 from app.db import Base, create_engine_and_factory
 from app.models import AlertEvent, AuditLog, Check, MaintenanceWindow, Server, ServerEvent
@@ -258,8 +258,11 @@ async def test_offline_alert_says_what_changed_before(tmp_path, monkeypatch):
     sent = _capture(monkeypatch)
     await collector.evaluate_servers(factory, Settings(alert_webhook="http://hook"), now)
     assert [m.kind for m in sent] == ["offline"]
-    assert "↳ за час до этого: обновлены пакеты: ждали обновления 12, осталось 0" in sent[0]
-    assert "перезагрузка" not in sent[0]
+    # в чат - коротко, что менялось за час до сбоя - в полном тексте (история, панель)
+    assert sent[0].startswith("🔴📡 web-a\n<b>Не на связи</b>") and "за час до этого" not in sent[0]
+    full = alerts.full_text(sent[0])
+    assert "↳ за час до этого: обновлены пакеты: ждали обновления 12, осталось 0" in full
+    assert "перезагрузка" not in full
     await engine.dispose()
 
 
@@ -282,9 +285,12 @@ async def test_site_down_alert_says_what_changed_on_its_server(client, monkeypat
         ("bad", "site-a", "down", "HTTP 502", None, cid, None),
         ("bad", "site-b", "down", "HTTP 502", None, oid, None),
     ], now)
-    by = {m.target: str(m) for m in sent}
+    by = {m.target: alerts.full_text(m) for m in sent}
     assert "↳ за час до этого: новый образ: shop-web-1" in by["site-a"]
     assert "↳" not in by["site-b"]  # у сайта без сервера в панели строки нет
+    # в чат подробность не идет: там что случилось и причина
+    chat = {m.target: str(m) for m in sent}
+    assert "<b>Не отвечает</b>" in chat["site-a"] and "за час до этого" not in chat["site-a"]
 
 
 def test_udp_sessions_and_flapping_ports_stay_out():

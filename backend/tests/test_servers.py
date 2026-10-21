@@ -72,20 +72,24 @@ async def test_server_offline_and_recovery_alert(tmp_path, monkeypatch):
     monkeypatch.setattr("app.alerts.send_alert", fake_send)
     settings = Settings(alert_webhook="http://hook")
 
-    # молчит 10 мин → оффлайн-алерт
+    from app.alerts import full_text
+
+    # молчит 10 мин → оффлайн-алерт: в чате коротко, подробности - в истории
     await collector.evaluate_servers(factory, settings, now)
-    assert len(sent) == 1 and "недоступен" in sent[0]
+    assert len(sent) == 1 and sent[0].startswith("🔴📡") and "<b>Не на связи</b>" in sent[0]
+    assert "недоступен" in full_text(sent[0])
     # повторно — без дубля
     sent.clear()
     await collector.evaluate_servers(factory, settings, now)
     assert sent == []
-    # снова на связи → recovery «снова доступен» (для offline — свой текст)
+    # снова на связи → отбой одной строкой (для offline — свой текст)
     async with factory() as s:
         srv = await s.scalar(__import__("sqlalchemy").select(Server))
         srv.last_seen = now
         await s.commit()
     await collector.evaluate_servers(factory, settings, now)
-    assert len(sent) == 1 and "снова доступен" in sent[0]
+    assert len(sent) == 1 and sent[0].startswith("✅") and "снова на связи" in sent[0]
+    assert "\n" not in sent[0]
     await engine.dispose()
 
 
@@ -138,7 +142,7 @@ async def test_server_disk_level_escalation(tmp_path, monkeypatch):
 
     # 87% → предупреждение. Уровень читается по ведущей иконке, не по слову
     await collector.evaluate_servers(factory, settings, now)
-    assert len(sent) == 1 and sent[0].startswith("⚠️") and "87%" in sent[0]
+    assert len(sent) == 1 and sent[0].startswith("⚠️💽") and "заполнен на 87%" in sent[0]
     assert "предупреждение" not in sent[0]
     # то же значение → без дубля
     sent.clear()
@@ -167,8 +171,9 @@ async def test_server_disk_level_escalation(tmp_path, monkeypatch):
     later = now + timedelta(minutes=31)
     await set_disk(80, later)
     await collector.evaluate_servers(factory, settings, later)
-    assert len(sent) == 1 and "снова в норме" in sent[0]
-    assert "80%" in sent[0] and "было 97%" in sent[0]
+    # отбой одной строкой: что вернулось и до какого значения, без "было N"
+    assert len(sent) == 1 and sent[0].startswith("✅") and "диск снова в норме" in sent[0]
+    assert "80%" in sent[0] and "было" not in sent[0] and "\n" not in sent[0]
     await engine.dispose()
 
 
@@ -203,8 +208,11 @@ async def test_server_reboot_alert(tmp_path, monkeypatch):
     monkeypatch.setattr("app.alerts.send_alert", fake_send)
     settings = Settings(alert_webhook="http://hook")
 
+    from app.alerts import full_text
+
     await collector.evaluate_servers(factory, settings, now)
-    assert len(sent) == 1 and "перезагружен" in sent[0]
+    assert len(sent) == 1 and "🔄" in sent[0].split("\n")[0] and "<b>Перезагрузился</b>" in sent[0]
+    assert "перезагружен" in full_text(sent[0])
     # повторно тот же rebooted_at → без дубля
     sent.clear()
     await collector.evaluate_servers(factory, settings, now)
@@ -649,8 +657,13 @@ async def test_server_alert_flood_digest(tmp_path, monkeypatch):
     monkeypatch.setattr("app.alerts.send_alert", fake_send)
     # 8 одинаковых "недоступен" - одно сообщение со списком серверов (alerts.merge_storm)
     settings = Settings(alert_webhook="http://hook", alert_flood_threshold=6)
+    from app.alerts import full_text
+
     await collector.evaluate_servers(factory, settings, now)
-    assert len(sent) == 1 and "8 серверов" in sent[0] and all(f"node{i}" in sent[0] for i in range(8))
+    assert len(sent) == 1 and "8 серверов" in sent[0] and "Не на связи" in sent[0]
+    # в чате первые шесть именами и "и еще 2", весь список - в полном тексте
+    assert all(f"node{i}" in sent[0] for i in range(6)) and "и еще 2" in sent[0]
+    assert all(f"node{i}" in full_text(sent[0]) for i in range(8))
 
     # порог дайджеста 0 = выкл: склейка от него не зависит, все равно одно сообщение
     async with factory() as s:
@@ -747,7 +760,7 @@ async def test_server_alert_snooze_per_type(tmp_path, monkeypatch):
     await collector.evaluate_servers(factory, settings, now)
     # oom заглушён → нет; offline НЕ заглушён → есть ровно он
     assert len(sent) == 1
-    assert "OOM" not in sent[0] and "недоступен" in sent[0]
+    assert "OOM" not in sent[0] and "Не на связи" in sent[0]
 
     # снуз истёк: OOM, бывший под снузом, учтен молча и не приходит, новый - приходит
     async with factory() as s:
@@ -867,10 +880,13 @@ async def test_throttle_alerts_only_when_sustained_and_hot(tmp_path, monkeypatch
     assert sent == []
 
     # горячий троттлинг 3 интервала подряд → УСТОЙЧИВЫЙ → один алерт
+    from app.alerts import full_text
+
     await tick(50, 95)
     await tick(60, 96)
     await tick(80, 97)
-    assert len(sent) == 1 and "троттлинг" in sent[0].lower()
+    assert len(sent) == 1 and "<b>CPU сбрасывает частоту от перегрева</b>" in sent[0]
+    assert "троттлинг" in full_text(sent[0]).lower()
     # держится дальше → без дублей
     sent.clear()
     await tick(90, 98)
@@ -887,7 +903,7 @@ async def test_throttle_alerts_only_when_sustained_and_hot(tmp_path, monkeypatch
         await tick(0, 55)
     assert sent == []
     await tick(0, 55)
-    assert len(sent) == 1 and "снова в норме" in sent[0]
+    assert len(sent) == 1 and sent[0].startswith("✅") and "троттлинга больше нет" in sent[0]
     sent.clear()
     await tick(0, 55)
     assert sent == []
@@ -930,9 +946,13 @@ async def test_oom_kill_one_shot_alert(tmp_path, monkeypatch):
     monkeypatch.setattr("app.alerts.send_alert", fake_send)
     settings = Settings(alert_webhook="http://hook")
 
-    # oom_total=3 → алерт с числом и жертвой
+    from app.alerts import full_text
+
+    # oom_total=3 → алерт: в чате что случилось и кто убит, число - в полном тексте
     await collector.evaluate_servers(factory, settings, now)
-    assert len(sent) == 1 and "OOM" in sent[0] and "3" in sent[0] and "mysqld" in sent[0]
+    assert len(sent) == 1 and "<b>Кончилась память (OOM)</b>" in sent[0] and "Убит: mysqld" in sent[0]
+    assert "pid" not in sent[0]
+    assert "3" in full_text(sent[0]) and "mysqld" in full_text(sent[0])
     # счётчик не вырос → без дубля
     sent.clear()
     await collector.evaluate_servers(factory, settings, now)
@@ -945,7 +965,7 @@ async def test_oom_kill_one_shot_alert(tmp_path, monkeypatch):
     assert sent == []
     await collector.evaluate_servers(factory, settings, now + timedelta(minutes=61))
     oom_msgs = [m for m in sent if "OOM" in m]  # сервер к этому времени еще и молчит - это отдельно
-    assert len(oom_msgs) == 1 and "повторялась: с прошлого сообщения еще 1 раз" in oom_msgs[0]
+    assert len(oom_msgs) == 1 and "повторялась: с прошлого сообщения еще 1 раз" in full_text(oom_msgs[0])
     await engine.dispose()
 
 
@@ -1001,7 +1021,9 @@ async def test_docker_container_crash_loop_alert(tmp_path, monkeypatch):
     assert sent == []  # 2 прироста < порога 3
     await set_rc(3)
     await collector.evaluate_servers(factory, settings, now)
-    assert len(sent) == 1 and "web" in sent[0] and "перезапус" in sent[0].lower()
+    assert len(sent) == 1 and sent[0].startswith("🔴🐳") and "перезапус" in sent[0].lower()
+    # имя контейнера как есть: "Web" вместо "web" - уже другой контейнер
+    assert "web перезапускается по кругу" in sent[0]
     # тот же rc → без дубля
     sent.clear()
     await collector.evaluate_servers(factory, settings, now)
@@ -1200,20 +1222,24 @@ async def test_backup_alerts(tmp_path, monkeypatch):
     # свежий успешный бэкап → тихо
     await collector.evaluate_servers(factory, settings, now)
     assert sent == []
+    from app.alerts import full_text
+
     # последний прогон упал → алерт «ошибка»
     await set_rep(0, nowts)
     await collector.evaluate_servers(factory, settings, now)
-    assert len(sent) == 1 and "ошибк" in sent[0].lower()
+    assert len(sent) == 1 and sent[0].startswith("🔴💾") and "<b>Бэкап упал</b>" in sent[0]
+    assert "ошибк" in full_text(sent[0]).lower()
     # снова успех → восстановление
     sent.clear()
     await set_rep(1, nowts)
     await collector.evaluate_servers(factory, settings, now)
-    assert len(sent) == 1 and "норм" in sent[0].lower()
+    assert len(sent) == 1 and sent[0].startswith("✅") and "бэкап снова проходит" in sent[0]
     # бэкап устарел на 3 дня → алерт «не свежий»
     sent.clear()
     await set_rep(1, nowts - 3 * 86400)
     await collector.evaluate_servers(factory, settings, now)
-    assert len(sent) == 1 and ("свеж" in sent[0].lower() or "устар" in sent[0].lower())
+    assert len(sent) == 1 and "<b>Бэкапа нет 3 дня</b>" in sent[0]
+    assert "свеж" in full_text(sent[0]).lower() or "устар" in full_text(sent[0]).lower()
     await engine.dispose()
 
 
@@ -1353,14 +1379,18 @@ async def test_backup_missing_alert_and_optout(tmp_path, monkeypatch):
     settings = Settings(alert_webhook="http://hook")
 
     await collector.evaluate_servers(factory, settings, now)
-    assert len(sent) == 1 and "не настроен" in sent[0]
+    assert len(sent) == 1 and "<b>Бэкап не настроен</b>" in sent[0]
+    # подсказка про галочку - в полном тексте, не в чате
+    assert "галочка" not in sent[0]
     # ставим галочку «бэкап не требуется» → recovery
     sent.clear()
     async with factory() as s:
         (await s.scalar(select(Server))).backup_not_required = True
         await s.commit()
     await collector.evaluate_servers(factory, settings, now)
-    assert len(sent) == 1 and "норм" in sent[0].lower()
+    assert len(sent) == 1 and sent[0].startswith("✅") and "\n" not in sent[0]
+    # бэкап так и не настроен, его отметили ненужным: "бэкап настроен" в отбое - неправда
+    assert "бэкап настроен" not in sent[0], sent[0]
     await engine.dispose()
 
 
@@ -1753,13 +1783,19 @@ async def test_daily_uncovered_digest(tmp_path, monkeypatch):
         await s.commit()
     await collector._daily_uncovered(factory, settings)
     assert len(sent) == 1, sent
-    msg = sent[0]
+    from app.alerts import full_text
+
+    msg, full = sent[0], full_text(sent[0])
+    # в чате - чего не хватает и где, по строке на дыру
     assert "новая-нода" in msg
-    assert "инвентарь СУБД" in msg, "не сказано, чего не хватает"
+    assert "dbstat-setup" in msg, "не сказано, чего не хватает"
     assert "Docker без доступа" in msg
-    assert "kervax_helpers.yml" in msg, "нет готовой команды — сводка не действие, а новость"
-    assert "мёртвая-нода" not in msg, "оффлайновую ноду звать чинить рано"
-    assert "timesync-setup" not in msg, "установленный helper попал в сводку"
+    # в полном тексте - словами и с готовой командой
+    assert "инвентарь СУБД" in full, "не сказано, чего не хватает"
+    assert "kervax_helpers.yml" in full, "нет готовой команды — сводка не действие, а новость"
+    assert "kervax_helpers.yml" not in msg, "команда в чате - подробность для панели"
+    assert "мёртвая-нода" not in full and "мертвая-нода" not in msg, "оффлайновую ноду звать чинить рано"
+    assert "timesync-setup" not in full, "установленный helper попал в сводку"
 
     # второй раз в те же сутки — молчим
     sent.clear()
@@ -1892,10 +1928,14 @@ async def test_expiry_alert_text_and_link(tmp_path, monkeypatch):
     await collector.evaluate_servers(
         factory, Settings(alert_webhook="http://hook", panel_url="https://kervax.test"), now)
     assert len(sent) == 1, sent
+    from app.alerts import full_text
+
     msg = sent[0]
+    assert msg.startswith("⚠️⏳")
     assert "default/foundry-frontend-demo-staging-tls" in msg
-    assert "истекает через 6 дн." in msg
-    assert "обновите до этой даты" not in msg and " · " not in msg
+    assert "<b>TLS-сертификат в секрете истекает через 6 дней</b>" in msg
+    assert "истекает через 6 дн." in full_text(msg)
+    assert "обновите до этой даты" not in full_text(msg) and " · " not in full_text(msg)
     assert "?kube=1&amp;ktab=expiry" in msg or "?kube=1&ktab=expiry" in msg
     await engine.dispose()
 

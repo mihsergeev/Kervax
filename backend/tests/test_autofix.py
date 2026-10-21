@@ -89,7 +89,12 @@ async def test_autofix_flow(client, auth_headers, monkeypatch):
     r = await client.post("/api/agent/backup-result", json={"id": cmds[0].id, "ok": True, "output": out},
                           headers={"Authorization": f"Bearer {token}"})
     assert r.status_code == 200
-    assert len(sent) == 1 and "автоочистка диска: журнал systemd, освобождено 3.7 ГБ" in sent[0]
+    from app.alerts import full_text
+
+    # в чате - что сделано и сколько освободилось, что чистили - строкой ниже
+    assert len(sent) == 1 and sent[0].startswith("🧹")
+    assert "<b>Почистил диск, освобождено 3.7гб</b>" in sent[0] and "журнал systemd" in sent[0]
+    assert "автоочистка диска: журнал systemd, освобождено 3.7 ГБ" in full_text(sent[0])
 
     # журнал на паузе - следом старые логи; потом все на паузе
     assert await autofix_disks(factory, now) == 1
@@ -97,7 +102,9 @@ async def test_autofix_flow(client, auth_headers, monkeypatch):
     assert cmds[-1].payload["name"] == "rotated-logs"
     await client.post("/api/agent/backup-result", json={"id": cmds[-1].id, "ok": False, "output": "boom"},
                       headers={"Authorization": f"Bearer {token}"})
-    assert "автоочистка диска не удалась (старые ротированные логи): boom" in sent[-1]
+    assert "<b>Не получилось почистить диск</b>" in sent[-1] and "старые ротированные логи" in sent[-1]
+    assert "boom" not in sent[-1]  # вывод команды - в истории, не в чате
+    assert "автоочистка диска не удалась (старые ротированные логи): boom" in full_text(sent[-1])
     assert await autofix_disks(factory, now) == 0
     # через 6 часов журнал можно снова
     assert await autofix_disks(factory, now + timedelta(hours=6, minutes=1)) == 1

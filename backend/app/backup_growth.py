@@ -10,6 +10,8 @@ feed-a и stats-a уходило по 200-300 ГБ за ночь, и этого 
 
 from datetime import datetime
 
+from app import tg_fmt
+
 EXTRA_KEY = "backup-runs"
 _MIN_HISTORY = 5  # прогонов до последнего: меньше - не с чем сравнивать
 _HISTORY = 14  # с какими прогонами сравниваем последний
@@ -66,3 +68,17 @@ def jump(server, now: datetime) -> dict | None:
         "level": 1, "st": st, "usual": base, "ts": last["ts"],
         "text": f"бэкап добавил {fmt_size(st)} за прогон (обычно {fmt_size(base)})",
     }
+
+
+# -- короткий текст для Telegram (формат A, app/tg_fmt.py) --
+# Бэкап вырос на 76гб за раз
+# обычно 54мб
+
+def tg_short(items) -> tuple[str, list[str]] | None:
+    """(что случилось, конкретика) по jump(): словарь или список из него."""
+    g = items[0] if isinstance(items, list) and items else items
+    if not isinstance(g, dict) or not g.get("st"):
+        return None
+    base = float(g.get("usual") or 0)
+    return (f"Бэкап вырос на {tg_fmt.size(float(g['st']))} за раз",
+            [f"обычно {tg_fmt.size(base)}"] if base > 0 else [])

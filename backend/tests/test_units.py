@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select
 
+from app.alerts import full_text
 from app.collector import unit_level, unit_log_line, unit_why, units_text
 
 CERTBOT = {"unit": "certbot.service", "desc": "Certbot", "type": "oneshot", "result": "exit-code",
@@ -98,11 +99,13 @@ async def test_units_alert_lifecycle(tmp_path, monkeypatch):
     await tick([dict(CERTBOT, since=int(now.timestamp()) + 60)])  # упал только что - ждем
     assert sent == []
     await tick([CERTBOT])
-    assert len(sent) == 1 and sent[0].startswith("⚠️⚙️ ") and "упал certbot.service: код 1" in sent[0]
+    assert len(sent) == 1 and sent[0].startswith("⚠️⚙️ ") and "упал certbot.service: код 1" in full_text(sent[0])
+    # в чате: какой юнит и почему, без "10 мин назад" и строки лога
+    assert sent[0] == "⚠️⚙️ node\n<b>Упал certbot.service</b>\nкод 1"
     await tick([CERTBOT])
     assert len(sent) == 1
     await tick([CERTBOT, NGINX])
-    assert len(sent) == 2 and sent[1].startswith("🔴⚙️ ") and "nginx.service (убит сигналом KILL)" in sent[1]
+    assert len(sent) == 2 and sent[1].startswith("🔴⚙️ ") and "nginx.service (убит сигналом KILL)" in full_text(sent[1])
     await tick([CERTBOT, NGINX, dict(NGINX, unit="php-fpm.service")])
     assert len(sent) == 3 and "php-fpm.service" in sent[2]
     # "не алертить" по certbot и php-fpm: остается nginx, нового нет
@@ -114,8 +117,12 @@ async def test_units_alert_lifecycle(tmp_path, monkeypatch):
         await tick([CERTBOT])
     assert len(sent) == 3
     await tick([CERTBOT])
-    assert len(sent) == 4 and sent[3].startswith("✅") and "упавших юнитов больше нет" in sent[3]
+    assert len(sent) == 4 and sent[3] == "✅ node: упавших юнитов нет"
     await engine.dispose()
+    # в чате первым - то, из-за чего сообщение: новый и худший nginx, а не уже объявленный certbot.
+    # Сейчас приходит "certbot.service (код 1), nginx.service (убит сигналом KILL)"
+    assert sent[1].split("\n")[1:] == ["<b>Упали юниты</b>",
+                                       "nginx.service (убит сигналом KILL), certbot.service (код 1)"], sent[1]
 
 
 async def test_unit_fix_command(client, auth_headers):
@@ -243,21 +250,24 @@ async def test_unit_loop_alert_lifecycle(tmp_path, monkeypatch):
     await tick(5)
     assert sent == []
     rows = await tick(8)
-    assert len(sent) == 1 and sent[0].startswith("🔁⚙️ "), sent
-    assert "worker.service перезапускается в цикле: 7 перезапусков за 15 мин, последний раз: код 3" in sent[0]
+    assert len(sent) == 1 and sent[0].startswith("🔴⚙️ "), sent
+    assert "worker.service перезапускается в цикле: 7 перезапусков за 15 мин, последний раз: код 3" in full_text(sent[0])
+    short = sent[0]
     assert [(p["level"], p["unit"], p["mute"], p["log"]) for p in rows] == [
         (2, "worker.service", "unit:worker.service", ["boom: config not found"])]
     assert rows[0]["text"] == "worker.service перезапускается в цикле: 7 перезапусков за 15 минут, последний раз: код 3"
     await tick(8, minutes=8)
     assert len(sent) == 1  # еще в окне: приросты были 8 минут назад
     rows = await tick(8, minutes=9)
-    assert len(sent) == 2 and sent[1].startswith("✅") and "worker.service: перезапуски прекратились" in sent[1]
+    assert len(sent) == 2 and sent[1].startswith("✅") and "больше не перезапускается" in sent[1], sent[1]
     assert rows == []
     # заглушенный по имени юнит: цикл снова идет, а алерта нет
     for n in (10, 12, 14):
         await tick(n, mutes=["unit:worker.service"])
     assert len(sent) == 2
     await engine.dispose()
+    # в чате: имя юнита как есть (не "Worker.service"), без счетчика перезапусков
+    assert short == "🔴⚙️ node\n<b>worker.service перезапускается по кругу</b>\nкод 3", short
 
 
 async def test_timer_job_failing_every_run_does_not_flap(tmp_path, monkeypatch):

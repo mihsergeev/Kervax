@@ -22,6 +22,7 @@ from types import SimpleNamespace
 
 from sqlalchemy import delete, select, update
 
+from app import tg_fmt
 from app.models import Server, ServerLink, LinkSample
 
 MAX_PER_SERVER = 16  # как linkMax в агенте: больше он и не проверит
@@ -128,8 +129,11 @@ async def handle(session, server: Server, results, now: datetime) -> list[dict]:
     for r in rows:
         if r.last_ts is None or now - _aware(r.last_ts) > FRESH:
             continue
+        # host, port, note - части name по отдельности: короткому алерту в чате порт не нужен
         state.append({"id": r.id, "name": label(r, names), "loss": r.last_loss, "rtt": r.last_rtt,
-                      "err": r.last_err, "held": r.target_server_id in silent})
+                      "err": r.last_err, "held": r.target_server_id in silent,
+                      "host": (names.get(r.target_server_id) if r.target_server_id else None) or r.host,
+                      "port": r.port, "note": r.note or ""})
     server.links_state = state or None
     return [{"id": r.id, "host": r.host, "port": r.port} for r in rows[:MAX_PER_SERVER]]
 
@@ -152,6 +156,70 @@ def problems(state) -> list[tuple[int, int, str]]:
                         + (f" ({err})" if err else "")))
     out.sort(key=lambda p: -p[0])
     return out
+
+
+_LABEL_RE = re.compile(r"^(.*?):(\d+)(?: \((.*)\))?$")
+# что агент шлет в err (shortNetErr) -> по-человечески; timeout не пишем: "нет связи" о том же
+_ERR_WORDS = {"connection refused": "порт не принимает подключения", "no route to host": "нет маршрута",
+              "network is unreachable": "нет маршрута", "no such host": "имя не резолвится",
+              "connection reset": "соединение сбрасывается"}
+
+
+# тексты problems(): имя связи - label() "адрес:порт (заметка)", адрес без пробелов (host_ok)
+_DOWN_RE = re.compile(r"^нет связи с (?P<name>\S+?:\d+(?: \([^)]*\))?)(?:: (?P<err>.*))?$")
+_LOSS_RE = re.compile(r"^связь с (?P<name>\S+?:\d+(?: \([^)]*\))?) теряет (?P<loss>[\d.]+)% попыток подключения"
+                      r"(?: \((?P<err>.*)\))?$")
+
+
+def _parts(x: dict) -> tuple[str, str, str]:
+    """(сервер или адрес, порт, заметка) связи из сводки; в сводке до host/port - разбором name."""
+    if x.get("host"):
+        return str(x["host"]), str(x.get("port") or ""), str(x.get("note") or "")
+    m = _LABEL_RE.match(str(x.get("name") or ""))
+    return (m.group(1), m.group(2), m.group(3) or "") if m else (str(x.get("name") or "?"), "", "")
+
+
+def _from_text(text: str) -> dict:
+    """Связь из текста problems(), когда сводки под рукой нет: {"name", "err", "loss"}."""
+    m = _DOWN_RE.match(text) or _LOSS_RE.match(text)
+    if not m:
+        return {"name": text}
+    d = m.groupdict()
+    return {"name": d["name"], "err": d.get("err") or "", "loss": float(d["loss"]) if d.get("loss") else 100.0}
+
+
+def tg_short(items, state=None) -> tuple[str, list[str]] | None:
+    """Алерт link: "Нет связи с vpn-b", ниже заметка связи и понятная причина. Порт -
+    только если с одним сервером в беде несколько связей. Остальные связи в беде - строкой "Еще: ...".
+    items - problems() (как в ctx["items"]); state - links_state сервера, если есть: в нем адрес,
+    порт и заметка отдельными полями. Сводку можно передать и первым аргументом."""
+    if items and all(isinstance(x, dict) for x in items):
+        state, items = items, problems(items)
+    lk = [x for x in items or [] if isinstance(x, (tuple, list)) and len(x) == 3]
+    if not lk:
+        return None
+    by_id = {int(x.get("id") or 0): x for x in state or [] if isinstance(x, dict)}
+    links = {i: by_id.get(i) or _from_text(str(t)) for _l, i, t in lk}
+    parts = {i: _parts(x) for i, x in links.items()}
+    hosts = [h for h, _p, _n in parts.values()]
+
+    def who(i: int) -> str:
+        h, p, _n = parts[i]
+        return f"{h}:{p}" if p and hosts.count(h) > 1 else h
+
+    lv, i, _t = lk[0]
+    x = links[i]
+    if lv >= 2:
+        what = f"Нет связи с {who(i)}"
+    else:
+        what = f"Связь с {who(i)} теряет {float(x.get('loss') or 0):.0f}% подключений"
+    err = str(x.get("err") or "")
+    fact = ", ".join(s for s in (parts[i][2], _ERR_WORDS.get(err, "")) if s)
+    facts = [fact] if fact else []
+    rest = [who(j) for _l, j, _t in lk[1:]]
+    if rest:
+        facts.append("Еще: " + tg_fmt.names(rest))
+    return what, facts
 
 
 async def forget(session, server_id: int) -> None:

@@ -8,7 +8,10 @@ extras["web-certs"].
 """
 from __future__ import annotations
 
+import re
 from datetime import datetime
+
+from app import tg_fmt
 
 # Алерт за неделю и за день, как у сроков сайтов и Kubernetes. Let's Encrypt продлевает за 30 дней:
 # за неделю продление уже точно не идет, а времени разобраться еще хватает. Сертификаты ближе
@@ -93,3 +96,49 @@ def view(rep: dict, now: datetime) -> list[dict] | None:
         out.append({"where": str(c.get("where") or ""), "file": str(c.get("file") or ""), "label": _label(c),
                     "days": days})
     return sorted(out, key=lambda x: x["days"])
+
+
+# -- короткий текст для Telegram (формат A, app/tg_fmt.py) --
+# Истекли сертификаты, продление не настроено
+# admin.example.com, bp.example.com, example.org
+
+_TEXT = re.compile(r"сертификат (.+?) (?:истек (\d+) дн назад|истекает через (\d+) дн)")
+
+
+def tg_short(items) -> tuple[str, list[str]] | None:
+    """(что случилось, конкретика) по problems(): истекшие важнее истекающих, имена - первым доменом
+    сертификата, без путей к файлам."""
+    certs = []
+    for p in items or []:
+        if not isinstance(p, (tuple, list)) or len(p) < 2:
+            continue
+        text = str(p[1] or "")
+        m = _TEXT.match(text)
+        if not m:
+            continue
+        name = m.group(1).split(",")[0].split(" и еще")[0].strip()
+        certs.append({"name": name, "expired": m.group(2) is not None,
+                      "days": int(m.group(3)) if m.group(3) is not None else -int(m.group(2)),
+                      "renew": "none" if "продление certbot не настроено" in text
+                      else "failed" if "certbot.service упал" in text else ""})
+    if not certs:
+        return None
+    gone = [c for c in certs if c["expired"]]
+    main = gone or certs
+    one = len(main) == 1
+    if gone:
+        what = "Истек сертификат" if one else "Истекли сертификаты"
+    else:
+        d = min(c["days"] for c in main)
+        when = "сегодня" if d < 1 else f"через {tg_fmt.days(d)}"
+        what = f"{'Сертификат истекает' if one else 'Сертификаты истекают'} {when}"
+    renew = {c["renew"] for c in main}
+    if "none" in renew:
+        what += ", продление не настроено"
+    elif "failed" in renew:
+        what += ", certbot упал"
+    facts = [tg_fmt.names(c["name"] for c in main)]
+    soon = [c["name"] for c in certs if not c["expired"]] if gone else []
+    if soon:
+        facts.append(tg_fmt.fact("Скоро истекает", tg_fmt.names(soon)))
+    return what, facts

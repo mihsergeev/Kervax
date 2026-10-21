@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select
 
+from app.alerts import full_text
 from app.docker_exposure import exposed, image_kind, outdated, text
 
 SOCK = ["/var/run/docker.sock"]
@@ -82,11 +83,13 @@ async def test_alert_fires_once_and_recovers(tmp_path, monkeypatch):
     good = {**bad, "binds": []}
     for _ in range(3):
         await tick(bad)
-    hits = [m for m in sent if "docker-сокет" in m]
-    assert len(hits) == 1 and "caddy-proxy-caddy-1" in hits[0], sent
-    # перевели caddy на прокси сокета - отбой
+    hits = [m for m in sent if getattr(m, "kind", "") == "docker_sock"]
+    assert len(hits) == 1 and "caddy-proxy-caddy-1 (caddy) держит docker-сокет" in full_text(hits[0]), sent
+    # в чате: что случилось и какой контейнер, без объяснения про root на хосте
+    assert hits[0] == "⚠️🐳 node\n<b>Внешний прокси держит docker-сокет</b>\ncaddy-proxy-caddy-1", hits[0]
+    # перевели caddy на прокси сокета - отбой одной строкой
     await tick(good)
-    assert any("больше не держит docker-сокет" in m for m in sent)
+    assert len(sent) == 2 and sent[1] == "✅ node: прокси больше не держит docker-сокет", sent
     await engine.dispose()
 
 

@@ -3,6 +3,7 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 from app import collector, maint
+from app.alerts import full_text
 from app.config import Settings
 from app.db import Base, create_engine_and_factory
 from app.models import Check, MaintenanceWindow, Server
@@ -241,8 +242,11 @@ async def test_verify_after_window(tmp_path, monkeypatch):
     settings = Settings(alert_webhook="http://hook")
     await collector.maintenance_tick(factory, settings, now)
     assert len(sent) == 2
-    assert sent[0] == '🚧 после обслуживания &quot;ядро&quot; все в норме (серверов 1, мониторов 1)'
-    assert sent[1].startswith("⚠️ ") and "web-b - не на связи" in sent[1]
+    # в чат - коротко: окно, итог и что не вернулось; счетчики - в полном тексте
+    assert sent[0] == "🚧 <b>ядро</b>\n<b>Обслуживание закончилось, все в норме</b>"
+    assert full_text(sent[0]) == '🚧 после обслуживания &quot;ядро&quot; все в норме (серверов 1, мониторов 1)'
+    assert sent[1] == "⚠️🚧 <b>второе</b>\n<b>Обслуживание закончилось, не все вернулось</b>\nweb-b - не на связи"
+    assert full_text(sent[1]).startswith("⚠️ ") and "web-b - не на связи" in full_text(sent[1])
     # второй раз по тому же окну не сверяем
     await collector.maintenance_tick(factory, settings, now + timedelta(minutes=1))
     assert len(sent) == 2

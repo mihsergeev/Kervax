@@ -31,8 +31,9 @@ import re
 from collections import Counter
 from datetime import datetime, timezone
 
+from app import tg_fmt
 from app.models import Server
-from app.queue_watch import where_text
+from app.queue_watch import where_in, where_text
 
 MUTE_PREFIX = "worker:"
 BACKOFF_S = 180  # BACKOFF дольше трех минут - не переходное состояние, а не запускается
@@ -141,6 +142,19 @@ def trouble(d: dict, p: dict) -> tuple[int, str] | None:
     return None
 
 
+def _state(d: dict, p: dict) -> str:
+    """Что с воркером одним словом (как в trouble): dead - не поднимают, backoff - не может
+    запуститься, exit - вышел с ошибкой, loop - падает и поднимается"""
+    st = str(p.get("state") or "")
+    if st in ("FATAL", "errored"):
+        return "dead"
+    if st == "BACKOFF" and int(d.get("ts") or 0) - int(p.get("since") or 0) >= BACKOFF_S:
+        return "backoff"
+    if st == "EXITED":
+        return "exit"
+    return "loop"
+
+
 def muted_keys(s: Server, now: datetime) -> set[str]:
     keys = {m[len(MUTE_PREFIX):] for m in (s.alert_mutes or []) if m.startswith(MUTE_PREFIX)}
     for k, until in (getattr(s, "alert_snoozes", None) or {}).items():
@@ -178,7 +192,10 @@ def _all(s: Server) -> list[dict]:
             since = min(int(x.get("since") or d["ts"] or 0) for x, _t in items)
             out.append({"key": k, "name": g or str(p["name"]), "source": d["source"], "level": lvl, "why": why,
                         "text": text, "since": datetime.fromtimestamp(since, timezone.utc).isoformat(),
-                        "copies": [key(d, x) for x, _t in items]})
+                        "copies": [key(d, x) for x, _t in items],
+                        # для короткого алерта: где (словами), сколько копий в беде, что с ним, код выхода
+                        "where": d["where"], "n": len(items), "state": _state(d, p),
+                        "exit": p.get("exit") if isinstance(p.get("exit"), int) else None})
     out.sort(key=lambda x: (-x["level"], x["key"]))
     return out
 
@@ -188,6 +205,32 @@ def problems(s: Server, now: datetime) -> list[dict]:
     программы заглушены и мьютом программы, и когда заглушена каждая (мьюты до 1.4.273 были по копиям)"""
     muted = muted_keys(s, now)
     return [x for x in _all(s) if x["key"] not in muted and not all(c in muted for c in x["copies"])]
+
+
+_WHAT = {"dead": ("Воркер не запускается", "Воркеры не запускаются"),
+         "backoff": ("Воркер не может запуститься", "Воркеры не могут запуститься"),
+         "exit": ("Воркер завершился с ошибкой", "Воркеры завершились с ошибкой"),
+         "loop": ("Воркер падает и поднимается", "Воркеры падают и поднимаются")}
+
+
+def tg_short(wp: list[dict]) -> tuple[str, list[str]] | None:
+    """Короткий алерт по problems(): "Воркеры падают и поднимаются / queue-listen x11 в
+    worker-a". Что - про худший (первый), остальные воркеры именами"""
+    if not wp:
+        return None
+    x = wp[0]
+    st = x.get("state") or "loop"
+    n = int(x.get("n") or 1)
+    many = n > 1 or any((y.get("state") or "loop") == st for y in wp[1:])
+    what = _WHAT.get(st, _WHAT["loop"])[1 if many else 0]
+    fact = str(x["name"]) + (f" x{n}" if n > 1 else "") + " " + where_in(x.get("where") or "")
+    if st == "exit" and x.get("exit") is not None:
+        fact += f", код {x['exit']}"
+    facts = [fact]
+    rest = [y["name"] for y in wp[1:] if y["name"] != x["name"]]
+    if rest:
+        facts.append(tg_fmt.fact("Еще", tg_fmt.names(rest)))
+    return what, facts
 
 
 def view(s: Server, now: datetime) -> list[dict] | None:

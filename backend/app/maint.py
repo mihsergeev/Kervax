@@ -93,6 +93,15 @@ def due_verify(w, now: datetime, tz: str) -> tuple[datetime, datetime] | None:
     return last
 
 
+def verify_short(bad: list[str]) -> tuple[str, list[str]]:
+    """Сверка после окна для чата (формат A): все вернулось или что так и не вернулось."""
+    from app import tg_fmt
+
+    if not bad:
+        return "Обслуживание закончилось, все в норме", []
+    return "Обслуживание закончилось, не все вернулось", [tg_fmt.names(bad, 2)]
+
+
 def verify_text(title: str, bad: list[str], n_srv: int, n_chk: int) -> str:
     """Сверка после окна: все в норме или что так и не вернулось."""
     if not bad:

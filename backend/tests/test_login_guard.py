@@ -91,8 +91,10 @@ async def test_one_alert_per_wave_and_none_for_repeat(client: httpx.AsyncClient,
             await client.post("/api/auth/login", json=BAD, headers=_from(ip))
     # три адреса за минуту - одно сообщение про первый, остальные видны в окне
     assert len(sent) == 1
-    assert "203.0.113.61" in sent[0] and "логины: admin" in sent[0] and "на час" in sent[0]
-    assert "—" not in sent[0]
+    # коротко: что происходит, какой адрес и на сколько заблокирован, какие логины пробовали
+    assert sent[0].startswith("🚨🔐 Kervax\nПодбирают пароль к панели\n")
+    assert "203.0.113.61 заблокирован на час" in sent[0] and "Логины: admin" in sent[0]
+    assert "—" not in sent[0] and "неудачных входов" not in sent[0]
 
 
 async def test_guard_validation_and_unban(client: httpx.AsyncClient, auth_headers):

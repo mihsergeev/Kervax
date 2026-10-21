@@ -129,6 +129,28 @@ def problems(srv: Server, now: datetime) -> list[tuple[int, str]]:
     return out
 
 
+_ROOT_PORTS = re.compile(r"^root может войти по SSH паролем, а порт (.+) открыт в интернет")
+_BRUTE = "идет перебор паролей SSH"
+
+
+def tg_short(items: list[tuple[int, str]]) -> tuple[str, list[str]] | None:
+    """Алерт ssh_risk (вход - problems()): "Перебор паролей SSH", "вход по паролю открыт, fail2ban
+    нет". root по паролю - главное, перебор тогда второй строкой. Без счетчиков попыток."""
+    if not items:
+        return None
+    root = next((m for _l, t in items if (m := _ROOT_PORTS.match(t))), None)
+    brute = any(t.startswith(_BRUTE) for _l, t in items)
+    if root:
+        ports = root.group(1)
+        facts = [f"{'порты' if ',' in ports else 'порт'} {ports} открыт{'ы' if ',' in ports else ''} в интернет"]
+        if brute:
+            facts.append("Идет перебор паролей, fail2ban нет")
+        return "SSH пускает root по паролю", facts
+    if brute:
+        return "Перебор паролей SSH", ["вход по паролю открыт, fail2ban нет"]
+    return "Опасный вход SSH", []
+
+
 def advice(srv: Server, now: datetime) -> list[dict]:
     """Пункт "Требует действий": вход по паролю на SSH, открытом в интернет. key - решение "вход по
     паролю нужен" в alert_mutes (muted), fix - шаги [{"id", "cmd"?, "arg"?, "on"?, "alt"?}]."""

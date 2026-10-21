@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 
 from app import alert_what, collector, web_upstream
+from app.alerts import full_text
 from app.config import Settings
 from app.db import Base, create_engine_and_factory
 from app.models import Server, ServerEvent, ServerMetric, WebErrorSample
@@ -104,8 +105,14 @@ async def test_5xx_alert_says_why(tmp_path, monkeypatch):
     monkeypatch.setattr("app.alerts.send_alert", fake_send)
     await collector.evaluate_servers(factory, Settings(alert_webhook="http://hook"), now)
     assert len(sent) == 1, sent
-    assert "Почему: app-backend-1:8000 не принимает соединения - 600" in sent[0]
+    assert "Почему: app-backend-1:8000 не принимает соединения - 600" in full_text(sent[0])
+    # в чате: доля, лог и код, и почему - без счетчиков и адреса upstream
+    lines = sent[0].split("\n")
+    assert lines[1] == "<b>4% запросов с ошибкой 5xx</b>" and lines[2].startswith("app-frontend: 502"), sent[0]
     await engine.dispose()
+    # почему - главная конкретика этого алерта (по замыслу "app-frontend: 502, бэкенд не принимает
+    # соединения"). Сейчас в чате только "app-frontend: 502", причина есть лишь в истории
+    assert "не принимает соединения" in sent[0], sent[0]
 
 
 async def _deploy_case(tmp_path, name, events, ups_of=None):
@@ -169,7 +176,10 @@ async def test_same_errors_without_deploy_still_alert(tmp_path, monkeypatch):
     engine, factory, now = await _deploy_case(tmp_path, "nodeploy.db",
                                               [(9, "crash", "crash", "app-backend-1"), (2, "crash", "crash", "app-backend-1")])
     sent = [x for x in await _sent(factory, now, monkeypatch) if "5xx" in x]
-    assert len(sent) == 1 and "Почему: backend не резолвится - 214" in sent[0], sent
+    assert len(sent) == 1 and "Почему: backend не резолвится - 214" in full_text(sent[0]), sent
+    lines = sent[0].split("\n")
+    assert lines[1] == "<b>1.7% запросов с ошибкой 5xx</b>" and lines[2].startswith("app-frontend"), sent[0]
+    assert ": 502" in lines[2], sent[0]
     await engine.dispose()
 
 

@@ -6,11 +6,17 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import select
 
 from app import collector, os_support, timeline
+from app.alerts import full_text
 from app.config import Settings
 from app.db import Base, create_engine_and_factory
 from app.models import MaintenanceWindow, Server, ServerEvent
 
 UPD = {"reboot": True, "reboot_ts": 1, "reboot_pkgs": ["linux-image-6.8.0-147-generic", "linux-base"]}
+
+
+def _reboots(sent: list) -> list:
+    """Алерты о перезагрузке: в чате "Перезагрузился", "перезагружен" - только в полном тексте."""
+    return [m for m in sent if getattr(m, "kind", "") == "reboot" or "перезагружен" in full_text(m)]
 
 
 def test_reboot_why():
@@ -62,14 +68,15 @@ async def test_reboot_after_updates_is_not_an_alert(client, auth_headers, monkey
     monkeypatch.setattr("app.alerts.send_alert", fake_send)
     now = datetime.now(timezone.utc)
     await collector.evaluate_servers(factory, Settings(alert_webhook="http://hook"), now)
-    rb = [m for m in sent if "перезагружен" in m]
+    rb = _reboots(sent)
     assert len(rb) == 1 and "web-b" in rb[0] and "web-a" not in rb[0], sent
+    assert rb[0].startswith("⚠️🔄 web-b\n<b>Перезагрузился</b>") and "перезагружен" in full_text(rb[0])
     async with factory() as s:
         a = await s.get(Server, planned)
         assert a.alert_state.get("reboot_at")  # отмечена, потом не придет
     sent.clear()
     await collector.evaluate_servers(factory, Settings(alert_webhook="http://hook"), now + timedelta(minutes=1))
-    assert not [m for m in sent if "перезагружен" in m]
+    assert not _reboots(sent)
 
 
 def test_timeline_says_planned():
@@ -109,7 +116,7 @@ async def test_reboot_in_maintenance_window_stays_silent_after_it(tmp_path, monk
     cfg = Settings(alert_webhook="http://hook")
     await collector.evaluate_servers(factory, cfg, now)
     await collector.evaluate_servers(factory, cfg, now + timedelta(minutes=20))  # окно кончилось
-    assert not [m for m in sent if "перезагружен" in m], sent
+    assert not _reboots(sent), sent
     async with factory() as s:
         assert (await s.execute(select(Server))).scalar_one().alert_state.get("reboot_at")
         assert ServerEvent  # хронология пишет перезагрузку сама (timeline.track)

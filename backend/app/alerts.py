@@ -14,7 +14,7 @@ import httpx
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app import settings_store, tg_buttons
+from app import settings_store, tg_buttons, tg_fmt
 from app.config import Settings
 from app.models import AlertEvent, Check, Server, TgAlert, User
 
@@ -38,9 +38,15 @@ class Msg(str):
     # что глушат кнопки под алертом в Telegram: "srv:<id>" или "chk:<id>[,<id>...]";
     # пусто - кнопок нет
     ref: str
+    # Короткий формат (app/tg_fmt.py): в чат уходит сам текст, а full - полный, с подробностями,
+    # для истории алертов и панели; line - этот же алерт одной строкой для пачки. Пусто - старый
+    # формат, где текст и есть полный
+    full: str
+    line: str
 
     def __new__(cls, text: str, section: str = "", group: str = "", kind: str = "",
-                target: str = "", recovery: bool = False, ref: str = "") -> "Msg":
+                target: str = "", recovery: bool = False, ref: str = "", full: str = "",
+                line: str = "") -> "Msg":
         obj = super().__new__(cls, text)
         obj.section = section
         obj.group = group
@@ -48,7 +54,28 @@ class Msg(str):
         obj.target = target
         obj.recovery = recovery
         obj.ref = ref
+        obj.full = full
+        obj.line = line
         return obj
+
+    def tail(self, extra: str, short: str = "") -> "Msg":
+        """Дописать хвост (причину, что менялось до сбоя, лог). У короткого алерта хвост идет
+        только в полный текст, в чат - short, если он есть: подробности смотрят в панели."""
+        if self.full:
+            text = str(self) + (short if short else "")
+            out = Msg(text, self.section, self.group, self.kind, self.target, self.recovery, self.ref,
+                      self.full + extra, self.line)
+        else:
+            out = Msg(str(self) + extra, self.section, self.group, self.kind, self.target, self.recovery,
+                      self.ref)
+        if getattr(self, "parts", None):
+            out.parts = self.parts
+        return out
+
+
+def full_text(m: str) -> str:
+    """Полный текст алерта (с подробностями), как он лежит в истории: у короткого - full."""
+    return getattr(m, "full", "") or str(m)
 
 
 # разделы, чьи объекты живут в группах СЕРВЕРОВ (у сайтов свой набор имён групп)
@@ -67,6 +94,7 @@ def _msg_scope(m: str) -> tuple[str, str]:
 # такой сервер идет своим сообщением.
 STORM_MIN = 3
 _STORM_NAMES = 30
+_STORM_SHORT = 6  # серверов ссылками в коротком сообщении, остальные - "и еще N"
 _AGO = re.compile(r"\d+\s*(?:с|сек|мин|ч|дн|д)\.?\s+назад")
 _HREF = re.compile(r'<a href="[^"]*">')
 # "это мы" и остальное, где кнопка про один сервер
@@ -106,16 +134,31 @@ def _storm_msg(parts: list) -> Msg:
     first = parts[0]
     names = list(dict.fromkeys(p.target for p in parts))
     links = list(dict.fromkeys(_linked(p) for p in parts))
-    shown = links[:_STORM_NAMES]
-    more = f" и еще {len(links) - len(shown)}" if len(links) > len(shown) else ""
-    head, _, tail = str(first).partition("\n")
     label = f"<b>{len(names)} {_servers_word(len(names))}</b>"
     own = _linked(first)
-    head = head.replace(own, label, 1) if own in head else head
-    body = head + "\n↳ " + ", ".join(shown) + more + (f"\n{tail}" if tail else "")
+    full = ""
+    line = ""
+    if getattr(first, "full", ""):
+        # короткий формат: "🔴⚙️ 6 серверов", что случилось, конкретика, последней строкой -
+        # какие серверы (ссылками). Полный список - в полном тексте
+        shown = links[:_STORM_SHORT]
+        more = f" и еще {len(links) - len(shown)}" if len(links) > len(shown) else ""
+        head, _, tail = str(first).partition("\n")
+        head = head.replace(own, label, 1) if own in head else head
+        body = head + (f"\n{tail}" if tail else "") + "\n" + ", ".join(shown) + more
+        f_head, _, f_tail = first.full.partition("\n")
+        f_head = f_head.replace(own, label, 1) if own in f_head else f_head
+        full = f_head + "\n↳ " + ", ".join(links[:_STORM_NAMES]) + (f"\n{f_tail}" if f_tail else "")
+        line = first.line.replace(own, label, 1) if first.line and own in first.line else first.line
+    else:
+        shown = links[:_STORM_NAMES]
+        more = f" и еще {len(links) - len(shown)}" if len(links) > len(shown) else ""
+        head, _, tail = str(first).partition("\n")
+        head = head.replace(own, label, 1) if own in head else head
+        body = head + "\n" + ", ".join(shown) + more + (f"\n{tail}" if tail else "")
     ids = [x for p in parts for x in str(p.ref or "").partition(":")[2].split(",") if x.strip().isdigit()]
     ref = "srv:" + ",".join(dict.fromkeys(ids)) if ids else ""
-    out = Msg(body, first.section, first.group, first.kind, ", ".join(names), first.recovery, ref)
+    out = Msg(body, first.section, first.group, first.kind, ", ".join(names), first.recovery, ref, full, line)
     out.parts = list(parts)  # история пишется по каждому серверу
     return out
 
@@ -241,21 +284,31 @@ async def send_alert(cfg: dict, text: str, parse_mode: str | None = None,
     return errors
 
 
-_DIGEST_LINES = 15  # сколько сообщений показать в дайджесте (остальные — счётчиком)
+_DIGEST_LINES = 20  # сколько алертов показать в пачке (остальные - счетчиком)
 
 
 _PRE = re.compile(r"\n[^\n]*\n<pre>.*?</pre>", re.S)
 
 
+def _digest_line(m: str) -> str:
+    """Алерт в пачке - одной строкой: готовая line у короткого формата, иначе первая строка
+    текста (хвост лога у Job и подробности в пачке не читаются и раздувают сообщение)."""
+    line = getattr(m, "line", "")
+    if line:
+        return line
+    return tg_fmt.clean(_PRE.sub("", str(m))).split("\n")[0]
+
+
 def _digest(messages: list[str]) -> str:
-    # хвост лога у алерта о Job в дайджест не берем: в пачке он не читается и раздувает
-    # сообщение за предел Telegram
-    head = [_PRE.sub("", m) for m in messages[:_DIGEST_LINES]]
+    head = [_digest_line(m) for m in messages[:_DIGEST_LINES]]
     extra = len(messages) - len(head)
-    body = "\n\n".join(head)
+    body = "\n".join(head)
     if extra:
-        body += f"\n\n…и ещё {extra}"
-    return f"🌊 {len(messages)} алертов за раз —\n\n{body}"
+        body += f"\nи еще {extra}"
+    n = len(messages)
+    word = ("алерт" if n % 10 == 1 and n % 100 != 11 else "алерта" if n % 10 in (2, 3, 4)
+            and n % 100 not in (12, 13, 14) else "алертов")
+    return f"🌊 {n} {word} за раз\n{body}"
 
 
 async def tg_edit(cfg: dict, chat: str, message_id: int, text: str, reply_markup: dict) -> None:
@@ -465,11 +518,15 @@ async def with_notes(session_factory, messages: list[str]) -> list[str]:
         if not got:
             out.append(m)
             continue
-        text = " · ".join(" ".join(n.split()) for n in got)
+        text = "; ".join(" ".join(n.split()) for n in got)
         if len(text) > _NOTE_MAX:
             text = text[:_NOTE_MAX - 3].rstrip() + "..."
-        out.append(Msg(f"{m}\n📝 <i>{html.escape(text)}</i>", m.section, m.group, m.kind,
-                       m.target, m.recovery, m.ref))
+        note = f"\n📝 <i>{html.escape(tg_fmt.clean(text))}</i>"
+        if isinstance(m, Msg):
+            # заметка - контекст для дежурного, она нужна и в коротком тексте
+            out.append(m.tail(note, note))
+        else:
+            out.append(Msg(f"{m}{note}"))
     return out
 
 
@@ -615,7 +672,7 @@ async def record_history(session_factory, messages: list[str]) -> None:
                     section=str(getattr(m, "section", "") or "")[:20],
                     grp=str(getattr(m, "group", "") or "")[:255],
                     recovery=bool(getattr(m, "recovery", False)),
-                    text=html.unescape(_TAG.sub("", str(m)))[:4000],
+                    text=html.unescape(_TAG.sub("", getattr(m, "full", "") or str(m)))[:4000],
                 ))
             await session.commit()
     except Exception:  # noqa: BLE001

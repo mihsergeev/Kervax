@@ -93,7 +93,7 @@ def test_grace_defaults():
 async def test_push_alert_uses_name_and_does_not_fold(client, monkeypatch):
     """У push-монитора нет адреса: в алерте его имя, а два упавших push-монитора - два
     сообщения, а не одно "и еще" (свертка по домену для них не имеет смысла)."""
-    from app import collector
+    from app import alerts, collector
     from app.config import Settings
 
     f = _factory(client)
@@ -115,8 +115,12 @@ async def test_push_alert_uses_name_and_does_not_fold(client, monkeypatch):
     await collector._send_alerts(f, Settings(alert_webhook="http://hook"), pending,
                                  datetime.now(timezone.utc))
     assert len(sent) == 2
-    assert "бэкап-a" in sent[0] and "нет сигнала 2 ч" in sent[0]
-    assert "push" not in str(sent[0]).split("—")[0]
+    # в чат: имя монитора в шапке, что случилось и причина; адреса push-монитора нет нигде
+    assert str(sent[0]).split("\n")[0].endswith(" бэкап-a") and "<b>Не отвечает</b>" in sent[0]
+    assert "нет сигнала 2 ч" in sent[0] and "push" not in str(sent[0])
+    full = alerts.full_text(sent[0])
+    assert "бэкап-a" in full and "нет сигнала 2 ч" in full and "push" not in full.split("—")[0]
+    assert "бэкап-b" in sent[1] and "бэкап-a" not in sent[1]
 
 
 async def test_viewer_does_not_get_token(client, auth_headers):

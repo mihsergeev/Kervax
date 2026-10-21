@@ -16,6 +16,7 @@ import re
 import shlex
 from datetime import datetime
 
+from app import tg_fmt
 from app.compose_cmd import verdict
 
 LAG_WARN = 300  # реплика отстает на 5 минут - предупреждение
@@ -279,6 +280,143 @@ def problems(rep: dict, now: datetime) -> list[tuple[int, str, str]]:
                            f"VACUUM {when}", f"{k}:vac:{d.get('db')}.{d.get('table')}"))
     out.sort(key=lambda r: -r[0])
     return out
+
+
+# ---- короткий алерт в Telegram (формат A, app/tg_fmt.py) ----
+# "Транзакция висит 8 ч / база app, клиент worker-a". Вход - список (уровень, текст, ключ), как его
+# отдает collector.db_health_problems: вид беды - из ключа, имена и сроки - из текста этого же модуля
+# (строки выше), без порогов и подсказок. Несколько бед - что про первую (худшую), остальные
+# короткими названиями
+
+# беда по виду из ключа коротким названием - для строки "Еще: ..."
+_TAG = {"stream": "реплика не получает данные", "lag": "реплика отстает", "xact": "долгая транзакция",
+        "idle": "висит транзакция", "lock": "ждут блокировку", "xid": "wraparound", "vac": "давно не было VACUUM",
+        "hist": "очередь очистки InnoDB", "conn": "отказы в подключении", "parts": "много кусков",
+        "rej": "отклоняются вставки", "delay": "замедляются вставки", "ro": "таблица только на чтение",
+        "queue": "стоит очередь репликации", "mut": "мутация стоит", "rdb": "не сохраняется снимок",
+        "aof": "не пишется AOF", "mem": "кончается память", "link": "реплика без связи"}
+_DUR_RX = re.compile(r"(\d+) сут(?: (\d+) ч)?|(\d+) ч(?: (\d+) мин)?|(\d+) мин")
+
+
+def _kind(key: str) -> tuple[str, str]:
+    """Вид беды из ключа: "pg:app-postgres-1:idle" -> ("idle", ""), "pg::vac:app.t" -> ("vac", "app.t")"""
+    kind = (str(key).split(":", 2) + ["", ""])[2]
+    k, _, sub = kind.partition(":")
+    return k, sub
+
+
+def _secs(s: str) -> int:
+    """Срок из текста _dur ("8 ч 25 мин", "2 сут 3 ч", "40 мин") обратно в секунды"""
+    m = _DUR_RX.search(s or "")
+    if not m:
+        return 0
+    d, dh, h, hm, mi = (int(g) if g else 0 for g in m.groups())
+    return d * 86400 + (dh + h) * 3600 + (hm + mi) * 60
+
+
+def _who_back(who: str) -> str:
+    """Кто держит из текста _who ("база app, worker-a") -> "база app, клиент worker-a" """
+    db, sep, app = str(who or "").partition(", ")
+    if not db.startswith("база "):
+        db, app = "", str(who or "")
+    return ", ".join(p for p in (db, f"клиент {app}" if app else "") if p)
+
+
+def _short_one(lvl: int, text: str, key: str) -> tuple[str, list[str]]:
+    """(что случилось, конкретика) одной беды"""
+    inst, _, body = str(text).partition(": ")
+    eng, _, cont = inst.partition(" ")
+    place = cont or "на хосте"
+    kind, sub = _kind(key)
+
+    def find(rx: str) -> re.Match | None:
+        return re.search(rx, body)
+
+    if kind == "stream":
+        if "репликация стоит" in body:
+            return f"Репликация {eng} стоит", [place]
+        return f"Реплика {eng} не получает WAL", [place]
+    if kind == "lag":
+        m = find(r"отстает(?: от основной)? на (.+)$")
+        sec = _secs(m.group(1)) if m else 0
+        return (f"Реплика {eng} отстает на {tg_fmt.dur(sec)}" if sec else f"Реплика {eng} отстает"), [place]
+    if kind in ("xact", "idle"):
+        word = "идет" if kind == "xact" else "простаивает"
+        m = find(rf"{word} (.+?)(?: \(([^()]*)\))?(?::|;|$)")
+        sec = _secs(m.group(1)) if m else 0
+        who = _who_back(m.group(2)) if m and m.group(2) else ""
+        verb = "идет" if kind == "xact" else "висит"
+        return (f"Транзакция {verb} {tg_fmt.dur(sec)}" if sec else f"Транзакция {verb}"), [who or inst]
+    if kind == "lock":
+        m = find(r"дольше всех (\d+ (?:сут|ч|мин)(?: \d+ (?:ч|мин))?)")
+        sec = _secs(m.group(1)) if m else 0
+        return (f"Запросы ждут блокировку {tg_fmt.dur(sec)}" if sec else "Запросы ждут блокировку"), [inst]
+    if kind == "xid":
+        m = find(r"базы (\S+)")
+        return f"{eng} подходит к остановке записи", [f"база {m.group(1) if m else '?'}, wraparound"]
+    if kind == "vac":
+        m, dm = find(r"([\d.]+) млн мертвых строк"), find(r"VACUUM не было (\d+) дней")
+        what = ("VACUUM ни разу не чистил таблицу" if "ни разу" in body else
+                f"VACUUM не чистил таблицу {tg_fmt.days(int(dm.group(1)))}" if dm else "VACUUM давно не чистил таблицу")
+        return what, [sub + (f", {m.group(1)} млн мертвых строк" if m else "")]
+    if kind == "hist":
+        return "Растет очередь очистки InnoDB", [inst]
+    if kind == "conn":
+        why = "упор в maxclients" if eng == "Redis" else "упор в max_connections"
+        return f"{eng} отказывает в подключениях", [f"{place}, {why}"]
+    if kind == "parts":
+        m = find(r"в (\S+) \(партиция")
+        what = "ClickHouse скоро начнет отклонять вставки" if lvl >= 2 else "ClickHouse замедляет вставки"
+        return what, [f"таблица {m.group(1) if m else '?'}, слияния не успевают"]
+    if kind == "rej":
+        return "ClickHouse отклоняет вставки", [f"{place}, слишком много кусков"]
+    if kind == "delay":
+        return "ClickHouse замедляет вставки", [f"{place}, слишком много кусков"]
+    if kind == "ro":
+        m = find(r"таблица (\S+) в режиме")
+        return "Таблица ClickHouse только на чтение", [f"{m.group(1) if m else '?'}, нет связи с Keeper или места"]
+    if kind == "queue":
+        m = find(r"самой старой задаче (.+?):")
+        sec = _secs(m.group(1)) if m else 0
+        return (f"Очередь репликации ClickHouse стоит {tg_fmt.dur(sec)}" if sec
+                else "Очередь репликации ClickHouse стоит"), [place]
+    if kind == "mut":
+        m = find(r"мутация в (\S+) (?:не выполняется|идет (.+))$")
+        tbl = f"таблица {m.group(1)}" if m else inst
+        if m and m.group(2):
+            return f"Мутация ClickHouse идет {tg_fmt.dur(_secs(m.group(2)))}", [tbl]
+        return "Мутация ClickHouse не выполняется", [tbl]
+    if kind == "rdb":
+        if lvl >= 2:
+            return "Redis отклоняет запись", [f"{place}, не сохраняется снимок на диск"]
+        return "Redis не сохраняет снимок на диск", [f"{place}, при перезапуске данные пропадут"]
+    if kind == "aof":
+        return "Redis отклоняет запись", [f"{place}, не пишется AOF"]
+    if kind == "mem":
+        if lvl >= 2:
+            return "У Redis кончилась память", [f"{place}, запись отклоняется"]
+        m = find(r"занято (\d+)%")
+        return (f"Redis заполнен на {m.group(1)}%" if m else "Redis почти заполнен"), [place]
+    if kind == "link":
+        return "Реплика Redis потеряла связь с основной", [place]
+    # незнакомый вид: первая фраза после имени экземпляра
+    if not body:
+        return tg_fmt.split_detail(text)
+    return tg_fmt.cap(re.split(r": | - | \(|; ", body)[0]), [inst]
+
+
+def tg_short(dh: list[tuple[int, str, str]]) -> tuple[str, list[str]] | None:
+    """Короткий алерт по списку (уровень, текст, ключ), как его отдает collector.db_health_problems:
+    что - про первую беду (худшую), остальные короткими названиями"""
+    if not dh:
+        return None
+    lvl, text, key = dh[0]
+    what, facts = _short_one(lvl, text, key)
+    rest = [_TAG.get(_kind(k)[0], "") for _l, _t, k in dh[1:]]
+    rest = [r for r in rest if r]
+    if rest:
+        facts = facts[:1] + [tg_fmt.fact("Еще", tg_fmt.names(rest, 2))]
+    return what, facts
 
 
 # Что грузит PostgreSQL (dbstat-setup 0.8): разница счетчиков со снимком примерно часовой давности и

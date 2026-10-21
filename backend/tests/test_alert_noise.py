@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import select
 
 from app import collector
+from app.alerts import full_text
 from app.models import Server
 
 
@@ -58,8 +59,11 @@ async def test_copies_of_a_worker_coming_back_one_by_one_are_one_message(tmp_pat
     engine, factory, cfg, sent = await _env(tmp_path, monkeypatch)
     t0 = datetime.now(timezone.utc) + timedelta(days=1)
     await _tick(factory, cfg, t0, _workers(t0, "00", "01"))
-    assert len(sent) == 1 and "воркер listen (Supervisor, контейнер feed-supervisor) падает и поднимается" in sent[0]
-    assert "так 2 копии из 15" in sent[0]
+    full = full_text(sent[0])
+    assert len(sent) == 1 and "воркер listen (Supervisor, контейнер feed-supervisor) падает и поднимается" in full
+    assert "так 2 копии из 15" in full
+    # в чате: копии одной программы - одно имя с числом копий, без "из 15"
+    assert sent[0].split("\n")[1:] ==["<b>Воркеры падают и поднимаются</b>", "listen x2 в feed-supervisor"]
     for i, bad in enumerate([("02",), ("00", "02"), ("05",), ("00", "01", "02", "03")]):
         t = t0 + timedelta(minutes=2 * (i + 1))
         await _tick(factory, cfg, t, _workers(t, *bad))
@@ -164,7 +168,10 @@ async def test_pressure_at_the_same_time_every_day_is_routine(tmp_path, monkeypa
     # четвертый день: в то же время, но держится на час дольше обычного конца - алерт с пометкой
     await episode(3, 0, 300, extra=(60, 200))
     assert len(sent) == 6
-    assert "сегодня держится дольше" in sent[4] and "✅" in sent[5]
+    assert "сегодня держится дольше" in full_text(sent[4]) and "✅" in sent[5]
+    # в чате все равно должно быть сказано, что случилось. Сейчас приходит "<b></b>": алерт уходит
+    # на тике, когда давление уже кончилось (окно остывания), подробностей нет, короткий текст пустой
+    assert sent[4].split("\n")[1] != "<b></b>", sent[4]
     await engine.dispose()
 
 

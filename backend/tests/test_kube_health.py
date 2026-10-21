@@ -5,9 +5,15 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import select
 
 from app import collector
+from app.alerts import full_text
 from app.models import Server
 
 NOW = datetime(2026, 10, 11, 12, 0, tzinfo=timezone.utc)
+
+
+def _jobs(sent: list) -> list:
+    """Алерты об упавших Job среди отправленного (по виду, а не по иконке)"""
+    return [m for m in sent if getattr(m, "kind", "") == "kube_job"]
 
 
 def _kube(**kw):
@@ -98,10 +104,12 @@ async def test_failed_job_event(tmp_path, monkeypatch):
                                                    "reason": "BackoffLimitExceeded"}])
         await s.commit()
     await collector.evaluate_servers(factory, cfg, now + timedelta(seconds=30))
-    jobs = [m for m in sent if m.startswith("💥☸️")]
-    assert len(jobs) == 1 and "упал Job: shop/migrate-42 (BackoffLimitExceeded)" in jobs[0], sent
+    jobs = _jobs(sent)
+    assert len(jobs) == 1 and "упал Job: shop/migrate-42 (BackoffLimitExceeded)" in full_text(jobs[0]), sent
+    # в чате: что случилось и какой Job, без "старого" ops/old
+    assert jobs[0] == "🔴☸️ k8s-a\n<b>Упал Job</b>\nshop/migrate-42 (BackoffLimitExceeded)"
     await collector.evaluate_servers(factory, cfg, now + timedelta(seconds=60))
-    assert len([m for m in sent if m.startswith("💥☸️")]) == 1
+    assert len(_jobs(sent)) == 1
     await engine.dispose()
 
 
@@ -126,7 +134,8 @@ def test_job_pod_and_log_tail():
 
 
 async def test_failed_job_alert_carries_log(tmp_path, monkeypatch):
-    """Алерт о Job ждет хвост лога его пода и приходит уже с ним: почему упал, видно в чате."""
+    """Алерт о Job ждет хвост лога его пода и приходит уже с ним: почему упал, видно в истории
+    алертов и в панели. В чате лог не читается - там Job и причина одной строкой."""
     from app.config import Settings
     from app.db import Base, create_engine_and_factory
     from app.models import KubeCommand
@@ -158,7 +167,7 @@ async def test_failed_job_alert_carries_log(tmp_path, monkeypatch):
     t1 = now + timedelta(seconds=30)
     assert await collector.request_job_logs(factory, t1) == 1
     await collector.evaluate_servers(factory, cfg, t1)
-    assert not [m for m in sent if m.startswith("💥☸️")]  # ждем ответ агента
+    assert not _jobs(sent)  # ждем ответ агента
     async with factory() as s:
         cmd = (await s.execute(select(KubeCommand))).scalars().one()
         assert (cmd.ns, cmd.name, cmd.action) == ("shop", "migrate-42-x7k2p", "logs")
@@ -168,12 +177,15 @@ async def test_failed_job_alert_carries_log(tmp_path, monkeypatch):
     t2 = now + timedelta(seconds=60)
     assert await collector.request_job_logs(factory, t2) == 0  # повторно не спрашиваем
     await collector.evaluate_servers(factory, cfg, t2)
-    jobs = [m for m in sent if m.startswith("💥☸️")]
+    jobs = _jobs(sent)
     assert len(jobs) == 1, sent
-    assert "упал Job: shop/migrate-42 (BackoffLimitExceeded)" in jobs[0]
-    assert "↳ под migrate-42-x7k2p (Error), конец лога:\n<pre>connecting\nValueError: bad &lt;address&gt;</pre>" in jobs[0]
+    full = full_text(jobs[0])
+    assert "упал Job: shop/migrate-42 (BackoffLimitExceeded)" in full
+    assert "↳ под migrate-42-x7k2p (Error), конец лога:\n<pre>connecting\nValueError: bad &lt;address&gt;</pre>" in full
+    # лог в чат не идет
+    assert jobs[0] == "🔴☸️ k8s-a\n<b>Упал Job</b>\nshop/migrate-42 (BackoffLimitExceeded)"
     await collector.evaluate_servers(factory, cfg, now + timedelta(seconds=90))
-    assert len([m for m in sent if m.startswith("💥☸️")]) == 1
+    assert len(_jobs(sent)) == 1
     await engine.dispose()
 
 
@@ -210,12 +222,13 @@ async def test_failed_job_alert_does_not_wait_forever(tmp_path, monkeypatch):
     for sec in (30, 60, 90):
         await collector.request_job_logs(factory, now + timedelta(seconds=sec))
         await collector.evaluate_servers(factory, cfg, now + timedelta(seconds=sec))
-    assert not [m for m in sent if m.startswith("💥☸️")]
+    assert not _jobs(sent)
     late = now + timedelta(seconds=30 + job_logs._WAIT + 1)
     await collector.request_job_logs(factory, late)
     await collector.evaluate_servers(factory, cfg, late)
-    jobs = [m for m in sent if m.startswith("💥☸️")]
-    assert len(jobs) == 1 and "<pre>" not in jobs[0]
+    jobs = _jobs(sent)
+    assert len(jobs) == 1 and "<pre>" not in full_text(jobs[0])
+    assert "упал Job: shop/migrate-42" in full_text(jobs[0])
     await engine.dispose()
 
 

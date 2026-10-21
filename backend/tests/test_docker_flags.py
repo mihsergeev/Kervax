@@ -5,6 +5,8 @@ from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select
 
+from app.alerts import full_text
+
 
 async def test_flags_clear_when_muted(tmp_path, monkeypatch):
     from app import collector
@@ -48,7 +50,10 @@ async def test_flags_clear_when_muted(tmp_path, monkeypatch):
 
     for rc in range(5):  # счетчик растет каждую минуту - цикл
         st = await tick(rc)
-    assert st.get("alerted_loop") and any("w" in m for m in sent)
+    loops = [m for m in sent if getattr(m, "kind", "") == "docker_loop"]
+    assert st.get("alerted_loop") and len(loops) == 1 and "контейнер w" in full_text(loops[0])
+    # в чате имя контейнера как есть, без счетчика рестартов
+    assert loops[0] == "🔴🐳 node\n<b>w перезапускается по кругу</b>", loops[0]
     n = len(sent)
     # заглушили посреди аварии, перезапуски прекратились и вышли из окна
     st = await tick(4, mutes=["docker_loop"], step=timedelta(minutes=20))
@@ -59,7 +64,12 @@ async def test_flags_clear_when_muted(tmp_path, monkeypatch):
     st = await tick(4, state="exited", mutes=[])
     st = await tick(4, state="exited")
     assert st.get("alerted_down")
+    downs = [m for m in sent if getattr(m, "kind", "") == "docker_down"]
+    assert len(downs) == 1 and "контейнер w не работает" in full_text(downs[0]), sent
     n = len(sent)
     st = await tick(4, state="running", mutes=["docker_down"])
     assert not st.get("alerted_down") and len(sent) == n
     await engine.dispose()
+    # причины нет - конкретики тоже нет: строка "не работает" под "Не работает контейнер w" - повтор.
+    # Сейчас приходит "Не работает контейнер w" / "не работает"
+    assert downs[0] == "🔴🐳 node\n<b>Не работает контейнер w</b>", downs[0]

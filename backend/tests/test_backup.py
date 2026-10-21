@@ -320,8 +320,10 @@ async def test_new_backup_client_without_an_agent_alerts_once(tmp_path, monkeypa
         bsrv.last_report = report("stats-a", "app-a", "node-new")
         await s.commit()
     await collector.evaluate_servers(factory, settings, now + timedelta(seconds=30))
+    from app.alerts import full_text
     hits = [x for x in sent if "без агента" in x]
-    assert len(hits) == 1 and "node-new" in hits[0] and "app-a" not in hits[0], sent
+    assert len(hits) == 1 and "node-new" in hits[0] and "app-a" not in full_text(hits[0]), sent
+    assert hits[0] == "⚠️💾 backup-01\n<b>Бэкап пишет нода без агента</b>\nnode-new", hits[0]
     await collector.evaluate_servers(factory, settings, now + timedelta(seconds=60))
     assert len([x for x in sent if "без агента" in x]) == 1  # не повторяется
     await engine.dispose()
@@ -634,8 +636,16 @@ async def test_new_late_repo_alerts_at_once_next_to_an_old_problem(tmp_path, mon
         await s.commit()
     await collector.evaluate_servers(factory, settings, now + timedelta(seconds=30))
     late = [x for x in sent if "web-07" in x]
-    assert len(late) == 1 and "бэкап опоздал" in late[0], sent
+    from app.alerts import full_text
+    assert len(late) == 1 and "бэкап опоздал" in full_text(late[0]), sent
+    # в чате новое - первым: web-07, а уже объявленный vpn-b после
+    assert late[0].split("\n")[2].startswith("web-07"), late[0]
     await engine.dispose()
+    # что случилось - про главное (опоздал бэкап web-07), а не общее "репозитории требуют внимания".
+    # Сейчас приходит "Репозитории требуют внимания" / "web-07, vpn-b"
+    assert "Опаздывает бэкап" in late[0], late[0]
+    # и первое сообщение: "700 дн" в чате должно быть словом ("700 дней"), как в остальных сроках
+    assert " дн<" not in first[0] and " дн\n" not in first[0], first[0]
 
 
 def test_prune_problems_say_why_the_cleanup_does_not_work():
@@ -722,8 +732,12 @@ async def test_prune_alert_waits_for_a_second_failure_but_not_for_a_broken_env(t
     monkeypatch.setattr("app.alerts.send_alert", fake_send)
     settings = Settings(alert_webhook="http://hook")
     await collector.evaluate_servers(factory, settings, now)
-    hits = [x for x in sent if "чистка" in x]
-    assert len(hits) == 1 and "env-broken" in hits[0] and "wrong password" in hits[0] and "lock-once" not in hits[0], sent
+    from app.alerts import full_text
+    hits = [x for x in sent if getattr(x, "kind", "") == "backup_prune"]
+    assert len(hits) == 1 and "env-broken" in hits[0] and "wrong password" in full_text(hits[0]), sent
+    assert "lock-once" not in full_text(hits[0])
+    # в чате: что случилось и какой репозиторий, текст ошибки restic - в панели
+    assert hits[0] == "⚠️🧹 backup-04\n<b>Не работает чистка репозитория</b>\nenv-broken", hits[0]
     later = now + timedelta(hours=27)
     async with factory() as s:
         srv = (await s.scalars(collector.select(Server).where(Server.name == "backup-04"))).first()
@@ -731,7 +745,7 @@ async def test_prune_alert_waits_for_a_second_failure_but_not_for_a_broken_env(t
         srv.last_seen = later
         await s.commit()
     await collector.evaluate_servers(factory, settings, later)
-    hits = [x for x in sent if "чистка" in x]
+    hits = [x for x in sent if getattr(x, "kind", "") == "backup_prune"]
     assert len(hits) == 2 and "lock-once" in hits[1], sent
     await engine.dispose()
 

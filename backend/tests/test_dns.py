@@ -101,9 +101,15 @@ async def test_dns_alert_fires_after_hold_with_the_provider_hint(tmp_path, monke
 
     monkeypatch.setattr("app.alerts.send_alert", fake_send)
     await collector.evaluate_servers(factory, Settings(alert_webhook="http://hook"), now)
+    from app.alerts import full_text
+
     hits = [x for x in sent if "DNS" in x or "резолвер" in x]
     assert hits, sent
-    assert any("Так же у 2 других нод" in x for x in hits), hits
+    # подсказка про провайдера - в полном тексте (история, панель)
+    assert any("Так же у 2 других нод" in full_text(x) for x in hits), hits
+    assert not any("Так же у" in x for x in hits)
+    # резолверы отвечают, но за 5 с: в чате это "тормозит", а не "не отвечает"
+    assert all("DNS тормозит" in x for x in hits), hits
     await engine.dispose()
 
 

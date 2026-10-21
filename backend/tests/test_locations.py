@@ -5,6 +5,7 @@ import pytest
 from sqlalchemy import func, select
 
 from app import bootstrap, checks as checks_mod, collector
+from app.alerts import full_text
 from app.checks import CheckOutcome
 from app.config import Settings
 from app.db import Base, create_engine_and_factory
@@ -181,7 +182,11 @@ async def test_location_partial_alert(tmp_path, monkeypatch):
     now = now + timedelta(seconds=collector._LOC_PARTIAL_SUSTAIN + 30)
     await collector.evaluate_location_alerts(factory, settings, now)
     assert len(sent) == 1
-    assert "🟢 Прямая — доступен" in sent[0] and "🔴 Прокси — недоступен" in sent[0]
+    # в чат: откуда не открывается и откуда открывается; весь список локаций - в полном тексте
+    assert sent[0].startswith("🟠🌍 ") and "<b>Недоступен: Прокси</b>" in sent[0]
+    assert sent[0].endswith("\nДоступен: Прямая")
+    full = full_text(sent[0])
+    assert "🟢 Прямая — доступен" in full and "🔴 Прокси — недоступен" in full
     assert "https://p.example.com/?check=" in sent[0]  # диплинк на монитор
     assert "sec=loc" in sent[0]  # сразу в раздел "Локации"
 
@@ -196,7 +201,8 @@ async def test_location_partial_alert(tmp_path, monkeypatch):
         r.status = "up"
         await s.commit()
     await collector.evaluate_location_alerts(factory, settings, now)
-    assert len(sent) == 1 and "снова доступен" in sent[0]
+    assert len(sent) == 1 and sent[0].startswith("✅ ") and sent[0].endswith(": открывается отовсюду")
+    assert "снова доступен" in full_text(sent[0])
     await engine.dispose()
 
 
@@ -477,7 +483,8 @@ async def test_partial_outage_that_lasts_still_alerts(tmp_path, monkeypatch):
 
     now = now + timedelta(minutes=20)
     await collector.evaluate_location_alerts(factory, settings, now)
-    assert len(sent) == 1 and "Алматы — недоступен" in sent[0]
+    assert len(sent) == 1 and "<b>Недоступен: Алматы</b>" in sent[0]
+    assert "Алматы — недоступен" in full_text(sent[0])
 
     # и отбой по нему приходит, потому что алерт был
     async with factory() as s:
@@ -486,7 +493,7 @@ async def test_partial_outage_that_lasts_still_alerts(tmp_path, monkeypatch):
         await s.commit()
     sent.clear()
     await collector.evaluate_location_alerts(factory, settings, now + timedelta(minutes=1))
-    assert len(sent) == 1 and "снова доступен" in sent[0]
+    assert len(sent) == 1 and "открывается отовсюду" in sent[0] and "снова доступен" in full_text(sent[0])
     await engine.dispose()
 
 
@@ -662,7 +669,9 @@ async def test_broken_proxy_one_alert(tmp_path, monkeypatch):
     now += timedelta(seconds=collector._LOC_PARTIAL_SUSTAIN + 30)
     await collector.evaluate_location_alerts(factory, settings, now)
     assert len(sent) == 1, sent
-    assert "Прокси локации «KZ» не отвечает" in sent[0] and "connect timeout" in sent[0]
+    assert "KZ" in sent[0]
+    full = full_text(sent[0])
+    assert "Прокси локации «KZ» не отвечает" in full and "connect timeout" in full
 
     # тот же сломанный прокси - без повтора
     sent.clear()
@@ -690,8 +699,9 @@ async def test_broken_proxy_one_alert(tmp_path, monkeypatch):
     await collector.evaluate_location_alerts(factory, settings, now)
     now += timedelta(seconds=collector._LOC_PARTIAL_SUSTAIN + 30)
     await collector.evaluate_location_alerts(factory, settings, now)
-    assert sent and all("Прокси локации" not in t for t in sent)
-    assert any("🔴 KZ — недоступен" in t for t in sent)
+    assert sent and all("Прокси локации" not in full_text(t) for t in sent)
+    assert any("<b>Недоступен: KZ</b>" in t for t in sent)
+    assert any("🔴 KZ — недоступен" in full_text(t) for t in sent)
     await engine.dispose()
 
 

@@ -40,9 +40,9 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from app import podnames
+from app import podnames, tg_fmt
 from app.models import Server
-from app.queue_watch import where_text
+from app.queue_watch import times_usual, where_short, where_text
 
 MUTE_PREFIX = "logerr:"
 LOG_MIN = 200  # строк с ошибками за час - меньше не шлем
@@ -303,9 +303,43 @@ def problems(s: Server, now: datetime) -> list[dict]:
         last = str(x.get("last") or "").strip()
         if last:
             text += f"\n↳ {last[:200]}"
-        out.append({"key": k, "label": label(x), "level": lvl, "why": w, "text": text})
+        out.append({"key": k, "label": label(x), "level": lvl, "why": w, "text": text,
+                    # для короткого алерта: где (у подов - уже ворклоад), контейнер пода, счет и обычный час
+                    "where": where_text(str(x.get("where") or "")), "container": str(x.get("container") or ""),
+                    "h1": int(x.get("h1") or 0), "base": base(x)})
     out.sort(key=lambda x: (-x["level"], x["key"]))
     return out
+
+
+# ---- короткий алерт в Telegram (формат A, app/tg_fmt.py) ----
+
+def _short_where(x: dict) -> str:
+    """"Контейнер: proxy-caddy-1", "Под: shop/web (php)": под - по ворклоаду, контейнер пода -
+    когда его имя не повторяет ворклоад"""
+    w = str(x.get("where") or "")
+    name = where_short(w, pods=False)
+    if w.startswith("контейнер "):
+        return tg_fmt.fact("Контейнер", name)
+    if w.startswith("под "):
+        c = str(x.get("container") or "")
+        return tg_fmt.fact("Под", name + (f" ({c})" if c and c not in name else ""))
+    return name
+
+
+def tg_short(lp: list[dict]) -> tuple[str, list[str]] | None:
+    """Короткий алерт по problems(): "Всплеск ошибок в логе / Контейнер: proxy-caddy-1, в 10 раз
+    больше обычного". Что - про первый лог (худший), остальные именами"""
+    if not lp:
+        return None
+    x = lp[0]
+    h1, b = int(x.get("h1") or 0), x.get("base")
+    # обычного не знаем (истории мало) - только где: счет за час в чат не пишем
+    more = times_usual(h1, b) or ("обычно ошибок почти нет" if b is not None else "")
+    facts = [_short_where(x) + (f", {more}" if more else "")]
+    rest = [where_short(str(y.get("where") or ""), pods=False) for y in lp[1:]]
+    if rest:
+        facts.append(tg_fmt.fact("Еще", tg_fmt.names(rest)))
+    return ("Всплеск ошибок в логах" if len(lp) > 1 else "Всплеск ошибок в логе"), facts
 
 
 def view(s: Server, now: datetime) -> dict | None:

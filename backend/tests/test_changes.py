@@ -5,12 +5,18 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import select
 
 from app import changes, collector
+from app.alerts import full_text
 from app.models import Server
 
 NOW = datetime(2026, 10, 11, 12, 0, tzinfo=timezone.utc)
 T = int(NOW.timestamp())
 KEY_A = {"u": "root", "t": "ED25519", "fp": "SHA256:aaaa", "c": "admin@laptop", "f": "/root/.ssh/authorized_keys"}
 KEY_B = {"u": "deploy", "t": "RSA", "fp": "SHA256:bbbb", "c": "", "f": "/home/deploy/.ssh/authorized_keys"}
+
+
+def _access(sent: list) -> list:
+    """Алерты "изменился доступ" среди отправленного (по виду, а не по иконке)"""
+    return [m for m in sent if getattr(m, "kind", "") == "access_change"]
 
 
 def _snap(ts, **kw):
@@ -132,7 +138,7 @@ async def test_access_alert_once_and_ack_api(client, auth_headers, tmp_path, mon
     cfg = Settings(alert_webhook="http://hook")
     await changes.track(factory, now)
     await collector.evaluate_servers(factory, cfg, now)
-    assert not [m for m in sent if m.startswith("🔑")]
+    assert not _access(sent)
     async with factory() as s:
         srv = (await s.execute(select(Server))).scalars().one()
         srv.last_report = {"uptime_seconds": 100000, "extras": {"changes": _snap(t0, keys=[KEY_A, KEY_B])}}
@@ -140,10 +146,12 @@ async def test_access_alert_once_and_ack_api(client, auth_headers, tmp_path, mon
     monkeypatch.setattr(changes, "_last_track", None)
     await changes.track(factory, now + timedelta(minutes=2))
     await collector.evaluate_servers(factory, cfg, now + timedelta(minutes=2))
-    keys = [m for m in sent if m.startswith("🔑")]
-    assert len(keys) == 1 and "добавлен SSH-ключ пользователю deploy" in keys[0], sent
+    keys = _access(sent)
+    assert len(keys) == 1 and "добавлен SSH-ключ пользователю deploy" in full_text(keys[0]), sent
+    # в чате: что случилось и кому, без типа и отпечатка ключа
+    assert keys[0] == "⚠️🔑 node\n<b>Добавлен SSH-ключ</b>\ndeploy", keys[0]
     await collector.evaluate_servers(factory, cfg, now + timedelta(minutes=3))
-    assert len([m for m in sent if m.startswith("🔑")]) == 1
+    assert len(_access(sent)) == 1
     await engine.dispose()
 
     # отметка "это мы" через API
@@ -242,8 +250,8 @@ async def test_fleet_key_is_silent_unknown_key_alerts(tmp_path, monkeypatch):
     monkeypatch.setattr(changes, "_last_track", None)
     await changes.track(factory, now + timedelta(minutes=2))
     await collector.evaluate_servers(factory, cfg, now + timedelta(minutes=2))
-    keys = [m for m in sent if m.startswith("🔑")]
-    assert len(keys) == 1 and "web-c" in keys[0] and "SHA256:xxxx" in keys[0], sent
+    keys = _access(sent)
+    assert len(keys) == 1 and "web-c" in keys[0] and "SHA256:xxxx" in full_text(keys[0]), sent
     async with factory() as s:
         b = (await s.execute(select(Server).where(Server.name == "web-b"))).scalar_one()
         assert [(e["alert"], e.get("known")) for e in b.changes["log"]] == [(False, True)]
@@ -255,5 +263,5 @@ async def test_fleet_key_is_silent_unknown_key_alerts(tmp_path, monkeypatch):
     monkeypatch.setattr(changes, "_last_track", None)
     await changes.track(factory, now + timedelta(minutes=12))
     await collector.evaluate_servers(factory, cfg, now + timedelta(minutes=12))
-    assert len([m for m in sent if m.startswith("🔑")]) == 1, sent
+    assert len(_access(sent)) == 1, sent
     await engine.dispose()

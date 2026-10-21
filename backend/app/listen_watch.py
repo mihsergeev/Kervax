@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 
+from app import tg_fmt
 from app.models import Server
 
 STABLE = timedelta(days=7)
@@ -126,3 +127,18 @@ def problems(srv: Server, now: datetime) -> list[dict]:
                     "text": f"порт {port}{f' ({proc})' if proc else ''} слушался {_days(last - first)} и пропал "
                             f"{ago} назад: то, что его держало, не работает"})
     return out
+
+
+def tg_short(items: list[dict]) -> tuple[str, list[str]] | None:
+    """Алерт listen_gone (вход - problems()): "Пропал порт 5432", "Слушал: postgres"."""
+    if not items:
+        return None
+    ports = [str(x.get("port") or "?") for x in items]
+    procs = [str(x.get("proc") or "") for x in items if x.get("proc")]
+    if len(items) == 1:
+        what = f"Пропал порт {ports[0]}"
+        facts = [tg_fmt.fact("Слушал", procs[0])] if procs else []
+    else:
+        what = f"Пропали порты {tg_fmt.names(ports)}"
+        facts = [tg_fmt.fact("Слушали", tg_fmt.names(procs))] if procs else []
+    return what, facts

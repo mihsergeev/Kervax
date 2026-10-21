@@ -3,6 +3,7 @@ import pytest
 from sqlalchemy import func, select
 
 from app import collector
+from app.alerts import full_text
 from app.checks import CheckOutcome
 from app.config import Settings
 from app.db import Base, create_engine_and_factory
@@ -256,8 +257,9 @@ async def test_alerts_config_api(client: httpx.AsyncClient, auth_headers):
 
 
 async def test_alert_rich_default_format(tmp_path, monkeypatch):
-    """Дефолтный алерт: «<иконка> <адрес-ссылка> — <текст> · монитор». Имя не
-    показываем, но @упоминания из него добавляем (для тегов). Без брендинга."""
+    """Дефолтный алерт: в чат - эмодзи, адрес ссылкой в монитор панели, что случилось и причина;
+    полный (адрес ссылкой на сайт, текст и ссылка "монитор") - в историю. Имя не показываем, но
+    @упоминания из него добавляем (для тегов). Без брендинга."""
     db = (tmp_path / "fmt.db").as_posix()
     engine, factory = create_engine_and_factory(f"sqlite+aiosqlite:///{db}")
     async with engine.begin() as conn:
@@ -285,14 +287,18 @@ async def test_alert_rich_default_format(tmp_path, monkeypatch):
     assert len(sent) == 1
     text, pm = sent[0]
     assert pm == "HTML"
-    # адрес — ссылка на сам сайт; отдельная ссылка «монитор» — на панель
-    assert 'href="https://api.example.com/health"' in text  # открыть сайт
-    assert '<a href="https://panel.example.com/?check=' in text and ">монитор</a>" in text
-    assert "🔴" in text and "timeout of 48000ms exceeded" in text
+    # в чат коротко: адрес ссылкой в монитор панели, что случилось и причина
+    assert text.startswith('🔴🌐 <a href="https://panel.example.com/?check=')
+    assert ">api.example.com/health</a>\n<b>Не отвечает</b>\ntimeout of 48000ms exceeded" in text
+    # полный текст (история, панель): адрес - ссылка на сам сайт, отдельная ссылка "монитор" - на панель
+    full = full_text(text)
+    assert 'href="https://api.example.com/health"' in full  # открыть сайт
+    assert '<a href="https://panel.example.com/?check=' in full and ">монитор</a>" in full
+    assert "🔴" in full and "timeout of 48000ms exceeded" in full
     # имя-текст («Бэкенд») не показываем, но @упоминания сохранены для тегов
-    assert "Бэкенд" not in text
+    assert "Бэкенд" not in text and "Бэкенд" not in full
     assert "@alice" in text and "@bob" in text
-    assert "Kervax" not in text and "«" not in text
+    assert "Kervax" not in text and "«" not in text and "—" not in text
     await engine.dispose()
 
 
@@ -324,15 +330,19 @@ async def test_alert_strips_token_and_dedupes_name(tmp_path, monkeypatch):
     await collector._send_alerts(factory, settings, pending, datetime.now(timezone.utc))
 
     text = sent[0]
+    full = full_text(text)
     # токен нигде: ни в тексте, ни в href ссылки на сайт (query отброшен)
     assert "SECRET123" not in text and "access-token" not in text
-    # ссылка «открыть сайт» — на адрес без query
-    assert 'href="https://shop.example.com/registration/get-active"' in text
-    # ссылка «монитор» — на панель
-    assert '<a href="https://panel.example.com/?check=' in text and ">монитор</a>" in text
+    assert "SECRET123" not in full and "access-token" not in full
+    # в чат отбой одной строкой: адрес без query ссылкой в монитор панели
+    assert text == (f'✅ <a href="https://panel.example.com/?check={cid}">'
+                    "shop.example.com/registration/get-active</a>: снова отвечает")
+    # полный текст: ссылка "открыть сайт" - на адрес без query, "монитор" - на панель
+    assert 'href="https://shop.example.com/registration/get-active"' in full
+    assert '<a href="https://panel.example.com/?check=' in full and ">монитор</a>" in full
     # имя == домен → отдельным текстом НЕ дублируется (в тексте нет « — acs… — »)
-    assert " — shop.example.com —" not in text
-    assert text.startswith("✅ ") and "HTTP 200 · 211 мс" in text
+    assert " — shop.example.com —" not in full
+    assert full.startswith("✅ ") and "HTTP 200 · 211 мс" in full
     await engine.dispose()
 
 
@@ -412,12 +422,13 @@ async def test_domain_alert_collapses_by_registrable_domain(tmp_path, monkeypatc
     monkeypatch.setattr("app.alerts.send_alert", fake_send)
     settings = Settings(alert_webhook="http://hook", panel_url="https://panel.example.com")
 
+    # текст как у collector (DomainAlerts): "регистрация домена <имя> истекает через N дн."
     pending = [
-        ("domain", f"{sub}.example.com", "", "регистрация домена истекает через 4 дн.",
+        ("domain", f"{sub}.example.com", "", "регистрация домена example.com истекает через 4 дн.",
          None, cid, ("domain_alerted_days", 7), "⚠️🌐")
         for sub, cid in zip(subs, ids)
     ] + [
-        ("domain", "example.net", "", "регистрация домена истекает через 12 дн.",
+        ("domain", "example.net", "", "регистрация домена example.net истекает через 12 дн.",
          None, other_id, ("domain_alerted_days", 14), "⚠️🌐")
     ]
     await collector._send_alerts(factory, settings, pending, datetime.now(timezone.utc))
@@ -425,9 +436,12 @@ async def test_domain_alert_collapses_by_registrable_domain(tmp_path, monkeypatc
     # два сообщения: одно про example.com (с пометкой про пять мониторов), одно про чужой
     assert len(sent) == 2, sent
     plg = next(t for t in sent if "example.com" in t)
-    assert "мониторов: 5" in plg
+    # в чат - домен и сколько осталось; сколько мониторов на нем - в полном тексте
+    assert plg.startswith("⚠️🌐 <a ") and ">example.com</a>\n<b>Домен истекает через 4 дня</b>" in plg
+    assert "мониторов" not in plg
+    assert "мониторов: 5" in full_text(plg)
     # в шапке само истекающее имя, а не поддомен одного из мониторов
-    assert "gitlab.example.com" not in plg
+    assert "gitlab.example.com" not in plg and "gitlab.example.com" not in full_text(plg)
     # второе сообщение — про ЧУЖОЙ домен; искать его по «нет example.com» нельзя:
     # ссылка на панель (panel.example.com) есть в обоих
     other = next(t for t in sent if t is not plg)
@@ -468,10 +482,14 @@ async def test_site_and_its_www_failing_together_are_one_message(tmp_path, monke
                ("bad", "other.org", "degraded", "медленно: 4000 мс", None, ids["other.org"], None)]
     await collector._send_alerts(factory, settings, pending, datetime.now(timezone.utc))
     assert len(sent) == 3, sent                      # другой статус и другой домен - отдельно
-    assert "медленно: 3630 мс" in sent[0] and "и www.example.com" in sent[0]
+    # в чат - что случилось и строкой "Еще:" второй адрес, подробности - в полном тексте
+    assert "<b>Тормозит</b>" in sent[0] and sent[0].endswith("\nЕще: www.example.com")
+    assert "медленно: 3630 мс" in full_text(sent[0]) and "и www.example.com" in full_text(sent[0])
     sent.clear()
     rec = [("recovery", "example.com", "up", "HTTP 200 · 614 мс", None, ids["example.com"], None),
            ("recovery", "www.example.com", "up", "HTTP 200 · 352 мс", None, ids["www.example.com"], None)]
     await collector._send_alerts(factory, settings, rec, datetime.now(timezone.utc))
-    assert len(sent) == 1 and "и www.example.com" in sent[0]
+    # отбой одной строкой, второй адрес - в полном тексте
+    assert len(sent) == 1 and "\n" not in sent[0] and "снова отвечает" in sent[0]
+    assert "и www.example.com" in full_text(sent[0])
     await engine.dispose()
