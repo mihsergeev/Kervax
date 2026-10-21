@@ -3101,18 +3101,36 @@ export function getAgentRelease(): Promise<{
   return api<{ version: string; problem?: string }>('/api/servers/agent-release')
 }
 // Выставить target-версию: server_ids=undefined → все включённые (иначе canary/подмножество).
-export function agentUpdate(version: string, serverIds?: number[]): Promise<Server[]> {
+// track - запомнить запуск на панели (ход раскатки в "Обновлениях", см. getFleetRollout)
+export function agentUpdate(version: string, serverIds?: number[], track = false): Promise<Server[]> {
   return api<Server[]>('/api/servers/agent-update', {
     method: 'POST',
-    body: JSON.stringify({ version, server_ids: serverIds ?? null }),
+    body: JSON.stringify({ version, server_ids: serverIds ?? null, track }),
   })
 }
-// Снять target-версию (остановить раскатку).
-export function agentUpdateCancel(serverIds?: number[]): Promise<Server[]> {
+// Снять target-версию (остановить раскатку); untrack - убрать эти ноды и из хода раскатки.
+export function agentUpdateCancel(serverIds?: number[], untrack = false): Promise<Server[]> {
   return api<Server[]>('/api/servers/agent-update/cancel', {
     method: 'POST',
-    body: JSON.stringify({ server_ids: serverIds ?? null }),
+    body: JSON.stringify({ server_ids: serverIds ?? null, untrack }),
   })
+}
+// Ход обновления парка из "Обновлений": что запустили и когда. Хранится на панели, а не во
+// вкладке: прогресс переживает перезагрузку и один у всех. Части нет - не запускали или прошли сутки
+export type FleetRollout = {
+  agent: { v: string; ids: number[]; at: string } | null
+  helpers: { hosts: string[]; at: string } | null
+}
+export function getFleetRollout(): Promise<FleetRollout> {
+  return api<FleetRollout>('/api/servers/fleet-rollout')
+}
+// команду ansible скопировали: панель ждет прогона на этих хостах
+export function startHelperRollout(hosts: string[]): Promise<FleetRollout> {
+  return api<FleetRollout>('/api/servers/fleet-rollout/helpers', { method: 'POST', body: JSON.stringify({ hosts }) })
+}
+// строка ушла или ее скрыли; цели агента не снимаются (для этого agentUpdateCancel)
+export function closeFleetRollout(part: 'agent' | 'helpers'): Promise<FleetRollout> {
+  return api<FleetRollout>(`/api/servers/fleet-rollout/${part}`, { method: 'DELETE' })
 }
 // Ошибки 5xx одного лога за окно: где, сколько, какие коды и пути. Сюда ведёт алерт.
 export type WebErrorRow = {

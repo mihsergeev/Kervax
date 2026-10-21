@@ -51,6 +51,7 @@ export const ACT: Record<string, string> = {
   onboard_done: 'закрыл подключение сервера',
   agent_update: 'обновление агента',
   agent_update_cancel: 'отменил обновление агента',
+  helper_rollout: 'запустил обновление helper\'ов',
   agent_rollout: 'раскатка агента',
   docker_restart: 'перезапустил контейнер',
   docker_stop: 'остановил контейнер',

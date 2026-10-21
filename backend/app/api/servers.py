@@ -46,6 +46,7 @@ from app import traffic as traffic_mod
 from app import usage as usage_mod
 from app import audit, backup_growth, backup_state, bsrv_cleanup, custom_backups, docker_exposure, geoip, kube_coverage, manual_probe, open_ports, os_support
 from app import dump_reason
+from app import fleet_rollout
 from app import oom as oom_mod
 from app import software as software_mod
 from app.collector import (
@@ -86,8 +87,12 @@ from app.schemas import (
     AgentPackagesIn,
     AgentReportIn,
     AgentSiteProbesIn,
+    AgentRunOut,
     AgentUpdateCancel,
     AgentUpdateReq,
+    FleetRolloutOut,
+    HelperRolloutReq,
+    HelperRunOut,
     AlertSnoozeIn,
     BackupCommandIn,
     BackupCommandOut,
@@ -1218,6 +1223,8 @@ async def agent_update(
         s.target_agent_version = body.version
         targeted.append(s.name)
     await session.commit()
+    if body.track and servers:
+        await fleet_rollout.track_agent(session, body.version, [s.id for s in servers])
     await audit.record(
         session, user.username, "agent_update", f"{body.version}: {targeted}"
     )
@@ -1240,9 +1247,57 @@ async def agent_update_cancel(
     for s in servers:
         s.target_agent_version = ""
     await session.commit()
+    if body.untrack:
+        await fleet_rollout.untrack(session, "agent", ids={s.id for s in servers})
     await audit.record(session, user.username, "agent_update_cancel", str(names))
     now = datetime.now(timezone.utc)
     return [_out(s, now) for s in servers]
+
+
+async def _scoped_nodes(user, session) -> tuple[set[int], set[str]]:
+    """id и хосты (как их зовет ansible: hostname, иначе имя) серверов групп учетки."""
+    rows = (await session.execute(
+        scope_query(user, select(Server.id, Server.hostname, Server.name), Server))).all()
+    return {r.id for r in rows}, {r.hostname or r.name for r in rows}
+
+
+@router.get("/fleet-rollout", response_model=FleetRolloutOut)
+async def get_fleet_rollout(user: CurrentUser, session: SessionDep) -> FleetRolloutOut:
+    """Что запущено из "Обновлений" и когда (fleet_rollout.py). Чужие группы не видны:
+    редактор группы получает только свои ноды, пусто - части нет."""
+    data = await fleet_rollout.load(session)
+    ids, hosts = await _scoped_nodes(user, session)
+    out = FleetRolloutOut()
+    if (a := data["agent"]) and (mine := [i for i in a["ids"] if i in ids]):
+        out.agent = AgentRunOut(v=a["v"], ids=mine, at=datetime.fromtimestamp(a["at"], timezone.utc))
+    if (h := data["helpers"]) and (mine_h := [x for x in h["hosts"] if x in hosts]):
+        out.helpers = HelperRunOut(hosts=mine_h, at=datetime.fromtimestamp(h["at"], timezone.utc))
+    return out
+
+
+@router.post("/fleet-rollout/helpers", response_model=FleetRolloutOut)
+async def start_helper_rollout(
+    body: HelperRolloutReq, user: CurrentUser, session: SessionDep
+) -> FleetRolloutOut:
+    """Команду ansible для helper'ов скопировали: панель ее не выполняет, только ждет, пока
+    хосты перестанут требовать прогона (helper_rollout), и показывает прогресс."""
+    _, hosts = await _scoped_nodes(user, session)
+    mine = sorted({h for h in body.hosts if h in hosts})
+    if mine:
+        await fleet_rollout.track_helpers(session, mine)
+        await audit.record(session, user.username, "helper_rollout", str(mine))
+    return await get_fleet_rollout(user, session)
+
+
+@router.delete("/fleet-rollout/{part}", response_model=FleetRolloutOut)
+async def close_fleet_rollout(part: str, user: CurrentUser, session: SessionDep) -> FleetRolloutOut:
+    """Строка ушла (все обновились) или ее скрыли: из хода раскатки уходят ноды учетки.
+    Цели агента не снимаются - для этого "стоп" (agent-update/cancel)."""
+    if part not in ("agent", "helpers"):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Нет такой части")
+    ids, hosts = await _scoped_nodes(user, session)
+    await fleet_rollout.untrack(session, part, ids=ids, hosts=hosts)
+    return await get_fleet_rollout(user, session)
 
 
 @router.get("/{server_id}", response_model=ServerOut)

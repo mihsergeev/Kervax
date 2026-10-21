@@ -33,7 +33,7 @@ import { useAuth } from './auth'
 import { IconBackups, IconDocker, IconKube, IconServers, IconSites } from './icons'
 import { CountryFlag } from './CountryFlag'
 import { NetTile, type Tone } from './NetLinks'
-import { agentBehind, helperGroups, rolloutHosts as fleetHosts, RolloutProgress, UpdateConfirm, useAgentRollout, useViaPanels, ansibleCmd, type HelperGroup, type UpdScope } from './FleetUpdate'
+import { AgentUpdRow, HelperUpdRow, UpdateAllButton, agentBehind, rolloutHosts as fleetHosts, useFleetRollout, useViaPanels } from './FleetUpdate'
 
 // сколько проблемных строк показывать в карточках главной
 const HOME_LIST_LIMIT = 25
@@ -55,14 +55,9 @@ type T = (k: string, p?: Record<string, string | number>) => string
 // представлен строкой, объекта под рукой нет, поэтому код кладём в сам пункт
 type ActItem = {
   key: string; icon: string; section: Section; id?: number; text: string; srv?: boolean; sec?: string; cc?: string; name?: string
-  // обновление по парку (агент, helper'ы, настройка юнита): отдельный блок "Обновления" над
-  // "Требует действий", иначе среди длинных строк по серверам эти пункты терялись
+  // обновление по парку, которое кнопкой не чинится (кривой релиз, отказ самообновления):
+  // блок "Обновления" рядом со строками агента и helper'ов (FleetUpdate.tsx)
   fleet?: boolean
-  // что обновляет кнопка "обновить" на строке блока "Обновления": агент (OTA) или helper'ы
-  // и юнит агента (ansible на hosts)
-  upd?: 'agent' | 'helpers'
-  hosts?: string[]
-  hgrp?: HelperGroup
   // вид проблемы: одинаковые на двух и больше серверах сворачиваются в одну строку со списком
   // серверов (раскрывается кликом); detail - что именно на этом сервере, без его имени
   grp?: string
@@ -314,31 +309,25 @@ function grpLabel(grp: string, t: T): string {
   return fixed[grp] ?? grp
 }
 
-function actionItems(servers: Server[], avail: string, relProblem: string, t: T): ActItem[] {
+function actionItems(servers: Server[], relProblem: string, t: T): ActItem[] {
   const items: ActItem[] = []
   // Релиз агента собран криво (раздаётся не тот бинарь, что подписан) — обновлять
   // нечем, и без этой строки поломка молчит: агенты просто вечно отвергают обновление.
   if (relProblem) {
     items.push({ key: 'agent-release', icon: '⛔', section: 'servers', text: relProblem, fleet: true })
   }
-  const behind = servers.filter((s) => s.online && s.agent_version && avail && s.agent_version !== avail)
-  if (behind.length > 0) {
-    items.push({ key: 'agent-upd', icon: '⬆', section: 'servers', fleet: true, upd: 'agent',
-      text: t('Доступно обновление агента {v}: отстаёт нод — {n}', { v: avail, n: behind.length }) })
-  }
-  // Требования к systemd-ЮНИТУ агента (watchdog и т.п.): агент шлёт caps, бэкенд → agent_advice
-  // (человекочитаемый текст). Агрегируем ПО ТЕКСТУ требования, а не по нодам — иначе один и тот
-  // же «нет watchdog» размножился бы на весь парк. Раскатывается ansible-плейбуком (кнопка ниже).
+  // отстающий агент, helper'ы и настройка юнита агента (watchdog и т.п., раскатывается тем же
+  // плейбуком) - своими строками с кнопками (AgentUpdRow, HelperUpdRow). Здесь остается только
+  // то, что кнопкой не чинится: отказ самообновления агента. Агрегируем ПО ТЕКСТУ, а не по
+  // нодам - иначе одна и та же беда размножилась бы на весь парк.
   const advHosts = new Map<string, string[]>()
   for (const s of servers) {
     if (!s.online) continue
     for (const title of s.agent_advice || []) advHosts.set(title, [...(advHosts.get(title) ?? []), s.hostname || s.name])
   }
   for (const [title, hosts] of advHosts) {
-    // отказ самообновления ansible не чинит - кнопки у такой строки нет, только переход
-    const unit = !servers.some((s) => s.agent_update_error && title.endsWith(s.agent_update_error))
+    if (!servers.some((s) => s.agent_update_error && title.endsWith(s.agent_update_error))) continue
     items.push({ key: `adv-${title}`, icon: '🩺', section: 'servers', fleet: true,
-      upd: unit ? 'helpers' : undefined, hosts,
       text: t('{what}: нод без настройки — {n}', { what: title, n: hosts.length }) })
   }
   for (const s of servers) {
@@ -476,24 +465,6 @@ function actionItems(servers: Server[], avail: string, relProblem: string, t: T)
       items.push({ key: `ssh-${s.id}`, icon: a.level >= 2 ? '⛔' : '🔐', section: 'servers', id: s.id,
         name: s.name, cc: s.country, sec: 'ssh', grp: `ssh-${a.kind}`, detail: a.text, text: `${s.name}: ${a.text}` })
     }
-  }
-  // helper -> ноды, где его ставить или обновлять: одной строкой на helper, а не на ноду.
-  // "устарел (? -> v0.1)" на ноде, где helper'а нет вовсе, вводит в заблуждение: это первая
-  // установка, и делается она тем же прогоном. Одна нода - с ее именем, клик ведет в карточку
-  for (const g of helperGroups(servers)) {
-    const s = g.nodes[0]
-    const many = g.nodes.length > 1
-    const names = shortList(g.nodes.map((x) => x.name), t, 4)
-    items.push({ key: `hlp-${g.key}`, icon: '🧩', section: 'servers', id: s.id, name: many ? undefined : s.name,
-      cc: many ? undefined : s.country, fleet: true, upd: 'helpers', hgrp: g,
-      hosts: g.nodes.map((x) => x.hostname || x.name),
-      text: g.fresh
-        ? many
-          ? t('helper «{helper}» не установлен ({b}): нод - {n} ({list})', { helper: g.name, b: g.b, n: g.nodes.length, list: names })
-          : t('{name}: helper «{helper}» не установлен ({b}) — поставьте', { name: s.name, helper: g.name, b: g.b })
-        : many
-          ? t('helper «{helper}» устарел ({a} → {b}): нод - {n} ({list})', { helper: g.name, a: g.a, b: g.b, n: g.nodes.length, list: names })
-          : t('{name}: helper «{helper}» устарел ({a} → {b}) — переустановите', { name: s.name, helper: g.name, a: g.a, b: g.b }) })
   }
   return items
 }
@@ -707,8 +678,6 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
   )
   const [ov, setOv] = useState<ChecksOverview | null>(null)
   const [servers, setServers] = useState<Server[] | null>(null)
-  // подтверждение обновления в блоке "Обновления": что обновить (все или одна строка)
-  const [plan, setPlan] = useState<UpdScope | null>(null)
   const viaPanels = useViaPanels()
   // отметить проблему сервера известной (📌 в "Что сломано")
   const [knownFor, setKnownFor] = useState<{ id: number; kind: string; title: string } | null>(null)
@@ -826,9 +795,10 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
   const srvWarn = srvProblems.filter((p) => !p.down)
 
   const srvList = servers ?? []
-  const rollout = useAgentRollout(srvList, avail, setServers, onUnauthorized)
-  const allActions = actionItems(srvList, avail, relProblem, t).filter((x) => canSee(x.section))
-  const fleet = allActions.filter((x) => x.fleet)
+  const fleetRun = useFleetRollout(srvList, avail, setServers, onUnauthorized, !isViewer)
+  const allActions = actionItems(srvList, relProblem, t).filter((x) => canSee(x.section))
+  // отказ самообновления, пока идет раскатка, виден в строке агента по ноде - без повтора
+  const fleet = allActions.filter((x) => x.fleet && !(fleetRun.agent && x.key.startsWith('adv-')))
   const actions = allActions.filter((x) => !x.fleet)
   // по разделам: на серверах - сверху, бэкапное - ниже; внутри одинаковое свернуто в группы
   const actGroups = [
@@ -948,20 +918,14 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
   // Хосты для ansible: те, что плейбук реально чинит - устаревший helper (переустановка)
   // ИЛИ не включен watchdog (helper agent-watchdog, ALWAYS)
   const rolloutHosts = fleetHosts(srvList)
-  // "Обновить все" и кнопки строк блока "Обновления": агент OTA через панель, helper'ы командой
-  // ansible; подтверждение, прогресс и итог в самом блоке (FleetUpdate.tsx, тот же код у "Серверов")
+  // Блок "Обновления": строки агента и helper'ов со своими кнопками (подтверждение вторым
+  // кликом в ту же точку, прогресс в строке, по успеху строка уходит сама) - FleetUpdate.tsx,
+  // строка агента та же, что в баннере "Серверов". Ниже - то, что кнопкой не чинится
   const canUpd = !isViewer && canSee('servers')
-  const agentLag = agentBehind(srvList, avail)
-  const agentOn = agentLag.filter((s) => s.online)
-  const fullScope: UpdScope = { agent: agentOn.length > 0, hosts: rolloutHosts, helpers: helperGroups(srvList) }
-  const doUpdate = async (sc: UpdScope) => {
-    if (sc.hosts.length) navigator.clipboard?.writeText(ansibleCmd(sc.hosts, viaPanels))?.catch(() => {})
-    const ids = sc.agent ? agentLag.map((s) => s.id) : []
-    if (await rollout.start(ids, sc.hosts)) setPlan(null)
-  }
-  const canary = async () => {
-    if (agentOn.length) await rollout.start([agentOn[0].id])
-  }
+  const showSrv = canSee('servers')
+  const agentRowOn = showSrv && (agentBehind(srvList, avail).some((s) => s.online) || !!fleetRun.agent)
+  const helperRowOn = showSrv && (rolloutHosts.length > 0 || !!fleetRun.helpers)
+  const updN = fleet.length + (agentRowOn ? 1 : 0) + (helperRowOn ? 1 : 0)
   // строка "Что сломано"; sub - внутри раскрытой группы: сервер и подробности без шапки
   const brokenRow = (it: Broken, sub = false) => (
     <button
@@ -1039,32 +1003,6 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
       </div>
     )
   }
-  // строка "Обновлений": кликается не строка, а ее кнопки - обновить на месте или перейти
-  const fleetRow = (it: ActItem) => (
-    <div key={it.key} className="home-attention-row upd-row">
-      <span className="lk-dot lk-dot-info" />
-      <span className="home-attention-ico">{it.icon}</span>
-      <span className="home-attention-txt">
-        <CountryFlag code={it.cc} /> {it.text}
-      </span>
-      {canUpd && it.upd === 'agent' && agentOn.length > 1 && (
-        <button className="linklike small upd-canary" disabled={rollout.busy} onClick={canary}
-          title={t('Обновить сначала одну ноду (canary), потом остальные')}>
-          {t('canary - 1 нода')}
-        </button>
-      )}
-      {canUpd && it.upd && (
-        <button className="ghost small" disabled={rollout.busy}
-          onClick={() => setPlan(it.upd === 'agent'
-            ? { agent: true, hosts: [], helpers: [] }
-            : { agent: false, hosts: it.hosts ?? [], helpers: it.hgrp ? [it.hgrp] : [] })}>
-          {t('обновить')}
-        </button>
-      )}
-      <button className="ghost small upd-open" title={t('Открыть')}
-        onClick={() => onOpen(it.section, it.id, it.srv, it.sec)}>→</button>
-    </div>
-  )
   const actRow = (it: ActItem) => (
     <button key={it.key} className="home-attention-row" onClick={() => onOpen(it.section, it.id, it.srv, it.sec)}>
       <span className={`lk-dot ${it.fleet ? 'lk-dot-info' : 'lk-dot-warn'}`} />
@@ -1311,26 +1249,24 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
           <LocalProbeHint items={probeHints} onDone={load} />
         </div>
       )}
-      {(fleet.length > 0 || (canSee('servers') && rolloutHosts.length > 0) || rollout.run) && (
+      {updN > 0 && (
         <div className="chart-card net-card home-block home-attention-fleet">
           <div className="upd-head">
-            {cap(t('Обновления'), fleet.length, 'info')}
-            {canUpd && !plan && (fullScope.agent || rolloutHosts.length > 0) && (
-              <button className="upd-all" disabled={rollout.busy} onClick={() => setPlan(fullScope)}>
-                {t('Обновить все')}
-              </button>
-            )}
+            {cap(t('Обновления'), updN, 'info')}
+            {canUpd && <UpdateAllButton servers={srvList} avail={avail} fleet={fleetRun} via={viaPanels} />}
           </div>
-          {fleet.length > 0 && <div className="home-attention-list">{fleet.map(fleetRow)}</div>}
-          {plan && (
-            <UpdateConfirm scope={plan} servers={srvList} avail={avail} via={viaPanels} busy={rollout.busy}
-              onGo={() => doUpdate(plan)} onCancel={() => setPlan(null)} />
-          )}
-          {rollout.err && <div className="upd-err">{rollout.err}</div>}
-          {rollout.run && (
-            <RolloutProgress run={rollout.run} servers={srvList} onClose={rollout.close}
-              onOpen={(id) => onOpen('servers', id)} />
-          )}
+          <div className="home-attention-list">
+            {showSrv && (
+              <AgentUpdRow servers={srvList} avail={avail} fleet={fleetRun} canUpd={canUpd}
+                onOpen={() => onOpen('servers')} onOpenNode={(id) => onOpen('servers', id)} />
+            )}
+            {showSrv && (
+              <HelperUpdRow servers={srvList} fleet={fleetRun} canUpd={canUpd} via={viaPanels}
+                onOpen={() => onOpen('servers')} />
+            )}
+            {fleet.map(actRow)}
+          </div>
+          {fleetRun.err && <div className="upd-err">{fleetRun.err}</div>}
         </div>
       )}
       {actions.length > 0 && (

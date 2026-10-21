@@ -109,7 +109,7 @@ import { SoftwareCard } from './Software'
 import { FixSteps, useFixDone } from './FixSteps'
 import { GpuCard, GpuChip } from './Gpu'
 import { KnownServerList } from './KnownDialog'
-import { agentBehind, RolloutProgress, UpdateConfirm, useAgentRollout } from './FleetUpdate'
+import { AgentUpdRow, agentBehind, useFleetRollout } from './FleetUpdate'
 import { MaintBanner, MaintChip } from './MaintModal'
 
 type MetricKey =
@@ -4927,19 +4927,16 @@ export function ServersPage({ onUnauthorized, openServerId, openServerSec, onCon
 
   // доступная (подписанная) версия агента для управляемого обновления
   const [avail, setAvail] = useState('')
-  // "Обновить все": подтверждение и прогресс - общий код с главной (FleetUpdate.tsx)
-  const [updPlan, setUpdPlan] = useState(false)
-  const agentRun = useAgentRollout(servers ?? [], avail, setServers, onUnauthorized)
+  // обновление агента: та же строка, что на главной (FleetUpdate.tsx), здесь еще с canary
+  const fleetRun = useFleetRollout(servers ?? [], avail, setServers, onUnauthorized, !isViewer)
   useEffect(() => {
     getAgentRelease()
       .then((r) => setAvail(r.version))
       .catch(() => setAvail(''))
   }, [])
 
-  // серверы, которые онлайн, отчитались о версии и отстают от доступной; цель ставится
-  // и тем, что не на связи (agentBehind): обновятся, когда вернутся
-  const lagging = agentBehind(servers ?? [], avail)
-  const behind = lagging.filter((s) => s.online)
+  // серверы, которые онлайн, отчитались о версии и отстают от доступной
+  const behind = agentBehind(servers ?? [], avail).filter((s) => s.online)
   // заглушенное (пороги и алерты серверов) - плиткой "Заглушено" рядом с остальными, весь
   // список в панели справа: мьют видно, не открывая карточку (иначе бессрочный теряется молча).
   // Мьюты репозиториев и покрытия бэкапа живут на своей странице "Бэкапы"
@@ -5120,48 +5117,12 @@ export function ServersPage({ onUnauthorized, openServerId, openServerSec, onCon
         </div>
       )}
 
-      {!isViewer && behind.length > 0 && (
-        <div className="agent-update-banner">
-          <span className="aub-text">
-            {t('Доступна версия агента {v}. Отстают: {n}.', {
-              v: avail,
-              n: behind.length,
-            })}
-            {/* медленный канал (РФ-ноды за DPI): показываем прогресс, иначе выглядит как
-                «обновление не идёт», хотя докачка продолжается сама */}
-            {behind.some((s) => s.agent_update_note) && (
-              <span className="muted small aub-progress">
-                {behind
-                  .filter((s) => s.agent_update_note)
-                  .map((s) => `${s.name}: ${s.agent_update_note}`)
-                  .join(' · ')}
-              </span>
-            )}
-          </span>
-          <div className="aub-actions">
-            <button
-              className="ghost"
-              disabled={agentRun.busy}
-              onClick={() => agentRun.start([behind[0].id])}
-              title={t('Обновить сначала одну ноду (canary), потом остальные')}
-            >
-              {t('Canary — 1 ноду')}
-            </button>
-            <button disabled={agentRun.busy || updPlan} onClick={() => setUpdPlan(true)}>
-              {t('Обновить все ({n})', { n: behind.length })}
-            </button>
-          </div>
+      {!isViewer && (behind.length > 0 || fleetRun.agent) && (
+        <div className="agent-update-banner upd-banner">
+          <AgentUpdRow servers={servers ?? []} avail={avail} fleet={fleetRun} canUpd canary
+            onOpenNode={(id) => setDetailId(id)} />
+          {fleetRun.err && <div className="upd-err">{fleetRun.err}</div>}
         </div>
-      )}
-      {!isViewer && updPlan && behind.length > 0 && (
-        <UpdateConfirm scope={{ agent: true, hosts: [], helpers: [] }} servers={servers ?? []} avail={avail}
-          via={false} busy={agentRun.busy} onCancel={() => setUpdPlan(false)}
-          onGo={async () => { if (await agentRun.start(lagging.map((s) => s.id))) setUpdPlan(false) }} />
-      )}
-      {agentRun.err && <div className="upd-err">{agentRun.err}</div>}
-      {agentRun.run && (
-        <RolloutProgress run={agentRun.run} servers={servers ?? []} onClose={agentRun.close}
-          onOpen={(id) => setDetailId(id)} />
       )}
       {mutesOpen && (
         <MutesPanel
