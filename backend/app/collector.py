@@ -54,6 +54,7 @@ from app import disk_mute
 from app import fill_alert
 from app import software as software_mod
 from app import tamper as tamper_mod
+from app import webfiles as webfiles_mod
 from app import parents as parents_mod
 from app import maint
 from app import tg_bot
@@ -342,7 +343,7 @@ _BACKUP_SEC = {"backup_failed": "runs", "backup_stale": "runs", "backup_growth":
 _BSRV_SEC = {"backup_repo": "repos", "backup_lock": "repos", "backup_unmonitored": "repos", "backup_check": "repos",
              "backup_prune": "cleanup", "backup_rotation": "cleanup"}
 # раздел карточки сервисов ноды по алерту и по проблеме
-_SVC_SEC = {"queue": "queues", "queue_stuck": "queues", "queue_failed": "queues", "workers": "workers", "cron_stuck": "cron", "log_errors": "logs", "fpm": "fpm", "db_conn": "db", "db_health": "db", "web_config": "web", "web_cert": "certs",
+_SVC_SEC = {"queue": "queues", "queue_stuck": "queues", "queue_failed": "queues", "workers": "workers", "cron_stuck": "cron", "log_errors": "logs", "fpm": "fpm", "db_conn": "db", "db_health": "db", "web_config": "web", "web_cert": "certs", "webfiles": "files",
             "llm": "llm"}
 _KUBE_TAB = {"kube_expiry": "expiry", "flux_down": "flux", "flux_stale": "flux", "kube_pod": "pods",
              "kube_cron": "cron", "kube_node": "nodes", "kube_job": "cron", "kube_restarts": "restarts"}
@@ -373,7 +374,7 @@ _ALERT_SECTION = {
     "docker_restarts": "docker",
     "kube_restarts": "kuber",
     "db_health": "services",
-    "web_config": "services",
+    "web_config": "services", "webfiles": "services",
     "web_cert": "services",
     "llm": "services",
 }
@@ -1826,6 +1827,8 @@ def _recovery_detail(key: str, st: dict, ctx: dict) -> str:
         return "сертификаты веб-серверов снова в сроке"
     if key == "web_config":
         return "конфиги веб-серверов снова проходят проверку"
+    if key == "webfiles":
+        return "новых php в файлах сайтов больше нет"
     if key == "db_health":
         return "базы снова в порядке: реплики догнали, долгих транзакций и блокировок нет"
     if key == "ssh_risk":
@@ -4003,6 +4006,10 @@ def server_problems(s: Server, now: datetime, pod_names: dict[str, str] | None =
     # Конфиг веб-сервера не проходит проверку: ведет в "Сервисы" ноды
     for lv, txt, _key in web_config.problems(rep, now):
         add("web_config", lv, txt, "web", "web_config", section="services")
+    # Новые php и правки кода вне выкладки в веб-корне без своего монитора (app/webfiles.py):
+    # ведет в "Сервисы" ноды, раздел "Файлы сайтов"
+    for lv, txt, _key in webfiles_mod.problems(getattr(s, "webfiles", None)):
+        add("webfiles", lv, txt, "files", "webfiles", section="services")
     # Здоровье баз: ведет в "Сервисы" ноды, где инвентарь СУБД
     for lv, txt, _key in db_health_problems(s, rep, now):
         add("db_health", lv, txt, "db", "db_health", section="services")
@@ -4078,7 +4085,7 @@ _SIGNALS = {6: "ABRT", 9: "KILL", 11: "SEGV", 15: "TERM"}
 # ноды, и каждые 10 минут снова. kervax-agent, kervax-dumps (дампы баз для бэкапа) и kervax-relay
 # (ретранслятор, через него ходят агенты других серверов) не тут: их падение - повод для алерта.
 _OWN_HELPER_UNIT = re.compile(
-    r"kervax-(changes|cron|db-stats|disk-health|disk-usage|fpm|gpu|kube-expiry|kube-flux|logerr|queues|relay-sync|sockfix|units|web-rate|web-sites|workers"
+    r"kervax-(changes|cron|db-stats|disk-health|disk-usage|fpm|gpu|kube-expiry|kube-flux|logerr|queues|relay-sync|sockfix|units|web-rate|web-sites|webfiles|workers"
     r"|[a-z]+-req)\.service")
 
 # Задание по таймеру, которое падает на каждом запуске, между падениями несколько минут
@@ -5973,6 +5980,15 @@ def _server_conditions(s: Server, now: datetime,
         out["web_config"] = (max((lv for lv, _t, _k in wc), default=0),
                              {"detail": "; ".join(t for _l, t, _k in wc[:3]), "sig": [k for _l, _t, k in wc], "items": wc,
                               "parts": [(k, t) for _l, t, k in wc]})
+    # Новые php в веб-корне без своего монитора (helper webfiles-setup): похоже на взлом. Одна
+    # правка вне выкладки - только строка в "Что сломано", в Telegram тихо. sig - какие файлы,
+    # чтобы новый php дал свой алерт
+    if getattr(s, "webfiles", None):
+        wf = webfiles_mod.problems(s.webfiles)
+        bad = [p for p in wf if p[0] >= 2]
+        out["webfiles"] = (3 if bad else 0,
+                           {"detail": "; ".join(t for _l, t, _k in bad[:3]), "sig": [k for _l, _t, k in bad],
+                            "items": bad, "parts": [(k, t) for _l, t, k in bad]})
     # Здоровье баз (helper dbstat-setup 0.5): реплика, долгие транзакции, блокировки, wraparound,
     # VACUUM. sig - что именно, чтобы новая беда при том же уровне дала свой алерт
     if online and db_health.block(rep, now) is not None:
@@ -6428,7 +6444,7 @@ async def evaluate_servers(
                 continue
             prev = int(st.get(key, 0))
             if key in ("disk_health", "units", "docker_restarts", "kube_restarts", "mem_leak", "db_health",
-                       "web_config", "web_cert", "listen_gone", "docker_risk", "access_risk", "link", "gpu",
+                       "web_config", "web_cert", "webfiles", "listen_gone", "docker_risk", "access_risk", "link", "gpu",
                        "queue_stuck", "queue_failed", "workers", "cron_stuck", "log_errors", "fpm"):
                 # Тот же уровень, но сломалось НОВОЕ (второй диск при уже развалившемся
                 # RAID, второй упавший юнит): молчать нельзя, хотя уровень не вырос. Что
@@ -7720,6 +7736,8 @@ async def collector_loop(
             # логи упавших Job - до алертов: алерт о Job ждет хвост лога его пода
             await stage("логи упавших Job", request_job_logs(
                 session_factory, datetime.now(timezone.utc)))
+            # файлы сайтов (helper webfiles-setup) - до алертов: признаки нужны и серверу, и сайтам
+            await stage("файлы сайтов", webfiles_mod.track(session_factory, datetime.now(timezone.utc)))
             await stage("серверные алерты", evaluate_servers(
                 session_factory, settings, datetime.now(timezone.utc)))
             await stage("окна обслуживания", maintenance_tick(

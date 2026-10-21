@@ -1527,6 +1527,8 @@ class ServerOut(BaseModel):
     web_config: list[dict] | None = None
     # сертификаты nginx со сроком в днях: [{where, file, label, days}] (web_certs.view)
     web_certs: list[dict] | None = None
+    # файлы сайтов: веб-корни, новые php и правки вне выкладки (webfiles.view)
+    webfiles: dict | None = None
     backup_audit_mutes: list[str] | None = None  # приглушённые находки покрытия (по ключу)
     backup_not_required: bool = False  # у сервера бэкап не требуется (алерт снят)
     db_dumps_ok: bool = False  # дампы СУБД настроены отдельно (пункт снят с главной)

@@ -40,6 +40,7 @@ export const ACT: Record<string, string> = {
   relay_on: 'включил ретранслятор для агентов',
   relay_off: 'выключил ретранслятор для агентов',
   changes_ack: 'отметил изменения доступа своими',
+  webfiles_accept: 'отметил новые файлы сайта своими',
   exposure_scan: 'проверил, что открыто в интернет',
   disk_autofix_on: 'включил автоочистку диска',
   disk_autofix_off: 'выключил автоочистку диска',

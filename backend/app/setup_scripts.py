@@ -76,6 +76,13 @@ def setup_needed(name: str, rep: dict, mutes: list[str] | None = None, relay: bo
     # helper 0.7 шел, и устаревший helper там никто не флагал
     if name == "webserver-setup":
         return bool(rep.get("web_services")) or bool((rep.get("extras") or {}).get("web-rate"))
+    # webfiles-setup - где сайты на самом сервере: nginx или Apache (в том числе в контейнерах),
+    # пулы PHP-FPM от fpm-setup или helper уже присылает файлы. Только прокси (Traefik, Envoy,
+    # ingress) - не повод: кода сайтов на такой ноде нет
+    if name == "webfiles-setup":
+        kinds = {str((w or {}).get("kind") or "") for w in rep.get("web_services") or [] if isinstance(w, dict)}
+        ex = rep.get("extras") or {}
+        return bool(kinds & {"nginx", "Apache"}) or bool(ex.get("fpm")) or bool(ex.get("webfiles"))
     # dbstat-setup — только там, где СУБД реально есть (скан процессов агента);
     # на ноде без баз инвентарь пустой, флагать нечего
     if name == "dbstat-setup":
@@ -140,6 +147,7 @@ _HELPER_LABEL = {
     "fpm-setup": "пулы PHP-FPM",
     "sockfix-setup": "compose внешнего прокси: сокет и образ",
     "relay-setup": "ретранслятор для агентов",
+    "webfiles-setup": "новые php и правки в файлах сайтов",
 }
 
 

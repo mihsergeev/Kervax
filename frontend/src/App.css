@@ -7744,3 +7744,8 @@ button.upd-go.upd-sure, button.upd-go.upd-sure:hover {
   .tamper-txt { flex: 1 1 calc(100% - 4rem); }
   .tamper-when, .tamper-row > button { margin-left: 2.2rem; }
 }
+
+/* Файлы сайтов в "Сервисах" ноды (WebFiles.tsx) */
+.webfiles-root { display: flex; flex-direction: column; gap: 0.2rem; padding: 0.4rem 0; border-bottom: 1px solid var(--border); }
+.webfiles-root:last-child { border-bottom: 0; }
+.webfiles-head { display: flex; flex-direction: column; gap: 2px; padding: 0 0.3rem; overflow-wrap: anywhere; }

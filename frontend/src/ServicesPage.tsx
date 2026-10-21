@@ -37,6 +37,7 @@ import { EngineIcon } from './engineIcon'
 import { CRON_MUTE, FPM_MUTE, LOGERR_MUTE, QFAIL_MUTE, QSTUCK_MUTE, WORKER_MUTE } from './mutes'
 import { OsIcon } from './osIcon'
 import { CountryFlag } from './CountryFlag'
+import { WebFiles, webfilesBad } from './WebFiles'
 import { byteUnits } from './units'
 import { NetTile, TileFilterChip, useTileFilter } from './NetLinks'
 import { EXPIRY_SHOW_DAYS, EXPIRY_WARN_DAYS, expiryTone } from './checkUtils'
@@ -1736,6 +1737,7 @@ const SVC_SECTIONS: SecDef[] = [
   { id: 'web', label: 'Веб-серверы', group: 'Веб' },
   { id: 'sites', label: 'Сайты', group: 'Веб' },
   { id: 'certs', label: 'Сертификаты', group: 'Веб' },
+  { id: 'files', label: 'Файлы сайтов', group: 'Веб' },
   { id: 'fpm', label: 'PHP-FPM', group: 'Веб' },
   { id: 'db', label: 'Базы и хранилища', group: 'Данные' },
   { id: 'queues', label: 'Очереди', group: 'Данные' },
@@ -1747,7 +1749,7 @@ const SVC_SECTIONS: SecDef[] = [
 const SVC_SEC_IDS = new Set(SVC_SECTIONS.map((x) => x.id))
 // раздел карточки по виду проблемы, если бэкенд его не назвал (старый бэкенд в кэше вкладки)
 const SVC_SEC_OF_KIND: Record<string, string> = {
-  queue: 'queues', queue_stuck: 'queues', workers: 'workers', cron_stuck: 'cron', log_errors: 'logs', fpm: 'fpm', web_cert: 'certs', web_config: 'web', db_health: 'db', db_conn: 'db', llm: 'llm',
+  queue: 'queues', queue_stuck: 'queues', workers: 'workers', cron_stuck: 'cron', log_errors: 'logs', fpm: 'fpm', web_cert: 'certs', web_config: 'web', webfiles: 'files', db_health: 'db', db_conn: 'db', llm: 'llm',
 }
 
 function ServerServicesModal({ srv, onClose, onChanged, initialSec, sites }: {
@@ -1845,6 +1847,7 @@ function ServerServicesModal({ srv, onClose, onChanged, initialSec, sites }: {
     web: web.length > 0,
     sites: siteList.length > 0,
     certs: certs.length > 0,
+    files: (s.webfiles?.roots ?? []).length > 0,
     db: dbItems.length > 0,
     queues: rabbit.length > 0,
     workers: wDaemons.length > 0 || (s.workers_skipped ?? []).length > 0,
@@ -1873,6 +1876,7 @@ function ServerServicesModal({ srv, onClose, onChanged, initialSec, sites }: {
     ),
     sites: sites.hosts ? t('всего {n}, все на мониторинге', { n: siteList.length }) : t('всего {n}', { n: siteList.length }),
     certs: nextCert ? t('ближайший: {l} через {n} дн', { l: nextCert.label, n: nextCert.days }) : '',
+    files: webfilesBad(s) ? '' : t('веб-корней: {n}, новых php и правок вне выкладки нет', { n: (s.webfiles?.roots ?? []).length }),
     db: subOf(
       [...new Set(dbItems.map((it) => it.kind))].join(', '),
       dbRows.length > 0 && t('баз: {n}', { n: dbRows.length }),
@@ -2156,6 +2160,8 @@ function ServerServicesModal({ srv, onClose, onChanged, initialSec, sites }: {
                 })}
               </div>
             )}
+
+            {cur.id === 'files' && <WebFiles s={s} onChanged={onChanged} />}
 
             {cur.id === 'db' && (
               <div className="net-cards">

@@ -35,6 +35,7 @@ from app import ssh_audit
 from app import web_certs
 from app import web_upstream
 from app import web_config
+from app import webfiles as webfiles_mod
 from app import changes as srv_changes
 from app import known
 from app import onboard
@@ -293,6 +294,7 @@ def _out(
     o.fpm = fpm_pools.view(server, now)
     o.web_config = web_config.view(server.last_report or {}, now)
     o.web_certs = web_certs.view(server.last_report or {}, now)
+    o.webfiles = webfiles_mod.view(server.webfiles, server.last_report or {}, now)
     # старые образы прокси с решением "оставить как есть" и шагами обновления под ноду
     o.proxy_outdated = docker_exposure.old_view(server.last_report or {}, now.timestamp(), server.alert_mutes)
     o.disk_analyze = disk_analyze_ok(server.last_report or {})
@@ -609,6 +611,7 @@ _SETUP_LABEL = {
     "fpm-setup": "Пулы PHP-FPM",
     "sockfix-setup": "Compose внешнего прокси: сокет и образ",
     "relay-setup": "Ретранслятор для агентов",
+    "webfiles-setup": "Файлы сайтов: новые php и правки",
 }
 
 
@@ -1478,6 +1481,23 @@ async def changes_ack(server_id: int, user: CurrentUser, session: SessionDep) ->
     await session.commit()
     await session.refresh(s)
     await audit.record(session, user.username, "changes_ack", s.name, "")
+    return _out(s, datetime.now(timezone.utc))
+
+
+@router.post("/{server_id}/webfiles-accept", response_model=ServerOut)
+async def webfiles_accept(server_id: int, body: dict, user: CurrentUser, session: SessionDep) -> ServerOut:
+    """Новые php и правки в веб-корне - свои (app/webfiles.py): root - какой корень (пусто - все),
+    key - php или edit (пусто - оба). Строка и признаки уходят, следующий новый файл снова виден."""
+    s = await _get_or_404(server_id, session, user)
+    if user.role == "viewer":
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Нужны права оператора")
+    root, key = str(body.get("root") or ""), str(body.get("key") or "")
+    if key not in ("", "php", "edit"):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Принимать нечего")
+    s.webfiles = webfiles_mod.accept(s.webfiles, root, key)
+    await session.commit()
+    await session.refresh(s)
+    await audit.record(session, user.username, "webfiles_accept", s.name, f"{root} {key}".strip())
     return _out(s, datetime.now(timezone.utc))
 
 
