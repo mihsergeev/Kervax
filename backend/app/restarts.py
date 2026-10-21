@@ -42,19 +42,39 @@ def targets(rep: dict) -> dict[str, int]:
     return out
 
 
-def step(prev: dict | None, rc: int, now: datetime) -> dict:
+def step(prev: dict | None, rc: int, now: datetime, last: dict | None = None) -> dict:
     """Новое состояние счетчика: прирост RestartCount с прошлого раза - событие [время, сколько].
-    Счетчик уменьшился - контейнер пересоздали (деплой), это не падение, а новая точка отсчета."""
+    Счетчик уменьшился - контейнер пересоздали (деплой), это не падение, а новая точка отсчета.
+    last - как кончился прошлый запуск пода (агент 2.43); его нет в отчете - держим известный."""
     p = prev if isinstance(prev, dict) else {}
     ev = []
     for e in p.get("ev") or []:
         t = _ts(e[0]) if isinstance(e, list) and len(e) == 2 else None
         if t is not None and (now - t).total_seconds() <= WINDOW:
             ev.append(e)
-    last = p.get("rc")
-    if isinstance(last, int) and rc > last:
-        ev.append([now.isoformat(), rc - last])
-    return {"rc": rc, "ev": ev[-_KEEP:]}
+    was = p.get("rc")
+    if isinstance(was, int) and rc > was:
+        ev.append([now.isoformat(), rc - was])
+    out = {"rc": rc, "ev": ev[-_KEEP:]}
+    known = last or (p.get("last") if isinstance(p.get("last"), dict) else None)
+    if known and rc:
+        out["last"] = known
+    return out
+
+
+# Поля last, которые панель помнит между отчетами. Причина прошлого завершения пропадает из
+# отчета, когда под удаляют на выкладке: kubelet оставляет у пода один мертвый контейнер, только
+# что убитый, а прошлый (по нему Last State) стирает. Воркеры, которые по плану выходят с кодом 0,
+# на минуту выкладки становились "причина неизвестна" и давали алерт, а на следующем отчете,
+# когда старых подов уже нет, - отбой "поды восстановлены". И так на каждой выкладке.
+_LAST_KEYS = ("c", "r", "x", "t", "lim", "probe", "pmsg", "log", "msg")
+
+
+def _last_of(p: dict | None) -> dict | None:
+    last = (p or {}).get("last")
+    if not isinstance(last, dict):
+        return None
+    return {k: last[k] for k in _LAST_KEYS if last.get(k) not in (None, "")} or None
 
 
 def update(state: dict | None, rep: dict, now: datetime) -> dict:
@@ -62,7 +82,8 @@ def update(state: dict | None, rep: dict, now: datetime) -> dict:
     отчете нет самого источника (агент на минуту потерял доступ к Docker или к кластеру), его
     счетчики держим как были: иначе прошлые сутки перезапусков потерялись бы."""
     old = state if isinstance(state, dict) else {}
-    new = {k: step(old.get(k), rc, now) for k, rc in targets(rep).items()}
+    pods = _pods(rep)
+    new = {k: step(old.get(k), rc, now, _last_of(pods.get(k))) for k, rc in targets(rep).items()}
     has_docker = bool(((rep or {}).get("docker") or {}).get("access"))
     has_pods = "pods" in (((rep or {}).get("kube") or {}))
     for k, v in old.items():
@@ -218,10 +239,10 @@ def _stall(snap: object) -> bool:
 
 
 def bursts(rs: dict, ctrl: dict[str, str], now: datetime, skip: set[str] | None = None,
-           pods: dict[str, dict] | None = None) -> list[dict]:
+           lasts: dict[str, dict | None] | None = None) -> list[dict]:
     """Пачки перезапусков подов за сутки: {"t" (последний в пачке), "pods" (ключи), "wl" (ворклоады),
     "node" (подвисание ноды подтверждено), "psi" (самое сильное давление в эти минуты)}. skip - поды,
-    которые в пачки не идут (плановый выход, заглушенные)."""
+    которые в пачки не идут (плановый выход, заглушенные); lasts - как кончился прошлый запуск пода."""
     skip = skip or set()
     evs = sorted((t, k) for k, cs in rs.items() if k.startswith("pod:") and k not in skip
                  for t, _n in _events(cs, now))
@@ -242,7 +263,7 @@ def bursts(rs: dict, ctrl: dict[str, str], now: datetime, skip: set[str] | None 
         snaps = [x for t, x in psi if (t0 - timedelta(seconds=90)) <= t <= (t1 + timedelta(seconds=90))]
         stall = [x for x in snaps if _stall(x)]
         keys = sorted({k for _t, k in g})
-        signs = [v for v in (_node_sign((pods or {}).get(k, {}).get("last")) for k in keys) if v is not None]
+        signs = [v for v in (_node_sign((lasts or {}).get(k)) for k in keys) if v is not None]
         node = bool(stall) or (len(signs) >= 2 and sum(signs) * 2 >= len(signs))
         top = max(stall or snaps, key=lambda x: max(float(x.get(k) or 0) for k in _PSI_STALL), default=None)
         out.append({"t": t1, "pods": keys, "wl": wl, "ev": {(k, t) for t, k in g}, "node": node,
@@ -258,9 +279,11 @@ def _pod_rows(s: Server, now: datetime) -> tuple[list[dict], list[dict]]:
     ctrl = podnames.ctrls(s.last_report)
     pods = _pods(s.last_report)
     muted = muted_keys(s)
-    skip = {k for k in rs if k.startswith("pod:") and (
-        cause((pods.get(k) or {}).get("last"))[0] == "exit0" or podnames.muted(muted, k, ctrl.get(k, "")))}
-    bl = bursts(rs, ctrl, now, skip, pods)
+    # причина из отчета, а нет ее там - последняя известная (см. _LAST_KEYS)
+    lasts = {k: (pods.get(k) or {}).get("last") or (rs[k].get("last") if isinstance(rs[k], dict) else None)
+             for k in rs if k.startswith("pod:")}
+    skip = {k for k in lasts if cause(lasts[k])[0] == "exit0" or podnames.muted(muted, k, ctrl.get(k, ""))}
+    bl = bursts(rs, ctrl, now, skip, lasts)
     # в счет пода не идут только перезапуски из пачек, где подтверждено подвисание ноды
     in_burst = set().union(*(b["ev"] for b in bl if b["node"])) if bl else set()
     rows = []
@@ -273,10 +296,11 @@ def _pod_rows(s: Server, now: datetime) -> tuple[list[dict], list[dict]]:
         n = sum(c for _t, c in evs)
         solo = sum(c for t, c in evs if (key, t) not in in_burst)
         p = pods.get(key) or {}
-        ck, ctext = cause(p.get("last"))
+        ck, ctext = cause(lasts.get(key))
         alert = ck != "exit0" and (n >= MIN_OOM if ck == "oom" else solo >= MIN)
         rows.append({"key": key, "n": n, "solo": solo, "last": max(t for t, _c in evs), "times": sorted(t for t, _c in evs),
-                     "ck": ck, "cause": ctext, "alert": alert, "ctrl": ctrl.get(key, ""), "pod": p})
+                     "ck": ck, "cause": ctext, "alert": alert, "ctrl": ctrl.get(key, ""), "pod": p,
+                     "lastinfo": lasts.get(key)})
     return rows, bl
 
 
@@ -374,7 +398,7 @@ def kube_view(s: Server, now: datetime) -> dict | None:
     pods = [{
         "ns": r["key"][4:].partition("/")[0], "name": r["key"][4:].partition("/")[2], "n": r["n"],
         "solo": r["solo"], "times": [t.isoformat() for t in r["times"][-30:]], "kind": r["ck"],
-        "why": r["cause"], "last": r["pod"].get("last"), "alert": r["alert"],
+        "why": r["cause"], "last": r["lastinfo"], "alert": r["alert"],
         "mute": MUTE_PREFIX + podnames.pod_key(r["key"], r["ctrl"]),
         "muted": podnames.muted(muted, r["key"], r["ctrl"]),
     } for r in sorted(rows, key=lambda r: (not r["alert"], -r["n"], r["key"]))]

@@ -230,3 +230,85 @@ def test_logs_prev_is_an_allowed_command():
     from app.schemas import KubeCommandIn
     c = KubeCommandIn(ns="default", kind="pod", name="app-a-6b8b56c769-f4k8m", action="logs_prev", tail=100)
     assert c.action == "logs_prev"
+
+
+def test_planned_exit_is_remembered_through_a_rollout():
+    """Воркеры по плану выходят с кодом 0 раз в 20 минут. На выкладке у удаляемого пода kubelet
+    стирает прошлый контейнер, и причина (Last State) пропадает из отчета: панель видела "причина
+    неизвестна" и давала алерт, а через минуту, когда старых подов уже нет, - отбой. Теперь панель
+    помнит последнюю известную причину пода."""
+    names = [("app-a-6f678d8d6d-jxrpd", "app-a"), ("app-b-649b7b9b57-z2gcf", "app-b"),
+             ("app-c-74fc666fc6-b6rn5", "app-c")]
+    done = {"c": "app", "r": "Completed", "x": 0, "t": 1, "log": "deadline reached, exiting"}
+    st = None
+    for i in range(31):  # тридцать плановых выходов каждого за 10 часов, все в одну минуту
+        t = NOW - timedelta(minutes=20 * (30 - i) + 1)
+        st = restarts.update(st, {"kube": {"pods": [dict(_pod(n, c, done if i else None), restarts=i)
+                                                    for n, c in names]}}, t)
+    # минута выкладки: поды еще в отчете, но прошлого запуска у них уже нет
+    gone = [dict(_pod(n, c), restarts=30) for n, c in names]
+    st = restarts.update(st, {"kube": {"pods": gone}}, NOW)
+    assert st["pod:default/app-a-6f678d8d6d-jxrpd"]["last"]["r"] == "Completed"
+    s = _srv(gone, st)
+    assert restarts.problems(s, NOW) == []
+    kv = restarts.kube_view(s, NOW)
+    assert kv["bursts"] == [] and {(p["n"], p["kind"]) for p in kv["pods"]} == {(30, "exit0")}
+    assert kv["pods"][0]["last"]["log"] == "deadline reached, exiting"
+    # новая причина из отчета вытесняет запомненную: под упал по-настоящему
+    crash = {"c": "app", "r": "Error", "x": 1, "log": "PDOException: no connection"}
+    st2 = restarts.update(st, {"kube": {"pods": [dict(_pod(n, c, crash), restarts=31) for n, c in names]}},
+                          NOW + timedelta(minutes=1))
+    assert st2["pod:default/app-a-6f678d8d6d-jxrpd"]["last"]["x"] == 1
+    # под пересоздали (счетчик с нуля) - прошлая причина ему не принадлежит
+    assert "last" not in restarts.step(st2["pod:default/app-a-6f678d8d6d-jxrpd"], 0, NOW + timedelta(minutes=2))
+
+
+async def test_recovery_waits_half_an_hour(tmp_path, monkeypatch):
+    """Выкладка уносит поды вместе с историей перезапусков, и отбой приходил на следующем же
+    отчете. Теперь отбой - после получаса без перезапусков, а вернулось внутри получаса - та же
+    история, без нового сообщения."""
+    from app.config import Settings
+    from app.db import Base, create_engine_and_factory
+
+    engine, factory = create_engine_and_factory(f"sqlite+aiosqlite:///{(tmp_path / 'rh.db').as_posix()}")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    now = datetime.now(timezone.utc)
+    pod = _pod("app-b-5d88689b5d-rg5d7", "app-b", {"c": "app", "r": "Error", "x": 1, "log": "fatal: db is gone"})
+    hot = {"pod:default/app-b-5d88689b5d-rg5d7": {"rc": 5, "ev": [[(now - timedelta(minutes=m)).isoformat(), 1]
+                                                                 for m in (7, 60, 120, 180, 240)]}}
+    async with factory() as s:
+        s.add(Server(name="k8s-a", token_hash="x", enabled=True, backup_not_required=True, last_seen=now,
+                     cpu_alert_percent=0, mem_alert_percent=0, last_report={"uptime_seconds": 100000}))
+        await s.commit()
+    sent: list[str] = []
+
+    async def fake_send(cfg, text, parse_mode=None):
+        sent.append(text)
+        return []
+
+    monkeypatch.setattr("app.alerts.send_alert", fake_send)
+    cfg = Settings(alert_webhook="http://hook")
+
+    async def tick(minutes, up):
+        t = now + timedelta(minutes=minutes)
+        async with factory() as s:
+            srv = (await s.execute(select(Server))).scalars().one()
+            srv.last_seen = t
+            srv.last_report = {"uptime_seconds": 100000, "kube": {"pods": [pod] if up else []}}
+            srv.alert_state = {**(srv.alert_state or {}), "restarts": hot if up else {}}
+            await s.commit()
+        await collector.evaluate_servers(factory, cfg, t)
+        return [m for m in sent if "k8s-a" in m]
+
+    assert len(await tick(0, True)) == 1
+    assert len(await tick(1, False)) == 1           # выкладка унесла под: отбоя пока нет
+    assert len(await tick(20, True)) == 1           # снова перезапускается - та же история
+    assert len(await tick(21, False)) == 1
+    assert len(await tick(50, False)) == 1          # 29 минут без перезапусков
+    msgs = await tick(52, False)
+    assert len(msgs) == 2 and "поды восстановлены" in msgs[1]
+    async with factory() as s:
+        srv = (await s.execute(select(Server))).scalars().one()
+        assert not srv.alert_state.get("kube_restarts") and not srv.alert_state.get("kube_restarts_hold")
+    await engine.dispose()

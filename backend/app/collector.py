@@ -4193,6 +4193,31 @@ def units_hold(s: Server, bad: list[dict], now: datetime, muted: set[str]) -> di
     return out
 
 
+# Перезапуски считаются за сутки по каждому поду, а на выкладке старые поды уходят вместе со своей
+# историей: алерт гас на следующем же отчете ("поды восстановлены"), и все повторялось на следующей
+# выкладке. Объявленное (kube_restarts_sig) держится еще полчаса после того, как пропало.
+_RESTARTS_RECOVER_HOLD = 1800
+
+
+def restarts_hold(s: Server, key: str, now_keys: set[str], now: datetime) -> dict[str, str]:
+    """Объявленные перезапуски, которых сейчас нет среди проблем, но выдержка отбоя еще идет:
+    {ключ: с какого момента пропал}. Заглушенный уходит сразу."""
+    st = s.alert_state or {}
+    prev = st.get(f"{key}_hold") if isinstance(st.get(f"{key}_hold"), dict) else {}
+    muted = srv_restarts.muted_keys(s)
+    sig = set(st.get(f"{key}_sig") or [])
+    if key == "kube_restarts":
+        sig = {podnames.pod_key(x) for x in sig}  # sig старых панелей - по подам
+    out: dict[str, str] = {}
+    for k in sorted(sig - now_keys):
+        if podnames.muted(muted, k):
+            continue
+        gone = _parse_iso(str(prev.get(k) or "")) or now
+        if (now - gone).total_seconds() < _RESTARTS_RECOVER_HOLD:
+            out[k] = gone.isoformat()
+    return out
+
+
 def units_block(rep: dict) -> dict | None:
     """Блок упавших юнитов из отчета (report.d/units.json, агент отдает как есть)."""
     block = ((rep.get("extras") or {}).get("units")) or {}
@@ -5836,11 +5861,13 @@ def _server_conditions(s: Server, now: datetime,
         rp = srv_restarts.problems(s, now)
         for kind, key in (("docker", "docker_restarts"), ("pod", "kube_restarts")):
             items = [x for x in rp if x["kind"] == kind]
+            hold = restarts_hold(s, key, {x["key"] for x in items}, now)
             # у подов в строке причина, она длинная: каждый под своей строкой
             sep = "\n" if kind == "pod" else "; "
-            out[key] = (1 if items else 0, {"detail": sep.join(x["text"] for x in items[:4]),
-                                            "sig": [x["key"] for x in items], "sep": sep,
-                                            "parts": [(x["key"], x["text"]) for x in items]})
+            out[key] = (1 if items or hold else 0, {"detail": sep.join(x["text"] for x in items[:4]),
+                                                    "sig": sorted({x["key"] for x in items} | hold.keys()),
+                                                    "sep": sep, "hold": hold,
+                                                    "parts": [(x["key"], x["text"]) for x in items]})
     # Пропал порт, который слушался неделями (история - alert_state listen_hist, ведет цикл алертов)
     if online and isinstance((s.alert_state or {}).get("listen_hist"), dict):
         lg = listen_watch.problems(s, now)
