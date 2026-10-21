@@ -24,7 +24,7 @@ import {
 import type { Section } from './App'
 import { backupAlive, backupWindowNote, dbAuditNames, knownText, dockRiskText, knownActive, proxyBuilt, shortList, sinceShort, srvIssues, srvKnown, knownMeta } from './serverUtils'
 import { KnownDialog } from './KnownDialog'
-import { LEAK_MUTE, LISTEN_MUTE, RESTARTS_MUTE, isDecision } from './mutes'
+import { LEAK_MUTE, LISTEN_MUTE, RESTARTS_MUTE, OOM_MUTE, isDecision, oomCulpritLabel } from './mutes'
 import { offLines, rotationLines } from './BsrvCleanup'
 import { MaintChip, MaintHome } from './MaintModal'
 import { useI18n } from './i18n'
@@ -737,6 +737,8 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
   // 🔕 с выбором срока: на час, день, неделю (снуз) или постоянно. Ключи без снуза (рост памяти,
   // перезапуски, пропавший порт - их бэкенд читает только из alert_mutes) глушатся сразу постоянно
   const [mutePick, setMutePick] = useState<string | null>(null)
+  const oomMuteText = (k: string) =>
+    k.startsWith(OOM_MUTE) ? t('не алертить об OOM из-за {n}', { n: oomCulpritLabel(k.slice(OOM_MUTE.length), t) }) : null
   const muteFor = (id: number, key: string, hours: number) => {
     setMutePick(null)
     if (hours < 0) return quickMute(id, [key])
@@ -957,7 +959,7 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
       )}
       {it.mute && mutePick === it.key && (
         <span className="home-mute-pick" onClick={(e) => e.stopPropagation()}>
-          <span className="muted">{t('не алертить:')}</span>
+          <span className="muted">{oomMuteText(it.mute) ? `${oomMuteText(it.mute)}:` : t('не алертить:')}</span>
           {[
             { h: 1, l: t('1 час') },
             { h: 24, l: t('1 день') },
@@ -972,7 +974,8 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
         </span>
       )}
       {it.mute && mutePick !== it.key && (
-        <span className="quick-mute" title={t('Не алертить')}
+        // OOM глушится по виновнику: в подсказке, по какому именно (он же в тексте строки)
+        <span className="quick-mute" title={oomMuteText(it.mute) ?? t('Не алертить')}
           onClick={(e) => {
             e.stopPropagation()
             if (snoozable(it.mute!)) setMutePick(it.key)
