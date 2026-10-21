@@ -1163,9 +1163,10 @@ function procTone(kind: 'cpu' | 'mem', cpu: number, rss: number, total: number):
 }
 
 // Чей процесс: служба, контейнер, под, сессия пользователя (owner_kind из app/oom.py)
-function oomOwner(k: { owner: string; owner_kind: string }, t: TFn): string {
-  if (k.owner_kind === 'container') return t('контейнер {n}', { n: k.owner })
-  if (k.owner_kind === 'pod') return t('под {n}', { n: k.owner.slice(0, 8) })
+function oomOwner(k: { owner: string; owner_kind: string; owner_unknown?: boolean }, t: TFn): string {
+  const n = k.owner_unknown ? `${k.owner} (${t('имя неизвестно')})` : k.owner
+  if (k.owner_kind === 'container') return t('контейнер {n}', { n })
+  if (k.owner_kind === 'pod') return t('под {n}', { n })
   if (k.owner_kind === 'user') return t('сессия {n}', { n: k.owner })
   if (k.owner_kind === 'host') return t('весь сервер')
   return k.owner

@@ -44,7 +44,7 @@ import (
 	"time"
 )
 
-const version = "2.45"
+const version = "2.46"
 
 // Публичный ключ для проверки подписи релизов агента (Ed25519, base64).
 // ПУСТО по умолчанию → самообновление ВЫКЛЮЧЕНО (агент никогда не заменяет себя).
@@ -679,6 +679,9 @@ type dockerInfo struct {
 }
 
 type dockerContainer struct {
+	// начало id (12 знаков, как в docker ps): OOM в журнале ядра называет контейнер только по
+	// cgroup docker-<id>.scope, и по этому полю панель находит его имя (2.46)
+	ID       string   `json:"id,omitempty"`
 	Name     string   `json:"name"`
 	Image    string   `json:"image"`
 	State    string   `json:"state"`            // running / exited / paused / restarting / created
@@ -4550,6 +4553,9 @@ func collectDocker() *dockerInfo {
 				name = strings.TrimPrefix(c.Names[0], "/")
 			}
 			dc := dockerContainer{Name: name, Image: c.Image, State: c.State, Status: c.Status, id: c.Id, imageID: c.ImageID}
+			if len(c.Id) >= 12 {
+				dc.ID = c.Id[:12]
+			}
 			dc.Ports = dockerPorts(c.Ports)
 			if c.State == "running" {
 				// кто съел память и CPU - для алертов и кнопки "перезапустить" в разделах

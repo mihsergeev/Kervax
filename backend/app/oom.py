@@ -55,6 +55,16 @@ LATE_S = 600
 # Единичный OOM в "Что сломано" держится столько после конца: это событие, а не поломка, и строка
 # "была 17 ч назад" висела сутки. Повторы и лежащая после OOM служба - дольше (problem)
 HOME_ONE_S = 3600
+# Имена контейнеров по id. В журнале ядра контейнер есть только как cgroup docker-<id>.scope, а
+# контейнер после OOM пересоздают (compose up, выкладка) с новым id, и в текущем отчете старого
+# нет. Панель помнит id -> имя из отчетов (last_report["ct_seen"], переносится из отчета в отчет)
+# неделю блока helper'а с запасом, при записи убийства в базу кладет имя в строку (oom_kills.data
+# "ct") - для 30 дней карточки. CT_MAX - потолок: на нодах CI контейнеры живут минуты.
+CT_SEEN_KEY = "ct_seen"
+CT_KEEP_S = 8 * 86400
+CT_MAX = 300
+# не знаем имени - короткий id с пометкой, чтобы id не читался как имя
+UNKNOWN = "имя неизвестно"
 
 # Процессы, убийство которых - авария, а не мелочь: базы, докер, веб-серверы, брокеры. Убитый
 # воркер php-fpm поднимется сам, убитый mysqld - это лежащая база.
@@ -68,6 +78,7 @@ _SVC = re.compile(r"^/(?:[^/]+\.slice/)*([^/]+\.service)(?:/|$)")
 _DOCKER = re.compile(r"(?:docker-|/docker/)([0-9a-f]{12,64})")
 _POD = re.compile(r"pod([0-9a-f]{8}[-_][0-9a-f]{4}[-_][0-9a-f]{4}[-_][0-9a-f]{4}[-_][0-9a-f]{12})")
 _USER = re.compile(r"^/user\.slice/user-(\d+)\.slice")
+_UID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-")
 _SCOPE = re.compile(r"/([^/]+\.scope)$")
 _QUIET_UNIT = re.compile(r"user(?:-runtime-dir)?@\d+\.service")
 
@@ -159,9 +170,11 @@ def rec_key(r: dict) -> str:
 _STORED: dict[int, float] = {}  # сервер -> время самой свежей записанной строки (в этом процессе)
 
 
-async def store(session: AsyncSession, server: Server, extras: dict | None, now: datetime) -> int:
+async def store(session: AsyncSession, server: Server, extras: dict | None, now: datetime,
+                rep: dict | None = None) -> int:
     """Новые строки блока в oom_kills. Блок каждый отчет один и тот же, пока не было новых
-    убийств: без новых строк в базу не ходим."""
+    убийств: без новых строк в базу не ходим. rep - новый отчет (с ct_seen): у убийства в
+    контейнере в строку пишется его имя ("ct"), пока панель его помнит."""
     recs = records((extras or {}).get(EXTRA_KEY) if isinstance(extras, dict) else None)
     if not recs:
         return 0
@@ -171,6 +184,7 @@ async def store(session: AsyncSession, server: Server, extras: dict | None, now:
     since = datetime.fromtimestamp(min(r["ts"] for r in recs), timezone.utc) - timedelta(seconds=1)
     have = set((await session.execute(select(OomKill.key).where(
         OomKill.server_id == server.id, OomKill.ts >= since))).scalars())
+    names = names_of(rep if rep is not None else server.last_report or {})
     n = 0
     for r in recs:
         key = rec_key(r)
@@ -178,6 +192,9 @@ async def store(session: AsyncSession, server: Server, extras: dict | None, now:
             continue
         have.add(key)
         data = {k: v for k, v in r.items() if k not in ("kind", "ts")}
+        o = kill_owner(r) if r["kind"] != "unit" else {}
+        if o.get("kind") == "container" and ct_name(o["name"], names):
+            data["ct"] = ct_name(o["name"], names)
         session.add(OomKill(server_id=server.id, ts=datetime.fromtimestamp(r["ts"], timezone.utc),
                             key=key, kind=r["kind"], data=data))
         n += 1
@@ -223,12 +240,31 @@ def owner(memcg: str, user: str = "", uid: int | None = None) -> dict:
     return {"kind": "host" if cg in ("", "/") else "other", "name": "" if cg in ("", "/") else cg}
 
 
+def ct_name(cid: str, names: dict[str, str] | None) -> str:
+    """Имя контейнера по id из cgroup, "" - не знаем."""
+    return (names or {}).get(cid[:12]) or "" if cid else ""
+
+
+def pod_name(uid: str, names: dict[str, str] | None) -> str:
+    """Под без хеша по uid из cgroup ("pod:<начало uid>" в карте names_of), "" - не знаем."""
+    return (names or {}).get("pod:" + uid[:8]) or "" if uid else ""
+
+
+def ct_text(cid: str, names: dict[str, str] | None) -> str:
+    return ct_name(cid, names) or (f"{cid[:12]} ({UNKNOWN})" if cid else "?")
+
+
+def pod_text(uid: str, names: dict[str, str] | None) -> str:
+    return pod_name(uid, names) or (f"{uid[:8]} ({UNKNOWN})" if uid else "?")
+
+
 def owner_text(o: dict, containers: dict[str, str] | None = None) -> str:
+    """containers - карта names_of: контейнеры по id и поды по "pod:<начало uid>"."""
     k, n = o.get("kind"), o.get("name") or ""
     if k == "container":
-        return "контейнер " + ((containers or {}).get(n) or n)
+        return "контейнер " + ct_text(n, containers)
     if k == "pod":
-        return "под " + (n[:8] if n else "")
+        return "под " + pod_text(n, containers)
     if k == "user":
         return "сессия " + n
     return n
@@ -459,16 +495,6 @@ def _same(a: str, b: str) -> bool:
     return bool(a and b) and (a in b or b in a)
 
 
-def pod_label(uid: str, pod_names: dict[str, str] | None = None) -> str:
-    """Под по uid из cgroup: ворклоад без хеша по имени из отчетов нод с kube-api (pod_names: начало
-    uid -> ns/имя, collector.pod_uid_names), не нашлось - начало uid."""
-    full = (pod_names or {}).get(uid[:8]) or (pod_names or {}).get(uid)
-    if not full:
-        return uid[:8]
-    ns, _, name = full.partition("/")
-    return podnames.label(ns, name)
-
-
 def _kill_label(k: dict, containers: dict[str, str] | None, pod_names: dict[str, str] | None,
                 with_owner: bool = True) -> str:
     """php-fpm7.4 (пул idv), java (tomcat9), mysqld, java (контейнер web)."""
@@ -484,10 +510,12 @@ def _kill_label(k: dict, containers: dict[str, str] | None, pod_names: dict[str,
             return f"{name} (пул {user})" if user and user != "root" else name
         return name if _same(name, svc) else f"{name} ({svc})"
     if kind == "container":
-        c = (containers or {}).get(own) or own
+        c = ct_name(own, containers)
+        if not c:
+            return f"{name} (контейнер {ct_text(own, containers)})"
         return name if _same(name, c) else f"{name} (контейнер {c})"
     if kind == "pod":
-        return f"{name} (под {pod_label(own, pod_names)})"
+        return f"{name} (под {pod_name(own, containers) or pod_text(own, _pod_map(pod_names))})"
     if kind == "user":
         return f"{name} (сессия {own})"
     return name
@@ -504,9 +532,9 @@ def _main_kills(kills: list[dict]) -> list[dict]:
 def _owner_fact(o: dict, containers: dict[str, str] | None, pod_names: dict[str, str] | None) -> tuple[str, str]:
     k, n = o.get("kind"), o.get("name") or ""
     if k == "pod":
-        return "Под", pod_label(n, pod_names) if n else "?"
+        return "Под", pod_name(n, containers) or pod_text(n, _pod_map(pod_names))
     if k == "container":
-        return "Контейнер", (containers or {}).get(n) or n
+        return "Контейнер", ct_text(n, containers)
     if k == "service":
         return "Служба", n.removesuffix(".service")
     if k == "user":
@@ -534,7 +562,10 @@ def episode_short(e: dict, tz, failed_now: set[str], containers: dict[str, str] 
                                         k0.get("uid")), containers, pod_names)
         lim = (e.get("mem") or {}).get("limit")
         if label:
-            facts.append(tg_fmt.fact(label, name + (f" (лимит {tg_fmt.size(lim * 1024)})" if lim else "")))
+            if lim:
+                lt = f"лимит {tg_fmt.size(lim * 1024)}"
+                name = name[:-1] + f", {lt})" if name.endswith(f"({UNKNOWN})") else f"{name} ({lt})"
+            facts.append(tg_fmt.fact(label, name))
         elif lim:
             facts.append(f"лимит {tg_fmt.size(lim * 1024)}")
         return what, facts
@@ -612,12 +643,54 @@ def units_failed_now(rep: dict) -> set[str]:
     return {str(u.get("unit")) for u in (ub.get("units") or []) if isinstance(u, dict) and u.get("unit")}
 
 
-def containers_of(rep: dict) -> dict[str, str]:
-    """id контейнера (12 знаков) -> имя, из отчета агента."""
+def _ct_now(rep: dict) -> dict[str, dict]:
+    """Контейнеры текущего отчета по id (агент 2.46+): имя и откуда запущен (compose)."""
     out = {}
     for c in ((rep or {}).get("docker") or {}).get("containers") or []:
         if isinstance(c, dict) and c.get("id") and c.get("name"):
-            out[str(c["id"])[:12]] = str(c["name"])
+            cmp = c.get("compose") if isinstance(c.get("compose"), dict) else {}
+            out[str(c["id"])[:12]] = {"n": str(c["name"])[:120], "p": str(cmp.get("project") or "")[:80],
+                                      "s": str(cmp.get("service") or "")[:80]}
+    return out
+
+
+def remember_containers(prev: dict | None, rep: dict, now_ts: float) -> dict:
+    """Карта id -> {n, p, s, t} для last_report["ct_seen"]: прошлая плюс контейнеры этого отчета
+    (t - когда видели последний раз), без тех, кого не видели CT_KEEP_S, не больше CT_MAX."""
+    out = {str(i): dict(v) for i, v in (prev or {}).items() if isinstance(v, dict) and v.get("n")
+           and now_ts - _f(v.get("t")) <= CT_KEEP_S}
+    for i, v in _ct_now(rep).items():
+        out[i] = {**v, "t": int(now_ts)}
+    if len(out) > CT_MAX:
+        out = dict(sorted(out.items(), key=lambda kv: -_f(kv[1].get("t")))[:CT_MAX])
+    return out
+
+
+def _pod_map(pod_names: dict[str, str] | None) -> dict[str, str]:
+    """pod_names (начало uid -> ns/имя, collector.pod_uid_names) в ключи "pod:<uid>" карты names_of."""
+    out = {}
+    for uid, full in (pod_names or {}).items():
+        ns, _, name = str(full).partition("/")
+        out["pod:" + str(uid)[:8]] = podnames.label(ns, name)
+    return out
+
+
+def names_of(rep: dict, pod_names: dict[str, str] | None = None, recs: list[dict] | None = None) -> dict[str, str]:
+    """Имена владельцев cgroup для текстов: id контейнера (12 знаков) -> имя, "pod:<начало uid>" ->
+    под без хеша. Контейнеры - из отчета и из памяти панели (ct_seen: пересозданный после OOM
+    контейнер называется по имени, а не по id), из строк oom_kills (recs, поле "ct") - для старых
+    эпизодов карточки. Поды - по отчетам нод с kube-api (pod_names)."""
+    out = _pod_map(pod_names)
+    for r in recs or []:
+        o = kill_owner(r) if r.get("kind") != "unit" else {}
+        if o.get("kind") == "container" and r.get("ct"):
+            out[o["name"][:12]] = str(r["ct"])
+    seen = (rep or {}).get(CT_SEEN_KEY)
+    for i, v in (seen.items() if isinstance(seen, dict) else ()):
+        if isinstance(v, dict) and v.get("n"):
+            out[str(i)[:12]] = str(v["n"])
+    for i, v in _ct_now(rep).items():
+        out[i] = v["n"]
     return out
 
 
@@ -635,9 +708,10 @@ def _owner_key(o: dict, containers: dict[str, str] | None = None) -> str:
     if k == "service":
         return "svc:" + n
     if k == "container":
-        return "ct:" + ((containers or {}).get(n) or n)
+        return "ct:" + (ct_name(n, containers) or n)
     if k == "pod":
-        return "pod:" + n
+        # по ворклоаду: новый под того же deployment - тот же виновник, мьют не слетает
+        return "pod:" + (pod_name(n, containers) or n)
     return "cg:" + n
 
 
@@ -674,7 +748,9 @@ def culprit_text(key: str) -> str:
     kind, _, name = key.partition(":")
     if not name:
         return ""
-    return {"ct": "контейнер " + name, "pod": "под " + name[:8], "proc": "процесс " + name}.get(kind, name)
+    if kind == "pod" and _UID.match(name):
+        name = name[:8]
+    return {"ct": "контейнер " + name, "pod": "под " + name, "proc": "процесс " + name}.get(kind, name)
 
 
 def mutes_now(s: Server, now: datetime) -> set[str]:
@@ -698,14 +774,28 @@ def episode_muted(e: dict, mutes: set[str], failed_now: set[str], containers: di
     старый эпизод стоял красным рядом с заглушенными."""
     if "oom" in mutes:
         return True
-    key = culprit(e, containers)
+    keys = {k for k in (culprit(e, containers), culprit(e)) if k}
     blind = e.get("kind") == "global" and not e.get("top")
-    if not (key and MUTE_PREFIX + key in mutes) and not (blind and any(m.startswith(MUTE_PREFIX) for m in mutes)):
+    if not any(MUTE_PREFIX + k in mutes for k in keys) and not (blind and any(m.startswith(MUTE_PREFIX) for m in mutes)):
         return False
     return not any(down for _u, down in failed_units(e, failed_now))
 
 
 # -- для карточки --
+
+def _owner_name(o: dict, names: dict[str, str] | None) -> str:
+    k, n = o.get("kind"), o.get("name") or ""
+    if k == "container":
+        return ct_name(n, names) or n[:12]
+    if k == "pod":
+        return pod_name(n, names) or n[:8]
+    return n
+
+
+def _owner_unknown(o: dict, names: dict[str, str] | None) -> bool:
+    k, n = o.get("kind"), o.get("name") or ""
+    return bool(n) and ((k == "container" and not ct_name(n, names)) or (k == "pod" and not pod_name(n, names)))
+
 
 def episode_view(e: dict, containers: dict[str, str] | None = None, failed_now: set[str] | None = None,
                  mutes: set[str] | None = None) -> dict:
@@ -715,8 +805,10 @@ def episode_view(e: dict, containers: dict[str, str] | None = None, failed_now: 
         kills.append({
             "ts": k["ts"], "pid": k.get("pid"), "name": k.get("name") or "", "uid": k.get("uid"),
             "user": k.get("user") or "", "anon": k.get("anon"), "adj": k.get("adj"), "kind": k["kind"],
-            # имя без "контейнер"/"сессия": слово ставит карточка на своем языке
-            "owner": (containers or {}).get(o.get("name") or "") or o.get("name") or "",
+            # имя без "контейнер"/"сессия": слово ставит карточка на своем языке; не знаем имени
+            # контейнера или пода - короткий id и owner_unknown
+            "owner": _owner_name(o, containers),
+            "owner_unknown": _owner_unknown(o, containers),
             "owner_kind": o["kind"], "memcg": k.get("memcg") or "",
             "line": k.get("line") or "",
         })
@@ -731,7 +823,7 @@ def episode_view(e: dict, containers: dict[str, str] | None = None, failed_now: 
     }
 
 
-def view(s: Server, now: datetime) -> dict | None:
+def view(s: Server, now: datetime, pod_names: dict[str, str] | None = None) -> dict | None:
     """Коротко для списка и карточки: сколько эпизодов за 7 дней, последний, и юниты, которые
     убил OOM (ссылка на эпизод и строка ядра). Из блока helper'а в последнем отчете."""
     rep = s.last_report or {}
@@ -747,7 +839,7 @@ def view(s: Server, now: datetime) -> dict | None:
     if not week and not links:
         return None
     last = week[-1] if week else None
-    conts = containers_of(rep)
+    conts = names_of(rep, pod_names)
     return {
         "n7": len(week), "last_at": last["start"] if last else None,
         "last_text": kills_text(last, conts) if last else "",
@@ -777,7 +869,7 @@ def alert_step(s: Server, st: dict, rep: dict, now: datetime, tz,
     b = block(rep, ref)
     eps = episodes(records(b)) if b else []
     failed = units_failed_now(rep)
-    conts = containers_of(rep)
+    conts = names_of(rep, pod_names)
     now_apply: dict = {}
     done = _f(st.get("oom_end"))
     if b is not None and "oom_end" not in st:
@@ -846,7 +938,7 @@ def alert_step(s: Server, st: dict, rep: dict, now: datetime, tz,
     return None, {}, now_apply
 
 
-def problem(s: Server, now: datetime) -> tuple[int, str, str] | None:
+def problem(s: Server, now: datetime, pod_names: dict[str, str] | None = None) -> tuple[int, str, str] | None:
     """Для "Что сломано": OOM за сутки без заглушенных - из-за кого, сколько раз, когда последний и
     кого убили, и ключ мьюта по виновнику последнего ("oom", если виновника не понять). Виновник в
     тексте - то, что глушит 🔕 строки. Единичный OOM, после которого все поднялось, - событие, а не
@@ -859,7 +951,7 @@ def problem(s: Server, now: datetime) -> tuple[int, str, str] | None:
     b = block(rep, now.timestamp())
     if b is None:
         return None
-    failed, conts = units_failed_now(rep), containers_of(rep)
+    failed, conts = units_failed_now(rep), names_of(rep, pod_names)
     day = [e for e in episodes(records(b)) if e["start"] >= now.timestamp() - 86400
            and not episode_muted(e, mutes, failed, conts)]
     if not day:
