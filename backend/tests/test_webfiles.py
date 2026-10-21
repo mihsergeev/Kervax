@@ -63,7 +63,7 @@ def test_server_problem_and_alert():
     st["loose"] = ["2080-11"]
     probs = webfiles.problems(st)
     assert probs == [(2, "похоже на взлом: новые php в /var/www/html (wordpress-7d9f): about.php, lock360.php",
-                      "php:2080-11:about.php,lock360.php")]
+                      "php:wordpress-7d9f:/var/www/html:about.php,lock360.php")]
     assert webfiles.tg_short(probs) == ("Похоже на взлом: новые php", ["about.php, lock360.php",
                                                                        "/var/www/html (wordpress-7d9f)"])
     s = Server(id=1, name="web-a", token_hash="x", enabled=True, backup_not_required=True, last_seen=NOW,
@@ -73,7 +73,7 @@ def test_server_problem_and_alert():
                disk_temp_alert_c=0, db_conn_alert_percent=0, web_5xx_alert_percent=0, kube_expiry_warn_days=[],
                webfiles=st)
     lvl, ctx = collector._server_conditions(s, NOW)["webfiles"]
-    assert lvl == 3 and ctx["sig"] == ["php:2080-11:about.php,lock360.php"]
+    assert lvl == 3 and ctx["sig"] == ["php:wordpress-7d9f:/var/www/html:about.php,lock360.php"]
     rows = [(p["level"], p.get("section"), p["sec"]) for p in collector.server_problems(s, NOW) if p["kind"] == "webfiles"]
     assert rows == [(2, "services", "files")]
     # одна правка без сайта: желтая строка, в Telegram тихо
@@ -104,8 +104,11 @@ def test_helper_needed_and_written_right():
     assert not setup_scripts.setup_needed("webfiles-setup", {"extras": {"fpm": {"v": 1, "pools": [], "skipped": []}}})
     assert not setup_scripts.setup_needed("webfiles-setup", {"web_services": [{"kind": "Traefik"}]})
     src = (Path(__file__).resolve().parents[2] / "agent" / "webfiles-setup.sh").read_text(encoding="utf-8")
-    assert "\r" not in src and "KERVAX_SETUP_VERSION=0.1" in src and "report.d/webfiles.json" in src
+    assert "\r" not in src and "KERVAX_SETUP_VERSION=0.2" in src and "report.d/webfiles.json" in src
     assert 'mv -f "$HELPER.new" "$HELPER"' in src and "versions/webfiles-setup.ver" in src
+    # контейнер: только верхний слой overlay, ключ по контейнеру, старт - не правка, ассеты мимо
+    assert "upperdir=" in src and 'key="c${cid:0:12}' in src and "START_WIN=600" in src
+    assert "! -path '*/web/assets/*'" in src
 
 
 async def _seed(client, domains):
@@ -158,3 +161,99 @@ def test_old_roots_drop_after_a_week():
     st = webfiles.process(None, blk(run(T - 600, first=True)), NOW - timedelta(days=8))
     st = webfiles.process(st, blk(roots=()), NOW)
     assert st["roots"] == {}
+
+
+# ---------- ложные признаки: ассеты, старт пода, вложенные корни, поды одного ворклоада ----------
+
+POD = "web-6d4f8b7c9d-x2k4q"
+
+
+def pod_root(key, where=POD, path="/app", **kw):
+    return {"key": key, "where": where, "path": path, "domains": [], "files": 3, "big": False, **kw}
+
+
+def test_generated_files_are_not_code():
+    assert webfiles.generated("admin/web/assets/f0076b67/jquery.js")
+    assert webfiles.generated("web/assets/faf2d0d1/yii.activeForm.js")
+    assert webfiles.generated("runtime/cache/a1/b2.php") and webfiles.generated("storage/framework/views/x.php")
+    assert webfiles.generated("sites/default/files/php/twig/abc/x.php")
+    # php в ассетах приложение не публикует - это признак
+    assert not webfiles.generated("web/assets/f0076b67/shell.php")
+    assert not webfiles.generated("wp-content/themes/shop/js/custom.js")
+    assert not webfiles.generated("src/Cache/Repository.php")
+    st = webfiles.process(None, blk(run(T - 1200, first=True)), NOW)
+    st = webfiles.process(st, blk(run(T - 600, n_new=3, new=[
+        ["admin/web/assets/f0076b67/jquery.js", T - 700, 285314], ["admin/web/assets/f0076b67/jquery.min.js", T - 700, 87533],
+        ["web/assets/f0076b67/up.php", T - 650, 400]])), NOW)
+    r = st["roots"]["2080-11"]
+    assert list(r["php"]) == ["web/assets/f0076b67/up.php"] and "edit" not in r
+
+
+def test_files_written_in_one_second_are_a_script():
+    st = webfiles.process(None, blk(run(T - 1200, first=True)), NOW)
+    gen = [[f"{app}/config/{f}-local.php", T - 6000, 100] for app in ("admin", "api", "common") for f in ("main", "params")]
+    st = webfiles.process(st, blk(run(T - 600, n_changed=6, changed=gen)), NOW)
+    r = st["roots"]["2080-11"]
+    assert "edit" not in r and r["deploy"]["n"] == 6
+
+
+def test_old_signs_pass_new_rules_once():
+    # набрано helper 0.1: ассеты и "правки" нового пода, на хосте - настоящая правка
+    st = {"seen": T - 600, "roots": {
+        "a": {**pod_root("a"), "at": NOW.isoformat(),
+              "edit": {"admin/web/assets/f0076b67/jquery.js": {"since": "x", "s": 1},
+                       "common/config/main-local.php": {"since": "x", "s": 1}}},
+        "h": {"key": "h", "where": "host", "path": "/var/www/shop", "at": NOW.isoformat(),
+              "edit": {"js/custom.js": {"since": "x", "s": 1}, "web/assets/1/a.js": {"since": "x", "s": 1}}}},
+        "loose": ["a", "h"]}
+    st = webfiles.process(st, blk(roots=()), NOW)
+    assert "edit" not in st["roots"]["a"] and list(st["roots"]["h"]["edit"]) == ["js/custom.js"]
+    assert [t for _l, t, _k in webfiles.problems(st)] == ["код изменен вне выкладки в /var/www/shop: custom.js"]
+    # второй раз чистка не повторяется: новая правка в контейнере остается
+    st["roots"]["a"]["edit"] = {"js/app.js": {"since": "x", "s": 1}}
+    assert "edit" in webfiles.process(st, blk(roots=()), NOW)["roots"]["a"]
+
+
+def test_nested_roots_of_one_pod_do_not_duplicate():
+    st = webfiles.process(None, blk(roots=(pod_root("a"), pod_root("b", path="/app/admin", domains=["admin.example.com"]))), NOW)
+    st = webfiles.process(st, {"v": 1, "ts": T, "roots": [], "runs": [{"ts": T - 600, "roots": [
+        {"key": "a", "n_new": 1, "new": [["admin/js/menu.js", T, 10]]},
+        {"key": "b", "n_new": 1, "new": [["js/menu.js", T, 10]]}]}]}, NOW)
+    assert "edit" not in st["roots"]["a"] and list(st["roots"]["b"]["edit"]) == ["js/menu.js"]
+
+
+def test_pods_of_one_workload_are_one_row():
+    pods = [f"web-6d4f8b7c9d-{s}" for s in ("x2k4q", "bc7dn", "m9zst")]
+    roots = tuple(pod_root(f"c{i}", where=w) for i, w in enumerate(pods))
+    st = webfiles.process(None, blk(roots=roots), NOW)
+    st = webfiles.process(st, {"v": 1, "ts": T, "roots": list(roots), "runs": [{"ts": T - 600, "roots": [
+        {"key": "c0", "n_new": 1, "new": [["shell.php", T, 900]]},
+        {"key": "c2", "n_new": 1, "new": [["shell.php", T, 900]]}]}]}, NOW)
+    st["loose"] = ["c0", "c1", "c2"]
+    v = webfiles.view(st, {}, NOW)["roots"]
+    assert len(v) == 1 and v[0]["where"] == "web" and v[0]["pods"] == 3 and v[0]["key"] == "c0,c1,c2"
+    assert [f["p"] for f in v[0]["php"]] == ["shell.php"]
+    assert webfiles.problems(st) == [(2, "похоже на взлом: новые php в /app (web): shell.php", "php:web:/app:shell.php")]
+    # "это наше" на строке снимает со всех подов
+    st = webfiles.accept(st, v[0]["key"], "php")
+    assert webfiles.problems(st) == []
+    assert webfiles.where("node-a", st["roots"]["c0"]) == "node-a, web"
+    # helper 0.2 пишет и неймспейс: одноименные деплойменты разных окружений не склеиваются
+    assert webfiles.workload({"where": "stage/web-6d4f8b7c9d-x2k4q"}) == "stage/web"
+    assert webfiles.workload({"where": "default/web-6d4f8b7c9d-x2k4q"}) == "web"
+    assert webfiles.workload({"where": "host"}) == ""
+
+
+def test_gone_container_root_drops_in_hours_host_root_stays():
+    st = webfiles.process(None, blk(roots=(pod_root("c0"), {**ROOT, "key": "h", "where": "host"})), NOW - timedelta(hours=3))
+    st = webfiles.process(st, blk(roots=()), NOW)
+    assert list(st["roots"]) == ["h"]
+
+
+def test_site_sign_lists_a_file_of_many_pods_once():
+    st = {"signs": {"php": {"since": NOW.isoformat(), "files": [
+        {"p": "shell.php", "sid": 1, "root": "c0", "where": "node-a, web"},
+        {"p": "shell.php", "sid": 1, "root": "c2", "where": "node-a, web"}]}}}
+    row = next(r for r in tamper.view(st)["signs"] if r["key"] == "php")
+    assert row["files"] == ["shell.php"] and row["n"] == 1 and row["where"] == "node-a, web"
+    assert tamper.alert_text(st).splitlines()[1] == "Новые php: shell.php"

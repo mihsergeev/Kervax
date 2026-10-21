@@ -377,7 +377,7 @@ def phrase(key: str, s: dict) -> str:
         return f"{it.get('what', '')} " + ("без поддержки" if it.get("eol") else "с дырой")
     if key in ("php", "edit"):
         from app import tg_fmt
-        names = [f["p"].rsplit("/", 1)[-1] for f in s.get("files") or []]
+        names = list(dict.fromkeys(f["p"].rsplit("/", 1)[-1] for f in s.get("files") or []))
         if key == "php":
             return f"новые php ({tg_fmt.names(names, 2)})"
         return f"правка {names[0]} вне выкладки" if len(names) == 1 else "правки вне выкладки: " + tg_fmt.names(names, 2)
@@ -435,7 +435,7 @@ def _detail(key: str, s: dict) -> str:
             return f"{it['what']} с дырой, исправлено в {it['fix']}"
     if key == "php":
         from app import tg_fmt
-        return "новые php: " + tg_fmt.names([f["p"].rsplit("/", 1)[-1] for f in s.get("files") or []])
+        return "новые php: " + tg_fmt.names(list(dict.fromkeys(f["p"].rsplit("/", 1)[-1] for f in s.get("files") or [])))
     return phrase(key, s)
 
 
@@ -466,8 +466,10 @@ def view(state: dict | None) -> dict | None:
             continue
         if k in ("php", "edit"):
             files = s.get("files") or []
+            # поды одного ворклоада присылают один и тот же файл - в списке он один раз
+            paths = list(dict.fromkeys(f.get("p", "") for f in files))
             rows.append({"key": k, "arg": "", "strong": k in STRONG, "since": s.get("since"),
-                         "files": [f.get("p", "") for f in files[:10]], "n": len(files),
+                         "files": paths[:10], "n": len(paths),
                          "where": ", ".join(dict.fromkeys(f.get("where", "") for f in files if f.get("where")))})
             continue
         rows.append({"key": k, "arg": "", "strong": k in STRONG, "since": s.get("since"),

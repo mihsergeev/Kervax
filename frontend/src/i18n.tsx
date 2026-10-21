@@ -3359,6 +3359,7 @@ const EN: Record<string, string> = {
   'Новые php': 'New php',
   'файлов кода больше {n}, список неполный': 'more than {n} code files, the list is incomplete',
   'файлов кода: {n}': 'code files: {n}',
+  'записано в контейнере файлов кода: {n}': 'code files written in the container: {n}',
   'выкладка {t}: {n} файлов': 'deploy {t}: {n} files',
   'признаки и в карточке сайта': 'signs are also in the site card',
   'Веб-корней не нашлось.': 'No web roots found.',
