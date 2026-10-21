@@ -4,6 +4,13 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.7.1] - 2026-10-21
+
+### Changed
+- Признаки взлома в карточке сайта: сводка по главной компактной сеткой вместо длинной строки -
+  заголовок и размер, внешние домены чипами (первые 6, остальные по кнопке "еще"), что видно
+  снаружи (движок, PHP) чипами с подсветкой версии с дырой, время разбора мелко.
+
 ## [1.7.0] - 2026-10-21
 
 ### Added
