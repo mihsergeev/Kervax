@@ -182,3 +182,12 @@ def recovery(name_html: str, what: str) -> str:
 def link(name: str, url: str = "") -> str:
     nm = html.escape(name)
     return f'<a href="{html.escape(url, quote=True)}">{nm}</a>' if url else nm
+
+
+SITE_ICON = "🔗"
+
+
+def site_link(url: str) -> str:
+    """Значок-ссылка на сам сайт рядом с именем монитора: "🔴🌐 example.com 🔗". Имя ведет в
+    панель, а открыть проверяемый адрес хочется прямо из чата, не проходя через монитор."""
+    return link(SITE_ICON, url) if url else ""

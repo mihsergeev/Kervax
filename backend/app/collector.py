@@ -1210,10 +1210,13 @@ async def _send_alerts(
             is_default = True
         full, line = "", ""
         if is_default:
-            # Короткий формат (app/tg_fmt.py): адрес ссылкой в монитор панели, что случилось,
-            # причина. Полный (адрес ссылкой на сайт, "монитор", задержка) - в историю
+            # Короткий формат (app/tg_fmt.py): адрес ссылкой в монитор панели и 🔗 на сайт, что
+            # случилось, причина. Полный (адрес ссылкой на сайт, "монитор", задержка) - в историю
             full = _alert_text(kind, name, status, msg, host, link_url, site_url, icon)
             head = tg_fmt.link(host or name, link_url or site_url)
+            if link_url and site_url:
+                # имя ведет в монитор панели, рядом значок - на сам проверяемый сайт
+                head += " " + tg_fmt.site_link(site_url)
             ments = " ".join(_MENTION_RE.findall(name or ""))  # @упоминания тегают людей
             sh = srv_short.site(kind, status, msg)
             if isinstance(sh, str) or icon == "✅":
