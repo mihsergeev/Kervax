@@ -19,6 +19,7 @@ _JOBS = 2         # логов на один алерт: больше - не в�
 _LINES = 15
 _CHARS = 1400     # на все логи алерта: сообщение Telegram - до 4096 символов
 _LINE_MAX = 200
+_GIST_MAX = 100   # суть ошибки в чате - одна строка
 _KEEP = 86400
 
 # агент просит логи с timestamps=true: метка в начале строки в чате только мешает
@@ -80,6 +81,29 @@ def tail_text(raw: str, lines: int = _LINES, chars: int = _CHARS) -> str:
     if out and len(out[0]) > chars:
         out[0] = "..." + out[0][-chars:]
     return "\n".join(out)
+
+
+# строка с ошибкой: в чат идет она, а не хвост лога
+_ERR = re.compile(r"(?i)\b(?:error|exception|fatal|failed|failure|panic|denied|refused|timed? ?out|"
+                  r"not found|no such|cannot|can't|unable|invalid|killed)\b|ошибк|не удалось")
+# кадры стека: "at fn (file:1:2)", "File "x.py", line 3" - не суть, а где
+_FRAME = re.compile(r"^\s+(?:at |File \"|\.\.\.)|^\s*Traceback \(most recent call last\)")
+# уровень и служебное в начале строки: "[ERROR]", "ERROR:", "level=error msg="
+_LEVEL = re.compile(r"^\s*(?:\[?(?:error|err|fatal|crit(?:ical)?|warn(?:ing)?)\]?:?\s+|level=\w+\s+msg=)",
+                    re.I)
+
+
+def gist(raw: str) -> str:
+    """Суть ошибки из лога одной строкой: последняя строка, похожая на ошибку (у Python это
+    "ValueError: ...", у Go - "panic: ...", у Node - "Error: ..."), без кадров стека и уровня.
+    Похожей нет - пусто: случайная последняя строка ("Done.") в чате только путает."""
+    for ln in reversed(tail_text(raw, lines=_TAIL, chars=10 ** 6).splitlines()):
+        if _FRAME.search(ln) or not _ERR.search(ln):
+            continue
+        ln = _LEVEL.sub("", ln).strip().strip('"')
+        if ln:
+            return ln if len(ln) <= _GIST_MAX else ln[:_GIST_MAX].rstrip() + "..."
+    return ""
 
 
 def entry(sid: int, key: str, now_ts: float) -> dict:
@@ -149,8 +173,11 @@ def attach(msg: alerts.Msg, logs: list[dict]) -> alerts.Msg:
             parts.append(f"\n{head}: лог получить не удалось")
     if not parts:
         return msg
-    # у короткого алерта лог только в полном тексте: в чате он не читается, смотрят в панели
-    return msg.tail("".join(parts))
+    # у короткого алерта лог только в полном тексте: в чате он не читается, смотрят в панели.
+    # В чат - одна строка с сутью ошибки, если она в логе нашлась
+    g = next((gist(x["log"]) for x in logs if x["ok"] and gist(x["log"])), "")
+    from app import tg_fmt
+    return msg.tail("".join(parts), "\n" + html.escape(tg_fmt.clean(g)) if g else "")
 
 
 def prune(now_ts: float) -> None:

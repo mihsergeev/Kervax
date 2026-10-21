@@ -148,7 +148,8 @@ def _storm_msg(parts: list) -> Msg:
         body = head + (f"\n{tail}" if tail else "") + "\n" + ", ".join(shown) + more
         f_head, _, f_tail = first.full.partition("\n")
         f_head = f_head.replace(own, label, 1) if own in f_head else f_head
-        full = f_head + "\n↳ " + ", ".join(links[:_STORM_NAMES]) + (f"\n{f_tail}" if f_tail else "")
+        f_more = f" и еще {len(links) - _STORM_NAMES}" if len(links) > _STORM_NAMES else ""
+        full = f_head + "\n↳ " + ", ".join(links[:_STORM_NAMES]) + f_more + (f"\n{f_tail}" if f_tail else "")
         line = first.line.replace(own, label, 1) if first.line and own in first.line else first.line
     else:
         shown = links[:_STORM_NAMES]

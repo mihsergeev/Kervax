@@ -127,7 +127,9 @@ def _from_module(key: str, items):
 
 
 def _fresh_first(items: list, fresh) -> list:
-    """Новое при открытом алерте - первым: иначе первой строкой стояло уже объявленное."""
+    """Новое при открытом алерте - только оно: о прежнем уже сказали, в чате оно было повтором
+    ("Еще: ..." с теми же именами в каждом сообщении). В полном тексте прежнее - строкой "и еще N,
+    о них уже сообщали". Нового среди items не нашлось (ключи другие) - все, как есть."""
     if not fresh or not isinstance(items, list):
         return items
 
@@ -137,7 +139,8 @@ def _fresh_first(items: list, fresh) -> list:
         if isinstance(x, (tuple, list)):
             return any(str(v) in fresh for v in x if isinstance(v, str))
         return str(x) in fresh
-    return sorted(items, key=lambda x: not is_new(x))
+    new = [x for x in items if is_new(x)]
+    return new or items
 
 
 def _cores(pct: float) -> str:
