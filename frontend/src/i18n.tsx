@@ -2594,6 +2594,10 @@ const EN: Record<string, string> = {
   'OOM из-за': 'OOM caused by',
   'OOM из-за {n}': 'OOM caused by {n}',
   'процесс {n}': 'process {n}',
+  // после "из-за" (oomCulpritLabel gen)
+  'контейнера {n}': 'container {n}',
+  'пода {n}': 'pod {n}',
+  'процесса {n}': 'process {n}',
   'любой OOM': 'any OOM',
   'не алертить:': 'do not alert:',
   'Не алертить': 'Do not alert',

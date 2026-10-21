@@ -4,6 +4,13 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.5.3] - 2026-10-21
+
+### Fixed
+- OOM на главной: "из-за контейнера web", а не "из-за контейнер web", и без повтора имени
+  контейнера после убитых процессов, если они все из него же. В алерте так же: "в лимите
+  контейнера web". Убиты процессы из разных мест - пометки, откуда каждый, остаются.
+
 ## [1.5.2] - 2026-10-21
 
 ### Fixed

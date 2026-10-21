@@ -59,7 +59,9 @@ def test_container_by_name_from_report_and_memory():
     # то же в длинном тексте и в виновнике (ключ мьюта по имени, не по id)
     e = oom.episodes(oom.records(rep2["extras"]["oom"]))[-1]
     names = oom.names_of(rep2)
-    assert "в лимите контейнер app-worker-1" in oom.episode_text(e, timezone.utc, set(), 1, names)
+    text = oom.episode_text(e, timezone.utc, set(), 1, names)
+    # контейнер уже назван в первой строке: у убитого из него же не повторяем
+    assert "в лимите контейнера app-worker-1" in text and text.splitlines()[1] == "убиты: python 4гб"
     assert oom.culprit(e, names) == "ct:app-worker-1" and oom.culprit(e) == "ct:" + CID[:12]
     assert oom.kills_text(e, {}) == "python 4гб (контейнер f4dcf4dcf4dc (имя неизвестно))"
 
@@ -110,7 +112,25 @@ def test_pod_by_workload_in_card_home_and_key():
     # главная и карточка сервера (view, problem) - тоже по имени
     s = SimpleNamespace(last_report=rep, alert_mutes=[], alert_snoozes={})
     assert oom.view(s, NOW, pods)["last_text"] == "mariadbd 1012мб (под wordpress-mariadb)"
-    assert "из-за под wordpress-mariadb" in oom.problem(s, NOW, pods)[1]
+    assert "из-за пода wordpress-mariadb" in oom.problem(s, NOW, pods)[1]
+    assert oom.culprit_text("pod:" + POD_UID, gen=True) == "пода e551fc7f"
+
+
+def test_home_line_case_and_no_repeat():
+    """Строка на главной: виновник в родительном (из-за контейнера X), и убитые из того же
+    контейнера без пометки "(контейнер X)" - это уже сказано. Убиты из разных мест - пометки остаются."""
+    rep = _rep([_ct_kill()], [_ct(CID, "web-a")])
+    s = SimpleNamespace(last_report=rep, alert_mutes=[], alert_snoozes={})
+    assert oom.problem(s, NOW) == (
+        1, "нехватка памяти (OOM) из-за контейнера web-a: была 5 мин назад, убиты python 4гб", "oom:ct:web-a")
+    # имени не знаем - id, но тоже без повтора
+    s.last_report = _rep([_ct_kill()], [{"name": "web-a"}])
+    assert oom.problem(s, NOW)[1].endswith("из-за контейнера f4dcf4dcf4dc: была 5 мин назад, убиты python 4гб")
+    # убит еще процесс другого контейнера: где кто - нужно
+    other = dict(_ct_kill(cid=OLD, dt=290), name="worker", anon=600 * 1024, top=[])
+    s.last_report = _rep([_ct_kill(), other], [_ct(CID, "web-a"), _ct(OLD, "worker-1")])
+    assert oom.problem(s, NOW)[1].endswith(
+        "из-за контейнера web-a: была 5 мин назад, убиты python 4гб (контейнер web-a), worker 600мб (контейнер worker-1)")
 
 
 def test_names_from_stored_rows():

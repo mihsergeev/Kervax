@@ -572,6 +572,10 @@ def test_culprit_not_killed_in_its_episode():
     assert oom.culprit(blind) == "svc:mysql.service"
     assert oom.culprit_text("svc:php7.4-fpm.service") == "php7.4-fpm.service"
     assert oom.culprit_text("proc:java") == "процесс java" and oom.culprit_text("ct:web") == "контейнер web"
+    # после "из-за" - родительный падеж; служба как есть
+    assert oom.culprit_text("proc:java", gen=True) == "процесса java"
+    assert oom.culprit_text("ct:web", gen=True) == "контейнера web"
+    assert oom.culprit_text("svc:php7.4-fpm.service", gen=True) == "php7.4-fpm.service"
     key = {"oom:svc:php7.4-fpm.service"}
     assert oom.episode_muted(eps[0], key, set()) and not oom.episode_muted(alone, key, set())
     # кто занимал память, не знаем, а OOM сервера уже глушат по виновнику - считается заглушенным
@@ -592,7 +596,7 @@ def test_problem_home_lifetime_and_culprit_text():
     assert p == (2, "нехватка памяти (OOM) из-за php7.4-fpm.service: была 30 мин назад, убиты mysqld 527мб "
                     "(mysql.service, uid db), systemd + sd-pam (сессия web)", "oom:svc:php7.4-fpm.service")
     p = prob(_fpm_block(ts, [ts - 1800]))
-    assert p[1] == ("нехватка памяти (OOM) из-за процесс php-fpm7.4: была 30 мин назад, убиты mysqld 527мб "
+    assert p[1] == ("нехватка памяти (OOM) из-за процесса php-fpm7.4: была 30 мин назад, убиты mysqld 527мб "
                     "(mysql.service, uid db), systemd + sd-pam (сессия web)") and p[2] == "oom:proc:php-fpm7.4"
     # 17 часов назад, один раз - событие прошло, на главной его нет
     assert prob(_fpm_block(ts, [ts - 17 * 3600])) is None
