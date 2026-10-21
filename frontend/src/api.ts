@@ -353,6 +353,8 @@ export type Check = {
   dns_server?: string
   dns_baseline?: string[] | null
   dns_last?: string[] | null
+  // признаки взлома (backend app/tamper.py): разбор главной раз в час, null - еще не разбирали
+  tamper?: TamperView | null
   // от какого сервера зависит: auto - панель находит сама, server - parent_server_id, off - ни от чего.
   // parents - на ком монитор держится на самом деле (why: local, site, ip, manual)
   parent_mode?: ParentMode
@@ -3415,6 +3417,40 @@ export function deleteMaint(id: number): Promise<void> {
 }
 
 // DNS-монитор: принять текущий ответ как правильный и сразу перепроверить
+// Признак взлома одной строкой карточки: key - вид, arg - домен для "это наше"
+export interface TamperSign {
+  key: 'empty' | 'title' | 'bot' | 'dom' | 'old'
+  arg: string
+  strong: boolean
+  since?: string | null
+  size?: number
+  was?: number | string
+  title?: string
+  human?: number
+  domain?: string
+  src?: string
+  what?: string
+  fix?: string
+  eol?: boolean
+}
+export interface TamperView {
+  level: 'none' | 'one' | 'hack'
+  summary: string
+  since?: string | null
+  signs: TamperSign[]
+  base: { title: string; size?: number | null }
+  last_at?: string | null
+  size?: number | null
+  engine: { wp?: string; php?: string; gen?: string }
+  domains: string[]
+  err: string
+}
+
+// кнопки признаков: "это наше", "новая норма", "это норм", "отложить", all - Разобрались
+export function acceptTamper(id: number, key: string, arg = ''): Promise<{ tamper: TamperView | null }> {
+  return api(`/api/checks/${id}/tamper-accept`, { method: 'POST', body: JSON.stringify({ key, arg }) })
+}
+
 export function acceptDns(id: number): Promise<CheckRun> {
   return api<CheckRun>(`/api/checks/${id}/dns-accept`, { method: 'POST' })
 }

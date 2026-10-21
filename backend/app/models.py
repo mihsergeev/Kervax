@@ -359,6 +359,10 @@ class Check(Base):
     dns_server: Mapped[str] = mapped_column(String(64), default="")
     dns_baseline: Mapped[list | None] = mapped_column(JSON, nullable=True)  # запомненный ответ
     dns_last: Mapped[list | None] = mapped_column(JSON, nullable=True)      # последний ответ
+    # признаки взлома (app/tamper.py): база главной, последний разбор, признаки и отложенное
+    tamper_state: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    # о чем уже предупредили в Telegram: "hack" и сильные признаки (новый сильный - новый алерт)
+    tamper_sent: Mapped[list | None] = mapped_column(JSON, nullable=True)
     # от какого сервера зависит (app/parents.py): auto - панель находит сама, server - задан
     # руками в parent_server_id, off - ни от чего. Пока родитель молчит, алерт придерживается
     parent_mode: Mapped[str] = mapped_column(String(8), default="auto")
@@ -376,6 +380,12 @@ class Check(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
+
+    @property
+    def tamper(self) -> dict | None:
+        """Признаки взлома для ответов API: уровень, строки с конкретикой (app/tamper.py)."""
+        from app import tamper as tamper_mod
+        return tamper_mod.view(self.tamper_state)
 
 
 class IgnoredDomain(Base):

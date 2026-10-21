@@ -57,4 +57,5 @@ export const MON_ALERT_KINDS: { k: string; label: string }[] = [
   { k: 'ssl', label: 'SSL-сертификат' },
   { k: 'domain', label: 'Домен' },
   { k: 'locpart', label: 'Частичная доступность (локации)' },
+  { k: 'tamper', label: 'Признаки взлома' },
 ]
