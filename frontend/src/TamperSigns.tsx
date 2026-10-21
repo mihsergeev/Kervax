@@ -7,6 +7,9 @@ import { fmtBytes } from './units'
 // времени и кнопка принять в базу. Сильные признаки красным, слабые желтым; "Разобрались" -
 // все текущее как норма. Признаки, у которых причина ушла, пропадают сами.
 
+// сколько внешних доменов видно сразу, остальные - кнопкой "еще N"
+const DOMS_SHOWN = 6
+
 const ICON: Record<string, string> = { empty: '📄', bot: '🤖', php: '🐘', title: '📝', dom: '🌐', edit: '✏️', old: '🧩' }
 
 type T = (k: string, p?: Record<string, string | number>) => string
@@ -61,6 +64,7 @@ export function TamperSigns({ check, canEdit, onChanged }: { check: Check; canEd
   const { t } = useI18n()
   const [busy, setBusy] = useState('')
   const [err, setErr] = useState('')
+  const [allDoms, setAllDoms] = useState(false)
   const v = check.tamper
   const act = async (key: string, arg = '') => {
     setBusy(key + arg)
@@ -76,10 +80,11 @@ export function TamperSigns({ check, canEdit, onChanged }: { check: Check; canEd
   }
   if (!v) return <div className="muted small">{t('Еще не разбирали: главную открываем раз в час, когда сайт отвечает.')}</div>
   const n = v.signs.length
-  const eng = subOf(
-    v.engine.wp ? `WordPress ${v.engine.wp}` : v.engine.gen ?? '',
-    v.engine.php ? `PHP ${v.engine.php}` : '',
-  )
+  // что видно снаружи; версия, по которой есть признак "с дырой", подсвечена как сам признак
+  const engs = [v.engine.wp ? `WordPress ${v.engine.wp}` : v.engine.gen ?? '', v.engine.php ? `PHP ${v.engine.php}` : ''].filter(Boolean)
+  const holes = new Set(v.signs.filter((s) => s.key === 'old').map((s) => s.what))
+  const doms = allDoms ? v.domains : v.domains.slice(0, DOMS_SHOWN)
+  const moreDoms = v.domains.length - doms.length
   return (
     <div className="tamper">
       {v.level === 'hack' && (
@@ -121,12 +126,36 @@ export function TamperSigns({ check, canEdit, onChanged }: { check: Check; canEd
         )
       })}
       {n === 0 && <div className="small">{t('Признаков нет.')}</div>}
-      <div className="muted small tamper-base">
-        {subOf(
-          v.base.title ? t('главная: "{title}", {size}', { title: v.base.title, size: size(v.size ?? v.base.size) }) : '',
-          v.domains.length ? t('внешние домены: {list}', { list: v.domains.join(', ') }) : t('внешних доменов нет'),
-          eng ? t('видно снаружи: {eng}', { eng }) : '',
-          v.last_at ? t('разбор {t}', { t: fmtDateTime(v.last_at) }) : '',
+      <div className="tamper-facts">
+        {v.base.title && (
+          <>
+            <span className="tamper-k">{t('Главная')}</span>
+            <span className="tamper-v">
+              {v.base.title} <span className="muted">· {size(v.size ?? v.base.size)}</span>
+            </span>
+          </>
+        )}
+        <span className="tamper-k">{t('Внешние домены')}</span>
+        <span className="tamper-v tamper-chips">
+          {doms.map((d) => <span key={d} className="type-chip">{d}</span>)}
+          {moreDoms > 0 && (
+            <button className="type-chip tamper-more" onClick={() => setAllDoms(true)}>{t('еще {n}', { n: moreDoms })}</button>
+          )}
+          {v.domains.length === 0 && <span className="muted">{t('нет')}</span>}
+        </span>
+        {engs.length > 0 && (
+          <>
+            <span className="tamper-k">{t('Видно снаружи')}</span>
+            <span className="tamper-v tamper-chips">
+              {engs.map((e) => <span key={e} className={`type-chip${holes.has(e) ? ' tamper-chip-warn' : ''}`}>{e}</span>)}
+            </span>
+          </>
+        )}
+        {v.last_at && (
+          <>
+            <span className="tamper-k">{t('Разобрано')}</span>
+            <span className="tamper-v muted small">{fmtDateTime(v.last_at)}</span>
+          </>
         )}
       </div>
       {v.err && <div className="muted small">{t('Последний разбор не удался: {err}', { err: v.err })}</div>}

@@ -7738,11 +7738,22 @@ button.upd-go.upd-sure, button.upd-go.upd-sure:hover {
 .tamper-ico { flex: 0 0 auto; width: 1.25em; text-align: center; }
 .tamper-txt { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; line-height: 1.4; overflow-wrap: anywhere; }
 .tamper-when { white-space: nowrap; margin-top: 0.15rem; }
-.tamper-base { margin-top: 0.4rem; line-height: 1.5; overflow-wrap: anywhere; }
+.tamper-facts {
+  display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 0.4rem 0.9rem; align-items: baseline;
+  margin-top: 0.5rem; padding: 0.55rem 0.7rem; border: 1px solid var(--border); border-radius: 8px; font-size: 0.86rem;
+}
+.tamper-k { color: var(--text-muted); font-size: 0.78rem; white-space: nowrap; }
+.tamper-v { min-width: 0; overflow-wrap: anywhere; line-height: 1.4; }
+.tamper-chips { display: flex; flex-wrap: wrap; gap: 0.3rem; }
+.tamper-chips .type-chip { font-size: 0.76rem; font-weight: 500; letter-spacing: 0; overflow-wrap: anywhere; }
+.type-chip.tamper-chip-warn { color: var(--degraded); background: color-mix(in srgb, var(--degraded) 14%, transparent); }
+button.type-chip.tamper-more { cursor: pointer; border: 1px dashed var(--border); color: var(--accent); background: transparent; font-family: inherit; }
 @media (max-width: 640px) {
   .tamper-row { flex-wrap: wrap; }
   .tamper-txt { flex: 1 1 calc(100% - 4rem); }
   .tamper-when, .tamper-row > button { margin-left: 2.2rem; }
+  .tamper-facts { grid-template-columns: minmax(0, 1fr); gap: 0.15rem; }
+  .tamper-v + .tamper-k { margin-top: 0.4rem; }
 }
 
 /* Файлы сайтов в "Сервисах" ноды (WebFiles.tsx) */

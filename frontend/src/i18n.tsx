@@ -3349,6 +3349,9 @@ const EN: Record<string, string> = {
   'сейчас': 'now',
   'Принять новый ответ как правильный': 'Accept the new answer as correct',
   // --- признаки взлома сайта (TamperSigns.tsx) ---
+  'Внешние домены': 'External domains',
+  'Видно снаружи': 'Visible from outside',
+  // --- признаки взлома сайта (TamperSigns.tsx) ---
   'Новые php в веб-корне': 'New php in the web root',
   'Код изменен вне выкладки': 'Code changed outside a deploy',
   'на {where}': 'on {where}',
@@ -3391,11 +3394,6 @@ const EN: Record<string, string> = {
   'Сам по себе не взлом, но надо глянуть.': 'Not a compromise by itself, but worth a look.',
   'с {t}': 'since {t}',
   'Признаков нет.': 'No signs.',
-  'главная: "{title}", {size}': 'home page: "{title}", {size}',
-  'внешние домены: {list}': 'external domains: {list}',
-  'внешних доменов нет': 'no external domains',
-  'видно снаружи: {eng}': 'visible from outside: {eng}',
-  'разбор {t}': 'checked {t}',
   'Последний разбор не удался: {err}': 'Last check failed: {err}',
   'разобрать не удалось: {err}': 'check failed: {err}',
   'признаков нет': 'no signs',
