@@ -50,6 +50,7 @@ from urllib.parse import unquote, urlsplit
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app import tg_fmt
 from app.models import Location, Server
 
 log = logging.getLogger("kervax.open_ports")
@@ -832,6 +833,69 @@ def new_text(rows: list[dict]) -> str:
     """'8080 (контейнер app (app:1)) на 203.0.113.5; Redis 6379 на ...' - опасные первыми."""
     rows = sorted(rows, key=lambda x: (not x.get("risk"), x.get("port") or 0))
     return exposed_text(rows)
+
+
+# ---- короткий текст алерта в Telegram (app/tg_fmt.py) ----
+
+# длинные подписи сервисов -> как их назовет человек в чате
+_SHORT_NAMES = {"Erlang epmd": "epmd", "Zabbix agent": "Zabbix", "ClickHouse HTTP": "ClickHouse",
+                "проверка здоровья балансировщика (kube-proxy)": "kube-proxy"}
+_WHO_RE = re.compile(r"^(?:процесс (?!пользователя )([^,\s]+)|контейнер (\S+)|сервис Kubernetes \S*?/(\S+))")
+
+
+def _who(what: str) -> str:
+    """Кто держит порт, одним словом: процесс, контейнер или сервис Kubernetes."""
+    m = _WHO_RE.match(str(what or ""))
+    return next((g for g in m.groups() if g), "") if m else ""
+
+
+def _short_name(x: dict) -> str:
+    """Название сервиса для чата: epmd, Zabbix, kube-proxy. "экспортер метрик" и подписи "или"
+    (9000 - ClickHouse, MinIO или php-fpm) - по тому, кто держит порт."""
+    name = str(x.get("name") or "")
+    if name in _SHORT_NAMES:
+        return _SHORT_NAMES[name]
+    if name == "экспортер метрик" or " или " in name:
+        return _who(str(x.get("what") or "")) or name.split(",")[0].split(" ")[0]
+    return re.split(r",\s|\s\(", name)[0]
+
+
+def _by_port(rows: list[dict]) -> list[dict]:
+    """Один порт на нескольких адресах - одна строка, порядок сохраняется."""
+    out: dict[int, dict] = {}
+    for x in rows:
+        out.setdefault(x.get("port"), x)
+    return list(out.values())
+
+
+def tg_short_exposed(rows: list[dict]) -> tuple[str, list[str]] | None:
+    """Алерт exposed (вход - exposed()): "Открыто в интернет", "RabbitMQ 5672, epmd 4369, Zabbix 10050
+    и еще 2". Опасное первым, и сначала разные сервисы: второй порт того же RabbitMQ уходит в "и еще"."""
+    if not rows:
+        return None
+    rows = sorted(_by_port(rows), key=lambda x: not x.get("risk"))
+    seen: set[str] = set()
+    first, dup = [], []
+    for x in rows:
+        nm = _short_name(x) or _who(str(x.get("what") or ""))
+        item = f"{nm} {x.get('port')}" if nm else f"порт {x.get('port')}"
+        (dup if nm and nm in seen else first).append(item)
+        seen.add(nm)
+    return "Открыто в интернет", [tg_fmt.names(first + dup)]
+
+
+def tg_short_new(rows: list[dict]) -> tuple[str, list[str]] | None:
+    """Алерт port_new (вход - new_ports()): "Открылись новые порты", "64100 rest-server, 64101
+    kervax-rest-tls". Порт первым, за ним сервис или кто его держит; опасные первыми."""
+    if not rows:
+        return None
+    rows = _by_port(sorted(rows, key=lambda x: (not x.get("risk"), x.get("port") or 0)))
+    items = []
+    for x in rows:
+        nm = _short_name(x) or _who(str(x.get("what") or ""))
+        items.append(f"{x.get('port')} {nm}" if nm else str(x.get("port")))
+    what = "Открылся новый порт" if len(rows) == 1 else "Открылись новые порты"
+    return what, [tg_fmt.names(items)]
 
 
 _running: asyncio.Task | None = None

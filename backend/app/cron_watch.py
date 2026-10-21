@@ -29,10 +29,13 @@ CPU копии со всеми ее детьми в секундах, проце
 """
 from __future__ import annotations
 
+import posixpath
+import re
 from datetime import datetime, timezone
 
+from app import tg_fmt
 from app.models import Server
-from app.queue_watch import where_text
+from app.queue_watch import where_in, where_text
 
 MUTE_PREFIX = "cron:"
 OVERLAP_S = 900  # вторая копия идет четверть часа - наслоение не мимолетное
@@ -180,7 +183,10 @@ def _all(s: Server) -> list[dict]:
         text = f"крон {j['source']}{' (' + sched + ')' if sched else ''} {why}\n↳ {str(j['cmd'])[:200]}"
         oldest = max(int(r.get("age") or 0) for r in j["run"])
         out.append({"key": j["key"], "source": j["source"], "level": lvl, "why": why, "text": text,
-                    "since": datetime.fromtimestamp(max(ts - oldest, 0), timezone.utc).isoformat()})
+                    "since": datetime.fromtimestamp(max(ts - oldest, 0), timezone.utc).isoformat(),
+                    # для короткого алерта: команда, расписание, сколько копий идет, старшая, наслоение ли
+                    "cmd": str(j["cmd"]), "sched": sched, "n": max(int(j.get("n") or 0), len(j["run"])),
+                    "age": oldest, "overlap": why.startswith("наслаивается")})
     out.sort(key=lambda x: (-x["level"], x["key"]))
     return out
 
@@ -189,6 +195,153 @@ def problems(s: Server, now: datetime) -> list[dict]:
     """Задачи в беде, без заглушенных: {"key", "source", "level", "why", "text", "since"}"""
     muted = _muted(s, now)
     return [x for x in _all(s) if x["key"] not in muted]
+
+
+# ---- короткий алерт в Telegram (формат A, app/tg_fmt.py) ----
+# "Крон висит 3 ч / report-sync refresh, раз в минуту": команда без пути, перенаправлений и
+# оберток (flock, timeout, nice, cd ... &&), расписание словами
+
+_WRAP_ARG = {"sudo": {"-u", "-g", "-C"}, "nice": {"-n"}, "ionice": {"-c", "-n", "-p"},
+             "flock": {"-w", "-E", "--timeout", "--conflict-exit-code"}, "timeout": {"-s", "-k", "--signal", "--kill-after"},
+             "systemd-cat": {"-t", "-p"}, "nohup": set(), "chronic": set(), "cronic": set(), "time": set(),
+             "env": set(), "run-one": set(), "setlock": set(), "lockrun": {"--lockfile"}}
+_SKIP_CMD = {"cd", "test", "[", "[[", "sleep", "source", ".", "export", "true", "set", "umask", "ulimit", "exec"}
+_INTERP = re.compile(r"^(php|python|ruby|perl|node|nodejs|bash|sh|dash|zsh)[\d.]*$")
+_REDIR_ALONE = re.compile(r"^(\d*|&)?(>>?|<)$")
+_REDIR = re.compile(r"^(\d*|&)?(>>?|<)\S+$")
+
+
+def _plain(toks: list[str]) -> list[str]:
+    """Слова команды без перенаправлений вывода (">/dev/null", "2>&1", ">> log"), кавычек и скобок"""
+    out, skip = [], False
+    for t in toks:
+        if skip:
+            skip = False
+            continue
+        if _REDIR_ALONE.match(t):
+            skip = True
+            continue
+        if _REDIR.match(t):
+            continue
+        t = t.strip("'\"()")
+        if t:
+            out.append(t)
+    return out
+
+
+def _unwrap(toks: list[str]) -> list[str]:
+    """Без оберток: VAR=x, sudo -u, nice -n 19, flock -n файл, timeout 1h, nohup..."""
+    while toks:
+        b = posixpath.basename(toks[0])
+        if re.match(r"^[A-Za-z_]\w*=", toks[0]):
+            toks = toks[1:]
+            continue
+        if b not in _WRAP_ARG:
+            break
+        toks = toks[1:]
+        while toks and toks[0].startswith("-") and toks[0] not in ("-c", "--command"):
+            opt = toks.pop(0)
+            if opt in _WRAP_ARG[b] and toks:
+                toks.pop(0)
+        if b in ("flock", "setlock") and toks:
+            toks = toks[1:]  # файл блокировки
+            if toks and toks[0] in ("-c", "--command"):
+                toks = toks[1:]
+        elif b == "timeout" and toks:
+            toks = toks[1:]  # срок
+    return toks
+
+
+def _cmd_words(seg: str) -> list[str]:
+    """Слова главной команды куска строки крона ([] - кусок служебный: cd, test, sleep...)"""
+    toks = _unwrap(_plain(seg.split()))
+    if not toks or posixpath.basename(toks[0]) in _SKIP_CMD:
+        return []
+    first = posixpath.basename(toks[0])
+    if not (_INTERP.match(first) and len(toks) > 1):
+        return [first] + toks[1:]
+    shell = first.rstrip("0123456789.") in ("bash", "sh", "dash", "zsh")
+    i = 1
+    while i < len(toks) and toks[i].startswith("-"):
+        if toks[i] == "-c" and shell:
+            return _cmd_words(" ".join(toks[i + 1:]))
+        if toks[i] in ("-m", "-f"):
+            i += 1
+            break
+        i += 2 if toks[i] in ("-d", "-c") else 1
+    return [posixpath.basename(toks[i])] + toks[i + 1:] if i < len(toks) else [first]
+
+
+def cmd_short(cmd: str, limit: int = 40) -> str:
+    """Команда крона коротко: "/opt/app/bin/report-sync refresh >/dev/null 2>&1" ->
+    "report-sync refresh", "cd /app && php artisan schedule:run" -> "artisan schedule:run".
+    Длинные аргументы отрезаются по словам: задачу узнают по началу"""
+    for seg in re.split(r"\s*(?:&&|\|\||;|\|)\s*", str(cmd or "")):
+        toks = _cmd_words(seg)
+        if not toks:
+            continue
+        out = toks[0][:limit]
+        for t in toks[1:]:
+            if len(out) + 1 + len(t) > limit:
+                break
+            out += " " + t
+        return out
+    return str(cmd or "").strip()[:limit]
+
+
+def _per(n: int, one: str, few: str, many: str) -> str:
+    return f"раз в {one}" if n == 1 else f"раз в {n} {_plural(n, one, few, many)}"
+
+
+def sched_words(sched: str) -> str:
+    """Расписание словами: "* * * * *" -> "раз в минуту", "*/5 * * * *" -> "раз в 5 минут",
+    "30 3 * * *" -> "каждый день в 03:30"; остальное как есть"""
+    s = str(sched or "").strip()
+    macros = {"@reboot": "при загрузке", "@yearly": "раз в год", "@annually": "раз в год",
+              "@monthly": "раз в месяц", "@weekly": "раз в неделю", "@daily": "раз в день",
+              "@midnight": "раз в день", "@hourly": "раз в час"}
+    if s in macros:
+        return macros[s]
+    p = s.split()
+    if len(p) != 5 or (p[2], p[3], p[4]) != ("*", "*", "*"):
+        return s
+    mi, h = p[0], p[1]
+    every_m, every_h = re.fullmatch(r"\*/(\d+)", mi), re.fullmatch(r"\*/(\d+)", h)
+    if mi == "*" and h == "*":
+        return "раз в минуту"
+    if every_m and h == "*":
+        return _per(int(every_m.group(1)), "минуту", "минуты", "минут")
+    if mi.isdigit() and h == "*":
+        return "раз в час"
+    if mi.isdigit() and every_h:
+        return _per(int(every_h.group(1)), "час", "часа", "часов")
+    if mi.isdigit() and h.isdigit():
+        return f"каждый день в {int(h):02d}:{int(mi):02d}"
+    return s
+
+
+def tg_short(cp: list[dict]) -> tuple[str, list[str]] | None:
+    """Короткий алерт по problems(): что - про худшую задачу (первую), остальные командами"""
+    if not cp:
+        return None
+    x = cp[0]
+    cmd = cmd_short(x.get("cmd") or "") or "?"
+    src = str(x.get("source") or "")
+    place = "" if src in ("", "на хосте") else " " + where_in(src)
+    sched = sched_words(x.get("sched") or "")
+    if x.get("overlap"):
+        what = "Копии крона наслаиваются"
+        head = f"{cmd} x{int(x.get('n') or 2)}"
+    else:
+        age = int(x.get("age") or 0)
+        what = f"Крон висит {tg_fmt.dur(age)}" if age >= 60 else "Крон висит"
+        head = cmd
+    facts = [head + place + (f", {sched}" if sched else "")]
+    rest = [cmd_short(y.get("cmd") or "") for y in cp[1:]]
+    rest = [r for r in rest if r and r != cmd]
+    if rest:
+        facts.append(tg_fmt.fact("Еще", tg_fmt.names(rest)))
+    return what, facts
 
 
 def view(s: Server, now: datetime) -> dict | None:

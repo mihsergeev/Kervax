@@ -149,8 +149,8 @@ def attach(msg: alerts.Msg, logs: list[dict]) -> alerts.Msg:
             parts.append(f"\n{head}: лог получить не удалось")
     if not parts:
         return msg
-    return alerts.Msg(str(msg) + "".join(parts), msg.section, msg.group, msg.kind, msg.target,
-                      msg.recovery, msg.ref)
+    # у короткого алерта лог только в полном тексте: в чате он не читается, смотрят в панели
+    return msg.tail("".join(parts))
 
 
 def prune(now_ts: float) -> None:

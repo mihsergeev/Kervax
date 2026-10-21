@@ -136,7 +136,7 @@ async def test_digest_per_chat(client, tg):
     msgs = [_srv(f"web-{i}", "web", k) for i, k in enumerate(("disk", "cpu", "mem"))] + [_srv("infra-a", "infra")]
     assert await alerts.dispatch(_cfg("rest"), True, msgs, 3, parse_mode="HTML")
     route = tg.to("-200")
-    assert len(route) == 1 and route[0].startswith("🌊 3 алертов")
+    assert len(route) == 1 and route[0].startswith("🌊 3 алерта")
     main = tg.to("-100")
     assert len(main) == 1 and "infra-a" in main[0]
 

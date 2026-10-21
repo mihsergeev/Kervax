@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import select
 
 from app import collector, open_ports
+from app.alerts import full_text
 from app.models import Server
 
 NOW = datetime(2026, 10, 11, 12, 0, tzinfo=timezone.utc)
@@ -389,10 +390,14 @@ async def test_port_new_alert_once_per_check(tmp_path, monkeypatch):
                                         ["203.0.113.5"], "Казахстан, Алматы", now)
         await s.commit()
     await collector.evaluate_servers(factory, cfg, now + timedelta(seconds=30))
-    news = [m for m in sent if m.startswith("🔴🚪")]
-    assert len(news) == 1 and "в интернет открылся новый порт: Redis 6379 на 203.0.113.5" in news[0], sent
+    news = [m for m in sent if getattr(m, "kind", "") == "port_new"]
+    assert len(news) == 1 and "в интернет открылся новый порт: Redis 6379 на 203.0.113.5" in full_text(news[0]), sent
+    # в чате: какой порт и что на нем, без адреса проверки
+    assert news[0] == "🔴🚪 node\n<b>Открылся новый порт</b>\n6379 Redis", news[0]
     # опасный сервис - еще и состояние (без выдержки: проверка раз в 6 часов)
-    assert any(m.startswith("🔓") and "открыто в интернет: Redis 6379" in m for m in sent), sent
+    exp = [m for m in sent if getattr(m, "kind", "") == "exposed"]
+    assert len(exp) == 1 and "открыто в интернет: Redis 6379" in full_text(exp[0]), sent
+    assert exp[0] == "🔴🔓 node\n<b>Открыто в интернет</b>\nRedis 6379", exp[0]
     n = len(sent)
     await collector.evaluate_servers(factory, cfg, now + timedelta(seconds=60))
     assert len(sent) == n  # та же проверка - второго сообщения нет

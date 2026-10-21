@@ -21,6 +21,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app import tg_fmt
 from app.models import Server
 
 log = logging.getLogger("kervax.changes")
@@ -266,6 +267,132 @@ def events_text(events: list[dict], limit: int = 4) -> str:
     if len(events) > limit:
         items.append(f"и еще {len(events) - limit}")
     return "; ".join(items)
+
+
+# ---- короткий текст алерта в Telegram (app/tg_fmt.py) ----
+
+# разбор текстов событий из diff и ssh_login_events (в старых записях ленты другого нет)
+_EV_RE = [
+    ("key", re.compile(r"^добавлен SSH-ключ пользователю (?P<u>\S+): \S+ \S+(?: \((?P<c>.*)\))?$")),
+    ("user", re.compile(r"^новый пользователь (?P<u>\S+) \(uid (?P<uid>[^,]*),")),
+    ("uid0", re.compile(r"^пользователь (?P<u>\S+) получил uid 0$")),
+    ("group", re.compile(r"^(?P<u>\S+) добавлен в группу (?P<g>\S+)$")),
+    ("file", re.compile(r"^(?:добавлен|изменен) (?P<path>/\S+)$")),
+    ("login", re.compile(r"^вход по паролю: (?P<u>\S+) с (?P<ip>\S+),")),
+]
+_COMMENT_MAX = 40
+
+
+def _parse(e: dict) -> dict:
+    """{"what": вид, "u", "c", "g", "path", "ip"} по тексту события; вид "" - не разобрали."""
+    text = str(e.get("text") or "")
+    for what, rx in _EV_RE:
+        m = rx.match(text)
+        if m:
+            d = {k: v for k, v in m.groupdict().items() if v}
+            if what == "user" and str(d.get("uid")) == "0":
+                what = "uid0"
+            return {"what": what, **d}
+    return {"what": ""}
+
+
+def _comment(c: str) -> str:
+    c = str(c or "").strip()
+    return c if len(c) <= _COMMENT_MAX else c[:_COMMENT_MAX - 3].rstrip() + "..."
+
+
+def _sudo_of(p: dict) -> str:
+    """Кому событие дает sudo: добавлен в группу или файл /etc/sudoers.d/<имя>."""
+    if p["what"] == "group":
+        return p.get("u", "")
+    if p["what"] == "file" and p.get("path", "").startswith("/etc/sudoers.d/"):
+        return p["path"].rsplit("/", 1)[-1]
+    return ""
+
+
+def _more(p: dict) -> str:
+    """Событие, не вошедшее в главное, одним-двумя словами."""
+    u = p.get("u", "")
+    return {"key": f"ключ {u}", "user": f"пользователь {u}", "uid0": f"uid 0 у {u}", "group": f"sudo у {u}",
+            "file": p.get("path", ""), "login": f"вход {u} по паролю"}.get(p["what"], "")
+
+
+def tg_short(events: list[dict]) -> tuple[str, list[str]] | None:
+    """Алерт access_change (вход - alert_events()): главное событие одной фразой, конкретика - кто и
+    комментарий ключа, без отпечатков. Главное по опасности: uid 0, вход по паролю с нового адреса,
+    новый пользователь с sudo, sudo старому пользователю, новый пользователь, ключ, файл sudoers.
+    События про того же пользователя входят в главное, остальные - строкой "Еще: ..."."""
+    if not events:
+        return None
+    ps = [_parse(e) for e in events if isinstance(e, dict)]
+    users = {p["u"] for p in ps if p["what"] in ("user", "uid0") and p.get("u")}
+    # файл в sudoers.d зовут по пользователю не всегда (90-cloud-init-users): по имени файла sudo
+    # считаем только у нового пользователя с тем же именем
+    group_sudo = [p["u"] for p in ps if p["what"] == "group" and p.get("u")]
+    sudo = set(group_sudo) | {_sudo_of(p) for p in ps if p["what"] == "file" and _sudo_of(p) in users}
+
+    def keys_of(u: str) -> list[str]:
+        return [_comment(p.get("c", "")) for p in ps if p["what"] == "key" and p.get("u") == u]
+
+    def user_fact(names: list[str]) -> str:
+        if len(names) != 1:
+            return tg_fmt.names(names)
+        ks = keys_of(names[0])
+        cs = [c for c in ks if c]
+        return names[0] + (f", вход по ключу {tg_fmt.names(cs)}" if cs else ", вход по ключу" if ks else "")
+
+    uid0 = [p["u"] for p in ps if p["what"] == "uid0" and p.get("u")]
+    logins = [p for p in ps if p["what"] == "login"]
+    new_sudo = [u for u in dict.fromkeys(p.get("u") for p in ps if p["what"] == "user") if u in sudo]
+    new_users = [u for u in dict.fromkeys(p.get("u") for p in ps if p["what"] == "user") if u]
+    old_sudo = [u for u in dict.fromkeys(group_sudo) if u not in users]
+    keys = [p for p in ps if p["what"] == "key"]
+    files = list(dict.fromkeys(p["path"] for p in ps if p["what"] == "file" and _sudo_of(p) not in users))
+
+    # главное: (что, конкретика, о ком оно - их события в "Еще" не повторяем)
+    if uid0:
+        uniq = list(dict.fromkeys(uid0))
+        main = ("Пользователь получил uid 0" if len(uniq) == 1 else "Пользователи получили uid 0",
+                tg_fmt.names(uniq), set(uniq), {"uid0", "user"})
+    elif logins:
+        items = list(dict.fromkeys(f"{p.get('u')} с {p.get('ip')}" for p in logins))
+        main = ("Вход по паролю с нового адреса", tg_fmt.names(items), set(), {"login"})
+    elif new_sudo:
+        main = ("Новый пользователь с sudo" if len(new_sudo) == 1 else "Новые пользователи с sudo",
+                user_fact(new_sudo), set(new_sudo), {"user", "key", "group", "file"})
+    elif old_sudo:
+        main = ("Выданы права sudo", tg_fmt.names(old_sudo), set(old_sudo), {"group", "file"})
+    elif new_users:
+        main = ("Новый пользователь" if len(new_users) == 1 else "Новые пользователи",
+                user_fact(new_users), set(new_users), {"user", "key"})
+    elif keys:
+        by: dict[str, list[str]] = {}
+        for p in keys:
+            by.setdefault(p.get("u", "?"), []).append(_comment(p.get("c", "")))
+        if len(by) == 1:
+            u, cs = next(iter(by.items()))
+            cs = [c for c in cs if c]
+            fact = f"{u}: {tg_fmt.names(cs)}" if cs else u
+        else:
+            fact = tg_fmt.names(f"{u}: {', '.join(c for c in cs if c)}" if any(cs) else u for u, cs in by.items())
+        main = ("Добавлен SSH-ключ" if len(keys) == 1 else "Добавлены SSH-ключи", fact, set(by), {"key"})
+    elif files:
+        main = ("Изменились права sudo", tg_fmt.names(files), set(), {"file"})
+    else:
+        return "Изменился доступ", []
+    what, fact, who, kinds = main
+
+    def covered(p: dict) -> bool:
+        if p["what"] in kinds and (p.get("u") in who or _sudo_of(p) in who):
+            return True
+        # само главное без "о ком": все входы, все файлы sudoers
+        return not who and p["what"] in kinds
+
+    rest = [_more(p) for p in ps if p["what"] and not covered(p)]
+    facts = [fact] if fact else []
+    if any(rest):
+        facts.append("Еще: " + tg_fmt.names(x for x in rest if x))
+    return what, facts
 
 
 def view(srv: Server) -> dict | None:

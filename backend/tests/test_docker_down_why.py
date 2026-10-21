@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select
 
+from app.alerts import full_text
 from app.collector import docker_down_why, docker_exit_code
 
 
@@ -97,10 +98,11 @@ async def test_lifecycle(tmp_path, monkeypatch):
         st = await tick([stopped, failed])
     # погашенный руками: ни тревоги, ни отметки "лежит с"
     assert not st["workers"].get("alerted_down") and not st["workers"].get("down_since")
-    assert not any("workers" in m for m in sent)
-    # не запустился: тревога с причиной от докера
+    assert not any("workers" in full_text(m) for m in sent)
+    # не запустился: тревога с причиной от докера (в истории - как есть, в чате - по-человечески)
     assert st["web"].get("alerted_down")
-    assert any("web" in m and "port is already allocated" in m for m in sent)
+    assert any("web" in m and "port is already allocated" in full_text(m) for m in sent)
+    assert "🔴🐳 node\n<b>Не работает контейнер web</b>\nпорт 80 уже занят" in sent, sent
 
     # тревога, поднятая старой логикой, снимается без слов "снова работает"
     n = len(sent)

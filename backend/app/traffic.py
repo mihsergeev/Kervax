@@ -17,6 +17,7 @@ from datetime import date, datetime, timedelta, timezone
 
 from sqlalchemy import select
 
+from app import tg_fmt
 from app.models import Server, ServerTraffic
 
 SUM_EVERY = timedelta(minutes=10)  # сводку за период пересчитываем не чаще
@@ -139,6 +140,54 @@ def problem(ts, now: datetime) -> tuple[int, str]:
         return 1, (f"к концу периода выйдет около {fmt_bytes(fc)} {what} при лимите {fmt_bytes(limit)} "
                    f"(сейчас {fmt_bytes(used)}, период до {till})")
     return 0, ""
+
+
+_DEC = ((10**12, "тб"), (10**9, "гб"), (10**6, "мб"))
+
+
+def _num(v: float) -> str:
+    return (f"{v:.1f}" if v < 10 else f"{v:.0f}").removesuffix(".0")
+
+
+def _dec_parts(n: float) -> tuple[str, str]:
+    for k, unit in _DEC:
+        if n >= k:
+            return _num(n / k), unit
+    return f"{n / 10**6:.0f}", "мб"
+
+
+def _dec(n: float) -> str:
+    """Десятичные единицы, как в тарифе, и как пишет человек: 18тб, 850гб, 1.5тб."""
+    return "".join(_dec_parts(n))
+
+
+def _of(used: float, limit: float) -> str:
+    """"18 из 20тб", а в разных единицах полностью: "850гб из 1тб"."""
+    (a, ua), (b, ub) = _dec_parts(used), _dec_parts(limit)
+    return f"{a} из {b}{ub}" if ua == ub else f"{a}{ua} из {b}{ub}"
+
+
+def tg_short(ts, now: datetime | None = None) -> tuple[str, list[str]] | None:
+    """Алерт traffic (вход - traffic_sum сервера и now, как у problem()): "Кончается трафик тарифа",
+    "18 из 20тб, до сброса 10 дней". Те же условия, что у problem(); ничего нет - None. Без now -
+    текущее время: так функцию можно звать с одним traffic_sum, как остальные tg_short."""
+    now = now or datetime.now(timezone.utc)
+    lvl, _t = problem(ts, now)
+    if not lvl:
+        return None
+    used, limit = float(ts.get("used") or 0), float(ts["limit"])
+    try:
+        end = date.fromisoformat(str(ts.get("end")))
+        left = tg_fmt.dur((datetime(end.year, end.month, end.day, tzinfo=timezone.utc) - now).total_seconds())
+    except ValueError:
+        left = ""
+    till = f", до сброса {left}" if left else ""
+    if used >= limit:
+        return "Кончился трафик тарифа", [_of(used, limit) + till]
+    if used / limit * 100 >= WARN_PCT:
+        return "Кончается трафик тарифа", [_of(used, limit) + till]
+    fc = float(ts.get("forecast") or 0)
+    return "Трафика тарифа не хватит до сброса", [f"уже {_of(used, limit)}, к сбросу будет около {_dec(fc)}"]
 
 
 def _ddmm(v) -> str:

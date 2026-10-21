@@ -13,6 +13,7 @@
 Запись: {text, by, at, until|None} пишет человек; level, sig (снимок того, что было сломано,
 когда отметили), worse, gone_at, reminded_at ведет сборщик."""
 
+import re
 from datetime import datetime, timedelta
 
 GONE_S = 10 * 60
@@ -113,6 +114,22 @@ def remind_text(what: str, entry: dict, now: datetime) -> str:
     if entry.get("by"):
         out += f" ({entry['by']})"
     return out
+
+
+_REMIND = re.compile(r"^известная проблема висит (\d+) дн: (.*?)(?: - (.*?))?(?: \(([^()]*)\))?$", re.S)
+
+
+def remind_short(text: str) -> tuple[str, list[str]]:
+    """Напоминание коротко (формат A, app/tg_fmt.py): "Висит 3 дня: диск" и кто что написал
+    ("Михаил: ждем фикс"). Разбирает текст remind_text."""
+    from app import tg_fmt
+
+    m = _REMIND.match(str(text or "").strip())
+    if not m:
+        return tg_fmt.split_detail(text)
+    days, what, note, by = m.groups()
+    fact = f"{by}: {note}" if by and note else note or ""
+    return f"Висит {tg_fmt.days(int(days))}: {tg_fmt.low(what)}", [fact] if fact else []
 
 
 def new_entry(text: str, by: str, days: int, now: datetime) -> dict:

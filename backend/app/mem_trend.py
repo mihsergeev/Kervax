@@ -22,7 +22,7 @@ from __future__ import annotations
 
 from datetime import date, datetime, timedelta
 
-from app import podnames
+from app import podnames, tg_fmt
 from app.models import Server
 
 LEAK_DAYS = 4  # суток подряд растет дно: 5 точек
@@ -170,3 +170,38 @@ def problems(s: Server, now: datetime) -> list[dict]:
         if x["level"]:
             x["text"] += f", свободной памяти сервера ({_fmt(free)}) при таком росте хватит примерно на {eta:g} сут"
     return out
+
+
+# -- короткий текст для Telegram (формат A, app/tg_fmt.py) --
+# Память растет 4 дня
+# Под: access-hub, уже 925мб
+
+_KIND_LABEL = {"pod": "Под", "docker": "Контейнер", "proc": "Процесс"}
+
+
+def _short_name(x: dict) -> str:
+    """access-hub (под без хеша), rest-server, dockerd или php-fpm7.4 (idv)."""
+    kind, name = x.get("kind"), str(x.get("name") or "?")
+    if kind == "pod":
+        ns, _, pod = name.partition("/")
+        return podnames.label(ns, pod) if pod else name
+    if kind == "proc":
+        comm, _, user = name.partition("@")
+        return comm if user in ("", "?", "root") else f"{comm} ({user})"
+    return name
+
+
+def tg_short(items) -> tuple[str, list[str]] | None:
+    """(что случилось, конкретика) по растущей памяти: вход - problems() с уровнем (то, что алертит).
+    Первое растущее с тем, сколько уже занимает, остальное именами."""
+    xs = [x for x in items or [] if isinstance(x, dict)]
+    if not xs:
+        return None
+    x = xs[0]
+    series = x.get("series") or []
+    now_b = series[-1] if series else None
+    val = _short_name(x) + (f", уже {tg_fmt.size(now_b)}" if now_b else "")
+    facts = [tg_fmt.fact(_KIND_LABEL.get(str(x.get("kind")), ""), val)]
+    if len(xs) > 1:
+        facts.append(tg_fmt.fact("Еще", tg_fmt.names(_short_name(y) for y in xs[1:])))
+    return f"Память растет {tg_fmt.days(LEAK_DAYS)}", facts

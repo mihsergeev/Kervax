@@ -29,6 +29,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app import tg_fmt
 from app.models import Server, ServerMetric
 
 log = logging.getLogger(__name__)
@@ -207,3 +208,37 @@ async def update_disk_forecasts(session_factory: async_sessionmaker[AsyncSession
         if n:
             await s.commit()
         return n
+
+
+# -- короткий текст для Telegram (формат A, app/tg_fmt.py) --
+# Диск / заполнится через 21 ч
+# сейчас 69%
+
+def when_short(h: float) -> str:
+    """Срок словами для чата: через 21 ч, через 3 дня."""
+    if h < 1:
+        return "меньше чем через час"
+    if h < 48:
+        return f"через {round(h)} ч"
+    return f"через {tg_fmt.days(round(h / 24))}"
+
+
+def tg_short(items, horizon_h: float = 5 * 24) -> tuple[str, list[str]] | None:
+    """(что случилось, конкретика) по fresh_items(): самый скорый раздел - что и сколько занято
+    сейчас, остальные в пределах горизонта алерта - именами со сроком."""
+    its = sorted((i for i in items or [] if isinstance(i, dict) and i.get("eta_h") is not None),
+                 key=lambda i: float(i["eta_h"]))
+    if not its:
+        return None
+    first = its[0]
+    when = when_short(float(first["eta_h"]))
+    if first.get("kind") == "inode":
+        what = f"Inode на {first['mount']} кончатся {when}"
+    else:
+        what = f"Диск {first['mount']} заполнится {when}"
+    facts = [f"сейчас {tg_fmt.pct(float(first['pct']))}"] if first.get("pct") is not None else []
+    rest = [f"{'inode ' if i.get('kind') == 'inode' else ''}{i['mount']} {when_short(float(i['eta_h']))}"
+            for i in its[1:] if float(i["eta_h"]) <= horizon_h]
+    if rest:
+        facts.append(tg_fmt.fact("Еще", tg_fmt.names(rest, 2)))
+    return what, facts

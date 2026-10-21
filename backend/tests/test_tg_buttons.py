@@ -128,6 +128,9 @@ async def test_digest_has_no_buttons(client, tg):
     msgs = [collector._server_alert_text("disk", f"web-{i}", f"9{i}%", ref=f"srv:{i}") for i in range(3)]
     await alerts.dispatch(CFG, True, msgs, 2, session_factory=f)
     assert len(tg.of("sendMessage")) == 1 and "reply_markup" not in tg.of("sendMessage")[0]
+    # в пачке каждый алерт одной строкой
+    text = tg.of("sendMessage")[0]["text"]
+    assert text.startswith("🌊 3 ") and text.split("\n")[1:] == [f"⚠️💽 web-{i}: 9{i}%" for i in range(3)]
 
 
 async def test_personal_copy_gets_same_buttons(client, tg):
@@ -573,13 +576,17 @@ async def test_storm_one_message_buttons_cover_all(client, tg):
     assert await alerts.dispatch(CFG, True, fires, 6, parse_mode="HTML", session_factory=f)
     sends = tg.of("sendMessage")
     assert len(sends) == 1
-    assert sends[0]["text"].startswith("⚙️ <b>3 сервера</b> — упал x.service: ошибка, 2 мин назад\n↳ ")
-    assert sends[0]["text"].count('<a href="https://kx/s">web-') == 3
+    # коротко: сколько серверов, что случилось, последней строкой - какие серверы (ссылками)
+    assert sends[0]["text"].startswith("⚠️⚙️ <b>3 сервера</b>\n<b>Упал x.service</b>\n")
+    assert sends[0]["text"].count('<a href="https://kx/s">web-') == 3 and "↳" not in sends[0]["text"]
     async with f() as s:
         row = (await s.scalars(select(TgAlert))).one()
         hist = (await s.scalars(select(alerts.AlertEvent))).all()
     assert row.ref == "srv:" + ",".join(map(str, ids))
     assert sorted(h.target for h in hist) == ["web-a", "web-b", "web-c"]
+    # в историю - полный текст каждого сервера, с его временем
+    assert sorted(h.text for h in hist) == [f"⚠️⚙️ web-{c} — упал x.service: ошибка, {n} мин назад"
+                                            for c, n in zip("abc", (2, 3, 2))]
     await _press(f, row.id, "h1")
     async with f() as s:
         assert all("units" in srv.alert_snoozes for srv in [await s.get(Server, i) for i in ids])

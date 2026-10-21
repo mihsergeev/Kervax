@@ -3,6 +3,7 @@
 from sqlalchemy import select
 
 from app import collector, flaky
+from app.alerts import full_text
 from app.checks import CheckOutcome
 from app.config import Settings
 from app.db import Base, create_engine_and_factory
@@ -93,9 +94,13 @@ async def test_flaky_alert_and_recovery(tmp_path, monkeypatch):
     sent, seen, row, incidents = await _run(tmp_path, monkeypatch, seq)
     # обычного алерта нет (подряд максимум один сбой), через раз - ровно один, и отбой
     assert len(sent) == 2, sent
-    assert "🟠" in sent[0] and "отвечает через раз: 4 из 20" in sent[0]
-    assert "ReadTimeout" in sent[0] and 'href="https://x"' in sent[0]
-    assert "✅" in sent[1] and "снова отвечает стабильно" in sent[1]
+    # в чат: что случилось и последняя ошибка; сколько сбоев из скольких - в полном тексте
+    assert sent[0].startswith("🟠🌐 ") and "<b>Отвечает через раз</b>" in sent[0]
+    assert sent[0].endswith("\nReadTimeout") and "4 из 20" not in sent[0]
+    full = full_text(sent[0])
+    assert "🟠" in full and "отвечает через раз: 4 из 20" in full
+    assert "ReadTimeout" in full and 'href="https://x"' in full
+    assert sent[1].startswith("✅ ") and sent[1].endswith(": снова отвечает стабильно")
     assert not any(i.notified for i in incidents)
     assert seen.index(True) == 27  # четвертый сбой
     assert seen.index(False, 27) == 45  # в окне остался один сбой

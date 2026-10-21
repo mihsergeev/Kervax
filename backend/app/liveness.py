@@ -146,6 +146,18 @@ async def check(srv, offline: bool = True, common: frozenset[str] = frozenset())
     return out
 
 
+def short(res: dict) -> str:
+    """То же одной строкой для чата (формат A): что видно с панели, без адресов и команд."""
+    st = res.get("state")
+    if st == "alive":
+        return "машина отвечает, молчит агент"
+    if st == "refused":
+        return "адрес отвечает отказом, похоже на перезагрузку"
+    if st == "blind":
+        return ""
+    return "машина не отвечает"
+
+
 def text(res: dict) -> str:
     st = res.get("state")
     if st == "alive":

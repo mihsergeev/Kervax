@@ -11,6 +11,7 @@ Neo4j, ансибл-роль, пишущая метрики для node_exporter
 import re
 from datetime import datetime
 
+from app import tg_fmt
 from app.schemas import CustomBackupDb, CustomBackupOut
 
 EXTRA_KEY = "custom-backups"
@@ -283,6 +284,56 @@ def problems(server, now: datetime) -> list[str]:
     return sorted(
         f"{v.name} ({v.problem})" for v in views(server, now) if v.status in _PROBLEM
     )
+
+
+# ---- короткий алерт в Telegram (формат A, app/tg_fmt.py) ----
+# "Упал свой бэкап files-sync": что и какое задание, конкретика только если она есть (таймаут, базы)
+
+_AGO = re.compile(r"(\d+(?:\.\d+)?) (мин|ч|дн)")
+_AGO_S = {"мин": 60, "ч": 3600, "дн": _DAY}
+
+
+def _ago_back(text: str) -> str:
+    """"нет свежего бэкапа 2.5 дн" -> "2 дня" (как пишет tg_fmt.dur)"""
+    m = _AGO.search(text)
+    return tg_fmt.dur(float(m.group(1)) * _AGO_S[m.group(2)]) if m else ""
+
+
+def _parse(item: str) -> tuple[str, str]:
+    """Строка problems() "имя (что не так)" -> (имя, что не так)"""
+    m = re.match(r"^(.*) \((.*)\)$", str(item), re.S)
+    return (m.group(1), m.group(2)) if m else (str(item), "")
+
+
+def _short_one(item: str) -> tuple[str, list[str]]:
+    """Строка problems() -> (что случилось, конкретика)"""
+    name, problem = _parse(item)
+    problem, _, bad = problem.partition(": ")
+    facts = [tg_fmt.fact("Базы", tg_fmt.names(bad.split(", ")))] if bad else []
+    if problem.startswith("таймер выключен"):
+        return f"Свой бэкап {name} не запускается", ["таймер выключен"]
+    if problem.startswith("нет свежего бэкапа"):
+        ago = _ago_back(problem)
+        return f"Свой бэкап {name} давно не отрабатывал", [f"последний успешный {ago} назад"] if ago else []
+    if problem.startswith("cron не запускал"):
+        ago = _ago_back(problem)
+        return f"Cron не запускает свой бэкап {name}", [f"последний запуск {ago} назад"] if ago else []
+    detail = {"не уложился в таймаут": "не уложился в таймаут", "убит сигналом": "убит сигналом",
+              "не записал итог": "прервался, итог не записан", "не сохранил снимок restic": "снимок restic не сохранен"}
+    why = next((v for k, v in detail.items() if k in problem), "")
+    return f"Упал свой бэкап {name}", ([why] if why else []) + facts
+
+
+def tg_short(own: list[str]) -> tuple[str, list[str]] | None:
+    """Короткий алерт по problems() (строки "имя (что не так)"): что - про первое задание, остальные
+    именами"""
+    if not own:
+        return None
+    what, facts = _short_one(own[0])
+    rest = [_parse(x)[0] for x in own[1:]]
+    if rest:
+        facts = facts[:1] + [tg_fmt.fact("Еще", tg_fmt.names(rest))]
+    return what, facts
 
 
 def has_file_backup(server, now: datetime) -> bool:

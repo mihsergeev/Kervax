@@ -134,13 +134,19 @@ async def test_cpu_spin_alert_lifecycle(tmp_path, monkeypatch):
             prc = (await s.execute(select(Server).where(Server.name == "k8s-a-prc"))).scalars().one()
             return prc.alert_state or {}
 
+    from app.alerts import full_text
+
     st = await tick([CHROME, CONTAINERD])
-    spin = [m for m in sent if "пустом цикле" in m or "крутят по ядру" in m]
-    assert len(spin) == 1 and "🌀" in spin[0] and f"(под {POD})" in spin[0], sent
+    spin = [m for m in sent if "пустом цикле" in full_text(m) or "крутят по ядру" in full_text(m)]
+    assert len(spin) == 1 and spin[0].startswith("⚠️🌀") and f"(под {POD})" in full_text(spin[0]), sent
+    assert "<b>Процессы крутятся впустую</b>" in spin[0] and "chrome x45, жгут 45 ядер" in spin[0]
+    # в чате - и где крутятся: под по ворклоаду, без хеша реплики
+    workload = POD.split("/")[1].rsplit("-", 2)[0]
+    assert workload in spin[0] and POD not in spin[0], spin[0]
     assert st.get("cpu_spin_from")
     st = await tick([CHROME, CONTAINERD])
-    assert len([m for m in sent if "крутят по ядру" in m]) == 1
+    assert len([m for m in sent if "крутят по ядру" in full_text(m)]) == 1
     st = await tick([CONTAINERD])
-    assert any(m.startswith("✅") and "крутивших CPU вхолостую" in m for m in sent), sent
+    assert any(m.startswith("✅") and "пустых циклов больше нет" in m for m in sent), sent
     assert not st.get("cpu_spin_from")
     await engine.dispose()

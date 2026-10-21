@@ -28,11 +28,12 @@ uid 0 пускает PermitRootLogin: no - никак, prohibit-password - то�
 """
 from __future__ import annotations
 
+import re
 import shlex
 from datetime import datetime, timedelta
 
 from app import changes as srv_changes
-from app import ssh_audit
+from app import ssh_audit, tg_fmt
 from app.models import Server
 
 MUTE_PREFIX = "access:"
@@ -115,6 +116,24 @@ def problems(srv: Server) -> list[tuple[int, str]]:
         if u.get("pw") == "NP":
             out.append((2, f"у учетки {name} пустой пароль: войти можно без пароля"))
     return out
+
+
+_ROOT_RE = re.compile(r"^учетка (\S+) с uid 0 ")
+_EMPTY_RE = re.compile(r"^у учетки (\S+) пустой пароль")
+
+
+def tg_short(items: list[tuple[int, str]]) -> tuple[str, list[str]] | None:
+    """Алерт access_risk (вход - problems()): "Второй root", "uid 0 у backup, пустой пароль у test"."""
+    if not items:
+        return None
+    roots = [m.group(1) for _l, t in items if (m := _ROOT_RE.match(t))]
+    empty = [m.group(1) for _l, t in items if (m := _EMPTY_RE.match(t))]
+    if roots:
+        fact = f"uid 0 у {tg_fmt.names(roots)}" + (f", пустой пароль у {tg_fmt.names(empty)}" if empty else "")
+        return "Второй root", [fact]
+    if empty:
+        return ("Пустой пароль у учетки" if len(empty) == 1 else "Пустой пароль у учеток"), [tg_fmt.names(empty)]
+    return "Опасный доступ", []
 
 
 def advice(srv: Server, now: datetime) -> dict | None:

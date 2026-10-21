@@ -409,3 +409,108 @@ def kube_view(s: Server, now: datetime) -> dict | None:
                    for b in [b for b in bl if b["node"]][-20:]],
         "burst_min": BURST_MIN,
     }
+
+
+# -- короткий текст для Telegram (формат A, app/tg_fmt.py) --
+# Под перезапускается
+# tech1/scheduler-dispatch: нет связи с базой
+
+from app import tg_fmt  # noqa: E402
+
+# строка лога упавшего пода -> причина словами; первая подошедшая
+_LINE_CAUSES = (
+    (re.compile(r"no connection to|could not connect to server|connection to server .* failed|"
+                r"Can't connect to (?:local )?MySQL|Lost connection to MySQL|MySQL server has gone away|"
+                r"server closed the connection unexpectedly|SQLSTATE\[(?:08\w{3}|HY000\] \[2002)|"
+                r"(?:Connection refused|ECONNREFUSED).{0,40}(?:5432|3306|27017)|(?:5432|3306|27017)\b.{0,40}"
+                r"(?:refused|timed? ?out|reset)", re.I), "нет связи с базой"),
+    (re.compile(r"redis.{0,60}(?:refused|timed? ?out|connect)|6379\b.{0,40}(?:refused|timed? ?out|reset)", re.I),
+     "нет связи с Redis"),
+    (re.compile(r"SQLSTATE", re.I), "ошибка SQL"),
+    (re.compile(r"leader ?election lost|lost lease|failed to renew lease", re.I), "потерял лидерство"),
+    (re.compile(r"out of memory|OutOfMemoryError|Cannot allocate memory|heap limit", re.I), "кончилась память"),
+    (re.compile(r"address already in use|EADDRINUSE", re.I), "порт уже занят"),
+    (re.compile(r"no such host|Name or service not known|getaddrinfo|ENOTFOUND|Temporary failure in name resolution",
+                re.I), "не резолвится адрес"),
+    (re.compile(r"connection refused|ECONNREFUSED", re.I), "отказ в соединении"),
+    (re.compile(r"deadline exceeded|timed? ?out|timeout", re.I), "таймаут"),
+    (re.compile(r"permission denied|EACCES", re.I), "нет прав"),
+    (re.compile(r"no such file or directory|ENOENT", re.I), "нет файла"),
+    (re.compile(r"segmentation fault|SIGSEGV", re.I), "segfault"),
+    (re.compile(r"\bpanic:", re.I), "panic"),
+)
+_K8S_SIZE = re.compile(r"(\d+(?:\.\d+)?)(Ki|Mi|Gi|Ti|K|M|G|T)?")
+_K8S_MUL = {"Ki": 2**10, "Mi": 2**20, "Gi": 2**30, "Ti": 2**40, "K": 1e3, "M": 1e6, "G": 1e9, "T": 1e12}
+
+
+def _k8s_size(lim: str) -> str:
+    """Лимит Kubernetes по-человечески: 512Mi -> 512мб, 1Gi -> 1гб."""
+    m = _K8S_SIZE.fullmatch(lim.strip())
+    if not m:
+        return lim.strip()
+    return tg_fmt.size(float(m.group(1)) * _K8S_MUL.get(m.group(2) or "", 1))
+
+
+def cause_short(why: str) -> str:
+    """Причина из текста cause() коротко: "OOM при лимите 512мб", "нет связи с базой", "exit 1"."""
+    w = " ".join(str(why or "").split())
+    if not w:
+        return ""
+    if w.startswith("OOMKilled при лимите "):
+        return "OOM при лимите " + _k8s_size(w.removeprefix("OOMKilled при лимите "))
+    if w.startswith("OOMKilled"):
+        return "OOM, кончилась память ноды"
+    m = re.match(r"убит по (\S+)-пробе", w)
+    if m:
+        return f"не прошел {m.group(1)}-пробу"
+    if w.startswith("сам вышел"):
+        return "вышел сам"
+    m = re.match(r"exit (\d+)(?: \(([^)]*)\))?(?:: (.*))?$", w)
+    if not m:
+        return w if len(w) <= 60 else w[:57].rstrip() + "..."
+    line = m.group(3) or ""
+    human = next((txt for rx, txt in _LINE_CAUSES if rx.search(line)), "")
+    return human or f"exit {m.group(1)}" + (f" ({m.group(2)})" if m.group(2) else "")
+
+
+def _short_pod(name: str) -> str:
+    ns, _, wl = str(name or "?").partition("/")
+    return podnames.label(ns, wl) if wl else ns
+
+
+def _why(x: dict) -> str:
+    """Причина прошлого завершения пода: поле, если оно есть, иначе хвост текста после ": "."""
+    return str(x.get("cause") or x.get("why") or str(x.get("text") or "").partition(": ")[2])
+
+
+def tg_short(items) -> tuple[str, list[str]] | None:
+    """(что случилось, конкретика) по элементам problems() одного вида (docker или pod). Пачки -
+    про ноду и ворклоады в них, под - ворклоад без хеша и причина коротко, контейнер - сколько раз
+    за сутки. Остальное именами."""
+    xs = [x for x in items or [] if isinstance(x, dict)]
+    if not xs:
+        return None
+    burst = next((x for x in xs if x.get("key") == BURSTS_KEY), None)
+    pods = [x for x in xs if x.get("kind") == "pod" and x is not burst]
+    docker = [x for x in xs if x.get("kind") == "docker"]
+    if burst is not None:
+        m = re.search(r"\(([^()]+)\) - подвисает", str(burst.get("text") or ""))
+        facts = [m.group(1)] if m else []
+        if pods:
+            facts.append(tg_fmt.fact("Еще", tg_fmt.names(_short_pod(x.get("name")) for x in pods)))
+        return "Поды перезапускаются пачками, подвисает нода", facts
+    if pods:
+        x = pods[0]
+        why = cause_short(_why(x))
+        facts = [f"{_short_pod(x.get('name'))}: {why}" if why else _short_pod(x.get("name"))]
+        if len(pods) > 1:
+            facts.append(tg_fmt.fact("Еще", tg_fmt.names(_short_pod(y.get("name")) for y in pods[1:])))
+        return ("Под перезапускается" if len(pods) == 1 else "Поды перезапускаются"), facts
+    if docker:
+        x = docker[0]
+        n = int(x.get("n") or 0)
+        facts = [f"{n} {_times(n)} за сутки"] if n else []
+        if len(docker) > 1:
+            facts.append(tg_fmt.fact("Еще", tg_fmt.names(str(y.get("name")) for y in docker[1:])))
+        return f"{x.get('name')} часто перезапускается", facts
+    return None

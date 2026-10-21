@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import select
 
 from app import backup_growth, collector
+from app.alerts import full_text
 from app.models import Server
 
 GB = 2**30
@@ -85,11 +86,16 @@ async def test_growth_alert_lifecycle(tmp_path, monkeypatch):
             await s.commit()
         await collector.evaluate_servers(factory, cfg, now)
 
+    def growth() -> list:
+        return [m for m in sent if getattr(m, "kind", "") == "backup_growth"]
+
     await tick([20] * 14 + [192])
-    msgs = [m for m in sent if "бэкап добавил" in m]
-    assert len(msgs) == 1 and "💾📈" in msgs[0] and "192 ГБ" in msgs[0], sent
+    msgs = growth()
+    assert len(msgs) == 1 and "бэкап добавил 192 ГБ за прогон" in full_text(msgs[0]), sent
+    # в чате: на сколько вырос и сколько обычно, размеры по-человечески
+    assert msgs[0] == "⚠️💾 feed-a\n<b>Бэкап вырос на 192гб за раз</b>\nобычно 20гб", msgs[0]
     await tick([20] * 14 + [192])
-    assert len([m for m in sent if "бэкап добавил" in m]) == 1
+    assert len(growth()) == 1
     # следующий прогон обычный: алерт закрывается молча, "снова обычный" в телеграм не идет
     await tick([20] * 13 + [192, 21])
     assert not [m for m in sent if m.startswith("✅")], sent
@@ -97,5 +103,5 @@ async def test_growth_alert_lifecycle(tmp_path, monkeypatch):
         assert not (await s.execute(select(Server))).scalars().one().alert_state.get("backup_growth")
     # и новый скачок снова алертит
     await tick([20] * 12 + [192, 21, 250])
-    assert len([m for m in sent if "бэкап добавил" in m]) == 2, sent
+    assert len(growth()) == 2 and "250гб" in growth()[1], sent
     await engine.dispose()

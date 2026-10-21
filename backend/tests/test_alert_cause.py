@@ -92,9 +92,15 @@ async def test_cpu_alert_says_who_eats_and_that_it_is_a_surge(tmp_path, monkeypa
     monkeypatch.setattr("app.alerts.send_alert", fake_send)
     await collector.evaluate_servers(factory, Settings(alert_webhook="http://hook"), now)
     assert len(sent) == 1, sent
-    assert "CPU 92% ≥ 90%" in sent[0]
-    assert "больше всего CPU у php-fpm 73%, queue-worker 28%" in sent[0]
-    assert "трафик x50 и соединений x13 к обычному для этого часа" in sent[0]
+    from app.alerts import full_text
+
+    # в чате - что случилось и главный пожиратель, разбор с наплывом - в полном тексте
+    assert sent[0].startswith("⚠️⚡") and "<b>CPU загружен на 92%</b>" in sent[0]
+    assert "Грузит: php-fpm" in sent[0] and "больше всего" not in sent[0]
+    full = full_text(sent[0])
+    assert "CPU 92% ≥ 90%" in full
+    assert "больше всего CPU у php-fpm 73%, queue-worker 28%" in full
+    assert "трафик x50 и соединений x13 к обычному для этого часа" in full
     await engine.dispose()
 
 
@@ -118,7 +124,10 @@ async def test_cpu_alert_without_history_looks_as_before(tmp_path, monkeypatch):
     monkeypatch.setattr("app.alerts.send_alert", fake_send)
     await collector.evaluate_servers(factory, Settings(alert_webhook="http://hook"), now)
     # ни процессов, ни истории: хвоста нет, «{cause}» в текст не протекает
-    assert len(sent) == 1 and sent[0].endswith("CPU 95% ≥ 90%") and "cause" not in sent[0]
+    from app.alerts import full_text
+
+    assert len(sent) == 1 and sent[0].endswith("<b>CPU загружен на 95%</b>") and "cause" not in sent[0]
+    assert full_text(sent[0]).endswith("CPU 95% ≥ 90%") and "cause" not in full_text(sent[0])
     await engine.dispose()
 
 
@@ -153,14 +162,18 @@ async def test_metric_walking_around_threshold_goes_quiet(tmp_path, monkeypatch)
         await collector.evaluate_servers(factory, settings, now)
         return list(sent)
 
+    from app.alerts import full_text
+
     # два захода за порог и обратно: пишем как раньше, по паре сообщений
-    assert any("CPU 95%" in x for x in await tick(0, 95))
+    assert any("CPU загружен на 95%" in x for x in await tick(0, 95))
     assert any("вернулся" in x or "снова" in x for x in await tick(30, 40))
-    assert any("CPU 95%" in x for x in await tick(60, 95))
+    assert any("CPU загружен на 95%" in x for x in await tick(60, 95))
     assert await tick(90, 40) != []
     # третий заход за те же 6 часов - одно сообщение про мигание, дальше тишина
     third = await tick(120, 95)
-    assert len(third) == 1 and "ходит вокруг порога" in third[0]
+    assert len(third) == 1 and "<b>CPU скачет около порога</b>" in third[0]
+    assert "молчу, пока не утихнет" in third[0]
+    assert "ходит вокруг порога" in full_text(third[0])
     assert await tick(150, 40) == []
     assert await tick(180, 95) == []
     # 6 часов от первого захода прошло, но последний был 4 часа назад: серия еще идет
@@ -168,7 +181,7 @@ async def test_metric_walking_around_threshold_goes_quiet(tmp_path, monkeypatch)
     # 6 часов без заходов, метрика в норме - короткий отбой, и снова можно алертить
     lift = await tick(60 * 9 + 10, 40)
     assert len(lift) == 1 and "CPU снова в норме" in lift[0]
-    assert any("CPU 95%" in x for x in await tick(60 * 9 + 40, 95))
+    assert any("CPU загружен на 95%" in x for x in await tick(60 * 9 + 40, 95))
     await engine.dispose()
 
 
@@ -214,8 +227,10 @@ async def test_requests_are_preferred_over_bytes(tmp_path, monkeypatch):
     await collector.evaluate_servers(factory, Settings(alert_webhook="http://hook"), now)
     # редиректы по 300 байт канал почти не шевелят, поэтому о байтах молчим, а запросы
     # выросли в 40 раз - о них и говорим
-    assert len(sent) == 1 and "запросов к веб-серверу x40 к обычному для этого часа" in sent[0]
-    assert "трафик" not in sent[0]
+    from app.alerts import full_text
+
+    assert len(sent) == 1 and "запросов к веб-серверу x40 к обычному для этого часа" in full_text(sent[0])
+    assert "трафик" not in full_text(sent[0]) and "трафик" not in sent[0]
     await engine.dispose()
 
 
@@ -278,8 +293,13 @@ async def test_dead_pod_of_a_controller_alerts_and_jobs_do_not(tmp_path, monkeyp
     settings = Settings(alert_webhook="http://hook")
     await collector.evaluate_servers(factory, settings, now)
     assert len(sent) == 1, sent
-    assert "default/postgres-0 (CrashLoopBackOff, 83 рестарта)" in sent[0]
-    assert "cron-aggregate" not in sent[0]  # Job - не наша забота
+    from app.alerts import full_text
+
+    # в чате - ворклоад без номера реплики и причина, счетчик рестартов - в полном тексте
+    assert sent[0].startswith("🔴☸️") and "<b>Не поднимается под</b>" in sent[0]
+    assert "default/postgres (CrashLoopBackOff)" in sent[0]
+    assert "default/postgres-0 (CrashLoopBackOff, 83 рестарта)" in full_text(sent[0])
+    assert "cron-aggregate" not in full_text(sent[0])  # Job - не наша забота
 
     # повторно молчим
     sent.clear()
@@ -302,7 +322,7 @@ async def test_dead_pod_of_a_controller_alerts_and_jobs_do_not(tmp_path, monkeyp
         srv.last_seen = now + timedelta(minutes=26)
         await s.commit()
     await collector.evaluate_servers(factory, settings, now + timedelta(minutes=26))
-    assert len(sent) == 1 and "снова в норме" in sent[0]
+    assert len(sent) == 1 and sent[0].startswith("✅") and "поды поднялись" in sent[0]
     await engine.dispose()
 
 
@@ -361,12 +381,20 @@ async def test_5xx_alert_says_where_codes_and_paths(tmp_path, monkeypatch):
     await collector.evaluate_servers(
         factory, Settings(alert_webhook="http://hook", panel_url="https://kervax.test"), now)
     assert len(sent) == 1, sent
+    from app.alerts import full_text
+
     msg = sent[0]
-    assert "0.20% запросов за 15 минут закончились ошибкой 5xx (1200 из 600000)" in msg
-    assert "Больше всего: ingress-nginx/ingress-nginx-controller-569b - 1200" in msg
-    assert "Коды: 503 - 1200" in msg
-    assert "Чаще всего падает: /api/v{n}/stat - 900" in msg
-    assert "сверху" not in msg
+    # в чате: доля, где и с каким кодом, частый путь
+    assert msg.startswith("🔴🌐") and "<b>0.2% запросов с ошибкой 5xx</b>" in msg
+    assert "ingress-nginx-controller-569b: 503" in msg
+    assert "Чаще всего: /api/v{n}/stat" in msg
+    # в полном тексте - с числами
+    full = full_text(msg)
+    assert "0.20% запросов за 15 минут закончились ошибкой 5xx (1200 из 600000)" in full
+    assert "Больше всего: ingress-nginx/ingress-nginx-controller-569b - 1200" in full
+    assert "Коды: 503 - 1200" in full
+    assert "Чаще всего падает: /api/v{n}/stat - 900" in full
+    assert "сверху" not in full
     # ссылка ведёт на раздел «Веб» карточки, где эти ошибки видны подробно
     assert "sec=web" in msg
     await engine.dispose()
@@ -421,7 +449,7 @@ async def test_5xx_bursts_within_an_hour_are_one_story(tmp_path, monkeypatch):
     assert await tick(45, 0) == []
     assert await tick(90, 0) == []              # чисто 45 минут - ещё рано
     rec = await tick(110, 0)                    # чисто больше часа - отбой
-    assert len(rec) == 1 and "ошибок 5xx нет уже час" in rec[0]
+    assert len(rec) == 1 and rec[0].startswith("✅") and "ошибок 5xx больше нет" in rec[0]
     await engine.dispose()
 
 
@@ -633,8 +661,10 @@ async def test_muted_log_drops_out_of_the_5xx_alert(tmp_path, monkeypatch):
         await s.commit()
     await collector.evaluate_servers(factory, settings, now + timedelta(seconds=30))
     assert len(sent) == 1, sent
-    assert "betsite-nginx" in sent[0] and "books" not in sent[0]
-    assert "(75 из 30000)" in sent[0]  # ошибки заглушенного лога вычтены
+    from app.alerts import full_text
+
+    assert "betsite-nginx: 502" in sent[0] and "books" not in full_text(sent[0])
+    assert "(75 из 30000)" in full_text(sent[0])  # ошибки заглушенного лога вычтены
     await engine.dispose()
 
 
@@ -703,8 +733,11 @@ async def test_scanner_probes_do_not_raise_the_5xx_alert(tmp_path, monkeypatch):
         await s.commit()
     await collector.evaluate_servers(factory, settings, now + timedelta(seconds=30))
     assert len(sent) == 1, sent
-    assert "betsite-nginx" in sent[0] and "dreamsite" not in sent[0]
-    assert "(75 из 30000)" in sent[0]  # ответы сканеру вычтены
+    from app.alerts import full_text
+
+    assert "betsite-nginx: 502" in sent[0] and "Чаще всего: /api/bets" in sent[0]
+    assert "dreamsite" not in full_text(sent[0])
+    assert "(75 из 30000)" in full_text(sent[0])  # ответы сканеру вычтены
     await engine.dispose()
 
 
@@ -869,9 +902,13 @@ async def test_disk_alert_says_where_the_space_went(tmp_path, monkeypatch):
 
     monkeypatch.setattr("app.alerts.send_alert", fake_send)
     await collector.evaluate_servers(factory, Settings(alert_webhook="http://hook"), now)
-    assert len(sent) == 1 and "88%" in sent[0]
-    assert "больше всего места: /var/lib/docker 50.0 ГБ" in sent[0]
-    assert "без риска освобождается ~5.8 ГБ" in sent[0]
+    from app.alerts import full_text
+
+    # в чате - сколько занято и главный каталог, разбор целиком - в полном тексте
+    assert len(sent) == 1 and "заполнен на 88%" in sent[0]
+    assert "Занимает: /var/lib/docker (50гб)" in sent[0] and "больше всего" not in sent[0]
+    assert "больше всего места: /var/lib/docker 50.0 ГБ" in full_text(sent[0])
+    assert "без риска освобождается ~5.8 ГБ" in full_text(sent[0])
     await engine.dispose()
 
 
@@ -904,7 +941,7 @@ async def test_busy_server_cpu_does_not_flap_around_the_threshold(tmp_path, monk
 
     for m in range(0, 17, 2):
         await tick(m, 95)
-    assert len(sent) == 1 and "CPU 95%" in sent[0]
+    assert len(sent) == 1 and "CPU загружен на 95%" in sent[0]
     for m in range(18, 80, 2):              # 83-89%: ниже порога, но выше линии снятия
         await tick(m, 89 if m % 4 else 83)
     await tick(80, 97)                      # снова выше порога - тот же алерт, не новый
@@ -914,5 +951,5 @@ async def test_busy_server_cpu_does_not_flap_around_the_threshold(tmp_path, monk
     assert len(sent) == 1
     for m in range(94, 112, 2):
         await tick(m, 70)
-    assert len(sent) == 2 and "CPU снова в норме: 70%" in sent[1]
+    assert len(sent) == 2 and sent[1].startswith("✅") and "CPU снова в норме, 70%" in sent[1]
     await engine.dispose()

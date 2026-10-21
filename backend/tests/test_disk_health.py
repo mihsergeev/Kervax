@@ -159,10 +159,15 @@ async def test_disk_health_alert_lifecycle(tmp_path, monkeypatch):
             await s.commit()
         await collector.evaluate_servers(factory, cfg, now)
 
+    from app.alerts import full_text
+
     await collector.evaluate_servers(factory, cfg, now)
     assert len(sent) == 1
-    assert sent[0].startswith("🚨💽 ") and "RAID md42, md43 (raid1): работает 1 из 2 дисков" in sent[0]
-    assert "не определяется (размер 0)" in sent[0] and "ошибки ввода-вывода в журнале ядра: 40" in sent[0]
+    full = full_text(sent[0])
+    assert sent[0].startswith("🚨💽 ") and "RAID md42, md43 (raid1): работает 1 из 2 дисков" in full
+    assert "не определяется (размер 0)" in full and "ошибки ввода-вывода в журнале ядра: 40" in full
+    # в чате - что сломано: какой массив, без пустой строки "что случилось"
+    assert "<b></b>" not in sent[0] and "RAID md42" in sent[0], sent[0]
 
     await tick(_k8sd(0))  # ничего нового
     assert len(sent) == 1
@@ -176,14 +181,16 @@ async def test_disk_health_alert_lifecycle(tmp_path, monkeypatch):
     second = _k8sd(0)
     second["disks"][1] = _disk("nvme0n1", "S7HENU0Y566831J", grow={"media": 2})
     await tick(second)
-    assert len(sent) == 2 and "за сутки выросли ошибки - ошибки носителя +2" in sent[1]
+    assert len(sent) == 2 and "за сутки выросли ошибки - ошибки носителя +2" in full_text(sent[1])
+    assert "nvme0n1" in sent[1].split("\n")[1]  # новое - первым, в строке "что случилось"
     await tick(second)
     assert len(sent) == 2
 
     third = _k8sd(0)
     third["missing"] = [{"serial": "OTHER", "model": "m", "dev": "sda", "last": 1}]
     await tick(third)
-    assert len(sent) == 3 and "пропал диск sda" in sent[2]
+    assert len(sent) == 3 and "пропал диск sda" in full_text(sent[2])
+    assert "диск sda" in sent[2].split("\n")[1]
 
     fixed = _k8sd(0)
     fixed["raid"] = [_raid("md42", "nvme0n1p3 nvme1n1p3", active=2), _raid("md43", "nvme0n1p4 nvme1n1p4", active=2)]
@@ -195,6 +202,7 @@ async def test_disk_health_alert_lifecycle(tmp_path, monkeypatch):
     now = now + timedelta(hours=1)
     await tick(fixed)
     assert len(sent) == 4 and sent[3].startswith("✅") and "диски снова в порядке" in sent[3]
+    assert "\n" not in sent[3]
     await engine.dispose()
 
 

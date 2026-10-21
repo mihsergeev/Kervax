@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import select
 
 from app import collector, restarts
+from app.alerts import full_text
 from app.models import Server
 
 NOW = datetime(2026, 10, 12, 12, 0, tzinfo=timezone.utc)
@@ -107,9 +108,12 @@ async def test_alert_after_five_restarts_a_day(tmp_path, monkeypatch):
             srv.last_report = {"uptime_seconds": 100000, **_rep(rc=min(i, 6))}
             await s.commit()
         await collector.evaluate_servers(factory, cfg, t)
-    hits = [m for m in sent if m.startswith("🔄🐳")]
-    assert len(hits) == 1 and "контейнер web перезапускался 5 раз за сутки" in hits[0], sent
+    hits = [m for m in sent if getattr(m, "kind", "") == "docker_restarts"]
+    assert len(hits) == 1 and "контейнер web перезапускался 5 раз за сутки" in full_text(hits[0]), sent
+    assert hits[0].startswith("⚠️🐳 ") and hits[0].split("\n")[2] == "5 раз за сутки", hits[0]
     await engine.dispose()
+    # имя контейнера как есть: "web часто перезапускается", а не "Web часто перезапускается"
+    assert hits[0].split("\n")[1] == "<b>web часто перезапускается</b>", hits[0]
 
 
 def test_pod_names_come_down_to_their_workload():

@@ -24,6 +24,7 @@ import re
 import shlex
 import time
 
+from app import tg_fmt
 from app.compose_cmd import verdict
 
 _SOCK = frozenset({"/var/run/docker.sock", "/run/docker.sock", "/var/run", "/run"})
@@ -372,3 +373,11 @@ def text(items: list[dict]) -> str:
     more = f" и еще {len(items) - 3}" if len(items) > 3 else ""
     verb = "держит" if len(items) == 1 else "держат"
     return f"{names}{more} {verb} docker-сокет: взлом прокси, который смотрит в интернет, - root на хосте"
+
+
+def tg_short(items: list[dict]) -> tuple[str, list[str]] | None:
+    """Алерт docker_sock (вход - exposed()): "Внешний прокси держит docker-сокет", "caddy-proxy-caddy-1"."""
+    if not items:
+        return None
+    what = "Внешний прокси держит docker-сокет" if len(items) == 1 else "Внешние прокси держат docker-сокет"
+    return what, [tg_fmt.names(i["name"] for i in items)]

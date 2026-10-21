@@ -17,6 +17,8 @@ from __future__ import annotations
 import re
 from datetime import datetime, timezone
 
+from app import tg_fmt
+
 STALE = 600  # блок helper'а старше 10 минут: nvidia-smi завис или таймер не идет
 XID_HOLD = 3600  # ошибка Xid держится проблемой час: за это время ее разберут или она повторится
 DAY = 86400
@@ -557,3 +559,144 @@ def metric_llm(llm: list[dict] | None) -> list[dict] | None:
             "ttft": _p95(x, "ttft"), "tpot": _p95(x, "tpot"), "e2e": _p95(x, "e2e"),
         })
     return out or None
+
+
+# --- короткий текст для Telegram (формат A, app/tg_fmt.py) -----------------------------------
+# Отвалилась GPU 0
+# Xid 79, nvidia-smi ее не видит
+
+def _xid_what(code: int, who: str) -> str:
+    if code == 79:
+        return f"Отвалилась {who}"
+    if code in (48, 63, 64, 92, 94, 95, 140):
+        return f"Ошибки памяти {who}"
+    if code in (61, 62):
+        return f"Сбой микрокода {who}"
+    if code in (119, 120):
+        return f"Зависла {who}"
+    if code == 74:
+        return f"Ошибка NVLink на {who}"
+    if code == 154:
+        return f"{who} ждет восстановления"
+    return f"Ошибка {who}"
+
+
+def _gpu_one(p) -> tuple[str, list[str]]:
+    """Одна беда из problems(): по ключу - что это, из текста - номер карты и подробности."""
+    text, key = str(p[1] or ""), str(p[2] or "")
+    parts = key.split(":")
+    kind = parts[1] if len(parts) > 1 else ""
+    m = re.match(r"(GPU \S+?):? ", text)
+    who = m.group(1) if m else "GPU"
+    if kind == "stale":
+        m = re.search(r"не обновлялись (.+?):", text)
+        return "Нет свежих данных о GPU" + (f" {m.group(1)}" if m else ""), ["helper gpu-setup не отрабатывает"]
+    if kind == "drv":
+        why = text.partition("не отвечает")[2].strip(" :()")
+        return "Драйвер NVIDIA не отвечает", [why.split(" - ")[0]] if why else []
+    if kind == "lost":
+        if "Xid 79" in text:
+            return f"Отвалилась {who}", ["Xid 79, nvidia-smi ее не видит"]
+        return f"Пропала {who}", ["на шине есть, nvidia-smi ее не видит"]
+    if kind == "rf":
+        return f"{who} под замену", ["не удалось исключить сбойную память"]
+    if kind == "remap":
+        return f"Сбойная память на {who}", ["нужен сброс GPU или перезагрузка"]
+    if kind == "frozen":
+        m = re.search(r"не меняются (.+?) - ", text)
+        return f"Застыли показания {who}", [f"nvidia-smi не меняется {m.group(1)}"] if m else []
+    if kind == "ecc":
+        n = text.rpartition(" - ")[2].strip()
+        return f"Ошибки памяти {who}", [f"неисправимых ECC: {n}"] if n else []
+    if kind == "xid":
+        # gpu:xid:<шина 41:00>:<код>:<время> - в шине тоже двоеточие
+        code = _i(parts[-2]) if len(parts) > 4 else None
+        if code is not None:
+            tail = XID_HW.get(code, "").partition(": ")[2]
+            return _xid_what(code, who), [f"Xid {code}" + (f", {tail}" if tail else "")]
+    return tg_fmt.split_detail(text)
+
+
+def tg_short(items) -> tuple[str, list[str]] | None:
+    """(что случилось, конкретика) по problems(): первая (худшая) беда, остальные именами."""
+    ps = [p for p in items or [] if isinstance(p, (tuple, list)) and len(p) >= 3]
+    if not ps:
+        return None
+    what, facts = _gpu_one(ps[0])
+    if len(ps) > 1:
+        rest = tg_fmt.names(tg_fmt.low(_gpu_one(p)[0]) for p in ps[1:])
+        facts = facts[:1] + [tg_fmt.fact("Еще", rest)]
+    return what, facts
+
+
+def tg_short_heat(items) -> tuple[str, list[str]] | None:
+    """(что случилось, конкретика) по heat(): (уровень, текст), список таких или сам текст."""
+    if isinstance(items, list) and items and isinstance(items[0], (tuple, list)):
+        items = items[0]
+    if isinstance(items, (tuple, list)) and len(items) >= 2:
+        text = str(items[1] or "")
+    else:
+        text = str(items or "")
+    m = re.match(r"GPU (\S+) (?:перегрев|греется:) (\d+)°C", text)
+    if not m:
+        return tg_fmt.split_detail(text) if text else None
+    what = f"GPU {m.group(1)} греется до {m.group(2)}°C"
+    clk = re.search(r"частота снижена до (\d+) из (\d+) МГц", text)
+    if clk:
+        return what, [f"частота снижена до {clk.group(1)} из {clk.group(2)} МГц"]
+    if "перегрев" in text:
+        return what, ["дошла до замедления"]
+    return what, []
+
+
+_LAT = re.compile(r"задержка (до первого токена|на токен) p95 ([\d.]+) (мс|с), обычно ([\d.]+) (мс|с)")
+
+
+def _sec_of(v: str, unit: str) -> float:
+    return float(v) / 1000 if unit == "мс" else float(v)
+
+
+def _lat_text(v: float, b: float) -> str:
+    """2.4 с вместо 0.5, 310 мс вместо 120: обычное - в тех же единицах."""
+    if v >= 1:
+        return f"{f'{v:.1f}'.removesuffix('.0')} с вместо {f'{b:.1f}'.removesuffix('.0')}"
+    return f"{v * 1000:.0f} мс вместо {b * 1000:.0f}"
+
+
+def _llm_one(p) -> tuple[str, str]:
+    """(что случилось, конкретика) по одной беде llm_problems()."""
+    text, key = str(p[1] or ""), str(p[2] or "")
+    _llm, kind, svc = (key.split(":", 2) + ["", ""])[:3]
+    name = svc.split("|")[2] if svc.count("|") >= 2 else ""
+    name = name or text.partition(": ")[0]
+    if kind == "down":
+        m = re.search(r"/metrics \(([^)]+)\)", text)
+        return "LLM не отвечает", f"{name}: {m.group(1)}" if m else name
+    if kind == "queue":
+        m = re.search(r"в очереди (\d+)", text)
+        return "LLM не успевает, растет очередь", f"{name}: ждут {m.group(1)}" if m else name
+    if kind == "kv":
+        m = re.search(r"KV-кэш заполнен на (\d+)%", text)
+        return "У LLM кончился KV-кэш", f"{name}: занят на {m.group(1)}%" if m else name
+    m = _LAT.search(text)
+    if m:
+        what = "первый токен" if m.group(1) == "до первого токена" else "на токен"
+        v, b = _sec_of(m.group(2), m.group(3)), _sec_of(m.group(4), m.group(5))
+        return "LLM отвечает медленно", f"{name}: {what} {_lat_text(v, b)}"
+    w, f = tg_fmt.split_detail(text)
+    return w, (f[0] if f else "")
+
+
+def tg_short_llm(items) -> tuple[str, list[str]] | None:
+    """(что случилось, конкретика) по llm_problems(): первая (худшая) беда, остальные сервисы именами."""
+    ps = [p for p in items or [] if isinstance(p, (tuple, list)) and len(p) >= 3]
+    if not ps:
+        return None
+    what, fact = _llm_one(ps[0])
+    facts = [fact] if fact else []
+    first = fact.partition(": ")[0]
+    rest = [f.partition(": ")[0] for f in (_llm_one(p)[1] for p in ps[1:]) if f]
+    rest = [r for r in rest if r != first]
+    if rest:
+        facts.append(tg_fmt.fact("Еще", tg_fmt.names(rest)))
+    return what, facts

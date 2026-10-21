@@ -2,6 +2,7 @@
 from datetime import datetime, timedelta, timezone
 
 from app import collector, liveness, open_ports
+from app.alerts import full_text
 from app.config import Settings
 from app.db import Base, create_engine_and_factory
 from app.models import Server
@@ -94,7 +95,10 @@ async def test_offline_alert_says_whether_server_answers(tmp_path, monkeypatch):
     settings = Settings(alert_webhook="http://hook")
     later = now + timedelta(minutes=30)
     await collector.evaluate_servers(factory, settings, later)
-    assert len(sent) == 1 and "с панели сервер отвечает (203.0.113.10:2221)" in sent[0]
+    # в чат - что видно с панели одной строкой, адрес и команда - в полном тексте
+    assert len(sent) == 1 and sent[0].startswith("🔴📡 web-a\n<b>Не на связи</b>\n")
+    assert "Машина отвечает, молчит агент" in sent[0] and "203.0.113.10" not in sent[0]
+    assert "с панели сервер отвечает (203.0.113.10:2221)" in full_text(sent[0])
     async with factory() as s:
         st = (await s.get(Server, 1)).alert_state
         assert st["offline_probe"]["state"] == "alive"

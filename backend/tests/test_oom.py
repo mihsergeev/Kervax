@@ -18,6 +18,7 @@ import pytest
 from sqlalchemy import select
 
 from app import oom
+from app.alerts import full_text
 
 ROOT = Path(__file__).resolve().parents[2]
 SRC = (ROOT / "agent" / "units-setup.sh").read_text(encoding="utf-8")
@@ -295,8 +296,11 @@ async def test_units_alert_skips_oom_and_alert_text(tmp_path, monkeypatch):
     await collector.evaluate_servers(factory, Settings(alert_webhook="http://hook"), now)
     assert len(sent) == 1, sent
     # последний эпизод: php7.4-fpm лежит - критично
-    assert sent[0].startswith("🔴🧠 ") and "нехватка памяти (OOM)" in sent[0] and "упал" not in sent[0].split("\n")[0]
-    assert "php7.4-fpm.service (не поднялась)" in sent[0] and "за 7 дней OOM 2 раз" in sent[0]
+    full = full_text(sent[0])
+    assert sent[0].startswith("🔴🧠 ") and "нехватка памяти (OOM)" in full and "упал" not in full.split("\n")[0]
+    assert "php7.4-fpm.service (не поднялась)" in full and "за 7 дней OOM 2 раз" in full
+    # в чате: кого убило и что не поднялось, без "больше всего памяти" и счетчика за неделю
+    assert sent[0] == "🔴🧠 node\n<b>Кончилась память (OOM)</b>\nУбит: python (пул web)\nНе поднялась: php7.4-fpm"
     async with factory() as s:
         srv = (await s.execute(select(Server))).scalars().one()
         probs = collector.server_problems(srv, now)
@@ -406,8 +410,10 @@ async def test_units_alert_user_manager_by_cgroup(tmp_path, monkeypatch):
 
     monkeypatch.setattr("app.alerts.send_alert", fake_send)
     await collector.evaluate_servers(factory, Settings(alert_webhook="http://hook"), now)
-    assert len(sent) == 1 and "нехватка памяти (OOM)" in sent[0], sent
-    assert "user@1001" not in sent[0] and "launchpadlib" not in sent[0]
+    full = full_text(sent[0])
+    assert len(sent) == 1 and "нехватка памяти (OOM)" in full, sent
+    assert "user@1001" not in full and "launchpadlib" not in full
+    assert sent[0].split("\n")[1] == "<b>Кончилась память (OOM)</b>" and "user@1001" not in sent[0]
     async with factory() as s:
         srv = (await s.execute(select(Server))).scalars().one()
         texts = [p["text"] for p in collector.server_problems(srv, now)]

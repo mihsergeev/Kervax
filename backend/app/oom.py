@@ -25,6 +25,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app import podnames, tg_fmt
 from app.models import OomKill, Server
 
 EXTRA_KEY = "oom"
@@ -442,6 +443,128 @@ def episode_text(e: dict, tz, failed_now: set[str], n7: int, containers: dict[st
     return "\n".join(lines)
 
 
+# -- короткий текст для Telegram (формат A, app/tg_fmt.py) --
+# Кончилась память (OOM)
+# Убит: mariadbd
+# Под: wordpress-mariadb (лимит 1гб)
+# Кто занимал память, RAM и swap, сколько раз за неделю - в полном тексте и в карточке.
+
+WHAT = "Кончилась память (OOM)"
+_PID = re.compile(r"\s*\(pid \d+\)")
+
+
+def _same(a: str, b: str) -> bool:
+    """Процесс и служба об одном и том же: mysqld и mysql, dockerd и docker, postgres и postgresql."""
+    a, b = (re.sub(r"[\d.@_-]", "", x.lower()) for x in (a, b))
+    return bool(a and b) and (a in b or b in a)
+
+
+def pod_label(uid: str, pod_names: dict[str, str] | None = None) -> str:
+    """Под по uid из cgroup: ворклоад без хеша по имени из отчетов нод с kube-api (pod_names: начало
+    uid -> ns/имя, collector.pod_uid_names), не нашлось - начало uid."""
+    full = (pod_names or {}).get(uid[:8]) or (pod_names or {}).get(uid)
+    if not full:
+        return uid[:8]
+    ns, _, name = full.partition("/")
+    return podnames.label(ns, name)
+
+
+def _kill_label(k: dict, containers: dict[str, str] | None, pod_names: dict[str, str] | None,
+                with_owner: bool = True) -> str:
+    """php-fpm7.4 (пул idv), java (tomcat9), mysqld, java (контейнер web)."""
+    name = (k.get("name") or "").strip("()") or ("cgroup" if k.get("kind") == "oomd" else "?")
+    if not with_owner:
+        return name
+    o = kill_owner(k)
+    kind, own, user = o.get("kind"), o.get("name") or "", k.get("user") or ""
+    if kind == "service":
+        svc = own.removesuffix(".service")
+        if "fpm" in name or "fpm" in svc:
+            # воркеры php-fpm работают от пользователя своего пула
+            return f"{name} (пул {user})" if user and user != "root" else name
+        return name if _same(name, svc) else f"{name} ({svc})"
+    if kind == "container":
+        c = (containers or {}).get(own) or own
+        return name if _same(name, c) else f"{name} (контейнер {c})"
+    if kind == "pod":
+        return f"{name} (под {pod_label(own, pod_names)})"
+    if kind == "user":
+        return f"{name} (сессия {own})"
+    return name
+
+
+def _main_kills(kills: list[dict]) -> list[dict]:
+    """Ради чего убивали: процессы служб, контейнеров и подов от 10мб, крупные первыми. Мелочь
+    вроде healthcheck.sh и процессов сессии - только если больше никого."""
+    ks = sorted(kills, key=lambda k: -(k.get("anon") or 0))
+    loud = [k for k in ks if kill_owner(k)["kind"] != "user"]
+    return [k for k in loud if (k.get("anon") or 0) >= 10 * 1024] or loud or ks
+
+
+def _owner_fact(o: dict, containers: dict[str, str] | None, pod_names: dict[str, str] | None) -> tuple[str, str]:
+    k, n = o.get("kind"), o.get("name") or ""
+    if k == "pod":
+        return "Под", pod_label(n, pod_names) if n else "?"
+    if k == "container":
+        return "Контейнер", (containers or {}).get(n) or n
+    if k == "service":
+        return "Служба", n.removesuffix(".service")
+    if k == "user":
+        return "Сессия", n
+    if k in ("scope", "other"):
+        return "Cgroup", n
+    return "", ""
+
+
+def episode_short(e: dict, tz, failed_now: set[str], containers: dict[str, str] | None = None,
+                  pod_names: dict[str, str] | None = None, late: bool = False) -> tuple[str, list[str]]:
+    """(что случилось, конкретика) по эпизоду. late - сообщение опоздало: время эпизода в первой
+    строке, без объяснений почему."""
+    what = "Не хватает памяти (systemd-oomd)" if e["kind"] == "oomd" else WHAT
+    if late:
+        what += f" в {hhmm(e['start'], tz)}"
+    facts: list[str] = []
+    if e["kind"] == "memcg":
+        own = [k for k in e["kills"] if k["kind"] == "memcg"] or e["kills"]
+        ks = _main_kills(own)
+        facts.append(tg_fmt.fact("Убит" if len(ks) == 1 else "Убиты",
+                                 tg_fmt.names(_kill_label(k, containers, pod_names, False) for k in ks)))
+        k0 = own[0]
+        label, name = _owner_fact(owner(k0.get("oom_memcg") or k0.get("memcg") or "", k0.get("user") or "",
+                                        k0.get("uid")), containers, pod_names)
+        lim = (e.get("mem") or {}).get("limit")
+        if label:
+            facts.append(tg_fmt.fact(label, name + (f" (лимит {tg_fmt.size(lim * 1024)})" if lim else "")))
+        elif lim:
+            facts.append(f"лимит {tg_fmt.size(lim * 1024)}")
+        return what, facts
+    ks = _main_kills(e["kills"])
+    facts.append(tg_fmt.fact("Убит" if len(ks) == 1 else "Убиты",
+                             tg_fmt.names(_kill_label(k, containers, pod_names) for k in ks)))
+    fu = failed_units(e, failed_now)
+    down = [u.removesuffix(".service") for u, d in fu if d]
+    up = [u.removesuffix(".service") for u, d in fu if not d]
+    if down:
+        facts.append(tg_fmt.fact("Не поднялась" if len(down) == 1 else "Не поднялись", tg_fmt.names(down)))
+    elif up:
+        facts.append(tg_fmt.fact("Перезапустилась" if len(up) == 1 else "Перезапустились", tg_fmt.names(up)))
+    return what, facts
+
+
+def counter_short(victim: str) -> tuple[str, list[str]]:
+    """Без журнала (helper'а нет): по счетчику ядра и последней жертве от агента."""
+    v = _PID.sub("", victim or "").strip()
+    return WHAT, [tg_fmt.fact("Убит", v)] if v else []
+
+
+def tg_short(items) -> tuple[str, list[str]] | None:
+    """Короткий текст, который alert_step отдал в "oom_short" (что случилось, конкретика): тот же
+    вход, что у tg_short других модулей, если collector кладет его в ctx["items"]."""
+    if isinstance(items, (tuple, list)) and len(items) == 2 and isinstance(items[0], str) and items[0]:
+        return items[0], [str(f) for f in items[1] or [] if f]
+    return None
+
+
 # -- юниты --
 
 def unit_link(u: dict, eps: list[dict]) -> dict | None:
@@ -637,9 +760,12 @@ def view(s: Server, now: datetime) -> dict | None:
 # -- алерт --
 
 def alert_step(s: Server, st: dict, rep: dict, now: datetime, tz,
-               mutes: set[str] | None = None) -> tuple[tuple[int, str] | None, dict, dict]:
+               mutes: set[str] | None = None,
+               pod_names: dict[str, str] | None = None) -> tuple[tuple[int, str] | None, dict, dict]:
     """Что делать с алертом OOM на этом тике: (уровень и текст или None, что записать в состояние
-    после доставки, что записать сразу; "oom_ep" в первом - эпизод для ссылки, в состояние не идет). Состояние:
+    после доставки, что записать сразу; "oom_ep" в первом - эпизод для ссылки, "oom_short" - короткий
+    текст для Telegram (что случилось, конкретика), оба в состояние не идут). pod_names - имена подов
+    по uid (collector.pod_uid_names): OOM в лимите пода называет под по имени, а не по uid. Состояние:
     oom_end - конец последнего учтенного эпизода, oom_seen - учтенный счетчик ядра, oom_sent и
     oom_sent_lvl - когда и с каким уровнем ушло сообщение, oom_held - эпизоды, отложенные до
     конца часа после сообщения, oom_wait - когда вырос счетчик, а эпизода в журнале еще нет.
@@ -674,10 +800,11 @@ def alert_step(s: Server, st: dict, rep: dict, now: datetime, tz,
         lvl = max(level(e, failed) for e in ready)
         if recent and lvl <= sent_lvl:
             return None, {}, {**now_apply, **upd, "oom_held": held + [e["id"] for e in ready]}
-        text = episode_text(ready[-1], tz, failed, week, conts, more=len(held) + len(ready) - 1,
-                            late=late_text(ready[-1], now_ts))
+        late = late_text(ready[-1], now_ts)
+        text = episode_text(ready[-1], tz, failed, week, conts, more=len(held) + len(ready) - 1, late=late)
+        short = episode_short(ready[-1], tz, failed, conts, pod_names, late=bool(late))
         return (lvl, text), {**upd, "oom_held": [], "oom_sent": now_ts, "oom_sent_lvl": lvl,
-                             "oom_ep": ready[-1]["id"]}, now_apply
+                             "oom_ep": ready[-1]["id"], "oom_short": short}, now_apply
     if held and not recent:
         # час после сообщения прошел, а отложенное не сказано: одно сообщение про все (что не
         # заглушили, пока оно ждало)
@@ -688,13 +815,14 @@ def alert_step(s: Server, st: dict, rep: dict, now: datetime, tz,
         last = next((by_id[i] for i in reversed(held) if i in by_id), None)
         if last is not None:
             lvl = level(last, failed)
-            text = episode_text(last, tz, failed, week, conts, more=len(held) - 1,
-                                late=late_text(last, now_ts, held=True))
-            link = {"oom_ep": last["id"]}
+            late = late_text(last, now_ts, held=True)
+            text = episode_text(last, tz, failed, week, conts, more=len(held) - 1, late=late)
+            link = {"oom_ep": last["id"], "oom_short": episode_short(last, tz, failed, conts, pod_names,
+                                                                     late=bool(late))}
         else:
             lvl = 1
             text = f"нехватка памяти (OOM) повторялась: с прошлого сообщения еще {len(held)} раз"
-            link = {}
+            link = {"oom_short": (WHAT, [])}
         return (lvl, text), {"oom_held": [], "oom_sent": now_ts, "oom_sent_lvl": lvl, **link}, now_apply
     if total > seen and not fresh:
         wait = _f(st.get("oom_wait"))
@@ -713,7 +841,8 @@ def alert_step(s: Server, st: dict, rep: dict, now: datetime, tz,
             return None, {}, {**now_apply, **upd, "oom_held": held + [f"c{total}"]}
         victim = (s.oom_victim or "").strip()
         text = f"нехватка памяти (OOM): ядро убило {total - seen} процесс(ов)" + (f", последний {victim}" if victim else "")
-        return (1, text), {**upd, "oom_held": [], "oom_sent": now_ts, "oom_sent_lvl": 1}, now_apply
+        return (1, text), {**upd, "oom_held": [], "oom_sent": now_ts, "oom_sent_lvl": 1,
+                           "oom_short": counter_short(victim)}, now_apply
     return None, {}, now_apply
 
 

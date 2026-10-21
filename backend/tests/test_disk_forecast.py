@@ -192,16 +192,21 @@ async def test_forecast_alert_levels_and_recovery(tmp_path, monkeypatch):
     await tick(200)  # неделя - не повод
     assert sent == []
     await tick(60)
-    assert len(sent) == 1 and sent[0].startswith("⚠️📈 ")
-    assert "диск /hdd заполнится примерно через 2 дн: сейчас 80%, растет на ~3% в сутки" in sent[0]
+    from app.alerts import full_text
+
+    # в чате - какой диск и когда заполнится, сколько сейчас; скорость роста - в полном тексте
+    assert len(sent) == 1 and sent[0].startswith("⚠️💽 ")
+    assert "<b>Диск /hdd заполнится через 2 дня</b>" in sent[0] and "сейчас 80%" in sent[0]
+    assert "растет" not in sent[0]
+    assert "диск /hdd заполнится примерно через 2 дн: сейчас 80%, растет на ~3% в сутки" in full_text(sent[0])
     await tick(80)  # гистерезис: в пределах запаса алерт держится
     assert len(sent) == 1
     await tick(20)
-    assert len(sent) == 2 and sent[1].startswith("🔴📈 ") and "через 20 ч" in sent[1]
+    assert len(sent) == 2 and sent[1].startswith("🔴💽 ") and "заполнится через 20 ч" in sent[1]
     await tick(28)  # запас и у второго уровня
     assert len(sent) == 2
     await tick(None)  # рост прекратился
-    assert len(sent) == 3 and sent[2].startswith("✅") and "больше не грозят заполниться" in sent[2]
+    assert len(sent) == 3 and sent[2].startswith("✅") and "больше не грозит заполниться" in sent[2]
     await engine.dispose()
 
 
@@ -230,7 +235,7 @@ async def test_forecast_alert_comes_five_days_ahead(tmp_path, monkeypatch):
     await tick(130)  # больше пяти суток - рано
     assert sent == []
     await tick(115)
-    assert len(sent) == 1 and sent[0].startswith("⚠️📈 ") and "через 5 дн" in sent[0]
+    assert len(sent) == 1 and sent[0].startswith("⚠️💽 ") and "заполнится через 5 дней" in sent[0]
     await tick(150)  # запас гистерезиса
     assert len(sent) == 1
     await engine.dispose()
@@ -329,12 +334,18 @@ async def test_inode_alert_with_cause_and_disk_eta(tmp_path, monkeypatch):
                                         alert_state={"disk_since": held, "inode_since": held})
     sent = _capture(monkeypatch)
     await collector.evaluate_servers(factory, Settings(alert_webhook="http://hook"), now)
+    from app.alerts import full_text
+
     ino = next(m for m in sent if "inode на /" in m)
-    assert ino.startswith("🔴 ") and "занято 93% ≥ 90%" in ino
-    assert "кончатся примерно через 4 дн" in ino
-    assert "больше всего файлов: /var/lib/php/sessions 4.1 млн, /home/www 700 тыс." in ino
-    disk = next(m for m in sent if "диск 91%" in m)
-    assert "заполнится примерно через 4 дн" in disk
+    # в чате - что кончается и где больше всех файлов, без счетчиков
+    assert ino.startswith("🔴💽 ") and "<b>Кончаются inode на /</b>" in ino
+    assert "Больше всех файлов: /var/lib/php/sessions" in ino and "млн" not in ino
+    assert "занято 93% ≥ 90%" in full_text(ino)
+    assert "кончатся примерно через 4 дн" in full_text(ino)
+    assert "больше всего файлов: /var/lib/php/sessions 4.1 млн, /home/www 700 тыс." in full_text(ino)
+    disk = next(m for m in sent if "диск 91%" in full_text(m))
+    assert "заполнен на 91%" in disk
+    assert "заполнится примерно через 4 дн" in full_text(disk)
     await engine.dispose()
 
 

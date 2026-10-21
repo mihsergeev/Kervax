@@ -29,7 +29,7 @@ from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select
 
-from app import alerts, client_ip, settings_store
+from app import alerts, client_ip, settings_store, tg_fmt
 from app.models import RequestStat, Server
 
 log = logging.getLogger(__name__)
@@ -301,7 +301,7 @@ async def check(session_factory, settings, now: datetime) -> None:
     by_ip = servers_by_ip(servers)
     agg = aggregate(rows)
     new: dict[str, dict] = {}
-    fires: list[tuple[str, str, str]] = []  # (адрес, текст, кому в историю)
+    fires: list[tuple[str, str, str, str]] = []  # (адрес, текст, кому в историю, полный текст)
     recs: list[tuple[str, str, str]] = []
     default = settings_store.SERVER_ALERT_KINDS[KIND][1]
     tpl = rule.get("text") or default
@@ -325,7 +325,15 @@ async def check(session_factory, settings, now: datetime) -> None:
             body = default.format(**fields)
         if not h_txt:
             body = body.replace("\n↳ ", "").rstrip()
-        fires.append((key, f"🛑 {body}", target))
+        full = f"🛑 {body}"
+        if tpl == default:
+            # коротко (app/tg_fmt.py): кто шлет; что именно и сколько - в полном тексте
+            top = w_txt.partition("чаще всего ")[2]
+            short = tg_fmt.render("⚠️🧟", "<b>Kervax</b>", "Левые запросы в панель",
+                                  [w_who] + ([tg_fmt.fact("Чаще всего", top)] if top else []))
+            fires.append((key, short, target, full))
+        else:
+            fires.append((key, full, target, ""))
     for key, cur in state.items():
         if key in new:
             continue
@@ -340,16 +348,16 @@ async def check(session_factory, settings, now: datetime) -> None:
         if cur.get("notified"):
             srvs = [x for x in servers if x.id in set(cur.get("servers") or [])]
             w_who, target = who(key, srvs)
-            recs.append((key, f"✅ Левые запросы {html.escape(w_who)} прекратились", target))
+            recs.append((key, tg_fmt.recovery("<b>Kervax</b>", f"левые запросы {w_who} прекратились"), target))
     can_send = bool(rule.get("enabled", True)) and not muted and alerts.alerts_enabled(cfg)
-    msgs = [alerts.Msg(t, "servers", "", kind=KIND, target=tg, recovery=False) for _k, t, tg in fires]
+    msgs = [alerts.Msg(t, "servers", "", kind=KIND, target=tg, recovery=False, full=f) for _k, t, tg, f in fires]
     msgs += [alerts.Msg(t, "servers", "", kind=KIND, target=tg, recovery=True) for _k, t, tg in recs]
     delivered = bool(msgs) and can_send and await alerts.dispatch(
         cfg, True, msgs, int(cfg.get("flood_threshold", 6)), parse_mode="HTML",
         session_factory=session_factory,
     )
     if delivered:
-        for key, _t, _tg in fires:
+        for key, _t, _tg, _f in fires:
             new[key]["notified"] = True
     else:
         for key, _t, _tg in recs:  # отбой не дошел - попробуем на следующем тике

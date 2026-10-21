@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import select
 
 from app import collector, fill_alert
+from app.alerts import full_text
 from app.config import Settings
 from app.db import Base, create_engine_and_factory
 from app.models import Server, ServerMetric
@@ -128,7 +129,8 @@ async def test_hover_at_threshold_one_alert_and_no_false_recovery(tmp_path, monk
     sent = _sender(monkeypatch)
     for i in range(40):
         await _tick(factory, NOW + timedelta(minutes=i), 85.2 + 0.1 * (i % 2))
-    assert len(sent) == 1 and "диск 85% ≥ 85%" in sent[0]
+    assert len(sent) == 1 and "<b>Диск / заполнен на 85%</b>" in sent[0]
+    assert "диск 85% ≥ 85%" in full_text(sent[0])
     for i in range(40, 100):
         await _tick(factory, NOW + timedelta(minutes=i), 84.8 + 0.5 * (i % 2))
     assert len(sent) == 1
@@ -143,7 +145,10 @@ async def test_fast_fill_alerts_at_once(tmp_path, monkeypatch):
     for i, v in enumerate(vals):
         await _tick(factory, NOW + timedelta(minutes=i), v)
     assert len(sent) == 1, sent
-    assert "диск 88% ≥ 85%" in sent[0] and "заполняется быстро: +3.9% в минуту, до 100% ~3 мин" in sent[0]
+    # в чате - что заполняется быстро, скорость и срок - в полном тексте
+    assert "<b>Диск / быстро заполняется, уже 88%</b>" in sent[0]
+    full = full_text(sent[0])
+    assert "диск 88% ≥ 85%" in full and "заполняется быстро: +3.9% в минуту, до 100% ~3 мин" in full
     await engine.dispose()
 
 
@@ -162,11 +167,13 @@ async def test_disk_swinging_twice_is_one_message_and_one_recovery(tmp_path, mon
         return list(sent)
 
     first = await run(35, 88)
-    assert len(first) == 1 and "диск 88%" in first[0]
+    assert len(first) == 1 and "заполнен на 88%" in first[0]
     rec = await run(35, 61)
     assert len(rec) == 1 and "снова в норме" in rec[0]
     swing = await run(35, 88)
-    assert len(swing) == 1 and "диск скачет 61-88%: 2-й заход за порог за 6 ч" in swing[0]
+    assert len(swing) == 1 and "<b>Диск скачет около порога, 61-88%</b>" in swing[0]
+    assert "молчу, пока не утихнет" in swing[0] and "заход" not in swing[0]
+    assert "диск скачет 61-88%: 2-й заход за порог за 6 ч" in full_text(swing[0])
     assert await run(35, 61) == []
     # затихло: шесть часов без заходов - один отбой
     calm = await run(6 * 60, 61)
@@ -179,7 +186,8 @@ async def test_crit_comes_even_while_swinging_is_quiet(tmp_path, monkeypatch):
                                                           "flap_disk_since": NOW.isoformat()})
     sent = _sender(monkeypatch)
     await _tick(factory, NOW, 97)
-    assert len(sent) == 1 and "диск 97% ≥ 95%" in sent[0]
+    assert len(sent) == 1 and sent[0].startswith("🚨💽") and "заполнен на 97%" in sent[0]
+    assert "диск 97% ≥ 95%" in full_text(sent[0])
     await engine.dispose()
 
 

@@ -67,6 +67,8 @@ from app import traffic as traffic_mod
 from app import usage as usage_mod
 from app import disk_forecast as dfc
 from app import tg_buttons
+from app import tg_fmt
+from app import srv_short
 from app.setup_scripts import current_setup_versions, gaps
 from app.config import Settings, get_settings
 from app.models import (
@@ -303,38 +305,6 @@ def _expiry_icon(kind: str, days: int) -> str:
     предупреждение: до самой даты может оставаться почти сутки (см. _expiry_text)."""
     return ("🔥" if days < 0 else "⚠️") + _ALERT_ICON.get(kind, "")
 
-# Иконка серверного алерта по типу (текст правил — только «суть», без иконки).
-# «Недоступен» — 🔥: в ленте это самое тяжёлое событие, и его надо узнавать не читая.
-# Монитор 🖥 стоял и у него, и у порогов CPU/RAM — все строки выглядели одинаково.
-_SRV_ICON = {
-    # Пороговые метрики ведём знаком предупреждения: в ленте они должны читаться
-    # как «что-то не так», а не сливаться с информационными строками. У диска
-    # иконка ещё и уточняется по серьёзности — см. _srv_icon_for.
-    "offline": "🔥", "cpu": "⚠️", "mem": "⚠️", "disk": "⚠️", "temp": "🌡",
-    "throttle": "🥵", "conntrack": "🔗", "disktemp": "🌡", "reboot": "🔄", "oom": "🧠",
-    "db_conn": "🔌",
-    # огонёк перед китом: в ленте докерные строки шли теми же иконками, что и
-    # обычные события, и «упал»/«крутится в цикле» не читались как авария
-    "docker_down": "🔥🐳", "docker_loop": "🔥🐳",
-    "queue": "🐇", "backup_rotation": "🧹", "backup_lock": "🔒",
-    "backup_unmonitored": "💾", "backup_check": "🩺", "backup_prune": "🧹",
-    "backup_missing": "💾", "backup_failed": "💾", "backup_stale": "💾", "backup_repo": "💾",
-    "backup_dump": "💾", "backup_dump_space": "🈵", "backup_cron": "💾", "backup_custom": "💾",
-    "clock": "🕐", "dns": "🌐", "disk_health": "💽", "inode": "⚠️", "disk_forecast": "📈", "units": "⚙️",
-    "unit_loop": "🔁⚙️",
-    "cpu_spin": "🌀", "backup_growth": "💾📈", "docker_sock": "🔓🐳", "docker_risk": "🔑🐳",
-    # ⏳ — срок ещё не вышел, есть время спланировать; 🔥 — доставка уже встала
-    "kube_expiry": "⏳", "flux_down": "🔥☸️", "kube_pod": "☸️🔥", "web_5xx": "🌐🔥",
-    # репозиторий чартов недоступен, а развернутое работает: предупреждение, а не авария
-    "flux_stale": "⚠️☸️", "kube_cron": "⏰☸️",
-    "exposed": "🔓", "port_new": "🚪", "pressure": "🫁", "net_health": "📶", "link": "🔗", "traffic": "📊",
-    "kube_node": "🖥☸️", "kube_job": "💥☸️", "access_change": "🔑",
-    "backup_restore": "🛟💾", "docker_restarts": "🔄🐳", "kube_restarts": "🔄☸️",
-    "mem_leak": "📈🧠", "ssh_risk": "🔐", "access_risk": "🗝", "db_health": "🛢",
-    "web_config": "🧾", "web_cert": "🔏", "listen_gone": "🔌", "disk_slow": "🐢",
-    "gpu": "🎛", "gpu_heat": "🌡", "llm": "💬", "queue_stuck": "⏳", "queue_failed": "🧨", "workers": "👷",
-    "cron_stuck": "⏲", "log_errors": "📜", "fpm": "🐘",
-}
 
 # Куда ведёт ссылка алерта (deep-link ?server=id&sec=…). Целимся в КОНКРЕТНУЮ метрику,
 # а не в раздел: фронт сперва ищет карточку mcard-<sec> и только потом раздел msec-<sec>.
@@ -355,10 +325,6 @@ _SRV_SECTION = {
     "listen_gone": "exposure", "disk_slow": "disklat", "gpu": "gpu", "gpu_heat": "gpu",
 }
 
-
-# Диск шлёт три уровня, и ведущая иконка должна их различать: предупреждение,
-# проблема, критично. Для остальных типов берём иконку из _SRV_ICON как есть.
-_DISK_ICON = {1: "⚠️", 2: "🔴", 3: "🚨"}
 
 
 # Раздел панели, к которому относится алерт — по нему персональная рассылка
@@ -415,21 +381,29 @@ _ALERT_SECTION = {
 def _server_alert_text(
     kind: str, name: str, detail: str, link_url: str = "",
     recovery: bool = False, icon: str = "", group: str = "", ref: str = "",
+    level: int = 1, short: tuple[str, list[str]] | None = None,
 ) -> alerts.Msg:
-    """Дефолтный формат серверного алерта — как у сайтов, без «Kervax:»:
-    «<иконка> <сервер> — <detail>», где имя сервера — ссылка на монитор в панели
-    (без кавычек — ссылка и так выделена). Весь динамический контент экранируется.
+    """Серверный алерт в коротком формате (app/tg_fmt.py): эмодзи уровня и темы, имя сервера
+    ссылкой в нужный раздел панели, что случилось и одна-две строки конкретики (short; без
+    него - разбор detail). detail - полный текст, он идет в историю. Весь динамический
+    контент экранируется.
 
     group — группа сервера: нужна персональной доставке, чтобы не слать алерт про
     чужую инфраструктуру тому, кто её и в панели не видит."""
-    icon = "✅" if recovery else (icon or _SRV_ICON.get(kind) or "🖥")
-    nm = html.escape(name)
-    linked = f'<a href="{html.escape(link_url, quote=True)}">{nm}</a>' if link_url else nm
-    d = html.escape(detail)
+    linked = tg_fmt.link(name, link_url)
+    section = _ALERT_SECTION.get(kind, "servers")
+    if recovery:
+        # отбой - одна строка: "✅ сервер: что снова в норме"
+        return alerts.Msg(tg_fmt.recovery(linked, detail), section, group, kind=kind, target=name,
+                          recovery=True, ref=ref)
+    icon = icon or srv_short.icon(kind, level)
+    # полный текст - в историю алертов и для разбора "что шумит" (app/alert_what.py), в чат -
+    # короткий (app/tg_fmt.py)
+    full = f"{icon} {linked}" + (f" — {html.escape(detail)}" if detail else "")
+    what, facts = short if short is not None else tg_fmt.split_detail(detail)
     return alerts.Msg(
-        f"{icon} {linked}" + (f" — {d}" if d else ""),
-        _ALERT_SECTION.get(kind, "servers"),
-        group, kind=kind, target=name, recovery=recovery, ref=ref,
+        tg_fmt.render(icon, linked, what, facts), section, group, kind=kind, target=name, ref=ref,
+        full=full, line=tg_fmt.one_line(icon, linked, what, facts),
     )
 
 
@@ -1067,8 +1041,7 @@ async def _with_before(session_factory, msg: "alerts.Msg", s, end: datetime,
         return msg
     if not tail:
         return msg
-    return alerts.Msg(msg + "\n" + html.escape(tail), msg.section, msg.group, msg.kind, msg.target,
-                      msg.recovery, msg.ref)
+    return msg.tail("\n" + html.escape(tail))
 
 
 async def _send_alerts(
@@ -1188,8 +1161,10 @@ async def _send_alerts(
             continue  # тип заглушён именно для этого монитора
         if kind == "known":
             # напоминание об известной проблеме монитора: без кнопок и без свертки по домену
-            texts.append(alerts.Msg(f"{icon or '📌'} <b>{html.escape(name)}</b> — {html.escape(msg)}",
-                                    "sites", grp or "", kind="known", target=name))
+            k_what, k_facts = known_mod.remind_short(msg)
+            texts.append(alerts.Msg(tg_fmt.render(icon or "📌", f"<b>{html.escape(name)}</b>", k_what, k_facts),
+                                    "sites", grp or "", kind="known", target=name,
+                                    full=f"{icon or '📌'} <b>{html.escape(name)}</b> — {html.escape(msg)}"))
             continue
         if check_id is not None and check_id in known_ids and kind in ("bad", "flaky", "locpart"):
             continue  # известная проблема: про нее знают, молчим, пока не закроется или не выйдет срок
@@ -1233,9 +1208,23 @@ async def _send_alerts(
             )
         else:
             is_default = True
+        full, line = "", ""
         if is_default:
-            # богатый формат: адрес(ссылка на сайт) + иконка + имя + текст + «монитор»(ссылка в панель)
-            text = _alert_text(kind, name, status, msg, host, link_url, site_url, icon)
+            # Короткий формат (app/tg_fmt.py): адрес ссылкой в монитор панели, что случилось,
+            # причина. Полный (адрес ссылкой на сайт, "монитор", задержка) - в историю
+            full = _alert_text(kind, name, status, msg, host, link_url, site_url, icon)
+            head = tg_fmt.link(host or name, link_url or site_url)
+            ments = " ".join(_MENTION_RE.findall(name or ""))  # @упоминания тегают людей
+            sh = srv_short.site(kind, status, msg)
+            if isinstance(sh, str) or icon == "✅":
+                # отбой и "сертификат перевыпущен" - одной строкой
+                text = tg_fmt.recovery(head, sh if isinstance(sh, str) else msg)
+            else:
+                s_ico, s_what, s_facts = sh
+                text = tg_fmt.render(s_ico, head, s_what, s_facts)
+                line = tg_fmt.one_line(s_ico, head, s_what, s_facts)
+            if ments:
+                text += " " + html.escape(ments)
         else:
             # кастомный шаблон пользователя: рендерим и экранируем, ссылку — строкой
             text = html.escape(_fmt_site(rule["text"], name, grp, status, msg))
@@ -1247,35 +1236,33 @@ async def _send_alerts(
         if same is not None:
             same_at[same] = len(texts)
             same_hosts[same] = []
+        # открывается ли изнутри и что менялось перед падением - подробности для панели
         if kind == "bad" and check_id in inside_by:
-            text += "\n" + html.escape(inside_by[check_id])
+            full = (full or text) + "\n" + html.escape(inside_by[check_id])
         if kind == "bad" and check_id in before_by:
-            text += "\n" + html.escape(before_by[check_id])
+            full = (full or text) + "\n" + html.escape(before_by[check_id])
+        if not is_default and full:
+            text, full = full, ""
         # в истории отбой лежит под тем же видом, что и сама беда: фильтр по виду
         # показывает историю целиком
         texts.append(alerts.Msg(text, "sites", grp or "", kind=_SITE_HISTORY_KIND.get(kind, rk or kind),
                                 target=name, recovery=kind in _SITE_RECOVERY,
-                                ref=f"chk:{check_id}" if check_id is not None and rk else ""))
+                                ref=f"chk:{check_id}" if check_id is not None and rk else "",
+                                full=full, line=line))
         commits.append((kind, inc_id, check_id, flag))
 
-    # дописываем счётчик только там, где мониторов реально больше одного
+    # дописываем счётчик только там, где мониторов реально больше одного (в полный текст)
     for zone, idx in dom_at.items():
         n = dom_n.get(zone, 1)
         if n > 1:
-            old = texts[idx]
-            texts[idx] = alerts.Msg(
-                f"{old} · мониторов: {n}", old.section, old.group,
-                kind=old.kind, target=old.target, recovery=old.recovery, ref=old.ref,
-            )
+            texts[idx] = texts[idx].tail(f" · мониторов: {n}")
 
     for key, idx in same_at.items():
         more = same_hosts.get(key) or []
         if more:
-            old = texts[idx]
-            texts[idx] = alerts.Msg(
-                f"{old}\n↳ и {html.escape(', '.join(more))}", old.section, old.group,
-                kind=old.kind, target=old.target, recovery=old.recovery, ref=old.ref,
-            )
+            # тот же сайт с www или соседний поддомен: в чат - строкой "Еще: ..."
+            short_more = "" if texts[idx].recovery else "\n" + html.escape(tg_fmt.fact("Еще", tg_fmt.names(more)))
+            texts[idx] = texts[idx].tail(f"\n↳ и {html.escape(', '.join(more))}", short_more)
 
     for idx, ids in more_ids.items():
         old = texts[idx]
@@ -1283,6 +1270,7 @@ async def _send_alerts(
             texts[idx] = alerts.Msg(
                 str(old), old.section, old.group, kind=old.kind, target=old.target,
                 recovery=old.recovery, ref=old.ref + "".join(f",{i}" for i in ids),
+                full=old.full, line=old.line,
             )
 
     # parse_mode=HTML: имя монитора идёт ссылкой <a href>. Весь контент экранирован.
@@ -1607,7 +1595,7 @@ async def _proxy_alerts(
         state = {}
     names = {loc.id: loc.name for loc in enabled}
     new: dict[str, dict] = {}
-    fires: list[tuple[str, str]] = []  # (id, текст)
+    fires: list[tuple[str, str, str]] = []  # (id, текст, полный текст)
     recs: list[tuple[str, str]] = []
     for lid in broken:
         key, cur = str(lid), state.get(str(lid)) or {}
@@ -1618,21 +1606,24 @@ async def _proxy_alerts(
         new[key] = item
         if not item["notified"] and (now - datetime.fromisoformat(since)).total_seconds() >= _LOC_PARTIAL_SUSTAIN:
             name = html.escape(names.get(lid, "?"))
-            fires.append((key, (
+            full = (
                 f"🧭 Прокси локации «{name}» не отвечает: недоступны все сайты ({len(got)}), "
                 f"которые через нее проверяются, а с самой панели часть из них отвечает."
                 + (f"\nОшибка: {html.escape(err[:200])}" if err else "")
                 + f"\nАлерты «недоступен из {name}» по сайтам не шлются, пока прокси не заработает."
-            )))
+            )
+            # коротко: какая локация и ошибка; что алерты по ее сайтам придержаны - в полном тексте
+            fires.append((key, tg_fmt.render("🔴🌍", f"<b>{name}</b>", "Не отвечает прокси локации",
+                                             [err[:70]] if err else []), full))
     for key, cur in state.items():
         if key in new or not cur.get("notified"):
             continue
         if int(key) in names:
-            recs.append((key, f"✅ Прокси локации «{html.escape(names[int(key)])}» снова работает"))
+            recs.append((key, tg_fmt.recovery(f"<b>{html.escape(names[int(key)])}</b>", "прокси снова работает")))
         # локацию убрали или выключили - отбой не нужен
     can_send = bool(rule.get("enabled", True)) and not muted and alerts.alerts_enabled(cfg)
-    msgs = [alerts.Msg(t, "sites", "", kind="locpart", target=names.get(int(k), ""), recovery=False)
-            for k, t in fires]
+    msgs = [alerts.Msg(t, "sites", "", kind="locpart", target=names.get(int(k), ""), recovery=False, full=f)
+            for k, t, f in fires]
     msgs += [alerts.Msg(t, "sites", "", kind="locpart", target=names.get(int(k), ""), recovery=True)
              for k, t in recs]
     delivered = bool(msgs) and can_send and await alerts.dispatch(
@@ -1640,7 +1631,7 @@ async def _proxy_alerts(
         session_factory=session_factory,
     )
     if delivered:
-        for key, _t in fires:
+        for key, _t, _f in fires:
             new[key]["notified"] = True
     else:
         for key, _t in recs:  # отбой не дошел - попробуем на следующем тике
@@ -1820,6 +1811,18 @@ def _recovery_detail(key: str, st: dict, ctx: dict) -> str:
     return f"{label} снова в норме: {val}{unit}" + (
         f" (было {was}{unit})" if was is not None else ""
     )
+
+
+def _recovery_short(key: str, st: dict, ctx: dict, s=None) -> str:
+    """Отбой одной строкой для чата: "диск снова в норме, 82%". Полный (_recovery_detail) - про
+    то же подробно, он остается для старых шаблонов."""
+    if key == "exposed" and ctx.get("own"):
+        return "больше не алертим: проверка шла с адреса панели, нужна локация в другой сети"
+    if key == "backup_missing" and getattr(s, "backup_not_required", False):
+        return "бэкап больше не требуется"
+    rec = srv_short.RECOVERY.get(key) or f"{_SRV_LABEL.get(key, key)} снова в норме"
+    unit, val = _SRV_UNIT.get(key), ctx.get("value")
+    return f"{rec}, {val}{unit}" if unit and val is not None else rec
 
 # Тепловой троттлинг: алертим только на УСТОЙЧИВЫЙ (недоохлаждение), а не на
 # одиночные микро-спайки счётчика. Интервал засчитывается, лишь если ядро горячее
@@ -2944,6 +2947,24 @@ def disk_cause(rep: dict, forecast: dict | None = None, mount: str | None = None
         if safe >= _DISK_SAFE_MIN:
             parts.append(f"без риска освобождается ~{_fmt_size(safe)}")
     return " - " + "; ".join(parts) if parts else ""
+
+
+def disk_top_short(rep: dict, mount: str | None, what: str = "disk") -> str:
+    """Главный каталог раздела для короткого алерта: "/var/lib/containerd (58гб)", для inode -
+    просто каталог. Пусто без разбора helper'а diskusage-setup."""
+    block = disk_usage_block(rep) or {}
+    fss = [f for f in block.get("fs") or [] if isinstance(f, dict)]
+    if not fss:
+        return ""
+    fs = next((f for f in fss if mount and f.get("mount") == mount), None)
+    if fs is None:
+        fs = max(fss, key=lambda f: float(f.get("pct") or 0))
+    if what == "inode":
+        top = [{"path": t.get("path"), "bytes": t.get("files")} for t in fs.get("itop") or [] if isinstance(t, dict)]
+        dirs = disk_top_dirs({"top": top}, 1)
+        return dirs[0][0] if dirs else ""
+    dirs = disk_top_dirs(fs, 1)
+    return f"{dirs[0][0]} ({tg_fmt.size(dirs[0][1])})" if dirs else ""
 
 
 def _with_fast(fast: dict | None, cause: str) -> str:
@@ -4131,6 +4152,7 @@ def _news_first(ctx: dict, fresh: set[str]) -> dict:
     сказанном раньше - одной строкой. Перечень шел по порядку вида, и первой строкой каждый раз стояло
     уже объявленное: пять сообщений за 40 минут начинались одинаково и выглядели повтором без отбоя, а
     новое было ниже или вовсе пряталось в "и еще N". ctx["parts"] - (ключ из sig, текст) по порядку"""
+    ctx = {**ctx, "fresh": fresh}  # короткому тексту: новое - первым (app/srv_short.py)
     parts = ctx.get("parts") or []
     new = [t for k, t in parts if k in fresh]
     old = len(parts) - len(new)
@@ -5046,7 +5068,8 @@ def _flapping(s: Server, st: dict, now: datetime, apply, note: list, url: str = 
                 "offline", s.name,
                 f"связь нестабильна: {cnt} обрыва(ов) за {_FLAP_WINDOW // 60} мин — "
                 "дальше молчу, пока не устаканится",
-                url, group=s.group_name or "",
+                url, group=s.group_name or "", level=2,
+                short=("Связь то есть, то нет", ["молчу, пока не утихнет"]),
             )
         )
     return True
@@ -5107,7 +5130,12 @@ def _flap_metric(s: Server, st: dict, now: datetime, apply, note: list, url: str
     else:
         text = (f"{title} ходит вокруг порога: {cnt} срабатывания за "
                 f"{_FLAP_METRIC_WINDOW // 3600} ч - дальше молчу, пока не устаканится")
-    note.append(_server_alert_text(key, s.name, text, url, group=s.group_name or ""))
+    # в чат: что скачет и что дальше тишина; почему (временные файлы) - в полном тексте
+    rng = (f", {round(swing[0])}-{round(swing[1])}%" if key in ("disk", "inode") and swing
+           and round(swing[1]) > round(swing[0]) else "")
+    short = (f"{'Диск' if key == 'disk' else 'Inode' if key == 'inode' else title} скачет около порога{rng}",
+             ["молчу, пока не утихнет"])
+    note.append(_server_alert_text(key, s.name, text, url, group=s.group_name or "", short=short))
     return True
 
 
@@ -5224,6 +5252,7 @@ def kube_expiry_ctx(exp: float, days: float, it: dict, near: int) -> dict:
         # не для текста, а для иконки: «истекает через 6 дн.» и «ИСТЁК» —
         # разные новости, и в ленте они должны различаться с первого взгляда
         "expired": days < 0,
+        "days": days,
         "date": datetime.fromtimestamp(exp, tz=timezone.utc).strftime("%d.%m.%Y"),
         "more": f" (и ещё {near - 1} на этом сервере)" if near > 1 else "",
     }
@@ -5558,7 +5587,7 @@ def _server_conditions(s: Server, now: datetime,
     if online and (rep.get("kube") or {}).get("access"):
         bad_pods = kube_bad_pods(rep)
         sustain("kube_pod", bool(bad_pods),
-                {"pods": bad_pods_text(bad_pods), "n": len(bad_pods)},
+                {"pods": bad_pods_text(bad_pods), "n": len(bad_pods), "items": bad_pods},
                 below=not bad_pods, cool_s=_POD_CALM_S)
 
     if s.disk_temp_alert_c:  # макс по устройствам с датчиком (на VM датчика обычно нет)
@@ -5598,7 +5627,7 @@ def _server_conditions(s: Server, now: datetime,
             probs.sort(key=lambda p: -p[0])
         lvl = max((p[0] for p in probs), default=0)
         out["disk_health"] = (lvl, {
-            "detail": disk_health_text(probs), "level": lvl,
+            "detail": disk_health_text(probs), "level": lvl, "items": probs,
             # что именно сломано: новая поломка при том же уровне - повод для сообщения
             "sig": sorted({k for _l, k, _t in probs if k}),
             "since": io_since,
@@ -5622,7 +5651,7 @@ def _server_conditions(s: Server, now: datetime,
         else:
             f_lvl = 0
         out["disk_forecast"] = (f_lvl, {
-            "detail": dfc.forecast_text(fitems, _FORECAST_WARN_H) if f_lvl else "",
+            "detail": dfc.forecast_text(fitems, _FORECAST_WARN_H) if f_lvl else "", "items": fitems,
             "level": f_lvl,
         })
 
@@ -5648,7 +5677,7 @@ def _server_conditions(s: Server, now: datetime,
         hold = units_hold(s, bad, now, muted_u)
         u_lvl = max((h[1] for h in hold.values()), default=0)
         out["units"] = (u_lvl, {
-            "detail": units_text(bad, ref) if bad else "", "level": u_lvl,
+            "detail": units_text(bad, ref) if bad else "", "level": u_lvl, "items": bad,
             # какие юниты лежат: новый упавший при том же уровне - повод для сообщения
             "sig": sorted(hold), "hold": hold,
         })
@@ -5658,26 +5687,27 @@ def _server_conditions(s: Server, now: datetime,
     # старше 2.21 групп не шлет - None, как у юнитов без helper'а.
     if online and rep.get("cpu_groups") is not None:
         spin = spin_groups(rep)
-        out["cpu_spin"] = (1 if spin else 0, {"detail": spin_text(spin, pod_names) if spin else ""})
+        out["cpu_spin"] = (1 if spin else 0, {"detail": spin_text(spin, pod_names) if spin else "", "items": spin,
+                                           "owner": group_owner(spin[0], pod_names) if spin else ""})
 
     # Прогон бэкапа добавил в разы больше обычного (helper backup-setup 0.32). Без блока helper'а
     # ключа нет: молчание не значит, что прирост стал обычным.
     if online and backup_growth.EXTRA_KEY in (rep.get("extras") or {}):
         g = backup_growth.jump(s, now)
-        out["backup_growth"] = (1 if g else 0, {"detail": g["text"] if g else ""})
+        out["backup_growth"] = (1 if g else 0, {"detail": g["text"] if g else "", "items": g})
 
     # Внешний прокси (caddy-docker-proxy, traefik) с docker-сокетом: взлом прокси - root на
     # хосте. Только при доступе к докеру: без списка контейнеров молчание ничего не значит.
     # sig - какие контейнеры: новый такой же прокси на ноде - повод для нового сообщения.
     if online and (rep.get("docker") or {}).get("access"):
         ex = docker_exposure.exposed(rep)
-        out["docker_sock"] = (1 if ex else 0, {"detail": docker_exposure.text(ex),
+        out["docker_sock"] = (1 if ex else 0, {"detail": docker_exposure.text(ex), "items": ex,
                                                "sig": sorted(e["name"] for e in ex)})
         # Контейнер с ключами от хоста сверх положенного по назначению (privileged, опасные
         # capabilities, docker-сокет, корень хоста на запись). Пункт - в "Требует действий",
         # заглушенные точечно ("dockrisk:<имя>") не в счет; sig - контейнер и его ключи.
         dr = docker_risk.advice(s)
-        out["docker_risk"] = (1 if dr else 0, {"detail": docker_risk.text(dr),
+        out["docker_risk"] = (1 if dr else 0, {"detail": docker_risk.text(dr), "items": dr,
                                                "sig": sorted(f"{x['name']}:{','.join(x['flags'])}" for x in dr)})
 
     # Сдвиг часов: локальное время ноды (clock_unix) vs время панели на приёме. По модулю;
@@ -5816,19 +5846,19 @@ def _server_conditions(s: Server, now: datetime,
     # успешного, выключен таймер. Состояния устойчивые, как и у restic, — без дебаунса.
     if online:
         own = custom_backups.problems(s, now)
-        out["backup_custom"] = (1 if own else 0, {"jobs": "; ".join(own[:6]), "n": len(own)})
+        out["backup_custom"] = (1 if own else 0, {"jobs": "; ".join(own[:6]), "n": len(own), "items": own})
     # Опасный (2) или служебный (1) порт открыт в интернет (внешняя проверка портов): состояние,
     # пока не закроют файрволом или не отметят порт намеренным. Свежесть - в open_ports.exposed
     if online:
         ex = open_ports.exposed(s, now)
-        out["exposed"] = (open_ports.exposed_level(ex), {"detail": open_ports.exposure_text(ex), "n": len(ex),
+        out["exposed"] = (open_ports.exposed_level(ex), {"detail": open_ports.exposure_text(ex), "n": len(ex), "items": ex,
                                                          "own": open_ports.from_panel(s)})
     # Сервер задыхается (агент 2.26): уровень - худшая из причин, выдержка - как у CPU и RAM
     if online and any(rep.get(k) for k in ("psi", "dstate", "fds")):
         pr = pressure_problems(rep)
         pr_hold = pressure_hold_s(rep, pr)
         pctx = {"detail": "; ".join(t for _l, _r, t in pr[:3]), "res": pr[0][1] if pr else "", "cause": "",
-                "hint": pressure_hint(rep)}
+                "hint": pressure_hint(rep), "items": pr}
         if pr_hold:
             pctx["_note"] = bsrv_io_note(pr_hold)
         sustain_lvl("pressure", pr[0][0] if pr else 0, cool_s=_CALM_S, ctx=pctx, hold_s=pr_hold)
@@ -5837,7 +5867,8 @@ def _server_conditions(s: Server, now: datetime,
         nets = net_problems(rep)
         hint = net_hint(rep, nets)
         sustain_lvl("net_health", nets[0][0] if nets else 0,
-                    {"detail": "; ".join(t for _l, _r, t in nets[:4]) + (f"\n↳ {hint}" if hint else "")},
+                    {"detail": "; ".join(t for _l, _r, t in nets[:4]) + (f"\n↳ {hint}" if hint else ""),
+                     "items": nets},
                     cool_s=_CALM_S)
     # Связь с другими серверами (агент 2.31, app/netlinks.py). sig - какие связи в беде: новая
     # сломанная связь при уже объявленной - новое сообщение, та же снова - нет (держим до отбоя)
@@ -5848,13 +5879,14 @@ def _server_conditions(s: Server, now: datetime,
         if int(state.get("link", 0) or 0):
             sig |= set(state.get("link_sig") or [])
         sustain_lvl("link", lk[0][0] if lk else 0, {"detail": "; ".join(t for _l, _i, t in lk[:4]),
-                                                    "sig": sorted(sig),
+                                                    "sig": sorted(sig), "items": lk,
                                                     "parts": [(str(i), t) for _l, i, t in lk]}, cool_s=_CALM_S)
     # Трафик против лимита тарифа (app/traffic.py): прогноз ходит у границы, поэтому отбой только
     # после полусуток спокойствия
     tl, tt = traffic_mod.problem(getattr(s, "traffic_sum", None), now)
     if online and (tl or state.get("traffic")):
-        sustain_lvl("traffic", tl, {"detail": tt}, cool_s=_TRAFFIC_CALM_S)
+        sustain_lvl("traffic", tl, {"detail": tt, "items": getattr(s, "traffic_sum", None)},
+                    cool_s=_TRAFFIC_CALM_S)
     # Часто перезапускается: приросты счетчиков за сутки ведет цикл алертов (alert_state restarts).
     # sig - что именно, чтобы новый контейнер в той же беде дал свой алерт
     if online and isinstance((s.alert_state or {}).get("restarts"), dict):
@@ -5866,13 +5898,13 @@ def _server_conditions(s: Server, now: datetime,
             sep = "\n" if kind == "pod" else "; "
             out[key] = (1 if items or hold else 0, {"detail": sep.join(x["text"] for x in items[:4]),
                                                     "sig": sorted({x["key"] for x in items} | hold.keys()),
-                                                    "sep": sep, "hold": hold,
+                                                    "sep": sep, "hold": hold, "items": items,
                                                     "parts": [(x["key"], x["text"]) for x in items]})
     # Пропал порт, который слушался неделями (история - alert_state listen_hist, ведет цикл алертов)
     if online and isinstance((s.alert_state or {}).get("listen_hist"), dict):
         lg = listen_watch.problems(s, now)
         out["listen_gone"] = (1 if lg else 0, {"detail": "; ".join(x["text"] for x in lg[:3]),
-                                               "sig": [x["key"] for x in lg],
+                                               "sig": [x["key"] for x in lg], "items": lg,
                                                "parts": [(x["key"], x["text"]) for x in lg]})
     # Диск тормозит: задержка выше порога держится дольше выдержки
     if online and rep.get("disk_devs"):
@@ -5883,45 +5915,45 @@ def _server_conditions(s: Server, now: datetime,
     if online and gpu_mod.block(rep) is not None:
         gp = gpu_mod.problems(rep, now)
         out["gpu"] = (max((p[0] for p in gp), default=0),
-                      {"detail": "; ".join(p[1] for p in gp[:3]), "sig": [p[2] for p in gp],
+                      {"detail": "; ".join(p[1] for p in gp[:3]), "sig": [p[2] for p in gp], "items": gp,
                        "parts": [(p[2], p[1]) for p in gp]})
         hl, htext = gpu_mod.heat(rep, now)
-        sustain_lvl("gpu_heat", hl, {"detail": htext}, cool_s=_CALM_S)
+        sustain_lvl("gpu_heat", hl, {"detail": htext, "items": (hl, htext)}, cool_s=_CALM_S)
     # LLM-сервисы (агент 2.36): молчание /metrics, очередь при полном KV-кэше, задержки в разы выше
     # обычного - когда держится дольше выдержки
     if online and gpu_mod.llm_list(rep):
         lp = gpu_mod.llm_problems(rep, state.get("llm_base"), state.get("llm_lat"), now)
-        sustain_lvl("llm", max((p[0] for p in lp), default=0), {"detail": "; ".join(p[1] for p in lp[:3])},
+        sustain_lvl("llm", max((p[0] for p in lp), default=0), {"detail": "; ".join(p[1] for p in lp[:3]), "items": lp},
                     cool_s=_CALM_S)
     # Сертификат nginx истекает или истек (helper webserver-setup 0.24)
     if online and web_certs.block(rep, now) is not None:
         wce = web_certs.problems(rep, now)
         out["web_cert"] = (max((lv for lv, _t, _k in wce), default=0),
-                           {"detail": "; ".join(t for _l, t, _k in wce[:3]), "sig": [k for _l, _t, k in wce],
+                           {"detail": "; ".join(t for _l, t, _k in wce[:3]), "sig": [k for _l, _t, k in wce], "items": wce,
                             "parts": [(k, t) for _l, t, k in wce]})
     # Конфиг веб-сервера не проходит проверку (helper webserver-setup 0.23): сайты упадут при
     # следующем reload. sig - какой именно, чтобы второй сломанный конфиг дал свой алерт
     if online and web_config.block(rep, now) is not None:
         wc = web_config.problems(rep, now)
         out["web_config"] = (max((lv for lv, _t, _k in wc), default=0),
-                             {"detail": "; ".join(t for _l, t, _k in wc[:3]), "sig": [k for _l, _t, k in wc],
+                             {"detail": "; ".join(t for _l, t, _k in wc[:3]), "sig": [k for _l, _t, k in wc], "items": wc,
                               "parts": [(k, t) for _l, t, k in wc]})
     # Здоровье баз (helper dbstat-setup 0.5): реплика, долгие транзакции, блокировки, wraparound,
     # VACUUM. sig - что именно, чтобы новая беда при том же уровне дала свой алерт
     if online and db_health.block(rep, now) is not None:
         dh = db_health_problems(s, rep, now)
         out["db_health"] = (max((lv for lv, _t, _k in dh), default=0),
-                            {"detail": "; ".join(t for _l, t, _k in dh[:3]), "sig": [k for _l, _t, k in dh],
+                            {"detail": "; ".join(t for _l, t, _k in dh[:3]), "sig": [k for _l, _t, k in dh], "items": dh,
                              "parts": [(k, t) for _l, t, k in dh]})
     # SSH (helper changes-setup 0.3): root по паролю на открытом порту, перебор без защиты
     if online and ssh_audit.block(rep) is not None:
         sp = ssh_audit.problems(s, now)
-        out["ssh_risk"] = (max((lv for lv, _t in sp), default=0), {"detail": "; ".join(t for _l, t in sp)})
+        out["ssh_risk"] = (max((lv for lv, _t in sp), default=0), {"detail": "; ".join(t for _l, t in sp), "items": sp})
     # Второй root (uid 0) или учетка с пустым паролем: так выглядит закладка или забытая дыра
     if online and srv_changes.snapshot(rep) is not None:
         ar = access_audit.problems(s)
         out["access_risk"] = (max((lv for lv, _t in ar), default=0),
-                              {"detail": "; ".join(t for _l, t in ar), "sig": sorted(t for _l, t in ar),
+                              {"detail": "; ".join(t for _l, t in ar), "sig": sorted(t for _l, t in ar), "items": ar,
                                "parts": [(t, t) for _l, t in ar]})
     # Очередь растет и не разбирается: полчаса роста уже в самом правиле, выдержка не нужна.
     # sig - какие очереди, вторая застрявшая дает свой алерт
@@ -5930,14 +5962,14 @@ def _server_conditions(s: Server, now: datetime,
         out["queue_stuck"] = (max((x["level"] for x in qs), default=0),
                               {"detail": "; ".join(x["text"] for x in qs[:3])
                                          + (f"; и еще {len(qs) - 3}" if len(qs) > 3 else ""),
-                               "sig": [x["key"] for x in qs], "parts": [(x["key"], x["text"]) for x in qs]})
+                               "sig": [x["key"] for x in qs], "items": qs, "parts": [(x["key"], x["text"]) for x in qs]})
     # Всплеск упавших задач: окно в час уже в правиле, выдержка не нужна. sig - какие брокеры
     if online and queue_watch.helper_brokers(rep):
         fp = queue_watch.failed_problems(s, now)
         out["queue_failed"] = (max((x["level"] for x in fp), default=0),
                                {"detail": "\n".join(x["text"] for x in fp[:3])
                                           + (f"\nи еще {len(fp) - 3}" if len(fp) > 3 else ""),
-                                "sig": [x["key"] for x in fp], "parts": [(x["key"], x["text"]) for x in fp], "sep": "\n"})
+                                "sig": [x["key"] for x in fp], "items": fp, "parts": [(x["key"], x["text"]) for x in fp], "sep": "\n"})
     # Воркеры под supervisor и pm2: выдержка уже в правилах (BACKOFF три минуты, три перезапуска
     # за 15 минут), FATAL - сразу. sig - какие воркеры, второй упавший дает свой алерт
     if online and workers_mod.block(rep) is not None:
@@ -5945,7 +5977,7 @@ def _server_conditions(s: Server, now: datetime,
         out["workers"] = (max((x["level"] for x in wp), default=0),
                           {"detail": "\n".join(x["text"] for x in wp[:3])
                                      + (f"\nи еще {len(wp) - 3}" if len(wp) > 3 else ""),
-                           "sig": [x["key"] for x in wp], "parts": [(x["key"], x["text"]) for x in wp], "sep": "\n"})
+                           "sig": [x["key"] for x in wp], "items": wp, "parts": [(x["key"], x["text"]) for x in wp], "sep": "\n"})
     # Кроны: выдержка уже в правилах (вторая копия идет 15 минут, висит - не раньше часа). sig -
     # какие задачи: вторая наслоившаяся дает свой алерт
     if online and cron_watch.block(rep) is not None:
@@ -5954,7 +5986,7 @@ def _server_conditions(s: Server, now: datetime,
                              {"detail": "\n".join(x["text"] for x in cp[:3])
                                         + (f"\nи еще {len(cp) - 3}" if len(cp) > 3 else ""),
                               "parts": [(x["key"], x["text"]) for x in cp], "sep": "\n",
-                              "sig": [x["key"] for x in cp]})
+                              "sig": [x["key"] for x in cp], "items": cp})
     # Авария в логах (в разы выше обычного час подряд, log_errors.problems): выдержка уже в правиле,
     # всплески короче видны только в разделе. sig - какие логи
     if online and log_errors.block(rep) is not None:
@@ -5962,29 +5994,29 @@ def _server_conditions(s: Server, now: datetime,
         out["log_errors"] = (max((x["level"] for x in lp), default=0),
                              {"detail": "\n".join(x["text"] for x in lp[:3])
                                         + (f"\nи еще {len(lp) - 3}" if len(lp) > 3 else ""),
-                              "sig": [x["key"] for x in lp], "parts": [(x["key"], x["text"]) for x in lp], "sep": "\n"})
+                              "sig": [x["key"] for x in lp], "items": lp, "parts": [(x["key"], x["text"]) for x in lp], "sep": "\n"})
     # PHP-FPM: окно в час уже в правиле (минуты очереди, счет за час), выдержка не нужна. sig - какие пулы
     if online and fpm_pools.block(rep) is not None:
         fp = fpm_pools.problems(s, now)
         out["fpm"] = (max((x["level"] for x in fp), default=0),
                       {"detail": "\n".join(x["text"] for x in fp[:3])
                                  + (f"\nи еще {len(fp) - 3}" if len(fp) > 3 else ""),
-                       "sig": [x["key"] for x in fp], "parts": [(x["key"], x["text"]) for x in fp], "sep": "\n"})
+                       "sig": [x["key"] for x in fp], "items": fp, "parts": [(x["key"], x["text"]) for x in fp], "sep": "\n"})
     # Утечка памяти: дно растет суток подряд (история - в alert_state mem_trend, ведет цикл алертов)
     if online and isinstance((s.alert_state or {}).get("mem_trend"), dict):
         ml = [x for x in mem_trend.problems(s, now) if x["level"]]
         out["mem_leak"] = (max((x["level"] for x in ml), default=0),
-                           {"detail": "; ".join(x["text"] for x in ml[:3]), "sig": [x["key"] for x in ml],
+                           {"detail": "; ".join(x["text"] for x in ml[:3]), "sig": [x["key"] for x in ml], "items": ml,
                             "parts": [(x["key"], x["text"]) for x in ml]})
     # Проверка восстановления: итог недельной проверки держится до следующей, выдержка не нужна
     if online and backup_verify.block(rep) is not None:
         bv = backup_verify.problems(rep, now)
-        out["backup_restore"] = (bv[0][0] if bv else 0, {"detail": "; ".join(t for _l, t in bv[:3])})
+        out["backup_restore"] = (bv[0][0] if bv else 0, {"detail": "; ".join(t for _l, t in bv[:3]), "items": bv})
     # Ноды кластера: NotReady или под давлением дольше выдержки (перезагрузка ноды - минуты)
     if online and (rep.get("kube") or {}).get("access"):
         kn = kube_node_problems(rep)
         sustain_lvl("kube_node", 2 if kn else 0,
-                    {"detail": "; ".join(kn[:4]) + (f" и еще {len(kn) - 4}" if len(kn) > 4 else "")})
+                    {"detail": "; ".join(kn[:4]) + (f" и еще {len(kn) - 4}" if len(kn) > 4 else ""), "items": kn})
     return out
 
 
@@ -6054,6 +6086,16 @@ async def evaluate_servers(
             parts.append(f"↳ лежат мониторы: {html.escape(parents_mod.list_text(sorted(kids_down[sid])))}")
         return "".join("\n" + x for x in parts)
 
+    def deps_short(sid: int) -> str:
+        """То же для чата: "За ним молчат: a, b", "Лежат мониторы: x"."""
+        parts = []
+        if kids_quiet.get(sid):
+            parts.append(tg_fmt.fact("За ним молчат", tg_fmt.names(kids_quiet[sid])))
+        if kids_down.get(sid):
+            parts.append(("лежат мониторы: " if parts else "Лежат мониторы: ")
+                         + tg_fmt.names(sorted(kids_down[sid])))
+        return "\n" + html.escape("; ".join(parts)) if parts else ""
+
     base = settings.panel_url.rstrip("/")
     threshold = int(cfg.get("flood_threshold", 6))
 
@@ -6116,23 +6158,16 @@ async def evaluate_servers(
         url += tail if url else ""
         default = settings_store.SERVER_ALERT_KINDS[key][1]
         if rule["text"] == default or rule["text"] in settings_store.LEGACY_SERVER_DEFAULTS:
-            # у диска три уровня — ведущая иконка должна их различать
-            ico = _DISK_ICON.get(int(ctx.get("level") or 0), "") if key in ("disk", "inode") else ""
-            if key == "disk_health":
-                ico = _DISK_ICON.get(int(ctx.get("level") or 0), "") + "💽"
-            if key == "disk_forecast":
-                ico = _DISK_ICON.get(int(ctx.get("level") or 0), "") + "📈"
-            if key == "units":
-                ico = _DISK_ICON.get(int(ctx.get("level") or 0), "") + "⚙️"
-            if key == "oom":
-                ico = _DISK_ICON.get(int(ctx.get("level") or 0), "") + "🧠"
-            if key == "port_new":
-                ico = "🔴🚪"  # порт открыт всем: открытый только белому списку сюда не доходит
+            # Уровень - первым эмодзи (у диска три уровня, у юнитов и OOM - свои). Истекший срок
+            # в кластере - уже поломка, а не напоминание: красным
+            level = int(ctx.get("level") or ctx.get("_lvl") or 1)
             if key == "kube_expiry" and ctx.get("expired"):
-                ico = "⛔"  # срок не «скоро», а уже вышел — это поломка, а не напоминание
+                level = max(level, 2)
+            detail = _fmt_rule(default, s, ctx)
             return _server_alert_text(
-                key, s.name, _fmt_rule(default, s, ctx), url, icon=ico,
+                key, s.name, detail, url, icon=srv_short.icon(key, level),
                 group=s.group_name or "", ref=f"srv:{s.id}",
+                short=srv_short.short(key, ctx, s, detail, level),
             )
         txt = html.escape(_fmt_rule(rule["text"], s, ctx))
         return alerts.Msg(
@@ -6312,9 +6347,12 @@ async def evaluate_servers(
             # сообщением на сервер, а не по сообщению на каждую
             lines = [known_mod.remind_text(settings_store.SERVER_ALERT_KINDS.get(kk, (kk,))[0], e, now)
                      for kk, e in reminds]
+            k_what, k_facts = known_mod.remind_short(lines[0])
+            if len(lines) > 1:
+                k_facts = k_facts[:1] + [f"и еще {len(lines) - 1}"]
             fires.append(_server_alert_text(
                 "known", s.name, lines[0] if len(lines) == 1 else "; ".join(lines),
-                srv_url(s, reminds[0][0]), icon="📌", group=s.group_name or ""))
+                srv_url(s, reminds[0][0]), icon="📌", group=s.group_name or "", short=(k_what, k_facts)))
         # Подключение закрыто (человеком или само): что все еще сломано и не объявлялось,
         # становится известной проблемой. Алерт придет, если станет хуже или сломается новое
         if not onb and st.get("onboard") and talking:
@@ -6402,6 +6440,7 @@ async def evaluate_servers(
                             apply(s.id, sk, sorted(new_sig))
                             apply(s.id, tk, sorted(told | new_sig))
                         else:
+                            ctx["_lvl"] = level
                             fires.append(srv_fire(s, key, rule, _news_first(ctx, fresh)))
                             fire_apply.append((s.id, sk, sorted(new_sig)))
                             fire_apply.append((s.id, tk, sorted(told | new_sig)))
@@ -6510,24 +6549,27 @@ async def evaluate_servers(
                     # на что ушло место - из разбора helper'а diskusage-setup, без запросов
                     ctx["cause"] = _with_fast(ctx.get("fast"), disk_cause(
                         s.last_report or {}, s.disk_forecast, ctx.get("mount"), now))
+                    ctx["top"] = disk_top_short(s.last_report or {}, ctx.get("mount"), "disk")
                 if key == "inode":
                     ctx["cause"] = _with_fast(ctx.get("fast"), inode_cause(
                         s.last_report or {}, s.disk_forecast, ctx.get("mount"), now))
+                    ctx["top"] = disk_top_short(s.last_report or {}, ctx.get("mount"), "inode")
                 if key == "web_5xx":
                     try:
                         async with session_factory() as ses:
-                            ctx["where"] = web_where_text(await web_error_where(
-                                ses, s.id, now, web_muted_keys(s, now)))
+                            w_raw = await web_error_where(ses, s.id, now, web_muted_keys(s, now))
+                            ctx["where"] = web_where_text(w_raw)
+                            ctx["where_raw"] = w_raw
                     except Exception:
                         log.warning("не собрал, где ошибки 5xx на %s", s.name, exc_info=True)
+                ctx["_lvl"] = level
                 fmsg = srv_fire(s, key, rule, ctx)
                 if ctx.get("_note"):
-                    fmsg = alerts.Msg(fmsg + "\n↳ " + html.escape(str(ctx["_note"])), fmsg.section, fmsg.group,
-                                      fmsg.kind, fmsg.target, fmsg.recovery, fmsg.ref)
+                    fmsg = fmsg.tail("\n↳ " + html.escape(str(ctx["_note"])))
                 if key == "offline" and (tail := deps_tail(s.id)):
-                    # что молчит и лежит из-за него: их собственные алерты придержаны
-                    fmsg = alerts.Msg(fmsg + tail, fmsg.section, fmsg.group, fmsg.kind, fmsg.target,
-                                      fmsg.recovery, fmsg.ref)
+                    # что молчит и лежит из-за него: их собственные алерты придержаны. В чате -
+                    # строкой "За ним молчат: ...", без них непонятно, почему лежит соседнее
+                    fmsg = fmsg.tail(tail, deps_short(s.id))
                 if key == "offline" and probes_left > 0:
                     # молчит агент или сам сервер: панель стучится к нему сама (app/liveness.py)
                     probes_left -= 1
@@ -6537,8 +6579,9 @@ async def evaluate_servers(
                         log.warning("не проверил, жив ли %s", s.name, exc_info=True)
                         live = None
                     if live:
-                        fmsg = alerts.Msg(fmsg + "\n↳ " + html.escape(liveness.text(live)), fmsg.section,
-                                          fmsg.group, fmsg.kind, fmsg.target, fmsg.recovery, fmsg.ref)
+                        ls = liveness.short(live)
+                        fmsg = fmsg.tail("\n↳ " + html.escape(liveness.text(live)),
+                                         "\n" + html.escape(tg_fmt.cap(ls)) if ls else "")
                         fire_apply.append((s.id, "offline_probe", live | {"ts": now.isoformat()}))
                 if key in ("offline", "web_5xx"):
                     # что менялось на сервере за час до сбоя: деплой, перезагрузка, пакеты
@@ -6562,11 +6605,9 @@ async def evaluate_servers(
                 if key in _SILENT_RECOVERY:
                     apply(s.id, key, 0)
                     continue
-                detail = (
-                    "снова доступен"
-                    if key == "offline"
-                    else _recovery_detail(key, st, ctx)
-                )
+                # отбой одной строкой (app/srv_short.py RECOVERY); подробный _recovery_detail -
+                # для раздела и тестов
+                detail = _recovery_short(key, st, ctx, s)
                 recoveries.append(
                     _server_alert_text(key, s.name, detail, srv_url(s, key), recovery=True, group=s.group_name or "")
                 )
@@ -6595,7 +6636,7 @@ async def evaluate_servers(
             pn, fresh = rules.get("port_new"), open_ports.new_ports(s, now)
             if fresh and "port_new" not in mutes and pn and pn["enabled"] and _rule_scope_ok(pn, s):
                 fires.append(srv_fire(s, "port_new", pn, {
-                    "detail": "в интернет открылся новый порт: " + open_ports.new_text(fresh)}))
+                    "detail": "в интернет открылся новый порт: " + open_ports.new_text(fresh), "items": fresh}))
                 fire_apply.append((s.id, "port_new_at", pstamp))
             else:
                 apply(s.id, "port_new_at", pstamp)
@@ -6609,7 +6650,7 @@ async def evaluate_servers(
             ac = rules.get("access_change")
             if fresh_ev and "access_change" not in mutes and ac and ac["enabled"] and _rule_scope_ok(ac, s):
                 fires.append(srv_fire(s, "access_change", ac, {
-                    "detail": "изменился доступ: " + srv_changes.events_text(fresh_ev, 6)}))
+                    "detail": "изменился доступ: " + srv_changes.events_text(fresh_ev, 6), "items": fresh_ev}))
                 fire_apply.append((s.id, "access_change_at", astamp))
             else:
                 apply(s.id, "access_change_at", astamp)
@@ -6633,7 +6674,7 @@ async def evaluate_servers(
                     if logs is not None:
                         fires.append(job_logs.attach(srv_fire(s, "kube_job", kj, {
                             "detail": ("упал Job: " if len(fresh) == 1 else "упали Job: ")
-                            + failed_jobs_text(fresh, 5)}), logs))
+                            + failed_jobs_text(fresh, 5), "items": fresh}), logs))
                         fire_apply.append((s.id, "kube_jobs_seen", keys))
                 else:
                     apply(s.id, "kube_jobs_seen", keys)
@@ -6645,13 +6686,15 @@ async def evaluate_servers(
         om = rules.get("oom")
         # заглушенное (весь OOM или виновник, app/oom.py) учитывается молча: после мьюта старое не придет
         o_fire, o_done, o_now = oom_mod.alert_step(s, st, s.last_report or {}, now,
-                                                   tg_buttons.zone(cfg.get("tz") or "Europe/Moscow"), mutes)
+                                                   tg_buttons.zone(cfg.get("tz") or "Europe/Moscow"), mutes,
+                                                   pod_names=pod_names)
         for k, v in o_now.items():
             apply(s.id, k, v)
         o_ep = o_done.pop("oom_ep", None)
+        o_short = o_done.pop("oom_short", None)  # короткий текст (app/oom.py), не в alert_state
         if o_fire is not None and "oom" not in mutes and om and om["enabled"] and _rule_scope_ok(om, s):
             fires.append(srv_fire(s, "oom", om, {"detail": o_fire[1], "level": o_fire[0], "value": 1, "victim": "",
-                                                 "url_tail": f"&oom={o_ep}" if o_ep else ""}))
+                                                 "url_tail": f"&oom={o_ep}" if o_ep else "", "items": o_short}))
             for k, v in o_done.items():
                 fire_apply.append((s.id, k, v))
 
@@ -6698,7 +6741,7 @@ async def evaluate_servers(
                     # заглушенный посреди алерта, навсегда оставался "в цикле" на главной.
                     if loop_ok:
                         recoveries.append(_server_alert_text(
-                            "docker_loop", s.name, f"контейнер {name}: перезапуски прекратились",
+                            "docker_loop", s.name, f"{name} больше не перезапускается",
                             srv_url(s, "docker_loop"), recovery=True, group=s.group_name or ""))
                     cs["alerted_loop"] = False
                 # «упал»: не работает и это авария (docker_down_why: не остановлен руками),
@@ -6755,13 +6798,13 @@ async def evaluate_servers(
                 if len(hits) >= _UNIT_LOOP_MIN and not cs["alerted"] and not quiet:
                     count, why = unit_loop_text(u, hits)
                     fires.append(srv_fire(s, "unit_loop", ul_rule, {
-                        "unit": name, "count": count, "window": _UNIT_LOOP_WINDOW // 60, "why": why}))
+                        "unit": name, "count": count, "window": _UNIT_LOOP_WINDOW // 60, "why": why, "_lvl": 2}))
                     cs["alerted"] = True
                 elif cs["alerted"] and not hits:
                     # отметку снимаем всегда, отбой шлем только по живому правилу
                     if not quiet:
                         recoveries.append(_server_alert_text(
-                            "unit_loop", s.name, f"{name}: перезапуски прекратились",
+                            "unit_loop", s.name, f"{name} больше не перезапускается",
                             srv_url(s, "unit_loop"), recovery=True, group=s.group_name or ""))
                     cs["alerted"] = False
                 ustate[name] = cs
@@ -6770,7 +6813,7 @@ async def evaluate_servers(
                 cs = ustate.pop(gone)
                 if cs.get("alerted") and ul_ok and gone not in muted_u:
                     recoveries.append(_server_alert_text(
-                        "unit_loop", s.name, f"{gone}: перезапуски прекратились",
+                        "unit_loop", s.name, f"{gone} больше не перезапускается",
                         srv_url(s, "unit_loop"), recovery=True, group=s.group_name or ""))
             if ustate != (st.get("unit_loops") or {}):
                 apply(s.id, "unit_loops", ustate)
@@ -6839,8 +6882,7 @@ async def evaluate_servers(
                     elif depth < thr and was:
                         recoveries.append(_server_alert_text(
                             "queue", s.name,
-                            f"очередь {q.get('name') or '?'} ({src or 'rabbitmq'}) "
-                            f"снова в норме: {depth} < {thr}",
+                            f"очередь {q.get('name') or '?'} снова в норме",
                             srv_url(s, "queue"), recovery=True, group=s.group_name or ""))
                         qstate[key] = False
             # очередь удалили/переименовали — состояние по ней больше не нужно
@@ -6867,7 +6909,7 @@ async def evaluate_servers(
             was_stale = bool(st.get("rotation_stale"))
             if stale and not was_stale:
                 shown = ", ".join(stale[:6]) + (f" и ещё {len(stale) - 6}" if len(stale) > 6 else "")
-                fires.append(srv_fire(s, "backup_rotation", rot_r, {"repos": shown}))
+                fires.append(srv_fire(s, "backup_rotation", rot_r, {"repos": shown, "names": [x.split(" (")[0] for x in stale]}))
                 fire_apply.append((s.id, "rotation_stale", 1))
             elif not stale and was_stale:
                 recoveries.append(_server_alert_text(
@@ -6892,7 +6934,7 @@ async def evaluate_servers(
             if locks and lock_ok and due:
                 items = [f"{n} ({d} дн)" for n, d in locks]
                 shown = ", ".join(items[:6]) + (f" и еще {len(items) - 6}" if len(items) > 6 else "")
-                fires.append(srv_fire(s, "backup_lock", lr, {"repos": shown}))
+                fires.append(srv_fire(s, "backup_lock", lr, {"repos": shown, "names": names}))
                 fire_apply.append((s.id, "backup_locks", {"repos": names, "ts": now.timestamp()}))
             elif locks and prev_names and names != prev_names:
                 # набор сузился: запоминаем молча, иначе вернувшийся лок не считался бы новым
@@ -6914,7 +6956,7 @@ async def evaluate_servers(
             due = bool(set(bad) - set(prev_names)) or now.timestamp() - prev_ts >= _BACKUP_REPO_REALERT
             if bad and cr and cr["enabled"] and _rule_scope_ok(cr, s) and due:
                 shown = ", ".join(bad[:6]) + (f" и еще {len(bad) - 6}" if len(bad) > 6 else "")
-                fires.append(srv_fire(s, "backup_check", cr, {"repos": shown}))
+                fires.append(srv_fire(s, "backup_check", cr, {"repos": shown, "names": bad}))
                 fire_apply.append((s.id, "backup_checks", {"repos": bad, "ts": now.timestamp()}))
             elif bad and prev_names and bad != prev_names:
                 apply(s.id, "backup_checks", {"repos": bad, "ts": prev_ts})
@@ -6945,7 +6987,7 @@ async def evaluate_servers(
             if names and pr and pr["enabled"] and _rule_scope_ok(pr, s) and due:
                 items = [f"{n} ({shown_now[n]})" for n in names]
                 shown = ", ".join(items[:6]) + (f" и еще {len(items) - 6}" if len(items) > 6 else "")
-                fires.append(srv_fire(s, "backup_prune", pr, {"repos": shown}))
+                fires.append(srv_fire(s, "backup_prune", pr, {"repos": shown, "names": names}))
                 fire_apply.append((s.id, "backup_prunes", {"repos": names, "ts": now.timestamp()}))
             elif names and prev_names and names != prev_names:
                 apply(s.id, "backup_prunes", {"repos": names, "ts": prev_ts})
@@ -6969,7 +7011,7 @@ async def evaluate_servers(
                 new = [n for n in cur_un if n not in set(known)]
                 if new and ur and ur["enabled"] and _rule_scope_ok(ur, s):
                     shown = ", ".join(new[:6]) + (f" и еще {len(new) - 6}" if len(new) > 6 else "")
-                    fires.append(srv_fire(s, "backup_unmonitored", ur, {"repos": shown}))
+                    fires.append(srv_fire(s, "backup_unmonitored", ur, {"repos": shown, "names": new}))
                     fire_apply.append((s.id, "bsrv_clients", cur_un))
                 elif cur_un != sorted(known):
                     apply(s.id, "bsrv_clients", cur_un)
@@ -7003,7 +7045,9 @@ async def evaluate_servers(
                 items = [f"{p} ({repo_reason(byname.get(p) or {}, now, repo_ext, panel_names)})" for p in order]
                 lst = ", ".join(items[:8]) + (f" и еще {n - 8}" if n > 8 else "")
                 shown = f"{n} шт.: {lst}"
-                fires.append(srv_fire(s, "backup_repo", rr, {"repos": shown}))
+                fires.append(srv_fire(s, "backup_repo", rr, {
+                    "repos": shown, "names": order,
+                    "whys": [repo_reason(byname.get(p) or {}, now, repo_ext, panel_names) for p in order]}))
                 fire_apply.append((s.id, "backup_repos", {"repos": probs, "ts": now.timestamp()}))
             elif not probs and prev_active:
                 recoveries.append(_server_alert_text(
@@ -7121,7 +7165,10 @@ async def maintenance_tick(
                 if c.last_status in ("down", "degraded"):
                     bad.append(f"{c.name} - " + ("недоступен" if c.last_status == "down" else "тормозит"))
             text = maint.verify_text(w.title, bad, len(srvs), len(chks))
-            msgs.append(alerts.Msg(("⚠️ " if bad else "🚧 ") + html.escape(text), "servers", "", kind="maint"))
+            m_what, m_facts = maint.verify_short(bad)
+            msgs.append(alerts.Msg(
+                tg_fmt.render("⚠️🚧" if bad else "🚧", f"<b>{html.escape(w.title)}</b>", m_what, m_facts),
+                "servers", "", kind="maint", full=("⚠️ " if bad else "🚧 ") + html.escape(text)))
         await session.commit()
     if msgs and not muted and alerts.alerts_enabled(cfg):
         await alerts.dispatch(cfg, True, msgs, int(cfg.get("flood_threshold", 6)), parse_mode="HTML",
@@ -7362,11 +7409,13 @@ async def send_autofix_note(session_factory: async_sessionmaker[AsyncSession],
                     key=lambda f: float(f.get("pct") or 0), default=None)
         where = f" (диск {worst.get('mount')} был {worst.get('pct')}%)" if worst else ""
         detail, icon = f"автоочистка диска: {label}, освобождено {_fmt_size(freed)}{where}", "🧹"
+        short = (f"Почистил диск, освобождено {tg_fmt.size(freed)}", [label])
     else:
         detail, icon = f"автоочистка диска не удалась ({label}): {result[:200]}", "⚠️"
+        short = ("Не получилось почистить диск", [label])
     base = settings.panel_url.rstrip("/")
     url = f"{base}/?server={server_id}&sec=diskfill" if base else ""
-    msg = _server_alert_text("disk", name, detail, url, icon=icon, group=group)
+    msg = _server_alert_text("disk", name, detail, url, icon=icon, group=group, short=short)
     await alerts.dispatch(cfg, True, [msg], int(cfg.get("flood_threshold", 6)),
                           parse_mode="HTML", session_factory=session_factory)
 
@@ -7524,6 +7573,7 @@ async def _daily_uncovered(session_factory, settings: Settings) -> None:
     cur = current_setup_versions()
     lines: list[str] = []
     hosts: list[str] = []
+    by_gap: dict[str, list[str]] = {}  # чего не хватает -> на каких серверах (для чата)
     for srv in sorted(servers, key=lambda x: x.name or ""):
         # Оффлайновую ноду не зовём чинить: её отчёт устарел, и первым делом её
         # надо поднять — об этом уже есть свой алерт.
@@ -7549,6 +7599,9 @@ async def _daily_uncovered(session_factory, settings: Settings) -> None:
             "; ".join(html.escape(txt, quote=False) for _, txt in g),
         ))
         hosts.append(srv.name or "")
+        for _k, txt in g:
+            m = re.search(r"«([^»]+)»", txt)
+            by_gap.setdefault(m.group(1) if m else re.sub(r"\s*\(.*\)$", "", txt), []).append(srv.name or "")
 
     if not lines:
         return
@@ -7559,7 +7612,18 @@ async def _daily_uncovered(session_factory, settings: Settings) -> None:
         body = tpl.format(list="\n".join(lines), cmd=html.escape(cmd, quote=False), n=len(hosts))
     except (KeyError, IndexError, ValueError):
         body = default.format(list="\n".join(lines), cmd=html.escape(cmd, quote=False), n=len(hosts))
-    text = alerts.Msg(f"🧩 {body}", "servers", "", kind="uncovered")
+    if tpl == default:
+        # коротко (app/tg_fmt.py): чего не хватает и где; полный список и команда - в истории
+        if len(by_gap) == 1:
+            gap, where = next(iter(by_gap.items()))
+            u_what, u_facts = f"Нет helper'а {gap}", [tg_fmt.names(where)]
+        else:
+            u_what = "Новое без покрытия мониторингом"
+            u_facts = [f"{gap}: {tg_fmt.names(where, 2)}" for gap, where in list(by_gap.items())[:2]]
+        text = alerts.Msg(tg_fmt.render("🧩", "<b>Покрытие</b>", u_what, u_facts), "servers", "",
+                          kind="uncovered", full=f"🧩 {body}")
+    else:
+        text = alerts.Msg(f"🧩 {body}", "servers", "", kind="uncovered")
     if await alerts.dispatch(cfg, True, [text], threshold, parse_mode="HTML",
                              session_factory=session_factory):
         async with session_factory() as session:

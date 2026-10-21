@@ -49,6 +49,7 @@ from __future__ import annotations
 import re
 from datetime import datetime, timezone
 
+from app import podnames, tg_fmt
 from app.models import Server
 
 STUCK_S = 1800  # растет полчаса
@@ -427,3 +428,110 @@ def helper_view(s: Server) -> list[dict]:
             v["failed"] = {**b["failed"], "base": _base(b["failed"]), "spike": spike(b["failed"], b["source"] in held)}
         out.append(v)
     return out
+
+
+# ---- короткий алерт в Telegram (формат A, app/tg_fmt.py) ----
+# Где и что - без подписей и счета за период: "Очередь mail не разбирается / нет потребителей,
+# 25 тыс. в app-rabbitmq-1". Хелперы where_short, where_in и times_usual берут и соседние модули
+# (воркеры, кроны, логи, PHP-FPM)
+
+def where_short(w: str, pods: bool = True) -> str:
+    """Где коротко: "контейнер shop-php" -> "shop-php", "под shop/web-6b8b56c769-f4k8m" -> "shop/web"
+    (ворклоад без хеша, неймспейс - только если он что-то добавляет: не default и не то же имя),
+    "на хосте" - как есть. pods=False - имя пода уже ворклоад (сведено раньше)"""
+    w = where_text(w)
+    if w.startswith("контейнер "):
+        return w[len("контейнер "):]
+    if w.startswith("под "):
+        ns, _, name = w[len("под "):].rpartition("/")
+        wl = podnames.workload(name) if pods else name
+        return wl if not ns or ns in ("?", "default", wl) else f"{ns}/{wl}"
+    return w
+
+
+def where_in(w: str, pods: bool = True) -> str:
+    """"в shop-php", "в web", "на хосте" """
+    s = where_short(w, pods)
+    return s if s == "на хосте" else f"в {s}"
+
+
+def times_usual(n: float, base: float | None) -> str:
+    """"в 10 раз больше обычного"; обычного не знаем или почти ноль - пусто: скажет вызывающий"""
+    if base is None or base < 1:
+        return ""
+    x = round(n / base)
+    if x < 2:
+        return "больше обычного"
+    return f"в {x} {_plural_times(x)} больше обычного"
+
+
+def _plural_times(n: int) -> str:
+    return "раза" if 2 <= n % 10 <= 4 and not 12 <= n % 100 <= 14 else "раз"
+
+
+def _system_of(rest: str) -> str:
+    """Система брокера из хвоста источника helper'а ("Celery ns, db 1" -> "Celery")"""
+    for label in sorted(SYSTEM_LABEL.values(), key=len, reverse=True):
+        if rest.startswith(label):
+            return label
+    return rest.split(", ")[0].strip()
+
+
+def _src_in(source: str) -> str:
+    """Брокер очереди коротко: "в app-rabbitmq-1", у очередей helper'а и система: "в redis (Celery)" """
+    w, _, rest = str(source or "").partition(", ")
+    system = _system_of(rest) if rest else ""
+    return where_in(w) + (f" ({system})" if system else "")
+
+
+def tg_short(qs: list[dict]) -> tuple[str, list[str]] | None:
+    """Короткий алерт "очередь не разбирается" (queue_stuck) по problems(): что - про первую (дольше
+    всех), остальные очереди именами"""
+    if not qs:
+        return None
+    q = qs[0]
+    where, n = _src_in(q.get("source") or ""), tg_fmt.count(q.get("depth") or 0)
+    if q.get("stall"):
+        what = f"Очередь {q['name']} стоит"
+        fact = f"задача ждет {tg_fmt.dur(q.get('wait') or q.get('age') or 0)}, {n} {where}"
+    else:
+        what = f"Очередь {q['name']} не разбирается"
+        head = "нет потребителей" if q.get("consumers") == 0 else f"растет {tg_fmt.dur(q.get('age') or 0)}"
+        fact = f"{head}, {n} {where}"
+    facts = [fact]
+    rest = [x["name"] for x in qs[1:] if x["name"] != q["name"]]
+    if rest:
+        facts.append(tg_fmt.fact("Еще", tg_fmt.names(rest)))
+    return what, facts
+
+
+def tg_short_failed(fp: list[dict]) -> tuple[str, list[str]] | None:
+    """Короткий алерт "падают задачи" (queue_failed) по failed_problems(): "failed_jobs (Laravel),
+    в 100 раз больше обычного"; остальные брокеры именами"""
+    if not fp:
+        return None
+
+    def name(x: dict) -> str:
+        w, _, rest = str(x.get("source") or "").partition(", ")
+        system = _system_of(rest) if rest else ""
+        if system == SYSTEM_LABEL["laravel_failed"]:
+            system = "failed_jobs (Laravel)"
+        place = where_in(w)
+        return f"{system} {place}" if system else place
+
+    x = fp[0]
+    base = x.get("base")
+    more = times_usual(int(x.get("h1") or 0), base)
+    if not more and base is not None:
+        more = "обычно задачи не падают"
+    facts = [name(x) + (f", {more}" if more else "")]
+    rest = [name(y) for y in fp[1:]]
+    if rest:
+        facts.append(tg_fmt.fact("Еще", tg_fmt.names(rest)))
+    return "Падают задачи", facts
+
+
+def tg_short_depth(queue: str, source: str, value: int | float) -> tuple[str, list[str]]:
+    """Короткий алерт "очередь выше порога" (вид queue, ctx queue/source/value в collector):
+    "Выросла очередь emails / 15 тыс. в app-rabbitmq-1". Порог не пишем: он в панели"""
+    return f"Выросла очередь {queue or '?'}", [f"{tg_fmt.count(value or 0)} {_src_in(source or 'rabbitmq')}"]

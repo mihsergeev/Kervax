@@ -296,5 +296,5 @@ async def test_alerts(_: AdminUser, session: SessionDep) -> AlertTestResult:
     cfg = await settings_store.get_alert_config(session, settings)
     if not alerts.alerts_enabled(cfg):
         return AlertTestResult(sent=False, errors=["Каналы не настроены"])
-    errors = await alerts.send_alert(cfg, "🔔 Тестовое уведомление — каналы работают.")
+    errors = await alerts.send_alert(cfg, "🔔 Kervax\nТест: алерты сюда доходят")
     return AlertTestResult(sent=not errors, errors=errors)

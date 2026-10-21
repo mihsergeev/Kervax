@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import select
 
 from app import collector, known
+from app.alerts import full_text
 from app.config import Settings
 from app.db import Base, create_engine_and_factory
 from app.models import AuditLog, Check, Server
@@ -212,7 +213,8 @@ async def test_server_known_expired_and_reminder(tmp_path, monkeypatch):
     settings = Settings(alert_webhook="http://hook")
     await collector.evaluate_servers(factory, settings, now)
     # висит неделю - напоминание, сам алерт молчит
-    assert len(sent) == 1 and "📌" in sent[0] and "известная проблема висит 8 дн" in sent[0]
+    assert len(sent) == 1 and sent[0].startswith("📌 ") and "<b>Висит 8 дней: диск</b>" in sent[0]
+    assert "известная проблема висит 8 дн" in full_text(sent[0])
     # срок вышел, проблема осталась - алерт как обычно
     await _set(factory, last_seen=now + timedelta(minutes=1), known_issues={
         "disk": _entry(level=1, until=now.isoformat())})

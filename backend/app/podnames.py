@@ -53,3 +53,11 @@ def muted(keys: set[str], key: str, ctrl: str = "") -> bool:
         return False
     wk = pod_key(key, ctrl)
     return wk in keys or any(pod_key(k) == wk for k in keys if k.startswith("pod:"))
+
+
+def label(ns: str, name: str, ctrl: str = "") -> str:
+    """Под для короткого алерта: ворклоад без хеша, неймспейс - только если он что-то добавляет.
+    default/wordpress-mariadb-7d9f8b6c5d-x2k4q -> wordpress-mariadb, access-hub/access-hub-... ->
+    access-hub, tech1/scheduler-dispatch-... -> tech1/scheduler-dispatch."""
+    wl = workload(name, ctrl)
+    return wl if not ns or ns in ("?", "default", wl) else f"{ns}/{wl}"

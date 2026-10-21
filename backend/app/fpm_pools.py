@@ -32,10 +32,12 @@ SAT_HOT минут, TOUT_HOT убитых или CRASH_HOT падений. Ме�
 """
 from __future__ import annotations
 
+import re
 from datetime import datetime, timezone
 
+from app import tg_fmt
 from app.models import Server
-from app.queue_watch import where_text
+from app.queue_watch import where_in, where_text
 
 MUTE_PREFIX = "fpm:"
 SAT_MIN = 15  # минут из часа запросы ждали воркера
@@ -170,16 +172,90 @@ def problems(s: Server, now: datetime) -> list[dict]:
         ex = CRASH_HINT if _crashing(x, h) else str(x.get("tout_last") or x.get("slow_last") or "").strip()
         if ex:
             text += f"\n↳ {ex[:200]}"
-        out.append({"key": k, "label": label(x), "level": lvl, "why": w, "text": text})
+        out.append({"key": k, "label": label(x), "level": lvl, "why": w, "text": text,
+                    # для короткого алерта: где, пул, предел воркеров, что сработало, сигнал падения
+                    "where": where_text(str(x.get("where") or "")), "pool": str(x.get("pool") or ""),
+                    "max": _i(x, "max"), "causes": _causes(x, h), "sig": _signal(str(x.get("crash_last") or ""))})
     # журнал ядра: падения, которые не объясняет пул (лог FPM не нашелся, падает не FPM)
     kx = kern(s.last_report or {})
     h = KERN_KEY in held
     if kx and not crash and KERN_KEY not in muted and level(kx, h):
         w = _kern_why(kx)
         out.append({"key": KERN_KEY, "label": KERN_LABEL, "level": level(kx, h), "why": w,
-                    "text": f"{w}\n↳ {CRASH_HINT}"})
+                    "text": f"{w}\n↳ {CRASH_HINT}", "kern": True, "causes": ["crash"],
+                    "proc": _kern_proc(kx["crash_last"])})
     out.sort(key=lambda x: (-x["level"], x["key"]))
     return out
+
+
+def _causes(p: dict, held: bool = False) -> list[str]:
+    """Что сработало (как в why): sat - запросы ждали воркера, reached - упор в предел, tout - убиты
+    по таймауту, crash - воркеры падают"""
+    k = 0.5 if held else 1
+    out = []
+    if _i(p, "sat") >= SAT_MIN * k:
+        out.append("sat")
+    if _i(p, "reached") >= REACHED_MIN * k:
+        out.append("reached")
+    if _i(p, "tout") >= TOUT_MIN * k:
+        out.append("tout")
+    if _crashing(p, held):
+        out.append("crash")
+    return out
+
+
+_SIG = {"11": "SIGSEGV", "6": "SIGABRT", "7": "SIGBUS", "4": "SIGILL", "8": "SIGFPE"}
+
+
+def _signal(line: str) -> str:
+    """Сигнал падения из строки лога FPM: "child 12 exited on signal 11 (SIGSEGV)" -> "SIGSEGV" """
+    m = re.search(r"\((SIG[A-Z]+)\)", line)
+    if m:
+        return m.group(1)
+    m = re.search(r"signal (\d+)", line)
+    return _SIG.get(m.group(1), f"сигнал {m.group(1)}") if m else ""
+
+
+def _kern_proc(line: str) -> str:
+    """Процесс из строки журнала ядра: "php-fpm7.4[1234]: segfault at ..." -> "php-fpm7.4" """
+    m = re.search(r"([\w.@+-]+)\[\d+\]", line)
+    return m.group(1) if m else ""
+
+
+# ---- короткий алерт в Telegram (формат A, app/tg_fmt.py) ----
+
+def _pool_where(x: dict) -> str:
+    """"media" (пул на хосте), "www в shop-php" """
+    w = str(x.get("where") or "")
+    return str(x.get("pool") or "?") + ("" if w in ("", "на хосте") else " " + where_in(w))
+
+
+def tg_short(fp: list[dict]) -> tuple[str, list[str]] | None:
+    """Короткий алерт по problems(): "PHP-FPM не справляется / Пул: media, заняты все 50
+    воркеров". Что - про худший пул (первый), остальные именами"""
+    if not fp:
+        return None
+    x = fp[0]
+    causes = x.get("causes") or []
+    if x.get("kern"):
+        proc = x.get("proc") or ""
+        what, facts = "Падает PHP на ноде", [f"{proc}, segfault" if proc else "segfault по журналу ядра"]
+    elif "sat" in causes or "reached" in causes:
+        mx = int(x.get("max") or 0)
+        busy = ("занят единственный воркер" if mx == 1 else
+                f"заняты все {mx} {_plural(mx, 'воркер', 'воркера', 'воркеров')}" if mx else "заняты все воркеры")
+        what, facts = "PHP-FPM не справляется", [tg_fmt.fact("Пул", f"{_pool_where(x)}, {busy}")]
+        if "crash" in causes:
+            facts.append("воркеры еще и падают" + (f" ({x['sig']})" if x.get("sig") else ""))
+    elif "tout" in causes:
+        what, facts = "PHP-FPM обрывает запросы по таймауту", [tg_fmt.fact("Пул", _pool_where(x))]
+    else:
+        sig = x.get("sig") or ""
+        what, facts = "Падают воркеры PHP-FPM", [tg_fmt.fact("Пул", _pool_where(x) + (f", {sig}" if sig else ""))]
+    rest = [_pool_where(y) for y in fp[1:] if not y.get("kern")]
+    if rest:
+        facts.append(tg_fmt.fact("Еще", tg_fmt.names(rest)))
+    return what, facts[:2]
 
 
 def _kern_why(kx: dict) -> str:

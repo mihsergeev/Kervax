@@ -9,6 +9,7 @@ from sqlalchemy import select
 from app import checks as checks_exec
 from app import collector
 from app import manual_probe
+from app.alerts import full_text
 from app.config import Settings
 from app.models import Check, CheckSample, ProbeRequest
 
@@ -131,8 +132,12 @@ async def test_inside_probe_goes_into_the_alert(client, auth_headers, monkeypatc
     # второй сбой: алерт, в нем - что видно изнутри; новых заданий агенту нет
     assert await collector.run_due_checks(factory, cfg) == 1
     assert len(sent) == 1, sent
-    assert "изнутри web-a открывается (HTTP 200 · 4 мс): приложение живо" in sent[0]
-    assert "сервер не принимает соединение: 10 с без ответа" in sent[0]
+    # в чат - что случилось и причина; что видно изнутри сервера - в полном тексте (история, панель)
+    assert sent[0].startswith("🔴🌐 ") and "<b>Не отвечает</b>" in sent[0]
+    assert sent[0].endswith("\nсервер не принимает соединение: 10 с без ответа")
+    full = full_text(sent[0])
+    assert "изнутри web-a открывается (HTTP 200 · 4 мс): приложение живо" in full
+    assert "сервер не принимает соединение: 10 с без ответа" in full
     async with factory() as s:
         assert len((await s.scalars(select(ProbeRequest))).all()) == 1
 
