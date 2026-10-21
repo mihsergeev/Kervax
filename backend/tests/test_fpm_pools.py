@@ -122,9 +122,61 @@ def test_alert_condition():
     assert collector._server_conditions(_srv(_rep()), NOW)["fpm"][0] == 0
 
 
+def _kern_rep(pools=None, n=0, n_d=None):
+    rep = _rep(pools)
+    rep["extras"]["fpm"]["kern"] = {"n": n, "n_d": n if n_d is None else n_d, "ts": TS - 60,
+                                    "last": "php-fpm[4242]: segfault at 0 ip 00007f sp 00007ffd error 4 in libphp.so"}
+    return rep
+
+
+def test_crash_level_and_text():
+    # одно падение в день бывает от расширения; подряд - проблема
+    assert fp.level(_pool("container a", crash=2)) == 0
+    assert fp.level(_pool("container a", crash=3)) == 1
+    assert fp.level(_pool("container a", crash=10)) == 2
+    assert fp.level(_pool("container a", crash=2), held=True) == 1
+    assert fp.level(_pool("container a", crash=1), held=True) == 0
+    ex = "child 77 exited on signal 11 (SIGSEGV - core dumped) after 0.4 seconds from start"
+    s = _srv(_rep([_pool("pod shop/web-0", crash=12, crash_d=40, crash_last=ex, tout_last="script x timed out")]))
+    p = fp.problems(s, NOW)
+    assert p[0]["level"] == 2 and p[0]["why"] == "воркеры падают: 12 за час"
+    # в алерте не пример строки лога, а что это значит и что делать
+    assert p[0]["text"] == "PHP-FPM под shop/web-0, пул www: воркеры падают: 12 за час\n↳ " + fp.CRASH_HINT
+    row = fp.view(s, NOW)["pools"][0]
+    assert row["crash"] == 12 and row["crash_d"] == 40 and row["crash_last"] == ex
+
+
+def test_kernel_crashes():
+    # падения php по журналу ядра: своя строка, когда пулы о них молчат
+    s = _srv(_kern_rep([_pool("container a")], n=4, n_d=9))
+    p = fp.problems(s, NOW)
+    assert [(x["key"], x["level"]) for x in p] == [("ядро|php", 1)]
+    assert p[0]["text"] == "PHP на ноде падает: 4 за час по журналу ядра (segfault)\n↳ " + fp.CRASH_HINT
+    v = fp.view(s, NOW)["pools"]
+    assert v[-1]["kern"] is True and v[-1]["label"] == "PHP на ноде (журнал ядра)" and v[-1]["crash_d"] == 9
+    assert v[-1]["crash_last"].startswith("php-fpm[4242]: segfault at 0") and v[-1]["level"] == 1
+    # те же падения уже видны у пула - второй строки в алерте нет
+    s = _srv(_kern_rep([_pool("container a", crash=4)], n=4))
+    assert [x["key"] for x in fp.problems(s, NOW)] == ["контейнер a|www"]
+    # мало, мьют, за сутки ничего - нет ни алерта, ни строки
+    assert fp.problems(_srv(_kern_rep(n=2)), NOW) == []
+    assert fp.problems(_srv(_kern_rep(n=12), mutes=["fpm:ядро|php"]), NOW) == []
+    assert fp.view(_srv(_kern_rep(n=12), mutes=["fpm:ядро|php"]), NOW)["pools"][-1]["mute"] == {"perm": True}
+    assert all(not x.get("kern") for x in fp.view(_srv(_kern_rep(n=0)), NOW)["pools"])
+    # отбой при половине порога после ушедшего алерта
+    assert fp.problems(_srv(_kern_rep(n=2), state={"fpm_sig": ["ядро|php"]}), NOW)[0]["level"] == 1
+    lv, ctx = collector._server_conditions(_srv(_kern_rep(n=11)), NOW)["fpm"]
+    assert lv == 2 and ctx["sig"] == ["ядро|php"]
+
+
 def test_helper_script():
     src = (Path(__file__).resolve().parents[2] / "agent" / "fpm-setup.sh").read_text(encoding="utf-8")
-    assert "KERVAX_SETUP_VERSION=0.1" in src and "KERVAX_SETUP_ALWAYS=1" in src and "\r" not in src
+    assert "KERVAX_SETUP_VERSION=0.2" in src and "KERVAX_SETUP_ALWAYS=1" in src and "\r" not in src
+    # падение - сигнал сбоя, а не убийство: 9 и 15 - таймаут, OOM и перезагрузка
+    assert "exited on signal (4|6|7|8|11) " in src and "-e \\047exited on signal\\047" in src
+    # журнал ядра по курсору, без курсора - с прошлого прогона; курсор из состояния - только своими символами
+    assert '"--after-cursor=$kc"' in src and '"--since=@$kt"' in src and "*[!A-Za-z0-9=\\;]*) kc=\"\" ;;" in src
+    assert "(php|lsphp)[A-Za-z0-9._-]*\\[[0-9]+\\]:? +(segfault at|general protection|trap )" in src
     # обратный слэш в строке лога удваивается так, что mawk его не теряет: иначе отчет не JSON
     assert '_jn = split(s, _jp, "\\\\")' in src
     # смещения больше 2 ГиБ: mawk пишет 7.1983e+09 в строке и режет %d на 2^31; strtonum в mawk нет

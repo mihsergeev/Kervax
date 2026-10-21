@@ -44,7 +44,7 @@ from app import packages as packages_mod
 from app import netlinks
 from app import traffic as traffic_mod
 from app import usage as usage_mod
-from app import audit, backup_growth, bsrv_cleanup, custom_backups, docker_exposure, geoip, kube_coverage, manual_probe, open_ports, os_support
+from app import audit, backup_growth, backup_state, bsrv_cleanup, custom_backups, docker_exposure, geoip, kube_coverage, manual_probe, open_ports, os_support
 from app import dump_reason
 from app import oom as oom_mod
 from app import software as software_mod
@@ -304,6 +304,7 @@ def _out(
     o.alert_since = alert_since(server)
     o.docker_since = docker_since(server)
     o.backup_growth = backup_growth.jump(server, now)
+    o.backup_state = backup_state.view(server)
     o.bsrv_rotation = backup_rotation_items(server, now)
     # вкладка "Чистка": что не так с чисткой и готовые шаги под этот сервер и репозитории
     o.bsrv_cleanup = bsrv_cleanup.view(server, now)
@@ -2092,6 +2093,13 @@ async def backup_command(
         payload = {"name": body.unit, "since": body.since_min, "lines": body.lines, "prio": body.prio}
     elif body.mode in ("preview", "run", "restart", "reset"):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "этот режим - только у disk_fix и unit_fix")
+    elif body.action == "deprovision":
+        # "Удалить настройку": снять с клиента то, что ставит "Настроить бэкап" (юниты, env с
+        # паролем, скрипт, restic панели). Репозиторий на бэкап-сервере не трогается. Живой
+        # бэкап так не снести: кнопка только у упавшей настройки и у следов старого бэкапа
+        if backup_state.backup_alive((srv.last_report or {}).get("backup")):
+            raise HTTPException(status.HTTP_400_BAD_REQUEST,
+                                "на сервере работает бэкап - удалять его настройку отсюда нельзя")
     elif body.action in ("dump_setup", "dump_remove"):
         if not body.engine:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "не указан движок дампа")
@@ -2326,6 +2334,13 @@ def _job_runner(session_factory, job_id: int, user: str = "", what: str = ""):
                 job.status = status_
             if message is not None:
                 job.message = message
+            # итог настройки клиента - на сервер: упавшая выносит его в "Проблемы" раздела
+            # "Бэкапы" (app/backup_state.py), удачная это снимает
+            if what == "setup" and status_ in ("error", "done"):
+                srv = await s.get(Server, job.server_id)
+                if srv is not None:
+                    srv.backup_setup_err = None if status_ == "done" else {
+                        "ts": datetime.now(timezone.utc).isoformat(), "msg": (message or "")[:250], "job": job.id}
             await s.commit()
             srv_id = job.server_id
         if status_ == "error" and user:
@@ -2472,9 +2487,12 @@ async def backup_setup(
     client = await _get_or_404(server_id, session, user)
     bs = await _get_or_404(body.backup_server_id, session)
     crep = client.last_report or {}
-    bk = crep.get("backup") or {}
-    if bk.get("configured") or bk.get("metric_present"):
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "на этом сервере уже настроен бэкап")
+    # Отказываем только при ЖИВОМ бэкапе и без согласия переустановить поверх. Метрика,
+    # оставшаяся от снесенного бэкапа, и упавшая на полпути настройка - не бэкап: раньше
+    # форма отказывала по одной метрике, и такую ноду нельзя было настроить вовсе
+    if backup_state.backup_alive(crep.get("backup")) and not body.reinstall:
+        raise HTTPException(status.HTTP_409_CONFLICT,
+                            "на этом сервере уже есть бэкап - отметьте \"переустановить поверх\"")
     if not ((bs.last_report or {}).get("backup_server") or {}).get("present"):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "выбранный сервер не является бэкап-сервером")
     client_ip, server_ip = _pick_ip(client), _pick_ip(bs)
@@ -2488,7 +2506,8 @@ async def backup_setup(
     session.add(job)
     await session.commit()
     await audit.record(
-        session, user.username, "backup_setup", f"{name}→{bs.name} ({body.mode})", f"srv={server_id}"
+        session, user.username, "backup_setup",
+        f"{name}→{bs.name} ({body.mode}{', поверх' if body.reinstall else ''})", f"srv={server_id}"
     )
     # Порты берём у САМОГО бэкап-сервера (агент шлёт их в отчёте), а не константами:
     # панель разрешает развернуть rest-server на своём порту, и тогда репозиторий
@@ -3406,6 +3425,8 @@ async def agent_backup_result(
     c.result = out[-100_000:]
     c.status = "done" if body.ok else "error"
     c.done_at = datetime.now(timezone.utc)
+    if c.action == "deprovision" and body.ok:
+        server.backup_setup_err = None  # настройку сняли - упавшей больше нет
     if not body.ok:
         # параметры команды - в журнал до того, как payload сотрется (маска секретов внутри)
         panel_errors.command_failed(request.app.state.session_factory, "backup", c, server_name=server.name or "")

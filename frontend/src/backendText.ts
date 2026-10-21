@@ -8,6 +8,15 @@ type Rule = [RegExp, string]
 
 // Длинные фразы раньше коротких: "открыто в интернет" входит в "служебное открыто в интернет"
 const PHRASES: Rule[] = [
+  // настроен ли бэкап (app/backup_state.py) и форма настройки
+  [/осталась метрика старого бэкапа от (\S+), restic и таймера бэкапа нет/g,
+    'a metric of an old backup from $1 is left, there is no restic and no backup timer'],
+  [/осталась метрика старого бэкапа, restic и таймера бэкапа нет/g,
+    'a metric of an old backup is left, there is no restic and no backup timer'],
+  [/на этом сервере уже есть бэкап - отметьте "переустановить поверх"/g,
+    'this server already has a backup - tick "reinstall over it"'],
+  [/на сервере работает бэкап - удалять его настройку отсюда нельзя/g,
+    'a backup is working on this server - its setup cannot be removed from here'],
   // чистка бэкап-сервера (collector.rotation_stale_repos, rotation_overflow)
   [/сервер переименовали из (\S+): (\d+) (?:снапшот|снапшота|снапшотов) под старым именем, по (\S+)/g,
     'the server was renamed from $1: $2 snapshots under the old name, up to $3'],

@@ -611,6 +611,7 @@ function BackupModal({
   initialSec,
   onChanged,
   onClose,
+  onReinstall,
 }: {
   server: Server
   backup: BackupInfo
@@ -620,6 +621,7 @@ function BackupModal({
   initialSec?: string | null // из ссылки алерта или с главной: ?backup=id&sec=coverage
   onChanged: () => void
   onClose: () => void
+  onReinstall?: () => void // "Настроить бэкап" поверх существующего (форма спросит согласие)
 }) {
   const { isAdmin } = useAuth()
   const { t } = useI18n()
@@ -700,7 +702,10 @@ function BackupModal({
   const add = (sec: string, x: SecItem) => (items[sec] ??= []).push(x)
   if (s.online) {
     if (b.metric_present && b.success === 0)
-      add('runs', { level: 2, text: t('бэкап завершился с ошибкой'), since: s.alert_since?.backup_failed })
+      add('runs', {
+        level: 2, since: s.alert_since?.backup_failed,
+        text: s.backup_state?.reason ? t('бэкап завершился с ошибкой: {why}', { why: s.backup_state.reason }) : t('бэкап завершился с ошибкой'),
+      })
     else if (b.metric_present && b.last_backup_ts && Date.now() / 1000 - b.last_backup_ts > STALE_SECONDS)
       add('runs', { level: 1, text: t('бэкап не свежий: последний {ago}', { ago: fmtAgo(b.last_backup_ts) }), since: s.alert_since?.backup_stale })
     const g = s.backup_growth
@@ -981,6 +986,12 @@ function BackupModal({
                   </div>
                 )}
                 {!b.manageable && <EnableManage />}
+                {canManage && onReinstall && (
+                  <div className="backup-manage-actions">
+                    <button className="ghost" onClick={onReinstall}>{t('Переустановить бэкап')}</button>
+                    <span className="muted small">{t('настройка заново поверх этой: бэкап-сервер, пути, расписание')}</span>
+                  </div>
+                )}
               </div>
             )}
           </div>
@@ -2686,13 +2697,14 @@ function NodeCoverageModal({ server: s, canManage, onChanged, onClose }: {
   )
 }
 
-function NoBackupRow({ server: s, canAct, onSetup, onDeploy, onCoverage, onChanged }: {
+function NoBackupRow({ server: s, canAct, onSetup, onDeploy, onCoverage, onChanged, focus }: {
   server: Server; canAct: boolean; onSetup: () => void; onDeploy: () => void
-  onCoverage?: () => void; onChanged: () => void
+  onCoverage?: () => void; onChanged: () => void; focus?: boolean
 }) {
   const { t } = useI18n()
   const [busy, setBusy] = useState(false)
   const optedOut = s.backup_not_required
+  const rowRef = useFocusRow(focus)
   const toggle = async () => {
     setBusy(true)
     try {
@@ -2703,7 +2715,7 @@ function NoBackupRow({ server: s, canAct, onSetup, onDeploy, onCoverage, onChang
     }
   }
   return (
-    <div className="loc-res hs-host hs-nb">
+    <div className={`loc-res hs-host hs-nb${focus ? ' hs-focus' : ''}`} ref={rowRef}>
       <span className={`lk-dot${optedOut ? '' : ' lk-dot-bad'}`} />
       <div className="hs-host-main">
         <div className="hs-host-name">
@@ -2714,6 +2726,7 @@ function NoBackupRow({ server: s, canAct, onSetup, onDeploy, onCoverage, onChang
           <OwnBackupsChip server={s} />
         </div>
         <div className="mono muted small">{serverAddr(s)}</div>
+        {s.backup_state?.traces && <div className="muted small">{s.backup_state.traces}</div>}
       </div>
       <div className="nobackup-actions">
         {canAct && !optedOut && (
@@ -2738,6 +2751,79 @@ function NoBackupRow({ server: s, canAct, onSetup, onDeploy, onCoverage, onChang
 
 function serverAddr(s: Server): string {
   return s.agent_ip || s.hostname || ''
+}
+
+// строка, на которую ведет ссылка с главной (?backup=id у ноды без бэкапа): прокрутить к ней
+function useFocusRow(focus?: boolean) {
+  const ref = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    if (focus) ref.current?.scrollIntoView({ block: 'center', behavior: 'smooth' })
+  }, [focus])
+  return ref
+}
+
+// "Удалить настройку" умеют агент 2.45 и helper backup-setup 0.39
+const DEPROV_AGENT = '2.45'
+const DEPROV_HELPER = '0.39'
+
+// Настройка бэкапа из панели упала на полпути: бэкапа нет, а на клиенте могли остаться restic,
+// env с паролем и юниты. Причина - что ответила настройка; переделать поверх или снять то, что
+// она успела поставить (репозиторий на бэкап-сервере не трогается)
+function SetupProblemRow({ server: s, canAct, onRedo, onChanged, focus }: {
+  server: Server; canAct: boolean; onRedo: () => void; onChanged: () => void; focus?: boolean
+}) {
+  const { t } = useI18n()
+  const [busy, setBusy] = useState(false)
+  const [err, setErr] = useState<string | null>(null)
+  const rowRef = useFocusRow(focus)
+  const st = s.backup_state
+  const helper = s.last_report?.setup_versions?.['backup-setup']
+  const can = verAtLeast(s.agent_version, DEPROV_AGENT) && verAtLeast(helper != null ? String(helper) : '', DEPROV_HELPER)
+  const remove = async () => {
+    if (!window.confirm(t('Снять с {name} то, что успела поставить настройка бэкапа (юниты, env с паролем, скрипт, restic панели)? Репозиторий на бэкап-сервере останется.', { name: s.name }))) return
+    setBusy(true)
+    setErr(null)
+    try {
+      const c = await backupCommand(s.id, { action: 'deprovision' })
+      let last = c
+      // агент за ретранслятором или DPI забирает команду не сразу - ждем до полутора минут
+      for (let i = 0; i < 60 && last.status !== 'done' && last.status !== 'error'; i++) {
+        await new Promise((r) => setTimeout(r, 1500))
+        last = await backupCommandStatus(s.id, c.id)
+      }
+      if (last.status !== 'done') setErr(last.result || t('не удалось'))
+      onChanged()
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : t('ошибка'))
+    } finally {
+      setBusy(false)
+    }
+  }
+  return (
+    <div className={`loc-res hs-host hs-nb${focus ? ' hs-focus' : ''}`} ref={rowRef}>
+      <span className="lk-dot lk-dot-bad" />
+      <div className="hs-host-main">
+        <div className="hs-host-name">
+          <CountryFlag code={s.country} />
+          {s.name}
+          {s.group_name && <span className="type-chip group-chip">{s.group_name}</span>}
+          {st?.since && <span className="muted small">{fmtRel(st.since)}</span>}
+        </div>
+        <div className="mono muted small">{serverAddr(s)}</div>
+        <div className="small t-down">{t('настройка бэкапа не прошла: {why}', { why: st?.reason || t('без причины') })}</div>
+        {err && <div className="form-error small">{err}</div>}
+      </div>
+      {canAct && (
+        <div className="nobackup-actions">
+          <button disabled={busy} onClick={onRedo}>{t('Переделать настройку')}</button>
+          <button className="ghost" disabled={busy || !can} onClick={remove}
+            title={can ? undefined : t('нужны агент {a} и helper backup-setup {h} - обновите их на сервере', { a: DEPROV_AGENT, h: DEPROV_HELPER })}>
+            {busy ? '…' : t('Удалить настройку')}
+          </button>
+        </div>
+      )}
+    </div>
+  )
 }
 
 // дефолтный exclude-список (синхронен с бэкендом) — бэкапим «/» кроме мусора.
@@ -2883,6 +2969,9 @@ function BackupSetupModal({ server: s, backupServers, onClose, onDone }: {
   const [schedule, setSchedule] = useState('23:00')
   const [tls, setTls] = useState(true)
   const [ret, setRet] = useState({ last: 3, daily: 7, weekly: 4, monthly: 6 })
+  // на ноде уже есть бэкап (то же правило, что у раздела): настройка только поверх, с согласия
+  const hasBackup = backupAlive(s.last_report?.backup)
+  const [reinstall, setReinstall] = useState(false)
   const [job, setJob] = useState<BackupSetupJob | null>(null)
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState<string | null>(null)
@@ -2900,11 +2989,13 @@ function BackupSetupModal({ server: s, backupServers, onClose, onDone }: {
     if (!/^([01][0-9]|2[0-3]):[0-5][0-9]$/.test(schedule)) { setErr(t('время в формате ЧЧ:ММ')); return }
     const list = paths.split('\n').map((x) => x.trim()).filter(Boolean)
     if (mode === 'include' && list.length === 0) { setErr(t('для режима «только» укажите пути')); return }
+    if (hasBackup && !reinstall) { setErr(t('на сервере уже есть бэкап - отметьте "переустановить поверх"')); return }
     setBusy(true)
     try {
       const j = await backupSetup(s.id, {
         backup_server_id: bsId, mode, paths: list, schedule, tls,
         keep_last: ret.last, keep_daily: ret.daily, keep_weekly: ret.weekly, keep_monthly: ret.monthly,
+        reinstall: hasBackup && reinstall,
       })
       setJob(j)
       let cur = j
@@ -2949,6 +3040,23 @@ function BackupSetupModal({ server: s, backupServers, onClose, onDone }: {
           </div>
         ) : !job ? (
           <div className="backup-setup-form">
+            {s.backup_state?.state === 'partial' && (
+              <div className="card muted small">
+                {t('Прошлая настройка не прошла: {why}. Настройка поверх перепишет то, что она успела поставить.', { why: s.backup_state.reason || t('без причины') })}
+              </div>
+            )}
+            {!hasBackup && s.backup_state?.traces && (
+              <div className="card muted small">{t('{traces} - настройка поставит бэкап заново.', { traces: s.backup_state.traces })}</div>
+            )}
+            {hasBackup && (
+              <div className="card small">
+                <div>{t('На сервере уже есть бэкап. Настройка поверх перепишет его на клиенте: расписание, пути, пароль и адрес репозитория. Репозиторий и история на бэкап-сервере останутся, если выбран тот же сервер.')}</div>
+                <label className="nobackup-check">
+                  <input type="checkbox" checked={reinstall} onChange={(e) => setReinstall(e.target.checked)} />
+                  {t('переустановить поверх')}
+                </label>
+              </div>
+            )}
             <label className="backup-manage-label">{t('Бэкап-сервер')}</label>
             <select className="field-inp" value={bsId} onChange={(e) => setBsId(Number(e.target.value))}>
               {backupServers.map((b) => <option key={b.id} value={b.id}>{b.name}</option>)}
@@ -2988,7 +3096,7 @@ function BackupSetupModal({ server: s, backupServers, onClose, onDone }: {
             </label>
             {err && <div className="form-error small">{err}</div>}
             <div className="backup-manage-actions">
-              <button disabled={busy} onClick={run}>{busy ? '…' : t('▶ Настроить и запустить')}</button>
+              <button disabled={busy || (hasBackup && !reinstall)} onClick={run}>{busy ? '…' : hasBackup ? t('▶ Переустановить и запустить') : t('▶ Настроить и запустить')}</button>
             </div>
             <div className="muted small">
               {t('Панель создаст репозиторий на бэкап-сервере (htpasswd/init/prune) и настроит restic-бэкап на клиенте. Данные шифруются на клиенте. До ~2 мин.')}
@@ -3149,8 +3257,11 @@ export function BackupsPage({
       !backupAlive(s.last_report?.backup),
   )
   // свой файловый бэкап (restic/borg/rsync без панели): нода не «без бэкапа», за ним следим
-  const ownOnly = noPanelBackup.filter(hasOwnFileBackup).sort((a, b) => a.name.localeCompare(b.name))
-  const noBackupAll = noPanelBackup.filter((s) => !hasOwnFileBackup(s))
+  // упавшая на полпути настройка из панели (backup_state partial): своим блоком "Проблемы" с
+  // причиной и кнопками, а не в "Без бэкапа" - там казалось, что никто и не пробовал
+  const setupBad = noPanelBackup.filter((s) => s.backup_state?.state === 'partial').sort((a, b) => a.name.localeCompare(b.name))
+  const ownOnly = noPanelBackup.filter((s) => s.backup_state?.state !== 'partial' && hasOwnFileBackup(s)).sort((a, b) => a.name.localeCompare(b.name))
+  const noBackupAll = noPanelBackup.filter((s) => s.backup_state?.state !== 'partial' && !hasOwnFileBackup(s))
   // требуют бэкапа (галка не стоит) — наверх, красным; «не требуется» — в отдельный подвал внизу
   const noBackupReq = noBackupAll.filter((s) => !s.backup_not_required).sort((a, b) => a.name.localeCompare(b.name))
   const noBackupOpt = noBackupAll.filter((s) => s.backup_not_required).sort((a, b) => a.name.localeCompare(b.name))
@@ -3188,9 +3299,10 @@ export function BackupsPage({
     .sort((a, b) => a.s.name.localeCompare(b.s.name))
   const srvHostsView = showSec('servers') ? srvHosts.filter(({ s }) => match(s)) : []
   const ownOnlyView = showSec('nobackup') ? ownOnly.filter(match) : []
+  const setupBadView = showSec('nobackup') ? setupBad.filter(match) : []
   const noBackupReqView = showSec('nobackup') ? noBackupReq.filter(match) : []
   const noBackupOptView = showSec('nobackup') ? noBackupOpt.filter(match) : []
-  const nothing = hosts.length + srvHostsView.length + ownOnlyView.length + noBackupReqView.length + noBackupOptView.length === 0
+  const nothing = hosts.length + srvHostsView.length + ownOnlyView.length + noBackupReqView.length + noBackupOptView.length + setupBadView.length === 0
   // нажатая плитка: подпись чипа над списком и что сказать, если под нее ничего не попало
   const filterLabel: Record<BFilter, string> = {
     clients: t('клиенты'), nobackup: t('без бэкапа'), servers: t('бэкап-серверы'),
@@ -3219,14 +3331,17 @@ export function BackupsPage({
   const open = allHosts.find(({ s }) => s.id === openId)
   // нода не клиент бэкапа (без бэкапа / «не требуется») — открываем ей модалку покрытия,
   // иначе клик из «Требует действий» упирался бы в пустоту
+  const [focusId, setFocusId] = useState<number | null>(null)
   useEffect(() => {
     if (openId == null || open) return
     const srv = (servers ?? []).find((x) => x.id === openId)
     if (!srv) return
+    const row = setupBad.some((x) => x.id === srv.id) || noBackupAll.some((x) => x.id === srv.id)
     if (srv.last_report?.backup_server?.present) setOpenSrvId(openId)
+    else if (row && linkSec.sec !== 'coverage') setFocusId(srv.id)
     else if ((srv.backup_audit?.length ?? 0) > 0) setCovId(srv.id)
     setOpenId(null)
-  }, [openId, open, servers])
+  }, [openId, open, servers, setupBad, noBackupAll, linkSec.sec])
 
   return (
     <div>
@@ -3251,7 +3366,7 @@ export function BackupsPage({
           )}
         </div>
       </div>
-      {servers && allHosts.length + srvHosts.length + noBackupAll.length + ownOnly.length > 0 && (
+      {servers && allHosts.length + srvHosts.length + noBackupAll.length + ownOnly.length + setupBad.length > 0 && (
         <div className="net-tiles hs-tiles">
           <NetTile
             label={t('Клиенты')}
@@ -3266,13 +3381,14 @@ export function BackupsPage({
           />
           <NetTile
             label={t('Без бэкапа')}
-            value={String(noBackupReq.length)}
+            value={String(noBackupReq.length + setupBad.length)}
             sub={subOf(
+              setupBad.length > 0 && t('настройка не прошла: {n}', { n: setupBad.length }),
               ownOnly.length > 0 && t('свой бэкап: {n}', { n: ownOnly.length }),
               ownOnlyBadN > 0 && t('с проблемой: {n}', { n: ownOnlyBadN }),
               noBackupOpt.length > 0 && t('не требуется: {n}', { n: noBackupOpt.length }),
             ) || t('у всех нод есть')}
-            tone={noBackupReq.length || ownOnlyBadN ? 'bad' : 'ok'}
+            tone={noBackupReq.length || setupBad.length || ownOnlyBadN ? 'bad' : 'ok'}
             {...tileProps('nobackup')}
           />
           {srvHosts.length > 0 && (
@@ -3367,6 +3483,22 @@ export function BackupsPage({
             </div>
           </div>
         )}
+        {setupBadView.length > 0 && (
+          <div className="chart-card net-card net-card-wide">
+            <div className="net-head">
+              <div className="chart-cap net-cap">
+                {t('Проблемы')}
+                <span className="net-n net-n-bad">{setupBadView.length}</span>
+              </div>
+            </div>
+            <div className="loc-results">
+              {setupBadView.map((s) => (
+                <SetupProblemRow key={s.id} server={s} canAct={!isViewer} focus={focusId === s.id}
+                  onRedo={() => setSetupSrv(s)} onChanged={load} />
+              ))}
+            </div>
+          </div>
+        )}
         {noBackupReqView.length > 0 && (
           <div className="chart-card net-card net-card-wide">
             <div className="net-head">
@@ -3377,7 +3509,7 @@ export function BackupsPage({
             </div>
             <div className="loc-results">
               {noBackupReqView.map((s) => (
-                <NoBackupRow key={s.id} server={s} canAct={!isViewer}
+                <NoBackupRow key={s.id} server={s} canAct={!isViewer} focus={focusId === s.id}
                   onSetup={() => setSetupSrv(s)} onDeploy={() => setDeploySrv(s)} onChanged={load} />
               ))}
             </div>
@@ -3516,6 +3648,11 @@ export function BackupsPage({
           onClose={() => {
             setOpenId(null)
             setLinkSec({ id: null, sec: null })
+          }}
+          onReinstall={() => {
+            setOpenId(null)
+            setLinkSec({ id: null, sec: null })
+            setSetupSrv(open.s)
           }}
         />
       )}

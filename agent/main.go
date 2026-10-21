@@ -44,7 +44,7 @@ import (
 	"time"
 )
 
-const version = "2.44"
+const version = "2.45"
 
 // Публичный ключ для проверки подписи релизов агента (Ed25519, base64).
 // ПУСТО по умолчанию → самообновление ВЫКЛЮЧЕНО (агент никогда не заменяет себя).
@@ -6690,6 +6690,10 @@ func runBackupCommand(panelURL, token string, cmd backupCommand) {
 		lines = []string{"action=restic_update"}
 	case "get_creds":
 		lines = []string{"action=get_creds"}
+	case "deprovision":
+		// «удалить настройку»: helper снимает с клиента то, что ставит провижининг
+		// (юниты, env, скрипт, restic панели); репозиторий на бэкап-сервере не трогает
+		lines = []string{"action=deprovision"}
 	case "dump_setup", "dump_remove":
 		// движок из белого списка, имя контейнера — только безопасные символы
 		// список ДОЛЖЕН совпадать с _DUMP_ENGINE панели и разбором в backup-setup.sh:

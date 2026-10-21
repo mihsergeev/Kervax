@@ -557,8 +557,13 @@ function backupProblems(servers: Server[], t: T): ProbItem[] {
   for (const s of servers) {
     if (!s.online) continue
     const b = s.last_report?.backup
-    if (b?.present && b.metric_present) {
-      if (b.success === 0) out.push({ key: `b-fail-${s.id}`, id: s.id, name: s.name, cc: s.country, down: true, sec: 'runs', since: s.alert_since?.backup_failed, text: t('{name}: бэкап завершился с ошибкой', { name: s.name }) })
+    // настроен ли бэкап - то же правило, что у раздела "Бэкапы" и формы (backupAlive): метрика,
+    // оставшаяся от снесенного бэкапа, не "бэкап упал", а "бэкап не настроен"
+    const alive = backupAlive(b)
+    const st = s.backup_state
+    if (alive && b?.metric_present) {
+      if (b.success === 0) out.push({ key: `b-fail-${s.id}`, id: s.id, name: s.name, cc: s.country, down: true, sec: 'runs', since: s.alert_since?.backup_failed,
+        text: st?.reason ? t('{name}: бэкап завершился с ошибкой - {why}', { name: s.name, why: st.reason }) : t('{name}: бэкап завершился с ошибкой', { name: s.name }) })
       else if (b.last_backup_ts && Date.now() / 1000 - b.last_backup_ts > 2 * 86400) out.push({ key: `b-stale-${s.id}`, id: s.id, name: s.name, cc: s.country, down: false, sec: 'runs', since: s.alert_since?.backup_stale, text: t('{name}: бэкап не свежий', { name: s.name }) })
     }
     const bs = s.last_report?.backup_server
@@ -576,9 +581,14 @@ function backupProblems(servers: Server[], t: T): ProbItem[] {
       out.push({ key: `b-growth-${s.id}`, id: s.id, name: s.name, cc: s.country, down: false, sec: 'runs',
         since: new Date(g.ts * 1000).toISOString(), text: `${s.name}: ${g.text}` })
     const ownFiles = (s.custom_backups ?? []).some((j) => j.files && !j.ignored)
-    // сервер без настроенного бэкапа (и не помеченный «не требуется», и не сам бэкап-сервер)
-    if (!bs?.present && !(b?.configured || b?.metric_present) && !s.backup_not_required && !ownFiles) {
-      out.push({ key: `b-none-${s.id}`, id: s.id, name: s.name, cc: s.country, down: false, since: s.alert_since?.backup_missing, text: t('{name}: бэкап не настроен', { name: s.name }) })
+    // настройка из панели упала на полпути: в "Бэкапах" нода в "Проблемах" с кнопками
+    if (!bs?.present && !alive && st?.state === 'partial') {
+      out.push({ key: `b-part-${s.id}`, id: s.id, name: s.name, cc: s.country, down: true, since: st.since,
+        text: t('{name}: настройка бэкапа не прошла - {why}', { name: s.name, why: st.reason || t('без причины') }) })
+    } else if (!bs?.present && !alive && !s.backup_not_required && !ownFiles) {
+      // сервер без настроенного бэкапа (и не помеченный «не требуется», и не сам бэкап-сервер)
+      out.push({ key: `b-none-${s.id}`, id: s.id, name: s.name, cc: s.country, down: false, since: s.alert_since?.backup_missing,
+        text: st?.traces ? t('{name}: бэкап не настроен ({traces})', { name: s.name, traces: st.traces }) : t('{name}: бэкап не настроен', { name: s.name }) })
     }
     if (bs?.present) {
       if (!bs.running) out.push({ key: `bs-stop-${s.id}`, id: s.id, name: s.name, cc: s.country, down: true, srv: true, sec: 'server', text: t('{name}: rest-server остановлен', { name: s.name }) })

@@ -1564,6 +1564,9 @@ class ServerOut(BaseModel):
     docker_since: dict[str, str] = Field(default_factory=dict)
     # последний прогон бэкапа добавил в разы больше обычного: {level, text, st, usual, ts}
     backup_growth: dict | None = None
+    # настроен ли бэкап (app/backup_state.py): {state: ok|partial|none, reason, since, traces} -
+    # одно правило для главной, раздела "Бэкапы" и формы настройки
+    backup_state: dict | None = None
     # начало uid пода -> ns/имя: агент воркера без доступа к kube-api знает поды по uid
     pod_names: dict[str, str] = Field(default_factory=dict)
     # ноды кластера без агента панели; считает kube_coverage по ВСЕМ серверам панели
@@ -1943,7 +1946,7 @@ class BackupCommandIn(BaseModel):
     Только белый список: set_paths (include/exclude), set_schedule, run_now."""
 
     action: str = Field(pattern="^(set_paths|set_schedule|run_now|dump_setup|dump_remove|restic_update|update_image|timesync|disk_fix|unit_fix"
-                        "|unit_journal)$")
+                        "|unit_journal|deprovision)$")
     # include/exclude - для путей бэкапа; preview/run - для disk_fix; restart/reset - для unit_fix
     mode: str = Field(default="exclude", pattern="^(include|exclude|preview|run|restart|reset)$")
     paths: list[str] = Field(default_factory=list, max_length=200)
@@ -2026,6 +2029,9 @@ class BackupSetupIn(BaseModel):
     keep_weekly: int = Field(default=4, ge=1, le=3650)
     keep_monthly: int = Field(default=6, ge=1, le=3650)
     tls: bool = True  # True → self-signed caddy :64101 + --cacert; False → HTTP как в ансибл-роли
+    # на ноде уже есть бэкап: переписать его настройку на клиенте (репозиторий и история на
+    # бэкап-сервере остаются, если он тот же)
+    reinstall: bool = False
 
     @field_validator("paths")
     @classmethod

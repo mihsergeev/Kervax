@@ -1089,7 +1089,9 @@ async def test_backup_alerts(tmp_path, monkeypatch):
 
     def rep(success, ts):
         return {"uptime_seconds": 100,
-                "backup": {"present": True, "metric_present": True, "success": success, "last_backup_ts": ts}}
+                # живой бэкап: таймер есть (одна метрика без restic и таймера - следы старого бэкапа)
+                "backup": {"present": True, "configured": True, "restic_found": True, "metric_present": True,
+                           "success": success, "last_backup_ts": ts}}
 
     async with factory() as s:
         s.add(Server(

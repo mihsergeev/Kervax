@@ -755,6 +755,10 @@ class Server(Base):
     # по умолчанию у каждого сервера ДОЛЖЕН быть бэкап; если не настроен — алерт.
     # Флаг «бэкап не требуется» (галочка в панели) снимает этот алерт для сервера.
     backup_not_required: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
+    # последняя настройка бэкапа из панели упала: {ts, msg, job}. Пока бэкапа нет, нода в
+    # "Проблемах" раздела "Бэкапы", а не в "Без бэкапа" (app/backup_state.py). Снимается удачной
+    # настройкой или "удалить настройку"
+    backup_setup_err: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     # «дампы СУБД настроены отдельно» — снимает пункт аудита с главной
     db_dumps_ok: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
     # приглушённые находки аудита покрытия — ключи вида "db:RabbitMQ", "kube_vol:/mnt/x".
