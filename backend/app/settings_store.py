@@ -286,6 +286,8 @@ SITE_ALERT_KINDS: dict[str, tuple[str, str]] = {
     "ssl": ("SSL-сертификат", "🔐 {name} — {message}"),
     "domain": ("Домен", "🌐 {name} — {message}"),
     "locpart": ("Частичная доступность (локации)", "🌍 {name}\n{message}"),
+    # app/tamper.py: страница при 200 изменилась, подмена для Googlebot, чужой домен, дыра в версии
+    "tamper": ("Признаки взлома", "🕵️ {name} — {message}"),
 }
 
 # Прежние (до-ребрендовые/«Kervax:») дефолты сайтовых правил. Если в БД сохранён

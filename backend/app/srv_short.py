@@ -237,7 +237,7 @@ def _days_words(text: str) -> str:
 
 
 SITE_RECOVERY = {"recovery": "снова отвечает", "locrec": "открывается отовсюду",
-                 "flakyrec": "снова отвечает стабильно"}
+                 "flakyrec": "снова отвечает стабильно", "tamperrec": "признаков взлома больше нет"}
 
 
 def site(kind: str, status: str, msg: str) -> tuple[str, str, list[str]] | str:
@@ -259,6 +259,10 @@ def site(kind: str, status: str, msg: str) -> tuple[str, str, list[str]] | str:
         if status == "degraded":
             return "⚠️🌐", "Тормозит", facts
         return "🔴🌐", "Не отвечает", facts
+    if kind == "tamper":
+        # app/tamper.alert_text: что случилось и строки конкретики через перевод строки
+        lines = [x for x in msg.split("\n") if x.strip()]
+        return "🚨🕵️", lines[0] if lines else "Похоже на взлом", lines[1:3]
     if kind == "flaky":
         last = msg.partition("последняя ошибка: ")[2]
         return "🟠🌐", "Отвечает через раз", [_GO_ERR.sub("", last)] if last else []

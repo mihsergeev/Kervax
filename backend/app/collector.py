@@ -53,6 +53,7 @@ from app import disk_wear
 from app import disk_mute
 from app import fill_alert
 from app import software as software_mod
+from app import tamper as tamper_mod
 from app import parents as parents_mod
 from app import maint
 from app import tg_bot
@@ -293,7 +294,7 @@ def _display_host(target: str, ctype: str, port: int) -> str:
 
 _ALERT_ICON = {
     "recovery": "✅", "locrec": "✅", "ssl": "🔐", "domain": "🌐", "locpart": "🌍",
-    "flaky": "🟠", "flakyrec": "✅",
+    "flaky": "🟠", "flakyrec": "✅", "tamper": "🚨", "tamperrec": "✅",
 }
 
 
@@ -993,14 +994,15 @@ async def run_due_checks(
 _SITE_RULE_KIND = {
     "bad": "down", "recovery": "recovery", "ssl": "ssl",
     "domain": "domain", "locpart": "locpart", "locrec": "locpart",
-    "flaky": "flaky", "flakyrec": "flaky",
+    "flaky": "flaky", "flakyrec": "flaky", "tamper": "tamper", "tamperrec": "tamper",
 }
 # раздел карточки монитора по алерту: сроки - в "Сертификат и домен", частичная доступность - в
 # "Локации"; лежит и через раз - на сводку, там строка что и где оборвалось
-_SITE_SEC = {"ssl": "exp", "domain": "exp", "locpart": "loc", "locrec": "loc"}
+_SITE_SEC = {"ssl": "exp", "domain": "exp", "locpart": "loc", "locrec": "loc",
+             "tamper": "tamper", "tamperrec": "tamper"}
 # История алертов: отбой - под видом самой беды, чтобы фильтр показывал ее целиком
-_SITE_HISTORY_KIND = {"bad": "down", "recovery": "down"}
-_SITE_RECOVERY = frozenset({"recovery", "locrec", "flakyrec"})
+_SITE_HISTORY_KIND = {"bad": "down", "recovery": "down", "tamperrec": "tamper"}
+_SITE_RECOVERY = frozenset({"recovery", "locrec", "flakyrec", "tamperrec"})
 
 
 def _site_scope_ok(rule: dict, check_id: int | None, group: str) -> bool:
@@ -1292,6 +1294,36 @@ async def _send_alerts(
                 if row is not None:
                     setattr(row, attr, value)
         await session.commit()
+
+
+async def tamper_alerts(session_factory, settings: Settings, now: datetime) -> None:
+    """Признаки взлома (app/tamper.py): похоже на взлом - алерт, новый сильный признак - еще
+    один, признаков не осталось - отбой. Один слабый признак - только строка на главной."""
+    pending: list[Pending] = []
+    async with session_factory() as session:
+        rows = (await session.execute(
+            select(Check.id, Check.name, Check.enabled, Check.tamper_state, Check.tamper_sent)
+            .where(Check.type == "http"))).all()
+        quiet = False
+        for cid, name, enabled, st, sent in rows:
+            got = tamper_mod.alert_due(st, sent) if enabled else None
+            if got is None:
+                continue
+            kind, keep = got
+            if not kind:
+                # спустилось до одного слабого признака: молча забываем отправленное
+                row = await session.get(Check, cid)
+                if row is not None:
+                    row.tamper_sent = keep or None
+                    quiet = True
+                continue
+            msg = tamper_mod.alert_text(st) if kind == "tamper" else ""
+            pending.append(Pending(kind, name, "down" if kind == "tamper" else "up", msg, None, cid,
+                                   ("tamper_sent", keep or None)))
+        if quiet:
+            await session.commit()
+    if pending:
+        await _send_alerts(session_factory, settings, pending, now)
 
 
 async def run_location_probes(
@@ -7708,6 +7740,11 @@ async def collector_loop(
             # история износа SSD для прогноза до 90% (раз в час)
             await stage("износ дисков", disk_wear.refresh(
                 session_factory, datetime.now(timezone.utc), disk_health_block))
+            # признаки взлома сайтов: разбор главной фоном раз в час, алерты - по готовому
+            await stage("признаки взлома", tamper_mod.start_scan(
+                session_factory, datetime.now(timezone.utc)))
+            await stage("алерты признаков взлома", tamper_alerts(
+                session_factory, settings, datetime.now(timezone.utc)))
             # версии без поддержки: пакеты сторонних репозиториев из списков пакетов (раз в час)
             await stage("версии ПО", software_mod.refresh(session_factory, datetime.now(timezone.utc)))
             # базы уязвимостей раз в сутки, загрузка и разбор фоном

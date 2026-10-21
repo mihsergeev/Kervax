@@ -43,6 +43,7 @@ import { useUrlParam } from './deeplink'
 import { fmtRel } from './ServersPage'
 import { fmtDur } from './units'
 import { knownActive } from './serverUtils'
+import { TamperSigns } from './TamperSigns'
 
 type Props = {
   check: Check
@@ -130,6 +131,7 @@ const CHECK_SECTIONS: SecDef[] = [
   { id: 'loc', label: 'Локации', group: 'Проверка' },
   { id: 'paths', label: 'Пути и адреса', group: 'Проверка' },
   { id: 'exp', label: 'Сертификат и домен', group: 'Проверка' },
+  { id: 'tamper', label: 'Признаки взлома', group: 'Проверка' },
   { id: 'inc', label: 'Инциденты', group: 'История' },
   { id: 'log', label: 'Журнал проверок', group: 'История' },
   { id: 'deps', label: 'Зависимости', group: 'Связи' },
@@ -415,6 +417,8 @@ export function CheckDetail({ check, groups, initialSec, onClose, onSaved, onRun
     // вечным "нет данных"
     paths: check.type === 'http' && ((check.extra_paths ?? []).length > 0 || check.check_all_ips),
     exp: check.type === 'http' && (check.check_ssl || check.check_domain),
+    // главную разбирает панель (app/tamper.py): сайту за белым списком ее не открыть
+    tamper: check.type === 'http' && !check.probe_local,
     inc: true,
     log: true,
     deps: true,
@@ -446,6 +450,11 @@ export function CheckDetail({ check, groups, initialSec, onClose, onSaved, onRun
   if (shown.exp && check.check_domain && check.domain_days != null && check.domain_days <= maxWarn(check.domain_warn_days))
     add('exp', { level: check.domain_days <= 3 ? 2 : 1, text: `${t('Домен')}: ${expiryText(check.domain_days, t)}` })
 
+  // признаки взлома: похоже на взлом - красным, один слабый - желтым, как строка на главной
+  const tamper = check.tamper
+  if (shown.tamper && check.enabled && tamper && tamper.level !== 'none')
+    add('tamper', { level: tamper.level === 'hack' ? 2 : 1, text: tamper.summary, since: tamper.since })
+
   const lat = (points ?? []).map((p) => p.latency_ms).filter((x): x is number => x != null).sort((a, b) => a - b)
   const usual = lat.length >= 5 ? lat[Math.floor(lat.length / 2)] : null
   const lastInc = incidents[0]
@@ -467,6 +476,9 @@ export function CheckDetail({ check, groups, initialSec, onClose, onSaved, onRun
       check.check_ssl && check.ssl_days != null && `${t('сертификат')} ${expiryText(check.ssl_days, t)}`,
       check.check_domain && check.domain_days != null && `${t('домен')} ${expiryText(check.domain_days, t)}`,
     ) || t('нет данных'),
+    tamper: tamper
+      ? tamper.err && !tamper.last_at ? t('разобрать не удалось: {err}', { err: tamper.err }) : t('признаков нет')
+      : t('еще не разбирали'),
     inc: incFresh.length
       ? t('за {w}: {n}, последний {t}', { w: winLabel, n: incFresh.length, t: fmtDateTime(incFresh[0].started_at) })
       : lastInc
@@ -766,6 +778,12 @@ export function CheckDetail({ check, groups, initialSec, onClose, onSaved, onRun
               <div className="srv-sec">
                 {statusBar}
                 <PushInfo check={check} canEdit={!isViewer} />
+              </div>
+            )}
+
+            {cur.id === 'tamper' && (
+              <div className="srv-sec">
+                <TamperSigns check={check} canEdit={!isViewer} onChanged={() => onSaved?.()} />
               </div>
             )}
 

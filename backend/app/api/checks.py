@@ -1102,6 +1102,25 @@ async def dns_accept(
                     run_latency_ms=outcome.latency_ms, run_at=now, run_source="panel")
 
 
+_TAMPER_KEYS = frozenset({"empty", "title", "bot", "dom", "old", "all"})
+
+
+@router.post("/{check_id}/tamper-accept")
+async def tamper_accept(check_id: int, body: dict, user: CurrentUser, session: SessionDep) -> dict:
+    """Кнопки признаков взлома (app/tamper.py): "это наше" - домен в базу, "новая норма" -
+    страница в базу, "отложить" - версия с дырой на 7 дней, all - Разобрались, все текущее
+    как норма. Отбой придет следующим тиком, если признаков не осталось."""
+    check = await _get_or_404(check_id, session, user)
+    key, arg = str(body.get("key") or ""), str(body.get("arg") or "")
+    if key not in _TAMPER_KEYS or not check.tamper_state:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Принимать нечего")
+    from app import tamper as tamper_mod
+    check.tamper_state = tamper_mod.accept(check.tamper_state, key, arg, datetime.now(timezone.utc))
+    await session.commit()
+    await audit.record(session, user.username, "tamper_accept", check.name, f"{key} {arg}".strip()[:500])
+    return {"tamper": check.tamper}
+
+
 def _one_probe_source(check: Check) -> None:
     """Проверять можно ИЛИ изнутри сервера, ИЛИ из локаций, но не одновременно.
 
@@ -1155,6 +1174,10 @@ async def update_check(
     _push_defaults(check)
     _dns_defaults(check)
     await _parent_check(check, session, user)
+    if check.target != old_dns[0] and check.tamper_state:
+        # другой адрес - другая страница: база признаков взлома от старой не годится
+        check.tamper_state = None
+        check.tamper_sent = None
     if check.type == "dns" and (check.target, check.dns_type, check.dns_server) != old_dns:
         # спрашиваем другое - старый запомненный ответ к нему не относится
         check.dns_baseline = None

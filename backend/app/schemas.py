@@ -678,6 +678,8 @@ class CheckOut(BaseModel):
     dns_server: str = ""
     dns_baseline: list[str] | None = None
     dns_last: list[str] | None = None
+    # признаки взлома (app/tamper.py, Check.tamper): level none|one|hack, signs, summary
+    tamper: dict | None = None
     parent_mode: str = "auto"
     parent_server_id: int | None = None
     # от кого монитор зависит на самом деле (вычисляется): [{id, name, why, silent}], why - local,

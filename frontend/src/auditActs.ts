@@ -76,6 +76,7 @@ export const ACT: Record<string, string> = {
   local_probe_apply: 'перенес проверки на сервер',
   push_token: 'выпустил новый адрес push',
   dns_accept: 'принял новые DNS-записи',
+  tamper_accept: 'принял признак взлома как норму',
   domains_ignore: 'скрыл домены',
   domains_unignore: 'вернул домены',
   location_create: 'добавил локацию',

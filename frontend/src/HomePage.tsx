@@ -48,6 +48,7 @@ const ISSUE_ICON: Record<string, string> = {
   clock: '🕐', dns: '🌐', db_conn: '🔌', web_5xx: '🌐', queue: '🐇', kube_expiry: '⏳', flux_down: '☸️',
   flux_stale: '☸️', backup_dump: '🛢', backup_dump_space: '🛢', backup_cron: '🛢', backup_check: '🩺',
   unit_loop: '🔁', kube_cron: '⏰', exposed: '🔓', port_new: '🚪', pressure: '🫁', net_health: '📶', link: '🔗', traffic: '📊', kube_node: '☸️', kube_job: '💥', access_change: '🔑', backup_restore: '🛟', docker_restarts: '🔄', kube_restarts: '🔄', mem_leak: '📈', ssh_risk: '🔐', db_health: '🛢', web_config: '🧾', web_cert: '🔏', listen_gone: '🔌', disk_slow: '🐢', gpu: '🎛', gpu_heat: '🌡', llm: '💬', queue_stuck: '⏳', queue_failed: '🧨', workers: '👷', cron_stuck: '⏲', log_errors: '📜', fpm: '🐘', access_risk: '🗝',
+  tamper: '🕵️',
 }
 
 type T = (k: string, p?: Record<string, string | number>) => string
@@ -868,6 +869,17 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
     ...fromProbs(dockerProbs, 'docker'),
     ...fromProbs(kubeProbs, 'kuber'),
     ...fromProbs(backupProbs, 'backups'),
+    // признаки взлома сайта (backend app/tamper.py): похоже на взлом - красным, один слабый
+    // признак - желтым; клик ведет в раздел "Признаки взлома" карточки монитора
+    ...(canSee('sites')
+      ? (ov?.checks ?? [])
+          .filter((c) => c.enabled && !!c.tamper && c.tamper.level !== 'none')
+          .map((c): Broken => ({
+            key: `tm-${c.id}`, id: c.id, name: c.name, tone: c.tamper!.level === 'hack' ? 't-down' : 't-degraded',
+            text: c.tamper!.summary, kind: 'tamper', section: 'sites', srv: false, sec: 'tamper',
+            since: c.tamper!.since,
+          }))
+      : []),
   ].sort((a, b) => (a.tone === b.tone ? a.name.localeCompare(b.name) : a.tone === 't-down' ? -1 : 1))
   // предупреждения с одинаковой шапкой с двух и больше серверов - одна строка; красное - как есть
   type BrokenRow = { one: Broken } | { grp: string; head: string; items: Broken[] }
