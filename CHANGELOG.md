@@ -4,6 +4,12 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.5.4] - 2026-10-21
+
+### Added
+- Алерт сайта в Telegram: рядом с именем значок 🔗 - ссылка на сам проверяемый адрес. Имя, как
+  и раньше, ведет в монитор панели. У проверок без адреса сайта (TCP, ping) значка нет.
+
 ## [1.5.3] - 2026-10-21
 
 ### Fixed
