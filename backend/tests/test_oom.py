@@ -305,7 +305,8 @@ async def test_units_alert_skips_oom_and_alert_text(tmp_path, monkeypatch):
     assert "php7.4-fpm.service: убит OOM killer" in texts
     # за сутки один эпизод (второй неделю назад)
     assert any(p["kind"] == "oom" and p["level"] == 2 and p["text"].startswith(
-        "нехватка памяти (OOM): была 5 мин назад, убиты python 554мб (php7.4-fpm.service, uid web)") for p in probs)
+        "нехватка памяти (OOM) из-за php7.4-fpm.service: была 5 мин назад, убиты python 554мб (php7.4-fpm.service, uid web)")
+        for p in probs)
     view = oom.view(srv, now)
     assert view["n7"] == 2 and view["units"]["user@1001.service"]["quiet"] is True
     await engine.dispose()
@@ -528,3 +529,78 @@ async def test_oom_mute_api_and_alert_link(tmp_path, monkeypatch, client, auth_h
     async with factory() as s:
         assert "oom_ep" not in (await s.execute(select(Server))).scalars().one().alert_state
     await engine.dispose()
+
+
+def _kill(ts: float, name: str, uid: int, anon: int, memcg: str, top: list | None = None) -> dict:
+    return {"ts": ts, "kind": "global", "pid": int(ts) % 100000, "name": name, "uid": uid, "user": "web" if uid == 1001 else "db",
+            "anon": anon, "memcg": memcg, "top": top or [], "mem": {"ram": 8388068, "swap_total": 0}}
+
+
+_TOP = [{"name": "php-fpm7.4", "uid": 1001, "user": "web", "n": 30, "anon": 6250904},
+        {"name": "mysqld", "uid": 108, "user": "db", "n": 1, "anon": 539688}]
+_SESSION = "/user.slice/user-1001.slice/user@1001.service/init.scope"
+
+
+def _fpm_block(now: float, starts: list[float], tail: float | None = None, top: list | None = _TOP) -> dict:
+    """Как на проде 20.10: в эпизоде память у php-fpm x30, а убиты сессия и mysqld; php-fpm убит
+    только в отдельном эпизоде через две минуты (tail)."""
+    kills = []
+    for t in starts:
+        kills += [_kill(t, "systemd", 1001, 1920, _SESSION, top), _kill(t + 0.03, "(sd-pam)", 1001, 1468, _SESSION, top),
+                  _kill(t + 0.05, "mysqld", 108, 539688, "/system.slice/mysql.service", top)]
+    if tail is not None:
+        kills.append(_kill(tail, "php-fpm7.4", 1001, 400640, "/system.slice/php7.4-fpm.service", top))
+    return {"v": 1, "ts": now - 20, "kills": kills, "units": []}
+
+
+def test_culprit_not_killed_in_its_episode():
+    """Виновника не убили в его эпизоде (убиты mysqld и сессия): служба по убийству того же процесса в
+    соседнем эпизоде, без него - процесс из таблицы, но не убитый mysqld. Без таблицы - крупнейший убитый."""
+    now = 1_900_000_000.0
+    eps = oom.episodes(oom.records(_fpm_block(now, [now - 3600], tail=now - 3600 + 128)))
+    assert len(eps) == 2 and eps[0]["kills"][-1]["name"] == "mysqld"
+    assert oom.culprit(eps[0]) == "svc:php7.4-fpm.service"
+    alone = oom.episodes(oom.records(_fpm_block(now, [now - 3600])))[0]
+    assert oom.culprit(alone) == "proc:php-fpm7.4"
+    blind = oom.episodes(oom.records(_fpm_block(now, [now - 3600], top=[])))[0]
+    assert oom.culprit(blind) == "svc:mysql.service"
+    assert oom.culprit_text("svc:php7.4-fpm.service") == "php7.4-fpm.service"
+    assert oom.culprit_text("proc:java") == "процесс java" and oom.culprit_text("ct:web") == "контейнер web"
+    key = {"oom:svc:php7.4-fpm.service"}
+    assert oom.episode_muted(eps[0], key, set()) and not oom.episode_muted(alone, key, set())
+    # кто занимал память, не знаем, а OOM сервера уже глушат по виновнику - считается заглушенным
+    assert oom.episode_muted(blind, key, set()) and not oom.episode_muted(blind, set(), set())
+
+
+def test_problem_home_lifetime_and_culprit_text():
+    """Единичный OOM, после которого все поднялось, на главной час; повторы за сутки - пока они есть;
+    служба лежит после OOM - пока лежит. В тексте виновник, его же глушит ключ строки, мьют убирает строку."""
+    now = datetime.fromtimestamp(1_900_000_000, timezone.utc)
+    ts = now.timestamp()
+
+    def prob(b, **kw):
+        return oom.problem(_muted_server({"clock_unix": ts, "extras": {"oom": b}}, **kw), now)
+
+    # php-fpm убит три дня назад: его служба известна, хотя в эпизоде за сутки его не убивали
+    p = prob(_fpm_block(ts, [ts - 1800], tail=ts - 3 * 86400))
+    assert p == (2, "нехватка памяти (OOM) из-за php7.4-fpm.service: была 30 мин назад, убиты mysqld 527мб "
+                    "(mysql.service, uid db), systemd + sd-pam (сессия web)", "oom:svc:php7.4-fpm.service")
+    p = prob(_fpm_block(ts, [ts - 1800]))
+    assert p[1] == ("нехватка памяти (OOM) из-за процесс php-fpm7.4: была 30 мин назад, убиты mysqld 527мб "
+                    "(mysql.service, uid db), systemd + sd-pam (сессия web)") and p[2] == "oom:proc:php-fpm7.4"
+    # 17 часов назад, один раз - событие прошло, на главной его нет
+    assert prob(_fpm_block(ts, [ts - 17 * 3600])) is None
+    # повторялся за сутки - видно, пока повторы в пределах суток
+    p = prob(_fpm_block(ts, [ts - 17 * 3600, ts - 5 * 3600]))
+    assert p is not None and "2 раз за сутки, последний 5 ч назад" in p[1]
+    # мьют виновника на время убирает строку сразу
+    soon = (now + timedelta(days=7)).isoformat()
+    assert prob(_fpm_block(ts, [ts - 17 * 3600, ts - 5 * 3600], tail=ts - 5 * 3600 + 128),
+                snoozes={"oom:svc:php7.4-fpm.service": soon}) is None
+    # служба после OOM лежит - висит и через сутки без часа, и с мьютом виновника
+    units = {"v": 1, "ts": ts - 30, "units": [{"unit": "mysql.service", "result": "oom-kill", "since": ts - 17 * 3600}]}
+    rep = {"clock_unix": ts, "extras": {"oom": dict(_fpm_block(ts, [ts - 17 * 3600]),
+                                                    units=[{"ts": ts - 17 * 3600, "unit": "mysql.service", "what": "failed"}]),
+                                        "units": units}}
+    p = oom.problem(_muted_server(rep), now)
+    assert p is not None and p[0] == 2

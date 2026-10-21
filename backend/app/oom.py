@@ -51,6 +51,9 @@ UNIT_WINDOW = 180
 # придержанный на час повтор или OOM, пока панель лежала, читались как свежая беда. Обычный путь
 # (журнал раз в минуту + SETTLE) - пара минут.
 LATE_S = 600
+# Единичный OOM в "Что сломано" держится столько после конца: это событие, а не поломка, и строка
+# "была 17 ч назад" висела сутки. Повторы и лежащая после OOM служба - дольше (problem)
+HOME_ONE_S = 3600
 
 # Процессы, убийство которых - авария, а не мелочь: базы, докер, веб-серверы, брокеры. Убитый
 # воркер php-fpm поднимется сам, убитый mysqld - это лежащая база.
@@ -255,6 +258,15 @@ def episodes(recs: list[dict]) -> list[dict]:
             if e["start"] - UNIT_WINDOW <= m["ts"] <= e["end"] + UNIT_WINDOW:
                 units.setdefault(m["unit"], set()).add(m["what"])
         e["units"] = {u: sorted(w) for u, w in sorted(units.items())}
+    # служба процесса по всем убийствам периода: виновника в его эпизоде часто не убивают (ядро
+    # убило mysqld, а память у воркеров php-fpm), зато его процессы убиты в соседнем
+    procs: dict[tuple, dict] = {}
+    for k in kills:
+        o = kill_owner(k)
+        if o["kind"] != "user" and _owner_key(o):
+            procs[(k.get("name"), k.get("uid"))] = o
+    for e in eps:
+        e["procs"] = procs
     return eps
 
 
@@ -509,8 +521,10 @@ def _owner_key(o: dict, containers: dict[str, str] | None = None) -> str:
 def culprit(e: dict, containers: dict[str, str] | None = None) -> str:
     """Ключ виновника эпизода (без "oom:"), "" - не понять. Лимит cgroup - сама cgroup. Нехватка на
     сервере - кто больше всех занимал память по таблице ядра, со службой (контейнером) по убитому
-    процессу с тем же именем и uid: python x12 5.7гб (php7.4-fpm) -> svc:php7.4-fpm.service. Такого
-    процесса среди убитых нет - служба крупнейшего убитого, нет и ее - имя процесса из таблицы."""
+    процессу с тем же именем и uid: python x12 5.7гб (php7.4-fpm) -> svc:php7.4-fpm.service. Такой
+    процесс не убит в этом эпизоде - служба по убийствам соседних (episodes, procs), нет и там - имя
+    процесса из таблицы, но не убитый: в эпизоде, где php-fpm x30 занимал 6гб, первым убили mysqld,
+    и виновником выходил mysql.service. Таблицы нет - служба крупнейшего убитого."""
     if e.get("kind") == "memcg":
         k = next((k for k in e["kills"] if k["kind"] == "memcg"), None)
         if k is not None:
@@ -520,14 +534,24 @@ def culprit(e: dict, containers: dict[str, str] | None = None) -> str:
     top = next((t for t in e.get("top") or [] if (t.get("anon") or 0) >= 10 * 1024), None)
     if top is not None:
         k = next((k for k in loud if k.get("name") == top["name"] and k.get("uid") == top.get("uid")), None)
-        if k is not None and _owner_key(kill_owner(k), containers):
-            return _owner_key(kill_owner(k), containers)
+        o = kill_owner(k) if k is not None else (e.get("procs") or {}).get((top["name"], top.get("uid")))
+        key = _owner_key(o, containers) if o else ""
+        name = (top.get("name") or "").strip("()")
+        return key or ("proc:" + name if name else "")
     big = max(loud, key=lambda k: k.get("anon") or 0) if loud else None
     key = _owner_key(kill_owner(big), containers) if big is not None else ""
     if key:
         return key
-    name = ((top or {}).get("name") or (big or {}).get("name") or "").strip("()")
+    name = ((big or {}).get("name") or "").strip("()")
     return "proc:" + name if name else ""
+
+
+def culprit_text(key: str) -> str:
+    """Виновник для текста, как в чипе мьюта карточки: php7.4-fpm.service, контейнер web, процесс java."""
+    kind, _, name = key.partition(":")
+    if not name:
+        return ""
+    return {"ct": "контейнер " + name, "pod": "под " + name[:8], "proc": "процесс " + name}.get(kind, name)
 
 
 def mutes_now(s: Server, now: datetime) -> set[str]:
@@ -545,11 +569,15 @@ def mutes_now(s: Server, now: datetime) -> set[str]:
 
 def episode_muted(e: dict, mutes: set[str], failed_now: set[str], containers: dict[str, str] | None = None) -> bool:
     """Заглушен ли эпизод. Мьют виновника не глушит эпизод, после которого служба легла и не
-    поднялась: это уже не повтор известного, а лежащая служба, и алерта "упал юнит" по ней нет."""
+    поднялась: это уже не повтор известного, а лежащая служба, и алерта "упал юнит" по ней нет.
+    У нехватки на сервере без таблицы процессов (старый журнал, обрезанный вывод ядра) кто занимал
+    память, не знаем: OOM на сервере уже глушат по виновнику - такой эпизод считается его же, иначе
+    старый эпизод стоял красным рядом с заглушенными."""
     if "oom" in mutes:
         return True
     key = culprit(e, containers)
-    if not key or MUTE_PREFIX + key not in mutes:
+    blind = e.get("kind") == "global" and not e.get("top")
+    if not (key and MUTE_PREFIX + key in mutes) and not (blind and any(m.startswith(MUTE_PREFIX) for m in mutes)):
         return False
     return not any(down for _u, down in failed_units(e, failed_now))
 
@@ -690,8 +718,11 @@ def alert_step(s: Server, st: dict, rep: dict, now: datetime, tz,
 
 
 def problem(s: Server, now: datetime) -> tuple[int, str, str] | None:
-    """Для "Что сломано": OOM за сутки без заглушенных - сколько раз, когда последний и кого убили,
-    и ключ мьюта по виновнику последнего ("oom", если виновника не понять)."""
+    """Для "Что сломано": OOM за сутки без заглушенных - из-за кого, сколько раз, когда последний и
+    кого убили, и ключ мьюта по виновнику последнего ("oom", если виновника не понять). Виновник в
+    тексте - то, что глушит 🔕 строки. Единичный OOM, после которого все поднялось, - событие, а не
+    поломка: на главной HOME_ONE_S после него. Повторы за сутки и служба, которая после OOM лежит, -
+    пока они есть."""
     mutes = mutes_now(s, now)
     if "oom" in mutes:
         return None
@@ -704,10 +735,14 @@ def problem(s: Server, now: datetime) -> tuple[int, str, str] | None:
            and not episode_muted(e, mutes, failed, conts)]
     if not day:
         return None
+    if (len(day) == 1 and now.timestamp() - day[0]["end"] >= HOME_ONE_S
+            and not any(down for _u, down in failed_units(day[0], failed))):
+        return None
     lvl = max(level(e, failed) for e in day)
     ago = max(0.0, now.timestamp() - day[-1]["start"])
     when = f"{int(ago // 3600)} ч назад" if ago >= 3600 else f"{max(1, int(ago // 60))} мин назад"
     n = f"{len(day)} раз за сутки, последний" if len(day) > 1 else "была"
     key = culprit(day[-1], conts)
-    return (lvl, f"нехватка памяти (OOM): {n} {when}, убиты {kills_text(day[-1], conts)}",
+    who = f" из-за {culprit_text(key)}" if key else ""
+    return (lvl, f"нехватка памяти (OOM){who}: {n} {when}, убиты {kills_text(day[-1], conts)}",
             MUTE_PREFIX + key if key else "oom")
