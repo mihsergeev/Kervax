@@ -1210,22 +1210,22 @@ async def _send_alerts(
             is_default = True
         full, line = "", ""
         if is_default:
-            # Короткий формат (app/tg_fmt.py): адрес ссылкой в монитор панели и 🔗 на сайт, что
-            # случилось, причина. Полный (адрес ссылкой на сайт, "монитор", задержка) - в историю
+            # Короткий формат (app/tg_fmt.py): адрес ссылкой на сам сайт, в конце строки с именем
+            # "· монитор" ссылкой в панель, что случилось, причина. Полный (адрес ссылкой на сайт,
+            # "монитор", задержка) - в историю
             full = _alert_text(kind, name, status, msg, host, link_url, site_url, icon)
-            head = tg_fmt.link(host or name, link_url or site_url)
-            if link_url and site_url:
-                # имя ведет в монитор панели, рядом значок - на сам проверяемый сайт
-                head += " " + tg_fmt.site_link(site_url)
+            head = tg_fmt.link(host or name, site_url or link_url)
+            # без адреса сайта имя и так ведет в монитор: второй ссылки туда же не нужно
+            mon = tg_fmt.monitor_link(link_url) if site_url else ""
             ments = " ".join(_MENTION_RE.findall(name or ""))  # @упоминания тегают людей
             sh = srv_short.site(kind, status, msg)
             if isinstance(sh, str) or icon == "✅":
                 # отбой и "сертификат перевыпущен" - одной строкой
-                text = tg_fmt.recovery(head, sh if isinstance(sh, str) else msg)
+                text = tg_fmt.recovery(head, sh if isinstance(sh, str) else msg) + mon
             else:
                 s_ico, s_what, s_facts = sh
-                text = tg_fmt.render(s_ico, head, s_what, s_facts)
-                line = tg_fmt.one_line(s_ico, head, s_what, s_facts)
+                text = tg_fmt.render(s_ico, head + mon, s_what, s_facts)
+                line = tg_fmt.one_line(s_ico, head, s_what, s_facts) + mon
             if ments:
                 text += " " + html.escape(ments)
         else:

@@ -1,7 +1,9 @@
-"""Сайтовый алерт в чате: имя ведет в монитор панели, рядом 🔗 - на сам проверяемый сайт.
+"""Сайтовый алерт в чате: имя ведет на сам проверяемый сайт, в конце строки с именем
+" · монитор" ссылкой в монитор панели.
 
-У не-HTTP мониторов (tcp, ping) открывать в браузере нечего - значка нет; у срока домена
-текст про само имя домена, а не про адрес монитора - тоже без значка."""
+У не-HTTP мониторов (tcp, ping) открывать в браузере нечего - имя ведет в монитор, хвоста нет;
+у срока домена текст про само имя домена, а не про адрес монитора - тоже без хвоста. Без адреса
+панели имя ведет на сайт, хвоста нет."""
 
 from datetime import datetime, timezone
 
@@ -14,15 +16,20 @@ from app.models import Check
 PANEL = "https://panel.example.com"
 
 
-async def _send(tmp_path, monkeypatch, check: dict, pending: list, panel_url: str = PANEL) -> list[str]:
+async def _send(tmp_path, monkeypatch, checks: list[dict], pending: list, panel_url: str = PANEL) -> list[str]:
+    """pending - кортежи без check_id: id подставляется по номеру монитора в checks (последний
+    элемент кортежа)."""
     engine, factory = create_engine_and_factory(f"sqlite+aiosqlite:///{(tmp_path / 'link.db').as_posix()}")
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+    ids = []
     async with factory() as s:
-        c = Check(interval_seconds=1, enabled=True, **check)
-        s.add(c)
+        for ch in checks:
+            c = Check(interval_seconds=1, enabled=True, **ch)
+            s.add(c)
+            await s.flush()
+            ids.append(c.id)
         await s.commit()
-        cid = c.id
     sent: list[str] = []
 
     async def fake_send(cfg, text, parse_mode=None):
@@ -31,86 +38,114 @@ async def _send(tmp_path, monkeypatch, check: dict, pending: list, panel_url: st
 
     monkeypatch.setattr("app.alerts.send_alert", fake_send)
     settings = Settings(alert_webhook="http://hook", panel_url=panel_url)
-    await collector._send_alerts(factory, settings, [p[:5] + (cid,) + p[5:] for p in pending],
+    await collector._send_alerts(factory, settings, [p[:5] + (ids[p[5]], None) for p in pending],
                                  datetime.now(timezone.utc))
     await engine.dispose()
     return sent
 
 
-def test_site_link_helper():
-    assert tg_fmt.site_link("https://example.com/") == '<a href="https://example.com/">🔗</a>'
-    assert tg_fmt.site_link("") == ""
-    # кавычки и амперсанд в пути не ломают href
-    assert tg_fmt.site_link('https://example.com/a&b"c') == '<a href="https://example.com/a&amp;b&quot;c">🔗</a>'
+WEB = {"name": "web-a", "type": "http", "target": "https://www.example.com/"}
 
 
-async def test_down_alert_links_monitor_and_site(tmp_path, monkeypatch):
-    sent = await _send(tmp_path, monkeypatch,
-                       {"name": "web-a", "type": "http", "target": "https://www.example.com/"},
-                       [("bad", "web-a", "down", "HTTP 500", None, None)])
+def test_monitor_link_helper():
+    assert tg_fmt.monitor_link(f"{PANEL}/?check=1") == f' · <a href="{PANEL}/?check=1">монитор</a>'
+    assert tg_fmt.monitor_link("") == ""
+    # амперсанд в адресе панели экранируется в href
+    assert tg_fmt.monitor_link(f"{PANEL}/?check=1&sec=exp") == f' · <a href="{PANEL}/?check=1&amp;sec=exp">монитор</a>'
+
+
+async def test_down_name_links_site_and_tail_monitor(tmp_path, monkeypatch):
+    sent = await _send(tmp_path, monkeypatch, [WEB], [("bad", "web-a", "down", "HTTP 500", None, 0)])
     assert len(sent) == 1
-    first = str(sent[0]).split("\n")[0]
-    assert first.startswith(f'🔴🌐 <a href="{PANEL}/?check=')
-    assert first.endswith('>www.example.com</a> <a href="https://www.example.com/">🔗</a>')
-    assert "\n<b>Не отвечает</b>\n" in sent[0]
-    # в пачке одной строкой - с той же ссылкой на сайт
-    assert '<a href="https://www.example.com/">🔗</a>: не отвечает' in sent[0].line
+    first, what = str(sent[0]).split("\n")[:2]
+    assert first.startswith('🔴🌐 <a href="https://www.example.com/">www.example.com</a> · ')
+    assert first.endswith(f'<a href="{PANEL}/?check=1">монитор</a>')
+    assert what == "<b>Не отвечает</b>"
+    assert "🔗" not in sent[0]
+    # в пачке одной строкой: "монитор" в конце, после того, что случилось
+    assert sent[0].line.startswith('🔴🌐 <a href="https://www.example.com/">www.example.com</a>: не отвечает')
+    assert sent[0].line.endswith(f' · <a href="{PANEL}/?check=1">монитор</a>')
 
 
 async def test_link_drops_query_and_escapes(tmp_path, monkeypatch):
     sent = await _send(tmp_path, monkeypatch,
-                       {"name": "web-a", "type": "http",
-                        "target": "https://example.com/a&b/health?token=SECRET1"},
-                       [("bad", "web-a", "down", "HTTP 503", None, None)])
+                       [{"name": "web-a", "type": "http", "target": "https://example.com/a&b/health?token=SECRET1"}],
+                       [("bad", "web-a", "down", "HTTP 503", None, 0)])
     text = str(sent[0])
-    assert '<a href="https://example.com/a&amp;b/health">🔗</a>' in text
+    assert text.startswith('🔴🌐 <a href="https://example.com/a&amp;b/health">example.com/a&amp;b/health</a> · ')
     assert "SECRET1" not in text and "SECRET1" not in full_text(sent[0])
 
 
-async def test_recovery_has_site_link(tmp_path, monkeypatch):
+async def test_recovery_one_line_with_monitor_tail(tmp_path, monkeypatch):
     sent = await _send(tmp_path, monkeypatch,
-                       {"name": "web-a", "type": "http", "target": "https://example.com/"},
-                       [("recovery", "web-a", "up", "HTTP 200", None, None)])
-    assert str(sent[0]).endswith('</a> <a href="https://example.com/">🔗</a>: снова отвечает')
+                       [{"name": "web-a", "type": "http", "target": "https://example.com/"}],
+                       [("recovery", "web-a", "up", "HTTP 200", None, 0)])
+    assert str(sent[0]) == ('✅ <a href="https://example.com/">example.com</a>: снова отвечает'
+                            f' · <a href="{PANEL}/?check=1">монитор</a>')
 
 
-async def test_slow_has_site_link(tmp_path, monkeypatch):
-    sent = await _send(tmp_path, monkeypatch,
-                       {"name": "web-a", "type": "http", "target": "https://example.com/"},
-                       [("bad", "web-a", "degraded", "медленно: 4200 мс", None, None)])
-    assert str(sent[0]).startswith("⚠️🌐 ")
-    assert '<a href="https://example.com/">🔗</a>\n<b>Тормозит</b>' in sent[0]
+async def test_slow_tail_on_name_line(tmp_path, monkeypatch):
+    sent = await _send(tmp_path, monkeypatch, [WEB], [("bad", "web-a", "degraded", "медленно: 4200 мс", None, 0)])
+    assert str(sent[0]).startswith('⚠️🌐 <a href="https://www.example.com/">')
+    assert f'<a href="{PANEL}/?check=1">монитор</a>\n<b>Тормозит</b>' in sent[0]
 
 
-async def test_ssl_alert_has_site_link(tmp_path, monkeypatch):
-    sent = await _send(tmp_path, monkeypatch,
-                       {"name": "web-a", "type": "http", "target": "https://example.com/"},
-                       [("ssl", "web-a", "", "сертификат истекает через 5 дн.", None, None)])
+async def test_ssl_tail_leads_to_cert_section(tmp_path, monkeypatch):
+    sent = await _send(tmp_path, monkeypatch, [WEB],
+                       [("ssl", "web-a", "", "сертификат истекает через 5 дн.", None, 0)])
     assert len(sent) == 1
-    assert '<a href="https://example.com/">🔗</a>\n' in sent[0]
+    first = str(sent[0]).split("\n")[0]
+    assert '<a href="https://www.example.com/">www.example.com</a> · ' in first
+    assert first.endswith(f'<a href="{PANEL}/?check=1&amp;sec=exp">монитор</a>')
 
 
-async def test_tcp_monitor_without_site_link(tmp_path, monkeypatch):
+async def test_mentions_kept(tmp_path, monkeypatch):
+    web = dict(WEB, name="web-a @alice")
+    sent = await _send(tmp_path, monkeypatch, [web],
+                       [("bad", "web-a @alice", "down", "HTTP 500", None, 0),
+                        ("recovery", "web-a @alice", "up", "HTTP 200", None, 0)])
+    assert len(sent) == 2
+    # падение: упоминание в конце, хвост "монитор" остается в строке с именем
+    down = str(sent[0]).split("\n")
+    assert down[0].endswith(">монитор</a>") and down[-1].endswith(" @alice")
+    # отбой одной строкой: упоминание после "монитор"
+    assert str(sent[1]).endswith(f'снова отвечает · <a href="{PANEL}/?check=1">монитор</a> @alice')
+
+
+async def test_same_domain_fold_keeps_tail_on_first_line(tmp_path, monkeypatch):
+    """www и голый домен легли вместе: одно сообщение, "Еще" отдельной строкой в конце, хвост
+    "монитор" - в строке с именем."""
     sent = await _send(tmp_path, monkeypatch,
-                       {"name": "db-a", "type": "tcp", "target": "example.com", "port": 5432},
-                       [("bad", "db-a", "down", "connection refused", None, None)])
+                       [WEB, {"name": "web-b", "type": "http", "target": "https://example.com/"}],
+                       [("bad", "web-a", "down", "HTTP 500", None, 0),
+                        ("bad", "web-b", "down", "HTTP 500", None, 1)])
     assert len(sent) == 1
-    assert "🔗" not in sent[0] and "🔗" not in sent[0].line
-    assert f'<a href="{PANEL}/?check=' in sent[0]
+    lines = str(sent[0]).split("\n")
+    assert lines[0].endswith(f'<a href="{PANEL}/?check=1">монитор</a>')
+    assert lines[-1] == "Еще: example.com"
 
 
-async def test_domain_expiry_without_site_link(tmp_path, monkeypatch):
+async def test_tcp_monitor_name_links_monitor_without_tail(tmp_path, monkeypatch):
     sent = await _send(tmp_path, monkeypatch,
-                       {"name": "web-a", "type": "http", "target": "https://www.example.com/"},
-                       [("domain", "web-a", "", "регистрация домена истекает через 5 дн.", None, None)])
+                       [{"name": "db-a", "type": "tcp", "target": "example.com", "port": 5432}],
+                       [("bad", "db-a", "down", "connection refused", None, 0)])
     assert len(sent) == 1
-    assert "🔗" not in sent[0]
+    assert str(sent[0]).startswith(f'🔴🌐 <a href="{PANEL}/?check=1">example.com</a>\n')
+    assert ">монитор</a>" not in sent[0] and ">монитор</a>" not in sent[0].line
 
 
-async def test_without_panel_url_name_links_site_once(tmp_path, monkeypatch):
-    """Панель без адреса: имя и так ведет на сайт, второй ссылки на то же не нужно."""
+async def test_domain_expiry_without_tail(tmp_path, monkeypatch):
+    sent = await _send(tmp_path, monkeypatch, [WEB],
+                       [("domain", "web-a", "", "регистрация домена истекает через 5 дн.", None, 0)])
+    assert len(sent) == 1
+    first = str(sent[0]).split("\n")[0]
+    assert f'<a href="{PANEL}/?check=1' in first and ">example.com</a>" in first
+    assert ">монитор</a>" not in sent[0]
+
+
+async def test_without_panel_url_name_links_site_without_tail(tmp_path, monkeypatch):
     sent = await _send(tmp_path, monkeypatch,
-                       {"name": "web-a", "type": "http", "target": "https://example.com/"},
-                       [("bad", "web-a", "down", "HTTP 500", None, None)], panel_url="")
+                       [{"name": "web-a", "type": "http", "target": "https://example.com/"}],
+                       [("bad", "web-a", "down", "HTTP 500", None, 0)], panel_url="")
     assert str(sent[0]).startswith('🔴🌐 <a href="https://example.com/">example.com</a>\n')
-    assert "🔗" not in sent[0]
+    assert "монитор" not in sent[0]

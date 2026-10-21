@@ -201,7 +201,10 @@ async def test_location_partial_alert(tmp_path, monkeypatch):
         r.status = "up"
         await s.commit()
     await collector.evaluate_location_alerts(factory, settings, now)
-    assert len(sent) == 1 and sent[0].startswith("✅ ") and sent[0].endswith(": открывается отовсюду")
+    assert len(sent) == 1 and sent[0].startswith("✅ ")
+    # имя ведет на сайт, в конце строки "монитор" - в монитор панели
+    assert ': открывается отовсюду · <a href="https://p.example.com/?check=' in sent[0]
+    assert sent[0].endswith(">монитор</a>")
     assert "снова доступен" in full_text(sent[0])
     await engine.dispose()
 
