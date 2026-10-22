@@ -5727,6 +5727,18 @@ const EN: Record<string, string> = {
     'the server does not answer the panel either, though it did while online ({where})',
   'с панели не проверить: порты закрыты для нее':
     'cannot be checked from the panel: its ports are closed to it',
+  'выключен штатно':
+    'shut down cleanly',
+  'ушел на перезагрузку':
+    'went down for a reboot',
+  'система остановлена штатно':
+    'system stopped cleanly',
+  'ждем возврата':
+    'waiting for it to come back',
+  'не вернулся':
+    'did not come back',
+  'агента остановили штатно':
+    'the agent was stopped cleanly',
   '90% примерно к {d}':
     '90% around {d}',
   '100% примерно к {d}':

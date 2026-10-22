@@ -32,6 +32,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -44,7 +45,7 @@ import (
 	"time"
 )
 
-const version = "2.46"
+const version = "2.47"
 
 // Публичный ключ для проверки подписи релизов агента (Ed25519, base64).
 // ПУСТО по умолчанию → самообновление ВЫКЛЮЧЕНО (агент никогда не заменяет себя).
@@ -7298,6 +7299,85 @@ func panelClient(timeout time.Duration) *http.Client {
 	return &http.Client{Timeout: timeout, Transport: panelTransport(false)}
 }
 
+// Штатная остановка. При перезагрузке и выключении systemd шлет агенту SIGTERM раньше, чем
+// опускает сеть (юнит After=network-online.target), и агент успевает сказать панели "ухожу на
+// перезагрузку": панель не поднимает "не на связи", пока сервер грузится, и алертит, только если
+// он не вернулся (backend app/going_down.py). Жесткий reset и kernel panic сюда не доходят -
+// для них все как раньше.
+func goingDownLoop(panelURL, token string) {
+	ch := make(chan os.Signal, 1)
+	signal.Notify(ch, syscall.SIGTERM, syscall.SIGINT)
+	<-ch
+	kind := shutdownKind()
+	if err := postGoingDown(panelURL, token, kind); err != nil {
+		fmt.Fprintf(os.Stderr, "kervax-agent: панель не узнала об остановке (%s): %v\n", kind, err)
+	}
+	os.Exit(0)
+}
+
+// shutdownKind - почему остановили агента: reboot, poweroff, shutdown (система останавливается,
+// цель не видна) или stop (остановили только агента: systemctl stop/restart). Спрашиваем systemd:
+// у него в очереди задача reboot.target или poweroff.target. Шина при остановке может уже
+// закрываться - тогда хватает состояния stopping, а если systemctl есть, но не ответил вовсе,
+// система почти наверняка останавливается.
+func shutdownKind() string {
+	run := func(args ...string) (string, error) {
+		ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+		defer cancel()
+		out, err := exec.CommandContext(ctx, "systemctl", args...).Output()
+		return string(out), err
+	}
+	// не под systemd (контейнер, другой init) - спросить некого, считаем остановкой агента
+	if _, err := os.Stat("/run/systemd/system"); err != nil {
+		return "stop"
+	}
+	jobs, jerr := run("list-jobs", "--no-legend")
+	// is-system-running выходит с ненулевым кодом на всем, кроме running, но состояние печатает
+	state, _ := run("is-system-running")
+	return kindFromSystemd(jobs, jerr == nil, state)
+}
+
+func kindFromSystemd(jobs string, jobsOK bool, state string) string {
+	units := map[string]bool{}
+	for _, ln := range strings.Split(jobs, "\n") {
+		f := strings.Fields(ln)
+		if len(f) >= 2 {
+			units[f[1]] = true
+		}
+	}
+	switch {
+	case units["reboot.target"] || units["kexec.target"] || units["soft-reboot.target"]:
+		return "reboot"
+	case units["poweroff.target"] || units["halt.target"]:
+		return "poweroff"
+	case units["shutdown.target"] || strings.TrimSpace(state) == "stopping":
+		return "shutdown"
+	case !jobsOK && strings.TrimSpace(state) == "":
+		return "shutdown"
+	}
+	return "stop"
+}
+
+func postGoingDown(panelURL, token, kind string) error {
+	body, _ := json.Marshal(map[string]string{"kind": kind})
+	req, err := http.NewRequest("POST", strings.TrimRight(panelURL, "/")+"/api/agent/going-down", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := panelClient(3 * time.Second).Do(req)
+	if err != nil {
+		return err
+	}
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return fmt.Errorf("панель ответила %d", resp.StatusCode)
+	}
+	return nil
+}
+
 func panelTransport(keepAlive bool) *http.Transport {
 	return &http.Transport{
 		Proxy:                 panelProxy,
@@ -7366,6 +7446,8 @@ func main() {
 	// свежий процесс. 90с < offline_after (120с) → ложного «оффлайна» не будет.
 	// быстрый опрос docker-команд — отдельно от метрик, чтобы restart/logs шли ~3с
 	go commandLoop(url, token)
+	// SIGTERM при перезагрузке: успеть сказать панели "ухожу", чтобы она не алертила "не на связи"
+	go goingDownLoop(url, token)
 	// DNS ноды меряем фоном со своим тактом: отчет уходит раз в 15 секунд, столько не нужно
 	go dnsLoop(url)
 	// обновления ОС раз в час, слушающие порты и адреса раз в 5 минут

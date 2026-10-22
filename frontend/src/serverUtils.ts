@@ -136,6 +136,14 @@ function srvIssuesRaw(
   if (!s.online && !s.last_seen)
     return [{ tone: 't-degraded', text: t('агент ещё не выходил на связь'), mute: 'offline', kind: 'offline' }]
   if (!s.online) {
+    // агент предупредил о штатной перезагрузке: пока ждем, это не поломка (backend app/going_down.py)
+    const gd = s.going_down
+    if (gd && gd.kind !== 'stop') {
+      const what = gd.kind === 'poweroff' ? t('выключен штатно') : gd.kind === 'reboot' ? t('ушел на перезагрузку')
+        : t('система остановлена штатно')
+      return [{ tone: gd.wait ? 't-degraded' : 't-down', text: `${what}, ${gd.wait ? t('ждем возврата') : t('не вернулся')}`,
+        mute: 'offline', kind: 'offline', since: s.last_seen }]
+    }
     // что ответил сервер панели в момент алерта: молчит агент или сама машина (backend app/liveness.py)
     const p = s.offline_probe
     const why = p?.state === 'alive' ? t('сервер отвечает ({where}), молчит агент', { where: p.where ?? '' })
@@ -144,7 +152,8 @@ function srvIssuesRaw(
           : p?.state === 'silent' ? t('с панели сервер тоже не отвечает')
             // эталон: и на связи панель до сервера не достукивалась, молчание ничего не значит
             : p?.state === 'blind' ? t('с панели не проверить: порты закрыты для нее') : ''
-    return [{ tone: 't-down', text: why ? `${t('оффлайн')} - ${why}` : t('оффлайн'), mute: 'offline', kind: 'offline', since: s.last_seen }]
+    const head = gd?.kind === 'stop' ? t('агента остановили штатно') : t('оффлайн')
+    return [{ tone: 't-down', text: why ? `${head} - ${why}` : head, mute: 'offline', kind: 'offline', since: s.last_seen }]
   }
   const out: SrvIssue[] = []
   // все, о чем шлют алерты (место и inode, CPU, RAM, температуры, conntrack и троттлинг - по уровню

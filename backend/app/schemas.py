@@ -1445,6 +1445,8 @@ class ServerOut(BaseModel):
     # недоступен: ответил ли сервер панели в момент алерта (app/liveness.py) -
     # {state: alive|refused|silent, where, tried, ts}
     offline_probe: dict | None = None
+    # агент предупредил о штатной остановке: {kind, at, wait} (app/going_down.py)
+    going_down: dict | None = None
     # прогноз износа SSD по дискам из отчета (app/disk_wear.py)
     wear_forecast: list[dict] = Field(default_factory=list)
     onboard_done_at: datetime | None = None
@@ -1724,6 +1726,11 @@ class OomEventOut(BaseModel):
 
 
 # --- агент → панель ---
+
+
+class AgentGoingDownIn(BaseModel):
+    """Агент уходит штатно: reboot, poweroff, shutdown или stop (app/going_down.py)."""
+    kind: str = Field(default="shutdown", max_length=16)
 
 
 class AgentReportIn(BaseModel):

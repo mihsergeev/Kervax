@@ -24,6 +24,7 @@ from app import gpu as gpu_mod
 from app import queue_watch
 from app import workers as workers_mod
 from app import cron_watch
+from app import going_down
 from app import log_errors
 from app import fpm_pools
 from app import mem_trend
@@ -87,6 +88,7 @@ from app.schemas import (
     AgentConfigOut,
     AgentReleaseOut,
     AgentPackagesIn,
+    AgentGoingDownIn,
     AgentReportIn,
     AgentSiteProbesIn,
     AgentRunOut,
@@ -303,6 +305,8 @@ def _out(
     # недоступен: что ответил сервер панели в момент алерта (app/liveness.py)
     probe = (server.alert_state or {}).get("offline_probe")
     o.offline_probe = probe if isinstance(probe, dict) and not o.online else None
+    # молчит после штатной перезагрузки: ждем его или он не вернулся (app/going_down.py)
+    o.going_down = going_down.view(server.last_report, o.online, now)
     if onboard.active(server, now):
         o.onboard = {"until": onboard.until(server).isoformat()}
     o.problems = server_problems(server, now, pod_names, web_err)
@@ -3152,9 +3156,13 @@ async def agent_report(
     prev_rep = server.last_report or {}
     prev_up = prev_rep.get("uptime_seconds") or 0
     boot = prev_rep.get("boot") if isinstance(prev_rep.get("boot"), dict) else None
-    if prev_up and body.uptime_seconds and body.uptime_seconds < prev_up - 60:
+    rebooted = bool(prev_up and body.uptime_seconds and body.uptime_seconds < prev_up - 60)
+    if rebooted:
         server.rebooted_at = now
-        boot = {"at": now.isoformat(), "why": os_support.reboot_why(prev_rep)}
+        # агент предупредил о штатной перезагрузке (app/going_down.py) - она плановая: без алерта,
+        # в ленте со временем без связи
+        boot = {"at": now.isoformat(),
+                "why": going_down.boot_why(prev_rep, os_support.reboot_why(prev_rep), server.last_seen, now)}
     # OOM-киллы копим КУМУЛЯТИВНО тут (в ingest'е видим каждый отчёт), а не в
     # collector'е по last_report — дельта живёт лишь один тик и терялась при поллинге.
     # Сколько их, считает oom_mod.counter_step по счетчику ядра (агент 2.42)
@@ -3176,6 +3184,8 @@ async def agent_report(
     await oom_mod.store(session, server, body.extras, now, report_dict)
     if boot:
         report_dict["boot"] = boot
+    if gd := going_down.carry(prev_rep, now, rebooted):
+        report_dict[going_down.KEY] = gd
     # Вернулся после долгого молчания (ВМ выключали, пропадала сеть): с этого момента прогрев,
     # его сайты и сервисы еще поднимаются (app/boot_warmup.py). Перезагрузку видно и по аптайму
     if boot_warmup.came_back(server.last_seen, now, max(server.offline_after_seconds or 120, 30)
@@ -3436,6 +3446,27 @@ async def agent_site_probe_result(
     pending = await _store_site_probes(session, server.id, body.site_probes, now)
     await session.commit()
     background.add_task(send_alerts_soon, request.app.state.session_factory, pending, now)
+    return {"ok": True}
+
+
+@agent_router.post("/going-down")
+async def agent_going_down(
+    body: AgentGoingDownIn,
+    session: SessionDep,
+    authorization: str = Header(default=""),
+) -> dict:
+    """Агент 2.47+ уходит штатно (SIGTERM от systemd): перезагрузка, выключение или остановка
+    одного агента. Пока сервер грузится, "недоступен" не поднимается (app/going_down.py)."""
+    token = authorization.removeprefix("Bearer ").strip()
+    server = await session.scalar(
+        select(Server).where(Server.token_hash == hash_agent_token(token))
+    )
+    if server is None or not server.enabled:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Неверный токен агента")
+    rep = dict(server.last_report or {})
+    rep[going_down.KEY] = going_down.make(body.kind, datetime.now(timezone.utc))
+    server.last_report = rep
+    await session.commit()
     return {"ok": True}
 
 

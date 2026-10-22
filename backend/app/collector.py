@@ -57,6 +57,7 @@ from app import tamper as tamper_mod
 from app import webfiles as webfiles_mod
 from app import parents as parents_mod
 from app import boot_warmup
+from app import going_down
 from app import maint
 from app import tg_bot
 from app import web_certs
@@ -5523,7 +5524,13 @@ def _server_conditions(s: Server, now: datetime,
         # ещё _OFFLINE_ALERT_EXTRA сверх порога.
         silent = (now - _aware(s.last_seen)).total_seconds()
         alert_off = silent > max(s.offline_after_seconds, 30) + _OFFLINE_ALERT_EXTRA
-        out["offline"] = (0 if online else (1 if alert_off else int(state.get("offline", 0))), {})
+        # агент предупредил о штатной перезагрузке (app/going_down.py): сервер грузится, ждем его
+        # до going_down.WAIT, а не обычную выдержку. Не вернулся - алерт, что не вернулся
+        if alert_off and going_down.holds(s.last_report, now):
+            alert_off = False
+        gd = going_down.notice(s.last_report) if not online else None
+        out["offline"] = (0 if online else (1 if alert_off else int(state.get("offline", 0))),
+                          {"down": gd} if gd else {})
 
     # 0 = слать сразу (валидное значение!) → fallback на дефолт ТОЛЬКО при None
     _ss = getattr(s, "alert_sustain_seconds", None)
@@ -6766,6 +6773,8 @@ async def evaluate_servers(
                 fmsg = srv_fire(s, key, rule, ctx)
                 if ctx.get("_note"):
                     fmsg = fmsg.tail("\n↳ " + html.escape(str(ctx["_note"])))
+                if key == "offline" and (gd_note := going_down.note(ctx.get("down"), now)):
+                    fmsg = fmsg.tail("\n↳ " + html.escape(gd_note))
                 if key == "offline" and (tail := deps_tail(s.id)):
                     # что молчит и лежит из-за него: их собственные алерты придержаны. В чате -
                     # строкой "За ним молчат: ...", без них непонятно, почему лежит соседнее
