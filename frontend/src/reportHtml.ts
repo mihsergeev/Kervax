@@ -21,9 +21,9 @@ const PLAIN: [RegExp, string][] = [
   [/ё/g, 'е'],
   [/Ё/g, 'Е'],
 ]
-const plain = (s: string) => PLAIN.reduce((a, [re, to]) => a.replace(re, to), s)
+export const plain = (s: string) => PLAIN.reduce((a, [re, to]) => a.replace(re, to), s)
 
-const esc = (s: string) =>
+export const esc = (s: string) =>
   plain(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
 
 // длительность без длинного тире: файл уходит людям
