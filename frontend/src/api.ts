@@ -2200,6 +2200,8 @@ export type Server = {
   onboard_done_at?: string | null
   // недоступен: что ответил сервер панели в момент алерта (backend app/liveness.py)
   offline_probe?: { state: 'alive' | 'refused' | 'silent' | 'blind'; where?: string; tried?: string[]; was?: string; ts?: string } | null
+  // агент предупредил о штатной остановке; wait - панель еще ждет сервер (backend app/going_down.py)
+  going_down?: { kind: 'reboot' | 'poweroff' | 'shutdown' | 'stop'; at: string; wait: boolean } | null
   // прогноз износа SSD (backend app/disk_wear.py): d90/d100 - даты ISO, src - замер или средняя за жизнь
   wear_forecast?: DiskWear[]
   onboard_by?: string

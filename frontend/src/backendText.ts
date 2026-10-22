@@ -60,6 +60,13 @@ const PHRASES: Rule[] = [
   [/нужна перезагрузка уже /g, 'reboot pending for '],
   [/плановая перезагрузка: после обновления ее ждали/g, 'planned reboot: expected after updates'],
   [/плановая перезагрузка: ждало новое ядро (\S+)/g, 'planned reboot: new kernel $1 was waiting'],
+  // агент предупредил о перезагрузке (backend app/going_down.py)
+  [/плановая перезагрузка: штатная/g, 'planned reboot: clean'],
+  [/плановая перезагрузка: выключали штатно/g, 'planned reboot: clean shutdown'],
+  [/, без связи меньше минуты/g, ', offline for less than a minute'],
+  [/, без связи (\d+) ч (\d+) мин/g, ', offline for $1 h $2 min'],
+  [/, без связи (\d+) ч/g, ', offline for $1 h'],
+  [/, без связи (\d+) мин/g, ', offline for $1 min'],
   [/в \/boot ядро (\S+), а работает (\S+): нужна перезагрузка/g, 'kernel $1 is in /boot but $2 is running: reboot needed'],
   [/не установлено (\d+) (?:обновление|обновления|обновлений) безопасности: /g, '$1 security updates not installed: '],
   [/автообновления выключены/g, 'automatic updates are off'],

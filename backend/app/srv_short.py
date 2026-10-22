@@ -14,7 +14,7 @@ import importlib
 import re
 from datetime import datetime
 
-from app import podnames, tg_fmt
+from app import going_down, podnames, tg_fmt
 
 # Тема - второй эмодзи после уровня: по нему в ленте видно, про что алерт
 TOPIC = {
@@ -352,7 +352,8 @@ def _short(key: str, ctx: dict, s, level: int):
         return _from_module(key, items)
     v = ctx.get("value")
     if key == "offline":
-        return "Не на связи", []
+        # агент предупредил об остановке и сервер не вернулся (app/going_down.py)
+        return going_down.short(ctx.get("down")) or "Не на связи", []
     if key == "reboot":
         return "Перезагрузился", []
     if key == "cpu":
