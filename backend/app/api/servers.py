@@ -40,6 +40,7 @@ from app import changes as srv_changes
 from app import known
 from app import onboard
 from app import parents as parents_mod
+from app import boot_warmup
 from app import timeline as timeline_mod
 from app import packages as packages_mod
 from app import netlinks
@@ -51,11 +52,11 @@ from app import fleet_rollout
 from app import oom as oom_mod
 from app import software as software_mod
 from app.collector import (
-    _backup_problem_repos, alert_since, awaiting_after_pause, backup_cadence, backup_rotation_items, backup_unmonitored,
+    _OFFLINE_ALERT_EXTRA, _backup_problem_repos, alert_since, awaiting_after_pause, backup_cadence, backup_rotation_items, backup_unmonitored,
     bsrv_extra, bsrv_restic_old, clock_skew_window, cron_job_issues, disk_analyze_ok, prune_problems, repo_reason, docker_since,
     backup_run_start, dump_local_stale, needed_pod_names, panel_server_names, pod_uid_names,
     disk_health_block, send_alerts_soon, send_autofix_note, server_problems, web_5xx_total, web_breakdown,
-    web_error_window, web_label_key, web_log_label, web_rate_total,
+    web_error_window, web_label_key, web_log_label, web_rate_total, panel_started_at,
 )
 from app.setup_scripts import (
     current_setup_versions as _current_setup_versions,
@@ -3172,6 +3173,13 @@ async def agent_report(
     await oom_mod.store(session, server, body.extras, now, report_dict)
     if boot:
         report_dict["boot"] = boot
+    # Вернулся после долгого молчания (ВМ выключали, пропадала сеть): с этого момента прогрев,
+    # его сайты и сервисы еще поднимаются (app/boot_warmup.py). Перезагрузку видно и по аптайму
+    if boot_warmup.came_back(server.last_seen, now, max(server.offline_after_seconds or 120, 30)
+                             + _OFFLINE_ALERT_EXTRA, panel_started_at()):
+        report_dict[boot_warmup.BACK_KEY] = now.isoformat()
+    elif back := boot_warmup.keep_back(prev_rep.get(boot_warmup.BACK_KEY), now):
+        report_dict[boot_warmup.BACK_KEY] = back
     # журнал установок - разовый, в хронологию; в last_report ему жить незачем
     report_dict.pop("pkg_ev", None)
     # связи живут в своих таблицах (app/netlinks.py)

@@ -985,8 +985,9 @@ async def test_docker_container_crash_loop_alert(tmp_path, monkeypatch):
         await conn.run_sync(Base.metadata.create_all)
     now = datetime.now(timezone.utc)
 
+    # сервер работает давно: перезапуски на прогреве после загрузки в цикл не идут (app/boot_warmup.py)
     def rep(rc):
-        return {"uptime_seconds": 100, "docker": {"present": True, "access": True,
+        return {"uptime_seconds": 86400, "docker": {"present": True, "access": True,
                 "containers": [{"name": "web", "state": "running", "policy": "always", "restarts": rc}]}}
 
     async with factory() as s:

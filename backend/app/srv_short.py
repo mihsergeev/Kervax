@@ -230,7 +230,11 @@ def _split_names(text: str) -> list[str]:
     return out
 
 
-_GO_ERR = re.compile(r"\s*\((?:Get|Post|Head|dial|read|write) [^)]*\)+")
+# Сырая ошибка в скобках: без кириллицы, кроме "(HTTP 503)". Обрезанная (без закрывающей скобки
+# в конце) - тоже: "(Get "https://example.com": dial tcp 127.0.0.1:443: c" в чате не нужна
+_RAW_ERR = re.compile(r"\s*\((?![^()]*[а-яА-ЯёЁ])(?!HTTP \d{3}\))[^()]*(?:\)+|$)")
+_GO_URL = re.compile(r'^(?:Get|Post|Head) "[^"]*":\s*')
+_MULTI_IP = re.compile(r"^(\d+)/(\d+) адресов OK; ")
 _DN = re.compile(r"(\d+) дн\.?")
 
 
@@ -242,6 +246,28 @@ SITE_RECOVERY = {"recovery": "снова отвечает", "locrec": "откр�
                  "flakyrec": "снова отвечает стабильно", "tamperrec": "признаков взлома больше нет"}
 
 
+def _reason(text: str) -> str:
+    """Причина одной строкой: без сырой ошибки Go/httpx в скобках и без "Get "<адрес>": "."""
+    why = _GO_URL.sub("", str(text or "").strip())
+    while True:
+        cut = _RAW_ERR.sub("", why)
+        if cut == why:
+            break
+        why = cut
+    return why.strip() or str(text or "").strip()
+
+
+def _multi_ip(rest: str, ok: int, total: int) -> list[str]:
+    """"1.2.3.4 — сервер отклонил соединение — порт закрыт (...); 5.6.7.8 — ..." -> сколько адресов
+    не отвечает и первый из них с причиной."""
+    items = [x for x in rest.split("; ") if x.strip()]
+    first = items[0].split(" — ") if items else []
+    facts = [f"не отвечает {total - ok} из {total} адресов"]
+    if len(first) > 1:
+        facts.append(f"{first[0].strip()}: {_reason(first[1])}")
+    return facts
+
+
 def site(kind: str, status: str, msg: str) -> tuple[str, str, list[str]] | str:
     """Короткий сайтовый алерт: (эмодзи, что случилось, конкретика) или строка отбоя.
 
@@ -251,13 +277,19 @@ def site(kind: str, status: str, msg: str) -> tuple[str, str, list[str]] | str:
     if kind in SITE_RECOVERY:
         return SITE_RECOVERY[kind]
     if kind == "bad":
+        multi = _MULTI_IP.match(msg)
+        if multi:
+            facts = _multi_ip(msg[multi.end():], int(multi.group(1)), int(multi.group(2)))
+            return ("⚠️🌐", "Тормозит", facts[1:]) if status == "degraded" else ("🔴🌐", "Не отвечает", facts)
         parts = [p.strip() for p in msg.split(" — ") if p.strip()]
-        why = _GO_ERR.sub("", parts[0]) if parts else ""
+        why = _reason(parts[0]) if parts else ""
         m = re.search(r"медленно: (\d+) мс", why)
         if m:
             why = re.sub(r",?\s*медленно: \d+ мс", "", why).strip()
             why = (why + ", " if why else "") + f"ответ за {tg_fmt.dur(int(m.group(1)) / 1000)}"
-        facts = [why] + [p for p in parts[1:] if p != "монитор"]
+        # После тире - пояснения и советы ("так бывает у Kubernetes, проверяйте из панели"): они в
+        # панели и в истории алертов. В чат кроме причины только то, через что проверяли
+        facts = [why] + [p for p in parts[1:] if p.endswith("в обход шлюза")]
         if status == "degraded":
             return "⚠️🌐", "Тормозит", facts
         return "🔴🌐", "Не отвечает", facts
@@ -267,7 +299,7 @@ def site(kind: str, status: str, msg: str) -> tuple[str, str, list[str]] | str:
         return "🚨🕵️", lines[0] if lines else "Похоже на взлом", lines[1:3]
     if kind == "flaky":
         last = msg.partition("последняя ошибка: ")[2]
-        return "🟠🌐", "Отвечает через раз", [_GO_ERR.sub("", last)] if last else []
+        return "🟠🌐", "Отвечает через раз", [_reason(last.split(" — ")[0])] if last else []
     if kind == "locpart":
         bad = [ln for ln in msg.split("\n") if ln.startswith("🔴")]
         good = [ln for ln in msg.split("\n") if ln.startswith("🟢")]

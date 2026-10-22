@@ -161,17 +161,21 @@ def list_text(names: list[str], limit: int = LIST_MAX) -> str:
 
 async def load_servers(session) -> list[SimpleNamespace]:
     """Серверы для поиска родителей и проверки "молчит ли". Из отчета берем только
-    web_services JSON-оператором в запросе: отчеты целиком ради этого не тянем."""
+    web_services, аптайм и возврат на связь JSON-оператором в запросе: отчеты целиком ради
+    этого не тянем."""
     from app.models import Server
 
     rows = (await session.execute(select(
         Server.id, Server.name, Server.group_name, Server.parent_id, Server.external_ip,
         Server.agent_ip, Server.enabled, Server.last_seen, Server.offline_after_seconds,
-        Server.last_report["web_services"],
+        Server.last_report["web_services"], Server.last_report["uptime_seconds"], Server.last_report["back_at"],
     ))).all()
+    # аптайм и возврат на связь - для прогрева после включения (app/boot_warmup.py)
     return [
         SimpleNamespace(id=i, name=n, group_name=g or "", parent_id=p, external_ip=e or "",
                         agent_ip=a or "", enabled=en, last_seen=ls, offline_after_seconds=oa or 120,
-                        last_report={"web_services": w if isinstance(w, list) else []})
-        for i, n, g, p, e, a, en, ls, oa, w in rows
+                        last_report={"web_services": w if isinstance(w, list) else [],
+                                     "uptime_seconds": up if isinstance(up, (int, float)) else 0,
+                                     "back_at": bk if isinstance(bk, str) else ""})
+        for i, n, g, p, e, a, en, ls, oa, w, up, bk in rows
     ]
