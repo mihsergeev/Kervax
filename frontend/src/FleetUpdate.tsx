@@ -52,7 +52,7 @@ export function helperGroups(servers: Server[]): HelperGroup[] {
   return [...by.values()]
 }
 
-const hostOf = (s: Server) => s.hostname || s.name
+export const hostOf = (s: Server) => s.hostname || s.name
 
 // хосты, где прогон kervax_helpers.yml что-то поменяет (helper или настройка юнита агента)
 export function rolloutHosts(servers: Server[]): string[] {
@@ -342,11 +342,19 @@ export function AgentUpdRow({ servers, avail, fleet, canUpd, canary, onOpen, onO
 }
 
 // Команда ansible для helper'ов. С доступом ansible одна команда на все панели (плагин
-// инвентаря сам спрашивает панели), иначе - список хостов этой панели
+// инвентаря сам спрашивает панели), иначе - список хостов этой панели. Нод немного - по
+// именам и с доступом: имя в команде видно сразу, и не нужно гадать, попала ли нода в группу
+const BY_NAME_MAX = 3
 export function ansibleCmd(hosts: string[], viaPanels: boolean): string {
-  return viaPanels
+  return viaPanels && (hosts.length === 0 || hosts.length > BY_NAME_MAX)
     ? 'ansible-playbook playbooks/kervax_helpers.yml -l kervax_outdated'
-    : `ansible-playbook playbooks/kervax_helpers.yml -l '${hosts.join(',')}'`
+    : helperCmd(hosts)
+}
+
+// Та же команда по именам нод: работает и без доступа ansible, и когда группа еще не собралась
+export function helperCmd(hosts: string[]): string {
+  const l = hosts.length === 1 ? hosts[0] : `'${hosts.join(',')}'`
+  return `ansible-playbook playbooks/kervax_helpers.yml -l ${l}`
 }
 
 export function useViaPanels(): boolean {
@@ -408,6 +416,7 @@ export function HelperUpdRow({ servers, fleet, canUpd, via, onOpen }: {
         <span className="home-attention-txt">
           {t('helper\'ы: обновить на {n} {nodes}', { n, nodes: nodesLoc(n, t) })}{' '}
           <span className="muted small">({[what.join(', '), shortList(pending, t, 3)].filter(Boolean).join('; ')})</span>
+          {canUpd && <code className="upd-cmd">{ansibleCmd(pending, via)}</code>}
         </span>
         {canUpd && (
           <button className="ghost small" disabled={fleet.busy} onClick={() => startHelpers(fleet, pending, via)}>

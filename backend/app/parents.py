@@ -9,16 +9,23 @@
 Родителя монитора панель находит сама только по однозначным признакам, иначе легко
 заглушить настоящую аварию из-за постороннего сервера:
 - монитор проверяется изнутри сервера (probe_local): без агента его просто некому проверить;
+- домен монитора смотрит в DNS только на адреса одного сервера: туда и идут запросы, даже
+  если сайт с тем же именем остался в конфиге другого сервера, а веб-сервер этого агент не
+  разбирает (панели хостинга);
 - домен монитора обслуживает ровно один сервер (web_services из отчетов агентов);
 - цель монитора - внешний IP ровно одного сервера.
 Домен на нескольких серверах (фронт и бэкенд, два балансируемых узла) сам не связываем.
+Домен за адресом не из панели (Cloudflare, чужой балансировщик) - только по web_services.
 Остальное человек задает руками: parent_mode="server" и parent_server_id, или "off" -
 монитор ни от чего не зависит. У сервера родитель только ручной (parent_id): шлюз, VPN,
 гипервизор, за которым он стоит.
 """
 from __future__ import annotations
 
+import asyncio
 import ipaddress
+import socket
+import time
 from datetime import datetime
 from types import SimpleNamespace
 from urllib.parse import urlparse
@@ -33,6 +40,18 @@ WHY_MANUAL = "manual"  # задан руками
 
 # сколько детей перечислять в сообщении про родителя, остальное - "и еще N"
 LIST_MAX = 5
+
+# Сервер опаздывает с отчетом (агент шлет раз в 15 с): сайт, упавший в эту минуту, скорее
+# всего лежит вместе с ним. Его алерт придерживаем, пока не станет ясно, замолчал ли сервер:
+# иначе сайты уходили отдельными сообщениями раньше "не на связи" про сам сервер
+LATE_S = 60
+
+# адреса доменов мониторов: ответ живет полчаса, неудачу повторяем через пять минут, ждем
+# резолвер не дольше трех секунд - на тике сборщика и в запросе карточки
+DNS_TTL = 1800
+DNS_RETRY = 300
+DNS_WAIT = 3.0
+_dns: dict[str, tuple[frozenset[str], float]] = {}
 
 
 def target_host(check) -> str:
@@ -83,6 +102,8 @@ class Index:
         self.domains: dict[str, set[int]] = {}
         self.ips: dict[str, set[int]] = {}
         self.parent: dict[int, int] = {}
+        # адреса доменов мониторов из DNS (resolve_for); пусто - родителя ищем без них
+        self.resolved: dict[str, frozenset[str]] = {}
         for s in servers:
             self.names[s.id] = s.name
             if getattr(s, "parent_id", None):
@@ -114,11 +135,77 @@ def parents_of(check, idx: Index) -> list[tuple[int, str]]:
         return []
     if _is_ip(host):
         ids, why = idx.ips.get(host), WHY_IP
+    elif (owner := _dns_owner(host, idx)) and idx.domains.get(host) != {owner}:
+        # DNS ведет не туда, где сайт в конфиге, или конфига агент не видит: решает адрес
+        ids, why = {owner}, WHY_IP
     else:
         ids, why = idx.domains.get(host), WHY_SITE
     if ids and len(ids) == 1:
         return [(next(iter(ids)), why)]
     return []
+
+
+def _dns_owner(host: str, idx: Index) -> int | None:
+    """Сервер, на адреса которого смотрит домен. Все адреса домена должны быть его: второй
+    адрес у постороннего узла - уже балансировка, сам сервер сайт целиком не роняет."""
+    ips = idx.resolved.get(host)
+    if not ips:
+        return None
+    owners: set[int] = set()
+    for ip in ips:
+        ids = idx.ips.get(ip)
+        if not ids or len(ids) != 1:
+            return None
+        owners |= ids
+    return next(iter(owners)) if len(owners) == 1 else None
+
+
+def _dns_host(check, idx: Index) -> str:
+    """Домен монитора, адрес которого нужен для поиска родителя, или ""."""
+    if (getattr(check, "parent_mode", None) or "auto") != "auto":
+        return ""
+    if getattr(check, "probe_local", False) and getattr(check, "probe_server_id", None) in idx.names:
+        return ""
+    host = target_host(check)
+    return "" if not host or _is_ip(host) else host
+
+
+async def _lookup(host: str) -> frozenset[str]:
+    infos = await asyncio.get_running_loop().getaddrinfo(host, None, type=socket.SOCK_STREAM)
+    out = set()
+    for info in infos:
+        try:
+            ip = ipaddress.ip_address(info[4][0])
+        except ValueError:
+            continue
+        # внутренние адреса не сравниваем: 10.0.0.5 бывает у серверов в разных сетях
+        if ip.is_global:
+            out.add(str(ip))
+    return frozenset(out)
+
+
+async def resolve_for(idx: Index, checks) -> Index:
+    """Подставляет в индекс адреса доменов мониторов. Из кеша сразу; устаревшие спрашиваем
+    разом, ждем не дольше DNS_WAIT. Не ответил резолвер - остается прошлый адрес: сбой DNS у
+    панели не повод отвязать сайты от их серверов."""
+    hosts = {h for c in checks if (h := _dns_host(c, idx))}
+    mono = time.monotonic()
+    stale = [h for h in hosts if h not in _dns or _dns[h][1] <= mono]
+    if stale:
+        tasks = {asyncio.ensure_future(_lookup(h)): h for h in stale}
+        done, pending = await asyncio.wait(tasks, timeout=DNS_WAIT)
+        for t in pending:
+            t.cancel()
+        for t, h in tasks.items():
+            got = t.result() if t in done and not t.cancelled() and t.exception() is None else None
+            if got:
+                _dns[h] = (got, mono + DNS_TTL)
+            else:
+                _dns[h] = (_dns[h][0] if h in _dns else frozenset(), mono + DNS_RETRY)
+    for h in hosts:
+        if h in _dns and _dns[h][0]:
+            idx.resolved[h] = _dns[h][0]
+    return idx
 
 
 def silent_ids(servers, now: datetime, seen_online, just_started: bool) -> set[int]:
@@ -131,6 +218,24 @@ def silent_ids(servers, now: datetime, seen_online, just_started: bool) -> set[i
         if getattr(s, "enabled", True) and getattr(s, "last_seen", None) is not None
         and not seen_online(s, now)
     }
+
+
+def late_ids(servers, now: datetime, just_started: bool) -> set[int]:
+    """Серверы, опоздавшие с отчетом дольше LATE_S (и молчащие): сбой их сайтов ждет, пока не
+    станет ясно, лежит ли сам сервер. Порог не больше offline-порога сервера."""
+    if just_started:
+        return set()
+    out = set()
+    for s in servers:
+        seen = getattr(s, "last_seen", None)
+        if not getattr(s, "enabled", True) or seen is None:
+            continue
+        if seen.tzinfo is None:
+            seen = seen.replace(tzinfo=now.tzinfo)
+        lim = min(LATE_S, max(getattr(s, "offline_after_seconds", None) or 120, 30))
+        if (now - seen).total_seconds() > lim:
+            out.add(s.id)
+    return out
 
 
 def held_by(check, idx: Index, silent: set[int]) -> int | None:

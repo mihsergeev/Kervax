@@ -130,7 +130,7 @@ async def test_digest_has_no_buttons(client, tg):
     assert len(tg.of("sendMessage")) == 1 and "reply_markup" not in tg.of("sendMessage")[0]
     # в пачке каждый алерт одной строкой
     text = tg.of("sendMessage")[0]["text"]
-    assert text.startswith("🌊 3 ") and text.split("\n")[1:] == [f"⚠️💽 web-{i}: 9{i}%" for i in range(3)]
+    assert text.split("\n") == [f"⚠️💽 web-{i}: 9{i}%" for i in range(3)]
 
 
 async def test_personal_copy_gets_same_buttons(client, tg):

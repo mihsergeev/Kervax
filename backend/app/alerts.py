@@ -306,10 +306,8 @@ def _digest(messages: list[str]) -> str:
     body = "\n".join(head)
     if extra:
         body += f"\nи еще {extra}"
-    n = len(messages)
-    word = ("алерт" if n % 10 == 1 and n % 100 != 11 else "алерта" if n % 10 in (2, 3, 4)
-            and n % 100 not in (12, 13, 14) else "алертов")
-    return f"🌊 {n} {word} за раз\n{body}"
+    # без заголовка "N алертов за раз": счетчик ничего не говорит, строки и так видны
+    return body
 
 
 async def tg_edit(cfg: dict, chat: str, message_id: int, text: str, reply_markup: dict) -> None:

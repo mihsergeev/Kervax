@@ -72,6 +72,16 @@ def _no_dns_lookups(monkeypatch):
 
     monkeypatch.setattr(checks, "_dns_time", no_lookup)
 
+    # адреса доменов для поиска сервера монитора (app/parents.py): по умолчанию домены не
+    # резолвятся, тест про это подставляет свои
+    from app import parents
+
+    async def no_addrs(host):
+        return frozenset()
+
+    monkeypatch.setattr(parents, "_lookup", no_addrs)
+    monkeypatch.setattr(parents, "_dns", {})
+
 
 @pytest.fixture(autouse=True)
 def _job_logs_clean():

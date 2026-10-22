@@ -109,7 +109,7 @@ import { SoftwareCard } from './Software'
 import { FixSteps, useFixDone } from './FixSteps'
 import { GpuCard, GpuChip } from './Gpu'
 import { KnownServerList } from './KnownDialog'
-import { AgentUpdRow, agentBehind, useFleetRollout } from './FleetUpdate'
+import { AgentUpdRow, agentBehind, helperCmd, hostOf, useFleetRollout } from './FleetUpdate'
 import { MaintBanner, MaintChip } from './MaintModal'
 
 type MetricKey =
@@ -5740,8 +5740,9 @@ function agentLate(s: Server): boolean {
 }
 
 // Как дела у ретранслятора: что сказал helper relay-setup и когда
-function RelayStatus({ relay }: { relay: RelayView }) {
+function RelayStatus({ relay, host }: { relay: RelayView; host: string }) {
   const { t } = useI18n()
+  const [copied, setCopied] = useState(false)
   const fw = relay.firewall === 'none' ? t('без фаервола: адреса проверяет сам прокси') : relay.firewall
   const line =
     relay.state === 'ok'
@@ -5758,7 +5759,28 @@ function RelayStatus({ relay }: { relay: RelayView }) {
           : relay.state === 'stale'
             ? t('Helper давно не обращался к панели: сервер не на связи или не достает до нее.')
             : t('Ошибка ретранслятора: {err}', { err: relay.error })
-  return <p className={`small ${relay.state === 'ok' ? 'muted' : 'form-error'}`}>📡 {line}</p>
+  if (relay.state !== 'no_helper') {
+    return <p className={`small ${relay.state === 'ok' ? 'muted' : 'form-error'}`}>📡 {line}</p>
+  }
+  // helper ставит человек плейбуком: готовая команда на одну эту ноду, без поиска в "Требует действий"
+  const cmd = helperCmd([host])
+  return (
+    <div className="small form-error">
+      📡 {line}
+      <code className="upd-cmd">{cmd}</code>
+      <button
+        type="button"
+        className="ghost small"
+        onClick={() => {
+          try { navigator.clipboard?.writeText(cmd)?.catch(() => {}) } catch { /* команда видна в строке */ }
+          setCopied(true)
+          window.setTimeout(() => setCopied(false), 1500)
+        }}
+      >
+        {copied ? t('Скопировано ✓') : t('Скопировать команду')}
+      </button>
+    </div>
+  )
 }
 
 type ServerEditForm = {
@@ -5996,6 +6018,7 @@ function ServerEditCard({
   groups,
   isVm,
   relay,
+  host,
   onSubmit,
   onCancel,
   onDelete,
@@ -6007,6 +6030,7 @@ function ServerEditCard({
   groups: string[]
   isVm?: boolean
   relay?: RelayView | null
+  host: string // имя ноды для ansible -l (как в "Требует действий")
   onSubmit: () => void
   onCancel: () => void
   onDelete: () => void
@@ -6264,7 +6288,7 @@ function ServerEditCard({
           />
         </label>
       )}
-      {form.relay_enabled && relay && <RelayStatus relay={relay} />}
+      {form.relay_enabled && relay && <RelayStatus relay={relay} host={host} />}
       <div className="modal-actions edit-actions">
         <button className="ghost" onClick={onCancel} disabled={busy}>
           {t('Отмена')}
@@ -6961,6 +6985,7 @@ function ServerDetail({
               groups={groups}
               isVm={r.is_vm === true}
               relay={s.relay}
+              host={hostOf(s)}
               onSubmit={submitEdit}
               onCancel={() => setEditing(false)}
               onDelete={del}

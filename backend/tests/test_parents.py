@@ -118,7 +118,7 @@ async def test_node_behind_a_silent_gateway_is_a_line_in_its_message(tmp_path, m
     assert sent[0].target == "gw-a"
     # в чат - кто за ним молчит и какие мониторы лежат, строками конкретики
     assert sent[0].startswith("🔴📡 gw-a\n<b>Не на связи</b>\n")
-    assert "За ним молчат: node-b" in sent[0] and "; лежат мониторы: site-a" in sent[0]
+    assert "\nЗа ним молчат: node-b\nСайты: site-a" in sent[0]
     full = full_text(sent[0])
     assert "↳ за ним молчат: node-b" in full
     assert "↳ лежат мониторы: site-a" in full and "site-z" not in full and "site-z" not in sent[0]

@@ -69,7 +69,7 @@ def test_tail_goes_to_the_full_text_only():
 def test_digest_is_one_line_per_alert():
     msgs = [_server_alert_text("disk", f"s{i}", "x", short=("Диск заполнен на 90%", ["/var"])) for i in range(3)]
     d = alerts._digest(msgs + [alerts.Msg("🔥 old — недоступен\n↳ подробности")])
-    assert d.split("\n") == ["🌊 4 алерта за раз", "⚠️💽 s0: диск заполнен на 90%, /var",
+    assert d.split("\n") == ["⚠️💽 s0: диск заполнен на 90%, /var",
                              "⚠️💽 s1: диск заполнен на 90%, /var", "⚠️💽 s2: диск заполнен на 90%, /var",
                              "🔥 old: недоступен"]
 
