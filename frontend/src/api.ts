@@ -3728,3 +3728,34 @@ export function sendProblemReport(body: {
 }): Promise<{ id: number; attached: number; client_log: number }> {
   return api('/api/panel-errors/report', { method: 'POST', body: JSON.stringify(body) })
 }
+
+// --- инвентаризация железа (backend app/inventory.py) ---
+export type InvDisk = { dev: string; model: string; serial: string; kind: '' | 'nvme' | 'ssd' | 'hdd' | 'virt'; size: number }
+export type InvRaid = { dev: string; level: string; map: string; state: string; sync: string; degraded: boolean }
+export type InvServer = {
+  id: number
+  name: string
+  group: string
+  online: boolean
+  reported: boolean // агент хоть раз присылал отчет
+  cpu_model: string
+  threads: number
+  freq_mhz: number | null // текущая средняя частота
+  mem: number
+  swap: number
+  disks: InvDisk[] | null // null - нет helper'а disk-health, известен только объем разделов
+  fs_total: number
+  raid: InvRaid[]
+  gpus: string[]
+  os: string
+  kernel: string
+  virt: string // гипервизор; пусто - Baremetal
+  ip: string
+  local_ip: string // только если отличается от ip
+  country: string
+  uptime: number
+  last_seen: string | null
+}
+export function getInventory(): Promise<{ servers: InvServer[] }> {
+  return api<{ servers: InvServer[] }>('/api/report/inventory')
+}

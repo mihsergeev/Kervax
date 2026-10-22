@@ -20,7 +20,7 @@ from zoneinfo import ZoneInfo
 from fastapi import APIRouter, Query
 from sqlalchemy import case, func, or_, select
 
-from app import maint, settings_store
+from app import inventory, maint, settings_store
 from app.api.alert_history import _scope as _alert_scope, group_fires, noise_item, target_ids
 from app.collector import _OFFLINE_ALERT_EXTRA, seen_online
 from app.config import get_settings
@@ -333,3 +333,17 @@ async def report(user: CurrentUser, session: SessionDep, days: int = Query(7, ge
                        if x["target"] == s["name"] and x["section"] != "sites"][:_THINGS]
     out["maint"] = await _maint(session, user, since, until, srv_ids, chk_ids, tz)
     return out
+
+
+@router.get("/inventory")
+async def inventory_report(user: CurrentUser, session: SessionDep) -> dict:
+    """Инвентаризация железа (app/inventory.py): все включенные серверы учетки, выбирает и
+    считает итоги фронт. Без раздела "Серверы" - пусто"""
+    if "servers" not in set(user_sections(user)):
+        return {"servers": []}
+    now = datetime.now(timezone.utc)
+    rows = (await session.execute(
+        scope_query(user, select(Server).where(Server.enabled.is_(True)), Server, "servers"))).scalars().all()
+    out = [inventory.server_row(s, now) for s in rows]
+    out.sort(key=lambda x: (x["group"].lower(), x["name"].lower()))
+    return {"servers": out}

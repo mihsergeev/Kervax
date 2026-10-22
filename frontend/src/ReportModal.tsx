@@ -3,6 +3,7 @@ import { ApiError, getReport, type Report, type ReportNoise } from './api'
 import { useBranding } from './BrandLogo'
 import { CardNav, type SecDef } from './cardLayout'
 import { useI18n } from './i18n'
+import { Inventory } from './Inventory'
 import { NetTile } from './NetLinks'
 import { downloadReportHtml } from './reportHtml'
 import { NoiseTable } from './NoiseTable'
@@ -29,6 +30,7 @@ const LEAD: Record<string, string> = {
   noise: 'Что именно срабатывало и где. Если одно и то же приходит каждый день - стоит починить, поправить порог или заглушить.',
   backups: 'Бэкапы, по которым приходили алерты: не сделался, устарел, не сходится ротация.',
   maint: 'Плановые работы за период: пока окно шло, алерты по его серверам и мониторам молчали.',
+  inv: 'Что стоит на серверах: процессор, память, диски. Выберите группы или отдельные серверы и скачайте отчет в HTML или Excel.',
 }
 
 // изменение к прошлому периоду: "лучше" - зеленым, "хуже" - красным
@@ -158,6 +160,7 @@ export function ReportModal({ onClose, onUnauthorized, onOpen }: Props) {
     { id: 'noise', label: 'Что шумело', group: 'Алерты' },
     ...(backups.length ? [{ id: 'backups', label: 'Бэкапы', group: 'Алерты' }] : []),
     { id: 'maint', label: 'Окна обслуживания', group: 'Работы' },
+    ...(servers ? [{ id: 'inv', label: 'Инвентаризация', group: 'Парк' }] : []),
   ]
   const side: Record<string, string> = {}
   if (data) {
@@ -168,6 +171,8 @@ export function ReportModal({ onClose, onUnauthorized, onOpen }: Props) {
     side.maint = String(data.maint.length)
   }
   const cur = SECS.find((s) => s.id === sec) ?? SECS[0]
+  // инвентаризация - не за период: ни сроков, ни общего файла отчета, свои кнопки
+  const inv = cur.id === 'inv'
 
   const link = (kind: 'server' | 'check', id: number, name: string) => (
     <button className="linklike" onClick={() => onOpen(kind, id)}>
@@ -203,24 +208,26 @@ export function ReportModal({ onClose, onUnauthorized, onOpen }: Props) {
 
   return (
     <div className="modal-backdrop">
-      <div className="card modal alerts-modal" onClick={(e) => e.stopPropagation()}>
+      <div className={`card modal alerts-modal${inv ? ' al-wide' : ''}`} onClick={(e) => e.stopPropagation()}>
         <div className="al-head">
           <h3>{t('Отчет')}</h3>
-          {data && (
+          {data && !inv && (
             <span className="muted small">
               {fmtDay(data.since)} - {fmtDay(data.until)}
               {busy ? ` · ${t('считаем...')}` : ''}
             </span>
           )}
           <span className="al-head-btns">
-            <button
-              className="ghost"
-              disabled={!data || busy}
-              title={t('Одним HTML-файлом: открывается в любом браузере, можно переслать или распечатать')}
-              onClick={() => data && downloadReportHtml(data, t, branding?.title || 'Kervax')}
-            >
-              {t('Скачать отчет')}
-            </button>
+            {!inv && (
+              <button
+                className="ghost"
+                disabled={!data || busy}
+                title={t('Одним HTML-файлом: открывается в любом браузере, можно переслать или распечатать')}
+                onClick={() => data && downloadReportHtml(data, t, branding?.title || 'Kervax')}
+              >
+                {t('Скачать отчет')}
+              </button>
+            )}
             <button className="ghost" onClick={onClose}>
               {t('Закрыть')}
             </button>
@@ -232,16 +239,27 @@ export function ReportModal({ onClose, onUnauthorized, onOpen }: Props) {
           <div className="al-main" ref={mainRef}>
             <div className="srv-main-head">
               <h4>{t(cur.label)}</h4>
-              <div className="win-switch">
-                {PERIODS.map((d) => (
-                  <button key={d} className={`win-btn${d === days ? ' win-btn-active' : ''}`} onClick={() => setDays(d)}>
-                    {d === 1 ? t('сутки') : t('{n} дней', { n: d })}
-                  </button>
-                ))}
-              </div>
+              {!inv && (
+                <div className="win-switch">
+                  {PERIODS.map((d) => (
+                    <button key={d} className={`win-btn${d === days ? ' win-btn-active' : ''}`} onClick={() => setDays(d)}>
+                      {d === 1 ? t('сутки') : t('{n} дней', { n: d })}
+                    </button>
+                  ))}
+                </div>
+              )}
             </div>
             {err && <p className="form-error">{err}</p>}
-            {!data ? (
+            {inv ? (
+              <div className="srv-sec inv-sec">
+                <p className="muted small al-lead">{t(LEAD.inv)}</p>
+                <Inventory
+                  brand={branding?.title || 'Kervax'}
+                  onOpen={(id) => onOpen('server', id)}
+                  onUnauthorized={onUnauthorized}
+                />
+              </div>
+            ) : !data ? (
               !err && <p className="muted small">{t('считаем...')}</p>
             ) : (
               <div className={`srv-sec${busy ? ' rp-busy' : ''}`}>

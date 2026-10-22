@@ -468,6 +468,8 @@ input:focus {
   height: min(620px, calc(100vh - 8vh - 2rem));
   height: min(620px, calc(100dvh - 8vh - 2rem));
 }
+/* инвентаризация: полная таблица широкая, окну дается почти весь экран */
+.alerts-modal.al-wide { width: min(1480px, calc(100vw - 2rem)); }
 .ac-form { display: flex; flex-direction: column; gap: 0.6rem; margin-bottom: 0.6rem; }
 .qr-wrap.ac-qr { align-self: flex-start; }
 /* плитка «Выключены» — нейтрально-приглушённая цифра */
@@ -7764,3 +7766,43 @@ button.type-chip.tamper-more { cursor: pointer; border: 1px dashed var(--border)
 .webfiles-root { display: flex; flex-direction: column; gap: 0.2rem; padding: 0.4rem 0; border-bottom: 1px solid var(--border); }
 .webfiles-root:last-child { border-bottom: 0; }
 .webfiles-head { display: flex; flex-direction: column; gap: 2px; padding: 0 0.3rem; overflow-wrap: anywhere; }
+
+/* инвентаризация в окне "Отчет" (Inventory.tsx): выбор серверов чипами, плотная таблица */
+.srv-sec.inv-sec { max-width: none; }
+.inv { display: flex; flex-direction: column; gap: 0.6rem; }
+.inv-pick { display: flex; flex-direction: column; gap: 0.45rem; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 0.55rem 0.7rem; }
+.inv-row { display: flex; flex-wrap: wrap; gap: 0.4rem; align-items: center; }
+.inv-lab { font-size: 0.7rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-muted); margin-right: 0.15rem; }
+.inv-grow { flex: 1; }
+button.inv-chip { background: transparent; color: var(--text); border: 1px solid var(--border-strong); border-radius: 999px; padding: 0.12rem 0.65rem; font-size: 0.8rem; font-weight: 500; box-shadow: none; }
+button.inv-chip i { font-style: normal; color: var(--text-muted); font-size: 0.74rem; margin-left: 0.2rem; }
+button.inv-chip:hover { background: var(--hover); }
+button.inv-chip.on { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 18%, transparent); }
+.inv-q { flex: 1 1 12rem; min-width: 0; max-width: 22rem; }
+.inv-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(10rem, 1fr)); gap: 0.1rem 0.7rem; padding-top: 0.35rem; border-top: 1px dashed var(--border); }
+.inv-list label { display: flex; flex-direction: row; margin: 0; gap: 0.35rem; align-items: center; font-size: 0.82rem; cursor: pointer; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.inv-list label.off { color: var(--text-muted); text-decoration: line-through; }
+.inv-list input { width: auto; margin: 0; flex: 0 0 auto; }
+.inv-tw { overflow-x: auto; border: 1px solid var(--border); border-radius: 8px; }
+.inv-tbl { margin: 0; font-size: 0.84rem; }
+.inv-tbl th { white-space: nowrap; }
+.inv-tbl td, .inv-tbl th { padding: 0.3rem 0.5rem; vertical-align: top; }
+.inv-tbl .mono { font-size: 0.74rem; }
+.inv-tbl .num { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.inv-tbl tfoot td { font-weight: 600; background: var(--bg); border-top: 1px solid var(--border-strong); }
+.inv-full { width: auto; min-width: 100%; }
+.inv-full td { line-height: 1.35; }
+.inv-name { font-weight: 600; }
+.inv-disks { display: flex; flex-wrap: wrap; gap: 0.1rem 0.7rem; }
+.inv-disks.inv-col { flex-direction: column; }
+.inv-disk { white-space: nowrap; }
+.inv-dt { display: inline-block; width: 0.5rem; height: 0.5rem; border-radius: 2px; margin-right: 0.35rem; }
+.inv-dt-nvme { background: #8b5cf6; }
+.inv-dt-ssd { background: #3b82f6; }
+.inv-dt-hdd { background: #f59e0b; }
+.inv-dt-virt { background: #64748b; }
+.inv-dt-unk { border: 1px dashed var(--text-muted); }
+.type-chip.inv-bare { color: var(--up); }
+.inv-bad { color: var(--down); }
+.inv-off { display: inline-block; width: 0.45rem; height: 0.45rem; border-radius: 50%; background: var(--down); margin-left: 0.3rem; vertical-align: 0.1rem; }
+.inv-tiles { margin-top: 0.1rem; }
