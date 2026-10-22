@@ -26,6 +26,7 @@ const EN: Record<string, string> = {
   'Готово': 'Done',
   'Ошибка': 'Error',
   'Ошибка HTTP {code}': 'HTTP error {code}',
+  'Сервер прислал непонятный ответ, обновите страницу': 'The server sent an unreadable response, reload the page',
   '…': '…',
 
   // --- вход ---
@@ -4106,6 +4107,17 @@ const EN: Record<string, string> = {
   'не добавлены: {n}': 'not added: {n}',
   'уже на мониторинге': 'already monitored',
   'снаружи — изнутри некому': 'outside — nobody to check inside',
+  'главная не открылась — ищем типовые пути изнутри…': 'home page failed — looking for typical paths from inside…',
+  'Обычный GET на адрес MCP-сервера получает {code} — так и положено, сервер жив. Монитор будет проверять {path} и считать рабочими ответы 200–499, кроме 404.':
+    'A plain GET to an MCP server endpoint gets {code} — that is expected, the server is alive. The monitor will check {path} and treat 200–499 except 404 as working.',
+  'Главная не открылась, а {path} отвечает {code}: у сервиса просто нет главной страницы. Монитор будет проверять {path}.':
+    'The home page failed, but {path} answers {code}: the service simply has no home page. The monitor will check {path}.',
+  '{path} отвечает {code}, как живой MCP-сервер — мониторить его': '{path} answers {code} like a live MCP server — monitor it',
+  '{path} отвечает {code} — мониторить его': '{path} answers {code} — monitor it',
+  'Монитор проверяет этот путь: главной у сервиса нет.': 'The monitor checks this path: the service has no home page.',
+  'Главная не открылась, но отвечает типовой путь (/health, /api, /mcp…) — у сервиса просто нет главной страницы.':
+    'The home page failed, but a typical path (/health, /api, /mcp…) answers — the service simply has no home page.',
+  'без главной, по типовому пути: {n}': 'no home page, via a typical path: {n}',
   'Домен не нашёлся ни на одной ноде — проверять изнутри некому, поэтому монитор проверяет панель снаружи.':
     'The domain was not found on any node — nobody can check it from inside, so the panel checks it from outside.',
   'вне мониторинга осталось доменов: {n}': 'domains still not monitored: {n}',

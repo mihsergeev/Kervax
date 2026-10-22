@@ -260,6 +260,9 @@ async def ingest(
             if check is not None:
                 inside_probe.store(check, req, server_id, now)
             continue
+        if req.kind == "dpath":
+            # типовой путь домена из мастера: сырой код читает domain_probe.local_hints
+            continue
         if req.check_id == 0:
             await _ingest_domain(session, req, now)
             continue
@@ -370,3 +373,7 @@ async def _ingest_domain(session: AsyncSession, req: ProbeRequest, now: datetime
     row.local_status = outcome.status
     row.local_latency_ms = outcome.latency_ms
     row.local_message = outcome.message[:512]
+    from app import domain_probe  # domain_probe импортирует этот модуль
+
+    if domain_probe.wants_paths(outcome.status, outcome.message):
+        await domain_probe.request_local_paths(session, row, now)

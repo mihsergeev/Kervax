@@ -84,7 +84,23 @@ export async function api<T>(path: string, options: RequestInit = {}): Promise<T
   }
   if (res.status === 204) return undefined as T
 
-  const body = await res.json().catch(() => null)
+  // Тело читаем текстом и разбираем сами. Раньше json().catch(() => null) превращал ответ 200,
+  // который не JSON (страница прокси, оборванный на деплое ответ), в null: список окон
+  // обслуживания приходил null, и главная падала в отрисовке на .filter
+  const text = await res.text().catch(() => null)
+  let body = null
+  let broken = text === null
+  if (text) {
+    try {
+      body = JSON.parse(text)
+    } catch {
+      broken = true
+    }
+  }
+  if (res.ok && broken) {
+    noteApiFailure(method, path, res.status, (text ?? '').slice(0, 200))
+    throw new ApiError(tr('Сервер прислал непонятный ответ, обновите страницу'), res.status)
+  }
   if (!res.ok) {
     const detail =
       typeof body?.detail === 'string' ? body.detail : tr('Ошибка HTTP {code}', { code: res.status })
@@ -537,6 +553,8 @@ export type AdoptedDomain = {
   check_id: number
   local: boolean
   server: string
+  path: string // типовой путь вместо главной; пусто — главная
+  expected_status: string // ожидаемые коды, если не по умолчанию
   reason: '' | 'monitored' | 'invalid'
   problem: string
 }
@@ -552,15 +570,17 @@ export type AdoptResult = {
 
 // Завести мониторы по доменам веб-сервиса. Возвращает обновлённую карту хостов,
 // чтобы галочки перерисовались без перезагрузки страницы. local — какие из доменов
-// проверять изнутри сервера, где они найдены (ноду панель вычисляет сама).
+// проверять изнутри сервера, где они найдены (ноду панель вычисляет сама); paths — какие
+// мониторить по типовому пути, подобранному проверкой (сам путь панель берёт из итога).
 export function adoptDomains(
   domains: string[],
   group_name = '',
   local: string[] = [],
+  paths: string[] = [],
 ): Promise<AdoptResult> {
   return api('/api/checks/adopt', {
     method: 'POST',
-    body: JSON.stringify({ domains, group_name, local }),
+    body: JSON.stringify({ domains, group_name, local, paths }),
   })
 }
 
@@ -569,6 +589,9 @@ export function adoptDomains(
 // pending — ещё проверяется; none (изнутри) — проверить было некому. *_kind — что не так
 // одним словом: http, dns, tls, refused, timeout, reset, connect, other, offline, no_answer.
 export type ProbeStatus = 'pending' | 'up' | 'degraded' | 'down' | 'none'
+// Главная не открылась, а типовой путь (/health, /api, /mcp…) отвечает — его и предлагаем.
+// expect — ожидаемые коды монитора, если не по умолчанию (MCP на GET отвечает 405/406).
+export type PathHint = { path: string; code: number; expect: string }
 export type DomainProbe = {
   domain: string
   started_at: string
@@ -583,6 +606,9 @@ export type DomainProbe = {
   local_kind: string
   local_code: number
   local_server: string
+  ext_hint: PathHint | null
+  local_hint: PathHint | null
+  local_hint_pending: boolean // агент ещё перебирает пути изнутри
 }
 // force=false — домены со свежим итогом не перепроверяются (открытие мастера)
 export function probeDomains(domains: string[], force = false): Promise<{ items: DomainProbe[] }> {

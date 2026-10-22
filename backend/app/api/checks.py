@@ -28,6 +28,7 @@ from app.models import (
     CheckIncident,
     CheckIpSample,
     CheckSample,
+    DomainProbe,
     Location,
     IgnoredDomain,
     LocationResult,
@@ -893,6 +894,7 @@ async def adopt_domains(
         if local else {}
     )
     now = datetime.now(timezone.utc)
+    hints = await _adopt_hints(session, {_norm_domain(d) for d in body.paths}, now)
     # итог по каждому домену: без него мастер после добавления не может показать,
     # что заведено, как оно будет проверяться и что нет — только общие числа
     items: list[AdoptItemOut] = []
@@ -921,6 +923,14 @@ async def adopt_domains(
             sort_order=max_order,
         )
         hit = serving.get(domain) if domain in local else None
+        # главная не открылась, а типовой путь отвечает - монитор на нем (путь подобран
+        # проверкой в мастере тем способом, каким монитор и будет проверять)
+        ext_hint, local_hint = hints.get(domain, (None, None))
+        hint = local_hint if hit else ext_hint
+        if hint:
+            check.target += hint["path"]
+            if hint["expect"]:
+                check.expected_status = hint["expect"]
         if hit:
             # домен, который панель не видит снаружи (так показала проверка в мастере),
             # проверяет агент его ноды; сразу помечаем привязку — первый ответ агента
@@ -930,7 +940,10 @@ async def adopt_domains(
             check.probe_bound_at = now
             _one_probe_source(check)
         fresh.append(check)
-        items.append(AdoptItemOut(domain=domain, local=bool(hit), server=hit[1] if hit else ""))
+        items.append(AdoptItemOut(
+            domain=domain, local=bool(hit), server=hit[1] if hit else "",
+            path=hint["path"] if hint else "", expected_status=hint["expect"] if hint else "",
+        ))
     if fresh:
         session.add_all(fresh)
         await session.commit()
@@ -947,6 +960,18 @@ async def adopt_domains(
         local=sum(1 for c in fresh if c.probe_local),
         group_name=group, items=items,
     )
+
+
+async def _adopt_hints(
+    session, domains: set[str], now: datetime
+) -> dict[str, tuple[dict | None, dict | None]]:
+    """Подобранные мастером типовые пути: {домен: (снаружи, изнутри)}."""
+    if not domains:
+        return {}
+    rows = list(await session.scalars(select(DomainProbe).where(DomainProbe.domain.in_(domains))))
+    inside = await domain_probe.local_hints(session, rows, now)
+    return {r.domain: (r.ext_hint or None, inside.get(r.domain, (None, False))[0] or None)
+            for r in rows}
 
 
 @router.post("", response_model=CheckOut, status_code=status.HTTP_201_CREATED)

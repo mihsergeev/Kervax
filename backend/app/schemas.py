@@ -591,6 +591,9 @@ class AdoptDomainsIn(BaseModel):
     # Какие из них проверять изнутри сервера, где домен найден (сайт закрыт снаружи).
     # Ноду здесь не передают: её панель вычисляет сама, как и для «проверять локально».
     local: list[str] = Field(default_factory=list, max_length=500)
+    # Какие мониторить по типовому пути, подобранному проверкой в мастере (главная не
+    # открылась, а /health или /api отвечают). Сам путь панель берет из итога проверки.
+    paths: list[str] = Field(default_factory=list, max_length=500)
 
 
 class AdoptItemOut(BaseModel):
@@ -600,6 +603,8 @@ class AdoptItemOut(BaseModel):
     check_id: int = 0  # монитор по домену; 0 — не заведён или вне видимости учётки
     local: bool = False  # проверяет агент ноды — изнутри сервера
     server: str = ""  # какая нода проверяет изнутри
+    path: str = ""  # типовой путь вместо главной; пусто - главная
+    expected_status: str = ""  # ожидаемые коды, если не по умолчанию (MCP: 405/406 - живой)
     # почему монитор не заведён: monitored — домен уже на мониторинге, invalid — имя не
     # годится (подробность в problem); пусто — заведён
     reason: str = ""
@@ -626,6 +631,17 @@ class DomainProbeIn(BaseModel):
     force: bool = False
 
 
+class PathHint(BaseModel):
+    """Типовой путь, который отвечает, когда главная не открылась (domain_probe.PATHS).
+
+    expect - ожидаемые коды для монитора, если не по умолчанию: адрес MCP-сервера на
+    обычный GET отвечает 405/406, и это значит "жив"."""
+
+    path: str
+    code: int
+    expect: str = ""
+
+
 class DomainProbeOut(BaseModel):
     """Итог разовой проверки домена: снаружи (панелью) и изнутри сервера (агентом).
 
@@ -647,6 +663,10 @@ class DomainProbeOut(BaseModel):
     local_kind: str = ""
     local_code: int = 0
     local_server: str = ""
+    # главная не открылась, а типовой путь отвечает - его и предлагаем мониторить
+    ext_hint: PathHint | None = None
+    local_hint: PathHint | None = None
+    local_hint_pending: bool = False  # агент еще перебирает пути изнутри
 
 
 class DomainProbesOut(BaseModel):

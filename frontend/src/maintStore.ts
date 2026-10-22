@@ -12,6 +12,9 @@ function refresh(force = false): void {
   inflight = true
   listMaint()
     .then((d) => {
+      // не список (null от прокси или старого бэкенда) - оставляем прежние окна, иначе
+      // плашки и блок на главной падают на .filter
+      if (!Array.isArray(d)) return
       cache = { ts: Date.now(), data: d }
       subs.forEach((f) => f(d))
     })

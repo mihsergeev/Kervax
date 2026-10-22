@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import {
   ApiError,
@@ -8,6 +8,7 @@ import {
   ignoreDomains,
   probeDomains,
   type DomainProbe,
+  type PathHint,
   type ProbeStatus,
 } from './api'
 import { useI18n } from './i18n'
@@ -36,7 +37,11 @@ type T = (s: string, p?: Record<string, string | number>) => string
 type Mode = 'ext' | 'local'
 
 const works = (s?: ProbeStatus) => s === 'up' || s === 'degraded'
-const waiting = (p: DomainProbe) => p.ext_status === 'pending' || p.local_status === 'pending'
+const waiting = (p: DomainProbe) =>
+  p.ext_status === 'pending' || p.local_status === 'pending' || p.local_hint_pending
+// открывается снаружи / изнутри — главная или хотя бы типовой путь (/health, /api, /mcp…)
+const extOpens = (p: DomainProbe) => works(p.ext_status) || !!p.ext_hint
+const localOpens = (p: DomainProbe) => works(p.local_status) || !!p.local_hint
 
 // Что не так — одним словом: строк в мастере бывает сотня, и полную причину («сервер не
 // ответил на попытку соединения (ConnectTimeout)») читать в каждой некому. Она в подсказке.
@@ -109,6 +114,49 @@ function ProbeChoice({ p, mode, onMode }: { p: DomainProbe; mode: Mode; onMode: 
   )
 }
 
+// Главная не открылась, а типовой путь отвечает: у API, MCP-сервера или бэкенда за прокси
+// главной просто нет. Предлагаем мониторить этот путь — галочка стоит сразу, иначе
+// монитор на главной покраснел бы с первой проверки.
+function PathHintPick({
+  hint,
+  pending,
+  on,
+  onToggle,
+}: {
+  hint: PathHint | null
+  pending: boolean
+  on: boolean
+  onToggle: () => void
+}) {
+  const { t } = useI18n()
+  if (!hint) {
+    return pending ? (
+      <div className="adopt-path muted small">
+        <span className="run-spin" />
+        {t('главная не открылась — ищем типовые пути изнутри…')}
+      </div>
+    ) : null
+  }
+  const mcp = !!hint.expect
+  return (
+    <label
+      className={`adopt-path small${on ? ' on' : ''}`}
+      title={
+        mcp
+          ? t('Обычный GET на адрес MCP-сервера получает {code} — так и положено, сервер жив. Монитор будет проверять {path} и считать рабочими ответы 200–499, кроме 404.', { code: hint.code, path: hint.path })
+          : t('Главная не открылась, а {path} отвечает {code}: у сервиса просто нет главной страницы. Монитор будет проверять {path}.', { code: hint.code, path: hint.path })
+      }
+    >
+      <input type="checkbox" checked={on} onChange={onToggle} />
+      <span>
+        {mcp
+          ? t('{path} отвечает {code}, как живой MCP-сервер — мониторить его', { path: hint.path, code: hint.code })
+          : t('{path} отвечает {code} — мониторить его', { path: hint.path, code: hint.code })}
+      </span>
+    </label>
+  )
+}
+
 // Итог «Поставить на мониторинг»: что заведено и как будет проверяться, что нет и почему.
 // Раньше добавленные строки просто пропадали из списка, оставалась строчка «создано
 // мониторов: 5» над пустым списком — что добавилось, а что нет, было не понять.
@@ -178,6 +226,14 @@ function AdoptReport({
             <span className="adopt-mark up">✓</span>
             <span className="adopt-dom mono">{i.domain}</span>
             {how(i)}
+            {i.path && (
+              <span
+                className="adopt-how-path mono small"
+                title={t('Монитор проверяет этот путь: главной у сервиса нет.')}
+              >
+                {i.path}
+              </span>
+            )}
             {open(i)}
           </div>
         ))}
@@ -280,6 +336,8 @@ export function AdoptSitesModal({
   const [inflight, setInflight] = useState<Set<string>>(new Set())
   const [probeErr, setProbeErr] = useState('')
   const [modes, setModes] = useState<Record<string, Mode>>({})
+  // домены, где человек снял предложенный типовой путь — монитор пойдёт на главную
+  const [pathOff, setPathOff] = useState<Set<string>>(new Set())
   const requested = useRef<Set<string>>(new Set())
 
   // строки со статусом: считаем один раз на смену входных данных/карты мониторов
@@ -398,22 +456,32 @@ export function AdoptSitesModal({
     if (chosen) return chosen
     const p = probes[domain]
     // снаружи — пока не доказано, что снаружи не работает, а изнутри работает
-    if (!p || works(p.ext_status) || p.ext_status === 'pending') return 'ext'
-    return works(p.local_status) ? 'local' : 'ext'
+    if (!p || extOpens(p) || p.ext_status === 'pending') return 'ext'
+    return localOpens(p) ? 'local' : 'ext'
   }
+  // типовой путь выбранного варианта — если главная там не открылась, а путь отвечает
+  const hintOf = (domain: string): PathHint | null => {
+    const p = probes[domain]
+    if (!p) return null
+    const local = modeOf(domain) === 'local'
+    if (works(local ? p.local_status : p.ext_status)) return null
+    return local ? p.local_hint : p.ext_hint
+  }
+  const pathOn = (domain: string) => !!hintOf(domain) && !pathOff.has(domain)
   const chosenWorks = (domain: string) => {
     const p = probes[domain]
-    return !!p && works(modeOf(domain) === 'local' ? p.local_status : p.ext_status)
+    return !!p && (works(modeOf(domain) === 'local' ? p.local_status : p.ext_status) || pathOn(domain))
   }
 
   const probeRows = newDomains.filter((d) => probes[d] || inflight.has(d))
   const probeDone = newDomains.filter((d) => probes[d] && !waiting(probes[d]) && !inflight.has(d))
   const probeRunning = probeRows.length - probeDone.length
-  const extOk = probeDone.filter((d) => works(probes[d].ext_status)).length
+  const extOk = probeDone.filter((d) => extOpens(probes[d])).length
   const localOnly = probeDone.filter(
-    (d) => !works(probes[d].ext_status) && works(probes[d].local_status),
+    (d) => !extOpens(probes[d]) && localOpens(probes[d]),
   ).length
   const dead = probeDone.length - extOk - localOnly
+  const viaPath = probeDone.filter((d) => !!hintOf(d)).length
   const checkedAt = probeDone
     .map((d) => probes[d].started_at)
     .sort((a, b) => Date.parse(a) - Date.parse(b))[0]
@@ -484,7 +552,7 @@ export function AdoptSitesModal({
     try {
       const chunk = picked.slice(0, ADOPT_MAX).map((r) => r.domain)
       const local = chunk.filter((d) => modeOf(d) === 'local')
-      const res = await adoptDomains(chunk, group.trim(), local)
+      const res = await adoptDomains(chunk, group.trim(), local, chunk.filter(pathOn))
       setSel((prev) => {
         const next = new Set(prev)
         for (const d of chunk) next.delete(d)
@@ -600,6 +668,11 @@ export function AdoptSitesModal({
                       {t('открываются снаружи: {n}', { n: extOk })}
                     </span>
                     {localOnly > 0 && <span>{t('только изнутри сервера: {n}', { n: localOnly })}</span>}
+                    {viaPath > 0 && (
+                      <span title={t('Главная не открылась, но отвечает типовой путь (/health, /api, /mcp…) — у сервиса просто нет главной страницы.')}>
+                        {t('без главной, по типовому пути: {n}', { n: viaPath })}
+                      </span>
+                    )}
                     {dead > 0 && <span className="t-down">{t('не открываются: {n}', { n: dead })}</span>}
                     {checkedAt && <span className="muted">{t('проверено {ago}', { ago: agoText(checkedAt, t) })}</span>}
                     <button
@@ -651,67 +724,88 @@ export function AdoptSitesModal({
                       {!shut && (
                         <div className="adopt-rows">
                           {list.map((r) => (
-                            <div key={r.domain} className={`adopt-row adopt-${r.status}`}>
-                              {r.status === 'new' ? (
-                                <input
-                                  type="checkbox"
-                                  checked={sel.has(r.domain)}
-                                  onChange={() => toggle(r.domain)}
-                                />
-                              ) : r.status === 'monitored' ? (
-                                r.checkId > 0 && onOpenCheck ? (
-                                  <button
-                                    className="adopt-mark up"
-                                    title={t('Уже в мониторинге — открыть монитор')}
-                                    onClick={() => onOpenCheck(r.checkId)}
-                                  >
-                                    ✓
-                                  </button>
+                            <Fragment key={r.domain}>
+                              <div className={`adopt-row adopt-${r.status}`}>
+                                {r.status === 'new' ? (
+                                  <input
+                                    type="checkbox"
+                                    checked={sel.has(r.domain)}
+                                    onChange={() => toggle(r.domain)}
+                                  />
+                                ) : r.status === 'monitored' ? (
+                                  r.checkId > 0 && onOpenCheck ? (
+                                    <button
+                                      className="adopt-mark up"
+                                      title={t('Уже в мониторинге — открыть монитор')}
+                                      onClick={() => onOpenCheck(r.checkId)}
+                                    >
+                                      ✓
+                                    </button>
+                                  ) : (
+                                    <span className="adopt-mark up" title={t('Уже в мониторинге')}>✓</span>
+                                  )
                                 ) : (
-                                  <span className="adopt-mark up" title={t('Уже в мониторинге')}>✓</span>
-                                )
-                              ) : (
-                                <span
-                                  className="adopt-mark"
-                                  title={t('Маска или regexp — монитору нужен конкретный адрес')}
-                                >
-                                  —
-                                </span>
-                              )}
-                              <span className="adopt-dom mono">{r.domain}</span>
-                              {r.status === 'new' && probes[r.domain] ? (
-                                <ProbeChoice
-                                  p={probes[r.domain]}
-                                  mode={modeOf(r.domain)}
-                                  onMode={(m) => setModes((prev) => ({ ...prev, [r.domain]: m }))}
+                                  <span
+                                    className="adopt-mark"
+                                    title={t('Маска или regexp — монитору нужен конкретный адрес')}
+                                  >
+                                    —
+                                  </span>
+                                )}
+                                <span className="adopt-dom mono">{r.domain}</span>
+                                {r.status === 'new' && probes[r.domain] ? (
+                                  <ProbeChoice
+                                    p={probes[r.domain]}
+                                    mode={modeOf(r.domain)}
+                                    onMode={(m) => setModes((prev) => ({ ...prev, [r.domain]: m }))}
+                                  />
+                                ) : r.status === 'new' && inflight.has(r.domain) ? (
+                                  <span className="adopt-probes adopt-probe-wait">
+                                    <span className="run-spin" />
+                                  </span>
+                                ) : null}
+                                {r.servers.length > 0 && (
+                                  <span className="adopt-where muted small">{r.servers.join(', ')}</span>
+                                )}
+                                {r.status === 'new' && (
+                                  <button
+                                    className="adopt-skip"
+                                    title={t('Мониторить не нужно — убрать из предложений')}
+                                    onClick={() => mark([r.domain], true)}
+                                  >
+                                    ✕
+                                  </button>
+                                )}
+                                {r.status === 'skipped' && (
+                                  <button
+                                    className="adopt-skip back"
+                                    title={t('Вернуть в предложения')}
+                                    onClick={() => mark([r.domain], false)}
+                                  >
+                                    ↺
+                                  </button>
+                                )}
+                              </div>
+                              {r.status === 'new' && probes[r.domain] && (
+                                <PathHintPick
+                                  hint={hintOf(r.domain)}
+                                  pending={
+                                    modeOf(r.domain) === 'local' &&
+                                    !works(probes[r.domain].local_status) &&
+                                    probes[r.domain].local_hint_pending
+                                  }
+                                  on={pathOn(r.domain)}
+                                  onToggle={() =>
+                                    setPathOff((prev) => {
+                                      const next = new Set(prev)
+                                      if (next.has(r.domain)) next.delete(r.domain)
+                                      else next.add(r.domain)
+                                      return next
+                                    })
+                                  }
                                 />
-                              ) : r.status === 'new' && inflight.has(r.domain) ? (
-                                <span className="adopt-probes adopt-probe-wait">
-                                  <span className="run-spin" />
-                                </span>
-                              ) : null}
-                              {r.servers.length > 0 && (
-                                <span className="adopt-where muted small">{r.servers.join(', ')}</span>
                               )}
-                              {r.status === 'new' && (
-                                <button
-                                  className="adopt-skip"
-                                  title={t('Мониторить не нужно — убрать из предложений')}
-                                  onClick={() => mark([r.domain], true)}
-                                >
-                                  ✕
-                                </button>
-                              )}
-                              {r.status === 'skipped' && (
-                                <button
-                                  className="adopt-skip back"
-                                  title={t('Вернуть в предложения')}
-                                  onClick={() => mark([r.domain], false)}
-                                >
-                                  ↺
-                                </button>
-                              )}
-                            </div>
+                            </Fragment>
                           ))}
                         </div>
                       )}
