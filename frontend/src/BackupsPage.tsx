@@ -3161,7 +3161,7 @@ export function BackupsPage({
   onSrvConsumed?: () => void
 }) {
   const { t } = useI18n()
-  const { isViewer } = useAuth()
+  const { isViewer, isAdmin } = useAuth()
   const [servers, setServers] = useState<Server[] | null>(null)
   const [err, setErr] = useState<string | null>(null)
   const [openId, setOpenId] = useState<number | null>(openHostId)
@@ -3617,7 +3617,7 @@ export function BackupsPage({
       </div>
       {/* Сейф доступов — в подвале, рядом со справочными блоками: это не ежедневная
           работа, а страховка на день восстановления. Виден только админам. */}
-      {!isViewer && <VaultPanel servers={servers ?? []} />}
+      {isAdmin && <VaultPanel servers={servers ?? []} />}
       {mutesOpen && (
         <MutesPanel
           rows={mutes}

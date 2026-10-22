@@ -673,7 +673,7 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
   // Главная — витрина всех разделов, поэтому она обязана уважать нарезку доступа:
   // иначе учётка без «Бэкапов» видит на ней и карточку бэкапов, и пункты, ведущие
   // в закрытый раздел (клик по ним всё равно упрётся в 403).
-  const { sections, isViewer } = useAuth()
+  const { sections, isViewer, isAdmin } = useAuth()
   const canSee = useCallback(
     (sec: Section) => sections.length === 0 || sections.includes(sec),
     [sections],
@@ -723,10 +723,12 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
       .catch(() => setProbeHints([]))
     // объекты, по которым не сработает ни один алерт. Доступно только админу
     // (область действия — часть настроек алертов), остальным просто молчим
-    alertCoverage()
-      .then((r) => setMutes(r.items))
-      .catch(() => setMutes([]))
-  }, [onUnauthorized])
+    if (isAdmin)
+      alertCoverage()
+        .then((r) => setMutes(r.items))
+        .catch(() => setMutes([]))
+    else setMutes([])
+  }, [onUnauthorized, isAdmin])
 
   // быстрый мут прямо с главной: приглушить типы алертов сервера навсегда (alert_mutes).
   // Для диска warn ключ 'disk@1' — крит и проблема продолжат алертить (см. _muted).
@@ -970,7 +972,7 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
           📌
         </span>
       )}
-      {it.mute && mutePick === it.key && (
+      {it.mute && !isViewer && mutePick === it.key && (
         <span className="home-mute-pick" onClick={(e) => e.stopPropagation()}>
           <span className="muted">{oomMuteText(it.mute) ? `${oomMuteText(it.mute)}:` : t('не алертить:')}</span>
           {[
@@ -986,7 +988,7 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
           <span className="home-mute-opt muted" role="button" onClick={() => setMutePick(null)}>✕</span>
         </span>
       )}
-      {it.mute && mutePick !== it.key && (
+      {it.mute && !isViewer && mutePick !== it.key && (
         // OOM глушится по виновнику: в подсказке, по какому именно (он же в тексте строки)
         <span className="quick-mute" title={oomMuteText(it.mute) ?? t('Не алертить')}
           onClick={(e) => {
@@ -1156,7 +1158,7 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
       )}
       {tiles.length > 0 && <div className="net-tiles home-tiles">{tiles}</div>}
       <div className="net-cards home-blocks">
-      {mutes.length > 0 && <MuteHint items={mutes} onOpen={onOpen} onDone={load} />}
+      {mutes.length > 0 && isAdmin && <MuteHint items={mutes} onOpen={onOpen} onDone={load} />}
       {broken.length > 0 && (
         <div className={`chart-card net-card net-card-wide home-block home-attention-broken${broken.some((x) => x.tone === 't-down') ? ' has-down' : ''}`}>
           {cap(t('Что сломано'), brokenRows.length, broken.some((x) => x.tone === 't-down') ? 'bad' : 'warn')}
@@ -1259,7 +1261,8 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
           </div>
         </div>
       )}
-      {probeHints.length > 0 && (
+      {/* подсказка - предложение поменять мониторы, учетке только для просмотра не нужна */}
+      {probeHints.length > 0 && !isViewer && (
         <div className="chart-card net-card home-block home-attention-probe">
           {cap(t('Похоже на белый список'), probeHints.length)}
           <LocalProbeHint items={probeHints} onDone={load} />

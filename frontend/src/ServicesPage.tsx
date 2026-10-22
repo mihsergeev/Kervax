@@ -1162,7 +1162,7 @@ function QueueList({ server, svc, busy, save, onChanged, onlyProblems }: {
                   className={`mono queue-thr-cell${eff > 0 ? ' queue-alert-on' : ''}`}
                   type="number"
                   min={0}
-                  disabled={busy}
+                  disabled={busy || isViewer}
                   placeholder={t('порог')}
                   value={draftOf(key)}
                   title={t('Порог этой очереди: с этого числа сообщений алертим. Пусто или 0 — не алертить.')}
@@ -1760,6 +1760,7 @@ function ServerServicesModal({ srv, onClose, onChanged, initialSec, sites }: {
   sites: SitesCtx // «какие домены уже мониторятся» + как завести новый
 }) {
   const { t } = useI18n()
+  const { isViewer } = useAuth()
   const s = srv.server
   const [active, setActive] = useState<string>(() => (SVC_SEC_IDS.has(initialSec ?? '') ? initialSec! : 'overview'))
   const layoutRef = useRef<HTMLDivElement>(null)
@@ -2299,7 +2300,7 @@ function ServerServicesModal({ srv, onClose, onChanged, initialSec, sites }: {
                     min={0}
                     placeholder="0"
                     value={draft}
-                    disabled={busy}
+                    disabled={busy || isViewer}
                     onChange={(e) => setDraft(e.target.value)}
                     onBlur={() => {
                       const v = Math.max(0, Math.round(Number(draft) || 0))

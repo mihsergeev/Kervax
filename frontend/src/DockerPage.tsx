@@ -626,7 +626,7 @@ function ContainerRow({
   day?: number // перезапусков за сутки (restarts_day)
   problem?: string // 'down' | 'loop' — по контейнеру уже отправлен алерт
   canAct: boolean
-  onLogs: () => void
+  onLogs?: () => void // нет у учетки только для просмотра: логи читаются командой на ноде
   onChanged: () => void
   onDenied?: () => void // прокси ответил 403: на ноде доступ только на чтение
   sock?: boolean // внешний прокси с docker-сокетом
@@ -717,9 +717,11 @@ function ContainerRow({
         {c.status}
       </div>
       <div className="docker-actions">
-        <button className="ghost icon-btn" onClick={onLogs} title={t('Логи')}>
-          📄
-        </button>
+        {onLogs && (
+          <button className="ghost icon-btn" onClick={onLogs} title={t('Логи')}>
+            📄
+          </button>
+        )}
         {canAct &&
           (running ? (
             <>
@@ -883,6 +885,8 @@ function DockerHostModal({
   onChanged: () => void
 }) {
   const { t } = useI18n()
+  // логи - тоже команда агенту (POST), учетке только для просмотра бэкенд ее не даст
+  const canLogs = !useAuth().isViewer
   const [logs, setLogs] = useState<string | null>(null)
   const [hideStopped, setHideStopped] = useState(false)
   const [denied, setDenied] = useState(false)
@@ -1202,7 +1206,7 @@ function DockerHostModal({
                           sock={exposed.some((e) => e.name === c.name)}
                           day={s.restarts_day?.['docker:' + c.name] ?? 0}
                           canAct={canAct}
-                          onLogs={() => setLogs(c.name)}
+                          onLogs={canLogs ? () => setLogs(c.name) : undefined}
                           onChanged={onChanged}
                         />
                       ))

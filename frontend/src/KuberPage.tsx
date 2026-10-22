@@ -514,7 +514,7 @@ function PodRow({
   p: KubePod
   day?: number // перезапусков за сутки (restarts_day)
   canAct: boolean
-  onLogs: () => void
+  onLogs?: () => void // нет у учетки только для просмотра: логи читаются командой на ноде
   onChanged: () => void
 }) {
   const { t } = useI18n()
@@ -587,9 +587,11 @@ function PodRow({
       </div>
       <div className={`docker-c-status mono small ${podTone(p)}`}>{p.phase}</div>
       <div className="docker-actions">
-        <button className="ghost icon-btn" onClick={onLogs} title={t('Логи')}>
-          📄
-        </button>
+        {onLogs && (
+          <button className="ghost icon-btn" onClick={onLogs} title={t('Логи')}>
+            📄
+          </button>
+        )}
         {canAct && (
           <button className="ghost icon-btn" disabled={busy} onClick={act} title={done ? t('Удалить под (очистить)') : t('Перезапустить под')}>
             {busy ? '…' : done ? '🗑' : '⟳'}
@@ -637,6 +639,8 @@ function KubeHostModal({
   onAddNode: (n: KubeNodeRef) => void // завести ноду кластера в панели (форма добавления сервера)
 }) {
   const { t } = useI18n()
+  // логи - тоже команда агенту (POST), учетке только для просмотра бэкенд ее не даст
+  const canLogs = !useAuth().isViewer
   const [logsPod, setLogsPod] = useState<KubePod | null>(null)
   // лог прошлого запуска пода из раздела "Перезапуски"
   const [prevPod, setPrevPod] = useState<KubePod | null>(null)
@@ -1018,7 +1022,7 @@ function KubeHostModal({
                             serverId={s.id}
                             p={p}
                             canAct={canAct}
-                            onLogs={() => setLogsPod(p)}
+                            onLogs={canLogs ? () => setLogsPod(p) : undefined}
                             onChanged={onChanged}
                             day={s.restarts_day?.[`pod:${p.ns}/${p.name}`] ?? 0}
                           />
@@ -1033,7 +1037,7 @@ function KubeHostModal({
                 data={s.kube_restarts}
                 flavor={kube.flavor}
                 canAct={canAct}
-                onPrevLogs={(p) => setPrevPod({ ns: p.ns, name: p.name, phase: '', ready: false, restarts: p.n })}
+                onPrevLogs={canLogs ? (p) => setPrevPod({ ns: p.ns, name: p.name, phase: '', ready: false, restarts: p.n }) : undefined}
                 onChanged={onChanged}
               />
             )}
