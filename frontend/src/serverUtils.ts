@@ -1,4 +1,4 @@
-import type { BackupAudit, BackupInfo, KnownIssue, DiskHealth, DiskUsage, DockerRisk, Server, ServerReport, UnitsBlock, WebRate } from './api'
+import type { BackupAudit, BackupInfo, BackupTarget, KnownIssue, DiskHealth, DiskUsage, DockerRisk, Server, ServerReport, UnitsBlock, WebRate } from './api'
 import { tr } from './i18n'
 
 // Запросы в минуту по access-логам ноды: блок кладёт root-хелпер webserver-setup, агент
@@ -329,4 +329,40 @@ export function gpuSecLine(s: Server, t: (k: string, p?: Record<string, string |
     sum.util != null ? t('загрузка {p}%', { p: sum.util }) : '',
     sum.mem != null ? t('память {a} из {b} ГБ', { a: sum.mem, b: sum.memt ?? 0 }) : '',
   ].filter(Boolean).join(', ')
+}
+
+// Куда идет бэкап ноды: сервер бэкапов из панели (srv), если хост из адреса репозитория - один из
+// его адресов или имя, и сам адрес (бэкенд backup_target: хост, порт, канал, без логина и пароля).
+// Сначала ищем среди серверов бэкапов (rest-server найден), потом среди всех: сервер бэкапов мог
+// еще не отдать статистику. Старый helper адреса не отдает - тогда по имени репозитория со стороны
+// сервера бэкапов (репозиторий называется по имени клиента).
+export type BackupDest = { name: string; srv?: Server; target?: BackupTarget | null }
+
+function srvAddrs(s: Server): string[] {
+  return [s.external_ip, s.agent_ip, s.local_ip, s.hostname, s.name, ...(s.last_report?.ips ?? [])]
+    .filter((x): x is string => !!x).map((x) => x.toLowerCase())
+}
+
+export function backupDest(client: Server, servers: Server[]): BackupDest | null {
+  const tg = client.backup_target
+  const host = (tg?.host ?? '').toLowerCase()
+  if (host) {
+    const hits = servers.filter((s) => s.id !== client.id && srvAddrs(s).includes(host))
+    const srv = hits.find((s) => s.last_report?.backup_server?.present) ?? hits[0]
+    return { name: srv?.name ?? tg!.host, srv, target: tg }
+  }
+  if (tg) return { name: '', target: tg }
+  for (const s of servers) {
+    const repos = s.last_report?.backup_server?.repos
+    if (repos?.some((r) => r.name === client.hostname || r.name === client.name)) return { name: s.name, srv: s }
+  }
+  return null
+}
+
+// Адрес назначения: "203.0.113.5:64100" (у локального репозитория - путь)
+export function backupDestWhere(tg?: BackupTarget | null): string {
+  if (!tg) return ''
+  if (tg.kind === 'local') return tg.repo
+  const host = tg.host.includes(':') ? `[${tg.host}]` : tg.host
+  return tg.port ? `${host}:${tg.port}` : host
 }

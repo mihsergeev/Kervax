@@ -7868,3 +7868,7 @@ button.inv-dd-btn { font-size: 0.82rem; padding: 0.28rem 0.7rem; }
   .inv-tw { overflow-x: auto; }
   .inv-tbl th, .inv-tbl tfoot td { position: static; }
 }
+/* перевод клиентов сервера бэкапов на https: галка, клиент, итог справа (label иначе встает колонкой) */
+.bsrv-https-row { flex-direction: row; justify-content: flex-start; text-align: left; cursor: pointer; }
+.bsrv-https-row input[type="checkbox"] { flex: 0 0 auto; width: auto; margin: 0; }
+.bsrv-https-row > .small:last-child { flex-shrink: 0; max-width: 45%; text-align: right; }

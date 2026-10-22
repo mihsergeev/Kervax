@@ -135,11 +135,14 @@ export const SWVER_MUTE = 'swver:'
 export const SSH_MUTE = 'ssh:'
 // Старый образ внешнего прокси, который решили не обновлять: proxyold:<контейнер>
 export const PROXYOLD_MUTE = 'proxyold:'
+// Бэкап по http через интернет, и так нужно (app/backup_target.py): bkhttp:repo
+export const BKHTTP_MUTE = 'bkhttp:'
 // Решения "так и должно быть": учетка нужна, порт открыт намеренно, ключи от хоста по назначению,
-// не нужен после перезагрузки, ОС или ПО не обновить, вход по паролю нужен, старый прокси оставить.
+// не нужен после перезагрузки, ОС или ПО не обновить, вход по паролю нужен, старый прокси оставить,
+// бэкап по http оставить.
 // Хранятся в alert_mutes, но это не заглушенный алерт: в "Заглушено" и чипе "бессрочно" их нет, видны
 // и снимаются там, где поставлены (раздел карточки, "вернуть")
-const DECISIONS = [ACCESS_MUTE, EXPOSED_MUTE, DOCKRISK_MUTE, NOBOOT_MUTE, OSUPD_MUTE, SWVER_MUTE, SSH_MUTE, PROXYOLD_MUTE]
+const DECISIONS = [ACCESS_MUTE, EXPOSED_MUTE, DOCKRISK_MUTE, NOBOOT_MUTE, OSUPD_MUTE, SWVER_MUTE, SSH_MUTE, PROXYOLD_MUTE, BKHTTP_MUTE]
 export const isDecision = (k: string) => DECISIONS.some((p) => k.startsWith(p))
 // Кнопка и подпись решения по совету об ОС: что именно нельзя
 export function osDecisionLabel(kind: string, t: TFn): string {
@@ -169,6 +172,7 @@ export function muteKindLabel(k: string, t: TFn): string | null {
   }
   if (k.startsWith(SSH_MUTE)) return `SSH: ${t('вход по паролю нужен')}`
   if (k.startsWith(DOCKRISK_MUTE)) return `${t('ключи от хоста по назначению')}: ${k.slice(DOCKRISK_MUTE.length)}`
+  if (k.startsWith(BKHTTP_MUTE)) return t('бэкап по http оставлен')
   if (k.startsWith(PROXYOLD_MUTE)) return `${t('старый образ прокси оставлен')}: ${k.slice(PROXYOLD_MUTE.length)}`
   if (k.startsWith(LISTEN_MUTE)) return `${t('пропавший порт')}: ${k.slice(LISTEN_MUTE.length)}`
   if (k.startsWith(QSTUCK_MUTE)) {

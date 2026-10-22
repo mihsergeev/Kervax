@@ -17,6 +17,21 @@ const PHRASES: Rule[] = [
     'this server already has a backup - tick "reinstall over it"'],
   [/на сервере работает бэкап - удалять его настройку отсюда нельзя/g,
     'a backup is working on this server - its setup cannot be removed from here'],
+  // перевод бэкапа на https (app/backup_target.py, api/servers.py _orchestrate_to_https)
+  [/(\S+): нужен агент (\S+) или новее/g, '$1: agent $2 or newer is needed'],
+  [/(\S+): нужен helper (\S+) (\S+) или новее/g, '$1: helper $2 $3 or newer is needed'],
+  [/(\S+): панель не видит на нем rest-server/g, '$1: the panel sees no rest-server on it'],
+  [/сервер бэкапов (\S+) не найден в панели/g, 'backup server $1 is not in the panel'],
+  [/бэкап настроен не панелью или не через rest-server/g, 'the backup was not set up by the panel or not through rest-server'],
+  [/бэкап уже идет по https/g, 'the backup already goes over https'],
+  [/бэкап идет не на (\S+)/g, 'the backup does not go to $1'],
+  [/не удалось определить IP клиента/g, 'could not determine the client IP'],
+  [/бэкап идет по https/g, 'the backup goes over https'],
+  [/не удалось получить сертификат сервера бэкапов/g, 'could not get the backup server certificate'],
+  [/не удалось открыть TLS-порт клиенту: /g, 'could not open the TLS port for the client: '],
+  [/не удалось поднять TLS rest-server: /g, 'could not bring up the TLS rest-server: '],
+  [/клиент не перешел на https, бэкап остался на http/g, 'the client did not move to https, the backup stays on http'],
+  [/сбой оркестрации: /g, 'orchestration failure: '],
   // чистка бэкап-сервера (collector.rotation_stale_repos, rotation_overflow)
   [/сервер переименовали из (\S+): (\d+) (?:снапшот|снапшота|снапшотов) под старым именем, по (\S+)/g,
     'the server was renamed from $1: $2 snapshots under the old name, up to $3'],
@@ -235,7 +250,7 @@ export function trBackend(s: string): string {
 
 // Поля ответов API, где лежат такие тексты. Ключи и идентификаторы (mute, key, kind) не трогаем:
 // по ним панель шлет запросы обратно
-const FIELDS = new Set(['text', 'detail', 'what', 'hint', 'note', 'bsrv_rotation', 'reasons', 'why'])
+const FIELDS = new Set(['text', 'detail', 'what', 'hint', 'note', 'bsrv_rotation', 'reasons', 'why', 'blockers'])
 
 export function trBody<T>(x: T, field = ''): T {
   if (typeof x === 'string') return (FIELDS.has(field) ? trBackend(x) : x) as T

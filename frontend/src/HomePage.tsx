@@ -22,7 +22,7 @@ import {
   type KnownIssue,
 } from './api'
 import type { Section } from './App'
-import { backupAlive, backupWindowNote, dbAuditNames, knownText, dockRiskText, knownActive, proxyBuilt, shortList, sinceShort, srvIssues, srvKnown, knownMeta } from './serverUtils'
+import { backupAlive, backupDest, backupDestWhere, backupWindowNote, dbAuditNames, knownText, dockRiskText, knownActive, proxyBuilt, shortList, sinceShort, srvIssues, srvKnown, knownMeta } from './serverUtils'
 import { KnownDialog } from './KnownDialog'
 import { LEAK_MUTE, LISTEN_MUTE, RESTARTS_MUTE, OOM_MUTE, isDecision, oomCulpritLabel } from './mutes'
 import { offLines, rotationLines } from './BsrvCleanup'
@@ -303,6 +303,7 @@ function grpLabel(grp: string, t: T): string {
     'k-noagent': t('ноды кластера без агента'),
     'bs-restic': t('на сервере бэкапов старый restic - обновите'),
     'bs-setup': t('бэкап-сервер без статистики - запустите backupserver-setup'),
+    'bk-http': t('бэкап идет по http без шифрования - переведите на https'),
     onb: t('новые серверы: проверьте, что нашлось при подключении, и закройте подключение в карточке'),
     dockrisk: t('у контейнеров ключи от хоста - взлом приложения в них даст root на сервере'),
     'sw-eol': t('ПО без поддержки - обновите'),
@@ -409,6 +410,18 @@ function actionItems(servers: Server[], relProblem: string, t: T): ActItem[] {
       const db = dbAuditNames(dbs).join(', ')
       items.push({ key: `dbdump-${s.id}`, icon: '🛢', section: 'backups', id: s.id, name: s.name, cc: s.country, sec: 'coverage',
         grp: 'dbdump', detail: db, text: t('{name}: {db} — нужен отдельный дамп', { name: s.name, db }) })
+    }
+    // Бэкап по http через интернет (app/backup_target.py): логин и пароль репозитория летят открытым
+    // текстом. Таких серверов много, поэтому без алерта, одним пунктом на всех; как перевести на https и
+    // решение "оставить http" - в окне бэкапа, раздел "Расписание и пути"
+    const bk = s.backup_target
+    if (bk?.insecure && !bk.muted) {
+      const d = backupDest(s, servers)
+      const where = backupDestWhere(bk)
+      const dest = d?.srv ? `${d.srv.name} (${where})` : where
+      items.push({ key: `bk-http-${s.id}`, icon: '🔓', section: 'backups', id: s.id, name: s.name, cc: s.country, sec: 'manage',
+        grp: 'bk-http', detail: dest,
+        text: t('{name}: бэкап идет по http без шифрования на {dest} - переведите на https', { name: s.name, dest }) })
     }
     // ОС: конец поддержки, перезагрузка, обновления безопасности - по пункту на вид совета:
     // десяток нод с отложенной перезагрузкой сворачивается в одну строку "нужна перезагрузка".

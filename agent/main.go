@@ -45,7 +45,7 @@ import (
 	"time"
 )
 
-const version = "2.47"
+const version = "2.48"
 
 // Публичный ключ для проверки подписи релизов агента (Ed25519, base64).
 // ПУСТО по умолчанию → самообновление ВЫКЛЮЧЕНО (агент никогда не заменяет себя).
@@ -854,7 +854,7 @@ type kubeCommand struct {
 
 type backupCommand struct {
 	ID       int      `json:"id"`
-	Action   string   `json:"action"`   // set_paths/set_schedule/run_now/provision (клиент); deploy_server/provision_client/deploy_tls_front/get_cert (бэкап-сервер)
+	Action   string   `json:"action"`   // set_paths/set_schedule/run_now/provision/to_https (клиент); deploy_server/provision_client/deploy_tls_front/get_cert/allow_tls (бэкап-сервер)
 	Mode     string   `json:"mode"`     // include/exclude
 	Paths    []string `json:"paths"`    // пути (set_paths/provision)
 	Schedule string   `json:"schedule"` // HH:MM
@@ -6771,7 +6771,19 @@ func runBackupCommand(panelURL, token string, cmd backupCommand) {
 			}
 			lines = append(lines, "path="+p)
 		}
-	case "deploy_server", "update_image", "provision_client", "deploy_tls_front", "get_cert", "get_client_creds":
+	case "to_https":
+		// перевести бэкап с rest:http на TLS rest-server того же сервера бэкапов. Логин и адрес
+		// helper берет из env ноды, панель шлет только порт и сертификат. Проверка по https
+		// (restic snapshots) идет до переключения и на медленном канале занимает время
+		lines, ok := toHTTPSLines(cmd)
+		if !ok {
+			postBackupResult(panelURL, token, cmd.ID, false, "неверный порт или сертификат")
+			return
+		}
+		res, out := spoolInFor(backupReqDir, backupResDir, cmd.ID, lines, "backup-setup", 4*time.Minute)
+		postBackupResult(panelURL, token, cmd.ID, res, out)
+		return
+	case "deploy_server", "update_image", "provision_client", "deploy_tls_front", "get_cert", "get_client_creds", "allow_tls":
 		// команды бэкап-СЕРВЕРА → отдельный спул bsrv-req
 		lines, ok := backupServerLines(cmd)
 		if !ok {
@@ -6875,8 +6887,28 @@ func backupServerLines(cmd backupCommand) ([]string, bool) {
 			return nil, false
 		}
 		return []string{"action=get_client_creds", "name=" + cmd.Name}, true
+	case "allow_tls":
+		// открыть TLS-порт клиенту, который переходит с http на https
+		if !backupIPOK(cmd.ClientIP) {
+			return nil, false
+		}
+		return []string{"action=allow_tls", "client_ip=" + cmd.ClientIP}, true
 	}
 	return nil, false
+}
+
+// toHTTPSLines - запрос helper'у клиента "перейти на https": порт TLS rest-server и его
+// сертификат одной строкой base64 (спул режет переводы строк).
+func toHTTPSLines(cmd backupCommand) ([]string, bool) {
+	if cmd.Port < 1 || cmd.Port > 65535 || cmd.CacertB64 == "" || len(cmd.CacertB64) > 16384 {
+		return nil, false
+	}
+	for _, r := range cmd.CacertB64 {
+		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '+' || r == '/' || r == '=') {
+			return nil, false
+		}
+	}
+	return []string{"action=to_https", fmt.Sprintf("port=%d", cmd.Port), "cacert_b64=" + cmd.CacertB64}, true
 }
 
 // backupNameOK — имя клиента/репо: hostname-безопасные символы.
