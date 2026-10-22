@@ -3696,6 +3696,36 @@ def io_cause(rep: dict) -> str:
     return f" - {d.get('dev') or '?'} занят на {float(d['util']):.0f}%" + (f", задержка {aw:.0f} мс" if aw else "")
 
 
+# Строки метрик в "Что сломано": подпись, единица, порог алерта. Линия снятия (порог минус _HYST) -
+# только у CPU и RAM, у остальных алерт снимается сразу под порогом.
+_METRIC_ROW = {"cpu": ("CPU", "%", "cpu_alert_percent"), "mem": ("RAM", "%", "mem_alert_percent"),
+               "temp": ("CPU", "°C", "temp_alert_c"), "conntrack": ("conntrack", "%", "conntrack_alert_percent"),
+               "disktemp": ("диск", "°C", "disk_temp_alert_c")}
+
+
+def _metric_row(s: Server, state: dict, now: datetime, kind: str, value: float) -> str:
+    """Строка CPU, RAM, температур и conntrack для "Что сломано": что держит алерт - среднее за
+    последние полчаса ("<вид>_avg", ведет цикл алертов), а сейчас - если заметно отличается. Под
+    порогом CPU и RAM еще и когда алерт снимется: строка "CPU 52%" рядом со "сломано" выглядела
+    ложной, хотя нода часами сидела выше порога и просела на минуту."""
+    label, unit, attr = _METRIC_ROW[kind]
+    cur = round(value)
+    text = f"{label} {cur}{unit}"
+    avg = state.get(f"{kind}_avg")
+    if isinstance(avg, dict) and isinstance(avg.get("v"), (int, float)) and abs(avg["v"] - value) >= _METRIC_ROW_DIFF:
+        text = f"{label} {round(avg['v'])}{unit} за {int(avg.get('min') or _METRIC_AVG_S // 60)} мин, сейчас {cur}{unit}"
+    thr = getattr(s, attr, 0) or 0
+    if kind not in ("cpu", "mem") or not thr or value >= thr:
+        return text
+    line = round(thr - _HYST)
+    ss = getattr(s, "alert_sustain_seconds", None)
+    hold = _SUSTAIN_DEFAULT if ss is None else max(int(ss), 0)
+    cool = _parse_iso(str(state.get(f"{kind}_cool") or "")) if value < line else None
+    left = hold - ((now - cool).total_seconds() if cool else 0)
+    mins = max(1, -(-int(left) // 60))
+    return text + f" - снимется, если продержится ниже {line}{unit} {'еще ' if cool else ''}{mins} мин"
+
+
 def server_problems(s: Server, now: datetime, pod_names: dict[str, str] | None = None,
                     web_err: tuple[float, float, int, dict, float] | None = None) -> list[dict]:
     """Что сломано на сервере коротко, для сводки "Что сломано" на главной и значков в списке
@@ -3805,7 +3835,7 @@ def server_problems(s: Server, now: datetime, pod_names: dict[str, str] | None =
                 f"inode@{lvl}" if lvl < 3 else "inode")
     # CPU, RAM, температуры, conntrack и троттлинг - по уровню алерта (его выдержка, гистерезис и
     # отбой после затишья), а не по последнему отчету: минутный всплеск, о котором алерта не будет,
-    # зажигал строку на главной, и через минуту она пропадала. Значение в тексте - текущее.
+    # зажигал строку на главной, и через минуту она пропадала. В тексте - что держит алерт (_metric_row).
     alerted = {k for k in ("cpu", "mem", "temp", "conntrack", "disktemp", "throttle")
                if int(state.get(k, 0) or 0) >= 1}
     early = alert_since(s) if alerted else {}
@@ -3816,18 +3846,18 @@ def server_problems(s: Server, now: datetime, pod_names: dict[str, str] | None =
 
     cpu = rep.get("cpu_percent")
     if getattr(s, "cpu_alert_percent", 0) and cpu is not None:
-        metric("cpu", 2, f"CPU {round(cpu)}%")
+        metric("cpu", 2, _metric_row(s, state, now, "cpu", cpu))
     if getattr(s, "mem_alert_percent", 0) and rep.get("mem_total"):
-        metric("mem", 2, f"RAM {round((rep.get('mem_used') or 0) / rep['mem_total'] * 100)}%")
+        metric("mem", 2, _metric_row(s, state, now, "mem", (rep.get("mem_used") or 0) / rep["mem_total"] * 100))
     temp = rep.get("cpu_temp")
     if getattr(s, "temp_alert_c", 0) and temp is not None:
-        metric("temp", 2, f"CPU {round(temp)}°C")
+        metric("temp", 2, _metric_row(s, state, now, "temp", temp))
     ctmax = rep.get("conntrack_max") or 0
     if getattr(s, "conntrack_alert_percent", 0) and ctmax > 0:
-        metric("conntrack", 2, f"conntrack {round((rep.get('conntrack_count') or 0) / ctmax * 100)}%")
+        metric("conntrack", 2, _metric_row(s, state, now, "conntrack", (rep.get("conntrack_count") or 0) / ctmax * 100))
     dtemps = [d["temp"] for d in rep.get("disk_devs") or [] if isinstance(d, dict) and d.get("temp") is not None]
     if getattr(s, "disk_temp_alert_c", 0) and dtemps:
-        metric("disktemp", 2, f"диск {round(max(dtemps))}°C")
+        metric("disktemp", 2, _metric_row(s, state, now, "disktemp", max(dtemps)))
     if rep.get("cpu_throttle") is not None:
         metric("throttle", 1, "троттлинг CPU от перегрева")
     # Часы: пороги алерта (5 с, 30 с, 5 минут) без его выдержки. Сдвиг уже очищен от дороги
@@ -4852,6 +4882,62 @@ async def fill_history(session: AsyncSession, servers: list[Server],
     return out
 
 
+# Среднее за последние полчаса держит алерт CPU, RAM, температур и conntrack: и в алерте, и в "Что
+# сломано" раньше было значение последнего отчета, и нода, которая часами сидит выше порога, в
+# минуту провала показывала "CPU 52%" рядом со "сломано" (на одной ноде 22.10.2026, load 54 на 12 ядрах)
+_METRIC_AVG_S = 1800
+_METRIC_AVG_KINDS = ("cpu", "mem", "temp", "conntrack", "disktemp")
+# На сколько сейчас должно отличаться от среднего, чтобы назвать оба
+_METRIC_ROW_DIFF = 5
+
+
+async def metric_history(session: AsyncSession, servers: list[Server],
+                         now: datetime) -> dict[int, list[tuple[float, dict[str, float]]]]:
+    """{server_id: [(unix, {"cpu"|"mem"|"temp"|"conntrack"|"disktemp": значение})]} за последние
+    полчаса - только у серверов, где превышение уже идет ("<вид>_since"): остальным среднее не
+    нужно. Один запрос на тик по истории метрик, как fill_history."""
+    ids = [s.id for s in servers
+           if any((s.alert_state or {}).get(f"{k}_since") for k in _METRIC_AVG_KINDS)]
+    out: dict[int, list[tuple[float, dict[str, float]]]] = {}
+    if not ids:
+        return out
+    rows = await session.execute(
+        select(ServerMetric.server_id, ServerMetric.ts, ServerMetric.cpu_percent, ServerMetric.mem_percent,
+               ServerMetric.cpu_temp, ServerMetric.conntrack_count, ServerMetric.conntrack_max,
+               ServerMetric.disk_devs)
+        .where(ServerMetric.server_id.in_(ids), ServerMetric.ts >= now - timedelta(seconds=_METRIC_AVG_S))
+        .order_by(ServerMetric.ts))
+    for sid, ts, cpu, mem, temp, ct, ctmax, devs in rows.all():
+        v: dict[str, float] = {}
+        if cpu is not None:
+            v["cpu"] = float(cpu)
+        if mem is not None:
+            v["mem"] = float(mem)
+        if temp is not None:
+            v["temp"] = float(temp)
+        if ctmax:
+            v["conntrack"] = float(ct or 0) / float(ctmax) * 100
+        dt = [float(d["temp"]) for d in devs or [] if isinstance(d, dict) and d.get("temp") is not None]
+        if dt:
+            v["disktemp"] = max(dt)
+        out.setdefault(sid, []).append((_aware(ts).timestamp(), v))
+    return out
+
+
+def metric_avg(hist: list[tuple[float, dict[str, float]]] | None, kind: str, since: str | None,
+               now: datetime) -> dict | None:
+    """Среднее вида kind с начала превышения, но не дальше получаса: {"v": значение, "min": за
+    сколько минут}. None - превышения нет или истории за это время нет."""
+    start = _parse_iso(since or "")
+    if start is None:
+        return None
+    t0 = max(start.timestamp(), now.timestamp() - _METRIC_AVG_S)
+    vals = [v[kind] for t, v in hist or [] if t >= t0 and v.get(kind) is not None]
+    if not vals:
+        return None
+    return {"v": round(sum(vals) / len(vals)), "min": max(1, round((now.timestamp() - t0) / 60))}
+
+
 async def web_error_window(session: AsyncSession,
                            now: datetime) -> dict[int, tuple[float, float, int, dict, float]]:
     """{server_id: (запросов, ошибок 5xx, минут с данными, {ключ лога: {минута: ошибок}},
@@ -5383,11 +5469,14 @@ def dump_issues(rep: dict, now: datetime) -> tuple[list[str], str, list[str], in
 def _server_conditions(s: Server, now: datetime,
                        web_err: tuple[float, float, int, dict, float] | None = None,
                        pod_names: dict[str, str] | None = None,
-                       fill_hist: dict[str, list[tuple[float, float]]] | None = None) -> dict[str, tuple[int, dict]]:
+                       fill_hist: dict[str, list[tuple[float, float]]] | None = None,
+                       metric_hist: list[tuple[float, dict[str, float]]] | None = None) -> dict[str, tuple[int, dict]]:
     """Пороги сервера: ключ → (уровень, контекст для шаблона текста). Уровень 0 =
     норма; для диска 1=предупреждение(≥warn), 2=проблема(≥alert), 3=критично(≥crit).
     fill_hist - заполнение худшего раздела за последние минуты ({"disk"|"inode": [(unix, %)]},
-    fill_history): по нему видно быстрое заполнение, которое алертит без выдержки."""
+    fill_history): по нему видно быстрое заполнение, которое алертит без выдержки.
+    metric_hist - CPU, RAM, температуры и conntrack за полчаса (metric_history): из нее среднее,
+    которое держит алерт (ctx["avg"]); None - не считать."""
     out: dict[str, tuple[int, dict]] = {}
     state = s.alert_state or {}
     seen = s.last_seen is not None
@@ -5439,6 +5528,8 @@ def _server_conditions(s: Server, now: datetime,
         ctx["since"] = since
         if below is not None:
             ctx["cool"] = cool
+        if key in _METRIC_AVG_KINDS and metric_hist is not None:
+            ctx["avg"] = metric_avg(metric_hist, key, since, now)
         out[key] = (lvl, ctx)
 
     def sustain_lvl(key: str, lvl: int, ctx: dict, cool_s: float | None = None,
@@ -6104,6 +6195,7 @@ async def evaluate_servers(
         rules = await settings_store.get_server_alert_rules(session)
         web_err = await web_error_window(session, now)
         fill_hist = await fill_history(session, servers, now)
+        metric_hist = await metric_history(session, servers, now)
         windows = list(await session.scalars(select(MaintenanceWindow)))
         # лежащие мониторы - чтобы назвать их в сообщении про сервер, от которого они зависят
         down_checks = [SimpleNamespace(id=i, name=n, target=t, type=ty, probe_local=pl, probe_server_id=ps,
@@ -6319,7 +6411,8 @@ async def evaluate_servers(
                     f"{settings_store.SERVER_ALERT_KINDS[fk][0]} снова в норме",
                     srv_url(s, fk), recovery=True, group=s.group_name or "",
                 ))
-        conds = _server_conditions(s, now, web_err.get(s.id), pod_names, fill_hist.get(s.id))
+        conds = _server_conditions(s, now, web_err.get(s.id), pod_names, fill_hist.get(s.id),
+                                   metric_hist.get(s.id, []))
         # Нода молчит: про ее CPU, память и диски ничего не известно. Все, кроме самого
         # "недоступен", замирает как было: ни срабатываний, ни отбоев, ни сброса выдержек.
         # Иначе пороговые условия на молчащей ноде падали в ноль, и объявленный CPU получал
@@ -6341,6 +6434,9 @@ async def evaluate_servers(
             # гистерезис CPU и RAM: с какого момента значение ниже линии снятия
             if "cool" in cx and st.get(f"{k}_cool") != cx["cool"]:
                 apply(s.id, f"{k}_cool", cx["cool"])
+            # среднее за полчаса, которое держит алерт CPU, RAM, температур и conntrack
+            if "avg" in cx and st.get(f"{k}_avg") != cx["avg"]:
+                apply(s.id, f"{k}_avg", cx["avg"])
             # выдержка отбоя упавших юнитов: с какого момента юнита нет среди упавших
             if "hold" in cx and (st.get(f"{k}_hold") or {}) != cx["hold"]:
                 apply(s.id, f"{k}_hold", cx["hold"] or None)
@@ -6585,6 +6681,9 @@ async def evaluate_servers(
                     continue
                 if key in ("cpu", "mem"):
                     ctx["cause"] = await cause_for(s, key)
+                if key in _METRIC_AVG_KINDS and isinstance(ctx.get("avg"), dict):
+                    # в алерте - среднее за выдержку, а не последний отчет: из него и "было N" в отбое
+                    ctx["value_now"], ctx["value"] = ctx.get("value"), ctx["avg"]["v"]
                 if key == "pressure":
                     # кто ест память или какой диск занят: главное, что спросит инженер
                     if ctx.get("res") == "mem":
