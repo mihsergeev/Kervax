@@ -116,6 +116,7 @@ export const ACT: Record<string, string> = {
   backup_repo_unarchive: 'вернул репозиторий бэкапа из архива',
   backup_server_deploy: 'развернул сервер бэкапов',
   backup_server_enable_tls: 'включил TLS на сервере бэкапов',
+  backup_to_https: 'перевел бэкап сервера на https',
   backup_credentials_view: 'посмотрел доступы бэкапа',
   custom_backup_ignore: 'перестал следить за своим бэкапом',
   custom_backup_watch: 'вернул слежку за своим бэкапом',

@@ -81,7 +81,9 @@ fi
 #       (no cron.d and no active cron line = off), an off cleanup has its cron.d line commented
 #       out under "# kervax-prune-off", prune-off / prune-on switch it explicitly, adopt-legacy
 #       leaves the cleanup off when the shared script did not run, and stats report the state
-KERVAX_SETUP_VERSION=0.34  # MAJOR.MINOR; compared component-wise (0.13 > 0.2!)
+# 0.35: allow-tls opens the TLS port for a client moving from http to https (the ufw rules of
+#       provision-client, without touching htpasswd, the repository or its cleanup)
+KERVAX_SETUP_VERSION=0.35  # MAJOR.MINOR; compared component-wise (0.13 > 0.2!)
 # Which nodes need this helper at all. Read by the ansible playbook on the
 # CONTROL machine and evaluated as a shell condition ON THE NODE, so a new
 # helper lands where it belongs without anyone editing the playbook.
@@ -1336,6 +1338,23 @@ COMPOSEEOF
   echo "OK native TLS rest-server on :$TLS_PORT"
 }
 
+# allow-tls <client_ip> opens the TLS port for a client that moves from http to https: the same
+# ufw rules provision-client writes (the port on the host and the route to the container port, for
+# a published docker port). Idempotent; the TLS rest-server has to be running already.
+cmd_allow_tls() {
+  local client_ip="$1"
+  valid_ip "$client_ip" || { echo "bad ip" >&2; return 2; }
+  [ -f "$(tls_dir)/cert.pem" ] || { echo "no TLS rest-server on this backup server (enable HTTPS first)" >&2; return 2; }
+  command -v docker >/dev/null 2>&1 && [ -n "$(docker ps -q --filter "publish=$TLS_PORT" 2>/dev/null)" ] \
+    || { echo "the TLS rest-server on :$TLS_PORT is not running" >&2; return 2; }
+  if ! command -v ufw >/dev/null 2>&1; then
+    echo "OK :$TLS_PORT, ufw is not installed"; return 0
+  fi
+  ufw allow proto tcp from "$client_ip" to any port "$TLS_PORT" >/dev/null 2>&1 || { echo "ufw allow failed" >&2; return 2; }
+  ufw route allow proto tcp from "$client_ip" to any port 8000 >/dev/null 2>&1 || true
+  echo "OK :$TLS_PORT open for $client_ip"
+}
+
 # the certificate is returned as a single base64 line (it survives the spool's tr '\n'; the client decodes it into cacert)
 cmd_get_cert() { local d; d="$(tls_dir)"; [ -f "$d/cert.pem" ] && base64 -w0 "$d/cert.pem" || { echo "no cert" >&2; return 2; }; }
 
@@ -1593,6 +1612,7 @@ cmd_process_spool() {
       provision_client) if out="$(cmd_provision_client "$name" "$hpass" "$repopass" "$client_ip" "$kl" "$kd" "$kw" "$km" 2>&1)"; then ok=true; fi ;;
       deploy_tls_front) if out="$(cmd_deploy_tls_front "$san_ip" "$san_dns" 2>&1)"; then ok=true; fi ;;
       get_cert)         if out="$(cmd_get_cert 2>&1)"; then ok=true; fi ;;
+      allow_tls)        if out="$(cmd_allow_tls "$client_ip" 2>&1)"; then ok=true; fi ;;
       get_client_creds) if out="$(cmd_get_client_creds "$name" 2>&1)"; then ok=true; fi ;;
       *) out="unknown action" ;;
     esac
@@ -1618,9 +1638,10 @@ case "${1:-}" in
   provision-client) shift; cmd_provision_client "$@" ;;
   deploy-tls-front) shift; cmd_deploy_tls_front "$@" ;;
   get-cert)         cmd_get_cert ;;
+  allow-tls)        shift; cmd_allow_tls "$@" ;;
   get-client-creds) shift; cmd_get_client_creds "$@" ;;
   process-spool)    cmd_process_spool ;;
-  *) echo "usage: $0 {stats|regen-prune|adopt-legacy [--apply] [name...]|deploy-server [port]|update-image|restic-update|forget-group <repo> <host> [--apply]|merge-group <repo> <old-host> <new-host> [--apply]|dedup-cron|prune-off <repo>|prune-on <repo>|provision-client <name> <hpass> <repopass> <ip> [kl kd kw km]|deploy-tls-front <ip> [dns]|get-cert|get-client-creds <name>|process-spool}" >&2; exit 2 ;;
+  *) echo "usage: $0 {stats|regen-prune|adopt-legacy [--apply] [name...]|deploy-server [port]|update-image|restic-update|forget-group <repo> <host> [--apply]|merge-group <repo> <old-host> <new-host> [--apply]|dedup-cron|prune-off <repo>|prune-on <repo>|provision-client <name> <hpass> <repopass> <ip> [kl kd kw km]|deploy-tls-front <ip> [dns]|get-cert|allow-tls <ip>|get-client-creds <name>|process-spool}" >&2; exit 2 ;;
 esac
 HELPER_EOF
 chmod 0755 "$HELPER.new" && mv -f "$HELPER.new" "$HELPER"

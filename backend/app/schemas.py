@@ -1369,6 +1369,12 @@ class BackupAuditMuteIn(BaseModel):
     muted: bool
 
 
+class BackupToHttpsIn(BaseModel):
+    """Перевести клиентов сервера бэкапов с http на https, по очереди."""
+
+    client_ids: list[int] = Field(min_length=1, max_length=200)
+
+
 class BackupServerDeployIn(BaseModel):
     """Развернуть rest-server на ноде с нуля. Образ и режим (--append-only --private-repos)
     зашиты в helper и панелью НЕ управляются — иначе это вектор ослабления защиты."""
@@ -1487,6 +1493,10 @@ class ServerOut(BaseModel):
     exposure: dict | None = None
     # что сделать с ОС ноды (os_support.advice): конец поддержки, перезагрузка, обновления
     os_advice: list[dict] | None = None
+    # куда идет бэкап (backup_target.view): {kind, proto, host, port, repo, insecure, muted}
+    backup_target: dict | None = None
+    # бэкап по http: {bs_id, blockers} - куда переводить на https и что мешает (только в списке)
+    backup_https: dict | None = None
     # версии без поддержки (software.advice): PHP, СУБД, прокси, у которых кончилась поддержка
     sw_advice: list[dict] | None = None
     # изменения на сервере (changes.view): лента и отметка "это мы"
@@ -2095,6 +2105,12 @@ class BackupSetupJobOut(BaseModel):
     status: str  # running/done/error
     steps: list[dict] = Field(default_factory=list)  # [{step, ok, detail}]
     message: str = ""
+
+
+class BackupToHttpsJobOut(BackupSetupJobOut):
+    """Задача перевода одного клиента на https в пачке: чей это бэкап."""
+
+    server_id: int
 
 
 class AgentReleaseOut(BaseModel):

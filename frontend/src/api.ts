@@ -1696,6 +1696,7 @@ export type ServerReport = {
   clock_unix?: number // локальные часы ноды на момент отправки отчёта
   // слушающие сокеты кроме localhost (агент 2.26): по ним панель проверяет, что открыто снаружи
   listen?: { p: string; ip: string; port: number; u?: string }[]
+  ips?: string[] // адреса на интерфейсах ноды (агент 2.26+)
   // давление на ресурсы (агент 2.26): PSI в % времени - mem_some_60, io_full_10 и т.п.;
   // процессы в D-state; открытые файлы против fs.file-max
   psi?: Record<string, number>
@@ -2082,6 +2083,20 @@ export interface DiskWear {
   soon: boolean
 }
 
+// Куда идет бэкап ноды: kind - бэкенд restic (rest, s3, sftp, local), proto - канал (http, https,
+// sftp), insecure - http через интернет (пункт "Требует действий"), muted - решение "по http оставить"
+export type BackupTarget = {
+  kind: string
+  proto: string
+  host: string
+  port?: number | null
+  repo: string
+  insecure: boolean
+  muted: boolean
+}
+// решение "бэкап по http оставить" в alert_mutes (app/backup_target.py MUTE_KEY)
+export const BACKUP_HTTP_MUTE = 'bkhttp:repo'
+
 export type Server = {
   id: number
   name: string
@@ -2111,6 +2126,10 @@ export type Server = {
   // key - ключ решения "так и должно быть" в alert_mutes (osupd:<kind>), muted - решение принято
   // fix - шаги на ноде, после которых пункт уходит: id текста, команда, arg для текста, alt - другой путь
   os_advice?: { kind: string; level: number; text: string; key: string; muted?: boolean; fix?: OsFixStep[] }[]
+  // куда идет бэкап (app/backup_target.py), адрес без логина и пароля
+  backup_target?: BackupTarget | null
+  // бэкап по http: на какой сервер бэкапов переводить на https и что мешает (только в списке серверов)
+  backup_https?: { bs_id: number | null; blockers: string[] } | null
   // версии без поддержки (app/software.py): строка на продукт, 2 - без поддержки, 1 - скоро
   sw_advice?: { key: string; level: number; name: string; what: string; text: string }[] | null
   // GPU NVIDIA (helper gpu-setup): карточка раздела и плашка списка; LLM-сервисы (агент 2.36)
@@ -3062,6 +3081,16 @@ export function deployBackupServer(
   })
 }
 // миграция существующего HTTP rest-server на HTTPS (self-signed TLS-фронт :64101)
+// перевести бэкап клиента с http на https того же сервера бэкапов (проверка по https до переключения)
+export function backupToHttps(serverId: number): Promise<BackupSetupJob> {
+  return api<BackupSetupJob>(`/api/servers/${serverId}/backup/to-https`, { method: 'POST' })
+}
+// то же пачкой клиентов сервера бэкапов, по очереди; прогресс каждого - backupSetupStatus(server_id, id)
+export function backupServerToHttps(bsId: number, clientIds: number[]): Promise<(BackupSetupJob & { server_id: number })[]> {
+  return api<(BackupSetupJob & { server_id: number })[]>(`/api/servers/${bsId}/backup-server/to-https`, {
+    method: 'POST', body: JSON.stringify({ client_ids: clientIds }),
+  })
+}
 export function enableBackupTls(serverId: number): Promise<BackupSetupJob> {
   return api<BackupSetupJob>(`/api/servers/${serverId}/backup-server/enable-tls`, {
     method: 'POST',

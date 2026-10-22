@@ -47,7 +47,7 @@ from app import packages as packages_mod
 from app import netlinks
 from app import traffic as traffic_mod
 from app import usage as usage_mod
-from app import audit, backup_growth, backup_state, bsrv_cleanup, custom_backups, docker_exposure, geoip, kube_coverage, manual_probe, open_ports, os_support
+from app import audit, backup_growth, backup_state, backup_target, bsrv_cleanup, custom_backups, docker_exposure, geoip, kube_coverage, manual_probe, open_ports, os_support
 from app import dump_reason
 from app import fleet_rollout
 from app import oom as oom_mod
@@ -108,6 +108,8 @@ from app.schemas import (
     BackupAudit,
     BackupResultIn,
     BackupServerDeployIn,
+    BackupToHttpsIn,
+    BackupToHttpsJobOut,
     BackupSetupIn,
     BackupSetupJobOut,
     DockerCommandIn,
@@ -269,6 +271,7 @@ def _out(
     o.sw_advice = software_mod.advice(server.last_report or {}, server.sw_host, now, server.alert_mutes)
     o.changes = srv_changes.view(server)
     o.backup_verify = backup_verify.view(server.last_report or {}, now)
+    o.backup_target = backup_target.view(server.last_report or {}, server.alert_mutes)
     o.restarts_day = srv_restarts.view(server, now) or None
     o.kube_restarts = srv_restarts.kube_view(server, now)
     o.mem_leaks = mem_trend.problems(server, now) or None
@@ -537,6 +540,8 @@ async def list_servers(user: CurrentUser, session: SessionDep) -> list[ServerOut
         if s.id in bogus:
             o.problems = [*o.problems, bogus[s.id]]
         o.kube_unmonitored = _unmonitored(s, index)
+        # бэкап по http: на какой сервер бэкапов переводить на https и что мешает (кнопка в окне)
+        o.backup_https = backup_target.https_view(s, every)
         bs = (s.last_report or {}).get("backup_server") or {}
         if bs.get("present"):
             arch = s.backup_repo_archive or {}
@@ -2693,6 +2698,118 @@ async def backup_server_enable_tls(
     return BackupSetupJobOut.model_validate(job)
 
 
+async def _orchestrate_to_https(session_factory, job_id: int, params: dict) -> None:
+    """Перевести бэкап клиента с rest:http на TLS rest-server того же сервера бэкапов. Логин и
+    пароль не проходят через панель: https-адрес helper клиента собирает из своего env. Порядок:
+    TLS rest-server на сервере бэкапов (если его еще нет), его сертификат, TLS-порт клиенту в ufw,
+    затем клиент читает репозиторий по https и только при успехе переключается. Неудача на любом
+    шаге оставляет бэкап на http."""
+    _steps, save, step = _job_runner(session_factory, job_id, params.get("_user", ""), "to_https")
+    try:
+        bs_id = params["bs_id"]
+        if not params["tls_front"]:
+            ok, out = await step("tls-front", bs_id, "deploy_tls_front",
+                                 {"san_ip": params["san_ip"], "san_dns": params["bs_hostname"]}, 300)
+            if not ok:
+                return await save("error", ("не удалось поднять TLS rest-server: " + (out or "").replace("\r", " ").strip())[:250])
+        ok, cert = await step("get-cert", bs_id, "get_cert", {})
+        if not ok or not (cert or "").strip():
+            return await save("error", "не удалось получить сертификат сервера бэкапов")
+        ok, out = await step("allow-tls", bs_id, "allow_tls", {"client_ip": params["client_ip"]})
+        if not ok:
+            return await save("error", ("не удалось открыть TLS-порт клиенту: " + (out or "").replace("\r", " ").strip())[:250])
+        ok, out = await step("to-https", params["client_id"], "to_https",
+                             {"port": params["tls_port"], "cacert_b64": cert.strip()}, 280)
+        if not ok:
+            return await save("error", ((out or "").replace("\r", " ").strip() or "клиент не перешел на https, бэкап остался на http")[:250])
+        await save("done", "бэкап идет по https")
+    except BaseException as e:  # noqa: BLE001
+        import traceback
+        print("to_https orchestration FAILED:", repr(e), traceback.format_exc(), flush=True)
+        try:
+            await save("error", f"сбой оркестрации: {type(e).__name__}: {e}"[:250])
+        except BaseException:  # noqa: BLE001
+            pass
+
+
+async def _to_https_job(session, user, client: Server, bs: Server | None) -> tuple[BackupSetupJob, dict]:
+    """Проверки и задача перевода одного клиента; 400 с причиной, если сейчас нельзя."""
+    why = backup_target.https_blockers(client, bs)
+    if why:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"{client.name}: " + "; ".join(why))
+    client_ip = _pick_ip(client)
+    if not client_ip:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"{client.name}: не удалось определить IP клиента")
+    t = backup_target.view(client.last_report or {}) or {}
+    bs_rep = (bs.last_report or {}).get("backup_server") or {}
+    host = t.get("host", "")
+    job = BackupSetupJob(server_id=client.id, backup_server_id=bs.id, status="running", steps=[])
+    session.add(job)
+    await session.commit()
+    await audit.record(session, user.username, "backup_to_https", f"{client.name}->{bs.name}", f"srv={client.id}")
+    params = {
+        "client_id": client.id, "client_ip": client_ip, "bs_id": bs.id, "bs_hostname": bs.hostname or "",
+        "tls_front": bool(bs_rep.get("tls_front")), "tls_port": int(bs_rep.get("tls_port") or 64101),
+        # сертификат нового TLS rest-server - на тот адрес, по которому клиент уже ходит
+        "san_ip": host if backup_target.is_ip(host) else _pick_ip(bs), "_user": user.username,
+    }
+    return job, params
+
+
+@router.post("/{server_id}/backup/to-https", response_model=BackupSetupJobOut)
+async def backup_to_https(
+    server_id: int, request: Request, user: CurrentUser, session: SessionDep,
+) -> BackupSetupJobOut:
+    """Перевести бэкап клиента с http на https того же сервера бэкапов. Прогресс - GET
+    /backup/setup/{job_id}."""
+    client = await _get_or_404(server_id, session, user)
+    bs = backup_target.find_backup_server(client, list(await session.scalars(select(Server))))
+    job, params = await _to_https_job(session, user, client, bs)
+    task = asyncio.create_task(_orchestrate_to_https(request.app.state.session_factory, job.id, params))
+    _setup_tasks.add(task)
+    task.add_done_callback(_setup_tasks.discard)
+    return BackupSetupJobOut.model_validate(job)
+
+
+@router.post("/{server_id}/backup-server/to-https", response_model=list[BackupToHttpsJobOut])
+async def backup_server_to_https(
+    server_id: int, body: BackupToHttpsIn, request: Request, user: CurrentUser, session: SessionDep,
+) -> list[BackupToHttpsJobOut]:
+    """Перевести на https выбранных клиентов сервера бэкапов, по очереди: следующий начинается,
+    когда предыдущий закончился (удачно или нет). Задачи создаются сразу, фронт поллит каждую.
+    Клиент, которого сейчас не перевести, отказывает всю пачку с причиной - до начала."""
+    bs = await _get_or_404(server_id, session, user)
+    every = list(await session.scalars(select(Server)))
+    by_id = {s.id: s for s in every}
+    todo = []
+    for cid in dict.fromkeys(body.client_ids):
+        client = by_id.get(cid)
+        if client is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, f"сервер {cid} не найден")
+        await _get_or_404(cid, session, user)  # нарезка по группам: чужой клиент - 404
+        if backup_target.find_backup_server(client, every) is not bs:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, f"{client.name}: бэкап идет не на {bs.name}")
+        why = backup_target.https_blockers(client, bs)
+        if why:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, f"{client.name}: " + "; ".join(why))
+        todo.append(client)
+    runs = [await _to_https_job(session, user, c, bs) for c in todo]
+    factory = request.app.state.session_factory
+
+    async def chain():
+        tls_front = runs[0][1]["tls_front"]
+        for job, params in runs:
+            # TLS rest-server поднимает только первый в очереди
+            params["tls_front"] = tls_front
+            await _orchestrate_to_https(factory, job.id, params)
+            tls_front = True
+
+    task = asyncio.create_task(chain())
+    _setup_tasks.add(task)
+    task.add_done_callback(_setup_tasks.discard)
+    return [BackupToHttpsJobOut.model_validate(j) for j, _ in runs]
+
+
 @router.get("/{server_id}/backup/setup/{job_id}", response_model=BackupSetupJobOut)
 async def backup_setup_status(
     server_id: int, job_id: int, user: CurrentUser, session: SessionDep
@@ -3175,6 +3292,8 @@ async def agent_report(
         session.add(OomEvent(server_id=server.id, ts=now, victim=victim, count=oom_delta))
     await _store_web_errors(session, server, body, now)
     report_dict = body.model_dump()
+    # адрес репозитория бэкапа - только без логина и пароля, что бы ни прислал helper
+    backup_target.clean_report(report_dict)
     # убийства, которые еще не попали в точку графика (точка пишется раз в минуту)
     report_dict["oom_pend"] = 0 if write_metric else oom_pend
     # имена контейнеров по id переносятся из отчета в отчет: OOM называет контейнер по cgroup с id,

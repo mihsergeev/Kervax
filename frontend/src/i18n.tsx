@@ -6315,6 +6315,39 @@ const EN: Record<string, string> = {
   'Диски неизвестны': 'Disks unknown',
   'нет helper disk-health': 'no disk-health helper',
   'Серверов нет.': 'No servers.',
+  // куда идет бэкап, бэкап по http и перевод на https
+  'открыть сервер бэкапов': 'open the backup server',
+  'бэкап идет по http без шифрования: логин и пароль репозитория видны по дороге':
+    'the backup goes over plain http: the repository login and password are visible on the way',
+  'бэкап идет на {where} по http без шифрования: логин и пароль репозитория видны по дороге':
+    'the backup goes to {where} over plain http: the repository login and password are visible on the way',
+  'http оставлен': 'http kept',
+  'Так задумано: убрать из "Требует действий"': 'This is intended: drop it from "Action needed"',
+  'оставить http': 'keep http',
+  'перевести на https': 'move to https',
+  'бэкап по http оставлен': 'backup over http kept',
+  'бэкап идет по http без шифрования - переведите на https': 'the backup goes over plain http - move it to https',
+  '{name}: бэкап идет по http без шифрования на {dest} - переведите на https':
+    '{name}: the backup goes over plain http to {dest} - move it to https',
+  'TLS-порт клиенту на сервере бэкапов': 'the TLS port for the client on the backup server',
+  'проверка по https и переключение': 'check over https and switch',
+  'бэкап идет по https': 'the backup goes over https',
+  'Перевод на TLS rest-server того же сервера бэкапов (порт 64101, сертификат самоподписанный): сервер бэкапов открывает клиенту порт, клиент читает репозиторий по https и переключается, только если это получилось. Не получилось - бэкап остается на http. Логин, пароль и репозиторий те же, снапшоты остаются.':
+    'Moves to the TLS rest-server of the same backup server (port 64101, a self-signed certificate): the backup server opens the port for the client, the client reads the repository over https and switches only if that worked. If not, the backup stays on http. The login, password and repository stay the same, the snapshots stay.',
+  'Перевести бэкап {name} на https? Если проверка по https не пройдет, бэкап останется на http.':
+    'Move the backup of {name} to https? If the check over https fails, the backup stays on http.',
+  'Перевести пока нельзя': 'Cannot move yet',
+  'Перевести на https по очереди: {n}? У кого проверка по https не пройдет, бэкап останется на http.':
+    'Move to https one by one: {n}? Where the check over https fails, the backup stays on http.',
+  'по https': 'over https',
+  'в очереди': 'queued',
+  'Клиенты по http': 'Clients over http',
+  'выбрать всех, кого можно': 'select all that can be moved',
+  'перевести на https: {n}': 'move to https: {n}',
+  'Переход на https': 'Move to https',
+  'все клиенты по https': 'all clients over https',
+  'по http: {list}': 'over http: {list}',
+  'перевел бэкап сервера на https': 'moved the server backup to https',
 }
 
 type Ctx = {

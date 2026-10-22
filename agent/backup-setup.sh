@@ -103,7 +103,10 @@ AGENT_USER=kervax
 #       repository on the backup server is not touched. A failed backup run says why: the restic
 #       error from the journal of that run goes into report.d/backup-runs.json (fail), and the
 #       panel shows it next to "the backup failed" instead of the bare fact
-KERVAX_SETUP_VERSION=0.39  # MAJOR.MINOR; compared component-wise (0.13 > 0.2!)
+# 0.40: to-https - the backup moves from rest:http to the TLS rest-server of the same backup server
+#       (login, host and repository from the node's own env, the port and the certificate from the
+#       panel). The repository is read over https first; a failed check changes nothing
+KERVAX_SETUP_VERSION=0.40  # MAJOR.MINOR; compared component-wise (0.13 > 0.2!)
 KERVAX_SETUP_ALWAYS=1  # safe on any node: installs only its own helper and spool and does not
                        # touch the backup configuration until the panel sends a command
 install -d -m 0755 "$HELPER_DIR" "$STATE_DIR" /var/lib/kervax/versions
@@ -1132,6 +1135,71 @@ cmd_get_config() {
 
 # get-creds returns the data needed for a restore (repo URL plus password). A secret: only on
 # an explicit panel request, through the spool (res 0770, removed at once). NEVER into the config file.
+# to-https <tls_port> <cacert_b64> moves the panel backup from rest:http to the TLS rest-server of
+# the same backup server (the second rest-server with --tls over the same data and htpasswd). The
+# https address is built HERE from the node's own env (the panel never sees the login and password):
+# the same login, host and repository, only the scheme and the port change. First the repository is
+# read over https with the certificate (restic snapshots); only when that works are the env, the
+# certificate and the runner switched. A failed check changes nothing, the backup stays on http.
+# The previous env is kept next to it as .http-bak (0600) for a manual way back.
+cmd_to_https() {
+  local port="$1" cacert_b64="$2"
+  [[ "$port" =~ ^[0-9]{2,5}$ ]] || { echo "bad port" >&2; return 2; }
+  [ -n "$cacert_b64" ] && [ "$cacert_b64" != "-" ] || { echo "no certificate of the backup server" >&2; return 2; }
+  [ -f "$PROV_ENV" ] || { echo "env not found (the backup was not configured by this panel)" >&2; return 2; }
+  [ -f "$PROV_SCRIPT" ] || { echo "the backup script $PROV_SCRIPT not found" >&2; return 2; }
+  [ -x "$RESTIC_BIN" ] || { echo "restic not found ($RESTIC_BIN)" >&2; return 2; }
+  local url pass
+  url="$(sed -n 's/^RESTIC_REPOSITORY=//p' "$PROV_ENV" | head -1)"
+  pass="$(sed -n 's/^RESTIC_PASSWORD=//p' "$PROV_ENV" | head -1)"
+  case "$url" in
+    rest:https://*) echo "OK already https"; return 0 ;;
+    rest:http://*) ;;
+    *) echo "the repository is not rest:http, nothing to move" >&2; return 2 ;;
+  esac
+  # rest:http://login:pass@host:port/repo/ -> rest:https://login:pass@host:<tls_port>/repo/
+  local rest="${url#rest:http://}" hp path ui="" host
+  hp="${rest%%/*}"; path="${rest#"$hp"}"
+  case "$hp" in *@*) ui="${hp%@*}@"; hp="${hp##*@}" ;; esac
+  case "$hp" in \[*) host="${hp%%]*}]" ;; *) host="${hp%%:*}" ;; esac
+  [ -n "$host" ] || { echo "could not read the host from the repository address" >&2; return 2; }
+  local new="rest:https://${ui}${host}:${port}${path}"
+  local ca out n
+  ca="$(mktemp "$RESTIC_BIN_DIR/.backup-ca.XXXXXX")" || { echo "mktemp failed" >&2; return 2; }
+  if ! printf '%s' "$cacert_b64" | base64 -d > "$ca" 2>/dev/null || ! grep -q 'BEGIN CERTIFICATE' "$ca"; then
+    rm -f "$ca"; echo "bad certificate" >&2; return 2
+  fi
+  chmod 0644 "$ca"
+  # the check: the snapshots are read over https with the certificate. No lock, no cache - read only
+  if ! out="$(RESTIC_REPOSITORY="$new" RESTIC_PASSWORD="$pass" timeout 150 \
+              "$RESTIC_BIN" --cacert "$ca" --no-cache --no-lock snapshots --json 2>&1)"; then
+    rm -f "$ca"
+    # restic repeats the address in its errors: the login and password are cut out
+    echo "the check over https failed, the backup stays on http: $(printf '%s' "$out" | sed -E 's#//[^@/ ]*@#//#g' | tr '\n' ' ' | cut -c1-300)" >&2
+    return 2
+  fi
+  n="$(printf '%s' "$out" | grep -o '"short_id"' | wc -l | tr -d ' ')"
+  # the switch: env (only the RESTIC_REPOSITORY line), the certificate, the runner with --cacert
+  umask 077
+  cp -p "$PROV_ENV" "$PROV_ENV.http-bak"
+  NEW_URL="$new" awk '/^RESTIC_REPOSITORY=/ { print "RESTIC_REPOSITORY=" ENVIRON["NEW_URL"]; next } { print }' \
+    "$PROV_ENV" > "$PROV_ENV.tmp" && chown root:root "$PROV_ENV.tmp" && chmod 0600 "$PROV_ENV.tmp" \
+    && mv -f "$PROV_ENV.tmp" "$PROV_ENV" || { umask 022; rm -f "$PROV_ENV.tmp" "$ca"; echo "could not write the env" >&2; return 2; }
+  umask 022
+  mv -f "$ca" "$PROV_CACERT"
+  local line; line="$(printf 'RESTIC=%q' "$RESTIC_BIN --cacert $PROV_CACERT")"
+  if LINE="$line" awk '/^RESTIC=/ { print ENVIRON["LINE"]; next } { print }' "$PROV_SCRIPT" > "$PROV_SCRIPT.tmp"; then
+    chmod 0700 "$PROV_SCRIPT.tmp"; chown "$PROV_USER:$PROV_USER" "$PROV_SCRIPT.tmp" 2>/dev/null || true
+    mv -f "$PROV_SCRIPT.tmp" "$PROV_SCRIPT"
+  else
+    # the runner did not get --cacert: back to http, otherwise the next night fails
+    rm -f "$PROV_SCRIPT.tmp"; mv -f "$PROV_ENV.http-bak" "$PROV_ENV"
+    echo "could not update the backup script, the backup stays on http" >&2; return 2
+  fi
+  refresh_config
+  echo "OK the backup goes over https :$port, snapshots read over https: $n; the previous env is in $PROV_ENV.http-bak"
+}
+
 cmd_get_creds() {
   [ -f "$PROV_ENV" ] || { echo "env not found (the backup was not configured by this panel)" >&2; return 2; }
   local url pass cacert=""
@@ -1497,11 +1565,11 @@ cmd_adopt() {
 }
 
 cmd_process_spool() {
-  local req id action mode schedule paths out ok k v line repo_url repopass delay ver cacert_b64 engine container
+  local req id action mode schedule paths out ok k v line repo_url repopass delay ver cacert_b64 engine container port
   for req in "$REQ_DIR"/*.req; do
     [ -f "$req" ] || continue
     id="$(basename "$req" .req)"
-    action=""; mode="exclude"; schedule=""; paths=(); repo_url=""; repopass=""; delay="1h"; ver="$RESTIC_TARGET_VER"; cacert_b64="-"; engine=""; container=""
+    action=""; mode="exclude"; schedule=""; paths=(); repo_url=""; repopass=""; delay="1h"; ver="$RESTIC_TARGET_VER"; cacert_b64="-"; engine=""; container=""; port=""
     # IMPORTANT: not `IFS='=' read -r k v` - that trims a trailing '=' (base64 padding of cacert).
     # The line is read whole and split on the first '=' with parameter expansion.
     while IFS= read -r line; do
@@ -1510,7 +1578,7 @@ cmd_process_spool() {
         action) action="$v";; mode) mode="$v";; schedule) schedule="$v";; path) paths+=("$v");;
         repo_url) repo_url="$v";; repopass) repopass="$v";; delay) delay="$v";;
         restic_version) ver="$v";; cacert_b64) cacert_b64="$v";;
-        engine) engine="$v";; container) container="$v";;
+        engine) engine="$v";; container) container="$v";; port) port="$v";;
         dump_dir) export KV_DUMP_DIR="$v";;
         dump_keep) export KV_DUMP_KEEP="$v";;
         dump_minfree) export KV_DUMP_MINFREE="$v";;
@@ -1526,6 +1594,7 @@ cmd_process_spool() {
       provision)    if out="$(cmd_provision "$repo_url" "$repopass" "$mode" "$schedule" "$delay" "$ver" "$cacert_b64" "${paths[@]}" 2>&1)"; then ok=true; fi ;;
       adopt)        if out="$(cmd_adopt "$ver" 2>&1)"; then ok=true; fi ;;
       get_creds)    if out="$(cmd_get_creds 2>&1)"; then ok=true; fi ;;
+      to_https)     if out="$(cmd_to_https "$port" "$cacert_b64" 2>&1)"; then ok=true; fi ;;
       dump_setup)   if out="$(cmd_dump_setup "$engine" "$container" 2>&1)"; then ok=true; fi ;;
       dump_remove)  if out="$(cmd_dump_remove "$engine" "$container" 2>&1)"; then ok=true; fi ;;
       deprovision)  if out="$(cmd_deprovision 2>&1)"; then ok=true; fi ;;
@@ -2525,12 +2594,13 @@ case "${1:-}" in
   provision)     shift; cmd_provision "$@" ;;
   adopt)         shift; cmd_adopt "$@" ;;
   get-creds)     cmd_get_creds ;;
+  to-https)      shift; cmd_to_https "$@" ;;
   dump-setup)    shift; cmd_dump_setup "$@" ;;
   dump-remove)   shift; cmd_dump_remove "$@" ;;
   deprovision)   cmd_deprovision ;;
   dump-status)   cmd_dump_status ;;
   process-spool) cmd_process_spool ;;
-  *) echo "usage: $0 {get-config|custom-scan|backup-runs|set-paths <mode> <path...>|set-schedule <HH:MM>|run-now|provision <url> <repopass> <mode> <HH:MM> <delay> <ver> <cacert_b64|-> <path...>|dump-setup <engine> [container]|dump-remove <engine>|deprovision|dump-status|process-spool}" >&2; exit 2 ;;
+  *) echo "usage: $0 {get-config|custom-scan|backup-runs|set-paths <mode> <path...>|set-schedule <HH:MM>|run-now|provision <url> <repopass> <mode> <HH:MM> <delay> <ver> <cacert_b64|-> <path...>|dump-setup <engine> [container]|dump-remove <engine>|deprovision|to-https <port> <cacert_b64>|dump-status|process-spool}" >&2; exit 2 ;;
 esac
 HELPER_EOF
 chmod 0755 "$HELPER.new" && mv -f "$HELPER.new" "$HELPER"

@@ -29,8 +29,9 @@ import {
   type RepoStat,
   type Server,
 } from './api'
-import { updateServer } from './api'
-import { backupAlive, backupWindowNote, dbAuditNames, hasOwnFileBackup, shortList, srvIssues, srvMuted } from './serverUtils'
+import { BACKUP_HTTP_MUTE, backupServerToHttps, backupToHttps, updateServer } from './api'
+import { trBackend } from './backendText'
+import { backupAlive, backupDest, backupDestWhere, backupWindowNote, dbAuditNames, hasOwnFileBackup, shortList, srvIssues, srvMuted, type BackupDest } from './serverUtils'
 import { fmtRel } from './ServersPage'
 import { CardNav, FreshChip, markMuted, OvAreas, OvRows, secInfoOf, type OvRow, type SecDef, type SecInfo, type SecItem } from './cardLayout'
 import { OsIcon } from './osIcon'
@@ -103,32 +104,25 @@ function diskPct(info: BackupServerInfo): number | null {
   return total ? Math.min(100, Math.round(((info.disk_used || 0) / total) * 100)) : null
 }
 
-// имя бэкап-сервера назначения из repo_dest (rest://host:port/name → host → имя ноды-сервера)
-function backupDestName(
-  repoDest: string | undefined,
-  servers: Server[],
-  client?: Server,
-): string {
-  if (repoDest) {
-    const host = repoDest.match(/rest:[a-z]+:\/\/([^:/]+)/)?.[1] || ''
-    if (host) {
-      const srv = servers.find(
-        (s) => (s.external_ip === host || s.agent_ip === host || s.hostname === host) &&
-          s.last_report?.backup_server?.present,
-      )
-      return srv?.name || host
-    }
-  }
-  // Фолбэк для нод со старым helper'ом: они repo_dest не отдают вовсе. Ищем со стороны
-  // бэкап-сервера — репозиторий называется по имени клиента, так что совпадение надёжное.
-  if (client) {
-    for (const s of servers) {
-      const repos = s.last_report?.backup_server?.repos
-      if (!repos) continue
-      if (repos.some((r) => r.name === client.hostname || r.name === client.name)) return s.name
-    }
-  }
-  return ''
+// Куда бэкапится: имя сервера бэкапов, за ним адрес, порт и канал (serverUtils.backupDest). Имя -
+// ссылка на окно сервера бэкапов (или карточку, если rest-server на нем панель не видит). http через
+// интернет подсвечен: это пункт "Требует действий", пока не решили оставить
+function DestLabel({ dest, onOpen }: { dest: BackupDest; onOpen?: (s: Server) => void }) {
+  const { t } = useI18n()
+  const tg = dest.target
+  const where = backupDestWhere(tg)
+  const proto = tg && tg.kind !== 'local' ? (
+    <span className={tg.insecure && !tg.muted ? 't-degraded' : undefined}>{tg.proto}</span>
+  ) : null
+  const addr = where || proto ? <>{where}{where && proto ? ', ' : ''}{proto}</> : null
+  // сервер бэкапов в панели не нашелся: имя - это и есть хост, повторять его не нужно
+  if (!dest.srv) return addr ?? <>{dest.name}</>
+  const bsrv = !!dest.srv.last_report?.backup_server?.present
+  const name = onOpen ? (
+    <a href={bsrv ? `?backupsrv=${dest.srv.id}` : `?server=${dest.srv.id}`} title={t('открыть сервер бэкапов')}
+      onClick={(e) => { e.preventDefault(); onOpen(dest.srv!) }}>{dest.name}</a>
+  ) : dest.name
+  return <>{name}{addr && <> ({addr})</>}</>
 }
 
 // Статистику репозитория (физический размер на бэкап-сервере, число снапшотов) панель
@@ -602,6 +596,228 @@ const BK_SEC_OF_KIND: Record<string, string> = {
   backup_dump: 'coverage', backup_dump_space: 'coverage', backup_cron: 'coverage', backup_restore: 'restore',
 }
 
+// Перевод на https - задача на бэкенде (api/servers.py _orchestrate_to_https): шаги и итог
+function useHttpsSteps(): Record<string, string> {
+  const { t } = useI18n()
+  return {
+    'tls-front': t('TLS-фронт на бэкап-сервере'),
+    'get-cert': t('сертификат'),
+    'allow-tls': t('TLS-порт клиенту на сервере бэкапов'),
+    'to-https': t('проверка по https и переключение'),
+  }
+}
+
+// ждать задачу до конца, отдавая каждое новое состояние
+async function waitJob(serverId: number, j: BackupSetupJob, alive: { current: boolean },
+  onStep: (j: BackupSetupJob) => void): Promise<BackupSetupJob> {
+  let cur = j
+  while (cur.status === 'running' && alive.current) {
+    await new Promise((r) => setTimeout(r, 2500))
+    if (!alive.current) break
+    cur = await backupSetupStatus(serverId, cur.id)
+    onStep(cur)
+  }
+  return cur
+}
+
+function HttpsSteps({ job }: { job: BackupSetupJob }) {
+  const { t, lang } = useI18n()
+  const lbl = useHttpsSteps()
+  return (
+    <div className="backup-setup-progress">
+      {job.steps.map((st, i) => (
+        <div key={i} className={`setup-step ${st.ok ? 't-up' : 't-down'}`}>
+          <span className="mono">{st.ok ? '✓' : '✗'}</span> {lbl[st.step] || st.step}
+          {!st.ok && st.detail && <span className="muted small"> - {st.detail}</span>}
+        </div>
+      ))}
+      {job.status === 'running' && (
+        <div className="setup-step muted"><span className="sdot sdot-unknown" /> {t('выполняется…')}</div>
+      )}
+      {job.status !== 'running' && (
+        <div className={`setup-final ${job.status === 'done' ? 't-up' : 'form-error'}`}>
+          {job.status === 'done' ? `✅ ${t('бэкап идет по https')}` : `❌ ${lang === 'en' ? trBackend(job.message) : job.message}`}
+        </div>
+      )}
+    </div>
+  )
+}
+
+const HTTPS_HOW = 'Перевод на TLS rest-server того же сервера бэкапов (порт 64101, сертификат самоподписанный): сервер бэкапов открывает клиенту порт, клиент читает репозиторий по https и переключается, только если это получилось. Не получилось - бэкап остается на http. Логин, пароль и репозиторий те же, снапшоты остаются.'
+
+// Бэкап идет по http через интернет (app/backup_target.py): логин и пароль rest-server летят открытым
+// текстом. Не авария, а дело: пункт "Требует действий", здесь - кнопка "перевести на https" и решение
+// "оставить http" (alert_mutes bkhttp:repo), принятое видно приглушенным с "вернуть"
+function BackupHttp({ server: s, canManage, onChanged }: {
+  server: Server
+  canManage: boolean
+  onChanged: () => void
+}) {
+  const { t } = useI18n()
+  const [busy, setBusy] = useState(false)
+  const [job, setJob] = useState<BackupSetupJob | null>(null)
+  const [err, setErr] = useState<string | null>(null)
+  const alive = useRef(true)
+  useEffect(() => () => { alive.current = false }, [])
+  const tg = s.backup_target
+  if (!tg) return null
+  const blockers = s.backup_https?.blockers ?? []
+  const running = job?.status === 'running'
+  const toggle = () => {
+    const cur = s.alert_mutes ?? []
+    setBusy(true)
+    updateServer(s.id, { alert_mutes: tg.muted ? cur.filter((m) => m !== BACKUP_HTTP_MUTE) : [...new Set([...cur, BACKUP_HTTP_MUTE])] })
+      .then(onChanged)
+      .catch(() => {})
+      .finally(() => setBusy(false))
+  }
+  const move = async () => {
+    if (!window.confirm(t('Перевести бэкап {name} на https? Если проверка по https не пройдет, бэкап останется на http.', { name: s.name }))) return
+    setErr(null)
+    try {
+      const j = await backupToHttps(s.id)
+      setJob(j)
+      const fin = await waitJob(s.id, j, alive, setJob)
+      if (fin.status === 'done' && alive.current) onChanged()
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : t('ошибка'))
+    }
+  }
+  return (
+    <div>
+      <div className={`osupd-adv ${tg.muted ? 'osupd-adv-off' : 'net-note'}`}>
+        <span className="osupd-adv-text">
+          {t('бэкап идет на {where} по http без шифрования: логин и пароль репозитория видны по дороге', { where: backupDestWhere(tg) })}
+        </span>
+        {tg.muted && <span className="osupd-adv-why">{t('http оставлен')}</span>}
+        {canManage && !tg.muted && job?.status !== 'done' && (
+          <button className="ghost small row-act" disabled={running || blockers.length > 0} onClick={move}
+            title={blockers.length ? blockers.join('; ') : t(HTTPS_HOW)}>
+            🔒 {t('перевести на https')}
+          </button>
+        )}
+        {canManage && (
+          <button className="ghost small row-act" disabled={busy || running} onClick={toggle}
+            title={tg.muted ? undefined : t('Так задумано: убрать из "Требует действий"')}>
+            {tg.muted ? t('вернуть') : t('оставить http')}
+          </button>
+        )}
+      </div>
+      {!tg.muted && !job && (
+        <div className="muted small">
+          {blockers.length > 0 ? `${t('Перевести пока нельзя')}: ${blockers.join('; ')}` : t(HTTPS_HOW)}
+        </div>
+      )}
+      {err && <div className="form-error small">{err}</div>}
+      {job && <HttpsSteps job={job} />}
+    </div>
+  )
+}
+
+// Клиенты этого сервера бэкапов, которые ходят по http: перевод на https галками, по очереди
+// (бэкенд ведет очередь сам, следующий начинается после предыдущего). Итог - по каждому серверу
+function BsrvHttps({ server: bs, clients, canAct, onChanged }: {
+  server: Server; clients: Server[]; canAct: boolean; onChanged: () => void
+}) {
+  const { t, lang } = useI18n()
+  const lbl = useHttpsSteps()
+  const [sel, setSel] = useState<Set<number>>(new Set())
+  const [jobs, setJobs] = useState<Record<number, BackupSetupJob>>({})
+  const [active, setActive] = useState<number | null>(null) // чей перевод идет сейчас
+  // кого отправили переводить: перешедший на https уходит из списка клиентов по http, а его итог
+  // должен остаться на экране вместе с остальными
+  const [sent, setSent] = useState<Server[]>([])
+  const rows = [...clients, ...sent.filter((x) => !clients.some((c) => c.id === x.id))]
+  const [err, setErr] = useState<string | null>(null)
+  const alive = useRef(true)
+  useEffect(() => () => { alive.current = false }, [])
+  const running = Object.values(jobs).some((j) => j.status === 'running')
+  const ready = clients.filter((c) => !(c.backup_https?.blockers ?? []).length)
+  const flip = (id: number) => setSel((prev) => {
+    const n = new Set(prev)
+    if (n.has(id)) n.delete(id)
+    else n.add(id)
+    return n
+  })
+  const run = async () => {
+    const ids = clients.filter((c) => sel.has(c.id)).map((c) => c.id)
+    if (!ids.length) return
+    if (!window.confirm(t('Перевести на https по очереди: {n}? У кого проверка по https не пройдет, бэкап останется на http.', { n: ids.length }))) return
+    setErr(null)
+    try {
+      const list = await backupServerToHttps(bs.id, ids)
+      setSent(clients.filter((c) => sel.has(c.id)))
+      setJobs(Object.fromEntries(list.map((j) => [j.server_id, j])))
+      setSel(new Set())
+      // очередь идет на бэкенде; опрашиваем по порядку - пока ждем первого, остальные в очереди
+      for (const j of list) {
+        if (!alive.current) return
+        setActive(j.server_id)
+        await waitJob(j.server_id, j, alive, (cur) => setJobs((prev) => ({ ...prev, [j.server_id]: cur })))
+      }
+      setActive(null)
+      if (alive.current) onChanged()
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : t('ошибка'))
+    }
+  }
+  const state = (c: Server): ReactNode => {
+    const j = jobs[c.id]
+    if (!j) return null
+    if (j.status === 'done') return <span className="t-up">✓ {t('по https')}</span>
+    if (j.status === 'error') return <span className="t-down">✗ {lang === 'en' ? trBackend(j.message) : j.message}</span>
+    if (c.id !== active) return <span className="muted">{t('в очереди')}</span>
+    const last = j.steps[j.steps.length - 1]
+    return <span className="muted">{last ? `${t('идет')}: ${lbl[last.step] || last.step}` : t('идет')}</span>
+  }
+  return (
+    <div className="srv-sec">
+      <div className="muted small">{t(HTTPS_HOW)}</div>
+      <div className="chart-card net-card net-card-wide">
+        <div className="net-head">
+          <div className="chart-cap net-cap">
+            {t('Клиенты по http')}
+            <span className="net-n">{clients.length}</span>
+          </div>
+          {canAct && (
+            <div className="backup-manage-actions">
+              <button className="ghost small" disabled={running || !ready.length}
+                onClick={() => setSel(new Set(ready.filter((c) => !c.backup_target?.muted).map((c) => c.id)))}>
+                {t('выбрать всех, кого можно')}
+              </button>
+              <button className="small" disabled={running || sel.size === 0} onClick={run}>
+                🔒 {t('перевести на https: {n}', { n: sel.size })}
+              </button>
+            </div>
+          )}
+        </div>
+        {err && <div className="form-error small">{err}</div>}
+        <div className="loc-results">
+          {rows.map((c) => {
+            const why = c.backup_https?.blockers ?? []
+            return (
+              <label key={c.id} className="loc-res bsrv-https-row">
+                <input type="checkbox" checked={sel.has(c.id)} disabled={!canAct || running || why.length > 0 || jobs[c.id]?.status === 'done'}
+                  onChange={() => flip(c.id)} />
+                <span className="hs-host-main">
+                  <span className="hs-host-name">
+                    <CountryFlag code={c.country} />
+                    {c.name}
+                    {c.backup_target?.muted && <span className="type-chip off">{t('http оставлен')}</span>}
+                  </span>
+                  <span className="backup-row-meta mono muted small">{backupDestWhere(c.backup_target)}</span>
+                  {why.length > 0 && <span className="muted small">{t('Перевести пока нельзя')}: {why.join('; ')}</span>}
+                </span>
+                <span className="small">{state(c)}</span>
+              </label>
+            )
+          })}
+        </div>
+      </div>
+    </div>
+  )
+}
+
 function BackupModal({
   server: s,
   backup: b,
@@ -612,16 +828,18 @@ function BackupModal({
   onChanged,
   onClose,
   onReinstall,
+  onOpenDest,
 }: {
   server: Server
   backup: BackupInfo
   repo?: RepoStat
-  dest: string // сервер бэкапов, куда идет этот бэкап
+  dest: BackupDest | null // сервер бэкапов, куда идет этот бэкап, и адрес
   canManage: boolean
   initialSec?: string | null // из ссылки алерта или с главной: ?backup=id&sec=coverage
   onChanged: () => void
   onClose: () => void
   onReinstall?: () => void // "Настроить бэкап" поверх существующего (форма спросит согласие)
+  onOpenDest?: (s: Server) => void // открыть сервер бэкапов из строки "куда"
 }) {
   const { isAdmin } = useAuth()
   const { t } = useI18n()
@@ -682,6 +900,8 @@ function BackupModal({
   const own = s.custom_backups ?? []
   const ownBad = ownBackupProblems(s)
   const mutes = new Set(s.alert_mutes ?? [])
+  // бэкап по http через интернет и не решено "оставить": пункт "Требует действий"
+  const httpOpen = !!s.backup_target?.insecure && !s.backup_target.muted
 
   const shown: Record<string, boolean> = {
     overview: true,
@@ -722,6 +942,8 @@ function BackupModal({
       const sec = BK_SEC_IDS.has(i.sec ?? '') ? i.sec! : (BK_SEC_OF_KIND[i.kind ?? ''] ?? 'runs')
       add(sec, { level: i.tone === 't-down' ? 2 : 1, text: i.text, since: i.since })
     }
+    if (httpOpen)
+      add('manage', { level: 1, text: t('бэкап идет по http без шифрования: логин и пароль репозитория видны по дороге') })
     const dbs = audit.filter((x) => x.kind === 'db')
     if (dbs.length && !s.db_dumps_ok)
       add('coverage', {
@@ -803,9 +1025,9 @@ function BackupModal({
           </div>
         </div>
         <div className="srv-meta srv-meta-line">
-          {(dest || b.repo_dest) && (
-            <span className="srv-meta-item" title={b.repo_dest || undefined}>
-              <span className="srv-meta-k">{t('куда')}</span> {dest || b.repo_dest}
+          {dest && (
+            <span className="srv-meta-item">
+              <span className="srv-meta-k">{t('куда')}</span> <DestLabel dest={dest} onOpen={onOpenDest} />
             </span>
           )}
           <span className="srv-meta-item">
@@ -974,6 +1196,9 @@ function BackupModal({
                     </span>
                   ))}
                 </div>
+                {s.backup_target?.insecure && (
+                  <BackupHttp server={s} canManage={canManage} onChanged={onChanged} />
+                )}
                 {helperOld && (
                   <div className="net-note">{t('helper на ноде устарел — переустановите, чтобы подхватить новые фичи/фиксы:')}</div>
                 )}
@@ -1114,7 +1339,7 @@ function HostRow({
   server: Server
   backup: BackupInfo
   showGroup?: boolean
-  dest?: string
+  dest?: BackupDest | null
   hint?: string | null // что из нажатой плитки нашлось у клиента
   onOpen: () => void
 }) {
@@ -1156,7 +1381,7 @@ function HostRow({
           свойство самой ноды, и глазами удобнее сверять по одной вертикали */}
       {dest && (
         <div className="backup-dest mono muted small" title={t('куда бэкапится')}>
-          🗄 {dest}
+          🗄 <DestLabel dest={dest} />
         </div>
       )}
       <div className="hs-host-count mono">
@@ -2080,6 +2305,7 @@ const BSRV_SECTIONS: SecDef[] = [
   { id: 'archive', label: 'Архив', group: 'Репозитории' },
   { id: 'cleanup', label: 'Чистка', group: 'Репозитории' },
   { id: 'server', label: 'Сервер', group: 'Нода' },
+  { id: 'https', label: 'Переход на https', group: 'Нода' },
   { id: 'coverage', label: 'Покрытие', group: 'Нода' },
 ]
 const BSRV_SEC_IDS = new Set(BSRV_SECTIONS.map((x) => x.id))
@@ -2162,6 +2388,9 @@ function BackupServerModal({ server: s, info, servers, canAct, initialSec, onCha
   const audit = (s.backup_audit ?? []).filter((x) => !x.muted)
   const pruneNames = Object.keys(ctx.prune).filter((n) => !muted.has(n) && !ctx.archived.has(n)).sort()
   const rot = s.bsrv_rotation ?? []
+  // клиенты, чей бэкап идет сюда по http (бэкенд: backup_https.bs_id - этот сервер)
+  const httpClients = servers.filter((c) => c.backup_https?.bs_id === s.id).sort((a, b) => a.name.localeCompare(b.name))
+  const httpOpen = httpClients.filter((c) => !c.backup_target?.muted)
 
   const shown: Record<string, boolean> = {
     overview: true,
@@ -2169,6 +2398,8 @@ function BackupServerModal({ server: s, info, servers, canAct, initialSec, onCha
     archive: archivedRepos.length > 0,
     cleanup: all.length > 0,
     server: true,
+    // открытый раздел не прячем, когда последний клиент перешел на https: на нем итоги перевода
+    https: httpClients.length > 0 || active === 'https',
     coverage: (s.backup_audit?.length ?? 0) > 0,
   }
   const secs = BSRV_SECTIONS.filter((x) => shown[x.id])
@@ -2233,6 +2464,7 @@ function BackupServerModal({ server: s, info, servers, canAct, initialSec, onCha
       info.running ? t('запущен') : t('остановлен'),
     ),
     coverage: okDb ? t('бэкапится баз: {n}', { n: okDb }) : t('баз не найдено'),
+    https: t('все клиенты по https'),
   }
   const infoSec: Record<string, SecInfo> = {}
   for (const { id } of BSRV_SECTIONS) infoSec[id] = secInfoOf(items[id] ?? [], ok[id] ?? '', t)
@@ -2240,6 +2472,7 @@ function BackupServerModal({ server: s, info, servers, canAct, initialSec, onCha
   const soft = (id: string, line: string) => {
     if (!infoSec[id].level) infoSec[id] = { ...infoSec[id], level: 1, line }
   }
+  if (httpOpen.length) soft('https', t('по http: {list}', { list: shortList(httpOpen.map((c) => c.name), t, 3) }))
   if (srvOld) soft('server', t('rest-server {v}, есть {t}', { v: info.version ?? '', t: RESTSRV_TARGET }))
   else if (!info.tls_front) soft('server', t('клиенты ходят по HTTP, без TLS'))
   const gaps = audit.filter((x) => x.gap)
@@ -2535,6 +2768,7 @@ function BackupServerModal({ server: s, info, servers, canAct, initialSec, onCha
               </div>
             )}
 
+            {cur.id === 'https' && <BsrvHttps server={s} clients={httpClients} canAct={canAct} onChanged={onChanged} />}
             {cur.id === 'coverage' && <CoverageAudit server={s} canManage={canAct} onChanged={onChanged} bare />}
           </div>
         </div>
@@ -2963,14 +3197,25 @@ function BackupSetupModal({ server: s, backupServers, onClose, onDone }: {
   server: Server; backupServers: Server[]; onClose: () => void; onDone: () => void
 }) {
   const { t } = useI18n()
-  const [bsId, setBsId] = useState<number>(backupServers[0]?.id ?? 0)
-  const [mode, setMode] = useState<'exclude' | 'include'>('exclude')
-  const [paths, setPaths] = useState(DEFAULT_EXCLUDES.join('\n'))
-  const [schedule, setSchedule] = useState('23:00')
-  const [tls, setTls] = useState(true)
-  const [ret, setRet] = useState({ last: 3, daily: 7, weekly: 4, monthly: 6 })
   // на ноде уже есть бэкап (то же правило, что у раздела): настройка только поверх, с согласия
   const hasBackup = backupAlive(s.last_report?.backup)
+  // Переустановка поверх (в том числе перевод на https) начинает с текущих настроек: сервер бэкапов,
+  // пути, время и хранение. С умолчаниями она молча сбрасывала свои пути на стандартные
+  const cur = hasBackup && s.last_report?.backup?.manageable ? s.last_report.backup : null
+  const curSrv = cur ? backupDest(s, backupServers)?.srv : undefined
+  const curRepo = cur ? backupRepoStat(cur.repo_dest, backupServers, s) : undefined
+  const curMode: 'exclude' | 'include' = cur?.mode === 'include' ? 'include' : 'exclude'
+  const [bsId, setBsId] = useState<number>(
+    curSrv && backupServers.some((x) => x.id === curSrv.id) ? curSrv.id : backupServers[0]?.id ?? 0)
+  const [mode, setMode] = useState<'exclude' | 'include'>(curMode)
+  const [paths, setPaths] = useState(
+    cur ? ((curMode === 'include' ? cur.includes : cur.excludes) ?? []).join('\n') : DEFAULT_EXCLUDES.join('\n'))
+  const [schedule, setSchedule] = useState(cur?.schedule || '23:00')
+  const [tls, setTls] = useState(true)
+  const [ret, setRet] = useState({
+    last: curRepo?.keep_last ?? 3, daily: curRepo?.keep_daily ?? 7,
+    weekly: curRepo?.keep_weekly ?? 4, monthly: curRepo?.keep_monthly ?? 6,
+  })
   const [reinstall, setReinstall] = useState(false)
   const [job, setJob] = useState<BackupSetupJob | null>(null)
   const [busy, setBusy] = useState(false)
@@ -3578,7 +3823,7 @@ export function BackupsPage({
                   server={s}
                   backup={d}
                   showGroup={groupBy !== 'group'}
-                  dest={backupDestName(d.repo_dest, servers ?? [], s)}
+                  dest={backupDest(s, servers ?? [])}
                   hint={hint}
                   onOpen={() => setOpenId(s.id)}
                 />
@@ -3641,7 +3886,7 @@ export function BackupsPage({
           server={open.s}
           backup={open.d}
           repo={backupRepoStat(open.d.repo_dest, servers ?? [], open.s)}
-          dest={backupDestName(open.d.repo_dest, servers ?? [], open.s)}
+          dest={backupDest(open.s, servers ?? [])}
           canManage={!isViewer}
           initialSec={linkSec.id === open.s.id ? linkSec.sec : null}
           onChanged={load}
@@ -3653,6 +3898,12 @@ export function BackupsPage({
             setOpenId(null)
             setLinkSec({ id: null, sec: null })
             setSetupSrv(open.s)
+          }}
+          onOpenDest={(d) => {
+            setOpenId(null)
+            setLinkSec({ id: null, sec: null })
+            if (d.last_report?.backup_server?.present) setOpenSrvId(d.id)
+            else window.location.assign(`?server=${d.id}`)
           }}
         />
       )}
