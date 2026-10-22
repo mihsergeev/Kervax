@@ -7795,42 +7795,76 @@ button.type-chip.tamper-more { cursor: pointer; border: 1px dashed var(--border)
 .webfiles-root:last-child { border-bottom: 0; }
 .webfiles-head { display: flex; flex-direction: column; gap: 2px; padding: 0 0.3rem; overflow-wrap: anywhere; }
 
-/* инвентаризация в окне "Отчет" (Inventory.tsx): выбор серверов чипами, плотная таблица */
+/* инвентаризация в окне "Отчет" (Inventory.tsx): плитки итогов, строка фильтров, плотная таблица с группами */
 .srv-sec.inv-sec { max-width: none; }
-.inv { display: flex; flex-direction: column; gap: 0.6rem; }
-.inv-pick { display: flex; flex-direction: column; gap: 0.45rem; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 0.55rem 0.7rem; }
-.inv-row { display: flex; flex-wrap: wrap; gap: 0.4rem; align-items: center; }
-.inv-lab { font-size: 0.7rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-muted); margin-right: 0.15rem; }
+.inv { display: flex; flex-direction: column; gap: 0.5rem; }
+.inv-top, .inv-bar { display: flex; flex-wrap: wrap; gap: 0.4rem; align-items: center; }
+.inv-bar { background: var(--bg-card); border: 1px solid var(--border); border-radius: 8px; padding: 0.35rem 0.45rem; }
 .inv-grow { flex: 1; }
-button.inv-chip { background: transparent; color: var(--text); border: 1px solid var(--border-strong); border-radius: 999px; padding: 0.12rem 0.65rem; font-size: 0.8rem; font-weight: 500; box-shadow: none; }
-button.inv-chip i { font-style: normal; color: var(--text-muted); font-size: 0.74rem; margin-left: 0.2rem; }
-button.inv-chip:hover { background: var(--hover); }
-button.inv-chip.on { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 18%, transparent); }
-.inv-q { flex: 1 1 12rem; min-width: 0; max-width: 22rem; }
-.inv-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(10rem, 1fr)); gap: 0.1rem 0.7rem; padding-top: 0.35rem; border-top: 1px dashed var(--border); }
-.inv-list label { display: flex; flex-direction: row; margin: 0; gap: 0.35rem; align-items: center; font-size: 0.82rem; cursor: pointer; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.inv-list label.off { color: var(--text-muted); text-decoration: line-through; }
-.inv-list input { width: auto; margin: 0; flex: 0 0 auto; }
-.inv-tw { overflow-x: auto; border: 1px solid var(--border); border-radius: 8px; }
-.inv-tbl { margin: 0; font-size: 0.84rem; }
-.inv-tbl th { white-space: nowrap; }
-.inv-tbl td, .inv-tbl th { padding: 0.3rem 0.5rem; vertical-align: top; }
-.inv-tbl .mono { font-size: 0.74rem; }
+.inv-q { flex: 0 1 14rem; min-width: 8rem; }
+.inv-cnt { font-style: normal; font-weight: 400; color: var(--text-muted); margin-left: 0.15rem; }
+/* выбор групп: кнопка со списком галок */
+.inv-dd { position: relative; }
+button.inv-dd-btn { font-size: 0.82rem; padding: 0.28rem 0.7rem; }
+.inv-dd-btn b { font-weight: 600; max-width: 14rem; display: inline-block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; }
+.inv-pop { position: absolute; top: calc(100% + 0.25rem); left: 0; z-index: 20; min-width: 13rem; max-height: 22rem; overflow: auto; background: var(--bg-card); border: 1px solid var(--border-strong); border-radius: 8px; padding: 0.3rem; box-shadow: var(--shadow-modal, 0 10px 30px rgba(0, 0, 0, 0.45)); display: flex; flex-direction: column; gap: 1px; }
+.inv-pop label { display: flex; flex-direction: row; align-items: center; gap: 0.45rem; margin: 0; padding: 0.2rem 0.4rem; border-radius: 5px; font-size: 0.84rem; cursor: pointer; white-space: nowrap; }
+.inv-pop label:hover { background: var(--hover); }
+.inv-pop label i { font-style: normal; margin-left: auto; padding-left: 0.8rem; color: var(--text-muted); font-size: 0.76rem; }
+.inv-pop-sep { border-top: 1px solid var(--border); margin: 0.2rem 0; }
+.inv input[type='checkbox'] { width: auto; margin: 0; accent-color: var(--accent); }
+/* плитки итогов: цветная полоса слева у дисков и GPU, доля объема полоской */
+.inv-tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(7.5rem, 1fr)); gap: 0.4rem; }
+.inv-tile { position: relative; overflow: hidden; display: flex; flex-direction: column; min-width: 0; background: var(--bg-card); border: 1px solid var(--border); border-radius: 8px; padding: 0.35rem 0.6rem 0.4rem; }
+.inv-tile .k { font-size: 0.68rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-muted); }
+.inv-tile b { font-size: 1.25rem; line-height: 1.25; font-variant-numeric: tabular-nums; }
+.inv-tile .d { font-size: 0.72rem; color: var(--text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.inv-tile.disk::before { content: ''; position: absolute; left: 0; top: 0; bottom: 0; width: 3px; background: var(--c); }
+.inv-share { display: block; height: 4px; margin-top: 0.3rem; border-radius: 2px; overflow: hidden; background: var(--border); }
+.inv-share i { display: block; height: 100%; background: var(--c); }
+.inv-k-nvme { --c: #8b5cf6; }
+.inv-k-ssd { --c: #3b82f6; }
+.inv-k-hdd { --c: #f59e0b; }
+.inv-k-virt { --c: #64748b; }
+.inv-k-gpu { --c: var(--up); }
+.inv-k-warn { --c: var(--degraded); }
+.inv-k-unk { --c: transparent; }
+/* таблица: плотно, зебра, группы строками с подытогами, шапка и итог прилипают к окну */
+.inv-tw { border: 1px solid var(--border); border-radius: 8px; background: var(--bg-card); }
+.inv-tbl { width: 100%; margin: 0; border-collapse: separate; border-spacing: 0; font-size: 0.82rem; }
+.inv-tbl th { position: sticky; top: -0.55rem; z-index: 2; text-align: left; white-space: nowrap; font-size: 0.68rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-muted); background: color-mix(in srgb, var(--text) 4%, var(--bg-card)); padding: 0.32rem 0.45rem; border-bottom: 1px solid var(--border-strong); }
+.inv-tbl th:first-child { border-top-left-radius: 8px; }
+.inv-tbl th:last-child { border-top-right-radius: 8px; }
+.inv-tbl td { padding: 0.2rem 0.45rem; border-bottom: 1px solid var(--border); vertical-align: top; line-height: 1.38; }
+.inv-tbl tbody tr.inv-r:nth-child(even of .inv-r) td { background: color-mix(in srgb, var(--text) 2.5%, transparent); }
+.inv-tbl tbody tr.inv-r:hover td { background: color-mix(in srgb, var(--accent) 8%, transparent); }
+.inv-tbl tr.inv-r.off td { opacity: 0.38; }
+.inv-tbl tr.inv-r.off .inv-name { text-decoration: line-through; }
 .inv-tbl .num { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
-.inv-tbl tfoot td { font-weight: 600; background: var(--bg); border-top: 1px solid var(--border-strong); }
-.inv-full { width: auto; min-width: 100%; }
-.inv-full td { line-height: 1.35; }
-.inv-name { font-weight: 600; }
-.inv-disks { display: flex; flex-wrap: wrap; gap: 0.1rem 0.7rem; }
-.inv-disks.inv-col { flex-direction: column; }
-.inv-disk { white-space: nowrap; }
-.inv-dt { display: inline-block; width: 0.5rem; height: 0.5rem; border-radius: 2px; margin-right: 0.35rem; }
-.inv-dt-nvme { background: #8b5cf6; }
-.inv-dt-ssd { background: #3b82f6; }
-.inv-dt-hdd { background: #f59e0b; }
-.inv-dt-virt { background: #64748b; }
-.inv-dt-unk { border: 1px dashed var(--text-muted); }
-.type-chip.inv-bare { color: var(--up); }
-.inv-bad { color: var(--down); }
-.inv-off { display: inline-block; width: 0.45rem; height: 0.45rem; border-radius: 50%; background: var(--down); margin-left: 0.3rem; vertical-align: 0.1rem; }
-.inv-tiles { margin-top: 0.1rem; }
+.inv-tbl .nowrap { white-space: nowrap; }
+.inv-tbl .inv-cb { width: 1.4rem; padding-right: 0; }
+.inv-tbl tr.inv-gh td { cursor: pointer; font-weight: 600; padding-top: 0.32rem; padding-bottom: 0.32rem; background: color-mix(in srgb, var(--accent) 7%, var(--bg-card)); border-top: 1px solid var(--border-strong); }
+.inv-tbl tr.inv-gh td .muted { font-weight: 400; }
+.inv-car { display: inline-block; width: 0.8rem; color: var(--text-muted); }
+.inv-tbl tfoot td { position: sticky; bottom: -1rem; z-index: 2; font-weight: 600; background: color-mix(in srgb, var(--text) 4%, var(--bg-card)); border-top: 1px solid var(--border-strong); border-bottom: 0; padding-top: 0.32rem; padding-bottom: 0.32rem; }
+.inv-name { font-weight: 600; text-decoration: none; }
+.inv-name:hover { text-decoration: underline; }
+.inv-ip { font-family: ui-monospace, Consolas, monospace; font-size: 0.76rem; color: var(--text-muted); }
+.inv-sub { display: block; font-size: 0.72rem; color: var(--text-muted); line-height: 1.3; font-weight: 400; }
+.inv-sub.inv-ip { font-size: 0.7rem; }
+.inv-kind { display: inline-block; margin-left: 0.3rem; padding: 0 0.3rem; border-radius: 4px; font-size: 0.64rem; font-weight: 700; letter-spacing: 0.03em; vertical-align: 0.08rem; color: var(--text-muted); background: var(--hover); }
+.inv-kind.bm { color: var(--up); background: color-mix(in srgb, var(--up) 12%, transparent); }
+.inv-off { display: inline-block; width: 0.4rem; height: 0.4rem; border-radius: 50%; background: var(--down); margin-left: 0.3rem; vertical-align: 0.12rem; }
+.inv-dks { display: flex; flex-wrap: wrap; gap: 0.05rem 0.7rem; }
+.inv-dk { display: inline-flex; align-items: center; gap: 0.32rem; white-space: nowrap; }
+.inv-dk::before { content: ''; flex: 0 0 auto; width: 0.5rem; height: 0.5rem; border-radius: 2px; background: var(--c); }
+.inv-dk.inv-k-unk::before { border: 1px dashed var(--text-muted); }
+.inv-dmod { display: block; padding-left: 0.82rem; font-family: ui-monospace, Consolas, monospace; font-size: 0.68rem; line-height: 1.25; color: var(--text-muted); }
+.inv-raid { display: inline-block; margin-left: 0.4rem; padding: 0 0.3rem; border: 1px solid var(--border-strong); border-radius: 4px; font-family: ui-monospace, Consolas, monospace; font-size: 0.66rem; vertical-align: 0.06rem; color: var(--text-muted); }
+.inv-raid.bad { color: var(--down); border-color: color-mix(in srgb, var(--down) 60%, transparent); background: color-mix(in srgb, var(--down) 10%, transparent); }
+.inv-gpu { display: inline-block; margin-left: 0.35rem; padding: 0 0.3rem; border-radius: 4px; font-size: 0.68rem; font-weight: 600; color: var(--up); background: color-mix(in srgb, var(--up) 10%, transparent); }
+.inv-warn { color: var(--degraded); }
+@media (max-width: 900px) {
+  .inv-tw { overflow-x: auto; }
+  .inv-tbl th, .inv-tbl tfoot td { position: static; }
+}
