@@ -692,19 +692,21 @@ def outcome_from_agent(check, probe, now, degraded_ms: int) -> CheckOutcome:
         # значит, что сайт живёт по HTTP, а в мониторе записан https.
         if "unknown authority" in low or "x509" in low:
             why, _ = x509_reason(probe.error)
-            return CheckOutcome("down", lat, message=f"{why} ({probe.error[:60]})")
+            return CheckOutcome("down", lat, message=f"{why} ({probe.error[:200]})")
         if "connection refused" in low:
             # «Отказано в соединении» — это НЕ белый список: тот рвёт уже принятое
             # соединение, а здесь на localhost этот порт вообще никто не слушает.
             # Живой случай: Kubernetes-нода, где ingress принимает трафик только на
             # внешнем адресе (hostPort, LoadBalancer). Раньше сюда шла подсказка
             # «добавьте 127.0.0.1 в белый список» — человек правил то, что не сломано.
+            # До тире причина, она и уходит в алерт (app/srv_short.site); пояснение и
+            # ошибка как есть - для панели и истории алертов.
             return CheckOutcome(
                 "down", None,
-                message=f"изнутри сервера порт {_target_port(check)} закрыт: веб-сервер "
-                        "не слушает localhost (так бывает у Kubernetes) — локальная "
+                message=f"изнутри сервера порт {_target_port(check)} закрыт — веб-сервер "
+                        "не слушает localhost (так бывает у Kubernetes), локальная "
                         "проверка здесь не сработает, проверяйте из панели "
-                        f"({probe.error[:60]})",
+                        f"({probe.error[:200]})",
             )
         if "eof" in low or "reset by peer" in low:
             # Обрыв уже принятого соединения на локальной проверке почти всегда
@@ -716,12 +718,12 @@ def outcome_from_agent(check, probe, now, degraded_ms: int) -> CheckOutcome:
             # открыла бы сайт любому из них.
             return CheckOutcome(
                 "down", lat,
-                message="сервер оборвал соединение изнутри: белый список сайта не "
-                        "пускает локальный запрос — добавьте в него 127.0.0.1/32, "
+                message="сервер оборвал запрос изнутри: похоже, белый список сайта — "
+                        "добавьте в него 127.0.0.1/32, "
                         "::1/128 и адрес шлюза docker-сети прокси (docker network "
                         "inspect caddy -f '{{(index .IPAM.Config 0).Gateway}}'), "
                         "подсеть целиком добавлять не надо "
-                        f"({probe.error[:60]})",
+                        f"({probe.error[:200]})",
             )
         # Остальное прогоняем через тот же словарь подсказок, что и свои ошибки:
         # «connection refused» инженеру понятно, дежурному — нет, а читают одни люди.
@@ -1352,6 +1354,7 @@ _ERROR_HINTS: tuple[tuple[str, str], ...] = (
     ("nodename nor servname provided", "домен не находится в DNS"),
     ("temporary failure in name resolution", "DNS временно не отвечает"),
     ("no address associated with hostname", "у домена нет IP-адреса"),
+    ("no such host", "домен не находится в DNS"),  # Go (агент)
     # --- соединение
     ("connection refused", "сервер отклонил соединение — порт закрыт"),
     ("all connection attempts failed", "не удалось подключиться ни по одному адресу"),
@@ -1372,9 +1375,12 @@ _ERROR_HINTS: tuple[tuple[str, str], ...] = (
     ("doesn't match", "TLS-сертификат выписан на другое имя"),
     ("sslv3", "ошибка TLS-рукопожатия"),
     ("wrong version number", "на порту не TLS — возможно, обычный HTTP"),
+    ("http response to https client", "на порту не TLS — возможно, обычный HTTP"),  # Go
     ("ssl", "ошибка TLS"),
+    ("tls:", "ошибка TLS"),  # Go: «remote error: tls: handshake failure»
     # --- протокол
     ("too many redirects", "слишком много перенаправлений"),
+    ("stopped after", "слишком много перенаправлений"),  # Go: «stopped after 10 redirects»
     ("invalid url", "адрес записан неверно"),
     ("proxy", "точка проверки не смогла пройти через прокси"),
 )

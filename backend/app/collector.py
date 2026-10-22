@@ -56,6 +56,7 @@ from app import software as software_mod
 from app import tamper as tamper_mod
 from app import webfiles as webfiles_mod
 from app import parents as parents_mod
+from app import boot_warmup
 from app import maint
 from app import tg_bot
 from app import web_certs
@@ -154,6 +155,11 @@ _PAUSE_GAP_SECONDS = 60.0
 
 def panel_just_started(now: datetime) -> bool:
     return (now - _PANEL_STARTED).total_seconds() < _START_GRACE_SECONDS
+
+
+def panel_started_at() -> datetime:
+    """С какого момента панель слушает агентов (старт процесса или пробуждение после паузы)."""
+    return _PANEL_STARTED
 
 
 def note_pause(now: datetime, gap: float) -> None:
@@ -1106,6 +1112,9 @@ async def _send_alerts(
                 psrv = await parents_mod.load_servers(session)
                 pidx = parents_mod.Index(psrv)
                 silent = parents_mod.silent_ids(psrv, now, seen_online, panel_just_started(now))
+                # родитель только что включился или вернулся на связь: его сайты еще поднимаются,
+                # ждем конца прогрева (app/boot_warmup.py). Не поднялся - алерт придет после
+                warm = await boot_warmup.warming_ids(session, psrv, now)
                 pids_by: dict[int, set[int]] = {}
                 for c in lite:
                     pids = {pid for pid, _w in parents_mod.parents_of(c, pidx)}
@@ -1113,6 +1122,8 @@ async def _send_alerts(
                         held.add(c.id)
                     elif pids & _ms:
                         snoozed.add(c.id)
+                    elif pids & warm:
+                        held.add(c.id)
                     elif c.id in down_ids and pids:
                         pids_by[c.id] = pids
                 if pids_by:
@@ -1172,7 +1183,7 @@ async def _send_alerts(
         if check_id is not None and check_id in known_ids and kind in ("bad", "flaky", "locpart"):
             continue  # известная проблема: про нее знают, молчим, пока не закроется или не выйдет срок
         if check_id is not None and check_id in held and kind in ("bad", "flaky", "locpart"):
-            continue  # родитель молчит: лежит из-за него, это строка в сообщении про сервер
+            continue  # родитель молчит или прогревается: лежит из-за него, ждем
         tgt, typ, prt = meta.get(check_id, ("", "http", 0))
         # у push-монитора нет адреса: в заголовке алерта его имя
         host = name if typ == "push" else _display_host(tgt, typ, prt)
@@ -2009,6 +2020,14 @@ def _flux_detail(msg: str, limit: int = 150) -> str:
 # сразу, а в Telegram уйдёт только устойчивый обрыв). 3 минуты = 12 пропущенных
 # отчётов подряд: разовая перегрузка канала столько не держится.
 _OFFLINE_ALERT_EXTRA = 180
+# Что поднимается вместе с сервером и в первые минуты после включения еще не встало: юниты,
+# контейнеры, поды, воркеры, базы, очереди, сеть до соседей. Пока идет прогрев (app/boot_warmup.py),
+# их новые беды молчат. Диски, бэкапы, сроки и доступы от загрузки не зависят - их не держим
+_BOOT_HOLD = frozenset({
+    "units", "kube_pod", "kube_node", "kube_restarts", "docker_restarts", "flux_down", "flux_stale",
+    "workers", "fpm", "cron_stuck", "log_errors", "queue_stuck", "queue_failed", "db_conn", "db_health",
+    "web_5xx", "listen_gone", "link", "net_health", "dns", "llm", "gpu", "pressure", "cpu", "mem",
+})
 
 # Docker-контейнеры. Crash-loop: сколько РАЗ RestartCount должен вырасти за окно,
 # чтобы счесть «постоянно ребутается» (одиночный рестарт при деплое не в счёт).
@@ -6418,6 +6437,7 @@ async def evaluate_servers(
         # Иначе пороговые условия на молчащей ноде падали в ноль, и объявленный CPU получал
         # "снова в норме" ровно тогда, когда нода пропала (и после каждого деплоя панели).
         talking = seen_online(s, now)
+        warm = talking and boot_warmup.server_warming(s, now)
         # состояние дебаунса ведём КАЖДЫЙ тик, даже без смены уровня алерта — иначе
         # оно не накопится (при level==prev цикл ниже делает continue без записи).
         # «<тип>_since» — момент начала «жарки» (по времени); throttle — «_streak».
@@ -6529,6 +6549,11 @@ async def evaluate_servers(
                 # стоит за молчащим (или обслуживаемым) сервером: молчит из-за него, это строка в
                 # его сообщении. Состояние не трогаем: родитель вернулся, а этот все еще молчит -
                 # придет свой "недоступен"
+                continue
+            if warm and key in _BOOT_HOLD and level > 0:
+                # сервер только что включился или вернулся на связь: юниты, контейнеры, поды и
+                # прочее, что поднимается вместе с ним, еще встают. Ждем конца прогрева без записи
+                # состояния, не поднялось - алерт придет после (app/boot_warmup.py)
                 continue
             if _muted(key, level, mutes):
                 continue  # тип (или его нижние уровни) заглушён для этого сервера
@@ -6817,7 +6842,9 @@ async def evaluate_servers(
             elif set(keys) - set(seen):
                 fresh = [j for j in jobs if job_logs.job_key(j) not in set(seen)]
                 kj = rules.get("kube_job")
-                if "kube_job" not in mutes and kj and kj["enabled"] and _rule_scope_ok(kj, s):
+                # Job, упавший на прогреве после включения (база еще не встала), - загрузка: кроны
+                # запустятся снова, а падающий и дальше даст свой алерт
+                if not warm and "kube_job" not in mutes and kj and kj["enabled"] and _rule_scope_ok(kj, s):
                     # хвост лога пода просит стадия "логи упавших Job"; пока агент не ответил
                     # (до job_logs._WAIT), алерт ждет следующего тика, kube_jobs_seen не трогаем
                     logs = job_logs.collect(s.id, k_rep, fresh, now.timestamp())
@@ -6875,8 +6902,10 @@ async def evaluate_servers(
                     if (p := _parse_iso(ts)) and (now - p).total_seconds() <= _DOCKER_LOOP_WINDOW
                 ]
                 prev_rc = cs.get("rc")
-                if prev_rc is not None and rc > int(prev_rc):
-                    loops.append(now.isoformat())  # был ≥1 рестарт с прошлого тика
+                if prev_rc is not None and rc > int(prev_rc) and not warm:
+                    # был ≥1 рестарт с прошлого тика. На прогреве после включения не считаем:
+                    # контейнер падал, пока не встала база, - это загрузка, не цикл
+                    loops.append(now.isoformat())
                 cs["rc"], cs["loops"] = rc, loops
                 looping = len(loops) >= _DOCKER_LOOP_MIN
                 was_loop = bool(cs.get("alerted_loop"))
@@ -6943,6 +6972,8 @@ async def evaluate_servers(
                 name = str(u["unit"])
                 seen_u.add(name)
                 cs = unit_loop_step(ustate.get(name), _int(u.get("n")), now)
+                if warm and not cs["alerted"]:
+                    cs["hits"] = []  # перезапуски на прогреве - загрузка, не цикл (как у контейнеров)
                 hits = cs["hits"]
                 quiet = name in muted_u or not ul_ok
                 if len(hits) >= _UNIT_LOOP_MIN and not cs["alerted"] and not quiet:
@@ -7024,7 +7055,8 @@ async def evaluate_servers(
                         continue
                     depth = queue_depth(q)
                     was = bool(qstate.get(key))
-                    if depth >= thr and not was:
+                    if depth >= thr and not was and not warm:
+                        # на прогреве потребители еще встают: переросла и не разобралась - после
                         ctx = {"queue": q.get("name") or "?", "source": src or "rabbitmq",
                                "value": depth, "threshold": thr}
                         fires.append(srv_fire(s, "queue", qr, ctx))
