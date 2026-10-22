@@ -654,6 +654,8 @@ const EN: Record<string, string> = {
   'ноды кластера без агента': 'cluster nodes without the agent',
   'на сервере бэкапов старый restic - обновите': 'old restic on the backup server - update it',
   'бэкап-сервер без статистики - запустите backupserver-setup': 'backup server without statistics - run backupserver-setup',
+  'новые серверы: проверьте, что нашлось при подключении, и закройте подключение в карточке':
+    'new servers: check what was found at onboarding and close onboarding in the server card',
   'у контейнеров ключи от хоста - взлом приложения в них даст root на сервере':
     'containers hold keys to the host - breaking into the app gives root on the server',
   'По бэкапам': 'Backups',

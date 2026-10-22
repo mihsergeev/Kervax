@@ -4,6 +4,12 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.7.7] - 2026-10-22
+
+### Fixed
+- Главная, "Требует действий": у группы только что подключенных серверов подпись "новые серверы:
+  проверьте, что нашлось при подключении, и закройте подключение в карточке" вместо кода onb.
+
 ## [1.7.6] - 2026-10-22
 
 ### Fixed
