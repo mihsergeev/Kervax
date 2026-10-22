@@ -22,11 +22,17 @@
 # compiled templates are not listed at all, published assets (Yii web/assets and the like) -
 # only their php.
 #
+# A deploy through git (git pull with two files) is told by the reflog: a root inside a checkout
+# - in the container or, for a bind mount, on the host - sends the times of the last pull,
+# checkout, merge and reset, and the panel takes the files written right before one of them for
+# the deploy. The reflog is read as a file: git is not run, so nothing in the repository (its
+# config, hooks, filters) runs as root.
+#
 # Only paths, sizes and modification times leave the node, never file contents. The helper
 # changes nothing in the roots and keeps its own lists in /var/lib/kervax/webfiles (root only).
 set -euo pipefail
 
-KERVAX_SETUP_VERSION=0.2  # MAJOR.MINOR; compared component-wise
+KERVAX_SETUP_VERSION=0.3  # MAJOR.MINOR; compared component-wise
 KERVAX_SETUP_WHEN="pgrep -x nginx || pgrep -x apache2 || pgrep -x httpd || pgrep php-fpm || pgrep -x php || pgrep lsphp || pgrep frankenphp"
 
 HELPER_DIR=/lib65/kervax
@@ -54,6 +60,8 @@ MAXLIST=15       # files of each kind per root in one run
 START_WIN=600    # a container younger than this is its start: the list is only taken
 MAXFILES=200000  # a bigger root is listed only up to this
 KEEP=3600        # runs with changes stay in the file for an hour: the agent may have been away
+GIT_KEEP=604800  # reflog entries of the last week
+GIT_MAX=10       # of them, the newest
 MAXOUT=60000     # bytes; the agent takes 256 KB per file and 512 KB for all helpers together
 TAB=$(printf '\t')
 
@@ -74,6 +82,61 @@ upper_of() {
          if ($5 != "/" || $(i + 1) != "overlay") next
          n = split($(i + 3), o, ","); for (j = 1; j <= n; j++) if (o[j] ~ /^upperdir=/) u = substr(o[j], 10) }
        END { if (u != "") print u }' "/proc/$1/mountinfo" 2>/dev/null
+}
+
+# the git directory of the checkout a directory lies in: .git up the tree, a directory or a
+# "gitdir: ..." file (a worktree); base is /proc/<pid>/root for a path inside a container
+gitdir_of() {
+  local base=$1 d=$2 g i=0
+  while [ "$i" -lt 12 ]; do
+    if [ -d "$base$d/.git" ]; then printf '%s\n' "$base$d/.git"; return 0; fi
+    if [ -f "$base$d/.git" ]; then
+      g=$(head -c 512 "$base$d/.git" 2>/dev/null | sed -n 's/^gitdir: *//p' | head -1)
+      case "$g" in
+        '') ;;
+        /*) printf '%s\n' "$base$g"; return 0 ;;
+        *) printf '%s\n' "$base$d/$g"; return 0 ;;
+      esac
+    fi
+    [ "$d" = / ] && return 1
+    d=${d%/*}
+    [ -n "$d" ] || d=/
+    i=$((i + 1))
+  done
+  return 1
+}
+
+# a path inside a container as the host sees it, through the bind mount it lies on
+host_path() {
+  awk -v d="$2" '
+    function under(p, m) { return m == "/" || p == m || index(p, m "/") == 1 }
+    function rest(p, m) { return m == "/" ? p : substr(p, length(m) + 1) }
+    FILENAME == ARGV[1] { if (under(d, $5) && length($5) > length(mp)) { mp = $5; dev = $3; src = $4 }; next }
+    mp != "/" && $3 == dev && under(src, $4) && (hm == "" || length($4) > length(hr)) { hr = $4; hm = $5 }
+    END {
+      if (hm == "") exit
+      out = hm "/" rest(src, hr) "/" rest(d, mp); gsub(/\/+/, "/", out)
+      if (length(out) > 1) sub(/\/$/, "", out)
+      print out
+    }' "/proc/$1/mountinfo" /proc/1/mountinfo 2>/dev/null
+}
+
+# GEV: [ts,"kind"] of the last reflog entries of HEAD that put code in place, newest last; one
+# read per repository
+declare -A GITEV=()
+git_events() {
+  local f=$1/logs/HEAD
+  GEV=""
+  [ -f "$f" ] || return 0
+  if [ -z "${GITEV[$f]+x}" ]; then
+    GITEV[$f]=$(tail -c 65536 "$f" 2>/dev/null | awk -F '\t' -v min="$((now - GIT_KEEP))" -v max="$GIT_MAX" '
+      { n = split($1, a, " "); ts = a[n - 1]; split($2, m, /[ :(]/); k = m[1] }
+      ts ~ /^[0-9]+$/ && ts + 0 >= min && k ~ /^(pull|checkout|merge|reset|rebase|commit|clone|cherry-pick|revert|am)$/ {
+        e[++c] = "[" ts ",\"" k "\"]"
+      }
+      END { s = c > max ? c - max + 1 : 1; for (i = s; i <= c; i++) printf "%s%s", (i > s ? "," : ""), e[i] }')
+  fi
+  GEV=${GITEV[$f]}
 }
 
 # Docker container id -> name, for "where" in the panel
@@ -235,9 +298,24 @@ while IFS="$TAB" read -r pid dir names; do
   files=$(wc -l < "$work/new")
   big=false
   [ "$files" -ge "$MAXFILES" ] && big=true
+  # the reflog of the checkout: in the container, else on the host behind the bind mount
+  if [ "$p" = "$inner" ]; then
+    gd=$(gitdir_of "" "$p" || true)
+  else
+    gd=$(gitdir_of "/proc/$pid/root" "$inner" || true)
+    if [ -z "$gd" ]; then
+      hp=$(host_path "$pid" "$inner")
+      [ -n "$hp" ] && gd=$(gitdir_of "" "$hp" || true)
+    fi
+  fi
+  GEV=""
+  [ -n "$gd" ] && git_events "$gd"
+  # the same directory mounted into several containers (php-fpm and a worker of one project)
+  src=""
+  [ "$layer" = false ] && src=$(stat -L -c '%d-%i' "$p" 2>/dev/null || true)
   doms=$(printf '%s\n' "$names" | tr ' ' '\n' | grep -E '^[A-Za-z0-9*][A-Za-z0-9.*-]*\.[A-Za-z]{2,}$' | sort -u | head -20 \
     | awk '{ printf "%s\"%s\"", (NR > 1 ? "," : ""), $0 }')
-  roots="$roots${roots:+,}{\"key\":\"$key\",\"where\":\"$(esc "$where")\",\"path\":\"$(esc "$inner")\",\"domains\":[$doms],\"files\":$files,\"big\":$big,\"layer\":$layer}"
+  roots="$roots${roots:+,}{\"key\":\"$key\",\"where\":\"$(esc "$where")\",\"path\":\"$(esc "$inner")\",\"domains\":[$doms],\"files\":$files,\"big\":$big,\"layer\":$layer${src:+,\"src\":\"$src\"}${GEV:+,\"git\":[$GEV]}}"
   snap="$SNAP/$key.lst"
   if [ ! -e "$snap" ] || [ "$young" = true ]; then
     deltas="$deltas${deltas:+,}{\"key\":\"$key\",\"first\":true}"

@@ -3364,6 +3364,7 @@ const EN: Record<string, string> = {
   'файлов кода: {n}': 'code files: {n}',
   'записано в контейнере файлов кода: {n}': 'code files written in the container: {n}',
   'выкладка {t}: {n} файлов': 'deploy {t}: {n} files',
+  'выкладка git {k} {t}: {n} файлов': 'deploy git {k} {t}: {n} files',
   'признаки и в карточке сайта': 'signs are also in the site card',
   'Веб-корней не нашлось.': 'No web roots found.',
   'веб-корней: {n}, новых php и правок вне выкладки нет': 'web roots: {n}, no new php or changes outside a deploy',

@@ -4,6 +4,15 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.8.3] - 2026-10-22
+
+### Fixed
+- Файлы сайтов: выкладка через git (pull, checkout, merge, reset) больше не признак взлома, сколько
+  бы файлов ни поменялось. Helper webfiles-setup 0.3 читает reflog репозитория (без запуска git), и
+  файлы, записанные в момент события, считаются выкладкой. php в загрузках остается признаком.
+- Один каталог, смонтированный в несколько контейнеров (php-fpm и supervisor), - одна строка с
+  контейнерами через запятую.
+
 ## [1.8.2] - 2026-10-22
 
 ### Added

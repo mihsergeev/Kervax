@@ -5,7 +5,8 @@ import { useI18n } from './i18n'
 
 // Раздел "Файлы сайтов" в "Сервисах" ноды (backend app/webfiles.py, helper webfiles-setup):
 // веб-корни, которые helper нашел сам, последняя выкладка и признаки - новые php и правки кода
-// вне выкладки. Корень с доменом своего монитора показывает признаки и в карточке сайта.
+// вне выкладки. Корень с доменом своего монитора показывает признаки и в карточке сайта. Каталог,
+// смонтированный в несколько контейнеров, - одна строка, контейнеры через запятую.
 
 const fmtDateTime = (ts: string) =>
   new Date(ts).toLocaleString([], { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })
@@ -72,7 +73,11 @@ export function WebFiles({ s, onChanged }: { s: Server; onChanged: () => void })
                 r.layer
                   ? t('записано в контейнере файлов кода: {n}', { n: r.files })
                   : r.big ? t('файлов кода больше {n}, список неполный', { n: r.files }) : t('файлов кода: {n}', { n: r.files }),
-                r.deploy ? t('выкладка {t}: {n} файлов', { t: fmtDateTime(r.deploy.at), n: r.deploy.n }) : '',
+                r.deploy
+                  ? r.deploy.git
+                    ? t('выкладка git {k} {t}: {n} файлов', { k: r.deploy.git, t: fmtDateTime(r.deploy.at), n: r.deploy.n })
+                    : t('выкладка {t}: {n} файлов', { t: fmtDateTime(r.deploy.at), n: r.deploy.n })
+                  : '',
                 r.site && (r.php.length || r.edit.length) ? t('признаки и в карточке сайта') : '',
               ].filter(Boolean).join(' · ')}
             </span>
