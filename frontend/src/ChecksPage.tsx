@@ -24,6 +24,7 @@ import { ImportModal } from './ImportModal'
 import { useI18n } from './i18n'
 import { MaintChip } from './MaintModal'
 import { useAuth } from './auth'
+import { knownMeta, knownText } from './serverUtils'
 
 type Props = {
   onUnauthorized: () => void
@@ -979,7 +980,12 @@ function CheckRow({
             </span>
           )}
           {c.known_issue && (
-            <span className="note-chip" title={c.known_issue.text}>
+            <span
+              className="note-chip"
+              title={`${t('Известная проблема')}: ${t('сбой монитора')} - ${knownText(c.known_issue, t)}${
+                knownMeta(c.known_issue, t) ? ` (${knownMeta(c.known_issue, t)})` : ''
+              }\n${t('Нажмите: открыть монитор, там же снять отметку')}`}
+            >
               📌
             </span>
           )}

@@ -1,6 +1,6 @@
 import { withProxy } from './installProxy'
 import { InstallPath, type InstallMode } from './InstallPath'
-import { type ReactNode, useCallback, useEffect, useRef, useState } from 'react'
+import { Fragment, type ReactNode, useCallback, useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import {
   agentUpdate,
@@ -108,7 +108,7 @@ import { DiskWritersBlock, NetUsersCard } from './Usage'
 import { SoftwareCard } from './Software'
 import { FixSteps, useFixDone } from './FixSteps'
 import { GpuCard, GpuChip } from './Gpu'
-import { KnownServerList } from './KnownDialog'
+import { KnownServerList, knownItems, knownTitle } from './KnownDialog'
 import { AgentUpdRow, agentBehind, helperCmd, hostOf, useFleetRollout } from './FleetUpdate'
 import { MaintBanner, MaintChip } from './MaintModal'
 
@@ -846,7 +846,7 @@ const SEC_OF_CARD: Record<string, string> = {
   diskhealth: 'disk', du: 'disk', diskwrite: 'disk',
   exposure: 'ports', conn: 'ports', ssh: 'access', osupd: 'updates', software: 'updates',
   unitloop: 'units', noboot: 'units', pressure: 'proc', web5xx: 'web',
-  clock: 'overview', dns: 'overview',
+  clock: 'overview', dns: 'overview', known: 'alerts',
   gpuutil: 'gpu', gpumem: 'gpu', gputemp: 'gpu', gpupower: 'gpu',
 }
 // раздел, к которому ведет ссылка ?sec=: сам раздел или тот, где лежит карточка
@@ -932,10 +932,10 @@ function serverSecInfo(c: {
     behind ? t('за ним серверов: {n}', { n: behind }) : '',
     c.kids.length ? t('зависят мониторов: {n}', { n: c.kids.length }) : '',
   ].filter(Boolean).join(', ') || t('связей нет: ни за кем не стоит, мониторов на нем нет')
-  const known = Object.keys(s.known_issues ?? {}).length
+  const known = knownItems(s, t)
   ok.alerts = [
     c.mutes.length ? t('заглушено: {list}', { list: muteBrief(c.mutes, t) }) : t('ничего не заглушено'),
-    known ? t('известных проблем: {n}', { n: known }) : '',
+    known.length ? t('известные проблемы: {list}', { list: shortList(known.map((x) => x.label), t, 3) }) : '',
   ].filter(Boolean).join(', ')
 
   const out: Record<string, SecInfo> = {}
@@ -3236,55 +3236,103 @@ function unitWhy(u: FailedUnit, t: TFn): string {
   }
 }
 
-// Известные причины, у которых есть понятный выход: что случилось и, где можно, команда.
+// Известные причины, у которых есть понятный выход. Схема одна: что случилось одной фразой ->
+// что сделать (где можно, командой) -> почему не страшно. noRestart - перезапуск не поможет,
+// кнопки "Перезапустить" у такого юнита нет. group - юниты с одной причиной (mdmonitor и
+// mdmonitor-oneshot) идут одной карточкой с одной командой на всех.
 // Набор - с парка 05.10.2026: mdmonitor на семи нодах, unbound-resolvconf на четырех и т.д.
-type UnitHint = { text: string; cmd?: string }
-function unitHint(u: FailedUnit, all: FailedUnit[], t: TFn): UnitHint | null {
+type UnitHint = {
+  what: string
+  todo: string
+  cmd?: string
+  playbook?: string
+  calm?: string
+  noRestart?: string
+  group?: string
+}
+const CLEANUP = 'ansible-playbook playbooks/units_cleanup.yml -l '
+function unitHint(u: FailedUnit, all: FailedUnit[], host: string, t: TFn): UnitHint | null {
   const log = u.log.join('\n')
   const n = u.unit
+  const again = t('Перезапуск не поможет: юнит упадет снова.')
   // у давно упавшего mdmonitor.service лог уже ротирован, причину видно у mdmonitor-oneshot
   const mdNoMail = all.some((x) => x.unit.startsWith('mdmonitor') && x.log.join('\n').includes('No mail address'))
-  if (n.startsWith('mdmonitor') && (log.includes('No mail address') || (!log && mdNoMail)))
+  if (n.startsWith('mdmonitor') && (log.includes('No mail address') || (!log && mdNoMail))) {
+    // как в units_cleanup.yml: таймер oneshot выключить, mdmonitor.service замаскировать (его
+    // запускает еще и правило udev), отметку сбросить у тех, что упали. Таймер трогаем, только
+    // если oneshot есть на ноде: на RHEL его нет, и disable оборвал бы всю цепочку
+    const md = all.filter((x) => x.unit.startsWith('mdmonitor')).map((x) => x.unit)
+    const cmd = [
+      ...(md.includes('mdmonitor-oneshot.service') ? ['sudo systemctl disable --now mdmonitor-oneshot.timer'] : []),
+      'sudo systemctl mask --now mdmonitor.service',
+      `sudo systemctl reset-failed ${md.join(' ')}`,
+    ].join(' && ')
     return {
-      text: t('mdadm некуда слать письма, RAID он на самом деле не мониторит. За RAID следит Kervax ("Диск: поломка"), мониторинг mdadm можно выключить (по всему парку - плейбук units_cleanup.yml):'),
-      cmd: 'sudo systemctl disable --now mdmonitor-oneshot.timer && sudo systemctl mask --now mdmonitor.service && sudo systemctl reset-failed mdmonitor.service mdmonitor-oneshot.service',
+      what: t('mdadm некуда слать письма (в mdadm.conf нет MAILADDR), поэтому он не следит за RAID и падает при каждом запуске.'),
+      todo: t('выключить мониторинг mdadm на этом сервере:'),
+      cmd,
+      playbook: CLEANUP + host,
+      calm: t('за RAID следит Kervax, раздел Диск.'),
+      noRestart: again,
+      group: 'mdmonitor',
     }
+  }
   if (n === 'unbound-resolvconf.service')
     return {
-      text: t('unbound пытается прописаться в systemd-resolved, которого на ноде нет. Ничего полезного юнит не делает, его можно выключить (по всему парку - плейбук units_cleanup.yml):'),
+      what: t('unbound пытается прописаться в systemd-resolved, которого на сервере нет, и падает.'),
+      todo: t('выключить этот юнит:'),
       cmd: 'sudo systemctl mask --now unbound-resolvconf.service && sudo systemctl reset-failed unbound-resolvconf.service',
+      playbook: CLEANUP + host,
+      calm: t('сам unbound работает, этот юнит ему не нужен.'),
+      noRestart: again,
     }
   if (n.startsWith('systemd-networkd-wait-online'))
     return {
-      text: t('При загрузке не дождались сети: обычно из-за интерфейса, который не нужен или не управляется networkd. Сервер при этом работает, достаточно сбросить отметку. Если повторяется на каждой загрузке - ограничьте ожидание нужным интерфейсом (--interface=) или выключите юнит.'),
+      what: t('При загрузке не дождались сети: обычно из-за интерфейса, который не нужен или не управляется networkd.'),
+      todo: t('нажать "Сбросить". Если повторяется на каждой загрузке - ограничить ожидание нужным интерфейсом (--interface=) или выключить юнит.'),
+      calm: t('сервер работает, юнит нужен только при загрузке.'),
+      noRestart: t('Перезапуск не нужен: юнит только ждет сеть при загрузке.'),
     }
   if (n.endsWith('.socket') && u.result === 'resources')
     return {
-      text: t('Сокет не смог занять свой порт: обычно его уже держит сам сервис (sshd со своим портом). Сервис при этом работает, лишний сокет можно выключить:'),
+      what: t('Сокет не смог занять свой порт: обычно его уже держит сам сервис (например, sshd со своим портом).'),
+      todo: t('выключить лишний сокет:'),
       cmd: `sudo systemctl disable --now ${n} && sudo systemctl reset-failed ${n}`,
+      calm: t('сервис при этом работает.'),
+      noRestart: t('Перезапуск не поможет: порт занят.'),
     }
   if (log.includes('at least one source file could not be read'))
     return {
-      text: t('restic закончил бэкап, но часть файлов прочитать не смог (код 3): снапшот есть, но неполный. Какие файлы - в журнале юнита:'),
+      what: t('restic закончил бэкап, но часть файлов прочитать не смог (код 3): снапшот есть, но неполный.'),
+      todo: t('найти в журнале, какие файлы, и исключить их из бэкапа или выдать доступ:'),
       cmd: `sudo journalctl -u ${n} --since "2 days ago" --no-pager | grep -i -E "error|denied|no such"`,
     }
   if (n.startsWith('clamav-freshclam'))
     return {
-      text: t('freshclam не может скачать базы антивируса, и они устаревают. Частая причина - зеркало ClamAV закрыто для адресов из России: нужно свое зеркало (PrivateMirror в freshclam.conf) или прокси.'),
+      what: t('freshclam не может скачать базы антивируса, и они устаревают.'),
+      todo: t('частая причина - зеркало ClamAV закрыто для адресов из России: прописать свое зеркало (PrivateMirror в freshclam.conf) или прокси.'),
+      noRestart: again,
     }
   if (n === 'openipmi.service')
     return {
-      text: t('openipmi не нашел IPMI на этой машине. Если BMC нет или он не нужен, юнит можно выключить:'),
+      what: t('openipmi не нашел IPMI на этой машине.'),
+      todo: t('если BMC нет или он не нужен, выключить юнит:'),
       cmd: 'sudo systemctl disable --now openipmi.service && sudo systemctl reset-failed openipmi.service',
+      noRestart: again,
     }
   if (n === 'console-setup.service')
     return {
-      text: t('Неправильная раскладка консоли, на сервере ни на что не влияет. Поправить - sudo dpkg-reconfigure keyboard-configuration, или просто сбросить отметку.'),
+      what: t('Не применилась раскладка консоли.'),
+      todo: t('нажать "Сбросить" или поправить раскладку: sudo dpkg-reconfigure keyboard-configuration'),
+      calm: t('на сервере раскладка консоли ни на что не влияет.'),
+      noRestart: again,
     }
   if (n === 'certbot.service' && log.includes('manual'))
     return {
-      text: t('Сертификат выпущен вручную (manual plugin), сам он не продлится. Продлите вручную или удалите ненужный:'),
+      what: t('Сертификат выпущен вручную (manual plugin), сам он не продлится.'),
+      todo: t('продлить его вручную или удалить, если не нужен:'),
       cmd: 'sudo certbot certificates && sudo certbot delete --cert-name <cert-name>',
+      noRestart: again,
     }
   return null
 }
@@ -3318,6 +3366,7 @@ function osFixText(st: OsFixStep, t: (k: string, p?: Record<string, string | num
     case 'unatt_check': return t('Автообновления включены, но не запускались: проверить таймеры apt и последний лог.')
     case 'noboot_docker': return t('Сначала: эти контейнеры без restart policy, после перезагрузки docker их не поднимет.')
     case 'noboot_units': return t('Сначала: эти сервисы работают, но не включены, после перезагрузки их не будет.')
+    case 'reboot_soft': return t('Обновлен только dbus. Перезапустить его отдельно нельзя: от него зависят systemd-logind и сессии, поэтому пакет и просит перезагрузку. Старый dbus работает как работал, срочности нет: перезагрузите при ближайшем окне обслуживания.')
     case 'reboot': return t('Перезагрузить, когда есть доступ к консоли сервера: несколько минут сервер недоступен. Старое ядро остается в меню GRUB (Advanced options), если новое не загрузится.')
     case 'pro_attach': return t('Ubuntu Pro: исправления безопасности до {date}. Токен - на ubuntu.com/pro, для личного использования бесплатно до 5 машин, для компании нужна подписка. Подключение панель видит с агента 2.39.', { date: st.arg ?? '' })
     case 'pro_run': return t('Поставить исправления из ESM.')
@@ -3368,6 +3417,8 @@ function OsUpdates({ server: s, onChanged }: { server: Server; onChanged: () => 
   }, { live: (a) => !a.muted })
   if (!u && !adv.length && !fixed.done.length) return null
   const live = adv.filter((a) => !a.muted)
+  // обновлен только dbus (бэкенд os_support.soft_reboot): не "нужна", а при случае
+  const softReboot = adv.some((a) => a.kind === 'reboot' && a.soft)
   const keepAll = () => {
     setBusyAll(true)
     updateServer(s.id, { alert_mutes: [...new Set([...(s.alert_mutes ?? []), ...live.map((a) => a.key)])] })
@@ -3389,25 +3440,41 @@ function OsUpdates({ server: s, onChanged }: { server: Server; onChanged: () => 
           )}
         </div>
         {fixed.bars}
-        {adv.map((a) => (
+        {adv.map((a) => {
+          // заглушенное до нового (та же заглушка, что галками на главной) снимается своим ключом
+          const mk = a.muted_new && a.new_key ? a.new_key : a.key
+          return (
           <div key={a.kind}>
             <div className={`osupd-adv ${a.muted ? 'osupd-adv-off' : a.level >= 2 ? 'net-prob' : 'net-note'}`}>
-              <span className="osupd-adv-text">{a.text}</span>
-              {a.muted && <span className="osupd-adv-why">{osDecisionLabel(a.kind, t)}</span>}
+              <span className="osupd-adv-text">
+                {a.text}
+                {(a.pkgs?.length ?? 0) > 0 && (
+                  <small className="osupd-adv-pkgs muted">{t('обновлены пакеты')}: {a.pkgs!.join(', ')}</small>
+                )}
+              </span>
+              {a.muted && <span className="osupd-adv-why">{a.muted_new ? t('заглушено до нового') : osDecisionLabel(a.kind, t)}</span>}
               {(a.fix?.length ?? 0) > 0 && (
                 <button className="ghost small row-act" onClick={() => setOpen(open === a.kind ? '' : a.kind)}>
                   {open === a.kind ? t('скрыть') : t('как исправить')}
                 </button>
               )}
+              {!isViewer && a.new_key && !a.muted && (
+                <button className="ghost small row-act" disabled={busy === a.new_key || busyAll}
+                  title={t('Пункт вернется сам, если обновится новое ядро или пакет или сервер перезагрузится и снова попросит перезагрузку')}
+                  onClick={() => toggle(a.new_key!, true)}>
+                  {t('заглушить до нового')}
+                </button>
+              )}
               {!isViewer && a.key && (
-                <button className="ghost small row-act" disabled={busy === a.key || busyAll} onClick={() => toggle(a.key, !a.muted)}>
+                <button className="ghost small row-act" disabled={busy === mk || busyAll} onClick={() => toggle(mk, !a.muted)}>
                   {a.muted ? t('вернуть') : osDecisionLabel(a.kind, t)}
                 </button>
               )}
             </div>
             {open === a.kind && a.fix && <OsFix steps={a.fix} />}
           </div>
-        ))}
+          )
+        })}
         {u && (
           <div className="net-tiles net-tiles-text">
             {u.updates >= 0 && (
@@ -3428,10 +3495,10 @@ function OsUpdates({ server: s, onChanged }: { server: Server; onChanged: () => 
             )}
             <NetTile
               label={t('Перезагрузка')}
-              value={u.reboot ? t('нужна') : t('не нужна')}
+              value={u.reboot ? (softReboot ? t('при случае') : t('нужна')) : t('не нужна')}
               sub={u.reboot && u.reboot_ts ? t('с {d}', { d: day(u.reboot_ts) }) : undefined}
               title={(u.reboot_pkgs ?? []).join(', ') || undefined}
-              tone={u.reboot ? 'warn' : 'ok'}
+              tone={u.reboot ? (softReboot ? undefined : 'warn') : 'ok'}
             />
             {unatt && (
               <NetTile
@@ -4417,47 +4484,53 @@ function FailedUnits({ server: s, onChanged, onOom }: { server: Server; onChange
         ? t('{n} ч назад', { n: Math.floor(d / 3600) })
         : t('{n} мин назад', { n: Math.max(1, Math.floor(d / 60)) })
   }
-  const run = async (unit: string, mode: 'restart' | 'reset') => {
+  // у карточки с одной причиной на несколько юнитов (mdmonitor) - со всеми по очереди, до первой
+  // ошибки; результат пишется на карточку (key)
+  const run = async (key: string, units: string[], mode: 'restart' | 'reset') => {
+    const unit = units.join(', ')
     const q =
       mode === 'restart'
         ? t('Перезапустить {u}?', { u: unit })
         : t('Сбросить у {u} отметку "упал"? Сам юнит не запустится, алерт по нему закроется.', { u: unit })
     if (!window.confirm(q)) return
-    setSt((cur) => ({ ...cur, [unit]: { busy: true } }))
+    setSt((cur) => ({ ...cur, [key]: { busy: true } }))
     try {
-      const c = await backupCommand(s.id, { action: 'unit_fix', mode, unit })
-      let last = c
-      const t0 = Date.now()
-      while (last.status !== 'done' && last.status !== 'error' && Date.now() - t0 < 7 * 60_000) {
-        await new Promise((res) => setTimeout(res, 1500))
-        last = await backupCommandStatus(s.id, c.id)
+      let ok = false
+      for (const one of units) {
+        const c = await backupCommand(s.id, { action: 'unit_fix', mode, unit: one })
+        let last = c
+        const t0 = Date.now()
+        while (last.status !== 'done' && last.status !== 'error' && Date.now() - t0 < 7 * 60_000) {
+          await new Promise((res) => setTimeout(res, 1500))
+          last = await backupCommandStatus(s.id, c.id)
+        }
+        let data: UnitFixResult | null = null
+        try {
+          data = JSON.parse(last.result || '')
+        } catch {
+          data = null
+        }
+        ok = last.status === 'done' && !!last.ok
+        const msg = data ? unitStateText(data, t) : last.result || t('не удалось')
+        setSt((cur) => ({ ...cur, [key]: { ok, msg: units.length > 1 ? `${one}: ${msg}` : msg, log: data?.log } }))
+        if (!ok) break
       }
-      let data: UnitFixResult | null = null
-      try {
-        data = JSON.parse(last.result || '')
-      } catch {
-        data = null
-      }
-      const ok = last.status === 'done' && !!last.ok
-      setSt((cur) => ({
-        ...cur,
-        [unit]: { ok, msg: data ? unitStateText(data, t) : last.result || t('не удалось'), log: data?.log },
-      }))
       if (ok) window.setTimeout(onChanged, 5000)
     } catch (e) {
-      setSt((cur) => ({ ...cur, [unit]: { ok: false, msg: e instanceof Error ? e.message : String(e) } }))
+      setSt((cur) => ({ ...cur, [key]: { ok: false, msg: e instanceof Error ? e.message : String(e) } }))
     }
   }
-  const mute = async (kind: string, hours: number) => {
+  const mute = async (kinds: string[], hours: number) => {
     setBusy(true)
     try {
+      const mutes = s.alert_mutes ?? []
       if (hours < 0) {
-        await updateServer(s.id, { alert_mutes: [...new Set([...(s.alert_mutes ?? []), kind])] })
+        await updateServer(s.id, { alert_mutes: [...new Set([...mutes, ...kinds])] })
       } else if (hours === 0) {
-        if ((s.alert_mutes ?? []).includes(kind))
-          await updateServer(s.id, { alert_mutes: (s.alert_mutes ?? []).filter((x) => x !== kind) })
-        if (s.alert_snoozes?.[kind]) await snoozeServerAlert(s.id, kind, 0)
-      } else await snoozeServerAlert(s.id, kind, hours)
+        if (kinds.some((k) => mutes.includes(k)))
+          await updateServer(s.id, { alert_mutes: mutes.filter((x) => !kinds.includes(x)) })
+        for (const k of kinds) if (s.alert_snoozes?.[k]) await snoozeServerAlert(s.id, k, 0)
+      } else for (const k of kinds) await snoozeServerAlert(s.id, k, hours)
       setPicking(null)
       onChanged()
     } catch {
@@ -4472,6 +4545,17 @@ function FailedUnits({ server: s, onChanged, onOom }: { server: Server; onChange
   // пользователя (user@N.service) - не служба: серым и в конце
   const oomOf = (u: FailedUnit) => s.oom?.units?.[u.unit]
   const muted = (u: FailedUnit) => ((s.alert_mutes ?? []).includes(UNIT_MUTE + u.unit) || oomOf(u)?.quiet ? 1 : 0)
+  // юниты с одной причиной (hint.group) - одной карточкой: одно объяснение и одна команда
+  const host = hostOf(s)
+  const cards: { key: string; units: FailedUnit[]; hint: UnitHint | null }[] = []
+  for (const u of ub.units) {
+    const hint = unitHint(u, ub.units, host, t)
+    const same = hint?.group ? cards.find((c) => c.hint?.group === hint.group) : undefined
+    if (same) same.units.push(u)
+    else cards.push({ key: u.unit, units: [u], hint })
+  }
+  const cardMuted = (c: (typeof cards)[number]) => Math.min(...c.units.map(muted))
+  const cardLevel = (c: (typeof cards)[number]) => Math.max(...c.units.map(unitLevel))
   const copy = (text: string, key: string) => {
     void navigator.clipboard?.writeText(text).then(() => {
       setCopied(key)
@@ -4486,27 +4570,50 @@ function FailedUnits({ server: s, onChanged, onOom }: { server: Server; onChange
       {!agentOk && !isViewer && ub.fix && (
         <div className="muted small du-note">{t('Кнопки перезапуска появятся после обновления агента до 2.17.')}</div>
       )}
-      {[...ub.units]
+      {cards
         // заглушенные - в конец: они уже разобраны, внимание нужно остальным
-        .sort((a, b) => muted(a) - muted(b) || unitLevel(b) - unitLevel(a))
-        .map((u) => {
-          const kind = UNIT_MUTE + u.unit
-          const perm = (s.alert_mutes ?? []).includes(kind)
-          const until = s.alert_snoozes?.[kind]
+        .sort((a, b) => cardMuted(a) - cardMuted(b) || cardLevel(b) - cardLevel(a))
+        .map((card) => {
+          const { key, units, hint } = card
+          const u = units[0]
+          const lvl = cardLevel(card)
+          const names = units.map((x) => x.unit)
+          const kinds = names.map((x) => UNIT_MUTE + x)
+          const perm = kinds.every((k) => (s.alert_mutes ?? []).includes(k))
+          const untils = kinds.map((k) => s.alert_snoozes?.[k])
+          const until = untils.every(Boolean) ? [...(untils as string[])].sort()[0] : undefined
           const snoozed = !!until && new Date(until).getTime() > Date.now()
-          const us = st[u.unit]
-          const hint = unitHint(u, ub.units, t)
-          const ol = oomOf(u)
-          const log = ol?.line ? [`kernel: ${ol.line}`, ...u.log] : u.log
+          const us = st[key]
+          const ol = units.length === 1 ? oomOf(u) : undefined
+          // одинаковые строки у юнитов карточки - один раз
+          const ulog = [...new Set(units.flatMap((x) => x.log))]
+          const log = ol?.line ? [`kernel: ${ol.line}`, ...ulog] : ulog
+          // журнал - у того, по чьему логу видна причина; "назад" - по последнему падению
+          const jrUnit = (units.find((x) => x.log.length) ?? u).unit
+          const latest = units.reduce((a, b) => ((b.since ?? 0) > (a.since ?? 0) ? b : a))
+          const cmdBox = (cmd: string, ck: string) => (
+            <div className="agent-advice-cmd">
+              <pre>{cmd}</pre>
+              <button className="ghost" onClick={() => copy(cmd, ck)}>
+                {copied === ck ? t('Скопировано') : t('Копировать')}
+              </button>
+            </div>
+          )
           return (
-            <div key={u.unit} className={`unit-row${perm || snoozed || ol?.quiet ? ' unit-muted' : ''}`}>
+            <div key={key} className={`unit-row${perm || snoozed || ol?.quiet ? ' unit-muted' : ''}`}>
               <div className="unit-head">
-                <span className={`lk-dot lk-dot-${ol?.quiet ? 'idle' : unitLevel(u) === 2 ? 'bad' : 'warn'}`} />
-                <span className="mono unit-name">{u.unit}</span>
-                <span className={ol?.quiet ? 'muted' : unitLevel(u) === 2 ? 't-down' : 't-degraded'}>
+                <span className={`lk-dot lk-dot-${ol?.quiet ? 'idle' : lvl === 2 ? 'bad' : 'warn'}`} />
+                {names.map((x, i) => (
+                  <Fragment key={x}>
+                    {i > 0 && <span className="muted">{i === names.length - 1 ? t('и') : ','}</span>}
+                    <span className="mono unit-name">{x}</span>
+                  </Fragment>
+                ))}
+                <span className={ol?.quiet ? 'muted' : lvl === 2 ? 't-down' : 't-degraded'}>
                   {ol ? t('убит OOM killer') : unitWhy(u, t)}
                 </span>
-                <span className="muted small">{ago(u)}</span>
+                <span className="muted small">{ago(latest)}</span>
+                {units.length > 1 && <span className="muted small">{t('одна причина')}</span>}
                 {ol?.ep && onOom && (
                   <button className="oom-link small" onClick={() => onOom(ol.ep!)}>
                     {t('эпизод OOM')}
@@ -4518,17 +4625,25 @@ function FailedUnits({ server: s, onChanged, onOom }: { server: Server; onChange
                   {t('Менеджер сессии пользователя, а не служба: поднимется сам при следующем входе, в упавшие не считается')}
                 </div>
               )}
-              {u.desc && u.desc !== u.unit && <div className="muted small unit-desc">{u.desc}</div>}
+              {units.length === 1 && u.desc && u.desc !== u.unit && <div className="muted small unit-desc">{u.desc}</div>}
               {log.length > 0 && <pre className="unit-log mono">{log.join('\n')}</pre>}
               {hint && (
                 <div className="small unit-hint">
-                  {hint.text}
-                  {hint.cmd && (
-                    <div className="agent-advice-cmd">
-                      <pre>{hint.cmd}</pre>
-                      <button className="ghost" onClick={() => copy(hint.cmd!, u.unit)}>
-                        {copied === u.unit ? t('Скопировано') : t('Копировать')}
-                      </button>
+                  <div>{hint.what}</div>
+                  <div>
+                    <b>{t('Что сделать:')}</b> {hint.todo}
+                  </div>
+                  {hint.cmd && cmdBox(hint.cmd, key)}
+                  {hint.playbook && (
+                    <>
+                      <div>{t('или плейбуком (на весь парк - с -l kervax):')}</div>
+                      {cmdBox(hint.playbook, key + ':pb')}
+                    </>
+                  )}
+                  {hint.noRestart && <div className="muted">{hint.noRestart}</div>}
+                  {hint.calm && (
+                    <div className="muted">
+                      <b>{t('Почему не страшно:')}</b> {hint.calm}
                     </div>
                   )}
                 </div>
@@ -4542,16 +4657,19 @@ function FailedUnits({ server: s, onChanged, onOom }: { server: Server; onChange
               )}
               <div className="unit-actions small">
                 {canJournal && (
-                  <button className="ghost small row-act" onClick={() => setJr(u.unit)}>
+                  <button className="ghost small row-act" onClick={() => setJr(jrUnit)}>
                     {t('Журнал')}
                   </button>
                 )}
                 {canFix && !us?.busy && (
                   <>
-                    <button className="ghost small row-act" onClick={() => run(u.unit, 'restart')}>
-                      {t('Перезапустить')}
-                    </button>
-                    <button className="ghost small row-act" onClick={() => run(u.unit, 'reset')}>
+                    {/* перезапуск, который заведомо не поможет, не предлагаем: почему - в подсказке */}
+                    {!hint?.noRestart && (
+                      <button className="ghost small row-act" onClick={() => run(key, names, 'restart')}>
+                        {t('Перезапустить')}
+                      </button>
+                    )}
+                    <button className="ghost small row-act" onClick={() => run(key, names, 'reset')}>
                       {t('Сбросить')}
                     </button>
                   </>
@@ -4560,22 +4678,22 @@ function FailedUnits({ server: s, onChanged, onOom }: { server: Server; onChange
                   <span className="snooze-active-chip snooze-perm">
                     🔇 {perm ? t('не алертит, постоянно') : t('не алертит {t}', { t: t('до {t}', { t: fmt(until!) }) })}
                     {!isViewer && (
-                      <button className="chip-x" disabled={busy} title={t('Снять')} onClick={() => mute(kind, 0)}>
+                      <button className="chip-x" disabled={busy} title={t('Снять')} onClick={() => mute(kinds, 0)}>
                         ✕
                       </button>
                     )}
                   </span>
                 ) : (
                   !isViewer &&
-                  (picking === kind ? (
+                  (picking === key ? (
                     <>
-                      <span className="muted">🔕 {t('не алертить по этому юниту:')}</span>
+                      <span className="muted">🔕 {units.length > 1 ? t('не алертить по этим юнитам:') : t('не алертить по этому юниту:')}</span>
                       {[
                         { h: 24, l: t('1 день') },
                         { h: 24 * 7, l: t('1 неделя') },
                         { h: -1, l: t('постоянно') },
                       ].map(({ h, l }) => (
-                        <button key={h} className="ghost small" disabled={busy} onClick={() => mute(kind, h)}>
+                        <button key={h} className="ghost small" disabled={busy} onClick={() => mute(kinds, h)}>
                           {l}
                         </button>
                       ))}
@@ -4584,7 +4702,7 @@ function FailedUnits({ server: s, onChanged, onOom }: { server: Server; onChange
                       </button>
                     </>
                   ) : (
-                    <button className="ghost small" onClick={() => setPicking(kind)}>
+                    <button className="ghost small" onClick={() => setPicking(key)}>
                       🔕 {t('не алертить')}
                     </button>
                   ))
@@ -5277,6 +5395,7 @@ export function ServersPage({ onUnauthorized, openServerId, openServerSec, onCon
                 <ServerRow
                   key={s.id}
                   server={s}
+                  servers={servers ?? []}
                   showGroup={groupBy !== 'group'}
                   onOpen={() =>
                     selectMode ? toggleSelected(s.id) : setDetailId(s.id)
@@ -5358,8 +5477,36 @@ function SrvGroupSummary({ items }: { items: Server[] }) {
   )
 }
 
+// Ретранслятор Kervax (app/relay.py) рядом с именем: у самого ретранслятора - чьи агенты через
+// него ходят (выбрали его в команде установки, relay_via_id), у ноды за ним - через какой
+function RelayChip({ s, servers, t, onClick }: { s: Server; servers: Server[]; t: TFn; onClick?: () => void }) {
+  if (s.relay_enabled) {
+    const names = servers.filter((x) => x.relay_via_id === s.id && x.id !== s.id).map((x) => x.name).sort()
+    const title = names.length
+      ? t('Ретранслятор Kervax: через него ходят агенты: {list}', { list: names.join(', ') })
+      : t('Ретранслятор Kervax, сейчас никто не ходит')
+    return (
+      <span
+        className={`type-chip relay-chip${onClick ? ' clickable' : ''}`}
+        title={onClick ? `${title}\n${t('Нажмите: настройки и состояние ретранслятора')}` : title}
+        onClick={onClick && ((e) => { e.stopPropagation(); onClick() })}
+      >
+        {t('ретранслятор')}
+      </span>
+    )
+  }
+  const via = s.relay_via_id ? servers.find((x) => x.id === s.relay_via_id) : undefined
+  if (!via) return null
+  return (
+    <span className="type-chip relay-via-chip" title={t('Агент ходит в панель через ретранслятор {name}', { name: via.name })}>
+      {t('через ретранслятор {name}', { name: via.name })}
+    </span>
+  )
+}
+
 function ServerRow({
   server: s,
+  servers,
   onOpen,
   onOpenSec,
   showGroup = true,
@@ -5369,6 +5516,7 @@ function ServerRow({
   drag,
 }: {
   server: Server
+  servers: Server[] // все серверы: имена нод за ретранслятором
   onOpen: () => void
   // клик по 🔥: открыть деталь сразу на разделе с проблемой (null = просто открыть)
   onOpenSec: (sec: string | null) => void
@@ -5387,6 +5535,7 @@ function ServerRow({
   // «горит» — сервер онлайн, но с активными превышениями (CPU/RAM/диск/темп/…)
   const issues = srvIssues(s, t)
   const onFire = s.online && issues.length > 0
+  const known = knownItems(s, t)
   const muteItems = collectMutes(s, t, ['alert'])
   return (
     // Вся карточка — вход в сервер, как строки «Докера», «Сервисов» и «Сайтов». Раньше
@@ -5463,8 +5612,21 @@ function ServerRow({
               📝
             </span>
           )}
-          {Object.keys(s.known_issues ?? {}).length > 0 && (
-            <span className="note-chip" title={Object.values(s.known_issues ?? {}).map((k) => k.text).join('; ')}>
+          {/* известные проблемы: какие и что про них отмечено, клик - к списку в карточке, там же снять */}
+          {known.length > 0 && (
+            <span
+              className="note-chip clickable"
+              role="button"
+              tabIndex={0}
+              title={`${knownTitle(known, t)}\n${t('Нажмите: открыть список в карточке, там же снять отметку')}`}
+              onClick={(e) => { e.stopPropagation(); onOpenSec('known') }}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                  e.stopPropagation(); e.preventDefault()
+                  onOpenSec('known')
+                }
+              }}
+            >
               📌
             </span>
           )}
@@ -5475,6 +5637,7 @@ function ServerRow({
           {s.last_report?.backup_server?.present && (
             <span className="type-chip" title={t('Сервер бэкапов (rest-server)')}>🗄 {t('бэкап-сервер')}</span>
           )}
+          <RelayChip s={s} servers={servers} t={t} />
           {s.gpu_sum && (
             <GpuChip sum={s.gpu_sum} bad={issues.some((i) => i.kind === 'gpu' || i.kind === 'gpu_heat')} t={t} />
           )}
@@ -6264,7 +6427,7 @@ function ServerEditCard({
         </div>
       </div>
       {/* ретранслятор: прокси до панели для агентов, чей адрес режут на пути к ней */}
-      <label className="checkbox">
+      <label className="checkbox" id="edit-relay">
         <input
           type="checkbox"
           checked={form.relay_enabled}
@@ -6610,6 +6773,12 @@ function ServerDetail({
     }
   }
 
+  // бэйдж "ретранслятор" в шапке: настройки сразу на галочке ретранслятора и его состоянии
+  function editRelay() {
+    startEdit()
+    window.setTimeout(() => document.getElementById('edit-relay')?.scrollIntoView({ behavior: 'smooth', block: 'center' }), 100)
+  }
+
   function startEdit() {
     setForm({
       name: s.name,
@@ -6846,6 +7015,8 @@ function ServerDetail({
             <h3>{s.name}</h3>
             {s.group_name && <span className="type-chip group-chip">{s.group_name}</span>}
             {s.onboard && <span className="type-chip onb-chip">{t('подключается')}</span>}
+            {/* состояние ретранслятора живет в настройках сервера: клик туда */}
+            {!editing && <RelayChip s={s} servers={servers} t={t} onClick={isViewer ? undefined : editRelay} />}
             {/* что заглушено - значком, сами заглушки в разделе "Алерты" */}
             {muteItems.length > 0 && !editing && (
               <button className="srv-head-chip" onClick={() => go('alerts')}>
@@ -7487,7 +7658,7 @@ function ServerDetail({
             )}
             {Object.keys(known).length > 0 && (
               <KnownServerList
-                items={known}
+                server={s}
                 canEdit={!isViewer}
                 onDrop={async (kind) => {
                   try {

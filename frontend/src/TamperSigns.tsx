@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { acceptTamper, type Check, type TamperSign } from './api'
 import { useI18n } from './i18n'
 import { fmtBytes } from './units'
+import { editNote, wpEditHead } from './WebFiles'
 
 // Раздел карточки сайта "Признаки взлома" (backend app/tamper.py): что именно не так, с какого
 // времени. На каждом признаке "это ок" (все, что в нем сейчас, в базу) и "отложить 7 дн";
@@ -36,7 +37,8 @@ function signText(s: TamperSign, t: T): [string, string] {
   if (s.key === 'php' || s.key === 'edit') {
     const files = s.files ?? []
     const more = (s.n ?? files.length) - files.length
-    return [s.key === 'php' ? t('Новые php в веб-корне') : t('Код изменен вне выкладки'), subOf(
+    return [s.key === 'php' ? t('Новые php в веб-корне') : t('Файлы кода изменились не через git/деплой'), subOf(
+      s.key === 'edit' ? wpEditHead(files, !!s.wp, t) : '',
       files.join(', ') + (more > 0 ? ' ' + t('и еще {n}', { n: more }) : ''),
       s.where ? t('на {where}', { where: s.where }) : '',
     )]
@@ -136,6 +138,7 @@ export function TamperSigns({ check, canEdit, onChanged }: { check: Check; canEd
               <span className="tamper-txt">
                 {what}
                 {sub && <span className="muted small mono-ish">{sub}</span>}
+                {s.key === 'edit' && <span className="muted small">{editNote(t, t('это ок'))}</span>}
               </span>
               {since && <span className="muted small tamper-when">{t('с {t}', { t: fmtDateTime(since) })}</span>}
               {canEdit && (

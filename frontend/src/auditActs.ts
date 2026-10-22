@@ -63,6 +63,8 @@ export const ACT: Record<string, string> = {
   kube_logs: 'посмотрел логи пода',
   kube_node_ignore: 'отметил, что агент на ноде не нужен',
   kube_node_watch: 'вернул ноду в проверку агентов',
+  kube_expiry_ignore: 'отметил, что за сроком в кластере не следим',
+  kube_expiry_watch: 'вернул срок в кластере под присмотр',
   check_create: 'добавил монитор',
   check_update: 'изменил монитор',
   check_delete: 'удалил монитор',

@@ -128,6 +128,9 @@ export const NOBOOT_MUTE = 'noboot:'
 export const ACCESS_MUTE = 'access:'
 // ОС, которую сейчас не обновить или не перезагрузить: osupd:<вид совета> (eol, reboot, security, apt)
 export const OSUPD_MUTE = 'osupd:'
+// Перезагрузка, заглушенная до нового: osupd:reboot@<отпечаток набора пакетов> (app/os_support.py). Новый
+// пакет, новое ядро или перезагрузка и снова "нужна" - другой отпечаток, пункт возвращается сам
+export const OSUPD_REBOOT_NEW = 'osupd:reboot@'
 // Версия ПО, которую сейчас не обновить: swver:<состояние>:<продукт>-<цикл>. У "скоро" - отложить до
 // конца поддержки: когда она кончится, у пункта другое состояние, и он вернется сам
 export const SWVER_MUTE = 'swver:'
@@ -165,6 +168,7 @@ export function muteKindLabel(k: string, t: TFn): string | null {
   if (k === 'access_audit') return t('Доступы: заброшенные учетки и слабые ключи')
   if (k.startsWith(NOBOOT_MUTE)) return `${t('не нужен после перезагрузки')}: ${k.slice(NOBOOT_MUTE.length)}`
   if (k.startsWith(ACCESS_MUTE)) return `${t('учетка нужна')}: ${k.slice(ACCESS_MUTE.length)}`
+  if (k.startsWith(OSUPD_REBOOT_NEW)) return `${t('Обновления ОС')}: ${t('перезагрузка заглушена до нового')}`
   if (k.startsWith(OSUPD_MUTE)) return `${t('Обновления ОС')}: ${osDecisionLabel(k.slice(OSUPD_MUTE.length), t)}`
   if (k.startsWith(SWVER_MUTE)) {
     const [st, what] = k.slice(SWVER_MUTE.length).split(':')

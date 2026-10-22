@@ -51,6 +51,7 @@ from app import onboard as onboard_mod
 from app import liveness
 from app import disk_wear
 from app import disk_mute
+from app import kube_expiry as kube_expiry_mod
 from app import fill_alert
 from app import software as software_mod
 from app import tamper as tamper_mod
@@ -3969,7 +3970,7 @@ def server_problems(s: Server, now: datetime, pod_names: dict[str, str] | None =
         add("fpm", x["level"], x["text"], "fpm", fpm_pools.MUTE_PREFIX + x["key"], section="services")
     # Сроки кластера: ближайший в пределах дальнего порога. За последний порог и истекший - проблема
     wd = kube_warn_days(s) if getattr(s, "kube_expiry_warn_days", None) else []
-    soon = kube_expiry_soon(rep, wd, now) if wd else None
+    soon = kube_expiry_soon(rep, wd, now, s) if wd else None
     if soon is not None:
         c = kube_expiry_ctx(*soon)
         add("kube_expiry", 3 if soon[1] < 0 else 2 if soon[1] <= wd[-1] else 1,
@@ -5366,12 +5367,13 @@ def kube_warn_days(s: Server) -> list[int]:
     return sorted({int(d) for d in (s.kube_expiry_warn_days or []) if int(d) > 0}, reverse=True)
 
 
-def kube_expiry_soon(rep: dict, warn_days: list[int],
-                     now: datetime) -> tuple[float, float, dict, int] | None:
+def kube_expiry_soon(rep: dict, warn_days: list[int], now: datetime,
+                     s: Server | None = None) -> tuple[float, float, dict, int] | None:
     """Самый ранний срок кластера в пределах дальнего порога: (истекает, дней осталось,
-    запись helper'а, сколько всего сроков в пределах порога) или None."""
+    запись helper'а, сколько всего сроков в пределах порога) или None. Пункты с отметкой
+    "не следить" (app/kube_expiry.py) не в счет."""
     soon, near = None, 0
-    for it in rep.get("kube_expiry") or []:
+    for it in kube_expiry_mod.live(s, rep) if s is not None else rep.get("kube_expiry") or []:
         exp = it.get("expires") or 0
         if exp <= 0:
             continue
@@ -5401,6 +5403,10 @@ def kube_expiry_ctx(exp: float, days: float, it: dict, near: int) -> dict:
         where = f"{where} ({note})"
     kind = it.get("kind") or ""
     advice = _KUBE_ADVICE.get((kind, days < 0), "")
+    # helper 0.3: TLS-секрет не указан ни в одном Ingress - скорее всего его просто забыли удалить
+    unused = kind == "secret-cert" and it.get("ingress") is False
+    if unused:
+        advice = "не используется ни одним ingress: удалите секрет или отметьте \"не следить\""
     return {
         "value": phrase,
         "what": _KUBE_KIND.get(kind, "срок"),
@@ -5412,6 +5418,7 @@ def kube_expiry_ctx(exp: float, days: float, it: dict, near: int) -> dict:
         "days": days,
         "date": datetime.fromtimestamp(exp, tz=timezone.utc).strftime("%d.%m.%Y"),
         "more": f" (и ещё {near - 1} на этом сервере)" if near > 1 else "",
+        "unused": unused,
     }
 
 
@@ -5698,7 +5705,7 @@ def _server_conditions(s: Server, now: datetime,
     # датируемых сущностей на ноде десятки.
     warn_days = kube_warn_days(s)
     if warn_days:
-        soon = kube_expiry_soon(rep, warn_days, now)
+        soon = kube_expiry_soon(rep, warn_days, now, s)
         if soon is not None:
             days = soon[1]
             sustain("kube_expiry", True, kube_expiry_ctx(*soon))
@@ -6387,7 +6394,9 @@ async def evaluate_servers(
     # сервер закрыл подключение сам (вышел ONBOARD_MAX): sid -> что стало известным
     onboard_closed: dict[int, list[str]] = {}
     # мьют поломки диска снят сам, диск заменили и массив собрался: (sid, текст)
-    mute_lift: list[tuple[int, str]] = []
+    mute_lift: list[tuple[int, str, str]] = []
+    # отметки "не следить" у сроков кластера: секрет обновили или удалили (sid, ключ, at, новая|None)
+    kexp_upd: list[tuple[int, str, str, dict | None]] = []
     # где в очередях начинается каждый сервер: у серверов на подключении после цикла
     # отправляется только офлайн и критичный диск (onboard_mod.split)
     marks: list[tuple[int | None, int, int, int, int]] = []
@@ -6514,13 +6523,23 @@ async def evaluate_servers(
                 dm_snz = _parse_iso((s.alert_snoozes or {}).get(disk_mute.KEY) or "")
                 if dm_snz is None or dm_snz <= now:  # временный снуз того же вида дослуживает свой срок
                     mutes.discard(disk_mute.KEY)
-                mute_lift.append((s.id, dm_txt))
+                mute_lift.append((s.id, disk_mute.KEY, dm_txt))
                 recoveries.append(_server_alert_text(disk_mute.KEY, s.name, dm_txt, srv_url(s, disk_mute.KEY),
                                                      recovery=True, group=s.group_name or ""))
                 for dk, dv in (("", 0), ("_sig", []), ("_told", []), ("_told_lvl", None)):
                     apply(s.id, disk_mute.KEY + dk, dv)
             if dm_anc != st.get(disk_mute.STATE):
                 apply(s.id, disk_mute.STATE, dm_anc)
+        # Сроки кластера "не следить" (app/kube_expiry.py): секрет обновили - снова следим,
+        # удалили - отметка тихо уходит. Только по живому отчету: у молчащего сервера он старый
+        if s.kube_expiry_ignored and talking:
+            for kk, new_e in kube_expiry_mod.step(s.kube_expiry_ignored, s.last_report or {}, now).items():
+                kexp_upd.append((s.id, kk, str((s.kube_expiry_ignored.get(kk) or {}).get("at") or ""), new_e))
+        # Перезагрузка, заглушенная до нового (app/os_support.py): на ноде уже другой набор пакетов
+        # или она перезагрузилась - заглушка больше ни о чем, пункт и так вернулся; убираем с записью в журнал
+        if talking:
+            for mk, why in os_support.stale_mutes(s.last_report or {}, s.alert_mutes):
+                mute_lift.append((s.id, mk, f"заглушка перезагрузки снята: {why}"))
         # Известные проблемы (app/known.py): снимок того, что отметили, закрытие, когда ушла
         # сама или вышел срок, и напоминание раз в неделю, что она все еще висит
         known_now: dict[str, dict] = {}
@@ -7327,7 +7346,7 @@ async def evaluate_servers(
         for sid, key, value in rec_apply:
             apply(sid, key, value)
 
-    if changed_ids or known_upd or known_add or onboard_closed or mute_lift:
+    if changed_ids or known_upd or known_add or onboard_closed or mute_lift or kexp_upd:
         async with session_factory() as session:
             for sid in changed_ids:
                 row = await session.get(Server, sid)
@@ -7358,12 +7377,22 @@ async def evaluate_servers(
                     row.onboard_done_at, row.onboard_by = now, "авто"
                     session.add(AuditLog(username="авто", action="onboard_done", target=row.name[:255],
                                          detail=", ".join(made)))
-            for sid, txt in mute_lift:
+            for sid, mk, txt in mute_lift:
                 row = await session.get(Server, sid)
-                if row is not None and disk_mute.KEY in (row.alert_mutes or []):
+                if row is not None and mk in (row.alert_mutes or []):
                     # сняли руками раньше нас - в журнал писать нечего
-                    row.alert_mutes = [m for m in row.alert_mutes if m != disk_mute.KEY]
+                    row.alert_mutes = [m for m in row.alert_mutes if m != mk]
                     session.add(AuditLog(username="авто", action="mute_lifted", target=row.name[:255], detail=txt))
+            for sid, kk, at, new_e in kexp_upd:
+                row = await session.get(Server, sid)
+                cur = dict((row.kube_expiry_ignored if row is not None else None) or {})
+                if not isinstance(cur.get(kk), dict) or str(cur[kk].get("at") or "") != at:
+                    continue  # отметку успели поменять руками - их версия главнее
+                if new_e is None:
+                    cur.pop(kk)
+                else:
+                    cur[kk] = new_e
+                row.kube_expiry_ignored = cur or None
             await session.commit()
 
 

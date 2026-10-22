@@ -1,8 +1,30 @@
 import { useState } from 'react'
-import type { KnownIssue } from './api'
+import type { KnownIssue, Server } from './api'
 import { useI18n } from './i18n'
-import { SRV_ALERT_KINDS } from './mutes'
-import { knownMeta, knownText } from './serverUtils'
+import { kindLabel, type TFn } from './mutes'
+import { knownActive, knownMeta, knownText, srvIssuesRaw } from './serverUtils'
+
+// Известные проблемы сервера по-человечески. Ключ known_issues - вид алерта; подпись - что
+// сломано сейчас, тем же текстом, что в "Что сломано" ("порт 8080 открыт в мир"), а ушло
+// или текста нет - название вида алерта. line - строка целиком: проблема, отметка, кто и до когда
+export type KnownItem = { kind: string; k: KnownIssue; label: string; line: string }
+
+export function knownItems(s: Server, t: TFn): KnownItem[] {
+  const all = Object.entries(s.known_issues ?? {}).filter(([, k]) => knownActive(k))
+  if (!all.length) return []
+  const raw = srvIssuesRaw(s, t)
+  return all.map(([kind, k]) => {
+    const live = [...new Set(raw.filter((i) => i.kind === kind).map((i) => i.text))]
+    const label = live.length ? live.join(', ') : kindLabel(kind, t)
+    const meta = knownMeta(k, t)
+    return { kind, k, label, line: `${label} - ${knownText(k, t)}${meta ? ` (${meta})` : ''}` }
+  })
+}
+
+// Подсказка значка 📌: список известных проблем по строке
+export function knownTitle(items: KnownItem[], t: TFn): string {
+  return [`${t('Известные проблемы')}:`, ...items.map((x) => `- ${x.line}`)].join('\n')
+}
 
 const KNOWN_DAYS: [number, string][] = [
   [0, 'пока не починится'],
@@ -78,18 +100,20 @@ export function KnownDialog({
   )
 }
 
-// Известные проблемы в карточке сервера: вид, что написали, кто и до когда, снять
+// Известные проблемы в карточке сервера: что сломано, что про это известно, кто и до когда, снять
 export function KnownServerList({
-  items,
+  server,
   canEdit,
   onDrop,
 }: {
-  items: Record<string, KnownIssue>
+  server: Server
   canEdit: boolean
   onDrop: (kind: string) => Promise<void>
 }) {
   const { t } = useI18n()
   const [busy, setBusy] = useState(false)
+  const items = knownItems(server, t)
+  if (!items.length) return null
   const drop = async (kind: string) => {
     setBusy(true)
     try {
@@ -99,14 +123,15 @@ export function KnownServerList({
     }
   }
   return (
-    <div className="note-bar known-bar">
+    <div className="note-bar known-bar" id="mcard-known">
       <span className="note-bar-ic">📌</span>
       <div className="note-bar-body">
         <b>{t('Известные проблемы')}</b>
-        {Object.entries(items).map(([kind, k]) => (
+        <div className="muted small">{t('Алерт по ним молчит, пока не станет хуже. Снимите отметку, если надо снова получать алерты.')}</div>
+        {items.map(({ kind, k, label }) => (
           <div key={kind} className="known-row">
             <span>
-              {t(SRV_ALERT_KINDS.find((x) => x.k === kind)?.label ?? kind)}: {k.text}
+              {label} - {knownText(k, t)}
               {knownMeta(k, t) && <span className="muted small"> ({knownMeta(k, t)})</span>}
               {k.worse && <span className="t-down small"> · {t('стало хуже отмеченного, алерт ушел')}</span>}
             </span>

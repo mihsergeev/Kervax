@@ -2902,29 +2902,97 @@ function BackupServerRow({ server: s, info, onOpen }: { server: Server; info: Ba
 }
 
 // строка сервера без настроенного бэкапа: кнопка «Настроить бэкап» + чекбокс «не требуется»
-// Нода без бэкапа (или с галкой «не требуется») своей модалки не имеет, но находки
-// аудита у неё есть — показываем их отдельной лёгкой модалкой, чтобы пункт с главной
-// вёл во что-то осмысленное, а не в пустоту.
-function NodeCoverageModal({ server: s, canManage, onChanged, onClose }: {
-  server: Server; canManage: boolean; onChanged: () => void; onClose: () => void
+// Нода без бэкапа (или с галкой «не требуется») окна бэкапа не имеет, но находки аудита и свои
+// бэкапы у неё есть - показываем их в окне того же вида, что окно бэкапа ноды: широкое, меню
+// разделов слева. Раздел один - меню не нужно, одна широкая колонка
+const NODE_COV_SECTIONS: SecDef[] = [
+  { id: 'coverage', label: 'Покрытие', group: '' },
+  { id: 'own', label: 'Свои бэкапы', group: '' },
+]
+
+function NodeCoverageModal({ server: s, canManage, initialSec, onChanged, onClose }: {
+  server: Server; canManage: boolean; initialSec?: string | null; onChanged: () => void; onClose: () => void
 }) {
   const { t } = useI18n()
+  const [active, setActive] = useState<string>(initialSec ?? '')
+  const layoutRef = useRef<HTMLDivElement>(null)
+  const go = (id: string) => {
+    setActive(id)
+    const el = layoutRef.current
+    if (el && el.getBoundingClientRect().top < 0) el.scrollIntoView({ block: 'start' })
+  }
+  const audit = (s.backup_audit ?? []).filter((x) => !x.muted)
+  const own = s.custom_backups ?? []
+  const ownBad = ownBackupProblems(s)
+  const shown: Record<string, boolean> = { coverage: (s.backup_audit?.length ?? 0) > 0, own: own.length > 0 }
+  const secs = NODE_COV_SECTIONS.filter((x) => shown[x.id])
+  const cur = secs.find((x) => x.id === active) ?? secs[0]
+
+  // числа в меню - как в окне бэкапа ноды: что не бэкапится и какой свой бэкап не отрабатывает
+  const items: Record<string, SecItem[]> = {}
+  const gaps = audit.filter((x) => x.gap)
+  if (gaps.length)
+    items.coverage = [{ level: 1, count: gaps.length, text: t('не бэкапится: {list}', { list: shortList(gaps.map((x) => x.subject), t, 3) }) }]
+  if (ownBad.length)
+    items.own = [{
+      level: ownBad.some((j) => j.status === 'failed') ? 2 : 1,
+      count: ownBad.length,
+      text: t('свой бэкап не отрабатывает: {jobs}', { jobs: ownBad.map((j) => `${j.name} (${j.problem})`).join(', ') }),
+    }]
+  const info: Record<string, SecInfo> = {}
+  for (const { id } of NODE_COV_SECTIONS) info[id] = secInfoOf(items[id] ?? [], '', t)
+  const side: Record<string, string> = { own: String(own.filter((j) => !j.ignored).length) }
+
+  const body = cur && (
+    <>
+      <div className="srv-main-head">
+        <h4>{t(cur.label)}</h4>
+      </div>
+      {cur.id === 'coverage' && <CoverageAudit server={s} canManage={canManage} onChanged={onChanged} bare />}
+      {cur.id === 'own' && <OwnBackups server={s} canManage={canManage} onChanged={onChanged} bare />}
+    </>
+  )
   return createPortal(
     <div className="modal-backdrop">
-      <div className="card modal backup-manage-modal" onClick={(e) => e.stopPropagation()}>
-        <div className="modal-head">
-          <h3><CountryFlag code={s.country} /> {s.name}</h3>
-          <button className="ghost" onClick={onClose}>{t('Закрыть')}</button>
+      <div className="card detail detail-server hs-modal" onClick={(e) => e.stopPropagation()}>
+        <div className="detail-head">
+          <div className="detail-title">
+            <span className={`sdot ${s.online ? 'sdot-up' : 'sdot-down'}`} />
+            <OsIcon os={s.os} size={18} />
+            <CountryFlag code={s.country} />
+            <h3>{s.name}</h3>
+            {s.group_name && <span className="type-chip group-chip">{s.group_name}</span>}
+            {s.backup_not_required && <span className="type-chip">{t('бэкап не требуется')}</span>}
+          </div>
+          <div className="detail-head-actions">
+            <button className="ghost icon-btn" onClick={onClose} title={t('Закрыть')}>
+              ✕
+            </button>
+          </div>
         </div>
-        <div className="muted small">
-          {s.backup_not_required
-            ? t('Бэкап на этой ноде помечен как не требующийся, но данные на ней есть:')
-            : hasOwnFileBackup(s)
-              ? t('Панельного бэкапа на ноде нет, но есть свой — за ним панель следит:')
-              : t('Файловый бэкап на ноде не настроен. Что на ней обнаружено:')}
+        <div className="srv-meta srv-meta-line">
+          <span className="srv-meta-item muted">
+            {s.backup_not_required
+              ? t('Бэкап на этой ноде помечен как не требующийся, но данные на ней есть')
+              : hasOwnFileBackup(s)
+                ? t('Панельного бэкапа на ноде нет, но есть свой - за ним панель следит')
+                : t('Файловый бэкап на ноде не настроен. Что на ней обнаружено')}
+          </span>
+          {s.agent_ip && <span className="srv-meta-item mono">{s.agent_ip}</span>}
+          <span className="srv-meta-item">
+            <span className="srv-meta-k">{t('обновлено')}</span> {fmtRel(s.last_seen)}
+          </span>
         </div>
-        <OwnBackups server={s} canManage={canManage} onChanged={onChanged} />
-        <CoverageAudit server={s} canManage={canManage} onChanged={onChanged} />
+        {secs.length > 1 ? (
+          <div className="srv-layout" ref={layoutRef}>
+            <CardNav secs={secs} active={cur.id} info={info} side={side} onGo={go} />
+            <div className="srv-main">{body}</div>
+          </div>
+        ) : (
+          <div className="srv-main srv-main-solo">
+            {body ?? <div className="srv-empty">{t('На ноде ничего не найдено')}</div>}
+          </div>
+        )}
       </div>
     </div>,
     document.body,
@@ -3772,7 +3840,11 @@ export function BackupsPage({
               {ownOnlyView.map((s) => {
                 const bad = ownBackupProblems(s).length > 0
                 return (
-                  <button key={s.id} className="loc-res loc-res-btn hs-host" onClick={() => setCovId(s.id)}>
+                  <button key={s.id} className="loc-res loc-res-btn hs-host" onClick={() => {
+                    // из этого списка открываем сразу раздел своих бэкапов
+                    setLinkSec({ id: s.id, sec: 'own' })
+                    setCovId(s.id)
+                  }}>
                     <span className={`lk-dot ${bad ? 'lk-dot-bad' : 'lk-dot-ok'}`}
                       title={bad ? t('свой бэкап с проблемой') : t('свой бэкап работает')} />
                     <div className="hs-host-main">
@@ -3932,7 +4004,12 @@ export function BackupsPage({
       )}
       {covSrv && (
         <NodeCoverageModal server={covSrv} canManage={!isViewer}
-          onChanged={load} onClose={() => setCovId(null)} />
+          initialSec={linkSec.id === covSrv.id ? linkSec.sec : null}
+          onChanged={load}
+          onClose={() => {
+            setCovId(null)
+            setLinkSec({ id: null, sec: null })
+          }} />
       )}
       {deploySrv && (
         <DeployServerModal

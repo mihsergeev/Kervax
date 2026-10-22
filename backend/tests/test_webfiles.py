@@ -87,7 +87,7 @@ def test_server_problem_and_alert():
 def test_site_signs_count_with_page_signs():
     st = {"signs": {"edit": {"since": NOW.isoformat(), "files": [
         {"p": "wp-content/themes/shop/js/prod/custom.js", "sid": 1, "root": "k", "where": "web-a, wordpress"}]}}}
-    assert tamper.level(st) == "one" and tamper.summary(st) == "правка custom.js вне выкладки"
+    assert tamper.level(st) == "one" and tamper.summary(st) == "правка custom.js не через git/деплой"
     st["signs"]["dom"] = {"list": {"evil.example.net": {"src": "/js/custom.js"}}}
     assert tamper.level(st) == "hack"
     row = next(r for r in tamper.view(st)["signs"] if r["key"] == "edit")
@@ -104,7 +104,7 @@ def test_helper_needed_and_written_right():
     assert not setup_scripts.setup_needed("webfiles-setup", {"extras": {"fpm": {"v": 1, "pools": [], "skipped": []}}})
     assert not setup_scripts.setup_needed("webfiles-setup", {"web_services": [{"kind": "Traefik"}]})
     src = (Path(__file__).resolve().parents[2] / "agent" / "webfiles-setup.sh").read_text(encoding="utf-8")
-    assert "\r" not in src and "KERVAX_SETUP_VERSION=0.3" in src and "report.d/webfiles.json" in src
+    assert "\r" not in src and "KERVAX_SETUP_VERSION=0.4" in src and "report.d/webfiles.json" in src
     assert 'mv -f "$HELPER.new" "$HELPER"' in src and "versions/webfiles-setup.ver" in src
     # контейнер: только верхний слой overlay, ключ по контейнеру, старт - не правка, ассеты мимо
     assert "upperdir=" in src and 'key="c${cid:0:12}' in src and "START_WIN=600" in src
@@ -232,7 +232,7 @@ def test_old_signs_pass_new_rules_once():
         "loose": ["a", "h"]}
     st = webfiles.process(st, blk(roots=()), NOW)
     assert "edit" not in st["roots"]["a"] and list(st["roots"]["h"]["edit"]) == ["js/custom.js"]
-    assert [t for _l, t, _k in webfiles.problems(st)] == ["код изменен вне выкладки в /var/www/shop: custom.js"]
+    assert [t for _l, t, _k in webfiles.problems(st)] == ["код изменен не через git/деплой в /var/www/shop: custom.js"]
     # второй раз чистка не повторяется: новая правка в контейнере остается
     st["roots"]["a"]["edit"] = {"js/app.js": {"since": "x", "s": 1}}
     assert "edit" in webfiles.process(st, blk(roots=()), NOW)["roots"]["a"]
@@ -347,5 +347,111 @@ def test_one_dir_in_two_containers_is_one_row():
     assert [(x["where"], x["path"], x["key"], x["pods"]) for x in v] == [
         ("shop-php-fpm, shop-worker", "/srv/shop", "c1,c2", 1), ("shop-nginx", "/srv/shop/backend", "c3", 1)]
     assert [f["p"] for f in v[0]["edit"]] == ["backend/a.js"]
-    assert webfiles.problems(st) == [(1, "код изменен вне выкладки в /srv/shop (shop-php-fpm, shop-worker): a.js",
+    assert webfiles.problems(st) == [(1, "код изменен не через git/деплой в /srv/shop (shop-php-fpm, shop-worker): a.js",
                                       "edit:shop-php-fpm, shop-worker:/srv/shop:backend/a.js")]
+
+
+
+# ---------- WordPress обновляет себя сам ----------
+
+WP_ROOT = {**ROOT, "wp": "6.6.2"}
+LANG = "wp-content/languages/plugins/wordpress-seo-ru_RU.l10n.php"
+
+
+def wp_start():
+    return webfiles.process(None, blk(run(T - 1200, first=True), roots=(WP_ROOT,)), NOW)
+
+
+def test_language_pack_is_wordpress_not_an_edit():
+    # пакет перевода: .l10n.php и .mo в одну секунду - не признак, серая строка
+    st = webfiles.process(wp_start(), blk(run(T - 600, n_changed=1, changed=[[LANG, T - 700, 52000, T - 700]]),
+                                          roots=(WP_ROOT,)), NOW)
+    r = st["roots"]["2080-11"]
+    assert "edit" not in r and "deploy" not in r
+    assert r["wpev"] == [{"k": "lang", "part": "plugin", "slug": "wordpress-seo", "loc": "ru_RU",
+                          "at": datetime.fromtimestamp(T - 700, timezone.utc).isoformat()}]
+    st["loose"] = ["2080-11"]
+    assert webfiles.problems(st) == []
+    v = webfiles.view(st, {}, NOW)["roots"][0]
+    assert v["wp"] == "6.6.2" and [e["slug"] for e in v["wp_events"]] == ["wordpress-seo"]
+    # перевод ядра и темы
+    st = webfiles.process(st, blk(run(T - 300, n_changed=2, changed=[
+        ["wp-content/languages/admin-ru_RU.l10n.php", T - 400, 9000, T - 401],
+        ["wp-content/languages/themes/twentytwentyfour-de_DE_formal.l10n.php", T - 400, 900, T - 400]]),
+        roots=(WP_ROOT,)), NOW)
+    evs = st["roots"]["2080-11"]["wpev"]
+    assert {(e["part"], e["slug"], e["loc"]) for e in evs} == {
+        ("plugin", "wordpress-seo", "ru_RU"), ("core", "", "ru_RU"), ("theme", "twentytwentyfour", "de_DE_formal")}
+    assert "edit" not in st["roots"]["2080-11"]
+
+
+def test_language_file_without_its_mo_stays_a_sign():
+    # .mo не обновлялся (правка руками) или helper старый (времени .mo нет) - правка, как раньше
+    st = webfiles.process(wp_start(), blk(run(T - 600, n_changed=2, changed=[
+        [LANG, T - 700, 52000, T - 90000], ["wp-content/languages/ru_RU.l10n.php", T - 700, 9000]]),
+        roots=(WP_ROOT,)), NOW)
+    r = st["roots"]["2080-11"]
+    assert sorted(r["edit"]) == ["wp-content/languages/plugins/wordpress-seo-ru_RU.l10n.php",
+                                 "wp-content/languages/ru_RU.l10n.php"]
+    assert "wpev" not in r
+    # php в загрузках с "временем .mo" рядом - все равно признак
+    st = webfiles.process(st, blk(run(T - 300, n_new=1, new=[
+        ["wp-content/uploads/languages/x-ru_RU.l10n.php", T - 400, 900, T - 400]]), roots=(WP_ROOT,)), NOW)
+    assert list(st["roots"]["2080-11"]["php"]) == ["wp-content/uploads/languages/x-ru_RU.l10n.php"]
+
+
+def test_plugin_update_with_version_is_info_without_it_a_named_sign():
+    st = wp_start()
+    up = ["plugin", "hello-dolly", "1.7.2", "1.7.3", "wp-content/plugins/hello-dolly/"]
+    st = webfiles.process(st, blk(run(T - 600, n_changed=2, wp=[up], changed=[
+        ["wp-content/plugins/hello-dolly/hello.php", T - 700, 2500],
+        ["wp-content/plugins/hello-dolly/readme.js", T - 699, 300]]), roots=(WP_ROOT,)), NOW)
+    r = st["roots"]["2080-11"]
+    assert "edit" not in r and "deploy" not in r
+    assert r["wpev"][0] == {"k": "plugin", "slug": "hello-dolly", "from": "1.7.2", "to": "1.7.3",
+                            "at": datetime.fromtimestamp(T - 700, timezone.utc).isoformat()}
+    # большое обновление: в списке 15 файлов из 400, все его - ни выкладки, ни признака
+    many = [[f"wp-content/plugins/wordpress-seo/src/f{i:02}.php", T - 500, 100] for i in range(15)]
+    st = webfiles.process(st, blk(run(T - 450, n_changed=400, changed=many, wp=[
+        ["plugin", "wordpress-seo", "23.5", "23.6", "wp-content/plugins/wordpress-seo/"]]), roots=(WP_ROOT,)), NOW)
+    r = st["roots"]["2080-11"]
+    assert "edit" not in r and "deploy" not in r and r["wpev"][0]["to"] == "23.6"
+    # файлы плагина изменились, версия та же - признак, с названием плагина
+    st = webfiles.process(st, blk(run(T - 300, n_changed=1, changed=[
+        ["wp-content/plugins/wordpress-seo/src/main.php", T - 350, 4100]]), roots=(WP_ROOT,)), NOW)
+    st["loose"] = ["2080-11"]
+    assert webfiles.problems(st) == [(1, "файлы плагина wordpress-seo изменились без смены версии в /var/www/html "
+                                         "(wordpress-7d9f): main.php",
+                                      "edit:wordpress-7d9f:/var/www/html:wp-content/plugins/wordpress-seo/src/main.php")]
+
+
+def test_core_file_changed_without_version_is_a_sign():
+    st = wp_start()
+    # ядро обновилось: версия сменилась, файлы ядра вместе - не признак; wp-config.php - правка
+    st = webfiles.process(st, blk(run(T - 600, n_changed=3, wp=[["core", "", "6.6.1", "6.6.2", ""]], changed=[
+        ["wp-includes/version.php", T - 700, 900], ["wp-login.php", T - 700, 5000],
+        ["wp-config.php", T - 700, 3000]]), roots=(WP_ROOT,)), NOW)
+    r = st["roots"]["2080-11"]
+    assert list(r["edit"]) == ["wp-config.php"] and r["wpev"][0]["k"] == "core"
+    st = webfiles.accept(st)
+    # файл ядра поменяли без смены версии - признак с названием
+    st = webfiles.process(st, blk(run(T - 300, n_changed=1, changed=[["wp-includes/post.php", T - 350, 900]]),
+                                  roots=(WP_ROOT,)), NOW)
+    st["loose"] = ["2080-11"]
+    assert webfiles.problems(st)[0][1] == ("файлы ядра WordPress изменились без смены версии в /var/www/html "
+                                           "(wordpress-7d9f): post.php")
+    # правка задолго до обновления в том же каталоге - не его (файлы обновления пишутся подряд)
+    st = webfiles.accept(st)
+    st = webfiles.process(st, blk(run(T - 100, n_changed=2, wp=[["core", "", "6.6.2", "6.6.3", ""]], changed=[
+        ["wp-includes/post.php", T - 5000, 900], ["wp-includes/version.php", T - 150, 900]]),
+        roots=(WP_ROOT,)), NOW)
+    assert list(st["roots"]["2080-11"]["edit"]) == ["wp-includes/post.php", "wp-includes/version.php"]
+
+
+def test_edit_head_names_the_owner():
+    assert webfiles.edit_head(["wp-content/themes/shop/js/a.js"], False) == "файлы темы shop изменились"
+    assert webfiles.edit_head(["wp-content/plugins/hello.php"], True) == "файлы плагина hello изменились без смены версии"
+    # index.php в корне - ядро, только если корень точно WordPress
+    assert webfiles.edit_head(["index.php"], False) == "код изменен не через git/деплой"
+    assert webfiles.edit_head(["index.php"], True) == "файлы ядра WordPress изменились без смены версии"
+    assert webfiles.edit_head(["wp-content/plugins/a/x.php", "js/app.js"], True) == "код изменен не через git/деплой"

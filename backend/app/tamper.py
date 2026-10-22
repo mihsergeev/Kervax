@@ -486,7 +486,9 @@ def phrase(key: str, s: dict) -> str:
         names = list(dict.fromkeys(f["p"].rsplit("/", 1)[-1] for f in s.get("files") or []))
         if key == "php":
             return f"новые php ({tg_fmt.names(names, 2)})"
-        return f"правка {names[0]} вне выкладки" if len(names) == 1 else "правки вне выкладки: " + tg_fmt.names(names, 2)
+        if len(names) == 1:
+            return f"правка {names[0]} не через git/деплой"
+        return "правки не через git/деплой: " + tg_fmt.names(names, 2)
     return key
 
 
@@ -575,7 +577,7 @@ def view(state: dict | None) -> dict | None:
             # поды одного ворклоада присылают один и тот же файл - в списке он один раз
             paths = list(dict.fromkeys(f.get("p", "") for f in files))
             rows.append({"key": k, "arg": "", "strong": k in STRONG, "since": s.get("since"),
-                         "files": paths[:10], "n": len(paths),
+                         "files": paths[:10], "n": len(paths), "wp": any(f.get("wp") for f in files),
                          "where": ", ".join(dict.fromkeys(f.get("where", "") for f in files if f.get("where")))})
             continue
         rows.append({"key": k, "arg": "", "strong": k in STRONG, "since": s.get("since"),

@@ -1353,6 +1353,14 @@ class CustomBackupIgnoreIn(BaseModel):
     ignored: bool
 
 
+class KubeExpiryIgnoreIn(BaseModel):
+    """Срок кластера "не нужен, не следить" - или вернуть его под присмотр."""
+
+    kind: str = Field(min_length=1, max_length=40, pattern=r"^[a-z-]+$")
+    where: str = Field(min_length=1, max_length=512)
+    ignored: bool
+
+
 class KubeNodeIgnoreIn(BaseModel):
     """Нода кластера, на которой агент не нужен, - или вернуть ее в подсказку."""
 
@@ -1594,6 +1602,8 @@ class ServerOut(BaseModel):
     problems: list[dict] = []
     custom_backup_ignored: list[str] | None = None
     kube_node_ignored: list[str] | None = None  # ноды кластера, где агент не нужен (по имени)
+    # сроки кластера с отметкой "не следить": {"<kind>|<where>": {by, at}}, только действующие
+    kube_expiry_ignored: dict[str, dict] | None = None
     # с какого момента видна проблема каждого вида (ISO) - для "Что сломано": "2 дня"
     alert_since: dict[str, str] = Field(default_factory=dict)
     # с какого момента лежит каждый упавший контейнер: {имя: ISO}
@@ -1772,7 +1782,8 @@ class AgentReportIn(BaseModel):
     web_services: list[dict] = []
     db_stats: list[dict] = []  # инвентарь СУБД: базы/размеры/логины (хелпер dbstat-setup)
     # сроки PKI кластера, kubeconfig'ов, TLS-секретов и кредов Flux
-    # (хелпер kubeexpiry-setup): [{kind, where, expires, note}]
+    # (хелпер kubeexpiry-setup): [{kind, where, expires, note, fp?, ingress?}]; fp - отпечаток
+    # сертификата, ingress - TLS-секрет указан хоть в одном Ingress (с helper'а 0.3 и агента 2.49)
     kube_expiry: list[dict] = []
     # результаты локальных проверок сайтов, снятые агентом изнутри сервера:
     # [{id, code, latency_ms, error, kw_up_found, kw_down_found}]

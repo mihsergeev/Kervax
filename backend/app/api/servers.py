@@ -39,6 +39,7 @@ from app import web_config
 from app import webfiles as webfiles_mod
 from app import changes as srv_changes
 from app import known
+from app import kube_expiry
 from app import onboard
 from app import parents as parents_mod
 from app import boot_warmup
@@ -117,6 +118,7 @@ from app.schemas import (
     DockerResultIn,
     HelperAdvice,
     KubeCommandIn,
+    KubeExpiryIgnoreIn,
     KubeNodeIgnoreIn,
     KubeNodeRef,
     KubeCommandOut,
@@ -273,6 +275,7 @@ def _out(
     o.backup_verify = backup_verify.view(server.last_report or {}, now)
     o.backup_target = backup_target.view(server.last_report or {}, server.alert_mutes)
     o.restarts_day = srv_restarts.view(server, now) or None
+    o.kube_expiry_ignored = kube_expiry.view(server)
     o.kube_restarts = srv_restarts.kube_view(server, now)
     o.mem_leaks = mem_trend.problems(server, now) or None
     o.oom = oom_mod.view(server, now, pod_names)
@@ -2034,6 +2037,37 @@ def _kube_cmd_out(c: KubeCommand, now: datetime) -> KubeCommandOut:
     )).total_seconds() > 90:
         c.status, c.ok, c.result = "error", False, "агент не ответил (таймаут)"
     return KubeCommandOut.model_validate(c)
+
+
+@router.post("/{server_id}/kube/expiry-ignore", response_model=ServerOut)
+async def kube_expiry_ignore(
+    server_id: int, body: KubeExpiryIgnoreIn, user: CurrentUser, session: SessionDep
+) -> ServerOut:
+    """Срок кластера "не нужен, не следить" (старый секрет, который никто не использует) - или
+    вернуть его. Отметка привязана к сроку и отпечатку из отчета: обновят секрет - снова следим.
+    Сам секрет панель не трогает: она ничего не меняет в кластере."""
+    s = await _get_or_404(server_id, session, user)
+    now = datetime.now(timezone.utc)
+    k = kube_expiry.key({"kind": body.kind, "where": body.where})
+    cur = dict(s.kube_expiry_ignored or {})
+    if body.ignored:
+        it = next((x for x in (s.last_report or {}).get("kube_expiry") or [] if kube_expiry.key(x) == k), None)
+        if it is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Такого срока в отчете нет")
+        if k not in cur and len(cur) >= kube_expiry.MAX_ITEMS:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "Слишком много отметок")
+        cur[k] = kube_expiry.entry(it, user.username, now)
+    else:
+        cur.pop(k, None)
+    s.kube_expiry_ignored = cur or None
+    await session.commit()
+    await session.refresh(s)
+    await audit.record(
+        session, user.username,
+        "kube_expiry_ignore" if body.ignored else "kube_expiry_watch",
+        s.name, f"{body.kind} {body.where}",
+    )
+    return _out(s, now)
 
 
 @router.post("/{server_id}/kube/node-ignore", response_model=ServerOut)

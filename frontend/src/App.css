@@ -678,6 +678,27 @@ input:focus {
   align-items: center;
   margin-top: 6px;
 }
+/* Сроки: команда удаления секрета руками (панель сама его не удаляет) и свернутые "не следим" */
+.kube-exp-cmd {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  align-items: baseline;
+  margin-top: 6px;
+}
+.kube-exp-cmd code { overflow-wrap: anywhere; white-space: normal; }
+.kube-exp-unused { margin-top: 2px; white-space: normal; }
+/* срок и под ним "не нужен, не следить": строка не растет на отдельный ряд кнопок */
+.kube-exp-side {
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 4px;
+}
+.kube-exp-side .linklike { font-size: 0.74rem; color: var(--text-muted); white-space: nowrap; }
+.kube-exp-side .linklike:hover { color: var(--accent); }
+button.linklike.kube-exp-off { display: block; margin: 10px 0 6px; text-align: left; color: var(--text-muted); }
 /* Сводка над списком сроков: почему список стоит читать прямо сейчас. */
 .kube-expiry-note {
   padding: 0.5rem 0.65rem;
@@ -787,6 +808,23 @@ input:focus {
   border-top: 1px dashed var(--border);
 }
 .home-attention-sub .home-attention-row { border: 0; background: none; padding: 0.25rem 0.4rem; font-size: 0.86rem; }
+/* заглушка до нового в раскрытой группе: галки, "выбрать все", заглушенные строкой внизу */
+.home-sel-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 0.3rem 0.8rem; padding: 0.2rem 0.4rem 0.3rem; font-size: 0.84rem; }
+label.home-sel-all { display: inline-flex; flex-direction: row; align-items: center; gap: 0.4rem; font-size: inherit; color: var(--text); cursor: pointer; }
+.home-sel-box { width: auto; margin: 0; flex-shrink: 0; cursor: pointer; accent-color: var(--accent); }.home-sel-foot { display: flex; gap: 0.8rem; padding: 0.2rem 0.4rem 0; }
+.home-attention-row.home-attention-muted { opacity: 0.6; }
+.home-attention-row.home-attention-muted .linklike { flex-shrink: 0; }
+.home-sel-foot .linklike { color: var(--text-muted); }
+/* полный список пакетов под человеческим текстом пункта "Обновления ОС" */
+.osupd-adv-pkgs { display: block; font-size: 0.78rem; overflow-wrap: anywhere; }
+.home-sel-foot .linklike:hover { color: var(--text); }
+/* 🔕 у строки группы - по наведению, иначе десяток колокольчиков в столбик; без мыши видно всегда */
+.home-attention-subrow .quick-mute { opacity: 0; }
+.home-attention-subrow:hover .quick-mute, .home-attention-subrow:focus-within .quick-mute { opacity: 0.6; }
+.home-attention-subrow .quick-mute:hover { opacity: 1; }
+@media (hover: none) {
+  .home-attention-subrow .quick-mute { opacity: 0.5; }
+}
 /* группы в "Требует действий": серверное сверху, бэкапное ниже */
 .home-attention-grp { display: flex; flex-direction: column; gap: 0.3rem; }
 .home-attention-grp + .home-attention-grp { margin-top: 0.4rem; }
@@ -3818,6 +3856,13 @@ button.srv-nav-item.active {
   padding: 0.55rem 0 0 1.2rem;
   border-left: 1px solid var(--border);
 }
+/* окно с одним разделом: меню слева не нужно, раздел на всю ширину */
+.srv-main.srv-main-solo {
+  min-height: 0;
+  padding-left: 0;
+  border-left: 0;
+  border-top: 1px solid var(--border);
+}
 .srv-main-head {
   display: flex;
   align-items: center;
@@ -4611,6 +4656,95 @@ textarea:focus {
   text-transform: uppercase;
   letter-spacing: 0.05em;
   margin: 0.2rem 0;
+}
+/* FixSteps badges: номер кружком, текст шага яркий, команда на своем фоне с отступом под номером */
+.fix-b {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  margin: 0.55rem 0 0.2rem;
+}
+.fix-b-step {
+  display: flex;
+  gap: 0.6rem;
+  align-items: flex-start;
+}
+.fix-b-side {
+  padding-left: 2.1rem;
+}
+.fix-b-num {
+  flex: 0 0 auto;
+  width: 1.5rem;
+  height: 1.5rem;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.78rem;
+  font-weight: 700;
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
+}
+.fix-b-body {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+.fix-b-text {
+  color: var(--text);
+  font-size: 0.88rem;
+  line-height: 1.35;
+  padding-top: 0.15rem;
+  overflow-wrap: anywhere;
+}
+.fix-b-side .fix-b-text {
+  color: var(--text-muted);
+  font-size: 0.82rem;
+  line-height: 1.3;
+}
+.fix-b-tag {
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-right: 0.45rem;
+}
+.fix-b .agent-advice-cmd pre {
+  color: var(--text);
+  background: color-mix(in srgb, var(--accent) 7%, var(--bg));
+  border-color: color-mix(in srgb, var(--accent) 22%, var(--border));
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+@media (max-width: 600px) {
+  .fix-b .agent-advice-cmd {
+    flex-direction: column;
+  }
+  .fix-b .agent-advice-cmd button {
+    align-self: flex-end;
+  }
+  .fix-b-side {
+    padding-left: 0;
+  }
+}
+/* подробности под "подробнее": свернуто по умолчанию */
+.fix-more {
+  margin-top: 0.55rem;
+  font-size: 0.8rem;
+  color: var(--text-muted);
+}
+.fix-more > summary {
+  cursor: pointer;
+  width: fit-content;
+}
+.fix-more > div {
+  margin-top: 0.3rem;
+  overflow-wrap: anywhere;
+}
+.fix-more code {
+  color: var(--text);
 }
 .osupd-adv-why {
   font-size: 0.78rem;
@@ -5634,6 +5768,20 @@ button.svc-site-on:hover {
 }
 .own-backup-ignored {
   opacity: 0.6;
+}
+/* в разделе окна у карточки свой заголовок раздела, отступ сверху лишний */
+.hs-modal .own-backups { margin-top: 0; }
+/* телефон: статус и "не отслеживать" строкой под текстом, иначе текст сжат в столбик в 3 слова */
+@media (max-width: 760px) {
+  .own-backup { flex-wrap: wrap; row-gap: 0.4rem; }
+  .own-backup-main { flex: 1 1 calc(100% - 1.5rem); }
+  .own-backup-side {
+    flex: 1 1 100%;
+    flex-direction: row;
+    align-items: center;
+    justify-content: space-between;
+    margin-left: 1.3rem;
+  }
 }
 .brand-dark-actions {
   display: flex;
@@ -7240,6 +7388,9 @@ button.tl-tile-off .net-tile-value {
   .hs-modal .docker-row { flex-wrap: wrap; row-gap: 0.4rem; }
   .hs-modal .docker-row .docker-c-main { flex: 1 1 calc(100% - 1.5rem); }
   .hs-modal .docker-row .docker-c-status { margin-left: 1.3rem; }
+  /* сроки: срок и "не следить" одной строкой под именем */
+  .hs-modal .docker-row .kube-exp-side { flex-direction: row; align-items: center; gap: 0.8rem; margin-left: 1.3rem; }
+  .hs-modal .docker-row .kube-exp-side .docker-c-status { margin-left: 0; }
   .hs-modal .docker-row .docker-actions { margin-left: auto; }
   /* упавший Job: строка и лог друг под другом, переносится сама строка, а не колонка */
   .hs-modal .docker-row.job-row { flex-wrap: nowrap; }

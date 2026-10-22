@@ -22,6 +22,14 @@ helper 0.2 смотрит только верхний слой overlay (запи
 дублируют признаки. Один каталог, смонтированный в несколько контейнеров (php-fpm и воркер одного
 проекта), - тоже одна строка: helper 0.3 присылает устройство и inode корня.
 
+Штатные обновления WordPress (из админки или wp-cron) - не правка. Пакет перевода пишет .l10n.php
+вместе с .mo в одну секунду: helper 0.4 присылает к измененному languages/*.l10n.php время его .mo.
+Плагин, тема и ядро - по смене версии: helper 0.4 присылает в прогоне, чьи версии сменились с
+прошлого (Version: из заголовка, $wp_version ядра), и файлы этого каталога, записанные вместе,
+- обновление. Такое показывается серой строкой ("обновлен плагин X 1.0 -> 1.1"), не признаком.
+Файлы плагина или ядра изменились, а версия нет - признак, с названием, чей это файл. php в
+загрузках - признак всегда.
+
 Признаки копятся в servers.webfiles, пока их не примут кнопкой ("это наше") или файл не пропадет.
 Корень с доменами из конфига (или единственный сайт сервера) привязан к монитору: признаки идут
 в его "Признаки взлома" и считаются вместе с признаками страницы (app/tamper.py). Остальные -
@@ -31,6 +39,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from collections import Counter
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlparse
@@ -52,6 +61,10 @@ GIT_AFTER = 2     # и немного после: время файла и со�
 RUN_WIN = 660     # признак без времени файла (набран до helper'а 0.3) - событие за прогон до него
 RULES = 2          # версия правил: старые признаки один раз проходят через новые
 MAX_FILES = 50     # файлов в одном признаке
+WP_SPAN = 600      # обновление пишет файлы каталога подряд: разброс времени больше - не оно
+WP_LANG_GAP = 2    # .l10n.php и .mo одного пакета перевода - в одну секунду (с округлением)
+WP_EVENTS = 10     # обновлений WordPress в корне помним
+WP_SHOW = timedelta(days=7)
 _PHP = (".php", ".phtml", ".phar", ".pht", ".php3", ".php4", ".php5", ".php7", ".php8")
 _UPLOADS = frozenset({"uploads", "upload", "files", "media", "images", "img", "pictures", "userfiles",
                       "tmp", "temp"})
@@ -62,6 +75,15 @@ _CACHE_SEGS = frozenset({".git", "node_modules", "cache", ".cache", "managed_cac
 _CACHE_PATHS = ("/storage/framework/", "/var/cache/", "/bootstrap/cache/", "/files/php/twig/",
                 "/var/view_preprocessed/")
 _ASSET_PATHS = ("/web/assets/", "/public/assets/", "/pub/static/", "/web/cpresources/")
+
+
+# languages/[plugins|themes/]<slug>-<locale>.l10n.php, у ядра без slug: ru_RU, admin-ru_RU
+_WP_LANG = re.compile(r"(?:^|/)languages/(?:(plugins|themes)/)?([^/]+)\.l10n\.php$")
+_WP_LOCALE = re.compile(r"^(?:(.+)-)?([a-z]{2,3}(?:_[A-Z]{2})?(?:_[a-z0-9]+)?)$")
+_WP_PART = re.compile(r"(?:^|/)wp-content/(plugins|themes)/([^/]+?)(?:\.php)?(?:/|$)")
+_WP_CORE = re.compile(r"(?:^|/)wp-(?:admin|includes)/")
+# файлы ядра в корне WordPress; wp-config.php обновление не пишет
+_WP_CORE_TOP = re.compile(r"^(?:index\.php|xmlrpc\.php|wp-(?!config\.php)[^/]+\.php)$")
 
 
 def block(rep: dict, now: datetime) -> dict | None:
@@ -132,7 +154,8 @@ def process(state: dict | None, b: dict, now: datetime) -> dict:
                    domains=[str(d).lower() for d in r.get("domains") or []][:20],
                    files=int(r.get("files") or 0), big=bool(r.get("big")), layer=bool(r.get("layer")),
                    at=now.isoformat())
-        for k, v in (("src", str(r.get("src") or "")), ("git", _events(r.get("git")))):
+        for k, v in (("src", str(r.get("src") or "")), ("git", _events(r.get("git"))),
+                     ("wp", str(r.get("wp") or ""))):
             if v:
                 cur[k] = v
             else:
@@ -252,9 +275,95 @@ def _git_clean(root: dict) -> None:
             root.pop(k)
 
 
+def wp_part(p: str, wp: bool = False) -> tuple[str, str] | None:
+    """Чей файл WordPress: ("plugin", slug), ("theme", slug), ("core", ""); None - не его.
+    index.php и wp-*.php в корне - ядро, только если корень точно WordPress (wp)."""
+    m = _WP_PART.search(p)
+    if m:
+        return m.group(1)[:-1], m.group(2)
+    if _WP_CORE.search(p) or wp and "/" not in p and _WP_CORE_TOP.match(p):
+        return "core", ""
+    return None
+
+
+def _wp_lang(p: str, t: int, mo: int | None) -> dict | None:
+    """Пакет перевода, который WordPress поставил сам: .l10n.php и .mo рядом в одну секунду."""
+    m = _WP_LANG.search(p)
+    if not m or not mo or t <= 0 or abs(mo - t) > WP_LANG_GAP:
+        return None
+    loc = _WP_LOCALE.match(m.group(2))
+    if not loc:
+        return None
+    part = (m.group(1) or "")[:-1] or "core"
+    return {"k": "lang", "part": part, "slug": "" if part == "core" else loc.group(1) or "",
+            "loc": loc.group(2), "at": _iso(t)}
+
+
+def _wp_covers(up: list[str], p: str) -> bool:
+    """Файл из каталога обновленного плагина, темы или ядра (prefix - путь от корня)."""
+    kind, prefix = up[0], up[4]
+    if kind == "core":
+        if not p.startswith(prefix):
+            return False
+        r = p[len(prefix):]
+        return r.startswith(("wp-admin/", "wp-includes/")) or bool(_WP_CORE_TOP.match(r))
+    return p.startswith(prefix) if prefix.endswith("/") else p == prefix
+
+
+def _wp_ups(lst) -> list[list[str]]:
+    """[[вид, slug, было, стало, путь], ...] из прогона helper'а 0.4."""
+    out = []
+    for x in lst or []:
+        if isinstance(x, (list, tuple)) and len(x) >= 5 and x[0] in ("core", "plugin", "theme"):
+            out.append([str(v) for v in x[:5]])
+    return out
+
+
+def _ev_key(e: dict) -> tuple:
+    return e["k"], e.get("part", ""), e.get("slug", ""), e.get("loc", "")
+
+
+def _wp_event(root: dict, ev: dict) -> None:
+    evs = [e for e in root.get("wpev") or [] if _ev_key(e) != _ev_key(ev)]
+    root["wpev"] = sorted(evs + [ev], key=lambda e: e.get("at", ""), reverse=True)[:WP_EVENTS]
+
+
+def _wp_explain(root: dict, d: dict, rows: list[tuple[str, int, int]], ts: float) -> set[str]:
+    """Файлы, которые записал сам WordPress: пакет перевода, обновление плагина, темы или ядра.
+    php в загрузках не объясняется ничем."""
+    mo = {}
+    for x in (d.get("new") or []) + (d.get("changed") or []):
+        if isinstance(x, (list, tuple)) and len(x) >= 4 and isinstance(x[0], str):
+            try:
+                mo[x[0]] = int(x[3])
+            except (TypeError, ValueError):
+                pass
+    out: set[str] = set()
+    cand = [(p, t) for p, t, s in rows if not (is_php(p) and in_uploads(p) and not _quiet_index(p, s))]
+    for p, t in cand:
+        ev = _wp_lang(p, t, mo.get(p))
+        if ev:
+            _wp_event(root, ev)
+            out.add(p)
+    for up in _wp_ups(d.get("wp")):
+        mine = [(p, t) for p, t in cand if p not in out and _wp_covers(up, p)]
+        times = [t for _p, t in mine if t > 0]
+        # файлы одного обновления пишутся подряд; правка задолго до него - не его
+        if times and max(times) - min(times) <= WP_SPAN:
+            out.update(p for p, _t in mine)
+        _wp_event(root, {"k": up[0], "slug": up[1], "from": up[2], "to": up[3],
+                         "at": _iso(min(times) if times else ts)})
+    return out
+
+
 def _apply(root: dict, d: dict, ts: float) -> None:
     new = [x for x in _rows(d.get("new")) if not generated(x[0])]
     changed = [x for x in _rows(d.get("changed")) if not generated(x[0])]
+    # обновил сам WordPress - не признак и не выкладка
+    listed = len(new) + len(changed)
+    wp = _wp_explain(root, d, new + changed, ts)
+    new = [x for x in new if x[0] not in wp]
+    changed = [x for x in changed if x[0] not in wp]
     # записанное выкладкой через git - не признак при любом числе файлов (кроме php в загрузках)
     by_git: dict[str, list] = {}
     for p, t, _s in new + changed:
@@ -266,6 +375,9 @@ def _apply(root: dict, d: dict, ts: float) -> None:
         _git_deploy(root, last, sum(1 for e in by_git.values() if e == last))
     gone = d.get("gone") or []
     total = int(d.get("n_new") or len(new)) + int(d.get("n_changed") or len(changed))
+    if wp:
+        # из списка (до 15 каждого вида) объяснено все - остальное, которого не видно, того же обновления
+        total = total - len(wp) if new or changed else 0
     same: dict[int, int] = {}
     for _p, t, _s in new + changed:
         if t > 0:
@@ -410,8 +522,10 @@ def mirror(servers: list[tuple[int, str, dict]], checks: list[tuple[int, str, se
                 for k in ("php", "edit"):
                     for p, v in (r.get(k) or {}).items():
                         sign = by_check.setdefault(cid, {}).setdefault(k, {"files": [], "since": v["since"]})
-                        sign["files"].append({"p": p, "sid": sid, "root": rk, "where": where(name, r),
-                                              "since": v["since"]})
+                        f = {"p": p, "sid": sid, "root": rk, "where": where(name, r), "since": v["since"]}
+                        if r.get("wp"):
+                            f["wp"] = True
+                        sign["files"].append(f)
                         sign["since"] = min(sign["since"], v["since"])
     return by_check, loose
 
@@ -438,12 +552,25 @@ def problems(state: dict | None) -> list[tuple[int, str, str]]:
         if php:
             text = f"похоже на взлом: новые php в {path}{at}: " + tg_fmt.names([_base(p) for p in php])
             if edit:
-                text += ", правки вне выкладки: " + tg_fmt.names([_base(p) for p in edit], 2)
+                text += ", правки не через git/деплой: " + tg_fmt.names([_base(p) for p in edit], 2)
             out.append((2, text, f"php:{gk}:" + ",".join(php)))
         elif edit:
-            out.append((1, f"код изменен вне выкладки в {path}{at}: "
+            head = edit_head(edit, any(r.get("wp") for _rk, r in items))
+            out.append((1, f"{head} в {path}{at}: "
                            + tg_fmt.names([_base(p) for p in edit]), f"edit:{gk}:" + ",".join(edit)))
     return out
+
+
+def edit_head(paths: list[str], versions: bool) -> str:
+    """Как назвать правку: все файлы одного плагина, темы или ядра WordPress - так и сказать.
+    versions - helper следит за версиями WordPress, т.е. версия точно не сменилась."""
+    parts = {wp_part(p, versions) for p in paths}
+    if len(parts) == 1 and None not in parts:
+        kind, slug = parts.pop()
+        what = {"plugin": f"файлы плагина {slug}", "theme": f"файлы темы {slug}",
+                "core": "файлы ядра WordPress"}[kind]
+        return what + (" изменились без смены версии" if versions else " изменились")
+    return "код изменен не через git/деплой"
 
 
 def view(state: dict | None, rep: dict, now: datetime) -> dict | None:
@@ -469,8 +596,24 @@ def view(state: dict | None, rep: dict, now: datetime) -> dict | None:
             "php": [{"p": p, **v} for p, v in sorted(_merged(items, "php").items())],
             "edit": [{"p": p, **v} for p, v in sorted(_merged(items, "edit").items())],
             "site": any(rk not in loose for rk, _r in items),
+            # WordPress: версия ядра (helper 0.4 следит за версиями) и что он обновил сам за неделю
+            "wp": next((r["wp"] for r in rs if r.get("wp")), ""),
+            "wp_events": _wp_shown(rs, now),
         })
     return {"roots": out, "ts": (b or {}).get("ts")}
+
+
+def _wp_shown(rs: list[dict], now: datetime) -> list[dict]:
+    seen, out = set(), []
+    for e in sorted((e for r in rs for e in r.get("wpev") or []), key=lambda e: e.get("at", ""), reverse=True):
+        try:
+            fresh = now - datetime.fromisoformat(e.get("at") or "") <= WP_SHOW
+        except ValueError:
+            fresh = False
+        if fresh and _ev_key(e) not in seen:
+            seen.add(_ev_key(e))
+            out.append(e)
+    return out
 
 
 def tg_short(items) -> tuple[str, list[str]] | None:

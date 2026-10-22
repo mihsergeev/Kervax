@@ -361,24 +361,46 @@ const EN: Record<string, string> = {
   'убит из-за нехватки памяти': 'killed by the OOM killer',
   'перестал отвечать watchdog': 'stopped answering the watchdog',
   'упал': 'failed',
-  'mdadm некуда слать письма, RAID он на самом деле не мониторит. За RAID следит Kervax ("Диск: поломка"), мониторинг mdadm можно выключить (по всему парку - плейбук units_cleanup.yml):':
-    'mdadm has no mail address to send to, so it does not really watch the RAID. Kervax does ("Disk: failure"), so the mdadm monitor can be turned off (fleet-wide: the units_cleanup.yml playbook):',
-  'unbound пытается прописаться в systemd-resolved, которого на ноде нет. Ничего полезного юнит не делает, его можно выключить (по всему парку - плейбук units_cleanup.yml):':
-    'unbound tries to register itself in systemd-resolved, which is not on this node. The unit does nothing useful and can be turned off (fleet-wide: the units_cleanup.yml playbook):',
-  'При загрузке не дождались сети: обычно из-за интерфейса, который не нужен или не управляется networkd. Сервер при этом работает, достаточно сбросить отметку. Если повторяется на каждой загрузке - ограничьте ожидание нужным интерфейсом (--interface=) или выключите юнит.':
-    'The network was not ready in time at boot, usually because of an interface that is not needed or not managed by networkd. The server works; resetting the mark is enough. If it repeats on every boot, limit the wait to the right interface (--interface=) or turn the unit off.',
-  'Сокет не смог занять свой порт: обычно его уже держит сам сервис (sshd со своим портом). Сервис при этом работает, лишний сокет можно выключить:':
-    'The socket could not take its port, usually because the service itself holds it (sshd with its own port). The service works; the extra socket can be turned off:',
-  'restic закончил бэкап, но часть файлов прочитать не смог (код 3): снапшот есть, но неполный. Какие файлы - в журнале юнита:':
-    'restic finished the backup but could not read some files (exit code 3): the snapshot exists but is incomplete. Which files - in the unit log:',
-  'freshclam не может скачать базы антивируса, и они устаревают. Частая причина - зеркало ClamAV закрыто для адресов из России: нужно свое зеркало (PrivateMirror в freshclam.conf) или прокси.':
-    'freshclam cannot download the antivirus databases, so they get stale. A common cause: the ClamAV mirror is closed to Russian addresses; use your own mirror (PrivateMirror in freshclam.conf) or a proxy.',
-  'openipmi не нашел IPMI на этой машине. Если BMC нет или он не нужен, юнит можно выключить:':
-    'openipmi found no IPMI on this machine. If there is no BMC or it is not needed, the unit can be turned off:',
-  'Неправильная раскладка консоли, на сервере ни на что не влияет. Поправить - sudo dpkg-reconfigure keyboard-configuration, или просто сбросить отметку.':
-    'A wrong console keyboard layout; on a server it affects nothing. Fix it with sudo dpkg-reconfigure keyboard-configuration, or just reset the mark.',
-  'Сертификат выпущен вручную (manual plugin), сам он не продлится. Продлите вручную или удалите ненужный:':
-    'The certificate was issued by hand (manual plugin) and will not renew by itself. Renew it by hand or delete it if unused:',
+  'и': 'and',
+  'Перезапуск не поможет: юнит упадет снова.': 'A restart will not help: the unit will fail again.',
+  'mdadm некуда слать письма (в mdadm.conf нет MAILADDR), поэтому он не следит за RAID и падает при каждом запуске.':
+    'mdadm has nowhere to send mail (no MAILADDR in mdadm.conf), so it does not watch the RAID and fails on every start.',
+  'выключить мониторинг mdadm на этом сервере:': 'turn off the mdadm monitor on this server:',
+  'за RAID следит Kervax, раздел Диск.': 'Kervax watches the RAID, see the Disk section.',
+  'unbound пытается прописаться в systemd-resolved, которого на сервере нет, и падает.':
+    'unbound tries to register itself in systemd-resolved, which is not on this server, and fails.',
+  'выключить этот юнит:': 'turn this unit off:',
+  'сам unbound работает, этот юнит ему не нужен.': 'unbound itself works and does not need this unit.',
+  'При загрузке не дождались сети: обычно из-за интерфейса, который не нужен или не управляется networkd.':
+    'The network was not ready in time at boot, usually because of an interface that is not needed or not managed by networkd.',
+  'нажать "Сбросить". Если повторяется на каждой загрузке - ограничить ожидание нужным интерфейсом (--interface=) или выключить юнит.':
+    'press "Reset". If it repeats on every boot, limit the wait to the right interface (--interface=) or turn the unit off.',
+  'сервер работает, юнит нужен только при загрузке.': 'the server works, the unit only matters at boot.',
+  'Перезапуск не нужен: юнит только ждет сеть при загрузке.': 'No restart needed: the unit only waits for the network at boot.',
+  'Сокет не смог занять свой порт: обычно его уже держит сам сервис (например, sshd со своим портом).':
+    'The socket could not take its port, usually because the service itself holds it (for example, sshd with its own port).',
+  'выключить лишний сокет:': 'turn the extra socket off:',
+  'сервис при этом работает.': 'the service itself works.',
+  'Перезапуск не поможет: порт занят.': 'A restart will not help: the port is taken.',
+  'restic закончил бэкап, но часть файлов прочитать не смог (код 3): снапшот есть, но неполный.':
+    'restic finished the backup but could not read some files (exit code 3): the snapshot exists but is incomplete.',
+  'найти в журнале, какие файлы, и исключить их из бэкапа или выдать доступ:':
+    'find which files in the log, then exclude them from the backup or grant access:',
+  'freshclam не может скачать базы антивируса, и они устаревают.': 'freshclam cannot download the antivirus databases, so they get stale.',
+  'частая причина - зеркало ClamAV закрыто для адресов из России: прописать свое зеркало (PrivateMirror в freshclam.conf) или прокси.':
+    'a common cause is the ClamAV mirror being closed to Russian addresses: set your own mirror (PrivateMirror in freshclam.conf) or a proxy.',
+  'openipmi не нашел IPMI на этой машине.': 'openipmi found no IPMI on this machine.',
+  'если BMC нет или он не нужен, выключить юнит:': 'if there is no BMC or it is not needed, turn the unit off:',
+  'Не применилась раскладка консоли.': 'The console keyboard layout was not applied.',
+  'нажать "Сбросить" или поправить раскладку: sudo dpkg-reconfigure keyboard-configuration':
+    'press "Reset" or fix the layout: sudo dpkg-reconfigure keyboard-configuration',
+  'на сервере раскладка консоли ни на что не влияет.': 'on a server the console layout affects nothing.',
+  'Сертификат выпущен вручную (manual plugin), сам он не продлится.': 'The certificate was issued by hand (manual plugin) and will not renew itself.',
+  'продлить его вручную или удалить, если не нужен:': 'renew it by hand or delete it if it is not needed:',
+  'или плейбуком (на весь парк - с -l kervax):': 'or with the playbook (fleet-wide: -l kervax):',
+  'Почему не страшно:': 'Why it is not a worry:',
+  'одна причина': 'same cause',
+  'не алертить по этим юнитам:': 'do not alert on these units:',
   'отметка сброшена': 'failed mark cleared',
   '{n} дн назад': '{n} d ago',
   'отработал без ошибок': 'finished without errors',
@@ -421,6 +443,16 @@ const EN: Record<string, string> = {
   'Добавить в панель': 'Add to the panel',
   'Агент не нужен': 'Agent not needed',
   'Вернуть подсказку': 'Show the hint again',
+  // сроки кластера "не нужен, не следить"
+  'не нужен, не следить': 'not needed, do not watch',
+  'следить снова': 'watch again',
+  'не следим': 'not watched',
+  'не следим: {n}': 'not watched: {n}',
+  'отметил {who}, {when}': 'marked by {who}, {when}',
+  'не используется ни одним ingress': 'not used by any ingress',
+  'удалить из кластера вручную:': 'to delete it from the cluster by hand:',
+  'Уберет пункт из проблем и алертов. Обновят секрет - панель снова будет за ним следить':
+    'Removes the item from problems and alerts. Once the secret is renewed, the panel watches it again',
   // поды и ноды кластера по metrics-server
   'по metrics-server, как kubectl top': 'from metrics-server, like kubectl top',
   'сорт: память': 'sort: memory',
@@ -641,6 +673,27 @@ const EN: Record<string, string> = {
   'слабые SSH-ключи - замените на ed25519': 'weak SSH keys - replace them with ed25519',
   'поддержка ОС кончилась или скоро кончится': 'OS support has ended or ends soon',
   'нужна перезагрузка после обновлений': 'a reboot is needed after updates',
+  'обновлен только dbus - перезагрузить при случае': 'only dbus was updated - reboot when convenient',
+  'ждут перезагрузки после обновления ядра или библиотек': 'waiting for a reboot after a kernel or library update',
+  'обновлены пакеты': 'updated packages',
+  'Заглушить до нового: пункт вернется сам, если обновится новое ядро или пакет или сервер перезагрузится и снова попросит перезагрузку':
+    'Mute until something new: the item comes back by itself if a new kernel or package is updated or the server reboots and asks for a reboot again',
+  'Пункт вернется сам, если обновится новое ядро или пакет или сервер перезагрузится и снова попросит перезагрузку':
+    'The item comes back by itself if a new kernel or package is updated or the server reboots and asks for a reboot again',
+  'заглушено {n}': 'muted {n}',
+  'заглушено {n}, показать': 'muted {n}, show',
+  'скрыть заглушенные': 'hide muted',
+  'вернуть все': 'restore all',
+  'выбрать все': 'select all',
+  'заглушить выбранные': 'mute selected',
+  'заглушить выбранные ({n})': 'mute selected ({n})',
+  'вернутся сами, если появится новое': 'they come back by themselves if something new appears',
+  'заглушить до нового': 'mute until new',
+  'заглушено до нового': 'muted until new',
+  'при случае': 'when convenient',
+  'перезагрузка заглушена до нового': 'reboot muted until new',
+  'Обновлен только dbus. Перезапустить его отдельно нельзя: от него зависят systemd-logind и сессии, поэтому пакет и просит перезагрузку. Старый dbus работает как работал, срочности нет: перезагрузите при ближайшем окне обслуживания.':
+    'Only dbus was updated. It cannot be restarted on its own: systemd-logind and sessions depend on it, which is why the package asks for a reboot. The old dbus keeps working as before, there is no rush: reboot in the next maintenance window.',
   'не установлены обновления безопасности': 'security updates are not installed',
   'список пакетов давно не обновлялся': 'the package list has not been refreshed for a long time',
   'SSH пускает по паролю': 'SSH accepts passwords',
@@ -701,10 +754,12 @@ const EN: Record<string, string> = {
   '{n} ч назад': '{n} h ago',
   '{n} д назад': '{n} d ago',
   'Что на ноде': 'What is on the node',
-  'Бэкап на этой ноде помечен как не требующийся, но данные на ней есть:':
-    'Backup is marked as not required for this node, but it does hold data:',
-  'Файловый бэкап на ноде не настроен. Что на ней обнаружено:':
-    'No file-level backup is configured on this node. What was detected:',
+  'Бэкап на этой ноде помечен как не требующийся, но данные на ней есть':
+    'Backup is marked as not required for this node, but it does hold data',
+  'Файловый бэкап на ноде не настроен. Что на ней обнаружено':
+    'No file-level backup is configured on this node. What was detected',
+  'бэкап не требуется': 'backup not required',
+  'На ноде ничего не найдено': 'Nothing found on the node',
   'Сервисы': 'Services',
   'обнаружено типов: {n}': 'kinds detected: {n}',
   '{s} нод · {k} типов сервисов': '{s} nodes · {k} service kinds',
@@ -1351,13 +1406,9 @@ const EN: Record<string, string> = {
   'Доступы': 'Access',
   'Доступ: второй root или пустой пароль': 'Access: a second root or an empty password',
   'Доступы: заброшенные учетки и слабые ключи': 'Access: unused accounts and weak keys',
-  'Если контейнер из compose, поправьте и сам файл (restart: unless-stopped), иначе следующий up вернет как было.':
-    'If the container comes from compose, fix the file too (restart: unless-stopped), or the next up brings it back.',
   'Не запустятся после перезагрузки': 'Will not start after a reboot',
   'Не нужны после перезагрузки: {list}': 'Not needed after a reboot: {list}',
   'Не переживет перезагрузку': 'Will not survive a reboot',
-  'После перезагрузки не поднимутся: у контейнеров нет restart policy (или on-failure), докер запускает после ребута только always и unless-stopped.':
-    'These will not come back after a reboot: they have no restart policy (or on-failure), and after a reboot Docker starts only always and unless-stopped.',
   'Работают, но не включены: их запустили systemctl start без enable, и после ребута их не будет.':
     'Running but not enabled: they were started with systemctl start without enable and will be gone after a reboot.',
   'Так задумано: не напоминать про этот контейнер': 'This is intended: do not remind about this container',
@@ -1422,52 +1473,8 @@ const EN: Record<string, string> = {
   'вернуть {name}': 'bring back {name}',
   // как исправить ключи от хоста (docker_risk.fixes)
   'Как исправить: {names}': 'How to fix: {names}',
-  'Это CI-агент: privileged ему нужен только для docker внутри сборок. Сколько образов у docker внутри агента - 0 или ошибка значит, что сборки docker не запускают и privileged можно убрать:':
-    'This is a CI agent: it needs privileged only for docker inside builds. How many images the docker inside the agent has - 0 or an error means builds do not run docker and privileged can go:',
-  'Копия compose рядом:': 'A copy of the compose file next to it:',
-  'В {file} у сервиса {svc} privileged: true заменить на privileged: false, diff покажет замену, последняя строка - вышло ли:':
-    'In {file}, service {svc}: replace privileged: true with privileged: false, diff shows the change, the last line says whether it worked:',
-  'Строку {env} тоже можно убрать: без privileged docker внутри все равно не поднимется.':
-    'The {env} line can go too: without privileged the docker inside will not start anyway.',
-  'В {file} у сервиса {svc} privileged: true заменить на то, что ему нужно по назначению ({need}), diff покажет замену, последняя строка - вышло ли:':
-    'In {file}, service {svc}: replace privileged: true with what it actually needs ({need}), diff shows the change, the last line says whether it worked:',
-  'В {file} у сервиса {svc} убрать docker-сокет из volumes, diff покажет строку, последняя строка - вышло ли:':
-    'In {file}, service {svc}: remove the docker socket from volumes, diff shows the line, the last line says whether it worked:',
-  'Дописать в {file} руками: сервису DOCKER_HOST и сеть docker-api, рядом сервис docker-api - прокси сокета только на чтение (видит контейнеры и события, запускать и останавливать не дает). GID - число из stat -c %g /var/run/docker.sock:':
-    'Add to {file} by hand: DOCKER_HOST and the docker-api network for the service, and a docker-api service next to it - a read-only socket proxy (sees containers and events, cannot start or stop them). GID is the number from stat -c %g /var/run/docker.sock:',
-  'В {file} у сервиса {svc} убрать из cap_add {caps}. Строки с ними:':
-    'In {file}, service {svc}: remove {caps} from cap_add. The lines with them:',
-  'В {file} у сервиса {svc} {paths} смонтирован на запись: оставьте только нужный подкаталог или допишите :ro, если писать не нужно. Строки с ними:':
-    'In {file}, service {svc}: {paths} is mounted writable - keep only the subdirectory it needs or add :ro if it does not write there. The lines with them:',
-  'Проверить файл и пересоздать только эти сервисы, потом статус и лог. Последние строки скажут по каждому контейнеру, ушел ли ключ на деле. Пункт уйдет сам со следующим отчетом агента.':
-    'Check the file and recreate only these services, then the status and the log. The last lines say for each container whether the key is really gone. The item goes away by itself with the next agent report.',
-  'Если в логе Operation not permitted - не хватает одного права: добавьте только его в cap_add (или устройство в devices), а не privileged обратно.':
-    'If the log says Operation not permitted, one right is missing: add just that to cap_add (or the device to devices), not privileged back.',
-  'Если docker-api пишет в лог blocked - приложению нужен еще путь API: допишите его в -allowGET.':
-    'If docker-api logs blocked, the app needs one more API path: add it to -allowGET.',
-  'Если что-то не так - вернуть прежний compose и пересоздать сервисы:':
-    'If something is wrong - bring back the previous compose file and recreate the services:',
-  'Если docker в сборках нужен - privileged тут по назначению, нажмите "по назначению". Безопаснее держать такие агенты на отдельной ВМ без прода или запускать их через sysbox (runtime: sysbox-runc): docker внутри без privileged.':
-    'If builds do need docker, privileged is by design here: press "by design". Safer is to keep such agents on a separate VM with no production on it, or run them with sysbox (runtime: sysbox-runc): docker inside without privileged.',
-  'Если приложение само запускает или останавливает контейнеры (CI, деплой, управление) - прокси только на чтение ему не подойдет, сокет тут по назначению: нажмите "по назначению".':
-    'If the app starts or stops containers itself (CI, deploys, management), a read-only proxy will not do and the socket is by design: press "by design".',
-  'Контейнер запущен не из compose: пересоздайте его той же командой docker run, но без {what}.':
-    'The container is not from compose: recreate it with the same docker run command, but without {what}.',
   'docker-сокета в -v': 'the docker socket in -v',
   '{paths} на запись в -v': '{paths} writable in -v',
-  'Агент не присылает, откуда запущен контейнер: после обновления агента здесь будут готовые команды. Где его compose (папка, файлы, сервис):':
-    'The agent does not report where the container was started from: after an agent update there will be ready commands here. Where its compose is (directory, files, service):',
-  'Сделайте копию файла и в блоке сервиса замените privileged: true на {need}.':
-    'Make a copy of the file and in the service block replace privileged: true with {need}.',
-  'Сделайте копию файла и в блоке сервиса замените privileged: true на privileged: false.':
-    'Make a copy of the file and in the service block replace privileged: true with privileged: false.',
-  'Уберите docker-сокет из volumes сервиса. Если приложению нужен список контейнеров или события - дайте ему прокси сокета только на чтение (wollomatic/socket-proxy во внутренней сети, DOCKER_HOST=tcp://docker-api:2375).':
-    'Remove the docker socket from the service volumes. If the app needs the container list or events, give it a read-only socket proxy (wollomatic/socket-proxy on an internal network, DOCKER_HOST=tcp://docker-api:2375).',
-  'Уберите из cap_add сервиса {caps}.': 'Remove {caps} from the service cap_add.',
-  'Вместо {paths} смонтируйте только нужный подкаталог или допишите :ro, если писать не нужно.':
-    'Instead of {paths}, mount only the subdirectory it needs or add :ro if it does not write there.',
-  'Потом в папке проекта sudo docker compose up -d <сервис> и лог. Откат - вернуть копию файла и тот же up -d.':
-    'Then in the project directory sudo docker compose up -d <service> and check the log. To roll back, restore the copy and run the same up -d.',
   // пропавший порт, диск тормозит
   'Сервер: пропал порт': 'Server: port gone',
   'пропавший порт': 'gone port',
@@ -2224,6 +2231,124 @@ const EN: Record<string, string> = {
   'Перезапусков за сутки': 'Restarts in a day',
   'Прокси держит docker-сокет': 'A proxy holds the docker socket',
   'Старый образ прокси': 'Old proxy image',
+  'CI-агент: сколько образов у docker внутри, 0 или ошибка - privileged можно убрать':
+    'CI agent: how many images the docker inside has, 0 or an error - privileged can go',
+  'Operation not permitted в логе - не хватает одного права: добавьте его в cap_add (или устройство в devices), а не privileged обратно.':
+    'Operation not permitted in the log - one permission is missing: add it to cap_add (or the device to devices), not privileged back.',
+  'caddy из роли caddy-proxy:':
+    'caddy from the caddy-proxy role:',
+  'docker compose up -d в каталоге проекта, в логе docker-api не должно быть blocked':
+    'docker compose up -d in the project directory, the docker-api log must have no blocked',
+  'docker в сборках нужен - privileged по назначению, нажмите "по назначению" (безопаснее отдельная ВМ или sysbox)':
+    'builds need docker - privileged is intended, press "intended" (safer: a separate VM or sysbox)',
+  'docker-api пишет blocked - приложению нужен еще путь API: допишите его в -allowGET.':
+    'docker-api logs blocked - the app needs one more API path: add it to -allowGET.',
+  'image задан переменной: поставьте в ней {target} (обычно в .env рядом с compose), потом пересоздать сервис':
+    'image is set by a variable: set it to {target} (usually in .env next to the compose file), then recreate the service',
+  'restart {policy}: после перезагрузки докер его не поднимет':
+    'restart {policy}: docker will not start it after a reboot',
+  'sudo docker compose up -d <сервис> в папке проекта, откат - вернуть копию и тот же up -d':
+    'sudo docker compose up -d <service> in the project directory, to roll back - restore the copy and the same up -d',
+  '{list}: docker-сокет целиком, а это root на хосте. Нужен прокси сокета только на чтение, сам сокет из volumes убрать.':
+    '{list}: the whole docker socket, which is root on the host. Put a read-only socket proxy in front, drop the socket from volumes.',
+  '{what} от {when}, торчит в интернет, нужно {tag}':
+    '{what} from {when}, faces the internet, needs {tag}',
+  '{what} от {when}, торчит в интернет, своя сборка: только пересобрать':
+    '{what} from {when}, faces the internet, a custom build: rebuild only',
+  'В compose прокси убрать из volumes строку с docker.sock':
+    'In the proxy compose file drop the docker.sock line from volumes',
+  'В traefik 2.11 запрос с телом рвется через 60 с: для долгих загрузок верните --entryPoints.<имя>.transport.respondingTimeouts.readTimeout=0.':
+    'traefik 2.11 cuts a request with a body after 60 s: for long uploads set --entryPoints.<name>.transport.respondingTimeouts.readTimeout=0.',
+  'В {file} у {svc} {paths} на запись: смонтировать только нужный подкаталог или дописать :ro':
+    'In {file} {svc} has {paths} writable: mount only the needed subdirectory or add :ro',
+  'В {file} у {svc} заменить privileged: true на privileged: false':
+    'In {file} for {svc} replace privileged: true with privileged: false',
+  'В {file} у {svc} заменить privileged: true на {need}':
+    'In {file} for {svc} replace privileged: true with {need}',
+  'В {file} у {svc} убрать docker-сокет из volumes':
+    'In {file} drop the docker socket from the volumes of {svc}',
+  'В {file} у {svc} убрать из cap_add {caps}':
+    'In {file} drop {caps} from the cap_add of {svc}',
+  'В {file} у сервиса {svc} убрать из volumes строку с docker.sock':
+    'In {file} drop the docker.sock line from the volumes of service {svc}',
+  'Вместо {paths} смонтировать нужный подкаталог или дописать :ro':
+    'Instead of {paths} mount the needed subdirectory or add :ro',
+  'Готовый compose для {name} собран из {file}, что меняется:':
+    'A ready compose file for {name} is built from {file}, the changes:',
+  'Готовый файл соберет helper sockfix-setup, пока руками.':
+    'The sockfix-setup helper will build a ready file, by hand for now.',
+  'Для {name} готового файла нет: {why}{detail}.':
+    'No ready file for {name}: {why}{detail}.',
+  'Добавить сервису environment и networks, рядом сервис и сеть docker-api, как в примере':
+    'Add environment and networks to the service, and the docker-api service and network next to it, as in the example',
+  'Дописать в {file} руками: docker-api (прокси сокета только на чтение) и DOCKER_HOST сервису, GID из stat -c %g /var/run/docker.sock':
+    'Add to {file} by hand: docker-api (a read-only socket proxy) and DOCKER_HOST for the service, GID from stat -c %g /var/run/docker.sock',
+  'Если контейнер из compose, то же в файле (restart: unless-stopped), иначе следующий up вернет как было':
+    'If the container is from compose, the same in the file (restart: unless-stopped), or the next up brings the old policy back',
+  'Запомнить коды ответов доменов':
+    'Save the response codes of the domains',
+  'Копия compose рядом':
+    'A copy of the compose file next to it',
+  'Копия файла, потом в сервисе заменить privileged: true на privileged: false':
+    'Copy the file, then in the service replace privileged: true with privileged: false',
+  'Копия файла, потом в сервисе заменить privileged: true на {need}':
+    'Copy the file, then in the service replace privileged: true with {need}',
+  'Найти compose прокси: каталог, файлы, проект, сервис':
+    'Find the proxy compose: directory, files, project, service',
+  'Найти compose: папка, файлы, сервис (с новым агентом тут будут готовые команды)':
+    'Find the compose: directory, files, service (a newer agent gives ready commands here)',
+  'Не из compose: docker pull {target} и пересоздать контейнер той же командой docker run':
+    'Not from compose: docker pull {target} and recreate the container with the same docker run',
+  'Не из compose: пересоздать той же командой docker run, но без {what}':
+    'Not from compose: recreate with the same docker run, but without {what}',
+  'Образ старше caddy 2.5: бэкенд начнет получать Via и X-Forwarded-Host, а X-Forwarded-For от клиента отбрасывается.':
+    'The image is older than caddy 2.5: the backend starts getting Via and X-Forwarded-Host, and X-Forwarded-For from the client is dropped.',
+  'Пересоздать сервисы и сверить, последние строки скажут, ушел ли ключ':
+    'Recreate the services and check, the last lines tell whether the key is gone',
+  'Поднять FROM в Dockerfile до {target} и пересобрать':
+    'Raise FROM in the Dockerfile to {target} and rebuild',
+  'Поставить restart unless-stopped':
+    'Set restart unless-stopped',
+  'Применить, прокси пересоздастся за пару секунд':
+    'Apply, the proxy is recreated in a couple of seconds',
+  'С caddy 2.11 HTTPS-апстрим ({{upstreams https ...}}) получает Host апстрима, а не сайта: если бэкенду нужен исходный, добавьте header_up Host {hostport}.':
+    'Since caddy 2.11 an HTTPS upstream ({{upstreams https ...}}) gets the Host of the upstream, not of the site: if the backend needs the original one, add header_up Host {hostport}.',
+  'Сверить: оба контейнера работают, blocked в логе docker-api - 0':
+    'Check: both containers run, blocked in the docker-api log is 0',
+  'Сверить: сервис работает, лог без ошибок':
+    'Check: the service runs, no errors in the log',
+  'Сверить: сервис работает, лог без ошибок, коды те же (OK)':
+    'Check: the service runs, no errors in the log, same codes (OK)',
+  'Своя сборка (задана в {at}): пересобрать на свежем базовом образе':
+    'A custom build (set in {at}): rebuild it on a fresh base image',
+  'Скачать свежий {target} и пересоздать сервис, прежний образ останется как kervax-old':
+    'Pull a fresh {target} and recreate the service, the old image stays as kervax-old',
+  'Сменить image в {at} и пересоздать сервис':
+    'Change image in {at} and recreate the service',
+  'Сменить image на {target} в compose, потом docker compose pull и up -d --no-deps для этого сервиса':
+    'Change image to {target} in compose, then docker compose pull and up -d --no-deps for this service',
+  'Сменить image на {target} в compose, потом пересоздать сервис':
+    'Change image to {target} in compose, then recreate the service',
+  'Строку image не правлю сам: {why}.':
+    'Not editing the image line myself: {why}.',
+  'Убрать docker-сокет из volumes, если нужен список контейнеров - прокси сокета только на чтение (DOCKER_HOST=tcp://docker-api:2375)':
+    'Drop the docker socket from volumes, if the app needs the container list - a read-only socket proxy (DOCKER_HOST=tcp://docker-api:2375)',
+  'Убрать из cap_add {caps}':
+    'Drop {caps} from cap_add',
+  'вернуть как было':
+    'restore as it was',
+  'вернуть прежний compose':
+    'restore the old compose file',
+  'вернуть прежний compose, старый образ на диске':
+    'restore the old compose file, the old image is on disk',
+  'вернуть прежний образ':
+    'restore the old image',
+  'подробнее':
+    'details',
+  'приложение само управляет контейнерами (CI, деплой) - сокет по назначению, нажмите "по назначению"':
+    'the app manages containers itself (CI, deploy) - the socket is intended, press "intended"',
+  'строку {env} тоже убрать':
+    'drop the {env} line too',
   'Ключи от хоста': 'Host keys',
   'Не поднимутся после перезагрузки': 'Will not start after a reboot',
   'Доступ только на чтение': 'Read-only access',
@@ -3098,7 +3223,7 @@ const EN: Record<string, string> = {
   'за ним серверов: {n}': 'servers behind it: {n}',
   'зависят мониторов: {n}': 'dependent monitors: {n}',
   'заглушено: {list}': 'muted: {list}',
-  'известных проблем: {n}': 'known issues: {n}',
+  'известные проблемы: {list}': 'known issues: {list}',
   'изменений не было': 'no changes yet',
   'не задано': 'not set',
   'ничего не заглушено': 'nothing muted',
@@ -3356,7 +3481,21 @@ const EN: Record<string, string> = {
   'Видно снаружи': 'Visible from outside',
   // --- признаки взлома сайта (TamperSigns.tsx) ---
   'Новые php в веб-корне': 'New php in the web root',
-  'Код изменен вне выкладки': 'Code changed outside a deploy',
+  'Файлы кода изменились не через git/деплой': 'Code files changed outside git/deploy',
+  'файлы поменялись на сервере напрямую: правка руками, админка, плагин или взлом. Если это вы - нажмите "{btn}"':
+    'the files were changed right on the server: a manual edit, the admin panel, a plugin or a break-in. If it was you, press "{btn}"',
+  'файлы плагина {s} изменились без смены версии': 'files of plugin {s} changed without a version change',
+  'файлы плагина {s} изменились': 'files of plugin {s} changed',
+  'файлы темы {s} изменились без смены версии': 'files of theme {s} changed without a version change',
+  'файлы темы {s} изменились': 'files of theme {s} changed',
+  'файлы ядра WordPress изменились без смены версии': 'WordPress core files changed without a version change',
+  'файлы ядра WordPress изменились': 'WordPress core files changed',
+  'WordPress сам обновил перевод плагина {s} ({loc})': 'WordPress updated the translation of plugin {s} itself ({loc})',
+  'WordPress сам обновил перевод темы {s} ({loc})': 'WordPress updated the translation of theme {s} itself ({loc})',
+  'WordPress сам обновил свой перевод ({loc})': 'WordPress updated its own translation ({loc})',
+  'обновлен плагин {s} {from} -> {to} (из админки или автообновлением)': 'plugin {s} updated {from} -> {to} (from the admin panel or by auto-update)',
+  'обновлена тема {s} {from} -> {to} (из админки или автообновлением)': 'theme {s} updated {from} -> {to} (from the admin panel or by auto-update)',
+  'обновлен WordPress {from} -> {to} (из админки или автообновлением)': 'WordPress updated {from} -> {to} (from the admin panel or by auto-update)',
   'на {where}': 'on {where}',
   'Файлы сайтов': 'Site files',
   'Новые php': 'New php',
@@ -3367,7 +3506,7 @@ const EN: Record<string, string> = {
   'выкладка git {k} {t}: {n} файлов': 'deploy git {k} {t}: {n} files',
   'признаки и в карточке сайта': 'signs are also in the site card',
   'Веб-корней не нашлось.': 'No web roots found.',
-  'веб-корней: {n}, новых php и правок вне выкладки нет': 'web roots: {n}, no new php or changes outside a deploy',
+  'веб-корней: {n}, новых php и правок не через git/деплой нет': 'web roots: {n}, no new php or changes outside git/deploy',
   'Признаки взлома: новые php в файлах сайтов': 'Signs of compromise: new php in site files',
   'отметил новые файлы сайта своими': 'marked new site files as ours',
   // --- признаки взлома сайта (TamperSigns.tsx) ---
@@ -4148,25 +4287,6 @@ const EN: Record<string, string> = {
   'Прокси docker-сокета на этой ноде пускает только чтение, поэтому перезапуск, стоп и старт дают 403. Замените его этой командой: просмотр плюс перезапуск, стоп и старт, без exec, создания контейнеров и образов, слушает только 127.0.0.1 хоста.':
     'The docker socket proxy on this node allows reading only, so restart, stop and start get 403. Replace it with this command: viewing plus restart, stop and start, no exec, no creating containers or images, listening on 127.0.0.1 of the host only.',
   'Доступ к Docker (прокси)': 'Docker access (proxy)',
-  '{list}: docker-сокет смонтирован целиком. Прокси смотрит в интернет, а сокет - это root на хосте: одна дыра в прокси, и чужой получает весь сервер. Лечится так: прокси читает докер через прокси сокета только на чтение (список контейнеров, сети, события), а сам сокет из его volumes уходит.':
-    '{list}: the whole docker socket is mounted. The proxy faces the internet, and the socket is root on the host: one hole in the proxy and a stranger owns the server. The cure: the proxy reads docker through a read-only socket proxy (container list, networks, events), and the socket leaves its volumes.',
-  'Исправленный compose для {name} уже готов: helper собрал его на сервере из {file} и проверил через docker compose config. Что меняется:':
-    'A fixed compose file for {name} is ready: the helper built it on the server from {file} and checked it with docker compose config. What changes:',
-  '1. Применить - от root на сервере, прокси пересоздастся за пару секунд:':
-    '1. Apply it as root on the server, the proxy is recreated in a couple of seconds:',
-  '2. Проверить: оба контейнера работают, blocked в логе docker-api - 0, сайты открываются. Этот пункт уйдет сам со следующим отчетом агента.':
-    '2. Check: both containers run, blocked in the docker-api log is 0, the sites open. This item goes away by itself with the next agent report.',
-  'Если что-то не так - вернуть как было:': 'If something is wrong, roll back:',
-  'Для {name} готового файла нет: {why}{detail}. Поправьте compose руками:':
-    'No ready file for {name}: {why}{detail}. Edit the compose by hand:',
-  'Готовый исправленный compose под эту ноду соберет helper sockfix-setup: поставьте его плейбуком хелперов, и здесь появятся разница с нынешним файлом и команды. Пока - руками:':
-    'The sockfix-setup helper builds a fixed compose file for this node: install it with the helpers playbook, and the diff against the current file and the commands show up here. Until then, by hand:',
-  'в {file} у сервиса {svc} уберите из volumes строку с docker.sock;': 'in {file}, remove the docker.sock line from the volumes of the {svc} service;',
-  'в compose-файле прокси уберите из volumes строку с docker.sock;': 'in the compose file of the proxy, remove the docker.sock line from its volumes;',
-  'добавьте ему environment и networks из примера ниже, остальное в сервисе не трогайте;':
-    'add the environment and networks from the example below to it, leave the rest of the service as is;',
-  'добавьте сервис docker-api и сеть docker-api из примера;': 'add the docker-api service and the docker-api network from the example;',
-  'docker compose up -d в каталоге проекта.': 'run docker compose up -d in the project directory.',
   'файл размечен необычно (табы или сбитые отступы)': 'the file has an unusual layout (tabs or broken indentation)',
   'файл старого формата compose v1, без services:': 'the file is in the old compose v1 format, without services:',
   'в файле якоря YAML (&, *, <<), такую разметку надежно не поправить': 'the file uses YAML anchors (&, *, <<), such a layout cannot be edited reliably',
@@ -4185,8 +4305,6 @@ const EN: Record<string, string> = {
   'нужен docker compose v2': 'docker compose v2 is needed',
   'на хосте нет docker-сокета': 'there is no docker socket on the host',
   'docker compose не принял исправленный файл': 'docker compose did not accept the fixed file',
-  'Проверка после замены: в логе docker-api нет строк blocked request, сайты отвечают как раньше. Ноды с этой проблемой плагин инвентаря ansible собирает в группу kervax_docker_sock.':
-    'Check after the change: no blocked request lines in the docker-api log, the sites answer as before. The ansible inventory plugin puts the nodes with this problem into the kervax_docker_sock group.',
   'прокси смотрит в интернет и держит docker-сокет: взлом прокси даст root на хосте':
     'the proxy faces the internet and holds the docker socket: breaking into the proxy gives root on the host',
   'внешний прокси держит docker-сокет: взлом прокси даст root на хосте':
@@ -4202,52 +4320,11 @@ const EN: Record<string, string> = {
   'На сервере restic {v}, а helper ставит {target} (ту же версию, что у клиентов). Обычно его обновляет установка helper\'а, если скачать не вышло, запустите на сервере:':
     'The server runs restic {v}, the helper installs {target} (the same version the clients run). Installing the helper normally updates it; if the download failed, run on the server:',
   'образ внешнего прокси собран больше года назад': 'the internet-facing proxy image was built more than a year ago',
-  '{list}: образ собран больше года назад. Прокси смотрит в интернет, а за год в нем закрывают не одну дыру.':
-    '{list}: the image was built more than a year ago. The proxy faces the internet, and a year brings more than one security fix.',
-  'caddy-docker-proxy: закрепленная версия, как в роли caddy-proxy - 2.13.1, внутри caddy 2.11. Метки контейнеров читаются как раньше, сертификаты в /data остаются. С caddy 2.11 к HTTPS-апстриму ({{upstreams https ...}}) уходит Host апстрима, а не сайта: если бэкенду нужен исходный, добавьте header_up Host {hostport}.':
-    'caddy-docker-proxy: a pinned version, as in the caddy-proxy role - 2.13.1, with caddy 2.11 inside. Container labels are read as before, the certificates in /data stay. Since caddy 2.11 an HTTPS upstream ({{upstreams https ...}}) gets the Host of the upstream, not of the site: if the backend needs the original one, add header_up Host {hostport}.',
-  'Образ старше caddy 2.5: бэкенд начнет получать заголовки Via и X-Forwarded-Host, а X-Forwarded-For от клиента отбрасывается - остается только реальный IP.':
-    'The image predates caddy 2.5: the backend starts getting the Via and X-Forwarded-Host headers, and an X-Forwarded-For sent by the client is dropped - only the real IP stays.',
-  'caddy: ветка 2.11, патчи в ней приезжают с pull. С 2.11 к HTTPS-апстриму уходит Host апстрима (вернуть - header_up Host {hostport}), а конфиг проверяется строже: если caddy не стартует, строка с ошибкой будет в логе, тогда откат.':
-    'caddy: the 2.11 branch, its patches arrive with a pull. Since 2.11 an HTTPS upstream gets the Host of the upstream (to keep the old one - header_up Host {hostport}), and the config is checked more strictly: if caddy does not start, the log has the line with the error, then roll back.',
-  'traefik: последний патч своей ветки, для v2 это traefik:v2.11 (не latest: это уже v3, метки пришлось бы переписать). В 2.11 на чтение запроса вместе с телом по умолчанию 60 с: если на сайтах есть загрузки дольше минуты, верните --entryPoints.<имя>.transport.respondingTimeouts.readTimeout=0.':
-    'traefik: the latest patch of its branch, for v2 that is traefik:v2.11 (not latest: that is v3, the labels would need rewriting). In 2.11 reading a request with its body is limited to 60 s by default: if the sites take uploads longer than a minute, set --entryPoints.<name>.transport.respondingTimeouts.readTimeout=0 back.',
-  'nginx-proxy: последний тег nginxproxy/nginx-proxy (и docker-gen, если он запущен отдельно).':
-    'nginx-proxy: the latest nginxproxy/nginx-proxy tag (and docker-gen if it runs separately).',
-  'Для сайтов с важным трафиком безопаснее стенд рядом: новый образ на других портах, сравнить ответы всех доменов, потом переключить. Ноды с этой проблемой плагин инвентаря ansible собирает в группу kervax_proxy_old, caddy из роли caddy-proxy обновляет caddy_harden.yml.':
-    'For sites with important traffic a stand next to it is safer: the new image on other ports, compare the answers of all domains, then switch. The ansible inventory plugin puts the nodes with this problem into the kervax_proxy_old group; caddy from the caddy-proxy role is updated by caddy_harden.yml.',
-  'образ задан переменной (${...})': 'the image comes from a variable (${...})',
   'у сервиса в compose нет image': 'the service has no image in compose',
   'свежий тег': 'a fresh tag',
-  'До обновления - коды ответов доменов этого прокси через него самого, мимо DNS и CDN. Запишутся в файл, после обновления сверим:':
-    'Before the update - the response codes of the domains of this proxy through the proxy itself, past DNS and CDN. They go to a file to compare after the update:',
-  'Обновить - от root на сервере: копия compose рядом (.bak-kervax-image), новый тег в {at} (строка после правки скажет, вышло ли), скачать образ и пересоздать только этот сервис. Сайты пропадут на несколько секунд, сертификаты и данные в томах остаются:':
-    'Update - as root on the server: a copy of the compose file next to it (.bak-kervax-image), the new tag in {at} (the line after the edit says whether it worked), pull the image and recreate only this service. The sites go away for a few seconds, the certificates and the data in volumes stay:',
-  'Тег уже {target}, образ просто давно не скачивали: прежний остается под тегом kervax-old для отката, скачать свежий и пересоздать только этот сервис:':
-    'The tag is already {target}, the image just was not pulled for a long time: the previous one stays under the kervax-old tag for a rollback, pull a fresh one and recreate only this service:',
-  'Образ собирается из Dockerfile (build:): поднимите в нем FROM до свежего тега ({target}) и пересоберите, --pull скачает свежую базу:':
-    'The image is built from a Dockerfile (build:): raise its FROM to a fresh tag ({target}) and rebuild, --pull fetches a fresh base:',
-  'Образ {image} - своя сборка, не из репозитория апстрима (задан в {at}): тег не поменять, пересоберите его на свежем базовом образе.':
-    'The {image} image is a custom build, not from the upstream repository (set in {at}): the tag cannot be swapped, rebuild it on a fresh base image.',
-  'Проверить: сервис работает, в логе нет ошибок конфига, коды доменов те же (OK), а если тег меняли - последняя строка скажет, на новом ли образе контейнер. Пункт уйдет сам в течение получаса: даты сборки образов агент перечитывает раз в 30 минут.':
-    'Check: the service runs, the log has no config errors, the domain codes are the same (OK), and if the tag was changed, the last line says whether the container runs the new image. The item goes away by itself within half an hour: the agent rereads image build dates every 30 minutes.',
-  'Если что-то не так - вернуть прежний compose, старый образ остался на диске:':
-    'If something is wrong - bring back the previous compose file, the old image is still on disk:',
-  'Если что-то не так - вернуть прежний образ:': 'If something is wrong - bring back the previous image:',
-  'Готовые команды под эту ноду соберет helper sockfix-setup 0.2: он найдет compose-файл и строку с образом, поставьте его плейбуком хелперов. Пока - руками. Где compose прокси (каталог, файлы, проект, сервис):':
-    'The sockfix-setup 0.2 helper builds ready commands for this node: it finds the compose file and the image line, install it with the helpers playbook. Until then, by hand. Where the compose file of the proxy is (directory, files, project, service):',
-  'В compose-файле у сервиса поменяйте image на {target}, потом скачать образ и пересоздать только этот сервис:':
-    'In the compose file set the image of the service to {target}, then pull the image and recreate only this service:',
-  'В этом compose-файле у сервиса поменяйте image на {target}, потом в каталоге проекта docker compose pull и docker compose up -d --no-deps только для этого сервиса.':
-    'In that compose file set the image of the service to {target}, then in the project directory run docker compose pull and docker compose up -d --no-deps for this service only.',
-  'Контейнер запущен не через docker compose: скачайте свежий образ и пересоздайте контейнер той же командой docker run, но с ним.':
-    'The container was not started by docker compose: pull a fresh image and recreate the container with the same docker run command, but with that image.',
-  'обновить на {target}': 'update to {target}',
-  'своя сборка: только пересобрать': 'custom build: rebuild only',
   'Не обновлять: убрать из "Требует действий" и группы ansible kervax_proxy_old':
     'Do not update: remove from "Action needed" and from the kervax_proxy_old ansible group',
   'оставить как есть': 'keep as is',
-  'Готовых команд нет: {why}.': 'No ready commands: {why}.',
   'Оставлены как есть: {list}': 'Kept as is: {list}',
   '{list}: старый образ оставлен как есть': '{list}: the old image is kept as is',
   'старый образ прокси оставлен': 'old proxy image kept',
@@ -4404,8 +4481,8 @@ const EN: Record<string, string> = {
     'Set up without the panel. The panel found them by itself and watches them without changing anything on the node.',
   'скрыть неотслеживаемые': 'hide unwatched',
   'не отслеживаются ({n})': 'not watched ({n})',
-  'Панельного бэкапа на ноде нет, но есть свой — за ним панель следит:':
-    'The node has no panel backup, but it has its own, and the panel watches it:',
+  'Панельного бэкапа на ноде нет, но есть свой - за ним панель следит':
+    'The node has no panel backup, but it has its own, and the panel watches it',
   'Свой бэкап (настроен без панели)': 'Own backup (set up without the panel)',
   '{name}: свой бэкап не отрабатывает — {jobs}':
     '{name}: own backup is failing — {jobs}',
@@ -5446,6 +5523,10 @@ const EN: Record<string, string> = {
     'marked a node as not needing an agent',
   'вернул ноду в проверку агентов':
     'put a node back into the agent check',
+  'отметил, что за сроком в кластере не следим':
+    'marked a cluster expiry as not watched',
+  'вернул срок в кластере под присмотр':
+    'put a cluster expiry back under watch',
   'заглушил монитор':
     'snoozed a monitor',
   'изменил мониторы пачкой':
@@ -5807,8 +5888,28 @@ const EN: Record<string, string> = {
     'Close onboarding',
   'подключается':
     'onboarding',
-  'было при подключении':
-    'was there at onboarding',
+  'уже было при подключении сервера, отмечено как известное':
+    'was already there when the server was onboarded, marked as known',
+  'Нажмите: открыть список в карточке, там же снять отметку':
+    'Click to open the list in the server card, you can unmark it there',
+  'Нажмите: открыть монитор, там же снять отметку':
+    'Click to open the monitor, you can unmark it there',
+  'сбой монитора':
+    'monitor failure',
+  'ретранслятор':
+    'relay',
+  'Ретранслятор Kervax: через него ходят агенты: {list}':
+    'Kervax relay, agents going through it: {list}',
+  'Ретранслятор Kervax, сейчас никто не ходит':
+    'Kervax relay, no agents use it right now',
+  'Нажмите: настройки и состояние ретранслятора':
+    'Click to open relay settings and status',
+  'Агент ходит в панель через ретранслятор {name}':
+    'The agent reaches the panel through relay {name}',
+  'через ретранслятор {name}':
+    'via relay {name}',
+  'Алерт по ним молчит, пока не станет хуже. Снимите отметку, если надо снова получать алерты.':
+    'Alerts stay silent until it gets worse. Unmark to get alerts again.',
   '{name}: идет подключение - посмотрите, что нашлось, и закройте его в карточке':
     '{name}: onboarding is open, check what was found and close it in the server card',
   'закрыл подключение сервера':

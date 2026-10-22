@@ -149,18 +149,6 @@ const SOCK_WHY: Record<string, string> = {
   unexpected: 'не вышло',
 }
 
-function CmdBlock({ text, id, copied, onCopy }: { text: string; id: string; copied: string; onCopy: (id: string, text: string) => void }) {
-  const { t } = useI18n()
-  return (
-    <div className="agent-advice-cmd">
-      <pre>{text}</pre>
-      <button className="ghost" onClick={() => onCopy(id, text)}>
-        {copied === id ? t('Скопировано') : t('Копировать')}
-      </button>
-    </div>
-  )
-}
-
 // Разница исправленного файла с нынешним: добавленное зеленым, убранное красным
 function SockDiff({ diff }: { diff: string }) {
   return (
@@ -178,12 +166,6 @@ type Exposed = NonNullable<Server['docker_exposed']>[number]
 
 function SockWarning({ items }: { items: Exposed[] }) {
   const { t } = useI18n()
-  const [copied, setCopied] = useState('')
-  const copy = (id: string, text: string) => {
-    navigator.clipboard?.writeText(text)
-    setCopied(id)
-    window.setTimeout(() => setCopied(''), 1500)
-  }
   const ready = items.filter((i) => i.fix?.ok)
   const manual = items.filter((i) => !i.fix?.ok)
   // снипет руками: с настоящим gid сокета и именем сервиса, если helper их прислал
@@ -205,103 +187,108 @@ function SockWarning({ items }: { items: Exposed[] }) {
         <div className="chart-cap">{t('Прокси держит docker-сокет')}</div>
       </div>
       <div className="net-prob">
-        {t('{list}: docker-сокет смонтирован целиком. Прокси смотрит в интернет, а сокет - это root на хосте: одна дыра в прокси, и чужой получает весь сервер. Лечится так: прокси читает докер через прокси сокета только на чтение (список контейнеров, сети, события), а сам сокет из его volumes уходит.',
+        {t('{list}: docker-сокет целиком, а это root на хосте. Нужен прокси сокета только на чтение, сам сокет из volumes убрать.',
           { list: items.map((i) => `${i.name} (${i.kind})`).join(', ') })}
       </div>
       {ready.map((i) => {
         const fx = i.fix!
         return (
           <div key={i.name} className="sock-fix">
-            <div className="net-sub">
-              {t('Исправленный compose для {name} уже готов: helper собрал его на сервере из {file} и проверил через docker compose config. Что меняется:',
-                { name: i.name, file: fx.file ?? '' })}
-            </div>
+            <div className="small">{t('Готовый compose для {name} собран из {file}, что меняется:', { name: i.name, file: fx.file ?? '' })}</div>
             <SockDiff diff={fx.diff ?? ''} />
-            <div className="net-sub">{t('1. Применить - от root на сервере, прокси пересоздастся за пару секунд:')}</div>
-            <CmdBlock text={fx.apply ?? ''} id={`${i.name}:apply`} copied={copied} onCopy={copy} />
-            <div className="net-sub">{t('2. Проверить: оба контейнера работают, blocked в логе docker-api - 0, сайты открываются. Этот пункт уйдет сам со следующим отчетом агента.')}</div>
-            <CmdBlock text={fx.check ?? ''} id={`${i.name}:check`} copied={copied} onCopy={copy} />
-            <div className="net-sub">{t('Если что-то не так - вернуть как было:')}</div>
-            <CmdBlock text={fx.rollback ?? ''} id={`${i.name}:rollback`} copied={copied} onCopy={copy} />
+            <FixSteps badges steps={[
+              { id: 'apply', cmd: fx.apply },
+              { id: 'check', cmd: fx.check },
+              { id: 'rollback', cmd: fx.rollback, undo: true },
+            ]} text={(st) => st.id === 'apply' ? t('Применить, прокси пересоздастся за пару секунд')
+              : st.id === 'check' ? t('Сверить: оба контейнера работают, blocked в логе docker-api - 0')
+              : t('вернуть как было')} />
           </div>
         )
       })}
       {manual.map((i) => (
         <div key={i.name} className="sock-fix">
-          <div className="net-sub">
+          <div className="small">
             {i.fix
-              ? t('Для {name} готового файла нет: {why}{detail}. Поправьте compose руками:', {
+              ? t('Для {name} готового файла нет: {why}{detail}.', {
                   name: i.name, why: t(SOCK_WHY[i.fix.why ?? ''] ?? 'не вышло'),
                   detail: i.fix.why_detail ? ` (${i.fix.why_detail})` : '',
                 })
-              : t('Готовый исправленный compose под эту ноду соберет helper sockfix-setup: поставьте его плейбуком хелперов, и здесь появятся разница с нынешним файлом и команды. Пока - руками:')}
+              : t('Готовый файл соберет helper sockfix-setup, пока руками.')}
           </div>
-          <ol className="sock-steps">
-            <li>{i.fix?.file
-              ? t('в {file} у сервиса {svc} уберите из volumes строку с docker.sock;', { file: i.fix.file, svc: i.fix.service ?? i.kind })
-              : t('в compose-файле прокси уберите из volumes строку с docker.sock;')}</li>
-            <li>{t('добавьте ему environment и networks из примера ниже, остальное в сервисе не трогайте;')}</li>
-            <li>{t('добавьте сервис docker-api и сеть docker-api из примера;')}</li>
-            <li>{t('docker compose up -d в каталоге проекта.')}</li>
-          </ol>
-          {SOCK_FIX[i.kind] && <CmdBlock text={snippet(i)} id={`${i.name}:snippet`} copied={copied} onCopy={copy} />}
+          <FixSteps badges steps={[
+            { id: 'rm' },
+            { id: 'add', cmd: SOCK_FIX[i.kind] ? snippet(i) : undefined },
+            { id: 'up' },
+          ]} text={(st) => st.id === 'rm'
+            ? (i.fix?.file
+              ? t('В {file} у сервиса {svc} убрать из volumes строку с docker.sock', { file: i.fix.file, svc: i.fix.service ?? i.kind })
+              : t('В compose прокси убрать из volumes строку с docker.sock'))
+            : st.id === 'add' ? t('Добавить сервису environment и networks, рядом сервис и сеть docker-api, как в примере')
+            : t('docker compose up -d в каталоге проекта, в логе docker-api не должно быть blocked')} />
         </div>
       ))}
-      {manual.length > 0 && (
-        <div className="net-foot">
-          {t('Проверка после замены: в логе docker-api нет строк blocked request, сайты отвечают как раньше. Ноды с этой проблемой плагин инвентаря ansible собирает в группу kervax_docker_sock.')}
-        </div>
-      )}
+      <details className="fix-more">
+        <summary>{t('подробнее')}</summary>
+        <div>{t('ansible:')} <code>ansible-playbook playbooks/caddy_harden.yml -l kervax_docker_sock</code></div>
+      </details>
     </div>
   )
 }
 
 // Внешний прокси на образе старше года: на что обновлять и готовые команды под ноду (бэкенд
-// docker_exposure.upgrade: где compose-файл и строка image - от helper'а sockfix-setup 0.2). Подсказки -
-// из обновлений 06.10.2026 (traefik 2.5.5 -> 2.11.57, caddy 2.4.5 -> caddy-docker-proxy 2.13.1): что
-// меняется по умолчанию и чего не поймает сравнение ответов сайтов. Не обновлять - решение "оставить
-// как есть" (proxyold:<контейнер>): пункт уходит из "Требует действий" и группы ansible. Шаги рисует
-// общий FixSteps, как у ОС, SSH и версий ПО.
+// docker_exposure.upgrade: где compose-файл и строка image - от helper'а sockfix-setup 0.2). Сверху
+// одна строка "что не так", дальше три коротких шага с командами, под "подробнее" - только то, что
+// может сломаться при обновлении (из обновлений 06.10.2026: traefik 2.5.5 -> 2.11.57, caddy 2.4.5 ->
+// caddy-docker-proxy 2.13.1), и ansible. Не обновлять - решение "оставить как есть"
+// (proxyold:<контейнер>): пункт уходит из "Требует действий" и группы ansible.
 type ProxyOld = NonNullable<Server['proxy_outdated']>[number]
 type UpStep = NonNullable<ProxyOld['fix']>['steps'][number]
 
 const PROXY_HINT: Record<string, string> = {
-  cdp: 'caddy-docker-proxy: закрепленная версия, как в роли caddy-proxy - 2.13.1, внутри caddy 2.11. Метки контейнеров читаются как раньше, сертификаты в /data остаются. С caddy 2.11 к HTTPS-апстриму ({{upstreams https ...}}) уходит Host апстрима, а не сайта: если бэкенду нужен исходный, добавьте header_up Host {hostport}.',
-  pre25: 'Образ старше caddy 2.5: бэкенд начнет получать заголовки Via и X-Forwarded-Host, а X-Forwarded-For от клиента отбрасывается - остается только реальный IP.',
-  caddy: 'caddy: ветка 2.11, патчи в ней приезжают с pull. С 2.11 к HTTPS-апстриму уходит Host апстрима (вернуть - header_up Host {hostport}), а конфиг проверяется строже: если caddy не стартует, строка с ошибкой будет в логе, тогда откат.',
-  traefik: 'traefik: последний патч своей ветки, для v2 это traefik:v2.11 (не latest: это уже v3, метки пришлось бы переписать). В 2.11 на чтение запроса вместе с телом по умолчанию 60 с: если на сайтах есть загрузки дольше минуты, верните --entryPoints.<имя>.transport.respondingTimeouts.readTimeout=0.',
-  'nginx-proxy': 'nginx-proxy: последний тег nginxproxy/nginx-proxy (и docker-gen, если он запущен отдельно).',
+  caddy: 'С caddy 2.11 HTTPS-апстрим ({{upstreams https ...}}) получает Host апстрима, а не сайта: если бэкенду нужен исходный, добавьте header_up Host {hostport}.',
+  pre25: 'Образ старше caddy 2.5: бэкенд начнет получать Via и X-Forwarded-Host, а X-Forwarded-For от клиента отбрасывается.',
+  traefik: 'В traefik 2.11 запрос с телом рвется через 60 с: для долгих загрузок верните --entryPoints.<имя>.transport.respondingTimeouts.readTimeout=0.',
 }
 // caddy 2.5 вышел в конце апреля 2022: собранное раньше - caddy 2.4 и старше
 const CADDY25 = Date.UTC(2022, 4, 1) / 1000
 
 const proxyHints = (p: ProxyOld) =>
-  [p.image.includes('caddy-docker-proxy') ? 'cdp' : p.kind, ...(p.kind === 'caddy' && p.built < CADDY25 ? ['pre25'] : [])]
-    .filter((k) => PROXY_HINT[k])
+  [p.kind, ...(p.kind === 'caddy' && p.built < CADDY25 ? ['pre25'] : [])].filter((k) => PROXY_HINT[k])
+
+// "caddy-docker-proxy 2.8.6": образ без реестра, тег (у latest - метка версии)
+function proxyWhat(p: ProxyOld): string {
+  const ref = p.image.split('@')[0]
+  const [name, tag = ''] = ref.slice(ref.lastIndexOf('/') + 1).split(':')
+  return [name, tag && tag !== 'latest' ? tag : p.version || tag].filter(Boolean).join(' ')
+}
 
 // Почему helper не нашел образ в compose: коды сверх SOCK_WHY
 const IMG_WHY: Record<string, string> = {
-  var: 'образ задан переменной (${...})',
   noimage: 'у сервиса в compose нет image',
 }
 
-// Шаг обновления словами: команды собирает бэкенд под ноду, тексты здесь по id
-function upgradeText(st: UpStep, p: ProxyOld, t: (k: string, p?: Record<string, string | number>) => string): string {
+// Шаг обновления словами, одной строкой: команды собирает бэкенд под ноду, тексты здесь по id
+function upgradeText(st: UpStep, p: ProxyOld, codes: boolean, t: (k: string, p?: Record<string, string | number>) => string): string {
   const tgt = p.fix?.target || t('свежий тег')
   switch (st.id) {
-    case 'codes': return t('До обновления - коды ответов доменов этого прокси через него самого, мимо DNS и CDN. Запишутся в файл, после обновления сверим:')
-    case 'apply': return t('Обновить - от root на сервере: копия compose рядом (.bak-kervax-image), новый тег в {at} (строка после правки скажет, вышло ли), скачать образ и пересоздать только этот сервис. Сайты пропадут на несколько секунд, сертификаты и данные в томах остаются:', { at: st.arg ?? '' })
-    case 'apply_same': return t('Тег уже {target}, образ просто давно не скачивали: прежний остается под тегом kervax-old для отката, скачать свежий и пересоздать только этот сервис:', { target: tgt })
-    case 'build': return t('Образ собирается из Dockerfile (build:): поднимите в нем FROM до свежего тега ({target}) и пересоберите, --pull скачает свежую базу:', { target: tgt })
-    case 'custom': return t('Образ {image} - своя сборка, не из репозитория апстрима (задан в {at}): тег не поменять, пересоберите его на свежем базовом образе.', { image: p.image, at: st.arg ?? '' })
-    case 'check': return t('Проверить: сервис работает, в логе нет ошибок конфига, коды доменов те же (OK), а если тег меняли - последняя строка скажет, на новом ли образе контейнер. Пункт уйдет сам в течение получаса: даты сборки образов агент перечитывает раз в 30 минут.')
-    case 'rollback': return t('Если что-то не так - вернуть прежний compose, старый образ остался на диске:')
-    case 'rollback_same': return t('Если что-то не так - вернуть прежний образ:')
-    case 'find': return t('Готовые команды под эту ноду соберет helper sockfix-setup 0.2: он найдет compose-файл и строку с образом, поставьте его плейбуком хелперов. Пока - руками. Где compose прокси (каталог, файлы, проект, сервис):')
-    case 'manual': return st.cmd
-      ? t('В compose-файле у сервиса поменяйте image на {target}, потом скачать образ и пересоздать только этот сервис:', { target: tgt })
-      : t('В этом compose-файле у сервиса поменяйте image на {target}, потом в каталоге проекта docker compose pull и docker compose up -d --no-deps только для этого сервиса.', { target: tgt })
-    case 'run': return t('Контейнер запущен не через docker compose: скачайте свежий образ и пересоздайте контейнер той же командой docker run, но с ним.')
+    case 'codes': return t('Запомнить коды ответов доменов')
+    case 'apply': return t('Сменить image в {at} и пересоздать сервис', { at: st.arg ?? '' })
+    case 'apply_same': return t('Скачать свежий {target} и пересоздать сервис, прежний образ останется как kervax-old', { target: tgt })
+    case 'build': return t('Поднять FROM в Dockerfile до {target} и пересобрать', { target: tgt })
+    case 'custom': return t('Своя сборка (задана в {at}): пересобрать на свежем базовом образе', { at: st.arg ?? '' })
+    case 'check': return codes
+      ? t('Сверить: сервис работает, лог без ошибок, коды те же (OK)')
+      : t('Сверить: сервис работает, лог без ошибок')
+    case 'rollback': return t('вернуть прежний compose, старый образ на диске')
+    case 'rollback_same': return t('вернуть прежний образ')
+    case 'find': return t('Найти compose прокси: каталог, файлы, проект, сервис')
+    case 'manual':
+      if (p.fix?.why === 'var') return t('image задан переменной: поставьте в ней {target} (обычно в .env рядом с compose), потом пересоздать сервис', { target: tgt })
+      return st.cmd
+        ? t('Сменить image на {target} в compose, потом пересоздать сервис', { target: tgt })
+        : t('Сменить image на {target} в compose, потом docker compose pull и up -d --no-deps для этого сервиса', { target: tgt })
+    case 'run': return t('Не из compose: docker pull {target} и пересоздать контейнер той же командой docker run', { target: tgt })
     default: return st.id
   }
 }
@@ -324,28 +311,24 @@ function ProxyOldWarning({ server: s, items, canAct, onChanged }: { server: Serv
       <div className="net-head">
         <div className="chart-cap">{t('Старый образ прокси')}</div>
       </div>
-      {live.length > 0 && (
-        <div className="net-note">
-          {t('{list}: образ собран больше года назад. Прокси смотрит в интернет, а за год в нем закрывают не одну дыру.',
-            { list: live.map((p) => `${p.name} (${proxyBuilt(p)})`).join(', ') })}
-        </div>
-      )}
       {live.map((p) => {
         const fx = p.fix
-        const why = fx?.why && fx.why !== 'nohelper' ? fx.why : ''
-        // шаги по порядку с номерами, откат - без номера: он только если что-то не так
         const steps = fx?.steps ?? []
-        const num = new Map<UpStep, string>()
-        let n = 0
-        for (const st of steps) num.set(st, st.id.startsWith('rollback') ? '' : `${++n}. `)
+        const codes = steps.some((st) => st.id === 'codes')
+        const what = proxyWhat(p)
+        const when = proxyBuilt({ built: p.built })
+        const why = fx?.why && !['nohelper', 'var', 'nocompose'].includes(fx.why) ? fx.why : ''
+        const hints = proxyHints(p)
         return (
           <div key={p.name} className="sock-fix">
             <div className="loc-res hs-warn-row">
               <span className="lk-dot lk-dot-bad" />
               <div className="hs-warn-main">
-                <span className="mono">{p.name}</span> <span className="muted small">({p.image})</span>
-                <div className="small">
-                  {fx?.target ? t('обновить на {target}', { target: fx.target }) : t('своя сборка: только пересобрать')}
+                <span className="mono">{p.name}</span>
+                <div>
+                  {fx?.target
+                    ? t('{what} от {when}, торчит в интернет, нужно {tag}', { what, when, tag: fx.target.slice(fx.target.lastIndexOf(':') + 1) })
+                    : t('{what} от {when}, торчит в интернет, своя сборка: только пересобрать', { what, when })}
                 </div>
               </div>
               {canAct && (
@@ -355,15 +338,20 @@ function ProxyOldWarning({ server: s, items, canAct, onChanged }: { server: Serv
                 </button>
               )}
             </div>
-            {proxyHints(p).map((k) => (
-              <div key={k} className="small">{t(PROXY_HINT[k])}</div>
-            ))}
-            {why && (
-              <div className="net-sub">
-                {t('Готовых команд нет: {why}.', { why: t(IMG_WHY[why] ?? SOCK_WHY[why] ?? 'не вышло') })}
-              </div>
+            {steps.length > 0 && (
+              <FixSteps badges steps={steps.map((st) => ({ ...st, undo: st.id.startsWith('rollback') }))}
+                text={(st) => upgradeText(st, p, codes, t)} />
             )}
-            {steps.length > 0 && <FixSteps steps={steps} text={(st) => (num.get(st) ?? '') + upgradeText(st, p, t)} />}
+            {(hints.length > 0 || why || p.kind === 'caddy') && (
+              <details className="fix-more">
+                <summary>{t('подробнее')}</summary>
+                {hints.map((k) => <div key={k}>{t(PROXY_HINT[k])}</div>)}
+                {why && <div>{t('Строку image не правлю сам: {why}.', { why: t(IMG_WHY[why] ?? SOCK_WHY[why] ?? 'не вышло') })}</div>}
+                {p.kind === 'caddy' && (
+                  <div>{t('caddy из роли caddy-proxy:')} <code>ansible-playbook playbooks/caddy_harden.yml -l kervax_proxy_old</code></div>
+                )}
+              </details>
+            )}
           </div>
         )
       })}
@@ -379,11 +367,6 @@ function ProxyOldWarning({ server: s, items, canAct, onChanged }: { server: Serv
           </div>
         </div>
       )}
-      {live.length > 0 && (
-        <div className="net-foot">
-          {t('Для сайтов с важным трафиком безопаснее стенд рядом: новый образ на других портах, сравнить ответы всех доменов, потом переключить. Ноды с этой проблемой плагин инвентаря ansible собирает в группу kervax_proxy_old, caddy из роли caddy-proxy обновляет caddy_harden.yml.')}
-        </div>
-      )}
     </div>
   )
 }
@@ -396,33 +379,31 @@ function riskFixText(st: RiskStep, a: Record<string, string>, t: (k: string, p?:
   const fl = (a.flags ?? '').split(',')
   const need = [a.cap_add && `cap_add: [${a.cap_add}]`, a.devices && `devices: [${a.devices}]`].filter(Boolean).join(', ')
   switch (st.id) {
-    case 'ci_check': return t('Это CI-агент: privileged ему нужен только для docker внутри сборок. Сколько образов у docker внутри агента - 0 или ошибка значит, что сборки docker не запускают и privileged можно убрать:')
-    case 'bak': return t('Копия compose рядом:')
-    case 'priv_off': return t('В {file} у сервиса {svc} privileged: true заменить на privileged: false, diff покажет замену, последняя строка - вышло ли:', a)
-      + (a.dind_env ? ' ' + t('Строку {env} тоже можно убрать: без privileged docker внутри все равно не поднимется.', { env: a.dind_env }) : '')
-    case 'priv_set': return t('В {file} у сервиса {svc} privileged: true заменить на то, что ему нужно по назначению ({need}), diff покажет замену, последняя строка - вышло ли:', { ...a, need })
-    case 'sock_rm': return t('В {file} у сервиса {svc} убрать docker-сокет из volumes, diff покажет строку, последняя строка - вышло ли:', a)
-    case 'sock_add': return t('Дописать в {file} руками: сервису DOCKER_HOST и сеть docker-api, рядом сервис docker-api - прокси сокета только на чтение (видит контейнеры и события, запускать и останавливать не дает). GID - число из stat -c %g /var/run/docker.sock:', a)
-    case 'caps_edit': return t('В {file} у сервиса {svc} убрать из cap_add {caps}. Строки с ними:', a)
-    case 'host_edit': return t('В {file} у сервиса {svc} {paths} смонтирован на запись: оставьте только нужный подкаталог или допишите :ro, если писать не нужно. Строки с ними:', a)
-    case 'up': return t('Проверить файл и пересоздать только эти сервисы, потом статус и лог. Последние строки скажут по каждому контейнеру, ушел ли ключ на деле. Пункт уйдет сам со следующим отчетом агента.')
-      + (fl.includes('priv') ? ' ' + t('Если в логе Operation not permitted - не хватает одного права: добавьте только его в cap_add (или устройство в devices), а не privileged обратно.') : '')
-      + (fl.includes('sock') ? ' ' + t('Если docker-api пишет в лог blocked - приложению нужен еще путь API: допишите его в -allowGET.') : '')
-    case 'undo': return t('Если что-то не так - вернуть прежний compose и пересоздать сервисы:')
-    case 'alt_ci': return t('Если docker в сборках нужен - privileged тут по назначению, нажмите "по назначению". Безопаснее держать такие агенты на отдельной ВМ без прода или запускать их через sysbox (runtime: sysbox-runc): docker внутри без privileged.')
-    case 'alt_sock': return t('Если приложение само запускает или останавливает контейнеры (CI, деплой, управление) - прокси только на чтение ему не подойдет, сокет тут по назначению: нажмите "по назначению".')
-    case 'run': return t('Контейнер запущен не из compose: пересоздайте его той же командой docker run, но без {what}.', {
+    case 'ci_check': return t('CI-агент: сколько образов у docker внутри, 0 или ошибка - privileged можно убрать')
+    case 'bak': return t('Копия compose рядом')
+    case 'priv_off': return t('В {file} у {svc} заменить privileged: true на privileged: false', a)
+      + (a.dind_env ? ', ' + t('строку {env} тоже убрать', { env: a.dind_env }) : '')
+    case 'priv_set': return t('В {file} у {svc} заменить privileged: true на {need}', { ...a, need })
+    case 'sock_rm': return t('В {file} у {svc} убрать docker-сокет из volumes', a)
+    case 'sock_add': return t('Дописать в {file} руками: docker-api (прокси сокета только на чтение) и DOCKER_HOST сервису, GID из stat -c %g /var/run/docker.sock', a)
+    case 'caps_edit': return t('В {file} у {svc} убрать из cap_add {caps}', a)
+    case 'host_edit': return t('В {file} у {svc} {paths} на запись: смонтировать только нужный подкаталог или дописать :ro', a)
+    case 'up': return t('Пересоздать сервисы и сверить, последние строки скажут, ушел ли ключ')
+    case 'undo': return t('вернуть прежний compose')
+    case 'alt_ci': return t('docker в сборках нужен - privileged по назначению, нажмите "по назначению" (безопаснее отдельная ВМ или sysbox)')
+    case 'alt_sock': return t('приложение само управляет контейнерами (CI, деплой) - сокет по назначению, нажмите "по назначению"')
+    case 'run': return t('Не из compose: пересоздать той же командой docker run, но без {what}', {
       what: fl.map((f) => f === 'priv' ? '--privileged' : f === 'sock' ? t('docker-сокета в -v')
         : f === 'caps' ? `--cap-add ${a.caps ?? ''}` : t('{paths} на запись в -v', a)).join(', '),
     })
-    case 'find': return t('Агент не присылает, откуда запущен контейнер: после обновления агента здесь будут готовые команды. Где его compose (папка, файлы, сервис):')
+    case 'find': return t('Найти compose: папка, файлы, сервис (с новым агентом тут будут готовые команды)')
     case 'hand_priv': return need
-      ? t('Сделайте копию файла и в блоке сервиса замените privileged: true на {need}.', { need })
-      : t('Сделайте копию файла и в блоке сервиса замените privileged: true на privileged: false.')
-    case 'hand_sock': return t('Уберите docker-сокет из volumes сервиса. Если приложению нужен список контейнеров или события - дайте ему прокси сокета только на чтение (wollomatic/socket-proxy во внутренней сети, DOCKER_HOST=tcp://docker-api:2375).')
-    case 'hand_caps': return t('Уберите из cap_add сервиса {caps}.', a)
-    case 'hand_host': return t('Вместо {paths} смонтируйте только нужный подкаталог или допишите :ro, если писать не нужно.', a)
-    case 'hand_up': return t('Потом в папке проекта sudo docker compose up -d <сервис> и лог. Откат - вернуть копию файла и тот же up -d.')
+      ? t('Копия файла, потом в сервисе заменить privileged: true на {need}', { need })
+      : t('Копия файла, потом в сервисе заменить privileged: true на privileged: false')
+    case 'hand_sock': return t('Убрать docker-сокет из volumes, если нужен список контейнеров - прокси сокета только на чтение (DOCKER_HOST=tcp://docker-api:2375)')
+    case 'hand_caps': return t('Убрать из cap_add {caps}', a)
+    case 'hand_host': return t('Вместо {paths} смонтировать нужный подкаталог или дописать :ro', a)
+    case 'hand_up': return t('sudo docker compose up -d <сервис> в папке проекта, откат - вернуть копию и тот же up -d')
     default: return st.id
   }
 }
@@ -471,17 +452,19 @@ function RiskWarning({ server: s, canAct, onChanged }: { server: Server; canAct:
               </div>
             ))}
           </div>
-          {blocks.map((b) => {
-            // номера по порядку, откат и "или" без номера: они не по порядку
-            let n = 0
-            const num = new Map(b.steps.map((st) => [st, st.undo || st.alt ? '' : `${++n}. `]))
-            return (
-              <div key={b.key} className="sock-fix">
-                <div className="small">{t('Как исправить: {names}', { names: b.names.join(', ') })}</div>
-                <FixSteps steps={b.steps} text={(st) => (num.get(st) ?? '') + riskFixText(st, b.args, t)} />
-              </div>
-            )
-          })}
+          {blocks.map((b) => (
+            <div key={b.key} className="sock-fix">
+              <div className="small">{t('Как исправить: {names}', { names: b.names.join(', ') })}</div>
+              <FixSteps badges steps={b.steps} text={(st) => riskFixText(st, b.args, t)} />
+              {(b.args.flags ?? '').split(',').some((f) => f === 'priv' || f === 'sock') && (
+                <details className="fix-more">
+                  <summary>{t('подробнее')}</summary>
+                  {b.args.flags?.split(',').includes('priv') && <div>{t('Operation not permitted в логе - не хватает одного права: добавьте его в cap_add (или устройство в devices), а не privileged обратно.')}</div>}
+                  {b.args.flags?.split(',').includes('sock') && <div>{t('docker-api пишет blocked - приложению нужен еще путь API: допишите его в -allowGET.')}</div>}
+                </details>
+              )}
+            </div>
+          ))}
         </>
       )}
       {muted.length > 0 && (
@@ -505,7 +488,6 @@ function RiskWarning({ server: s, canAct, onChanged }: { server: Server; canAct:
 function NoBootWarning({ server: s, canAct, onChanged }: { server: Server; canAct: boolean; onChanged: () => void }) {
   const { t } = useI18n()
   const [busy, setBusy] = useState('')
-  const [copied, setCopied] = useState(false)
   const items = s.noboot?.docker ?? []
   const live = items.filter((x) => !x.muted)
   const muted = items.filter((x) => x.muted)
@@ -526,15 +508,13 @@ function NoBootWarning({ server: s, canAct, onChanged }: { server: Server; canAc
       </div>
       {live.length > 0 && (
         <>
-          <div className="net-note">
-            {t('После перезагрузки не поднимутся: у контейнеров нет restart policy (или on-failure), докер запускает после ребута только always и unless-stopped.')}
-          </div>
           <div className="loc-results">
             {live.map((x) => (
               <div key={x.name} className="loc-res hs-warn-row">
                 <span className="lk-dot lk-dot-warn" />
                 <div className="hs-warn-main">
-                  <span className="mono">{x.name}</span> <span className="muted small">({x.image}, restart {x.policy})</span>
+                  <span className="mono">{x.name}</span>
+                  <div>{t('restart {policy}: после перезагрузки докер его не поднимет', { policy: x.policy })}</div>
                 </div>
                 {canAct && (
                   <button className="ghost small" disabled={busy === x.name} onClick={() => toggle(x.name, true)}
@@ -545,22 +525,9 @@ function NoBootWarning({ server: s, canAct, onChanged }: { server: Server; canAc
               </div>
             ))}
           </div>
-          <div className="agent-advice-cmd">
-            <pre>{cmd}</pre>
-            <button
-              className="ghost"
-              onClick={() => {
-                navigator.clipboard?.writeText(cmd)
-                setCopied(true)
-                window.setTimeout(() => setCopied(false), 1500)
-              }}
-            >
-              {copied ? t('Скопировано') : t('Копировать')}
-            </button>
-          </div>
-          <div className="net-foot">
-            {t('Если контейнер из compose, поправьте и сам файл (restart: unless-stopped), иначе следующий up вернет как было.')}
-          </div>
+          <FixSteps badges steps={[{ id: 'update', cmd }, { id: 'compose' }]}
+            text={(st) => st.id === 'update' ? t('Поставить restart unless-stopped')
+              : t('Если контейнер из compose, то же в файле (restart: unless-stopped), иначе следующий up вернет как было')} />
         </>
       )}
       {muted.length > 0 && (

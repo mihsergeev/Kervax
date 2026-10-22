@@ -63,6 +63,11 @@ type ActItem = {
   // серверов (раскрывается кликом); detail - что именно на этом сервере, без его имени
   grp?: string
   detail?: string
+  // заглушка до нового (osupd:reboot@<отпечаток>): галки в раскрытой группе и 🔕 у строки; muted -
+  // уже заглушен, виден внизу группы строкой "заглушено N, показать"
+  mute?: string
+  muted?: boolean
+  tip?: string // всплывающая подсказка строки: полный список пакетов
 }
 // name - имя сервера: по нему "Что сломано" пишет "сервер - что" (text начинается с "имя: ")
 type ProbItem = {
@@ -264,20 +269,25 @@ function splitHead(text: string): [string, string] {
   return m ? [m[1], m[2]] : [text, '']
 }
 
-// Строка блока "Требует действий": пункт как есть или группа одинаковых с разных серверов
-type ActRow = { one: ActItem } | { grp: string; items: ActItem[] }
+// Строка блока "Требует действий": пункт как есть или группа одинаковых с разных серверов.
+// Заглушенные до нового - внизу своей группы; одна живая строка с заглушенными рядом - тоже группа,
+// иначе заглушенные было бы не вернуть с главной. Все заглушены - группы нет: пустая главная - норма
+type ActRow = { one: ActItem } | { grp: string; items: ActItem[]; muted: ActItem[] }
 
 function groupActs(items: ActItem[]): ActRow[] {
   const by = new Map<string, ActItem[]>()
   for (const it of items) if (it.grp) by.set(it.grp, [...(by.get(it.grp) ?? []), it])
   const rows: ActRow[] = []
   const done = new Set<string>()
+  // место группы - по первому пункту, заглушенному тоже: после заглушки группа не прыгает по списку
   for (const it of items) {
     const list = it.grp ? by.get(it.grp)! : null
-    if (!list || list.length < 2) rows.push({ one: it })
-    else if (!done.has(it.grp!)) {
+    const live = list ? list.filter((x) => !x.muted) : []
+    if (!list || list.length < 2) {
+      if (!it.muted) rows.push({ one: it })
+    } else if (!done.has(it.grp!) && live.length) {
       done.add(it.grp!)
-      rows.push({ grp: it.grp!, items: list })
+      rows.push({ grp: it.grp!, items: live, muted: list.filter((x) => x.muted) })
     }
   }
   const bad = (r: ActRow) => ('one' in r ? r.one.icon === '⛔' : r.items.some((x) => x.icon === '⛔'))
@@ -290,7 +300,8 @@ function grpLabel(grp: string, t: T): string {
     'access-s': t('учетки с доступом, в которые давно не входят - проверьте, нужны ли они'),
     'access-w': t('слабые SSH-ключи - замените на ed25519'),
     'os-eol': t('поддержка ОС кончилась или скоро кончится'),
-    'os-reboot': t('нужна перезагрузка после обновлений'),
+    'os-reboot': t('ждут перезагрузки после обновления ядра или библиотек'),
+    'os-reboot-soft': t('обновлен только dbus - перезагрузить при случае'),
     'os-security': t('не установлены обновления безопасности'),
     'os-apt': t('список пакетов давно не обновлялся'),
     'ssh-ssh_password': t('SSH пускает по паролю'),
@@ -425,11 +436,14 @@ function actionItems(servers: Server[], relProblem: string, t: T): ActItem[] {
     }
     // ОС: конец поддержки, перезагрузка, обновления безопасности - по пункту на вид совета:
     // десяток нод с отложенной перезагрузкой сворачивается в одну строку "нужна перезагрузка".
-    // Принятое в карточке ("обновить ОС нельзя") сюда не идет: это решение, а не дело
-    for (const x of (s.os_advice ?? []).filter((x) => !x.muted)) {
+    // Принятое в карточке ("обновить ОС нельзя") сюда не идет: это решение, а не дело. Перезагрузка,
+    // заглушенная до нового, идет приглушенной в низ своей группы; только dbus - своей группой "при случае"
+    for (const x of (s.os_advice ?? []).filter((x) => !x.muted || x.muted_new)) {
+      const grp = `os-${x.kind}${x.soft ? '-soft' : ''}`
       items.push({ key: `os-${x.kind}-${s.id}`, icon: x.level >= 2 ? '⛔' : '🧰', section: 'servers', id: s.id,
-        name: s.name, cc: s.country, sec: 'osupd', grp: `os-${x.kind}`, detail: x.text,
-        text: `${s.name}: ${x.text}` })
+        name: s.name, cc: s.country, sec: 'osupd', grp, detail: x.text,
+        text: `${s.name}: ${x.text}`, mute: x.new_key, muted: !!x.muted_new,
+        tip: x.pkgs?.length ? `${t('обновлены пакеты')}: ${x.pkgs.join(', ')}` : undefined })
     }
     // версии без поддержки - список дел, а не авария: на сервер одна строка ("без поддержки
     // PostgreSQL 12, PHP 7.3 и 7.4"), такие серверы сворачиваются в один пункт, где и что - в карточке
@@ -704,6 +718,9 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
   // "Требует действий": раскрытые группы и показ всех строк сверх ATTENTION_LIMIT
   const [openGrps, setOpenGrps] = useState<Set<string>>(() => new Set())
   const [actAll, setActAll] = useState(false)
+  // галки в раскрытой группе (ключи пунктов) и идет ли заглушка или возврат
+  const [actSel, setActSel] = useState<Set<string>>(() => new Set())
+  const [actBusy, setActBusy] = useState(false)
   const toggleGrp = (g: string) =>
     setOpenGrps((prev) => {
       const n = new Set(prev)
@@ -751,6 +768,37 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
     const next = [...new Set([...(s.alert_mutes ?? []), ...keys])]
     updateServer(id, { alert_mutes: next }).then(load).catch(() => {})
   }, [servers, load])
+  // Заглушить до нового (on) или вернуть пункты "Требует действий": ключ пункта в alert_mutes сервера.
+  // Прежние заглушки того же вида (до "@") уходят: они про набор пакетов, которого уже нет
+  const muteActs = (list: ActItem[], on: boolean) => {
+    const byId = new Map((servers ?? []).map((s) => [s.id, s]))
+    const jobs = list.flatMap((it) => {
+      const s = it.id != null ? byId.get(it.id) : undefined
+      if (!s || !it.mute) return []
+      const pre = it.mute.slice(0, it.mute.indexOf('@') + 1)
+      const cur = (s.alert_mutes ?? []).filter((k) => (on ? !k.startsWith(pre) : k !== it.mute))
+      return [updateServer(s.id, { alert_mutes: on ? [...cur, it.mute] : cur })]
+    })
+    if (!jobs.length) return
+    setActBusy(true)
+    Promise.allSettled(jobs)
+      .then(load)
+      .finally(() => {
+        setActBusy(false)
+        setActSel((prev) => {
+          const n = new Set(prev)
+          for (const it of list) n.delete(it.key)
+          return n
+        })
+      })
+  }
+  const pickActs = (keys: string[], on: boolean) =>
+    setActSel((prev) => {
+      const n = new Set(prev)
+      for (const k of keys) if (on) n.add(k)
+      else n.delete(k)
+      return n
+    })
   // 🔕 с выбором срока: на час, день, неделю (снуз) или постоянно. Ключи без снуза (рост памяти,
   // перезапуски, пропавший порт - их бэкенд читает только из alert_mutes) глушатся сразу постоянно
   const [mutePick, setMutePick] = useState<string | null>(null)
@@ -1034,32 +1082,80 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
       </div>
     )
   }
+  // 🔕 у пункта, который глушится до нового: в подсказке, когда он вернется сам
+  const muteNewTip = t('Заглушить до нового: пункт вернется сам, если обновится новое ядро или пакет или сервер перезагрузится и снова попросит перезагрузку')
+  const quickNew = (it: ActItem) =>
+    it.mute && !isViewer ? (
+      <span className="quick-mute" title={muteNewTip} role="button"
+        onClick={(e) => {
+          e.stopPropagation()
+          if (!actBusy) muteActs([it], true)
+        }}>
+        🔕
+      </span>
+    ) : null
   const actRow = (it: ActItem) => (
-    <button key={it.key} className="home-attention-row" onClick={() => onOpen(it.section, it.id, it.srv, it.sec)}>
+    <button key={it.key} className="home-attention-row" title={it.tip} onClick={() => onOpen(it.section, it.id, it.srv, it.sec)}>
       <span className={`lk-dot ${it.fleet ? 'lk-dot-info' : 'lk-dot-warn'}`} />
       <span className="home-attention-ico">{it.icon}</span>
       <span className="home-attention-txt">
         <CountryFlag code={it.cc} /> {it.text}
       </span>
+      {quickNew(it)}
       <span className="home-open">→</span>
     </button>
   )
-  // строка внутри раскрытой группы: сервер и что на нем, без повтора самой проблемы
-  const subRow = (it: ActItem) => (
-    <button key={it.key} className="home-attention-row home-attention-subrow"
-      onClick={() => onOpen(it.section, it.id, it.srv, it.sec)}>
+  // строка внутри раскрытой группы: сервер и что на нем, без повтора самой проблемы. В группе, где
+  // пункты глушатся (pick), строка - div с галкой: чекбокс внутри кнопки браузеры не кликают
+  const subRow = (it: ActItem, pick = false) => {
+    const go = () => onOpen(it.section, it.id, it.srv, it.sec)
+    const txt = (
       <span className="home-attention-txt">
         <CountryFlag code={it.cc} /> <b>{it.name}</b>
         {it.detail ? <span className="muted"> - {it.detail}</span> : null}
       </span>
-      <span className="home-open">→</span>
-    </button>
-  )
+    )
+    if (!pick && !it.muted && !it.mute)
+      return (
+        <button key={it.key} className="home-attention-row home-attention-subrow" title={it.tip} onClick={go}>
+          {txt}
+          <span className="home-open">→</span>
+        </button>
+      )
+    return (
+      <div key={it.key} role="button" tabIndex={0} title={it.tip}
+        className={`home-attention-row home-attention-subrow${it.muted ? ' home-attention-muted' : ''}`}
+        onClick={go} onKeyDown={(e) => e.key === 'Enter' && e.target === e.currentTarget && go()}>
+        {pick && !it.muted && (
+          <input type="checkbox" className="home-sel-box" checked={actSel.has(it.key)} aria-label={it.name}
+            onClick={(e) => e.stopPropagation()} onChange={(e) => pickActs([it.key], e.target.checked)} />
+        )}
+        {txt}
+        {it.muted
+          ? !isViewer && (
+              <button className="linklike small" disabled={actBusy}
+                onClick={(e) => {
+                  e.stopPropagation()
+                  muteActs([it], false)
+                }}>
+                {t('вернуть')}
+              </button>
+            )
+          : quickNew(it)}
+        <span className="home-open">→</span>
+      </div>
+    )
+  }
   const grpRow = (r: ActRow) => {
     if ('one' in r) return actRow(r.one)
     const open = openGrps.has(r.grp)
     const names = shortList(r.items.map((x) => x.name ?? ''), t, 4)
     const icon = r.items.some((x) => x.icon === '⛔') ? '⛔' : r.items[0].icon
+    // заглушить можно галками: выбрать все, заглушить выбранные; заглушенные - строкой внизу
+    const mutable = isViewer ? [] : r.items.filter((x) => x.mute)
+    const picked = mutable.filter((x) => actSel.has(x.key))
+    const allOn = mutable.length > 0 && picked.length === mutable.length
+    const mOpen = openGrps.has(`m-${r.grp}`)
     return (
       <div key={`g-${r.grp}`} className={`home-attention-grpbox${open ? ' open' : ''}`}>
         <button className="home-attention-row" onClick={() => toggleGrp(r.grp)}>
@@ -1068,10 +1164,42 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
           <span className="home-attention-txt">
             {grpLabel(r.grp, t)}
             <span className="muted"> · {t('серверов: {n}', { n: r.items.length })} ({names})</span>
+            {r.muted.length > 0 && <span className="muted"> · {t('заглушено {n}', { n: r.muted.length })}</span>}
           </span>
           <span className="home-open">{open ? '▾' : '▸'}</span>
         </button>
-        {open && <div className="home-attention-sub">{r.items.map(subRow)}</div>}
+        {open && (
+          <div className="home-attention-sub">
+            {mutable.length > 1 && (
+              <div className="home-sel-bar">
+                <label className="home-sel-all">
+                  <input type="checkbox" className="home-sel-box" checked={allOn}
+                    onChange={() => pickActs(mutable.map((x) => x.key), !allOn)} />
+                  {t('выбрать все')}
+                </label>
+                <button className="ghost small" disabled={!picked.length || actBusy} title={muteNewTip}
+                  onClick={() => muteActs(picked, true)}>
+                  {picked.length ? t('заглушить выбранные ({n})', { n: picked.length }) : t('заглушить выбранные')}
+                </button>
+                <span className="muted small">{t('вернутся сами, если появится новое')}</span>
+              </div>
+            )}
+            {r.items.map((x) => subRow(x, mutable.length > 1 && !!x.mute))}
+            {r.muted.length > 0 && (
+              <div className="home-sel-foot">
+                <button className="linklike muted small" onClick={() => toggleGrp(`m-${r.grp}`)}>
+                  {mOpen ? t('скрыть заглушенные') : t('заглушено {n}, показать', { n: r.muted.length })}
+                </button>
+                {mOpen && !isViewer && r.muted.length > 1 && (
+                  <button className="linklike muted small" disabled={actBusy} onClick={() => muteActs(r.muted, false)}>
+                    {t('вернуть все')}
+                  </button>
+                )}
+              </div>
+            )}
+            {mOpen && r.muted.map((x) => subRow(x))}
+          </div>
+        )}
       </div>
     )
   }

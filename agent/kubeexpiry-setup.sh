@@ -32,7 +32,7 @@
 # Result: /var/lib/kervax/kube-expiry.json, world-readable; the agent only reads it.
 set -euo pipefail
 
-KERVAX_SETUP_VERSION=0.2  # MAJOR.MINOR; compared component-wise
+KERVAX_SETUP_VERSION=0.3  # MAJOR.MINOR; compared component-wise
 # Which nodes need this helper at all. Read by the ansible playbook on the
 # CONTROL machine and evaluated as a shell condition ON THE NODE, so a new
 # helper lands where it belongs without anyone editing the playbook.
@@ -80,10 +80,12 @@ have() { command -v "$1" >/dev/null 2>&1; }
 esc() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g' | tr -d '\000-\037'; }
 
 ITEMS=""
-add() { # kind where expires_ts note
-  local k="$1" w="$2" ts="$3" n="${4:-}"
+add() { # kind where expires_ts note [fingerprint] [ingress: 1 | 0 | empty = unknown]
+  local k="$1" w="$2" ts="$3" n="${4:-}" fp="${5:-}" ing="${6:-}" extra=""
   [ -n "$ts" ] && [ "$ts" -gt 0 ] 2>/dev/null || return 0
-  ITEMS="$ITEMS${ITEMS:+,}{\"kind\":\"$(esc "$k")\",\"where\":\"$(esc "$w")\",\"expires\":$ts,\"note\":\"$(esc "$n")\"}"
+  [ -n "$fp" ] && extra="$extra,\"fp\":\"$(esc "$fp")\""
+  case "$ing" in 1) extra="$extra,\"ingress\":true" ;; 0) extra="$extra,\"ingress\":false" ;; esac
+  ITEMS="$ITEMS${ITEMS:+,}{\"kind\":\"$(esc "$k")\",\"where\":\"$(esc "$w")\",\"expires\":$ts,\"note\":\"$(esc "$n")\"$extra}"
 }
 
 cert_ts() { # PEM on stdin -> unix timestamp of notAfter
@@ -147,12 +149,16 @@ if [ -n "$KC" ] && have python3; then
   # asking the forge about token expiry has no business running every five minutes.
   SRC='{}'
   SEC='{}'
+  ING=''
   RES=$(timeout $TO $KC get gitrepositories,ocirepositories,helmrepositories,kustomizations,helmreleases,imagerepositories,imageupdateautomations \
         -A -o json 2>/dev/null || echo '{}')
   if [ "$FLUX_ONLY" = 0 ]; then
     SRC=$(timeout $TO $KC get gitrepositories,ocirepositories,helmrepositories,imagerepositories \
           -A -o json 2>/dev/null || echo '{}')
     SEC=$(timeout $TO $KC get secrets -A -o json 2>/dev/null || echo '{}')
+    # Which TLS secrets an Ingress points at (spec.tls[].secretName): an expired secret nobody
+    # uses is most likely just forgotten. Empty when the read failed - "unknown", not "unused"
+    ING=$(timeout $TO $KC get ingresses -A -o json 2>/dev/null || true)
   fi
 
   FLUX_STATE=$(printf '%s' "$RES" | timeout $TO python3 -c '
@@ -279,10 +285,25 @@ print("\n".join(f"{k}\t{w}\t{t}\t{n}" for k, w, t, n in rows))
 ' >> "$ROWS" 2>/dev/null || true
 
   # TLS certificates in secrets (cert-manager, ingress, Flux mTLS): the date is inside the
-  # certificate, no network call needed.
-  printf '%s' "$SEC" | timeout $TO python3 -c '
+  # certificate, no network call needed. The fingerprint tells a renewed certificate from the old
+  # one: the panel's "do not watch" mark holds only for the certificate it was set on.
+  printf '%s\n---\n%s\n' "$SEC" "$ING" | timeout $TO python3 -c '
 import base64, json, subprocess, sys
-data = json.load(sys.stdin) or {}
+raw = sys.stdin.read().split("\n---\n")
+data = json.loads(raw[0] or "{}") or {}
+# secrets named in some Ingress spec.tls[]; None - the read failed, usage unknown
+used = None
+try:
+    ing = json.loads(raw[1]) if len(raw) > 1 and raw[1].strip() else None
+except Exception:
+    ing = None
+if isinstance(ing, dict) and isinstance(ing.get("items"), list):
+    used = set()
+    for i in ing["items"]:
+        ns = (i.get("metadata") or {}).get("namespace", "")
+        for t in (i.get("spec") or {}).get("tls") or []:
+            if t.get("secretName"):
+                used.add(ns + "/" + t.get("secretName"))
 rows = []
 for s in data.get("items", []):
     if s.get("type") != "kubernetes.io/tls":
@@ -293,27 +314,30 @@ for s in data.get("items", []):
         continue
     try:
         pem = base64.b64decode(blob)
-        p = subprocess.run(["openssl", "x509", "-noout", "-enddate"], input=pem,
+        p = subprocess.run(["openssl", "x509", "-noout", "-enddate", "-fingerprint", "-sha256"], input=pem,
                            capture_output=True, timeout=10)
-        line = p.stdout.decode().strip()
-        if not line.startswith("notAfter="):
+        lines = p.stdout.decode().splitlines()
+        end = next((x[9:] for x in lines if x.startswith("notAfter=")), "")
+        fp = next((x.split("=", 1)[1] for x in lines if "Fingerprint=" in x), "")
+        if not end:
             continue
-        d = subprocess.run(["date", "-d", line[9:], "+%s"], capture_output=True, timeout=10)
+        d = subprocess.run(["date", "-d", end, "+%s"], capture_output=True, timeout=10)
         ts = int((d.stdout or b"").strip() or 0)
     except Exception:
         continue
     if ts:
-        ns = m.get("namespace", "")
-        nm = m.get("name", "")
-        rows.append(("secret-cert", f"{ns}/{nm}", ts, "tls.crt"))
-print("\n".join(f"{k}\t{w}\t{t}\t{n}" for k, w, t, n in rows))
+        where = m.get("namespace", "") + "/" + m.get("name", "")
+        fp = fp.replace(":", "").lower()[:16]
+        ing = "" if used is None else "1" if where in used else "0"
+        rows.append(("secret-cert", where, ts, "tls.crt", fp, ing))
+print("\n".join("\t".join(map(str, r)) for r in rows))
 ' >> "$ROWS" 2>/dev/null || true
   fi   # /FLUX_ONLY = 0: secrets and the forge
 fi
 
 if [ -s "$ROWS" ]; then
-  while IFS=$'\t' read -r k w ts n; do
-    [ -n "${ts:-}" ] && add "$k" "$w" "$ts" "$n"
+  while IFS=$'\t' read -r k w ts n fp ing; do
+    [ -n "${ts:-}" ] && add "$k" "$w" "$ts" "$n" "${fp:-}" "${ing:-}"
   done < "$ROWS"
 fi
 rm -f "$ROWS"
