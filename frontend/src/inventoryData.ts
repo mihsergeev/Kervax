@@ -95,6 +95,32 @@ export function disksText(s: InvServer, t: T): string {
 export const raidText = (r: InvServer['raid'][number]) =>
   [r.level, r.map, r.sync].filter(Boolean).join(' ') || r.dev
 
+// метки RAID рядом с дисками: одинаковые массивы одной меткой "raid1 [UU] x2", массив без диска - bad
+export function raidLabels(raid: InvServer['raid']): { text: string; bad: boolean }[] {
+  const m = new Map<string, { n: number; bad: boolean }>()
+  for (const r of raid) {
+    const k = raidText(r)
+    const x = m.get(k)
+    if (x) x.n++
+    else m.set(k, { n: 1, bad: r.degraded })
+  }
+  return [...m.entries()].map(([k, x]) => ({ text: x.n > 1 ? `${k} x${x.n}` : k, bad: x.bad }))
+}
+
+// серверы по группам в порядке списка (бэкенд уже отсортировал по группе и имени), серверы
+// без группы - последними: ключ пустой или ниже любого символа
+export function byGroup(list: InvServer[], key: (s: InvServer) => string = (s) => s.group): [string, InvServer[]][] {
+  const m = new Map<string, InvServer[]>()
+  for (const s of list) {
+    const k = key(s)
+    const xs = m.get(k)
+    if (xs) xs.push(s)
+    else m.set(k, [s])
+  }
+  const noGroup = (k: string) => !k || k === '\u0000'
+  return [...m.entries()].sort((a, b) => Number(noGroup(a[0])) - Number(noGroup(b[0])))
+}
+
 export type InvTotals = {
   n: number
   bare: number
@@ -198,6 +224,19 @@ export function inventoryXlsx(list: InvServer[], full: boolean, t: T): Blob {
   for (const [g, n] of Object.entries(tot.gpus)) sum.push([`GPU ${g}`, n])
   if (tot.unknown) sum.push([t('Без helper disk-health, диски неизвестны'), tot.unknown])
   sheets.push({ name: t('Итоги'), head: [t('Показатель'), t('Значение')], rows: sum, widths: [40, 14] })
+  // подытоги групп: сколько железа у каждой
+  const kinds = KINDS.filter((k) => tot.disks[k])
+  const grow = (name: string, x: InvTotals): XlsxCell[] => [
+    name, x.n, x.threads, x.mem, ...kinds.map((k) => (x.disks[k] ? tb(x.disks[k]!.size) : null)),
+    Object.values(x.gpus).reduce((a, b) => a + b, 0) || null,
+  ]
+  sheets.push({
+    name: t('По группам'),
+    head: [t('Группа'), t('Серверов'), 'CPU', t('RAM, ГБ'), ...kinds.map((k) => t('{kind}: ТБ', { kind: kindLabel(k, t) })), 'GPU'],
+    rows: [...byGroup(list).map(([g, xs]) => grow(g || t('без группы'), invTotals(xs))), grow(t('Итого'), tot)],
+    widths: [22, 10, 8, 10, ...kinds.map(() => 11), 7],
+    totalRow: true,
+  })
   return xlsxBlob(sheets)
 }
 
