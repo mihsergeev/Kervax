@@ -786,6 +786,9 @@ class Server(Base):
     # ноды кластера этого сервера (по имени), на которых агент не нужен: чужие, временные.
     # Остальные ноды без агента панель выносит в "Требует действий" (см. kube_coverage).
     kube_node_ignored: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    # сроки кластера, за которыми не следим ("не нужен, не следить"): {"<kind>|<where>": {by, at,
+    # expires, fp}}. Снимается само, когда у пункта другой срок или отпечаток (app/kube_expiry.py)
+    kube_expiry_ignored: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     # свои бэкапы ноды, которые отслеживать не нужно (id найденных helper'ом заданий):
     # эвристика поиска ошибается, и «это не бэкап» должно сниматься одним кликом
     custom_backup_ignored: Mapped[list | None] = mapped_column(JSON, nullable=True)

@@ -28,11 +28,18 @@
 # the deploy. The reflog is read as a file: git is not run, so nothing in the repository (its
 # config, hooks, filters) runs as root.
 #
-# Only paths, sizes and modification times leave the node, never file contents. The helper
-# changes nothing in the roots and keeps its own lists in /var/lib/kervax/webfiles (root only).
+# WordPress updates itself from the admin or by wp-cron: a language pack, a plugin, a theme or
+# the core. To tell that from an edit, a changed translation (languages/*.l10n.php) is sent with
+# the time of the .mo next to it - a language pack writes both in the same second - and a run
+# carries the versions that changed since the last one: the core from wp-includes/version.php,
+# plugins and themes from the Version: line of their headers.
+#
+# Only paths, sizes, modification times and these versions leave the node, never file contents.
+# The helper changes nothing in the roots and keeps its own lists in /var/lib/kervax/webfiles
+# (root only).
 set -euo pipefail
 
-KERVAX_SETUP_VERSION=0.3  # MAJOR.MINOR; compared component-wise
+KERVAX_SETUP_VERSION=0.4 # MAJOR.MINOR; compared component-wise
 KERVAX_SETUP_WHEN="pgrep -x nginx || pgrep -x apache2 || pgrep -x httpd || pgrep php-fpm || pgrep -x php || pgrep lsphp || pgrep frankenphp"
 
 HELPER_DIR=/lib65/kervax
@@ -245,11 +252,46 @@ listing() {
     | sort -t "$TAB" -k1,1
 }
 
-# JSON array of up to MAXLIST lines "kind TAB path TAB mtime TAB size" of one kind
+# JSON array of up to MAXLIST lines "kind TAB path TAB mtime TAB size [TAB mtime of the .mo]" of one kind
 jlist() {
   awk -F '\t' -v k="$1" -v max="$MAXLIST" '
     function e(s) { gsub(/[\000-\037]/, "", s); gsub(/\\/, "\\\\", s); gsub(/"/, "\\\"", s); return s }
-    $1 == k && n < max { printf "%s[\"%s\",%s,%s]", (n++ ? "," : ""), e($2), ($3 == "" ? 0 : $3), ($4 == "" ? 0 : $4) }' "$2"
+    $1 == k && n < max { printf "%s[\"%s\",%s,%s%s]", (n++ ? "," : ""), e($2), ($3 == "" ? 0 : $3), ($4 == "" ? 0 : $4),
+                                ($5 ~ /^[0-9]+$/ ? "," $5 : "") }' "$2"
+}
+
+# WordPress in the root: "kind TAB slug TAB version TAB path prefix", kind is core, plugin or
+# theme. Only the first lines of plugin and theme headers are looked at, for the Version: line
+wp_versions() {
+  local p=$1 v w="" c rel
+  for v in "$p/wp-includes/version.php" "$p"/*/wp-includes/version.php "$p/web/wp/wp-includes/version.php"; do
+    if [ -f "$v" ]; then w=${v%/wp-includes/version.php}; break; fi
+  done
+  [ -n "$w" ] || return 0
+  rel=${w#"$p"}; rel=${rel#/}; rel=${rel:+$rel/}
+  v=$(awk -F "'" '/^\$wp_version *=/ { print $2; exit }' "$w/wp-includes/version.php" 2>/dev/null | tr -cd 'A-Za-z0-9._+-' | head -c 30)
+  printf 'core\t\t%s\t%s\n' "$v" "$rel"
+  c=$w/wp-content
+  [ -d "$c" ] || c=${w%/*}/app  # Bedrock: web/wp and web/app
+  [ -d "$c" ] || return 0
+  rel=${c#"$p"}; rel=${rel#/}/
+  { find "$c/plugins" -mindepth 1 -maxdepth 2 -type f -name '*.php' 2>/dev/null | head -2000
+    find "$c/themes" -mindepth 2 -maxdepth 2 -type f -name style.css 2>/dev/null | head -500
+  } | tr '\n' '\0' | xargs -0 -r awk -v c="$c" -v rel="$rel" '
+    FNR == 1 { f = FILENAME }
+    FNR <= 60 && /(Plugin|Theme) Name:/ { named[f] = 1 }
+    FNR <= 60 && !(f in ver) && /^[ \t\/*#@]*Version:/ {
+      v = $0; sub(/.*Version:[ \t]*/, "", v); gsub(/[^A-Za-z0-9._+-]/, "", v); ver[f] = substr(v, 1, 30)
+    }
+    END {
+      for (f in ver) {
+        if (!(f in named) || ver[f] == "") continue
+        r = substr(f, length(c) + 2); n = split(r, a, "/")
+        if (a[1] == "themes") print "theme\t" a[2] "\t" ver[f] "\t" rel "themes/" a[2] "/"
+        else if (n == 3) print "plugin\t" a[2] "\t" ver[f] "\t" rel "plugins/" a[2] "/"
+        else { s = a[2]; sub(/\.php$/, "", s); print "plugin\t" s "\t" ver[f] "\t" rel r }
+      }
+    }' 2>/dev/null | sort -t "$TAB" -k1,2 | awk -F '\t' '!seen[$1 FS $2]++'
 }
 
 now=$(date +%s)
@@ -313,13 +355,26 @@ while IFS="$TAB" read -r pid dir names; do
   # the same directory mounted into several containers (php-fpm and a worker of one project)
   src=""
   [ "$layer" = false ] && src=$(stat -L -c '%d-%i' "$p" 2>/dev/null || true)
+  # WordPress: versions now, the core one goes to the panel with the root
+  wp_versions "$p" > "$work/wp"
+  wpv=$(awk -F '\t' '$1 == "core" { print $3; exit }' "$work/wp")
   doms=$(printf '%s\n' "$names" | tr ' ' '\n' | grep -E '^[A-Za-z0-9*][A-Za-z0-9.*-]*\.[A-Za-z]{2,}$' | sort -u | head -20 \
     | awk '{ printf "%s\"%s\"", (NR > 1 ? "," : ""), $0 }')
-  roots="$roots${roots:+,}{\"key\":\"$key\",\"where\":\"$(esc "$where")\",\"path\":\"$(esc "$inner")\",\"domains\":[$doms],\"files\":$files,\"big\":$big,\"layer\":$layer${src:+,\"src\":\"$src\"}${GEV:+,\"git\":[$GEV]}}"
+  roots="$roots${roots:+,}{\"key\":\"$key\",\"where\":\"$(esc "$where")\",\"path\":\"$(esc "$inner")\",\"domains\":[$doms],\"files\":$files,\"big\":$big,\"layer\":$layer${src:+,\"src\":\"$src\"}${GEV:+,\"git\":[$GEV]}${wpv:+,\"wp\":\"$wpv\"}}"
   snap="$SNAP/$key.lst"
   if [ ! -e "$snap" ] || [ "$young" = true ]; then
     deltas="$deltas${deltas:+,}{\"key\":\"$key\",\"first\":true}"
   else
+    # versions changed since the last run: ["plugin","slug","old","new","path prefix"]
+    wpup=""
+    if [ -s "$work/wp" ] && [ -f "$SNAP/$key.wp" ]; then
+      wpup=$(awk -F '\t' '
+        function e(s) { gsub(/[\000-\037"\\]/, "", s); return s }
+        FILENAME == ARGV[1] { o[$1 FS $2] = $3; next }
+        ($1 FS $2) in o && o[$1 FS $2] != $3 && o[$1 FS $2] != "" && $3 != "" {
+          printf "%s[\"%s\",\"%s\",\"%s\",\"%s\",\"%s\"]", (n++ ? "," : ""), $1, e($2), o[$1 FS $2], $3, e($4)
+        }' "$SNAP/$key.wp" "$work/wp" | head -c 4000)
+    fi
     # N new, C changed (time or size), G gone
     awk -F '\t' 'FILENAME == ARGV[1] { o[$1] = $2 "\t" $3; next }
       { if (!($1 in o)) print "N\t" $0; else { if (o[$1] != $2 "\t" $3) print "C\t" $0; delete o[$1] } }
@@ -327,16 +382,28 @@ while IFS="$TAB" read -r pid dir names; do
     nn=$(grep -c '^N' "$work/diff" || true)
     nc=$(grep -c '^C' "$work/diff" || true)
     ng=$(grep -c '^G' "$work/diff" || true)
-    if [ "$((nn + nc + ng))" -gt 0 ]; then
-      deltas="$deltas${deltas:+,}{\"key\":\"$key\",\"n_new\":$nn,\"n_changed\":$nc,\"n_gone\":$ng,\"new\":[$(jlist N "$work/diff")],\"changed\":[$(jlist C "$work/diff")],\"gone\":[$(jlist G "$work/diff")]}"
+    # a translation goes with the time of its .mo: a language pack writes them in one second
+    if grep -q "^[NC]$TAB.*languages/.*\.l10n\.php$TAB" "$work/diff"; then
+      while IFS= read -r line; do
+        f=${line#?"$TAB"}; f=${f%%"$TAB"*}
+        case "$line" in
+          [NC]"$TAB"*languages/*.l10n.php"$TAB"*)
+            printf '%s\t%s\n' "$line" "$(stat -c %Y "$p/${f%.l10n.php}.mo" 2>/dev/null || true)" ;;
+          *) printf '%s\n' "$line" ;;
+        esac
+      done < "$work/diff" > "$work/diff2" && mv -f "$work/diff2" "$work/diff"
+    fi
+    if [ "$((nn + nc + ng))" -gt 0 ] || [ -n "$wpup" ]; then
+      deltas="$deltas${deltas:+,}{\"key\":\"$key\",\"n_new\":$nn,\"n_changed\":$nc,\"n_gone\":$ng,\"new\":[$(jlist N "$work/diff")],\"changed\":[$(jlist C "$work/diff")],\"gone\":[$(jlist G "$work/diff")]${wpup:+,\"wp\":[$wpup]}}"
     fi
   fi
   cp -f "$work/new" "$snap.tmp" && mv -f "$snap.tmp" "$snap"
+  cp -f "$work/wp" "$SNAP/$key.wp.tmp" && mv -f "$SNAP/$key.wp.tmp" "$SNAP/$key.wp"
 done < <(cands | awk -F '\t' '!seen[$1 FS $2]++')
 
 # lists of roots that are gone for a week, of containers - for a day
-find "$SNAP" -maxdepth 1 -name '*.lst' -mtime +7 -delete 2>/dev/null || true
-find "$SNAP" -maxdepth 1 -name 'c*.lst' -mtime +0 -delete 2>/dev/null || true
+find "$SNAP" -maxdepth 1 \( -name '*.lst' -o -name '*.wp' \) -mtime +7 -delete 2>/dev/null || true
+find "$SNAP" -maxdepth 1 \( -name 'c*.lst' -o -name 'c*.wp' \) -mtime +0 -delete 2>/dev/null || true
 
 # runs with changes of the last hour, newest last
 touch "$RUNS"

@@ -45,7 +45,7 @@ import (
 	"time"
 )
 
-const version = "2.48"
+const version = "2.49"
 
 // Публичный ключ для проверки подписи релизов агента (Ed25519, base64).
 // ПУСТО по умолчанию → самообновление ВЫКЛЮЧЕНО (агент никогда не заменяет себя).
@@ -4311,6 +4311,10 @@ type kubeExpiry struct {
 	Where   string `json:"where"`          // путь к файлу либо namespace/name
 	Expires int64  `json:"expires"`        // unix-время истечения
 	Note    string `json:"note,omitempty"` // имя сертификата или поле секрета
+	// helper 0.3, только TLS-секреты: короткий отпечаток сертификата (обновленный секрет панель
+	// отличает от старого) и указан ли секрет хоть в одном Ingress (nil - прочитать не вышло)
+	FP      string `json:"fp,omitempty"`
+	Ingress *bool  `json:"ingress,omitempty"`
 }
 
 // Состояние ресурса Flux. Нужно ко второй половине той же беды: срок можно

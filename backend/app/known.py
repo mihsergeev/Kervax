@@ -109,8 +109,10 @@ def age_text(entry: dict, now: datetime) -> str:
 def remind_text(what: str, entry: dict, now: datetime) -> str:
     """Тело напоминания: что висит, сколько, что про это написали и кто."""
     out = f"известная проблема висит {age_text(entry, now)}: {what}"
-    if entry.get("text"):
-        out += f" - {entry['text']}"
+    # отмеченная при закрытии подключения: в записи короткое "было при подключении"
+    note = "уже было при подключении сервера" if entry.get("onboard") else entry.get("text")
+    if note:
+        out += f" - {note}"
     if entry.get("by"):
         out += f" ({entry['by']})"
     return out

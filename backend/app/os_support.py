@@ -16,15 +16,35 @@
 встанет. Тогда это решение человека "так и должно быть" (alert_mutes "osupd:<вид>"): пункт уходит
 из "Требует действий", а в карточке виден приглушенным с кнопкой "вернуть". Не заглушенный алерт -
 в "Заглушено" его нет, как и других решений.
+
+Перезагрузку чаще откладывают, чем запрещают: "до нового" (alert_mutes "osupd:reboot@<отпечаток>",
+ставится с главной галками по многим серверам или в карточке). Отпечаток - набор пакетов, ради которых
+нужна перезагрузка, и время, когда о ней узнали (/run/reboot-required переписывается каждой такой
+установкой). Новое ядро, новый пакет или перезагрузка и снова "нужна" - другой отпечаток, пункт
+возвращается сам, а устаревшую заглушку сборщик убирает с записью в журнал (stale_mutes).
+
+Обновлен только dbus - не "нужна перезагрузка", а "при случае" (soft): dbus на ходу не
+перезапускают (от него зависят systemd-logind и сессии), Ubuntu поэтому и просит перезагрузку, а
+работающий старый dbus сам по себе ничего не ломает. Такие серверы годами висели в одной группе с
+непримененными ядрами и libc6 и прятали их.
 """
 from __future__ import annotations
 
+import hashlib
 import re
 from datetime import date, datetime, timezone
 
 from app import reboot_survive
 
 MUTE_PREFIX = "osupd:"
+# заглушка перезагрузки до нового: osupd:reboot@<отпечаток>
+REBOOT_NEW = MUTE_PREFIX + "reboot@"
+# пакеты, после которых перезагрузка нужна "при случае": демон, который на ходу не перезапускают
+_SOFT_RX = re.compile(r"^(dbus|libdbus)")
+# пакеты ядра в reboot-required.pkgs: версия после префикса (linux-image-6.8.0-87-generic)
+_KERNEL_RX = re.compile(r"^linux-(?:signed-)?(?:image|modules)(?:-extra)?(?:-unsigned)?-(\d\S*)$")
+# служебные: перезагрузку просят вместе с ядром, сами по себе ничего не значат
+_QUIET_PKGS = {"linux-base"}
 
 # Конец поддержки: у Ubuntu LTS - обычной (дальше обновления безопасности только по подписке
 # Ubuntu Pro), у Debian - вместе с LTS (Debian LTS бесплатный), у RHEL-семейства - полной.
@@ -59,6 +79,7 @@ _ESM = {"Ubuntu 16.04": date(2026, 4, 30), "Ubuntu 18.04": date(2028, 4, 30), "U
         "Ubuntu 22.04": date(2032, 4, 30), "Ubuntu 24.04": date(2034, 4, 30), "Ubuntu 26.04": date(2036, 4, 30)}
 EOL_WARN_DAYS = 180  # за полгода - пора планировать переезд
 REBOOT_AFTER_DAYS = 7  # перезагрузку после обновления ядра откладывают на ночь-другую, не на месяц
+REBOOT_SOFT_AFTER_DAYS = 30  # только dbus: срочности нет, месяц до ближайшего окна
 UNATT_STALE_DAYS = 3
 APT_STALE_DAYS = 14
 
@@ -86,14 +107,112 @@ def eol_of(os_name: str) -> tuple[str, date, bool] | None:
 def advice(rep: dict, now: datetime, mutes: list[str] | None = None) -> list[dict]:
     """Что сделать с ОС ноды: [{"kind", "level", "text", "key", "muted", "fix"}], уровень 2 - уже
     дыра, 1 - пора; muted - человек решил, что так и должно быть (ключ key в alert_mutes); fix -
-    шаги [{"id", "cmd"?, "arg"?, "alt"?}], alt - другой путь вместо шагов выше."""
+    шаги [{"id", "cmd"?, "arg"?, "alt"?}], alt - другой путь вместо шагов выше.
+    У перезагрузки еще new_key - заглушка до нового (osupd:reboot@<отпечаток>), muted_new - заглушена
+    ею, а не решением "перезагружать нельзя"; soft - обновлен только dbus, перезагрузить при случае."""
     out = _advice(rep, now)
     got = set(mutes or [])
     for x in out:
         x["key"] = MUTE_PREFIX + x["kind"]
         x["muted"] = x["key"] in got
+        if x["kind"] == "reboot":
+            x["new_key"] = REBOOT_NEW + reboot_sig(rep)
+            x["muted_new"] = not x["muted"] and x["new_key"] in got
+            x["muted"] = x["muted"] or x["muted_new"]
         x["fix"] = _fix(x["kind"], rep, now, got)
     return out
+
+
+def _upd(rep: dict) -> dict:
+    u = (rep or {}).get("os_upd")
+    return u if isinstance(u, dict) else {}
+
+
+def _pkgs(u: dict) -> list[str]:
+    return [str(p) for p in u.get("reboot_pkgs") or [] if p]
+
+
+def _ver(v: str) -> list[int]:
+    return [int(x) for x in re.findall(r"\d+", v)]
+
+
+def _kshort(v: str) -> str:
+    return re.sub(r"-generic$", "", v)
+
+
+def _list(xs: list[str], n: int = 3) -> str:
+    return ", ".join(xs[:n]) + (f" и еще {len(xs) - n}" if len(xs) > n else "")
+
+
+def reboot_parts(u: dict) -> list[str]:
+    """Зачем перезагрузка, по-человечески: ядро (что работает и что заработает), библиотеки
+    (старые в памяти процессов), dbus (на ходу не перезапустить), остальное как есть. linux-base не
+    показываем: служебный пакет, его ставят вместе с ядром"""
+    pkgs = _pkgs(u)
+    parts: list[str] = []
+    kernels = [m.group(1) for p in pkgs if (m := _KERNEL_RX.match(p))]
+    if u.get("kernel_new"):
+        kernels.append(str(u["kernel_new"]))
+    run = str(u.get("kernel") or "")
+    if kernels:
+        new = max(kernels, key=_ver)
+        if not run:
+            parts.append(f"установлено ядро {_kshort(new)} - заработает после перезагрузки")
+        elif _ver(new) > _ver(run):
+            parts.append(f"работает ядро {_kshort(run)}, установлено {_kshort(new)} - новое заработает после перезагрузки")
+    rest = [p for p in pkgs if not _KERNEL_RX.match(p) and p not in _QUIET_PKGS]
+    libs = [p for p in rest if p.startswith("lib") and not _SOFT_RX.match(p)]
+    if libs:
+        one = len(libs) == 1
+        parts.append(f"{'обновлена' if one else 'обновлены'} {_list(libs)} - процессы держат "
+                     f"{'старую' if one else 'старые'} в памяти, нужна перезагрузка или перезапуск служб")
+    if any(_SOFT_RX.match(p) for p in rest):
+        parts.append("обновлен dbus, перезапустить его без перезагрузки нельзя")
+    other = [p for p in rest if p not in libs and not _SOFT_RX.match(p)]
+    if other:
+        parts.append(f"{'обновлен' if len(other) == 1 else 'обновлены'} {_list(other)} - нужна перезагрузка")
+    return parts
+
+
+def soft_reboot(u: dict) -> bool:
+    """Перезагрузка нужна только ради dbus: при случае, а не срочно"""
+    pkgs = _pkgs(u)
+    return bool(u.get("reboot")) and bool(pkgs) and all(_SOFT_RX.match(p) for p in pkgs)
+
+
+def reboot_sig(rep: dict) -> str:
+    """Отпечаток того, ради чего нужна перезагрузка; "" - не нужна. Набор пакетов и время
+    reboot-required: новая установка такого пакета переписывает файл, перезагрузка его стирает"""
+    u = _upd(rep)
+    if u.get("reboot"):
+        try:
+            ts = int(float(u.get("reboot_ts") or 0))
+        except (TypeError, ValueError):
+            ts = 0
+        base = f"r{ts}:" + ",".join(sorted(set(_pkgs(u))))
+    elif u.get("kernel_new"):
+        base = f"k{u['kernel_new']}<{u.get('kernel') or ''}"
+    else:
+        return ""
+    return hashlib.sha1(base.encode()).hexdigest()[:10]
+
+
+def stale_mutes(rep: dict, mutes: list[str] | None) -> list[tuple[str, str]]:
+    """Заглушки перезагрузки до нового, которые уже не про то, что на ноде: [(ключ, почему снята)].
+    Без os_upd в отчете (старый агент, нет данных) не снимаем ничего."""
+    old = [str(m) for m in mutes or [] if str(m).startswith(REBOOT_NEW)]
+    u = _upd(rep)
+    if not old or not u:
+        return []
+    sig = reboot_sig(rep)
+    if not sig:
+        why = "перезагрузка больше не нужна"
+    elif u.get("reboot"):
+        pkgs = [p for p in _pkgs(u) if p not in _QUIET_PKGS][:4]
+        why = "после заглушки снова нужна перезагрузка" + (f" (обновлены {', '.join(pkgs)})" if pkgs else "")
+    else:
+        why = f"в /boot новое ядро {u['kernel_new']}"
+    return [(m, why) for m in old if m != REBOOT_NEW + sig]
 
 
 APT_UPDATE = "sudo apt update"
@@ -126,7 +245,8 @@ def _fix(kind: str, rep: dict, now: datetime, mutes: set[str]) -> list[dict]:
             steps.append({"id": "unatt_install", "cmd": UNATT_INSTALL})
         return steps + [{"id": "unatt_enable", "cmd": UNATT_ENABLE}, {"id": "unatt_run", "cmd": UNATT_RUN}]
     if kind == "reboot":
-        steps = []
+        # только dbus: почему не "перезапустить dbus", а перезагрузка при случае
+        steps = [{"id": "reboot_soft"}] if soft_reboot(u) else []
         if reboot_survive.MUTE_ALL not in mutes:
             dc = [c["name"] for c in reboot_survive.containers(rep) if reboot_survive.MUTE_PREFIX + c["name"] not in mutes]
             un = [x["unit"] for x in reboot_survive.units(rep, now) if reboot_survive.MUTE_PREFIX + x["unit"] not in mutes]
@@ -197,13 +317,20 @@ def _advice(rep: dict, now: datetime) -> list[dict]:
 
     if u.get("reboot"):
         d = ago(u.get("reboot_ts"))
-        if d is not None and d >= REBOOT_AFTER_DAYS:
-            pkgs = [str(p) for p in u.get("reboot_pkgs") or []][:4]
-            out.append({"kind": "reboot", "level": 1, "text": f"нужна перезагрузка уже {_days(d)}"
-                        + (f" (обновлены {', '.join(pkgs)})" if pkgs else "")})
+        soft = soft_reboot(u)
+        # reboot_ts - mtime /run/reboot-required: файл переписывает каждая установка такого пакета,
+        # поэтому это последнее обновление, а не первое (первое могло быть раньше). /run живет до
+        # перезагрузки, так что старше нее срок не бывает
+        when = f" (последнее обновление {_days(d)} назад)" if d is not None else ""
+        if soft and d is not None and d >= REBOOT_SOFT_AFTER_DAYS:
+            out.append({"kind": "reboot", "level": 1, "soft": True, "pkgs": _pkgs(u), "text": (
+                f"обновлен dbus, перезапустить его без перезагрузки нельзя - перезагрузить при случае{when}")})
+        elif not soft and d is not None and d >= REBOOT_AFTER_DAYS:
+            parts = reboot_parts(u) or ["нужна перезагрузка после обновления"]
+            out.append({"kind": "reboot", "level": 1, "pkgs": _pkgs(u), "text": "; ".join(parts) + when})
     elif u.get("kernel_new"):
-        out.append({"kind": "reboot", "level": 1,
-                    "text": f"в /boot ядро {u['kernel_new']}, а работает {u.get('kernel') or '?'}: нужна перезагрузка"})
+        parts = reboot_parts(u) or [f"установлено ядро {_kshort(str(u['kernel_new']))} - заработает после перезагрузки"]
+        out.append({"kind": "reboot", "level": 1, "text": "; ".join(parts)})
     try:
         sec = int(u.get("security") or 0)
     except (TypeError, ValueError):

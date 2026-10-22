@@ -1877,7 +1877,7 @@ function ServerServicesModal({ srv, onClose, onChanged, initialSec, sites }: {
     ),
     sites: sites.hosts ? t('всего {n}, все на мониторинге', { n: siteList.length }) : t('всего {n}', { n: siteList.length }),
     certs: nextCert ? t('ближайший: {l} через {n} дн', { l: nextCert.label, n: nextCert.days }) : '',
-    files: webfilesBad(s) ? '' : t('веб-корней: {n}, новых php и правок вне выкладки нет', { n: (s.webfiles?.roots ?? []).length }),
+    files: webfilesBad(s) ? '' : t('веб-корней: {n}, новых php и правок не через git/деплой нет', { n: (s.webfiles?.roots ?? []).length }),
     db: subOf(
       [...new Set(dbItems.map((it) => it.kind))].join(', '),
       dbRows.length > 0 && t('баз: {n}', { n: dbRows.length }),

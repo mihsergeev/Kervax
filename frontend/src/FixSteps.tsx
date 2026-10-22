@@ -59,16 +59,39 @@ export function FixCmd({ cmd, onCopy, className = '' }: { cmd: string; onCopy?: 
   )
 }
 
-export function FixSteps<S extends FixStep>({ steps, text, foot, numbered, onCopy }: {
+// badges - номер шага кружком, текст яркий, команда на своем фоне: шаги не сливаются с текстом
+// (карточка Docker). Номер у каждого шага по порядку, у отката и "или" нет
+export function FixSteps<S extends FixStep>({ steps, text, foot, numbered, badges, onCopy }: {
   steps: S[]
   text: (st: S) => string
   foot?: string
   numbered?: boolean
+  badges?: boolean
   // скопировали команду шага: вызывающий может ждать, что ее сейчас выполнят
   onCopy?: (st: S) => void
 }) {
   const { t } = useI18n()
   let n = 0
+  if (badges) return (
+    <div className="fix-b">
+      {steps.map((st, i) => {
+        const num = st.alt || st.undo ? 0 : ++n
+        return (
+          <div key={st.id + i} className={`fix-b-step${num ? '' : ' fix-b-side'}`}>
+            {num > 0 && <span className="fix-b-num">{num}</span>}
+            <div className="fix-b-body">
+              <div className="fix-b-text">
+                {!num && <span className="fix-b-tag">{t(st.alt ? 'или' : 'откат')}</span>}
+                {text(st)}
+              </div>
+              {st.cmd && <FixCmd cmd={st.cmd} onCopy={() => onCopy?.(st)} />}
+            </div>
+          </div>
+        )
+      })}
+      {foot && <div className="muted small">{foot}</div>}
+    </div>
+  )
   return (
     <div className="osupd-fix">
       {steps.map((st, i) => {

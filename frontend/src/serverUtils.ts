@@ -128,7 +128,7 @@ function srvIssueMuted(i: SrvIssue, mutes: Set<string>): boolean {
   return false
 }
 
-function srvIssuesRaw(
+export function srvIssuesRaw(
   s: Server,
   t: (k: string, p?: Record<string, string | number>) => string,
 ): SrvIssue[] {
@@ -307,11 +307,13 @@ export function backupWindowNote(s: Server): string | null {
   return null
 }
 
-// Кто отметил и до какого числа: "admin, до 20.10.2026"
-// Текст отметки: что написал человек, а у поставленной при закрытии подключения - перевод
+// Текст отметки: что написал человек, а у поставленной при закрытии подключения - что это
+// значит (в записи на бэкенде там короткое "было при подключении")
 export function knownText(k: KnownIssue, t: (k: string, p?: Record<string, string | number>) => string): string {
-  return k.onboard ? t('было при подключении') : k.text
+  return k.onboard ? t('уже было при подключении сервера, отмечено как известное') : k.text
 }
+
+// Кто отметил и до какого числа: "admin, до 20.10.2026"
 
 export function knownMeta(k: KnownIssue, t: (k: string, p?: Record<string, string | number>) => string): string {
   const parts = [k.by || '']

@@ -2125,7 +2125,13 @@ export type Server = {
   // что сделать с ОС: конец поддержки, перезагрузка, обновления безопасности (level 2 - уже дыра)
   // key - ключ решения "так и должно быть" в alert_mutes (osupd:<kind>), muted - решение принято
   // fix - шаги на ноде, после которых пункт уходит: id текста, команда, arg для текста, alt - другой путь
-  os_advice?: { kind: string; level: number; text: string; key: string; muted?: boolean; fix?: OsFixStep[] }[]
+  // у перезагрузки: new_key - заглушка до нового (osupd:reboot@<отпечаток набора пакетов>), muted_new -
+  // заглушена ею, а не решением; soft - обновлен только dbus, перезагрузить при случае
+  os_advice?: {
+    kind: string; level: number; text: string; key: string; muted?: boolean; fix?: OsFixStep[]
+    new_key?: string; muted_new?: boolean; soft?: boolean
+    pkgs?: string[] // у перезагрузки: все пакеты, ради которых она нужна (текст говорит главное)
+  }[]
   // куда идет бэкап (app/backup_target.py), адрес без логина и пароля
   backup_target?: BackupTarget | null
   // бэкап по http: на какой сервер бэкапов переводить на https и что мешает (только в списке серверов)
@@ -2191,7 +2197,7 @@ export type Server = {
   web_config?: { server: string; where: string; ok: boolean; err: string }[] | null
   // сертификаты nginx (helper webserver-setup 0.24): сколько дней до конца срока
   web_certs?: { where: string; file: string; label: string; days: number }[] | null
-  // файлы сайтов (backend app/webfiles.py): веб-корни, новые php и правки вне выкладки
+  // файлы сайтов (backend app/webfiles.py): веб-корни, новые php и правки не через git/деплой
   webfiles?: { roots: WebRoot[]; ts?: number | null } | null
   // внешние прокси со сборкой образа старше года (built - unix-секунды); key - решение "оставить как
   // есть" в alert_mutes (proxyold:<контейнер>), muted - решение принято, fix - как обновить
@@ -2278,6 +2284,8 @@ export type Server = {
   custom_backups?: CustomBackup[] // свои бэкапы ноды (настроены без панели) со статусом
   custom_backup_ignored?: string[] | null
   kube_node_ignored?: string[] | null // ноды кластера, где агент не нужен (по имени)
+  // сроки кластера "не нужен, не следить": {"<kind>|<where>": кто и когда}, только действующие
+  kube_expiry_ignored?: Record<string, { by: string; at: string }> | null
   kube_unmonitored?: KubeNodeRef[] // ноды кластера без агента панели (считает бэкенд)
   bsrv_unmonitored?: string[] // репозитории бэкап-сервера, чьих клиентов нет в панели (считает бэкенд)
   bsrv_rotation?: string[] // что сейчас сказал бы алерт "ротация встала" (считает бэкенд)
@@ -2497,6 +2505,8 @@ export type KubeExpiry = {
   where: string // путь к файлу либо namespace/name
   expires: number // unix-время истечения
   note?: string // имя сертификата или поле секрета
+  fp?: string // TLS-секрет: короткий отпечаток сертификата (helper 0.3)
+  ingress?: boolean // TLS-секрет указан хоть в одном Ingress; нет поля - неизвестно (helper 0.3)
 }
 
 // Состояние ресурса Flux. Нужно к тому же классу отказов с другой стороны: срок
@@ -2763,6 +2773,19 @@ export interface WebRoot {
   php: { p: string; since: string }[]
   edit: { p: string; since: string }[]
   site: boolean
+  // WordPress: версия ядра (helper 0.4 следит за версиями) и что он обновил сам за неделю
+  wp?: string
+  wp_events?: WpEvent[]
+}
+// обновление, которое WordPress поставил сам: перевод (part - чей) или плагин, тема, ядро с версиями
+export interface WpEvent {
+  k: 'lang' | 'plugin' | 'theme' | 'core'
+  part?: 'plugin' | 'theme' | 'core'
+  slug?: string
+  loc?: string
+  from?: string
+  to?: string
+  at: string
 }
 // новые php и правки в корне - свои: root пусто - все корни, key пусто - оба признака
 export function acceptWebfiles(id: number, root = '', key = ''): Promise<Server> {
@@ -3144,6 +3167,14 @@ export function kubeNodeIgnore(id: number, node: string, ignored: boolean): Prom
   })
 }
 
+// срок кластера "не нужен, не следить" - или вернуть его под присмотр. Секрет панель не удаляет
+export function kubeExpiryIgnore(id: number, kind: string, where: string, ignored: boolean): Promise<Server> {
+  return api<Server>(`/api/servers/${id}/kube/expiry-ignore`, {
+    method: 'POST',
+    body: JSON.stringify({ kind, where, ignored }),
+  })
+}
+
 export function backupAuditMute(id: number, key: string, muted: boolean): Promise<Server> {
   return api<Server>(`/api/servers/${id}/backup/audit-mute`, {
     method: 'POST',
@@ -3512,8 +3543,10 @@ export interface TamperSign {
   what?: string
   fix?: string
   eol?: boolean
-  // php и edit - файлы на сервере (app/webfiles.py): первые 10, сколько всего и где
+  // php и edit - файлы на сервере (app/webfiles.py): первые 10, сколько всего и где; wp - корень
+  // WordPress, за версиями которого следит helper
   files?: string[]
+  wp?: boolean
   n?: number
   where?: string
 }

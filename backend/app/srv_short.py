@@ -404,7 +404,10 @@ def _short(key: str, ctx: dict, s, level: int):
         left = round(days)
         when = (f"истек {tg_fmt.days(abs(left) or 1)} назад" if days < 0
                 else "истекает сегодня" if left < 1 else f"истекает через {tg_fmt.days(left)}")
-        return f"{tg_fmt.cap(what)} {when}", [str(ctx.get("where") or "")]
+        facts = [str(ctx.get("where") or "")]
+        if ctx.get("unused"):
+            facts.append("не используется ни одним ingress")
+        return f"{tg_fmt.cap(what)} {when}", facts
     if key == "flux_down":
         reason = re.sub(r"\s*\([A-Za-z]+\)$", "", str(ctx.get("reason") or ""))
         return "Flux не выкатывает", [f"{ctx.get('where')}: {reason}" if ctx.get("where") else reason]
