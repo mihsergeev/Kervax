@@ -5448,6 +5448,34 @@ button.svc-site-on:hover {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+/* Главная не открылась, а типовой путь отвечает: предложение строкой под доменом,
+   с отступом под чекбокс — видно, к какому домену оно относится. */
+.adopt-path {
+  display: flex;
+  /* общий стиль label в формах — колонкой */
+  flex-direction: row;
+  align-items: center;
+  width: fit-content;
+  gap: 0.4rem;
+  margin: 0 0 0.2rem 1.55rem;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+.adopt-path.on {
+  color: var(--up);
+}
+.adopt-path input {
+  margin: 0;
+}
+.adopt-path .run-spin {
+  width: 0.7em;
+  height: 0.7em;
+  border-width: 1.5px;
+}
+.adopt-how-path {
+  flex-shrink: 0;
+  color: var(--text-muted);
+}
 @media (max-width: 720px) {
   /* на узком экране пара уходит второй строкой под домен */
   .adopt-row {

@@ -4,6 +4,19 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.8.2] - 2026-10-22
+
+### Added
+- Найденные на серверах домены: если главная отвечает 404 или ошибкой, панель снаружи и через
+  агента пробует типовые пути (/health, /healthz, /api/health, /status, /ping, /ready, /version,
+  /api, /docs, /openapi.json, /swagger, /mcp) и предлагает первый, что отвечает 2xx: "/health
+  отвечает 200 - мониторить его". MCP-сервер на /mcp с ответом 400-406 считается живым, монитор
+  ставится с ожидаемыми кодами 200-403,405-499.
+
+### Fixed
+- Главная не падает, если API ответил 200 с телом не в JSON (оборванный ответ на выкладке,
+  страница прокси): показывается ошибка "Сервер прислал непонятный ответ, обновите страницу".
+
 ## [1.8.1] - 2026-10-22
 
 ### Changed

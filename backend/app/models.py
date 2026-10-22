@@ -607,6 +607,12 @@ class DomainProbe(Base):
     local_status: Mapped[str] = mapped_column(String(16), default="")
     local_latency_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     local_message: Mapped[str] = mapped_column(String(512), default="")
+    # главная не открылась, а сервер ответил (404 у API, MCP-сервера, бэкенда за прокси) -
+    # подобранный типовой путь (domain_probe.PATHS): {"path", "code", "expect"}; {} - ни
+    # один не подошел, None - не подбирали. Снаружи подбирает панель сразу, изнутри -
+    # агент: local_paths - номера заданий ему, {путь: probe_requests.id}
+    ext_hint: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    local_paths: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
 
 class LocationResult(Base):

@@ -226,16 +226,21 @@ async def test_adopt_reports_each_domain(client, auth_headers, monkeypatch):
     # порядок — как в запросе, повтор домена второй строки не даёт
     assert body["items"] == [
         {"domain": "closed.example", "check_id": ids["https://closed.example"], "local": True,
-         "server": "stand-a", "reason": "", "problem": ""},
+         "server": "stand-a", "reason": "", "problem": "", "path": "",
+         "expected_status": ""},
         {"domain": "open.example", "check_id": ids["https://open.example"], "local": False,
-         "server": "", "reason": "", "problem": ""},
+         "server": "", "reason": "", "problem": "", "path": "",
+         "expected_status": ""},
         {"domain": "watched.example", "check_id": ids["https://watched.example"],
-         "local": False, "server": "", "reason": "monitored", "problem": ""},
+         "local": False, "server": "", "reason": "monitored", "problem": "", "path": "",
+         "expected_status": ""},
         {"domain": "*.mask.example", "check_id": 0, "local": False, "server": "",
-         "reason": "invalid", "problem": "маска — нет конкретного хоста"},
+         "reason": "invalid", "problem": "маска — нет конкретного хоста", "path": "",
+         "expected_status": ""},
         # изнутри просили, но домен не найден ни на одной ноде — проверяет панель
         {"domain": "nowhere.example", "check_id": ids["https://nowhere.example"],
-         "local": False, "server": "", "reason": "", "problem": ""},
+         "local": False, "server": "", "reason": "", "problem": "", "path": "",
+         "expected_status": ""},
     ]
 
 
@@ -269,3 +274,181 @@ def test_kind_names_the_problem():
                      "(так бывает у Kubernetes), локальная проверка здесь не сработает "
                      "(dial tcp 127.0.0.1:443: connect: connection refused)")[0] == "refused"
     assert k("down", "что-то непонятное")[0] == "other"
+
+
+# Живой случай (22.10.2026): MCP-сервер на найденном домене на "/" отвечает 404, мастер
+# показывал его мертвым снаружи и изнутри. Сервис жив, главной у него просто нет.
+SERVICES = {
+    # главная 404, жив /api, а /mcp на GET отвечает 406
+    "https://api.example.com": 404, "https://api.example.com/api": 200,
+    "https://api.example.com/mcp": 406,
+    # только MCP: GET на /mcp - 406, остальное 404
+    "https://mcp.example.com": 404, "https://mcp.example.com/mcp": 406,
+    # на все подряд 400 - это не MCP-сервер, а прокси, которому что-то не нравится
+    "https://strict.example.com": 400, "https://strict.example.com/mcp": 400,
+    # главной нет, ничего типового тоже
+    "https://gone.example.com": 404,
+}
+SERVICE_SITES = ["open.example", "closed.example", "api.example.com", "mcp.example.com",
+                 "strict.example.com", "gone.example.com"]
+
+
+async def _setup_services(client, auth_headers, monkeypatch):
+    sid, ah, _ = await _setup(client, auth_headers, monkeypatch)
+    report = dict(REPORT, web_services=[{"kind": "caddy", "sites": SERVICE_SITES}])
+    await client.post("/api/agent/report", json=report, headers=ah)
+    calls: list[str] = []
+
+    async def fake_run(check):
+        calls.append(check.target)
+        if check.target == "https://open.example":
+            return checks_exec.CheckOutcome("up", latency_ms=85, message="HTTP 200 · 85 мс")
+        if check.target.startswith("https://closed.example"):
+            return checks_exec.CheckOutcome(
+                "down", message="сервер оборвал соединение (Connection reset by peer)")
+        root = "/".join(check.target.split("/")[:3])
+        code = SERVICES.get(check.target, 400 if root.startswith("https://strict.") else 404)
+        if check.target != root:
+            # типовой путь: короткий таймаут, годен только 2xx
+            assert check.timeout_ms == domain_probe.PATH_TIMEOUT_MS
+            assert check.expected_status == "200-299"
+        if checks_exec.status_matches(code, check.expected_status):
+            return checks_exec.CheckOutcome("up", latency_ms=9, message=f"HTTP {code} · 9 мс")
+        return checks_exec.CheckOutcome("down", latency_ms=9, message=f"HTTP {code}")
+
+    monkeypatch.setattr("app.checks.run_check", fake_run)
+    return sid, ah, calls
+
+
+async def test_probe_suggests_typical_path_outside(client, auth_headers, monkeypatch):
+    sid, ah, calls = await _setup_services(client, auth_headers, monkeypatch)
+    r = await client.post("/api/checks/discovered/probe", headers=auth_headers,
+                          json={"domains": SERVICE_SITES})
+    assert r.status_code == 200, r.text
+    items = _by_domain((await client.get("/api/checks/discovered/probes",
+                                         headers=auth_headers)).json()["items"])
+    api = items["api.example.com"]
+    # главная по-прежнему "не открылась" - подсказка идет отдельно
+    assert api["ext_status"] == "down" and api["ext_code"] == 404
+    assert api["ext_hint"] == {"path": "/api", "code": 200, "expect": ""}
+    assert items["mcp.example.com"]["ext_hint"] == {
+        "path": "/mcp", "code": 406, "expect": domain_probe.MCP_EXPECT}
+    assert items["strict.example.com"]["ext_hint"] is None
+    assert items["gone.example.com"]["ext_hint"] is None
+    assert items["open.example"]["ext_hint"] is None
+    # пути пробуют только там, где сервер ответил, а главная не подошла
+    assert not any(c.startswith(("https://open.example/", "https://closed.example/"))
+                   for c in calls)
+    assert sorted(c for c in calls if c.startswith("https://gone.example.com/")) == sorted(
+        f"https://gone.example.com{p}" for p in domain_probe.PATHS)
+
+    domains = ["api.example.com", "mcp.example.com", "gone.example.com", "open.example"]
+    r = await client.post("/api/checks/adopt", headers=auth_headers,
+                          json={"domains": domains, "paths": domains})
+    assert r.status_code == 201, r.text
+    got = {i["domain"]: (i["path"], i["expected_status"]) for i in r.json()["items"]}
+    assert got == {
+        "api.example.com": ("/api", ""),
+        "mcp.example.com": ("/mcp", domain_probe.MCP_EXPECT),
+        "gone.example.com": ("", ""),
+        "open.example": ("", ""),
+    }
+    async with _factory(client)() as s:
+        checks = {c.name: c for c in await s.scalars(select(Check))}
+    assert checks["api.example.com"].target == "https://api.example.com/api"
+    assert checks["api.example.com"].expected_status == "200-399"
+    mcp = checks["mcp.example.com"]
+    assert mcp.target == "https://mcp.example.com/mcp"
+    assert mcp.expected_status == domain_probe.MCP_EXPECT
+    # MCP-монитор: 406 - жив, 404 и 5xx - нет
+    assert checks_exec.status_matches(406, mcp.expected_status)
+    assert not checks_exec.status_matches(404, mcp.expected_status)
+    assert not checks_exec.status_matches(502, mcp.expected_status)
+    assert checks["gone.example.com"].target == "https://gone.example.com"
+    # монитор с путем - все тот же домен: мастер больше его не предлагает
+    hosts = (await client.get("/api/checks/known-hosts", headers=auth_headers)).json()["hosts"]
+    assert hosts["api.example.com"] == checks["api.example.com"].id
+
+
+async def test_adopt_without_paths_keeps_root(client, auth_headers, monkeypatch):
+    """Путь подобран, но человек снял выбор - монитор на главной, как раньше."""
+    await _setup_services(client, auth_headers, monkeypatch)
+    await client.post("/api/checks/discovered/probe", headers=auth_headers,
+                      json={"domains": ["api.example.com"]})
+    r = await client.post("/api/checks/adopt", headers=auth_headers,
+                          json={"domains": ["api.example.com"]})
+    assert r.json()["items"][0]["path"] == ""
+    async with _factory(client)() as s:
+        chk = (await s.scalars(select(Check).where(Check.name == "api.example.com"))).one()
+    assert chk.target == "https://api.example.com"
+
+
+async def test_probe_suggests_typical_path_inside(client, auth_headers, monkeypatch):
+    """Сайт за белым списком, у которого и изнутри главная 404: пути перебирает агент."""
+    sid, ah, calls = await _setup_services(client, auth_headers, monkeypatch)
+    await client.post("/api/checks/discovered/probe", headers=auth_headers,
+                      json={"domains": ["closed.example"]})
+    tasks = (await client.get("/api/agent/commands", headers=ah)).json()["site_probes"]
+    assert [t["url"] for t in tasks] == ["https://closed.example"]
+    await client.post("/api/agent/site-probe-result", headers=ah, json={"site_probes": [
+        {"id": tasks[0]["id"], "code": 404, "latency_ms": 3},
+    ]})
+    item = (await client.get("/api/checks/discovered/probes", headers=auth_headers)).json()
+    item = item["items"][0]
+    assert item["local_status"] == "down" and item["local_code"] == 404
+    assert item["local_hint"] is None and item["local_hint_pending"] is True
+
+    tasks = (await client.get("/api/agent/commands", headers=ah)).json()["site_probes"]
+    assert sorted(t["url"] for t in tasks) == sorted(
+        f"https://closed.example{p}" for p in domain_probe.PATHS)
+    assert all(t["timeout_ms"] == domain_probe.PATH_TIMEOUT_MS for t in tasks)
+    codes = {"https://closed.example/healthz": 200, "https://closed.example/docs": 200}
+    r = await client.post("/api/agent/site-probe-result", headers=ah, json={"site_probes": [
+        {"id": t["id"], "code": codes.get(t["url"], 404), "latency_ms": 2} for t in tasks
+    ]})
+    assert r.status_code == 200, r.text
+    item = (await client.get("/api/checks/discovered/probes", headers=auth_headers)).json()
+    item = item["items"][0]
+    assert item["local_hint"] == {"path": "/healthz", "code": 200, "expect": ""}
+    assert item["local_hint_pending"] is False
+    # ответ про путь - не вердикт домена
+    assert item["local_status"] == "down"
+
+    r = await client.post("/api/checks/adopt", headers=auth_headers, json={
+        "domains": ["closed.example"], "local": ["closed.example"], "paths": ["closed.example"],
+    })
+    assert r.json()["items"][0]["path"] == "/healthz"
+    async with _factory(client)() as s:
+        chk = (await s.scalars(select(Check).where(Check.name == "closed.example"))).one()
+    assert chk.target == "https://closed.example/healthz" and chk.probe_local
+
+
+async def test_inside_paths_give_up_when_agent_is_silent(client, auth_headers, monkeypatch):
+    sid, ah, _ = await _setup_services(client, auth_headers, monkeypatch)
+    await client.post("/api/checks/discovered/probe", headers=auth_headers,
+                      json={"domains": ["closed.example"]})
+    tasks = (await client.get("/api/agent/commands", headers=ah)).json()["site_probes"]
+    await client.post("/api/agent/site-probe-result", headers=ah, json={"site_probes": [
+        {"id": tasks[0]["id"], "code": 404, "latency_ms": 3},
+    ]})
+    async with _factory(client)() as s:
+        row = await s.get(DomainProbe, "closed.example")
+        row.local_ts = datetime.now(timezone.utc) - timedelta(minutes=5)
+        await s.commit()
+    item = (await client.get("/api/checks/discovered/probes", headers=auth_headers)).json()
+    item = item["items"][0]
+    assert item["local_hint"] is None and item["local_hint_pending"] is False
+
+
+def test_pick_prefers_health_over_mcp():
+    pick = domain_probe.pick
+    assert pick(404, {"/mcp": 406, "/docs": 200}) == {"path": "/docs", "code": 200, "expect": ""}
+    assert pick(404, {"/health": 204, "/ping": 200})["path"] == "/health"
+    # 400 на все подряд - не признак MCP-сервера
+    assert pick(400, {"/mcp": 400}) == {}
+    assert pick(404, {"/mcp": 401})["expect"] == domain_probe.MCP_EXPECT
+    assert pick(404, {"/api": 301, "/mcp": 404}) == {}
+    assert domain_probe.wants_paths("down", "не найдено (HTTP 404)")
+    assert not domain_probe.wants_paths("down", "слишком много запросов (HTTP 429)")
+    assert not domain_probe.wants_paths("down", "сервер не ответил (ConnectTimeout)")
+    assert not domain_probe.wants_paths("up", "HTTP 200 · 5 мс")
