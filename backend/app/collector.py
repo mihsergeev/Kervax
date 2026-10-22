@@ -1110,8 +1110,11 @@ async def _send_alerts(
                                                 parent_mode=pm, parent_server_id=pp))
             if lite:
                 psrv = await parents_mod.load_servers(session)
-                pidx = parents_mod.Index(psrv)
-                silent = parents_mod.silent_ids(psrv, now, seen_online, panel_just_started(now))
+                pidx = await parents_mod.resolve_for(parents_mod.Index(psrv), lite)
+                # не только молчащий, но и опоздавший с отчетом: сайт упал в ту же минуту, что
+                # замолчал его сервер, - ждем, пока не станет ясно, лежит ли сервер. Лежит - сайт
+                # строкой в его "не на связи", а не отдельным сообщением раньше него
+                silent = parents_mod.late_ids(psrv, now, panel_just_started(now))
                 # родитель только что включился или вернулся на связь: его сайты еще поднимаются,
                 # ждем конца прогрева (app/boot_warmup.py). Не поднялся - алерт придет после
                 warm = await boot_warmup.warming_ids(session, psrv, now)
@@ -2020,6 +2023,12 @@ def _flux_detail(msg: str, limit: int = 150) -> str:
 # сразу, а в Telegram уйдёт только устойчивый обрыв). 3 минуты = 12 пропущенных
 # отчётов подряд: разовая перегрузка канала столько не держится.
 _OFFLINE_ALERT_EXTRA = 180
+
+# Отбой "снова на связи" ждет, пока лежавшие из-за сервера мониторы проверят после его
+# возврата (интервал обычно минута), чтобы назвать поднявшиеся одним сообщением
+_KIDS_WAIT = 180
+# подпись мониторов по виду в сообщении про сервер
+_KID_LABEL = {"http": "сайты", "tcp_port": "порты", "cert": "сертификаты", "dns": "DNS", "push": "push"}
 # Что поднимается вместе с сервером и в первые минуты после включения еще не встало: юниты,
 # контейнеры, поды, воркеры, базы, очереди, сеть до соседей. Пока идет прогрев (app/boot_warmup.py),
 # их новые беды молчат. Диски, бэкапы, сроки и доступы от загрузки не зависят - их не держим
@@ -6216,25 +6225,28 @@ async def evaluate_servers(
         fill_hist = await fill_history(session, servers, now)
         metric_hist = await metric_history(session, servers, now)
         windows = list(await session.scalars(select(MaintenanceWindow)))
-        # лежащие мониторы - чтобы назвать их в сообщении про сервер, от которого они зависят
-        down_checks = [SimpleNamespace(id=i, name=n, target=t, type=ty, probe_local=pl, probe_server_id=ps,
-                                       parent_mode=pm, parent_server_id=pp)
-                       for i, n, t, ty, pl, ps, pm, pp in (await session.execute(select(
-                           Check.id, Check.name, Check.target, Check.type, Check.probe_local,
-                           Check.probe_server_id, Check.parent_mode, Check.parent_server_id,
-                       ).where(Check.enabled.is_(True), Check.last_status == "down"))).all()]
+        # мониторы - чтобы назвать лежащие в сообщении про сервер, от которого они зависят, и в
+        # его отбое сказать, какие поднялись вместе с ним
+        mon_by = {i: SimpleNamespace(id=i, name=n, target=t, type=ty, probe_local=pl, probe_server_id=ps,
+                                     parent_mode=pm, parent_server_id=pp, last_status=ls, last_checked_at=lc)
+                  for i, n, t, ty, pl, ps, pm, pp, ls, lc in (await session.execute(select(
+                      Check.id, Check.name, Check.target, Check.type, Check.probe_local,
+                      Check.probe_server_id, Check.parent_mode, Check.parent_server_id,
+                      Check.last_status, Check.last_checked_at,
+                  ).where(Check.enabled.is_(True)))).all()}
+        down_checks = [c for c in mon_by.values() if c.last_status == "down"]
     can_send = alerts.alerts_enabled(cfg) and not muted
     # окна обслуживания: сервер в идущем окне молчит, как под снузом (app/maint.py)
     maint_srv, _mc = maint.active(windows, now, cfg.get("tz") or "Europe/Moscow")
     # Зависимости (app/parents.py): кто сейчас молчит, что из-за этого лежит и кто стоит за ним.
     # Сервер за молчащим (или обслуживаемым) родителем про "недоступен" не пишет, он строкой
     # в сообщении про родителя; так же названы лежащие мониторы родителя.
-    pidx = parents_mod.Index(servers)
+    pidx = await parents_mod.resolve_for(parents_mod.Index(servers), down_checks)
     silent = parents_mod.silent_ids(servers, now, seen_online, panel_just_started(now))
-    kids_down: dict[int, list[str]] = {}
-    for _c in down_checks:
+    kids_down: dict[int, list[int]] = {}
+    for _c in sorted(down_checks, key=lambda c: c.name):
         for _pid, _why in parents_mod.parents_of(_c, pidx):
-            kids_down.setdefault(_pid, []).append(_c.name)
+            kids_down.setdefault(_pid, []).append(_c.id)
     kids_quiet: dict[int, list[str]] = {}
     for _s in sorted(servers, key=lambda x: x.name):
         if _s.parent_id and _s.id in silent:
@@ -6245,18 +6257,31 @@ async def evaluate_servers(
         if kids_quiet.get(sid):
             parts.append(f"↳ за ним молчат: {html.escape(parents_mod.list_text(kids_quiet[sid]))}")
         if kids_down.get(sid):
-            parts.append(f"↳ лежат мониторы: {html.escape(parents_mod.list_text(sorted(kids_down[sid])))}")
+            names = [mon_by[i].name for i in kids_down[sid]]
+            parts.append(f"↳ лежат мониторы: {html.escape(parents_mod.list_text(names))}")
         return "".join("\n" + x for x in parts)
 
+    def kid_links(cs) -> str:
+        """Имена мониторов ссылками на монитор: "a, b, c и еще 3"."""
+        shown = [tg_fmt.link(c.name, f"{base}/?check={c.id}" if base else "") for c in cs[:tg_fmt.NAMES_MAX]]
+        rest = len(cs) - len(shown)
+        return ", ".join(shown) + (f" и еще {rest}" if rest > 0 else "")
+
+    def kids_lines(ids, label: str = "") -> list[str]:
+        """Мониторы строками по видам: "Сайты: a, b", в отбое с подписью "Поднялись сайты: a"."""
+        by: dict[str, list] = {}
+        for i in ids:
+            if (c := mon_by.get(i)) is not None:
+                by.setdefault(_KID_LABEL.get(c.type, "мониторы"), []).append(c)
+        return [tg_fmt.cap(f"{label} {what}" if label else what) + ": " + kid_links(cs) for what, cs in by.items()]
+
     def deps_short(sid: int) -> str:
-        """То же для чата: "За ним молчат: a, b", "Лежат мониторы: x"."""
+        """То же для чата: "За ним молчат: a, b", "Сайты: x, y" ссылками на мониторы."""
         parts = []
         if kids_quiet.get(sid):
-            parts.append(tg_fmt.fact("За ним молчат", tg_fmt.names(kids_quiet[sid])))
-        if kids_down.get(sid):
-            parts.append(("лежат мониторы: " if parts else "Лежат мониторы: ")
-                         + tg_fmt.names(sorted(kids_down[sid])))
-        return "\n" + html.escape("; ".join(parts)) if parts else ""
+            parts.append(html.escape(tg_fmt.fact("За ним молчат", tg_fmt.names(kids_quiet[sid]))))
+        parts += kids_lines(kids_down.get(sid) or [])
+        return "".join("\n" + x for x in parts)
 
     base = settings.panel_url.rstrip("/")
     threshold = int(cfg.get("flood_threshold", 6))
@@ -6773,6 +6798,9 @@ async def evaluate_servers(
                     # «обрыв объявлен» ставим вместе с самим алертом (тот же fire_apply),
                     # чтобы флаг не появился, когда отправка пачки не удалась
                     fire_apply.append((s.id, "offline_said", 1))
+                    if kids_down.get(s.id):
+                        # названные мониторы - для отбоя: какие поднялись вместе с ним
+                        fire_apply.append((s.id, "offline_kids", kids_down[s.id]))
             elif level == 0:  # полное восстановление
                 if key in _FLAP_METRIC_KINDS and st.get(f"flap_{key}_muted"):
                     apply(s.id, key, 0)  # серия заглушена: про мигание уже сказано
@@ -6780,16 +6808,39 @@ async def evaluate_servers(
                 if key in _SILENT_RECOVERY:
                     apply(s.id, key, 0)
                     continue
+                kids_tail = ""
+                if key == "offline":
+                    # Мониторы, которые лежали из-за него: названные в алерте и упавшие, пока он
+                    # молчал. Отбой ждет, пока каждый проверят после возврата (не дольше
+                    # _KIDS_WAIT), и называет поднявшиеся. Не поднявшийся ждет конца прогрева
+                    # (app/boot_warmup.py) и не поднялся - придет своим алертом
+                    kids = list(dict.fromkeys([i for i in st.get("offline_kids") or [] if i in mon_by]
+                                              + kids_down.get(s.id, [])))
+                    back = _parse_iso(str(st.get("offline_back") or "")) or now
+                    if kids and (now - back).total_seconds() < _KIDS_WAIT and any(
+                            mon_by[i].last_checked_at is None or _aware(mon_by[i].last_checked_at) < back
+                            for i in kids):
+                        if not st.get("offline_back"):
+                            apply(s.id, "offline_back", now.isoformat())
+                        continue
+                    up = [i for i in kids if mon_by[i].last_status in ("up", "degraded")]
+                    down = [mon_by[i] for i in kids if i not in up]
+                    lines = kids_lines(up, "поднялись")
+                    if down:
+                        lines.append("Еще поднимаются: " + kid_links(down))
+                    kids_tail = "".join("\n" + x for x in lines)
                 # отбой одной строкой (app/srv_short.py RECOVERY); подробный _recovery_detail -
                 # для раздела и тестов
                 detail = _recovery_short(key, st, ctx, s)
-                recoveries.append(
-                    _server_alert_text(key, s.name, detail, srv_url(s, key), recovery=True, group=s.group_name or "")
-                )
+                rmsg = _server_alert_text(key, s.name, detail, srv_url(s, key), recovery=True,
+                                          group=s.group_name or "")
+                recoveries.append(rmsg.tail(kids_tail) if kids_tail else rmsg)
                 rec_apply.append((s.id, key, 0))
                 if key == "offline":
                     rec_apply.append((s.id, "offline_said", 0))
                     rec_apply.append((s.id, "offline_probe", None))
+                    rec_apply.append((s.id, "offline_kids", None))
+                    rec_apply.append((s.id, "offline_back", None))
             else:  # де-эскалация (crit→problem): без алерта, просто снижаем уровень
                 apply(s.id, key, level)
         # перезагрузка (аптайм сброшен) — одноразовый алерт на новый rebooted_at. Плановая (после

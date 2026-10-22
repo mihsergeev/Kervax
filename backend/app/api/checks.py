@@ -145,12 +145,14 @@ async def list_checks(user: CurrentUser, session: SessionDep) -> list[Check]:
     return [_hide_secrets(c, user) for c in rows]
 
 
-async def _parents_index(session) -> tuple[parents_mod.Index, dict[int, str], set[int]]:
-    """Серверы для подписи родителей: индекс, группы (чужую не называем) и кто молчит."""
+async def _parents_index(session, checks) -> tuple[parents_mod.Index, dict[int, str], set[int]]:
+    """Серверы для подписи родителей: индекс (с адресами доменов мониторов, как у алертов),
+    группы (чужую не называем) и кто молчит."""
     servers = await parents_mod.load_servers(session)
     now = datetime.now(timezone.utc)
     silent = parents_mod.silent_ids(servers, now, seen_online, panel_just_started(now))
-    return parents_mod.Index(servers), {x.id: x.group_name for x in servers}, silent
+    idx = await parents_mod.resolve_for(parents_mod.Index(servers), checks)
+    return idx, {x.id: x.group_name for x in servers}, silent
 
 
 def _parents_out(c, idx, groups, silent, user) -> list[dict]:
@@ -168,7 +170,7 @@ async def _with_parents(session, user, checks) -> None:
     сохранены, в базу это не пишется. Сервер чужой группы не называем."""
     if not checks:
         return
-    idx, groups, silent = await _parents_index(session)
+    idx, groups, silent = await _parents_index(session, checks)
     for c in checks:
         c.parents = _parents_out(c, idx, groups, silent, user)
 
@@ -299,7 +301,7 @@ async def overview(user: CurrentUser, session: SessionDep) -> ChecksOverviewOut:
     )
     outs = []
     secrets_ok = user.role in ("admin", "editor")
-    pidx, pgroups, psilent = await _parents_index(session)
+    pidx, pgroups, psilent = await _parents_index(session, checks)
     for c in checks:
         co = CheckOut.model_validate(c)
         if not secrets_ok:

@@ -46,10 +46,11 @@ async def depmap(user: CurrentUser, session: SessionDep) -> dict:
             Check.id, Check.name, Check.type, Check.target, Check.last_status, Check.probe_local,
             Check.probe_server_id, Check.parent_mode, Check.parent_server_id,
         ).where(Check.enabled.is_(True)), Check, "sites"))).all()
-        for r in rows:
-            c = SimpleNamespace(id=r.id, target=r.target, type=r.type, probe_local=r.probe_local,
-                                probe_server_id=r.probe_server_id, parent_mode=r.parent_mode,
-                                parent_server_id=r.parent_server_id)
+        cs = [SimpleNamespace(id=r.id, target=r.target, type=r.type, probe_local=r.probe_local,
+                              probe_server_id=r.probe_server_id, parent_mode=r.parent_mode,
+                              parent_server_id=r.parent_server_id) for r in rows]
+        await parents_mod.resolve_for(idx, cs)
+        for r, c in zip(rows, cs):
             # mode: off - отвязан руками (ни от какого сервера не зависит), иначе auto или server
             out_c.append({
                 "id": r.id, "name": r.name, "type": r.type, "target": r.target or "",

@@ -136,6 +136,31 @@ def test_fresh_node_is_not_asked_for_helpers():
     assert not _fresh_node(s, now)
 
 
+def test_relay_helper_is_asked_for_on_a_fresh_node():
+    """Галочку ретранслятора включили через пару минут после установки агента: установщик уже
+    прошел и relay-setup не принесет. Нода сразу в kervax_outdated, а не через 20 минут -
+    иначе плейбук с -l kervax_outdated отвечал "no hosts", а карточка звала его гонять."""
+    from datetime import datetime, timedelta, timezone
+
+    from app.api.ansible import node_of
+    from app.api.servers import _fresh_node, _helper_advice
+    from app.models import Server
+
+    now = datetime.now(timezone.utc)
+    rep = {"agent_version": "2.46", "setup_versions": {"timesync-setup": "0.2"}}
+    s = Server(id=7, name="kz-relay", token_hash="x", enabled=True, last_report=rep, last_seen=now,
+               first_report_at=now - timedelta(minutes=15), relay_enabled=True,
+               offline_after_seconds=180)
+    cur = {"timesync-setup": "0.2", "relay-setup": "0.1", "units-setup": "0.5"}
+    assert _fresh_node(s, now)
+    # units-setup установщик еще может принести - молчим; relay-setup - нет
+    assert [a.name for a in _helper_advice(s, cur)] == ["relay-setup"]
+    n = node_of(s, cur, now)
+    assert n is not None and n.rollout and [a.name for a in n.outdated] == ["relay-setup"]
+    s.relay_enabled = False
+    assert _helper_advice(s, cur) == []
+
+
 async def test_first_report_marks_the_node_fresh(client, auth_headers):
     r = await client.post("/api/servers", json={"name": "fresh-one"}, headers=auth_headers)
     token = r.json()["token"]

@@ -662,7 +662,10 @@ def _helper_advice(server: Server, cur: dict[str, str]) -> list[HelperAdvice]:
         inst = sv.get(name)  # None = helper до версионирования
         # агенты < 1.63 слали версии числами — приводим к строке, чтобы не спорить о типах
         inst = None if inst is None else str(inst)
-        if inst is None and fresh:
+        # relay-setup - не про установщик: галочку ретранслятора ставят уже на живой ноде, и
+        # установщик, прошедший раньше, его не принесет. Спрятать его на 20 минут значило
+        # оставить kervax_outdated пустым как раз тогда, когда человек пошел гонять плейбук
+        if inst is None and fresh and name != "relay-setup":
             continue
         if inst is None or _ver_key(inst) < _ver_key(c):
             out.append(
