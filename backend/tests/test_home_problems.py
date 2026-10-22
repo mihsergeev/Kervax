@@ -302,7 +302,7 @@ def test_metrics_follow_the_alert_not_the_last_report():
                for k in kinds for p in texts[k])
     # CPU опустился до 85%: ниже порога, но алерт еще не снят - строка остается
     s = _srv(now, {**rep, "cpu_percent": 85}, state, **kw)
-    assert [p["text"] for p in _probs(s, now, "cpu")] == ["CPU 85%"]
+    assert [p["text"] for p in _probs(s, now, "cpu")] == ["CPU 85% - снимется, если продержится ниже 80% 15 мин"]
     # порог выключили - строки нет, даже если в состоянии остался уровень
     s = _srv(now, rep, state, **{**kw, "cpu_alert_percent": 0})
     assert _probs(s, now, "cpu") == []

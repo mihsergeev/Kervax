@@ -4,6 +4,14 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.7.4] - 2026-10-22
+
+### Changed
+- CPU, RAM, температуры и conntrack в "Что сломано", в карточке сервера и в алерте: среднее за
+  время превышения (не больше получаса) и когда алерт снимется, а не значение последнего отчета.
+  Например "CPU 85% за 30 мин, сейчас 52% - снимется, если продержится ниже 80% еще 12 мин".
+  Раньше в минуту провала висело "CPU 52%" рядом со "сломано", хотя сервер был перегружен часами.
+
 ## [1.7.3] - 2026-10-22
 
 ### Fixed

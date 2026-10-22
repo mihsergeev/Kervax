@@ -303,6 +303,14 @@ def short(key: str, ctx: dict, s, detail: str = "", level: int = 1,
     return tg_fmt.cap(what), [f for f in facts if f]
 
 
+def _avg_tail(ctx: dict) -> str:
+    """CPU, RAM, температуры и conntrack: в value среднее за выдержку (collector ставит value_now)"""
+    avg = ctx.get("avg")
+    if "value_now" not in ctx or not isinstance(avg, dict) or not avg.get("min"):
+        return ""
+    return f" в среднем за {int(avg['min'])} мин"
+
+
 def _short(key: str, ctx: dict, s, level: int):
     rep = (getattr(s, "last_report", None) or {}) if s is not None else {}
     items = ctx.get("items")
@@ -317,10 +325,10 @@ def _short(key: str, ctx: dict, s, level: int):
         return "Перезагрузился", []
     if key == "cpu":
         top = top_proc(rep, "cpu")
-        return f"CPU загружен на {v}%", [tg_fmt.fact("Грузит", top)] if top else []
+        return f"CPU загружен на {v}%{_avg_tail(ctx)}", [tg_fmt.fact("Грузит", top)] if top else []
     if key == "mem":
         top = top_proc(rep, "mem")
-        return f"Память занята на {v}%", [tg_fmt.fact("Ест", top)] if top else []
+        return f"Память занята на {v}%{_avg_tail(ctx)}", [tg_fmt.fact("Ест", top)] if top else []
     if key in ("disk", "inode"):
         mount = ctx.get("mount") or ""
         where = f" {mount}" if mount else ""
@@ -331,13 +339,13 @@ def _short(key: str, ctx: dict, s, level: int):
         top = ctx.get("top") or ""
         return what, [tg_fmt.fact("Больше всех файлов" if key == "inode" else "Занимает", top)] if top else []
     if key == "temp":
-        return f"CPU греется до {v}°C", []
+        return f"CPU греется до {v}°C{_avg_tail(ctx)}", []
     if key == "throttle":
         return "CPU сбрасывает частоту от перегрева", []
     if key == "disktemp":
-        return f"Диск греется до {v}°C", []
+        return f"Диск греется до {v}°C{_avg_tail(ctx)}", []
     if key == "conntrack":
-        return f"Таблица conntrack заполнена на {v}%", []
+        return f"Таблица conntrack заполнена на {v}%{_avg_tail(ctx)}", []
     if key == "clock":
         return f"Часы ушли на {v}", []
     if key == "db_conn":
