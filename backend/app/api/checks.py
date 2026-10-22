@@ -1112,13 +1112,15 @@ async def tamper_accept(check_id: int, body: dict, user: CurrentUser, session: S
     как норма. Отбой придет следующим тиком, если признаков не осталось."""
     check = await _get_or_404(check_id, session, user)
     key, arg = str(body.get("key") or ""), str(body.get("arg") or "")
-    if key not in _TAMPER_KEYS or not check.tamper_state:
+    mode = str(body.get("mode") or "")
+    if key not in _TAMPER_KEYS or not check.tamper_state or mode not in ("", "later") or (mode and key == "all"):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Принимать нечего")
     from app import tamper as tamper_mod
     from app import webfiles as webfiles_mod
-    # новые php и правки - файлы на сервере: снимаем их там, иначе стадия "файлы сайтов" вернет признак
+    # новые php и правки - файлы на сервере: снимаем их там, иначе стадия "файлы сайтов" вернет
+    # признак. Отложенные остаются на сервере, их прячет сама стадия
     signs = check.tamper_state.get("signs") or {}
-    for k in (("php", "edit") if key == "all" else (key,) if key in ("php", "edit") else ()):
+    for k in (() if mode else ("php", "edit") if key == "all" else (key,) if key in ("php", "edit") else ()):
         by: dict[tuple[int, str], list[str]] = {}
         for f in (signs.get(k) or {}).get("files") or []:
             by.setdefault((int(f.get("sid") or 0), str(f.get("root") or "")), []).append(str(f.get("p") or ""))
@@ -1126,9 +1128,9 @@ async def tamper_accept(check_id: int, body: dict, user: CurrentUser, session: S
             srv = await session.get(Server, sid)
             if srv is not None:
                 srv.webfiles = webfiles_mod.accept(srv.webfiles, root, k, paths)
-    check.tamper_state = tamper_mod.accept(check.tamper_state, key, arg, datetime.now(timezone.utc))
+    check.tamper_state = tamper_mod.accept(check.tamper_state, key, arg, datetime.now(timezone.utc), mode)
     await session.commit()
-    await audit.record(session, user.username, "tamper_accept", check.name, f"{key} {arg}".strip()[:500])
+    await audit.record(session, user.username, "tamper_accept", check.name, " ".join(x for x in (key, arg, mode) if x)[:500])
     return {"tamper": check.tamper}
 
 

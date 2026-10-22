@@ -141,6 +141,26 @@ async def test_track_maps_root_to_site_and_accept(client, auth_headers, monkeypa
         assert "php" not in (await s.get(Server, sid)).webfiles["roots"]["2080-11"]
 
 
+async def test_postponed_site_files_stay_on_server_and_new_ones_show(client, auth_headers, monkeypatch):
+    monkeypatch.setattr(webfiles, "STALE", 10 ** 9)
+    f, sid, a, _b = await _seed(client, ["www.shop.example.com"])
+    await webfiles.track(f, datetime.now(timezone.utc))
+    r = await client.post(f"/api/checks/{a}/tamper-accept", json={"key": "edit", "mode": "later"},
+                          headers=auth_headers)
+    assert r.status_code == 200 and [x["key"] for x in r.json()["tamper"]["signs"]] == ["php"]
+    async with f() as s:
+        srv = await s.get(Server, sid)
+        assert "js/custom.js" in srv.webfiles["roots"]["2080-11"]["edit"]  # на сервере файл остался
+        root = srv.webfiles["roots"]["2080-11"]
+        srv.webfiles = {**srv.webfiles, "roots": {"2080-11": {**root, "edit": {
+            **root["edit"], "js/menu.js": {"since": NOW.isoformat(), "s": 50}}}}}
+        await s.commit()
+    await webfiles.track(f, datetime.now(timezone.utc))
+    async with f() as s:
+        edit = (await s.get(Check, a)).tamper_state["signs"]["edit"]
+        assert [x["p"] for x in edit["files"]] == ["js/menu.js"]  # отложенный спрятан, новый виден
+
+
 async def test_track_loose_root_is_server_problem(client, auth_headers, monkeypatch):
     monkeypatch.setattr(webfiles, "STALE", 10 ** 9)
     f, sid, a, _b = await _seed(client, [])

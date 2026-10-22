@@ -32,7 +32,9 @@ def run(st, o, at, fleet=frozenset(), versions=None):
 
 def test_parse_page_domains_title_own_js():
     p = tamper.parse_page(PAGE + "<iframe src='//evil.example.net/check'></iframe>"
-                          "<script>var u='https://203.0.113.9/x';</script>", "https://www.example.com/")
+                          "<script>var u='https://docs.example.org/x'; s.src='https://203.0.113.9/x';</script>"
+                          "<script type='application/ld+json'>{\"sameAs\": \"https://social.example.org/shop\"}</script>",
+                          "https://www.example.com/")
     assert p["title"] == "Example Shop"
     assert p["domains"] == {"www.googletagmanager.com": "script", "evil.example.net": "iframe",
                             "203.0.113.9": "inline"}
@@ -45,6 +47,22 @@ def test_js_domains_skip_docs_and_own():
           'var ns="http://www.w3.org/2000/svg"; /* https://github.com/x */ fetch("/api")')
     assert tamper.js_domains(js) == {"cdn-check.example.org"}
     assert not tamper.is_external("static.example.com", "www.example.com")
+
+
+def test_js_domains_only_what_loads():
+    # строки-ссылки внутри библиотеки (лицензия, документация, соцсети, значение по умолчанию) - не загрузка
+    lib = ('return`https://spdx.example.org/licenses/${a}.html`;case"tiktok":return"https://social.example.org/@"+o;'
+           'new URL(s,"https://author.example.org");cfg={validatorUrl:"https://validator.example.org/validator"}')
+    assert tamper.js_domains(lib) == set()
+    loads = ("document.write('<script src=\"https://w.example.net/a\"></script>');"
+             'el.innerHTML="<iframe src=\\"https://i.example.net/f\\"></iframe>";'
+             'fetch(`https://api.example.net/${id}`);x.open("GET","https://xhr.example.net/v");'
+             'new WebSocket("wss://ws.example.net/s");import("https://mod.example.net/m");'
+             '(w,d,"script","https://counter.example.net/tag.js","ym");window.location.href="https://go.example.net/"')
+    assert tamper.js_domains(loads) == {"w.example.net", "i.example.net", "api.example.net", "xhr.example.net",
+                                        "ws.example.net", "mod.example.net", "counter.example.net", "go.example.net"}
+    assert tamper.is_vendor("/swagger/swagger-ui-bundle.js") and tamper.is_vendor("/js/jquery-3.7.1.min.js")
+    assert tamper.is_vendor("/assets/vendor/app.js") and not tamper.is_vendor("/js/reactions.js")
 
 
 def test_engine_from_generator_and_headers():
@@ -125,7 +143,7 @@ def test_accept_buttons():
     st = tamper.accept(st, "old", "", NOW)
     assert "old" not in st["signs"]
     st = run(st, bad, NOW + timedelta(hours=2), versions={"wp": WP})
-    assert set(st["signs"]) == {"bot"}  # отложенная версия и принятый домен не вернулись
+    assert set(st["signs"]) == {"bot"}  # известная версия и принятый домен не вернулись
     st = tamper.accept(st, "all", "", NOW)
     assert tamper.level(st) == "none"
     st = run(st, bad, NOW + timedelta(hours=3), versions={"wp": WP})
@@ -247,6 +265,102 @@ async def test_api_accept_and_view(client, auth_headers):
     assert r.status_code == 200 and r.json()["tamper"]["level"] == "none"
     r = await client.post(f"/api/checks/{cid}/tamper-accept", json={"key": "nope"}, headers=auth_headers)
     assert r.status_code == 400
+    r = await client.post(f"/api/checks/{cid}/tamper-accept", json={"key": "all", "mode": "later"},
+                          headers=auth_headers)
+    assert r.status_code == 400
     # другой адрес - база сбрасывается
     r = await client.patch(f"/api/checks/{cid}", json={"target": "https://shop.example.com"}, headers=auth_headers)
     assert r.json()["tamper"] is None
+
+
+def js_obs(js, page=None, **kw):
+    """Разбор со своими js: js {файл: домены} - прочитанные, page - все свои js страницы."""
+    doms = {"www.googletagmanager.com": "script"}
+    for path, ds in js.items():
+        for d in ds:
+            doms.setdefault(d, path)
+    return {**obs(domains=doms, **kw), "js": js, "js_page": page if page is not None else list(js)}
+
+
+def test_js_unread_at_first_scan_goes_to_base():
+    # первый разбор: файлы на странице, но не открылись - их домены потом в базу, а не признаком
+    st = run(None, js_obs({}, page=["/js/app.js", "/swagger/swagger-ui-bundle.js"]), NOW)
+    assert st["base"]["js"] == {"/js/app.js": False, "/swagger/swagger-ui-bundle.js": False}
+    good = {"/js/app.js": ["api.example.org"], "/swagger/swagger-ui-bundle.js": ["cdn.example.org"]}
+    for m in (60, 70):
+        st = run(st, js_obs(good), NOW + timedelta(minutes=m))
+    assert not st["signs"] and not st["pend"]
+    assert {"api.example.org", "cdn.example.org"} <= set(st["base"]["domains"])
+    assert st["base"]["js"] == {"/js/app.js": True, "/swagger/swagger-ui-bundle.js": True}
+    # правка прочитанного своего файла и новый свой файл - признак, новая вендорная сборка - в базу
+    bad = {**good, "/js/app.js": ["api.example.org", "evil.example.net"], "/js/new.js": ["evil2.example.net"],
+           "/js/chart-4.5.min.js": ["charts.example.org"]}
+    for m in (120, 130):
+        st = run(st, js_obs(bad), NOW + timedelta(minutes=m))
+    assert sorted(st["signs"]["dom"]["list"]) == ["evil.example.net", "evil2.example.net"]
+    assert "charts.example.org" in st["base"]["domains"]
+    # файлы, которых больше нет на странице, забываются
+    st = run(st, js_obs({"/js/app.js": ["api.example.org"]}), NOW + timedelta(hours=3))
+    assert st["base"]["js"] == {"/js/app.js": True}
+
+
+def test_old_base_without_js_takes_vendor_domains_but_not_signed():
+    # база снята, когда js еще не запоминались: сборка отдает домены в базу, кроме уже горящих
+    since = NOW.isoformat()
+    st = {"base": {"title": "Example Shop", "size": 13000, "domains": {"www.googletagmanager.com": "script"}},
+          "signs": {"dom": {"list": {"a.example.net": {"src": "/js/app.min.js", "since": since}}, "since": since}}}
+    st = run(st, js_obs({"/js/app.min.js": ["a.example.net", "b.example.net"], "/js/own.js": ["c.example.net"]}),
+             NOW + timedelta(hours=1))
+    assert "b.example.net" in st["base"]["domains"]
+    assert "a.example.net" not in st["base"]["domains"] and "c.example.net" not in st["base"]["domains"]
+    # новый свой файл - как обычно: домен копится в горящий признак
+    assert sorted(st["signs"]["dom"]["list"]) == ["a.example.net", "c.example.net"]
+
+
+def test_group_ok_and_postpone_light_up_only_new():
+    st = run(None, obs(), NOW)
+    two = obs(domains={"www.googletagmanager.com": "script", "a.example.net": "iframe", "b.example.net": "script"})
+    for m in (60, 70):
+        st = run(st, two, NOW + timedelta(minutes=m))
+    # "отложить 7 дн" на группу: оба домена прячутся, третий загорается сам по себе
+    st = tamper.accept(st, "dom", "", NOW + timedelta(minutes=75), mode="later")
+    assert "dom" not in st["signs"] and st["post"]["dom"]["what"] == ["a.example.net", "b.example.net"]
+    three = obs(domains={**two["domains"], "c.example.net": "iframe"})
+    for m in (120, 130):
+        st = run(st, three, NOW + timedelta(minutes=m))
+    assert list(st["signs"]["dom"]["list"]) == ["c.example.net"]
+    # "это ок" на группу: все текущие в базу
+    st = tamper.accept(st, "dom", "", NOW + timedelta(minutes=135))
+    assert "dom" not in st["signs"] and "c.example.net" in st["base"]["domains"]
+    # через неделю отложенные возвращаются, если еще на месте
+    later = NOW + tamper.POSTPONE + timedelta(hours=2)
+    for m in (0, 10):
+        st = run(st, three, later + timedelta(minutes=m))
+    assert sorted(st["signs"]["dom"]["list"]) == ["a.example.net", "b.example.net"]
+
+
+def test_version_ok_lights_again_on_other_version():
+    st = run(None, obs(), NOW)
+    st = run(st, obs(engine={"wp": "7.0"}), NOW + timedelta(hours=1), versions={"wp": WP})
+    st = tamper.accept(st, "old", "WordPress 7.0", NOW)
+    st = run(st, obs(engine={"wp": "7.0"}), NOW + timedelta(hours=2), versions={"wp": WP})
+    assert "old" not in st["signs"] and st["ok_old"] == ["WordPress 7.0"]
+    st = run(st, obs(engine={"wp": "7.0.6"}), NOW + timedelta(hours=3), versions={"wp": WP})
+    assert [it["what"] for it in st["signs"]["old"]["items"]] == ["WordPress 7.0.6"]
+    # отложенное в старом формате (просто время) прячет всю группу
+    st2 = {**st, "post": {"old": (NOW + timedelta(days=5)).isoformat()}}
+    assert "old" not in run(st2, obs(engine={"wp": "7.0.6"}), NOW + timedelta(hours=4), versions={"wp": WP})["signs"]
+
+
+def test_postponed_empty_page_keeps_base_size():
+    st = run(None, obs(), NOW)
+    for m in (60, 70):
+        st = run(st, obs(size=173, title=""), NOW + timedelta(minutes=m))
+    st = tamper.accept(st, "empty", "", NOW + timedelta(minutes=75), mode="later")
+    for h in range(2, 6):
+        st = run(st, obs(size=173, title=""), NOW + timedelta(hours=h))
+    assert tamper.level(st) == "none" and st["base"]["size"] == 13000
+    later = NOW + tamper.POSTPONE + timedelta(hours=2)
+    for m in (0, 10):
+        st = run(st, obs(size=173, title=""), later + timedelta(minutes=m))
+    assert "empty" in st["signs"]

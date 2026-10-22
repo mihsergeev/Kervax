@@ -397,6 +397,7 @@ def tg_short(items) -> tuple[str, list[str]] | None:
 async def track(session_factory: async_sessionmaker[AsyncSession], now: datetime) -> None:
     """Свежие блоки helper'а -> servers.webfiles; признаки привязанных корней -> мониторы."""
     from app import parents as parents_mod
+    from app import tamper as tamper_mod
     from app.models import Check, Server
     async with session_factory() as s:
         servers = list(await s.scalars(select(Server)))
@@ -428,8 +429,11 @@ async def track(session_factory: async_sessionmaker[AsyncSession], now: datetime
             signs = dict(st.get("signs") or {})
             before = {k: signs.get(k) for k in ("php", "edit")}
             for k in ("php", "edit"):
-                if k in want:
-                    signs[k] = want[k]
+                # "отложить" в карточке сайта прячет файлы, что были в признаке, новые видно сразу
+                files = [f for f in (want.get(k) or {}).get("files") or []
+                         if not tamper_mod.hidden(st.get("post"), k, f["p"], now)]
+                if files:
+                    signs[k] = {"files": files, "since": min(f["since"] for f in files)}
                 else:
                     signs.pop(k, None)
             if before != {k: signs.get(k) for k in ("php", "edit")}:
