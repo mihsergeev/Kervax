@@ -1,4 +1,4 @@
-"""Признаки взлома в файлах сайтов (helper webfiles-setup 0.2, блок extras["webfiles"]).
+"""Признаки взлома в файлах сайтов (helper webfiles-setup 0.3, блок extras["webfiles"]).
 
 Helper сам находит веб-корни (рабочие каталоги php/Apache, root из конфигов nginx и Apache,
 /var/www/*, в контейнерах и подах через /proc/<pid>/root) и раз в 10 минут присылает разницу
@@ -9,14 +9,18 @@ Helper сам находит веб-корни (рабочие каталоги 
 - код изменен вне выкладки: правка или новый js/.htaccess, когда за прогон в корне поменялось
   меньше 10 файлов. Слабый признак.
 Выкладка - 10 и больше файлов за прогон или 5 и больше записанных в одну секунду (скрипт:
-выкладка, старт контейнера): серая строка "выкладка", не признак.
+выкладка, старт контейнера): серая строка "выкладка", не признак. Выкладка через git (pull
+двух файлов) - по reflog: helper 0.3 присылает времена последних pull/checkout/reset репозитория,
+в котором лежит корень, и файлы, записанные за секунды до такого события, - выкладка при любом
+их числе. Правка в другое время - признак, как раньше; со старым helper'ом (без reflog) - тоже.
 
 Генерируемое в работе - не код: кэши и скомпилированные шаблоны не в счет совсем, ассеты, которые
 приложение публикует само (Yii web/assets/<хеш>, Magento pub/static), - кроме php. В контейнере
 helper 0.2 смотрит только верхний слой overlay (записанное в живом контейнере), ключ корня - по
 контейнеру, первые 10 минут после старта только снимает список. Поды одного ворклоада - одна
 строка и одна проблема ("backend", подов: 5), вложенные корни одного пода (/app и /app/admin) не
-дублируют признаки.
+дублируют признаки. Один каталог, смонтированный в несколько контейнеров (php-fpm и воркер одного
+проекта), - тоже одна строка: helper 0.3 присылает устройство и inode корня.
 
 Признаки копятся в servers.webfiles, пока их не примут кнопкой ("это наше") или файл не пропадет.
 Корень с доменами из конфига (или единственный сайт сервера) привязан к монитору: признаки идут
@@ -27,6 +31,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections import Counter
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlparse
 
@@ -42,6 +47,9 @@ MASS = 10          # столько файлов за прогон в одном
 BATCH = 5          # столько файлов с одним временем записи - их записал скрипт, не человек
 GONE_ROOT = timedelta(days=7)
 GONE_CT = timedelta(hours=2)  # корень контейнера, которого нет в списке, - контейнер пересоздан
+GIT_BEFORE = 30   # git пишет файлы до записи в reflog: файлы за столько секунд до события - его
+GIT_AFTER = 2     # и немного после: время файла и события округлено до секунды
+RUN_WIN = 660     # признак без времени файла (набран до helper'а 0.3) - событие за прогон до него
 RULES = 2          # версия правил: старые признаки один раз проходят через новые
 MAX_FILES = 50     # файлов в одном признаке
 _PHP = (".php", ".phtml", ".phar", ".pht", ".php3", ".php4", ".php5", ".php7", ".php8")
@@ -124,6 +132,11 @@ def process(state: dict | None, b: dict, now: datetime) -> dict:
                    domains=[str(d).lower() for d in r.get("domains") or []][:20],
                    files=int(r.get("files") or 0), big=bool(r.get("big")), layer=bool(r.get("layer")),
                    at=now.isoformat())
+        for k, v in (("src", str(r.get("src") or "")), ("git", _events(r.get("git")))):
+            if v:
+                cur[k] = v
+            else:
+                cur.pop(k, None)
     runs = sorted((x for x in b.get("runs") or [] if isinstance(x, dict)), key=lambda x: float(x.get("ts") or 0))
     for run in runs:
         ts = float(run.get("ts") or 0)
@@ -137,6 +150,8 @@ def process(state: dict | None, b: dict, now: datetime) -> dict:
     if int(st["r"]) < RULES:
         _rules2(roots)
         st["r"] = RULES
+    for r in roots.values():
+        _git_clean(r)
     _nested(roots)
     for k in [k for k, r in roots.items() if _old(r, now)]:
         roots.pop(k)
@@ -182,9 +197,73 @@ def _nested(roots: dict) -> None:
                     a.pop(k)
 
 
+def _events(lst) -> list[list]:
+    """[[ts, "pull"], ...] из блока helper'а 0.3, по времени."""
+    out = []
+    for x in lst or []:
+        if isinstance(x, (list, tuple)) and x:
+            try:
+                out.append([int(x[0]), str(x[1] if len(x) > 1 else "")])
+            except (TypeError, ValueError):
+                continue
+    return sorted(out)
+
+
+def _git_event(root: dict, t: int, since: str = "") -> list | None:
+    """Событие reflog, которым записан файл: время файла за секунды до события. Признак без
+    времени файла (набран до этой версии) - событие за прогон до признака."""
+    evs = root.get("git") or []
+    if t > 0:
+        # ближайшее событие не раньше файла: git пишет reflog после файлов
+        near = [e for e in evs if e[0] - GIT_BEFORE <= t <= e[0] + GIT_AFTER]
+        return min(near, key=lambda e: (e[0] < t, abs(e[0] - t)), default=None)
+    try:
+        s = datetime.fromisoformat(since).timestamp()
+    except (TypeError, ValueError):
+        return None
+    return next((e for e in evs if s - RUN_WIN < e[0] <= s), None)
+
+
+def _git_deploy(root: dict, ev: list, n: int) -> None:
+    at = _iso(ev[0])
+    old = root.get("deploy") or {}
+    if old.get("at") == at and old.get("git"):
+        n = max(n, int(old.get("n") or 0))
+    elif old.get("at", "") > at:
+        return
+    root["deploy"] = {"at": at, "n": n, "git": ev[1]}
+
+
+def _git_clean(root: dict) -> None:
+    """Признаки, файлы которых записала выкладка через git: reflog мог прийти позже правки
+    (git дописывает его в конце) или признак набран до helper'а 0.3."""
+    if not root.get("git"):
+        return
+    for k in ("php", "edit"):
+        files = root.get(k) or {}
+        for p in list(files):
+            if k == "php" and in_uploads(p):
+                continue
+            ev = _git_event(root, int(files[p].get("t") or 0), files[p].get("since") or "")
+            if ev:
+                files.pop(p)
+                _git_deploy(root, ev, 1)
+        if k in root and not files:
+            root.pop(k)
+
+
 def _apply(root: dict, d: dict, ts: float) -> None:
     new = [x for x in _rows(d.get("new")) if not generated(x[0])]
     changed = [x for x in _rows(d.get("changed")) if not generated(x[0])]
+    # записанное выкладкой через git - не признак при любом числе файлов (кроме php в загрузках)
+    by_git: dict[str, list] = {}
+    for p, t, _s in new + changed:
+        ev = _git_event(root, t) if t > 0 else None
+        if ev:
+            by_git[p] = ev
+    if by_git:
+        last = max(by_git.values())
+        _git_deploy(root, last, sum(1 for e in by_git.values() if e == last))
     gone = d.get("gone") or []
     total = int(d.get("n_new") or len(new)) + int(d.get("n_changed") or len(changed))
     same: dict[int, int] = {}
@@ -195,20 +274,20 @@ def _apply(root: dict, d: dict, ts: float) -> None:
     if deploy:
         root["deploy"] = {"at": _iso(ts), "n": total}
     since = _iso(ts)
-    for p, _t, size in new:
+    for p, t, size in new:
         if is_php(p) and in_uploads(p) and not _quiet_index(p, size):
-            _add(root, "php", p, since, size)
-        elif deploy:
+            _add(root, "php", p, since, size, t)
+        elif deploy or p in by_git:
             continue
         elif is_php(p):
-            _add(root, "php", p, since, size)
+            _add(root, "php", p, since, size, t)
         else:
-            _add(root, "edit", p, since, size)
-    for p, _t, size in changed:
+            _add(root, "edit", p, since, size, t)
+    for p, t, size in changed:
         if is_php(p) and in_uploads(p) and not _quiet_index(p, size):
-            _add(root, "php", p, since, size)
-        elif not deploy:
-            _add(root, "edit", p, since, size)
+            _add(root, "php", p, since, size, t)
+        elif not deploy and p not in by_git:
+            _add(root, "edit", p, since, size, t)
     for g in gone:
         p = g[0] if isinstance(g, (list, tuple)) and g else g
         for k in ("php", "edit"):
@@ -218,10 +297,12 @@ def _apply(root: dict, d: dict, ts: float) -> None:
             root.pop(k)
 
 
-def _add(root: dict, key: str, p: str, since: str, size: int) -> None:
+def _add(root: dict, key: str, p: str, since: str, size: int, t: int = 0) -> None:
     files = root.setdefault(key, {})
     if p in files or len(files) < MAX_FILES:
         files[p] = {"since": (files.get(p) or {}).get("since") or since, "s": size}
+        if t > 0:
+            files[p]["t"] = t
 
 
 def accept(state: dict | None, root: str = "", key: str = "", paths: list[str] | None = None) -> dict:
@@ -289,11 +370,19 @@ def where(srv_name: str, root: dict) -> str:
 
 
 def groups(roots: dict) -> list[tuple[str, str, list[tuple[str, dict]]]]:
-    """(ворклоад, путь, корни): поды одного ворклоада с одним путем - одна строка."""
+    """(ворклоады, путь, корни): поды одного ворклоада с одним путем - одна строка, один каталог,
+    смонтированный в несколько контейнеров (src от helper'а 0.3), - тоже, с контейнерами через
+    запятую."""
     out: dict[tuple[str, str], list[tuple[str, dict]]] = {}
     for rk, r in roots.items():
-        out.setdefault((workload(r), r.get("path") or ""), []).append((rk, r))
-    return [(w, p, sorted(items)) for (w, p), items in sorted(out.items(), key=lambda x: (x[0][0] != "", x[0][1], x[0][0]))]
+        src = r.get("src") if in_container(r) and not r.get("layer") else ""
+        out.setdefault(("", "=" + src) if src else (workload(r), r.get("path") or ""), []).append((rk, r))
+    rows = []
+    for items in out.values():
+        items = sorted(items)
+        w = ", ".join(sorted({workload(r) for _rk, r in items}))
+        rows.append((w, min(r.get("path") or "" for _rk, r in items), items))
+    return sorted(rows, key=lambda x: (x[0] != "", x[1], x[0]))
 
 
 def _merged(items: list[tuple[str, dict]], k: str) -> dict[str, dict]:
@@ -371,7 +460,8 @@ def view(state: dict | None, rep: dict, now: datetime) -> dict | None:
         out.append({
             # key - корни через запятую: "это наше" снимает признаки со всех подов строки
             "key": ",".join(rk for rk, _r in items), "where": w or "host", "path": path,
-            "pods": len(items) if w else 0,
+            # подов самого большого ворклоада строки: php-fpm и воркер одного проекта - не поды
+            "pods": max(Counter(workload(r) for r in rs).values()) if w else 0,
             "domains": list(dict.fromkeys(d for r in rs for d in r.get("domains") or []))[:20],
             "files": max(r.get("files", 0) for r in rs), "big": any(r.get("big") for r in rs),
             "layer": all(r.get("layer") for r in rs),

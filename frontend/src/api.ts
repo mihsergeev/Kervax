@@ -2737,7 +2737,8 @@ export interface WebRoot {
   // pods - сколько подов ворклоада в строке (0 - хост), layer - список только верхнего слоя контейнера
   pods?: number
   layer?: boolean
-  deploy?: { at: string; n: number } | null
+  // git - выкладка через git (pull, checkout...) по reflog репозитория
+  deploy?: { at: string; n: number; git?: string } | null
   php: { p: string; since: string }[]
   edit: { p: string; since: string }[]
   site: boolean

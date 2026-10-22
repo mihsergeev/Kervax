@@ -104,11 +104,15 @@ def test_helper_needed_and_written_right():
     assert not setup_scripts.setup_needed("webfiles-setup", {"extras": {"fpm": {"v": 1, "pools": [], "skipped": []}}})
     assert not setup_scripts.setup_needed("webfiles-setup", {"web_services": [{"kind": "Traefik"}]})
     src = (Path(__file__).resolve().parents[2] / "agent" / "webfiles-setup.sh").read_text(encoding="utf-8")
-    assert "\r" not in src and "KERVAX_SETUP_VERSION=0.2" in src and "report.d/webfiles.json" in src
+    assert "\r" not in src and "KERVAX_SETUP_VERSION=0.3" in src and "report.d/webfiles.json" in src
     assert 'mv -f "$HELPER.new" "$HELPER"' in src and "versions/webfiles-setup.ver" in src
     # контейнер: только верхний слой overlay, ключ по контейнеру, старт - не правка, ассеты мимо
     assert "upperdir=" in src and 'key="c${cid:0:12}' in src and "START_WIN=600" in src
     assert "! -path '*/web/assets/*'" in src
+    # выкладка через git: reflog читается файлом, сам git не запускается (конфиг репозитория мог бы
+    # запустить фильтр от root), корень в bind-mount ищется на хосте через mountinfo
+    assert "/logs/HEAD" in src and "/proc/1/mountinfo" in src and '\\"git\\":[$GEV]' in src
+    assert "git -c" not in src and "git diff" not in src and "git -C" not in src
 
 
 async def _seed(client, domains):
@@ -277,3 +281,71 @@ def test_site_sign_lists_a_file_of_many_pods_once():
     row = next(r for r in tamper.view(st)["signs"] if r["key"] == "php")
     assert row["files"] == ["shell.php"] and row["n"] == 1 and row["where"] == "node-a, web"
     assert tamper.alert_text(st).splitlines()[1] == "Новые php: shell.php"
+
+
+# ---------- выкладка через git: reflog репозитория, в котором лежит корень ----------
+
+def git_root(events, key="2080-11", **kw):
+    return {**ROOT, "key": key, "git": events, **kw}
+
+
+def test_git_pull_of_two_files_is_a_deploy_an_edit_later_is_a_sign():
+    pull = T - 700
+    roots = (git_root([[T - 90000, "clone"], [pull - 3, "checkout"], [pull, "pull"]]),)
+    st = webfiles.process(None, blk(run(T - 1200, first=True), roots=roots), NOW)
+    st = webfiles.process(st, blk(run(T - 600, n_new=1, n_changed=2, changed=[
+        ["controllers/ReportController.php", pull - 1, 900], ["controllers/HookController.php", pull - 1, 400]],
+        new=[["models/Invoice.php", pull, 300]]), roots=roots), NOW)
+    r = st["roots"]["2080-11"]
+    assert "edit" not in r and "php" not in r
+    assert r["deploy"] == {"at": webfiles._iso(pull), "n": 3, "git": "pull"}  # noqa: SLF001
+    # правка руками через минуты после pull - признак, как раньше
+    st = webfiles.process(st, blk(run(T - 300, n_changed=1, changed=[["controllers/OrderController.php", T - 400, 50]]),
+                                  roots=roots), NOW)
+    assert list(st["roots"]["2080-11"]["edit"]) == ["controllers/OrderController.php"]
+    # php в загрузках - признак и в выкладке через git
+    st = webfiles.process(st, blk(run(T - 100, n_new=1, new=[["web/uploads/x.php", pull, 900]]), roots=roots), NOW)
+    assert list(st["roots"]["2080-11"]["php"]) == ["web/uploads/x.php"]
+
+
+def test_without_reflog_two_files_are_a_sign_as_before():
+    st = webfiles.process(None, blk(run(T - 1200, first=True)), NOW)
+    st = webfiles.process(st, blk(run(T - 600, n_changed=2, changed=[
+        ["controllers/ReportController.php", T - 700, 900], ["controllers/HookController.php", T - 700, 400]])), NOW)
+    r = st["roots"]["2080-11"]
+    assert sorted(r["edit"]) == ["controllers/HookController.php", "controllers/ReportController.php"]
+    assert r["edit"]["controllers/HookController.php"]["t"] == T - 700
+    # helper обновили: reflog показал pull в ту же секунду - признак уходит сам
+    st = webfiles.process(st, blk(roots=(git_root([[T - 699, "pull"]]),)), NOW)
+    assert "edit" not in st["roots"]["2080-11"] and st["roots"]["2080-11"]["deploy"]["git"] == "pull"
+
+
+def test_old_sign_without_file_time_goes_with_reflog_of_its_run():
+    since = datetime.fromtimestamp(T - 600, timezone.utc).isoformat()
+    st = {"r": webfiles.RULES, "seen": T - 600, "roots": {
+        "a": {**ROOT, "key": "a", "where": "host", "at": NOW.isoformat(),
+              "edit": {"controllers/ReportController.php": {"since": since, "s": 1}}},
+        "b": {**ROOT, "key": "b", "where": "host", "path": "/srv/b", "at": NOW.isoformat(),
+              "edit": {"js/app.js": {"since": since, "s": 1}}}}}
+    roots = (git_root([[T - 640, "pull"]], key="a", where="host"),
+             git_root([[T - 5000, "pull"]], key="b", where="host", path="/srv/b"))
+    st = webfiles.process(st, blk(roots=roots), NOW)
+    assert "edit" not in st["roots"]["a"]
+    assert list(st["roots"]["b"]["edit"]) == ["js/app.js"]  # pull задолго до признака - правка остается
+
+
+def test_one_dir_in_two_containers_is_one_row():
+    roots = (pod_root("c1", where="shop-php-fpm", path="/srv/shop", src="2049-77"),
+             pod_root("c2", where="shop-worker", path="/srv/shop", src="2049-77"),
+             pod_root("c3", where="shop-nginx", path="/srv/shop/backend", src="2049-90"))
+    st = webfiles.process(None, blk(roots=roots), NOW)
+    st = webfiles.process(st, {"v": 1, "ts": T, "roots": list(roots), "runs": [{"ts": T - 600, "roots": [
+        {"key": "c1", "n_changed": 1, "changed": [["backend/a.js", T - 900, 10]]},
+        {"key": "c2", "n_changed": 1, "changed": [["backend/a.js", T - 900, 10]]}]}]}, NOW)
+    st["loose"] = ["c1", "c2", "c3"]
+    v = webfiles.view(st, {}, NOW)["roots"]
+    assert [(x["where"], x["path"], x["key"], x["pods"]) for x in v] == [
+        ("shop-php-fpm, shop-worker", "/srv/shop", "c1,c2", 1), ("shop-nginx", "/srv/shop/backend", "c3", 1)]
+    assert [f["p"] for f in v[0]["edit"]] == ["backend/a.js"]
+    assert webfiles.problems(st) == [(1, "код изменен вне выкладки в /srv/shop (shop-php-fpm, shop-worker): a.js",
+                                      "edit:shop-php-fpm, shop-worker:/srv/shop:backend/a.js")]
