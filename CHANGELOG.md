@@ -4,6 +4,13 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.8.4] - 2026-10-22
+
+### Fixed
+- Учетка только для просмотра не видит кнопок, которые бэкенд ей не даст: логи контейнеров и подов,
+  "лог прошлого запуска", "не алертить" в "Что сломано", починка покрытия алертов, сейф доступов в
+  бэкапах. Пороги очередей видны, но выключены. Плашка "Только просмотр" - только у таких учеток.
+
 ## [1.8.3] - 2026-10-22
 
 ### Fixed

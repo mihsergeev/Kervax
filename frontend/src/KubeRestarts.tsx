@@ -72,7 +72,7 @@ function RestartRow({
   flavor?: string
   canAct: boolean
   busy: boolean
-  onPrevLogs: () => void
+  onPrevLogs?: () => void
   onMute: (on: boolean) => void
 }) {
   const { t } = useI18n()
@@ -128,7 +128,7 @@ function RestartRow({
         )}
         {p.last?.probe && p.last.pmsg && p.last.pmsg.length > 100 && <pre className="web-err-lines mono">{p.last.pmsg}</pre>}
         <div className="job-log-head small">
-          {prevOk && s.online ? (
+          {prevOk && s.online && onPrevLogs ? (
             <button className="ghost small" onClick={onPrevLogs}>
               📄 {t('Лог прошлого запуска')}
             </button>
@@ -159,7 +159,7 @@ export function KubeRestartsSec({
   data: KubeRestarts
   flavor?: string
   canAct: boolean
-  onPrevLogs: (p: KubeRestartPod) => void
+  onPrevLogs?: (p: KubeRestartPod) => void // нет у учетки только для просмотра
   onChanged: () => void
 }) {
   const { t } = useI18n()
@@ -220,7 +220,7 @@ export function KubeRestartsSec({
             flavor={flavor}
             canAct={canAct}
             busy={busy === p.mute}
-            onPrevLogs={() => onPrevLogs(p)}
+            onPrevLogs={onPrevLogs && (() => onPrevLogs(p))}
             onMute={(on) => setMute(p.mute, on)}
           />
         ))}

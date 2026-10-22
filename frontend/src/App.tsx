@@ -453,7 +453,7 @@ export default function App() {
                   onClick={() => setMenuOpen(false)}
                 />
                 <div className="menu-pop menu-pop-right">
-                  {role !== 'admin' && (
+                  {role === 'viewer' && (
                     <>
                       <div className="menu-role-badge">
                         {t('Только просмотр')}
