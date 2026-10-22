@@ -4,6 +4,19 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.7.8] - 2026-10-22
+
+### Fixed
+- Признаки взлома: из своих js страницы берутся только адреса, с которых что-то грузится (src,
+  fetch, XMLHttpRequest, import, WebSocket, переход, адрес *.js), а не любые ссылки в тексте
+  библиотеки. Домены вендорных сборок (*.min.js, *.bundle.js, vendor/, swagger-ui, jquery и т.п.) и
+  js, который не прочитался при первом разборе, ложатся в базу без признака.
+
+### Added
+- Признаки взлома: "это ок" и "отложить 7 дн" на весь признак сразу, для всех видов. "Это ок"
+  принимает все текущее, новое зажжет признак снова, но только с новым. "Отложить" прячет на неделю
+  только то, что было на момент нажатия. "Это ок" на версию с дырой держится, пока версия та же.
+
 ## [1.7.7] - 2026-10-22
 
 ### Fixed

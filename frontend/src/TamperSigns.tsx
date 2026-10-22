@@ -4,8 +4,10 @@ import { useI18n } from './i18n'
 import { fmtBytes } from './units'
 
 // Раздел карточки сайта "Признаки взлома" (backend app/tamper.py): что именно не так, с какого
-// времени и кнопка принять в базу. Сильные признаки красным, слабые желтым; "Разобрались" -
-// все текущее как норма. Признаки, у которых причина ушла, пропадают сами.
+// времени. На каждом признаке "это ок" (все, что в нем сейчас, в базу) и "отложить 7 дн";
+// появится новое - признак загорится снова, но только с новым. Несколько доменов или версий -
+// заголовок группы и строки с кнопкой на одну. Сильные признаки красным, слабые желтым;
+// "Разобрались" - все текущее как норма. Признаки, у которых причина ушла, пропадают сами.
 
 // сколько внешних доменов видно сразу, остальные - кнопкой "еще N"
 const DOMS_SHOWN = 6
@@ -53,11 +55,24 @@ function whereOf(src: string, t: T): string {
   return src ? t('в {file}', { file: src }) : ''
 }
 
-function actOf(key: string, t: T): string {
-  if (key === 'dom' || key === 'php' || key === 'edit') return t('это наше')
-  if (key === 'bot') return t('это норм')
-  if (key === 'old') return t('отложить 7 дн')
-  return t('новая норма')
+// группа из нескольких строк (домены, версии): заголовок с кнопками на всю группу
+function groupText(rows: TamperSign[], t: T): [string, string] {
+  if (rows[0].key === 'dom') {
+    const srcs = [...new Set(rows.map((s) => s.src ?? ''))]
+    return [t('Новые внешние домены'), srcs.length === 1 ? whereOf(srcs[0], t) : '']
+  }
+  return [t('Версии с дырами'), '']
+}
+
+// строки view идут по признакам подряд: один признак - одна группа
+function groupsOf(signs: TamperSign[]): TamperSign[][] {
+  const out: TamperSign[][] = []
+  for (const s of signs) {
+    const last = out[out.length - 1]
+    if (last && last[0].key === s.key) last.push(s)
+    else out.push([s])
+  }
+  return out
 }
 
 export function TamperSigns({ check, canEdit, onChanged }: { check: Check; canEdit: boolean; onChanged: () => void }) {
@@ -66,11 +81,11 @@ export function TamperSigns({ check, canEdit, onChanged }: { check: Check; canEd
   const [err, setErr] = useState('')
   const [allDoms, setAllDoms] = useState(false)
   const v = check.tamper
-  const act = async (key: string, arg = '') => {
-    setBusy(key + arg)
+  const act = async (key: string, arg = '', mode: '' | 'later' = '') => {
+    setBusy(key + arg + mode)
     setErr('')
     try {
-      await acceptTamper(check.id, key, arg)
+      await acceptTamper(check.id, key, arg, mode)
       onChanged()
     } catch (e) {
       setErr(String((e as Error).message || e))
@@ -108,20 +123,48 @@ export function TamperSigns({ check, canEdit, onChanged }: { check: Check; canEd
           </span>
         </div>
       )}
-      {v.signs.map((s) => {
-        const [what, sub] = signText(s, t)
+      {groupsOf(v.signs).map((rows) => {
+        const s = rows[0]
+        const many = rows.length > 1
+        const [what, sub] = many ? groupText(rows, t) : signText(s, t)
+        const since = rows.map((r) => r.since ?? '').filter(Boolean).sort()[0]
         return (
-          <div key={s.key + s.arg + (s.what ?? '')} className="tamper-row">
-            <span className={`lk-dot ${s.strong ? 'lk-dot-bad' : 'lk-dot-warn'}`} />
-            <span className="tamper-ico">{ICON[s.key] ?? '⚠️'}</span>
-            <span className="tamper-txt">
-              {what}
-              {sub && <span className="muted small mono-ish">{sub}</span>}
-            </span>
-            {s.since && <span className="muted small tamper-when">{t('с {t}', { t: fmtDateTime(s.since) })}</span>}
-            {canEdit && (
-              <button className="ghost small" disabled={!!busy} onClick={() => act(s.key, s.arg)}>{actOf(s.key, t)}</button>
-            )}
+          <div key={s.key} className="tamper-group">
+            <div className="tamper-row">
+              <span className={`lk-dot ${s.strong ? 'lk-dot-bad' : 'lk-dot-warn'}`} />
+              <span className="tamper-ico">{ICON[s.key] ?? '⚠️'}</span>
+              <span className="tamper-txt">
+                {what}
+                {sub && <span className="muted small mono-ish">{sub}</span>}
+              </span>
+              {since && <span className="muted small tamper-when">{t('с {t}', { t: fmtDateTime(since) })}</span>}
+              {canEdit && (
+                // на весь признак: в базу все, что в нем сейчас; новое потом загорится само
+                <span className="tamper-acts">
+                  <button className="ghost small" disabled={!!busy} onClick={() => act(s.key)}>{t('это ок')}</button>
+                  <button className="ghost small" disabled={!!busy} onClick={() => act(s.key, '', 'later')}>{t('отложить 7 дн')}</button>
+                </span>
+              )}
+            </div>
+            {many && rows.map((r) => {
+              const [rw, rs] = r.key === 'dom' ? [r.domain ?? '', whereOf(r.src ?? '', t)] : signText(r, t)
+              return (
+                <div key={r.arg} className="tamper-row tamper-sub">
+                  <span className="tamper-txt">
+                    {rw}
+                    {rs && rs !== sub && <span className="muted small mono-ish">{rs}</span>}
+                  </span>
+                  {r.since && r.since !== since && (
+                    <span className="muted small tamper-when">{t('с {t}', { t: fmtDateTime(r.since) })}</span>
+                  )}
+                  {canEdit && (
+                    <button className="ghost small" disabled={!!busy} onClick={() => act(r.key, r.arg)}>
+                      {r.key === 'dom' ? t('это наше') : t('это ок')}
+                    </button>
+                  )}
+                </div>
+              )
+            })}
           </div>
         )
       })}

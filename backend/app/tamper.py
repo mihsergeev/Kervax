@@ -13,8 +13,14 @@
 
 Сильный признак или два любых - "похоже на взлом": алерт и красная строка в "Что сломано".
 Один слабый - желтая строка, в Telegram тихо. База страницы - первый удачный разбор, дальше
-ее меняют только кнопки карточки ("это наше", "новая норма", "Разобрались"). Признак
+ее меняют только кнопки карточки ("это ок" на группу или строку, "Разобрались"); "отложить"
+прячет группу на 7 дней, но только то, что в ней было, - новое загорается сразу. Признак
 ставится со второго разбора подряд и снимается сам, когда причина ушла.
+
+Из своих js берутся только адреса, с которых что-то грузят (src=, fetch, import, WebSocket,
+document.write со script/iframe, переход на адрес, адрес .js), а не любая строка с доменом. Свой js,
+который был на странице с первого разбора, но тогда не прочитался, и вендорная сборка (*.min.js,
+*.bundle.js, vendor/, известные библиотеки) при первом чтении отдают домены в базу без признака.
 
 Версии с дырами берутся из открытых источников (api.wordpress.org, php.net) раз в сутки и
 хранятся в настройках панели: без сети работаем по последнему загруженному, а если не
@@ -41,7 +47,7 @@ log = logging.getLogger("kervax.tamper")
 
 SCAN_EVERY = timedelta(hours=1)
 RECHECK = timedelta(minutes=10)  # подозрение подтверждаем быстро, а не через час
-POSTPONE = timedelta(days=7)     # "отложить" для версии с дырой
+POSTPONE = timedelta(days=7)     # "отложить" группу признака
 OLD_GRACE = timedelta(days=2)    # свежее исправление: пару дней на автообновление
 VERSIONS_EVERY = timedelta(hours=24)
 _LOOK_EVERY = timedelta(minutes=1)
@@ -67,7 +73,29 @@ _DOC_HOSTS = frozenset({
     "momentjs.com", "localhost", "example.com", "www.example.com", "json-schema.org",
 })
 _URL_LIT = re.compile(
-    r"""["'`](?:https?:)?//((?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,24}|\d{1,3}(?:\.\d{1,3}){3})(?::\d+)?(?=[/"'`?#])""",
+    r"""["'`](?:(?:https?|wss?):)?//((?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,24}|\d{1,3}(?:\.\d{1,3}){3})"""
+    r"""(?::\d+)?([/?#][^"'`\s\\<>]*)?(?=["'`\\])""",
+    re.I,
+)
+# что стоит перед адресом, если с него грузят: src= (в том числе внутри html-строки для
+# document.write и innerHTML), fetch, XMLHttpRequest.open, import, WebSocket, переход на адрес.
+# Ссылки на документацию, лицензии и соцсети в тексте библиотек сюда не попадают
+_LOAD_CTX = re.compile(
+    r"""(?:\b(?:fetch|import|importScripts|getScript|sendBeacon|WebSocket|EventSource|Worker|SharedWorker)\s*\(\s*"""
+    r"""|\.open\(\s*["'][a-z]+["']\s*,\s*"""
+    r"""|\bsrc\s*=\s*\\?"""
+    r"""|setAttribute\(\s*["']src["']\s*,\s*"""
+    r"""|\b(?:from|import)\s*"""
+    r"""|\blocation(?:\.href)?\s*=\s*|\blocation\.(?:replace|assign)\(\s*)$""",
+    re.I,
+)
+_JS_PATH = re.compile(r"\.m?js(?:[?#]|$)", re.I)
+# вендорные файлы: сборки и известные библиотеки. Домены из них при первом чтении файла - в базу
+_VENDOR = re.compile(
+    r"""(?:\.min\.m?js$|[.-]bundle\.m?js$|/vendors?/|/node_modules/|/libs?/|/wp-includes/js/"""
+    r"""|/(?:swagger-ui|redoc|jquery|react|react-dom|bootstrap|vue|angular|lodash|underscore|moment|popper"""
+    r"""|select2|slick|swiper|owl\.carousel|fancybox|lightbox|tinymce|ckeditor|chart|d3|three|gsap|axios"""
+    r"""|polyfills?|core-js|modernizr|highlight|prism|leaflet|alpine|htmx)(?:[.-][^/]*)?\.m?js$)""",
     re.I,
 )
 _WP_GEN = re.compile(r"WordPress\s+(\d+\.\d+(?:\.\d+)?)", re.I)
@@ -96,7 +124,9 @@ class _Page(HTMLParser):
             self.srcs.append((tag, a["src"].strip()))
         elif tag == "meta" and a.get("name", "").lower() == "generator":
             self.generator = self.generator or a.get("content", "")[:120]
-        if tag == "script" and not a.get("src"):
+        # ld+json и шаблоны - данные, а не код: ссылки на соцсети оттуда ничего не грузят
+        typ = a.get("type", "").lower()
+        if tag == "script" and not a.get("src") and (not typ or "script" in typ or typ == "module"):
             self._in_script = True
 
     def handle_endtag(self, tag):
@@ -131,8 +161,21 @@ def _ok_host(h: str) -> bool:
 
 
 def js_domains(text: str) -> set[str]:
-    """Домены из адресов в строковых литералах js (iframe/script, вставленные кодом)."""
-    return {m.group(1).lower() for m in _URL_LIT.finditer(text or "") if _ok_host(m.group(1))}
+    """Домены, с которых js что-то грузит: адрес-строка после src=, fetch, import и т.п. или
+    адрес .js. Просто строка с адресом (документация, лицензия, ссылка на соцсеть) не в счет."""
+    text = text or ""
+    out = set()
+    for m in _URL_LIT.finditer(text):
+        h = m.group(1).lower()
+        if h in out or not _ok_host(h):
+            continue
+        if _JS_PATH.search(m.group(2) or "") or _LOAD_CTX.search(text[max(0, m.start() - 80):m.start()]):
+            out.add(h)
+    return out
+
+
+def is_vendor(path: str) -> bool:
+    return bool(_VENDOR.search((path or "").split("?", 1)[0]))
 
 
 def parse_page(text: str, url: str) -> dict:
@@ -259,22 +302,79 @@ def _dt(v) -> datetime | None:
     return d if d.tzinfo else d.replace(tzinfo=timezone.utc)
 
 
+def _until(v) -> datetime | None:
+    # "отложить": {"until", "what"}; до 1.7.8 - просто время, для всей группы
+    return _dt(v.get("until") if isinstance(v, dict) else v)
+
+
+def hidden(post: dict | None, key: str, item: str = "", now: datetime | None = None) -> bool:
+    """Отложено ли: вся группа или этот домен/файл/версия. Что появилось в группе после
+    "отложить", видно сразу."""
+    v = (post or {}).get(key)
+    until = _until(v) if v is not None else None
+    if until is None or (now is not None and until <= now):
+        return False
+    what = v.get("what") if isinstance(v, dict) else None
+    return not what or item in what
+
+
+def _items(key: str, s: dict) -> list[str]:
+    """Что сейчас в группе признака: домены, версии, файлы. Пусто - признак без списка."""
+    if key == "dom":
+        return sorted(s.get("list") or {})
+    if key == "old":
+        return [it.get("what", "") for it in s.get("items") or []]
+    if key in ("php", "edit"):
+        return list(dict.fromkeys(f.get("p", "") for f in s.get("files") or []))
+    return []
+
+
+def _take_js(base: dict, obs: dict, signed: set[str]) -> dict:
+    """Свои js, которые раньше не читались: файл был на странице с первого разбора, но тогда не
+    открылся, или это вендорная сборка (новая версия библиотеки) - его домены ложатся в базу без
+    признака. Новый свой файл и правка уже прочитанного сравниваются с базой как обычно."""
+    page = obs.get("js_page")
+    if page is None:
+        return base
+    js = base.get("js")
+    if not isinstance(js, dict):
+        # база снята, когда панель еще не запоминала js: свое считаем прочитанным, сборки - нет
+        js = {p: not is_vendor(p) for p in page}
+    js = dict(js)
+    doms = dict(base.get("domains") or {})
+    for p, ds in (obs.get("js") or {}).items():
+        if js.get(p) is True or (p not in js and not is_vendor(p)):
+            continue
+        for d in ds:
+            if d not in signed:
+                doms.setdefault(d, p)
+        js[p] = True
+    # ушедшие со страницы файлы забываем: у сборок с хешем в имени список иначе только растет
+    return {**base, "domains": doms, "js": {p: v for p, v in js.items() if p in page}}
+
+
 def observe(state: dict | None, obs: dict, now: datetime, fleet: set[str], versions: dict) -> dict:
     """Новое состояние по разбору obs. obs: size, title, domains {домен: откуда}, bot (size,
-    title) или None, engine. fleet - домены из баз других сайтов (их не считаем чужими)."""
+    title) или None, engine, js {свой js: домены} - прочитанные файлы, js_page - все свои js
+    страницы. fleet - домены из баз других сайтов (их не считаем чужими)."""
     st = dict(state or {})
     base = st.get("base")
+    post = {k: v for k, v in (st.get("post") or {}).items() if (_until(v) or now) > now}
     seen: dict[str, dict] = {}
     if not base:
         base = {"title": obs["title"], "size": obs["size"], "domains": dict(obs["domains"]), "at": _iso(now)}
+        if obs.get("js_page") is not None:
+            base["js"] = {p: p in (obs.get("js") or {}) for p in obs["js_page"]}
     else:
+        signed = set((((st.get("signs") or {}).get("dom") or {}).get("list")) or {})
+        base = _take_js(base, obs, signed)
         b_size, b_title = int(base.get("size") or 0), base.get("title") or ""
         if (b_size >= 2048 and obs["size"] * 5 <= b_size) or (b_title and not obs["title"]):
             seen["empty"] = {"size": obs["size"], "was": b_size, "title": b_title}
         elif b_title and obs["title"] and norm_title(obs["title"]) != norm_title(b_title):
             seen["title"] = {"title": obs["title"], "was": b_title}
         known = set(base.get("domains") or {}) | fleet
-        new = {d: src for d, src in obs["domains"].items() if d not in known}
+        new = {d: src for d, src in obs["domains"].items() if d not in known and not hidden(post, "dom", d)}
         if new:
             seen["dom"] = {"list": new}
     bot = obs.get("bot")
@@ -284,8 +384,14 @@ def observe(state: dict | None, obs: dict, now: datetime, fleet: set[str], versi
         diff_size = big >= 2048 and big >= small * 3
         if (diff_title or diff_size) and norm_title(bot["title"]) != (st.get("bot_ok") or "\0"):
             seen["bot"] = {"title": bot["title"], "size": bot["size"], "human": obs["size"]}
-    post = {k: v for k, v in (st.get("post") or {}).items() if (_dt(v) or now) > now}
-    old = [] if "old" in post else old_items(obs.get("engine") or {}, versions, now)
+    # отложенная пустая главная не подтягивает базу размера: через 7 дней признак вернется
+    emptied = "empty" in seen
+    for k in ("empty", "title", "bot"):
+        if hidden(post, k):
+            seen.pop(k, None)
+    ok_old = set(st.get("ok_old") or [])
+    old = [it for it in old_items(obs.get("engine") or {}, versions, now)
+           if it["what"] not in ok_old and not hidden(post, "old", it["what"])]
     signs = dict(st.get("signs") or {})
     pend = dict(st.get("pend") or {})
     for k in ("empty", "title", "dom", "bot"):
@@ -317,7 +423,7 @@ def observe(state: dict | None, obs: dict, now: datetime, fleet: set[str], versi
     else:
         signs.pop("old", None)
     # спокойная главная понемногу подтягивает базу размера: сайт растет, база за ним
-    if "empty" not in seen and "empty" not in pend and base.get("size") and obs["size"]:
+    if not emptied and "empty" not in pend and base.get("size") and obs["size"]:
         base = {**base, "size": int(base["size"] * 0.8 + obs["size"] * 0.2)}
     st.update(base=base, signs=signs, pend=pend, post=post, engine=obs.get("engine") or {},
               last={"at": _iso(now), "size": obs["size"], "title": obs["title"],
@@ -462,7 +568,7 @@ def view(state: dict | None) -> dict | None:
             continue
         if k == "old":
             for it in s.get("items") or []:
-                rows.append({"key": "old", "arg": "", "strong": False, "since": s.get("since"), **it})
+                rows.append({"key": "old", "arg": it.get("what", ""), "strong": False, "since": s.get("since"), **it})
             continue
         if k in ("php", "edit"):
             files = s.get("files") or []
@@ -485,14 +591,23 @@ def view(state: dict | None) -> dict | None:
     }
 
 
-def accept(state: dict, key: str, arg: str, now: datetime) -> dict:
-    """Кнопки карточки: "это наше" (домен в базу), "новая норма" (страница в базу), "это норм"
-    (разница для Googlebot), "отложить" (версия), "all" - Разобрались: все текущее как норма."""
+def accept(state: dict, key: str, arg: str, now: datetime, mode: str = "") -> dict:
+    """Кнопки карточки. "Это ок" на группу признака (arg пусто) или одну строку (arg - домен,
+    версия): домены в базу, страница в базу, разница для Googlebot - норма, версия с дырой
+    известна (на другой версии признак загорится снова); "all" - Разобрались, все текущее как
+    норма. mode "later" - отложить группу на 7 дней: прячется то, что в ней сейчас, новое
+    видно сразу."""
     st = json.loads(json.dumps(state or {}))
     base = st.setdefault("base", {})
     last = st.get("last") or {}
     signs = st.setdefault("signs", {})
     pend = st.setdefault("pend", {})
+    if mode == "later":
+        s = signs.pop(key, None)
+        if s is not None:
+            pend.pop(key, None)
+            st.setdefault("post", {})[key] = {"until": _iso(now + POSTPONE), "what": _items(key, s)}
+        return st
     keys = list(signs) + list(pend) if key == "all" else [key]
     for k in keys:
         if k in ("empty", "title"):
@@ -504,7 +619,9 @@ def accept(state: dict, key: str, arg: str, now: datetime) -> dict:
         elif k == "dom":
             doms = base.setdefault("domains", {})
             lst = (signs.get("dom") or {}).get("list") or {}
-            take = [arg] if (key != "all" and arg) else list(lst) + list((last.get("domains") or {}))
+            # группа - домены, что в признаке сейчас; Разобрались - все домены страницы
+            take = [arg] if (key != "all" and arg) else list(lst) + (
+                list(last.get("domains") or {}) if key == "all" else [])
             for d in take:
                 doms[d] = (lst.get(d) or {}).get("src") or (last.get("domains") or {}).get(d, "")
             left = {d: v for d, v in lst.items() if d not in doms}
@@ -519,8 +636,15 @@ def accept(state: dict, key: str, arg: str, now: datetime) -> dict:
             signs.pop("bot", None)
             pend.pop("bot", None)
         elif k == "old":
-            st.setdefault("post", {})["old"] = _iso(now + POSTPONE)
-            signs.pop("old", None)
+            items = (signs.get("old") or {}).get("items") or []
+            take = [arg] if (key != "all" and arg) else [it.get("what", "") for it in items]
+            ok = [w for w in st.get("ok_old") or [] if w not in take] + [w for w in take if w]
+            st["ok_old"] = ok[-20:]
+            left = [it for it in items if it.get("what") not in ok]
+            if left:
+                signs["old"]["items"] = left
+            else:
+                signs.pop("old", None)
         elif k in ("php", "edit"):
             # файлы на сервере: в servers.webfiles их снимает API (webfiles.accept), иначе
             # стадия "файлы сайтов" положила бы признак обратно
@@ -560,6 +684,7 @@ async def scan(check) -> dict:
         page = parse_page(text, final)
         domains = dict(page["domains"])
         host = (urlparse(final).hostname or "").lower()
+        js_read: dict[str, list[str]] = {}
         for js in page["js"]:
             try:
                 jr, jt = await _get(client, js, checks_exec._USER_AGENT, _MAX_JS_BODY)
@@ -567,9 +692,10 @@ async def scan(check) -> dict:
                 continue
             if jr.status_code != 200:
                 continue
-            for d in js_domains(jt):
-                if is_external(d, host):
-                    domains.setdefault(d, urlparse(js).path or js)
+            path = urlparse(js).path or js
+            js_read[path] = sorted(d for d in js_domains(jt) if is_external(d, host))
+            for d in js_read[path]:
+                domains.setdefault(d, path)
         bot = None
         try:
             br, bt = await _get(client, url, _BOT_UA)
@@ -579,7 +705,8 @@ async def scan(check) -> dict:
         except httpx.HTTPError:
             pass
         return {"obs": {"size": len(r.content), "title": page["title"], "domains": domains, "bot": bot,
-                        "engine": engine(r.headers, page["generator"], text)}}
+                        "engine": engine(r.headers, page["generator"], text),
+                        "js": js_read, "js_page": list(dict.fromkeys(urlparse(j).path or j for j in page["js"]))}}
 
 
 async def _fetch_versions() -> dict:

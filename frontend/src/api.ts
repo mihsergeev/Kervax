@@ -3472,9 +3472,10 @@ export interface TamperView {
   err: string
 }
 
-// кнопки признаков: "это наше", "новая норма", "это норм", "отложить", all - Разобрались
-export function acceptTamper(id: number, key: string, arg = ''): Promise<{ tamper: TamperView | null }> {
-  return api(`/api/checks/${id}/tamper-accept`, { method: 'POST', body: JSON.stringify({ key, arg }) })
+// кнопки признаков: "это ок" на группу (arg пусто) или строку, all - Разобрались;
+// mode later - отложить группу на 7 дней, новое в ней загорается сразу
+export function acceptTamper(id: number, key: string, arg = '', mode: '' | 'later' = ''): Promise<{ tamper: TamperView | null }> {
+  return api(`/api/checks/${id}/tamper-accept`, { method: 'POST', body: JSON.stringify({ key, arg, mode }) })
 }
 
 export function acceptDns(id: number): Promise<CheckRun> {
