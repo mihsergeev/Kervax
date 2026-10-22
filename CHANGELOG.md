@@ -4,6 +4,14 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.7.6] - 2026-10-22
+
+### Fixed
+- "Хранение данных": у пустой группы прирост в сутки 0, а не размер пустых страниц таблиц на
+  Postgres.
+- Проверки на GitHub снова зеленые: тест хранения данных на Postgres и selfcheck в публичном
+  репозитории (не доехал список осознанно открытых токенов).
+
 ## [1.7.5] - 2026-10-22
 
 ### Fixed

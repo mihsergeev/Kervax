@@ -187,6 +187,8 @@ def check_secrets() -> None:
         "push_token": "backend/app/api/checks.py",    # там же: адрес push-монитора
         "telegram_token": "backend/app/api/alerts.py",  # весь роутер — AdminUser
         "repopass": "backend/app/api/servers.py",     # ключ бэкапа — AdminUser
+        # токен входа под чужой учеткой - только админу, после его пароля (impersonate_start)
+        "access_token": "backend/app/api/users.py",
     }
     # осознанно открытые: own_token — флаг «свой бот», а не сам токен; secret —
     # TOTP при настройке 2FA СВОЕЙ учётки; token — разовый токен агента, который

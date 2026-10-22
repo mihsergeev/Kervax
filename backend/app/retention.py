@@ -108,11 +108,12 @@ async def overview(session: AsyncSession, settings: Settings, now: datetime) -> 
         b = sum(p["bytes"] for p in parts)
         listed += b
         oldest = _aware((await session.execute(select(func.min(model.ts)))).scalar())
-        # прирост в сутки: за сколько дней накоплено то, что лежит (не больше срока)
+        # прирост в сутки: за сколько дней накоплено то, что лежит (не больше срока). Пустая группа
+        # не растет: ее байты - пустые страницы таблиц и индексов (dbstat, Postgres), а не данные
         span = (now - oldest).total_seconds() / 86400 if oldest else 0
         covered = max(1.0, min(float(days), span))
         groups.append({"id": gid, "days": days, "oldest": oldest, "bytes": b, "span_days": round(min(days, span), 1),
-                       "per_day": int(b / covered) if b else 0, "parts": parts})
+                       "per_day": int(b / covered) if b and oldest else 0, "parts": parts})
     fixed = []
     for key, keep, tables in FIXED:
         b = sum(size.get(t, 0) for t in tables) if tables else None
