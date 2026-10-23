@@ -76,7 +76,7 @@ def _app(client):
 
 
 async def _pair(client, auth_headers, n, dest="rest:http://203.0.113.{n}:64100/node-{n}/", agent="2.48",
-                helper="0.40", bs_helper="0.35", tls_front=True):
+                helper="0.42", bs_helper="0.35", tls_front=True):
     from app.models import Server
 
     a = (await client.post("/api/servers", json={"name": f"node-{n}"}, headers=auth_headers)).json()["server"]["id"]
@@ -108,7 +108,7 @@ async def test_to_https_needs_new_agent_and_helpers(client, auth_headers, monkey
     why = lst[a]["backup_https"]["blockers"]
     assert lst[a]["backup_https"]["bs_id"] == b
     assert "node-1: нужен агент 2.48 или новее" in why
-    assert "node-1: нужен helper backup-setup 0.40 или новее" in why
+    assert "node-1: нужен helper backup-setup 0.42 или новее" in why
     assert "bk-1: нужен helper backupserver-setup 0.35 или новее" in why
     r = await client.post(f"/api/servers/{a}/backup/to-https", headers=auth_headers)
     assert r.status_code == 400 and "нужен агент 2.48" in r.json()["detail"]
@@ -148,7 +148,7 @@ async def test_bulk_to_https_goes_one_by_one(client, auth_headers, monkeypatch):
     async with _app(client).state.session_factory() as s:
         c2 = await s.get(Server, a2)
         c2.last_report = {"backup": {"present": True, "repo_dest": "rest:http://203.0.113.11:64100/node-12/"},
-                          "setup_versions": {"backup-setup": "0.40"}}
+                          "setup_versions": {"backup-setup": "0.42"}}
         c2.agent_version, c2.agent_ip = "2.48", "198.51.100.6"
         await s.commit()
     r = await client.post(f"/api/servers/{b}/backup-server/to-https", json={"client_ids": [a1, a2]},
@@ -281,7 +281,7 @@ def test_helpers_know_the_new_actions():
     agent = Path(__file__).resolve().parents[2] / "agent"
     cl = (agent / "backup-setup.sh").read_text(encoding="utf-8")
     bs = (agent / "backupserver-setup.sh").read_text(encoding="utf-8")
-    assert "KERVAX_SETUP_VERSION=0.41" in cl and 'to_https)     if out="$(cmd_to_https' in cl
+    assert "KERVAX_SETUP_VERSION=0.42" in cl and 'to_https)     if out="$(cmd_to_https' in cl
     assert "KERVAX_SETUP_VERSION=0.35" in bs and 'allow_tls)        if out="$(cmd_allow_tls' in bs
     import re
 

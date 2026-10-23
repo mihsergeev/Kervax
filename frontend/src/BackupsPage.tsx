@@ -904,6 +904,9 @@ function BackupModal({
   // и по одной restic-длительности не понять, когда бэкап реально закончился
   const withDumps = (b.full_duration_sec || 0) > (b.duration_sec || 0) + 2
   const win = backupWindowNote(s)
+  // последний прогон упал: по метрике, а без нее - по Result юнита (backup_state.backup_failed)
+  const runFailed = b.metric_present ? b.success === 0
+    : b.ts_source === 'systemd' && !!b.service_result && b.service_result !== 'success'
   const v = s.backup_verify
   const helperOld = canManage && b.manageable && (b.helper_version || 0) < CURRENT_BACKUP_HELPER
   const audit = (s.backup_audit ?? []).filter((x) => !x.muted)
@@ -1114,6 +1117,18 @@ function BackupModal({
                   <div key={i} className="net-prob">{n}</div>
                 ))}
                 {win && <div className="net-note">{t('Не уложился в окно')}: {win}</div>}
+                {/* почему упал прогон: коротко, под ним строка restic свернутой (helper backup-setup 0.39+) */}
+                {runFailed && s.backup_state?.reason && (
+                  <div className="net-prob">
+                    {t('Почему ошибка')}: {s.backup_state.reason}
+                    {s.backup_state.reason_raw && s.backup_state.reason_raw !== s.backup_state.reason && (
+                      <details className="fix-more">
+                        <summary>{t('текст ошибки restic')}</summary>
+                        <pre className="web-err-lines mono">{s.backup_state.reason_raw}</pre>
+                      </details>
+                    )}
+                  </div>
+                )}
                 <div className="chart-card net-card net-card-wide">
                   <div className="kv-list">
                     {row(t('Последний бэкап'), b.last_backup_ts

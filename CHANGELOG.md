@@ -4,6 +4,18 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.8.21] - 2026-10-24
+
+### Fixed
+- Бэкап после перевода на https: на нодах, где скрипт бэкапа вызывает restic по пути (старый ансибл-скрипт),
+  ночной прогон падал с "x509: certificate signed by unknown authority", хотя перевод отвечал OK. Сертификат
+  теперь задается через RESTIC_CACERT в env, перевод проверяет restic так же, как его запускает сервис бэкапа,
+  и при неудаче остается на http. Ноды, переведенные раньше, чинятся на ближайшем обновлении helper'а
+  (backup-setup 0.42). Перевод на https доступен с backup-setup 0.42.
+- Упавший прогон бэкапа: причина коротко ("сервер бэкапов: сертификат не доверен (x509)") вместо простыни из
+  повторов "retrying after", в "Прогонах" под ней свернутый текст ошибки restic.
+- Упавший сервис бэкапа больше не показывается в "Что сломано" второй строкой как упавший юнит systemd.
+
 ## [1.8.20] - 2026-10-24
 
 ### Changed

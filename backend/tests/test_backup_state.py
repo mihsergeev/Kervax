@@ -67,7 +67,8 @@ def test_fail_reason_from_helper_belongs_to_the_last_run():
     fail = {"ts": T - 3500, "msg": "Fatal: unable to open config file: connection refused"}
     rep_ex = {"backup-runs": {"v": 1, "ts": T, "runs": [], "fail": fail}}
     s = _srv(ALIVE_FAILED, extras=rep_ex)
-    assert backup_state.view(s) == {"state": "ok", "reason": fail["msg"], "since": None, "traces": ""}
+    assert backup_state.view(s) == {"state": "ok", "reason": "сервер бэкапов не принимает соединения",
+                                    "reason_raw": fail["msg"], "since": None, "traces": ""}
     # ошибка прошлого прогона, последний упал позже и по-другому - не выдаем ее за причину
     s = _srv(ALIVE_FAILED | {"last_backup_ts": T}, extras={"backup-runs": {"fail": fail | {"ts": T - 86400}}})
     assert backup_state.fail_reason(s.last_report) == ""
@@ -75,6 +76,36 @@ def test_fail_reason_from_helper_belongs_to_the_last_run():
     s = _srv(ALIVE_FAILED | {"success": 1}, extras=rep_ex)
     assert backup_state.fail_reason(s.last_report) == ""
 
+
+
+# helper до 0.42 брал в причину первые строки журнала - повторы restic перед отказом
+RETRY_MSG = ('Stat(<config/>) returned error, retrying after 1.301661681s: Head "https://***@203.0.113.7:64101/'
+             'backup-a/config": tls: failed to verify certificate: x509: certificate signed by unknown authority '
+             'Stat(<config/>) returned error, retrying after 2.381765077s: Head "https://***@203.0.113.7:64101')
+
+
+def test_fail_short_says_what_broke():
+    assert backup_state.fail_short(RETRY_MSG) == "сервер бэкапов: сертификат не доверен (x509)"
+    assert backup_state.fail_line(RETRY_MSG).startswith('Head "https://***@203.0.113.7:64101/backup-a/config": tls:')
+    assert "retrying" not in backup_state.fail_line(RETRY_MSG)
+    fatal = ('Fatal: unable to open config file: Head "https://***@203.0.113.7:64101/backup-a/config": '
+             'x509: certificate is valid for 198.51.100.9, not 203.0.113.7')
+    assert backup_state.fail_short(fatal) == "сервер бэкапов: сертификат выписан на другой адрес (x509)"
+    assert backup_state.fail_short("Fatal: wrong password or no key found") == "не подходит пароль репозитория"
+    locked = "Fatal: unable to create lock in backend: repository is already locked by PID 7"
+    assert backup_state.fail_short(locked) == "репозиторий занят чужим локом"
+    # незнакомое - первая осмысленная строка, без "Fatal:"
+    assert backup_state.fail_short("Fatal: something new happened") == "something new happened"
+    assert len(backup_state.fail_short("Fatal: " + "x" * 400)) <= 122
+    assert backup_state.fail_short("") == ""
+
+
+def test_alert_and_home_get_the_short_reason():
+    s = _srv(ALIVE_FAILED, extras={"backup-runs": {"fail": {"ts": T - 3500, "msg": RETRY_MSG}}})
+    v = backup_state.view(s)
+    assert v["reason"] == "сервер бэкапов: сертификат не доверен (x509)" and v["reason_raw"] == RETRY_MSG
+    why = collector._server_conditions(s, NOW)["backup_failed"][1]["why"]
+    assert why == ": сервер бэкапов: сертификат не доверен (x509)"
 
 def test_alerts_follow_the_same_rule():
     # следы старого бэкапа: не "бэкап упал", а "не настроен" (после отсрочки суток)
@@ -94,7 +125,7 @@ def test_alerts_follow_the_same_rule():
     fail = {"ts": T - 3500, "msg": "Fatal: wrong password or no key found"}
     s = _srv(ALIVE_FAILED, extras={"backup-runs": {"fail": fail}})
     cond = collector._server_conditions(s, NOW)
-    assert cond["backup_failed"] == (1, {"why": ": Fatal: wrong password or no key found"})
+    assert cond["backup_failed"] == (1, {"why": ": не подходит пароль репозитория"})
     assert cond["backup_missing"][0] == 0
 
 
@@ -235,7 +266,7 @@ def _run(tmp_path: Path, case: str) -> str:
 
 
 def test_helper_version_and_spool_know_deprovision():
-    assert re.search(r"^KERVAX_SETUP_VERSION=0\.41 ", SRC, re.M)
+    assert re.search(r"^KERVAX_SETUP_VERSION=0\.42 ", SRC, re.M)
     assert backup_state.FAIL_REASON_HELPER == "0.39"
     assert '      deprovision)  if out="$(cmd_deprovision 2>&1)"; then ok=true; fi ;;' in SRC
 
@@ -307,3 +338,78 @@ ls -A "$T" "$PROV_METRICS_DIR"
         assert not re.search(rf"^{re.escape(gone)}$", left, re.M), (gone, out)
     # чужие файлы метрик не трогаем
     assert "other.prom" in left and "rk2.prom" in left
+
+
+def test_helper_reason_is_the_fatal_line_not_the_retries(tmp_path):
+    """restic минутами повторяет запрос перед отказом: в причину идет строка Fatal, а не повторы"""
+    out = _run(tmp_path, r'''
+systemctl() {
+  case "$*" in
+    *"-p Result"*) echo exit-code ;;
+    *"-p InvocationID"*) echo inv1 ;;
+    *"-p ExecMainExitTimestamp"*) echo "" ;;
+  esac
+}
+journalctl() {
+  case "$*" in
+    *_SYSTEMD_INVOCATION_ID=inv1*)
+      for i in 1 2 3; do
+        printf 'Stat(<config/>) returned error, retrying after 1.%ss: Head "https://backup-a:fakepass@203.0.113.7:64101/backup-a/config": tls: failed to verify certificate: x509: certificate signed by unknown authority\n' "$i"
+      done
+      printf 'Fatal: unable to open config file: Head "https://backup-a:fakepass@203.0.113.7:64101/backup-a/config": tls: failed to verify certificate: x509: certificate signed by unknown authority\n' ;;
+  esac
+}
+backup_runs_parse systemd-rest.service "$(backup_last_fail systemd-rest.service)" </dev/null
+''')
+    msg = json.loads(out.strip().splitlines()[-1])["fail"]["msg"]
+    assert msg.startswith("Fatal: unable to open config file:") and "retrying" not in msg
+    assert "fakepass" not in msg and "x509: certificate signed by unknown authority" in msg
+
+
+def test_helper_gives_the_certificate_to_nodes_switched_by_040(tmp_path):
+    """0.40 перевел ансибл-runner без --cacert: refresh дописывает RESTIC_CACERT в env один раз и
+    только там, где переводил to-https (рядом .http-bak)"""
+    out = _run(tmp_path, r'''
+chown() { :; }
+PROV_ENV="$T/env"; PROV_CACERT="$T/backup-ca.pem"
+printf -- '-----BEGIN CERTIFICATE-----\nfake\n-----END CERTIFICATE-----\n' > "$PROV_CACERT"
+printf 'RESTIC_PASSWORD=fakepass\nRESTIC_REPOSITORY=rest:https://backup-a:fakepass@203.0.113.7:64101/backup-a/\n' > "$PROV_ENV"
+https_cacert_maybe; echo "no-bak: $(grep -c '^RESTIC_CACERT=' "$PROV_ENV")"
+printf 'RESTIC_REPOSITORY=rest:http://x/\n' > "$PROV_ENV.http-bak"
+https_cacert_maybe; https_cacert_maybe
+echo "switched: $(grep -c '^RESTIC_CACERT=' "$PROV_ENV") $(stat -c %a "$PROV_ENV")"
+grep '^RESTIC_CACERT=' "$PROV_ENV"; grep -c '^RESTIC_PASSWORD=fakepass$' "$PROV_ENV"
+printf 'RESTIC_REPOSITORY=rest:http://backup-a:fakepass@203.0.113.7:64100/backup-a/\n' > "$PROV_ENV"
+https_cacert_maybe; echo "http: $(grep -c '^RESTIC_CACERT=' "$PROV_ENV")"
+''')
+    lines = out.strip().splitlines()
+    assert "no-bak: 0" in lines and "http: 0" in lines
+    assert any(x.startswith("switched: 1 ") for x in lines)  # права 0600 проверяет сценарий в WSL
+    assert any(x.startswith("RESTIC_CACERT=") and x.endswith("/backup-ca.pem") for x in lines)
+    assert "1" in lines  # пароль на месте
+
+
+def test_helper_job_check_runs_restic_as_the_backup_service(tmp_path):
+    """проверка после перевода на https идет как ночной прогон: User и EnvironmentFile сервиса бэкапа,
+    без своего --cacert; у юнита без EnvironmentFile - env панели"""
+    out = _run(tmp_path, r'''
+find_timer() { echo systemd-rest.timer; }
+timeout() { shift; "$@"; }
+systemd-run() { echo "RUN $*" >&2; }
+systemctl() {
+  case "$*" in
+    "show -p User --value systemd-rest.service") echo bx231 ;;
+    "show -p EnvironmentFiles --value systemd-rest.service")
+      printf '/etc/systemd-resta.conf (ignore_errors=no)\n/etc/backup-extra.env (ignore_errors=yes)\n' ;;
+  esac
+}
+unit_restic_check
+systemctl() { :; }
+unit_restic_check
+''')
+    runs = [x for x in out.splitlines() if x.startswith("RUN ")]
+    assert len(runs) == 2
+    assert "-p User=bx231 -p EnvironmentFile=/etc/systemd-resta.conf -p EnvironmentFile=/etc/backup-extra.env" in runs[0]
+    assert runs[0].endswith("-- /usr/local/lib/.restic/restic --no-cache --no-lock cat config")
+    assert "--cacert" not in runs[0] and "RuntimeMaxSec=150" in runs[0]
+    assert "User=" not in runs[1] and "-p EnvironmentFile=/etc/systemd-resta.conf --" in runs[1]

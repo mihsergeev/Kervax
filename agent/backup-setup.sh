@@ -111,7 +111,13 @@ AGENT_USER=kervax
 #       when there is something to upgrade, and the panel called it "the timer is off" and
 #       "cannot see when it ran". A job whose name says update/upgrade and nothing about a backup
 #       is skipped. A wrapper script that runs gitlab-backup create is an own backup now
-KERVAX_SETUP_VERSION=0.41  # MAJOR.MINOR; compared component-wise (0.13 > 0.2!)
+# 0.42: to-https puts RESTIC_CACERT into the env: 0.40 gave --cacert only to a runner with a RESTIC=
+#       line, the ansible runner (restic in BACKUP_CMD) stayed without it, the switch said OK and the
+#       night run failed on x509. After the switch restic is run the way the backup service runs it
+#       (its User and EnvironmentFile, no --cacert of its own); a failure puts everything back on
+#       http. Nodes already switched that way get the line on the next refresh. The reason of a
+#       failed run is the Fatal line, not the "retrying after" repeats
+KERVAX_SETUP_VERSION=0.42  # MAJOR.MINOR; compared component-wise (0.13 > 0.2!)
 KERVAX_SETUP_ALWAYS=1  # safe on any node: installs only its own helper and spool and does not
                        # touch the backup configuration until the panel sends a command
 install -d -m 0755 "$HELPER_DIR" "$STATE_DIR" /var/lib/kervax/versions
@@ -1184,25 +1190,80 @@ cmd_to_https() {
     return 2
   fi
   n="$(printf '%s' "$out" | grep -o '"short_id"' | wc -l | tr -d ' ')"
-  # the switch: env (only the RESTIC_REPOSITORY line), the certificate, the runner with --cacert
+  # the switch: env (the RESTIC_REPOSITORY line plus RESTIC_CACERT), the certificate, the runner.
+  # The previous runner and certificate are kept until the check below passes
   umask 077
   cp -p "$PROV_ENV" "$PROV_ENV.http-bak"
   NEW_URL="$new" awk '/^RESTIC_REPOSITORY=/ { print "RESTIC_REPOSITORY=" ENVIRON["NEW_URL"]; next } { print }' \
     "$PROV_ENV" > "$PROV_ENV.tmp" && chown root:root "$PROV_ENV.tmp" && chmod 0600 "$PROV_ENV.tmp" \
-    && mv -f "$PROV_ENV.tmp" "$PROV_ENV" || { umask 022; rm -f "$PROV_ENV.tmp" "$ca"; echo "could not write the env" >&2; return 2; }
+    && mv -f "$PROV_ENV.tmp" "$PROV_ENV" && env_cacert_set \
+    || { umask 022; rm -f "$PROV_ENV.tmp" "$ca"; mv -f "$PROV_ENV.http-bak" "$PROV_ENV"; echo "could not write the env" >&2; return 2; }
   umask 022
+  local prev_ca=""
+  [ -f "$PROV_CACERT" ] && { prev_ca="$PROV_CACERT.pre-https"; cp -p "$PROV_CACERT" "$prev_ca"; }
   mv -f "$ca" "$PROV_CACERT"
+  cp -p "$PROV_SCRIPT" "$PROV_SCRIPT.kervax-pre-https.bak"
+  # the panel's runner keeps restic in RESTIC= and gets --cacert there too; a runner without that
+  # line (the ansible one, restic in BACKUP_CMD) is left as is - RESTIC_CACERT in the env covers it
   local line; line="$(printf 'RESTIC=%q' "$RESTIC_BIN --cacert $PROV_CACERT")"
   if LINE="$line" awk '/^RESTIC=/ { print ENVIRON["LINE"]; next } { print }' "$PROV_SCRIPT" > "$PROV_SCRIPT.tmp"; then
     chmod 0700 "$PROV_SCRIPT.tmp"; chown "$PROV_USER:$PROV_USER" "$PROV_SCRIPT.tmp" 2>/dev/null || true
     mv -f "$PROV_SCRIPT.tmp" "$PROV_SCRIPT"
   else
-    # the runner did not get --cacert: back to http, otherwise the next night fails
-    rm -f "$PROV_SCRIPT.tmp"; mv -f "$PROV_ENV.http-bak" "$PROV_ENV"
-    echo "could not update the backup script, the backup stays on http" >&2; return 2
+    rm -f "$PROV_SCRIPT.tmp"
   fi
+  # the check the way the night run goes: the service's user and env files, no --cacert of its own.
+  # The read with --cacert above proves the server, this one proves the backup job. Fails - all back
+  if ! out="$(unit_restic_check 2>&1)"; then
+    mv -f "$PROV_ENV.http-bak" "$PROV_ENV"
+    mv -f "$PROV_SCRIPT.kervax-pre-https.bak" "$PROV_SCRIPT"
+    if [ -n "$prev_ca" ]; then mv -f "$prev_ca" "$PROV_CACERT"; else rm -f "$PROV_CACERT"; fi
+    refresh_config
+    echo "the backup job would not trust the backup server over https (checked as $PROV_SERVICE runs), the backup stays on http: $(printf '%s' "$out" | grep -a -v 'retrying after' | sed -E 's#//[^@/ ]*@#//#g' | tr '\n' ' ' | cut -c1-300)" >&2
+    return 2
+  fi
+  rm -f "$prev_ca"
   refresh_config
-  echo "OK the backup goes over https :$port, snapshots read over https: $n; the previous env is in $PROV_ENV.http-bak"
+  echo "OK the backup goes over https :$port, snapshots read over https: $n, the backup job trusts the certificate; the previous env is in $PROV_ENV.http-bak"
+}
+
+# RESTIC_CACERT in the env makes every restic run of the backup trust the backup server certificate:
+# restic reads it itself, so it works for any runner - the panel's one with RESTIC=... and the
+# ansible one with the restic path in BACKUP_CMD. 0.40 edited only RESTIC= and left such runners
+# without the certificate: the switch said OK and the night run failed on x509.
+env_cacert_set() {
+  local tmp="$PROV_ENV.tmp"
+  ( umask 077; { grep -v '^RESTIC_CACERT=' "$PROV_ENV"; echo "RESTIC_CACERT=$PROV_CACERT"; } > "$tmp" ) \
+    && chown root:root "$tmp" && chmod 0600 "$tmp" && mv -f "$tmp" "$PROV_ENV" || { rm -f "$tmp"; return 1; }
+}
+
+# restic as the backup service runs it: a transient unit with the service's User and EnvironmentFile,
+# reading the repository config (no lock, no cache). 150 s at most: on a certificate error restic
+# retries for a quarter of an hour.
+unit_restic_check() {
+  local svc user f props=()
+  svc="$(find_timer)" || true
+  svc="${svc:-$PROV_TIMER}"; svc="${svc%.timer}.service"
+  user="$(systemctl show -p User --value "$svc" 2>/dev/null)" || true
+  [ -n "$user" ] && props+=(-p "User=$user")
+  while read -r f _; do
+    [ -n "$f" ] && props+=(-p "EnvironmentFile=$f")
+  done < <(systemctl show -p EnvironmentFiles --value "$svc" 2>/dev/null || true)
+  # a unit without EnvironmentFile: the runner reads the env itself
+  printf '%s\n' "${props[@]}" | grep -q '^EnvironmentFile=' || props+=(-p "EnvironmentFile=$PROV_ENV")
+  timeout 180 systemd-run --wait --pipe --collect -q -p RuntimeMaxSec=150 "${props[@]}" -- \
+    "$RESTIC_BIN" --no-cache --no-lock cat config < /dev/null > /dev/null
+}
+
+# A node switched by helper 0.40 with the ansible runner: the env is https, the certificate is in
+# place, and the runner never got it (see env_cacert_set). Fixed once, on the next refresh. Only
+# where to-https did the switch (.http-bak next to the env): a hand-made https with a public CA
+# must not get our certificate as the only trusted one.
+https_cacert_maybe() {
+  [ -f "$PROV_ENV" ] && [ -f "$PROV_ENV.http-bak" ] && [ -f "$PROV_CACERT" ] || return 0
+  grep -q '^RESTIC_REPOSITORY=rest:https://' "$PROV_ENV" || return 0
+  grep -q '^RESTIC_CACERT=' "$PROV_ENV" && return 0
+  env_cacert_set
 }
 
 cmd_get_creds() {
@@ -2359,9 +2420,14 @@ backup_last_fail() {
   [ "$(systemctl show -p Result --value "$svc" 2>/dev/null)" = success ] && return 0
   inv="$(systemctl show -p InvocationID --value "$svc" 2>/dev/null)"
   [ -n "$inv" ] || return 0
-  msg="$(journalctl -u "$svc" _SYSTEMD_INVOCATION_ID="$inv" -o cat -q --no-pager 2>/dev/null \
+  # restic retries a failing request for minutes ("... returned error, retrying after 1.3s: ...")
+  # before it gives up: those lines are the same error again and again, the Fatal line says it once
+  local lines
+  lines="$(journalctl -u "$svc" _SYSTEMD_INVOCATION_ID="$inv" -o cat -q --no-pager 2>/dev/null \
     | grep -a -E '^Fatal: |unable to |[Ee]rror: |wrong password|connection refused|no such host|certificate' \
-    | head -n 2 | tr '\n\t' '  ' | tr -d '\000-\037' | sed -E 's#//[^/@ ]*@#//***@#g; s/ +$//' | cut -c1-300)"
+    | grep -a -v 'retrying after' || true)"
+  msg="$( { printf '%s\n' "$lines" | grep -a -m1 '^Fatal: ' || printf '%s\n' "$lines" | head -n 2; } \
+    | tr '\n\t' '  ' | tr -d '\000-\037' | sed -E 's#//[^/@ ]*@#//***@#g; s/ +$//' | cut -c1-300)"
   [ -n "$msg" ] || msg="the backup service ended with $(systemctl show -p Result --value "$svc" 2>/dev/null)"
   end="$(date -d "$(systemctl show -p ExecMainExitTimestamp --value "$svc" 2>/dev/null)" +%s 2>/dev/null || date +%s)"
   printf '{"ts":%s,"msg":"%s"}' "$end" "$(json_escape "$msg")"
@@ -2600,7 +2666,8 @@ case "${1:-}" in
   get-config)    cmd_get_config ;;
   # the scan is throttled inside (every CUSTOM_EVERY seconds): the config refresh stays per-minute
   refresh)       refresh_config || true; custom_scan_maybe; kube_access_maybe || true; dumps_trigger_maybe || true
-                 dumps_rsyncable_maybe || true; vanished_ok_maybe || true; retry_lock_maybe || true; backup_runs_maybe || true
+                 dumps_rsyncable_maybe || true; vanished_ok_maybe || true; retry_lock_maybe || true; https_cacert_maybe || true
+                 backup_runs_maybe || true
                  verify_maybe || true ;;
   custom-scan)   cmd_custom_scan ;;
   backup-runs)   cmd_backup_runs ;;

@@ -73,3 +73,24 @@ async def test_problems_in_servers_list(client, auth_headers):
     srv = (await client.get("/api/servers", headers=auth_headers)).json()[0]
     assert srv["problems"] == [{"kind": "inode", "level": 3, "text": "inode / 97%", "sec": "diskfill", "mute": "inode",
                                "since": None}]
+
+
+def test_failed_backup_service_is_the_backup_item_not_a_unit():
+    """упавший systemd-rest.service - это упавший прогон бэкапа: пункт бэкапа с причиной уже есть,
+    отдельной строки "юнит упал" в "Что сломано" нет (как и алерта по нему)"""
+    now = datetime.now(timezone.utc)
+    ts = int(now.timestamp())
+    rep = {"clock_unix": ts,
+           "backup": {"present": True, "configured": True, "restic_found": True, "metric_present": True,
+                      "success": 0, "last_backup_ts": ts - 3600},
+           "extras": {"units": {"v": 1, "ts": ts - 30, "fix": True, "units": [
+               {"unit": "systemd-rest.service", "type": "oneshot", "result": "exit-code", "status": 1,
+                "since": ts - 3600, "log": []},
+               {"unit": "certbot.service", "type": "oneshot", "result": "exit-code", "status": 1,
+                "since": ts - 3600, "log": []}]}}}
+    units = [p["text"] for p in server_problems(_server(rep, now), now) if p["kind"] == "units"]
+    assert units == ["certbot.service: код 1"]
+    # бэкап не настроен - чужой юнит с таким именем показываем как есть
+    rep["backup"] = {"present": False}
+    units = [p["text"] for p in server_problems(_server(rep, now), now) if p["kind"] == "units"]
+    assert "systemd-rest.service: код 1" in units

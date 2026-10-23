@@ -15,6 +15,21 @@ const PHRASES: Rule[] = [
   [/ на хосте верит заголовку от любого адреса \(/g, ' on the host trusts the header from any address ('],
   [/\), а (\d+) и (\d+) открыты в обход Cloudflare/g, '), and $1 and $2 are open past Cloudflare'],
   [/\), а (\d+) открыт в обход Cloudflare/g, '), and $1 is open past Cloudflare'],
+  // почему упал прогон бэкапа, коротко (app/backup_state.py fail_short)
+  [/сервер бэкапов: сертификат не доверен/g, 'backup server: certificate not trusted'],
+  [/сервер бэкапов: сертификат просрочен/g, 'backup server: certificate expired'],
+  [/сервер бэкапов: сертификат выписан на другой адрес/g, 'backup server: certificate issued for another address'],
+  [/сервер бэкапов: ошибка TLS/g, 'backup server: TLS error'],
+  [/не подходит пароль репозитория/g, 'the repository password does not match'],
+  [/сервер бэкапов не принял логин/g, 'the backup server rejected the login'],
+  [/сервер бэкапов не принимает соединения/g, 'the backup server refuses connections'],
+  [/не находится адрес сервера бэкапов/g, 'the backup server address does not resolve'],
+  [/сервер бэкапов не отвечает \(таймаут\)/g, 'the backup server does not answer (timeout)'],
+  [/нет сети до сервера бэкапов/g, 'no network to the backup server'],
+  [/репозиторий занят чужим локом/g, 'the repository is locked by someone else'],
+  [/кончилось место/g, 'out of space'],
+  [/на сервере бэкапов нет репозитория/g, 'no repository on the backup server'],
+  [/прогон не уложился в таймаут юнита/g, 'the run did not fit into the unit timeout'],
   // свои бэкапы ноды (app/custom_backups.py evaluate)
   [/таймер выключен, последний прогон (.+?) назад/g, 'the timer is off, the last run was $1 ago'],
   // GitLab: повод алерта и заметки про бэкап (app/gitlab.py why, backup_notes)
@@ -373,7 +388,7 @@ export function trBackend(s: string): string {
 
 // Поля ответов API, где лежат такие тексты. Ключи и идентификаторы (mute, key, kind) не трогаем:
 // по ним панель шлет запросы обратно
-const FIELDS = new Set(['text', 'detail', 'what', 'hint', 'note', 'bsrv_rotation', 'reasons', 'why', 'blockers'])
+const FIELDS = new Set(['text', 'detail', 'what', 'hint', 'note', 'bsrv_rotation', 'reasons', 'reason', 'why', 'blockers'])
 // Словари, где текст - значение под именем объекта: причины CronJob {ns/имя: почему}
 const MAPS = new Set(['kube_cron_issues'])
 

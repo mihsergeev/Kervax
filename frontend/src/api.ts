@@ -1900,7 +1900,8 @@ export type BackupRun = {
 }
 // fail - почему упал последний прогон, строка ошибки restic из журнала (helper backup-setup 0.39)
 export type BackupRuns = { v: number; ts: number; unit?: string; runs: BackupRun[]; fail?: { ts: number; msg: string } }
-export type BackupState = { state: 'ok' | 'partial' | 'none'; reason: string; since: string | null; traces: string }
+// reason у упавшего прогона коротко ("сервер бэкапов: сертификат не доверен (x509)"), reason_raw - строка restic
+export type BackupState = { state: 'ok' | 'partial' | 'none'; reason: string; reason_raw?: string; since: string | null; traces: string }
 // Разбор места (helper diskusage-setup): есть, пока раздел заполняется (от 75%). Helper
 // ничего не удаляет, у находок - команда для человека.
 export type DiskUsageDir = { path: string; bytes: number }
