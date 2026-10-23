@@ -106,7 +106,12 @@ AGENT_USER=kervax
 # 0.40: to-https - the backup moves from rest:http to the TLS rest-server of the same backup server
 #       (login, host and repository from the node's own env, the port and the certificate from the
 #       panel). The repository is read over https first; a failed check changes nothing
-KERVAX_SETUP_VERSION=0.40  # MAJOR.MINOR; compared component-wise (0.13 > 0.2!)
+# 0.41: an updater that takes a backup only on the way (gitlab-autoupgrade: gitlab-backup and an
+#       rsync snapshot for its own rollback before every upgrade step) is not an own backup: it runs
+#       when there is something to upgrade, and the panel called it "the timer is off" and
+#       "cannot see when it ran". A job whose name says update/upgrade and nothing about a backup
+#       is skipped. A wrapper script that runs gitlab-backup create is an own backup now
+KERVAX_SETUP_VERSION=0.41  # MAJOR.MINOR; compared component-wise (0.13 > 0.2!)
 KERVAX_SETUP_ALWAYS=1  # safe on any node: installs only its own helper and spool and does not
                        # touch the backup configuration until the panel sends a command
 install -d -m 0755 "$HELPER_DIR" "$STATE_DIR" /var/lib/kervax/versions
@@ -1622,10 +1627,16 @@ CB_NAME_RE='backup|dump|bkp|snapshot|restic|borg|rsync|rclone|duplicity|kopia|pg
 # ...or by what its script actually runs, whatever the script is called
 # "restic ... backup" only as the SUBCOMMAND: a prune script mentions .../backup in its repository path
 CB_FILE_TOOL_RE='restic[[:space:]]+([^|;&]*[[:space:]])?backup([[:space:]]|$)|borg[[:space:]]+([^|;&]*[[:space:]])?create([[:space:]]|$)|borgmatic|rsync[[:space:]]|rclone[[:space:]]+([^|;&]*[[:space:]])?(copy|sync)([[:space:]]|$)|duplicity[[:space:]]|kopia[[:space:]]+([^|;&]*[[:space:]])?snapshot'
-CB_TOOL_RE='pg_dump|pg_basebackup|pgbackrest|barman|wal-g|mysqldump|mariadb-dump|mariabackup|xtrabackup|mongodump|neo4j-admin|clickhouse-backup|etcdctl.*snapshot|redis-cli.*(--rdb|bgsave)|'"$CB_FILE_TOOL_RE"
+CB_TOOL_RE='pg_dump|pg_basebackup|pgbackrest|barman|wal-g|mysqldump|mariadb-dump|mariabackup|xtrabackup|mongodump|neo4j-admin|clickhouse-backup|etcdctl.*snapshot|redis-cli.*(--rdb|bgsave)|gitlab-backup[[:space:]]+create|gitlab:backup:create|'"$CB_FILE_TOOL_RE"
 # Repository upkeep (prune, forget, rotation, checks) is not a backup: nothing is saved, and on a
 # backup server the panel already watches rotation itself. Skipped unless the same job also backs up.
 CB_MAINT_RE='prune|forget|cleanup|clean-up|rotate|rotation|purge|verify|check'
+# An updater backs up only on the way: gitlab-autoupgrade runs gitlab-backup and rsyncs a snapshot
+# for its own rollback before every upgrade step. It runs when there is something to upgrade, so it
+# is no backup to watch. The name decides (update/upgrade and no backup word), not the body: the
+# body of such a script is full of backup tools.
+CB_UPDATER_RE='upgrade|update|unattended'
+CB_BACKUP_WORD_RE='backup|dump|bkp|snapshot'
 # look-alikes that are not backups, and the panel's own jobs (it already watches those)
 # dpkg-db-backup is the distribution's own copy of the package database, not a data backup
 CB_SKIP_RE='tcpdump|coredump|dumpe2fs|xfsdump|dumpcap|kervax|systemd-rest|restic-backup\.(timer|service)|^restic\.(timer|service)$|dpkg-db-backup'
@@ -1666,6 +1677,11 @@ cb_is_files() { [[ "${1,,}" =~ restic|borg|rsync|rclone|duplicity|kopia|bacula|b
 cb_maintenance_only() {  # $1 names and command, $2 script body
   [[ "${1,,}" =~ $CB_MAINT_RE ]] || return 1
   ! grep -qiE "$CB_TOOL_RE" <<<"$1"$'\n'"$2"
+}
+
+# an updater: the name says update/upgrade and says nothing about a backup
+cb_updater_only() {  # $1 names, command and unit description
+  [[ "${1,,}" =~ $CB_UPDATER_RE ]] && ! [[ "${1,,}" =~ $CB_BACKUP_WORD_RE ]]
 }
 
 # JSON array of running containers a job refers to. Explicit references first (docker exec
@@ -2128,6 +2144,7 @@ cmd_custom_scan() {
     if ! [[ "${t,,} ${svc,,}" =~ $CB_NAME_RE ]] && ! grep -qiE "$CB_TOOL_RE" <<<"$body" \
        && ! cb_writes_metrics "$execs"$'\n'"$body"; then continue; fi
     cb_maintenance_only "$t $svc $desc" "$body" && continue
+    cb_updater_only "$t $svc $desc $script" && continue
     cal="$(systemctl show "$t" --timestamp=unix -p TimersCalendar --value 2>/dev/null)"
     next="$(printf '%s' "$cal" | sed -n 's/.*next_elapse=@\([0-9]*\).*/\1/p' | head -1)"
     cal="$(printf '%s' "$cal" | sed -n 's/.*OnCalendar=\([^;]*\);.*/\1/p' | sed 's/[[:space:]]*$//' | head -1)"
@@ -2155,6 +2172,7 @@ cmd_custom_scan() {
     if ! [[ "${cmd,,}" =~ $CB_NAME_RE ]] && ! grep -qiE "$CB_TOOL_RE" <<<"$cmd"$'\n'"$body" \
        && ! cb_writes_metrics "$cmd"$'\n'"$body"; then continue; fi
     cb_maintenance_only "$cmd" "$body" && continue
+    cb_updater_only "$cmd" && continue
     # the command is hashed, never sent: it may carry a password
     id="cron:$(printf '%s|%s' "$user" "$cmd" | sha1sum | cut -c1-12)"
     [ -n "${cron_seen[$id]:-}" ] && continue

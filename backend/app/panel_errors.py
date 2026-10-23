@@ -5,9 +5,15 @@
 
   * необработанное исключение бэкенда (500) - маршрут, кто, короткий traceback (middleware);
   * отказ на изменяющий запрос человека (POST/PUT/PATCH/DELETE с 4xx/5xx), кроме ожидаемого
-    шума: 401 (протух вход, его лечит повторный вход), 422 (форма не прошла проверку), любых
-    отказов /api/auth/ (неверный пароль или код - у входа своя защита и свой журнал) и отказов
-    из EXPECTED (только для просмотра, бэкап уже есть: интерфейс сам объясняет человеку);
+    шума: 401 (протух вход, его лечит повторный вход), любых отказов /api/auth/ (неверный
+    пароль или код - у входа своя защита и свой журнал) и отказов из EXPECTED (только для
+    просмотра, бэкап уже есть: интерфейс сам объясняет человеку);
+  * 422 (не прошла проверка) на запрос из интерфейса самой панели (from_panel_ui: заголовок
+    X-Kervax-Page, его ставит api() фронта, и вход человека). Это ошибка панели: форма прислала
+    то, чего бэкенд не принимает (так с 1.4.215 по 1.8.19 не сохранялась правка ни одного
+    монитора, а журнал молчал). Пишутся маршрут, метод, поля и сообщения проверки, без значений
+    и тела запроса; одна строка на маршрут и набор полей (invalid_note). 422 от скриптов и
+    внешних клиентов API - их ошибка, ее не пишем;
   * провал команды агенту или helper'у, которую поставил человек (Docker, Kubernetes, бэкап,
     юниты, место на диске), с выводом helper'а и параметрами команды. Кроме логов пода или
     контейнера, которого уже нет (target_gone): интерфейс говорит "под уже пересоздан";
@@ -61,8 +67,10 @@ WRITE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 # только исключения бэкенда
 MACHINE = ("/api/agent/", "/api/ansible/")
 SKIP = frozenset({"/api/health"})
-# ожидаемые отказы: протухший вход и форма, не прошедшая проверку
+# ожидаемые отказы: протухший вход и не прошедшая проверку форма (форму из интерфейса панели
+# пишет invalid_note, отдельно и без тела запроса)
 NOISY_CODES = frozenset({401, 422})
+INVALID = 422
 QUIET_PREFIX = ("/api/auth/", "/api/panel-errors")
 
 
@@ -89,6 +97,10 @@ def expected_refusal(code: int, body: bytes) -> bool:
 _MSG_MAX = 2000
 _DETAIL_MAX = 8000
 _BODY_KEPT = 4096
+# ответ 422 FastAPI повторяет в каждой ошибке присланное ("input"): чтобы разобрать поля и у
+# большой формы, его читаем дальше _BODY_KEPT (в журнал значения не идут)
+_INVALID_KEPT = 65536
+_INVALID_FIELDS = 20
 _TB_LINES = 30
 # одинаковая ошибка чаще раза в _THROTTLE_S из процесса - только счетчик в памяти, без записи
 _THROTTLE_S = 5.0
@@ -213,10 +225,12 @@ async def record(
     server_name: str = "",
     extra: dict | None = None,
     fp_extra: str = "",
+    fp_key: str | None = None,
     dedupe: bool = True,
 ) -> int | None:
     """Записать ошибку или прибавить счетчик у такой же. Никогда не бросает: журнал не должен
-    ронять запрос, который и так закончился ошибкой. Возвращает id строки (None - не записано)."""
+    ронять запрос, который и так закончился ошибкой. Возвращает id строки (None - не записано).
+    fp_key - по чему складывать одинаковые ошибки вместо текста (у формы - набор полей)."""
     if session_factory is None:
         return None
     try:
@@ -224,7 +238,7 @@ async def record(
         detail = mask_text(detail, _DETAIL_MAX)
         if kind == "command" and server_id is not None:
             fp_extra = f"{fp_extra}|srv={server_id}"
-        fp = fingerprint(kind, action, message, status, fp_extra) if dedupe else hashlib.sha1(
+        fp = fingerprint(kind, action, message if fp_key is None else fp_key, status, fp_extra) if dedupe else hashlib.sha1(
             f"{kind}|{time.time_ns()}|{id(extra)}".encode()).hexdigest()
         add = 1
         if dedupe:
@@ -406,6 +420,65 @@ def _detail_of(raw: bytes) -> str:
     return json.dumps(mask_obj(d), ensure_ascii=False)[:1000]
 
 
+# ошибка проверки FastAPI/pydantic в JSON: {"type": "...", "loc": [...], "msg": "...", "input": ...}.
+# Регулярка - для ответа, обрезанного на _INVALID_KEPT (JSON уже не разобрать)
+_INVALID_ITEM = re.compile(r'"type"\s*:\s*"([^"]*)"\s*,\s*"loc"\s*:\s*\[([^\]]*)\]\s*,\s*"msg"\s*:\s*"((?:[^"\\]|\\.)*)"')
+_LOC_ROOT = frozenset({"body", "query", "path", "header", "cookie"})
+
+
+def _field_of(loc) -> str:
+    """["body", "items", 0, "name"] -> items.0.name: где лежало поле (body, query), не нужно."""
+    parts = [str(x) for x in (loc or [])]
+    if len(parts) > 1 and parts[0] in _LOC_ROOT:
+        parts = parts[1:]
+    return ".".join(parts)[:120]
+
+
+def invalid_fields(raw: bytes) -> tuple[list[dict], str]:
+    """Что не прошло проверку: [{field, type, msg}] без значений (input и ctx отбрасываются), или
+    текст отказа, если бэкенд ответил 422 строкой (HTTPException(422, "..."))."""
+    text = raw.decode("utf-8", "replace") if raw else ""
+    items: list[dict] = []
+    try:
+        data = json.loads(text) if text else None
+    except ValueError:
+        data = None
+        for t, loc, msg in _INVALID_ITEM.findall(text):
+            try:
+                loc_v, msg_v = json.loads(f"[{loc}]"), json.loads(f'"{msg}"')
+            except ValueError:
+                continue
+            items.append({"field": _field_of(loc_v), "type": t[:60], "msg": mask_text(msg_v, 300)})
+    d = data.get("detail") if isinstance(data, dict) else None
+    if isinstance(d, str):
+        return [], mask_text(d, 500)
+    if isinstance(d, list):
+        for e in d:
+            if isinstance(e, dict):
+                items.append({"field": _field_of(e.get("loc")), "type": str(e.get("type") or "")[:60],
+                              "msg": mask_text(e.get("msg") or "", 300)})
+    seen: set[tuple] = set()
+    out = []
+    for x in items:
+        if (x["field"], x["type"]) not in seen:
+            seen.add((x["field"], x["type"]))
+            out.append(x)
+    return out[:_INVALID_FIELDS], ""
+
+
+def from_panel_ui(scope) -> bool:
+    """Запрос из интерфейса самой панели: api() фронта ставит X-Kervax-Page (адрес страницы) к
+    каждому запросу, и у человека есть вход. Скрипты, ansible и внешние клиенты API заголовок не
+    шлют: их 422 - их ошибка, не панели."""
+    return _header(scope, b"x-kervax-page").startswith("/") and bool(who_from_scope(scope))
+
+
+def invalid_candidate(path: str) -> bool:
+    """Маршрут, 422 на котором из интерфейса - ошибка панели (вход и сам журнал - нет)."""
+    return (path.startswith("/api/") and path not in SKIP and not path.startswith(MACHINE)
+            and not path.startswith(QUIET_PREFIX))
+
+
 def should_record(method: str, path: str, status: int) -> str | None:
     """Вид записи для ответа без исключения: server, api или None (не пишем)."""
     if path in SKIP or not path.startswith("/api/"):
@@ -435,6 +508,8 @@ class PanelErrorMiddleware:
             return
         method = scope.get("method", "")
         keep_body = method in WRITE_METHODS and not path.startswith(MACHINE) and not path.startswith(QUIET_PREFIX)
+        # 422 читаем дальше, только если это может быть форма панели
+        resp_max = _INVALID_KEPT if invalid_candidate(path) and _header(scope, b"x-kervax-page") else _BODY_KEPT
         req = bytearray()
         resp = bytearray()
         code = 0
@@ -449,8 +524,10 @@ class PanelErrorMiddleware:
             nonlocal code
             if msg["type"] == "http.response.start":
                 code = msg["status"]
-            elif msg["type"] == "http.response.body" and code >= 400 and len(resp) < _BODY_KEPT:
-                resp.extend(msg.get("body", b"")[: _BODY_KEPT - len(resp)])
+            elif msg["type"] == "http.response.body" and code >= 400:
+                limit = resp_max if code == INVALID else _BODY_KEPT
+                if len(resp) < limit:
+                    resp.extend(msg.get("body", b"")[: limit - len(resp)])
             await send(msg)
 
         try:
@@ -463,6 +540,31 @@ class PanelErrorMiddleware:
             kind = None
         if kind:
             self._note(scope, path, method, code, req, bytes(resp), None)
+        elif code == INVALID and invalid_candidate(path) and from_panel_ui(scope):
+            self.invalid_note(scope, path, method, bytes(resp))
+
+    def invalid_note(self, scope, path, method, resp) -> None:
+        """Форма панели не прошла проверку бэкенда. Одна строка на маршрут и набор полей (fp_key):
+        сломанная форма копит счетчик, а не новые строки, сколько бы раз ее ни отправили и что бы
+        в нее ни вписали. Значения полей и тело запроса не пишутся."""
+        try:
+            factory = getattr(getattr(scope.get("app"), "state", None), "session_factory", None)
+            m = _SRV_IN_PATH.match(path)
+            fields, text = invalid_fields(resp)
+            if fields:
+                message = "форма не прошла проверку: " + "; ".join(f"{x['field'] or '?'}: {x['msg']}" for x in fields)
+                detail = "\n".join(f"поле {x['field'] or '?'} ({x['type']}): {x['msg']}" for x in fields)
+                key = "|".join(sorted(f"{_NUMS.sub('#', x['field'])}:{x['type']}" for x in fields))
+            else:
+                message, detail, key = "форма не прошла проверку: " + (text or "без подробностей"), "", text
+            record_soon(
+                factory, kind="api", action=f"{method} {_route(scope, path)}", message=message, detail=detail,
+                status=INVALID, username=who_from_scope(scope),
+                page=_header(scope, b"x-kervax-page")[:300], section=_header(scope, b"x-kervax-section")[:32],
+                server_id=int(m.group(1)) if m else None, fp_key=f"invalid|{key}", extra={"invalid": fields},
+            )
+        except Exception:  # noqa: BLE001
+            log.debug("журнал ошибок панели: 422", exc_info=True)
 
     def _note(self, scope, path, method, code, req, resp, exc) -> None:
         try:

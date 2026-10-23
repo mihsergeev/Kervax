@@ -15,6 +15,8 @@ const PHRASES: Rule[] = [
   [/ на хосте верит заголовку от любого адреса \(/g, ' on the host trusts the header from any address ('],
   [/\), а (\d+) и (\d+) открыты в обход Cloudflare/g, '), and $1 and $2 are open past Cloudflare'],
   [/\), а (\d+) открыт в обход Cloudflare/g, '), and $1 is open past Cloudflare'],
+  // свои бэкапы ноды (app/custom_backups.py evaluate)
+  [/таймер выключен, последний прогон (.+?) назад/g, 'the timer is off, the last run was $1 ago'],
   // GitLab: повод алерта и заметки про бэкап (app/gitlab.py why, backup_notes)
   [/, патч (\S+) вышел (.+?) назад \(последний (\S+)\)/g, ', patch $1 was released $2 ago (latest $3)'],
   [/, патч (\S+) вышел (.+?) назад/g, ', patch $1 was released $2 ago'],

@@ -218,8 +218,9 @@ export async function api<T>(path: string, options: RequestInit = {}): Promise<T
       typeof body?.detail === 'string'
         ? body.detail
         : invalid?.text || tr('Ошибка HTTP {code}', { code: res.status })
-    // последние неудачные запросы уходят вместе с "Сообщить о проблеме"
-    noteApiFailure(method, path, res.status, typeof body?.detail === 'string' ? body.detail : JSON.stringify(body?.detail ?? ''))
+    // последние неудачные запросы уходят вместе с "Сообщить о проблеме". У 422 - поля и причины:
+    // сырой detail повторяет присланные значения, а там бывают пароли и заголовки
+    noteApiFailure(method, path, res.status, typeof body?.detail === 'string' ? body.detail : invalid?.text || JSON.stringify(body?.detail ?? ''))
     throw new ApiError(detail, res.status, invalid?.fields)
   }
   // тексты проблем бэкенд пишет по-русски: английской панели переводим то, что умеем
@@ -2467,9 +2468,10 @@ export type Server = {
 
 // Свой бэкап ноды: cron-задание, systemd-таймер или скрипт с метриками, настроенный без
 // панели. Находит helper на ноде, статус считает панель; сама нода при этом не меняется.
-// ran — cron задание запускает (видно по журналу), но итога не видно
+// ran — cron задание запускает (видно по журналу), но итога не видно; off — таймер выключен,
+// но задание еще не запускалось или прошлый прогон свежий (не проблема)
 export type CustomBackupStatus =
-  | 'ok' | 'failed' | 'stale' | 'disabled' | 'running' | 'ran' | 'unknown' | 'ignored'
+  | 'ok' | 'failed' | 'stale' | 'disabled' | 'off' | 'running' | 'ran' | 'unknown' | 'ignored'
 export type CustomBackup = {
   id: string
   kind: 'cron' | 'systemd' | 'metrics'

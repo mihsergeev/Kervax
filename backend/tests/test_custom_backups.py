@@ -68,9 +68,14 @@ def test_statuses():
     stale = custom_backups.evaluate(old, NOW, set())
     assert stale.status == "stale" and "нет свежего" in stale.problem
 
-    # выключенный таймер — бэкап не запускается вовсе
+    # выключенный таймер, а прошлый прогон свежий: человек сам его снял, алерта еще нет
     off = _jobs()[1] | {"enabled": False}
-    assert custom_backups.evaluate(off, NOW, set()).status == "disabled"
+    v = custom_backups.evaluate(off, NOW, set())
+    assert v.status == "off" and not v.problem
+    # бэкапа нет дольше двух интервалов - вот это уже беда
+    long_off = off | {"ok_ts": T - 3 * 86400, "run_ts": T - 3 * 86400, "prev_ts": T - 3 * 86400, "next_ts": 0}
+    v = custom_backups.evaluate(long_off, NOW, set())
+    assert v.status == "disabled" and v.problem == "таймер выключен, последний прогон 3 дн назад"
     # идёт прямо сейчас — не проблема, даже если прошлый упал
     run = _jobs()[0] | {"running": True}
     assert custom_backups.evaluate(run, NOW, set()).status == "running"
@@ -93,6 +98,46 @@ def test_prometheus_flag_file_is_not_a_job():
     # задание cron с похожим словом в имени остается
     cron = dict(flag, id="cron:1", kind="cron", name="restic_backup_monitoring_disabled")
     assert len(custom_backups.jobs_of(_server(jobs=[cron]))) == 1
+
+
+def _timer(name, **kw):
+    job = {"id": f"systemd:{name}.timer", "kind": "systemd", "name": name, "desc": "",
+           "schedule": "*-*-* 22:15:00", "engines": [], "files": True, "containers": [],
+           "unit": f"{name}.service", "script": "", "ok": -1, "ok_ts": 0, "run_ts": 0,
+           "running": False, "next_ts": 0, "prev_ts": 0, "enabled": False}
+    return job | kw
+
+
+def test_never_run_disabled_timer_is_no_alert():
+    """Таймер поставили выключенным и включили через несколько часов: раньше в TG приходило
+    "свой бэкап не запускается", а потом "свои бэкапы снова отрабатывают", хотя задание ни разу
+    не запускалось. Недоделанная установка - не беда"""
+    s = _server(jobs=_jobs()[1:] + [_timer("files-sync")])
+    v = {x.name: x for x in custom_backups.views(s, NOW)}["files-sync"]
+    assert v.status == "off" and not v.problem
+    assert custom_backups.problems(s, NOW) == []
+    assert collector._server_conditions(s, NOW)["backup_custom"][0] == 0
+
+
+def test_updater_is_not_an_own_backup():
+    """gitlab-autoupgrade делает gitlab-backup и rsync-снимок только перед обновлением, helper
+    видел rsync в теле и отдавал его своим бэкапом с вечным "не видно" и "таймер выключен"."""
+    au = _timer("gitlab-autoupgrade", desc="GitLab autoupgrade (/opt/scripts/gitlab-autoupgrade.sh)",
+                script="/opt/scripts/gitlab-autoupgrade.sh")
+    apt = _timer("app-update", unit="app-update.service")
+    s = _server(jobs=_jobs() + [au, apt])
+    names = {v.name for v in custom_backups.views(s, NOW)}
+    assert "gitlab-autoupgrade" not in names and "app-update" not in names
+    assert "gitlab-autoupgrade" not in " ".join(custom_backups.problems(s, NOW))
+    # настоящий бэкап GitLab по крону и таймер бэкапа перед обновлением - свои бэкапы
+    gl = {"id": "cron:bb22", "kind": "cron", "name": "gitlab-backup", "schedule": "0 2 * * *", "ok": -1}
+    pre = _timer("backup-before-upgrade")
+    # у крона панель видит только имя скрипта, а про бэкап сказано в аргументе
+    # ("v-update-sys-queue backup"): решает helper по всей командной строке
+    queue = {"id": "cron:cc33", "kind": "cron", "name": "v-update-sys-queue", "schedule": "*/5 * * * *",
+             "script": "/usr/local/panel/bin/v-update-sys-queue", "ok": -1}
+    names = {v.name for v in custom_backups.views(_server(jobs=[gl, pre, queue]), NOW)}
+    assert names == {"gitlab-backup", "backup-before-upgrade", "v-update-sys-queue"}
 
 
 def test_frozen_scan_raises_nothing():

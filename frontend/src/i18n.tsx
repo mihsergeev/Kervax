@@ -4625,6 +4625,9 @@ const EN: Record<string, string> = {
     'It is not visible when the job last ran: it has no metrics, and the panel found no backup files.',
   'Запуски видны по журналу cron, а итог — нет: скрипт не пишет ни метрик, ни отметки о результате, а файлов бэкапа панель не нашла.':
     'Runs are visible in the cron log, the outcome is not: the script writes neither metrics nor a status file, and the panel found no backup files.',
+  'Таймер выключен. Алерт придет, если свежего бэкапа не будет дольше обычного.':
+    'The timer is off. An alert comes if there is no fresh backup for longer than usual.',
+  'Таймер выключен, задание еще ни разу не запускалось.': 'The timer is off, the job has never run yet.',
   'запускается': 'runs',
   'последний снимок restic': 'last restic snapshot',
   'отметка': 'status file',
@@ -6236,8 +6239,8 @@ const EN: Record<string, string> = {
     'What people wrote with the Report an issue button, with their errors from the 15 minutes before.',
   'Необработанные исключения бэкенда (500): маршрут, кто и короткий traceback кода панели.':
     'Unhandled backend exceptions (500): route, who and a short traceback of the panel code.',
-  'Изменяющие запросы, на которые панель ответила отказом. Протухший вход (401), неверный пароль и не прошедшие проверку формы (422) сюда не пишутся.':
-    'Changing requests the panel refused. An expired session (401), a wrong password and forms that failed validation (422) are not recorded here.',
+  'Изменяющие запросы, на которые панель ответила отказом, и формы панели, которые не прошли проверку бэкенда (422): поля и причины, без значений. Протухший вход (401) и неверный пароль сюда не пишутся.':
+    'Changing requests the panel refused, and panel forms the backend rejected (422): fields and reasons, without values. An expired session (401) and a wrong password are not recorded here.',
   'Команды агенту и helper-скриптам, которые запустил человек и которые не прошли: вывод helper-скрипта и параметры команды.':
     'Agent and helper commands started by a person that failed: the helper output and the command parameters.',
   'Ошибки в браузере: исключения, необработанные промисы и упавшие при отрисовке экраны.':

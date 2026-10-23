@@ -43,9 +43,27 @@ def _is_flag(job: dict) -> bool:
     return job.get("kind") == "metrics" and bool(_FLAG_RE.search(str(job.get("name") or "").lower()))
 
 
+# Обновлялка, а не бэкап: gitlab-autoupgrade перед каждым шагом делает gitlab-backup и rsync-снимок
+# для своего отката, helper видел в теле rsync и отдавал ее своим бэкапом. Запускается она, когда
+# есть что обновлять, и следить за ней как за бэкапом незачем. Решает имя: update/upgrade и ни слова
+# про бэкап. helper с 0.41 таких не отдает, здесь - для нод со старым helper'ом и только по таймерам:
+# у крона сюда доходит одно имя скрипта, а слово про бэкап бывает в аргументах
+# ("v-update-sys-queue backup" у HestiaCP - очередь бэкапов), командную строку видит только helper
+_UPDATER_RE = re.compile(r"upgrade|update|unattended")
+_BACKUP_WORD_RE = re.compile(r"backup|dump|bkp|snapshot")
+
+
+def _is_updater(job: dict) -> bool:
+    if job.get("kind") != "systemd":
+        return False
+    text = " ".join(str(job.get(k) or "") for k in ("name", "desc", "unit", "script")).lower()
+    return bool(_UPDATER_RE.search(text)) and not _BACKUP_WORD_RE.search(text)
+
+
 def jobs_of(server) -> list[dict]:
     jobs = _block(server).get("jobs")
-    return [j for j in (jobs or []) if isinstance(j, dict) and j.get("id") and not _is_flag(j)]
+    return [j for j in (jobs or []) if isinstance(j, dict) and j.get("id")
+            and not _is_flag(j) and not _is_updater(j)]
 
 
 _DOW_NAMES = {"sun": 0, "mon": 1, "tue": 2, "wed": 3, "thu": 4, "fri": 5, "sat": 6}
@@ -194,7 +212,14 @@ def evaluate(job: dict, now: datetime, ignored: set[str], fresh: bool = True) ->
     elif job.get("running"):
         status = "running"
     elif job.get("kind") == "systemd" and job.get("enabled") is False:
-        status, problem = "disabled", "таймер выключен — бэкап не запускается"
+        # Таймер выключают руками: задание только ставят или его прогоны на время сняли, человек
+        # об этом знает. Беда - только когда бэкап уже работал и свежего нет дольше обычного.
+        # Выключенный и ни разу не запускавшийся таймер - недоделанная установка, не алерт
+        last = max(ok_ts, run_ts, int(job.get("prev_ts") or 0))
+        if last > 0 and nowts - last > after:
+            status, problem = "disabled", f"таймер выключен, последний прогон {_ago(nowts - last)} назад"
+        else:
+            status = "off"
     elif ok == 0:
         fail = job.get("fail") or ""
         if fail == "state":
@@ -311,7 +336,8 @@ def _short_one(item: str) -> tuple[str, list[str]]:
     problem, _, bad = problem.partition(": ")
     facts = [tg_fmt.fact("Базы", tg_fmt.names(bad.split(", ")))] if bad else []
     if problem.startswith("таймер выключен"):
-        return f"Свой бэкап {name} не запускается", ["таймер выключен"]
+        ago = _ago_back(problem)
+        return f"Свой бэкап {name} не запускается", [f"таймер выключен, последний прогон {ago} назад" if ago else "таймер выключен"]
     if problem.startswith("нет свежего бэкапа"):
         ago = _ago_back(problem)
         return f"Свой бэкап {name} давно не отрабатывал", [f"последний успешный {ago} назад"] if ago else []

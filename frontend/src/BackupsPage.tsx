@@ -447,16 +447,16 @@ function OwnBackupRow({ job: j, canManage, busy, onToggle }: {
 }) {
   const { t } = useI18n()
   const label: Record<CustomBackup['status'], string> = {
-    ok: t('работает'), failed: t('ошибка'), stale: t('не свежий'), disabled: t('таймер выключен'),
+    ok: t('работает'), failed: t('ошибка'), stale: t('не свежий'), disabled: t('таймер выключен'), off: t('выключен'),
     running: t('идёт сейчас'), ran: t('запускается'), unknown: t('не видно'), ignored: t('не отслеживается'),
   }
   const tone: Record<CustomBackup['status'], string> = {
-    ok: 't-up', running: 't-up', failed: 't-down', stale: 't-degraded', disabled: 't-degraded',
+    ok: 't-up', running: 't-up', failed: 't-down', stale: 't-degraded', disabled: 't-degraded', off: 'muted',
     ran: '', unknown: 'muted', ignored: 'muted',
   }
   const dot: Record<CustomBackup['status'], string> = {
     ok: 'sdot-up', running: 'sdot-up', failed: 'sdot-down', stale: 'sdot-degraded',
-    disabled: 'sdot-degraded', ran: 'sdot-unknown', unknown: 'sdot-unknown', ignored: 'sdot-unknown',
+    disabled: 'sdot-degraded', off: 'sdot-unknown', ran: 'sdot-unknown', unknown: 'sdot-unknown', ignored: 'sdot-unknown',
   }
   const where = j.kind === 'cron'
     ? `cron · ${fmtSchedule(j.schedule, t)}`
@@ -506,6 +506,13 @@ function OwnBackupRow({ job: j, canManage, busy, onToggle }: {
             {j.scan_stale
               ? t('Сведения с ноды давно не обновлялись: helper бэкапа там не запускается. Переустановите его.')
               : t('Не видно, когда задание отработало: метрик у него нет, а файлов бэкапа панель не нашла.')}
+          </div>
+        )}
+        {j.status === 'off' && (
+          <div className="muted small">
+            {j.ok_ts || j.run_ts
+              ? t('Таймер выключен. Алерт придет, если свежего бэкапа не будет дольше обычного.')
+              : t('Таймер выключен, задание еще ни разу не запускалось.')}
           </div>
         )}
         {j.status === 'ran' && (
