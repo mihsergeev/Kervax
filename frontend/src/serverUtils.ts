@@ -341,9 +341,27 @@ export function gpuSecLine(s: Server, t: (k: string, p?: Record<string, string |
 export type BackupDest = { name: string; srv?: Server; target?: BackupTarget | null }
 
 function srvAddrs(s: Server): string[] {
-  return [s.external_ip, s.agent_ip, s.local_ip, s.hostname, s.name, ...(s.last_report?.ips ?? [])]
-    .filter((x): x is string => !!x).map((x) => x.toLowerCase())
+  return [...srvIps(s), s.hostname, s.name].filter((x): x is string => !!x).map((x) => x.toLowerCase())
 }
+
+// Все известные адреса ноды: внешний, с которого ходит агент (часто меш), локальный и публичные
+// на интерфейсах. Тот же набор, что у общего поиска панели (backend/app/search.py)
+export function srvIps(s: Server): string[] {
+  return [s.external_ip, s.agent_ip, s.local_ip, ...(s.last_report?.ips ?? [])].filter((x): x is string => !!x)
+}
+
+// Поиск по адресу (q уже в нижнем регистре): с начала адреса, а с точкой или двоеточием в запросе -
+// и с середины ("244.89"). Голые цифры с середины не ищем: "1" иначе нашел бы почти все ноды
+export function ipHit(ips: (string | null | undefined)[], q: string): boolean {
+  if (!q) return false
+  const mid = /[.:]/.test(q)
+  return ips.some((ip) => {
+    const a = (ip ?? '').toLowerCase()
+    return !!a && (a.startsWith(q) || (mid && a.includes(q)))
+  })
+}
+
+export const srvIpHit = (s: Server, q: string) => ipHit(srvIps(s), q)
 
 export function backupDest(client: Server, servers: Server[]): BackupDest | null {
   const tg = client.backup_target

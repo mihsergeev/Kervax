@@ -26,6 +26,11 @@
 # Сухой прогон (покажет, что и где обновится, ничего не меняя):
 #   ansible-playbook playbooks/kervax_helpers.yml -l '…' --check --diff
 #
+# Поставить helper "только вручную" (kube-setup) на конкретную ноду - эту команду
+# показывает панель в окне кластера, рядом с curl:
+#   ansible-playbook playbooks/kervax_helpers.yml -l web-01 -e kervax_install=kube-setup
+# Названный helper ставится заново, даже если уже стоит, после него перезапускается агент.
+#
 # Скрипты лежат в другом месте? Укажите каталог явно:
 #   ansible-playbook playbooks/kervax_helpers.yml -l '…' -e kervax_src=/path/to/agent
 
@@ -55,6 +60,10 @@
     # временная копия в /root, а не в /tmp: /tmp доступен на запись всем, и подменить
     # скрипт между копированием и запуском там принципиально возможно
     kervax_stage: /root/.kervax-setup
+    # -e kervax_install=kube-setup[,...] - явная установка названных helper'ов на ноды из -l,
+    # в том числе KERVAX_SETUP_MANUAL: решение уже принял человек, назвав ноду и helper
+    kervax_install_list: >-
+      {{ (kervax_install | default('')).split(',') | map('trim') | select | list }}
     # Каталог со скриптами ищем сами: раскладка репо ansible либо репо панели.
     # lookup выполняется на управляющей машине, к нодам не ходит.
     # Порядок = приоритет (first_found берёт первый существующий):
@@ -143,6 +152,14 @@
         that: (kervax_helpers | default([])) | length > 0
         fail_msg: "В {{ kervax_src }} нет ни одного скрипта с KERVAX_SETUP_VERSION="
 
+    - name: Проверить имена в kervax_install
+      ansible.builtin.assert:
+        that: kervax_install_list | difference(kervax_helpers) | length == 0
+        fail_msg: >-
+          Нет таких helper'ов: {{ kervax_install_list | difference(kervax_helpers) | join(', ') }}.
+          Есть: {{ kervax_helpers | join(', ') }}
+      when: kervax_install_list | length > 0
+
     # Целевые версии читаем ИЗ САМИХ СКРИПТОВ (lookup — на управляющей машине).
     # Держать их копией в плейбуке нельзя: разъедутся, и обновления встанут молча.
     # Отдельной игрой это делать тоже нельзя: --limit применяется ко ВСЕМ играм,
@@ -208,6 +225,26 @@
            | difference(kervax_manual | default([])) }}
       when: (item ~ '=') not in (kervax_have.stdout | default(''))
 
+    # Явно названный helper, которому нода не подходит (kube-setup без кластера), упал бы
+    # на установке с невнятной ошибкой. Говорим сразу, в чем дело
+    - name: Названный в kervax_install helper не подходит ноде
+      ansible.builtin.fail:
+        msg: >-
+          {{ item }} не подходит этой ноде, условие из скрипта не выполнилось:
+          {{ kervax_when[item] }}
+      loop: "{{ kervax_install_list }}"
+      when:
+        - kervax_when[item] | default('') | length > 0
+        - item not in (kervax_fits.stdout_lines | default([]))
+
+    # Ставим заново, даже если версия та же: панель просит включить доступ, значит на ноде
+    # его нет (kube.json пропал или токен отозван), а повторный запуск безопасен
+    - name: Добавить явно названные helper'ы (kervax_install)
+      ansible.builtin.set_fact:
+        kervax_todo: "{{ (kervax_todo | default([])) + [item] }}"
+      loop: "{{ kervax_install_list }}"
+      when: item not in (kervax_todo | default([]))
+
     - name: Что будет установлено или обновлено
       ansible.builtin.debug:
         msg: >-
@@ -256,6 +293,14 @@
           loop: "{{ kervax_todo | default([]) }}"
           register: kervax_run
           changed_when: kervax_run.rc == 0
+
+        # Как в команде с curl из панели: kube-setup выдает агенту доступ, рестарт сразу
+        # подхватывает его. Только при явной установке - массовое обновление агент не дергает
+        - name: Перезапустить агент Kervax после явной установки
+          ansible.builtin.systemd:
+            name: kervax-agent
+            state: restarted
+          when: kervax_install_list | length > 0
       always:
         - name: Убрать временную копию
           ansible.builtin.file:

@@ -867,6 +867,73 @@ def _path_covered(path: str, mode: str, inc: list[str], exc: list[str]) -> bool:
     return not any(under(path, p) for p in exc)
 
 
+# Движки с инвентарем баз (dbstat-setup): код движка в db_stats. Их объем - сумма баз, а не каталог:
+# каталог PostgreSQL держит еще WAL, и du по нему не нужен вовсе
+_SIZE_INV = {"PostgreSQL": "pg", "MySQL/MariaDB": "mysql", "ClickHouse": "clickhouse"}
+# Индексы в дамп не идут (pg_dump, mysqldump): их размер helper меряет раз в сутки
+_SIZE_IDX = {"pg", "mysql"}
+_SIZE_SMALL = {"RabbitMQ"}  # export_definitions: килобайты при любом объеме очередей
+# Замер каталогов раз в сутки, отчет каждые 15 минут: старше трех суток - helper замер бросил
+_SIZE_MAX_AGE = 3 * 86400
+
+
+class _CoverageSizes:
+    """Примерный объем, который придется бэкапить, для строк "Покрытия". Источники - то, что root-helper
+    dbstat-setup уже присылает: инвентарь баз (db_stats) и с 0.15 extras["db-sizes"] (индексы и du
+    каталогов данных). Без замера строка молчит, а не пишет "неизвестно"."""
+
+    def __init__(self, rep: dict):
+        self.inv: dict[tuple[str, str], list[tuple[str, int]]] = {}
+        for e in rep.get("db_stats") or []:
+            if not isinstance(e, dict) or e.get("engine") not in _SIZE_INV.values():
+                continue
+            dbs = [(str(d.get("name") or ""), int(d.get("size") or 0))
+                   for d in e.get("dbs") or [] if isinstance(d, dict)]
+            self.inv[(e["engine"], str(e.get("container") or ""))] = [x for x in dbs if x[1] > 0]
+        self.idx: dict[tuple[str, str], int] = {}
+        self.du: dict[str, int] = {}  # контейнер -> байты
+        self.native: dict[str, int] = {}  # движок нативной установки -> байты
+        block = (rep.get("extras") or {}).get("db-sizes")
+        items = block.get("items") if isinstance(block, dict) else None
+        ref = float(rep.get("clock_unix") or 0) or datetime.now(timezone.utc).timestamp()
+        for it in items if isinstance(items, list) else []:
+            if not isinstance(it, dict) or ref - float(it.get("ts") or 0) > _SIZE_MAX_AGE:
+                continue
+            key, cont = str(it.get("key") or ""), str(it.get("container") or "")
+            if int(it.get("idx") or 0) > 0:
+                self.idx[(key, cont)] = int(it["idx"])
+            b = int(it.get("bytes") or 0)
+            if b <= 0:
+                continue
+            if cont:
+                self.du[cont] = b
+            elif key in _DB_IMAGES:
+                self.native[_DB_IMAGES[key]] = self.native.get(_DB_IMAGES[key], 0) + b
+
+    def fill(self, a: BackupAudit) -> None:
+        # поды kubernetes helper не меряет; у CronJob-ветки instance пустой, но поды есть
+        if a.kind not in ("db", "db_ok") or a.pods or a.instance.startswith("k8s."):
+            return
+        if a.subject in _SIZE_SMALL:
+            a.size_small = True
+            return
+        code = _SIZE_INV.get(a.subject)
+        dbs = self.inv.get((code, a.instance)) if code else None
+        if dbs:
+            total = sum(s for _, s in dbs)
+            idx = self.idx.get((code, a.instance), 0) if code in _SIZE_IDX else 0
+            # индексов больше базы не бывает: такой замер с другого дня, лучше без него
+            a.size_bytes = total - idx if 0 < idx < total else total
+            if a.size_bytes < total * 0.85:
+                a.size_db = total
+            if len(dbs) > 1:
+                name, top = max(dbs, key=lambda x: x[1])
+                if top >= total * 0.3:  # крупнейшая из сотни мелких ничего не объясняет
+                    a.size_top, a.size_top_bytes = name, top
+            return
+        a.size_bytes = self.du.get(a.instance, 0) if a.instance else self.native.get(a.subject, 0)
+
+
 def _backup_coverage(server: Server) -> list[BackupAudit]:
     """Аудит: что на ноде рискует не восстановиться. Три источника — точки монтирования
     с данными, bind-mount'ы контейнеров (осознанно проброшенные хост-пути = почти всегда
@@ -1107,6 +1174,9 @@ def _backup_coverage(server: Server) -> list[BackupAudit]:
                 downtime=_DUMP_DOWNTIME.get(code, "") if can_dump and not kube else "",
                 container=inst, pods=inst_pods[:4],
             ))
+    sizes = _CoverageSizes(rep)
+    for a in out:
+        sizes.fill(a)
     # покрытие путей знаем только для нод с helper'ом (у остальных нет конфига)
     if not bk.get("manageable"):
         return out
@@ -3371,6 +3441,8 @@ async def agent_report(
     report_dict = body.model_dump()
     # адрес репозитория бэкапа - только без логина и пароля, что бы ни прислал helper
     backup_target.clean_report(report_dict)
+    # отчет, собранный до перевода на https, не возвращает старый http-адрес
+    backup_target.carry(prev_rep, report_dict, now.timestamp())
     # убийства, которые еще не попали в точку графика (точка пишется раз в минуту)
     report_dict["oom_pend"] = 0 if write_metric else oom_pend
     # имена контейнеров по id переносятся из отчета в отчет: OOM называет контейнер по cgroup с id,
@@ -3748,6 +3820,13 @@ async def agent_backup_result(
     c.done_at = datetime.now(timezone.utc)
     if c.action == "deprovision" and body.ok:
         server.backup_setup_err = None  # настройку сняли - упавшей больше нет
+    if c.action == "to_https" and body.ok:
+        # бэкап уже на https: адрес в отчете сразу, не дожидаясь следующего отчета агента
+        # (app/backup_target.py, switched)
+        rep = backup_target.switched(server.last_report or {}, (c.payload or {}).get("port"),
+                                     c.done_at.timestamp())
+        if rep is not None:
+            server.last_report = rep
     if not body.ok:
         # параметры команды - в журнал до того, как payload сотрется (маска секретов внутри)
         panel_errors.command_failed(request.app.state.session_factory, "backup", c, server_name=server.name or "")

@@ -28,7 +28,7 @@ import { LlmSection } from './Gpu'
 import { currentLang, useI18n } from './i18n'
 import { useAuth } from './auth'
 import { useUrlCard, useUrlParam } from './deeplink'
-import { shortList, srvIssues, srvMuted, webRate } from './serverUtils'
+import { shortList, srvIpHit, srvIssues, srvMuted, webRate } from './serverUtils'
 import { fmtRel } from './ServersPage'
 import { FixSteps, useFixDone } from './FixSteps'
 import { CardNav, FreshChip, markMuted, OvAreas, OvRows, secInfoOf, type OvRow, type SecDef, type SecInfo, type SecItem } from './cardLayout'
@@ -2561,7 +2561,7 @@ export function ServicesPage({ onUnauthorized, openServerId, openSec, onConsumed
         [server.name, server.group_name, ...items.map((i) => i.kind)]
           .join(' ')
           .toLowerCase()
-          .includes(q),
+          .includes(q) || srvIpHit(server, q),
       )
     : all
   ).filter((r) => !tile || ((tile !== 'queues' || r.server.online) && r.items.some(SVC_OF[tile])))
@@ -2685,7 +2685,7 @@ export function ServicesPage({ onUnauthorized, openServerId, openSec, onConsumed
             autoComplete="off"
             readOnly={searchRo}
             onFocus={() => setSearchRo(false)}
-            placeholder={t('Поиск: нода, группа, сервис…')}
+            placeholder={t('Поиск: нода, IP, группа, сервис…')}
             value={query}
             onChange={(e) => setQuery(e.target.value)}
           />

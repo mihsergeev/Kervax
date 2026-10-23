@@ -58,9 +58,14 @@
 # ALTER SYSTEM), the role the helper got in as, the compose project of the container, the systemd unit
 # of a host instance. And whether the hour-old snapshot already had statements: for an hour after
 # pg_stat_statements was switched on the top stayed empty, and that read as "the database is idle".
+#
+# 0.15: how much there is to back up, for the Coverage section: once a day the index size of every
+# PostgreSQL and MySQL instance (a dump holds no indexes) and the size of the data directories of
+# the other engines (MinIO, Prometheus, Redis...), at idle priority and with a time limit, into
+# /var/lib/kervax/report.d/db-sizes.json.
 set -euo pipefail
 
-KERVAX_SETUP_VERSION=0.14  # MAJOR.MINOR; compared component-wise
+KERVAX_SETUP_VERSION=0.15  # MAJOR.MINOR; compared component-wise
 KERVAX_SETUP_ALWAYS=1     # safe on any node: without a database it collects an empty file
 
 HELPER_DIR=/lib65/kervax
@@ -175,6 +180,8 @@ collect_pg() {
   cu=$(pg_q "$c" "select count(*) from pg_stat_activity where backend_type = 'client backend'" | head -1)
   cm=$(pg_q "$c" "select current_setting('max_connections')::int" | head -1)
   add_entry pg "$c" "$v" "$d" "$u" "$cu" "$cm"
+  [ "$d" = "[]" ] || INV="$INV|postgres:$c|"
+  idx_pg "$c"
   health_pg "$c"
 }
 
@@ -566,6 +573,8 @@ collect_mysql() {
   cu=$(my_q "$c" "show global status like 'Threads_connected'" | awk '{print $2}' | head -1)
   cm=$(my_q "$c" "select @@max_connections" | head -1)
   add_entry mysql "$n" "$v" "$d" "$u" "$cu" "$cm"
+  [ "$d" = "[]" ] || INV="$INV|mysql:$n|"
+  idx_mysql "$c" "$n"
   health_mysql "$c" "$n"
 }
 
@@ -753,6 +762,7 @@ collect_ch() {
       | awk -F'\t' '{print $1"|"$2}' | dbs_json)
   u=$(ch_q "$c" "select name from system.users order by name format TabSeparated" | list_json)
   add_entry clickhouse "$c" "$v" "$d" "$u"
+  [ "$d" = "[]" ] || INV="$INV|clickhouse:$c|"
   health_ch "$c"
 }
 
@@ -926,6 +936,138 @@ health_redis() {
   HEALTH="$HEALTH${HEALTH:+,}{\"engine\":\"redis\",\"container\":\"$(esc "$c")\",\"role\":\"$(esc "$role")\",\"replicas\":$rep,\"lag\":0,\"link\":\"$(esc "$link")\",\"down\":$down,\"mem\":$mem,\"maxmem\":$maxm,\"policy\":\"$(esc "$pol")\",\"rdb\":\"$(esc "$rdb")\",\"rdb_changes\":$chg,\"rdb_age\":$age,\"aof\":$aof,\"aof_status\":\"$(esc "$aofs")\",\"stop_writes\":\"$sw\",\"win\":$win,\"evicted\":$ev,\"rejected\":$rj,\"cmds\":[$cmds]}"
 }
 
+# ── How much there is to back up (0.15) ────────────────────────────────────────
+# The Coverage section shows next to every database roughly how big its dump or copy will be:
+# backing up 100 MB and 2 TB are different jobs. Measured once a day and cached in SIZE_DIR, so
+# the 15-minute runs only read the cache:
+#   - PostgreSQL and MySQL: the index size per instance. A dump holds no indexes, so the panel
+#     takes the inventory size minus this. Catalog sizes only, no table is read.
+#   - other engines (MinIO, Prometheus, Redis, MongoDB...): du of the container's writable mounts
+#     or of a host engine's data directory, at idle CPU and IO priority and with a time limit. A
+#     directory that is a filesystem of its own is taken from df at once.
+# A measurement that did not finish is remembered as such for a day and the panel shows nothing.
+SIZE_DIR=/var/lib/kervax/db-size
+SIZE_OUT=/var/lib/kervax/report.d/db-sizes.json
+SIZE_EVERY=86400  # a size is measured again after a day
+SIZE_TO=600       # one du at most this long
+SIZE_BUDGET=900   # seconds of new du per run; the rest waits for the next run
+INV=""            # |engine:instance| of SQL engines whose inventory has sizes: they need no du
+install -d -m 0700 "$SIZE_DIR"
+IONICE=""
+have ionice && IONICE="ionice -c 3"
+skey() { printf '%s.%s' "$1" "$2" | tr -c 'A-Za-z0-9._-' '_'; }
+stale() { [ ! -s "$1" ] || [ $(( $(date +%s) - $(stat -c %Y -- "$1" 2>/dev/null || echo 0) )) -ge "$SIZE_EVERY" ]; }
+put() { printf '%s\n%s\n' "$2" "${3-}" > "$1.tmp" && mv -f "$1.tmp" "$1"; }  # file value [instance]
+
+idx_pg() {
+  local c="$1" f db s t=0
+  f="$SIZE_DIR/idx.$(skey pg "$c")"
+  stale "$f" || return 0
+  while IFS= read -r db; do
+    [ -n "$db" ] || continue
+    s=$(pg_q_db "$c" "$db" "select coalesce(sum(pg_relation_size(indexrelid)),0) from pg_index" | head -1)
+    t=$((t + $(num "$s")))
+  done < <(pg_q "$c" "select datname from pg_database where not datistemplate and datallowconn order by pg_database_size(datname) desc limit $MAXDB")
+  put "$f" "$t" "$c"
+}
+idx_mysql() { # container name
+  local f s
+  f="$SIZE_DIR/idx.$(skey mysql "$2")"
+  stale "$f" || return 0
+  s=$(my_q "$1" "select ifnull(sum(index_length),0) from information_schema.tables where table_schema not in ('information_schema','performance_schema','sys')" | head -1)
+  put "$f" "$(num "$s")" "$2"
+}
+
+# directories that are data: not the system ones, not files (configs, sockets), none nested in another
+data_dirs() {
+  local d
+  while IFS= read -r d; do
+    d=${d%/}
+    case "$d" in ''|/proc|/proc/*|/sys|/sys/*|/dev|/dev/*|/run|/run/*|/var/run|/var/run/*|/etc|/etc/*|/tmp|/usr|/usr/*|/boot|/boot/*|/bin|/sbin|/lib|/lib64|/opt|/srv|/root|/home|/mnt|/media|/var|/var/lib|/var/lib/docker) continue ;; esac
+    [ -d "$d" ] && printf '%s\n' "$d"
+  done | sort -u | awk '{ if (k != "" && index($0, k "/") == 1) next; k = $0; print }'
+}
+# bytes in the given directories, or nothing when a du ran out of time
+dir_bytes() {
+  local d s t=0
+  for d in "$@"; do
+    if [ "$(stat -c %m -- "$d" 2>/dev/null)" = "$d" ]; then
+      s=$(df -P -B1 -- "$d" 2>/dev/null | awk 'NR == 2 {print $3}')
+    else
+      s=$(timeout "$SIZE_TO" nice -n 19 $IONICE du -sxB1 -- "$d" 2>/dev/null | awk '{print $1}')
+    fi
+    case "$s" in ''|*[!0-9]*) return 1 ;; esac
+    t=$((t + s))
+  done
+  printf '%s' "$t"
+}
+SIZE_ITEMS=""
+SIZE_START=$SECONDS
+measure() { # key container dirs (one per line)
+  local f b dirs
+  f="$SIZE_DIR/du.$(skey "$1" "$2")"
+  mapfile -t dirs < <(printf '%s\n' "$3" | data_dirs)
+  [ "${#dirs[@]}" -gt 0 ] || return 0
+  if stale "$f" && [ $((SECONDS - SIZE_START)) -lt "$SIZE_BUDGET" ]; then
+    b=$(dir_bytes "${dirs[@]}") || b=-
+    put "$f" "${b:--}"
+  fi
+  b=$(head -1 "$f" 2>/dev/null)
+  case "$b" in ''|*[!0-9]*) return 0 ;; esac
+  SIZE_ITEMS="$SIZE_ITEMS${SIZE_ITEMS:+,}{\"key\":\"$(esc "$1")\",\"container\":\"$(esc "$2")\",\"bytes\":$b,\"ts\":$(stat -c %Y -- "$f")}"
+}
+# the engine key the panel knows (its list of database images) from an image; "" = not a database.
+# Exporters, operators and postgrest carry an engine in the name but hold no data. RabbitMQ is left
+# out: what to back up there are the definitions, a few kilobytes whatever lies in the queues
+size_key() {
+  local i
+  i=$(printf '%s' "$1" | tr 'A-Z' 'a-z')
+  case "$i" in *exporter*|*postgrest*|*operator*) return 0 ;; esac
+  for k in postgres postgis timescale pgvector mysql mariadb percona mongo clickhouse elasticsearch opensearch \
+           redis valkey influxdb victoriametrics etcd cockroach cassandra zookeeper kafka neo4j couchdb \
+           mssql sqlserver prometheus minio vault consul grafana; do
+    case "$i" in *"$k"*) printf '%s' "$k"; return 0 ;; esac
+  done
+}
+# argument of a host process option, "--opt=X" or "--opt X"
+proc_opt() {
+  tr '\0' '\n' < "/proc/$1/cmdline" 2>/dev/null | awk -v o="$2" '
+    f { print; exit } $0 == o { f = 1 } index($0, o "=") == 1 { print substr($0, length(o) + 2); exit }'
+}
+# data directories of a host engine: where its process says, else its working directory (PostgreSQL,
+# MySQL and Redis change into theirs). A process in a container's namespaces is not a host engine
+native_dirs() { # key pid
+  local p="$2" cwd d
+  cwd=$(readlink "/proc/$p/cwd" 2>/dev/null)
+  case "$1" in
+    prometheus) d=$(proc_opt "$p" --storage.tsdb.path); d=${d:-data/} ;;
+    mongo)      d=$(proc_opt "$p" --dbpath); d=${d:-/var/lib/mongodb} ;;
+    minio)      tr '\0' '\n' < "/proc/$p/cmdline" 2>/dev/null | awk 'f && /^\// && !/[{]/ { print } $0 == "server" { f = 1 }'
+                tr '\0' '\n' < "/proc/$p/environ" 2>/dev/null | sed -n 's/^MINIO_VOLUMES=//p' | tr ' ' '\n' | grep '^/' | grep -v '[{]'
+                return 0 ;;
+    clickhouse) d=/var/lib/clickhouse ;;
+    *)          d=$cwd ;;
+  esac
+  case "$d" in /*) ;; *) d="$cwd/$d" ;; esac
+  printf '%s\n' "$d"
+}
+sizes_native() {
+  local key comm p dirs
+  for key in postgres mysql redis prometheus minio mongo clickhouse influxdb; do
+    case "$INV" in *"|$key:|"*) continue ;; esac
+    dirs=""
+    for comm in $(case $key in postgres) echo postgres ;; mysql) echo mysqld mariadbd ;; redis) echo redis-server ;;
+                    mongo) echo mongod ;; clickhouse) echo clickhouse-serv ;; influxdb) echo influxd ;; *) echo "$key" ;; esac); do
+      for p in $(pgrep -x "$comm"); do
+        [ "$(readlink "/proc/$p/ns/mnt" 2>/dev/null)" = "$HOSTMNT" ] || continue
+        dirs="$dirs$(native_dirs "$key" "$p")
+"
+      done
+    done
+    [ -n "$dirs" ] && measure "$key" "" "$dirs"
+  done
+}
+
 # -- sweep: containers by image plus host processes --------------------------------
 MY_NS=""  # mount namespaces of the MySQL containers docker already went through
 if have docker; then
@@ -972,6 +1114,30 @@ mkdir -p "${HOUT%/*}"
 printf '{"v":1,"ts":%s,"items":[%s]}\n' "$(date +%s)" "$HEALTH" > "$HOUT.tmp.$$"
 chmod 0644 "$HOUT.tmp.$$"
 mv -f "$HOUT.tmp.$$" "$HOUT"
+
+# sizes last: a du that takes minutes must not hold back the inventory and health written above
+if have docker; then
+  docker ps --format '{{.Names}}|{{.Image}}' 2>/dev/null > "$SIZE_DIR/ps.$$" || : > "$SIZE_DIR/ps.$$"
+  while IFS='|' read -r name img; do
+    key=$(size_key "$img")
+    [ -n "$name" ] && [ -n "$key" ] || continue
+    case "$key" in postgres|postgis|timescale|pgvector) fam=postgres ;; mysql|mariadb|percona) fam=mysql ;; *) fam=$key ;; esac
+    case "$INV" in *"|$fam:$name|"*) continue ;; esac
+    measure "$key" "$name" "$(docker inspect -f '{{range .Mounts}}{{if .RW}}{{.Source}}{{"\n"}}{{end}}{{end}}' "$name" 2>/dev/null)"
+  done < "$SIZE_DIR/ps.$$"
+  rm -f "$SIZE_DIR/ps.$$"
+fi
+sizes_native
+for f in "$SIZE_DIR"/idx.*; do
+  [ -s "$f" ] || continue
+  b=$(head -1 "$f"); n=${f##*/idx.}
+  case "$b" in ''|0|*[!0-9]*) continue ;; esac
+  SIZE_ITEMS="$SIZE_ITEMS${SIZE_ITEMS:+,}{\"key\":\"$(esc "${n%%.*}")\",\"container\":\"$(esc "$(sed -n 2p "$f")")\",\"idx\":$b,\"ts\":$(stat -c %Y -- "$f")}"
+done
+find "$SIZE_DIR" -maxdepth 1 -type f -mtime +3 -delete 2>/dev/null
+printf '{"v":1,"ts":%s,"items":[%s]}\n' "$(date +%s)" "$SIZE_ITEMS" > "$SIZE_OUT.tmp.$$"
+chmod 0644 "$SIZE_OUT.tmp.$$"
+mv -f "$SIZE_OUT.tmp.$$" "$SIZE_OUT"
 HELPER_EOF
 chmod 0755 "$HELPER.new" && mv -f "$HELPER.new" "$HELPER"
 chmod 0755 "$HELPER"

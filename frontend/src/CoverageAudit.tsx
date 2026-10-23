@@ -5,7 +5,7 @@ import { dumpFailText, helperText } from './helperText'
 import { useI18n } from './i18n'
 import { EngineIcon } from './engineIcon'
 import { NetTile } from './NetLinks'
-import { byteUnits } from './units'
+import { byteUnits, fmtBytes } from './units'
 
 const fmtSize = (n: number) => {
   const [, kb, mb, gb] = byteUnits()
@@ -279,7 +279,7 @@ export function CoverageAudit({ server: s, canManage, onChanged, onSchedule, bar
   // Строка под именем базы: у дампа - когда снимался или когда снимется первый, каталог и сколько
   // хранить; у остального - короткая note с бэкенда. Полный текст находки - в подсказке.
   const rowLine = (x: BackupAudit, d: DumpStat | undefined) => {
-    if (!d) return <>{x.note || x.detail}</>
+    if (!d) return <>{x.note || x.detail}{sizeTail(x)}</>
     const head = x.kind === 'db'
       ? x.note || x.detail // дамп включен, но не снимается
       : d.files > 0
@@ -296,6 +296,23 @@ export function CoverageAudit({ server: s, canManage, onChanged, onSchedule, bar
       </>
     )
   }
+  // Объем: рядом с именем - сколько примерно бэкапить, в строке - из чего он (база целиком, если дамп
+  // без индексов заметно меньше, и крупнейшая база). Не посчитано - молчим
+  const sizeChip = (x: BackupAudit) =>
+    x.size_small
+      ? <span className="cov-size" title={t('бэкапятся только настройки (definitions): килобайты при любом объеме очередей')}>{t('мало')}</span>
+      : x.size_bytes
+        ? <span className="cov-size" title={x.size_db
+            ? t('примерный объем дампа: данные без индексов, индексы в дамп не идут')
+            : t('примерно столько придется бэкапить, замер раз в сутки')}>~{fmtBytes(x.size_bytes)}</span>
+        : null
+  const sizeTail = (x: BackupAudit) => {
+    const parts = [
+      x.size_db ? t('дамп без индексов, база {v}', { v: fmtBytes(x.size_db) }) : '',
+      x.size_top && x.size_top_bytes ? t('крупнейшая {name} {v}', { name: x.size_top, v: fmtBytes(x.size_top_bytes) }) : '',
+    ].filter(Boolean)
+    return parts.length ? <> · {parts.join(', ')}</> : null
+  }
   const row = (x: BackupAudit, side: 'q' | 'ok', i: number) => {
     const d = findDump(x.dump_engine, x.instance)
     const cfgKey = x.instance || x.dump_engine || ''
@@ -307,6 +324,7 @@ export function CoverageAudit({ server: s, canManage, onChanged, onSchedule, bar
         <div className="cov-nm">
           <b>{x.subject}</b>
           {x.instance && <span className="type-chip mono">{instLabel(x.instance)}</span>}
+          {sizeChip(x)}
           {side === 'q' && d && <span className="cov-tag cov-tag-bad">{t('дамп не снимается')}</span>}
           {side === 'ok' && d && !d.files && <span className="cov-tag cov-tag-wait">{t('ждет первого бэкапа')}</span>}
           {d?.skipped && <span className="cov-tag cov-tag-bad">{t('пропущен: мало места')}</span>}
@@ -372,6 +390,11 @@ export function CoverageAudit({ server: s, canManage, onChanged, onSchedule, bar
   const broken = (x: BackupAudit) => x.kind === 'db' && !!findDump(x.dump_engine, x.instance)
   const left = [...risks].sort((a, b) => Number(broken(b)) - Number(broken(a)))
   const brokenN = allRisks.filter(broken).length
+  // сколько всего придется бэкапить из "Под вопросом": по строкам, где объем посчитан; есть
+  // непосчитанные - "от", чтобы сумма не выдавала себя за полную
+  const leftSized = left.filter((x) => (x.size_bytes ?? 0) > 0)
+  const leftSum = leftSized.reduce((n, x) => n + (x.size_bytes ?? 0), 0)
+  const leftPartial = left.some((x) => !x.size_bytes && !x.size_small)
   const waitN = okItems.filter((x) => { const d = findDump(x.dump_engine, x.instance); return !!d && !d.files }).length
   const isDb = (x: BackupAudit) => x.kind === 'db' || x.kind === 'db_ok'
   const mutedDb = mutedItems.filter(isDb).length
@@ -471,6 +494,13 @@ export function CoverageAudit({ server: s, canManage, onChanged, onSchedule, bar
             <div className={`cov-col cov-col-q${left.length ? '' : ' cov-col-calm'}`}>
               <div className="cov-col-h">
                 {t('Под вопросом')} <span className="cov-n">{left.length}</span>
+                {leftSized.length > 1 && (
+                  <span className="cov-size cov-size-sum" title={leftPartial
+                    ? t('сумма по базам, где объем посчитан; у остальных его пока нет')
+                    : t('примерно столько придется бэкапить по всем базам под вопросом')}>
+                    {leftPartial ? t('от ~{v}', { v: fmtBytes(leftSum) }) : `~${fmtBytes(leftSum)}`}
+                  </span>
+                )}
                 {left.length > 0 && <span className="cov-col-sub">{t('нужен дамп: файловый снапшот живой базы может не восстановиться')}</span>}
               </div>
               {/* при «бэкаплю все базы сам» находки-СУБД свёрнуты — счётчик и кнопка */}

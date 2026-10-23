@@ -31,7 +31,7 @@ import {
 } from './api'
 import { BACKUP_HTTP_MUTE, backupServerToHttps, backupToHttps, updateServer } from './api'
 import { trBackend } from './backendText'
-import { backupAlive, backupDest, backupDestWhere, backupWindowNote, dbAuditNames, hasOwnFileBackup, shortList, srvIssues, srvMuted, type BackupDest } from './serverUtils'
+import { backupAlive, backupDest, backupDestWhere, backupWindowNote, dbAuditNames, hasOwnFileBackup, shortList, srvIpHit, srvIssues, srvMuted, type BackupDest } from './serverUtils'
 import { fmtRel } from './ServersPage'
 import { CardNav, FreshChip, markMuted, OvAreas, OvRows, secInfoOf, type OvRow, type SecDef, type SecInfo, type SecItem } from './cardLayout'
 import { OsIcon } from './osIcon'
@@ -661,6 +661,9 @@ function BackupHttp({ server: s, canManage, onChanged }: {
   useEffect(() => () => { alive.current = false }, [])
   const tg = s.backup_target
   if (!tg) return null
+  // перешел на https: панель ставит новый адрес сразу по ответу helper'а, плашка уходит вместе с
+  // пунктом в меню, а итог шагов остается на экране
+  if (!tg.insecure) return job ? <HttpsSteps job={job} /> : null
   const blockers = s.backup_https?.blockers ?? []
   const running = job?.status === 'running'
   const toggle = () => {
@@ -1196,9 +1199,7 @@ function BackupModal({
                     </span>
                   ))}
                 </div>
-                {s.backup_target?.insecure && (
-                  <BackupHttp server={s} canManage={canManage} onChanged={onChanged} />
-                )}
+                {s.backup_target && <BackupHttp server={s} canManage={canManage} onChanged={onChanged} />}
                 {helperOld && (
                   <div className="net-note">{t('helper на ноде устарел — переустановите, чтобы подхватить новые фичи/фиксы:')}</div>
                 )}
@@ -3566,7 +3567,7 @@ export function BackupsPage({
   // бэкап-серверы и «не требуется» оставались как есть — при активном фильтре это
   // читалось как «ничего не бэкапится», хотя ноды просто не подходили под запрос.
   const match = (s: Server) =>
-    !q || [s.name, s.group_name].join(' ').toLowerCase().includes(q)
+    !q || [s.name, s.group_name].join(' ').toLowerCase().includes(q) || srvIpHit(s, q)
   // Нажатая плитка оставляет свой блок страницы, тот, что она считает: клиентов, бэкап-серверы,
   // ноды без бэкапа (вместе со своим бэкапом и "не требуется" - их числа в той же плитке) или
   // клиентов без пройденной проверки восстановления. Поиск действует поверх
@@ -3728,7 +3729,7 @@ export function BackupsPage({
             autoComplete="off"
             readOnly={searchRo}
             onFocus={() => setSearchRo(false)}
-            placeholder={t('Поиск: нода, группа…')}
+            placeholder={t('Поиск: нода, IP, группа…')}
             value={query}
             onChange={(e) => setQuery(e.target.value)}
           />
