@@ -235,7 +235,7 @@ def _run(tmp_path: Path, case: str) -> str:
 
 
 def test_helper_version_and_spool_know_deprovision():
-    assert re.search(r"^KERVAX_SETUP_VERSION=0\.40 ", SRC, re.M)
+    assert re.search(r"^KERVAX_SETUP_VERSION=0\.41 ", SRC, re.M)
     assert backup_state.FAIL_REASON_HELPER == "0.39"
     assert '      deprovision)  if out="$(cmd_deprovision 2>&1)"; then ok=true; fi ;;' in SRC
 

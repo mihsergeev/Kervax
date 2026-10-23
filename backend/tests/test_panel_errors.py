@@ -404,3 +404,76 @@ async def test_cli_dump_reads_open_errors(client, monkeypatch):
     assert [x["message"] for x in out["items"]] == ["TypeError: boom"]
     assert len(out["items"][0]["detail"]) < 120 and out["version"]
     assert len((await panel_errors_cli.dump(7, True, 100))["items"]) == 2
+
+
+UI = {"X-Kervax-Page": "/?check=12", "X-Kervax-Section": "sites"}
+
+
+async def test_invalid_form_from_panel_ui_is_logged_without_values(client, auth_headers):
+    # форма панели (api() ставит X-Kervax-Page) прислала то, чего бэкенд не принимает
+    for name in (5, 6, 7):
+        r = await client.post("/api/checks", headers={**auth_headers, **UI}, json={
+            "name": name, "type": "http", "target": "https://example.com", "interval_seconds": f"x{name}",
+            "auth_pass": "fakepass" * 40})
+        assert r.status_code == 422
+        await pe.drain()
+    rows = await _rows(client)
+    # одна строка на маршрут и набор полей, сколько бы раз ни отправили и что бы ни вписали
+    assert len(rows) == 1, [x.message for x in rows]
+    r = rows[0]
+    assert (r.kind, r.status, r.action, r.count) == ("api", 422, "POST /api/checks", 3)
+    assert r.username == "admin" and r.section == "sites" and r.page == "/?check=12"
+    assert r.message.startswith("форма не прошла проверку: ") and "interval_seconds" in r.message
+    fields = {x["field"] for x in r.extra["invalid"]}
+    assert fields == {"name", "interval_seconds", "auth_pass"} and all(set(x) == {"field", "type", "msg"} for x in r.extra["invalid"])
+    # значений полей и тела запроса в записи нет
+    for where in (r.message, r.detail, str(r.extra)):
+        assert "fakepass" not in where and "тело запроса" not in where and "x7" not in where
+
+
+async def test_invalid_form_other_fields_is_another_row(client, auth_headers):
+    await client.post("/api/checks", headers={**auth_headers, **UI}, json={"name": 5})
+    await client.post("/api/checks", headers={**auth_headers, **UI}, json={"name": "web", "type": "http", "target": "https://example.com", "interval_seconds": 1})
+    assert len(await _rows(client, status=422)) == 2
+
+
+async def test_invalid_request_from_scripts_is_not_logged(client, auth_headers):
+    # без заголовка интерфейса: скрипт или внешний клиент API, его 422 - его ошибка
+    assert (await client.post("/api/checks", headers=auth_headers, json={"name": 5})).status_code == 422
+    # заголовок есть, а входа нет: 401, не 422
+    assert (await client.post("/api/checks", headers=UI, json={"name": 5})).status_code == 401
+    # форма входа: у нее свой журнал
+    r = await client.post("/api/auth/login", headers=UI, json={"username": 5})
+    assert r.status_code == 422
+    # адрес страницы - путь, а не что попало
+    assert (await client.post("/api/checks", headers={**auth_headers, "X-Kervax-Page": "curl"},
+                              json={"name": 5})).status_code == 422
+    assert await _rows(client) == []
+
+
+async def test_invalid_as_plain_text_is_logged(client, auth_headers):
+    from fastapi import HTTPException
+
+    async def bad():
+        raise HTTPException(422, "Недопустимое правило")
+
+    _app(client).add_api_route("/api/servers/{server_id}/badrule", bad, methods=["PUT"])
+    r = await client.put("/api/servers/3/badrule", headers={**auth_headers, **UI}, json={"token": "fake-token-example"})
+    assert r.status_code == 422
+    (row,) = await _rows(client)
+    assert row.message == "форма не прошла проверку: Недопустимое правило"
+    assert row.action == "PUT /api/servers/{server_id}/badrule" and row.server_id == 3
+    assert "fake-token-example" not in row.detail
+
+
+def test_invalid_fields_of_cut_response():
+    # ответ обрезан на _INVALID_KEPT: JSON не разобрать, поля достаются регуляркой
+    raw = (b'{"detail":[{"type":"greater_than_equal","loc":["body","push_period"],"msg":"Input should be greater '
+           b'than or equal to 60","input":0,"ctx":{"ge":60}},{"type":"missing","loc":["body","items",0,"name"],'
+           b'"msg":"Field required","input":{"password":"fakep')
+    fields, text = pe.invalid_fields(raw)
+    assert text == "" and [(x["field"], x["type"]) for x in fields] == [
+        ("push_period", "greater_than_equal"), ("items.0.name", "missing")]
+    assert "fakep" not in str(fields)
+    assert pe.invalid_fields(b'{"detail": "no"}') == ([], "no")
+    assert pe.invalid_fields(b"") == ([], "")

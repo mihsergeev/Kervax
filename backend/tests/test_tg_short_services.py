@@ -294,6 +294,8 @@ def test_custom_backup():
         "Свой бэкап files-sync давно не отрабатывал", ["последний успешный 2 дня назад", "Еще: graph-dump, dump.sh"])
     assert custom_backups.tg_short(["graph-dump (таймер выключен — бэкап не запускается)"]) == (
         "Свой бэкап graph-dump не запускается", ["таймер выключен"])
+    assert custom_backups.tg_short(["graph-dump (таймер выключен, последний прогон 3 дн назад)"]) == (
+        "Свой бэкап graph-dump не запускается", ["таймер выключен, последний прогон 3 дня назад"])
     assert custom_backups.tg_short(["dump.sh (cron не запускал задание 30 ч)"]) == (
         "Cron не запускает свой бэкап dump.sh", ["последний запуск 30 ч назад"])
     assert custom_backups.tg_short([]) is None

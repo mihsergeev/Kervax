@@ -25,7 +25,8 @@ export function uiSection(): string {
 export function uiPage(): string {
   return (window.location.pathname + window.location.search).slice(0, 300)
 }
-// заголовки к каждому запросу: бэкенд пишет их в журнал, если запрос не удался
+// заголовки к каждому запросу: бэкенд пишет их в журнал, если запрос не удался. По X-Kervax-Page
+// он же отличает запрос интерфейса панели от скрипта: 422 первого - ошибка панели и идет в журнал
 export function uiHeaders(): Record<string, string> {
   const h: Record<string, string> = { 'X-Kervax-Page': uiPage() }
   if (ctx.section) h['X-Kervax-Section'] = ctx.section
