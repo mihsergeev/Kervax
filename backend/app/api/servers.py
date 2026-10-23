@@ -48,6 +48,7 @@ from app import packages as packages_mod
 from app import netlinks
 from app import traffic as traffic_mod
 from app import usage as usage_mod
+from app import home_mute
 from app import audit, backup_growth, backup_state, backup_target, bsrv_cleanup, custom_backups, docker_exposure, geoip, kube_coverage, manual_probe, open_ports, os_support
 from app import dump_reason
 from app import fleet_rollout
@@ -543,6 +544,9 @@ async def list_servers(user: CurrentUser, session: SessionDep) -> list[ServerOut
         if s.id in bogus:
             o.problems = [*o.problems, bogus[s.id]]
         o.kube_unmonitored = _unmonitored(s, index)
+        # ключи заглушки до нового для пунктов "Требует действий" (app/home_mute.py): нужны только
+        # главной, а она берет этот список
+        o.home_mutes = home_mute.keys(s, now, index)
         # бэкап по http: на какой сервер бэкапов переводить на https и что мешает (кнопка в окне)
         o.backup_https = backup_target.https_view(s, every)
         bs = (s.last_report or {}).get("backup_server") or {}

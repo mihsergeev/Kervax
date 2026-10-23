@@ -2193,6 +2193,9 @@ export type Server = {
   }[]
   // куда идет бэкап (app/backup_target.py), адрес без логина и пароля
   backup_target?: BackupTarget | null
+  // ключи заглушки до нового пунктов "Требует действий" (app/home_mute.py): {группа: home:<группа>@<отпечаток>},
+  // только у пунктов, которые сейчас есть, и только в списке серверов
+  home_mutes?: Record<string, string>
   // бэкап по http: на какой сервер бэкапов переводить на https и что мешает (только в списке серверов)
   backup_https?: { bs_id: number | null; blockers: string[] } | null
   // версии без поддержки (app/software.py): строка на продукт, 2 - без поддержки, 1 - скоро

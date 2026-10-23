@@ -94,6 +94,7 @@ import {
   type MuteItem,
 } from './mutes'
 import { MutesPanel } from './MutesPanel'
+import { grpMuteTip } from './homeGroups'
 import { useAuth } from './auth'
 import { AlertHistoryModal } from './AlertHistoryModal'
 import type { Section } from './App'
@@ -3453,7 +3454,7 @@ function OsUpdates({ server: s, onChanged }: { server: Server; onChanged: () => 
               )}
               {!isViewer && a.new_key && !a.muted && (
                 <button className="ghost small row-act" disabled={busy === a.new_key || busyAll}
-                  title={t('Пункт вернется сам, если обновится новое ядро или пакет или сервер перезагрузится и снова попросит перезагрузку')}
+                  title={grpMuteTip(`os-${a.kind}${a.soft ? '-soft' : ''}`, t)}
                   onClick={() => toggle(a.new_key!, true)}>
                   {t('заглушить до нового')}
                 </button>

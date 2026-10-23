@@ -26,23 +26,23 @@ def test_eol_by_pretty_name():
 
 
 def _nofix(xs):
-    return [{k: v for k, v in x.items() if k != "fix"} for x in xs]
+    return [{k: v for k, v in x.items() if k not in ("fix", "new_key", "muted_new")} for x in xs]
 
 
 def test_eol_advice():
     assert _nofix(os_support.advice({"os": "Ubuntu 20.04.6 LTS"}, NOW)) == [{
         "kind": "eol", "level": 2, "key": "osupd:eol", "muted": False, "text": (
-            "обычная поддержка Ubuntu 20.04 кончилась 31.05.2025: исправления безопасности дальше только в Ubuntu Pro "
-            "(ESM до 30.04.2030, pro attach) или после переезда на новую LTS")}]
+            "Ubuntu 20.04: обычная поддержка кончилась 31.05.2025, дальше Ubuntu Pro (ESM до 30.04.2030) "
+            "или переезд на новую LTS")}]
     assert _nofix(os_support.advice({"os": "Debian GNU/Linux 11 (bullseye)"}, NOW)) == [{
         "kind": "eol", "level": 2, "key": "osupd:eol", "muted": False,
-        "text": "поддержка Debian 11 кончилась 31.08.2026: обновлений безопасности больше нет"}]
+        "text": "Debian 11: поддержка кончилась 31.08.2026, обновлений безопасности больше нет"}]
     # ESM тоже кончился - Ubuntu Pro уже не спасет
     assert [a["text"] for a in os_support.advice({"os": "Ubuntu 16.04.7 LTS"}, NOW)] == [
-        "поддержка Ubuntu 16.04 кончилась 30.04.2021, ESM тоже (30.04.2026): обновлений безопасности больше нет"]
+        "Ubuntu 16.04: поддержка кончилась 30.04.2021, ESM тоже (30.04.2026), обновлений безопасности больше нет"]
     # за полгода предупреждаем, раньше молчим
     soon = os_support.advice({"os": "Ubuntu 22.04.4 LTS"}, datetime(2027, 1, 1, tzinfo=timezone.utc))
-    assert [(a["level"], a["text"]) for a in soon] == [(1, "поддержка Ubuntu 22.04 кончится 01.06.2027, через 151 день")]
+    assert [(a["level"], a["text"]) for a in soon] == [(1, "Ubuntu 22.04: поддержка кончится 01.06.2027, через 151 день")]
     assert os_support.advice({"os": "Ubuntu 24.04.1 LTS"}, NOW) == []
 
 
@@ -89,7 +89,7 @@ def test_ubuntu_pro_attached_moves_the_end_to_esm():
     assert os_support.advice(rep, NOW) == []
     late = [a for a in os_support.advice(rep, datetime(2029, 12, 1, tzinfo=timezone.utc)) if a["kind"] == "eol"]
     assert [(a["level"], a["text"]) for a in late] == [
-        (1, "исправления Ubuntu Pro (ESM) для Ubuntu 20.04 кончатся 30.04.2030, через 150 дней")]
+        (1, "Ubuntu 20.04: исправления Ubuntu Pro (ESM) кончатся 30.04.2030, через 150 дней")]
     assert late[0]["fix"] == [{"id": "release_upgrade", "cmd": "sudo do-release-upgrade", "alt": False}]
     # ESM кончился - как без подписки
     assert os_support.advice({"os": "Ubuntu 16.04.7 LTS", "os_upd": _upd(esm=True)}, NOW)[0]["level"] == 2

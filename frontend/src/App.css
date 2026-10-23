@@ -822,13 +822,17 @@ button.linklike.kube-exp-off { display: block; margin: 10px 0 6px; text-align: l
 /* заглушка до нового в раскрытой группе: галки, "выбрать все", заглушенные строкой внизу */
 .home-sel-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 0.3rem 0.8rem; padding: 0.2rem 0.4rem 0.3rem; font-size: 0.84rem; }
 label.home-sel-all { display: inline-flex; flex-direction: row; align-items: center; gap: 0.4rem; font-size: inherit; color: var(--text); cursor: pointer; }
-.home-sel-box { width: auto; margin: 0; flex-shrink: 0; cursor: pointer; accent-color: var(--accent); }.home-sel-foot { display: flex; gap: 0.8rem; padding: 0.2rem 0.4rem 0; }
+.home-sel-box { width: auto; margin: 0; flex-shrink: 0; cursor: pointer; accent-color: var(--accent); }
+.home-sel-foot { display: flex; gap: 0.8rem; padding: 0.2rem 0.4rem 0; }
 .home-attention-row.home-attention-muted { opacity: 0.6; }
 .home-attention-row.home-attention-muted .linklike { flex-shrink: 0; }
 .home-sel-foot .linklike { color: var(--text-muted); }
 /* полный список пакетов под человеческим текстом пункта "Обновления ОС" */
 .osupd-adv-pkgs { display: block; font-size: 0.78rem; overflow-wrap: anywhere; }
 .home-sel-foot .linklike:hover { color: var(--text); }
+/* текст, одинаковый у нескольких серверов группы: один раз над ними, в строках только имена */
+.home-grp-common { padding: 0.3rem 0.4rem 0.1rem; font-size: 0.84rem; color: var(--text-muted); overflow-wrap: anywhere; }
+.home-grp-common ~ .home-attention-subrow { padding-left: 1rem; }
 /* 🔕 у строки группы - по наведению, иначе десяток колокольчиков в столбик; без мыши видно всегда */
 .home-attention-subrow .quick-mute { opacity: 0; }
 .home-attention-subrow:hover .quick-mute, .home-attention-subrow:focus-within .quick-mute { opacity: 0.6; }
