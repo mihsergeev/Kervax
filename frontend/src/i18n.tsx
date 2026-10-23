@@ -2879,7 +2879,24 @@ const EN: Record<string, string> = {
   'helper еще не выходил на связь': 'helper has not reported yet',
   'давно не отвечал': 'silent for a while',
   'Как агент пойдет в панель': 'How the agent reaches the panel',
-  'Агент ходит в панель сам. Если адрес сервера режут на пути к панели (ответ панели не доходит), выберите ретранслятор или локацию.': 'The agent reaches the panel by itself. If the server address is blocked on the way to the panel (the panel answer never arrives), choose a relay or a location.',
+  'Сервер сам достает панель': 'The server reaches the panel by itself',
+  'Адрес режут по пути к панели': 'The address is blocked on the way to the panel',
+  'Через прокси локации из окна Локации': 'Via a location proxy from the Locations window',
+  'Ваш http или socks5 прокси': 'Your own http or socks5 proxy',
+  'Выполните на сервере под root': 'Run on the server as root',
+  'токен показывается один раз': 'the token is shown only once',
+  'Сначала заполните поля выше: прокси попадет в команду': 'Fill in the fields above first: the proxy goes into the command',
+  'Если curl упал по таймауту, подождите минуту и повторите: панель открывает адрес новой ноды не сразу':
+    'If curl timed out, wait a minute and run it again: the panel opens the new node address with a short delay',
+  'Агент сам настроит Docker, Kubernetes и доступ к бэкапам': 'The agent sets up Docker, Kubernetes and backup access by itself',
+  'Docker через прокси только для чтения (read-only proxy), Kubernetes через узкий сервисный аккаунт (SA), плюс доступ к бэкапам. Вручную доделывать ничего не нужно. Без авто-настройки: допишите в конец команды --no-auto.':
+    'Docker through a read-only proxy, Kubernetes through a narrow service account (SA), plus backup access. Nothing to finish by hand. To skip auto-setup, add --no-auto at the end of the command.',
+  'Допишите в конец команды любое имя этого инстанса, например main. Агенты будут работать рядом, каждый со своей панелью.':
+    'Add any name for this instance at the end of the command, for example main. The agents will run side by side, each with its own panel.',
+  '{host}, v{ver}, метрики уже идут': '{host}, v{ver}, metrics are coming in',
+  'Ждем первый отчет агента': 'Waiting for the first agent report',
+  'Агент на связи': 'Agent is online',
+  'статус сменится здесь сам': 'the status updates here by itself',
   'Ретранслятор': 'Relay',
   '— выберите —': '— choose —',
   'Сервер сразу попадает в список адресов, которые ретранслятор пускает: helper откроет ему порт в течение минуты.': 'The server goes straight into the list of addresses the relay lets in: its helper opens the port for it within a minute.',
@@ -2914,15 +2931,6 @@ const EN: Record<string, string> = {
   'Укажите внешний IP сервера: ретранслятор пускает только известные адреса': 'Set the server external IP: the relay lets in only known addresses',
   'Выберите локацию с адресом прокси': 'Choose a location with a proxy address',
   'На сервере уже стоит агент другой панели?': 'Already running an agent for another panel on this server?',
-  'Допишите третий аргумент — любое имя этого инстанса — в самый конец команды, через пробел после токена:':
-    'Append a third argument — any name for this instance — at the very end of the command, separated by a space after the token:',
-  'Скопировать с « main»': 'Copy with " main"',
-  '«main» — произвольное имя, оно лишь отличает панели между собой. Агенты будут работать рядом, каждый со своей панелью.':
-    '"main" is an arbitrary name; it just distinguishes the panels. The agents will run side by side, each with its own panel.',
-  'Ждём первый отчёт агента — статус обновится здесь сам…':
-    'Waiting for the first agent report — the status updates here automatically…',
-  'Агент подключился: {host} · v{ver} — метрики уже идут':
-    'Agent connected: {host} · v{ver} — metrics are flowing',
   'Если панель закрыта фаерволом: адрес попадёт в data/agent_allow_ips, а хостовый скрипт ops/agent-firewall-sync.sh разрешит его в ufw/firewalld. Для Caddy-вайтлиста ничего не нужно — /api/agent/* уже открыт.':
     'If the panel host is firewalled: the address goes to data/agent_allow_ips and the host-side ops/agent-firewall-sync.sh allows it in ufw/firewalld. Nothing needed for the Caddy allow-list — /api/agent/* is already open.',
   'Адрес, с которого агент ходит в панель — для разрешения в фаерволе хоста панели (ufw/firewalld).':
@@ -2997,13 +3005,7 @@ const EN: Record<string, string> = {
   'Добавить сервер': 'Add server',
   'Создать': 'Create',
   'напр. Прод / БД': 'e.g. Prod / DB',
-  '⏱ Файрвол панели открывается для IP новой ноды в течение ~2 мин. Если команда упала по таймауту (curl: timed out) — подождите минуту и повторите её же.':
-    '⏱ The panel firewall opens for the new node’s IP within ~2 min. If the command timed out (curl: timed out) — wait a minute and re-run the same command.',
-  'Агент сам включит всё применимое на ноде — Docker (read-only proxy), Kubernetes (узкий SA), доступ к бэкапам — вручную доделывать ничего не нужно. Отключить авто-настройку: добавить --no-auto.':
-    'The agent auto-enables everything applicable on the node — Docker (read-only proxy), Kubernetes (narrow SA), backup access — nothing to do by hand. Disable auto-setup: add --no-auto.',
   'Сервер создан': 'Server created',
-  'Выполните команду на сервере (под root). Токен показывается один раз.':
-    'Run this command on the server (as root). The token is shown once.',
   'Скопировать команду': 'Copy command',
   'Скопировано ✓': 'Copied ✓',
   'аптайм': 'uptime',

@@ -5708,6 +5708,23 @@ export function EnrollModal({
   )
 }
 
+// Команда установки по аргументам: переносится между ними, а не посреди токена. Токен
+// приглушен до наведения (или тапа на телефоне), копируется команда целиком
+function InstallCmd({ cmd, token, add }: { cmd: string; token: string; add?: string }) {
+  const parts = cmd.match(/'[^']*'|\S+/g) ?? []
+  return (
+    <pre className="install-cmd ic-cmd" tabIndex={0}>
+      {parts.map((p, i) => (
+        <span key={i}>
+          {i > 0 && ' '}
+          <span className={`ic-arg${p === token ? ' ic-tok' : ''}`}>{p}</span>
+        </span>
+      ))}
+      {add && <span className="install-cmd-add"> {add}</span>}
+    </pre>
+  )
+}
+
 export function InstallModal({
   enroll,
   onClose,
@@ -5720,10 +5737,13 @@ export function InstallModal({
   mode?: InstallMode // с чего открыть выбор пути (подсказка "агент не достает до панели")
 }) {
   const { t } = useI18n()
-  const [copied, setCopied] = useState(false)
+  const [copied, setCopied] = useState('')
   // путь до панели (InstallPath): прокси ретранслятора, локации или свой - в команду
+  const [path, setPath] = useState<InstallMode>(mode ?? 'direct')
   const [proxy, setProxy] = useState('')
   const cmd = withProxy(enroll.install_cmd, proxy)
+  // путь через прокси выбран, а прокси в команде еще нет: копировать рано
+  const pending = path !== 'direct' && cmd === enroll.install_cmd
   // живая проверка: поллим сервер, пока агент не пришлёт первый отчёт
   const [connected, setConnected] = useState<Server | null>(null)
   useEffect(() => {
@@ -5739,85 +5759,105 @@ export function InstallModal({
     }, 4000)
     return () => window.clearInterval(id)
   }, [enroll.server.id, connected])
+  const copy = (text: string, what: string) => {
+    navigator.clipboard?.writeText(text)
+    setCopied(what)
+  }
   return (
     <div className="modal-backdrop">
-      <div className="card modal" onClick={(e) => e.stopPropagation()}>
-        <div className="clients-head">
+      <div className="card modal ic-modal" onClick={(e) => e.stopPropagation()}>
+        <div className="al-head">
           <h3>{title ?? t('Сервер создан')}</h3>
+          <span className="ic-name mono">{enroll.server.name}</span>
           <button className="ghost" onClick={onClose}>
             {t('Закрыть')}
           </button>
         </div>
-        <p className="muted small">
-          {t('Выполните команду на сервере (под root). Токен показывается один раз.')}
-        </p>
-        <pre className="install-cmd">{cmd}</pre>
-        <p className="muted small">
-          {t('Агент сам включит всё применимое на ноде — Docker (read-only proxy), Kubernetes (узкий SA), доступ к бэкапам — вручную доделывать ничего не нужно. Отключить авто-настройку: добавить --no-auto.')}
-        </p>
-        <details className="install-alt">
-          <summary className="muted small">
-            {t('На сервере уже стоит агент другой панели?')}
-          </summary>
-          <p className="muted small install-alt-hint">
-            {t('Допишите третий аргумент — любое имя этого инстанса — в самый конец команды, через пробел после токена:')}
-          </p>
-          <pre className="install-cmd">
-            {cmd}
-            <span className="install-cmd-add"> main</span>
-          </pre>
-          <div className="modal-actions install-alt-actions">
-            <button
-              className="ghost"
-              onClick={() => {
-                navigator.clipboard?.writeText(`${cmd} main`)
-                setCopied(true)
-              }}
-            >
-              {t('Скопировать с « main»')}
+
+        <section className="ic-step">
+          <div className="ic-step-head">
+            <span className="ic-num">1</span>
+            {t('Как агент пойдет в панель')}
+          </div>
+          <InstallPath
+            server={enroll.server}
+            initial={mode}
+            onMode={setPath}
+            onProxy={(p) => {
+              setProxy(p)
+              setCopied('')
+            }}
+          />
+        </section>
+
+        <section className="ic-step">
+          <div className="ic-step-head">
+            <span className="ic-num">2</span>
+            {t('Выполните на сервере под root')}
+            <span className="ic-once muted small">{t('токен показывается один раз')}</span>
+          </div>
+          <div className="ic-cmd-row">
+            <InstallCmd cmd={cmd} token={enroll.token} />
+            <button className={`ic-copy${connected ? ' ghost' : ''}`} disabled={pending} onClick={() => copy(cmd, 'cmd')}>
+              {copied === 'cmd' ? t('Скопировано ✓') : t('Копировать')}
             </button>
           </div>
-          <p className="muted small">
-            {t('«main» — произвольное имя, оно лишь отличает панели между собой. Агенты будут работать рядом, каждый со своей панелью.')}
-          </p>
-        </details>
-        <InstallPath
-          server={enroll.server}
-          initial={mode}
-          onProxy={(p) => {
-            setProxy(p)
-            setCopied(false)
-          }}
-        />
-        <p className="muted small install-fw-note">
-          {t('⏱ Файрвол панели открывается для IP новой ноды в течение ~2 мин. Если команда упала по таймауту (curl: timed out) — подождите минуту и повторите её же.')}
-        </p>
-        {connected ? (
-          <div className="install-status install-ok">
-            ✓{' '}
-            {t('Агент подключился: {host} · v{ver} — метрики уже идут', {
-              host: connected.hostname || connected.name,
-              ver: connected.agent_version || '?',
-            })}
-          </div>
-        ) : (
-          <div className="install-status install-wait">
-            <span className="sdot sdot-unknown" />
-            {t('Ждём первый отчёт агента — статус обновится здесь сам…')}
-          </div>
-        )}
-        <div className="modal-actions">
-          <button
-            className={connected ? 'ghost' : ''}
-            onClick={() => {
-              navigator.clipboard?.writeText(cmd)
-              setCopied(true)
-            }}
-          >
-            {copied ? t('Скопировано ✓') : t('Скопировать команду')}
-          </button>
-          {connected && <button onClick={onClose}>{t('Готово')}</button>}
-        </div>
+          {pending ? (
+            <p className="ic-hint t-degraded small">{t('Сначала заполните поля выше: прокси попадет в команду')}</p>
+          ) : (
+            <p className="ic-hint muted small">
+              {t('Если curl упал по таймауту, подождите минуту и повторите: панель открывает адрес новой ноды не сразу')}
+            </p>
+          )}
+          <details className="ic-more">
+            <summary className="muted small">{t('Агент сам настроит Docker, Kubernetes и доступ к бэкапам')}</summary>
+            <p className="muted small">
+              {t('Docker через прокси только для чтения (read-only proxy), Kubernetes через узкий сервисный аккаунт (SA), плюс доступ к бэкапам. Вручную доделывать ничего не нужно. Без авто-настройки: допишите в конец команды --no-auto.')}
+            </p>
+          </details>
+          <details className="ic-more">
+            <summary className="muted small">{t('На сервере уже стоит агент другой панели?')}</summary>
+            <p className="muted small">
+              {t('Допишите в конец команды любое имя этого инстанса, например main. Агенты будут работать рядом, каждый со своей панелью.')}
+            </p>
+            <div className="ic-cmd-row">
+              <InstallCmd cmd={cmd} token={enroll.token} add="main" />
+              <button className="ghost ic-copy" disabled={pending} onClick={() => copy(`${cmd} main`, 'main')}>
+                {copied === 'main' ? t('Скопировано ✓') : t('Копировать')}
+              </button>
+            </div>
+          </details>
+        </section>
+
+        <section className={`ic-status${connected ? ' ic-status-ok' : ''}`}>
+          <span className="ic-num">3</span>
+          {connected ? (
+            <>
+              <span className="ic-ok-dot">✓</span>
+              <span>
+                <b>{t('Агент на связи')}</b>
+                <span className="muted small">
+                  {' '}
+                  {t('{host}, v{ver}, метрики уже идут', {
+                    host: connected.hostname || connected.name,
+                    ver: connected.agent_version || '?',
+                  })}
+                </span>
+              </span>
+              <button className="ic-done" onClick={onClose}>
+                {t('Готово')}
+              </button>
+            </>
+          ) : (
+            <>
+              <span className="ic-pulse" />
+              <span>
+                <b>{t('Ждем первый отчет агента')}</b>
+                <span className="muted small"> {t('статус сменится здесь сам')}</span>
+              </span>
+            </>
+          )}
+        </section>
       </div>
     </div>
   )
