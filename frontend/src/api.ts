@@ -2834,16 +2834,35 @@ export interface WebRoot {
   layer?: boolean
   // git - выкладка через git (pull, checkout...) по reflog репозитория
   deploy?: { at: string; n: number; git?: string } | null
-  php: { p: string; since: string }[]
-  // g - "dirty": файл рабочей копии git, содержимое не как в HEAD
-  edit: { p: string; since: string; g?: string }[]
+  php: WebFile[]
+  edit: WebFile[]
   site: boolean
   // WordPress: версия ядра (helper 0.4 следит за версиями) и что он обновил сам за неделю
   wp?: string
   wp_events?: WpEvent[]
-  // рабочая копия git: ветка и файлы, записанные заново тем же содержимым, что в HEAD (за неделю)
+  // рабочая копия git: ветка и файлы, записанные заново тем же содержимым (git - тем же, что в HEAD; за неделю)
   branch?: string
-  same?: { at: string; files: string[]; n: number } | null
+  same?: { at: string; files: string[]; n: number; git?: boolean } | null
+  // здесь правят руками: dev - да, mode - как выбрано (auto - по ветке); dev_work - правки
+  // разработчика, которые поэтому не признак
+  dev?: boolean
+  mode?: 'auto' | 'dev' | 'strict'
+  dev_work?: WebFile[]
+  // последний признак, который снялся сам (why: gone, back, head, wplang), за неделю
+  cleared?: { at: string; p: string; why: string } | null
+}
+// файл признака: t - время записи (unix), k - новый (new) или изменен (chg), g - что знает git
+// (dirty - не как в HEAD, new - git его не знает, ignored - в .gitignore), o - владелец,
+// w - записал пользователь веб-сервера, x - похож на веб-шелл (helper webfiles-setup 0.6)
+export interface WebFile {
+  p: string
+  since: string
+  t?: number
+  k?: 'new' | 'chg'
+  g?: string
+  o?: string
+  w?: number
+  x?: number
 }
 // обновление, которое WordPress поставил сам: перевод (part - чей) или плагин, тема, ядро с версиями
 export interface WpEvent {
@@ -2858,6 +2877,10 @@ export interface WpEvent {
 // новые php и правки в корне - свои: root пусто - все корни, key пусто - оба признака
 export function acceptWebfiles(id: number, root = '', key = ''): Promise<Server> {
   return api<Server>(`/api/servers/${id}/webfiles-accept`, { method: 'POST', body: JSON.stringify({ root, key }) })
+}
+// здесь правят руками: auto - по ветке рабочей копии, dev - да, strict - каждая правка признак
+export function setWebfilesMode(id: number, root: string, mode: 'auto' | 'dev' | 'strict'): Promise<Server> {
+  return api<Server>(`/api/servers/${id}/webfiles-mode`, { method: 'POST', body: JSON.stringify({ root, mode }) })
 }
 // Изменения доступа сделали свои: строка уходит с главной
 export function ackChanges(id: number): Promise<Server> {
@@ -3637,6 +3660,9 @@ export interface TamperSign {
   branch?: string
   n?: number
   where?: string
+  // что о всех файлах знает git (dirty, new, ignored) и сами файлы с подробностями (helper 0.6)
+  git?: string
+  items?: WebFile[]
 }
 export interface TamperView {
   level: 'none' | 'one' | 'hack'

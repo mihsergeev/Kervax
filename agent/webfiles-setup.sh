@@ -27,13 +27,24 @@
 # checkout, merge and reset, and the panel takes the files written right before one of them for
 # the deploy. The reflog is read as a file.
 #
-# A changed file of a checkout is compared with its version in HEAD: the same content (an IDE or
-# a tool in the container wrote it again) is not an edit, a different one is an uncommitted edit
-# in the working copy, a file git does not know stays a file outside git. The hash of the file is
-# taken by sha1sum, from git only "git ls-tree HEAD" is asked - it runs no hooks, filters or
-# fsmonitor - with transports off (no lazy fetch of a partial clone), no system or global config,
-# and as the owner of the git directory: what the repository config could make git run, its
-# owner could run anyway. A git directory of another user inside a container is not looked into.
+# A change is a change of content, not of the modification time: the list keeps a sha1 of every
+# file (taken a part per run, changed files first), and a file written again with the same content
+# (an IDE, a deploy, a plugin rewriting its own file) is sent only as "same". A changed file of a
+# checkout is compared with its version in HEAD: the same content as in HEAD is not an edit, a
+# different one is an uncommitted edit, a file git does not know is new or, by .gitignore, local
+# (configs, vendor). From git only "git ls-tree HEAD" and "git check-ignore --no-index" are asked -
+# they run no hooks, filters or fsmonitor - with transports off (no lazy fetch of a partial clone),
+# no system or global config, and as the owner of the git directory: what the repository config
+# could make git run, its owner could run anyway. A git directory of another user inside a
+# container is not looked into.
+#
+# A file sent as changed stays on a watch list for 30 days and is looked at again every run: gone,
+# back to the content it had before, now the same as in HEAD (committed, checked out, pulled) or a
+# translation with its .mo - the panel then takes its sign off by itself. For every file sent the
+# owner goes along, whether the owner is the user the web server or php runs as (that is how a web
+# shell gets in) and whether the php looks like a web shell (eval of base64, a call with $_POST and
+# the like, names of known shells) - the panel keeps these signs even where people edit the code by
+# hand.
 #
 # WordPress updates itself from the admin or by wp-cron: a language pack, a plugin, a theme or
 # the core. To tell that from an edit, a changed translation (languages/*.l10n.php) is sent with
@@ -41,12 +52,13 @@
 # carries the versions that changed since the last one: the core from wp-includes/version.php,
 # plugins and themes from the Version: line of their headers.
 #
-# Only paths, sizes, modification times and these versions leave the node, never file contents.
+# Only paths, sizes, modification times, owners, these versions and the verdicts above leave the
+# node, never file contents or their hashes.
 # The helper changes nothing in the roots and keeps its own lists in /var/lib/kervax/webfiles
 # (root only).
 set -euo pipefail
 
-KERVAX_SETUP_VERSION=0.5 # MAJOR.MINOR; compared component-wise
+KERVAX_SETUP_VERSION=0.6 # MAJOR.MINOR; compared component-wise
 KERVAX_SETUP_WHEN="pgrep -x nginx || pgrep -x apache2 || pgrep -x httpd || pgrep php-fpm || pgrep -x php || pgrep lsphp || pgrep frankenphp"
 
 HELPER_DIR=/lib65/kervax
@@ -77,6 +89,12 @@ KEEP=3600        # runs with changes stay in the file for an hour: the agent may
 GIT_KEEP=604800  # reflog entries of the last week
 GIT_MAX=10       # of them, the newest
 MAXOUT=60000     # bytes; the agent takes 256 KB per file and 512 KB for all helpers together
+HASH_RUN=20000   # files hashed per root in one run: the list gets its hashes over a few runs
+HASH_ALL=40000   # and in all roots: the first run on a big node stays far from the unit timeout
+HASH_MAX=4194304 # bigger files are not hashed: their change is told by time and size
+WATCH_DAYS=30    # a file sent as changed is looked at again this long
+WATCH_MAX=300    # files on the watch list of a root
+SEED_DAYS=14     # helper 0.5 had no watch list: files written this recently are put on it
 TAB=$(printf '\t')
 
 esc() { printf '%s' "$1" | tr -d '\000-\037' | sed 's/\\/\\\\/g; s/"/\\"/g'; }
@@ -159,13 +177,15 @@ git_branch() {
   head -c 256 "$1/HEAD" 2>/dev/null | sed -n 's|^ref: *refs/heads/||p' | head -1 | tr -cd 'A-Za-z0-9._/+-' | head -c 80
 }
 
-# GSAME, GDIRTY: JSON lists of the files (paths from the root) whose content is the same as in
-# HEAD or not. Arguments: git dir, path prefix of the root in the checkout, root, file with paths
+# GST[path from the root]: same (as in HEAD), dirty (not as in HEAD), new (git does not know it)
+# or ignored (by .gitignore: local configs, vendor). Arguments: git dir, path prefix of the root
+# in the checkout, root, top of the checkout, file with paths
+declare -A GST=()
 git_check() {
-  local gd=$1 pre=$2 root=$3 list=$4 cdir=$1 uid gid f h t e
-  local -a run=() paths=()
+  local gd=$1 pre=$2 root=$3 top=$4 list=$5 cdir=$1 uid gid f h t gcfg
+  local -a run=() paths=() untracked=()
   local -A tree=()
-  GSAME="" GDIRTY=""
+  GST=()
   command -v git >/dev/null 2>&1 && command -v sha1sum >/dev/null 2>&1 || return 0
   [ -s "$list" ] && [ -f "$gd/HEAD" ] || return 0
   # a linked worktree keeps the config in the common git directory
@@ -188,20 +208,85 @@ git_check() {
   fi
   while IFS= read -r f; do paths+=("$pre$f"); done < "$list"
   printf '[safe]\n\tdirectory = *\n' > "$work/gitconfig"
+  gcfg=$([ "$uid" = 0 ] && echo "$work/gitconfig" || echo /dev/null)
   # "mode type blob TAB path", NUL-terminated: paths come as they are
   while IFS="$TAB" read -r -d '' h f; do
     tree[$f]=${h##* }
   done < <(cd / && timeout 30 env -i PATH="$PATH" HOME=/nonexistent GIT_CONFIG_NOSYSTEM=1 \
-             GIT_CONFIG_GLOBAL="$([ "$uid" = 0 ] && echo "$work/gitconfig" || echo /dev/null)" GIT_TERMINAL_PROMPT=0 \
+             GIT_CONFIG_GLOBAL="$gcfg" GIT_TERMINAL_PROMPT=0 \
              "${run[@]}" git -c safe.directory='*' -c protocol.allow=never --literal-pathspecs --git-dir="$gd" \
              ls-tree -z --full-tree HEAD -- "${paths[@]}" 2>/dev/null)
   while IFS= read -r f; do
+    [ -f "$root/$f" ] || continue
     t=${tree[$pre$f]:-}
-    [ -n "$t" ] && [ -f "$root/$f" ] || continue
+    if [ -z "$t" ]; then untracked+=("$pre$f"); continue; fi
     h=$({ printf 'blob %s\0' "$(stat -c %s "$root/$f")"; cat "$root/$f"; } 2>/dev/null | sha1sum | cut -c1-40)
-    e="\"$(esc "$f")\""
-    if [ "$h" = "$t" ]; then GSAME="$GSAME${GSAME:+,}$e"; else GDIRTY="$GDIRTY${GDIRTY:+,}$e"; fi
+    if [ "$h" = "$t" ]; then GST[$f]=same; else GST[$f]=dirty; fi
   done < "$list"
+  [ "${#untracked[@]}" -gt 0 ] && [ -d "$top" ] || return 0
+  for f in "${untracked[@]}"; do GST[${f#"$pre"}]=new; done
+  # .gitignore of the checkout only: no index (no fsmonitor, no untracked cache), no global excludes.
+  # check-ignore takes no literal pathspecs: a path given as "./path" is not read as pathspec magic
+  while IFS= read -r -d '' f; do
+    f=${f#./}
+    [ -n "${GST[${f#"$pre"}]+x}" ] && GST[${f#"$pre"}]=ignored
+  done < <(cd "$top" && printf './%s\0' "${untracked[@]}" | timeout 30 env -i PATH="$PATH" HOME=/nonexistent \
+             GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL="$gcfg" GIT_TERMINAL_PROMPT=0 \
+             "${run[@]}" git -c safe.directory='*' -c protocol.allow=never -c core.fsmonitor= \
+             -c core.excludesFile=/dev/null --git-dir="$gd" --work-tree=. \
+             check-ignore --no-index -z --stdin 2>/dev/null)
+}
+
+# WEBALL: " uid uid " the web servers and php of the node run as (not root): a file of this owner
+# was written by a site itself. One list for the node: php-fpm writes into a directory nginx of
+# another container serves
+WEBALL=" "
+web_uids() {
+  local d comm u
+  for d in /proc/[0-9]*; do
+    comm=$(cat "$d/comm" 2>/dev/null) || continue
+    case "$comm" in
+      php|php[0-9]*|php-fpm*|php-cgi*|lsphp*|frankenphp|apache2|httpd|nginx|litespeed|openlitespeed) ;;
+      *) continue ;;
+    esac
+    u=$(awk '$1 == "Uid:" { print $2; exit }' "$d/status" 2>/dev/null)
+    [ -n "$u" ] && [ "$u" != 0 ] || continue
+    case "$WEBALL" in *" $u "*) ;; *) WEBALL="$WEBALL$u " ;; esac
+  done
+}
+
+# OWN[path from the root]: "owner TAB 1 when the owner is the web user TAB 1 when the php looks
+# like a web shell". Arguments: root, passwd to read names from, web uids, file with paths
+declare -A OWN=()
+owners_of() {
+  local root=$1 pw=$2 web=$3 list=$4 f u n w
+  local -A name=() sus=()
+  OWN=()
+  [ -s "$list" ] || return 0
+  while IFS=: read -r n _x u _rest; do
+    [ -n "$u" ] && [ -z "${name[$u]+x}" ] && name[$u]=$(printf '%s' "$n" | tr -cd 'A-Za-z0-9._-' | head -c 32)
+  done < <(head -c 262144 "$pw" 2>/dev/null)
+  # web shells: code run from the request, eval of an encoded string, the names of known shells
+  while IFS= read -r -d '' f; do sus[$f]=1; done < <(cd "$root" 2>/dev/null && awk '/\.(php[3-8]?|phtml|pht|phar)$/' "$list" \
+    | while IFS= read -r f; do [ -f "$f" ] && [ "$(stat -c %s "$f" 2>/dev/null || echo 0)" -le "$HASH_MAX" ] && printf '%s\0' "$f"; done \
+    | timeout 60 xargs -0 -r grep -l -Z -a -s -E \
+        -e '(eval|assert)[[:space:]]*\([[:space:]]*@?[[:space:]]*(base64_decode|gzinflate|gzuncompress|gzdecode|str_rot13|strrev|rawurldecode|hex2bin)[[:space:]]*\(' \
+        -e '(eval|assert|system|passthru|shell_exec|exec|popen|proc_open|pcntl_exec)[[:space:]]*\([[:space:]]*@?[[:space:]]*\$_(GET|POST|REQUEST|COOKIE|SERVER|FILES)' \
+        -e '\$_(GET|POST|REQUEST|COOKIE)[[:space:]]*\[[^]]{1,40}\][[:space:]]*\([[:space:]]*@?[[:space:]]*\$_(GET|POST|REQUEST|COOKIE)' \
+        -e '(FilesMan|b374k|c99shell|r57shell|IndoXploit|AnonymousFox|Yanz Webshell)' -- 2>/dev/null)
+  while IFS= read -r f; do
+    u=$(stat -c %u "$root/$f" 2>/dev/null) || continue
+    n=${name[$u]:-$u}
+    w=0
+    case "$web" in *" $u "*) w=1 ;; esac
+    OWN[$f]="$n$TAB$w$TAB${sus[$f]:-0}"
+  done < "$list"
+}
+
+# sha1 of the files on a list (paths from the root) -> "path TAB sha1"
+hashes() {
+  (cd "$1" 2>/dev/null && tr '\n' '\0' < "$2" | timeout 300 nice -n 15 xargs -0 -r sha1sum -- 2>/dev/null) \
+    | awk '!/^\\/ { print substr($0, 43) "\t" substr($0, 1, 40) }'
 }
 
 # Docker container id -> name, for "where" in the panel
@@ -353,11 +438,12 @@ wp_versions() {
 }
 
 now=$(date +%s)
+web_uids
 find "${OUT%/*}" -maxdepth 1 -name "${OUT##*/}.??????" -mmin +30 -delete 2>/dev/null || true
 work=$(mktemp -d /tmp/kervax-webfiles.XXXXXX)
 trap 'rm -rf "$work"' EXIT
 
-roots="" deltas="" n=0 nfull=0 seen=" "
+roots="" deltas="" n=0 nfull=0 nhashed=0 seen=" "
 while IFS="$TAB" read -r pid dir names; do
   [ "$n" -lt "$MAXROOTS" ] || break
   p=$(scan_path "$pid" "$dir") || continue
@@ -425,8 +511,27 @@ while IFS="$TAB" read -r pid dir names; do
   wpv=$(awk -F '\t' '$1 == "core" { print $3; exit }' "$work/wp")
   doms=$(printf '%s\n' "$names" | tr ' ' '\n' | grep -E '^[A-Za-z0-9*][A-Za-z0-9.*-]*\.[A-Za-z]{2,}$' | sort -u | head -20 \
     | awk '{ printf "%s\"%s\"", (NR > 1 ? "," : ""), $0 }')
-  roots="$roots${roots:+,}{\"key\":\"$key\",\"where\":\"$(esc "$where")\",\"path\":\"$(esc "$inner")\",\"domains\":[$doms],\"files\":$files,\"big\":$big,\"layer\":$layer${src:+,\"src\":\"$src\"}${GEV:+,\"git\":[$GEV]}${branch:+,\"branch\":\"$branch\"}${wpv:+,\"wp\":\"$wpv\"}}"
-  snap="$SNAP/$key.lst"
+  snap="$SNAP/$key.lst" wf="$SNAP/$key.watch" lroot=$p
+  [ -n "$upper" ] && lroot=$upper
+  old=$snap
+  [ -e "$snap" ] || { : > "$work/none"; old=$work/none; }
+  # hashes of the files unchanged since the last run are carried over; the changed and new ones
+  # are hashed first, then a part of those without a hash yet (helper 0.5 lists had none)
+  awk -F '\t' -v OFS='\t' 'FILENAME == ARGV[1] { o[$1] = $2 FS $3; h[$1] = $4; next }
+    { if (($1 in o) && o[$1] == $2 FS $3) print $1, $2, $3, h[$1], ""; else print $1, $2, $3, "", 1 }' \
+    "$old" "$work/new" > "$work/cur0"
+  # the changed ones always (up to HASH_RUN), the rest while the run has HASH_ALL left
+  left=$((HASH_ALL - nhashed))
+  awk -F '\t' -v max="$HASH_MAX" -v left="$left" '$4 == "" && $3 <= max && ($5 == 1 || left > 0) {
+      print ($5 == 1 ? 0 : 1) "\t" $1; if ($5 != 1) left--
+    }' "$work/cur0" | sort -s -t "$TAB" -k1,1n | head -n "$HASH_RUN" | cut -f2- > "$work/tohash"
+  nhashed=$((nhashed + $(wc -l < "$work/tohash")))
+  hashes "$lroot" "$work/tohash" > "$work/hashed"
+  awk -F '\t' -v OFS='\t' 'FILENAME == ARGV[1] { h[$1] = $2; next } { print $1, $2, $3, ($1 in h ? h[$1] : $4) }' \
+    "$work/hashed" "$work/cur0" > "$work/cur"
+  : > "$work/diff"
+  : > "$work/listed"
+  nn=0 nc=0 ng=0 ns=0 wpup=""
   if [ ! -e "$snap" ] || [ "$young" = true ]; then
     deltas="$deltas${deltas:+,}{\"key\":\"$key\",\"first\":true}"
   else
@@ -440,13 +545,15 @@ while IFS="$TAB" read -r pid dir names; do
           printf "%s[\"%s\",\"%s\",\"%s\",\"%s\",\"%s\"]", (n++ ? "," : ""), $1, e($2), o[$1 FS $2], $3, e($4)
         }' "$SNAP/$key.wp" "$work/wp" | head -c 4000)
     fi
-    # N new, C changed (time or size), G gone
-    awk -F '\t' 'FILENAME == ARGV[1] { o[$1] = $2 "\t" $3; next }
-      { if (!($1 in o)) print "N\t" $0; else { if (o[$1] != $2 "\t" $3) print "C\t" $0; delete o[$1] } }
-      END { for (k in o) print "G\t" k }' "$snap" "$work/new" > "$work/diff"
+    # N new, C changed, S written again with the same content, G gone
+    awk -F '\t' 'FILENAME == ARGV[1] { o[$1] = $2 FS $3; oh[$1] = $4; next }
+      { if (!($1 in o)) print "N\t" $1 "\t" $2 "\t" $3
+        else { if (o[$1] != $2 FS $3) print ((oh[$1] != "" && $4 == oh[$1]) ? "S" : "C") "\t" $1 "\t" $2 "\t" $3; delete o[$1] } }
+      END { for (k in o) print "G\t" k }' "$snap" "$work/cur" > "$work/diff"
     nn=$(grep -c '^N' "$work/diff" || true)
     nc=$(grep -c '^C' "$work/diff" || true)
     ng=$(grep -c '^G' "$work/diff" || true)
+    ns=$(grep -c '^S' "$work/diff" || true)
     # a translation goes with the time of its .mo: a language pack writes them in one second
     if grep -q "^[NC]$TAB.*languages/.*\.l10n\.php$TAB" "$work/diff"; then
       while IFS= read -r line; do
@@ -458,23 +565,95 @@ while IFS="$TAB" read -r pid dir names; do
         esac
       done < "$work/diff" > "$work/diff2" && mv -f "$work/diff2" "$work/diff"
     fi
-    # the files sent: the same content as in HEAD or not
-    GSAME="" GDIRTY=""
-    if [ -n "$gd" ] && [ -n "$gtop" ] && [ "$((nn + nc))" -gt 0 ]; then
-      awk -F '\t' -v max="$MAXLIST" '($1 == "N" || $1 == "C") && c[$1]++ < max { print $2 }' "$work/diff" > "$work/gitfiles"
-      git_check "$gd" "$gpre" "$p" "$work/gitfiles"
-    fi
-    if [ "$((nn + nc + ng))" -gt 0 ] || [ -n "$wpup" ]; then
-      deltas="$deltas${deltas:+,}{\"key\":\"$key\",\"n_new\":$nn,\"n_changed\":$nc,\"n_gone\":$ng,\"new\":[$(jlist N "$work/diff")],\"changed\":[$(jlist C "$work/diff")],\"gone\":[$(jlist G "$work/diff")]${wpup:+,\"wp\":[$wpup]}${GSAME:+,\"git_same\":[$GSAME]}${GDIRTY:+,\"git_dirty\":[$GDIRTY]}}"
-    fi
+    # the files sent to the panel, as jlist takes them
+    awk -F '\t' -v max="$MAXLIST" '($1 == "N" || $1 == "C") && c[$1]++ < max { print $2 }' "$work/diff" > "$work/listed"
   fi
-  cp -f "$work/new" "$snap.tmp" && mv -f "$snap.tmp" "$snap"
+  # the watch list "path TAB hash before TAB added TAB verdict TAB when": the files sent go on it
+  # with the hash they had before, a file sent again keeps its first one
+  clean=""
+  if [ -e "$snap" ]; then
+    if [ -e "$wf" ]; then
+      cp -f "$wf" "$work/watch0"
+    elif [ "$young" = true ]; then
+      : > "$work/watch0"
+    else
+      # signs of helper 0.5 are files written apart: five and more in one second are a deploy or an
+      # update (2500 files of plugin updates in two weeks are not rare), they would crowd them out
+      awk -F '\t' -v min="$((now - SEED_DAYS * 86400))" 'NR == FNR { if ($2 >= min) c[$2]++; next }
+        $2 >= min && c[$2] < 5' "$work/cur" "$work/cur" | sort -t "$TAB" -k2,2nr | head -n "$WATCH_MAX" \
+        | awk -F '\t' -v now="$now" '{ print $1 "\t\t" now "\t\t" }' > "$work/watch0"
+    fi
+    awk -F '\t' -v OFS='\t' -v now="$now" '
+      FILENAME == ARGV[1] { oh[$1] = $4; next }
+      FILENAME == ARGV[2] { want[$1] = 1; next }
+      { if (($1 in want) && $4 != "") next; if ($1 in want) has[$1] = 1; print }
+      END { for (f in want) if (!(f in has)) print f, oh[f], now, "", "" }' "$snap" "$work/listed" "$work/watch0" > "$work/watch1"
+    # open entries with the hash and time now ("-" - not in the list any more, "." - no hash: read
+    # splits on runs of tabs)
+    awk -F '\t' -v OFS='\t' 'FILENAME == ARGV[1] { if ($4 == "") w[$1] = $2; next }
+      ($1 in w) { print $1, (w[$1] == "" ? "." : w[$1]), ($4 == "" ? "." : $4), $2; seen[$1] = 1 }
+      END { for (f in w) if (!(f in seen)) print f, (w[f] == "" ? "." : w[f]), "-", 0 }' "$work/watch1" "$work/cur" > "$work/wcur"
+  else
+    : > "$work/watch1"
+    : > "$work/wcur"
+  fi
+  # git: the files sent and those watched - as in HEAD or not, new or in .gitignore
+  GST=()
+  if [ -n "$gd" ] && [ -n "$gtop" ]; then
+    cut -f1 "$work/wcur" | cat "$work/listed" - | sort -u > "$work/gitfiles"
+    git_check "$gd" "$gpre" "$p" "$gtop" "$work/gitfiles"
+  fi
+  # a watched file is done with: gone, back as it was, as in HEAD, a translation with its .mo
+  : > "$work/verd"
+  while IFS="$TAB" read -r f h0 h t; do
+    v=""
+    # a file removed in a container leaves a whiteout in the upper layer: not a regular file
+    if [ "$h" = - ] && [ ! -f "$lroot/$f" ]; then v=gone
+    elif [ "$h0" != . ] && [ "$h" = "$h0" ]; then v=back
+    elif [ "${GST[$f]:-}" = same ]; then v=head
+    else
+      case "$f" in
+        *languages/*.l10n.php)
+          mo=$(stat -c %Y "$p/${f%.l10n.php}.mo" 2>/dev/null || echo 0)
+          [ "$t" -gt 0 ] && [ "$((mo - t))" -le 2 ] && [ "$((t - mo))" -le 2 ] && v=wplang ;;
+      esac
+    fi
+    [ -n "$v" ] && printf '%s\t%s\n' "$f" "$v" >> "$work/verd"
+  done < "$work/wcur"
+  if [ -e "$snap" ]; then
+    awk -F '\t' -v OFS='\t' -v now="$now" -v wd="$((WATCH_DAYS * 86400))" 'FILENAME == ARGV[1] { v[$1] = $2; next }
+      $4 == "" && ($1 in v) { $4 = v[$1]; $5 = now }
+      ($4 != "" && now - $5 > 86400) || ($4 == "" && now - $3 > wd) { next }
+      { print }' "$work/verd" "$work/watch1" | sort -t "$TAB" -k3,3nr | head -n "$WATCH_MAX" > "$wf.tmp" && mv -f "$wf.tmp" "$wf"
+    # done with in the last day: the panel takes their signs off
+    clean=$(awk -F '\t' 'function e(s) { gsub(/[\000-\037]/, "", s); gsub(/\\/, "\\\\", s); gsub(/"/, "\\\"", s); return s }
+      $4 != "" && n < 40 { printf "%s[\"%s\",\"%s\"]", (n++ ? "," : ""), e($1), $4 }' "$wf")
+  fi
+  if [ "$((nn + nc + ng + ns))" -gt 0 ] || [ -n "$wpup" ]; then
+    # owner of each file sent, whether the site wrote it, whether it looks like a web shell
+    pw=/etc/passwd
+    [ "$p" != "$inner" ] && pw=/proc/$pid/root/etc/passwd
+    owners_of "$lroot" "$pw" "$WEBALL" "$work/listed"
+    finfo=""
+    while IFS= read -r f; do
+      o=${OWN[$f]:-} g=${GST[$f]:-}
+      [ -n "$o$g" ] || continue
+      on="" ow=0 ox=0
+      [ -n "$o" ] && IFS="$TAB" read -r on ow ox <<< "$o"
+      finfo="$finfo${finfo:+,}\"$(esc "$f")\":[\"$g\",\"$(esc "$on")\",${ow:-0},${ox:-0}]"
+    done < "$work/listed"
+    [ -n "$finfo" ] && finfo=",\"f\":{$finfo}"
+    deltas="$deltas${deltas:+,}{\"key\":\"$key\",\"n_new\":$nn,\"n_changed\":$nc,\"n_gone\":$ng,\"n_same\":$ns,\"new\":[$(jlist N "$work/diff")],\"changed\":[$(jlist C "$work/diff")],\"gone\":[$(jlist G "$work/diff")],\"same\":[$(jlist S "$work/diff")]${wpup:+,\"wp\":[$wpup]}$finfo}"
+  fi
+  roots="$roots${roots:+,}{\"key\":\"$key\",\"where\":\"$(esc "$where")\",\"path\":\"$(esc "$inner")\",\"domains\":[$doms],\"files\":$files,\"big\":$big,\"layer\":$layer${src:+,\"src\":\"$src\"}${GEV:+,\"git\":[$GEV]}${branch:+,\"branch\":\"$branch\"}${wpv:+,\"wp\":\"$wpv\"}${clean:+,\"clean\":[$clean]}}"
+  cp -f "$work/cur" "$snap.tmp" && mv -f "$snap.tmp" "$snap"
+  [ -e "$wf" ] || : > "$wf"
   cp -f "$work/wp" "$SNAP/$key.wp.tmp" && mv -f "$SNAP/$key.wp.tmp" "$SNAP/$key.wp"
 done < <(cands | awk -F '\t' '!seen[$1 FS $2]++')
 
 # lists of roots that are gone for a week, of containers - for a day
-find "$SNAP" -maxdepth 1 \( -name '*.lst' -o -name '*.wp' \) -mtime +7 -delete 2>/dev/null || true
-find "$SNAP" -maxdepth 1 \( -name 'c*.lst' -o -name 'c*.wp' \) -mtime +0 -delete 2>/dev/null || true
+find "$SNAP" -maxdepth 1 \( -name '*.lst' -o -name '*.wp' -o -name '*.watch' \) -mtime +7 -delete 2>/dev/null || true
+find "$SNAP" -maxdepth 1 \( -name 'c*.lst' -o -name 'c*.wp' -o -name 'c*.watch' \) -mtime +0 -delete 2>/dev/null || true
 
 # runs with changes of the last hour, newest last
 touch "$RUNS"

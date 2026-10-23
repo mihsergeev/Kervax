@@ -496,6 +496,10 @@ def _sorted(signs: dict) -> list[str]:
     return sorted(signs, key=lambda k: ORDER.index(k) if k in ORDER else 99)
 
 
+def _one(vals: set[str]) -> str:
+    return next(iter(vals)) if len(vals) == 1 else ""
+
+
 def summary(state: dict | None) -> str:
     """Строка "Что сломано": что именно, без счетчиков."""
     signs = (state or {}).get("signs") or {}
@@ -580,6 +584,11 @@ def view(state: dict | None) -> dict | None:
                          "files": paths[:10], "n": len(paths), "wp": any(f.get("wp") for f in files),
                          # все файлы не как в HEAD рабочей копии git: ветка (app/webfiles.py)
                          "dirty": bool(files) and all(f.get("g") == "dirty" for f in files),
+                         # что о файлах знает git, если у всех одно (dirty, new, ignored), и по файлу:
+                         # новый или изменен, владелец, записал ли сам сайт, похож ли на веб-шелл
+                         "git": _one({f.get("g", "") for f in files}),
+                         "items": [{x: f[x] for x in ("p", "t", "since", "k", "g", "o", "w", "x") if f.get(x)}
+                                   for f in {f.get("p", ""): f for f in files}.values()][:10],
                          "branch": next((f["branch"] for f in files if f.get("branch")), ""),
                          "where": ", ".join(dict.fromkeys(f.get("where", "") for f in files if f.get("where")))})
             continue
