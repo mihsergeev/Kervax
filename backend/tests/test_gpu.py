@@ -1,6 +1,14 @@
 """GPU NVIDIA (helper gpu-setup) и LLM-сервисы (агент 2.36): проблемы, перегрев, плашка, карточка,
 обычные задержки и точки для графиков."""
+import os
+import re
+import shutil
+import subprocess
+import sys
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+import pytest
 
 from app import collector, gpu, llm_lat
 from app.models import Server
@@ -144,7 +152,7 @@ def test_heat_levels():
 def test_summary_and_view():
     s = gpu.summary(_rep(), NOW)
     assert s == {"n": 2, "models": ["A100 80GB PCIe"], "util": 50, "mem": 75.8, "memt": 160.0, "helper": True, "ok": True,
-                 "frozen": 0}
+                 "smi": True, "frozen": 0}
     # без helper'а - по шине из отчета агента
     s = gpu.summary({"gpu_pci": [{"bus": "0000:41:00.0", "dev": "20b5", "drv": "nvidia"}]}, NOW)
     assert s["n"] == 1 and not s["helper"] and s["util"] is None
@@ -173,6 +181,78 @@ def test_setup_needed():
     assert setup_needed("gpu-setup", {"gpu_pci": [{"bus": "0000:41:00.0", "drv": "nvidia"}]})
     assert setup_needed("gpu-setup", _rep())
     assert not setup_needed("gpu-setup", {"mem_total": 1})
+
+
+def test_nouveau_card_is_not_a_gpu():
+    """На одной ноде (Ryzen без встроенной графики) стоит GT 710 под монитор на nouveau: красная
+    плашка "GPU нет связи" и просьба поставить helper были ложными"""
+    card = [{"bus": "0000:2d:00.0", "dev": "128b", "drv": "nouveau"}]
+    for rep in ({"gpu_pci": card, "clock_unix": TS},
+                _rep(_block(smi=False, ok=False, gpus=[], procs=[], driver="", cuda="", pci=card))):
+        assert not gpu.has_gpu(rep)
+        assert not setup_needed("gpu-setup", rep)
+        assert gpu.summary(rep, NOW) is None and gpu.view(rep, NOW) is None
+        assert gpu.problems(rep, NOW) == []
+    # helper перестал отрабатывать на такой ноде - про GPU, которой нет, тоже не говорим
+    old = _rep(_block(ts=TS - 3600, smi=False, ok=False, gpus=[], procs=[], pci=card))
+    assert gpu.problems(old, NOW) == []
+    # поставили драйвер NVIDIA - карта вернулась
+    assert gpu.has_gpu({"gpu_pci": [{**card[0], "drv": "nvidia"}]})
+
+
+GPU_SETUP = Path(__file__).resolve().parents[2] / "agent" / "gpu-setup.sh"
+
+
+def _when() -> str:
+    return re.search(r'^KERVAX_SETUP_WHEN="([^"]+)"', GPU_SETUP.read_text(encoding="utf-8"), re.M).group(1)
+
+
+def test_setup_when_rules():
+    """Условие в двойных кавычках и после set -u: $ развернулся бы при запуске самого скрипта, а
+    кавычки, слэши и скобки ломают разбор в плейбуке и установщике"""
+    assert not set(_when()) & set("$`'\\{}"), _when()
+    assert "nouveau" in _when()
+
+
+@pytest.mark.skipif(sys.platform != "linux" or shutil.which("sh") is None, reason="нужны sh и симлинки")
+def test_setup_when_on_fake_sys(tmp_path):
+    """Helper ставится на карту NVIDIA без драйвера и на nvidia, на nouveau - нет"""
+    def tree(name, cards):
+        root = tmp_path / name / "sys"
+        (root / "bus/pci/devices").mkdir(parents=True)
+        for bus, vendor, cls, drv in cards:
+            d = root / "devices/pci0000:00" / bus
+            d.mkdir(parents=True)
+            (d / "vendor").write_text(vendor + "\n")
+            (d / "class").write_text(cls + "\n")
+            os.symlink(d, root / "bus/pci/devices" / bus)
+            if drv:
+                (root / "bus/pci/drivers" / drv).mkdir(parents=True, exist_ok=True)
+                os.symlink(root / "bus/pci/drivers" / drv, d / "driver")
+        return _when().replace("/sys/bus/pci/devices", str(root / "bus/pci/devices"))
+
+    nic = ("0000:00:1f.6", "0x8086", "0x020000", "e1000e")
+    cases = {
+        "nouveau": ([nic, ("0000:2d:00.0", "0x10de", "0x030000", "nouveau"), ("0000:2d:00.1", "0x10de", "0x040300", "")], 1),
+        "nodrv": ([nic, ("0000:41:00.0", "0x10de", "0x030200", "")], 0),
+        "nvidia": ([nic, ("0000:41:00.0", "0x10de", "0x030200", "nvidia")], 0),
+        "mixed": ([("0000:2d:00.0", "0x10de", "0x030000", "nouveau"), ("0000:41:00.0", "0x10de", "0x030200", "nvidia")], 0),
+        "none": ([nic], 1),
+    }
+    env = {**os.environ, "PATH": "/usr/bin:/bin"}  # без nvidia-smi
+    for name, (cards, rc) in cases.items():
+        r = subprocess.run(["sh", "-c", tree(name, cards)], env=env, capture_output=True)
+        assert r.returncode == rc, name
+
+
+def test_no_driver_is_not_lost_link():
+    """Карта без драйвера (drv "") и без nvidia-smi: плашка есть, но smi=false, это не потеря связи"""
+    card = [{"bus": "0000:41:00.0", "dev": "20b5", "drv": ""}]
+    rep = _rep(_block(smi=False, ok=False, gpus=[], procs=[], driver="", cuda="", pci=card))
+    s = gpu.summary(rep, NOW)
+    assert s["n"] == 1 and s["helper"] and not s["ok"] and s["smi"] is False
+    assert gpu.view(rep, NOW)["smi"] is False
+    assert gpu.problems(rep, NOW) == []
 
 
 def _llm(**kw):

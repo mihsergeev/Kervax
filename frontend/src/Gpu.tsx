@@ -33,21 +33,24 @@ const KIND: Record<string, string> = { container: 'контейнер', pod: 'п
 
 // Плашка в списке серверов: средняя загрузка карт полосой, красная - если GPU не в порядке
 export function GpuChip({ sum, bad, t }: { sum: GpuSum; bad: boolean; t: TFn }) {
+  // smi=false - драйвер NVIDIA не ставили, карта не используется: связь не терялась
+  const lost = sum.helper && !sum.ok && sum.smi !== false
   const tip = [
     `${sum.n} x ${sum.models.join(', ') || 'NVIDIA'}`,
     sum.mem != null ? t('память {a} из {b} ГБ', { a: sum.mem, b: sum.memt ?? 0 }) : '',
-    !sum.helper ? t('нет helper gpu-setup: загрузка не видна') : !sum.ok ? t('драйвер NVIDIA не отвечает') : '',
+    !sum.helper ? t('нет helper gpu-setup: загрузка не видна') : sum.smi === false ? t('драйвер NVIDIA не установлен')
+      : !sum.ok ? t('драйвер NVIDIA не отвечает') : '',
     sum.frozen ? t('показания nvidia-smi застыли') : '',
   ].filter(Boolean).join(', ')
   return (
-    <span className={`gpu-chip${bad || (sum.helper && !sum.ok) ? ' gpu-chip-bad' : ''}`} title={tip}>
+    <span className={`gpu-chip${bad || lost ? ' gpu-chip-bad' : ''}`} title={tip}>
       GPU
       {sum.util != null ? (
         <>
           <span className="gpu-chip-bar"><span style={{ width: `${Math.min(100, sum.util)}%` }} /></span>
           {sum.util}%
         </>
-      ) : sum.helper && !sum.ok ? (
+      ) : lost ? (
         <span>{t('нет связи')}</span>
       ) : (
         sum.n > 1 && <span>x{sum.n}</span>

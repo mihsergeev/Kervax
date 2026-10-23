@@ -2720,6 +2720,7 @@ export type GpuView = {
 export type GpuSum = {
   n: number; models: string[]; util: number | null; mem: number | null; memt: number | null; helper: boolean; ok: boolean
   frozen?: number // сколько карт с застывшими показаниями
+  smi?: boolean // false - nvidia-smi нет, драйвер NVIDIA не ставили
 }
 // LLM-сервис (gpu.llm_view): за последние 5 минут, задержки [p50, p95, p99] в секундах
 export type LlmSvc = {
