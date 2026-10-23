@@ -39,6 +39,7 @@ from app import workers as workers_mod
 from app import cron_watch
 from app import log_errors
 from app import fpm_pools
+from app import gitlab as gitlab_mod
 from app import web_upstream
 from app import listen_watch
 from app import podnames
@@ -64,6 +65,7 @@ from app import maint
 from app import tg_bot
 from app import web_certs
 from app import web_config
+from app import cf_realip
 from app import changes as srv_changes
 from app import timeline as timeline_mod
 from app import open_ports
@@ -330,7 +332,8 @@ _SRV_SECTION = {
     "clock": "clock", "disk_health": "diskhealth", "inode": "diskfill", "disk_forecast": "diskfill", "units": "units",
     "unit_loop": "unitloop",
     "cpu_spin": "cpueat",
-    "exposed": "exposure", "port_new": "exposure", "pressure": "pressure", "net_health": "nethealth",
+    "exposed": "exposure", "port_new": "exposure", "cf_realip": "exposure", "pressure": "pressure",
+    "net_health": "nethealth",
     "link": "links", "traffic": "traffic",
     "access_change": "changes", "mem_leak": "memleak", "ssh_risk": "ssh", "access_risk": "access",
     "listen_gone": "exposure", "disk_slow": "disklat", "gpu": "gpu", "gpu_heat": "gpu",
@@ -352,7 +355,7 @@ _BACKUP_SEC = {"backup_failed": "runs", "backup_stale": "runs", "backup_growth":
 _BSRV_SEC = {"backup_repo": "repos", "backup_lock": "repos", "backup_unmonitored": "repos", "backup_check": "repos",
              "backup_prune": "cleanup", "backup_rotation": "cleanup"}
 # раздел карточки сервисов ноды по алерту и по проблеме
-_SVC_SEC = {"queue": "queues", "queue_stuck": "queues", "queue_failed": "queues", "workers": "workers", "cron_stuck": "cron", "log_errors": "logs", "fpm": "fpm", "db_conn": "db", "db_health": "db", "web_config": "web", "web_cert": "certs", "webfiles": "files",
+_SVC_SEC = {"queue": "queues", "queue_stuck": "queues", "queue_failed": "queues", "workers": "workers", "cron_stuck": "cron", "log_errors": "logs", "fpm": "fpm", "gitlab": "gitlab", "db_conn": "db", "db_health": "db", "web_config": "web", "web_cert": "certs", "webfiles": "files",
             "llm": "llm"}
 _KUBE_TAB = {"kube_expiry": "expiry", "flux_down": "flux", "flux_stale": "flux", "kube_pod": "pods",
              "kube_cron": "cron", "kube_node": "nodes", "kube_job": "cron", "kube_restarts": "restarts"}
@@ -369,6 +372,7 @@ _ALERT_SECTION = {
     "cron_stuck": "services",
     "log_errors": "services",
     "fpm": "services",
+    "gitlab": "services",
     "backup_repo": "backups",
     "backup_rotation": "backups",
     "backup_lock": "backups",
@@ -1721,6 +1725,7 @@ _SRV_LABEL = {
     "docker_risk": "контейнеры с ключами от хоста",
     "access_risk": "второй root или пустой пароль",
     "exposed": "открытые в интернет сервисы",
+    "cf_realip": "обход белых списков подменой заголовка",
     "pressure": "давление на ресурсы",
     "net_health": "сеть ноды",
     "link": "связь между серверами",
@@ -1805,6 +1810,8 @@ def _recovery_detail(key: str, st: dict, ctx: dict) -> str:
         return "кроны больше не наслаиваются и не висят"
     if key == "log_errors":
         return "ошибок в логах снова обычно: за час меньше половины порога"
+    if key == "gitlab":
+        return "GitLab в порядке: патчи стоят, остановки пройдены, автообновление и фоновые миграции не стоят"
     if key == "fpm":
         return "PHP-FPM снова в норме: запросы не ждут воркеров и не убиваются по таймауту, воркеры не падают"
     if key == "disk_forecast":
@@ -1849,6 +1856,9 @@ def _recovery_detail(key: str, st: dict, ctx: dict) -> str:
         return "сертификаты веб-серверов снова в сроке"
     if key == "web_config":
         return "конфиги веб-серверов снова проходят проверку"
+    if key == "cf_realip":
+        return ("белые списки больше не обходятся подменой заголовка: порт закрыт для всех, кроме "
+                "Cloudflare, или веб-сервер верит заголовку только от него")
     if key == "webfiles":
         return "новых php в файлах сайтов больше нет"
     if key == "db_health":
@@ -3934,6 +3944,9 @@ def server_problems(s: Server, now: datetime, pod_names: dict[str, str] | None =
     # PHP-FPM (helper fpm-setup): пул подолгу упирается в pm.max_children или рвет запросы по таймауту
     for x in fpm_pools.problems(s, now):
         add("fpm", x["level"], x["text"], "fpm", fpm_pools.MUTE_PREFIX + x["key"], section="services")
+    # GitLab (helper gitlab-setup): отстал от патча или остановки, автообновление встало, упали миграции
+    for x in gitlab_mod.problems(s, now):
+        add("gitlab", x["level"], x["text"], "gitlab", gitlab_mod.MUTE_PREFIX + x["key"], section="services")
     # Сроки кластера: ближайший в пределах дальнего порога. За последний порог и истекший - проблема
     wd = kube_warn_days(s) if getattr(s, "kube_expiry_warn_days", None) else []
     soon = kube_expiry_soon(rep, wd, now, s) if wd else None
@@ -4077,6 +4090,10 @@ def server_problems(s: Server, now: datetime, pod_names: dict[str, str] | None =
     if fresh:
         add("port_new", 2, "в интернет открылся новый порт: " + open_ports.new_text(fresh), "exposure", "port_new",
             open_ports.new_since(s))
+    # веб-сервер верит CF-Connecting-IP или X-Forwarded-For от всех, а 80/443 открыты в обход
+    # Cloudflare: белые списки обходятся поддельным заголовком (app/cf_realip.py)
+    for lv, txt, _key in cf_realip.problems(s, now):
+        add("cf_realip", lv, txt, "exposure", "cf_realip")
     out.sort(key=lambda p: -p["level"])
     return out
 
@@ -4111,7 +4128,7 @@ _SIGNALS = {6: "ABRT", 9: "KILL", 11: "SEGV", 15: "TERM"}
 # ноды, и каждые 10 минут снова. kervax-agent, kervax-dumps (дампы баз для бэкапа) и kervax-relay
 # (ретранслятор, через него ходят агенты других серверов) не тут: их падение - повод для алерта.
 _OWN_HELPER_UNIT = re.compile(
-    r"kervax-(changes|cron|db-stats|disk-health|disk-usage|fpm|gpu|kube-expiry|kube-flux|logerr|queues|relay-sync|sockfix|units|web-rate|web-sites|webfiles|workers"
+    r"kervax-(changes|cron|db-stats|disk-health|disk-usage|fpm|gitlab|gpu|kube-expiry|kube-flux|logerr|queues|relay-sync|sockfix|units|web-rate|web-sites|webfiles|workers"
     r"|[a-z]+-req)\.service")
 
 # Задание по таймеру, которое падает на каждом запуске, между падениями несколько минут
@@ -4255,6 +4272,8 @@ def _sig_all_quiet(s: Server, key: str, sig: set[str], now: datetime) -> bool:
         return all(k in log_errors.muted_keys(s, now) for k in sig)
     if key == "fpm":
         return all(k in fpm_pools.muted_keys(s, now) for k in sig)
+    if key == "gitlab":
+        return all(k in gitlab_mod.muted_keys(s, now) for k in sig)
     if key == "mem_leak":
         # растет как росло, но памяти теперь хватает (или правило 1.4.278: раньше алертил любой
         # рост): "память больше не растет" было бы неправдой
@@ -6000,6 +6019,13 @@ def _server_conditions(s: Server, now: datetime,
         ex = open_ports.exposed(s, now)
         out["exposed"] = (open_ports.exposed_level(ex), {"detail": open_ports.exposure_text(ex), "n": len(ex), "items": ex,
                                                          "own": open_ports.from_panel(s)})
+    # Белые списки обходятся подменой CF-Connecting-IP (helper webserver-setup 0.27 + внешняя
+    # проверка портов): красное, пока не закроют порт для всех, кроме Cloudflare, не ограничат
+    # доверие или не отметят "так задумано". sig - какой веб-сервер, второй дает свой алерт
+    if online and cf_realip.block(rep, now) is not None:
+        cr = cf_realip.findings(s, now)
+        out["cf_realip"] = (2 if cr else 0, {"detail": "; ".join(cf_realip.text(f) for f in cr[:3]),
+                                             "sig": [f["key"] for f in cr], "items": cr})
     # Сервер задыхается (агент 2.26): уровень - худшая из причин, выдержка - как у CPU и RAM
     if online and any(rep.get(k) for k in ("psi", "dstate", "fds")):
         pr = pressure_problems(rep)
@@ -6158,6 +6184,13 @@ def _server_conditions(s: Server, now: datetime,
                       {"detail": "\n".join(x["text"] for x in fp[:3])
                                  + (f"\nи еще {len(fp) - 3}" if len(fp) > 3 else ""),
                        "sig": [x["key"] for x in fp], "items": fp, "parts": [(x["key"], x["text"]) for x in fp], "sep": "\n"})
+    # GitLab: поводы - даты выпусков и состояние автообновления, не всплески; выдержка не нужна. sig - инстансы
+    if online and gitlab_mod.block(rep) is not None:
+        gp = gitlab_mod.problems(s, now)
+        out["gitlab"] = (max((x["level"] for x in gp), default=0),
+                         {"detail": "\n".join(x["text"] for x in gp[:3])
+                                    + (f"\nи еще {len(gp) - 3}" if len(gp) > 3 else ""),
+                          "sig": [x["key"] for x in gp], "items": gp, "parts": [(x["key"], x["text"]) for x in gp], "sep": "\n"})
     # Утечка памяти: дно растет суток подряд (история - в alert_state mem_trend, ведет цикл алертов)
     if online and isinstance((s.alert_state or {}).get("mem_trend"), dict):
         ml = [x for x in mem_trend.problems(s, now) if x["level"]]
@@ -6597,7 +6630,8 @@ async def evaluate_servers(
             prev = int(st.get(key, 0))
             if key in ("disk_health", "units", "docker_restarts", "kube_restarts", "mem_leak", "db_health",
                        "web_config", "web_cert", "webfiles", "listen_gone", "docker_risk", "access_risk", "link", "gpu",
-                       "queue_stuck", "queue_failed", "workers", "cron_stuck", "log_errors", "fpm"):
+                       "cf_realip",
+                       "queue_stuck", "queue_failed", "workers", "cron_stuck", "log_errors", "fpm", "gitlab"):
                 # Тот же уровень, но сломалось НОВОЕ (второй диск при уже развалившемся
                 # RAID, второй упавший юнит): молчать нельзя, хотя уровень не вырос. Что
                 # сломано - ключи в sig.
@@ -7971,6 +8005,8 @@ async def collector_loop(
                 session_factory, settings, datetime.now(timezone.utc)))
             # версии без поддержки: пакеты сторонних репозиториев из списков пакетов (раз в час)
             await stage("версии ПО", software_mod.refresh(session_factory, datetime.now(timezone.utc)))
+            # выпуски GitLab (теги Docker Hub и обязательные остановки) раз в 6 часов, одной выборкой на парк
+            await stage("выпуски GitLab", gitlab_mod.refresh(session_factory, datetime.now(timezone.utc)))
             # базы уязвимостей раз в сутки, загрузка и разбор фоном
             await stage("базы уязвимостей", vulns_mod.start_refresh(
                 session_factory, datetime.now(timezone.utc)))

@@ -252,7 +252,7 @@ def _rate_body() -> str:
 
 
 def test_helper_version_and_wiring():
-    assert "KERVAX_SETUP_VERSION=0.26" in SRC and "\r" not in SRC
+    assert "KERVAX_SETUP_VERSION=0.27" in SRC and "\r" not in SRC
     body = _rate_body()
     # строки ошибок nginx в потоке контейнера: не в счет запросов, но причина берется
     assert "\\[(emerg|alert|crit|error|warn|notice|info|debug)\\]/ { up_take($0); next }" in body

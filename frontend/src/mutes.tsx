@@ -61,6 +61,7 @@ export const SRV_ALERT_KINDS: { k: string; label: string }[] = [
   { k: 'cron_stuck', label: 'Крон наслаивается или висит' },
   { k: 'log_errors', label: 'Всплеск ошибок в логах' },
   { k: 'fpm', label: 'PHP-FPM не справляется' },
+  { k: 'gitlab', label: 'GitLab устарел' },
   { k: 'cpu_spin', label: 'CPU: процессы в пустом цикле' },
   { k: 'backup_growth', label: 'Бэкап: резкий прирост' },
   { k: 'docker_sock', label: 'Docker: внешний прокси с docker-сокетом' },
@@ -68,6 +69,7 @@ export const SRV_ALERT_KINDS: { k: string; label: string }[] = [
   { k: 'access_risk', label: 'Доступ: второй root или пустой пароль' },
   { k: 'exposed', label: 'Сеть: открыто в интернет то, что должно быть закрыто' },
   { k: 'port_new', label: 'Сеть: открылся новый порт' },
+  { k: 'cf_realip', label: 'Сеть: белые списки обходятся подменой CF-Connecting-IP' },
   { k: 'pressure', label: 'Сервер задыхается' },
   { k: 'net_health', label: 'Сеть: потери и ошибки' },
   { k: 'link', label: 'Сеть: связь между серверами' },
@@ -87,6 +89,8 @@ export const WEB_MUTE = 'web_5xx:'
 export const UNIT_MUTE = 'unit:'
 // Порт, открытый в интернет намеренно: exposed:<порт>
 export const EXPOSED_MUTE = 'exposed:'
+// Веб-сервер верит заголовку от всех при порте в обход Cloudflare, и так задумано: cfip:<сервер>:<где>
+export const CFIP_MUTE = 'cfip:'
 // Один контейнер или под, который часто перезапускается: restarts:docker:<имя> | restarts:pod:<ns>/<имя>
 export const RESTARTS_MUTE = 'restarts:'
 // Порог предупреждения "часто перезапускается": перезапусков за сутки (restarts.MIN на бэкенде)
@@ -107,6 +111,8 @@ export const CRON_MUTE = 'cron:'
 export const LOGERR_MUTE = 'logerr:'
 // Один пул PHP-FPM: fpm:<где>|<пул>
 export const FPM_MUTE = 'fpm:'
+// Один GitLab: gitlab:<хост из external_url или имя контейнера>
+export const GITLAB_MUTE = 'gitlab:'
 // OOM из-за одного виновника (кто занимал память): oom:svc:<служба> | oom:ct:<контейнер> | oom:pod:<uid> |
 // oom:cg:<cgroup> | oom:proc:<процесс>; OOM из-за других приходят. "oom" целиком - все OOM сервера
 export const OOM_MUTE = 'oom:'
@@ -145,7 +151,7 @@ export const BKHTTP_MUTE = 'bkhttp:'
 // бэкап по http оставить.
 // Хранятся в alert_mutes, но это не заглушенный алерт: в "Заглушено" и чипе "бессрочно" их нет, видны
 // и снимаются там, где поставлены (раздел карточки, "вернуть")
-const DECISIONS = [ACCESS_MUTE, EXPOSED_MUTE, DOCKRISK_MUTE, NOBOOT_MUTE, OSUPD_MUTE, SWVER_MUTE, SSH_MUTE, PROXYOLD_MUTE, BKHTTP_MUTE]
+const DECISIONS = [ACCESS_MUTE, EXPOSED_MUTE, CFIP_MUTE, DOCKRISK_MUTE, NOBOOT_MUTE, OSUPD_MUTE, SWVER_MUTE, SSH_MUTE, PROXYOLD_MUTE, BKHTTP_MUTE]
 export const isDecision = (k: string) => DECISIONS.some((p) => k.startsWith(p))
 // Кнопка и подпись решения по совету об ОС: что именно нельзя
 export function osDecisionLabel(kind: string, t: TFn): string {
@@ -215,6 +221,7 @@ export function muteKindLabel(k: string, t: TFn): string | null {
     const [w, p] = k.slice(FPM_MUTE.length).split('|')
     return `${t('пул PHP-FPM')}: ${p ?? ''} (${w})`
   }
+  if (k.startsWith(GITLAB_MUTE)) return `GitLab: ${k.slice(GITLAB_MUTE.length)}`
   if (k.startsWith(LEAK_MUTE)) return `${t('рост памяти')}: ${k.slice(LEAK_MUTE.length).replace(/^(docker|pod|proc):/, '')}`
   if (k.startsWith(RESTARTS_MUTE)) {
     const key = k.slice(RESTARTS_MUTE.length)
@@ -225,6 +232,7 @@ export function muteKindLabel(k: string, t: TFn): string | null {
   }
   if (k.startsWith(UNIT_MUTE)) return `${t('юнит')}: ${k.slice(UNIT_MUTE.length)}`
   if (k.startsWith(EXPOSED_MUTE)) return `${t('открытый порт')}: ${k.slice(EXPOSED_MUTE.length)}`
+  if (k.startsWith(CFIP_MUTE)) return `${t('доверие к CF-Connecting-IP')}: ${k.slice(CFIP_MUTE.length)}`
   return k.startsWith(WEB_MUTE) ? `${t('5xx по логу')}: ${k.slice(WEB_MUTE.length)}` : null
 }
 

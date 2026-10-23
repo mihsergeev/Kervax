@@ -8,6 +8,38 @@ type Rule = [RegExp, string]
 
 // Длинные фразы раньше коротких: "открыто в интернет" входит в "служебное открыто в интернет"
 const PHRASES: Rule[] = [
+  // белые списки обходятся подменой CF-Connecting-IP (app/cf_realip.py)
+  [/белые списки обходятся подменой (\S+): /g, 'allow lists are bypassed with a forged $1: '],
+  [/ в поде (\S+) верит заголовку от любого адреса \(/g, ' in pod $1 trusts the header from any address ('],
+  [/ в контейнере (\S+) верит заголовку от любого адреса \(/g, ' in container $1 trusts the header from any address ('],
+  [/ на хосте верит заголовку от любого адреса \(/g, ' on the host trusts the header from any address ('],
+  [/\), а (\d+) и (\d+) открыты в обход Cloudflare/g, '), and $1 and $2 are open past Cloudflare'],
+  [/\), а (\d+) открыт в обход Cloudflare/g, '), and $1 is open past Cloudflare'],
+  // GitLab: повод алерта и заметки про бэкап (app/gitlab.py why, backup_notes)
+  [/, патч (\S+) вышел (.+?) назад \(последний (\S+)\)/g, ', patch $1 was released $2 ago (latest $3)'],
+  [/, патч (\S+) вышел (.+?) назад/g, ', patch $1 was released $2 ago'],
+  [/ ниже обязательной остановки (\S+) \(вышла (.+?) назад\), обновлять по шагам: /g, ' is below the required stop $1 (released $2 ago), upgrade step by step: '],
+  [/упали фоновые миграции \((\d+)\)/g, 'background migrations failed ($1)'],
+  [/, следующее обновление на них остановится/g, ', the next upgrade stops on them'],
+  [/автообновление остановлено на (\S+)/g, 'autoupgrade stopped at $1'],
+  [/автообновление пометило GitLab сломанным, откат не удался: /g, 'autoupgrade marked GitLab broken, the rollback failed: '],
+  [/каталог бэкапов не найден на хосте/g, 'the backup directory is not found on the host'],
+  [/в каталоге бэкапов нет ни одного архива gitlab-backup/g, 'no gitlab-backup archive in the backup directory'],
+  [/последний бэкап (.+?) назад/g, 'the last backup was $1 ago'],
+  [/, по расписанию не делается/g, ', not made on a schedule'],
+  [/крон или таймер с gitlab-backup не найден/g, 'no cron or timer with gitlab-backup found'],
+  [/расписание делает бэкап без /g, 'the schedule makes a backup without '],
+  [/(^|\s)бэкап без /g, '$1backup without '],
+  [/последний запуск (\S+) завершился с ошибкой/g, 'the last run of $1 failed'],
+  [/gitlab-secrets\.json и конфиг нигде не сохраняются: без них базу из бэкапа не прочитать/g,
+    'gitlab-secrets.json and the config are not saved anywhere: without them the database in a backup cannot be read'],
+  [/архиву конфига (.+?), в restic-бэкапе Kervax его нет/g, 'the config archive is $1 old and it is not in the Kervax restic backup'],
+  [/(?<=without [^(]*)репозиториев/g, 'repositories'],
+  [/(?<=without [^(]*)загрузок/g, 'uploads'],
+  [/(?<=without [^(]*)пакетов/g, 'packages'],
+  [/(?<=without [^(]*)базы/g, 'database'],
+  [/(?<=without [^(]*)состояний Terraform/g, 'Terraform states'],
+  [/(?<=without [^(]*)секретных файлов CI/g, 'CI secure files'],
   // CronJob кластера: упал или не запускается и почему (app/kube_cron.py)
   [/дамп-CronJob не отрабатывает: /g, 'dump CronJob does not run: '],
   [/CronJob не отрабатывает: /g, 'CronJob does not run: '],

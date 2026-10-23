@@ -1126,6 +1126,11 @@ label.home-sel-all { display: inline-flex; flex-direction: row; align-items: cen
 .exp-cf-base { color: var(--text-muted); margin-right: 0.2rem; overflow-wrap: anywhere; }
 .exp-cf-line { display: flex; align-items: flex-start; gap: 0.45rem; }
 .exp-cf-line > span:first-child { display: inline-flex; padding-top: 0.2rem; }
+/* белые списки обходятся подменой заголовка: красная плашка над колонками, текст обычным цветом */
+.exp-realip, .exp-realip-done { display: flex; flex-direction: column; gap: 0.3rem; color: var(--text); }
+.exp-realip-h { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 0.5rem; }
+.exp-realip .exp-realip-h b { color: var(--down); }
+.exp-realip .mono, .exp-realip-done .mono { overflow-wrap: anywhere; }
 /* колонки встают друг под друга по ширине самой карточки, а не окна: в узком содержимом
    страницы сервера карточка уже окна; в узкой колонке кнопка уходит под имя порта */
 .exp-card { container-type: inline-size; }
@@ -8039,3 +8044,7 @@ button.inv-dd-btn { font-size: 0.82rem; padding: 0.28rem 0.7rem; }
 .bsrv-https-row { flex-direction: row; justify-content: flex-start; text-align: left; cursor: pointer; }
 .bsrv-https-row input[type="checkbox"] { flex: 0 0 auto; width: auto; margin: 0; }
 .bsrv-https-row > .small:last-child { flex-shrink: 0; max-width: 45%; text-align: right; }
+
+/* GitLab в сервисах: тон строки красит только полоску и точку, текст - свой у каждой строки */
+.gl-row .docker-c-main { color: var(--text); }
+.gl-row .docker-c-img.t-degraded { color: var(--degraded); white-space: normal; }
