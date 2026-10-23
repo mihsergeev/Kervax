@@ -27,6 +27,7 @@ from app import home_mute, kube_coverage, os_support
 from app import request_watch
 from app import panel_errors
 from app import inside_probe
+from app import site_flap
 from app import job_logs, kube_cron
 from app import retention as retention_mod
 from app import db_health
@@ -44,6 +45,7 @@ from app import web_upstream
 from app import listen_watch
 from app import podnames
 from app import mem_trend
+from app import mem_limit
 from app import oom as oom_mod
 from app import restarts as srv_restarts
 from app import ssh_audit
@@ -123,8 +125,9 @@ class Pending(NamedTuple):
     msg: str
     inc_id: int | None
     check_id: int | None
-    # None (инцидент) либо (атрибут, значение) — что выставить на мониторе при успехе
-    flag: tuple[str, object] | None
+    # None (инцидент) либо (атрибут, значение) или список таких пар — что выставить на
+    # мониторе при успехе
+    flag: tuple[str, object] | list[tuple[str, object]] | None
     icon: str = ""  # готовая ведущая иконка (сроки: 🔥 истекло / ⚠️ предупреждение)
 
 
@@ -305,7 +308,7 @@ def _display_host(target: str, ctype: str, port: int) -> str:
 
 
 _ALERT_ICON = {
-    "recovery": "✅", "locrec": "✅", "ssl": "🔐", "domain": "🌐", "locpart": "🌍",
+    "recovery": "✅", "recstable": "✅", "locrec": "✅", "ssl": "🔐", "domain": "🌐", "locpart": "🌍",
     "flaky": "🟠", "flakyrec": "✅", "tamper": "🚨", "tamperrec": "✅",
 }
 
@@ -335,7 +338,7 @@ _SRV_SECTION = {
     "exposed": "exposure", "port_new": "exposure", "cf_realip": "exposure", "pressure": "pressure",
     "net_health": "nethealth",
     "link": "links", "traffic": "traffic",
-    "access_change": "changes", "mem_leak": "memleak", "ssh_risk": "ssh", "access_risk": "access",
+    "access_change": "changes", "mem_leak": "memleak", "mem_limit": "memlimit", "ssh_risk": "ssh", "access_risk": "access",
     "listen_gone": "exposure", "disk_slow": "disklat", "gpu": "gpu", "gpu_heat": "gpu",
 }
 
@@ -757,6 +760,11 @@ async def record_outcome(
             CheckIncident.ended_at.is_(None),
         )
     )
+    # мигающий сайт (app/site_flap.py): о нем уже сказали, отбоя не было - не повторяемся.
+    # Проверок не было дольше STABLE (монитор выключали, панель стояла) - эпизод забыт
+    ep = site_flap.level(row.flap_state)
+    if ep and row.last_checked_at is not None and now - _aware(row.last_checked_at) > site_flap.STABLE:
+        row.flap_state, ep = None, None
     if new_status != "up":
         if open_inc is None:
             open_inc = CheckIncident(
@@ -775,15 +783,32 @@ async def record_outcome(
             1,
         )
         if not manual and not open_inc.notified and row.consecutive_fails >= threshold:
-            pending.append(
-                ("bad", row.name, new_status, msg, open_inc.id, row.id, None, "")
-            )
+            if ep == "down":
+                # снова упал, а отбоя мигавшему сайту еще не было: тот же эпизод, молчим
+                open_inc.notified = True
+            elif ep == "flaky" and now - _aware(open_inc.started_at) < site_flap.WORSE:
+                pass  # отвечал через раз, теперь лежит: пишем, если падение продержится
+            else:
+                pending.append(Pending("bad", row.name, new_status, msg, open_inc.id, row.id,
+                                       ("flap_state", site_flap.opened("down", now)), ""))
     elif open_inc is not None:
         open_inc.ended_at = now
         if open_inc.notified:
-            # несём up-сообщение («HTTP 200 · N мс» / «порт открыт …») —
-            # чтобы в восстановлении был виден код/латентность, а не пусто
-            pending.append(("recovery", row.name, "up", msg, None, row.id, None, ""))
+            if row.flaky_since is not None or site_flap.flapping(await _flap_hist(session, row, now, new_status), now):
+                # мигает: отбой, когда продержится (ниже, на следующих проверках)
+                if ep != "down":
+                    row.flap_state = site_flap.opened("down", now)
+            else:
+                # несём up-сообщение («HTTP 200 · N мс» / «порт открыт …») —
+                # чтобы в восстановлении был виден код/латентность, а не пусто
+                pending.append(("recovery", row.name, "up", msg, None, row.id, None, ""))
+                row.flap_state = site_flap.closed(now)
+    elif ep == "down" and site_flap.stable(await _flap_hist(session, row, now, new_status), now):
+        pending.append(Pending("recstable", row.name, "up", f"снова отвечает стабильно: {msg}",
+                               None, row.id, None, ""))
+        row.flap_state = site_flap.closed(now)
+        # "через раз" этого эпизода закрыт тем же отбоем
+        row.flaky_since, row.flaky_notified = None, False
     if not manual:
         await _flaky_step(session, row, new_status, msg, now, pending)
     if row.known_issue and not manual:
@@ -830,6 +855,22 @@ async def record_outcome(
             ))
 
 
+async def _flap_hist(session: AsyncSession, row: Check, now: datetime, status: str) -> site_flap.Hist:
+    """Проверки монитора за FLAP_WINDOW (и не меньше STABLE_N последних) вместе с нынешней:
+    мигает ли сайт и пришел ли в норму. Нынешний снимок уже в сессии и попадает в выборку
+    при автофлаше, поэтому берем строго раньше now и дописываем его сами."""
+    lim = max(site_flap.STABLE_N, int(site_flap.FLAP_WINDOW.total_seconds() // max(row.interval_seconds, 1)) + 2)
+    prev = (
+        await session.execute(
+            select(CheckSample.ts, CheckSample.status)
+            .where(CheckSample.check_id == row.id, CheckSample.ts < now)
+            .order_by(CheckSample.ts.desc())
+            .limit(min(lim, 400))
+        )
+    ).all()
+    return [(_aware(ts), st) for ts, st in reversed(prev)] + [(now, status)]
+
+
 async def _flaky_step(
     session: AsyncSession, row: Check, new_status: str, msg: str, now: datetime, pending: list
 ) -> None:
@@ -839,11 +880,15 @@ async def _flaky_step(
     Состояние (flaky_since) меняем сразу, а алерт и отбой ставим в очередь, пока они не уйдут:
     flaky_notified выставит _send_alerts только после доставки."""
     thr = max(row.alert_after_failures, 1)
+    # нынешний снимок уже в сессии и может попасть в выборку при автофлаше
+    cond = [CheckSample.check_id == row.id, CheckSample.ts < now]
+    # сбои закрытого эпизода (app/site_flap.py) уже объявлены и отбиты: второй раз не считаем
+    if (cut := site_flap.cutoff(row.flap_state)) is not None:
+        cond.append(CheckSample.ts > cut)
     prev = (
         await session.execute(
             select(CheckSample.status, CheckSample.message)
-            # нынешний снимок уже в сессии и может попасть в выборку при автофлаше
-            .where(CheckSample.check_id == row.id, CheckSample.ts < now)
+            .where(*cond)
             .order_by(CheckSample.ts.desc())
             .limit(flaky.WINDOW + thr)
         )
@@ -856,7 +901,13 @@ async def _flaky_step(
         row.flaky_since = now
     elif was and not now_flaky:
         row.flaky_since = None
-    if now_flaky and not row.flaky_notified:
+    ep = site_flap.level(row.flap_state)
+    if now_flaky and not row.flaky_notified and ep is not None:
+        # о сайте уже сказали (лежит или через раз), отбоя не было: это тот же эпизод
+        row.flaky_notified = True
+    elif not now_flaky and row.flaky_notified and ep == "down":
+        row.flaky_notified = False  # отбой придет один, когда сайт продержится (site_flap.stable)
+    elif now_flaky and not row.flaky_notified:
         fails, _ = flaky.short_failures(statuses, thr)
         last_err = next((m for st, m in reversed(hist) if st == "down" and m), "")
         text = (
@@ -866,7 +917,8 @@ async def _flaky_step(
         if last_err:
             text += f", последняя ошибка: {last_err}"
         pending.append(
-            Pending("flaky", row.name, new_status, text, None, row.id, ("flaky_notified", True), "")
+            Pending("flaky", row.name, new_status, text, None, row.id,
+                    [("flaky_notified", True), ("flap_state", site_flap.opened("flaky", now))], "")
         )
     elif not now_flaky and row.flaky_notified:
         pending.append(
@@ -875,6 +927,8 @@ async def _flaky_step(
                 ("flaky_notified", False), "",
             )
         )
+        if ep == "flaky":
+            row.flap_state = site_flap.closed(now)
 
 
 async def send_alerts_soon(session_factory, pending: list, now: datetime) -> None:
@@ -1011,7 +1065,7 @@ async def run_due_checks(
 
 # pending-kind → тип правила (recovery локаций считаем частью locpart)
 _SITE_RULE_KIND = {
-    "bad": "down", "recovery": "recovery", "ssl": "ssl",
+    "bad": "down", "recovery": "recovery", "recstable": "recovery", "ssl": "ssl",
     "domain": "domain", "locpart": "locpart", "locrec": "locpart",
     "flaky": "flaky", "flakyrec": "flaky", "tamper": "tamper", "tamperrec": "tamper",
 }
@@ -1020,8 +1074,8 @@ _SITE_RULE_KIND = {
 _SITE_SEC = {"ssl": "exp", "domain": "exp", "locpart": "loc", "locrec": "loc",
              "tamper": "tamper", "tamperrec": "tamper"}
 # История алертов: отбой - под видом самой беды, чтобы фильтр показывал ее целиком
-_SITE_HISTORY_KIND = {"bad": "down", "recovery": "down", "tamperrec": "tamper"}
-_SITE_RECOVERY = frozenset({"recovery", "locrec", "flakyrec", "tamperrec"})
+_SITE_HISTORY_KIND = {"bad": "down", "recovery": "down", "recstable": "down", "tamperrec": "tamper"}
+_SITE_RECOVERY = frozenset({"recovery", "recstable", "locrec", "flakyrec", "tamperrec"})
 
 
 def _site_scope_ok(rule: dict, check_id: int | None, group: str) -> bool:
@@ -1219,7 +1273,7 @@ async def _send_alerts(
                 continue
         same = None
         # push и dns в один заголовок не сворачиваем: у каждого свой смысл, а не "тот же сайт"
-        if kind in ("bad", "recovery") and tgt and typ not in ("push", "dns"):
+        if kind in ("bad", "recovery", "recstable") and tgt and typ not in ("push", "dns"):
             same = (kind, status, checks_exec._registrable_domain(tgt))
             if same in same_at:
                 same_hosts[same].append(host or name)
@@ -1315,11 +1369,12 @@ async def _send_alerts(
                 inc = await session.get(CheckIncident, inc_id)
                 if inc is not None:
                     inc.notified = True
-            elif flag and check_id is not None:
-                attr, value = flag  # напр. ("ssl_alerted_days", 7)
+            if flag and check_id is not None:
+                # ("ssl_alerted_days", 7) или список таких пар
                 row = await session.get(Check, check_id)
                 if row is not None:
-                    setattr(row, attr, value)
+                    for attr, value in flag if isinstance(flag, list) else [flag]:
+                        setattr(row, attr, value)
         await session.commit()
 
 
@@ -1720,6 +1775,7 @@ _SRV_LABEL = {
     "disk_forecast": "прогноз заполнения",
     "units": "юниты systemd",
     "cpu_spin": "процессы в пустом цикле",
+    "mem_limit": "у лимита памяти",
     "backup_growth": "прирост бэкапа",
     "docker_sock": "docker-сокет у внешнего прокси",
     "docker_risk": "контейнеры с ключами от хоста",
@@ -1848,6 +1904,8 @@ def _recovery_detail(key: str, st: dict, ctx: dict) -> str:
         return "ноды кластера снова Ready, давления нет"
     if key == "mem_leak":
         return "память больше не растет день за днем"
+    if key == "mem_limit":
+        return "контейнеры и поды больше не упираются в свой лимит памяти"
     if key == "listen_gone":
         return "пропавшие порты снова слушаются или сняты с наблюдения"
     if key == "disk_slow":
@@ -4072,6 +4130,9 @@ def server_problems(s: Server, now: datetime, pod_names: dict[str, str] | None =
             add("mem_leak", x["level"], x["text"], "pods", mute, section="kuber")
         else:
             add("mem_leak", x["level"], x["text"], "memleak", mute)
+    # Уперся в лимит памяти и тормозит: ведет в раздел "Память" карточки, там кнопка "так задумано"
+    for x in mem_limit.problems(s, now):
+        add("mem_limit", x["level"], x["text"], "memlimit", mem_limit.MUTE_PREFIX + x["key"], x["since"])
     # Часто перезапускается (медленный цикл): контейнер ведет в "Докер", под - в "Кубер"
     for x in srv_restarts.problems(s, now):
         if x["kind"] == "docker":
@@ -4283,6 +4344,8 @@ def _sig_all_quiet(s: Server, key: str, sig: set[str], now: datetime) -> bool:
         muted = {m[len(mem_trend.MUTE_PREFIX):] for m in (s.alert_mutes or []) if m.startswith(mem_trend.MUTE_PREFIX)}
         growing = {x["key"] for x in mem_trend.problems(s, now)}
         return all(k in growing or podnames.muted(muted, k) for k in sig)
+    if key == "mem_limit":
+        return all(podnames.muted(mem_limit.decided(s), k) for k in sig)
     return False
 
 
@@ -6188,9 +6251,11 @@ def _server_conditions(s: Server, now: datetime,
                                  + (f"\nи еще {len(fp) - 3}" if len(fp) > 3 else ""),
                        "sig": [x["key"] for x in fp], "items": fp, "parts": [(x["key"], x["text"]) for x in fp], "sep": "\n"})
     # GitLab: поводы - даты выпусков и состояние автообновления, не всплески; выдержка не нужна. sig - инстансы
-    if online and gitlab_mod.block(rep) is not None:
-        gp = gitlab_mod.problems(s, now)
-        out["gitlab"] = (max((x["level"] for x in gp), default=0),
+    # Выпусков нет (база пустая или не прочиталась): "устарел" не проверить. Объявленный алерт
+    # замирает как был, без отбоя; сломанное автообновление и миграции видны и без выпусков
+    gp = gitlab_mod.problems(s, now) if online and gitlab_mod.block(rep) is not None else None
+    if gp is not None and (gp or gitlab_mod.feed() is not None or not int(state.get("gitlab", 0))):
+        out["gitlab"] =(max((x["level"] for x in gp), default=0),
                          {"detail": "\n".join(x["text"] for x in gp[:3])
                                     + (f"\nи еще {len(gp) - 3}" if len(gp) > 3 else ""),
                           "sig": [x["key"] for x in gp], "items": gp, "parts": [(x["key"], x["text"]) for x in gp], "sep": "\n"})
@@ -6200,6 +6265,15 @@ def _server_conditions(s: Server, now: datetime,
         out["mem_leak"] = (max((x["level"] for x in ml), default=0),
                            {"detail": "; ".join(x["text"] for x in ml[:3]), "sig": [x["key"] for x in ml], "items": ml,
                             "parts": [(x["key"], x["text"]) for x in ml]})
+    # Уперся в лимит памяти: выдержка - своя на каждый контейнер и под (alert_state memlim, его
+    # ведет цикл алертов), общая не нужна. sig - кто именно
+    if online and mem_limit.block(rep) is not None:
+        mp = mem_limit.problems(s, now)
+        out["mem_limit"] = (max((x["level"] for x in mp), default=0),
+                            {"detail": "\n".join(x["text"] for x in mp[:3])
+                                       + (f"\nи еще {len(mp) - 3}" if len(mp) > 3 else ""),
+                             "sig": [x["key"] for x in mp], "items": mp, "parts": [(x["key"], x["text"]) for x in mp],
+                             "sep": "\n"})
     # Проверка восстановления: итог недельной проверки держится до следующей, выдержка не нужна
     if online and backup_verify.block(rep) is not None:
         bv = backup_verify.problems(rep, now)
@@ -6247,6 +6321,9 @@ async def evaluate_servers(
         fill_hist = await fill_history(session, servers, now)
         metric_hist = await metric_history(session, servers, now)
         windows = list(await session.scalars(select(MaintenanceWindow)))
+        # выпуски GitLab из app_settings: в памяти планировщика после старта их нет до стадии
+        # "выпуски GitLab", и первый тик давал отбой "GitLab устарел", а следующий - ту же тревогу
+        await gitlab_mod.load_feed(session)
         # мониторы - чтобы назвать лежащие в сообщении про сервер, от которого они зависят, и в
         # его отбое сказать, какие поднялись вместе с ним
         mon_by = {i: SimpleNamespace(id=i, name=n, target=t, type=ty, probe_local=pl, probe_server_id=ps,
@@ -6631,7 +6708,7 @@ async def evaluate_servers(
                 # сломано"; что останется к закрытию, станет известной проблемой
                 continue
             prev = int(st.get(key, 0))
-            if key in ("disk_health", "units", "docker_restarts", "kube_restarts", "mem_leak", "db_health",
+            if key in ("disk_health", "units", "docker_restarts", "kube_restarts", "mem_leak", "mem_limit", "db_health",
                        "web_config", "web_cert", "webfiles", "listen_gone", "docker_risk", "access_risk", "link", "gpu",
                        "cf_realip",
                        "queue_stuck", "queue_failed", "workers", "cron_stuck", "log_errors", "fpm", "gitlab"):
@@ -7114,6 +7191,10 @@ async def evaluate_servers(
             mstate = mem_trend.update(st.get("mem_trend"), s.last_report or {}, now)
             if mstate != (st.get("mem_trend") or {}):
                 apply(s.id, "mem_trend", mstate)
+            # эпизоды у лимита памяти по каждому контейнеру и поду (mem_limit)
+            mlstate = mem_limit.update(st.get("memlim"), s.last_report or {}, now, pod_names)
+            if mlstate is not None and mlstate != (st.get("memlim") or {}):
+                apply(s.id, "memlim", mlstate)
             # ход очередей: растет и не разбирается (queue_watch)
             if queue_watch.queues(s.last_report or {}) or st.get("qwatch"):
                 qw = queue_watch.update(st.get("qwatch"), s.last_report or {}, now,

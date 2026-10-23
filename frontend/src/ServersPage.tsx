@@ -37,6 +37,7 @@ import {
   type ClockInfo,
   type DnsInfo,
   type ExposedPort,
+  type MemLimitItem,
   type DiskForecastItem,
   type FailedUnit,
   type DiskHealth,
@@ -65,7 +66,7 @@ import {
 } from './api'
 import { StackedAreaChart, type ChartMark, type Series } from './charts/StackedAreaChart'
 import { OnboardBlock } from './OnboardBlock'
-import { diskHealth, diskUsage, fmtSetupVersion, gpuSecLine, shortList, sinceShort, unitsBlock, srvIpHit, srvIssues, type SrvIssue, webLogLabel, webRate, webSeriesName, webUnparsed } from './serverUtils'
+import { diskHealth, diskUsage, fmtSetupVersion, limText, memLimFacts, gpuSecLine, shortList, sinceShort, unitsBlock, srvIpHit, srvIssues, type SrvIssue, webLogLabel, webRate, webSeriesName, webUnparsed } from './serverUtils'
 import { OsIcon } from './osIcon'
 import { CountryFlag } from './CountryFlag'
 import { currentLang, useI18n } from './i18n'
@@ -79,6 +80,7 @@ import {
   WEB_MUTE,
   EXPOSED_MUTE,
   CFIP_MUTE,
+  MEMLIM_MUTE,
   NOBOOT_MUTE,
   ACCESS_MUTE,
   osDecisionLabel,
@@ -831,7 +833,7 @@ const SECTION_LABEL: Record<string, string> = { services: 'Сервисы', kube
 // часы и DNS разбираются на сводке
 const SEC_OF_CARD: Record<string, string> = {
   cores: 'cpu', freq: 'cpu', throttle: 'cpu', temp: 'cpu', cpueat: 'cpu',
-  swap: 'mem', memwb: 'mem', oom: 'mem', memleak: 'mem',
+  swap: 'mem', memwb: 'mem', oom: 'mem', memleak: 'mem', memlimit: 'mem',
   netifrx: 'net', netiftx: 'net', neterr: 'net', nethealth: 'net', links: 'net', traffic: 'net', netusers: 'net',
   conntrack: 'net', sockets: 'net',
   diskio: 'disk', diskiops: 'disk', diskutil: 'disk', disklat: 'disk', disktemp: 'disk', diskfill: 'disk',
@@ -2888,6 +2890,83 @@ function MemLeaks({ server: s }: { server: Server }) {
             </div>
           )
         })}
+      </div>
+    </div>
+  )
+}
+
+// У своего лимита памяти (app/mem_limit.py): кто тормозит сейчас - давление памяти или major faults
+// держатся 10 минут, кто у лимита без давления (кэш занял лимит - это нормально), что было за сутки.
+// "так задумано" - memlim:<ключ>, как у белых списков
+function MemLimitsCard({ server: s, isViewer, onChanged }: { server: Server; isViewer: boolean; onChanged: () => void }) {
+  const { t } = useI18n()
+  const [busy, setBusy] = useState(false)
+  const ml = s.mem_limits
+  if (!ml || (!ml.bad.length && !ml.near.length && !ml.past.length)) return null
+  const kindName = { docker: t('контейнер'), pod: t('под'), unit: t('юнит') }
+  const hm = (iso?: string) => (iso ? new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '')
+  const advice = { docker: t('поднимите лимит памяти контейнера (mem_limit)'), pod: t('поднимите limit памяти пода'), unit: t('поднимите MemoryMax / MemoryHigh юнита') }
+  const setDecided = async (key: string, on: boolean) => {
+    if (on && !window.confirm(t('Так задумано: этот лимит памяти оставить как есть? Панель перестанет алертить по нему.'))) return
+    setBusy(true)
+    try {
+      const k = MEMLIM_MUTE + key
+      const cur = (s.alert_mutes ?? []).filter((m) => m !== k)
+      await updateServer(s.id, { alert_mutes: on ? [...cur, k] : cur })
+      onChanged()
+    } catch {
+      /* кнопка остается, можно повторить */
+    } finally {
+      setBusy(false)
+    }
+  }
+  const row = (x: MemLimitItem, tone: 'bad' | 'warn' | 'info', sub: string) => (
+    <div key={x.key + (x.from ?? '')} className="loc-res ml-row">
+      <span className={`lk-dot lk-dot-${tone}`} />
+      <div className="ml-main">
+        <span className="acc-tag">{kindName[x.kind]}</span> <b>{x.name}</b>
+        <div className="muted small">{sub}</div>
+      </div>
+      <div className="ml-rate">
+        <span className={tone === 'bad' ? 't-down' : tone === 'warn' ? 't-degraded' : ''}>{limText(x.v.lim)}</span>
+        {x.decided !== undefined && !isViewer && (
+          <div>
+            {x.decided ? (
+              <span className="muted small">
+                {t('так задумано')}{' '}
+                <button className="ghost small row-act" disabled={busy} onClick={() => setDecided(x.key, false)}>
+                  {t('вернуть алерт')}
+                </button>
+              </span>
+            ) : (
+              <button className="ghost small row-act" disabled={busy} onClick={() => setDecided(x.key, true)}>
+                🔕 {t('так задумано')}
+              </button>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  )
+  return (
+    <div className="chart-card net-card net-card-wide" id="mcard-memlimit">
+      <div className="net-head">
+        <div className="chart-cap">{t('У лимита памяти')}</div>
+      </div>
+      <div className="net-sub">
+        {t('Контейнеры, поды и юниты, занявшие свой лимит памяти. Кэш заполняет любой лимит, это нормально. Беда - когда при этом растет давление памяти (PSI full) или major faults: ядро выкидывает код и данные, процесс читает их с диска снова и тормозит, но не падает. Алерт - если так держится 10 минут.')}
+      </div>
+      <div className="loc-results">
+        {ml.bad.map((x) =>
+          row(x, x.decided ? 'info' : (x.level ?? 1) >= 2 ? 'bad' : 'warn',
+            `${memLimFacts(x.v, t)} - ${t('тормозит, но не падает')}${x.decided ? '' : `; ${advice[x.kind]}`}`),
+        )}
+        {ml.past.map((x) =>
+          row(x, 'info', `${t('тормозил {from} - {to}', { from: hm(x.from), to: hm(x.to) })}: ${memLimFacts(x.v, t)}`),
+        )}
+        {ml.near.map((x) =>
+          row(x, x.hot ? 'warn' : 'info', x.hot ? `${memLimFacts(x.v, t)} - ${t('давление есть, ждем 10 минут')}` : `${memLimFacts(x.v, t)} - ${t('давления нет, это кэш')}`),
+        )}
       </div>
     </div>
   )
@@ -7336,6 +7415,7 @@ function ServerDetail({
           <div className="net-cards">
             <OomBlock server={s} eps={oomEps} open={oomOpen} onOpen={setOomOpen} onChanged={onChanged} />
             <MemLeaks server={s} />
+            <MemLimitsCard server={s} isViewer={isViewer} onChanged={onChanged} />
             <MemContainers server={s} onChanged={onChanged} />
             <MemPods server={s} onChanged={onChanged} />
           </div>

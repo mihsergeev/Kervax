@@ -318,6 +318,9 @@ class Check(Base):
         DateTime(timezone=True), nullable=True, default=None
     )
     flaky_notified: Mapped[bool] = mapped_column(Boolean, default=False)
+    # мигающий сайт (app/site_flap.py): о нем уже сказали и отбоя не было - {"lvl", "at"},
+    # или когда закрыли прошлый эпизод - {"closed"}
+    flap_state: Mapped[dict | None] = mapped_column(JSON, nullable=True, default=None)
     # последние вычисленные сроки (обновляются реже основной проверки)
     ssl_days: Mapped[int | None] = mapped_column(Integer, nullable=True)
     domain_days: Mapped[int | None] = mapped_column(Integer, nullable=True)

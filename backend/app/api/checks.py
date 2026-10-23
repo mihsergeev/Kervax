@@ -7,7 +7,7 @@ import secrets
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Query, Request, status
 from sqlalchemy import case, delete as sa_delete, func, select
 
-from app import audit, domain_probe, expiry_snooze, known, manual_probe, try_probe
+from app import allowlist_hint, audit, domain_probe, expiry_snooze, known, manual_probe, try_probe
 from app import parents as parents_mod
 from app.checks import status_matches
 from app import checks as checks_exec
@@ -742,19 +742,30 @@ def _serving_servers(servers) -> dict[str, tuple[int, str]]:
     return found
 
 
+async def _outside_uptime(session, check_id: int, now: datetime, days: int) -> float | None:
+    """Доля проверок снаружи без "down" за days дней, %; None - проверок не было."""
+    total, ok = (await session.execute(
+        select(func.count(), func.sum(case((CheckSample.status != "down", 1), else_=0)))
+        .where(CheckSample.check_id == check_id, CheckSample.ts >= now - timedelta(days=days))
+    )).one()
+    return round((ok or 0) / total * 100, 1) if total else None
+
+
 @router.get("/local-probe-suggestions", response_model=LocalProbeSuggestionsOut)
 async def local_probe_suggestions(
     user: CurrentUser, session: SessionDep
 ) -> LocalProbeSuggestionsOut:
-    """Сайты, которые не отвечают панели, но живут на известной ей ноде.
+    """Сайты, которые снаружи закрыты белым списком (app/allowlist_hint.py).
 
-    Почти всегда это белый список: снаружи соединение рвут, а сайт цел. Панель уже
-    знает домены всех веб-серверов парка — значит может не ждать, пока человек
-    сопоставит одно с другим, а предложить проверять такой сайт изнутри сервера.
-    Само не назначаем: проверка изнутри отвечает на другой вопрос, чем внешняя, и
-    подменять одну другой без ведома владельца нельзя."""
+    Если домен держит известная панели нода, предлагаем проверять сайт изнутри нее; если
+    снаружи сайт стабильно отвечает 403 - считать этот код нормой. Само не назначаем:
+    проверка изнутри отвечает на другой вопрос, чем внешняя, и подменять одну другой без
+    ведома владельца нельзя."""
+    now = datetime.now(timezone.utc)
     servers = list(await session.scalars(scope_query(user, select(Server), Server)))
     serving = _serving_servers(servers)
+    enabled_locs = list(await session.scalars(
+        select(Location).where(Location.enabled.is_(True), Location.monitors.is_(True))))
     out: list[LocalProbeSuggestion] = []
     for check in await session.scalars(
         select(Check).where(
@@ -768,24 +779,53 @@ async def local_probe_suggestions(
             continue
         msg = (check.last_message or "")[:200]
         host = _host_of(check)
-        # Сайт ОТВЕЧАЕТ кодом «не пущу» — значит он жив, и проверять изнутри нечего:
-        # довольно считать этот код нормой. Так лечатся сайты за прокси, которое
-        # закрывает их само (Envoy Gateway, nginx с allow/deny), где локальной
-        # проверке и зацепиться не за что: на localhost там никто не слушает.
         code = _closed_code(check, msg)
-        if code:
-            out.append(LocalProbeSuggestion(
-                check_id=check.id, name=check.name, host=host, message=msg,
-                kind="code", code=code,
-            ))
-            continue
         hit = serving.get(host)
-        if not hit:
+        outside = allowlist_hint.outside_kind(msg, check.last_phases, code)
+        # подключиться не дают, а сайт не на нашей ноде - проверить изнутри негде
+        if not outside or (outside != "code" and not hit):
             continue
-        out.append(LocalProbeSuggestion(
-            check_id=check.id, name=check.name, host=host, message=msg,
-            kind="local", server_id=hit[0], server_name=hit[1],
-        ))
+        since = await session.scalar(
+            select(func.min(CheckIncident.started_at))
+            .where(CheckIncident.check_id == check.id, CheckIncident.ended_at.is_(None))
+        )
+        since = _aware(since) if since else None
+        if since is None or now - since < allowlist_hint.STEADY:
+            continue
+        locs = effective_locations(check, enabled_locs) if check.check_locations else []
+        loc_st = list(await session.scalars(
+            select(LocationResult.status).where(
+                LocationResult.check_id == check.id,
+                LocationResult.location_id.in_([x.id for x in locs]),
+            )
+        )) if locs else []
+        ever_up = await session.scalar(
+            select(CheckSample.id).where(
+                CheckSample.check_id == check.id, CheckSample.status != "down",
+                CheckSample.ts >= now - timedelta(days=30),
+            ).limit(1)
+        ) is not None
+        hint = allowlist_hint.judge(
+            outside=outside, since=since, now=now, locations=loc_st,
+            inside=allowlist_hint.inside_status(check.last_inside, since),
+            ever_up=ever_up, code=code,
+            up7=await _outside_uptime(session, check.id, now, 7) if ever_up else 0.0,
+            up30=await _outside_uptime(session, check.id, now, 30) if ever_up else 0.0,
+        )
+        if hint is None:
+            continue
+        # изнутри открывается, но ноду, что держит домен, панель не знает (нашлась по
+        # адресу): включить проверку изнутри некуда, остается только принять 403
+        if hint.reason != "code" and not hit:
+            if outside != "code":
+                continue
+            hint.reason = "code"
+        base = dict(check_id=check.id, name=check.name, host=host, message=msg,
+                    reason=hint.reason, outside=outside, since=since, code=code)
+        if hint.reason == "code":
+            out.append(LocalProbeSuggestion(**base, kind="code"))
+        else:
+            out.append(LocalProbeSuggestion(**base, kind="local", server_id=hit[0], server_name=hit[1]))
     out.sort(key=lambda x: (x.kind, x.name))
     return LocalProbeSuggestionsOut(items=out)
 

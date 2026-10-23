@@ -225,3 +225,81 @@ def test_helper_version_line_and_lf():
     assert b"\r\n" not in raw
     line = next(x for x in raw.decode().splitlines() if x.startswith("KERVAX_SETUP_VERSION="))
     assert line.split("=", 1)[1].split()[0].count(".") == 1 and "  #" in line
+
+
+async def test_restart_without_feed_in_memory_keeps_alert(tmp_path, monkeypatch):
+    """Перезапуск планировщика: выпусков в памяти нет до стадии "выпуски GitLab". Открытая тревога не
+    получает отбоя и через минуту ту же тревогу снова: выпуски берутся из базы, а без них уровень замирает"""
+    import json
+
+    from sqlalchemy import delete, select
+
+    from app import settings_store
+    from app.alerts import full_text
+    from app.config import Settings
+    from app.db import Base, create_engine_and_factory
+    from app.models import AppSetting
+
+    monkeypatch.setattr(gl, "PATCH_DAYS", 7)
+    monkeypatch.setattr(gl, "STOP_DAYS", 14)
+
+    def factory():
+        return create_engine_and_factory(f"sqlite+aiosqlite:///{(tmp_path / 's.db').as_posix()}")
+
+    engine, fac = factory()
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    async with fac() as s:
+        s.add(Server(name="web-a", token_hash="x", enabled=True, backup_not_required=True, last_seen=NOW,
+                     cpu_alert_percent=0, mem_alert_percent=0, last_report={"uptime_seconds": 100000}))
+        await settings_store.set_raw(s, gl.FEED_KEY, json.dumps(FEED))
+        await s.commit()
+    sent: list[str] = []
+
+    async def fake_send(cfg, text, parse_mode=None):
+        sent.append(text)
+        return []
+
+    monkeypatch.setattr("app.alerts.send_alert", fake_send)
+    cfg = Settings(alert_webhook="http://hook")
+
+    async def tick(minute, inst=None):
+        t = NOW.replace(minute=minute)
+        async with fac() as s:
+            srv = (await s.execute(select(Server))).scalars().one()
+            srv.last_seen = t
+            srv.last_report = {"uptime_seconds": 100000, **_rep([inst or _inst()], ts=int(t.timestamp())),
+                               "clock_unix": t.timestamp()}
+            await s.commit()
+        await collector.evaluate_servers(fac, cfg, t)
+
+    await tick(1)
+    assert len(sent) == 1 and "19.4.1, патч 19.4.2" in full_text(sent[0])
+    # перезапуск: новый процесс, в памяти выпусков нет, в базе есть
+    await engine.dispose()
+    gl.set_feed(None)
+    engine, fac = factory()
+    await tick(2)
+    await tick(3)
+    assert len(sent) == 1
+    # выпусков нет и в базе (не прочитались): объявленное замирает, без отбоя
+    async with fac() as s:
+        await s.execute(delete(AppSetting).where(AppSetting.key == gl.FEED_KEY))
+        await s.commit()
+    gl.set_feed(None)
+    await tick(4)
+    assert len(sent) == 1
+    async with fac() as s:
+        assert (await s.execute(select(Server))).scalars().one().alert_state["gitlab"] == 1
+    # а сломанное автообновление видно и без выпусков: это новость
+    au = {"broken": "2026-10-22 23:50:00 19.4.1 -> 19.5.1: откат не удался", "blocked": ""}
+    await tick(5, _inst(au=au))
+    assert len(sent) == 2 and "сломан" in full_text(sent[1])
+    # выпуски вернулись, GitLab обновили - честный отбой
+    async with fac() as s:
+        await settings_store.set_raw(s, gl.FEED_KEY, json.dumps(FEED))
+        await s.commit()
+    gl.set_feed(None)
+    await tick(6, _inst(version="19.5.1"))
+    assert len(sent) == 3 and "снова в порядке" in sent[2]
+    await engine.dispose()

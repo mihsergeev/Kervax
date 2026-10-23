@@ -45,6 +45,7 @@ export const SRV_ALERT_KINDS: { k: string; label: string }[] = [
   { k: 'docker_restarts', label: 'Docker: часто перезапускается' },
   { k: 'kube_restarts', label: 'Kubernetes: под часто перезапускается' },
   { k: 'mem_leak', label: 'Память: растет день за днем' },
+  { k: 'mem_limit', label: 'Память: уперся в лимит' },
   { k: 'ssh_risk', label: 'SSH: опасный вход' },
   { k: 'db_health', label: 'СУБД: реплика, транзакции, запись, VACUUM' },
   { k: 'web_config', label: 'Веб-сервер: конфиг не проходит проверку' },
@@ -97,6 +98,8 @@ export const RESTARTS_MUTE = 'restarts:'
 export const RESTARTS_DAY_MIN = 5
 // Один контейнер, под или процесс, чья память растет: leak:docker:<имя> | leak:pod:<ns>/<имя> | leak:proc:<имя>@<польз.>
 export const LEAK_MUTE = 'leak:'
+// Контейнер, под или юнит у своего лимита памяти, так задумано: memlim:docker:<имя> | memlim:pod:<ns>/<ворклоад> | memlim:unit:<юнит>
+export const MEMLIM_MUTE = 'memlim:'
 // Один пропавший порт: listen:<порт>
 export const LISTEN_MUTE = 'listen:'
 // Одна очередь, которая растет и не разбирается: qstuck:<источник>|<vhost>/<имя> (ключ порога очереди)
@@ -151,7 +154,7 @@ export const BKHTTP_MUTE = 'bkhttp:'
 // бэкап по http оставить.
 // Хранятся в alert_mutes, но это не заглушенный алерт: в "Заглушено" и чипе "бессрочно" их нет, видны
 // и снимаются там, где поставлены (раздел карточки, "вернуть")
-const DECISIONS = [ACCESS_MUTE, EXPOSED_MUTE, CFIP_MUTE, DOCKRISK_MUTE, NOBOOT_MUTE, OSUPD_MUTE, SWVER_MUTE, SSH_MUTE, PROXYOLD_MUTE, BKHTTP_MUTE]
+const DECISIONS = [ACCESS_MUTE, EXPOSED_MUTE, CFIP_MUTE, MEMLIM_MUTE, DOCKRISK_MUTE, NOBOOT_MUTE, OSUPD_MUTE, SWVER_MUTE, SSH_MUTE, PROXYOLD_MUTE, BKHTTP_MUTE]
 export const isDecision = (k: string) => DECISIONS.some((p) => k.startsWith(p))
 // Кнопка и подпись решения по совету об ОС: что именно нельзя
 export function osDecisionLabel(kind: string, t: TFn): string {
@@ -222,6 +225,7 @@ export function muteKindLabel(k: string, t: TFn): string | null {
     return `${t('пул PHP-FPM')}: ${p ?? ''} (${w})`
   }
   if (k.startsWith(GITLAB_MUTE)) return `GitLab: ${k.slice(GITLAB_MUTE.length)}`
+  if (k.startsWith(MEMLIM_MUTE)) return `${t('у лимита памяти, так задумано')}: ${k.slice(MEMLIM_MUTE.length).replace(/^(docker|pod|unit):/, '').replace(/^\?\//, '')}`
   if (k.startsWith(LEAK_MUTE)) return `${t('рост памяти')}: ${k.slice(LEAK_MUTE.length).replace(/^(docker|pod|proc):/, '')}`
   if (k.startsWith(RESTARTS_MUTE)) {
     const key = k.slice(RESTARTS_MUTE.length)

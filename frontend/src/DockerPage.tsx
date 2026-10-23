@@ -10,6 +10,7 @@ import {
   type DockerCommand,
   type DockerContainer,
   type DockerInfo,
+  type MemLimitItem,
   type RiskStep,
   type Server,
 } from './api'
@@ -20,7 +21,7 @@ import { DOCKRISK_MUTE, NOBOOT_MUTE, RESTARTS_DAY_MIN } from './mutes'
 import { OsIcon } from './osIcon'
 import { CountryFlag } from './CountryFlag'
 import { FixSteps, useFixDone } from './FixSteps'
-import { dockRiskText, proxyBuilt, shortList, srvIpHit, srvIssues, srvMuted } from './serverUtils'
+import { dockRiskText, memLimChip, proxyBuilt, shortList, srvIpHit, srvIssues, srvMuted } from './serverUtils'
 import { fmtRel } from './ServersPage'
 import { CardNav, FreshChip, markMuted, OvAreas, OvRows, secInfoOf, type OvRow, type SecDef, type SecInfo, type SecItem } from './cardLayout'
 import { NetTile, TileFilterChip, useTileFilter } from './NetLinks'
@@ -581,6 +582,7 @@ function ContainerRow({
   onDenied,
   sock = false,
   day = 0,
+  memlim,
 }: {
   serverId: number
   c: DockerContainer
@@ -591,6 +593,7 @@ function ContainerRow({
   onChanged: () => void
   onDenied?: () => void // прокси ответил 403: на ноде доступ только на чтение
   sock?: boolean // внешний прокси с docker-сокетом
+  memlim?: MemLimitItem // уперся в лимит памяти и тормозит (mem_limits.bad)
 }) {
   const { t } = useI18n()
   const [busy, setBusy] = useState<string | null>(null)
@@ -639,6 +642,11 @@ function ContainerRow({
           {c.name}
           {c.health === 'unhealthy' && (
             <span className="type-chip off" title={t('healthcheck: unhealthy')}>unhealthy</span>
+          )}
+          {memLimChip(memlim, t) && (
+            <span className="type-chip t-degraded" title={memLimChip(memlim, t)!.title}>
+              🧠 {memLimChip(memlim, t)!.label}
+            </span>
           )}
           {sock && (
             <span className="type-chip off" title={t('прокси смотрит в интернет и держит docker-сокет: взлом прокси даст root на хосте')}>
@@ -1179,6 +1187,7 @@ function DockerHostModal({
                           onDenied={() => setDenied(true)}
                           sock={exposed.some((e) => e.name === c.name)}
                           day={s.restarts_day?.['docker:' + c.name] ?? 0}
+                          memlim={s.mem_limits?.bad.find((x) => x.kind === 'docker' && x.v.name === c.name)}
                           canAct={canAct}
                           onLogs={canLogs ? () => setLogs(c.name) : undefined}
                           onChanged={onChanged}

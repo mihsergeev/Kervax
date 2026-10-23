@@ -2640,6 +2640,27 @@ const EN: Record<string, string> = {
   'памяти хватит больше чем на месяц': 'memory lasts more than a month',
   'Память: растет день за днем': 'Memory: grows day after day',
   'рост памяти': 'memory growth',
+  // у своего лимита памяти
+  'У лимита памяти': 'At the memory limit',
+  'Контейнеры, поды и юниты, занявшие свой лимит памяти. Кэш заполняет любой лимит, это нормально. Беда - когда при этом растет давление памяти (PSI full) или major faults: ядро выкидывает код и данные, процесс читает их с диска снова и тормозит, но не падает. Алерт - если так держится 10 минут.':
+    'Containers, pods and units that filled their memory limit. Page cache fills any limit, that is normal. The trouble is when memory pressure (PSI full) or major faults grow at the same time: the kernel evicts code and data, the process reads them from disk again and slows down without crashing. Alerts if it lasts 10 minutes.',
+  'Память: уперся в лимит': 'Memory: hit its limit',
+  'у лимита памяти, так задумано': 'at the memory limit, intended',
+  'используется {p}%': '{p}% used',
+  'major faults {n}/с': 'major faults {n}/s',
+  'refault {n}/с': 'refault {n}/s',
+  'тормозит, но не падает': 'slow, but not crashing',
+  'поднимите лимит памяти контейнера (mem_limit)': 'raise the container memory limit (mem_limit)',
+  'поднимите limit памяти пода': 'raise the pod memory limit',
+  'поднимите MemoryMax / MemoryHigh юнита': 'raise MemoryMax / MemoryHigh of the unit',
+  'Так задумано: этот лимит памяти оставить как есть? Панель перестанет алертить по нему.':
+    'Intended: keep this memory limit as it is? The panel will stop alerting about it.',
+  'тормозил {from} - {to}': 'was slow {from} - {to}',
+  'давление есть, ждем 10 минут': 'under pressure, waiting 10 minutes',
+  'давления нет, это кэш': 'no pressure, it is cache',
+  'у лимита памяти {l}': 'at memory limit {l}',
+  'тормозит, но не падает. Подробности - в карточке сервера, раздел Память':
+    'slow, but not crashing. Details are in the server card, Memory section',
   // часто перезапускается
   'Docker: часто перезапускается': 'Docker: restarts often',
   'Kubernetes: под часто перезапускается': 'Kubernetes: pod restarts often',
@@ -3490,13 +3511,16 @@ const EN: Record<string, string> = {
   'Проверять локально включено, но домен не найден ни на одном сервере — проверять некому':
     'Local probing is on, but the domain was not found on any server — nobody can check it',
   'Похоже на белый список': 'Looks like an allow-list',
-  '🏠 проверять локально: подходит {n} сайт(ов)': '🏠 probe locally: {n} site(s) qualify',
-  'Эти сайты панель снаружи проверить не может — похоже на белый список. Те, чей домен держит ваш сервер, она предлагает проверять изнутри него. А если сайт ОТВЕЧАЕТ «доступ запрещён» — он жив, и довольно считать этот код нормой: изнутри там проверять нечего, прокси закрывает сайт сам.':
-    'The panel cannot check these sites from outside — that looks like an allow-list. For those whose domain is served by one of your servers it offers a probe from within. And when a site ANSWERS with "forbidden" it is alive, so it is enough to treat that code as normal: there is nothing to probe from within, the proxy closes the site itself.',
-  'отвечает {code} — считать нормой': 'answers {code} — treat as normal',
-  'принять код': 'accept the code',
-  'включить': 'enable',
-  'включить для всех {n}': 'enable for all {n}',
+  'снаружи отвечает {code}': 'answers {code} from outside',
+  'снаружи сбрасывает соединение': 'connection is reset from outside',
+  'снаружи не подключается': 'no connection from outside',
+  'уже {d}': 'for {d}',
+  '{out}{d}, изнутри {srv} открывается': '{out}{d}, opens from within {srv}',
+  '{out} и ни разу не открылся, домен на {srv}': '{out} and never opened, the domain is on {srv}',
+  '{out} и ни разу не открылся': '{out} and never opened',
+  'считать {code} нормой': 'treat {code} as normal',
+  'проверять изнутри': 'probe from within',
+  'применить ко всем {n}': 'apply to all {n}',
   'Проверять локально, с самого сервера': 'Probe locally, from the server itself',
   'Алерты не придут': 'No alerts will arrive',
   'По этим объектам не сработает ни один алерт: они не попадают ни в одну область действия правил. Метрики собираются и графики рисуются — но когда что-то сломается, не придёт ничего.':

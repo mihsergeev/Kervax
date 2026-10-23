@@ -313,6 +313,18 @@ const PHRASES: Rule[] = [
   [/ в сутки, свободной памяти сервера \((.+?)\) при таком росте хватит примерно на (\S+) сут/g,
     ' a day, at this rate the free memory of the server ($1) lasts about $2 days'],
   [/ в сутки/g, ' a day'],
+  // у своего лимита памяти (mem_limit.py)
+  [/под (\S+) уперся в лимит памяти (\S+): используется (\d+)%/g, 'pod $1 hit its memory limit $2: $3% used'],
+  [/контейнер (\S+) уперся в лимит памяти (\S+): используется (\d+)%/g, 'container $1 hit its memory limit $2: $3% used'],
+  [/юнит (\S+) уперся в лимит памяти (\S+): используется (\d+)%/g, 'unit $1 hit its memory limit $2: $3% used'],
+  [/, major faults (\S+)\/с/g, ', major faults $1/s'],
+  [/, refault (\S+)\/с/g, ', refault $1/s'],
+  [/ - тормозит, но не падает; поднимите limit памяти пода/g, ' - slow, but not crashing; raise the pod memory limit'],
+  [/ - тормозит, но не падает; поднимите лимит памяти контейнера \(mem_limit\)/g,
+    ' - slow, but not crashing; raise the container memory limit (mem_limit)'],
+  [/ - тормозит, но не падает; поднимите MemoryMax \/ MemoryHigh юнита/g,
+    ' - slow, but not crashing; raise MemoryMax / MemoryHigh of the unit'],
+  [/контейнеры и поды больше не упираются в свой лимит памяти/g, 'containers and pods no longer hit their memory limit'],
   [/\(пользователь (\S+)\)/g, '(user $1)'],
   // файлы сайтов (app/webfiles.py problems, app/tamper.py summary)
   [/похоже на взлом: новые php в /g, 'looks like a break-in: new php in '],

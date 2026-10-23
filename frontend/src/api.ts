@@ -1551,6 +1551,33 @@ export type MemLeak = {
   level: number
   text: string
 }
+// У своего лимита памяти (app/mem_limit.py, агент 2.51): замер cgroup контейнера, пода или юнита
+export type MemLimitSnap = {
+  lim: number // действующий лимит, байт
+  cur: number // занято вместе с кэшем
+  anon?: number
+  full?: number // PSI memory full avg60, %
+  f10?: number
+  some?: number
+  mf?: number // major faults в секунду
+  rf?: number // refault в секунду
+  kind: 'docker' | 'pod' | 'unit'
+  name: string // как в отчете: контейнер, ns/под, юнит
+}
+export type MemLimitItem = {
+  key: string // docker:<имя> | pod:<ns>/<ворклоад> | unit:<юнит>
+  kind: 'docker' | 'pod' | 'unit'
+  name: string // для людей: под - ns/ворклоад
+  v: MemLimitSnap
+  level?: number
+  since?: string
+  text?: string
+  decided?: boolean // отмечено "так задумано"
+  hot?: boolean // у лимита и давление, но еще не 10 минут
+  from?: string // прошедший эпизод
+  to?: string
+}
+export type MemLimits = { bad: MemLimitItem[]; near: MemLimitItem[]; past: MemLimitItem[] }
 export type CpuGroup = {
   comm: string
   kind?: 'container' | 'pod' | 'unit' | ''
@@ -2335,6 +2362,7 @@ export type Server = {
   kube_restarts?: KubeRestarts | null
   // что течет памятью: дно (минимум за сутки) растет 4 суток подряд; series - эти минимумы, байты
   mem_leaks?: MemLeak[] | null
+  mem_limits?: MemLimits | null
   // OOM (backend app/oom.py): эпизодов за 7 дней, последний, юниты, убитые OOM
   oom?: OomSummary | null
   // SSH (helper changes-setup 0.3): как пускает соединение из интернета; open - порт открыт снаружи
@@ -3583,8 +3611,7 @@ export type Location = {
   created_at: string
 }
 
-// Сайт лежит по внешней проверке, а его домен обслуживает известная панели нода.
-// Почти всегда это белый список: снаружи рвут соединение, а сайт цел.
+// Сайт похоже закрыт снаружи белым списком (бэкенд app/allowlist_hint.py).
 export type LocalProbeSuggestion = {
   check_id: number
   name: string
@@ -3596,6 +3623,11 @@ export type LocalProbeSuggestion = {
   code: number
   server_id: number
   server_name: string
+  // почему так решили: inside_up - изнутри ноды открывается, never_up - снаружи не
+  // открывался ни разу, code - стабильно отвечает 403
+  reason: 'inside_up' | 'never_up' | 'code'
+  outside: 'connect' | 'reset' | 'code' // чем кончается проверка снаружи
+  since: string | null // с какого момента снаружи не открывается
 }
 
 // Объект, по которому не сработает ни один алерт. Читается только админом:

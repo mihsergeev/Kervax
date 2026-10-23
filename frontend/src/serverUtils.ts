@@ -1,5 +1,6 @@
-import type { BackupAudit, BackupInfo, BackupTarget, KnownIssue, DiskHealth, DiskUsage, DockerRisk, Server, ServerReport, UnitsBlock, WebRate } from './api'
+import type { BackupAudit, BackupInfo, BackupTarget, KnownIssue, DiskHealth, DiskUsage, DockerRisk, MemLimitItem, MemLimitSnap, Server, ServerReport, UnitsBlock, WebRate } from './api'
 import { tr } from './i18n'
+import { fmtBytes } from './units'
 
 // Запросы в минуту по access-логам ноды: блок кладёт root-хелпер webserver-setup, агент
 // отдаёт его как есть. Протухший блок (хелпер встал, логи не крутятся) не показываем:
@@ -385,4 +386,30 @@ export function backupDestWhere(tg?: BackupTarget | null): string {
   if (tg.kind === 'local') return tg.repo
   const host = tg.host.includes(':') ? `[${tg.host}]` : tg.host
   return tg.port ? `${host}:${tg.port}` : host
+}
+
+// Лимит так, как его пишут в манифесте: 384Mi, 1Gi (как lim_text на бэкенде)
+export function limText(b: number): string {
+  if (b > 0 && b % 2 ** 30 === 0) return `${b / 2 ** 30}Gi`
+  if (b > 0 && b % 2 ** 20 === 0) return `${b / 2 ** 20}Mi`
+  return fmtBytes(b)
+}
+
+// "используется 99%, PSI full 4.8, major faults 87/с" - то же, что в алерте
+export function memLimFacts(v: MemLimitSnap, t: (k: string, p?: Record<string, string | number>) => string = tr): string {
+  const parts = [t('используется {p}%', { p: Math.min(Math.floor((v.cur / v.lim) * 100), 100) })]
+  if ((v.full ?? 0) >= 0.1) parts.push(`PSI full ${(v.full ?? 0) < 10 ? (v.full ?? 0).toFixed(1).replace(/\.0$/, '') : Math.round(v.full ?? 0)}`)
+  if ((v.mf ?? 0) >= 1) parts.push(t('major faults {n}/с', { n: Math.round(v.mf ?? 0) }))
+  else if ((v.rf ?? 0) >= 1) parts.push(t('refault {n}/с', { n: Math.round(v.rf ?? 0) }))
+  return parts.join(', ')
+}
+
+// Метка у строки контейнера или пода (разделы Docker и Кубер): тормозит у лимита и еще не отмечен
+// "так задумано". title - то же, что в алерте
+export function memLimChip(x: MemLimitItem | undefined, t: (k: string, p?: Record<string, string | number>) => string = tr) {
+  if (!x || x.decided) return null
+  return {
+    label: t('у лимита памяти {l}', { l: limText(x.v.lim) }),
+    title: `${memLimFacts(x.v, t)} - ${t('тормозит, но не падает. Подробности - в карточке сервера, раздел Память')}`,
+  }
 }

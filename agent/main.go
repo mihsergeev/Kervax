@@ -45,7 +45,7 @@ import (
 	"time"
 )
 
-const version = "2.50"
+const version = "2.51"
 
 // Публичный ключ для проверки подписи релизов агента (Ed25519, base64).
 // ПУСТО по умолчанию → самообновление ВЫКЛЮЧЕНО (агент никогда не заменяет себя).
@@ -197,6 +197,9 @@ type report struct {
 	// кто пишет на диск за последний час: контейнеры, поды и юниты systemd по io.stat их cgroup
 	DiskWriters   []ioWriter `json:"disk_writers,omitempty"`
 	DiskWritersV1 bool       `json:"disk_writers_v1,omitempty"` // cgroup v1: отложенная запись в счетчики не попадает
+	// контейнеры, поды и юниты у своего лимита памяти: давление и major faults их cgroup. Без
+	// omitempty: пустой список - "никого у лимита", поля нет - агент старый
+	MemLimits []memLimit `json:"mem_limits"`
 	// кто качает трафик за последний час: контейнеры и поды по счетчикам их сетевого пространства
 	NetUsers []netUser `json:"net_users,omitempty"`
 	// видеокарты NVIDIA на шине PCI (2.36): по ним панель просит helper gpu-setup и видит потерянную карту
@@ -2896,6 +2899,203 @@ func podCPUWalk(dir string, depth int, out map[string]uint64) {
 	}
 }
 
+// ── У своего лимита памяти ─────────────────────────────────────────────────────
+// Контейнер, под или юнит, упершийся в свой лимит памяти, не всегда падает по OOM: ядро
+// выкидывает его кэш и код, процесс тут же читает их с диска снова, и он работает, но в разы
+// медленнее (база с лимитом 384Mi отвечала по 10 секунд). Сам процент от лимита ничего не
+// говорит: кэш страниц заполняет любой лимит до краев, и это нормально. Беду видно по давлению
+// памяти (PSI memory full - сколько времени все процессы cgroup стоят в ожидании памяти) и по
+// скорости major faults и refault - как часто вытесненное приходится читать обратно. Все это в
+// файлах cgroup v2, они читаются без прав. На v1 давления нет - не собираем.
+
+// memLimit - cgroup у лимита: в отчет попадают только те, у кого занято от memLimRatio лимита
+type memLimit struct {
+	Kind string  `json:"kind"`        // container / pod / unit
+	Name string  `json:"name"`        // имя контейнера, ns/под, юнит; без имени - начало id
+	U    string  `json:"u,omitempty"` // у пода - начало uid: имя без kube-api панель найдет по отчету контроллера
+	Lim  uint64  `json:"lim"`         // действующий лимит: меньшее из memory.max и memory.high
+	Cur  uint64  `json:"cur"`         // memory.current, вместе с кэшем
+	Anon uint64  `json:"anon"`        // анонимная память (куча процессов), ее ядру не выкинуть
+	File uint64  `json:"file"`        // файловый кэш
+	Some float64 `json:"some"`        // PSI memory some avg60, %
+	Full float64 `json:"full"`        // PSI memory full avg60, %
+	F10  float64 `json:"f10"`         // PSI memory full avg10, %
+	MF   float64 `json:"mf"`          // major faults в секунду с прошлого замера
+	RF   float64 `json:"rf"`          // refault (файлы и анонимная) в секунду с прошлого замера
+}
+
+const memLimRatio = 0.9
+
+// cgMem - прошлые счетчики cgroup для скорости faults и refault
+var cgMem = struct {
+	sync.Mutex
+	m map[string]cgMemSample
+}{m: map[string]cgMemSample{}}
+
+type cgMemSample struct {
+	mf, rf uint64
+	at     time.Time
+}
+
+// memLimits - контейнеры docker, поды этой ноды и юниты systemd у своего лимита памяти. Под - одной
+// строкой: из самого пода и его контейнеров берется тот, кто ближе к лимиту (лимит бывает у пода,
+// а бывает только у одного контейнера). Пустой список, а не nil: так панель отличает "никого у
+// лимита" от агента, который этого еще не собирает.
+func memLimits(root string, conts, pods map[string]string, now time.Time) []memLimit {
+	out := []memLimit{}
+	if _, err := os.Stat(root + "/cgroup.controllers"); err != nil {
+		return out // не cgroup v2
+	}
+	cgMem.Lock()
+	defer cgMem.Unlock()
+	for k, v := range cgMem.m {
+		if now.Sub(v.at) > 10*time.Minute {
+			delete(cgMem.m, k)
+		}
+	}
+	add := func(kind, name, u string, dirs []string) {
+		var best *memLimit
+		for _, d := range dirs {
+			m, ok := memLimitAt(d, now)
+			if ok && (best == nil || float64(m.Cur)/float64(m.Lim) > float64(best.Cur)/float64(best.Lim)) {
+				best = &m
+			}
+		}
+		if best != nil {
+			best.Kind, best.Name, best.U = kind, name, u
+			out = append(out, *best)
+		}
+	}
+	for _, base := range []string{root + "/system.slice", root + "/docker"} {
+		ents, _ := os.ReadDir(base)
+		for _, e := range ents {
+			n := e.Name()
+			if !e.IsDir() || (base == root+"/system.slice" && !(strings.HasPrefix(n, "docker-") && strings.HasSuffix(n, ".scope"))) {
+				continue
+			}
+			id := strings.TrimSuffix(strings.TrimPrefix(n, "docker-"), ".scope")
+			if len(id) < 12 || strings.Contains(id, ".") {
+				continue
+			}
+			name := conts[id]
+			if name == "" {
+				name = id[:12]
+			}
+			add("container", name, "", []string{base + "/" + n})
+		}
+	}
+	podDirs := map[string]string{}
+	if top, err := os.ReadDir(root); err == nil {
+		for _, e := range top {
+			if e.IsDir() && strings.HasPrefix(e.Name(), "kubepods") {
+				ioPodDirs(root+"/"+e.Name(), 0, podDirs)
+			}
+		}
+	}
+	for uid, d := range podDirs {
+		dirs := []string{d}
+		if ents, err := os.ReadDir(d); err == nil {
+			for _, e := range ents {
+				if e.IsDir() {
+					dirs = append(dirs, d+"/"+e.Name())
+				}
+			}
+		}
+		name := pods[uid]
+		if name == "" {
+			name = "pod " + uid[:8]
+		}
+		add("pod", name, uid[:8], dirs)
+	}
+	if ents, err := os.ReadDir(root + "/system.slice"); err == nil {
+		for _, e := range ents {
+			if e.IsDir() && strings.HasSuffix(e.Name(), ".service") {
+				add("unit", e.Name(), "", []string{root + "/system.slice/" + e.Name()})
+			}
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Full != out[j].Full {
+			return out[i].Full > out[j].Full
+		}
+		return out[i].MF > out[j].MF
+	})
+	if len(out) > 20 {
+		out = out[:20]
+	}
+	return out
+}
+
+// memLimitAt - одна cgroup: есть лимит и занято от memLimRatio - (замер, true). Счетчики для
+// скорости запоминаются у всех, кто у лимита: первый замер - скорость 0, сравнивать не с чем.
+func memLimitAt(dir string, now time.Time) (memLimit, bool) {
+	lim, _ := readUintFile(dir + "/memory.max") // "max" - лимита нет, 0
+	if h, ok := readUintFile(dir + "/memory.high"); ok && h > 0 && (lim == 0 || h < lim) {
+		lim = h
+	}
+	cur, ok := readUintFile(dir + "/memory.current")
+	if lim == 0 || !ok || float64(cur) < memLimRatio*float64(lim) {
+		return memLimit{}, false
+	}
+	m := memLimit{Lim: lim, Cur: cur}
+	st := cgroupStats(dir + "/memory.stat")
+	m.Anon, m.File = st["anon"], st["file"]
+	mf := st["pgmajfault"]
+	// до ядра 5.9 refault один, без деления на файлы и анонимную
+	rf := st["workingset_refault_file"] + st["workingset_refault_anon"] + st["workingset_refault"]
+	if prev, ok := cgMem.m[dir]; ok {
+		if el := now.Sub(prev.at).Seconds(); el > 0 && mf >= prev.mf && rf >= prev.rf {
+			m.MF, m.RF = round1(float64(mf-prev.mf)/el), round1(float64(rf-prev.rf)/el)
+		}
+	}
+	cgMem.m[dir] = cgMemSample{mf, rf, now}
+	m.Some, m.Full, m.F10 = memPressure(dir + "/memory.pressure")
+	return m, true
+}
+
+// cgroupStats - memory.stat целиком: ключ -> значение
+func cgroupStats(path string) map[string]uint64 {
+	out := map[string]uint64{}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return out
+	}
+	for _, ln := range strings.Split(string(b), "\n") {
+		if f := strings.Fields(ln); len(f) == 2 {
+			if v, err := strconv.ParseUint(f[1], 10, 64); err == nil {
+				out[f[0]] = v
+			}
+		}
+	}
+	return out
+}
+
+// memPressure - из memory.pressure ("some avg10=0.00 avg60=0.00 avg300=0.00 total=0", строка
+// full так же): some avg60, full avg60, full avg10
+func memPressure(path string) (some, full, full10 float64) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	for _, ln := range strings.Split(string(b), "\n") {
+		f := strings.Fields(ln)
+		if len(f) < 3 {
+			continue
+		}
+		val := func(s, key string) float64 {
+			v, _ := strconv.ParseFloat(strings.TrimPrefix(s, key+"="), 64)
+			return v
+		}
+		switch f[0] {
+		case "some":
+			some = val(f[2], "avg60")
+		case "full":
+			full10, full = val(f[1], "avg10"), val(f[2], "avg60")
+		}
+	}
+	return
+}
+
 // ── Кто пишет на диск ──────────────────────────────────────────────────────────
 // Запись и чтение за последний час по cgroup контейнеров docker, подов этой ноды и юнитов systemd
 // (плюс user.slice - сессии и cron). Рядом с прогнозом износа SSD первый вопрос - кто это пишет, а
@@ -3797,6 +3997,7 @@ func collect(prev sample) (report, sample) {
 	cn, pn := containerNames(dk), podNames(r.Kube)
 	r.CPUGroups = cpuGroups(prev, cur, cn, pn)
 	r.DiskWriters, r.DiskWritersV1 = diskWriters("/sys/fs/cgroup", cn, pn, time.Now())
+	r.MemLimits = memLimits("/sys/fs/cgroup", cn, pn, time.Now())
 	r.NetUsers = netUsers("/sys/fs/cgroup", "/proc", cn, pn, time.Now())
 	r.GPUPCI = gpuOnPCI("/sys/bus/pci/devices", time.Now())
 	r.LLM = collectLLM("/proc", cn, pn, time.Now())
