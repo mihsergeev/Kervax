@@ -225,7 +225,7 @@ def test_kube_cronjobs_other_than_dumps():
     rep = {"clock_unix": ts, "kube": {"access": True, "cronjobs": crons}}
     assert collector.cron_job_issues(rep, now, dumps=False) == {
         "hub/geoip-update": "последний прогон не удался",
-        "tech/report": "нет успешного прогона 9.0 дн",
+        "tech/report": "не запускается 9.0 дн",
         "kube-system/descheduler": "прогон идет 132.0 дн, новых запусков нет",
     }
     assert collector.cron_job_issues(rep, now, dumps=True) == {"db/pg-backup": "приостановлен"}
@@ -234,7 +234,7 @@ def test_kube_cronjobs_other_than_dumps():
     assert [(p["level"], p["section"], p["sec"], p["mute"]) for p in got] == [(1, "kuber", "cron", "kube_cron")]
     assert got[0]["text"] == ("CronJob не отрабатывают: hub/geoip-update (последний прогон не удался); "
                               "kube-system/descheduler (прогон идет 132.0 дн, новых запусков нет); "
-                              "tech/report (нет успешного прогона 9.0 дн)")
+                              "tech/report (не запускается 9.0 дн)")
     lvl, ctx = collector._server_conditions(s, now)["kube_cron"]
     assert lvl == 1 and ctx["n"] == 3
     rep["kube"]["cronjobs"] = crons[1:2]

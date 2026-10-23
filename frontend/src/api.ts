@@ -1612,9 +1612,20 @@ export function podFinished(p: KubePod): boolean {
   return false
 }
 // CronJob кластера: расписание и прогоны (агент отдает все, панель судит по ним дампы и обычные кроны)
+// последний Job CronJob (агент 2.50): чем кончился, у упавшего - под, причина, код выхода и строка
+// лога без секретов. gone - Job уже удален по истории, остальное агент помнит или знает из событий
+export type KubeCronRun = {
+  job: string; st?: 'ok' | 'failed' | 'running' | ''; t?: number; done?: number
+  reason?: string; msg?: string; pod?: string; pr?: string; x?: number; log?: string; gone?: boolean
+}
+
 export type KubeCronJob = {
   ns: string; name: string; schedule?: string; suspend?: boolean; image?: string
   last_schedule?: number; last_success?: number; active?: number
+  // агент 2.50: почему не запускается или упал
+  active_job?: string; policy?: string; deadline?: number; fail_keep?: number; ttl?: number
+  last?: KubeCronRun
+  ev?: { r: string; m?: string; t: number; w?: boolean } // последнее значимое событие CronJob
 }
 
 export type KubeInfo = {

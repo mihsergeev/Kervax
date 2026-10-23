@@ -4,6 +4,22 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.8.11] - 2026-10-23
+
+### Added
+- CronJob в карточке кластера: кнопка "Лог последнего запуска". Сверху причина: упал
+  (BackoffLimitExceeded, DeadlineExceeded, OOMKilled, ImagePullBackOff, Evicted, код выхода, строка
+  из конца лога) или не запускается (Job не создается, пропущен запуск при startingDeadlineSeconds,
+  Forbid при идущем прошлом Job, стоят все CronJob кластера). Ниже лог пода последнего Job тем же
+  окном, что у подов. Job уже удален по истории - "лог не сохранился" и что известно из событий.
+  Учетке только для просмотра лог по галке "может читать логи". Нужен агент 2.50.
+- Алерт CronJob по формату A: упал, не запускается или завис, с причиной и строкой лога, если агент
+  ее прислал (секреты вырезаны). Ссылка открывает строку CronJob и его лог.
+
+### Fixed
+- Смена расписания CronJob (раз в неделю на каждый день) давала ложный алерт "не отработал": отсчет
+  теперь от момента смены.
+
 ## [1.8.10] - 2026-10-23
 
 ### Added

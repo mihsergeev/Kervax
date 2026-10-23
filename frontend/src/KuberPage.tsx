@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import {
   ApiError,
@@ -14,6 +14,7 @@ import {
   updateServer,
   type FluxState,
   type KubeCommand,
+  type KubeCronJob,
   type KubeExpiry,
   type KubeInfo,
   type KubeNodeRef,
@@ -35,7 +36,7 @@ import { EnrollModal, fmtRel, InstallModal } from './ServersPage'
 import { CardNav, FreshChip, markMuted, OvAreas, OvRows, secInfoOf, type OvRow, type SecDef, type SecInfo, type SecItem } from './cardLayout'
 import { NetTile, TileFilterChip, useTileFilter } from './NetLinks'
 import { KubeRestartsSec } from './KubeRestarts'
-import { LockedLogs } from './LogsLocked'
+import { LockedLogs, LOGS_LOCKED } from './LogsLocked'
 
 // Вкладка «Кубер»: КОМПАКТНЫЙ список хостов с кластером; клик по хосту → модалка
 // с нодами, воркоадами и подами (статусы, рестарты, логи, управление). Агент читает
@@ -238,6 +239,123 @@ function JobLog({ server, pod, onOpen }: { server: Server; pod: KubePod; onOpen:
   )
 }
 
+// CronJob из ссылки алерта (?kube=id&sec=cron&cj=ns/имя&log=1): адрес снят при запуске, пока
+// список кластеров грузится, панель успевает переписать строку без него. Берется один раз:
+// первая открытая карточка кластера его забывает
+let linkCj = new URLSearchParams(window.location.search).get('cj')
+const linkCjLog = new URLSearchParams(window.location.search).get('log') === '1'
+
+// Job последнего запуска по расписанию называется <cronjob>-<минуты unix>: так его видно и у
+// старого агента, который не присылает last
+function cronLastJob(c: KubeCronJob): string {
+  return c.last?.job || (c.last_schedule ? `${c.name}-${Math.floor(c.last_schedule / 60)}` : '')
+}
+
+// Почему упал или не запускается: над логом последнего запуска. Строка лога из отчета - только
+// тому, кому можно читать логи
+function CronCause({ cj, issue, canLogs }: { cj: KubeCronJob; issue?: string; canLogs: boolean }) {
+  const { t } = useI18n()
+  const ago = (ts?: number) => (ts ? sinceShort(new Date(ts * 1000).toISOString(), t) || t('только что') : '')
+  const last = cj.last
+  const job = cronLastJob(cj)
+  const st = !last?.st ? '' : last.st === 'ok' ? t('успешно') : last.st === 'failed' ? t('упал') : t('идет')
+  const cause = [last?.reason, last?.pr && last.pr !== 'Error' && last.pr !== last.reason ? last.pr : '',
+    last?.x != null && last.x !== 0 ? t('код {x}', { x: last.x }) : ''].filter(Boolean).join(', ')
+  const evFresh = !!cj.ev && cj.ev.t > (cj.last_schedule ?? 0)
+  const facts: string[] = []
+  if (cj.suspend) facts.push(t('приостановлен (suspend: true)'))
+  if (cj.policy) facts.push(`concurrencyPolicy ${cj.policy}`)
+  if (cj.deadline) facts.push(`startingDeadlineSeconds ${cj.deadline}`)
+  if (cj.active && cj.active_job) facts.push(t('идет Job {job}', { job: cj.active_job }))
+  return (
+    <div className="cron-cause">
+      {issue && <div className="net-prob">{issue}</div>}
+      {job ? (
+        <div className="small mono">
+          Job {job}
+          {(last?.t || cj.last_schedule) ? ` · ${t('запуск {a} назад', { a: ago(last?.t || cj.last_schedule) })}` : ''}
+          {st ? ` · ${st}` : last?.gone ? ` · ${t('чем кончился, неизвестно')}` : ''}
+          {cause && !(issue ?? '').includes(cause) ? `: ${cause}` : ''}
+        </div>
+      ) : (
+        <div className="small muted">{t('Запусков еще не было')}</div>
+      )}
+      {last?.msg && last.st === 'failed' && <div className="small muted mono">{last.msg}</div>}
+      {last?.log && canLogs && (
+        <div className="small mono">
+          {t('строка лога:')} {last.log}
+        </div>
+      )}
+      {cj.ev && (
+        <div className={`small mono${evFresh && cj.ev.w ? ' t-down' : ' muted'}`}>
+          {t('событие {r} {a} назад', { r: cj.ev.r, a: ago(cj.ev.t) })}
+          {cj.ev.m ? `: ${cj.ev.m}` : ''}
+        </div>
+      )}
+      {facts.length > 0 && <div className="small muted mono">{facts.join(' · ')}</div>}
+    </div>
+  )
+}
+
+// Лог последнего запуска CronJob тем же окном, что у подов, с причиной наверху. Пода нет (Job
+// вычищен по failedJobsHistoryLimit или ttlSecondsAfterFinished) - так и пишем, и что известно
+// из событий. Учетке только для просмотра лог - по галке, причина видна всем
+function CronRunModal({
+  server,
+  cj,
+  pods,
+  issue,
+  onClose,
+  onGone,
+}: {
+  server: Server
+  cj: KubeCronJob
+  pods: KubePod[]
+  issue?: string
+  onClose: () => void
+  onGone?: () => void
+}) {
+  const { t } = useI18n()
+  const { canLogs } = useAuth()
+  const last = cj.last
+  const job = cronLastJob(cj)
+  const found = (last?.pod ? pods.find((p) => p.ns === cj.ns && p.name === last.pod) : null) ?? (job ? jobPod(pods, cj.ns, job) : null)
+  const podName = found?.name ?? (last?.gone ? '' : last?.pod ?? '')
+  const pod: KubePod | null = podName
+    ? found ?? { ns: cj.ns, name: podName, phase: '', ready: false, restarts: 0, owner: 'Job' }
+    : null
+  const gone = t('Лог не сохранился: Job удален по истории')
+  const note = <CronCause cj={cj} issue={issue} canLogs={canLogs} />
+  if (pod && canLogs) return <PodLogsModal server={server} pod={pod} note={note} goneText={gone} onClose={onClose} onGone={onGone} />
+  const keep: string[] = []
+  if (cj.fail_keep != null) keep.push(t('упавших Job хранится: {n} (failedJobsHistoryLimit)', { n: cj.fail_keep }))
+  if (cj.ttl != null) keep.push(t('Job удаляется через {n} с после конца (ttlSecondsAfterFinished)', { n: cj.ttl }))
+  return createPortal(
+    <div className="modal-backdrop">
+      <div className="card modal logs-modal" onClick={(e) => e.stopPropagation()}>
+        <div className="clients-head">
+          <h3 className="mono">
+            {cj.ns}/{cj.name} <span className="muted small">· <CountryFlag code={server.country} /> {server.name}</span>
+          </h3>
+          <button className="ghost" onClick={onClose}>
+            {t('Закрыть')}
+          </button>
+        </div>
+        {note}
+        {!job ? null : !canLogs ? (
+          <div className="logs-empty muted">{t(LOGS_LOCKED)}</div>
+        ) : last?.gone || !pod ? (
+          <div className="logs-empty muted">
+            {last?.gone || !last ? gone : t('Пода этого Job в отчете нет, лог не найти')}
+            {keep.length > 0 && <div className="small">{keep.join(' · ')}</div>}
+          </div>
+        ) : null}
+      </div>
+    </div>,
+    document.body,
+  )
+}
+
 const MUTE_FOR = [
   { h: 1, l: '1 час' },
   { h: 24, l: '1 день' },
@@ -347,12 +465,16 @@ function PodLogsModal({
   server,
   pod,
   prev = false,
+  note,
+  goneText,
   onClose,
   onGone,
 }: {
   server: Server
   pod: KubePod
   prev?: boolean // лог прошлого запуска (kubectl logs --previous): почему упал
+  note?: ReactNode // над логом: почему упал CronJob (CronRunModal)
+  goneText?: string // пода уже нет: свой текст вместо "пересоздан" (Job удален по истории)
   onClose: () => void
   onGone?: () => void // пода уже нет (пересоздан): обновить список
 }) {
@@ -377,7 +499,7 @@ function PodLogsModal({
         if (res.status === 'done') setLogs(res.result ?? '')
         else if (logsTargetGone(res)) {
           // нажали в списке, загруженном до пересоздания пода: это не сбой, список устарел
-          setErr(t('Под уже пересоздан или удален, список обновлен'))
+          setErr(goneText ?? t('Под уже пересоздан или удален, список обновлен'))
           gone.current?.()
         } else setErr(logsErrorText(res.result) || t('не удалось получить логи'))
       } catch {
@@ -386,7 +508,7 @@ function PodLogsModal({
         setLoading(false)
       }
     },
-    [server.id, pod.ns, pod.name, prev, t],
+    [server.id, pod.ns, pod.name, prev, goneText, t],
   )
   useEffect(() => {
     load('tail')
@@ -420,6 +542,7 @@ function PodLogsModal({
             {t('Закрыть')}
           </button>
         </div>
+        {note}
         <div className="logs-toolbar">
           <div className="win-switch">
             {ranges.map(({ k, l }) => (
@@ -666,6 +789,17 @@ function KubeHostModal({
   const [logsPod, setLogsPod] = useState<KubePod | null>(null)
   // лог прошлого запуска пода из раздела "Перезапуски"
   const [prevPod, setPrevPod] = useState<KubePod | null>(null)
+  // CronJob из ссылки алерта подсвечен в списке, с &log=1 сразу открыт лог его последнего запуска
+  const [cronLink] = useState<string | null>(() => {
+    const k = linkCj
+    linkCj = null
+    return k
+  })
+  const [cronOpen, setCronOpen] = useState<string | null>(null)
+  // открываем после первого кадра: окно, смонтированное вместе с карточкой, легло бы под нее
+  useEffect(() => {
+    if (cronLink && linkCjLog) setCronOpen(cronLink)
+  }, [cronLink])
   const [muteOpen, setMuteOpen] = useState(false)
   const [jobMuting, setJobMuting] = useState(false)
   const [jobBusy, setJobBusy] = useState(false)
@@ -784,6 +918,13 @@ function KubeHostModal({
   // раздел пропал (последний завершенный под подчистили) - на сводку, а не на пустое место
   const cur = secs.find((x) => x.id === active) ?? secs[0]
   useUrlParam('sec', cur.id === 'overview' ? null : cur.id)
+  // открытый лог CronJob - в адресе, ссылкой можно поделиться
+  const cronShown = cur.id === 'cron' ? cronjobs.find((c) => `${c.ns}/${c.name}` === cronOpen) ?? null : null
+  useUrlParam('cj', cronShown ? cronOpen : null)
+  useUrlParam('log', cronShown ? '1' : null)
+  useEffect(() => {
+    if (cronLink && cur.id === 'cron') document.getElementById(`cj-${cronLink}`)?.scrollIntoView({ block: 'center' })
+  }, [cronLink, cur.id])
 
   // «Поды» = только живые; завершённые (история Job/CronJob) — свой раздел, чтобы не
   // подмешивались к тому, что надо чинить
@@ -1180,25 +1321,45 @@ function KubeHostModal({
                       const issue = cronIssues[key]
                       const ago = (ts?: number) => (ts ? sinceShort(new Date(ts * 1000).toISOString(), t) || t('только что') : '')
                       const tone = issue ? (c.suspend ? 't-degraded' : 't-down') : c.suspend ? '' : 't-up'
+                      const ran = !!cronLastJob(c)
+                      // у проблемного - кнопкой словами: за ней идут из алерта; у остальных - значком
+                      const open = () => setCronOpen(key)
+                      const logBtn = !ran || !kube.access ? null : issue ? (
+                        <button className="ghost small" onClick={open}>
+                          {t('Лог последнего запуска')}
+                        </button>
+                      ) : (
+                        <button className="ghost icon-btn" onClick={open} title={t('Лог последнего запуска')}>
+                          📄
+                        </button>
+                      )
                       return (
-                        <div className={`loc-res docker-row ${tone}`} key={key}>
-                          <span className={`lk-dot${DOT[tone] ?? ''}`} />
-                          <div className="docker-c-main">
-                            <div className="docker-c-name mono">
-                              {key}
-                              {c.schedule && <span className="type-chip">{c.schedule}</span>}
+                        <div
+                          className={`loc-res docker-row job-row cron-row ${tone}${key === cronLink ? ' cj-link' : ''}`}
+                          key={key}
+                          id={`cj-${key}`}
+                        >
+                          <div className="job-main">
+                            <span className={`lk-dot${DOT[tone] ?? ''}`} />
+                            <div className="docker-c-main">
+                              <div className="docker-c-name mono">
+                                {key}
+                                {c.schedule && <span className="type-chip">{c.schedule}</span>}
+                              </div>
+                              <div className="docker-c-img mono muted small">
+                                {c.last_schedule
+                                  ? t('запуск {a} назад', { a: ago(c.last_schedule) })
+                                  : t('еще не запускался')}
+                                {c.last_success ? ` · ${t('успешный {a} назад', { a: ago(c.last_success) })}` : ''}
+                                {c.image ? ` · ${c.image}` : ''}
+                              </div>
                             </div>
-                            <div className="docker-c-img mono muted small">
-                              {c.last_schedule
-                                ? t('запуск {a} назад', { a: ago(c.last_schedule) })
-                                : t('еще не запускался')}
-                              {c.last_success ? ` · ${t('успешный {a} назад', { a: ago(c.last_success) })}` : ''}
-                              {c.image ? ` · ${c.image}` : ''}
+                            <div className={`docker-c-status mono small ${tone}`}>
+                              {issue || (c.suspend ? t('приостановлен') : c.active ? t('идет') : t('ок'))}
                             </div>
+                            {!issue && logBtn && <div className="docker-actions">{logBtn}</div>}
                           </div>
-                          <div className={`docker-c-status mono small ${tone}`}>
-                            {issue || (c.suspend ? t('приостановлен') : c.active ? t('идет') : t('ок'))}
-                          </div>
+                          {issue && logBtn && <div className="job-log">{logBtn}</div>}
                         </div>
                       )
                     })}
@@ -1397,6 +1558,16 @@ function KubeHostModal({
       </div>
       {logsPod && <PodLogsModal server={s} pod={logsPod} onClose={() => setLogsPod(null)} onGone={onChanged} />}
       {prevPod && <PodLogsModal server={s} pod={prevPod} prev onClose={() => setPrevPod(null)} onGone={onChanged} />}
+      {cronShown && (
+        <CronRunModal
+          server={s}
+          cj={cronShown}
+          pods={pods}
+          issue={cronIssues[`${cronShown.ns}/${cronShown.name}`]}
+          onClose={() => setCronOpen(null)}
+          onGone={onChanged}
+        />
+      )}
     </div>,
     document.body,
   )

@@ -8,6 +8,27 @@ type Rule = [RegExp, string]
 
 // Длинные фразы раньше коротких: "открыто в интернет" входит в "служебное открыто в интернет"
 const PHRASES: Rule[] = [
+  // CronJob кластера: упал или не запускается и почему (app/kube_cron.py)
+  [/дамп-CronJob не отрабатывает: /g, 'dump CronJob does not run: '],
+  [/CronJob не отрабатывает: /g, 'CronJob does not run: '],
+  [/CronJob не отрабатывают: /g, 'CronJobs do not run: '],
+  [/прошлый Job идет (.+?), Forbid не пускает новые/g, 'the previous Job has been running for $1, Forbid keeps new ones out'],
+  [/прогон идет (.+?), новых запусков нет/g, 'a run has been going for $1, no new starts'],
+  [/Forbid, а прошлый Job еще идет/g, 'Forbid, and the previous Job is still running'],
+  [/контроллер не создает Job: стоят все CronJob кластера/g, 'the controller does not create Jobs: all CronJobs of the cluster are stuck'],
+  [/пропущено слишком много запусков/g, 'too many missed starts'],
+  [/пропущен запуск/g, 'a start was missed'],
+  [/Job не создается: /g, 'the Job is not created: '],
+  [/не запускается /g, 'not starting for '],
+  [/, успешного (?:прогона|дампа) нет /g, ', no success for '],
+  [/нет успешного прогона /g, 'no successful run for '],
+  [/нет успешного дампа /g, 'no successful dump for '],
+  [/последний прогон не удался/g, 'the last run failed'],
+  [/прогон не удался/g, 'the run failed'],
+  [/(?<![а-яё])упал: /g, 'failed: '],
+  [/, под (\S+)/g, ', pod $1'],
+  [/(?<![а-яё])код (\d+)/g, 'code $1'],
+  [/^приостановлен$/g, 'suspended'],
   // настроен ли бэкап (app/backup_state.py) и форма настройки
   [/осталась метрика старого бэкапа от (\S+), restic и таймера бэкапа нет/g,
     'a metric of an old backup from $1 is left, there is no restic and no backup timer'],
@@ -283,13 +304,15 @@ export function trBackend(s: string): string {
 // Поля ответов API, где лежат такие тексты. Ключи и идентификаторы (mute, key, kind) не трогаем:
 // по ним панель шлет запросы обратно
 const FIELDS = new Set(['text', 'detail', 'what', 'hint', 'note', 'bsrv_rotation', 'reasons', 'why', 'blockers'])
+// Словари, где текст - значение под именем объекта: причины CronJob {ns/имя: почему}
+const MAPS = new Set(['kube_cron_issues'])
 
 export function trBody<T>(x: T, field = ''): T {
   if (typeof x === 'string') return (FIELDS.has(field) ? trBackend(x) : x) as T
   if (Array.isArray(x)) return x.map((v) => trBody(v, field)) as T
   if (x && typeof x === 'object') {
     const o = x as Record<string, unknown>
-    for (const k of Object.keys(o)) o[k] = trBody(o[k], k)
+    for (const k of Object.keys(o)) o[k] = MAPS.has(field) && typeof o[k] === 'string' ? trBackend(o[k] as string) : trBody(o[k], k)
   }
   return x
 }

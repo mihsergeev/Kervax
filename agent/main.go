@@ -45,7 +45,7 @@ import (
 	"time"
 )
 
-const version = "2.49"
+const version = "2.50"
 
 // Публичный ключ для проверки подписи релизов агента (Ed25519, base64).
 // ПУСТО по умолчанию → самообновление ВЫКЛЮЧЕНО (агент никогда не заменяет себя).
@@ -414,6 +414,42 @@ type kubeCronJob struct {
 	LastSchedule int64 `json:"last_schedule,omitempty"` // unix: последний запуск по расписанию
 	LastSuccess  int64 `json:"last_success,omitempty"`  // unix: последний УСПЕШНЫЙ прогон
 	Active       int   `json:"active,omitempty"`        // сколько Job'ов сейчас выполняется
+	// почему CronJob не запускается или упал (агент 2.50): панель пишет причину в строке и в алерте
+	ActiveJob string       `json:"active_job,omitempty"` // какой Job идет сейчас (при Forbid висящий держит новые)
+	Policy    string       `json:"policy,omitempty"`     // concurrencyPolicy, если не Allow: Forbid/Replace
+	Deadline  int64        `json:"deadline,omitempty"`   // startingDeadlineSeconds
+	FailKeep  *int         `json:"fail_keep,omitempty"`  // failedJobsHistoryLimit: сколько упавших Job хранится
+	TTL       *int64       `json:"ttl,omitempty"`        // ttlSecondsAfterFinished у Job: удаляется после конца
+	Last      *kubeCronRun `json:"last,omitempty"`       // последний Job
+	Ev        *kubeCronEv  `json:"ev,omitempty"`         // последнее значимое событие CronJob (не создан Job и т.п.)
+}
+
+// kubeCronRun - последний Job CronJob'а: чем кончился и, если упал, почему. Под и строка лога -
+// только у упавшего, один раз на Job. Gone - Job уже удален по истории (failedJobsHistoryLimit,
+// ttlSecondsAfterFinished): что о нем известно, агент помнит с тех пор, как видел его, или знает
+// из события SawCompletedJob
+type kubeCronRun struct {
+	Job    string `json:"job"`
+	St     string `json:"st"`               // ok / failed / running
+	T      int64  `json:"t,omitempty"`      // startTime
+	Done   int64  `json:"done,omitempty"`   // completionTime или когда упал
+	Reason string `json:"reason,omitempty"` // BackoffLimitExceeded / DeadlineExceeded
+	Msg    string `json:"msg,omitempty"`    // сообщение условия Failed
+	Pod    string `json:"pod,omitempty"`
+	PR     string `json:"pr,omitempty"`  // причина пода: OOMKilled / Error / ImagePullBackOff / Evicted
+	X      *int   `json:"x,omitempty"`   // код выхода контейнера
+	Log    string `json:"log,omitempty"` // строка из конца лога, похожая на ошибку, без секретов
+	Gone   bool   `json:"gone,omitempty"`
+}
+
+// kubeCronEv - событие CronJob, объясняющее, почему нет запусков: FailedCreate, MissSchedule,
+// TooManyMissedTimes, JobAlreadyActive (Forbid), InvalidSchedule. События кластер хранит час, а
+// ежедневный CronJob пишет их раз в сутки, поэтому агент держит последнее в памяти
+type kubeCronEv struct {
+	R string `json:"r"`
+	M string `json:"m,omitempty"`
+	T int64  `json:"t"`
+	W bool   `json:"w,omitempty"` // Warning
 }
 
 type kubeNode struct {
@@ -5223,8 +5259,9 @@ func collectKube() *kubeInfo {
 			}
 		}
 	}
-	ki.CronJobs = kubeCronJobs(cl, kc)
-	ki.FailedJobs = kubeFailedJobs(cl, kc, time.Now())
+	jobs := kubeJobList(cl, kc)
+	ki.CronJobs = kubeCronJobs(cl, kc, jobs, time.Now())
+	ki.FailedJobs = kubeFailedJobs(jobs, time.Now())
 	ki.NodePorts = kubeNodePorts(cl, kc)
 	ki.Volumes = kubeVolumes(cl, kc)
 	// домены маршрутов кластера: стандартный Ingress + Gateway API HTTPRoute
@@ -5297,18 +5334,22 @@ func kubeIngressHosts(cl *http.Client, kc *kubeConf) []string {
 }
 
 // kubeCronJobs — расписания заданий кластера (обычно единицы). Панель по ним понимает,
-// что дамп СУБД уже настроен. Требует batch/cronjobs:get,list (kube-setup v2); на старом
-// RBAC запрос вернёт 403 и мы просто отдадим пусто — не ломаемся.
-func kubeCronJobs(cl *http.Client, kc *kubeConf) []kubeCronJob {
+// что дамп СУБД уже настроен, и следит за прогонами. Требует batch/cronjobs:get,list (kube-setup v2);
+// на старом RBAC запрос вернёт 403 и мы просто отдадим пусто — не ломаемся.
+func kubeCronJobs(cl *http.Client, kc *kubeConf, jobs []kubeJobItem, now time.Time) []kubeCronJob {
 	var d struct {
 		Items []struct {
 			Metadata struct{ Name, Namespace string }
 			Spec     struct {
-				Schedule    string
-				Suspend     *bool
-				JobTemplate struct {
+				Schedule                string
+				Suspend                 *bool
+				ConcurrencyPolicy       string
+				StartingDeadlineSeconds *int64
+				FailedJobsHistoryLimit  *int
+				JobTemplate             struct {
 					Spec struct {
-						Template struct {
+						TTLSecondsAfterFinished *int64
+						Template                struct {
 							Spec struct {
 								Containers []struct{ Image string }
 							}
@@ -5317,40 +5358,400 @@ func kubeCronJobs(cl *http.Client, kc *kubeConf) []kubeCronJob {
 				}
 			}
 			Status struct {
-				Active             []json.RawMessage `json:"active"`
-				LastScheduleTime   string            `json:"lastScheduleTime"`
-				LastSuccessfulTime string            `json:"lastSuccessfulTime"`
+				Active             []struct{ Name string } `json:"active"`
+				LastScheduleTime   string                  `json:"lastScheduleTime"`
+				LastSuccessfulTime string                  `json:"lastSuccessfulTime"`
 			}
 		}
 	}
 	if kubeGet(cl, kc, "/apis/batch/v1/cronjobs", &d) != nil {
 		return nil
 	}
-	unix := func(s string) int64 {
-		if s == "" {
-			return 0
+	evs, done := kubeCronEvents(cl, kc, now)
+	byCron := map[string][]kubeJobItem{}
+	for _, j := range jobs {
+		if o := j.Metadata.OwnerReferences; len(o) > 0 && o[0].Kind == "CronJob" {
+			k := j.Metadata.Namespace + "/" + o[0].Name
+			byCron[k] = append(byCron[k], j)
 		}
-		t, err := time.Parse(time.RFC3339, s)
-		if err != nil {
-			return 0
-		}
-		return t.Unix()
 	}
+	keep := map[string]bool{}
+	lookups := 0
 	out := make([]kubeCronJob, 0, len(d.Items))
 	for _, c := range d.Items {
 		cj := kubeCronJob{NS: c.Metadata.Namespace, Name: c.Metadata.Name, Schedule: c.Spec.Schedule}
+		key := cj.NS + "/" + cj.Name
+		keep[key] = true
 		if c.Spec.Suspend != nil {
 			cj.Suspend = *c.Spec.Suspend
 		}
 		if cs := c.Spec.JobTemplate.Spec.Template.Spec.Containers; len(cs) > 0 {
 			cj.Image = cs[0].Image
 		}
-		cj.LastSchedule = unix(c.Status.LastScheduleTime)
-		cj.LastSuccess = unix(c.Status.LastSuccessfulTime)
+		cj.LastSchedule = unixRFC(c.Status.LastScheduleTime)
+		cj.LastSuccess = unixRFC(c.Status.LastSuccessfulTime)
 		cj.Active = len(c.Status.Active)
+		if cj.Active > 0 {
+			cj.ActiveJob = c.Status.Active[0].Name
+		}
+		if p := c.Spec.ConcurrencyPolicy; p != "" && p != "Allow" {
+			cj.Policy = p
+		}
+		if c.Spec.StartingDeadlineSeconds != nil {
+			cj.Deadline = *c.Spec.StartingDeadlineSeconds
+		}
+		cj.FailKeep = c.Spec.FailedJobsHistoryLimit
+		cj.TTL = c.Spec.JobTemplate.Spec.TTLSecondsAfterFinished
+		if e, ok := evs[key]; ok {
+			cj.Ev = &e
+		}
+		cj.Last = kubeCronLast(cl, kc, cj, byCron[key], done[key], &lookups)
 		out = append(out, cj)
 	}
+	kubeCronForget(keep)
 	return out
+}
+
+func unixRFC(s string) int64 {
+	if s == "" {
+		return 0
+	}
+	t, err := time.Parse(time.RFC3339, s)
+	if err != nil {
+		return 0
+	}
+	return t.Unix()
+}
+
+// kubeJobItem - Job из /apis/batch/v1/jobs: и для прогонов CronJob, и для упавших разовых Job
+type kubeJobItem struct {
+	Metadata struct {
+		Name, Namespace   string
+		CreationTimestamp string
+		OwnerReferences   []struct{ Kind, Name string }
+	}
+	Status struct {
+		StartTime      string
+		CompletionTime string
+		Active         int
+		Succeeded      int
+		Conditions     []struct{ Type, Status, Reason, Message, LastTransitionTime string }
+	}
+}
+
+// kubeJobList - все Job кластера одним запросом (batch/jobs, kube-setup 0.2+); нет прав - nil
+func kubeJobList(cl *http.Client, kc *kubeConf) []kubeJobItem {
+	var d struct{ Items []kubeJobItem }
+	if kubeGet(cl, kc, "/apis/batch/v1/jobs", &d) != nil {
+		return nil
+	}
+	return d.Items
+}
+
+// cronRunOf - чем кончился Job: ok, failed (с причиной условия Failed) или еще идет
+func cronRunOf(j kubeJobItem) kubeCronRun {
+	r := kubeCronRun{Job: j.Metadata.Name, St: "running", T: unixRFC(j.Status.StartTime)}
+	if r.T == 0 {
+		r.T = unixRFC(j.Metadata.CreationTimestamp)
+	}
+	for _, c := range j.Status.Conditions {
+		if c.Status != "True" {
+			continue
+		}
+		switch c.Type {
+		case "Complete":
+			r.St, r.Done = "ok", unixRFC(j.Status.CompletionTime)
+			if r.Done == 0 {
+				r.Done = unixRFC(c.LastTransitionTime)
+			}
+		case "Failed":
+			r.St, r.Reason, r.Msg, r.Done = "failed", c.Reason, truncRunes(cleanLogLine(c.Message), 160), unixRFC(c.LastTransitionTime)
+		}
+	}
+	return r
+}
+
+// cronLastJob - Job последнего прогона: тот, что создан последним запуском по расписанию
+// (<cronjob>-<минуты unix>), или ручной запуск после него. Нет ни того, ни другого - Job
+// последнего запуска удален по истории: ok = false, want - как он назывался
+func cronLastJob(name string, lastSchedule int64, jobs []kubeJobItem) (j *kubeJobItem, want string, ok bool) {
+	if lastSchedule > 0 {
+		want = fmt.Sprintf("%s-%d", name, lastSchedule/60)
+	}
+	for i := range jobs {
+		if j == nil || jobs[i].Metadata.CreationTimestamp > j.Metadata.CreationTimestamp ||
+			(jobs[i].Metadata.CreationTimestamp == j.Metadata.CreationTimestamp && jobs[i].Metadata.Name > j.Metadata.Name) {
+			j = &jobs[i]
+		}
+	}
+	if want == "" {
+		return j, "", j != nil
+	}
+	for i := range jobs {
+		if jobs[i].Metadata.Name == want {
+			if unixRFC(j.Metadata.CreationTimestamp) > unixRFC(jobs[i].Metadata.CreationTimestamp) {
+				return j, want, true // после него запускали руками
+			}
+			return &jobs[i], want, true
+		}
+	}
+	if j != nil && unixRFC(j.Metadata.CreationTimestamp) > lastSchedule {
+		return j, want, true
+	}
+	return nil, want, false
+}
+
+// Упавшие прогоны CronJob, уже разобранные (под, код выхода, строка лога), и значимые события:
+// ключ ns/cronjob. Упавший нужен и после того, как Job удален по истории, - тогда в отчет идет
+// то, что помним
+var (
+	kubeCronMu   sync.Mutex
+	kubeCronFail = map[string]kubeCronRun{}
+	kubeCronEvs  = map[string]kubeCronEv{}
+)
+
+// kubeCronForget - CronJob удалили: забываем его прогоны и события
+func kubeCronForget(keep map[string]bool) {
+	kubeCronMu.Lock()
+	defer kubeCronMu.Unlock()
+	for k := range kubeCronFail {
+		if !keep[k] {
+			delete(kubeCronFail, k)
+		}
+	}
+	for k := range kubeCronEvs {
+		if !keep[k] {
+			delete(kubeCronEvs, k)
+		}
+	}
+}
+
+// kubeCronLookups - сколько упавших прогонов агент разбирает за отчет (поды Job + лог, два
+// запроса): разом упавший десяток CronJob добирается в следующих отчетах
+const kubeCronLookups = 4
+
+// kubeCronLast - последний прогон CronJob: чем кончился, у упавшего - под, код и строка лога
+func kubeCronLast(cl *http.Client, kc *kubeConf, cj kubeCronJob, jobs []kubeJobItem, done kubeCronDone, lookups *int) *kubeCronRun {
+	key := cj.NS + "/" + cj.Name
+	kubeCronMu.Lock()
+	mem, known := kubeCronFail[key]
+	kubeCronMu.Unlock()
+	last, want, ok := cronLastJob(cj.Name, cj.LastSchedule, jobs)
+	if !ok {
+		if want == "" {
+			return nil
+		}
+		if known && mem.Job == want {
+			mem.Gone = true
+			return &mem
+		}
+		r := &kubeCronRun{Job: want, T: cj.LastSchedule, Gone: true}
+		if done.Job == want {
+			r.St = map[string]string{"Complete": "ok", "Failed": "failed"}[done.Cond]
+			r.Done = done.T
+		}
+		return r
+	}
+	r := cronRunOf(*last)
+	if r.St != "failed" {
+		return &r
+	}
+	if known && mem.Job == r.Job {
+		return &mem
+	}
+	if *lookups >= kubeCronLookups {
+		return &r
+	}
+	*lookups++
+	kubeCronPod(cl, kc, cj.NS, &r)
+	kubeCronMu.Lock()
+	kubeCronFail[key] = r
+	kubeCronMu.Unlock()
+	return &r
+}
+
+// kubeCronPod - под упавшего Job: его причина (OOMKilled, ImagePullBackOff, Evicted), код выхода
+// и строка из конца лога. Секреты из строки вырезаются: она уходит в отчет и в алерт
+func kubeCronPod(cl *http.Client, kc *kubeConf, ns string, r *kubeCronRun) {
+	var d struct{ Items []kubeJobPod }
+	path := fmt.Sprintf("/api/v1/namespaces/%s/pods?labelSelector=%s", url.PathEscape(ns), url.QueryEscape("job-name="+r.Job))
+	if kubeGet(cl, kc, path, &d) != nil {
+		return
+	}
+	cname := cronPodCause(d.Items, r)
+	if cname == "" {
+		return // контейнер не запускался (образ не скачался): лога нет
+	}
+	lp := fmt.Sprintf("/api/v1/namespaces/%s/pods/%s/log?tailLines=40&container=%s",
+		url.PathEscape(ns), url.PathEscape(r.Pod), url.QueryEscape(cname))
+	req, err := http.NewRequest("GET", strings.TrimRight(kc.Server, "/")+lp, nil)
+	if err != nil {
+		return
+	}
+	req.Header.Set("Authorization", "Bearer "+kc.Token)
+	resp, err := cl.Do(req)
+	if err != nil {
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return
+	}
+	b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
+	r.Log = scrubSecrets(prevLogLine(string(b)))
+}
+
+type kubeJobPod struct {
+	Metadata struct{ Name, CreationTimestamp string }
+	Status   struct {
+		Reason            string
+		ContainerStatuses []struct {
+			Name  string
+			State struct {
+				Waiting    *struct{ Reason string } `json:"waiting"`
+				Terminated *kubeTerm                `json:"terminated"`
+			} `json:"state"`
+			LastState struct {
+				Terminated *kubeTerm `json:"terminated"`
+			} `json:"lastState"`
+		}
+	}
+}
+
+// cronPodCause - причина по последнему поду Job (при backoffLimit их несколько, важна последняя
+// попытка): Evicted, ImagePullBackOff, OOMKilled, код выхода. Возвращает контейнер, чей лог читать
+func cronPodCause(pods []kubeJobPod, r *kubeCronRun) string {
+	if len(pods) == 0 {
+		return ""
+	}
+	best := 0
+	for i, p := range pods {
+		if p.Metadata.CreationTimestamp > pods[best].Metadata.CreationTimestamp {
+			best = i
+		}
+	}
+	p := pods[best]
+	r.Pod, r.PR = p.Metadata.Name, p.Status.Reason // Evicted, DeadlineExceeded
+	cname := ""
+	for _, cs := range p.Status.ContainerStatuses {
+		if w := cs.State.Waiting; w != nil && w.Reason != "" && r.PR == "" {
+			r.PR = w.Reason // ImagePullBackOff, CreateContainerConfigError
+		}
+		t := cs.State.Terminated
+		if t == nil {
+			t = cs.LastState.Terminated
+		}
+		if t != nil && (r.X == nil || (*r.X == 0 && t.ExitCode != 0)) {
+			x := t.ExitCode
+			r.X, cname = &x, cs.Name
+			if t.Reason != "" && p.Status.Reason == "" {
+				r.PR = t.Reason // OOMKilled, Error
+			}
+		}
+	}
+	return cname
+}
+
+// kubeCronDone - из события SawCompletedJob: каким кончился Job, даже если его уже удалили
+type kubeCronDone struct {
+	Job, Cond string
+	T         int64
+}
+
+// cronQuiet - обычные события CronJob, ничего не объясняющие: создал, удалил старый, увидел конец
+var cronQuiet = map[string]bool{"SuccessfulCreate": true, "SuccessfulDelete": true, "SawCompletedJob": true}
+
+var sawCompletedRe = regexp.MustCompile(`^Saw completed job: ([^\s,]+),? (?:status|condition): (\w+)`)
+
+type kubeCronEvent struct {
+	Type, Reason, Message    string
+	LastTimestamp, EventTime string
+	InvolvedObject           struct{ Kind, Namespace, Name string }
+	Metadata                 struct{ CreationTimestamp string }
+}
+
+func (e kubeCronEvent) at() int64 {
+	if t := unixRFC(e.LastTimestamp); t > 0 {
+		return t
+	}
+	if t, err := time.Parse(time.RFC3339Nano, e.EventTime); err == nil {
+		return t.Unix()
+	}
+	return unixRFC(e.Metadata.CreationTimestamp)
+}
+
+// cronEventsOf - разбор событий CronJob (отдельно, чтобы проверить тестом): последнее значимое
+// событие и последний увиденный конец Job по каждому ns/cronjob
+func cronEventsOf(items []kubeCronEvent) (map[string]kubeCronEv, map[string]kubeCronDone) {
+	evs, done := map[string]kubeCronEv{}, map[string]kubeCronDone{}
+	for _, e := range items {
+		if e.InvolvedObject.Kind != "CronJob" {
+			continue
+		}
+		key, t := e.InvolvedObject.Namespace+"/"+e.InvolvedObject.Name, e.at()
+		if e.Reason == "SawCompletedJob" {
+			if m := sawCompletedRe.FindStringSubmatch(e.Message); m != nil && t >= done[key].T {
+				done[key] = kubeCronDone{Job: m[1], Cond: m[2], T: t}
+			}
+			continue
+		}
+		if cronQuiet[e.Reason] {
+			continue
+		}
+		if old, ok := evs[key]; !ok || t >= old.T {
+			evs[key] = kubeCronEv{R: e.Reason, M: truncRunes(scrubSecrets(cleanLogLine(e.Message)), 200), T: t, W: e.Type == "Warning"}
+		}
+	}
+	return evs, done
+}
+
+// kubeCronEvents - события CronJob кластера одним запросом. Значимые агент помнит дольше часа,
+// что их хранит кластер: у ежедневного CronJob иначе к утру причины уже не было бы
+func kubeCronEvents(cl *http.Client, kc *kubeConf, now time.Time) (map[string]kubeCronEv, map[string]kubeCronDone) {
+	var d struct{ Items []kubeCronEvent }
+	if kubeGet(cl, kc, "/api/v1/events?limit=1000&fieldSelector="+url.QueryEscape("involvedObject.kind=CronJob"), &d) != nil {
+		d.Items = nil
+	}
+	evs, done := cronEventsOf(d.Items)
+	kubeCronMu.Lock()
+	defer kubeCronMu.Unlock()
+	for k, e := range evs {
+		if old, ok := kubeCronEvs[k]; !ok || e.T >= old.T {
+			kubeCronEvs[k] = e
+		}
+	}
+	out := map[string]kubeCronEv{}
+	for k, e := range kubeCronEvs {
+		if now.Unix()-e.T > 30*86400 {
+			delete(kubeCronEvs, k)
+			continue
+		}
+		out[k] = e
+	}
+	return out, done
+}
+
+// Секреты в строке лога: key=value / key: value с ключом-паролем, Bearer, логин:пароль в адресе,
+// длинные токены. Строка уходит в отчет и в алерт в чате - пароля там быть не должно
+var (
+	secretKV    = regexp.MustCompile(`(?i)((?:pass(?:word|wd)?|pwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|auth(?:orization)?|credentials?|dsn)["']?\s*[:=]\s*["']?(?:(?:bearer|basic)\s+)?)[^\s"',;&]+`)
+	secretBear  = regexp.MustCompile(`(?i)\b(bearer|basic)\s+[A-Za-z0-9._~+/=-]{8,}`)
+	secretURL   = regexp.MustCompile(`(://[^/\s:@]+):[^@/\s]+@`)
+	secretToken = regexp.MustCompile(`[A-Za-z0-9+/_=-]{32,}`)
+)
+
+func scrubSecrets(s string) string {
+	s = secretURL.ReplaceAllString(s, "$1:***@")
+	s = secretBear.ReplaceAllString(s, "$1 ***")
+	s = secretKV.ReplaceAllString(s, "${1}***")
+	return secretToken.ReplaceAllStringFunc(s, func(m string) string {
+		// путь или имя через дефисы - не токен: в токене вперемешку буквы и цифры
+		if strings.Count(m, "/") > 2 || !strings.ContainsAny(m, "0123456789") ||
+			!strings.ContainsAny(strings.ToLower(m), "abcdefghijklmnopqrstuvwxyz") {
+			return m
+		}
+		return "***"
+	})
 }
 
 // kubeVolumes — постоянные тома (PV). Нужны аудиту бэкапа: том на hostPath/local — это
@@ -8741,25 +9142,9 @@ func truncRunes(s string, n int) string {
 
 // kubeFailedJobs - упавшие за неделю Job, созданные не CronJob'ом (их прогоны панель судит по
 // самим CronJob): миграции, разовые задачи. Требует batch/jobs (kube-setup 0.2+).
-func kubeFailedJobs(cl *http.Client, kc *kubeConf, now time.Time) []kubeJob {
-	var d struct {
-		Items []struct {
-			Metadata struct {
-				Name, Namespace   string
-				CreationTimestamp string
-				OwnerReferences   []struct{ Kind string }
-			}
-			Status struct {
-				Succeeded  int
-				Conditions []struct{ Type, Status, Reason, LastTransitionTime string }
-			}
-		}
-	}
-	if kubeGet(cl, kc, "/apis/batch/v1/jobs", &d) != nil {
-		return nil
-	}
+func kubeFailedJobs(jobs []kubeJobItem, now time.Time) []kubeJob {
 	var out []kubeJob
-	for _, j := range d.Items {
+	for _, j := range jobs {
 		if len(j.Metadata.OwnerReferences) > 0 && j.Metadata.OwnerReferences[0].Kind == "CronJob" {
 			continue
 		}
