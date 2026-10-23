@@ -6563,6 +6563,10 @@ body:has(.modal-backdrop) {
   gap: 0.4rem;
   flex-wrap: wrap;
 }
+.local-probe-txt {
+  flex: 1 1 14rem;
+  min-width: 0;
+}
 .form-note {
   margin: -0.3rem 0 0.5rem;
 }

@@ -50,7 +50,7 @@ const ISSUE_ICON: Record<string, string> = {
   docker: '🐳', kuber: '☸️', backups: '💾', docker_sock: '🔓',
   clock: '🕐', dns: '🌐', db_conn: '🔌', web_5xx: '🌐', queue: '🐇', kube_expiry: '⏳', flux_down: '☸️',
   flux_stale: '☸️', backup_dump: '🛢', backup_dump_space: '🛢', backup_cron: '🛢', backup_check: '🩺',
-  unit_loop: '🔁', kube_cron: '⏰', exposed: '🔓', port_new: '🚪', cf_realip: '🎭', pressure: '🫁', net_health: '📶', link: '🔗', traffic: '📊', kube_node: '☸️', kube_job: '💥', access_change: '🔑', backup_restore: '🛟', docker_restarts: '🔄', kube_restarts: '🔄', mem_leak: '📈', ssh_risk: '🔐', db_health: '🛢', web_config: '🧾', web_cert: '🔏', listen_gone: '🔌', disk_slow: '🐢', gpu: '🎛', gpu_heat: '🌡', llm: '💬', queue_stuck: '⏳', queue_failed: '🧨', workers: '👷', cron_stuck: '⏲', log_errors: '📜', fpm: '🐘', gitlab: '🦊', access_risk: '🗝',
+  unit_loop: '🔁', kube_cron: '⏰', exposed: '🔓', port_new: '🚪', cf_realip: '🎭', pressure: '🫁', net_health: '📶', link: '🔗', traffic: '📊', kube_node: '☸️', kube_job: '💥', access_change: '🔑', backup_restore: '🛟', docker_restarts: '🔄', kube_restarts: '🔄', mem_leak: '📈', mem_limit: '🧠', ssh_risk: '🔐', db_health: '🛢', web_config: '🧾', web_cert: '🔏', listen_gone: '🔌', disk_slow: '🐢', gpu: '🎛', gpu_heat: '🌡', llm: '💬', queue_stuck: '⏳', queue_failed: '🧨', workers: '👷', cron_stuck: '⏲', log_errors: '📜', fpm: '🐘', gitlab: '🦊', access_risk: '🗝',
   tamper: '🕵️', webfiles: '🕵️',
 }
 
@@ -101,11 +101,26 @@ const K_BAD_POD = ['CrashLoopBackOff', 'ImagePullBackOff', 'ErrImagePull', 'Erro
 // выкатывать их сама: helper ставится от root, и «кнопка в панели» означала бы, что
 // взлом панели = root на всём парке. Поэтому здесь только список хостов, а выкатывает
 // человек своим ansible — панель к нодам с root-правами не ходит.
-// Сайт лежит по внешней проверке, а его домен обслуживает известная панели нода —
-// почти всегда это белый список: снаружи рвут соединение, изнутри сайт цел. Панель
-// уже знает и то, и другое, так что незачем заставлять человека сопоставлять это
-// руками. Но и включать молча нельзя: проверка изнутри отвечает на другой вопрос,
-// чем внешняя, и подменять одну другой без ведома владельца — обман.
+// Сайт снаружи закрыт белым списком (бэкенд app/allowlist_hint.py): режут соединение или
+// отвечают 403 со всех точек часами, а изнутри его ноды он открывается или снаружи не
+// открывался ни разу. Строка говорит, почему так решили, кнопка - что сделать. Включать
+// молча нельзя: проверка изнутри отвечает на другой вопрос, чем внешняя.
+function hintWhy(x: LocalProbeSuggestion, t: T): string {
+  const out =
+    x.outside === 'code'
+      ? t('снаружи отвечает {code}', { code: x.code })
+      : x.outside === 'reset'
+        ? t('снаружи сбрасывает соединение')
+        : t('снаружи не подключается')
+  if (x.reason === 'inside_up') {
+    const d = sinceShort(x.since, t)
+    return t('{out}{d}, изнутри {srv} открывается', { out, d: d ? ' ' + t('уже {d}', { d }) : '', srv: x.server_name })
+  }
+  if (x.reason === 'never_up' && x.server_name)
+    return t('{out} и ни разу не открылся, домен на {srv}', { out, srv: x.server_name })
+  return t('{out} и ни разу не открылся', { out })
+}
+
 function LocalProbeHint({
   items,
   onDone,
@@ -114,7 +129,6 @@ function LocalProbeHint({
   onDone: () => void
 }) {
   const { t } = useI18n()
-  const [open, setOpen] = useState(false)
   const [busy, setBusy] = useState(false)
   const apply = async (ids: number[]) => {
     setBusy(true)
@@ -126,42 +140,23 @@ function LocalProbeHint({
     }
   }
   return (
-    <div className="ansible-hint">
-      <button className="ghost" onClick={() => setOpen(!open)}>
-        {open
-          ? t('скрыть')
-          : t('🏠 проверять локально: подходит {n} сайт(ов)', { n: items.length })}
-      </button>
-      {open && (
-        <div className="local-probe-hint">
-          <div className="muted small">
-            {t('Эти сайты панель снаружи проверить не может — похоже на белый список. Те, чей домен держит ваш сервер, она предлагает проверять изнутри него. А если сайт ОТВЕЧАЕТ «доступ запрещён» — он жив, и довольно считать этот код нормой: изнутри там проверять нечего, прокси закрывает сайт сам.')}
-          </div>
-          <ul className="local-probe-list">
-            {items.map((x) => (
-              <li key={x.check_id}>
-                <span className="mono">{x.host}</span>{' '}
-                <span className="muted small">
-                  {x.kind === 'code'
-                    ? t('отвечает {code} — считать нормой', { code: x.code })
-                    : `→ ${x.server_name}`}
-                </span>{' '}
-                <button className="ghost small" disabled={busy} onClick={() => apply([x.check_id])}>
-                  {x.kind === 'code' ? t('принять код') : t('включить')}
-                </button>
-              </li>
-            ))}
-          </ul>
-          {items.length > 1 && (
-            <button
-              className="ghost"
-              disabled={busy}
-              onClick={() => apply(items.map((x) => x.check_id))}
-            >
-              {t('включить для всех {n}', { n: items.length })}
+    <div className="local-probe-hint">
+      <ul className="local-probe-list">
+        {items.map((x) => (
+          <li key={x.check_id} title={x.message}>
+            <span className="local-probe-txt">
+              <span className="mono">{x.host}</span> <span className="muted small">{hintWhy(x, t)}</span>
+            </span>
+            <button className="ghost small" disabled={busy} onClick={() => apply([x.check_id])}>
+              {x.kind === 'code' ? t('считать {code} нормой', { code: x.code }) : t('проверять изнутри')}
             </button>
-          )}
-        </div>
+          </li>
+        ))}
+      </ul>
+      {items.length > 1 && (
+        <button className="ghost" disabled={busy} onClick={() => apply(items.map((x) => x.check_id))}>
+          {t('применить ко всем {n}', { n: items.length })}
+        </button>
       )}
     </div>
   )

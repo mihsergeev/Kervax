@@ -20,6 +20,7 @@ import {
   type KubeNodeRef,
   type KubePod,
   type KubeWorkload,
+  type MemLimitItem,
   type Server,
   type ServerEnroll,
 } from './api'
@@ -32,7 +33,7 @@ import { kindLabel, KUBE_WORK_KINDS, RESTARTS_DAY_MIN } from './mutes'
 import { OsIcon } from './osIcon'
 import { CountryFlag } from './CountryFlag'
 import { fmtBytes } from './units'
-import { ipHit, shortList, sinceShort, srvIps, srvIssues, srvMuted } from './serverUtils'
+import { ipHit, memLimChip, shortList, sinceShort, srvIps, srvIssues, srvMuted } from './serverUtils'
 import { EnrollModal, fmtRel, InstallModal } from './ServersPage'
 import { CardNav, FreshChip, markMuted, OvAreas, OvRows, secInfoOf, type OvRow, type SecDef, type SecInfo, type SecItem } from './cardLayout'
 import { NetTile, TileFilterChip, useTileFilter } from './NetLinks'
@@ -659,10 +660,12 @@ function PodRow({
   onLogs,
   onChanged,
   day = 0,
+  memlim,
 }: {
   serverId: number
   p: KubePod
   day?: number // перезапусков за сутки (restarts_day)
+  memlim?: MemLimitItem // уперся в лимит памяти и тормозит (mem_limits.bad ноды, где он работает)
   canAct: boolean
   onLogs?: () => void // нет - логи закрыты учетке (только для просмотра без галки): кнопка приглушена
   onChanged: () => void
@@ -713,6 +716,11 @@ function PodRow({
                 : t('перезапусков за все время: {n} (само по себе не проблема, тревога - только CrashLoopBackOff)', { n: p.restarts })}
             >
               ⟳ {p.restarts}{day > 0 && ` · ${t('{d} за сутки', { d: day })}`}
+            </span>
+          )}
+          {memLimChip(memlim, t) && (
+            <span className="type-chip t-degraded" title={memLimChip(memlim, t)!.title}>
+              🧠 {memLimChip(memlim, t)!.label}
             </span>
           )}
           {p.nolim && (
@@ -781,10 +789,12 @@ function KubeHostModal({
   onClose,
   onChanged,
   onAddNode,
+  memlim,
 }: {
   server: Server
   kube: KubeInfo
   canAct: boolean
+  memlim?: Record<string, MemLimitItem> // поды у лимита памяти по всем нодам: ns/под -> что с ним
   initialTab?: string | null // из ссылки алерта: ?kube=id&ktab=expiry, или ?kube=id&sec=expiry
   onClose: () => void
   onChanged: () => void
@@ -1218,6 +1228,7 @@ function KubeHostModal({
                             onLogs={canLogs ? () => setLogsPod(p) : undefined}
                             onChanged={onChanged}
                             day={s.restarts_day?.[`pod:${p.ns}/${p.name}`] ?? 0}
+                            memlim={memlim?.[`${p.ns}/${p.name}`]}
                           />
                         ))}
                 </div>
@@ -1764,6 +1775,10 @@ export function KuberPage({
     return () => window.clearInterval(id)
   }, [load])
 
+  // поды, упершиеся в лимит памяти, по всем нодам: агент ноды знает свои поды, а список подов
+  // кластера - у той ноды, где kube-api
+  const memlimPods: Record<string, MemLimitItem> = {}
+  for (const x of (servers ?? []).flatMap((sv) => sv.mem_limits?.bad ?? [])) if (x.kind === 'pod') memlimPods[x.v.name] = x
   const allHosts = (servers ?? [])
     .map((s) => ({ s, d: s.last_report?.kube }))
     .filter((x): x is KHost => !!x.d?.present)
@@ -1971,6 +1986,7 @@ export function KuberPage({
           key={open.s.id}
           server={open.s}
           kube={open.d}
+          memlim={memlimPods}
           canAct={!isViewer && open.d.access}
           initialTab={linkTab.id === open.s.id ? linkTab.tab : null}
           onClose={() => {

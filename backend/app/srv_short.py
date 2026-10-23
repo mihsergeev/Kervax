@@ -19,7 +19,7 @@ from app import going_down, podnames, tg_fmt
 # Тема - второй эмодзи после уровня: по нему в ленте видно, про что алерт
 TOPIC = {
     "offline": "📡", "reboot": "🔄", "cpu": "⚡", "cpu_spin": "🌀", "mem": "🧠", "oom": "🧠",
-    "mem_leak": "📈", "pressure": "🫁", "temp": "🌡", "throttle": "🌡", "disktemp": "🌡",
+    "mem_leak": "📈", "mem_limit": "🧠", "pressure": "🫁", "temp": "🌡", "throttle": "🌡", "disktemp": "🌡",
     "gpu_heat": "🌡", "clock": "🕐", "dns": "🌐", "disk": "💽", "inode": "💽", "disk_forecast": "💽",
     "disk_health": "💽", "disk_slow": "🐢", "net_health": "📶", "link": "🔗", "traffic": "📊",
     "conntrack": "🔗", "listen_gone": "🔌", "exposed": "🔓", "port_new": "🚪", "cf_realip": "🎭", "access_change": "🔑",
@@ -81,6 +81,7 @@ RECOVERY = {
     "pressure": "сервер больше не задыхается", "net_health": "потерь в сети больше нет",
     "link": "связь между серверами в порядке", "traffic": "трафик в пределах тарифа",
     "kube_node": "ноды кластера снова готовы", "mem_leak": "память больше не растет",
+    "mem_limit": "больше не упирается в лимит памяти",
     "listen_gone": "пропавшие порты снова слушают", "disk_slow": "диск больше не тормозит",
     "web_cert": "сертификаты снова в сроке", "web_config": "конфиги снова в порядке",
     "webfiles": "новых php в файлах сайтов больше нет",
@@ -109,6 +110,7 @@ _MODULE = {
     "docker_sock": ("docker_exposure", "tg_short"), "docker_risk": ("docker_risk", "tg_short"),
     "listen_gone": ("listen_watch", "tg_short"), "link": ("netlinks", "tg_short"),
     "traffic": ("traffic", "tg_short"), "mem_leak": ("mem_trend", "tg_short"),
+    "mem_limit": ("mem_limit", "tg_short"),
     "docker_restarts": ("restarts", "tg_short"), "kube_restarts": ("restarts", "tg_short"),
     "gpu": ("gpu", "tg_short"), "gpu_heat": ("gpu", "tg_short_heat"), "llm": ("gpu", "tg_short_llm"),
     "web_cert": ("web_certs", "tg_short"), "web_config": ("web_config", "tg_short"),
@@ -244,7 +246,7 @@ def _days_words(text: str) -> str:
     return _DN.sub(lambda m: tg_fmt.days(int(m.group(1))), text)
 
 
-SITE_RECOVERY = {"recovery": "снова отвечает", "locrec": "открывается отовсюду",
+SITE_RECOVERY = {"recovery": "снова отвечает", "recstable": "снова отвечает стабильно", "locrec": "открывается отовсюду",
                  "flakyrec": "снова отвечает стабильно", "tamperrec": "признаков взлома больше нет"}
 
 

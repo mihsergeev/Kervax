@@ -29,6 +29,7 @@ from app import log_errors
 from app import fpm_pools
 from app import gitlab as gitlab_mod
 from app import mem_trend
+from app import mem_limit
 from app import restarts as srv_restarts
 from app import access_audit
 from app import docker_risk
@@ -284,6 +285,7 @@ def _out(
     o.kube_expiry_ignored = kube_expiry.view(server)
     o.kube_restarts = srv_restarts.kube_view(server, now)
     o.mem_leaks = mem_trend.problems(server, now) or None
+    o.mem_limits = mem_limit.view(server, now, pod_names)
     o.oom = oom_mod.view(server, now, pod_names)
     o.ssh = ssh_audit.view(server, now)
     o.ssh_advice = ssh_audit.advice(server, now) or None

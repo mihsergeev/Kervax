@@ -926,10 +926,16 @@ async def test_suggestion_for_site_that_answers_403(client, auth_headers, monkey
     # сессий берём у него, а не у импортированного модуля: иначе правка уедет
     # в другую базу и монитор останется нетронутым.
     factory = client._transport.app.state.session_factory  # noqa: SLF001
+    from datetime import datetime, timedelta, timezone
+    from app.models import CheckIncident
     async with factory() as s:
         row = (await s.scalars(select(Check).where(Check.id == cid))).one()
         row.last_status = "down"
         row.last_message = "доступ запрещён (HTTP 403)"
+        # 403 держится часами, а снаружи сайт не открывался ни разу: так выглядит прокси,
+        # который закрывает сайт сам, а не авария
+        s.add(CheckIncident(check_id=cid, status="down",
+                            started_at=datetime.now(timezone.utc) - timedelta(hours=3)))
         await s.commit()
 
     r = await client.get("/api/checks/local-probe-suggestions", headers=auth_headers)

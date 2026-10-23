@@ -566,6 +566,11 @@ class LocalProbeSuggestion(BaseModel):
     code: int = 0  # для kind="code": какой код предлагаем считать нормой
     server_id: int = 0
     server_name: str = ""
+    # почему похоже на белый список (app/allowlist_hint.py): inside_up - изнутри ноды
+    # открывается, never_up - снаружи не открывался ни разу, code - стабильно 403
+    reason: str = ""
+    outside: str = ""  # connect | reset | code: чем кончается проверка снаружи
+    since: datetime | None = None  # с какого момента снаружи не открывается
 
 
 class LocalProbeSuggestionsOut(BaseModel):
@@ -1544,6 +1549,9 @@ class ServerOut(BaseModel):
     kube_restarts: dict | None = None
     # что течет памятью: [{key, kind, name, rate, eta_days, series, level, text}] (mem_trend.problems)
     mem_leaks: list[dict] | None = None
+    # у своего лимита памяти (mem_limit.view): {"bad": тормозят сейчас, "near": у лимита без давления,
+    # "past": эпизоды за сутки}; None - агент старше 2.51
+    mem_limits: dict | None = None
     # OOM (app/oom.py): эпизодов за 7 дней, последний, юниты, убитые OOM ({юнит: {ep, line, quiet}})
     oom: dict | None = None
     # SSH (helper changes-setup 0.3): настройки входа, перебор, открыт ли порт (ssh_audit.view)
@@ -1859,6 +1867,9 @@ class AgentReportIn(BaseModel):
     # кто пишет на диск за последний час (агент 2.33): [{kind, name, w, r, s}]
     disk_writers: list[dict] = Field(default_factory=list, max_length=50)
     disk_writers_v1: bool = False
+    # у своего лимита памяти (агент 2.51): [{kind, name, u, lim, cur, anon, file, some, full, f10, mf, rf}].
+    # None - агент старый; [] - никого у лимита (app/mem_limit.py)
+    mem_limits: list[dict] | None = Field(default=None, max_length=50)
     # кто качает трафик за последний час (агент 2.34): [{kind, name, rx, tx, s}]
     net_users: list[dict] = Field(default_factory=list, max_length=50)
     # видеокарты NVIDIA на шине PCI (агент 2.36): [{bus, dev, drv}]
