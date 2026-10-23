@@ -3771,8 +3771,11 @@ def server_problems(s: Server, now: datetime, pod_names: dict[str, str] | None =
         muted = units_muted(s, now)
         oom_b = oom_mod.block(rep, now.timestamp())
         oom_eps = oom_mod.episodes(oom_mod.records(oom_b))
+        # упавший сервис бэкапа - это упавший прогон, про него пункт бэкапа с причиной (как и в алерте)
+        covered = backup_units(s, rep)
         for u in ub.get("units") or []:
-            if not isinstance(u, dict) or not u.get("unit") or u["unit"] in muted or benign_unit(str(u["unit"])):
+            if not isinstance(u, dict) or not u.get("unit") or u["unit"] in muted or benign_unit(str(u["unit"])) \
+                    or u["unit"] in covered:
                 continue
             if ref - float(u.get("since") or 0) < _UNIT_MIN_AGE or oom_mod.unit_pending(u, oom_b, ref):
                 continue
@@ -5963,7 +5966,7 @@ def _server_conditions(s: Server, now: datetime,
             out["backup_stale"] = (0, {"days": 0})
     if online and backup_state.backup_alive(bk) and (bk.get("metric_present") or from_systemd):
         # пустой Result бывает пока сервис ни разу не отработал — это не «упал»
-        reason = backup_state.fail_reason(rep)
+        reason = backup_state.fail_short(backup_state.fail_reason(rep))
         out["backup_failed"] = (1 if backup_state.backup_failed(bk) else 0,
                                 {"why": f": {reason}" if reason else ""})
         last_ts = bk.get("last_backup_ts") or 0

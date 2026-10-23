@@ -18,6 +18,7 @@
 
 from __future__ import annotations
 
+import re
 from datetime import datetime, timezone
 
 from app.models import Server
@@ -86,6 +87,51 @@ def fail_reason(rep: dict | None) -> str:
     return msg[:300]
 
 
+# Повторы restic перед отказом: "Stat(<config/>) returned error, retrying after 1.3s: <ошибка>".
+# helper до 0.42 брал в причину первые строки журнала, а это они - простыня из одной и той же ошибки
+_RETRY_RE = re.compile(r"\S+ (?:returned error|failed), retrying after [\d.]+[a-zµ]*: ")
+
+# Что restic сказал -> коротко для человека. Первое совпадение, порядок важен: x509 частные раньше общего
+_FAIL_SHORT: tuple[tuple[re.Pattern, str], ...] = tuple((re.compile(p, re.I), t) for p, t in (
+    (r"certificate signed by unknown authority", "сервер бэкапов: сертификат не доверен (x509)"),
+    (r"certificate has expired|certificate is not yet valid", "сервер бэкапов: сертификат просрочен (x509)"),
+    (r"certificate is valid for|doesn't contain any IP SANs|cannot validate certificate",
+     "сервер бэкапов: сертификат выписан на другой адрес (x509)"),
+    (r"x509:|tls: ", "сервер бэкапов: ошибка TLS"),
+    (r"wrong password|no key found", "не подходит пароль репозитория"),
+    (r"401 Unauthorized", "сервер бэкапов не принял логин (401)"),
+    (r"connection refused", "сервер бэкапов не принимает соединения"),
+    (r"no such host", "не находится адрес сервера бэкапов (DNS)"),
+    (r"i/o timeout|context deadline exceeded|handshake timeout", "сервер бэкапов не отвечает (таймаут)"),
+    (r"no route to host|network is unreachable", "нет сети до сервера бэкапов"),
+    (r"repository is already locked|unable to create lock", "репозиторий занят чужим локом"),
+    (r"no space left", "кончилось место"),
+    (r"config file does not exist|Is there a repository at|404 Not Found", "на сервере бэкапов нет репозитория"),
+    (r"the backup service ended with timeout", "прогон не уложился в таймаут юнита"),
+))
+
+
+def fail_line(msg: str) -> str:
+    """Первая осмысленная строка ошибки: строка Fatal, иначе первая ошибка без повторов restic."""
+    msg = (msg or "").strip()
+    if "Fatal: " in msg:
+        return msg.split("Fatal: ", 1)[1].split(" Fatal: ")[0].strip()
+    parts = [p.strip() for p in _RETRY_RE.split(msg) if p.strip()]
+    return parts[0] if parts else msg
+
+
+def fail_short(msg: str) -> str:
+    """Почему упал прогон, коротко и по-русски: "сервер бэкапов: сертификат не доверен (x509)".
+    Незнакомая ошибка - ее первая осмысленная строка."""
+    if not msg:
+        return ""
+    for rx, text in _FAIL_SHORT:
+        if rx.search(msg):
+            return text
+    line = fail_line(msg)
+    return line if len(line) <= 120 else line[:119].rstrip() + "..."
+
+
 def setup_error(s: Server) -> dict | None:
     """Последняя настройка из панели упала: {ts, msg, job}. Пока сервер без бэкапа."""
     err = getattr(s, "backup_setup_err", None)
@@ -96,11 +142,13 @@ def setup_error(s: Server) -> dict | None:
 
 def view(s: Server) -> dict:
     """Состояние бэкапа для фронта: {state, reason, since, traces}. reason - почему: упавший прогон
-    (ok) или упавшая настройка (partial); since - с какого момента (ISO) для partial."""
+    (ok, коротко - fail_short, а сырая строка restic в reason_raw) или упавшая настройка (partial);
+    since - с какого момента (ISO) для partial."""
     rep = s.last_report or {}
     bk = rep.get("backup") or {}
     if backup_alive(bk):
-        return {"state": "ok", "reason": fail_reason(rep), "since": None, "traces": ""}
+        raw = fail_reason(rep)
+        return {"state": "ok", "reason": fail_short(raw), "reason_raw": raw, "since": None, "traces": ""}
     err = setup_error(s)
     if err:
         return {"state": "partial", "reason": str(err.get("msg") or ""), "since": err.get("ts"),

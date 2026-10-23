@@ -114,7 +114,7 @@ def view(rep: dict, mutes: list[str] | None = None) -> dict | None:
 # собирает https-адрес из своего env, читает репозиторий по https с сертификатом сервера бэкапов
 # и переключается только если это получилось; сервер бэкапов открывает клиенту TLS-порт
 AGENT_MIN = (2, 48)          # агент знает действия to_https и allow_tls
-CLIENT_HELPER_MIN = (0, 40)  # backup-setup: to-https
+CLIENT_HELPER_MIN = (0, 42)  # backup-setup: to-https, с 0.42 доверие через RESTIC_CACERT и проверка путем юнита
 BSRV_HELPER_MIN = (0, 35)    # backupserver-setup: allow-tls
 
 

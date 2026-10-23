@@ -3266,6 +3266,8 @@ const EN: Record<string, string> = {
   'баз не найдено': 'no databases found',
   'бэкап завершился с ошибкой': 'backup finished with an error',
   'бэкап завершился с ошибкой: {why}': 'backup finished with an error: {why}',
+  'Почему ошибка': 'Why it failed',
+  'текст ошибки restic': 'restic error text',
   'без причины': 'no reason given',
   'настройка бэкапа не прошла: {why}': 'backup setup failed: {why}',
   'Переделать настройку': 'Redo the setup',
