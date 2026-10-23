@@ -85,6 +85,7 @@ export function ChecksPage({ onUnauthorized, openCheckId, openSec = null, onCons
   const [wizard, setWizard] = useState(false)
   // новый монитор - через форму с пробной проверкой (AddMonitor)
   const [addErr, setAddErr] = useState<string | null>(null)
+  const [addErrFields, setAddErrFields] = useState<string[]>([])
   const [busy, setBusy] = useState(false)
   const [detailId, setDetailId] = useState<number | null>(null)
   // раздел из ссылки - до первого открытия карточки этого монитора
@@ -186,12 +187,14 @@ export function ChecksPage({ onUnauthorized, openCheckId, openSec = null, onCons
 
   const openAdd = () => {
     setAddErr(null)
+    setAddErrFields([])
     setFormOpen(true)
   }
 
   const submitNew = async (f: CheckForm) => {
     setBusy(true)
     setAddErr(null)
+    setAddErrFields([])
     try {
       await createCheck(f)
       setFormOpen(false)
@@ -199,6 +202,7 @@ export function ChecksPage({ onUnauthorized, openCheckId, openSec = null, onCons
     } catch (e) {
       if (e instanceof ApiError && e.status === 401) return onUnauthorized()
       setAddErr(e instanceof Error ? e.message : t('Ошибка'))
+      if (e instanceof ApiError) setAddErrFields(e.fields)
     } finally {
       setBusy(false)
     }
@@ -701,6 +705,7 @@ export function ChecksPage({ onUnauthorized, openCheckId, openSec = null, onCons
           groups={groupNames}
           busy={busy}
           error={addErr}
+          errorFields={addErrFields}
           onSubmit={submitNew}
           onCancel={() => setFormOpen(false)}
           onOpenCheck={(id) => {

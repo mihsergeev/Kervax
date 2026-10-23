@@ -189,10 +189,12 @@ export function CheckDetail({ check, groups, initialSec, onClose, onSaved, onRun
   const [form, setForm] = useState<CheckForm | null>(null)
   const [saving, setSaving] = useState(false)
   const [saveErr, setSaveErr] = useState<string | null>(null)
+  const [saveErrFields, setSaveErrFields] = useState<string[]>([])
 
   const startEdit = () => {
     setForm(checkToForm(check))
     setSaveErr(null)
+    setSaveErrFields([])
     setEditing(true)
   }
   // старый монитор сертификата формы не имеет: его заводят и меняют только через API
@@ -203,6 +205,7 @@ export function CheckDetail({ check, groups, initialSec, onClose, onSaved, onRun
     if (!body) return
     setSaving(true)
     setSaveErr(null)
+    setSaveErrFields([])
     try {
       await updateCheck(check.id, body)
       setEditing(false)
@@ -210,6 +213,7 @@ export function CheckDetail({ check, groups, initialSec, onClose, onSaved, onRun
     } catch (e) {
       if (e instanceof ApiError && e.status === 401) return onUnauthorized()
       setSaveErr(e instanceof Error ? e.message : t('Ошибка'))
+      if (e instanceof ApiError) setSaveErrFields(e.fields)
     } finally {
       setSaving(false)
     }
@@ -717,6 +721,7 @@ export function CheckDetail({ check, groups, initialSec, onClose, onSaved, onRun
                 groups={groups ?? []}
                 busy={saving}
                 error={saveErr}
+                errorFields={saveErrFields}
                 onSubmit={submitEdit}
                 onCancel={() => setEditing(false)}
                 onUnauthorized={onUnauthorized}

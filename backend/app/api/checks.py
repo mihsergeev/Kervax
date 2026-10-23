@@ -1025,7 +1025,7 @@ def _push_defaults(check: Check) -> None:
     check.check_ssl = False
     check.check_domain = False
     check.extra_paths = []
-    check.push_period = max(int(check.push_period or 0), 60) or 3600
+    check.push_period = max(int(check.push_period or 3600), 60)
 
 
 @router.put("/{check_id}/note", response_model=CheckOut)

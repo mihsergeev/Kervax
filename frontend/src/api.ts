@@ -89,11 +89,89 @@ export function writeBlocked(method: string, path: string, body?: unknown): bool
 
 export class ApiError extends Error {
   status: number
+  // 422: какие поля не прошли проверку бэкенда - форма их подсвечивает
+  fields: string[]
 
-  constructor(message: string, status: number) {
+  constructor(message: string, status: number, fields: string[] = []) {
     super(message)
     this.status = status
+    this.fields = fields
   }
+}
+
+// 422 от FastAPI несет в detail список {loc, type, msg, ctx}. Раньше вместо него
+// показывалось голое "Ошибка HTTP 422", и было не понять, какое поле поправить
+type Invalid = { loc?: (string | number)[]; type?: string; msg?: string; ctx?: Record<string, unknown> }
+
+// подписи как в формах; поле без подписи показываем как есть
+const FIELD_LABEL: Record<string, string> = {
+  name: 'Название',
+  target: 'Адрес',
+  port: 'Порт',
+  group_name: 'Группа',
+  interval_seconds: 'Интервал, сек',
+  degraded_ms: 'Порог «медленно», мс',
+  retries: 'Повторы при сбое',
+  degraded_after_failures: 'Алерт «медленно» после N подряд',
+  expected_status: 'Ожидаемый статус',
+  keyword_up: 'Слово в ответе (должно быть)',
+  keyword_down: 'Слово-стоп (не должно быть)',
+  ssl_warn_days: 'Сертификат: напоминать за, дн.',
+  domain_warn_days: 'Домен: напоминать за, дн.',
+  extra_paths: 'Дополнительные пути',
+  http_headers: 'Заголовок, по строке',
+  dns_server: 'DNS-сервер (IP)',
+  password: 'Пароль',
+}
+
+function invalidWhat(e: Invalid): string {
+  const c = e.ctx ?? {}
+  const n = (v: unknown) => ({ n: String(v) })
+  switch (e.type) {
+    case 'missing':
+      return tr('обязательное поле')
+    case 'greater_than_equal':
+      return tr('должно быть не меньше {n}', n(c.ge))
+    case 'greater_than':
+      return tr('должно быть больше {n}', n(c.gt))
+    case 'less_than_equal':
+      return tr('должно быть не больше {n}', n(c.le))
+    case 'less_than':
+      return tr('должно быть меньше {n}', n(c.lt))
+    case 'string_too_short':
+      return Number(c.min_length) <= 1 ? tr('не может быть пустым') : tr('не короче {n} символов', n(c.min_length))
+    case 'string_too_long':
+      return tr('не длиннее {n} символов', n(c.max_length))
+    case 'too_long':
+      return tr('не больше {n} значений', n(c.max_length))
+    case 'string_pattern_mismatch':
+      return tr('недопустимое значение')
+    case 'literal_error':
+    case 'enum':
+      return tr('допустимо: {list}', { list: String(c.expected) })
+    case 'int_parsing':
+    case 'int_type':
+    case 'int_from_float':
+      return tr('нужно целое число')
+    case 'value_error':
+      // свои проверки бэкенда пишут текст сами
+      return (e.msg ?? '').replace(/^Value error, /, '')
+  }
+  return e.msg ?? ''
+}
+
+// поле - последнее имя в loc: ["body", "ssl_warn_days", 0] -> ssl_warn_days
+export function invalidDetail(detail: unknown): { text: string; fields: string[] } | null {
+  if (!Array.isArray(detail) || detail.length === 0) return null
+  const fields: string[] = []
+  const lines = (detail as Invalid[]).map((e) => {
+    const f = [...(e.loc ?? [])].reverse().find((x): x is string => typeof x === 'string' && x !== 'body') ?? ''
+    if (f && !fields.includes(f)) fields.push(f)
+    const what = invalidWhat(e)
+    if (!f) return what
+    return tr('Поле "{field}": {what}', { field: FIELD_LABEL[f] ? tr(FIELD_LABEL[f]) : f, what })
+  })
+  return { text: [...new Set(lines)].join('; '), fields }
 }
 
 export async function api<T>(path: string, options: RequestInit = {}): Promise<T> {
@@ -135,11 +213,14 @@ export async function api<T>(path: string, options: RequestInit = {}): Promise<T
     throw new ApiError(tr('Сервер прислал непонятный ответ, обновите страницу'), res.status)
   }
   if (!res.ok) {
+    const invalid = invalidDetail(body?.detail)
     const detail =
-      typeof body?.detail === 'string' ? body.detail : tr('Ошибка HTTP {code}', { code: res.status })
+      typeof body?.detail === 'string'
+        ? body.detail
+        : invalid?.text || tr('Ошибка HTTP {code}', { code: res.status })
     // последние неудачные запросы уходят вместе с "Сообщить о проблеме"
     noteApiFailure(method, path, res.status, typeof body?.detail === 'string' ? body.detail : JSON.stringify(body?.detail ?? ''))
-    throw new ApiError(detail, res.status)
+    throw new ApiError(detail, res.status, invalid?.fields)
   }
   // тексты проблем бэкенд пишет по-русски: английской панели переводим то, что умеем
   return (currentLang() === 'en' ? trBody(body) : body) as T
