@@ -1521,6 +1521,23 @@ async def webfiles_accept(server_id: int, body: dict, user: CurrentUser, session
     return _out(s, datetime.now(timezone.utc))
 
 
+@router.post("/{server_id}/webfiles-mode", response_model=ServerOut)
+async def webfiles_mode(server_id: int, body: dict, user: CurrentUser, session: SessionDep) -> ServerOut:
+    """Здесь правят руками (app/webfiles.py): root - корни строки через запятую, mode - auto (по
+    ветке рабочей копии), dev (правки разработчика не признак) или strict (каждая правка - признак)."""
+    s = await _get_or_404(server_id, session, user)
+    if user.role == "viewer":
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Нужны права оператора")
+    root, mode = str(body.get("root") or ""), str(body.get("mode") or "")
+    if not root or mode not in webfiles_mod.MODES:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Нет такого режима")
+    s.webfiles = webfiles_mod.set_mode(s.webfiles, root, mode)
+    await session.commit()
+    await session.refresh(s)
+    await audit.record(session, user.username, "webfiles_mode", s.name, f"{root} {mode}")
+    return _out(s, datetime.now(timezone.utc))
+
+
 @router.post("/{server_id}/snooze-alert", response_model=ServerOut)
 async def snooze_server_alert(
     server_id: int, body: AlertSnoozeIn, user: CurrentUser, session: SessionDep

@@ -267,6 +267,13 @@ const PHRASES: Rule[] = [
   [/\(пользователь (\S+)\)/g, '(user $1)'],
   // файлы сайтов (app/webfiles.py problems, app/tamper.py summary)
   [/похоже на взлом: новые php в /g, 'looks like a break-in: new php in '],
+  [/похоже на взлом: php похож на веб-шелл в /g, 'looks like a break-in: php looks like a web shell in '],
+  [/, владелец (\S+) \(веб-сервер\)/g, ', owner $1 (web server)'],
+  [/, владелец (\S+)/g, ', owner $1'],
+  [/новые файлы, которых нет в git \(ветка (\S+)\) в /g, 'new files git does not know (branch $1) in '],
+  [/новые файлы, которых нет в git в /g, 'new files git does not know in '],
+  [/изменены файлы вне git \(в \.gitignore\) \(ветка (\S+)\) в /g, 'files outside git changed (in .gitignore) (branch $1) in '],
+  [/изменены файлы вне git \(в \.gitignore\) в /g, 'files outside git changed (in .gitignore) in '],
   [/, правки не через git\/деплой: /g, ', changes outside git/deploy: '],
   [/код изменен не через git\/деплой в /g, 'code changed outside git/deploy in '],
   [/не закоммиченная правка в рабочей копии git \(ветка (\S+)\) в /g, 'uncommitted edit in the git working copy (branch $1) in '],
