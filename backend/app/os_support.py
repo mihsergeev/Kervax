@@ -23,6 +23,11 @@
 установкой). Новое ядро, новый пакет или перезагрузка и снова "нужна" - другой отпечаток, пункт
 возвращается сам, а устаревшую заглушку сборщик убирает с записью в журнал (stale_mutes).
 
+Так же "до нового" глушатся и остальные пункты (osupd:<вид>@<отпечаток>): конец поддержки - до смены
+версии ОС или ее состояния (обычная поддержка кончилась, Ubuntu Pro подключен, кончается ESM), обновления
+безопасности - до смены причины, почему они не ставятся (выключены, не установлены, не запускаются),
+список пакетов - до следующего apt update. Ушел пункт - заглушку тоже снимает сборщик.
+
 Обновлен только dbus - не "нужна перезагрузка", а "при случае" (soft): dbus на ходу не
 перезапускают (от него зависят systemd-logind и сессии), Ubuntu поэтому и просит перезагрузку, а
 работающий старый dbus сам по себе ничего не ломает. Такие серверы годами висели в одной группе с
@@ -37,7 +42,7 @@ from datetime import date, datetime, timezone
 from app import reboot_survive
 
 MUTE_PREFIX = "osupd:"
-# заглушка перезагрузки до нового: osupd:reboot@<отпечаток>
+# заглушка перезагрузки до нового: osupd:reboot@<отпечаток>; у других видов так же, osupd:<вид>@
 REBOOT_NEW = MUTE_PREFIX + "reboot@"
 # пакеты, после которых перезагрузка нужна "при случае": демон, который на ходу не перезапускают
 _SOFT_RX = re.compile(r"^(dbus|libdbus)")
@@ -108,19 +113,24 @@ def advice(rep: dict, now: datetime, mutes: list[str] | None = None) -> list[dic
     """Что сделать с ОС ноды: [{"kind", "level", "text", "key", "muted", "fix"}], уровень 2 - уже
     дыра, 1 - пора; muted - человек решил, что так и должно быть (ключ key в alert_mutes); fix -
     шаги [{"id", "cmd"?, "arg"?, "alt"?}], alt - другой путь вместо шагов выше.
-    У перезагрузки еще new_key - заглушка до нового (osupd:reboot@<отпечаток>), muted_new - заглушена
-    ею, а не решением "перезагружать нельзя"; soft - обновлен только dbus, перезагрузить при случае."""
+    new_key - заглушка до нового (osupd:<вид>@<отпечаток>), muted_new - заглушена ею, а не решением
+    "обновить нельзя"; soft - обновлен только dbus, перезагрузить при случае."""
     out = _advice(rep, now)
     got = set(mutes or [])
     for x in out:
         x["key"] = MUTE_PREFIX + x["kind"]
         x["muted"] = x["key"] in got
-        if x["kind"] == "reboot":
-            x["new_key"] = REBOOT_NEW + reboot_sig(rep)
-            x["muted_new"] = not x["muted"] and x["new_key"] in got
-            x["muted"] = x["muted"] or x["muted_new"]
+        x["new_key"] = _new_key(x["kind"], rep, x.pop("sig", ""))
+        x["muted_new"] = not x["muted"] and x["new_key"] in got
+        x["muted"] = x["muted"] or x["muted_new"]
         x["fix"] = _fix(x["kind"], rep, now, got)
     return out
+
+
+def _new_key(kind: str, rep: dict, sig: str) -> str:
+    if kind == "reboot":
+        return REBOOT_NEW + reboot_sig(rep)
+    return f"{MUTE_PREFIX}{kind}@{hashlib.sha1(sig.encode()).hexdigest()[:10]}"
 
 
 def _upd(rep: dict) -> dict:
@@ -197,13 +207,19 @@ def reboot_sig(rep: dict) -> str:
     return hashlib.sha1(base.encode()).hexdigest()[:10]
 
 
-def stale_mutes(rep: dict, mutes: list[str] | None) -> list[tuple[str, str]]:
-    """Заглушки перезагрузки до нового, которые уже не про то, что на ноде: [(ключ, почему снята)].
-    Без os_upd в отчете (старый агент, нет данных) не снимаем ничего."""
+_STALE_WHY = {"eol": "заглушка конца поддержки ОС снята", "security": "заглушка обновлений безопасности снята",
+              "apt": "заглушка списка пакетов снята"}
+
+
+def stale_mutes(rep: dict, mutes: list[str] | None, now: datetime | None = None) -> list[tuple[str, str]]:
+    """Заглушки до нового, которые уже не про то, что на ноде: [(ключ, почему снята)]. Перезагрузка,
+    обновления и apt без os_upd в отчете (старый агент, нет данных) не снимаются, конец поддержки - без
+    имени ОС."""
+    out = _stale_other(rep, mutes, now or datetime.now(timezone.utc))
     old = [str(m) for m in mutes or [] if str(m).startswith(REBOOT_NEW)]
     u = _upd(rep)
     if not old or not u:
-        return []
+        return out
     sig = reboot_sig(rep)
     if not sig:
         why = "перезагрузка больше не нужна"
@@ -212,7 +228,30 @@ def stale_mutes(rep: dict, mutes: list[str] | None) -> list[tuple[str, str]]:
         why = "после заглушки снова нужна перезагрузка" + (f" (обновлены {', '.join(pkgs)})" if pkgs else "")
     else:
         why = f"в /boot новое ядро {u['kernel_new']}"
-    return [(m, why) for m in old if m != REBOOT_NEW + sig]
+    return out + [(m, why) for m in old if m != REBOOT_NEW + sig]
+
+
+def _stale_other(rep: dict, mutes: list[str] | None, now: datetime) -> list[tuple[str, str]]:
+    old = [str(m) for m in mutes or [] if str(m).startswith(MUTE_PREFIX) and "@" in str(m)
+           and not str(m).startswith(REBOOT_NEW)]
+    if not old:
+        return []
+    cur = {x["kind"]: _new_key(x["kind"], rep, x.get("sig", "")) for x in _advice(rep, now)}
+    out = []
+    for m in old:
+        kind = m[len(MUTE_PREFIX):].split("@", 1)[0]
+        if kind not in _STALE_WHY or m == cur.get(kind):
+            continue
+        if kind == "eol" and not rep.get("os") or kind != "eol" and not _upd(rep):
+            continue
+        if kind == "eol":
+            why = f"пункт ушел, ОС {rep['os']}" if kind not in cur else "у поддержки ОС новое состояние"
+        elif kind == "security":
+            why = "обновления безопасности установлены" if kind not in cur else "у обновлений безопасности новая причина"
+        else:
+            why = "список пакетов обновлен"
+        out.append((m, f"{_STALE_WHY[kind]}: {why}"))
+    return out
 
 
 APT_UPDATE = "sudo apt update"
@@ -291,19 +330,19 @@ def _advice(rep: dict, now: datetime) -> list[dict]:
             # Ubuntu Pro подключен (агент 2.39 видит репозиторий ESM): срок - конец ESM
             left_e = (esm - today).days
             if left_e <= EOL_WARN_DAYS:
-                out.append({"kind": "eol", "level": 1, "text": (
-                    f"исправления Ubuntu Pro (ESM) для {name} кончатся {esm.strftime('%d.%m.%Y')}, через {_days(left_e)}")})
+                out.append({"kind": "eol", "level": 1, "sig": f"{name}:esm-soon", "text": (
+                    f"{name}: исправления Ubuntu Pro (ESM) кончатся {esm.strftime('%d.%m.%Y')}, через {_days(left_e)}")})
         elif left < 0 and paid and esm and esm >= today:
             # что делать, если переезд невозможен: ESM в Ubuntu Pro (pro attach <токен>)
-            out.append({"kind": "eol", "level": 2, "text": (
-                f"обычная поддержка {name} кончилась {when}: исправления безопасности дальше только в Ubuntu Pro "
-                f"(ESM до {esm.strftime('%d.%m.%Y')}, pro attach) или после переезда на новую LTS")})
+            out.append({"kind": "eol", "level": 2, "sig": f"{name}:ended-esm", "text": (
+                f"{name}: обычная поддержка кончилась {when}, дальше Ubuntu Pro (ESM до {esm.strftime('%d.%m.%Y')}) "
+                f"или переезд на новую LTS")})
         elif left < 0:
-            out.append({"kind": "eol", "level": 2, "text": (
-                f"поддержка {name} кончилась {when}, ESM тоже ({esm.strftime('%d.%m.%Y')}): обновлений безопасности больше нет"
-                if paid and esm else f"поддержка {name} кончилась {when}: обновлений безопасности больше нет")})
+            out.append({"kind": "eol", "level": 2, "sig": f"{name}:ended", "text": (
+                f"{name}: поддержка кончилась {when}, ESM тоже ({esm.strftime('%d.%m.%Y')}), обновлений безопасности больше нет"
+                if paid and esm else f"{name}: поддержка кончилась {when}, обновлений безопасности больше нет")})
         elif left <= EOL_WARN_DAYS:
-            out.append({"kind": "eol", "level": 1, "text": f"поддержка {name} кончится {when}, через {_days(left)}"})
+            out.append({"kind": "eol", "level": 1, "sig": f"{name}:soon", "text": f"{name}: поддержка кончится {when}, через {_days(left)}"})
     if not u:
         return out
     ts_now = now.timestamp()
@@ -341,11 +380,12 @@ def _advice(rep: dict, now: datetime) -> list[dict]:
         why = {"off": "автообновления выключены", "none": "unattended-upgrades не установлен"}.get(unatt)
         if why is None:
             why = f"автообновления не запускались {_days(ud)}" if ud is not None else "автообновления не запускались"
-        out.append({"kind": "security", "level": 1, "text": (
+        # причина, а не число: новые обновления безопасности выходят каждую неделю
+        out.append({"kind": "security", "level": 1, "sig": unatt if unatt in ("off", "none") else "stale", "text": (
             f"не установлено {sec} {_plural(sec, 'обновление', 'обновления', 'обновлений')} безопасности: {why}")})
     ad = ago(u.get("apt_ts"))
     if ad is not None and ad >= APT_STALE_DAYS:
-        out.append({"kind": "apt", "level": 1,
+        out.append({"kind": "apt", "level": 1, "sig": str(u.get("apt_ts")),
                     "text": f"список пакетов не обновлялся {_days(ad)}: о новых обновлениях нода не знает"})
     return out
 

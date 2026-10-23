@@ -33,6 +33,8 @@ import { ExpirySnoozePick, ExpirySnoozeState, expEntry, expHidden, expSnoozeTip 
 import { useAuth } from './auth'
 import { IconBackups, IconDocker, IconKube, IconServers, IconSites } from './icons'
 import { CountryFlag } from './CountryFlag'
+import { ActGroup, QuickMute } from './ActGroup'
+import { grpMuteTip } from './homeGroups'
 import { NetTile, type Tone } from './NetLinks'
 import { AgentUpdRow, HelperUpdRow, UpdateAllButton, agentBehind, rolloutHosts as fleetHosts, useFleetRollout, useViaPanels } from './FleetUpdate'
 
@@ -64,8 +66,8 @@ type ActItem = {
   // серверов (раскрывается кликом); detail - что именно на этом сервере, без его имени
   grp?: string
   detail?: string
-  // заглушка до нового (osupd:reboot@<отпечаток>): галки в раскрытой группе и 🔕 у строки; muted -
-  // уже заглушен, виден внизу группы строкой "заглушено N, показать"
+  // заглушка до нового (osupd:<вид>@ у ОС, home:<группа>@ у остальных, ключ дает бэкенд): галки в
+  // раскрытой группе и 🔕 у строки; muted - уже заглушен, виден внизу группы "заглушено N, показать"
   mute?: string
   muted?: boolean
   tip?: string // всплывающая подсказка строки: полный список пакетов
@@ -295,37 +297,13 @@ function groupActs(items: ActItem[]): ActRow[] {
   return rows.sort((a, b) => Number(bad(b)) - Number(bad(a)))
 }
 
-// Подпись группы: что за проблема, без имени сервера (оно в списке после)
-function grpLabel(grp: string, t: T): string {
-  const fixed: Record<string, string> = {
-    'access-s': t('учетки с доступом, в которые давно не входят - проверьте, нужны ли они'),
-    'access-w': t('слабые SSH-ключи - замените на ed25519'),
-    'os-eol': t('поддержка ОС кончилась или скоро кончится'),
-    'os-reboot': t('ждут перезагрузки после обновления ядра или библиотек'),
-    'os-reboot-soft': t('обновлен только dbus - перезагрузить при случае'),
-    'os-security': t('не установлены обновления безопасности'),
-    'os-apt': t('список пакетов давно не обновлялся'),
-    'ssh-ssh_password': t('SSH пускает по паролю'),
-    'noboot-u': t('после перезагрузки не запустятся юниты: работают, но не включены'),
-    'noboot-d': t('после перезагрузки не поднимутся контейнеры без restart policy'),
-    dbdump: t('базы без отдельного дампа'),
-    'd-acc': t('Docker без доступа - включите read-only proxy'),
-    'k-acc': t('Kubernetes без доступа - запустите kube-setup'),
-    'd-old': t('устарел образ внешнего прокси - обновите'),
-    'k-noagent': t('ноды кластера без агента'),
-    'bs-restic': t('на сервере бэкапов старый restic - обновите'),
-    'bs-setup': t('бэкап-сервер без статистики - запустите backupserver-setup'),
-    'bk-http': t('бэкап идет по http без шифрования - переведите на https'),
-    onb: t('новые серверы: проверьте, что нашлось при подключении, и закройте подключение в карточке'),
-    dockrisk: t('у контейнеров ключи от хоста - взлом приложения в них даст root на сервере'),
-    'sw-eol': t('ПО без поддержки - обновите'),
-    'sw-soon': t('скоро кончится поддержка ПО - запланируйте обновление'),
-  }
-  return fixed[grp] ?? grp
-}
-
 function actionItems(servers: Server[], relProblem: string, t: T): ActItem[] {
   const items: ActItem[] = []
+  // ключ заглушки пункта группы и заглушен ли он (backend app/home_mute.py)
+  const hm = (s: Server, grp: string) => {
+    const mute = s.home_mutes?.[grp]
+    return { grp, mute, muted: !!mute && (s.alert_mutes ?? []).includes(mute) }
+  }
   // Релиз агента собран криво (раздаётся не тот бинарь, что подписан) — обновлять
   // нечем, и без этой строки поломка молчит: агенты просто вечно отвергают обновление.
   if (relProblem) {
@@ -351,11 +329,11 @@ function actionItems(servers: Server[], relProblem: string, t: T): ActItem[] {
     // Только что поставленная нода: установщик еще поднимает прокси Docker и ставит helper'ы
     // (их бэкенд в эти минуты и не требует). Без паузы плашки мигали и пропадали сами.
     if (rep?.docker?.present && !rep.docker.access && !s.fresh) {
-      items.push({ key: `d-acc-${s.id}`, icon: '🐳', section: 'docker', id: s.id, name: s.name, cc: s.country, grp: 'd-acc',
+      items.push({ key: `d-acc-${s.id}`, icon: '🐳', section: 'docker', id: s.id, name: s.name, cc: s.country, ...hm(s, 'd-acc'),
         text: t('{name}: Docker без доступа — включите read-only proxy', { name: s.name }) })
     }
     if (rep?.kube?.present && !rep.kube.access && !s.fresh) {
-      items.push({ key: `k-acc-${s.id}`, icon: '☸', section: 'kuber', id: s.id, name: s.name, cc: s.country, grp: 'k-acc',
+      items.push({ key: `k-acc-${s.id}`, icon: '☸', section: 'kuber', id: s.id, name: s.name, cc: s.country, ...hm(s, 'k-acc'),
         text: t('{name}: Kubernetes без доступа — запустите kube-setup', { name: s.name }) })
     }
     // Внешний прокси на старом образе: смотрит в интернет, а за год в caddy и traefik закрывают
@@ -365,7 +343,7 @@ function actionItems(servers: Server[], relProblem: string, t: T): ActItem[] {
     if (old.length > 0) {
       const list = old.map((p) => `${p.name} (${proxyBuilt(p)})`).join(', ')
       items.push({ key: `d-old-${s.id}`, icon: '🧓', section: 'docker', id: s.id, name: s.name, cc: s.country, sec: 'proxy',
-        grp: 'd-old', detail: list,
+        ...hm(s, 'd-old'), detail: list,
         text: t('{name}: устарел образ внешнего прокси {list} - обновите', { name: s.name, list }) })
     }
     // Ноды кластера без агента: на них не видно ни дисков, ни SMART, ни упавших юнитов, ни
@@ -375,7 +353,7 @@ function actionItems(servers: Server[], relProblem: string, t: T): ActItem[] {
     if (unmon.length > 0) {
       const names = unmon.slice(0, 4).map((n) => n.name).join(', ') + (unmon.length > 4 ? ', ...' : '')
       items.push({ key: `k-noagent-${s.id}`, icon: '☸', section: 'kuber', id: s.id, name: s.name, cc: s.country, sec: 'nodes',
-        grp: 'k-noagent', detail: `${unmon.length} (${names})`,
+        ...hm(s, 'k-noagent'), detail: `${unmon.length} (${names})`,
         text: t('{name}: нод кластера без агента - {n} ({nodes})', { name: s.name, n: unmon.length, nodes: names }) })
     }
     // Диски дойдут до 90% износа меньше чем через полгода (backend app/disk_wear.py). Ближе двух
@@ -386,27 +364,27 @@ function actionItems(servers: Server[], relProblem: string, t: T): ActItem[] {
       const day = when.split('-').reverse().join('.')
       const disks = plan.map((w) => w.dev).join(', ')
       items.push({ key: `wear-${s.id}`, icon: '💽', section: 'servers', id: s.id, name: s.name, cc: s.country, sec: 'diskhealth',
-        grp: 'wear-plan', detail: `${disks}: ${day}`,
+        ...hm(s, 'wear-plan'), detail: `${disks}: ${day}`,
         text: t('{name}: диски {disks} дойдут до 90% износа примерно к {d} - запланируйте замену', { name: s.name, disks, d: day }) })
     }
     // restic самого сервера бэкапов (prune, forget, check) старше той версии, до которой его
     // обновляет helper: обычно обновление не скачалось. Ведем в модалку сервера, там команда.
     if (s.bsrv_restic_old) {
       items.push({ key: `bs-restic-${s.id}`, icon: '🧓', section: 'backups', id: s.id, name: s.name, cc: s.country, srv: true, sec: 'server',
-        grp: 'bs-restic', detail: `restic ${s.bsrv_restic_old}`,
+        ...hm(s, 'bs-restic'), detail: `restic ${s.bsrv_restic_old}`,
         text: t('{name}: на сервере бэкапов старый restic {v} - обновите', { name: s.name, v: s.bsrv_restic_old }) })
     }
     // Идет подключение (backend app/onboard.py): алертом уходят только офлайн и критичный диск,
     // остальное ждет, пока человек посмотрит, что нашлось, и закроет подключение в карточке
     if (s.onboard) {
-      items.push({ key: `onb-${s.id}`, icon: '🆕', section: 'servers', id: s.id, name: s.name, cc: s.country, grp: 'onb',
+      items.push({ key: `onb-${s.id}`, icon: '🆕', section: 'servers', id: s.id, name: s.name, cc: s.country, ...hm(s, 'onb'),
         text: t('{name}: идет подключение - посмотрите, что нашлось, и закройте его в карточке', { name: s.name }) })
     }
     // бэкап-сервер найден (по docker), но статистики репо нет → нужен backupserver-setup
     const bs = rep?.backup_server
     if (bs?.present && (!bs.repos || bs.repos.length === 0)) {
       items.push({ key: `bs-setup-${s.id}`, icon: '🗄', section: 'backups', id: s.id, name: s.name, cc: s.country, srv: true, sec: 'repos',
-        grp: 'bs-setup',
+        ...hm(s, 'bs-setup'),
         text: t('{name}: бэкап-сервер — включите статистику (backupserver-setup)', { name: s.name }) })
     }
     // setup-скрипты (helper'ы) устарели → переустановить. Версии сверяет бэкенд (helper_advice);
@@ -421,7 +399,7 @@ function actionItems(servers: Server[], relProblem: string, t: T): ActItem[] {
       // клиента, бэкап-сервера или вообще без бэкапа (иначе пункт вёл бы в пустоту)
       const db = dbAuditNames(dbs).join(', ')
       items.push({ key: `dbdump-${s.id}`, icon: '🛢', section: 'backups', id: s.id, name: s.name, cc: s.country, sec: 'coverage',
-        grp: 'dbdump', detail: db, text: t('{name}: {db} — нужен отдельный дамп', { name: s.name, db }) })
+        ...hm(s, 'dbdump'), detail: db, text: t('{name}: {db} — нужен отдельный дамп', { name: s.name, db }) })
     }
     // Бэкап по http через интернет (app/backup_target.py): логин и пароль репозитория летят открытым
     // текстом. Таких серверов много, поэтому без алерта, одним пунктом на всех; как перевести на https и
@@ -432,7 +410,7 @@ function actionItems(servers: Server[], relProblem: string, t: T): ActItem[] {
       const where = backupDestWhere(bk)
       const dest = d?.srv ? `${d.srv.name} (${where})` : where
       items.push({ key: `bk-http-${s.id}`, icon: '🔓', section: 'backups', id: s.id, name: s.name, cc: s.country, sec: 'manage',
-        grp: 'bk-http', detail: dest,
+        ...hm(s, 'bk-http'), detail: dest,
         text: t('{name}: бэкап идет по http без шифрования на {dest} - переведите на https', { name: s.name, dest }) })
     }
     // ОС: конец поддержки, перезагрузка, обновления безопасности - по пункту на вид совета:
@@ -453,7 +431,7 @@ function actionItems(servers: Server[], relProblem: string, t: T): ActItem[] {
       if (!sw.length) continue
       const list = sw.map((x) => x.what).join(', ')
       items.push({ key: `sw-${lvl}-${s.id}`, icon: lvl >= 2 ? '⛔' : '🧰', section: 'servers', id: s.id,
-        name: s.name, cc: s.country, sec: 'software', grp: lvl >= 2 ? 'sw-eol' : 'sw-soon', detail: list,
+        name: s.name, cc: s.country, sec: 'software', ...hm(s, lvl >= 2 ? 'sw-eol' : 'sw-soon'), detail: list,
         text: lvl >= 2 ? t('{name}: без поддержки {list}', { name: s.name, list })
           : t('{name}: скоро кончится поддержка {list}', { name: s.name, list }) })
     }
@@ -465,7 +443,7 @@ function actionItems(servers: Server[], relProblem: string, t: T): ActItem[] {
     if (risk.length > 0 && !(s.alert_mutes ?? []).includes('docker_risk')) {
       const list = risk.map((x) => `${x.name} (${dockRiskText(x, t)})`).join(', ')
       items.push({ key: `dockrisk-${s.id}`, icon: '🔑', section: 'docker', id: s.id, name: s.name, cc: s.country, sec: 'host',
-        grp: 'dockrisk', detail: list,
+        ...hm(s, 'dockrisk'), detail: list,
         text: t('{name}: у контейнеров ключи от хоста: {list} - взлом приложения в них даст root на сервере',
           { name: s.name, list }) })
     }
@@ -473,27 +451,27 @@ function actionItems(servers: Server[], relProblem: string, t: T): ActItem[] {
     const nb = s.noboot_advice
     if (nb && nb.docker.length > 0)
       items.push({ key: `noboot-d-${s.id}`, icon: '🔁', section: 'docker', id: s.id, name: s.name, cc: s.country, sec: 'boot',
-        grp: 'noboot-d', detail: shortList(nb.docker, t),
+        ...hm(s, 'noboot-d'), detail: shortList(nb.docker, t),
         text: t('{name}: после перезагрузки не поднимутся контейнеры без restart policy: {list}',
           { name: s.name, list: shortList(nb.docker, t) }) })
     if (nb && nb.units.length > 0)
       items.push({ key: `noboot-u-${s.id}`, icon: '🔁', section: 'servers', id: s.id, name: s.name, cc: s.country,
-        sec: 'noboot', grp: 'noboot-u', detail: shortList(nb.units, t), text: t('{name}: после перезагрузки не запустятся {list}: работают, но не включены',
+        sec: 'noboot', ...hm(s, 'noboot-u'), detail: shortList(nb.units, t), text: t('{name}: после перезагрузки не запустятся {list}: работают, но не включены',
           { name: s.name, list: shortList(nb.units, t) }) })
     // учетки с доступом, в которые давно не входят, и слабые ключи
     const ac = s.access_advice
     if (ac && ac.stale.length > 0)
       items.push({ key: `access-s-${s.id}`, icon: '🗝', section: 'servers', id: s.id, name: s.name, cc: s.country,
-        sec: 'access', grp: 'access-s', detail: shortList(ac.stale, t), text: t('{name}: учетки с доступом, в которые давно не входят: {list} - проверьте, нужны ли они',
+        sec: 'access', ...hm(s, 'access-s'), detail: shortList(ac.stale, t), text: t('{name}: учетки с доступом, в которые давно не входят: {list} - проверьте, нужны ли они',
           { name: s.name, list: shortList(ac.stale, t) }) })
     if (ac && ac.weak.length > 0)
       items.push({ key: `access-w-${s.id}`, icon: '🗝', section: 'servers', id: s.id, name: s.name, cc: s.country,
-        sec: 'access', grp: 'access-w', detail: shortList(ac.weak, t), text: t('{name}: слабые SSH-ключи у {list} - замените на ed25519',
+        sec: 'access', ...hm(s, 'access-w'), detail: shortList(ac.weak, t), text: t('{name}: слабые SSH-ключи у {list} - замените на ed25519',
           { name: s.name, list: shortList(ac.weak, t) }) })
     // SSH пускает по паролю, а порт открыт в интернет; "вход по паролю нужен" - решение, сюда не идет
     for (const a of (s.ssh_advice ?? []).filter((a) => !a.muted)) {
       items.push({ key: `ssh-${s.id}`, icon: a.level >= 2 ? '⛔' : '🔐', section: 'servers', id: s.id,
-        name: s.name, cc: s.country, sec: 'ssh', grp: `ssh-${a.kind}`, detail: a.text, text: `${s.name}: ${a.text}` })
+        name: s.name, cc: s.country, sec: 'ssh', ...hm(s, `ssh-${a.kind}`), detail: a.text, text: `${s.name}: ${a.text}` })
     }
   }
   return items
@@ -726,8 +704,7 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
   // "Требует действий": раскрытые группы и показ всех строк сверх ATTENTION_LIMIT
   const [openGrps, setOpenGrps] = useState<Set<string>>(() => new Set())
   const [actAll, setActAll] = useState(false)
-  // галки в раскрытой группе (ключи пунктов) и идет ли заглушка или возврат
-  const [actSel, setActSel] = useState<Set<string>>(() => new Set())
+  // идет заглушка одиночной строки (у групп свое, ActGroup.tsx)
   const [actBusy, setActBusy] = useState(false)
   const toggleGrp = (g: string) =>
     setOpenGrps((prev) => {
@@ -777,36 +754,19 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
     updateServer(id, { alert_mutes: next }).then(load).catch(() => {})
   }, [servers, load])
   // Заглушить до нового (on) или вернуть пункты "Требует действий": ключ пункта в alert_mutes сервера.
-  // Прежние заглушки того же вида (до "@") уходят: они про набор пакетов, которого уже нет
-  const muteActs = (list: ActItem[], on: boolean) => {
+  // Прежние заглушки того же вида (до "@") уходят: они про то, чего на сервере уже нет
+  const muteActs = (list: ActItem[], on: boolean): Promise<unknown> => {
     const byId = new Map((servers ?? []).map((s) => [s.id, s]))
     const jobs = list.flatMap((it) => {
       const s = it.id != null ? byId.get(it.id) : undefined
       if (!s || !it.mute) return []
-      const pre = it.mute.slice(0, it.mute.indexOf('@') + 1)
-      const cur = (s.alert_mutes ?? []).filter((k) => (on ? !k.startsWith(pre) : k !== it.mute))
+      const at = it.mute.indexOf('@')
+      const same = (k: string) => (at < 0 ? k === it.mute : k.startsWith(it.mute!.slice(0, at + 1)))
+      const cur = (s.alert_mutes ?? []).filter((k) => (on ? !same(k) : k !== it.mute))
       return [updateServer(s.id, { alert_mutes: on ? [...cur, it.mute] : cur })]
     })
-    if (!jobs.length) return
-    setActBusy(true)
-    Promise.allSettled(jobs)
-      .then(load)
-      .finally(() => {
-        setActBusy(false)
-        setActSel((prev) => {
-          const n = new Set(prev)
-          for (const it of list) n.delete(it.key)
-          return n
-        })
-      })
+    return Promise.allSettled(jobs).then(load)
   }
-  const pickActs = (keys: string[], on: boolean) =>
-    setActSel((prev) => {
-      const n = new Set(prev)
-      for (const k of keys) if (on) n.add(k)
-      else n.delete(k)
-      return n
-    })
   // 🔕 с выбором срока: на час, день, неделю (снуз) или постоянно. Ключи без снуза (рост памяти,
   // перезапуски, пропавший порт - их бэкенд читает только из alert_mutes) глушатся сразу постоянно
   const [mutePick, setMutePick] = useState<string | null>(null)
@@ -1095,18 +1055,6 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
       </div>
     )
   }
-  // 🔕 у пункта, который глушится до нового: в подсказке, когда он вернется сам
-  const muteNewTip = t('Заглушить до нового: пункт вернется сам, если обновится новое ядро или пакет или сервер перезагрузится и снова попросит перезагрузку')
-  const quickNew = (it: ActItem) =>
-    it.mute && !isViewer ? (
-      <span className="quick-mute" title={muteNewTip} role="button"
-        onClick={(e) => {
-          e.stopPropagation()
-          if (!actBusy) muteActs([it], true)
-        }}>
-        🔕
-      </span>
-    ) : null
   const actRow = (it: ActItem) => (
     <button key={it.key} className="home-attention-row" title={it.tip} onClick={() => onOpen(it.section, it.id, it.srv, it.sec)}>
       <span className={`lk-dot ${it.fleet ? 'lk-dot-info' : 'lk-dot-warn'}`} />
@@ -1114,108 +1062,25 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
       <span className="home-attention-txt">
         <CountryFlag code={it.cc} /> {it.text}
       </span>
-      {quickNew(it)}
+      {it.mute && !isViewer && it.grp && (
+        <QuickMute tip={grpMuteTip(it.grp, t)} busy={actBusy}
+          onMute={() => {
+            setActBusy(true)
+            muteActs([it], true).finally(() => setActBusy(false))
+          }} />
+      )}
       <span className="home-open">→</span>
     </button>
   )
-  // строка внутри раскрытой группы: сервер и что на нем, без повтора самой проблемы. В группе, где
-  // пункты глушатся (pick), строка - div с галкой: чекбокс внутри кнопки браузеры не кликают
-  const subRow = (it: ActItem, pick = false) => {
-    const go = () => onOpen(it.section, it.id, it.srv, it.sec)
-    const txt = (
-      <span className="home-attention-txt">
-        <CountryFlag code={it.cc} /> <b>{it.name}</b>
-        {it.detail ? <span className="muted"> - {it.detail}</span> : null}
-      </span>
+  // группа - общий компонент с галками и заглушкой (ActGroup.tsx)
+  const grpRow = (r: ActRow) =>
+    'one' in r ? (
+      actRow(r.one)
+    ) : (
+      <ActGroup key={`g-${r.grp}`} grp={r.grp} items={r.items} muted={r.muted} open={openGrps.has(r.grp)}
+        canMute={!isViewer} onToggle={() => toggleGrp(r.grp)} onMute={muteActs}
+        onOpen={(it) => onOpen(it.section, it.id, it.srv, it.sec)} />
     )
-    if (!pick && !it.muted && !it.mute)
-      return (
-        <button key={it.key} className="home-attention-row home-attention-subrow" title={it.tip} onClick={go}>
-          {txt}
-          <span className="home-open">→</span>
-        </button>
-      )
-    return (
-      <div key={it.key} role="button" tabIndex={0} title={it.tip}
-        className={`home-attention-row home-attention-subrow${it.muted ? ' home-attention-muted' : ''}`}
-        onClick={go} onKeyDown={(e) => e.key === 'Enter' && e.target === e.currentTarget && go()}>
-        {pick && !it.muted && (
-          <input type="checkbox" className="home-sel-box" checked={actSel.has(it.key)} aria-label={it.name}
-            onClick={(e) => e.stopPropagation()} onChange={(e) => pickActs([it.key], e.target.checked)} />
-        )}
-        {txt}
-        {it.muted
-          ? !isViewer && (
-              <button className="linklike small" disabled={actBusy}
-                onClick={(e) => {
-                  e.stopPropagation()
-                  muteActs([it], false)
-                }}>
-                {t('вернуть')}
-              </button>
-            )
-          : quickNew(it)}
-        <span className="home-open">→</span>
-      </div>
-    )
-  }
-  const grpRow = (r: ActRow) => {
-    if ('one' in r) return actRow(r.one)
-    const open = openGrps.has(r.grp)
-    const names = shortList(r.items.map((x) => x.name ?? ''), t, 4)
-    const icon = r.items.some((x) => x.icon === '⛔') ? '⛔' : r.items[0].icon
-    // заглушить можно галками: выбрать все, заглушить выбранные; заглушенные - строкой внизу
-    const mutable = isViewer ? [] : r.items.filter((x) => x.mute)
-    const picked = mutable.filter((x) => actSel.has(x.key))
-    const allOn = mutable.length > 0 && picked.length === mutable.length
-    const mOpen = openGrps.has(`m-${r.grp}`)
-    return (
-      <div key={`g-${r.grp}`} className={`home-attention-grpbox${open ? ' open' : ''}`}>
-        <button className="home-attention-row" onClick={() => toggleGrp(r.grp)}>
-          <span className="lk-dot lk-dot-warn" />
-          <span className="home-attention-ico">{icon}</span>
-          <span className="home-attention-txt">
-            {grpLabel(r.grp, t)}
-            <span className="muted"> · {t('серверов: {n}', { n: r.items.length })} ({names})</span>
-            {r.muted.length > 0 && <span className="muted"> · {t('заглушено {n}', { n: r.muted.length })}</span>}
-          </span>
-          <span className="home-open">{open ? '▾' : '▸'}</span>
-        </button>
-        {open && (
-          <div className="home-attention-sub">
-            {mutable.length > 1 && (
-              <div className="home-sel-bar">
-                <label className="home-sel-all">
-                  <input type="checkbox" className="home-sel-box" checked={allOn}
-                    onChange={() => pickActs(mutable.map((x) => x.key), !allOn)} />
-                  {t('выбрать все')}
-                </label>
-                <button className="ghost small" disabled={!picked.length || actBusy} title={muteNewTip}
-                  onClick={() => muteActs(picked, true)}>
-                  {picked.length ? t('заглушить выбранные ({n})', { n: picked.length }) : t('заглушить выбранные')}
-                </button>
-                <span className="muted small">{t('вернутся сами, если появится новое')}</span>
-              </div>
-            )}
-            {r.items.map((x) => subRow(x, mutable.length > 1 && !!x.mute))}
-            {r.muted.length > 0 && (
-              <div className="home-sel-foot">
-                <button className="linklike muted small" onClick={() => toggleGrp(`m-${r.grp}`)}>
-                  {mOpen ? t('скрыть заглушенные') : t('заглушено {n}, показать', { n: r.muted.length })}
-                </button>
-                {mOpen && !isViewer && r.muted.length > 1 && (
-                  <button className="linklike muted small" disabled={actBusy} onClick={() => muteActs(r.muted, false)}>
-                    {t('вернуть все')}
-                  </button>
-                )}
-              </div>
-            )}
-            {mOpen && r.muted.map((x) => subRow(x))}
-          </div>
-        )}
-      </div>
-    )
-  }
   // Сводка сверху: плитка на раздел, клик ведет в него. Тон плитки - по худшему в разделе:
   // красная - есть настоящая беда, желтая - только предупреждения
   const probTone = (list: ProbItem[]): Tone => (list.some((p) => p.down) ? 'bad' : list.length ? 'warn' : 'ok')

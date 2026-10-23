@@ -13,6 +13,7 @@ import {
   updateServer,
   type Server,
 } from './api'
+import { HOME_MUTE, homeMuteLabel } from './homeGroups'
 import { shortList } from './serverUtils'
 
 export type TFn = (s: string, params?: Record<string, string | number>) => string
@@ -128,9 +129,8 @@ export const NOBOOT_MUTE = 'noboot:'
 export const ACCESS_MUTE = 'access:'
 // ОС, которую сейчас не обновить или не перезагрузить: osupd:<вид совета> (eol, reboot, security, apt)
 export const OSUPD_MUTE = 'osupd:'
-// Перезагрузка, заглушенная до нового: osupd:reboot@<отпечаток набора пакетов> (app/os_support.py). Новый
-// пакет, новое ядро или перезагрузка и снова "нужна" - другой отпечаток, пункт возвращается сам
-export const OSUPD_REBOOT_NEW = 'osupd:reboot@'
+// Пункт ОС, заглушенный до нового: osupd:<вид>@<отпечаток> (app/os_support.py). У перезагрузки отпечаток -
+// набор пакетов, у конца поддержки - версия ОС и ее срок: новое - другой отпечаток, пункт возвращается сам
 // Версия ПО, которую сейчас не обновить: swver:<состояние>:<продукт>-<цикл>. У "скоро" - отложить до
 // конца поддержки: когда она кончится, у пункта другое состояние, и он вернется сам
 export const SWVER_MUTE = 'swver:'
@@ -153,6 +153,13 @@ export function osDecisionLabel(kind: string, t: TFn): string {
   if (kind === 'reboot') return t('перезагружать нельзя')
   return t('обновлять нельзя')
 }
+// Подпись заглушки до нового пункта ОС
+function osNewLabel(kind: string, t: TFn): string {
+  if (kind === 'reboot') return t('перезагрузка заглушена до нового')
+  if (kind === 'eol') return t('конец поддержки заглушен до нового')
+  if (kind === 'security') return t('обновления безопасности заглушены до нового')
+  return t('список пакетов заглушен до нового')
+}
 // Кнопка (done=false) и подпись (done=true) решения по версии ПО
 export function swDecisionLabel(state: string, done: boolean, t: TFn): string {
   if (state === 'soon') return done ? t('отложено до конца поддержки') : t('отложить до конца поддержки')
@@ -160,7 +167,10 @@ export function swDecisionLabel(state: string, done: boolean, t: TFn): string {
 }
 // Бессрочный мьют, который снимет сама панель: поломка диска - после замены диска и сборки массива
 // (app/disk_mute.py). Подпись вместо "бессрочно", иначе он выглядит забытым навсегда
+// Заглушка группы "Требует действий" (home:) тоже снимается сама: сборщик убирает ее, когда пункт
+// ушел или появилось новое (app/home_mute.py)
 export function muteAutoNote(k: string, t: TFn): string | null {
+  if (k.startsWith(HOME_MUTE)) return k.includes('@') ? t('снимется сам, если появится новое или пункт уйдет') : t('снимется сам, когда пункт уйдет')
   return k === 'disk_health' ? t('снимется сам после замены диска и сборки массива') : null
 }
 export function muteKindLabel(k: string, t: TFn): string | null {
@@ -168,7 +178,10 @@ export function muteKindLabel(k: string, t: TFn): string | null {
   if (k === 'access_audit') return t('Доступы: заброшенные учетки и слабые ключи')
   if (k.startsWith(NOBOOT_MUTE)) return `${t('не нужен после перезагрузки')}: ${k.slice(NOBOOT_MUTE.length)}`
   if (k.startsWith(ACCESS_MUTE)) return `${t('учетка нужна')}: ${k.slice(ACCESS_MUTE.length)}`
-  if (k.startsWith(OSUPD_REBOOT_NEW)) return `${t('Обновления ОС')}: ${t('перезагрузка заглушена до нового')}`
+  if (k.startsWith(OSUPD_MUTE) && k.includes('@'))
+    return `${t('Обновления ОС')}: ${osNewLabel(k.slice(OSUPD_MUTE.length).split('@')[0], t)}`
+  const home = homeMuteLabel(k, t)
+  if (home) return home
   if (k.startsWith(OSUPD_MUTE)) return `${t('Обновления ОС')}: ${osDecisionLabel(k.slice(OSUPD_MUTE.length), t)}`
   if (k.startsWith(SWVER_MUTE)) {
     const [st, what] = k.slice(SWVER_MUTE.length).split(':')

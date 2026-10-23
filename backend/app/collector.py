@@ -23,7 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app import alerts, audit, backup, backup_growth, checks as checks_exec, custom_backups, docker_exposure, flaky, heartbeat, settings_store
 from app import backup_state, backup_verify
-from app import os_support
+from app import home_mute, kube_coverage, os_support
 from app import request_watch
 from app import panel_errors
 from app import inside_probe
@@ -6221,6 +6221,11 @@ async def evaluate_servers(
                       Check.last_status, Check.last_checked_at,
                   ).where(Check.enabled.is_(True)))).all()}
         down_checks = [c for c in mon_by.values() if c.last_status == "down"]
+        # ноды кластера без агента сверяются со всеми серверами панели, как в списке серверов: только
+        # если есть заглушка этой группы, иначе незачем (app/home_mute.py)
+        kube_index = (kube_coverage.build_index(await session.scalars(select(Server)))
+                      if any(str(m).startswith(home_mute.PREFIX + "k-noagent") for x in servers for m in x.alert_mutes or [])
+                      else None)
     can_send = alerts.alerts_enabled(cfg) and not muted
     # окна обслуживания: сервер в идущем окне молчит, как под снузом (app/maint.py)
     maint_srv, _mc = maint.active(windows, now, cfg.get("tz") or "Europe/Moscow")
@@ -6507,11 +6512,14 @@ async def evaluate_servers(
         if s.kube_expiry_ignored and talking:
             for kk, new_e in kube_expiry_mod.step(s.kube_expiry_ignored, s.last_report or {}, now).items():
                 kexp_upd.append((s.id, kk, str((s.kube_expiry_ignored.get(kk) or {}).get("at") or ""), new_e))
-        # Перезагрузка, заглушенная до нового (app/os_support.py): на ноде уже другой набор пакетов
-        # или она перезагрузилась - заглушка больше ни о чем, пункт и так вернулся; убираем с записью в журнал
+        # Пункты "Требует действий", заглушенные до нового (app/os_support.py, app/home_mute.py): на ноде
+        # уже другой набор пакетов, другая ОС, другие базы или пункт ушел - заглушка больше ни о чем;
+        # убираем с записью в журнал
         if talking:
-            for mk, why in os_support.stale_mutes(s.last_report or {}, s.alert_mutes):
-                mute_lift.append((s.id, mk, f"заглушка перезагрузки снята: {why}"))
+            for mk, why in os_support.stale_mutes(s.last_report or {}, s.alert_mutes, now):
+                mute_lift.append((s.id, mk, why if mk.split("@")[0] != "osupd:reboot" else f"заглушка перезагрузки снята: {why}"))
+            for mk, why in home_mute.stale(s, now, kube_index):
+                mute_lift.append((s.id, mk, why))
         # Известные проблемы (app/known.py): снимок того, что отметили, закрытие, когда ушла
         # сама или вышел срок, и напоминание раз в неделю, что она все еще висит
         known_now: dict[str, dict] = {}
