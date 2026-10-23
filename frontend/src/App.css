@@ -178,6 +178,17 @@ button:disabled {
   cursor: default;
 }
 
+/* кнопка логов, закрытых учетке (LogsLocked.tsx): подсказка на обертке, выключенная кнопка
+   события мыши не получает, а без этого браузер не показал бы и подсказку обертки */
+.logs-locked {
+  display: inline-flex;
+  cursor: help;
+}
+.logs-locked button:disabled {
+  pointer-events: none;
+  opacity: 0.4;
+}
+
 button.ghost {
   background: transparent;
   color: var(--text-muted);
@@ -2114,6 +2125,7 @@ button.ghost.us-imp { padding: 0.1rem 0.5rem; font-size: 0.75rem; line-height: 1
   button.ghost.us-imp { opacity: 1; margin-top: 0.2rem; }
 }
 .us-role { max-width: 16rem; }
+.us-logs { margin: 0.4rem 0 0.6rem; }
 .us-form { flex-wrap: wrap; }
 .us-form .field { flex: 1 1 12rem; min-width: 0; }
 /* защита входа (LoginGuardSec): правило и строка добавления в белый список */

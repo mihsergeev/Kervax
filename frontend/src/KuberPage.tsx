@@ -35,6 +35,7 @@ import { EnrollModal, fmtRel, InstallModal } from './ServersPage'
 import { CardNav, FreshChip, markMuted, OvAreas, OvRows, secInfoOf, type OvRow, type SecDef, type SecInfo, type SecItem } from './cardLayout'
 import { NetTile, TileFilterChip, useTileFilter } from './NetLinks'
 import { KubeRestartsSec } from './KubeRestarts'
+import { LockedLogs } from './LogsLocked'
 
 // Вкладка «Кубер»: КОМПАКТНЫЙ список хостов с кластером; клик по хосту → модалка
 // с нодами, воркоадами и подами (статусы, рестарты, логи, управление). Агент читает
@@ -533,7 +534,7 @@ function PodRow({
   p: KubePod
   day?: number // перезапусков за сутки (restarts_day)
   canAct: boolean
-  onLogs?: () => void // нет у учетки только для просмотра: логи читаются командой на ноде
+  onLogs?: () => void // нет - логи закрыты учетке (только для просмотра без галки): кнопка приглушена
   onChanged: () => void
 }) {
   const { t } = useI18n()
@@ -606,10 +607,12 @@ function PodRow({
       </div>
       <div className={`docker-c-status mono small ${podTone(p)}`}>{p.phase}</div>
       <div className="docker-actions">
-        {onLogs && (
+        {onLogs ? (
           <button className="ghost icon-btn" onClick={onLogs} title={t('Логи')}>
             📄
           </button>
+        ) : (
+          <LockedLogs className="ghost icon-btn">📄</LockedLogs>
         )}
         {canAct && (
           <button className="ghost icon-btn" disabled={busy} onClick={act} title={done ? t('Удалить под (очистить)') : t('Перезапустить под')}>
@@ -658,8 +661,8 @@ function KubeHostModal({
   onAddNode: (n: KubeNodeRef) => void // завести ноду кластера в панели (форма добавления сервера)
 }) {
   const { t } = useI18n()
-  // логи - тоже команда агенту (POST), учетке только для просмотра бэкенд ее не даст
-  const canLogs = !useAuth().isViewer
+  // логи - тоже команда агенту (POST): учетке только для просмотра - если админ разрешил галкой
+  const { canLogs, isViewer } = useAuth()
   const [logsPod, setLogsPod] = useState<KubePod | null>(null)
   // лог прошлого запуска пода из раздела "Перезапуски"
   const [prevPod, setPrevPod] = useState<KubePod | null>(null)
@@ -745,7 +748,9 @@ function KubeHostModal({
   const [expErr, setExpErr] = useState<{ key: string; msg: string } | null>(null)
   const [expCopied, setExpCopied] = useState('')
   // отметку ставит любой, кроме наблюдателя: доступ панели к kube-api для нее не нужен
-  const canMark = canLogs
+  const canMark = !isViewer
+  // лог упавшего Job - то же чтение логов пода: нужен доступ панели к kube-api
+  const jobLogs = canLogs && kube.access
   const setExpIgnored = (e: KubeExpiry, ignored: boolean) => {
     const key = expKey(e)
     setExpBusy(key)
@@ -1152,12 +1157,17 @@ function KubeHostModal({
                           <div className="docker-c-status mono small t-down">{j.reason || 'Failed'}</div>
                         </div>
                         {/* лог сразу у трех свежих: дальше - старое, его открывают руками */}
-                        {pod && canAct && s.online && i < 3 && <JobLog server={s} pod={pod} onOpen={() => setLogsPod(pod)} />}
-                        {pod && canAct && (!s.online || i >= 3) && (
+                        {pod && jobLogs && s.online && i < 3 && <JobLog server={s} pod={pod} onOpen={() => setLogsPod(pod)} />}
+                        {pod && jobLogs && (!s.online || i >= 3) && (
                           <div className="job-log">
                             <button className="ghost small" onClick={() => setLogsPod(pod)}>
                               {t('Лог пода {pod}', { pod: pod.name })}
                             </button>
+                          </div>
+                        )}
+                        {pod && kube.access && !canLogs && (
+                          <div className="job-log">
+                            <LockedLogs className="ghost small">{t('Лог пода {pod}', { pod: pod.name })}</LockedLogs>
                           </div>
                         )}
                       </div>

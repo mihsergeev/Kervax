@@ -103,6 +103,7 @@ import { TimelineCard, TL_ICON } from './TimelineCard'
 import { PackagesCard } from './PackagesCard'
 import { VulnsCard } from './VulnsCard'
 import { JournalCard, JournalModal, journalBlocker } from './UnitJournal'
+import { LockedLogs } from './LogsLocked'
 import { LinksCard, NetTile, TrafficCard, type Tone } from './NetLinks'
 import { DiskWritersBlock, NetUsersCard } from './Usage'
 import { SoftwareCard } from './Software'
@@ -3671,12 +3672,14 @@ function PressureCard({ server: s }: { server: Server }) {
 
 function LoopingUnits({ server: s, onChanged }: { server: Server; onChanged: () => void }) {
   const { t } = useI18n()
-  const { isViewer } = useAuth()
+  const { isViewer, canLogs } = useAuth()
   const [busy, setBusy] = useState(false)
   const [jr, setJr] = useState<string | null>(null)
   const rows = (s.problems ?? []).filter((p) => p.kind === 'unit_loop' && p.unit)
   if (!rows.length) return null
-  const canJournal = !isViewer && !journalBlocker(s)
+  // журнал учетке только для просмотра - с галкой "может читать логи", без нее кнопка приглушена
+  const hasJournal = !journalBlocker(s)
+  const canJournal = canLogs && hasJournal
   const mute = async (unit: string) => {
     if (!window.confirm(t('Не алертить по {u}? Юнит перестанет алертить и как упавший, и как перезапускающийся.', { u: unit }))) return
     setBusy(true)
@@ -3705,16 +3708,20 @@ function LoopingUnits({ server: s, onChanged }: { server: Server; onChanged: () 
           <FixSteps steps={[{ id: 'log', cmd: `sudo journalctl -u ${p.unit} -n 50 --no-pager` }]}
             text={() => t('Найти причину в логе')}
             foot={t('systemd поднимает сервис сам, поэтому среди упавших его нет.')} />
-          {!isViewer && (
+          {(!isViewer || hasJournal) && (
             <div className="unit-actions small">
-              {canJournal && (
+              {canJournal ? (
                 <button className="ghost small row-act" onClick={() => setJr(p.unit!)}>
                   {t('Журнал')}
                 </button>
+              ) : (
+                hasJournal && <LockedLogs className="ghost small row-act">{t('Журнал')}</LockedLogs>
               )}
-              <button className="ghost small row-act" disabled={busy} onClick={() => mute(p.unit!)}>
-                🔕 {t('не алертить по этому юниту')}
-              </button>
+              {!isViewer && (
+                <button className="ghost small row-act" disabled={busy} onClick={() => mute(p.unit!)}>
+                  🔕 {t('не алертить по этому юниту')}
+                </button>
+              )}
             </div>
           )}
         </div>
@@ -4439,7 +4446,7 @@ function SshLogin({ server: s, onChanged }: { server: Server; onChanged: () => v
 
 function FailedUnits({ server: s, onChanged, onOom }: { server: Server; onChanged: () => void; onOom?: (ep: string) => void }) {
   const { t } = useI18n()
-  const { isViewer } = useAuth()
+  const { isViewer, canLogs } = useAuth()
   const [st, setSt] = useState<Record<string, { busy?: boolean; ok?: boolean; msg?: string; log?: string[] }>>({})
   const [picking, setPicking] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
@@ -4447,7 +4454,9 @@ function FailedUnits({ server: s, onChanged, onOom }: { server: Server; onChange
   const r = s.last_report
   const ub = unitsBlock(r)
   if (!ub || !ub.units.length) return null
-  const canJournal = !isViewer && !journalBlocker(s)
+  // журнал учетке только для просмотра - с галкой "может читать логи", без нее кнопка приглушена
+  const hasJournal = !journalBlocker(s)
+  const canJournal = canLogs && hasJournal
   const agentOk = verAtLeast(r?.agent_version, UNITS_AGENT)
   const canFix = ub.fix && agentOk && !isViewer
   const ref = r?.clock_unix || ub.ts
@@ -4603,10 +4612,12 @@ function FailedUnits({ server: s, onChanged, onOom }: { server: Server; onChange
                 </div>
               )}
               <div className="unit-actions small">
-                {canJournal && (
+                {canJournal ? (
                   <button className="ghost small row-act" onClick={() => setJr(jrUnit)}>
                     {t('Журнал')}
                   </button>
+                ) : (
+                  hasJournal && <LockedLogs className="ghost small row-act">{t('Журнал')}</LockedLogs>
                 )}
                 {canFix && !us?.busy && (
                   <>
@@ -6839,7 +6850,6 @@ function ServerDetail({
       case 'updates': return !!(r.os_upd || s.os_advice?.length || s.sw_advice?.length || r.docker?.containers?.length)
       case 'vulns':
       case 'pkgs': return !!r.pkgs?.n
-      case 'journal': return !isViewer
       case 'changes': return !!s.changes
       default: return true
     }

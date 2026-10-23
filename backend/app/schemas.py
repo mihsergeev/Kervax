@@ -61,6 +61,8 @@ class UserOut(BaseModel):
     sections: list[str] | None = None
     server_groups: list[str] | None = None
     site_groups: list[str] | None = None
+    # учетке только для просмотра разрешено читать логи (см. модель User)
+    can_read_logs: bool = False
 
 
 class MeOut(UserOut):
@@ -88,6 +90,8 @@ class UserCreate(BaseModel):
     sections: list[str] = Field(default_factory=list, max_length=20)
     server_groups: list[str] = Field(default_factory=list, max_length=100)
     site_groups: list[str] = Field(default_factory=list, max_length=100)
+    # чтение логов учеткой только для просмотра; у других ролей не хранится
+    can_read_logs: bool = False
 
 
 class UserUpdate(BaseModel):
@@ -97,6 +101,7 @@ class UserUpdate(BaseModel):
     sections: list[str] | None = Field(default=None, max_length=20)
     server_groups: list[str] | None = Field(default=None, max_length=100)
     site_groups: list[str] | None = Field(default=None, max_length=100)
+    can_read_logs: bool | None = None
 
 
 class UserResetPassword(BaseModel):
@@ -113,6 +118,7 @@ class UserListItem(BaseModel):
     sections: list[str] | None = None
     server_groups: list[str] | None = None
     site_groups: list[str] | None = None
+    can_read_logs: bool = False
     totp_enabled: bool
     created_at: datetime
 

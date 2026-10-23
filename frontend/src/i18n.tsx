@@ -6518,6 +6518,16 @@ const EN: Record<string, string> = {
   'Таких мониторов нет: у каждого есть сервер.': 'No such monitors: each one has a server.',
   'Таких серверов нет: у каждого есть связи.': 'No such servers: each one has links.',
   'Таких серверов нет.': 'No such servers.',
+
+  // --- галка "может читать логи" у учетки только для просмотра (UsersModal, LogsLocked) ---
+  'Логи закрыты для этой учетки, может открыть админ': 'Logs are closed for this account, an admin can open them',
+  'Может читать логи контейнеров и подов': 'Can read container and pod logs',
+  'В логах бывают пароли и токены. Откроется и журнал systemd, менять учетка ничего не сможет.':
+    'Logs may contain passwords and tokens. The systemd journal opens too, the account still cannot change anything.',
+  'читает логи': 'reads logs',
+  'разрешил учетке читать логи': 'allowed the account to read logs',
+  'закрыл учетке логи': 'closed logs for the account',
+  'посмотрел лог прошлого запуска пода': 'viewed the previous run log of a pod',
 }
 
 type Ctx = {

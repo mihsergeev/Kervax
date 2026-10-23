@@ -44,7 +44,7 @@ from sqlalchemy import delete, func, select
 
 from app.backup_state import BACKUP_EXISTS
 from app.config import get_settings
-from app.deps import VIEWER_READ_ONLY
+from app.deps import LOGS_CLOSED, VIEWER_READ_ONLY
 from app.impersonate import READ_ONLY, who_of
 from app.models import PanelError, Server
 
@@ -74,8 +74,9 @@ def _head(text: str) -> bytes:
 # Ожидаемые отказы на изменение: код ответа и начало текста. Не ошибка панели, как и протухший
 # вход: интерфейс такие действия не предлагает или сам объясняет, что делать
 EXPECTED: dict[int, tuple[bytes, ...]] = {
-    # вход админа под чужой учеткой (app/impersonate.py) и учетка только для просмотра (deps.py)
-    403: (_head(READ_ONLY), _head(VIEWER_READ_ONLY)),
+    # вход админа под чужой учеткой (app/impersonate.py) и учетка только для просмотра (deps.py),
+    # ей же логи без галки "может читать логи" (кнопки приглушены, подсказка объясняет)
+    403: (_head(READ_ONLY), _head(VIEWER_READ_ONLY), _head(LOGS_CLOSED)),
     # "настроить бэкап" поверх живого без согласия: форма спросит "переустановить поверх"
     409: (_head(BACKUP_EXISTS),),
 }

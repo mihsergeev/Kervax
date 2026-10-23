@@ -25,6 +25,7 @@ import { fmtRel } from './ServersPage'
 import { CardNav, FreshChip, markMuted, OvAreas, OvRows, secInfoOf, type OvRow, type SecDef, type SecInfo, type SecItem } from './cardLayout'
 import { NetTile, TileFilterChip, useTileFilter } from './NetLinks'
 import { fmtBytes } from './units'
+import { LockedLogs } from './LogsLocked'
 
 // Вкладка «Docker»: КОМПАКТНЫЙ список хостов с докером; клик по хосту → модалка
 // с его контейнерами (версии, статусы, кнопки, логи). Так масштабируется на 100+
@@ -585,7 +586,7 @@ function ContainerRow({
   day?: number // перезапусков за сутки (restarts_day)
   problem?: string // 'down' | 'loop' — по контейнеру уже отправлен алерт
   canAct: boolean
-  onLogs?: () => void // нет у учетки только для просмотра: логи читаются командой на ноде
+  onLogs?: () => void // нет - логи закрыты учетке (только для просмотра без галки): кнопка приглушена
   onChanged: () => void
   onDenied?: () => void // прокси ответил 403: на ноде доступ только на чтение
   sock?: boolean // внешний прокси с docker-сокетом
@@ -676,10 +677,12 @@ function ContainerRow({
         {c.status}
       </div>
       <div className="docker-actions">
-        {onLogs && (
+        {onLogs ? (
           <button className="ghost icon-btn" onClick={onLogs} title={t('Логи')}>
             📄
           </button>
+        ) : (
+          <LockedLogs className="ghost icon-btn">📄</LockedLogs>
         )}
         {canAct &&
           (running ? (
@@ -855,8 +858,8 @@ function DockerHostModal({
   onChanged: () => void
 }) {
   const { t } = useI18n()
-  // логи - тоже команда агенту (POST), учетке только для просмотра бэкенд ее не даст
-  const canLogs = !useAuth().isViewer
+  // логи - тоже команда агенту (POST): учетке только для просмотра - если админ разрешил галкой
+  const { canLogs } = useAuth()
   const [logs, setLogs] = useState<string | null>(null)
   const [hideStopped, setHideStopped] = useState(false)
   const [denied, setDenied] = useState(false)

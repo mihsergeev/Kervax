@@ -4,6 +4,7 @@ import { backupCommand, backupCommandStatus, type Server } from './api'
 import { useAuth } from './auth'
 import { CountryFlag } from './CountryFlag'
 import { useI18n } from './i18n'
+import { LockedLogs } from './LogsLocked'
 
 // Журнал systemd по запросу (агент 2.29, helper units-setup 0.4): юнит, вся система или ядро,
 // за период, с приоритетом не ниже выбранного. Как логи контейнеров: в панели не хранится,
@@ -294,13 +295,12 @@ export function JournalModal({ server: s, unit: unit0, onClose }: { server: Serv
   )
 }
 
-// Карточка в разделе "Процессы": открыть журнал без SSH. Наблюдателю не показываем: чтение идет
-// через команду агенту, а изменяющие запросы ему закрыты.
+// Карточка в разделе "Журнал": открыть журнал без SSH. Учетке только для просмотра - если админ
+// разрешил ей логи галкой, иначе кнопки приглушены с подсказкой (в журнале бывают пароли и токены).
 export function JournalCard({ server: s }: { server: Server }) {
   const { t } = useI18n()
-  const { isViewer } = useAuth()
+  const { canLogs } = useAuth()
   const [open, setOpen] = useState<string | null>(null)
-  if (isViewer) return null
   const block = journalBlocker(s)
   return (
     <div className="chart-card net-card net-card-narrow" id="mcard-journal">
@@ -312,6 +312,12 @@ export function JournalCard({ server: s }: { server: Server }) {
           {block === 'agent'
             ? t('Журнал откроется после обновления агента до 2.29.')
             : t('Журнал читается через helper units-setup 0.4: обновите его (блок "Обновления" на главной).')}
+        </div>
+      ) : !canLogs ? (
+        <div className="unit-actions small">
+          <LockedLogs className="ghost small row-act">{t('Весь журнал')}</LockedLogs>
+          <LockedLogs className="ghost small row-act">{t('Ядро')}</LockedLogs>
+          <LockedLogs className="ghost small row-act">{t('Юнит...')}</LockedLogs>
         </div>
       ) : (
         <div className="unit-actions small">

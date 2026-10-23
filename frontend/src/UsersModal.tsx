@@ -47,17 +47,20 @@ type T = (s: string, p?: Record<string, string | number>) => string
 const LOGIN_ACTS = new Set(['login_ok', 'login_fail', 'login_2fa_fail', 'login_blocked', 'login_lockout'])
 const FAIL_ACTS = new Set(['login_fail', 'login_2fa_fail', 'login_blocked', 'login_lockout', 'impersonate_pw_fail'])
 
-type Draft = { id: number; role: Role; sections: string[]; server_groups: string[]; site_groups: string[] }
+// can_read_logs - галка учетки только для просмотра "может читать логи" (у других ролей не хранится)
+type Draft = { id: number; role: Role; sections: string[]; server_groups: string[]; site_groups: string[]; can_read_logs: boolean }
 const draftOf = (u: UserCard): Draft => ({
   id: u.id,
   role: u.role,
   sections: u.sections ?? [],
   server_groups: u.server_groups ?? [],
   site_groups: u.site_groups ?? [],
+  can_read_logs: !!u.can_read_logs,
 })
 const sameSet = (a: string[], b: string[]) => a.length === b.length && a.every((x) => b.includes(x))
 const sameDraft = (a: Draft, b: Draft) =>
   a.role === b.role &&
+  a.can_read_logs === b.can_read_logs &&
   sameSet(a.sections, b.sections) &&
   sameSet(a.server_groups, b.server_groups) &&
   sameSet(a.site_groups, b.site_groups)
@@ -121,7 +124,7 @@ function accessLines(u: UserCard, t: T): string[] {
     (u.server_groups?.length ?? 0) === 0 && (u.site_groups?.length ?? 0) === 0
       ? t('группы: все')
       : t('серверы: {s} · сайты: {c}', { s: list(u.server_groups), c: list(u.site_groups) })
-  return [t('разделы: {s}', { s: secs }), groups]
+  return [t('разделы: {s}', { s: secs }), groups, ...(u.role === 'viewer' && u.can_read_logs ? [t('читает логи')] : [])]
 }
 
 export function UsersModal({ onClose, onUnauthorized }: Props) {
@@ -216,6 +219,7 @@ export function UsersModal({ onClose, onUnauthorized }: Props) {
         sections: d.sections,
         server_groups: d.server_groups,
         site_groups: d.site_groups,
+        can_read_logs: d.role === 'viewer' && d.can_read_logs,
       })
       await load()
       setDraft(null)
@@ -490,6 +494,15 @@ export function UsersModal({ onClose, onUnauthorized }: Props) {
                         <option value="admin">{t('Админ')}</option>
                       </select>
                     </label>
+                    {d.role === 'viewer' && (
+                      <label className="check-toggle us-logs">
+                        <input type="checkbox" checked={d.can_read_logs} onChange={(e) => patch({ can_read_logs: e.target.checked })} />
+                        <span>
+                          <span>{t('Может читать логи контейнеров и подов')}</span>
+                          <span className="muted small">{t('В логах бывают пароли и токены. Откроется и журнал systemd, менять учетка ничего не сможет.')}</span>
+                        </span>
+                      </label>
+                    )}
                     {d.role !== 'admin' ? (
                       <>
                         <PickList

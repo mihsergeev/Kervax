@@ -1,3 +1,4 @@
+import re
 from datetime import datetime, timezone
 from typing import Annotated
 
@@ -26,6 +27,17 @@ _WRITE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 # Ошибку интерфейса и "сообщить о проблеме" шлет любая учетка: это запись в журнал ошибок
 # панели, а не изменение объектов
 _SELF_SERVICE_PREFIX = ("/api/auth/", "/api/panel-errors/front", "/api/panel-errors/report")
+
+# Чтение логов учеткой только для просмотра с галкой can_read_logs. Логи - это команда агенту
+# через POST того же эндпоинта, что и рестарт, поэтому пропускаем не путь, а тип команды: только
+# эти три пути и только эти действия. Остальное (restart, delete_pod, unit_fix...) - как раньше
+LOG_ACTIONS = {
+    "docker": frozenset({"logs"}),
+    "kube": frozenset({"logs", "logs_prev"}),
+    "backup": frozenset({"unit_journal"}),  # журнал юнита, всей системы или ядра
+}
+LOGS_CLOSED = "Логи закрыты для этой учетки, может открыть админ"
+_LOG_CMD_PATH = re.compile(r"/api/servers/\d+/(docker|kube|backup)/command")
 
 
 async def get_current_user(
@@ -65,6 +77,7 @@ async def get_current_user(
         user.role not in ("admin", "editor")
         and request.method in _WRITE_METHODS
         and not request.url.path.startswith(_SELF_SERVICE_PREFIX)
+        and not await _viewer_reads_logs(request, user)
     ):
         raise HTTPException(status.HTTP_403_FORBIDDEN, VIEWER_READ_ONLY)
     # Разделы: если учётке нарезан список, всё за его пределами закрыто И на чтение.
@@ -75,6 +88,36 @@ async def get_current_user(
             status.HTTP_403_FORBIDDEN, "Раздел недоступен для этой учётной записи"
         )
     return user
+
+
+async def _viewer_reads_logs(request: Request, user: User) -> bool:
+    """POST учетки только для просмотра - это чтение логов, которое ей разрешил админ? Тип
+    команды берется из тела: FastAPI к этому моменту его уже прочитал, и обработчик разберет
+    то же самое тело (там действие проверяется еще раз, viewer_command_ok). Без галки, на другом
+    пути, с другим действием или с непонятным телом - нет."""
+    m = _LOG_CMD_PATH.fullmatch(request.url.path)
+    if m is None or request.method != "POST":
+        return False
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001 - не JSON: не логи
+        return False
+    if not isinstance(body, dict) or body.get("action") not in LOG_ACTIONS[m.group(1)]:
+        return False
+    if not user.can_read_logs:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, LOGS_CLOSED)
+    return True
+
+
+def viewer_command_ok(user: User, kind: str, action: str) -> None:
+    """Вторая проверка в обработчике команды, по уже разобранному телу: учетке только для
+    просмотра можно только чтение логов и только с галкой. Первая - в get_current_user."""
+    if user.role in ("admin", "editor"):
+        return
+    if action not in LOG_ACTIONS[kind]:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, VIEWER_READ_ONLY)
+    if not user.can_read_logs:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, LOGS_CLOSED)
 
 
 async def _check_impersonation(payload: dict, user: User, session: AsyncSession, unauthorized) -> None:

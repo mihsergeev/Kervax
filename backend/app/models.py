@@ -50,6 +50,10 @@ class User(Base):
     # Ограничение сквозное: и списки, и открытие конкретного объекта по id.
     server_groups: Mapped[list | None] = mapped_column(JSON, nullable=True)
     site_groups: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    # Учетке только для просмотра можно разрешить чтение логов контейнеров, подов и журнала
+    # systemd (в логах бывают пароли и токены, поэтому по умолчанию нет). Только чтение: любое
+    # другое изменение ей закрыто как и раньше (app/deps.py). Другим ролям логи открыты всегда
+    can_read_logs: Mapped[bool] = mapped_column(Boolean, default=False)
     totp_secret: Mapped[str] = mapped_column(String(64), default="")
     totp_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
     # последний использованный TOTP-счётчик (защита от повторного использования кода)
