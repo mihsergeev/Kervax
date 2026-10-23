@@ -213,8 +213,10 @@ class CheckCreate(BaseModel):
 
     # additional paths of the same site, checked with the main address (see checks.extra_paths_of)
     extra_paths: list[str] = []
-    # push: сигнал ждем каждые push_period секунд, плюс допуск (0 = десятая часть, от 2 минут)
-    push_period: int = Field(default=3600, ge=60, le=31 * 86400)
+    # push: сигнал ждем каждые push_period секунд, плюс допуск (0 = десятая часть, от 2 минут).
+    # 0 пускаем: так период лежит у всех мониторов, кроме push, и форма правки шлет его обратно.
+    # Push-монитору минуту и час по умолчанию подставляет checks._push_defaults
+    push_period: int = Field(default=3600, ge=0, le=31 * 86400)
     push_grace: int = Field(default=0, ge=0, le=7 * 86400)
     # dns: тип записи, ожидаемые значения по строке, equal | contains, IP резолвера
     dns_type: Literal["", "A", "AAAA", "CNAME", "MX", "NS", "TXT"] = ""
@@ -330,7 +332,7 @@ class CheckUpdate(BaseModel):
     auth_pass: str | None = Field(default=None, max_length=256)
     http_headers: str | None = Field(default=None, max_length=4096)
     ignore_tls: bool | None = None
-    push_period: int | None = Field(default=None, ge=60, le=31 * 86400)
+    push_period: int | None = Field(default=None, ge=0, le=31 * 86400)
     push_grace: int | None = Field(default=None, ge=0, le=7 * 86400)
     dns_type: Literal["", "A", "AAAA", "CNAME", "MX", "NS", "TXT"] | None = None
     dns_expect: str | None = Field(default=None, max_length=4000)

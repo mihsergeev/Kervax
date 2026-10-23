@@ -272,6 +272,15 @@ input:focus {
 .field > span.t-degraded {
   color: var(--degraded);
 }
+/* поле, которое бэкенд не принял (422): рамка и подпись красные */
+.field.field-bad > span:first-child {
+  color: var(--down);
+}
+.field.field-bad input,
+.field.field-bad textarea,
+input.field-bad {
+  border-color: var(--down);
+}
 
 .form-error {
   color: var(--down);

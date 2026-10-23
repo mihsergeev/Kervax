@@ -55,6 +55,8 @@ type Props = {
   groups: string[]
   busy: boolean
   error: string | null
+  // поля, которые бэкенд не принял (422): подсвечиваем
+  errorFields?: string[]
   onSubmit: (form: CheckForm) => void
   onCancel: () => void
   onOpenCheck?: (id: number) => void
@@ -86,6 +88,13 @@ const dnsKey = (f: CheckForm) =>
   JSON.stringify([(f.dns_server ?? '').trim(), (f.dns_expect ?? '').trim(), f.dns_match ?? 'equal'])
 
 // допуск push по умолчанию - десятая часть периода, но не меньше 2 минут (checks.push_limits)
+// поля в тонкой настройке: не принял бэкенд - раскрываем ее
+const ADV_FIELDS = [
+  'push_grace', 'interval_seconds', 'dns_server', 'degraded_ms', 'retries', 'degraded_after_failures',
+  'expected_status', 'keyword_up', 'keyword_down', 'ssl_warn_days', 'domain_warn_days', 'extra_paths',
+  'http_headers', 'location_ids', 'alert_mutes',
+]
+
 const pushGrace = (f: CheckForm) => f.push_grace || Math.max(120, Math.floor((f.push_period || 3600) / 10))
 
 // "db.example.com:5432" - порт, остальное - сайт; со схемой в начале - всегда сайт
@@ -184,6 +193,7 @@ export function AddMonitor({
   groups,
   busy,
   error,
+  errorFields,
   onSubmit,
   onCancel,
   onOpenCheck,
@@ -213,6 +223,15 @@ export function AddMonitor({
   })
   const hasCreds = base.auth_method === 'basic' || !!base.http_headers
   const [adv, setAdv] = useState(() => editing && advTouched(base, hasCreds))
+  const bad = (f: string) => (errorFields?.includes(f) ? ' field-bad' : '')
+  // поле, которое бэкенд не принял, может сидеть в свернутой тонкой настройке: раскрываем и
+  // показываем первое такое поле
+  const rootRef = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    if (!errorFields?.length) return
+    if (errorFields.some((f) => ADV_FIELDS.includes(f))) setAdv(true)
+    requestAnimationFrame(() => rootRef.current?.querySelector('.field-bad')?.scrollIntoView({ block: 'center' }))
+  }, [errorFields])
   const [addOff, setAddOff] = useState(false)
   // '' - в правке: сайт просит вход, а что с этим делать, монитор еще не решил
   const [auth, setAuth] = useState<'ok401' | 'give' | ''>(() =>
@@ -859,7 +878,7 @@ export function AddMonitor({
         </button>
       </div>
       {ownPeriod && (
-        <label className="field am-period">
+        <label className={'field am-period' + bad('push_period')}>
           <span>{t('Период, минут')}</span>
           <input
             type="number"
@@ -900,7 +919,7 @@ export function AddMonitor({
       {existingNote}
       {wantOpen ? (
         <div className="am-box">
-          <label className="field">
+          <label className={'field' + bad('dns_expect')}>
             <span>{t('Ожидаемый ответ, по строке')}</span>
             <textarea
               className="mono"
@@ -958,13 +977,13 @@ export function AddMonitor({
   )
 
   return (
-    <div className={editing ? 'am am-edit' : 'card am'}>
+    <div ref={rootRef} className={editing ? 'am am-edit' : 'card am'}>
       {!editing && <h3 className="am-h">{t('Новый монитор')}</h3>}
       <span className="am-lab">{t('Что проверять')}</span>
       {!isPush && (
         <div className="am-addr">
           <input
-            className="mono"
+            className={'mono' + bad('target') + bad('port')}
             value={addr}
             autoFocus={!editing}
             placeholder={isDns ? 'example.com' : 'shop.example.com'}
@@ -1090,7 +1109,7 @@ export function AddMonitor({
                 {auth === 'give' && (
                   <>
                     <div className="am-grid2">
-                      <label className="field">
+                      <label className={'field' + bad('http_headers')}>
                         <span>{t('Заголовок, по строке')}</span>
                         <textarea
                           className="mono"
@@ -1105,7 +1124,7 @@ export function AddMonitor({
                         />
                       </label>
                       <div className="am-grid2 am-tight">
-                        <label className="field">
+                        <label className={'field' + bad('auth_user')}>
                           <span>{t('или логин (HTTP Basic)')}</span>
                           <input
                             value={form.auth_user ?? ''}
@@ -1113,7 +1132,7 @@ export function AddMonitor({
                             onChange={(e) => set({ auth_user: e.target.value, auth_method: e.target.value || form.auth_pass ? 'basic' : '' })}
                           />
                         </label>
-                        <label className="field">
+                        <label className={'field' + bad('auth_pass')}>
                           <span>{t('Пароль')}</span>
                           <input
                             type="password"
@@ -1219,7 +1238,7 @@ export function AddMonitor({
           )}
 
           <div className="am-sec am-grid2">
-            <label className="field">
+            <label className={'field' + bad('name')}>
               <span>{t('Название')}</span>
               <input
                 value={shownName}
@@ -1231,7 +1250,7 @@ export function AddMonitor({
                 {t('Название попадает в текст алерта: @упоминания в нём тегнут людей в Telegram.')}
               </span>
             </label>
-            <label className="field">
+            <label className={'field' + bad('group_name')}>
               <span>{t('Группа')}</span>
               <input
                 value={shownGroup}
@@ -1298,7 +1317,7 @@ export function AddMonitor({
                 </button>
               </div>
               {isPush && (
-                <label className="field">
+                <label className={'field' + bad('push_grace')}>
                   <span>{t('Допуск, минут (0 = десятая часть периода)')}</span>
                   <input
                     type="number"
@@ -1313,7 +1332,7 @@ export function AddMonitor({
               )}
               {isDns && (
                 <div className="form-grid">
-                  <label className="field">
+                  <label className={'field' + bad('interval_seconds')}>
                     <span>{t('Интервал, сек')}</span>
                     <input
                       type="number"
@@ -1321,7 +1340,7 @@ export function AddMonitor({
                       onChange={(e) => set({ interval_seconds: Number(e.target.value) || 0 })}
                     />
                   </label>
-                  <label className="field">
+                  <label className={'field' + bad('dns_server')}>
                     <span>{t('DNS-сервер (IP)')}</span>
                     <input
                       className="mono"
@@ -1335,7 +1354,7 @@ export function AddMonitor({
               )}
               {kind === 'addr' && (
               <div className="form-grid">
-                <label className="field">
+                <label className={'field' + bad('interval_seconds')}>
                   <span>{t('Интервал, сек')}</span>
                   <input
                     type="number"
@@ -1343,7 +1362,7 @@ export function AddMonitor({
                     onChange={(e) => set({ interval_seconds: Number(e.target.value) || 0 })}
                   />
                 </label>
-                <label className="field">
+                <label className={'field' + bad('degraded_ms')}>
                   <span>{t('Порог «медленно», мс')}</span>
                   <input
                     type="number"
@@ -1351,7 +1370,7 @@ export function AddMonitor({
                     onChange={(e) => set({ degraded_ms: Number(e.target.value) || 0 })}
                   />
                 </label>
-                <label className="field">
+                <label className={'field' + bad('retries')}>
                   <span>{t('Повторы при сбое')}</span>
                   <input
                     type="number"
@@ -1360,7 +1379,7 @@ export function AddMonitor({
                     title={t('Считать «упавшим» и слать алерт, только если провалятся все попытки подряд.')}
                   />
                 </label>
-                <label className="field">
+                <label className={'field' + bad('degraded_after_failures')}>
                   <span>{t('Алерт «медленно» после N подряд')}</span>
                   <input
                     type="number"
@@ -1371,7 +1390,7 @@ export function AddMonitor({
                 </label>
                 {http && (
                   <>
-                    <label className="field">
+                    <label className={'field' + bad('expected_status')}>
                       <span>{t('Ожидаемый статус')}</span>
                       <input
                         value={form.expected_status ?? ''}
@@ -1379,15 +1398,15 @@ export function AddMonitor({
                         onChange={(e) => set({ expected_status: e.target.value })}
                       />
                     </label>
-                    <label className="field">
+                    <label className={'field' + bad('keyword_up')}>
                       <span>{t('Слово в ответе (должно быть)')}</span>
                       <input value={form.keyword_up ?? ''} onChange={(e) => set({ keyword_up: e.target.value })} />
                     </label>
-                    <label className="field">
+                    <label className={'field' + bad('keyword_down')}>
                       <span>{t('Слово-стоп (не должно быть)')}</span>
                       <input value={form.keyword_down ?? ''} onChange={(e) => set({ keyword_down: e.target.value })} />
                     </label>
-                    <label className="field">
+                    <label className={'field' + bad('ssl_warn_days')}>
                       <span>{t('Сертификат: напоминать за, дн.')}</span>
                       <input
                         value={sslTxt}
@@ -1398,7 +1417,7 @@ export function AddMonitor({
                         }}
                       />
                     </label>
-                    <label className="field">
+                    <label className={'field' + bad('domain_warn_days')}>
                       <span>{t('Домен: напоминать за, дн.')}</span>
                       <input
                         value={domTxt}
@@ -1429,7 +1448,7 @@ export function AddMonitor({
               )}
               {http && (
                 <div className="am-grid2">
-                  <label className="field">
+                  <label className={'field' + bad('extra_paths')}>
                     <span>{t('Дополнительные пути')}</span>
                     <textarea
                       className="mono"
@@ -1444,7 +1463,7 @@ export function AddMonitor({
                     />
                   </label>
                   {!((has401 || authSeen) && auth === 'give') && (
-                    <label className="field">
+                    <label className={'field' + bad('http_headers')}>
                       <span>{t('Заголовок, по строке')}</span>
                       <textarea
                         className="mono"
