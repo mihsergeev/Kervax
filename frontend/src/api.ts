@@ -1670,6 +1670,20 @@ export type Exposure = {
   via_ips?: string[] // с каких адресов шла проверка (адреса прокси), с 1.4.263
   // сайты ноды, чьи домены смотрят в Cloudflare: первые 10, всего n из проверенных checked
   cf?: { sites: string[]; n: number; checked: number; total: number }
+  // веб-серверы, чьи белые списки обходятся подменой CF-Connecting-IP (app/cf_realip.py)
+  realip?: RealIpTrust[]
+}
+// Веб-сервер верит заголовку с адресом клиента от любого адреса, а порт открыт в обход Cloudflare
+export type RealIpTrust = {
+  key: string // для решения "так задумано" (cfip:<key>)
+  label: string // ingress-nginx, nginx, Caddy, Traefik
+  where: string // "на хосте", "в поде ns/имя", "в контейнере имя"
+  hdr: string // CF-Connecting-IP или X-Forwarded-For
+  trust: string // чему верит: "set_real_ip_from 0.0.0.0/0"
+  ports: number[] // какие из 80 и 443 открыты напрямую
+  acl: number // сайтов с allow/deny
+  names: string[] // до трех таких сайтов
+  decided: boolean // отмечено "так задумано"
 }
 
 // Одно изменение на сервере: kind key/user/sudo/cron/unit, act add/del/mod; alert - изменение
@@ -2224,6 +2238,8 @@ export type Server = {
   log_errors?: LogErrInfo | null
   // пулы PHP-FPM (helper fpm-setup): воркеры, очередь, упоры в pm.max_children, медленные и убитые запросы
   fpm?: FpmInfo | null
+  // GitLab (helper gitlab-setup): версия и путь обновления, бэкап, фоновые миграции, автообновление
+  gitlab?: GitlabInfo | null
   // заглушенные очереди: насовсем или до срока
   queue_mutes?: Record<string, { perm?: boolean; until?: string }> | null
   // изменения на сервере (helper changes-setup): лента между снимками, отметка "это мы"
@@ -2529,6 +2545,75 @@ export type FpmPool = {
   why?: string
   mute?: { perm?: boolean; until?: string }
 }
+export type GitlabSched = {
+  how: string // cron | timer
+  src: string // файл крона или имя таймера
+  when: string // расписание
+  db: number // делает gitlab-backup
+  skip: string // SKIP=...
+  etc: number // сохраняет и конфиг (backup-etc или архив /etc/gitlab)
+  enabled?: string
+  last?: number
+  next?: number
+  result?: string
+}
+export type GitlabStatus = {
+  latest: string
+  lp: string | null // последний патч своей минорной
+  patch: { ver: string; newest: string; days: number | null } | null // самый старый не поставленный патч
+  stop: { ver: string; days: number | null } | null // ниже последней вышедшей обязательной остановки
+  next_stop: string | null
+  target: string | null
+  path: string[]
+  major: string | null // вышла новая мажорная
+}
+export type GitlabInst = {
+  key: string
+  label: string
+  host: string
+  ct: string
+  state: string
+  image: string
+  dir: string
+  service: string
+  files: string
+  mode: string // image | build
+  from: string
+  dockerfile: string
+  version: string
+  edition: string
+  url: string
+  data: string
+  config: string
+  bdir: string
+  secrets: boolean
+  keep: number
+  st: GitlabStatus | null
+  bk: { n: number; total: number; first: number; last?: { name: string; ts: number; size: number; info: number; skipped: string; ver: string } } | null
+  sched: GitlabSched[]
+  cfg: { n: number; ts: number; path: string } | null
+  restic_cfg: boolean
+  restic_data: boolean
+  notes: { level: number; text: string }[]
+  bbm: { total: number; failed: number; open: number; list: { st: number; job: string; table: string; col: string }[] } | null
+  au: {
+    conf: string; timer: string; next: number; svc: string; result: string; blocked: string; broken: string
+    behind_since: number; last_result: string; history: string[]; gitlab_backup: string; skip: string
+    allow_major: string; stale_days: number
+  } | null
+  level?: number
+  why?: string
+  causes?: string[]
+  mute?: { perm?: boolean; until?: string }
+}
+export type GitlabInfo = {
+  ts: number
+  patch_days: number
+  stop_days: number
+  feed: { ts: string; err: string; stops_src: string } | null
+  instances: GitlabInst[]
+}
+
 export type FpmInfo = { ts: number; pools: FpmPool[]; skipped: { where: string; why: string }[] }
 export type LogErrInfo = { ts: number; logs: number; skipped: number; sources: LogErrSource[] }
 export type CronInfo = {

@@ -27,7 +27,11 @@ set -euo pipefail
 #       address becomes the container name, a pod address the ingress upstream name. The
 #       error log of the host nginx goes to the map as a 5th column and is read once a minute
 #       too, split between the sites by its "server:" field
-KERVAX_SETUP_VERSION=0.26  # MAJOR.MINOR; compared component-wise
+# 0.27: whom nginx (host, containers, pods with ingress-nginx), Caddy and Traefik believe about
+#       the client address: real_ip_header + set_real_ip_from, trusted_proxies, forwardedHeaders
+#       -> report.d/web-realip.json. Trust in anyone plus 80/443 open past Cloudflare means the
+#       allow/deny lists open to a forged CF-Connecting-IP or X-Forwarded-For
+KERVAX_SETUP_VERSION=0.27  # MAJOR.MINOR; compared component-wise
 KERVAX_SETUP_ALWAYS=1     # safe on any node: the refresh is a no-op without a web server
 
 HELPER_DIR=/lib65/kervax
@@ -493,6 +497,197 @@ CERTOUT=/var/lib/kervax/report.d/web-certs.json
 printf '{"v":1,"ts":%s,"renew":"%s","certs":[%s]}\n' "$(date +%s)" "$(cert_renew)" "$CERTS" > "$CERTOUT.tmp.$$"
 chmod 0644 "$CERTOUT.tmp.$$"
 mv -f "$CERTOUT.tmp.$$" "$CERTOUT"
+
+# -- 0.27: whom the web servers believe about the client address (CF-Connecting-IP, X-Forwarded-For) --
+# A server that takes the client address from a header sent by anyone lets a direct visitor with
+# a forged header through allow/deny lists. The panel raises it only together with 80/443 open
+# past Cloudflare. Only the header names, the trusted ranges, the listen ports, whether the site
+# has allow/deny and up to three domains leave the node.
+# nginx (on the host via nginx -T, in containers via docker exec, in pods - ingress-nginx too -
+# from the config files under /proc/<pid>/root): each server block takes real_ip_header and
+# set_real_ip_from of its own or from the http level. nginx -T prints included files one after
+# another, not inside http {}, so everything outside a server block counts as the http level and
+# is applied at the end. Without set_real_ip_from nginx believes nobody - not printed.
+extract_realip() {
+  awk '
+    function val(   v) { v = $2; sub(/;$/, "", v); gsub(/["\047]/, "", v); return v }
+    function port_of(v,   a, p) {
+      if (v ~ /^unix:/) return ""
+      if (v ~ /^[0-9]+$/) { a = ""; p = v }
+      else if (v ~ /:[0-9]+$/) { p = v; sub(/^.*:/, "", p); a = v; sub(/:[0-9]+$/, "", a) }
+      else { a = v; p = 80 }
+      if (a ~ /^(127\.|\[::1\]|localhost)/) return ""
+      return p
+    }
+    function add(list, x) { return (index(" " list " ", " " x " ")) ? list : list (list == "" ? "" : " ") x }
+    { sub(/(^|[[:space:]])#.*$/, "") }
+    /^[[:space:]]*stream[[:space:]]*\{/ && !insrv { instream = 1; sdepth = 0 }
+    instream { o = gsub(/\{/, "{"); c = gsub(/\}/, "}"); sdepth += o - c; if (sdepth <= 0) instream = 0; next }
+    /^[[:space:]]*server[[:space:]]*\{/ && !insrv { insrv = 1; depth = 0; n++; hdr[n] = ""; from[n] = ""; ports[n] = ""; acl[n] = 0; name[n] = ""; lis[n] = 0 }
+    !insrv && $1 == "real_ip_header" { h_hdr = val(); next }
+    !insrv && $1 == "set_real_ip_from" { h_from = add(h_from, val()); next }
+    insrv {
+      o = gsub(/\{/, "{"); c = gsub(/\}/, "}"); depth += o - c
+      if ($1 == "real_ip_header") hdr[n] = val()
+      else if ($1 == "set_real_ip_from") from[n] = add(from[n], val())
+      else if ($1 == "listen") { lis[n] = 1; p = port_of(val()); if (p != "") ports[n] = add(ports[n], p) }
+      else if ($1 == "server_name" && name[n] == "") {
+        for (i = 2; i <= NF; i++) { g = $i; sub(/;$/, "", g); gsub(/["\047]/, "", g)
+          if (g != "" && g != "_" && g != "localhost" && g ~ /^[A-Za-z0-9.*-]+$/ && g ~ /[A-Za-z]/) { name[n] = g; break } }
+      }
+      if ($0 ~ /(^|[{;[:space:]])deny[[:space:]]/) acl[n] = 1
+      if (depth <= 0) insrv = 0
+    }
+    END {
+      for (i = 1; i <= n; i++) {
+        h = (hdr[i] != "") ? hdr[i] : h_hdr
+        f = (from[i] != "") ? from[i] : h_from
+        if (h == "" || h == "proxy_protocol" || f == "") continue
+        if (!lis[i]) ports[i] = "80"
+        if (ports[i] == "") continue
+        print h "\t" f "\t" ports[i] "\t" acl[i] "\t" name[i]
+      }
+    }'
+}
+# Server blocks of one web server -> one JSON item: headers (those of the named sites with
+# allow/deny first), trusted ranges, ports, how many sites have allow/deny, up to three domains.
+realip_item() { # server where; extract_realip lines on stdin
+  awk -F'\t' -v srv="$1" -v wh="$(cesc "$2")" '
+    function put(arr, cnt, x, max) { if (x == "" || ((arr, x) in seen_) || cnt >= max) return cnt
+      seen_[arr, x] = 1; out[arr, cnt] = x; return cnt + 1 }
+    function js(arr, cnt, num,   i, s) { s = ""; for (i = 0; i < cnt; i++) s = s (i ? "," : "") (num ? out[arr, i] : "\"" out[arr, i] "\""); return "[" s "]" }
+    function ok(x) { return x ~ /^[A-Za-z0-9._:\/*-]+$/ }
+    BEGIN { nh = nf = np = nn = na = 0 }
+    { line[NR] = $0 }
+    END {
+      if (NR == 0) exit
+      for (pass = 1; pass <= 3; pass++)
+        for (r = 1; r <= NR; r++) { split(line[r], c, "\t")
+          rank = (c[4] == 1) ? ((c[5] != "") ? 1 : 2) : 3
+          if (rank == pass && ok(c[1])) nh = put("h", nh, c[1], 4) }
+      for (r = 1; r <= NR; r++) {
+        split(line[r], c, "\t")
+        m = split(c[2], fr, " "); for (k = 1; k <= m; k++) if (ok(fr[k])) nf = put("f", nf, fr[k], 40)
+        m = split(c[3], pp, " "); for (k = 1; k <= m; k++) if (pp[k] ~ /^[0-9]+$/) np = put("p", np, pp[k] + 0, 16)
+        if (c[4] == 1) { na++; if (c[5] != "" && ok(c[5])) nn = put("n", nn, c[5], 3) }
+      }
+      printf "{\"server\":\"%s\",\"where\":\"%s\",\"hdr\":%s,\"from\":%s,\"ports\":%s,\"acl\":%d,\"names\":%s}", \
+        srv, wh, js("h", nh, 0), js("f", nf, 0), js("p", np, 1), na, js("n", nn, 0)
+    }'
+}
+words() { tr '\n' ' ' | tr -s ' ' | sed 's/^ //; s/ $//'; }  # строки в одну, без раскрытия "*"
+REALIP=""
+realip_add() { [ -n "$1" ] && REALIP="$REALIP${REALIP:+,}$1"; return 0; }
+# pod name by the container id: the kubelet symlink /var/log/containers/<pod>_<ns>_<container>-<id>.log
+pod_of() {
+  local l base rest
+  for l in /var/log/containers/*-"$1".log; do
+    [ -e "$l" ] || continue
+    base=${l##*/}; rest=${base#*_}; printf '%s/%s' "${rest%%_*}" "${base%%_*}"; return 0
+  done
+  echo pod
+}
+collect_realip_nginx() {
+  local id pid name
+  if command -v nginx >/dev/null 2>&1 && pgrep -x nginx >/dev/null 2>&1; then
+    nginx -T 2>/dev/null | extract_realip | realip_item nginx host
+    echo
+  fi
+  nginx_container_ids | while read -r id pid; do
+    if command -v docker >/dev/null 2>&1 && name=$(docker inspect -f '{{.Name}}' "$id" 2>/dev/null); then
+      docker exec "$id" nginx -T 2>/dev/null | extract_realip | realip_item nginx "${name#/}"
+    elif [ -d "/proc/$pid/root/etc/nginx" ]; then
+      cat "/proc/$pid/root/etc/nginx/nginx.conf" "/proc/$pid/root/etc/nginx/conf.d/"*.conf \
+        "/proc/$pid/root/etc/nginx/sites-enabled/"* 2>/dev/null | extract_realip | realip_item nginx "pod $(pod_of "$id")"
+    fi
+    echo
+  done
+}
+# Caddy: its live config from the admin endpoint. trusted_proxies (private_ranges arrives already
+# expanded), client_ip_headers (X-Forwarded-For when not set), the client_ip matcher - the
+# allow/deny that believes the header; remote_ip with "forwarded":true (before Caddy 2.7) believes
+# X-Forwarded-For from anyone. Without the admin endpoint we do not know - nothing is printed.
+caddy_realip() { # the live config on stdin -> one extract_realip line, nothing without trust
+  local cfg from hdr ports acl
+  cfg=$(tr -d '\n' | head -c 4000000)
+  from=$(printf '%s' "$cfg" | grep -o '"trusted_proxies":{[^}]*}' | grep -o '"ranges":\[[^]]*\]' \
+    | grep -o '"[^"]*"' | tr -d '"' | grep -v '^ranges$')
+  printf '%s' "$cfg" | grep -q '"forwarded":true' && from="$from *"
+  [ -n "$(printf '%s' "$from" | tr -d ' \n')" ] || return 0
+  hdr=$(printf '%s' "$cfg" | grep -o '"client_ip_headers":\[[^]]*\]' | head -n 1 | grep -o '"[^"]*"' | tr -d '"' | grep -v '^client_ip_headers$')
+  [ -n "$hdr" ] || hdr=X-Forwarded-For
+  ports=$(printf '%s' "$cfg" | grep -o '"listen":\[[^]]*\]' | grep -o ':[0-9]*"' | tr -d ':"' | sort -u)
+  [ -n "$ports" ] || ports="80 443"
+  acl=$(printf '%s' "$cfg" | grep -o '"client_ip":{\|"forwarded":true' | wc -l)
+  [ "$acl" -gt 0 ] && acl=1 || acl=0
+  printf '%s\t%s\t%s\t%s\t\n' "$(printf '%s\n' "$hdr" | awk 'NF {print $1; exit}')" "$(printf '%s' "$from" | words)" \
+    "$(printf '%s' "$ports" | words)" "$acl"
+}
+collect_realip_caddy() {
+  local p pid cid where
+  for p in /proc/[0-9]*; do
+    [ "$(cat "$p/comm" 2>/dev/null)" = caddy ] || continue
+    pid=${p#/proc/}
+    cid=$(grep -o '[0-9a-f]\{64\}' "$p/cgroup" 2>/dev/null | tail -n 1)
+    if [ -z "$cid" ]; then
+      where=host
+    elif command -v docker >/dev/null 2>&1 && where=$(docker inspect -f '{{.Name}}' "$cid" 2>/dev/null); then
+      where=${where#/}
+    else
+      continue
+    fi
+    caddy_get "$pid" /config/ | caddy_realip | realip_item caddy "$where"
+    echo
+  done
+}
+# Traefik: entryPoints.<name>.forwardedHeaders.insecure / trustedIPs in its arguments or its static
+# config file. Its ipAllowList looks at the connection address, not at the headers, unless an
+# ipStrategy (depth, excludedIPs) is set: only those count as allow/deny that believe the header
+# (docker labels, arguments, the static file).
+collect_realip_traefik() {
+  local p pid cid where args files from acl ports f
+  for p in /proc/[0-9]*; do
+    [ "$(cat "$p/comm" 2>/dev/null)" = traefik ] || continue
+    pid=${p#/proc/}
+    cid=$(grep -o '[0-9a-f]\{64\}' "$p/cgroup" 2>/dev/null | tail -n 1)
+    if [ -z "$cid" ]; then
+      where=host
+    elif command -v docker >/dev/null 2>&1 && where=$(docker inspect -f '{{.Name}}' "$cid" 2>/dev/null); then
+      where=${where#/}
+    else
+      where="pod $(pod_of "$cid")"
+    fi
+    args=$(tr '\0' '\n' < "$p/cmdline" 2>/dev/null)
+    files=""
+    for f in $(printf '%s\n' "$args" | sed -n 's/^--configfile=//Ip') /etc/traefik/traefik.yml /etc/traefik/traefik.yaml /etc/traefik/traefik.toml; do
+      [ -f "/proc/$pid/root$f" ] && files="$files /proc/$pid/root$f"
+    done
+    from=$(printf '%s\n' "$args" | grep -iE '^--entrypoints\.[^.]+\.forwardedheaders\.trustedips=' | sed 's/^[^=]*=//' | tr ',' ' ')
+    printf '%s\n' "$args" | grep -qiE '^--entrypoints\.[^.]+\.forwardedheaders\.insecure(=true)?$' && from="$from *"
+    if [ -n "$files" ]; then
+      from="$from $(cat $files 2>/dev/null | awk '
+        tolower($0) ~ /forwardedheaders/ { left = 8; next }
+        left > 0 { left--
+          if (tolower($0) ~ /insecure[[:space:]]*[:=][[:space:]]*true/) print "*"
+          s = $0; while (match(s, /[0-9a-fA-F.:]+\/[0-9]+/)) { print substr(s, RSTART, RLENGTH); s = substr(s, RSTART + RLENGTH) } }')"
+    fi
+    [ -n "$(printf '%s' "$from" | tr -d ' \n')" ] || continue
+    acl=0
+    { printf '%s\n' "$args"; cat $files 2>/dev/null
+      command -v docker >/dev/null 2>&1 && for c in $(label_containers); do docker inspect --format '{{json .Config.Labels}}' "$c" 2>/dev/null; done
+    } | grep -qi 'ipstrategy' && acl=1
+    ports=$(printf '%s\n' "$args" | sed -n 's/^--entrypoints\.[^.]*\.address=.*:\([0-9][0-9]*\).*$/\1/Ip' | sort -u)
+    [ -n "$ports" ] || ports="80 443"
+    printf 'X-Forwarded-For\t%s\t%s\t%s\t\n' "$(printf '%s' "$from" | words)" "$(printf '%s' "$ports" | words)" "$acl" \
+      | realip_item traefik "$where"
+    echo
+  done
+}
+while IFS= read -r line; do realip_add "$line"; done < <(collect_realip_nginx; collect_realip_caddy; collect_realip_traefik)
+REALIPOUT=/var/lib/kervax/report.d/web-realip.json
+printf '{"v":1,"ts":%s,"items":[%s]}\n' "$(date +%s)" "$REALIP" > "$REALIPOUT.tmp.$$"
+chmod 0644 "$REALIPOUT.tmp.$$"
+mv -f "$REALIPOUT.tmp.$$" "$REALIPOUT"
 
 NGINX=$(collect_nginx | sort -u)
 APACHE=$(collect_apache | sort -u)

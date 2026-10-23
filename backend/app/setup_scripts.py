@@ -117,11 +117,23 @@ def setup_needed(name: str, rep: dict, mutes: list[str] | None = None, relay: bo
         ref = float(rep.get("clock_unix") or 0) or time.time()
         return (bool(docker_exposure.exposed(rep)) or bool(docker_exposure.old_live(rep, ref, mutes))
                 or "sockfix" in (rep.get("extras") or {}))
+    # gitlab-setup - где агент видит контейнер GitLab (образ gitlab-ce/ee, в том числе собранный
+    # поверх него, или сервис compose с таким именем) или helper уже присылает инстансы. Пустой
+    # блок не повод: helper ставится по условию, но мог остаться на ноде, где GitLab убрали
+    if name == "gitlab-setup":
+        return (any(_gitlab_ct(c) for c in (rep.get("docker") or {}).get("containers") or [] if isinstance(c, dict))
+                or bool(((rep.get("extras") or {}).get("gitlab") or {}).get("instances")))
     # backup-setup — транспорт панели для дампов, нужен и без файлового бэкапа;
     # timesync-setup, agent-watchdog, diskusage-setup, diskhealth-setup и units-setup
     # ansible ставит всюду (диск забивается и ломается где угодно, а на VM здоровье дисков смотрит хотя бы
     # RAID и ошибки ядра); остальное - см. докстроку
     return True
+
+
+def _gitlab_ct(c: dict) -> bool:
+    img = str(c.get("image") or "").lower()
+    svc = str((c.get("compose") or {}).get("service") or "").lower()
+    return "runner" not in img and ("gitlab-ce" in img or "gitlab-ee" in img or svc in ("gitlab", "gitlab-ce", "gitlab-ee"))
 
 
 # Чего именно не хватает — словами, которые говорят, ЧТО делать. Ключ нужен, чтобы
@@ -150,6 +162,7 @@ _HELPER_LABEL = {
     "cron-setup": "кроны на хосте и в контейнерах",
     "logerr-setup": "ошибки в логах контейнеров",
     "fpm-setup": "пулы PHP-FPM",
+    "gitlab-setup": "версия, бэкап и миграции GitLab",
     "sockfix-setup": "compose внешнего прокси: сокет и образ",
     "relay-setup": "ретранслятор для агентов",
     "webfiles-setup": "новые php и правки в файлах сайтов",

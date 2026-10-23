@@ -38,6 +38,7 @@ import { CRON_MUTE, FPM_MUTE, LOGERR_MUTE, QFAIL_MUTE, QSTUCK_MUTE, WORKER_MUTE 
 import { OsIcon } from './osIcon'
 import { CountryFlag } from './CountryFlag'
 import { WebFiles, webfilesBad } from './WebFiles'
+import { GitlabSection, gitlabLine } from './GitlabSection'
 import { byteUnits } from './units'
 import { NetTile, TileFilterChip, useTileFilter } from './NetLinks'
 import { EXPIRY_SHOW_DAYS, EXPIRY_WARN_DAYS, expiryTone } from './checkUtils'
@@ -139,6 +140,7 @@ type SvcItem = {
   llm?: boolean // LLM-сервис (vLLM, SGLang, TEI): метрики в s.llm, свой раздел
   workers?: boolean // демон воркеров (supervisor, pm2): программы в s.workers, свой раздел
   cron?: boolean // кроны (helper cron-setup): задачи в s.cron, свой раздел; ноду в список не добавляет
+  gitlab?: boolean // GitLab (helper gitlab-setup): инстансы в s.gitlab, свой раздел
 }
 type SrvServices = { server: Server; items: SvcItem[] }
 
@@ -860,6 +862,8 @@ function buildByServer(
     for (const x of s.llm ?? []) items.push({ kind: x.engine_name, where: x.where, llm: true })
     // демоны воркеров (helper workers-setup): supervisor и pm2, свой раздел
     for (const d of s.workers ?? []) items.push({ kind: d.label, where: d.where, workers: true })
+    // GitLab (helper gitlab-setup): свой раздел, по строке на инстанс
+    for (const x of s.gitlab?.instances ?? []) items.push({ kind: 'GitLab', where: `${x.label} (${x.version || x.state})`, gitlab: true })
     // кроны (helper cron-setup): cron есть почти на каждой ноде, в список нод он ее не добавляет,
     // но окно сервисов по ссылке из алерта открывается и у ноды без других сервисов
     const hasCron = (s.cron?.jobs ?? []).length > 0 || (s.log_errors?.sources ?? []).length > 0 || (s.fpm?.pools ?? []).length > 0
@@ -872,7 +876,7 @@ function buildByServer(
     const stats = s.last_report?.db_stats ?? []
     if (stats.length)
       for (const it of items) {
-        if (it.web || it.llm || it.workers || it.cron) continue
+        if (it.web || it.llm || it.workers || it.cron || it.gitlab) continue
         const m = matchDbStats(it.kind, stats)
         if (m.length) it.db = m
       }
@@ -1749,11 +1753,12 @@ const SVC_SECTIONS: SecDef[] = [
   { id: 'cron', label: 'Кроны', group: 'Процессы' },
   { id: 'logs', label: 'Ошибки в логах', group: 'Процессы' },
   { id: 'llm', label: 'LLM', group: 'Модели' },
+  { id: 'gitlab', label: 'GitLab', group: 'Приложения' },
 ]
 const SVC_SEC_IDS = new Set(SVC_SECTIONS.map((x) => x.id))
 // раздел карточки по виду проблемы, если бэкенд его не назвал (старый бэкенд в кэше вкладки)
 const SVC_SEC_OF_KIND: Record<string, string> = {
-  queue: 'queues', queue_stuck: 'queues', workers: 'workers', cron_stuck: 'cron', log_errors: 'logs', fpm: 'fpm', web_cert: 'certs', web_config: 'web', webfiles: 'files', db_health: 'db', db_conn: 'db', llm: 'llm',
+  queue: 'queues', queue_stuck: 'queues', workers: 'workers', cron_stuck: 'cron', log_errors: 'logs', fpm: 'fpm', gitlab: 'gitlab', web_cert: 'certs', web_config: 'web', webfiles: 'files', db_health: 'db', db_conn: 'db', llm: 'llm',
 }
 
 function ServerServicesModal({ srv, onClose, onChanged, initialSec, sites }: {
@@ -1789,7 +1794,7 @@ function ServerServicesModal({ srv, onClose, onChanged, initialSec, sites }: {
   const rate = webRate(s.last_report)
   // СУБД сверху, под ними прочее, что держит данные (Grafana, Prometheus, etcd): их тоже находит аудит
   const isDb = (it: SvcItem) => Object.values(DB_ENGINE_LABEL).includes(it.kind)
-  const dbItems = srv.items.filter((it) => !it.web && !it.svc && !it.llm && !it.workers && !it.cron).sort((a, b) => Number(isDb(b)) - Number(isDb(a)))
+  const dbItems = srv.items.filter((it) => !it.web && !it.svc && !it.llm && !it.workers && !it.cron && !it.gitlab).sort((a, b) => Number(isDb(b)) - Number(isDb(a)))
   const llm = s.llm ?? []
   const llmBad = llm.filter((x) => !x.ok && !x.no_metrics).length
   const dbs = dbItems.flatMap((it) => it.db ?? [])
@@ -1860,6 +1865,7 @@ function ServerServicesModal({ srv, onClose, onChanged, initialSec, sites }: {
     logs: lSrc.length > 0,
     fpm: fPools.length > 0,
     llm: llm.length > 0,
+    gitlab: (s.gitlab?.instances ?? []).length > 0,
   }
   const secs = SVC_SECTIONS.filter((x) => shown[x.id])
   const cur = secs.find((x) => x.id === active) ?? secs[0]
@@ -1905,6 +1911,7 @@ function ServerServicesModal({ srv, onClose, onChanged, initialSec, sites }: {
       t('пулов: {n}', { n: fPools.length }),
       t('воркеров {n} из {m}', { n: fPools.reduce((a, x) => a + x.children, 0), m: fPools.reduce((a, x) => a + x.max, 0) }),
     ),
+    gitlab: s.gitlab ? gitlabLine(s.gitlab, t) : '',
     logs: subOf(
       t('логов с ошибками: {n}', { n: lSrc.length }),
       t('за час: {n}', { n: rpmText(lSrc.reduce((a, x) => a + x.h1, 0)) }),
@@ -2236,6 +2243,7 @@ function ServerServicesModal({ srv, onClose, onChanged, initialSec, sites }: {
                 <FpmList server={s} pools={fPools} onChanged={onChanged} onlyProblems={fOnly} />
               </div>
             )}
+            {cur.id === 'gitlab' && s.gitlab && <GitlabSection server={s} g={s.gitlab} onChanged={onChanged} />}
             {cur.id === 'logs' && lErr && (
               <div className="srv-sec">
                 <div className="muted small">

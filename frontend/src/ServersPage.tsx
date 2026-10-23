@@ -55,6 +55,7 @@ import {
   type CpuGroup,
   type OsFixStep,
   type Server,
+  type RealIpTrust,
   type ServerEnroll,
   type GpuSum,
   type ServerMetric,
@@ -77,6 +78,7 @@ import {
   UNIT_MUTE,
   WEB_MUTE,
   EXPOSED_MUTE,
+  CFIP_MUTE,
   NOBOOT_MUTE,
   ACCESS_MUTE,
   osDecisionLabel,
@@ -4025,6 +4027,9 @@ function OpenPorts({ server: s, onChanged }: { server: Server; onChanged: () => 
             : t('По адресу {ip} отвечает другой сервер: там {o}, а у этой ноды {n}. Порты по этому адресу не про эту ноду, поэтому алертов по ним нет.', { ip: f.ip, o: f.outside, n: f.node })}
         </div>
       ))}
+      {!own && (ex?.realip ?? []).length > 0 && (
+        <RealIpBox server={s} items={ex?.realip ?? []} isViewer={isViewer} onChanged={onChanged} />
+      )}
       {ex && !own && allowed.length > 0 && (
         <div className="net-note">
           {t('Адрес проверки {ips} стоит в белом списке файрвола ноды (его добавляют под мониторинг). Порты {ports} файрвол пускает только по белому списку: проверке они открыты, а интернету нет. Они в колонке "Закрыто снаружи", алертов по ним нет. Чтобы проверка видела то же, что и интернет, добавьте в "Локациях" прокси в другой сети.', { ips: viaIps, ports: allowed.map((g) => g.port).join(', ') })}
@@ -4168,6 +4173,84 @@ function OpenPorts({ server: s, onChanged }: { server: Server; onChanged: () => 
         </div>
       )}
     </div>
+  )
+}
+
+// Где веб-сервер: бэкенд пишет "на хосте", "в поде ns/имя", "в контейнере имя"
+function realIpWhere(w: string, t: TFn): string {
+  if (w.startsWith('в поде ')) return t('в поде {n}', { n: w.slice(7) })
+  if (w.startsWith('в контейнере ')) return t('в контейнере {n}', { n: w.slice(13) })
+  return t('на хосте')
+}
+
+// Как ограничить доверие к заголовку у этого веб-сервера
+function realIpFix(label: string, t: TFn): string {
+  if (label === 'ingress-nginx') return t('в ConfigMap ingress-nginx задайте proxy-real-ip-cidr диапазонами Cloudflare')
+  if (label === 'Caddy') return t('в trusted_proxies оставьте только диапазоны Cloudflare')
+  if (label === 'Traefik') return t('уберите forwardedHeaders.insecure и оставьте в trustedIPs только диапазоны Cloudflare')
+  return t('в set_real_ip_from оставьте только диапазоны Cloudflare')
+}
+
+// Веб-сервер верит CF-Connecting-IP или X-Forwarded-For от любого адреса, а 80/443 открыты в обход
+// Cloudflare: прямой заход с поддельным заголовком проходит allow/deny (app/cf_realip.py). Решение
+// "так задумано" - cfip:<веб-сервер>, как "открыт намеренно" у порта
+function RealIpBox({ server: s, items, isViewer, onChanged }: { server: Server; items: RealIpTrust[]; isViewer: boolean; onChanged: () => void }) {
+  const { t } = useI18n()
+  const [busy, setBusy] = useState(false)
+  const setDecided = async (key: string, on: boolean) => {
+    if (on && !window.confirm(t('Так задумано: белые списки этого веб-сервера обходить можно? Панель перестанет алертить по нему.'))) return
+    setBusy(true)
+    try {
+      const k = CFIP_MUTE + key
+      const cur = (s.alert_mutes ?? []).filter((m) => m !== k)
+      await updateServer(s.id, { alert_mutes: on ? [...cur, k] : cur })
+      onChanged()
+    } catch {
+      /* кнопка остается, можно повторить */
+    } finally {
+      setBusy(false)
+    }
+  }
+  return (
+    <>
+      {items.map((x) => (
+        <div key={x.key} className={x.decided ? 'net-note exp-realip-done' : 'net-prob exp-realip'}>
+          <div className="exp-realip-h">
+            <b>{t('Белые списки обходятся подменой {h}', { h: x.hdr })}</b>
+            {x.decided ? (
+              <span className="muted exp-act">
+                {t('так задумано')}{' '}
+                {!isViewer && (
+                  <button className="ghost small row-act" disabled={busy} onClick={() => setDecided(x.key, false)}>
+                    {t('вернуть алерт')}
+                  </button>
+                )}
+              </span>
+            ) : (
+              !isViewer && (
+                <button className="ghost small row-act exp-act" disabled={busy} onClick={() => setDecided(x.key, true)}>
+                  🔕 {t('так задумано')}
+                </button>
+              )
+            )}
+          </div>
+          <div>
+            {t('{who} {where} верит заголовку от любого адреса:', { who: x.label, where: realIpWhere(x.where, t) })} <span className="mono">{x.trust}</span>.{' '}
+            {t('Порты {p} открыты в обход Cloudflare, и прямой заход на адрес ноды с поддельным {h} проходит allow/deny у сайтов ({n}):', {
+              p: x.ports.join(', '),
+              h: x.hdr,
+              n: x.acl,
+            })}{' '}
+            <span className="mono">{x.names.join(', ')}</span>
+          </div>
+          {!x.decided && (
+            <div className="muted small">
+              {t('Пустите на {p} только адреса Cloudflare или {fix}.', { p: x.ports.join(', '), fix: realIpFix(x.label, t) })}
+            </div>
+          )}
+        </div>
+      ))}
+    </>
   )
 }
 

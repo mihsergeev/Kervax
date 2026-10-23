@@ -25,7 +25,9 @@ listen его не видно: шлюз Envoy с сайтами на 80 и 443 �
 
 Через Cloudflare: если домены сайтов ноды смотрят в адреса Cloudflare, а 80 или 443 напрямую
 закрыт, порт открыт только для Cloudflare (белый список его адресов в файрволе или
-NetworkPolicy). Открыт напрямую - Cloudflare можно обойти, это видно отметкой в строке.
+NetworkPolicy). Открыт напрямую - Cloudflare можно обойти, это видно отметкой в строке. Если
+веб-сервер вдобавок верит CF-Connecting-IP или X-Forwarded-For от любого адреса, белые списки
+обходятся поддельным заголовком: это красный признак (app/cf_realip.py).
 
 Белый список с адресом проверки: прокси, через который смотрим, бывает и адресом мониторов, и его
 добавляют в белые списки файрвола нод. Тогда порт, закрытый для интернета, проверке открыт: на
@@ -756,6 +758,21 @@ def _mark_cf(out: dict) -> None:
     for x in out["ports"]:
         if x["port"] in CF_PORTS and x.get("state") in ("open", "closed", "filtered"):
             x["cf"] = "also" if x["state"] == "open" else "only"
+
+
+def cf_open(srv: Server, now: datetime) -> list[int]:
+    """80 и 443, открытые в обход Cloudflare по свежей проверке (cf: also): сайты ноды идут через
+    него, а порт открыт и напрямую. Проверка с самой панели, порт только белому списку с адресом
+    проверки и адрес другого сервера не в счет. Пускает ли файрвол туда только Cloudflare, проверка
+    и видит: такой порт для нее закрыт."""
+    ex = _ex(srv)
+    ts = scanned_at(srv)
+    if ts is None or now - ts > FRESH or from_panel(srv) or not (ex.get("cf") or {}).get("n"):
+        return []
+    alien = foreign(srv)
+    return sorted({x["port"] for x in marked_rows(srv, ex.get("ports") or [])
+                   if x["port"] in CF_PORTS and x.get("state") == "open" and not x.get("allow")
+                   and x.get("ip") not in alien})
 
 
 def exposed(srv: Server, now: datetime) -> list[dict]:

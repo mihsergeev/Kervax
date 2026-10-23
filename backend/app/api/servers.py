@@ -27,6 +27,7 @@ from app import cron_watch
 from app import going_down
 from app import log_errors
 from app import fpm_pools
+from app import gitlab as gitlab_mod
 from app import mem_trend
 from app import restarts as srv_restarts
 from app import access_audit
@@ -34,6 +35,7 @@ from app import docker_risk
 from app import reboot_survive
 from app import ssh_audit
 from app import web_certs
+from app import cf_realip
 from app import web_upstream
 from app import web_config
 from app import webfiles as webfiles_mod
@@ -270,6 +272,9 @@ def _out(
     o.docker_exposed = docker_exposure.view(server.last_report or {})
     o.docker_risk = docker_risk.view(server, fix=True)
     o.exposure = open_ports.view(server)
+    if o.exposure is not None:
+        # веб-серверы, чьи белые списки обходятся подменой CF-Connecting-IP (app/cf_realip.py)
+        o.exposure["realip"] = cf_realip.view(server, now) or []
     o.os_advice = os_support.advice(server.last_report or {}, now, server.alert_mutes)
     o.sw_advice = software_mod.advice(server.last_report or {}, server.sw_host, now, server.alert_mutes)
     o.changes = srv_changes.view(server)
@@ -302,6 +307,7 @@ def _out(
     o.cron = cron_watch.view(server, now)
     o.log_errors = log_errors.view(server, now)
     o.fpm = fpm_pools.view(server, now)
+    o.gitlab = gitlab_mod.view(server, now)
     o.web_config = web_config.view(server.last_report or {}, now)
     o.web_certs = web_certs.view(server.last_report or {}, now)
     o.webfiles = webfiles_mod.view(server.webfiles, server.last_report or {}, now)
@@ -531,6 +537,8 @@ async def list_servers(user: CurrentUser, session: SessionDep) -> list[ServerOut
     # ошибки 5xx за 15 минут по всем нодам - двумя запросами на весь список, для "Что сломано"
     web_err = await web_error_window(session, now)
     bogus = await request_watch.server_issues(session)
+    # выпуски GitLab собирает планировщик, веб берет их из app_settings (раз в 5 минут)
+    await gitlab_mod.load_feed(session)
     # куда пойдут алерты серверов на подключении: строка чек-листа в карточке
     cfg = None
     if any(onboard.active(s, now) for s in servers):
@@ -626,6 +634,7 @@ _SETUP_LABEL = {
     "cron-setup": "Кроны на хосте и в контейнерах",
     "logerr-setup": "Ошибки в логах контейнеров",
     "fpm-setup": "Пулы PHP-FPM",
+    "gitlab-setup": "GitLab: версия, бэкап, миграции",
     "sockfix-setup": "Compose внешнего прокси: сокет и образ",
     "relay-setup": "Ретранслятор для агентов",
     "webfiles-setup": "Файлы сайтов: новые php и правки",
@@ -1326,6 +1335,7 @@ async def close_fleet_rollout(part: str, user: CurrentUser, session: SessionDep)
 @router.get("/{server_id}", response_model=ServerOut)
 async def get_server(server_id: int, user: CurrentUser, session: SessionDep) -> ServerOut:
     server = await _get_or_404(server_id, session, user)
+    await gitlab_mod.load_feed(session)
     o = _out(server, datetime.now(timezone.utc))
     bogus = (await request_watch.server_issues(session)).get(server.id)
     if bogus:
