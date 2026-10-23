@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { installVia, listLocations, listServers, type Location, type Server } from './api'
 import { useI18n } from './i18n'
 import { isProxyUrl } from './installProxy'
@@ -9,11 +9,43 @@ import { isProxyUrl } from './installProxy'
 // прокси панель не видит вовсе: он дописывается в команду здесь же (installProxy).
 export type InstallMode = 'direct' | 'relay' | 'location' | 'custom'
 
-const MODES: { k: InstallMode; label: string }[] = [
-  { k: 'direct', label: 'Напрямую' },
-  { k: 'relay', label: 'Через ретранслятор' },
-  { k: 'location', label: 'Через локацию' },
-  { k: 'custom', label: 'Свой прокси' },
+// карточки выбора пути: значок, название и одна строка, когда какой нужен
+const MODES: { k: InstallMode; label: string; hint: string; icon: ReactNode }[] = [
+  { k: 'direct', label: 'Напрямую', hint: 'Сервер сам достает панель', icon: <path d="M3 12h15m-5-5 5 5-5 5" /> },
+  {
+    k: 'relay',
+    label: 'Через ретранслятор',
+    hint: 'Адрес режут по пути к панели',
+    icon: (
+      <>
+        <circle cx="4.5" cy="12" r="2" />
+        <circle cx="12" cy="12" r="2" />
+        <path d="M6.5 12h3.5m4 0h6m-3-3 3 3-3 3" />
+      </>
+    ),
+  },
+  {
+    k: 'location',
+    label: 'Через локацию',
+    hint: 'Через прокси локации из окна Локации',
+    icon: (
+      <>
+        <circle cx="12" cy="12" r="8.5" />
+        <path d="M3.5 12h17M12 3.5c2.3 2.4 3.4 5.2 3.4 8.5s-1.1 6.1-3.4 8.5c-2.3-2.4-3.4-5.2-3.4-8.5S9.7 5.9 12 3.5z" />
+      </>
+    ),
+  },
+  {
+    k: 'custom',
+    label: 'Свой прокси',
+    hint: 'Ваш http или socks5 прокси',
+    icon: (
+      <>
+        <circle cx="8" cy="12" r="3.5" />
+        <path d="M11.5 12H21m-3 0v3m-3-3v2" />
+      </>
+    ),
+  },
 ]
 
 const RELAY_STATE: Record<string, string> = {
@@ -28,10 +60,12 @@ export function InstallPath({
   server,
   initial = 'direct',
   onProxy,
+  onMode,
 }: {
   server: Server
   initial?: InstallMode
   onProxy: (proxy: string) => void
+  onMode?: (mode: InstallMode) => void
 }) {
   const { t } = useI18n()
   const [mode, setMode] = useState<InstallMode>(initial)
@@ -120,104 +154,114 @@ export function InstallPath({
   const needIp = mode === 'relay' || mode === 'location'
   return (
     <div className="install-path">
-      <div className="muted small">{t('Как агент пойдет в панель')}</div>
-      <div className="win-switch install-path-modes">
+      <div className="ip-modes" role="radiogroup">
         {MODES.map((m) => (
           <button
             key={m.k}
-            className={`win-btn${mode === m.k ? ' win-btn-active' : ''}`}
-            onClick={() => setMode(m.k)}
+            type="button"
+            role="radio"
+            aria-checked={mode === m.k}
+            className={`ip-mode${mode === m.k ? ' ip-mode-on' : ''}`}
+            onClick={() => {
+              setMode(m.k)
+              onMode?.(m.k)
+            }}
           >
-            {t(m.label)}
+            <svg className="ip-ico" viewBox="0 0 24 24" aria-hidden="true">
+              {m.icon}
+            </svg>
+            <span className="ip-txt">
+              <b>{t(m.label)}</b>
+              <span>{t(m.hint)}</span>
+            </span>
           </button>
         ))}
       </div>
-      {mode === 'direct' && (
-        <p className="muted small install-alt-hint">
-          {t('Агент ходит в панель сам. Если адрес сервера режут на пути к панели (ответ панели не доходит), выберите ретранслятор или локацию.')}
-        </p>
+      {mode !== 'direct' && (
+        <div className="ip-fields">
+          {mode === 'relay' &&
+            (relays.length ? (
+              <label className="field">
+                <span>{t('Ретранслятор')}</span>
+                <select value={relayId ?? ''} onChange={(e) => setRelayId(e.target.value ? Number(e.target.value) : null)}>
+                  <option value="">{t('— выберите —')}</option>
+                  {relays.map((r) => (
+                    <option key={r.id} value={r.id}>
+                      {r.name} · {t(RELAY_STATE[r.relay?.state ?? ''] ?? 'helper не поставлен')}
+                    </option>
+                  ))}
+                </select>
+                <span className="field-hint muted small">
+                  {t('Сервер сразу попадает в список адресов, которые ретранслятор пускает: helper откроет ему порт в течение минуты.')}
+                </span>
+              </label>
+            ) : (
+              <p className="muted small install-alt-hint">
+                {t('Ретрансляторов нет. Включите "Ретранслятор для агентов" в настройках сервера, который сам достает до панели.')}
+              </p>
+            ))}
+          {mode === 'location' &&
+            (locs.length ? (
+              <label className="field">
+                <span>{t('Локация')}</span>
+                <select value={locId ?? ''} onChange={(e) => setLocId(e.target.value ? Number(e.target.value) : null)}>
+                  <option value="">{t('— выберите —')}</option>
+                  {locs.map((l) => (
+                    <option key={l.id} value={l.id}>
+                      {l.name}
+                      {l.exit_country ? ` · ${l.exit_country}` : ''}
+                    </option>
+                  ))}
+                </select>
+                <span className="field-hint muted small">
+                  {t('Через прокси локации. IP сервера должен быть разрешен в самом прокси, если он пускает не всех.')}
+                </span>
+              </label>
+            ) : (
+              <p className="muted small install-alt-hint">{t('Локаций с адресом прокси нет: их заводят в окне Локации.')}</p>
+            ))}
+          {mode === 'custom' && (
+            <label className="field">
+              <span>{t('Прокси')}</span>
+              <input
+                value={custom}
+                onChange={(e) => setCustom(e.target.value)}
+                placeholder="http://user:password@proxy.example.com:3128"
+                autoComplete="off"
+                spellCheck={false}
+              />
+              <span className={`field-hint small ${customBad ? 'form-error' : 'muted'}`}>
+                {customBad
+                  ? t('Нужен вида http://логин:пароль@хост:порт (подходят и https://, socks5://), без пробелов и кавычек.')
+                  : t('Он попадет в команду и в конфиг агента на сервере, панель его не хранит.')}
+              </span>
+            </label>
+          )}
+          {(needIp || mode === 'custom') && (
+            <label className="field">
+              <span>
+                {t('Внешний IP сервера')}
+                {mode === 'relay' ? '' : ` (${t('опционально')})`}
+              </span>
+              <input
+                value={ip}
+                onChange={(e) => setIp(e.target.value)}
+                onBlur={() => setIpApplied(ip)}
+                onKeyDown={(e) => e.key === 'Enter' && setIpApplied(ip)}
+                placeholder="203.0.113.10"
+                spellCheck={false}
+              />
+              <span className={`field-hint small ${ipBad ? 'form-error' : 'muted'}`}>
+                {ipBad
+                  ? t('IP сервера указан неверно')
+                  : t('Через прокси панель видит адрес прокси, а не сервера: страна и проверки снаружи идут по этому адресу.')}
+              </span>
+            </label>
+          )}
+          {busy && <p className="muted small">{t('Подставляю в команду…')}</p>}
+          {err && <p className="form-error small">{t(err)}</p>}
+        </div>
       )}
-      {mode === 'relay' &&
-        (relays.length ? (
-          <label className="field">
-            <span>{t('Ретранслятор')}</span>
-            <select value={relayId ?? ''} onChange={(e) => setRelayId(e.target.value ? Number(e.target.value) : null)}>
-              <option value="">{t('— выберите —')}</option>
-              {relays.map((r) => (
-                <option key={r.id} value={r.id}>
-                  {r.name} · {t(RELAY_STATE[r.relay?.state ?? ''] ?? 'helper не поставлен')}
-                </option>
-              ))}
-            </select>
-            <span className="field-hint muted small">
-              {t('Сервер сразу попадает в список адресов, которые ретранслятор пускает: helper откроет ему порт в течение минуты.')}
-            </span>
-          </label>
-        ) : (
-          <p className="muted small install-alt-hint">
-            {t('Ретрансляторов нет. Включите "Ретранслятор для агентов" в настройках сервера, который сам достает до панели.')}
-          </p>
-        ))}
-      {mode === 'location' &&
-        (locs.length ? (
-          <label className="field">
-            <span>{t('Локация')}</span>
-            <select value={locId ?? ''} onChange={(e) => setLocId(e.target.value ? Number(e.target.value) : null)}>
-              <option value="">{t('— выберите —')}</option>
-              {locs.map((l) => (
-                <option key={l.id} value={l.id}>
-                  {l.name}
-                  {l.exit_country ? ` · ${l.exit_country}` : ''}
-                </option>
-              ))}
-            </select>
-            <span className="field-hint muted small">
-              {t('Через прокси локации. IP сервера должен быть разрешен в самом прокси, если он пускает не всех.')}
-            </span>
-          </label>
-        ) : (
-          <p className="muted small install-alt-hint">{t('Локаций с адресом прокси нет: их заводят в окне Локации.')}</p>
-        ))}
-      {mode === 'custom' && (
-        <label className="field">
-          <span>{t('Прокси')}</span>
-          <input
-            value={custom}
-            onChange={(e) => setCustom(e.target.value)}
-            placeholder="http://user:password@proxy.example.com:3128"
-            autoComplete="off"
-            spellCheck={false}
-          />
-          <span className={`field-hint small ${customBad ? 'form-error' : 'muted'}`}>
-            {customBad
-              ? t('Нужен вида http://логин:пароль@хост:порт (подходят и https://, socks5://), без пробелов и кавычек.')
-              : t('Он попадет в команду и в конфиг агента на сервере, панель его не хранит.')}
-          </span>
-        </label>
-      )}
-      {(needIp || mode === 'custom') && (
-        <label className="field">
-          <span>
-            {t('Внешний IP сервера')}
-            {mode === 'relay' ? '' : ` (${t('опционально')})`}
-          </span>
-          <input
-            value={ip}
-            onChange={(e) => setIp(e.target.value)}
-            onBlur={() => setIpApplied(ip)}
-            onKeyDown={(e) => e.key === 'Enter' && setIpApplied(ip)}
-            placeholder="203.0.113.10"
-            spellCheck={false}
-          />
-          <span className={`field-hint small ${ipBad ? 'form-error' : 'muted'}`}>
-            {ipBad
-              ? t('IP сервера указан неверно')
-              : t('Через прокси панель видит адрес прокси, а не сервера: страна и проверки снаружи идут по этому адресу.')}
-          </span>
-        </label>
-      )}
-      {busy && <p className="muted small">{t('Подставляю в команду…')}</p>}
-      {err && <p className="form-error small">{t(err)}</p>}
     </div>
   )
 }
