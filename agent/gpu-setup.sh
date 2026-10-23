@@ -15,7 +15,11 @@
 set -euo pipefail
 
 KERVAX_SETUP_VERSION=0.4  # MAJOR.MINOR; compared component-wise
-KERVAX_SETUP_WHEN="command -v nvidia-smi >/dev/null 2>&1 || grep -qsx 0x10de /sys/bus/pci/devices/*/vendor"
+# nvidia-smi is there, or an NVIDIA display card (class 0x03xx) not bound to nouveau: a card on nouveau
+# drives a monitor (hosters put them into Ryzen servers without integrated graphics), there is no CUDA on
+# it, so the helper has nothing to read. A card with no driver at all still gets the helper. No $ in the
+# condition: the assignment is double-quoted and runs under set -u in this very script
+KERVAX_SETUP_WHEN="command -v nvidia-smi >/dev/null 2>&1 || grep -lsx 0x10de /sys/bus/pci/devices/*/vendor | sed s/vendor/class/ | xargs -r grep -ls ^0x03 | sed s/class/driver/ | xargs -r readlink -f | grep -qv drivers/nouveau"
 
 HELPER_DIR=/lib65/kervax
 HELPER="$HELPER_DIR/kervax-gpu"

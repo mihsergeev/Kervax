@@ -1855,6 +1855,7 @@ const EN: Record<string, string> = {
   'доля': 'share',
   'драйвер': 'driver',
   'драйвер NVIDIA не отвечает': 'the NVIDIA driver does not answer',
+  'драйвер NVIDIA не установлен': 'the NVIDIA driver is not installed',
   'за 5 минут, мини-графики за час': 'over 5 minutes, sparklines over an hour',
   'за {n} мин': 'in {n} min',
   'загрузка {p}%': 'load {p}%',

@@ -115,12 +115,16 @@ def age(b: dict, now: datetime, rep: dict | None = None) -> float:
 
 
 def pci_list(rep: dict) -> list[dict]:
-    """Карты NVIDIA на шине: из helper'а, без него - из отчета агента 2.36"""
+    """Карты NVIDIA на шине: из helper'а, без него - из отчета агента 2.36. Карты на nouveau не в
+    счет: это вывод на монитор (хостеры ставят такие в серверы на Ryzen без встроенной графики),
+    CUDA на nouveau нет и nvidia-smi их не видит. Поставят драйвер NVIDIA - drv станет nvidia,
+    и карта вернется. Свежая вычислительная карта до установки драйвера тоже на nouveau и тоже
+    скрыта: алерта по ней и так нет (smi=false)"""
     b = block(rep)
     src = (b or {}).get("pci") if b else None
     if not isinstance(src, list):
         src = (rep or {}).get("gpu_pci")
-    return [p for p in (src or []) if isinstance(p, dict) and p.get("bus")]
+    return [p for p in (src or []) if isinstance(p, dict) and p.get("bus") and p.get("drv") != "nouveau"]
 
 
 def has_gpu(rep: dict) -> bool:
@@ -215,6 +219,8 @@ def problems(rep: dict, now: datetime) -> list[tuple[int, str, str, str | None]]
     b = block(rep)
     if b is None:
         return []
+    if not b.get("smi") and not has_gpu(rep):
+        return []  # helper стоит, а nvidia-smi и карт нет (только nouveau): судить не о чем
     a = age(b, now, rep)
     if a > STALE:
         return [(1, f"данные о GPU не обновлялись {_dur(a)}: helper gpu-setup не отрабатывает "
@@ -231,7 +237,7 @@ def problems(rep: dict, now: datetime) -> list[tuple[int, str, str, str | None]]
         drv = str(p.get("drv") or "")
         k = bus_key(p["bus"])
         if drv not in ("nvidia", "") or k in seen:
-            continue  # vfio-pci - отдана в виртуальную машину, nouveau - не наш драйвер
+            continue  # vfio-pci - отдана в виртуальную машину
         txt = f"GPU {p['bus']} пропала: на шине PCI она есть, драйвер NVIDIA ее не видит"
         x79 = next((x for x in xids if x["code"] == 79 and bus_key(x["bus"]) == k), None)
         if x79:
@@ -324,6 +330,7 @@ def summary(rep: dict, now: datetime) -> dict | None:
         "memt": round(memt / 1024, 1) if gs else None,
         "helper": b is not None,
         "ok": bool(b and b.get("ok")),
+        "smi": bool(b and b.get("smi")),  # false - драйвер NVIDIA не ставили: не "нет связи"
         "frozen": sum(1 for g in gs if frozen(g)),
     }
 
@@ -333,7 +340,7 @@ def view(rep: dict, now: datetime) -> dict | None:
     шине и драйвер"""
     b = block(rep)
     pci = pci_list(rep)
-    if b is None and not pci:
+    if not pci and not (b and _gpus(b)):
         return None
     if b is None:
         return {"helper": False, "pci": [{"bus": p["bus"], "drv": str(p.get("drv") or "")} for p in pci]}
