@@ -30,6 +30,11 @@ helper 0.2 смотрит только верхний слой overlay (запи
 Файлы плагина или ядра изменились, а версия нет - признак, с названием, чей это файл. php в
 загрузках - признак всегда.
 
+Файл рабочей копии git helper 0.5 сверяет с HEAD: то же содержимое (IDE или инструмент в
+контейнере записали файл заново) - не правка, тихая строка "перезаписан тем же содержимым".
+Другое содержимое - признак, с текстом "не закоммиченная правка в рабочей копии git (ветка X)".
+Файл, которого нет в HEAD, и php в загрузках - признаки, как раньше.
+
 Признаки копятся в servers.webfiles, пока их не примут кнопкой ("это наше") или файл не пропадет.
 Корень с доменами из конфига (или единственный сайт сервера) привязан к монитору: признаки идут
 в его "Признаки взлома" и считаются вместе с признаками страницы (app/tamper.py). Остальные -
@@ -155,7 +160,7 @@ def process(state: dict | None, b: dict, now: datetime) -> dict:
                    files=int(r.get("files") or 0), big=bool(r.get("big")), layer=bool(r.get("layer")),
                    at=now.isoformat())
         for k, v in (("src", str(r.get("src") or "")), ("git", _events(r.get("git"))),
-                     ("wp", str(r.get("wp") or ""))):
+                     ("wp", str(r.get("wp") or "")), ("branch", str(r.get("branch") or ""))):
             if v:
                 cur[k] = v
             else:
@@ -356,14 +361,36 @@ def _wp_explain(root: dict, d: dict, rows: list[tuple[str, int, int]], ts: float
     return out
 
 
+def _strs(lst) -> set[str]:
+    return {x for x in lst or [] if isinstance(x, str)}
+
+
+def _git_same(root: dict, d: dict, rows: list[tuple[str, int, int]], ts: float) -> set[str]:
+    """Файлы с тем же содержимым, что в HEAD репозитория (helper 0.5): записаны заново, а не
+    изменены. Признак по такому файлу, если был, снимается - файл снова как в git."""
+    same = _strs(d.get("git_same"))
+    out = {p for p, _t, s in rows if p in same and not (is_php(p) and in_uploads(p) and not _quiet_index(p, s))}
+    if not out:
+        return out
+    for p in out:
+        (root.get("edit") or {}).pop(p, None)
+    if "edit" in root and not root["edit"]:
+        root.pop("edit")
+    times = [t for p, t, _s in rows if p in out and t > 0]
+    root["same"] = {"at": _iso(max(times) if times else ts), "files": sorted(out)[:5], "n": len(out)}
+    return out
+
+
 def _apply(root: dict, d: dict, ts: float) -> None:
     new = [x for x in _rows(d.get("new")) if not generated(x[0])]
     changed = [x for x in _rows(d.get("changed")) if not generated(x[0])]
-    # обновил сам WordPress - не признак и не выкладка
+    # обновил сам WordPress или файл записан заново тем же содержимым, что в git, - не признак и
+    # не выкладка
     listed = len(new) + len(changed)
-    wp = _wp_explain(root, d, new + changed, ts)
+    wp = _wp_explain(root, d, new + changed, ts) | _git_same(root, d, new + changed, ts)
     new = [x for x in new if x[0] not in wp]
     changed = [x for x in changed if x[0] not in wp]
+    dirty = _strs(d.get("git_dirty"))
     # записанное выкладкой через git - не признак при любом числе файлов (кроме php в загрузках)
     by_git: dict[str, list] = {}
     for p, t, _s in new + changed:
@@ -399,7 +426,7 @@ def _apply(root: dict, d: dict, ts: float) -> None:
         if is_php(p) and in_uploads(p) and not _quiet_index(p, size):
             _add(root, "php", p, since, size, t)
         elif not deploy and p not in by_git:
-            _add(root, "edit", p, since, size, t)
+            _add(root, "edit", p, since, size, t, "dirty" if p in dirty else "")
     for g in gone:
         p = g[0] if isinstance(g, (list, tuple)) and g else g
         for k in ("php", "edit"):
@@ -409,12 +436,15 @@ def _apply(root: dict, d: dict, ts: float) -> None:
             root.pop(k)
 
 
-def _add(root: dict, key: str, p: str, since: str, size: int, t: int = 0) -> None:
+def _add(root: dict, key: str, p: str, since: str, size: int, t: int = 0, g: str = "") -> None:
+    """g - "dirty": файл рабочей копии git, содержимое не как в HEAD."""
     files = root.setdefault(key, {})
     if p in files or len(files) < MAX_FILES:
         files[p] = {"since": (files.get(p) or {}).get("since") or since, "s": size}
         if t > 0:
             files[p]["t"] = t
+        if g:
+            files[p]["g"] = g
 
 
 def accept(state: dict | None, root: str = "", key: str = "", paths: list[str] | None = None) -> dict:
@@ -525,6 +555,9 @@ def mirror(servers: list[tuple[int, str, dict]], checks: list[tuple[int, str, se
                         f = {"p": p, "sid": sid, "root": rk, "where": where(name, r), "since": v["since"]}
                         if r.get("wp"):
                             f["wp"] = True
+                        if v.get("g"):
+                            f["g"] = v["g"]
+                            f["branch"] = r.get("branch") or ""
                         sign["files"].append(f)
                         sign["since"] = min(sign["since"], v["since"])
     return by_check, loose
@@ -555,15 +588,21 @@ def problems(state: dict | None) -> list[tuple[int, str, str]]:
                 text += ", правки не через git/деплой: " + tg_fmt.names([_base(p) for p in edit], 2)
             out.append((2, text, f"php:{gk}:" + ",".join(php)))
         elif edit:
-            head = edit_head(edit, any(r.get("wp") for _rk, r in items))
+            ef = _merged(items, "edit")
+            dirty = all(v.get("g") == "dirty" for v in ef.values())
+            head = edit_head(edit, any(r.get("wp") for _rk, r in items), dirty,
+                             next((r["branch"] for _rk, r in items if r.get("branch")), ""))
             out.append((1, f"{head} в {path}{at}: "
                            + tg_fmt.names([_base(p) for p in edit]), f"edit:{gk}:" + ",".join(edit)))
     return out
 
 
-def edit_head(paths: list[str], versions: bool) -> str:
-    """Как назвать правку: все файлы одного плагина, темы или ядра WordPress - так и сказать.
-    versions - helper следит за версиями WordPress, т.е. версия точно не сменилась."""
+def edit_head(paths: list[str], versions: bool, dirty: bool = False, branch: str = "") -> str:
+    """Как назвать правку: все файлы не как в HEAD рабочей копии git (dirty) - не закоммиченная
+    правка; все файлы одного плагина, темы или ядра WordPress - так и сказать. versions - helper
+    следит за версиями WordPress, т.е. версия точно не сменилась."""
+    if dirty:
+        return "не закоммиченная правка в рабочей копии git" + (f" (ветка {branch})" if branch else "")
     parts = {wp_part(p, versions) for p in paths}
     if len(parts) == 1 and None not in parts:
         kind, slug = parts.pop()
@@ -599,8 +638,19 @@ def view(state: dict | None, rep: dict, now: datetime) -> dict | None:
             # WordPress: версия ядра (helper 0.4 следит за версиями) и что он обновил сам за неделю
             "wp": next((r["wp"] for r in rs if r.get("wp")), ""),
             "wp_events": _wp_shown(rs, now),
+            # рабочая копия git: ветка и последний файл, записанный заново тем же содержимым (за неделю)
+            "branch": next((r["branch"] for r in rs if r.get("branch")), ""),
+            "same": _same_shown(rs, now),
         })
     return {"roots": out, "ts": (b or {}).get("ts")}
+
+
+def _same_shown(rs: list[dict], now: datetime) -> dict | None:
+    last = max((r["same"] for r in rs if r.get("same")), key=lambda x: x.get("at", ""), default=None)
+    try:
+        return last if last and now - datetime.fromisoformat(last["at"]) <= WP_SHOW else None
+    except (KeyError, ValueError):
+        return None
 
 
 def _wp_shown(rs: list[dict], now: datetime) -> list[dict]:

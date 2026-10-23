@@ -107,8 +107,9 @@ export function VulnsModal({ onClose, onUnauthorized, onOpen }: Props) {
     { id: 'over', label: 'Сводка', group: '' },
     ...pkgs.map((p) => ({ id: `p:${p.key}`, label: p.kernel ? 'Ядро' : p.src, group: 'Что обновить' })),
     ...vuln.map((s) => ({ id: `s${s.id}`, label: s.name, group: 'Серверы' })),
-    ...(clean.length ? [{ id: 'clean', label: 'Без важных', group: 'Остальные' }] : []),
-    ...(unknown.length ? [{ id: 'unknown', label: 'Не проверены', group: 'Остальные' }] : []),
+    // "Остальные" есть всегда: пока данные грузятся, меню не перестраивается, пусто - так и пишем
+    { id: 'clean', label: 'Без важных', group: 'Остальные' },
+    { id: 'unknown', label: 'Не проверены', group: 'Остальные' },
   ]
   const HEAD: Record<string, string> = { clean: 'Без важных уязвимостей', unknown: 'Не проверены' }
   const cur = SECS.find((s) => s.id === sec) ?? SECS[0]
@@ -478,8 +479,9 @@ export function VulnsModal({ onClose, onUnauthorized, onOpen }: Props) {
                 {cur.id === 'over' && (needle ? found() : overview())}
                 {curPkg && pkgSec(curPkg)}
                 {curSrv && srvSec(curSrv)}
-                {cur.id === 'clean' && listSec(clean, 'clean')}
-                {cur.id === 'unknown' && listSec(unknown, 'unknown')}
+                {cur.id === 'clean' && (clean.length ? listSec(clean, 'clean') : <p className="muted small">{t('Таких серверов нет.')}</p>)}
+                {cur.id === 'unknown' &&
+                  (unknown.length ? listSec(unknown, 'unknown') : <p className="muted small">{t('Таких серверов нет.')}</p>)}
               </div>
             )}
           </div>

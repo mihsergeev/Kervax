@@ -348,6 +348,180 @@ const EN: Record<string, string> = {
   'Контейнеры по памяти': 'Containers by memory',
   'Что сломано': 'What is broken',
   // упавшие юниты systemd
+  'На сервере restic {v}, нужен {target}, как у клиентов':
+    'The server has restic {v}, {target} is needed, as on the clients',
+  'Обновить restic на сервере': 'Update restic on the server',
+  'Обычно его обновляет установка helper\'а: значит, скачать с GitHub не вышло.':
+    'Installing the helper usually updates it, so the download from GitHub failed.',
+  'Будет стерто безвозвратно: {n} снапшотов, {sz}, последний {ago}. Других копий у панели нет.':
+    'This erases for good: {n} snapshots, {sz}, the last one {ago}. The panel has no other copies.',
+  'Если бэкап еще может понадобиться, приглушите репозиторий (🔕): данные останутся.':
+    'If the backup may still be needed, mute the repository (🔕): the data stays.',
+  'Репозиторий пустой и не инициализирован, удалять нечего, кроме мусора.':
+    'The repository is empty and not initialized, there is nothing to delete but leftovers.',
+  'Удалить на бэкап-сервере от root': 'Delete on the backup server as root',
+  'Панель бэкапы не удаляет, это защита от взлома. Если репозиторий заводил Ansible, проверьте еще строку в sudo crontab -l.':
+    'The panel does not delete backups, this protects against a break-in. If Ansible created the repository, also check for a line in sudo crontab -l.',
+  'Снять висячие локи на бэкап-сервере от root': 'Remove stale locks on the backup server as root',
+  'Живой лок идущего бэкапа или чистки (моложе 30 минут) команда не тронет. Пароль читается из env внутри команды и в списке процессов не виден.':
+    'A live lock of a running backup or cleanup (younger than 30 minutes) is left alone. The password is read from the env inside the command and is not visible in the process list.',
+  'Снял, проверить': 'Done, check',
+  'Статус обновится сам в течение минуты.': 'The status updates by itself within a minute.',
+  'перевести репозиторий на чистку панели': 'move the repository to the panel cleanup',
+  'удалить старую группу или, если ее надо хранить, убрать в архив':
+    'delete the old group or, if it must be kept, archive it',
+  'посмотреть, что делает чистка и что удалит политика': 'check what the cleanup does and what the policy would delete',
+  'завести чистку или убрать репозиторий в архив': 'set up a cleanup or archive the repository',
+  'обновить helper backupserver-setup: по старому не видно, кто чистит репозиторий':
+    'update the backupserver-setup helper: the old one does not show who cleans the repository',
+  'Перевести их на чистку панели': 'Move them to the panel cleanup',
+  'У каждого репозитория будет свой prune-скрипт с той же политикой и паролем, чистка раз в сутки и проверка целостности раз в неделю.':
+    'Each repository gets its own prune script with the same policy and password, a daily cleanup and a weekly integrity check.',
+  'Перевести на чистку панели можно по желанию: она снимает висячие локи, пишет метрики, раз в неделю проверяет целостность и не держит вечно старые группы снапшотов.':
+    'Moving to the panel cleanup is optional: it removes stale locks, writes metrics, checks integrity weekly and does not keep old snapshot groups forever.',
+  'включил helper до 0.34: выключить, как было, или подтвердить, что она нужна':
+    'a helper before 0.34 turned it on: turn it off as it was, or confirm it is needed',
+  'Прокси docker-сокета пускает только чтение: перезапуск, стоп и старт дают 403':
+    'The docker socket proxy is read-only: restart, stop and start return 403',
+  'Docker есть, но список контейнеров агенту не виден': 'Docker is here, but the agent cannot see the container list',
+  'Заменить прокси на прокси с перезапуском': 'Replace the proxy with one that allows restarts',
+  'Включить доступ на чтение': 'Enable read access',
+  'Просмотр плюс перезапуск, стоп и старт, без exec, создания контейнеров и образов. Слушает только 127.0.0.1 хоста.':
+    'Viewing plus restart, stop and start, no exec, no creating containers or images. Listens on the host\'s 127.0.0.1 only.',
+  'docker-socket-proxy: просмотр и перезапуск, без exec и root. Новым нодам - флаг --docker при установке.':
+    'docker-socket-proxy: viewing and restart, no exec or root. For new nodes, the --docker flag at install.',
+  'Поды, которые перезапускались за сутки. В Telegram: OOMKilled от 3 раз, падения и убийства по пробе от 5, пачки от {n}. Выход с кодом 0 - плановый, только здесь.':
+    'Pods restarted in the last 24 h. To Telegram: OOMKilled from 3 times, crashes and probe kills from 5, bursts from {n}. Exit code 0 is planned and shown only here.',
+  'Пачек за сутки: {n}: поды разных ворклоадов перезапускались разом, подвисала нода':
+    'Bursts in 24 h: {n}: pods of different workloads restarted at once, the node stalled',
+  'Чинить ноду, а не поды: нагрузка, память, диск под etcd': 'Fix the node, not the pods: load, memory, the etcd disk',
+  'В эти минуты на ноде было давление или поды упали по таймауту пробы и kube-api (leader election lost). Плановый выход с кодом 0 и заглушенные поды в пачки не идут.':
+    'In those minutes the node was under pressure, or pods failed on probe and kube-api timeouts (leader election lost). Planned exit code 0 and muted pods do not count in bursts.',
+  'Кластер есть, но у агента нет доступа к kube-api': 'There is a cluster, but the agent has no access to kube-api',
+  'Включить доступ на чтение и точечное управление': 'Enable read access and targeted management',
+  'Скрипт создает ServiceAccount с узким RBAC (не cluster-admin) и кладет токен для агента.':
+    'The script creates a ServiceAccount with narrow RBAC (not cluster-admin) and leaves a token for the agent.',
+  'Часы разошлись с панелью на {n}, синхронизируйте время': 'The clock is {n} off from the panel, sync the time',
+  'Время не синхронизировано, включите NTP': 'Time is not synced, turn on NTP',
+  'Включить синхронизацию': 'Turn on time sync',
+  'Включить systemd-timesyncd: демона синхронизации на сервере нет':
+    'Turn on systemd-timesyncd: the server has no time sync daemon',
+  'до NTP не достучаться: открыть исходящий UDP 123 (sudo ufw allow out 123/udp)':
+    'NTP is unreachable: open outgoing UDP 123 (sudo ufw allow out 123/udp)',
+  'разово выставить часы по времени панели, она доступна по HTTPS':
+    'set the clock once from the panel time, it is reachable over HTTPS',
+  'Кнопка "в один клик" появится после установки timesync-хелпера (ansible kervax_helpers.yml).':
+    'The one-click button appears after the timesync helper is installed (ansible kervax_helpers.yml).',
+  'Поставить автообновления. Ставят только исправления безопасности из репозитория дистрибутива: сторонние (docker и прочие) не трогают, конфиги не меняют, сами не перезагружают.':
+    'Install automatic updates. They install only security fixes from the distribution repository: third-party ones (docker and others) are left alone, configs are not changed, no reboots.',
+  'Перезагрузить при ближайшем окне обслуживания, срочности нет. Обновлен только dbus, а отдельно его не перезапустить: от него зависят systemd-logind и сессии.':
+    'Reboot in the next maintenance window, no hurry. Only dbus was updated, and it cannot be restarted on its own: systemd-logind and sessions depend on it.',
+  'Перезагрузить, когда есть доступ к консоли сервера. Несколько минут сервер недоступен. Старое ядро остается в меню GRUB (Advanced options), если новое не загрузится.':
+    'Reboot when you have access to the server console. The server is down for a few minutes. The old kernel stays in the GRUB menu (Advanced options) in case the new one does not boot.',
+  'Подключить Ubuntu Pro: исправления безопасности до {date}. Токен - на ubuntu.com/pro, для личного использования бесплатно до 5 машин, для компании нужна подписка. Подключение панель видит с агента 2.39.':
+    'Attach Ubuntu Pro: security fixes until {date}. The token is at ubuntu.com/pro, free for personal use on up to 5 machines, a company needs a subscription. The panel sees the attachment from agent 2.39.',
+  'Переехать на следующую версию, по одной за раз. С перезагрузкой: заранее бэкап и доступ к консоли.':
+    'Move to the next release, one at a time. It needs a reboot: have a backup and console access ready.',
+  'Переехать на Debian {n} по release notes. sources.list на новое кодовое имя, apt full-upgrade и перезагрузка: заранее бэкап и доступ к консоли.':
+    'Move to Debian {n} following the release notes. sources.list to the new codename, apt full-upgrade and a reboot: have a backup and console access ready.',
+  'Переехать на следующую версию. RHEL, AlmaLinux и Rocky - через leapp, CentOS - переустановкой на AlmaLinux или Rocky.':
+    'Move to the next release. RHEL, AlmaLinux and Rocky via leapp, CentOS by reinstalling as AlmaLinux or Rocky.',
+  'Пункт уйдет сам в течение часа после этих шагов.': 'The item goes away by itself within an hour after these steps.',
+  'Найти причину в логе': 'Find the cause in the log',
+  'systemd поднимает сервис сам, поэтому среди упавших его нет.':
+    'systemd brings the service back itself, so it is not among the failed units.',
+  'Сначала добавить ключ для {arg}. Сейчас у нее только пароль, последний вход {on}: после выключения паролей она не войдет. Вместо <public-key> - свой публичный ключ (ssh-ed25519 ...), вход по ключу проверить в новом окне.':
+    'First add a key for {arg}. It has only a password now, last login {on}: once passwords are off, it cannot log in. Put your public key (ssh-ed25519 ...) instead of <public-key> and check key login in a new window.',
+  'Проверить вход по ключу для {arg} в новом окне. Она входила по паролю {on}, хотя ключ есть: если ключ не тот, добавьте нужный.':
+    'Check key login for {arg} in a new window. It logged in with a password {on} although it has a key: if the key is wrong, add the right one.',
+  'Выключить вход по паролю отдельным файлом. Имя на 00- нужно, чтобы файл читался раньше 50-cloud-init.conf: в sshd побеждает первое значение.':
+    'Turn off password login with a separate file. The 00- name makes it load before 50-cloud-init.conf: in sshd the first value wins.',
+  'Выключить вход по паролю в sshd_config. У этой версии OpenSSH нет sshd_config.d, строка встает первой. Копия - sshd_config.bak-nopass.':
+    'Turn off password login in sshd_config. This OpenSSH version has no sshd_config.d, the line goes first. Backup: sshd_config.bak-nopass.',
+  'Проверить, пока ничего не применено: ниже должно быть no. Если yes - значение задано раньше, найти где: sudo grep -rn PasswordAuthentication /etc/ssh/':
+    'Check before anything is applied: below it must say no. If yes, the value is set earlier, find where: sudo grep -rn PasswordAuthentication /etc/ssh/',
+  'Применить, открытые сессии не рвутся. Это окно не закрывайте, пока в новом не войдете по ключу: если не пускает, отсюда же откат.':
+    'Apply, open sessions stay. Keep this window open until you log in with a key in a new one: if it fails, roll back from here.',
+  'если что-то не так': 'if something is wrong',
+  'пароль только из своих сетей, из интернета - по ключу. Вместо <cidr> - ваши адреса или сети через запятую (192.0.2.10,198.51.100.0/24), иначе пароль выключится везде. Этот файл вместо файла выше, дальше та же проверка и reload.':
+    'password only from your own networks, key from the internet. Put your addresses or networks, comma separated, instead of <cidr> (192.0.2.10,198.51.100.0/24), otherwise passwords go off everywhere. Use this file instead of the one above, then the same check and reload.',
+  'пароль нужен отовсюду: fail2ban от перебора. Банит адрес после нескольких неудачных входов, здесь порт {arg} (на RHEL пакет из EPEL). Пункт останется, уйдет только приписка про перебор.':
+    'password needed from everywhere: fail2ban against brute force. It bans an address after a few failed logins, port {arg} here (on RHEL the package is from EPEL). The item stays, only the brute force note goes away.',
+  'Через другие учетки за 90 дней никто не входил. Если отключить {arg}, войти на сервер может стать некому: сначала проверьте вход другой учеткой с sudo или через консоль.':
+    'Nobody logged in with other accounts in 90 days. If you disable {arg}, nobody may be able to log in: first check login with another sudo account or the console.',
+  'Убедиться, что от {arg} ничего не работает. Процессы, crontab, lingering и сервисы с User={arg}: пусто и no crontab - ничего нет.':
+    'Make sure nothing runs as {arg}. Processes, crontab, lingering and services with User={arg}: empty and no crontab means nothing.',
+  'Отключить: пароль заблокирован, срок учетки в прошлом. SSH не пустит ни по паролю, ни по ключу, cron и su для нее тоже. Обратимо.':
+    'Disable: the password is locked, the account expiry is in the past. SSH lets it in neither with a password nor a key, cron and su stop too. Reversible.',
+  'Заблокировать пароль {arg}: sudo и cron root продолжат работать. Срок учетки root не ставят, истекшая root ломает cron и su. Если в консоль входите root по паролю, после блокировки не войдете.':
+    'Lock the {arg} password: sudo and root cron keep working. root gets no expiry, an expired root breaks cron and su. If you log in to the console as root with a password, you will not after the lock.',
+  'Убрать ключи: файл переименовывается, а не удаляется. Панель считает доступом любой ключ в authorized_keys.':
+    'Remove the keys: the file is renamed, not deleted. The panel counts any key in authorized_keys as access.',
+  'если учетка понадобится': 'if the account is needed again',
+  'удалить совсем - необратимо. Домашний каталог останется без хозяина (userdel -r удалит и его). Лучше сначала поживите с отключенной.':
+    'delete for good, irreversible. The home directory is left without an owner (userdel -r deletes it too). Better live with it disabled first.',
+  'Учетка уйдет из заброшенных в течение 10 минут.': 'The account leaves the stale list within 10 minutes.',
+  'Входы по журналу sshd видны с {d}.': 'Logins from the sshd log are visible since {d}.',
+  'Включить автозапуск': 'Enable start at boot',
+  'Пункт уйдет сам в течение 10 минут после выключения паролей.':
+    'The item goes away by itself within 10 minutes after passwords are off.',
+  'Нужно действие на сервере': 'Action needed on the server',
+  '{label} (helper {helper}): {a} -> {b}': '{label} (helper {helper}): {a} -> {b}',
+  'Выполнить от root, одной командой': 'Run as root, one command',
+  'OTA обновляет только бинарь, не юнит, поэтому вручную.': 'OTA updates only the binary, not the unit, hence by hand.',
+  'Переустановка helper\'а ничего не ломает.': 'Reinstalling a helper breaks nothing.',
+  'Убрать неработающий резолвер из настроек сети (netplan, /etc/resolv.conf) или заменить рабочим':
+    'Remove the dead resolver from the network settings (netplan, /etc/resolv.conf) or replace it with a working one',
+  'Остальные отвечают и имена резолвятся, но запасного нет.':
+    'The others answer and names resolve, but there is no spare.',
+  'Проверить свой резолвер ноды (unbound, dnsmasq) и серверы, куда он пересылает запросы':
+    'Check the node\'s own resolver (unbound, dnsmasq) and the servers it forwards to',
+  'Поставить первыми в /etc/resolv.conf публичные: nameserver 1.1.1.1 и 8.8.8.8':
+    'Put public ones first in /etc/resolv.conf: nameserver 1.1.1.1 and 8.8.8.8',
+  'Пока тормозят резолверы провайдера: запросы идут к резолверам по порядку.':
+    'While the provider resolvers are slow: queries go to resolvers in order.',
+  'Добавить публичные резолверы': 'Add public resolvers',
+  'Пока тормозят резолверы провайдера: systemd-resolved спросит их вместе с резолверами сети и возьмет первый ответ.':
+    'While the provider resolvers are slow: systemd-resolved asks them along with the network resolvers and takes the first answer.',
+  'mdadm некуда слать письма (в mdadm.conf нет MAILADDR): за RAID он не следит и падает при каждом запуске':
+    'mdadm has nowhere to send mail (no MAILADDR in mdadm.conf): it does not watch the RAID and fails on every start',
+  'Выключить мониторинг mdadm на этом сервере': 'Turn off the mdadm monitor on this server',
+  'по всему парку: плейбук не тронет ноды, где MAILADDR задан':
+    'fleet-wide: the playbook skips nodes where MAILADDR is set',
+  'За RAID следит Kervax, раздел Диск.': 'Kervax watches the RAID, see the Disk section.',
+  'unbound пытается прописаться в systemd-resolved, которого на сервере нет':
+    'unbound tries to register itself in systemd-resolved, which is not on this server',
+  'Выключить юнит': 'Turn the unit off',
+  'по всему парку': 'fleet-wide',
+  'Сам unbound работает, этот юнит ему не нужен.': 'unbound itself works and does not need this unit.',
+  'При загрузке не дождались сети: обычно мешает интерфейс, который не нужен или не под networkd':
+    'The network was not ready at boot: usually an interface that is not needed or not managed by networkd',
+  'Нажать "Сбросить": сервер работает, юнит нужен только при загрузке':
+    'Press "Reset": the server works, the unit only matters at boot',
+  'если повторяется на каждой загрузке: ждать только нужный интерфейс (--interface=) или выключить юнит':
+    'if it repeats on every boot: wait only for the right interface (--interface=) or turn the unit off',
+  'Сокет не смог занять порт: его уже держит сам сервис (например, sshd со своим портом)':
+    'The socket could not take its port: the service itself holds it (for example, sshd with its own port)',
+  'Выключить лишний сокет': 'Turn the extra socket off',
+  'Перезапуск не поможет: порт занят. Сервис при этом работает.':
+    'A restart will not help: the port is taken. The service itself works.',
+  'restic не смог прочитать часть файлов (код 3): снапшот есть, но неполный':
+    'restic could not read some files (exit code 3): the snapshot exists but is incomplete',
+  'Найти в журнале, какие файлы': 'Find which files in the log',
+  'Исключить их из бэкапа или выдать доступ': 'Exclude them from the backup or grant access',
+  'freshclam не может скачать базы антивируса, они устаревают':
+    'freshclam cannot download the antivirus databases, they get stale',
+  'Прописать свое зеркало (PrivateMirror в freshclam.conf) или прокси: зеркало ClamAV закрыто для адресов из России':
+    'Set your own mirror (PrivateMirror in freshclam.conf) or a proxy: the ClamAV mirror is closed to Russian addresses',
+  'openipmi не нашел IPMI на этой машине': 'openipmi found no IPMI on this machine',
+  'Если BMC нет или он не нужен, выключить юнит': 'If there is no BMC or it is not needed, turn the unit off',
+  'Не применилась раскладка консоли, на сервере это ни на что не влияет':
+    'The console keyboard layout was not applied; on a server this affects nothing',
+  'Нажать "Сбросить"': 'Press "Reset"',
+  'поправить раскладку': 'fix the layout',
+  'Сертификат выпущен вручную (manual plugin), сам он не продлится':
+    'The certificate was issued by hand (manual plugin) and will not renew itself',
+  'Удалить ненужный сертификат или продлить его вручную': 'Delete the unneeded certificate or renew it by hand',
   'Упавшие юниты systemd': 'Failed systemd units',
   'Systemd: упавшие юниты': 'Systemd: failed units',
   'юнит': 'unit',
@@ -363,42 +537,7 @@ const EN: Record<string, string> = {
   'упал': 'failed',
   'и': 'and',
   'Перезапуск не поможет: юнит упадет снова.': 'A restart will not help: the unit will fail again.',
-  'mdadm некуда слать письма (в mdadm.conf нет MAILADDR), поэтому он не следит за RAID и падает при каждом запуске.':
-    'mdadm has nowhere to send mail (no MAILADDR in mdadm.conf), so it does not watch the RAID and fails on every start.',
-  'выключить мониторинг mdadm на этом сервере:': 'turn off the mdadm monitor on this server:',
-  'за RAID следит Kervax, раздел Диск.': 'Kervax watches the RAID, see the Disk section.',
-  'unbound пытается прописаться в systemd-resolved, которого на сервере нет, и падает.':
-    'unbound tries to register itself in systemd-resolved, which is not on this server, and fails.',
-  'выключить этот юнит:': 'turn this unit off:',
-  'сам unbound работает, этот юнит ему не нужен.': 'unbound itself works and does not need this unit.',
-  'При загрузке не дождались сети: обычно из-за интерфейса, который не нужен или не управляется networkd.':
-    'The network was not ready in time at boot, usually because of an interface that is not needed or not managed by networkd.',
-  'нажать "Сбросить". Если повторяется на каждой загрузке - ограничить ожидание нужным интерфейсом (--interface=) или выключить юнит.':
-    'press "Reset". If it repeats on every boot, limit the wait to the right interface (--interface=) or turn the unit off.',
-  'сервер работает, юнит нужен только при загрузке.': 'the server works, the unit only matters at boot.',
-  'Перезапуск не нужен: юнит только ждет сеть при загрузке.': 'No restart needed: the unit only waits for the network at boot.',
-  'Сокет не смог занять свой порт: обычно его уже держит сам сервис (например, sshd со своим портом).':
-    'The socket could not take its port, usually because the service itself holds it (for example, sshd with its own port).',
-  'выключить лишний сокет:': 'turn the extra socket off:',
-  'сервис при этом работает.': 'the service itself works.',
   'Перезапуск не поможет: порт занят.': 'A restart will not help: the port is taken.',
-  'restic закончил бэкап, но часть файлов прочитать не смог (код 3): снапшот есть, но неполный.':
-    'restic finished the backup but could not read some files (exit code 3): the snapshot exists but is incomplete.',
-  'найти в журнале, какие файлы, и исключить их из бэкапа или выдать доступ:':
-    'find which files in the log, then exclude them from the backup or grant access:',
-  'freshclam не может скачать базы антивируса, и они устаревают.': 'freshclam cannot download the antivirus databases, so they get stale.',
-  'частая причина - зеркало ClamAV закрыто для адресов из России: прописать свое зеркало (PrivateMirror в freshclam.conf) или прокси.':
-    'a common cause is the ClamAV mirror being closed to Russian addresses: set your own mirror (PrivateMirror in freshclam.conf) or a proxy.',
-  'openipmi не нашел IPMI на этой машине.': 'openipmi found no IPMI on this machine.',
-  'если BMC нет или он не нужен, выключить юнит:': 'if there is no BMC or it is not needed, turn the unit off:',
-  'Не применилась раскладка консоли.': 'The console keyboard layout was not applied.',
-  'нажать "Сбросить" или поправить раскладку: sudo dpkg-reconfigure keyboard-configuration':
-    'press "Reset" or fix the layout: sudo dpkg-reconfigure keyboard-configuration',
-  'на сервере раскладка консоли ни на что не влияет.': 'on a server the console layout affects nothing.',
-  'Сертификат выпущен вручную (manual plugin), сам он не продлится.': 'The certificate was issued by hand (manual plugin) and will not renew itself.',
-  'продлить его вручную или удалить, если не нужен:': 'renew it by hand or delete it if it is not needed:',
-  'или плейбуком (на весь парк - с -l kervax):': 'or with the playbook (fleet-wide: -l kervax):',
-  'Почему не страшно:': 'Why it is not a worry:',
   'одна причина': 'same cause',
   'не алертить по этим юнитам:': 'do not alert on these units:',
   'отметка сброшена': 'failed mark cleared',
@@ -451,6 +590,31 @@ const EN: Record<string, string> = {
   'отметил {who}, {when}': 'marked by {who}, {when}',
   'не используется ни одним ingress': 'not used by any ingress',
   'удалить из кластера вручную:': 'to delete it from the cluster by hand:',
+  // сроки сайтов: напомнить за 7/1 дней или не следить (ExpirySnooze.tsx)
+  'напомню за {n} дн.': 'remind {n} d before',
+  'не следить отметил {who}, {when}': 'marked as not watched by {who}, {when}',
+  'отложил {who}, {when}. Продлят - отложка снимется сама': 'postponed by {who}, {when}. Once renewed, the postponement is lifted by itself',
+  'за 7 дн.': '7 d before',
+  'за 1 день': '1 day before',
+  'напомнить за 7 дней': 'remind 7 days before',
+  'напомнить за 1 день': 'remind 1 day before',
+  'не следить за доменом': 'do not watch the domain',
+  'не следить за сертификатом': 'do not watch the certificate',
+  'Пункт уйдет с главной и из алертов навсегда. Вернуть - строкой "не следим" внизу блока или в карточке':
+    'The item leaves the home page and alerts for good. Bring it back from the "not watched" line under the block or in the card',
+  'Пункт уйдет с главной и из алертов, пока до конца больше {n} дн. Продлят - отложка снимется сама':
+    'The item leaves the home page and alerts while more than {n} d are left. Once renewed, the postponement is lifted by itself',
+  'напомнить:': 'remind:',
+  'не следить': 'do not watch',
+  'Пункт вернется на главную и в алерты по обычным порогам': 'The item returns to the home page and alerts at the usual thresholds',
+  'отложено: {n}': 'postponed: {n}',
+  'Напомнить позже или не следить за доменом': 'Remind later or stop watching the domain',
+  'Напомнить позже или не следить за сертификатом': 'Remind later or stop watching the certificate',
+  'Нажмите: напомнить позже или не следить': 'Click: remind later or stop watching',
+  'Отложить сертификат': 'Postpone certificate',
+  'Отложить домен': 'Postpone domain',
+  'Сертификат отложен': 'Certificate postponed',
+  'Домен отложен': 'Domain postponed',
   'Уберет пункт из проблем и алертов. Обновят секрет - панель снова будет за ним следить':
     'Removes the item from problems and alerts. Once the secret is renewed, the panel watches it again',
   // поды и ноды кластера по metrics-server
@@ -585,8 +749,6 @@ const EN: Record<string, string> = {
   'Место освободится после перезапуска: {p}.': 'The space is freed after restarting: {p}.',
   'apt удалит ядра, которые больше не нужны; текущее останется.':
     'apt removes kernels that are no longer needed; the running one stays.',
-  'OTA обновляет только бинарь, не юнит — поэтому вручную. На новых установках уже включено.':
-    'OTA updates only the binary, not the unit — hence manual. Already included on fresh installs.',
   'Весь сервер': 'Whole server',
   '1 час': '1 h',
   '1 день': '1 d',
@@ -661,10 +823,6 @@ const EN: Record<string, string> = {
   '(по systemd)': '(from systemd)',
   '🧹 как удалить': '🧹 how to delete',
   '🔓 как снять лок': '🔓 how to unlock',
-  'Команда снимает только висячие локи, которые не обновлялись больше 30 минут. Живой лок идущего бэкапа или чистки она не тронет. Обычно висячий лок остается после аварийно прерванной операции.':
-    'The command removes only stale locks, the ones not refreshed for over 30 minutes. It leaves the live lock of a running backup or cleanup alone. A stale lock usually lingers after an operation was aborted.',
-  'Выполнять на бэкап-сервере от root. Пароль читается из prune-env внутри команды и в списке процессов не виден.':
-    'Run on the backup server as root. The password is read from prune-env inside the command and never appears in the process list.',
   'Покрытие': 'Coverage',
   'На серверах': 'On servers',
   'серверов: {n}': 'servers: {n}',
@@ -692,8 +850,6 @@ const EN: Record<string, string> = {
   'заглушено до нового': 'muted until new',
   'при случае': 'when convenient',
   'перезагрузка заглушена до нового': 'reboot muted until new',
-  'Обновлен только dbus. Перезапустить его отдельно нельзя: от него зависят systemd-logind и сессии, поэтому пакет и просит перезагрузку. Старый dbus работает как работал, срочности нет: перезагрузите при ближайшем окне обслуживания.':
-    'Only dbus was updated. It cannot be restarted on its own: systemd-logind and sessions depend on it, which is why the package asks for a reboot. The old dbus keeps working as before, there is no rush: reboot in the next maintenance window.',
   'не установлены обновления безопасности': 'security updates are not installed',
   'список пакетов давно не обновлялся': 'the package list has not been refreshed for a long time',
   'SSH пускает по паролю': 'SSH accepts passwords',
@@ -798,21 +954,12 @@ const EN: Record<string, string> = {
   'сдвиг': 'offset',
   'синхронизировано': 'synchronized',
   'не синхронизировано': 'not synchronized',
-  'Часы разошлись с панелью на {n} — синхронизируйте время:':
-    'Clock differs from the panel by {n} — synchronize the time:',
-  'Время не синхронизировано — включите NTP:': 'Time is not synchronized — enable NTP:',
   'Синхронизировать время': 'Sync time',
   'синхронизирую…': 'syncing…',
   'Синхронизировать время сейчас? Часы шагнут к точному времени; при большом расхождении это резкий скачок (для БД/приложений заметно).':
     'Sync time now? The clock will step to the correct time; with a large drift this is a sudden jump (noticeable for DBs/apps).',
   'или вручную': 'or manually',
   'команды для ручной синхронизации': 'manual sync commands',
-  'Кнопка «в один клик» появится после установки timesync-хелпера (ansible kervax_helpers.yml).':
-    'The one-click button appears once the timesync helper is installed (ansible kervax_helpers.yml).',
-  'Демон синхронизации не найден — команда выше включит systemd-timesyncd.':
-    'No time-sync daemon found — the command above enables systemd-timesyncd.',
-  'Если исходящий закрыт и до NTP не достучаться (UDP 123): открой порт (напр. sudo ufw allow out 123/udp) — либо разово выставь часы по времени панели (она достижима по HTTPS):':
-    'If outbound is blocked and NTP is unreachable (UDP 123): open the port (e.g. sudo ufw allow out 123/udp) — or set the clock once from the panel time (it is reachable over HTTPS):',
   'Восстановимость под вопросом ({n}):': 'Restorability in question ({n}):',
   '🛢 базы, которые бэкаплю сам: {n} — показать': '🛢 databases I back up myself: {n} — show',
   'свернуть базы (бэкаплю сам)': 'collapse (I back these up myself)',
@@ -820,8 +967,6 @@ const EN: Record<string, string> = {
     'Checked automatically: mount points, container bind mounts and live databases. Kubernetes volumes are not checked yet.',
   'Репозиторий пустой и не инициализирован — удалять нечего, кроме мусора. Панель бэкапы не удаляет (это защита от взлома), выполните от root на бэкап-сервере:':
     'The repository is empty and never initialized — nothing to lose but junk. The panel never deletes backups (that is the anti-compromise guarantee); run as root on the backup server:',
-  'Последняя строка — чтобы панель сразу забыла репу (иначе до следующей минуты). Если репу заводил Ansible, у неё может быть ещё строка в root-crontab — проверьте `sudo crontab -l`.':
-    'The last line makes the panel drop the repo immediately (otherwise it lingers until the next minute). If the repo was created by Ansible, it may also have a line in root crontab — check `sudo crontab -l`.',
   'Нет config, но снапшоты есть ({n} шт., {sz}) — данные могут быть восстановимы. Вслепую не удаляйте, разберитесь на сервере.':
     'No config, but snapshots exist ({n}, {sz}) — data may be recoverable. Do not delete blindly; investigate on the server.',
   'метрики restic нет (старый runner) — время и длительность взяты из systemd':
@@ -840,15 +985,9 @@ const EN: Record<string, string> = {
     'The panel will install docker/restic/htpasswd from the distro repos and start rest-server in append-only + private-repos mode. Client repositories are created later, separately. Up to ~2 min.',
   'репозиторий уже был — подключились к нему, история сохранена':
     'repository already existed — reconnected to it, history preserved',
-  'Требуется ручное действие на сервере. Выполните от root:':
-    'Manual action required on the server. Run as root:',
   'Агенту не хватает прав из systemd-юнита:':
     'The agent lacks permissions from its systemd unit:',
   'Setup-скрипты на ноде устарели:': 'Setup scripts on the node are outdated:',
-  '{label} (helper «{helper}»): {a} → {b}':
-    '{label} (helper "{helper}"): {a} → {b}',
-  'Переустановка идемпотентна — обновит helper, ничего не сломает.':
-    'Reinstall is idempotent — it updates the helper without breaking anything.',
   'Куда бэкапится': 'Backs up to',
   'куда бэкапится': 'backs up to',
   'адрес ноды': 'node address',
@@ -1181,21 +1320,11 @@ const EN: Record<string, string> = {
   'резолверы из resolv.conf': 'resolvers from resolv.conf',
   'имя не из кэша': 'a name not in cache',
   'не резолвится': 'does not resolve',
-  'Пока резолверы провайдера тормозят, можно добавить на ноде публичные: DNS=1.1.1.1 8.8.8.8 в /etc/systemd/resolved.conf.d/. systemd-resolved спросит их вместе с резолверами сети и возьмет первый ответ.':
-    'While the provider resolvers are slow, public ones can be added on the node: DNS=1.1.1.1 8.8.8.8 in /etc/systemd/resolved.conf.d/. systemd-resolved asks them together with the network resolvers and takes the first answer.',
-  'Пока резолверы провайдера тормозят, можно поставить первыми в /etc/resolv.conf публичные (nameserver 1.1.1.1 и 8.8.8.8): запросы идут к резолверам по порядку.':
-    'While the provider resolvers are slow, public ones (nameserver 1.1.1.1 and 8.8.8.8) can be put first in /etc/resolv.conf: queries go to the resolvers in order.',
-  'Ноду обслуживает свой резолвер (unbound, dnsmasq): проверьте его и серверы, куда он пересылает запросы.':
-    'The node is served by a resolver of its own (unbound, dnsmasq): check it and the servers it forwards queries to.',
-  'Остальные резолверы отвечают, и имена резолвятся, но запасного нет: уберите неработающий из настроек сети ноды (netplan, /etc/resolv.conf) или замените рабочим.':
-    'The other resolvers answer and names resolve, but there is no spare: remove the dead one from the node network settings (netplan, /etc/resolv.conf) or replace it with a working one.',
   'DNS - только предупреждения': 'DNS - warnings only',
   'Юниты в цикле перезапусков': 'Units in a restart loop',
   'Systemd: юниты в цикле перезапусков': 'Systemd: units in a restart loop',
   'Не алертить по {u}? Юнит перестанет алертить и как упавший, и как перезапускающийся.':
     'Stop alerting on {u}? The unit will alert neither as failed nor as restarting.',
-  'systemd поднимает сервис сам, поэтому среди упавших его нет. Причину обычно видно в логе: journalctl -u {u} -n 50':
-    'systemd brings the service back by itself, so it is not among the failed ones. The cause is usually in the log: journalctl -u {u} -n 50',
   'не алертить по этому юниту': 'do not alert on this unit',
   'CronJob ⚠ ({n})': 'CronJob ⚠ ({n})',
   'CronJob ({n})': 'CronJob ({n})',
@@ -1364,45 +1493,9 @@ const EN: Record<string, string> = {
   '{name}: слабые SSH-ключи у {list} - замените на ed25519': '{name}: weak SSH keys for {list} - replace them with ed25519',
   '{name}: учетки с доступом, в которые давно не входят: {list} - проверьте, нужны ли они':
     '{name}: accounts with access that nobody has used for a long time: {list} - check whether they are still needed',
-  'Входы по журналу sshd видны с {d}. Как отключить заброшенную учетку - кнопка в ее строке, root - только passwd -l root, без срока учетки.':
-    'Logins from the sshd log are known since {d}. How to disable an unused account - the button in its row; root only with passwd -l root, without an account expiry.',
   'как отключить': 'how to disable',
-  'После этого учетка уйдет из заброшенных в течение 10 минут: helper changes-setup снимает учетки раз в 10 минут.':
-    'After this the account leaves the unused list within 10 minutes: the changes-setup helper takes the accounts every 10 minutes.',
-  'Через другие учетки за 90 дней никто не входил: если отключить {arg}, на сервер может стать некому войти. Сначала проверьте вход другой учеткой с sudo или через консоль.':
-    'Nobody has logged in through other accounts for 90 days: with {arg} disabled there may be no way into the server. First check a login with another sudo account or through the console.',
-  'Сначала убедиться, что от {arg} ничего не работает: процессы, ее crontab, lingering (пользовательские юниты после выхода) и сервисы с User={arg}. Пусто и no crontab - ничего нет.':
-    'First make sure nothing runs as {arg}: processes, its crontab, lingering (user units after logout) and services with User={arg}. Empty output and no crontab mean nothing.',
-  'Отключить: пароль заблокирован, срок учетки в прошлом - SSH не пустит ни по паролю, ни по ключу, cron и su для нее тоже перестанут работать. Обратимо.':
-    'Disable: the password is locked and the account expiry is in the past - SSH lets it in neither with a password nor with a key, cron and su stop working for it too. Reversible.',
-  'Заблокировать пароль {arg}: sudo и cron root продолжат работать. Срок учетки root не ставят (usermod -e): истекшая root ломает cron и su. Если в консоль сервера входите root по паролю, после блокировки не войдете - держите учетку с sudo.':
-    'Lock the {arg} password: sudo and root cron keep working. Root gets no account expiry (usermod -e): an expired root breaks cron and su. If you log in to the server console as root with a password, you will not after locking - keep an account with sudo.',
-  'Убрать ключи: панель считает доступом любой ключ в authorized_keys. Файл переименовывается, а не удаляется.':
-    'Remove the keys: the panel counts any key in authorized_keys as access. The file is renamed, not deleted.',
-  'Вернуть, если учетка понадобится:': 'Bring it back if the account is needed:',
-  'Удалить совсем - необратимо: учетка пропадет, домашний каталог останется без хозяина (userdel -r удалит и его со всеми файлами). Лучше сначала поживите с отключенной.':
-    'Delete for good - irreversible: the account is gone, the home directory stays without an owner (userdel -r deletes it too, with all files). Better live with it disabled first.',
   // SSH: как выключить вход по паролю, решение "вход по паролю нужен"
   'вход по паролю нужен': 'password login needed',
-  'После выключения паролей пункт уйдет сам в течение 10 минут: helper changes-setup снимает настройки SSH раз в 10 минут.':
-    'Once passwords are off the item goes away by itself within 10 minutes: the changes-setup helper reads the SSH settings every 10 minutes.',
-  'Сначала ключ для {arg}: пароль задан, SSH-ключей нет, последний вход {on}. После выключения паролей эта учетка не войдет. Вставьте свой публичный ключ (строку ssh-ed25519 ...) вместо <public-key> и проверьте вход по ключу в новом окне.':
-    'First a key for {arg}: it has a password and no SSH keys, last login {on}. Once passwords are off, this account cannot log in. Put your public key (the ssh-ed25519 ... line) in place of <public-key> and check a key login in a new window.',
-  '{arg} входила по паролю {on}, хотя ключ есть: проверьте вход по ключу в новом окне или добавьте нужный ключ.':
-    '{arg} logged in with a password on {on} although it has a key: check a key login in a new window or add the right key.',
-  'Выключить вход по паролю отдельным файлом. В sshd побеждает первое значение, Include sshd_config.d/*.conf стоит в начале sshd_config, а файлы читаются по алфавиту: 00- раньше 50-cloud-init.conf, где cloud-init на Ubuntu включает пароль.':
-    'Turn password login off with a separate file. In sshd the first value wins, Include sshd_config.d/*.conf sits at the top of sshd_config, and the files are read in alphabetical order: 00- comes before 50-cloud-init.conf, where cloud-init on Ubuntu turns passwords on.',
-  'У этой версии OpenSSH нет sshd_config.d: строка встает первой в sshd_config, а первое значение и побеждает. Копия - sshd_config.bak-nopass.':
-    'This OpenSSH version has no sshd_config.d: the line goes first in sshd_config, and the first value wins. The copy is sshd_config.bak-nopass.',
-  'Проверить, пока ничего не применено: sshd -t молчит, если конфиг в порядке, ниже должно быть no. Если yes - значение задано раньше или в sshd_config нет Include, найти где: sudo grep -rn PasswordAuthentication /etc/ssh/':
-    'Check before applying anything: sshd -t prints nothing when the config is fine, below it should say no. If it says yes, the value is set earlier or sshd_config has no Include, find where: sudo grep -rn PasswordAuthentication /etc/ssh/',
-  'Применить: открытые сессии не рвутся (на Ubuntu с ssh.socket тоже). Это окно не закрывайте, пока в новом окне не войдете по ключу: если не пускает, отсюда же откат.':
-    'Apply: open sessions stay (with ssh.socket on Ubuntu too). Do not close this window until you have logged in with a key in a new one: if it does not let you in, roll back from here.',
-  'Откат, если что-то не так:': 'Roll back if something is wrong:',
-  'Если пароль нужен: только из своих сетей, из интернета - по ключу. Вместо <cidr> - ваши адреса или сети через запятую (192.0.2.10,198.51.100.0/24), иначе пароль выключится везде. Этот файл вместо файла выше, дальше та же проверка и reload, а для своего адреса sudo sshd -T -C user=root,host=x,addr=<адрес> | grep -i passwordauth должно дать yes. Пункт уйдет сам: панель смотрит, пускает ли SSH по паролю из интернета.':
-    'If passwords are needed: only from your own networks, by key from the internet. Replace <cidr> with your addresses or networks, comma separated (192.0.2.10,198.51.100.0/24), or passwords go off everywhere. This file instead of the one above, then the same check and reload, and for your own address sudo sshd -T -C user=root,host=x,addr=<address> | grep -i passwordauth should say yes. The item goes away by itself: the panel looks at whether SSH accepts passwords from the internet.',
-  'Если пароль нужен отовсюду: защита от перебора. fail2ban банит адрес после нескольких неудачных входов, здесь порт {arg} и журнал через systemd (на RHEL и похожих пакет из EPEL). Пункт при этом не уйдет, уйдет только приписка про перебор: пароль оставить - решение "вход по паролю нужен".':
-    'If passwords are needed from anywhere: brute force protection. fail2ban bans an address after a few failed logins, here on port {arg} with the systemd journal (on RHEL and similar the package is in EPEL). The item stays, only the note about brute force goes: keeping passwords is the decision "password login needed".',
   'Доступы': 'Access',
   'Доступ: второй root или пустой пароль': 'Access: a second root or an empty password',
   'Доступы: заброшенные учетки и слабые ключи': 'Access: unused accounts and weak keys',
@@ -1436,25 +1529,15 @@ const EN: Record<string, string> = {
   'или': 'or',
   'Обновить список пакетов: ничего не ставит, только узнает, что вышло.': 'Refresh the package lists: installs nothing, only learns what is out.',
   'Чтобы список обновлялся сам каждый день (без автоустановки):': 'To refresh the lists by itself every day (without installing anything):',
-  'Поставить автообновления. unattended-upgrades ставит только исправления безопасности из репозитория дистрибутива: сторонние репозитории (docker и прочие) не трогает, конфиги оставляет как есть, ничего не удаляет и сам не перезагружает.':
-    'Install automatic updates. unattended-upgrades installs only security fixes from the distribution repository: it leaves third-party repositories (docker and others) alone, keeps config files as they are, removes nothing and never reboots by itself.',
   'Включить их: каждый день свежий список пакетов и исправления безопасности.': 'Turn them on: fresh package lists and security fixes every day.',
   'Поставить исправления безопасности сейчас, не дожидаясь ночного прогона. Лог - в /var/log/unattended-upgrades/.':
     'Install the security fixes now, without waiting for the nightly run. The log is in /var/log/unattended-upgrades/.',
   'Автообновления включены, но не запускались: проверить таймеры apt и последний лог.': 'Automatic updates are on but have not run: check the apt timers and the last log.',
   'Сначала: эти контейнеры без restart policy, после перезагрузки docker их не поднимет.': 'First: these containers have no restart policy, docker will not start them after a reboot.',
   'Сначала: эти сервисы работают, но не включены, после перезагрузки их не будет.': 'First: these services run but are not enabled, they will be gone after a reboot.',
-  'Перезагрузить, когда есть доступ к консоли сервера: несколько минут сервер недоступен. Старое ядро остается в меню GRUB (Advanced options), если новое не загрузится.':
-    'Reboot when you have access to the server console: the server is down for a few minutes. The old kernel stays in the GRUB menu (Advanced options) in case the new one does not boot.',
   'Ubuntu Pro: исправления безопасности до {date}. Токен - на ubuntu.com/pro, для личного использования бесплатно до 5 машин, для компании нужна подписка. Подключение панель видит с агента 2.39.':
     'Ubuntu Pro: security fixes until {date}. The token is at ubuntu.com/pro, free for personal use on up to 5 machines, a company needs a subscription. The panel sees it from agent 2.39.',
   'Поставить исправления из ESM.': 'Install the fixes from ESM.',
-  'Переезд на следующую версию: по одной за раз, с перезагрузкой. Заранее бэкап и доступ к консоли.': 'Move to the next release: one at a time, with a reboot. Make a backup and have console access first.',
-  'Переезд на Debian {n} по release notes: sources.list на новое кодовое имя, apt full-upgrade и перезагрузка. Заранее бэкап и доступ к консоли.':
-    'Move to Debian {n} following the release notes: sources.list to the new codename, apt full-upgrade and a reboot. Make a backup and have console access first.',
-  'Переезд на следующую версию: RHEL, AlmaLinux и Rocky - через leapp, CentOS - переустановкой на AlmaLinux или Rocky.':
-    'Move to the next release: RHEL, AlmaLinux and Rocky with leapp, CentOS by reinstalling onto AlmaLinux or Rocky.',
-  'После этих шагов пункт уйдет сам в течение часа: агент пересчитывает обновления раз в час.': 'After these steps the item goes away by itself within an hour: the agent recounts updates every hour.',
   // контейнеры с ключами от хоста
   '{name}: у контейнеров ключи от хоста: {list} - взлом приложения в них даст root на сервере':
     '{name}: containers hold the keys to the host: {list} - breaking into the app inside gives root on the server',
@@ -1609,6 +1692,8 @@ const EN: Record<string, string> = {
   // очереди, которые растут и не разбираются (ServicesPage, mutes)
   'Очередь растет и не разбирается': 'Queue grows and is not consumed',
   'растет {a} и не разбирается, было {n}': 'growing for {a} and not consumed, was {n}',
+  'нет потребителей {a}, было {n}': 'no consumers for {a}, was {n}',
+  '{a} не отдает ни одного, было {n}': 'not a single message taken for {a}, was {n}',
   'нет потребителей': 'no consumers',
   'порог': 'threshold',
   'не алертить по этой очереди:': 'no alerts for this queue:',
@@ -2528,14 +2613,6 @@ const EN: Record<string, string> = {
   'Скрипт спросит подтверждение числом. Панель ничего не удаляет — это защита на случай её взлома.':
     'The script asks for numeric confirmation. The panel deletes nothing — this protects you if the panel itself is compromised.',
 
-  'Будет стёрто безвозвратно: {n} снапшотов, {sz}, последний {ago}. Восстановить будет нечем — других копий этих данных у панели нет.':
-    'Will be erased permanently: {n} snapshots, {sz}, last one {ago}. There will be nothing to restore from — the panel holds no other copy.',
-  'Удаляйте, только если сервер выведен из эксплуатации. Если бэкап ещё может понадобиться — приглушите репозиторий (🔕): он перестанет считаться проблемой, а данные останутся.':
-    'Delete only if the server is decommissioned. If the backup may still be needed, mute the repository (🔕) instead: it stops counting as an issue and the data stays.',
-  'Репозиторий пустой и не инициализирован — удалять нечего, кроме мусора.':
-    'The repository is empty and uninitialised — there is nothing to delete but leftovers.',
-  'Панель бэкапы не удаляет (это защита от взлома), выполните от root на бэкап-сервере:':
-    'The panel never deletes backups (this is protection against compromise) — run as root on the backup server:',
 
   'Не бэкапить это — убрать из проблем': 'Do not back this up — clear from issues',
   'не бэкапится намеренно, в проблемы не идет': 'not backed up on purpose, not counted as an issue',
@@ -2543,9 +2620,6 @@ const EN: Record<string, string> = {
 
   'Настраиваю и снимаю пробный дамп — подождите, на большой базе это может занять до минуты…':
     'Setting up and taking a test dump — please wait, on a large database this can take up to a minute…',
-  'Снял — проверить': 'Removed it — re-check',
-  'Статус обновится и сам, в течение минуты: сервер пересчитывает статистику по расписанию.':
-    'The status also clears on its own within a minute: the server recomputes stats on a schedule.',
   'идёт бэкап': 'backup running',
   'битый': 'broken',
   'активность': 'activity',
@@ -2656,8 +2730,6 @@ const EN: Record<string, string> = {
   'Поиск: хост, группа, нода, под, воркоад…': 'Search: host, group, node, pod, workload…',
   'Kubernetes не найден ни на одном сервере. Агент определяет кластер сам (k0s/k3s/microk8s/kubeadm); если он есть, но раздел пуст — обновите агент.':
     'Kubernetes not found on any server. The agent detects the cluster itself (k0s/k3s/microk8s/kubeadm); if it exists but the section is empty — update the agent.',
-  'Кластер найден, но агент не имеет доступа к kube-api. Включите read-only + точечное управление: скрипт создаёт ServiceAccount с узким RBAC (не cluster-admin) и кладёт токен для агента.':
-    'Cluster found, but the agent has no kube-api access. Enable read-only + limited management: the script creates a ServiceAccount with narrow RBAC (not cluster-admin) and writes a token for the agent.',
   'Поды ({n})': 'Pods ({n})',
   'Ворклоады ({n})': 'Workloads ({n})',
   'Ноды ({n})': 'Nodes ({n})',
@@ -2688,6 +2760,10 @@ const EN: Record<string, string> = {
   'не удалось': 'failed',
   'ошибка': 'error',
   'не удалось получить логи': 'failed to fetch logs',
+  'Под уже пересоздан или удален, список обновлен': 'The pod has already been recreated or deleted, the list is refreshed',
+  'Под уже удален, его лога больше нет': 'The pod is already deleted, its log is gone',
+  'Контейнер уже пересоздан или удален, список обновлен': 'The container has already been recreated or deleted, the list is refreshed',
+  'Учетная запись только для просмотра: изменения запрещены': 'View-only account: changes are not allowed',
   '(пусто)': '(empty)',
   'Пусто — контейнер ничего не писал в лог.': 'Empty — the container has written nothing to the log.',
   'Нет записей за выбранный период. Контейнер давно не писал в лог — попробуйте «400 строк».':
@@ -2704,8 +2780,6 @@ const EN: Record<string, string> = {
   'за час': 'last hour',
   'за день': 'last day',
   'Скачать .txt': 'Download .txt',
-  'Docker установлен (версии видны). Список контейнеров скрыт — включите read-only доступ (docker-socket-proxy: только просмотр + restart, без exec/root). Новым нодам — флаг --docker при установке.':
-    'Docker is installed (versions shown). Container list hidden — enable read-only access (docker-socket-proxy: view + restart only, no exec/root). For new nodes use the --docker install flag.',
   'OOM-киллы': 'OOM kills',
   'последние киллы': 'recent kills',
   'процесс неизвестен': 'process unknown',
@@ -3014,13 +3088,9 @@ const EN: Record<string, string> = {
   'Не алертить о перезапусках': 'Do not alert about restarts',
   'Снова алертить': 'Alert again',
   'Снова алертить о пачках': 'Alert about bursts again',
-  'Пачек за сутки: {n}. Поды разных ворклоадов перезапускались разом, и это подвисание ноды: в эти минуты на ней было давление или поды упали по таймауту пробы и kube-api (leader election lost). Чинить ноду, а не поды: нагрузка, память, диск под etcd. Плановый выход с кодом 0 и заглушенные поды в пачки не идут.':
-    'Bursts in a day: {n}. Pods of different workloads restarted at once, and the node stalled: it was under pressure in those minutes, or the pods failed on probe and kube-api timeouts (leader election lost). Fix the node, not the pods: load, memory, the disk under etcd. Planned exits with code 0 and muted pods do not count.',
   'ждали: CPU {c}%, память {m}%, диск {d}%': 'waited: CPU {c}%, memory {m}%, disk {d}%',
   'Перезапуски вместе с подами других ворклоадов: беда ноды или kube-api, в счет пода не идут':
     'Restarts together with pods of other workloads: a node or kube-api problem, not counted against the pod',
-  'Поды, которые перезапускались за сутки: когда и как кончился прошлый запуск. В Telegram - OOMKilled от 3 раз за сутки, падения и убийства по пробе от 5 раз (не считая пачек), пачки от {n} за сутки; выход с кодом 0 - плановый, только здесь.':
-    'Pods that restarted in the last day: when, and how the previous run ended. Telegram gets OOMKilled from 3 times a day, crashes and probe kills from 5 times (not counting bursts), bursts from {n} a day; exit code 0 is planned and shows only here.',
   'Почему:': 'Why:',
   'Причину прошлого завершения агент еще не прислал.': 'The agent has not sent how the previous run ended yet.',
   'Причину прошлого завершения присылает агент {v} и новее, у этой ноды {cur}. Пока смотрите командами ниже.':
@@ -3134,6 +3204,7 @@ const EN: Record<string, string> = {
   '{traces} - настройка поставит бэкап заново.': '{traces} - the setup installs the backup anew.',
   'На сервере уже есть бэкап. Настройка поверх перепишет его на клиенте: расписание, пути, пароль и адрес репозитория. Репозиторий и история на бэкап-сервере останутся, если выбран тот же сервер.': 'The server already has a backup. Setting up over it rewrites it on the client: schedule, paths, password and repository address. The repository and its history on the backup server stay if the same server is chosen.',
   'переустановить поверх': 'reinstall over it',
+  'На сервере уже есть бэкап: отметьте "переустановить поверх", если его надо переписать': 'The server already has a backup: tick "reinstall over it" if it should be rewritten',
   'Переустановить бэкап': 'Reinstall the backup',
   'настройка заново поверх этой: бэкап-сервер, пути, расписание': 'set it up again over this one: backup server, paths, schedule',
   '▶ Переустановить и запустить': '▶ Reinstall and run',
@@ -3484,6 +3555,9 @@ const EN: Record<string, string> = {
   'Файлы кода изменились не через git/деплой': 'Code files changed outside git/deploy',
   'файлы поменялись на сервере напрямую: правка руками, админка, плагин или взлом. Если это вы - нажмите "{btn}"':
     'the files were changed right on the server: a manual edit, the admin panel, a plugin or a break-in. If it was you, press "{btn}"',
+  'не закоммиченная правка в рабочей копии git (ветка {b})': 'uncommitted edit in the git working copy (branch {b})',
+  'не закоммиченная правка в рабочей копии git': 'uncommitted edit in the git working copy',
+  'перезаписаны тем же содержимым, что в git: {f}': 'rewritten with the same content as in git: {f}',
   'файлы плагина {s} изменились без смены версии': 'files of plugin {s} changed without a version change',
   'файлы плагина {s} изменились': 'files of plugin {s} changed',
   'файлы темы {s} изменились без смены версии': 'files of theme {s} changed without a version change',
@@ -4284,8 +4358,6 @@ const EN: Record<string, string> = {
   'свободно {f} из {tt}': '{f} free of {tt}',
   'Обновить': 'Refresh',
   'докер не смог запустить': 'docker could not start it',
-  'Прокси docker-сокета на этой ноде пускает только чтение, поэтому перезапуск, стоп и старт дают 403. Замените его этой командой: просмотр плюс перезапуск, стоп и старт, без exec, создания контейнеров и образов, слушает только 127.0.0.1 хоста.':
-    'The docker socket proxy on this node allows reading only, so restart, stop and start get 403. Replace it with this command: viewing plus restart, stop and start, no exec, no creating containers or images, listening on 127.0.0.1 of the host only.',
   'Доступ к Docker (прокси)': 'Docker access (proxy)',
   'файл размечен необычно (табы или сбитые отступы)': 'the file has an unusual layout (tabs or broken indentation)',
   'файл старого формата compose v1, без services:': 'the file is in the old compose v1 format, without services:',
@@ -5527,6 +5599,10 @@ const EN: Record<string, string> = {
     'marked a cluster expiry as not watched',
   'вернул срок в кластере под присмотр':
     'put a cluster expiry back under watch',
+  'отложил срок домена или сертификата':
+    'postponed a domain or certificate expiry',
+  'вернул срок домена или сертификата под присмотр':
+    'put a domain or certificate expiry back under watch',
   'заглушил монитор':
     'snoozed a monitor',
   'изменил мониторы пачкой':
@@ -5908,6 +5984,10 @@ const EN: Record<string, string> = {
     'The agent reaches the panel through relay {name}',
   'через ретранслятор {name}':
     'via relay {name}',
+  'Нода Kubernetes':
+    'Kubernetes node',
+  'Сервисы LLM: {list}':
+    'LLM services: {list}',
   'Алерт по ним молчит, пока не станет хуже. Снимите отметку, если надо снова получать алерты.':
     'Alerts stay silent until it gets worse. Unmark to get alerts again.',
   '{name}: идет подключение - посмотрите, что нашлось, и закройте его в карточке':
@@ -6155,16 +6235,6 @@ const EN: Record<string, string> = {
     'old snapshots are not removed, the repository has no cleanup - {list}',
   'старые снапшоты не вычищаются, разобрать в Чистке - {list}':
     'old snapshots are not removed, see the Cleanup section - {list}',
-  'Что сделать: перевести репозиторий на чистку панели.':
-    'What to do: move the repository to the panel cleanup.',
-  'Что сделать: удалить старую группу или, если ее надо хранить, убрать в архив.':
-    'What to do: remove the old group or, if it must be kept, archive it.',
-  'Что сделать: посмотреть, что делает чистка и что удалит политика.':
-    'What to do: look at what the cleanup does and what the policy would remove.',
-  'Что сделать: завести чистку или убрать репозиторий в архив.':
-    'What to do: set up a cleanup or move the repository to the archive.',
-  'Что сделать: обновить helper backupserver-setup, по старому не видно, кто чистит репозиторий.':
-    'What to do: update helper backupserver-setup, the old one does not tell who cleans the repository.',
   'Старый скрипт чистки не запускается: эти репозитории никто не чистит':
     'The old cleanup script does not run: nobody cleans these repositories',
   'Старый скрипт {script} чистит репозиториев: {n}, в {when} ({where})':
@@ -6175,10 +6245,6 @@ const EN: Record<string, string> = {
     'Last run {ago}.',
   'Еще на нем репозиториев в архиве: {n}, их чистить не нужно.':
     'It also has {n} archived repositories, they need no cleanup.',
-  'Что сделать: перевести их на чистку панели. У каждого будет свой prune-скрипт с той же политикой и паролем, чистка раз в сутки и проверка целостности раз в неделю.':
-    'What to do: move them to the panel cleanup. Each gets its own prune script with the same policy and password, a daily cleanup and a weekly integrity check.',
-  'Можно перевести их на чистку панели: она снимает висячие локи, пишет метрики, раз в неделю проверяет целостность и не держит вечно старые группы снапшотов.':
-    'They can move to the panel cleanup: it removes stale locks, writes metrics, checks integrity weekly and does not keep old snapshot groups forever.',
   'В {script} блоки на удаленные репозитории: {n}':
     '{script} has blocks for repositories that are gone: {n}',
   'как убрать':
@@ -6214,8 +6280,6 @@ const EN: Record<string, string> = {
     'off since {ago}',
   'чистка идет, хотя в crontab root ее строка закомментирована руками':
     'the cleanup runs although its line in the root crontab is commented out by hand',
-  'Ее включил helper до 0.34. Что сделать: выключить, как было, или подтвердить, что она нужна.':
-    'A helper older than 0.34 turned it on. What to do: turn it off as it was, or confirm it is needed.',
   'чистка выключена вручную, а бэкапы идут: снапшотов {n}, растет без чистки':
     'cleanup turned off by hand while backups keep coming: {n} snapshots, growing without a cleanup',
   'чистка выключена вручную':
@@ -6337,7 +6401,6 @@ const EN: Record<string, string> = {
   'перейти на {name} {to} через копию данных, путь и команды ниже': 'move to {name} {to} via a data copy, the path and commands below',
   'перевести пакет {pkg} на {name} {to}, команды ниже': 'move the {pkg} package to {name} {to}, commands below',
   'перевести {pkg} на {name} {to}, как - ниже': 'move {pkg} to {name} {to}, how - below',
-  'Что сделать:': 'What to do:',
   'пакет {p}': 'package {p}',
   'как у {c}': 'same as {c}',
   'версия {v} из {k}': 'version {v} from {k}',
@@ -6449,6 +6512,12 @@ const EN: Record<string, string> = {
   'все клиенты по https': 'all clients over https',
   'по http: {list}': 'over http: {list}',
   'перевел бэкап сервера на https': 'moved the server backup to https',
+
+  // --- постоянные разделы меню в окнах (ReportModal, DepMapModal, VulnsModal) ---
+  'Алертов по бэкапам за период не было.': 'No backup alerts in this period.',
+  'Таких мониторов нет: у каждого есть сервер.': 'No such monitors: each one has a server.',
+  'Таких серверов нет: у каждого есть связи.': 'No such servers: each one has links.',
+  'Таких серверов нет.': 'No such servers.',
 }
 
 type Ctx = {

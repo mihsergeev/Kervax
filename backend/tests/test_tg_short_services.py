@@ -153,7 +153,7 @@ def test_queue_stuck():
     mail = {"name": "mail", "source": "контейнер app-rabbitmq-1", "age": 4140, "d0": 25209, "depth": 25263,
              "consumers": 0, "stall": False}
     assert _ok(queue_watch.tg_short([mail])) == ("Очередь mail не разбирается",
-                                                  ["нет потребителей, 25 тыс. в app-rabbitmq-1"])
+                                                  ["нет потребителей 1 ч, 25 тыс. в app-rabbitmq-1"])
     tg = {"name": "notify", "source": "контейнер web-a-rabbitmq-1", "age": 14000, "depth": 160, "consumers": 2}
     crawl = {"name": "results", "source": "под default/rabbitmq-0", "age": 4000, "depth": 145, "consumers": 0}
     celery = {"name": "tasks", "source": "контейнер redis, Celery myns, db 1", "age": 7200, "depth": 300, "wait": 7200,
@@ -161,20 +161,37 @@ def test_queue_stuck():
     assert _ok(queue_watch.tg_short([tg, crawl, celery])) == (
         "Очередь notify не разбирается",
         ["растет 3 ч, 160 в web-a-rabbitmq-1", "Еще: results, tasks"])
+    assert _ok(queue_watch.tg_short([tg])) == ("Очередь notify не разбирается",
+                                               ["растет 3 ч, 160 в web-a-rabbitmq-1", "потребителей 2"])
     assert queue_watch.tg_short([crawl]) == ("Очередь results не разбирается",
-                                             ["нет потребителей, 145 в rabbitmq"])
+                                             ["нет потребителей 1 ч, 145 в rabbitmq", "+2 в мин"])
+    # растет при живых потребителях: скорость, обычный уровень, сколько потребителей
+    feed = {"name": "feed", "source": "контейнер rabbitmq", "age": 2400, "d0": 1000, "depth": 6000,
+            "consumers": 15, "why": "grow", "base": 1200}
+    assert _ok(queue_watch.tg_short([feed])) == (
+        "Очередь feed не разбирается",
+        ["растет 40 мин, 6000 в rabbitmq", "+125 в мин, обычно до 1200, потребителей 15"])
+    slow = {"name": "rare", "source": "контейнер rabbitmq", "age": 3 * 3600, "d0": 500, "depth": 509,
+            "consumers": 2, "why": "slow", "base": None}
+    assert _ok(queue_watch.tg_short([slow])) == ("Очередь rare не разбирается",
+                                                 ["3 ч не отдает ни одного, 509 в rabbitmq", "потребителей 2"])
     assert queue_watch.tg_short([celery]) == ("Очередь tasks стоит", ["задача ждет 2 ч, 300 в redis (Celery)"])
     assert queue_watch.tg_short([]) is None
 
 
 def test_queue_stuck_from_problems():
-    # растет 40 минут и нет потребителей: поле consumers и источник доходят до короткого текста
+    # потребителей нет 40 минут, условие держится 10: поле consumers и источник доходят до короткого текста
     src = "контейнер app-rabbitmq-1"
-    st = {"qwatch": {f"{src}|//mail": {"t0": TS - 2400, "d0": 0, "p": 400, "nd": True, "last": 400, "seen": TS}}}
+    st = {"qwatch": {f"{src}|//mail": {"t0": TS - 2400, "d0": 0, "p": 400, "nd": True, "last": 400, "seen": TS,
+                                       "c": 0, "z0": TS - 2400, "zd": 0, "bad": TS - 600}}}
     rep = {"clock_unix": TS, "services": [{"kind": "rabbitmq", "source": src, "queues": [
         {"name": "mail", "vhost": "/", "ready": 400, "unacked": 0, "consumers": 0}]}]}
     qs = queue_watch.problems(_srv(rep, st), NOW)
-    assert queue_watch.tg_short(qs) == ("Очередь mail не разбирается", ["нет потребителей, 400 в app-rabbitmq-1"])
+    assert queue_watch.tg_short(qs) == ("Очередь mail не разбирается",
+                                        ["нет потребителей 40 мин, 400 в app-rabbitmq-1", "+10 в мин"])
+    # условие выполняется меньше 10 минут - еще не алерт
+    st["qwatch"][f"{src}|//mail"]["bad"] = TS - 300
+    assert queue_watch.problems(_srv(rep, st), NOW) == []
 
 
 def test_queue_failed_and_depth():

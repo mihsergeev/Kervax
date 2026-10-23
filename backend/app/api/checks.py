@@ -7,7 +7,7 @@ import secrets
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Query, Request, status
 from sqlalchemy import case, delete as sa_delete, func, select
 
-from app import audit, domain_probe, known, manual_probe, try_probe
+from app import audit, domain_probe, expiry_snooze, known, manual_probe, try_probe
 from app import parents as parents_mod
 from app.checks import status_matches
 from app import checks as checks_exec
@@ -51,6 +51,7 @@ from app.schemas import (
     CheckCreate,
     CheckIdList,
     SnoozeIn,
+    ExpirySnoozeIn,
     CheckImport,
     CheckHistoryOut,
     CheckIncidentOut,
@@ -1259,6 +1260,45 @@ async def snooze_check(
     return check
 
 
+@router.post("/{check_id}/expiry-snooze", response_model=CheckOut)
+async def expiry_snooze_check(
+    check_id: int, body: ExpirySnoozeIn, user: CurrentUser, session: SessionDep
+) -> Check:
+    """Срок сайта: "напомнить за 7/1 дней", "не следить" или вернуть (app/expiry_snooze.py).
+
+    Срок домена один на весь домен, поэтому отметка ставится всем мониторам на нем: иначе
+    пункт с главной не ушел бы, а напоминание пришло бы по соседнему монитору."""
+    check = await _get_or_404(check_id, session, user)
+    now = datetime.now(timezone.utc)
+    days = check.domain_days if body.kind == "domain" else check.ssl_days
+    if body.mode is not None and body.mode > 0 and (days is None or days <= body.mode):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"До конца срока уже не больше {body.mode} дн.")
+    rows = [check]
+    what = check.name
+    if body.kind == "domain":
+        what = zone = checks_exec._registrable_domain(check.target or check.name or "")
+        for c in await session.scalars(select(Check).where(Check.check_domain.is_(True), Check.id != check.id)):
+            if group_allowed(user, c.group_name, "sites") and                     checks_exec._registrable_domain(c.target or c.name or "") == zone:
+                rows.append(c)
+    for c in rows:
+        cur = dict(c.expiry_snooze or {})
+        if body.mode is None:
+            cur.pop(body.kind, None)
+        else:
+            cur[body.kind] = expiry_snooze.entry(
+                body.mode, c.domain_days if body.kind == "domain" else c.ssl_days, user.username, now)
+        c.expiry_snooze = cur or None
+    await session.commit()
+    await session.refresh(check)
+    kind = "домен" if body.kind == "domain" else "сертификат"
+    await audit.record(
+        session, user.username,
+        "expiry_watch" if body.mode is None else "expiry_snooze",
+        what, f"{kind}: {expiry_snooze.label(body.mode)}" if body.mode is not None else kind,
+    )
+    return check
+
+
 @router.delete("/{check_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_check(
     check_id: int, user: CurrentUser, session: SessionDep
@@ -1317,6 +1357,7 @@ async def run_check_now(
         check.ssl_message = info.ssl_message[:256]
     if info.domain_days is not None or info.ssl_days is not None:
         check.expiry_checked_at = datetime.now(timezone.utc)
+        expiry_snooze.sync(check)  # оплатили и жмут "проверить": отложка продленного снимается
         await session.commit()
         await session.refresh(check)
     background.add_task(send_alerts_soon, request.app.state.session_factory, pending, now)

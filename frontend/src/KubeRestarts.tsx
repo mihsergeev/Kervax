@@ -109,9 +109,7 @@ function RestartRow({
       </div>
       <div className="job-log">
         {p.why ? (
-          <div className="small">
-            <b>{t('Почему:')}</b> {p.why}
-          </div>
+          <div className="small">{p.why}</div>
         ) : (
           <div className="muted small">
             {prevOk
@@ -184,13 +182,12 @@ export function KubeRestartsSec({
   return (
     <div className="srv-sec">
       <p className="muted small kube-hint">
-        {t('Поды, которые перезапускались за сутки: когда и как кончился прошлый запуск. В Telegram - OOMKilled от 3 раз за сутки, падения и убийства по пробе от 5 раз (не считая пачек), пачки от {n} за сутки; выход с кодом 0 - плановый, только здесь.', { n: data.burst_min })}
+        {t('Поды, которые перезапускались за сутки. В Telegram: OOMKilled от 3 раз, падения и убийства по пробе от 5, пачки от {n}. Выход с кодом 0 - плановый, только здесь.', { n: data.burst_min })}
       </p>
       {bursts.length > 0 && (
         <div className={burstsHot && !burstsMuted ? 'net-prob' : 'net-note'}>
-          <div>
-            {t('Пачек за сутки: {n}. Поды разных ворклоадов перезапускались разом, и это подвисание ноды: в эти минуты на ней было давление или поды упали по таймауту пробы и kube-api (leader election lost). Чинить ноду, а не поды: нагрузка, память, диск под etcd. Плановый выход с кодом 0 и заглушенные поды в пачки не идут.', { n: bursts.length })}
-          </div>
+          <div>{t('Пачек за сутки: {n}: поды разных ворклоадов перезапускались разом, подвисала нода', { n: bursts.length })}</div>
+          <div className="fix-do">{t('Чинить ноду, а не поды: нагрузка, память, диск под etcd')}</div>
           <div className="mono small kube-bursts">
             {bursts.slice(0, 8).map((b) => (
               <div key={b.t}>
@@ -203,6 +200,10 @@ export function KubeRestartsSec({
               </div>
             ))}
           </div>
+          <details className="fix-more">
+            <summary>{t('подробнее')}</summary>
+            <div>{t('В эти минуты на ноде было давление или поды упали по таймауту пробы и kube-api (leader election lost). Плановый выход с кодом 0 и заглушенные поды в пачки не идут.')}</div>
+          </details>
           {canAct && burstsHot && (
             <button className="ghost small" disabled={busy === BURSTS_MUTE} onClick={() => setMute(BURSTS_MUTE, !burstsMuted)}>
               {burstsMuted ? t('Снова алертить о пачках') : `🔕 ${t('Не алертить о пачках')}`}

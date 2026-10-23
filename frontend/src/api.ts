@@ -50,9 +50,24 @@ export async function stopImpersonation(): Promise<void> {
   localStorage.removeItem(IMP_ADMIN_KEY)
   localStorage.removeItem(IMP_ID_KEY)
   setToken(own)
+  setReadOnly(false) // дальше запросы с токеном админа, даже если смотрели глазами наблюдателя
   if (own && id) {
     await api(`/api/users/impersonation/${id}/stop`, { method: 'POST' }).catch(() => undefined)
   }
+}
+
+// Учетка только для просмотра: бэкенд (deps.py) отказывает ей в любом изменении, кроме своей
+// учетки и журнала ошибок. Одна проверка на все запросы: изменение от нее не уходит на сервер
+// вовсе, человек сразу видит понятный отказ. Кнопки изменений при этом не рисуются (canWrite в
+// auth.tsx), а эта проверка ловит то, что прятать забыли. App ставит флаг по роли из /me
+const VIEWER_WRITES = ['/api/auth/', '/api/panel-errors/front', '/api/panel-errors/report']
+export const VIEWER_READ_ONLY = 'Учетная запись только для просмотра: изменения запрещены'
+let readOnly = false
+export function setReadOnly(v: boolean): void {
+  readOnly = v
+}
+export function writeBlocked(method: string, path: string): boolean {
+  return readOnly && method !== 'GET' && method !== 'HEAD' && !VIEWER_WRITES.some((p) => path.startsWith(p))
 }
 
 export class ApiError extends Error {
@@ -74,6 +89,7 @@ export async function api<T>(path: string, options: RequestInit = {}): Promise<T
   const token = getToken()
   if (token) headers['Authorization'] = `Bearer ${token}`
   const method = (options.method || 'GET').toUpperCase()
+  if (writeBlocked(method, path)) throw new ApiError(tr(VIEWER_READ_ONLY), 403)
 
   let res: Response
   try {
@@ -420,6 +436,8 @@ export type Check = {
   ssl_message: string
   domain_message: string
   expiry_checked_at: string | null
+  // отложенные сроки: mode 7/1 - напомнить за столько дней, 0 - не следим; days - срок, когда откладывали
+  expiry_snooze?: Partial<Record<'ssl' | 'domain', ExpirySnooze>> | null
   check_locations: boolean
   location_ids: number[] | null
   last_status: CheckStatus
@@ -881,6 +899,16 @@ export function runCheck(id: number): Promise<CheckRun> {
 
 export function runCheckResult(id: number, requestId: number): Promise<CheckRun> {
   return api<CheckRun>(`/api/checks/${id}/run/${requestId}`)
+}
+
+export type ExpirySnooze = { mode: 7 | 1 | 0; by: string; at: string; days: number | null }
+
+// Срок сайта: напомнить за 7/1 дней, не следить (0) или вернуть (null). Домен - всем мониторам на нем
+export function expirySnooze(id: number, kind: 'ssl' | 'domain', mode: 7 | 1 | 0 | null): Promise<Check> {
+  return api<Check>(`/api/checks/${id}/expiry-snooze`, {
+    method: 'POST',
+    body: JSON.stringify({ kind, mode }),
+  })
 }
 
 // Быстрый снуз алертов монитора на N часов (0 = снять).
@@ -2143,7 +2171,8 @@ export type Server = {
   gpu_sum?: GpuSum | null
   llm?: LlmSvc[] | null
   // очереди, которые растут и не разбираются: {ключ очереди: {age, d0, muted}} (queue_watch.view)
-  queue_watch?: Record<string, { age: number; d0: number; muted: boolean; stall?: boolean; wait?: number }> | null
+  // why: nocons - нет потребителей, slow - не отдает ни одного, grow - растет, stall - стоит
+  queue_watch?: Record<string, { age: number; d0: number; muted: boolean; stall?: boolean; wait?: number; why?: string }> | null
   // очереди в Redis (helper queues-setup) и экземпляры Redis без известного пароля
   queue_brokers?: ServiceInfo[] | null
   queue_skipped?: string[] | null
@@ -2771,11 +2800,15 @@ export interface WebRoot {
   // git - выкладка через git (pull, checkout...) по reflog репозитория
   deploy?: { at: string; n: number; git?: string } | null
   php: { p: string; since: string }[]
-  edit: { p: string; since: string }[]
+  // g - "dirty": файл рабочей копии git, содержимое не как в HEAD
+  edit: { p: string; since: string; g?: string }[]
   site: boolean
   // WordPress: версия ядра (helper 0.4 следит за версиями) и что он обновил сам за неделю
   wp?: string
   wp_events?: WpEvent[]
+  // рабочая копия git: ветка и файлы, записанные заново тем же содержимым, что в HEAD (за неделю)
+  branch?: string
+  same?: { at: string; files: string[]; n: number } | null
 }
 // обновление, которое WordPress поставил сам: перевод (part - чей) или плагин, тема, ядро с версиями
 export interface WpEvent {
@@ -3018,6 +3051,23 @@ export function kubeCommand(
 }
 export function kubeCommandStatus(serverId: number, cmdId: number): Promise<KubeCommand> {
   return api<KubeCommand>(`/api/servers/${serverId}/kube/command/${cmdId}`)
+}
+// Логи пода или контейнера, которого уже нет (агент: "logs 404: {...NotFound...}" у пода, "logs
+// 404" у контейнера): нажали "логи" в списке, загруженном до пересоздания пода. Тот же разбор -
+// target_gone в backend/app/panel_errors.py, в журнал ошибок такое не пишется
+export function logsTargetGone(c: { status: string; result: string }): boolean {
+  return c.status !== 'done' && /^logs 404\b/.test((c.result || '').trim())
+}
+// Отказ kube-api в логах - текстом из его ответа, без JSON: "logs 400: {...,"message":"..."}"
+export function logsErrorText(result: string): string {
+  const m = /^logs (\d+): (\{[\s\S]*\})$/.exec((result || '').trim())
+  if (!m) return result
+  try {
+    const msg = (JSON.parse(m[2]) as { message?: unknown }).message
+    return typeof msg === 'string' && msg ? `${msg} (${m[1]})` : result
+  } catch {
+    return result
+  }
 }
 export type BackupCommand = {
   id: number
@@ -3547,6 +3597,9 @@ export interface TamperSign {
   // WordPress, за версиями которого следит helper
   files?: string[]
   wp?: boolean
+  // все файлы правки не как в HEAD рабочей копии git, ветка
+  dirty?: boolean
+  branch?: string
   n?: number
   where?: string
 }

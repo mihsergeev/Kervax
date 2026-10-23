@@ -578,6 +578,9 @@ def view(state: dict | None) -> dict | None:
             paths = list(dict.fromkeys(f.get("p", "") for f in files))
             rows.append({"key": k, "arg": "", "strong": k in STRONG, "since": s.get("since"),
                          "files": paths[:10], "n": len(paths), "wp": any(f.get("wp") for f in files),
+                         # все файлы не как в HEAD рабочей копии git: ветка (app/webfiles.py)
+                         "dirty": bool(files) and all(f.get("g") == "dirty" for f in files),
+                         "branch": next((f["branch"] for f in files if f.get("branch")), ""),
                          "where": ", ".join(dict.fromkeys(f.get("where", "") for f in files if f.get("where")))})
             continue
         rows.append({"key": k, "arg": "", "strong": k in STRONG, "since": s.get("since"),

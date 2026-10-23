@@ -152,8 +152,9 @@ export function DepMapModal({ onClose, onUnauthorized, onOpen }: Props) {
   const SECS: SecDef[] = [
     { id: 'over', label: 'Сводка', group: '' },
     ...held.map((s) => ({ id: `s${s.id}`, label: s.name, group: 'Серверы' })),
-    ...(orphans.length ? [{ id: 'orph', label: 'Мониторы', group: 'Без связей' }] : []),
-    ...(lonely.length ? [{ id: 'lonely', label: 'Серверы', group: 'Без связей' }] : []),
+    // "Без связей" есть всегда: пока карта грузится, меню не перестраивается, пусто - так и пишем
+    { id: 'orph', label: 'Мониторы', group: 'Без связей' },
+    { id: 'lonely', label: 'Серверы', group: 'Без связей' },
   ]
   // в меню под подписью "Без связей" коротко, в заголовке раздела полностью
   const HEAD: Record<string, string> = { orph: 'Мониторы без сервера', lonely: 'Серверы без связей' }
@@ -582,8 +583,10 @@ export function DepMapModal({ onClose, onUnauthorized, onOpen }: Props) {
               <div className="srv-sec">
                 {cur.id === 'over' && (needle ? found() : overview())}
                 {curSrv && server(curSrv)}
-                {cur.id === 'orph' && orphanSec()}
-                {cur.id === 'lonely' && lonelySec()}
+                {cur.id === 'orph' &&
+                  (orphans.length ? orphanSec() : <p className="muted small">{t('Таких мониторов нет: у каждого есть сервер.')}</p>)}
+                {cur.id === 'lonely' &&
+                  (lonely.length ? lonelySec() : <p className="muted small">{t('Таких серверов нет: у каждого есть связи.')}</p>)}
               </div>
             )}
           </div>

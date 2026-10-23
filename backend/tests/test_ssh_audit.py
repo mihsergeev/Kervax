@@ -178,6 +178,7 @@ def test_password_fix_names_who_would_be_locked_out():
     assert st["ssh_dropin"]["cmd"] == "echo 'PasswordAuthentication no' | sudo tee /etc/ssh/sshd_config.d/00-no-password.conf"
     assert st["ssh_reload"]["cmd"] == "sudo systemctl reload ssh"
     assert st["ssh_undo"]["cmd"] == "sudo rm /etc/ssh/sshd_config.d/00-no-password.conf\nsudo systemctl reload ssh"
+    assert st["ssh_undo"]["undo"] is True  # FixSteps рисует его "откатом", без номера
     assert st["ssh_match"]["cmd"].splitlines() == [
         "echo 'PasswordAuthentication no' | sudo tee /etc/ssh/sshd_config.d/00-no-password.conf",
         "echo 'Match Address <cidr>' | sudo tee -a /etc/ssh/sshd_config.d/00-no-password.conf",

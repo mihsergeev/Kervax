@@ -104,7 +104,7 @@ def test_helper_needed_and_written_right():
     assert not setup_scripts.setup_needed("webfiles-setup", {"extras": {"fpm": {"v": 1, "pools": [], "skipped": []}}})
     assert not setup_scripts.setup_needed("webfiles-setup", {"web_services": [{"kind": "Traefik"}]})
     src = (Path(__file__).resolve().parents[2] / "agent" / "webfiles-setup.sh").read_text(encoding="utf-8")
-    assert "\r" not in src and "KERVAX_SETUP_VERSION=0.4" in src and "report.d/webfiles.json" in src
+    assert "\r" not in src and "KERVAX_SETUP_VERSION=0.5" in src and "report.d/webfiles.json" in src
     assert 'mv -f "$HELPER.new" "$HELPER"' in src and "versions/webfiles-setup.ver" in src
     # контейнер: только верхний слой overlay, ключ по контейнеру, старт - не правка, ассеты мимо
     assert "upperdir=" in src and 'key="c${cid:0:12}' in src and "START_WIN=600" in src
@@ -112,7 +112,11 @@ def test_helper_needed_and_written_right():
     # выкладка через git: reflog читается файлом, сам git не запускается (конфиг репозитория мог бы
     # запустить фильтр от root), корень в bind-mount ищется на хосте через mountinfo
     assert "/logs/HEAD" in src and "/proc/1/mountinfo" in src and '\\"git\\":[$GEV]' in src
-    assert "git -c" not in src and "git diff" not in src and "git -C" not in src
+    assert "git diff" not in src and "git -C" not in src and "git status" not in src and "hash-object" not in src
+    # сверка с HEAD: от git только ls-tree (без хуков, фильтров и fsmonitor), без транспорта (ленивая
+    # докачка частичного клона), без системного и глобального конфига, от владельца каталога .git
+    assert src.count(" git -c ") == 1 and "ls-tree -z --full-tree HEAD" in src and "protocol.allow=never" in src
+    assert "GIT_CONFIG_NOSYSTEM=1" in src and 'setpriv --reuid="$uid"' in src and "safe.directory" in src
 
 
 async def _seed(client, domains):
@@ -455,3 +459,58 @@ def test_edit_head_names_the_owner():
     assert webfiles.edit_head(["index.php"], False) == "код изменен не через git/деплой"
     assert webfiles.edit_head(["index.php"], True) == "файлы ядра WordPress изменились без смены версии"
     assert webfiles.edit_head(["wp-content/plugins/a/x.php", "js/app.js"], True) == "код изменен не через git/деплой"
+
+
+# ---------- рабочая копия git: тот же файл, что в HEAD, или правка ----------
+
+GIT_ROOT = {**ROOT, "where": "host", "path": "/srv/api", "branch": "feature-x"}
+SRC = "src/Service/Report/Column.php"
+
+
+def git_start():
+    return webfiles.process(None, blk(run(T - 1200, first=True), roots=(GIT_ROOT,)), NOW)
+
+
+def test_same_content_as_head_is_not_an_edit():
+    # файл записан заново тем же содержимым (IDE, инструмент в контейнере) - не признак, тихая строка
+    st = webfiles.process(git_start(), blk(run(T - 600, n_changed=1, changed=[[SRC, T - 700, 900]], git_same=[SRC]),
+                                           roots=(GIT_ROOT,)), NOW)
+    r = st["roots"]["2080-11"]
+    assert "edit" not in r and "deploy" not in r and r["same"]["files"] == [SRC]
+    st["loose"] = ["2080-11"]
+    assert webfiles.problems(st) == []
+    v = webfiles.view(st, {}, NOW)["roots"][0]
+    assert v["branch"] == "feature-x" and v["same"]["n"] == 1
+    # правку откатили к HEAD - признак уходит сам
+    st = webfiles.process(st, blk(run(T - 300, n_changed=1, changed=[[SRC, T - 350, 950]], git_dirty=[SRC]),
+                                  roots=(GIT_ROOT,)), NOW)
+    assert list(st["roots"]["2080-11"]["edit"]) == [SRC]
+    st = webfiles.process(st, blk(run(T - 100, n_changed=1, changed=[[SRC, T - 150, 900]], git_same=[SRC]),
+                                  roots=(GIT_ROOT,)), NOW)
+    assert "edit" not in st["roots"]["2080-11"]
+
+
+def test_uncommitted_edit_is_named_so():
+    st = webfiles.process(git_start(), blk(run(T - 600, n_changed=1, changed=[[SRC, T - 700, 950]], git_dirty=[SRC]),
+                                           roots=(GIT_ROOT,)), NOW)
+    assert st["roots"]["2080-11"]["edit"][SRC]["g"] == "dirty"
+    st["loose"] = ["2080-11"]
+    assert webfiles.problems(st)[0][:2] == (1, "не закоммиченная правка в рабочей копии git (ветка feature-x) "
+                                               "в /srv/api: Column.php")
+    # рядом файл, которого нет в git, - обычная правка, без "не закоммиченной"
+    st = webfiles.process(st, blk(run(T - 300, n_new=1, new=[["public/js/x.js", T - 350, 10]]), roots=(GIT_ROOT,)), NOW)
+    assert webfiles.problems(st)[0][1].startswith("код изменен не через git/деплой в /srv/api")
+    # в карточке сайта: признак знает, что правка в рабочей копии
+    by_check, _loose = webfiles.mirror([(1, "dev", {**st, "roots": {"2080-11": {
+        **st["roots"]["2080-11"], "edit": {SRC: st["roots"]["2080-11"]["edit"][SRC]}}}})], [(5, "", {1})])
+    row = next(x for x in tamper.view({"signs": by_check[5]})["signs"] if x["key"] == "edit")
+    assert row["dirty"] is True and row["branch"] == "feature-x"
+
+
+def test_git_does_not_hide_break_in_files():
+    # php в загрузках с тем же содержимым, что в HEAD, и новый php вне git - признаки, как раньше
+    st = webfiles.process(git_start(), blk(run(T - 600, n_new=2, new=[
+        ["public/uploads/shell.php", T - 700, 900], ["src/Controller/x.php", T - 700, 300]],
+        git_same=["public/uploads/shell.php"]), roots=(GIT_ROOT,)), NOW)
+    assert sorted(st["roots"]["2080-11"]["php"]) == ["public/uploads/shell.php", "src/Controller/x.php"]
+    assert "same" not in st["roots"]["2080-11"]

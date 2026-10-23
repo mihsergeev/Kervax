@@ -1,7 +1,7 @@
 import { Fragment, useCallback, useEffect, useState, type ReactNode } from 'react'
 import { getSoftware, updateServer, type Server, type SoftwareItem, type SoftwareOut, type SwFixBlock } from './api'
 import { useAuth } from './auth'
-import { FixCmd, useFixDone } from './FixSteps'
+import { FixSteps, useFixDone } from './FixSteps'
 import { useI18n } from './i18n'
 import { swDecisionLabel } from './mutes'
 
@@ -256,25 +256,12 @@ function Toggle({ label, children }: { label: string; children: ReactNode }) {
 
 type Step = SwFixBlock['steps'][number]
 
-// шаги одной строкой с номером, командой и тем, что значит плохой исход
+// шаги короткой строкой (полный текст - в подсказке), под командой - что значит плохой исход.
+// Откат и "не нужен" уже под своим переключателем: метки "откат"/"или" у шагов там лишние
 function Steps({ steps, a, t, onCopy }: { steps: Step[]; a: Record<string, string>; t: TFn; onCopy?: (st: Step) => void }) {
-  let n = 0
   return (
-    <div className="sw-steps">
-      {steps.map((st, i) => {
-        const fail = st.cmd ? ifFail(st.id, t) : ''
-        return (
-          <div key={st.id + i} className="sw-step">
-            <div className="sw-step-txt" title={swFixText(st.id, a, t)}>
-              {steps.length > 1 && <b className="sw-num">{++n}.</b>}
-              {shortText(st.id, a, t)}
-            </div>
-            {st.cmd && <FixCmd cmd={st.cmd} className="sw-cmd" onCopy={() => onCopy?.(st)} />}
-            {fail && <div className="muted small">{fail}</div>}
-          </div>
-        )
-      })}
-    </div>
+    <FixSteps steps={steps.map((st) => ({ ...st, alt: false, undo: false }))} text={(st) => shortText(st.id, a, t)}
+      tip={(st) => swFixText(st.id, a, t)} note={(st) => (st.cmd ? ifFail(st.id, t) : '')} onCopy={onCopy} />
   )
 }
 
@@ -331,7 +318,7 @@ function SwFix({ g, data, checking, onCheck, t }: {
     <div className="sw-fix">
       {headline(g, t).map((h, i) => (
         <div key={i} className="sw-fix-what">
-          <b>{t('Что сделать:')}</b> {h}
+          {h}
           {i === 0 && more && <span className="muted"> · {t('подойдет и {list}', { list: more })}</span>}
         </div>
       ))}

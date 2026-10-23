@@ -998,7 +998,18 @@ label.home-sel-all { display: inline-flex; flex-direction: row; align-items: cen
   border: 1px solid var(--border);
   border-radius: 8px;
 }
-.unit-hint { margin-top: 0.3rem; }
+.unit-hint { margin-top: 0.35rem; }
+/* вывод юнита, когда причина известна: мелко и без рамки, только подтверждает причину */
+.unit-log-c {
+  margin-top: 0.15rem;
+  padding: 0 0 0 0.55rem;
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  background: none;
+  border: 0;
+  border-left: 2px solid var(--border);
+  border-radius: 0;
+}
 .unit-actions { display: flex; align-items: center; gap: 0.4rem; flex-wrap: wrap; margin-top: 0.35rem; }
 /* что открыто в интернет */
 .exp-table { width: 100%; border-collapse: collapse; }
@@ -1259,11 +1270,6 @@ button.ghost.tile-filter-chip:hover { border-color: var(--accent); background: c
 .sw-facts { display: flex; flex-wrap: wrap; align-items: center; gap: 0.3rem 0.5rem; overflow-wrap: anywhere; }
 .sw-facts .mono { font-size: 0.78rem; }
 button.ghost.sw-copy { margin: 0; padding: 0.1rem 0.45rem; }
-.sw-steps { display: flex; flex-direction: column; gap: 0.45rem; }
-.sw-step-txt { overflow-wrap: anywhere; }
-.sw-num { margin-right: 0.35rem; }
-.sw-step .agent-advice-cmd { margin-top: 0.25rem; }
-.sw-cmd pre { color: var(--text); white-space: pre-wrap; overflow-wrap: anywhere; word-break: normal; }
 .sw-extra { display: flex; flex-wrap: wrap; gap: 0.35rem 0.6rem; align-items: flex-start; }
 .sw-extra > .sw-tog:has(.sw-tog-body) { flex-basis: 100%; }
 .sw-tog { display: flex; flex-direction: column; gap: 0.35rem; }
@@ -1289,8 +1295,6 @@ button.ghost.sw-tog-btn { align-self: flex-start; margin: 0; padding: 0.15rem 0.
   .sw-fix-dir { grid-column: 2 / -1; grid-row: 3; white-space: normal; }
   .sw-fix-dir:empty { display: none; }
   .sw-fix-detail { padding-left: 0.8rem; }
-  .sw-cmd { flex-direction: column; }
-  .sw-cmd button.ghost { align-self: flex-end; }
 }
 @media (max-width: 600px) {
   .ub-list { grid-template-columns: minmax(0, 1fr) auto; }
@@ -1398,7 +1402,6 @@ button.ghost.sw-tog-btn { align-self: flex-start; margin: 0; padding: 0.15rem 0.
 }
 .du-fix-actions { display: flex; gap: 0.5rem; }
 .du-fix-line { display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap; margin: 0.3rem 0 0.2rem; }
-.clock-fix-fallback { margin-top: 0.5rem; }
 .clock-sync-row { display: flex; align-items: center; gap: 0.4rem; margin: 0.4rem 0; }
 .clock-manual { margin-top: 0.4rem; }
 .clock-manual summary { cursor: pointer; }
@@ -4583,11 +4586,9 @@ textarea:focus {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
-/* команда в шагах - обычным цветом, даже внутри желтой или красной строки репозитория */
-.osupd-fix .agent-advice-cmd pre {
-  color: var(--text);
-}
-.bsrv-clean-do {
+/* что сделать одной строкой под сутью, без шагов */
+.bsrv-clean-do,
+.fix-do {
   font-size: 0.85rem;
   font-weight: 600;
 }
@@ -4595,31 +4596,6 @@ textarea:focus {
   display: flex;
   justify-content: flex-start;
   margin-top: 0.3rem;
-}
-.osupd-fix {
-  display: flex;
-  flex-direction: column;
-  gap: 0.5rem;
-  margin: 0.4rem 0 0.2rem;
-  padding: 0.6rem 0.7rem;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-}
-.osupd-step .agent-advice-cmd {
-  margin-top: 0.3rem;
-}
-.osupd-step .agent-advice-cmd pre {
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-}
-/* на телефоне команда во всю ширину, кнопка под ней: рядом с кнопкой строка рвалась по буквам */
-@media (max-width: 600px) {
-  .osupd-step .agent-advice-cmd {
-    flex-direction: column;
-  }
-  .osupd-step .agent-advice-cmd button {
-    align-self: flex-end;
-  }
 }
 /* замечание исправили, пока оно было на экране (useFixDone): что изменилось и "закрыть" */
 .fix-done-list {
@@ -4646,18 +4622,7 @@ textarea:focus {
 .fix-done button {
   flex: 0 0 auto;
 }
-.osupd-num {
-  margin-right: 0.35rem;
-  color: var(--text);
-}
-.osupd-alt {
-  font-size: 0.78rem;
-  color: var(--text-muted);
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  margin: 0.2rem 0;
-}
-/* FixSteps badges: номер кружком, текст шага яркий, команда на своем фоне с отступом под номером */
+/* FixSteps: номер кружком, текст шага яркий, команда на своем фоне с отступом под номером */
 .fix-b {
   display: flex;
   flex-direction: column;
@@ -4703,6 +4668,13 @@ textarea:focus {
 .fix-b-side .fix-b-text {
   color: var(--text-muted);
   font-size: 0.82rem;
+  line-height: 1.3;
+}
+/* пояснение к шагу и строка внизу: мелко, чтобы не спорить с текстом шагов */
+.fix-b-note,
+.fix-b-foot {
+  color: var(--text-muted);
+  font-size: 0.78rem;
   line-height: 1.3;
 }
 .fix-b-tag {
@@ -6271,6 +6243,13 @@ button.adopt-mark {
 @media (max-width: 600px) {
   .home-mute-pick { margin-left: 0; }
 }
+/* сроки сайтов: напомнить за 7/1 дней или не следить (ExpirySnooze.tsx) */
+.kv-v .exp-snooze-pick, .check-row .exp-snooze-pick { margin-left: 0; }
+.exp-snooze-state { margin-left: auto; display: inline-flex; align-items: center; gap: 0.4rem; font-size: 0.8rem; }
+.kv-v .exp-snooze-state { margin-left: 0; }
+.exp-badge-pick { cursor: pointer; }
+.exp-badge-pick:hover { outline: 1px solid var(--accent); }
+.uptime-badge.exp-badge-off { opacity: 0.7; }
 
 /* строка restic с кнопкой обновления */
 .restic-row { display: inline-flex; align-items: center; gap: 10px; flex-wrap: wrap; }
@@ -7590,6 +7569,21 @@ button.ghost.lc-del { color: var(--down); border-color: color-mix(in srgb, var(-
   .al-flow-row { grid-template-columns: minmax(0, 1fr); gap: 0.3rem; }
   .al-flow-ar { display: none; }
 }
+/* Роли сервера рядом с именем (RoleChips.tsx): вид как у плашки GPU, у каждой роли свой цвет.
+   Не зеленый/желтый/красный статусов и не синий групп */
+.role-chip { --rc: #a78bfa; display: inline-flex; align-items: center; gap: 0.25rem; font-size: 0.68rem; font-weight: 600; letter-spacing: 0.03em; padding: 0.05rem 0.4rem; border-radius: 6px; border: 1px solid color-mix(in srgb, var(--rc) 45%, transparent); color: var(--rc); background: color-mix(in srgb, var(--rc) 10%, transparent); flex-shrink: 0; white-space: nowrap; }
+.role-chip svg { width: 0.8rem; height: 0.8rem; flex-shrink: 0; }
+.role-chip.clickable:hover { background: color-mix(in srgb, var(--rc) 20%, transparent); }
+.role-backup { --rc: #a78bfa; }
+.role-relay, .role-via { --rc: #22d3ee; }
+/* нода за ретранслятором: тише самого ретранслятора */
+.role-via { border-style: dashed; background: transparent; }
+.role-kube { --rc: #e879f9; }
+.role-llm { --rc: #a5b4fc; }
+:root[data-theme='light'] .role-backup { --rc: #6d28d9; }
+:root[data-theme='light'] .role-relay, :root[data-theme='light'] .role-via { --rc: #0e7490; }
+:root[data-theme='light'] .role-kube { --rc: #a21caf; }
+:root[data-theme='light'] .role-llm { --rc: #4338ca; }
 /* GPU: плашка в списке серверов - средняя загрузка карт полосой, красная при поломке */
 .gpu-chip { display: inline-flex; align-items: center; gap: 0.3rem; font-size: 0.68rem; font-weight: 600; letter-spacing: 0.03em; padding: 0.05rem 0.4rem; border-radius: 6px; border: 1px solid rgba(118, 185, 0, 0.45); color: #6f9d2a; background: rgba(118, 185, 0, 0.08); flex-shrink: 0; font-variant-numeric: tabular-nums; }
 .gpu-chip-bar { display: inline-block; width: 26px; height: 5px; border-radius: 3px; background: var(--border); position: relative; overflow: hidden; }

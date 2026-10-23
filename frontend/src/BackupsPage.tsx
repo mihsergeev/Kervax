@@ -1524,24 +1524,12 @@ function EnableServerStats() {
 // поэтому показываем команду для сервера.
 function ServerResticOld({ ver, target }: { ver: string; target: string }) {
   const { t } = useI18n()
-  const [copied, setCopied] = useState(false)
   const cmd = 'sudo /lib65/kervax/kervax-backupserver-helper restic-update'
   return (
     <div className="net-note">
-      {t('На сервере restic {v}, а helper ставит {target} (ту же версию, что у клиентов). Обычно его обновляет установка helper\'а, если скачать не вышло, запустите на сервере:', { v: ver, target })}
-      <div className="agent-advice-cmd">
-        <pre>{cmd}</pre>
-        <button
-          className="ghost"
-          onClick={() => {
-            navigator.clipboard?.writeText(cmd)
-            setCopied(true)
-            window.setTimeout(() => setCopied(false), 1500)
-          }}
-        >
-          {copied ? t('Скопировано') : t('Копировать')}
-        </button>
-      </div>
+      {t('На сервере restic {v}, нужен {target}, как у клиентов', { v: ver, target })}
+      <FixSteps steps={[{ id: 'upd', cmd }]} text={() => t('Обновить restic на сервере')}
+        foot={t('Обычно его обновляет установка helper\'а: значит, скачать с GitHub не вышло.')} />
     </div>
   )
 }
@@ -1679,7 +1667,6 @@ function rotationLimitDays(r: RepoStat): number {
 function RepoCleanup({ r }: { r: RepoStat }) {
   const { t } = useI18n()
   const [open, setOpen] = useState(false)
-  const [copied, setCopied] = useState(false)
   const hasData = r.snapshots > 0
   const cmd = [
     `R=${r.name}`,
@@ -1698,37 +1685,20 @@ function RepoCleanup({ r }: { r: RepoStat }) {
         <>
           {hasData ? (
             <div className="form-error small">
-              ⚠️ {t('Будет стёрто безвозвратно: {n} снапшотов, {sz}, последний {ago}. Восстановить будет нечем — других копий этих данных у панели нет.', {
+              ⚠️ {t('Будет стерто безвозвратно: {n} снапшотов, {sz}, последний {ago}. Других копий у панели нет.', {
                 n: r.snapshots, sz: fmtBytes(r.size_bytes), ago: fmtAgo(r.last_activity),
               })}
               <div className="muted small">
-                {t('Удаляйте, только если сервер выведен из эксплуатации. Если бэкап ещё может понадобиться — приглушите репозиторий (🔕): он перестанет считаться проблемой, а данные останутся.')}
+                {t('Если бэкап еще может понадобиться, приглушите репозиторий (🔕): данные останутся.')}
               </div>
             </div>
           ) : (
             <div className="muted small">
-              {t('Репозиторий пустой и не инициализирован — удалять нечего, кроме мусора.')}
+              {t('Репозиторий пустой и не инициализирован, удалять нечего, кроме мусора.')}
             </div>
           )}
-          <div className="muted small">
-            {t('Панель бэкапы не удаляет (это защита от взлома), выполните от root на бэкап-сервере:')}
-          </div>
-          <div className="agent-advice-cmd">
-            <pre>{cmd}</pre>
-            <button
-              className="ghost"
-              onClick={() => {
-                navigator.clipboard?.writeText(cmd)
-                setCopied(true)
-                window.setTimeout(() => setCopied(false), 1500)
-              }}
-            >
-              {copied ? t('Скопировано') : t('Копировать')}
-            </button>
-          </div>
-          <div className="muted small">
-            {t('Последняя строка — чтобы панель сразу забыла репу (иначе до следующей минуты). Если репу заводил Ansible, у неё может быть ещё строка в root-crontab — проверьте `sudo crontab -l`.')}
-          </div>
+          <FixSteps steps={[{ id: 'rm', cmd }]} text={() => t('Удалить на бэкап-сервере от root')}
+            foot={t('Панель бэкапы не удаляет, это защита от взлома. Если репозиторий заводил Ansible, проверьте еще строку в sudo crontab -l.')} />
         </>
       )}
     </div>
@@ -1741,7 +1711,6 @@ function RepoCleanup({ r }: { r: RepoStat }) {
 function RepoUnlock({ r, onChanged }: { r: RepoStat; onChanged: () => void }) {
   const { t } = useI18n()
   const [open, setOpen] = useState(false)
-  const [copied, setCopied] = useState(false)
   const [checking, setChecking] = useState(false)
   // пароль берём из prune-env ВНУТРИ sudo bash -c: так он не светится в списке процессов
   const cmd = [
@@ -1784,19 +1753,8 @@ function RepoUnlock({ r, onChanged }: { r: RepoStat; onChanged: () => void }) {
       </button>
       {open && (
         <>
-          <div className="muted small">
-            {t('Команда снимает только висячие локи, которые не обновлялись больше 30 минут. Живой лок идущего бэкапа или чистки она не тронет. Обычно висячий лок остается после аварийно прерванной операции.')}
-          </div>
-          <div className="agent-advice-cmd">
-            <pre>{cmd}</pre>
-            <button className="ghost" onClick={() => {
-              navigator.clipboard?.writeText(cmd)
-              setCopied(true); window.setTimeout(() => setCopied(false), 1500)
-            }}>{copied ? t('Скопировано') : t('Копировать')}</button>
-          </div>
-          <div className="muted small">
-            {t('Выполнять на бэкап-сервере от root. Пароль читается из prune-env внутри команды и в списке процессов не виден.')}
-          </div>
+          <FixSteps steps={[{ id: 'unlock', cmd }]} text={() => t('Снять висячие локи на бэкап-сервере от root')}
+            foot={t('Живой лок идущего бэкапа или чистки (моложе 30 минут) команда не тронет. Пароль читается из env внутри команды и в списке процессов не виден.')} />
           {/* Статус снимается не мгновенно: helper пересчитывает статистику раз в минуту,
               потом отчёт агента и опрос UI. Без этой подсказки снятый лок выглядел как
               «панель не заметила», и человек шёл проверять второй раз. */}
@@ -1805,9 +1763,9 @@ function RepoUnlock({ r, onChanged }: { r: RepoStat; onChanged: () => void }) {
               setChecking(true)
               onChanged()
               window.setTimeout(() => setChecking(false), 2000)
-            }}>{checking ? t('Проверяю…') : t('Снял — проверить')}</button>
+            }}>{checking ? t('Проверяю…') : t('Снял, проверить')}</button>
             <span className="muted small">
-              {t('Статус обновится и сам, в течение минуты: сервер пересчитывает статистику по расписанию.')}
+              {t('Статус обновится сам в течение минуты.')}
             </span>
           </div>
         </>
@@ -3265,8 +3223,10 @@ function BackupSetupModal({ server: s, backupServers, onClose, onDone }: {
   server: Server; backupServers: Server[]; onClose: () => void; onDone: () => void
 }) {
   const { t } = useI18n()
-  // на ноде уже есть бэкап (то же правило, что у раздела): настройка только поверх, с согласия
-  const hasBackup = backupAlive(s.last_report?.backup)
+  // на ноде уже есть бэкап (то же правило, что у раздела): настройка только поверх, с согласия.
+  // found: список устарел, а бэкап на сервере уже есть (ответ 409) - тоже только поверх
+  const [found, setFound] = useState(false)
+  const hasBackup = backupAlive(s.last_report?.backup) || found
   // Переустановка поверх (в том числе перевод на https) начинает с текущих настроек: сервер бэкапов,
   // пути, время и хранение. С умолчаниями она молча сбрасывала свои пути на стандартные
   const cur = hasBackup && s.last_report?.backup?.manageable ? s.last_report.backup : null
@@ -3320,6 +3280,12 @@ function BackupSetupModal({ server: s, backupServers, onClose, onDone }: {
       }
       if (cur.status === 'done' && alive.current) window.setTimeout(() => alive.current && onDone(), 1400)
     } catch (e) {
+      if (e instanceof ApiError && e.status === 409) {
+        // пока окно было открыто, бэкап настроили (или агент о нем только что сообщил)
+        setFound(true)
+        setErr(t('На сервере уже есть бэкап: отметьте "переустановить поверх", если его надо переписать'))
+        return
+      }
       setErr(e instanceof Error ? e.message : t('ошибка'))
     } finally {
       if (alive.current) setBusy(false)

@@ -240,7 +240,7 @@ def password_fix(srv: Server, ssh: dict, now: datetime) -> list[dict]:
     steps += [
         {"id": "ssh_check", "cmd": "sudo sshd -t && sudo sshd -T | grep -Ei '^(passwordauthentication|kbdinteractiveauthentication) '"},
         {"id": "ssh_reload", "cmd": reload},
-        {"id": "ssh_undo", "cmd": undo},
+        {"id": "ssh_undo", "undo": True, "cmd": undo},
         {"id": "ssh_match", "alt": True, "cmd": match},
     ]
     if not ssh.get("guard"):

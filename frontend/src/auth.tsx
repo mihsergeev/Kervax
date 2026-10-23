@@ -4,11 +4,14 @@ import type { Role } from './api'
 // Права текущего пользователя для гейтинга UI. Backend всё равно проверяет всё сам
 // (роль, разделы, группы) — здесь только чтобы не показывать то, что даст 403.
 //   isViewer — только чтение (роль viewer)
+//   canWrite — можно ли что-то менять: кнопки изменений (рестарт, мьют, настройка бэкапа...) рисуются
+//              только при нем. Запрос на изменение от наблюдателя api.ts не отправит вовсе
 //   isAdmin  — учётки и настройки панели (роль admin; editor их не получает)
 //   sections — разрешённые вкладки; пусто = все
 export type Auth = {
   role: Role
   isViewer: boolean
+  canWrite: boolean
   isAdmin: boolean
   sections: string[]
   username: string // чтобы отличать свою учётку от чужой (напр. запрет самоудаления)
@@ -17,6 +20,7 @@ export type Auth = {
 const AuthContext = createContext<Auth>({
   role: 'admin',
   isViewer: false,
+  canWrite: true,
   isAdmin: true,
   sections: [],
   username: '',

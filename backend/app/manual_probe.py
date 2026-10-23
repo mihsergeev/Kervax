@@ -23,7 +23,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import checks as checks_exec
-from app import inside_probe
+from app import expiry_snooze, inside_probe
 from app.collector import _aware, record_outcome
 from app.models import AgentPathProbe, AgentProbe, Check, DomainProbe, ProbeRequest, Server
 
@@ -338,6 +338,7 @@ async def _store_manual_main(session: AsyncSession, check: Check, req: ProbeRequ
     if info.ssl_days is not None:
         check.ssl_days = info.ssl_days
         check.ssl_message = info.ssl_message[:256]
+        expiry_snooze.sync(check)
 
     probe = await session.get(AgentProbe, check.id)
     if probe is None:
