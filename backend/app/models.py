@@ -326,6 +326,9 @@ class Check(Base):
     # после продления. Позволяет слать по одному алерту на каждый порог (эскалация).
     ssl_alerted_days: Mapped[int | None] = mapped_column(Integer, nullable=True)
     domain_alerted_days: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # отложенные сроки: "напомнить за 7/1 дней" и "не следить" (app/expiry_snooze.py):
+    # {"domain"|"ssl": {mode, by, at, days}}; продление снимает отложку, "не следить" остается
+    expiry_snooze: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
     # последний результат (для карточек/списка без обращения к тайм-серии)
     last_status: Mapped[str] = mapped_column(String(16), default="unknown")  # up|degraded|down|unknown

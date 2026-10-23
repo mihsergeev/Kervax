@@ -16,6 +16,10 @@ bearer_scheme = HTTPBearer(auto_error=False)
 
 SessionDep = Annotated[AsyncSession, Depends(get_session)]
 
+# отказ учетке только для просмотра на любое изменение. Ожидаемый: журнал ошибок панели его не
+# пишет (app/panel_errors.py), фронт такие запросы и не шлет (api.ts)
+VIEWER_READ_ONLY = "Учетная запись только для просмотра: изменения запрещены"
+
 # изменяющие HTTP-методы (viewer'у запрещены)
 _WRITE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 # self-service своей учетки (пароль/2FA) - можно и viewer'у; вход не аутентифицирован.
@@ -62,10 +66,7 @@ async def get_current_user(
         and request.method in _WRITE_METHODS
         and not request.url.path.startswith(_SELF_SERVICE_PREFIX)
     ):
-        raise HTTPException(
-            status.HTTP_403_FORBIDDEN,
-            "Учётная запись только для просмотра — изменения запрещены",
-        )
+        raise HTTPException(status.HTTP_403_FORBIDDEN, VIEWER_READ_ONLY)
     # Разделы: если учётке нарезан список, всё за его пределами закрыто И на чтение.
     # Проверка здесь, а не в каждом роутере: любой аутентифицированный маршрут зависит
     # от CurrentUser, поэтому обойти её нельзя — как и запрет записи выше.

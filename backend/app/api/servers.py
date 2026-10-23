@@ -2617,8 +2617,7 @@ async def backup_setup(
     # оставшаяся от снесенного бэкапа, и упавшая на полпути настройка - не бэкап: раньше
     # форма отказывала по одной метрике, и такую ноду нельзя было настроить вовсе
     if backup_state.backup_alive(crep.get("backup")) and not body.reinstall:
-        raise HTTPException(status.HTTP_409_CONFLICT,
-                            "на этом сервере уже есть бэкап - отметьте \"переустановить поверх\"")
+        raise HTTPException(status.HTTP_409_CONFLICT, backup_state.BACKUP_EXISTS)
     if not ((bs.last_report or {}).get("backup_server") or {}).get("present"):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "выбранный сервер не является бэкап-сервером")
     client_ip, server_ip = _pick_ip(client), _pick_ip(bs)

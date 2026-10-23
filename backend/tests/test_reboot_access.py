@@ -171,6 +171,7 @@ def test_disable_stale_account():
     assert [(x["id"], x.get("alt", False)) for x in fix] == [
         ("acc_check", False), ("acc_lock", False), ("acc_keys", False), ("acc_undo", False), ("acc_delete", True)]
     st = {x["id"]: x["cmd"] for x in fix}
+    assert next(x for x in fix if x["id"] == "acc_undo")["undo"] is True
     assert st["acc_check"].splitlines() == [
         "ps -u olduser -o pid,lstart,args", "sudo crontab -l -u olduser", "ls /var/lib/systemd/linger/",
         "grep -rlxF 'User=olduser' /etc/systemd/system /lib/systemd/system"]

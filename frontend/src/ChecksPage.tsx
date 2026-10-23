@@ -16,6 +16,7 @@ import {
 import { BulkModal } from './BulkModal'
 import { CheckDetail } from './CheckDetail'
 import { EXPIRY_WARN_DAYS, expiryText, expiryTone } from './checkUtils'
+import { ExpirySnoozePick, expEntry, expHidden, expSnoozeText, expSnoozeTip, type ExpKind } from './ExpirySnooze'
 import { useUrlCard } from './deeplink'
 import { AdoptSitesModal, adoptable } from './AdoptSitesModal'
 import { AddMonitor } from './AddMonitor'
@@ -789,6 +790,8 @@ export function ChecksPage({ onUnauthorized, openCheckId, openSec = null, onCons
                     key={c.id}
                     check={c}
                     showGroup={groupBy !== 'group'}
+                    canEdit={!isViewer && !selectMode}
+                    onChanged={load}
                     onOpen={() =>
                       selectMode ? toggleSelected(c.id) : setDetailId(c.id)
                     }
@@ -901,6 +904,36 @@ function Tile({
   )
 }
 
+// Срок сертификата или домена в строке списка. На пороге алерта нажатие - напомнить за 7/1 дней
+// или не следить (ExpirySnooze.tsx); отложенный приглушен со 🔕, вернуть - в карточке
+function ExpBadge({ c, kind, canEdit, onChanged }: { c: Check; kind: ExpKind; canEdit: boolean; onChanged?: () => void }) {
+  const { t } = useI18n()
+  const [pick, setPick] = useState(false)
+  const on = kind === 'ssl' ? c.check_ssl : c.check_domain
+  const days = kind === 'ssl' ? c.ssl_days : c.domain_days
+  const warn = kind === 'ssl' ? c.ssl_warn_days : c.domain_warn_days
+  if (!on || days == null || !warnBadge(days, warn)) return null
+  const e = expEntry(c, kind)
+  const hidden = expHidden(c, kind)
+  const canPick = canEdit && !hidden && warn.length > 0 && days <= Math.max(...warn)
+  if (pick && canPick)
+    return <ExpirySnoozePick check={c} kind={kind} short onDone={() => onChanged?.()} onClose={() => setPick(false)} />
+  const what = kind === 'ssl' ? t('SSL истекает') : t('Домен истекает')
+  return (
+    <span
+      className={`uptime-badge ${hidden ? 'muted exp-badge-off' : warnBadge(days, warn)}${canPick ? ' exp-badge-pick' : ''}`}
+      title={hidden && e
+        ? `${what} · ${expSnoozeText(e, t)}
+${expSnoozeTip(e, t)}`
+        : canPick ? `${what}
+${t('Нажмите: напомнить позже или не следить')}` : what}
+      onClick={canPick ? (ev) => { ev.stopPropagation(); setPick(true) } : undefined}
+    >
+      {kind === 'ssl' ? '🔐' : '🌐'} {expiryText(days, t)}{hidden ? ' 🔕' : ''}
+    </span>
+  )
+}
+
 function CheckRow({
   check: c,
   showGroup,
@@ -910,9 +943,13 @@ function CheckRow({
   dragOver,
   selecting,
   checked,
+  canEdit = false,
+  onChanged,
 }: {
   check: Check
   showGroup?: boolean
+  canEdit?: boolean
+  onChanged?: () => void
   onOpen: () => void
   reorder?: {
     onDragStart: () => void
@@ -1031,16 +1068,8 @@ function CheckRow({
               {c.uptime_24h}%
             </span>
           )}
-          {c.check_ssl && c.ssl_days != null && warnBadge(c.ssl_days, c.ssl_warn_days) && (
-            <span className={`uptime-badge ${warnBadge(c.ssl_days, c.ssl_warn_days)}`} title={t('SSL истекает')}>
-              🔐 {expiryText(c.ssl_days, t)}
-            </span>
-          )}
-          {c.check_domain && c.domain_days != null && warnBadge(c.domain_days, c.domain_warn_days) && (
-            <span className={`uptime-badge ${warnBadge(c.domain_days, c.domain_warn_days)}`} title={t('Домен истекает')}>
-              🌐 {expiryText(c.domain_days, t)}
-            </span>
-          )}
+          <ExpBadge c={c} kind="ssl" canEdit={canEdit} onChanged={onChanged} />
+          <ExpBadge c={c} kind="domain" canEdit={canEdit} onChanged={onChanged} />
           {/* Основная проверка зелёная, а из локации сайт не отвечает — строка
               выглядела полностью исправной, и проблему было видно только внутри
               монитора. Помечаем прямо в списке. */}

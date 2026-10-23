@@ -25,8 +25,15 @@
 # A deploy through git (git pull with two files) is told by the reflog: a root inside a checkout
 # - in the container or, for a bind mount, on the host - sends the times of the last pull,
 # checkout, merge and reset, and the panel takes the files written right before one of them for
-# the deploy. The reflog is read as a file: git is not run, so nothing in the repository (its
-# config, hooks, filters) runs as root.
+# the deploy. The reflog is read as a file.
+#
+# A changed file of a checkout is compared with its version in HEAD: the same content (an IDE or
+# a tool in the container wrote it again) is not an edit, a different one is an uncommitted edit
+# in the working copy, a file git does not know stays a file outside git. The hash of the file is
+# taken by sha1sum, from git only "git ls-tree HEAD" is asked - it runs no hooks, filters or
+# fsmonitor - with transports off (no lazy fetch of a partial clone), no system or global config,
+# and as the owner of the git directory: what the repository config could make git run, its
+# owner could run anyway. A git directory of another user inside a container is not looked into.
 #
 # WordPress updates itself from the admin or by wp-cron: a language pack, a plugin, a theme or
 # the core. To tell that from an edit, a changed translation (languages/*.l10n.php) is sent with
@@ -39,7 +46,7 @@
 # (root only).
 set -euo pipefail
 
-KERVAX_SETUP_VERSION=0.4 # MAJOR.MINOR; compared component-wise
+KERVAX_SETUP_VERSION=0.5 # MAJOR.MINOR; compared component-wise
 KERVAX_SETUP_WHEN="pgrep -x nginx || pgrep -x apache2 || pgrep -x httpd || pgrep php-fpm || pgrep -x php || pgrep lsphp || pgrep frankenphp"
 
 HELPER_DIR=/lib65/kervax
@@ -92,17 +99,18 @@ upper_of() {
 }
 
 # the git directory of the checkout a directory lies in: .git up the tree, a directory or a
-# "gitdir: ..." file (a worktree); base is /proc/<pid>/root for a path inside a container
+# "gitdir: ..." file (a worktree); base is /proc/<pid>/root for a path inside a container.
+# Prints "gitdir TAB top of the checkout"
 gitdir_of() {
   local base=$1 d=$2 g i=0
   while [ "$i" -lt 12 ]; do
-    if [ -d "$base$d/.git" ]; then printf '%s\n' "$base$d/.git"; return 0; fi
+    if [ -d "$base$d/.git" ]; then printf '%s\t%s\n' "$base$d/.git" "$base$d"; return 0; fi
     if [ -f "$base$d/.git" ]; then
       g=$(head -c 512 "$base$d/.git" 2>/dev/null | sed -n 's/^gitdir: *//p' | head -1)
       case "$g" in
         '') ;;
-        /*) printf '%s\n' "$base$g"; return 0 ;;
-        *) printf '%s\n' "$base$d/$g"; return 0 ;;
+        /*) printf '%s\t%s\n' "$base$g" "$base$d"; return 0 ;;
+        *) printf '%s\t%s\n' "$base$d/$g" "$base$d"; return 0 ;;
       esac
     fi
     [ "$d" = / ] && return 1
@@ -144,6 +152,56 @@ git_events() {
       END { s = c > max ? c - max + 1 : 1; for (i = s; i <= c; i++) printf "%s%s", (i > s ? "," : ""), e[i] }')
   fi
   GEV=${GITEV[$f]}
+}
+
+# the branch checked out: from HEAD as a file, empty when detached
+git_branch() {
+  head -c 256 "$1/HEAD" 2>/dev/null | sed -n 's|^ref: *refs/heads/||p' | head -1 | tr -cd 'A-Za-z0-9._/+-' | head -c 80
+}
+
+# GSAME, GDIRTY: JSON lists of the files (paths from the root) whose content is the same as in
+# HEAD or not. Arguments: git dir, path prefix of the root in the checkout, root, file with paths
+git_check() {
+  local gd=$1 pre=$2 root=$3 list=$4 cdir=$1 uid gid f h t e
+  local -a run=() paths=()
+  local -A tree=()
+  GSAME="" GDIRTY=""
+  command -v git >/dev/null 2>&1 && command -v sha1sum >/dev/null 2>&1 || return 0
+  [ -s "$list" ] && [ -f "$gd/HEAD" ] || return 0
+  # a linked worktree keeps the config in the common git directory
+  if [ -f "$gd/commondir" ]; then
+    f=$(head -c 512 "$gd/commondir" 2>/dev/null | head -1)
+    case "$f" in /*) cdir=$f ;; ?*) cdir=$gd/$f ;; esac
+    case "$gd" in /proc/[0-9]*/root/*) [ "${f#/}" != "$f" ] && cdir=${gd%%/root/*}/root$f ;; esac
+  fi
+  # SHA-256 repositories: sha1sum of the file means nothing there
+  grep -qi 'objectformat' "$cdir/config" 2>/dev/null && return 0
+  uid=$(stat -c %u "$gd" 2>/dev/null) || return 0
+  gid=$(stat -c %g "$gd" 2>/dev/null) || return 0
+  for f in "$cdir" "$cdir/config"; do
+    if [ -e "$f" ] && [ "$(stat -c %u "$f" 2>/dev/null)" != "$uid" ]; then return 0; fi
+  done
+  if [ "$uid" != 0 ]; then
+    case "$gd" in /proc/*) return 0 ;; esac
+    command -v setpriv >/dev/null 2>&1 || return 0
+    run=(setpriv --reuid="$uid" --regid="$gid" --clear-groups)
+  fi
+  while IFS= read -r f; do paths+=("$pre$f"); done < "$list"
+  printf '[safe]\n\tdirectory = *\n' > "$work/gitconfig"
+  # "mode type blob TAB path", NUL-terminated: paths come as they are
+  while IFS="$TAB" read -r -d '' h f; do
+    tree[$f]=${h##* }
+  done < <(cd / && timeout 30 env -i PATH="$PATH" HOME=/nonexistent GIT_CONFIG_NOSYSTEM=1 \
+             GIT_CONFIG_GLOBAL="$([ "$uid" = 0 ] && echo "$work/gitconfig" || echo /dev/null)" GIT_TERMINAL_PROMPT=0 \
+             "${run[@]}" git -c safe.directory='*' -c protocol.allow=never --literal-pathspecs --git-dir="$gd" \
+             ls-tree -z --full-tree HEAD -- "${paths[@]}" 2>/dev/null)
+  while IFS= read -r f; do
+    t=${tree[$pre$f]:-}
+    [ -n "$t" ] && [ -f "$root/$f" ] || continue
+    h=$({ printf 'blob %s\0' "$(stat -c %s "$root/$f")"; cat "$root/$f"; } 2>/dev/null | sha1sum | cut -c1-40)
+    e="\"$(esc "$f")\""
+    if [ "$h" = "$t" ]; then GSAME="$GSAME${GSAME:+,}$e"; else GDIRTY="$GDIRTY${GDIRTY:+,}$e"; fi
+  done < "$list"
 }
 
 # Docker container id -> name, for "where" in the panel
@@ -341,17 +399,24 @@ while IFS="$TAB" read -r pid dir names; do
   big=false
   [ "$files" -ge "$MAXFILES" ] && big=true
   # the reflog of the checkout: in the container, else on the host behind the bind mount
+  # gbase - the root as seen next to the checkout top, for paths in the checkout
+  gbase=$p
   if [ "$p" = "$inner" ]; then
-    gd=$(gitdir_of "" "$p" || true)
+    gt=$(gitdir_of "" "$p" || true)
   else
-    gd=$(gitdir_of "/proc/$pid/root" "$inner" || true)
-    if [ -z "$gd" ]; then
+    gt=$(gitdir_of "/proc/$pid/root" "$inner" || true)
+    if [ -z "$gt" ]; then
       hp=$(host_path "$pid" "$inner")
-      [ -n "$hp" ] && gd=$(gitdir_of "" "$hp" || true)
+      [ -n "$hp" ] && gt=$(gitdir_of "" "$hp" || true) && gbase=$hp
     fi
   fi
+  gd=${gt%%"$TAB"*} gtop=${gt#*"$TAB"} gpre="" branch=""
+  case "$gbase/" in
+    "${gtop%/}/"*) gpre=${gbase#"${gtop%/}"}; gpre=${gpre#/}; gpre=${gpre:+$gpre/} ;;
+    *) gtop="" ;;
+  esac
   GEV=""
-  [ -n "$gd" ] && git_events "$gd"
+  [ -n "$gd" ] && git_events "$gd" && branch=$(git_branch "$gd")
   # the same directory mounted into several containers (php-fpm and a worker of one project)
   src=""
   [ "$layer" = false ] && src=$(stat -L -c '%d-%i' "$p" 2>/dev/null || true)
@@ -360,7 +425,7 @@ while IFS="$TAB" read -r pid dir names; do
   wpv=$(awk -F '\t' '$1 == "core" { print $3; exit }' "$work/wp")
   doms=$(printf '%s\n' "$names" | tr ' ' '\n' | grep -E '^[A-Za-z0-9*][A-Za-z0-9.*-]*\.[A-Za-z]{2,}$' | sort -u | head -20 \
     | awk '{ printf "%s\"%s\"", (NR > 1 ? "," : ""), $0 }')
-  roots="$roots${roots:+,}{\"key\":\"$key\",\"where\":\"$(esc "$where")\",\"path\":\"$(esc "$inner")\",\"domains\":[$doms],\"files\":$files,\"big\":$big,\"layer\":$layer${src:+,\"src\":\"$src\"}${GEV:+,\"git\":[$GEV]}${wpv:+,\"wp\":\"$wpv\"}}"
+  roots="$roots${roots:+,}{\"key\":\"$key\",\"where\":\"$(esc "$where")\",\"path\":\"$(esc "$inner")\",\"domains\":[$doms],\"files\":$files,\"big\":$big,\"layer\":$layer${src:+,\"src\":\"$src\"}${GEV:+,\"git\":[$GEV]}${branch:+,\"branch\":\"$branch\"}${wpv:+,\"wp\":\"$wpv\"}}"
   snap="$SNAP/$key.lst"
   if [ ! -e "$snap" ] || [ "$young" = true ]; then
     deltas="$deltas${deltas:+,}{\"key\":\"$key\",\"first\":true}"
@@ -393,8 +458,14 @@ while IFS="$TAB" read -r pid dir names; do
         esac
       done < "$work/diff" > "$work/diff2" && mv -f "$work/diff2" "$work/diff"
     fi
+    # the files sent: the same content as in HEAD or not
+    GSAME="" GDIRTY=""
+    if [ -n "$gd" ] && [ -n "$gtop" ] && [ "$((nn + nc))" -gt 0 ]; then
+      awk -F '\t' -v max="$MAXLIST" '($1 == "N" || $1 == "C") && c[$1]++ < max { print $2 }' "$work/diff" > "$work/gitfiles"
+      git_check "$gd" "$gpre" "$p" "$work/gitfiles"
+    fi
     if [ "$((nn + nc + ng))" -gt 0 ] || [ -n "$wpup" ]; then
-      deltas="$deltas${deltas:+,}{\"key\":\"$key\",\"n_new\":$nn,\"n_changed\":$nc,\"n_gone\":$ng,\"new\":[$(jlist N "$work/diff")],\"changed\":[$(jlist C "$work/diff")],\"gone\":[$(jlist G "$work/diff")]${wpup:+,\"wp\":[$wpup]}}"
+      deltas="$deltas${deltas:+,}{\"key\":\"$key\",\"n_new\":$nn,\"n_changed\":$nc,\"n_gone\":$ng,\"new\":[$(jlist N "$work/diff")],\"changed\":[$(jlist C "$work/diff")],\"gone\":[$(jlist G "$work/diff")]${wpup:+,\"wp\":[$wpup]}${GSAME:+,\"git_same\":[$GSAME]}${GDIRTY:+,\"git_dirty\":[$GDIRTY]}}"
     fi
   fi
   cp -f "$work/new" "$snap.tmp" && mv -f "$snap.tmp" "$snap"

@@ -4,6 +4,8 @@ import {
   ApiError,
   kubeCommand,
   kubeCommandStatus,
+  logsErrorText,
+  logsTargetGone,
   kubeExpiryIgnore,
   kubeNodeIgnore,
   listServers,
@@ -22,6 +24,7 @@ import {
 } from './api'
 import { useAuth } from './auth'
 import { useUrlCard, useUrlParam } from './deeplink'
+import { FixSteps } from './FixSteps'
 import { useI18n } from './i18n'
 import { kindLabel, KUBE_WORK_KINDS, RESTARTS_DAY_MIN } from './mutes'
 import { OsIcon } from './osIcon'
@@ -157,28 +160,16 @@ function KubeLogo() {
 
 function EnableBlock() {
   const { t } = useI18n()
-  const [copied, setCopied] = useState(false)
   return (
     <div className="chart-card net-card net-card-wide">
       <div className="net-head">
         <div className="chart-cap">{t('Нет доступа к kube-api')}</div>
       </div>
       <div className="net-note">
-        {t('Кластер найден, но агент не имеет доступа к kube-api. Включите read-only + точечное управление: скрипт создаёт ServiceAccount с узким RBAC (не cluster-admin) и кладёт токен для агента.')}
+        {t('Кластер есть, но у агента нет доступа к kube-api')}
       </div>
-      <div className="agent-advice-cmd">
-        <pre>{KUBE_ENABLE_CMD}</pre>
-        <button
-          className="ghost"
-          onClick={() => {
-            navigator.clipboard?.writeText(KUBE_ENABLE_CMD)
-            setCopied(true)
-            window.setTimeout(() => setCopied(false), 1500)
-          }}
-        >
-          {copied ? t('Скопировано') : t('Копировать')}
-        </button>
-      </div>
+      <FixSteps steps={[{ id: 'enable', cmd: KUBE_ENABLE_CMD }]} text={() => t('Включить доступ на чтение и точечное управление')}
+        foot={t('Скрипт создает ServiceAccount с узким RBAC (не cluster-admin) и кладет токен для агента.')} />
     </div>
   )
 }
@@ -214,7 +205,8 @@ function JobLog({ server, pod, onOpen }: { server: Server; pod: KubePod; onOpen:
         if (!alive) return
         if (r.status === 'done')
           setText((r.result ?? '').split('\n').map((l) => l.replace(LOG_TS, '')).filter((l) => l.trim()).slice(-25).join('\n'))
-        else setErr(r.result || t('не удалось получить логи'))
+        else if (logsTargetGone(r)) setErr(t('Под уже удален, его лога больше нет'))
+        else setErr(logsErrorText(r.result) || t('не удалось получить логи'))
       })
       .catch(() => alive && setErr(t('не удалось получить логи')))
     return () => {
@@ -355,13 +347,20 @@ function PodLogsModal({
   pod,
   prev = false,
   onClose,
+  onGone,
 }: {
   server: Server
   pod: KubePod
   prev?: boolean // лог прошлого запуска (kubectl logs --previous): почему упал
   onClose: () => void
+  onGone?: () => void // пода уже нет (пересоздан): обновить список
 }) {
   const { t } = useI18n()
+  // через ref: onChanged родителя меняется на каждом его обновлении и перезапускал бы логи
+  const gone = useRef(onGone)
+  useEffect(() => {
+    gone.current = onGone
+  }, [onGone])
   const [logs, setLogs] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const [err, setErr] = useState<string | null>(null)
@@ -375,7 +374,11 @@ function PodLogsModal({
       try {
         const res = await runAndWait(server.id, pod.ns, 'pod', pod.name, prev ? 'logs_prev' : 'logs', opts)
         if (res.status === 'done') setLogs(res.result ?? '')
-        else setErr(res.result || t('не удалось получить логи'))
+        else if (logsTargetGone(res)) {
+          // нажали в списке, загруженном до пересоздания пода: это не сбой, список устарел
+          setErr(t('Под уже пересоздан или удален, список обновлен'))
+          gone.current?.()
+        } else setErr(logsErrorText(res.result) || t('не удалось получить логи'))
       } catch {
         setErr(t('ошибка'))
       } finally {
@@ -1382,8 +1385,8 @@ function KubeHostModal({
           </div>
         </div>
       </div>
-      {logsPod && <PodLogsModal server={s} pod={logsPod} onClose={() => setLogsPod(null)} />}
-      {prevPod && <PodLogsModal server={s} pod={prevPod} prev onClose={() => setPrevPod(null)} />}
+      {logsPod && <PodLogsModal server={s} pod={logsPod} onClose={() => setLogsPod(null)} onGone={onChanged} />}
+      {prevPod && <PodLogsModal server={s} pod={prevPod} prev onClose={() => setPrevPod(null)} onGone={onChanged} />}
     </div>,
     document.body,
   )

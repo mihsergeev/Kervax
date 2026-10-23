@@ -5,10 +5,12 @@
 
   * необработанное исключение бэкенда (500) - маршрут, кто, короткий traceback (middleware);
   * отказ на изменяющий запрос человека (POST/PUT/PATCH/DELETE с 4xx/5xx), кроме ожидаемого
-    шума: 401 (протух вход, его лечит повторный вход), 422 (форма не прошла проверку) и любых
-    отказов /api/auth/ (неверный пароль или код - у входа своя защита и свой журнал);
+    шума: 401 (протух вход, его лечит повторный вход), 422 (форма не прошла проверку), любых
+    отказов /api/auth/ (неверный пароль или код - у входа своя защита и свой журнал) и отказов
+    из EXPECTED (только для просмотра, бэкап уже есть: интерфейс сам объясняет человеку);
   * провал команды агенту или helper'у, которую поставил человек (Docker, Kubernetes, бэкап,
-    юниты, место на диске), с выводом helper'а и параметрами команды;
+    юниты, место на диске), с выводом helper'а и параметрами команды. Кроме логов пода или
+    контейнера, которого уже нет (target_gone): интерфейс говорит "под уже пересоздан";
   * ошибка интерфейса (window.onerror, unhandledrejection, error boundary) - с фронта, с
     ограничением частоты на обеих сторонах;
   * сообщение "сообщить о проблеме": пара слов от человека, к ним сами прикладываются его
@@ -40,7 +42,9 @@ from typing import Any
 
 from sqlalchemy import delete, func, select
 
+from app.backup_state import BACKUP_EXISTS
 from app.config import get_settings
+from app.deps import VIEWER_READ_ONLY
 from app.impersonate import READ_ONLY, who_of
 from app.models import PanelError, Server
 
@@ -61,8 +65,25 @@ SKIP = frozenset({"/api/health"})
 NOISY_CODES = frozenset({401, 422})
 QUIET_PREFIX = ("/api/auth/", "/api/panel-errors")
 
-# начало ответа на изменение во время входа под чужой учеткой (impersonate.READ_ONLY)
-_IMP_READ_ONLY = READ_ONLY.split("{")[0].encode()
+
+def _head(text: str) -> bytes:
+    """Неизменное начало текста отказа, как оно лежит в JSON ответа: до подстановки и кавычек."""
+    return text.split("{")[0].split('"')[0].encode()
+
+
+# Ожидаемые отказы на изменение: код ответа и начало текста. Не ошибка панели, как и протухший
+# вход: интерфейс такие действия не предлагает или сам объясняет, что делать
+EXPECTED: dict[int, tuple[bytes, ...]] = {
+    # вход админа под чужой учеткой (app/impersonate.py) и учетка только для просмотра (deps.py)
+    403: (_head(READ_ONLY), _head(VIEWER_READ_ONLY)),
+    # "настроить бэкап" поверх живого без согласия: форма спросит "переустановить поверх"
+    409: (_head(BACKUP_EXISTS),),
+}
+
+
+def expected_refusal(code: int, body: bytes) -> bool:
+    return any(h and h in body for h in EXPECTED.get(code, ()))
+
 
 _MSG_MAX = 2000
 _DETAIL_MAX = 8000
@@ -276,6 +297,16 @@ def reset() -> None:
 
 _CMD_SECTION = {"docker": "docker", "kube": "kuber", "backup": "backups"}
 _CMD_PARAMS = ("container", "ns", "kind", "name", "mode", "schedule", "tail", "since")
+# агент: "logs 404: {...NotFound...}" у пода (kube-api), "logs 404" у контейнера (docker)
+_LOGS_GONE = re.compile(r"^logs 404\b")
+
+
+def target_gone(kind: str, c) -> bool:
+    """Логи пода или контейнера, которого уже нет: человек нажал "логи" в списке, загруженном до
+    пересоздания пода. Интерфейс говорит "под уже пересоздан или удален" и обновляет список -
+    не сбой панели. Тот же разбор - logsTargetGone на фронте (api.ts)."""
+    return (kind in ("kube", "docker") and (getattr(c, "action", "") or "") in ("logs", "logs_prev")
+            and bool(_LOGS_GONE.match((getattr(c, "result", "") or "").strip())))
 
 
 def command_params(kind: str, c) -> dict:
@@ -297,7 +328,7 @@ def command_failed(session_factory, kind: str, c, *, server_name: str = "", soon
     """Команда, поставленная человеком, не удалась (агент ответил ошибкой или не ответил).
     Команды планировщика (created_by пусто) сюда не идут: у них свои уведомления."""
     who = getattr(c, "created_by", "") or ""
-    if not who or getattr(c, "origin", "") == "auto":
+    if not who or getattr(c, "origin", "") == "auto" or target_gone(kind, c):
         return None
     action = getattr(c, "action", "") or ""
     if kind == "backup" and action in ("unit_fix", "unit_journal"):
@@ -427,9 +458,7 @@ class PanelErrorMiddleware:
             self._note(scope, path, method, 500, req, b"", exc)
             raise
         kind = should_record(method, path, code)
-        # отказ в изменении, пока админ смотрит панель глазами пользователя (app/impersonate.py), -
-        # ожидаемый, как и протухший вход: не ошибка панели
-        if kind == "api" and code == 403 and _IMP_READ_ONLY in resp:
+        if kind == "api" and expected_refusal(code, bytes(resp)):
             kind = None
         if kind:
             self._note(scope, path, method, code, req, bytes(resp), None)

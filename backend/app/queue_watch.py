@@ -8,19 +8,30 @@
 в начале d0, пик p и флаг "ни разу не уменьшилась" (nd). Ход начинается заново, когда очередь
 опустилась ниже пика больше чем на DIP (живой воркер разбирает пачками, и очередь ходит пилой).
 Алерт, когда очередь
-- растет дольше STUCK_S и выросла хотя бы на GROW_MIN: не разбирают или разбирают медленнее,
-  чем кладут;
-- или дольше SLOW_S не уменьшилась ни на одно сообщение и выросла хотя бы на SLOW_GROW: умерший
-  воркер редкой очереди (пять писем в час) за полчаса не наберет сотню;
-- или у нее нет ни одного потребителя (агент 2.38), и она STUCK_S не уменьшилась и выросла хотя бы
-  на SLOW_GROW: воркер умер, ждать три часа незачем;
+- дольше SLOW_S не уменьшилась ни на одно сообщение и выросла хотя бы на SLOW_GROW: не отдает
+  ничего, хотя потребители есть, или умер воркер редкой очереди (пять писем в час за полчаса не
+  наберут сотню);
+- или растет дольше STUCK_S и выросла хотя бы на GROW_MIN, и в ней хотя бы в BASE_X раз больше
+  обычного: разбирают медленнее, чем кладут, и уже заметно для этой очереди. Обычное - медиана
+  суточных пиков за неделю (dm), пик считается по ходу, который кончился: очередь дошла до него и
+  пошла вниз, ее разобрали. Полтысячи в очереди, которая днем ходит до тысячи, - это наплыв, его
+  разберут. Пока ни одного разобранного хода нет, обычного не знаем и судим только по росту;
+- или у нее нет ни одного потребителя (агент 2.38), а сообщения с тех пор копятся: воркер умер,
+  ждать три часа незачем. Только если очередь не разбирают без потребителей: кто забирает
+  сообщения опросом (basic.get) или подключается на минуту раз в час, держит потребителей нулем
+  почти все время. Такую очередь видно: она убывает, когда потребителей нет (zc), и неделю после
+  этого их отсутствие у нее не судим;
 - или стоит (queues-setup 0.4 присылает, когда стала готовой самая старая задача, oldest): самая
   старая ждет дольше AGE_S, и ее никто не взял за STALL_S - очередь, в которую больше не пишут,
   не растет, и правила роста ее не видят.
 И во всех случаях в очереди сейчас не меньше MIN_DEPTH сообщений: шестнадцать писем, которые
 воркер забирает пачкой раз в несколько часов, будили человека и через две минуты давали отбой.
+Условие должно продержаться HOLD_S, только потом алерт ("bad" - с какого момента оно выполняется):
+перезапуск воркера, выкладка, наплыв на десять минут давали отбой в ту же минуту или через
+несколько минут после алерта, и реагировать было не на что.
 Об очереди, по которой алерт уже ушел, отбой - когда в ней меньше половины MIN_DEPTH (и рост меньше
-половины GROW_MIN): глубина, которая ходит около сотни, не должна слать алерт и отбой по очереди.
+половины GROW_MIN, глубина меньше половины порога по обычному уровню): глубина, которая ходит около
+сотни, не должна слать алерт и отбой по очереди.
 Очереди мертвых писем (dlq, dead, failed) и служебные очереди Celery и RabbitMQ (pidbox, celeryev,
 amq.*) не судим: первые копятся по замыслу, вторые живут сами по себе.
 
@@ -31,10 +42,14 @@ amq.*) не судим: первые копятся по замыслу, вто�
 Oban, River, pg-boss, Hangfire - брокер на таблицу, ключ "на хосте, Yii, база app" (и таблица, если
 она названа не так, как у системы по умолчанию). Заглушить очередь можно насовсем (alert_mutes
 "qstuck:<ключ>") или на время (alert_snoozes с тем же ключом): и алерт хода, и порог глубины. Состояние - в
-alert_state["qwatch"]: {ключ очереди: {"t0", "d0", "p", "nd", "last", "seen", "oc", "ocs"}}, ключ как у
-порога (collector.queue_key); oc - когда стала готовой самая старая задача, ocs - с какого отчета она
-та же. Ведет цикл алертов, пока нода на связи; провал в отчетах дольше GAP_S начинает ход заново: что
-было с очередью, пока нода молчала, неизвестно.
+alert_state["qwatch"]: {ключ очереди: {"t0", "d0", "p", "nd", "last", "seen", "oc", "ocs", "c", "z0", "zd",
+"zc", "dm", "bad"}}, ключ как у порога (collector.queue_key); oc - когда стала готовой самая
+старая задача, ocs - с какого отчета она та же; c - потребителей в прошлом отчете, z0 и zd - с какого
+момента их нет и сколько тогда было в очереди, zc - когда очередь последний раз убыла без
+потребителей, dm - пик разобранных ходов по суткам {номер суток UTC: глубина}. Ведет цикл алертов,
+пока нода на связи; провал в отчетах дольше GAP_S начинает ход заново: что было с очередью, пока нода
+молчала, неизвестно. Очередь, которой нет в отчете дольше KEEP_S, забываем, а ее обычный уровень и
+разбор без потребителей помним неделю.
 
 Упавшие задачи (queues-setup 0.4, раз в 5 минут): у брокера "failed" - сколько упало за час (h1) и
 сутки (d1), за какое окно известно (span: у Laravel и Symfony счет по id строк, история копится с
@@ -56,6 +71,10 @@ STUCK_S = 1800  # растет полчаса
 GROW_MIN = 100  # и выросла хотя бы на сотню
 SLOW_S = 3 * 3600  # или три часа не убыла ни на одно сообщение
 SLOW_GROW = 5
+HOLD_S = 600  # условие держится 10 минут - тогда алерт: отбой через пару минут после алерта не нужен
+PULL_KEEP = 7 * 86400  # убывала без потребителей - неделю их отсутствие у этой очереди не судим
+BASE_DAYS = 7  # обычный уровень - по суточным пикам за неделю
+BASE_X = 2  # и растущая очередь должна быть хотя бы вдвое выше него
 AGE_S = 3600  # или самая старая задача ждет час
 STALL_S = 1800  # и ее не взяли за полчаса
 MIN_DEPTH = 100  # и в очереди не меньше сотни: о десятке сообщений не алертим
@@ -231,44 +250,109 @@ def muted_keys(s: Server, now: datetime) -> set[str]:
     return _muted(s, now, MUTE_PREFIX)
 
 
-def step(e: dict | None, d: int, ts: int, oldest: int | None = None) -> dict:
-    """Следующее состояние хода очереди по новой глубине и самой старой задаче"""
-    if (not isinstance(e, dict) or ts - int(e.get("seen") or 0) > GAP_S
-            or d < int(e.get("p") or 0) - max(DIP_ABS, DIP_REL * int(e.get("p") or 0))):
+def step(e: dict | None, d: int, ts: int, oldest: int | None = None, consumers: int | None = None) -> dict:
+    """Следующее состояние хода очереди по новой глубине, самой старой задаче и потребителям"""
+    gap = not isinstance(e, dict) or ts - int(e.get("seen") or 0) > GAP_S
+    dip = not gap and d < int(e.get("p") or 0) - max(DIP_ABS, DIP_REL * int(e.get("p") or 0))
+    if gap or dip:
         out = {"t0": ts, "d0": d, "p": d, "nd": True, "last": d, "seen": ts}
-        prev = e if isinstance(e, dict) and ts - int(e.get("seen") or 0) <= GAP_S else {}
+        prev = {} if gap else e
+        if prev.get("bad"):
+            out["bad"] = prev["bad"]
     else:
         last = int(e.get("last") or 0)
         out = {**e, "p": max(int(e.get("p") or 0), d), "nd": bool(e.get("nd")) and d >= last, "last": d, "seen": ts}
         prev = e
-    out.pop("oc", None)
-    out.pop("ocs", None)
+    old = e if isinstance(e, dict) else {}
+    for k in ("oc", "ocs", "c", "z0", "zd"):
+        out.pop(k, None)
     if oldest:
         # та же самая старая задача (ее время то же) - ее не взяли; другая - очередь движется
         same = prev.get("oc") == oldest and prev.get("ocs")
         out["oc"], out["ocs"] = oldest, int(prev["ocs"]) if same else ts
+    # пики разобранных ходов по суткам (обычный уровень) и когда убывала без потребителей помним и
+    # через провал в отчетах: это не про текущий ход
+    day = ts // 86400
+    dm = {str(k): int(v) for k, v in (old.get("dm") or {}).items() if str(k).isdigit() and int(k) >= day - BASE_DAYS}
+    if dip:
+        dm[str(day)] = max(dm.get(str(day), 0), int(e.get("p") or 0))
+    if dm:
+        out["dm"] = dm
+    else:
+        out.pop("dm", None)
+    zc = int(old.get("zc") or 0)
+    if consumers is not None:
+        out["c"] = consumers
+    if consumers == 0:
+        if prev.get("c") == 0 and d < int(prev.get("last") or 0):
+            zc = ts  # потребителей не было и нет, а очередь убыла: разбирают без них
+        if prev.get("c") == 0 and prev.get("z0"):
+            out["z0"], out["zd"] = int(prev["z0"]), int(prev.get("zd") or 0)
+        else:
+            out["z0"], out["zd"] = ts, d
+    if zc and ts - zc <= PULL_KEEP:
+        out["zc"] = zc
+    else:
+        out.pop("zc", None)
     return out
 
 
-def update(state: dict | None, rep: dict, now: datetime) -> dict:
+def update(state: dict | None, rep: dict, now: datetime, held: set[str] | None = None) -> dict:
+    """Ход всех очередей ноды по отчету. held - по каким очередям алерт уже ушел (queue_stuck_sig):
+    у них отбой с гистерезисом, и "bad" (с какого момента выполняется условие алерта) - по нему же"""
     ts = int(now.timestamp())
-    st = {k: v for k, v in (state or {}).items() if isinstance(v, dict) and ts - int(v.get("seen") or 0) <= KEEP_S}
+    held = held or set()
+    st = {k: v for k, v in (state or {}).items() if isinstance(v, dict) and ts - int(v.get("seen") or 0)
+          <= (BASE_DAYS * 86400 if v.get("dm") or v.get("zc") else KEEP_S)}
     for q in queues(rep):
-        st[q["key"]] = step(st.get(q["key"]), q["depth"], ts, q["oldest"])
+        e = step(st.get(q["key"]), q["depth"], ts, q["oldest"], q["consumers"])
+        h = q["key"] in held
+        if why(e, q["depth"], ts, q["consumers"], h)[0] or stalled(e, q["depth"], ts, h):
+            e["bad"] = int(e.get("bad") or ts)
+        else:
+            e.pop("bad", None)
+        st[q["key"]] = e
     return st
 
 
-def stuck(e: dict | None, d: int, ts: int, consumers: int | None = None, held: bool = False) -> int:
-    """Сколько секунд очередь растет и не разбирается (0 - разбирается). held - алерт по ней уже ушел:
-    отбой, когда в ней меньше половины MIN_DEPTH или рост от начала хода меньше половины GROW_MIN"""
+def usual(e: dict | None, ts: int) -> int | None:
+    """Обычный уровень очереди: медиана суточных пиков разобранных ходов за неделю. None - ни одного
+    разобранного хода не видели, обычного не знаем"""
+    if not isinstance(e, dict):
+        return None
+    vals = sorted(int(v) for k, v in (e.get("dm") or {}).items()
+                  if str(k).isdigit() and int(k) >= ts // 86400 - BASE_DAYS)
+    return vals[len(vals) // 2] if vals else None
+
+
+def pull(e: dict | None, ts: int) -> bool:
+    """Очередь разбирают без потребителей (опросом или наездами): за неделю убывала, когда их не было"""
+    return isinstance(e, dict) and bool(e.get("zc")) and ts - int(e["zc"]) <= PULL_KEEP
+
+
+def why(e: dict | None, d: int, ts: int, consumers: int | None = None, held: bool = False) -> tuple[str, int]:
+    """Почему очередь не разбирается и сколько секунд: ("nocons", сколько нет потребителей), ("slow",
+    сколько не отдает ни одного), ("grow", сколько растет) или ("", 0). held - алерт по ней уже ушел:
+    отбой, когда в ней меньше половины MIN_DEPTH, рост от начала хода меньше половины GROW_MIN или
+    глубина меньше половины порога по обычному уровню"""
     if not isinstance(e, dict) or ts - int(e.get("seen") or 0) > GAP_S or d < (MIN_DEPTH // 2 if held else MIN_DEPTH):
-        return 0
+        return "", 0
+    if consumers == 0 and e.get("z0") and not pull(e, ts) and d - int(e.get("zd") or 0) >= SLOW_GROW:
+        return "nocons", ts - int(e["z0"])
     age, grow = ts - int(e.get("t0") or ts), d - int(e.get("d0") or 0)
+    if age >= SLOW_S and e.get("nd") and grow >= SLOW_GROW:
+        return "slow", age
+    base = usual(e, ts)
+    if base is not None and d < BASE_X * base / (2 if held else 1):
+        return "", 0  # наплыв в пределах обычного для этой очереди: разберут
     if age >= STUCK_S and grow >= (GROW_MIN // 2 if held else GROW_MIN):
-        return age
-    if grow >= SLOW_GROW and e.get("nd") and (age >= SLOW_S or (consumers == 0 and age >= STUCK_S)):
-        return age
-    return 0
+        return "grow", age
+    return "", 0
+
+
+def stuck(e: dict | None, d: int, ts: int, consumers: int | None = None, held: bool = False) -> int:
+    """Сколько секунд очередь не разбирается (0 - разбирается), см. why"""
+    return why(e, d, ts, consumers, held)[1]
 
 
 def stalled(e: dict | None, d: int, ts: int, held: bool = False) -> int:
@@ -311,44 +395,56 @@ def _stuck_all(s: Server, now: datetime) -> list[dict]:
             continue
         e = st.get(q["key"])
         h = q["key"] in held
-        age = stuck(e, q["depth"], ts, q["consumers"], h)
+        kind, age = why(e, q["depth"], ts, q["consumers"], h)
         wait = stalled(e, q["depth"], ts, h)
         if not age and not wait:
             continue
-        d0 = int(e.get("d0") or 0)
+        if not h and ts - int(e.get("bad") or ts) < HOLD_S:
+            continue  # еще не продержалось: перезапуск воркера или наплыв проходят за минуты
         where = f" ({q['source']})" if q["source"] else ""
         old = ts - q["oldest"] if q["oldest"] and ts > q["oldest"] else 0
+        d0 = int(e.get("zd") or 0) if kind == "nocons" else int(e.get("d0") or 0)
+        base = usual(e, ts)
         if age:
-            why = "нет ни одного потребителя" if q["consumers"] == 0 else "не разбирается"
-            text = (f"очередь {q['name']}{where} растет {_dur(age)} и {why}: "
-                    f"{_n(d0)} -> {_n(q['depth'])} сообщений"
-                    + (f", самая старая задача ждет {_dur(old)}" if old >= AGE_S else ""))
+            moved = f"{_n(d0)} -> {_n(q['depth'])} сообщений"
+            if kind == "nocons":
+                text = f"очередь {q['name']}{where} без потребителей {_dur(age)}, сообщения копятся: {moved}"
+            elif kind == "slow":
+                text = f"очередь {q['name']}{where} {_dur(age)} не отдает ни одного сообщения: {moved}"
+            else:
+                text = f"очередь {q['name']}{where} растет {_dur(age)} и не разбирается: {moved}"
+            if base is not None and kind != "nocons":
+                text += f", обычно до {_n(base)}"
+            if old >= AGE_S:
+                text += f", самая старая задача ждет {_dur(old)}"
             since = ts - age
         else:
+            kind = "stall"
             text = (f"очередь {q['name']}{where} стоит: самая старая задача ждет {_dur(wait)}, "
                     f"в очереди {_n(q['depth'])}")
             since = int(e.get("ocs") or ts)
         out.append({"key": q["key"], "name": q["name"], "source": q["source"], "age": age or ts - since, "d0": d0,
-                    "depth": q["depth"], "consumers": q["consumers"], "wait": old, "stall": not age, "level": 2,
-                    "text": text, "since": datetime.fromtimestamp(since, timezone.utc).isoformat()})
+                    "depth": q["depth"], "consumers": q["consumers"], "wait": old, "stall": not age, "why": kind,
+                    "base": base, "level": 2, "text": text,
+                    "since": datetime.fromtimestamp(since, timezone.utc).isoformat()})
     out.sort(key=lambda x: -x["age"])
     return out
 
 
 def problems(s: Server, now: datetime) -> list[dict]:
-    """Очереди, которые растут и не разбираются или стоят: {"key", "name", "source", "age", "d0",
-    "depth", "consumers", "wait", "stall", "level", "text", "since"}, без заглушенных. Без потребителей
-    (агент 2.38) - так и сказано."""
+    """Очереди, которые не разбираются или стоят: {"key", "name", "source", "age", "d0", "depth",
+    "consumers", "wait", "stall", "why" ("nocons", "slow", "grow", "stall"), "base" (обычный уровень или
+    None), "level", "text", "since"}, без заглушенных"""
     muted = muted_keys(s, now)
     return [x for x in _stuck_all(s, now) if x["key"] not in muted]
 
 
 def view(s: Server, now: datetime) -> dict[str, dict]:
-    """Для строк очередей в карточке: {ключ: {"age", "d0", "muted", "stall", "wait"}} у тех, что растут
-    и не разбираются или стоят"""
+    """Для строк очередей в карточке: {ключ: {"age", "d0", "muted", "stall", "wait", "why"}} у тех, что
+    не разбираются или стоят (те же, что в алерте: после выдержки)"""
     muted = muted_keys(s, now)
     return {x["key"]: {"age": x["age"], "d0": x["d0"], "muted": x["key"] in muted, "stall": x["stall"],
-                       "wait": x["wait"]} for x in _stuck_all(s, now)}
+                       "wait": x["wait"], "why": x["why"]} for x in _stuck_all(s, now)}
 
 
 def mute_view(s: Server, now: datetime, prefix: str = MUTE_PREFIX) -> dict[str, dict]:
@@ -486,22 +582,40 @@ def _src_in(source: str) -> str:
 
 def tg_short(qs: list[dict]) -> tuple[str, list[str]] | None:
     """Короткий алерт "очередь не разбирается" (queue_stuck) по problems(): что - про первую (дольше
-    всех), остальные очереди именами"""
+    всех), строка - сколько в очереди и как давно, вторая - скорость, обычный уровень и потребители,
+    а если очередей несколько - остальные именами"""
     if not qs:
         return None
     q = qs[0]
     where, n = _src_in(q.get("source") or ""), tg_fmt.count(q.get("depth") or 0)
-    if q.get("stall"):
+    age = int(q.get("age") or 0)
+    kind = q.get("why") or ("stall" if q.get("stall") else "nocons" if q.get("consumers") == 0 else "grow")
+    if kind == "stall":
         what = f"Очередь {q['name']} стоит"
-        fact = f"задача ждет {tg_fmt.dur(q.get('wait') or q.get('age') or 0)}, {n} {where}"
+        facts = [f"задача ждет {tg_fmt.dur(q.get('wait') or age)}, {n} {where}"]
     else:
         what = f"Очередь {q['name']} не разбирается"
-        head = "нет потребителей" if q.get("consumers") == 0 else f"растет {tg_fmt.dur(q.get('age') or 0)}"
-        fact = f"{head}, {n} {where}"
-    facts = [fact]
+        if kind == "nocons":
+            head = f"нет потребителей {tg_fmt.dur(age)}"
+        elif kind == "slow":
+            head = f"{tg_fmt.dur(age)} не отдает ни одного"
+        else:
+            head = f"растет {tg_fmt.dur(age)}"
+        facts = [f"{head}, {n} {where}"]
+        more = []
+        rate = (int(q.get("depth") or 0) - int(q.get("d0") or 0)) * 60 / age if age > 0 else 0
+        if rate >= 1:
+            more.append(f"+{tg_fmt.count(rate)} в мин")
+        if q.get("base") is not None and kind != "nocons":
+            more.append(f"обычно до {tg_fmt.count(q['base'])}")
+        if q.get("consumers"):
+            more.append(f"потребителей {q['consumers']}")
+        if more:
+            facts.append(", ".join(more))
     rest = [x["name"] for x in qs[1:] if x["name"] != q["name"]]
     if rest:
-        facts.append(tg_fmt.fact("Еще", tg_fmt.names(rest)))
+        # строк конкретики не больше двух: другие очереди важнее скорости первой
+        facts = [facts[0], tg_fmt.fact("Еще", tg_fmt.names(rest))]
     return what, facts
 
 

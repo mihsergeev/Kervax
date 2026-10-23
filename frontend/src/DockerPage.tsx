@@ -4,6 +4,7 @@ import {
   ApiError,
   dockerCommand,
   dockerCommandStatus,
+  logsTargetGone,
   listServers,
   updateServer,
   type DockerCommand,
@@ -196,7 +197,7 @@ function SockWarning({ items }: { items: Exposed[] }) {
           <div key={i.name} className="sock-fix">
             <div className="small">{t('Готовый compose для {name} собран из {file}, что меняется:', { name: i.name, file: fx.file ?? '' })}</div>
             <SockDiff diff={fx.diff ?? ''} />
-            <FixSteps badges steps={[
+            <FixSteps steps={[
               { id: 'apply', cmd: fx.apply },
               { id: 'check', cmd: fx.check },
               { id: 'rollback', cmd: fx.rollback, undo: true },
@@ -216,7 +217,7 @@ function SockWarning({ items }: { items: Exposed[] }) {
                 })
               : t('Готовый файл соберет helper sockfix-setup, пока руками.')}
           </div>
-          <FixSteps badges steps={[
+          <FixSteps steps={[
             { id: 'rm' },
             { id: 'add', cmd: SOCK_FIX[i.kind] ? snippet(i) : undefined },
             { id: 'up' },
@@ -339,7 +340,7 @@ function ProxyOldWarning({ server: s, items, canAct, onChanged }: { server: Serv
               )}
             </div>
             {steps.length > 0 && (
-              <FixSteps badges steps={steps.map((st) => ({ ...st, undo: st.id.startsWith('rollback') }))}
+              <FixSteps steps={steps.map((st) => ({ ...st, undo: st.id.startsWith('rollback') }))}
                 text={(st) => upgradeText(st, p, codes, t)} />
             )}
             {(hints.length > 0 || why || p.kind === 'caddy') && (
@@ -455,7 +456,7 @@ function RiskWarning({ server: s, canAct, onChanged }: { server: Server; canAct:
           {blocks.map((b) => (
             <div key={b.key} className="sock-fix">
               <div className="small">{t('Как исправить: {names}', { names: b.names.join(', ') })}</div>
-              <FixSteps badges steps={b.steps} text={(st) => riskFixText(st, b.args, t)} />
+              <FixSteps steps={b.steps} text={(st) => riskFixText(st, b.args, t)} />
               {(b.args.flags ?? '').split(',').some((f) => f === 'priv' || f === 'sock') && (
                 <details className="fix-more">
                   <summary>{t('подробнее')}</summary>
@@ -525,7 +526,7 @@ function NoBootWarning({ server: s, canAct, onChanged }: { server: Server; canAc
               </div>
             ))}
           </div>
-          <FixSteps badges steps={[{ id: 'update', cmd }, { id: 'compose' }]}
+          <FixSteps steps={[{ id: 'update', cmd }, { id: 'compose' }]}
             text={(st) => st.id === 'update' ? t('Поставить restart unless-stopped')
               : t('Если контейнер из compose, то же в файле (restart: unless-stopped), иначе следующий up вернет как было')} />
         </>
@@ -549,7 +550,6 @@ function NoBootWarning({ server: s, canAct, onChanged }: { server: Server; canAc
 // readonly: доступ есть, но действие получило 403 - на ноде прокси только для чтения
 function EnableBlock({ readonly = false }: { readonly?: boolean }) {
   const { t } = useI18n()
-  const [copied, setCopied] = useState(false)
   return (
     <div className="chart-card net-card net-card-wide">
       <div className="net-head">
@@ -557,22 +557,14 @@ function EnableBlock({ readonly = false }: { readonly?: boolean }) {
       </div>
       <div className={readonly ? 'net-prob' : 'net-note'}>
         {readonly
-          ? t('Прокси docker-сокета на этой ноде пускает только чтение, поэтому перезапуск, стоп и старт дают 403. Замените его этой командой: просмотр плюс перезапуск, стоп и старт, без exec, создания контейнеров и образов, слушает только 127.0.0.1 хоста.')
-          : t('Docker установлен (версии видны). Список контейнеров скрыт — включите read-only доступ (docker-socket-proxy: только просмотр + restart, без exec/root). Новым нодам — флаг --docker при установке.')}
+          ? t('Прокси docker-сокета пускает только чтение: перезапуск, стоп и старт дают 403')
+          : t('Docker есть, но список контейнеров агенту не виден')}
       </div>
-      <div className="agent-advice-cmd">
-        <pre>{DOCKER_ENABLE_CMD}</pre>
-        <button
-          className="ghost"
-          onClick={() => {
-            navigator.clipboard?.writeText(DOCKER_ENABLE_CMD)
-            setCopied(true)
-            window.setTimeout(() => setCopied(false), 1500)
-          }}
-        >
-          {copied ? t('Скопировано') : t('Копировать')}
-        </button>
-      </div>
+      <FixSteps steps={[{ id: 'enable', cmd: DOCKER_ENABLE_CMD }]}
+        text={() => readonly ? t('Заменить прокси на прокси с перезапуском') : t('Включить доступ на чтение')}
+        foot={readonly
+          ? t('Просмотр плюс перезапуск, стоп и старт, без exec, создания контейнеров и образов. Слушает только 127.0.0.1 хоста.')
+          : t('docker-socket-proxy: просмотр и перезапуск, без exec и root. Новым нодам - флаг --docker при установке.')} />
     </div>
   )
 }
@@ -714,12 +706,19 @@ function LogsModal({
   server,
   container,
   onClose,
+  onGone,
 }: {
   server: Server
   container: string
   onClose: () => void
+  onGone?: () => void // контейнера уже нет (пересоздан): обновить список
 }) {
   const { t } = useI18n()
+  // через ref: onChanged родителя меняется на каждом его обновлении и перезапускал бы логи
+  const gone = useRef(onGone)
+  useEffect(() => {
+    gone.current = onGone
+  }, [onGone])
   const [logs, setLogs] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const [err, setErr] = useState<string | null>(null)
@@ -733,7 +732,11 @@ function LogsModal({
       try {
         const res = await runAndWait(server.id, container, 'logs', opts)
         if (res.status === 'done') setLogs(res.result ?? '')
-        else setErr(res.result || t('не удалось получить логи'))
+        else if (logsTargetGone(res)) {
+          // нажали в списке, загруженном до пересоздания контейнера: это не сбой, список устарел
+          setErr(t('Контейнер уже пересоздан или удален, список обновлен'))
+          gone.current?.()
+        } else setErr(res.result || t('не удалось получить логи'))
       } catch {
         setErr(t('ошибка'))
       } finally {
@@ -1229,7 +1232,7 @@ function DockerHostModal({
           </div>
         )}
       </div>
-      {logs && <LogsModal server={s} container={logs} onClose={() => setLogs(null)} />}
+      {logs && <LogsModal server={s} container={logs} onClose={() => setLogs(null)} onGone={onChanged} />}
     </div>,
     document.body,
   )

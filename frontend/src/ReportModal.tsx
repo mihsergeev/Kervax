@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { ApiError, getReport, type Report, type ReportNoise } from './api'
+import { useAuth } from './auth'
 import { useBranding } from './BrandLogo'
 import { CardNav, type SecDef } from './cardLayout'
 import { useI18n } from './i18n'
@@ -105,6 +106,7 @@ function DayBars({ labels, series, fmt, t }: { labels: string[]; series: Series[
 
 export function ReportModal({ onClose, onUnauthorized, onOpen }: Props) {
   const { t } = useI18n()
+  const { sections } = useAuth()
   const [branding] = useBranding()
   const [days, setDays] = useState(7)
   const [data, setData] = useState<Report | null>(null)
@@ -153,14 +155,17 @@ export function ReportModal({ onClose, onUnauthorized, onOpen }: Props) {
   // никто не пропадал - колонки недоступности пустые, не показываем их
   const anyOff = (servers?.items ?? []).some((s) => s.offline_s > 0)
 
+  // меню собирается из разделов учетки, а не из пришедших данных: пока отчет считается,
+  // раскладка уже окончательная, разделы показывают "считаем..." (раньше меню перестраивалось)
+  const can = (k: string) => !sections.length || sections.includes(k)
   const SECS: SecDef[] = [
     { id: 'over', label: 'Сводка', group: '' },
-    ...(sites ? [{ id: 'sites', label: 'Сайты', group: 'Что ломалось' }] : []),
-    ...(servers ? [{ id: 'servers', label: 'Серверы', group: 'Что ломалось' }] : []),
+    ...(can('sites') ? [{ id: 'sites', label: 'Сайты', group: 'Что ломалось' }] : []),
+    ...(can('servers') ? [{ id: 'servers', label: 'Серверы', group: 'Что ломалось' }] : []),
     { id: 'noise', label: 'Что шумело', group: 'Алерты' },
-    ...(backups.length ? [{ id: 'backups', label: 'Бэкапы', group: 'Алерты' }] : []),
+    { id: 'backups', label: 'Бэкапы', group: 'Алерты' },
     { id: 'maint', label: 'Окна обслуживания', group: 'Работы' },
-    ...(servers ? [{ id: 'inv', label: 'Инвентаризация', group: 'Парк' }] : []),
+    ...(can('servers') ? [{ id: 'inv', label: 'Инвентаризация', group: 'Парк' }] : []),
   ]
   const side: Record<string, string> = {}
   if (data) {
@@ -478,7 +483,12 @@ export function ReportModal({ onClose, onUnauthorized, onOpen }: Props) {
                   </>
                 )}
 
-                {cur.id === 'backups' && <NoiseTable items={backups} name={noiseName} />}
+                {cur.id === 'backups' &&
+                  (backups.length ? (
+                    <NoiseTable items={backups} name={noiseName} />
+                  ) : (
+                    <p className="muted small">{t('Алертов по бэкапам за период не было.')}</p>
+                  ))}
 
                 {cur.id === 'maint' &&
                   (data.maint.length === 0 ? (

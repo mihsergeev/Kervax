@@ -29,6 +29,7 @@ import { offLines, rotationLines } from './BsrvCleanup'
 import { MaintChip, MaintHome } from './MaintModal'
 import { useI18n } from './i18n'
 import { expiryText, registrableDomain } from './checkUtils'
+import { ExpirySnoozePick, ExpirySnoozeState, expEntry, expHidden, expSnoozeTip } from './ExpirySnooze'
 import { useAuth } from './auth'
 import { IconBackups, IconDocker, IconKube, IconServers, IconSites } from './icons'
 import { CountryFlag } from './CountryFlag'
@@ -652,18 +653,21 @@ type Props = {
   onUnauthorized: () => void
 }
 
-// more — сколько ЕЩЁ мониторов висит на том же истекающем имени
+// more — сколько ЕЩЁ мониторов висит на том же истекающем имени; check - монитор, в который
+// ведет строка (у домена - с наименьшим сроком), через него откладывают
 type Warn = {
   id: number
   name: string
   kind: 'ssl' | 'domain'
   days: number
   more?: number
+  check: Check
 }
 
 const maxWarn = (w: number[]) => (w.length ? Math.max(...w) : 0)
 
-function expiryWarnings(checks: Check[]): Warn[] {
+// hidden: отложенные и "не следим" (ExpirySnooze.tsx) - не на главной, строкой внизу блока
+function expiryWarnings(checks: Check[], hidden = false): Warn[] {
   const out: Warn[] = []
   // Домен продлевают ЦЕЛИКОМ, поэтому истекает он один, а мониторов на его
   // поддоменах может быть сколько угодно: пять строк «gitlab/y/bot/msg/env
@@ -672,10 +676,13 @@ function expiryWarnings(checks: Check[]): Warn[] {
   // Сертификаты так не сворачиваем: у каждого хоста он обычно свой, и wildcard
   // от отдельных по данным монитора не отличить.
   const byDomain = new Map<string, Warn>()
+  // отложенные - вместе со сроком, когда отложили, даже если он уже за порогами монитора
+  const inWarn = (c: Check, kind: 'ssl' | 'domain', days: number, warn: number[]) =>
+    expHidden(c, kind) === hidden && (days <= maxWarn(warn) || (hidden && !!expEntry(c, kind)))
   for (const c of checks) {
-    if (c.check_ssl && c.ssl_days != null && c.ssl_days <= maxWarn(c.ssl_warn_days))
-      out.push({ id: c.id, name: c.name, kind: 'ssl', days: c.ssl_days })
-    if (c.check_domain && c.domain_days != null && c.domain_days <= maxWarn(c.domain_warn_days)) {
+    if (c.check_ssl && c.ssl_days != null && inWarn(c, 'ssl', c.ssl_days, c.ssl_warn_days))
+      out.push({ id: c.id, name: c.name, kind: 'ssl', days: c.ssl_days, check: c })
+    if (c.check_domain && c.domain_days != null && inWarn(c, 'domain', c.domain_days, c.domain_warn_days)) {
       const zone = registrableDomain(c.target || c.name)
       const seen = byDomain.get(zone)
       if (seen) {
@@ -684,10 +691,11 @@ function expiryWarnings(checks: Check[]): Warn[] {
         if (c.domain_days < seen.days) {
           seen.days = c.domain_days
           seen.id = c.id
+          seen.check = c
         }
         continue
       }
-      const w: Warn = { id: c.id, name: zone, kind: 'domain', days: c.domain_days }
+      const w: Warn = { id: c.id, name: zone, kind: 'domain', days: c.domain_days, check: c }
       byDomain.set(zone, w)
       out.push(w)
     }
@@ -802,6 +810,9 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
   // 🔕 с выбором срока: на час, день, неделю (снуз) или постоянно. Ключи без снуза (рост памяти,
   // перезапуски, пропавший порт - их бэкенд читает только из alert_mutes) глушатся сразу постоянно
   const [mutePick, setMutePick] = useState<string | null>(null)
+  // сроки сайтов: у какой строки открыт выбор "напомнить за", раскрыта ли строка отложенных
+  const [warnPick, setWarnPick] = useState<string | null>(null)
+  const [warnOffOpen, setWarnOffOpen] = useState(false)
   const oomMuteText = (k: string) =>
     k.startsWith(OOM_MUTE) ? t('не алертить об OOM из-за {n}', { n: oomCulpritLabel(k.slice(OOM_MUTE.length), t, true) }) : null
   const muteFor = (id: number, key: string, hours: number) => {
@@ -817,6 +828,8 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
   }, [load])
 
   const warns = ov ? expiryWarnings(ov.checks) : []
+  // отложенные и "не следим": строкой внизу блока "Сайты", оттуда вернуть
+  const warnsOff = ov ? expiryWarnings(ov.checks, true) : []
   // Заголовок — про СЕЙЧАС: сколько мониторов лежит или деградирует. Открытые
   // инциденты сюда не подмешиваем: иначе при нуле проблем выходило красное
   // «Проблемы: 0». Счётчик инцидентов виден строкой ниже.
@@ -1274,6 +1287,42 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
     ? srvList.map((s) => ({ s, note: backupWindowNote(s) })).filter((x) => x.note)
     : []
   const siteRows = canSee('sites') ? downChecks.length + warns.length : 0
+  // строка срока сертификата/домена: 🔕 - напомнить за 7/1 дней или не следить (ExpirySnooze.tsx);
+  // off - отложенная, в раскрытой строке внизу блока, с "вернуть"
+  const warnRow = (w: Warn, off = false) => {
+    const key = `${w.kind}-${w.id}`
+    const e = expEntry(w.check, w.kind)
+    return (
+      <div key={key} role="button" tabIndex={0}
+        className={`home-attention-row${off ? ' home-attention-subrow home-attention-muted' : ''}`}
+        onClick={() => onOpen('sites', w.id, false, 'exp')}
+        onKeyDown={(ev) => ev.key === 'Enter' && ev.target === ev.currentTarget && onOpen('sites', w.id, false, 'exp')}>
+        <span className={`lk-dot ${off ? '' : w.days <= 3 ? 'lk-dot-bad' : 'lk-dot-warn'}`} />
+        <span className="home-attention-ico">{w.kind === 'ssl' ? '🔐' : '🌐'}</span>
+        <span className="home-attention-txt" title={off && e ? expSnoozeTip(e, t) : undefined}>
+          <b>{w.name}</b>
+          <span className="muted">
+            {' - '}
+            {w.kind === 'ssl' ? t('SSL') : t('домен')} · {expiryText(w.days, t)}
+            {w.more ? ` · ${t('мониторов: {n}', { n: w.more + 1 })}` : ''}
+          </span>
+        </span>
+        {off ? (
+          <ExpirySnoozeState check={w.check} kind={w.kind} canEdit={!isViewer} onDone={load} />
+        ) : !isViewer && warnPick === key ? (
+          <ExpirySnoozePick check={w.check} kind={w.kind} short onDone={load} onClose={() => setWarnPick(null)} />
+        ) : !isViewer && (
+          <span className="quick-mute" title={w.kind === 'domain'
+            ? t('Напомнить позже или не следить за доменом')
+            : t('Напомнить позже или не следить за сертификатом')}
+            onClick={(ev) => { ev.stopPropagation(); setWarnPick(key) }}>
+            🔕
+          </span>
+        )}
+        <span className="home-open">→</span>
+      </div>
+    )
+  }
   // шапка карточки блока: подпись и счетчик, тон счетчика - по самому тяжелому в блоке
   const cap = (title: string, n?: number, tone?: 'bad' | 'warn' | 'info') => (
     <div className="net-head">
@@ -1347,26 +1396,26 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
                 {t('…ещё {n}', { n: downChecks.length - HOME_LIST_LIMIT })}
               </button>
             )}
-            {warns.slice(0, HOME_LIST_LIMIT).map((w) => (
-              <button key={`${w.kind}-${w.id}`} className="home-attention-row" onClick={() => onOpen('sites', w.id)}>
-                <span className={`lk-dot ${w.days <= 3 ? 'lk-dot-bad' : 'lk-dot-warn'}`} />
-                <span className="home-attention-ico">{w.kind === 'ssl' ? '🔐' : '🌐'}</span>
-                <span className="home-attention-txt">
-                  <b>{w.name}</b>
-                  <span className="muted">
-                    {' - '}
-                    {w.kind === 'ssl' ? t('SSL') : t('домен')} · {expiryText(w.days, t)}
-                    {w.more ? ` · ${t('мониторов: {n}', { n: w.more + 1 })}` : ''}
-                  </span>
-                </span>
-                <span className="home-open">→</span>
-              </button>
-            ))}
+            {warns.slice(0, HOME_LIST_LIMIT).map((w) => warnRow(w))}
             {warns.length > HOME_LIST_LIMIT && (
               <button className="ghost small home-attention-more" onClick={() => onNavigate('sites')}>
                 {t('…ещё {n}', { n: warns.length - HOME_LIST_LIMIT })}
               </button>
             )}
+            {warnsOff.length > 0 && (
+              <div className="home-sel-foot">
+                <button className="linklike muted small" onClick={() => setWarnOffOpen(!warnOffOpen)}>
+                  {[
+                    warnsOff.some((w) => expEntry(w.check, w.kind)?.mode !== 0) &&
+                      t('отложено: {n}', { n: warnsOff.filter((w) => expEntry(w.check, w.kind)?.mode !== 0).length }),
+                    warnsOff.some((w) => expEntry(w.check, w.kind)?.mode === 0) &&
+                      t('не следим: {n}', { n: warnsOff.filter((w) => expEntry(w.check, w.kind)?.mode === 0).length }),
+                  ].filter(Boolean).join(', ')}
+                  , {warnOffOpen ? t('скрыть') : t('показать')}
+                </button>
+              </div>
+            )}
+            {warnOffOpen && warnsOff.map((w) => warnRow(w, true))}
           </div>
         </div>
       )}

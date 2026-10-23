@@ -1101,9 +1101,13 @@ function QueueList({ server, svc, busy, save, onChanged, onlyProblems }: {
                     <div className={`docker-c-img small${stuck.muted ? ' muted' : ' q-stuck'}`}>
                       {stuck.stall
                         ? t('стоит: самая старая задача ждет {a}', { a: qAge(stuck.wait ?? stuck.age, t) })
-                        : t('растет {a} и не разбирается, было {n}', { a: qAge(stuck.age, t), n: rpmText(stuck.d0) })}
+                        : stuck.why === 'nocons'
+                          ? t('нет потребителей {a}, было {n}', { a: qAge(stuck.age, t), n: rpmText(stuck.d0) })
+                          : stuck.why === 'slow'
+                            ? t('{a} не отдает ни одного, было {n}', { a: qAge(stuck.age, t), n: rpmText(stuck.d0) })
+                            : t('растет {a} и не разбирается, было {n}', { a: qAge(stuck.age, t), n: rpmText(stuck.d0) })}
                       {stuck.muted ? ` · ${t('заглушено')}` : ''}
-                      {x.consumers === 0 ? ` · ${t('нет потребителей')}` : ''}
+                      {x.consumers === 0 && stuck.why !== 'nocons' ? ` · ${t('нет потребителей')}` : ''}
                     </div>
                   )}
                   {((!stuck && x.consumers === 0 && d > 0) || (!stuck?.stall && x.oldest && x.ready > 0)) && (

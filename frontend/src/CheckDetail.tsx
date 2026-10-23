@@ -28,6 +28,7 @@ import {
 import { AddMonitor } from './AddMonitor'
 import { CheckWhere, phaseSeries } from './CheckPhases'
 import { SnoozeControl } from './SnoozeControl'
+import { ExpirySnoozePick, ExpirySnoozeState, expEntry, expHidden, type ExpKind } from './ExpirySnooze'
 import { StackedAreaChart } from './charts/StackedAreaChart'
 import { StatusBar, type BarStatus } from './charts/StatusBar'
 import { useI18n } from './i18n'
@@ -445,9 +446,12 @@ export function CheckDetail({ check, groups, initialSec, onClose, onSaved, onRun
       text: stText + (st !== 'up' && check.last_message ? ` · ${check.last_message}` : ''),
       since: st === 'up' ? check.flaky_since : openInc?.started_at,
     })
-  if (shown.exp && check.check_ssl && check.ssl_days != null && check.ssl_days <= maxWarn(check.ssl_warn_days))
+  // отложенные и "не следим" (ExpirySnooze.tsx) - не проблема, их состояние в разделе сроков
+  if (shown.exp && check.check_ssl && check.ssl_days != null && check.ssl_days <= maxWarn(check.ssl_warn_days) &&
+      !expHidden(check, 'ssl'))
     add('exp', { level: check.ssl_days <= 3 ? 2 : 1, text: `${t('SSL-сертификат')}: ${expiryText(check.ssl_days, t)}` })
-  if (shown.exp && check.check_domain && check.domain_days != null && check.domain_days <= maxWarn(check.domain_warn_days))
+  if (shown.exp && check.check_domain && check.domain_days != null && check.domain_days <= maxWarn(check.domain_warn_days) &&
+      !expHidden(check, 'domain'))
     add('exp', { level: check.domain_days <= 3 ? 2 : 1, text: `${t('Домен')}: ${expiryText(check.domain_days, t)}` })
 
   // признаки взлома: похоже на взлом - красным, один слабый - желтым, как строка на главной
@@ -552,6 +556,27 @@ export function CheckDetail({ check, groups, initialSec, onClose, onSaved, onRun
       )}
     </div>
   )
+  // срок на пороге алерта: напомнить за 7/1 дней или не следить; отложенный - кто, когда и "вернуть"
+  const expSnoozeRow = (kind: ExpKind) => {
+    const days = kind === 'ssl' ? check.ssl_days : check.domain_days
+    const warn = kind === 'ssl' ? check.ssl_warn_days : check.domain_warn_days
+    const e = expEntry(check, kind)
+    if (!e && (isViewer || days == null || days > maxWarn(warn))) return null
+    return (
+      <div className="kv-row">
+        <span className="kv-k muted small">
+          {e
+            ? kind === 'ssl' ? t('Сертификат отложен') : t('Домен отложен')
+            : kind === 'ssl' ? t('Отложить сертификат') : t('Отложить домен')}
+        </span>
+        <span className="kv-v small">
+          {e
+            ? <ExpirySnoozeState check={check} kind={kind} canEdit={!isViewer} onDone={() => onSaved?.()} />
+            : <ExpirySnoozePick check={check} kind={kind} onDone={() => onSaved?.()} />}
+        </span>
+      </div>
+    )
+  }
 
   return (
     <>
@@ -929,6 +954,7 @@ export function CheckDetail({ check, groups, initialSec, onClose, onSaved, onRun
                       </span>
                     </div>
                   )}
+                  {check.check_ssl && expSnoozeRow('ssl')}
                   {check.check_domain && (
                     <div className="kv-row">
                       <span className="kv-k muted small">{t('Домен')}</span>
@@ -937,6 +963,7 @@ export function CheckDetail({ check, groups, initialSec, onClose, onSaved, onRun
                       </span>
                     </div>
                   )}
+                  {check.check_domain && expSnoozeRow('domain')}
                   {check.expiry_checked_at && (
                     <div className="kv-row">
                       <span className="kv-k muted small">{t('проверено')}</span>

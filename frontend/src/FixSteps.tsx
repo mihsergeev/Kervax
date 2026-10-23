@@ -5,7 +5,6 @@ import { useI18n } from './i18n'
 // бэкенд под ноду, тексты - у вызывающего по id шага (обновления ОС, версии ПО, SSH и доступы,
 // старый образ прокси, pg_stat_statements). alt - другой путь вместо шагов выше (черта "или"),
 // undo - откат, выполнять не по порядку, а только если что-то не так (черта "откат").
-// numbered - номера у шагов с командой по порядку; заметки без команды, откат и "или" без номера
 export type FixStep = { id: string; cmd?: string; alt?: boolean; undo?: boolean }
 
 // Команды сами говорят, вышло или нет: последняя строка вроде echo "образ заменен" || echo "НЕ
@@ -38,7 +37,7 @@ function cmdText(cmd: string, lang: string, t: (s: string) => string): string {
 }
 
 // Команда шага с кнопкой "Копировать": английская панель показывает и копирует фразы проверки
-// по-английски (cmdText). Шаги версий ПО рисуют ее сами, без рамки FixSteps
+// по-английски (cmdText)
 export function FixCmd({ cmd, onCopy, className = '' }: { cmd: string; onCopy?: () => void; className?: string }) {
   const { t, lang } = useI18n()
   const [copied, setCopied] = useState(false)
@@ -59,56 +58,50 @@ export function FixCmd({ cmd, onCopy, className = '' }: { cmd: string; onCopy?: 
   )
 }
 
-// badges - номер шага кружком, текст яркий, команда на своем фоне: шаги не сливаются с текстом
-// (карточка Docker). Номер у каждого шага по порядку, у отката и "или" нет
-export function FixSteps<S extends FixStep>({ steps, text, foot, numbered, badges, onCopy }: {
+// Длинный текст шага: первая фраза - что сделать (ярко), остальное - пояснение мелко под ней.
+// Режем по точке перед заглавной: так и в русском, и в английском тексте
+const SPLIT = /\.\s+(?=[A-ZА-ЯЁ])/
+function splitStep(s: string): [string, string] {
+  const m = SPLIT.exec(s)
+  return m ? [s.slice(0, m.index + 1), s.slice(m.index + m[0].length)] : [s, '']
+}
+
+// Вид один на всю панель: номер шага кружком, текст яркий и короткий, команда на своем фоне - шаги
+// не сливаются с текстом. Номер у каждого шага по порядку, у отката и "или" нет. note - пояснение к
+// шагу мелко под текстом: все, что не нужно, чтобы просто выполнить шаг. foot - мелкая строка внизу
+// (когда пункт уйдет сам, почему не страшно). tip - полный текст шага в подсказке при наведении
+export function FixSteps<S extends FixStep>({ steps, text, note, tip, foot, onCopy }: {
   steps: S[]
   text: (st: S) => string
+  note?: (st: S) => string | undefined
+  tip?: (st: S) => string | undefined
   foot?: string
-  numbered?: boolean
-  badges?: boolean
   // скопировали команду шага: вызывающий может ждать, что ее сейчас выполнят
   onCopy?: (st: S) => void
 }) {
   const { t } = useI18n()
   let n = 0
-  if (badges) return (
+  return (
     <div className="fix-b">
       {steps.map((st, i) => {
         const num = st.alt || st.undo ? 0 : ++n
+        const [head, rest] = splitStep(text(st))
+        const nt = [rest, note?.(st)].filter(Boolean).join(' ')
         return (
           <div key={st.id + i} className={`fix-b-step${num ? '' : ' fix-b-side'}`}>
             {num > 0 && <span className="fix-b-num">{num}</span>}
             <div className="fix-b-body">
-              <div className="fix-b-text">
+              <div className="fix-b-text" title={tip?.(st)}>
                 {!num && <span className="fix-b-tag">{t(st.alt ? 'или' : 'откат')}</span>}
-                {text(st)}
+                {head}
               </div>
+              {nt && <div className="fix-b-note">{nt}</div>}
               {st.cmd && <FixCmd cmd={st.cmd} onCopy={() => onCopy?.(st)} />}
             </div>
           </div>
         )
       })}
-      {foot && <div className="muted small">{foot}</div>}
-    </div>
-  )
-  return (
-    <div className="osupd-fix">
-      {steps.map((st, i) => {
-        const num = numbered && st.cmd && !st.alt && !st.undo ? ++n : 0
-        return (
-          <div key={st.id + i} className="osupd-step">
-            {st.alt && <div className="osupd-alt">{t('или')}</div>}
-            {st.undo && <div className="osupd-alt">{t('откат')}</div>}
-            <div className="muted small">
-              {num > 0 && <b className="osupd-num">{num}.</b>}
-              {text(st)}
-            </div>
-            {st.cmd && <FixCmd cmd={st.cmd} onCopy={() => onCopy?.(st)} />}
-          </div>
-        )
-      })}
-      {foot && <div className="muted small">{foot}</div>}
+      {foot && <div className="fix-b-foot">{foot}</div>}
     </div>
   )
 }

@@ -189,7 +189,7 @@ def disable_fix(a: dict, files: list[str], root_pass: bool, alone: bool) -> list
         steps.append({"id": "acc_keys", "arg": name, "cmd": hide})
         undo.append(back)
     if undo:
-        steps.append({"id": "acc_undo", "arg": name, "cmd": "\n".join(undo)})
+        steps.append({"id": "acc_undo", "undo": True, "arg": name, "cmd": "\n".join(undo)})
     if a["uid"] != 0:
         steps.append({"id": "acc_delete", "alt": True, "arg": name, "cmd": f"sudo userdel {name}"})
     return steps

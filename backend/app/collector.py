@@ -52,6 +52,7 @@ from app import liveness
 from app import disk_wear
 from app import disk_mute
 from app import kube_expiry as kube_expiry_mod
+from app import expiry_snooze
 from app import fill_alert
 from app import software as software_mod
 from app import tamper as tamper_mod
@@ -539,14 +540,18 @@ def _apply_expiry(row: Check, info, now: datetime, pending: list, doms: DomainAl
         row.domain_message = info.domain_message[:256]
     elif row.domain_days is None:
         row.domain_message = info.domain_message[:256]
+    # Отложенные сроки (app/expiry_snooze.py): продлили - отложка снята, дальше обычные пороги.
+    # Пока отложено, напоминание не уходит и порог не отмечается: на пороге отложки оно придет
+    expiry_snooze.sync(row)
 
     if row.check_ssl and info.ssl_days is not None:
-        thr = row.ssl_warn_days or []
+        thr = expiry_snooze.thresholds(row, "ssl", row.ssl_warn_days or [])
+        quiet = expiry_snooze.hidden(row, "ssl")
         if thr and info.ssl_days > max(thr):
             # Перевыпустили → сбрасываем эскалацию И сообщаем об этом. Раньше тут
             # была тишина: человек продлевал по нашему же алерту и не понимал,
             # увидела ли это панель. Закрытие темы стоит одного сообщения.
-            if row.ssl_alerted_days is not None:
+            if row.ssl_alerted_days is not None and not quiet:
                 pending.append((
                     "ssl", row.name, "",
                     f"SSL-сертификат перевыпущен, до истечения {info.ssl_days} дн.",
@@ -554,7 +559,7 @@ def _apply_expiry(row: Check, info, now: datetime, pending: list, doms: DomainAl
                 ))
             row.ssl_alerted_days = None
         bucket = _expiry_bucket(info.ssl_days, thr, row.ssl_alerted_days)
-        if bucket is not None:
+        if bucket is not None and not quiet:
             txt = _expiry_text("SSL-сертификат", info.ssl_days, "SSL-сертификат истёк")
             pending.append(
                 ("ssl", row.name, "", txt, None, row.id, ("ssl_alerted_days", bucket),
@@ -562,12 +567,13 @@ def _apply_expiry(row: Check, info, now: datetime, pending: list, doms: DomainAl
             )
 
     if row.check_domain and info.domain_days is not None:
-        thr = row.domain_warn_days or []
+        thr = expiry_snooze.thresholds(row, "domain", row.domain_warn_days or [])
+        quiet = expiry_snooze.hidden(row, "domain")
         dom = checks_exec._registrable_domain(row.target or row.name or "")
         n = doms.count(dom) if doms else 1
         more = f" (мониторов на нем: {n})" if n > 1 else ""
         if thr and info.domain_days > max(thr):
-            if row.domain_alerted_days is not None and (
+            if row.domain_alerted_days is not None and not quiet and (
                     doms is None or doms.first_renewed(dom, row.id, info.domain_days, max(thr))):
                 pending.append((
                     "domain", row.name, "",
@@ -578,7 +584,7 @@ def _apply_expiry(row: Check, info, now: datetime, pending: list, doms: DomainAl
                 doms.first_renewed(dom, row.id, info.domain_days, max(thr))
             row.domain_alerted_days = None
         bucket = _expiry_bucket(info.domain_days, thr, row.domain_alerted_days)
-        if bucket is not None:
+        if bucket is not None and not quiet:
             if doms is None or doms.should_alert(dom, row.id, bucket):
                 txt = _expiry_text(
                     f"регистрация домена {dom}", info.domain_days, f"регистрация домена {dom} истекла"
@@ -6139,8 +6145,8 @@ def _server_conditions(s: Server, now: datetime,
         out["access_risk"] = (max((lv for lv, _t in ar), default=0),
                               {"detail": "; ".join(t for _l, t in ar), "sig": sorted(t for _l, t in ar), "items": ar,
                                "parts": [(t, t) for _l, t in ar]})
-    # Очередь растет и не разбирается: полчаса роста уже в самом правиле, выдержка не нужна.
-    # sig - какие очереди, вторая застрявшая дает свой алерт
+    # Очередь не разбирается: выдержка своя у каждой очереди (queue_watch.HOLD_S, "bad" в ходе),
+    # общая не нужна. sig - какие очереди, вторая застрявшая дает свой алерт
     if online and isinstance((s.alert_state or {}).get("qwatch"), dict):
         qs = queue_watch.problems(s, now)
         out["queue_stuck"] = (max((x["level"] for x in qs), default=0),
@@ -7094,7 +7100,8 @@ async def evaluate_servers(
                 apply(s.id, "mem_trend", mstate)
             # ход очередей: растет и не разбирается (queue_watch)
             if queue_watch.queues(s.last_report or {}) or st.get("qwatch"):
-                qw = queue_watch.update(st.get("qwatch"), s.last_report or {}, now)
+                qw = queue_watch.update(st.get("qwatch"), s.last_report or {}, now,
+                                        {str(k) for k in st.get("queue_stuck_sig") or []})
                 if qw != (st.get("qwatch") or {}):
                     apply(s.id, "qwatch", qw)
             # обычные задержки LLM-сервисов: от них алерт "задержки выросли в разы" (gpu.base_update)

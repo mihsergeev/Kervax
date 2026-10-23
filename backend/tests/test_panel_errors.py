@@ -264,16 +264,89 @@ async def test_journal_is_admin_only_but_anyone_can_report(client, auth_headers)
     await pe.drain()
 
     j =(await client.get("/api/panel-errors", headers=auth_headers)).json()
-    # отказ наблюдателю на изменение тоже в журнале: значит, интерфейс показал ему лишнюю кнопку
-    assert {x["kind"] for x in j["items"]} == {"report", "front", "api"}
-    assert j["counts"]["open"] == 3 and j["counts"]["by_kind"]["report"] == 1
-    assert (await client.get("/api/panel-errors/count", headers=auth_headers)).json() == {"open": 3, "reports": 1}
+    # отказ наблюдателю на изменение - ожидаемый, его в журнале нет (фронт такие запросы и не шлет)
+    assert {x["kind"] for x in j["items"]} == {"report", "front"}
+    assert j["counts"]["open"] == 2 and j["counts"]["by_kind"]["report"] == 1
+    assert (await client.get("/api/panel-errors/count", headers=auth_headers)).json() == {"open": 2, "reports": 1}
     ids = [x["id"] for x in j["items"]]
     r = await client.post("/api/panel-errors/resolve", headers=auth_headers, json={"ids": ids})
-    assert r.json()["changed"] == 3
+    assert r.json()["changed"] == 2
     assert (await client.get("/api/panel-errors", headers=auth_headers)).json()["items"] == []
     res = (await client.get("/api/panel-errors?state=resolved&q=открывается", headers=auth_headers)).json()["items"]
     assert len(res) == 1 and res[0]["resolved_by"] == "admin"
+
+
+async def test_viewer_refusal_is_expected_and_plain_text(client, auth_headers):
+    vh = await _viewer(client, auth_headers)
+    r = await client.post("/api/servers", json={"name": "app-02"}, headers=auth_headers)
+    sid = r.json()["server"]["id"]
+    r = await client.post(f"/api/servers/{sid}/docker/command", headers=vh, json={"container": "web", "action": "restart"})
+    assert r.status_code == 403
+    assert r.json()["detail"] == "Учетная запись только для просмотра: изменения запрещены"
+    # тот же отказ у любого изменения: кнопки у наблюдателя спрятаны, это не сбой панели
+    assert (await client.delete(f"/api/servers/{sid}", headers=vh)).status_code == 403
+    assert await _rows(client) == []
+    # а отказ с другим текстом или кодом - по-прежнему сбой
+    assert pe.expected_refusal(403, '{"detail":"Учетная запись только для просмотра: изменения запрещены"}'.encode())
+    assert not pe.expected_refusal(403, '{"detail":"Раздел недоступен для этой учётной записи"}'.encode())
+    assert not pe.expected_refusal(400, '{"detail":"Учетная запись только для просмотра: изменения запрещены"}'.encode())
+
+
+async def test_backup_already_there_is_not_a_panel_error(client, auth_headers, monkeypatch):
+    from app.api import servers as srv_api
+    from app.models import Server
+
+    async def fake(_f, job_id, params):
+        return None
+
+    monkeypatch.setattr(srv_api, "_orchestrate_setup", fake)
+    a = (await client.post("/api/servers", json={"name": "cl-9"}, headers=auth_headers)).json()["server"]["id"]
+    b = (await client.post("/api/servers", json={"name": "bs-9"}, headers=auth_headers)).json()["server"]["id"]
+    async with _app(client).state.session_factory() as s:
+        ca, cb = await s.get(Server, a), await s.get(Server, b)
+        ca.last_report = {"backup": {"present": True, "restic_found": True, "configured": True, "metric_present": True}}
+        ca.agent_ip = "10.0.0.5"
+        cb.last_report = {"backup_server": {"present": True, "running": True, "port": 64100, "tls_port": 64101}}
+        cb.agent_ip = "10.0.0.6"
+        await s.commit()
+    body = {"backup_server_id": b, "mode": "exclude", "paths": ["/proc"], "schedule": "12:00"}
+    # форма открыта по старому списку, а бэкап уже есть: отказ ожидаемый, форма спросит "поверх"
+    r = await client.post(f"/api/servers/{a}/backup/setup", json=body, headers=auth_headers)
+    assert r.status_code == 409 and "переустановить поверх" in r.json()["detail"]
+    assert await _rows(client) == []
+    # другой отказ той же формы - в журнале
+    r = await client.post(f"/api/servers/{a}/backup/setup", json=body | {"backup_server_id": a, "reinstall": True},
+                          headers=auth_headers)
+    assert r.status_code == 400
+    assert [x.status for x in await _rows(client)] == [400]
+
+
+async def test_logs_of_a_gone_pod_or_container_are_not_logged(client, auth_headers):
+    r = await client.post("/api/servers", json={"name": "kb-9"}, headers=auth_headers)
+    token, sid = r.json()["token"], r.json()["server"]["id"]
+    agent = {"Authorization": f"Bearer {token}"}
+    gone = ('logs 404: {"kind":"Status","apiVersion":"v1","metadata":{},"status":"Failure",'
+            '"message":"pods \\"web-7d9f-abcde\\" not found","reason":"NotFound",'
+            '"details":{"name":"web-7d9f-abcde","kind":"pods"},"code":404}')
+
+    async def kube(action, output):
+        r = await client.post(f"/api/servers/{sid}/kube/command", headers=auth_headers,
+                              json={"ns": "default", "kind": "pod", "name": "web-7d9f-abcde", "action": action})
+        assert r.status_code == 200, r.text
+        r = await client.post("/api/agent/kube-result", headers=agent, json={"id": r.json()["id"], "ok": False, "output": output})
+        assert r.status_code == 200
+
+    # под пересоздали, а человек нажал "логи" в старом списке
+    await kube("logs", gone)
+    await kube("logs_prev", gone)
+    r = await client.post(f"/api/servers/{sid}/docker/command", headers=auth_headers, json={"container": "web", "action": "logs"})
+    await client.post("/api/agent/docker-result", headers=agent, json={"id": r.json()["id"], "ok": False, "output": "logs 404"})
+    assert await _rows(client) == []
+    # другой отказ логов и 404 у другого действия - сбой, в журнале
+    await kube("logs", 'logs 403: {"kind":"Status","message":"forbidden","code":403}')
+    await kube("delete_pod", "delete 404: not found")
+    rows = await _rows(client, kind="command")
+    assert sorted(x.action for x in rows) == ["kube delete_pod", "kube logs"]
 
 
 async def test_prune_keeps_month_and_row_cap(client, monkeypatch):

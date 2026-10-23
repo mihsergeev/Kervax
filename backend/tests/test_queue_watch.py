@@ -9,8 +9,11 @@ NOW = datetime(2026, 10, 18, 12, 0, tzinfo=timezone.utc)
 SRC = "контейнер app-rabbitmq-1"
 
 
-def _rep(**depths):
+def _rep(consumers=None, **depths):
     qs = [{"name": n, "vhost": "/", "ready": d, "unacked": 0} for n, d in depths.items()]
+    if consumers is not None:
+        for q in qs:
+            q["consumers"] = consumers
     return {"mem_total": 8 * 2**30, "mem_used": 2**30, "clock_unix": int(NOW.timestamp()),
             "services": [{"kind": "rabbitmq", "source": SRC, "queues": qs, "total": len(qs)}]}
 
@@ -24,13 +27,29 @@ def _srv(state=None, rep=None, mutes=None):
                   web_5xx_alert_percent=0, kube_expiry_warn_days=[])
 
 
-def _run(series, name="mail", step_s=60):
+def _run(series, name="mail", step_s=60, consumers=None):
     """Прогон ряда глубин раз в step_s секунд, конец - в NOW: состояние и сколько очередь застряла"""
     st: dict = {}
     t0 = NOW - timedelta(seconds=step_s * (len(series) - 1))
     for i, d in enumerate(series):
-        st = qw.update(st, _rep(**{name: d}), t0 + timedelta(seconds=step_s * i))
-    return st, qw.stuck(st[f"{SRC}|//{name}"], series[-1], int(NOW.timestamp()))
+        st = qw.update(st, _rep(consumers=consumers, **{name: d}), t0 + timedelta(seconds=step_s * i))
+    return st, qw.stuck(st[f"{SRC}|//{name}"], series[-1], int(NOW.timestamp()), consumers)
+
+
+def _watch(series, cons, st=None, end=NOW):
+    """Цикл алертов раз в минуту по ряду (глубина, потребители), конец - в end: состояние и на какой
+    минуте очередь впервые стала проблемой (алерт), None - не стала"""
+    st = dict(st or {})
+    t0 = end - timedelta(minutes=len(series) - 1)
+    fired = None
+    for i, (d, c) in enumerate(zip(series, cons)):
+        t = t0 + timedelta(minutes=i)
+        rep = _rep(consumers=c, mail=d)
+        st = qw.update(st, rep, t)
+        ps = qw.problems(_srv({"qwatch": st}, rep), t)
+        if ps and fired is None:
+            fired = (i, ps[0])
+    return st, fired
 
 
 def test_growing_queue_nobody_takes():
@@ -61,11 +80,11 @@ def test_dead_worker_of_a_rare_queue():
     assert _run(taken)[1] == 0
     # стоит и не растет - не судим (очередь никто не пишет)
     assert _run([107] * 200)[1] == 0
-    # без потребителей (агент 2.38) хватает получаса
-    st, _a = _run([100 + i // 5 for i in range(41)])
+    # без потребителей (агент 2.38) три часа ждать незачем: их нет 40 минут, а сообщения копятся
+    st, age = _run([100 + i // 5 for i in range(41)], consumers=0)
+    assert age == 2400
     e = st[f"{SRC}|//mail"]
-    assert qw.stuck(e, 108, int(NOW.timestamp())) == 0
-    assert qw.stuck(e, 108, int(NOW.timestamp()), consumers=0) == 2400
+    assert qw.why(e, 108, int(NOW.timestamp()), 0) == ("nocons", 2400)
     assert qw.stuck(e, 108, int(NOW.timestamp()), consumers=2) == 0
 
 
@@ -98,10 +117,11 @@ def test_problems_text_skip_and_mute():
     ps = qw.problems(s, NOW)
     assert [p["text"] for p in ps] == [f"очередь mail ({SRC}) растет 40 мин и не разбирается: 0 -> 2 000 сообщений"]
     assert ps[0]["since"].startswith("2026-10-18T11:20")
-    assert qw.view(s, NOW) == {f"{SRC}|//mail": {"age": 2400, "d0": 0, "muted": False, "stall": False, "wait": 0}}
-    # без потребителей (агент 2.38) - так и сказано
+    assert qw.view(s, NOW) == {f"{SRC}|//mail": {"age": 2400, "d0": 0, "muted": False, "stall": False, "wait": 0,
+                                                  "why": "grow"}}
+    # ноль потребителей в одном отчете - еще не "нет потребителей" (перезапуск воркера): растет, как и было
     rep["services"][0]["queues"][0]["consumers"] = 0
-    assert "нет ни одного потребителя" in qw.problems(_srv({"qwatch": st}, rep), NOW)[0]["text"]
+    assert "растет 40 мин" in qw.problems(_srv({"qwatch": st}, rep), NOW)[0]["text"]
     # заглушенная очередь - не проблема, в карточке видна с отметкой
     muted = _srv({"qwatch": st}, rep, mutes=[qw.MUTE_PREFIX + f"{SRC}|//mail"])
     assert qw.problems(muted, NOW) == []
@@ -374,3 +394,94 @@ def test_laravel_failed_jobs_is_a_broker_of_its_own():
     b = qw.helper_brokers(rep)[0]
     assert b["label"] == "Laravel failed_jobs" and b["source"] == "контейнер app-redis, Laravel failed_jobs, база app"
     assert b["queues"] == [] and b["failed"]["span"] == 4000 and qw.queues(rep) == []
+
+
+# ---- мигание: перезапуск воркера, разбор без потребителей, наплыв, выдержка ----
+
+def test_consumers_gone_for_a_minute_is_not_an_alert():
+    # воркер перезапустился: две минуты без потребителей, очередь подросла и тут же разобрана
+    series = [300 + (i % 5) * 10 for i in range(30)] + [340, 380] + [300 + (i % 5) * 10 for i in range(30)]
+    cons = [3] * 30 + [0, 0] + [3] * 30
+    assert _watch(series, cons)[1] is None
+    # и девять минут без потребителей - еще не алерт
+    series = [300] * 20 + [300 + 20 * i for i in range(1, 10)] + [300] * 10
+    cons = [3] * 20 + [0] * 9 + [3] * 10
+    assert _watch(series, cons)[1] is None
+
+
+def test_consumers_gone_for_good():
+    # потребителей нет с 10-й минуты, сообщения копятся по 10 в минуту: условие с 11-й, алерт через
+    # 10 минут выдержки - на 21-й, текст про потребителей
+    series = [300] * 10 + [300 + 10 * i for i in range(30)]
+    cons = [3] * 10 + [0] * 30
+    st, fired = _watch(series, cons)
+    assert fired is not None and fired[0] == 21
+    p = fired[1]
+    assert p["why"] == "nocons" and p["age"] == 660 and p["d0"] == 300
+    assert p["text"] == f"очередь mail ({SRC}) без потребителей 11 мин, сообщения копятся: 300 -> 410 сообщений"
+    # стоит без потребителей и не растет - никто не пишет, не судим
+    assert _watch([300] * 40, [0] * 40)[1] is None
+
+
+def test_queue_consumed_without_consumers():
+    # воркер берет сообщения опросом (basic.get): потребителей всегда ноль, очередь копится 45 минут
+    # и уходит за минуту. Первый раз это не отличить от умершего воркера, дальше - видно
+    cycle = [6 * i for i in range(45)] + [0] * 5
+    st, fired = _watch(cycle, [0] * 50)
+    assert fired is not None and fired[1]["why"] == "nocons"
+    e = st[f"{SRC}|//mail"]
+    assert qw.pull(e, int(NOW.timestamp()))
+    st, fired = _watch(cycle * 3, [0] * 150, st=st, end=NOW + timedelta(minutes=150))
+    assert fired is None
+    # второй и дальше заходы до 264 не выше обычного: тот самый ход, который уже разбирали
+    assert qw.usual(st[f"{SRC}|//mail"], int(NOW.timestamp()) + 150 * 60) == 264
+    # через неделю без таких разборов отсутствие потребителей снова судим
+    later = int(e["zc"]) + qw.PULL_KEEP + 60
+    assert not qw.pull(e, later)
+
+
+def _history(peak, days=6, name="mail", consumers=15):
+    """Неделя истории: каждые сутки очередь доходила до peak, и ее разбирали (провалы в отчетах между
+    сутками ход не держат, а пики разобранных ходов помнятся)"""
+    st: dict = {}
+    for k in range(days, 0, -1):
+        for i, d in enumerate((peak // 2, peak, 0)):
+            st = qw.update(st, _rep(consumers=consumers, **{name: d}), NOW - timedelta(days=k) + timedelta(minutes=i))
+    return st
+
+
+def test_growth_within_the_usual_level_is_not_an_alert():
+    # потребители живы и забирают, приток временно больше: 50 -> 473 за 40 минут. Днем очередь
+    # ходит до 1 200, это наплыв, а не "не разбирается"
+    burst = [50 + 423 * i // 40 for i in range(41)]
+    st, fired = _watch(burst, [15] * 41, st=_history(1200))
+    assert fired is None
+    assert qw.usual(st[f"{SRC}|//mail"], int(NOW.timestamp())) == 1200
+    # а 5 000 при обычных 1 200 - уже алерт, с обычным уровнем в тексте
+    big = [50 + 5000 * i // 40 for i in range(41)]
+    st, fired = _watch(big, [15] * 41, st=_history(1200))
+    assert fired is not None and fired[1]["why"] == "grow" and fired[1]["base"] == 1200
+    assert fired[1]["text"].endswith(", обычно до 1 200")
+    # ни одного разобранного хода за неделю - обычного не знаем, правило только по росту
+    assert qw.usual({"dm": {"1": 5}}, int(NOW.timestamp())) is None
+    assert qw.usual(_history(1200, days=9)[f"{SRC}|//mail"], int(NOW.timestamp())) == 1200
+
+
+def test_alert_waits_ten_minutes():
+    # рос полчаса и через девять минут разобран: раньше алерт и отбой через 9 минут, теперь тишина
+    series = [50 + 14 * i for i in range(39)] + [40] * 5
+    assert _watch(series, [15] * 44)[1] is None
+    # растет и дальше - алерт на 40-й минуте (условие с 30-й плюс выдержка)
+    st, fired = _watch([50 + 14 * i for i in range(50)], [15] * 50)
+    assert fired is not None and fired[0] == 40 and fired[1]["why"] == "grow"
+
+
+def test_standing_queue_with_consumers():
+    # потребители есть, но за три часа не отдали ни одного сообщения: очередь стоит
+    series = [500 + i // 20 for i in range(200)]
+    st, fired = _watch(series, [2] * 200)
+    assert fired is not None and fired[0] == 190 and fired[1]["why"] == "slow"
+    assert "не отдает ни одного сообщения" in fired[1]["text"]
+    # хоть одно отдала - тишина
+    taken = series[:100] + [series[99] - 1] + series[101:]
+    assert _watch(taken, [2] * 200)[1] is None

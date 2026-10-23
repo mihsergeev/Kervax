@@ -106,8 +106,9 @@ import { JournalCard, JournalModal, journalBlocker } from './UnitJournal'
 import { LinksCard, NetTile, TrafficCard, type Tone } from './NetLinks'
 import { DiskWritersBlock, NetUsersCard } from './Usage'
 import { SoftwareCard } from './Software'
-import { FixSteps, useFixDone } from './FixSteps'
+import { type FixStep, FixSteps, useFixDone } from './FixSteps'
 import { GpuCard, GpuChip } from './Gpu'
+import { RoleChips } from './RoleChips'
 import { KnownServerList, knownItems, knownTitle } from './KnownDialog'
 import { AgentUpdRow, agentBehind, helperCmd, hostOf, useFleetRollout } from './FleetUpdate'
 import { MaintBanner, MaintChip } from './MaintModal'
@@ -659,11 +660,13 @@ function ClockStatus({ clock, skew }: { clock: ClockInfo; skew?: number }) {
 // команда синхронизации времени (copy-paste). Панель на ноду не лезет — печатает команду,
 // оператор выполняет осознанно (шаг часов рискован для БД/приложений). Плюс аварийный
 // HTTP-фолбэк на случай закрытого исходящего NTP: шаг часов по времени самой панели.
+// публичные резолверы рядом с резолверами сети: systemd-resolved берет первый ответ
+const DNS_PUBLIC = "sudo mkdir -p /etc/systemd/resolved.conf.d && printf '[Resolve]\\nDNS=1.1.1.1 8.8.8.8\\n' | sudo tee /etc/systemd/resolved.conf.d/public-dns.conf && sudo systemctl restart systemd-resolved"
+
 function ClockFix({ server: s, clock, skew, canManage }: {
   server: Server; clock: ClockInfo; skew?: number; canManage: boolean
 }) {
   const { t } = useI18n()
-  const [copied, setCopied] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null)
   // одноклик доступен, только если на ноде установлен timesync-хелпер (иначе — copy-paste)
@@ -692,28 +695,17 @@ function ClockFix({ server: s, clock, skew, canManage }: {
     : 'sudo timedatectl set-ntp true'
   const httpFix =
     `sudo date -s "$(curl -sI ${window.location.origin}/ | grep -i '^date:' | cut -d' ' -f2- | tr -d '\\r')"`
-  const copy = (txt: string, id: string) => {
-    navigator.clipboard?.writeText(txt); setCopied(id); window.setTimeout(() => setCopied(null), 1500)
-  }
-  const cmdRow = (txt: string, id: string) => (
-    <div className="agent-advice-cmd">
-      <pre>{txt}</pre>
-      <button className="ghost" onClick={() => copy(txt, id)}>
-        {copied === id ? t('Скопировано') : t('Копировать')}
-      </button>
-    </div>
-  )
   const off = Math.abs(skew ?? 0)
   return (
     <div className="clock-fix">
       <div className="form-error small">
         🕐 {off >= 5
-          ? t('Часы разошлись с панелью на {n} — синхронизируйте время:', {
+          ? t('Часы разошлись с панелью на {n}, синхронизируйте время', {
             n: off < 120
               ? `${off} ${timeUnits()[3]}`
               : `${Math.round(off / 60)} ${currentLang() === 'en' ? 'min' : 'мин'}`,
           })
-          : t('Время не синхронизировано — включите NTP:')}
+          : t('Время не синхронизировано, включите NTP')}
       </div>
       {/* одноклик, если стоит timesync-хелпер: агент шлёт команду, root-хелпер синкает
           (+ HTTP-фолбэк по времени панели, если исходящий NTP закрыт) */}
@@ -728,17 +720,13 @@ function ClockFix({ server: s, clock, skew, canManage }: {
       {/* copy-paste — универсальная альтернатива и путь для нод без helper'а */}
       <details className="clock-manual">
         <summary className="muted small">{hasHelper ? t('или вручную') : t('команды для ручной синхронизации')}</summary>
-        {cmdRow(main, 'main')}
-        {!clock.service && (
-          <div className="muted small">{t('Демон синхронизации не найден — команда выше включит systemd-timesyncd.')}</div>
-        )}
-        <div className="muted small clock-fix-fallback">
-          {t('Если исходящий закрыт и до NTP не достучаться (UDP 123): открой порт (напр. sudo ufw allow out 123/udp) — либо разово выставь часы по времени панели (она достижима по HTTPS):')}
-        </div>
-        {cmdRow(httpFix, 'http')}
-        {!hasHelper && (
-          <div className="muted small">{t('Кнопка «в один клик» появится после установки timesync-хелпера (ansible kervax_helpers.yml).')}</div>
-        )}
+        <FixSteps
+          steps={[{ id: 'ntp', cmd: main }, { id: 'port', alt: true }, { id: 'http', alt: true, cmd: httpFix }]}
+          text={(st) => st.id === 'ntp'
+            ? (clock.service ? t('Включить синхронизацию') : t('Включить systemd-timesyncd: демона синхронизации на сервере нет'))
+            : st.id === 'port' ? t('до NTP не достучаться: открыть исходящий UDP 123 (sudo ufw allow out 123/udp)')
+            : t('разово выставить часы по времени панели, она доступна по HTTPS')}
+          foot={hasHelper ? undefined : t('Кнопка "в один клик" появится после установки timesync-хелпера (ansible kervax_helpers.yml).')} />
       </details>
     </div>
   )
@@ -3236,25 +3224,20 @@ function unitWhy(u: FailedUnit, t: TFn): string {
   }
 }
 
-// Известные причины, у которых есть понятный выход. Схема одна: что случилось одной фразой ->
-// что сделать (где можно, командой) -> почему не страшно. noRestart - перезапуск не поможет,
-// кнопки "Перезапустить" у такого юнита нет. group - юниты с одной причиной (mdmonitor и
+// Известные причины, у которых есть понятный выход: причина одной строкой, шаги FixSteps (номер,
+// текст, команда), мелкой строкой внизу - почему перезапуск не поможет и почему не страшно.
+// noRestart - кнопки "Перезапустить" у такого юнита нет. group - юниты с одной причиной (mdmonitor и
 // mdmonitor-oneshot) идут одной карточкой с одной командой на всех.
 // Набор - с парка 05.10.2026: mdmonitor на семи нодах, unbound-resolvconf на четырех и т.д.
-type UnitHint = {
-  what: string
-  todo: string
-  cmd?: string
-  playbook?: string
-  calm?: string
-  noRestart?: string
-  group?: string
-}
-const CLEANUP = 'ansible-playbook playbooks/units_cleanup.yml -l '
-function unitHint(u: FailedUnit, all: FailedUnit[], host: string, t: TFn): UnitHint | null {
+type UnitStep = FixStep & { text: string }
+type UnitHint = { what: string; steps: UnitStep[]; foot?: string; noRestart?: boolean; group?: string }
+// плейбук сам смотрит, где есть что убирать, поэтому сразу на весь парк
+const CLEANUP = 'ansible-playbook playbooks/units_cleanup.yml -l kervax'
+function unitHint(u: FailedUnit, all: FailedUnit[], t: TFn): UnitHint | null {
   const log = u.log.join('\n')
   const n = u.unit
   const again = t('Перезапуск не поможет: юнит упадет снова.')
+  const fleet = (text: string): UnitStep => ({ id: 'fleet', alt: true, text, cmd: CLEANUP })
   // у давно упавшего mdmonitor.service лог уже ротирован, причину видно у mdmonitor-oneshot
   const mdNoMail = all.some((x) => x.unit.startsWith('mdmonitor') && x.log.join('\n').includes('No mail address'))
   if (n.startsWith('mdmonitor') && (log.includes('No mail address') || (!log && mdNoMail))) {
@@ -3268,71 +3251,80 @@ function unitHint(u: FailedUnit, all: FailedUnit[], host: string, t: TFn): UnitH
       `sudo systemctl reset-failed ${md.join(' ')}`,
     ].join(' && ')
     return {
-      what: t('mdadm некуда слать письма (в mdadm.conf нет MAILADDR), поэтому он не следит за RAID и падает при каждом запуске.'),
-      todo: t('выключить мониторинг mdadm на этом сервере:'),
-      cmd,
-      playbook: CLEANUP + host,
-      calm: t('за RAID следит Kervax, раздел Диск.'),
-      noRestart: again,
+      what: t('mdadm некуда слать письма (в mdadm.conf нет MAILADDR): за RAID он не следит и падает при каждом запуске'),
+      steps: [
+        { id: 'off', text: t('Выключить мониторинг mdadm на этом сервере'), cmd },
+        fleet(t('по всему парку: плейбук не тронет ноды, где MAILADDR задан')),
+      ],
+      foot: `${again} ${t('За RAID следит Kervax, раздел Диск.')}`,
+      noRestart: true,
       group: 'mdmonitor',
     }
   }
   if (n === 'unbound-resolvconf.service')
     return {
-      what: t('unbound пытается прописаться в systemd-resolved, которого на сервере нет, и падает.'),
-      todo: t('выключить этот юнит:'),
-      cmd: 'sudo systemctl mask --now unbound-resolvconf.service && sudo systemctl reset-failed unbound-resolvconf.service',
-      playbook: CLEANUP + host,
-      calm: t('сам unbound работает, этот юнит ему не нужен.'),
-      noRestart: again,
+      what: t('unbound пытается прописаться в systemd-resolved, которого на сервере нет'),
+      steps: [
+        { id: 'off', text: t('Выключить юнит'), cmd: 'sudo systemctl mask --now unbound-resolvconf.service && sudo systemctl reset-failed unbound-resolvconf.service' },
+        fleet(t('по всему парку')),
+      ],
+      foot: `${again} ${t('Сам unbound работает, этот юнит ему не нужен.')}`,
+      noRestart: true,
     }
   if (n.startsWith('systemd-networkd-wait-online'))
     return {
-      what: t('При загрузке не дождались сети: обычно из-за интерфейса, который не нужен или не управляется networkd.'),
-      todo: t('нажать "Сбросить". Если повторяется на каждой загрузке - ограничить ожидание нужным интерфейсом (--interface=) или выключить юнит.'),
-      calm: t('сервер работает, юнит нужен только при загрузке.'),
-      noRestart: t('Перезапуск не нужен: юнит только ждет сеть при загрузке.'),
+      what: t('При загрузке не дождались сети: обычно мешает интерфейс, который не нужен или не под networkd'),
+      steps: [
+        { id: 'reset', text: t('Нажать "Сбросить": сервер работает, юнит нужен только при загрузке') },
+        { id: 'iface', alt: true, text: t('если повторяется на каждой загрузке: ждать только нужный интерфейс (--interface=) или выключить юнит') },
+      ],
+      noRestart: true,
     }
   if (n.endsWith('.socket') && u.result === 'resources')
     return {
-      what: t('Сокет не смог занять свой порт: обычно его уже держит сам сервис (например, sshd со своим портом).'),
-      todo: t('выключить лишний сокет:'),
-      cmd: `sudo systemctl disable --now ${n} && sudo systemctl reset-failed ${n}`,
-      calm: t('сервис при этом работает.'),
-      noRestart: t('Перезапуск не поможет: порт занят.'),
+      what: t('Сокет не смог занять порт: его уже держит сам сервис (например, sshd со своим портом)'),
+      steps: [{ id: 'off', text: t('Выключить лишний сокет'), cmd: `sudo systemctl disable --now ${n} && sudo systemctl reset-failed ${n}` }],
+      foot: t('Перезапуск не поможет: порт занят. Сервис при этом работает.'),
+      noRestart: true,
     }
   if (log.includes('at least one source file could not be read'))
     return {
-      what: t('restic закончил бэкап, но часть файлов прочитать не смог (код 3): снапшот есть, но неполный.'),
-      todo: t('найти в журнале, какие файлы, и исключить их из бэкапа или выдать доступ:'),
-      cmd: `sudo journalctl -u ${n} --since "2 days ago" --no-pager | grep -i -E "error|denied|no such"`,
+      what: t('restic не смог прочитать часть файлов (код 3): снапшот есть, но неполный'),
+      steps: [
+        { id: 'find', text: t('Найти в журнале, какие файлы'), cmd: `sudo journalctl -u ${n} --since "2 days ago" --no-pager | grep -i -E "error|denied|no such"` },
+        { id: 'fix', text: t('Исключить их из бэкапа или выдать доступ') },
+      ],
     }
   if (n.startsWith('clamav-freshclam'))
     return {
-      what: t('freshclam не может скачать базы антивируса, и они устаревают.'),
-      todo: t('частая причина - зеркало ClamAV закрыто для адресов из России: прописать свое зеркало (PrivateMirror в freshclam.conf) или прокси.'),
-      noRestart: again,
+      what: t('freshclam не может скачать базы антивируса, они устаревают'),
+      steps: [{ id: 'mirror', text: t('Прописать свое зеркало (PrivateMirror в freshclam.conf) или прокси: зеркало ClamAV закрыто для адресов из России') }],
+      foot: again,
+      noRestart: true,
     }
   if (n === 'openipmi.service')
     return {
-      what: t('openipmi не нашел IPMI на этой машине.'),
-      todo: t('если BMC нет или он не нужен, выключить юнит:'),
-      cmd: 'sudo systemctl disable --now openipmi.service && sudo systemctl reset-failed openipmi.service',
-      noRestart: again,
+      what: t('openipmi не нашел IPMI на этой машине'),
+      steps: [{ id: 'off', text: t('Если BMC нет или он не нужен, выключить юнит'), cmd: 'sudo systemctl disable --now openipmi.service && sudo systemctl reset-failed openipmi.service' }],
+      foot: again,
+      noRestart: true,
     }
   if (n === 'console-setup.service')
     return {
-      what: t('Не применилась раскладка консоли.'),
-      todo: t('нажать "Сбросить" или поправить раскладку: sudo dpkg-reconfigure keyboard-configuration'),
-      calm: t('на сервере раскладка консоли ни на что не влияет.'),
-      noRestart: again,
+      what: t('Не применилась раскладка консоли, на сервере это ни на что не влияет'),
+      steps: [
+        { id: 'reset', text: t('Нажать "Сбросить"') },
+        { id: 'fix', alt: true, text: t('поправить раскладку'), cmd: 'sudo dpkg-reconfigure keyboard-configuration' },
+      ],
+      foot: again,
+      noRestart: true,
     }
   if (n === 'certbot.service' && log.includes('manual'))
     return {
-      what: t('Сертификат выпущен вручную (manual plugin), сам он не продлится.'),
-      todo: t('продлить его вручную или удалить, если не нужен:'),
-      cmd: 'sudo certbot certificates && sudo certbot delete --cert-name <cert-name>',
-      noRestart: again,
+      what: t('Сертификат выпущен вручную (manual plugin), сам он не продлится'),
+      steps: [{ id: 'del', text: t('Удалить ненужный сертификат или продлить его вручную'), cmd: 'sudo certbot certificates && sudo certbot delete --cert-name <cert-name>' }],
+      foot: again,
+      noRestart: true,
     }
   return null
 }
@@ -3360,19 +3352,19 @@ function osFixText(st: OsFixStep, t: (k: string, p?: Record<string, string | num
   switch (st.id) {
     case 'apt_update': return t('Обновить список пакетов: ничего не ставит, только узнает, что вышло.')
     case 'apt_daily': return t('Чтобы список обновлялся сам каждый день (без автоустановки):')
-    case 'unatt_install': return t('Поставить автообновления. unattended-upgrades ставит только исправления безопасности из репозитория дистрибутива: сторонние репозитории (docker и прочие) не трогает, конфиги оставляет как есть, ничего не удаляет и сам не перезагружает.')
+    case 'unatt_install': return t('Поставить автообновления. Ставят только исправления безопасности из репозитория дистрибутива: сторонние (docker и прочие) не трогают, конфиги не меняют, сами не перезагружают.')
     case 'unatt_enable': return t('Включить их: каждый день свежий список пакетов и исправления безопасности.')
     case 'unatt_run': return t('Поставить исправления безопасности сейчас, не дожидаясь ночного прогона. Лог - в /var/log/unattended-upgrades/.')
     case 'unatt_check': return t('Автообновления включены, но не запускались: проверить таймеры apt и последний лог.')
     case 'noboot_docker': return t('Сначала: эти контейнеры без restart policy, после перезагрузки docker их не поднимет.')
     case 'noboot_units': return t('Сначала: эти сервисы работают, но не включены, после перезагрузки их не будет.')
-    case 'reboot_soft': return t('Обновлен только dbus. Перезапустить его отдельно нельзя: от него зависят systemd-logind и сессии, поэтому пакет и просит перезагрузку. Старый dbus работает как работал, срочности нет: перезагрузите при ближайшем окне обслуживания.')
-    case 'reboot': return t('Перезагрузить, когда есть доступ к консоли сервера: несколько минут сервер недоступен. Старое ядро остается в меню GRUB (Advanced options), если новое не загрузится.')
-    case 'pro_attach': return t('Ubuntu Pro: исправления безопасности до {date}. Токен - на ubuntu.com/pro, для личного использования бесплатно до 5 машин, для компании нужна подписка. Подключение панель видит с агента 2.39.', { date: st.arg ?? '' })
+    case 'reboot_soft': return t('Перезагрузить при ближайшем окне обслуживания, срочности нет. Обновлен только dbus, а отдельно его не перезапустить: от него зависят systemd-logind и сессии.')
+    case 'reboot': return t('Перезагрузить, когда есть доступ к консоли сервера. Несколько минут сервер недоступен. Старое ядро остается в меню GRUB (Advanced options), если новое не загрузится.')
+    case 'pro_attach': return t('Подключить Ubuntu Pro: исправления безопасности до {date}. Токен - на ubuntu.com/pro, для личного использования бесплатно до 5 машин, для компании нужна подписка. Подключение панель видит с агента 2.39.', { date: st.arg ?? '' })
     case 'pro_run': return t('Поставить исправления из ESM.')
-    case 'release_upgrade': return t('Переезд на следующую версию: по одной за раз, с перезагрузкой. Заранее бэкап и доступ к консоли.')
-    case 'debian_upgrade': return t('Переезд на Debian {n} по release notes: sources.list на новое кодовое имя, apt full-upgrade и перезагрузка. Заранее бэкап и доступ к консоли.', { n: st.arg ?? '' })
-    case 'el_upgrade': return t('Переезд на следующую версию: RHEL, AlmaLinux и Rocky - через leapp, CentOS - переустановкой на AlmaLinux или Rocky.')
+    case 'release_upgrade': return t('Переехать на следующую версию, по одной за раз. С перезагрузкой: заранее бэкап и доступ к консоли.')
+    case 'debian_upgrade': return t('Переехать на Debian {n} по release notes. sources.list на новое кодовое имя, apt full-upgrade и перезагрузка: заранее бэкап и доступ к консоли.', { n: st.arg ?? '' })
+    case 'el_upgrade': return t('Переехать на следующую версию. RHEL, AlmaLinux и Rocky - через leapp, CentOS - переустановкой на AlmaLinux или Rocky.')
     default: return st.id
   }
 }
@@ -3384,7 +3376,7 @@ function OsFix({ steps }: { steps: OsFixStep[] }) {
   const { t } = useI18n()
   return (
     <FixSteps steps={steps} text={(st) => osFixText(st, t)}
-      foot={t('После этих шагов пункт уйдет сам в течение часа: агент пересчитывает обновления раз в час.')} />
+      foot={t('Пункт уйдет сам в течение часа после этих шагов.')} />
   )
 }
 
@@ -3710,9 +3702,9 @@ function LoopingUnits({ server: s, onChanged }: { server: Server; onChanged: () 
             {sinceShort(p.since, t) && <span className="muted small">{sinceShort(p.since, t)}</span>}
           </div>
           {(p.log?.length ?? 0) > 0 && <pre className="unit-log mono">{p.log!.join('\n')}</pre>}
-          <div className="muted small unit-hint">
-            {t('systemd поднимает сервис сам, поэтому среди упавших его нет. Причину обычно видно в логе: journalctl -u {u} -n 50', { u: p.unit! })}
-          </div>
+          <FixSteps steps={[{ id: 'log', cmd: `sudo journalctl -u ${p.unit} -n 50 --no-pager` }]}
+            text={() => t('Найти причину в логе')}
+            foot={t('systemd поднимает сервис сам, поэтому среди упавших его нет.')} />
           {!isViewer && (
             <div className="unit-actions small">
               {canJournal && (
@@ -4190,22 +4182,22 @@ function useMuteToggle(s: Server, onChanged: () => void) {
 function accessFixText(st: OsFixStep, t: (k: string, p?: Record<string, string | number>) => string): string {
   const p = { arg: st.arg ?? '', on: st.on ?? '' }
   switch (st.id) {
-    case 'ssh_key_add': return t('Сначала ключ для {arg}: пароль задан, SSH-ключей нет, последний вход {on}. После выключения паролей эта учетка не войдет. Вставьте свой публичный ключ (строку ssh-ed25519 ...) вместо <public-key> и проверьте вход по ключу в новом окне.', p)
-    case 'ssh_key_check': return t('{arg} входила по паролю {on}, хотя ключ есть: проверьте вход по ключу в новом окне или добавьте нужный ключ.', p)
-    case 'ssh_dropin': return t('Выключить вход по паролю отдельным файлом. В sshd побеждает первое значение, Include sshd_config.d/*.conf стоит в начале sshd_config, а файлы читаются по алфавиту: 00- раньше 50-cloud-init.conf, где cloud-init на Ubuntu включает пароль.')
-    case 'ssh_conf': return t('У этой версии OpenSSH нет sshd_config.d: строка встает первой в sshd_config, а первое значение и побеждает. Копия - sshd_config.bak-nopass.')
-    case 'ssh_check': return t('Проверить, пока ничего не применено: sshd -t молчит, если конфиг в порядке, ниже должно быть no. Если yes - значение задано раньше или в sshd_config нет Include, найти где: sudo grep -rn PasswordAuthentication /etc/ssh/')
-    case 'ssh_reload': return t('Применить: открытые сессии не рвутся (на Ubuntu с ssh.socket тоже). Это окно не закрывайте, пока в новом окне не войдете по ключу: если не пускает, отсюда же откат.')
-    case 'ssh_undo': return t('Откат, если что-то не так:')
-    case 'ssh_match': return t('Если пароль нужен: только из своих сетей, из интернета - по ключу. Вместо <cidr> - ваши адреса или сети через запятую (192.0.2.10,198.51.100.0/24), иначе пароль выключится везде. Этот файл вместо файла выше, дальше та же проверка и reload, а для своего адреса sudo sshd -T -C user=root,host=x,addr=<адрес> | grep -i passwordauth должно дать yes. Пункт уйдет сам: панель смотрит, пускает ли SSH по паролю из интернета.')
-    case 'ssh_guard': return t('Если пароль нужен отовсюду: защита от перебора. fail2ban банит адрес после нескольких неудачных входов, здесь порт {arg} и журнал через systemd (на RHEL и похожих пакет из EPEL). Пункт при этом не уйдет, уйдет только приписка про перебор: пароль оставить - решение "вход по паролю нужен".', p)
-    case 'acc_alone': return t('Через другие учетки за 90 дней никто не входил: если отключить {arg}, на сервер может стать некому войти. Сначала проверьте вход другой учеткой с sudo или через консоль.', p)
-    case 'acc_check': return t('Сначала убедиться, что от {arg} ничего не работает: процессы, ее crontab, lingering (пользовательские юниты после выхода) и сервисы с User={arg}. Пусто и no crontab - ничего нет.', p)
-    case 'acc_lock': return t('Отключить: пароль заблокирован, срок учетки в прошлом - SSH не пустит ни по паролю, ни по ключу, cron и su для нее тоже перестанут работать. Обратимо.')
-    case 'acc_root_lock': return t('Заблокировать пароль {arg}: sudo и cron root продолжат работать. Срок учетки root не ставят (usermod -e): истекшая root ломает cron и su. Если в консоль сервера входите root по паролю, после блокировки не войдете - держите учетку с sudo.', p)
-    case 'acc_keys': return t('Убрать ключи: панель считает доступом любой ключ в authorized_keys. Файл переименовывается, а не удаляется.')
-    case 'acc_undo': return t('Вернуть, если учетка понадобится:')
-    case 'acc_delete': return t('Удалить совсем - необратимо: учетка пропадет, домашний каталог останется без хозяина (userdel -r удалит и его со всеми файлами). Лучше сначала поживите с отключенной.')
+    case 'ssh_key_add': return t('Сначала добавить ключ для {arg}. Сейчас у нее только пароль, последний вход {on}: после выключения паролей она не войдет. Вместо <public-key> - свой публичный ключ (ssh-ed25519 ...), вход по ключу проверить в новом окне.', p)
+    case 'ssh_key_check': return t('Проверить вход по ключу для {arg} в новом окне. Она входила по паролю {on}, хотя ключ есть: если ключ не тот, добавьте нужный.', p)
+    case 'ssh_dropin': return t('Выключить вход по паролю отдельным файлом. Имя на 00- нужно, чтобы файл читался раньше 50-cloud-init.conf: в sshd побеждает первое значение.')
+    case 'ssh_conf': return t('Выключить вход по паролю в sshd_config. У этой версии OpenSSH нет sshd_config.d, строка встает первой. Копия - sshd_config.bak-nopass.')
+    case 'ssh_check': return t('Проверить, пока ничего не применено: ниже должно быть no. Если yes - значение задано раньше, найти где: sudo grep -rn PasswordAuthentication /etc/ssh/')
+    case 'ssh_reload': return t('Применить, открытые сессии не рвутся. Это окно не закрывайте, пока в новом не войдете по ключу: если не пускает, отсюда же откат.')
+    case 'ssh_undo': return t('если что-то не так')
+    case 'ssh_match': return t('пароль только из своих сетей, из интернета - по ключу. Вместо <cidr> - ваши адреса или сети через запятую (192.0.2.10,198.51.100.0/24), иначе пароль выключится везде. Этот файл вместо файла выше, дальше та же проверка и reload.')
+    case 'ssh_guard': return t('пароль нужен отовсюду: fail2ban от перебора. Банит адрес после нескольких неудачных входов, здесь порт {arg} (на RHEL пакет из EPEL). Пункт останется, уйдет только приписка про перебор.', p)
+    case 'acc_alone': return t('Через другие учетки за 90 дней никто не входил. Если отключить {arg}, войти на сервер может стать некому: сначала проверьте вход другой учеткой с sudo или через консоль.', p)
+    case 'acc_check': return t('Убедиться, что от {arg} ничего не работает. Процессы, crontab, lingering и сервисы с User={arg}: пусто и no crontab - ничего нет.', p)
+    case 'acc_lock': return t('Отключить: пароль заблокирован, срок учетки в прошлом. SSH не пустит ни по паролю, ни по ключу, cron и su для нее тоже. Обратимо.')
+    case 'acc_root_lock': return t('Заблокировать пароль {arg}: sudo и cron root продолжат работать. Срок учетки root не ставят, истекшая root ломает cron и su. Если в консоль входите root по паролю, после блокировки не войдете.', p)
+    case 'acc_keys': return t('Убрать ключи: файл переименовывается, а не удаляется. Панель считает доступом любой ключ в authorized_keys.')
+    case 'acc_undo': return t('если учетка понадобится')
+    case 'acc_delete': return t('удалить совсем - необратимо. Домашний каталог останется без хозяина (userdel -r удалит и его). Лучше сначала поживите с отключенной.')
     default: return st.id
   }
 }
@@ -4306,10 +4298,10 @@ function AccessCard({ server: s, onChanged }: { server: Server; onChanged: () =>
       </div>
       {openFix.length > 0 && (
         <FixSteps steps={openFix} text={(st) => accessFixText(st, t)}
-          foot={t('После этого учетка уйдет из заброшенных в течение 10 минут: helper changes-setup снимает учетки раз в 10 минут.')} />
+          foot={t('Учетка уйдет из заброшенных в течение 10 минут.')} />
       )}
       <div className="net-foot">
-        {t('Входы по журналу sshd видны с {d}. Как отключить заброшенную учетку - кнопка в ее строке, root - только passwd -l root, без срока учетки.', {
+        {t('Входы по журналу sshd видны с {d}.', {
           d: v.seen_since ? new Date(v.seen_since * 1000).toLocaleDateString() : '-',
         })}
       </div>
@@ -4322,13 +4314,12 @@ function NoBootUnits({ server: s, onChanged }: { server: Server; onChanged: () =
   const { t } = useI18n()
   const { isViewer } = useAuth()
   const { busy, toggle } = useMuteToggle(s, onChanged)
-  const [copied, setCopied] = useState(false)
   const units = s.noboot?.units ?? []
   const fixed = useFixDone(s.online ? s.noboot?.units : null, (u) => u.unit, (u) =>
     t('{unit} включен, поднимется после перезагрузки, замечание закрыто', { unit: u.unit }), { live: (u) => !u.muted })
   if (units.length === 0 && !fixed.done.length) return null
   const live = units.filter((u) => !u.muted)
-  const cmd = `systemctl enable ${live.map((u) => u.unit).join(' ')}`
+  const cmd = `sudo systemctl enable ${live.map((u) => u.unit).join(' ')}`
   return (
     <div className="chart-card net-card" id="mcard-noboot">
       <div className="net-head">
@@ -4359,21 +4350,7 @@ function NoBootUnits({ server: s, onChanged }: { server: Server; onChanged: () =
         ))}
       </div>
       </>}
-      {live.length > 0 && (
-        <div className="agent-advice-cmd">
-          <pre>{cmd}</pre>
-          <button
-            className="ghost"
-            onClick={() => {
-              navigator.clipboard?.writeText(cmd)
-              setCopied(true)
-              window.setTimeout(() => setCopied(false), 1500)
-            }}
-          >
-            {copied ? t('Скопировано') : t('Копировать')}
-          </button>
-        </div>
-      )}
+      {live.length > 0 && <FixSteps steps={[{ id: 'enable', cmd }]} text={() => t('Включить автозапуск')} />}
     </div>
   )
 }
@@ -4425,7 +4402,7 @@ function SshLogin({ server: s, onChanged }: { server: Server; onChanged: () => v
           </div>
           {open === a.kind && !a.muted && a.fix && (
             <FixSteps steps={a.fix} text={(st) => accessFixText(st, t)}
-              foot={t('После выключения паролей пункт уйдет сам в течение 10 минут: helper changes-setup снимает настройки SSH раз в 10 минут.')} />
+              foot={t('Пункт уйдет сам в течение 10 минут после выключения паролей.')} />
           )}
         </div>
       ))}
@@ -4466,7 +4443,6 @@ function FailedUnits({ server: s, onChanged, onOom }: { server: Server; onChange
   const [st, setSt] = useState<Record<string, { busy?: boolean; ok?: boolean; msg?: string; log?: string[] }>>({})
   const [picking, setPicking] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
-  const [copied, setCopied] = useState<string | null>(null)
   const [jr, setJr] = useState<string | null>(null)
   const r = s.last_report
   const ub = unitsBlock(r)
@@ -4546,22 +4522,15 @@ function FailedUnits({ server: s, onChanged, onOom }: { server: Server; onChange
   const oomOf = (u: FailedUnit) => s.oom?.units?.[u.unit]
   const muted = (u: FailedUnit) => ((s.alert_mutes ?? []).includes(UNIT_MUTE + u.unit) || oomOf(u)?.quiet ? 1 : 0)
   // юниты с одной причиной (hint.group) - одной карточкой: одно объяснение и одна команда
-  const host = hostOf(s)
   const cards: { key: string; units: FailedUnit[]; hint: UnitHint | null }[] = []
   for (const u of ub.units) {
-    const hint = unitHint(u, ub.units, host, t)
+    const hint = unitHint(u, ub.units, t)
     const same = hint?.group ? cards.find((c) => c.hint?.group === hint.group) : undefined
     if (same) same.units.push(u)
     else cards.push({ key: u.unit, units: [u], hint })
   }
   const cardMuted = (c: (typeof cards)[number]) => Math.min(...c.units.map(muted))
   const cardLevel = (c: (typeof cards)[number]) => Math.max(...c.units.map(unitLevel))
-  const copy = (text: string, key: string) => {
-    void navigator.clipboard?.writeText(text).then(() => {
-      setCopied(key)
-      window.setTimeout(() => setCopied((c) => (c === key ? null : c)), 1500)
-    })
-  }
   return (
     <div className="chart-card net-card net-card-wide" id="mcard-units">
       <div className="net-head">
@@ -4591,14 +4560,6 @@ function FailedUnits({ server: s, onChanged, onOom }: { server: Server; onChange
           // журнал - у того, по чьему логу видна причина; "назад" - по последнему падению
           const jrUnit = (units.find((x) => x.log.length) ?? u).unit
           const latest = units.reduce((a, b) => ((b.since ?? 0) > (a.since ?? 0) ? b : a))
-          const cmdBox = (cmd: string, ck: string) => (
-            <div className="agent-advice-cmd">
-              <pre>{cmd}</pre>
-              <button className="ghost" onClick={() => copy(cmd, ck)}>
-                {copied === ck ? t('Скопировано') : t('Копировать')}
-              </button>
-            </div>
-          )
           return (
             <div key={key} className={`unit-row${perm || snoozed || ol?.quiet ? ' unit-muted' : ''}`}>
               <div className="unit-head">
@@ -4626,26 +4587,12 @@ function FailedUnits({ server: s, onChanged, onOom }: { server: Server; onChange
                 </div>
               )}
               {units.length === 1 && u.desc && u.desc !== u.unit && <div className="muted small unit-desc">{u.desc}</div>}
-              {log.length > 0 && <pre className="unit-log mono">{log.join('\n')}</pre>}
+              {/* вывод юнита - мелко под заголовком: с подсказкой он только подтверждает причину */}
+              {log.length > 0 && <pre className={`unit-log mono${hint ? ' unit-log-c' : ''}`}>{log.join('\n')}</pre>}
               {hint && (
-                <div className="small unit-hint">
-                  <div>{hint.what}</div>
-                  <div>
-                    <b>{t('Что сделать:')}</b> {hint.todo}
-                  </div>
-                  {hint.cmd && cmdBox(hint.cmd, key)}
-                  {hint.playbook && (
-                    <>
-                      <div>{t('или плейбуком (на весь парк - с -l kervax):')}</div>
-                      {cmdBox(hint.playbook, key + ':pb')}
-                    </>
-                  )}
-                  {hint.noRestart && <div className="muted">{hint.noRestart}</div>}
-                  {hint.calm && (
-                    <div className="muted">
-                      <b>{t('Почему не страшно:')}</b> {hint.calm}
-                    </div>
-                  )}
+                <div className="unit-hint">
+                  <div className="muted small">{hint.what}</div>
+                  <FixSteps steps={hint.steps} text={(x) => x.text} foot={hint.foot} />
                 </div>
               )}
               {us?.busy && <div className="muted small">{t('Выполняю...')}</div>}
@@ -5477,33 +5424,6 @@ function SrvGroupSummary({ items }: { items: Server[] }) {
   )
 }
 
-// Ретранслятор Kervax (app/relay.py) рядом с именем: у самого ретранслятора - чьи агенты через
-// него ходят (выбрали его в команде установки, relay_via_id), у ноды за ним - через какой
-function RelayChip({ s, servers, t, onClick }: { s: Server; servers: Server[]; t: TFn; onClick?: () => void }) {
-  if (s.relay_enabled) {
-    const names = servers.filter((x) => x.relay_via_id === s.id && x.id !== s.id).map((x) => x.name).sort()
-    const title = names.length
-      ? t('Ретранслятор Kervax: через него ходят агенты: {list}', { list: names.join(', ') })
-      : t('Ретранслятор Kervax, сейчас никто не ходит')
-    return (
-      <span
-        className={`type-chip relay-chip${onClick ? ' clickable' : ''}`}
-        title={onClick ? `${title}\n${t('Нажмите: настройки и состояние ретранслятора')}` : title}
-        onClick={onClick && ((e) => { e.stopPropagation(); onClick() })}
-      >
-        {t('ретранслятор')}
-      </span>
-    )
-  }
-  const via = s.relay_via_id ? servers.find((x) => x.id === s.relay_via_id) : undefined
-  if (!via) return null
-  return (
-    <span className="type-chip relay-via-chip" title={t('Агент ходит в панель через ретранслятор {name}', { name: via.name })}>
-      {t('через ретранслятор {name}', { name: via.name })}
-    </span>
-  )
-}
-
 function ServerRow({
   server: s,
   servers,
@@ -5634,10 +5554,7 @@ function ServerRow({
           {showGroup && s.group_name && (
             <span className="type-chip group-chip">{s.group_name}</span>
           )}
-          {s.last_report?.backup_server?.present && (
-            <span className="type-chip" title={t('Сервер бэкапов (rest-server)')}>🗄 {t('бэкап-сервер')}</span>
-          )}
-          <RelayChip s={s} servers={servers} t={t} />
+          <RoleChips s={s} servers={servers} t={t} />
           {s.gpu_sum && (
             <GpuChip sum={s.gpu_sum} bad={issues.some((i) => i.kind === 'gpu' || i.kind === 'gpu_heat')} t={t} />
           )}
@@ -6109,7 +6026,6 @@ function ServerFixBanner({
   helpers: HelperAdvice[]
   t: (s: string, vars?: Record<string, string | number>) => string
 }) {
-  const [copied, setCopied] = useState(false)
   const parts: string[] = []
   if (command) parts.push(command)
   for (const h of helpers)
@@ -6120,7 +6036,7 @@ function ServerFixBanner({
   return (
     <div className="agent-advice">
       <div className="agent-advice-head">
-        🔧 {t('Требуется ручное действие на сервере. Выполните от root:')}
+        🔧 {t('Нужно действие на сервере')}
       </div>
       {command && (
         <>
@@ -6140,7 +6056,7 @@ function ServerFixBanner({
           <ul className="agent-advice-list">
             {helpers.map((h) => (
               <li key={h.name}>
-                {t('{label} (helper «{helper}»): {a} → {b}', {
+                {t('{label} (helper {helper}): {a} -> {b}', {
                   label: t(h.label),
                   helper: h.name,
                   a: fmtSetupVersion(h.installed),
@@ -6151,24 +6067,11 @@ function ServerFixBanner({
           </ul>
         </>
       )}
-      <div className="agent-advice-cmd">
-        <pre>{cmd}</pre>
-        <button
-          className="ghost"
-          onClick={() => {
-            navigator.clipboard?.writeText(cmd)
-            setCopied(true)
-            window.setTimeout(() => setCopied(false), 1500)
-          }}
-        >
-          {copied ? t('Скопировано') : t('Копировать')}
-        </button>
-      </div>
-      <div className="muted small">
-        {command && t('OTA обновляет только бинарь, не юнит — поэтому вручную. На новых установках уже включено.')}
-        {command && helpers.length > 0 && ' '}
-        {helpers.length > 0 && t('Переустановка идемпотентна — обновит helper, ничего не сломает.')}
-      </div>
+      <FixSteps steps={[{ id: 'run', cmd }]} text={() => t('Выполнить от root, одной командой')}
+        foot={[
+          command && t('OTA обновляет только бинарь, не юнит, поэтому вручную.'),
+          helpers.length > 0 && t('Переустановка helper\'а ничего не ломает.'),
+        ].filter(Boolean).join(' ')} />
     </div>
   )
 }
@@ -6968,15 +6871,16 @@ function ServerDetail({
       {(s.problems ?? []).filter((p) => p.kind === 'dns').map((p) => (
         <div key="dns" className="dns-problem small">
           <span className={p.level >= 2 ? 't-down' : 't-degraded'}>{p.text}</span>
-          <div className="muted">
-            {p.sub === 'resolver'
-              ? t('Остальные резолверы отвечают, и имена резолвятся, но запасного нет: уберите неработающий из настроек сети ноды (netplan, /etc/resolv.conf) или замените рабочим.')
-              : r.dns?.mode === 'local'
-                ? t('Ноду обслуживает свой резолвер (unbound, dnsmasq): проверьте его и серверы, куда он пересылает запросы.')
-                : r.dns?.mode === 'direct'
-                  ? t('Пока резолверы провайдера тормозят, можно поставить первыми в /etc/resolv.conf публичные (nameserver 1.1.1.1 и 8.8.8.8): запросы идут к резолверам по порядку.')
-                  : t('Пока резолверы провайдера тормозят, можно добавить на ноде публичные: DNS=1.1.1.1 8.8.8.8 в /etc/systemd/resolved.conf.d/. systemd-resolved спросит их вместе с резолверами сети и возьмет первый ответ.')}
-          </div>
+          {p.sub === 'resolver'
+            ? <FixSteps steps={[{ id: 'rm' }]} text={() => t('Убрать неработающий резолвер из настроек сети (netplan, /etc/resolv.conf) или заменить рабочим')}
+                foot={t('Остальные отвечают и имена резолвятся, но запасного нет.')} />
+            : r.dns?.mode === 'local'
+              ? <FixSteps steps={[{ id: 'local' }]} text={() => t('Проверить свой резолвер ноды (unbound, dnsmasq) и серверы, куда он пересылает запросы')} />
+              : r.dns?.mode === 'direct'
+                ? <FixSteps steps={[{ id: 'direct' }]} text={() => t('Поставить первыми в /etc/resolv.conf публичные: nameserver 1.1.1.1 и 8.8.8.8')}
+                    foot={t('Пока тормозят резолверы провайдера: запросы идут к резолверам по порядку.')} />
+                : <FixSteps steps={[{ id: 'resolved', cmd: DNS_PUBLIC }]} text={() => t('Добавить публичные резолверы')}
+                    foot={t('Пока тормозят резолверы провайдера: systemd-resolved спросит их вместе с резолверами сети и возьмет первый ответ.')} />}
         </div>
       ))}
       <OvRows
@@ -7015,8 +6919,11 @@ function ServerDetail({
             <h3>{s.name}</h3>
             {s.group_name && <span className="type-chip group-chip">{s.group_name}</span>}
             {s.onboard && <span className="type-chip onb-chip">{t('подключается')}</span>}
-            {/* состояние ретранслятора живет в настройках сервера: клик туда */}
-            {!editing && <RelayChip s={s} servers={servers} t={t} onClick={isViewer ? undefined : editRelay} />}
+            {/* роли как в списке; состояние ретранслятора живет в настройках сервера: клик туда */}
+            {!editing && <RoleChips s={s} servers={servers} t={t} onRelay={isViewer ? undefined : editRelay} />}
+            {!editing && s.gpu_sum && (
+              <GpuChip sum={s.gpu_sum} bad={issues.some((i) => i.kind === 'gpu' || i.kind === 'gpu_heat')} t={t} />
+            )}
             {/* что заглушено - значком, сами заглушки в разделе "Алерты" */}
             {muteItems.length > 0 && !editing && (
               <button className="srv-head-chip" onClick={() => go('alerts')}>

@@ -108,11 +108,11 @@ export function offLines(s: Server, t: TFn): { key: string; text: string; n: num
 // Что сделать с репозиторием, где старье не уходит, - строкой под причиной
 export function rotationAction(cause: BsrvCleanupRot['cause'], t: TFn): string {
   switch (cause) {
-    case 'legacy': case 'legacy_off': return t('Что сделать: перевести репозиторий на чистку панели.')
-    case 'old_group': return t('Что сделать: удалить старую группу или, если ее надо хранить, убрать в архив.')
-    case 'script': return t('Что сделать: посмотреть, что делает чистка и что удалит политика.')
-    case 'none': return t('Что сделать: завести чистку или убрать репозиторий в архив.')
-    default: return t('Что сделать: обновить helper backupserver-setup, по старому не видно, кто чистит репозиторий.')
+    case 'legacy': case 'legacy_off': return t('перевести репозиторий на чистку панели')
+    case 'old_group': return t('удалить старую группу или, если ее надо хранить, убрать в архив')
+    case 'script': return t('посмотреть, что делает чистка и что удалит политика')
+    case 'none': return t('завести чистку или убрать репозиторий в архив')
+    default: return t('обновить helper backupserver-setup: по старому не видно, кто чистит репозиторий')
   }
 }
 
@@ -163,13 +163,17 @@ export function LegacyPlaque({ leg, when, last }: { leg: BsrvCleanupLegacy; when
             : [last && t('Последний прогон {ago}.', { ago: last }),
               leg.archived > 0 && t('Еще на нем репозиториев в архиве: {n}, их чистить не нужно.', { n: leg.archived })].filter(Boolean).join(' ')}
         </div>
-        <div className={off ? 'bsrv-clean-do' : 'muted small'}>
-          {off
-            ? t('Что сделать: перевести их на чистку панели. У каждого будет свой prune-скрипт с той же политикой и паролем, чистка раз в сутки и проверка целостности раз в неделю.')
-            : t('Можно перевести их на чистку панели: она снимает висячие локи, пишет метрики, раз в неделю проверяет целостность и не держит вечно старые группы снапшотов.')}
-        </div>
+        {off && <div className="bsrv-clean-do">{t('Перевести их на чистку панели')}</div>}
       </div>
       {open && <FixSteps steps={leg.fix} text={(st) => bsrvFixText(st, t)} />}
+      <details className="fix-more">
+        <summary>{t('подробнее')}</summary>
+        <div>
+          {off
+            ? t('У каждого репозитория будет свой prune-скрипт с той же политикой и паролем, чистка раз в сутки и проверка целостности раз в неделю.')
+            : t('Перевести на чистку панели можно по желанию: она снимает висячие локи, пишет метрики, раз в неделю проверяет целостность и не держит вечно старые группы снапшотов.')}
+        </div>
+      </details>
     </div>
   )
 }
@@ -238,7 +242,7 @@ export function OffRows({ off, hand, fmtAgo }: {
             <div className="docker-c-main">
               <div className="docker-c-name mono">{x.repo}</div>
               <div className="docker-c-img small repo-rot-why">{t('чистка идет, хотя в crontab root ее строка закомментирована руками')}</div>
-              <div className="muted small">{t('Ее включил helper до 0.34. Что сделать: выключить, как было, или подтвердить, что она нужна.')}</div>
+              <div className="muted small">{t('включил helper до 0.34: выключить, как было, или подтвердить, что она нужна')}</div>
             </div>
           </div>
           <RowFix steps={x.fix} />

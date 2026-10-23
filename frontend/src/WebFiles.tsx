@@ -43,6 +43,13 @@ export function wpEditHead(paths: string[], wp: boolean, t: T): string {
   return wp ? t('файлы ядра WordPress изменились без смены версии') : t('файлы ядра WordPress изменились')
 }
 
+// правка в рабочей копии git, не закоммиченная: так понятнее, чем "не через деплой"
+export function gitDirtyHead(branch: string, t: T): string {
+  return branch
+    ? t('не закоммиченная правка в рабочей копии git (ветка {b})', { b: branch })
+    : t('не закоммиченная правка в рабочей копии git')
+}
+
 // что значит признак правки и что с ним делать; btn - как называется кнопка рядом
 export function editNote(t: T, btn: string): string {
   return t('файлы поменялись на сервере напрямую: правка руками, админка, плагин или взлом. Если это вы - нажмите "{btn}"', { btn })
@@ -86,7 +93,8 @@ export function WebFiles({ s, onChanged }: { s: Server; onChanged: () => void })
     const files = r[key]
     if (!files.length) return null
     const since = files.map((f) => f.since).sort()[0]
-    const head = key === 'edit' ? wpEditHead(files.map((f) => f.p), !!r.wp, t) : ''
+    const dirty = key === 'edit' && r.edit.every((f) => f.g === 'dirty')
+    const head = key !== 'edit' ? '' : dirty ? gitDirtyHead(r.branch ?? '', t) : wpEditHead(files.map((f) => f.p), !!r.wp, t)
     return (
       <div className="tamper-row">
         <span className={`lk-dot ${key === 'php' ? 'lk-dot-bad' : 'lk-dot-warn'}`} />
@@ -129,6 +137,18 @@ export function WebFiles({ s, onChanged }: { s: Server; onChanged: () => void })
           </div>
           {sign(r, 'php')}
           {sign(r, 'edit')}
+          {r.same && (
+            <div className="tamper-row">
+              <span className="lk-dot lk-dot-idle" />
+              <span className="tamper-ico">🔁</span>
+              <span className="tamper-txt muted small">
+                {t('перезаписаны тем же содержимым, что в git: {f}', {
+                  f: r.same.files.join(', ') + (r.same.n > r.same.files.length ? ' ' + t('и еще {n}', { n: r.same.n - r.same.files.length }) : ''),
+                })}
+              </span>
+              <span className="muted small tamper-when">{fmtDateTime(r.same.at)}</span>
+            </div>
+          )}
           {(r.wp_events ?? []).map((e) => (
             <div key={`${e.k}:${e.part ?? ''}:${e.slug ?? ''}:${e.loc ?? ''}`} className="tamper-row">
               <span className="lk-dot lk-dot-idle" />

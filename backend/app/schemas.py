@@ -736,6 +736,8 @@ class CheckOut(BaseModel):
     ssl_message: str
     domain_message: str
     expiry_checked_at: datetime | None
+    # отложенные сроки: {"domain"|"ssl": {mode, by, at, days}}, mode 7/1 - до скольких дней, 0 - не следим
+    expiry_snooze: dict | None = None
     check_locations: bool
     location_ids: list[int] | None
     last_status: str
@@ -1353,6 +1355,13 @@ class CustomBackupIgnoreIn(BaseModel):
     ignored: bool
 
 
+class ExpirySnoozeIn(BaseModel):
+    """Срок сайта: "напомнить за 7/1 дней" (mode 7/1), "не следить" (0) или вернуть (None)."""
+
+    kind: Literal["ssl", "domain"]
+    mode: Literal[7, 1, 0] | None = None
+
+
 class KubeExpiryIgnoreIn(BaseModel):
     """Срок кластера "не нужен, не следить" - или вернуть его под присмотр."""
 
@@ -1539,8 +1548,8 @@ class ServerOut(BaseModel):
     gpu_sum: dict | None = None
     # LLM-сервисы с обычными задержками (gpu.llm_view)
     llm: list[dict] | None = None
-    # очереди, которые растут и не разбираются или стоят: {ключ очереди: {"age", "d0", "muted", "stall",
-    # "wait"}} (queue_watch.view)
+    # очереди, которые не разбираются или стоят: {ключ очереди: {"age", "d0", "muted", "stall", "wait",
+    # "why"}} (queue_watch.view)
     queue_watch: dict | None = None
     # очереди от helper'а queues-setup (Redis, таблицы баз): брокеры как у RabbitMQ, с подписью "where" и
     # упавшими задачами "failed" (queue_watch.helper_view)
