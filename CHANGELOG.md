@@ -4,6 +4,14 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.8.15] - 2026-10-23
+
+### Fixed
+- sockfix-setup 0.3: compose-файл с маркером конца YAML-документа "..." (и "---" в начале) правится
+  внутри своего документа, несколько документов дают понятную причину отказа. Файл, который не принял
+  docker compose, больше не остается в каталоге готовых. На compose 2.24 проверка DOCKER_HOST не
+  отказывает зря (environment списком). Для compose без --format проверка разбирает напечатанный YAML.
+
 ## [1.8.14] - 2026-10-23
 
 ### Fixed

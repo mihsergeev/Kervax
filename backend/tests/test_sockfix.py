@@ -122,6 +122,139 @@ def test_what_it_does_not_edit(change, code):
     assert e.value.code == code
 
 
+def test_document_markers():
+    # файл кончается маркером конца документа: сеть docker-api дописана до него, а не во второй документ
+    out = fix(PLAIN + "...\n")
+    assert out.endswith("networks:\n  caddy:\n    external: true\n  docker-api:\n    internal: true\n...\n")
+    # маркер начала и директива перед ним остаются на месте, правка та же
+    out = fix("%YAML 1.2\n---\n" + PLAIN + "...\n# end\n")
+    assert out.startswith("%YAML 1.2\n---\nservices:\n") and out.endswith("    internal: true\n...\n# end\n")
+    assert out[len("%YAML 1.2\n---\n"):-len("...\n# end\n")] == fix(PLAIN)
+    # без networks наверху блок сети тоже встает перед маркером
+    text = "---\nservices:\n  caddy:\n    image: x\n    volumes:\n      - /var/run/docker.sock:/var/run/docker.sock\n...\n"
+    assert fix(text).endswith("networks:\n  docker-api:\n    internal: true\n...\n")
+    # пустой документ рядом не мешает
+    assert fix("---\n# empty\n---\n" + PLAIN) == "---\n# empty\n---\n" + fix(PLAIN)
+
+
+@pytest.mark.parametrize("text,code", [
+    (PLAIN + "---\nservices:\n  web:\n    image: nginx\n", "multidoc"),
+    (PLAIN + "...\nnetworks:\n  extra: {}\n", "multidoc"),
+    ("--- services:\n", "layout"),
+])
+def test_several_documents_are_not_guessed(text, code):
+    with pytest.raises(SF["Bail"]) as e:
+        fix(text)
+    assert e.value.code == code
+    if code == "multidoc":
+        with pytest.raises(SF["Bail"]):
+            SF["image_at"](text, "caddy")
+
+
+def test_image_line_after_start_marker():
+    assert SF["image_at"]("---\n" + PLAIN + "...\n", "caddy")[:2] == (4, "lucaslorentz/caddy-docker-proxy:2.12.0")
+
+
+def _validate_with(monkeypatch, tmp_path, answers):
+    """validate() с подставным docker compose: answers - по очереди (код, stdout, stderr)"""
+    calls = []
+
+    def run(cmd, timeout):
+        calls.append(cmd)
+        rc, out, err = answers[len(calls) - 1]
+        return SF["subprocess"].CompletedProcess(cmd, rc, out, err)
+    monkeypatch.setitem(SF, "run", run)
+    SF["validate"](str(tmp_path / "f.yml"), str(tmp_path), "edge", "caddy")
+    return calls
+
+
+YAML_OK = """name: edge
+services:
+  caddy:
+    environment:
+      DOCKER_HOST: tcp://docker-api:2375
+    image: lucaslorentz/caddy-docker-proxy:2.12.0
+    networks:
+      caddy: null
+      docker-api: null
+  docker-api:
+    image: wollomatic/socket-proxy:1.13.1
+    volumes:
+      - type: bind
+        source: /var/run/docker.sock
+        target: /var/run/docker.sock
+networks:
+  docker-api:
+    internal: true
+"""
+
+
+def test_validate_refuses_what_compose_refused(monkeypatch, tmp_path):
+    err = "yaml: line 38: did not find expected <document start>\n"
+    with pytest.raises(SF["Bail"]) as e:
+        _validate_with(monkeypatch, tmp_path, [(1, "", err)])
+    assert e.value.code == "validate" and "document start" in e.value.detail
+    # старый compose без --format: ошибка разбора и там отказ
+    with pytest.raises(SF["Bail"]) as e:
+        _validate_with(monkeypatch, tmp_path, [(16, "", "unknown flag: --format\n"),
+                                               (15, "", 'service "caddy" refers to undefined network docker-api: invalid compose project\n')])
+    assert e.value.code == "validate" and "undefined network" in e.value.detail
+
+
+def test_validate_env_as_list(monkeypatch, tmp_path):
+    # compose 2.24 печатает environment списком, как в файле: это тоже DOCKER_HOST
+    cfg = {"services": {"caddy": {"environment": ["CADDY_INGRESS_NETWORKS=caddy", "DOCKER_HOST=tcp://docker-api:2375"],
+                                  "volumes": [{"source": "./data"}], "networks": {"caddy": None, "docker-api": None}},
+                        "docker-api": {}}}
+    _validate_with(monkeypatch, tmp_path, [(0, SF["json"].dumps(cfg), "")])
+    cfg["services"]["caddy"]["environment"][1] = "DOCKER_HOST=tcp://127.0.0.1:2375"
+    with pytest.raises(SF["Bail"]) as e:
+        _validate_with(monkeypatch, tmp_path, [(0, SF["json"].dumps(cfg), "")])
+    assert e.value.detail == "DOCKER_HOST did not land"
+
+
+def test_validate_old_compose_reads_the_yaml(monkeypatch, tmp_path):
+    flag = (16, "", "unknown flag: --format\n")
+    calls = _validate_with(monkeypatch, tmp_path, [flag, (0, YAML_OK, "")])
+    assert calls[1][-1] == "config" and "--format" not in calls[1]
+    # принял, но сокет остался у caddy или DOCKER_HOST не встал - тоже отказ
+    for bad, why in ((YAML_OK.replace("    image: lucaslorentz", "    volumes:\n      - /var/run/docker.sock:/var/run/docker.sock\n    image: lucaslorentz"), "socket"),
+                     (YAML_OK.replace("tcp://docker-api:2375", "tcp://127.0.0.1:2375"), "DOCKER_HOST"),
+                     (YAML_OK.replace("      docker-api: null\n", ""), "docker-api"),
+                     ("services: {}\n", "no service")):
+        with pytest.raises(SF["Bail"]) as e:
+            _validate_with(monkeypatch, tmp_path, [flag, (0, bad, "")])
+        assert e.value.code == "validate" and why in e.value.detail
+
+
+def test_refused_file_does_not_stay(monkeypatch, tmp_path):
+    src = tmp_path / "docker-compose.yml"
+    src.write_text(PLAIN, encoding="utf-8")
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "edge.yml").write_text("old\n", encoding="utf-8")
+    monkeypatch.setitem(SF, "OUT_DIR", str(out))
+    sock = tmp_path / "docker.sock"
+    sock.write_text("", encoding="utf-8")
+    monkeypatch.setitem(SF, "SOCKS", (str(sock),))
+    c = _cont("edge-caddy-1", "lucaslorentz/caddy-docker-proxy:2.12.0", [str(src)], str(tmp_path))
+    c["Mounts"] = [{"Source": str(sock)}]
+    made = set()
+
+    def refuse(path, wd, project, svc):
+        assert path.endswith(".new.yml") and open(path, encoding="utf-8").read().endswith("internal: true\n")
+        raise SF["Bail"]("validate", "did not find expected <document start>")
+    monkeypatch.setitem(SF, "validate", refuse)
+    it = SF["one"](c, "2.33.1", made)
+    assert not it["ok"] and it["why"] == "validate" and "fixed" not in it and not made
+    # старый файл проекта не подменен; что не в made, main() убирает из каталога
+    assert (out / "edge.yml").read_text(encoding="utf-8") == "old\n"
+    monkeypatch.setitem(SF, "validate", lambda *a: None)
+    it = SF["one"](c, "2.33.1", made)
+    assert it["ok"] and it["fixed"] == str(out / "edge.yml") and made == {"edge.yml"}
+    assert sorted(x.name for x in out.iterdir()) == ["edge.yml"]
+
+
 def test_diff_masks_secrets():
     m = SF["mask"]
     assert m("            ACME_TOKEN: s3cr3t") == "            ACME_TOKEN: ***"
@@ -220,7 +353,7 @@ def test_edge_item_and_override_file(tmp_path):
 
 
 def test_helper_script():
-    assert "KERVAX_SETUP_VERSION=0.2" in SRC and "KERVAX_SETUP_WHEN=" in SRC and "\r" not in SRC
+    assert "KERVAX_SETUP_VERSION=0.3  # MAJOR.MINOR" in SRC and "KERVAX_SETUP_WHEN=" in SRC and "\r" not in SRC
     # 0.2 ставится и туда, где обычный caddy без меток docker: его образ тоже смотрит в интернет
     assert "grep -q -e caddy -e traefik" in SRC
     # ничего не применяет: только копия файла 0600 в своем каталоге и отчет

@@ -21,10 +21,13 @@
 # compose file pins its image: the file, the line and the value as written. When the image is
 # older than a year, the panel builds the commands that move it to a fresh tag; this file still
 # edits nothing for that.
+# 0.3: a compose file that ends with the YAML end marker "..." (or starts with "---") is edited
+# inside its one document, a file with several documents gets a reason. The fixed file is checked
+# by docker compose before it lands in /var/lib/kervax/sockfix: a refused one is not left there.
 # Writes /var/lib/kervax/report.d/sockfix.json; the agent hands report.d to the panel as is.
 set -euo pipefail
 
-KERVAX_SETUP_VERSION=0.2  # MAJOR.MINOR; compared component-wise
+KERVAX_SETUP_VERSION=0.3  # MAJOR.MINOR; compared component-wise
 KERVAX_SETUP_WHEN="command -v docker >/dev/null 2>&1 && docker ps 2>/dev/null | grep -q -e caddy -e traefik -e nginx-proxy -e docker-gen"
 
 HELPER_DIR=/lib65/kervax
@@ -142,6 +145,25 @@ def first_sig(lines, start, end):
     return next((i for i in range(start, end) if sig(lines[i])), None)
 
 
+def doc(lines):
+    """the one YAML document of the file: [start, end) between its "---" and "..." markers. A file that
+    ends with "..." got the docker-api network written after it, into a second document, and docker
+    compose refused it; a file with several documents is not guessed at"""
+    parts, start = [], 0
+    for i, line in enumerate(lines):
+        m = re.match(r"^(---|\.\.\.)(\s|$)", line)
+        if m:
+            if sig(line[3:]):
+                raise Bail("layout", "line %d" % (i + 1))
+            parts.append((start, i))
+            start = i + 1
+    parts.append((start, len(lines)))
+    full = [(a, b) for a, b in parts if any(sig(x) and not x.startswith("%") for x in lines[a:b])]
+    if len(full) > 1:
+        raise Bail("multidoc", "%d documents" % len(full))
+    return full[0] if full else (0, len(lines))
+
+
 def items(lines, start, end):
     """list items of a block key: [(first, end, text)] and the indent of their "-" """
     out, cur, ii = [], None, None
@@ -165,6 +187,9 @@ def fix_caddy(text, svc, nets, has_ingress, gid, sock):
     lines = text.splitlines(True)
     if lines and not lines[-1].endswith(("\n", "\r")):
         lines[-1] += nl
+    # everything is added inside the document, the markers around it stay where they were
+    d0, d1 = doc(lines)
+    head, tail, lines = lines[:d0], lines[d1:], lines[d0:d1]
     top = block(lines, 0, len(lines), 0)
     if "services" not in top:
         raise Bail("v1")
@@ -291,12 +316,12 @@ def fix_caddy(text, svc, nets, has_ingress, gid, sock):
     else:
         add(len(lines), ["networks:", " " * u + "docker-api:", " " * (2 * u) + "internal: true"])
 
-    out = []
+    out = head[:]
     for i in range(len(lines) + 1):
         out.extend(ins.get(i, []))
         if i < len(lines) and i not in dels:
             out.append(lines[i])
-    return "".join(out)
+    return "".join(out + tail)
 
 
 def mask(line):
@@ -324,21 +349,45 @@ def validate(path, wd, project, svc):
     cmd = ["docker", "compose", "-p", project, "--project-directory", wd, "-f", path, "config", "--format", "json"]
     r = run(cmd, 60)
     if r.returncode != 0 and "unknown flag" in r.stderr:
-        # an old compose v2 without --format can only say whether the file is valid
-        r = run(cmd[:-2] + ["-q"], 60)
+        # an old compose v2 without --format prints YAML: the same checks, read from it as text
+        r = run(cmd[:-2], 60)
         if r.returncode == 0:
-            return
+            return landed(*from_yaml(r.stdout, svc))
     if r.returncode != 0:
         raise Bail("validate", (r.stderr.strip().splitlines() or ["failed"])[-1][:200])
     cfg = json.loads(r.stdout)
     s = cfg["services"][svc]
-    if any("docker.sock" in str(v.get("source", "")) for v in s.get("volumes") or []):
-        raise Bail("validate", "the socket is still mounted")
     envs = s.get("environment") or {}
-    if (envs.get("DOCKER_HOST") if isinstance(envs, dict) else None) != "tcp://docker-api:2375":
+    if isinstance(envs, list):  # compose 2.24 prints the list as written: ["K=V"]
+        envs = dict(str(x).partition("=")[::2] for x in envs)
+    landed(any("docker.sock" in str(v.get("source", "")) for v in s.get("volumes") or []),
+           (envs.get("DOCKER_HOST") if isinstance(envs, dict) else None) == "tcp://docker-api:2375",
+           "docker-api" in cfg["services"] and "docker-api" in (s.get("networks") or {}))
+
+
+def landed(sock, host, api):
+    if sock:
+        raise Bail("validate", "the socket is still mounted")
+    if not host:
         raise Bail("validate", "DOCKER_HOST did not land")
-    if "docker-api" not in cfg["services"] or "docker-api" not in (s.get("networks") or {}):
+    if not api:
         raise Bail("validate", "docker-api did not land")
+
+
+def from_yaml(text, svc):
+    """what landed() needs, from the YAML docker compose config printed: (socket, DOCKER_HOST, docker-api)"""
+    try:
+        lines = text.splitlines(True)
+        s0, s1 = block(lines, 0, len(lines), 0)["services"]
+        svcs = block(lines, s0 + 1, s1, ind(lines[first_sig(lines, s0 + 1, s1)]))
+        a0, a1 = svcs[svc]
+        keys = block(lines, a0 + 1, a1, ind(lines[first_sig(lines, a0 + 1, a1)]))
+        body = "".join(lines[a0:a1])
+        nets = "".join(lines[slice(*keys["networks"])]) if "networks" in keys else ""
+    except (Bail, KeyError, TypeError, IndexError):
+        raise Bail("validate", "docker compose config printed no service " + svc)
+    return ("docker.sock" in body, bool(re.search(r"DOCKER_HOST: [\"']?tcp://docker-api:2375\b", body)),
+            "docker-api" in svcs and "docker-api" in nets)
 
 
 def one(c, cv, made):
@@ -386,12 +435,15 @@ def one(c, cv, made):
         new = fix_caddy(src, it["service"], [n for n in it["nets"] if n != "docker-api"],
                         "CADDY_INGRESS_NETWORKS" in env, it["gid"], sock)
         dst = os.path.join(OUT_DIR, re.sub(r"[^A-Za-z0-9_.-]", "_", it["project"]) + ".yml")
-        fd = os.open(dst + ".tmp", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        # checked before it takes the place of the file: a file docker compose refused stays out of
+        # the directory, and the stale file of this project goes with the cleanup in main()
+        tmp = dst[:-4] + ".new.yml"
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             fh.write(new)
-        os.replace(dst + ".tmp", dst)
+        validate(tmp, it["dir"], it["project"], it["service"])
+        os.replace(tmp, dst)
         made.add(os.path.basename(dst))
-        validate(dst, it["dir"], it["project"], it["service"])
         it["fixed"] = dst
         diff = difflib.unified_diff(src.splitlines(), new.splitlines(), os.path.basename(f),
                                     os.path.basename(f) + " (fixed)", lineterm="", n=2)
@@ -420,6 +472,9 @@ def image_at(text, svc):
     """the image of the service in one compose file: (line, value as written, built here), line 0 -
     no image key; None - the service is not in this file"""
     lines = text.splitlines(True)
+    # only the one document counts; the lines around it are blanked so the line numbers stay
+    d0, d1 = doc(lines)
+    lines = ["\n"] * d0 + lines[d0:d1] + ["\n"] * (len(lines) - d1)
     top = block(lines, 0, len(lines), 0)
     if "services" not in top:
         raise Bail("v1")

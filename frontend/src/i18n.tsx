@@ -4394,6 +4394,7 @@ const EN: Record<string, string> = {
   'Доступ к Docker (прокси)': 'Docker access (proxy)',
   'файл размечен необычно (табы или сбитые отступы)': 'the file has an unusual layout (tabs or broken indentation)',
   'файл старого формата compose v1, без services:': 'the file is in the old compose v1 format, without services:',
+  'в файле несколько YAML-документов (---), какой из них правится, не угадать': 'the file holds several YAML documents (---), no telling which one to edit',
   'в файле якоря YAML (&, *, <<), такую разметку надежно не поправить': 'the file uses YAML anchors (&, *, <<), such a layout cannot be edited reliably',
   'нужный ключ записан в одну строку ([...] или {...})': 'a key it needs is written inline ([...] or {...})',
   'сервиса нет в файле, из которого его запустили': 'the service is not in the file it was started from',
