@@ -59,15 +59,32 @@ export async function stopImpersonation(): Promise<void> {
 // Учетка только для просмотра: бэкенд (deps.py) отказывает ей в любом изменении, кроме своей
 // учетки и журнала ошибок. Одна проверка на все запросы: изменение от нее не уходит на сервер
 // вовсе, человек сразу видит понятный отказ. Кнопки изменений при этом не рисуются (canWrite в
-// auth.tsx), а эта проверка ловит то, что прятать забыли. App ставит флаг по роли из /me
+// auth.tsx), а эта проверка ловит то, что прятать забыли. App ставит флаг по роли из /me.
+// Исключение - чтение логов, если админ разрешил его учетке галкой: это команда агенту через тот
+// же POST, что и рестарт, поэтому пропускается только команда с действием чтения (как в deps.py)
 const VIEWER_WRITES = ['/api/auth/', '/api/panel-errors/front', '/api/panel-errors/report']
 export const VIEWER_READ_ONLY = 'Учетная запись только для просмотра: изменения запрещены'
+const LOG_CMD = /^\/api\/servers\/\d+\/(docker|kube|backup)\/command$/
+const LOG_ACTIONS: Record<string, string[]> = { docker: ['logs'], kube: ['logs', 'logs_prev'], backup: ['unit_journal'] }
 let readOnly = false
-export function setReadOnly(v: boolean): void {
+let logsReadable = false
+export function setReadOnly(v: boolean, logs = false): void {
   readOnly = v
+  logsReadable = v && logs
 }
-export function writeBlocked(method: string, path: string): boolean {
+function readsLogs(method: string, path: string, body: unknown): boolean {
+  const m = LOG_CMD.exec(path)
+  if (!logsReadable || method !== 'POST' || !m || typeof body !== 'string') return false
+  try {
+    const action = (JSON.parse(body) as { action?: unknown }).action
+    return typeof action === 'string' && LOG_ACTIONS[m[1]].includes(action)
+  } catch {
+    return false
+  }
+}
+export function writeBlocked(method: string, path: string, body?: unknown): boolean {
   return readOnly && method !== 'GET' && method !== 'HEAD' && !VIEWER_WRITES.some((p) => path.startsWith(p))
+    && !readsLogs(method, path, body)
 }
 
 export class ApiError extends Error {
@@ -89,7 +106,7 @@ export async function api<T>(path: string, options: RequestInit = {}): Promise<T
   const token = getToken()
   if (token) headers['Authorization'] = `Bearer ${token}`
   const method = (options.method || 'GET').toUpperCase()
-  if (writeBlocked(method, path)) throw new ApiError(tr(VIEWER_READ_ONLY), 403)
+  if (writeBlocked(method, path, options.body)) throw new ApiError(tr(VIEWER_READ_ONLY), 403)
 
   let res: Response
   try {
@@ -145,6 +162,8 @@ export type UserOut = {
   // видимые группы; у серверов и у сайтов свои наборы имён, поэтому списки раздельные
   server_groups?: string[] | null
   site_groups?: string[] | null
+  // учетке только для просмотра админ разрешил читать логи контейнеров, подов и журнал systemd
+  can_read_logs?: boolean
   // админ вошел под этой учеткой: кто и до какого времени (плашка сверху)
   impersonator?: string | null
   imp_expires?: string | null
@@ -172,6 +191,7 @@ export type PanelUser = {
   sections?: string[] | null
   server_groups?: string[] | null
   site_groups?: string[] | null
+  can_read_logs?: boolean
   totp_enabled: boolean
   created_at: string
 }
@@ -179,7 +199,7 @@ export type PanelUser = {
 // Правка роли и границ доступа существующей учётки (пароль — отдельным вызовом).
 export function updateUser(
   id: number,
-  body: { role?: Role; sections?: string[]; server_groups?: string[]; site_groups?: string[] },
+  body: { role?: Role; sections?: string[]; server_groups?: string[]; site_groups?: string[]; can_read_logs?: boolean },
 ): Promise<PanelUser> {
   return api<PanelUser>(`/api/users/${id}`, { method: 'PATCH', body: JSON.stringify(body) })
 }

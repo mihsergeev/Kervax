@@ -6,12 +6,15 @@ import type { Role } from './api'
 //   isViewer — только чтение (роль viewer)
 //   canWrite — можно ли что-то менять: кнопки изменений (рестарт, мьют, настройка бэкапа...) рисуются
 //              только при нем. Запрос на изменение от наблюдателя api.ts не отправит вовсе
+//   canLogs  — можно ли читать логи контейнеров, подов и журнал systemd: всем, кроме наблюдателя;
+//              ему - если админ поставил галку (в логах бывают пароли и токены)
 //   isAdmin  — учётки и настройки панели (роль admin; editor их не получает)
 //   sections — разрешённые вкладки; пусто = все
 export type Auth = {
   role: Role
   isViewer: boolean
   canWrite: boolean
+  canLogs: boolean
   isAdmin: boolean
   sections: string[]
   username: string // чтобы отличать свою учётку от чужой (напр. запрет самоудаления)
@@ -21,6 +24,7 @@ const AuthContext = createContext<Auth>({
   role: 'admin',
   isViewer: false,
   canWrite: true,
+  canLogs: true,
   isAdmin: true,
   sections: [],
   username: '',

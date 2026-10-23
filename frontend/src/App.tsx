@@ -77,6 +77,7 @@ export default function App() {
   const [role, setRole] = useState<Role>('admin')
   // разделы, разрешённые учётке; пустой список = все (см. backend/app/deps.py)
   const [sections, setSections] = useState<string[]>([])
+  const [logsOpen, setLogsOpen] = useState(false) // галка "может читать логи" учетки только для просмотра
   const [username, setUsername] = useState('')
   // админ вошел под этой учеткой: кто, до какого времени и что ей видно (плашка сверху)
   const [imp, setImp] = useState<{ by: string; expires: string; serverGroups: string[]; siteGroups: string[] } | null>(null)
@@ -258,7 +259,8 @@ export default function App() {
     me()
       .then((u) => {
         setRole(u.role)
-        setReadOnly(u.role === 'viewer')
+        setReadOnly(u.role === 'viewer', !!u.can_read_logs)
+        setLogsOpen(!!u.can_read_logs)
         setSections(u.sections ?? [])
         setUsername(u.username)
         setImp(
@@ -323,6 +325,7 @@ export default function App() {
         role,
         isViewer: role === 'viewer',
         canWrite: role !== 'viewer',
+        canLogs: role !== 'viewer' || logsOpen,
         isAdmin: role === 'admin',
         sections,
         username,

@@ -130,11 +130,14 @@ async def create_user(
         sections=body.sections,
         server_groups=body.server_groups,
         site_groups=body.site_groups,
+        can_read_logs=body.can_read_logs and body.role == "viewer",
     )
     session.add(user)
     await session.commit()
     await session.refresh(user)
     await audit.record(session, admin.username, "user_create", user.username, user.role)
+    if user.can_read_logs:
+        await audit.record(session, admin.username, "user_logs_on", user.username)
     return user
 
 
@@ -179,9 +182,18 @@ async def update_user(
         user.server_groups = body.server_groups
     if body.site_groups is not None:
         user.site_groups = body.site_groups
+    # Галка чтения логов имеет смысл только у учетки только для просмотра: другим ролям логи
+    # открыты и так. При смене роли она снимается, чтобы при возврате к просмотру логи не
+    # открылись сами собой
+    logs = user.can_read_logs if body.can_read_logs is None else body.can_read_logs
+    logs = logs and user.role == "viewer"
+    logs_changed = logs != user.can_read_logs
+    user.can_read_logs = logs
     await session.commit()
     await session.refresh(user)
     await audit.record(session, admin.username, "user_scope", user.username)
+    if logs_changed:
+        await audit.record(session, admin.username, "user_logs_on" if logs else "user_logs_off", user.username)
     return user
 
 

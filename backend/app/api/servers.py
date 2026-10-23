@@ -66,7 +66,7 @@ from app.setup_scripts import (
     setup_scripts as _setup_scripts,
 )
 from app.config import get_settings
-from app.deps import AdminUser, CurrentUser, SessionDep, group_allowed, scope_query
+from app.deps import AdminUser, CurrentUser, SessionDep, group_allowed, scope_query, viewer_command_ok
 from app.models import (
     AgentPathProbe,
     AgentProbe,
@@ -1939,6 +1939,13 @@ async def server_oom_events(
     return [OomEventOut.model_validate(r) for r in rows]
 
 
+def _cmd_visible(user, c) -> bool:
+    """Результат команды (в нем бывает лог) учетке только для просмотра - только своей и только
+    с галкой "может читать логи": иначе чужой лог, запрошенный админом, она прочитала бы по
+    номеру команды, а свой - уже после того, как галку сняли."""
+    return user.role in ("admin", "editor") or (user.can_read_logs and c.created_by == user.username)
+
+
 async def _take_docker_commands(session, server_id: int) -> list[dict]:
     """Забирает pending docker-команды сервера, помечает running (не переслать
     повторно), возвращает для агента. Общий код /report и /commands (НЕ коммитит)."""
@@ -1980,6 +1987,7 @@ async def docker_command(
 ) -> DockerCommandOut:
     """Поставить docker-действие в очередь (агент заберёт в ответе на отчёт, ~15с).
     Исполняется через read-only proxy: только restart/stop/start + logs."""
+    viewer_command_ok(user, "docker", body.action)
     await _get_or_404(server_id, session, user)
     c = DockerCommand(
         server_id=server_id, container=body.container, action=body.action,
@@ -1999,8 +2007,9 @@ async def docker_command_status(
     server_id: int, cmd_id: int, user: CurrentUser, session: SessionDep, request: Request
 ) -> DockerCommandOut:
     """Статус/результат команды — панель поллит после постановки."""
+    await _get_or_404(server_id, session, user)
     c = await session.get(DockerCommand, cmd_id)
-    if c is None or c.server_id != server_id:
+    if c is None or c.server_id != server_id or not _cmd_visible(user, c):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Команда не найдена")
     was = c.status
     out = _docker_cmd_out(c, datetime.now(timezone.utc))
@@ -2108,6 +2117,7 @@ async def kube_command(
 ) -> KubeCommandOut:
     """Поставить kube-действие в очередь (агент заберёт ~1-15с). Исполняется по токену
     узкого SA: только rollout_restart (deploy/sts/ds), delete_pod, logs."""
+    viewer_command_ok(user, "kube", body.action)
     await _get_or_404(server_id, session, user)
     c = KubeCommand(
         server_id=server_id, ns=body.ns, kind=body.kind, name=body.name,
@@ -2127,8 +2137,9 @@ async def kube_command(
 async def kube_command_status(
     server_id: int, cmd_id: int, user: CurrentUser, session: SessionDep, request: Request
 ) -> KubeCommandOut:
+    await _get_or_404(server_id, session, user)
     c = await session.get(KubeCommand, cmd_id)
-    if c is None or c.server_id != server_id:
+    if c is None or c.server_id != server_id or not _cmd_visible(user, c):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Команда не найдена")
     was = c.status
     out = _kube_cmd_out(c, datetime.now(timezone.utc))
@@ -2181,6 +2192,7 @@ async def backup_command(
 ) -> BackupCommandOut:
     """Поставить backup-действие в очередь (агент заберёт ~1-15с). Исполняется через
     узкий helper: только set_paths / set_schedule / run_now."""
+    viewer_command_ok(user, "backup", body.action)
     srv = await _get_or_404(server_id, session, user)
     # engine/container нужны только dump_setup — кладём в payload (агент мержит его
     # в команду верхним уровнем), чтобы не плодить колонки под разовые поля
@@ -2213,7 +2225,7 @@ async def backup_command(
         payload = {"name": body.unit}
     elif body.action == "unit_journal":
         # Журнал юнита, всей системы (_all) или ядра (_kernel): только чтение, через тот же
-        # helper units-setup (0.4+). Viewer'у не дает общий запрет изменяющих методов.
+        # helper units-setup (0.4+). Viewer'у - только с галкой "может читать логи" (deps.py).
         if not body.unit:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "не указан юнит")
         payload = {"name": body.unit, "since": body.since_min, "lines": body.lines, "prio": body.prio}
@@ -2258,8 +2270,9 @@ async def backup_command(
 async def backup_command_status(
     server_id: int, cmd_id: int, user: CurrentUser, session: SessionDep, request: Request
 ) -> BackupCommandOut:
+    await _get_or_404(server_id, session, user)
     c = await session.get(BackupCommand, cmd_id)
-    if c is None or c.server_id != server_id:
+    if c is None or c.server_id != server_id or not _cmd_visible(user, c):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Команда не найдена")
     was = c.status
     out = _backup_cmd_out(c, datetime.now(timezone.utc))

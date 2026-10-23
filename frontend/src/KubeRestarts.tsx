@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { updateServer, type KubeLast, type KubeRestartPod, type KubeRestarts, type Server } from './api'
 import { useI18n } from './i18n'
+import { LockedLogs } from './LogsLocked'
 import { shortList } from './serverUtils'
 
 // Раздел "Перезапуски" окна кластера: сюда ведет алерт kube_restarts. У каждого пода, который
@@ -130,6 +131,8 @@ function RestartRow({
             <button className="ghost small" onClick={onPrevLogs}>
               📄 {t('Лог прошлого запуска')}
             </button>
+          ) : prevOk && s.online ? (
+            <LockedLogs className="ghost small">📄 {t('Лог прошлого запуска')}</LockedLogs>
           ) : (
             <span className="muted">{t('Лог прошлого запуска и описание пода:')}</span>
           )}
@@ -157,7 +160,7 @@ export function KubeRestartsSec({
   data: KubeRestarts
   flavor?: string
   canAct: boolean
-  onPrevLogs?: (p: KubeRestartPod) => void // нет у учетки только для просмотра
+  onPrevLogs?: (p: KubeRestartPod) => void // нет - логи закрыты учетке, кнопка приглушена
   onChanged: () => void
 }) {
   const { t } = useI18n()
