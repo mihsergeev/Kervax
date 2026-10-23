@@ -16,7 +16,7 @@ from collections import Counter
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import NamedTuple
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 from sqlalchemy import and_, delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -27,7 +27,7 @@ from app import os_support
 from app import request_watch
 from app import panel_errors
 from app import inside_probe
-from app import job_logs
+from app import job_logs, kube_cron
 from app import retention as retention_mod
 from app import db_health
 from app import access_audit
@@ -2246,10 +2246,6 @@ _DUMP_CRON_DB_KEYS = (
     "neo4j", "rabbitmq", "couchdb", "mssql", "sqlserver", "prometheus", "minio",
     "vault", "consul", "grafana",
 )
-# «в процессе» с запасом: запланированный прогон не считаем упавшим ещё 2 ч (длительный дамп)
-_CRON_DUMP_SLACK_SECONDS = 2 * 3600
-
-
 def _looks_dump_cron(cj: dict) -> bool:
     """Тот же матч, что _backup_coverage.existing: образ СУБД + намёк на дамп в имени/образе."""
     nm = (cj.get("name") or "").lower()
@@ -2258,69 +2254,33 @@ def _looks_dump_cron(cj: dict) -> bool:
     return any(k in img and (looks_backup or k in nm) for k in _DUMP_CRON_DB_KEYS)
 
 
-def _cron_interval_seconds(sched: str) -> int:
-    """Грубая оценка интервала cron-расписания (5 полей) в секундах. Неизвестно → сутки.
-    Нужна, чтобы порог «давно нет успеха» был адекватен частоте (ежечасный ≠ ежедневный)."""
-    p = (sched or "").split()
-    if len(p) != 5:
-        return 86400
-    minute, hour, dom, _mon, dow = p
-    if minute.startswith("*/"):
-        return max(int(minute[2:] or 1) * 60, 60)
-    if minute == "*":
-        return 60
-    if hour == "*":
-        return 3600
-    if hour.startswith("*/"):
-        return max(int(hour[2:] or 1) * 3600, 3600)
-    if dow != "*":
-        return 7 * 86400          # по дню недели → еженедельно
-    if dom.startswith("*/"):
-        return max(int(dom[2:] or 1) * 86400, 86400)
-    if dom != "*":
-        return 28 * 86400         # конкретное число месяца → ~ежемесячно
-    return 86400                  # M H * * * → ежедневно
-
-
-def cron_job_issues(rep: dict, now: datetime, dumps: bool) -> dict[str, str]:
-    """Проблемные CronJob кластера: {ns/имя: причина}. dumps=True - только дамп-CronJob'ы
-    (у них и "приостановлен" - проблема: бэкап встал), иначе все остальные (приостановленный
-    обычный крон - чье-то решение, не поломка). Идущий прямо сейчас прогон (active) не трогаем,
-    если он не завис: идет дольше двух интервалов (минимум сутки), а новых запусков нет. Так
-    стоял descheduler раз в 5 минут, у которого прогон "шел" 132 дня.
-    Порог несвежести - 2 интервала расписания (минимум 2ч): daily-крон молчит сутки, но не
-    пропустит "не отработал 2 дня" - даже если CronJob вообще перестал стартовать (тогда
-    last_schedule и last_success замирают вместе, и сравнение ls-ok эту дыру не ловит)."""
-    out: dict[str, str] = {}
-    nowts = now.timestamp()
-    for cj in ((rep.get("kube") or {}).get("cronjobs") or []):
+def cron_job_items(rep: dict, now: datetime, dumps: bool, state: dict | None = None) -> dict[str, dict]:
+    """Проблемные CronJob кластера с разбором: {ns/имя: {"kind", "why", "detail", "log"}}
+    (app/kube_cron.py). dumps=True - только дамп-CronJob'ы (у них и "приостановлен" - проблема:
+    бэкап встал), иначе все остальные (приостановленный обычный крон - чье-то решение, не
+    поломка). state - alert_state сервера: по нему видно, что расписание недавно сменилось."""
+    out: dict[str, dict] = {}
+    for cj in kube_cron.cronjobs(rep):
         if _looks_dump_cron(cj) != dumps:
             continue
-        name = f"{cj.get('ns', '?')}/{cj.get('name', '?')}"
-        if cj.get("suspend"):
-            if dumps:
-                out[name] = "приостановлен"
-            continue
-        ls = int(cj.get("last_schedule") or 0)
-        ok = int(cj.get("last_success") or 0)
-        every = _cron_interval_seconds(cj.get("schedule", ""))
-        if cj.get("active"):
-            if ls and nowts - ls > max(every * 2, 86400):
-                out[name] = f"прогон идет {round((nowts - ls) / 86400, 1)} дн, новых запусков нет"
-            continue  # прогон идёт — рано паниковать
-        stale_after = max(every * 2, 2 * 3600)
-        if ok > 0 and nowts - ok > stale_after:
-            what = "дампа" if dumps else "прогона"
-            out[name] = f"нет успешного {what} {round((nowts - ok) / 86400, 1)} дн"
-        elif ls and (ok == 0 or ls - ok > _CRON_DUMP_SLACK_SECONDS):
-            out[name] = "последний прогон не удался"
+        if (it := kube_cron.issue(rep, cj, now, state, dumps)) is not None:
+            out[kube_cron.key(cj)] = it
     return out
 
 
-def _cron_dump_problems(rep: dict, now: datetime) -> list[str]:
+def cron_job_issues(rep: dict, now: datetime, dumps: bool, state: dict | None = None) -> dict[str, str]:
+    """Проблемные CronJob кластера: {ns/имя: причина}. Идущий прямо сейчас прогон не трогаем,
+    если он не завис: идет дольше двух интервалов (минимум сутки), а новых запусков нет. Так
+    стоял descheduler раз в 5 минут, у которого прогон "шел" 132 дня.
+    Порог несвежести - 2 интервала расписания (минимум 2ч). Запуски идут и падают - "упал" с
+    причиной, запусков нет - "не запускается" с причиной из событий CronJob."""
+    return {k: v["why"] for k, v in cron_job_items(rep, now, dumps, state).items()}
+
+
+def _cron_dump_problems(rep: dict, now: datetime, state: dict | None = None) -> list[str]:
     """Проблемные дамп-CronJob'ы строками "ns/имя (причина)". Панель их раньше только
     детектила - теперь мониторит (правило: любой настроенный бэкап должен алертить)."""
-    return sorted(f"{n} ({why})" for n, why in cron_job_issues(rep, now, dumps=True).items())
+    return sorted(f"{n} ({why})" for n, why in cron_job_issues(rep, now, True, state).items())
 
 
 def _backup_problem_repos(
@@ -3999,12 +3959,12 @@ def server_problems(s: Server, now: datetime, pod_names: dict[str, str] | None =
         add("backup_dump_space", 2, f"дамп пропущен, мало места (свободно {free}%): " + ", ".join(skipped),
             "coverage", "backup_dump_space", section="backups", srv=False)
     if (rep.get("kube") or {}).get("access"):
-        cron = _cron_dump_problems(rep, now)
+        cron = _cron_dump_problems(rep, now, state)
         if cron:
             add("backup_cron", 2, "дамп-CronJob не отрабатывает: " + "; ".join(cron[:3])
                 + (f" и еще {len(cron) - 3}" if len(cron) > 3 else ""), "coverage", "backup_cron",
                 section="backups", srv=False)
-        kc = sorted(f"{n} ({why})" for n, why in cron_job_issues(rep, now, dumps=False).items())
+        kc = sorted(f"{n} ({why})" for n, why in cron_job_issues(rep, now, False, state).items())
         if kc:
             add("kube_cron", 1, ("CronJob не отрабатывает: " if len(kc) == 1 else "CronJob не отрабатывают: ")
                 + "; ".join(kc[:3]) + (f" и еще {len(kc) - 3}" if len(kc) > 3 else ""), "cron", "kube_cron",
@@ -6016,13 +5976,19 @@ def _server_conditions(s: Server, now: datetime,
     # часто без него). Панель раньше только детектила «дамп настроен» — теперь алертит,
     # если CronJob приостановлен или его последний прогон не завершился успехом.
     if online and (rep.get("kube") or {}).get("access"):
-        cron = _cron_dump_problems(rep, now)
+        cron = _cron_dump_problems(rep, now, state)
         out["backup_cron"] = (1 if cron else 0, {"jobs": "; ".join(cron[:6]), "n": len(cron)})
         # Остальные CronJob кластера: задание по расписанию упало или перестало отрабатывать.
         # Предупреждение, как у упавшего oneshot-юнита: сервис живой, не сделана работа.
-        kc = sorted(f"{n} ({why})" for n, why in cron_job_issues(rep, now, dumps=False).items())
-        out["kube_cron"] = (1 if kc else 0, {"jobs": "; ".join(kc[:6]) + (f" и еще {len(kc) - 6}" if len(kc) > 6 else ""),
-                                             "n": len(kc)})
+        # items - разбор для короткого алерта (упал/не запускается, причина, строка лога),
+        # у одного CronJob ссылка ведет прямо на его строку и открывает лог или причину
+        ki = cron_job_items(rep, now, False, state)
+        kc = sorted(f"{n} ({v['why']})" for n, v in ki.items())
+        kctx = {"jobs": "; ".join(kc[:6]) + (f" и еще {len(kc) - 6}" if len(kc) > 6 else ""), "n": len(kc),
+                "items": [{"name": n, **v} for n, v in sorted(ki.items())]}
+        if len(ki) == 1:
+            kctx["url_tail"] = "&cj=" + quote(next(iter(ki)), safe="/") + "&log=1"
+        out["kube_cron"] = (1 if kc else 0, kctx)
     # Свои бэкапы ноды (настроены без панели; находит helper): упал прогон, давно не было
     # успешного, выключен таймер. Состояния устойчивые, как и у restic, — без дебаунса.
     if online:
@@ -7090,6 +7056,11 @@ async def evaluate_servers(
             rstate = srv_restarts.update(st.get("restarts"), s.last_report or {}, now)
             if rstate != (st.get("restarts") or {}):
                 apply(s.id, "restarts", rstate)
+            # расписания CronJob: сменившееся расписание - не "не отработал" (kube_cron.track)
+            if kube_cron.cronjobs(s.last_report) or st.get(kube_cron.STATE_KEY):
+                cstate = kube_cron.track(st.get(kube_cron.STATE_KEY), s.last_report, now)
+                if cstate != (st.get(kube_cron.STATE_KEY) or {}):
+                    apply(s.id, kube_cron.STATE_KEY, cstate)
             # история слушающих портов: какой порт держится неделями и пропал (listen_watch)
             lstate = listen_watch.update(st.get("listen_hist"), s.last_report or {}, now)
             if lstate is not None and lstate != (st.get("listen_hist") or {}):

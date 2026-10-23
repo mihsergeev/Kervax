@@ -5136,6 +5136,20 @@ const EN: Record<string, string> = {
   'поды, Job и CronJob': 'pods, Jobs and CronJobs',
   'не алертить об упавших Job:': 'do not alert about failed Jobs:',
   'не алертить об упавших Job': 'do not alert about failed Jobs',
+  // --- лог последнего запуска CronJob и почему он упал или не запускается (KuberPage) ---
+  'Лог последнего запуска': 'Log of the last run',
+  'успешно': 'succeeded',
+  'код {x}': 'code {x}',
+  'приостановлен (suspend: true)': 'suspended (suspend: true)',
+  'идет Job {job}': 'Job {job} is running',
+  'чем кончился, неизвестно': 'outcome unknown',
+  'Запусков еще не было': 'No runs yet',
+  'строка лога:': 'log line:',
+  'событие {r} {a} назад': 'event {r} {a} ago',
+  'Лог не сохранился: Job удален по истории': 'The log was not kept: the Job was removed by history limits',
+  'упавших Job хранится: {n} (failedJobsHistoryLimit)': 'failed Jobs kept: {n} (failedJobsHistoryLimit)',
+  'Job удаляется через {n} с после конца (ttlSecondsAfterFinished)': 'the Job is removed {n} s after it ends (ttlSecondsAfterFinished)',
+  'Пода этого Job в отчете нет, лог не найти': 'The pod of this Job is not in the report, the log cannot be found',
   // --- окно хранения данных разделами (RetentionModal) ---
   'История проверок':
     'Check history',

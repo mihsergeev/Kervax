@@ -318,6 +318,27 @@ def site(kind: str, status: str, msg: str) -> tuple[str, str, list[str]] | str:
     return "🔴🌐", tg_fmt.split_detail(msg)[0], tg_fmt.split_detail(msg)[1]
 
 
+_CRON_WHAT = {"fail": "Упал CronJob", "nostart": "CronJob не запускается", "hang": "Завис CronJob"}
+_CRON_DAYS = re.compile(r"(\d+(?:\.\d+)?) дн(?!\w)")
+
+
+def _kube_cron(ctx: dict) -> tuple[str, list[str]]:
+    """Один CronJob: упал (причина и строка из конца лога, если агент ее прислал), не запускается
+    (сколько и почему) или завис. Несколько - именами, разбор в панели."""
+    items = [x for x in ctx.get("items") or [] if isinstance(x, dict) and x.get("name")]
+    if not items:  # контекст старого формата
+        names = _split_names(ctx.get("jobs") or "")
+        return ("Не отработал CronJob" if len(names) == 1 else "Не отрабатывают CronJob"), [tg_fmt.names(names)]
+    if len(items) > 1:
+        return "Не отрабатывают CronJob", [tg_fmt.names([x["name"] for x in items])]
+    it = items[0]
+    detail = _CRON_DAYS.sub(lambda m: tg_fmt.days(int(float(m.group(1)))), str(it.get("detail") or ""))
+    facts = [f"{it['name']} - {detail}" if detail else str(it["name"])]
+    if it.get("log"):
+        facts.append(tg_fmt.fact("Последняя строка лога", str(it["log"])))
+    return _CRON_WHAT.get(str(it.get("kind") or ""), "Не отработал CronJob"), facts
+
+
 def short(key: str, ctx: dict, s, detail: str = "", level: int = 1,
           now: datetime | None = None) -> tuple[str, list[str]]:
     """(что случилось, конкретика) для вида key. detail - полный текст: из него запасной разбор."""
@@ -501,8 +522,7 @@ def _short(key: str, ctx: dict, s, level: int):
             facts = facts[:1] + [f"и еще {len(texts) - 1}"]
         return what, facts
     if key == "kube_cron":
-        names = _split_names(ctx.get("jobs") or "")
-        return ("Не отработал CronJob" if len(names) == 1 else "Не отрабатывают CronJob"), [tg_fmt.names(names)]
+        return _kube_cron(ctx)
     if key == "kube_job":
         jobs = items or []
         if not jobs:

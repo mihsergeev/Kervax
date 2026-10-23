@@ -317,8 +317,8 @@ def _out(
         o.onboard = {"until": onboard.until(server).isoformat()}
     o.problems = server_problems(server, now, pod_names, web_err)
     if ((server.last_report or {}).get("kube") or {}).get("access"):
-        o.kube_cron_issues = {**cron_job_issues(server.last_report, now, True),
-                              **cron_job_issues(server.last_report, now, False)}
+        o.kube_cron_issues = {**cron_job_issues(server.last_report, now, True, server.alert_state),
+                              **cron_job_issues(server.last_report, now, False, server.alert_state)}
     o.alert_since = alert_since(server)
     o.docker_since = docker_since(server)
     o.backup_growth = backup_growth.jump(server, now)
