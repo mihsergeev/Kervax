@@ -206,6 +206,75 @@ async def test_to_https_orchestration_steps(client, auth_headers, monkeypatch):
         assert job.status == "error" and "stays on http" in job.message
 
 
+def test_https_dest_and_switch():
+    h = backup_target.https_dest
+    assert h("rest:http://203.0.113.5:64100/node-a/", 64101) == "rest:https://203.0.113.5:64101/node-a/"
+    assert h("rest:http://backup.example.com/node-a", 64101) == "rest:https://backup.example.com:64101/node-a"
+    assert h("rest:http://[2001:db8::5]:64100/node-a/", 64101) == "rest:https://[2001:db8::5]:64101/node-a/"
+    assert h("rest:http://node-a:fakepass@203.0.113.5:64100/node-a/", 64101) == "rest:https://203.0.113.5:64101/node-a/"
+    assert h("rest:https://203.0.113.5:64101/node-a/", 64101) == "" and h("sftp:host-b:/srv", 64101) == ""
+
+    rep = {"cpu_percent": 5, "backup": {"present": True, "repo_dest": "rest:http://203.0.113.5:64100/node-a/"}}
+    new = backup_target.switched(rep, "64101", 1000.0)
+    assert new["backup"] == {"present": True, "repo_dest": "rest:https://203.0.113.5:64101/node-a/"}
+    assert new["cpu_percent"] == 5 and rep["backup"]["repo_dest"].startswith("rest:http:")  # старый не тронут
+    assert backup_target.view(new)["insecure"] is False
+    assert backup_target.switched(rep, None, 1000.0) is None
+    assert backup_target.switched(new, 64101, 1000.0) is None  # уже https
+    assert backup_target.switched({}, 64101, 1000.0) is None
+
+    # отчет, собранный до переключения, старый адрес не возвращает
+    late = {"backup": {"repo_dest": "rest:http://203.0.113.5:64100/node-a/"}}
+    backup_target.carry(new, late, 1060.0)
+    assert late["backup"]["repo_dest"] == "rest:https://203.0.113.5:64101/node-a/"
+    assert late[backup_target.SWITCH_KEY] == new[backup_target.SWITCH_KEY]
+    # агент прислал https - переключение подтверждено, отметка больше не нужна
+    ok = {"backup": {"repo_dest": "rest:https://203.0.113.5:64101/node-a/"}}
+    backup_target.carry(late, ok, 1090.0)
+    assert backup_target.SWITCH_KEY not in ok
+    # агент и через SWITCH_HOLD шлет http - верим ему, плашка возвращается
+    still = {"backup": {"repo_dest": "rest:http://203.0.113.5:64100/node-a/"}}
+    backup_target.carry(late, still, 1000.0 + backup_target.SWITCH_HOLD + 1)
+    assert backup_target.view(still)["insecure"] is True and backup_target.SWITCH_KEY not in still
+
+
+async def test_https_shows_right_after_the_switch(client, auth_headers):
+    """Удачный to_https от агента: окно бэкапа, список и "Требует действий" видят https сразу,
+    не дожидаясь отчета; запоздавший отчет со старым адресом это не откатывает."""
+    from app.models import BackupCommand
+
+    r = await client.post("/api/servers", json={"name": "node-9"}, headers=auth_headers)
+    sid, token = r.json()["server"]["id"], r.json()["token"]
+    agent = {"Authorization": f"Bearer {token}"}
+    rep = {"hostname": "node-9", "os": "Debian", "agent_version": "2.48", "cpu_percent": 5,
+           "mem_used": 1, "mem_total": 2, "clock_unix": int(time.time()),
+           "backup": {"present": True, "repo_dest": "rest:http://node-9:fakepass@203.0.113.9:64100/node-9/"}}
+    assert (await client.post("/api/agent/report", json=rep, headers=agent)).status_code == 200
+
+    async def cmd(ok):
+        async with _app(client).state.session_factory() as s:
+            c = BackupCommand(server_id=sid, action="to_https",
+                              payload={"port": 64101, "cacert_b64": "fake-token-example"})
+            s.add(c)
+            await s.commit()
+            cid = c.id
+        r = await client.post("/api/agent/backup-result", json={"id": cid, "ok": ok, "output": "x"}, headers=agent)
+        assert r.status_code == 200, r.text
+        return (await client.get(f"/api/servers/{sid}", headers=auth_headers)).json()
+
+    # проверка по https не прошла - бэкап на http, плашка остается
+    srv = await cmd(False)
+    assert srv["backup_target"]["proto"] == "http" and srv["backup_target"]["insecure"] is True
+    srv = await cmd(True)
+    assert srv["backup_target"] == {"kind": "rest", "proto": "https", "host": "203.0.113.9", "port": 64101,
+                                    "repo": "node-9", "insecure": False, "muted": False}
+    assert "fakepass" not in str(srv)
+    # отчет, собранный до переключения, пришел позже ответа
+    assert (await client.post("/api/agent/report", json=rep, headers=agent)).status_code == 200
+    srv = (await client.get(f"/api/servers/{sid}", headers=auth_headers)).json()
+    assert srv["backup_target"]["proto"] == "https" and srv["backup_target"]["insecure"] is False
+
+
 def test_helpers_know_the_new_actions():
     from pathlib import Path
 

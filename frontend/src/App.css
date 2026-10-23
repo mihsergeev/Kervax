@@ -6078,6 +6078,9 @@ button.adopt-mark {
 .cov-col-ok { border-color: color-mix(in srgb, var(--up) 30%, var(--border)); background: color-mix(in srgb, var(--up) 4%, transparent); }
 .cov-col-h { display: flex; align-items: baseline; flex-wrap: wrap; gap: 0.2rem 0.45rem; font-weight: 600; font-size: 0.88rem; margin-bottom: 0.15rem; }
 .cov-n { font-variant-numeric: tabular-nums; }
+/* примерный объем бэкапа базы: рядом с именем и суммой в заголовке колонки */
+.cov-size { font-size: 0.8rem; font-weight: 500; color: var(--text-muted); font-variant-numeric: tabular-nums; white-space: nowrap; cursor: help; }
+.cov-size-sum { font-weight: 600; }
 .cov-col-sub { font-weight: 400; font-size: 0.76rem; color: var(--text-muted); }
 .cov-col-sub .linklike { font-size: inherit; }
 .cov-li { display: grid; grid-template-columns: 22px minmax(0, 1fr) auto; gap: 0.15rem 0.55rem; align-items: center; padding: 0.45rem 0;

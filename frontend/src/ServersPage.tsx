@@ -65,7 +65,7 @@ import {
 } from './api'
 import { StackedAreaChart, type ChartMark, type Series } from './charts/StackedAreaChart'
 import { OnboardBlock } from './OnboardBlock'
-import { diskHealth, diskUsage, fmtSetupVersion, gpuSecLine, shortList, sinceShort, unitsBlock, srvIssues, type SrvIssue, webLogLabel, webRate, webSeriesName, webUnparsed } from './serverUtils'
+import { diskHealth, diskUsage, fmtSetupVersion, gpuSecLine, shortList, sinceShort, unitsBlock, srvIpHit, srvIssues, type SrvIssue, webLogLabel, webRate, webSeriesName, webUnparsed } from './serverUtils'
 import { OsIcon } from './osIcon'
 import { CountryFlag } from './CountryFlag'
 import { currentLang, useI18n } from './i18n'
@@ -5116,8 +5116,8 @@ export function ServersPage({ onUnauthorized, openServerId, openServerSec, onCon
     if (filter === 'offline' && s.online) return false
     if (filter === 'problem' && srvIssues(s, t).length === 0) return false
     if (!q) return true
-    return [s.name, s.group_name, s.external_ip, s.local_ip, s.hostname, s.os]
-      .some((v) => v?.toLowerCase().includes(q))
+    return [s.name, s.group_name, s.hostname, s.os]
+      .some((v) => v?.toLowerCase().includes(q)) || srvIpHit(s, q)
   })
   // сырое (неокруглённое) значение метрики — чтобы близкие значения не «ничьились»
   const metric = (s: Server): number | null => {

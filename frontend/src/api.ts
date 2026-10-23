@@ -2718,6 +2718,11 @@ export type BackupAudit = {
   key?: string // "db:RabbitMQ:cont" — устойчивый ключ находки (для точечного приглушения)
   instance?: string // экземпляр: контейнер или контроллер пода k8s.… ("" = нативная установка)
   muted?: boolean // приглушена вручную: не считается проблемой и не идёт на главную
+  size_bytes?: number // примерно сколько бэкапить (дамп без индексов или каталог данных); 0 = не посчитано
+  size_db?: number // база целиком, когда дамп заметно меньше
+  size_top?: string // крупнейшая база экземпляра
+  size_top_bytes?: number
+  size_small?: boolean // бэкапится малое при любом объеме (RabbitMQ: definitions)
 }
 export type HelperAdvice = {
   name: string // backup-setup / backupserver-setup / kube-setup

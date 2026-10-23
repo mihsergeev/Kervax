@@ -26,12 +26,13 @@ import {
 import { useAuth } from './auth'
 import { useUrlCard, useUrlParam } from './deeplink'
 import { FixSteps } from './FixSteps'
+import { helperCmd, hostOf } from './FleetUpdate'
 import { useI18n } from './i18n'
 import { kindLabel, KUBE_WORK_KINDS, RESTARTS_DAY_MIN } from './mutes'
 import { OsIcon } from './osIcon'
 import { CountryFlag } from './CountryFlag'
 import { fmtBytes } from './units'
-import { shortList, sinceShort, srvIssues, srvMuted } from './serverUtils'
+import { ipHit, shortList, sinceShort, srvIps, srvIssues, srvMuted } from './serverUtils'
 import { EnrollModal, fmtRel, InstallModal } from './ServersPage'
 import { CardNav, FreshChip, markMuted, OvAreas, OvRows, secInfoOf, type OvRow, type SecDef, type SecInfo, type SecItem } from './cardLayout'
 import { NetTile, TileFilterChip, useTileFilter } from './NetLinks'
@@ -48,6 +49,9 @@ import { LockedLogs, LOGS_LOCKED } from './LogsLocked'
 // кладёт токен в /etc/kervax/kube.json (root:kervax), перезапускает агент.
 const KUBE_ENABLE_CMD = `curl -fsSL ${window.location.origin}/api/agent/kube-setup.sh | sudo bash
 sudo systemctl restart kervax-agent`
+// то же плейбуком из репо ansible: kube-setup помечен "только вручную" и массовым прогоном не
+// ставится, -e kervax_install называет его явно, плейбук ставит и перезапускает агент
+const kubeAnsibleCmd = (s: Server) => `${helperCmd([hostOf(s)])} -e kervax_install=kube-setup`
 
 // Что именно истекает. Путь к файлу сам по себе инженеру ничего не говорит —
 // пока не сказано, чем этот файл держит кластер.
@@ -160,7 +164,7 @@ function KubeLogo() {
   )
 }
 
-function EnableBlock() {
+function EnableBlock({ server }: { server: Server }) {
   const { t } = useI18n()
   return (
     <div className="chart-card net-card net-card-wide">
@@ -170,7 +174,10 @@ function EnableBlock() {
       <div className="net-note">
         {t('Кластер есть, но у агента нет доступа к kube-api')}
       </div>
-      <FixSteps steps={[{ id: 'enable', cmd: KUBE_ENABLE_CMD }]} text={() => t('Включить доступ на чтение и точечное управление')}
+      <FixSteps steps={[{ id: 'enable', cmd: KUBE_ENABLE_CMD }, { id: 'ansible', alt: true, cmd: kubeAnsibleCmd(server) }]}
+        text={(st) => st.id === 'ansible'
+          ? t('через ansible: плейбук поставит kube-setup и перезапустит агент')
+          : t('Включить доступ на чтение и точечное управление')}
         foot={t('Скрипт создает ServiceAccount с узким RBAC (не cluster-admin) и кладет токен для агента.')} />
     </div>
   )
@@ -1041,7 +1048,7 @@ function KubeHostModal({
 
   const overview = (
     <div className="srv-sec">
-      {!kube.access && <EnableBlock />}
+      {!kube.access && <EnableBlock server={s} />}
       <OvRows rows={rows} />
       {kube.access && (
         <div className="net-tiles srv-tiles">
@@ -1774,7 +1781,8 @@ export function KuberPage({
       ]
         .join(' ')
         .toLowerCase()
-      return hay.includes(q)
+      // адреса самой ноды и узлов кластера
+      return hay.includes(q) || ipHit([...srvIps(s), ...(d.nodes ?? []).map((n) => n.ip)], q)
     })
     .map((h) => ({ ...h, hint: tile ? kubeHit(tile, h, t) : null }))
     .filter((h) => !tile || h.hint)
@@ -1911,7 +1919,7 @@ export function KuberPage({
         <div className="checks-search-row">
           <input
             className="checks-search"
-            placeholder={t('Поиск: хост, группа, нода, под, воркоад…')}
+            placeholder={t('Поиск: хост, IP, группа, нода, под, воркоад…')}
             value={query}
             onChange={(e) => setQuery(e.target.value)}
           />

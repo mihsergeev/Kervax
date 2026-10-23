@@ -20,7 +20,7 @@ import { DOCKRISK_MUTE, NOBOOT_MUTE, RESTARTS_DAY_MIN } from './mutes'
 import { OsIcon } from './osIcon'
 import { CountryFlag } from './CountryFlag'
 import { FixSteps, useFixDone } from './FixSteps'
-import { dockRiskText, proxyBuilt, shortList, srvIssues, srvMuted } from './serverUtils'
+import { dockRiskText, proxyBuilt, shortList, srvIpHit, srvIssues, srvMuted } from './serverUtils'
 import { fmtRel } from './ServersPage'
 import { CardNav, FreshChip, markMuted, OvAreas, OvRows, secInfoOf, type OvRow, type SecDef, type SecInfo, type SecItem } from './cardLayout'
 import { NetTile, TileFilterChip, useTileFilter } from './NetLinks'
@@ -1438,7 +1438,7 @@ export function DockerPage({
       ]
         .join(' ')
         .toLowerCase()
-      return hay.includes(q)
+      return hay.includes(q) || srvIpHit(s, q)
     })
     .map((h) => ({ ...h, hint: tile ? dockerHit(tile, h, t) : null }))
     .filter((h) => !tile || h.hint)
@@ -1573,7 +1573,7 @@ export function DockerPage({
         <div className="checks-search-row">
           <input
             className="checks-search"
-            placeholder={t('Поиск: хост, группа, контейнер, образ…')}
+            placeholder={t('Поиск: хост, IP, группа, контейнер, образ…')}
             value={query}
             onChange={(e) => setQuery(e.target.value)}
           />

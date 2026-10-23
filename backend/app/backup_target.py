@@ -173,6 +173,61 @@ def https_view(client, servers) -> dict | None:
     return {"bs_id": bs.id if bs else None, "blockers": https_blockers(client, bs)}
 
 
+# Адрес в отчете агента меняется только со следующим отчетом после переключения, а пока его нет,
+# окно бэкапа, список, "Требует действий" и шапка показывали бы http. Панель сама ставит https-адрес
+# в last_report, как только helper ответил "переключил" (switched). Отчет, собранный до
+# переключения, может прийти позже ответа: пока не прошло SWITCH_HOLD, старый http-адрес в нем
+# заменяется https-адресом (carry). Отчет с https-адресом подтверждает переключение; если и после
+# SWITCH_HOLD агент шлет http, верим агенту - плашка "по http" возвращается
+SWITCH_KEY = "bk_https"
+SWITCH_HOLD = 300  # секунд
+
+
+def https_dest(dest: str, port: int) -> str:
+    """rest:http://host:port/repo -> rest:https://host:<port>/repo, как собирает helper. Пусто,
+    если адрес не rest:http."""
+    s = clean(dest)
+    if not s.startswith("rest:http://"):
+        return ""
+    rest = s[len("rest:http://"):]
+    hp, slash, path = rest.partition("/")
+    host = hp[:hp.index("]") + 1] if hp.startswith("[") and "]" in hp else hp.split(":", 1)[0]
+    if not host:
+        return ""
+    return f"rest:https://{host}:{int(port)}{slash}{path}"
+
+
+def switched(rep: dict, port: object, now_ts: float) -> dict | None:
+    """Новый last_report после удачного to_https: https-адрес и отметка для carry. None - адрес
+    в отчете не rest:http или порт непонятный (ждем отчета агента)."""
+    try:
+        p = int(port)
+    except (TypeError, ValueError):
+        return None
+    b = (rep or {}).get("backup")
+    old = clean(b.get("repo_dest") or "") if isinstance(b, dict) else ""
+    new = https_dest(old, p) if 0 < p < 65536 else ""
+    if not new:
+        return None
+    out = dict(rep)
+    out["backup"] = {**b, "repo_dest": new}
+    out[SWITCH_KEY] = {"ts": now_ts, "old": old, "new": new}
+    return out
+
+
+def carry(prev: dict, rep: dict, now_ts: float) -> None:
+    """Отчет агента сразу после переключения (на месте): старый http-адрес -> https до SWITCH_HOLD."""
+    sw = (prev or {}).get(SWITCH_KEY)
+    if not isinstance(sw, dict) or now_ts - float(sw.get("ts") or 0) > SWITCH_HOLD:
+        return
+    b = rep.get("backup")
+    if not isinstance(b, dict):
+        return
+    if b.get("repo_dest") == sw.get("old"):
+        b["repo_dest"] = sw.get("new")
+        rep[SWITCH_KEY] = sw
+
+
 def is_ip(host: str) -> bool:
     try:
         ipaddress.ip_address(host)

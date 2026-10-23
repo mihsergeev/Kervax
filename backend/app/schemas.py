@@ -1300,6 +1300,13 @@ class BackupAudit(BaseModel):
     # Пусто = нативная установка. Входит в ключ: две postgres на ноде глушатся и дампятся
     # независимо.
     instance: str = ""
+    # Примерно сколько придется бэкапить (dbstat-setup 0.15): у PostgreSQL и MySQL - базы без
+    # индексов (в дамп они не идут), у остальных - каталог данных. 0 - не посчитано, строка молчит.
+    size_bytes: int = 0
+    size_db: int = 0  # база целиком, когда дамп заметно меньше нее
+    size_top: str = ""  # крупнейшая база экземпляра, если баз несколько
+    size_top_bytes: int = 0
+    size_small: bool = False  # бэкапится малое при любом объеме данных (RabbitMQ: definitions)
 
 
 class CustomBackupDb(BaseModel):

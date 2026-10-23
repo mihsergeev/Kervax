@@ -399,6 +399,8 @@ const EN: Record<string, string> = {
     'In those minutes the node was under pressure, or pods failed on probe and kube-api timeouts (leader election lost). Planned exit code 0 and muted pods do not count in bursts.',
   'Кластер есть, но у агента нет доступа к kube-api': 'There is a cluster, but the agent has no access to kube-api',
   'Включить доступ на чтение и точечное управление': 'Enable read access and targeted management',
+  'через ansible: плейбук поставит kube-setup и перезапустит агент':
+    'via ansible: the playbook installs kube-setup and restarts the agent',
   'Скрипт создает ServiceAccount с узким RBAC (не cluster-admin) и кладет токен для агента.':
     'The script creates a ServiceAccount with narrow RBAC (not cluster-admin) and leaves a token for the agent.',
   'Часы разошлись с панелью на {n}, синхронизируйте время': 'The clock is {n} off from the panel, sync the time',
@@ -912,6 +914,15 @@ const EN: Record<string, string> = {
   'первый снимется в ближайший бэкап': 'first one runs with the next backup',
   'хранить {k}': 'keep {k}',
   'дамп не снимается': 'dump not taken',
+  'бэкапятся только настройки (definitions): килобайты при любом объеме очередей': 'only the settings (definitions) are backed up: kilobytes whatever the queues hold',
+  'мало': 'small',
+  'примерный объем дампа: данные без индексов, индексы в дамп не идут': 'approximate dump size: data without indexes, a dump holds no indexes',
+  'примерно столько придется бэкапить, замер раз в сутки': 'roughly this much to back up, measured once a day',
+  'дамп без индексов, база {v}': 'dump without indexes, database {v}',
+  'крупнейшая {name} {v}': 'largest {name} {v}',
+  'сумма по базам, где объем посчитан; у остальных его пока нет': 'sum over the databases with a measured size; the rest are not measured yet',
+  'примерно столько придется бэкапить по всем базам под вопросом': 'roughly this much to back up for all questionable databases',
+  'от ~{v}': 'from ~{v}',
   'ждет первого бэкапа': 'waiting for the first backup',
   'пропущен: мало места': 'skipped: low disk space',
   'включить дамп': 'enable dump',
@@ -1223,7 +1234,7 @@ const EN: Record<string, string> = {
   'открыть': 'unlock',
   'закрыть сейф': 'lock vault',
   'собрать доступы с нод': 'collect from nodes',
-  'Поиск: нода, группа, сервис…': 'Search: node, group, service…',
+  'Поиск: нода, IP, группа, сервис…': 'Search: node, IP, group, service…',
   'По запросу «{q}» ничего нет.': 'Nothing matches “{q}”.',
   'По запросу «{q}» ничего нет — это фильтр, а не отсутствие бэкапов.':
     'Nothing matches “{q}” — that is the filter, not a lack of backups.',
@@ -2743,7 +2754,7 @@ const EN: Record<string, string> = {
   'не найден': 'not found',
   'Статус читается с ноды без секретов (метрики + systemctl). Управление — в следующей фазе.':
     'Status is read from the node without secrets (metrics + systemctl). Management comes in the next phase.',
-  'Поиск: нода, группа…': 'Search: node, group…',
+  'Поиск: нода, IP, группа…': 'Search: node, IP, group…',
   'Ноды с restic-бэкапом не найдены. Агент определяет бэкап сам (метрики + systemd); если бэкап есть, но раздел пуст — обновите агент.':
     'No nodes with a restic backup found. The agent detects backups itself (metrics + systemd); if a backup exists but the section is empty — update the agent.',
   'Управление': 'Management',
@@ -2774,7 +2785,7 @@ const EN: Record<string, string> = {
     'To manage the backup from the panel, install the narrow helper (root + sudoers limited to backup operations only):',
   // --- Kubernetes ---
   '{n} кластеров': '{n} clusters',
-  'Поиск: хост, группа, нода, под, воркоад…': 'Search: host, group, node, pod, workload…',
+  'Поиск: хост, IP, группа, нода, под, воркоад…': 'Search: host, IP, group, node, pod, workload…',
   'Kubernetes не найден ни на одном сервере. Агент определяет кластер сам (k0s/k3s/microk8s/kubeadm); если он есть, но раздел пуст — обновите агент.':
     'Kubernetes not found on any server. The agent detects the cluster itself (k0s/k3s/microk8s/kubeadm); if it exists but the section is empty — update the agent.',
   'Поды ({n})': 'Pods ({n})',
@@ -3404,7 +3415,7 @@ const EN: Record<string, string> = {
   'Оффлайн: {n}': 'Offline: {n}',
   'Поиск: имя, группа, IP…': 'Search: name, group, IP…',
   'Поиск: имя, адрес, группа…': 'Search: name, address, group…',
-  'Поиск: хост, группа, контейнер, образ…': 'Search: host, group, container, image…',
+  'Поиск: хост, IP, группа, контейнер, образ…': 'Search: host, IP, group, container, image…',
   'Выбрать': 'Select',
   'Выбрано: {n}': 'Selected: {n}',
   'Все видимые': 'All visible',
