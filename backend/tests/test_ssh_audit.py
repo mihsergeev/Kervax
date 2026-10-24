@@ -211,3 +211,62 @@ def test_password_login_can_be_kept_by_decision():
     s = _people(_ssh(), [], mutes=["ssh:ssh_password"])
     a = ssh_audit.advice(s, NOW)[0]
     assert a["muted"] is True and a["fix"]  # пункт остается в карточке, решение снимается "вернуть"
+
+
+def test_brute_waves_around_threshold_do_not_flap():
+    """GPU-нода клиента: порт 22 "filtered" у проверки, root по паролю, перебор с внешних
+    адресов 31-35 за 10 минут, а между волнами меньше 30. Раньше SSH считался открытым только в
+    волну, и ssh_risk давал тревогу и отбой каждые 20 минут. Перебор помним: SSH открыт сутки,
+    перебор идет час, отбой - когда исправили настройку."""
+    from app import changes as srv_changes
+    top = [{"ip": "203.0.113.148", "n": 4}]
+    ex = _ex(state="filtered", port=22)
+
+    def snap(fail, ts, **kw):
+        return {"v": 1, "ts": int(ts.timestamp()), "ssh": _ssh(**{"root": "yes", "guard": "", "ports": [22],
+                                                                 "fail": fail, "fail_top": top, **kw})}
+
+    st: dict = {}
+    s = _srv(exposure=ex)
+    levels = []
+    for i, fail in enumerate([33, 12, 35, 29, 31, 8, 30, 15]):
+        t = NOW + timedelta(minutes=10 * i)
+        sn = snap(fail, t)
+        st = srv_changes.apply_snapshot(st, sn, t)
+        s.last_report = {"extras": {"changes": sn}}
+        s.changes, s.last_seen = st, t
+        levels.append(collector._server_conditions(s, t)["ssh_risk"][0])
+    assert levels == [2] * 8
+    # тише порога: перебор в тексте по последней волне
+    assert ssh_audit.problems(s, NOW + timedelta(minutes=70))[1] == (
+        1, "идет перебор паролей SSH: за последний час до 30 неудачных входов за 10 минут (больше всех с "
+           "203.0.113.148: 4), вход по паролю включен, а fail2ban и подобного нет")
+    assert ssh_audit.view(s, NOW + timedelta(minutes=70))["open"] is True
+    # через час без волн перебора уже нет, но root по паролю на открытом SSH остается
+    later = NOW + timedelta(hours=2, minutes=1)
+    s.last_report = {"extras": {"changes": snap(5, later)}}
+    assert [lv for lv, _t in ssh_audit.problems(s, later)] == [2]
+    # сутки без перебора с внешних адресов: похоже, порт закрыли
+    gone = NOW + timedelta(minutes=60) + ssh_audit.BRUTE_HOLD + timedelta(minutes=1)
+    s.last_report = {"extras": {"changes": snap(0, gone)}}
+    assert ssh_audit.problems(s, gone) == [] and ssh_audit.advice(s, gone) == []
+    # исправили: root только по ключу и fail2ban - отбой сразу, хотя перебор помним
+    t = NOW + timedelta(minutes=80)
+    s.last_report = {"extras": {"changes": snap(40, t, guard="fail2ban")}}
+    s.last_report["extras"]["changes"]["ssh"]["root"] = "prohibit-password"
+    assert ssh_audit.problems(s, t) == []
+
+
+def test_brute_memory_only_from_the_internet():
+    """В память идет только перебор с внешних адресов и выше порога"""
+    from app import changes as srv_changes
+    st = srv_changes.apply_snapshot({}, {"v": 1, "ts": int(NOW.timestamp()),
+                                         "ssh": _ssh(fail=200, fail_top=[{"ip": "10.0.0.5", "n": 200}])}, NOW)
+    assert "ssh_brute" not in st
+    st = srv_changes.apply_snapshot(st, {"v": 1, "ts": int(NOW.timestamp()) + 600,
+                                         "ssh": _ssh(fail=5, fail_top=[{"ip": "198.51.100.9", "n": 5}])}, NOW)
+    assert "ssh_brute" not in st
+    t = NOW + timedelta(minutes=20)
+    st = srv_changes.apply_snapshot(st, {"v": 1, "ts": int(t.timestamp()),
+                                         "ssh": _ssh(fail=40, fail_top=[{"ip": "198.51.100.9", "n": 40}])}, t)
+    assert st["ssh_brute"] == {"ts": t.isoformat(), "n": 40, "top": [{"ip": "198.51.100.9", "n": 40}]}

@@ -4,6 +4,14 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.8.30] - 2026-10-24
+
+### Fixed
+- "SSH пускает root по паролю" больше не дребезжит: если внешняя проверка порт не видит, открытым его делает
+  перебор с внешних адресов, а боты приходят волнами то выше, то ниже порога - тревога и отбой шли каждые 20
+  минут. Теперь перебор помнится час, а SSH после него считается открытым в интернет сутки. Отбой приходит сразу,
+  когда исправили настройку (root только по ключу, пароли выключены или поставлен fail2ban).
+
 ## [1.8.29] - 2026-10-24
 
 ### Security

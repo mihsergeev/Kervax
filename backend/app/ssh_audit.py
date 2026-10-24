@@ -8,6 +8,14 @@
 одной ноде SSH был проброшен с другого адреса и номера порта (NAT 203.0.113.7:2224 -> нода:2221),
 проверка портов этого не видела, и алерт дал отбой, хотя подбирали еще 7 часов.
 
+Перебор помним (servers.changes["ssh_brute"], пишет changes.track по снимкам helper'а): боты
+приходят волнами, и на GPU-ноде за "filtered" с адреса проверки неудачных входов за 10 минут было
+то 31-35, то меньше 30. SSH считался то открытым, то нет, и "root по паролю" давал тревогу и отбой
+каждые 20 минут. Теперь перебор с внешних адресов держит SSH видимым из интернета сутки
+(BRUTE_HOLD), а сам перебор идет еще час после последних 10 минут выше порога (BRUTE_ON). Отбой
+сразу - когда исправили настройку (root без пароля, пароли выключены, поставили fail2ban); если
+закрыли порт - когда за час (или сутки для root) перебора больше не было.
+
 Что делать:
 - root входит по паролю на открытый SSH - проблема и алерт;
 - вход по паролю включен, порт открыт, идет перебор, а fail2ban/sshguard/crowdsec нет -
@@ -26,12 +34,14 @@
 from __future__ import annotations
 
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from app import open_ports
 from app.models import Server
 
 BRUTE_MIN = 30  # неудачных входов за 10 минут: это уже перебор, а не опечатка
+BRUTE_ON = timedelta(hours=1)  # перебор "идет", пока был выше порога за последний час
+BRUTE_HOLD = timedelta(days=1)  # перебор с внешних адресов доказывает, что SSH открыт, на сутки
 MUTE_PREFIX = "ssh:"
 DROPIN = "/etc/ssh/sshd_config.d/00-no-password.conf"
 CONF = "/etc/ssh/sshd_config"
@@ -99,15 +109,53 @@ def brute_from_internet(ssh: dict) -> bool:
                for x in ssh.get("fail_top") or [] if isinstance(x, dict))
 
 
+def note_brute(state: dict, snap: dict, stamp: str) -> None:
+    """Запомнить перебор из снимка helper'а (changes.apply_snapshot): state["ssh_brute"] - когда
+    последний раз было BRUTE_MIN+ с внешних адресов, сколько и откуда больше всех."""
+    ssh = snap.get("ssh") if isinstance(snap.get("ssh"), dict) else {}
+    if ssh and brute_from_internet(ssh):
+        top = [x for x in ssh.get("fail_top") or [] if isinstance(x, dict) and x.get("ip")][:1]
+        state["ssh_brute"] = {"ts": stamp, "n": int(ssh.get("fail") or 0), "top": top}
+
+
+def _brute_mem(srv: Server) -> tuple[datetime, dict] | None:
+    ch = srv.changes if isinstance(getattr(srv, "changes", None), dict) else {}
+    b = ch.get("ssh_brute")
+    if not isinstance(b, dict) or not b.get("ts"):
+        return None
+    try:
+        return datetime.fromisoformat(str(b["ts"])), b
+    except ValueError:
+        return None
+
+
+def brute_recent(srv: Server, ssh: dict, now: datetime, hold: timedelta) -> bool:
+    """Перебор с внешних адресов в этом снимке или был за hold"""
+    if brute_from_internet(ssh):
+        return True
+    mem = _brute_mem(srv)
+    return mem is not None and now - mem[0] <= hold
+
+
 def reachable(srv: Server, ssh: dict, now: datetime) -> bool:
-    """SSH виден из интернета: по внешней проверке портов или по перебору с внешних адресов."""
-    return internet_open(srv, ssh, now) is True or brute_from_internet(ssh)
+    """SSH виден из интернета: по внешней проверке портов или по перебору с внешних адресов за сутки."""
+    return internet_open(srv, ssh, now) is True or brute_recent(srv, ssh, now, BRUTE_HOLD)
 
 
 def _top(ssh: dict) -> str:
     """' (больше всех с 203.0.113.9: 120)' - откуда перебор (changes-setup 0.4)"""
     top = [x for x in ssh.get("fail_top") or [] if isinstance(x, dict) and x.get("ip")]
     return f" (больше всех с {top[0]['ip']}: {top[0].get('n')})" if top else ""
+
+
+def _brute_text(srv: Server, ssh: dict) -> str:
+    fail = int(ssh.get("fail") or 0)
+    mem = _brute_mem(srv)
+    if fail >= BRUTE_MIN or mem is None:
+        return f"{fail} неудачных входов за 10 минут{_top(ssh)}"
+    # сейчас тише порога, а за час подбирали: число и источник - того раза
+    b = mem[1]
+    return f"за последний час до {int(b.get('n') or 0)} неудачных входов за 10 минут{_top({'fail_top': b.get('top')})}"
 
 
 def _ports(ssh: dict) -> str:
@@ -122,9 +170,10 @@ def problems(srv: Server, now: datetime) -> list[tuple[int, str]]:
     out = []
     if root_password(ssh):
         out.append((2, f"root может войти по SSH паролем, а порт {_ports(ssh)} открыт в интернет"))
-    fail = int(ssh.get("fail") or 0)
-    if password_login(ssh) and fail >= BRUTE_MIN and not ssh.get("guard"):
-        out.append((1, f"идет перебор паролей SSH: {fail} неудачных входов за 10 минут{_top(ssh)}, вход по "
+    # порт открыт уже доказан: перебор сейчас - с любых адресов, после - по памяти о внешнем
+    brute = int(ssh.get("fail") or 0) >= BRUTE_MIN or brute_recent(srv, ssh, now, BRUTE_ON)
+    if password_login(ssh) and not ssh.get("guard") and brute:
+        out.append((1, f"идет перебор паролей SSH: {_brute_text(srv, ssh)}, вход по "
                        f"паролю включен, а fail2ban и подобного нет"))
     return out
 
@@ -266,5 +315,5 @@ def view(srv: Server, now: datetime) -> dict | None:
     return {"ports": ssh.get("ports") or [], "password": password_login(ssh), "root": str(ssh.get("root") or ""),
             "root_password": root_password(ssh), "guard": str(ssh.get("guard") or ""),
             "fail": int(ssh.get("fail") or 0), "accepted_password": int(ssh.get("accp") or 0),
-            "open": True if brute_from_internet(ssh) else internet_open(srv, ssh, now),
+            "open": True if brute_recent(srv, ssh, now, BRUTE_HOLD) else internet_open(srv, ssh, now),
             "fail_top": [x for x in ssh.get("fail_top") or [] if isinstance(x, dict)][:5]}

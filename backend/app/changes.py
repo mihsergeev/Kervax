@@ -21,7 +21,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app import tg_fmt
+from app import ssh_audit, tg_fmt
 from app.models import Server
 
 log = logging.getLogger("kervax.changes")
@@ -231,6 +231,7 @@ def apply_snapshot(state: dict | None, snap: dict, now: datetime, known: set[str
     logv = [e for e in st.get("log") or [] if isinstance(e, dict)]
     stamp = datetime.fromtimestamp(int(snap["ts"]), timezone.utc).isoformat()
     logins = ssh_login_events(st, snap, stamp) if (snap.get("ssh") or {}).get("logins") is not None else []
+    ssh_audit.note_brute(st, snap, stamp)  # перебор помним: волны ботов не должны давать отбой
     if prev is not None or logins:
         events = [dict(e, ts=stamp) for e in (diff(prev, snap) if prev is not None else []) + logins]
         for e in events:
