@@ -173,7 +173,50 @@ def test_helper_and_agent_carry_the_new_fields():
 
     agent = Path(__file__).resolve().parents[2] / "agent"
     sh = (agent / "kubeexpiry-setup.sh").read_text(encoding="utf-8")
-    assert "KERVAX_SETUP_VERSION=0.3" in sh and "get ingresses -A -o json" in sh
+    assert "KERVAX_SETUP_VERSION=0.4  # " in sh and "get ingresses -A -o json" in sh and "\r" not in sh
+    for what in ("gateways.gateway.networking.k8s.io", "ingressroutes.traefik.io", "pods"):
+        assert what in sh, what
     # агент читает файл helper'а в структуру: без этих полей он бы их молча выбросил
     main = (agent / "main.go").read_text(encoding="utf-8")
     assert '`json:"fp,omitempty"`' in main and '`json:"ingress,omitempty"`' in main
+
+
+def test_secret_nobody_uses_is_not_a_problem():
+    """helper 0.4 видит все ссылки на секрет (Ingress, Gateway, IngressRoute, поды): истекший секрет без
+    ссылок не алертим и не пишем в "Что сломано", карточка показывает его серой строкой. Используемый
+    истекший (wildcard, который cert-manager не может выпустить) - проблема, как и был"""
+    now = datetime(2026, 10, 20, tzinfo=timezone.utc)
+    ts = int(now.timestamp())
+    stale = [{"kind": "secret-cert", "where": f"default/old-{i}-ssl", "expires": ts - (200 + i) * DAY,
+              "note": "tls.crt", "fp": f"a{i}", "ingress": False} for i in range(6)]
+    wild = {"kind": "secret-cert", "where": "default/wildcard-ssl", "expires": ts - 237 * DAY, "note": "tls.crt",
+            "fp": "bb", "ingress": True}
+    s = _srv(now, [*stale, wild])
+    s.last_report["setup_versions"] = {"kubeexpiry-setup": "0.4"}
+    got = _probs(s, now)
+    assert [p["level"] for p in got] == [3] and "default/wildcard-ssl" in got[0]["text"]
+    assert "и ещё" not in got[0]["text"]  # шесть неиспользуемых в счет не идут
+    assert kube_expiry.unused_view(s) == [f"secret-cert|default/old-{i}-ssl" for i in range(6)]
+    # алерт - про тот же wildcard
+    _lvl, ctx = collector._server_conditions(s, now)["kube_expiry"]
+    assert ctx["where"] == "default/wildcard-ssl" and not ctx["unused"] and not ctx["more"]
+
+    # используемых истекших нет - нет и проблемы, и алерта
+    s.last_report["kube_expiry"] = stale
+    assert _probs(s, now) == []
+    assert collector.kube_expiry_soon(s.last_report, [7, 1], now, s) is None
+    assert collector.kube_expiry_soon(s.last_report, [7, 1], now) is None
+
+    # helper 0.3 знал только Ingress (секреты в томах подов он считал неиспользуемыми): по-старому,
+    # проблема с подсказкой, без серой строки
+    s.last_report["setup_versions"] = {"kubeexpiry-setup": "0.3"}
+    assert [p["level"] for p in _probs(s, now)] == [3]
+    assert kube_expiry.unused_view(s) is None
+    # Ingress не прочитались (поля нет) - не знаем, значит следим
+    s.last_report = {"clock_unix": ts, "setup_versions": {"kubeexpiry-setup": "0.4"},
+                     "kube_expiry": [{k: v for k, v in stale[0].items() if k != "ingress"}]}
+    assert [p["level"] for p in _probs(s, now)] == [3] and kube_expiry.unused_view(s) is None
+    # "не используется" - только у TLS-секретов
+    s.last_report["kube_expiry"] = [{"kind": "kubeconfig", "where": "/root/.kube/config", "expires": ts - DAY,
+                                     "ingress": False}]
+    assert _probs(s, now) and kube_expiry.unused_view(s) is None

@@ -5424,7 +5424,9 @@ def kube_expiry_soon(rep: dict, warn_days: list[int], now: datetime,
     запись helper'а, сколько всего сроков в пределах порога) или None. Пункты с отметкой
     "не следить" (app/kube_expiry.py) не в счет."""
     soon, near = None, 0
-    for it in kube_expiry_mod.live(s, rep) if s is not None else rep.get("kube_expiry") or []:
+    items = kube_expiry_mod.live(s, rep) if s is not None else [
+        it for it in rep.get("kube_expiry") or [] if not kube_expiry_mod.unused(it, rep)]
+    for it in items:
         exp = it.get("expires") or 0
         if exp <= 0:
             continue
@@ -5454,7 +5456,8 @@ def kube_expiry_ctx(exp: float, days: float, it: dict, near: int) -> dict:
         where = f"{where} ({note})"
     kind = it.get("kind") or ""
     advice = _KUBE_ADVICE.get((kind, days < 0), "")
-    # helper 0.3: TLS-секрет не указан ни в одном Ingress - скорее всего его просто забыли удалить
+    # helper 0.3: TLS-секрет не указан ни в одном Ingress - скорее всего его просто забыли удалить.
+    # С 0.4 такой (ссылок нет совсем) сюда не доходит: kube_expiry.live его не пропускает
     unused = kind == "secret-cert" and it.get("ingress") is False
     if unused:
         advice = "не используется ни одним ingress: удалите секрет или отметьте \"не следить\""
@@ -6089,7 +6092,7 @@ def _server_conditions(s: Server, now: datetime,
     # проверка портов): красное, пока не закроют порт для всех, кроме Cloudflare, не ограничат
     # доверие или не отметят "так задумано". sig - какой веб-сервер, второй дает свой алерт
     if online and cf_realip.block(rep, now) is not None:
-        cr = cf_realip.findings(s, now)
+        cr = cf_realip.alerting(s, now)  # без allow/deny - желтое в "Что сломано", без сообщения
         out["cf_realip"] = (2 if cr else 0, {"detail": "; ".join(cf_realip.text(f) for f in cr[:3]),
                                              "sig": [f["key"] for f in cr], "items": cr})
     # Сервер задыхается (агент 2.26): уровень - худшая из причин, выдержка - как у CPU и RAM

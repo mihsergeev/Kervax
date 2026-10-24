@@ -12,12 +12,22 @@
   разово не дочитать секреты, и решение человека из-за этого теряться не должно;
 - кто и когда отметил - в записи, панель показывает это в подсказке.
 
-Запись в servers.kube_expiry_ignored: {"<kind>|<where>": {by, at, expires, fp, gone_at?}}."""
+Запись в servers.kube_expiry_ignored: {"<kind>|<where>": {by, at, expires, fp, gone_at?}}.
+
+TLS-секрет, на который ничего не ссылается, - не проблема, даже истекший: на одной ноде шесть старых
+секретов без единой ссылки держали раздел и главную красными. helper 0.4 смотрит, кто их берет:
+spec.tls у Ingress, certificateRefs у Gateway, tls.secretName у IngressRoute Traefik и тома подов
+(в поле ingress, агент передает его как есть). Такой секрет без алерта и без строки в "Что
+сломано", в карточке - серой строкой "не используется, можно удалить". Используемый истекший
+(wildcard, который cert-manager не может выпустить) - проблема, как и был. helper 0.3 знал только
+Ingress и пропустил бы секреты подов (hubble, вебхуки), поэтому его "не используется" - только
+подсказка, без снятия алерта."""
 
 from datetime import datetime
 
 GONE_S = 86400
 MAX_ITEMS = 500
+USE_FROM = (0, 4)  # с этой версии helper'а ingress=false значит "ссылок нет совсем"
 
 
 def key(it: dict) -> str:
@@ -51,17 +61,40 @@ def active(s, rep: dict) -> dict[str, dict]:
     return out
 
 
+def _ver(v) -> tuple[int, ...]:
+    try:
+        return tuple(int(x) for x in str(v or "").split("."))
+    except ValueError:
+        return ()
+
+
+def knows_use(rep: dict) -> bool:
+    """helper видит все ссылки на секрет, а не только Ingress."""
+    return _ver(((rep or {}).get("setup_versions") or {}).get("kubeexpiry-setup")) >= USE_FROM
+
+
+def unused(it: dict, rep: dict) -> bool:
+    """TLS-секрет, на который ничего в кластере не ссылается (helper 0.4+)."""
+    return it.get("kind") == "secret-cert" and it.get("ingress") is False and knows_use(rep)
+
+
 def live(s, rep: dict) -> list[dict]:
-    """Сроки, за которыми следим: без отмеченных "не следить"."""
+    """Сроки, за которыми следим: без отмеченных "не следить" и без секретов, которые никто не берет."""
     items = rep.get("kube_expiry") or []
     act = active(s, rep)
-    return [it for it in items if key(it) not in act] if act else list(items)
+    return [it for it in items if key(it) not in act and not unused(it, rep)]
 
 
 def view(s) -> dict[str, dict] | None:
     """Для карточки: кто и когда отметил, по ключу пункта. Только действующие отметки."""
     act = active(s, s.last_report or {})
     return {k: {"by": e.get("by") or "", "at": e.get("at") or ""} for k, e in act.items()} or None
+
+
+def unused_view(s) -> list[str] | None:
+    """Для карточки: ключи секретов "не используется, можно удалить"."""
+    rep = s.last_report or {}
+    return [key(it) for it in rep.get("kube_expiry") or [] if unused(it, rep)] or None
 
 
 def entry(it: dict, by: str, now: datetime) -> dict:

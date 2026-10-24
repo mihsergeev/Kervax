@@ -9,16 +9,25 @@ whitelist-source-range открывались любому.
 helper раз в 15 минут присылает report.d/web-realip.json: кому из веб-серверов верят (nginx на
 хосте, в контейнерах и подах - ingress-nginx тоже, по его готовому nginx.conf; Caddy по живому
 конфигу; Traefik по аргументам и файлу), какие порты они слушают и сколько сайтов с allow/deny.
-Опасно, только если сошлось все:
+Признак, когда сошлось:
 - доверие без ограничения источника: сеть шире /8 (/16 у IPv6) - 0.0.0.0/0 и подобное,
   forwardedHeaders.insecure у Traefik, remote_ip forwarded у старого Caddy; у Caddy в контейнере
   еще и частные сети (private_ranges): IPv6 до него идет через docker-proxy с адреса шлюза моста;
-- есть allow/deny, которые этим обходятся (у Traefik - ipAllowList с ipStrategy);
 - свежая внешняя проверка видит 80 или 443 открытым напрямую при сайтах через Cloudflare
   (open_ports.cf_open). Фильтр, который пускает на эти порты только Cloudflare (nftables, ufw,
-  NetworkPolicy), проверка видит закрытым портом - и признака нет.
+  NetworkPolicy, iptables mangle), проверка видит закрытым портом - и признака нет. Правила хоста
+  сами по себе ничего не решают: на Cilium с kube-proxy-replacement и на k3s с klipper (hostPort,
+  DNAT мимо INPUT) ufw трафик к ingress не видит вовсе.
+Есть allow/deny (у Traefik - ipAllowList с ipStrategy) - красное, "белые списки обходятся", с алертом.
+Нет - желтое, "IP клиента можно подделать": поддельный адрес видят логи, баны fail2ban, лимиты
+входа WordPress и само приложение. Это в "Что сломано" и в карточке, без сообщения в Telegram.
 
-Человек может отметить "так задумано" (cfip:<веб-сервер>), признак уходит.
+Реплики одного ворклоада (Deployment, DaemonSet, StatefulSet) - один веб-сервер: у ingress-nginx с
+replicaCount 3 было три одинаковые строки и в "Что сломано", и в карточке, и в алерте. Склеиваем по
+владельцу пода, рядом - сколько подов.
+
+Человек может отметить "так задумано" (cfip:<веб-сервер>), признак уходит. Решение стоит на ворклоаде
+и переживает пересоздание подов.
 """
 from __future__ import annotations
 
@@ -62,6 +71,12 @@ def _pod(x: dict) -> tuple[str, str] | None:
     return ns, name
 
 
+def _workload(x: dict, ctrls: dict[str, str] | None = None) -> str:
+    """Владелец пода: из ctrl агента ("deployment/ingress-nginx-controller"), иначе имя без суффиксов."""
+    ns, name = _pod(x) or ("", "")
+    return podnames.workload(name, (ctrls or {}).get(f"pod:{ns or '?'}/{name}", ""))
+
+
 def label(x: dict) -> str:
     """Кто: ingress-nginx, nginx, Caddy, Traefik."""
     srv = str(x.get("server") or "")
@@ -71,19 +86,19 @@ def label(x: dict) -> str:
     return _NAMES.get(srv, srv or "веб-сервер")
 
 
-def where_text(x: dict) -> str:
+def where_text(x: dict, ctrls: dict[str, str] | None = None) -> str:
     """"на хосте", "в поде default/ingress-nginx-controller", "в контейнере caddy"."""
     w = _where(x)
     pod = _pod(x)
     if pod:
-        return f"в поде {pod[0]}/{podnames.workload(pod[1])}" if pod[0] else f"в поде {podnames.workload(pod[1])}"
+        return f"в поде {pod[0]}/{_workload(x, ctrls)}" if pod[0] else f"в поде {_workload(x, ctrls)}"
     return "на хосте" if w == "host" else f"в контейнере {w}"
 
 
-def key(x: dict) -> str:
+def key(x: dict, ctrls: dict[str, str] | None = None) -> str:
     """Ключ веб-сервера для решения "так задумано": под - по ворклоаду, его имя меняется с выкладкой."""
     pod = _pod(x)
-    w = f"pod {pod[0]}/{podnames.workload(pod[1])}" if pod else _where(x)
+    w = f"pod {pod[0]}/{_workload(x, ctrls)}" if pod else _where(x)
     return f"{x.get('server') or '?'}:{w}"
 
 
@@ -146,38 +161,66 @@ def findings(srv: Server, now: datetime, with_decided: bool = False) -> list[dic
     if not cf:
         return []
     done = decided(srv)
-    out = []
+    ctrls = podnames.ctrls(srv.last_report)
+    by: dict[str, dict] = {}
     for x in items:
         trust = trust_any(x)
-        if not trust or int(x.get("acl") or 0) <= 0:
+        if not trust:
             continue
         ports = sorted(p for p in cf if p in host_ports(srv, x))
         if not ports:
             continue
-        k = key(x)
-        if k in done and not with_decided:
+        k = key(x, ctrls)
+        # решение, поставленное до того, как агент прислал владельца, - по имени без суффиксов
+        mark = k in done or key(x) in done
+        if mark and not with_decided:
             continue
-        out.append({"key": k, "label": label(x), "where": where_text(x), "hdr": _hdr(x), "trust": trust,
-                    "ports": ports, "acl": int(x.get("acl") or 0), "names": _strs(x.get("names"))[:3],
-                    "decided": k in done})
-    return out
+        f = by.get(k)
+        if f is None:
+            by[k] = {"key": k, "label": label(x), "where": where_text(x, ctrls), "hdr": _hdr(x), "trust": trust,
+                     "ports": ports, "acl": int(x.get("acl") or 0), "names": _strs(x.get("names"))[:3],
+                     "decided": mark, "pods": 1 if _pod(x) else 0}
+            continue
+        # еще одна реплика того же ворклоада: конфиг у них общий, посреди выкладки может
+        # отличаться - берем объединение
+        f["pods"] += 1
+        f["ports"] = sorted(set(f["ports"]) | set(ports))
+        f["acl"] = max(f["acl"], int(x.get("acl") or 0))
+        f["names"] = list(dict.fromkeys(f["names"] + _strs(x.get("names"))))[:3]
+    return list(by.values())
 
 
 def _ports(ports: list[int]) -> str:
     return " и ".join(str(p) for p in ports)
 
 
+def level(f: dict) -> int:
+    """2 - есть allow/deny, которые обходятся подменой; 1 - подделывается только адрес клиента."""
+    return 2 if int(f.get("acl") or 0) > 0 else 1
+
+
 def text(f: dict) -> str:
     """'белые списки обходятся подменой CF-Connecting-IP: ingress-nginx в поде default/ingress-nginx-controller
-    верит заголовку от любого адреса (set_real_ip_from 0.0.0.0/0), а 80 и 443 открыты в обход Cloudflare'"""
+    верит заголовку от любого адреса (set_real_ip_from 0.0.0.0/0), а 80 и 443 открыты в обход Cloudflare'.
+    Без allow/deny - 'IP клиента можно подделать заголовком X-Forwarded-For: ... - баны, лимиты входа и
+    логи видят поддельный адрес'"""
     many = len(f["ports"]) > 1
-    return (f"белые списки обходятся подменой {f['hdr']}: {f['label']} {f['where']} верит заголовку от любого адреса "
-            f"({f['trust']}), а {_ports(f['ports'])} {'открыты' if many else 'открыт'} в обход Cloudflare")
+    pods = f" (подов: {f['pods']})" if int(f.get("pods") or 0) > 1 else ""
+    head = (f"белые списки обходятся подменой {f['hdr']}" if level(f) == 2
+            else f"IP клиента можно подделать заголовком {f['hdr']}")
+    tail = "" if level(f) == 2 else " - баны, лимиты входа и логи видят поддельный адрес"
+    return (f"{head}: {f['label']} {f['where']}{pods} верит заголовку от любого адреса "
+            f"({f['trust']}), а {_ports(f['ports'])} {'открыты' if many else 'открыт'} в обход Cloudflare{tail}")
 
 
 def problems(srv: Server, now: datetime) -> list[tuple[int, str, str]]:
-    """(уровень, текст, ключ) для "Что сломано" и алерта cf_realip: всегда красное."""
-    return [(2, text(f), f["key"]) for f in findings(srv, now)]
+    """(уровень, текст, ключ) для "Что сломано": красное при allow/deny, иначе желтое."""
+    return [(level(f), text(f), f["key"]) for f in findings(srv, now)]
+
+
+def alerting(srv: Server, now: datetime) -> list[dict]:
+    """Находки для алерта cf_realip: только те, где обходятся белые списки."""
+    return [f for f in findings(srv, now) if level(f) == 2]
 
 
 def view(srv: Server, now: datetime) -> list[dict] | None:
@@ -200,6 +243,8 @@ def tg_short(items) -> tuple[str, list[str]] | None:
     where = str(r.get("where") or "").removeprefix("в поде ").removeprefix("в контейнере ")
     # имя пода и так называет веб-сервер (default/ingress-nginx-controller) - без повтора
     who = r["label"] if where == "на хосте" else where if r["label"] in where else f"{r['label']} {where}"
+    if int(r.get("pods") or 0) > 1:
+        who += f" (подов: {r['pods']})"
     ports = r.get("ports") or []
     facts = [f"{who}: {r.get('trust')}",
              f"{_ports(ports)} {'открыты' if len(ports) > 1 else 'открыт'} в обход Cloudflare"]

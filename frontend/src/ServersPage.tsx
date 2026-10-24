@@ -4293,9 +4293,9 @@ function RealIpBox({ server: s, items, isViewer, onChanged }: { server: Server; 
   return (
     <>
       {items.map((x) => (
-        <div key={x.key} className={x.decided ? 'net-note exp-realip-done' : 'net-prob exp-realip'}>
+        <div key={x.key} className={x.decided ? 'net-note exp-realip-done' : x.acl > 0 ? 'net-prob exp-realip' : 'net-note exp-realip'}>
           <div className="exp-realip-h">
-            <b>{t('Белые списки обходятся подменой {h}', { h: x.hdr })}</b>
+            <b>{x.acl > 0 ? t('Белые списки обходятся подменой {h}', { h: x.hdr }) : t('IP клиента можно подделать заголовком {h}', { h: x.hdr })}</b>
             {x.decided ? (
               <span className="muted exp-act">
                 {t('так задумано')}{' '}
@@ -4315,12 +4315,22 @@ function RealIpBox({ server: s, items, isViewer, onChanged }: { server: Server; 
           </div>
           <div>
             {t('{who} {where} верит заголовку от любого адреса:', { who: x.label, where: realIpWhere(x.where, t) })} <span className="mono">{x.trust}</span>.{' '}
-            {t('Порты {p} открыты в обход Cloudflare, и прямой заход на адрес ноды с поддельным {h} проходит allow/deny у сайтов ({n}):', {
-              p: x.ports.join(', '),
-              h: x.hdr,
-              n: x.acl,
-            })}{' '}
-            <span className="mono">{x.names.join(', ')}</span>
+            {(x.pods ?? 0) > 1 && <span className="muted">{t('подов: {n}', { n: x.pods ?? 0 })}. </span>}
+            {x.acl > 0 ? (
+              <>
+                {t('Порты {p} открыты в обход Cloudflare, и прямой заход на адрес ноды с поддельным {h} проходит allow/deny у сайтов ({n}):', {
+                  p: x.ports.join(', '),
+                  h: x.hdr,
+                  n: x.acl,
+                })}{' '}
+                <span className="mono">{x.names.join(', ')}</span>
+              </>
+            ) : (
+              t('Порты {p} открыты в обход Cloudflare: при прямом заходе с поддельным {h} логи, баны fail2ban, лимиты входа и само приложение видят чужой адрес. Белых списков (allow/deny) тут нет.', {
+                p: x.ports.join(', '),
+                h: x.hdr,
+              })
+            )}
           </div>
           {!x.decided && (
             <div className="muted small">

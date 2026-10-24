@@ -7,7 +7,8 @@ import { useI18n } from './i18n'
 // веб-корни, которые helper нашел сам, последняя выкладка и признаки - новые php и правки кода не
 // через git/деплой. Корень с доменом своего монитора показывает признаки и в карточке сайта. Каталог,
 // смонтированный в несколько контейнеров, - одна строка, контейнеры через запятую. Что WordPress
-// обновил сам (перевод, плагин, тему, ядро), - серыми строками, не признаком. По каждому файлу -
+// обновил сам (перевод, плагин, тему, ядро), и файлы, которые плагин держит сам (drop-in по шаблону,
+// конфиг без кода, закрытый .htaccess), - серыми строками, не признаком. По каждому файлу -
 // что о нем знает git, кто владелец и когда записан. Где правят руками (рабочая копия на ветке
 // разработки или так выбрано), правки разработчика - серой строкой, признаки - только то, что
 // похоже на взлом.
@@ -93,11 +94,25 @@ function wpEventText(e: WpEvent, t: T): string {
   return t('обновлен WordPress {from} -> {to} (из админки или автообновлением)', p)
 }
 
-function clearedText(why: string, p: string, t: T): string {
+function clearedText(why: string, p: string, t: T, slug = ''): string {
   if (why === 'gone') return t('признак снят сам: {p} удален', { p })
   if (why === 'back') return t('признак снят сам: {p} вернули как было', { p })
   if (why === 'head') return t('признак снят сам: {p} теперь как в git', { p })
+  if (why === 'plugin') return t('признак снят сам: {p} записал плагин {s} по своему шаблону', { p, s: slug })
+  if (why === 'data') return t('признак снят сам: в {p} нет кода, только настройки плагина', { p })
+  if (why === 'deny') return t('признак снят сам: {p} только закрывает доступ', { p })
   return t('признак снят сам: {p} - пакет перевода WordPress', { p })
+}
+
+// файлы, которые плагин держит сам (by - вердикты helper'а 0.7): кто и что это
+function genText(x: { files: string[]; n: number; by: string[] }, t: T): string {
+  const f = sameFiles(x, t)
+  const [one] = x.by
+  if (x.by.length === 1 && one.startsWith('plugin:'))
+    return t('плагин {s} сам записал свой файл по шаблону: {f}', { s: one.slice(7), f })
+  if (x.by.length === 1 && one === 'data') return t('плагин записал свои настройки, кода в файле нет: {f}', { f })
+  if (x.by.length === 1 && one === 'deny') return t('плагин закрыл доступ к каталогу (.htaccess): {f}', { f })
+  return t('файлы, которые плагины пишут сами, не правка: {f}', { f })
 }
 
 export function webfilesBad(s: Server): number {
@@ -223,7 +238,7 @@ export function WebFiles({ s, onChanged }: { s: Server; onChanged: () => void })
             <div className="tamper-row">
               <span className="lk-dot lk-dot-idle" />
               <span className="tamper-ico">✅</span>
-              <span className="tamper-txt muted small">{clearedText(r.cleared.why, r.cleared.p, t)}</span>
+              <span className="tamper-txt muted small">{clearedText(r.cleared.why, r.cleared.p, t, r.cleared.slug)}</span>
               <span className="muted small tamper-when">{fmtDateTime(r.cleared.at)}</span>
             </div>
           )}
@@ -237,6 +252,14 @@ export function WebFiles({ s, onChanged }: { s: Server; onChanged: () => void })
                   : t('перезаписаны тем же содержимым, что в git: {f}', { f: sameFiles(r.same, t) })}
               </span>
               <span className="muted small tamper-when">{fmtDateTime(r.same.at)}</span>
+            </div>
+          )}
+          {r.gen && (
+            <div className="tamper-row">
+              <span className="lk-dot lk-dot-idle" />
+              <span className="tamper-ico">🧩</span>
+              <span className="tamper-txt muted small">{genText(r.gen, t)}</span>
+              <span className="muted small tamper-when">{fmtDateTime(r.gen.at)}</span>
             </div>
           )}
           {(r.wp_events ?? []).map((e) => (

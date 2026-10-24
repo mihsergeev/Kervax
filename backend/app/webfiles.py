@@ -43,6 +43,15 @@ Helper 0.6 смотрит на содержимое, а не на время ф�
 30 дней и пишет в корне "clean", когда файл пропал, вернулся к прежнему содержимому, стал как в
 HEAD (закоммитили, выложили) или оказался пакетом перевода, - признак по нему снимается сам.
 
+Файлы, которые плагин WordPress держит сам, - не правка. Helper 0.7 присылает к файлу вердикт (d):
+plugin:<slug> - drop-in в wp-content (advanced-cache.php, object-cache.php, autoptimize_404_handler.php,
+wp-cache-config.php) сделан из файла этого установленного плагина: строки кода те же и в том же
+порядке, заполнены только места под путь и версию, поменялись только значения настроек; data - php
+в wp-content, который ничего не выполняет (exit в начале или одни значения: конфиги плагинов кэша);
+deny - .htaccess, который только закрывает доступ. Такое - тихая строка, висящий признак по такому
+файлу снимается сам (досмотр присылает тот же вердикт в "clean"). Подмененный drop-in (лишняя строка
+кода, путь вне сайта) вердикта не получает и остается признаком, похожее на веб-шелл - тоже.
+
 Где правят руками (рабочая копия разработчика на dev-сервере: ветка не main/master/prod/release,
 или так выбрано в строке корня), правки файлов не признак, они видны серой строкой. Признаками
 остаются php в загрузках, php, похожий на веб-шелл, и файлы, которые записал сам сайт (владелец -
@@ -102,6 +111,8 @@ MODES = ("auto", "dev", "strict")
 
 
 # languages/[plugins|themes/]<slug>-<locale>.l10n.php, у ядра без slug: ru_RU, admin-ru_RU
+# вердикт helper'а 0.7: файл держит сам плагин (drop-in по шаблону), конфиг без кода, закрытый .htaccess
+_GEN = re.compile(r"^(?:plugin:[A-Za-z0-9._-]{1,60}|data|deny)$")
 _WP_LANG = re.compile(r"(?:^|/)languages/(?:(plugins|themes)/)?([^/]+)\.l10n\.php$")
 _WP_LOCALE = re.compile(r"^(?:(.+)-)?([a-z]{2,3}(?:_[A-Z]{2})?(?:_[a-z0-9]+)?)$")
 _WP_PART = re.compile(r"(?:^|/)wp-content/(plugins|themes)/([^/]+?)(?:\.php)?(?:/|$)")
@@ -235,23 +246,25 @@ def _rules(roots: dict, was: int) -> None:
 
 
 CLEAN = {"gone": "файл удален", "back": "файл вернули как было", "head": "файл стал как в git (HEAD)",
-         "wplang": "это пакет перевода WordPress"}
+         "wplang": "это пакет перевода WordPress", "plugin": "файл записал плагин по своему шаблону",
+         "data": "в файле нет кода, только настройки", "deny": ".htaccess только закрывает доступ"}
 
 
 def _clean(root: dict, lst, now: datetime) -> None:
     """Признаки по файлам, с которыми helper 0.6 разобрался: [[путь, почему], ...]. Почему - в
-    CLEAN; php в загрузках снимается, только когда файла нет."""
+    CLEAN, у плагина с его slug ("plugin:wp-rocket", helper 0.7); php в загрузках снимается, только
+    когда файла нет."""
     for x in lst or []:
-        if not (isinstance(x, (list, tuple)) and len(x) >= 2 and str(x[1]) in CLEAN):
+        if not (isinstance(x, (list, tuple)) and len(x) >= 2 and (str(x[1]) in CLEAN or _GEN.match(str(x[1])))):
             continue
-        p, why = str(x[0]), str(x[1])
+        p, (why, _sep, slug) = str(x[0]), str(x[1]).partition(":")
         for k in ("php", "edit"):
             if p not in (root.get(k) or {}):
                 continue
             if k == "php" and in_uploads(p) and why != "gone":
                 continue
             root[k].pop(p)
-            root["cleared"] = {"at": now.isoformat(), "p": p, "why": why}
+            root["cleared"] = {"at": now.isoformat(), "p": p, "why": why, **({"slug": slug} if slug else {})}
         for k in ("php", "edit"):
             if k in root and not root[k]:
                 root.pop(k)
@@ -415,14 +428,16 @@ def _strs(lst) -> set[str]:
 
 
 def _info(d: dict) -> dict[str, dict]:
-    """Что helper 0.6 знает о присланных файлах: {путь: [git, владелец, веб-сервер, веб-шелл]} ->
-    {путь: {"g": ..., "o": ..., "w": 1, "x": 1}}; у 0.5 - только git_dirty."""
+    """Что helper 0.6 знает о присланных файлах: {путь: [git, владелец, веб-сервер, веб-шелл,
+    вердикт 0.7]} -> {путь: {"g": ..., "o": ..., "w": 1, "x": 1, "d": "plugin:wp-rocket"}}; у 0.5 -
+    только git_dirty."""
     out: dict[str, dict] = {}
     for p, v in (d.get("f") or {}).items():
         if not (isinstance(p, str) and isinstance(v, (list, tuple))):
             continue
-        g, o, w, x = (list(v) + ["", "", 0, 0])[:4]
-        i = {"g": str(g or ""), "o": str(o or "")[:32], "w": 1 if w == 1 else 0, "x": 1 if x == 1 else 0}
+        g, o, w, x, gen = (list(v) + ["", "", 0, 0, ""])[:5]
+        i = {"g": str(g or ""), "o": str(o or "")[:32], "w": 1 if w == 1 else 0, "x": 1 if x == 1 else 0,
+             "d": str(gen) if _GEN.match(str(gen or "")) and x != 1 else ""}
         out[p] = {k: v for k, v in i.items() if v}
     for p in _strs(d.get("git_dirty")):
         out.setdefault(p, {"g": "dirty"})
@@ -444,6 +459,23 @@ def _same(root: dict, rows: list[tuple[str, int, int]], again: list[tuple[str, i
     files = sorted({p for p, _t, _s in rows + again})
     times = [t for _p, t, _s in rows + again if t > 0]
     root["same"] = {"at": _iso(max(times) if times else ts), "files": files[:5], "n": len(files), "git": bool(rows)}
+
+
+def _gen(root: dict, rows: list[tuple[str, int, int]], info: dict[str, dict], ts: float) -> None:
+    """Тихая строка "это файлы плагина": drop-in по шаблону, конфиг без кода, закрытый .htaccess
+    (helper 0.7). Признак по такому файлу, если был, снимается: файл снова такой, каким его пишет плагин."""
+    if not rows:
+        return
+    for p, _t, _s in rows:
+        for k in ("php", "edit"):
+            (root.get(k) or {}).pop(p, None)
+    for k in ("php", "edit"):
+        if k in root and not root[k]:
+            root.pop(k)
+    files = sorted({p for p, _t, _s in rows})
+    times = [t for _p, t, _s in rows if t > 0]
+    root["gen"] = {"at": _iso(max(times) if times else ts), "files": files[:5], "n": len(files),
+                   "by": sorted({info[p]["d"] for p in files})[:5]}
 
 
 def _apply(root: dict, d: dict, ts: float) -> None:
@@ -472,7 +504,11 @@ def _apply(root: dict, d: dict, ts: float) -> None:
     head = [x for x in changed + new if info.get(x[0], {}).get("g") == "same" and x[0] not in by_git
             and not strong(x[0], x[2])]
     _same(root, head, [x for x in _rows(d.get("same")) if not generated(x[0])], ts)
-    quiet = wp | {p for p, _t, _s in head}
+    # файл, который плагин держит сам (helper 0.7), - не правка
+    gen = [x for x in changed + new if info.get(x[0], {}).get("d") and x[0] not in by_git and x[0] not in wp
+           and not strong(x[0], x[2])]
+    _gen(root, gen, info, ts)
+    quiet = wp | {p for p, _t, _s in head + gen}
     new = [x for x in new if x[0] not in quiet]
     changed = [x for x in changed if x[0] not in quiet]
     gone = d.get("gone") or []
@@ -825,6 +861,8 @@ def view(state: dict | None, rep: dict, now: datetime) -> dict | None:
             # рабочая копия git: ветка и последний файл, записанный заново тем же содержимым (за неделю)
             "branch": next((r["branch"] for r in rs if r.get("branch")), ""),
             "same": _same_shown(rs, now),
+            # файлы, которые плагин записал сам: drop-in по шаблону, конфиг без кода (за неделю)
+            "gen": _gen_shown(rs, now),
         })
     return {"roots": out, "ts": (b or {}).get("ts")}
 
@@ -837,12 +875,16 @@ def _cleared_shown(rs: list[dict], now: datetime) -> dict | None:
         return None
 
 
-def _same_shown(rs: list[dict], now: datetime) -> dict | None:
-    last = max((r["same"] for r in rs if r.get("same")), key=lambda x: x.get("at", ""), default=None)
+def _same_shown(rs: list[dict], now: datetime, k: str = "same") -> dict | None:
+    last = max((r[k] for r in rs if r.get(k)), key=lambda x: x.get("at", ""), default=None)
     try:
         return last if last and now - datetime.fromisoformat(last["at"]) <= WP_SHOW else None
     except (KeyError, ValueError):
         return None
+
+
+def _gen_shown(rs: list[dict], now: datetime) -> dict | None:
+    return _same_shown(rs, now, "gen")
 
 
 def _wp_shown(rs: list[dict], now: datetime) -> list[dict]:

@@ -46,6 +46,21 @@
 # the like, names of known shells) - the panel keeps these signs even where people edit the code by
 # hand.
 #
+# A plugin writes files of its own in wp-content: drop-ins (advanced-cache.php, object-cache.php,
+# db.php, autoptimize_404_handler.php) from a file it ships, configs of cache plugins, .htaccess
+# that closes a directory. Such a file sent or watched goes with a verdict when it is that and
+# nothing else, and does not look like a web shell:
+# - plugin:<slug> - a file right in wp-content made from a file of that installed plugin of the
+#   same name (or name-sample.php): its lines of code are lines of that file in the same order,
+#   some left out, a placeholder ({{NAME}}, <!--name-->) filled with a path or a version, a
+#   constant set to another literal or to a path from a directory of WordPress; a literal into a
+#   variable may be anywhere. An absolute path stays in the site and none goes up with "..": a
+#   drop-in pointed elsewhere would load code from there;
+# - data - php in wp-content that runs nothing: exit first, or only literal values (a string, a
+#   number, true, false, null, an array of them) into variables and constants;
+# - deny - .htaccess that only closes access.
+# The panel takes such a change for the plugin's, not an edit, and takes off a sign of such a file.
+#
 # WordPress updates itself from the admin or by wp-cron: a language pack, a plugin, a theme or
 # the core. To tell that from an edit, a changed translation (languages/*.l10n.php) is sent with
 # the time of the .mo next to it - a language pack writes both in the same second - and a run
@@ -58,7 +73,7 @@
 # (root only).
 set -euo pipefail
 
-KERVAX_SETUP_VERSION=0.6 # MAJOR.MINOR; compared component-wise
+KERVAX_SETUP_VERSION=0.7 # MAJOR.MINOR; compared component-wise
 KERVAX_SETUP_WHEN="pgrep -x nginx || pgrep -x apache2 || pgrep -x httpd || pgrep php-fpm || pgrep -x php || pgrep lsphp || pgrep frankenphp"
 
 HELPER_DIR=/lib65/kervax
@@ -96,6 +111,175 @@ WATCH_DAYS=30    # a file sent as changed is looked at again this long
 WATCH_MAX=300    # files on the watch list of a root
 SEED_DAYS=14     # helper 0.5 had no watch list: files written this recently are put on it
 TAB=$(printf '\t')
+GEN_TPL=1048576  # a plugin file bigger than this is not a template
+GEN_DATA=32768   # php or .htaccess bigger than this is not a config
+
+# The checks of gen_check: mode=tpl - a template and the file, data or deny - the file
+IFS= read -r -d '' GEN_AWK <<'GEN_AWK_EOF' || true
+function safe(v) { return v ~ /^[A-Za-z0-9._\/:~+@-]*$/ && !index(v, "..") }
+# an absolute path in a value points into the site: a drop-in pointed elsewhere would load
+# code from there
+function inbase(v) { return substr(v, 1, 1) != "/" || v == "/" || index(v "/", base "/") == 1 }
+# php without whitespace and comments, strings as S, the rest in lower case; "!" where it may
+# hide code: a comment that ends php mode, an attribute, a string with $, { or \ in double quotes
+function strip(s,   out, i, n, c, d, e, j, t) {
+  n = length(s); out = ""; i = 1
+  while (i <= n) {
+    c = substr(s, i, 1); d = substr(s, i, 2)
+    if (d == "#[") return "!"
+    if (d == "//" || c == "#") {
+      t = substr(s, i); j = index(t, "\n")
+      if (j) t = substr(t, 1, j - 1)
+      if (index(t, "?>")) return "!"
+      i += length(t); continue
+    }
+    if (d == "/*") {
+      j = index(substr(s, i + 2), "*/")
+      if (!j) return "!"
+      i += j + 3; continue
+    }
+    if (c == "'") {
+      for (j = i + 1; j <= n; j++) { e = substr(s, j, 1); if (e == "\\") j++; else if (e == "'") break }
+      if (j > n) return "!"
+      out = out "S"; i = j + 1; continue
+    }
+    if (c == "\"") {
+      for (j = i + 1; j <= n; j++) {
+        e = substr(s, j, 1)
+        if (e == "\\" || e == "$" || e == "{") return "!"
+        if (e == "\"") break
+      }
+      if (j > n) return "!"
+      out = out "S"; i = j + 1; continue
+    }
+    if (c != " " && c != "\t" && c != "\r" && c != "\n") out = out tolower(c)
+    i++
+  }
+  return out
+}
+# a literal value at P of V: a string, a number, true, false, null or an array of them
+function val(   t) {
+  if (substr(V, P, 6) == "array(") { P += 6; return arr(")") }
+  t = substr(V, P, 1)
+  if (t == "[") { P++; return arr("]") }
+  if (t == "S") { P++; return 1 }
+  t = substr(V, P)
+  if (match(t, /^-?[0-9][0-9.]*/) || match(t, /^(true|false|null)/)) { P += RLENGTH; return 1 }
+  return 0
+}
+function arr(cl) {
+  while (1) {
+    if (substr(V, P, 1) == cl) { P++; return 1 }
+    if (!val()) return 0
+    if (substr(V, P, 2) == "=>") { P += 2; if (!val()) return 0 }
+    if (substr(V, P, 1) == ",") P++
+    else if (substr(V, P, 1) == cl) { P++; return 1 }
+    else return 0
+  }
+}
+function literal(v) { V = v; P = 1; return v != "" && val() && P == length(V) + 1 }
+# a statement of a file that runs nothing: the ABSPATH guard, a literal into a variable or a
+# constant, return of a literal
+function stmt(x) {
+  if (br && substr(x, 1, 1) == "}") { br = 0; x = substr(x, 2) }
+  if (x == "") return 1
+  if (x ~ /^(defined\(S\)(\|\||or)|if\(!defined\(S\)\))(exit|die)(\((S|[0-9]+)?\))?$/) return 1
+  if (x ~ /^if\(!defined\(S\)\)[{](exit|die)(\((S|[0-9]+)?\))?$/) { br = 1; return 1 }
+  if (substr(x, 1, 9) == "define(S," && substr(x, length(x)) == ")") return literal(substr(x, 10, length(x) - 10))
+  if (substr(x, 1, 6) == "return") return literal(substr(x, 7))
+  if (match(x, /^\$[a-z_][a-z0-9_]*(\[(S|-?[0-9]+)?\])*=/)) return literal(substr(x, RLENGTH + 1))
+  return 0
+}
+# strings of a line that start with / stay in the site, none goes up with ..
+function paths(s,   c, j, p) {
+  if (index(s, "..")) return 0
+  while (match(s, /['"]\//)) {
+    c = substr(s, RSTART, 1); s = substr(s, RSTART + 1)
+    j = index(s, c); p = j ? substr(s, 1, j - 1) : s
+    if (!inbase(p)) return 0
+    s = j ? substr(s, j + 1) : ""
+  }
+  return 1
+}
+# a line of the template with placeholders ({{NAME}}, <!--name-->) filled with a path or a version
+function ph(tl, s,   k, lit, rest, i, pos, j, v) {
+  k = 0; rest = tl
+  while (match(rest, /[{][{][A-Za-z0-9_\/.-]+[}][}]|<!--[A-Za-z0-9_.-]+-->/)) {
+    lit[k++] = substr(rest, 1, RSTART - 1); rest = substr(rest, RSTART + RLENGTH)
+  }
+  if (!k) return 0
+  lit[k] = rest
+  if (substr(s, 1, length(lit[0])) != lit[0]) return 0
+  pos = length(lit[0]) + 1
+  for (i = 1; i < k; i++) {
+    if (lit[i] == "") continue
+    j = index(substr(s, pos), lit[i])
+    if (!j) return 0
+    v = substr(s, pos, j - 1)
+    if (!safe(v) || !inbase(v)) return 0
+    pos += j - 1 + length(lit[i])
+  }
+  if (length(s) - pos + 1 < length(lit[k]) || substr(s, length(s) - length(lit[k]) + 1) != lit[k]) return 0
+  v = substr(s, pos, length(s) - pos + 1 - length(lit[k]))
+  return safe(v) && inbase(v)
+}
+# a line of the file is this line of the template: the same, filled in, or another value of the
+# same constant - a literal or a path from a directory of WordPress
+function like(tl, s,   a, b, n, v) {
+  if (tl == s || s == "<?php" && substr(tl, 1, 5) == "<?php") return 1
+  if (ph(tl, s)) return 1
+  a = strip(tl); b = strip(s)
+  if (a == "!" || b == "!" || substr(b, length(b) - 1) != ");" || index(s, "..")) return 0
+  if (substr(a, 1, 9) != "define(S," || substr(b, 1, 9) != "define(S,") return 0
+  a = tl; n = s; gsub(/[ \t]/, "", a); gsub(/[ \t]/, "", n)
+  a = substr(a, 1, index(a, ","))
+  if (a == "" || substr(n, 1, length(a)) != a) return 0
+  v = substr(b, 10, length(b) - 11)
+  return v ~ /^(wp_content_dir|wp_plugin_dir|abspath)\.S$/ || literal(v) && paths(s)
+}
+# a literal into a variable runs nothing, in any place: a cache plugin keeps its settings so and
+# adds new ones where it likes
+function extra(s,   b) {
+  b = strip(s)
+  if (b == "!" || substr(b, length(b)) != ";" || !paths(s)) return 0
+  b = substr(b, 1, length(b) - 1)
+  return match(b, /^\$[a-z_][a-z0-9_]*(\[(S|-?[0-9]+)?\])*=/) && literal(substr(b, RLENGTH + 1))
+}
+function norm(s) { sub(/\r$/, "", s); sub(/[ \t]+$/, "", s); return s ~ /^[ \t]*$/ ? "" : s }
+BEGIN { xre = "^<[?]php[ \t]+(exit|die)[ \t]*([(][ \t]*('[^'\\\\]*'|\"[^\"$\\\\]*\"|[0-9]+)?[ \t]*[)])?[ \t]*;" }
+mode == "deny" {
+  l = tolower($0); sub(/\r$/, "", l); sub(/^[ \t]+/, "", l); sub(/[ \t]+$/, "", l)
+  if (l == "" || l ~ /^#/ || l ~ /^<\/?(ifmodule|files|filesmatch)([ \t>]|$)/ || l ~ /^order[ \t]+(deny|allow)[ \t]*,[ \t]*(deny|allow)$/ || l ~ /^options[ \t]+-indexes$/) next
+  if (l ~ /^require[ \t]+all[ \t]+denied$/ || l ~ /^deny[ \t]+from[ \t]+all$/) { deny = 1; next }
+  bad = 1; exit
+}
+mode == "data" {
+  sub(/\r$/, "")
+  if (NR == 1 && $0 ~ xre) { ok = 1; exit }
+  buf = buf $0 "\n"; next
+}
+mode == "tpl" && FILENAME == ARGV[1] { s = norm($0); if (s != "") t[++tn] = s; next }
+mode == "tpl" {
+  s = norm($0)
+  if (s == "") next
+  if (extra(s)) next
+  while (++ti <= tn) if (like(t[ti], s)) break
+  if (ti > tn) { bad = 1; exit }
+}
+END {
+  if (mode == "deny") exit !(deny && !bad)
+  if (mode == "tpl") exit bad || !tn
+  if (ok) exit 0
+  x = strip(buf)
+  if (x == "!" || substr(x, 1, 5) != "<?php") exit 1
+  x = substr(x, 6)
+  if (substr(x, length(x) - 1) == "?>") x = substr(x, 1, length(x) - 2)
+  if (index(x, "?>") || index(x, "<?")) exit 1
+  n = split(x, st, ";")
+  for (i = 1; i <= n; i++) if (!stmt(st[i])) exit 1
+  exit 0
+}
+GEN_AWK_EOF
 
 esc() { printf '%s' "$1" | tr -d '\000-\037' | sed 's/\\/\\\\/g; s/"/\\"/g'; }
 
@@ -255,6 +439,18 @@ web_uids() {
   done
 }
 
+# NUL-separated paths of the list (from the root) whose php looks like a web shell: code run from
+# the request, eval of an encoded string, the names of known shells
+shells() {
+  (cd "$1" 2>/dev/null && awk '/\.(php[3-8]?|phtml|pht|phar)$/' "$2" \
+    | while IFS= read -r f; do [ -f "$f" ] && [ "$(stat -c %s "$f" 2>/dev/null || echo 0)" -le "$HASH_MAX" ] && printf '%s\0' "$f"; done \
+    | timeout 60 xargs -0 -r grep -l -Z -a -s -E \
+        -e '(eval|assert)[[:space:]]*\([[:space:]]*@?[[:space:]]*(base64_decode|gzinflate|gzuncompress|gzdecode|str_rot13|strrev|rawurldecode|hex2bin)[[:space:]]*\(' \
+        -e '(eval|assert|system|passthru|shell_exec|exec|popen|proc_open|pcntl_exec)[[:space:]]*\([[:space:]]*@?[[:space:]]*\$_(GET|POST|REQUEST|COOKIE|SERVER|FILES)' \
+        -e '\$_(GET|POST|REQUEST|COOKIE)[[:space:]]*\[[^]]{1,40}\][[:space:]]*\([[:space:]]*@?[[:space:]]*\$_(GET|POST|REQUEST|COOKIE)' \
+        -e '(FilesMan|b374k|c99shell|r57shell|IndoXploit|AnonymousFox|Yanz Webshell)' -- 2>/dev/null)
+}
+
 # OWN[path from the root]: "owner TAB 1 when the owner is the web user TAB 1 when the php looks
 # like a web shell". Arguments: root, passwd to read names from, web uids, file with paths
 declare -A OWN=()
@@ -266,14 +462,7 @@ owners_of() {
   while IFS=: read -r n _x u _rest; do
     [ -n "$u" ] && [ -z "${name[$u]+x}" ] && name[$u]=$(printf '%s' "$n" | tr -cd 'A-Za-z0-9._-' | head -c 32)
   done < <(head -c 262144 "$pw" 2>/dev/null)
-  # web shells: code run from the request, eval of an encoded string, the names of known shells
-  while IFS= read -r -d '' f; do sus[$f]=1; done < <(cd "$root" 2>/dev/null && awk '/\.(php[3-8]?|phtml|pht|phar)$/' "$list" \
-    | while IFS= read -r f; do [ -f "$f" ] && [ "$(stat -c %s "$f" 2>/dev/null || echo 0)" -le "$HASH_MAX" ] && printf '%s\0' "$f"; done \
-    | timeout 60 xargs -0 -r grep -l -Z -a -s -E \
-        -e '(eval|assert)[[:space:]]*\([[:space:]]*@?[[:space:]]*(base64_decode|gzinflate|gzuncompress|gzdecode|str_rot13|strrev|rawurldecode|hex2bin)[[:space:]]*\(' \
-        -e '(eval|assert|system|passthru|shell_exec|exec|popen|proc_open|pcntl_exec)[[:space:]]*\([[:space:]]*@?[[:space:]]*\$_(GET|POST|REQUEST|COOKIE|SERVER|FILES)' \
-        -e '\$_(GET|POST|REQUEST|COOKIE)[[:space:]]*\[[^]]{1,40}\][[:space:]]*\([[:space:]]*@?[[:space:]]*\$_(GET|POST|REQUEST|COOKIE)' \
-        -e '(FilesMan|b374k|c99shell|r57shell|IndoXploit|AnonymousFox|Yanz Webshell)' -- 2>/dev/null)
+  while IFS= read -r -d '' f; do sus[$f]=1; done < <(shells "$root" "$list")
   while IFS= read -r f; do
     u=$(stat -c %u "$root/$f" 2>/dev/null) || continue
     n=${name[$u]:-$u}
@@ -281,6 +470,52 @@ owners_of() {
     case "$web" in *" $u "*) w=1 ;; esac
     OWN[$f]="$n$TAB$w$TAB${sus[$f]:-0}"
   done < "$list"
+}
+
+# GEN[path from the root]: plugin:<slug>, data or deny - a file a plugin keeps by itself (see the
+# top). Arguments: root, the root as the site sees it (for paths in drop-ins), wp-content from the
+# root ("" - not WordPress), file with paths
+declare -A GEN=()
+gen_check() {
+  local root=$1 base=$2 wpc=$3 list=$4 f b t v
+  local -A sus=()
+  GEN=()
+  [ -s "$list" ] || return 0
+  # only what such a file can be: .htaccess, php in wp-content out of plugins and themes
+  while IFS= read -r f; do
+    case "$f" in
+      .htaccess|*/.htaccess) printf '%s\n' "$f" ;;
+      "$wpc"plugins/*|"$wpc"themes/*|"$wpc"mu-plugins/*) ;;
+      "$wpc"*.php) [ -n "$wpc" ] && printf '%s\n' "$f" ;;
+    esac
+  done < "$list" > "$work/gencand"
+  [ -s "$work/gencand" ] || return 0
+  while IFS= read -r -d '' f; do sus[$f]=1; done < <(shells "$root" "$work/gencand")
+  while IFS= read -r f; do
+    [ -z "${sus[$f]:-}" ] && [ -f "$root/$f" ] && [ ! -L "$root/$f" ] || continue
+    v=""
+    case "$f" in
+      .htaccess|*/.htaccess)
+        [ "$(stat -c %s "$root/$f" 2>/dev/null || echo 0)" -le "$GEN_DATA" ] && awk -v mode=deny "$GEN_AWK" "$root/$f" 2>/dev/null && v=deny ;;
+      *)
+        # a drop-in lies right in wp-content
+        b=${f#"$wpc"}
+        if [ "${b%/*}" = "$b" ] && [ -d "$root/${wpc}plugins" ]; then
+          while IFS= read -r t; do
+            if awk -v mode=tpl -v base="$base" "$GEN_AWK" "$t" "$root/$f" 2>/dev/null; then
+              t=${t#"$root/${wpc}plugins/"}
+              v=plugin:$(printf '%s' "${t%%/*}" | tr -cd 'A-Za-z0-9._-' | head -c 60)
+              break
+            fi
+          done < <(find "$root/${wpc}plugins" -mindepth 2 -maxdepth 5 -type f \( -name "$b" -o -name "${b%.php}-sample.php" \) \
+                     -size -"$((GEN_TPL / 1024))"k 2>/dev/null | head -5)
+        fi
+        if [ -z "$v" ] && [ "$(stat -c %s "$root/$f" 2>/dev/null || echo 0)" -le "$GEN_DATA" ] && awk -v mode=data "$GEN_AWK" "$root/$f" 2>/dev/null; then
+          v=data
+        fi ;;
+    esac
+    [ -n "$v" ] && GEN[$f]=$v
+  done < "$work/gencand"
 }
 
 # sha1 of the files on a list (paths from the root) -> "path TAB sha1"
@@ -509,6 +744,12 @@ while IFS="$TAB" read -r pid dir names; do
   # WordPress: versions now, the core one goes to the panel with the root
   wp_versions "$p" > "$work/wp"
   wpv=$(awk -F '\t' '$1 == "core" { print $3; exit }' "$work/wp")
+  # wp-content from the root: where the plugins are, else next to the core
+  wpc=$(awk -F '\t' '$1 == "plugin" && (i = index($4, "plugins/")) { print substr($4, 1, i - 1); exit }' "$work/wp")
+  if [ -z "$wpc" ] && [ -n "$wpv" ]; then
+    wpc=$(awk -F '\t' '$1 == "core" { print $4 "wp-content/"; exit }' "$work/wp")
+    [ -d "$p/$wpc" ] || wpc=""
+  fi
   doms=$(printf '%s\n' "$names" | tr ' ' '\n' | grep -E '^[A-Za-z0-9*][A-Za-z0-9.*-]*\.[A-Za-z]{2,}$' | sort -u | head -20 \
     | awk '{ printf "%s\"%s\"", (NR > 1 ? "," : ""), $0 }')
   snap="$SNAP/$key.lst" wf="$SNAP/$key.watch" lroot=$p
@@ -603,7 +844,11 @@ while IFS="$TAB" read -r pid dir names; do
     cut -f1 "$work/wcur" | cat "$work/listed" - | sort -u > "$work/gitfiles"
     git_check "$gd" "$gpre" "$p" "$gtop" "$work/gitfiles"
   fi
-  # a watched file is done with: gone, back as it was, as in HEAD, a translation with its .mo
+  # files a plugin keeps by itself: the ones sent and those watched
+  cut -f1 "$work/wcur" | cat "$work/listed" - | sort -u > "$work/genfiles"
+  gen_check "$p" "$inner" "$wpc" "$work/genfiles"
+  # a watched file is done with: gone, back as it was, as in HEAD, a translation with its .mo, a
+  # file the plugin keeps
   : > "$work/verd"
   while IFS="$TAB" read -r f h0 h t; do
     v=""
@@ -611,6 +856,7 @@ while IFS="$TAB" read -r pid dir names; do
     if [ "$h" = - ] && [ ! -f "$lroot/$f" ]; then v=gone
     elif [ "$h0" != . ] && [ "$h" = "$h0" ]; then v=back
     elif [ "${GST[$f]:-}" = same ]; then v=head
+    elif [ -n "${GEN[$f]:-}" ]; then v=${GEN[$f]}
     else
       case "$f" in
         *languages/*.l10n.php)
@@ -636,11 +882,11 @@ while IFS="$TAB" read -r pid dir names; do
     owners_of "$lroot" "$pw" "$WEBALL" "$work/listed"
     finfo=""
     while IFS= read -r f; do
-      o=${OWN[$f]:-} g=${GST[$f]:-}
-      [ -n "$o$g" ] || continue
+      o=${OWN[$f]:-} g=${GST[$f]:-} d=${GEN[$f]:-}
+      [ -n "$o$g$d" ] || continue
       on="" ow=0 ox=0
       [ -n "$o" ] && IFS="$TAB" read -r on ow ox <<< "$o"
-      finfo="$finfo${finfo:+,}\"$(esc "$f")\":[\"$g\",\"$(esc "$on")\",${ow:-0},${ox:-0}]"
+      finfo="$finfo${finfo:+,}\"$(esc "$f")\":[\"$g\",\"$(esc "$on")\",${ow:-0},${ox:-0}${d:+,\"$d\"}]"
     done < "$work/listed"
     [ -n "$finfo" ] && finfo=",\"f\":{$finfo}"
     deltas="$deltas${deltas:+,}{\"key\":\"$key\",\"n_new\":$nn,\"n_changed\":$nc,\"n_gone\":$ng,\"n_same\":$ns,\"new\":[$(jlist N "$work/diff")],\"changed\":[$(jlist C "$work/diff")],\"gone\":[$(jlist G "$work/diff")],\"same\":[$(jlist S "$work/diff")]${wpup:+,\"wp\":[$wpup]}$finfo}"

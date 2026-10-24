@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
-# Scenario test of kubeexpiry-setup.sh (helper 0.3): TLS secrets get a certificate fingerprint and
-# a mark whether some Ingress points at them (spec.tls[].secretName); when the Ingress read fails
-# the mark is left out ("unknown", not "unused"). Runs the real helper in a scratch directory with
-# a fake kubectl. Usage: kube_expiry_ingress.sh <repo root>. Prints PASS or the failures.
+# Scenario test of kubeexpiry-setup.sh (helper 0.4): TLS secrets get a certificate fingerprint and
+# a mark whether something points at them - Ingress spec.tls[].secretName, Gateway certificateRefs,
+# Traefik IngressRoute tls.secretName, pod volumes and env. A cluster without Gateway API or Traefik
+# is not a failed read; when any read fails the mark is left out ("unknown", not "unused"). Runs
+# the real helper in a scratch directory with a fake kubectl. Usage: kube_expiry_ingress.sh <repo
+# root>. Prints PASS or the failures.
 set -uo pipefail
 ROOT="${1:?repo root}"
 T="$(mktemp -d /tmp/kv-kexp.XXXXXX)"
@@ -16,25 +18,54 @@ cert() { # name -> base64 of a fresh self-signed certificate
 }
 A=$(cert used-ssl 30)
 B=$(cert old-ssl 1)
-cat > "$T/secrets.json" <<EOF
-{"items":[
- {"type":"kubernetes.io/tls","metadata":{"namespace":"default","name":"used-ssl"},"data":{"tls.crt":"$A"}},
- {"type":"kubernetes.io/tls","metadata":{"namespace":"default","name":"old-ssl"},"data":{"tls.crt":"$B"}},
- {"type":"Opaque","metadata":{"namespace":"default","name":"other"},"data":{}}
-]}
-EOF
+C=$(cert gw-ssl 30)
+D=$(cert route-ssl 30)
+E=$(cert mounted-certs 30)
+F=$(cert env-ssl 30)
+sec() { # namespace name base64
+  printf '{"type":"kubernetes.io/tls","metadata":{"namespace":"%s","name":"%s"},"data":{"tls.crt":"%s"}},' "$1" "$2" "$3"
+}
+{
+  printf '{"items":['
+  sec default used-ssl "$A"; sec default old-ssl "$B"; sec edge gw-ssl "$C"; sec default route-ssl "$D"
+  sec kube-system mounted-certs "$E"; sec default env-ssl "$F"
+  printf '{"type":"Opaque","metadata":{"namespace":"default","name":"other"},"data":{}}]}\n'
+} > "$T/secrets.json"
 cat > "$T/ingresses.json" <<'EOF'
 {"items":[
  {"metadata":{"namespace":"default","name":"web"},"spec":{"tls":[{"hosts":["a.example.com"],"secretName":"used-ssl"}]}},
  {"metadata":{"namespace":"other","name":"web"},"spec":{"tls":[{"secretName":"old-ssl"}]}}
 ]}
 EOF
-# fake kubectl: kubectl --kubeconfig <f> get <what> -A -o json
+# the Gateway lives in its own namespace and points at a secret in another one
+cat > "$T/gateways.json" <<'EOF'
+{"items":[{"metadata":{"namespace":"gw","name":"main"},"spec":{"listeners":[
+ {"name":"https","tls":{"certificateRefs":[{"kind":"Secret","name":"gw-ssl","namespace":"edge"}]}},
+ {"name":"http"}]}}]}
+EOF
+cat > "$T/routes.json" <<'EOF'
+{"items":[{"metadata":{"namespace":"default","name":"app"},"spec":{"tls":{"secretName":"route-ssl"}}}]}
+EOF
+cat > "$T/pods.json" <<'EOF'
+{"items":[
+ {"metadata":{"namespace":"kube-system","name":"relay-5d9c7b8f6-abcde"},"spec":{"volumes":[
+   {"name":"tls","projected":{"sources":[{"secret":{"name":"mounted-certs"}}]}}],"containers":[{"name":"relay"}]}},
+ {"metadata":{"namespace":"default","name":"worker-0"},"spec":{"containers":[{"name":"w",
+   "env":[{"name":"CERT","valueFrom":{"secretKeyRef":{"name":"env-ssl","key":"tls.crt"}}}]}]}}
+]}
+EOF
+# fake kubectl: kubectl --kubeconfig <f> get <what> -A -o json. No Traefik in the old group, like
+# a cluster that never had it
 cat > "$T/bin/kubectl" <<EOF
 #!/usr/bin/env bash
 case "\$4" in
   secrets) cat "$T/secrets.json" ;;
   ingresses) [ -f "$T/ing-fail" ] && exit 1; cat "$T/ingresses.json" ;;
+  gateways.gateway.networking.k8s.io) cat "$T/gateways.json" ;;
+  ingressroutes.traefik.io) cat "$T/routes.json" ;;
+  ingressroutetcps.traefik.io) echo '{"items":[]}' ;;
+  pods) [ -f "$T/pods-fail" ] && { echo "Unable to connect to the server" >&2; exit 1; }; cat "$T/pods.json" ;;
+  *traefik.containo.us) echo "error: the server doesn't have a resource type \"\$4\"" >&2; exit 1 ;;
   *) echo '{"items":[]}' ;;
 esac
 EOF
@@ -62,6 +93,17 @@ check "unused secret marked as unused: $O" '[[ "$O" == *"\"ingress\": false"* ]]
 check "fingerprint is the short sha256: $U vs $FP" '[[ "$U" == *"\"fp\": \"$FP\""* ]]'
 check "note kept" '[[ "$U" == *"\"note\": \"tls.crt\""* ]]'
 check "only TLS secrets" '[ "$(item default/other)" = null ]'
+for w in edge/gw-ssl default/route-ssl kube-system/mounted-certs default/env-ssl; do
+  X=$(item "$w")
+  check "$w is used (Gateway, IngressRoute, pod volume, pod env): $X" '[[ "$X" == *"\"ingress\": true"* ]]'
+done
+check "no leftovers" '[ -z "$(ls /tmp/kv-kube-rows.* 2>/dev/null)" ]'
+
+touch "$T/pods-fail"
+"$T/helper"
+O=$(item default/old-ssl)
+check "failed pod read leaves usage unknown: $O" '[[ "$O" != *ingress* && "$O" == *"\"fp\""* ]]'
+rm -f "$T/pods-fail"
 
 touch "$T/ing-fail"
 "$T/helper"

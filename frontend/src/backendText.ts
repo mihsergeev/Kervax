@@ -10,6 +10,9 @@ type Rule = [RegExp, string]
 const PHRASES: Rule[] = [
   // белые списки обходятся подменой CF-Connecting-IP (app/cf_realip.py)
   [/белые списки обходятся подменой (\S+): /g, 'allow lists are bypassed with a forged $1: '],
+  [/IP клиента можно подделать заголовком (\S+): /g, 'the client IP can be forged with $1: '],
+  [/ - баны, лимиты входа и логи видят поддельный адрес/g, ' - bans, login limits and logs see the forged address'],
+  [/ в поде (\S+) \(подов: (\d+)\) верит заголовку от любого адреса \(/g, ' in pod $1 ($2 pods) trusts the header from any address ('],
   [/ в поде (\S+) верит заголовку от любого адреса \(/g, ' in pod $1 trusts the header from any address ('],
   [/ в контейнере (\S+) верит заголовку от любого адреса \(/g, ' in container $1 trusts the header from any address ('],
   [/ на хосте верит заголовку от любого адреса \(/g, ' on the host trusts the header from any address ('],
