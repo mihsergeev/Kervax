@@ -1277,6 +1277,18 @@ class InstallViaOut(BaseModel):
     ip: str = ""
 
 
+class InstallStatusOut(BaseModel):
+    """Шаг 3 окна установки: что панель знает о новой ноде, пока агент не прислал отчет."""
+    ip: str = ""  # IP сервера, который открывается в фаерволе панели
+    # '' нечего сказать | open | opening | no_ip | stale (app/install_watch.firewall_state)
+    firewall: str = ""
+    fw_age: int | None = None  # секунд с последнего прогона скрипта открытия адресов
+    relay: str = ""  # '' | opening | open: helper ретранслятора еще не пустил ноду / пустил
+    script_at: datetime | None = None  # нода скачала установщик
+    agent_at: datetime | None = None  # нода скачала бинарь агента
+    connected: bool = False  # первый отчет пришел
+
+
 class BackupAudit(BaseModel):
     """Находка аудита покрытия бэкапа: что на ноде рискует не восстановиться."""
 

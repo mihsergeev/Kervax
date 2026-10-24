@@ -24,6 +24,12 @@
 # proxy= in its config and sends everything to the panel through it as well.
 #
 # Russian version of this installer: agent/install-ru.sh
+#
+# The whole script is one { ... } block: sh reads a compound command to its end before
+# running any of it. Piped from curl over a link that stalls or cuts the transfer midway
+# (a DPI in the path), a truncated installer then does not run at all, instead of running
+# its first half and waiting for the rest forever.
+{
 set -eu
 
 # Argument parsing: positional <url> <token> [instance] plus flags.
@@ -34,7 +40,8 @@ set -eu
 # --ca-file <path>: the root that signed the panel's certificate (see the trust step below)
 # --proxy <url>: proxy to the panel for this installer and the agent (see the header)
 URL=""; TOKEN=""; INSTANCE=""; WANT_DOCKER=0; NO_AUTO=0; UNINSTALL=0; CA_FILE=""; WANT_CA=0
-PROXY=""; WANT_PROXY=0
+# KERVAX_PROXY in the environment is the same as --proxy: the panel's install command passes it so
+PROXY="${KERVAX_PROXY:-}"; WANT_PROXY=0
 for a in "$@"; do
   if [ "$WANT_CA" = 1 ]; then CA_FILE="$a"; WANT_CA=0; continue; fi
   if [ "$WANT_PROXY" = 1 ]; then PROXY="$a"; WANT_PROXY=0; continue; fi
@@ -242,7 +249,7 @@ if [ -n "$CA_FILE" ]; then
   $CA_UPDATE >/dev/null 2>&1 || { echo "✗ $CA_UPDATE failed." >&2; exit 1; }
   # checked WITHOUT --cacert, through the system store: exactly how the agent connects.
   # /api/agent/* and not /api/health: the panel's IP allow-list does not apply there.
-  if ! pcurl -fsS --connect-timeout 15 -o /dev/null "${URL%/}/api/agent/install.sh" 2>/tmp/kervax-ca-check.err; then
+  if ! pcurl -fsS --connect-timeout 15 -m 60 --retry 3 --retry-delay 5 -o /dev/null "${URL%/}/api/agent/install.sh" 2>/tmp/kervax-ca-check.err; then
     echo "✗ The panel CA is in $CA_DST, but https to the panel still fails:" >&2
     cat /tmp/kervax-ca-check.err >&2
     echo "  The certificate has to be issued for the exact host in $URL (an IP or a name)." >&2
@@ -283,10 +290,27 @@ chmod 0755 /opt/kervax-agent "$BIN_DIR"
 # refused to start, and the installer blamed the panel's firewall. Only where curl knows it.
 RETRY_ALL=""
 { curl --help all; curl --help; } 2>/dev/null | grep -q -- '--retry-all-errors' && RETRY_ALL="--retry-all-errors"
-pcurl -fsSL --connect-timeout 15 --retry 5 --retry-delay 3 $RETRY_ALL \
-     -C - "${URL%/}/api/agent/download/$ARCH" -o "$BIN.new" || {
-  echo "✗ The panel is unreachable from this server. If it sits behind a firewall," >&2
-  echo "  add the server IP in its settings, wait about 2 minutes and retry." >&2
+# --speed-limit/--speed-time: a transfer that stalls (the DPI drops the packets but keeps the
+# connection) becomes an error after a minute and is retried from where it stopped; before,
+# curl waited for it forever. The gzipped binary is 2.4 times smaller, which on a slow link
+# is 15 minutes instead of 40; gzip checks it while unpacking (CRC). A node without gzip gets
+# the plain binary.
+fetch() {
+  pcurl -fsSL --connect-timeout 15 --speed-limit 512 --speed-time 60 --retry 10 --retry-delay 5 \
+       $RETRY_ALL -C - "$1" -o "$2"
+}
+rm -f "$BIN.new" "$BIN.new.gz"
+if command -v gzip >/dev/null 2>&1 \
+   && pcurl -fsI --connect-timeout 15 -m 60 "${URL%/}/api/agent/download-gz/$ARCH" >/dev/null 2>&1 \
+   && fetch "${URL%/}/api/agent/download-gz/$ARCH" "$BIN.new.gz" \
+   && gzip -dc "$BIN.new.gz" > "$BIN.new"; then
+  rm -f "$BIN.new.gz"
+else
+  rm -f "$BIN.new" "$BIN.new.gz"
+  fetch "${URL%/}/api/agent/download/$ARCH" "$BIN.new"
+fi || {
+  echo "✗ Could not download the agent from the panel: the transfer kept failing." >&2
+  echo "  Run the command again. If the panel sits behind a firewall, check the server IP in its settings." >&2
   [ -n "$PROXY" ] && echo "  The download went through the proxy: check that it is reachable and lets this server in." >&2
   exit 1
 }
@@ -433,8 +457,16 @@ run_remote_setup() {
   # a shared route serving ANY helper from the directory. This used to be
   # /api/agent/$1.sh - only kube/backup/backupserver have personal URLs, so on a fresh
   # node webserver-setup silently got a 404 and was never installed.
-  pcurl -fsSL --connect-timeout 15 "${URL%/}/api/agent/setup/$1.sh" | bash \
-    || echo "· $1: could not run it (skipping)." >&2
+  # to a file first, then bash: a helper piped straight into bash ran its first half when the
+  # transfer broke off midway. </dev/null - as under the playbook, nobody answers questions
+  f=$(mktemp) || return 0
+  if pcurl -fsSL --compressed --connect-timeout 15 --speed-limit 512 --speed-time 60 --retry 3 \
+       --retry-delay 5 $RETRY_ALL "${URL%/}/api/agent/setup/$1.sh" -o "$f"; then
+    bash "$f" </dev/null || echo "· $1: could not run it (skipping)." >&2
+  else
+    echo "· $1: could not download it (skipping)." >&2
+  fi
+  rm -f "$f"
 }
 
 # Which helpers this node needs is decided BY THE HELPERS THEMSELVES, and the panel's
@@ -449,7 +481,7 @@ run_remote_setup() {
 # bash. (The ansible playbook is a different matter: it reads the same conditions from
 # the repository, not over the network.)
 install_applicable_setups() {
-  idx=$(pcurl -fsSL --connect-timeout 15 "${URL%/}/api/agent/setup/index" 2>/dev/null) || {
+  idx=$(pcurl -fsSL --compressed --connect-timeout 15 -m 60 --retry 3 --retry-delay 5 "${URL%/}/api/agent/setup/index" 2>/dev/null) || {
     echo "· the helper index is unavailable - skipping the helpers." >&2; return; }
   # split BETWEEN entries, not on every '{': a condition may contain braces of its
   # own, and splitting on them tore an entry in half - the helper after it vanished
@@ -486,3 +518,4 @@ elif [ "$WANT_DOCKER" = 1 ]; then
   setup_docker_proxy
   systemctl restart "$UNIT" 2>/dev/null || true
 fi
+}

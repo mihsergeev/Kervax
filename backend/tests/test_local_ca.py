@@ -44,11 +44,11 @@ def settings(tmp_path, monkeypatch):
     config.get_settings.cache_clear()
 
 
-def test_install_cmd_without_ca_is_unchanged(settings):
+def test_install_cmd_without_ca_has_no_root(settings):
     from app.api.servers import _install_cmd
-    assert _install_cmd("tok") == (
-        "curl -fsSL --connect-timeout 15 https://192.168.1.10/api/agent/install.sh"
-        " | sh -s -- https://192.168.1.10 tok")
+    cmd = _install_cmd("tok")
+    assert cmd.startswith("sh -c '") and "--cacert" not in cmd and "--ca-file" not in cmd
+    assert cmd.endswith("' - https://192.168.1.10 tok")
 
 
 def test_install_cmd_carries_the_root(settings):
@@ -59,10 +59,10 @@ def test_install_cmd_carries_the_root(settings):
     assert b64 and b64.group(2) == PANEL_CA_TMP
     assert base64.b64decode(b64.group(1)).decode() == PEM  # только сам сертификат, без мусора
     # curl проверяет панель этим корнем, без -k / --insecure
-    assert f"curl -fsSL --connect-timeout 15 --cacert {PANEL_CA_TMP} https://192.168.1.10/api/agent/install.sh" in cmd
+    assert f"--cacert {PANEL_CA_TMP}" in cmd and "https://192.168.1.10/api/agent/install.sh" in cmd
     assert " -k " not in cmd and "--insecure" not in cmd
     # --ca-file до адреса: UI дописывает имя инстанса (" main") в самый конец команды
-    assert cmd.endswith(f"| sh -s -- --ca-file {PANEL_CA_TMP} https://192.168.1.10 tok")
+    assert cmd.endswith(f"' - --ca-file {PANEL_CA_TMP} https://192.168.1.10 tok")
 
 
 def test_not_a_certificate_is_ignored(settings):
@@ -133,7 +133,7 @@ def test_installer_trusts_the_panel_ca(name):
     for d in ("/usr/local/share/ca-certificates/", "/etc/pki/ca-trust/source/anchors/", "/etc/pki/trust/anchors/"):
         assert f"CA_DST={d}$CA_NAME" in block, d
     # проверка без --cacert и под /api/agent (белый список панели там не действует)
-    check = re.search(r"curl -fsS --connect-timeout 15 -o /dev/null \"\$\{URL%/\}/api/agent/install\.sh\"", block)
+    check = re.search(r"curl -fsS --connect-timeout 15 [^\n]*-o /dev/null \"\$\{URL%/\}/api/agent/install\.sh\"", block)
     assert check and "--cacert" not in block and " -k " not in block
     assert 'CA_NAME="kervax-panel${INSTANCE:+-$INSTANCE}.crt"' in s
 

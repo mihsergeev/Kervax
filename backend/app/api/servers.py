@@ -18,6 +18,7 @@ from app import backup_verify
 from app import relay as relay_mod
 from app import disk_wear
 from app import request_watch
+from app import install_watch
 from app import panel_errors
 from app import db_health
 from app import gpu as gpu_mod
@@ -423,16 +424,38 @@ def panel_ca_pem() -> str:
     return "\n".join(certs) + "\n"
 
 
+# Что печатает команда установки, пока ждет панель. Фронт подменяет их в английском интерфейсе
+# (installProxy.ts), поэтому одинарных кавычек и фигурных скобок в них нет.
+INSTALL_WAIT_MSG = "Панель пока закрыта для этого сервера, ждем 10 с (curl $?, попытка $i/24)"
+INSTALL_GIVEUP_MSG = "Панель так и не ответила: проверьте IP сервера в ее настройках и исходящий 443 (или прокси)"
+
+
 def _install_cmd(token: str) -> str:
+    """Команда установки агента: одна строка, ее копируют из окна "Сервер создан".
+
+    Новая нода стучится в панель раньше, чем та откроет ей фаервол (ops/agent-firewall-sync.sh),
+    поэтому команда сама повторяет попытки: 24 раза через 10 с, потом честно сдается. Установщик
+    сначала скачивается в файл целиком (-m: зависшая передача тоже ошибка) и только потом
+    запускается: через `curl | sh` на канале с DPI, который обрывает передачу посреди файла, sh
+    выполнял половину установщика и ждал остаток вечно. --compressed: сжатый установщик меньше
+    порога, на котором такой DPI режет соединение.
+
+    sh -c: аргументы установщика идут последними, и то, что окно предлагает дописать в конец
+    (--no-auto, имя инстанса), попадает к нему. Токен только в аргументах, повторы его не печатают.
+    Прокси окно передает переменной KERVAX_PROXY перед sh -c: ее берут и этот curl, и install.sh."""
     base = get_settings().panel_url.rstrip("/") or "https://ПАНЕЛЬ"
-    # --connect-timeout: закрытая фаерволом панель даёт быстрый явный отказ,
-    # а не многоминутное зависание пайпа
     ca = panel_ca_pem()
+    cacert = f" --cacert {PANEL_CA_TMP}" if ca else ""
+    script = (
+        "f=$(mktemp) && for i in $(seq 24); do"
+        f" curl -fsL --compressed --connect-timeout 10 -m 120{cacert}"
+        ' ${KERVAX_PROXY:+--proxy "$KERVAX_PROXY"}'
+        f' -o "$f" {base}/api/agent/install.sh && exec sh "$f" "$@";'
+        f' echo "{INSTALL_WAIT_MSG}" >&2; sleep 10; done;'
+        f' echo "{INSTALL_GIVEUP_MSG}" >&2; exit 1'
+    )
     if not ca:
-        return (
-            f"curl -fsSL --connect-timeout 15 {base}/api/agent/install.sh"
-            f" | sh -s -- {base} {token}"
-        )
+        return f"sh -c '{script}' - {base} {token}"
     # Корень едет в самой команде: скачать его с панели нечем, https к ней без корня и не
     # проверить, а отключать проверку (-k) нельзя. curl проверяет панель этим корнем, install.sh
     # доверяет ему в ОС (агент и helper'ы ходят в панель системным хранилищем). --ca-file стоит
@@ -440,8 +463,7 @@ def _install_cmd(token: str) -> str:
     b64 = base64.b64encode(ca.encode("ascii")).decode("ascii")
     return (
         f"echo {b64} | base64 -d > {PANEL_CA_TMP} && "
-        f"curl -fsSL --connect-timeout 15 --cacert {PANEL_CA_TMP} {base}/api/agent/install.sh"
-        f" | sh -s -- --ca-file {PANEL_CA_TMP} {base} {token}"
+        f"sh -c '{script}' - --ca-file {PANEL_CA_TMP} {base} {token}"
     )
 
 
@@ -3100,7 +3122,8 @@ async def push_signal(token: str, session: SessionDep, status_: str = Query("", 
 
 
 @agent_router.get("/install.sh")
-async def install_script() -> PlainTextResponse:
+async def install_script(x_forwarded_for: str = Header(default=""), x_real_ip: str = Header(default="")) -> PlainTextResponse:
+    install_watch.note(_client_ip(x_forwarded_for, x_real_ip), "script")
     path = os.path.join(get_settings().agent_dist_dir, "install.sh")
     if not os.path.exists(path):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "install.sh не найден")
@@ -3121,12 +3144,13 @@ async def panel_ca() -> PlainTextResponse:
 
 
 @agent_router.get("/install-ru.sh")
-async def install_script_ru() -> PlainTextResponse:
+async def install_script_ru(x_forwarded_for: str = Header(default=""), x_real_ip: str = Header(default="")) -> PlainTextResponse:
     """Тот же установщик с сообщениями на русском.
 
     Основной install.sh англоязычный — его видят все, кто ставит панель. Русская
     копия нужна там, где команду выполняет человек, которому так понятнее, и
     отличается она ровно языком вывода."""
+    install_watch.note(_client_ip(x_forwarded_for, x_real_ip), "script")
     path = os.path.join(get_settings().agent_dist_dir, "install-ru.sh")
     if not os.path.exists(path):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "install-ru.sh не найден")
@@ -3215,9 +3239,11 @@ async def setup_script(name: str) -> PlainTextResponse:
 
 
 @agent_router.get("/download/{arch}")
-async def download_agent(arch: str) -> FileResponse:
+async def download_agent(arch: str, x_forwarded_for: str = Header(default=""),
+                         x_real_ip: str = Header(default="")) -> FileResponse:
     if arch not in ("amd64", "arm64"):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "нет такой архитектуры")
+    install_watch.note(_client_ip(x_forwarded_for, x_real_ip), "agent")
     path = os.path.join(get_settings().agent_dist_dir, f"kervax-agent-{arch}")
     if not os.path.exists(path):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "бинарь агента не собран")
@@ -3260,7 +3286,8 @@ def agent_gz_ok(arch: str) -> bool:
 
 
 @agent_router.api_route("/download-gz/{arch}", methods=["GET", "HEAD"])
-async def download_agent_gz(arch: str) -> FileResponse:
+async def download_agent_gz(arch: str, x_forwarded_for: str = Header(default=""),
+                            x_real_ip: str = Header(default="")) -> FileResponse:
     """Тот же бинарь, сжатый gzip (в 2.4 раза меньше). Агент 2.18+ берет его первым и сам
     распаковывает; подлинность проверяет по подписанному манифесту, как у несжатого. На
     канале за DPI (ru-be, ~0.2 МБ/мин) это 15 минут вместо 40. HEAD нужен агенту, чтобы
@@ -3270,6 +3297,7 @@ async def download_agent_gz(arch: str) -> FileResponse:
     path = os.path.join(get_settings().agent_dist_dir, f"kervax-agent-{arch}.gz")
     if not os.path.exists(path) or not agent_gz_ok(arch):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "сжатого бинаря нет")
+    install_watch.note(_client_ip(x_forwarded_for, x_real_ip), "agent")
     return FileResponse(path, media_type="application/octet-stream")
 
 

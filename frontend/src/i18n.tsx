@@ -2953,8 +2953,21 @@ const EN: Record<string, string> = {
   'Выполните на сервере под root': 'Run on the server as root',
   'токен показывается один раз': 'the token is shown only once',
   'Сначала заполните поля выше: прокси попадет в команду': 'Fill in the fields above first: the proxy goes into the command',
-  'Если curl упал по таймауту, подождите минуту и повторите: панель открывает адрес новой ноды не сразу':
-    'If curl timed out, wait a minute and run it again: the panel opens the new node address with a short delay',
+  'Панель пока закрыта для этого сервера, ждем 10 с (curl $?, попытка $i/24)':
+    'The panel does not let this server in yet, waiting 10 s (curl $?, attempt $i/24)',
+  'Панель так и не ответила: проверьте IP сервера в ее настройках и исходящий 443 (или прокси)':
+    'The panel never answered: check the server IP in its settings and outgoing 443 (or the proxy)',
+  'сервер скачал агента в {t}, ждем запуска': 'the server downloaded the agent at {t}, waiting for it to start',
+  'сервер скачал установщик в {t}': 'the server downloaded the installer at {t}',
+  'ретранслятор пустит этот сервер в течение минуты': 'the relay will let this server in within a minute',
+  'ретранслятор уже пускает этот сервер': 'the relay already lets this server in',
+  'адрес {ip} открыт в фаерволе панели': 'address {ip} is open in the panel firewall',
+  'открываем адрес {ip} в фаерволе панели, обычно до 2 минут, команда подождет':
+    'opening {ip} in the panel firewall, usually within 2 minutes, the command will wait',
+  'адреса в фаерволе панели не обновлялись {n} мин: на хосте панели не запускается ops/agent-firewall-sync.sh':
+    'the panel firewall has not been updated for {n} min: ops/agent-firewall-sync.sh does not run on the panel host',
+  'IP сервера не указан, фаервол панели его не пустит:': 'The server IP is not set, the panel firewall will not let it in:',
+  'IP сервера': 'Server IP',
   'Агент сам настроит Docker, Kubernetes и доступ к бэкапам': 'The agent sets up Docker, Kubernetes and backup access by itself',
   'Docker через прокси только для чтения (read-only proxy), Kubernetes через узкий сервисный аккаунт (SA), плюс доступ к бэкапам. Вручную доделывать ничего не нужно. Без авто-настройки: допишите в конец команды --no-auto.':
     'Docker through a read-only proxy, Kubernetes through a narrow service account (SA), plus backup access. Nothing to finish by hand. To skip auto-setup, add --no-auto at the end of the command.',

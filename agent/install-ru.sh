@@ -25,6 +25,12 @@
 #
 # Это русская версия установщика: отличается только языком сообщений.
 # Английская — agent/install.sh, её же раздаёт панель по /api/agent/install.sh.
+#
+# Весь скрипт - один блок { ... }: sh дочитывает составную команду до конца и только потом
+# выполняет. Если curl отдал установщик не целиком (канал завис или DPI оборвал передачу
+# посреди файла), обрезанный скрипт не выполнится вовсе, а не отработает первой половиной
+# и не будет вечно ждать остаток.
+{
 set -eu
 
 # Разбор аргументов: позиционные <url> <токен> [инстанс] + флаги.
@@ -34,7 +40,8 @@ set -eu
 # --ca-file <путь>: корень, которым подписан сертификат панели (см. шаг доверия ниже)
 # --proxy <url>: прокси до панели для установщика и агента (см. шапку)
 URL=""; TOKEN=""; INSTANCE=""; WANT_DOCKER=0; NO_AUTO=0; UNINSTALL=0; CA_FILE=""; WANT_CA=0
-PROXY=""; WANT_PROXY=0
+# KERVAX_PROXY в окружении - то же, что --proxy: так его передает команда установки из панели
+PROXY="${KERVAX_PROXY:-}"; WANT_PROXY=0
 for a in "$@"; do
   if [ "$WANT_CA" = 1 ]; then CA_FILE="$a"; WANT_CA=0; continue; fi
   if [ "$WANT_PROXY" = 1 ]; then PROXY="$a"; WANT_PROXY=0; continue; fi
@@ -241,7 +248,7 @@ if [ -n "$CA_FILE" ]; then
   $CA_UPDATE >/dev/null 2>&1 || { echo "✗ $CA_UPDATE не отработал." >&2; exit 1; }
   # проверяем БЕЗ --cacert, через системное хранилище: ровно так ходит агент.
   # /api/agent/*, а не /api/health: белый список адресов панели там не действует.
-  if ! pcurl -fsS --connect-timeout 15 -o /dev/null "${URL%/}/api/agent/install.sh" 2>/tmp/kervax-ca-check.err; then
+  if ! pcurl -fsS --connect-timeout 15 -m 60 --retry 3 --retry-delay 5 -o /dev/null "${URL%/}/api/agent/install.sh" 2>/tmp/kervax-ca-check.err; then
     echo "✗ CA панели лежит в $CA_DST, но https к панели все равно не проходит:" >&2
     cat /tmp/kervax-ca-check.err >&2
     echo "  Сертификат должен быть выписан ровно на хост из $URL (IP или имя)." >&2
@@ -282,10 +289,26 @@ chmod 0755 /opt/kervax-agent "$BIN_DIR"
 # не запускался, а установщик валил все на фаервол панели. Только там, где curl его знает.
 RETRY_ALL=""
 { curl --help all; curl --help; } 2>/dev/null | grep -q -- '--retry-all-errors' && RETRY_ALL="--retry-all-errors"
-pcurl -fsSL --connect-timeout 15 --retry 5 --retry-delay 3 $RETRY_ALL \
-     -C - "${URL%/}/api/agent/download/$ARCH" -o "$BIN.new" || {
-  echo "✗ Панель недоступна с этого сервера. Если она за фаерволом — укажите" >&2
-  echo "  «IP сервера» в её настройках и подождите ~2 мин (cron-синк), затем повторите." >&2
+# --speed-limit/--speed-time: зависшая передача (DPI глотает пакеты, а соединение держит)
+# через минуту становится ошибкой и повторяется с места обрыва; раньше curl ждал ее вечно.
+# Сжатый бинарь в 2.4 раза меньше, на медленном канале это 15 минут вместо 40; gzip
+# проверяет его при распаковке (CRC). Нода без gzip получает несжатый.
+fetch() {
+  pcurl -fsSL --connect-timeout 15 --speed-limit 512 --speed-time 60 --retry 10 --retry-delay 5 \
+       $RETRY_ALL -C - "$1" -o "$2"
+}
+rm -f "$BIN.new" "$BIN.new.gz"
+if command -v gzip >/dev/null 2>&1 \
+   && pcurl -fsI --connect-timeout 15 -m 60 "${URL%/}/api/agent/download-gz/$ARCH" >/dev/null 2>&1 \
+   && fetch "${URL%/}/api/agent/download-gz/$ARCH" "$BIN.new.gz" \
+   && gzip -dc "$BIN.new.gz" > "$BIN.new"; then
+  rm -f "$BIN.new.gz"
+else
+  rm -f "$BIN.new" "$BIN.new.gz"
+  fetch "${URL%/}/api/agent/download/$ARCH" "$BIN.new"
+fi || {
+  echo "✗ Не удалось скачать агента с панели: передача все время обрывается." >&2
+  echo "  Выполните команду еще раз. Если панель за фаерволом, проверьте IP сервера в ее настройках." >&2
   [ -n "$PROXY" ] && echo "  Скачивали через прокси: проверьте, что он доступен и пускает этот сервер." >&2
   exit 1
 }
@@ -430,8 +453,16 @@ run_remote_setup() {
   # общий маршрут: раздаётся ЛЮБОЙ хелпер каталога. Раньше тут был /api/agent/$1.sh —
   # персональные URL есть только у kube/backup/backupserver, поэтому webserver-setup
   # на свежей ноде молча получал 404 и не ставился.
-  pcurl -fsSL --connect-timeout 15 "${URL%/}/api/agent/setup/$1.sh" | bash \
-    || echo "· $1: не удалось выполнить (пропускаю)." >&2
+  # сначала в файл, потом bash: helper, отданный прямо в bash, при обрыве передачи посреди
+  # файла выполнялся первой половиной. </dev/null - как под плейбуком, вопросов никто не ждет
+  f=$(mktemp) || return 0
+  if pcurl -fsSL --compressed --connect-timeout 15 --speed-limit 512 --speed-time 60 --retry 3 \
+       --retry-delay 5 $RETRY_ALL "${URL%/}/api/agent/setup/$1.sh" -o "$f"; then
+    bash "$f" </dev/null || echo "· $1: не удалось выполнить (пропускаю)." >&2
+  else
+    echo "· $1: не удалось скачать (пропускаю)." >&2
+  fi
+  rm -f "$f"
 }
 
 # Кому нужен хелпер, решают САМИ ХЕЛПЕРЫ, а каталог панели лишь передаёт их ответы:
@@ -444,7 +475,7 @@ run_remote_setup() {
 # полностью: он качает оттуда сами хелперы и отдаёт их в bash. (Ansible-плейбук — другое
 # дело: он читает те же условия из репозитория, а не по сети.)
 install_applicable_setups() {
-  idx=$(pcurl -fsSL --connect-timeout 15 "${URL%/}/api/agent/setup/index" 2>/dev/null) || {
+  idx=$(pcurl -fsSL --compressed --connect-timeout 15 -m 60 --retry 3 --retry-delay 5 "${URL%/}/api/agent/setup/index" 2>/dev/null) || {
     echo "· каталог хелперов недоступен — пропускаю хелперы." >&2; return; }
   # делим МЕЖДУ записями, а не по каждой '{': в условии бывают свои скобки, и
   # разбиение по ним рвало запись пополам — следующий за ней хелпер пропадал из
@@ -481,3 +512,4 @@ elif [ "$WANT_DOCKER" = 1 ]; then
   setup_docker_proxy
   systemctl restart "$UNIT" 2>/dev/null || true
 fi
+}
