@@ -91,9 +91,11 @@ function expiryHorizon(s: Server): number {
 // Сроки, за которыми следим: без отметки "не нужен, не следить". Бэкенд отдает только действующие
 // отметки: у обновленного секрета другой срок или отпечаток, и он возвращается под присмотр сам
 const expKey = (e: KubeExpiry) => `${e.kind}|${e.where}`
+// и без секретов, на которые ничего не ссылается (kube_expiry_unused, helper 0.4): не проблема
 function liveExpiry(s: Server): KubeExpiry[] {
   const ign = s.kube_expiry_ignored ?? {}
-  return (s.last_report?.kube_expiry ?? []).filter((e) => !ign[expKey(e)])
+  const unused = new Set(s.kube_expiry_unused ?? [])
+  return (s.last_report?.kube_expiry ?? []).filter((e) => !ign[expKey(e)] && !unused.has(expKey(e)))
 }
 // TLS-секрет, который не указан ни в одном Ingress (helper 0.3): истекший такой скорее забыт, чем
 // сломан, и показывается мягче. Нет поля - helper старый или Ingress не прочитались, не знаем
@@ -890,11 +892,15 @@ function KubeHostModal({
   // Сроки и состояние Flux приезжают в отчёте агента (хелпер kubeexpiry-setup),
   // а не через kube-api: у ServiceAccount панели доступа к секретам нет и не будет.
   // Отмеченные "не нужен, не следить" - отдельно, свернутой строкой внизу раздела
+  // Секреты, на которые ничего не ссылается (helper 0.4) - тоже отдельно: не проблема, можно удалить
   const expIgn = s.kube_expiry_ignored ?? {}
+  const expUnused = new Set(s.kube_expiry_unused ?? [])
   const expiryAll: KubeExpiry[] = (s.last_report?.kube_expiry ?? []).slice().sort((a, b) => a.expires - b.expires)
-  const expiry = expiryAll.filter((e) => !expIgn[expKey(e)])
+  const expiry = expiryAll.filter((e) => !expIgn[expKey(e)] && !expUnused.has(expKey(e)))
   const expiryOff = expiryAll.filter((e) => expIgn[expKey(e)])
+  const expiryUnused = expiryAll.filter((e) => !expIgn[expKey(e)] && expUnused.has(expKey(e)))
   const [expOffOpen, setExpOffOpen] = useState(false)
+  const [expUnusedOpen, setExpUnusedOpen] = useState(false)
   const [expBusy, setExpBusy] = useState<string | null>(null)
   const [expErr, setExpErr] = useState<{ key: string; msg: string } | null>(null)
   const [expCopied, setExpCopied] = useState('')
@@ -1018,6 +1024,7 @@ function KubeHostModal({
     nodes: t('готовы {a} из {b}', { a: nodesReady, b: nodes.length }),
     expiry: next
       ? t('ближайший: {what}, {d}', { what: t(EXPIRY_KIND[next.kind] ?? next.kind), d: daysText(nextDays) })
+      : expiryUnused.length ? t('не используется, можно удалить: {n}', { n: expiryUnused.length })
       : expiryOff.length ? t('не следим: {n}', { n: expiryOff.length }) : '',
     flux: t('ресурсов: {n}, все в Ready', { n: flux.length }),
   }
@@ -1461,18 +1468,19 @@ function KubeHostModal({
                   {t('Сертификаты, kubeconfig-и и токены Flux с их сроками. Собирает root-хелпер на самой ноде: панель токенов не видит.')}
                 </p>
                 {(() => {
-                  // off - отмечен "не нужен, не следить": серый, без алерта, с "следить снова"
-                  const row = (e: KubeExpiry, off: boolean) => {
+                  // off - отмечен "не нужен, не следить": серый, без алерта, с "следить снова";
+                  // spare - на секрет ничего не ссылается (helper 0.4): серый, без алерта, с командой удаления
+                  const row = (e: KubeExpiry, off: boolean, spare = false) => {
                     const key = expKey(e)
                     const d = daysLeft(e.expires)
                     const unused = unusedSecret(e)
                     // истекший секрет, который не указан ни в одном Ingress, скорее забыт: желтым, не красным
-                    const tone = off ? 't-muted' : unused && d < 0 ? 't-degraded' : expiryTone(d, horizon)
+                    const tone = off || spare ? 't-muted' : unused && d < 0 ? 't-degraded' : expiryTone(d, horizon)
                     const mark = expIgn[key]
-                    const cmd = off || (unused && d < 0) ? deleteSecretCmd(e) : ''
+                    const cmd = off || spare || (unused && d < 0) ? deleteSecretCmd(e) : ''
                     return (
                       <div className={`loc-res docker-row ${tone}`} key={e.kind + '/' + e.where + '/' + (e.note ?? '')}>
-                        <span className={`lk-dot${off ? '' : DOT[tone] ?? ' lk-dot-ok'}`} />
+                        <span className={`lk-dot${off || spare ? '' : DOT[tone] ?? ' lk-dot-ok'}`} />
                         <div className="docker-c-main">
                           <div className="docker-c-name mono">
                             {e.where}
@@ -1488,7 +1496,11 @@ function KubeHostModal({
                             {new Date(e.expires * 1000).toLocaleDateString()}
                             {e.note ? ` · ${e.note}` : ''}
                           </div>
-                          {unused && <div className="muted small kube-exp-unused">{t('не используется ни одним ingress')}</div>}
+                          {spare ? (
+                            <div className="muted small kube-exp-unused">{t('не используется, можно удалить')}</div>
+                          ) : (
+                            unused && <div className="muted small kube-exp-unused">{t('не используется ни одним ingress')}</div>
+                          )}
                           {expErr && expErr.key === key && <div className="form-error small">{expErr.msg}</div>}
                           {cmd && (
                             <div className="kube-exp-cmd small">
@@ -1506,7 +1518,7 @@ function KubeHostModal({
                         </div>
                         <div className="kube-exp-side">
                           <div className={`docker-c-status mono small ${tone}`}>{daysText(d)}</div>
-                          {canMark && (
+                          {canMark && !spare && (
                             <button className="linklike small" disabled={expBusy === key} onClick={() => setExpIgnored(e, !off)}
                               title={off ? undefined : t('Уберет пункт из проблем и алертов. Обновят секрет - панель снова будет за ним следить')}>
                               {off ? t('следить снова') : t('не нужен, не следить')}
@@ -1519,6 +1531,14 @@ function KubeHostModal({
                   return (
                     <>
                       {expiry.length > 0 && <div className="loc-results docker-clist">{expiry.map((e) => row(e, false))}</div>}
+                      {expiryUnused.length > 0 && (
+                        <>
+                          <button className="linklike kube-exp-off muted small" onClick={() => setExpUnusedOpen(!expUnusedOpen)}>
+                            {t('не используется, можно удалить: {n}', { n: expiryUnused.length })}, {expUnusedOpen ? t('скрыть') : t('показать')}
+                          </button>
+                          {expUnusedOpen && <div className="loc-results docker-clist">{expiryUnused.map((e) => row(e, false, true))}</div>}
+                        </>
+                      )}
                       {expiryOff.length > 0 && (
                         <>
                           <button className="linklike kube-exp-off muted small" onClick={() => setExpOffOpen(!expOffOpen)}>

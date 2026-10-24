@@ -1640,6 +1640,8 @@ class ServerOut(BaseModel):
     kube_node_ignored: list[str] | None = None  # ноды кластера, где агент не нужен (по имени)
     # сроки кластера с отметкой "не следить": {"<kind>|<where>": {by, at}}, только действующие
     kube_expiry_ignored: dict[str, dict] | None = None
+    # TLS-секреты, на которые ничего не ссылается (helper kubeexpiry-setup 0.4): "<kind>|<where>"
+    kube_expiry_unused: list[str] | None = None
     # с какого момента видна проблема каждого вида (ISO) - для "Что сломано": "2 дня"
     alert_since: dict[str, str] = Field(default_factory=dict)
     # с какого момента лежит каждый упавший контейнер: {имя: ISO}

@@ -1,8 +1,12 @@
 """Признаки взлома в файлах сайтов (app/webfiles.py, helper webfiles-setup): выкладка или правка,
 php в загрузках, привязка корня к монитору, проблема и алерт сервера, кнопки."""
 import re
+import shutil
+import subprocess
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+import pytest
 
 from app import collector, setup_scripts, tamper, webfiles
 from app.models import Check, Server
@@ -105,7 +109,7 @@ def test_helper_needed_and_written_right():
     assert not setup_scripts.setup_needed("webfiles-setup", {"extras": {"fpm": {"v": 1, "pools": [], "skipped": []}}})
     assert not setup_scripts.setup_needed("webfiles-setup", {"web_services": [{"kind": "Traefik"}]})
     src = (Path(__file__).resolve().parents[2] / "agent" / "webfiles-setup.sh").read_text(encoding="utf-8")
-    assert "\r" not in src and "KERVAX_SETUP_VERSION=0.6 " in src and "report.d/webfiles.json" in src
+    assert "\r" not in src and "KERVAX_SETUP_VERSION=0.7 " in src and "report.d/webfiles.json" in src
     assert 'mv -f "$HELPER.new" "$HELPER"' in src and "versions/webfiles-setup.ver" in src
     # контейнер: только верхний слой overlay, ключ по контейнеру, старт - не правка, ассеты мимо
     assert "upperdir=" in src and 'key="c${cid:0:12}' in src and "START_WIN=600" in src
@@ -725,3 +729,162 @@ def test_setup_version_lines_are_well_formed():
     for f in sorted(agent.glob("*-setup.sh")):
         lines = [ln for ln in f.read_text(encoding="utf-8").splitlines() if ln.startswith("KERVAX_SETUP_VERSION=")]
         assert len(lines) == 1 and re.fullmatch(r"KERVAX_SETUP_VERSION=\d+\.\d+(?:[ \t]+#.*)?", lines[0]), (f.name, lines)
+
+
+# ---------- файлы, которые плагин держит сам (helper 0.7) ----------
+
+DROPIN = "wp-content/advanced-cache.php"
+
+
+def f07(d, g="", owner="root", web=0, shell=0):
+    """Что helper 0.7 пишет о файле: как 0.6 и вердикт - plugin:<slug>, data или deny."""
+    return [g, owner, web, shell, d]
+
+
+def test_plugin_files_are_not_an_edit():
+    # плагин кэша записал drop-in по своему шаблону, свои настройки и .htaccess, закрывающий каталог
+    conf, closed = "wp-content/wp-rocket-config/shop.example.com.php", "wp-content/uploads/wpforms/.htaccess"
+    st = webfiles.process(None, blk(run(T - 1200, first=True)), NOW)
+    st = webfiles.process(st, blk(run(T - 600, n_changed=1, n_new=2, changed=[[DROPIN, T - 650, 2452]],
+        new=[[conf, T - 640, 1928], [closed, T - 640, 99]],
+        f={DROPIN: f07("plugin:wp-rocket"), conf: f07("data", owner="www-data", web=1),
+           closed: f07("deny", owner="www-data", web=1)})), NOW)
+    r = st["roots"]["2080-11"]
+    assert "edit" not in r and "php" not in r and "deploy" not in r
+    assert r["gen"]["n"] == 3 and r["gen"]["by"] == ["data", "deny", "plugin:wp-rocket"]
+    row = webfiles.view(st, {"extras": {"webfiles": blk()}}, NOW)["roots"][0]
+    assert row["gen"]["files"][0] == DROPIN and not row["edit"]
+
+
+def test_dropin_not_like_its_template_stays_a_sign():
+    # helper не дал вердикта (лишняя строка кода, путь вне сайта) - правка, как раньше; похожее на
+    # веб-шелл - сильный признак, вердикт тут не в счет; php-"настройки" в загрузках - тоже признак
+    st = webfiles.process(None, blk(run(T - 1200, first=True)), NOW)
+    st = webfiles.process(st, blk(run(T - 600, n_changed=2, n_new=1, changed=[[DROPIN, T - 650, 2600],
+        ["wp-content/object-cache.php", T - 650, 900]], new=[["wp-content/uploads/cfg.php", T - 640, 50]],
+        f={DROPIN: f06("", "root"), "wp-content/object-cache.php": f07("plugin:redis-cache", shell=1),
+           "wp-content/uploads/cfg.php": f07("data", owner="www-data", web=1)})), NOW)
+    r = st["roots"]["2080-11"]
+    assert list(r["edit"]) == [DROPIN]
+    assert sorted(r["php"]) == ["wp-content/object-cache.php", "wp-content/uploads/cfg.php"]
+    assert r["php"]["wp-content/object-cache.php"]["x"] == 1 and "gen" not in r
+    # кривой вердикт не принимается
+    assert webfiles._info({"f": {"a.php": ["", "root", 0, 0, "plugin:x y"]}}) == {"a.php": {"o": "root"}}
+
+
+def test_hanging_dropin_sign_clears_by_itself():
+    # признак по drop-in висит (helper 0.6 не знал шаблонов), 0.7 досматривает файл: он такой, каким
+    # его пишет плагин, - признак снимается сам, с названием плагина
+    wflogs = "wp-content/wflogs/.htaccess"
+    st = webfiles.process(None, blk(run(T - 1200, first=True)), NOW)
+    st = webfiles.process(st, blk(run(T - 900, n_changed=2, changed=[[DROPIN, T - 950, 2452], [wflogs, T - 950, 133]],
+                                      f={DROPIN: f06("", "root")})), NOW)
+    assert sorted(st["roots"]["2080-11"]["edit"]) == [DROPIN, wflogs]
+    st = webfiles.process(st, blk(roots=({**ROOT, "clean": [[DROPIN, "plugin:wp-rocket"]]},)), NOW)
+    r = st["roots"]["2080-11"]
+    assert list(r["edit"]) == [wflogs] and r["cleared"] == {"at": NOW.isoformat(), "p": DROPIN, "why": "plugin",
+                                                            "slug": "wp-rocket"}
+    st = webfiles.process(st, blk(roots=({**ROOT, "clean": [[wflogs, "deny"]]},)), NOW)
+    assert "edit" not in st["roots"]["2080-11"]
+    # снова подменили - снова признак; плагин записал его заново - признак снят и тихая строка
+    st = webfiles.process(st, blk(run(T - 600, n_changed=1, changed=[[DROPIN, T - 650, 2600]])), NOW)
+    assert list(st["roots"]["2080-11"]["edit"]) == [DROPIN]
+    st = webfiles.process(st, blk(run(T - 300, n_changed=1, changed=[[DROPIN, T - 350, 2452]],
+                                      f={DROPIN: f07("plugin:wp-rocket")})), NOW)
+    r = st["roots"]["2080-11"]
+    assert "edit" not in r and r["gen"]["files"] == [DROPIN]
+    # php в загрузках "настройками" не снимается, только когда удален
+    st = webfiles.process(st, blk(run(T - 200, n_new=1, new=[["wp-content/uploads/x.php", T - 250, 40]])), NOW)
+    st = webfiles.process(st, blk(roots=({**ROOT, "clean": [["wp-content/uploads/x.php", "data"]]},)), NOW)
+    assert list(st["roots"]["2080-11"]["php"]) == ["wp-content/uploads/x.php"]
+
+
+def _gen_awk() -> str:
+    src = (Path(__file__).resolve().parents[2] / "agent" / "webfiles-setup.sh").read_text(encoding="utf-8")
+    return re.search(r"<<'GEN_AWK_EOF' \|\| true\n(.*?)GEN_AWK_EOF\n", src, re.S).group(1)
+
+
+def _awk(tmp_path: Path, mode: str, *texts: str) -> bool:
+    awk = shutil.which("awk")
+    if not awk:
+        pytest.skip("нет awk")
+    prog = tmp_path / "gen.awk"
+    prog.write_text(_gen_awk(), encoding="utf-8", newline="\n")
+    files = []
+    for i, t in enumerate(texts):
+        f = tmp_path / f"f{i}"
+        f.write_text(t, encoding="utf-8", newline="\n")
+        files.append(f.as_posix())
+    p = subprocess.run([awk, "-v", f"mode={mode}", "-v", "base=/var/www/html", "-f", prog.as_posix(), *files],
+                       capture_output=True, timeout=30, env={"LC_ALL": "C"})
+    return p.returncode == 0
+
+
+TPL = """<?php
+defined( 'ABSPATH' ) || exit;
+
+$rocket_path        = '{{WP_ROCKET_PATH}}';
+if ( version_compare( phpversion(), '{{WP_ROCKET_PHP_VERSION}}', '<' ) ) {
+\treturn;
+}
+'{{MOBILE_CACHE}}';
+include_once '{{WP_ROCKET_PATH}}inc/Mobile_Detect.php';
+'{{/MOBILE_CACHE}}';
+require $rocket_path . 'inc/class-cache.php';
+"""
+DROP = """<?php
+defined( 'ABSPATH' ) || exit;
+$rocket_path        = '/var/www/html/wp-content/plugins/wp-rocket/';
+if ( version_compare( phpversion(), '7.0', '<' ) ) {
+\treturn;
+}
+
+require $rocket_path . 'inc/class-cache.php';
+"""
+REQ = "require $rocket_path . 'inc/class-cache.php';\n"
+
+
+def test_helper_tells_dropin_from_its_template(tmp_path):
+    assert _awk(tmp_path, "tpl", TPL, DROP)
+    # строка кода, которой нет в шаблоне, - не его
+    assert not _awk(tmp_path, "tpl", TPL, DROP.replace("\nrequire", "\n@include '/var/www/html/x.ico';\nrequire"))
+    # строки шаблона не в том порядке - тоже
+    assert not _awk(tmp_path, "tpl", TPL, DROP.replace(REQ, "").replace("<?php\n", "<?php\n" + REQ))
+    # путь вне сайта или наверх через .., код вместо версии
+    assert not _awk(tmp_path, "tpl", TPL, DROP.replace("/var/www/html/wp-content/plugins/wp-rocket/", "/tmp/x/"))
+    assert not _awk(tmp_path, "tpl", TPL, DROP.replace("/var/www/html/wp-content/plugins/wp-rocket/", "../../../tmp/"))
+    assert not _awk(tmp_path, "tpl", TPL, DROP.replace("'7.0'", "'7.0' . system('id') . ''"))
+    # конфиг WP Super Cache из -sample: другое значение и новая настройка - можно, вызов - нет
+    sample = ("<?php\nif ( ! defined('WPCACHEHOME') )\n\tdefine( 'WPCACHEHOME', WP_PLUGIN_DIR . '/wp-super-cache/' );\n"
+              "$cache_enabled = false;\n")
+    cfg = ("<?php\n$cache_page_secret = 'abc';\nif ( ! defined('WPCACHEHOME') )\n"
+           "\tdefine( 'WPCACHEHOME', WP_CONTENT_DIR . '/plugins/wp-super-cache/' );\n$cache_enabled = true;\n")
+    assert _awk(tmp_path, "tpl", sample, cfg)
+    assert not _awk(tmp_path, "tpl", sample, cfg.replace("true;", "'system'('id');"))
+    assert not _awk(tmp_path, "tpl", sample, cfg.replace("true;", "`id`;"))
+
+
+def test_helper_tells_data_and_closed_dir(tmp_path):
+    conf = ("<?php\ndefined( 'ABSPATH' ) || exit;\n$rocket_cookie_hash = 'c0ffee';\n$q = array (\n  'utm_source' => 1,\n);\n"
+            "define( 'X', true );\n")
+    assert _awk(tmp_path, "data", conf)
+    assert _awk(tmp_path, "data", "<?php exit('Access denied'); __halt_compiler(); ?>\nbinary")
+    assert _awk(tmp_path, "data", '<?php exit; ?>{"pgcache.enabled":true,"dir":"\\/x"}')
+    for bad in ("$a = 'system'('id');", "$a = ['system'][0]('id');", '$a = "x{$_GET[1]}";', "$a = `id`;",
+                "// ?> <?php system('id');", "$a = array(1)(2);", "eval($_POST[1]);"):
+        assert not _awk(tmp_path, "data", conf + bad + "\n"), bad
+    # строка exit с \ перед кавычкой: для php строка идет дальше и вызов перед exit выполнился бы
+    assert not _awk(tmp_path, "data", "<?php exit('\\');X' . system('id'));\n")
+    closed = ("<IfModule mod_authz_core.c>\n\tRequire all denied\n</IfModule>\n<IfModule !mod_authz_core.c>\n"
+              "\tOrder deny,allow\n\tDeny from all\n</IfModule>")
+    assert _awk(tmp_path, "deny", closed)
+    assert not _awk(tmp_path, "deny", "Deny from all\nAddHandler application/x-httpd-php .jpg\n")
+    assert not _awk(tmp_path, "deny", "Options -Indexes\n")
+
+
+def test_helper_07_plugin_files():
+    src = (Path(__file__).resolve().parents[2] / "agent" / "webfiles-setup.sh").read_text(encoding="utf-8")
+    # шаблон - файл того же имени (или -sample) в каталоге плагина, вердикт - пятым полем файла и в
+    # досмотре; похожее на веб-шелл вердикта не получает
+    assert '-name "${b%.php}-sample.php"' in src and '${d:+,\\"$d\\"}' in src and "v=${GEN[$f]}" in src
+    assert '[ -z "${sus[$f]:-}" ]' in src and "mode=tpl" in src and "mode=data" in src and "mode=deny" in src

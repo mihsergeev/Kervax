@@ -1787,6 +1787,7 @@ export type RealIpTrust = {
   key: string // для решения "так задумано" (cfip:<key>)
   label: string // ingress-nginx, nginx, Caddy, Traefik
   where: string // "на хосте", "в поде ns/имя", "в контейнере имя"
+  pods?: number // реплик ворклоада с этой бедой: строка одна на Deployment/DaemonSet/StatefulSet
   hdr: string // CF-Connecting-IP или X-Forwarded-For
   trust: string // чему верит: "set_real_ip_from 0.0.0.0/0"
   ports: number[] // какие из 80 и 443 открыты напрямую
@@ -2476,6 +2477,7 @@ export type Server = {
   kube_node_ignored?: string[] | null // ноды кластера, где агент не нужен (по имени)
   // сроки кластера "не нужен, не следить": {"<kind>|<where>": кто и когда}, только действующие
   kube_expiry_ignored?: Record<string, { by: string; at: string }> | null
+  kube_expiry_unused?: string[] | null // TLS-секреты, на которые ничего не ссылается (helper 0.4): "<kind>|<where>"
   kube_unmonitored?: KubeNodeRef[] // ноды кластера без агента панели (считает бэкенд)
   bsrv_unmonitored?: string[] // репозитории бэкап-сервера, чьих клиентов нет в панели (считает бэкенд)
   bsrv_rotation?: string[] // что сейчас сказал бы алерт "ротация встала" (считает бэкенд)
@@ -3050,8 +3052,12 @@ export interface WebRoot {
   dev?: boolean
   mode?: 'auto' | 'dev' | 'strict'
   dev_work?: WebFile[]
-  // последний признак, который снялся сам (why: gone, back, head, wplang), за неделю
-  cleared?: { at: string; p: string; why: string } | null
+  // файлы, которые плагин записал сам (helper 0.7, за неделю): by - plugin:<slug>, data (конфиг
+  // без кода), deny (.htaccess только закрывает доступ)
+  gen?: { at: string; files: string[]; n: number; by: string[] } | null
+  // последний признак, который снялся сам (why: gone, back, head, wplang, plugin со slug, data,
+  // deny), за неделю
+  cleared?: { at: string; p: string; why: string; slug?: string } | null
 }
 // файл признака: t - время записи (unix), k - новый (new) или изменен (chg), g - что знает git
 // (dirty - не как в HEAD, new - git его не знает, ignored - в .gitignore), o - владелец,

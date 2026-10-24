@@ -672,7 +672,9 @@ def _fw_rules(items, fam: int) -> list[tuple]:
 def _port_path(srv: Server, port: int) -> tuple[str, int] | None:
     """Каким путем снаружи идут на порт: ("in", порт) - на саму ноду, ("fwd", порт в контейнере) -
     опубликованный порт Docker (DNAT, мимо INPUT, правила смотрят порт контейнера), None - порт
-    Kubernetes: kube-proxy заворачивает его своими правилами, судить не беремся."""
+    Kubernetes: kube-proxy заворачивает его своими правилами, судить не беремся. Так же None, если
+    сокета на хосте нет: порт заворачивает DNAT (hostPort, klipper у k3s, Cilium), а панель про это
+    может не знать - доступа к кластеру ей не дали, и правила INPUT к нему отношения не имеют."""
     rep = srv.last_report or {}
     for c in ((rep.get("docker") or {}).get("containers") or []):
         for p in (c.get("ports") or []) if isinstance(c, dict) else []:
@@ -681,6 +683,10 @@ def _port_path(srv: Server, port: int) -> tuple[str, int] | None:
     for n in ((rep.get("kube") or {}).get("nodeports") or []):
         if isinstance(n, dict) and port in (n.get("node_port"), n.get("port") if n.get("type") == "LoadBalancer" else None):
             return None
+    listen = rep.get("listen")
+    if isinstance(listen, list) and listen and not any(
+            isinstance(s, dict) and str(s.get("p") or "").startswith("tcp") and str(s.get("port")) == str(port) for s in listen):
+        return None
     return "in", port
 
 

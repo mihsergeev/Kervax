@@ -283,6 +283,7 @@ def _out(
     o.backup_target = backup_target.view(server.last_report or {}, server.alert_mutes)
     o.restarts_day = srv_restarts.view(server, now) or None
     o.kube_expiry_ignored = kube_expiry.view(server)
+    o.kube_expiry_unused = kube_expiry.unused_view(server)
     o.kube_restarts = srv_restarts.kube_view(server, now)
     o.mem_leaks = mem_trend.problems(server, now) or None
     o.mem_limits = mem_limit.view(server, now, pod_names)

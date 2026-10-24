@@ -32,7 +32,7 @@
 # Result: /var/lib/kervax/kube-expiry.json, world-readable; the agent only reads it.
 set -euo pipefail
 
-KERVAX_SETUP_VERSION=0.3  # MAJOR.MINOR; compared component-wise
+KERVAX_SETUP_VERSION=0.4  # MAJOR.MINOR; compared component-wise
 # Which nodes need this helper at all. Read by the ansible playbook on the
 # CONTROL machine and evaluated as a shell condition ON THE NODE, so a new
 # helper lands where it belongs without anyone editing the playbook.
@@ -80,7 +80,16 @@ have() { command -v "$1" >/dev/null 2>&1; }
 esc() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g' | tr -d '\000-\037'; }
 
 ITEMS=""
-add() { # kind where expires_ts note [fingerprint] [ingress: 1 | 0 | empty = unknown]
+# A list of objects for the "who uses this secret" check: the JSON, {"items":[]} when the cluster has
+# no such resource type (no Gateway API, no Traefik), nothing when the read failed - "unknown"
+kget() {
+  local out
+  if out=$(timeout $TO $KC get "$1" -A -o json 2>"$ROWS.err"); then printf '%s' "$out"
+  elif grep -q "have a resource type" "$ROWS.err" 2>/dev/null; then printf '{"items":[]}'
+  fi
+}
+
+add() { # kind where expires_ts note [fingerprint] [used: 1 | 0 | empty = unknown]
   local k="$1" w="$2" ts="$3" n="${4:-}" fp="${5:-}" ing="${6:-}" extra=""
   [ -n "$ts" ] && [ "$ts" -gt 0 ] 2>/dev/null || return 0
   [ -n "$fp" ] && extra="$extra,\"fp\":\"$(esc "$fp")\""
@@ -150,15 +159,25 @@ if [ -n "$KC" ] && have python3; then
   SRC='{}'
   SEC='{}'
   ING=''
+  USE=''
   RES=$(timeout $TO $KC get gitrepositories,ocirepositories,helmrepositories,kustomizations,helmreleases,imagerepositories,imageupdateautomations \
         -A -o json 2>/dev/null || echo '{}')
   if [ "$FLUX_ONLY" = 0 ]; then
     SRC=$(timeout $TO $KC get gitrepositories,ocirepositories,helmrepositories,imagerepositories \
           -A -o json 2>/dev/null || echo '{}')
     SEC=$(timeout $TO $KC get secrets -A -o json 2>/dev/null || echo '{}')
-    # Which TLS secrets an Ingress points at (spec.tls[].secretName): an expired secret nobody
-    # uses is most likely just forgotten. Empty when the read failed - "unknown", not "unused"
+    # Which TLS secrets something points at: an expired secret nobody uses is most likely just
+    # forgotten, and the panel does not alert on it. Ingress spec.tls[].secretName, Gateway API
+    # certificateRefs, Traefik IngressRoute tls.secretName, pod volumes and env (hubble and webhooks
+    # mount their certificates and have no Ingress at all). Empty when a read failed - "unknown",
+    # not "unused"
     ING=$(timeout $TO $KC get ingresses -A -o json 2>/dev/null || true)
+    for r in gateways.gateway.networking.k8s.io ingressroutes.traefik.io ingressroutetcps.traefik.io \
+             ingressroutes.traefik.containo.us ingressroutetcps.traefik.containo.us pods; do
+      USE="$USE
+---
+$(kget "$r")"
+    done
   fi
 
   FLUX_STATE=$(printf '%s' "$RES" | timeout $TO python3 -c '
@@ -287,23 +306,48 @@ print("\n".join(f"{k}\t{w}\t{t}\t{n}" for k, w, t, n in rows))
   # TLS certificates in secrets (cert-manager, ingress, Flux mTLS): the date is inside the
   # certificate, no network call needed. The fingerprint tells a renewed certificate from the old
   # one: the panel's "do not watch" mark holds only for the certificate it was set on.
-  printf '%s\n---\n%s\n' "$SEC" "$ING" | timeout $TO python3 -c '
+  printf '%s\n---\n%s%s\n' "$SEC" "$ING" "$USE" | timeout $TO python3 -c '
 import base64, json, subprocess, sys
 raw = sys.stdin.read().split("\n---\n")
 data = json.loads(raw[0] or "{}") or {}
-# secrets named in some Ingress spec.tls[]; None - the read failed, usage unknown
-used = None
-try:
-    ing = json.loads(raw[1]) if len(raw) > 1 and raw[1].strip() else None
-except Exception:
-    ing = None
-if isinstance(ing, dict) and isinstance(ing.get("items"), list):
-    used = set()
-    for i in ing["items"]:
-        ns = (i.get("metadata") or {}).get("namespace", "")
-        for t in (i.get("spec") or {}).get("tls") or []:
-            if t.get("secretName"):
-                used.add(ns + "/" + t.get("secretName"))
+
+
+def items(text):
+    try:
+        d = json.loads(text) if text.strip() else None
+    except Exception:
+        return None
+    return d.get("items") if isinstance(d, dict) and isinstance(d.get("items"), list) else None
+
+
+# secrets something points at: Ingress, Gateway, IngressRoute(TCP) of both Traefik groups, pods.
+# None - one of the reads failed, usage unknown
+# (the reads go in this order, kubectl does not always fill kind of a list item)
+KINDS = ["Ingress", "Gateway", "IngressRoute", "IngressRouteTCP", "IngressRoute", "IngressRouteTCP", "Pod"]
+lists = [items(x) for x in raw[1:]]
+used = None if len(lists) < len(KINDS) or any(x is None for x in lists) else set()
+for kind, i in [] if used is None else [(k, i) for k, x in zip(KINDS, lists) for i in x]:
+    ns = (i.get("metadata") or {}).get("namespace", "")
+    spec = i.get("spec") or {}
+    names = []
+    if kind == "Ingress":
+        names = [t.get("secretName") for t in spec.get("tls") or []]
+    elif kind == "Gateway":
+        for li in spec.get("listeners") or []:
+            for ref in (li.get("tls") or {}).get("certificateRefs") or []:
+                if (ref.get("kind") or "Secret") == "Secret" and ref.get("name"):
+                    used.add((ref.get("namespace") or ns) + "/" + ref["name"])
+    elif kind in ("IngressRoute", "IngressRouteTCP"):
+        names = [(spec.get("tls") or {}).get("secretName")]
+    elif kind == "Pod":
+        for v in spec.get("volumes") or []:
+            names.append((v.get("secret") or {}).get("secretName"))
+            for src in (v.get("projected") or {}).get("sources") or []:
+                names.append((src.get("secret") or {}).get("name"))
+        for c in (spec.get("containers") or []) + (spec.get("initContainers") or []):
+            names += [(e.get("secretRef") or {}).get("name") for e in c.get("envFrom") or []]
+            names += [((e.get("valueFrom") or {}).get("secretKeyRef") or {}).get("name") for e in c.get("env") or []]
+    used.update(ns + "/" + n for n in names if n)
 rows = []
 for s in data.get("items", []):
     if s.get("type") != "kubernetes.io/tls":
@@ -340,7 +384,7 @@ if [ -s "$ROWS" ]; then
     [ -n "${ts:-}" ] && add "$k" "$w" "$ts" "$n" "${fp:-}" "${ing:-}"
   done < "$ROWS"
 fi
-rm -f "$ROWS"
+rm -f "$ROWS" "$ROWS.err"
 
 if [ "$FLUX_ONLY" = 1 ]; then
   # Keep the dates from the last full pass, replace only the Ready state. If the API server was
