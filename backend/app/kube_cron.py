@@ -38,18 +38,39 @@ def _int(v) -> int:
 
 
 def track(prev: dict | None, rep: dict | None, now: datetime) -> dict:
-    """Расписания CronJob между отчетами: {ns/имя: {"s": расписание, "at": когда сменилось}}.
-    Впервые увиденный CronJob - без отметки: смены не было, есть только то, что видим."""
+    """Расписания CronJob между отчетами: {ns/имя: {"s": расписание, "at": когда сменилось,
+    "bad": вердикт последнего законченного прогона}}. Впервые увиденный CronJob - без отметки:
+    смены не было, есть только то, что видим. "bad" держит issue(), пока идет новый прогон."""
+    from app.collector import _looks_dump_cron  # тот же матч дампа, что у аудита бэкапа
+
     p = prev if isinstance(prev, dict) else {}
     out = {}
     for cj in cronjobs(rep):
         k, s = key(cj), str(cj.get("schedule") or "")
         was = p.get(k)
         if isinstance(was, dict) and was.get("s") == s:
-            out[k] = was
+            rec = dict(was)
         else:
-            out[k] = {"s": s, "at": now.isoformat() if isinstance(was, dict) else ""}
+            rec = {"s": s, "at": now.isoformat() if isinstance(was, dict) else ""}
+        if not cj.get("active"):
+            bad = issue(rep or {}, cj, now, {STATE_KEY: {**p, k: rec}}, _looks_dump_cron(cj))
+            if bad is not None and bad.get("kind") in _HELD:
+                rec["bad"] = {x: bad.get(x) for x in ("kind", "why", "detail", "log")}
+            else:
+                rec.pop("bad", None)
+        out[k] = rec
     return out
+
+
+# Вердикты, которые держатся, пока идет следующий прогон: упал и давно нет успеха. "Не запускается"
+# снимает сам запуск
+_HELD = ("fail", "stale")
+
+
+def _held(state: dict | None, name: str) -> dict | None:
+    rec = ((state or {}).get(STATE_KEY) or {}).get(name)
+    bad = rec.get("bad") if isinstance(rec, dict) else None
+    return bad if isinstance(bad, dict) and bad.get("kind") in _HELD else None
 
 
 def changed_at(state: dict | None, name: str) -> float:
@@ -167,6 +188,12 @@ def issue(rep: dict, cj: dict, now: datetime, state: dict | None, dumps: bool) -
     every = interval(str(cj.get("schedule") or ""))
     if cj.get("active"):
         if not (ls and nowts - ls > max(every * 2, 86400)):
+            # Прогон идет и не завис. Прошлый законченный упал - это все еще беда, пока новый не
+            # кончится успехом: иначе у падающего ежедневного крона в момент запуска уходил отбой,
+            # а через 30 секунд, когда Job падал, - снова тревога. Каждый день два сообщения
+            held = _held(state, key(cj))
+            if held is not None:
+                return {**held, "why": f"{held.get('why') or ''} (идет новый прогон)"}
             return None  # прогон идет - рано паниковать
         pod = _active_pod_reason(rep, cj)
         d = _days(nowts - ls)

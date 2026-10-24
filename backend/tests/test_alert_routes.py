@@ -22,7 +22,8 @@ class _Resp:
 
 class FakeTG:
     calls: list = []
-    broken: set = set()
+    broken: set = set()  # 400: чат отказал навсегда (не найден, бот удален)
+    down: set = set()  # 502: сбой Telegram, повторится на следующем тике
     next_id = 100
 
     def __init__(self, *a, **k):
@@ -38,6 +39,8 @@ class FakeTG:
         method = url.rsplit("/", 1)[1]
         if method == "sendMessage" and str(json.get("chat_id")) in FakeTG.broken:
             return _Resp({"ok": False}, 400)
+        if method == "sendMessage" and str(json.get("chat_id")) in FakeTG.down:
+            return _Resp({"ok": False}, 502)
         FakeTG.calls.append((method, json))
         FakeTG.next_id += 1
         return _Resp({"ok": True, "result": {"message_id": FakeTG.next_id}})
@@ -53,7 +56,7 @@ class FakeTG:
 
 @pytest.fixture
 def tg(monkeypatch):
-    FakeTG.calls, FakeTG.broken, FakeTG.next_id = [], set(), 100
+    FakeTG.calls, FakeTG.broken, FakeTG.down, FakeTG.next_id = [], set(), set(), 100
     monkeypatch.setattr("app.alerts.httpx.AsyncClient", FakeTG)
     return FakeTG
 
@@ -125,7 +128,8 @@ async def test_broken_route_no_second_copy_when_main_has_it(client, tg):
 
 
 async def test_broken_main_is_retried(client, tg):
-    tg.broken = {"-100"}
+    # сбой Telegram (5xx), а не отказ навсегда: 400 повтора больше не вызывает (test_alert_transport)
+    tg.down = {"-100"}
     assert not await alerts.dispatch(_cfg("rest"), True, [_srv("infra-a", "infra")], 0)
     # то, что принял чат по группам, считается доставленным, но основной сбоит - повтор
     assert not await alerts.dispatch(_cfg("all"), True, [_srv("web-a", "web")], 0)

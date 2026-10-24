@@ -235,6 +235,13 @@ export function muteKindLabel(k: string, t: TFn): string | null {
       : `${t('перезапуски контейнера')}: ${key.replace(/^docker:/, '')}`
   }
   if (k.startsWith(UNIT_MUTE)) return `${t('юнит')}: ${k.slice(UNIT_MUTE.length)}`
+  // одна вещь кластера или Docker (кнопки Telegram глушат ее, а не вид целиком): kube_cron:<ns>/<имя>,
+  // kube_job:<ns>/<имя>, kube_pod:<ns>/<ворклоад>, docker_down:<контейнер>, docker_loop:<контейнер>, kube_expiry:<что>
+  const one: [string, string][] = [
+    ['kube_cron:', 'CronJob'], ['kube_job:', 'Job'], ['kube_pod:', t('под')],
+    ['docker_down:', t('контейнер лежит')], ['docker_loop:', t('контейнер в цикле')], ['kube_expiry:', t('срок в кластере')],
+  ]
+  for (const [p, l] of one) if (k.startsWith(p)) return `${l}: ${k.slice(p.length)}`
   if (k.startsWith(EXPOSED_MUTE)) return `${t('открытый порт')}: ${k.slice(EXPOSED_MUTE.length)}`
   if (k.startsWith(CFIP_MUTE)) return `${t('доверие к CF-Connecting-IP')}: ${k.slice(CFIP_MUTE.length)}`
   return k.startsWith(WEB_MUTE) ? `${t('5xx по логу')}: ${k.slice(WEB_MUTE.length)}` : null

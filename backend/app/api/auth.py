@@ -1,4 +1,5 @@
 import math
+import re
 import secrets
 import string
 from datetime import datetime, timedelta, timezone
@@ -7,7 +8,7 @@ import httpx
 from fastapi import APIRouter, HTTPException, Request, status
 from sqlalchemy import and_, func, or_, select
 
-from app import alerts, audit, client_ip, impersonate, ratelimit, settings_store, tg_fmt, totp
+from app import alerts, audit, client_ip, impersonate, ratelimit, settings_store, tg_bot, tg_fmt, totp
 from app.config import get_settings
 from app.deps import CurrentUser, SessionDep
 from app.models import AuditLog, LoginBan, User
@@ -259,6 +260,7 @@ async def twofa_disable(
 # инфраструктуру уходили бы незнакомцу). Панель забирает апдейты бота и ищет код.
 
 _LINK_ALPHABET = string.ascii_uppercase + string.digits
+_TG_TOKEN = re.compile(r"\d+:[A-Za-z0-9_-]{30,}")
 
 
 async def _tg_api(session, user: User) -> tuple[str, str]:
@@ -305,9 +307,11 @@ async def telegram_link(user: CurrentUser, session: SessionDep) -> TelegramLinkO
             status.HTTP_400_BAD_REQUEST,
             "Бот не настроен: укажите свой токен или попросите админа заполнить общий",
         )
-    user.tg_link_code = "".join(secrets.choice(_LINK_ALPHABET) for _ in range(6))
+    # живет 10 минут и только в личном чате с ботом (tg_bot.link_code_*)
+    code = "".join(secrets.choice(_LINK_ALPHABET) for _ in range(tg_bot.LINK_LEN))
+    user.tg_link_code = tg_bot.link_code_store(code, datetime.now(timezone.utc))
     await session.commit()
-    return TelegramLinkOut(code=f"/link {user.tg_link_code}", bot=await _bot_name(api, token))
+    return TelegramLinkOut(code=f"/link {code}", bot=await _bot_name(api, token))
 
 
 @router.post("/telegram/confirm", response_model=TelegramOut)
@@ -320,6 +324,9 @@ async def telegram_confirm(user: CurrentUser, session: SessionDep) -> TelegramOu
         if user.tg_chat_id:
             return await _tg_state(session, user)  # код уже нашел бот панели
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Сначала получите код")
+    code = tg_bot.link_code_parse(user.tg_link_code, datetime.now(timezone.utc))
+    if not code:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Код устарел, получите новый")
     api, token = await _tg_api(session, user)
     if not token:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Бот не настроен")
@@ -342,8 +349,9 @@ async def telegram_confirm(user: CurrentUser, session: SessionDep) -> TelegramOu
         ) from exc
     chat = ""
     for upd in updates:
-        msg = upd.get("message") or upd.get("channel_post") or {}
-        if user.tg_link_code in (msg.get("text") or ""):
+        # только личный чат: в группе и канале код видят все
+        msg = upd.get("message") or {}
+        if code in (msg.get("text") or "") and (msg.get("chat") or {}).get("type", "private") == "private":
             chat = str((msg.get("chat") or {}).get("id") or "")
     if not chat:
         raise HTTPException(
@@ -363,10 +371,20 @@ async def telegram_update(
 ) -> TelegramOut:
     if body.alerts is not None:
         user.tg_alerts = body.alerts
-    if body.chat_id is not None:
-        user.tg_chat_id = body.chat_id.strip()
+    if body.chat_id is not None and body.chat_id.strip() not in ("", user.tg_chat_id):
+        # чужой chat_id руками: нажатия кнопок в том чате сопоставлялись бы с этой учеткой, а
+        # алерты уходили бы в чужую личку. Чат задается только кодом /link
+        raise HTTPException(status.HTTP_400_BAD_REQUEST,
+                            "Чат привязывается кодом: получите код и отправьте его боту")
+    if body.chat_id is not None and not body.chat_id.strip():
+        user.tg_chat_id = ""
     if body.token is not None:
-        user.tg_token = body.token.strip()
+        tok = body.token.strip()
+        # токен идет в URL запросов к Telegram: только формат токена бота, иначе им можно было
+        # дернуть любой путь на хосте API
+        if tok and not _TG_TOKEN.fullmatch(tok):
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "Это не похоже на токен бота (123456:ABC...)")
+        user.tg_token = tok
     await session.commit()
     await audit.record(session, user.username, "tg_update", user.username)
     return await _tg_state(session, user)

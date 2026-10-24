@@ -22,7 +22,7 @@ from sqlalchemy import case, func, or_, select
 
 from app import inventory, maint, settings_store
 from app.api.alert_history import _scope as _alert_scope, group_fires, noise_item, target_ids
-from app.collector import _OFFLINE_ALERT_EXTRA, seen_online
+from app.collector import offline_extra, seen_online
 from app.config import get_settings
 from app.deps import CurrentUser, SessionDep, scope_query, user_sections
 from app.models import AlertEvent, Check, CheckIncident, CheckSample, MaintenanceWindow, Server, ServerMetric
@@ -155,7 +155,7 @@ async def _offline_gaps(session, servers, since, until, now, tail: bool = True) 
     """Простои серверов по пропускам в минутных метриках: {id: [(начало, конец)]} и общие
     простои панели. Порог - как у алерта "недоступен": offline_after плюс выдержка."""
     by_id = {s.id: s for s in servers}
-    thr = {s.id: max(s.offline_after_seconds or 120, 30) + _OFFLINE_ALERT_EXTRA for s in servers}
+    thr = {s.id: max(s.offline_after_seconds or 120, 30) + offline_extra(s) for s in servers}
     gaps: dict[int, list] = {s.id: [] for s in servers}
     if servers:
         dialect = session.bind.dialect.name

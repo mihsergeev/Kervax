@@ -162,7 +162,8 @@ def _dockrisk(s: Server, now: datetime, ctx: dict) -> str | None:
     if _docker(s.last_report or {}) is None:
         return None
     if "docker_risk" in (s.alert_mutes or []):
-        return ""
+        # заглушен вид алерта целиком: пункт есть, просто не алертит - заглушку не снимаем
+        return None
     return _h(f"{x['name']}:{'+'.join(map(str, x.get('flags') or []))}:{'+'.join(map(str, x.get('caps') or []))}"
               for x in docker_risk.view(s) if not x.get("muted"))
 
@@ -226,11 +227,27 @@ def keys(s: Server, now: datetime, kube_index: tuple[set[str], set[str]] | None 
     return out
 
 
-def stale(s: Server, now: datetime, kube_index: tuple[set[str], set[str]] | None = None) -> list[tuple[str, str]]:
-    """Заглушки, которые уже не про то, что на сервере: [(ключ, почему снята)]. Без данных (None) не
-    трогаем: helper мог не прислать блок, а заглушка про то, что он покажет снова."""
+# alert_state: из чего состоял пункт, когда его заглушили: {ключ заглушки: [хеши частей]}. По нему
+# видно, сузился набор (одну базу из двух начали дампить) или в нем появилось новое
+STATE = "home_items"
+
+
+def _items(sig: str) -> list[str]:
+    return sorted({hashlib.sha1(x.encode()).hexdigest()[:8] for x in sig.split(",") if x})
+
+
+def review(s: Server, now: datetime, kube_index: tuple[set[str], set[str]] | None = None,
+           known: dict | None = None) -> tuple[list[tuple[str, str]], list[tuple[str, str]], dict]:
+    """Заглушки, которые уже не про то, что на сервере. Возвращает (снять: [(ключ, почему)],
+    переписать: [(старый ключ, новый)], что запомнить в alert_state[STATE]). Набор сузился (часть
+    пунктов поправили) - заглушка молча переходит на остаток: обещано "снимется, если появится
+    новое", а не "если поправят часть". Без данных (None) не трогаем: helper мог не прислать блок,
+    а заглушка про то, что он покажет снова."""
     ctx = {"kube_index": kube_index}
-    out = []
+    known = known if isinstance(known, dict) else {}
+    lift: list[tuple[str, str]] = []
+    swap: list[tuple[str, str]] = []
+    keep: dict[str, list[str]] = {}
     for m in s.alert_mutes or []:
         m = str(m)
         if not m.startswith(PREFIX):
@@ -240,10 +257,28 @@ def stale(s: Server, now: datetime, kube_index: tuple[set[str], set[str]] | None
             continue
         sig = _sig(grp, s, now, ctx)
         if sig is None:
+            if m in known:
+                keep[m] = known[m]
             continue
         label = LABELS.get(grp, grp)
         if not sig:
-            out.append((m, f"заглушка снята, {label}: пункт ушел"))
-        elif key(grp, sig) != m:
-            out.append((m, f"заглушка снята, {label}: появилось новое"))
-    return out
+            lift.append((m, f"заглушка снята, {label}: пункт ушел"))
+            continue
+        new = key(grp, sig)
+        if new == m:
+            if grp not in PLAIN:
+                keep[m] = _items(sig)
+            continue
+        was = known.get(m)
+        if isinstance(was, list) and was and set(_items(sig)) <= set(was):
+            swap.append((m, new))
+            keep[new] = _items(sig)
+        else:
+            lift.append((m, f"заглушка снята, {label}: появилось новое"))
+    return lift, swap, keep
+
+
+def stale(s: Server, now: datetime, kube_index: tuple[set[str], set[str]] | None = None,
+          known: dict | None = None) -> list[tuple[str, str]]:
+    """Заглушки, которые уже не про то, что на сервере: [(ключ, почему снята)] (см. review)."""
+    return review(s, now, kube_index, known)[0]

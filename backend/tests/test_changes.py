@@ -149,7 +149,7 @@ async def test_access_alert_once_and_ack_api(client, auth_headers, tmp_path, mon
     keys = _access(sent)
     assert len(keys) == 1 and "добавлен SSH-ключ пользователю deploy" in full_text(keys[0]), sent
     # в чате: что случилось и кому, без типа и отпечатка ключа
-    assert keys[0] == "⚠️🔑 node\n<b>Добавлен SSH-ключ</b>\ndeploy", keys[0]
+    assert keys[0] == "🔴🔑 node\n<b>Добавлен SSH-ключ</b>\ndeploy", keys[0]
     await collector.evaluate_servers(factory, cfg, now + timedelta(minutes=3))
     assert len(_access(sent)) == 1
     await engine.dispose()

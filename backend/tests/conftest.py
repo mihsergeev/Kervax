@@ -84,6 +84,19 @@ def _no_dns_lookups(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _scheduler_memory_clean():
+    """Память планировщика между тиками (отбои мониторов на повтор, отметка массового молчания
+    парка): тесту - с чистого листа, иначе отметка одного теста дает отбой в следующем."""
+    from app import collector
+
+    collector._REC_RETRY.clear()
+    collector._gap_said.clear()
+    yield
+    collector._REC_RETRY.clear()
+    collector._gap_said.clear()
+
+
+@pytest.fixture(autouse=True)
 def _job_logs_clean():
     """Запросы логов упавших Job живут в памяти планировщика: тесту - с чистого листа."""
     from app import job_logs

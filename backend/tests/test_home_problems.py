@@ -104,7 +104,8 @@ def test_db_connections_and_rabbitmq_queues():
     assert _probs(s, now, "db_conn") == []
     # алерт висит - строка с текущим значением и началом превышения
     since = (now - timedelta(minutes=30)).isoformat()
-    s = _srv(now, rep, {"db_conn": 1, "db_conn_since": since}, db_conn_alert_percent=90, queue_alert_depth=1000)
+    s = _srv(now, rep, {"db_conn": 1, "db_conn_since": since, "queues_since": {"rmq|//jobs": since}},
+             db_conn_alert_percent=90, queue_alert_depth=1000)
     got = _probs(s, now, "db_conn")
     assert [(p["level"], p["section"], p["text"], p["since"]) for p in got] == [
         (2, "services", "pg: занято 95 из 100 подключений (95%)", since)]
@@ -298,7 +299,8 @@ def test_metrics_follow_the_alert_not_the_last_report():
     s = _srv(now, rep, state, **kw)
     texts = {k: _probs(s, now, k) for k in kinds}
     assert [p["text"] for k in kinds for p in texts[k]] == ["CPU 97%", "RAM 95%", "CPU 91°C", "conntrack 95%", "диск 70°C"]
-    assert all(p["level"] == 2 and p["mute"] == k and p["sec"] == k and p["since"] == since
+    # уровень - как у алерта в Telegram (здесь 1, желтый), а не красный на всякий случай
+    assert all(p["level"] == 1 and p["mute"] == k and p["sec"] == k and p["since"] == since
                for k in kinds for p in texts[k])
     # CPU опустился до 85%: ниже порога, но алерт еще не снят - строка остается
     s = _srv(now, {**rep, "cpu_percent": 85}, state, **kw)

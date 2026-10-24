@@ -310,7 +310,7 @@ async def test_recovery_waits_half_an_hour(tmp_path, monkeypatch):
     assert len(await tick(21, False)) == 1
     assert len(await tick(50, False)) == 1          # 29 минут без перезапусков
     msgs = await tick(52, False)
-    assert len(msgs) == 2 and "частых перезапусков нет" in msgs[1]
+    assert len(msgs) == 2 and "больше не перезапускаются" in msgs[1]
     async with factory() as s:
         srv = (await s.execute(select(Server))).scalars().one()
         assert not srv.alert_state.get("kube_restarts") and not srv.alert_state.get("kube_restarts_hold")

@@ -6758,6 +6758,23 @@ const EN: Record<string, string> = {
   'упала': 'failed',
   'финализируется': 'finalizing',
   'статус {n}': 'status {n}',
+  // --- главная: заглушено целиком, плитки по списку "Что сломано" ---
+  'только предупреждения': 'warnings only',
+  'предупр. и проблемы': 'warnings and problems',
+  'насовсем': 'permanently',
+  'заглушено целиком, серверов: {n}': 'muted entirely, servers: {n}',
+  'Алерты этого вида не приходят ни по одной вещи на сервере, в том числе по новым':
+    'Alerts of this kind do not come for anything on the server, including new things',
+  'Вернуть алерты этого вида на сервере': 'Restore alerts of this kind on the server',
+  'частично: {n}': 'partial: {n}',
+  'открытых инцидентов: {n}': 'open incidents: {n}',
+  'С проблемами': 'With problems',
+  'С предупреждениями': 'With warnings',
+  'С проблемами и предупреждениями': 'With problems and warnings',
+  'серверов с проблемами: {d}, только с предупреждениями: {w}': 'servers with problems: {d}, with warnings only: {w}',
+  'контейнер лежит': 'container down',
+  'контейнер в цикле': 'container restart loop',
+  'срок в кластере': 'cluster expiry',
 }
 
 type Ctx = {

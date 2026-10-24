@@ -454,4 +454,9 @@ async def test_benign_distro_timers_do_not_alert(tmp_path, monkeypatch):
         srv = (await s.execute(select(Server))).scalars().one()
     assert sent == [] and int(srv.alert_state.get("units", 0)) == 0
     assert not any(p["kind"] == "units" for p in collector.server_problems(srv, now))
+    # в чате молча, но закрытие с причиной - в истории алерта
+    from app.models import AlertEvent
+    async with factory() as s:
+        ev = (await s.execute(select(AlertEvent))).scalars().all()
+    assert [e.kind for e in ev] == ["units"] and "больше не считаем проблемой: служебный юнит" in ev[0].text
     await engine.dispose()
