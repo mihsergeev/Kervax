@@ -4415,6 +4415,65 @@ _ROUTINE_KINDS = frozenset({"pressure", "disk_slow", "cpu", "kube_restarts", "do
 # Алерты без отбоя в телеграм: событие уже прошло, делать по "снова обычно" нечего. Прирост бэкапа -
 # один прогон добавил в разы больше обычного; следующий обычный прогон закрывает алерт молча
 _SILENT_RECOVERY = frozenset({"backup_growth"})
+
+# Дребезг тревога-отбой (неделя 18-24.10 на трех панелях): под ClickHouse у лимита памяти четыре
+# пары за вечер, свой бэкап walg-pull пять пар, GitLab отбой и тревога в одну минуту, PHP-FPM и 5xx
+# раз в два-три часа, юнит с таймаутом дважды за час. У каждого вида своя выдержка, но волна
+# длиннее выдержки все равно давала пару сообщений. Общее правило для всех видов цикла:
+# - отбой только после _SETTLE_S подряд без проблемы (alert_state "<вид>_calm" - с какого момента
+#   чисто); вернулось раньше - это все та же тревога, сообщений нет;
+# - то же самое (уровень не выше и ничего нового в перечне) в течение _AGAIN_S после отбоя - не
+#   новая тревога, а продолжение прежней: молча ("<вид>_hush"), и отбой у такой волны молчаливый.
+#   Цепочка таких волн тянется не дольше _AGAIN_MAX от первого отбоя, держится повтор дольше
+#   _AGAIN_TELL - это уже не волна, сообщение уходит с пометкой. Что сказали в прошлый раз -
+#   "<вид>_was": {ts отбоя, first - первый отбой цепочки, lvl, sig}
+# Свои правила у offline (мигание связи) и у видов без отбоя
+_SETTLE_S = 15 * 60
+_AGAIN_S = 6 * 3600
+_AGAIN_MAX = 24 * 3600
+_AGAIN_TELL = 3 * 3600
+_NO_SETTLE = frozenset({"offline"}) | _SILENT_RECOVERY
+# Своя выдержка отбоя по каждому объекту, которая держит его, пока он в <вид>_sig (units_hold,
+# restarts_hold): общая поверх нее перезапускала бы ее по кругу. Повтор после отбоя - общий
+_OWN_SETTLE = frozenset({"units", "docker_restarts", "kube_restarts"})
+
+
+def _who(ctx: dict) -> list[str]:
+    """О ком тревога - чтобы повтор с другим объектом не сошел за ту же волну: перечень (sig), у
+    видов без него - "who" (задания своего бэкапа) или точка монтирования диска."""
+    if "sig" in ctx:
+        return sorted({str(x) for x in ctx.get("sig") or []})
+    if "who" in ctx:
+        return sorted({str(x) for x in ctx.get("who") or []})
+    return [str(ctx["mount"])] if ctx.get("mount") else []
+
+
+def _again_of(st: dict, key: str, level: int, sig, now: datetime) -> dict | None:
+    """Прошлый отбой, продолжением которого будет эта тревога, или None (тревога новая)."""
+    was = st.get(f"{key}_was")
+    if not isinstance(was, dict) or _AGAIN_S <= 0:
+        return None
+    ts, first = _parse_iso(str(was.get("ts") or "")), _parse_iso(str(was.get("first") or ""))
+    if ts is None or first is None or (now - ts).total_seconds() > _AGAIN_S \
+            or (now - first).total_seconds() > _AGAIN_MAX:
+        return None
+    if level > int(was.get("lvl") or 0) or not set(sig or []) <= set(was.get("sig") or []):
+        return None  # хуже, чем было, или сломалось новое - это новость
+    return was
+
+
+def _was_after(st: dict, key: str, prev: int, now: datetime) -> dict:
+    """"<вид>_was" для отбоя: что было сказано (уровень и перечень) и начало цепочки повторов."""
+    old = st.get(f"{key}_was") if isinstance(st.get(f"{key}_was"), dict) else {}
+    first = _parse_iso(str(old.get("first") or ""))
+    ts = _parse_iso(str(old.get("ts") or ""))
+    if first is None or ts is None or (now - ts).total_seconds() > _AGAIN_S:
+        first = now
+    sig = set(st.get(f"{key}_told") or []) | set(st.get(f"{key}_sig") or []) | set(st.get(f"{key}_who") or [])
+    lvl = max(int(st.get(f"{key}_told_lvl") or 0), prev, int(old.get("lvl") or 0) if first != now else 0)
+    if first != now:
+        sig |= set(old.get("sig") or [])
+    return {"ts": now.isoformat(), "first": first.isoformat(), "lvl": lvl, "sig": sorted(sig)}
 # Медленные признаки - только днем по поясу панели (_DAY_FROM.._DAY_TO): утечка памяти и прогноз
 # заполнения диска (кроме "заполнится за сутки")
 _DAYTIME_KINDS = frozenset({"mem_leak", "disk_forecast"})
@@ -4544,6 +4603,9 @@ def _closed_tail(key: str, st: dict) -> list[tuple[str, object]]:
     for suf, empty in (("_sig", []), ("_told", []), ("_told_lvl", None)):
         if st.get(key + suf):
             out.append((key + suf, empty))
+    for suf in ("_calm", "_hush", "_who"):
+        if st.get(key + suf):
+            out.append((key + suf, None))
     if key == "offline":
         out += [("offline_said", 0), ("offline_probe", None), ("offline_kids", None), ("offline_back", None)]
     return out
@@ -6341,7 +6403,8 @@ def _server_conditions(s: Server, now: datetime,
     # успешного, выключен таймер. Состояния устойчивые, как и у restic, — без дебаунса.
     if online:
         own = custom_backups.problems(s, now)
-        out["backup_custom"] = (1 if own else 0, {"jobs": "; ".join(own[:6]), "n": len(own), "items": own})
+        out["backup_custom"] = (1 if own else 0, {"jobs": "; ".join(own[:6]), "n": len(own), "items": own,
+                                                  "who": custom_backups.names(own)})
     # Опасный (2) или служебный (1) порт открыт в интернет (внешняя проверка портов): состояние,
     # пока не закроют файрволом или не отметят порт намеренным. Свежесть - в open_ports.exposed
     if online:
@@ -7025,6 +7088,43 @@ async def evaluate_servers(
                 # сломано"; что останется к закрытию, станет известной проблемой
                 continue
             prev = int(st.get(key, 0))
+            if key not in _NO_SETTLE:
+                # дребезг тревога-отбой (см. _SETTLE_S): отбой после устойчивой нормы, повтор после
+                # отбоя - продолжение прежней тревоги
+                calm = _parse_iso(str(st.get(f"{key}_calm") or ""))
+                hush = _parse_iso(str(st.get(f"{key}_hush") or ""))
+                if level and calm is not None:
+                    apply(s.id, f"{key}_calm", None)  # вернулось до отбоя: все та же тревога
+                if prev and not level:
+                    if _SETTLE_S > 0 and key not in _OWN_SETTLE:
+                        if calm is None:
+                            apply(s.id, f"{key}_calm", now.isoformat())
+                            continue
+                        if (now - calm).total_seconds() < _SETTLE_S:
+                            continue
+                    if hush is not None:
+                        # о повторе не говорили - и отбой ему не нужен; цепочка тянется от него
+                        for k2, v2 in _closed_tail(key, st):
+                            apply(s.id, k2, v2)
+                        apply(s.id, f"{key}_was", _was_after(st, key, prev, now))
+                        continue
+                elif level and not prev:
+                    was = _again_of(st, key, level, _who(ctx), now)
+                    if was is not None:
+                        apply(s.id, key, level)
+                        apply(s.id, f"{key}_hush", now.isoformat())
+                        if "sig" not in ctx and _who(ctx):
+                            apply(s.id, f"{key}_who", _who(ctx))
+                        if "sig" in ctx:
+                            # перечень сказанного - с прошлой волны: новое в нем придет новостью
+                            apply(s.id, f"{key}_sig", sorted(ctx.get("sig") or []))
+                            apply(s.id, f"{key}_told", sorted(set(was.get("sig") or []) | set(ctx.get("sig") or [])))
+                            apply(s.id, f"{key}_told_lvl", max(int(was.get("lvl") or 0), level))
+                        continue
+                elif level and hush is not None and (now - hush).total_seconds() >= _AGAIN_TELL:
+                    # повтор держится часами: это уже не волна, говорим как о новой тревоге
+                    prev = 0
+                    ctx["_note"] = f"после отбоя вернулось и держится уже {tg_fmt.dur((now - hush).total_seconds())}"
             if key in _DAYTIME_KINDS and level > 0 and (key != "disk_forecast" or level < 2)                     and not _daytime(now, cfg.get("tz") or "Europe/Moscow"):
                 # Медленный признак (память растет день за днем, диск заполнится через дни): ждать
                 # он может до утра, в 3 ночи его не шлем. Состояние не трогаем - утром придет как есть
@@ -7069,6 +7169,8 @@ async def evaluate_servers(
                     why = _sig_rule_why(s, key, old_sig, now)
                     quiet_closed.append((s, key, f"больше не считаем проблемой: {why}" if why
                                          else "все, о чем был алерт, заглушено"))
+                    rec_apply.append((s.id, f"{key}_calm", None))
+                    rec_apply.append((s.id, f"{key}_hush", None))
                     rec_apply.append((s.id, sk, []))
                     rec_apply.append((s.id, tk, []))
                     rec_apply.append((s.id, lvk, None))
@@ -7086,6 +7188,8 @@ async def evaluate_servers(
                         else:
                             ctx["_lvl"] = level
                             fires.append(srv_fire(s, key, rule, _news_first(ctx, fresh)))
+                            if st.get(f"{key}_hush"):
+                                fire_apply.append((s.id, f"{key}_hush", None))  # сказали - уже не тихий повтор
                             fire_apply.append((s.id, sk, sorted(new_sig)))
                             fire_apply.append((s.id, tk, sorted(told | new_sig)))
                             fire_apply.append((s.id, f"{key}_said", now.isoformat()))
@@ -7238,6 +7342,12 @@ async def evaluate_servers(
                                               _aware(s.last_seen) if key == "offline" and s.last_seen else now)
                 fires.append(fmsg)
                 fire_apply.append((s.id, key, level))
+                if st.get(f"{key}_hush"):
+                    fire_apply.append((s.id, f"{key}_hush", None))
+                if "sig" not in ctx and key not in _NO_SETTLE and _who(ctx):
+                    # о ком сказали - для повтора после отбоя (_again_of)
+                    fire_apply.append((s.id, f"{key}_who", sorted(set(st.get(f"{key}_who") or [] if prev else [])
+                                                                  | set(_who(ctx)))))
                 if key in _SRV_UNIT and ctx.get("value") is not None:
                     # запоминаем ОБЪЯВЛЕННОЕ значение — из него отбой построит «было N».
                     # При эскалации перезаписываем: сравнивать надо с последним, что
@@ -7285,6 +7395,11 @@ async def evaluate_servers(
                                           group=s.group_name or "")
                 recoveries.append(rmsg.tail(kids_tail) if kids_tail else rmsg)
                 rec_apply.append((s.id, key, 0))
+                if key not in _NO_SETTLE:
+                    rec_apply.append((s.id, f"{key}_calm", None))
+                    rec_apply.append((s.id, f"{key}_was", _was_after(st, key, prev, now)))
+                    if st.get(f"{key}_who"):
+                        rec_apply.append((s.id, f"{key}_who", None))
                 if key == "offline":
                     rec_apply.append((s.id, "offline_said", 0))
                     rec_apply.append((s.id, "offline_probe", None))

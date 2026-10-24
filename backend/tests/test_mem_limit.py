@@ -49,11 +49,14 @@ def _run(reps, start=NOW, step_s=60, state=None):
 def test_hot_thresholds():
     assert mem_limit.hot(THRASH)
     assert not mem_limit.hot(CACHE)  # у лимита, но давления нет: кэш
-    # одного давления хватает, и одних major faults, и одного refault
+    # PSI full хватает одного; major faults и refault - только вместе с PSI some
     assert mem_limit.hot({**CACHE, "full": 1.0})
-    assert mem_limit.hot({**CACHE, "mf": 50})
-    assert mem_limit.hot({**CACHE, "rf": 2000})
-    assert not mem_limit.hot({**CACHE, "full": 0.9, "mf": 49, "rf": 1999})
+    assert mem_limit.hot({**CACHE, "some": 5, "mf": 50})
+    assert mem_limit.hot({**CACHE, "some": 5, "rf": 2000})
+    assert not mem_limit.hot({**CACHE, "mf": 50})
+    assert not mem_limit.hot({**CACHE, "rf": 2000})
+    assert not mem_limit.hot({**CACHE, "some": 4.9, "rf": 50000})
+    assert not mem_limit.hot({**CACHE, "full": 0.9, "some": 5, "mf": 49, "rf": 1999})
     # давление есть, но до лимита далеко: это не лимит (память сервера, своп) - не наше
     assert not mem_limit.hot({**THRASH, "cur": 300 * MI})
 
@@ -176,3 +179,35 @@ def test_tg_short():
     st, t = _run([_rep(THRASH, c)] * 11)
     _what, facts = srv_short.short("mem_limit", {"items": mem_limit.problems(_srv(st), t)}, None)
     assert facts[1] == "Еще: default/wp-mariadb" or facts[1] == "Еще: shop-db"
+
+
+# ClickHouse у лимита 40Gi (вечер 24.10): занято 99.7%, анонимной памяти около четверти, кэш
+# страниц по кругу - refault волнами 4-11 тыс/с, а PSI и major faults по нулям. Было четыре пары
+# "уперся" - "больше не упирается" за вечер
+GI = 2**30
+CH = {"kind": "pod", "name": "default/chi-olap-main-0-0-0", "u": "5e1fa0c2", "lim": 40 * GI, "cur": int(39.88 * GI),
+      "anon": int(9.25 * GI), "file": int(30.5 * GI), "some": 0, "full": 0, "f10": 0, "mf": 0, "rf": 0}
+
+
+def _ch_evening():
+    """Вечер по минутам: refault волнами по 20-30 минут с перерывами в час-два."""
+    out = []
+    for burst, quiet in ((26, 150), (24, 35), (25, 34), (26, 40)):
+        out += [_rep({**CH, "rf": 3700 + 300 * (i % 25)}) for i in range(burst)]
+        out += [_rep(CH)] * quiet
+    return out
+
+
+def test_page_cache_churn_at_limit_is_not_thrash():
+    st, t = _run(_ch_evening())
+    assert mem_limit.problems(_srv(st), t) == []
+    v = mem_limit.view(_srv(st, rep=_rep(CH)), t)
+    assert v["bad"] == [] and v["past"] == [] and [x["key"] for x in v["near"]] == ["pod:default/chi-olap-main-0-0"]
+
+
+def test_same_waves_with_memory_pressure_alert():
+    # та же база, но ей тесно: refault вместе с давлением - процессы ждут память
+    reps = [_rep({**CH, "some": 7.5, "rf": 9000, "mf": 12})] * 12
+    st, t = _run(reps)
+    p = mem_limit.problems(_srv(st), t)
+    assert len(p) == 1 and "PSI some 7.5, major faults 12/с" in p[0]["text"]

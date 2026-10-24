@@ -68,6 +68,22 @@ def _servers_added_long_ago(monkeypatch):
     monkeypatch.setattr(collector, "_NEW_SERVER_QUIET", 0)
 
 
+def pytest_configure(config):
+    config.addinivalue_line("markers", "calm: тест с выдержкой отбоя и повторами после отбоя (collector._SETTLE_S)")
+
+
+@pytest.fixture(autouse=True)
+def _calm_off(request, monkeypatch):
+    """Без общей выдержки отбоя и тихих повторов (collector._SETTLE_S, _AGAIN_S): тесты каждого вида
+    проверяют его собственный отбой тиком позже. Само правило проверяют тесты с меткой calm."""
+    if request.node.get_closest_marker("calm"):
+        return
+    from app import collector
+
+    monkeypatch.setattr(collector, "_SETTLE_S", 0)
+    monkeypatch.setattr(collector, "_AGAIN_S", 0)
+
+
 @pytest.fixture(autouse=True)
 def _no_dns_lookups(monkeypatch):
     """Мониторы из панели меряют DNS отдельным запросом (checks._dns_time). В тестах сеть не
