@@ -144,12 +144,14 @@ def site_probe_task(check, task_id: int) -> dict:
 
     Агент ходит ТОЛЬКО на localhost (адрес он подменяет сам), поэтому URL здесь — это
     не «куда пойти», а «чьим именем представиться»: Host и SNI. Панель не может послать
-    агента ни на какой другой хост, и заставить его сканировать сеть тоже не может —
-    даже будучи захваченной."""
+    агента ни на какой другой хост. Порт из URL агент берет как есть, поэтому метод здесь
+    только читающий: POST на localhost-сервис ноды (прокси docker-сокета, админки) из
+    проверки делал бы действие. Порт, кроме 80 и 443, заводит только админ (api/checks.py)."""
+    method = (check.method or "GET").upper()
     return {
         "id": task_id,
         "url": check.target,
-        "method": check.method or "GET",
+        "method": method if method in ("GET", "HEAD") else "GET",
         "timeout_ms": check.timeout_ms,
         "interval": check.interval_seconds,
         "expected_status": check.expected_status,

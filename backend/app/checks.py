@@ -19,6 +19,7 @@ from urllib.parse import urlparse, urlunparse
 
 import httpx
 
+from app import net_guard
 from app.config import get_settings
 
 # верхняя граница читаемого тела при поиске ключевого слова (защита от гигантских ответов)
@@ -73,6 +74,8 @@ def _cert_days_left(not_after: str) -> float:
 async def _ssl_probe(host: str, port: int, timeout: float) -> tuple[float | None, str]:
     """TLS-хендшейк с проверкой цепочки. Возвращает (дней_до_истечения|None, сообщение).
     None + сообщение = сертификат невалиден/недоступен (истёк, mismatch, self-signed…)."""
+    if bad := await net_guard.connect_ok(host):
+        return None, bad
     ctx = ssl.create_default_context()
     try:
         _reader, writer = await asyncio.wait_for(
@@ -971,6 +974,7 @@ async def _run_http(
         async with httpx.AsyncClient(
             timeout=timeout, follow_redirects=True, proxy=proxy,
             headers=headers, auth=auth, verify=verify,
+            event_hooks={"request": [net_guard.request_hook(proxy is not None)]},
         ) as client:
             resp = await client.request(method, u, extensions=extensions or {})
             text = resp.text[:_MAX_BODY] if (check.keyword_up or check.keyword_down) else ""
@@ -1056,6 +1060,8 @@ async def _run_tcp_port(check) -> CheckOutcome:
     host = check.target.strip()
     port = check.port or 80
     timeout = max(check.timeout_ms, 1000) / 1000.0
+    if bad := await net_guard.connect_ok(host):
+        return CheckOutcome("down", message=bad)
     t0 = time.perf_counter()
     try:
         reader, writer = await asyncio.wait_for(
@@ -1183,6 +1189,8 @@ async def _run_dns(check) -> CheckOutcome:
     name = (check.target or "").strip()
     server = (getattr(check, "dns_server", "") or "").strip()
     timeout = max(check.timeout_ms, 1000) / 1000.0
+    if server and net_guard.ip_class(server) == net_guard.FORBIDDEN:
+        return CheckOutcome("down", message=net_guard.FORBIDDEN_TEXT)
     res = dns.asyncresolver.Resolver(configure=not server)
     if server:
         res.nameservers = [server]

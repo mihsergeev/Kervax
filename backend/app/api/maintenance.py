@@ -52,10 +52,10 @@ def _validate(body: MaintIn, vis: tuple[set[int], set[int]]) -> None:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Среди выбранных есть недоступные вам серверы или мониторы")
 
 
-def _fill(w: MaintenanceWindow, body: MaintIn, keep_srv=(), keep_chk=()) -> None:
+def _fill(w: MaintenanceWindow, body: MaintIn) -> None:
     w.title = body.title.strip()
-    w.server_ids = sorted(set(body.server_ids) | set(keep_srv)) or None
-    w.check_ids = sorted(set(body.check_ids) | set(keep_chk)) or None
+    w.server_ids = sorted(set(body.server_ids)) or None
+    w.check_ids = sorted(set(body.check_ids)) or None
     w.starts_at = _utc(body.starts_at)
     w.ends_at = _utc(body.ends_at)
     w.repeat = body.repeat
@@ -120,13 +120,18 @@ async def create_window(body: MaintIn, user: CurrentUser, session: SessionDep) -
 
 @router.put("/{wid}", response_model=MaintOut)
 async def update_window(wid: int, body: MaintIn, user: CurrentUser, session: SessionDep) -> MaintOut:
-    """Правка. Серверы и мониторы чужих групп, которых учетка не видит, в окне остаются."""
+    """Правка. Окно с серверами или мониторами чужих групп учетка с группами не правит, как и
+    не удаляет: раньше чужие объекты оставались в окне и получали новое расписание, и
+    "каждый день 00:00-23:59" глушило чужие серверы."""
     vis = await _visible(session, user)
-    _validate(body, vis)
     w = await _get(session, wid)
-    _fill(w, body,
-          keep_srv=[i for i in (w.server_ids or []) if i not in vis[0]],
-          keep_chk=[i for i in (w.check_ids or []) if i not in vis[1]])
+    srv, chk = set(w.server_ids or []), set(w.check_ids or [])
+    if not (srv & vis[0]) and not (chk & vis[1]):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Окно не найдено")
+    if not srv <= vis[0] or not chk <= vis[1]:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "В окне есть серверы или мониторы чужих групп")
+    _validate(body, vis)
+    _fill(w, body)
     # новое расписание - новая сверка: старая отметка относилась к прошлому времени
     w.verified_end = None
     await session.commit()
@@ -139,6 +144,8 @@ async def update_window(wid: int, body: MaintIn, user: CurrentUser, session: Ses
 async def delete_window(wid: int, user: CurrentUser, session: SessionDep) -> None:
     vis = await _visible(session, user)
     w = await _get(session, wid)
+    if not (set(w.server_ids or []) & vis[0]) and not (set(w.check_ids or []) & vis[1]):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Окно не найдено")
     if not set(w.server_ids or []) <= vis[0] or not set(w.check_ids or []) <= vis[1]:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "В окне есть серверы или мониторы чужих групп")
     title = w.title

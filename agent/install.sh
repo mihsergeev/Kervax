@@ -60,6 +60,14 @@ for a in "$@"; do
       fi ;;
   esac
 done
+# The panel command passes the token in KERVAX_TOKEN rather than as an argument:
+# arguments are visible to every user in ps for the minutes the install takes.
+# Then the second positional argument is the instance name, not the token
+if [ -n "${KERVAX_TOKEN:-}" ]; then
+  if [ -n "$TOKEN" ] && [ -z "$INSTANCE" ]; then INSTANCE="$TOKEN"; fi
+  TOKEN="$KERVAX_TOKEN"
+fi
+unset KERVAX_TOKEN
 
 # ── Removal ──────────────────────────────────────────────────────────────────
 # There used to be no reverse operation at all: the server is deleted in the panel
@@ -244,19 +252,25 @@ if [ -n "$CA_FILE" ]; then
     echo "✗ No system trust store found to add the panel CA to (install ca-certificates)." >&2
     exit 1
   fi
+  # the root becomes trusted for all TLS of the node: only a regular file of our own user,
+  # not a symlink, so a file planted in /tmp by someone else is never taken
+  if [ -L "$CA_FILE" ] || [ ! -f "$CA_FILE" ] || [ ! -O "$CA_FILE" ]; then
+    echo "✗ --ca-file $CA_FILE must be a regular file owned by $(id -un), not a link." >&2; exit 1
+  fi
   cp "$CA_FILE" "$CA_DST"
   chmod 0644 "$CA_DST"
   $CA_UPDATE >/dev/null 2>&1 || { echo "✗ $CA_UPDATE failed." >&2; exit 1; }
   # checked WITHOUT --cacert, through the system store: exactly how the agent connects.
   # /api/agent/* and not /api/health: the panel's IP allow-list does not apply there.
-  if ! pcurl -fsS --connect-timeout 15 -m 60 --retry 3 --retry-delay 5 -o /dev/null "${URL%/}/api/agent/install.sh" 2>/tmp/kervax-ca-check.err; then
+  CA_ERR=$(mktemp)
+  if ! pcurl -fsS --connect-timeout 15 -m 60 --retry 3 --retry-delay 5 -o /dev/null "${URL%/}/api/agent/install.sh" 2>"$CA_ERR"; then
     echo "✗ The panel CA is in $CA_DST, but https to the panel still fails:" >&2
-    cat /tmp/kervax-ca-check.err >&2
+    cat "$CA_ERR" >&2
     echo "  The certificate has to be issued for the exact host in $URL (an IP or a name)." >&2
-    rm -f /tmp/kervax-ca-check.err
+    rm -f "$CA_ERR"
     exit 1
   fi
-  rm -f /tmp/kervax-ca-check.err
+  rm -f "$CA_ERR"
   echo "✓ The panel CA is trusted: $CA_DST"
 fi
 

@@ -414,7 +414,7 @@ class AlertSnoozeIn(BaseModel):
     # gitlab:<хост или контейнер> - один GitLab;
     # oom:<виновник> - OOM из-за одной службы, контейнера или процесса (app/oom.py culprit)
     kind: str = Field(min_length=1, max_length=480,
-                      pattern=r"^(?:[a-z_]+(?:@[1-3])?|web_5xx:[^\x00-\x1f]{1,220}|unit:[A-Za-z0-9@._:\\-]{1,200}"
+                      pattern=r"^(?:[a-z_][a-z0-9_]*(?:@[1-3])?|web_5xx:[^\x00-\x1f]{1,220}|unit:[A-Za-z0-9@._:\\-]{1,200}"
                               r"|qstuck:[^\x00-\x1f]{1,470}|qfail:[^\x00-\x1f]{1,470}|worker:[^\x00-\x1f]{1,470}|cron:[^\x00-\x1f]{1,470}|logerr:[^\x00-\x1f]{1,470}|fpm:[^\x00-\x1f]{1,470}|gitlab:[^\x00-\x1f]{1,470}"
                               r"|oom:[^\x00-\x1f]{1,470})$")
     hours: float = Field(ge=0, le=24 * 30)
@@ -1198,11 +1198,37 @@ class LocationOut(BaseModel):
 # --- серверы (агент-push) ---
 
 
+def _agent_ip_ok(v):
+    """IP сервера уходит в фаервол хоста панели (ops/agent-firewall-sync.sh): только одиночный
+    адрес. Подсеть 0.0.0.0/0 открывала 80/443 панели всем."""
+    if v is None:
+        return v
+    v = str(v).strip()
+    if v:
+        import ipaddress
+        try:
+            ip = ipaddress.ip_address(v)
+        except ValueError:
+            raise ValueError("IP сервера - один адрес IPv4 или IPv6, без подсети") from None
+        if ip.is_unspecified or ip.is_multicast:
+            raise ValueError("IP сервера - адрес конкретной машины")
+        v = str(ip)
+    return v
+
+
+def agent_ip_valid(v: str) -> bool:
+    try:
+        return bool(_agent_ip_ok(v))
+    except ValueError:
+        return False
+
+
 class ServerCreate(BaseModel):
     name: str = Field(min_length=1, max_length=128)
     group_name: str = Field(default="", max_length=64)
     # IP, с которого агент будет ходить в панель (опционально, для фаервола)
     agent_ip: str = Field(default="", max_length=64)
+    _agent_ip = field_validator("agent_ip")(_agent_ip_ok)
     cpu_alert_percent: int = Field(default=90, ge=0, le=100)
     mem_alert_percent: int = Field(default=90, ge=0, le=100)
     disk_alert_percent: int = Field(default=90, ge=0, le=100)
@@ -1216,6 +1242,7 @@ class ServerUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=128)
     group_name: str | None = Field(default=None, max_length=64)
     agent_ip: str | None = Field(default=None, max_length=64)
+    _agent_ip = field_validator("agent_ip")(_agent_ip_ok)
     enabled: bool | None = None
     cpu_alert_percent: int | None = Field(default=None, ge=0, le=100)
     mem_alert_percent: int | None = Field(default=None, ge=0, le=100)
@@ -1465,6 +1492,12 @@ class ServerOut(BaseModel):
     os: str
     agent_version: str
     target_agent_version: str  # если задана и != agent_version — идёт обновление
+
+    @field_validator("hostname", mode="before")
+    @classmethod
+    def _hostname_safe(cls, v):
+        # имя, записанное до проверки на приеме (AgentReportIn), в команды тоже не попадает
+        return safe_hostname(v) if isinstance(v, str) else ""
     local_ip: str
     external_ip: str
     agent_ip: str = ""
@@ -1806,8 +1839,27 @@ class AgentGoingDownIn(BaseModel):
     kind: str = Field(default="shutdown", max_length=16)
 
 
+# Имя хоста от ноды уходит в команды ansible, которые человек копирует себе в терминал
+# (`-l <hostname>`). Взломанная нода могла прислать `x;curl ...|sh;#` и получить выполнение на
+# управляющей машине. Пропускаем только то, что бывает в именах хостов
+_HOSTNAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,252}$")
+
+
+def safe_hostname(value: str) -> str:
+    """Имя хоста, годное для подстановки в команду, иначе пустая строка."""
+    value = (value or "").strip()
+    return value if _HOSTNAME_RE.fullmatch(value) else ""
+
+
 class AgentReportIn(BaseModel):
     hostname: str = Field(default="", max_length=255)
+
+    @field_validator("hostname", mode="before")
+    @classmethod
+    def _hostname_ok(cls, v):
+        # отчет не роняем: старые агенты и странные имена продолжают слать метрики, имя просто не берем
+        return safe_hostname(v) if isinstance(v, str) else ""
+
     os: str = Field(default="", max_length=128)
     agent_version: str = Field(default="", max_length=32)
     cpu_model: str = Field(default="", max_length=128)
@@ -2041,7 +2093,29 @@ class KubeResultIn(BaseModel):
 
 
 # путь бэкапа: абсолютный, безопасные символы, без «..» (агент+helper валидируют повторно)
-_BACKUP_PATH = r"^/[A-Za-z0-9._/+-]+$"  # '+' — для /lost+found (стандартный exclude ext-ФС)
+_BACKUP_PATH = r"^/[A-Za-z0-9._/+-]+$"
+# Каталог дампов helper создает с правами 0700 (и сам каталог, если он уже есть), а "Выключить
+# дамп" удаляет каталог движка целиком. /var/lib со службами, /etc, /usr так ломали ноду от root:
+# системные деревья нельзя совсем, верхние каталоги (/home, /var, /opt...) - только подкаталогом
+_DUMP_DENY_TREES = ("/etc", "/usr", "/boot", "/bin", "/sbin", "/lib", "/lib32", "/lib64", "/libx32",
+                    "/proc", "/sys", "/dev", "/run", "/tmp", "/var/lib", "/var/run", "/var/tmp",
+                    "/var/log", "/var/spool", "/var/cache", "/snap")
+_DUMP_DENY_EXACT = ("/home", "/root", "/var", "/srv", "/opt", "/mnt", "/media", "/data")
+# каталог по умолчанию (DUMP_DIR_BASE в agent/backup-setup.sh): его и подкаталоги задает editor,
+# любой другой - только админ (api/servers.py backup_command)
+DUMP_DIR_DEFAULT = "/backup"
+
+
+def dump_dir_safe(v: str) -> bool:
+    p = "/" + "/".join(x for x in v.split("/") if x and x != ".")
+    if p in _DUMP_DENY_EXACT:
+        return False
+    return not any(p == t or p.startswith(t + "/") for t in _DUMP_DENY_TREES)
+
+
+def dump_dir_default(v: str) -> bool:
+    p = "/" + "/".join(x for x in (v or "").split("/") if x and x != ".")
+    return not v or p == DUMP_DIR_DEFAULT or p.startswith(DUMP_DIR_DEFAULT + "/")  # '+' — для /lost+found (стандартный exclude ext-ФС)
 
 
 _UNIT_NAME = r"^$|^[A-Za-z0-9@._:\\][A-Za-z0-9@._:\\-]*\.(service|socket|timer|mount|automount|swap|path)$"
@@ -2098,7 +2172,7 @@ class BackupCommandIn(BaseModel):
     @classmethod
     def _dump_dir_ok(cls, v: str) -> str:
         # уходит в rm/mkdir от root на ноде: только абсолютный безопасный путь. Пусто = дефолт.
-        if v and (not re.match(_BACKUP_PATH, v) or ".." in v or v == "/"):
+        if v and (not re.match(_BACKUP_PATH, v) or ".." in v or v == "/" or not dump_dir_safe(v)):
             raise ValueError(f"недопустимый каталог дампов: {v}")
         return v
 

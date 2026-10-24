@@ -21,7 +21,7 @@ from app.collector import bsrv_extra, bsrv_restic_old
 from app.config import get_settings
 from app.deps import SessionDep
 from app.models import Server
-from app.schemas import AnsibleNodeOut, AnsibleServerOut, AnsibleServersOut
+from app.schemas import AnsibleNodeOut, AnsibleServerOut, AnsibleServersOut, safe_hostname
 from app.security import hash_agent_token
 from app.setup_scripts import current_setup_versions
 
@@ -54,7 +54,7 @@ def node_of(s: Server, cur: dict[str, str], now: datetime) -> AnsibleNodeOut | N
     issues = _issues(rep, now, s.alert_mutes) if online else []
     restic = bsrv_restic_old(rep) if "restic_old" in issues else ""
     return AnsibleNodeOut(
-        id=s.id, name=s.name, hostname=str(rep.get("hostname") or ""),
+        id=s.id, name=s.name, hostname=safe_hostname(str(rep.get("hostname") or "")),
         ips=[ip for ip in dict.fromkeys([s.external_ip, s.agent_ip, s.local_ip]) if ip],
         online=online, enabled=bool(s.enabled),
         rollout=online and helper_rollout(s, advice),

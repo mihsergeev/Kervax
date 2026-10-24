@@ -35,8 +35,11 @@ def verify_password(password: str, password_hash: str) -> bool:
 
 
 def create_access_token(
-    username: str, secret: str, ttl_minutes: int, token_version: int = 0
+    username: str, secret: str, ttl_minutes: int, token_version: int = 0, user_id: int | None = None,
 ) -> str:
+    """uid - номер учетки: имя после удаления можно завести заново, и токен старой учетки с той
+    же версией (0) подходил к новой, вплоть до admin. Токены без uid (выпущенные до этого)
+    принимаются, пока не истекут."""
     now = datetime.now(timezone.utc)
     payload = {
         "sub": username,
@@ -44,6 +47,8 @@ def create_access_token(
         "iat": now,
         "exp": now + timedelta(minutes=ttl_minutes),
     }
+    if user_id is not None:
+        payload["uid"] = user_id
     return jwt.encode(payload, secret, algorithm="HS256")
 
 

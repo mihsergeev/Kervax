@@ -61,6 +61,9 @@ async def get_current_user(
     # токен, выпущенный до смены пароля (иная version), больше не действителен
     if payload.get("ver", 0) != user.token_version:
         raise unauthorized
+    # токен удаленной учетки с тем же именем (security.create_access_token)
+    if "uid" in payload and payload["uid"] != user.id:
+        raise unauthorized
     impersonate.set_acting(None)
     if payload.get("imp") is not None:
         await _check_impersonation(payload, user, session, unauthorized)

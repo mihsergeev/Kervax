@@ -1,13 +1,15 @@
 from datetime import datetime, timedelta, timezone
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlsplit, urlunsplit
 
 import ipaddress
+import re
 import secrets
+from types import SimpleNamespace
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Query, Request, status
 from sqlalchemy import case, delete as sa_delete, func, select
 
-from app import allowlist_hint, audit, domain_probe, expiry_snooze, known, manual_probe, try_probe
+from app import allowlist_hint, audit, domain_probe, expiry_snooze, known, manual_probe, net_guard, try_probe
 from app import parents as parents_mod
 from app.checks import status_matches
 from app import checks as checks_exec
@@ -89,7 +91,36 @@ def _hide_secrets(check: Check, user) -> Check:
     check.auth_pass = ""
     check.http_headers = ""
     check.push_token = ""
+    check.auth_user = ""
+    check.target = mask_target(check.target)
     return check
+
+
+# параметры адреса, в которых обычно лежит секрет (?token=, ?key=, ?sig=...)
+_SECRET_PARAM = re.compile(r"(?i)(token|key|secret|pass|pwd|auth|sig|signature|session|sid|code|hash|jwt)")
+
+
+def mask_target(target: str) -> str:
+    """Адрес монитора для учетки только для просмотра: без user:pass@ и значений секретных
+    параметров. Пароль и заголовки ей и так не отдаем, а логин с паролем в самом адресе и
+    ?token= отдавались."""
+    t = target or ""
+    try:
+        parts = urlsplit(t if "://" in t else "//" + t)
+    except ValueError:
+        return t
+    netloc = parts.netloc
+    if "@" in netloc:
+        netloc = "***@" + netloc.rsplit("@", 1)[1]
+    query = parts.query
+    if query:
+        query = "&".join(
+            (k + "=***") if (sep and _SECRET_PARAM.search(k)) else (k + sep + v)
+            for k, sep, v in (x.partition("=") for x in query.split("&")))
+    if (netloc, query) == (parts.netloc, parts.query):
+        return t
+    out = urlunsplit(parts._replace(netloc=netloc, query=query))
+    return out if "://" in t else out.removeprefix("//")
 
 
 async def _get_or_404(
@@ -127,6 +158,8 @@ def _run_out(check: Check, user, **extra) -> CheckRunOut:
         out.auth_pass = ""
         out.http_headers = ""
         out.push_token = ""
+        out.auth_user = ""
+        out.target = mask_target(out.target)
     for key, value in extra.items():
         setattr(out, key, value)
     return out
@@ -166,6 +199,15 @@ def _parents_out(c, idx, groups, silent, user) -> list[dict]:
     ]
 
 
+def _inside_out(li, groups: dict[int, str], user):
+    """Ответ изнутри сервера (app/inside_probe.py) без имени сервера чужой группы."""
+    if not isinstance(li, dict) or not li.get("server_id"):
+        return li
+    if group_allowed(user, groups.get(li.get("server_id"), ""), "servers"):
+        return li
+    return {k: v for k, v in li.items() if k not in ("server", "server_id")}
+
+
 async def _with_parents(session, user, checks) -> None:
     """Фактические родители мониторов (app/parents.py) - подпись "зависит от" в карточке и
     списке. Вешается обычным атрибутом: объекты к этому моменту отвязаны от сессии или
@@ -175,6 +217,8 @@ async def _with_parents(session, user, checks) -> None:
     idx, groups, silent = await _parents_index(session, checks)
     for c in checks:
         c.parents = _parents_out(c, idx, groups, silent, user)
+        if c not in session:  # отвязанный объект: правка в базу не уйдет
+            c.last_inside = _inside_out(c.last_inside, groups, user)
 
 
 async def _parent_check(check: Check, session, user) -> None:
@@ -295,10 +339,11 @@ async def overview(user: CurrentUser, session: SessionDep) -> ChecksOverviewOut:
     # имена серверов-проверяльщиков: в списке сайт помечается «локально · <сервер>»,
     # иначе зелёный статус выглядит как обычная внешняя доступность, а это не она
     pids = {c.probe_server_id for c in checks if c.probe_server_id}
+    # сервер чужой группы не называем
     pnames = (
         {r[0]: r[1] for r in (await session.execute(
-            select(Server.id, Server.name).where(Server.id.in_(pids))
-        )).all()}
+            select(Server.id, Server.name, Server.group_name).where(Server.id.in_(pids))
+        )).all() if group_allowed(user, r[2], "servers")}
         if pids else {}
     )
     outs = []
@@ -312,7 +357,10 @@ async def overview(user: CurrentUser, session: SessionDep) -> ChecksOverviewOut:
             co.auth_pass = ""
             co.http_headers = ""
             co.push_token = ""
+            co.auth_user = ""
+            co.target = mask_target(co.target)
         co.probe_server_name = pnames.get(c.probe_server_id or 0)
+        co.last_inside = _inside_out(co.last_inside, pgroups, user)
         co.parents = _parents_out(c, pidx, pgroups, psilent, user)
         co.uptime_24h = uptime.get(c.id)
         co.beats = beats.get(c.id)
@@ -343,14 +391,18 @@ async def overview(user: CurrentUser, session: SessionDep) -> ChecksOverviewOut:
 
 @router.get("/incidents", response_model=list[CheckIncidentOut])
 async def list_incidents(
-    _: CurrentUser,
+    user: CurrentUser,
     session: SessionDep,
     check_id: int | None = Query(default=None),
     limit: int = Query(default=50, ge=1, le=500),
 ) -> list[CheckIncidentOut]:
     query = select(CheckIncident).order_by(CheckIncident.started_at.desc()).limit(limit)
     if check_id is not None:
+        await _get_or_404(check_id, session, user)
         query = query.where(CheckIncident.check_id == check_id)
+    # только мониторы групп учетки: имя и last_message чужих мониторов сюда не попадают
+    query = query.where(CheckIncident.check_id.in_(
+        scope_query(user, select(Check.id), Check, "sites")))
     incidents = list(await session.scalars(query))
     # порог и интервал нужны, чтобы объяснить, ПОЧЕМУ по инциденту не было алерта
     meta = {
@@ -389,8 +441,10 @@ async def bulk_update(
         q = q.where(Check.id.in_(ids))
     checks = list(await session.scalars(q))
     for check in checks:
+        old_local = (check.probe_local, check.target, check.method)
         for name, value in fields.items():
             setattr(check, name, value)
+        _local_probe_ok(check, user, old_local)
         if "probe_local" in fields or "check_locations" in fields:
             _one_probe_source(check)
     if "enabled" in fields:
@@ -470,6 +524,14 @@ async def import_checks(
                 status.HTTP_403_FORBIDDEN, "Группа недоступна для этой учётной записи"
             )
     checks = [Check(**item.model_dump()) for item in body.items]
+    for check in checks:
+        # те же нормализации и запреты, что у одиночного создания: раньше импорт пропускал
+        # резолвер DNS-монитора в виде DoH-адреса на любой хост
+        _push_defaults(check)
+        _dns_defaults(check)
+        _local_probe_ok(check, user)
+        await _target_ok(check.type, check.target, check.dns_server, user)
+        _one_probe_source(check)
     session.add_all(checks)
     await session.commit()
     await audit.record(session, user.username, "checks_import", str(len(checks)))
@@ -504,6 +566,14 @@ def _host_of(check: Check) -> str:
     return target.split("://")[-1].split("/")[0].split(":")[0].strip(".")
 
 
+def _host_of_raw(target: str) -> str:
+    t = (target or "").strip().lower()
+    try:
+        return (urlparse(t if "://" in t else "http://" + t).hostname or "").strip(".")
+    except ValueError:
+        return ""
+
+
 def _norm_domain(raw: str) -> str:
     """Домен из отчёта агента → канонический хост (без схемы, пути, порта и точки)."""
     d = (raw or "").strip().lower().rstrip(".")
@@ -536,7 +606,8 @@ async def _hosts_map(user, session) -> tuple[dict[str, int], list[str]]:
     """Карта «домен → id монитора» (0 = вне видимости учётки) + группы сайтов."""
     hosts: dict[str, int] = {}
     groups: set[str] = set()
-    for check in await session.scalars(select(Check)):
+    # учетке с группами чужие мониторы не называем вовсе: ни домены, ни имена групп
+    for check in await session.scalars(scope_query(user, select(Check), Check, "sites")):
         if check.group_name:
             groups.add(check.group_name)
         host = _host_of(check)
@@ -678,6 +749,9 @@ async def try_check(body: CheckTryIn, user: CurrentUser, session: SessionDep) ->
     chk = try_probe.check_of(body)
     if body.type == "dns":
         _dns_defaults(chk)  # имя без схемы и пути, резолвер - только IP, как у сохраненного
+    if body.part in ("panel", "expiry"):
+        await _target_ok(body.type, chk.target, getattr(chk, "dns_server", ""), user)
+    if body.type == "dns":
         chk.retries = 0
         own = await session.get(Check, body.check_id) if body.check_id else None
         # правка: без ожидаемого монитор сравнивает с запомненным ответом - проба тоже
@@ -693,6 +767,12 @@ async def try_check(body: CheckTryIn, user: CurrentUser, session: SessionDep) ->
         return CheckTryOut(**await try_probe.expiry(chk))
     if body.part == "locations":
         return CheckTryOut(locations=await try_probe.locations(session, chk))
+    if body.method not in LOCAL_METHODS:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST,
+                            "Проверка изнутри сервера - только методом GET или HEAD")
+    if local_port(body.target) not in LOCAL_PORTS and user.role != "admin":
+        raise HTTPException(status.HTTP_403_FORBIDDEN,
+                            "Проверку изнутри сервера на порт, кроме 80 и 443, задает только администратор")
     servers = list(await session.scalars(scope_query(user, select(Server), Server)))
     out = await try_probe.inside(session, body, servers, datetime.now(timezone.utc))
     await session.commit()
@@ -858,6 +938,9 @@ async def local_probe_apply(
         hit = serving.get(_host_of(check))
         if not hit:
             continue
+        if (check.method or "GET") not in LOCAL_METHODS or (
+                local_port(check.target) not in LOCAL_PORTS and user.role != "admin"):
+            continue  # такой монитор изнутри не проверяем (_local_probe_ok)
         check.probe_local = True
         check.probe_server_id = hit[0]
         updated += 1
@@ -1033,6 +1116,8 @@ async def create_check(
     _push_defaults(check)
     _dns_defaults(check)
     await _parent_check(check, session, user)
+    _local_probe_ok(check, user)
+    await _target_ok(check.type, check.target, check.dns_server, user)
     _one_probe_source(check)
     # новый монитор — в конец списка (иначе прыгнул бы наверх при ручном порядке)
     max_order = await session.scalar(select(func.max(Check.sort_order)))
@@ -1194,12 +1279,63 @@ async def tamper_accept(check_id: int, body: dict, user: CurrentUser, session: S
             by.setdefault((int(f.get("sid") or 0), str(f.get("root") or "")), []).append(str(f.get("p") or ""))
         for (sid, root), paths in by.items():
             srv = await session.get(Server, sid)
-            if srv is not None:
+            # baseline файлов чужого сервера не трогаем: так можно было спрятать веб-шелл от его группы
+            if srv is not None and group_allowed(user, srv.group_name):
                 srv.webfiles = webfiles_mod.accept(srv.webfiles, root, k, paths)
     check.tamper_state = tamper_mod.accept(check.tamper_state, key, arg, datetime.now(timezone.utc), mode)
     await session.commit()
     await audit.record(session, user.username, "tamper_accept", check.name, " ".join(x for x in (key, arg, mode) if x)[:500])
     return {"tamper": check.tamper}
+
+
+# Проверка изнутри идет на localhost ноды. Любой порт и метод превращали ее в доступ к
+# localhost-сервисам ноды (прокси docker-сокета, админки), а keyword - в чтение их ответов
+# по биту. Метод - только чтение; порт не 80/443 - только админ (сайт на 8443 бывает, но
+# решать это не editor'у)
+LOCAL_METHODS = ("GET", "HEAD")
+LOCAL_PORTS = (None, 80, 443)
+
+
+def local_port(target: str) -> int | None:
+    t = (target or "").strip()
+    try:
+        return urlparse(t if "://" in t else "http://" + t).port
+    except ValueError:
+        return -1
+
+
+def _local_probe_ok(check: Check, user, before: tuple | None = None) -> None:
+    """Можно ли этой учетке такой монитор с проверкой изнутри. before - (probe_local, target,
+    method) до правки: монитор, который не трогали в этих полях, не перепроверяем."""
+    if not check.probe_local or check.type != "http":
+        return
+    if before is not None and before == (check.probe_local, check.target, check.method):
+        return
+    if (check.method or "GET") not in LOCAL_METHODS:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST,
+                            "Проверка изнутри сервера - только методом GET или HEAD")
+    if local_port(check.target) not in LOCAL_PORTS and user.role != "admin":
+        raise HTTPException(status.HTTP_403_FORBIDDEN,
+                            "Проверку изнутри сервера на порт, кроме 80 и 443, задает только администратор")
+
+
+def _target_host(typ: str, target: str) -> str:
+    # dns: имя спрашивают у резолвера, сами туда не ходим (резолвер проверяется отдельно)
+    return parents_mod.target_host(SimpleNamespace(type=typ, target=target))
+
+
+async def _target_ok(typ: str, target: str, dns_server: str, user) -> None:
+    """Куда монитор пойдет с хоста панели (app/net_guard.py): метаданные облака - никому,
+    внутренняя сеть - только админу."""
+    for host in (_target_host(typ, target), (dns_server or "").strip() if typ == "dns" else ""):
+        if not host:
+            continue
+        cls = await net_guard.host_class(host)
+        if cls == net_guard.FORBIDDEN:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "Этот адрес проверять из панели нельзя: "
+                                + net_guard.FORBIDDEN_TEXT)
+        if cls == net_guard.INTERNAL and user.role != "admin":
+            raise HTTPException(status.HTTP_403_FORBIDDEN, net_guard.ADMIN_ONLY_TEXT)
 
 
 def _one_probe_source(check: Check) -> None:
@@ -1250,10 +1386,20 @@ async def update_check(
     check = await _get_or_404(check_id, session, user)
     old_paths = list(check.extra_paths or [])
     old_dns = (check.target, check.dns_type, check.dns_server)
-    for field, value in body.model_dump(exclude_unset=True).items():
+    old_local = (check.probe_local, check.target, check.method)
+    old_where = (check.type, check.target, check.dns_server)
+    fields = body.model_dump(exclude_unset=True)
+    # перенос монитора в чужую группу: алерты уходили бы ее получателям, а создавать там нельзя
+    if "group_name" in fields and fields["group_name"] != check.group_name and (
+            not group_allowed(user, fields["group_name"], "sites")):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Группа недоступна для этой учётной записи")
+    for field, value in fields.items():
         setattr(check, field, value)
+    _local_probe_ok(check, user, old_local)
     _push_defaults(check)
     _dns_defaults(check)
+    if (check.type, check.target, check.dns_server) != old_where:
+        await _target_ok(check.type, check.target, check.dns_server, user)
     await _parent_check(check, session, user)
     if check.target != old_dns[0] and check.tamper_state:
         # другой адрес - другая страница: база признаков взлома от старой не годится
@@ -1274,6 +1420,10 @@ async def update_check(
             ))
         if not new_paths:
             check.last_path_results = None
+    if check.probe_local and old_local[0] and _host_of(check) != _host_of_raw(old_local[1]):
+        # другой хост - привязку к ноде ищем заново, старая нода этот домен могла и не держать
+        check.probe_server_id = None
+        check.probe_bound_at = None
     _one_probe_source(check)
     await _close_if_disabled(session, [check])
     await session.commit()

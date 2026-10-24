@@ -136,15 +136,25 @@ async def test_api_groups(client, auth_headers):
     login = await client.post("/api/auth/login", json={"username": "webeditor", "password": "webeditor-pass-2026"})
     eh = {"Authorization": f"Bearer {login.json()['access_token']}"}
     assert (await client.post("/api/maintenance", json=_body(server_ids=[other]), headers=eh)).status_code == 400
-    # окно админа на оба сервера: редактор видит только свой, правка чужой не теряет
+    # окно админа на оба сервера: редактор видит только свой, а править и удалять такое окно
+    # не может - раньше правка писала новое расписание и чужому серверу ("каждый день весь день")
     j = (await client.post("/api/maintenance", json=_body(server_ids=[own, other]), headers=auth_headers)).json()
     seen = (await client.get("/api/maintenance", headers=eh)).json()
     assert seen[0]["server_ids"] == [own]
-    r = await client.put(f"/api/maintenance/{j['id']}", json=_body(server_ids=[own], title="x"), headers=eh)
-    assert r.status_code == 200
+    r = await client.put(f"/api/maintenance/{j['id']}", json=_body(server_ids=[own], title="x", repeat="daily"),
+                         headers=eh)
+    assert r.status_code == 403
     full = (await client.get("/api/maintenance", headers=auth_headers)).json()
-    assert full[0]["server_ids"] == sorted([own, other])
+    assert full[0]["server_ids"] == sorted([own, other]) and full[0]["title"] != "x"
     assert (await client.delete(f"/api/maintenance/{j['id']}", headers=eh)).status_code == 403
+    # окно только из чужих серверов: для редактора его нет
+    k = (await client.post("/api/maintenance", json=_body(server_ids=[other]), headers=auth_headers)).json()
+    r = await client.put(f"/api/maintenance/{k['id']}", json=_body(server_ids=[own]), headers=eh)
+    assert r.status_code == 404
+    # свое окно - правит как раньше
+    m = (await client.post("/api/maintenance", json=_body(server_ids=[own]), headers=eh)).json()
+    r = await client.put(f"/api/maintenance/{m['id']}", json=_body(server_ids=[own], title="y"), headers=eh)
+    assert r.status_code == 200 and r.json()["title"] == "y"
 
 
 # ---------------------------------------------------------------- сборщик

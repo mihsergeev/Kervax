@@ -45,9 +45,10 @@ def test_command_is_one_line_with_the_installer_args_last(settings):
     cmd = _install_cmd(TOKEN)
     assert "\n" not in cmd
     # то, что окно предлагает дописать (--no-auto, имя инстанса), попадает установщику
-    assert cmd.endswith(f"' - https://panel.example.com {TOKEN}")
-    assert cmd.count(TOKEN) == 1
-    script = cmd[len("sh -c '"):cmd.rindex("' - ")]
+    assert cmd.endswith("' - https://panel.example.com")
+    # токен в окружении перед sh -c, а не в аргументах (их видит ps любого пользователя ноды)
+    assert cmd.startswith(f"KERVAX_TOKEN={TOKEN} sh -c '") and cmd.count(TOKEN) == 1
+    script = cmd[len(f"KERVAX_TOKEN={TOKEN} sh -c '"):cmd.rindex("' - ")]
     assert "'" not in script
     # сначала файл целиком, потом запуск; зависшая передача - тоже ошибка
     assert '-o "$f" https://panel.example.com/api/agent/install.sh && exec sh "$f" "$@"' in script
@@ -74,7 +75,7 @@ echo "$*" >> "$STATE.args"
 [ "$n" -le "$FAIL_N" ] && exit 28
 out=""; prev=""
 for a in "$@"; do [ "$prev" = "-o" ] && out="$a"; prev="$a"; done
-printf '%s\\n' 'echo "installer: $*"' > "$out"
+printf '%s\\n' 'echo "installer: $* token=$KERVAX_TOKEN"' > "$out"
 """
 
 
@@ -102,7 +103,8 @@ def test_command_waits_for_the_panel_and_runs_the_installer(settings, tmp_path):
     # три отказа - три понятные строки с попыткой, потом установщик с аргументами и хвостом
     assert r.stderr.count("Панель пока закрыта для этого сервера") == 3
     assert "(curl 28, попытка 3/24)" in r.stderr
-    assert f"installer: https://panel.example.com {TOKEN} main" in r.stdout
+    # токен доходит до установщика окружением, а в его аргументах только адрес и хвост
+    assert f"installer: https://panel.example.com main token={TOKEN}" in r.stdout
     assert TOKEN not in r.stderr  # повторы токен не печатают
     assert "--proxy" not in (tmp_path / "n.args").read_text()
 

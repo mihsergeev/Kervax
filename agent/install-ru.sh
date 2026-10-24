@@ -60,6 +60,14 @@ for a in "$@"; do
       fi ;;
   esac
 done
+# Команда из панели передает токен в KERVAX_TOKEN, а не аргументом: аргументы видит в ps
+# любой пользователь все минуты установки. Тогда второй позиционный аргумент - имя
+# инстанса, а не токен
+if [ -n "${KERVAX_TOKEN:-}" ]; then
+  if [ -n "$TOKEN" ] && [ -z "$INSTANCE" ]; then INSTANCE="$TOKEN"; fi
+  TOKEN="$KERVAX_TOKEN"
+fi
+unset KERVAX_TOKEN
 
 # ── Удаление ─────────────────────────────────────────────────────────────────
 # Обратной операции не было вовсе: сервер убирают из панели, а на ноде остаётся
@@ -243,19 +251,25 @@ if [ -n "$CA_FILE" ]; then
     echo "✗ Не нашел системного хранилища, куда добавить CA панели (поставьте ca-certificates)." >&2
     exit 1
   fi
+  # корень станет доверенным для всего TLS ноды: только обычный файл своего пользователя,
+  # не ссылка, чтобы подложенный кем-то в /tmp файл не попал в хранилище
+  if [ -L "$CA_FILE" ] || [ ! -f "$CA_FILE" ] || [ ! -O "$CA_FILE" ]; then
+    echo "✗ --ca-file $CA_FILE - должен быть обычный файл пользователя $(id -un), не ссылка." >&2; exit 1
+  fi
   cp "$CA_FILE" "$CA_DST"
   chmod 0644 "$CA_DST"
   $CA_UPDATE >/dev/null 2>&1 || { echo "✗ $CA_UPDATE не отработал." >&2; exit 1; }
   # проверяем БЕЗ --cacert, через системное хранилище: ровно так ходит агент.
   # /api/agent/*, а не /api/health: белый список адресов панели там не действует.
-  if ! pcurl -fsS --connect-timeout 15 -m 60 --retry 3 --retry-delay 5 -o /dev/null "${URL%/}/api/agent/install.sh" 2>/tmp/kervax-ca-check.err; then
+  CA_ERR=$(mktemp)
+  if ! pcurl -fsS --connect-timeout 15 -m 60 --retry 3 --retry-delay 5 -o /dev/null "${URL%/}/api/agent/install.sh" 2>"$CA_ERR"; then
     echo "✗ CA панели лежит в $CA_DST, но https к панели все равно не проходит:" >&2
-    cat /tmp/kervax-ca-check.err >&2
+    cat "$CA_ERR" >&2
     echo "  Сертификат должен быть выписан ровно на хост из $URL (IP или имя)." >&2
-    rm -f /tmp/kervax-ca-check.err
+    rm -f "$CA_ERR"
     exit 1
   fi
-  rm -f /tmp/kervax-ca-check.err
+  rm -f "$CA_ERR"
   echo "✓ CA панели в доверенных: $CA_DST"
 fi
 

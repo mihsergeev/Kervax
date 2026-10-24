@@ -93,6 +93,23 @@ async def _record_failure(
         await _lockout_alert(session, settings, ban)
 
 
+async def _guarded(session, request: Request, username: str, action: str, ok: bool, err: str) -> None:
+    """Проверка секрета под тем же счетчиком, что и вход: заблокированный адрес не пробует
+    вовсе, неудача считается к блокировке (белый список - только запись в журнал)."""
+    settings = get_settings()
+    key = _client_key(request)
+    guard = await ratelimit.load(session)
+    trusted = guard.allowed(key) is not None
+    ban = None if trusted else await ratelimit.active_ban(session, key)
+    if ban is not None:
+        await ratelimit.note_blocked(session, ban)
+        left = (_aware(ban.until) - datetime.now(timezone.utc)).total_seconds()
+        raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, f"locked:{max(1, math.ceil(left / 60))}")
+    if not ok:
+        await _record_failure(session, settings, key, username, action, guard, trusted)
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, err)
+
+
 @router.post("/login", response_model=TokenResponse)
 async def login(
     body: LoginRequest, request: Request, session: SessionDep
@@ -130,7 +147,7 @@ async def login(
     await ratelimit.clear(session, key)
     token = create_access_token(
         user.username, settings.jwt_secret, settings.jwt_ttl_minutes,
-        user.token_version,
+        user.token_version, user.id,
     )
     await audit.record(session, user.username, "login_ok", key)
     return TokenResponse(access_token=token)
@@ -141,8 +158,10 @@ async def change_password(
     body: PasswordChangeRequest, request: Request, user: CurrentUser, session: SessionDep
 ) -> TokenResponse:
     """Смена пароля из UI: проверяет текущий, инвалидирует все старые токены."""
-    if not verify_password(body.current_password, user.password_hash):
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Неверный текущий пароль")
+    # С украденным токеном текущий пароль подбирали без ограничений: тот же счетчик неудач
+    # и блокировка адреса, что у входа
+    await _guarded(session, request, user.username, "password_fail",
+                   verify_password(body.current_password, user.password_hash), "Неверный текущий пароль")
     user.password_hash = hash_password(body.new_password)
     user.token_version += 1  # все ранее выданные токены становятся недействительны
     await session.commit()
@@ -154,9 +173,21 @@ async def change_password(
     )
     token = create_access_token(
         user.username, settings.jwt_secret, settings.jwt_ttl_minutes,
-        user.token_version,
+        user.token_version, user.id,
     )
     return TokenResponse(access_token=token)
+
+
+@router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
+async def logout(user: CurrentUser, session: SessionDep) -> None:
+    """Выход: токен перестает действовать сразу, а не через 12 часов. Отзываются все токены
+    учетки (версия общая), то есть и вход с других устройств: украденный токен иначе жил бы
+    до срока. Вход под чужой учеткой так не закрыть - для него "Вернуться к себе"."""
+    if impersonate.acting() is not None:
+        return
+    user.token_version += 1
+    await session.commit()
+    await audit.record(session, user.username, "logout", user.username)
 
 
 @router.get("/me", response_model=MeOut)
@@ -241,12 +272,13 @@ async def twofa_enable(
 
 @router.post("/2fa/disable", response_model=TwoFAStatusOut)
 async def twofa_disable(
-    body: TwoFAVerifyRequest, user: CurrentUser, session: SessionDep
+    body: TwoFAVerifyRequest, request: Request, user: CurrentUser, session: SessionDep
 ) -> TwoFAStatusOut:
     if not user.totp_enabled:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "2FA не включена")
-    if not totp.verify(user.totp_secret, body.otp):
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Неверный код")
+    # шесть цифр с украденным токеном перебирались бы без счета: тот же лимит, что у входа
+    await _guarded(session, request, user.username, "2fa_disable_fail",
+                   totp.verify(user.totp_secret, body.otp), "Неверный код")
     user.totp_enabled = False
     user.totp_secret = ""
     await session.commit()
