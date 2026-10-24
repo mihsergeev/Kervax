@@ -10,7 +10,7 @@ import {
   backupRepoMute,
   snoozeServer,
   snoozeServerAlert,
-  updateServer,
+  muteServerKeys,
   type Server,
 } from './api'
 import { HOME_MUTE, homeMuteLabel } from './homeGroups'
@@ -50,7 +50,7 @@ export const SRV_ALERT_KINDS: { k: string; label: string }[] = [
   { k: 'db_health', label: 'СУБД: реплика, транзакции, запись, VACUUM' },
   { k: 'web_config', label: 'Веб-сервер: конфиг не проходит проверку' },
   { k: 'web_cert', label: 'Веб-сервер: сертификат истекает' },
-  { k: 'webfiles', label: 'Признаки взлома: новые php в файлах сайтов' },
+  { k: 'webfiles', label: 'Признаки взлома в файлах сайтов' },
   { k: 'listen_gone', label: 'Сервер: пропал порт' },
   { k: 'disk_slow', label: 'Диск тормозит' },
   { k: 'gpu', label: 'GPU: драйвер, пропала карта, ошибки Xid' },
@@ -255,8 +255,8 @@ export const SNOOZE_KINDS: { k: string; label: string }[] = SRV_ALERT_KINDS.flat
   x.k === 'disk'
     ? [
         x,
-        { k: 'disk@1', label: 'Диск — только предупреждения' },
-        { k: 'disk@2', label: 'Диск — предупр. и проблемы' },
+        { k: 'disk@1', label: 'Диск - только предупреждения' },
+        { k: 'disk@2', label: 'Диск - предупреждения и проблемы' },
       ]
     : [x],
 )
@@ -285,7 +285,7 @@ const RULE_KIND_LABELS: Record<string, string> = {
   // глушатся с главной кнопкой 🔕 у строки "Что сломано"
   'dns@1': 'DNS - только предупреждения',
   'clock@1': 'Время сервера - только предупреждения',
-  'clock@2': 'Время сервера - предупр. и проблемы',
+  'clock@2': 'Время сервера - предупреждения и проблемы',
   db_conn: 'Коннекты СУБД',
   queue: 'Очереди: выше порога',
   kube_expiry: 'Kubernetes: сроки',
@@ -356,7 +356,7 @@ export function liftMute(s: Server, i: MuteItem): Promise<Server> {
   if (i.group === 'audit') return backupAuditMute(s.id, i.key, false)
   if (i.key === '') return snoozeServer(s.id, 0)
   if (i.until) return snoozeServerAlert(s.id, i.key, 0)
-  return updateServer(s.id, { alert_mutes: (s.alert_mutes ?? []).filter((k) => k !== i.key) })
+  return muteServerKeys(s.id, [], [i.key])
 }
 
 // Вернуть только что снятое ("вернуть" в панели): снуз - на оставшееся до прежнего срока время,
@@ -364,7 +364,7 @@ export function liftMute(s: Server, i: MuteItem): Promise<Server> {
 export async function restoreMute(s: Server, i: MuteItem): Promise<Server> {
   if (i.group === 'repo') return backupRepoMute(s.id, i.key, true)
   if (i.group === 'audit') return backupAuditMute(s.id, i.key, true)
-  if (!i.until) return updateServer(s.id, { alert_mutes: [...new Set([...(s.alert_mutes ?? []), i.key])] })
+  if (!i.until) return muteServerKeys(s.id, [i.key])
   const hours = Math.min(24 * 30, (Date.parse(i.until) - Date.now()) / 3600_000)
   if (hours <= 0) return s
   return i.key === '' ? snoozeServer(s.id, hours) : snoozeServerAlert(s.id, i.key, hours)

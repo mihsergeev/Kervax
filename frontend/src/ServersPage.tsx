@@ -36,6 +36,7 @@ import {
   scanExposure,
   ackChanges,
   updateServer,
+  muteServerKeys,
   type AccessAccount,
   type ClockInfo,
   type DnsInfo,
@@ -66,15 +67,19 @@ import {
   type ServerReport,
   type ServerVulns,
   type TimelineResult,
+  cmdState,
+  cmdWaitText,
 } from './api'
 import { StackedAreaChart, type ChartMark, type Series } from './charts/StackedAreaChart'
 import { OnboardBlock } from './OnboardBlock'
-import { diskHealth, diskUsage, fmtSetupVersion, limText, memLimFacts, gpuSecLine, shortList, sinceShort, unitsBlock, srvIpHit, srvIssues, tallyServers, type SrvIssue, webLogLabel, webRate, webSeriesName, webUnparsed } from './serverUtils'
+import { diskHealth, diskUsage, fmtSetupVersion, limText, memLimFacts, gpuSecLine, shortList, sinceShort, unitsBlock, srvIpHit, srvIssues, srvMuted, tallyServers, type SrvIssue, webLogLabel, webRate, webSeriesName, webUnparsed } from './serverUtils'
 import { OsIcon } from './osIcon'
 import { CountryFlag } from './CountryFlag'
 import { currentLang, useI18n } from './i18n'
+import { useEscape } from './useEscape'
+import { toastError } from './toast'
 import { useUrlCard, useUrlParam } from './deeplink'
-import { CardNav, FreshChip, OvAreas, OvRows, secInfoOf, type SecDef, type SecInfo, type SecItem } from './cardLayout'
+import { CardNav, FreshChip, markMuted, OvAreas, OvRows, secInfoOf, type SecDef, type SecInfo, type SecItem } from './cardLayout'
 import { fmtBytes, fmtDur, rateUnits, timeUnits } from './units'
 import {
   MuteChip,
@@ -690,8 +695,8 @@ function ClockFix({ server: s, clock, skew, canManage }: {
         await new Promise((r) => setTimeout(r, 500))
         last = await backupCommandStatus(s.id, c.id)
       }
-      const ok = last.status !== 'error'
-      setMsg({ ok, text: last.result || (ok ? t('готово') : t('не удалось')) })
+      const ok = cmdState(last) === 'ok'
+      setMsg({ ok, text: cmdState(last) === 'wait' ? cmdWaitText() : last.result || (ok ? t('готово') : t('не удалось')) })
     } catch (e) {
       setMsg({ ok: false, text: e instanceof Error ? e.message : t('ошибка') })
     } finally {
@@ -939,8 +944,11 @@ function serverSecInfo(c: {
   for (const { id } of DETAIL_SECTIONS) out[id] = secInfoOf(items[id] ?? [], ok[id] ?? '', t)
   // справка и заглушки - желтым, но не проблемой: на карте видно, что там не пусто
   if (v?.release && v.feed_ts && v.summary.pkgs)
-    out.vulns = { level: 1, n: v.summary.pkgs, line: t('важных CVE: {n}, пакетов: {p}', { n: v.summary.cves, p: v.summary.pkgs }) }
+    out.vulns = { level: 1, n: v.summary.cves, line: t('важных CVE: {n}, пакетов: {p}', { n: v.summary.cves, p: v.summary.pkgs }) }
   if (c.mutes.length && !out.alerts.n) out.alerts = { level: 1, n: c.mutes.length, line: ok.alerts }
+  // заглушенная беда (упавшая служба, порт) - серым с пометкой, а не "упавших служб нет"
+  markMuted(out, srvMuted(s, t).filter((i) => !i.section && i.kind !== 'offline')
+    .map((i) => ({ sec: secOfLink(i.sec) ?? 'overview', text: i.text })), t)
   if (parent && !parent.online && !out.deps.n)
     out.deps = { level: 1, n: 0, line: t('стоит за {name}, он не на связи', { name: parent.name }) }
   const idle = [!ex && 'ports', !unitsBlock(r) && 'units', !wr && 'web', !!v && (!v.release || !v.feed_ts) && 'vulns',
@@ -1216,17 +1224,17 @@ function OomMute({ server: s, culprit, onChanged }: { server: Server; culprit: s
     setBusy(true)
     try {
       if (hours < 0) {
-        await updateServer(s.id, { alert_mutes: [...new Set([...(s.alert_mutes ?? []), kind])] })
+        await muteServerKeys(s.id, [kind])
         if (s.alert_snoozes?.[kind]) await snoozeServerAlert(s.id, kind, 0)
       } else if (hours === 0) {
         if ((s.alert_mutes ?? []).includes(kind))
-          await updateServer(s.id, { alert_mutes: (s.alert_mutes ?? []).filter((x) => x !== kind) })
+          await muteServerKeys(s.id, [], [kind])
         if (s.alert_snoozes?.[kind]) await snoozeServerAlert(s.id, kind, 0)
       } else await snoozeServerAlert(s.id, kind, hours)
       setPicking(false)
       onChanged()
-    } catch {
-      /* кнопка остается, можно повторить */
+    } catch (e) {
+      toastError(e) // кнопка остается, можно повторить
     } finally {
       setBusy(false)
     }
@@ -1520,10 +1528,10 @@ function WebErrorList({
     setBusy(true)
     try {
       if (hours < 0) {
-        await updateServer(s.id, { alert_mutes: [...new Set([...(s.alert_mutes ?? []), kind])] })
+        await muteServerKeys(s.id, [kind])
       } else if (hours === 0) {
         if ((s.alert_mutes ?? []).includes(kind))
-          await updateServer(s.id, { alert_mutes: (s.alert_mutes ?? []).filter((x) => x !== kind) })
+          await muteServerKeys(s.id, [], [kind])
         if (s.alert_snoozes?.[kind]) await snoozeServerAlert(s.id, kind, 0)
       } else await snoozeServerAlert(s.id, kind, hours)
       setPicking(null)
@@ -2322,6 +2330,10 @@ function DiskAnalyze({ server: s, mount, forecast, onChanged }: {
   const { t } = useI18n()
   const { isViewer } = useAuth()
   const [st, setSt] = useState<AnalyzeState>('idle')
+  // разбор приехал со свежим отчетом - "Разбор запущен" больше не нужен: помним, при каком
+  // отчете разбора его запустили
+  const duTs = diskUsage(s.last_report)?.ts
+  const [sentAt, setSentAt] = useState<number | undefined>(undefined)
   if (isViewer) return null
   if (!s.disk_analyze) {
     return forecast ? (
@@ -2341,6 +2353,7 @@ function DiskAnalyze({ server: s, mount, forecast, onChanged }: {
       }
       if (last.status === 'done' && last.ok) {
         setSt('sent')
+        setSentAt(duTs)
         // du по большому разделу идет минуты, а отчет агент шлет раз в несколько десятков секунд
         window.setTimeout(onChanged, 45_000)
         window.setTimeout(onChanged, 150_000)
@@ -2351,7 +2364,7 @@ function DiskAnalyze({ server: s, mount, forecast, onChanged }: {
       setSt(e instanceof Error ? e.message : t('не удалось'))
     }
   }
-  if (st === 'sent') {
+  if (st === 'sent' && sentAt === duTs) {
     return <div className="muted small">{t('Разбор запущен, появится ниже через минуту-две.')}</div>
   }
   return (
@@ -2390,7 +2403,7 @@ function duShort(it: DiskUsageItem, t: TFn): { name: string; sub: string } {
     case 'apt-cache': return { name: t('кэш apt'), sub: '/var/cache/apt' }
     case 'dnf-cache': return { name: t('кэш dnf/yum'), sub: '' }
     case 'tmp-dir':
-    case 'vartmp-dir': return { name: it.path, sub: it.fresh ? t('есть свежие файлы') : t('{n} старых файлов', { n: it.count ?? 0 }) }
+    case 'vartmp-dir': return { name: it.path, sub: it.fresh ? t('есть свежие файлы') : t('старых файлов: {n}', { n: it.count ?? 0 }) }
     case 'deleted-open':
       return { name: t('удаленные, но открытые файлы'), sub: (it.procs ?? []).map((p) => `${p.comm} ${p.pid}`).join(', ') }
     default: return { name: duLabel(it, t), sub: '' }
@@ -2914,11 +2927,10 @@ function MemLimitsCard({ server: s, isViewer, onChanged }: { server: Server; isV
     setBusy(true)
     try {
       const k = MEMLIM_MUTE + key
-      const cur = (s.alert_mutes ?? []).filter((m) => m !== k)
-      await updateServer(s.id, { alert_mutes: on ? [...cur, k] : cur })
+      await muteServerKeys(s.id, on ? [k] : [], on ? [] : [k])
       onChanged()
-    } catch {
-      /* кнопка остается, можно повторить */
+    } catch (e) {
+      toastError(e) // кнопка остается, можно повторить
     } finally {
       setBusy(false)
     }
@@ -3081,7 +3093,7 @@ function SrvTiles({ r, M, info, onGo, gpu, oom }: {
         <TileSpark vals={M.map((m) => m.net_rx)} color="#57a894" />)}
       {gpu &&
         tile('gpu', 'GPU', gpu.util != null ? `${gpu.util}%` : '—',
-          gpu.mem != null ? `${gpu.n} x ${gpu.models.join(', ')} · ${gpu.mem} / ${gpu.memt} ${t('ГБ')}` : `${gpu.n} x NVIDIA`, gpu.util,
+          gpu.mem != null ? `${gpu.n} x ${gpu.models.join(', ')} · ${gpu.memt != null ? `${gpu.mem} / ${gpu.memt}` : gpu.mem} ${t('ГБ')}` : `${gpu.n} x NVIDIA`, gpu.util,
           <TileSpark
             vals={M.map((m) => (m.gpu?.length ? m.gpu.reduce((a, x) => a + (x.u ?? 0), 0) / m.gpu.length : null))}
             max={100}
@@ -3476,6 +3488,7 @@ function OsUpdates({ server: s, onChanged }: { server: Server; onChanged: () => 
   const { isViewer } = useAuth()
   const { busy, toggle } = useMuteToggle(s, onChanged)
   const [busyAll, setBusyAll] = useState(false)
+  const [allErr, setAllErr] = useState<string | null>(null)
   const [open, setOpen] = useState('')
   const u = s.last_report?.os_upd
   const adv = s.os_advice ?? []
@@ -3499,9 +3512,10 @@ function OsUpdates({ server: s, onChanged }: { server: Server; onChanged: () => 
   const softReboot = adv.some((a) => a.kind === 'reboot' && a.soft)
   const keepAll = () => {
     setBusyAll(true)
-    updateServer(s.id, { alert_mutes: [...new Set([...(s.alert_mutes ?? []), ...live.map((a) => a.key)])] })
+    setAllErr(null)
+    muteServerKeys(s.id, live.map((a) => a.key))
       .then(onChanged)
-      .catch(() => {})
+      .catch((e) => setAllErr(e instanceof Error ? e.message : t('Ошибка')))
       .finally(() => setBusyAll(false))
   }
   const day = (ts?: number) => (ts ? new Date(ts * 1000).toLocaleDateString() : '')
@@ -3517,6 +3531,7 @@ function OsUpdates({ server: s, onChanged }: { server: Server; onChanged: () => 
             </button>
           )}
         </div>
+        {allErr && <p className="form-error small">{allErr}</p>}
         {fixed.bars}
         {adv.map((a) => {
           // заглушенное до нового (та же заглушка, что галками на главной) снимается своим ключом
@@ -3613,8 +3628,8 @@ function ChangesFeed({ server: s, onChanged }: { server: Server; onChanged: () =
     try {
       await ackChanges(s.id)
       onChanged()
-    } catch {
-      /* кнопка остается, можно повторить */
+    } catch (e) {
+      toastError(e) // кнопка остается, можно повторить
     } finally {
       setBusy(false)
     }
@@ -3769,10 +3784,10 @@ function LoopingUnits({ server: s, onChanged }: { server: Server; onChanged: () 
     if (!window.confirm(t('Не алертить по {u}? Юнит перестанет алертить и как упавший, и как перезапускающийся.', { u: unit }))) return
     setBusy(true)
     try {
-      await updateServer(s.id, { alert_mutes: [...new Set([...(s.alert_mutes ?? []), UNIT_MUTE + unit])] })
+      await muteServerKeys(s.id, [UNIT_MUTE + unit])
       onChanged()
-    } catch {
-      /* кнопка остается, можно повторить */
+    } catch (e) {
+      toastError(e) // кнопка остается, можно повторить
     } finally {
       setBusy(false)
     }
@@ -3818,8 +3833,8 @@ function LoopingUnits({ server: s, onChanged }: { server: Server; onChanged: () 
 
 // Что открыто в интернет. Панель раз в 6 часов стучится снаружи (через первую локацию-прокси,
 // без нее - сама) ко всем портам, которые слушает нода: что видно из интернета, а что закрыто.
-// Красное - опасное (база, очередь, Docker API, kubelet, node_exporter), желтое - служебное (порты
-// Kubernetes, агенты и экспортеры метрик): снаружи должно быть закрыто и то и другое. Проверка с
+// Красное - опасное (база, очередь, Docker API, kubelet, Prometheus и node_exporter), желтое - служебное
+// (порты Kubernetes, агенты мониторинга): снаружи должно быть закрыто и то и другое. Проверка с
 // адреса самой панели показывает, что открыто для панели: файрвол ноды часто пускает её по белому
 // списку, поэтому цветов и кнопок там нет.
 type PortGroup = {
@@ -3986,11 +4001,10 @@ function OpenPorts({ server: s, onChanged }: { server: Server; onChanged: () => 
     setBusy(true)
     try {
       const key = EXPOSED_MUTE + port
-      const cur = (s.alert_mutes ?? []).filter((k) => k !== key)
-      await updateServer(s.id, { alert_mutes: on ? [...cur, key] : cur })
+      await muteServerKeys(s.id, on ? [key] : [], on ? [] : [key])
       onChanged()
-    } catch {
-      /* кнопка остается, можно повторить */
+    } catch (e) {
+      toastError(e) // кнопка остается, можно повторить
     } finally {
       setBusy(false)
     }
@@ -4133,7 +4147,7 @@ function OpenPorts({ server: s, onChanged }: { server: Server; onChanged: () => 
             <NetTile
               label={t('Опасных')}
               value={String(dangerous)}
-              sub={t('базы, очереди, Docker API, kubelet')}
+              sub={t('базы, очереди, Docker API, kubelet, экспортеры метрик')}
               tone={dangerous ? 'bad' : 'ok'}
             />
           )}
@@ -4141,7 +4155,7 @@ function OpenPorts({ server: s, onChanged }: { server: Server; onChanged: () => 
             <NetTile
               label={t('Служебных')}
               value={String(service)}
-              sub={t('Kubernetes, агенты, экспортеры')}
+              sub={t('Kubernetes, агенты мониторинга')}
               tone={service ? 'warn' : 'ok'}
             />
           )}
@@ -4249,7 +4263,7 @@ function OpenPorts({ server: s, onChanged }: { server: Server; onChanged: () => 
           )}
           {ex && !own && opened.length > 0 && (
             <div>
-              {t('Красным - опасное: базы, очереди, etcd, kubelet, Docker API, node_exporter. Желтым - служебное: порты Kubernetes и сети подов, агенты и экспортеры метрик. Снаружи должно быть закрыто и то и другое, а если порт открыт специально, отметьте "открыт намеренно". Остальное (SSH, веб, ваши сервисы) - для сведения.')}
+              {t('Красным - опасное: базы, очереди, etcd, kubelet, Docker API, Prometheus и node_exporter. Желтым - служебное: порты Kubernetes и сети подов, агенты мониторинга. Снаружи должно быть закрыто и то и другое, а если порт открыт специально, отметьте "открыт намеренно". Остальное (SSH, веб, ваши сервисы) - для сведения.')}
             </div>
           )}
         </div>
@@ -4284,11 +4298,10 @@ function RealIpBox({ server: s, items, isViewer, onChanged }: { server: Server; 
     setBusy(true)
     try {
       const k = CFIP_MUTE + key
-      const cur = (s.alert_mutes ?? []).filter((m) => m !== k)
-      await updateServer(s.id, { alert_mutes: on ? [...cur, k] : cur })
+      await muteServerKeys(s.id, on ? [k] : [], on ? [] : [k])
       onChanged()
-    } catch {
-      /* кнопка остается, можно повторить */
+    } catch (e) {
+      toastError(e) // кнопка остается, можно повторить
     } finally {
       setBusy(false)
     }
@@ -4350,11 +4363,10 @@ function RealIpBox({ server: s, items, isViewer, onChanged }: { server: Server; 
 function useMuteToggle(s: Server, onChanged: () => void) {
   const [busy, setBusy] = useState('')
   const toggle = (key: string, on: boolean) => {
-    const cur = s.alert_mutes ?? []
     setBusy(key)
-    updateServer(s.id, { alert_mutes: on ? [...new Set([...cur, key])] : cur.filter((m) => m !== key) })
+    muteServerKeys(s.id, on ? [key] : [], on ? [] : [key])
       .then(onChanged)
-      .catch(() => {})
+      .catch(toastError)
       .finally(() => setBusy(''))
   }
   return { busy, toggle }
@@ -4603,11 +4615,10 @@ function SshLogin({ server: s, onChanged }: { server: Server; onChanged: () => v
           value={v.guard || t('нет')}
           tone={v.guard ? 'ok' : v.open ? 'warn' : undefined}
         />
-        <NetTile
-          label={t('Неудачных входов за 10 минут')}
-          value={String(v.fail)}
-          sub={v.accepted_password > 0 ? t('входов по паролю: {n}', { n: v.accepted_password }) : undefined}
-        />
+        <NetTile label={t('Неудачных входов за 10 минут')} value={String(v.fail)} />
+        {v.accepted_password > 0 && (
+          <NetTile label={t('Вошли по паролю за 10 минут')} value={String(v.accepted_password)} tone="warn" />
+        )}
       </div>
       {top.length > 0 && (
         <div className="net-foot">
@@ -4686,16 +4697,16 @@ function FailedUnits({ server: s, onChanged, onOom }: { server: Server; onChange
     try {
       const mutes = s.alert_mutes ?? []
       if (hours < 0) {
-        await updateServer(s.id, { alert_mutes: [...new Set([...mutes, ...kinds])] })
+        await muteServerKeys(s.id, kinds)
       } else if (hours === 0) {
         if (kinds.some((k) => mutes.includes(k)))
-          await updateServer(s.id, { alert_mutes: mutes.filter((x) => !kinds.includes(x)) })
+          await muteServerKeys(s.id, [], kinds)
         for (const k of kinds) if (s.alert_snoozes?.[k]) await snoozeServerAlert(s.id, k, 0)
       } else for (const k of kinds) await snoozeServerAlert(s.id, k, hours)
       setPicking(null)
       onChanged()
-    } catch {
-      /* кнопка остается, можно повторить */
+    } catch (e) {
+      toastError(e) // кнопка остается, можно повторить
     } finally {
       setBusy(false)
     }
@@ -5176,7 +5187,6 @@ export function ServersPage({ onUnauthorized, openServerId, openServerSec, onCon
       onConsumed?.()
     }
   }, [openServerId, openServerSec, onConsumed])
-  useUrlCard('server', detailId)
 
   // доступная (подписанная) версия агента для управляемого обновления
   const [avail, setAvail] = useState('')
@@ -5206,6 +5216,10 @@ export function ServersPage({ onUnauthorized, openServerId, openServerSec, onCon
   const problemsLabel = !srvTally.warn ? t('С проблемами') : !srvTally.down ? t('С предупреждениями')
     : t('С проблемами и предупреждениями')
   const detail = detailId != null ? servers?.find((s) => s.id === detailId) : undefined
+  // ссылка на удаленный или чужой сервер: сказать об этом и убрать id из адреса, а не молча
+  // показать список
+  const notFound = !!servers && detailId != null && !detail
+  useUrlCard('server', notFound ? null : detailId)
   const q = query.trim().toLowerCase()
   const visible = (servers ?? []).filter((s) => {
     if (filter === 'online' && !s.online) return false
@@ -5222,10 +5236,8 @@ export function ServersPage({ onUnauthorized, openServerId, openServerSec, onCon
     if (sortBy === 'cpu') return rep.cpu_percent ?? null
     if (sortBy === 'ram')
       return rep.mem_total ? (rep.mem_used ?? 0) / rep.mem_total : null
-    const d = rep.disks
-    return d?.length
-      ? Math.max(...d.filter((x) => x.total).map((x) => x.used / x.total))
-      : null
+    const d = (rep.disks ?? []).filter((x) => x.total)
+    return d.length ? Math.max(...d.map((x) => x.used / x.total)) : null
   }
   const sorted =
     sortBy === 'name'
@@ -5274,13 +5286,22 @@ export function ServersPage({ onUnauthorized, openServerId, openServerSec, onCon
       )
     )
       return
+    // отдельного bulk-эндпоинта у серверов нет — удаляем по одному. Уже удаленный (404) не ошибка,
+    // а после отказа список перечитываем: удаленные до него не должны висеть выбранными
+    const left = new Set(ids)
     try {
-      // отдельного bulk-эндпоинта у серверов нет — удаляем по одному
-      for (const id of ids) await deleteServer(id)
+      for (const id of ids) {
+        await deleteServer(id).catch((e) => {
+          if (!(e instanceof ApiError && e.status === 404)) throw e
+        })
+        left.delete(id)
+      }
       exitSelect()
       load()
     } catch (e) {
       if (e instanceof ApiError && e.status === 401) return onUnauthorized()
+      setSelected(left)
+      load()
       setErr(e instanceof Error ? e.message : t('Ошибка'))
     }
   }
@@ -5492,6 +5513,12 @@ export function ServersPage({ onUnauthorized, openServerId, openServerSec, onCon
         </div>
       )}
 
+      {notFound && (
+        <p className="form-error">
+          {t('Сервер не найден или нет доступа')}{' '}
+          <button type="button" className="linklike" onClick={() => setDetailId(null)}>{t('Закрыть')}</button>
+        </p>
+      )}
       {err && <p className="form-error">{err}</p>}
       {servers && servers.length === 0 && (
         <div className="card muted">
@@ -5578,6 +5605,7 @@ export function ServersPage({ onUnauthorized, openServerId, openServerSec, onCon
       {enroll && <InstallModal enroll={enroll} onClose={() => setEnroll(null)} />}
       {detail && (
         <ServerDetail
+          key={detail.id}
           server={detail}
           servers={servers ?? []}
           available={avail}
@@ -5641,9 +5669,9 @@ function ServerRow({
   const { t } = useI18n()
   const r = s.last_report ?? {}
   const memP = pct(r.mem_used, r.mem_total)
-  const diskP = r.disks?.length
-    ? Math.max(...r.disks.filter((d) => d.total).map((d) => Math.round((d.used / d.total) * 100)))
-    : null
+  // разделы с нулевым размером не считаем; если других нет - нет и процента (а не -Infinity%)
+  const diskPs = (r.disks ?? []).filter((d) => d.total).map((d) => Math.round((d.used / d.total) * 100))
+  const diskP = diskPs.length ? Math.max(...diskPs) : null
   // «горит» — сервер онлайн, но с активными превышениями (CPU/RAM/диск/темп/…)
   const issues = srvIssues(s, t)
   const onFire = s.online && issues.length > 0
@@ -5782,6 +5810,7 @@ export function EnrollModal({
   onUnauthorized: () => void
 }) {
   const { t } = useI18n()
+  useEscape(onClose)
   const [name, setName] = useState(initial?.name ?? '')
   const [group, setGroup] = useState(initial?.group ?? '')
   const [agentIp, setAgentIp] = useState(initial?.ip ?? '')
@@ -5920,6 +5949,7 @@ export function InstallModal({
   mode?: InstallMode // с чего открыть выбор пути (подсказка "агент не достает до панели")
 }) {
   const { t } = useI18n()
+  useEscape(onClose)
   const [copied, setCopied] = useState('')
   // путь до панели (InstallPath): прокси ретранслятора, локации или свой - в команду
   const [path, setPath] = useState<InstallMode>(mode ?? 'direct')
@@ -6395,7 +6425,9 @@ function ServerEditCard({
 }) {
   const { t } = useI18n()
   const { isAdmin } = useAuth()
-  const num = (v: string) => (v === '' ? 0 : Number(v))
+  // пустое поле - NaN: при сохранении оно не уходит (раньше уходил 0 и бэкенд отвечал 422)
+  const num = (v: string) => (v === '' ? NaN : Number(v))
+  const nv = (x: number) => (Number.isFinite(x) ? x : '')
   // на VM нет датчиков температуры → скрываем температурные алерты (CPU/диск)
   const kinds = SRV_ALERT_KINDS.filter(
     ({ k }) => !isVm || (k !== 'temp' && k !== 'disktemp'),
@@ -6446,7 +6478,7 @@ function ServerEditCard({
             type="number"
             min={0}
             max={100}
-            value={form.cpu_alert_percent}
+            value={nv(form.cpu_alert_percent)}
             onChange={(e) => set({ cpu_alert_percent: num(e.target.value) })}
           />
         </label>
@@ -6456,7 +6488,7 @@ function ServerEditCard({
             type="number"
             min={0}
             max={100}
-            value={form.mem_alert_percent}
+            value={nv(form.mem_alert_percent)}
             onChange={(e) => set({ mem_alert_percent: num(e.target.value) })}
           />
         </label>
@@ -6469,7 +6501,7 @@ function ServerEditCard({
             type="number"
             min={0}
             max={100}
-            value={form.disk_warn_percent}
+            value={nv(form.disk_warn_percent)}
             onChange={(e) => set({ disk_warn_percent: num(e.target.value) })}
           />
         </label>
@@ -6479,7 +6511,7 @@ function ServerEditCard({
             type="number"
             min={0}
             max={100}
-            value={form.disk_alert_percent}
+            value={nv(form.disk_alert_percent)}
             onChange={(e) => set({ disk_alert_percent: num(e.target.value) })}
           />
         </label>
@@ -6489,7 +6521,7 @@ function ServerEditCard({
             type="number"
             min={0}
             max={100}
-            value={form.disk_crit_percent}
+            value={nv(form.disk_crit_percent)}
             onChange={(e) => set({ disk_crit_percent: num(e.target.value) })}
           />
         </label>
@@ -6514,7 +6546,7 @@ function ServerEditCard({
             type="number"
             min={0}
             max={120}
-            value={form.temp_alert_c}
+            value={nv(form.temp_alert_c)}
             onChange={(e) => set({ temp_alert_c: num(e.target.value) })}
           />
         </label>
@@ -6526,7 +6558,7 @@ function ServerEditCard({
             type="number"
             min={0}
             max={100}
-            value={form.conntrack_alert_percent}
+            value={nv(form.conntrack_alert_percent)}
             onChange={(e) => set({ conntrack_alert_percent: num(e.target.value) })}
           />
         </label>
@@ -6536,7 +6568,7 @@ function ServerEditCard({
             type="number"
             min={0}
             max={100}
-            value={form.db_conn_alert_percent}
+            value={nv(form.db_conn_alert_percent)}
             onChange={(e) => set({ db_conn_alert_percent: num(e.target.value) })}
           />
         </label>
@@ -6547,7 +6579,7 @@ function ServerEditCard({
             min={0}
             max={100}
             step={0.01}
-            value={form.web_5xx_alert_percent}
+            value={nv(form.web_5xx_alert_percent)}
             onChange={(e) => set({ web_5xx_alert_percent: num(e.target.value) })}
           />
         </label>
@@ -6567,7 +6599,7 @@ function ServerEditCard({
               type="number"
               min={0}
               max={120}
-              value={form.disk_temp_alert_c}
+              value={nv(form.disk_temp_alert_c)}
               onChange={(e) => set({ disk_temp_alert_c: num(e.target.value) })}
             />
           </label>
@@ -6579,7 +6611,7 @@ function ServerEditCard({
           type="number"
           min={30}
           max={86400}
-          value={form.offline_after_seconds}
+          value={nv(form.offline_after_seconds)}
           onChange={(e) => set({ offline_after_seconds: num(e.target.value) })}
         />
       </label>
@@ -6589,7 +6621,7 @@ function ServerEditCard({
           type="number"
           min={0}
           max={1440}
-          value={form.alert_sustain_min}
+          value={nv(form.alert_sustain_min)}
           onChange={(e) => set({ alert_sustain_min: num(e.target.value) })}
         />
         <span className="muted small">
@@ -6670,6 +6702,7 @@ function ServerChartModal({
   onClose: () => void
 }) {
   const { t } = useI18n()
+  useEscape(onClose)
   const [hours, setHours] = useState(6)
   const [zoom, setZoom] = useState<{ from: number; to: number } | null>(null)
   const [metrics, setMetrics] = useState<ServerMetric[] | null>(null)
@@ -6684,12 +6717,16 @@ function ServerChartModal({
 
   useEffect(() => {
     setMetrics(null)
+    let alive = true // ответ за прошлый период или зум не перетирает выбранный
     const run = () =>
-      serverMetrics(server.id, hours, zoom ?? undefined).then(setMetrics).catch(() => {})
+      serverMetrics(server.id, hours, zoom ?? undefined).then((v) => { if (alive) setMetrics(v) }).catch(() => {})
     run()
-    if (zoom) return // на зуме не автообновляем — фиксированное окно
-    const id = window.setInterval(run, 15000)
-    return () => window.clearInterval(id)
+    // на зуме не автообновляем — фиксированное окно
+    const id = zoom ? 0 : window.setInterval(run, 15000)
+    return () => {
+      alive = false
+      window.clearInterval(id)
+    }
   }, [server.id, hours, zoom])
 
   const M = metrics ?? []
@@ -6806,12 +6843,17 @@ function ServerDetail({
   // команда установки заново (чек-лист подключения): новый токен, старая команда не сработает
   const [enroll, setEnroll] = useState<ServerEnroll | null>(null)
   const [enrollMode, setEnrollMode] = useState<InstallMode | undefined>(undefined)
+  // отказ действия в окне (403, 404, 422, сеть): тостом, а не молча вернувшейся кнопкой
+  const actFail = (e: unknown) => {
+    if (e instanceof ApiError && e.status === 401) return onUnauthorized()
+    toastError(e)
+  }
   const reissue = async (mode?: InstallMode) => {
     setEnrollMode(mode)
     try {
       setEnroll(await rotateServerToken(s.id))
     } catch (e) {
-      if (e instanceof ApiError && e.status === 401) onUnauthorized()
+      actFail(e)
     }
   }
   const doUpdate = async (fn: () => Promise<Server[]>) => {
@@ -6820,7 +6862,7 @@ function ServerDetail({
       await fn()
       onChanged()
     } catch (e) {
-      if (e instanceof ApiError && e.status === 401) return onUnauthorized()
+      actFail(e)
     } finally {
       setUpdBusy(false)
     }
@@ -6830,16 +6872,24 @@ function ServerDetail({
   const [zoomKey, setZoomKey] = useState<MetricKey | null>(null)
   const [editing, setEditing] = useState(false)
   const [form, setForm] = useState<ServerEditForm | null>(null)
+  // Esc закрывает карточку, но не во время правки: там он стер бы набранное
+  useEscape(onClose, !editing)
   const [saving, setSaving] = useState(false)
   const [saveErr, setSaveErr] = useState<string | null>(null)
+  const mutes0 = useRef<string[]>([]) // мьюты на момент открытия формы
   const r = s.last_report ?? {}
 
   useEffect(() => {
     setMetrics(null)
-    const run = () => serverMetrics(s.id, hours).then(setMetrics).catch(() => {})
+    // поздний ответ за прошлый период не должен лечь на выбранный ("90д", потом сразу "1ч")
+    let alive = true
+    const run = () => serverMetrics(s.id, hours).then((v) => { if (alive) setMetrics(v) }).catch(() => {})
     run()
     const id = window.setInterval(run, 12000)
-    return () => window.clearInterval(id)
+    return () => {
+      alive = false
+      window.clearInterval(id)
+    }
   }, [s.id, hours])
 
   // открытый раздел: сводка или тот, куда вела ссылка; в адресе он виден (?sec=), ссылкой
@@ -6964,7 +7014,8 @@ function ServerDetail({
       onChanged()
       onClose()
     } catch (e) {
-      if (e instanceof ApiError && e.status === 401) onUnauthorized()
+      if (e instanceof ApiError && e.status === 401) return onUnauthorized()
+      setSaveErr(e instanceof Error ? e.message : t('Ошибка'))
     }
   }
 
@@ -6997,6 +7048,7 @@ function ServerDetail({
       relay_enabled: !!s.relay_enabled,
       relay_port: s.relay_port ?? 0,
     })
+    mutes0.current = s.alert_mutes ?? []
     setSaveErr(null)
     setEditing(true)
   }
@@ -7006,25 +7058,32 @@ function ServerDetail({
     setSaving(true)
     setSaveErr(null)
     try {
+      // пустое поле не отправляем (остается как было), дробь в целом пороге округляем
+      const int = (x: number) => (Number.isFinite(x) ? Math.round(x) : undefined)
+      // мьюты: поверх текущих, а не снимка на момент открытия формы - заглушенное за это время
+      // в другом месте не должно пропасть
+      const was = new Set(mutes0.current)
+      const keep = new Set(form.alert_mutes)
+      const mutes = [...new Set([...(s.alert_mutes ?? []).filter((k) => keep.has(k) || !was.has(k)), ...form.alert_mutes])]
       await updateServer(s.id, {
         name: form.name.trim(),
         group_name: form.group_name.trim(),
         agent_ip: form.agent_ip.trim(),
-        cpu_alert_percent: form.cpu_alert_percent,
-        mem_alert_percent: form.mem_alert_percent,
-        disk_alert_percent: form.disk_alert_percent,
-        disk_warn_percent: form.disk_warn_percent,
-        disk_crit_percent: form.disk_crit_percent,
+        cpu_alert_percent: int(form.cpu_alert_percent),
+        mem_alert_percent: int(form.mem_alert_percent),
+        disk_alert_percent: int(form.disk_alert_percent),
+        disk_warn_percent: int(form.disk_warn_percent),
+        disk_crit_percent: int(form.disk_crit_percent),
         disk_autofix: form.disk_autofix,
-        temp_alert_c: form.temp_alert_c,
-        conntrack_alert_percent: form.conntrack_alert_percent,
-        db_conn_alert_percent: form.db_conn_alert_percent,
-        web_5xx_alert_percent: form.web_5xx_alert_percent,
+        temp_alert_c: int(form.temp_alert_c),
+        conntrack_alert_percent: int(form.conntrack_alert_percent),
+        db_conn_alert_percent: int(form.db_conn_alert_percent),
+        web_5xx_alert_percent: Number.isFinite(form.web_5xx_alert_percent) ? form.web_5xx_alert_percent : undefined,
         kube_expiry_warn_days: form.kube_expiry_warn_days.split(/[^0-9]+/).filter(Boolean).map(Number),
-        disk_temp_alert_c: form.disk_temp_alert_c,
-        alert_mutes: form.alert_mutes,
-        offline_after_seconds: form.offline_after_seconds,
-        alert_sustain_seconds: Math.max(0, Math.round(form.alert_sustain_min * 60)),
+        disk_temp_alert_c: int(form.disk_temp_alert_c),
+        alert_mutes: mutes,
+        offline_after_seconds: int(form.offline_after_seconds),
+        alert_sustain_seconds: Number.isFinite(form.alert_sustain_min) ? Math.max(0, Math.round(form.alert_sustain_min * 60)) : undefined,
       })
       // ретранслятор отдельно: панель проверяет, что сервер сам достает до нее, и может отказать
       if (form.relay_enabled !== !!s.relay_enabled || (form.relay_enabled && form.relay_port !== (s.relay_port ?? 0)))
@@ -7816,31 +7875,27 @@ function ServerDetail({
                 busy={snoozing}
                 onUnmute={async (kind) => {
                   setSnoozing(true)
-                  try {
-                    await updateServer(s.id, {
-                      alert_mutes: (s.alert_mutes ?? []).filter((x) => x !== kind),
-                    })
+                                try {
+                    await muteServerKeys(s.id, [], [kind])
                     onChanged()
                   } catch (e) {
-                    if (e instanceof ApiError && e.status === 401) onUnauthorized()
+                    actFail(e)
                   } finally {
                     setSnoozing(false)
                   }
                 }}
                 onSnooze={async (kind, hours) => {
                   setSnoozing(true)
-                  try {
+                                try {
                     if (hours < 0) {
                       // «постоянно» — это не снуз, а мьют: снуз всегда имеет срок и
                       // истекает, а тут нужно, чтобы порог молчал, пока его не вернут
-                      const cur = s.alert_mutes ?? []
-                      const add = kind === null ? SRV_ALERT_KINDS.map((x) => x.k) : [kind]
-                      await updateServer(s.id, { alert_mutes: [...new Set([...cur, ...add])] })
+                      await muteServerKeys(s.id, kind === null ? SRV_ALERT_KINDS.map((x) => x.k) : [kind])
                     } else if (kind === null) await snoozeServer(s.id, hours)
                     else await snoozeServerAlert(s.id, kind, hours)
                     onChanged()
                   } catch (e) {
-                    if (e instanceof ApiError && e.status === 401) onUnauthorized()
+                    actFail(e)
                   } finally {
                     setSnoozing(false)
                   }

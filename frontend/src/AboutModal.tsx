@@ -14,6 +14,7 @@ import { BrandMark } from './Logo'
 import { useAuth } from './auth'
 import { CardNav, type SecDef } from './cardLayout'
 import { useI18n } from './i18n'
+import { useEscape } from './useEscape'
 
 export const KERVAX_URL = 'https://github.com/mihsergeev/Kervax'
 const MAX_KB = 512
@@ -27,6 +28,7 @@ export function AboutModal({ onClose, onBrandingChanged }: {
   onBrandingChanged: () => void
 }) {
   const { t } = useI18n()
+  useEscape(onClose)
   const { isAdmin } = useAuth()
   const [sec, setSec] = useState('about')
   // версия — с бэкенда: см. getHealth в api.ts

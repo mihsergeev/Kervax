@@ -6,6 +6,7 @@ import {
   listServers,
   snoozeServerAlert,
   updateServer,
+  muteServerKeys,
   type DBStat,
   type DbAdvice,
   type ChHealth,
@@ -25,7 +26,8 @@ import {
   type WorkerProg,
 } from './api'
 import { LlmSection } from './Gpu'
-import { currentLang, useI18n } from './i18n'
+import { useI18n } from './i18n'
+import { toastError } from './toast'
 import { useAuth } from './auth'
 import { useUrlCard, useUrlParam } from './deeplink'
 import { shortList, srvIpHit, srvIssues, srvMuted, webRate } from './serverUtils'
@@ -39,7 +41,7 @@ import { OsIcon } from './osIcon'
 import { CountryFlag } from './CountryFlag'
 import { WebFiles, webfilesBad } from './WebFiles'
 import { GitlabSection, gitlabLine } from './GitlabSection'
-import { byteUnits } from './units'
+import { byteUnits, fmtInt } from './units'
 import { NetTile, TileFilterChip, useTileFilter } from './NetLinks'
 import { EXPIRY_SHOW_DAYS, EXPIRY_WARN_DAYS, expiryTone } from './checkUtils'
 
@@ -145,6 +147,10 @@ type SvcItem = {
 type SrvServices = { server: Server; items: SvcItem[] }
 
 const QUEUE_HOT = 100 // очередь глубже — подсвечиваем: обычно отставший консьюмер
+// мертвые письма копятся по замыслу, служебные очереди Celery и RabbitMQ - тоже: в "переполнены" их
+// не считаем. Тот же список, что у бэкенда (queue_watch._SKIP)
+const QUEUE_SKIP = /(^|[._:-])(dlq|dlx|dead|deadletter|dead_letter|dead-letter|failed|parking)($|[._:-])|\.pidbox$|^celeryev\.|^amq\.|\.reply-|^reply[._-]/i
+const qHot = (q: QueueStat) => qDepth(q) >= QUEUE_HOT && !QUEUE_SKIP.test(q.name)
 // иконка брокера очередей по тому, где они лежат (helper queues-setup); без engine - RabbitMQ
 const QUEUE_ENGINE_ICON: Record<string, string> = { redis: 'Redis', pg: 'PostgreSQL', mysql: 'MySQL/MariaDB' }
 // точка строки очереди по тону
@@ -154,7 +160,7 @@ const subOf = (...parts: (string | false | 0 | undefined)[]) => parts.filter(Boo
 
 // «6 042» вместо «6042»: тысячи в потоке запросов читаются взглядом, а не пересчётом
 function rpmText(v: number): string {
-  return Math.round(v).toLocaleString('ru-RU').replace(/\u00a0/g, ' ')
+  return fmtInt(v)
 }
 
 // Ключ очереди ДОЛЖЕН совпадать с backend/app/collector.py::queue_key — по нему
@@ -235,7 +241,7 @@ function lagText(sec: number, t: (s: string, v?: Record<string, string | number>
 const LOAD_QUIET_MS = 60_000 // запросы заняли меньше минуты за час - топ ни о чем не говорит
 
 function fmtCount(n: number): string {
-  return Math.round(n).toLocaleString(currentLang() === 'ru' ? 'ru-RU' : 'en-US')
+  return fmtInt(n)
 }
 
 // Совет по настройкам (backend db_health.advice) словами: что не так, на сколько поправить и нужен ли перезапуск
@@ -887,15 +893,25 @@ function buildByServer(
 }
 
 // сколько доменов можно поставить на мониторинг: не под монитором и не помечены "не нужно"
+// "1 сервис, 3 сервиса, 5 сервисов" вместо "3 серв."
+function svcWord(n: number, t: (k: string) => string): string {
+  const d = n % 10, dd = n % 100
+  if (d === 1 && dd !== 11) return t('сервис')
+  if (d >= 2 && d <= 4 && (dd < 12 || dd > 14)) return t('сервиса')
+  return t('сервисов')
+}
+
 function missingSites(sites: string[], ctx: SitesCtx): number {
   const hosts = ctx.hosts
   if (!hosts) return 0
-  return sites.filter((x) => adoptable(x) && hosts[x.toLowerCase()] == null && !ctx.skip.has(x.toLowerCase())).length
+  // один домен - один раз, без оглядки на регистр (как "доменов вне мониторинга" в Сайтах)
+  return [...new Set(sites.map((x) => x.toLowerCase()))]
+    .filter((x) => adoptable(x) && hosts[x] == null && !ctx.skip.has(x)).length
 }
 
 // суммарная «горячесть» ноды по очередям RabbitMQ (для цвета строки)
 function hotQueues(items: SvcItem[]): number {
-  return items.reduce((n, it) => n + (it.svc?.queues ?? []).filter((q) => qDepth(q) >= QUEUE_HOT).length, 0)
+  return items.reduce((n, it) => n + (it.svc?.queues ?? []).filter(qHot).length, 0)
 }
 
 // Очереди RabbitMQ одного инстанса - прямо в разделе "Очереди" карточки ноды. Раньше это была
@@ -989,16 +1005,16 @@ function QueueList({ server, svc, busy, save, onChanged, onlyProblems }: {
     setMBusy(true)
     try {
       if (hours < 0) {
-        await updateServer(server.id, { alert_mutes: [...new Set([...(server.alert_mutes ?? []), kind])] })
+        await muteServerKeys(server.id, [kind])
       } else if (hours === 0) {
         if ((server.alert_mutes ?? []).includes(kind))
-          await updateServer(server.id, { alert_mutes: (server.alert_mutes ?? []).filter((x) => x !== kind) })
+          await muteServerKeys(server.id, [], [kind])
         if (server.alert_snoozes?.[kind]) await snoozeServerAlert(server.id, kind, 0)
       } else await snoozeServerAlert(server.id, kind, hours)
       setPicking(null)
       onChanged()
-    } catch {
-      /* кнопка остается, можно повторить */
+    } catch (e) {
+      toastError(e) // кнопка остается, можно повторить
     } finally {
       setMBusy(false)
     }
@@ -1046,7 +1062,7 @@ function QueueList({ server, svc, busy, save, onChanged, onlyProblems }: {
     .sort((a, b) => a.o - b.o || a.i - b.i)
     .map(({ x }) => x)
   const withMsgs = all.filter((x) => qDepth(x) > 0).length
-  const hotN = all.filter((x) => qDepth(x) >= QUEUE_HOT).length
+  const hotN = all.filter(qHot).length
   const msgsAll = all.reduce((a, x) => a + qDepth(x), 0)
   // таблица failed_jobs Laravel - не очередь: только упавшие задачи
   const failOnly = svc.kind === 'laravel_failed'
@@ -1231,16 +1247,16 @@ function WorkerList({ server, d, onChanged, onlyProblems }: {
     setMBusy(true)
     try {
       if (hours < 0) {
-        await updateServer(server.id, { alert_mutes: [...new Set([...(server.alert_mutes ?? []), kind])] })
+        await muteServerKeys(server.id, [kind])
       } else if (hours === 0) {
         if ((server.alert_mutes ?? []).includes(kind))
-          await updateServer(server.id, { alert_mutes: (server.alert_mutes ?? []).filter((x) => x !== kind) })
+          await muteServerKeys(server.id, [], [kind])
         if (server.alert_snoozes?.[kind]) await snoozeServerAlert(server.id, kind, 0)
       } else await snoozeServerAlert(server.id, kind, hours)
       setPicking(null)
       onChanged()
-    } catch {
-      /* кнопка остается, можно повторить */
+    } catch (e) {
+      toastError(e) // кнопка остается, можно повторить
     } finally {
       setMBusy(false)
     }
@@ -1360,16 +1376,16 @@ function CronList({ server, where, kind, jobs, onChanged, filter }: {
     setMBusy(true)
     try {
       if (hours < 0) {
-        await updateServer(server.id, { alert_mutes: [...new Set([...(server.alert_mutes ?? []), kind])] })
+        await muteServerKeys(server.id, [kind])
       } else if (hours === 0) {
         if ((server.alert_mutes ?? []).includes(kind))
-          await updateServer(server.id, { alert_mutes: (server.alert_mutes ?? []).filter((x) => x !== kind) })
+          await muteServerKeys(server.id, [], [kind])
         if (server.alert_snoozes?.[kind]) await snoozeServerAlert(server.id, kind, 0)
       } else await snoozeServerAlert(server.id, kind, hours)
       setPicking(null)
       onChanged()
-    } catch {
-      /* кнопка остается, можно повторить */
+    } catch (e) {
+      toastError(e) // кнопка остается, можно повторить
     } finally {
       setMBusy(false)
     }
@@ -1504,16 +1520,16 @@ function LogErrList({ server, sources, onChanged, onlySpikes }: {
     setMBusy(true)
     try {
       if (hours < 0) {
-        await updateServer(server.id, { alert_mutes: [...new Set([...(server.alert_mutes ?? []), kind])] })
+        await muteServerKeys(server.id, [kind])
       } else if (hours === 0) {
         if ((server.alert_mutes ?? []).includes(kind))
-          await updateServer(server.id, { alert_mutes: (server.alert_mutes ?? []).filter((x) => x !== kind) })
+          await muteServerKeys(server.id, [], [kind])
         if (server.alert_snoozes?.[kind]) await snoozeServerAlert(server.id, kind, 0)
       } else await snoozeServerAlert(server.id, kind, hours)
       setPicking(null)
       onChanged()
-    } catch {
-      /* кнопка остается, можно повторить */
+    } catch (e) {
+      toastError(e) // кнопка остается, можно повторить
     } finally {
       setMBusy(false)
     }
@@ -1628,16 +1644,16 @@ function FpmList({ server, pools, onChanged, onlyProblems }: {
     setMBusy(true)
     try {
       if (hours < 0) {
-        await updateServer(server.id, { alert_mutes: [...new Set([...(server.alert_mutes ?? []), kind])] })
+        await muteServerKeys(server.id, [kind])
       } else if (hours === 0) {
         if ((server.alert_mutes ?? []).includes(kind))
-          await updateServer(server.id, { alert_mutes: (server.alert_mutes ?? []).filter((x) => x !== kind) })
+          await muteServerKeys(server.id, [], [kind])
         if (server.alert_snoozes?.[kind]) await snoozeServerAlert(server.id, kind, 0)
       } else await snoozeServerAlert(server.id, kind, hours)
       setPicking(null)
       onChanged()
-    } catch {
-      /* кнопка остается, можно повторить */
+    } catch (e) {
+      toastError(e) // кнопка остается, можно повторить
     } finally {
       setMBusy(false)
     }
@@ -1779,15 +1795,21 @@ function ServerServicesModal({ srv, onClose, onChanged, initialSec, sites }: {
     if (el && el.getBoundingClientRect().top < 0) el.scrollIntoView({ block: 'start' })
   }
   const [busy, setBusy] = useState(false)
-  const save = (body: Parameters<typeof updateServer>[1]) => {
-    setBusy(true)
-    updateServer(s.id, body)
-      .then(onChanged)
-      .catch(() => {})
-      .finally(() => setBusy(false))
-  }
+  // порог не сохранился (больше предела, сбой сети): сказать и вернуть в поле то, что на сервере
+  const [saveErr, setSaveErr] = useState<string | null>(null)
   const depth = s.queue_alert_depth ?? 0
   const [draft, setDraft] = useState(String(depth || ''))
+  const save = (body: Parameters<typeof updateServer>[1]) => {
+    setBusy(true)
+    setSaveErr(null)
+    updateServer(s.id, body)
+      .then(onChanged)
+      .catch((e) => {
+        setSaveErr(e instanceof Error ? e.message : t('Ошибка'))
+        setDraft(String(depth || ''))
+      })
+      .finally(() => setBusy(false))
+  }
   const web = srv.items.filter((it) => it.web)
   const siteList = [...new Set(web.flatMap((it) => it.sites ?? []))]
   const missing = missingSites(siteList, sites)
@@ -1836,7 +1858,7 @@ function ServerServicesModal({ srv, onClose, onChanged, initialSec, sites }: {
   const fProbN = fPools.filter((x) => x.level && !x.mute).length
   const dbNoAuth = (s.queue_db_skipped ?? []).filter((x) => x.why === 'auth')
   const dbBig = (s.queue_db_skipped ?? []).filter((x) => x.why === 'big')
-  const qHot = qAll.filter((x) => qDepth(x) >= QUEUE_HOT).length
+  const qHotN = qAll.filter(qHot).length
   // брокеры с бедой - наверх; фильтр "с проблемами" прячет остальное
   const [qOnly, setQOnly] = useState(false)
   const qProbs = (it: SvcItem) => [
@@ -1887,7 +1909,7 @@ function ServerServicesModal({ srv, onClose, onChanged, initialSec, sites }: {
     ),
     sites: sites.hosts ? t('всего {n}, все на мониторинге', { n: siteList.length }) : t('всего {n}', { n: siteList.length }),
     certs: nextCert ? t('ближайший: {l} через {n} дн', { l: nextCert.label, n: nextCert.days }) : '',
-    files: webfilesBad(s) ? '' : t('веб-корней: {n}, новых php и правок не через git/деплой нет', { n: (s.webfiles?.roots ?? []).length }),
+    files: webfilesBad(s) ? '' : t('веб-корней: {n}, признаков взлома нет', { n: (s.webfiles?.roots ?? []).length }),
     db: subOf(
       [...new Set(dbItems.map((it) => it.kind))].join(', '),
       dbRows.length > 0 && t('баз: {n}', { n: dbRows.length }),
@@ -1929,7 +1951,7 @@ function ServerServicesModal({ srv, onClose, onChanged, initialSec, sites }: {
     if (!info[id].level) info[id] = { ...info[id], level: 1, line }
   }
   if (missing > 0) soft('sites', t('всего {n}, без монитора {m}', { n: siteList.length, m: missing }))
-  if (qHot > 0) soft('queues', t('переполнены: {n} (от {m} сообщений)', { n: qHot, m: QUEUE_HOT }))
+  if (qHotN > 0) soft('queues', t('переполнены: {n} (от {m} сообщений)', { n: qHotN, m: QUEUE_HOT }))
   markMuted(info, srvMuted(s, t).filter((i) => i.section === 'services').map((i) => ({
     sec: SVC_SEC_IDS.has(i.sec ?? '') ? i.sec! : (SVC_SEC_OF_KIND[i.kind ?? ''] ?? 'overview'), text: i.text,
   })), t)
@@ -2060,7 +2082,7 @@ function ServerServicesModal({ srv, onClose, onChanged, initialSec, sites }: {
                         label={tileLabel('queues', t('Очереди'))}
                         value={String(rabbit.reduce((n, it) => n + (it.svc?.total ?? 0), 0))}
                         sub={t('сообщений: {m}', { m: rpmText(qAll.reduce((a, x) => a + qDepth(x), 0)) })}
-                        tone={tileTone('queues', qHot ? 'warn' : 'ok')}
+                        tone={tileTone('queues', qHotN ? 'warn' : 'ok')}
                       />
                     </button>
                   )}
@@ -2310,6 +2332,7 @@ function ServerServicesModal({ srv, onClose, onChanged, initialSec, sites }: {
                     className="mono queue-thr-input"
                     type="number"
                     min={0}
+                    max={10_000_000}
                     placeholder="0"
                     value={draft}
                     disabled={busy || isViewer}
@@ -2323,6 +2346,7 @@ function ServerServicesModal({ srv, onClose, onChanged, initialSec, sites }: {
                     {t('сообщений и больше — сразу во всех очередях ниже. У любой очереди значение можно поправить или стереть.')}
                   </span>
                 </div>
+                {saveErr && <p className="form-error small">{t('Порог не сохранен: {err}', { err: saveErr })}</p>}
                 <div className="muted small">
                   {t('Без порога панель сама алертит очередь от сотни сообщений, которая полчаса растет и не разбирается, стоит больше часа или осталась без потребителей. Упавшие задачи алертят только всплеском: от сотни за час и в пять раз больше обычного. Очереди мертвых писем (dlq) не судятся.')}
                 </div>
@@ -2380,7 +2404,7 @@ function svcHit(f: SFilter, r: SrvServices, ctx: SitesCtx, t: TFn): string | nul
   const list = (xs: string[]) => ({ list: shortList(xs, t, 8) })
   if (f === 'queues') {
     const svc = r.items.filter(SVC_OF.queues)
-    const hot = svc.flatMap((it) => it.svc?.queues ?? []).filter((x) => qDepth(x) >= QUEUE_HOT).map((x) => x.name)
+    const hot = svc.flatMap((it) => it.svc?.queues ?? []).filter(qHot).map((x) => x.name)
     return subOf(
       t('очередей: {n}', { n: svc.reduce((n, it) => n + (it.svc?.total ?? 0), 0) }),
       hot.length > 0 && t('переполнены: {list}', list(hot)),
@@ -2414,8 +2438,12 @@ function HostRow({ srv, showGroup, only, hint, onOpen }: {
   const s = srv.server
   const items = only ? srv.items.filter(only) : srv.items
   const hot = hotQueues(srv.items)
-  const cfg = (s.web_config ?? []).filter((c) => !c.ok).length
-  const dbp = (s.db_health ?? []).flatMap((h) => h.problems)
+  // в чипах - что именно: очереди, веб-серверы, базы, а не голые счетчики
+  const hotNames = srv.items.flatMap((it) => it.svc?.queues ?? []).filter(qHot).map((q) => q.name)
+  const cfgBad = (s.web_config ?? []).filter((c) => !c.ok)
+  const cfg = cfgBad.length
+  const dbBad = (s.db_health ?? []).filter((h) => h.problems.length)
+  const dbp = dbBad.flatMap((h) => h.problems)
   const tone = cfg || dbp.some((p) => p.level >= 2) ? 't-down' : hot || dbp.length ? 't-degraded' : ''
   return (
     <button className="loc-res loc-res-btn hs-host" onClick={onOpen}>
@@ -2427,15 +2455,17 @@ function HostRow({ srv, showGroup, only, hint, onOpen }: {
           {s.name}
           {showGroup && s.group_name && <span className="type-chip group-chip">{s.group_name}</span>}
           {hot > 0 && (
-            <span className="type-chip off" title={t('переполненные очереди')}>📨 {hot}</span>
+            <span className="type-chip off chip-names" title={t('переполненные очереди')}>📨 {shortList(hotNames, t, 2)}</span>
           )}
           {cfg > 0 && (
-            <span className="type-chip off" title={t('конфиг веб-сервера не проходит проверку')}>🧾 {cfg}</span>
+            <span className="type-chip off chip-names" title={t('конфиг веб-сервера не проходит проверку')}>
+              🧾 {shortList(cfgBad.map((c) => c.where || c.server), t, 2)}
+            </span>
           )}
           {dbp.length > 0 && (
-            <span className={`type-chip${dbp.some((p) => p.level >= 2) ? ' off' : ' t-degraded'}`}
+            <span className={`type-chip chip-names${dbp.some((p) => p.level >= 2) ? ' off' : ' t-degraded'}`}
               title={dbp.map((p) => p.text).join('\n')}>
-              🛢 {dbp.length}
+              🛢 {shortList(dbBad.map((h) => h.container || DB_ENGINE_LABEL[h.engine] || h.engine), t, 2)}
             </span>
           )}
         </div>
@@ -2455,7 +2485,7 @@ function HostRow({ srv, showGroup, only, hint, onOpen }: {
         {hint && <div className="hs-host-hit">{hint}</div>}
       </div>
       <div className={`hs-host-count mono ${tone}`}>
-        {items.length}<span className="muted"> {t('серв.')}</span>
+        {items.length}<span className="muted"> {svcWord(items.length, t)}</span>
       </div>
     </button>
   )
@@ -2501,13 +2531,19 @@ export function ServicesPage({ onUnauthorized, openServerId, openSec, onConsumed
     localStorage.setItem('kervax_services_groupby', g)
   }
 
+  // ошибка загрузки - текстом, а не вечная "загрузка…" (как в Докере и Кубере)
+  const [err, setErr] = useState<string | null>(null)
   const load = useCallback(() => {
     listServers()
-      .then(setServers)
-      .catch((e) => {
-        if (e instanceof ApiError && e.status === 401) onUnauthorized()
+      .then((v) => {
+        setServers(v)
+        setErr(null)
       })
-  }, [onUnauthorized])
+      .catch((e) => {
+        if (e instanceof ApiError && e.status === 401) return onUnauthorized()
+        setErr(e instanceof Error ? e.message : t('Ошибка'))
+      })
+  }, [onUnauthorized, t])
 
   const loadHosts = useCallback(() => {
     knownHosts()
@@ -2548,7 +2584,7 @@ export function ServicesPage({ onUnauthorized, openServerId, openSec, onConsumed
     return () => window.clearInterval(id)
   }, [load, loadHosts])
 
-  if (!servers) return <p className="muted">{t('загрузка…')}</p>
+  if (!servers) return err ? <p className="form-error">{err}</p> : <p className="muted">{t('загрузка…')}</p>
   // ноды только с кроном - для окна по ссылке, в списке нод их нет
   const withCron = buildByServer(servers, t)
   const all = withCron.filter((r) => r.items.length > 0)
@@ -2558,7 +2594,8 @@ export function ServicesPage({ onUnauthorized, openServerId, openSec, onConsumed
   // нажатая плитка оставляет ноды с ее сервисами (очереди - как в плитке, только на связи)
   const rows = (q
     ? all.filter(({ server, items }) =>
-        [server.name, server.group_name, ...items.map((i) => i.kind)]
+        // и домены сайтов, и где работает (контейнер, под), как поиск в Докере и Кубере
+        [server.name, server.group_name, ...items.map((i) => i.kind), ...items.flatMap((i) => i.sites ?? []), ...items.map((i) => i.where ?? '')]
           .join(' ')
           .toLowerCase()
           .includes(q) || srvIpHit(server, q),
@@ -2592,14 +2629,15 @@ export function ServicesPage({ onUnauthorized, openServerId, openSec, onConsumed
   const dbWarn = live.filter((r) => (r.server.db_health ?? []).some((h) => h.problems.some((p) => p.level < 2))).map((r) => r.server.name)
   const webItems = svcAll.filter(({ it }) => it.web)
   const siteN = webItems.reduce((n, { it }) => n + (it.sites?.length ?? 0), 0)
-  const missN = all.reduce((n, r) => n + missingSites([...new Set(r.items.flatMap((it) => it.sites ?? []))], sitesCtx), 0)
+  // домен на двух нодах - один сайт без монитора, а не два
+  const missN = missingSites(all.flatMap((r) => r.items.flatMap((it) => it.sites ?? [])), sitesCtx)
   const cfgBad = live.filter((r) => (r.server.web_config ?? []).some((c) => !c.ok)).map((r) => r.server.name)
   // сертификаты ближе месяца - видно; алертный порог (неделя, день) - цветом плитки. Срок не
   // устаревает, поэтому по всем нодам
   const certs = all.flatMap((r) => (r.server.web_certs ?? []).filter((c) => c.days <= EXPIRY_SHOW_DAYS))
   const rabbit = svcAll.filter(({ it, s }) => !!it.svc && s.online)
   const qAll = rabbit.flatMap(({ it }) => it.svc?.queues ?? [])
-  const qHot = qAll.filter((x) => qDepth(x) >= QUEUE_HOT)
+  const qHotAll = qAll.filter(qHot)
   // нажатая плитка: подпись чипа над списком и что сказать, если под нее ничего не попало
   const filterLabel: Record<SFilter, string> = { db: t('базы данных'), web: t('веб-серверы'), queues: t('очереди') }
   const filterEmpty: Record<SFilter, string> = {
@@ -2611,6 +2649,7 @@ export function ServicesPage({ onUnauthorized, openServerId, openSec, onConsumed
       <div className="page-head">
         <h2>{t('Сервисы')}</h2>
       </div>
+      {err && <p className="form-error">{err}</p>}
       {all.length > 1 && (
         <div className="checks-head">
           <div className="checks-head-actions">
@@ -2668,9 +2707,9 @@ export function ServicesPage({ onUnauthorized, openServerId, openSec, onConsumed
               value={String(rabbit.reduce((n, { it }) => n + (it.svc?.total ?? 0), 0))}
               sub={subOf(
                 t('сообщений: {m}', { m: rpmText(qAll.reduce((a, x) => a + qDepth(x), 0)) }),
-                qHot.length > 0 && t('переполнены: {list}', { list: names(qHot.map((x) => x.name)) }),
+                qHotAll.length > 0 && t('переполнены: {list}', { list: names(qHotAll.map((x) => x.name)) }),
               )}
-              tone={qHot.length ? 'warn' : 'ok'}
+              tone={qHotAll.length ? 'warn' : 'ok'}
               {...tileProps('queues')}
             />
           )}

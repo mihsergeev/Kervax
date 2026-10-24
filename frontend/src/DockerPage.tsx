@@ -6,17 +6,20 @@ import {
   dockerCommandStatus,
   logsTargetGone,
   listServers,
-  updateServer,
+  muteServerKeys,
   type DockerCommand,
   type DockerContainer,
   type DockerInfo,
   type MemLimitItem,
   type RiskStep,
   type Server,
+  cmdState,
+  cmdWaitText,
 } from './api'
 import { useAuth } from './auth'
 import { useUrlCard, useUrlParam } from './deeplink'
 import { useI18n } from './i18n'
+import { toastError } from './toast'
 import { DOCKRISK_MUTE, NOBOOT_MUTE, RESTARTS_DAY_MIN } from './mutes'
 import { OsIcon } from './osIcon'
 import { CountryFlag } from './CountryFlag'
@@ -303,11 +306,10 @@ function ProxyOldWarning({ server: s, items, canAct, onChanged }: { server: Serv
   const live = items.filter((p) => !p.muted)
   const muted = items.filter((p) => p.muted)
   const toggle = (key: string, on: boolean) => {
-    const cur = s.alert_mutes ?? []
     setBusy(key)
-    updateServer(s.id, { alert_mutes: on ? [...new Set([...cur, key])] : cur.filter((m) => m !== key) })
+    muteServerKeys(s.id, on ? [key] : [], on ? [] : [key])
       .then(onChanged)
-      .catch(() => {})
+      .catch(toastError)
       .finally(() => setBusy(''))
   }
   return (
@@ -422,11 +424,10 @@ function RiskWarning({ server: s, canAct, onChanged }: { server: Server; canAct:
   const blocks = [...new Map(live.flatMap((x) => (x.fix ? [[x.fix.key, x.fix] as const] : []))).values()]
   const toggle = (name: string, on: boolean) => {
     const key = DOCKRISK_MUTE + name
-    const cur = s.alert_mutes ?? []
     setBusy(name)
-    updateServer(s.id, { alert_mutes: on ? [...new Set([...cur, key])] : cur.filter((m) => m !== key) })
+    muteServerKeys(s.id, on ? [key] : [], on ? [] : [key])
       .then(onChanged)
-      .catch(() => {})
+      .catch(toastError)
       .finally(() => setBusy(''))
   }
   return (
@@ -498,11 +499,10 @@ function NoBootWarning({ server: s, canAct, onChanged }: { server: Server; canAc
   const cmd = `docker update --restart unless-stopped ${live.map((x) => x.name).join(' ')}`
   const toggle = (name: string, on: boolean) => {
     const key = NOBOOT_MUTE + name
-    const cur = s.alert_mutes ?? []
     setBusy(name)
-    updateServer(s.id, { alert_mutes: on ? [...new Set([...cur, key])] : cur.filter((m) => m !== key) })
+    muteServerKeys(s.id, on ? [key] : [], on ? [] : [key])
       .then(onChanged)
-      .catch(() => {})
+      .catch(toastError)
       .finally(() => setBusy(''))
   }
   return (
@@ -605,13 +605,14 @@ function ContainerRow({
     setErr(null)
     try {
       const res = await runAndWait(serverId, c.name, action)
-      if (res.status !== 'done') {
+      if (cmdState(res) === 'wait') setErr(cmdWaitText())
+      else if (cmdState(res) !== 'ok') {
         setErr(res.result || t('не удалось'))
         if ((res.result || '').includes('(403)')) onDenied?.()
       }
       onChanged()
-    } catch {
-      setErr(t('ошибка'))
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : t('ошибка'))
     } finally {
       setBusy(null)
     }
@@ -748,9 +749,9 @@ function LogsModal({
           // нажали в списке, загруженном до пересоздания контейнера: это не сбой, список устарел
           setErr(t('Контейнер уже пересоздан или удален, список обновлен'))
           gone.current?.()
-        } else setErr(res.result || t('не удалось получить логи'))
-      } catch {
-        setErr(t('ошибка'))
+        } else setErr(cmdState(res) === 'wait' ? cmdWaitText() : res.result || t('не удалось получить логи'))
+      } catch (e) {
+        setErr(e instanceof Error ? e.message : t('ошибка'))
       } finally {
         setLoading(false)
       }
@@ -1290,8 +1291,8 @@ function HostRow({
           {showGroup && s.group_name && <span className="type-chip group-chip">{s.group_name}</span>}
           {!docker.access && <span className="type-chip off">{t('нет доступа')}</span>}
           {probs > 0 && (
-            <span className="type-chip off" title={t('по контейнерам ушел алерт: упали или крутятся по кругу')}>
-              🔥 {probs}
+            <span className="type-chip off chip-names" title={t('по контейнерам ушел алерт: упали или крутятся по кругу')}>
+              🔥 {shortList(Object.keys(s.docker_alerts ?? {}), t, 2)}
             </span>
           )}
           {(s.docker_exposed?.length ?? 0) > 0 && (
@@ -1300,8 +1301,8 @@ function HostRow({
             </span>
           )}
           {(s.noboot?.docker ?? []).some((x) => !x.muted) && (
-            <span className="type-chip off" title={t('после перезагрузки не поднимутся: нет restart policy')}>
-              🔁 {(s.noboot?.docker ?? []).filter((x) => !x.muted).length}
+            <span className="type-chip off chip-names" title={t('после перезагрузки не поднимутся: нет restart policy')}>
+              🔁 {shortList((s.noboot?.docker ?? []).filter((x) => !x.muted).map((x) => x.name), t, 2)}
             </span>
           )}
           {(s.docker_risk ?? []).some((x) => !x.muted) && (

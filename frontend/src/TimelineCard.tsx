@@ -35,7 +35,7 @@ type Props = { serverId: number; onUnauthorized: () => void }
 const groupOf = (cat: string) => GROUPS.find((g) => g.cats.includes(cat))?.key ?? cat
 
 export function TimelineCard({ serverId, onUnauthorized }: Props) {
-  const { t } = useI18n()
+  const { t, lang } = useI18n()
   const [days, setDays] = useState(7)
   const [data, setData] = useState<TimelineResult | null>(null)
   const [loaded, setLoaded] = useState<string | null>(null)
@@ -88,7 +88,8 @@ export function TimelineCard({ serverId, onUnauthorized }: Props) {
       return n
     })
 
-  const fmtDay = (ts: string) => new Date(ts).toLocaleDateString([], { day: 'numeric', month: 'long', weekday: 'short' })
+  // день - на языке панели, а не браузера: в EN было "СБ, 24 ОКТЯБРЯ"
+  const fmtDay = (ts: string) => new Date(ts).toLocaleDateString(lang === 'ru' ? 'ru-RU' : 'en-GB', { day: 'numeric', month: 'long', weekday: 'short' })
   const fmtTime = (ts: string) => new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
 
   const text = (e: TimelineEvent) => {
@@ -196,9 +197,7 @@ export function TimelineCard({ serverId, onUnauthorized }: Props) {
       <div className="net-foot">
         <div>{t('Плитки сверху - фильтр: нажмите, чтобы скрыть группу из ленты.')}</div>
         <div>
-          {t(
-            'Контейнеры, система и порты записываются с 1.4.168, пакеты по журналу установок - с агента 2.28. Доступ и кроны - из снимков раз в 10 минут.',
-          )}
+          {t('Доступ и кроны записываются снимками раз в 10 минут, остальное - как только агент заметил.')}
         </div>
       </div>
     </div>

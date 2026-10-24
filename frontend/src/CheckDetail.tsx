@@ -31,7 +31,8 @@ import { SnoozeControl } from './SnoozeControl'
 import { ExpirySnoozePick, ExpirySnoozeState, expEntry, expHidden, type ExpKind } from './ExpirySnooze'
 import { StackedAreaChart } from './charts/StackedAreaChart'
 import { StatusBar, type BarStatus } from './charts/StatusBar'
-import { useI18n } from './i18n'
+import { currentLang, useI18n } from './i18n'
+import { useEscape } from './useEscape'
 import { MON_ALERT_KINDS, expiryText, expiryTone } from './checkUtils'
 import { useAuth } from './auth'
 import { NoteBar } from './NoteBar'
@@ -53,7 +54,8 @@ type Props = {
   onClose: () => void
   onSaved?: () => void
   onRun?: () => void // ручная проверка закончилась — обновить список
-  onDelete?: () => void
+  // вернет текст отказа, если удалить не вышло
+  onDelete?: () => Promise<string | null> | void
   onUnauthorized: () => void
 }
 
@@ -185,6 +187,8 @@ export function CheckDetail({ check, groups, initialSec, onClose, onSaved, onRun
 
   // редактирование прямо в модалке: там же заметка и удаление, как у сервера
   const [editing, setEditing] = useState(false)
+  // Esc закрывает окно, но не во время правки: там он стер бы набранное
+  useEscape(onClose, !editing)
   const [snoozing, setSnoozing] = useState(false)
   const [form, setForm] = useState<CheckForm | null>(null)
   const [saving, setSaving] = useState(false)
@@ -299,7 +303,8 @@ export function CheckDetail({ check, groups, initialSec, onClose, onSaved, onRun
   useEffect(() => {
     if (editing) return
     const run = () => {
-      checkUptime(check.id).then(setUptime).catch(fail)
+      // красная ошибка прошлого опроса уходит, как только API снова ответил
+      checkUptime(check.id).then((v) => { setUptime(v); setErr(null) }).catch(fail)
       listIncidents(50, check.id).then(setIncidents).catch(fail)
       checkLog(check.id, logFailed, 100).then(setLogRows).catch(fail)
       if (check.check_locations)
@@ -453,10 +458,10 @@ export function CheckDetail({ check, groups, initialSec, onClose, onSaved, onRun
   // отложенные и "не следим" (ExpirySnooze.tsx) - не проблема, их состояние в разделе сроков
   if (shown.exp && check.check_ssl && check.ssl_days != null && check.ssl_days <= maxWarn(check.ssl_warn_days) &&
       !expHidden(check, 'ssl'))
-    add('exp', { level: check.ssl_days <= 3 ? 2 : 1, text: `${t('SSL-сертификат')}: ${expiryText(check.ssl_days, t)}` })
+    add('exp', { level: expiryTone(check.ssl_days, check.ssl_warn_days) === 't-down' ? 2 : 1, text: `${t('SSL-сертификат')}: ${expiryText(check.ssl_days, t)}` })
   if (shown.exp && check.check_domain && check.domain_days != null && check.domain_days <= maxWarn(check.domain_warn_days) &&
       !expHidden(check, 'domain'))
-    add('exp', { level: check.domain_days <= 3 ? 2 : 1, text: `${t('Домен')}: ${expiryText(check.domain_days, t)}` })
+    add('exp', { level: expiryTone(check.domain_days, check.domain_warn_days) === 't-down' ? 2 : 1, text: `${t('Домен')}: ${expiryText(check.domain_days, t)}` })
 
   // признаки взлома: похоже на взлом - красным, один слабый - желтым, как строка на главной
   const tamper = check.tamper
@@ -529,7 +534,7 @@ export function CheckDetail({ check, groups, initialSec, onClose, onSaved, onRun
       act: shown[id] ? { label: t(secs.find((s) => s.id === id)?.label ?? id), onClick: () => go(id) } : undefined,
     })),
   ).sort((a, b) => Number(b.tone === 't-down') - Number(a.tone === 't-down'))
-  const alertAfterMin = Math.round((check.alert_after_failures * check.interval_seconds) / 60)
+  const alertAfterMin = Math.max(1, Math.round((check.alert_after_failures * check.interval_seconds) / 60))
 
   const statusBar = (
     <>
@@ -663,7 +668,7 @@ export function CheckDetail({ check, groups, initialSec, onClose, onSaved, onRun
           )}
           {shown.loc && (
             <span className="srv-meta-item">
-              <span className="srv-meta-k">{t('с локаций')}</span> {locs.length || (check.location_ids ?? []).length}
+              <span className="srv-meta-k">{t('с локаций')}</span> {locs.length || check.location_ids?.length || t('все')}
             </span>
           )}
           {check.probe_local && (
@@ -695,7 +700,10 @@ export function CheckDetail({ check, groups, initialSec, onClose, onSaved, onRun
             {/* удаление - сверху и отдельно, чтобы не нажать случайно рядом с "Сохранить" */}
             {onDelete && (
               <div className="edit-danger-top">
-                <button className="ghost danger-btn" onClick={onDelete} disabled={saving}>
+                <button className="ghost danger-btn" disabled={saving} onClick={async () => {
+                  const m = await onDelete()
+                  if (m) setSaveErr(m)
+                }}>
                   🗑 {t('Удалить монитор')}
                 </button>
               </div>
@@ -938,6 +946,7 @@ export function CheckDetail({ check, groups, initialSec, onClose, onSaved, onRun
                       days={check.ssl_days}
                       warn={check.ssl_warn_days}
                       message={check.ssl_message}
+                      at={check.expiry_checked_at}
                     />
                   )}
                   {check.check_domain && (
@@ -947,6 +956,7 @@ export function CheckDetail({ check, groups, initialSec, onClose, onSaved, onRun
                       days={check.domain_days}
                       warn={check.domain_warn_days}
                       message={check.domain_message}
+                      at={check.expiry_checked_at}
                     />
                   )}
                 </div>
@@ -1405,16 +1415,20 @@ function ExpiryPill({
   days,
   warn,
   message,
+  at,
 }: {
   icon: string
   label: string
   days: number | null
   warn: number[]
   message: string
+  at?: string | null // когда сроки проверяли: от этой даты считаем дату окончания
 }) {
   const { t } = useI18n()
   const tn = days == null ? '' : expiryTone(days, warn) || 't-up'
-  const text = days == null ? message || t('нет данных') : expiryText(days, t)
+  // дата окончания и сколько осталось: "до 17.11.2026, через 24 дн.", а не "до 24 дн."
+  const end = days != null && days > 0 && at ? new Date(new Date(at).getTime() + days * 86_400_000).toLocaleDateString(currentLang() === 'ru' ? 'ru-RU' : 'en-GB') : ''
+  const text = days == null ? message || t('нет данных') : end ? t('до {d}, через {n} дн.', { d: end, n: days }) : expiryText(days, t)
   return (
     <div className="expiry-pill" title={message}>
       <span className="expiry-ico">{icon}</span>

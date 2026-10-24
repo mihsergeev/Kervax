@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { ApiError, getRetentionOverview, putRetention, type RetentionGroup, type RetentionOverview } from './api'
 import { CardNav, type SecDef } from './cardLayout'
 import { useI18n } from './i18n'
+import { useEscape } from './useEscape'
 import { NetTile } from './NetLinks'
 import { fmtBytes } from './units'
 
@@ -116,6 +117,7 @@ export function RetentionModal({ onClose, onUnauthorized }: Props) {
     if (dirty && !window.confirm(t('Закрыть без сохранения? Изменения пропадут.'))) return
     onClose()
   }
+  useEscape(close)
   const setDays = (id: Gid, d: number) => {
     setMsg(null)
     setWant((w) => ({ ...w, [id]: Math.max(1, Math.min(3650, Math.round(d) || 1)) }))

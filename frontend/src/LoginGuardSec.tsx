@@ -110,7 +110,7 @@ export function LoginGuardSec({
         </label>
         <label className="field">
           <span>{t('Подпись')}</span>
-          <input value={note} onChange={(e) => setNote(e.target.value)} placeholder={t('например, офис')} autoComplete="off" onKeyDown={(e) => e.key === 'Enter' && add(net, note)} />
+          <input value={note} maxLength={80} onChange={(e) => setNote(e.target.value)} placeholder={t('например, офис')} autoComplete="off" onKeyDown={(e) => e.key === 'Enter' && add(net, note)} />
         </label>
         <button className="ghost" disabled={busy || !net.trim()} onClick={() => add(net, note)}>
           {t('Добавить')}

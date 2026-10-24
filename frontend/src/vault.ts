@@ -10,6 +10,7 @@
 // но тянуть WASM-зависимость в панель ради этого не стали.
 
 import { tr } from './i18n'
+import { cleanPem, oneLine, shq } from './shell'
 
 const ITERATIONS = 600_000
 const VERIFIER_TEXT = 'kervax-vault-v1' // расшифровался — пароль верный
@@ -112,16 +113,21 @@ export async function checkPassword(password: string, meta: VaultMeta): Promise<
 
 // Готовые команды восстановления. Смысл сейфа не в том, чтобы показать пароль, а в
 // том, чтобы из него можно было СРАЗУ достать данные — поэтому отдаём копипасту.
+// Значения отдает нода или сервер бэкапов, поэтому каждое - через shq (shell.ts), имя файла - только
+// из безопасных символов, а сертификат - только настоящий PEM: ограничитель heredoc с "_" в base64 не
+// встречается, и строка из сертификата не закроет его раньше времени
 export function restoreCommands(s: VaultSecret, repo: string): string {
   const https = s.repo_url.startsWith('rest:https://')
-  const ca = https && s.cacert ? ` --cacert /tmp/${repo}-ca.pem` : ''
+  const pem = https && s.cacert ? cleanPem(s.cacert) : null
+  const caFile = `/tmp/${repo.replace(/[^A-Za-z0-9._-]/g, '_')}-ca.pem`
+  const ca = pem ? ` --cacert ${caFile}` : ''
   const lines = [
-    `export RESTIC_REPOSITORY='${s.repo_url}'`,
-    `export RESTIC_PASSWORD='${s.repopass}'`,
+    `export RESTIC_REPOSITORY=${shq(s.repo_url)}`,
+    `export RESTIC_PASSWORD=${shq(s.repopass)}`,
   ]
-  if (https && s.cacert) {
+  if (pem) {
     lines.push(`# ${tr('сертификат бэкап-сервера (самоподписанный) — создаём файл прямо здесь:')}`)
-    lines.push(`cat > /tmp/${repo}-ca.pem <<'PEM'`, s.cacert.trim(), 'PEM')
+    lines.push(`cat > ${caFile} <<'PEM_END'`, pem, 'PEM_END')
   } else if (https) {
     // честно говорим, что блок неполный: без серта restic к https-репо не подключится
     lines.push(`# ${tr('сертификат бэкап-сервера получить не удалось — возьмите /app/rest-server-tls/cert.pem')}`)
@@ -135,22 +141,22 @@ export function restoreCommands(s: VaultSecret, repo: string): string {
   // Сертификат — не секрет и не обязателен: без него репозиторий тоже открывается.
   // Расписываем варианты, иначе выгрузка выглядит так, будто потеря серта фатальна.
   if (https) {
-    const hostPort = s.repo_url.replace('rest:https://', '').split('/')[0]
-    const overHttp = s.repo_url.replace('rest:https://', 'rest:http://').replace(/:\d+\//, ':64100/')
+    const hostPort = shq(oneLine(s.repo_url.replace('rest:https://', '').split('/')[0]))
+    const overHttp = shq(oneLine(s.repo_url.replace('rest:https://', 'rest:http://').replace(/:\d+\//, ':64100/')))
     lines.push(
       '',
       `# ${tr('сертификата под рукой нет? подойдёт любой из вариантов:')}`,
       `# ${tr('1) снять его с сервера — он отдаёт сертификат всем, кто подключается:')}`,
-      `#    openssl s_client -showcerts -connect ${hostPort} </dev/null 2>/dev/null | openssl x509 > /tmp/${repo}-ca.pem`,
+      `#    openssl s_client -showcerts -connect ${hostPort} </dev/null 2>/dev/null | openssl x509 > ${caFile}`,
       `# ${tr('2) без проверки подлинности сервера (канал шифруется, подмену сервера не поймать):')}`,
       '#    restic --insecure-tls snapshots',
-      `# ${tr('3) по http, если порт открыт:')} RESTIC_REPOSITORY='${overHttp}'`,
+      `# ${tr('3) по http, если порт открыт:')} RESTIC_REPOSITORY=${overHttp}`,
     )
   }
   if (s.repo_local) {
     lines.push(
       `# ${tr('4) прямо на бэкап-сервере, вообще без сети и TLS (от root, тем же паролем):')}`,
-      `#    restic -r ${s.repo_local} snapshots`,
+      `#    restic -r ${shq(oneLine(s.repo_local))} snapshots`,
     )
   }
   return lines.join('\n')
@@ -185,7 +191,7 @@ export function plainExport(
       `${tr('репозиторий').padEnd(12)}: ${r.secret.repo_url}`,
       `${tr('пароль').padEnd(12)}: ${r.secret.repopass}`,
       `${tr('сертификат').padEnd(12)}: ${https
-        ? (r.secret.cacert ? tr('вложен в команды ниже')
+        ? (r.secret.cacert && cleanPem(r.secret.cacert) ? tr('вложен в команды ниже')
                            : tr('отсутствует — https без сертификата не подключится'))
         : tr('не нужен (http)')}`,
       r.secret.saved_at

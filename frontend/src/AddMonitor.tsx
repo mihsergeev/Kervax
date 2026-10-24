@@ -16,7 +16,7 @@ import {
   type TryResult,
 } from './api'
 import { useI18n } from './i18n'
-import { EXPIRY_WARN_DAYS, MON_ALERT_KINDS } from './checkUtils'
+import { EXPIRY_WARN_DAYS, MON_ALERT_KINDS, expiryTone } from './checkUtils'
 
 // Форма нового монитора: адрес, пробная проверка и выбор "откуда проверять" по ее итогам.
 // Старая форма спрашивала тип, адрес и способ проверки вслепую: увидит ли панель сайт,
@@ -95,6 +95,10 @@ const ADV_FIELDS = [
   'http_headers', 'location_ids', 'alert_mutes',
 ]
 
+// "если лежит 5 минут": столько сбоев подряд, но не больше 20 - больше бэкенд не принимает
+// (при интервале 10 с это около 3 минут)
+const m5Fails = (every: number) => Math.min(20, Math.max(1, Math.round(300 / every)))
+
 const pushGrace = (f: CheckForm) => f.push_grace || Math.max(120, Math.floor((f.push_period || 3600) / 10))
 
 // "db.example.com:5432" - порт, остальное - сайт; со схемой в начале - всегда сайт
@@ -152,6 +156,9 @@ function headersText(json: string): string {
 // адрес монитора в поле формы: у порта - хост:порт, IPv6 в скобках
 function addrOf(f: CheckForm): string {
   if (f.type === 'push') return ''
+  // HTTP без схемы вида "example.com:8443" (импорт, "Массово") разобрался бы как TCP-порт: правка
+  // молча поменяла бы тип и выключила сертификат и домен. Схему дописываем, как ее и так считает бэкенд
+  if (f.type === 'http' && !SCHEME.test(f.target) && parseAddr(f.target).type !== 'http') return `https://${f.target}`
   if (f.type !== 'tcp_port' || !f.port) return f.target
   return f.target.includes(':') ? `[${f.target}]:${f.port}` : `${f.target}:${f.port}`
 }
@@ -219,7 +226,7 @@ export function AddMonitor({
   const [preset, setPreset] = useState<Preset>(() => {
     if (!editing) return 'n3'
     const every = base.interval_seconds ?? 60
-    return ownFails === 1 ? 'n1' : ownFails === 3 ? 'n3' : ownFails === Math.max(1, Math.round(300 / every)) ? 'm5' : 'own'
+    return ownFails === 1 ? 'n1' : ownFails === 3 ? 'n3' : ownFails === m5Fails(every) ? 'm5' : 'own'
   })
   const hasCreds = base.auth_method === 'basic' || !!base.http_headers
   const [adv, setAdv] = useState(() => editing && advTouched(base, hasCreds))
@@ -556,10 +563,13 @@ export function AddMonitor({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [has401])
 
+  // "401 - норма": вписанные логин, пароль и заголовки не должны уйти с монитором скрытыми
   const chooseAuth = (v: 'ok401' | 'give') => {
     setAuth(v)
-    if (v === 'ok401') set({ expected_status: '200-399,401' })
-    else set({ expected_status: '200-399' })
+    if (v === 'ok401') {
+      set({ expected_status: '200-399,401', auth_method: '', auth_user: '', auth_pass: '', http_headers: '' })
+      setHdrText('')
+    } else set({ expected_status: '200-399' })
   }
 
   const autoName = isPush ? '' : isDns ? (cur.target ? `DNS ${cur.target}${dnsType !== 'A' ? ` ${dnsType}` : ''}` : '') : displayHost(cur)
@@ -579,7 +589,7 @@ export function AddMonitor({
   const period = Math.max(form.push_period || 3600, 60)
   const grace = pushGrace(form)
   const presetFails = (p: Preset) =>
-    p === 'n1' ? 1 : p === 'n3' ? 3 : p === 'm5' ? Math.max(1, Math.round(300 / interval)) : ownFails
+    p === 'n1' ? 1 : p === 'n3' ? 3 : p === 'm5' ? m5Fails(interval) : ownFails
   const presetLabel: Record<Preset, string> = {
     n1: t('сразу'),
     n3: t('после 3 сбоев подряд'),
@@ -599,7 +609,7 @@ export function AddMonitor({
   )
   function presetOfBase(): Preset {
     const every = base.interval_seconds ?? 60
-    return ownFails === 1 ? 'n1' : ownFails === 3 ? 'n3' : ownFails === Math.max(1, Math.round(300 / every)) ? 'm5' : 'own'
+    return ownFails === 1 ? 'n1' : ownFails === 3 ? 'n3' : ownFails === m5Fails(every) ? 'm5' : 'own'
   }
   const whereLabel =
     where === 'local'
@@ -1182,7 +1192,7 @@ export function AddMonitor({
                       {fresh && tried.exp?.st === 'wait' ? (
                         <span className="run-spin" />
                       ) : exp?.ssl_days != null ? (
-                        <span className={exp.ssl_days < 14 ? 't-degraded' : 'muted'}>{t('сейчас {n} дн.', { n: exp.ssl_days })}</span>
+                        <span className={expiryTone(exp.ssl_days, form.ssl_warn_days ?? EXPIRY_WARN_DAYS) || 'muted'}>{t('сейчас {n} дн.', { n: exp.ssl_days })}</span>
                       ) : (
                         exp?.ssl_message && <span className="muted">{exp.ssl_message}</span>
                       )}
@@ -1198,7 +1208,7 @@ export function AddMonitor({
                       {fresh && tried.exp?.st === 'wait' ? (
                         <span className="run-spin" />
                       ) : exp?.domain_days != null ? (
-                        <span className={exp.domain_days < 30 ? 't-degraded' : 'muted'}>{t('сейчас {n} дн.', { n: exp.domain_days })}</span>
+                        <span className={expiryTone(exp.domain_days, form.domain_warn_days ?? EXPIRY_WARN_DAYS) || 'muted'}>{t('сейчас {n} дн.', { n: exp.domain_days })}</span>
                       ) : (
                         exp?.domain_message && <span className="muted">{exp.domain_message}</span>
                       )}

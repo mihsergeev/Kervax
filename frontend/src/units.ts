@@ -35,3 +35,12 @@ export function fmtDur(s?: number): string {
   const mm = Math.floor((s % 3600) / 60)
   return hh > 0 ? `${hh}${h} ${mm}${m}` : mm > 0 ? `${mm}${m} ${s % 60}${sec}` : `${s}${sec}`
 }
+
+// Целое с разрядами на языке панели: "2 140" и "21 400" одинаково (у ru-RU четырехзначное без
+// пробела, рядом с пятизначным с пробелом это читалось как разные форматы). Пробел обычный
+export function fmtInt(n: number): string {
+  const ru = currentLang() === 'ru'
+  return Math.round(n)
+    .toLocaleString(ru ? 'ru-RU' : 'en-US', { useGrouping: 'always' } as Intl.NumberFormatOptions)
+    .replace(/[\u00a0\u202f]/g, ' ')
+}

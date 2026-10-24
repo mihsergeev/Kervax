@@ -26,6 +26,7 @@ import { actLabel } from './auditActs'
 import { useAuth } from './auth'
 import { CardNav, type SecDef } from './cardLayout'
 import { useI18n } from './i18n'
+import { useEscape } from './useEscape'
 import { LoginGuardSec } from './LoginGuardSec'
 import { PanelRequestsSec } from './PanelRequestsSec'
 import { banWords, guardDraftOf, sameGuard, type GuardDraft } from './loginGuard'
@@ -188,10 +189,13 @@ export function UsersModal({ onClose, onUnauthorized }: Props) {
     setSec(id)
     mainRef.current?.scrollTo({ top: 0 })
   }
+  // недозаведенная учетка тоже пропадет при закрытии
+  const newDirty = !!(nName.trim() || nPass)
   const close = () => {
-    if (dirty && !window.confirm(t('Закрыть без сохранения? Изменения пропадут.'))) return
+    if ((dirty || newDirty) && !window.confirm(t('Закрыть без сохранения? Изменения пропадут.'))) return
     onClose()
   }
+  useEscape(close)
   const patch = (p: Partial<Draft>) => {
     if (!curUser) return
     setMsg(null)

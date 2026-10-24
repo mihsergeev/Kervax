@@ -5,6 +5,7 @@
 import { Fragment, useCallback, useEffect, useId, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react'
 import { ApiError, type Server } from './api'
 import { useI18n } from './i18n'
+import { useEscape } from './useEscape'
 import { liftMute, muteAutoNote, muteLeft, mutesByServer, muteSoon, restoreMute, type MuteRow, type TFn } from './mutes'
 
 const rowId = (r: MuteRow) => `${r.sid}|${r.group}|${r.until ? 's' : 'p'}|${r.key}`
@@ -67,13 +68,7 @@ export function MutesPanel({
     onClose()
     back.current?.focus()
   }, [onClose])
-  useEffect(() => {
-    const h = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && !e.defaultPrevented) close()
-    }
-    window.addEventListener('keydown', h)
-    return () => window.removeEventListener('keydown', h)
-  }, [close])
+  useEscape(close)
   // Tab не уходит из панели на страницу под ней
   const trap = (e: ReactKeyboardEvent) => {
     if (e.key !== 'Tab' || !box.current) return

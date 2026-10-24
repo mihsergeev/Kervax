@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { updateServer, type KubeLast, type KubeRestartPod, type KubeRestarts, type Server } from './api'
+import { muteServerKeys, type KubeLast, type KubeRestartPod, type KubeRestarts, type Server } from './api'
 import { useI18n } from './i18n'
 import { LockedLogs } from './LogsLocked'
 import { shortList } from './serverUtils'
@@ -171,7 +171,7 @@ export function KubeRestartsSec({
     setBusy(key)
     setErr(null)
     try {
-      await updateServer(s.id, { alert_mutes: on ? [...new Set([...mutes, key])] : mutes.filter((k) => k !== key) })
+      await muteServerKeys(s.id, on ? [key] : [], on ? [] : [key])
       onChanged()
     } catch (e) {
       setErr(e instanceof Error ? e.message : t('Ошибка'))

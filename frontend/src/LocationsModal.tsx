@@ -17,6 +17,7 @@ import {
 import { CardNav, type SecDef, type SecInfo } from './cardLayout'
 import { CountryFlag } from './CountryFlag'
 import { useI18n } from './i18n'
+import { useEscape } from './useEscape'
 
 type Props = {
   onClose: () => void
@@ -57,6 +58,8 @@ export function LocationsModal({ onClose, onUnauthorized, onOpenCheck }: Props) 
   const [sec, setSec] = useState('where')
   const [f, setF] = useState<Form>(EMPTY)
   const [test, setTest] = useState<ProxyTestResult | null>(null)
+  const [testedUrl, setTestedUrl] = useState('')
+  const urlRef = useRef('') // адрес в поле сейчас: ответ проверки сверяется с ним
   const [testing, setTesting] = useState(false)
   const [busy, setBusy] = useState(false)
   const [msg, setMsg] = useState<string | null>(null)
@@ -129,9 +132,13 @@ export function LocationsModal({ onClose, onUnauthorized, onOpenCheck }: Props) 
   }
 
   const trimmed = f.url.trim()
+  useEffect(() => {
+    urlRef.current = trimmed
+  }, [trimmed])
   const urlChanged = !cur || trimmed !== cur.url.trim()
   // сохраняем прокси, только если он доступен; неизмененный адрес уже был сохранен рабочим
-  const verified = trimmed === '' || !urlChanged || (test != null && test.ok)
+  // проверка засчитывается только тому адресу, который проверяли: адрес могли поправить, пока она шла
+  const verified = trimmed === '' || !urlChanged || (test != null && test.ok && testedUrl === trimmed)
   const canSave = !busy && f.name.trim() !== '' && verified && (sec === 'add' || dirty)
 
   async function testNow() {
@@ -142,7 +149,13 @@ export function LocationsModal({ onClose, onUnauthorized, onOpenCheck }: Props) 
         const r = await testSavedLocation(cur.id)
         setTest(r)
         setLocs((all) => all && all.map((y) => (y.id === cur.id ? { ...y, exit_ip: r.exit_ip, exit_country: r.exit_country, exit_at: new Date().toISOString() } : y)))
-      } else setTest(await testProxy(trimmed))
+      } else {
+        const r = await testProxy(trimmed)
+        // пока шла проверка, адрес в поле поменяли - ее итог к новому адресу не относится
+        if (urlRef.current !== trimmed) return
+        setTestedUrl(trimmed)
+        setTest(r)
+      }
     } catch (e) {
       fail(e)
     } finally {
@@ -154,7 +167,7 @@ export function LocationsModal({ onClose, onUnauthorized, onOpenCheck }: Props) 
     setBusy(true)
     setErr(null)
     setMsg(null)
-    const exit = urlChanged && test?.ok && trimmed ? { exit_ip: test.exit_ip, exit_country: test.exit_country } : {}
+    const exit = urlChanged && test?.ok && trimmed && testedUrl === trimmed ? { exit_ip: test.exit_ip, exit_country: test.exit_country } : {}
     try {
       if (cur) {
         await updateLocation(cur.id, { ...f, ...exit })
@@ -189,6 +202,7 @@ export function LocationsModal({ onClose, onUnauthorized, onOpenCheck }: Props) 
     if (dirty && !window.confirm(t('Закрыть без сохранения? Изменения пропадут.'))) return
     onClose()
   }
+  useEscape(close)
 
   const stat = (id: number): LocationStat | undefined => ov?.locations.find((s) => s.id === id)
   const broken = new Set((ov?.locations ?? []).filter((s) => s.broken).map((s) => s.id))

@@ -165,7 +165,7 @@ _HELPER_LABEL = {
     "gitlab-setup": "версия, бэкап и миграции GitLab",
     "sockfix-setup": "compose внешнего прокси: сокет и образ",
     "relay-setup": "ретранслятор для агентов",
-    "webfiles-setup": "новые php и правки в файлах сайтов",
+    "webfiles-setup": "признаки взлома в файлах сайтов",
 }
 
 

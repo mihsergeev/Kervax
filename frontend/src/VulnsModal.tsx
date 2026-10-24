@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { ApiError, getFleetVulns, type FleetVulnServer, type FleetVulns, type VulnCve, type VulnFinding } from './api'
 import { CardNav, type SecDef, type SecInfo } from './cardLayout'
 import { useI18n } from './i18n'
+import { useEscape } from './useEscape'
 import { NetTile } from './NetLinks'
 import type { Section } from './App'
 import { VulnCves, VulnFix, VulnRow, VulnsNote } from './VulnsCard'
@@ -56,6 +57,7 @@ function packages(servers: FleetVulnServer[]): Pkg[] {
 
 export function VulnsModal({ onClose, onUnauthorized, onOpen }: Props) {
   const { t } = useI18n()
+  useEscape(onClose)
   const [data, setData] = useState<FleetVulns | null>(null)
   const [err, setErr] = useState('')
   const [sec, setSec] = useState('over')

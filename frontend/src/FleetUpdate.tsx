@@ -6,6 +6,7 @@ import {
 import { useAuth } from './auth'
 import { useI18n } from './i18n'
 import { fmtSetupVersion, shortList } from './serverUtils'
+import { HOST_RE, shq } from './shell'
 
 // Обновление парка из блока "Обновления" главной и баннера "Серверов": агент - OTA через
 // панель (/api/servers/agent-update), helper'ы - командой ansible. Панель helper'ы сама не ставит:
@@ -52,7 +53,10 @@ export function helperGroups(servers: Server[]): HelperGroup[] {
   return [...by.values()]
 }
 
-export const hostOf = (s: Server) => s.hostname || s.name
+// имя для ansible -l: hostname ноды, если он похож на имя хоста (его присылает сама нода), иначе имя
+// сервера в панели. В команду оно все равно идет через shq (shell.ts)
+export const hostOf = (s: Server) =>
+  s.hostname && HOST_RE.test(s.hostname) ? s.hostname : s.name || s.hostname || ''
 
 // хосты, где прогон kervax_helpers.yml что-то поменяет (helper или настройка юнита агента)
 export function rolloutHosts(servers: Server[]): string[] {
@@ -353,8 +357,7 @@ export function ansibleCmd(hosts: string[], viaPanels: boolean): string {
 
 // Та же команда по именам нод: работает и без доступа ansible, и когда группа еще не собралась
 export function helperCmd(hosts: string[]): string {
-  const l = hosts.length === 1 ? hosts[0] : `'${hosts.join(',')}'`
-  return `ansible-playbook playbooks/kervax_helpers.yml -l ${l}`
+  return `ansible-playbook playbooks/kervax_helpers.yml -l ${shq(hosts.join(','))}`
 }
 
 export function useViaPanels(): boolean {

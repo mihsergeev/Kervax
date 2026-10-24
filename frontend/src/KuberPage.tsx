@@ -11,7 +11,7 @@ import {
   listServers,
   podFinished,
   snoozeServerAlert,
-  updateServer,
+  muteServerKeys,
   type FluxState,
   type KubeCommand,
   type KubeCronJob,
@@ -23,12 +23,16 @@ import {
   type MemLimitItem,
   type Server,
   type ServerEnroll,
+  cmdState,
+  cmdWaitText,
 } from './api'
 import { useAuth } from './auth'
 import { useUrlCard, useUrlParam } from './deeplink'
 import { FixSteps } from './FixSteps'
 import { helperCmd, hostOf } from './FleetUpdate'
+import { KUBE_NAME_RE } from './shell'
 import { useI18n } from './i18n'
+import { toastError } from './toast'
 import { kindLabel, KUBE_WORK_KINDS, RESTARTS_DAY_MIN } from './mutes'
 import { OsIcon } from './osIcon'
 import { CountryFlag } from './CountryFlag'
@@ -101,9 +105,13 @@ function liveExpiry(s: Server): KubeExpiry[] {
 // сломан, и показывается мягче. Нет поля - helper старый или Ingress не прочитались, не знаем
 const unusedSecret = (e: KubeExpiry) => e.kind === 'secret-cert' && e.ingress === false
 // Удалить секрет панель не может и не должна (она ничего не меняет в кластере): команда для человека
+// Имена с ноды: команду даем, только если namespace и секрет похожи на имена Kubernetes
 function deleteSecretCmd(e: KubeExpiry): string {
   const i = e.where.indexOf('/')
-  return e.kind === 'secret-cert' && i > 0 ? `kubectl -n ${e.where.slice(0, i)} delete secret ${e.where.slice(i + 1)}` : ''
+  const ns = e.where.slice(0, i)
+  const name = e.where.slice(i + 1)
+  return e.kind === 'secret-cert' && i > 0 && KUBE_NAME_RE.test(ns) && KUBE_NAME_RE.test(name)
+    ? `kubectl -n ${ns} delete secret ${name}` : ''
 }
 
 function podTone(p: KubePod): string {
@@ -377,11 +385,11 @@ const MUTE_FOR = [
 // Заглушить алерты сервера: kinds на hours часов, -1 - постоянно, 0 - снять
 async function muteKinds(s: Server, kinds: string[], hours: number) {
   if (hours < 0) {
-    await updateServer(s.id, { alert_mutes: [...new Set([...(s.alert_mutes ?? []), ...kinds])] })
+    await muteServerKeys(s.id, kinds)
     return
   }
   if (hours === 0 && kinds.some((k) => (s.alert_mutes ?? []).includes(k)))
-    await updateServer(s.id, { alert_mutes: (s.alert_mutes ?? []).filter((x) => !kinds.includes(x)) })
+    await muteServerKeys(s.id, [], kinds)
   for (const k of kinds) if (hours > 0 || s.alert_snoozes?.[k]) await snoozeServerAlert(s.id, k, hours)
 }
 
@@ -511,9 +519,9 @@ function PodLogsModal({
           // нажали в списке, загруженном до пересоздания пода: это не сбой, список устарел
           setErr(goneText ?? t('Под уже пересоздан или удален, список обновлен'))
           gone.current?.()
-        } else setErr(logsErrorText(res.result) || t('не удалось получить логи'))
-      } catch {
-        setErr(t('ошибка'))
+        } else setErr(cmdState(res) === 'wait' ? cmdWaitText() : logsErrorText(res.result) || t('не удалось получить логи'))
+      } catch (e) {
+        setErr(e instanceof Error ? e.message : t('ошибка'))
       } finally {
         setLoading(false)
       }
@@ -620,10 +628,10 @@ function WorkloadRow({
     setErr(null)
     try {
       const res = await runAndWait(serverId, w.ns, kind, w.name, 'rollout_restart')
-      if (res.status !== 'done') setErr(res.result || t('не удалось'))
+      if (cmdState(res) !== 'ok') setErr(cmdState(res) === 'wait' ? cmdWaitText() : res.result || t('не удалось'))
       onChanged()
-    } catch {
-      setErr(t('ошибка'))
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : t('ошибка'))
     } finally {
       setBusy(false)
     }
@@ -685,10 +693,10 @@ function PodRow({
     setErr(null)
     try {
       const res = await runAndWait(serverId, p.ns, 'pod', p.name, 'delete_pod')
-      if (res.status !== 'done') setErr(res.result || t('не удалось'))
+      if (cmdState(res) !== 'ok') setErr(cmdState(res) === 'wait' ? cmdWaitText() : res.result || t('не удалось'))
       onChanged()
-    } catch {
-      setErr(t('ошибка'))
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : t('ошибка'))
     } finally {
       setBusy(false)
     }
@@ -854,6 +862,8 @@ function KubeHostModal({
       await muteKinds(s, ['kube_job'], hours)
       setJobMuting(false)
       onChanged()
+    } catch (e) {
+      toastError(e)
     } finally {
       setJobBusy(false)
     }
@@ -1631,13 +1641,17 @@ function HostRow({
   const pods = kube.pods ?? []
   const nodesReady = nodes.filter((n) => n.ready).length
   const { running, active } = podCounts(pods)
-  const bad = pods.filter((p) => !podFinished(p) && podTone(p) === 't-down').length
+  // в чипах имена, а не голые числа: что именно падает и что истекает
+  const badPods = pods.filter((p) => !podFinished(p) && podTone(p) === 't-down')
+  const bad = badPods.length
   // Сроки видны прямо в списке: истёкший токен Flux не меняет ни одного счётчика
   // подов, и без отдельной пометки хост в списке выглядит совершенно здоровым.
-  const fluxBroken = (s.last_report?.flux ?? []).filter(
+  const fluxBad = (s.last_report?.flux ?? []).filter(
     (f) => !f.ready && !FLUX_TRANSIENT.has(f.reason ?? ''),
-  ).length
-  const soon = liveExpiry(s).filter((e) => daysLeft(e.expires) <= expiryHorizon(s)).length
+  )
+  const fluxBroken = fluxBad.length
+  const soonList = liveExpiry(s).filter((e) => daysLeft(e.expires) <= expiryHorizon(s))
+  const soon = soonList.length
   return (
     <button className="loc-res loc-res-btn hs-host" onClick={onOpen}>
       <span className={`lk-dot ${s.online ? 'lk-dot-ok' : 'lk-dot-bad'}`} title={s.online ? t('на связи') : t('не на связи')} />
@@ -1649,8 +1663,8 @@ function HostRow({
           {showGroup && s.group_name && <span className="type-chip group-chip">{s.group_name}</span>}
           {!kube.access && <span className="type-chip off">{t('нет доступа')}</span>}
           {bad > 0 && (
-            <span className="type-chip off" title={t('поды падают: CrashLoopBackOff, ошибка образа или запуска')}>
-              🔥 {bad}
+            <span className="type-chip off chip-names" title={t('поды падают: CrashLoopBackOff, ошибка образа или запуска')}>
+              🔥 {shortList(badPods.map((p) => p.name), t, 2)}
             </span>
           )}
           {kube.access && nodesReady < nodes.length && (
@@ -1659,13 +1673,13 @@ function HostRow({
             </span>
           )}
           {fluxBroken > 0 && (
-            <span className="type-chip t-down" title={t('Ресурсы Flux не в Ready — доставка встала')}>
-              {t('Flux ⚠ {n}', { n: fluxBroken })}
+            <span className="type-chip t-down chip-names" title={t('Ресурсы Flux не в Ready — доставка встала')}>
+              Flux ⚠ {shortList(fluxBad.map((f) => f.where.split('/').pop() || f.where), t, 2)}
             </span>
           )}
           {soon > 0 && (
-            <span className="type-chip t-degraded" title={t('Сертификаты или токены истекают в ближайшие две недели')}>
-              {t('сроки ⏳ {n}', { n: soon })}
+            <span className="type-chip t-degraded chip-names" title={t('Истекает за {n} дн. и раньше: {list}', { n: expiryHorizon(s), list: soonList.map((e) => e.where).join(', ') })}>
+              ⏳ {shortList(soonList.map((e) => t(EXPIRY_KIND[e.kind] ?? e.kind)), t, 2)}
             </span>
           )}
         </div>
@@ -1954,7 +1968,7 @@ export function KuberPage({
         <div className="checks-search-row">
           <input
             className="checks-search"
-            placeholder={t('Поиск: хост, IP, группа, нода, под, воркоад…')}
+            placeholder={t('Поиск: хост, IP, группа, нода, под, ворклоад…')}
             value={query}
             onChange={(e) => setQuery(e.target.value)}
           />

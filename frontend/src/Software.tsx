@@ -1,8 +1,9 @@
 import { Fragment, useCallback, useEffect, useState, type ReactNode } from 'react'
-import { getSoftware, updateServer, type Server, type SoftwareItem, type SoftwareOut, type SwFixBlock } from './api'
+import { muteServerKeys, getSoftware, type Server, type SoftwareItem, type SoftwareOut, type SwFixBlock } from './api'
 import { useAuth } from './auth'
 import { FixSteps, useFixDone } from './FixSteps'
 import { useI18n } from './i18n'
+import { toastError } from './toast'
 import { swDecisionLabel } from './mutes'
 
 // Версии ПО (app/software.py): что стоит в контейнерах и на хосте и когда у этого кончается
@@ -432,9 +433,9 @@ export function SoftwareCard({ server: s, onChanged }: { server: Server; onChang
   const mutes = s.alert_mutes ?? []
   const decide = (key: string, on: boolean) => {
     setBusy(key)
-    updateServer(s.id, { alert_mutes: on ? [...new Set([...mutes, key])] : mutes.filter((m) => m !== key) })
+    muteServerKeys(s.id, on ? [key] : [], on ? [] : [key])
       .then(onChanged)
-      .catch(() => {})
+      .catch(toastError)
       .finally(() => setBusy(''))
   }
   const [checking, setChecking] = useState(false)

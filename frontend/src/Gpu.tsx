@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { serverMetrics, type GpuSum, type LlmSvc, type Server, type ServerMetric } from './api'
 import { OvRows, type OvRow } from './cardLayout'
 import { useI18n } from './i18n'
+import { fmtInt } from './units'
 
 // GPU NVIDIA (helper gpu-setup, app/gpu.py) и LLM-сервисы (агент 2.36). В карточке сервера раздел
 // GPU: что не так, драйвер, таблица карт, процессы на них и ошибки Xid за сутки; графики раздела
@@ -13,7 +14,7 @@ const gb = (mib: number | null | undefined) => (mib == null ? '—' : (mib / 102
 const pct = (a: number | null | undefined, b: number | null | undefined) => (a != null && b ? (a / b) * 100 : null)
 const tone = (p: number | null, warn: number, bad: number) => (p == null ? '' : p >= bad ? ' bad' : p >= warn ? ' warn' : '')
 // "1 840" вместо "1840": потоки токенов читаются взглядом
-const num = (v: number) => Math.round(v).toLocaleString('ru-RU').replace(/ /g, ' ')
+const num = (v: number) => fmtInt(v)
 
 function upText(sec: number | null | undefined, t: TFn): string {
   if (!sec) return ''
