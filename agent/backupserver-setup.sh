@@ -83,7 +83,23 @@ fi
 #       leaves the cleanup off when the shared script did not run, and stats report the state
 # 0.35: allow-tls opens the TLS port for a client moving from http to https (the ufw rules of
 #       provision-client, without touching htpasswd, the repository or its cleanup)
-KERVAX_SETUP_VERSION=0.35  # MAJOR.MINOR; compared component-wise (0.13 > 0.2!)
+# 0.36: the root side keeps its boundary:
+#       * the answer directory is 0750 and answers are written through mktemp (a symlink the agent
+#         planted there turned the write and the chmod 0644 onto any root file); a request that is
+#         a symlink or larger than 64 KiB is dropped;
+#       * repopass and hpass are checked before they reach the prune env (root sources it every
+#         night) and htpasswd; the repository name cannot be . or .. or start with a dot or a dash;
+#         a bad DNS name for the certificate is left out instead of passed to openssl;
+#       * the weekly check state moved from /var/tmp (anyone could create it for a new client, and
+#         the prune ran its contents through bash arithmetic as root) to /var/lib/kervax/bsrv-check,
+#         and every field is checked to be a number;
+#       * the prune metrics are written through mktemp: on a server that backs itself up the
+#         node_exporter directory used to belong to bx231;
+#       * hpass goes to htpasswd and curl on stdin, not in argv; temporary files through mktemp;
+#       * restic is installed only as RESTIC_TARGET_VER with the baked sha256;
+#       * a rest-server port published by docker past ufw is reported (docker opens it to the
+#         whole internet when ufw-docker is not set up), and ufw opens the actual port
+KERVAX_SETUP_VERSION=0.36  # MAJOR.MINOR; compared component-wise (0.13 > 0.2!)
 # Which nodes need this helper at all. Read by the ansible playbook on the
 # CONTROL machine and evaluated as a shell condition ON THE NODE, so a new
 # helper lands where it belongs without anyone editing the playbook.
@@ -96,8 +112,12 @@ chmod 0644 /var/lib/kervax/versions/backupserver-setup.ver  # explicit: the agen
 rm -f /etc/sudoers.d/kervax-backupserver 2>/dev/null || true
 # spool: the agent (kervax) drops requests (needs -wx on the directory) and reads answers (r-x)
 install -d -o root -g "$AGENT_USER" -m 0730 "$REQ_DIR"
-# 0770: the agent (kervax) must DELETE an answer once read, otherwise res files pile up
-install -d -o root -g "$AGENT_USER" -m 0770 "$RES_DIR"
+# 0750: the agent only reads answers. With write access it could plant a symlink under the name
+# root writes the answer to and turn that write (and the chmod after it) onto any file. Root
+# removes old answers itself; the agent's attempt to delete one simply fails.
+install -d -o root -g "$AGENT_USER" -m 0750 "$RES_DIR"
+# the state of the weekly repository check (it used to live in /var/tmp, open to everyone)
+install -d -o root -g root -m 0700 /var/lib/kervax/bsrv-check
 # under ProtectSystem=strict the agent may write only to its own bin directory, so the spool
 # is allowed explicitly; otherwise /var/lib/kervax is read-only and the spool does not work.
 # A drop-in plus an agent restart.
@@ -333,7 +353,20 @@ prune_off_reason() {
 }
 
 # client name validation (it is also the repository and htpasswd user name): hostname-safe characters only
-valid_name() { case "$1" in ''|*[!A-Za-z0-9._-]*) return 1 ;; *) return 0 ;; esac; }
+# (not . or .., and no leading dot or dash: .htpasswd lives next to the repositories)
+valid_name() {
+  case "$1" in ''|.*|-*|*[!A-Za-z0-9._-]*) return 1 ;; esac
+  [ "${#1}" -le 128 ]
+}
+# The repository password goes into the prune env, which root sources every night, and back to
+# the client's env (read by systemd and by bash). Only characters neither of them interprets.
+secret_ok() { [[ "$1" =~ ^[A-Za-z0-9+/=_.,:@%-]{8,256}$ ]]; }
+# the htpasswd password is also the password in the client's rest: URL - URL-safe characters only
+hpass_ok() { [[ "$1" =~ ^[A-Za-z0-9._~-]{8,128}$ ]]; }
+# a DNS name for the certificate SAN
+valid_dns() {
+  [ "${#1}" -le 253 ] && [[ "$1" =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$ ]]
+}
 valid_ip()   { [[ "$1" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] || [[ "$1" =~ ^[0-9A-Fa-f:]+$ ]]; }
 valid_num()  { [[ "$1" =~ ^[0-9]+$ ]]; }
 
@@ -516,10 +549,28 @@ cmd_stats() {
 }
 refresh_stats() { cmd_stats > "$STATE_DIR/backupserver.json.tmp" 2>/dev/null && mv -f "$STATE_DIR/backupserver.json.tmp" "$STATE_DIR/backupserver.json" && chmod 0644 "$STATE_DIR/backupserver.json"; }
 
+# The rest-server port is published by docker on 0.0.0.0, and docker puts its own iptables rules
+# ahead of ufw. Without ufw-docker (DOCKER-USER jumping to ufw-user-forward) the per-client ufw
+# rules do not apply to it and the port is open to the whole internet, guarded by the htpasswd
+# alone. Printed as a warning: the helper does not rewrite the server's firewall.
+ufw_docker_note() {
+  command -v docker >/dev/null 2>&1 || return 1
+  if ! command -v ufw >/dev/null 2>&1 || ! ufw status 2>/dev/null | grep -q '^Status: active'; then
+    echo "WARNING: ufw is not active - the rest-server ports are open to everyone, the client IP rules do nothing"
+    return 0
+  fi
+  command -v iptables >/dev/null 2>&1 || return 1
+  iptables -S DOCKER-USER 2>/dev/null | grep -q -- '-j ufw-user-forward' && return 1
+  echo "WARNING: docker publishes the rest-server ports past ufw (ufw-docker is not set up: no DOCKER-USER -> ufw-user-forward), the ports are open to everyone"
+}
+
 # ------- client provisioning: htpasswd + init + ufw + prune (transport agnostic) -------
 install_prune() {
   local name="$1" kl="$2" kd="$3" kw="$4" km="$5" repopass="$6" state="${7:-on}"
-  install -d -m 0755 "$PRUNE_DIR" "$ENV_DIR" "$LOG_DIR" "$METRICS_DIR" "$NE_METRICS_DIR"
+  install -d -m 0755 "$PRUNE_DIR" "$ENV_DIR" "$LOG_DIR" "$METRICS_DIR"
+  # not chmod'ed when it exists: on a server that backs itself up backup-setup makes it
+  # root:bx231 1775 for the backup run's own metrics, and 0755 here would make that run fail
+  [ -d "$NE_METRICS_DIR" ] || install -d -m 0755 "$NE_METRICS_DIR"
   # per-client env (repo is a local path; the password is needed for forget/prune on the server)
   umask 077
   # `set -a` is mandatory: the prune script only sources the env, while restic is a CHILD
@@ -558,7 +609,10 @@ prune_hour() {
 # password, and on regeneration there is nowhere to take it from (nor any need).
 write_prune_script() {
   local name="$1" kl="$2" kd="$3" kw="$4" km="$5" state="${6:-keep}" why="${7:-}"
-  install -d -m 0755 "$PRUNE_DIR" "$LOG_DIR" "$METRICS_DIR" "$NE_METRICS_DIR"
+  install -d -m 0755 "$PRUNE_DIR" "$LOG_DIR" "$METRICS_DIR"
+  # not chmod'ed when it exists: on a server that backs itself up backup-setup makes it
+  # root:bx231 1775 for the backup run's own metrics, and 0755 here would make that run fail
+  [ -d "$NE_METRICS_DIR" ] || install -d -m 0755 "$NE_METRICS_DIR"
   # per-client prune script: retention lives in the KEEP=(...) line, which the panel reads via keep_of.
   local ps="$PRUNE_DIR/restic-prune-$name.sh"
   {
@@ -578,9 +632,30 @@ mkdir -p "$(dirname "$LOG")" "$(dirname "$METRICS_FILE")" "$(dirname "$METRICS_F
 ts_start=$(date +%s); success=0
 snap_before=-1; snap_after=-1; removed=-1; busy=0
 bytes_before=-1; bytes_after=-1; oldest_ts=0
-# "<time> <1|0|-1> <part> <parts>" of the last weekly integrity check, see below
-CHECK_STATE="/var/tmp/restic-check-${CLIENT}.state"
+# "<time> <1|0|-1> <part> <parts>" of the last weekly integrity check, see below. In a root-only
+# directory: in /var/tmp anyone could create the file for a new client before its first prune,
+# and the fields went into bash arithmetic, which runs $(...) inside an array index.
+CHECK_STATE="/var/lib/kervax/bsrv-check/${CLIENT}.state"
 check_ts=0; check_ok=-1; check_part=0; check_parts=0
+mkdir -p "$(dirname "$CHECK_STATE")"; chmod 0700 "$(dirname "$CHECK_STATE")"
+# the state of a client checked before 0.36: taken over once, only when root wrote it
+OLD_STATE="/var/tmp/restic-check-${CLIENT}.state"
+if [ ! -e "$CHECK_STATE" ] && [ -f "$OLD_STATE" ] && [ ! -L "$OLD_STATE" ] && [ "$(stat -c %u "$OLD_STATE")" = 0 ]; then
+  head -c 200 "$OLD_STATE" > "$CHECK_STATE"
+fi
+# every field is a number or the state is ignored (as if no check had run yet)
+check_state_read() {
+  local a="" b="" c="" d=""
+  check_ts=0; check_ok=-1; check_part=0; check_parts=0
+  [ -s "$CHECK_STATE" ] || return 0
+  read -r a b c d _ < "$CHECK_STATE" || true
+  [[ "$a" =~ ^[0-9]{1,12}$ ]] || return 0
+  check_ts="$a"
+  [[ "$b" =~ ^-?[01]$ ]] && check_ok="$b"
+  [[ "$c" =~ ^[0-9]{1,6}$ ]] && check_part="$c"
+  [[ "$d" =~ ^[0-9]{1,6}$ ]] && check_parts="$d"
+  return 0
+}
 CHECK_SLICE=$(( 50 * 1024 * 1024 * 1024 ))  # at most this much data is read per weekly check
 # restic snapshots --json on stdin -> the groups file (argv[1]): host, tags, a few paths,
 # count, first and last snapshot. More than one group only, otherwise the file is removed.
@@ -617,7 +692,7 @@ with open(out + ".tmp", "w") as f:
 os.chmod(out + ".tmp", 0o644)
 os.replace(out + ".tmp", out)
 '
-[ -s "$CHECK_STATE" ] && read -r check_ts check_ok < "$CHECK_STATE"
+check_state_read
 
 # Snapshots are counted WITHOUT jq: backup servers do not have it, and the metric sat at -1
 # for years. In the --json output there is exactly one "short_id" per snapshot.
@@ -707,10 +782,11 @@ repo_size() { du -sb "$RESTIC_REPOSITORY" 2>/dev/null | awk '{print $1}'; }
     # because restic check holds an exclusive lock and a backup starting meanwhile waits for it
     # (clients wait up to 2 hours since backup-setup 0.33). Repositories up to 400 GiB are read
     # whole in 8 weeks.
-    if [ ! -s "$CHECK_STATE" ]; then
+    check_state_read
+    if [ "$check_ts" = 0 ]; then
       echo "$(( $(date +%s) - ( $(printf '%s' "$CLIENT" | cksum | cut -d' ' -f1) % 7 ) * 86400 )) -1" > "$CHECK_STATE"
     fi
-    read -r check_ts check_ok check_part check_parts < "$CHECK_STATE" || true
+    check_state_read
     if [ "$busy" -eq 0 ] && [ $(( $(date +%s) - ${check_ts:-0} )) -ge $(( 7 * 86400 )) ]; then
       parts=8
       if [ "${bytes_before:--1}" -gt 0 ] 2>/dev/null; then
@@ -724,7 +800,7 @@ repo_size() { du -sb "$RESTIC_REPOSITORY" 2>/dev/null | awk '{print $1}'; }
       elif ! printf '%s' "$chk_out" | grep -qi "already locked"; then
         echo "$(date +%s) 0 $part $parts" > "$CHECK_STATE"
       fi
-      read -r check_ts check_ok check_part check_parts < "$CHECK_STATE" || true
+      check_state_read
     fi
     # Snapshot groups the way forget sees them (host and tags), for the panel. An old group,
     # left by a renamed host, a server that is gone or a one-off backup, is kept by the policy
@@ -747,6 +823,10 @@ repo_size() { du -sb "$RESTIC_REPOSITORY" 2>/dev/null | awk '{print $1}'; }
   echo "=== $(date -Is) ${CLIENT}: done (success=${success}, snapshots ${snap_before}->${snap_after}, removed ${removed}) ==="
 } >> "$LOG" 2>&1
 ts_end=$(date +%s)
+# The file is put together in the root-only state directory and renamed into place. On a server
+# that backs itself up the node_exporter directory used to belong to bx231, and a symlink it
+# left under the fixed ".partial" name turned this write and its chmod onto any root file.
+MTMP="$(mktemp "$(dirname "$CHECK_STATE")/metrics.XXXXXX")" || exit 0
 {
   # prune_success reports whether the COMMANDS ran without error. It is NOT "the rotation
   # happened": a forget with nothing to remove also returns 0. Whether it happened is answered
@@ -768,14 +848,15 @@ ts_end=$(date +%s)
   echo "restic_server_check_read_parts{client=\"${CLIENT}\"} ${check_parts:-0}"
   # 1 - the last run met a running backup and left the cleanup for the next run
   echo "restic_server_prune_busy{client=\"${CLIENT}\"} ${busy}"
-} > "${METRICS_FILE}.partial" && {
-  chmod 0644 "${METRICS_FILE}.partial"
+} > "$MTMP" && {
+  chmod 0644 "$MTMP"
   # node-exporter reads the file as a whole: we publish by rename so it never catches it
   # mid-write
-  cp -f "${METRICS_FILE}.partial" "${METRICS_FILE_ALT}.partial" 2>/dev/null &&
+  cp -f "$MTMP" "${METRICS_FILE_ALT}.partial" 2>/dev/null &&
     mv -f "${METRICS_FILE_ALT}.partial" "${METRICS_FILE_ALT}"
-  mv -f "${METRICS_FILE}.partial" "${METRICS_FILE}"
+  mv -fT "$MTMP" "${METRICS_FILE}"
 }
+rm -f "$MTMP"
 PRUNE_BODY
   } > "$ps"
   chmod 0755 "$ps"; chown root:root "$ps"
@@ -1069,22 +1150,41 @@ ensure_pkgs() {
   return 0
 }
 
-# restic on the backup server: the system one, otherwise downloaded with a sha256 check (as on the client)
+# restic on the backup server: the system one, otherwise RESTIC_TARGET_VER checked against the
+# baked sha256 (0.35 and older took 0.18.1 into fixed names in /tmp, the sum was optional)
 ensure_restic_srv() {
   [ -x "$RESTIC_BIN" ] && return 0
-  local ver="0.18.1" arch f base
-  case "$(uname -m)" in x86_64) arch=amd64;; aarch64|arm64) arch=arm64;; *) echo "unknown architecture" >&2; return 2;; esac
+  local tmp
   install -d -m 0755 "$(dirname "$KERVAX_RESTIC")"
-  base="https://github.com/restic/restic/releases/download/v$ver"; f="restic_${ver}_linux_${arch}.bz2"
-  curl -fsSL --connect-timeout 20 "$base/$f" -o "/tmp/$f" || { echo "could not download restic" >&2; return 2; }
-  if curl -fsSL --connect-timeout 20 "$base/SHA256SUMS" -o /tmp/restic-sums 2>/dev/null && [ -s /tmp/restic-sums ]; then
-    ( cd /tmp && grep " $f\$" restic-sums | sha256sum -c - >/dev/null 2>&1 ) \
-      || { echo "the restic checksum did not match" >&2; rm -f "/tmp/$f" /tmp/restic-sums; return 2; }
-  fi
-  bunzip2 -f "/tmp/$f" || { echo "bunzip2 fail" >&2; return 2; }
-  install -m 0755 "/tmp/restic_${ver}_linux_${arch}" "$KERVAX_RESTIC"
-  rm -f "/tmp/restic_${ver}_linux_${arch}" /tmp/restic-sums
+  tmp="$(restic_fetch)" || return 2
+  install -o root -g root -m 0755 "$tmp/restic" "$KERVAX_RESTIC"
+  rm -rf "$tmp"
   RESTIC_BIN="$KERVAX_RESTIC"
+}
+
+# restic_fetch downloads RESTIC_TARGET_VER into a fresh mktemp -d, checks the .bz2 against the baked
+# sha256 and prints the directory; the binary is <dir>/restic and reports the right version
+restic_fetch() {
+  local arch want f tmp got
+  case "$(uname -m)" in
+    x86_64) arch=amd64; want="$RESTIC_SHA_amd64" ;;
+    aarch64|arm64) arch=arm64; want="$RESTIC_SHA_arm64" ;;
+    *) echo "unknown architecture: $(uname -m)" >&2; return 2 ;;
+  esac
+  command -v bunzip2 >/dev/null 2>&1 || { apt-get update -qq >/dev/null 2>&1 || true; apt-get install -y -qq bzip2 >/dev/null 2>&1 || true; }
+  f="restic_${RESTIC_TARGET_VER}_linux_${arch}.bz2"
+  tmp="$(mktemp -d /tmp/kv-restic.XXXXXX)" || return 2
+  if ! curl -fsSL --connect-timeout 20 --max-time 600 "https://github.com/restic/restic/releases/download/v$RESTIC_TARGET_VER/$f" -o "$tmp/$f"; then
+    rm -rf "$tmp"; echo "could not download restic $RESTIC_TARGET_VER from github" >&2; return 2
+  fi
+  got="$(sha256sum "$tmp/$f" | awk '{ print $1 }')"
+  if [ "$got" != "$want" ]; then
+    rm -rf "$tmp"; echo "the sha256 did not match (expected $want, got $got), nothing was replaced" >&2; return 2
+  fi
+  bunzip2 -c "$tmp/$f" > "$tmp/restic" || { rm -rf "$tmp"; echo "bunzip2 failed" >&2; return 2; }
+  chmod 0755 "$tmp/restic"
+  [ "$(restic_ver "$tmp/restic")" = "$RESTIC_TARGET_VER" ] || { rm -rf "$tmp"; echo "the downloaded restic does not run" >&2; return 2; }
+  printf '%s' "$tmp"
 }
 
 cmd_deploy_server() {
@@ -1096,7 +1196,10 @@ cmd_deploy_server() {
   # the upper directories are 0700 (as on existing servers): below them live prune-env files
   # with repository passwords - local unprivileged users may not even list them
   install -d -m 0700 /app/rest-server /app/rest-server/system
-  install -d -m 0755 "$PRUNE_DIR" "$ENV_DIR" "$LOG_DIR" "$METRICS_DIR" "$NE_METRICS_DIR"
+  install -d -m 0755 "$PRUNE_DIR" "$ENV_DIR" "$LOG_DIR" "$METRICS_DIR"
+  # not chmod'ed when it exists: on a server that backs itself up backup-setup makes it
+  # root:bx231 1775 for the backup run's own metrics, and 0755 here would make that run fail
+  [ -d "$NE_METRICS_DIR" ] || install -d -m 0755 "$NE_METRICS_DIR"
   install -d -m 0700 "$DATA"
   # htpasswd must exist: with --private-repos an empty file means nobody gets in
   [ -f "$HTPASSWD" ] || { : > "$HTPASSWD"; chown root:root "$HTPASSWD"; chmod 0600 "$HTPASSWD"; }
@@ -1123,9 +1226,10 @@ services:
 COMPOSEEOF
     chmod 0644 "$COMPOSE"
   fi
-  ( cd /app/rest-server && docker compose up -d ) >/tmp/kv-rs.$$ 2>&1 \
-    || { echo "docker compose up failed: $(tr '\n' ' ' </tmp/kv-rs.$$)" >&2; rm -f /tmp/kv-rs.$$; return 2; }
-  rm -f /tmp/kv-rs.$$
+  local rlog; rlog="$(mktemp /tmp/kv-rs.XXXXXX)" || { echo "mktemp failed" >&2; return 2; }
+  ( cd /app/rest-server && docker compose up -d ) >"$rlog" 2>&1 \
+    || { echo "docker compose up failed: $(tr '\n' ' ' <"$rlog")" >&2; rm -f "$rlog"; return 2; }
+  rm -f "$rlog"
   # health: with an empty htpasswd the rest-server must answer 401 - it listens and requires auth
   local code="" i
   for i in 1 2 3 4 5 6 7 8 9 10; do
@@ -1142,6 +1246,7 @@ COMPOSEEOF
   else
     echo "OK rest-server deployed: port $port, append-only plus private-repos, HTTP $code, ufw $ufw_state"
   fi
+  ufw_docker_note || true
 }
 
 # cmd_update_image updates the rest-server image to the baked-in REST_IMAGE. The data (the
@@ -1156,9 +1261,10 @@ cmd_update_image() {
   cur="$(grep -oE 'restic/rest-server:[A-Za-z0-9._-]+' "$COMPOSE" | head -1)"
   # ONLY the image line is edited, the rest of the compose file is left as is (--append-only and other flags)
   sed -i "s#image:.*restic/rest-server:[A-Za-z0-9._-]*#image: $REST_IMAGE#" "$COMPOSE"
-  ( cd /app/rest-server && docker compose pull && docker compose up -d ) >/tmp/kv-rsu.$$ 2>&1 \
-    || { echo "the image update failed: $(tr '\n' ' ' </tmp/kv-rsu.$$ | tail -c 300)" >&2; rm -f /tmp/kv-rsu.$$; return 2; }
-  rm -f /tmp/kv-rsu.$$
+  local ulog; ulog="$(mktemp /tmp/kv-rsu.XXXXXX)" || { echo "mktemp failed" >&2; return 2; }
+  ( cd /app/rest-server && docker compose pull && docker compose up -d ) >"$ulog" 2>&1 \
+    || { echo "the image update failed: $(tr '\n' ' ' <"$ulog" | tail -c 300)" >&2; rm -f "$ulog"; return 2; }
+  rm -f "$ulog"
   # health: a rest-server with private repos answers 401 on "/" - it is listening
   local code="" i
   for i in $(seq 1 15); do
@@ -1179,6 +1285,8 @@ cmd_provision_client() {
   local name="$1" hpass="$2" repopass="$3" client_ip="$4" kl="${5:-3}" kd="${6:-7}" kw="${7:-4}" km="${8:-6}"
   valid_name "$name" || { echo "bad name" >&2; return 2; }
   valid_ip "$client_ip" || { echo "bad ip" >&2; return 2; }
+  hpass_ok "$hpass" || { echo "bad hpass: 8-128 letters, digits and . _ ~ -" >&2; return 2; }
+  # checked for a new repository below; an existing one keeps the password stored on this server
   for n in "$kl" "$kd" "$kw" "$km"; do valid_num "$n" || { echo "bad retention" >&2; return 2; }; done
   # SAFETY: every keep is at least 1 (we always hold one last/daily/weekly/monthly snapshot,
   # otherwise forget/prune wipes those slices). The floor is enforced on the backup server
@@ -1222,10 +1330,15 @@ cmd_provision_client() {
       [ "${okm:-0}" -ge 1 ] 2>/dev/null && km="$okm"
     fi
   fi
+  # the password goes into the prune env, which root sources every night, as RESTIC_PASSWORD="..."
+  if [ "$existing" -eq 0 ] && ! secret_ok "$repopass"; then
+    echo "bad repopass: 8-256 characters without quotes, \$, \\, ;, spaces or ~" >&2; return 2
+  fi
   # 1) htpasswd (bcrypt cost 10) - the client's access to the rest-server (this transport
   # password can be rotated freely: it is not about data encryption, and the panel hands the
   # client a new one)
-  htpasswd -bB -C 10 "$HTPASSWD" "$name" "$hpass" >/dev/null 2>&1 || { echo "htpasswd failed" >&2; return 2; }
+  # on stdin (-i), not in argv: any user of the server sees the arguments in ps
+  printf '%s\n' "$hpass" | htpasswd -iB -C 10 "$HTPASSWD" "$name" >/dev/null 2>&1 || { echo "htpasswd failed" >&2; return 2; }
   # 1a) WAIT until the rest-servers see the new user. Each re-reads htpasswd by itself only
   # every 30 seconds, so they get SIGHUP; an init or a client backup that comes before the
   # re-read gets a 401 (seen on live nodes: the HTTP one at init, the TLS one at the client's
@@ -1235,11 +1348,13 @@ cmd_provision_client() {
   if command -v curl >/dev/null 2>&1; then
     local i code tcode=200 tls=""
     command -v docker >/dev/null 2>&1 && [ -n "$(docker ps -q --filter "publish=$TLS_PORT" 2>/dev/null)" ] && tls=1
+    # the login goes to curl as a config on stdin (-K -), not in argv; hpass_ok leaves no quotes in it
+    local cauth; cauth="$(printf 'user = "%s:%s"' "$name" "$hpass")"
     for i in $(seq 1 40); do
-      code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 \
-             -u "$name:$hpass" "http://127.0.0.1:$(rest_port)/$name/config" 2>/dev/null || echo 000)
-      [ -n "$tls" ] && tcode=$(curl -sk -o /dev/null -w '%{http_code}' --max-time 5 \
-             -u "$name:$hpass" "https://127.0.0.1:$TLS_PORT/$name/config" 2>/dev/null || echo 000)
+      code=$(printf '%s\n' "$cauth" | curl -K - -s -o /dev/null -w '%{http_code}' --max-time 5 \
+             "http://127.0.0.1:$(rest_port)/$name/config" 2>/dev/null || echo 000)
+      [ -n "$tls" ] && tcode=$(printf '%s\n' "$cauth" | curl -K - -sk -o /dev/null -w '%{http_code}' --max-time 5 \
+             "https://127.0.0.1:$TLS_PORT/$name/config" 2>/dev/null || echo 000)
       # 404/403/200 - the credentials are already accepted
       [ "$code" != "401" ] && [ "$tcode" != "401" ] && break
       sleep 1
@@ -1251,17 +1366,19 @@ cmd_provision_client() {
   fi
   # 2) initialise the repository through the local rest-server (correct file permissions inside)
   if [ "$existing" -eq 0 ]; then
+    local ilog rc=0; ilog="$(mktemp /tmp/kv-init.XXXXXX)" || { echo "mktemp failed" >&2; return 2; }
     RESTIC_REPOSITORY="rest:http://$name:$hpass@127.0.0.1:$(rest_port)/$name" RESTIC_PASSWORD="$repopass" \
-      "$RESTIC_BIN" init >/tmp/kv-init.$$ 2>&1
-    local rc=$?
-    if [ $rc -ne 0 ] && ! grep -q 'config file already exists\|already initialized' /tmp/kv-init.$$; then
-      echo "init failed: $(tr '\n' ' ' </tmp/kv-init.$$)" >&2; rm -f /tmp/kv-init.$$; return 2
+      "$RESTIC_BIN" init >"$ilog" 2>&1 || rc=$?
+    if [ $rc -ne 0 ] && ! grep -q 'config file already exists\|already initialized' "$ilog"; then
+      echo "init failed: $(tr '\n' ' ' <"$ilog")" >&2; rm -f "$ilog"; return 2
     fi
-    rm -f /tmp/kv-init.$$
+    rm -f "$ilog"
   fi
-  # 3) ufw allow for the client IP to the rest port and the TLS port (if a front exists) - best effort
+  # 3) ufw allow for the client IP to the rest port and the TLS port (if a front exists) - best effort.
+  # The port the rest-server actually listens on: a server deployed on a custom port used to get
+  # the rule for the default one
   if command -v ufw >/dev/null 2>&1; then
-    ufw allow proto tcp from "$client_ip" to any port "$REST_PORT" >/dev/null 2>&1 || true
+    ufw allow proto tcp from "$client_ip" to any port "$(rest_port)" >/dev/null 2>&1 || true
     ufw route allow proto tcp from "$client_ip" to any port 8000 >/dev/null 2>&1 || true
     [ -f "$(tls_dir)/cert.pem" ] && ufw allow proto tcp from "$client_ip" to any port "$TLS_PORT" >/dev/null 2>&1 || true
   fi
@@ -1272,6 +1389,7 @@ cmd_provision_client() {
   [ "$existing" -eq 1 ] && [ -f "$PRUNE_DIR/restic-prune-$name.sh" ] && pstate=keep
   install_prune "$name" "$kl" "$kd" "$kw" "$km" "$repopass" "$pstate"
   refresh_stats
+  ufw_docker_note >&2 || true
   if [ "$existing" -eq 1 ]; then
     # the panel does not know the password of an existing repository - return it, otherwise the client cannot be set up
     printf 'OK existing %s\nREPOPASS_B64=%s\n' "$name" "$(printf '%s' "$repopass" | base64 -w0)"
@@ -1286,8 +1404,13 @@ cmd_provision_client() {
 # left alone, so HTTP and HTTPS work at the same time. There used to be a caddy front here; it
 # is now removed (migration).
 cmd_deploy_tls_front() {
-  local san_ip="$1" san_dns="${2:-}"
+  local san_ip="$1" san_dns="${2:-}" dns_note=""
   valid_ip "$san_ip" || { echo "bad san ip" >&2; return 2; }
+  # the name goes into the openssl -addext line: anything but a plain DNS name (a comma adds SANs
+  # of its own choice) is left out, the certificate is still valid for the IP
+  if [ -n "$san_dns" ] && ! valid_dns "$san_dns"; then
+    dns_note=" (the DNS name was not a valid host name and was left out of the certificate)"; san_dns=""
+  fi
   command -v docker >/dev/null 2>&1 || { echo "no docker" >&2; return 2; }
   install -d -m 0755 "$TLS_DIR"
   # MIGRATION of the 0.14 layout (system/kervax-tls -> its own directory). Strictly BEFORE
@@ -1332,10 +1455,12 @@ services:
       - "$TLS_DIR/cert.pem:/certs/cert.pem:ro"
       - "$TLS_DIR/key.pem:/certs/key.pem:ro"
 COMPOSEEOF
-  ( cd "$TLS_DIR" && docker compose up -d ) >/tmp/kv-tls.$$ 2>&1 || { echo "rest-tls up failed: $(tr '\n' ' ' </tmp/kv-tls.$$)" >&2; rm -f /tmp/kv-tls.$$; return 2; }
-  rm -f /tmp/kv-tls.$$
+  local tlog; tlog="$(mktemp /tmp/kv-tls.XXXXXX)" || { echo "mktemp failed" >&2; return 2; }
+  ( cd "$TLS_DIR" && docker compose up -d ) >"$tlog" 2>&1 || { echo "rest-tls up failed: $(tr '\n' ' ' <"$tlog")" >&2; rm -f "$tlog"; return 2; }
+  rm -f "$tlog"
   refresh_stats
-  echo "OK native TLS rest-server on :$TLS_PORT"
+  echo "OK native TLS rest-server on :$TLS_PORT$dns_note"
+  ufw_docker_note || true
 }
 
 # allow-tls <client_ip> opens the TLS port for a client that moves from http to https: the same
@@ -1379,12 +1504,7 @@ cmd_get_client_creds() {
 # package gets the package put on hold, otherwise apt would bring the old one back on the next
 # upgrade.
 cmd_restic_update() {
-  local arch want b cur old=() f tmp got newbin out="" pkg held=""
-  case "$(uname -m)" in
-    x86_64) arch=amd64; want="$RESTIC_SHA_amd64" ;;
-    aarch64|arm64) arch=arm64; want="$RESTIC_SHA_arm64" ;;
-    *) echo "unknown architecture: $(uname -m)" >&2; return 2 ;;
-  esac
+  local b cur old=() tmp newbin nb out="" pkg held=""
   while IFS= read -r b; do
     [ -x "$b" ] || continue
     cur="$(restic_ver "$b")"
@@ -1392,30 +1512,20 @@ cmd_restic_update() {
     if ver_lt "$cur" "$RESTIC_TARGET_VER"; then old+=("$b"); echo "$b: restic $cur"; fi
   done < <(server_restic_bins)
   if [ "${#old[@]}" -eq 0 ]; then echo "restic is $RESTIC_TARGET_VER or newer, nothing to update"; return 0; fi
-  command -v bunzip2 >/dev/null 2>&1 || { apt-get update -qq >/dev/null 2>&1 || true; apt-get install -y -qq bzip2 >/dev/null 2>&1 || true; }
-  f="restic_${RESTIC_TARGET_VER}_linux_${arch}.bz2"
-  tmp="$(mktemp -d /tmp/kv-restic.XXXXXX)"
-  if ! curl -fsSL --connect-timeout 20 --max-time 600 "https://github.com/restic/restic/releases/download/v$RESTIC_TARGET_VER/$f" -o "$tmp/$f"; then
-    rm -rf "$tmp"; echo "could not download restic $RESTIC_TARGET_VER from github" >&2; return 2
-  fi
-  got="$(sha256sum "$tmp/$f" | awk '{ print $1 }')"
-  if [ "$got" != "$want" ]; then
-    rm -rf "$tmp"; echo "the sha256 did not match (expected $want, got $got), nothing was replaced" >&2; return 2
-  fi
-  bunzip2 -f "$tmp/$f" || { rm -rf "$tmp"; echo "bunzip2 failed" >&2; return 2; }
-  newbin="$tmp/${f%.bz2}"
-  chmod 0755 "$newbin"
-  [ "$(restic_ver "$newbin")" = "$RESTIC_TARGET_VER" ] || { rm -rf "$tmp"; echo "the downloaded restic does not run" >&2; return 2; }
+  tmp="$(restic_fetch)" || return 2
+  newbin="$tmp/restic"
   for b in "${old[@]}"; do
     # a copy next to it plus mv: same filesystem, so the swap is atomic and a running prune keeps the old file
-    if cp -f "$newbin" "$b.kv-new" && chmod 0755 "$b.kv-new" && mv -f "$b.kv-new" "$b"; then
+    nb=""
+    if nb="$(mktemp "$(dirname "$b")/.restic-new.XXXXXX")" && cp -f "$newbin" "$nb" \
+       && chown root:root "$nb" && chmod 0755 "$nb" && mv -fT "$nb" "$b"; then
       out="$out $b"
       pkg="$(dpkg -S "$b" 2>/dev/null | head -n1 | cut -d: -f1 || true)"
       if [ -n "$pkg" ] && apt-mark hold "$pkg" >/dev/null 2>&1; then
         held=" (package $pkg is on hold now, apt will not bring the old version back)"
       fi
     else
-      rm -f "$b.kv-new"; echo "could not replace $b" >&2
+      [ -n "$nb" ] && rm -f "$nb"; echo "could not replace $b" >&2
     fi
   done
   rm -rf "$tmp"
@@ -1588,11 +1698,22 @@ print(len(ts), ts[0] if ts else 0, ts[-1] if ts else 0)
   )
 }
 
+# The answer goes into a 0750 directory the agent cannot write to, through a fresh mktemp name;
+# answers nobody picked up are removed after 10 minutes (the agent cannot delete them any more).
+res_write() {  # $1 id, $2 ok, $3 output
+  local tmp
+  tmp="$(mktemp "$RES_DIR/.res.XXXXXX")" || return 1
+  printf 'ok=%s\noutput=%s\n' "$2" "$3" > "$tmp" && chmod 0644 "$tmp" && mv -fT "$tmp" "$RES_DIR/$1.res" || rm -f "$tmp"
+}
+
 cmd_process_spool() {
   local req id action name hpass repopass client_ip kl kd kw km san_ip san_dns port out ok k v line
+  find "$RES_DIR" -maxdepth 1 -type f -name '*.res' -mmin +10 -delete 2>/dev/null || true
   for req in "$REQ_DIR"/*.req; do
-    [ -f "$req" ] || continue
+    [ -e "$req" ] || [ -L "$req" ] || continue
     id="$(basename "$req" .req)"
+    # the agent names requests <command id>-<nanoseconds>; a symlink or anything else is not a request
+    if [ -L "$req" ] || [ ! -f "$req" ] || [[ ! "$id" =~ ^[0-9A-Za-z_-]{1,64}$ ]]; then rm -f "$req"; continue; fi
     action=""; name=""; hpass=""; repopass=""; client_ip=""; kl=3; kd=7; kw=4; km=6; san_ip=""; san_dns=""; port="$REST_PORT"
     # read the whole line and split on the first '=' (this keeps a trailing '=' inside values)
     while IFS= read -r line; do
@@ -1603,7 +1724,7 @@ cmd_process_spool() {
         keep_weekly) kw="$v";; keep_monthly) km="$v";; san_ip) san_ip="$v";; san_dns) san_dns="$v";;
         port) port="$v";;
       esac
-    done < "$req"
+    done < <(head -c 65536 "$req")
     rm -f "$req"  # secrets do not linger on disk
     out=""; ok=false
     case "$action" in
@@ -1616,8 +1737,7 @@ cmd_process_spool() {
       get_client_creds) if out="$(cmd_get_client_creds "$name" 2>&1)"; then ok=true; fi ;;
       *) out="unknown action" ;;
     esac
-    printf 'ok=%s\noutput=%s\n' "$ok" "$(printf '%s' "$out" | tr '\n' '\r')" > "$RES_DIR/$id.res.tmp"
-    mv -f "$RES_DIR/$id.res.tmp" "$RES_DIR/$id.res"; chmod 0644 "$RES_DIR/$id.res"
+    res_write "$id" "$ok" "$(printf '%s' "$out" | tr '\n' '\r')" || true
   done
 }
 

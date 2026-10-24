@@ -6,10 +6,9 @@
 # pods and the host alike), asks it for its programs every minute and writes
 # /var/lib/kervax/report.d/workers.json; the agent hands report.d to the panel as is.
 #
-# supervisord is asked over its own XML-RPC socket with its own python and supervisor module,
-# inside its mount and network namespaces: the socket path and the credentials come from its
-# config ([supervisorctl], else [unix_http_server] or [inet_http_server]), they never leave the
-# namespace. pm2 is asked over its rpc.sock with the axon client shipped inside pm2 itself
+# supervisord is asked over its own XML-RPC socket by curl of the host: the socket path and the
+# credentials come from its config ([supervisorctl], else [unix_http_server] or [inet_http_server]),
+# they never leave the node. pm2 is asked over its rpc.sock with the axon client shipped inside pm2 itself
 # (getMonitorData, what "pm2 jlist" calls), by the daemon's own node. Not "pm2 jlist": the pm2
 # command starts a new daemon when it does not find one, and a wrong PM2_HOME would do just that.
 #
@@ -29,9 +28,19 @@
 # and up" every few minutes. A restart after any other exit, or after a run shorter than a
 # minute, is still counted as a crash (r15, r60). Restart times kept by 0.2 counted both and are
 # dropped on the first run.
+#
+# 0.4: the helper ran, as root with every capability, the python or node a process pointed at: a
+# user's process with "supervisord" in its arguments got its own file run as root, and an image's
+# interpreter ran as root of the host outside the container's confinement. supervisord is asked
+# by the host's curl now, over its XML-RPC socket (a unix one through /proc/PID/root, an inet one
+# inside its network namespace only), and nothing of the daemon's runs. pm2's node runs as the
+# daemon's own user; root of a docker container by docker exec, confined like the container, root
+# of another container as nobody; root on the host only when the node is root's and nobody else
+# can change it or a directory above it. A host without curl 7.40 asks supervisord the old way,
+# under the same rule.
 set -euo pipefail
 
-KERVAX_SETUP_VERSION=0.3  # MAJOR.MINOR; compared component-wise
+KERVAX_SETUP_VERSION=0.4  # MAJOR.MINOR; compared component-wise
 KERVAX_SETUP_ALWAYS=1     # safe on any node: without supervisord or pm2 it runs one ps and exits
 
 HELPER_DIR=/lib65/kervax
@@ -109,7 +118,155 @@ where_of() { # pid -> "container X" | "pod ns/name" | "host"
 }
 in_root() { [ -e "/proc/$1/root$2" ]; }  # pid path
 
-# supervisord: its python, its config; prints "P name state start now pid exit desc log" or "E why"
+# -- who runs what inside a daemon's namespaces --
+# A container's files are its image's, and a host process' command line is whatever its user typed:
+# nothing found through a process runs as root unless the process is root's on the host itself and
+# the file is root's too (it and every directory above it, none writable by anybody else). Anything
+# else runs as the process' own user, root of a container as nobody, and a container is entered
+# with its PID namespace as well.
+on_host() { [ "$(stat -L -c %d:%i "/proc/$1/root" 2>/dev/null)" = "$(stat -L -c %d:%i /)" ]; }
+roots() { # path -> 0 if root's and nobody else can change it
+  local f m
+  f=$(readlink -f "$1" 2>/dev/null) && [ -e "$f" ] || return 1
+  while :; do
+    m=$(stat -c '%u %a' "$f" 2>/dev/null) || return 1
+    [ "${m%% *}" = 0 ] && [ $((0${m#* } & 022)) = 0 ] || return 1
+    [ "$f" = / ] && return 0
+    f=${f%/*}; f=${f:-/}
+  done
+}
+ids_of() { awk '/^Uid:/ { u = $2 } /^Gid:/ { g = $2 } END { if (u != "") print u, g }' "/proc/$1/status" 2>/dev/null; }
+ns_as() { # pid binary (as seen inside) -> nsenter options
+  local u g
+  read -r u g < <(ids_of "$1") && [ -n "$u" ] || return 1
+  if on_host "$1"; then
+    [ "$u" = 0 ] && ! roots "$2" && { u=65534; g=65534; }
+    printf -- '-m -n -S %s -G %s' "$u" "$g"
+  else
+    [ "$u" = 0 ] && { u=65534; g=65534; }
+    printf -- '-m -n -p -S %s -G %s' "$u" "$g"
+  fi
+}
+
+# supervisord is asked by the host's own curl over its XML-RPC socket: a unix socket through
+# /proc/PID/root, an inet one inside its network namespace only. Nothing of the daemon's runs.
+# The credentials go to curl on stdin, not on its command line.
+curl -q --help all 2>/dev/null | grep -q -- --unix-socket && CURL_UNIX=1 || CURL_UNIX=0
+sup_ini() { # pid conf -> "url user password" (tab separated) to try, and "norpc" if it has no socket at all
+  local p=$1 conf=$2 here f pat pats=()
+  here=${conf%/*}; here=${here:-/}
+  # [include] files: a socket may be set in an included file
+  read -r -a pats < <(awk '/^[ \t]*\[/ { s = $0; next } s ~ /^[ \t]*\[include\]/ && /^[ \t]*files[ \t]*[=:]/ { sub(/^[^=:]*[=:]/, ""); sub(/[ \t]+;.*$/, ""); print; exit }' \
+                      "/proc/$p/root$conf" 2>/dev/null)
+  {
+    head -c 262144 "/proc/$p/root$conf" 2>/dev/null; echo
+    for pat in "${pats[@]:0:5}"; do
+      case "$pat" in /*) ;; *) pat="$here/$pat" ;; esac
+      for f in "/proc/$p/root"$pat; do [ -f "$f" ] && { head -c 262144 "$f" 2>/dev/null; echo; }; done
+    done
+  } > "$TMPD/conf"
+  tr '\0' '\n' < "/proc/$p/environ" > "$TMPD/env" 2>/dev/null
+  awk -v here="$here" -v envf="$TMPD/env" '
+    BEGIN { while ((getline l < envf) > 0) { i = index(l, "="); if (i) env["ENV_" substr(l, 1, i - 1)] = substr(l, i + 1) } }
+    function val(s,   k) { sub(/^[ \t]+/, "", s); sub(/[ \t]+;.*$/, "", s); sub(/[ \t\r]+$/, "", s); gsub(/%\(here\)s/, here, s)
+      while (match(s, /%\(ENV_[A-Za-z0-9_]+\)s/)) { k = substr(s, RSTART + 2, RLENGTH - 4); s = substr(s, 1, RSTART - 1) env[k] substr(s, RSTART + RLENGTH) }
+      return s }
+    /^[ \t]*[;#]/ { next }
+    /^[ \t]*\[/ { sec = $0; gsub(/^[ \t]*\[|\][ \t\r]*$/, "", sec); has[sec] = 1; next }
+    { i = index($0, "="); j = index($0, ":"); if (!i || (j && j < i)) i = j; if (!i) next
+      k = tolower(substr($0, 1, i - 1)); gsub(/[ \t]/, "", k); v[sec "|" k] = val(substr($0, i + 1)) }
+    END {
+      if (v["supervisorctl|serverurl"] != "") print v["supervisorctl|serverurl"] "\t" v["supervisorctl|username"] "\t" v["supervisorctl|password"]
+      if (v["unix_http_server|file"] != "") print "unix://" v["unix_http_server|file"] "\t" v["unix_http_server|username"] "\t" v["unix_http_server|password"]
+      if (v["inet_http_server|port"] != "") { p = v["inet_http_server|port"]; sub(/.*:/, "", p)
+        print "http://127.0.0.1:" p "\t" v["inet_http_server|username"] "\t" v["inet_http_server|password"] }
+      # without [unix_http_server] and [inet_http_server] supervisord has no control socket at all
+      # (docker-mailserver): nobody, supervisorctl included, can ask it
+      if (!has["unix_http_server"] && !has["inet_http_server"] && !has["include"]) print "norpc" }' "$TMPD/conf"
+}
+sup_call() { # pid url user password body -> the reply in $TMPD/x; 0 - answered, 1 - refused (auth), 2 - no answer
+  local p=$1 url=$2 user=$3 pw=$4 body=$5 auth="" code sock
+  cq() { printf '%s' "$1" | sed 's/[\\"]/\\&/g'; }
+  [ -n "$user" ] && auth="user = \"$(cq "$user"):$(cq "$pw")\""
+  : > "$TMPD/x"
+  case "$url" in
+    unix://*)
+      sock="/proc/$p/root${url#unix://}"
+      [ "$CURL_UNIX" = 1 ] && [ -S "$sock" ] || return 2
+      code=$(printf '%s\n' "$auth" | curl -q -s -m 5 -K - --noproxy '*' -o "$TMPD/x" -w '%{http_code}' --unix-socket "$sock" \
+             -H 'Content-Type: text/xml' --data-binary "$body" http://localhost/RPC2 2>/dev/null) ;;
+    http://*)
+      code=$(printf '%s\n' "$auth" | nsenter -t "$p" -n -- curl -q -s -m 5 -K - --noproxy '*' -o "$TMPD/x" -w '%{http_code}' \
+             -H 'Content-Type: text/xml' --data-binary "$body" "${url%/}/RPC2" 2>/dev/null) ;;
+    *) return 2 ;;
+  esac
+  [ "$code" = 401 ] && return 1
+  [ "$code" = 200 ] || return 2
+}
+xq() { printf '%s' "$1" | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g'; }
+# XML-RPC replies, read tag by tag; values unescaped, a log line with secrets hidden
+SUP_AWK='
+function un(s) { gsub(/&lt;/, "<", s); gsub(/&gt;/, ">", s); gsub(/&quot;/, "\"", s); gsub(/&apos;/, "\047", s); gsub(/&amp;/, "\\&", s); return s }
+function cl(s) { gsub(/[\t\r\n]+/, " ", s); return s }
+function mask(s,   out, st, ln, m) { s = substr(s, 1, 600); out = ""
+  while (match(tolower(s), /(pass(word|wd)?|secret|token|api[_-]?key|authorization)["\047]?[ ]*[=:][ ]*[^ ]+/)) {
+    st = RSTART; ln = RLENGTH; m = substr(s, st, ln); match(m, /[=:][ ]*/)
+    out = out substr(s, 1, st - 1) substr(m, 1, RSTART + RLENGTH - 1) "***"; s = substr(s, st + ln) }
+  s = out s; gsub(/[[:cntrl:]]/, " ", s); return substr(s, 1, 300) }
+BEGIN { RS = "<" }
+{ i = index($0, ">"); t = substr($0, 1, i - 1); x = substr($0, i + 1) }
+t == "fault" { fault = 1 }
+'
+# getAllProcessInfo -> "P name state start now pid exit desc" and OK
+SUP_ROWS=$SUP_AWK'
+t == "struct" { split("", m) }
+t == "name" { k = x }
+t == "value" { vv = x }
+t ~ /^(string|int|i4|i8|boolean|double)$/ { vv = x }
+t == "/member" { m[k] = un(vv) }
+t == "/struct" && ("statename" in m) { n++
+  print "P\t" cl(m["group"] == m["name"] ? m["name"] : m["group"] ":" m["name"]) "\t" cl(m["statename"]) "\t" cl(m["start"]) "\t" cl(m["now"]) \
+    "\t" cl(m["pid"]) "\t" cl(m["exitstatus"]) "\t" cl(substr(m["spawnerr"], 1, 200)) }
+END { if (!fault) print "OK" }'
+# tailProcess*Log -> its last line that is not empty
+SUP_TAIL=$SUP_AWK'
+t == "string" && !got { s = x; got = 1 }
+END { if (fault || !got) exit; s = un(s); gsub(sprintf("%c", 27) "\\[[0-9;?]*[A-Za-z]", "", s)
+  n = split(s, L, "\n"); for (j = n; j >= 1; j--) { y = L[j]; gsub(/^[ \t\r]+|[ \t\r]+$/, "", y); if (y != "") break }
+  if (y != "") print mask(y) }'
+SUP_ALL='<?xml version="1.0"?><methodCall><methodName>supervisor.getAllProcessInfo</methodName><params></params></methodCall>'
+sup_ask() { # pid conf -> rows like SUP_PY prints, from the host
+  local p=$1 conf=$2 url user pw r why=down norpc="" ok="" tag full st start now pid ex desc line m t0=$SECONDS nlog=0
+  while IFS=$'\t' read -r url user pw; do
+    [ "$url" = norpc ] && { norpc=1; continue; }
+    sup_call "$p" "$url" "$user" "$pw" "$SUP_ALL"; r=$?
+    [ $r = 1 ] && why=auth
+    [ $r = 0 ] && awk "$SUP_ROWS" "$TMPD/x" > "$TMPD/sup" 2>/dev/null && grep -qx OK "$TMPD/sup" && { ok=1; break; }
+  done < <(sup_ini "$p" "$conf")
+  if [ -z "$ok" ]; then
+    [ -n "$norpc" ] && [ "$why" = down ] && why=norpc
+    printf 'E\t%s\n' "$why"; return
+  fi
+  while IFS=$'\t' read -r tag full st start now pid ex desc; do
+    [ "$tag" = P ] || continue
+    line=""
+    case "$st" in FATAL|BACKOFF|EXITED|UNKNOWN) m=1 ;; *) m=$(( ${now:-0} - ${start:-0} < 900 )) ;; esac
+    # the last line of its log, the time of one daemon and 30 programs at most
+    if [ "$m" = 1 ] && [ $nlog -lt 30 ] && [ $((SECONDS - t0)) -lt "$TO" ]; then
+      nlog=$((nlog + 1))
+      for t in tailProcessStderrLog tailProcessStdoutLog; do
+        sup_call "$p" "$url" "$user" "$pw" "<?xml version=\"1.0\"?><methodCall><methodName>supervisor.$t</methodName><params><param><value><string>$(xq "$full")</string></value></param><param><value><int>0</int></value></param><param><value><int>4000</int></value></param></params></methodCall>" || continue
+        line=$(awk "$SUP_TAIL" "$TMPD/x" 2>/dev/null)
+        [ -n "$line" ] && break
+      done
+    fi
+    printf 'P\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$full" "$st" "$start" "$now" "$pid" "$ex" "$desc" "$line"
+  done < "$TMPD/sup"
+  echo OK
+}
+
+# supervisord: its python, its config; prints "P name state start now pid exit desc log" or "E why".
+# Only where the curl of the host cannot reach a unix socket (curl before 7.40), run as ns_as says
 SUP_PY='
 import sys, re, os
 try:
@@ -279,17 +436,34 @@ while IFS=$'\t' read -r P KIND; do
     conf=$(sup_conf "$P")
     [ -n "$conf" ] || { printf '%s\t%s\tnoconf\n' "$W" "$KIND" >> "$TMPD/skip"; continue; }
     ID="$W|supervisor|$conf"
-    # the interpreter from the command line: a supervisor installed in a virtualenv imports only
-    # there, and /proc/PID/exe points past the venv to the system python
-    py=$(tr '\0' '\n' < "/proc/$P/cmdline" 2>/dev/null | head -1)
-    case "${py##*/}" in python*) ;; *) py=$exe ;; esac
-    timeout "$TO" nsenter -t "$P" -m -n -- "$py" -c "$SUP_PY" "$conf" < /dev/null > "$TMPD/out" 2>/dev/null
+    : > "$TMPD/out"
+    if [ "$CURL_UNIX" = 1 ] || sup_ini "$P" "$conf" | grep -q '^http://'; then
+      sup_ask "$P" "$conf" > "$TMPD/out" 2>/dev/null
+    else
+      # the interpreter from the command line: a supervisor installed in a virtualenv imports only
+      # there, and /proc/PID/exe points past the venv to the system python
+      py=$(tr '\0' '\n' < "/proc/$P/cmdline" 2>/dev/null | head -1)
+      case "${py##*/}" in python*) ;; *) py=$exe ;; esac
+      # shellcheck disable=SC2086
+      o=$(ns_as "$P" "$py") && timeout -k 5 "$TO" nsenter -t "$P" $o -- "$py" -E -s -c "$SUP_PY" "$conf" \
+        < /dev/null > "$TMPD/out" 2>/dev/null
+    fi
   else
     home=$(pm2_home "$P")
     ID="$W|pm2|$home"
-    # shellcheck disable=SC2046
-    timeout "$TO" nsenter -t "$P" -m -n -- "$exe" -e "$PM2_JS" "$home" $(pm2_dirs "$P" "$home" | sort -u) \
-      < /dev/null > "$TMPD/out" 2>/dev/null
+    id=$(cid_of "$P")
+    : > "$TMPD/out"
+    # a docker container's own node runs there by docker exec, confined like the container itself
+    # (as its root too: pm2 keeps rpc.sock to its own user); elsewhere as ns_as says
+    if [ -n "$id" ] && [ -n "${DNAME[$id]:-}" ] && ! on_host "$P"; then
+      # shellcheck disable=SC2046
+      timeout -k 5 "$TO" docker exec -u "$(ids_of "$P" | tr ' ' :)" "$id" "$exe" -e "$PM2_JS" "$home" \
+        $(pm2_dirs "$P" "$home" | sort -u) < /dev/null > "$TMPD/out" 2>/dev/null
+    elif o=$(ns_as "$P" "$exe"); then
+      # shellcheck disable=SC2046,SC2086
+      timeout -k 5 "$TO" nsenter -t "$P" $o -- "$exe" -e "$PM2_JS" "$home" \
+        $(pm2_dirs "$P" "$home" | sort -u) < /dev/null > "$TMPD/out" 2>/dev/null
+    fi
   fi
   e=$(awk -F'\t' '$1 == "E" { print $2; exit }' "$TMPD/out")
   if [ -n "$e" ] || ! grep -qx OK "$TMPD/out"; then

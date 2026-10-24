@@ -98,7 +98,11 @@ def test_own_unit_does_not_alert():
 
 def test_helper_script():
     src = (Path(__file__).resolve().parents[2] / "agent" / "workers-setup.sh").read_text(encoding="utf-8")
-    assert "KERVAX_SETUP_VERSION=0.3" in src and "KERVAX_SETUP_ALWAYS=1" in src and "\r" not in src
+    assert "KERVAX_SETUP_VERSION=0.4" in src and "KERVAX_SETUP_ALWAYS=1" in src and "\r" not in src
+    # 0.4: ничего, на что указал процесс, не запускается от root: supervisord спрашивает curl хоста,
+    # node pm2 - от владельца демона, root контейнера - docker exec или nobody
+    assert '-m -n -- "$py"' not in src and '-m -n -- "$exe"' not in src
+    assert "--unix-socket" in src and "-K -" in src and "u=65534; g=65534" in src and "docker exec -u" in src
     # 0.3: выход с кодом 0 после минуты работы - плановый перезапуск, не падение; старые времена сброшены
     assert 'if ($9 == "0" && $6 - cs[k] >= 60) pt = pt' in src and '\\"p60\\":%d' in src
     assert 'rt = cv >= 3 ? hour(crt[k]) : ""' in src

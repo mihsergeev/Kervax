@@ -14,9 +14,15 @@
 # Since 0.6 the panel can ask to analyze a filesystem below 75% ("Analyze", or a forecast says
 # it fills up in days): the fixer puts it on a watch list for a day, and the measurement treats
 # it as filling up. Read only, so fix.conf does not gate it.
+# Since 0.7 the answer directory of the spool is root's (0750, the agent reads): it was the agent's
+# to write while root wrote the answer there by a fixed name and made it 0644 after the move, and
+# a symlink planted by the agent led root to overwrite any file and open it to everybody. Answers
+# go through mktemp and are moved in already 0644; root removes the ones the agent did not take
+# within 10 minutes. A request that is a symlink or not a regular file is dropped unread, and only
+# its first 4 KB are read.
 set -euo pipefail
 
-KERVAX_SETUP_VERSION=0.6  # MAJOR.MINOR; compared component-wise
+KERVAX_SETUP_VERSION=0.7  # MAJOR.MINOR; compared component-wise
 KERVAX_SETUP_ALWAYS=1     # safe on any node: while disks have room it only reads df
 
 HELPER_DIR=/lib65/kervax
@@ -455,7 +461,9 @@ RES_DIR="$STATE_DIR/du-res"
 FIXER="$HELPER_DIR/kervax-disk-fix"
 if getent group "$AGENT_USER" >/dev/null 2>&1; then
   install -d -o root -g "$AGENT_USER" -m 0730 "$REQ_DIR"
-  install -d -o root -g "$AGENT_USER" -m 0770 "$RES_DIR"
+  install -d -o root -g "$AGENT_USER" -m 0750 "$RES_DIR"
+  # whatever the agent could leave there while the directory was its to write (0.6): only answers stay
+  find "$RES_DIR" -mindepth 1 \( ! -type f -o ! -name '*.res' \) -exec rm -rf {} + 2>/dev/null || true
   # the agent runs under ProtectSystem=strict: let it write the spool in /var/lib/kervax
   if systemctl cat kervax-agent >/dev/null 2>&1 \
      && [ ! -f /etc/systemd/system/kervax-agent.service.d/kervax-spool.conf ]; then
@@ -472,6 +480,9 @@ if getent group "$AGENT_USER" >/dev/null 2>&1; then
 # The fixer refuses anything not listed here, and the panel cannot change this file.
 # Remove an action to switch its button off; "allow=" with nothing disables them all.
 allow=journal rotated-logs apt-cache dnf-cache coredumps crash-reports docker-dangling docker-build-cache container-log
+# The panel may read the journal of the whole system (Logs, "whole journal"), not only of one unit
+# or the kernel: it holds sudo commands and the lines of every application.
+#journal_all=yes
 CONF_EOF
     chmod 0644 /etc/kervax/fix.conf
   fi
@@ -621,15 +632,20 @@ run_action() {  # action mode container mount
 }
 
 process_spool() {
-  local req id line k v act mode cont mnt tmpd first b n sample ok out refresh=""
+  local req id line k v act mode cont mnt tmpd first b n sample ok out refresh="" t
+  # answers the agent did not take (it timed out): the directory is root's, the agent cannot remove them
+  find "$RES_DIR" -maxdepth 1 -type f -mmin +10 -delete 2>/dev/null || true
   for req in "$REQ_DIR"/*.req; do
-    [ -f "$req" ] || continue
+    [ -e "$req" ] || [ -L "$req" ] || continue
     id=$(basename "$req" .req)
+    # a symlink or a fifo the agent left would make root read whatever it points at
+    if [ -L "$req" ] || [ ! -f "$req" ]; then rm -f "$req"; continue; fi
+    case "$id" in ''|*[!0-9-]*) rm -f "$req"; continue ;; esac
     act=""; mode=""; cont=""; mnt=""
     while IFS= read -r line; do
       k=${line%%=*}; v=${line#*=}
       case "$k" in action) act=$v ;; mode) mode=$v ;; container) cont=$v ;; mount) mnt=$v ;; esac
-    done < "$req"
+    done < <(head -c 4096 "$req")
     rm -f "$req"
     ok=false
     case "$mode" in preview|run) ;; *) act="" ;; esac
@@ -668,9 +684,9 @@ EOF_S
       fi
       rm -rf "$tmpd"
     fi
-    printf 'ok=%s\noutput=%s\n' "$ok" "$out" > "$RES_DIR/$id.res.tmp"
-    mv -f "$RES_DIR/$id.res.tmp" "$RES_DIR/$id.res"
-    chmod 0644 "$RES_DIR/$id.res"
+    t=$(mktemp "$RES_DIR/.res.XXXXXX") || continue
+    printf 'ok=%s\noutput=%s\n' "$ok" "$out" > "$t"
+    chmod 0644 "$t"; mv -fT "$t" "$RES_DIR/$id.res"
   done
   # after a run the panel should see the new numbers at once, not in ten minutes
   if [ -n "$refresh" ]; then

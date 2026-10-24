@@ -853,7 +853,7 @@ def test_new_client_user_reaches_every_rest_server():
     src = (Path(__file__).resolve().parents[2] / "agent" / "backupserver-setup.sh").read_text(encoding="utf-8")
     assert b"\r" not in src.encode()
     body = src[src.index("cmd_provision_client() {"):]
-    hp, sig, tls = body.index("htpasswd -bB"), body.index("rest_reload_htpasswd"), body.index('"https://127.0.0.1:$TLS_PORT/$name/config"')
+    hp, sig, tls = body.index("htpasswd -iB"), body.index("rest_reload_htpasswd"), body.index('"https://127.0.0.1:$TLS_PORT/$name/config"')
     assert hp < sig < tls < body.index("$RESTIC_BIN\" init")
     fn = src[src.index("rest_reload_htpasswd() {"):]
     fn = fn[:fn.index("\n}\n")]

@@ -117,7 +117,24 @@ AGENT_USER=kervax
 #       (its User and EnvironmentFile, no --cacert of its own); a failure puts everything back on
 #       http. Nodes already switched that way get the line on the next refresh. The reason of a
 #       failed run is the Fatal line, not the "retrying after" repeats
-KERVAX_SETUP_VERSION=0.42  # MAJOR.MINOR; compared component-wise (0.13 > 0.2!)
+# 0.43: the root side keeps its boundary against the agent and against bx231:
+#       * the answer directory is 0750: the agent only reads answers, root writes them through
+#         mktemp and removes them after 10 minutes (a symlink planted there by the agent used to
+#         turn the write and the chmod 0644 onto any root file); a request that is a symlink or
+#         larger than 64 KiB is dropped;
+#       * repopass and repo_url are checked before they reach the env file, which systemd and the
+#         runner (source, as bash) both read: a value with a quote, $ or ; ran as bx231 there;
+#       * provisioning goes only to the backup server the node already uses or to one listed in
+#         /etc/kervax/backup-allow (root writes it; the first provisioning records its server):
+#         the panel can no longer send the node's disk to a server of its choice;
+#       * /usr/local/lib/.restic and the restic in it belong to root (bx231 could swap the binary
+#         that root runs too), the metrics directory is root:bx231 1775;
+#       * dumps go into <dir>/kervax-dumps/<engine> for a directory other than /backup, system
+#         directories are refused, the dump directory itself is never chmod'ed, and dump-remove
+#         removes only a directory the helper made; KV_DUMP_* no longer leak into the next
+#         request of the same pass;
+#       * restic is downloaded into mktemp -d and checked against the baked sha256 only
+KERVAX_SETUP_VERSION=0.43  # MAJOR.MINOR; compared component-wise (0.13 > 0.2!)
 KERVAX_SETUP_ALWAYS=1  # safe on any node: installs only its own helper and spool and does not
                        # touch the backup configuration until the panel sends a command
 install -d -m 0755 "$HELPER_DIR" "$STATE_DIR" /var/lib/kervax/versions
@@ -127,8 +144,10 @@ chmod 0644 /var/lib/kervax/versions/backup-setup.ver  # explicit: the agent (ker
 rm -f /etc/sudoers.d/kervax-backup 2>/dev/null || true
 # spool: the agent (kervax) drops requests (needs -wx) and reads answers (needs r-x)
 install -d -o root -g "$AGENT_USER" -m 0730 "$REQ_DIR"
-# 0770: the agent (kervax) must DELETE an answer once read, otherwise res files pile up
-install -d -o root -g "$AGENT_USER" -m 0770 "$RES_DIR"
+# 0750: the agent only reads answers. With write access it could plant a symlink under the name
+# root writes the answer to and turn that write (and the chmod after it) onto any file. Root
+# removes old answers itself (res_cleanup); the agent's attempt to delete one simply fails.
+install -d -o root -g "$AGENT_USER" -m 0750 "$RES_DIR"
 # under ProtectSystem=strict the agent may write only to its own bin directory, so the spool is
 # allowed explicitly; otherwise /var/lib/kervax is read-only and the spool does not work.
 # A drop-in plus an agent restart.
@@ -183,6 +202,102 @@ valid_path() { case "$1" in
 esac; }
 json_escape() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
 
+# The env file is read twice: by systemd (EnvironmentFile=) and by the runner (source, as bash).
+# No quoting means the same to both, so a value goes in only when it holds nothing either of
+# them would interpret: no quotes, $, `, \, ;, spaces or ~. The panel generates letters and
+# digits; the wider set covers passwords of older layouts.
+secret_ok() { [[ "$1" =~ ^[A-Za-z0-9+/=_.,:@%-]{8,256}$ ]]; }
+REPO_URL_RE='^rest:https?://([A-Za-z0-9._-]+:[A-Za-z0-9._%+=-]+@)?([A-Za-z0-9.-]+|\[[0-9A-Fa-f:.]+\])(:[0-9]{1,5})?(/[A-Za-z0-9._-]+)*/?$'
+repo_url_ok() { [ "${#1}" -le 512 ] && [[ "$1" =~ $REPO_URL_RE ]]; }
+# the host of rest:http(s)://[user:pass@]host[:port]/repo, without brackets for IPv6
+repo_host() {
+  local r="${1#rest:}" hp
+  r="${r#http://}"; r="${r#https://}"; hp="${r%%/*}"; hp="${hp##*@}"
+  case "$hp" in \[*) hp="${hp%%]*}"; printf '%s' "${hp#[}" ;; *) printf '%s' "${hp%%:*}" ;; esac
+}
+
+# Backup servers this node may send its data to. Root writes the file (by hand or with ansible);
+# the first provisioning records its server there, and so does the refresh for a node that
+# already backs up. A provisioning to any other server is refused: the panel (or whoever took it
+# over) cannot point the node's backup at a server of its own and get the whole disk the next
+# night. Moving a node to another backup server is one line here, as root on the node.
+BACKUP_ALLOW=/etc/kervax/backup-allow
+allow_hosts() { [ -f "$BACKUP_ALLOW" ] && sed -e 's/#.*//' -e 's/[[:space:]]//g' "$BACKUP_ALLOW" | grep -v '^$' || true; }
+allow_add() {
+  [ -L "$BACKUP_ALLOW" ] && return 1
+  [ -d /etc/kervax ] || install -d -m 0755 /etc/kervax
+  if [ ! -f "$BACKUP_ALLOW" ]; then
+    printf '# backup servers this node may send its backup to (one host or IP per line)\n' > "$BACKUP_ALLOW"
+  fi
+  allow_hosts | grep -qxF "$1" || printf '%s\n' "$1" >> "$BACKUP_ALLOW"
+  chown root:root "$BACKUP_ALLOW"; chmod 0644 "$BACKUP_ALLOW"
+}
+# $1 the host of the new repository, $2 "local" when the address was read on the node itself (adopt)
+repo_host_ok() {
+  local h="$1" cur=""
+  [ -n "$h" ] || { echo "no host in the repository address" >&2; return 1; }
+  if [ -f "$BACKUP_ALLOW" ]; then
+    allow_hosts | grep -qxF "$h" && return 0
+    [ "${2:-}" = local ] && { allow_add "$h"; return 0; }
+    echo "the backup server $h is not in $BACKUP_ALLOW - the node sends its backup only to the servers listed there. To allow it, add the line as root on the node: echo $h >> $BACKUP_ALLOW" >&2
+    return 1
+  fi
+  [ -f "$PROV_ENV" ] && cur="$(sed -n 's/^RESTIC_REPOSITORY=//p' "$PROV_ENV" | head -1)"
+  if [ -n "$cur" ] && [ "${2:-}" != local ] && [ "$(repo_host "$cur")" != "$h" ]; then
+    echo "the node backs up to $(repo_host "$cur"), not to $h - a backup is moved to another server only by root on the node: echo $h >> $BACKUP_ALLOW" >&2
+    return 1
+  fi
+  allow_add "$h"
+}
+# a node that already backs up gets its current server recorded
+allow_seed_maybe() {
+  if [ -f "$BACKUP_ALLOW" ] || [ -L "$BACKUP_ALLOW" ] || [ ! -f "$PROV_ENV" ]; then return 0; fi
+  local cur; cur="$(sed -n 's/^RESTIC_REPOSITORY=//p' "$PROV_ENV" | head -1)"
+  case "$cur" in rest:*) allow_add "$(repo_host "$cur")" ;; esac
+}
+
+# bx231 runs restic and writes its own metrics file, nothing more. 0.42 and older gave it the
+# restic directory with the binary in it (root runs that binary too: restic-update, to-https)
+# and the whole node_exporter directory (root writes there on a backup server). Now the restic
+# directory and the binary belong to root, and the metrics directory is root:bx231 1775: bx231
+# still creates and renames its own files there (the runner writes through a temporary file and
+# mv), but cannot touch anyone else's.
+backup_perms_maybe() {
+  local f
+  if [ -d "$RESTIC_BIN_DIR" ] && [ ! -L "$RESTIC_BIN_DIR" ]; then
+    for f in "$RESTIC_BIN_DIR" "$RESTIC_BIN" "$PROV_CACERT"; do
+      [ -e "$f" ] && [ ! -L "$f" ] || continue
+      [ "$(stat -c %u "$f")" = 0 ] || chown root:root "$f"
+      chmod go-w "$f"
+    done
+  fi
+  metrics_dir_prepare 0
+}
+# $1 1 - create the directory (provisioning), 0 - only repair one that bx231 owns
+metrics_dir_prepare() {
+  local d="$PROV_METRICS_DIR" f
+  id -u "$PROV_USER" >/dev/null 2>&1 || return 0
+  [ -L "$d" ] && return 0
+  if [ ! -d "$d" ]; then
+    [ "$1" = 1 ] || return 0
+    # install -d creates missing parents itself and leaves existing ones as they are
+    install -d -o root -g "$PROV_USER" -m 1775 "$d"
+    return 0
+  fi
+  case "$(stat -c '%U %a' "$d")" in
+    "$PROV_USER "*) ;;                      # 0.42 and older: bx231 owned it
+    "root 1775") return 0 ;;
+    root\ *) [ "$1" = 1 ] || return 0 ;;    # bx231 cannot write there yet: provisioning only
+    *) return 0 ;;
+  esac
+  # bx231 must keep replacing its own metrics: a file root owns could not be renamed over in a
+  # sticky directory, and the backup run would fail on writing its metrics
+  for f in "$d/$PROV_METRICS_FILE" "$d/rk.prom"; do
+    [ -f "$f" ] && [ ! -L "$f" ] && [ "$(stat -c %U "$f")" = root ] && chown "$PROV_USER:$PROV_USER" "$f"
+  done
+  chown root:"$PROV_USER" "$d" && chmod 1775 "$d"
+}
+
 # ------- local database dumps: restic picks them up with the ordinary file backup -------
 # A file snapshot of a live database may fail to restore, so a proper dump is placed next to it.
 # Passwords are NOT needed and NOT stored: containers are entered with `docker exec` as a
@@ -196,6 +311,46 @@ DUMPS_D=/lib65/kervax/dumps.d
 RUN_DUMPS=/lib65/kervax/run-dumps.sh
 DUMP_KEEP=2  # keep the last 2: restic holds the history, there is no point duplicating it on disk
 DUMP_HOUR=3  # the hour of the dumps' own timer (when the node has no file backup)
+
+# The dump directory comes from the panel, and root creates directories under it, rotates the
+# dumps and removes them. A system directory is refused outright (/var/lib as the directory made
+# root chmod /var/lib 0700 and later rm -rf /var/lib/mysql).
+dump_sys_dir() {  # $1 an absolute path without ..
+  case "$1/" in
+    /|/var/|/home/) return 0 ;;
+    /bin/*|/boot/*|/dev/*|/etc/*|/lib*/*|/proc/*|/root/*|/run/*|/sbin/*|/snap/*|/sys/*|/tmp/*|/usr/*) return 0 ;;
+    /var/tmp/*|/var/lib/*|/var/log/*|/var/cache/*|/var/spool/*|/var/run/*|/var/lock/*|/var/mail/*) return 0 ;;
+  esac
+  return 1
+}
+# Every existing part of the path belongs to root, and nobody else may write to it (a sticky
+# directory is fine): otherwise a user swaps a directory of theirs for a symlink, and root
+# rotates dumps somewhere else.
+dump_path_safe() {
+  local p="$1" st m
+  while :; do
+    if [ -e "$p" ]; then
+      st="$(stat -c '%u %a' "$p")" || return 1; m="${st##* }"
+      [ "${st%% *}" = 0 ] || return 1
+      if (( (8#$m & 8#022) != 0 && (8#$m & 8#1000) == 0 )); then return 1; fi
+    fi
+    [ "$p" = / ] && return 0
+    p="$(dirname "$p")"
+  done
+}
+# Where the dumps of a directory chosen in the panel go. /backup is the helper's own and keeps its
+# layout (/backup/<engine>). Any other directory gets a kervax-dumps subdirectory, so nothing that
+# was there before is ever chmod'ed, rotated or removed. A slot that already lives in the old
+# layout (<dir>/<engine>) stays there, so its dumps do not move.
+dump_root_of() {  # $1 directory, $2 engine, $3 container
+  local d="$1" old="$1/$2" cur=""
+  [ -n "$3" ] && old="$old/$3"
+  [ "$d" = "$DUMP_DIR_BASE" ] && { printf '%s' "$d"; return; }
+  case "$d" in */kervax-dumps) printf '%s' "$d"; return ;; esac
+  local slot="$2"; [ -n "$3" ] && slot="$2@$3"
+  [ -f "$DUMPS_D/$slot.meta" ] && cur="$(sed -n 's/^dir=//p' "$DUMPS_D/$slot.meta" | head -1)"
+  if [ "$cur" = "$old" ]; then printf '%s' "$d"; else printf '%s' "$d/kervax-dumps"; fi
+}
 
 # run-dumps.sh runs every enabled dump. It is attached to the backup service as
 # ExecStartPre=- (note the minus): a failed dump must NOT cancel the file backup.
@@ -778,9 +933,22 @@ cmd_dump_setup() {
     /*) : ;; *) echo "the dump directory must be an absolute path: $dir_base" >&2; return 2 ;;
   esac
   case "$dir_base" in
-    *..*|*[!A-Za-z0-9._/-]*) echo "invalid dump directory: $dir_base" >&2; return 2 ;;
+    *..*|*[!A-Za-z0-9._/-]*|*//*) echo "invalid dump directory: $dir_base" >&2; return 2 ;;
     /) echo "the root / cannot be used for dumps" >&2; return 2 ;;
   esac
+  dir_base="${dir_base%/}"
+  # a directory sent by the panel; the helper's own /backup keeps its layout and is not second-guessed
+  if [ "$dir_base" != "$DUMP_DIR_BASE" ]; then
+    local dir_real; dir_real="$(realpath -m -- "$dir_base")"
+    if dump_sys_dir "$dir_base" || dump_sys_dir "$dir_real"; then
+      echo "$dir_base is a system directory - dumps go to /backup or to a directory of their own (/data/dumps, /mnt/backup)" >&2; return 2
+    fi
+    if ! dump_path_safe "$dir_real"; then
+      echo "$dir_base cannot hold dumps: a part of the path belongs to another user or others may write to it, and root would follow whatever they put there" >&2; return 2
+    fi
+  fi
+  local dir_req="$dir_base"
+  dir_base="$(dump_root_of "$dir_base" "$engine" "$container")"
   case "$keep" in ''|*[!0-9]*) keep=2 ;; esac
   [ "$keep" -lt 1 ] && keep=1; [ "$keep" -gt 30 ] && keep=30
   case "$minfree" in ''|*[!0-9]*) minfree=10 ;; esac
@@ -803,7 +971,8 @@ cmd_dump_setup() {
   # failed try left the dump directory and a drop-in on the backup service), changing the
   # settings of a working dump keeps it as it was when the probe fails, and the host MySQL dump is
   # generated with the login the probe found.
-  local perr="/tmp/kv-dump.$$" prc=0
+  local perr prc=0
+  perr="$(mktemp /tmp/kv-dump.XXXXXX)" || { echo "mktemp failed" >&2; return 2; }
   dump_probe "$engine" "$container" >"$perr" 2>&1 || prc=$?
   if [ "$prc" -ne 0 ]; then
     local err; err="$(tr '\n' ' ' <"$perr" | sed 's/  */ /g; s/^ //; s/ $//' | tail -c 1000)"; rm -f "$perr"
@@ -812,6 +981,8 @@ cmd_dump_setup() {
     echo "the dump probe failed, dumps were NOT enabled: $err" >&2; return 2
   fi
   rm -f "$perr"
+  # the chosen directory is created when missing and never chmod'ed: it may hold other things
+  [ -d "$dir_req" ] || install -d -m 0755 "$dir_req"
   install -d -m 0700 "$dir_base" "$dir_base/$engine" "$out"
   write_run_dumps
   local f="$DUMPS_D/$slot.sh"
@@ -1022,7 +1193,7 @@ fi
       # exclude mode: make sure the dump directory is not thrown out by an exclusion
       local exc; exc="$(sed -n 's/^EXCLUDES_STR="\(.*\)"$/\1/p' "$script" | head -1)"
       case "$exc" in
-        *"--exclude=$dir_base"*) added=" WARNING: $dir_base is on the exclusion list - the dumps will not reach the backup!" ;;
+        *"--exclude=$dir_base"*|*"--exclude=$dir_req "*|*"--exclude=$dir_req") added=" WARNING: $dir_base is on the exclusion list - the dumps will not reach the backup!" ;;
       esac
     fi
   fi
@@ -1058,8 +1229,23 @@ cmd_dump_remove() {
     out="$(sed -n 's/^dir=//p' "$DUMPS_D/$slot.meta" | head -1)"
     base="$(dirname "$(dirname "$out")")"; [ -z "$container" ] && base="$(dirname "$out")"
   fi
+  # Only a directory the helper itself lays out is removed: <base>/<engine>[/<container>] with
+  # a base that is not a system directory. 0.42 and older trusted dir= from .meta, and a dump
+  # set up on /var/lib turned dump-remove into rm -rf /var/lib/mysql.
+  local want="$base/$engine"; [ -n "$container" ] && want="$base/$engine/$container"
+  local keepfiles=""
+  case "$out" in /*) ;; *) keepfiles=1 ;; esac
+  case "$out" in *..*|*[!A-Za-z0-9._/-]*) keepfiles=1 ;; esac
+  [ "$out" = "$want" ] || keepfiles=1
+  dump_sys_dir "$base" && keepfiles=1
+  [ -z "$keepfiles" ] && dump_sys_dir "$(realpath -m -- "$base")" && keepfiles=1
   rm -f "$f" "$DUMPS_D/$slot.meta" "$DUMPS_D/$slot.skip"
-  rm -rf "${out:?}"
+  if [ -n "$keepfiles" ]; then
+    refresh_config
+    echo "OK $slot dumps disabled; the files in $out were left in place: it is not a dump directory this helper lays out"
+    return 0
+  fi
+  rm -rf --one-file-system "${out:?}"
   # the engine directory is removed only if no dumps of another container remain in it
   rmdir "$(dirname "$out")" 2>/dev/null || true
   refresh_config
@@ -1176,6 +1362,8 @@ cmd_to_https() {
   [ -n "$host" ] || { echo "could not read the host from the repository address" >&2; return 2; }
   local new="rest:https://${ui}${host}:${port}${path}"
   local ca out n
+  # the certificate is written into the restic directory: it has to be root's first (0.42 left it to bx231)
+  backup_perms_maybe
   ca="$(mktemp "$RESTIC_BIN_DIR/.backup-ca.XXXXXX")" || { echo "mktemp failed" >&2; return 2; }
   if ! printf '%s' "$cacert_b64" | base64 -d > "$ca" 2>/dev/null || ! grep -q 'BEGIN CERTIFICATE' "$ca"; then
     rm -f "$ca"; echo "bad certificate" >&2; return 2
@@ -1311,23 +1499,43 @@ cmd_run_now() {
 
 # ---- provisioning a backup from scratch (restic plus env, script, service and timer) ----
 ensure_restic() {
-  local ver="$1" arch f base
+  local tmp
   [ -x "$RESTIC_BIN" ] && return 0
-  install -d -m 0755 "$RESTIC_BIN_DIR"
+  install -d -o root -g root -m 0755 "$RESTIC_BIN_DIR"
   # restic is already in the system - a copy is placed into our directory (as the ansible role does)
   if command -v restic >/dev/null 2>&1; then
-    cp "$(command -v restic)" "$RESTIC_BIN"; chmod 0755 "$RESTIC_BIN"; return 0
+    install -o root -g root -m 0755 "$(command -v restic)" "$RESTIC_BIN"; return 0
   fi
-  case "$(uname -m)" in x86_64) arch=amd64;; aarch64|arm64) arch=arm64;; *) echo "unknown arch." >&2; return 2;; esac
+  # RESTIC_TARGET_VER from a private mktemp directory, checked against the baked sha256. 0.42 and
+  # older downloaded into fixed names in /tmp, and the sum was optional and came from the same host
+  tmp="$(restic_fetch)" || return 2
+  install -o root -g root -m 0755 "$tmp/restic" "$RESTIC_BIN"
+  rm -rf "$tmp"
+}
+
+# restic_fetch downloads RESTIC_TARGET_VER into a fresh mktemp -d, checks the .bz2 against the sha256
+# BAKED into the helper (not only against github's SHA256SUMS) and prints the directory; the binary
+# is <dir>/restic and has been run once
+restic_fetch() {
+  local arch want base f tmp got
+  case "$(uname -m)" in
+    x86_64) arch=amd64; want="$RESTIC_SHA_amd64";;
+    aarch64|arm64) arch=arm64; want="$RESTIC_SHA_arm64";;
+    *) echo "unknown architecture: $(uname -m)" >&2; return 2;;
+  esac
   command -v bunzip2 >/dev/null 2>&1 || { apt-get update -qq >/dev/null 2>&1 || true; apt-get install -y -qq bzip2 >/dev/null 2>&1 || true; }
-  base="https://github.com/restic/restic/releases/download/v$ver"; f="restic_${ver}_linux_${arch}.bz2"
-  curl -fsSL --connect-timeout 20 "$base/$f" -o "/tmp/$f" || { echo "could not download restic" >&2; return 2; }
-  if curl -fsSL --connect-timeout 20 "$base/SHA256SUMS" -o /tmp/restic-sums 2>/dev/null && [ -s /tmp/restic-sums ]; then
-    ( cd /tmp && grep " $f\$" restic-sums | sha256sum -c - >/dev/null 2>&1 ) || { echo "the checksum did not match" >&2; rm -f "/tmp/$f"; return 2; }
+  base="https://github.com/restic/restic/releases/download/v$RESTIC_TARGET_VER"
+  f="restic_${RESTIC_TARGET_VER}_linux_${arch}.bz2"
+  tmp="$(mktemp -d /tmp/kv-restic.XXXXXX)" || return 2
+  curl -fsSL --connect-timeout 20 "$base/$f" -o "$tmp/$f" || { rm -rf "$tmp"; echo "could not download restic $RESTIC_TARGET_VER" >&2; return 2; }
+  got="$(sha256sum "$tmp/$f" | awk '{print $1}')"
+  if [ "$got" != "$want" ]; then
+    rm -rf "$tmp"; echo "the sha256 did not match (expected $want, got $got) - restic was not installed" >&2; return 2
   fi
-  bunzip2 -f "/tmp/$f" || { echo "bunzip2 fail" >&2; return 2; }
-  install -m 0755 "/tmp/restic_${ver}_linux_${arch}" "$RESTIC_BIN"
-  rm -f "/tmp/restic_${ver}_linux_${arch}" /tmp/restic-sums
+  bunzip2 -c "$tmp/$f" > "$tmp/restic" || { rm -rf "$tmp"; echo "bunzip2 fail" >&2; return 2; }
+  chmod 0755 "$tmp/restic"
+  "$tmp/restic" version >/dev/null 2>&1 || { rm -rf "$tmp"; echo "the downloaded restic does not run" >&2; return 2; }
+  printf '%s' "$tmp"
 }
 
 # The target restic version for the whole fleet plus its sha256 (verification is MANDATORY).
@@ -1343,12 +1551,6 @@ RESTIC_SHA_arm64="a5f64aaab53d51e311fa3829124c5b703f2d14cf187d8640b6be3b2b493764
 # SHA256SUMS from the same host alone) and replaces atomically. The backup configuration is not
 # touched - only the binary.
 cmd_restic_update() {
-  local arch want
-  case "$(uname -m)" in
-    x86_64) arch=amd64; want="$RESTIC_SHA_amd64";;
-    aarch64|arm64) arch=arm64; want="$RESTIC_SHA_arm64";;
-    *) echo "unknown architecture: $(uname -m)" >&2; return 2;;
-  esac
   # which binaries to update: the panel one plus the system one (they may be the same - dedup below)
   local targets=() b
   [ -x "$RESTIC_BIN" ] && targets+=("$RESTIC_BIN")
@@ -1361,28 +1563,20 @@ cmd_restic_update() {
   if [ "$cur" = "$RESTIC_TARGET_VER" ]; then
     echo "restic is already $RESTIC_TARGET_VER - no update needed"; return 0
   fi
-  command -v bunzip2 >/dev/null 2>&1 || { apt-get update -qq >/dev/null 2>&1 || true; apt-get install -y -qq bzip2 >/dev/null 2>&1 || true; }
-  local base f tmp
-  base="https://github.com/restic/restic/releases/download/v$RESTIC_TARGET_VER"
-  f="restic_${RESTIC_TARGET_VER}_linux_${arch}.bz2"
-  tmp="$(mktemp -d /tmp/kv-restic.XXXXXX)"
-  curl -fsSL --connect-timeout 20 "$base/$f" -o "$tmp/$f" || { rm -rf "$tmp"; echo "could not download restic $RESTIC_TARGET_VER" >&2; return 2; }
-  # the sha256 of the compressed .bz2 is compared with the value BAKED into the helper, not only with github's SHA256SUMS
-  local got; got="$(sha256sum "$tmp/$f" | awk '{print $1}')"
-  if [ "$got" != "$want" ]; then
-    rm -rf "$tmp"; echo "the sha256 did not match (expected $want, got $got) - the update was cancelled" >&2; return 2
-  fi
-  bunzip2 -f "$tmp/$f" || { rm -rf "$tmp"; echo "bunzip2 fail" >&2; return 2; }
-  local newbin="$tmp/restic_${RESTIC_TARGET_VER}_linux_${arch}"
-  chmod 0755 "$newbin"
-  "$newbin" version >/dev/null 2>&1 || { rm -rf "$tmp"; echo "the downloaded restic does not run" >&2; return 2; }
-  # atomic replacement of each unique binary: cp to a temporary next to it plus mv (same filesystem)
-  local done="" out=""
+  local tmp newbin
+  tmp="$(restic_fetch)" || { echo "the update was cancelled" >&2; return 2; }
+  newbin="$tmp/restic"
+  # atomic replacement of each unique binary: a mktemp copy next to it plus mv (same filesystem)
+  local done="" out="" nb
   for b in "${targets[@]}"; do
     case " $done " in *" $b "*) continue;; esac   # dedup (the panel binary may be the system one)
     done="$done $b"
-    cp -f "$newbin" "$b.kv-new" && chmod 0755 "$b.kv-new" && mv -f "$b.kv-new" "$b" \
-      && out="$out $b" || echo "could not replace $b" >&2
+    if nb="$(mktemp "$(dirname "$b")/.restic-new.XXXXXX")" && cp -f "$newbin" "$nb" \
+       && chown root:root "$nb" && chmod 0755 "$nb" && mv -fT "$nb" "$b"; then
+      out="$out $b"
+    else
+      [ -n "$nb" ] && rm -f "$nb"; echo "could not replace $b" >&2
+    fi
   done
   rm -rf "$tmp"
   echo "restic updated to $RESTIC_TARGET_VER (was ${cur:-?}):$out"
@@ -1453,8 +1647,11 @@ cmd_provision() {
   # provision <repo_url> <repopass> <mode> <schedule> <delay> <restic_ver> <cacert_b64|-> <path...>
   local repo_url="$1" repopass="$2" mode="$3" sched="$4" delay="$5" ver="$6" cacert_b64="$7"; shift 7
   local paths=("$@")
-  case "$repo_url" in rest:*) ;; *) echo "bad repo url" >&2; return 2;; esac
+  # both values go into the env file, which systemd and the runner (bash) read: see secret_ok
+  repo_url_ok "$repo_url" || { echo "bad repo url: rest:http(s)://login:password@host:port/name is expected, letters, digits and . _ - only" >&2; return 2; }
   [ -n "$repopass" ] || { echo "no repopass" >&2; return 2; }
+  secret_ok "$repopass" || { echo "the repository password has characters the env file cannot hold safely (quotes, \$, \\, ;, spaces, ~) or is shorter than 8 - set the backup up by hand" >&2; return 2; }
+  repo_host_ok "$(repo_host "$repo_url")" "${KV_REPO_LOCAL:+local}" || return 2
   [ "$mode" = include ] || [ "$mode" = exclude ] || { echo "bad mode" >&2; return 2; }
   [[ "$sched" =~ ^([01][0-9]|2[0-3]):[0-5][0-9]$ ]] || { echo "bad time" >&2; return 2; }
   [ "${#paths[@]}" -gt 0 ] || { echo "no paths" >&2; return 2; }
@@ -1470,11 +1667,16 @@ cmd_provision() {
   id -u "$PROV_USER" >/dev/null 2>&1 || useradd --system --home-dir "$PROV_HOME" --create-home --shell /usr/sbin/nologin "$PROV_USER"
   # 2) restic
   ensure_restic "$ver" || return 2
-  install -d -o "$PROV_USER" -g "$PROV_USER" -m 0755 "$RESTIC_BIN_DIR" 2>/dev/null || true
-  chown -R "$PROV_USER:$PROV_USER" "$RESTIC_BIN_DIR" 2>/dev/null || true
+  # the directory and the binary stay root's: bx231 only runs restic, root runs it too
+  backup_perms_maybe
   # 3) cacert (for a self-signed backup server), if supplied
   if [ "$cacert_b64" != "-" ] && [ -n "$cacert_b64" ]; then
-    printf '%s' "$cacert_b64" | base64 -d > "$PROV_CACERT" 2>/dev/null && chmod 0644 "$PROV_CACERT" || { echo "bad cacert" >&2; return 2; }
+    local ca; ca="$(mktemp "$RESTIC_BIN_DIR/.backup-ca.XXXXXX")" || { echo "mktemp failed" >&2; return 2; }
+    if printf '%s' "$cacert_b64" | base64 -d > "$ca" 2>/dev/null && grep -q 'BEGIN CERTIFICATE' "$ca"; then
+      chmod 0644 "$ca"; mv -fT "$ca" "$PROV_CACERT"
+    else
+      rm -f "$ca"; echo "bad cacert" >&2; return 2
+    fi
   else
     rm -f "$PROV_CACERT" 2>/dev/null || true
   fi
@@ -1482,9 +1684,9 @@ cmd_provision() {
   umask 077
   { printf 'RESTIC_PASSWORD=%s\n' "$repopass"; printf 'RESTIC_REPOSITORY=%s\n' "$repo_url"; } > "$PROV_ENV"
   chown root:root "$PROV_ENV"; chmod 0600 "$PROV_ENV"; umask 022
-  # 5) the metrics directory (the backup user must be able to write)
-  install -d -o "$PROV_USER" -g "$PROV_USER" -m 0775 "$PROV_METRICS_DIR" 2>/dev/null || \
-    { mkdir -p "$PROV_METRICS_DIR"; chown "$PROV_USER:$PROV_USER" "$PROV_METRICS_DIR" 2>/dev/null || true; }
+  # 5) the metrics directory: the backup user writes its own file there (root:bx231 1775, see
+  # backup_perms_maybe); 0.42 and older gave bx231 the whole directory
+  metrics_dir_prepare 1 || true
   # 6) the backup script
   write_runner "$mode" "${paths[@]}"
   # 7) service + timer
@@ -1581,6 +1783,10 @@ cmd_adopt() {
   repopass="$(sed -nE 's/^(export )?RESTIC_PASSWORD=(.*)$/\2/p' "$envf" | head -1 | sed -E 's/^["'\'']//; s/["'\'']$//')"
   case "$repo_url" in rest:*) ;; *) echo "the old RESTIC_REPOSITORY is not a rest: URL - refusing to migrate blindly" >&2; return 2;; esac
   [ -n "$repopass" ] || { echo "RESTIC_PASSWORD is empty in the old env" >&2; return 2; }
+  # 0.42 and older cut the quotes off and wrote the rest as is: a password with a space or a $ in it
+  # no longer read back the same from the new env. Such a backup stays as it was
+  secret_ok "$repopass" || { echo "the old RESTIC_PASSWORD has characters the panel env cannot hold safely (quotes, \$, \\, ;, spaces, ~) - leaving the old backup as it is" >&2; return 2; }
+  repo_url_ok "$repo_url" || { echo "the old RESTIC_REPOSITORY is not a plain rest: address - leaving the old backup as it is" >&2; return 2; }
   # 4) mode and paths from ExecStart (or from the wrapper script it points to)
   local execline; execline="$(printf '%s\n' "$unit" | sed -nE 's/^ExecStart=(.*)$/\1/p' | head -1)"
   local scan="$execline"
@@ -1626,16 +1832,31 @@ cmd_adopt() {
   if [ -n "${KV_ADOPT_DRYRUN:-}" ]; then
     printf 'DRY-RUN. env=%s paths:\n' "$envf"; printf '  - %s\n' "${paths[@]}"; return 0
   fi
-  cmd_provision "$repo_url" "$repopass" "$mode" "$sched" 0 "$ver" - "${paths[@]}" || { echo "provisioning failed" >&2; return 2; }
+  # the address was read on the node itself: its server is recorded in backup-allow, not refused
+  KV_REPO_LOCAL=1 cmd_provision "$repo_url" "$repopass" "$mode" "$sched" 0 "$ver" - "${paths[@]}" || { echo "provisioning failed" >&2; return 2; }
   echo "OK adopted -> the panel layout ($mode, $sched)"
 }
 
+# The answer goes into a 0750 directory the agent cannot write to, through a fresh mktemp name;
+# answers nobody picked up are removed after 10 minutes (the agent cannot delete them any more).
+res_write() {  # $1 id, $2 ok, $3 output
+  local tmp
+  tmp="$(mktemp "$RES_DIR/.res.XXXXXX")" || return 1
+  printf 'ok=%s\noutput=%s\n' "$2" "$3" > "$tmp" && chmod 0644 "$tmp" && mv -fT "$tmp" "$RES_DIR/$1.res" || rm -f "$tmp"
+}
+res_cleanup() { find "$RES_DIR" -maxdepth 1 -type f -name '*.res' -mmin +10 -delete 2>/dev/null || true; }
+
 cmd_process_spool() {
   local req id action mode schedule paths out ok k v line repo_url repopass delay ver cacert_b64 engine container port
+  local dump_dir dump_keep dump_minfree
+  res_cleanup
   for req in "$REQ_DIR"/*.req; do
-    [ -f "$req" ] || continue
+    [ -e "$req" ] || [ -L "$req" ] || continue
     id="$(basename "$req" .req)"
+    # the agent names requests <command id>-<nanoseconds>; a symlink or anything else is not a request
+    if [ -L "$req" ] || [ ! -f "$req" ] || [[ ! "$id" =~ ^[0-9A-Za-z_-]{1,64}$ ]]; then rm -f "$req"; continue; fi
     action=""; mode="exclude"; schedule=""; paths=(); repo_url=""; repopass=""; delay="1h"; ver="$RESTIC_TARGET_VER"; cacert_b64="-"; engine=""; container=""; port=""
+    dump_dir=""; dump_keep=""; dump_minfree=""
     # IMPORTANT: not `IFS='=' read -r k v` - that trims a trailing '=' (base64 padding of cacert).
     # The line is read whole and split on the first '=' with parameter expansion.
     while IFS= read -r line; do
@@ -1645,11 +1866,9 @@ cmd_process_spool() {
         repo_url) repo_url="$v";; repopass) repopass="$v";; delay) delay="$v";;
         restic_version) ver="$v";; cacert_b64) cacert_b64="$v";;
         engine) engine="$v";; container) container="$v";; port) port="$v";;
-        dump_dir) export KV_DUMP_DIR="$v";;
-        dump_keep) export KV_DUMP_KEEP="$v";;
-        dump_minfree) export KV_DUMP_MINFREE="$v";;
+        dump_dir) dump_dir="$v";; dump_keep) dump_keep="$v";; dump_minfree) dump_minfree="$v";;
       esac
-    done < "$req"
+    done < <(head -c 65536 "$req")
     rm -f "$req"  # secrets (repopass) do not linger on disk
     out=""; ok=false
     case "$action" in
@@ -1661,13 +1880,13 @@ cmd_process_spool() {
       adopt)        if out="$(cmd_adopt "$ver" 2>&1)"; then ok=true; fi ;;
       get_creds)    if out="$(cmd_get_creds 2>&1)"; then ok=true; fi ;;
       to_https)     if out="$(cmd_to_https "$port" "$cacert_b64" 2>&1)"; then ok=true; fi ;;
-      dump_setup)   if out="$(cmd_dump_setup "$engine" "$container" 2>&1)"; then ok=true; fi ;;
+      # the settings of THIS request only: exported, they used to carry over to the next one
+      dump_setup)   if out="$(KV_DUMP_DIR="$dump_dir" KV_DUMP_KEEP="$dump_keep" KV_DUMP_MINFREE="$dump_minfree" cmd_dump_setup "$engine" "$container" 2>&1)"; then ok=true; fi ;;
       dump_remove)  if out="$(cmd_dump_remove "$engine" "$container" 2>&1)"; then ok=true; fi ;;
       deprovision)  if out="$(cmd_deprovision 2>&1)"; then ok=true; fi ;;
       *) out="unknown action" ;;
     esac
-    printf 'ok=%s\noutput=%s\n' "$ok" "$(printf '%s' "$out" | tr '\n' ' ')" > "$RES_DIR/$id.res.tmp"
-    mv -f "$RES_DIR/$id.res.tmp" "$RES_DIR/$id.res"; chmod 0644 "$RES_DIR/$id.res"
+    res_write "$id" "$ok" "$(printf '%s' "$out" | tr '\n' ' ')" || true
   done
   refresh_config  # refresh the config file for the panel after the changes
 }
@@ -2667,7 +2886,7 @@ case "${1:-}" in
   # the scan is throttled inside (every CUSTOM_EVERY seconds): the config refresh stays per-minute
   refresh)       refresh_config || true; custom_scan_maybe; kube_access_maybe || true; dumps_trigger_maybe || true
                  dumps_rsyncable_maybe || true; vanished_ok_maybe || true; retry_lock_maybe || true; https_cacert_maybe || true
-                 backup_runs_maybe || true
+                 backup_runs_maybe || true; backup_perms_maybe || true; allow_seed_maybe || true; res_cleanup
                  verify_maybe || true ;;
   custom-scan)   cmd_custom_scan ;;
   backup-runs)   cmd_backup_runs ;;

@@ -173,7 +173,7 @@ def test_helper_and_agent_carry_the_new_fields():
 
     agent = Path(__file__).resolve().parents[2] / "agent"
     sh = (agent / "kubeexpiry-setup.sh").read_text(encoding="utf-8")
-    assert "KERVAX_SETUP_VERSION=0.4  # " in sh and "get ingresses -A -o json" in sh and "\r" not in sh
+    assert "KERVAX_SETUP_VERSION=0.5  # " in sh and "get ingresses -A -o json" in sh and "\r" not in sh
     for what in ("gateways.gateway.networking.k8s.io", "ingressroutes.traefik.io", "pods"):
         assert what in sh, what
     # агент читает файл helper'а в структуру: без этих полей он бы их молча выбросил

@@ -236,8 +236,18 @@ id kervax >/dev/null 2>&1 || useradd --system --no-create-home --shell /usr/sbin
 #    --uninstall снимает ровно эти файлы. --
 CA_NAME="kervax-panel${INSTANCE:+-$INSTANCE}.crt"
 if [ -n "$CA_FILE" ]; then
-  grep -q -- '-----BEGIN CERTIFICATE-----' "$CA_FILE" 2>/dev/null || {
-    echo "✗ --ca-file $CA_FILE - не сертификат в PEM." >&2; exit 1; }
+  # Файл приходит из /tmp, где его мог заранее создать или подменить кто угодно: он читается
+  # один раз в свой файл и только если это не симлинк, его владелец root или тот, кто вызвал
+  # sudo, и писать в него больше никто не может (дописанный CA тоже стал бы доверенным)
+  CA_OWN=$(stat -c '%u %a' "$CA_FILE" 2>/dev/null || echo "x 777")
+  if [ -L "$CA_FILE" ] || [ ! -f "$CA_FILE" ] || [ $((0${CA_OWN#* } & 022)) != 0 ] \
+     || { [ "${CA_OWN% *}" != 0 ] && [ "${CA_OWN% *}" != "${SUDO_UID:-0}" ]; }; then
+    echo "✗ --ca-file $CA_FILE - не обычный файл root или пользователя, вызвавшего sudo, или в него может писать кто-то еще." >&2; exit 1
+  fi
+  CA_TMP=$(mktemp)
+  cat "$CA_FILE" > "$CA_TMP"
+  grep -q -- '-----BEGIN CERTIFICATE-----' "$CA_TMP" || {
+    rm -f "$CA_TMP"; echo "✗ --ca-file $CA_FILE - не сертификат в PEM." >&2; exit 1; }
   if command -v update-ca-certificates >/dev/null 2>&1 && [ -d /usr/local/share/ca-certificates ]; then
     CA_DST=/usr/local/share/ca-certificates/$CA_NAME            # Debian, Ubuntu, Alpine
     CA_UPDATE="update-ca-certificates"
@@ -251,12 +261,8 @@ if [ -n "$CA_FILE" ]; then
     echo "✗ Не нашел системного хранилища, куда добавить CA панели (поставьте ca-certificates)." >&2
     exit 1
   fi
-  # корень станет доверенным для всего TLS ноды: только обычный файл своего пользователя,
-  # не ссылка, чтобы подложенный кем-то в /tmp файл не попал в хранилище
-  if [ -L "$CA_FILE" ] || [ ! -f "$CA_FILE" ] || [ ! -O "$CA_FILE" ]; then
-    echo "✗ --ca-file $CA_FILE - должен быть обычный файл пользователя $(id -un), не ссылка." >&2; exit 1
-  fi
-  cp "$CA_FILE" "$CA_DST"
+  cp "$CA_TMP" "$CA_DST"
+  rm -f "$CA_TMP"
   chmod 0644 "$CA_DST"
   $CA_UPDATE >/dev/null 2>&1 || { echo "✗ $CA_UPDATE не отработал." >&2; exit 1; }
   # проверяем БЕЗ --cacert, через системное хранилище: ровно так ходит агент.
@@ -436,24 +442,30 @@ echo "✓ $UNIT установлен и запущен. Логи: journalctl -u 
 # Доступ к Docker для агента БЕЗ выдачи ему root. Крошечный socket-proxy (wollomatic)
 # отдает агенту ТОЛЬКО пер-методный allowlist: GET version/list/logs и список образов (даты
 # сборки образов внешних прокси) + POST restart/stop/start конкретного контейнера. Все
-# остальное (exec, create, pull, build, volumes, host-mount) - 403. Ни RCE, ни host-root. Работает в сети хоста и слушает
-# только 127.0.0.1: другие контейнеры до него не достают (из bridge-сети любой контейнер
-# мог через него читать переменные окружения и логи всех остальных). Без capabilities,
-# корень только для чтения. Та же команда - в dockerproxy-setup.sh и в разделе Docker панели.
+# остальное (exec, create, pull, build, volumes, host-mount) - 403. Ни RCE, ни host-root. Сети у него
+# нет, слушает unix-сокет в /var/lib/kervax/docker, куда заходят только root и группа kervax:
+# ни контейнеры, ни другие пользователи ноды до него не достают (на 127.0.0.1:2375 любой из них
+# читал переменные окружения всех контейнеров и мог их остановить). Без capabilities, корень
+# только для чтения, образ закреплен по digest. Та же команда - в dockerproxy-setup.sh и в
+# разделе Docker панели.
 setup_docker_proxy() {
   command -v docker >/dev/null 2>&1 || { echo "· Docker не найден — пропускаю proxy." >&2; return; }
   echo "→ Настраиваю bounded-доступ к Docker (socket-proxy)..."
-  DGID=$(getent group docker 2>/dev/null | cut -d: -f3)
+  DGID=$(stat -c %g /var/run/docker.sock 2>/dev/null || getent group docker 2>/dev/null | cut -d: -f3)
+  KGID=$(getent group kervax 2>/dev/null | cut -d: -f3)
+  install -d -o root -g kervax -m 2770 /var/lib/kervax/docker
   docker rm -f kervax-docker-proxy >/dev/null 2>&1 || true
-  if docker run -d --name kervax-docker-proxy --restart unless-stopped \
-      --network host --read-only --cap-drop ALL --security-opt no-new-privileges \
-      --user "65534:${DGID:-999}" \
-      -v /var/run/docker.sock:/var/run/docker.sock:ro \
-      wollomatic/socket-proxy:1 \
-        -loglevel warn -listenip 127.0.0.1 -allowfrom 127.0.0.1/32 -shutdowngracetime 1 \
-        -allowGET '^/(v[0-9.]+/)?(version|info|_ping|containers/json|images/json|containers/[a-zA-Z0-9_.-]+/(json|logs))' \
+  if [ -n "$KGID" ] && docker run -d --name kervax-docker-proxy --restart unless-stopped \
+      --network none --read-only --cap-drop ALL --security-opt no-new-privileges \
+      --user "65534:${DGID:-999}" --group-add "$KGID" \
+      -v /var/run/docker.sock:/var/run/docker.sock:ro -v /var/lib/kervax/docker:/run/kervax \
+      wollomatic/socket-proxy:1.13.2@sha256:ff95d6ff6c27853005ef85eb8f4ab5923dc3d2f1e055f98fb6aeeaceec3fe848 \
+        -loglevel warn -proxysocketendpoint /run/kervax/docker.sock -proxysocketendpointfilemode 0660 -shutdowngracetime 1 \
+        -allowGET '^/(v[0-9.]+/)?(version|_ping|containers/json|images/json|containers/[a-zA-Z0-9_.-]+/(json|logs))$' \
         -allowPOST '^/(v[0-9.]+/)?containers/[a-zA-Z0-9_.-]+/(restart|stop|start)$' >/dev/null; then
-    grep -q '^docker_host=' "$CONF" || printf 'docker_host=tcp://127.0.0.1:2375\n' >> "$CONF"
+    # тот же файл переписывается: он остается агента (kervax, 0600)
+    printf '%s\n' "$(grep -v '^docker_host=' "$CONF")" > "$CONF"
+    printf 'docker_host=/var/lib/kervax/docker/docker.sock\n' >> "$CONF"
     echo "✓ Docker включён (proxy: view + restart/stop/start, без exec/create/root)."
   else
     echo "✗ Не удалось поднять socket-proxy (docker-демон доступен?)." >&2

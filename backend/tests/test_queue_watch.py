@@ -262,7 +262,10 @@ def test_snooze_accepts_a_queue_key():
 def test_helper_script():
     from pathlib import Path
     src = (Path(__file__).resolve().parents[2] / "agent" / "queues-setup.sh").read_text(encoding="utf-8")
-    assert "KERVAX_SETUP_VERSION=0.4" in src and "/bin/sh -c" in src and 'KERVAX_SETUP_WHEN="' in src
+    assert "KERVAX_SETUP_VERSION=0.5" in src and "/bin/sh -c" in src and 'KERVAX_SETUP_WHEN="' in src
+    # 0.5: клиенты в чужих namespace только от пользователя экземпляра, root контейнера - nobody
+    assert 'nsenter -t "$P" -n -m' not in src and 'nsenter -t "$P" -m -n --' not in src
+    assert src.count('nsenter -t "$P" $') >= 4 and "u=65534; g=65534" in src and '"/proc/$1/root$f"' not in src
     assert "pgrep -x postgres" in src and "pgrep -x mysqld" in src
     assert "REDISCLI_AUTH" in src and "\r" not in src
     # пароль только через stdin или окружение, не в командной строке

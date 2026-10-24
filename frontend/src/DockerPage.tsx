@@ -51,16 +51,19 @@ const DOT: Record<string, string> = { 't-up': ' lk-dot-ok', 't-down': ' lk-dot-b
 // подпись плитки из частей: пустые выкидываем
 const subOf = (...parts: (string | false | 0 | undefined)[]) => parts.filter(Boolean).join(' · ')
 
-const DOCKER_ENABLE_CMD = `DGID=$(getent group docker | cut -d: -f3)
+const DOCKER_ENABLE_CMD = `DGID=$(stat -c %g /var/run/docker.sock); KGID=$(getent group kervax | cut -d: -f3)
+sudo install -d -o root -g kervax -m 2770 /var/lib/kervax/docker
 sudo docker rm -f kervax-docker-proxy 2>/dev/null
 sudo docker run -d --name kervax-docker-proxy --restart unless-stopped \\
-  --network host --read-only --cap-drop ALL --security-opt no-new-privileges \\
-  --user 65534:$DGID -v /var/run/docker.sock:/var/run/docker.sock:ro \\
-  wollomatic/socket-proxy:1 \\
-  -loglevel warn -listenip 127.0.0.1 -allowfrom 127.0.0.1/32 -shutdowngracetime 1 \\
-  -allowGET '^/(v[0-9.]+/)?(version|info|_ping|containers/json|images/json|containers/[a-zA-Z0-9_.-]+/(json|logs))' \\
+  --network none --read-only --cap-drop ALL --security-opt no-new-privileges \\
+  --user 65534:$DGID --group-add $KGID \\
+  -v /var/run/docker.sock:/var/run/docker.sock:ro -v /var/lib/kervax/docker:/run/kervax \\
+  wollomatic/socket-proxy:1.13.2@sha256:ff95d6ff6c27853005ef85eb8f4ab5923dc3d2f1e055f98fb6aeeaceec3fe848 \\
+  -loglevel warn -proxysocketendpoint /run/kervax/docker.sock -proxysocketendpointfilemode 0660 -shutdowngracetime 1 \\
+  -allowGET '^/(v[0-9.]+/)?(version|_ping|containers/json|images/json|containers/[a-zA-Z0-9_.-]+/(json|logs))$' \\
   -allowPOST '^/(v[0-9.]+/)?containers/[a-zA-Z0-9_.-]+/(restart|stop|start)$'
-grep -q '^docker_host=' /etc/kervax-agent.conf || echo docker_host=tcp://127.0.0.1:2375 | sudo tee -a /etc/kervax-agent.conf
+sudo sed -i '/^docker_host=/d' /etc/kervax-agent.conf
+echo docker_host=/var/lib/kervax/docker/docker.sock | sudo tee -a /etc/kervax-agent.conf
 sudo systemctl restart kervax-agent`
 
 async function runAndWait(

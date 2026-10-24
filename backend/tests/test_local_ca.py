@@ -170,11 +170,14 @@ def test_installer_trusts_the_panel_ca(name):
 
 @pytest.mark.parametrize("name", INSTALLERS)
 def test_installer_refuses_foreign_ca_file(name):
-    """Корень берется только из обычного файла своего пользователя: подложенный в /tmp чужой файл
-    или ссылка не попадают в доверенные; файл ошибок проверки - свой временный."""
+    """Корень берется только из обычного файла root или того, кто вызвал sudo, и в который больше
+    никто не пишет: подложенный в /tmp чужой файл или ссылка не попадают в доверенные. Файл
+    читается один раз в свой временный, копируется уже он; файл ошибок проверки - свой временный."""
     s = src(AGENT / name)
-    guard = s.index('if [ -L "$CA_FILE" ] || [ ! -f "$CA_FILE" ] || [ ! -O "$CA_FILE" ]; then')
-    assert guard < s.index('cp "$CA_FILE" "$CA_DST"')
+    guard = s.index('if [ -L "$CA_FILE" ] || [ ! -f "$CA_FILE" ] || [ $((0${CA_OWN#* } & 022)) != 0 ]')
+    assert '"${CA_OWN% *}" != "${SUDO_UID:-0}"' in s
+    assert guard < s.index('cat "$CA_FILE" > "$CA_TMP"') < s.index('cp "$CA_TMP" "$CA_DST"')
+    assert 'cp "$CA_FILE"' not in s
     assert "/tmp/kervax-ca-check.err" not in s and 'CA_ERR=$(mktemp)' in s
 
 
