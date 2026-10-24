@@ -129,6 +129,8 @@ const PHRASES: Rule[] = [
   [/вход по паролю: (\S+) с (\S+), раньше с этого адреса не входил/g,
     'password login: $1 from $2, never logged in from this address before'],
   [/идет перебор паролей SSH: (\d+) неудачных входов за 10 минут/g, 'SSH brute force: $1 failed logins in 10 minutes'],
+  [/идет перебор паролей SSH: за последний час до (\d+) неудачных входов за 10 минут/g,
+    'SSH brute force: up to $1 failed logins in 10 minutes within the last hour'],
   [/\(больше всех с (\S+): (\d+)\)/g, '(most from $1: $2)'],
   [/, вход по паролю включен, а fail2ban и подобного нет/g, ', password login is on and there is no fail2ban or similar'],
   [/SSH пускает по паролю, а порт (.+?) открыт в интернет: оставьте вход по ключам \(PasswordAuthentication no\)/g,
