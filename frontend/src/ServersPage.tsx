@@ -4530,6 +4530,9 @@ function NoBootUnits({ server: s, onChanged }: { server: Server; onChanged: () =
           <div key={u.unit} className={`loc-res nb-row${u.muted ? ' loc-res-off' : ''}`}>
             <span className={`lk-dot${u.muted ? '' : ' lk-dot-warn'}`} />
             <span className="mono nb-name">{u.unit}</span>
+            {u.container && (
+              <span className="muted small nb-since">{t('запускает контейнер {name}', { name: u.container })}</span>
+            )}
             {u.started > 0 && (
               <span className="muted small nb-since">
                 {t('работает с {d}', { d: new Date(u.started * 1000).toLocaleDateString() })}

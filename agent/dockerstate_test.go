@@ -29,6 +29,8 @@ func TestDockerInspectStopped(t *testing.T) {
 			w.Write([]byte(`{"RestartCount":2,"State":{"Error":"  Bind for 0.0.0.0:80 failed: port is already allocated\n","ExitCode":128,"OOMKilled":true},"HostConfig":{"RestartPolicy":{"Name":"on-failure","MaximumRetryCount":5}}}`))
 		case "/containers/up/json":
 			w.Write([]byte(`{"RestartCount":1,"State":{"Error":"","ExitCode":0},"HostConfig":{"RestartPolicy":{"Name":"always"}}}`))
+		case "/containers/rm/json":
+			w.Write([]byte(`{"State":{},"HostConfig":{"RestartPolicy":{"Name":"no"},"AutoRemove":true}}`))
 		default:
 			http.NotFound(w, r)
 		}
@@ -52,6 +54,11 @@ func TestDockerInspectStopped(t *testing.T) {
 	dockerInspect(cl, "up", &u)
 	if u.Exit != nil || u.Err != "" || u.Restarts != 1 {
 		t.Fatalf("running container must not carry exit/err: %+v", u)
+	}
+	rm := dockerContainer{Name: "rm", State: "running"}
+	dockerInspect(cl, "rm", &rm)
+	if !rm.AutoRm || u.AutoRm {
+		t.Fatalf("docker run --rm must carry auto_rm: %+v %+v", rm, u)
 	}
 	// в отчете код 0 у остановленного виден (указатель), у работающего этих полей нет
 	b, _ := json.Marshal(m)

@@ -2,7 +2,7 @@
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from app import access_audit, collector, reboot_survive
+from app import access_audit, collector, os_support, reboot_survive
 from app.models import Server
 
 NOW = datetime(2026, 10, 13, 12, 0, tzinfo=timezone.utc)
@@ -60,6 +60,34 @@ def test_noboot_view_advice_and_mutes():
     assert reboot_survive.advice(s, NOW) == {"docker": ["n8n"], "units": []}
     assert [c["muted"] for c in reboot_survive.view(s, NOW)["docker"]] == [False, True]
     assert reboot_survive.advice(_srv(rep, mutes=["noboot"]), NOW) is None
+
+
+def test_container_started_by_systemd_unit():
+    """docker run --rm из юнита systemd: restart no, но после ребута его поднимет systemd"""
+    rep = {"clock_unix": TS, "docker": {"access": True, "containers": [
+        {**_c("edge-proxy", "no", image="haproxy:3.0-alpine"), "auto_rm": True,
+         "unit": "edge-proxy.service", "unit_on": True},                        # юнит включен
+        {**_c("worker-1", "no"), "auto_rm": True, "unit": "worker.service"},   # юнит не включен
+        {**_c("adhoc", "no"), "auto_rm": True},                                 # --rm, юнита нет
+        _c("cadvisor", ""),                                                     # обычный без policy
+    ]}}
+    assert reboot_survive.containers(rep) == [
+        {"name": "adhoc", "image": "app/x:1", "policy": "no", "autorm": True},
+        {"name": "cadvisor", "image": "app/x:1", "policy": "no", "autorm": False}]
+    # без helper'а units-setup не включенный юнит контейнера - пункт про юнит
+    assert reboot_survive.units(rep, NOW) == [{"unit": "worker.service", "started": 0, "container": "worker-1"}]
+    assert reboot_survive.advice(_srv(rep), NOW) == {"docker": ["adhoc", "cadvisor"], "units": ["worker.service"]}
+    v = reboot_survive.view(_srv(rep, mutes=["noboot:worker.service"]), NOW)
+    assert v["units"] == [{"unit": "worker.service", "started": 0, "container": "worker-1", "muted": True}]
+    # helper стоит: про юниты решает он (worker.service тянет таймер - в его списке нет)
+    assert reboot_survive.units({**rep, **_units()}, NOW) == []
+    # перед перезагрузкой docker update только для обычного: на --rm докер его не примет
+    fix = os_support._fix("reboot", rep, NOW, set())
+    assert {"id": "noboot_docker", "cmd": "sudo docker update --restart unless-stopped cadvisor"} in fix
+    assert {"id": "noboot_units", "cmd": "sudo systemctl enable worker.service"} in fix
+    # старый агент без полей: все как раньше
+    assert [c["name"] for c in reboot_survive.containers({"docker": {"access": True, "containers": [
+        _c("edge-proxy", "no")]}})] == ["edge-proxy"]
 
 
 def _snap(users, keys=(), nopasswd=(), groups=None, since=TS - 5 * 365 * DAY, ssh_pass="no"):
