@@ -1,3 +1,4 @@
+import os
 from collections.abc import AsyncIterator
 
 import httpx
@@ -8,8 +9,12 @@ from app import config
 
 @pytest.fixture
 async def client(tmp_path, monkeypatch) -> AsyncIterator[httpx.AsyncClient]:
+    # KERVAX_TEST_PG=postgresql+asyncpg://... - те же тесты на PostgreSQL (CI, job migrations):
+    # SQLite не ловит aware datetime, JSON-операции и сдвиг sequence после вставки с явным id.
+    # База одна на прогон, поэтому без -n, и перед каждым тестом схема создается заново
+    pg = os.environ.get("KERVAX_TEST_PG", "")
     db_path = (tmp_path / "test.db").as_posix()
-    monkeypatch.setenv("KERVAX_DB_URL", f"sqlite+aiosqlite:///{db_path}")
+    monkeypatch.setenv("KERVAX_DB_URL", pg or f"sqlite+aiosqlite:///{db_path}")
     monkeypatch.setenv("KERVAX_DATA_DIR", (tmp_path / "data").as_posix())
     monkeypatch.setenv("KERVAX_ADMIN_USER", "admin")
     monkeypatch.setenv("KERVAX_ADMIN_PASSWORD", "testpass-2026")
@@ -22,6 +27,8 @@ async def client(tmp_path, monkeypatch) -> AsyncIterator[httpx.AsyncClient]:
 
     app = create_app()
     async with app.state.engine.begin() as conn:
+        if pg:
+            await conn.run_sync(Base.metadata.drop_all)
         await conn.run_sync(Base.metadata.create_all)
     await ensure_admin(app.state.session_factory, config.get_settings())
 

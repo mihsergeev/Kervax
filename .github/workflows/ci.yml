@@ -29,6 +29,51 @@ jobs:
           pip install pip-audit
           pip-audit
 
+  # Миграции и PostgreSQL. Тесты выше идут на SQLite через create_all: миграция, которая не
+  # накатывается на PG, и расхождение моделей со схемой всплывали только на проде, где
+  # backend уходил в цикл перезапусков на "alembic upgrade head". Здесь: накат с нуля,
+  # сверка моделей со схемой, откат последней и накат обратно, и часть тестов на PG.
+  migrations:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_DB: kervax
+          POSTGRES_USER: kervax
+          POSTGRES_PASSWORD: kervax
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U kervax"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 12
+    defaults:
+      run:
+        working-directory: backend
+    env:
+      KERVAX_DB_URL: postgresql+asyncpg://kervax:kervax@localhost:5432/kervax
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: pip install .[dev]
+      - name: Upgrade from scratch
+        run: alembic upgrade head
+      - name: Models match the schema
+        run: alembic check
+      - name: Downgrade one and upgrade again
+        run: alembic downgrade -1 && alembic upgrade head
+      - name: Tests on PostgreSQL
+        env:
+          KERVAX_TEST_PG: postgresql+asyncpg://kervax:kervax@localhost:5432/kervax_tests
+        run: |
+          PGPASSWORD=kervax psql -h localhost -U kervax -d kervax -c 'create database kervax_tests'
+          pytest -q tests/test_backup.py tests/test_auth.py tests/test_users.py tests/test_checks.py tests/test_servers.py tests/test_maint.py tests/test_check_edit_roundtrip.py tests/test_audit_view.py tests/test_home_mute.py
+
   # Проверка «панель не молчит»: рядом с кодом живут списки, написанные руками
   # (виды алертов, подписи helper'ов, разделы, переводы). Код уходит вперёд —
   # панель не ругается, а тихо перестаёт что-то показывать. Ловим машинно.

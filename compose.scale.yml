@@ -13,7 +13,8 @@ services:
     command:
       - sh
       - -c
-      - alembic upgrade head && exec uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers ${KERVAX_WEB_WORKERS:-3}
+      # без access-лога uvicorn: те же запросы с временем ответа пишет nginx фронта
+      - alembic upgrade head && exec uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers ${KERVAX_WEB_WORKERS:-3} --no-access-log
     environment:
       KERVAX_RUN_SCHEDULER: "0"
     healthcheck:
@@ -25,6 +26,13 @@ services:
   # Одиночный процесс планировщика: сбор мониторов, серверные/локационные алерты,
   # прунинг, авто-бэкап. РОВНО один экземпляр (не масштабировать).
   scheduler:
+    # ротация как в compose.yml (якорь оттуда в этот файл не виден)
+    logging:
+      driver: json-file
+      options:
+        max-size: 50m
+        max-file: "5"
+        compress: "true"
     build:
       context: .
       dockerfile: backend/Dockerfile
@@ -32,6 +40,9 @@ services:
         AGENT_PUBKEY: ${KERVAX_AGENT_PUBKEY:-}
         DEPS_EPOCH: ${KERVAX_DEPS_EPOCH:-}
     restart: unless-stopped
+    # по SIGTERM планировщик доделывает тик (отправка алертов и запись состояния) и выходит;
+    # 10 с по умолчанию на длинный тик не хватает, дальше docker убивает процесс
+    stop_grace_period: 60s
     security_opt:
       - no-new-privileges:true
     command: ["python", "-m", "app.scheduler_run"]
@@ -49,6 +60,7 @@ services:
       KERVAX_DISK_ALERT_PERCENT: ${KERVAX_DISK_ALERT_PERCENT:-90}
       KERVAX_BACKUP_INTERVAL_HOURS: ${KERVAX_BACKUP_INTERVAL_HOURS:-24}
       KERVAX_BACKUP_KEEP: ${KERVAX_BACKUP_KEEP:-14}
+      KERVAX_BACKUP_KEY: ${KERVAX_BACKUP_KEY:-}
     volumes:
       - ./data:/data
     depends_on:

@@ -37,9 +37,14 @@ def do_run_migrations(connection: Connection) -> None:
 
 async def run_async_migrations() -> None:
     configuration = config.get_section(config.config_ini_section) or {}
-    configuration["sqlalchemy.url"] = get_settings().db_url
+    url = get_settings().db_url
+    configuration["sqlalchemy.url"] = url
+    # Миграция с ALTER TABLE ждет блокировку, пока старый планировщик держит транзакцию, и
+    # без потолка ждала бы вечно, а с ней и выкладка. 10 секунд и ошибка: backend упадет,
+    # docker перезапустит его, и миграция пойдет заново, когда таблицу отпустят
+    extra = {"server_settings": {"lock_timeout": "10s"}} if url.startswith("postgresql") else {}
     connectable = async_engine_from_config(
-        configuration, prefix="sqlalchemy.", poolclass=pool.NullPool
+        configuration, prefix="sqlalchemy.", poolclass=pool.NullPool, connect_args=extra
     )
     async with connectable.connect() as connection:
         await connection.run_sync(do_run_migrations)

@@ -7,12 +7,27 @@
 
 Восстановление трогает только таблицы, которые есть в файле: старый файл без связей или сейфа
 их не сотрет.
+
+Файл (выгрузка и автобэкап на диске) зашифрован: в мониторах лежат пароли и заголовки с
+токенами, в настройках токены ботов, а файл уезжает на ноутбук админа и в копии диска.
+Ключ выводится из KERVAX_BACKUP_KEY, если он задан, иначе из KERVAX_JWT_SECRET. Чтобы
+поднять файл на другой панели, ей нужен тот же ключ: KERVAX_BACKUP_KEY = значение
+KERVAX_BACKUP_KEY (или KERVAX_JWT_SECRET) старой панели. Старые открытые файлы
+восстанавливаются как раньше.
 """
 
+import base64
+import hashlib
 import json
 import os
 import re
+import zlib
 from datetime import datetime, timezone
+
+from cryptography.exceptions import InvalidTag
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
 from sqlalchemy import DateTime, delete, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -51,6 +66,75 @@ _SERVER_METRIC_FIELDS = ("last_report", "last_seen")
 _LINK_STATE_FIELDS = {"win": None, "last_ts": None, "last_loss": None, "last_rtt": None, "last_err": ""}
 
 _NAME_RE = re.compile(r"^kervax-backup-\d{8}-\d{6}\.json$")
+
+
+_ENC_ALG = "hkdf-sha256+zlib+aes-256-gcm"
+_ENC_AAD = b"kervax-panel-backup"
+
+
+def _derive(material: str) -> bytes:
+    return HKDF(
+        algorithm=hashes.SHA256(), length=32, salt=b"kervax-backup", info=b"panel-backup-v1"
+    ).derive(material.encode("utf-8"))
+
+
+def _key_id(key: bytes) -> str:
+    # по отпечатку видно, каким ключом закрыт файл, без раскрытия самого ключа
+    return hashlib.sha256(key).hexdigest()[:12]
+
+
+def _keys(settings: Settings) -> list[bytes]:
+    """Ключи по порядку: первым шифруем, расшифровать пробуем каждым. JWT-секрет вторым,
+    чтобы файлы, сделанные до того, как задали KERVAX_BACKUP_KEY, тоже открывались."""
+    out: list[bytes] = []
+    for m in (settings.backup_key, settings.jwt_secret):
+        if m and (k := _derive(m)) not in out:
+            out.append(k)
+    return out
+
+
+def seal(data: dict, settings: Settings) -> dict:
+    """Шифрует выгрузку целиком. Снаружи только то, по чему файл узнают: app, format, дата."""
+    key = _keys(settings)[0]
+    nonce = os.urandom(12)
+    raw = zlib.compress(json.dumps(data, ensure_ascii=False).encode("utf-8"), 6)
+    ct = AESGCM(key).encrypt(nonce, raw, _ENC_AAD)
+    return {
+        "app": "kervax",
+        "format": FORMAT_VERSION,
+        "created_at": data.get("created_at"),
+        "encrypted": {
+            "alg": _ENC_ALG,
+            "key_id": _key_id(key),
+            "nonce": base64.b64encode(nonce).decode(),
+            "data": base64.b64encode(ct).decode(),
+        },
+    }
+
+
+def unseal(data: dict, settings: Settings) -> dict:
+    """Открытый файл возвращает как есть, зашифрованный расшифровывает ключом этой панели."""
+    enc = data.get("encrypted") if isinstance(data, dict) else None
+    if enc is None:
+        return data
+    if not isinstance(enc, dict) or enc.get("alg") != _ENC_ALG:
+        raise ValueError("Неизвестный формат шифрования бэкапа")
+    try:
+        nonce = base64.b64decode(enc["nonce"])
+        ct = base64.b64decode(enc["data"])
+    except (KeyError, TypeError, ValueError):
+        raise ValueError("Файл бэкапа поврежден")
+    for key in _keys(settings):
+        try:
+            raw = AESGCM(key).decrypt(nonce, ct, _ENC_AAD)
+        except InvalidTag:
+            continue
+        return json.loads(zlib.decompress(raw))
+    raise ValueError(
+        f"Файл зашифрован ключом другой панели (отпечаток {enc.get('key_id', '?')}). "
+        "Впишите в .env этой панели KERVAX_BACKUP_KEY со значением KERVAX_BACKUP_KEY "
+        "или KERVAX_JWT_SECRET той панели, где файл сделан, и перезапустите ее"
+    )
 
 
 def _cols(model) -> list:
@@ -102,7 +186,13 @@ async def export_data(session: AsyncSession) -> dict:
     }
 
 
+async def export_sealed(session: AsyncSession, settings: Settings) -> dict:
+    return seal(await export_data(session), settings)
+
+
 async def import_data(session: AsyncSession, data: dict, settings: Settings) -> dict:
+    if isinstance(data, dict) and data.get("app") == "kervax" and "encrypted" in data:
+        data = unseal(data, settings)
     if not isinstance(data, dict) or data.get("app") != "kervax" or "tables" not in data:
         raise ValueError("Это не файл бэкапа Kervax")
     if data.get("format") != FORMAT_VERSION:
@@ -189,13 +279,25 @@ def read_file(settings: Settings, name: str) -> dict:
 
 async def write_auto_backup(session: AsyncSession, settings: Settings, keep: int) -> str:
     """Создаёт файл бэкапа на диске и удаляет лишние (оставляет keep новейших)."""
-    data = await export_data(session)
+    data = await export_sealed(session, settings)
     d = backups_dir(settings)
     os.makedirs(d, exist_ok=True)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
     name = f"kervax-backup-{stamp}.json"
-    with open(os.path.join(d, name), "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False)
+    # Через временный файл и rename: процесс, упавший посреди записи, оставлял обрезанный файл
+    # под нормальным именем, он считался в keep и вытеснял целый. Временный под маску не
+    # попадает, в списке его не видно
+    final = os.path.join(d, name)
+    tmp = f"{final}.{os.getpid()}.tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, final)
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)
     # прунинг старых
     files = [n for n in os.listdir(d) if _NAME_RE.match(n)]
     files.sort(reverse=True)
