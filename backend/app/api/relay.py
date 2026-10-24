@@ -12,7 +12,7 @@ from app.api.servers import _get_or_404, _is_online, _out, _write_agent_allowlis
 from app.config import get_settings
 from app.deps import CurrentUser, SessionDep
 from app.models import Location, Server
-from app.schemas import InstallStatusOut, InstallViaIn, InstallViaOut, RelayUpdate, ServerOut
+from app.schemas import InstallStatusOut, InstallViaIn, InstallViaOut, RelayUpdate, ServerOut, agent_ip_valid
 from app.security import hash_agent_token
 
 router = APIRouter(prefix="/servers", tags=["relay"])
@@ -51,7 +51,7 @@ async def install_via(server_id: int, body: InstallViaIn, user: CurrentUser, ses
     свой прокси панель не видит вовсе: браузер дописывает его в команду сам."""
     server = await _get_or_404(server_id, session, user)
     ip = body.ip.strip()
-    if ip and not relay_mod.valid_ip(ip):
+    if ip and not agent_ip_valid(ip):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "IP сервера указан неверно")
     if ip:
         server.agent_ip = ip

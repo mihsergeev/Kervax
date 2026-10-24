@@ -82,6 +82,14 @@ def _no_dns_lookups(monkeypatch):
     monkeypatch.setattr(parents, "_lookup", no_addrs)
     monkeypatch.setattr(parents, "_dns", {})
 
+    # куда панели можно ходить (app/net_guard.py): имена не резолвим, судим по самому адресу
+    from app import net_guard
+
+    async def no_resolve(host, timeout):
+        return []
+
+    monkeypatch.setattr(net_guard, "_resolve", no_resolve)
+
 
 @pytest.fixture(autouse=True)
 def _scheduler_memory_clean():

@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import contextlib
 import gzip
 import hashlib
 import json
@@ -8,6 +9,7 @@ import os
 import re
 import secrets
 import string
+import tempfile
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, Query, Request, status
@@ -71,7 +73,7 @@ from app.setup_scripts import (
     setup_scripts as _setup_scripts,
 )
 from app.config import get_settings
-from app.deps import AdminUser, CurrentUser, SessionDep, group_allowed, scope_query, viewer_command_ok
+from app.deps import LOGS_CLOSED, AdminUser, CurrentUser, SessionDep, group_allowed, scope_query, viewer_command_ok
 from app.models import (
     AgentPathProbe,
     AgentProbe,
@@ -89,6 +91,9 @@ from app.models import (
     WebErrorSample,
 )
 from app.schemas import (
+    agent_ip_valid,
+    dump_dir_default,
+    safe_hostname,
     KnownIn,
     NoteIn,
     AgentConfigOut,
@@ -249,6 +254,43 @@ def _agent_advice(server: Server) -> tuple[list[str], str | None]:
     return extra + titles, cmd
 
 
+# Что в отчете и в разборах карточки - строки логов и командные строки процессов: там бывают
+# пароли (`mysql -p...`, `--requirepass`, токены в URL), ради этого и есть галка "может читать
+# логи". Учетке только для просмотра без галки эти поля не отдаем: раньше она читала их в
+# last_report и разборах карточки, обходя галку
+_LOG_KEYS = frozenset({"cmdline", "log", "pmsg", "msg", "crash_last", "lines"})
+
+
+def _strip_logs(v, depth: int = 0):
+    if depth > 12:
+        return v
+    if isinstance(v, dict):
+        out = {}
+        for k, x in v.items():
+            if k in _LOG_KEYS and (isinstance(x, str) or (
+                    isinstance(x, list) and all(isinstance(i, str) for i in x))):
+                continue
+            out[k] = _strip_logs(x, depth + 1)
+        if isinstance(out.get("sources"), list):
+            # пример строки лога у helper'а ошибок в логах (logerr)
+            out["sources"] = [{k: x for k, x in s.items() if k != "last"} if isinstance(s, dict) else s
+                              for s in out["sources"]]
+        return out
+    if isinstance(v, list):
+        return [_strip_logs(x, depth + 1) for x in v]
+    return v
+
+
+def _logs_for(o: ServerOut, user) -> ServerOut:
+    if user.role != "viewer" or user.can_read_logs:
+        return o
+    for name in type(o).model_fields:
+        val = getattr(o, name, None)
+        if isinstance(val, (dict, list)):
+            setattr(o, name, _strip_logs(val))
+    return o
+
+
 def _out(
     server: Server, now: datetime, cur_versions: dict[str, int] | None = None,
     pod_names: dict[str, str] | None = None,
@@ -382,27 +424,42 @@ async def _get_or_404(server_id: int, session: SessionDep, user: User | None = N
 async def _write_agent_allowlist(session) -> None:
     """Пишет data/agent_allow_ips — адреса, с которых агенты ходят в панель.
     Хостовый ops/agent-firewall-sync.sh разрешает их в ufw/firewalld (если панель
-    закрыта фаерволом). Пишем атомарно; пустой файл = разрешать нечего."""
-    ips = [
+    закрыта фаерволом). Пустой файл = разрешать нечего.
+
+    Только одиночные адреса: подсеть 0.0.0.0/0 в "IP сервера" открывала 80/443 хоста панели
+    всем (agent_ip теперь проверяется и на приеме, а здесь - то, что записано раньше).
+    Пишем через свой временный файл: у трех воркеров uvicorn общее имя .tmp давало гонку,
+    и PATCH сервера отвечал 500 уже после коммита. Ошибка записи ответ не роняет: изменения
+    в базе, файл перепишет следующая правка."""
+    ips = sorted({
         ip.strip()
         for ip in await session.scalars(
             select(Server.agent_ip).where(Server.agent_ip != "")
         )
-        if ip and ip.strip()
-    ]
+        if ip and agent_ip_valid(ip.strip())
+    })
     data_dir = get_settings().data_dir
-    os.makedirs(data_dir, exist_ok=True)
-    path = os.path.join(data_dir, "agent_allow_ips")
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as fh:
-        fh.write("\n".join(sorted(set(ips))) + ("\n" if ips else ""))
-    os.replace(tmp, path)
+    tmp = ""
+    try:
+        os.makedirs(data_dir, exist_ok=True)
+        path = os.path.join(data_dir, "agent_allow_ips")
+        fd, tmp = tempfile.mkstemp(dir=data_dir, prefix="agent_allow_ips.")
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write("\n".join(ips) + ("\n" if ips else ""))
+        os.chmod(tmp, 0o644)
+        os.replace(tmp, path)
+    except OSError:
+        log.warning("не удалось записать agent_allow_ips", exc_info=True)
+        if tmp:
+            with contextlib.suppress(OSError):
+                os.unlink(tmp)
 
 
 _PEM_CERT = re.compile(
     r"-----BEGIN CERTIFICATE-----\s+[A-Za-z0-9+/=\s]+?-----END CERTIFICATE-----")
-# куда агент кладет корень на время установки (install.sh потом копирует его в хранилище ОС)
-PANEL_CA_TMP = "/tmp/kervax-panel-ca.crt"
+# переменная оболочки с временным файлом корня на время установки (install.sh потом копирует
+# его в хранилище ОС)
+PANEL_CA_VAR = "KERVAX_CA"
 
 
 def panel_ca_pem() -> str:
@@ -442,11 +499,15 @@ def _install_cmd(token: str) -> str:
     порога, на котором такой DPI режет соединение.
 
     sh -c: аргументы установщика идут последними, и то, что окно предлагает дописать в конец
-    (--no-auto, имя инстанса), попадает к нему. Токен только в аргументах, повторы его не печатают.
-    Прокси окно передает переменной KERVAX_PROXY перед sh -c: ее берут и этот curl, и install.sh."""
+    (--no-auto, имя инстанса), попадает к нему. Токен - в KERVAX_TOKEN перед sh -c, а не
+    аргументом: аргументы видит в ps любой пользователь ноды все минуты установки, а с токеном
+    можно забирать команды вместо ноды. Присваивание перед командой в argv не попадает, а
+    окружение процесса читает только его владелец; exec sh передает его install.sh. Прокси окно
+    передает так же, переменной KERVAX_PROXY перед sh -c: ее берут и этот curl, и install.sh."""
     base = get_settings().panel_url.rstrip("/") or "https://ПАНЕЛЬ"
     ca = panel_ca_pem()
-    cacert = f" --cacert {PANEL_CA_TMP}" if ca else ""
+    # с корнем аргументы начинаются с "--ca-file <файл>": curl берет тот же файл вторым аргументом
+    cacert = ' --cacert "$2"' if ca else ""
     script = (
         "f=$(mktemp) && for i in $(seq 24); do"
         f" curl -fsL --compressed --connect-timeout 10 -m 120{cacert}"
@@ -456,15 +517,17 @@ def _install_cmd(token: str) -> str:
         f' echo "{INSTALL_GIVEUP_MSG}" >&2; exit 1'
     )
     if not ca:
-        return f"sh -c '{script}' - {base} {token}"
+        return f"KERVAX_TOKEN={token} sh -c '{script}' - {base}"
     # Корень едет в самой команде: скачать его с панели нечем, https к ней без корня и не
     # проверить, а отключать проверку (-k) нельзя. curl проверяет панель этим корнем, install.sh
     # доверяет ему в ОС (агент и helper'ы ходят в панель системным хранилищем). --ca-file стоит
     # ДО адреса: третий позиционный аргумент (имя инстанса) UI дописывает в самый конец.
+    # Файл - через mktemp: фиксированное имя в /tmp можно было подложить заранее своим и
+    # получить свой CA в доверенных ноды (install.sh еще и проверяет владельца файла)
     b64 = base64.b64encode(ca.encode("ascii")).decode("ascii")
     return (
-        f"echo {b64} | base64 -d > {PANEL_CA_TMP} && "
-        f"sh -c '{script}' - --ca-file {PANEL_CA_TMP} {base} {token}"
+        f'{PANEL_CA_VAR}=$(mktemp) && echo {b64} | base64 -d > "${PANEL_CA_VAR}" && '
+        f"KERVAX_TOKEN={token} sh -c '{script}' - --ca-file \"${PANEL_CA_VAR}\" {base}"
     )
 
 
@@ -592,7 +655,7 @@ async def list_servers(user: CurrentUser, session: SessionDep) -> list[ServerOut
             o.bsrv_repo_reasons = {
                 n: repo_reason(byname[n], now, ext, panel)
                 for n in _backup_problem_repos(bs, set(s.backup_repo_mutes or []), now, ext, panel, arch)}
-        outs.append(o)
+        outs.append(_logs_for(o, user))
     return outs
 
 
@@ -601,7 +664,10 @@ async def create_server(
     body: ServerCreate, user: CurrentUser, session: SessionDep
 ) -> ServerEnrollOut:
     name = body.name.strip()
-    await _name_free(session, name)
+    # в чужую группу не заводим: учетка с группами подкладывала бы ноду соседям
+    if not group_allowed(user, body.group_name):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Группа недоступна для этой учётной записи")
+    await _name_free(session, name, user=user)
     token = generate_agent_token()
     # подключение открыто (app/onboard.py): пока его не закроют, от сервера уходит алертом только
     # офлайн и критичный диск. Метка в состоянии - чтобы сборщик знал, что было что закрывать
@@ -619,7 +685,7 @@ async def create_server(
     )
 
 
-async def _name_free(session, name: str, exclude_id: int | None = None) -> None:
+async def _name_free(session, name: str, exclude_id: int | None = None, user=None) -> None:
     """Проверяет, что имя еще не занято: панель различает ноды по имени.
 
     Две записи с одним именем в списке не различить, их метрики и алерты идут вперемешку,
@@ -630,6 +696,9 @@ async def _name_free(session, name: str, exclude_id: int | None = None) -> None:
     )
     if dup is None or dup.id == exclude_id:
         return
+    if user is not None and not group_allowed(user, dup.group_name):
+        # сервер чужой группы не называем и не подтверждаем его имя дословно
+        raise HTTPException(status.HTTP_409_CONFLICT, "Это имя уже занято, выберите другое.")
     raise HTTPException(
         status.HTTP_409_CONFLICT,
         f"Сервер {dup.name} уже есть в панели. Другой ноде дайте другое имя, "
@@ -1222,10 +1291,10 @@ def _backup_coverage(server: Server) -> list[BackupAudit]:
         if (d.get("used") or 0) < _AUDIT_MIN_BYTES:
             continue
         if not _path_covered(m, mode, inc, exc):
-            gb = (d.get("used") or 0) / 1e9
+            # ГБ двоичные, как в карточке дисков: десятичные давали на ~7% больше
             out.append(BackupAudit(
                 kind="mount", subject=m, gap=True,
-                detail=f"смонтированная ФС с данными ({gb:.0f} ГБ) не попадает в бэкап",
+                detail=f"смонтированная ФС с данными ({backup_growth.fmt_size(d.get('used') or 0)}) не попадает в бэкап",
             ))
     seen: set[str] = set()
     for c in ((rep.get("docker") or {}).get("containers") or []):
@@ -1436,7 +1505,7 @@ async def get_server(server_id: int, user: CurrentUser, session: SessionDep) -> 
     bogus = (await request_watch.server_issues(session)).get(server.id)
     if bogus:
         o.problems = [*o.problems, bogus]
-    return o
+    return _logs_for(o, user)
 
 
 @router.post("/{server_id}/snooze", response_model=ServerOut)
@@ -1683,9 +1752,12 @@ async def update_server(
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Авто-очистку диска включает только админ")
     if autofix_changed:
         fields["disk_autofix"] = autofix
+    if "group_name" in fields and fields["group_name"] != server.group_name and (
+            not group_allowed(user, fields["group_name"])):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Группа недоступна для этой учётной записи")
     if fields.get("name") is not None:
         fields["name"] = fields["name"].strip()
-        await _name_free(session, fields["name"], exclude_id=server.id)
+        await _name_free(session, fields["name"], exclude_id=server.id, user=user)
     parent_changed = "parent_id" in fields and fields["parent_id"] != server.parent_id
     if parent_changed and fields["parent_id"] is not None:
         pid = fields["parent_id"]
@@ -2010,7 +2082,10 @@ async def server_web_error_lines(
     hours: int = Query(default=24, ge=1, le=720),
 ) -> list[str]:
     """Все сохраненные строки с 5xx одного лога за окно, старые сверху: из них панель
-    собирает .txt, чтобы не искать ошибки на сервере."""
+    собирает .txt, чтобы не искать ошибки на сервере. Это строки access-лога (в URL бывают
+    токены): учетке только для просмотра - только с галкой "может читать логи"."""
+    if user.role == "viewer" and not user.can_read_logs:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, LOGS_CLOSED)
     await _get_or_404(server_id, session, user)
     since = datetime.now(timezone.utc) - timedelta(hours=hours)
     rows = await session.scalars(
@@ -2370,6 +2445,11 @@ async def backup_command(
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "не указан движок дампа")
         payload = {"engine": body.engine, "container": body.container}
         if body.action == "dump_setup":
+            # свой каталог дампов - root-действие на ноде (helper создает его 0700, выключение
+            # дампа удаляет): как "Освободить место", только админ. /backup и пусто - всем
+            if not dump_dir_default(body.dump_dir) and user.role != "admin":
+                raise HTTPException(status.HTTP_403_FORBIDDEN,
+                                    "Каталог дампов не в /backup задает только администратор")
             # настройки едут только при включении; агент подставит дефолты для пустых
             payload["dump_dir"] = body.dump_dir
             payload["dump_keep"] = body.dump_keep
@@ -2751,7 +2831,8 @@ async def backup_setup(
     провижинит репо на бэкап-сервере (htpasswd/init/ufw/prune) и бэкап на клиенте
     (restic/env/timer). Возвращает job — фронт поллит /backup/setup/{job_id}."""
     client = await _get_or_404(server_id, session, user)
-    bs = await _get_or_404(body.backup_server_id, session)
+    # сервер бэкапов - тоже из групп учетки: настройка ставит на нем htpasswd, репозиторий и ufw
+    bs = await _get_or_404(body.backup_server_id, session, user)
     crep = client.last_report or {}
     # Отказываем только при ЖИВОМ бэкапе и без согласия переустановить поверх. Метрика,
     # оставшаяся от снесенного бэкапа, и упавшая на полпути настройка - не бэкап: раньше
@@ -3348,8 +3429,12 @@ async def agent_report(
     token = authorization.removeprefix("Bearer ").strip()
     if not token:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Нет токена агента")
+    # Строку сервера держим до конца приема: отчет переписывает last_report целиком, и два
+    # одновременных запроса (повтор отчета после таймаута, going-down посреди отчета) раньше
+    # затирали друг друга - пропадала отметка штатной перезагрузки (ложный "недоступен"), а
+    # OOM считался дважды от одного и того же прошлого отчета
     server = await session.scalar(
-        select(Server).where(Server.token_hash == hash_agent_token(token))
+        select(Server).where(Server.token_hash == hash_agent_token(token)).with_for_update()
     )
     if server is None or not server.enabled:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Неверный токен агента")
@@ -3433,6 +3518,8 @@ async def agent_report(
         )
     if body.hostname:
         server.hostname = body.hostname[:255]
+    elif server.hostname and not safe_hostname(server.hostname):
+        server.hostname = ""  # записано до проверки имени на приеме
     if body.os:
         server.os = body.os[:128]
     if body.local_ip:
@@ -3756,10 +3843,11 @@ async def agent_going_down(
     authorization: str = Header(default=""),
 ) -> dict:
     """Агент 2.47+ уходит штатно (SIGTERM от systemd): перезагрузка, выключение или остановка
-    одного агента. Пока сервер грузится, "недоступен" не поднимается (app/going_down.py)."""
+    одного агента. Пока сервер грузится, "недоступен" не поднимается (app/going_down.py).
+    Строка под замком, как в agent_report: отметка не теряется под отчетом, идущим в это время."""
     token = authorization.removeprefix("Bearer ").strip()
     server = await session.scalar(
-        select(Server).where(Server.token_hash == hash_agent_token(token))
+        select(Server).where(Server.token_hash == hash_agent_token(token)).with_for_update()
     )
     if server is None or not server.enabled:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Неверный токен агента")

@@ -112,6 +112,15 @@ async def add_link(server_id: int, body: LinkIn, user: CurrentUser, session: Ses
     host = body.host.strip().lower()
     if not netlinks.host_ok(host):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Адрес - IP или имя хоста, без http:// и порта")
+    if netlinks.host_forbidden(host):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "localhost и адреса метаданных облака проверять нельзя")
+    # Связь - TCP с ноды на этот адрес: с любым адресом это сканер сети изнутри ноды. Не админу -
+    # только адреса и имена серверов парка из своих групп
+    if user.role != "admin":
+        visible = [s for s in await session.scalars(select(Server)) if group_allowed(user, s.group_name)]
+        if host not in netlinks.fleet_hosts(visible):
+            raise HTTPException(status.HTTP_403_FORBIDDEN,
+                                "Связь с адресом не из серверов панели добавляет только администратор")
     target = None
     if body.target_server_id is not None:
         if body.target_server_id == server.id:

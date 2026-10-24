@@ -5890,7 +5890,7 @@ export function EnrollModal({
 
 // Команда установки по аргументам: переносится между ними, а не посреди токена. Токен
 // приглушен до наведения (или тапа на телефоне), копируется команда целиком. Повторы ожидания
-// (sh -c '...') тоже приглушены и текут как текст: глазу нужны адрес панели и токен в конце
+// (sh -c '...') тоже приглушены и текут как текст: глазу нужны адрес панели и токен (KERVAX_TOKEN в начале)
 function InstallCmd({ cmd, token, add }: { cmd: string; token: string; add?: string }) {
   const parts = cmd.match(/'[^']*'|\S+/g) ?? []
   return (
@@ -5898,7 +5898,7 @@ function InstallCmd({ cmd, token, add }: { cmd: string; token: string; add?: str
       {parts.map((p, i) => (
         <span key={i}>
           {i > 0 && ' '}
-          <span className={p === token ? 'ic-arg ic-tok' : p.length > 80 && p.startsWith("'") ? 'ic-script' : 'ic-arg'}>
+          <span className={p === token || p === `KERVAX_TOKEN=${token}` ? 'ic-arg ic-tok' : p.length > 80 && p.startsWith("'") ? 'ic-script' : 'ic-arg'}>
             {p}
           </span>
         </span>

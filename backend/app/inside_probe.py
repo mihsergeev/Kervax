@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+from urllib.parse import urlparse
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -27,6 +28,14 @@ KIND = "inside"
 REPEAT = timedelta(minutes=5)
 # сколько ответ изнутри годится для алерта
 FRESH = timedelta(minutes=10)
+
+
+def _port(target: str) -> int | None:
+    t = (target or "").strip()
+    try:
+        return urlparse(t if "://" in t else "http://" + t).port
+    except ValueError:
+        return -1
 
 
 def _ts(v) -> datetime | None:
@@ -42,6 +51,10 @@ async def request(session: AsyncSession, check: Check, now: datetime) -> bool:
     from app.manual_probe import fast_agent
 
     if check.type != "http" or check.probe_local:
+        return False
+    if _port(check.target) not in (None, 80, 443):
+        # монитор из панели на нестандартный порт завел кто угодно, а изнутри это был бы запрос
+        # к localhost-сервису ноды (прокси docker-сокета, админки): туда не спрашиваем
         return False
     li = check.last_inside if isinstance(check.last_inside, dict) else {}
     asked = _ts(li.get("asked"))

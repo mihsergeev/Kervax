@@ -27,10 +27,11 @@ _SITES_MAX = 300
 
 
 @router.post("/test", response_model=ProxyTestResult)
-async def test_location_proxy(body: LocationTest, _: CurrentUser) -> ProxyTestResult:
+async def test_location_proxy(body: LocationTest, _: AdminUser) -> ProxyTestResult:
     """Проверяет, что прокси локации доступен (идёт ли через него трафик) — чтобы
     сохранять только рабочие. Пустой url = «напрямую» → всегда ок. У рабочего прокси
-    заодно видно, в какой стране он выходит в интернет."""
+    заодно видно, в какой стране он выходит в интернет. Только админ: локации заводит он, а
+    адрес прокси - любой хост и порт, то есть сканер сети с хоста панели."""
     ok, message, latency = await checks.test_proxy(body.url)
     ip, cc = await checks.proxy_exit(body.url) if ok and body.url.strip() else ("", "")
     return ProxyTestResult(ok=ok, message=message, latency_ms=latency, exit_ip=ip, exit_country=cc)

@@ -42,6 +42,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app import checks as checks_exec
+from app import net_guard
 
 log = logging.getLogger("kervax.tamper")
 
@@ -684,8 +685,10 @@ async def scan(check) -> dict:
     auth = (httpx.BasicAuth(check.auth_user or "", check.auth_pass or "")
             if getattr(check, "auth_method", "") == "basic" else None)
     headers = checks_exec._parse_headers(getattr(check, "http_headers", "") or "")
+    # те же запреты адресов, что у монитора: страница и ее JS не уводят панель во внутреннюю сеть
     async with httpx.AsyncClient(timeout=_TIMEOUT, follow_redirects=True, auth=auth, headers=headers,
-                                 verify=not getattr(check, "ignore_tls", False)) as client:
+                                 verify=not getattr(check, "ignore_tls", False),
+                                 event_hooks={"request": [net_guard.request_hook()]}) as client:
         try:
             r, text = await _get(client, url, checks_exec._USER_AGENT)
         except httpx.HTTPError as exc:

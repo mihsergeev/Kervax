@@ -628,6 +628,24 @@ _UNBIND_GRACE = 30 * 60
 _bound_seen: dict[int, datetime] = {}
 
 
+def _probe_node(cands: list[int], current: int | None, group_of: dict[int, str]) -> int | None:
+    """Нода для монитора среди серверов, у которых домен в web_services (по имени сервера).
+
+    Список сайтов присылает сам агент, и взломанная нода могла вписать себе чужой домен:
+    раньше брался первый по имени сервер, и монитор (с его заголовками и паролем) уезжал к ней,
+    а она слала "up" за чужой сайт. Теперь привязка держится, пока прежняя нода домен
+    обслуживает, а из нескольких новых выбираем, только если все они в одной группе
+    серверов (балансируемые узлы одного хозяина). Иначе - никого: монитор скажет, что
+    проверять некому, и человек разберется."""
+    if not cands:
+        return None
+    if current in cands:
+        return current
+    if len({group_of.get(i, "") for i in cands}) == 1:
+        return cands[0]
+    return None
+
+
 async def rebind_local_probes(session_factory) -> int:
     """Привязывает мониторы с галочкой «локально» к ноде, обслуживающей их домен.
 
@@ -646,20 +664,22 @@ async def rebind_local_probes(session_factory) -> int:
         )
         if not checks:
             return 0
-        serving: dict[str, int] = {}
-        for srv in sorted(await session.scalars(select(Server)), key=lambda x: x.name):
+        servers = sorted(await session.scalars(select(Server)), key=lambda x: x.name)
+        group_of = {srv.id: srv.group_name or "" for srv in servers}
+        claims: dict[str, list[int]] = {}
+        for srv in servers:
             for web in (srv.last_report or {}).get("web_services") or []:
                 for raw in web.get("sites") or []:
                     host = _host_of_target(raw)
-                    if host and host not in serving:
-                        serving[host] = srv.id
+                    if host and srv.id not in claims.setdefault(host, []):
+                        claims[host].append(srv.id)
         changed = 0
         now = datetime.now(timezone.utc)
         online = {
             srv.id for srv in await session.scalars(select(Server)) if seen_online(srv, now)
         }
         for c in checks:
-            want = serving.get(_host_of_target(c.target))
+            want = _probe_node(claims.get(_host_of_target(c.target)) or [], c.probe_server_id, group_of)
             if want is not None and want == c.probe_server_id:
                 _bound_seen[c.id] = now
             # Домен пропал из списка, а нода, которая его держала, на связи: скорее всего

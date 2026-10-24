@@ -47,22 +47,52 @@ def settings(tmp_path, monkeypatch):
 def test_install_cmd_without_ca_has_no_root(settings):
     from app.api.servers import _install_cmd
     cmd = _install_cmd("tok")
-    assert cmd.startswith("sh -c '") and "--cacert" not in cmd and "--ca-file" not in cmd
-    assert cmd.endswith("' - https://192.168.1.10 tok")
+    # токен в окружении sh, а не в его аргументах: аргументы видны в ps любому пользователю ноды
+    assert cmd.startswith("KERVAX_TOKEN=tok sh -c '") and "--cacert" not in cmd and "--ca-file" not in cmd
+    assert cmd.endswith("' - https://192.168.1.10")
 
 
 def test_install_cmd_carries_the_root(settings):
-    from app.api.servers import PANEL_CA_TMP, _install_cmd
+    from app.api.servers import _install_cmd
     (settings / "panel-ca.crt").write_text("junk before\n" + PEM, encoding="ascii")
     cmd = _install_cmd("tok")
-    b64 = re.match(r"echo ([A-Za-z0-9+/=]+) \| base64 -d > (\S+) && ", cmd)
-    assert b64 and b64.group(2) == PANEL_CA_TMP
+    # корень - во временный файл mktemp, а не в фиксированный /tmp/kervax-panel-ca.crt
+    b64 = re.match(r'KERVAX_CA=\$\(mktemp\) && echo ([A-Za-z0-9+/=]+) \| base64 -d > "\$KERVAX_CA" && ', cmd)
+    assert b64 and "/tmp/" not in cmd
     assert base64.b64decode(b64.group(1)).decode() == PEM  # только сам сертификат, без мусора
-    # curl проверяет панель этим корнем, без -k / --insecure
-    assert f"--cacert {PANEL_CA_TMP}" in cmd and "https://192.168.1.10/api/agent/install.sh" in cmd
+    # curl проверяет панель этим корнем (вторым аргументом после --ca-file), без -k / --insecure
+    assert '--cacert "$2"' in cmd and "https://192.168.1.10/api/agent/install.sh" in cmd
     assert " -k " not in cmd and "--insecure" not in cmd
     # --ca-file до адреса: UI дописывает имя инстанса (" main") в самый конец команды
-    assert cmd.endswith(f"' - --ca-file {PANEL_CA_TMP} https://192.168.1.10 tok")
+    assert cmd.endswith('\' - --ca-file "$KERVAX_CA" https://192.168.1.10')
+    assert "KERVAX_TOKEN=tok sh -c '" in cmd
+
+
+@pytest.mark.skipif(shutil.which("sh") is None or shutil.which("base64") is None, reason="нужен sh")
+def test_install_cmd_runs_in_sh(settings, tmp_path):
+    """Команда целиком в sh: установщик получает токен из окружения, в его аргументах токена нет,
+    имя инстанса, дописанное в конец, доходит до него, а curl проверяет панель тем же корнем."""
+    from app.api.servers import _install_cmd
+    (settings / "panel-ca.crt").write_text(PEM, encoding="ascii")
+    fake = tmp_path / "bin"
+    fake.mkdir()
+    # curl кладет в -o "установщик", который печатает свои аргументы, токен и первую строку корня;
+    # сам curl отмечает, какой корень ему дали
+    (fake / "curl").write_text(
+        "#!/bin/sh\n"
+        "while [ $# -gt 0 ]; do case \"$1\" in -o) out=$2; shift;; --cacert) echo \"cacert=$2\"; shift;; esac; shift; done\n"
+        "echo 'echo \"args=$*\"; echo \"tok=$KERVAX_TOKEN\"; head -1 \"$2\"' > \"$out\"\n",
+        encoding="ascii", newline="\n")
+    (fake / "curl").chmod(0o755)
+    path = fake.as_posix() + ":" + ":".join(p for p in ("/usr" + "/bin", "/bin"))
+    out = subprocess.run(["sh", "-c", _install_cmd("fake-token-example") + " main"], capture_output=True,
+                         text=True, env={"PATH": path}, timeout=30)
+    assert "tok=fake-token-example" in out.stdout, (out.stdout, out.stderr)
+    args = next(x for x in out.stdout.splitlines() if x.startswith("args="))
+    assert "fake-token-example" not in args and args.endswith("https://192.168.1.10 main")
+    cacert = next(x for x in out.stdout.splitlines() if x.startswith("cacert="))
+    assert args.startswith("args=--ca-file " + cacert[len("cacert="):] + " ")
+    assert "-----BEGIN CERTIFICATE-----" in out.stdout
 
 
 def test_not_a_certificate_is_ignored(settings):
@@ -139,6 +169,16 @@ def test_installer_trusts_the_panel_ca(name):
 
 
 @pytest.mark.parametrize("name", INSTALLERS)
+def test_installer_refuses_foreign_ca_file(name):
+    """Корень берется только из обычного файла своего пользователя: подложенный в /tmp чужой файл
+    или ссылка не попадают в доверенные; файл ошибок проверки - свой временный."""
+    s = src(AGENT / name)
+    guard = s.index('if [ -L "$CA_FILE" ] || [ ! -f "$CA_FILE" ] || [ ! -O "$CA_FILE" ]; then')
+    assert guard < s.index('cp "$CA_FILE" "$CA_DST"')
+    assert "/tmp/kervax-ca-check.err" not in s and 'CA_ERR=$(mktemp)' in s
+
+
+@pytest.mark.parametrize("name", INSTALLERS)
 def test_uninstall_removes_the_panel_ca(name):
     s = src(AGENT / name)
     block = s[s.index('if [ "$UNINSTALL" = 1 ]; then'):s.index("\n  exit 0\nfi\n")]
@@ -165,3 +205,24 @@ def test_installer_args(name):
     assert parse(name, "--ca-file", ca, "https://p", "tok", "main") == f"{ca}|https://p|tok|main|0"
     assert parse(name, "--ca-file=/x.pem", "https://p", "tok", "--no-auto") == "/x.pem|https://p|tok||1"
     assert parse(name, "https://p", "tok") == "|https://p|tok||0"
+
+
+def parse_env(name, token, *args):
+    """Разбор аргументов вместе с токеном из KERVAX_TOKEN (так его передает команда из панели)."""
+    s = src(AGENT / name)
+    start = s.index('URL=""; TOKEN=""')
+    end = s.index("unset KERVAX_TOKEN\n", start) + len("unset KERVAX_TOKEN\n")
+    script = s[start:end] + 'printf "%s|%s|%s|%s|%s" "$URL" "$TOKEN" "$INSTANCE" "$NO_AUTO" "${KERVAX_TOKEN-unset}"\n'
+    out = subprocess.run(["sh", "-c", script, "sh", *args], capture_output=True, text=True, check=True,
+                         env={"KERVAX_TOKEN": token})
+    return out.stdout
+
+
+@pytest.mark.skipif(shutil.which("sh") is None, reason="нужен sh")
+@pytest.mark.parametrize("name", INSTALLERS)
+def test_installer_token_from_env(name):
+    # новая команда: токен в окружении, второй позиционный - имя инстанса
+    assert parse_env(name, "tok", "https://p") == "https://p|tok||0|unset"
+    assert parse_env(name, "tok", "--ca-file", "/x", "https://p", "main", "--no-auto") == "https://p|tok|main|1|unset"
+    # старая команда (токен аргументом) работает как раньше
+    assert parse_env(name, "", "https://p", "tok", "main") == "https://p|tok|main|0|unset"

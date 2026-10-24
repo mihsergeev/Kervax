@@ -45,6 +45,33 @@ def host_ok(host: str) -> bool:
         return bool(_HOST_RE.match(h))
 
 
+def host_forbidden(host: str) -> bool:
+    """Свой localhost и метаданные облака: туда связь не проверяем никогда, иначе учетка панели
+    стучалась с ноды в ее localhost-сервисы и в 169.254.169.254."""
+    h = (host or "").strip().lower().rstrip(".")
+    if h in ("localhost", "metadata", "metadata.google.internal") or h.endswith(".localhost"):
+        return True
+    try:
+        ip = ipaddress.ip_address(h)
+    except ValueError:
+        return False
+    if ip.version == 6 and ip.ipv4_mapped:
+        ip = ip.ipv4_mapped
+    return (ip.is_loopback or ip.is_link_local or ip.is_unspecified or ip.is_multicast
+            or h in ("100.100.100.200", "fd00:ec2::254"))
+
+
+def fleet_hosts(servers) -> set[str]:
+    """Адреса и имена серверов панели: связь проверяем между ними, а не с кем угодно."""
+    out: set[str] = set()
+    for s in servers:
+        for v in (s.external_ip, s.agent_ip, s.local_ip, s.hostname, s.name):
+            v = (v or "").strip().lower().rstrip(".")
+            if v:
+                out.add(v)
+    return out
+
+
 def _aware(dt: datetime) -> datetime:
     return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
 
@@ -135,7 +162,9 @@ async def handle(session, server: Server, results, now: datetime) -> list[dict]:
                       "host": (names.get(r.target_server_id) if r.target_server_id else None) or r.host,
                       "port": r.port, "note": r.note or ""})
     server.links_state = state or None
-    return [{"id": r.id, "host": r.host, "port": r.port} for r in rows[:MAX_PER_SERVER]]
+    # заведенное раньше на localhost или метаданные агенту больше не отдаем
+    return [{"id": r.id, "host": r.host, "port": r.port} for r in rows[:MAX_PER_SERVER]
+            if not host_forbidden(r.host)]
 
 
 def problems(state) -> list[tuple[int, int, str]]:

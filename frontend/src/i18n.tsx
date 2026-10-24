@@ -5709,6 +5709,12 @@ const EN: Record<string, string> = {
     'wrong 2FA code',
   'неверный пароль':
     'wrong password',
+  'выход':
+    'logout',
+  'неверный текущий пароль при смене':
+    'wrong current password on change',
+  'неверный код при отключении 2FA':
+    'wrong code when turning 2FA off',
   'отвязал Telegram':
     'unlinked Telegram',
   'отключил доступ ansible':
