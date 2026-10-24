@@ -493,13 +493,16 @@ function RiskWarning({ server: s, canAct, onChanged }: { server: Server; canAct:
 
 // Контейнеры, которые после перезагрузки не поднимутся: restart policy no или on-failure. Одна
 // команда на все и кнопка "не нужен после перезагрузки" (мут noboot:<имя>), если так задумано.
+// docker run --rm (autorm) в команду не идет: докер ее не примет, такой контейнер запускает
+// кто-то другой - юнит systemd или скрипт.
 function NoBootWarning({ server: s, canAct, onChanged }: { server: Server; canAct: boolean; onChanged: () => void }) {
   const { t } = useI18n()
   const [busy, setBusy] = useState('')
   const items = s.noboot?.docker ?? []
   const live = items.filter((x) => !x.muted)
   const muted = items.filter((x) => x.muted)
-  const cmd = `docker update --restart unless-stopped ${live.map((x) => x.name).join(' ')}`
+  const plain = live.filter((x) => !x.autorm)
+  const cmd = `docker update --restart unless-stopped ${plain.map((x) => x.name).join(' ')}`
   const toggle = (name: string, on: boolean) => {
     const key = NOBOOT_MUTE + name
     setBusy(name)
@@ -521,7 +524,9 @@ function NoBootWarning({ server: s, canAct, onChanged }: { server: Server; canAc
                 <span className="lk-dot lk-dot-warn" />
                 <div className="hs-warn-main">
                   <span className="mono">{x.name}</span>
-                  <div>{t('restart {policy}: после перезагрузки докер его не поднимет', { policy: x.policy })}</div>
+                  <div>{x.autorm
+                    ? t('контейнер с --rm, его запускает не докер - проверьте systemd-юнит или скрипт, который его запускает: docker update --restart тут не поможет')
+                    : t('restart {policy}: после перезагрузки докер его не поднимет', { policy: x.policy })}</div>
                 </div>
                 {canAct && (
                   <button className="ghost small" disabled={busy === x.name} onClick={() => toggle(x.name, true)}
@@ -532,9 +537,9 @@ function NoBootWarning({ server: s, canAct, onChanged }: { server: Server; canAc
               </div>
             ))}
           </div>
-          <FixSteps steps={[{ id: 'update', cmd }, { id: 'compose' }]}
+          {plain.length > 0 && <FixSteps steps={[{ id: 'update', cmd }, { id: 'compose' }]}
             text={(st) => st.id === 'update' ? t('Поставить restart unless-stopped')
-              : t('Если контейнер из compose, то же в файле (restart: unless-stopped), иначе следующий up вернет как было')} />
+              : t('Если контейнер из compose, то же в файле (restart: unless-stopped), иначе следующий up вернет как было')} />}
         </>
       )}
       {muted.length > 0 && (
@@ -957,8 +962,9 @@ function DockerHostModal({
   const riskDone = useFixDone(watch ? s.docker_risk : null, (x) => x.name, (x) => goneText(x.name, () =>
     t('{name}: ключей от хоста больше нет (было: {what}), замечание закрыто', { name: x.name, what: dockRiskText(x, t) })),
   { live: (x) => !x.muted, on: cur.id === 'host' })
-  const bootDone = useFixDone(watch ? s.noboot?.docker : null, (x) => x.name, (x) => goneText(x.name, (c) =>
-    t('{name}: restart {policy}, поднимется после перезагрузки, замечание закрыто', { name: x.name, policy: c.policy || '-' })),
+  const bootDone = useFixDone(watch ? s.noboot?.docker : null, (x) => x.name, (x) => goneText(x.name, (c) => c.unit
+    ? t('{name}: его запускает юнит {unit}, замечание закрыто', { name: x.name, unit: c.unit })
+    : t('{name}: restart {policy}, поднимется после перезагрузки, замечание закрыто', { name: x.name, policy: c.policy || '-' })),
   { live: (x) => !x.muted, on: cur.id === 'boot' })
 
   // Замечания по разделам. Проблемы те же, что в "Что сломано" на главной: упавшие и крутящиеся

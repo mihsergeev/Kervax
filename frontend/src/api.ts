@@ -1642,6 +1642,10 @@ export type DockerContainer = {
   status: string // «Up 3 hours (healthy)»
   restarts?: number // RestartCount демона
   policy?: string // restart-policy: no/always/unless-stopped/on-failure
+  // без restart policy: docker run --rm, юнит systemd, который его запускает, и включен ли он
+  auto_rm?: boolean
+  unit?: string
+  unit_on?: boolean
   health?: string // healthy/unhealthy/starting
   mem?: number // память работающего контейнера, байты (агент 2.14+, как docker stats)
   cpu?: number // CPU работающего контейнера, % одного ядра (агент 2.21+)
@@ -3003,8 +3007,10 @@ export function createServer(body: ServerForm): Promise<ServerEnroll> {
 }
 // не переживет перезагрузку (reboot_survive.view); muted - заглушен точечно ("по назначению")
 export interface NoBoot {
-  docker: { name: string; image: string; policy: string; muted: boolean }[]
-  units: { unit: string; started: number; muted: boolean }[]
+  // autorm - docker run --rm: его запускает не докер, docker update --restart он не примет
+  docker: { name: string; image: string; policy: string; autorm?: boolean; muted: boolean }[]
+  // container - юнит нашел агент по контейнеру, которого юнит запускает
+  units: { unit: string; started: number; container?: string; muted: boolean }[]
 }
 
 // учетка с shell (access_audit.view): pw - P задан, L заблокирован, NP пустой; last - последний

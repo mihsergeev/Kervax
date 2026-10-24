@@ -4,6 +4,14 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.8.32] - 2026-10-24
+
+### Fixed
+- Докер -> Перезагрузка: контейнер, которого запускает юнит systemd (docker run --rm в ExecStart, процесс docker
+  run в юните или юнит с именем контейнера), больше не числится в "не поднимутся после перезагрузки". Для
+  контейнера с --rm панель не предлагает docker update --restart, который докер не примет, а советует проверить
+  юнит или скрипт; невключенный юнит такого контейнера показывается пунктом про юнит. Нужен агент 2.53.
+
 ## [1.8.31] - 2026-10-24
 
 ### Changed

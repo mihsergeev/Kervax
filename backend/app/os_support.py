@@ -287,7 +287,9 @@ def _fix(kind: str, rep: dict, now: datetime, mutes: set[str]) -> list[dict]:
         # только dbus: почему не "перезапустить dbus", а перезагрузка при случае
         steps = [{"id": "reboot_soft"}] if soft_reboot(u) else []
         if reboot_survive.MUTE_ALL not in mutes:
-            dc = [c["name"] for c in reboot_survive.containers(rep) if reboot_survive.MUTE_PREFIX + c["name"] not in mutes]
+            # docker run --rm docker update не примет: такой контейнер запускает не докер
+            dc = [c["name"] for c in reboot_survive.containers(rep)
+                  if reboot_survive.MUTE_PREFIX + c["name"] not in mutes and not c["autorm"]]
             un = [x["unit"] for x in reboot_survive.units(rep, now) if reboot_survive.MUTE_PREFIX + x["unit"] not in mutes]
             if dc:
                 steps.append({"id": "noboot_docker", "cmd": "sudo docker update --restart unless-stopped " + " ".join(dc)})

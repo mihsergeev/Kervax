@@ -9,6 +9,15 @@ docker update --restart unless-stopped <имя>.
 ни D-Bus, ни другой юнит (helper units-setup 0.3): после ребута его нет. Лечится
 systemctl enable <юнит>.
 
+Контейнер, которого запускает юнит systemd (ExecStart=docker run --rm --name ..., Restart=always),
+после ребута поднимет systemd, restart no у него - не ошибка. Юнит находит агент: включенный
+юнит с docker run --name <имя> в ExecStart, процесс docker run в cgroup юнита или юнит с именем
+контейнера ("unit", "unit_on"). Включенный юнит - контейнер не считаем. Не включенный - это
+пункт про юнит (systemctl enable), а не про контейнер; helper units-setup, если он стоит,
+решает про юниты точнее (видит, кого тянут сокет, таймер и другие юниты). docker run --rm
+(auto_rm) без найденного юнита - считаем, но docker update --restart не предлагаем: на --rm
+докер его не примет, а запускает такой контейнер кто-то другой.
+
 Не считаем: задачи swarm (имя.N.id, их перезапускает swarm), контейнеры Kubernetes (k8s_*),
 контейнеры Coolify (его sentinel без restart policy поднимает сам Coolify), консоли getty на
 терминалах (getty@tty6 systemd поднимает сам, когда на терминал переключились, enable им не нужен)
@@ -36,8 +45,8 @@ def _up_a_day(status: str) -> bool:
     return bool(_UP_DAYS.match(status or ""))
 
 
-def containers(rep: dict) -> list[dict]:
-    """Работающие контейнеры, которые докер после ребута не поднимет: [{"name", "image", "policy"}]."""
+def _no_policy(rep: dict) -> list[dict]:
+    """Работающие сутки и больше контейнеры без restart policy, кроме swarm, k8s и Coolify"""
     dk = (rep or {}).get("docker") or {}
     if not dk.get("access"):
         return []
@@ -53,26 +62,53 @@ def containers(rep: dict) -> list[dict]:
             continue
         if not _up_a_day(str(c.get("status") or "")):
             continue
-        out.append({"name": name, "image": image, "policy": pol or "no"})
+        out.append(c)
     return out
 
 
-def units(rep: dict, now: datetime) -> list[dict]:
-    """Сервисы, которые работают, но после ребута не запустятся: [{"unit", "started"}]."""
+def containers(rep: dict) -> list[dict]:
+    """Работающие контейнеры, которые докер после ребута не поднимет и не поднимет юнит systemd:
+    [{"name", "image", "policy", "autorm"}]. autorm - docker run --rm: docker update ему не поможет."""
+    out = []
+    for c in _no_policy(rep):
+        if c.get("unit"):
+            continue  # его запускает юнит: включенный поднимет, не включенный - пункт в units()
+        out.append({"name": str(c["name"]), "image": str(c.get("image") or ""),
+                    "policy": str(c.get("policy") or "") or "no", "autorm": bool(c.get("auto_rm"))})
+    return out
+
+
+def _helper_units(rep: dict, now: datetime) -> list[dict] | None:
+    """Список helper units-setup; None - helper не стоит или давно молчит"""
     ub = ((rep or {}).get("extras") or {}).get("units")
     if not isinstance(ub, dict) or ub.get("v") != 1:
-        return []
+        return None
     ref = float((rep or {}).get("clock_unix") or 0) or now.timestamp()
     if ref - float(ub.get("ts") or 0) > _STALE_BLOCK:
-        return []  # helper давно не отчитывался: список устарел
+        return None  # helper давно не отчитывался: список устарел
+    return [u for u in ub.get("noboot") or [] if isinstance(u, dict)]
+
+
+def units(rep: dict, now: datetime) -> list[dict]:
+    """Сервисы, которые работают, но после ребута не запустятся: [{"unit", "started"}], у юнита,
+    найденного по контейнеру, еще "container"."""
+    hl = _helper_units(rep, now)
     out = []
-    for u in ub.get("noboot") or []:
-        if not isinstance(u, dict) or not u.get("unit") or _ON_DEMAND_UNIT.match(str(u["unit"])):
+    for u in hl or []:
+        if not u.get("unit") or _ON_DEMAND_UNIT.match(str(u["unit"])):
             continue
         started = int(u.get("started") or 0)
         if started and now.timestamp() - started < _DAY:
             continue
         out.append({"unit": str(u["unit"]), "started": started})
+    if hl is None:
+        # без helper'а про юнит знает только агент: юнит контейнера не включен
+        seen = set()
+        for c in _no_policy(rep):
+            unit = str(c.get("unit") or "")
+            if unit and not c.get("unit_on") and unit not in seen:
+                seen.add(unit)
+                out.append({"unit": unit, "started": 0, "container": str(c["name"])})
     return out
 
 

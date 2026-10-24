@@ -45,7 +45,7 @@ import (
 	"time"
 )
 
-const version = "2.52"
+const version = "2.53"
 
 // Публичный ключ для проверки подписи релизов агента (Ed25519, base64).
 // ПУСТО по умолчанию → самообновление ВЫКЛЮЧЕНО (агент никогда не заменяет себя).
@@ -760,9 +760,15 @@ type dockerContainer struct {
 	// поиска по меткам на самой ноде. Пустой объект - контейнер запущен не из compose
 	Compose *dockerCompose `json:"compose,omitempty"`
 	Vols    []string       `json:"vols,omitempty"` // каталоги named volumes на запись
-	imageID string   // id образа: по нему дата сборки из /images/json
-	ip      string   // IP контейнера для скрейпа метрик; в отчёт НЕ уходит (строчная)
-	id      string   // id контейнера: по нему процесс находит свой контейнер (cpu_groups)
+	// Кто поднимет его после перезагрузки, если не докер: docker run --rm без restart
+	// policy обычно запускает юнит systemd (ExecStart=docker run --rm --name ...), и restart no
+	// у такого контейнера - не ошибка. Unit - этот юнит, UnitOn - он включен (enable).
+	AutoRm  bool   `json:"auto_rm,omitempty"`
+	Unit    string `json:"unit,omitempty"`
+	UnitOn  bool   `json:"unit_on,omitempty"`
+	imageID string // id образа: по нему дата сборки из /images/json
+	ip      string // IP контейнера для скрейпа метрик; в отчёт НЕ уходит (строчная)
+	id      string // id контейнера: по нему процесс находит свой контейнер (cpu_groups)
 }
 
 // метки com.docker.compose.* контейнера; files - через запятую, как в метке
@@ -4895,8 +4901,197 @@ func collectDocker() *dockerInfo {
 			di.Containers = append(di.Containers, dc)
 		}
 		imageBuildDates(cl, di.Containers, time.Now())
+		dockerUnits(di.Containers, "/proc", "/etc/systemd/system")
 	}
 	return di
+}
+
+// dockerUnits проставляет юнит systemd контейнерам, которые докер после перезагрузки сам не
+// поднимет (работают с restart policy no или on-failure). Такой контейнер часто запускает юнит:
+// ExecStart=docker run --rm --name <имя> ..., Restart=always - его поднимет systemd, и подсказка
+// "docker update --restart" для него вредная (на --rm докер ее не примет). Признаки по порядку:
+// включенный юнит, у которого в ExecStart docker run --name <имя> или docker start <имя>; процесс
+// docker run с этим именем в cgroup юнита (ExecStart=/opt/app/run.sh); юнит с именем контейнера.
+func dockerUnits(cs []dockerContainer, proc, etc string) {
+	need := map[string]int{}
+	for i, c := range cs {
+		if c.State == "running" && c.Name != "" && (c.Policy == "" || c.Policy == "no" || strings.HasPrefix(c.Policy, "on-failure")) {
+			need[c.Name] = i
+		}
+	}
+	if len(need) == 0 {
+		return
+	}
+	set := func(name, unit string, on bool) {
+		if i, ok := need[name]; ok && cs[i].Unit == "" {
+			cs[i].Unit, cs[i].UnitOn = unit, on
+		}
+	}
+	on := enabledUnits(etc)
+	ids := make([]string, 0, len(on))
+	for u := range on {
+		ids = append(ids, u)
+	}
+	sort.Strings(ids)
+	for _, u := range ids {
+		if b, err := os.ReadFile(on[u]); err == nil && len(b) < 1<<16 {
+			for _, n := range unitDockerNames(string(b)) {
+				set(n, u, true)
+			}
+		}
+	}
+	for n, u := range dockerRunUnits(proc) {
+		set(n, u, on[u] != "")
+	}
+	for n := range need {
+		u := n + ".service"
+		if on[u] != "" {
+			set(n, u, true)
+		} else if _, err := os.Stat(etc + "/" + u); err == nil {
+			set(n, u, false)
+		}
+	}
+}
+
+// enabledUnits - включенные сервисы: ссылки в *.wants и *.requires, юнит -> путь (ReadFile идет
+// по ссылке к самому файлу юнита)
+func enabledUnits(etc string) map[string]string {
+	out := map[string]string{}
+	for _, pat := range []string{"/*.wants/*.service", "/*.requires/*.service"} {
+		ms, _ := filepath.Glob(etc + pat)
+		for _, m := range ms {
+			if u := filepath.Base(m); out[u] == "" {
+				out[u] = m
+			}
+		}
+	}
+	return out
+}
+
+// unitDockerNames - имена контейнеров из ExecStart юнита (строки с \ в конце склеены)
+func unitDockerNames(unit string) []string {
+	var out []string
+	for _, ln := range strings.Split(strings.ReplaceAll(unit, "\\n", " "), "\n") {
+		k, v, ok := strings.Cut(strings.TrimSpace(ln), "=")
+		if !ok || strings.TrimSpace(k) != "ExecStart" {
+			continue
+		}
+		out = append(out, dockerCmdNames(strings.Fields(strings.TrimLeft(strings.TrimSpace(v), "-@:+!")))...)
+	}
+	return out
+}
+
+// у этих глобальных флагов docker значение идет отдельным словом
+var dockerGlobalArg = map[string]bool{"-H": true, "--host": true, "-c": true, "--context": true,
+	"--config": true, "-l": true, "--log-level": true}
+
+// dockerCmdNames - какие контейнеры запускает команда: docker run --name <имя>, docker start
+// <имя>... В том числе внутри sh -c '...; docker run ...'. Остальные команды docker - ничего.
+func dockerCmdNames(args []string) []string {
+	for i := range args {
+		args[i] = strings.Trim(args[i], `'";&|`)
+	}
+	var out []string
+	for i, a := range args {
+		if filepath.Base(a) != "docker" {
+			continue
+		}
+		rest := args[i+1:]
+		for len(rest) > 0 && strings.HasPrefix(rest[0], "-") {
+			if dockerGlobalArg[rest[0]] {
+				rest = rest[1:]
+			}
+			if len(rest) > 0 {
+				rest = rest[1:]
+			}
+		}
+		if len(rest) > 0 && rest[0] == "container" {
+			rest = rest[1:]
+		}
+		if len(rest) == 0 {
+			continue
+		}
+		switch rest[0] {
+		case "run":
+			for j := 1; j < len(rest) && filepath.Base(rest[j]) != "docker"; j++ {
+				if rest[j] == "--name" && j+1 < len(rest) {
+					out = append(out, rest[j+1])
+					break
+				}
+				if v, ok := strings.CutPrefix(rest[j], "--name="); ok {
+					out = append(out, v)
+					break
+				}
+			}
+		case "start":
+			for j := 1; j < len(rest) && filepath.Base(rest[j]) != "docker"; j++ {
+				switch a := rest[j]; {
+				case a == "--detach-keys" || a == "--checkpoint" || a == "--checkpoint-dir":
+					j++
+				case a != "" && !strings.HasPrefix(a, "-"):
+					out = append(out, a)
+				}
+			}
+		}
+	}
+	return out
+}
+
+// не юниты контейнера, а то, откуда его запустили руками или по расписанию
+var notOwnerUnit = map[string]bool{"cron.service": true, "crond.service": true, "cronie.service": true,
+	"anacron.service": true, "atd.service": true, "ssh.service": true, "sshd.service": true,
+	"docker.service": true, "containerd.service": true}
+
+// dockerRunUnits - процессы docker run/start (без -d они живут, пока живет контейнер) и юнит, в
+// cgroup которого они работают: имя контейнера -> юнит
+func dockerRunUnits(proc string) map[string]string {
+	out := map[string]string{}
+	ents, _ := os.ReadDir(proc)
+	for _, e := range ents {
+		if _, err := strconv.Atoi(e.Name()); err != nil {
+			continue
+		}
+		dir := proc + "/" + e.Name()
+		if b, err := os.ReadFile(dir + "/comm"); err != nil || strings.TrimSpace(string(b)) != "docker" {
+			continue
+		}
+		b, err := os.ReadFile(dir + "/cmdline")
+		if err != nil {
+			continue
+		}
+		names := dockerCmdNames(strings.Split(strings.TrimRight(string(b), "\x00"), "\x00"))
+		if len(names) == 0 {
+			continue
+		}
+		cg, _ := os.ReadFile(dir + "/cgroup")
+		if u := cgroupUnit(string(cg)); u != "" {
+			for _, n := range names {
+				out[n] = u
+			}
+		}
+	}
+	return out
+}
+
+// cgroupUnit - системный сервис из /proc/<pid>/cgroup ("0::/system.slice/app.service"), без
+// пользовательских (user@1000.service/...) и тех, что из notOwnerUnit
+func cgroupUnit(cg string) string {
+	for _, ln := range strings.Split(cg, "\n") {
+		f := strings.SplitN(ln, ":", 3)
+		if len(f) != 3 || strings.Contains(f[2], "/user@") {
+			continue
+		}
+		parts := strings.Split(f[2], "/")
+		for i := len(parts) - 1; i >= 0; i-- {
+			if strings.HasSuffix(parts[i], ".service") {
+				if notOwnerUnit[parts[i]] {
+					return ""
+				}
+				return parts[i]
+			}
+		}
+	}
+	return ""
 }
 
 // hostCaps - capabilities, с которыми из контейнера выходят на хост: монтировать (SYS_ADMIN),
@@ -5069,6 +5264,7 @@ func dockerInspect(cl *http.Client, id string, dc *dockerContainer) {
 			Privileged bool
 			CapAdd     []string
 			PidMode    string
+			AutoRemove bool
 		}
 		Mounts []struct {
 			Type   string
@@ -5104,6 +5300,7 @@ func dockerInspect(cl *http.Client, id string, dc *dockerContainer) {
 	dc.Restarts = ins.RestartCount
 	dc.Policy = ins.HostConfig.RestartPolicy.Name
 	dc.MaxRetry = ins.HostConfig.RestartPolicy.MaximumRetryCount
+	dc.AutoRm = ins.HostConfig.AutoRemove
 	if ins.State.Health != nil {
 		dc.Health = ins.State.Health.Status
 	}

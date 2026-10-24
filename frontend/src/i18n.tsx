@@ -2436,6 +2436,10 @@ const EN: Record<string, string> = {
     'image is set by a variable: set it to {target} (usually in .env next to the compose file), then recreate the service',
   'restart {policy}: после перезагрузки докер его не поднимет':
     'restart {policy}: docker will not start it after a reboot',
+  'контейнер с --rm, его запускает не докер - проверьте systemd-юнит или скрипт, который его запускает: docker update --restart тут не поможет':
+    'a --rm container is started by something other than docker - check the systemd unit or script that starts it: docker update --restart will not help here',
+  'запускает контейнер {name}': 'starts container {name}',
+  '{name}: его запускает юнит {unit}, замечание закрыто': '{name}: it is started by unit {unit}, the warning is closed',
   'sudo docker compose up -d <сервис> в папке проекта, откат - вернуть копию и тот же up -d':
     'sudo docker compose up -d <service> in the project directory, to roll back - restore the copy and the same up -d',
   '{list}: docker-сокет целиком, а это root на хосте. Нужен прокси сокета только на чтение, сам сокет из volumes убрать.':
