@@ -281,8 +281,8 @@ def test_helpers_know_the_new_actions():
     agent = Path(__file__).resolve().parents[2] / "agent"
     cl = (agent / "backup-setup.sh").read_text(encoding="utf-8")
     bs = (agent / "backupserver-setup.sh").read_text(encoding="utf-8")
-    assert "KERVAX_SETUP_VERSION=0.42" in cl and 'to_https)     if out="$(cmd_to_https' in cl
-    assert "KERVAX_SETUP_VERSION=0.35" in bs and 'allow_tls)        if out="$(cmd_allow_tls' in bs
+    assert "KERVAX_SETUP_VERSION=0.43" in cl and 'to_https)     if out="$(cmd_to_https' in cl
+    assert "KERVAX_SETUP_VERSION=0.36" in bs and 'allow_tls)        if out="$(cmd_allow_tls' in bs
     import re
 
     main = (agent / "main.go").read_text(encoding="utf-8")
@@ -307,4 +307,26 @@ def test_to_https_scenario_in_a_shell():
     root = Path(__file__).resolve().parents[2]
     r = subprocess.run(["bash", str(Path(__file__).parent / "sh" / "backup_to_https.sh"), str(root)],
                        capture_output=True, text=True, timeout=300)
+    assert r.returncode == 0 and r.stdout.strip().endswith("PASS"), r.stdout + r.stderr
+
+
+def test_backup_sec_scenario_in_a_shell():
+    """Сценарий tests/sh/backup_sec.sh (helper 0.43): ответы спула не уводятся симлинком, repopass и
+    repo_url проверяются до env, провижининг только на свой сервер бэкапов или из backup-allow,
+    restic принадлежит root, бэкап от bx231 по http и https идет и пишет метрики, дампы не лезут в
+    системные и чужие каталоги. Нужен Linux, root и systemd, иначе пропуск; на Windows его гоняют
+    в WSL: wsl -u root -- bash tests/sh/backup_sec.sh <корень репо>."""
+    import os
+    import shutil
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    import pytest
+
+    if sys.platform != "linux" or os.geteuid() != 0 or not shutil.which("systemd-run") or not os.path.isdir("/srv"):
+        pytest.skip("нужен Linux, root и systemd")
+    root = Path(__file__).resolve().parents[2]
+    r = subprocess.run(["bash", str(Path(__file__).parent / "sh" / "backup_sec.sh"), str(root)],
+                       capture_output=True, text=True, timeout=600)
     assert r.returncode == 0 and r.stdout.strip().endswith("PASS"), r.stdout + r.stderr

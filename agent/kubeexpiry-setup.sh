@@ -30,9 +30,15 @@
 # themselves, touches no secrets, calls no forge, and refreshes that one field.
 #
 # Result: /var/lib/kervax/kube-expiry.json, world-readable; the agent only reads it.
+#
+# 0.5: the Flux token went to curl on its command line (every user of the node saw it in ps)
+# and to whatever host the source's url named. It goes on curl's stdin now, and only to the host
+# it went to the first time (/var/lib/kervax/kubeexpiry-hosts.json, root only): whoever may edit
+# a GitRepository but not read its secret can no longer point the url at a server of their own.
+# A forge that really moved: remove that file. The temporary list of rows is made by mktemp.
 set -euo pipefail
 
-KERVAX_SETUP_VERSION=0.4  # MAJOR.MINOR; compared component-wise
+KERVAX_SETUP_VERSION=0.5  # MAJOR.MINOR; compared component-wise
 # Which nodes need this helper at all. Read by the ansible playbook on the
 # CONTROL machine and evaluated as a shell condition ON THE NODE, so a new
 # helper lands where it belongs without anyone editing the playbook.
@@ -148,8 +154,8 @@ elif have microk8s; then KC="microk8s kubectl"
 fi
 
 FLUX_STATE="[]"
-ROWS=/tmp/kv-kube-rows.$$
-: > "$ROWS"
+ROWS=$(mktemp) || exit 0
+trap 'rm -f "$ROWS" "$ROWS.err"' EXIT
 
 if [ -n "$KC" ] && have python3; then
   # Sources carry the URL and the name of the secret with the credentials; the secrets hold the
@@ -220,11 +226,25 @@ for s in secrets.get("items", []):
     by_name[(m.get("namespace"), m.get("name"))] = s
 
 
-def run(cmd, timeout=12):
+def run(cmd, timeout=12, data=None):
     try:
-        return subprocess.run(cmd, capture_output=True, timeout=timeout)
+        return subprocess.run(cmd, capture_output=True, timeout=timeout, input=data)
     except Exception:
         return None
+
+
+# A token goes only to the host it went to the first time: whoever may edit a GitRepository
+# but not read its secret would otherwise point its url at a server of their own and get the
+# token. Kept by secret, root only
+PIN = "/var/lib/kervax/kubeexpiry-hosts.json"
+try:
+    with open(PIN) as f:
+        pins = json.load(f)
+    if not isinstance(pins, dict):
+        pins = {}
+except Exception:
+    pins = {}
+pins_new = dict(pins)
 
 
 def to_ts(stamp):
@@ -235,7 +255,7 @@ def to_ts(stamp):
         return None
 
 
-def forge_expiry(token, url):
+def forge_expiry(token, url, pin_key):
     """Ask the forge that hosts this source when its token expires.
 
     The host comes from the source URL, so a self-hosted GitLab is asked about its own token
@@ -244,11 +264,15 @@ def forge_expiry(token, url):
     host = urlsplit(url).netloc.split("@")[-1]
     if not host or not token:
         return None
+    if pins.get(pin_key, host) != host:
+        return None
+    pins_new[pin_key] = host
     base = f"https://{host}"
     if token.startswith(("glpat-", "gldt-")):
-        # project access tokens answer here too: they belong to a project bot user
-        p = run(["curl", "-sS", "-m", "8", "-H", "PRIVATE-TOKEN: " + token,
-                 f"{base}/api/v4/personal_access_tokens/self"])
+        # project access tokens answer here too: they belong to a project bot user. The header
+        # goes on stdin (-H @-): on the command line every user of the node sees it in ps
+        p = run(["curl", "-sS", "-m", "8", "-H", "@-", f"{base}/api/v4/personal_access_tokens/self"],
+                data=("PRIVATE-TOKEN: " + token + "\n").encode())
         if p:
             try:
                 exp = (json.loads((p.stdout or b"{}").decode() or "{}") or {}).get("expires_at")
@@ -258,8 +282,8 @@ def forge_expiry(token, url):
                 return to_ts(exp)
     elif token.startswith(("ghp_", "github_pat_", "gho_")):
         api = "https://api.github.com" if host.endswith("github.com") else f"{base}/api/v3"
-        p = run(["curl", "-sS", "-o", "/dev/null", "-D", "-", "-m", "8",
-                 "-H", "Authorization: Bearer " + token, f"{api}/user"])
+        p = run(["curl", "-sS", "-o", "/dev/null", "-D", "-", "-m", "8", "-H", "@-", f"{api}/user"],
+                data=("Authorization: Bearer " + token + "\n").encode())
         if p:
             for line in (p.stdout or b"").decode(errors="replace").splitlines():
                 if line.lower().startswith("github-authentication-token-expiration:"):
@@ -293,7 +317,7 @@ for src in sources.get("items", []):
             token = base64.b64decode(raw_val).decode("utf-8", "replace").strip()
         except Exception:
             continue
-        ts = forge_expiry(token, url)
+        ts = forge_expiry(token, url, f"{ns}/{ref}")
         if ts:
             kind = src.get("kind", "source")
             name = meta.get("name", "")
@@ -301,6 +325,15 @@ for src in sources.get("items", []):
         break
 
 print("\n".join(f"{k}\t{w}\t{t}\t{n}" for k, w, t, n in rows))
+if pins_new != pins:
+    try:
+        import os
+        with open(PIN + ".tmp", "w") as f:
+            os.chmod(PIN + ".tmp", 0o600)
+            json.dump(pins_new, f)
+        os.replace(PIN + ".tmp", PIN)
+    except Exception:
+        pass
 ' >> "$ROWS" 2>/dev/null || true
 
   # TLS certificates in secrets (cert-manager, ingress, Flux mTLS): the date is inside the

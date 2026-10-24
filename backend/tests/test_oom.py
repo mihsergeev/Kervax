@@ -84,7 +84,7 @@ def _helper_json(journal: str, now: float, passwd: str = "web:x:1001:1001::/home
 
 
 def test_helper_version_and_wiring():
-    assert "KERVAX_SETUP_VERSION=0.5" in SRC and "\r" not in SRC
+    assert "KERVAX_SETUP_VERSION=0.6" in SRC and "\r" not in SRC
     helper = _body("HELPER_EOF")
     assert 'scan) scan; oom_scan ;;' in helper
     # журнал читается одним запросом: ядро, отметки systemd о юнитах и systemd-oomd

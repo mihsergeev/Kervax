@@ -45,7 +45,7 @@ import (
 	"time"
 )
 
-const version = "2.51"
+const version = "2.52"
 
 // Публичный ключ для проверки подписи релизов агента (Ed25519, base64).
 // ПУСТО по умолчанию → самообновление ВЫКЛЮЧЕНО (агент никогда не заменяет себя).
@@ -938,8 +938,31 @@ type artifact struct {
 	Size   int    `json:"size"`
 }
 type manifest struct {
-	Version   string              `json:"version"`
-	Artifacts map[string]artifact `json:"artifacts"`
+	Version    string              `json:"version"`
+	ReleasedAt string              `json:"released_at"`
+	Artifacts  map[string]artifact `json:"artifacts"`
+}
+
+// otaMaxAge - сколько живет подписанный манифест. Анти-откат не пускает назад, но панель (или тот,
+// кто ее взломал) могла поставить любой старый подписанный выпуск новее текущего, в том числе с
+// уже закрытой дырой. Срок берется из подписанного released_at (его пишет release.py), так что
+// без ключа подписи его не подделать; выпуски идут чаще, и свежий манифест есть всегда
+const otaMaxAge = 120 * 24 * time.Hour
+
+// manifestFresh - released_at манифеста не старше otaMaxAge и не из будущего (сутки на часы)
+func manifestFresh(m manifest, now time.Time) error {
+	t, err := time.Parse(time.RFC3339Nano, m.ReleasedAt)
+	if err != nil {
+		return fmt.Errorf("в манифесте нет даты выпуска - отказ")
+	}
+	if now.Sub(t) > otaMaxAge {
+		return fmt.Errorf("манифест %s выпущен %s, старше %d дней - отказ (нужен свежий выпуск)",
+			m.Version, t.Format("2006-01-02"), int(otaMaxAge.Hours()/24))
+	}
+	if t.Sub(now) > 24*time.Hour {
+		return fmt.Errorf("дата выпуска манифеста %s в будущем - отказ", t.Format("2006-01-02"))
+	}
+	return nil
 }
 
 // versionNewer — a строго новее b (сравнение по dotted-числам): анти-откат.
@@ -1344,6 +1367,52 @@ var (
 	siteProbing atomic.Bool
 )
 
+// Проверка изнутри ходит только на порты сайтов. На localhost ноды слушают и чужие для нее
+// службы: прокси docker-сокета на 2375 отдавал env контейнеров по GET и останавливал их по
+// POST, и учетка с правом заводить мониторы доставала так пароли и гасила контейнеры
+var localProbePorts = map[string]bool{"80": true, "443": true}
+
+var errLocalProbePort = errors.New("проверка изнутри ходит только на порты 80 и 443")
+
+// localProbeMethod - метод проверки изнутри: только чтение
+func localProbeMethod(m string) (string, bool) {
+	m = strings.ToUpper(strings.TrimSpace(m))
+	if m == "" {
+		m = "GET"
+	}
+	return m, m == "GET" || m == "HEAD"
+}
+
+// localProbeTargetOK - адрес и метод проверки изнутри до того, как что-то отправлено: http(s),
+// порт сайта, только чтение. Ни localhost, ни сервис кластера с другим портом или методом не
+// трогаются
+func localProbeTargetOK(p siteProbe) error {
+	u, err := url.Parse(p.URL)
+	if err != nil {
+		return err
+	}
+	port := u.Port()
+	switch u.Scheme {
+	case "http":
+		if port == "" {
+			port = "80"
+		}
+	case "https":
+		if port == "" {
+			port = "443"
+		}
+	default:
+		return fmt.Errorf("проверка изнутри ходит только по http и https")
+	}
+	if !localProbePorts[port] {
+		return errLocalProbePort
+	}
+	if m, ok := localProbeMethod(p.Method); !ok {
+		return fmt.Errorf("проверка изнутри делает только GET и HEAD, а не %s", m)
+	}
+	return nil
+}
+
 // localDialer — транспорт, который ВСЕГДА идёт на localhost, каким бы ни был хост в
 // URL. Порт и схема берутся из URL, имя — уходит в Host и SNI, так что сервер отдаёт
 // тот же виртуальный хост и тот же сертификат, что и настоящему посетителю.
@@ -1354,6 +1423,9 @@ func localDialer(timeout time.Duration, insecure bool) *http.Transport {
 			_, port, err := net.SplitHostPort(addr)
 			if err != nil {
 				return nil, err
+			}
+			if !localProbePorts[port] {
+				return nil, errLocalProbePort
 			}
 			conn, err := d.DialContext(ctx, network, net.JoinHostPort("127.0.0.1", port))
 			if err == nil {
@@ -1379,6 +1451,9 @@ func localDialer(timeout time.Duration, insecure bool) *http.Transport {
 // не пускает саму ноду), а домен маршрутизирует кластер — проверяем сервис этого маршрута
 // напрямую, в обход шлюза.
 func probeSite(p siteProbe) siteProbeResult {
+	if err := localProbeTargetOK(p); err != nil {
+		return siteProbeResult{ID: p.ID, KwUpFound: true, Error: err.Error()}
+	}
 	res := probeSiteLocal(p)
 	if res.Error == "" && res.Code != 403 {
 		return res
@@ -1397,11 +1472,12 @@ func probeTimeout(p siteProbe) time.Duration {
 	return timeout
 }
 
-// probeRequest — запрос проверки: метод, заголовки и basic auth монитора
+// probeRequest — запрос проверки: метод, заголовки и basic auth монитора. Изнутри только
+// GET и HEAD: POST на localhost ноды - уже не проверка, а действие
 func probeRequest(p siteProbe, target string) (*http.Request, error) {
-	method := strings.ToUpper(strings.TrimSpace(p.Method))
-	if method == "" {
-		method = "GET"
+	method, ok := localProbeMethod(p.Method)
+	if !ok {
+		return nil, fmt.Errorf("проверка изнутри делает только GET и HEAD, а не %s", method)
 	}
 	req, err := http.NewRequest(method, target, nil)
 	if err != nil {
@@ -1903,6 +1979,9 @@ func selfUpdate(panelURL, want string) error {
 	}
 	if !versionNewer(m.Version, version) {
 		return permanent(fmt.Errorf("%s не новее текущей %s — отказ (анти-откат)", m.Version, version))
+	}
+	if err := manifestFresh(m, time.Now()); err != nil {
+		return permanent(err)
 	}
 	art, ok := m.Artifacts[runtime.GOARCH]
 	if !ok {
@@ -3627,6 +3706,8 @@ func enrichProc(p *procStat) {
 	if b, err := os.ReadFile(dir + "/cmdline"); err == nil && len(b) > 0 {
 		cl := strings.TrimRight(string(b), "\x00")
 		cl = strings.TrimSpace(strings.ReplaceAll(cl, "\x00", " "))
+		// пароли из аргументов (mysql -pXXX, sshpass -p, --password=) маскируются до обрезки
+		cl = scrubCmdline(cl)
 		if r := []rune(cl); len(r) > procCmdlineMax {
 			cl = string(r[:procCmdlineMax]) + "…"
 		}
@@ -5955,6 +6036,67 @@ func scrubSecrets(s string) string {
 	})
 }
 
+// Пароли в аргументах команд: ключ, за которым идет значение отдельным словом
+// (--password X, sshpass -p X, redis-cli -a X), и mysql-овское -pXXXX слитно
+var (
+	cmdSecretFlags = map[string]bool{
+		"--password": true, "--passwd": true, "--pass": true, "--pwd": true, "--requirepass": true,
+		"--masterauth": true, "--secret": true, "--token": true, "--api-key": true, "--apikey": true,
+		"--auth": true, "--access-key": true, "--secret-key": true, "--private-key": true,
+	}
+	// -p слитно с паролем: у этих программ -p<что-то> - всегда пароль
+	cmdMysqlLike = map[string]bool{
+		"mysql": true, "mysqldump": true, "mysqladmin": true, "mysqlimport": true, "mysqlcheck": true,
+		"mysqlpump": true, "mysqlshow": true, "mariadb": true, "mariadb-dump": true, "mariadb-admin": true,
+		"mariadb-import": true, "mariadb-check": true, "mydumper": true, "myloader": true,
+	}
+)
+
+// Пароли в аргументах внутри строки журнала (sudo пишет COMMAND=... целиком)
+var (
+	logSecretFlag  = regexp.MustCompile(`(?i)((?:^|\s)--(?:password|passwd|pass|pwd|requirepass|masterauth|secret|token|api-key|apikey|access-key|secret-key)\s+)[^\s"']+`)
+	logSecretShort = regexp.MustCompile(`(\b(?:sshpass\s+-p|redis-cli\b[^\n]*?\s-a)\s+)[^\s"']+`)
+	logMysqlP      = regexp.MustCompile(`(\b(?:mysql\w*|mariadb[\w-]*|mydumper|myloader)\b[^\n]*?\s-p)[^\s"']+`)
+)
+
+// scrubLog - журнал системы без секретов. Тот же scrubSecrets, кроме правила длинных токенов:
+// в журнале это id контейнеров, юнитов и сессий, а без них журнал теряет смысл
+func scrubLog(s string) string {
+	s = secretURL.ReplaceAllString(s, "$1:***@")
+	s = secretBear.ReplaceAllString(s, "$1 ***")
+	s = secretKV.ReplaceAllString(s, "${1}***")
+	s = logSecretFlag.ReplaceAllString(s, "${1}***")
+	s = logSecretShort.ReplaceAllString(s, "${1}***")
+	return logMysqlP.ReplaceAllString(s, "${1}***")
+}
+
+// scrubCmdline - командная строка процесса без паролей: она уходит в панель и в ее базу
+func scrubCmdline(cl string) string {
+	words := strings.Split(cl, " ")
+	prog := ""
+	if len(words) > 0 {
+		prog = filepath.Base(words[0])
+	}
+	maskNext := false
+	for i, w := range words {
+		if maskNext && w != "" {
+			words[i] = "***"
+			maskNext = false
+			continue
+		}
+		lw := strings.ToLower(w)
+		switch {
+		case cmdSecretFlags[lw]:
+			maskNext = true
+		case (prog == "sshpass" && w == "-p") || (prog == "redis-cli" && w == "-a"):
+			maskNext = true
+		case cmdMysqlLike[prog] && strings.HasPrefix(w, "-p") && len(w) > 2 && !strings.HasPrefix(w, "-port"):
+			words[i] = "-p***"
+		}
+	}
+	return scrubSecrets(strings.Join(words, " "))
+}
+
 // kubeVolumes — постоянные тома (PV). Нужны аудиту бэкапа: том на hostPath/local — это
 // обычный каталог на ноде, и его надо либо включить в бэкап, либо осознанно исключить;
 // том на nfs/csi живёт вне ноды, и файловый бэкап его не заберёт в принципе.
@@ -7345,6 +7487,19 @@ func runBackupCommand(panelURL, token string, cmd backupCommand) {
 			postBackupResult(panelURL, token, cmd.ID, false, "нет repo_url/repopass")
 			return
 		}
+		// оба значения helper пишет в env, который читают systemd и bash раннера
+		if !backupRepoURLRe.MatchString(cmd.RepoURL) {
+			postBackupResult(panelURL, token, cmd.ID, false, "недопустимый адрес репозитория")
+			return
+		}
+		if !backupSecretRe.MatchString(cmd.Repopass) {
+			postBackupResult(panelURL, token, cmd.ID, false, "недопустимый пароль репозитория")
+			return
+		}
+		if ok, why := backupHostAllowed(cmd.RepoURL); !ok {
+			postBackupResult(panelURL, token, cmd.ID, false, why)
+			return
+		}
 		if cmd.Mode != "include" && cmd.Mode != "exclude" {
 			postBackupResult(panelURL, token, cmd.ID, false, "неизвестный режим")
 			return
@@ -7446,7 +7601,8 @@ func runBackupCommand(panelURL, token string, cmd backupCommand) {
 			if err != nil {
 				res, out = false, "journal: "+err.Error()
 			} else {
-				out = tailText(text, journalMaxOut)
+				// в журнале бывают пароли: sudo с командой целиком, строки приложений
+				out = tailText(scrubLog(text), journalMaxOut)
 			}
 		}
 		postBackupResult(panelURL, token, cmd.ID, res, out)
@@ -7472,7 +7628,12 @@ func backupServerLines(cmd backupCommand) ([]string, bool) {
 		// обновить образ rest-server до зашитого в helper — параметров нет
 		return []string{"action=update_image"}, true
 	case "provision_client":
-		if !backupNameOK(cmd.Name) || cmd.Hpass == "" || cmd.Repopass == "" || !backupIPOK(cmd.ClientIP) {
+		if !backupRepoNameOK(cmd.Name) || !backupIPOK(cmd.ClientIP) {
+			return nil, false
+		}
+		// пароль репозитория root на сервере бэкапов пишет в env очистки и каждую ночь выполняет
+		// его через source; hpass идет в htpasswd и в адрес репозитория клиента
+		if !backupHpassRe.MatchString(cmd.Hpass) || !backupSecretRe.MatchString(cmd.Repopass) {
 			return nil, false
 		}
 		return []string{
@@ -7489,7 +7650,7 @@ func backupServerLines(cmd backupCommand) ([]string, bool) {
 	case "get_cert":
 		return []string{"action=get_cert"}, true
 	case "get_client_creds":
-		if !backupNameOK(cmd.Name) {
+		if !backupRepoNameOK(cmd.Name) {
 			return nil, false
 		}
 		return []string{"action=get_client_creds", "name=" + cmd.Name}, true
@@ -7517,6 +7678,42 @@ func toHTTPSLines(cmd backupCommand) ([]string, bool) {
 	return []string{"action=to_https", fmt.Sprintf("port=%d", cmd.Port), "cacert_b64=" + cmd.CacertB64}, true
 }
 
+// Секреты и адрес бэкапа уходят в env-файлы, которые читают systemd (EnvironmentFile) и bash
+// (source) - на клиенте от bx231, на сервере бэкапов от root. Пропускаем только символы, которые
+// ни тот, ни другой не трактуют: кавычка, $ или ; в пароле выполнялись там как команда.
+// Те же правила в backup-setup.sh (secret_ok, repo_url_ok) и backupserver-setup.sh (hpass_ok)
+var (
+	backupSecretRe  = regexp.MustCompile(`^[A-Za-z0-9+/=_.,:@%-]{8,256}$`)
+	backupHpassRe   = regexp.MustCompile(`^[A-Za-z0-9._~-]{8,128}$`)
+	backupRepoURLRe = regexp.MustCompile(`^rest:https?://([A-Za-z0-9._-]+:[A-Za-z0-9._%+=-]+@)?([A-Za-z0-9.-]+|\[[0-9A-Fa-f:.]+\])(:[0-9]{1,5})?(/[A-Za-z0-9._-]+)*/?$`)
+)
+
+// backupAllowFile - серверы бэкапов, куда нода вообще может слать данные. Пишет root (руками
+// или ансиблом), первый провижининг записывает туда свой сервер. Решает helper: агент только
+// заранее отказывает с понятной причиной, если файл есть и сервера в нем нет
+var backupAllowFile = "/etc/kervax/backup-allow"
+
+func backupHostAllowed(repoURL string) (bool, string) {
+	u, err := url.Parse(strings.TrimPrefix(repoURL, "rest:"))
+	if err != nil || u.Hostname() == "" {
+		return false, "недопустимый адрес репозитория"
+	}
+	b, err := os.ReadFile(backupAllowFile)
+	if err != nil {
+		return true, "" // файла нет или он не читается: решит helper
+	}
+	host := u.Hostname()
+	for _, ln := range strings.Split(string(b), "\n") {
+		if i := strings.IndexByte(ln, '#'); i >= 0 {
+			ln = ln[:i]
+		}
+		if strings.TrimSpace(ln) == host {
+			return true, ""
+		}
+	}
+	return false, "сервер бэкапов " + host + " не в " + backupAllowFile + " на ноде: добавить его можно только от root на самой ноде"
+}
+
 // backupNameOK — имя клиента/репо: hostname-безопасные символы.
 func backupNameOK(s string) bool {
 	if s == "" {
@@ -7531,9 +7728,16 @@ func backupNameOK(s string) bool {
 	return true
 }
 
-// dumpDirOK — абсолютный путь под каталог дампов: только безопасные символы. Путь уходит
-// в rm/mkdir от root в helper, поэтому шлём лишь то, из чего вредного пути не собрать.
-// Проверку на «/» и «..» делает вызывающий; helper валидирует всё повторно.
+// backupRepoNameOK - имя репозитория на сервере бэкапов: это каталог рядом с .htpasswd, так что
+// без ".", ".." и без точки или дефиса в начале (как valid_name в backupserver-setup.sh)
+func backupRepoNameOK(s string) bool {
+	return backupNameOK(s) && len(s) <= 128 && s[0] != '.' && s[0] != '-'
+}
+
+// dumpDirOK — абсолютный путь под каталог дампов: только безопасные символы и не системный
+// каталог. Путь уходит в mkdir/ротацию/rm от root в helper: /var/lib в роли каталога дампов
+// оборачивался chmod 0700 /var/lib и rm -rf /var/lib/mysql. Проверку на «/» и «..» делает
+// вызывающий; helper валидирует всё повторно (dump_sys_dir и владельцы каталогов пути).
 func dumpDirOK(s string) bool {
 	for _, r := range s {
 		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' ||
@@ -7541,7 +7745,26 @@ func dumpDirOK(s string) bool {
 			return false
 		}
 	}
-	return true
+	return !dumpSysDir(s)
+}
+
+// dumpSysDir - системные каталоги, куда дампы не кладем (тот же список в dump_sys_dir helper'а)
+func dumpSysDir(s string) bool {
+	p := strings.TrimRight(s, "/") + "/"
+	switch p {
+	case "/", "/var/", "/home/":
+		return true
+	}
+	for _, pre := range []string{
+		"/bin/", "/boot/", "/dev/", "/etc/", "/lib", "/proc/", "/root/", "/run/", "/sbin/", "/snap/",
+		"/sys/", "/tmp/", "/usr/", "/var/tmp/", "/var/lib/", "/var/log/", "/var/cache/", "/var/spool/",
+		"/var/run/", "/var/lock/", "/var/mail/",
+	} {
+		if strings.HasPrefix(p, pre) {
+			return true
+		}
+	}
+	return false
 }
 
 // backupIPOK — IPv4/IPv6-подобная строка (helper валидирует повторно).
@@ -7711,6 +7934,13 @@ func spoolIn(reqDir, resDir string, cmdID int, lines []string, helper string) (b
 
 // spoolInFor - то же с заданным ожиданием ответа (долгие действия helper'а).
 func spoolInFor(reqDir, resDir string, cmdID int, lines []string, helper string, wait time.Duration) (bool, string) {
+	// helper читает запрос построчно key=value, и последняя строка с ключом побеждает: перевод
+	// строки внутри значения (пароля, адреса) дописал бы в запрос свои ключи, вплоть до action
+	for _, ln := range lines {
+		if strings.ContainsAny(ln, "\r\n\x00") {
+			return false, "недопустимый символ в параметрах запроса"
+		}
+	}
 	reqID := fmt.Sprintf("%d-%d", cmdID, time.Now().UnixNano())
 	tmp := filepath.Join(reqDir, reqID+".tmp")
 	req := filepath.Join(reqDir, reqID+".req")
@@ -7726,7 +7956,9 @@ func spoolInFor(reqDir, resDir string, cmdID int, lines []string, helper string,
 	deadline := time.Now().Add(wait)
 	for time.Now().Before(deadline) {
 		if b, err := os.ReadFile(res); err == nil {
-			os.Remove(res) // res-каталог 0770 → агент может удалить прочитанный ответ
+			// res-каталоги бэкапа с backup-setup 0.43 и backupserver-setup 0.36 - 0750: удалить
+			// ответ агент там не может, его убирает root через 10 минут. В остальных спулах удаляет
+			os.Remove(res)
 			ok := false
 			out := ""
 			for _, ln := range strings.Split(string(b), "\n") {
@@ -7771,6 +8003,26 @@ func postBackupResult(panelURL, token string, id int, ok bool, output string) {
 	}
 	io.Copy(io.Discard, resp.Body)
 	resp.Body.Close()
+}
+
+// panelURLOK - панель только по https: токен сервера уходит в каждом запросе, а с ним панель
+// присылает и пароли бэкапа. http допустим лишь на самой ноде (стенд на localhost)
+func panelURLOK(raw string) error {
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return fmt.Errorf("адрес панели %q не разобрать", raw)
+	}
+	switch u.Scheme {
+	case "https":
+		return nil
+	case "http":
+		h := u.Hostname()
+		if h == "localhost" || h == "::1" || strings.HasPrefix(h, "127.") {
+			return nil
+		}
+		return fmt.Errorf("адрес панели %s по http: токен ушел бы открытым текстом, нужен https://", raw)
+	}
+	return fmt.Errorf("адрес панели %s: нужен https://", raw)
 }
 
 func readConfig(path string) (url, token string) {
@@ -8052,6 +8304,10 @@ func main() {
 	url, token := readConfig(cfgPath)
 	if url == "" || token == "" {
 		fmt.Fprintln(os.Stderr, "kervax-agent: в конфиге нужны url= и token=")
+		os.Exit(1)
+	}
+	if err := panelURLOK(url); err != nil {
+		fmt.Fprintln(os.Stderr, "kervax-agent:", err)
 		os.Exit(1)
 	}
 	if panelProxyRaw != "" {

@@ -63,9 +63,14 @@
 # PostgreSQL and MySQL instance (a dump holds no indexes) and the size of the data directories of
 # the other engines (MinIO, Prometheus, Redis...), at idle priority and with a time limit, into
 # /var/lib/kervax/report.d/db-sizes.json.
+#
+# 0.16: pg_stat_statements does not normalize utility statements (CREATE SUBSCRIPTION ... CONNECTION,
+# COMMENT, DDL): their string literals went to the panel as they were. Every string literal of a
+# PostgreSQL text is '?' now, and a text that names credentials, an access, API or private key is
+# dropped like one with a password. The list of containers is kept in a mktemp file, not /tmp by pid.
 set -euo pipefail
 
-KERVAX_SETUP_VERSION=0.15  # MAJOR.MINOR; compared component-wise
+KERVAX_SETUP_VERSION=0.16  # MAJOR.MINOR; compared component-wise
 KERVAX_SETUP_ALWAYS=1     # safe on any node: without a database it collects an empty file
 
 HELPER_DIR=/lib65/kervax
@@ -392,7 +397,7 @@ load_pg() { # container -> a JSON object on stdout, nothing when the engine does
       echo "$now" > "$dir/texts.at"
       # whitespace is collapsed on the first 2000 characters only: regexp_replace over thousands of
       # 8 MB texts hung for minutes. The secret check runs on the whole text
-      ( TO=120; pg_q_db "$c" "$db" "select s.queryid||'|'||s.dbid||'|'||s.userid||'|'||coalesce(d.datname,'')||'|'||case when s.query ~* '(passw|secret|token|identified|pgp_sym|encrypt)' then '' else left(regexp_replace(left(s.query, 2000), '\s+', ' ', 'g'), $QTEXT_MAX) end from pg_stat_statements(true) s left join pg_database d on d.oid = s.dbid where s.queryid in ($miss)$topq" ) > "$dir/texts.new"
+      ( TO=120; pg_q_db "$c" "$db" "select s.queryid||'|'||s.dbid||'|'||s.userid||'|'||coalesce(d.datname,'')||'|'||case when s.query ~* '(passw|secret|token|identified|pgp_sym|encrypt|credential|access.?key|api.?key|private.?key)' then '' else left(regexp_replace(regexp_replace(left(s.query, 2000), '''(''''|[^''])*''', '''?''', 'g'), '\s+', ' ', 'g'), $QTEXT_MAX) end from pg_stat_statements(true) s left join pg_database d on d.oid = s.dbid where s.queryid in ($miss)$topq" ) > "$dir/texts.new"
       cat "$dir/texts.new" "$dir/texts" | awk -F'|' 'NF >= 5 && !seen[$1 FS $2 FS $3]++' | head -n 200 > "$dir/texts.tmp" && mv -f "$dir/texts.tmp" "$dir/texts"
       rm -f "$dir/texts.new"
     fi
@@ -693,7 +698,7 @@ load_my() { # container name status innodb_metrics -> a JSON object on stdout
     miss=$(awk -F'|' '{ printf "%s'\''%s'\''", (n++ ? "," : ""), $3 }' "$dir/top" | tr -cd "0-9a-f,'")
     if [ -n "$miss" ]; then
       # texts of the top only; one that mentions a password or a secret is not sent at all
-      my_q "$c" "select concat_ws('|', digest, case when lower(digest_text) regexp 'passw|secret|token|identified|aes_encrypt|des_encrypt' then '' else left(digest_text, $QTEXT_MAX) end) from performance_schema.events_statements_summary_by_digest where digest in ($miss)" > "$dir/texts"
+      my_q "$c" "select concat_ws('|', digest, case when lower(digest_text) regexp 'passw|secret|token|identified|aes_encrypt|des_encrypt|credential|access.?key|api.?key|private.?key' then '' else left(digest_text, $QTEXT_MAX) end) from performance_schema.events_statements_summary_by_digest where digest in ($miss)" > "$dir/texts"
     fi
     top=$(awk -F'|' 'function j(s,   _jp, _jn, _ji) { _jn = split(s, _jp, "\\"); s = _jp[1]; for (_ji = 2; _ji <= _jn; _ji++) s = s "\\\\" _jp[_ji]; gsub(/"/, "\\\"", s); return s }
       FILENAME == ARGV[1] { d = $1; q = substr($0, length($1) + 2); if (!(d in tx)) tx[d] = q; next }
@@ -825,7 +830,7 @@ select count(), sum(query_duration_ms), sum(read_bytes), max(memory_usage), repl
     qe=$(num "$(printf '%s\n' "$out" | sed -n 1p)")
     top=$(printf '%s\n' "$out" | sed 1d | awk -F'\t' 'BEGIN { n = 0 }
       NF >= 5 && $1 ~ /^[0-9]+$/ && $2 ~ /^[0-9]+$/ && $3 ~ /^[0-9]+$/ && $4 ~ /^[0-9]+$/ {
-        q = $5; if (tolower(q) ~ /passw|secret|token|identified|encrypt/) q = ""
+        q = $5; if (tolower(q) ~ /passw|secret|token|identified|encrypt|credential|access.?key|api.?key|private.?key/) q = ""
         gsub(/\\/, " ", q); gsub(/"/, "'"'"'", q); gsub(/[\001-\037]/, " ", q)
         printf "%s{\"n\":%s,\"ms\":%s,\"rd\":%s,\"mem\":%s,\"q\":\"%s\"}", (n++ ? "," : ""), $1, $2, $3, $4, q }')
     # the agent drops a report.d file over 256 KB whole: the texts share the budget with PostgreSQL
@@ -1070,10 +1075,10 @@ sizes_native() {
 
 # -- sweep: containers by image plus host processes --------------------------------
 MY_NS=""  # mount namespaces of the MySQL containers docker already went through
-if have docker; then
+if have docker && DBS=$(mktemp); then
   docker ps --format '{{.Names}}|{{.Image}}' 2>/dev/null | while IFS='|' read -r name img; do
     echo "$name|$img"
-  done > /tmp/kv-dbs.$$ 2>/dev/null || : > /tmp/kv-dbs.$$
+  done > "$DBS" 2>/dev/null || : > "$DBS"
   while IFS='|' read -r name img; do
     [ -n "$name" ] || continue
     case "$(printf '%s' "$img" | tr 'A-Z' 'a-z')" in
@@ -1083,8 +1088,8 @@ if have docker; then
       *clickhouse*)                      collect_ch "$name" ;;
       *redis*|*valkey*)                  collect_redis "$name" ;;
     esac
-  done < /tmp/kv-dbs.$$
-  rm -f /tmp/kv-dbs.$$
+  done < "$DBS"
+  rm -f "$DBS"
 fi
 # host engines (not in docker) - only if one is actually listening locally
 pgrep -x postgres        >/dev/null 2>&1 && have psql             && collect_pg ""

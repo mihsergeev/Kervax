@@ -21,9 +21,18 @@
 # every kill), which units lost a process, and what systemd-oomd killed. The agent runs as an
 # unprivileged user and cannot read the kernel journal. Read by cursor, written to
 # /var/lib/kervax/report.d/oom.json (the last 7 days).
+#
+# 0.6: the answer directory of the spool is root's (0750, the agent reads): it was the agent's to
+# write while root wrote the answer there by a fixed name and made it 0644 after the move, and a
+# symlink planted by the agent led root to overwrite any file and open it to everybody. Answers go
+# through mktemp and are moved in already 0644; root removes the ones the agent did not take within
+# 10 minutes. A request that is a symlink or not a regular file is dropped unread, and only its
+# first 4 KB are read. The journal of the whole system (sudo commands, every application's lines)
+# is read only where /etc/kervax/fix.conf says journal_all=yes, and values after password=,
+# token=, Bearer and the like and passwords in URLs are hidden in every journal sent.
 set -euo pipefail
 
-KERVAX_SETUP_VERSION=0.5  # MAJOR.MINOR; compared component-wise
+KERVAX_SETUP_VERSION=0.6  # MAJOR.MINOR; compared component-wise
 KERVAX_SETUP_ALWAYS=1     # safe on any node: it only reads systemctl and the journal
 
 HELPER_DIR=/lib65/kervax
@@ -180,7 +189,13 @@ journal_out() {
   local unit=$1 since=$2 lines=$3 prio=$4 tmp
   local -a sel
   case "$unit" in
-    _all) sel=() ;;
+    _all)
+      # the whole journal only where the node allows it: the panel cannot change fix.conf
+      if [ "$(sed -n 's/^journal_all=//p' /etc/kervax/fix.conf 2>/dev/null | tail -1)" != yes ]; then
+        echo "the whole journal is not allowed on this node (journal_all=yes in /etc/kervax/fix.conf)"
+        return 2
+      fi
+      sel=() ;;
     _kernel) sel=(-k) ;;
     *) unit_ok "$unit" || return 1; sel=(-u "$unit") ;;
   esac
@@ -194,27 +209,44 @@ journal_out() {
   tmp=$(mktemp)
   timeout 30 journalctl ${sel[@]+"${sel[@]}"} --since "-${since}min" -n "$lines" -p "$prio" -o short-iso --no-pager \
     > "$tmp" 2>&1
-  head -c 300000 "$tmp" | gzip -c | base64 | tr -d '\n'
+  # secrets in the lines: values after password=, token= and the like, Bearer and Basic, user:password@
+  head -c 300000 "$tmp" | sed -E \
+    -e 's/((pass(word|wd)?|secret|token|api[_-]?key|authorization)["'"'"']?[[:space:]]*[=:][[:space:]]*)(bearer[[:space:]]+|basic[[:space:]]+)?[^[:space:]"'"'"',;&]+/\1\4***/Ig' \
+    -e 's/(bearer|basic)[[:space:]]+[A-Za-z0-9._~+\/=-]{8,}/\1 ***/Ig' \
+    -e 's#(://[^/:@[:space:]]+:)[^/@[:space:]]+@#\1***@#g' \
+    | gzip -c | base64 | tr -d '\n'
   rm -f "$tmp"
+}
+
+# the answer, through mktemp in the root-only directory and moved in already readable
+put_res() { # id ok output
+  local t
+  t=$(mktemp "$RES_DIR/.res.XXXXXX") || return 0
+  printf 'ok=%s\noutput=%s\n' "$2" "$3" > "$t"
+  chmod 0644 "$t"; mv -fT "$t" "$RES_DIR/$1.res"
 }
 
 process_spool() {
   local req id line k v op unit ok out rc state result tmp since lines prio changed=0
+  # answers the agent did not take (it timed out): the directory is root's, the agent cannot remove them
+  find "$RES_DIR" -maxdepth 1 -type f -mmin +10 -delete 2>/dev/null || true
   for req in "$REQ_DIR"/*.req; do
-    [ -f "$req" ] || continue
+    [ -e "$req" ] || [ -L "$req" ] || continue
     id=$(basename "$req" .req)
+    # a symlink or a fifo the agent left would make root read whatever it points at
+    if [ -L "$req" ] || [ ! -f "$req" ]; then rm -f "$req"; continue; fi
+    case "$id" in ''|*[!0-9-]*) rm -f "$req"; continue ;; esac
     op=""; unit=""; since=""; lines=""; prio=""
     while IFS= read -r line; do
       k=${line%%=*}; v=${line#*=}
       case "$k" in op) op=$v ;; unit) unit=$v ;; since) since=$v ;; lines) lines=$v ;; prio) prio=$v ;; esac
-    done < "$req"
+    done < <(head -c 4096 "$req")
     rm -f "$req"
     ok=false
     if [ "$op" = journal ]; then
-      if out=$(journal_out "$unit" "$since" "$lines" "$prio"); then ok=true; else out="bad request"; fi
-      printf 'ok=%s\noutput=%s\n' "$ok" "$out" > "$RES_DIR/$id.res.tmp"
-      mv -f "$RES_DIR/$id.res.tmp" "$RES_DIR/$id.res"
-      chmod 0644 "$RES_DIR/$id.res"
+      out=$(journal_out "$unit" "$since" "$lines" "$prio"); rc=$?
+      if [ $rc = 0 ]; then ok=true; elif [ $rc != 2 ]; then out="bad request"; fi
+      put_res "$id" "$ok" "$out"
       continue
     fi
     changed=1
@@ -237,9 +269,7 @@ process_spool() {
       out="{\"op\":\"$op\",\"unit\":\"$(esc "$unit")\",\"state\":\"$(esc "$state")\",\"result\":\"$(esc "$result")\",\"rc\":$rc,\"log\":[$(json_lines "$tmp")]}"
       rm -f "$tmp"
     fi
-    printf 'ok=%s\noutput=%s\n' "$ok" "$out" > "$RES_DIR/$id.res.tmp"
-    mv -f "$RES_DIR/$id.res.tmp" "$RES_DIR/$id.res"
-    chmod 0644 "$RES_DIR/$id.res"
+    put_res "$id" "$ok" "$out"
   done
   # the panel should see the new state at once, not in a minute (reading the journal changes nothing)
   [ "$changed" = 1 ] && scan
@@ -466,7 +496,9 @@ EOF
 # -- restart/reset requests from the panel through the spool --
 if getent group "$AGENT_USER" >/dev/null 2>&1; then
   install -d -o root -g "$AGENT_USER" -m 0730 "$REQ_DIR"
-  install -d -o root -g "$AGENT_USER" -m 0770 "$RES_DIR"
+  install -d -o root -g "$AGENT_USER" -m 0750 "$RES_DIR"
+  # whatever the agent could leave there while the directory was its to write (0.5): only answers stay
+  find "$RES_DIR" -mindepth 1 \( ! -type f -o ! -name '*.res' \) -exec rm -rf {} + 2>/dev/null || true
   # the agent runs under ProtectSystem=strict: let it write the spool in /var/lib/kervax
   if systemctl cat kervax-agent >/dev/null 2>&1 \
      && [ ! -f /etc/systemd/system/kervax-agent.service.d/kervax-spool.conf ]; then

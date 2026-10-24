@@ -59,11 +59,20 @@
 # awk of Debian and Ubuntu (its gsub puts back one backslash, not two), and the agent dropped the
 # whole block; mysql printed backslashes doubled in its batch output and now runs with --raw.
 #
+# 0.5: redis-cli and mysql ran as root with every capability, and the shell and the client were
+# whatever the process' root held: a user's own redis-server with a redis-cli next to it, or an
+# image, got its file run as root of the host outside the container's confinement. Every client
+# runs as the instance's own user now (psql did already), root of a container as nobody, inside
+# its PID namespace as well; as root only on the host and only a client that is root's and nobody
+# else can change (mysql keeps reading debian.cnf). A password file a container names is read
+# inside it as its user: through /proc/PID/root an absolute symlink led root to a file of the host,
+# and its first line went to the container's client.
+#
 # Only queue names, numbers, job class names and the first line of the last error leave the node:
 # no job arguments, no other keys or rows.
 set -euo pipefail
 
-KERVAX_SETUP_VERSION=0.4  # MAJOR.MINOR; compared component-wise
+KERVAX_SETUP_VERSION=0.5  # MAJOR.MINOR; compared component-wise
 KERVAX_SETUP_WHEN="pgrep -x redis-server >/dev/null 2>&1 || pgrep -x valkey-server >/dev/null 2>&1 || pgrep -x postgres >/dev/null 2>&1 || pgrep -x postmaster >/dev/null 2>&1 || pgrep -x mysqld >/dev/null 2>&1 || pgrep -x mariadbd >/dev/null 2>&1"
 
 HELPER_DIR=/lib65/kervax
@@ -182,6 +191,43 @@ where_of() { # pid id spec -> "container X" | "pod ns/name" | "host"
   [ -n "$id" ] && { echo "container ${id:0:12}"; return; }
   echo host
 }
+# -- who runs what inside an instance's namespaces --
+# A container's files are its image's, and a host process' path is whatever its user chose:
+# nothing found through a process runs as root unless the process is on the host and the file is
+# root's (it and every directory above it, none writable by anybody else). Anything else runs as
+# the process' own user, root of a container as nobody, and a container is entered with its PID
+# namespace as well.
+on_host() { [ "$(stat -L -c %d:%i "/proc/$1/root" 2>/dev/null)" = "$(stat -L -c %d:%i /)" ]; }
+roots() { # path -> 0 if root's and nobody else can change it
+  local f m
+  f=$(readlink -f "$1" 2>/dev/null) && [ -e "$f" ] || return 1
+  while :; do
+    m=$(stat -c '%u %a' "$f" 2>/dev/null) || return 1
+    [ "${m%% *}" = 0 ] && [ $((0${m#* } & 022)) = 0 ] || return 1
+    [ "$f" = / ] && return 0
+    f=${f%/*}; f=${f:-/}
+  done
+}
+ns_as() { # pid binary [root] -> nsenter options; with "root" a binary of the host that is root's runs as root
+  local u g
+  read -r u g < <(awk '/^Uid:/ { u = $2 } /^Gid:/ { g = $2 } END { if (u != "") print u, g }' "/proc/$1/status" 2>/dev/null) \
+    && [ -n "$u" ] || return 1
+  if on_host "$1"; then
+    if roots "$2"; then [ "${3:-}" = root ] && { u=0; g=0; }
+    elif [ "$u" = 0 ]; then u=65534; g=65534; fi
+    printf -- '-m -n -S %s -G %s' "$u" "$g"
+  else
+    [ "$u" = 0 ] && { u=65534; g=65534; }
+    printf -- '-m -n -p -S %s -G %s' "$u" "$g"
+  fi
+}
+# A file a container names, read inside it as its user: through /proc/PID/root an absolute symlink
+# would lead root to a file of the host. The first 64 KB
+in_read() { # pid path
+  local o
+  # shellcheck disable=SC2086
+  o=$(ns_as "$1" /bin/cat) && timeout -k 2 5 nsenter -t "$1" $o -- cat -- "$2" 2>/dev/null | head -c 65536
+}
 spec_env() { # spec var -> value
   grep -o "\"$2=[^\"]*\"" "$1" 2>/dev/null | head -1 | sed "s/^\"$2=//; s/\"\$//"
 }
@@ -191,20 +237,21 @@ pw_of() { # pid spec -> the password or nothing
     for f in REDIS_PASSWORD VALKEY_PASSWORD REDIS_PASS; do pw=$(spec_env "$spec" $f); [ -n "$pw" ] && break; done
     if [ -z "$pw" ]; then
       f=$(spec_env "$spec" REDIS_PASSWORD_FILE)
-      [ -n "$f" ] && pw=$(head -1 "/proc/$p/root$f" 2>/dev/null | tr -d '\r\n')
+      [ -n "$f" ] && pw=$(in_read "$p" "$f" | head -1 | tr -d '\r\n')
     fi
     args=$(grep -o '"args":\[[^]]*\]' "$spec" | head -1 | sed 's/^"args":\[//; s/\]$//; s/","/\n/g; s/^"//; s/"$//' | tr ' ' '\n')
     [ -z "$pw" ] && pw=$(printf '%s\n' "$args" | awk 'p { print; exit } $0 == "--requirepass" { p = 1; next } /^--requirepass=/ { sub(/^--requirepass=/, ""); print; exit }' | tr -d "\"'")
     if [ -z "$pw" ]; then
       f=$(printf '%s\n' "$args" | grep -m1 '\.conf$')
-      [ -n "$f" ] && pw=$(awk '$1 == "requirepass" { print $2; exit }' "/proc/$p/root$f" 2>/dev/null | tr -d "\"'")
+      [ -n "$f" ] && pw=$(in_read "$p" "$f" | awk '$1 == "requirepass" { print $2; exit }' | tr -d "\"'")
     fi
   fi
   if [ -z "$pw" ]; then
     for f in /usr/local/etc/redis/redis.conf /etc/redis/redis.conf /etc/redis.conf /etc/redis/6379.conf \
              /opt/bitnami/redis/etc/redis.conf /data/redis.conf /redis.conf /etc/valkey/valkey.conf \
              /var/opt/gitlab/redis/redis.conf; do
-      pw=$(awk '$1 == "requirepass" { print $2; exit }' "/proc/$p/root$f" 2>/dev/null | tr -d "\"'")
+      [ -e "/proc/$p/root$f" ] || continue
+      pw=$(in_read "$p" "$f" | awk '$1 == "requirepass" { print $2; exit }' | tr -d "\"'")
       [ -n "$pw" ] && break
     done
   fi
@@ -231,15 +278,20 @@ listen_of() { # pid
   awk -v ino="$ino" '$6 == "01" && $8 != "" && index(ino, " " $7 " ") { print "-s " $8; exit }' "/proc/$p/net/unix" 2>/dev/null
 }
 
-# redis-cli of the instance itself, inside its namespaces; P CLI TGT PW are set per instance
+# redis-cli of the instance itself, inside its namespaces, as ns_as says; P CLI TGT PW NSO are set
+# per instance
+# shellcheck disable=SC2086
 rcli() {
-  printf '%s\n' "$PW" | timeout "${T:-$TO}" nsenter -t "$P" -n -m /bin/sh -c \
+  [ -n "$NSO" ] || return 1
+  printf '%s\n' "$PW" | timeout -k 2 "${T:-$TO}" nsenter -t "$P" $NSO -- /bin/sh -c \
     'read -r REDISCLI_AUTH; [ -n "$REDISCLI_AUTH" ] && export REDISCLI_AUTH; c=$1; shift; exec "$c" "$@"' \
     sh "$CLI" $TGT "$@" 2>/dev/null
 }
 # commands from stdin, one reply per line
+# shellcheck disable=SC2086
 rbatch() {
-  { printf '%s\n' "$PW"; cat; } | timeout "$TO" nsenter -t "$P" -n -m /bin/sh -c \
+  [ -n "$NSO" ] || return 1
+  { printf '%s\n' "$PW"; cat; } | timeout -k 2 "$TO" nsenter -t "$P" $NSO -- /bin/sh -c \
     'read -r REDISCLI_AUTH; [ -n "$REDISCLI_AUTH" ] && export REDISCLI_AUTH; c=$1; shift; exec "$c" "$@"' \
     sh "$CLI" $TGT -n "$1" 2>/dev/null
 }
@@ -325,6 +377,7 @@ find_db() { # db
 : > "$TMPD/cache"
 : > "$TMPD/skip"
 while IFS=$'\t' read -r P W TGT CLI SPEC; do
+  NSO=$(ns_as "$P" "$CLI") || NSO=""
   INST="$W|$TGT"
   last=$(awk -F'\t' -v i="$INST" '$1 == "D" && $2 == i { print $3 "\t" $4; exit }' "$CACHE" 2>/dev/null)
   when=${last%%$'\t'*}; status=${last#*$'\t'}
@@ -356,6 +409,7 @@ mv -f "$TMPD/cache" "$CACHE.new" && mv -f "$CACHE.new" "$CACHE"
 # -- depth of the known queues: one redis-cli per database, commands on stdin --
 : > "$TMPD/rows"
 while IFS=$'\t' read -r P W TGT CLI SPEC; do
+  NSO=$(ns_as "$P" "$CLI") || NSO=""
   INST="$W|$TGT"
   grep -qF "Q"$'\t'"$INST"$'\t' "$CACHE" || continue
   PW=$(pw_of "$P" "$SPEC")
@@ -501,7 +555,7 @@ secret_of() { # pid spec var -> its value in the container's environment, or the
   v=$(spec_env "$2" "$3")
   if [ -z "$v" ]; then
     f=$(spec_env "$2" "${3}_FILE")
-    [ -n "$f" ] && v=$(head -1 "/proc/$1/root$f" 2>/dev/null | tr -d '\r\n')
+    [ -n "$f" ] && v=$(in_read "$1" "$f" | head -1 | tr -d '\r\n')
   fi
   # config.json is written by Go: & < > come as \u0026 \u003c \u003e
   printf '%s' "$v" | sed 's/\\u0026/\&/g; s/\\u003c/</g; s/\\u003e/>/g; s/\\\\/\\/g'
@@ -528,15 +582,17 @@ uid_of() { awk -v k="$2:" '$1 == k { print $2 }' "/proc/$1/status" 2>/dev/null; 
 # password, MySQL's defaults file. psql runs as the server's own user: peer authentication on the
 # socket lets exactly that user in. The password goes in the environment, never on a command line.
 pgrun() { # db sql
-  local pw=""
+  local pw="" o
   [ -n "$M_PW" ] && pw=$(secret_of "$P" "$SPEC" "$M_PW")
-  timeout "$DB_TO" nsenter -t "$P" -m -n -S "$(uid_of "$P" Uid)" -G "$(uid_of "$P" Gid)" -- /usr/bin/env -i \
+  o=$(ns_as "$P" "$M_CLI") || return 1
+  # shellcheck disable=SC2086
+  timeout -k 2 "$DB_TO" nsenter -t "$P" $o -- /usr/bin/env -i \
     PATH="$IPATH" HOME=/tmp PGPASSWORD="$pw" PGCONNECT_TIMEOUT=5 PGAPPNAME=kervax-queues \
     PGOPTIONS="-c statement_timeout=5000 -c lock_timeout=2000 -c default_transaction_read_only=on" \
     "$M_CLI" -X -A -t -q -F "$TAB" -v ON_ERROR_STOP=1 -h "$M_HOST" -p "$M_PORT" -U "$M_USER" -d "$1" -c "$2" 2>"$TMPD/dberr"
 }
 myrun() { # sql
-  local pw="" envs=(PATH="$IPATH" HOME=/root) args=()
+  local pw="" o envs=(PATH="$IPATH" HOME=/root) args=()
   [ -n "$M_PW" ] && pw=$(secret_of "$P" "$SPEC" "$M_PW")
   [ -n "$pw" ] && envs+=(MYSQL_PWD="$pw")
   [ -n "$M_DEF" ] && args+=(--defaults-file="$M_DEF")  # has to be the first option
@@ -544,7 +600,10 @@ myrun() { # sql
   [ -n "$M_USER" ] && args+=(-u "$M_USER")
   case "$M_HOST" in /*) args+=(-S "$M_HOST") ;; ?*) args+=(-h "$M_HOST" -P "$M_PORT") ;; esac
   # on stdin: with -e the client stops at the first error even with --force
-  printf '%s %s;\n' "$MY_PRE" "$1" | timeout "$DB_TO" nsenter -t "$P" -m -n -- /usr/bin/env -i "${envs[@]}" "$M_CLI" "${args[@]}" 2>"$TMPD/dberr"
+  # a client of the host that is root's runs as root (debian.cnf is root's), the rest as ns_as says
+  o=$(ns_as "$P" "$M_CLI" root) || return 1
+  # shellcheck disable=SC2086
+  printf '%s %s;\n' "$MY_PRE" "$1" | timeout -k 2 "$DB_TO" nsenter -t "$P" $o -- /usr/bin/env -i "${envs[@]}" "$M_CLI" "${args[@]}" 2>"$TMPD/dberr"
 }
 dbrun() { if [ "$ENG" = pg ]; then pgrun "$@"; else shift; myrun "$@"; fi; }  # db sql
 login_err() { grep -qiE 'authentication|password|access denied|pg_hba|role .* does not exist|not permitted' "$TMPD/dberr" 2>/dev/null; }

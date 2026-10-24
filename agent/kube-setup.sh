@@ -15,7 +15,18 @@ set -euo pipefail
 
 # v2: RBAC gained READ on batch/cronjobs+jobs — the panel sees database dumps already set up
 # v3: plus read on persistentvolumes/claims — the audit matches cluster volumes against backups
-KERVAX_SETUP_VERSION=0.14  # MAJOR.MINOR; compared component-wise (0.13 > 0.2!)
+# 0.15: patch on deployments, statefulsets and daemonsets let the token rewrite any workload of
+# the cluster - a privileged DaemonSet in kube-system with the host's root mounted, that is root
+# on every node and the cluster admin. The panel only ever patches the restartedAt annotation of
+# the pod template (rollout restart), so a ValidatingAdmissionPolicy now lets this account change
+# nothing else in the pod template (its spec, labels and other annotations stay as they are; the
+# rest of a workload's spec - replicas, strategy - gives no access to a node), and patch is
+# granted only where the cluster has that API
+# (admissionregistration.k8s.io/v1, Kubernetes 1.30): an older cluster gets no patch at all, and
+# a rollout restart from the panel answers 403 there (deleting a pod still works). Patch on
+# replicasets is gone (never used). The token goes to curl in its config on stdin, not in its
+# arguments.
+KERVAX_SETUP_VERSION=0.15  # MAJOR.MINOR; compared component-wise (0.13 > 0.2!)
 # Which nodes need this helper at all - read by the installer and by the ansible
 # playbook, and evaluated as a shell condition ON THE NODE.
 KERVAX_SETUP_WHEN="command -v k0s >/dev/null 2>&1 || command -v k3s >/dev/null 2>&1 || command -v microk8s >/dev/null 2>&1 || command -v kubelet >/dev/null 2>&1 || [ -e /etc/kubernetes/admin.conf ] || [ -d /var/lib/k0s ]"
@@ -44,6 +55,61 @@ KC=$(detect_kubectl)
 [ -z "$KC" ] && { echo "kube-setup: no kubectl or cluster distribution found" >&2; exit 1; }
 echo "kube-setup: kubectl = $KC"
 
+# --- the admission policy that keeps patch to rollout restart: applied BEFORE the role grants
+#     patch, and the role grants it only if the cluster has the API ---
+WORKLOAD_VERBS="get, list, watch"
+if $KC get --raw /apis/admissionregistration.k8s.io/v1 2>/dev/null | grep -q '"validatingadmissionpolicies"'; then
+  if $KC apply -f - <<'YAML'
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: kervax-agent-restart-only
+  labels: { app.kubernetes.io/managed-by: kervax }
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["apps"]
+        apiVersions: ["*"]
+        operations: ["UPDATE"]
+        resources: ["deployments", "statefulsets", "daemonsets"]
+  matchConditions:
+    - name: kervax-agent
+      expression: request.userInfo.username == "system:serviceaccount:kube-system:kervax-agent"
+  variables:
+    - name: rs
+      expression: '"kubectl.kubernetes.io/restartedAt"'
+    - name: na
+      expression: object.spec.template.metadata.?annotations.orValue({})
+    - name: oa
+      expression: oldObject.spec.template.metadata.?annotations.orValue({})
+  validations:
+    - expression: object.spec.template.spec == oldObject.spec.template.spec
+      message: the kervax agent may only restart a workload (restartedAt), not change its pod spec
+    - expression: >-
+        object.spec.template.metadata.?labels.orValue({}) == oldObject.spec.template.metadata.?labels.orValue({})
+        && variables.na.all(k, k == variables.rs || (k in variables.oa && variables.oa[k] == variables.na[k]))
+        && variables.oa.all(k, k == variables.rs || k in variables.na)
+      message: the kervax agent may only change the restartedAt annotation of the pod template
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: kervax-agent-restart-only
+  labels: { app.kubernetes.io/managed-by: kervax }
+spec:
+  policyName: kervax-agent-restart-only
+  validationActions: [Deny]
+YAML
+  then
+    WORKLOAD_VERBS="get, list, watch, patch"
+  else
+    echo "kube-setup: the admission policy did not apply - the account gets no patch (rollout restart is off)" >&2
+  fi
+else
+  echo "kube-setup: no ValidatingAdmissionPolicy in this cluster (Kubernetes before 1.30) - the account gets no patch: rollout restart from the panel is off, pod deletion works" >&2
+fi
+
 # --- SA plus a narrow ClusterRole and binding (idempotent, apply) ---
 $KC apply -f - <<YAML
 apiVersion: v1
@@ -63,9 +129,14 @@ rules:
   - apiGroups: [""]
     resources: [nodes, namespaces, pods, pods/log, events, services]
     verbs: [get, list, watch]
+  # patch = rollout restart (the restartedAt annotation in the template), held to exactly that by
+  # the admission policy above; without the policy there is no patch
   - apiGroups: ["apps"]
-    resources: [deployments, statefulsets, daemonsets, replicasets]
-    verbs: [get, list, watch, patch]     # patch = rollout restart (annotation in the template)
+    resources: [deployments, statefulsets, daemonsets]
+    verbs: [${WORKLOAD_VERBS}]
+  - apiGroups: ["apps"]
+    resources: [replicasets]
+    verbs: [get, list, watch]
   # READ ONLY on schedules: from them the panel understands a database dump is already
   # configured and stops asking for a separate backup. This grants no secret contents —
   # only names and specs.
@@ -161,7 +232,8 @@ chmod 0644 /var/lib/kervax/versions/kube-setup.ver
 echo "kube-setup: done -> $OUT (server=$SERVER)"
 echo "kube-setup: verifying read access..."
 if command -v curl >/dev/null 2>&1; then
-  code=$(curl -sS -o /dev/null -w '%{http_code}' --cacert <(echo "$CA" | base64 -d) \
-        -H "Authorization: Bearer $TOKEN" "$SERVER/api/v1/nodes" || echo 000)
+  # the token in curl's config on stdin: on its command line every user of the node sees it in ps
+  code=$(printf 'header = "Authorization: Bearer %s"\n' "$TOKEN" | curl -sS -K - -o /dev/null -w '%{http_code}' \
+        --cacert <(echo "$CA" | base64 -d) "$SERVER/api/v1/nodes" || echo 000)
   echo "kube-setup: GET /api/v1/nodes -> HTTP $code (200 = ok)"
 fi

@@ -264,7 +264,7 @@ def test_helper_turns_cleanup_off_and_keeps_it_off():
     """helper 0.34: prune-off / prune-on, regen-prune и adopt-legacy сохраняют выключенное состояние."""
     from pathlib import Path
     src = (Path(__file__).resolve().parents[2] / "agent" / "backupserver-setup.sh").read_text(encoding="utf-8")
-    assert "KERVAX_SETUP_VERSION=0.35" in src and "\r" not in src
+    assert "KERVAX_SETUP_VERSION=0.36" in src and "\r" not in src
     assert 'prune-off)        shift; cmd_prune_switch off "$@" ;;' in src
     assert 'prune-on)         shift; cmd_prune_switch on "$@" ;;' in src
     regen = src[src.index("cmd_regen_prune() {"):]
@@ -298,5 +298,26 @@ def test_helper_scenario_in_a_shell():
         pytest.skip("нужен Linux, root и python3")
     root = Path(__file__).resolve().parents[2]
     r = subprocess.run(["bash", str(Path(__file__).parent / "sh" / "bsrv_prune_off.sh"), str(root)],
+                       capture_output=True, text=True, timeout=300)
+    assert r.returncode == 0 and r.stdout.strip().endswith("PASS"), r.stdout + r.stderr
+
+
+def test_bsrv_sec_scenario_in_a_shell():
+    """Сценарий tests/sh/bsrv_sec.sh (helper 0.36): имена, repopass и hpass проверяются до htpasswd и
+    env очистки, hpass не в argv, состояние недельной проверки не подложить и не выполнить, метрики
+    очистки не идут по симлинку, ответы спула не уводятся. Нужен Linux и root, иначе пропуск;
+    на Windows его гоняют в WSL: wsl -u root -- bash tests/sh/bsrv_sec.sh <корень репо>."""
+    import os
+    import shutil
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    import pytest
+
+    if sys.platform != "linux" or os.geteuid() != 0 or not shutil.which("python3"):
+        pytest.skip("нужен Linux, root и python3")
+    root = Path(__file__).resolve().parents[2]
+    r = subprocess.run(["bash", str(Path(__file__).parent / "sh" / "bsrv_sec.sh"), str(root)],
                        capture_output=True, text=True, timeout=300)
     assert r.returncode == 0 and r.stdout.strip().endswith("PASS"), r.stdout + r.stderr

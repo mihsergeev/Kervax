@@ -89,7 +89,7 @@ def test_alert_home_and_view():
 
 def test_helper_writes_health():
     src = (Path(__file__).resolve().parents[2] / "agent" / "dbstat-setup.sh").read_text(encoding="utf-8")
-    assert "KERVAX_SETUP_VERSION=0.15  # " in src and "health_pg()" in src and "health_mysql()" in src
+    assert "KERVAX_SETUP_VERSION=0.16  # " in src and "health_pg()" in src and "health_mysql()" in src
     # 0.7: без роли postgres - под пользователем контейнера в явную базу, а не в базу с его именем
     assert 'psql -d "${d:-postgres}" -Atqc "$q" ${u:+-U "$u"}' in src
     assert "backend_xmin is not null" in src and "idle_xmin" in src
@@ -138,7 +138,7 @@ def test_helper_collects_load():
     assert "from pg_stat_statements(false)" in src and "pg_stat_statements(true)" in src
     assert "QTEXT_BIG=1073741824" in src and "pgss_query_texts.stat" in src
     # тексты с паролями и секретами не уходят
-    assert "~* '(passw|secret|token|identified|pgp_sym|encrypt)' then ''" in src
+    assert "~* '(passw|secret|token|identified|pgp_sym|encrypt|credential|access.?key|api.?key|private.?key)' then ''" in src
     # пустой первый файл: FNR == NR ловил строки второго файла как первого, топ выходил пустым
     # четвертый - команды Redis (0.10), пятый и шестой - нагрузка и запросы MySQL (0.11)
     assert "FNR == NR" not in src and src.count("FILENAME == ARGV[1]") == 6

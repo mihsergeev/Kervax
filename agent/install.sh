@@ -237,8 +237,18 @@ id kervax >/dev/null 2>&1 || useradd --system --no-create-home --shell /usr/sbin
 #    first one, and --uninstall removes exactly these files. --
 CA_NAME="kervax-panel${INSTANCE:+-$INSTANCE}.crt"
 if [ -n "$CA_FILE" ]; then
-  grep -q -- '-----BEGIN CERTIFICATE-----' "$CA_FILE" 2>/dev/null || {
-    echo "✗ --ca-file $CA_FILE is not a PEM certificate." >&2; exit 1; }
+  # The file comes from /tmp, where anybody may have made it first or swap it: it is read once
+  # into a file of our own, and only if it is not a symlink, belongs to root or to whoever ran
+  # sudo, and nobody else can write it (an appended CA would be trusted too)
+  CA_OWN=$(stat -c '%u %a' "$CA_FILE" 2>/dev/null || echo "x 777")
+  if [ -L "$CA_FILE" ] || [ ! -f "$CA_FILE" ] || [ $((0${CA_OWN#* } & 022)) != 0 ] \
+     || { [ "${CA_OWN% *}" != 0 ] && [ "${CA_OWN% *}" != "${SUDO_UID:-0}" ]; }; then
+    echo "✗ --ca-file $CA_FILE: not a regular file of root or of the user who ran sudo, or others can write it." >&2; exit 1
+  fi
+  CA_TMP=$(mktemp)
+  cat "$CA_FILE" > "$CA_TMP"
+  grep -q -- '-----BEGIN CERTIFICATE-----' "$CA_TMP" || {
+    rm -f "$CA_TMP"; echo "✗ --ca-file $CA_FILE is not a PEM certificate." >&2; exit 1; }
   if command -v update-ca-certificates >/dev/null 2>&1 && [ -d /usr/local/share/ca-certificates ]; then
     CA_DST=/usr/local/share/ca-certificates/$CA_NAME            # Debian, Ubuntu, Alpine
     CA_UPDATE="update-ca-certificates"
@@ -252,12 +262,8 @@ if [ -n "$CA_FILE" ]; then
     echo "✗ No system trust store found to add the panel CA to (install ca-certificates)." >&2
     exit 1
   fi
-  # the root becomes trusted for all TLS of the node: only a regular file of our own user,
-  # not a symlink, so a file planted in /tmp by someone else is never taken
-  if [ -L "$CA_FILE" ] || [ ! -f "$CA_FILE" ] || [ ! -O "$CA_FILE" ]; then
-    echo "✗ --ca-file $CA_FILE must be a regular file owned by $(id -un), not a link." >&2; exit 1
-  fi
-  cp "$CA_FILE" "$CA_DST"
+  cp "$CA_TMP" "$CA_DST"
+  rm -f "$CA_TMP"
   chmod 0644 "$CA_DST"
   $CA_UPDATE >/dev/null 2>&1 || { echo "✗ $CA_UPDATE failed." >&2; exit 1; }
   # checked WITHOUT --cacert, through the system store: exactly how the agent connects.
@@ -439,25 +445,30 @@ echo "✓ $UNIT installed and started. Logs: journalctl -u $UNIT -f"
 # Docker access for the agent WITHOUT granting it root. A tiny socket-proxy (wollomatic)
 # exposes ONLY a per-method allowlist: GET version/list/logs and the image list (build dates
 # of internet-facing proxy images) plus POST restart/stop/start for a specific container.
-# Everything else (exec, create, pull, build, volumes, host mounts) returns 403. No RCE, no host root. It runs in the host
-# network and listens on 127.0.0.1 only: other containers cannot reach it (from the bridge
-# network any container could read the env and logs of every other one through it). No
-# capabilities, read-only root. The same command lives in dockerproxy-setup.sh and in the
+# Everything else (exec, create, pull, build, volumes, host mounts) returns 403. No RCE, no host root. It has no
+# network and listens on a unix socket in /var/lib/kervax/docker, a directory only root and the
+# kervax group enter: neither containers nor other users of the node reach it (on 127.0.0.1:2375
+# any of them could read the env of every container and stop it). No capabilities, read-only
+# root, the image pinned by digest. The same command lives in dockerproxy-setup.sh and in the
 # Docker section of the panel.
 setup_docker_proxy() {
   command -v docker >/dev/null 2>&1 || { echo "· Docker not found - skipping the proxy." >&2; return; }
   echo "→ Setting up bounded Docker access (socket-proxy)..."
-  DGID=$(getent group docker 2>/dev/null | cut -d: -f3)
+  DGID=$(stat -c %g /var/run/docker.sock 2>/dev/null || getent group docker 2>/dev/null | cut -d: -f3)
+  KGID=$(getent group kervax 2>/dev/null | cut -d: -f3)
+  install -d -o root -g kervax -m 2770 /var/lib/kervax/docker
   docker rm -f kervax-docker-proxy >/dev/null 2>&1 || true
-  if docker run -d --name kervax-docker-proxy --restart unless-stopped \
-      --network host --read-only --cap-drop ALL --security-opt no-new-privileges \
-      --user "65534:${DGID:-999}" \
-      -v /var/run/docker.sock:/var/run/docker.sock:ro \
-      wollomatic/socket-proxy:1 \
-        -loglevel warn -listenip 127.0.0.1 -allowfrom 127.0.0.1/32 -shutdowngracetime 1 \
-        -allowGET '^/(v[0-9.]+/)?(version|info|_ping|containers/json|images/json|containers/[a-zA-Z0-9_.-]+/(json|logs))' \
+  if [ -n "$KGID" ] && docker run -d --name kervax-docker-proxy --restart unless-stopped \
+      --network none --read-only --cap-drop ALL --security-opt no-new-privileges \
+      --user "65534:${DGID:-999}" --group-add "$KGID" \
+      -v /var/run/docker.sock:/var/run/docker.sock:ro -v /var/lib/kervax/docker:/run/kervax \
+      wollomatic/socket-proxy:1.13.2@sha256:ff95d6ff6c27853005ef85eb8f4ab5923dc3d2f1e055f98fb6aeeaceec3fe848 \
+        -loglevel warn -proxysocketendpoint /run/kervax/docker.sock -proxysocketendpointfilemode 0660 -shutdowngracetime 1 \
+        -allowGET '^/(v[0-9.]+/)?(version|_ping|containers/json|images/json|containers/[a-zA-Z0-9_.-]+/(json|logs))$' \
         -allowPOST '^/(v[0-9.]+/)?containers/[a-zA-Z0-9_.-]+/(restart|stop|start)$' >/dev/null; then
-    grep -q '^docker_host=' "$CONF" || printf 'docker_host=tcp://127.0.0.1:2375\n' >> "$CONF"
+    # the same file is rewritten: it stays the agent's (kervax, 0600)
+    printf '%s\n' "$(grep -v '^docker_host=' "$CONF")" > "$CONF"
+    printf 'docker_host=/var/lib/kervax/docker/docker.sock\n' >> "$CONF"
     echo "✓ Docker enabled (proxy: view plus restart/stop/start, no exec/create/root)."
   else
     echo "✗ Could not start the socket-proxy (is the docker daemon reachable?)." >&2

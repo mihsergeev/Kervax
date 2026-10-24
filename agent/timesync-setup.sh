@@ -8,6 +8,16 @@
 # There is exactly one action (sync), and the panel URL used for the fallback is
 # validated. Run as root on the node. Without this helper the panel only shows a
 # copy-paste command.
+#
+# 0.3: the answer directory was the agent's to write (0770) while root wrote the answer there by a
+# fixed name and made it 0644 after the move: a symlink planted by the agent led root to overwrite
+# any file and open it to everybody (/etc/shadow). The directory is root's now (0750, the agent
+# reads), answers are written through mktemp and moved in already 0644, and root removes the ones
+# the agent did not take within 10 minutes. A request that is a symlink or not a regular file is
+# dropped unread, and only its first 4 KB are read. The panel URL for the HTTP fallback came from
+# the request and any https:// passed: the agent could set the node's clock to any date from a
+# server of its own. It is taken only if it is the url of an agent config of this node
+# (/etc/kervax-agent*.conf), with its proxy, and a step of more than 6 hours is refused.
 set -euo pipefail
 
 HELPER_DIR=/lib65/kervax
@@ -17,7 +27,7 @@ REQ_DIR="$STATE_DIR/tsync-req"
 RES_DIR="$STATE_DIR/tsync-res"
 AGENT_USER=kervax
 
-KERVAX_SETUP_VERSION=0.2  # MAJOR.MINOR; compared component-wise
+KERVAX_SETUP_VERSION=0.3  # MAJOR.MINOR; compared component-wise
 KERVAX_SETUP_ALWAYS=1     # safe on any node, so it is installed on the first pass too
 if ! getent group "$AGENT_USER" >/dev/null 2>&1; then
   echo "No Kervax agent on this node (group '$AGENT_USER' is missing). Add the node in the panel first." >&2
@@ -26,9 +36,11 @@ fi
 install -d -m 0755 "$HELPER_DIR" "$STATE_DIR" /var/lib/kervax/versions
 echo "$KERVAX_SETUP_VERSION" > /var/lib/kervax/versions/timesync-setup.ver
 chmod 0644 /var/lib/kervax/versions/timesync-setup.ver
-# spool: the agent (kervax) drops requests (-wx) and reads/removes answers (r-x plus write)
+# spool: the agent (kervax) drops requests (-wx) and reads answers (r-x); answers are root's
 install -d -o root -g "$AGENT_USER" -m 0730 "$REQ_DIR"
-install -d -o root -g "$AGENT_USER" -m 0770 "$RES_DIR"
+install -d -o root -g "$AGENT_USER" -m 0750 "$RES_DIR"
+# whatever the agent could leave there while the directory was its to write (0.2): only answers stay
+find "$RES_DIR" -mindepth 1 \( ! -type f -o ! -name '*.res' \) -exec rm -rf {} + 2>/dev/null || true
 # the agent runs under ProtectSystem=strict — allow it to write the spool in /var/lib/kervax
 if systemctl cat kervax-agent >/dev/null 2>&1; then
   install -d -m 0755 /etc/systemd/system/kervax-agent.service.d
@@ -50,6 +62,7 @@ cat > "$HELPER.new" <<'HELPER_EOF'
 set -euo pipefail
 REQ_DIR=/var/lib/kervax/tsync-req
 RES_DIR=/var/lib/kervax/tsync-res
+MAX_STEP=21600  # the HTTP fallback does not move the clock further than 6 hours
 
 # the active time daemon ('' = none is running)
 _active_timed() {
@@ -60,9 +73,14 @@ _active_timed() {
 }
 
 cmd_sync() {
-  local panel="$1" svc method note synced=no i httpdate now
-  # the fallback panel URL is accepted only as https:// (it comes from the agent config)
+  local panel="$1" svc method note synced=no i httpdate now when proxy="" c
+  # the fallback panel URL: only https:// and only the url of an agent config of this node (the
+  # request comes from the agent, the configs are written by the install), with its proxy
   case "$panel" in https://*) ;; *) panel="" ;; esac
+  if [ -n "$panel" ]; then
+    c=$(grep -lxF "url=$panel" /etc/kervax-agent.conf /etc/kervax-agent-*.conf 2>/dev/null | head -1)
+    if [ -n "$c" ]; then proxy=$(sed -n 's/^proxy=//p' "$c" | head -1); else panel=""; fi
+  fi
   # 1) is a daemon present? if not, start systemd-timesyncd (usually preinstalled)
   svc="$(_active_timed || true)"
   if [ -z "$svc" ]; then
@@ -95,8 +113,13 @@ cmd_sync() {
   fi
   # 4) NTP unreachable (outbound UDP 123 blocked?) -> HTTP fallback to the panel's clock
   if [ -n "$panel" ]; then
-    httpdate="$(curl -sI --max-time 10 "$panel/" 2>/dev/null | grep -i '^date:' | head -1 | cut -d' ' -f2- | tr -d '\r')"
-    if [ -n "$httpdate" ] && date -s "$httpdate" >/dev/null 2>&1; then
+    httpdate="$(curl -q -sI --max-time 10 ${proxy:+-x "$proxy"} "$panel/" 2>/dev/null | grep -i '^date:' | head -1 | cut -d' ' -f2- | tr -d '\r')"
+    when=""; [ -n "$httpdate" ] && when=$(date -d "$httpdate" +%s 2>/dev/null || echo "")
+    if [ -n "$when" ] && [ $((when - $(date +%s))) -gt $MAX_STEP -o $(($(date +%s) - when)) -gt $MAX_STEP ]; then
+      echo "the panel's clock differs from this node's by more than 6 hours ($httpdate) - not stepped; set the time by hand (date -s) or open outbound UDP 123" >&2
+      return 2
+    fi
+    if [ -n "$when" ] && date -s "@$when" >/dev/null 2>&1; then
       echo "OK NTP unreachable - the clock was set from the panel (coarse, to the second): $(date '+%F %T %Z'). For accurate sync open outbound UDP 123 (e.g. ufw allow out 123/udp)"
       return 0
     fi
@@ -106,20 +129,26 @@ cmd_sync() {
 }
 
 cmd_process_spool() {
-  local req id panel line k v out ok
+  local req id panel line k v out ok t
+  # answers the agent did not take (it timed out): the directory is root's, the agent cannot remove them
+  find "$RES_DIR" -maxdepth 1 -type f -mmin +10 -delete 2>/dev/null || true
   for req in "$REQ_DIR"/*.req; do
-    [ -f "$req" ] || continue
+    [ -e "$req" ] || [ -L "$req" ] || continue
     id="$(basename "$req" .req)"
+    # a symlink or a fifo the agent left would make root read whatever it points at
+    if [ -L "$req" ] || [ ! -f "$req" ]; then rm -f "$req"; continue; fi
+    case "$id" in ''|*[!0-9-]*) rm -f "$req"; continue ;; esac
     panel=""
     while IFS= read -r line; do
       k="${line%%=*}"; v="${line#*=}"
       case "$k" in panel_url) panel="$v" ;; esac
-    done < "$req"
+    done < <(head -c 4096 "$req")
     rm -f "$req"
     out=""; ok=false
     if out="$(cmd_sync "$panel" 2>&1)"; then ok=true; fi
-    printf 'ok=%s\noutput=%s\n' "$ok" "$(printf '%s' "$out" | tr '\n' ' ')" > "$RES_DIR/$id.res.tmp"
-    mv -f "$RES_DIR/$id.res.tmp" "$RES_DIR/$id.res"; chmod 0644 "$RES_DIR/$id.res"
+    t=$(mktemp "$RES_DIR/.res.XXXXXX") || continue
+    printf 'ok=%s\noutput=%s\n' "$ok" "$(printf '%s' "$out" | tr '\n' ' ')" > "$t"
+    chmod 0644 "$t"; mv -fT "$t" "$RES_DIR/$id.res"
   done
 }
 

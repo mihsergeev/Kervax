@@ -114,7 +114,7 @@ def test_frontend_knows_every_phrase():
 # ---------------------------------------------------------------- helper на ноде
 
 def test_helper_version_and_wiring():
-    assert "KERVAX_SETUP_VERSION=0.42" in SRC and "\r" not in SRC
+    assert "KERVAX_SETUP_VERSION=0.43" in SRC and "\r" not in SRC
     probe = SRC[SRC.index("dump_probe() {"):SRC.index("# Compression of the dumps (0.30)")]
     # проверки дампа больше не выбрасывают свою ошибку
     for gone in ("else mysqldump --no-data --all-databases >/dev/null 2>&1; fi",
@@ -142,7 +142,8 @@ STUBS = r'''
 set +e
 T="$(cd "$1" && pwd)"; export T
 DUMPS_D="$T/dumps.d"; mkdir -p "$DUMPS_D"
-export KV_DUMP_DIR="$T/backup" KV_DUMP_MINFREE=0
+# каталог по умолчанию (свой у helper'а): каталог из панели во временной папке helper 0.43 не примет
+DUMP_DIR_BASE="$T/backup"; export KV_DUMP_MINFREE=0
 MY_CNFS=("$T/debian.cnf" "$T/my.cnf")
 printf '[client]\nuser=maint\n' > "$T/debian.cnf"
 write_run_dumps() { :; }
