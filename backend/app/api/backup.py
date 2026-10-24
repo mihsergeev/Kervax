@@ -50,8 +50,8 @@ async def overview(_: AdminUser, session: SessionDep) -> BackupOverview:
 
 @router.get("/export")
 async def export_now(_: AdminUser, session: SessionDep) -> dict:
-    """Свежий бэкап конфигурации (без метрик) — фронт сохранит как файл."""
-    return await backup.export_data(session)
+    """Свежий бэкап конфигурации (без метрик), зашифрованный, — фронт сохранит как файл."""
+    return await backup.export_sealed(session, get_settings())
 
 
 @router.get("/list", response_model=list[BackupFileInfo])

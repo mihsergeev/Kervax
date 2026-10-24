@@ -5,6 +5,8 @@
 #   ops/deploy.sh <host> v1.1.2           deploy a tag
 #   ops/deploy.sh <host> --dry-run        show what would happen and exit
 #   ops/deploy.sh --all                   deploy to every panel listed in ops/prods
+#   ops/deploy.sh <host> --attach         show a deploy that is running (or ran) on <host>
+#   ops/deploy.sh <host> --rollback       put back the version that was there before the last deploy
 #
 # ops/prods is one ssh host per line (blank lines and # comments ignored). It is not
 # in the repository: which panels an installation has is nobody else's business. With
@@ -28,17 +30,23 @@
 #    data counters, and that the scheduler was built from the same version as the backend:
 #    it is the one sending alerts, and a forgotten scheduler silently leaves them on the
 #    old code.
+#
+# The work on production itself (unpack, build, start, verify, roll back) is ops/deploy-remote.sh:
+# it is shipped with the sources and runs there as its own process, so a dropped ssh session
+# or a closed terminal no longer leaves a panel without containers. See that file for details.
 set -eu
 
-HOST=""; REF="HEAD"; DIR=/app/kervax; DRY=0; ALL=0
+HOST=""; REF="HEAD"; DIR=/app/kervax; DRY=0; ALL=0; ATTACH=0; ROLLBACK=0
 # время на панель - в итоговой строке: видно, какая из них тормозит выкладку
 T_HOST=$(date +%s)
 while [ $# -gt 0 ]; do
     case "$1" in
         --dry-run) DRY=1; shift ;;
         --all) ALL=1; shift ;;
+        --attach) ATTACH=1; shift ;;
+        --rollback) ROLLBACK=1; shift ;;
         --dir) DIR="$2"; shift 2 ;;
-        -h|--help) sed -n '2,14p' "$0"; exit 0 ;;
+        -h|--help) sed -n '2,9p' "$0"; exit 0 ;;
         -*) echo "unknown argument: $1" >&2; exit 2 ;;
         *) if [ -z "$HOST" ]; then HOST="$1"; else REF="$1"; fi; shift ;;
     esac
@@ -118,6 +126,49 @@ say()  { printf '\n\033[1m→ %s\033[0m\n' "$*"; }
 die()  { printf '\n\033[31m✗ %s\033[0m\n' "$*" >&2; exit 1; }
 warn() { printf '\033[33m  ! %s\033[0m\n' "$*"; }
 
+# Watch a run on production. The log goes to the screen and to a local copy; if the connection
+# drops, reconnect and continue from the line the screen stopped at. The run itself does not
+# depend on this connection at all. Returns 0 - success, 1 - the run failed, 2 - no connection.
+follow() {
+    kind="$1"; tries=0; FL=$(mktemp); : > "$FL.rc"
+    while :; do
+        shown=$(( $(wc -l < "$FL") ))
+        # код ssh - через файл: в конвейере его иначе не достать, а под set -e упавший ssh
+        # оборвал бы подоболочку раньше записи
+        { r=0; ssh -o ServerAliveInterval=15 -o ServerAliveCountMax=4 "$HOST" \
+              "sudo sh '$RD/run.sh' follow $kind $shown" || r=$?; echo "$r" > "$FL.rc"; } | tee -a "$FL"
+        rc=$(cat "$FL.rc")
+        case "$rc" in
+            0|1) rm -f "$FL" "$FL.rc"; return "$rc" ;;
+        esac
+        tries=$((tries + 1))
+        if [ "$tries" -ge 6 ]; then
+            rm -f "$FL" "$FL.rc"
+            warn "no connection to $HOST - the run goes on there by itself; to watch it again:"
+            warn "  ops/deploy.sh $HOST --attach"
+            return 2
+        fi
+        warn "connection to $HOST lost, reconnecting ($tries)..."
+        sleep 5
+    done
+}
+
+# --attach / --rollback: the last run on the panel, without the repository
+if [ "$ATTACH" = "1" ] || [ "$ROLLBACK" = "1" ]; then
+    RD=$(ssh "$HOST" "readlink '$DIR/.deploy/current'" 2>/dev/null) || true
+    [ -n "$RD" ] || die "$HOST: no deploy runs found in $DIR/.deploy"
+    if [ "$ROLLBACK" = "1" ]; then
+        say "Rolling $HOST back from the run $(basename "$RD")"
+        ssh "$HOST" "sudo sh '$RD/run.sh' start rollback" || die "could not start the rollback"
+        follow rollback || die "rollback failed - see above"
+        printf '\n\033[32m✓ %s rolled back\033[0m\n' "$HOST"
+    else
+        say "Run $(basename "$RD") on $HOST"
+        follow run || exit 1
+    fi
+    exit 0
+fi
+
 git rev-parse --git-dir >/dev/null 2>&1 || die "run this from the Kervax repository"
 git rev-parse --verify --quiet "$REF" >/dev/null || die "no such revision: $REF"
 # Exactly what is committed gets deployed: git archive does not see the working tree, and
@@ -148,7 +199,14 @@ CONFIG_FILES=$(printf '%s' "$BEFORE" | sed -n 1p)
 VER_BEFORE=$(printf '%s' "$BEFORE" | sed -n 2p)
 MIG_BEFORE=$(printf '%s' "$BEFORE" | sed -n 3p)
 CNT_BEFORE=$(printf '%s' "$BEFORE" | sed -n 4p)
-[ -n "$CONFIG_FILES" ] || die "could not determine the compose file set on production (is the panel running?)"
+if [ -z "$CONFIG_FILES" ]; then
+    # No frontend container - typically a run that died halfway. The set then comes from .env
+    # (COMPOSE_FILE), so a broken panel can be repaired with the same command
+    CONFIG_FILES=$(ssh "$HOST" "sudo sed -n 's/^COMPOSE_FILE=//p' '$DIR/.env'" 2>/dev/null | tr ':' ',' || true)
+    [ -n "$CONFIG_FILES" ] || die "could not determine the compose file set on production (no running frontend and no COMPOSE_FILE in .env)"
+    warn "the panel is not running - the compose set is taken from COMPOSE_FILE in .env"
+fi
+PREV_VERSION=$(printf '%s' "$VER_BEFORE" | sed -n 's/.*"version": *"\([0-9.]*\)".*/\1/p')
 
 FILES=$(printf '%s' "$CONFIG_FILES" | tr ',' '\n' | sed 's|.*/||' | sed 's/^/-f /' | tr '\n' ' ')
 # the scheduler is rebuilt ONLY if this set contains it (scale mode)
@@ -208,22 +266,27 @@ if [ "$DRY" = "1" ]; then
     exit 0
 fi
 
-# -- Shipping -----------------------------------------------------------------
-say "Shipping the sources"
-git archive "$REF" | ssh "$HOST" "sudo tar x -C '$DIR'" || die "unpacking failed"
-
-if [ -n "$STALE" ]; then
-    say "Removing stale files"
-    printf '%s\n' "$STALE" | ssh "$HOST" "cd '$DIR' && while IFS= read -r f; do
-        [ -n \"\$f\" ] && sudo rm -f -- \"\$f\"
-    done
-    # directories left empty by the removal go too - but only if they are empty
-    sudo find . -type d -empty -not -path './data/*' -not -path './.git/*' -delete 2>/dev/null || true"
-fi
-
-# the manifest is written AFTER a successful delivery - otherwise an interrupted deploy
-# would leave a list of files that are not on production, and the next cleanup would miss
-printf '%s\n' "$NEW_LIST" | ssh "$HOST" "sudo tee '$DIR/.kervax-deployed' >/dev/null"
+# -- Shipping and the run on production -------------------------------------
+# Everything the run needs goes in one archive through one connection; the run starts only if
+# the whole archive arrived. A connection dropped before that changes nothing on production.
+RUN="$(date -u +%Y%m%d-%H%M%S)-$REV"
+RD="$DIR/.deploy/$RUN"
+STAGE=$(mktemp -d)
+trap 'rm -rf "$STAGE"' EXIT
+git archive "$REF" > "$STAGE/src.tar"
+printf '%s\n' "$NEW_LIST" > "$STAGE/manifest.txt"
+printf '%s\n' "$STALE" | grep -v '^$' > "$STAGE/stale.txt" || true
+cp "$(dirname "$0")/deploy-remote.sh" "$STAGE/run.sh"
+# DEPS_EPOCH - номер недели: зависимости бэкенда в отдельном слое, и он пересобирается раз в
+# неделю или при смене их списка, а не на каждом релизе (backend/Dockerfile)
+cat > "$STAGE/params" <<EOF
+FILES='$FILES'
+SERVICES='$SERVICES'
+EPOCH='$(date -u +%G-%V)'
+VERSION='$VERSION'
+PREV_VERSION='${PREV_VERSION:-unknown}'
+REV='$REV'
+EOF
 
 # -- The signed agent release -------------------------------------------------
 # agent-dist/ is not in the repository (the signature is made offline, off this machine's
@@ -237,41 +300,38 @@ if [ -f agent-dist/manifest.json ] && [ -f agent-dist/manifest.sig ]; then
     REMOTE_AGENT=$(ssh "$HOST" "sudo sed -n 's/.*\"version\":\"\([^\"]*\)\".*/\1/p' '$DIR/agent-dist/manifest.json' 2>/dev/null" || true)
     if [ "$LOCAL_AGENT" != "$REMOTE_AGENT" ]; then
         say "Shipping the signed agent release: ${REMOTE_AGENT:-none} -> $LOCAL_AGENT"
-        tar -cf - -C agent-dist manifest.json manifest.sig \
-            | ssh "$HOST" "sudo tar x -C '$DIR/agent-dist'" || die "the manifest did not arrive"
-        AGENT_SHIPPED="$LOCAL_AGENT"
+        tar -cf "$STAGE/agent.tar" -C agent-dist manifest.json manifest.sig
     else
         echo "  signed agent release: $LOCAL_AGENT, already there"
     fi
 fi
 
-# -- Build --------------------------------------------------------------------
-say "Building and starting: $SERVICES"
-# DEPS_EPOCH - номер недели: зависимости бэкенда в отдельном слое, и он пересобирается раз в
-# неделю или при смене их списка, а не на каждом релизе (backend/Dockerfile)
-EPOCH=$(date -u +%G-%V)
-ssh "$HOST" "cd '$DIR' && sudo env KERVAX_DEPS_EPOCH=$EPOCH docker compose $FILES up -d --build $SERVICES 2>&1 | tail -6" \
-    || die "the build failed - production stayed on its previous containers"
+say "Shipping the sources and starting the run $RUN"
+tar -cf - -C "$STAGE" . | ssh "$HOST" "sudo mkdir -p '$RD' && sudo tar xf - -C '$RD' \
+    && { sudo sh '$RD/run.sh' start run || { rc=\$?; sudo rm -rf '$RD'; exit \$rc; }; }" \
+    || die "the run did not start (another deploy on $HOST? ops/deploy.sh $HOST --attach) - production was not touched"
 
-# -- Verification -------------------------------------------------------------
+set +e
+follow run
+RC=$?
+set -e
+[ "$RC" = 2 ] && exit 1
+[ "$RC" = 0 ] || die "the deploy failed on $HOST - see the log above (on the server: $RD/run.log)"
+
+# -- What the live panel says -------------------------------------------------
 say "Verifying that this is what got deployed"
-sleep 12
 AFTER=$(ssh "$HOST" "cd '$DIR'
     DBPW=\$(sudo grep '^KERVAX_DB_PASSWORD=' .env | cut -d= -f2-)
     VER=\$(sudo docker exec kervax-backend-1 python -c 'import urllib.request;print(urllib.request.urlopen(\"http://localhost:8000/api/health\").read().decode())' 2>/dev/null)
     MIG=\$(sudo docker exec -e PGPASSWORD=\"\$DBPW\" kervax-db-1 psql -U kervax -d kervax -tAc 'select version_num from alembic_version' 2>/dev/null | head -1)
     CNT=\$(sudo docker exec -e PGPASSWORD=\"\$DBPW\" kervax-db-1 psql -U kervax -d kervax -tAc 'select (select count(*) from servers), (select count(*) from checks), (select count(*) from users)' 2>/dev/null | head -1)
-    SCH=\$(sudo docker exec kervax-scheduler-1 sed -n 's/^\s*version: str = \"\([0-9.]*\)\".*/\1/p' /srv/app/config.py 2>/dev/null | head -1)
-    ERR=\$(sudo docker logs kervax-backend-1 --since 3m 2>&1 | grep -ciE 'traceback|critical' || true)
     AGT=\$(sudo docker exec kervax-backend-1 python -c 'import urllib.request;print(urllib.request.urlopen(\"http://localhost:8000/api/agent/manifest\").read().decode())' 2>/dev/null | sed -n 's/.*\"version\":\"\([^\"]*\)\".*/\1/p')
-    printf '%s\n%s\n%s\n%s\n%s\n%s\n' \"\$VER\" \"\$MIG\" \"\$CNT\" \"\$SCH\" \"\$ERR\" \"\$AGT\"")
+    printf '%s\n%s\n%s\n%s\n' \"\$VER\" \"\$MIG\" \"\$CNT\" \"\$AGT\"")
 
 VER_AFTER=$(printf '%s' "$AFTER" | sed -n 1p)
 MIG_AFTER=$(printf '%s' "$AFTER" | sed -n 2p)
 CNT_AFTER=$(printf '%s' "$AFTER" | sed -n 3p)
-SCH_AFTER=$(printf '%s' "$AFTER" | sed -n 4p)
-ERR_AFTER=$(printf '%s' "$AFTER" | sed -n 5p)
-AGT_AFTER=$(printf '%s' "$AFTER" | sed -n 6p)
+AGT_AFTER=$(printf '%s' "$AFTER" | sed -n 4p)
 
 BAD=0
 echo "  health:    $VER_AFTER"
@@ -279,17 +339,9 @@ case "$VER_AFTER" in
     *"\"version\":\"$VERSION\""*) ;;
     *) echo "    ✗ version is not $VERSION - the code is NOT deployed"; BAD=1 ;;
 esac
-case "$VER_AFTER" in
-    *'"db":"ok"'*) ;;
-    *) echo "    ✗ the database is unreachable for the panel"; BAD=1 ;;
-esac
 echo "  migration: $MIG_BEFORE -> $MIG_AFTER"
 echo "  data:      $CNT_BEFORE -> $CNT_AFTER"
 [ "$CNT_BEFORE" = "$CNT_AFTER" ] || warn "the counters changed - check that this is expected"
-if [ "$SERVICES" != "${SERVICES#*scheduler}" ]; then
-    echo "  scheduler: $SCH_AFTER"
-    [ "$SCH_AFTER" = "$VERSION" ] || { echo "    ✗ scheduler is not on $VERSION - alerts run old code"; BAD=1; }
-fi
 # What the LIVE panel hands to agents, not what lies in the directory: the manifest is
 # baked into the image, so a file delivered but never built in reaches no one.
 if [ -n "${LOCAL_AGENT:-}" ]; then
@@ -301,16 +353,9 @@ if [ -n "${LOCAL_AGENT:-}" ]; then
              echo "       the signed one and the panel refuses to serve the release)"
              BAD=1; }
 fi
-echo "  tracebacks in the backend log over 3 minutes: ${ERR_AFTER:-0}"
-[ "${ERR_AFTER:-0}" = "0" ] || BAD=1
 
 if [ "$BAD" = "0" ]; then
-    # Кэш сборки старше недели - вон: он копился с каждым релизом (14.10.2026 на одной панели
-    # 143 ГБ при диске, заполненном на 86%). Недельный остается, следующая сборка не медленнее.
-    FREED=$(ssh "$HOST" "sudo docker builder prune -f --filter until=168h 2>/dev/null" \
-        | sed -n 's/^Total reclaimed space:[[:space:]]*//p; s/^Total:[[:space:]]*//p' | tail -1)
-    echo "  build cache older than a week freed: ${FREED:-0B}"
     printf '\n\033[32m✓ %s: %s deployed and verified in %s s\033[0m\n' "$HOST" "$VERSION" "$(( $(date +%s) - T_HOST ))"
 else
-    die "verification failed - see the output above (docker compose $FILES logs --tail=50)"
+    die "verification failed - see the output above; to put the previous version back: ops/deploy.sh $HOST --rollback"
 fi

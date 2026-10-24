@@ -1,0 +1,11 @@
+# Runs agent-firewall-sync.sh as soon as the panel rewrites the agent address list, so a new
+# server's address opens within seconds instead of on the next cron run. See the script header.
+[Unit]
+Description=Kervax: open new agent addresses in the firewall right away
+
+[Path]
+PathChanged=/app/kervax/data/agent_allow_ips
+Unit=kervax-agent-fw.service
+
+[Install]
+WantedBy=multi-user.target

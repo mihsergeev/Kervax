@@ -1,4 +1,13 @@
+import json
+
 import httpx
+import pytest
+
+from app import backup, config
+
+
+def _open(sealed: dict) -> dict:
+    return backup.unseal(sealed, config.get_settings())
 
 
 async def test_backup_export_restore_roundtrip(
@@ -17,7 +26,11 @@ async def test_backup_export_restore_roundtrip(
     # экспорт: есть монитор, метрик НЕТ
     r = await client.get("/api/backup/export", headers=auth_headers)
     assert r.status_code == 200
-    data = r.json()
+    sealed = r.json()
+    # файл зашифрован: снаружи только то, по чему его узнают
+    assert sealed["app"] == "kervax" and "tables" not in sealed
+    assert "ex.com" not in json.dumps(sealed)
+    data = _open(sealed)
     assert data["app"] == "kervax"
     assert any(c["name"] == "m1" for c in data["tables"]["checks"])
     assert any(s["name"] == "s1" for s in data["tables"]["servers"])
@@ -31,8 +44,8 @@ async def test_backup_export_restore_roundtrip(
     ov = (await client.get("/api/checks/overview", headers=auth_headers)).json()
     assert ov["total"] == 0
 
-    # восстановление возвращает монитор
-    r = await client.post("/api/backup/restore", json=data, headers=auth_headers)
+    # восстановление зашифрованного файла возвращает монитор
+    r = await client.post("/api/backup/restore", json=sealed, headers=auth_headers)
     assert r.status_code == 200
     assert r.json()["restored"]["checks"] >= 1
 
@@ -58,7 +71,7 @@ async def test_backup_keeps_links_windows_hidden_domains_and_old_files_do_not_wi
     assert ov["last_auto"] is None and ov["files"] == [] and ov["total_bytes"] == 0
     assert ov["next_auto"] is not None  # включен по умолчанию: на ближайшем проходе
 
-    data = (await client.get("/api/backup/export", headers=auth_headers)).json()
+    data = _open((await client.get("/api/backup/export", headers=auth_headers)).json())
     assert [d["domain"] for d in data["tables"]["ignored_domains"]] == ["dev.example.com"]
     for k in ("server_links", "maintenance_windows", "backup_vault"):
         assert k in data["tables"]
@@ -67,7 +80,7 @@ async def test_backup_keeps_links_windows_hidden_domains_and_old_files_do_not_wi
     old = {**data, "tables": {k: v for k, v in data["tables"].items() if k != "ignored_domains"}}
     r = await client.post("/api/backup/restore", json=old, headers=auth_headers)
     assert r.status_code == 200 and "ignored_domains" not in r.json()["restored"]
-    again = (await client.get("/api/backup/export", headers=auth_headers)).json()
+    again = _open((await client.get("/api/backup/export", headers=auth_headers)).json())
     assert len(again["tables"]["ignored_domains"]) == 1
 
     # а свежий файл возвращает их из бэкапа
@@ -84,6 +97,65 @@ async def test_backup_keeps_links_windows_hidden_domains_and_old_files_do_not_wi
     assert r.status_code == 200
     ov = (await client.get("/api/backup/overview", headers=auth_headers)).json()
     assert len(ov["files"]) == 1 and ov["total_bytes"] == ov["files"][0]["size"] > 0
+
+
+async def test_backup_file_on_disk_is_sealed_and_written_whole(
+    client: httpx.AsyncClient, auth_headers
+):
+    await client.post(
+        "/api/checks",
+        json={"name": "m1", "type": "http", "target": "https://ex.com", "auth_pass": "fakepass"},
+        headers=auth_headers,
+    )
+    name = (await client.post("/api/backup/run", headers=auth_headers)).json()["name"]
+    d = backup.backups_dir(config.get_settings())
+    import os
+
+    # временный файл после записи не остается
+    assert os.listdir(d) == [name]
+    raw = open(os.path.join(d, name), encoding="utf-8").read()
+    assert "fakepass" not in raw and "ex.com" not in raw
+    # файл с диска восстанавливается тем же путем, что и выгрузка
+    f = (await client.get(f"/api/backup/file/{name}", headers=auth_headers)).json()
+    r = await client.post("/api/backup/restore", json=f, headers=auth_headers)
+    assert r.status_code == 200 and r.json()["restored"]["checks"] == 1
+
+
+async def test_backup_from_another_panel_needs_its_key(
+    client: httpx.AsyncClient, auth_headers, monkeypatch
+):
+    sealed = (await client.get("/api/backup/export", headers=auth_headers)).json()
+    # другая панель: свой JWT-секрет, файл не открывается, ответ говорит, что вписать
+    monkeypatch.setenv("KERVAX_JWT_SECRET", "other-secret-0123456789abcdef0123456789abcd")
+    config.get_settings.cache_clear()
+    login = await client.post(
+        "/api/auth/login", json={"username": "admin", "password": "testpass-2026"}
+    )
+    hdr = {"Authorization": f"Bearer {login.json()['access_token']}"}
+    r = await client.post("/api/backup/restore", json=sealed, headers=hdr)
+    assert r.status_code == 400 and "KERVAX_BACKUP_KEY" in r.json()["detail"]
+    with pytest.raises(ValueError, match="KERVAX_BACKUP_KEY"):
+        _open(sealed)
+    # ключ старой панели в KERVAX_BACKUP_KEY - файл открывается
+    monkeypatch.setenv("KERVAX_BACKUP_KEY", "test-secret-0123456789abcdef0123456789abcdef")
+    config.get_settings.cache_clear()
+    assert _open(sealed)["app"] == "kervax"
+
+
+def test_backup_key_set_later_still_opens_old_files(monkeypatch):
+    monkeypatch.setenv("KERVAX_JWT_SECRET", "jwt-0123456789abcdef0123456789abcdef01")
+    config.get_settings.cache_clear()
+    old = backup.seal({"app": "kervax", "tables": {}}, config.get_settings())
+    monkeypatch.setenv("KERVAX_BACKUP_KEY", "backup-key-0123456789abcdef0123456789")
+    config.get_settings.cache_clear()
+    new = backup.seal({"app": "kervax", "tables": {}}, config.get_settings())
+    assert new["encrypted"]["key_id"] != old["encrypted"]["key_id"]
+    assert _open(old)["app"] == _open(new)["app"] == "kervax"
+    # испорченный файл - понятная ошибка, а не 500
+    bad = {**new, "encrypted": {**new["encrypted"], "data": "AAAA"}}
+    with pytest.raises(ValueError):
+        _open(bad)
+    config.get_settings.cache_clear()
 
 
 async def test_backup_restore_rejects_foreign_file(

@@ -8244,6 +8244,7 @@ async def _prune(
             ServerUsage.hour < int((now - usage_mod.KEEP).timestamp() // 3600)))
         # история алертов маленькая, а нужна надолго: "как часто это было за квартал"
         await session.execute(delete(AlertEvent).where(AlertEvent.ts < now - _ALERT_HISTORY_KEEP))
+        await session.execute(delete(AuditLog).where(AuditLog.ts < now - retention_mod.AUDIT_KEEP))
         # docker/kube-команды (с логами) держим коротко — неделя, не тайм-серия
         cmd_floor = now - retention_mod.COMMANDS_KEEP
         await session.execute(delete(DockerCommand).where(DockerCommand.created_at < cmd_floor))

@@ -1,7 +1,17 @@
+# Логи контейнеров с ротацией: без нее json-file растет без предела (access-лог опроса команд
+# агентами - сотни мегабайт за несколько часов на контейнер). Пять файлов по 50 МБ, старые сжаты.
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: 50m
+    max-file: "5"
+    compress: "true"
+
 services:
   db:
     image: postgres:18-alpine
     restart: unless-stopped
+    logging: *logging
     security_opt:
       - no-new-privileges:true
     # parallel-query / большой work_mem используют /dev/shm — дефолтных 64 МБ мало
@@ -33,6 +43,8 @@ services:
       - autovacuum_analyze_scale_factor=0.05
       - -c
       - autovacuum_vacuum_cost_limit=2000     # вакуум успевает за прунингом
+      - -c
+      - log_min_duration_statement=1000      # запросы дольше секунды - в лог db, иначе их не найти
     environment:
       # имя БД/роли параметризованы: новые установки — kervax; при апгрейде
       # существующего кластера задайте прежние значения в .env, чтобы не мигрировать данные
@@ -52,6 +64,7 @@ services:
       retries: 12
 
   backend:
+    logging: *logging
     build:
       context: .
       dockerfile: backend/Dockerfile
@@ -77,6 +90,7 @@ services:
       KERVAX_DISK_ALERT_PERCENT: ${KERVAX_DISK_ALERT_PERCENT:-90}
       KERVAX_BACKUP_INTERVAL_HOURS: ${KERVAX_BACKUP_INTERVAL_HOURS:-24}
       KERVAX_BACKUP_KEEP: ${KERVAX_BACKUP_KEEP:-14}
+      KERVAX_BACKUP_KEY: ${KERVAX_BACKUP_KEY:-}
     volumes:
       - ./data:/data
     depends_on:
@@ -86,6 +100,7 @@ services:
       - internal
 
   frontend:
+    logging: *logging
     build: ./frontend
     restart: unless-stopped
     security_opt:

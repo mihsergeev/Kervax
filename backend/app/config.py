@@ -7,7 +7,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="KERVAX_", env_file=".env")
 
     app_name: str = "Kervax"
-    version: str = "1.8.26"
+    version: str = "1.8.27"
     debug: bool = False
     # Внешний URL панели — если задан, в алерты добавляется ссылка на монитор
     # (напр. https://kervax.example.com). Пусто = ссылку не добавляем.
@@ -95,6 +95,9 @@ class Settings(BaseSettings):
     # --- Авто-бэкап БД ---
     backup_interval_hours: int = 24
     backup_keep: int = 14
+    # Ключ шифрования файлов бэкапа панели. Пусто = выводится из jwt_secret. Задайте явно,
+    # если jwt_secret может смениться: старые файлы откроются, только пока виден их ключ
+    backup_key: str = ""
 
     # --- Аутентификация ---
     jwt_secret: str = "dev-insecure-change-me"

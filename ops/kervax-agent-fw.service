@@ -1,0 +1,7 @@
+[Unit]
+Description=Kervax: sync agent addresses into the firewall
+
+[Service]
+Type=oneshot
+Environment=KERVAX_AGENT_IPS=/app/kervax/data/agent_allow_ips
+ExecStart=/lib65/kervax/agent-firewall-sync.sh

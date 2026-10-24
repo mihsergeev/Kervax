@@ -13,6 +13,17 @@
 #     > /etc/cron.d/kervax-agent-fw
 #   chmod 644 /etc/cron.d/kervax-agent-fw
 #
+# Cron alone opens a new server's address up to 2 minutes late, and the install command waits
+# that long. The path unit next to this script runs it the moment the panel rewrites the list
+# (cron stays as a safety net):
+#   install -m644 ops/kervax-agent-fw.service ops/kervax-agent-fw.path /etc/systemd/system/
+#   systemctl daemon-reload && systemctl enable --now kervax-agent-fw.path
+# (both units assume /app/kervax/data and /lib65/kervax - edit them if yours differ)
+#
+# What is actually open goes back to the panel in <data>/agent_allow_ips.applied: the install
+# window shows "address open" or "opening" from it, and its age tells the panel whether this
+# script runs at all.
+#
 # SYNC BOTH WAYS: adding a server opens access, removing it closes access again.
 # To make automatic removal safe, the script touches ONLY the addresses it opened itself: it
 # keeps that list in its own state file (STATE). Rules created by hand or by anything else are
@@ -26,9 +37,14 @@ set -eu
 PATH=/usr/local/sbin:/usr/sbin:/sbin:$PATH
 
 IPS_FILE="${KERVAX_AGENT_IPS:-/app/kervax/data/agent_allow_ips}"
+APPLIED="${KERVAX_FW_APPLIED:-$IPS_FILE.applied}"
 STATE="${KERVAX_FW_STATE:-/var/lib/kervax/agent-fw-opened}"
 PRUNE="${KERVAX_FW_PRUNE:-1}"
 [ -r "$IPS_FILE" ] || exit 0
+# cron and the path unit may fire together: one run at a time
+if command -v flock >/dev/null 2>&1; then
+  exec 9>/run/kervax-agent-fw.lock && flock -w 60 9 || exit 0
+fi
 
 CHANGED=0
 
@@ -85,9 +101,11 @@ if [ ! -f "$STATE" ]; then
   fi
 fi
 
-# normalise: valid addresses only, no shell surprises coming from the file
+# normalise: valid addresses only, no shell surprises coming from the file. Single addresses,
+# never subnets: "0.0.0.0/0" in the list opened 80/443 of the panel host to everyone. The
+# opened list below still accepts "/", so such a rule left from before is closed by step 2
 DESIRED=$(tr -d '\r' < "$IPS_FILE" | tr -s '[:space:]' '\n' \
-          | grep -E '^[0-9a-fA-F.:/]+$' | sort -u || true)
+          | grep -E '^([0-9]{1,3}\.){3}[0-9]{1,3}$|^[0-9a-fA-F]*:[0-9a-fA-F:.]*$' | sort -u || true)
 OPENED=$(tr -d '\r' < "$STATE" | tr -s '[:space:]' '\n' \
          | grep -E '^[0-9a-fA-F.:/]+$' | sort -u || true)
 
@@ -142,4 +160,12 @@ mv -f "$STATE.tmp" "$STATE" 2>/dev/null || true
 
 # firewalld applies permanent rules only after a reload
 [ "$CHANGED" = "1" ] && have_fwd && firewall-cmd --reload >/dev/null 2>&1 || true
+
+# Report back to the panel: which firewall and which addresses are open now. Written every run,
+# so a stale file means the script stopped running. With no firewall nothing blocks the agents.
+if have_ufw; then FW=ufw; elif have_fwd; then FW=firewalld; else FW=none; fi
+{
+  echo "# kervax-agent-fw fw=$FW ts=$(date +%s)"
+  [ "$FW" = none ] || tr -d '\r' < "$STATE" | grep -E '^[0-9a-fA-F.:/]+$' || true
+} > "$APPLIED.tmp" 2>/dev/null && chmod 0644 "$APPLIED.tmp" 2>/dev/null && mv -f "$APPLIED.tmp" "$APPLIED" 2>/dev/null || true
 exit 0
